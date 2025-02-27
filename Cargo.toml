@@ -1,4 +1,4 @@
-workspace = { members = ["crates/boyko-ecs"] }
+workspace = { members = ["crates/boyko_ecs", "crates/boyko_macros"] }
 
 [package]
 name = "boyko-engine"
@@ -6,3 +6,5 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+boyko-ecs = { path = "crates/boyko_ecs" }
+boyko-macros = { path = "crates/boyko_macros" }
