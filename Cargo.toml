@@ -1,0 +1,8 @@
+workspace = { members = ["crates/boyko-ecs"] }
+
+[package]
+name = "boyko-engine"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
