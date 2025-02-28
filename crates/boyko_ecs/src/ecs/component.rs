@@ -2,11 +2,6 @@ use std::any::TypeId;
 
 pub type ComponentId = usize;
 
-pub struct ComponentMetadata {
-    pub type_id: TypeId,
-    pub size: usize,
-    pub alignment: usize
-}
 pub trait Component: 'static + Sized {
     #[inline(always)]
     fn component_id() -> ComponentId;
@@ -15,6 +10,17 @@ pub trait Component: 'static + Sized {
     fn debug_type_name() -> &'static str;
 
     #[inline(always)]
-    fn metadata() -> &'static ComponentMetadata;
-}
+    fn type_id() -> TypeId {
+        TypeId::of::<Self>()
+    }
 
+    #[inline(always)]
+    fn size() -> usize {
+        std::mem::size_of::<Self>()
+    }
+
+    #[inline(always)]
+    fn alignment() -> usize {
+        std::mem::align_of::<Self>()
+    }
+}
