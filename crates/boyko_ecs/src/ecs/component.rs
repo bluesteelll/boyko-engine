@@ -7,7 +7,9 @@ pub trait Component: 'static + Sized {
     fn component_id() -> ComponentId;
 
     #[inline(always)]
-    fn debug_type_name() -> &'static str;
+    fn debug_type_name() -> &'static str{
+        std::any::type_name::<Self>()
+    }
 
     #[inline(always)]
     fn type_id() -> TypeId {

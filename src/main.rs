@@ -15,6 +15,6 @@ struct Poinat{
 }
 
 fn main() {
-    println!("{}", Point::component_id());
+    println!("{}", Point::alignment());
     println!("{}", Poinat::component_id());
 }
