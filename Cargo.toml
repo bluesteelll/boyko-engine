@@ -8,3 +8,4 @@ edition = "2021"
 [dependencies]
 boyko-ecs = { path = "crates/boyko_ecs" }
 boyko-macros = { path = "crates/boyko_macros" }
+rand = "0.9.0"
