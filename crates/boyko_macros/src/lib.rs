@@ -20,7 +20,7 @@ pub fn component_macro(input: TokenStream) -> TokenStream {
     let component_id = COMPONENT_COUNTER.fetch_add(1, Ordering::Relaxed);
 
     let expanded = quote! {
-        impl boyko_ecs::ecs::component::Component for #name {
+        impl boyko_ecs::ecs::core::component::Component for #name {
             #[inline(always)]
             fn component_id() -> usize {
                 #component_id
