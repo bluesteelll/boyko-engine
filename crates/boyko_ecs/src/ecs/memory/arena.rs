@@ -7,6 +7,9 @@ use super::utils::{align_up, is_power_of_two};
 /// Maximum number of free blocks to track in the freelist
 const MAX_FREE_BLOCKS: usize = 32;
 
+/// Minimum size of a free block to be tracked
+const MIN_FREE_BLOCK_SIZE: usize = 64;
+
 /// Memory block metadata for the freelist
 #[derive(Clone, Copy, Debug)]
 struct FreeBlock {
@@ -18,7 +21,6 @@ struct FreeBlock {
 
 /// Memory arena for component storage
 /// Uses a bump allocator with a simple freelist for reuse
-/// No atomic operations for maximum performance
 #[repr(align(64))] // Align to cache line
 pub struct Arena {
     /// Pointer to the arena memory
@@ -76,14 +78,13 @@ impl Arena {
 
     /// Allocate a memory region from the arena
     /// Returns a pointer to the allocated memory or None if out of memory
-    ///
-    /// This implementation is non-atomic for maximum performance
-    /// It tries to reuse freed blocks first before allocating new memory
     #[inline(always)]
     pub fn allocate(&mut self, size: usize, align: usize) -> Option<NonNull<u8>> {
         if size == 0 {
             return Some(self.ptr);
         }
+
+        debug_assert!(is_power_of_two(align), "Alignment must be a power of 2");
 
         // First try to reuse a free block if available
         if !self.free_blocks.is_empty() {
@@ -118,6 +119,7 @@ impl Arena {
         // Find best-fit block
         let mut best_fit_idx = None;
         let mut best_fit_size = usize::MAX;
+        let mut best_aligned_addr = 0;
 
         for (i, block) in self.free_blocks.iter().enumerate() {
             // Calculate aligned address within the block
@@ -130,9 +132,10 @@ impl Arena {
             if block.size >= total_size && block.size < best_fit_size {
                 best_fit_idx = Some(i);
                 best_fit_size = block.size;
+                best_aligned_addr = aligned_addr;
 
                 // If perfect fit, break early
-                if block.size <= total_size + 64 { // Allow small waste
+                if block.size <= total_size + MIN_FREE_BLOCK_SIZE { // Allow small waste
                     break;
                 }
             }
@@ -144,15 +147,26 @@ impl Arena {
 
             // Calculate aligned address
             let block_start = block.offset;
-            let aligned_addr = (block_start + align_mask) & !align_mask;
+            let aligned_addr = best_aligned_addr;
             let alignment_waste = aligned_addr - block_start;
             let total_size = size + alignment_waste;
 
             // Check if the remaining space is worth tracking
-            if block.size - total_size >= 64 { // Minimum block size threshold
+            if block.size - total_size >= MIN_FREE_BLOCK_SIZE {
                 // Update the block with remaining space
                 self.free_blocks[idx].offset = block_start + total_size;
                 self.free_blocks[idx].size = block.size - total_size;
+
+                // If there's wasted space at the beginning due to alignment, and it's large enough,
+                // add it as a new free block
+                if alignment_waste >= MIN_FREE_BLOCK_SIZE {
+                    if self.free_blocks.len() < MAX_FREE_BLOCKS {
+                        self.free_blocks.push(FreeBlock {
+                            offset: block_start,
+                            size: alignment_waste,
+                        });
+                    }
+                }
             } else {
                 // Remove the block as we're using all of it
                 self.free_blocks.swap_remove(idx);
@@ -169,13 +183,25 @@ impl Arena {
     /// Free a memory region
     /// This adds the region to the free list for future reuse
     #[inline]
-    pub fn free(&mut self, ptr: NonNull<u8>, size: usize) {
+    pub unsafe fn free(&mut self, ptr: NonNull<u8>, size: usize) {
         if size == 0 {
             return;
         }
 
         // Calculate offset from arena start
-        let offset = unsafe { ptr.as_ptr().offset_from(self.ptr.as_ptr()) as usize };
+        let offset = ptr.as_ptr().offset_from(self.ptr.as_ptr()) as usize;
+
+        // Check if this block is at the end of the arena (can move cursor back)
+        if offset + size == self.cursor {
+            // Just move cursor back
+            self.cursor = offset;
+            return;
+        }
+
+        // Don't track small blocks
+        if size < MIN_FREE_BLOCK_SIZE {
+            return;
+        }
 
         // Check if we can merge with adjacent blocks
         let mut merged = false;
@@ -281,6 +307,9 @@ impl Arena {
             self.cursor = block.offset;
             // Remove the block from freelist
             self.free_blocks.swap_remove(highest_idx);
+
+            // Recursively check for more blocks at the tail
+            self.try_reclaim_tail();
         }
     }
 

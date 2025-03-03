@@ -1,14 +1,14 @@
 // crates/boyko_ecs/src/ecs/memory/utils.rs
 
-/// Проверка, является ли число степенью двойки
+/// Check if a number is a power of two
 ///
 /// # Arguments
 ///
-/// * `n` - число для проверки
+/// * `n` - The number to check
 ///
 /// # Returns
 ///
-/// `true` если число является степенью двойки, иначе `false`
+/// `true` if the number is a power of two, `false` otherwise
 #[inline(always)]
 pub fn is_power_of_two(n: usize) -> bool {
     n != 0 && (n & (n - 1)) == 0
@@ -99,7 +99,7 @@ pub fn next_power_of_2(n: usize) -> usize {
 ///
 /// A tuple of (start_index, end_index) for the thread to process
 #[inline(always)]
-pub fn calculate_thread_workload(thread_id: usize, thread_count: usize, item_count: usize) -> (usize, usize) {
+pub fn calculate_thread_entity_range(thread_id: usize, thread_count: usize, item_count: usize) -> (usize, usize) {
     if thread_count == 0 || thread_id >= thread_count || item_count == 0 {
         return (0, 0);
     }
@@ -208,78 +208,20 @@ pub fn is_cache_aligned(ptr: *const u8, cache_line_size: usize) -> bool {
     (ptr as usize & (cache_line_size - 1)) == 0
 }
 
-/// Determine if a memory range crosses a cache line boundary
-/// This is important for avoiding false sharing
+/// Test if a bit is set in a bitmap
 ///
 /// # Arguments
 ///
-/// * `ptr` - Start pointer of the memory range
-/// * `size` - Size of the memory range in bytes
-/// * `cache_line_size` - Cache line size (usually 64 bytes)
+/// * `bitmap` - The bitmap to test
+/// * `bit_index` - The index of the bit to test
 ///
 /// # Returns
 ///
-/// `true` if the memory range crosses a cache line boundary
+/// `true` if the bit is set, `false` otherwise
 #[inline(always)]
-pub fn crosses_cache_line(ptr: *const u8, size: usize, cache_line_size: usize) -> bool {
-    let start_line = (ptr as usize) / cache_line_size;
-    let end_line = ((ptr as usize) + size - 1) / cache_line_size;
-    start_line != end_line
-}
-
-/// Calculate padding needed to avoid false sharing
-/// Adds padding to ensure data doesn't share a cache line with other data
-///
-/// # Arguments
-///
-/// * `ptr` - Pointer to the data
-/// * `size` - Size of the data in bytes
-/// * `cache_line_size` - Cache line size (usually 64 bytes)
-///
-/// # Returns
-///
-/// Padding in bytes needed to align to the next cache line
-#[inline(always)]
-pub fn calculate_false_sharing_padding(ptr: *const u8, size: usize, cache_line_size: usize) -> usize {
-    debug_assert!(is_power_of_two(cache_line_size), "Cache line size must be a power of 2");
-
-    let end_addr = (ptr as usize) + size;
-    let next_cache_line = ((end_addr + cache_line_size - 1) / cache_line_size) * cache_line_size;
-
-    next_cache_line - end_addr
-}
-
-/// Find the first set bit in a u64
-/// This is useful for bitmap operations
-///
-/// # Arguments
-///
-/// * `bitmap` - The bitmap to search
-///
-/// # Returns
-///
-/// The index of the first set bit, or 64 if no bits are set
-#[inline(always)]
-pub fn find_first_set_bit(bitmap: u64) -> usize {
-    if bitmap == 0 {
-        return 64;
-    }
-    bitmap.trailing_zeros() as usize
-}
-
-/// Count the number of set bits in a u64
-/// This is useful for bitmap operations
-///
-/// # Arguments
-///
-/// * `bitmap` - The bitmap to count
-///
-/// # Returns
-///
-/// The number of set bits
-#[inline(always)]
-pub fn count_set_bits(bitmap: u64) -> usize {
-    bitmap.count_ones() as usize
+pub fn test_bit(bitmap: u64, bit_index: usize) -> bool {
+    debug_assert!(bit_index < 64, "Bit index out of bounds: {} >= 64", bit_index);
+    (bitmap & (1u64 << bit_index)) != 0
 }
 
 /// Set a bit in a bitmap
@@ -312,66 +254,4 @@ pub fn set_bit(bitmap: u64, bit_index: usize) -> u64 {
 pub fn clear_bit(bitmap: u64, bit_index: usize) -> u64 {
     debug_assert!(bit_index < 64, "Bit index out of bounds: {} >= 64", bit_index);
     bitmap & !(1u64 << bit_index)
-}
-
-/// Test if a bit is set in a bitmap
-///
-/// # Arguments
-///
-/// * `bitmap` - The bitmap to test
-/// * `bit_index` - The index of the bit to test
-///
-/// # Returns
-///
-/// `true` if the bit is set, `false` otherwise
-#[inline(always)]
-pub fn test_bit(bitmap: u64, bit_index: usize) -> bool {
-    debug_assert!(bit_index < 64, "Bit index out of bounds: {} >= 64", bit_index);
-    (bitmap & (1u64 << bit_index)) != 0
-}
-
-/// Find contiguous free bits in a bitmap
-/// Useful for finding space for multiple components
-///
-/// # Arguments
-///
-/// * `bitmap` - The bitmap to search (1=free, 0=used)
-/// * `count` - The number of contiguous bits needed
-///
-/// # Returns
-///
-/// The starting index of the free bits, or None if not found
-#[inline]
-pub fn find_contiguous_bits(bitmap: u64, count: usize) -> Option<usize> {
-    if count == 0 {
-        return Some(0);
-    }
-
-    if count > 64 {
-        return None;
-    }
-
-    if count == 1 {
-        // Fast path for single bit
-        let bit = find_first_set_bit(bitmap);
-        if bit < 64 {
-            return Some(bit);
-        }
-        return None;
-    }
-
-    // For contiguous bits, we need to check each possible starting position
-    let mask = (1u64 << count) - 1;
-
-    for i in 0..=64-count {
-        // Shift the mask to the current position
-        let shifted_mask = mask << i;
-
-        // Check if all bits in the mask are free
-        if (bitmap & shifted_mask) == shifted_mask {
-            return Some(i);
-        }
-    }
-
-    None
 }
