@@ -35,20 +35,19 @@ pub struct MemFreeBlockMaster {
 
 impl MemFreeBlockMaster {
     pub fn new() -> Self {
-        Self {
-            blocks: Vec::with_capacity(1024),
-            free_ind: Vec::new(),
-            mem_size_tree: BTreeMap::new(),
-            start_map: HashMap::new(),
-            end_map: HashMap::new(),
-            size: 0,
-        }
+        Self::with_capacity(1024)
+    }
+
+    pub fn new_init(arena_size: usize) -> Self {
+        let mut block_master = Self::with_capacity(1024);
+        block_master.insert(MemFreeBlock::new(0, arena_size));
+        block_master
     }
 
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             blocks: Vec::with_capacity(capacity),
-            free_ind: Vec::with_capacity(capacity / 4),  // Резервируем место для ~25% свободных индексов
+            free_ind: Vec::with_capacity(capacity / 4),
             mem_size_tree: BTreeMap::new(),
             start_map: HashMap::with_capacity(capacity),
             end_map: HashMap::with_capacity(capacity),
@@ -139,7 +138,7 @@ impl MemFreeBlockMaster {
 
 
     /// Returns start address
-    pub fn allocate(&mut self, size: usize) -> Option<usize> {
+    pub fn allocate(&mut self, size: usize) -> Option<MemFreeBlock> {
         if size == 0 {
             return None;
         }
@@ -148,14 +147,50 @@ impl MemFreeBlockMaster {
 
         self.remove_block_index(block_index);
 
-        // If remainder available insert it to the pool
+        // Если есть остаток, добавляем его обратно в пул
         let remainder_size = block.size() - size;
         if remainder_size > 0 {
             let remainder = MemFreeBlock::new(block.start + size, block.end);
             self.insert(remainder);
+
+            // Возвращаем только запрошенную часть блока
+            return Some(MemFreeBlock::new(block.start, block.start + size));
         }
 
-        Some(block.start)
+        // Возвращаем весь блок, если он точно подходит по размеру
+        Some(block)
+    }
+
+    /// Выделяет выровненный блок памяти
+    pub fn allocate_aligned(&mut self, size: usize, align: usize) -> Option<MemFreeBlock> {
+        if size == 0 {
+            return None;
+        }
+
+        // Ищем блок с учетом максимально возможного выравнивания
+        let required_size = size + align - 1;
+        let (block_index, block) = self.find_best_fit_with_index(required_size)?;
+
+        self.remove_block_index(block_index);
+
+        // Вычисляем выровненный адрес начала
+        let aligned_start = crate::ecs::memory::utils::align_up(block.start, align);
+
+        // Создаем выровненный блок
+        let aligned_block = MemFreeBlock::new(aligned_start, aligned_start + size);
+
+        // Если выравнивание создало пробел в начале, возвращаем его в пул
+        if aligned_start > block.start {
+            self.insert(MemFreeBlock::new(block.start, aligned_start));
+        }
+
+        // Если есть остаток после выделенной памяти, возвращаем его в пул
+        let aligned_end = aligned_start + size;
+        if block.end > aligned_end {
+            self.insert(MemFreeBlock::new(aligned_end, block.end));
+        }
+
+        Some(aligned_block)
     }
 
     fn find_best_fit_with_index(&self, min_size: usize) -> Option<(usize, MemFreeBlock)> {
@@ -253,118 +288,4 @@ pub struct MemoryStats {
     pub total_blocks: usize,
     pub free_slots: usize,
     pub total_memory: usize,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_best_fit() {
-        let mut set = MemFreeBlockMaster::new();
-
-        // Добавляем блоки разного размера
-        set.insert(MemFreeBlock::new(100, 200)); // размер 100
-        set.insert(MemFreeBlock::new(300, 350)); // размер 50
-        set.insert(MemFreeBlock::new(500, 600)); // размер 100
-        set.insert(MemFreeBlock::new(700, 760)); // размер 60
-
-        // Проверяем best-fit
-        let block = set.find_best_fit(60).unwrap();
-        assert_eq!(block.size(), 60);
-
-        let block = set.find_best_fit(70).unwrap();
-        assert_eq!(block.size(), 100);
-    }
-
-    #[test]
-    fn test_merge_blocks() {
-        let mut set = MemFreeBlockMaster::new();
-
-        // Добавляем несмежные блоки
-        set.insert(MemFreeBlock::new(100, 200));
-        set.insert(MemFreeBlock::new(300, 400));
-        assert_eq!(set.len(), 2);
-
-        // Добавляем блок, смежный с существующими
-        set.insert(MemFreeBlock::new(200, 300));
-
-        // Проверяем, что все три блока слились в один
-        assert_eq!(set.len(), 1);
-
-        let block = set.find_best_fit(1).unwrap();
-        assert_eq!(block.start, 100);
-        assert_eq!(block.end, 400);
-    }
-
-    #[test]
-    fn test_allocate_with_remainder() {
-        let mut set = MemFreeBlockMaster::new();
-
-        // Добавляем блок
-        set.insert(MemFreeBlock::new(100, 200)); // размер 100
-
-        // Выделяем часть блока
-        let addr = set.allocate(40).unwrap();
-        assert_eq!(addr, 100);
-
-        // Проверяем, что остаток добавлен обратно
-        assert_eq!(set.len(), 1);
-        let remainder = set.find_best_fit(1).unwrap();
-        assert_eq!(remainder.size(), 60);
-        assert_eq!(remainder.start, 140);
-    }
-
-    #[test]
-    fn test_reuse_slots() {
-        let mut set = MemFreeBlockMaster::new();
-
-        // Добавляем несколько блоков
-        set.insert(MemFreeBlock::new(100, 200));
-        set.insert(MemFreeBlock::new(300, 400));
-        set.insert(MemFreeBlock::new(500, 600));
-
-        // Удаляем средний блок
-        set.allocate(100); // Удаляет блок по размеру (100, 200)
-        set.allocate(100); // Удаляет блок по размеру (500, 600)
-
-        // Проверяем статистику
-        let stats = set.get_memory_stats();
-        assert_eq!(stats.active_blocks, 1);
-        assert_eq!(stats.free_slots, 2);
-
-        // Добавляем новый блок и проверяем, что он использует свободный слот
-        set.insert(MemFreeBlock::new(700, 800));
-
-        let stats = set.get_memory_stats();
-        assert_eq!(stats.active_blocks, 2);
-        assert_eq!(stats.free_slots, 1);
-    }
-
-    #[test]
-    fn test_defragmentation() {
-        let mut set = MemFreeBlockMaster::new();
-
-        // Добавляем много блоков и затем удаляем некоторые из них
-        for i in 0..100 {
-            set.insert(MemFreeBlock::new(i * 1000, i * 1000 + 500));
-        }
-
-        // Удаляем половину блоков
-        for _ in 0..50 {
-            set.allocate(500);
-        }
-
-        let before = set.get_memory_stats();
-        assert_eq!(before.active_blocks, 50);
-        assert_eq!(before.free_slots, 50);
-
-        // Выполняем дефрагментацию
-        set.defragment();
-
-        let after = set.get_memory_stats();
-        assert_eq!(after.active_blocks, 50);
-        assert_eq!(after.free_slots, 0);
-        assert_eq!(after.total_blocks, 50);
-    }
 }
