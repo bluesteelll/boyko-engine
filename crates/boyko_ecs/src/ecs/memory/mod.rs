@@ -1,5 +1,9 @@
+
 pub mod arena;
-mod chunk;
-mod component_pool;
-mod simd;
-mod utils;
+
+pub mod utils;
+mod free_mem_block;
+pub mod chunk;
+pub mod component_pool;
+pub mod component_index;
+

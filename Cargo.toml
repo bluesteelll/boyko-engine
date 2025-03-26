@@ -3,8 +3,10 @@ workspace = { members = ["crates/boyko_ecs", "crates/boyko_macros"] }
 [package]
 name = "boyko-engine"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 boyko-ecs = { path = "crates/boyko_ecs" }
 boyko-macros = { path = "crates/boyko_macros" }
+rand = "0.9.0"
+chrono = "0.4.40"
