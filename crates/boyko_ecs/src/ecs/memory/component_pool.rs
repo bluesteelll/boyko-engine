@@ -2,15 +2,12 @@ use std::any::TypeId;
 use std::marker::PhantomData;
 use std::mem::size_of;
 use std::ptr::NonNull;
-use std::collections::HashMap;
 use crate::ecs::core::component::Component;
 use crate::ecs::memory::arena::Arena;
 use crate::ecs::memory::chunk::Chunk;
-use crate::ecs::memory::component_index::ComponentIndex;
-use crate::ecs::memory::free_chunk_master::FreeChunkMaster;
+use crate::ecs::memory::component_index::UnitId;
 use crate::ecs::constants::{
     DEFAULT_CHUNKS_PER_POOL,
-    DEFAULT_COMPONENTS_PER_CHUNK,
     TINY_COMPONENTS_PER_CHUNK,
     SMALL_COMPONENTS_PER_CHUNK,
     MEDIUM_COMPONENTS_PER_CHUNK,
@@ -18,41 +15,23 @@ use crate::ecs::constants::{
     TINY_COMPONENT_THRESHOLD,
     SMALL_COMPONENT_THRESHOLD,
     MEDIUM_COMPONENT_THRESHOLD,
-    MAX_EMPTY_CHUNKS_RATIO,
-    INITIAL_FREE_SLOTS_CAPACITY,
 };
 
-/// Type-erased ComponentPool interface
-pub trait IComponentPool {
-    /// Gets the TypeId of the component type stored in this pool
-    fn component_type_id(&self) -> TypeId;
-
-    /// Gets the size in bytes of the component type
-    fn component_size(&self) -> usize;
-
-    /// Gets the number of active components in the pool
-    fn count(&self) -> usize;
-
-    /// Gets the total capacity of the pool
-    fn capacity(&self) -> usize;
-
-    /// Removes a component at the specified index
-    fn swap_remove(&mut self, index: ComponentIndex) -> bool;
-}
 
 /// Static component pool handling components of specific type
 ///
-/// Provides cache-friendly component storage using chunks and smart reuse
-/// of freed memory for optimal performance.
+/// Provides cache-friendly component storage using pre-allocated static chunks.
+/// Uses swap_remove strategy to maintain data densely packed within each chunk.
+/// All chunks are pre-allocated during initialization for maximum performance.
 pub struct ComponentPool<T: Component> {
     /// Reference to the arena used for memory allocation
     arena: NonNull<Arena>,
 
-    /// Vector of component chunks
+    /// Vector of pre-allocated component chunks
     chunks: Vec<Chunk<T>>,
 
-    /// Free chunk manager for optimal reuse
-    free_chunks: FreeChunkMaster,
+    /// Index of the current chunk for new component allocations
+    current_chunk_index: usize,
 
     /// Number of active components in the pool
     count: usize,
@@ -60,23 +39,29 @@ pub struct ComponentPool<T: Component> {
     /// Number of components each chunk can hold
     capacity_per_chunk: usize,
 
-    /// List of freed component slots for reuse
-    free_slots: Vec<ComponentIndex>,
+    component_id: usize,
 
     /// Component type marker
     _marker: PhantomData<T>,
 }
 
 impl<T: Component> ComponentPool<T> {
-    /// Creates a new component pool with the specified parameters
-    pub fn new(arena: &Arena, chunks_per_pool: usize, components_per_chunk: usize) -> Self {
+    /// Creates a new component pool with pre-allocated chunks
+    pub fn new(arena: &Arena, num_chunks: usize, components_per_chunk: usize) -> Self {
+        let mut chunks = Vec::with_capacity(num_chunks);
+
+        // Pre-allocate all chunks
+        for _ in 0..num_chunks {
+            chunks.push(Chunk::<T>::new(arena, components_per_chunk));
+        }
+
         Self {
             arena: NonNull::from(arena),
-            chunks: Vec::with_capacity(chunks_per_pool),
-            free_chunks: FreeChunkMaster::with_capacity(chunks_per_pool / 4),
+            chunks,
+            current_chunk_index: 0,  // Start with the first chunk
             count: 0,
             capacity_per_chunk: components_per_chunk,
-            free_slots: Vec::with_capacity(INITIAL_FREE_SLOTS_CAPACITY),
+            component_id: T::component_id(),
             _marker: PhantomData,
         }
     }
@@ -103,72 +88,41 @@ impl<T: Component> ComponentPool<T> {
 
     /// Adds a component to the pool, returning its index
     ///
-    /// Uses a cache-friendly allocation strategy prioritizing:
-    /// 1. Last active chunk (hot cache)
-    /// 2. Free slots in newest chunks
-    /// 3. Recently emptied chunks (managed by FreeChunkMaster)
-    /// 4. New chunk allocation as last resort
-    pub fn add(&mut self, component: T) -> Option<ComponentIndex> {
-        // 1. First check if the last active chunk has space (best for cache locality)
-        if !self.chunks.is_empty() {
-            let last_chunk_index = self.chunks.len() - 1;
-            let last_chunk = &mut self.chunks[last_chunk_index];
+    /// O(1) implementation: Always adds to the current chunk,
+    /// moving to the next pre-allocated chunk when full.
+    pub fn add(&mut self, component: T) -> Option<UnitId> {
+        // Check if we have any chunks
+        if self.chunks.is_empty() {
+            return None;  // Pool is not properly initialized
+        }
 
-            if last_chunk.count() < self.capacity_per_chunk {
-                let id_inland = last_chunk.add(component).unwrap();
-                self.count += 1;
-                return Some(ComponentIndex::new(last_chunk_index, id_inland));
+        // Get the current chunk
+        let chunk = &mut self.chunks[self.current_chunk_index];
+
+        // If the current chunk is full, move to the next one
+        if chunk.count() >= self.capacity_per_chunk {
+            self.current_chunk_index += 1;
+
+            // Check if we've exhausted all chunks
+            if self.current_chunk_index >= self.chunks.len() {
+                // We've run out of pre-allocated chunks
+                return None;
             }
         }
 
-        // 2. Check for free slots, prioritizing those in higher-indexed chunks
-        if !self.free_slots.is_empty() {
-            // Look for a slot in the last chunk first (hot cache)
-            if !self.chunks.is_empty() {
-                let last_chunk_index = self.chunks.len() - 1;
+        // Now we're pointing at a chunk with space, use it
+        let chunk = &mut self.chunks[self.current_chunk_index];
+        let id_inland = match chunk.add(component) {
+            Some(idx) => idx,
+            None => return None, // This shouldn't happen if capacity is respected
+        };
 
-                // Try to find a slot in the last chunk
-                for i in 0..self.free_slots.len() {
-                    if self.free_slots[i].id_chunk as usize == last_chunk_index {
-                        let slot = self.free_slots.swap_remove(i);
-                        let chunk = &mut self.chunks[slot.id_chunk as usize];
-                        chunk.set(slot.id_inland as usize, component);
-                        self.count += 1;
-                        return Some(slot);
-                    }
-                }
-            }
-
-            // If no slots in the last chunk, just use any available slot
-            let slot = self.free_slots.pop().unwrap();
-            let chunk = &mut self.chunks[slot.id_chunk as usize];
-            chunk.set(slot.id_inland as usize, component);
-            self.count += 1;
-            return Some(slot);
-        }
-
-        // 3. Try to reuse an empty chunk from the free chunk pool
-        // FreeChunkMaster automatically gives us the best chunk for cache locality
-        if let Some(chunk_index) = self.free_chunks.get_best_chunk() {
-            let chunk = &mut self.chunks[chunk_index];
-            let id_inland = chunk.add(component).unwrap();
-            self.count += 1;
-            return Some(ComponentIndex::new(chunk_index, id_inland));
-        }
-
-        // 4. If no available slots or chunks, create a new chunk
-        let arena = unsafe { &*self.arena.as_ptr() };
-        let mut new_chunk = Chunk::<T>::new(arena, self.capacity_per_chunk);
-        let id_inland = new_chunk.add(component).unwrap();
-        let id_chunk = self.chunks.len();
-        self.chunks.push(new_chunk);
         self.count += 1;
-
-        Some(ComponentIndex::new(id_chunk, id_inland))
+        Some(UnitId::new(self.current_chunk_index, id_inland))
     }
 
     /// Gets a reference to a component by its index
-    pub fn get(&self, index: ComponentIndex) -> Option<&T> {
+    pub fn get(&self, index: UnitId) -> Option<&T> {
         let chunk_index = index.id_chunk as usize;
         if chunk_index >= self.chunks.len() {
             return None;
@@ -179,7 +133,7 @@ impl<T: Component> ComponentPool<T> {
     }
 
     /// Gets a mutable reference to a component by its index
-    pub fn get_mut(&mut self, index: ComponentIndex) -> Option<&mut T> {
+    pub fn get_mut(&mut self, index: UnitId) -> Option<&mut T> {
         let chunk_index = index.id_chunk as usize;
         if chunk_index >= self.chunks.len() {
             return None;
@@ -189,11 +143,8 @@ impl<T: Component> ComponentPool<T> {
         chunk.get_mut(index.id_inland as usize)
     }
 
-    /// Removes a component at the specified index using swap-remove strategy
-    ///
-    /// Instead of deleting empty chunks, they are stored in the free chunk pool
-    /// for later reuse, improving memory efficiency and allocation performance.
-    pub fn swap_remove(&mut self, index: ComponentIndex) -> bool {
+    /// Removes a component at the specified index using swap_remove strategy
+    pub fn swap_remove(&mut self, index: UnitId) -> bool {
         let chunk_index = index.id_chunk as usize;
         if chunk_index >= self.chunks.len() {
             return false;
@@ -202,94 +153,63 @@ impl<T: Component> ComponentPool<T> {
         let chunk = &mut self.chunks[chunk_index];
 
         // Try to remove the component from the chunk
-        if chunk.swap_remove(index.id_inland as usize) {
-            // If the chunk is now empty, add it to free_chunks
-            if chunk.count() == 0 {
-                // FreeChunkMaster handles duplicate prevention internally
-                self.free_chunks.add_chunk(chunk_index);
-
-                // Maybe trigger compaction if too many empty chunks
-                self.maybe_compact();
-            } else {
-                // Add the freed slot to free_slots
-                self.free_slots.push(index);
-            }
-
-            self.count -= 1;
-            return true;
+        if !chunk.swap_remove(index.id_inland as usize) {
+            return false;
         }
 
-        false
+        self.count -= 1;
+        true
     }
 
-    /// Checks if we should compact the pool and does it if necessary
-    fn maybe_compact(&mut self) {
-        // Only compact if we have too many empty chunks
-        if !self.free_chunks.is_empty() && !self.chunks.is_empty() {
-            let empty_ratio = self.free_chunks.len() as f32 / self.chunks.len() as f32;
-
-            if empty_ratio > MAX_EMPTY_CHUNKS_RATIO {
-                self.compact();
-            }
+    /// Find all components in a chunk and return them as references
+    pub fn chunk_components(&self, chunk_index: usize) -> Option<&[T]> {
+        if chunk_index >= self.chunks.len() {
+            return None;
         }
+
+        Some(self.chunks[chunk_index].as_slice())
     }
 
-    /// Compacts the pool by removing some empty chunks to reduce memory usage
-    ///
-    /// Keeps some empty chunks for future reuse while freeing memory from others.
-    /// Maintains indices to ensure component references remain valid.
-    pub fn compact(&mut self) {
-        // Keep some empty chunks (e.g., 20% of what we have)
-        let chunks_to_keep = (self.free_chunks.len() as f32 * 0.2) as usize;
-
-        // Get chunks to remove from FreeChunkMaster (it handles the sorting internally)
-        let chunks_to_remove = self.free_chunks.get_chunks_to_remove(chunks_to_keep);
-
-        if chunks_to_remove.is_empty() {
-            return;
+    /// Find all components in a chunk and return them as mutable references
+    pub fn chunk_components_mut(&mut self, chunk_index: usize) -> Option<&mut [T]> {
+        if chunk_index >= self.chunks.len() {
+            return None;
         }
 
-        // First update the free chunks master
-        self.free_chunks.remove_chunks(&chunks_to_remove);
-
-        // Now remove the chunks in descending order to avoid index shifting problems
-        let mut sorted_indices = chunks_to_remove;
-        sorted_indices.sort_unstable_by(|a, b| b.cmp(a));
-
-        // Track index remapping when chunks are moved
-        let mut index_remap = HashMap::new();
-
-        for chunk_index in sorted_indices {
-            // Skip if we're about to remove the last chunk
-            if self.chunks.len() <= 1 {
-                break;
-            }
-
-            // Get the index of the last chunk (which will move)
-            let last_chunk_index = self.chunks.len() - 1;
-
-            // Only need to remap if the removed chunk is not the last one
-            if chunk_index < last_chunk_index {
-                index_remap.insert(last_chunk_index, chunk_index);
-            }
-
-            // Remove the chunk
-            self.chunks.swap_remove(chunk_index);
-        }
-
-        // Update all free slots based on the remap
-        if !index_remap.is_empty() {
-            for slot in self.free_slots.iter_mut() {
-                let chunk_idx = slot.id_chunk as usize;
-                if let Some(&new_idx) = index_remap.get(&chunk_idx) {
-                    slot.id_chunk = new_idx as u32;
-                }
-            }
-        }
+        Some(self.chunks[chunk_index].as_mut_slice())
     }
-}
 
-impl<T: Component> IComponentPool for ComponentPool<T> {
+    /// Gets the number of chunks in this pool
+    pub fn chunks_count(&self) -> usize {
+        self.chunks.len()
+    }
+
+    /// Gets the index of the current top chunk
+    pub fn current_chunk_index(&self) -> usize {
+        self.current_chunk_index
+    }
+
+    /// Gets the count of components in a specific chunk
+    pub fn chunk_component_count(&self, chunk_index: usize) -> Option<usize> {
+        if chunk_index >= self.chunks.len() {
+            return None;
+        }
+
+        Some(self.chunks[chunk_index].count())
+    }
+
+    /// Check if the pool is full (all chunks are at capacity)
+    pub fn is_full(&self) -> bool {
+        self.current_chunk_index >= self.chunks.len() - 1 &&
+            self.chunks.last().map_or(true, |chunk| chunk.count() >= self.capacity_per_chunk)
+    }
+
+    /// Gets the remaining capacity in the pool
+    pub fn remaining_capacity(&self) -> usize {
+        let total_capacity = self.chunks.len() * self.capacity_per_chunk;
+        total_capacity - self.count
+    }
+
     fn component_type_id(&self) -> TypeId {
         TypeId::of::<T>()
     }
@@ -306,17 +226,4 @@ impl<T: Component> IComponentPool for ComponentPool<T> {
         self.chunks.len() * self.capacity_per_chunk
     }
 
-    fn swap_remove(&mut self, index: ComponentIndex) -> bool {
-        self.swap_remove(index)
-    }
-}
-
-/// Factory for creating type-erased component pools
-pub struct ComponentPoolFactory;
-
-impl ComponentPoolFactory {
-    /// Creates a new component pool for the specified component type
-    pub fn create<T: Component + 'static>(arena: &Arena) -> Box<dyn IComponentPool> {
-        Box::new(ComponentPool::<T>::with_default_sizes(arena))
-    }
 }

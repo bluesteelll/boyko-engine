@@ -1,7 +1,7 @@
 /// Struct for indexing components within a chunk-based storage system
 /// Represents a two-level addressing scheme for component access
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ComponentIndex {
+pub struct UnitId {
     /// Index of the chunk containing the component
     pub id_chunk: u32,
 
@@ -9,7 +9,7 @@ pub struct ComponentIndex {
     pub id_inland: u32,
 }
 
-impl ComponentIndex {
+impl UnitId {
     /// Creates a new component index with the specified chunk and inland indices
     ///
     /// # Parameters
