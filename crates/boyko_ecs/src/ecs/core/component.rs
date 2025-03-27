@@ -1,6 +1,5 @@
 use std::any::TypeId;
-
-pub type ComponentId = usize;
+use crate::ecs::identifiers::primitives::ComponentId;
 
 pub trait Component: 'static + Sized {
     #[inline(always)]
@@ -17,7 +16,7 @@ pub trait Component: 'static + Sized {
     }
 
     #[inline(always)]
-    fn size() -> usize {
+    fn mem_size() -> usize {
         std::mem::size_of::<Self>()
     }
 

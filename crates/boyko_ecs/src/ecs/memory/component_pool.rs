@@ -1,11 +1,10 @@
+use std::alloc::Layout;
 use std::any::TypeId;
-use std::marker::PhantomData;
-use std::mem::size_of;
 use std::ptr::NonNull;
 use crate::ecs::core::component::Component;
 use crate::ecs::memory::arena::Arena;
 use crate::ecs::memory::chunk::Chunk;
-use crate::ecs::memory::component_index::UnitId;
+use crate::ecs::identifiers::id_unit::UnitId;
 use crate::ecs::constants::{
     DEFAULT_CHUNKS_PER_POOL,
     TINY_COMPONENTS_PER_CHUNK,
@@ -17,20 +16,16 @@ use crate::ecs::constants::{
     MEDIUM_COMPONENT_THRESHOLD,
 };
 
-
-/// Static component pool handling components of specific type
-///
-/// Provides cache-friendly component storage using pre-allocated static chunks.
-/// Uses swap_remove strategy to maintain data densely packed within each chunk.
-/// All chunks are pre-allocated during initialization for maximum performance.
-pub struct ComponentPool<T: Component> {
+/// Component pool that manages chunks of components with centralized type information.
+/// Holds all type metadata in the pool and passes it to chunks as needed for operations.
+pub struct ComponentPool {
     /// Reference to the arena used for memory allocation
     arena: NonNull<Arena>,
 
-    /// Vector of pre-allocated component chunks
-    chunks: Vec<Chunk<T>>,
+    /// Vector of component chunks
+    chunks: Vec<Chunk>,
 
-    /// Index of the current chunk for new component allocations
+    /// Index of the current chunk for new allocations
     current_chunk_index: usize,
 
     /// Number of active components in the pool
@@ -39,121 +34,164 @@ pub struct ComponentPool<T: Component> {
     /// Number of components each chunk can hold
     capacity_per_chunk: usize,
 
+    /// Type information - centralized in the pool
+    type_id: TypeId,
     component_id: usize,
-
-    /// Component type marker
-    _marker: PhantomData<T>,
+    component_layout: Layout,
 }
 
-impl<T: Component> ComponentPool<T> {
-    /// Creates a new component pool with pre-allocated chunks
-    pub fn new(arena: &Arena, num_chunks: usize, components_per_chunk: usize) -> Self {
+impl ComponentPool {
+    /// Creates a new component pool for a specific component type
+    pub fn new<T: Component>(
+        arena: &Arena,
+        num_chunks: usize,
+        components_per_chunk: usize
+    ) -> Self {
+        let component_layout = Layout::new::<T>();
+        let type_id = TypeId::of::<T>();
+        let component_id = T::component_id();
+
         let mut chunks = Vec::with_capacity(num_chunks);
 
         // Pre-allocate all chunks
         for _ in 0..num_chunks {
-            chunks.push(Chunk::<T>::new(arena, components_per_chunk));
+            chunks.push(Chunk::new(arena, components_per_chunk, component_layout));
         }
 
         Self {
             arena: NonNull::from(arena),
             chunks,
-            current_chunk_index: 0,  // Start with the first chunk
+            current_chunk_index: 0,
             count: 0,
             capacity_per_chunk: components_per_chunk,
-            component_id: T::component_id(),
-            _marker: PhantomData,
+            type_id,
+            component_id,
+            component_layout,
         }
     }
 
     /// Creates a new component pool with default sizes based on component type
-    pub fn with_default_sizes(arena: &Arena) -> Self {
-        let components_per_chunk = Self::get_optimal_chunk_capacity();
-        Self::new(arena, DEFAULT_CHUNKS_PER_POOL, components_per_chunk)
+    pub fn with_default_sizes<T: Component>(arena: &Arena) -> Self {
+        let component_size = std::mem::size_of::<T>();
+        let components_per_chunk = Self::get_optimal_chunk_capacity(component_size);
+
+        Self::new::<T>(arena, DEFAULT_CHUNKS_PER_POOL, components_per_chunk)
     }
 
-    /// Determines the optimal number of components per chunk based on component size
-    fn get_optimal_chunk_capacity() -> usize {
-        let size = size_of::<T>();
-        if size <= TINY_COMPONENT_THRESHOLD {
+    /// Determines the optimal number of components per chunk based on size
+    fn get_optimal_chunk_capacity(component_size: usize) -> usize {
+        if component_size <= TINY_COMPONENT_THRESHOLD {
             TINY_COMPONENTS_PER_CHUNK
-        } else if size <= SMALL_COMPONENT_THRESHOLD {
+        } else if component_size <= SMALL_COMPONENT_THRESHOLD {
             SMALL_COMPONENTS_PER_CHUNK
-        } else if size <= MEDIUM_COMPONENT_THRESHOLD {
+        } else if component_size <= MEDIUM_COMPONENT_THRESHOLD {
             MEDIUM_COMPONENTS_PER_CHUNK
         } else {
             LARGE_COMPONENTS_PER_CHUNK
         }
     }
 
-    /// Adds a component to the pool, returning its index
+    //
+    // Raw operations
+    //
+
+    /// Adds raw component bytes to the pool
     ///
-    /// O(1) implementation: Always adds to the current chunk,
-    /// moving to the next pre-allocated chunk when full.
-    pub fn add(&mut self, component: T) -> Option<UnitId> {
+    /// # Safety
+    /// The caller must ensure the bytes represent a valid component of the pool's type
+    pub unsafe fn raw_add(&mut self, bytes: *const u8) -> Option<UnitId> {
         // Check if we have any chunks
         if self.chunks.is_empty() {
-            return None;  // Pool is not properly initialized
+            return None;
         }
 
-        // Get the current chunk
-        let chunk = &mut self.chunks[self.current_chunk_index];
+        // Find a chunk with space
+        while self.current_chunk_index < self.chunks.len() {
+            let chunk = &mut self.chunks[self.current_chunk_index];
 
-        // If the current chunk is full, move to the next one
-        if chunk.count() >= self.capacity_per_chunk {
-            self.current_chunk_index += 1;
+            if chunk.count() < self.capacity_per_chunk {
+                // This chunk has space, use it
+                let inland_index = match chunk.raw_add(bytes, self.component_layout) {
+                    Some(idx) => idx,
+                    None => return None, // Shouldn't happen if count < capacity
+                };
 
-            // Check if we've exhausted all chunks
-            if self.current_chunk_index >= self.chunks.len() {
-                // We've run out of pre-allocated chunks
-                return None;
+                self.count += 1;
+                return Some(UnitId::new(self.current_chunk_index, inland_index));
             }
+
+            // Current chunk is full, try the next one
+            self.current_chunk_index += 1;
         }
 
-        // Now we're pointing at a chunk with space, use it
-        let chunk = &mut self.chunks[self.current_chunk_index];
-        let id_inland = match chunk.add(component) {
-            Some(idx) => idx,
-            None => return None, // This shouldn't happen if capacity is respected
-        };
-
-        self.count += 1;
-        Some(UnitId::new(self.current_chunk_index, id_inland))
+        // All chunks are full
+        None
     }
 
-    /// Gets a reference to a component by its index
-    pub fn get(&self, index: UnitId) -> Option<&T> {
-        let chunk_index = index.id_chunk as usize;
+    /// Gets a raw pointer to a component by its index
+    pub fn raw_get(&self, index: UnitId) -> Option<*const u8> {
+        let chunk_index = index.chunk_index();
         if chunk_index >= self.chunks.len() {
             return None;
         }
 
-        let chunk = &self.chunks[chunk_index];
-        chunk.get(index.id_inland as usize)
+        self.chunks[chunk_index].raw_get(index.inland_index(), self.component_layout)
     }
 
-    /// Gets a mutable reference to a component by its index
-    pub fn get_mut(&mut self, index: UnitId) -> Option<&mut T> {
-        let chunk_index = index.id_chunk as usize;
+    /// Gets a mutable raw pointer to a component by its index
+    pub fn raw_get_mut(&mut self, index: UnitId) -> Option<*mut u8> {
+        let chunk_index = index.chunk_index();
         if chunk_index >= self.chunks.len() {
             return None;
         }
 
-        let chunk = &mut self.chunks[chunk_index];
-        chunk.get_mut(index.id_inland as usize)
+        self.chunks[chunk_index].raw_get_mut(index.inland_index(), self.component_layout)
+    }
+
+    //
+    // Type-safe operations
+    //
+
+    /// Adds a component to the pool, checking types at runtime
+    pub fn add<T: Component>(&mut self, component: T) -> Option<UnitId> {
+        if TypeId::of::<T>() != self.type_id {
+            return None; // Type mismatch
+        }
+
+        unsafe {
+            self.raw_add(&component as *const T as *const u8)
+        }
+    }
+
+    /// Gets a reference to a component by its index, checking types at runtime
+    pub fn get<T: Component>(&self, index: UnitId) -> Option<&T> {
+        if TypeId::of::<T>() != self.type_id {
+            return None; // Type mismatch
+        }
+
+        let ptr = self.raw_get(index)?;
+        unsafe { Some(&*(ptr as *const T)) }
+    }
+
+    /// Gets a mutable reference to a component by its index, checking types at runtime
+    pub fn get_mut<T: Component>(&mut self, index: UnitId) -> Option<&mut T> {
+        if TypeId::of::<T>() != self.type_id {
+            return None; // Type mismatch
+        }
+
+        let ptr = self.raw_get_mut(index)?;
+        unsafe { Some(&mut *(ptr as *mut T)) }
     }
 
     /// Removes a component at the specified index using swap_remove strategy
     pub fn swap_remove(&mut self, index: UnitId) -> bool {
-        let chunk_index = index.id_chunk as usize;
+        let chunk_index = index.chunk_index();
         if chunk_index >= self.chunks.len() {
             return false;
         }
 
         let chunk = &mut self.chunks[chunk_index];
-
-        // Try to remove the component from the chunk
-        if !chunk.swap_remove(index.id_inland as usize) {
+        if !chunk.swap_remove(index.inland_index(), self.component_layout) {
             return false;
         }
 
@@ -161,69 +199,101 @@ impl<T: Component> ComponentPool<T> {
         true
     }
 
-    /// Find all components in a chunk and return them as references
-    pub fn chunk_components(&self, chunk_index: usize) -> Option<&[T]> {
-        if chunk_index >= self.chunks.len() {
+    //
+    // Chunk-level access
+    //
+
+    /// Gets typed access to a chunk's components
+    pub fn chunk_components<T: Component>(&self, chunk_index: usize) -> Option<&[T]> {
+        if TypeId::of::<T>() != self.type_id || chunk_index >= self.chunks.len() {
             return None;
         }
 
-        Some(self.chunks[chunk_index].as_slice())
+        let chunk = &self.chunks[chunk_index];
+        let count = chunk.count();
+
+        if count == 0 {
+            return Some(&[]);
+        }
+
+        unsafe {
+            let ptr = chunk.data_ptr() as *const T;
+            Some(std::slice::from_raw_parts(ptr, count))
+        }
     }
 
-    /// Find all components in a chunk and return them as mutable references
-    pub fn chunk_components_mut(&mut self, chunk_index: usize) -> Option<&mut [T]> {
-        if chunk_index >= self.chunks.len() {
+    /// Gets mutable typed access to a chunk's components
+    pub fn chunk_components_mut<T: Component>(&mut self, chunk_index: usize) -> Option<&mut [T]> {
+        if TypeId::of::<T>() != self.type_id || chunk_index >= self.chunks.len() {
             return None;
         }
 
-        Some(self.chunks[chunk_index].as_mut_slice())
+        let chunk = &mut self.chunks[chunk_index];
+        let count = chunk.count();
+
+        if count == 0 {
+            return Some(&mut []);
+        }
+
+        unsafe {
+            let ptr = chunk.data_ptr_mut() as *mut T;
+            Some(std::slice::from_raw_parts_mut(ptr, count))
+        }
     }
 
-    /// Gets the number of chunks in this pool
+    //
+    // Pool information
+    //
+
+    #[inline]
     pub fn chunks_count(&self) -> usize {
         self.chunks.len()
     }
 
-    /// Gets the index of the current top chunk
+    #[inline]
     pub fn current_chunk_index(&self) -> usize {
         self.current_chunk_index
     }
 
-    /// Gets the count of components in a specific chunk
+    #[inline]
     pub fn chunk_component_count(&self, chunk_index: usize) -> Option<usize> {
-        if chunk_index >= self.chunks.len() {
-            return None;
-        }
-
-        Some(self.chunks[chunk_index].count())
+        self.chunks.get(chunk_index).map(|chunk| chunk.count())
     }
 
-    /// Check if the pool is full (all chunks are at capacity)
+    #[inline]
     pub fn is_full(&self) -> bool {
         self.current_chunk_index >= self.chunks.len() - 1 &&
             self.chunks.last().map_or(true, |chunk| chunk.count() >= self.capacity_per_chunk)
     }
 
-    /// Gets the remaining capacity in the pool
+    #[inline]
     pub fn remaining_capacity(&self) -> usize {
         let total_capacity = self.chunks.len() * self.capacity_per_chunk;
-        total_capacity - self.count
+        total_capacity.saturating_sub(self.count)
     }
 
-    fn component_type_id(&self) -> TypeId {
-        TypeId::of::<T>()
+    #[inline]
+    pub fn type_id(&self) -> TypeId {
+        self.type_id
     }
 
-    fn component_size(&self) -> usize {
-        size_of::<T>()
+    #[inline]
+    pub fn component_id(&self) -> usize {
+        self.component_id
     }
 
-    fn count(&self) -> usize {
+    #[inline]
+    pub fn component_layout(&self) -> Layout {
+        self.component_layout
+    }
+
+    #[inline]
+    pub fn count(&self) -> usize {
         self.count
     }
 
-    fn capacity(&self) -> usize {
+    #[inline]
+    pub fn capacity(&self) -> usize {
         self.chunks.len() * self.capacity_per_chunk
     }
-
 }

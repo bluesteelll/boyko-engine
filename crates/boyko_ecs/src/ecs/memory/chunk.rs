@@ -1,237 +1,184 @@
 use std::alloc::Layout;
-use std::mem;
 use std::ptr::NonNull;
-use crate::ecs::core::component::Component;
 use crate::ecs::memory::arena::Arena;
-use crate::ecs::constants::{DEFAULT_COMPONENTS_PER_CHUNK};
+use crate::ecs::constants::DEFAULT_COMPONENTS_PER_CHUNK;
 
-/// Chunk хранит фиксированное количество компонентов одного типа
-pub struct Chunk<T: Component> {
-    /// Указатель на выделенную память
-    data: NonNull<T>,
+/// A chunk stores a fixed number of components of the same type.
+/// This implementation is type-agnostic and only deals with raw memory.
+pub struct Chunk {
+    /// Raw pointer to the allocated memory
+    data: NonNull<u8>,
 
-    /// Вместимость чанка (максимальное количество компонентов)
+    /// Maximum number of components this chunk can hold
     capacity: usize,
 
-    /// Текущее количество занятых слотов
+    /// Current number of occupied slots
     count: usize,
 }
 
-impl<T: Component> Chunk<T> {
-    /// Создает новый чанк с указанной вместимостью
-    pub fn new(arena: &Arena, capacity: usize) -> Self {
-        // Выделяем память для массива компонентов
-        // Мы должны использовать allocate_layout, так как нам нужен массив
-        let layout = Layout::array::<T>(capacity).expect("Invalid array layout");
-        let ptr = arena.allocate_layout(layout);
+impl Chunk {
+    /// Creates a new chunk with memory allocated for components with specified layout
+    pub fn new(arena: &Arena, capacity: usize, component_layout: Layout) -> Self {
+        // Calculate memory layout for the component array
+        let array_layout = Layout::array::<u8>(capacity * component_layout.size())
+            .expect("Invalid array layout for chunk")
+            .align_to(component_layout.align())
+            .expect("Invalid alignment for chunk");
 
-        // Приводим указатель к нужному типу
-        let typed_ptr = unsafe { ptr.cast::<T>() };
+        // Allocate memory in the arena
+        let ptr = arena.allocate_layout(array_layout);
 
         Self {
-            data: typed_ptr,
+            data: ptr,
             capacity,
             count: 0,
         }
     }
 
-    /// Создает чанк с размером по умолчанию
-    pub fn with_default_capacity(arena: &Arena) -> Self {
-        Self::new(arena, DEFAULT_COMPONENTS_PER_CHUNK)
+    /// Creates a new chunk with default capacity
+    pub fn with_default_capacity(arena: &Arena, component_layout: Layout) -> Self {
+        Self::new(arena, DEFAULT_COMPONENTS_PER_CHUNK, component_layout)
     }
 
-    /// Добавляет компонент в чанк и возвращает его индекс
-    pub fn add(&mut self, component: T) -> Option<usize> {
-        // Проверяем, что есть место
+    //
+    // Raw memory operations
+    //
+
+    /// Raw add operation - adds raw bytes to the chunk
+    ///
+    /// # Safety
+    /// Caller must ensure the bytes represent a valid component
+    pub unsafe fn raw_add(&mut self, bytes: *const u8, layout: Layout) -> Option<usize> {
         if self.count >= self.capacity {
             return None;
         }
 
-        // Вычисляем адрес, куда поместить компонент
         let index = self.count;
-        let ptr = unsafe { self.data.as_ptr().add(index) };
+        let dst = self.data.as_ptr().add(index * layout.size());
 
-        // Размещаем компонент в памяти
-        unsafe {
-            std::ptr::write(ptr, component);
-        }
+        // Copy the component data
+        std::ptr::copy_nonoverlapping(bytes, dst, layout.size());
 
-        // Увеличиваем счетчик
         self.count += 1;
-
         Some(index)
     }
 
-    pub fn set(&mut self, index: usize, component: T) -> bool {
+    /// Raw set operation - overwrites a component with raw bytes
+    ///
+    /// # Safety
+    /// Caller must ensure the bytes represent a valid component
+    pub unsafe fn raw_set(&mut self, index: usize, bytes: *const u8, layout: Layout) -> bool {
         if index >= self.capacity {
             return false;
         }
 
-        // Если индекс больше текущего количества,
-        // мы автоматически увеличиваем счетчик
+        let dst = self.data.as_ptr().add(index * layout.size());
+
+        // Copy the new component data
+        std::ptr::copy_nonoverlapping(bytes, dst, layout.size());
+
+        // Update count if necessary
         if index >= self.count {
             self.count = index + 1;
         }
 
-        // Указатель на место в памяти
-        let ptr = unsafe { self.data.as_ptr().add(index) };
-
-        // Размещаем компонент в памяти
-        unsafe {
-            // Если значение уже существует, вызываем его деструктор
-            if index < self.count {
-                std::ptr::drop_in_place(ptr);
-            }
-
-            std::ptr::write(ptr, component);
-        }
-
         true
     }
 
-    /// Получает ссылку на компонент по индексу
-    pub fn get(&self, index: usize) -> Option<&T> {
+    /// Raw get operation - returns a raw pointer to the component's bytes
+    pub fn raw_get(&self, index: usize, layout: Layout) -> Option<*const u8> {
         if index >= self.count {
             return None;
         }
 
-        // Получаем указатель на компонент
-        let ptr = unsafe { self.data.as_ptr().add(index) };
-
-        // Преобразуем в ссылку
-        unsafe {
-            Some(&*ptr)
-        }
+        let ptr = unsafe { self.data.as_ptr().add(index * layout.size()) };
+        Some(ptr)
     }
 
-    /// Получает изменяемую ссылку на компонент по индексу
-    pub fn get_mut(&mut self, index: usize) -> Option<&mut T> {
+    /// Raw get mut operation - returns a mutable raw pointer to the component's bytes
+    pub fn raw_get_mut(&mut self, index: usize, layout: Layout) -> Option<*mut u8> {
         if index >= self.count {
             return None;
         }
 
-        // Получаем указатель на компонент
-        let ptr = unsafe { self.data.as_ptr().add(index) };
-
-        // Преобразуем в изменяемую ссылку
-        unsafe {
-            Some(&mut *ptr)
-        }
+        let ptr = unsafe { self.data.as_ptr().add(index * layout.size()) };
+        Some(ptr)
     }
 
-    /// Возвращает количество компонентов в чанке
+    /// Removes a component, swapping it with the last component for O(1) removal
+    pub fn swap_remove(&mut self, index: usize, layout: Layout) -> bool {
+        if index >= self.count {
+            return false;
+        }
+
+        // If it's not the last element, swap with the last one
+        if index < self.count - 1 {
+            let last_index = self.count - 1;
+
+            unsafe {
+                let src = self.data.as_ptr().add(last_index * layout.size());
+                let dst = self.data.as_ptr().add(index * layout.size());
+                std::ptr::copy_nonoverlapping(src, dst, layout.size());
+            }
+        }
+
+        self.count -= 1;
+        true
+    }
+
+    /// Removes a component, shifting all subsequent elements
+    pub fn remove(&mut self, index: usize, layout: Layout) -> bool {
+        if index >= self.count {
+            return false;
+        }
+
+        // Move all subsequent elements one position back
+        let elements_to_move = self.count - index - 1;
+        if elements_to_move > 0 {
+            unsafe {
+                let src = self.data.as_ptr().add((index + 1) * layout.size());
+                let dst = self.data.as_ptr().add(index * layout.size());
+                std::ptr::copy(src, dst, elements_to_move * layout.size());
+            }
+        }
+
+        self.count -= 1;
+        true
+    }
+
+    /// Clears the chunk, resetting the count without deallocating
+    pub fn clear(&mut self) {
+        // Just reset the count - we don't need to run destructors since
+        // the memory is managed by the arena
+        self.count = 0;
+    }
+
+    //
+    // Accessor methods
+    //
+
+    #[inline]
     pub fn count(&self) -> usize {
         self.count
     }
 
-    /// Возвращает вместимость чанка
+    #[inline]
     pub fn capacity(&self) -> usize {
         self.capacity
     }
 
-    /// Возвращает указатель на массив компонентов
-    pub fn as_ptr(&self) -> *const T {
+    #[inline]
+    pub fn is_full(&self) -> bool {
+        self.count >= self.capacity
+    }
+
+    #[inline]
+    pub fn data_ptr(&self) -> *const u8 {
         self.data.as_ptr()
     }
 
-    /// Возвращает изменяемый указатель на массив компонентов
-    pub fn as_mut_ptr(&mut self) -> *mut T {
+    #[inline]
+    pub fn data_ptr_mut(&mut self) -> *mut u8 {
         self.data.as_ptr()
-    }
-
-    /// Получает срез всех компонентов
-    pub fn as_slice(&self) -> &[T] {
-        unsafe {
-            std::slice::from_raw_parts(self.data.as_ptr(), self.count)
-        }
-    }
-
-    /// Получает изменяемый срез всех компонентов
-    pub fn as_mut_slice(&mut self) -> &mut [T] {
-        unsafe {
-            std::slice::from_raw_parts_mut(self.data.as_ptr(), self.count)
-        }
-    }
-
-    /// Очищает чанк, вызывая деструкторы всех компонентов
-    pub fn clear(&mut self) {
-        // Вызываем деструкторы для всех компонентов
-        for i in 0..self.count {
-            let ptr = unsafe { self.data.as_ptr().add(i) };
-            unsafe {
-                std::ptr::drop_in_place(ptr);
-            }
-        }
-
-        // Сбрасываем счетчик
-        self.count = 0;
-    }
-
-    /// Сдвигает элементы, чтобы заполнить пробел при удалении
-    pub fn remove(&mut self, index: usize) -> bool {
-        if index >= self.count {
-            return false;
-        }
-
-        // Получаем указатель на удаляемый компонент
-        let ptr = unsafe { self.data.as_ptr().add(index) };
-
-        // Вызываем деструктор
-        unsafe {
-            std::ptr::drop_in_place(ptr);
-        }
-
-        // Сдвигаем все последующие элементы на одну позицию назад
-        let elements_to_move = self.count - index - 1;
-        if elements_to_move > 0 {
-            unsafe {
-                let src = self.data.as_ptr().add(index + 1);
-                let dst = self.data.as_ptr().add(index);
-                std::ptr::copy(src, dst, elements_to_move);
-            }
-        }
-
-        // Уменьшаем счетчик
-        self.count -= 1;
-
-        true
-    }
-
-    /// Удаляет компонент, заменяя его последним (быстрее, но нарушает порядок)
-    pub fn swap_remove(&mut self, index: usize) -> bool {
-        if index >= self.count {
-            return false;
-        }
-
-        // Получаем указатель на удаляемый компонент
-        let ptr = unsafe { self.data.as_ptr().add(index) };
-
-        // Вызываем деструктор
-        unsafe {
-            std::ptr::drop_in_place(ptr);
-        }
-
-        // Если это не последний элемент, заменяем его последним
-        if index < self.count - 1 {
-            let last_index = self.count - 1;
-            let last_ptr = unsafe { self.data.as_ptr().add(last_index) };
-
-            // Перемещаем последний элемент на место удаленного
-            unsafe {
-                std::ptr::copy(last_ptr, ptr, 1);
-            }
-        }
-
-        // Уменьшаем счетчик
-        self.count -= 1;
-
-        true
-    }
-}
-
-// Реализуем Drop, чтобы вызвать деструкторы компонентов
-impl<T: Component> Drop for Chunk<T> {
-    fn drop(&mut self) {
-        self.clear();
     }
 }

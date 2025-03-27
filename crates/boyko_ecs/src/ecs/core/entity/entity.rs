@@ -1,4 +1,4 @@
-pub type EntityId = u32;
+use crate::ecs::identifiers::primitives::EntityId;
 
 pub struct Entity {
     pub id: EntityId,
