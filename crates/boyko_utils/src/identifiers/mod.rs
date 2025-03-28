@@ -1,2 +1,2 @@
 pub mod primitives;
-mod slot;
+pub mod slot;
