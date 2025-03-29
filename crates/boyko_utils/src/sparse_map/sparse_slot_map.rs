@@ -4,20 +4,21 @@ use crate::identifiers::primitives::Generation;
 use super::sparse_collection::SparseCollection;
 
 /// High-performance sparse set implementation with generation tracking
-/// Uses Slot<T> directly for a clean and efficient design
-pub struct SparseSlotMap<T: From<usize> + Into<usize>, U> {
-    sparse: Vec<Option<Slot<T>>>,
+/// Uses Slot directly for a clean and efficient design
+pub struct SparseSlotMap<U> {
+    // Maps external indices to a Slot where:
+    // - Slot.index stores the dense array index
+    // - Slot.generation stores the generation for validation
+    sparse: Vec<Option<Slot>>,
 
+    // Dense storage for values
     dense: Vec<U>,
 
     // Reverse mapping: external indices for each element in dense
-    indices: Vec<T>,
+    indices: Vec<usize>,
 }
 
-impl<T, U> SparseSlotMap<T, U>
-where
-    T: Copy + Into<usize> + From<usize> + Eq
-{
+impl<U> SparseSlotMap<U> {
     /// Creates a new empty SparseSlotMap
     #[inline(always)]
     pub fn new() -> Self {
@@ -41,15 +42,15 @@ where
     /// Creates a new slot for a given index with generation 0
     /// This should be used for initial slot creation
     #[inline(always)]
-    pub fn create_slot(&self, index: T) -> Slot<T> {
+    pub fn create_slot(&self, index: usize) -> Slot {
         Slot::new(index, 0)
     }
 
     /// Inserts a value using the provided slot
     /// Returns the previous value if the slot with matching generation existed
     #[inline]
-    pub fn insert(&mut self, slot: Slot<T>, value: U) -> Option<U> {
-        let idx: usize = slot.index().into();
+    pub fn insert(&mut self, slot: Slot, value: U) -> Option<U> {
+        let idx = slot.index();
         let generation = slot.generation();
 
         // Ensure sparse array is large enough
@@ -60,7 +61,7 @@ where
         match &self.sparse[idx] {
             Some(stored_slot) if stored_slot.generation() == generation => {
                 // Replace existing value, generations match
-                let dense_idx = stored_slot.index().into();
+                let dense_idx = stored_slot.index();
                 let old = std::mem::replace(&mut self.dense[dense_idx], value);
                 Some(old)
             },
@@ -71,7 +72,7 @@ where
                 self.indices.push(slot.index());
 
                 // Store a slot with dense index and the original generation
-                self.sparse[idx] = Some(Slot::new(T::from(dense_idx), generation));
+                self.sparse[idx] = Some(Slot::new(dense_idx, generation));
                 None
             }
         }
@@ -80,8 +81,8 @@ where
     /// Removes an element by slot and returns its value
     /// Only succeeds if the generation matches to prevent ABA problems
     #[inline]
-    pub fn remove(&mut self, slot: Slot<T>) -> Option<U> {
-        let idx: usize = slot.index().into();
+    pub fn remove(&mut self, slot: Slot) -> Option<U> {
+        let idx = slot.index();
         let generation = slot.generation();
 
         if idx >= self.sparse.len() {
@@ -93,7 +94,7 @@ where
                 return None; // Generation mismatch - stale reference
             }
 
-            let dense_idx: usize = stored_slot.index().into();
+            let dense_idx = stored_slot.index();
 
             // Increment generation to prevent ABA problem
             let new_generation = generation.wrapping_add(1);
@@ -115,13 +116,12 @@ where
 
                 // Update mapping for moved element
                 let swapped_index = self.indices.swap_remove(dense_idx);
-                let swapped_idx: usize = swapped_index.into();
 
-                if swapped_idx < self.sparse.len() {
-                    if let Some(swapped_slot) = &self.sparse[swapped_idx] {
+                if swapped_index < self.sparse.len() {
+                    if let Some(swapped_slot) = &self.sparse[swapped_index] {
                         // Create a new slot with updated dense index but same generation
-                        self.sparse[swapped_idx] = Some(Slot::new(
-                            T::from(dense_idx),
+                        self.sparse[swapped_index] = Some(Slot::new(
+                            dense_idx,
                             swapped_slot.generation()
                         ));
                     }
@@ -138,8 +138,8 @@ where
 
     /// Checks if an element exists with the specified slot, including generation verification
     #[inline(always)]
-    pub fn contains(&self, slot: Slot<T>) -> bool {
-        let idx: usize = slot.index().into();
+    pub fn contains(&self, slot: Slot) -> bool {
+        let idx = slot.index();
 
         idx < self.sparse.len() &&
             self.sparse[idx].as_ref().map_or(false, |stored_slot|
@@ -149,8 +149,8 @@ where
 
     /// Returns a reference to the value for the specified slot
     #[inline]
-    pub fn get(&self, slot: Slot<T>) -> Option<&U> {
-        let idx: usize = slot.index().into();
+    pub fn get(&self, slot: Slot) -> Option<&U> {
+        let idx = slot.index();
 
         if idx >= self.sparse.len() {
             return None;
@@ -158,7 +158,7 @@ where
 
         match &self.sparse[idx] {
             Some(stored_slot) if stored_slot.generation() == slot.generation() => {
-                let dense_idx: usize = stored_slot.index().into();
+                let dense_idx = stored_slot.index();
                 Some(&self.dense[dense_idx])
             },
             _ => None, // Generation mismatch or empty slot
@@ -167,8 +167,8 @@ where
 
     /// Returns a mutable reference to the value for the specified slot
     #[inline]
-    pub fn get_mut(&mut self, slot: Slot<T>) -> Option<&mut U> {
-        let idx: usize = slot.index().into();
+    pub fn get_mut(&mut self, slot: Slot) -> Option<&mut U> {
+        let idx = slot.index();
 
         if idx >= self.sparse.len() {
             return None;
@@ -176,7 +176,7 @@ where
 
         match &self.sparse[idx] {
             Some(stored_slot) if stored_slot.generation() == slot.generation() => {
-                let dense_idx: usize = stored_slot.index().into();
+                let dense_idx = stored_slot.index();
                 Some(&mut self.dense[dense_idx])
             },
             _ => None, // Generation mismatch or empty slot
@@ -198,30 +198,21 @@ where
     }
 }
 
-impl<T, U> Index<Slot<T>> for SparseSlotMap<T, U>
-where
-    T: Copy + Into<usize> + From<usize> + Eq
-{
+impl<U> Index<Slot> for SparseSlotMap<U> {
     type Output = U;
 
-    fn index(&self, slot: Slot<T>) -> &Self::Output {
+    fn index(&self, slot: Slot) -> &Self::Output {
         self.get(slot).expect("Slot not found or generation mismatch")
     }
 }
 
-impl<T, U> IndexMut<Slot<T>> for SparseSlotMap<T, U>
-where
-    T: Copy + Into<usize> + From<usize> + Eq
-{
-    fn index_mut(&mut self, slot: Slot<T>) -> &mut Self::Output {
+impl<U> IndexMut<Slot> for SparseSlotMap<U> {
+    fn index_mut(&mut self, slot: Slot) -> &mut Self::Output {
         self.get_mut(slot).expect("Slot not found or generation mismatch")
     }
 }
 
-impl<T, U> SparseCollection<Slot<T>, U> for SparseSlotMap<T, U>
-where
-    T: Copy + Into<usize> + From<usize> + Eq
-{
+impl<U> SparseCollection<Slot, U> for SparseSlotMap<U> {
     fn len(&self) -> usize {
         self.dense.len()
     }
