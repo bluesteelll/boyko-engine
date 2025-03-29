@@ -1,2 +1,2 @@
-mod sparse_map;
+pub mod sparse_map;
 mod identifiers;

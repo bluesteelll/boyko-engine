@@ -1,24 +1,21 @@
-
 use std::ops::{Index, IndexMut};
 use super::sparse_collection::SparseCollection;
 
 /// High-performance sparse set implementation
 /// Provides O(1) insertion, removal, and lookup with optimal cache locality
-pub struct SparseMap<T: Sized + Copy + From<usize> + Into<usize>, U> {
+pub struct SparseMap<U> {
     // Maps external indices to dense array indices
-    sparse: Vec<Option<T>>,
+    sparse: Vec<Option<usize>>,
 
+    // Dense storage for values
     dense: Vec<U>,
 
     // Reverse mapping: indices for each element in dense array
-    // Required for efficient O(1) removal
-    indices: Vec<T>,
+    indices: Vec<usize>,
 }
 
-impl<T, U> SparseMap<T, U>
-where
-    T: Copy + Into<usize> + From<usize> + Eq
-{
+impl<U> SparseMap<U> {
+    /// Creates a new empty SparseMap
     #[inline(always)]
     pub fn new() -> Self {
         Self {
@@ -28,6 +25,7 @@ where
         }
     }
 
+    /// Creates a SparseMap with pre-allocated capacity
     #[inline(always)]
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
@@ -40,15 +38,13 @@ where
     /// Inserts a value at the specified index
     /// Returns the previous value if one existed
     #[inline]
-    pub fn insert(&mut self, index: T, value: U) -> Option<U> {
-        let idx: usize = index.into();
-
+    pub fn insert(&mut self, index: usize, value: U) -> Option<U> {
         // Ensure sparse array is large enough
-        if idx >= self.sparse.len() {
-            self.sparse.resize(idx + 1, None);
+        if index >= self.sparse.len() {
+            self.sparse.resize(index + 1, None);
         }
 
-        match self.sparse[idx] {
+        match self.sparse[index] {
             Some(dense_idx) => {
                 // Replace existing value
                 let old = std::mem::replace(&mut self.dense[dense_idx], value);
@@ -59,7 +55,7 @@ where
                 let dense_idx = self.dense.len();
                 self.dense.push(value);
                 self.indices.push(index);
-                self.sparse[idx] = Some(dense_idx);
+                self.sparse[index] = Some(dense_idx);
                 None
             }
         }
@@ -68,14 +64,12 @@ where
     /// Removes an element by index and returns its value
     /// Uses swap_remove for O(1) removal time
     #[inline]
-    pub fn swap_remove(&mut self, index: T) -> Option<U> {
-        let idx: usize = index.into();
-
-        if idx >= self.sparse.len() {
+    pub fn remove(&mut self, index: usize) -> Option<U> {
+        if index >= self.sparse.len() {
             return None;
         }
 
-        self.sparse[idx].take().map(|dense_idx| {
+        self.sparse[index].take().map(|dense_idx| {
             // Fast removal by swapping with the last element
             let last_idx = self.dense.len() - 1;
 
@@ -90,8 +84,7 @@ where
 
                 // Update mapping for moved element
                 let swapped_index = self.indices.swap_remove(dense_idx);
-                let swapped_idx: usize = swapped_index.into();
-                self.sparse[swapped_idx] = Some(dense_idx);
+                self.sparse[swapped_index] = Some(dense_idx);
 
                 value
             };
@@ -100,30 +93,36 @@ where
         })
     }
 
+    /// Checks if an element exists at the specified index
     #[inline(always)]
-    pub fn contains(&self, index: T) -> bool {
-        let idx: usize = index.into();
-        idx < self.sparse.len() && self.sparse[idx].is_some()
+    pub fn contains(&self, index: usize) -> bool {
+        index < self.sparse.len() && self.sparse[index].is_some()
     }
 
+    /// Returns a reference to the value at the specified index
     #[inline]
-    pub fn get(&self, index: T) -> Option<&U> {
-        let idx: usize = index.into();
-        if idx >= self.sparse.len() {
+    pub fn get(&self, index: usize) -> Option<&U> {
+        if index >= self.sparse.len() {
             return None;
         }
 
-        self.sparse[idx].map(|dense_idx| &self.dense[dense_idx])
+        self.sparse[index].map(|dense_idx| &self.dense[dense_idx])
     }
 
+    /// Returns a mutable reference to the value at the specified index
     #[inline]
-    pub fn get_mut(&mut self, index: T) -> Option<&mut U> {
-        let idx: usize = index.into();
-        if idx >= self.sparse.len() {
+    pub fn get_mut(&mut self, index: usize) -> Option<&mut U> {
+        if index >= self.sparse.len() {
             return None;
         }
 
-        self.sparse[idx].map(move |dense_idx| &mut self.dense[dense_idx])
+        self.sparse[index].map(move |dense_idx| &mut self.dense[dense_idx])
+    }
+
+    /// Returns the number of elements in the collection
+    #[inline(always)]
+    pub fn len(&self) -> usize {
+        self.dense.len()
     }
 
     /// Checks if the collection is empty
@@ -141,30 +140,21 @@ where
     }
 }
 
-impl<T, U> Index<T> for SparseMap<T, U>
-where
-    T: Copy + Into<usize> + From<usize> + Eq
-{
+impl<U> Index<usize> for SparseMap<U> {
     type Output = U;
 
-    fn index(&self, index: T) -> &Self::Output {
+    fn index(&self, index: usize) -> &Self::Output {
         self.get(index).expect("Index not found in SparseMap")
     }
 }
 
-impl<T, U> IndexMut<T> for SparseMap<T, U>
-where
-    T: Copy + Into<usize> + From<usize> + Eq
-{
-    fn index_mut(&mut self, index: T) -> &mut Self::Output {
+impl<U> IndexMut<usize> for SparseMap<U> {
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
         self.get_mut(index).expect("Index not found in SparseMap")
     }
 }
 
-impl<T, U> SparseCollection<T, U> for SparseMap<T, U>
-where
-    T: Copy + Into<usize> + From<usize> + Eq
-{
+impl<U> SparseCollection<usize, U> for SparseMap<U> {
     fn len(&self) -> usize {
         self.dense.len()
     }
