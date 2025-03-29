@@ -8,7 +8,8 @@ pub struct Slot<T: Sized> {
     generation: Generation
 }
 
-impl<T: Sized + Copy> Slot<T> {
+impl<T> Slot<T>
+where T: Sized + Copy + From<usize> + Into<usize>{
     #[inline(always)]
     pub fn new(index: T, generation: Generation) -> Self {
         Self { index, generation }
