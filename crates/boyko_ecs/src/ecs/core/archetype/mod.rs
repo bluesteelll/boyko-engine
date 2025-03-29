@@ -1,2 +1,2 @@
 pub mod archetype;
-mod component_pool_bundle;
+pub mod component_pool_bundle;
