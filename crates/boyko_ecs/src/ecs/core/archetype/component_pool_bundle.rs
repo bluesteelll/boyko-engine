@@ -1,11 +1,11 @@
 use std::ops::{Index, IndexMut};
 use crate::ecs::core::component::Component;
-use crate::ecs::identifiers::primitives::{ChunkId, InlandComponentId};
+use crate::ecs::identifiers::primitives::{ChunkId, InlandComponentId, InlandPoolId};
 use crate::ecs::memory::component_pool::ComponentPool;
 use boyko_utils::sparse_map::sparse_map::SparseMap;
 pub struct ComponentPoolBundle {
     pools: Vec<ComponentPool>,
-    sparse_indexes: SparseMap<ChunkId>,
+    sparse_indexes: SparseMap<InlandPoolId>,
 }
 
 impl Index<InlandComponentId> for ComponentPoolBundle {
