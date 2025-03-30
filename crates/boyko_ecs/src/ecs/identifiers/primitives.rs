@@ -4,5 +4,7 @@ pub type ChunkId = usize;
 pub type InlandChunkId = usize;
 
 pub type ComponentId = usize;
-pub type InlandComponentId = usize;
+pub type InlandUnitId = usize;
 pub type InlandPoolId = usize;
+pub type InlandComponentId = usize;
+pub type InlandArchetypeId = usize;
