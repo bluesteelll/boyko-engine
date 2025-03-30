@@ -1,13 +1,14 @@
+use boyko_utils::identifiers::slot::Slot;
 use crate::ecs::identifiers::primitives::EntityId;
 
 pub struct Entity {
     pub id: EntityId,
-    pub generation: u16,
+    pub generation: usize,
 }
 
 impl Entity {
     #[inline]
-    pub fn new(id: EntityId, generation: u16) -> Self {
+    pub fn new(id: EntityId, generation: usize) -> Self {
         Self { id, generation }
     }
 
@@ -23,7 +24,7 @@ impl Entity {
     }
 
     #[inline]
-    pub fn generation(&self) -> u16 {
+    pub fn generation(&self) -> usize {
         self.generation
     }
 
@@ -55,3 +56,17 @@ impl Clone for Entity {
     }
 }
 
+impl From<Slot> for Entity {
+    fn from(slot: Slot) -> Self {
+        Entity {
+            id: slot.index(),
+            generation: slot.generation(),
+        }
+    }
+}
+
+impl Into<Slot> for Entity {
+    fn into(self) -> Slot {
+        Slot::new(self.id(), self.generation())
+    }
+}
