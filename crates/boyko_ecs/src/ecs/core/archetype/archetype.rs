@@ -7,3 +7,8 @@ pub struct Archetype {
     pool_bundle: ComponentPoolBundle,
     entities: Vec<Entity>
 }
+
+
+impl Archetype {
+    fn get_unit()
+}
