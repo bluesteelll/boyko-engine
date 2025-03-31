@@ -1,6 +1,7 @@
 use boyko_utils::identifiers::slot::Slot;
 use crate::ecs::identifiers::primitives::EntityId;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Entity {
     pub id: EntityId,
     pub generation: usize,
@@ -40,21 +41,7 @@ impl Entity {
     }
 }
 
-impl PartialEq for Entity {
-    fn eq(&self, other: &Self) -> bool {
-        self.is_same(other)
-    }
-}
 
-impl Eq for Entity {}
-
-impl Copy for Entity {}
-
-impl Clone for Entity {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
 
 impl From<Slot> for Entity {
     fn from(slot: Slot) -> Self {
