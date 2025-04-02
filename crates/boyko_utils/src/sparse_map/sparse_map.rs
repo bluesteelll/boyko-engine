@@ -14,7 +14,7 @@ pub struct SparseMap<U> {
     indices: Vec<usize>,
 }
 
-impl<U> SparseMap<U> {
+impl<U: Clone> SparseMap<U> {
     /// Creates a new empty SparseMap
     #[inline(always)]
     pub fn new() -> Self {
@@ -69,28 +69,42 @@ impl<U> SparseMap<U> {
             return None;
         }
 
-        self.sparse[index].take().map(|dense_idx| {
+        // Use replace to extract the Option value and guarantee it's set to None
+        let dense_idx_opt = std::mem::replace(&mut self.sparse[index], None);
+
+        if let Some(dense_idx) = dense_idx_opt {
             // Fast removal by swapping with the last element
             let last_idx = self.dense.len() - 1;
 
             let value = if dense_idx == last_idx {
-                // Last element, simply remove
+                // Last element, simply remove without swapping
                 let value = self.dense.pop().unwrap();
                 self.indices.pop();
                 value
             } else {
-                // Swap with last and remove
-                let value = self.dense.swap_remove(dense_idx);
+                // Get the value being removed
+                let value = self.dense[dense_idx].clone();
 
-                // Update mapping for moved element
-                let swapped_index = self.indices.swap_remove(dense_idx);
-                self.sparse[swapped_index] = Some(dense_idx);
+                // Get the last element and its index
+                let last_element = self.dense.pop().unwrap();
+                let moved_entity_index = self.indices.pop().unwrap();
+
+                // Put the last element in place of the removed element
+                self.dense[dense_idx] = last_element;
+                self.indices[dense_idx] = moved_entity_index;
+
+                // Update the sparse map for the moved entity (the one that was previously last)
+                if moved_entity_index < self.sparse.len() {
+                    self.sparse[moved_entity_index] = Some(dense_idx);
+                }
 
                 value
             };
 
-            value
-        })
+            Some(value)
+        } else {
+            None
+        }
     }
 
     /// Checks if an element exists at the specified index
@@ -106,7 +120,10 @@ impl<U> SparseMap<U> {
             return None;
         }
 
-        self.sparse[index].map(|dense_idx| &self.dense[dense_idx])
+        match self.sparse[index] {
+            Some(dense_idx) if dense_idx < self.dense.len() => Some(&self.dense[dense_idx]),
+            _ => None
+        }
     }
 
     /// Returns a mutable reference to the value at the specified index
@@ -116,7 +133,10 @@ impl<U> SparseMap<U> {
             return None;
         }
 
-        self.sparse[index].map(move |dense_idx| &mut self.dense[dense_idx])
+        match self.sparse[index] {
+            Some(dense_idx) if dense_idx < self.dense.len() => Some(&mut self.dense[dense_idx]),
+            _ => None
+        }
     }
 
     /// Returns the number of elements in the collection
@@ -138,9 +158,47 @@ impl<U> SparseMap<U> {
         self.dense.clear();
         self.indices.clear();
     }
+
+    /// Validates internal consistency - only used for debugging
+    pub fn validate(&self) -> bool {
+        if self.dense.len() != self.indices.len() {
+            return false;
+        }
+
+        // Check that all sparse entries point to valid dense indices
+        for (sparse_idx, dense_idx_opt) in self.sparse.iter().enumerate() {
+            if let Some(dense_idx) = dense_idx_opt {
+                // Dense index should be in bounds
+                if *dense_idx >= self.dense.len() {
+                    return false;
+                }
+
+                // The indices array should point back to this sparse index
+                if self.indices[*dense_idx] != sparse_idx {
+                    return false;
+                }
+            }
+        }
+
+        // Check that all indices point to valid sparse entries
+        for (dense_idx, sparse_idx) in self.indices.iter().enumerate() {
+            // Sparse index should be in bounds
+            if *sparse_idx >= self.sparse.len() {
+                return false;
+            }
+
+            // The sparse array should point back to this dense index
+            match self.sparse[*sparse_idx] {
+                Some(idx) if idx == dense_idx => {}, // Correct
+                _ => return false // Incorrect
+            }
+        }
+
+        true
+    }
 }
 
-impl<U> Index<usize> for SparseMap<U> {
+impl<U: Clone> Index<usize> for SparseMap<U> {
     type Output = U;
 
     fn index(&self, index: usize) -> &Self::Output {
@@ -148,18 +206,8 @@ impl<U> Index<usize> for SparseMap<U> {
     }
 }
 
-impl<U> IndexMut<usize> for SparseMap<U> {
+impl<U: Clone> IndexMut<usize> for SparseMap<U> {
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
         self.get_mut(index).expect("Index not found in SparseMap")
-    }
-}
-
-impl<U> SparseCollection<usize, U> for SparseMap<U> {
-    fn len(&self) -> usize {
-        self.dense.len()
-    }
-
-    fn sparse_len(&self) -> usize {
-        self.sparse.len()
     }
 }
