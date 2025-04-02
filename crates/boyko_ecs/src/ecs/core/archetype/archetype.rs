@@ -142,7 +142,6 @@ impl Archetype {
             // Store the entity-to-location mapping with generation
             self.entity_to_location.insert(entity_id, (generation, location));
 
-            // Increment current index
             self.current_index += 1;
 
             // Return an Entity instance
