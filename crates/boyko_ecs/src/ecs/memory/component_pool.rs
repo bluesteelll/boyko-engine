@@ -245,6 +245,28 @@ impl ComponentPool {
     // Pool information
     //
 
+    pub fn set_component<T: Component>(&mut self, index: UnitId, component: T) -> bool {
+        if TypeId::of::<T>() != self.type_id {
+            return false; // Type mismatch
+        }
+
+        let ptr = match self.raw_get_mut(index) {
+            Some(p) => p,
+            None => return false,
+        };
+
+        unsafe {
+            // Copy the component data directly to the existing memory location
+            std::ptr::copy_nonoverlapping(
+                &component as *const T as *const u8,
+                ptr,
+                std::mem::size_of::<T>()
+            );
+        }
+
+        true
+    }
+
     #[inline]
     pub fn chunks_count(&self) -> usize {
         self.chunks.len()
