@@ -34,6 +34,60 @@ impl EntityLocation {
     }
 }
 
+/// Represents information about an entity's storage location and generation
+#[derive(Debug, Clone, Copy)]
+pub struct EntityLocationInfo {
+    /// The entity's generation, used for stale reference detection
+    generation: Generation,
+
+    /// The storage location of the entity's components
+    location: EntityLocation,
+}
+
+impl EntityLocationInfo {
+    /// Creates a new EntityLocationInfo
+    #[inline]
+    pub fn new(generation: Generation, chunk_index: usize, inland_index: usize) -> Self {
+        Self {
+            generation,
+            location: EntityLocation::new(chunk_index, inland_index),
+        }
+    }
+
+    /// Creates a new EntityLocationInfo with the given location
+    #[inline]
+    pub fn with_location(generation: Generation, location: EntityLocation) -> Self {
+        Self {
+            generation,
+            location,
+        }
+    }
+
+    /// Gets the entity's generation
+    #[inline]
+    pub fn generation(&self) -> Generation {
+        self.generation
+    }
+
+    /// Gets the entity's component location
+    #[inline]
+    pub fn location(&self) -> EntityLocation {
+        self.location
+    }
+
+    /// Increments the generation counter
+    #[inline]
+    pub fn increment_generation(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    /// Updates the storage location
+    #[inline]
+    pub fn update_location(&mut self, chunk_index: usize, inland_index: usize) {
+        self.location = EntityLocation::new(chunk_index, inland_index);
+    }
+}
+
 /// Archetype represents a unique combination of component types
 /// All entities with the same component types belong to the same archetype
 pub struct Archetype {
@@ -43,8 +97,8 @@ pub struct Archetype {
     /// Storage for components organized by component type
     component_pools: ComponentPoolBundle,
 
-    /// Maps entity IDs to (generation, location) pairs
-    entity_to_location: SparseMap<(Generation, EntityLocation)>,
+    /// Maps entity IDs to location info
+    entity_to_location: SparseMap<EntityLocationInfo>,
 
     /// Current index for the next entity (equals number of entities)
     current_index: usize,
@@ -136,11 +190,15 @@ impl Archetype {
             let first_unit_id = unit_ids[0];
             let location = EntityLocation::new(first_unit_id.chunk_index(), first_unit_id.inland_index());
 
-            // For new entities, start with generation 0
-            let generation = 0;
+            // Determine generation to use
+            let generation = match self.entity_to_location.get(entity_id) {
+                Some(info) => info.generation(), // Use existing generation
+                None => 0, // For completely new entities, start with generation 0
+            };
 
-            // Store the entity-to-location mapping with generation
-            self.entity_to_location.insert(entity_id, (generation, location));
+            // Create or update location info
+            let location_info = EntityLocationInfo::with_location(generation, location);
+            self.entity_to_location.insert(entity_id, location_info);
 
             self.current_index += 1;
 
@@ -157,12 +215,14 @@ impl Archetype {
         let entity_id = entity.id();
         let generation = entity.generation();
 
-        // Get the location for this entity, checking generation in the process
-        if let Some(&(stored_gen, location)) = self.entity_to_location.get(entity_id) {
+        // Get the location info for this entity
+        if let Some(location_info) = self.entity_to_location.get(entity_id) {
             // Check if generations match
-            if stored_gen != generation {
+            if location_info.generation() != generation {
                 return false; // Stale reference
             }
+
+            let location = location_info.location();
 
             // Generate UnitIds for all components of this entity
             let mut unit_ids = Vec::with_capacity(self.component_pools.len());
@@ -174,8 +234,14 @@ impl Archetype {
             let success = self.component_pools.remove_entity(unit_ids);
 
             if success {
-                // Remove the entity-to-location mapping
-                self.entity_to_location.remove(entity_id);
+                // Increment the generation instead of removing the entity
+                if let Some(location_info) = self.entity_to_location.get_mut(entity_id) {
+                    location_info.increment_generation();
+
+                    // Add debug print to verify generation increment
+                    println!("Entity {} generation incremented: {} -> {}",
+                             entity_id, generation, location_info.generation());
+                }
 
                 // Decrement current index
                 self.current_index -= 1;
@@ -195,9 +261,9 @@ impl Archetype {
         let generation = entity.generation();
 
         // Get the location for this entity, checking generation in the process
-        if let Some(&(stored_gen, location)) = self.entity_to_location.get(entity_id) {
+        if let Some(location_info) = self.entity_to_location.get(entity_id) {
             // Check if generations match
-            if stored_gen != generation {
+            if location_info.generation() != generation {
                 return None; // Stale reference
             }
 
@@ -205,7 +271,7 @@ impl Archetype {
             let pool = self.component_pools.get_pool::<T>()?;
 
             // Use the cached location to create the UnitId
-            let unit_id = location.to_unit_id();
+            let unit_id = location_info.location().to_unit_id();
 
             // Get the component
             pool.get::<T>(unit_id)
@@ -220,9 +286,9 @@ impl Archetype {
         let generation = entity.generation();
 
         // Get the location for this entity, checking generation in the process
-        if let Some(&(stored_gen, location)) = self.entity_to_location.get(entity_id) {
+        if let Some(location_info) = self.entity_to_location.get(entity_id) {
             // Check if generations match
-            if stored_gen != generation {
+            if location_info.generation() != generation {
                 return None; // Stale reference
             }
 
@@ -230,7 +296,7 @@ impl Archetype {
             let pool = self.component_pools.get_pool_mut::<T>()?;
 
             // Use the cached location to create the UnitId
-            let unit_id = location.to_unit_id();
+            let unit_id = location_info.location().to_unit_id();
 
             // Get the component
             pool.get_mut::<T>(unit_id)
@@ -245,16 +311,16 @@ impl Archetype {
         let generation = entity.generation();
 
         // Get the location for this entity, checking generation in the process
-        if let Some(&(stored_gen, location)) = self.entity_to_location.get(entity_id) {
+        if let Some(location_info) = self.entity_to_location.get(entity_id) {
             // Check if generations match
-            if stored_gen != generation {
+            if location_info.generation() != generation {
                 return false; // Stale reference
             }
 
             // Get the component pool for this component type
             if let Some(pool) = self.component_pools.get_pool_mut::<T>() {
                 // Use the cached location to create the UnitId
-                let unit_id = location.to_unit_id();
+                let unit_id = location_info.location().to_unit_id();
 
                 // Use the set_component method on ComponentPool
                 return pool.set_component(unit_id, component);
@@ -270,8 +336,8 @@ impl Archetype {
         let entity_id = entity.id();
         let generation = entity.generation();
 
-        if let Some(&(stored_gen, _)) = self.entity_to_location.get(entity_id) {
-            stored_gen == generation
+        if let Some(location_info) = self.entity_to_location.get(entity_id) {
+            location_info.generation() == generation
         } else {
             false
         }
@@ -291,13 +357,6 @@ impl Archetype {
 }
 
 // Trait implementations remain the same
-
-// Trait implementations remain the same
-
-// We don't need a custom ComponentTupleToData trait as we're using
-// the existing ComponentTuple trait from component_pool_bundle
-
-// Additional implementations for larger tuples would be added as needed
 
 /// Trait for registering multiple component types with an archetype
 pub trait ComponentTypeList {
@@ -323,4 +382,4 @@ impl<T1: Component, T2: Component> ComponentTypeList for (T1, T2) {
 }
 
 // Note: Additional tuple implementations would be added for more component types
-// This pattern would continue for larger tuples as needed
+//TODO: Auto generation of tuple implementations by a macro

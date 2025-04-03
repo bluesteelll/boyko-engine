@@ -235,3 +235,12 @@ impl<T1: Component, T2: Component> ComponentTuple for (T1, T2) {
         }
     }
 }
+impl<T: Component> ComponentTuple for (T,) {
+    fn add_to_pool_bundle(self, bundle: &mut ComponentPoolBundle) -> Option<Vec<UnitId>> {
+        if let Some(pool) = bundle.get_pool_mut::<T>() {
+            pool.add(self.0).map(|id| vec![id])
+        } else {
+            None
+        }
+    }
+}
