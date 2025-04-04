@@ -237,10 +237,6 @@ impl Archetype {
                 // Increment the generation instead of removing the entity
                 if let Some(location_info) = self.entity_to_location.get_mut(entity_id) {
                     location_info.increment_generation();
-
-                    // Add debug print to verify generation increment
-                    println!("Entity {} generation incremented: {} -> {}",
-                             entity_id, generation, location_info.generation());
                 }
 
                 // Decrement current index
