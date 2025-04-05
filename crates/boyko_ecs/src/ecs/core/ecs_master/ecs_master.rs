@@ -102,7 +102,9 @@ impl EcsMaster {
                 let new_gen = old_gen.wrapping_add(1);
                 self.entities[entity_id] = Entity::new(entity_id, new_gen);
 
-
+                // Add debug output to verify generation increment
+                println!("Entity {} generation incremented: {} -> {}",
+                         entity_id, old_gen, new_gen);
 
                 // Add the ID to the free list for recycling
                 self.free_entity_ids.push(entity_id);
