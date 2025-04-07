@@ -159,21 +159,14 @@ impl ComponentPoolBundle {
     }
 
     /// Removes an entity's components from all pools
-    /// Takes a vector of UnitIds, one for each pool in the same order as the pools
     // TODO: FATAl BUG
-    pub fn remove_entity(&mut self, component_ids: Vec<UnitId>) -> bool {
-        if component_ids.len() != self.pools.len() {
-            return false; // Number of IDs doesn't match number of pools
-        }
+    pub fn remove_entity(&mut self, component_id: UnitId) -> bool {
 
         let mut success = true;
 
         // Remove components from all pools
-        for (pool_idx, unit_id) in component_ids.iter().enumerate() {
-            if !self.pools[pool_idx].swap_remove(*unit_id) {
-                success = false;
-                // Continue removing other components even if one fails
-            }
+        for mut pool in &mut self.pools {
+           success = pool.swap_remove(component_id);
         }
 
         success

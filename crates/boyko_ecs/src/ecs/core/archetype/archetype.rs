@@ -211,6 +211,7 @@ impl Archetype {
 
     /// Removes an entity and all its components from this archetype
     /// Returns true if the entity was successfully removed
+    // TODO: Change impl. Use sparse_remove of map
     pub fn remove_entity(&mut self, entity: Entity) -> bool {
         let entity_id = entity.id();
         let generation = entity.generation();
@@ -223,21 +224,16 @@ impl Archetype {
             }
 
             let location = location_info.location();
-
-            // Generate UnitIds for all components of this entity
-            let mut unit_ids = Vec::with_capacity(self.component_pools.len());
-            for _ in 0..self.component_pools.len() {
-                unit_ids.push(location.to_unit_id());
+            if let Some(location_info) = self.entity_to_location.get_mut(entity_id) {
+                location_info.increment_generation();
             }
 
             // Remove the components using ComponentPoolBundle's method
-            let success = self.component_pools.remove_entity(unit_ids);
+            let success = self.component_pools.remove_entity(UnitId::new(location.chunk_index, location.inland_index));
 
             if success {
                 // Increment the generation instead of removing the entity
-                if let Some(location_info) = self.entity_to_location.get_mut(entity_id) {
-                    location_info.increment_generation();
-                }
+
 
                 // Decrement current index
                 self.current_index -= 1;

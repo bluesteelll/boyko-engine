@@ -107,6 +107,48 @@ impl<U: Clone> SparseMap<U> {
         }
     }
 
+    pub fn pop_swap_remove(&mut self, index: usize) -> Option<U> {
+        if index >= self.sparse.len() {
+            return None;
+        }
+
+        // Use replace to extract the Option value and guarantee it's set to None
+        let dense_idx_opt = std::mem::replace(&mut self.sparse[index], None);
+
+        if let Some(dense_idx) = dense_idx_opt {
+            // Fast removal by swapping with the last element
+            let last_idx = self.dense.len() - 1;
+
+            let value = if dense_idx == last_idx {
+                // Last element, simply remove without swapping
+                let value = self.dense.pop().unwrap();
+                self.indices.pop();
+                value
+            } else {
+                // Get the value being removed
+                let value = self.dense[dense_idx].clone();
+
+                // Get the last element and its index
+                let last_element = self.dense.pop().unwrap();
+                let moved_entity_index = self.indices.pop().unwrap();
+
+                // Put the last element in place of the removed element
+                self.dense[dense_idx] = last_element;
+                self.indices[dense_idx] = moved_entity_index;
+
+                // Update the sparse map for the moved entity (the one that was previously last)
+                if moved_entity_index < self.sparse.len() {
+                    self.sparse[moved_entity_index] = Some(dense_idx);
+                }
+
+                value
+            };
+
+            Some(value)
+        } else {
+            None
+        }
+    }
     /// Checks if an element exists at the specified index
     #[inline(always)]
     pub fn contains(&self, index: usize) -> bool {

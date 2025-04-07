@@ -45,7 +45,7 @@ impl EcsMaster {
     /// Creates a new archetype with the specified component types
     /// Returns the ID of the created archetype
     pub fn create_archetype<T: ComponentTypeList>(&mut self) -> ArchetypeId {
-        let id = self.archetypes.len(); // Use length as next ID
+        let id = self.archetypes.len() + 1; // Use length as next ID
         self.archetypes.create_archetype::<T>(id, &self.arena)
     }
 
@@ -89,7 +89,9 @@ impl EcsMaster {
         if entity_id >= self.entities.len() || self.entities[entity_id].generation() != entity.generation() {
             return false;
         }
-
+        if entity_id == 2504 {
+            println!("entity 2504");
+        }
         // Find the archetype containing this entity
         if let Some(archetype) = self.archetypes.get_entity_archetype_mut(entity) {
             // Remove the entity from the archetype
@@ -111,6 +113,7 @@ impl EcsMaster {
 
                 return true;
             }
+            else {return false;}
         }
 
         false
