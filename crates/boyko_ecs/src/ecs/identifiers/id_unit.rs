@@ -1,39 +1,32 @@
-use crate::ecs::identifiers::primitives::{ChunkId, InlandChunkId};
+/// Direct pointer to a component with metadata
+#[derive(Debug, Clone, Copy)]
+pub struct Unit {
+    /// Direct pointer to the component in memory
+    ptr: *mut u8,
 
-/// Struct for indexing components within a chunk-based storage system
-/// Represents a two-level addressing scheme for component access
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct UnitId {
-    /// Index of the chunk containing the component
-    pub id_chunk: ChunkId,
-
-    /// Index of the component within the chunk
-    pub id_inland: InlandChunkId,
+    /// Index in the buffer (for quick calculation of buffer position)
+    buffer_index: usize,
 }
 
-impl UnitId {
-    /// Creates a new component index with the specified chunk and inland indices
-    ///
-    /// # Parameters
-    /// * `id_chunk` - The index of the chunk
-    /// * `id_inland` - The index of the component within the chunk
-    #[inline]
-    pub fn new(id_chunk: ChunkId, id_inland: InlandChunkId) -> Self {
+impl Unit {
+    /// Creates a new Unit
+    #[inline(always)]
+    pub fn new(ptr: *mut u8, buffer_index: usize) -> Self {
         Self {
-            id_chunk,
-            id_inland,
+            ptr,
+            buffer_index,
         }
     }
 
-    /// Returns the chunk index as a usize
-    #[inline]
-    pub fn chunk_index(&self) -> ChunkId {
-        self.id_chunk
+    /// Returns the pointer to the component
+    #[inline(always)]
+    pub fn ptr(&self) -> *mut u8 {
+        self.ptr
     }
 
-    /// Returns the inland index as a usize
-    #[inline]
-    pub fn inland_index(&self) -> InlandChunkId {
-        self.id_inland
+    /// Returns the buffer index
+    #[inline(always)]
+    pub fn buffer_index(&self) -> usize {
+        self.buffer_index
     }
 }
