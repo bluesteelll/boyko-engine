@@ -25,7 +25,7 @@ pub struct ComponentPool {
     units: Vec<Unit>,
 
     /// Chunk metadata
-    chunks: Vec<Chunk>,
+    pub chunks: Vec<Chunk>,
 
     /// Components per chunk
     components_per_chunk: usize,
