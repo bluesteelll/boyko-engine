@@ -424,3 +424,456 @@ impl ComponentPool {
         self.max_components - self.units.len()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ecs::core::component::Component;
+    use crate::ecs::memory::arena::Arena;
+    use crate::ecs::constants::{TINY_COMPONENT_THRESHOLD, SMALL_COMPONENT_THRESHOLD, MEDIUM_COMPONENT_THRESHOLD, TINY_COMPONENTS_PER_CHUNK, SMALL_COMPONENTS_PER_CHUNK, MEDIUM_COMPONENTS_PER_CHUNK, LARGE_COMPONENTS_PER_CHUNK};
+    use std::any::TypeId;
+
+    // Define a simple component type for testing
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    struct TestComponent {
+        value: u32
+    }
+
+    impl Component for TestComponent {
+        #[inline(always)]
+        fn component_id() -> usize {
+            0 // Static ID for testing
+        }
+    }
+
+    // Create a helper function to set up the pool
+    fn setup_pool() -> (Arena, ComponentPool) {
+        let arena = Arena::new();
+        let pool = ComponentPool::with_default_sizes::<TestComponent>(&arena);
+        (arena, pool)
+    }
+
+    // Helper to calculate components per chunk based on TestComponent size
+    fn get_components_per_chunk() -> usize {
+        if std::mem::size_of::<TestComponent>() <= TINY_COMPONENT_THRESHOLD {
+            TINY_COMPONENTS_PER_CHUNK
+        } else if std::mem::size_of::<TestComponent>() <= SMALL_COMPONENT_THRESHOLD {
+            SMALL_COMPONENTS_PER_CHUNK
+        } else if std::mem::size_of::<TestComponent>() <= MEDIUM_COMPONENT_THRESHOLD {
+            MEDIUM_COMPONENTS_PER_CHUNK
+        } else {
+            LARGE_COMPONENTS_PER_CHUNK
+        }
+    }
+
+    #[test]
+    fn test_create_pool() {
+        let (_, pool) = setup_pool();
+        assert_eq!(pool.count(), 0);
+        assert_eq!(pool.component_id(), 0);
+        assert!(pool.component_layout().size() > 0);
+        assert!(!pool.is_full());
+    }
+
+    #[test]
+    fn test_add_component() {
+        let (_, mut pool) = setup_pool();
+        let component = TestComponent { value: 42 };
+
+        let index = pool.add(component).expect("Failed to add component");
+
+        assert_eq!(pool.count(), 1);
+
+        let retrieved = pool.get::<TestComponent>(index).expect("Failed to get component");
+        assert_eq!(retrieved.value, 42);
+    }
+
+    #[test]
+    fn test_add_multiple_components() {
+        let (_, mut pool) = setup_pool();
+
+        // Add components
+        let indices = vec![
+            pool.add(TestComponent { value: 1 }).expect("Failed to add component 1"),
+            pool.add(TestComponent { value: 2 }).expect("Failed to add component 2"),
+            pool.add(TestComponent { value: 3 }).expect("Failed to add component 3"),
+        ];
+
+        assert_eq!(pool.count(), 3);
+
+        // Check if we can retrieve all components correctly
+        for (i, &index) in indices.iter().enumerate() {
+            let component = pool.get::<TestComponent>(index).expect("Failed to get component");
+            assert_eq!(component.value, i as u32 + 1);
+        }
+    }
+
+    #[test]
+    fn test_swap_remove_basic() {
+        let (_, mut pool) = setup_pool();
+
+        // Add components
+        let idx1 = pool.add(TestComponent { value: 1 }).expect("Failed to add component 1");
+        let idx2 = pool.add(TestComponent { value: 2 }).expect("Failed to add component 2");
+
+        assert_eq!(pool.count(), 2);
+
+        // Remove the first component
+        let success = pool.swap_remove(idx1);
+        assert!(success);
+
+        // Verify count decreased
+        assert_eq!(pool.count(), 1);
+
+        // Since it was swap_remove, the second component should now be at index 0
+        let component = pool.get::<TestComponent>(0).expect("Failed to get component after swap_remove");
+        assert_eq!(component.value, 2);
+
+        // Trying to get the removed component (by its original index) should fail
+        assert!(pool.get::<TestComponent>(1).is_none());
+    }
+
+    #[test]
+    fn test_swap_remove_last() {
+        let (_, mut pool) = setup_pool();
+
+        // Add components
+        let _idx1 = pool.add(TestComponent { value: 1 }).expect("Failed to add component 1");
+        let idx2 = pool.add(TestComponent { value: 2 }).expect("Failed to add component 2");
+
+        assert_eq!(pool.count(), 2);
+
+        // Remove the last component
+        let success = pool.swap_remove(idx2);
+        assert!(success);
+
+        // Verify count decreased
+        assert_eq!(pool.count(), 1);
+
+        // First component should still be at index 0
+        let component = pool.get::<TestComponent>(0).expect("Failed to get component after swap_remove");
+        assert_eq!(component.value, 1);
+
+        // Trying to get the removed component should fail
+        assert!(pool.get::<TestComponent>(1).is_none());
+    }
+
+    #[test]
+    fn test_swap_remove_invalid_index() {
+        let (_, mut pool) = setup_pool();
+
+        // Add a component
+        let _idx = pool.add(TestComponent { value: 1 }).expect("Failed to add component");
+
+        // Try to remove with an invalid index
+        let success = pool.swap_remove(999);
+        assert!(!success);
+
+        // Pool should still have 1 component
+        assert_eq!(pool.count(), 1);
+    }
+
+    #[test]
+    fn test_swap_remove_empty_pool() {
+        let (_, mut pool) = setup_pool();
+
+        // Try to remove from an empty pool
+        let success = pool.swap_remove(0);
+        assert!(!success);
+
+        // Pool should still be empty
+        assert_eq!(pool.count(), 0);
+    }
+
+    #[test]
+    fn test_type_safety() {
+        let (_, mut pool) = setup_pool();
+
+        // Add a component
+        let idx = pool.add(TestComponent { value: 42 }).expect("Failed to add component");
+
+        // Try to get it as a different type
+        struct WrongComponent {
+            x: f32
+        }
+
+        impl Component for WrongComponent {
+            fn component_id() -> usize {
+                1 // Different ID than TestComponent
+            }
+        }
+
+        // This should fail because the type is wrong
+        assert!(pool.get::<WrongComponent>(idx).is_none());
+    }
+
+    #[test]
+    fn test_memory_safety() {
+        let (_, mut pool) = setup_pool();
+
+        // Add many components
+        let mut indices = Vec::new();
+        for i in 0..100 {
+            let idx = pool.add(TestComponent { value: i }).expect("Failed to add component");
+            indices.push(idx);
+        }
+
+        // Remove some components in the middle
+        for i in 25..75 {
+            let success = pool.swap_remove(indices[i]);
+            assert!(success);
+        }
+
+        // Add more components
+        for i in 100..150 {
+            let _idx = pool.add(TestComponent { value: i }).expect("Failed to add component");
+        }
+
+        // Check components 0-24 (should be unchanged)
+        for i in 0..25 {
+            let component = pool.get::<TestComponent>(indices[i]).expect("Failed to get component");
+            assert_eq!(component.value, i as u32);
+        }
+
+        // Check that all components are still accessible
+        let count = pool.count();
+        for i in 0..count {
+            let component = pool.get::<TestComponent>(i);
+            assert!(component.is_some(), "Component at index {} is missing", i);
+        }
+    }
+
+    #[test]
+    fn test_get_mut_and_set() {
+        let (_, mut pool) = setup_pool();
+
+        // Add a component
+        let idx = pool.add(TestComponent { value: 42 }).expect("Failed to add component");
+
+        // Modify it through get_mut
+        {
+            let component = pool.get_mut::<TestComponent>(idx).expect("Failed to get component mutably");
+            component.value = 100;
+        }
+
+        // Check if the change took effect
+        let component = pool.get::<TestComponent>(idx).expect("Failed to get component");
+        assert_eq!(component.value, 100);
+
+        // Test set_component
+        let success = pool.set_component(idx, TestComponent { value: 200 });
+        assert!(success);
+
+        // Check if the change took effect
+        let component = pool.get::<TestComponent>(idx).expect("Failed to get component");
+        assert_eq!(component.value, 200);
+    }
+
+    #[test]
+    fn test_chunk_components() {
+        let (_, mut pool) = setup_pool();
+
+        // Add enough components to span multiple chunks
+        let components_per_chunk = get_components_per_chunk();
+        let num_components = components_per_chunk + 10; // Enough to have components in two chunks
+
+        for i in 0..num_components {
+            let _idx = pool.add(TestComponent { value: i as u32 }).expect("Failed to add component");
+        }
+
+        // Check components in the first chunk
+        let chunk0_components = pool.chunk_components::<TestComponent>(0).expect("Failed to get chunk components");
+        assert_eq!(chunk0_components.len(), components_per_chunk);
+
+        for (i, component) in chunk0_components.iter().enumerate() {
+            assert_eq!(component.value, i as u32);
+        }
+
+        // Check components in the second chunk
+        let chunk1_components = pool.chunk_components::<TestComponent>(1).expect("Failed to get chunk components");
+        assert_eq!(chunk1_components.len(), 10); // We added 10 extra components
+
+        for (i, component) in chunk1_components.iter().enumerate() {
+            assert_eq!(component.value, (components_per_chunk + i) as u32);
+        }
+    }
+
+    #[test]
+    fn test_swap_remove_across_chunks() {
+        let (_, mut pool) = setup_pool();
+
+        // Add enough components to span multiple chunks
+        let components_per_chunk = get_components_per_chunk();
+        let num_components = components_per_chunk + 10; // Enough to have components in two chunks
+
+        // Add components
+        let mut indices = Vec::new();
+        for i in 0..num_components {
+            let idx = pool.add(TestComponent { value: i as u32 }).expect("Failed to add component");
+            indices.push(idx);
+        }
+
+        // Remove a component from the first chunk
+        let removed_index = components_per_chunk / 2; // Middle of first chunk
+        pool.swap_remove(indices[removed_index]);
+
+        // This will have moved the last component (from the second chunk) to the first chunk
+        // Verify that all components are still accessible and have correct values
+
+        // First chunk should have all original components except the removed one
+        // The last component from second chunk should now be in first chunk
+        for i in 0..removed_index {
+            let component = pool.get::<TestComponent>(indices[i]).expect("Failed to get component");
+            assert_eq!(component.value, i as u32);
+        }
+
+        // The removed component's slot should now contain the last component
+        let component = pool.get::<TestComponent>(indices[removed_index]).expect("Failed to get component");
+        assert_eq!(component.value, (num_components - 1) as u32);
+
+        // The components after the removed one should be unchanged
+        for i in (removed_index + 1)..num_components - 1 {
+            let component = pool.get::<TestComponent>(indices[i]).expect("Failed to get component");
+            assert_eq!(component.value, i as u32);
+        }
+    }
+
+    #[test]
+    fn test_consecutive_swap_removes() {
+        let (_, mut pool) = setup_pool();
+
+        // Add several components
+        let indices = vec![
+            pool.add(TestComponent { value: 1 }).expect("Failed to add component 1"),
+            pool.add(TestComponent { value: 2 }).expect("Failed to add component 2"),
+            pool.add(TestComponent { value: 3 }).expect("Failed to add component 3"),
+            pool.add(TestComponent { value: 4 }).expect("Failed to add component 4"),
+            pool.add(TestComponent { value: 5 }).expect("Failed to add component 5"),
+        ];
+
+        // Remove components in the middle multiple times
+        pool.swap_remove(indices[1]); // Remove value 2, value 5 moves to position 1
+        pool.swap_remove(indices[2]); // Remove value 3, value 4 moves to position 2
+
+        // Check remaining components
+        assert_eq!(pool.count(), 3);
+
+        // First component should still be at index 0
+        let component = pool.get::<TestComponent>(indices[0]).expect("Failed to get component");
+        assert_eq!(component.value, 1);
+
+        // Index 1 should now have value 5 (from last position after first swap_remove)
+        let component = pool.get::<TestComponent>(indices[1]).expect("Failed to get component");
+        assert_eq!(component.value, 5);
+
+        // Index 2 should now have value 4 (from last position after second swap_remove)
+        let component = pool.get::<TestComponent>(indices[2]).expect("Failed to get component");
+        assert_eq!(component.value, 4);
+    }
+    #[test]
+    fn test_large_interleaved_add_remove() {
+        let (_, mut pool) = setup_pool();
+
+
+        let mut indices = Vec::with_capacity(1000);
+        for i in 0..1000 {
+            let idx = pool.add(TestComponent { value: i }).expect("Failed to add component");
+            indices.push(idx);
+        }
+
+
+        let removed_indices = [250, 500, 750];
+
+        let mut swapped_values = Vec::new();
+
+        for &idx_pos in &removed_indices {
+            let last_pos = indices.len() - 1 - swapped_values.len();
+            let last_value = pool.get::<TestComponent>(indices[last_pos])
+                .expect("Failed to get last component").value;
+            swapped_values.push(last_value);
+
+            pool.swap_remove(indices[idx_pos]);
+        }
+
+        let mut new_indices = Vec::new();
+        for i in 0..removed_indices.len() {
+            let idx = pool.add(TestComponent { value: 1000 + i as u32 })
+                .expect("Failed to add new component");
+            new_indices.push(idx);
+        }
+
+        assert_eq!(pool.count(), 1000);
+
+        for (i, &idx_pos) in removed_indices.iter().enumerate() {
+            let component = pool.get::<TestComponent>(indices[idx_pos])
+                .expect("Failed to get component after swap_remove");
+            assert_eq!(component.value, swapped_values[i],
+                       "Component at position {} should have value {} after swap_remove",
+                       idx_pos, swapped_values[i]);
+        }
+
+        for (i, &idx) in new_indices.iter().enumerate() {
+            let component = pool.get::<TestComponent>(idx)
+                .expect("Failed to get new component");
+            assert_eq!(component.value, 1000 + i as u32,
+                       "New component should have correct value");
+        }
+
+        for (i, &idx_pos) in removed_indices.iter().enumerate() {
+            let component1 = pool.get::<TestComponent>(indices[idx_pos])
+                .expect("Failed to get component at old index");
+            let component2 = pool.get::<TestComponent>(new_indices[i])
+                .expect("Failed to get component at new index");
+
+            assert_ne!(component1.value, component2.value, "Component values should be different for old and new positions");
+        }
+
+        for i in 0..1000 {
+            if removed_indices.contains(&i) {
+                continue;
+            }
+
+            let last_positions = (1000 - removed_indices.len()..1000).collect::<Vec<_>>();
+            if last_positions.contains(&i) {
+                continue;
+            }
+
+            if let Some(component) = pool.get::<TestComponent>(indices[i]) {
+                assert_eq!(component.value, i as u32,
+                           "Original component at {} should maintain its value {}", i, i);
+            } else {
+                panic!("Could not get component at index {}", indices[i]);
+            }
+        }
+    }
+    #[test]
+    fn test_interleaved_add_remove() {
+        let (_, mut pool) = setup_pool();
+
+        // Add components
+        let idx1 = pool.add(TestComponent { value: 1 }).expect("Failed to add component");
+        let _idx2 = pool.add(TestComponent { value: 2 }).expect("Failed to add component");
+
+        // Remove the first component - это переместит value=2 на позицию idx1
+        pool.swap_remove(idx1);
+
+        // Add more components - новый компонент будет на позиции 1
+        let idx3 = pool.add(TestComponent { value: 3 }).expect("Failed to add component");
+
+        // Verify values are as expected
+        assert_eq!(pool.count(), 2);
+
+        // После swap_remove, value=2 должен быть на позиции idx1
+        let component = pool.get::<TestComponent>(idx1).expect("Failed to get component at idx1");
+        assert_eq!(component.value, 2, "Component at idx1 should have value 2 (moved during swap_remove)");
+
+        // Новый компонент с value=3 должен быть на позиции idx3
+        let component1= pool.get::<TestComponent>(idx3).expect("Failed to get component at idx3");
+        assert_eq!(component1.value, 3);
+        let component2= pool.get::<TestComponent>(_idx2).expect("Failed to get component at idx3");
+        assert_eq!(component1.value, 3);
+
+        // Старый idx2 теперь равен id3
+        assert_eq!(component1, component2);
+    }
+}
