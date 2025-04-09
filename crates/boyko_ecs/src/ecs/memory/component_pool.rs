@@ -3,7 +3,7 @@ use std::any::TypeId;
 use std::ptr::NonNull;
 use crate::ecs::constants::{DEFAULT_CHUNKS_PER_POOL, LARGE_COMPONENTS_PER_CHUNK, MEDIUM_COMPONENTS_PER_CHUNK, MEDIUM_COMPONENT_THRESHOLD, SMALL_COMPONENTS_PER_CHUNK, SMALL_COMPONENT_THRESHOLD, TINY_COMPONENTS_PER_CHUNK, TINY_COMPONENT_THRESHOLD};
 use crate::ecs::core::component::Component;
-use crate::ecs::identifiers::id_unit::Unit;
+use crate::ecs::memory::id_unit::Unit;
 use crate::ecs::memory::arena::Arena;
 use crate::ecs::memory::chunk::Chunk;
 
