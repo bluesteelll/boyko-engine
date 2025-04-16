@@ -64,7 +64,7 @@ impl<U: Clone> SparseMap<U> {
     /// Removes an element by index and returns its value
     /// Uses swap_remove for O(1) removal time
     #[inline]
-    pub fn remove(&mut self, index: usize) -> Option<U> {
+    pub fn swap_remove(&mut self, index: usize) -> Option<U> {
         if index >= self.sparse.len() {
             return None;
         }

@@ -248,7 +248,7 @@ impl ComponentPool {
         // Get the Unit
         let unit = &self.units[index];
 
-        // Return reference to the component
+        // Return reference to th
         unsafe {
             Some(&*(unit.ptr() as *const T))
         }
@@ -876,4 +876,7 @@ mod tests {
         // Старый idx2 теперь равен id3
         assert_eq!(component1, component2);
     }
+
 }
+
+

@@ -1,3 +1,3 @@
-pub mod archetype;
+//pub mod archetype;
 pub mod component_pool_bundle;
-mod archetype_signature;
+//mod archetype_signature;
