@@ -3,6 +3,7 @@ use std::fmt::Debug;
 use std::hash::Hash;
 
 use super::bit_storage::BitStorage;
+use super::bit_set512::BitSet512;
 
 /// A generic bit set structure that supports various bitwise operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -233,7 +234,7 @@ mod tests {
         
         // Test union (OR)
         let union = mask1 | mask2;
-        assert_eq!(union.bits(), 0b101101); // Bits 0, 2, 3, 4, 5
+        assert_eq!(union.bits(), 0b111101); // Bits 0, 2, 3, 4, 5
         
         // Test difference
         let difference = mask1 - mask2;
@@ -311,5 +312,80 @@ mod tests {
         
         let result = mask1 & mask2;
         assert_eq!(result.bits(), 0x1_0000_0000_0000_0000); // Only bit 64 is common
+    }
+
+    #[test]
+    fn test_bitset512_operations() {
+        // Create BitSets using BitSet512
+        let mut set1 = BitSet::<BitSet512>::new();
+        let mut set2 = BitSet::<BitSet512>::new();
+        
+        // Set bits in different u64 blocks
+        set1.set(10);   // First block
+        set1.set(100);  // First block
+        set1.set(200);  // Third block
+        
+        set2.set(10);   // First block
+        set2.set(70);   // Second block
+        set2.set(300);  // Fourth block
+        
+        // Test bit operations
+        assert!(set1.is_set(10));
+        assert!(set1.is_set(100));
+        assert!(set1.is_set(200));
+        assert!(!set1.is_set(70));
+        assert!(!set1.is_set(300));
+        
+        assert!(set2.is_set(10));
+        assert!(set2.is_set(70));
+        assert!(set2.is_set(300));
+        assert!(!set2.is_set(100));
+        assert!(!set2.is_set(200));
+        
+        // Test count_ones
+        assert_eq!(set1.count_ones(), 3);
+        assert_eq!(set2.count_ones(), 3);
+        
+        // Test union
+        let union = set1 | set2;
+        assert!(union.is_set(10));
+        assert!(union.is_set(70));
+        assert!(union.is_set(100));
+        assert!(union.is_set(200));
+        assert!(union.is_set(300));
+        assert_eq!(union.count_ones(), 5);
+        
+        // Test intersection
+        let intersection = set1 & set2;
+        assert!(intersection.is_set(10));
+        assert!(!intersection.is_set(70));
+        assert!(!intersection.is_set(100));
+        assert!(!intersection.is_set(200));
+        assert!(!intersection.is_set(300));
+        assert_eq!(intersection.count_ones(), 1);
+        
+        // Test difference
+        let difference = set1 - set2;
+        assert!(!difference.is_set(10));
+        assert!(!difference.is_set(70));
+        assert!(difference.is_set(100));
+        assert!(difference.is_set(200));
+        assert!(!difference.is_set(300));
+        assert_eq!(difference.count_ones(), 2);
+        
+        // Test symmetric difference
+        let sym_difference = set1 ^ set2;
+        assert!(!sym_difference.is_set(10));
+        assert!(sym_difference.is_set(70));
+        assert!(sym_difference.is_set(100));
+        assert!(sym_difference.is_set(200));
+        assert!(sym_difference.is_set(300));
+        assert_eq!(sym_difference.count_ones(), 4);
+        
+        // Test high bits (close to 512)
+        let mut high_set = BitSet::<BitSet512>::new();
+        high_set.set(500);
+        assert!(high_set.is_set(500));
+        assert_eq!(high_set.count_ones(), 1);
     }
 }

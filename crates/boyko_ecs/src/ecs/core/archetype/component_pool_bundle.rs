@@ -4,7 +4,7 @@ use crate::ecs::identifiers::primitives::{ComponentId, InlandComponentId, Inland
 use crate::ecs::memory::component_pool::ComponentPool;
 use crate::ecs::memory::arena::Arena;
 use boyko_utils::sparse_map::sparse_map::SparseMap;
-use anyhow::{result, bali};
+use anyhow::{Result, bail};
 
 pub struct ComponentPoolBundle {
     pools: Vec<ComponentPool>,
@@ -79,48 +79,17 @@ impl ComponentPoolBundle {
     }
 
 
-    /// Adds a set of components for an entity to all pools in the bundle
-    /// Returns a vector of indices, one for each component pool in the same order as the pools
-    ///
-    /// # Type Safety
-    /// This method uses type erasure - it's the caller's responsibility to ensure
-    /// that components are paired with the correct pools.
-    pub fn add_entity_components(&mut self, components: Vec<(usize, *const u8)>) -> Option<Vec<usize>> {
-        if components.len() != self.pools.len() {
-            return None; // Number of components doesn't match number of pools
-        }
+    fn inland_get_unit<T: Component>(&self, inland_component_id: InlandComponentId) -> anyhow::Result<&T> {
+    let pool = &self.pools[inland_component_id as usize];
+        Ok(pool.get(inland_component_id).unwrap())
 
-        let mut result = Vec::with_capacity(self.pools.len());
-
-        // First check if all components can be added
-        for (pool_idx, (component_id, _)) in components.iter().enumerate() {
-            // Verify component type matches the pool
-            if self.pools[pool_idx].component_id() != *component_id {
-                return None; // Type mismatch
-            }
-        }
-
-        // Then add all components
-        for (pool_idx, (_, component_ptr)) in components.iter().enumerate() {
-            // Unsafe: We're trusting the caller to provide the correct component types
-            let index = unsafe {
-                self.pools[pool_idx].raw_add(*component_ptr)
-            };
-
-            if let Some(idx) = index {
-                result.push(idx);
-            } else {
-                // If any component fails to add, we need to roll back
-                for i in 0..result.len() {
-                    self.pools[i].swap_remove(result[i]);
-                }
-                return None;
-            }
-        }
-
-        Some(result)
     }
+    
 
+
+    pub fn get_unit <T: Component>(&self, component_id: ComponentId) -> anyhow::Result<&T> {
+        self.inland_get_unit(self.sparse_indexes[component_id])
+    }
 
     /// Removes components from all pools using indices
     /// Each index corresponds to the component in the respective pool
@@ -130,12 +99,11 @@ impl ComponentPoolBundle {
 
 
         // Remove components from each pool using their respective indices
-        for mut pool in self.pools.iter() {
-
+        for pool in self.pools.iter_mut() {
             success &= pool.swap_remove(self.sparse_indexes[index]);
         }
         if !success {
-            bali!("Error: in ComponentPoolBundle.swap_remove()")
+            bail!("Error: in ComponentPoolBundle.swap_remove()")
         }
         self.sparse_indexes.swap_remove(index);
         Ok(index)
@@ -143,17 +111,17 @@ impl ComponentPoolBundle {
     }
 }
 
-impl Index<InlandComponentId> for ComponentPoolBundle {
-    type Output = ComponentPool;
-
-    fn index(&self, index: InlandComponentId) -> &Self::Output {
-        &self.pools[index]
-    }
-}
-
-impl IndexMut<InlandComponentId> for ComponentPoolBundle {
-    fn index_mut(&mut self, index: InlandComponentId) -> &mut Self::Output {
-        &mut self.pools[index]
-    }
-}
+// impl Index<InlandComponentId> for ComponentPoolBundle {
+//     type Output = ComponentPool;
+//
+//     fn index(&self, index: InlandComponentId) -> &Self::Output {
+//         &self.pools[index]
+//     }
+// }
+//
+// impl IndexMut<InlandComponentId> for ComponentPoolBundle {
+//     fn index_mut(&mut self, index: InlandComponentId) -> &mut Self::Output {
+//         &mut self.pools[index]
+//     }
+// }
 

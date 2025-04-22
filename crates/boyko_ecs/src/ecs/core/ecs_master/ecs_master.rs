@@ -1,6 +1,6 @@
 use crate::ecs::core::ecs_master::archetype_bundle::ArchetypeBundle;
 use crate::ecs::core::archetype::archetype::{Archetype, ComponentTypeList};
-use crate::ecs::core::archetype::component_pool_bundle::ComponentTuple;
+//use crate::ecs::core::archetype::component_pool_bundle::ComponentTuple;
 use crate::ecs::core::component::Component;
 use crate::ecs::core::entity::entity::Entity;
 use crate::ecs::identifiers::primitives::{ArchetypeId, EntityId};
