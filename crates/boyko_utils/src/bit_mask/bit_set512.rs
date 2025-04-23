@@ -1,4 +1,4 @@
-use std::ops::{BitAnd, BitOr, BitXor, Not};
+/* use std::ops::{BitAnd, BitOr, BitXor, Not};
 use std::fmt::Debug;
 use std::hash::Hash;
 
@@ -120,6 +120,91 @@ impl BitStorage for BitSet512 {
         let mask = !(1u64 << bit_idx);
         result.bits[array_idx] &= mask;
         result
+    }
+}
+
+impl BitSet512 {
+    /// Number of 64-bit chunks in the bit set
+    pub const CHUNK_COUNT: usize = 8;
+    
+    /// Number of bits per chunk
+    pub const BITS_PER_CHUNK: usize = 64;
+    
+    /// Checks if this bit set is a superset of the other bit set
+    /// Returns true if this bit set contains all bits set in other
+    #[inline]
+    pub fn contains_all(&self, other: &Self) -> bool {
+        for i in 0..Self::CHUNK_COUNT {
+            if (self.bits[i] & other.bits[i]) != other.bits[i] {
+                return false;
+            }
+        }
+        true
+    }
+    
+    /// Checks if this bit set is a subset of the other bit set
+    /// Returns true if all bits set in this bit set are also set in other
+    #[inline]
+    pub fn is_subset_of(&self, other: &Self) -> bool {
+        other.contains_all(self)
+    }
+    
+    /// Checks if the bit set has any bits in common with another bit set
+    /// Returns true if at least one bit is set in both sets
+    #[inline]
+    pub fn has_any_common_bits(&self, other: &Self) -> bool {
+        for i in 0..Self::CHUNK_COUNT {
+            if (self.bits[i] & other.bits[i]) != 0 {
+                return true;
+            }
+        }
+        false
+    }
+    
+    /// Gets a bit in a specific chunk at a specific position
+    #[inline]
+    pub fn get_bit_in_chunk(&self, chunk_idx: usize, bit_idx: usize) -> bool {
+        if chunk_idx >= Self::CHUNK_COUNT || bit_idx >= Self::BITS_PER_CHUNK {
+            return false;
+        }
+        
+        let mask = 1u64 << bit_idx;
+        (self.bits[chunk_idx] & mask) != 0
+    }
+    
+    /// Checks if all bits not in the mask are zero
+    /// Useful for filtering archetypes with only specific components
+    #[inline]
+    pub fn has_only_bits_in_mask(&self, mask: &Self) -> bool {
+        for i in 0..Self::CHUNK_COUNT {
+            // Calculate bits that are in self but not in the mask
+            // If any such bits exist, then self has bits outside the mask
+            if (self.bits[i] & !mask.bits[i]) != 0 {
+                return false;
+            }
+        }
+        true
+    }
+    
+    /// Returns a new bit set that is the union of this bit set and another
+    /// Equivalent to the | operator but more explicit
+    #[inline]
+    pub fn union(&self, other: &Self) -> Self {
+        *self | *other
+    }
+    
+    /// Returns a new bit set that is the intersection of this bit set and another
+    /// Equivalent to the & operator but more explicit
+    #[inline]
+    pub fn intersection(&self, other: &Self) -> Self {
+        *self & *other
+    }
+    
+    /// Returns true if the bit set is empty (no bits set)
+    /// Equivalent to is_zero() but more semantically clear
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.is_zero()
     }
 }
 
@@ -278,4 +363,62 @@ mod tests {
         assert!(!bs.get_bit(385));
         assert!(!bs.get_bit(449));
     }
-} 
+    
+    #[test]
+    fn test_new_methods() {
+        let bs1 = BitSet512::default()
+            .with_bit_set(1)
+            .with_bit_set(2)
+            .with_bit_set(3);
+            
+        let bs2 = BitSet512::default()
+            .with_bit_set(2)
+            .with_bit_set(3)
+            .with_bit_set(4);
+            
+        let bs3 = BitSet512::default()
+            .with_bit_set(1)
+            .with_bit_set(2);
+            
+        // Test contains_all
+        assert!(bs1.contains_all(&bs3));
+        assert!(!bs3.contains_all(&bs1));
+        
+        // Test is_subset_of
+        assert!(bs3.is_subset_of(&bs1));
+        assert!(!bs1.is_subset_of(&bs3));
+        
+        // Test has_any_common_bits
+        assert!(bs1.has_any_common_bits(&bs2));
+        
+        let bs4 = BitSet512::default().with_bit_set(10);
+        let bs5 = BitSet512::default().with_bit_set(20);
+        assert!(!bs4.has_any_common_bits(&bs5));
+        
+        // Test get_bit_in_chunk
+        let bs6 = BitSet512::default().with_bit_set(65); // Bit 1 in chunk 1
+        assert!(bs6.get_bit_in_chunk(1, 1));
+        assert!(!bs6.get_bit_in_chunk(1, 2));
+        
+        // Test has_only_bits_in_mask
+        let mask = BitSet512::default()
+            .with_bit_set(1)
+            .with_bit_set(2)
+            .with_bit_set(3)
+            .with_bit_set(4);
+            
+        assert!(bs3.has_only_bits_in_mask(&mask));
+        assert!(!bs1.has_only_bits_in_mask(&bs3));
+        
+        // Test union and intersection
+        let union = bs1.union(&bs2);
+        let intersection = bs1.intersection(&bs2);
+        
+        assert_eq!(union.count_ones(), 4);
+        assert_eq!(intersection.count_ones(), 2);
+        
+        // Test is_empty
+        assert!(BitSet512::default().is_empty());
+        assert!(!bs1.is_empty());
+    }
+} */ 

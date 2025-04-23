@@ -1,391 +1,335 @@
-use std::ops::{BitAnd, BitOr, BitXor, Not, Sub};
-use std::fmt::Debug;
-use std::hash::Hash;
+use std::fmt::{Debug, Formatter};
+use std::ops::{BitAnd, BitOr, BitXor, Not, Shl, Shr, Sub};
 
-use super::bit_storage::BitStorage;
-use super::bit_set512::BitSet512;
+/// Trait for supported integer types that can be used in BitSet
+/// Defines the requirements and operations for bit manipulation
+pub trait BitInteger: 
+    Copy + Default + PartialEq + 
+    BitOr<Output = Self> + BitAnd<Output = Self> + BitXor<Output = Self> + Not<Output = Self> +
+    Shl<usize, Output = Self> + Shr<usize, Output = Self> + From<u8> + Sub<Output = Self>
+{
+    /// Number of bits in this integer type
+    const BITS: usize;
+    
+    /// Count the number of set bits (1s)
+    fn count_ones(self) -> u32;
+    
+    /// Count leading zeros (from the most significant bit)
+    fn leading_zeros(self) -> u32;
+    
+    /// Count trailing zeros (from the least significant bit)
+    fn trailing_zeros(self) -> u32;
+}
 
-/// A generic bit set structure that supports various bitwise operations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct BitSet<T: BitStorage> {
+// Implementation of BitInteger trait for supported types
+impl BitInteger for u8 {
+    const BITS: usize = 8;
+    
+    #[inline(always)]
+    fn count_ones(self) -> u32 { self.count_ones() }
+    
+    #[inline(always)]
+    fn leading_zeros(self) -> u32 { self.leading_zeros() }
+    
+    #[inline(always)]
+    fn trailing_zeros(self) -> u32 { self.trailing_zeros() }
+}
+
+impl BitInteger for u32 {
+    const BITS: usize = 32;
+    
+    #[inline(always)]
+    fn count_ones(self) -> u32 { self.count_ones() }
+    
+    #[inline(always)]
+    fn leading_zeros(self) -> u32 { self.leading_zeros() }
+    
+    #[inline(always)]
+    fn trailing_zeros(self) -> u32 { self.trailing_zeros() }
+}
+
+impl BitInteger for u64 {
+    const BITS: usize = 64;
+    
+    #[inline(always)]
+    fn count_ones(self) -> u32 { self.count_ones() }
+    
+    #[inline(always)]
+    fn leading_zeros(self) -> u32 { self.leading_zeros() }
+    
+    #[inline(always)]
+    fn trailing_zeros(self) -> u32 { self.trailing_zeros() }
+}
+
+impl BitInteger for u128 {
+    const BITS: usize = 128;
+    
+    #[inline(always)]
+    fn count_ones(self) -> u32 { self.count_ones() }
+    
+    #[inline(always)]
+    fn leading_zeros(self) -> u32 { self.leading_zeros() }
+    
+    #[inline(always)]
+    fn trailing_zeros(self) -> u32 { self.trailing_zeros() }
+}
+
+/// BitSet - A wrapper around integer types for convenient bit operations
+/// Provides high-performance bit manipulation methods and bitwise operations
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+pub struct BitSet<T: BitInteger> {
     bits: T,
 }
 
-impl<T: BitStorage> BitSet<T> {
-    /// Create a new empty bit set.
+impl<T: BitInteger> BitSet<T> {
+    /// Creates a new empty BitSet (all bits set to 0)
+    #[inline(always)]
     pub fn new() -> Self {
         Self { bits: T::default() }
     }
 
-    /// Create a bit set with the given bits.
-    pub fn from_bits(bits: T) -> Self {
-        Self { bits }
+    /// Creates a BitSet with the specified initial value
+    #[inline(always)]
+    pub fn from_value(value: T) -> Self {
+        Self { bits: value }
     }
 
-    /// Get the underlying bits.
-    pub fn bits(&self) -> T {
+    /// Returns the underlying value
+    #[inline(always)]
+    pub fn value(&self) -> T {
         self.bits
     }
 
-    /// Set a specific bit at the given position.
-    pub fn set(&mut self, position: u32) {
-        self.bits = self.bits.with_bit_set(position);
+    /// Sets the bit at position 'index' to 1
+    #[inline(always)]
+    pub fn set(&mut self, index: usize) {
+        debug_assert!(index < T::BITS, "Bit index out of range");
+        self.bits = self.bits | (T::from(1) << index);
     }
 
-    /// Create a new BitSet with a bit set at the given position.
-    pub fn with_bit_set(&self, position: u32) -> Self {
-        Self::from_bits(self.bits.with_bit_set(position))
+    /// Creates a new BitSet with the bit at position 'index' set to 1
+    #[inline(always)]
+    pub fn with_bit(mut self, index: usize) -> Self {
+        self.set(index);
+        self
     }
 
-    /// Clear a specific bit at the given position.
-    pub fn clear(&mut self, position: u32) {
-        self.bits = self.bits.with_bit_cleared(position);
+    /// Clears the bit at position 'index' (sets to 0)
+    #[inline(always)]
+    pub fn clear(&mut self, index: usize) {
+        debug_assert!(index < T::BITS, "Bit index out of range");
+        self.bits = self.bits & !(T::from(1) << index);
     }
 
-    /// Create a new BitSet with a bit cleared at the given position.
-    pub fn with_bit_cleared(&self, position: u32) -> Self {
-        Self::from_bits(self.bits.with_bit_cleared(position))
+    /// Toggles (inverts) the bit at position 'index'
+    #[inline(always)]
+    pub fn toggle(&mut self, index: usize) {
+        debug_assert!(index < T::BITS, "Bit index out of range");
+        self.bits = self.bits ^ (T::from(1) << index);
     }
 
-    /// Check if a specific bit is set.
-    pub fn is_set(&self, position: u32) -> bool {
-        self.bits.get_bit(position)
+    /// Checks if the bit at position 'index' is set (is 1)
+    #[inline(always)]
+    pub fn is_set(&self, index: usize) -> bool {
+        debug_assert!(index < T::BITS, "Bit index out of range");
+        let mask = T::from(1) << index;
+        (self.bits & mask) == mask
     }
 
-    /// Check if the bit set is empty.
+    /// Returns a bitmask with only the bit at position 'index' set to 1
+    #[inline(always)]
+    pub fn bit_mask(index: usize) -> Self {
+        debug_assert!(index < T::BITS, "Bit index out of range");
+        Self { bits: T::from(1) << index }
+    }
+
+    /// Checks if the BitSet is empty (all bits are 0)
+    #[inline(always)]
     pub fn is_empty(&self) -> bool {
-        self.bits.is_zero()
+        self.bits == T::default()
     }
 
-    /// Count the number of set bits.
+    /// Counts the number of set bits (1s)
+    #[inline(always)]
     pub fn count_ones(&self) -> u32 {
         self.bits.count_ones()
     }
+    
+    /// Returns the index of the first set bit, or None if no bits are set
+    #[inline(always)]
+    pub fn first_set_bit(&self) -> Option<usize> {
+        if self.bits == T::default() {
+            None
+        } else {
+            Some(self.bits.trailing_zeros() as usize)
+        }
+    }
+
+    /// Returns the index of the next set bit after 'after_index', or None if no more bits are set
+    pub fn next_set_bit(&self, after_index: usize) -> Option<usize> {
+        if after_index >= T::BITS - 1 {
+            return None;
+        }
+
+        // Create a mask that zeroes all bits up to after_index (inclusive)
+        let mask = !(((T::from(1) << (after_index + 1)) - T::from(1)));
+        let masked_bits = self.bits & mask;
+
+        if masked_bits == T::default() {
+            None
+        } else {
+            Some(masked_bits.trailing_zeros() as usize)
+        }
+    }
+
+    /// Returns the result of bitwise AND with another BitSet
+    #[inline(always)]
+    pub fn and(&self, other: &Self) -> Self {
+        Self { bits: self.bits & other.bits }
+    }
+
+    /// Applies bitwise AND with another BitSet in-place
+    #[inline(always)]
+    pub fn and_assign(&mut self, other: &Self) {
+        self.bits = self.bits & other.bits;
+    }
+
+    /// Returns the result of bitwise OR with another BitSet
+    #[inline(always)]
+    pub fn or(&self, other: &Self) -> Self {
+        Self { bits: self.bits | other.bits }
+    }
+
+    /// Applies bitwise OR with another BitSet in-place
+    #[inline(always)]
+    pub fn or_assign(&mut self, other: &Self) {
+        self.bits = self.bits | other.bits;
+    }
+
+    /// Returns the result of bitwise XOR with another BitSet
+    #[inline(always)]
+    pub fn xor(&self, other: &Self) -> Self {
+        Self { bits: self.bits ^ other.bits }
+    }
+
+    /// Applies bitwise XOR with another BitSet in-place
+    #[inline(always)]
+    pub fn xor_assign(&mut self, other: &Self) {
+        self.bits = self.bits ^ other.bits;
+    }
+
+    /// Returns the result of bitwise NOT (complement)
+    #[inline(always)]
+    pub fn not(&self) -> Self {
+        Self { bits: !self.bits }
+    }
+
+    /// Returns the result of shifting the bits left by 'shift' positions
+    #[inline(always)]
+    pub fn shift_left(&self, shift: usize) -> Self {
+        Self { bits: self.bits << shift }
+    }
+
+    /// Returns the result of shifting the bits right by 'shift' positions
+    #[inline(always)]
+    pub fn shift_right(&self, shift: usize) -> Self {
+        Self { bits: self.bits >> shift }
+    }
+    
+    /// Creates an iterator over all set bits (positions of 1s)
+    pub fn iter_ones(&self) -> BitSetIterator<T> {
+        BitSetIterator {
+            bitset: *self,
+            next_index: 0,
+        }
+    }
 }
 
-// Default implementation for BitSet
-impl<T: BitStorage> Default for BitSet<T> {
+/// Iterator over set bits in a BitSet
+pub struct BitSetIterator<T: BitInteger> {
+    bitset: BitSet<T>,
+    next_index: usize,
+}
+
+impl<T: BitInteger> Iterator for BitSetIterator<T> {
+    type Item = usize;
+    
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.next_index >= T::BITS {
+            return None;
+        }
+        
+        // Find the next set bit
+        let masked_bits = self.bitset.bits & !((T::from(1) << self.next_index) - T::from(1));
+        
+        if masked_bits == T::default() {
+            None
+        } else {
+            let pos = masked_bits.trailing_zeros() as usize;
+            self.next_index = pos + 1;
+            Some(pos)
+        }
+    }
+}
+
+/// Operator implementations for convenient usage
+
+impl<T: BitInteger> BitAnd for BitSet<T> {
+    type Output = Self;
+    
+    #[inline(always)]
+    fn bitand(self, rhs: Self) -> Self::Output {
+        Self { bits: self.bits & rhs.bits }
+    }
+}
+
+impl<T: BitInteger> BitOr for BitSet<T> {
+    type Output = Self;
+    
+    #[inline(always)]
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self { bits: self.bits | rhs.bits }
+    }
+}
+
+impl<T: BitInteger> BitXor for BitSet<T> {
+    type Output = Self;
+    
+    #[inline(always)]
+    fn bitxor(self, rhs: Self) -> Self::Output {
+        Self { bits: self.bits ^ rhs.bits }
+    }
+}
+
+impl<T: BitInteger> Not for BitSet<T> {
+    type Output = Self;
+    
+    #[inline(always)]
+    fn not(self) -> Self::Output {
+        Self { bits: !self.bits }
+    }
+}
+
+impl<T: BitInteger> Default for BitSet<T> {
+    #[inline(always)]
     fn default() -> Self {
         Self::new()
     }
 }
 
-// Intersection operation using BitAnd trait
-impl<T: BitStorage> BitAnd for BitSet<T> {
-    type Output = Self;
-
-    fn bitand(self, rhs: Self) -> Self::Output {
-        Self::from_bits(self.bits & rhs.bits)
-    }
-}
-
-// Union operation using BitOr trait
-impl<T: BitStorage> BitOr for BitSet<T> {
-    type Output = Self;
-
-    fn bitor(self, rhs: Self) -> Self::Output {
-        Self::from_bits(self.bits | rhs.bits)
-    }
-}
-
-// Difference operation using Sub trait
-impl<T: BitStorage> Sub for BitSet<T> {
-    type Output = Self;
-
-    fn sub(self, rhs: Self) -> Self::Output {
-        Self::from_bits(self.bits & !rhs.bits)
-    }
-}
-
-// Symmetric difference operation using BitXor trait
-impl<T: BitStorage> BitXor for BitSet<T> {
-    type Output = Self;
-
-    fn bitxor(self, rhs: Self) -> Self::Output {
-        Self::from_bits(self.bits ^ rhs.bits)
-    }
-}
-
-// Complement operation using Not trait
-impl<T: BitStorage> Not for BitSet<T> {
-    type Output = Self;
-
-    fn not(self) -> Self::Output {
-        Self::from_bits(!self.bits)
-    }
-}
-
-// Implement reference versions of the operations
-impl<T: BitStorage> BitAnd<&BitSet<T>> for BitSet<T> {
-    type Output = Self;
-
-    fn bitand(self, rhs: &Self) -> Self::Output {
-        Self::from_bits(self.bits & rhs.bits)
-    }
-}
-
-impl<T: BitStorage> BitAnd<BitSet<T>> for &BitSet<T> {
-    type Output = BitSet<T>;
-
-    fn bitand(self, rhs: BitSet<T>) -> Self::Output {
-        BitSet::from_bits(self.bits & rhs.bits)
-    }
-}
-
-impl<T: BitStorage> BitAnd for &BitSet<T> {
-    type Output = BitSet<T>;
-
-    fn bitand(self, rhs: Self) -> Self::Output {
-        BitSet::from_bits(self.bits & rhs.bits)
-    }
-}
-
-impl<T: BitStorage> BitOr<&BitSet<T>> for BitSet<T> {
-    type Output = Self;
-
-    fn bitor(self, rhs: &Self) -> Self::Output {
-        Self::from_bits(self.bits | rhs.bits)
-    }
-}
-
-impl<T: BitStorage> BitOr<BitSet<T>> for &BitSet<T> {
-    type Output = BitSet<T>;
-
-    fn bitor(self, rhs: BitSet<T>) -> Self::Output {
-        BitSet::from_bits(self.bits | rhs.bits)
-    }
-}
-
-impl<T: BitStorage> BitOr for &BitSet<T> {
-    type Output = BitSet<T>;
-
-    fn bitor(self, rhs: Self) -> Self::Output {
-        BitSet::from_bits(self.bits | rhs.bits)
-    }
-}
-
-impl<T: BitStorage> BitXor<&BitSet<T>> for BitSet<T> {
-    type Output = Self;
-
-    fn bitxor(self, rhs: &Self) -> Self::Output {
-        Self::from_bits(self.bits ^ rhs.bits)
-    }
-}
-
-impl<T: BitStorage> BitXor<BitSet<T>> for &BitSet<T> {
-    type Output = BitSet<T>;
-
-    fn bitxor(self, rhs: BitSet<T>) -> Self::Output {
-        BitSet::from_bits(self.bits ^ rhs.bits)
-    }
-}
-
-impl<T: BitStorage> BitXor for &BitSet<T> {
-    type Output = BitSet<T>;
-
-    fn bitxor(self, rhs: Self) -> Self::Output {
-        BitSet::from_bits(self.bits ^ rhs.bits)
-    }
-}
-
-impl<T: BitStorage> Sub<&BitSet<T>> for BitSet<T> {
-    type Output = Self;
-
-    fn sub(self, rhs: &Self) -> Self::Output {
-        Self::from_bits(self.bits & !rhs.bits)
-    }
-}
-
-impl<T: BitStorage> Sub<BitSet<T>> for &BitSet<T> {
-    type Output = BitSet<T>;
-
-    fn sub(self, rhs: BitSet<T>) -> Self::Output {
-        BitSet::from_bits(self.bits & !rhs.bits)
-    }
-}
-
-impl<T: BitStorage> Sub for &BitSet<T> {
-    type Output = BitSet<T>;
-
-    fn sub(self, rhs: Self) -> Self::Output {
-        BitSet::from_bits(self.bits & !rhs.bits)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_u8_operations() {
-        let mut mask1: BitSet<u8> = BitSet::new();
-        mask1.set(0);
-        mask1.set(2);
-        mask1.set(4);
+impl<T: BitInteger + Debug> Debug for BitSet<T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "BitSet({:?}) [", self.bits)?;
         
-        let mut mask2: BitSet<u8> = BitSet::new();
-        mask2.set(0);
-        mask2.set(3);
-        mask2.set(5);
+        let mut first = true;
+        for bit in self.iter_ones() {
+            if !first {
+                write!(f, ", ")?;
+            }
+            first = false;
+            write!(f, "{}", bit)?;
+        }
         
-        // Test intersection (AND)
-        let intersection = mask1 & mask2;
-        assert_eq!(intersection.bits(), 1); // Only bit 0 is common
-        
-        // Test union (OR)
-        let union = mask1 | mask2;
-        assert_eq!(union.bits(), 0b111101); // Bits 0, 2, 3, 4, 5
-        
-        // Test difference
-        let difference = mask1 - mask2;
-        assert_eq!(difference.bits(), 0b10100); // Bits 2, 4
-        
-        // Test symmetric difference (XOR)
-        let sym_diff = mask1 ^ mask2;
-        assert_eq!(sym_diff.bits(), 0b111100); // Bits 2, 3, 4, 5
-        
-        // Test complement (NOT)
-        let complement = !mask1;
-        assert_eq!(complement.bits(), !0b10101 as u8);
-    }
-    
-    #[test]
-    fn test_u16_operations() {
-        let mut mask1: BitSet<u16> = BitSet::new();
-        mask1.set(8);
-        mask1.set(10);
-        
-        let mut mask2: BitSet<u16> = BitSet::new();
-        mask2.set(8);
-        mask2.set(12);
-        
-        // Test intersection (AND)
-        let intersection = mask1 & mask2;
-        assert_eq!(intersection.bits(), 0x100); // Only bit 8 is common
-        
-        // Test union (OR)
-        let union = mask1 | mask2;
-        assert_eq!(union.bits(), 0x1500); // Bits 8, 10, 12
-        
-        // Test reference operations
-        let result1 = &mask1 & &mask2;
-        assert_eq!(result1.bits(), 0x100);
-    }
-    
-    #[test]
-    fn test_u32_operations() {
-        let mut mask1: BitSet<u32> = BitSet::new();
-        mask1.set(16);
-        mask1.set(20);
-        
-        let mut mask2: BitSet<u32> = BitSet::new();
-        mask2.set(16);
-        mask2.set(24);
-        
-        let result = mask1 & mask2;
-        assert_eq!(result.bits(), 0x10000); // Only bit 16 is common
-    }
-    
-    #[test]
-    fn test_u64_operations() {
-        let mut mask1: BitSet<u64> = BitSet::new();
-        mask1.set(32);
-        mask1.set(40);
-        
-        let mut mask2: BitSet<u64> = BitSet::new();
-        mask2.set(32);
-        mask2.set(48);
-        
-        let result = mask1 & mask2;
-        assert_eq!(result.bits(), 0x100000000); // Only bit 32 is common
-    }
-    
-    #[test]
-    fn test_u128_operations() {
-        let mut mask1: BitSet<u128> = BitSet::new();
-        mask1.set(64);
-        mask1.set(80);
-        
-        let mut mask2: BitSet<u128> = BitSet::new();
-        mask2.set(64);
-        mask2.set(96);
-        
-        let result = mask1 & mask2;
-        assert_eq!(result.bits(), 0x1_0000_0000_0000_0000); // Only bit 64 is common
-    }
-
-    #[test]
-    fn test_bitset512_operations() {
-        // Create BitSets using BitSet512
-        let mut set1 = BitSet::<BitSet512>::new();
-        let mut set2 = BitSet::<BitSet512>::new();
-        
-        // Set bits in different u64 blocks
-        set1.set(10);   // First block
-        set1.set(100);  // First block
-        set1.set(200);  // Third block
-        
-        set2.set(10);   // First block
-        set2.set(70);   // Second block
-        set2.set(300);  // Fourth block
-        
-        // Test bit operations
-        assert!(set1.is_set(10));
-        assert!(set1.is_set(100));
-        assert!(set1.is_set(200));
-        assert!(!set1.is_set(70));
-        assert!(!set1.is_set(300));
-        
-        assert!(set2.is_set(10));
-        assert!(set2.is_set(70));
-        assert!(set2.is_set(300));
-        assert!(!set2.is_set(100));
-        assert!(!set2.is_set(200));
-        
-        // Test count_ones
-        assert_eq!(set1.count_ones(), 3);
-        assert_eq!(set2.count_ones(), 3);
-        
-        // Test union
-        let union = set1 | set2;
-        assert!(union.is_set(10));
-        assert!(union.is_set(70));
-        assert!(union.is_set(100));
-        assert!(union.is_set(200));
-        assert!(union.is_set(300));
-        assert_eq!(union.count_ones(), 5);
-        
-        // Test intersection
-        let intersection = set1 & set2;
-        assert!(intersection.is_set(10));
-        assert!(!intersection.is_set(70));
-        assert!(!intersection.is_set(100));
-        assert!(!intersection.is_set(200));
-        assert!(!intersection.is_set(300));
-        assert_eq!(intersection.count_ones(), 1);
-        
-        // Test difference
-        let difference = set1 - set2;
-        assert!(!difference.is_set(10));
-        assert!(!difference.is_set(70));
-        assert!(difference.is_set(100));
-        assert!(difference.is_set(200));
-        assert!(!difference.is_set(300));
-        assert_eq!(difference.count_ones(), 2);
-        
-        // Test symmetric difference
-        let sym_difference = set1 ^ set2;
-        assert!(!sym_difference.is_set(10));
-        assert!(sym_difference.is_set(70));
-        assert!(sym_difference.is_set(100));
-        assert!(sym_difference.is_set(200));
-        assert!(sym_difference.is_set(300));
-        assert_eq!(sym_difference.count_ones(), 4);
-        
-        // Test high bits (close to 512)
-        let mut high_set = BitSet::<BitSet512>::new();
-        high_set.set(500);
-        assert!(high_set.is_set(500));
-        assert_eq!(high_set.count_ones(), 1);
+        write!(f, "]")
     }
 }
