@@ -1,5 +1,5 @@
 use std::ops::{Index, IndexMut};
-use crate::ecs::core::component::Component;
+use crate::ecs::core::component::component::Component;
 use crate::ecs::identifiers::primitives::{ComponentId, InlandComponentId, InlandPoolId};
 use crate::ecs::memory::component_pool::ComponentPool;
 use crate::ecs::memory::arena::Arena;

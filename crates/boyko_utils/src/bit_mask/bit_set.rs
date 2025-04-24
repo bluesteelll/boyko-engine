@@ -107,6 +107,13 @@ impl<T: BitInteger> BitSet<T> {
         self.bits = self.bits | (T::from(1) << index);
     }
 
+    /// Sets the bit at position 'index' to 0
+    #[inline(always)]
+    pub fn unset(&mut self, index: usize) {
+        debug_assert!(index < T::BITS, "Bit index out of range");
+        self.bits = self.bits & !(T::from(1) << index);
+    }
+
     /// Creates a new BitSet with the bit at position 'index' set to 1
     #[inline(always)]
     pub fn with_bit(mut self, index: usize) -> Self {

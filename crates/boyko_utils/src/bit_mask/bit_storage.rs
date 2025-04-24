@@ -1,4 +1,4 @@
-use std::ops::{BitAnd, BitOr, BitXor, Not};
+/* use std::ops::{BitAnd, BitOr, BitXor, Not};
 use std::fmt::Debug;
 use std::hash::Hash;
 
@@ -57,4 +57,4 @@ macro_rules! impl_bit_storage {
 }
 
 // Implement for standard integer types
-impl_bit_storage!(u8, u16, u32, u64, u128, usize); 
+impl_bit_storage!(u8, u16, u32, u64, u128, usize);  */

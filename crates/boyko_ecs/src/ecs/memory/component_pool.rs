@@ -2,7 +2,7 @@ use std::alloc::Layout;
 use std::any::TypeId;
 use std::ptr::NonNull;
 use crate::ecs::constants::{DEFAULT_CHUNKS_PER_POOL, LARGE_COMPONENTS_PER_CHUNK, MEDIUM_COMPONENTS_PER_CHUNK, MEDIUM_COMPONENT_THRESHOLD, SMALL_COMPONENTS_PER_CHUNK, SMALL_COMPONENT_THRESHOLD, TINY_COMPONENTS_PER_CHUNK, TINY_COMPONENT_THRESHOLD};
-use crate::ecs::core::component::Component;
+use crate::ecs::core::component::component::Component;
 use crate::ecs::memory::id_unit::Unit;
 use crate::ecs::memory::arena::Arena;
 use crate::ecs::memory::chunk::Chunk;
@@ -428,7 +428,7 @@ impl ComponentPool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ecs::core::component::Component;
+    use crate::ecs::core::component::component::Component;
     use crate::ecs::memory::arena::Arena;
     use crate::ecs::constants::{TINY_COMPONENT_THRESHOLD, SMALL_COMPONENT_THRESHOLD, MEDIUM_COMPONENT_THRESHOLD, TINY_COMPONENTS_PER_CHUNK, SMALL_COMPONENTS_PER_CHUNK, MEDIUM_COMPONENTS_PER_CHUNK, LARGE_COMPONENTS_PER_CHUNK};
     use std::any::TypeId;
