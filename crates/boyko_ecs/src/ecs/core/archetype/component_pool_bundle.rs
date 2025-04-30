@@ -256,7 +256,7 @@ impl ComponentPoolBundle {
                 "Component size mismatch for ID {}", component_id
             );
             
-            let inland_id = *self.sparse_indexes.get(component_id)?;
+            let inland_id = self.sparse_indexes.get(*component_id).copied()?;
             let idx = self.pools[inland_id].add(bytes)?;
             indices.push(idx);
         }
@@ -264,9 +264,25 @@ impl ComponentPoolBundle {
         // If we successfully added all components, return the indices
         Some(indices)
     }
+    
+    pub fn pop_entity(&mut self) -> bool {
+        if self.pools.is_empty() {
+            return true; // No pools to pop from
+        }
+        
+        let mut success = true;
+        
+        // Remove the last component from each pool
+        for pool in self.pools.iter_mut() {
+            success &= pool.pop();
+        }
+        
+        success
+    }
 
     /// Removes entity components from all pools
     /// Returns the removed entity's index if successful
+    /// NOTE: This function is not safe to use with the same entity_inland_target and entity_inland_last
     pub fn swap_remove_unit(&mut self, entity_inland_target: &EntityInland, entity_inland_last: &mut EntityInland) -> Result<usize> {
         let unit_index = entity_inland_target.unit_index();
         let mut success = true;

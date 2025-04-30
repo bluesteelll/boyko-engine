@@ -8,3 +8,4 @@ pub type InlandUnitId = usize;
 pub type InlandPoolId = usize;
 pub type InlandComponentId = usize;
 pub type InlandArchetypeId = usize;
+pub type Generation = usize;
