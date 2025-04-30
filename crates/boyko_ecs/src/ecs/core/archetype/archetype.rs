@@ -1,92 +1,6 @@
 use std::ptr::NonNull;
-use std::collections::HashSet;
 use std::any::TypeId;
 use boyko_utils::identifiers::primitives::Generation;
-use boyko_utils::sparse_map::sparse_map::SparseMap;
-use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId, EntityId};
-use crate::ecs::identifiers::id_unit::UnitId;
-use crate::ecs::core::component::Component;
-use crate::ecs::core::entity::entity::Entity;
-use crate::ecs::memory::arena::Arena;
-use crate::ecs::memory::component_pool::ComponentPool;
-use crate::ecs::core::archetype::component_pool_bundle::{ComponentPoolBundle, ComponentTuple};
-use crate::ecs::constants::INITIAL_ENTITY_CAPACITY;
-
-/// Represents the storage location of an entity's components within the archetype
-#[derive(Debug, Clone, Copy)]
-struct EntityLocation {
-    /// The chunk index where the entity's components are stored
-    chunk_index: usize,
-
-    /// The index within the chunk (the row in the component arrays)
-    inland_index: usize,
-}
-
-impl EntityLocation {
-    #[inline]
-    fn new(chunk_index: usize, inland_index: usize) -> Self {
-        Self { chunk_index, inland_index }
-    }
-
-    #[inline]
-    fn to_unit_id(&self) -> UnitId {
-        UnitId::new(self.chunk_index, self.inland_index)
-    }
-}
-
-/// Represents information about an entity's storage location and generation
-#[derive(Debug, Clone, Copy)]
-pub struct EntityLocationInfo {
-    /// The entity's generation, used for stale reference detection
-    generation: Generation,
-
-    /// The storage location of the entity's components
-    location: EntityLocation,
-}
-
-impl EntityLocationInfo {
-    /// Creates a new EntityLocationInfo
-    #[inline]
-    pub fn new(generation: Generation, chunk_index: usize, inland_index: usize) -> Self {
-        Self {
-            generation,
-            location: EntityLocation::new(chunk_index, inland_index),
-        }
-    }
-
-    /// Creates a new EntityLocationInfo with the given location
-    #[inline]
-    pub fn with_location(generation: Generation, location: EntityLocation) -> Self {
-        Self {
-            generation,
-            location,
-        }
-    }
-
-    /// Gets the entity's generation
-    #[inline]
-    pub fn generation(&self) -> Generation {
-        self.generation
-    }
-
-    /// Gets the entity's component location
-    #[inline]
-    pub fn location(&self) -> EntityLocation {
-        self.location
-    }
-
-    /// Increments the generation counter
-    #[inline]
-    pub fn increment_generation(&mut self) {
-        self.generation = self.generation.wrapping_add(1);
-    }
-
-    /// Updates the storage location
-    #[inline]
-    pub fn update_location(&mut self, chunk_index: usize, inland_index: usize) {
-        self.location = EntityLocation::new(chunk_index, inland_index);
-    }
-}
 
 /// Archetype represents a unique combination of component types
 /// All entities with the same component types belong to the same archetype
@@ -97,15 +11,11 @@ pub struct Archetype {
     /// Storage for components organized by component type
     component_pools: ComponentPoolBundle,
 
-    /// Maps entity IDs to location info
-    entity_to_location: SparseMap<EntityLocationInfo>,
 
     /// Current index for the next entity (equals number of entities)
     current_index: usize,
 
-    /// Set of component IDs in this archetype for quick signature checking
-    component_types: HashSet<ComponentId>,
-
+    signature: ArchetypeSignature,
     /// Reference to the arena used for memory allocation
     arena: NonNull<Arena>,
 }
@@ -115,20 +25,13 @@ impl Archetype {
     pub fn new(id: ArchetypeId, arena: &Arena) -> Self {
         Self {
             id,
+            signature: ArchetypeSignature::new(mask),
             component_pools: ComponentPoolBundle::new(),
-            entity_to_location: SparseMap::with_capacity(INITIAL_ENTITY_CAPACITY),
             current_index: 0,
-            component_types: HashSet::new(),
             arena: NonNull::from(arena),
         }
     }
 
-    /// Creates a new archetype with pre-registered component types
-    pub fn with_components<T: ComponentTypeList>(id: ArchetypeId, arena: &Arena) -> Self {
-        let mut archetype = Self::new(id, arena);
-        T::register_components(&mut archetype);
-        archetype
-    }
 
     /// Gets the unique ID of this archetype
     #[inline]
@@ -348,30 +251,3 @@ impl Archetype {
     }
 }
 
-// Trait implementations remain the same
-
-/// Trait for registering multiple component types with an archetype
-pub trait ComponentTypeList {
-    fn register_components(archetype: &mut Archetype);
-}
-
-// Implement for various tuples of component types
-impl ComponentTypeList for () {
-    fn register_components(_: &mut Archetype) {}
-}
-
-impl<T: Component> ComponentTypeList for (T,) {
-    fn register_components(archetype: &mut Archetype) {
-        archetype.register_component::<T>();
-    }
-}
-
-impl<T1: Component, T2: Component> ComponentTypeList for (T1, T2) {
-    fn register_components(archetype: &mut Archetype) {
-        archetype.register_component::<T1>();
-        archetype.register_component::<T2>();
-    }
-}
-
-// Note: Additional tuple implementations would be added for more component types
-//TODO: Auto generation of tuple implementations by a macro
