@@ -1,10 +1,11 @@
 use std::ops::{Index, IndexMut};
 use boyko_utils::sparse_map::sparse_map::SparseMap;
-use crate::ecs::core::archetype::archetype::{Archetype, ComponentTypeList};
+use crate::ecs::core::archetype::archetype::Archetype;
 use crate::ecs::core::entity::entity::Entity;
 use crate::ecs::core::entity::entity_inland::EntityInland;
-use crate::ecs::identifiers::primitives::{ArchetypeId, EntityId, InlandArchetypeId};
+use crate::ecs::identifiers::primitives::{ArchetypeId, EntityId, InlandArchetypeId, ComponentId};
 use crate::ecs::memory::arena::Arena;
+use crate::ecs::core::component::component_mask::ComponentMask;
 
 /// A collection of archetypes with efficient access by archetype ID
 pub struct ArchetypeBundle {
@@ -67,6 +68,15 @@ impl ArchetypeBundle {
         inland_id
     }
 
+    /// Creates a new archetype from a list of component IDs and adds it to the bundle
+    /// Returns the internal index assigned to this archetype
+    pub fn add_archetype_from_components(&mut self, archetype_id: ArchetypeId, component_ids: &[ComponentId], arena: &Arena) -> InlandArchetypeId {
+        // Create a new archetype from component IDs
+        let archetype = Archetype::create_by_ids(archetype_id, component_ids, arena);
+        
+        // Add the archetype to the bundle using the existing method
+        self.add_archetype(archetype)
+    }
 
     /// Gets the archetype for a specific entity using its inland data
     pub fn get_entity_archetype(&self, entity_inland: &EntityInland) -> Option<&Archetype> {

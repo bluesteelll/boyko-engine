@@ -1,20 +1,20 @@
-use crate::ecs::identifiers::primitives::{InlandArchetypeId, InlandPoolId, Generation};
+use crate::ecs::identifiers::primitives::{ArchetypeId, InlandPoolId, Generation};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EntityInland {
-    archetype_index: InlandArchetypeId,
+    archetype_id: ArchetypeId,
     unit_index: InlandPoolId,
     generation: Generation,
 }
 
 impl EntityInland {
-    pub fn new(archetype_index: InlandArchetypeId, unit_index: InlandPoolId, generation: Generation) -> Self {
-        Self { archetype_index, unit_index, generation }
+    pub fn new(archetype_id: ArchetypeId, unit_index: InlandPoolId, generation: Generation) -> Self {
+        Self { archetype_id, unit_index, generation }
     }
     
     #[inline]
-    pub fn archetype_index(&self) -> InlandArchetypeId {
-        self.archetype_index
+    pub fn archetype_id(&self) -> ArchetypeId {
+        self.archetype_id
     }
     
     #[inline]
@@ -23,8 +23,8 @@ impl EntityInland {
     }
     
     #[inline]
-    pub fn set_archetype_index(&mut self, archetype_index: InlandArchetypeId) {
-        self.archetype_index = archetype_index;
+    pub fn set_archetype_id(&mut self, archetype_id: ArchetypeId) {
+        self.archetype_id = archetype_id;
     }
     
     #[inline]
@@ -43,8 +43,8 @@ impl EntityInland {
     }
 
     #[inline]
-    pub fn update(&mut self, archetype_index: InlandArchetypeId, unit_index: InlandPoolId) {
-        self.archetype_index = archetype_index;
+    pub fn update(&mut self, archetype_id: ArchetypeId, unit_index: InlandPoolId) {
+        self.archetype_id = archetype_id;
         self.unit_index = unit_index;
     }
 }

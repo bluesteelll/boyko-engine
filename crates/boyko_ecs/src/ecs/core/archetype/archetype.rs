@@ -41,24 +41,31 @@ impl Archetype {
         }
     }
 
-    /// Creates a new archetype with a specific component mask
-    pub fn with_mask(id: ArchetypeId, mask: ComponentMask, arena: &Arena) -> Self {
-        // Extract component IDs from mask
-        let mut component_ids = Vec::new();
-        for comp_id in 0..512 {
-            if mask.contains(comp_id) {
-                component_ids.push(comp_id);
-            }
+
+    /// Creates a new archetype from a slice of component IDs
+    pub fn create_by_ids(id: ArchetypeId, component_ids: &[ComponentId], arena: &Arena) -> Self {
+        // Create a mask from the component IDs
+        let mut mask = ComponentMask::new();
+        for &comp_id in component_ids {
+            mask.set(comp_id);
         }
         
-        Self {
+        // Initialize archetype with mask and empty component pools
+        let mut archetype = Self {
             id,
             component_pools: ComponentPoolBundle::new(),
             current_index: 0,
             signature: ArchetypeSignature::new(mask),
             arena: NonNull::from(arena),
-            component_ids,
+            component_ids: component_ids.to_vec(),
+        };
+        
+        // Create component pools for each component ID
+        for &comp_id in component_ids {
+            archetype.component_pools.add_pool(arena, comp_id);
         }
+        
+        archetype
     }
 
     /// Gets the unique ID of this archetype
@@ -113,8 +120,8 @@ impl Archetype {
     /// Takes a reference to EntityInland and a vector of (component_id, component_bytes) pairs
     /// Updates the EntityInland with the unit index of the new entity
     pub fn create_entity(&mut self, inland: &mut EntityInland, components: Vec<(ComponentId, &[u8])>) -> bool {
-        debug_assert_eq!(inland.archetype_index(), self.id, 
-            "EntityInland archetype_index mismatch");
+        debug_assert_eq!(inland.archetype_id(), self.id, 
+            "EntityInland archetype_id mismatch");
         
         // Make sure all required components are provided
         for &comp_id in &self.component_ids {
@@ -151,8 +158,8 @@ impl Archetype {
     ///
     /// WARNING: This function should not be used with the same entity_inland and last_entity_inland
     pub fn remove_entity(&mut self, entity_inland: &mut EntityInland, last_entity_inland: &mut EntityInland) -> bool {
-        debug_assert_eq!(entity_inland.archetype_index(), self.id, 
-            "EntityInland archetype_index mismatch");
+        debug_assert_eq!(entity_inland.archetype_id(), self.id, 
+            "EntityInland archetype_id mismatch");
         
             // Call swap_remove on component pools
             if let Err(_) = self.component_pools.swap_remove_unit(entity_inland, last_entity_inland) {
@@ -171,8 +178,8 @@ impl Archetype {
     /// Gets a raw pointer to a component using EntityInland for direct access
     #[inline]
     pub fn get_component_raw(&self, inland: &EntityInland, component_id: ComponentId) -> Option<*const u8> {
-        debug_assert_eq!(inland.archetype_index(), self.id, 
-            "EntityInland archetype_index mismatch");
+        debug_assert_eq!(inland.archetype_id(), self.id, 
+            "EntityInland archetype_id mismatch");
         
         let unit_index = inland.unit_index();
         
@@ -186,8 +193,8 @@ impl Archetype {
     /// Gets a mutable raw pointer to a component using EntityInland for direct access
     #[inline]
     pub fn get_component_raw_mut(&mut self, inland: &EntityInland, component_id: ComponentId) -> Option<*mut u8> {
-        debug_assert_eq!(inland.archetype_index(), self.id, 
-            "EntityInland archetype_index mismatch");
+        debug_assert_eq!(inland.archetype_id(), self.id, 
+            "EntityInland archetype_id mismatch");
         
         let unit_index = inland.unit_index();
         
@@ -201,8 +208,8 @@ impl Archetype {
     /// Sets a component value using EntityInland for direct access
     #[inline]
     pub fn set_component(&mut self, inland: &EntityInland, component_id: ComponentId, bytes: &[u8]) -> bool {
-        debug_assert_eq!(inland.archetype_index(), self.id, 
-            "EntityInland archetype_index mismatch");
+        debug_assert_eq!(inland.archetype_id(), self.id, 
+            "EntityInland archetype_id mismatch");
         
         let unit_index = inland.unit_index();
         
@@ -255,7 +262,7 @@ impl Archetype {
     /// Initialize an EntityInland for the next entity slot in this archetype
     #[inline]
     pub fn init_entity_inland(&self, inland: &mut EntityInland) {
-        inland.set_archetype_index(self.id);
+        inland.set_archetype_id(self.id);
         // Unit index will be set during component creation
         // Generation is set by the ECS master
     }
