@@ -280,31 +280,26 @@ impl ComponentPoolBundle {
         success
     }
 
-    /// Removes entity components from all pools
-    /// Returns the removed entity's index if successful
-    /// NOTE: This function is not safe to use with the same entity_inland_target and entity_inland_last
-    pub fn swap_remove_unit(&mut self, entity_inland_target: &EntityInland, entity_inland_last: &mut EntityInland) -> Result<usize> {
-        let unit_index = entity_inland_target.unit_index();
-        let mut success = true;
+/// Removes entity components from all pools using swap_remove
+/// Returns the removed entity's index if successful
+pub fn swap_remove_unit(&mut self, unit_index: usize) -> Result<()> {
+    let mut success = true;
 
-        // Debug check for valid unit index
-        debug_assert!(self.pools.iter().all(|pool| unit_index < pool.count()),
-            "Unit index {} out of bounds in some pools", unit_index);
+    // Debug check for valid unit index
+    debug_assert!(self.pools.iter().all(|pool| unit_index < pool.count()),
+        "Unit index {} out of bounds in some pools", unit_index);
 
-        // Remove components from each pool using the unit index
-        for pool in self.pools.iter_mut() {
-            success &= pool.swap_remove(unit_index);
-        }
-        
-        if !success {
-            bail!("Error: in ComponentPoolBundle.swap_remove()")
-        }
-        
-        // Update the last entity's unit index to match the removed entity's position
-        entity_inland_last.set_unit_index(unit_index);
-
-        Ok(unit_index)
+    // Remove components from each pool using the unit index
+    for pool in self.pools.iter_mut() {
+        success &= pool.swap_remove(unit_index);
     }
+    
+    if !success {
+        bail!("Error: in ComponentPoolBundle.swap_remove_unit()")
+    }
+    
+    Ok(())
+}
 }
 
 // Implement Index/IndexMut for direct access to pools

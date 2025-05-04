@@ -1,5 +1,5 @@
 use std::ptr::NonNull;
-use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId};
+use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId, EntityId, InlandPoolId};
 use crate::ecs::core::entity::entity_inland::EntityInland;
 use crate::ecs::core::component::component_mask::ComponentMask;
 use crate::ecs::core::archetype::archetype_signature::ArchetypeSignature;
@@ -26,6 +26,9 @@ pub struct Archetype {
     
     /// Set of component IDs in this archetype for efficient iteration
     component_ids: Vec<ComponentId>,
+    /// Vector of entity IDs, indexed by unit_index
+    /// This allows O(1) access to entity ID by unit index
+    entity_ids: Vec<EntityId>,
 }
 
 impl Archetype {
@@ -38,6 +41,7 @@ impl Archetype {
             signature: ArchetypeSignature::new(ComponentMask::new()),
             arena: NonNull::from(arena),
             component_ids: Vec::new(),
+            entity_ids: Vec::new(),
         }
     }
 
@@ -58,6 +62,7 @@ impl Archetype {
             signature: ArchetypeSignature::new(mask),
             arena: NonNull::from(arena),
             component_ids: component_ids.to_vec(),
+            entity_ids: Vec::new(),
         };
         
         // Create component pools for each component ID
@@ -119,7 +124,7 @@ impl Archetype {
     /// Creates a new entity in this archetype with the given components
     /// Takes a reference to EntityInland and a vector of (component_id, component_bytes) pairs
     /// Updates the EntityInland with the unit index of the new entity
-    pub fn create_entity(&mut self, inland: &mut EntityInland, components: Vec<(ComponentId, &[u8])>) -> bool {
+    pub fn create_entity(&mut self, entity_id: EntityId, inland: &mut EntityInland, components: Vec<(ComponentId, &[u8])>) -> bool {
         debug_assert_eq!(inland.archetype_id(), self.id, 
             "EntityInland archetype_id mismatch");
         
@@ -146,33 +151,52 @@ impl Archetype {
         // Update the inland reference with the unit index
         inland.set_unit_index(unit_index);
         
+        // Add the entity ID to the vector
+        self.entity_ids.push(entity_id);
+        
         // Increment entity counter
         self.current_index += 1;
         
         true
     }
 
-    /// Removes an entity and all its components from this archetype
-    /// Takes reference to EntityInland for the entity to remove
-    /// Uses swap_remove for entities in the middle, and pop for the last entity
-    ///
-    /// WARNING: This function should not be used with the same entity_inland and last_entity_inland
-    pub fn remove_entity(&mut self, entity_inland: &mut EntityInland, last_entity_inland: &mut EntityInland) -> bool {
+ /// Removes an entity and all its components from this archetype
+    /// Returns information about the swap if it occurred
+    pub fn remove_entity(&mut self, entity_inland: &EntityInland) -> Option<EntityId> {
         debug_assert_eq!(entity_inland.archetype_id(), self.id, 
             "EntityInland archetype_id mismatch");
         
-            // Call swap_remove on component pools
-            if let Err(_) = self.component_pools.swap_remove_unit(entity_inland, last_entity_inland) {
-                return false;
+        let removed_unit_index = entity_inland.unit_index();
+        let last_unit_index = self.current_index.saturating_sub(1);
+        
+        // If removing the last entity, just pop it
+        if removed_unit_index == last_unit_index {
+            if self.component_pools.pop_entity() {
+                // Remove the last entity ID
+                self.entity_ids.pop();
+                // Decrement entity counter
+                self.current_index -= 1;
+                return None; // No swap occurred
+            } else {
+                return None; // Failed to pop
             }
-            
-            // Increment generation of deleted entity
-            entity_inland.increment_generation();
+        }
+        
+        // Get the entity ID that will be swapped
+        let swapped_entity_id = self.entity_ids[last_unit_index];
+        
+        // Swap_remove in component pools
+        if let Err(_) = self.component_pools.swap_remove_unit(removed_unit_index) {
+            return None; // Failed to swap_remove
+        }
+        
+        // Swap_remove the entity ID as well
+        self.entity_ids.swap_remove(removed_unit_index);
         
         // Decrement entity counter
         self.current_index -= 1;
         
-        true
+        Some(swapped_entity_id)
     }
 
     /// Gets a raw pointer to a component using EntityInland for direct access
@@ -280,5 +304,11 @@ impl Archetype {
         self.current_index -= 1;
         
         true
+    }
+    
+    /// Gets the entity ID at a specific unit index
+     #[inline]
+    pub fn get_entity_id_at(&self, unit_index: InlandPoolId) -> Option<EntityId> {
+        self.entity_ids.get(unit_index).copied()
     }
 }
