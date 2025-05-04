@@ -1,6 +1,8 @@
 use std::alloc::Layout;
 use std::any::TypeId;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::cell::UnsafeCell;
+use std::mem::MaybeUninit;
 
 /// Maximum number of components supported by the ECS system
 const MAX_COMPONENTS: usize = 512;
@@ -20,7 +22,7 @@ pub struct ComponentLayout {
 
 impl ComponentLayout {
     /// Creates a new ComponentLayout with static information about type T
-    pub const fn new_static<T: 'static>() -> Self {
+    pub fn new_static<T: 'static>() -> Self {
         Self {
             size: std::mem::size_of::<T>(),
             alignment: std::mem::align_of::<T>(),
@@ -40,31 +42,21 @@ impl ComponentLayout {
 /// Static registry for component layouts
 /// Uses fixed-size arrays to avoid dynamic allocation
 struct StaticLayoutRegistry {
-    /// Array of component layouts
-    /// The index corresponds to the component ID
-    layouts: [ComponentLayout; MAX_COMPONENTS],
-    
     /// Initialization flags for each component
     /// Each flag indicates whether the corresponding layout has been initialized
     initialized: [AtomicBool; MAX_COMPONENTS],
 }
-
-// Create a zeroed ComponentLayout for initialization
-const ZEROED_LAYOUT: ComponentLayout = ComponentLayout {
-    size: 0,
-    alignment: 0,
-    type_name: "",
-    type_id: TypeId::of::<()>(),
-};
 
 // Create a zeroed array of AtomicBool
 const ZEROED_ATOMIC_BOOL: AtomicBool = AtomicBool::new(false);
 
 /// The global static registry instance
 static REGISTRY: StaticLayoutRegistry = StaticLayoutRegistry {
-    layouts: [ZEROED_LAYOUT; MAX_COMPONENTS],
     initialized: [ZEROED_ATOMIC_BOOL; MAX_COMPONENTS],
 };
+
+// Static storage for component layouts
+static mut LAYOUTS: [Option<ComponentLayout>; MAX_COMPONENTS] = [None; MAX_COMPONENTS];
 
 /// Registers a component's layout information in the global registry
 /// This is typically called during program initialization
@@ -82,10 +74,7 @@ pub fn register_layout<T: 'static>(component_id: usize) {
         if !REGISTRY.initialized[component_id].swap(true, Ordering::AcqRel) {
             // We won the race - write the layout to the static array
             unsafe {
-                std::ptr::write(
-                    &REGISTRY.layouts[component_id] as *const ComponentLayout as *mut ComponentLayout,
-                    layout
-                );
+                LAYOUTS[component_id] = Some(layout);
             }
         }
     }
@@ -107,7 +96,9 @@ pub fn get_layout(component_id: usize) -> Option<&'static ComponentLayout> {
     // Check if the layout has been initialized
     if REGISTRY.initialized[component_id].load(Ordering::Acquire) {
         // Safe to return a reference since the data is static
-        Some(&REGISTRY.layouts[component_id])
+        unsafe {
+            LAYOUTS[component_id].as_ref()
+        }
     } else {
         None
     }
@@ -143,7 +134,7 @@ pub unsafe fn get_component_size_unchecked(component_id: usize) -> usize {
         REGISTRY.initialized[component_id].load(Ordering::Relaxed),
         "Component ID {} is invalid or not initialized", component_id);
     
-    REGISTRY.layouts[component_id].size
+    LAYOUTS[component_id].as_ref().unwrap_unchecked().size
 }
 
 /// Ultra-fast access to component alignment when you're confident the component exists
@@ -154,9 +145,8 @@ pub unsafe fn get_component_alignment_unchecked(component_id: usize) -> usize {
         REGISTRY.initialized[component_id].load(Ordering::Relaxed),
         "Component ID {} is invalid or not initialized", component_id);
     
-    REGISTRY.layouts[component_id].alignment
+    LAYOUTS[component_id].as_ref().unwrap_unchecked().alignment
 }
-
 
 /// Ultra-fast access to component layout when you're confident the component exists
 /// Will cause undefined behavior if component_id is invalid - use with caution!
@@ -166,7 +156,7 @@ pub unsafe fn get_layout_unchecked(component_id: usize) -> &'static ComponentLay
         REGISTRY.initialized[component_id].load(Ordering::Relaxed),
         "Component ID {} is invalid or not initialized", component_id);
     
-    &REGISTRY.layouts[component_id]
+    LAYOUTS[component_id].as_ref().unwrap_unchecked()
 }
 
 /// Ultra-fast access to component memory layout when you're confident the component exists
@@ -178,8 +168,8 @@ pub unsafe fn get_component_memory_layout_unchecked(component_id: usize) -> Layo
         "Component ID {} is invalid or not initialized", component_id);
    unsafe {
     Layout::from_size_align_unchecked(
-        REGISTRY.layouts[component_id].size,
-        REGISTRY.layouts[component_id].alignment
+        LAYOUTS[component_id].as_ref().unwrap_unchecked().size,
+        LAYOUTS[component_id].as_ref().unwrap_unchecked().alignment
     )
    }
 }
@@ -192,5 +182,5 @@ pub unsafe fn get_component_type_id_unchecked(component_id: usize) -> TypeId {
         REGISTRY.initialized[component_id].load(Ordering::Relaxed),
         "Component ID {} is invalid or not initialized", component_id);
     
-    REGISTRY.layouts[component_id].type_id
+    LAYOUTS[component_id].as_ref().unwrap_unchecked().type_id
 }
