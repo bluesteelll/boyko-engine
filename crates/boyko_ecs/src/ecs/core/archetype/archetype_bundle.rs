@@ -77,7 +77,38 @@ impl ArchetypeBundle {
         // Add the archetype to the bundle using the existing method
         self.add_archetype(archetype)
     }
+    
+    /// Removes an archetype from the bundle
+    /// Returns true if the archetype was found and removed
+    pub fn remove_archetype(&mut self, archetype_id: ArchetypeId) -> bool {
+        // Find the inland ID for this archetype
+        let inland_id = match self.archetype_to_index.get(archetype_id) {
+            Some(&id) => id,
+            None => return false, // Archetype not found
+        };
 
+        // Remove the mapping
+        self.archetype_to_index.swap_remove(archetype_id);
+
+        // If this wasn't the last archetype, we need to update the index mapping
+        // for the archetype that was moved from the end
+        if inland_id < self.archetypes.len() - 1 {
+            // Get the ID of the archetype that will be moved from the end
+            let moved_archetype_id = self.archetypes.last().unwrap().id();
+            
+            // Update its mapping to point to the new location
+            if let Some(mapping) = self.archetype_to_index.get_mut(moved_archetype_id) {
+                *mapping = inland_id;
+            }
+        }
+
+        // Remove the archetype using swap_remove
+        self.archetypes.swap_remove(inland_id);
+
+        true
+    }
+
+    
     /// Gets the archetype for a specific entity using its inland data
     pub fn get_entity_archetype(&self, entity_inland: &EntityInland) -> Option<&Archetype> {
         let archetype_id = entity_inland.archetype_id();
