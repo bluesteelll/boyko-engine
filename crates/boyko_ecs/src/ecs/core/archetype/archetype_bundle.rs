@@ -155,6 +155,12 @@ impl ArchetypeBundle {
     pub fn get_inland_id(&self, archetype_id: ArchetypeId) -> Option<InlandArchetypeId> {
         self.archetype_to_index.get(archetype_id).copied()
     }
+
+    /// Clears all archetypes from the bundle
+    pub fn clear(&mut self) {
+        self.archetypes.clear();
+        self.archetype_to_index.clear();
+    }
 }
 
 impl Index<ArchetypeId> for ArchetypeBundle {

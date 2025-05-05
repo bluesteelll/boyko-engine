@@ -1,5 +1,6 @@
 use crate::ecs::identifiers::primitives::ComponentId;
 use boyko_utils::bit_mask::bit_set::BitSet;
+use std::ops::{BitAnd, BitOr, BitXor, Not};
 /// 512-bit component mask
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(align(32))] 
@@ -127,5 +128,219 @@ impl ComponentMask {
             }
         }
         true
+    }
+
+    /// Returns true if this mask shares any bits with another mask
+    /// This is useful for determining if a component set intersects with another
+    pub fn intersects(&self, other: &Self) -> bool {
+        for i in 0..8 {
+            if !(self.blocks[i] & other.blocks[i]).is_empty() {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// Implement the bitwise AND operator for ComponentMask
+/// This performs an intersection of two masks
+impl BitAnd for ComponentMask {
+    type Output = Self;
+
+    fn bitand(self, rhs: Self) -> Self::Output {
+        self.intersection(&rhs)
+    }
+}
+
+/// Implement the bitwise AND operator for references
+impl BitAnd for &ComponentMask {
+    type Output = ComponentMask;
+
+    fn bitand(self, rhs: Self) -> Self::Output {
+        self.intersection(rhs)
+    }
+}
+
+/// Implement the bitwise OR operator for ComponentMask
+/// This performs a union of two masks
+impl BitOr for ComponentMask {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        self.union(&rhs)
+    }
+}
+
+/// Implement the bitwise OR operator for references
+impl BitOr for &ComponentMask {
+    type Output = ComponentMask;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        self.union(rhs)
+    }
+}
+
+/// Implement the bitwise XOR operator for ComponentMask
+/// This performs a symmetric difference of two masks
+impl BitXor for ComponentMask {
+    type Output = Self;
+
+    fn bitxor(self, rhs: Self) -> Self::Output {
+        self.symmetric_difference(&rhs)
+    }
+}
+
+/// Implement the bitwise XOR operator for references
+impl BitXor for &ComponentMask {
+    type Output = ComponentMask;
+
+    fn bitxor(self, rhs: Self) -> Self::Output {
+        self.symmetric_difference(rhs)
+    }
+}
+
+/// Implement the bitwise NOT operator for ComponentMask
+/// This inverts all bits in the mask
+impl Not for ComponentMask {
+    type Output = Self;
+
+    fn not(self) -> Self::Output {
+        let mut result = Self::new();
+        for i in 0..8 {
+            result.blocks[i] = !self.blocks[i];
+        }
+        result
+    }
+}
+
+/// Implement the bitwise NOT operator for references
+impl Not for &ComponentMask {
+    type Output = ComponentMask;
+
+    fn not(self) -> Self::Output {
+        let mut result = ComponentMask::new();
+        for i in 0..8 {
+            result.blocks[i] = !self.blocks[i];
+        }
+        result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_operator_and() {
+        let mut mask1 = ComponentMask::new();
+        let mut mask2 = ComponentMask::new();
+
+        // Set bits in mask1: 1, 2, 3
+        mask1.set(1);
+        mask1.set(2);
+        mask1.set(3);
+
+        // Set bits in mask2: 2, 3, 4
+        mask2.set(2);
+        mask2.set(3);
+        mask2.set(4);
+
+        // Result should have bits 2, 3 set
+        let result = mask1 & mask2;
+        assert!(result.contains(2));
+        assert!(result.contains(3));
+        assert!(!result.contains(1));
+        assert!(!result.contains(4));
+
+        // Test reference version
+        let result_ref = &mask1 & &mask2;
+        assert!(result_ref.contains(2));
+        assert!(result_ref.contains(3));
+        assert!(!result_ref.contains(1));
+        assert!(!result_ref.contains(4));
+    }
+
+    #[test]
+    fn test_operator_or() {
+        let mut mask1 = ComponentMask::new();
+        let mut mask2 = ComponentMask::new();
+
+        // Set bits in mask1: 1, 2
+        mask1.set(1);
+        mask1.set(2);
+
+        // Set bits in mask2: 2, 3
+        mask2.set(2);
+        mask2.set(3);
+
+        // Result should have bits 1, 2, 3 set
+        let result = mask1 | mask2;
+        assert!(result.contains(1));
+        assert!(result.contains(2));
+        assert!(result.contains(3));
+
+        // Test reference version
+        let result_ref = &mask1 | &mask2;
+        assert!(result_ref.contains(1));
+        assert!(result_ref.contains(2));
+        assert!(result_ref.contains(3));
+    }
+
+    #[test]
+    fn test_operator_xor() {
+        let mut mask1 = ComponentMask::new();
+        let mut mask2 = ComponentMask::new();
+
+        // Set bits in mask1: 1, 2, 3
+        mask1.set(1);
+        mask1.set(2);
+        mask1.set(3);
+
+        // Set bits in mask2: 2, 3, 4
+        mask2.set(2);
+        mask2.set(3);
+        mask2.set(4);
+
+        // Result should have bits 1, 4 set (symmetric difference)
+        let result = mask1 ^ mask2;
+        assert!(result.contains(1));
+        assert!(!result.contains(2));
+        assert!(!result.contains(3));
+        assert!(result.contains(4));
+
+        // Test reference version
+        let result_ref = &mask1 ^ &mask2;
+        assert!(result_ref.contains(1));
+        assert!(!result_ref.contains(2));
+        assert!(!result_ref.contains(3));
+        assert!(result_ref.contains(4));
+    }
+
+    #[test]
+    fn test_operator_not() {
+        let mut mask = ComponentMask::new();
+        
+        // Set bits 1, 2, 3
+        mask.set(1);
+        mask.set(2);
+        mask.set(3);
+        
+        // Invert the mask - all bits should be set except 1, 2, 3
+        let result = !mask;
+        
+        // Check the first few bits
+        assert!(!result.contains(1));
+        assert!(!result.contains(2));
+        assert!(!result.contains(3));
+        assert!(result.contains(4));
+        assert!(result.contains(5));
+        
+        // Test reference version
+        let result_ref = !&mask;
+        assert!(!result_ref.contains(1));
+        assert!(!result_ref.contains(2));
+        assert!(!result_ref.contains(3));
+        assert!(result_ref.contains(4));
+        assert!(result_ref.contains(5));
     }
 }

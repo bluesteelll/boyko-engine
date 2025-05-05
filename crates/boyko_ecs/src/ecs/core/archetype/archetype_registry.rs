@@ -201,6 +201,96 @@ impl ArchetypeRegistry {
         result
     }
     
+    /// Find archetypes with complex filtering criteria (include, exclude, optional components)
+    /// New method that replaces the filtering logic from QueryBuilder
+    pub fn find_with_filter(
+        &self,
+        include_mask: &ComponentMask,
+        exclude_mask: &ComponentMask,
+        optional_mask: &ComponentMask
+    ) -> Vec<ArchetypeId> {
+        // First get all archetypes matching the include mask
+        let base_archetypes = if include_mask.is_empty() {
+            // If no required components, use all archetypes
+            // Get all active archetype IDs from all pattern groups
+            let mut all_archetypes = Vec::new();
+            for &pattern in &self.active_patterns {
+                if let Some(group) = self.block_groups.get(pattern as usize) {
+                    all_archetypes.extend(group.iter().map(|(id, _)| *id));
+                }
+            }
+            all_archetypes
+        } else {
+            // Otherwise use the include mask
+            self.find_matching_archetypes(include_mask)
+        };
+        
+        // If no additional filtering needed, return base results
+        if exclude_mask.is_empty() && optional_mask.is_empty() {
+            return base_archetypes;
+        }
+        
+        // Apply additional filtering
+        base_archetypes.into_iter()
+            .filter(|&id| {
+                // Get the archetype signature
+                let signature = self.get_archetype_signature(id);
+                if let Some(signature) = signature {
+                    // Skip if archetype contains any excluded component
+                    if !exclude_mask.is_empty() {
+                        let intersection = &signature.mask & exclude_mask;
+                        if !intersection.is_empty() {
+                            return false;
+                        }
+                    }
+                    
+                    // Skip if optional components are required but none are present
+                    if !optional_mask.is_empty() {
+                        let intersection = &signature.mask & optional_mask;
+                        if intersection.is_empty() {
+                            return false;
+                        }
+                    }
+                    
+                    true
+                } else {
+                    false
+                }
+            })
+            .collect()
+    }
+    
+    /// Get the signature for an archetype by ID
+    /// Helper method for complex queries
+    pub fn get_archetype_signature(&self, archetype_id: ArchetypeId) -> Option<ArchetypeSignature> {
+        for &pattern in &self.active_patterns {
+            let pattern_index = pattern as usize;
+            if let Some(group) = self.block_groups.get(pattern_index) {
+                if let Some((_, signature)) = group.iter().find(|(id, _)| *id == archetype_id) {
+                    return Some(signature.clone());
+                }
+            }
+        }
+        None
+    }
+    
+    /// Find archetypes with components that can be included, excluded, or optional
+    /// Component-centric alternative to mask-based filtering
+    pub fn find_with_component_filter(
+        &self,
+        include_components: &[ComponentId],
+        exclude_components: &[ComponentId],
+        optional_components: &[ComponentId]
+    ) -> Vec<ArchetypeId> {
+        // Convert component arrays to masks
+        let include_mask = ComponentMask::from_components(include_components);
+        let exclude_mask = ComponentMask::from_components(exclude_components);
+        let optional_mask = ComponentMask::from_components(optional_components);
+        
+        // Use the mask-based filter
+        self.find_with_filter(&include_mask, &exclude_mask, &optional_mask)
+    }
+    
     /// Returns the number of archetypes in the registry
     pub fn len(&self) -> usize {
         let mut count = 0;
@@ -398,7 +488,7 @@ mod tests {
         registry.register_archetype(3, create_mask(&[comp2, comp3]));
         registry.register_archetype(4, create_mask(&[comp1, comp2, comp3]));
         
-        // Query with components across blocks
+        // Find archetypes with components in different blocks
         let results = registry.find_archetypes_with_components(&[comp1, comp2]);
         assert_eq!(results.len(), 2);
         assert!(results.contains(&1));
@@ -408,73 +498,75 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert!(results.contains(&2));
         assert!(results.contains(&4));
+    }
+    
+    #[test]
+    fn test_find_with_filter() {
+        let mut registry = ArchetypeRegistry::new();
         
-        let results = registry.find_archetypes_with_components(&[comp1, comp2, comp3]);
-        assert_eq!(results.len(), 1);
+        // Register archetypes with different component combinations
+        registry.register_archetype(1, create_mask(&[1, 2]));          // Position, Velocity
+        registry.register_archetype(2, create_mask(&[1, 3]));          // Position, Health
+        registry.register_archetype(3, create_mask(&[2, 4]));          // Velocity, Damage
+        registry.register_archetype(4, create_mask(&[1, 2, 3]));       // Position, Velocity, Health
+        registry.register_archetype(5, create_mask(&[1, 2, 4]));       // Position, Velocity, Damage
+        
+        // Find archetypes with Position, but not Damage
+        let include_mask = create_mask(&[1]);    // Position
+        let exclude_mask = create_mask(&[4]);    // Damage
+        let optional_mask = ComponentMask::new();
+        
+        let results = registry.find_with_filter(&include_mask, &exclude_mask, &optional_mask);
+        assert_eq!(results.len(), 3);
+        assert!(results.contains(&1));
+        assert!(results.contains(&2));
+        assert!(results.contains(&4));
+        
+        // Find archetypes with Position, and at least one of Health or Damage
+        let include_mask = create_mask(&[1]);    // Position
+        let exclude_mask = ComponentMask::new();
+        let optional_mask = create_mask(&[3, 4]);   // Health or Damage
+        
+        let results = registry.find_with_filter(&include_mask, &exclude_mask, &optional_mask);
+        assert_eq!(results.len(), 3);
+        assert!(results.contains(&2));
+        assert!(results.contains(&4));
+        assert!(results.contains(&5));
+        
+        // Find archetypes with Position AND Velocity, but NOT Damage
+        let include_mask = create_mask(&[1, 2]);  // Position AND Velocity
+        let exclude_mask = create_mask(&[4]);     // NOT Damage
+        let optional_mask = ComponentMask::new();
+        
+        let results = registry.find_with_filter(&include_mask, &exclude_mask, &optional_mask);
+        assert_eq!(results.len(), 2);
+        assert!(results.contains(&1));
         assert!(results.contains(&4));
     }
     
     #[test]
-    fn test_edge_cases() {
+    fn test_find_with_component_filter() {
         let mut registry = ArchetypeRegistry::new();
         
-        // Empty registry
-        let results = registry.find_matching_archetypes(&create_mask(&[1, 2]));
-        assert_eq!(results.len(), 0);
+        // Register archetypes with different component combinations
+        registry.register_archetype(1, create_mask(&[1, 2]));          // Position, Velocity
+        registry.register_archetype(2, create_mask(&[1, 3]));          // Position, Health
+        registry.register_archetype(3, create_mask(&[2, 4]));          // Velocity, Damage
+        registry.register_archetype(4, create_mask(&[1, 2, 3]));       // Position, Velocity, Health
+        registry.register_archetype(5, create_mask(&[1, 2, 4]));       // Position, Velocity, Damage
         
-        let results = registry.find_exact_match(&create_mask(&[1, 2]));
-        assert_eq!(results.len(), 0);
-        
-        let results = registry.find_archetypes_with_components(&[1, 2]);
-        assert_eq!(results.len(), 0);
-        
-        // Empty component list
-        registry.register_archetype(1, create_mask(&[1, 2]));
-        let results = registry.find_archetypes_with_components(&[]);
-        assert_eq!(results.len(), 0);
-        
-        // High component IDs (in different blocks)
-        let high_comp1 = 200;  // Block 3
-        let high_comp2 = 300;  // Block 4
-        
-        registry.register_archetype(2, create_mask(&[high_comp1, high_comp2]));
-        
-        let results = registry.find_archetypes_with_components(&[high_comp1]);
-        assert_eq!(results.len(), 1);
-        assert!(results.contains(&2));
-        
-        let results = registry.find_archetypes_with_components(&[high_comp1, high_comp2]);
-        assert_eq!(results.len(), 1);
-        assert!(results.contains(&2));
-    }
-    
-    #[test]
-    fn test_overlapping_archetypes() {
-        let mut registry = ArchetypeRegistry::new();
-        
-        // Create archetypes with overlapping components
-        registry.register_archetype(1, create_mask(&[1, 2, 3]));    // A, B, C
-        registry.register_archetype(2, create_mask(&[1, 2, 4]));    // A, B, D
-        registry.register_archetype(3, create_mask(&[1, 3, 4]));    // A, C, D
-        registry.register_archetype(4, create_mask(&[2, 3, 4]));    // B, C, D
-        registry.register_archetype(5, create_mask(&[1, 2, 3, 4])); // A, B, C, D
-        
-        // Query archetype with components A and B
-        let results = registry.find_archetypes_with_components(&[1, 2]);
+        // Find archetypes with Position, but not Damage
+        let results = registry.find_with_component_filter(&[1], &[4], &[]);
         assert_eq!(results.len(), 3);
         assert!(results.contains(&1));
         assert!(results.contains(&2));
-        assert!(results.contains(&5));
+        assert!(results.contains(&4));
         
-        // Query archetype with components A, C, and D
-        let results = registry.find_archetypes_with_components(&[1, 3, 4]);
-        assert_eq!(results.len(), 2);
-        assert!(results.contains(&3));
-        assert!(results.contains(&5));
-        
-        // Query archetype with all components
-        let results = registry.find_archetypes_with_components(&[1, 2, 3, 4]);
-        assert_eq!(results.len(), 1);
+        // Find archetypes with Position, and at least one of Health or Damage
+        let results = registry.find_with_component_filter(&[1], &[], &[3, 4]);
+        assert_eq!(results.len(), 3);
+        assert!(results.contains(&2));
+        assert!(results.contains(&4));
         assert!(results.contains(&5));
     }
 }

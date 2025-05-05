@@ -265,7 +265,13 @@ impl Archetype {
         &self.signature
     }
     
-    /// Gets the component IDs in this archetype
+    /// Gets the component mask for this archetype
+    #[inline]
+    pub fn component_mask(&self) -> &ComponentMask {
+        &self.signature.mask
+    }
+    
+    /// Gets the slice of component IDs for this archetype
     #[inline]
     pub fn component_ids(&self) -> &[ComponentId] {
         &self.component_ids
