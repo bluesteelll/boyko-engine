@@ -3,7 +3,7 @@ use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId, EntityId, In
 use crate::ecs::core::entity::entity_inland::EntityInland;
 use crate::ecs::core::component::component_mask::ComponentMask;
 use crate::ecs::core::archetype::archetype_signature::ArchetypeSignature;
-use crate::ecs::core::archetype::component_pool_bundle::ComponentPoolBundle;
+use crate::ecs::core::component::component_pool_bundle::ComponentPoolBundle;
 use crate::ecs::memory::arena::Arena;
 
 /// Archetype represents a unique combination of component types
