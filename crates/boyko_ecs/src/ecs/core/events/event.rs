@@ -1,5 +1,7 @@
 use std::alloc::Layout;
 
+use crate::ecs::core::entity::entity::Entity;
+
 /// Unique identifier for events
 pub type EventId = u64;
 
@@ -13,8 +15,8 @@ pub trait Event: 'static + Sized {
     fn event_name() -> &'static str;
     
     /// Returns the memory layout for this event type
-    #[inline]
-    fn layout() -> Layout {
-        Layout::new::<Self>()
-    }
+    fn artuments_layout() -> Layout; 
+    
+    
+    fn get_partitients() -> [Entity];
 }
