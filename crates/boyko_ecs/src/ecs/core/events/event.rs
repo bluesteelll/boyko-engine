@@ -17,6 +17,6 @@ pub trait Event: 'static + Sized {
     /// Returns the memory layout for this event type
     fn artuments_layout() -> Layout; 
     
-    
-    fn get_partitients() -> [Entity];
+    /// Returns the entities that are participants in this event
+    fn get_participents() -> [Entity];
 }
