@@ -1,4 +1,4 @@
-use crate::ecs::core::events::event::Event;
+/* use crate::ecs::core::events::event::Event;
 use crate::ecs::core::events::event_pool::EventPool;
 use crate::ecs::core::memory::arena::Arena;
 use std::ptr::NonNull;
@@ -77,4 +77,8 @@ impl EventPoolBundle {
             }
         }
     }
-}
+} */
+
+
+
+ //TODO: rework
