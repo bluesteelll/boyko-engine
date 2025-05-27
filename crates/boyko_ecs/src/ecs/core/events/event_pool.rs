@@ -1,4 +1,4 @@
-use std::alloc::Layout;
+/* use std::alloc::Layout;
 use std::ptr::NonNull;
 use crate::ecs::memory::arena::Arena;
 use crate::ecs::core::events::event::{Event, EventId, ErasedEvent};
@@ -255,3 +255,8 @@ impl<'a, E: Event> Iterator for EventPoolIter<'a, E> {
         Some(event)
     }
 }
+ */
+
+
+
+ //TODO: rework
