@@ -1,6 +1,6 @@
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, DeriveInput, Fields, Meta, MetaList, MetaNameValue, Expr, Lit, Field, Type};
+use syn::{parse_macro_input, DeriveInput, Fields};
 use std::sync::atomic::{AtomicUsize, AtomicU64, Ordering};
 
 // Global counter for component IDs
@@ -17,12 +17,14 @@ static EVENT_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// - Adds constant methods for optimized layout access
 ///
 /// # Example
+/// ```rust
 /// #[derive(Component)]
 /// struct Position {
 ///     x: f32,
 ///     y: f32,
 ///     z: f32,
 /// }
+/// ```
 #[proc_macro_derive(Component)]
 pub fn component_macro(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -98,14 +100,14 @@ pub fn component_macro(input: TokenStream) -> TokenStream {
 /// Derive macro for implementing the Event trait
 ///
 /// # Example
+/// ```rust
 /// #[derive(Event)]
 /// struct DamageEvent {
-///     // Parameters - any Sized type works automatically!
-///     // No Parameters derive needed thanks to blanket implementation
+///     // Parameters - these fields will be part of generated DamageEventParameters struct
 ///     damage_amount: f32,
 ///     is_critical: bool,
-///     damage_type: DamageType,  // Custom enum - works automatically
-///     damage_info: DamageInfo,  // Custom struct - works automatically
+///     damage_type: DamageType,  // Your custom types
+///     damage_info: DamageInfo,  // Your custom structs
 ///     
 ///     // Participants - entities involved (must be marked)
 ///     #[participant(components = "Position, Health")]
@@ -114,14 +116,18 @@ pub fn component_macro(input: TokenStream) -> TokenStream {
 ///     #[participant(components = "Position, Damage")]
 ///     attacker: Entity,
 /// }
+/// ```
+/// 
+/// This generates:
+/// - `DamageEventParticipants` struct implementing `Participants` trait
+/// - `DamageEventParameters` struct implementing `Parameters` trait
+/// - `Event` trait implementation for `DamageEvent`
 /// 
 /// Fields are treated as parameters by default unless marked with #[participant].
-/// ANY Sized type can be used as a parameter without additional derives or impls.
 #[proc_macro_derive(Event, attributes(event, participant, parameter))]
 pub fn event_derive(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = input.ident.clone();
-    let name_str = name.to_string();
     
     // Generate a unique event ID
     let event_id = EVENT_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -165,26 +171,23 @@ pub fn event_derive(input: TokenStream) -> TokenStream {
                         is_participant = true;
                         
                         // Parse component requirements
-                        match &attr.meta {
-                            Meta::List(meta_list) => {
-                                let content = meta_list.tokens.to_string();
-                                if let Some(components_start) = content.find("components = \"") {
-                                    let components_str = &content[components_start + 14..];
-                                    if let Some(end_quote) = components_str.find('"') {
-                                        let components = &components_str[..end_quote];
-                                        for comp in components.split(',') {
-                                            let comp = comp.trim();
-                                            if !comp.is_empty() {
-                                                let comp_ident = syn::Ident::new(comp, field_name.span());
-                                                component_ids.push(quote! {
-                                                    <#comp_ident as boyko_ecs::ecs::core::component::component::Component>::component_id()
-                                                });
-                                            }
+                        if let syn::Meta::List(meta_list) = &attr.meta {
+                            let content = meta_list.tokens.to_string();
+                            if let Some(components_start) = content.find("components = \"") {
+                                let components_str = &content[components_start + 14..];
+                                if let Some(end_quote) = components_str.find('"') {
+                                    let components = &components_str[..end_quote];
+                                    for comp in components.split(',') {
+                                        let comp = comp.trim();
+                                        if !comp.is_empty() {
+                                            let comp_ident = syn::Ident::new(comp, field_name.span());
+                                            component_ids.push(quote! {
+                                                <#comp_ident as boyko_ecs::ecs::core::component::component::Component>::component_id()
+                                            });
                                         }
                                     }
                                 }
                             }
-                            _ => {}
                         }
                         
                         participant_fields.push(field);
@@ -233,16 +236,6 @@ pub fn event_derive(input: TokenStream) -> TokenStream {
         quote! { pub #name: #ty }
     }).collect();
     
-    // Generate field accessors for Event struct
-    let event_fields: Vec<_> = participant_fields.iter()
-        .chain(parameter_fields.iter())
-        .map(|f| {
-            let name = &f.ident;
-            let ty = &f.ty;
-            quote! { #name: #ty }
-        })
-        .collect();
-    
     // Generate constructor field mappings
     let participant_field_names: Vec<_> = participant_fields.iter()
         .map(|f| &f.ident)
@@ -282,10 +275,10 @@ pub fn event_derive(input: TokenStream) -> TokenStream {
             #(#parameters_fields_tokens),*
         }
         
-        // Note: Parameters trait is automatically implemented via blanket impl
-        // impl<T: 'static + Sized> Parameters for T {}
+        // Explicitly implement Parameters trait for the generated type
+        impl boyko_ecs::ecs::core::events::parameters::Parameters for #parameters_name {}
         
-        // Update the Event struct to contain participants and parameters
+        // Add constants to the event struct
         impl #name {
             pub const EVENT_ID: boyko_ecs::ecs::core::events::event::EventId = #event_id;
             pub const EVENT_NAME: &'static str = stringify!(#name);
@@ -314,21 +307,25 @@ pub fn event_derive(input: TokenStream) -> TokenStream {
             
             fn participants(&self) -> &Self::Participants {
                 unsafe {
-                    // Safe because Participants struct has same layout as fields in Event
+                    // SAFETY: The event struct layout guarantees that participant fields
+                    // are placed first in the struct, in the same order as in the
+                    // generated Participants struct. Both use #[repr(C)] for layout stability.
                     &*(self as *const Self as *const Self::Participants)
                 }
             }
             
             fn participants_mut(&mut self) -> &mut Self::Participants {
                 unsafe {
-                    // Safe because Participants struct has same layout as fields in Event
+                    // SAFETY: Same layout guarantee as above, with mutable access
                     &mut *(self as *mut Self as *mut Self::Participants)
                 }
             }
             
             fn parameters(&self) -> &Self::Parameters {
                 unsafe {
-                    // Calculate offset to parameters
+                    // SAFETY: The event struct layout guarantees that parameter fields
+                    // follow participant fields. We calculate the offset based on the
+                    // size of the Participants struct to find the Parameters data.
                     let participants_size = std::mem::size_of::<Self::Participants>();
                     let ptr = (self as *const Self as *const u8).add(participants_size);
                     &*(ptr as *const Self::Parameters)
@@ -337,7 +334,7 @@ pub fn event_derive(input: TokenStream) -> TokenStream {
             
             fn parameters_mut(&mut self) -> &mut Self::Parameters {
                 unsafe {
-                    // Calculate offset to parameters
+                    // SAFETY: Same layout guarantee as above, with mutable access
                     let participants_size = std::mem::size_of::<Self::Participants>();
                     let ptr = (self as *mut Self as *mut u8).add(participants_size);
                     &mut *(ptr as *mut Self::Parameters)
@@ -345,8 +342,9 @@ pub fn event_derive(input: TokenStream) -> TokenStream {
             }
         }
         
-        // Register event in the global registry
+        // Register event in the global registry at program initialization
         #[ctor::ctor]
+        #[allow(non_snake_case)]
         fn __register_event() {
             boyko_ecs::ecs::core::events::event_registry::register_event::<#name>(#event_id);
         }

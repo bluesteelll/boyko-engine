@@ -41,9 +41,3 @@ pub trait Parameters: 'static + Sized {
         self as *mut Self as *mut u8
     }
 }
-
-/// Blanket implementation - any Sized type can be used as Parameters
-/// This allows maximum flexibility for event parameter types
-impl<T: 'static + Sized> Parameters for T {
-    // Uses all default implementations
-}
