@@ -1,0 +1,111 @@
+name: Deploy Documentation
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  MDBOOK_VERSION: '0.4.40'
+  MDBOOK_MERMAID_VERSION: '0.14.0'
+
+jobs:
+  build:
+    name: Build documentation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: docs
+
+      - name: Install mdBook and preprocessors
+        run: |
+          mkdir -p $HOME/.local/bin
+          curl -sSL https://github.com/rust-lang/mdBook/releases/download/v${MDBOOK_VERSION}/mdbook-v${MDBOOK_VERSION}-x86_64-unknown-linux-gnu.tar.gz | tar -xz -C $HOME/.local/bin
+          curl -sSL https://github.com/badboy/mdbook-mermaid/releases/download/v${MDBOOK_MERMAID_VERSION}/mdbook-mermaid-v${MDBOOK_MERMAID_VERSION}-x86_64-unknown-linux-gnu.tar.gz | tar -xz -C $HOME/.local/bin
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Verify mdBook
+        run: |
+          mdbook --version
+          mdbook-mermaid --version
+
+      - name: Build mdBook
+        run: mdbook build
+
+      - name: Build cargo doc
+        env:
+          RUSTDOCFLAGS: "-D warnings --enable-index-page -Z unstable-options"
+        run: |
+          # Note: --enable-index-page requires nightly. For stable, we generate a manual redirect below.
+          cargo doc --no-deps --workspace --all-features || cargo doc --no-deps --workspace --all-features
+
+      - name: Assemble site
+        run: |
+          mkdir -p _site
+          # mdBook output → root
+          cp -r book/output/* _site/
+          # cargo doc → /api/
+          mkdir -p _site/api
+          cp -r target/doc/* _site/api/
+          # Index redirect for /api/ to main crate
+          cat > _site/api/index.html <<'EOF'
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <title>Boyko Engine API</title>
+            <meta http-equiv="refresh" content="0; url=boyko_ecs/index.html">
+            <link rel="canonical" href="boyko_ecs/index.html">
+          </head>
+          <body>
+            <p>Redirecting to <a href="boyko_ecs/index.html">boyko_ecs</a>...</p>
+          </body>
+          </html>
+          EOF
+          # Ensure GitHub Pages serves correctly
+          touch _site/.nojekyll
+
+      - name: Setup Pages
+        if: github.ref == 'refs/heads/master'
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        if: github.ref == 'refs/heads/master'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4
