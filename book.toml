@@ -1,0 +1,47 @@
+[book]
+title = "Boyko Engine"
+authors = ["Boyko Engine Contributors"]
+description = "A high-performance Rust ECS game engine focused on cache optimization (data and instruction) and lock-free parallelism"
+language = "en"
+multilingual = false
+src = "book/src"
+
+[build]
+build-dir = "book/output"
+create-missing = false
+extra-watch-dirs = ["docs"]
+
+[output.html]
+default-theme = "navy"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/bluesteelll/boyko-engine"
+edit-url-template = "https://github.com/bluesteelll/boyko-engine/edit/master/{path}"
+site-url = "/boyko-engine/"
+no-section-label = false
+additional-css = ["book/theme/custom.css"]
+
+[output.html.fold]
+enable = true
+level = 1
+
+[output.html.playground]
+editable = false
+runnable = false
+copyable = true
+
+[output.html.search]
+enable = true
+limit-results = 30
+use-boolean-and = true
+boost-title = 2
+boost-hierarchy = 2
+boost-paragraph = 1
+expand = true
+heading-split-level = 3
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"
+
+[preprocessor.links]
+
+[preprocessor.index]
