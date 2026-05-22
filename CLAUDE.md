@@ -2,13 +2,15 @@
 
 Rust ECS-движок для игр с фокусом на **ультимативную производительность, кеш-локальность и нативный параллелизм**. Без компромиссов в пользу удобства против скорости.
 
-## Структура
+## Структура (ветка `ecs`)
+
+> ⚠️ Ты сейчас на ветке `ecs` — это последняя активная ветка разработки. **Сейчас не компилируется** — есть нерешённые ошибки (`299a6b6 Blanket trait impl error fixed` была попыткой фикса, неполной). Задача билда — приоритет.
 
 Workspace из крейтов:
 
-- [`crates/boyko_ecs/`](crates/boyko_ecs/) — ядро ECS (память, компоненты, сущности; на ветке `ecs` ещё архетипы, queries, events)
-- [`crates/boyko_macros/`](crates/boyko_macros/) — proc-macros (`#[derive(Component)]`)
-- `crates/boyko_utils/` — битмаски и битсеты (есть только на ветке `ecs`)
+- [`crates/boyko_ecs/`](crates/boyko_ecs/) — ядро ECS: память, компоненты, сущности, **архетипы, queries, events**
+- [`crates/boyko_macros/`](crates/boyko_macros/) — proc-macros: `#[derive(Component)]` и `#[derive(Event)]`
+- [`crates/boyko_utils/`](crates/boyko_utils/) — переиспользуемые коллекции: `BitSet`, `BitMask`, `BitSet512`, `SparseMap`, `SparseSlotMap`, `Slot`
 - [`src/main.rs`](src/main.rs) — исполняемая обёртка (сейчас пустая; проект библиотечный)
 
 ## Принципы (НЕРУШИМЫЕ)
@@ -43,12 +45,25 @@ cargo +nightly miri test                           # UB-детектор (есл
 
 ## Текущее состояние веток
 
-| Ветка | Что есть |
-|-------|----------|
-| `master` | Только подсистема памяти: `Arena`, `ComponentPool`, `Chunk`, `MemFreeBlockMaster`, базовые типы `Entity`/`Component` |
-| `ecs` | Полная архитектура: `Archetype`, `ArchetypeMaster`, `EcsMaster`, `Query`, `Event`, `BitSet`. **Не смержена** |
+| Ветка | Что есть | Билд |
+|-------|----------|------|
+| `master` | Только подсистема памяти: `Arena`, `ComponentPool<T>` (generic), `Chunk<T>` (generic), `MemFreeBlockMaster`, базовые типы `Entity`/`Component` | ✅ собирается |
+| **`ecs`** (ты здесь) | Полная архитектура: `EcsMaster`, `ArchetypeMaster`, `Archetype`, `Query`, `Event`, `EventRegistry`, `ComponentRegistry`, type-erased `ComponentPool` + `Chunk`, `EntityMaster` с recycling, `boyko_utils` (BitSet/SparseMap) | ❌ **не компилируется** |
 
-Если задача касается ECS-уровня (queries, archetypes, scheduler) — изучай ветку `ecs` через `git show origin/ecs:путь/к/файлу.rs`.
+### Ключевые архитектурные отличия от `master`
+
+- **Type-erased `ComponentPool` и `Chunk`** — больше не generic по `T`. Используют `ComponentRegistry` для хранения `Layout` (size + align) каждого `ComponentId`. Это нужно для гетерогенного хранения компонентов в архетипе.
+- **`Unit { ptr: *mut u8, buffer_index: usize }`** заменил двухуровневую адресацию `UnitId { chunk, inland }` с master. Теперь хранится **прямой указатель** на компонент.
+- **`identifiers/primitives`** — все ID унифицированы как `usize`: `EntityId`, `ArchetypeId`, `ChunkId`, `ComponentId`, `Generation`, `InlandPoolId`, и т.д.
+- **`EntityMaster`** — настоящий менеджер сущностей с reuse через free list и `SparseMap<EntityInland>` для O(1) lookup.
+- **`EcsMaster`** — top-level фасад, возвращает `anyhow::Result` (спорно для библиотеки — пересмотреть при стабилизации).
+- **Глобальные registries** (`ComponentRegistry`, `EventRegistry`) — хранят metadata в `static` storage. Регистрация при первом обращении через `#[derive]`-сгенерированный код.
+
+### Где смотреть детали
+
+- [docs/SYSTEMS.md](docs/SYSTEMS.md) — полный каталог подсистем с file:line ссылками
+- [docs/FEATURE_MAP.md](docs/FEATURE_MAP.md) — карта «хочу X → ищи Y»
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — слои, dependency graph, data flow
 
 ## Документация — два слоя
 
