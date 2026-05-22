@@ -46,39 +46,40 @@ pub fn component_macro(input: TokenStream) -> TokenStream {
         impl #name {
             /// The unique ID of this component type
             pub const COMPONENT_ID: usize = #component_id;
-            
+
             /// Size of this component in bytes
             pub const SIZE: usize = std::mem::size_of::<Self>();
-            
+
             /// Alignment requirement of this component
             pub const ALIGN: usize = std::mem::align_of::<Self>();
-            
+
             /// Returns the memory layout for this component type
             #[inline(always)]
             pub const fn layout() -> std::alloc::Layout {
                 unsafe { std::alloc::Layout::from_size_align_unchecked(Self::SIZE, Self::ALIGN) }
             }
-            
-            /// The component's type name (for debugging)
-            pub const TYPE_NAME: &'static str = std::any::type_name::<Self>();
         }
-        
+
         impl boyko_ecs::ecs::core::component::component::Component for #name {
             #[inline(always)]
             fn component_id() -> usize {
                 Self::COMPONENT_ID
             }
-            
-            #[inline(always)]
+
+            // NOTE: `std::any::type_name::<Self>()` is not yet stable as a const fn.
+            // Calling it from a regular fn body is fine, and the compiler usually
+            // folds it to a constant at codegen anyway, so there is no measurable
+            // performance loss compared to the previous `const TYPE_NAME` approach.
+            #[inline]
             fn debug_type_name() -> &'static str {
-                Self::TYPE_NAME
+                std::any::type_name::<Self>()
             }
-            
+
             #[inline(always)]
             fn mem_size() -> usize {
                 Self::SIZE
             }
-            
+
             #[inline(always)]
             fn alignment() -> usize {
                 Self::ALIGN
