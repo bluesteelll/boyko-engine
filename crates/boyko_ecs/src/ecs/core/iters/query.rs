@@ -160,26 +160,35 @@ mod tests {
     use crate::ecs::core::component::component_registry;
     use crate::ecs::memory::arena::Arena;
     
-    // Mock component types for testing
-    struct Position;
-    struct Velocity;
-    struct Health;
-    struct Damage;
+    // Mock component types for testing.
+    //
+    // Non-ZST wrappers around `u32` — the `MemFreeBlockMaster` allocator
+    // refuses zero-byte requests (returns `None` from `allocate_aligned`),
+    // which means a `ComponentPool` over a ZST cannot reserve its buffer
+    // and `with_default_sizes` panics with "Arena out of memory". Wrapping
+    // in `u32` gives a real layout (4 bytes) without changing any
+    // mask/signature behaviour the tests rely on.
+    #[repr(C)] struct Position(u32);
+    #[repr(C)] struct Velocity(u32);
+    #[repr(C)] struct Health(u32);
+    #[repr(C)] struct Damage(u32);
     
+    // Each test module owns its own ComponentId range; see the corresponding
+    // comment in `ecs_master.rs` tests for the rationale. `query` uses 200-209.
     impl Component for Position {
-        fn component_id() -> ComponentId { 1 }
+        fn component_id() -> ComponentId { 200 }
     }
-    
+
     impl Component for Velocity {
-        fn component_id() -> ComponentId { 2 }
+        fn component_id() -> ComponentId { 201 }
     }
-    
+
     impl Component for Health {
-        fn component_id() -> ComponentId { 3 }
+        fn component_id() -> ComponentId { 202 }
     }
-    
+
     impl Component for Damage {
-        fn component_id() -> ComponentId { 4 }
+        fn component_id() -> ComponentId { 203 }
     }
     
     fn register_mock_components() {
@@ -190,28 +199,33 @@ mod tests {
         component_registry::register_layout::<Damage>(Damage::component_id());
     }
     
-    fn create_test_arena() -> Arena {
-        Arena::new() // Arena constructor takes no arguments
-    }
-    
-    fn setup_test_archetypes() -> ArchetypeMaster {
+    /// Build the `ArchetypeMaster` together with the `Box<Arena>` it borrows.
+    ///
+    /// The arena MUST be returned to the caller and kept alive for the
+    /// duration of the test: `ArchetypeMaster` stores a `NonNull<Arena>`
+    /// derived from this `Box`, and dropping the arena turns that pointer
+    /// dangling — manifests as `Arena out of memory` panics in release (the
+    /// `MemFreeBlockMaster` lives in the freed buffer). This is the same
+    /// failure mode that audit C-001 fixed inside `EcsMaster`; we apply the
+    /// `Box<Arena>` pattern here too so tests don't reintroduce it.
+    fn setup_test_archetypes() -> (ArchetypeMaster, Box<Arena>) {
         register_mock_components();
-        let arena = create_test_arena();
+        let arena: Box<Arena> = Box::new(Arena::new());
         let mut master = ArchetypeMaster::new(&arena);
-        
+
         // Create some test archetypes
         master.create_archetype(&[Position::component_id()]);
         master.create_archetype(&[Position::component_id(), Velocity::component_id()]);
         master.create_archetype(&[Health::component_id()]);
         master.create_archetype(&[Position::component_id(), Health::component_id()]);
         master.create_archetype(&[Position::component_id(), Velocity::component_id(), Health::component_id()]);
-        
-        master
+
+        (master, arena)
     }
     
     #[test]
     fn test_basic_query() {
-        let master = setup_test_archetypes();
+        let (master, _arena) = setup_test_archetypes();
         let query = Query::with_component_ids(&master, &[Position::component_id()]);
         
         // Should find all archetypes with Position
@@ -225,7 +239,7 @@ mod tests {
     
     #[test]
     fn test_query_with_multiple_components() {
-        let master = setup_test_archetypes();
+        let (master, _arena) = setup_test_archetypes();
         let query = Query::with_component_ids(&master, &[Position::component_id(), Velocity::component_id()]);
         
         // Should find archetypes with both Position and Velocity
@@ -240,7 +254,7 @@ mod tests {
     
     #[test]
     fn test_type_safe_query() {
-        let master = setup_test_archetypes();
+        let (master, _arena) = setup_test_archetypes();
         let query = Query::with::<(Position, Velocity)>(&master);
         
         // Should find archetypes with both Position and Velocity
@@ -255,7 +269,7 @@ mod tests {
     
     #[test]
     fn test_iteration() {
-        let master = setup_test_archetypes();
+        let (master, _arena) = setup_test_archetypes();
         let query = Query::with_component_ids(&master, &[Position::component_id()]);
         
         // Manual iteration with iter()
@@ -284,7 +298,7 @@ mod tests {
     
     #[test]
     fn test_complex_filtering() {
-        let master = setup_test_archetypes();
+        let (master, _arena) = setup_test_archetypes();
         
         // Create masks for filtering
         let mut include_mask = ComponentMask::new();
@@ -297,35 +311,46 @@ mod tests {
         optional_mask.set(Velocity::component_id());
         optional_mask.set(Health::component_id());
         
-        // Should find archetypes with Position, without Damage, and with either Velocity or Health
+        // Should find archetypes with Position, without Damage, and with either Velocity or Health.
+        //
+        // From setup_test_archetypes(), 5 archetypes were created:
+        //   1. [Position]                          — no Velocity, no Health → fails `optional`
+        //   2. [Position, Velocity]                — matches
+        //   3. [Health]                            — no Position           → fails `include`
+        //   4. [Position, Health]                  — matches
+        //   5. [Position, Velocity, Health]        — matches
+        // Expected: 3. (The original test asserted 4, which was wrong — see
+        // archetype_master.rs::test_get_archetypes_with_component_filter for
+        // the consistent baseline: optional == "at least one of these must
+        // be present".)
         let query = Query::with_filters(
             &master,
-            &include_mask, 
+            &include_mask,
             &exclude_mask,
             &optional_mask
         );
-        
-        assert_eq!(query.len(), 4);
-        
+
+        assert_eq!(query.len(), 3);
+
         // Verify filtering criteria
         for archetype in query.iter() {
             // Must have Position
             assert!(archetype.has_component_id(Position::component_id()));
-            
+
             // Must not have Damage
             assert!(!archetype.has_component_id(Damage::component_id()));
-            
+
             // Must have either Velocity or Health or both
             assert!(
-                archetype.has_component_id(Velocity::component_id()) || 
+                archetype.has_component_id(Velocity::component_id()) ||
                 archetype.has_component_id(Health::component_id())
             );
         }
     }
-    
+
     #[test]
     fn test_type_safe_filters() {
-        let master = setup_test_archetypes();
+        let (master, _arena) = setup_test_archetypes();
         
         // Create masks manually instead of using type_filters to avoid ComponentSet issues
         let mut include_mask = ComponentMask::new();
@@ -338,26 +363,27 @@ mod tests {
         optional_mask.set(Velocity::component_id());
         optional_mask.set(Health::component_id());
         
+        // Same expectation as test_complex_filtering: 3 archetypes match.
         let query = Query::with_filters(
             &master,
             &include_mask,
             &exclude_mask,
             &optional_mask
         );
-        
-        assert_eq!(query.len(), 4);
-        
+
+        assert_eq!(query.len(), 3);
+
         // Verify filtering criteria
         for archetype in query.iter() {
             // Must have Position
             assert!(archetype.has_component_id(Position::component_id()));
-            
+
             // Must not have Damage
             assert!(!archetype.has_component_id(Damage::component_id()));
-            
+
             // Must have either Velocity or Health or both
             assert!(
-                archetype.has_component_id(Velocity::component_id()) || 
+                archetype.has_component_id(Velocity::component_id()) ||
                 archetype.has_component_id(Health::component_id())
             );
         }
