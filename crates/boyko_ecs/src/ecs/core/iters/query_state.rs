@@ -34,8 +34,7 @@ pub struct QueryState {
     exclude: ComponentMask,
     optional: ComponentMask,
     // Lines 4-5 (coldest): dedup bitset. Touched only when delta > 0.
-    // `pub(crate)` so Query<'a> can manually populate it for from_archetypes/exact-match paths.
-    pub(crate) matched_archetypes: ArchetypeBitSet,
+    matched_archetypes: ArchetypeBitSet,
 }
 
 impl QueryState {
@@ -73,6 +72,12 @@ impl QueryState {
     ///
     /// Warm path (generation unchanged): one load + comparison, then slice walk.
     /// Cold path (new archetypes exist): `update_archetypes` classifies the delta.
+    ///
+    /// # `clear()` interaction
+    /// If `master.clear()` was called since the last `iter()` / `update_archetypes()`
+    /// invocation, this state's cache is stale and must not be used. Call `reset()`
+    /// first, or drop this state and reconstruct. Debug builds catch the violation
+    /// via `debug_assert!`; release builds silently use the stale cache.
     pub fn iter<'a>(&'a mut self, master: &'a ArchetypeMaster) -> QueryStateIter<'a> {
         debug_assert!(
             self.generation <= master.archetype_generation(),
@@ -110,18 +115,18 @@ impl QueryState {
         // full sweep, but requires bundle index tracking. The dedup bitset makes the
         // per-seen-id work O(1), so total cost is O(new ids).
         for id in 1..current.get() {
-            if !self.matched_archetypes.contains(id) {
-                if let Some(arch) = master.get_archetype(id) {
-                    let mask = arch.component_mask();
-                    if self.matches(mask) {
-                        self.matched_archetypes.insert(id);
-                        self.matched_ids.push(id);
-                    }
-                    // Unmatched IDs are not inserted into matched_archetypes.
-                    // Archetype component sets are immutable post-creation, so
-                    // the same filter applied again will still not match. The loop
-                    // bound is O(current.get()) per call, bounded by MAX_ARCHETYPES.
+            if !self.matched_archetypes.contains(id)
+                && let Some(arch) = master.get_archetype(id)
+            {
+                let mask = arch.component_mask();
+                if self.matches(mask) {
+                    self.matched_archetypes.insert(id);
+                    self.matched_ids.push(id);
                 }
+                // Unmatched IDs are not inserted into matched_archetypes.
+                // Archetype component sets are immutable post-creation, so
+                // the same filter applied again will still not match. The loop
+                // bound is O(current.get()) per call, bounded by MAX_ARCHETYPES.
             }
         }
         self.generation = current;
@@ -183,23 +188,28 @@ impl QueryState {
         }
     }
 
-    /// Returns a mutable reference to the matched-IDs vector.
+    /// Inserts an archetype ID into both the dedup bitset and the matched-IDs
+    /// list, if it has not already been recorded.
     ///
-    /// Used by `Query<'a>` for the `from_archetypes` and `with_exact_mask`
-    /// paths that pre-populate the cache without going through `update_archetypes`.
+    /// This is the single authoritative mutation path for adding a matched
+    /// archetype; both internal structures are always updated together,
+    /// preventing silent desync if new internal state is added in the future.
     #[inline]
-    pub(crate) fn matched_ids_mut(&mut self) -> &mut Vec<ArchetypeId> {
-        &mut self.matched_ids
+    pub(crate) fn push_matched(&mut self, id: ArchetypeId) {
+        if !self.matched_archetypes.contains(id) {
+            self.matched_archetypes.insert(id);
+            self.matched_ids.push(id);
+        }
     }
 
-    /// Forces the stored generation to `new_gen`, marking the cache as synced.
+    /// Marks this state as synced with `master`'s current generation.
     ///
-    /// Used by `Query<'a>` after manually pre-populating the cache via
-    /// `from_archetypes` or `with_exact_mask`, where `update_archetypes` is
-    /// intentionally bypassed.
+    /// Call once after manually pre-populating the cache via `push_matched`
+    /// (e.g., in `Query::from_archetypes` or `Query::with_exact_mask`) to
+    /// prevent a redundant `update_archetypes` sweep on the next `iter()`.
     #[inline]
-    pub(crate) fn set_generation(&mut self, new_gen: ArchetypeGeneration) {
-        self.generation = new_gen;
+    pub(crate) fn mark_synced(&mut self, master: &ArchetypeMaster) {
+        self.generation = master.archetype_generation();
     }
 }
 

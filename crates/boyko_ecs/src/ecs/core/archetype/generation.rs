@@ -13,13 +13,11 @@ impl ArchetypeGeneration {
     /// First generation value. Used as initial state in `ArchetypeMaster::new`
     /// and the floor for `Option<ArchetypeGeneration>::None`-replacement
     /// patterns in `QueryState`.
-    pub(crate) const FIRST: Self = unsafe {
-        // SAFETY: 1 is non-zero by construction.
-        Self(NonZeroUsize::new_unchecked(1))
-    };
+    pub(crate) const FIRST: Self =
+        Self(NonZeroUsize::new(1).expect("invariant: 1 is non-zero"));
 
-    /// Monotonic step. Overflow at 2^63 increments is physically unreachable
-    /// (290 years at 1 GHz bump rate); `wrapping_add` documents the policy.
+    /// Monotonic step. Overflow at 2^64 increments is physically unreachable
+    /// (~584 years at 1 GHz bump rate); `wrapping_add` documents the policy.
     #[inline]
     pub(crate) fn bump(&mut self) {
         // SAFETY: wrapping usize+1 cannot produce zero unless start was usize::MAX,

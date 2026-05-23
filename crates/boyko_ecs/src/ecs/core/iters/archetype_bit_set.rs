@@ -19,6 +19,20 @@ pub struct ArchetypeBitSet {
     bits: [u64; ARCH_BITSET_WORDS],
 }
 
+/// Cold path: panic for out-of-range archetype IDs.
+///
+/// Extracted from `insert`/`contains` hot bodies so the panic machinery
+/// (format string, `format_args!`, stack unwinding prep) does not inflate
+/// the hot-path binary size and pollute I-cache (principle #3 / #7).
+#[cold]
+#[inline(never)]
+fn archetype_id_out_of_range(id: usize) -> ! {
+    panic!(
+        "invariant: archetype_id {} < MAX_ARCHETYPES ({})",
+        id, MAX_ARCHETYPES
+    );
+}
+
 impl ArchetypeBitSet {
     /// Creates an empty bitset.
     pub const fn new() -> Self {
@@ -34,12 +48,9 @@ impl ArchetypeBitSet {
     /// Mirrors the `MAX_COMPONENTS` overflow policy in `ComponentRegistry`.
     #[inline]
     pub fn insert(&mut self, archetype_id: usize) {
-        assert!(
-            archetype_id < MAX_ARCHETYPES,
-            "invariant: archetype_id {} < MAX_ARCHETYPES ({})",
-            archetype_id,
-            MAX_ARCHETYPES,
-        );
+        if archetype_id >= MAX_ARCHETYPES {
+            archetype_id_out_of_range(archetype_id);
+        }
         let w = archetype_id >> 6;
         let b = archetype_id & 63;
         self.bits[w] |= 1u64 << b;
@@ -51,12 +62,9 @@ impl ArchetypeBitSet {
     /// Panics in all builds when `archetype_id >= MAX_ARCHETYPES`.
     #[inline]
     pub fn contains(&self, archetype_id: usize) -> bool {
-        assert!(
-            archetype_id < MAX_ARCHETYPES,
-            "invariant: archetype_id {} < MAX_ARCHETYPES ({})",
-            archetype_id,
-            MAX_ARCHETYPES,
-        );
+        if archetype_id >= MAX_ARCHETYPES {
+            archetype_id_out_of_range(archetype_id);
+        }
         let w = archetype_id >> 6;
         let b = archetype_id & 63;
         (self.bits[w] >> b) & 1 == 1

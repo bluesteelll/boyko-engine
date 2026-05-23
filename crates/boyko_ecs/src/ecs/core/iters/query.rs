@@ -35,17 +35,13 @@ impl<'a> Query<'a> {
         let exclude = ComponentMask::new();
         let optional = ComponentMask::new();
         let mut state = QueryState::new(include, exclude, optional);
-        // Populate the cache manually from the provided archetype list.
+        // Populate the cache via push_matched, which keeps the dedup bitset
+        // and matched-IDs list in sync through the single authoritative path.
         for arch in archetypes {
-            // iter_cached is used later; for from_archetypes we push IDs directly.
-            // matched_archetypes bitset must also be updated for dedup consistency.
-            let id = arch.id();
-            state.matched_archetypes.insert(id);
-            state.matched_ids_mut().push(id);
+            state.push_matched(arch.id());
         }
         // Mark generation as synced so iter_cached can be called without update.
-        let current_gen = master.archetype_generation();
-        state.set_generation(current_gen);
+        state.mark_synced(master);
         Self { state, master }
     }
 
@@ -77,11 +73,9 @@ impl<'a> Query<'a> {
         let optional = ComponentMask::new();
         let mut state = QueryState::new(include, exclude, optional);
         for id in archetype_ids {
-            state.matched_archetypes.insert(id);
-            state.matched_ids_mut().push(id);
+            state.push_matched(id);
         }
-        let current_gen = master.archetype_generation();
-        state.set_generation(current_gen);
+        state.mark_synced(master);
         Self { state, master }
     }
 
