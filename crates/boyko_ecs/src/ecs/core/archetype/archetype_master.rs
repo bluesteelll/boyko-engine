@@ -101,38 +101,116 @@ impl ArchetypeMaster {
         self.archetypes.get_archetype_mut(archetype_id)
     }
     
-    /// Finds all archetypes that contain the specified components
+    /// Finds all archetypes that contain the specified components.
+    ///
+    /// Thin wrapper around [`find_archetypes_with_components_into`] for backward compatibility.
+    #[inline]
     pub fn find_archetypes_with_components(&self, component_ids: &[ComponentId]) -> Vec<ArchetypeId> {
         self.registry.find_archetypes_with_components(component_ids)
     }
-    
-    /// Finds all archetypes containing all components in the specified mask
+
+    /// Writes matching archetype IDs into `out`.
+    ///
+    /// # API contract
+    /// `out` is **cleared at function entry**. Any existing contents are
+    /// discarded. The caller's `Vec` is reused only for capacity, not data —
+    /// this enables zero-allocation reuse across calls.
+    #[inline]
+    pub fn find_archetypes_with_components_into(
+        &self,
+        component_ids: &[ComponentId],
+        out: &mut Vec<ArchetypeId>,
+    ) {
+        self.registry.find_archetypes_with_components_into(component_ids, out);
+    }
+
+    /// Finds all archetypes containing all components in the specified mask.
+    ///
+    /// Thin wrapper around [`find_matching_archetypes_into`] for backward compatibility.
+    #[inline]
     pub fn find_matching_archetypes(&self, mask: &ComponentMask) -> Vec<ArchetypeId> {
         self.registry.find_matching_archetypes(mask)
     }
-    
-    /// Find archetypes with complex filtering criteria (include, exclude, optional components)
+
+    /// Writes archetypes matching `mask` into `out`.
+    ///
+    /// # API contract
+    /// `out` is **cleared at function entry**. Any existing contents are
+    /// discarded. The caller's `Vec` is reused only for capacity, not data —
+    /// this enables zero-allocation reuse across calls.
+    #[inline]
+    pub fn find_matching_archetypes_into(&self, mask: &ComponentMask, out: &mut Vec<ArchetypeId>) {
+        self.registry.find_matching_archetypes_into(mask, out);
+    }
+
+    /// Find archetypes with complex filtering criteria (include, exclude, optional components).
+    ///
+    /// Thin wrapper around [`find_archetypes_with_filter_into`] for backward compatibility.
+    #[inline]
     pub fn find_archetypes_with_filter(
         &self,
         include_mask: &ComponentMask,
         exclude_mask: &ComponentMask,
-        optional_mask: &ComponentMask
+        optional_mask: &ComponentMask,
     ) -> Vec<ArchetypeId> {
         self.registry.find_with_filter(include_mask, exclude_mask, optional_mask)
     }
-    
-    /// Find archetypes with components that can be included, excluded, or optional
+
+    /// Writes matching archetype IDs into `out` using include/exclude/optional masks.
+    ///
+    /// # API contract
+    /// `out` is **cleared at function entry**. Any existing contents are
+    /// discarded. The caller's `Vec` is reused only for capacity, not data —
+    /// this enables zero-allocation reuse across calls.
+    #[inline]
+    pub fn find_archetypes_with_filter_into(
+        &self,
+        include_mask: &ComponentMask,
+        exclude_mask: &ComponentMask,
+        optional_mask: &ComponentMask,
+        out: &mut Vec<ArchetypeId>,
+    ) {
+        self.registry
+            .find_with_filter_into(include_mask, exclude_mask, optional_mask, out);
+    }
+
+    /// Find archetypes with components that can be included, excluded, or optional.
+    ///
+    /// Thin wrapper around [`find_archetypes_with_component_filter_into`] for backward compatibility.
+    #[inline]
     pub fn find_archetypes_with_component_filter(
         &self,
         include_components: &[ComponentId],
         exclude_components: &[ComponentId],
-        optional_components: &[ComponentId]
+        optional_components: &[ComponentId],
     ) -> Vec<ArchetypeId> {
         self.registry.find_with_component_filter(
             include_components,
             exclude_components,
-            optional_components
+            optional_components,
         )
+    }
+
+    /// Writes matching archetype IDs into `out` using component-array filters.
+    ///
+    /// # API contract
+    /// `out` is **cleared at function entry**. Any existing contents are
+    /// discarded. The caller's `Vec` is reused only for capacity, not data —
+    /// this enables zero-allocation reuse across calls.
+    #[inline]
+    pub fn find_archetypes_with_component_filter_into(
+        &self,
+        include_components: &[ComponentId],
+        exclude_components: &[ComponentId],
+        optional_components: &[ComponentId],
+        out: &mut Vec<ArchetypeId>,
+    ) {
+        self.registry.find_with_component_filter_into(
+            include_components,
+            exclude_components,
+            optional_components,
+            out,
+        );
     }
     
     /// Get references to archetypes with complex filtering

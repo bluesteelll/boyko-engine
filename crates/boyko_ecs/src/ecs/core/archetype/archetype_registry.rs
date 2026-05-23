@@ -77,81 +77,136 @@ impl ArchetypeRegistry {
         false
     }
     
-    /// Finds archetypes containing all components in the query mask
+    /// Finds archetypes containing all components in the query mask.
+    ///
+    /// Thin wrapper around [`find_matching_archetypes_into`] for backward compatibility.
+    #[inline]
     pub fn find_matching_archetypes(&self, mask: &ComponentMask) -> Vec<ArchetypeId> {
-        // Create query signature
+        let mut out = Vec::new();
+        self.find_matching_archetypes_into(mask, &mut out);
+        out
+    }
+
+    /// Writes matching archetype IDs into `out`.
+    ///
+    /// # API contract
+    /// `out` is **cleared at function entry**. Any existing contents are
+    /// discarded. The caller's `Vec` is reused only for capacity, not data —
+    /// this enables zero-allocation reuse across calls.
+    #[inline]
+    pub fn find_matching_archetypes_into(&self, mask: &ComponentMask, out: &mut Vec<ArchetypeId>) {
+        out.clear();
         let query = ArchetypeSignature::new(*mask);
-        let mut result = Vec::new();
-        
-        // Iterate only through active patterns
+
         for &pattern in &self.active_patterns {
-            // Check if all required blocks are present in this pattern
-            // If (query & !pattern) != 0, it means the query has bits that pattern doesn't
+            // If (query & !pattern) != 0 the query requires a block the pattern lacks.
             if (query.block_summary.value() & !pattern) == 0 {
                 let pattern_index = pattern as usize;
-                
-                // Get the group of archetypes with this pattern
                 if let Some(group) = self.block_groups.get(pattern_index) {
-                    // Check each archetype in the group
                     for &(id, ref signature) in group {
                         if signature.contains(&query) {
-                            result.push(id);
+                            out.push(id);
                         }
                     }
                 }
             }
         }
-        
-        result
     }
     
-    /// Finds archetypes that match the exact component mask
+    /// Finds archetypes that match the exact component mask.
+    ///
+    /// Thin wrapper around [`find_exact_match_into`] for backward compatibility.
+    #[inline]
     pub fn find_exact_match(&self, mask: &ComponentMask) -> Vec<ArchetypeId> {
-        // Create query signature
+        let mut out = Vec::new();
+        self.find_exact_match_into(mask, &mut out);
+        out
+    }
+
+    /// Writes archetypes with exactly `mask` into `out`.
+    ///
+    /// # API contract
+    /// `out` is **cleared at function entry**. Any existing contents are
+    /// discarded. The caller's `Vec` is reused only for capacity, not data —
+    /// this enables zero-allocation reuse across calls.
+    #[inline]
+    pub fn find_exact_match_into(&self, mask: &ComponentMask, out: &mut Vec<ArchetypeId>) {
+        out.clear();
         let query = ArchetypeSignature::new(*mask);
         let block_pattern = query.block_summary.value() as usize;
-        
-        // Check if there are any archetypes with this exact block pattern
+
         if let Some(group) = self.block_groups.get(block_pattern) {
-            // Filter archetypes that have exactly this mask
-            return group.iter()
-                .filter(|(_, signature)| signature.mask == query.mask)
-                .map(|(id, _)| *id)
-                .collect();
+            for (id, signature) in group {
+                if signature.mask == query.mask {
+                    out.push(*id);
+                }
+            }
         }
-        
-        Vec::new()
     }
     
-    /// Finds archetypes containing all specified components
-    /// Optimized for queries with few components
+    /// Finds archetypes containing all specified components.
+    ///
+    /// Thin wrapper around [`find_archetypes_with_components_into`] for backward compatibility.
+    #[inline]
     pub fn find_archetypes_with_components(&self, components: &[ComponentId]) -> Vec<ArchetypeId> {
-        // For small queries use specialized logic
+        let mut out = Vec::new();
+        self.find_archetypes_with_components_into(components, &mut out);
+        out
+    }
+
+    /// Writes matching archetype IDs into `out`.
+    ///
+    /// Optimized for queries with few (≤ 3) components via the stack-only
+    /// relevant-blocks path; larger queries fall back to the mask-based scan.
+    ///
+    /// # API contract
+    /// `out` is **cleared at function entry**. Any existing contents are
+    /// discarded. The caller's `Vec` is reused only for capacity, not data —
+    /// this enables zero-allocation reuse across calls.
+    #[inline]
+    pub fn find_archetypes_with_components_into(
+        &self,
+        components: &[ComponentId],
+        out: &mut Vec<ArchetypeId>,
+    ) {
+        out.clear();
         if components.len() <= 3 {
-            return self.find_archetypes_with_few_components(components);
+            self.find_archetypes_with_few_components_into(components, out);
+        } else {
+            let mask = ComponentMask::from_components(components);
+            self.find_matching_archetypes_into(&mask, out);
         }
-        
-        // For larger queries use the general mechanism
-        let mask = ComponentMask::from_components(components);
-        self.find_matching_archetypes(&mask)
     }
     
-    /// Specialized finder optimized for 1-3 component queries.
+    /// Writes results of a 1-3 component query into `out`.
     ///
     /// Uses a stack-only `[u8; 3]` buffer for the relevant-block set with
-    /// inline insertion-sort-with-dedup, eliminating the `Vec` allocation that
-    /// was previously required.
-    fn find_archetypes_with_few_components(&self, components: &[ComponentId]) -> Vec<ArchetypeId> {
+    /// inline insertion-sort-with-dedup, eliminating all heap allocation on the
+    /// bookkeeping path.
+    ///
+    /// # Caller invariant
+    /// `components.len() <= 3` — enforced by `debug_assert!`.
+    ///
+    /// # API contract
+    /// `out` is **cleared at function entry**. Any existing contents are
+    /// discarded. The caller's `Vec` is reused only for capacity, not data —
+    /// this enables zero-allocation reuse across calls.
+    fn find_archetypes_with_few_components_into(
+        &self,
+        components: &[ComponentId],
+        out: &mut Vec<ArchetypeId>,
+    ) {
+        out.clear();
         debug_assert!(
             components.len() <= 3,
-            "find_archetypes_with_few_components: caller invariant violated (len={})",
+            "find_archetypes_with_few_components_into: caller invariant violated (len={})",
             components.len()
         );
 
         // N-3: early exit prevents `all_blocks_present = true` from matching
         // every archetype when `relevant_blocks` is empty.
         if components.is_empty() {
-            return Vec::new();
+            return;
         }
 
         // Build a component mask for the signature check.
@@ -197,8 +252,6 @@ impl ArchetypeRegistry {
 
         let relevant_blocks = &blocks[..blocks_len];
 
-        let mut result = Vec::new();
-
         for &pattern in &self.active_patterns {
             // Check if all needed blocks are present in the pattern bit-field.
             let mut all_blocks_present = true;
@@ -214,73 +267,81 @@ impl ArchetypeRegistry {
                 if let Some(group) = self.block_groups.get(pattern_index) {
                     for &(id, ref signature) in group {
                         if signature.contains(&query) {
-                            result.push(id);
+                            out.push(id);
                         }
                     }
                 }
             }
         }
-
-        result
     }
     
-    /// Find archetypes with complex filtering criteria (include, exclude, optional components)
-    /// New method that replaces the filtering logic from QueryBuilder
+    /// Find archetypes with complex filtering criteria (include, exclude, optional components).
+    ///
+    /// Thin wrapper around [`find_with_filter_into`] for backward compatibility.
+    #[inline]
     pub fn find_with_filter(
         &self,
         include_mask: &ComponentMask,
         exclude_mask: &ComponentMask,
-        optional_mask: &ComponentMask
+        optional_mask: &ComponentMask,
     ) -> Vec<ArchetypeId> {
-        // First get all archetypes matching the include mask
-        let base_archetypes = if include_mask.is_empty() {
-            // If no required components, use all archetypes
-            // Get all active archetype IDs from all pattern groups
-            let mut all_archetypes = Vec::new();
+        let mut out = Vec::new();
+        self.find_with_filter_into(include_mask, exclude_mask, optional_mask, &mut out);
+        out
+    }
+
+    /// Writes matching archetype IDs into `out` using include/exclude/optional masks.
+    ///
+    /// # API contract
+    /// `out` is **cleared at function entry**. Any existing contents are
+    /// discarded. The caller's `Vec` is reused only for capacity, not data —
+    /// this enables zero-allocation reuse across calls.
+    #[inline]
+    pub fn find_with_filter_into(
+        &self,
+        include_mask: &ComponentMask,
+        exclude_mask: &ComponentMask,
+        optional_mask: &ComponentMask,
+        out: &mut Vec<ArchetypeId>,
+    ) {
+        out.clear();
+
+        // Collect base archetypes (those matching the include mask).
+        // We write into `out` temporarily, then apply exclude/optional in-place.
+        if include_mask.is_empty() {
             for &pattern in &self.active_patterns {
                 if let Some(group) = self.block_groups.get(pattern as usize) {
-                    all_archetypes.extend(group.iter().map(|(id, _)| *id));
+                    out.extend(group.iter().map(|(id, _)| *id));
                 }
             }
-            all_archetypes
         } else {
-            // Otherwise use the include mask
-            self.find_matching_archetypes(include_mask)
-        };
-        
-        // If no additional filtering needed, return base results
-        if exclude_mask.is_empty() && optional_mask.is_empty() {
-            return base_archetypes;
+            self.find_matching_archetypes_into(include_mask, out);
         }
-        
-        // Apply additional filtering
-        base_archetypes.into_iter()
-            .filter(|&id| {
-                // Get the archetype signature
-                let signature = self.get_archetype_signature(id);
-                if let Some(signature) = signature {
-                    // Skip if archetype contains any excluded component
-                    if !exclude_mask.is_empty() {
-                        let intersection = &signature.mask & exclude_mask;
-                        if !intersection.is_empty() {
-                            return false;
-                        }
-                    }
-                    
-                    // Skip if optional components are required but none are present
-                    if !optional_mask.is_empty() {
-                        let intersection = &signature.mask & optional_mask;
-                        if intersection.is_empty() {
-                            return false;
-                        }
-                    }
-                    
-                    true
-                } else {
-                    false
+
+        // If no additional filtering, we are done.
+        if exclude_mask.is_empty() && optional_mask.is_empty() {
+            return;
+        }
+
+        // Filter in-place: retain only archetypes that pass exclude + optional checks.
+        out.retain(|&id| {
+            let Some(signature) = self.get_archetype_signature(id) else {
+                return false;
+            };
+            if !exclude_mask.is_empty() {
+                let intersection = &signature.mask & exclude_mask;
+                if !intersection.is_empty() {
+                    return false;
                 }
-            })
-            .collect()
+            }
+            if !optional_mask.is_empty() {
+                let intersection = &signature.mask & optional_mask;
+                if intersection.is_empty() {
+                    return false;
+                }
+            }
+            true
+        });
     }
     
     /// Get the signature for an archetype by ID
@@ -297,21 +358,45 @@ impl ArchetypeRegistry {
         None
     }
     
-    /// Find archetypes with components that can be included, excluded, or optional
-    /// Component-centric alternative to mask-based filtering
+    /// Find archetypes with components that can be included, excluded, or optional.
+    ///
+    /// Component-centric alternative to mask-based filtering. Thin wrapper around
+    /// [`find_with_component_filter_into`] for backward compatibility.
+    #[inline]
     pub fn find_with_component_filter(
         &self,
         include_components: &[ComponentId],
         exclude_components: &[ComponentId],
-        optional_components: &[ComponentId]
+        optional_components: &[ComponentId],
     ) -> Vec<ArchetypeId> {
-        // Convert component arrays to masks
+        let mut out = Vec::new();
+        self.find_with_component_filter_into(
+            include_components,
+            exclude_components,
+            optional_components,
+            &mut out,
+        );
+        out
+    }
+
+    /// Writes matching archetype IDs into `out` using component-array filters.
+    ///
+    /// # API contract
+    /// `out` is **cleared at function entry**. Any existing contents are
+    /// discarded. The caller's `Vec` is reused only for capacity, not data —
+    /// this enables zero-allocation reuse across calls.
+    #[inline]
+    pub fn find_with_component_filter_into(
+        &self,
+        include_components: &[ComponentId],
+        exclude_components: &[ComponentId],
+        optional_components: &[ComponentId],
+        out: &mut Vec<ArchetypeId>,
+    ) {
         let include_mask = ComponentMask::from_components(include_components);
         let exclude_mask = ComponentMask::from_components(exclude_components);
         let optional_mask = ComponentMask::from_components(optional_components);
-        
-        // Use the mask-based filter
-        self.find_with_filter(&include_mask, &exclude_mask, &optional_mask)
+        self.find_with_filter_into(&include_mask, &exclude_mask, &optional_mask, out);
     }
     
     /// Returns the number of archetypes in the registry
@@ -591,5 +676,84 @@ mod tests {
         assert!(results.contains(&2));
         assert!(results.contains(&4));
         assert!(results.contains(&5));
+    }
+
+    // --- _into API tests ---
+
+    #[test]
+    fn t_into_writes_into_buffer() {
+        let mut registry = ArchetypeRegistry::new();
+        registry.register_archetype(1, create_mask(&[1, 2]));
+        registry.register_archetype(2, create_mask(&[1, 3]));
+
+        let mut out: Vec<ArchetypeId> = Vec::new();
+        registry.find_archetypes_with_components_into(&[1], &mut out);
+        assert_eq!(out.len(), 2);
+        assert!(out.contains(&1));
+        assert!(out.contains(&2));
+    }
+
+    #[test]
+    fn t_into_clears_buffer_on_entry() {
+        let mut registry = ArchetypeRegistry::new();
+        registry.register_archetype(10, create_mask(&[5, 6]));
+
+        // Pre-fill with garbage values.
+        let mut out: Vec<ArchetypeId> = vec![999, 888, 777];
+        registry.find_archetypes_with_components_into(&[5], &mut out);
+
+        // Garbage must be gone; only real matches remain.
+        assert_eq!(out.len(), 1);
+        assert!(out.contains(&10));
+        assert!(!out.contains(&999));
+    }
+
+    #[test]
+    fn t_into_is_zero_alloc_after_warmup() {
+        let mut registry = ArchetypeRegistry::new();
+        registry.register_archetype(1, create_mask(&[1, 2]));
+        registry.register_archetype(2, create_mask(&[1, 3]));
+
+        let mut out: Vec<ArchetypeId> = Vec::with_capacity(8);
+        // Warmup: fill and let `out` grow to stable capacity.
+        registry.find_archetypes_with_components_into(&[1], &mut out);
+        out.clear();
+        let cap_before = out.capacity();
+
+        // Steady state: 1 000 calls — capacity must not grow.
+        for _ in 0..1_000 {
+            registry.find_archetypes_with_components_into(&[1], &mut out);
+            out.clear();
+        }
+        assert_eq!(
+            out.capacity(),
+            cap_before,
+            "capacity must not grow after warmup (no reallocations)"
+        );
+    }
+
+    #[test]
+    fn t_few_components_max_arity_dedup() {
+        // Three component IDs all mapping to the same 64-bit block (block 0).
+        // After dedup, relevant_blocks should contain exactly one entry.
+        let comp_a: ComponentId = 1;  // block 0
+        let comp_b: ComponentId = 2;  // block 0
+        let comp_c: ComponentId = 3;  // block 0
+
+        let mut registry = ArchetypeRegistry::new();
+        registry.register_archetype(1, create_mask(&[comp_a, comp_b, comp_c]));
+        registry.register_archetype(2, create_mask(&[comp_a, comp_b]));
+        registry.register_archetype(3, create_mask(&[comp_a]));
+
+        // Query for all three — only archetype 1 qualifies.
+        let results = registry.find_archetypes_with_components(&[comp_a, comp_b, comp_c]);
+        assert_eq!(results.len(), 1);
+        assert!(results.contains(&1));
+
+        // Via _into path — same result.
+        let mut out = Vec::new();
+        registry.find_archetypes_with_components_into(&[comp_a, comp_b, comp_c], &mut out);
+        assert_eq!(out.len(), 1);
+        assert!(out.contains(&1));
     }
 }
