@@ -20,6 +20,7 @@
 use boyko_ecs::ecs::core::component::component_registry;
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::iters::query::Query;
+use boyko_ecs::ecs::core::iters::query_state::QueryState;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::hint::black_box;
 
@@ -173,5 +174,37 @@ fn bench_query_iter_raw_ptr(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_query_iter_entity_count, bench_query_iter_raw_ptr);
+/// Cached path: `QueryState` is built and warmed up **once** outside `b.iter`.
+/// Each iteration calls `state.iter()` which, on the warm path (generation
+/// unchanged), costs: one `generation` load + compare, then a slice walk +
+/// per-id `get_archetype` (SparseMap O(1)).
+///
+/// Compare against `query_iter::entity_count` to measure the per-call
+/// `find_archetypes_with_components` + `Vec` allocation savings.
+fn bench_query_state_iter(c: &mut Criterion) {
+    register_query_bench_components();
+
+    let mut group = c.benchmark_group("query_state_iter");
+    for &n in &[1_000usize, 10_000, 100_000] {
+        let ecs = build_query_ecs(n);
+
+        // Build QueryState ONCE outside b.iter — this is the cached warm path.
+        let mut state = QueryState::with_component_ids(&[QBENCH_POS_ID, QBENCH_VEL_ID]);
+        state.update_archetypes(ecs.archetype_master());
+
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
+            b.iter(|| {
+                // Warm path: generation unchanged, no archetype scan.
+                let mut sum = 0usize;
+                for arch in state.iter(ecs.archetype_master()) {
+                    sum += arch.entity_count();
+                }
+                black_box(sum)
+            });
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(benches, bench_query_iter_entity_count, bench_query_iter_raw_ptr, bench_query_state_iter);
 criterion_main!(benches);
