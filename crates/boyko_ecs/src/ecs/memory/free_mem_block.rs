@@ -84,6 +84,8 @@ impl MemFreeBlockMaster {
             .push(index);
 
         self.size += 1;
+
+        debug_assert!(self.debug_invariants(), "MemFreeBlockMaster invariants violated after insert");
     }
 
     #[inline]
@@ -154,11 +156,13 @@ impl MemFreeBlockMaster {
             let remainder = MemFreeBlock::new(block.start + size, block.end);
             self.insert(remainder);
 
+            // insert() already fires debug_assert!(debug_invariants()) internally.
             // Return only the requested portion of the block
             return Some(MemFreeBlock::new(block.start, block.start + size));
         }
 
         // Return the entire block if it fits the requested size exactly
+        debug_assert!(self.debug_invariants(), "MemFreeBlockMaster invariants violated after allocate");
         Some(block)
     }
 
@@ -191,6 +195,9 @@ impl MemFreeBlockMaster {
             self.insert(MemFreeBlock::new(aligned_end, block.end));
         }
 
+        // insert() fires debug_assert!(debug_invariants()) for each spill path above;
+        // assert here for the no-spill case and for clarity at function exit.
+        debug_assert!(self.debug_invariants(), "MemFreeBlockMaster invariants violated after allocate_aligned");
         Some(aligned_block)
     }
 
@@ -282,6 +289,24 @@ impl MemFreeBlockMaster {
         self.start_map = new_start_map;
         self.end_map = new_end_map;
         self.free_ind.clear();
+
+        debug_assert!(self.debug_invariants(), "MemFreeBlockMaster invariants violated after defragment");
+    }
+
+    /// Checks structural invariants that must hold at every stable point.
+    ///
+    /// Invariants:
+    /// - `start_map` and `end_map` contain the same number of entries.
+    /// - Both maps contain exactly `self.size` entries (active block count).
+    /// - Every slot is either active (tracked by maps) or free (`free_ind`):
+    ///   `self.size + self.free_ind.len() == self.blocks.len()`.
+    ///
+    /// Compiled in both debug and non-debug builds; `debug_assert!` callers
+    /// ensure the body is elided in release. Returns `true` when all hold.
+    pub(crate) fn debug_invariants(&self) -> bool {
+        self.start_map.len() == self.end_map.len()
+            && self.start_map.len() == self.size
+            && self.size + self.free_ind.len() == self.blocks.len()
     }
 }
 
@@ -290,4 +315,213 @@ pub struct MemoryStats {
     pub total_blocks: usize,
     pub free_slots: usize,
     pub total_memory: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // 1. new_init produces a single block covering [0, arena_size).
+    #[test]
+    fn master_new_init_single_block_covers_arena() {
+        let master = MemFreeBlockMaster::new_init(1024);
+        assert_eq!(master.len(), 1);
+        let block = master.find_best_fit(1).expect("must have one block");
+        assert_eq!(block.start, 0);
+        assert_eq!(block.end, 1024);
+        assert!(master.debug_invariants());
+    }
+
+    // 2. Two disjoint blocks are not merged.
+    #[test]
+    fn master_insert_two_disjoint_blocks_no_merge() {
+        let mut master = MemFreeBlockMaster::new();
+        master.insert(MemFreeBlock::new(0, 100));
+        master.insert(MemFreeBlock::new(200, 300));
+        assert_eq!(master.len(), 2);
+        assert!(master.debug_invariants());
+        // Both offsets must be indexed.
+        assert!(master.start_map.contains_key(&0));
+        assert!(master.start_map.contains_key(&200));
+    }
+
+    // 3. Insert [0,100) then [100,200): left-neighbor merge -> [0,200).
+    #[test]
+    fn master_insert_merges_left_neighbor() {
+        let mut master = MemFreeBlockMaster::new();
+        master.insert(MemFreeBlock::new(0, 100));
+        master.insert(MemFreeBlock::new(100, 200));
+        assert_eq!(master.len(), 1);
+        assert!(master.debug_invariants());
+        let block = master.find_best_fit(1).expect("one merged block");
+        assert_eq!(block.start, 0);
+        assert_eq!(block.end, 200);
+    }
+
+    // 4. Insert [100,200) then [0,100): right-neighbor merge -> [0,200).
+    #[test]
+    fn master_insert_merges_right_neighbor() {
+        let mut master = MemFreeBlockMaster::new();
+        master.insert(MemFreeBlock::new(100, 200));
+        master.insert(MemFreeBlock::new(0, 100));
+        assert_eq!(master.len(), 1);
+        assert!(master.debug_invariants());
+        let block = master.find_best_fit(1).expect("one merged block");
+        assert_eq!(block.start, 0);
+        assert_eq!(block.end, 200);
+    }
+
+    // 5. Insert [0,100), [200,300), [100,200): both-sides merge -> [0,300).
+    #[test]
+    fn master_insert_merges_both_neighbors() {
+        let mut master = MemFreeBlockMaster::new();
+        master.insert(MemFreeBlock::new(0, 100));
+        master.insert(MemFreeBlock::new(200, 300));
+        master.insert(MemFreeBlock::new(100, 200));
+        assert_eq!(master.len(), 1);
+        assert!(master.debug_invariants());
+        let block = master.find_best_fit(1).expect("one merged block");
+        assert_eq!(block.start, 0);
+        assert_eq!(block.end, 300);
+    }
+
+    // 6. allocate(100) on a single 100-byte block leaves the pool empty.
+    #[test]
+    fn master_allocate_exact_size_removes_block() {
+        let mut master = MemFreeBlockMaster::new();
+        master.insert(MemFreeBlock::new(0, 100));
+        let result = master.allocate(100);
+        assert!(result.is_some());
+        assert_eq!(master.len(), 0);
+        assert!(master.debug_invariants());
+    }
+
+    // 7. allocate(40) on a 100-byte block splits and re-inserts a 60-byte remainder.
+    #[test]
+    fn master_allocate_smaller_splits_remainder() {
+        let mut master = MemFreeBlockMaster::new();
+        master.insert(MemFreeBlock::new(0, 100));
+        let allocated = master.allocate(40).expect("must succeed");
+        assert_eq!(allocated.start, 0);
+        assert_eq!(allocated.end, 40);
+        assert_eq!(master.len(), 1);
+        assert!(master.debug_invariants());
+        let remainder = master.find_best_fit(1).expect("remainder block");
+        assert_eq!(remainder.start, 40);
+        assert_eq!(remainder.end, 100);
+    }
+
+    // 8. allocate_aligned on [10,200) with size=64, align=64 creates head and tail spills.
+    #[test]
+    fn master_allocate_aligned_creates_head_and_tail_spill() {
+        let mut master = MemFreeBlockMaster::new();
+        // Block [10, 200): total 190 bytes.
+        master.insert(MemFreeBlock::new(10, 200));
+        // Request 64 bytes at 64-byte alignment.
+        let result = master.allocate_aligned(64, 64);
+        let block = result.expect("must find an aligned block");
+        // Aligned start must be 64.
+        assert_eq!(block.start, 64);
+        assert_eq!(block.end, 128);
+        assert_eq!(block.start % 64, 0);
+        // Two spill blocks: [10, 64) and [128, 200).
+        assert_eq!(master.len(), 2);
+        assert!(master.debug_invariants());
+    }
+
+    // 9. Allocate then re-insert the same range coalesces back to the original block.
+    #[test]
+    fn master_allocate_then_insert_coalesces_back() {
+        let mut master = MemFreeBlockMaster::new();
+        master.insert(MemFreeBlock::new(0, 1024));
+        let allocated = master.allocate(64).expect("must succeed");
+        // Return the block.
+        master.insert(allocated);
+        assert_eq!(master.len(), 1);
+        assert!(master.debug_invariants());
+        let restored = master.find_best_fit(1).expect("restored block");
+        assert_eq!(restored.start, 0);
+        assert_eq!(restored.end, 1024);
+    }
+
+    // 10. find_best_fit picks the smallest block that satisfies the request.
+    #[test]
+    fn master_find_best_fit_picks_smallest_sufficient() {
+        let mut master = MemFreeBlockMaster::new();
+        // Insert three disjoint blocks with sizes 100, 200, 300.
+        master.insert(MemFreeBlock::new(0, 100));
+        master.insert(MemFreeBlock::new(1000, 1200));   // size 200
+        master.insert(MemFreeBlock::new(2000, 2300));   // size 300
+        let best = master.find_best_fit(150).expect("must find a 200-byte block");
+        assert_eq!(best.size(), 200);
+    }
+
+    // 11. remove_block_index removes an entry from both maps; free_ind grows.
+    #[test]
+    fn master_remove_block_index_keeps_maps_synchronized() {
+        let mut master = MemFreeBlockMaster::new();
+        master.insert(MemFreeBlock::new(0, 100));
+        let free_before = master.free_ind.len();
+        // Allocate clears the block via remove_block_index internally.
+        master.allocate(100).expect("must succeed");
+        // Maps must not contain the freed offsets.
+        assert!(!master.start_map.contains_key(&0));
+        assert!(!master.end_map.contains_key(&100));
+        // The slot was returned to free_ind.
+        assert_eq!(master.free_ind.len(), free_before + 1);
+        assert!(master.debug_invariants());
+    }
+
+    // 12. defragment after insert+remove compacts free slots.
+    #[test]
+    fn master_defragment_compacts_free_slots() {
+        let mut master = MemFreeBlockMaster::new();
+        // Insert several blocks, then allocate some to create free slots.
+        master.insert(MemFreeBlock::new(0, 100));
+        master.insert(MemFreeBlock::new(200, 300));
+        master.insert(MemFreeBlock::new(400, 500));
+        master.allocate(100).expect("first alloc");
+        // free_ind must be non-empty now.
+        assert!(!master.free_ind.is_empty());
+        master.defragment();
+        assert!(master.free_ind.is_empty(), "defragment must empty free_ind");
+        assert!(master.debug_invariants());
+    }
+
+    // 13. Stress: 65 536 non-overlapping inserts must not panic and keep len() consistent.
+    // Run via: cargo test -- --ignored
+    #[test]
+    #[ignore]
+    fn master_stress_btreemap_handles_64k_inserts_no_panic() {
+        let n = 65_536usize;
+        let mut master = MemFreeBlockMaster::with_capacity(n);
+        for i in 0..n {
+            // Gap of 100 between each block ensures no merging.
+            let start = i * 200;
+            master.insert(MemFreeBlock::new(start, start + 100));
+        }
+        assert_eq!(master.len(), n);
+        assert!(master.debug_invariants());
+    }
+
+    // 14. Positive invariant test: debug_invariants() returns true after each op.
+    #[test]
+    fn master_invariant_positive_after_each_op() {
+        let mut master = MemFreeBlockMaster::new_init(4096);
+        assert!(master.debug_invariants(), "after new_init");
+
+        master.insert(MemFreeBlock::new(5000, 5100));
+        assert!(master.debug_invariants(), "after insert");
+
+        let _alloc = master.allocate(64);
+        assert!(master.debug_invariants(), "after allocate");
+
+        let _aligned = master.allocate_aligned(64, 64);
+        assert!(master.debug_invariants(), "after allocate_aligned");
+
+        master.insert(MemFreeBlock::new(6000, 6100));
+        master.allocate(100).expect("setup for defragment");
+        master.defragment();
+        assert!(master.debug_invariants(), "after defragment");
+    }
 }
