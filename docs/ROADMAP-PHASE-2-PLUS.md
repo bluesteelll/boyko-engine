@@ -111,8 +111,8 @@ per frame = 0.5-1 ms of pure malloc overhead.
 | ID | Site | Fix | Status |
 |----|------|-----|--------|
 | **Q-011** | `Query::with_*` rebuilds `Vec<&Archetype>` per call | `QueryState` cache + archetype-generation tracking (Bevy pattern) | ✅ **DONE** (2026-05-23, ~21x warm-path speedup measured) |
-| **Q-012** | `ComponentSet::component_ids() -> Vec<ComponentId>` | `&'static [ComponentId]` or const generic `[ComponentId; N]` | open |
-| **Q-013** | `find_archetypes_with_*` 4 allocations per call | `SmallVec` or reusable scratch buffer | open |
+| **Q-012** | `ComponentSet::component_ids() -> Vec<ComponentId>` | `&'static [ComponentId]` or const generic `[ComponentId; N]` | ✅ **DONE** (2026-05-24) |
+| **Q-013** | `find_archetypes_with_*` 4 allocations per call | `SmallVec` or reusable scratch buffer | ✅ **DONE** (2026-05-24) |
 | **Q-015** | `MultiPoolSparseIter::next_raw` per-entity `Vec<ComponentPtr>` | tuple via generics or `[ComponentPtr; N]` | open |
 | **Q-016** | `SparseIter::new` `Vec<usize>::collect(0..N)` | `Range`-based iterator, no materialization | open |
 | **Q-017** | `ParticipantBuffer::push` double allocation | Absorbed by Q-001 (Phase 1b finish) | ✅ closed |
@@ -131,8 +131,36 @@ per frame = 0.5-1 ms of pure malloc overhead.
   - `QueryState`: `#[repr(C, align(64))]`, hot fields in cache line 0, Bevy-style `&mut update + &self iter` split.
   - `Query<'a>`: now delegates to a one-shot `QueryState`; stores `Vec<ArchetypeId>` (eliminates stale-ref UB from `swap_remove`).
 
-**Effort estimate**: 3-5 sessions for remaining. Q-011 done.
+**Effort estimate**: 3-5 sessions for remaining. Q-011, Q-012, Q-013 done.
 Others are localized.
+
+### Q-012 — ComponentSet::component_ids() static slice — DONE ✅
+
+- **Status**: ✅ DONE. Commit `bd63b7b` (12a).
+- **Implementation**:
+  - `()` returns `&[]` (zero cost, no heap).
+  - Single-component types: `SINGLE_COMPONENT_CACHE[component_id]` — a global
+    `[OnceLock<&'static [ComponentId]>; 512]` array. Lock-free after first init
+    per component type. Pointer-stable across calls.
+  - Tuple types (arity 2–8): `Box::leak` per call. Rust does not create
+    per-monomorphization statics for generic fn bodies; a shared OnceLock would
+    cache the first tuple's IDs for all distinct tuples — a correctness bug.
+    Query construction is not the per-frame hot path (QueryState caches archetype
+    IDs), so one small heap alloc per `Query::with::<T>()` is acceptable.
+  - 5 call sites in `query.rs` / `query_state.rs` adjusted (removed `& / let` bindings).
+  - 5 unit tests in ID range 495-499.
+
+### Q-013 — find_archetypes_with_* allocations — DONE ✅
+
+- **Status**: ✅ DONE. Commits `cf159c6` (13a), `33744d0` (13b), plus 13c in this session.
+- **13a**: `find_archetypes_with_few_components_into`: stack `[u8; 3]` + inline
+  insertion-sort-with-dedup replaces `Vec::with_capacity + sort_unstable + dedup`.
+  Also uses `signature.contains(&query)` instead of re-iterating `components`.
+- **13b**: `_into` siblings for all 5 registry `find_*` methods and all 4
+  `ArchetypeMaster` wrappers. Original methods are now thin wrappers; backward
+  compat preserved. `find_with_filter_into` uses `retain()` for in-place filtering.
+- **13c**: `query_one_shot` bench group added to `benches/query_iter.rs` covering
+  `with_typed` (Q-012 cache + registry scan) and `find_into` (zero-alloc steady state).
 
 ### Phase 2b — Cache / layout improvements (4 findings)
 

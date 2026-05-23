@@ -206,5 +206,60 @@ fn bench_query_state_iter(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_query_iter_entity_count, bench_query_iter_raw_ptr, bench_query_state_iter);
+/// Q-012 + Q-013 baseline: measures the cost of one-shot query construction and
+/// the zero-alloc steady-state `find_*_into` path.
+///
+/// Two sub-benchmarks per entity count:
+///   - `with_typed`: cold `Query::with::<(QBenchPos, QBenchVel)>(master)` construction.
+///     Exercises `ComponentSet::component_ids()` (Q-012) + registry scan combined cost.
+///   - `find_into`: direct `find_archetypes_with_components_into` reuse — steady-state
+///     cost with a pre-warmed `Vec` (Q-013 zero-alloc win).
+fn bench_query_one_shot(c: &mut Criterion) {
+    register_query_bench_components();
+
+    let mut group = c.benchmark_group("query_one_shot");
+    for &n in &[1_000usize, 10_000, 100_000] {
+        let ecs = build_query_ecs(n);
+        let registry = ecs.archetype_master().archetype_registry();
+
+        group.bench_with_input(BenchmarkId::new("with_component_ids", n), &n, |b, _| {
+            b.iter(|| {
+                // One-shot query construction: exercises find_archetypes_with_components
+                // (Q-013 path) + QueryState delta loop combined cost.
+                let query = Query::with_component_ids(
+                    ecs.archetype_master(),
+                    &[QBENCH_POS_ID, QBENCH_VEL_ID],
+                );
+                black_box(query.len())
+            });
+        });
+
+        // Pre-allocate the output buffer once outside the iter loop so the
+        // steady-state (post-warmup) measurements reflect zero-alloc behaviour.
+        // ArchetypeId is a type alias for usize.
+        let mut out: Vec<usize> = Vec::with_capacity(8);
+        // Warmup: fill the buffer and let it reach stable capacity.
+        registry.find_archetypes_with_components_into(&[QBENCH_POS_ID, QBENCH_VEL_ID], &mut out);
+
+        group.bench_with_input(BenchmarkId::new("find_into", n), &n, |b, _| {
+            b.iter(|| {
+                // Measures the Q-013 win directly — `out` is reused each iteration.
+                registry.find_archetypes_with_components_into(
+                    &[QBENCH_POS_ID, QBENCH_VEL_ID],
+                    &mut out,
+                );
+                black_box(out.len())
+            });
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_query_iter_entity_count,
+    bench_query_iter_raw_ptr,
+    bench_query_state_iter,
+    bench_query_one_shot,
+);
 criterion_main!(benches);

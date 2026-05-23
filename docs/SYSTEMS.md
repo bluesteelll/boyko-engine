@@ -367,10 +367,15 @@ Iterators over query results.
 **File:** [crates/boyko_ecs/src/ecs/core/iters/component_set.rs](../crates/boyko_ecs/src/ecs/core/iters/component_set.rs)
 
 ```rust
-pub trait ComponentSet { /* ... */ }
+pub trait ComponentSet {
+    fn component_ids() -> &'static [ComponentId];
+}
 ```
 
-Describes the set of components for a query — likely implemented for tuple types (`(A, B, C)`).
+Describes the set of components for a query — implemented for `()` and tuple types `A` through `(A..H)`.
+Returns a `&'static [ComponentId]`: no allocation after first call per type (Q-012).
+Single-component types use `SINGLE_COMPONENT_CACHE[id]` (lock-free per-id OnceLock).
+Tuple types use `Box::leak` per call (generic statics are shared across monomorphizations in Rust).
 
 ---
 

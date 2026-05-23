@@ -149,7 +149,7 @@ First point of contact for agents. When looking for where a particular piece of 
 | Warm-path delta update | [core/iters/query_state.rs](../crates/boyko_ecs/src/ecs/core/iters/query_state.rs) ✅ | `QueryState::update_archetypes(&master)` |
 | Generation-aware stale detection | [core/archetype/generation.rs](../crates/boyko_ecs/src/ecs/core/archetype/generation.rs) ✅ | `ArchetypeGeneration` + `ArchetypeMaster::archetype_generation()` |
 | 1024-bit inline dedup bitset | [core/iters/archetype_bit_set.rs](../crates/boyko_ecs/src/ecs/core/iters/archetype_bit_set.rs) ✅ | `ArchetypeBitSet` (128 B, 2 cache lines, no heap) |
-| Tuple trait for query parameters | [core/iters/component_set.rs](../crates/boyko_ecs/src/ecs/core/iters/component_set.rs) ✅ | `ComponentSet` trait |
+| Tuple trait for query parameters | [core/iters/component_set.rs](../crates/boyko_ecs/src/ecs/core/iters/component_set.rs) ✅ | `ComponentSet::component_ids() -> &'static [ComponentId]` (Q-012) |
 
 ---
 
