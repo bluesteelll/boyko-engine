@@ -1,4 +1,3 @@
-use std::alloc::Layout;
 use std::mem::MaybeUninit;
 use crate::ecs::core::events::event::EventId;
 use crate::ecs::core::events::parameters::parameters::Parameters;
@@ -7,9 +6,6 @@ use crate::ecs::core::events::parameters::parameters::Parameters;
 pub struct ParametersBuffer {
     /// Event ID this buffer is for.
     event_id: EventId,
-
-    /// Layout of the parameters structure.
-    layout: Layout,
 
     /// Raw data storage. `MaybeUninit<u8>` makes padding-byte writes sound
     /// under Miri — the buffer never interprets the bytes as initialized `u8`.
@@ -25,23 +21,19 @@ pub struct ParametersBuffer {
 impl ParametersBuffer {
     /// Creates a new parameters buffer.
     pub fn new<P: Parameters>(event_id: EventId) -> Self {
-        let layout = P::layout();
         Self {
             event_id,
-            layout,
             data: Vec::new(),
             count: 0,
-            parameters_size: layout.size(),
+            parameters_size: P::layout().size(),
         }
     }
 
     /// Creates a new parameters buffer with pre-allocated capacity.
     pub fn with_capacity<P: Parameters>(event_id: EventId, capacity: usize) -> Self {
-        let layout = P::layout();
-        let parameters_size = layout.size();
+        let parameters_size = P::layout().size();
         Self {
             event_id,
-            layout,
             data: Vec::with_capacity(capacity * parameters_size),
             count: 0,
             parameters_size,

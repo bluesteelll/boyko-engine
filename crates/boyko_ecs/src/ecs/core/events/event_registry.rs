@@ -95,9 +95,9 @@ static NEXT_EVENT_ID: AtomicUsize = AtomicUsize::new(0);
 /// Allocates a fresh `EventId` from the global counter and stores `EventInfo`
 /// derived from `E` in the corresponding `EVENT_INFO` slot.
 ///
-/// Production path: called from `#[derive(Event)]`-generated `E::event_id()`
-/// via a per-monomorphization `OnceLock`. Each concrete `E` gets exactly one
-/// ID across the process lifetime, regardless of how many threads call
+/// Production path: called from `#[event]`-generated `E::event_id()` (via
+/// lazy `OnceLock` per Q-001 / C-003). Each concrete `E` gets exactly one ID
+/// across the process lifetime, regardless of how many threads call
 /// `E::event_id()` concurrently.
 ///
 /// See [`crate::ecs::core::component::component_registry::register_new`] for

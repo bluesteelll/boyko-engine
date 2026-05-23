@@ -1,12 +1,18 @@
-/// Integration tests for #[event] attribute macro lazy-mint ID semantics.
+/// Integration tests for the `#[event]` attribute macro.
 ///
 /// Validates audit finding Q-005: the macro-generated `event_id()` must mint a
 /// unique, stable ID on first call and return the cached value on subsequent
 /// calls — using the per-type `OnceLock` + `register_event_new` path.
 ///
-/// Also serves as the Q-001 regression test suite: the #[event] macro rewrites
+/// Also serves as the Q-001 regression test suite: the `#[event]` macro rewrites
 /// the struct into a two-field native layout, eliminating the unsound cast from
-/// the deleted #[derive(Event)].
+/// the deleted `#[derive(Event)]`.
+///
+/// Test isolation note: the roadmap reserves event-ID range 500-509 for these
+/// integration tests, but post-C-003 the `event_id()` accessor mints from
+/// `NEXT_EVENT_ID` sequentially via `register_event_new`, so ranges cannot be
+/// enforced. Each `#[event]`-generated type carries its own per-impl `OnceLock`,
+/// so re-running tests is idempotent — but cross-test ordering of IDs is not.
 use boyko_macros::event;
 use boyko_ecs::ecs::core::events::event::Event;
 use boyko_ecs::ecs::core::events::event_registry;

@@ -1,4 +1,3 @@
-use std::alloc::Layout;
 use std::mem::MaybeUninit;
 use crate::ecs::core::events::event::EventId;
 use crate::ecs::core::events::participants::participants::Participants;
@@ -7,9 +6,6 @@ use crate::ecs::core::events::participants::participants::Participants;
 pub struct ParticipantBuffer {
     /// Event ID this buffer is for.
     event_id: EventId,
-
-    /// Layout of the participants structure.
-    layout: Layout,
 
     /// Raw data storage. `MaybeUninit<u8>` makes padding-byte writes sound
     /// under Miri — the buffer never interprets the bytes as initialized `u8`.
@@ -25,23 +21,19 @@ pub struct ParticipantBuffer {
 impl ParticipantBuffer {
     /// Creates a new participant buffer.
     pub fn new<P: Participants>(event_id: EventId) -> Self {
-        let layout = P::layout();
         Self {
             event_id,
-            layout,
             data: Vec::new(),
             count: 0,
-            participant_size: layout.size(),
+            participant_size: P::layout().size(),
         }
     }
 
     /// Creates a new participant buffer with pre-allocated capacity.
     pub fn with_capacity<P: Participants>(event_id: EventId, capacity: usize) -> Self {
-        let layout = P::layout();
-        let participant_size = layout.size();
+        let participant_size = P::layout().size();
         Self {
             event_id,
-            layout,
             data: Vec::with_capacity(capacity * participant_size),
             count: 0,
             participant_size,
