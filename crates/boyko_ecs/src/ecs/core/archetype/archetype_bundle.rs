@@ -1,11 +1,9 @@
 use std::ops::{Index, IndexMut};
 use boyko_utils::sparse_map::sparse_map::SparseMap;
 use crate::ecs::core::archetype::archetype::Archetype;
-use crate::ecs::core::entity::entity::Entity;
 use crate::ecs::core::entity::entity_inland::EntityInland;
-use crate::ecs::identifiers::primitives::{ArchetypeId, EntityId, InlandArchetypeId, ComponentId};
+use crate::ecs::identifiers::primitives::{ArchetypeId, InlandArchetypeId, ComponentId};
 use crate::ecs::memory::arena::Arena;
-use crate::ecs::core::component::component_mask::ComponentMask;
 
 /// A collection of archetypes with efficient access by archetype ID
 pub struct ArchetypeBundle {
@@ -14,6 +12,12 @@ pub struct ArchetypeBundle {
 
     /// Maps external archetype IDs to indices in the archetypes vector
     archetype_to_index: SparseMap<usize>,
+}
+
+impl Default for ArchetypeBundle {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ArchetypeBundle {

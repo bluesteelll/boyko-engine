@@ -21,13 +21,17 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion};
 // #[derive(Component)] — no manual register_layout needed.
 #[derive(Component)]
 struct BenchCompA {
+    #[allow(dead_code)]
     x: f32,
+    #[allow(dead_code)]
     y: f32,
+    #[allow(dead_code)]
     z: f32,
 }
 
 #[derive(Component)]
 struct BenchCompB {
+    #[allow(dead_code)]
     v: u64,
 }
 

@@ -38,7 +38,7 @@ fn concurrent_register_new_for_same_type() {
     for run in 0..RUNS {
         let results: Vec<usize> = std::thread::scope(|s| {
             let handles: Vec<_> = (0..N)
-                .map(|_| s.spawn(|| SharedComponent::component_id()))
+                .map(|_| s.spawn(SharedComponent::component_id))
                 .collect();
             handles.into_iter().map(|h| h.join().expect("thread must not panic")).collect()
         });
@@ -60,14 +60,14 @@ fn concurrent_register_new_for_same_type() {
 fn concurrent_register_new_for_distinct_types() {
     // Collect IDs: each closure captures a different type's component_id() fn.
     let ids: Vec<usize> = std::thread::scope(|s| {
-        let h0 = s.spawn(|| ThreadComp0::component_id());
-        let h1 = s.spawn(|| ThreadComp1::component_id());
-        let h2 = s.spawn(|| ThreadComp2::component_id());
-        let h3 = s.spawn(|| ThreadComp3::component_id());
-        let h4 = s.spawn(|| ThreadComp4::component_id());
-        let h5 = s.spawn(|| ThreadComp5::component_id());
-        let h6 = s.spawn(|| ThreadComp6::component_id());
-        let h7 = s.spawn(|| ThreadComp7::component_id());
+        let h0 = s.spawn(ThreadComp0::component_id);
+        let h1 = s.spawn(ThreadComp1::component_id);
+        let h2 = s.spawn(ThreadComp2::component_id);
+        let h3 = s.spawn(ThreadComp3::component_id);
+        let h4 = s.spawn(ThreadComp4::component_id);
+        let h5 = s.spawn(ThreadComp5::component_id);
+        let h6 = s.spawn(ThreadComp6::component_id);
+        let h7 = s.spawn(ThreadComp7::component_id);
         vec![
             h0.join().expect("thread 0 must not panic"),
             h1.join().expect("thread 1 must not panic"),
@@ -105,7 +105,7 @@ fn component_id_stable_after_concurrent_first_call() {
     // First, run N concurrent callers.
     let concurrent_ids: Vec<usize> = std::thread::scope(|s| {
         let handles: Vec<_> = (0..N)
-            .map(|_| s.spawn(|| SharedComponent::component_id()))
+            .map(|_| s.spawn(SharedComponent::component_id))
             .collect();
         handles.into_iter().map(|h| h.join().expect("thread must not panic")).collect()
     });

@@ -169,16 +169,16 @@ fn bench_query_iter_raw_ptr(c: &mut Criterion) {
                 let mut sum = 0.0f32;
                 for archetype in query.iter() {
                     for unit_index in 0..archetype.entity_count() {
-                        if let Some(entity_id) = archetype.get_entity_id_at(unit_index) {
-                            if let Some(entity) = ecs.get_entity(entity_id) {
-                                if let Some(ptr) = ecs.get_component_raw(entity, QBENCH_POS_ID) {
-                                    // SAFETY: ptr returned by get_component_raw points to a
-                                    // fully-initialised QBenchPos stored in the ComponentPool.
-                                    // The pool lives inside ecs which is borrowed immutably for
-                                    // the duration of this loop -- no writes occur concurrently.
-                                    let pos = unsafe { &*(ptr as *const QBenchPos) };
-                                    sum += pos.x;
-                                }
+                        if let Some(entity_id) = archetype.get_entity_id_at(unit_index)
+                            && let Some(entity) = ecs.get_entity(entity_id)
+                        {
+                            if let Some(ptr) = ecs.get_component_raw(entity, QBENCH_POS_ID) {
+                                // SAFETY: ptr returned by get_component_raw points to a
+                                // fully-initialised QBenchPos stored in the ComponentPool.
+                                // The pool lives inside ecs which is borrowed immutably for
+                                // the duration of this loop -- no writes occur concurrently.
+                                let pos = unsafe { &*(ptr as *const QBenchPos) };
+                                sum += pos.x;
                             }
                         }
                     }

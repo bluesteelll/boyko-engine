@@ -8,6 +8,7 @@ use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId};
 use crate::ecs::memory::arena::Arena;
 use crate::ecs::core::iters::query::Query;
 
+#[cfg(test)]
 use crate::ecs::core::component::component_registry;
 
 /// Master manager for archetypes, providing creation and lookup capabilities
@@ -79,7 +80,7 @@ impl ArchetypeMaster {
         let arena = unsafe { self.arena.as_ref() };
 
         // Create a new archetype with these component IDs
-        let inland_id = self.archetypes.add_archetype_from_components(
+        let _inland_id = self.archetypes.add_archetype_from_components(
             archetype_id,
             component_ids,
             arena
@@ -364,7 +365,7 @@ impl ArchetypeMaster {
         let source_archetype = self.get_archetype(source_archetype_id)?;
         
         // Get all component IDs from the source archetype
-        let mut new_components: Vec<ComponentId> = source_archetype.component_ids()
+        let new_components: Vec<ComponentId> = source_archetype.component_ids()
             .iter()
             .filter(|&&c| c != component_id)
             .copied()

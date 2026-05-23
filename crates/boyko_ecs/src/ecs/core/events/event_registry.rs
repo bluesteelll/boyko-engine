@@ -286,7 +286,7 @@ pub fn validate_event_types<E: Event>(event_id: EventId) -> bool {
 /// of the following has already completed for the corresponding type `E`:
 /// - [`register_event_new::<E>()`] (production path, via `E::event_id()`), or
 /// - [`register_event::<E>(event_id)`] (test-only escape hatch).
-/// Violating either yields UB.
+///   Violating either yields UB.
 #[inline(always)]
 pub unsafe fn get_event_info_unchecked(event_id: EventId) -> &'static EventInfo {
     let event_id_usize = event_id as usize;
@@ -307,7 +307,7 @@ pub unsafe fn get_event_info_unchecked(event_id: EventId) -> &'static EventInfo 
 /// of the following has already completed for the corresponding type `E`:
 /// - [`register_event_new::<E>()`] (production path, via `E::event_id()`), or
 /// - [`register_event::<E>(event_id)`] (test-only escape hatch).
-/// Violating either yields UB.
+///   Violating either yields UB.
 #[inline(always)]
 pub unsafe fn get_participants_layout_unchecked(event_id: EventId) -> Layout {
     // SAFETY: forwarded to the unchecked accessor; caller satisfies the same contract.
@@ -321,7 +321,7 @@ pub unsafe fn get_participants_layout_unchecked(event_id: EventId) -> Layout {
 /// of the following has already completed for the corresponding type `E`:
 /// - [`register_event_new::<E>()`] (production path, via `E::event_id()`), or
 /// - [`register_event::<E>(event_id)`] (test-only escape hatch).
-/// Violating either yields UB.
+///   Violating either yields UB.
 #[inline(always)]
 pub unsafe fn get_parameters_layout_unchecked(event_id: EventId) -> Layout {
     // SAFETY: forwarded to the unchecked accessor; caller satisfies the same contract.
@@ -441,7 +441,7 @@ mod tests {
         type Parameters = NoParameters;
         fn event_id() -> EventId {
             static ID: ::std::sync::OnceLock<EventId> = ::std::sync::OnceLock::new();
-            *ID.get_or_init(|| register_event_new::<Self>())
+            *ID.get_or_init(register_event_new::<Self>)
         }
         fn event_name() -> &'static str { "NewEventTypeA" }
         fn new(_p: NoParticipants, _q: NoParameters) -> Self { NewEventTypeA }
@@ -458,7 +458,7 @@ mod tests {
         type Parameters = NoParameters;
         fn event_id() -> EventId {
             static ID: ::std::sync::OnceLock<EventId> = ::std::sync::OnceLock::new();
-            *ID.get_or_init(|| register_event_new::<Self>())
+            *ID.get_or_init(register_event_new::<Self>)
         }
         fn event_name() -> &'static str { "NewEventTypeB" }
         fn new(_p: NoParticipants, _q: NoParameters) -> Self { NewEventTypeB }

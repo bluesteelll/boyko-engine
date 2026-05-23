@@ -52,8 +52,8 @@ impl From<Slot> for Entity {
     }
 }
 
-impl Into<Slot> for Entity {
-    fn into(self) -> Slot {
-        Slot::new(self.id(), self.generation())
+impl From<Entity> for Slot {
+    fn from(val: Entity) -> Self {
+        Slot::new(val.id(), val.generation())
     }
 }

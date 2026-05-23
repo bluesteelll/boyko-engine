@@ -1,6 +1,6 @@
 use crate::ecs::core::entity::entity::Entity;
 use crate::ecs::core::entity::entity_inland::EntityInland;
-use crate::ecs::identifiers::primitives::{EntityId, Generation, ArchetypeId, InlandPoolId};
+use crate::ecs::identifiers::primitives::{EntityId, ArchetypeId, InlandPoolId};
 use boyko_utils::sparse_map::sparse_map::SparseMap;
 
 /// Manages entity lifecycle, recycling, and internal mapping

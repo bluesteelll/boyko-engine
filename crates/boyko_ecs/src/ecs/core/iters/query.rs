@@ -242,7 +242,7 @@ mod tests {
     /// `Box<Arena>` pattern here too so tests don't reintroduce it.
     fn setup_test_archetypes() -> (ArchetypeMaster, Box<Arena>) {
         register_mock_components();
-        let arena: Box<Arena> = Box::new(Arena::new());
+        let arena: Box<Arena> = Box::default();
         let mut master = ArchetypeMaster::new(&arena);
 
         // Create some test archetypes

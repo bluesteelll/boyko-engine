@@ -15,6 +15,12 @@ pub struct ComponentPoolBundle {
     sparse_indexes: SparseMap<InlandPoolId>,
 }
 
+impl Default for ComponentPoolBundle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ComponentPoolBundle {
     /// Creates a new empty ComponentPoolBundle
     pub fn new() -> Self {

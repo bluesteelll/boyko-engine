@@ -277,7 +277,7 @@ mod tests {
         assert!(!result.contains(4));
 
         // Test reference version
-        let result_ref = &mask1 & &mask2;
+        let result_ref = mask1 & mask2;
         assert!(result_ref.contains(2));
         assert!(result_ref.contains(3));
         assert!(!result_ref.contains(1));
@@ -304,7 +304,7 @@ mod tests {
         assert!(result.contains(3));
 
         // Test reference version
-        let result_ref = &mask1 | &mask2;
+        let result_ref = mask1 | mask2;
         assert!(result_ref.contains(1));
         assert!(result_ref.contains(2));
         assert!(result_ref.contains(3));
@@ -333,7 +333,7 @@ mod tests {
         assert!(result.contains(4));
 
         // Test reference version
-        let result_ref = &mask1 ^ &mask2;
+        let result_ref = mask1 ^ mask2;
         assert!(result_ref.contains(1));
         assert!(!result_ref.contains(2));
         assert!(!result_ref.contains(3));

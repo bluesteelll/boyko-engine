@@ -49,11 +49,9 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: cargo clippy
-        # boyko_utils has pre-existing clippy violations tracked in Phase 5
-        # (Q-001 tester report). Run clippy across the workspace but do not
-        # fail on its issues until they are resolved. Remove `|| true` when
-        # boyko_utils is cleaned up.
-        run: cargo clippy --all-targets -- -D warnings || true
+        # Phase 5a cleared boyko_utils (13 warnings); Phase 5d cleared boyko_ecs
+        # (~43 warnings). Workspace is now clean: no || true workaround needed.
+        run: cargo clippy --all-targets -- -D warnings
 
   bench-compile:
     name: cargo bench --no-run

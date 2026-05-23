@@ -19,12 +19,16 @@ use crate::ecs::memory::id_unit::Unit;
 /// are uninitialized arena memory and must never be read or dropped.
 pub struct ComponentPool {
     /// Reference to the arena for memory allocation.
+    /// Reserved for future deallocation / defragmentation support (Phase 3).
+    #[allow(dead_code)]
     arena: NonNull<Arena>,
 
     /// Buffer for storing components, allocated directly from the arena.
     buffer: NonNull<u8>,
 
     /// Buffer capacity in bytes.
+    /// Reserved for bounds-checking in future growth/defragmentation code (Phase 3).
+    #[allow(dead_code)]
     buffer_capacity_bytes: usize,
 
     /// Maximum number of components.
@@ -169,7 +173,7 @@ impl ComponentPool {
                 self.component_layout.size(),
             );
 
-            ptr as *mut u8
+            ptr
         };
 
         let unit = Unit::new(component_ptr, buffer_index);
@@ -227,7 +231,7 @@ impl ComponentPool {
         //   exist after this call — no scope-exit drop.
         unsafe { core::ptr::write(dst.cast::<T>(), value) };
 
-        let unit = Unit::new(dst as *mut u8, buffer_index);
+        let unit = Unit::new(dst, buffer_index);
         let chunk_index = buffer_index / self.components_per_chunk;
         if let Some(chunk) = self.chunks.get_mut(chunk_index) {
             chunk.mark_dirty();

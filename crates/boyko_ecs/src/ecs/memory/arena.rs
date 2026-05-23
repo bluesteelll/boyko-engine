@@ -253,7 +253,7 @@ mod tests {
     #[test]
     fn arena_allocate_typed_returns_correct_alignment() {
         #[repr(align(32))]
-        struct Fat([u8; 32]);
+        struct Fat(#[allow(dead_code)] [u8; 32]);
 
         let arena = Arena::with_capacity(4096);
         let ptr: std::ptr::NonNull<Fat> = arena.allocate::<Fat>();

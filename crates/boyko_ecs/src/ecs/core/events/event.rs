@@ -1,6 +1,6 @@
 use std::alloc::Layout;
 use std::any::TypeId;
-use crate::ecs::core::events::participants::participants::{Participants, ParticipantInfo};
+use crate::ecs::core::events::participants::participants::Participants;
 use crate::ecs::core::events::parameters::parameters::Parameters;
 
 /// Unique identifier for events.

@@ -456,7 +456,7 @@ mod tests {
         // component_pools.pop_entity() — previously it was missing.
         let arena = Arena::with_capacity(4096 * 1024);
         let mut arch = make_archetype(&arena);
-        let mut inland0 = add_entity(&mut arch, 1);
+        let inland0 = add_entity(&mut arch, 1);
         add_entity(&mut arch, 2);
         add_entity(&mut arch, 3);
 

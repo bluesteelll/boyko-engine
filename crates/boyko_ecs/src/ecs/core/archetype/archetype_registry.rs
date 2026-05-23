@@ -14,6 +14,12 @@ pub struct ArchetypeRegistry {
     active_patterns: Vec<u8>,
 }
 
+impl Default for ArchetypeRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ArchetypeRegistry {
     /// Creates a new empty archetype registry
     pub fn new() -> Self {
@@ -22,9 +28,9 @@ impl ArchetypeRegistry {
             active_patterns: Vec::new(),
         }
     }
-    
+
     /// Creates a registry with pre-allocated capacity
-    pub fn with_capacity(capacity: usize) -> Self {
+    pub fn with_capacity(_capacity: usize) -> Self {
         Self {
             block_groups: SparseMap::with_capacity(256), // 256 possible block patterns (8-bit)
             active_patterns: Vec::with_capacity(32), // Expect fewer unique patterns
@@ -57,23 +63,23 @@ impl ArchetypeRegistry {
         // Find the archetype in all active block groups
         for &pattern in &self.active_patterns.clone() {
             let pattern_index = pattern as usize;
-            if let Some(group) = self.block_groups.get_mut(pattern_index) {
-                if let Some(pos) = group.iter().position(|(id, _)| *id == archetype_id) {
-                    // Remove the archetype from its group
-                    group.swap_remove(pos);
-                    
-                    // If group is now empty, we should remove the pattern from active_patterns
-                    if group.is_empty() {
-                        if let Some(pattern_pos) = self.active_patterns.iter().position(|&p| p == pattern) {
-                            self.active_patterns.swap_remove(pattern_pos);
-                        }
-                    }
-                    
-                    return true;
+            if let Some(group) = self.block_groups.get_mut(pattern_index)
+                && let Some(pos) = group.iter().position(|(id, _)| *id == archetype_id)
+            {
+                // Remove the archetype from its group
+                group.swap_remove(pos);
+
+                // If group is now empty, remove the pattern from active_patterns
+                if group.is_empty()
+                    && let Some(pattern_pos) = self.active_patterns.iter().position(|&p| p == pattern)
+                {
+                    self.active_patterns.swap_remove(pattern_pos);
                 }
+
+                return true;
             }
         }
-        
+
         false
     }
     
@@ -229,12 +235,12 @@ impl ArchetypeRegistry {
             // Insertion-sort-with-dedup: find the insertion position or skip duplicate.
             let mut insert_pos = blocks_len;
             let mut duplicate = false;
-            for i in 0..blocks_len {
-                if blocks[i] == block {
+            for (i, &b) in blocks[..blocks_len].iter().enumerate() {
+                if b == block {
                     duplicate = true;
                     break;
                 }
-                if blocks[i] > block {
+                if b > block {
                     insert_pos = i;
                     break;
                 }
@@ -350,10 +356,10 @@ impl ArchetypeRegistry {
     pub fn get_archetype_signature(&self, archetype_id: ArchetypeId) -> Option<ArchetypeSignature> {
         for &pattern in &self.active_patterns {
             let pattern_index = pattern as usize;
-            if let Some(group) = self.block_groups.get(pattern_index) {
-                if let Some((_, signature)) = group.iter().find(|(id, _)| *id == archetype_id) {
-                    return Some(signature.clone());
-                }
+            if let Some(group) = self.block_groups.get(pattern_index)
+                && let Some((_, signature)) = group.iter().find(|(id, _)| *id == archetype_id)
+            {
+                return Some(signature.clone());
             }
         }
         None

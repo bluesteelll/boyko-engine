@@ -267,7 +267,7 @@ pub fn get_component_memory_layout(component_id: usize) -> Option<Layout> {
 /// the following has already completed for the corresponding type `T`:
 /// - [`register_new::<T>()`] (production path, via `T::component_id()`), or
 /// - [`register_layout::<T>(component_id)`] (test-only escape hatch).
-/// Violating either yields UB.
+///   Violating either yields UB.
 #[inline(always)]
 pub unsafe fn get_component_size_unchecked(component_id: usize) -> usize {
     debug_assert!(
@@ -287,7 +287,7 @@ pub unsafe fn get_component_size_unchecked(component_id: usize) -> usize {
 /// the following has already completed for the corresponding type `T`:
 /// - [`register_new::<T>()`] (production path, via `T::component_id()`), or
 /// - [`register_layout::<T>(component_id)`] (test-only escape hatch).
-/// Violating either yields UB.
+///   Violating either yields UB.
 #[inline(always)]
 pub unsafe fn get_component_alignment_unchecked(component_id: usize) -> usize {
     debug_assert!(
@@ -307,7 +307,7 @@ pub unsafe fn get_component_alignment_unchecked(component_id: usize) -> usize {
 /// the following has already completed for the corresponding type `T`:
 /// - [`register_new::<T>()`] (production path, via `T::component_id()`), or
 /// - [`register_layout::<T>(component_id)`] (test-only escape hatch).
-/// Violating either yields UB.
+///   Violating either yields UB.
 #[inline(always)]
 pub unsafe fn get_layout_unchecked(component_id: usize) -> &'static ComponentLayout {
     debug_assert!(
@@ -327,7 +327,7 @@ pub unsafe fn get_layout_unchecked(component_id: usize) -> &'static ComponentLay
 /// the following has already completed for the corresponding type `T`:
 /// - [`register_new::<T>()`] (production path, via `T::component_id()`), or
 /// - [`register_layout::<T>(component_id)`] (test-only escape hatch).
-/// Violating either yields UB.
+///   Violating either yields UB.
 #[inline(always)]
 pub unsafe fn get_component_memory_layout_unchecked(component_id: usize) -> Layout {
     // SAFETY: forwarded to the unchecked accessor; caller satisfies the same contract.
@@ -343,7 +343,7 @@ pub unsafe fn get_component_memory_layout_unchecked(component_id: usize) -> Layo
 /// the following has already completed for the corresponding type `T`:
 /// - [`register_new::<T>()`] (production path, via `T::component_id()`), or
 /// - [`register_layout::<T>(component_id)`] (test-only escape hatch).
-/// Violating either yields UB.
+///   Violating either yields UB.
 #[inline(always)]
 pub unsafe fn get_component_type_id_unchecked(component_id: usize) -> TypeId {
     // SAFETY: forwarded to the unchecked accessor; caller satisfies the same contract.

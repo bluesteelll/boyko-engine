@@ -1,19 +1,19 @@
-/// Integration tests for Phase 1b drop_fn implementation.
-///
-/// Verifies audit findings:
-///   M-001 (cont.) — type-erased component Drop via `drop_in_place_glue`
-///   M-004         — swap_remove / pop now invoke drop glue
-///   C-004 (partial) — TypeId-check on typed API surfaces mismatches in debug
-///
-/// ID allocation (no collision with existing test modules):
-///   200  — DropCounter (drop-correctness tests group A)
-///   201  — DropCounter2 (set_component_typed: two separate DropCounter instances)
-///   202  — TypeA (TypeId-check tests)
-///   203  — TypeB (TypeId-check tests, wrong type)
-///   204  — ZstComp (ZST rejection test — size==0, triggers debug_assert)
-///   205  — u32 (POD / no-drop test)
-///   206  — BundleComp (bundle-level tests)
-///   207  — BundleMissing (bundle tests: type with no pool)
+// Integration tests for Phase 1b drop_fn implementation.
+//
+// Verifies audit findings:
+//   M-001 (cont.) — type-erased component Drop via `drop_in_place_glue`
+//   M-004         — swap_remove / pop now invoke drop glue
+//   C-004 (partial) — TypeId-check on typed API surfaces mismatches in debug
+//
+// ID allocation (no collision with existing test modules):
+//   200  — DropCounter (drop-correctness tests group A)
+//   201  — DropCounter2 (set_component_typed: two separate DropCounter instances)
+//   202  — TypeA (TypeId-check tests)
+//   203  — TypeB (TypeId-check tests, wrong type)
+//   204  — ZstComp (ZST rejection test — size==0, triggers debug_assert)
+//   205  — u32 (POD / no-drop test)
+//   206  — BundleComp (bundle-level tests)
+//   207  — BundleMissing (bundle tests: type with no pool)
 
 // ---- shared test infrastructure ------------------------------------------------
 
@@ -398,7 +398,7 @@ fn pool_drop_skipped_for_pod_components() {
             std::mem::size_of::<PodU32>(),
         )
     };
-    std::mem::forget(val); // avoid double-free: we copied bytes
+    // PodU32 is Copy with no Drop impl, so forget is a no-op; safe to remove.
 
     let idx = pool.add(bytes);
     assert_eq!(idx, Some(0), "first add to an empty pool must succeed at index 0");

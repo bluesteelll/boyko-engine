@@ -1,4 +1,3 @@
-use std::ptr::NonNull;
 use crate::ecs::core::archetype::archetype_master::ArchetypeMaster;
 use crate::ecs::core::entity::entity::Entity;
 use crate::ecs::core::entity::entity_master::EntityMaster;
@@ -39,7 +38,7 @@ impl EcsMaster {
     /// Creates a new empty EcsMaster
     #[inline]
     pub fn new() -> Self {
-        let arena: Box<Arena> = Box::new(Arena::new());
+        let arena: Box<Arena> = Box::default();
         // `&arena` auto-derefs to `&Arena` via `Box: Deref<Target = Arena>`;
         // the `NonNull::from` captured inside `ArchetypeMaster::new` therefore
         // points at the heap-allocated `Arena`, not at a stack temporary.
@@ -120,7 +119,7 @@ impl EcsMaster {
 pub fn delete_entity(&mut self, entity: Entity) -> bool {
     // Get the EntityInland data
     let entity_inland = match self.entity_master.get_entity_inland(entity) {
-        Some(inland) => inland.clone(), // Clone to avoid borrow issues
+        Some(inland) => *inland,
         None => return false,
     };
 
@@ -183,7 +182,7 @@ pub fn delete_entity(&mut self, entity: Entity) -> bool {
     #[inline]
     pub fn get_component_raw_mut(&mut self, entity: Entity, component_id: ComponentId) -> Option<*mut u8> {
         // Get EntityInland from the master
-        let entity_inland = self.entity_master.get_entity_inland(entity)?.clone();
+        let entity_inland = *self.entity_master.get_entity_inland(entity)?;
 
         // Get the archetype and component
         let archetype = self.archetype_master.get_archetype_mut(entity_inland.archetype_id())?;
@@ -200,10 +199,10 @@ pub fn delete_entity(&mut self, entity: Entity) -> bool {
         component_bytes: &[u8]
     ) -> bool {
         // Get EntityInland from the master
-        if let Some(entity_inland) = self.entity_master.get_entity_inland(entity).cloned() {
-            if let Some(archetype) = self.archetype_master.get_archetype_mut(entity_inland.archetype_id()) {
-                return archetype.set_component(&entity_inland, component_id, component_bytes);
-            }
+        if let Some(entity_inland) = self.entity_master.get_entity_inland(entity).copied()
+            && let Some(archetype) = self.archetype_master.get_archetype_mut(entity_inland.archetype_id())
+        {
+            return archetype.set_component(&entity_inland, component_id, component_bytes);
         }
         false
     }
@@ -223,10 +222,10 @@ pub fn delete_entity(&mut self, entity: Entity) -> bool {
     /// Checks if an entity has a specific component
     #[inline]
     pub fn has_component(&self, entity: Entity, component_id: ComponentId) -> bool {
-        if let Some(entity_inland) = self.entity_master.get_entity_inland(entity) {
-            if let Some(archetype) = self.archetype_master.get_archetype(entity_inland.archetype_id()) {
-                return archetype.has_component_id(component_id);
-            }
+        if let Some(entity_inland) = self.entity_master.get_entity_inland(entity)
+            && let Some(archetype) = self.archetype_master.get_archetype(entity_inland.archetype_id())
+        {
+            return archetype.has_component_id(component_id);
         }
         false
     }
@@ -271,10 +270,10 @@ pub fn delete_entity(&mut self, entity: Entity) -> bool {
             if let Some(archetype) = self.archetype_master.get_archetype(archetype_id) {
                 // Get all entity IDs from this archetype
                 for unit_index in 0..archetype.entity_count() {
-                    if let Some(entity_id) = archetype.get_entity_id_at(unit_index) {
-                        if let Some(entity) = self.entity_master.get_entity(entity_id) {
-                            result.push(entity);
-                        }
+                    if let Some(entity_id) = archetype.get_entity_id_at(unit_index)
+                        && let Some(entity) = self.entity_master.get_entity(entity_id)
+                    {
+                        result.push(entity);
                     }
                 }
             }
@@ -292,38 +291,38 @@ pub fn delete_entity(&mut self, entity: Entity) -> bool {
     ) -> Vec<(ComponentId, *const u8)> {
         let mut result = Vec::with_capacity(component_ids.len());
         
-        if let Some(entity_inland) = self.entity_master.get_entity_inland(entity) {
-            if let Some(archetype) = self.archetype_master.get_archetype(entity_inland.archetype_id()) {
-                for &component_id in component_ids {
-                    if let Some(ptr) = archetype.get_component_raw(entity_inland, component_id) {
-                        result.push((component_id, ptr));
-                    }
+        if let Some(entity_inland) = self.entity_master.get_entity_inland(entity)
+            && let Some(archetype) = self.archetype_master.get_archetype(entity_inland.archetype_id())
+        {
+            for &component_id in component_ids {
+                if let Some(ptr) = archetype.get_component_raw(entity_inland, component_id) {
+                    result.push((component_id, ptr));
                 }
             }
         }
-        
+
         result
     }
 
     /// Gets mutable raw pointers to multiple components for an entity
     /// Returns a vector of (ComponentId, *mut u8) pairs
     pub fn get_components_raw_mut(
-        &mut self, 
-        entity: Entity, 
+        &mut self,
+        entity: Entity,
         component_ids: &[ComponentId]
     ) -> Vec<(ComponentId, *mut u8)> {
         let mut result = Vec::with_capacity(component_ids.len());
-        
-        if let Some(entity_inland) = self.entity_master.get_entity_inland(entity).cloned() {
-            if let Some(archetype) = self.archetype_master.get_archetype_mut(entity_inland.archetype_id()) {
-                for &component_id in component_ids {
-                    if let Some(ptr) = archetype.get_component_raw_mut(&entity_inland, component_id) {
-                        result.push((component_id, ptr));
-                    }
+
+        if let Some(entity_inland) = self.entity_master.get_entity_inland(entity).copied()
+            && let Some(archetype) = self.archetype_master.get_archetype_mut(entity_inland.archetype_id())
+        {
+            for &component_id in component_ids {
+                if let Some(ptr) = archetype.get_component_raw_mut(&entity_inland, component_id) {
+                    result.push((component_id, ptr));
                 }
             }
         }
-        
+
         result
     }
 
