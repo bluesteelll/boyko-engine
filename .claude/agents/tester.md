@@ -2,7 +2,6 @@
 name: tester
 description: Builds the project, writes unit/integration tests and benchmarks, runs them and analyzes results. Use after code-reviewer has approved the code. Writes tests for correctness, edge cases, multi-threaded access (via loom where applicable), and performance (via criterion). Returns a report on coverage, discovered failures, and measured performance.
 tools: Read, Write, Edit, Glob, Grep, Bash
-model: sonnet
 ---
 
 # Role

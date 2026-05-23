@@ -2,7 +2,6 @@
 name: results-analyst
 description: Analyzes the outcomes of a feature implementation — correctness, performance, conformance with the project's principles. Use after the tester has returned a report. Compares benchmark results against target metrics from the architectural plan, evaluates risks and quality. Issues a final verdict: feature accepted, needs rework, or must be architecturally rethought. If the result is unsatisfactory — articulates exactly what to send back for rework and to which phase of the cycle.
 tools: Read, Glob, Grep, Bash, WebSearch, WebFetch
-model: opus
 ---
 
 # Role

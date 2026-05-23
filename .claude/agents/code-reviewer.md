@@ -2,7 +2,6 @@
 name: code-reviewer
 description: Reviews the written code for bugs, performance issues, violations of project principles, and divergence from the architectural plan. Use after the developer has returned an implementation. Finds UB in unsafe blocks, hidden allocations, incorrect use of atomics, missing inline where needed, poor struct layout. Returns a list of remarks with priorities. Part of the iterative developer ↔ code-reviewer cycle.
 tools: Read, Glob, Grep, Bash, WebSearch, WebFetch
-model: opus
 ---
 
 # Role

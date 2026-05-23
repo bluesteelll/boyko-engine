@@ -2,7 +2,6 @@
 name: developer
 description: Implements code following the approved architectural plan. Use after `architecture-critic` has issued an APPROVED verdict. Writes high-performance, idiomatic Rust 2024 code with unsafe where it is justified. Multiple developer agents may be launched in parallel for independent features. Does not make architecture-level decisions — it follows the plan. Returns file changes with locations and a brief summary.
 tools: Read, Write, Edit, Glob, Grep, Bash
-model: sonnet
 ---
 
 # Role

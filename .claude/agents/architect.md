@@ -2,7 +2,6 @@
 name: architect
 description: Designs the architecture of new features, systems, and subsystems of the boyko-engine ECS engine. Use when an architectural solution must be developed before any code is written (for example, parallel scheduler, query API, change detection, sparse set, archetype graph, command buffer, resource management). Returns a detailed implementation plan with justified decisions covering performance, cache locality, lock-free concurrency, and integration with existing subsystems.
 tools: Read, Glob, Grep, WebSearch, WebFetch, Agent
-model: opus
 ---
 
 # Role
