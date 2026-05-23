@@ -1,146 +1,151 @@
 # boyko-engine
 
-Rust ECS-движок для игр с фокусом на **ультимативную производительность, кеш-локальность и нативный параллелизм**. Без компромиссов в пользу удобства против скорости.
+A Rust ECS engine for games, built for **ultimate performance, cache locality, and native parallelism**. No comfort-vs-speed compromises.
 
-## Структура (ветка `ecs`)
+## Layout (branch `ecs`)
 
-> ⚠️ Ты сейчас на ветке `ecs` — это последняя активная ветка разработки. **Сейчас не компилируется** — есть нерешённые ошибки (`299a6b6 Blanket trait impl error fixed` была попыткой фикса, неполной). Задача билда — приоритет.
+> ⚠️ You are on branch `ecs` — the latest active development branch. **It does not currently compile** — there are unresolved errors (`299a6b6 Blanket trait impl error fixed` was an incomplete attempt). Restoring the build is the top priority.
 
-Workspace из крейтов:
+A workspace of crates:
 
-- [`crates/boyko_ecs/`](crates/boyko_ecs/) — ядро ECS: память, компоненты, сущности, **архетипы, queries, events**
-- [`crates/boyko_macros/`](crates/boyko_macros/) — proc-macros: `#[derive(Component)]` и `#[derive(Event)]`
-- [`crates/boyko_utils/`](crates/boyko_utils/) — переиспользуемые коллекции: `BitSet`, `BitMask`, `BitSet512`, `SparseMap`, `SparseSlotMap`, `Slot`
-- [`src/main.rs`](src/main.rs) — исполняемая обёртка (сейчас пустая; проект библиотечный)
+- [`crates/boyko_ecs/`](crates/boyko_ecs/) — ECS core: memory, components, entities, **archetypes, queries, events**
+- [`crates/boyko_macros/`](crates/boyko_macros/) — proc-macros: `#[derive(Component)]` and `#[derive(Event)]`
+- [`crates/boyko_utils/`](crates/boyko_utils/) — reusable collections: `BitSet`, `BitMask`, `BitSet512`, `SparseMap`, `SparseSlotMap`, `Slot`
+- [`src/main.rs`](src/main.rs) — executable wrapper (currently empty; the project is library-shaped)
 
-## Принципы (НЕРУШИМЫЕ)
+## Principles (INVIOLABLE)
 
-1. **Zero runtime overhead** — никаких `dyn Trait`/`Box`/`HashMap`/`Vec::new()` в hot path без обоснования
-2. **Data-Oriented Design** — Struct of Arrays, hot/cold split полей
-3. **Cache optimization (D-cache + I-cache)** — оба уровня кэша одинаково важны:
-   - **D-cache (данные)**: `#[repr(C)]` где layout важен, alignment по cache line (64 B), SoA + hot/cold split полей, padding против false sharing, sequential access patterns, software prefetching для предсказуемых паттернов, non-temporal stores для streaming-записей. Working set hot loop'ов держим в пределах L1d (~32 KB) / L2 (~256-512 KB) где это критично.
-   - **I-cache (инструкции)**: hot path компактный, никакого blind `#[inline(always)]` (см. принцип 7), `#[cold]` / `#[inline(never)]` для error paths и редких веток, контролируемая branch density, минимизированный размер hot loop. PGO (`-Cprofile-use=...`) применяется когда есть профиль исполнения.
-4. **Lock-free параллелизм** — без `Mutex`/`RwLock`/`RefCell` в hot path
-5. **Минимум аллокаций** — preallocate в setup, reuse во время игры
-6. **SIMD-friendly layout** — данные готовы к векторизации
-7. **Measured inlining** — `#[inline]` для cross-crate тривиальных функций и generic-методов (иначе тело недоступно для LTO). `#[inline(always)]` ТОЛЬКО когда профайлер/ассемблер показал, что компилятор не инлайнит сам и это критично. `#[cold]` / `#[inline(never)]` для error paths и редких веток. Чрезмерный inlining раздувает L1i cache и **снижает** perf — решения должны опираться на измерения, не на доктрину.
-8. **Unsafe оправдан** — но **каждый** `unsafe` блок имеет `// SAFETY:` коммент с инвариантами
+1. **Zero runtime overhead** — no `dyn Trait` / `Box` / `HashMap` / `Vec::new()` in the hot path without justification.
+2. **Data-Oriented Design** — Struct of Arrays, hot/cold field split.
+3. **Cache optimization (D-cache + I-cache)** — both levels of cache matter equally:
+   - **D-cache (data)**: `#[repr(C)]` where layout matters, cache-line alignment (64 B), SoA + hot/cold field split, padding against false sharing, sequential access patterns, software prefetching for predictable patterns, non-temporal stores for streaming writes. Keep the working set of hot loops within L1d (~32 KB) / L2 (~256-512 KB) where it is critical.
+   - **I-cache (instructions)**: a compact hot path, no blind `#[inline(always)]` (see principle 7), `#[cold]` / `#[inline(never)]` for error paths and rare branches, controlled branch density, minimized hot-loop size. PGO (`-Cprofile-use=...`) is applied when an execution profile exists.
+4. **Lock-free parallelism** — no `Mutex` / `RwLock` / `RefCell` on the hot path.
+5. **Minimum allocations** — preallocate during setup, reuse during gameplay.
+6. **SIMD-friendly layout** — data ready for vectorization.
+7. **Measured inlining** — `#[inline]` for trivial cross-crate and generic methods (otherwise the body is invisible to LTO). `#[inline(always)]` ONLY when a profiler or assembly inspection has shown that the compiler is not inlining on its own and that this matters. `#[cold]` / `#[inline(never)]` for error paths and rare branches. Excessive inlining bloats the L1i cache and **lowers** performance — decisions must be measurement-driven, not doctrine-driven.
+8. **Unsafe is justified** — but **every** `unsafe` block carries a `// SAFETY:` comment stating the invariants.
 
-## Команды сборки
+## Build commands
 
 ```powershell
-cargo check --all-targets                          # быстрая проверка типов
-cargo build --release                              # релизная сборка
-cargo clippy --all-targets -- -D warnings          # линтер
-cargo test --all-targets                           # тесты
-cargo bench                                        # бенчмарки
-cargo +nightly miri test                           # UB-детектор (если nightly)
+cargo check --all-targets                          # fast type check
+cargo build --release                              # release build
+cargo clippy --all-targets -- -D warnings          # linter
+cargo test --all-targets                           # tests
+cargo bench                                        # benchmarks
+cargo +nightly miri test                           # UB detector (if nightly is installed)
 ```
 
-## Целевая платформа
+## Target platform
 
-- ОС: Windows / Linux (x86_64)
-- SIMD: AVX2 baseline; AVX-512 опционально через `cfg(target_feature)`
+- OS: Windows / Linux (x86_64)
+- SIMD: AVX2 baseline; AVX-512 optionally via `cfg(target_feature)`
 - Edition: Rust 2024
 
-## Текущее состояние веток
+## Current branch state
 
-| Ветка | Что есть | Билд |
-|-------|----------|------|
-| `master` | Только подсистема памяти: `Arena`, `ComponentPool<T>` (generic), `Chunk<T>` (generic), `MemFreeBlockMaster`, базовые типы `Entity`/`Component` | ✅ собирается |
-| **`ecs`** (ты здесь) | Полная архитектура: `EcsMaster`, `ArchetypeMaster`, `Archetype`, `Query`, `Event`, `EventRegistry`, `ComponentRegistry`, type-erased `ComponentPool` + `Chunk`, `EntityMaster` с recycling, `boyko_utils` (BitSet/SparseMap) | ❌ **не компилируется** |
+| Branch | Contents | Build |
+|--------|----------|-------|
+| `master` | Only the memory subsystem: `Arena`, `ComponentPool<T>` (generic), `Chunk<T>` (generic), `MemFreeBlockMaster`, the basic `Entity` / `Component` types | ✅ builds |
+| **`ecs`** (you are here) | Full architecture: `EcsMaster`, `ArchetypeMaster`, `Archetype`, `Query`, `Event`, `EventRegistry`, `ComponentRegistry`, type-erased `ComponentPool` + `Chunk`, `EntityMaster` with recycling, `boyko_utils` (`BitSet` / `SparseMap`) | ❌ **does not build** |
 
-### Ключевые архитектурные отличия от `master`
+### Key architectural differences vs `master`
 
-- **Type-erased `ComponentPool` и `Chunk`** — больше не generic по `T`. Используют `ComponentRegistry` для хранения `Layout` (size + align) каждого `ComponentId`. Это нужно для гетерогенного хранения компонентов в архетипе.
-- **`Unit { ptr: *mut u8, buffer_index: usize }`** заменил двухуровневую адресацию `UnitId { chunk, inland }` с master. Теперь хранится **прямой указатель** на компонент.
-- **`identifiers/primitives`** — все ID унифицированы как `usize`: `EntityId`, `ArchetypeId`, `ChunkId`, `ComponentId`, `Generation`, `InlandPoolId`, и т.д.
-- **`EntityMaster`** — настоящий менеджер сущностей с reuse через free list и `SparseMap<EntityInland>` для O(1) lookup.
-- **`EcsMaster`** — top-level фасад, возвращает `anyhow::Result` (спорно для библиотеки — пересмотреть при стабилизации).
-- **Глобальные registries** (`ComponentRegistry`, `EventRegistry`) — хранят metadata в `static` storage. Регистрация при первом обращении через `#[derive]`-сгенерированный код.
+- **Type-erased `ComponentPool` and `Chunk`** — no longer generic over `T`. They use the `ComponentRegistry` to store the `Layout` (size + align) of each `ComponentId`. This is required for heterogeneous component storage within an archetype.
+- **`Unit { ptr: *mut u8, buffer_index: usize }`** replaces the two-level `UnitId { chunk, inland }` addressing from `master`. A **direct pointer** to the component is now stored.
+- **`identifiers/primitives`** — all IDs are unified as `usize`: `EntityId`, `ArchetypeId`, `ChunkId`, `ComponentId`, `Generation`, `InlandPoolId`, etc.
+- **`EntityMaster`** — a real entity manager with reuse via a free list and `SparseMap<EntityInland>` for O(1) lookup.
+- **`EcsMaster`** — top-level facade, returns `anyhow::Result` (questionable for a library — revisit at stabilization).
+- **Global registries** (`ComponentRegistry`, `EventRegistry`) — store metadata in `static` storage. Registration happens on first access through `#[derive]`-generated code.
 
-### Где смотреть детали
+### Where to dig for details
 
-- [docs/SYSTEMS.md](docs/SYSTEMS.md) — полный каталог подсистем с file:line ссылками
-- [docs/FEATURE_MAP.md](docs/FEATURE_MAP.md) — карта «хочу X → ищи Y»
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — слои, dependency graph, data flow
+- [docs/SYSTEMS.md](docs/SYSTEMS.md) — full subsystem catalog with file:line references
+- [docs/FEATURE_MAP.md](docs/FEATURE_MAP.md) — "I want X → look at Y" map
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — layers, dependency graph, data flow
 
-## Документация — два слоя
+## Documentation — two layers
 
-### Internal (для агентов, не для публикации)
+### Internal (for agents, not for publication)
 
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — обзор архитектуры и зависимостей между крейтами
-- [docs/SYSTEMS.md](docs/SYSTEMS.md) — каталог всех подсистем с указанием файлов и ключевых типов
-- [docs/FEATURE_MAP.md](docs/FEATURE_MAP.md) — быстрый поиск: «где реализовано X»
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — overview of the architecture and dependencies between crates
+- [docs/SYSTEMS.md](docs/SYSTEMS.md) — catalog of every subsystem with file pointers and key types
+- [docs/FEATURE_MAP.md](docs/FEATURE_MAP.md) — quick lookup: "where is X implemented?"
 
-**Любой агент** перед началом работы должен заглянуть в эти файлы. `FEATURE_MAP.md` — точка первого контакта.
+**Every agent** must consult these files before starting work. `FEATURE_MAP.md` is the first point of contact.
 
-### Public (mdBook + cargo doc, деплоится на GitHub Pages)
+### Public (mdBook + cargo doc, deployed to GitHub Pages)
 
-- [book.toml](book.toml) — конфиг mdBook
-- [book/src/](book/src/) — исходники публичной книги
-- [book/src/SUMMARY.md](book/src/SUMMARY.md) — оглавление (любая новая страница регистрируется здесь)
-- [.github/workflows/docs.yml](.github/workflows/docs.yml) — CI деплой на GitHub Pages
+- [book.toml](book.toml) — mdBook config
+- [book/src/](book/src/) — sources of the public book
+- [book/src/SUMMARY.md](book/src/SUMMARY.md) — table of contents (every new page is registered here)
+- [.github/workflows/docs.yml](.github/workflows/docs.yml) — CI deploy to GitHub Pages
 
-Деплой URL: `https://bluesteelll.github.io/boyko-engine/` (книга) + `/api/` (rustdoc).
+Deployment URL: `https://bluesteelll.github.io/boyko-engine/` (book) + `/api/` (rustdoc).
 
-Локальный preview:
+Local preview:
 ```powershell
-cargo install mdbook mdbook-mermaid    # один раз
+cargo install mdbook mdbook-mermaid    # one-time
 mdbook serve --open
 ```
 
-Публичную документацию пишет агент `doc-writer` — другие агенты её не редактируют.
+The public documentation is written by the `doc-writer` agent — other agents do not edit it.
 
-## Агенты
+## Agents
 
-В [.claude/agents/](.claude/agents/) определены:
+In [.claude/agents/](.claude/agents/) the following are defined:
 
-| Агент | Назначение |
-|-------|------------|
-| `architect` | Проектирует архитектуру новых фич |
-| `researcher` | Собирает практики из Bevy/flecs/EnTT/Unity DOTS |
-| `architecture-critic` | Критикует план до реализации |
-| `developer` | Реализует код по плану |
-| `code-reviewer` | Ревьюит написанный код |
-| `tester` | Билд + unit/integration/proptest/loom + criterion |
-| `results-analyst` | Финальный вердикт после реализации фичи |
-| `project-analyst` | Свободный анализ кодовой базы, security audit, ответы на вопросы |
-| `doc-writer` | Пишет публичную документацию в `book/src/` для деплоя на GitHub Pages |
+| Agent | Purpose |
+|-------|---------|
+| `architect` | Designs the architecture of new features |
+| `researcher` | Collects practices from Bevy / flecs / EnTT / Unity DOTS |
+| `architecture-critic` | Critiques the plan before implementation |
+| `developer` | Implements code following the plan |
+| `code-reviewer` | Reviews the written code |
+| `tester` | Build + unit / integration / proptest / loom + criterion |
+| `results-analyst` | Final verdict after the feature is implemented |
+| `project-analyst` | Free-form codebase analysis, security audit, Q&A |
+| `doc-writer` | Writes public documentation in `book/src/` for the GitHub Pages deploy |
 
-Главный Claude в чате выступает **оркестратором** — выбирает агентов под задачу и управляет циклами правок.
+The main Claude in the chat acts as the **orchestrator** — chooses the right agents for each task and runs the iteration loops.
 
-## Правила для агентов
+## Communication
 
-### Что нельзя в hot path
+- Chat messages between Claude and the user can be in Russian.
+- **Every artifact written into the repository is in English**: code, doc comments, inline comments, commit messages, internal docs, agent prompts, mdBook content, audit reports — everything. No mixed-language files.
+
+## Rules for agents
+
+### Forbidden on the hot path
 - `Box<dyn Trait>`, `Rc`, `Arc<Mutex<_>>`
-- `HashMap` (используй массив с `ComponentId`-индексом)
-- `Vec::new()`, `format!()`, `String::from()` (всё preallocate)
-- `clone()` больших структур
-- Виртуальная диспетчеризация
+- `HashMap` (use an array indexed by `ComponentId` instead)
+- `Vec::new()`, `format!()`, `String::from()` (preallocate everything)
+- `clone()` of large structs
+- Virtual dispatch
 
-### Что нужно для каждого `unsafe`
+### Required for every `unsafe`
 ```rust
-// SAFETY: <конкретные инварианты, которые гарантируют корректность>
+// SAFETY: <concrete invariants that guarantee correctness>
 unsafe { ... }
 ```
 
-### Разделение обязанностей
-- `developer` пишет код, но **не запускает тесты** — это работа `tester`'а
-- `code-reviewer` находит проблемы, но **не правит код** — это работа `developer`'а
-- `architecture-critic` критикует план, но **не диктует решение** — это работа `architect`'а
-- `project-analyst` отвечает на вопросы, но **не редактирует** ничего
+### Separation of duties
+- `developer` writes code but **does not run tests** — that is the `tester`'s job.
+- `code-reviewer` finds issues but **does not fix code** — that is the `developer`'s job.
+- `architecture-critic` critiques the plan but **does not dictate the design** — that is the `architect`'s job.
+- `project-analyst` answers questions but **does not edit** anything.
 
 ### Git
-- Никогда не коммитить без явного запроса пользователя
-- Никогда не использовать `--force`/`--no-verify` без явного разрешения
-- Коммиты только от автора репозитория. **Никогда** не добавлять `Co-Authored-By: Claude ...` (или аналогичные пометки об AI-ассистенте) в commit message. История должна выглядеть как авторская работа.
+- Never commit without an explicit user request.
+- Never use `--force` / `--no-verify` without explicit permission.
+- Commits are authored only by the repository owner. **Never** add `Co-Authored-By: Claude ...` (or any equivalent AI-assistant marker) to commit messages. The history must read as the author's own work.
 
-## Соглашения по коду
+## Code conventions
 
-- **Имена**: snake_case (функции/переменные), CamelCase (типы/трейты), SCREAMING_SNAKE_CASE (константы)
-- **Doc-комменты** (`///`) для всех public items
-- **Комментарии «зачем», не «что»** — никаких `// increment counter` над `x += 1`
-- **`expect("инвариант: ...")`** вместо `unwrap()` там, где panic возможен по дизайну
-- **`debug_assert!`** для проверки инвариантов в hot path (исчезают в release)
-- **Импорты группами**: std → external → crate → self
+- **Naming**: `snake_case` (functions / variables), `CamelCase` (types / traits), `SCREAMING_SNAKE_CASE` (constants).
+- **Doc comments** (`///`) on every public item.
+- **Comments explain "why", not "what"** — no `// increment counter` above `x += 1`.
+- **`expect("invariant: ...")`** instead of `unwrap()` wherever panic is by design.
+- **`debug_assert!`** for invariant checks on the hot path (they vanish in release).
+- **Imports grouped**: std → external → crate → self.
