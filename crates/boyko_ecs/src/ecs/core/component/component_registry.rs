@@ -46,30 +46,79 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// Maximum number of components supported by the ECS system.
 pub const MAX_COMPONENTS: usize = 512;
 
+/// Type-erased drop function pointer for a component type `T`.
+///
+/// Stored as [`ComponentLayout::drop_fn`] for types where
+/// `mem::needs_drop::<T>()` is true. Invoked by [`ComponentPool`] on
+/// `swap_remove`, `pop`, `set_component`, `set_component_typed`, and during
+/// `Drop`.
+///
+/// # Safety
+/// The caller must guarantee:
+/// - `ptr` points at a properly-aligned, fully-initialized instance of `T`.
+/// - Per the Rust Reference §"Type Layout — Size and Alignment",
+///   `size_of::<T>()` is always a multiple of `align_of::<T>()` for every
+///   `Sized T`, so an offset of `i * size_of::<T>()` from a base aligned to
+///   `align_of::<T>()` preserves alignment.
+/// - `ptr` is not aliased and the value will not be read or dropped again
+///   after this call.
+///
+/// [`ComponentPool`]: crate::ecs::memory::component_pool::ComponentPool
+pub type DropFn = unsafe fn(*mut u8);
+
+/// Type-erased drop glue for `T`.
+///
+/// Stored as `ComponentLayout::drop_fn` when `mem::needs_drop::<T>()` is true.
+///
+/// # Safety
+/// See [`DropFn`] contract above.
+#[inline]
+pub(crate) unsafe fn drop_in_place_glue<T: 'static>(ptr: *mut u8) {
+    // SAFETY: caller upholds the DropFn contract: ptr is aligned, initialized,
+    // exclusively owned, and not accessed again after this call.
+    unsafe { core::ptr::drop_in_place::<T>(ptr.cast::<T>()) }
+}
+
 /// Holds layout information for a specific component type.
 ///
 /// Filled in by [`register_new`] or [`register_layout`]. Each entry is written
 /// exactly once via `OnceLock::set` and read lock-free via `OnceLock::get`.
 /// Fixes audit findings M-002 / C-002 / Q-010.
+///
+/// Field order is cache-line friendly: hot fields (size, alignment, drop_fn)
+/// at lower offsets, cold fields (type_name, type_id) at higher offsets.
+/// Total: 56 B — fits in one 64 B cache line.
 #[derive(Clone, Copy, Debug)]
+#[repr(C)]
 pub struct ComponentLayout {
-    /// Size of the component in bytes.
+    /// Size in bytes — hot (read on every memcpy). Offset 0..8.
     pub size: usize,
-    /// Alignment requirement for the component.
+    /// Alignment requirement — hot. Offset 8..16.
     pub alignment: usize,
-    /// The component's type name (for debugging and collision messages).
+    /// Drop function pointer; `None` iff `!mem::needs_drop::<T>()` — hot
+    /// (read on swap_remove/pop/set_component/Drop). Niche-optimized to 8 B.
+    /// Offset 16..24.
+    pub drop_fn: Option<DropFn>,
+    /// Cold: type name for diagnostics. Offset 24..40.
     pub type_name: &'static str,
-    /// Unique type identifier.
+    /// Cold: TypeId for runtime type validation in debug. Offset 40..56.
     pub type_id: TypeId,
 }
 
 impl ComponentLayout {
     /// Creates a new `ComponentLayout` with static information about type `T`.
+    ///
+    /// The `if needs_drop::<T>()` branch is const-folded per monomorphization.
     #[inline]
     pub fn new_static<T: 'static>() -> Self {
         Self {
             size: std::mem::size_of::<T>(),
             alignment: std::mem::align_of::<T>(),
+            drop_fn: if std::mem::needs_drop::<T>() {
+                Some(drop_in_place_glue::<T> as DropFn)
+            } else {
+                None
+            },
             type_name: std::any::type_name::<T>(),
             type_id: TypeId::of::<T>(),
         }
