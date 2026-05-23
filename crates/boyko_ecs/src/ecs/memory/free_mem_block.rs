@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MemFreeBlock {
@@ -26,8 +26,8 @@ pub struct MemFreeBlockMaster {
 
     mem_size_tree: BTreeMap<usize, Vec<usize>>,
 
-    start_map: HashMap<usize, usize>,
-    end_map: HashMap<usize, usize>,
+    start_map: BTreeMap<usize, usize>,
+    end_map: BTreeMap<usize, usize>,
 
     // Total number of active blocks
     size: usize,
@@ -49,8 +49,8 @@ impl MemFreeBlockMaster {
             blocks: Vec::with_capacity(capacity),
             free_ind: Vec::with_capacity(capacity / 4),
             mem_size_tree: BTreeMap::new(),
-            start_map: HashMap::with_capacity(capacity),
-            end_map: HashMap::with_capacity(capacity),
+            start_map: BTreeMap::new(),
+            end_map: BTreeMap::new(),
             size: 0,
         }
     }
@@ -86,6 +86,7 @@ impl MemFreeBlockMaster {
         self.size += 1;
     }
 
+    #[inline]
     fn try_merge_remove(&mut self, mut block: MemFreeBlock) -> MemFreeBlock {
 
         if let Some(&left_index) = self.end_map.get(&block.start) {
@@ -253,9 +254,10 @@ impl MemFreeBlockMaster {
 
         let mut new_blocks = Vec::with_capacity(self.size);
         let mut new_mem_size_tree = BTreeMap::new();
-        let mut new_start_map = HashMap::with_capacity(self.size);
-        let mut new_end_map = HashMap::with_capacity(self.size);
-        let mut index_map = HashMap::with_capacity(self.size);
+        let mut new_start_map = BTreeMap::new();
+        let mut new_end_map = BTreeMap::new();
+        // index_map: dead code (M-013) — retained until that cleanup ticket lands.
+        let mut index_map = BTreeMap::new();
 
         // Iterate through the size tree and create a new vector of blocks
         for (size, indices) in &self.mem_size_tree {
