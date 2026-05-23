@@ -22,13 +22,21 @@ pub trait Parameters: 'static + Sized {
         bytes
     }
     
-    /// Deserializes parameters from bytes
-    /// Default implementation handles any Sized type
+    /// Deserializes parameters from bytes.
+    ///
+    /// # Safety
+    /// Caller guarantees that `bytes` contains a valid bit-pattern of `Self`
+    /// (i.e. produced by `to_bytes()` or `ptr::write` on a live `Self`).
+    /// The source buffer may have any alignment — we use `read_unaligned`
+    /// which tolerates unaligned pointers (`ParametersBuffer` stores data
+    /// in a byte-aligned `Vec<u8>`, see Q-002 in docs/AUDIT-2026-05-23.md).
     unsafe fn from_bytes(bytes: &[u8]) -> Option<Self> {
         if bytes.len() != std::mem::size_of::<Self>() {
             return None;
         }
-        Some(std::ptr::read(bytes.as_ptr() as *const Self))
+        // SAFETY: length validated above; `read_unaligned` requires only that
+        // `bytes.as_ptr()` is valid for reads of `size_of::<Self>()` bytes.
+        Some(unsafe { std::ptr::read_unaligned(bytes.as_ptr() as *const Self) })
     }
     
     /// Creates a raw pointer to the parameters

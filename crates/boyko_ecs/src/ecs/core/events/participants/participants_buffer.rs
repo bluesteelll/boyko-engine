@@ -71,15 +71,22 @@ impl ParticipantBuffer {
         Some(index)
     }
     
-    /// Gets participants at index
+    /// Gets participants at index.
+    ///
+    /// # Safety
+    /// Caller guarantees that `P` matches the type used at `push` time
+    /// (the buffer is type-erased — see audit finding Q-019 for the tracked
+    /// gap: there is currently no `TypeId` check on the read path).
     pub unsafe fn get<P: Participants>(&self, index: usize) -> Option<P> {
         if index >= self.count {
             return None;
         }
-        
+
         let offset = index * self.participant_size;
         let bytes = &self.data[offset..offset + self.participant_size];
-        P::from_bytes(bytes)
+        // SAFETY: `bytes.len() == self.participant_size == size_of::<P>()`
+        // by construction; bit-pattern validity is the caller's invariant.
+        unsafe { P::from_bytes(bytes) }
     }
     
     /// Gets raw bytes at index
