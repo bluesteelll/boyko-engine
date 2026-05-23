@@ -13,12 +13,13 @@ of truth for findings; this file is the source of truth for
 
 ## Current status (as of last commit on `ecs`)
 
-- 25 commits on `ecs` branch (Q-011 adds 5: 11a-11e).
+- 28 commits on `ecs` branch (M-012 adds 3: 12a-12c).
 - `cargo check --all-targets`: green, 0 errors.
-- `cargo test --all-targets`: **138/138 debug** (was 130, +8 new QueryState tests).
+- `cargo test --all-targets`: **152/153 debug** (was 138; +14 new M-012 tests, 1 ignored stress test).
 - Author: `Celtokisa <bluesteelll@hotmail.com>`. No AI co-author tags.
 - All artifacts in English.
 - Q-011 (QueryState cache): **DONE**. Warm-path ~21x speedup measured (3.6 ns vs 77 ns).
+- M-012 (HashMap -> BTreeMap in MemFreeBlockMaster): **DONE**. 14 unit tests added; bench infrastructure in `benches/allocator.rs`. Baseline numbers to be captured post-merge.
 
 ### Closed by Phase 1a / 1b
 
@@ -166,7 +167,7 @@ Others are localized.
 
 | ID | Site | Fix |
 |----|------|-----|
-| **M-012** | `start_map: HashMap<usize, usize>`, `end_map: HashMap<usize, usize>` in `MemFreeBlockMaster` | `BTreeMap` for ordered key access, or `Vec<Option<usize>>` |
+| **M-012** | `start_map: HashMap<usize, usize>`, `end_map: HashMap<usize, usize>` in `MemFreeBlockMaster` | `BTreeMap` for ordered key access, or `Vec<Option<usize>>` | ✅ **DONE** (2026-05-24) |
 | **M-018** | `O(N)` linear search in `mem_size_tree` indices vec | `HashSet` or reverse mapping |
 | **C-016** | `O(N×M)` "missing component" check in `Archetype::create_entity` | `ComponentMask` comparison against signature (O(8) for 512 bits) |
 | **M-007** | `Box<[ComponentPtr]>` returned per-entity from `MultiPoolSparseIter` | Const-generic array, tuple, or pre-allocated buffer |

@@ -24,3 +24,7 @@ harness = false
 [[bench]]
 name = "query_iter"
 harness = false
+
+[[bench]]
+name = "allocator"
+harness = false
