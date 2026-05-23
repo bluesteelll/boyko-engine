@@ -136,68 +136,91 @@ impl ArchetypeRegistry {
         self.find_matching_archetypes(&mask)
     }
     
-    /// Specialized finder optimized for 1-3 component queries
+    /// Specialized finder optimized for 1-3 component queries.
+    ///
+    /// Uses a stack-only `[u8; 3]` buffer for the relevant-block set with
+    /// inline insertion-sort-with-dedup, eliminating the `Vec` allocation that
+    /// was previously required.
     fn find_archetypes_with_few_components(&self, components: &[ComponentId]) -> Vec<ArchetypeId> {
+        debug_assert!(
+            components.len() <= 3,
+            "find_archetypes_with_few_components: caller invariant violated (len={})",
+            components.len()
+        );
+
+        // N-3: early exit prevents `all_blocks_present = true` from matching
+        // every archetype when `relevant_blocks` is empty.
         if components.is_empty() {
             return Vec::new();
         }
-        
-        // Create mask with only needed components
+
+        // Build a component mask for the signature check.
         let mut query_mask = ComponentMask::new();
         for &comp_id in components {
             query_mask.set(comp_id);
         }
-        
         let query = ArchetypeSignature::new(query_mask);
-        
-        // For 1-3 components we can precisely determine which blocks they're in
-        let mut relevant_blocks = Vec::with_capacity(components.len());
+
+        // Compute the relevant blocks (which 64-bit word each component lives in)
+        // using a stack-only [u8; 3] buffer + inline insertion-sort-with-dedup.
+        // `components.len() <= 3` is guaranteed by the debug_assert above.
+        let mut blocks: [u8; 3] = [0; 3];
+        let mut blocks_len: usize = 0;
+
         for &comp_id in components {
-            let block = (comp_id / 64) % 8;
-            relevant_blocks.push(block);
+            let block = ((comp_id / 64) % 8) as u8;
+
+            // Insertion-sort-with-dedup: find the insertion position or skip duplicate.
+            let mut insert_pos = blocks_len;
+            let mut duplicate = false;
+            for i in 0..blocks_len {
+                if blocks[i] == block {
+                    duplicate = true;
+                    break;
+                }
+                if blocks[i] > block {
+                    insert_pos = i;
+                    break;
+                }
+            }
+            if !duplicate {
+                // Shift elements right to make room.
+                let mut j = blocks_len;
+                while j > insert_pos {
+                    blocks[j] = blocks[j - 1];
+                    j -= 1;
+                }
+                blocks[insert_pos] = block;
+                blocks_len += 1;
+            }
         }
-        
-        // Remove duplicate blocks
-        relevant_blocks.sort();
-        relevant_blocks.dedup();
-        
+
+        let relevant_blocks = &blocks[..blocks_len];
+
         let mut result = Vec::new();
-        
-        // Iterate only through active patterns
+
         for &pattern in &self.active_patterns {
-            // Check if all needed blocks are present in the pattern
+            // Check if all needed blocks are present in the pattern bit-field.
             let mut all_blocks_present = true;
-            for &block in &relevant_blocks {
+            for &block in relevant_blocks {
                 if (pattern & (1 << block)) == 0 {
                     all_blocks_present = false;
                     break;
                 }
             }
-            
+
             if all_blocks_present {
                 let pattern_index = pattern as usize;
-                
-                // Get the group of archetypes with this pattern
                 if let Some(group) = self.block_groups.get(pattern_index) {
-                    // Optimize check for few components
                     for &(id, ref signature) in group {
-                        let mut all_components_present = true;
-                        
-                        for &comp_id in components {
-                            if !signature.mask.contains(comp_id) {
-                                all_components_present = false;
-                                break;
-                            }
-                        }
-                        
-                        if all_components_present {
+                        if signature.contains(&query) {
                             result.push(id);
                         }
                     }
                 }
             }
         }
-        
+
         result
     }
     
