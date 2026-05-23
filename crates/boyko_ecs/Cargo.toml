@@ -7,3 +7,6 @@ edition = "2024"
 rand = "0.9.0"
 boyko-utils =  { path = "../boyko_utils" }
 anyhow = "1.0.97"
+
+[dev-dependencies]
+boyko-macros = { path = "../boyko_macros" }
