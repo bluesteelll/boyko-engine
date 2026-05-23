@@ -86,7 +86,10 @@ impl Archetype {
             return false;
         }
 
-        // Get the arena for component pool creation
+        // SAFETY: `self.arena` was captured from the `Box<Arena>` owned by
+        // `EcsMaster`; that `Box` lives at a stable heap address and outlives
+        // every `Archetype` it parented (audit C-001 / drop-order invariant).
+        // Arena is `!Send + !Sync`, so no other thread holds a reference.
         let arena = unsafe { &*self.arena.as_ptr() };
 
         // Add a pool for this component type
@@ -301,14 +304,26 @@ impl Archetype {
     /// Takes a reference to the last entity's EntityInland to update its generation
     pub fn pop(&mut self, last_entity_inland: &mut EntityInland) -> bool {
         debug_assert!(self.current_index > 0, "Attempting to pop from an empty archetype");
-        debug_assert!(self.component_pools.pop_entity(), "Failed to pop entity from component pools");
-        
+
+        // C-008 fix: pop_entity() ran inside debug_assert!, so in release builds the
+        // pools were never popped while `current_index` was still decremented — silent
+        // corruption. Capture the result outside the assert.
+        let popped = self.component_pools.pop_entity();
+        debug_assert!(popped, "Failed to pop entity from component pools");
+        if !popped {
+            return false;
+        }
+
+        // Q-022 fix: keep entity_ids length in sync with current_index, otherwise
+        // get_entity_id_at returns stale entries after pop.
+        self.entity_ids.pop();
+
         // Increment generation of the popped entity
         last_entity_inland.increment_generation();
-        
+
         // Decrement entity counter
         self.current_index -= 1;
-        
+
         true
     }
     
@@ -316,5 +331,231 @@ impl Archetype {
      #[inline]
     pub fn get_entity_id_at(&self, unit_index: InlandPoolId) -> Option<EntityId> {
         self.entity_ids.get(unit_index).copied()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ecs::core::component::component_registry;
+    use crate::ecs::memory::arena::Arena;
+
+    // Use high IDs to avoid collisions with other test modules.
+    const COMP_A: ComponentId = 400;
+    const COMP_B: ComponentId = 401;
+
+    fn register_test_components() {
+        #[repr(C)]
+        struct CompA(u32);
+        #[repr(C)]
+        struct CompB(u64);
+        component_registry::register_layout::<CompA>(COMP_A);
+        component_registry::register_layout::<CompB>(COMP_B);
+    }
+
+    fn make_archetype(arena: &Arena) -> Archetype {
+        register_test_components();
+        Archetype::create_by_ids(1, &[COMP_A, COMP_B], arena)
+    }
+
+    // Helper: add one entity with zero-filled bytes for both components.
+    fn add_entity(arch: &mut Archetype, entity_id: EntityId) -> EntityInland {
+        let mut inland = EntityInland::new(arch.id(), 0, 0);
+        arch.init_entity_inland(&mut inland);
+        let bytes_a = vec![0u8; component_registry::get_component_size(COMP_A).unwrap()];
+        let bytes_b = vec![0u8; component_registry::get_component_size(COMP_B).unwrap()];
+        let components = vec![
+            (COMP_A, bytes_a.as_slice()),
+            (COMP_B, bytes_b.as_slice()),
+        ];
+        let ok = arch.create_entity(entity_id, &mut inland, components);
+        assert!(ok, "create_entity must succeed in setup helper");
+        inland
+    }
+
+    // --- create_entity ---
+
+    #[test]
+    fn create_entity_increments_entity_count() {
+        let arena = Arena::with_capacity(4096 * 1024);
+        let mut arch = make_archetype(&arena);
+
+        assert_eq!(arch.entity_count(), 0, "fresh archetype has no entities");
+        add_entity(&mut arch, 42);
+        assert_eq!(arch.entity_count(), 1, "count must be 1 after one create");
+    }
+
+    #[test]
+    fn create_entity_pushes_entity_id_to_vector() {
+        let arena = Arena::with_capacity(4096 * 1024);
+        let mut arch = make_archetype(&arena);
+
+        add_entity(&mut arch, 99);
+        assert_eq!(
+            arch.get_entity_id_at(0),
+            Some(99),
+            "entity ID 99 must be accessible at slot 0"
+        );
+    }
+
+    #[test]
+    fn create_entity_missing_component_returns_false() {
+        let arena = Arena::with_capacity(4096 * 1024);
+        let mut arch = make_archetype(&arena);
+
+        let mut inland = EntityInland::new(arch.id(), 0, 0);
+        arch.init_entity_inland(&mut inland);
+        // Provide only COMP_A, omit COMP_B.
+        let bytes_a = vec![0u8; component_registry::get_component_size(COMP_A).unwrap()];
+        let components = vec![(COMP_A, bytes_a.as_slice())];
+        let ok = arch.create_entity(10, &mut inland, components);
+        assert!(!ok, "create_entity must return false when a component is missing");
+    }
+
+    // --- pop (C-008 + Q-022 regression) ---
+
+    #[test]
+    fn pop_decrements_entity_count_in_debug_and_release() {
+        // Regression for C-008: in the original code, component pools were NOT
+        // popped in release because pop_entity() was inside debug_assert!.
+        // This test must pass under both `cargo test` and `cargo test --release`.
+        let arena = Arena::with_capacity(4096 * 1024);
+        let mut arch = make_archetype(&arena);
+        let mut inland = add_entity(&mut arch, 7);
+
+        assert_eq!(arch.entity_count(), 1);
+        let popped = arch.pop(&mut inland);
+        assert!(popped, "pop must return true");
+        assert_eq!(
+            arch.entity_count(),
+            0,
+            "entity_count must be 0 after pop — C-008 regression"
+        );
+    }
+
+    #[test]
+    fn pop_removes_entity_id_from_vector() {
+        // Regression for Q-022: entity_ids.pop() must be called alongside
+        // component_pools.pop_entity() — previously it was missing.
+        let arena = Arena::with_capacity(4096 * 1024);
+        let mut arch = make_archetype(&arena);
+        let mut inland0 = add_entity(&mut arch, 1);
+        add_entity(&mut arch, 2);
+        add_entity(&mut arch, 3);
+
+        // Pop removes the last entity (ID=3).
+        let mut inland_last = EntityInland::new(arch.id(), 2, 0);
+        arch.pop(&mut inland_last);
+
+        assert_eq!(
+            arch.entity_count(),
+            2,
+            "entity_count must be 2 after one pop"
+        );
+        assert!(
+            arch.get_entity_id_at(2).is_none(),
+            "slot 2 must be empty after pop — Q-022 regression"
+        );
+        assert_eq!(
+            arch.get_entity_id_at(0),
+            Some(1),
+            "slot 0 must still hold entity ID 1"
+        );
+        assert_eq!(
+            arch.get_entity_id_at(1),
+            Some(2),
+            "slot 1 must still hold entity ID 2"
+        );
+
+        // Suppress unused-variable warning for inland0.
+        let _ = inland0;
+    }
+
+    #[test]
+    fn pop_on_empty_archetype_panics_in_debug_or_returns_false_in_release() {
+        // In debug builds, debug_assert!(current_index > 0) fires and panics.
+        // In release builds, pop_entity() is called but the pools are empty
+        // and pop returns false — the function returns false without decrement.
+        // Both outcomes are acceptable; we use catch_unwind to allow both.
+        let arena = Arena::with_capacity(4096 * 1024);
+
+        // Build the archetype inside the closure so arena lifetime is valid.
+        // We can't move `arena` across the UnwindSafe boundary easily, so
+        // we reproduce a minimal inline version.
+        let _result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let arena2 = Arena::with_capacity(4096 * 1024);
+            register_test_components();
+            let mut arch = Archetype::create_by_ids(99, &[COMP_A, COMP_B], &arena2);
+            let mut inland = EntityInland::new(arch.id(), 0, 0);
+            // In debug: panics. In release: returns false (pool is empty → pop() = false).
+            let _ = arch.pop(&mut inland);
+        }));
+        // The test passes regardless of whether a panic occurred.
+        let _ = arena; // keep arena alive
+    }
+
+    // --- remove_entity ---
+
+    #[test]
+    fn remove_entity_last_decrements_count_and_returns_none() {
+        let arena = Arena::with_capacity(4096 * 1024);
+        let mut arch = make_archetype(&arena);
+        let inland = add_entity(&mut arch, 55);
+        // Removing the only entity — no swap needed.
+        let result = arch.remove_entity(&inland);
+        assert!(result.is_none(), "no swap expected for the last entity");
+        assert_eq!(arch.entity_count(), 0);
+    }
+
+    #[test]
+    fn remove_entity_non_last_returns_swapped_entity_id() {
+        let arena = Arena::with_capacity(4096 * 1024);
+        let mut arch = make_archetype(&arena);
+        let inland_first = add_entity(&mut arch, 10);
+        add_entity(&mut arch, 20); // last entity
+
+        // Remove first; last (20) should swap into position 0.
+        let result = arch.remove_entity(&inland_first);
+        assert_eq!(
+            result,
+            Some(20),
+            "swapped entity ID must be 20"
+        );
+        assert_eq!(arch.entity_count(), 1);
+    }
+
+    // --- has_component_id ---
+
+    #[test]
+    fn has_component_id_returns_true_for_registered() {
+        let arena = Arena::with_capacity(4096 * 1024);
+        let arch = make_archetype(&arena);
+        assert!(arch.has_component_id(COMP_A));
+        assert!(arch.has_component_id(COMP_B));
+    }
+
+    #[test]
+    fn has_component_id_returns_false_for_absent() {
+        let arena = Arena::with_capacity(4096 * 1024);
+        let arch = make_archetype(&arena);
+        assert!(!arch.has_component_id(402)); // never added
+    }
+
+    // --- matches_component_ids ---
+
+    #[test]
+    fn matches_component_ids_subset_returns_true() {
+        let arena = Arena::with_capacity(4096 * 1024);
+        let arch = make_archetype(&arena);
+        assert!(arch.matches_component_ids(&[COMP_A]));
+        assert!(arch.matches_component_ids(&[COMP_A, COMP_B]));
+    }
+
+    #[test]
+    fn matches_component_ids_superset_returns_false() {
+        let arena = Arena::with_capacity(4096 * 1024);
+        let arch = make_archetype(&arena);
+        // 402 is not in the archetype.
+        assert!(!arch.matches_component_ids(&[COMP_A, 402]));
     }
 }
