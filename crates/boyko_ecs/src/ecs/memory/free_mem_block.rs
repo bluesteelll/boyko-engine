@@ -287,8 +287,6 @@ impl MemFreeBlockMaster {
         let mut new_mem_size_tree: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
         let mut new_start_map = BTreeMap::new();
         let mut new_end_map = BTreeMap::new();
-        // index_map: dead code (M-013) — retained until that cleanup ticket lands.
-        let mut index_map = BTreeMap::new();
 
         // Iterate through the size tree and create a new vector of blocks
         for (size, indices) in &self.mem_size_tree {
@@ -302,7 +300,6 @@ impl MemFreeBlockMaster {
                 new_indices.push(new_index);
                 new_start_map.insert(block.start, new_index);
                 new_end_map.insert(block.end, new_index);
-                index_map.insert(old_index, new_index);
             }
 
             new_mem_size_tree.insert(*size, new_indices);

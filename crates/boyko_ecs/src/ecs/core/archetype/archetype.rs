@@ -143,6 +143,14 @@ impl Archetype {
             );
             input_mask.set(*id);
         }
+        // Duplicate ComponentIds collapse in the bitset: if popcount(input_mask) < components.len(),
+        // at least one id appeared more than once. Duplicates corrupt pool state.
+        debug_assert_eq!(
+            input_mask.popcount(),
+            components.len(),
+            "Archetype::create_entity input contains duplicate ComponentId"
+        );
+
         if !self.signature.mask.is_subset(&input_mask) {
             return false; // at least one required component is absent from input
         }
