@@ -83,8 +83,7 @@ impl<'a> Query<'a> {
     ///
     /// Example: `Query::with::<(Position, Velocity)>(master)`
     pub fn with<T: ComponentSet>(master: &'a ArchetypeMaster) -> Self {
-        let component_ids = T::component_ids();
-        Self::with_component_ids(master, &component_ids)
+        Self::with_component_ids(master, T::component_ids())
     }
 
     /// Creates a query with complex filtering.
@@ -115,13 +114,13 @@ impl<'a> Query<'a> {
         let mut exclude_mask = ComponentMask::new();
         let mut optional_mask = ComponentMask::new();
 
-        for &id in &Inc::component_ids() {
+        for &id in Inc::component_ids() {
             include_mask.set(id);
         }
-        for &id in &Exc::component_ids() {
+        for &id in Exc::component_ids() {
             exclude_mask.set(id);
         }
-        for &id in &Opt::component_ids() {
+        for &id in Opt::component_ids() {
             optional_mask.set(id);
         }
 

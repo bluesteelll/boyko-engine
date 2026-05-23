@@ -64,8 +64,7 @@ impl QueryState {
 
     /// Creates a type-safe state matching archetypes for the given `ComponentSet`.
     pub fn with<T: ComponentSet>() -> Self {
-        let ids = T::component_ids();
-        Self::with_component_ids(&ids)
+        Self::with_component_ids(T::component_ids())
     }
 
     /// Returns an iterator over matched archetypes, updating the cache if needed.
