@@ -38,6 +38,12 @@ pub struct MemFreeBlockMaster {
     size: usize,
 }
 
+impl Default for MemFreeBlockMaster {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MemFreeBlockMaster {
     pub fn new() -> Self {
         Self::with_capacity(1024)
@@ -90,7 +96,7 @@ impl MemFreeBlockMaster {
         self.end_map.insert(block.end, index);
 
         let bucket = self.mem_size_tree.entry(size)
-            .or_insert_with(Vec::new);
+            .or_default();
         bucket.push(index);
         // Record this block's position inside its bucket for O(1) removal.
         self.pos_in_size_vec[index] = bucket.len() - 1;
@@ -308,7 +314,7 @@ impl MemFreeBlockMaster {
         // Rebuild pos_in_size_vec from scratch: all active slots get their real
         // bucket position; no free slots remain after defragment (free_ind is cleared).
         let mut new_pos_in_size_vec = vec![usize::MAX; new_blocks.len()];
-        for (_, bucket) in &new_mem_size_tree {
+        for bucket in new_mem_size_tree.values() {
             for (pos, &block_idx) in bucket.iter().enumerate() {
                 new_pos_in_size_vec[block_idx] = pos;
             }

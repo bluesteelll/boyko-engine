@@ -206,7 +206,7 @@ impl Archetype {
         let swapped_entity_id = self.entity_ids[last_unit_index];
         
         // Swap_remove in component pools
-        if let Err(_) = self.component_pools.swap_remove_unit(removed_unit_index) {
+        if self.component_pools.swap_remove_unit(removed_unit_index).is_err() {
             return None; // Failed to swap_remove
         }
         
