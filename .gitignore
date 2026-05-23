@@ -2,3 +2,8 @@
 **/target/
 /.idea/
 *.lock
+
+# Temporary diagnostic outputs (generated during local builds / tests)
+/build-log.txt
+/test-output.txt
+/test-full-output.txt
