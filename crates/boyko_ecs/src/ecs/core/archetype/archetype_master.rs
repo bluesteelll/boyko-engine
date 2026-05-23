@@ -2,6 +2,7 @@ use std::ptr::NonNull;
 use crate::ecs::core::archetype::archetype_bundle::ArchetypeBundle;
 use crate::ecs::core::archetype::archetype_registry::ArchetypeRegistry;
 use crate::ecs::core::archetype::archetype::Archetype;
+use crate::ecs::core::archetype::generation::ArchetypeGeneration;
 use crate::ecs::core::component::component_mask::ComponentMask;
 use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId};
 use crate::ecs::memory::arena::Arena;
@@ -14,15 +15,20 @@ use crate::ecs::core::component::component_registry;
 pub struct ArchetypeMaster {
     /// Storage for archetypes with direct access by ID
     archetypes: ArchetypeBundle,
-    
+
     /// Registry for efficient component-based lookups
     registry: ArchetypeRegistry,
-    
+
     /// Memory arena for component allocation
     arena: NonNull<Arena>,
-    
+
     /// Next available archetype ID
     next_archetype_id: ArchetypeId,
+
+    /// Monotonic generation counter. Bumped on every new archetype creation.
+    /// Never reset — even after `clear()` — so `QueryState` can detect stale
+    /// caches by comparing against a saved generation value.
+    generation: ArchetypeGeneration,
 }
 
 impl ArchetypeMaster {
@@ -30,12 +36,13 @@ impl ArchetypeMaster {
     pub fn new(arena: &Arena) -> Self {
         Self {
             archetypes: ArchetypeBundle::new(),
-            registry: ArchetypeRegistry::with_capacity(64), // Initial capacity for registry
+            registry: ArchetypeRegistry::with_capacity(64),
             arena: NonNull::from(arena),
-            next_archetype_id: 1, // Start from ID 1
+            next_archetype_id: 1,
+            generation: ArchetypeGeneration::FIRST,
         }
     }
-    
+
     /// Creates a new ArchetypeMaster with the given capacity
     pub fn with_capacity(arena: &Arena, capacity: usize) -> Self {
         Self {
@@ -43,6 +50,7 @@ impl ArchetypeMaster {
             registry: ArchetypeRegistry::with_capacity(capacity),
             arena: NonNull::from(arena),
             next_archetype_id: 1,
+            generation: ArchetypeGeneration::FIRST,
         }
     }
     
@@ -61,7 +69,8 @@ impl ArchetypeMaster {
         // Allocate a new archetype ID
         let archetype_id = self.next_archetype_id;
         self.next_archetype_id += 1;
-        
+        self.generation.bump();
+
         // SAFETY: `self.arena` was captured from the `Box<Arena>` owned by
         // `EcsMaster` (audit C-001). The `Box` has a stable heap address and
         // outlives every `ArchetypeMaster`/`Archetype` that holds the
@@ -173,29 +182,38 @@ impl ArchetypeMaster {
         self.archetypes.len()
     }
     
-    /// Adds an existing archetype to the master
-    /// This is used when loading archetypes from external sources or for cloning
+    /// Adds an existing archetype to the master.
+    /// This is used when loading archetypes from external sources or for cloning.
     pub fn add_existing_archetype(&mut self, archetype: Archetype) -> ArchetypeId {
         let archetype_id = archetype.id();
-        
+
         // Extract component IDs before moving the archetype
         let component_ids = archetype.component_ids().to_vec();
-        
+
         // Register with the bundle
         self.archetypes.add_archetype(archetype);
-        
+
         // Create a mask from the component IDs
         let mask = ComponentMask::from_components(&component_ids);
-        
+
         // Register with the registry
         self.registry.register_archetype(archetype_id, mask);
-        
-        // Update next ID if necessary
+
+        // Update next ID if necessary and bump generation for each new archetype slot minted
         if archetype_id >= self.next_archetype_id {
             self.next_archetype_id = archetype_id + 1;
+            self.generation.bump();
         }
-        
+
         archetype_id
+    }
+
+    /// Returns the current archetype generation, monotonic across the master's
+    /// entire lifetime including `clear()` calls. Used by `QueryState` to detect
+    /// cache invalidation.
+    #[inline]
+    pub fn archetype_generation(&self) -> ArchetypeGeneration {
+        self.generation
     }
     
     /// Removes an archetype by ID
@@ -351,11 +369,25 @@ impl ArchetypeMaster {
         self.archetypes.iter()
     }
     
-    /// Clears all archetypes
+    /// Removes all archetypes and resets `next_archetype_id` to 1.
+    ///
+    /// # Caller responsibility
+    /// `clear()` invalidates every outstanding `QueryState` referencing this
+    /// master. After `clear()`, new archetypes are minted from id 1 again;
+    /// a stale `QueryState`'s internal dedup bitset would silently report
+    /// these recycled IDs as "already cached", producing garbage results.
+    /// Callers MUST drop or `reset()` every `QueryState` before calling `clear()`.
+    /// Debug builds catch the violation via `debug_assert!` in `QueryState::iter`.
+    ///
+    /// Note: `generation` is intentionally NOT reset by `clear()`, so a stale
+    /// state's `generation < master.archetype_generation()` invariant still
+    /// holds — but the matched IDs are now nonsense relative to the post-clear
+    /// archetype set.
     pub fn clear(&mut self) {
         self.archetypes = ArchetypeBundle::new();
         self.registry.clear();
         self.next_archetype_id = 1;
+        // `generation` is NOT reset — see doc comment above.
     }
 }
 
