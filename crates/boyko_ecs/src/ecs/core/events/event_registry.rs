@@ -1,6 +1,47 @@
+//! Global registry of event information.
+//!
+//! # Event ID assignment
+//!
+//! Each distinct type `E` implementing [`Event`](crate::ecs::core::events::event::Event)
+//! is assigned a unique [`EventId`] the first time `E::event_id()` is called
+//! in the current process. The assignment is lazy, lock-free on the cached
+//! read path, and stable for the lifetime of the process — but **not** stable
+//! across processes or across runs of the same binary if the order of first
+//! calls differs.
+//!
+//! # Startup warm-up contract
+//!
+//! Code that ingests `EventId`s from external sources (network, save files,
+//! scripts, etc.) MUST warm up the registry by calling `E::event_id()` for
+//! every event type `E` it expects to receive, *before* the first external ID
+//! arrives. Without warm-up, an incoming id `i` may refer to type `A` in this
+//! process but type `B` in a peer process — IDs are assigned in first-call
+//! order.
+//!
+//! Recommended pattern: at engine startup, call `<E as Event>::event_id()`
+//! for every event type that will be serialized, in a deterministic order.
+//!
+//! # Collision detection
+//!
+//! Every `set` call site ([`register_event_new`] and [`register_event`])
+//! checks the slot before declaring success. If the slot is already occupied
+//! by a *different* type than the one being registered, the call panics in
+//! both debug and release builds, naming both types. This catches accidental
+//! ID-space overlaps between the production counter and the test escape hatch
+//! immediately.
+//!
+//! # Threading
+//!
+//! All registry operations are safe to call from any thread. The global
+//! `NEXT_EVENT_ID` counter uses `Relaxed` ordering (uniqueness is sufficient;
+//! cross-thread happens-before is provided by `OnceLock::set` / `get`).
+//! Per-slot `OnceLock`s provide acquire/release synchronization of the
+//! `EventInfo` payload.
+
 use std::alloc::Layout;
 use std::any::TypeId;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::ecs::core::events::event::{Event, EventId};
 use crate::ecs::core::events::participants::participants::{Participants, ParticipantInfo};
@@ -11,14 +52,12 @@ pub const MAX_EVENTS: usize = 256;
 
 /// Holds information about a specific event type.
 ///
-/// Filled in by `register_event::<E>(id)` (currently from the
-/// `#[derive(Event)]`-generated `#[ctor::ctor]` initializer). Each entry is
+/// Filled in by [`register_event_new`] or [`register_event`]. Each entry is
 /// written at most once via `OnceLock::set`; read path is a lock-free
-/// acquire-load. Fixes audit findings M-002 / C-002 / Q-004 / Q-010
-/// (`static mut EVENT_INFO` race / Rust 2024 deprecation).
+/// acquire-load. Fixes audit findings M-002 / C-002 / Q-004 / Q-010.
 #[derive(Clone)]
 pub struct EventInfo {
-    /// Event type name (for debugging).
+    /// Event type name (for debugging and collision messages).
     pub type_name: &'static str,
 
     /// Memory layout of the event.
@@ -48,22 +87,34 @@ pub struct EventInfo {
 static EVENT_INFO: [OnceLock<EventInfo>; MAX_EVENTS] =
     [const { OnceLock::new() }; MAX_EVENTS];
 
-/// Registers an event's information in the global registry.
-/// Idempotent — duplicate registration is silently ignored (slot is `OnceLock`).
-pub fn register_event<E: Event>(event_id: EventId) {
-    let event_id_usize = event_id as usize;
+/// Monotonic counter for event IDs minted via [`register_event_new`].
+/// Test code that needs explicit IDs uses [`register_event`] and bypasses
+/// this counter — collisions are detected per-slot.
+static NEXT_EVENT_ID: AtomicUsize = AtomicUsize::new(0);
 
-    debug_assert!(
-        event_id_usize < MAX_EVENTS,
-        "Event ID {} exceeds maximum allowed ({})",
-        event_id,
+/// Allocates a fresh `EventId` from the global counter and stores `EventInfo`
+/// derived from `E` in the corresponding `EVENT_INFO` slot.
+///
+/// Production path: called from `#[derive(Event)]`-generated `E::event_id()`
+/// via a per-monomorphization `OnceLock`. Each concrete `E` gets exactly one
+/// ID across the process lifetime, regardless of how many threads call
+/// `E::event_id()` concurrently.
+///
+/// See [`crate::ecs::core::component::component_registry::register_new`] for
+/// the mirror design on the Component side.
+///
+/// # Panics
+/// - If `NEXT_EVENT_ID` reaches `MAX_EVENTS`.
+/// - If the slot is already occupied by a *different* `Event` type.
+pub fn register_event_new<E: Event>() -> EventId {
+    let raw = NEXT_EVENT_ID.fetch_add(1, Ordering::Relaxed);
+    assert!(
+        raw < MAX_EVENTS,
+        "EventRegistry exhausted: NEXT_EVENT_ID reached {}, MAX_EVENTS = {}",
+        raw,
         MAX_EVENTS
     );
-
-    if event_id_usize >= MAX_EVENTS {
-        return;
-    }
-
+    let id = raw as EventId;
     let info = EventInfo {
         type_name: std::any::type_name::<E>(),
         layout: E::layout(),
@@ -74,8 +125,72 @@ pub fn register_event<E: Event>(event_id: EventId) {
         parameters_type_id: TypeId::of::<E::Parameters>(),
         participant_info: E::Participants::participant_info(),
     };
+    match EVENT_INFO[raw].set(info) {
+        Ok(()) => id,
+        Err(_) => {
+            let existing = EVENT_INFO[raw]
+                .get()
+                .expect("invariant: OnceLock::set Err implies the slot is occupied");
+            if existing.type_id == TypeId::of::<E>() {
+                id
+            } else {
+                panic!(
+                    "EventId {} occupied by type {}, refused to register {}",
+                    id,
+                    existing.type_name,
+                    std::any::type_name::<E>()
+                )
+            }
+        }
+    }
+}
 
-    let _ = EVENT_INFO[event_id_usize].set(info);
+/// Test-only escape hatch: registers `E` under an explicit `event_id`.
+///
+/// Production code must not call this — use `E::event_id()` (which goes
+/// through [`register_event_new`]). Tests use this to install events under
+/// known, fixed IDs without depending on `NEXT_EVENT_ID`'s value.
+///
+/// # Panics
+/// - If `event_id >= MAX_EVENTS` (as `usize`).
+/// - If the slot is already occupied by a *different* `Event` type. Same-type
+///   re-registration is silently idempotent.
+#[doc(hidden)]
+pub fn register_event<E: Event>(event_id: EventId) {
+    let id_usize = event_id as usize;
+    assert!(
+        id_usize < MAX_EVENTS,
+        "Event ID {} exceeds maximum allowed ({})",
+        event_id,
+        MAX_EVENTS
+    );
+    let info = EventInfo {
+        type_name: std::any::type_name::<E>(),
+        layout: E::layout(),
+        participants_layout: E::Participants::layout(),
+        parameters_layout: E::Parameters::layout(),
+        type_id: E::type_id(),
+        participants_type_id: TypeId::of::<E::Participants>(),
+        parameters_type_id: TypeId::of::<E::Parameters>(),
+        participant_info: E::Participants::participant_info(),
+    };
+    match EVENT_INFO[id_usize].set(info) {
+        Ok(()) => {}
+        Err(_) => {
+            let existing = EVENT_INFO[id_usize]
+                .get()
+                .expect("invariant: OnceLock::set Err implies the slot is occupied");
+            if existing.type_id != TypeId::of::<E>() {
+                panic!(
+                    "EventId {} occupied by type {}, refused to register {}",
+                    event_id,
+                    existing.type_name,
+                    std::any::type_name::<E>()
+                )
+            }
+            // Same type — silent no-op (idempotent).
+        }
+    }
 }
 
 /// Retrieves event information by its ID.
@@ -167,8 +282,11 @@ pub fn validate_event_types<E: Event>(event_id: EventId) -> bool {
 /// Ultra-fast access to event info when you're confident the event exists.
 ///
 /// # Safety
-/// Caller guarantees `event_id` is `< MAX_EVENTS` and the slot has been
-/// initialized via `register_event::<E>(event_id)`.
+/// Caller guarantees that `event_id < MAX_EVENTS` (as `usize`) and that one
+/// of the following has already completed for the corresponding type `E`:
+/// - [`register_event_new::<E>()`] (production path, via `E::event_id()`), or
+/// - [`register_event::<E>(event_id)`] (test-only escape hatch).
+/// Violating either yields UB.
 #[inline(always)]
 pub unsafe fn get_event_info_unchecked(event_id: EventId) -> &'static EventInfo {
     let event_id_usize = event_id as usize;
@@ -177,27 +295,36 @@ pub unsafe fn get_event_info_unchecked(event_id: EventId) -> &'static EventInfo 
         "Event ID {} is invalid or not initialized",
         event_id
     );
-    // SAFETY: per the function contract, the slot is initialized.
+    // SAFETY: per the function contract, the slot is initialized and
+    // `event_id_usize < MAX_EVENTS`.
     unsafe { EVENT_INFO[event_id_usize].get().unwrap_unchecked() }
 }
 
 /// Ultra-fast access to participants layout when you're confident the event exists.
 ///
 /// # Safety
-/// See [`get_event_info_unchecked`].
+/// Caller guarantees that `event_id < MAX_EVENTS` (as `usize`) and that one
+/// of the following has already completed for the corresponding type `E`:
+/// - [`register_event_new::<E>()`] (production path, via `E::event_id()`), or
+/// - [`register_event::<E>(event_id)`] (test-only escape hatch).
+/// Violating either yields UB.
 #[inline(always)]
 pub unsafe fn get_participants_layout_unchecked(event_id: EventId) -> Layout {
-    // SAFETY: forwarded to the unchecked accessor.
+    // SAFETY: forwarded to the unchecked accessor; caller satisfies the same contract.
     unsafe { get_event_info_unchecked(event_id).participants_layout }
 }
 
 /// Ultra-fast access to parameters layout when you're confident the event exists.
 ///
 /// # Safety
-/// See [`get_event_info_unchecked`].
+/// Caller guarantees that `event_id < MAX_EVENTS` (as `usize`) and that one
+/// of the following has already completed for the corresponding type `E`:
+/// - [`register_event_new::<E>()`] (production path, via `E::event_id()`), or
+/// - [`register_event::<E>(event_id)`] (test-only escape hatch).
+/// Violating either yields UB.
 #[inline(always)]
 pub unsafe fn get_parameters_layout_unchecked(event_id: EventId) -> Layout {
-    // SAFETY: forwarded to the unchecked accessor.
+    // SAFETY: forwarded to the unchecked accessor; caller satisfies the same contract.
     unsafe { get_event_info_unchecked(event_id).parameters_layout }
 }
 
@@ -256,7 +383,181 @@ mod tests {
         fn parameters_mut(&mut self) -> &mut NoParameters { unimplemented!() }
     }
 
+    // -- Additional types for new Phase 1b tests (Q-005 / C-003 mirror) ----------
+
+    /// Collision-A event — distinct type used for collision-detection tests.
+    /// ID 210 reserved; must not be used by any other test in this crate.
+    struct ColEventA;
+
+    impl Event for ColEventA {
+        type Participants = NoParticipants;
+        type Parameters = NoParameters;
+        fn event_id() -> EventId { 210 }
+        fn event_name() -> &'static str { "ColEventA" }
+        fn new(_p: NoParticipants, _q: NoParameters) -> Self { ColEventA }
+        fn participants(&self) -> &NoParticipants { unimplemented!() }
+        fn participants_mut(&mut self) -> &mut NoParticipants { unimplemented!() }
+        fn parameters(&self) -> &NoParameters { unimplemented!() }
+        fn parameters_mut(&mut self) -> &mut NoParameters { unimplemented!() }
+    }
+
+    /// Collision-B event — different type, also targeting ID 210 to trigger collision.
+    struct ColEventB;
+
+    impl Event for ColEventB {
+        type Participants = NoParticipants;
+        type Parameters = NoParameters;
+        fn event_id() -> EventId { 210 }  // same ID as ColEventA — used in collision test
+        fn event_name() -> &'static str { "ColEventB" }
+        fn new(_p: NoParticipants, _q: NoParameters) -> Self { ColEventB }
+        fn participants(&self) -> &NoParticipants { unimplemented!() }
+        fn participants_mut(&mut self) -> &mut NoParticipants { unimplemented!() }
+        fn parameters(&self) -> &NoParameters { unimplemented!() }
+        fn parameters_mut(&mut self) -> &mut NoParameters { unimplemented!() }
+    }
+
+    /// Idempotency-A event — same type registered twice under ID 215.
+    struct IdempEventA;
+
+    impl Event for IdempEventA {
+        type Participants = NoParticipants;
+        type Parameters = NoParameters;
+        fn event_id() -> EventId { 215 }
+        fn event_name() -> &'static str { "IdempEventA" }
+        fn new(_p: NoParticipants, _q: NoParameters) -> Self { IdempEventA }
+        fn participants(&self) -> &NoParticipants { unimplemented!() }
+        fn participants_mut(&mut self) -> &mut NoParticipants { unimplemented!() }
+        fn parameters(&self) -> &NoParameters { unimplemented!() }
+        fn parameters_mut(&mut self) -> &mut NoParameters { unimplemented!() }
+    }
+
+    /// Two events for register_event_new distinctness test.
+    struct NewEventTypeA;
+
+    impl Event for NewEventTypeA {
+        type Participants = NoParticipants;
+        type Parameters = NoParameters;
+        fn event_id() -> EventId {
+            static ID: ::std::sync::OnceLock<EventId> = ::std::sync::OnceLock::new();
+            *ID.get_or_init(|| register_event_new::<Self>())
+        }
+        fn event_name() -> &'static str { "NewEventTypeA" }
+        fn new(_p: NoParticipants, _q: NoParameters) -> Self { NewEventTypeA }
+        fn participants(&self) -> &NoParticipants { unimplemented!() }
+        fn participants_mut(&mut self) -> &mut NoParticipants { unimplemented!() }
+        fn parameters(&self) -> &NoParameters { unimplemented!() }
+        fn parameters_mut(&mut self) -> &mut NoParameters { unimplemented!() }
+    }
+
+    struct NewEventTypeB;
+
+    impl Event for NewEventTypeB {
+        type Participants = NoParticipants;
+        type Parameters = NoParameters;
+        fn event_id() -> EventId {
+            static ID: ::std::sync::OnceLock<EventId> = ::std::sync::OnceLock::new();
+            *ID.get_or_init(|| register_event_new::<Self>())
+        }
+        fn event_name() -> &'static str { "NewEventTypeB" }
+        fn new(_p: NoParticipants, _q: NoParameters) -> Self { NewEventTypeB }
+        fn participants(&self) -> &NoParticipants { unimplemented!() }
+        fn participants_mut(&mut self) -> &mut NoParticipants { unimplemented!() }
+        fn parameters(&self) -> &NoParameters { unimplemented!() }
+        fn parameters_mut(&mut self) -> &mut NoParameters { unimplemented!() }
+    }
+
     // -- Tests -----------------------------------------------------------------
+
+    // ----- NEW TESTS: Phase 1b Q-005 -----
+
+    /// register_event_new for two distinct types must return different EventIds.
+    ///
+    /// Uses OnceLock-wrapped event_id() to mirror the macro-generated pattern.
+    /// The OnceLock ensures each type mints exactly one ID for the process lifetime.
+    #[test]
+    fn register_event_new_assigns_distinct_ids_for_distinct_types() {
+        let id_a = NewEventTypeA::event_id();
+        let id_b = NewEventTypeB::event_id();
+        assert_ne!(
+            id_a,
+            id_b,
+            "register_event_new must assign different IDs to NewEventTypeA and NewEventTypeB \
+             (got id_a={id_a}, id_b={id_b})"
+        );
+        // Both slots must be populated with matching type info.
+        let info_a = get_event_info(id_a).expect("slot for NewEventTypeA must be populated");
+        let info_b = get_event_info(id_b).expect("slot for NewEventTypeB must be populated");
+        assert_eq!(
+            info_a.type_id,
+            TypeId::of::<NewEventTypeA>(),
+            "EventInfo at id_a must carry NewEventTypeA type_id"
+        );
+        assert_eq!(
+            info_b.type_id,
+            TypeId::of::<NewEventTypeB>(),
+            "EventInfo at id_b must carry NewEventTypeB type_id"
+        );
+    }
+
+    /// register_event_new is idempotent when called through a per-type OnceLock:
+    /// second call returns the cached ID, same as the first.
+    #[test]
+    fn register_event_new_returns_same_id_on_repeat_via_oncelock() {
+        let id_first = NewEventTypeA::event_id();
+        let id_second = NewEventTypeA::event_id();
+        assert_eq!(
+            id_first,
+            id_second,
+            "OnceLock-wrapped event_id() must return the same ID on every call"
+        );
+    }
+
+    /// Collision detection: registering a different event type in an already-occupied
+    /// slot must panic with a message naming both types.
+    ///
+    /// ID 210: first occupied by ColEventA, then ColEventB triggers the panic.
+    /// Expected panic substring: "occupied by type" (matches the format string
+    /// "EventId {} occupied by type {}, refused to register {}").
+    #[test]
+    #[should_panic(expected = "occupied by type")]
+    fn register_event_collision_with_different_type_panics() {
+        register_event::<ColEventA>(210);
+        register_event::<ColEventB>(210);
+    }
+
+    /// Collision idempotent path: registering the SAME event type twice under the
+    /// same ID is a silent no-op. The slot must remain populated and valid.
+    ///
+    /// ID 215: both calls use IdempEventA.
+    #[test]
+    fn register_event_collision_with_same_type_is_silent_noop() {
+        register_event::<IdempEventA>(215);
+        register_event::<IdempEventA>(215); // second call — must not panic
+        let info = get_event_info(215)
+            .expect("slot must remain populated after idempotent re-registration");
+        assert_eq!(
+            info.type_id,
+            TypeId::of::<IdempEventA>(),
+            "slot type_id must remain IdempEventA after silent no-op"
+        );
+    }
+
+    /// register_event panics with the expected message when event_id >= MAX_EVENTS.
+    ///
+    /// Uses #[should_panic] with a tighter expected substring to lock in the
+    /// panic message format "Event ID {} exceeds maximum allowed ({})".
+    #[test]
+    #[should_panic(expected = "exceeds maximum allowed")]
+    fn register_event_at_max_events_panics_with_expected_message() {
+        register_event::<PingEvent>(MAX_EVENTS as EventId);
+    }
+
+    // NOTE: register_event_new exhaustion test (driving NEXT_EVENT_ID to MAX_EVENTS)
+    // is NOT included. NEXT_EVENT_ID is private with no test-only reset accessor.
+    // The same limitation applies as in component_registry.rs.
+    // TODO: developer to add #[cfg(test)] fn set_next_event_id_for_test(v: usize).
+
+    // ----- END NEW TESTS -----
 
     #[test]
     fn register_event_then_get_event_info_returns_some() {
@@ -298,8 +599,6 @@ mod tests {
         // Registering the same event twice must not overwrite — OnceLock guarantees this.
         register_event::<PingEvent>(PingEvent::event_id());
         register_event::<PingEvent>(PingEvent::event_id()); // second call — no-op
-        // If OnceLock were broken (e.g. static mut), the second write would race.
-        // We simply verify the slot is still populated correctly.
         let info = get_event_info(PingEvent::event_id()).expect("slot must still be present");
         assert_eq!(info.type_id, TypeId::of::<PingEvent>());
     }
@@ -313,25 +612,16 @@ mod tests {
             after >= before,
             "count must not decrease after registration (before={before}, after={after})"
         );
-        // After at least one register the count must be >= 1.
         assert!(after >= 1, "at least one event must be registered");
     }
 
     #[test]
-    fn register_event_out_of_range_is_safe() {
-        // ID >= MAX_EVENTS is out-of-range. In debug, debug_assert fires; in
-        // release, the `if` guard returns silently. Both register and get have
-        // their own debug_asserts, so both must be wrapped.
-        let _register = std::panic::catch_unwind(|| {
+    fn register_event_out_of_range_panics() {
+        // register_event now uses assert! (not debug_assert) — always panics OOB.
+        let result = std::panic::catch_unwind(|| {
             register_event::<PingEvent>(MAX_EVENTS as EventId);
         });
-        let slot_is_none = std::panic::catch_unwind(|| {
-            get_event_info(MAX_EVENTS as EventId)
-        });
-        if let Ok(result) = slot_is_none {
-            assert!(result.is_none(), "out-of-range event ID must yield None");
-        }
-        // If the inner catch_unwind returned Err the debug_assert fired — also acceptable.
+        assert!(result.is_err(), "out-of-range register_event must panic");
     }
 
     #[test]

@@ -11,4 +11,3 @@ boyko-ecs = { path = "../boyko_ecs" }
 syn = { version = "2.0.100", features = ["full"] }
 quote = "1.0.39"
 proc-macro2 = "1.0.93"
-ctor = "0.4.2"
