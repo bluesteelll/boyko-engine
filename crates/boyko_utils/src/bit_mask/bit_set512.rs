@@ -224,45 +224,45 @@ mod tests {
         let bs = BitSet512::from(5u8); // binary 101
         assert_eq!(bs.bits[0], 5);
         assert_eq!(bs.count_ones(), 2);
-        assert!(bs.get_bit(0)); // Проверка бита 1
-        assert!(!bs.get_bit(1)); // Проверка бита 0
-        assert!(bs.get_bit(2)); // Проверка бита 1
-        assert!(!bs.get_bit(3)); // Проверка бита 0
+        assert!(bs.get_bit(0)); // Check bit 1
+        assert!(!bs.get_bit(1)); // Check bit 0
+        assert!(bs.get_bit(2)); // Check bit 1
+        assert!(!bs.get_bit(3)); // Check bit 0
     }
 
     #[test]
     fn test_bit_operations() {
         let mut bs = BitSet512::default();
         
-        // Проверка функции with_bit_set
+        // Check the with_bit_set function
         let bs1 = bs.with_bit_set(5);
         assert_eq!(bs1.count_ones(), 1);
         assert!(bs1.get_bit(5));
-        
-        // Проверка установки битов в разных блоках u64
-        let bs2 = bs1.with_bit_set(70); // второй блок
+
+        // Check setting bits in different u64 blocks
+        let bs2 = bs1.with_bit_set(70); // second block
         assert_eq!(bs2.count_ones(), 2);
         assert!(bs2.get_bit(5));
         assert!(bs2.get_bit(70));
-        
-        // Проверка with_bit_cleared
+
+        // Check with_bit_cleared
         let bs3 = bs2.with_bit_cleared(5);
         assert_eq!(bs3.count_ones(), 1);
         assert!(!bs3.get_bit(5));
         assert!(bs3.get_bit(70));
-        
-        // Проверка границ блоков
-        let bs4 = bs3.with_bit_set(63); // край первого блока
-        let bs5 = bs4.with_bit_set(64); // начало второго блока
+
+        // Check block boundaries
+        let bs4 = bs3.with_bit_set(63); // edge of the first block
+        let bs5 = bs4.with_bit_set(64); // start of the second block
         assert_eq!(bs5.count_ones(), 3);
         assert!(bs5.get_bit(63));
         assert!(bs5.get_bit(64));
-        
-        // Проверка на невалидных позициях
-        let bs6 = bs5.with_bit_set(600); // за пределами битсета
-        assert_eq!(bs5, bs6); // не должно измениться
-        
-        assert!(!bs5.get_bit(600)); // запрос бита за пределами должен вернуть false
+
+        // Check invalid positions
+        let bs6 = bs5.with_bit_set(600); // out of bit set range
+        assert_eq!(bs5, bs6); // must not change
+
+        assert!(!bs5.get_bit(600)); // requesting an out-of-range bit must return false
     }
 
     #[test]
@@ -270,39 +270,39 @@ mod tests {
         let mut bs1 = BitSet512::default();
         let mut bs2 = BitSet512::default();
         
-        // Установим биты в первом множестве
+        // Set bits in the first set
         let bs1 = bs1.with_bit_set(10).with_bit_set(20).with_bit_set(30);
-        
-        // Установим биты во втором множестве
+
+        // Set bits in the second set
         let bs2 = bs2.with_bit_set(20).with_bit_set(30).with_bit_set(40);
-        
-        // Проверка AND
+
+        // Check AND
         let and_result = bs1 & bs2;
         assert_eq!(and_result.count_ones(), 2);
         assert!(!and_result.get_bit(10));
         assert!(and_result.get_bit(20));
         assert!(and_result.get_bit(30));
         assert!(!and_result.get_bit(40));
-        
-        // Проверка OR
+
+        // Check OR
         let or_result = bs1 | bs2;
         assert_eq!(or_result.count_ones(), 4);
         assert!(or_result.get_bit(10));
         assert!(or_result.get_bit(20));
         assert!(or_result.get_bit(30));
         assert!(or_result.get_bit(40));
-        
-        // Проверка XOR
+
+        // Check XOR
         let xor_result = bs1 ^ bs2;
         assert_eq!(xor_result.count_ones(), 2);
         assert!(xor_result.get_bit(10));
         assert!(!xor_result.get_bit(20));
         assert!(!xor_result.get_bit(30));
         assert!(xor_result.get_bit(40));
-        
-        // Проверка NOT
+
+        // Check NOT
         let not_result = !bs1;
-        assert_eq!(not_result.count_ones(), 512 - 3); // инвертировали 3 бита
+        assert_eq!(not_result.count_ones(), 512 - 3); // inverted 3 bits
         assert!(!not_result.get_bit(10));
         assert!(!not_result.get_bit(20));
         assert!(!not_result.get_bit(30));
@@ -313,12 +313,12 @@ mod tests {
     fn test_large_positions() {
         let mut bs = BitSet512::default();
         
-        // Проверяем установку бита в последнем блоке
+        // Check setting a bit in the last block
         let bs = bs.with_bit_set(500);
         assert_eq!(bs.count_ones(), 1);
         assert!(bs.get_bit(500));
-        
-        // Проверяем границы 512 бит
+
+        // Check the 512-bit boundary
         let bs = bs.with_bit_set(0).with_bit_set(511);
         assert_eq!(bs.count_ones(), 3);
         assert!(bs.get_bit(0));
@@ -330,20 +330,20 @@ mod tests {
     fn test_across_all_blocks() {
         let mut bs = BitSet512::default();
         
-        // Устанавливаем по одному биту в каждом блоке
+        // Set one bit in each block
         let bs = bs
-            .with_bit_set(0)     // блок 0
-            .with_bit_set(64)    // блок 1
-            .with_bit_set(128)   // блок 2
-            .with_bit_set(192)   // блок 3
-            .with_bit_set(256)   // блок 4
-            .with_bit_set(320)   // блок 5
-            .with_bit_set(384)   // блок 6
-            .with_bit_set(448);  // блок 7
-        
+            .with_bit_set(0)     // block 0
+            .with_bit_set(64)    // block 1
+            .with_bit_set(128)   // block 2
+            .with_bit_set(192)   // block 3
+            .with_bit_set(256)   // block 4
+            .with_bit_set(320)   // block 5
+            .with_bit_set(384)   // block 6
+            .with_bit_set(448);  // block 7
+
         assert_eq!(bs.count_ones(), 8);
-        
-        // Проверяем наличие битов
+
+        // Check the presence of bits
         assert!(bs.get_bit(0));
         assert!(bs.get_bit(64));
         assert!(bs.get_bit(128));
@@ -352,8 +352,8 @@ mod tests {
         assert!(bs.get_bit(320));
         assert!(bs.get_bit(384));
         assert!(bs.get_bit(448));
-        
-        // Проверяем отсутствие соседних битов
+
+        // Check the absence of neighboring bits
         assert!(!bs.get_bit(1));
         assert!(!bs.get_bit(65));
         assert!(!bs.get_bit(129));

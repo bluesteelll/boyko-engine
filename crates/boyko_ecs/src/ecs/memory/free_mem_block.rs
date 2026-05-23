@@ -29,7 +29,7 @@ pub struct MemFreeBlockMaster {
     start_map: HashMap<usize, usize>,
     end_map: HashMap<usize, usize>,
 
-    // Общее количество активных блоков
+    // Total number of active blocks
     size: usize,
 }
 
@@ -130,7 +130,7 @@ impl MemFreeBlockMaster {
     }
 
     pub fn find_best_fit(&self, min_size: usize) -> Option<MemFreeBlock> {
-        // Найти первую запись, где размер >= min_size
+        // Find the first entry where size >= min_size
         self.mem_size_tree.range(min_size..)
             .next()
             .and_then(|(_, indices)| indices.first().map(|&idx| self.blocks[idx]))
@@ -147,44 +147,44 @@ impl MemFreeBlockMaster {
 
         self.remove_block_index(block_index);
 
-        // Если есть остаток, добавляем его обратно в пул
+        // If there is a remainder, return it back to the pool
         let remainder_size = block.size() - size;
         if remainder_size > 0 {
             let remainder = MemFreeBlock::new(block.start + size, block.end);
             self.insert(remainder);
 
-            // Возвращаем только запрошенную часть блока
+            // Return only the requested portion of the block
             return Some(MemFreeBlock::new(block.start, block.start + size));
         }
 
-        // Возвращаем весь блок, если он точно подходит по размеру
+        // Return the entire block if it fits the requested size exactly
         Some(block)
     }
 
-    /// Выделяет выровненный блок памяти
+    /// Allocates an aligned memory block
     pub fn allocate_aligned(&mut self, size: usize, align: usize) -> Option<MemFreeBlock> {
         if size == 0 {
             return None;
         }
 
-        // Ищем блок с учетом максимально возможного выравнивания
+        // Search for a block accounting for the maximum possible alignment
         let required_size = size + align - 1;
         let (block_index, block) = self.find_best_fit_with_index(required_size)?;
 
         self.remove_block_index(block_index);
 
-        // Вычисляем выровненный адрес начала
+        // Compute the aligned start address
         let aligned_start = crate::ecs::memory::utils::align_up(block.start, align);
 
-        // Создаем выровненный блок
+        // Create the aligned block
         let aligned_block = MemFreeBlock::new(aligned_start, aligned_start + size);
 
-        // Если выравнивание создало пробел в начале, возвращаем его в пул
+        // If alignment created a gap at the start, return it to the pool
         if aligned_start > block.start {
             self.insert(MemFreeBlock::new(block.start, aligned_start));
         }
 
-        // Если есть остаток после выделенной памяти, возвращаем его в пул
+        // If there is a remainder after the allocated memory, return it to the pool
         let aligned_end = aligned_start + size;
         if block.end > aligned_end {
             self.insert(MemFreeBlock::new(aligned_end, block.end));
