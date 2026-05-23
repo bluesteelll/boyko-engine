@@ -1,6 +1,5 @@
 use std::ops::{Index, IndexMut};
 use crate::identifiers::slot::Slot;
-use crate::identifiers::primitives::Generation;
 use super::sparse_collection::SparseCollection;
 
 /// High-performance sparse set implementation with generation tracking
@@ -16,6 +15,12 @@ pub struct SparseSlotMap<U> {
 
     // Reverse mapping: external indices for each element in dense
     indices: Vec<usize>,
+}
+
+impl<U> Default for SparseSlotMap<U> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<U> SparseSlotMap<U> {
@@ -96,8 +101,8 @@ impl<U> SparseSlotMap<U> {
 
             let dense_idx = stored_slot.index();
 
-            // Increment generation to prevent ABA problem
-            let new_generation = generation.wrapping_add(1);
+            // Increment generation to prevent ABA problem (generation storage is tracked by M-016)
+            let _new_generation = generation.wrapping_add(1);
 
             // Remove entry from sparse array
             self.sparse[idx] = None;
@@ -117,14 +122,12 @@ impl<U> SparseSlotMap<U> {
                 // Update mapping for moved element
                 let swapped_index = self.indices.swap_remove(dense_idx);
 
-                if swapped_index < self.sparse.len() {
-                    if let Some(swapped_slot) = &self.sparse[swapped_index] {
-                        // Create a new slot with updated dense index but same generation
-                        self.sparse[swapped_index] = Some(Slot::new(
-                            dense_idx,
-                            swapped_slot.generation()
-                        ));
-                    }
+                if swapped_index < self.sparse.len()
+                    && let Some(swapped_slot) = &self.sparse[swapped_index]
+                {
+                    // Preserve generation of the moved slot; only update its dense index.
+                    let swapped_gen = swapped_slot.generation();
+                    self.sparse[swapped_index] = Some(Slot::new(dense_idx, swapped_gen));
                 }
 
                 value
@@ -141,10 +144,10 @@ impl<U> SparseSlotMap<U> {
     pub fn contains(&self, slot: Slot) -> bool {
         let idx = slot.index();
 
-        idx < self.sparse.len() &&
-            self.sparse[idx].as_ref().map_or(false, |stored_slot|
-                stored_slot.generation() == slot.generation()
-            )
+        idx < self.sparse.len()
+            && self.sparse[idx]
+                .as_ref()
+                .is_some_and(|stored_slot| stored_slot.generation() == slot.generation())
     }
 
     /// Returns a reference to the value for the specified slot

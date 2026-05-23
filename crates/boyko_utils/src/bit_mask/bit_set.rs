@@ -179,7 +179,7 @@ impl<T: BitInteger> BitSet<T> {
         }
 
         // Create a mask that zeroes all bits up to after_index (inclusive)
-        let mask = !(((T::from(1) << (after_index + 1)) - T::from(1)));
+        let mask = !((T::from(1) << (after_index + 1)) - T::from(1));
         let masked_bits = self.bits & mask;
 
         if masked_bits == T::default() {
@@ -280,7 +280,6 @@ impl<T: BitInteger> Iterator for BitSetIterator<T> {
 }
 
 /// Operator implementations for convenient usage
-
 impl<T: BitInteger> BitAnd for BitSet<T> {
     type Output = Self;
     
