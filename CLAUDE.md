@@ -9,7 +9,7 @@ A Rust ECS engine for games, built for **ultimate performance, cache locality, a
 A workspace of crates:
 
 - [`crates/boyko_ecs/`](crates/boyko_ecs/) — ECS core: memory, components, entities, **archetypes, queries, events**
-- [`crates/boyko_macros/`](crates/boyko_macros/) — proc-macros: `#[derive(Component)]` and `#[derive(Event)]`
+- [`crates/boyko_macros/`](crates/boyko_macros/) — proc-macros: `#[derive(Component)]` and `#[event]`
 - [`crates/boyko_utils/`](crates/boyko_utils/) — reusable collections: `BitSet`, `BitMask`, `BitSet512`, `SparseMap`, `SparseSlotMap`, `Slot`
 - [`src/main.rs`](src/main.rs) — executable wrapper (currently empty; the project is library-shaped)
 

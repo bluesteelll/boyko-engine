@@ -10,3 +10,4 @@ anyhow = "1.0.97"
 
 [dev-dependencies]
 boyko-macros = { path = "../boyko_macros" }
+trybuild = "1"

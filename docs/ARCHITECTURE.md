@@ -53,7 +53,7 @@ boyko-engine/
 │   │               └── iterators.rs          # ⚠️ empty stub file
 │   ├── boyko_macros/                     # proc-macros
 │   │   ├── Cargo.toml                    # deps: syn, quote, proc-macro2, boyko-ecs
-│   │   └── src/lib.rs                    # #[derive(Component)] + #[derive(Event)]
+│   │   └── src/lib.rs                    # #[derive(Component)] + #[event]
 │   └── boyko_utils/                      # reusable collections
 │       ├── Cargo.toml
 │       └── src/
@@ -170,7 +170,7 @@ On master there was `UnitId { chunk: u32, inland: u32 }` — 8 bytes, requiring 
 
 **Where:** [component_registry.rs](../crates/boyko_ecs/src/ecs/core/component/component_registry.rs), [event_registry.rs](../crates/boyko_ecs/src/ecs/core/events/event_registry.rs)
 
-`static` storage with per-slot `OnceLock<ComponentLayout>` / `OnceLock<EventInfo>`. Registration is invoked lazily on first call to `T::component_id()` / `E::event_id()` from `#[derive(Component)]` / `#[derive(Event)]`-generated code. Each type carries a static `OnceLock<Id>` that memoizes the assigned ID after first initialization.
+`static` storage with per-slot `OnceLock<ComponentLayout>` / `OnceLock<EventInfo>`. Registration is invoked lazily on first call to `T::component_id()` / `E::event_id()` from `#[derive(Component)]` / `#[event]`-generated code. Each type carries a static `OnceLock<Id>` that memoizes the assigned ID after first initialization.
 
 Component IDs are minted lazily on first call to `T::component_id()`; see the module-level docs of `crates/boyko_ecs/src/ecs/core/component/component_registry.rs` for the assignment algorithm, collision detection, and the startup warm-up contract for external-ID consumers. Event IDs follow the same model in `event_registry.rs`.
 
