@@ -1,4 +1,5 @@
 use crate::ecs::identifiers::primitives::ComponentId;
+use crate::ecs::core::component::component_registry::MAX_COMPONENTS;
 use boyko_utils::bit_mask::bit_set::BitSet;
 use std::ops::{BitAnd, BitOr, BitXor, Not};
 /// 512-bit component mask
@@ -8,6 +9,12 @@ pub struct ComponentMask {
     pub blocks: [BitSet<u64>; 8],
 }
 
+impl Default for ComponentMask {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ComponentMask {
     pub fn new() -> Self {
         Self { blocks: [BitSet::new(); 8] }
@@ -15,23 +22,35 @@ impl ComponentMask {
     
     #[inline]
     pub fn set(&mut self, component_id: ComponentId) {
-        let block = (component_id / 64) % 8;
+        debug_assert!(
+            component_id < MAX_COMPONENTS,
+            "ComponentId {component_id} out of range (MAX_COMPONENTS = {MAX_COMPONENTS})"
+        );
+        let block = component_id / 64;
         let bit = component_id % 64;
-        self.blocks[block].set(bit as usize);
+        self.blocks[block].set(bit);
     }
-    
+
     #[inline]
     pub fn unset(&mut self, component_id: ComponentId) {
-        let block = (component_id / 64) % 8;
+        debug_assert!(
+            component_id < MAX_COMPONENTS,
+            "ComponentId {component_id} out of range (MAX_COMPONENTS = {MAX_COMPONENTS})"
+        );
+        let block = component_id / 64;
         let bit = component_id % 64;
-        self.blocks[block].clear(bit as usize);
+        self.blocks[block].clear(bit);
     }
-    
+
     #[inline]
     pub fn contains(&self, component_id: ComponentId) -> bool {
-        let block = (component_id / 64) % 8;
+        debug_assert!(
+            component_id < MAX_COMPONENTS,
+            "ComponentId {component_id} out of range (MAX_COMPONENTS = {MAX_COMPONENTS})"
+        );
+        let block = component_id / 64;
         let bit = component_id % 64;
-        self.blocks[block].is_set(bit as usize)
+        self.blocks[block].is_set(bit)
     }
     
     pub fn from_components(components: &[ComponentId]) -> Self {
@@ -128,6 +147,11 @@ impl ComponentMask {
             }
         }
         true
+    }
+
+    /// Returns the count of set bits across all 8 blocks.
+    pub fn popcount(&self) -> usize {
+        self.blocks.iter().map(|b| b.count_ones() as usize).sum()
     }
 
     /// Returns true if this mask shares any bits with another mask
@@ -342,5 +366,16 @@ mod tests {
         assert!(!result_ref.contains(3));
         assert!(result_ref.contains(4));
         assert!(result_ref.contains(5));
+    }
+
+    /// Verify that `set` panics in debug builds when `component_id >= MAX_COMPONENTS`.
+    /// The `% 8` was previously silently wrapping; removing it and adding
+    /// `debug_assert!` makes out-of-range access detectable at test/dev time.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "out of range")]
+    fn test_set_out_of_range_panics() {
+        let mut mask = ComponentMask::new();
+        mask.set(MAX_COMPONENTS); // must panic
     }
 }
