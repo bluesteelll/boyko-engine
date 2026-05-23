@@ -337,6 +337,7 @@ mod tests {
     // -- Minimal stub types for testing ----------------------------------------
 
     /// Zero-sized participants stub.
+    #[derive(Clone, Copy)]
     struct NoParticipants;
 
     impl Participants for NoParticipants {
@@ -345,6 +346,7 @@ mod tests {
     }
 
     /// Zero-sized parameters stub.
+    #[derive(Clone, Copy)]
     struct NoParameters;
 
     impl Parameters for NoParameters {}
