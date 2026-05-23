@@ -1,11 +1,14 @@
 use std::ops::{Index, IndexMut};
+
+use anyhow::{Result, bail};
+use boyko_utils::sparse_map::sparse_map::SparseMap;
+
+use crate::ecs::core::component::component::Component;
+use crate::ecs::core::component::component_registry;
 use crate::ecs::core::entity::entity_inland::EntityInland;
 use crate::ecs::identifiers::primitives::{ComponentId, InlandPoolId};
-use crate::ecs::memory::component_pool::ComponentPool;
 use crate::ecs::memory::arena::Arena;
-use crate::ecs::core::component::component_registry;
-use boyko_utils::sparse_map::sparse_map::SparseMap;
-use anyhow::{Result, bail};
+use crate::ecs::memory::component_pool::ComponentPool;
 
 pub struct ComponentPoolBundle {
     pools: Vec<ComponentPool>,
@@ -293,13 +296,54 @@ pub fn swap_remove_unit(&mut self, unit_index: usize) -> Result<()> {
     for pool in self.pools.iter_mut() {
         success &= pool.swap_remove(unit_index);
     }
-    
+
     if !success {
         bail!("Error: in ComponentPoolBundle.swap_remove_unit()")
     }
-    
+
     Ok(())
 }
+
+    /// Type-checked append. Consumes `value` by move into the matching pool's slot.
+    ///
+    /// On missing `T::component_id()` (no matching pool), `value` drops at
+    /// scope exit; bundle is not modified.
+    ///
+    /// Returns the slot index on success, `None` if the pool is missing or full.
+    #[inline]
+    pub fn add_component_typed<T: Component>(&mut self, value: T) -> Option<usize> {
+        let component_id = T::component_id();
+        // On miss: `value` drops at scope exit; bundle is not modified.
+        let inland_id = self.sparse_indexes.get(component_id).copied()?;
+        self.pools[inland_id].add_typed(value)
+    }
+
+    /// Type-checked in-place overwrite. On missing component_id or out-of-bounds
+    /// `entity_inland`, `value` drops at scope exit; bundle is not modified.
+    ///
+    /// # Panic safety
+    /// Inherits the panic policy of [`ComponentPool::set_component_typed`] —
+    /// if the existing component's `Drop` impl panics, the pool is poisoned.
+    /// See `ComponentPool::set_component_typed` docs.
+    ///
+    /// # Panics (debug only)
+    /// `debug_assert!` on TypeId mismatch inside the pool.
+    #[inline]
+    pub fn set_component_typed<T: Component>(
+        &mut self,
+        entity_inland: &EntityInland,
+        value: T,
+    ) -> bool {
+        let component_id = T::component_id();
+        let Some(inland_id) = self.sparse_indexes.get(component_id).copied() else {
+            return false;
+        };
+        debug_assert!(
+            entity_inland.unit_index() < self.pools[inland_id].count(),
+            "Entity unit index out of bounds"
+        );
+        self.pools[inland_id].set_component_typed(entity_inland.unit_index(), value)
+    }
 }
 
 // Implement Index/IndexMut for direct access to pools
