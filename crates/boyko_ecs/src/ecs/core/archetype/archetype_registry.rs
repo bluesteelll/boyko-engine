@@ -188,23 +188,24 @@ impl ArchetypeRegistry {
     /// `components.len() <= 3` — enforced by `debug_assert!`.
     ///
     /// # API contract
-    /// `out` is **cleared at function entry**. Any existing contents are
-    /// discarded. The caller's `Vec` is reused only for capacity, not data —
-    /// this enables zero-allocation reuse across calls.
+    /// `out` is assumed to be cleared by the public wrapper that called this
+    /// helper (`find_archetypes_with_components_into`). Do not clear here to
+    /// avoid a redundant double-clear on every call.
     fn find_archetypes_with_few_components_into(
         &self,
         components: &[ComponentId],
         out: &mut Vec<ArchetypeId>,
     ) {
-        out.clear();
         debug_assert!(
             components.len() <= 3,
             "find_archetypes_with_few_components_into: caller invariant violated (len={})",
             components.len()
         );
 
-        // N-3: early exit prevents `all_blocks_present = true` from matching
-        // every archetype when `relevant_blocks` is empty.
+        // Load-bearing early-exit: without this, an empty `components` slice
+        // would match every archetype, because the inner
+        // `for &block in relevant_blocks` loop never executes and
+        // `all_blocks_present` stays true (vacuous truth).
         if components.is_empty() {
             return;
         }

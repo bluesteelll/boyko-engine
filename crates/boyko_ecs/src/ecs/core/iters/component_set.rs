@@ -1,4 +1,6 @@
-use std::sync::OnceLock;
+use std::any::TypeId;
+use std::collections::HashMap;
+use std::sync::{OnceLock, RwLock};
 
 use crate::ecs::core::component::component::Component;
 use crate::ecs::identifiers::primitives::ComponentId;
@@ -16,30 +18,81 @@ const MAX_COMPONENTS: usize = 512;
 static SINGLE_COMPONENT_CACHE: [OnceLock<&'static [ComponentId]>; MAX_COMPONENTS] =
     [const { OnceLock::new() }; MAX_COMPONENTS];
 
+/// Cache for tuple `ComponentSet` impls (arity 2-8).
+///
+/// Rust does NOT create per-monomorphization statics for generic fn bodies;
+/// a `static` inside `impl<A, B> Trait for (A, B)` is shared across all
+/// `(A, B)` instantiations. So we cache by `TypeId::of::<Self>()` — each
+/// distinct tuple type gets one cached slice, leaked once via `Box::leak`.
+///
+/// Concurrency model:
+/// - Cold path (Query/QueryState construction): RwLock read-fast-path, falls
+///   back to write lock + double-check on miss. Acceptable: query construction
+///   happens at setup, not per frame.
+/// - Hot path (`QueryState::iter`): does NOT touch this cache.
+///
+/// Memory: bounded by distinct tuple types in the app (~tens to ~hundreds).
+/// One `Box::leak` per distinct type => a few KB lifetime total.
+static TUPLE_CACHE: OnceLock<RwLock<HashMap<TypeId, &'static [ComponentId]>>> = OnceLock::new();
+
+/// Retrieve or initialize the cached `&'static [ComponentId]` for type `T`.
+///
+/// `init` is called at most once per `T`; subsequent calls return the same
+/// pointer with no allocation. Uses a read-lock fast path and falls back to
+/// a write-lock with double-check on miss.
+#[inline]
+fn tuple_cache_get_or_init<T: 'static>(
+    init: impl FnOnce() -> Vec<ComponentId>,
+) -> &'static [ComponentId] {
+    let cache = TUPLE_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+    let type_id = TypeId::of::<T>();
+
+    // Fast path: read lock, hopefully cached already.
+    {
+        let guard = cache.read().expect("invariant: TUPLE_CACHE RwLock is not poisoned");
+        if let Some(&slice) = guard.get(&type_id) {
+            return slice;
+        }
+    }
+
+    // Slow path: write lock + double-check (another thread may have inserted
+    // between the read-lock drop and the write-lock acquire).
+    let mut guard = cache.write().expect("invariant: TUPLE_CACHE RwLock is not poisoned");
+    if let Some(&slice) = guard.get(&type_id) {
+        return slice;
+    }
+    let leaked: &'static [ComponentId] = Box::leak(init().into_boxed_slice());
+    guard.insert(type_id, leaked);
+    leaked
+}
+
 /// Trait for type-safe component queries.
 ///
 /// Each implementation returns a `&'static [ComponentId]` cached on the first
 /// call per distinct component-set type. Subsequent calls return the cached
 /// static slice with no allocation.
 ///
-/// # Implementation note
+/// # Caching strategy
 ///
-/// - `()` returns `&[]` directly (no heap).
-/// - Single-component impls cache a length-1 slice in `SINGLE_COMPONENT_CACHE`
-///   indexed by `ComponentId` — lock-free after initialization.
-/// - Tuple impls (arity 2–8) leak a `Box<[ComponentId]>` on first call per
-///   invocation site. Because generic fn statics are shared across
-///   monomorphizations in Rust, tuples use `Box::leak` on each call.
-///   Query construction is not on the per-frame hot path (it happens once
-///   at setup; the hot path is `QueryState::iter`), so one small leak per
-///   distinct tuple type in the lifetime of the process is acceptable.
+/// - `()` returns `&[]` directly (no heap, no cache).
+/// - Single-component impls (`impl<A: Component> ComponentSet for A`) cache
+///   a length-1 slice in `SINGLE_COMPONENT_CACHE` indexed by `ComponentId` —
+///   lock-free `OnceLock` per slot.
+/// - Tuple impls (arity 2-8) cache via a `TypeId`-keyed `RwLock<HashMap>`
+///   (cold path: Query/QueryState construction). One `Box::leak` per distinct
+///   tuple type in the program's lifetime; total leak <1 KB for any realistic
+///   app (~50 distinct tuple types x ~64 bytes = 3 KB worst case).
+///
+/// # Pointer stability
+///
+/// All non-empty calls return the same pointer for the same type across all
+/// calls. This is critical for any downstream that uses pointer identity
+/// (e.g., interning).
 pub trait ComponentSet {
     /// Returns the component IDs for all types in this set.
     ///
-    /// The returned slice is `'static` and its contents are correct for this
-    /// specific type. For `()` and single-component types the pointer is stable
-    /// across calls (same address every time). For tuple types the pointer may
-    /// differ across calls, but the data is always correct.
+    /// The returned slice is `'static` and pointer-stable across calls for
+    /// the same type.
     fn component_ids() -> &'static [ComponentId];
 }
 
@@ -67,63 +120,57 @@ impl<A: Component> ComponentSet for A {
         );
         // Index by the component's own ID — unique per concrete type by the
         // component registry invariant (C-003).
-        SINGLE_COMPONENT_CACHE[id].get_or_init(|| {
-            Box::leak(vec![id].into_boxed_slice())
+        SINGLE_COMPONENT_CACHE[id].get_or_init(|| Box::leak(vec![id].into_boxed_slice()))
+    }
+}
+
+// Tuple impls 2-8.
+//
+// All 7 arities delegate to `tuple_cache_get_or_init::<Self>(...)`, keyed by
+// `TypeId::of::<Self>()`. Each distinct tuple type caches exactly one
+// `Box::leak`-ed slice on first call; all subsequent calls return the same
+// `'static` pointer with no allocation.
+
+/// Implementation for tuple of 2 component types.
+impl<A: Component, B: Component> ComponentSet for (A, B) {
+    #[inline]
+    fn component_ids() -> &'static [ComponentId] {
+        tuple_cache_get_or_init::<Self>(|| vec![A::component_id(), B::component_id()])
+    }
+}
+
+/// Implementation for tuple of 3 component types.
+impl<A: Component, B: Component, C: Component> ComponentSet for (A, B, C) {
+    #[inline]
+    fn component_ids() -> &'static [ComponentId] {
+        tuple_cache_get_or_init::<Self>(|| {
+            vec![A::component_id(), B::component_id(), C::component_id()]
         })
     }
 }
 
-// Tuple impls 2–8.
-//
-// Rust does NOT create per-monomorphization statics for generic fn bodies;
-// a `static` inside `impl<A, B> Trait for (A, B)` is shared by all `(A, B)`
-// instantiations. Therefore we use `Box::leak` on every call to ensure
-// each distinct tuple type produces a correct (if not pointer-stable) slice.
-// Query construction is not in the per-frame hot path, so this is acceptable.
-
-// Implementation for tuple of 2 component types.
-impl<A: Component, B: Component> ComponentSet for (A, B) {
-    #[inline]
-    fn component_ids() -> &'static [ComponentId] {
-        Box::leak(
-            vec![A::component_id(), B::component_id()].into_boxed_slice(),
-        )
-    }
-}
-
-// Implementation for tuple of 3 component types.
-impl<A: Component, B: Component, C: Component> ComponentSet for (A, B, C) {
-    #[inline]
-    fn component_ids() -> &'static [ComponentId] {
-        Box::leak(
-            vec![A::component_id(), B::component_id(), C::component_id()].into_boxed_slice(),
-        )
-    }
-}
-
-// Implementation for tuple of 4 component types.
+/// Implementation for tuple of 4 component types.
 impl<A: Component, B: Component, C: Component, D: Component> ComponentSet for (A, B, C, D) {
     #[inline]
     fn component_ids() -> &'static [ComponentId] {
-        Box::leak(
+        tuple_cache_get_or_init::<Self>(|| {
             vec![
                 A::component_id(),
                 B::component_id(),
                 C::component_id(),
                 D::component_id(),
             ]
-            .into_boxed_slice(),
-        )
+        })
     }
 }
 
-// Implementation for tuple of 5 component types.
+/// Implementation for tuple of 5 component types.
 impl<A: Component, B: Component, C: Component, D: Component, E: Component> ComponentSet
     for (A, B, C, D, E)
 {
     #[inline]
     fn component_ids() -> &'static [ComponentId] {
-        Box::leak(
+        tuple_cache_get_or_init::<Self>(|| {
             vec![
                 A::component_id(),
                 B::component_id(),
@@ -131,18 +178,17 @@ impl<A: Component, B: Component, C: Component, D: Component, E: Component> Compo
                 D::component_id(),
                 E::component_id(),
             ]
-            .into_boxed_slice(),
-        )
+        })
     }
 }
 
-// Implementation for tuple of 6 component types.
+/// Implementation for tuple of 6 component types.
 impl<A: Component, B: Component, C: Component, D: Component, E: Component, F: Component>
     ComponentSet for (A, B, C, D, E, F)
 {
     #[inline]
     fn component_ids() -> &'static [ComponentId] {
-        Box::leak(
+        tuple_cache_get_or_init::<Self>(|| {
             vec![
                 A::component_id(),
                 B::component_id(),
@@ -151,12 +197,11 @@ impl<A: Component, B: Component, C: Component, D: Component, E: Component, F: Co
                 E::component_id(),
                 F::component_id(),
             ]
-            .into_boxed_slice(),
-        )
+        })
     }
 }
 
-// Implementation for tuple of 7 component types.
+/// Implementation for tuple of 7 component types.
 impl<
         A: Component,
         B: Component,
@@ -169,7 +214,7 @@ impl<
 {
     #[inline]
     fn component_ids() -> &'static [ComponentId] {
-        Box::leak(
+        tuple_cache_get_or_init::<Self>(|| {
             vec![
                 A::component_id(),
                 B::component_id(),
@@ -179,12 +224,11 @@ impl<
                 F::component_id(),
                 G::component_id(),
             ]
-            .into_boxed_slice(),
-        )
+        })
     }
 }
 
-// Implementation for tuple of 8 component types.
+/// Implementation for tuple of 8 component types.
 impl<
         A: Component,
         B: Component,
@@ -198,7 +242,7 @@ impl<
 {
     #[inline]
     fn component_ids() -> &'static [ComponentId] {
-        Box::leak(
+        tuple_cache_get_or_init::<Self>(|| {
             vec![
                 A::component_id(),
                 B::component_id(),
@@ -209,8 +253,7 @@ impl<
                 G::component_id(),
                 H::component_id(),
             ]
-            .into_boxed_slice(),
-        )
+        })
     }
 }
 
@@ -307,7 +350,7 @@ mod tests {
     }
 
     #[test]
-    fn t499_distinct_tuples_distinct_pointers() {
+    fn t499_distinct_components_distinct_cache_slots() {
         register_test_components();
         // For single-component types, SINGLE_COMPONENT_CACHE uses ComponentId
         // as the array index: IDs 495 and 496 map to different slots, so the
@@ -324,5 +367,32 @@ mod tests {
         // Tuple correctness: each tuple returns the right IDs in correct count.
         assert_eq!(<(TestC495, TestC496)>::component_ids().len(), 2);
         assert_eq!(<(TestC495, TestC496, TestC497)>::component_ids().len(), 3);
+    }
+
+    /// Regression test for B1: tuple `component_ids()` must return the same pointer
+    /// on every call for the same tuple type. Catches any reversion to
+    /// `Box::leak`-per-call behaviour.
+    #[test]
+    fn t_tuple_pointer_stable_across_calls() {
+        register_test_components();
+        let p1 = <(TestC495, TestC496)>::component_ids().as_ptr();
+        let p2 = <(TestC495, TestC496)>::component_ids().as_ptr();
+        assert_eq!(
+            p1, p2,
+            "TUPLE_CACHE must return the same pointer on every call for the same tuple type"
+        );
+    }
+
+    /// Distinct tuple types must occupy distinct cache entries (and therefore
+    /// distinct pointers), because each has a unique `TypeId`.
+    #[test]
+    fn t_distinct_tuples_distinct_pointers() {
+        register_test_components();
+        let p_ab = <(TestC495, TestC496)>::component_ids().as_ptr();
+        let p_ac = <(TestC495, TestC497)>::component_ids().as_ptr();
+        assert_ne!(
+            p_ab, p_ac,
+            "distinct tuple types must have distinct TUPLE_CACHE entries"
+        );
     }
 }
