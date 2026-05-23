@@ -8,7 +8,21 @@ use crate::ecs::memory::arena::Arena;
 use crate::ecs::constants::DEFAULT_ARENA_SIZE;
 use anyhow::{Result, bail};
 
-/// Main ECS manager that coordinates entities, archetypes, and memory allocation
+/// Main ECS manager that coordinates entities, archetypes, and memory allocation.
+///
+/// # Field order (drop order)
+///
+/// Fields are dropped in declaration order (`entity_master`, `archetype_master`,
+/// `arena`). The arena **must** be last because `ArchetypeMaster`/`Archetype`
+/// store `NonNull<Arena>` (see audit finding C-001) and `ComponentPool`s store
+/// raw pointers into the arena's backing buffer. Dropping the arena last
+/// guarantees those pointers remain valid while child `Drop`s run.
+///
+/// The arena lives behind `Box<Arena>` so its address stays stable across
+/// moves of the owning `EcsMaster`: without that, the original code on
+/// `master` and `ecs` constructed `Arena` on the stack, stored
+/// `NonNull::from(&arena)`, and then moved `arena` into `self` — a textbook
+/// dangling-pointer construction (C-001).
 pub struct EcsMaster {
     /// Entity management system
     entity_master: EntityMaster,
@@ -16,18 +30,23 @@ pub struct EcsMaster {
     /// Archetype management system
     archetype_master: ArchetypeMaster,
 
-    /// Memory arena for component allocation
-    arena: Arena,
+    /// Memory arena for component allocation. `Box` provides a stable heap
+    /// address shared by every `NonNull<Arena>` stored in child structures.
+    arena: Box<Arena>,
 }
 
 impl EcsMaster {
     /// Creates a new empty EcsMaster
     #[inline]
     pub fn new() -> Self {
-        let arena = Arena::new();
+        let arena: Box<Arena> = Box::new(Arena::new());
+        // `&arena` auto-derefs to `&Arena` via `Box: Deref<Target = Arena>`;
+        // the `NonNull::from` captured inside `ArchetypeMaster::new` therefore
+        // points at the heap-allocated `Arena`, not at a stack temporary.
+        let archetype_master = ArchetypeMaster::new(&arena);
         Self {
             entity_master: EntityMaster::new(),
-            archetype_master: ArchetypeMaster::new(&arena),
+            archetype_master,
             arena,
         }
     }
@@ -35,10 +54,11 @@ impl EcsMaster {
     /// Creates a new EcsMaster with pre-allocated capacity
     #[inline]
     pub fn with_capacity(entity_capacity: usize, archetype_capacity: usize) -> Self {
-        let arena = Arena::with_capacity(DEFAULT_ARENA_SIZE);
+        let arena: Box<Arena> = Box::new(Arena::with_capacity(DEFAULT_ARENA_SIZE));
+        let archetype_master = ArchetypeMaster::with_capacity(&arena, archetype_capacity);
         Self {
             entity_master: EntityMaster::with_capacity(entity_capacity),
-            archetype_master: ArchetypeMaster::with_capacity(&arena, archetype_capacity),
+            archetype_master,
             arena,
         }
     }
@@ -357,10 +377,20 @@ mod tests {
     use super::*;
     use crate::ecs::core::component::component_registry;
 
-    // Define test components with their IDs
-    const POSITION_ID: ComponentId = 0;
-    const VELOCITY_ID: ComponentId = 1;
-    const HEALTH_ID: ComponentId = 2;
+    // Define test components with their IDs.
+    //
+    // Each test module owns its own ComponentId range to avoid inter-test
+    // pollution through the global `OnceLock<ComponentLayout>` registry —
+    // `OnceLock::set` fixes the first registration and silently ignores
+    // subsequent ones, so two test modules registering different types under
+    // the same ID end up with a layout mismatch (see audit C-003 — Phase 1b).
+    //   ecs_master  : 100-109
+    //   query       : 200-209
+    //   archetype_master : 300-309
+    //   archetype (unit) : 400-409
+    const POSITION_ID: ComponentId = 100;
+    const VELOCITY_ID: ComponentId = 101;
+    const HEALTH_ID: ComponentId = 102;
 
     #[repr(C)]
     struct Position { x: f32, y: f32, z: f32 }
