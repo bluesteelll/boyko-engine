@@ -1,60 +1,60 @@
-# Архитектура boyko-engine (ветка `ecs`)
+# boyko-engine architecture (branch `ecs`)
 
-> Эта документация отражает состояние **ветки `ecs`**. Сравнение с master — в конце.
+> This documentation reflects the state of the **`ecs` branch**. Comparison with master is at the end.
 
-## Цели и не-цели
+## Goals and non-goals
 
-**Цели:**
-- Производительность уровня state-of-the-art ECS-движков (Bevy / flecs / Unity DOTS / EnTT)
-- Кеш-локальность через type-erased chunked storage + archetype-grouping компонентов
-- Lock-free параллелизм с партиционированием работ по чанкам/архетипам
-- Минимальный footprint per-entity / per-component
-- Zero-cost generics — никакой динамической диспетчеризации в hot path
+**Goals:**
+- Performance on par with state-of-the-art ECS engines (Bevy / flecs / Unity DOTS / EnTT)
+- Cache locality via type-erased chunked storage + archetype-grouping of components
+- Lock-free parallelism with work partitioning by chunks/archetypes
+- Minimal per-entity / per-component footprint
+- Zero-cost generics — no dynamic dispatch in the hot path
 
-**Не-цели (на текущей стадии):**
-- Поддержка скриптинга (Lua, Wasm)
-- Hot-reload компонентов
-- Сериализация/десериализация (отложено до стабилизации модели)
-- Кроссплатформенность за пределы x86_64
+**Non-goals (at the current stage):**
+- Scripting support (Lua, Wasm)
+- Component hot-reload
+- Serialization/deserialization (deferred until the model stabilizes)
+- Cross-platform support beyond x86_64
 
-## Структура workspace
+## Workspace layout
 
 ```
 boyko-engine/
-├── Cargo.toml                            # workspace + основной бинарь
-├── src/main.rs                           # точка входа (пустая)
+├── Cargo.toml                            # workspace + main binary
+├── src/main.rs                           # entry point (empty)
 ├── crates/
-│   ├── boyko_ecs/                        # ядро ECS
+│   ├── boyko_ecs/                        # ECS core
 │   │   ├── Cargo.toml                    # deps: rand, anyhow, boyko-utils
 │   │   └── src/
 │   │       ├── lib.rs                    # pub mod ecs;
 │   │       └── ecs/
 │   │           ├── mod.rs                # core, memory, constants, identifiers
-│   │           ├── constants.rs          # размеры, выравнивание, пороги
+│   │           ├── constants.rs          # sizes, alignment, thresholds
 │   │           ├── identifiers/
 │   │           │   └── primitives.rs     # type aliases: EntityId, ArchetypeId, ComponentId, ...
 │   │           ├── core/
 │   │           │   ├── component/        # type-erased: Component trait, ComponentMask, ComponentPoolBundle, ComponentRegistry
 │   │           │   ├── entity/           # Entity, EntityInland, EntityMaster (recycling)
 │   │           │   ├── archetype/        # Archetype, ArchetypeMaster, ArchetypeRegistry, ArchetypeSignature, ArchetypeBundle
-│   │           │   ├── ecs_master/       # EcsMaster — top-level фасад
+│   │           │   ├── ecs_master/       # EcsMaster — top-level facade
 │   │           │   ├── iters/            # Query, SparseIter, ComponentSet
 │   │           │   ├── events/           # Event trait + EventPool/EventRegistry, Participants, Parameters
-│   │           │   └── containers/tuple/ # ComponentTuple для batch операций
+│   │           │   └── containers/tuple/ # ComponentTuple for batch operations
 │   │           └── memory/
-│   │               ├── arena.rs              # 64 MB arena с best-fit аллокатором
-│   │               ├── free_mem_block.rs     # tracker свободных блоков
-│   │               ├── chunk.rs              # type-erased: только metadata (start_index, capacity, dirty)
+│   │               ├── arena.rs              # 64 MB arena with best-fit allocator
+│   │               ├── free_mem_block.rs     # free-block tracker
+│   │               ├── chunk.rs              # type-erased: metadata only (start_index, capacity, dirty)
 │   │               ├── component_pool.rs     # type-erased: NonNull<u8> + Vec<Unit> + chunks
 │   │               ├── id_unit.rs            # Unit { ptr: *mut u8, buffer_index }
 │   │               ├── utils.rs              # align_up
-│   │               ├── sparse_iter_component_pool.rs   # итератор по пулу
-│   │               ├── multi_pool_sparse_iter.rs       # итератор по нескольким пулам
-│   │               └── iterators.rs          # ⚠️ пустой файл-заглушка
+│   │               ├── sparse_iter_component_pool.rs   # iterator over a pool
+│   │               ├── multi_pool_sparse_iter.rs       # iterator across multiple pools
+│   │               └── iterators.rs          # ⚠️ empty stub file
 │   ├── boyko_macros/                     # proc-macros
 │   │   ├── Cargo.toml                    # deps: syn, quote, proc-macro2, boyko-ecs
 │   │   └── src/lib.rs                    # #[derive(Component)] + #[derive(Event)]
-│   └── boyko_utils/                      # переиспользуемые коллекции
+│   └── boyko_utils/                      # reusable collections
 │       ├── Cargo.toml
 │       └── src/
 │           ├── lib.rs
@@ -65,34 +65,34 @@ boyko-engine/
 │           │   ├── bit_storage.rs        # BitStorage trait
 │           │   ├── bit_mask.rs           # BitMask<T: BitStorage>
 │           │   ├── bit_set.rs            # BitSet<T: BitInteger> + iterator
-│           │   └── bit_set512.rs         # BitSet512 — фиксированный 8×u64
+│           │   └── bit_set512.rs         # BitSet512 — fixed 8×u64
 │           └── sparse_map/
 │               ├── sparse_collection.rs  # SparseCollection trait
 │               ├── sparse_map.rs         # SparseMap<U>
 │               └── sparse_slot_map.rs    # SparseSlotMap<U>
-└── docs/                                 # внутренняя документация
+└── docs/                                 # internal documentation
 ```
 
-## Зависимости между крейтами
+## Inter-crate dependencies
 
 ```
 boyko-engine (main binary)
     ├── boyko_ecs
-    │       └── boyko_utils       ← новое на ecs
+    │       └── boyko_utils       ← new on ecs
     └── boyko_macros
-            └── boyko_ecs         (для путей в раскрытом коде макроса)
+            └── boyko_ecs         (for paths in macro-expanded code)
 ```
 
-Внешние зависимости:
+External dependencies:
 - `boyko_ecs`: `rand`, `anyhow`, `boyko-utils`
 - `boyko_macros`: `syn`, `quote`, `proc-macro2`, `boyko-ecs`
-- `boyko_utils`: (нет внешних)
+- `boyko_utils`: (none)
 
-## Слои архитектуры
+## Architecture layers
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
-│  Layer 4: Game/User Code (использует ECS API)                  │
+│  Layer 4: Game/User Code (uses ECS API)                        │
 └────────────────────────────────────────────────────────────────┘
                                 ↑
 ┌────────────────────────────────────────────────────────────────┐
@@ -122,123 +122,123 @@ boyko-engine (main binary)
 └────────────────────────────────────────────────────────────────┘
 ```
 
-## Поток данных при создании entity
+## Data flow when creating an entity
 
 ```
 User → EcsMaster::create_entity(archetype_id, components)
     ├─ EntityMaster::allocate_entity()
-    │      └─ либо взять из free_entity_ids,
-    │         либо bump next_entity_id → Entity { id, generation=0 }
+    │      └─ either take from free_entity_ids,
+    │         or bump next_entity_id → Entity { id, generation=0 }
     ├─ ArchetypeMaster::get_archetype_mut(id) → &mut Archetype
     ├─ Archetype::create_entity(entity_id, &mut inland, components)
-    │      └─ для каждой пары (component_id, &[u8]):
+    │      └─ for each pair (component_id, &[u8]):
     │             ComponentPoolBundle::get_pool_mut(component_id)
     │               → ComponentPool::add(...)
-    │                   ├─ если нужно: ComponentRegistry::get_layout(id)
-    │                   ├─ если первая аллокация: arena.allocate_layout(...)
+    │                   ├─ if needed: ComponentRegistry::get_layout(id)
+    │                   ├─ on first allocation: arena.allocate_layout(...)
     │                   ├─ ptr::copy(src=bytes, dst=buffer + offset, size=layout.size())
     │                   └─ units.push(Unit { ptr, buffer_index })
     └─ EntityMaster::register_entity(entity, archetype_id, unit_index)
               └─ entity_map.insert(entity.id, EntityInland { archetype_id, unit_index, generation })
 ```
 
-## Ключевые архитектурные решения
+## Key architectural decisions
 
-### 1. Type-erased `ComponentPool` (отказ от generic `<T>`)
+### 1. Type-erased `ComponentPool` (dropping generic `<T>`)
 
-**Где:** [crates/boyko_ecs/src/ecs/memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs)
+**Where:** [crates/boyko_ecs/src/ecs/memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs)
 
-На master `ComponentPool<T: Component>` был generic — один пул на один тип. На ecs пул хранит **сырые байты** (`buffer: NonNull<u8>`, `buffer_capacity_bytes: usize`) и работает через `ComponentId` + `Layout` из global `ComponentRegistry`.
+On master, `ComponentPool<T: Component>` was generic — one pool per type. On ecs, the pool stores **raw bytes** (`buffer: NonNull<u8>`, `buffer_capacity_bytes: usize`) and operates via `ComponentId` + `Layout` from the global `ComponentRegistry`.
 
-**Зачем:**
-- Архетип содержит много **разных** типов компонентов. С generic-пулом нельзя положить `Vec<ComponentPool<?>>` без `Box<dyn Trait>` или enum.
-- Type erasure через `Layout` — стандартный подход (Bevy `Table`, flecs `ecs_table_t`).
+**Why:**
+- An archetype contains many **different** component types. With a generic pool you can't put `Vec<ComponentPool<?>>` without `Box<dyn Trait>` or an enum.
+- Type erasure via `Layout` is the standard approach (Bevy `Table`, flecs `ecs_table_t`).
 
-**Цена:**
-- Каждый `add` / `get` теряет compile-time проверку типа — корректность опирается на инвариант «ComponentId соответствует правильному типу».
-- Доступ к компоненту требует `unsafe { &*(ptr as *const T) }` с SAFETY-комментом.
+**Cost:**
+- Each `add` / `get` loses compile-time type checking — correctness relies on the invariant that "ComponentId matches the right type".
+- Component access requires `unsafe { &*(ptr as *const T) }` with a SAFETY comment.
 
-### 2. Прямой указатель в `Unit` вместо двухуровневой адресации
+### 2. Direct pointer in `Unit` instead of two-level addressing
 
-**Где:** [crates/boyko_ecs/src/ecs/memory/id_unit.rs](../crates/boyko_ecs/src/ecs/memory/id_unit.rs)
+**Where:** [crates/boyko_ecs/src/ecs/memory/id_unit.rs](../crates/boyko_ecs/src/ecs/memory/id_unit.rs)
 
-На master был `UnitId { chunk: u32, inland: u32 }` — 8 байт, требовал вычисления адреса при каждом доступе. На ecs `Unit { ptr: *mut u8, buffer_index: usize }` — 16 байт, но доступ к компоненту прямой (`*ptr`).
+On master there was `UnitId { chunk: u32, inland: u32 }` — 8 bytes, requiring address computation on every access. On ecs, `Unit { ptr: *mut u8, buffer_index: usize }` — 16 bytes, but component access is direct (`*ptr`).
 
-**Trade-off:** удвоение размера индекса ради устранения индирекции при чтении.
+**Trade-off:** doubling the index size in exchange for removing indirection on reads.
 
 ### 3. Global `ComponentRegistry` / `EventRegistry`
 
-**Где:** [component_registry.rs](../crates/boyko_ecs/src/ecs/core/component/component_registry.rs), [event_registry.rs](../crates/boyko_ecs/src/ecs/core/events/event_registry.rs)
+**Where:** [component_registry.rs](../crates/boyko_ecs/src/ecs/core/component/component_registry.rs), [event_registry.rs](../crates/boyko_ecs/src/ecs/core/events/event_registry.rs)
 
-`static` storage с `register_layout<T>(component_id)` для регистрации типа. Регистрация автоматически вызывается из кода, сгенерированного `#[derive(Component)]`.
+`static` storage with `register_layout<T>(component_id)` to register a type. Registration is invoked automatically from the code generated by `#[derive(Component)]`.
 
-**Зачем:**
-- Type erasure требует runtime metadata (size, align, TypeId).
-- Один источник истины для всех `ComponentPool`.
+**Why:**
+- Type erasure requires runtime metadata (size, align, TypeId).
+- A single source of truth for all `ComponentPool` instances.
 
-**Риски:**
-- `ComponentId` зависит от порядка раскрытия макроса (AtomicUsize counter в proc-macro) — нестабильны между сборками.
-- Регистрация при первом использовании — нужно гарантировать, что регистрация прошла до первого доступа.
-- Thread-safety регистрации требует валидации (вероятно нужен `Mutex` или `OnceLock`).
+**Risks:**
+- `ComponentId` depends on the order in which the macro is expanded (AtomicUsize counter inside the proc-macro) — unstable across builds.
+- Registration on first use — must guarantee that registration completes before the first access.
+- Registration thread-safety needs validation (likely needs a `Mutex` or `OnceLock`).
 
-### 4. `EntityMaster` с recycling через free list
+### 4. `EntityMaster` with recycling via a free list
 
-**Где:** [entity_master.rs](../crates/boyko_ecs/src/ecs/core/entity/entity_master.rs)
+**Where:** [entity_master.rs](../crates/boyko_ecs/src/ecs/core/entity/entity_master.rs)
 
-`free_entity_ids: Vec<EntityId>` для переиспользования слотов. `entity_map: SparseMap<EntityInland>` для O(1) lookup по `EntityId`.
+`free_entity_ids: Vec<EntityId>` for reusing slots. `entity_map: SparseMap<EntityInland>` for O(1) lookup by `EntityId`.
 
-`Generation` инкрементируется при deallocate — предотвращает stale references.
+`Generation` is incremented on deallocation — preventing stale references.
 
-### 5. `anyhow::Result` в `EcsMaster`
+### 5. `anyhow::Result` in `EcsMaster`
 
-**Где:** [ecs_master.rs:9](../crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs)
+**Where:** [ecs_master.rs:9](../crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs)
 
-`anyhow` используется для propagation ошибок верхнего уровня. ⚠️ Спорное решение для библиотеки — `anyhow` обычно для приложений. При стабилизации API стоит заменить на domain-specific error type.
+`anyhow` is used to propagate top-level errors. ⚠️ A debatable choice for a library — `anyhow` is typically for applications. When stabilizing the API it's worth replacing with a domain-specific error type.
 
-### 6. Адаптивный размер чанка по размеру компонента
+### 6. Adaptive chunk size based on component size
 
-То же, что на master — `TINY/SMALL/MEDIUM/LARGE_COMPONENTS_PER_CHUNK` (см. [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs)).
+Same as on master — `TINY/SMALL/MEDIUM/LARGE_COMPONENTS_PER_CHUNK` (see [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs)).
 
-## Многопоточная модель (дизайн-цель)
+## Multi-threading model (design goal)
 
-Целевая модель:
-1. **Read-heavy parallelism**: множественные потоки итерируются по разным `Query` параллельно — Rust borrow checker через системный scheduler гарантирует отсутствие конфликтов component access.
-2. **Partitioned writes**: при параллельной обработке одного архетипа — деление чанков между потоками (1 поток = 1+ чанк).
-3. **Lock-free инфра**: аллокации, registry, доступ к архетипам — через атомики.
+Target model:
+1. **Read-heavy parallelism**: multiple threads iterate over different `Query` instances in parallel — the Rust borrow checker, via a system scheduler, guarantees the absence of component access conflicts.
+2. **Partitioned writes**: when one archetype is processed in parallel — divide chunks between threads (1 thread = 1+ chunk).
+3. **Lock-free infrastructure**: allocations, registry, archetype access — via atomics.
 
-Текущее состояние:
-- `Arena` — `UnsafeCell<MemFreeBlockMaster>`, **не thread-safe** для multi-writer.
-- `ComponentPool` mutability через `&mut self`.
-- `ComponentRegistry` / `EventRegistry` — `static` storage, нужна проверка thread-safety регистрации.
-- Никакого scheduler'а пока нет.
+Current state:
+- `Arena` — `UnsafeCell<MemFreeBlockMaster>`, **not thread-safe** for multi-writer.
+- `ComponentPool` mutability via `&mut self`.
+- `ComponentRegistry` / `EventRegistry` — `static` storage, registration thread-safety needs verification.
+- No scheduler yet.
 
-## Цели по производительности
+## Performance goals
 
-Целевые ориентиры (требуют валидации через criterion-бенчи после фикса билда):
+Target benchmarks (require validation via criterion benches after the build is fixed):
 
-| Операция | Target | Notes |
-|----------|--------|-------|
+| Operation | Target | Notes |
+|-----------|--------|-------|
 | `Arena::allocate_aligned` (no fragmentation) | ≤ 50 ns | BTreeMap lookup + 2 HashMap ops |
-| `ComponentPool::add` (есть место в чанке) | ≤ 10 ns | Type-erased: указатель + memcpy + Vec::push(Unit) |
-| Доступ к компоненту через `Unit::ptr` | ≤ 2 ns | Прямая dereference указателя |
-| Линейная итерация пула | ~32 GB/s для tiny компонентов | Sequential через buffer |
+| `ComponentPool::add` (space available in chunk) | ≤ 10 ns | Type-erased: pointer + memcpy + Vec::push(Unit) |
+| Component access via `Unit::ptr` | ≤ 2 ns | Direct pointer dereference |
+| Linear iteration over a pool | ~32 GB/s for tiny components | Sequential through buffer |
 | `EcsMaster::create_entity` | ≤ 150 ns | EntityMaster + ArchetypeMaster + ComponentPool::add × N |
-| Query construction (cached signature) | ≤ 50 ns | Фильтр архетипов по маске |
+| Query construction (cached signature) | ≤ 50 ns | Archetype filter by mask |
 
-Цифры — таргеты. Сейчас бенчей нет.
+These numbers are targets. No benchmarks exist yet.
 
-## Что отличается от ветки `master`
+## What differs from the `master` branch
 
-| Аспект | master | ecs |
+| Aspect | master | ecs |
 |--------|--------|-----|
 | ComponentPool | `ComponentPool<T: Component>` (generic) | type-erased + `ComponentRegistry` |
-| Chunk | `Chunk<T>` хранит данные | `Chunk` — только metadata (start_index, capacity, dirty) |
-| Адресация | `UnitId { chunk: u32, inland: u32 }` | `Unit { ptr: *mut u8, buffer_index: usize }` |
+| Chunk | `Chunk<T>` stores data | `Chunk` — metadata only (start_index, capacity, dirty) |
+| Addressing | `UnitId { chunk: u32, inland: u32 }` | `Unit { ptr: *mut u8, buffer_index: usize }` |
 | Entity ID | `u32` + generation `u16` | `usize` + generation `usize` |
-| EntityMaster | ⚠️ нет | ✅ с recycling |
-| Archetype | ⚠️ пустой файл-заглушка | ✅ полная реализация |
-| EcsMaster | ⚠️ пустой файл-заглушка | ✅ есть, использует anyhow |
-| Query | ⚠️ нет | ✅ есть |
-| Event subsystem | ⚠️ нет | ✅ есть (с Participants + Parameters) |
-| boyko_utils | ⚠️ нет | ✅ есть (BitSet, SparseMap, Slot) |
-| Билд | ✅ собирается | ❌ не компилируется |
+| EntityMaster | ⚠️ missing | ✅ with recycling |
+| Archetype | ⚠️ empty stub file | ✅ full implementation |
+| EcsMaster | ⚠️ empty stub file | ✅ present, uses anyhow |
+| Query | ⚠️ missing | ✅ present |
+| Event subsystem | ⚠️ missing | ✅ present (with Participants + Parameters) |
+| boyko_utils | ⚠️ missing | ✅ present (BitSet, SparseMap, Slot) |
+| Build | ✅ builds | ❌ does not compile |
