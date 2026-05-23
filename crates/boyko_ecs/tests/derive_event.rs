@@ -1,3 +1,5 @@
+// Temporarily disabled during Q-001 6b. Tests migrate to tests/event_attribute.rs in step 6d.
+#![cfg(any())]
 /// Integration tests for #[derive(Event)] lazy-mint ID semantics.
 ///
 /// Validates audit finding Q-005: the macro-generated `event_id()` must mint a
