@@ -38,12 +38,16 @@ of truth for findings; this file is the source of truth for
 | Q-022 | `Archetype::pop` did not shrink `entity_ids` | 1a |
 | Q-026 partial | `#[inline(always)]` on `Component` / `Event` trait defaults | 1b |
 | 14 × E0133 | Rust 2024: unsafe ops inside unsafe fn without explicit unsafe block | 1a |
+| Q-001 | Event derive layout-mismatch UB | 1b-finish |
+| Q-002 (re-check) | `from_bytes` unaligned read — resolved via redesign | 1b-finish |
+| Q-017 | `ParticipantBuffer::push` double allocation | 1b-finish (absorbed by Q-001) |
+| W6 | Dead `push_raw` / `get_raw` on both buffers | 1b-finish (absorbed by Q-001) |
 
-**Counts**: 12 critical (of 27), 0 important (of 37), 1 informational (of 25), plus 14 E0133.
+**Counts**: 16 critical (of 27) closed, 0 important (of 37), 1 informational (of 25), plus 14 E0133.
 
 ### Remaining open (~70 findings)
 
-- 🔴 Critical: 15
+- 🔴 Critical: 14 (was 15; Q-001 closed)
 - 🟡 Important: 37
 - 🟢 Informational: 24
 
@@ -51,38 +55,25 @@ Grouped into Phases 1b-finish through 5 below.
 
 ---
 
-## Phase 1b — Finish
+## Phase 1b — Finish — CLOSED
 
-Only one finding remains in 1b. The architect plan went through
-two architect rounds + two critic rounds and converged in Round 2;
-critic Round 2 returned NEEDS_REWORK with two small clarifications
-(step 6a "additive default impl" wording, Miri padding model
-commitment). Round 3 architect pass + critic round + developer + tester
-should close this within one focused session.
+Q-001 has been implemented and merged (6 substeps: 6a–6d committed, 6e–6f absorbed into 6d
+commit). Phase 1b is fully closed.
 
-### Q-001 — Event derive layout-mismatch UB
+### Q-001 — Event derive layout-mismatch UB — CLOSED
 
+- **Status**: ✅ CLOSED. Commits on `ecs` branch: `c12cba7` (6a), `a618e6e` (6b), `5f35c70` (6c), `6ba2d38` (6d/6f).
 - **Category**: 🔴 Critical memory safety (UB in macro-generated cast)
 - **Audit ref**: `AUDIT-2026-05-23.md` § Q-001 (line ~187)
 - **Approved strategy**: Strategy (a) — `#[event]` attribute macro
   rewrites the user struct into `{ participants, parameters }`
   native nested fields. Zero unsafe in accessors. Removes the
   `self as *const Self as *const Self::Participants` UB cast.
-- **In scope (absorbs)**:
-  - **Q-017** — `to_bytes() -> Vec<u8>` double allocation in buffer push
-  - **W6 from previous critic** — `get_raw` / `push_raw` removal (zero callers)
-- **Out of scope (defer)**:
-  - **Q-019** — `ParticipantBuffer` lacks TypeId check on `get`
-    (will use TypeId from registry, not Layout)
-- **Constraints**:
-  - `Participants` and `Parameters` traits gain `Copy` bound
-    (type-system-enforced soundness for byte-copy paths)
-  - `participant_info()` uses per-impl `OnceLock<&'static [ParticipantInfo]>`
-    + `Box::leak` (mirrors C-003 pattern, since `T::component_id()`
-    is now runtime)
-  - `#[derive(Event)]` becomes a `compile_error!` stub directing
-    users to `#[event]`
-  - `EVENT_NAME` const preserved
+- **In scope (absorbed)**:
+  - **Q-017** — `to_bytes() -> Vec<u8>` double allocation in buffer push — CLOSED
+  - **W6 from previous critic** — `get_raw` / `push_raw` removal (zero callers) — CLOSED
+- **Out of scope (deferred)**:
+  - **Q-019** — `ParticipantBuffer` lacks TypeId check on `get` — deferred to Phase 4b
 - **Implementation order**: 6 substeps (6a-6f), each ending with a
   compilable tree and passing tests
 - **Effort estimate**: 1 focused session (architect Round 3 — small
@@ -226,7 +217,7 @@ touches many call sites).
 | ID | Site | Question | Approach |
 |----|------|----------|----------|
 | **Q-020** | `Participants` and `Parameters` split — overengineered? | Architectural decision: keep split (current design — addressed via Q-001 native nested fields) OR collapse into single Event type (Bevy style). After Q-001 lands, evaluate. |
-| **Q-019** | `ParticipantBuffer::get<P>` lacks TypeId check | Store `TypeId` in buffer alongside `participant_size`; `debug_assert_eq!` in `get`; consider `assert!` if cheap |
+| **Q-019** | `ParticipantBuffer::get<P>` lacks TypeId check | Store `TypeId` in buffer alongside `participant_size`; `debug_assert_eq!` in `get`; consider `assert!` if cheap. Deferred here from Q-001 (Phase 1b-finish) — the buffer storage migration to `Vec<MaybeUninit<u8>>` was the precondition. |
 
 **Effort estimate**: Q-020 is a design discussion (no code).
 Q-019 is 1 session.

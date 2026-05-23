@@ -153,17 +153,17 @@ First point of contact for agents. When looking for where a particular piece of 
 
 | What | Where | How |
 |------|-------|-----|
-| Define an event | [boyko_macros/src/lib.rs](../crates/boyko_macros/src/lib.rs) ✅ | `#[derive(Event)] struct MyEvent { ... }` |
+| Define an event | [boyko_macros/src/lib.rs](../crates/boyko_macros/src/lib.rs) ✅ | `#[event] struct MyEvent { #[participant(...)] e: Entity, #[parameter] x: f32 }` |
 | Event trait | [core/events/event.rs](../crates/boyko_ecs/src/ecs/core/events/event.rs) ✅ | `Event` with `type Participants`, `type Parameters` |
 | Register an event | [core/events/event_registry.rs](../crates/boyko_ecs/src/ecs/core/events/event_registry.rs) ✅ | `register_event::<E>(event_id)` |
 | Get metadata | [core/events/event_registry.rs](../crates/boyko_ecs/src/ecs/core/events/event_registry.rs) ✅ | `get_event_info(id)`, `get_event_layout(id)` |
 | Validate event types | [core/events/event_registry.rs](../crates/boyko_ecs/src/ecs/core/events/event_registry.rs) ✅ | `validate_event_types::<E>(id)` |
 | Event pool | [core/events/event_pool.rs](../crates/boyko_ecs/src/ecs/core/events/event_pool.rs) ✅ | `EventPool` |
 | Bundle of heterogeneous pools | [core/events/event_pool_bundle.rs](../crates/boyko_ecs/src/ecs/core/events/event_pool_bundle.rs) ✅ | `EventPoolBundle` |
-| Participants trait | [core/events/participants/participants.rs](../crates/boyko_ecs/src/ecs/core/events/participants/participants.rs) ✅ | `Participants`, `ParticipantInfo` |
-| Buffer for participants | [core/events/participants/participants_buffer.rs](../crates/boyko_ecs/src/ecs/core/events/participants/participants_buffer.rs) ✅ | `ParticipantBuffer` |
-| Parameters trait | [core/events/parameters/parameters.rs](../crates/boyko_ecs/src/ecs/core/events/parameters/parameters.rs) ✅ | `Parameters` |
-| Buffer for parameters | [core/events/parameters/parameters_buffer.rs](../crates/boyko_ecs/src/ecs/core/events/parameters/parameters_buffer.rs) ✅ | `ParametersBuffer` |
+| Participants trait (Copy-bounded) | [core/events/participants/participants.rs](../crates/boyko_ecs/src/ecs/core/events/participants/participants.rs) ✅ | `Participants: Copy`, `ParticipantInfo` |
+| Buffer for participants | [core/events/participants/participants_buffer.rs](../crates/boyko_ecs/src/ecs/core/events/participants/participants_buffer.rs) ✅ | `ParticipantBuffer` (storage: `Vec<MaybeUninit<u8>>`) |
+| Parameters trait (Copy-bounded) | [core/events/parameters/parameters.rs](../crates/boyko_ecs/src/ecs/core/events/parameters/parameters.rs) ✅ | `Parameters: Copy` |
+| Buffer for parameters | [core/events/parameters/parameters_buffer.rs](../crates/boyko_ecs/src/ecs/core/events/parameters/parameters_buffer.rs) ✅ | `ParametersBuffer` (storage: `Vec<MaybeUninit<u8>>`) |
 
 ---
 

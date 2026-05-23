@@ -351,13 +351,27 @@ pub type EventId = u64;
 pub trait Event: 'static + Sized {
     type Participants: Participants;
     type Parameters: Parameters;
-    
+
     fn event_id() -> EventId;
     fn event_name() -> &'static str;
+    fn new(participants: Self::Participants, parameters: Self::Parameters) -> Self;
+    fn participants(&self) -> &Self::Participants;
+    fn participants_mut(&mut self) -> &mut Self::Participants;
+    fn parameters(&self) -> &Self::Parameters;
+    fn parameters_mut(&mut self) -> &mut Self::Parameters;
     fn layout() -> Layout { Layout::new::<Self>() }
     fn type_id() -> TypeId { TypeId::of::<Self>() }
 }
 ```
+
+The `#[event]` macro rewrites the user struct into a two-field native layout:
+```rust
+struct MyEvent {
+    pub participants: MyEventParticipants,
+    pub parameters: MyEventParameters,
+}
+```
+All accessors are safe typed-field reads — no unsafe pointer casts (Q-001 resolved).
 
 ### 8.2. EventPool / EventPoolBundle
 
@@ -372,17 +386,26 @@ API: `register_event<E>`, `get_event_info`, `get_event_layout`, `get_participant
 
 ### 8.4. Participants
 
-- [participants.rs](../crates/boyko_ecs/src/ecs/core/events/participants/participants.rs) — `Participants` trait, `ParticipantInfo`
-- [participants_buffer.rs](../crates/boyko_ecs/src/ecs/core/events/participants/participants_buffer.rs) — `ParticipantBuffer`
+- [participants.rs](../crates/boyko_ecs/src/ecs/core/events/participants/participants.rs) — `Participants: 'static + Sized + Copy` trait, `ParticipantInfo`
+- [participants_buffer.rs](../crates/boyko_ecs/src/ecs/core/events/participants/participants_buffer.rs) — `ParticipantBuffer` with `Vec<MaybeUninit<u8>>` storage
+
+`Participants` requires `Copy`. `ParticipantBuffer::push` uses `ptr::copy_nonoverlapping`
+directly from `&P`. `push_raw` / `get_raw` have been removed (W6).
 
 ### 8.5. Parameters
 
-- [parameters.rs](../crates/boyko_ecs/src/ecs/core/events/parameters/parameters.rs) — `Parameters` trait
-- [parameters_buffer.rs](../crates/boyko_ecs/src/ecs/core/events/parameters/parameters_buffer.rs) — `ParametersBuffer`
+- [parameters.rs](../crates/boyko_ecs/src/ecs/core/events/parameters/parameters.rs) — `Parameters: 'static + Sized + Copy` trait
+- [parameters_buffer.rs](../crates/boyko_ecs/src/ecs/core/events/parameters/parameters_buffer.rs) — `ParametersBuffer` with `Vec<MaybeUninit<u8>>` storage
 
-### 8.6. `#[derive(Event)]` macro
+Same storage model as `ParticipantBuffer`. `push_raw` / `get_raw` removed.
 
-**File:** [crates/boyko_macros/src/lib.rs](../crates/boyko_macros/src/lib.rs) — function `event_derive`.
+### 8.6. `#[event]` attribute macro
+
+**File:** [crates/boyko_macros/src/lib.rs](../crates/boyko_macros/src/lib.rs) — `#[proc_macro_attribute] pub fn event(...)`.
+
+`#[derive(Event)]` has been deleted (Q-001). Use `#[event]` instead. Per-field markers:
+- `#[participant(components = "TypeA, TypeB")]` — declares a participant entity field
+- `#[parameter]` — declares a plain data parameter field
 
 ---
 
