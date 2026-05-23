@@ -144,7 +144,11 @@ First point of contact for agents. When looking for where a particular piece of 
 | Query by ComponentId | [core/iters/query.rs](../crates/boyko_ecs/src/ecs/core/iters/query.rs) ✅ | `Query::with_component_ids(master, &[ComponentId])` |
 | Query by mask (inclusive) | [core/iters/query.rs](../crates/boyko_ecs/src/ecs/core/iters/query.rs) ✅ | `Query::with_mask(master, &mask)` |
 | Query with exact mask match | [core/iters/query.rs](../crates/boyko_ecs/src/ecs/core/iters/query.rs) ✅ | `Query::with_exact_mask(master, &mask)` |
-| Query from a ready-made set of archetypes | [core/iters/query.rs](../crates/boyko_ecs/src/ecs/core/iters/query.rs) ✅ | `Query::from_archetypes(Vec<&Archetype>)` |
+| Query from a ready-made set of archetypes | [core/iters/query.rs](../crates/boyko_ecs/src/ecs/core/iters/query.rs) ✅ | `Query::from_archetypes(Vec<&Archetype>, master)` |
+| **Cached persistent query (Q-011)** | [core/iters/query_state.rs](../crates/boyko_ecs/src/ecs/core/iters/query_state.rs) ✅ | `QueryState` — warm-path ~21x faster than one-shot `Query` |
+| Warm-path delta update | [core/iters/query_state.rs](../crates/boyko_ecs/src/ecs/core/iters/query_state.rs) ✅ | `QueryState::update_archetypes(&master)` |
+| Generation-aware stale detection | [core/archetype/generation.rs](../crates/boyko_ecs/src/ecs/core/archetype/generation.rs) ✅ | `ArchetypeGeneration` + `ArchetypeMaster::archetype_generation()` |
+| 1024-bit inline dedup bitset | [core/iters/archetype_bit_set.rs](../crates/boyko_ecs/src/ecs/core/iters/archetype_bit_set.rs) ✅ | `ArchetypeBitSet` (128 B, 2 cache lines, no heap) |
 | Tuple trait for query parameters | [core/iters/component_set.rs](../crates/boyko_ecs/src/ecs/core/iters/component_set.rs) ✅ | `ComponentSet` trait |
 
 ---

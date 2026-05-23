@@ -313,15 +313,50 @@ API:
 
 ```rust
 pub struct Query<'a> {
-    archetypes: Vec<&'a Archetype>,
+    state: QueryState,          // one-shot cache built at construction time
+    master: &'a ArchetypeMaster,
 }
 ```
 
 Constructors: `from_archetypes`, `with_component_ids`, `with_mask`, `with_exact_mask`.
 
-Stores direct references to `&Archetype` — maximum perf during iteration, no indirection.
+`Query<'a>` is the one-shot query path: at construction it builds a `QueryState`,
+calls `update_archetypes` once, then serves `iter()` from the cached `matched_ids`.
+Storing `Vec<ArchetypeId>` (not `Vec<&Archetype>`) eliminates a latent
+stale-reference UB from `swap_remove` in `ArchetypeBundle`.
 
-### 7.2. SparseIter / SparseIterMut
+### 7.2. QueryState (Q-011)
+
+**File:** [crates/boyko_ecs/src/ecs/core/iters/query_state.rs](../crates/boyko_ecs/src/ecs/core/iters/query_state.rs)
+
+```rust
+#[repr(C, align(64))]
+pub struct QueryState {
+    // Cache line 0 (hot):
+    generation: ArchetypeGeneration,    // last-synced generation
+    matched_ids: Vec<ArchetypeId>,      // IDs that passed the filter
+    // Lines 1-3 (cold):
+    include: ComponentMask,
+    exclude: ComponentMask,
+    optional: ComponentMask,
+    // Lines 4-5 (coldest):
+    matched_archetypes: ArchetypeBitSet,  // O(1) dedup during update
+}
+```
+
+The long-lived cache for hot-path iteration. Key APIs:
+- `update_archetypes(&master)` — delta-classifies newly minted archetypes since the last call. O(new_archetypes) work.
+- `iter(&mut self, master)` — Bevy-style split: requires `&mut self` for the generation check, delegates to `iter_cached` on warm path.
+- `reset()` — clears the cache for reuse after `master.clear()`.
+
+**Warm-path cost**: one `generation` load + compare; if unchanged, pure slice walk + per-id `get_archetype` (SparseMap O(1)).
+**Benchmark (2026-05-23)**: ~3.6 ns vs ~77 ns for the one-shot `Query` path (~21x faster for the two-archetype test setup).
+
+**Generation tracking**: uses `ArchetypeGeneration` (monotonic `NonZeroUsize`), bumped on every `create_archetype`. Never reset by `clear()` — stale `QueryState` detection is based on `state.generation <= master.archetype_generation()`. A `debug_assert!` catches post-`clear()` reuse in debug builds.
+
+**`ArchetypeBitSet`**: 1024-bit inline bitset (128 B, no heap) for O(1) dedup. `insert`/`contains` panic in all builds when `id >= MAX_ARCHETYPES`.
+
+### 7.3. SparseIter / SparseIterMut
 
 **File:** [crates/boyko_ecs/src/ecs/core/iters/sparse_iter.rs](../crates/boyko_ecs/src/ecs/core/iters/sparse_iter.rs)
 

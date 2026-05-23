@@ -13,11 +13,12 @@ of truth for findings; this file is the source of truth for
 
 ## Current status (as of last commit on `ecs`)
 
-- 20 commits on `ecs` branch.
-- `cargo check --all-targets`: green, 0 E0133.
-- `cargo test --all-targets`: **123/123 debug, 120/120 release.**
+- 25 commits on `ecs` branch (Q-011 adds 5: 11a-11e).
+- `cargo check --all-targets`: green, 0 errors.
+- `cargo test --all-targets`: **138/138 debug** (was 130, +8 new QueryState tests).
 - Author: `Celtokisa <bluesteelll@hotmail.com>`. No AI co-author tags.
 - All artifacts in English.
+- Q-011 (QueryState cache): **DONE**. Warm-path ~21x speedup measured (3.6 ns vs 77 ns).
 
 ### Closed by Phase 1a / 1b
 
@@ -107,21 +108,30 @@ Each `Vec` allocation in the per-frame loop is ~30-60 ns of malloc
 + free. At 100k entities / 60 fps, eight allocations per entity
 per frame = 0.5-1 ms of pure malloc overhead.
 
-| ID | Site | Fix |
-|----|------|-----|
-| **Q-011** | `Query::with_*` rebuilds `Vec<&Archetype>` per call | `QueryState` cache + archetype-generation tracking (Bevy pattern) |
-| **Q-012** | `ComponentSet::component_ids() -> Vec<ComponentId>` | `&'static [ComponentId]` or const generic `[ComponentId; N]` |
-| **Q-013** | `find_archetypes_with_*` 4 allocations per call | `SmallVec` or reusable scratch buffer |
-| **Q-015** | `MultiPoolSparseIter::next_raw` per-entity `Vec<ComponentPtr>` | tuple via generics or `[ComponentPtr; N]` |
-| **Q-016** | `SparseIter::new` `Vec<usize>::collect(0..N)` | `Range`-based iterator, no materialization |
-| **Q-017** | `ParticipantBuffer::push` double allocation | Absorbed by Q-001 (Phase 1b finish) |
-| **C-010** | `EcsMaster::create_entity(Vec<(ComponentId, &[u8])>)` API allocates per call | Builder pattern OR const-generic fixed-size args |
-| **M-019** | `ComponentPool::get_chunk_component_pointers -> Vec<*const u8>` | Return `&[Unit]` slice |
-| **C-012 / C-013** | `EntityMaster::iter_entities` is O(N total) for K active | Use dense-iteration over `SparseMap` |
-| **C-015** | `ArchetypeRegistry::len()` recomputes count; double loops in `unregister_archetype` | Cache `total_count`, reverse map `ArchetypeId → pattern`, don't `.clone()` |
+| ID | Site | Fix | Status |
+|----|------|-----|--------|
+| **Q-011** | `Query::with_*` rebuilds `Vec<&Archetype>` per call | `QueryState` cache + archetype-generation tracking (Bevy pattern) | ✅ **DONE** (2026-05-23, ~21x warm-path speedup measured) |
+| **Q-012** | `ComponentSet::component_ids() -> Vec<ComponentId>` | `&'static [ComponentId]` or const generic `[ComponentId; N]` | open |
+| **Q-013** | `find_archetypes_with_*` 4 allocations per call | `SmallVec` or reusable scratch buffer | open |
+| **Q-015** | `MultiPoolSparseIter::next_raw` per-entity `Vec<ComponentPtr>` | tuple via generics or `[ComponentPtr; N]` | open |
+| **Q-016** | `SparseIter::new` `Vec<usize>::collect(0..N)` | `Range`-based iterator, no materialization | open |
+| **Q-017** | `ParticipantBuffer::push` double allocation | Absorbed by Q-001 (Phase 1b finish) | ✅ closed |
+| **C-010** | `EcsMaster::create_entity(Vec<(ComponentId, &[u8])>)` API allocates per call | Builder pattern OR const-generic fixed-size args | open |
+| **M-019** | `ComponentPool::get_chunk_component_pointers -> Vec<*const u8>` | Return `&[Unit]` slice | open |
+| **C-012 / C-013** | `EntityMaster::iter_entities` is O(N total) for K active | Use dense-iteration over `SparseMap` | open |
+| **C-015** | `ArchetypeRegistry::len()` recomputes count; double loops in `unregister_archetype` | Cache `total_count`, reverse map `ArchetypeId → pattern`, don't `.clone()` | open |
 
-**Effort estimate**: 3-5 sessions. Q-011 (`QueryState`) is the
-biggest — requires a re-architecting of the Query lifecycle.
+### Q-011 — QueryState cache + archetype-generation tracking — DONE ✅
+
+- **Status**: ✅ DONE. Commits on `ecs` branch: `11aeef8` (11a), `150501b` (11b), `1201c59` (11c), `5ad2603` (11d).
+- **Measured speedup**: ~21x on warm path vs one-shot `Query::with_component_ids` (3.6 ns vs 77 ns, `query_state_iter` vs `query_iter/entity_count`, N=10k/100k on Windows x86_64).
+- **Implementation**:
+  - `ArchetypeGeneration`: monotonic `NonZeroUsize`, bumped on every `create_archetype`, never reset by `clear()`.
+  - `ArchetypeBitSet`: 1024-bit inline bitset (128 B, no heap) for O(1) dedup.
+  - `QueryState`: `#[repr(C, align(64))]`, hot fields in cache line 0, Bevy-style `&mut update + &self iter` split.
+  - `Query<'a>`: now delegates to a one-shot `QueryState`; stores `Vec<ArchetypeId>` (eliminates stale-ref UB from `swap_remove`).
+
+**Effort estimate**: 3-5 sessions for remaining. Q-011 done.
 Others are localized.
 
 ### Phase 2b — Cache / layout improvements (4 findings)
