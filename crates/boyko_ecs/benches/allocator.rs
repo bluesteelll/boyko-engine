@@ -97,6 +97,43 @@ fn bench_alloc_free_roundtrip(c: &mut Criterion) {
     group.finish();
 }
 
+// --- Group 3b: alloc + insert roundtrip, uniform-size pool (M-018 headline workload) ---
+//
+// 16 000 disjoint same-size (64-byte) blocks; alternate allocate(64) + insert(returned).
+// This is the worst case for the old O(K_size) scan — all blocks land in the same
+// size bucket. M-018's reverse-index reduces per-removal from O(16000) to O(1).
+
+fn bench_alloc_free_roundtrip_uniform_size(c: &mut Criterion) {
+    let mut group = c.benchmark_group("alloc_free_roundtrip_uniform_size");
+    let n = 16_000usize;
+    let block_size = 64usize;
+    let stride = block_size * 2; // gap prevents coalescing on re-insert
+
+    group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
+        b.iter_batched(
+            || {
+                // Pre-fill n disjoint same-size blocks.
+                let mut master = MemFreeBlockMaster::with_capacity(n);
+                for i in 0..n {
+                    master.insert(MemFreeBlock::new(i * stride, i * stride + block_size));
+                }
+                master
+            },
+            |mut master| {
+                // Alternate alloc + re-insert for the full n iterations.
+                for _ in 0..n {
+                    if let Some(block) = master.allocate(block_size) {
+                        master.insert(block);
+                    }
+                }
+                black_box(master);
+            },
+            BatchSize::SmallInput,
+        );
+    });
+    group.finish();
+}
+
 // --- Group 4: cold allocate_aligned (single alloc per iteration, fresh state) ---
 
 fn bench_alloc_cold(c: &mut Criterion) {
@@ -157,6 +194,7 @@ criterion_group!(
     bench_insert_disjoint,
     bench_insert_coalescing,
     bench_alloc_free_roundtrip,
+    bench_alloc_free_roundtrip_uniform_size,
     bench_alloc_cold,
     bench_arena_allocate_layout
 );

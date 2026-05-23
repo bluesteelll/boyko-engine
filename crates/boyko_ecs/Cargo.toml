@@ -28,3 +28,7 @@ harness = false
 [[bench]]
 name = "allocator"
 harness = false
+
+[[bench]]
+name = "archetype"
+harness = false
