@@ -34,7 +34,8 @@ pub struct QueryState {
     exclude: ComponentMask,
     optional: ComponentMask,
     // Lines 4-5 (coldest): dedup bitset. Touched only when delta > 0.
-    matched_archetypes: ArchetypeBitSet,
+    // `pub(crate)` so Query<'a> can manually populate it for from_archetypes/exact-match paths.
+    pub(crate) matched_archetypes: ArchetypeBitSet,
 }
 
 impl QueryState {
@@ -180,6 +181,25 @@ impl QueryState {
             master,
             ids: self.matched_ids.iter(),
         }
+    }
+
+    /// Returns a mutable reference to the matched-IDs vector.
+    ///
+    /// Used by `Query<'a>` for the `from_archetypes` and `with_exact_mask`
+    /// paths that pre-populate the cache without going through `update_archetypes`.
+    #[inline]
+    pub(crate) fn matched_ids_mut(&mut self) -> &mut Vec<ArchetypeId> {
+        &mut self.matched_ids
+    }
+
+    /// Forces the stored generation to `new_gen`, marking the cache as synced.
+    ///
+    /// Used by `Query<'a>` after manually pre-populating the cache via
+    /// `from_archetypes` or `with_exact_mask`, where `update_archetypes` is
+    /// intentionally bypassed.
+    #[inline]
+    pub(crate) fn set_generation(&mut self, new_gen: ArchetypeGeneration) {
+        self.generation = new_gen;
     }
 }
 
