@@ -62,13 +62,17 @@ impl ArchetypeMaster {
         let archetype_id = self.next_archetype_id;
         self.next_archetype_id += 1;
         
-        // Access the arena pointer directly to avoid borrowing self
+        // SAFETY: `self.arena` was captured from the `Box<Arena>` owned by
+        // `EcsMaster` (audit C-001). The `Box` has a stable heap address and
+        // outlives every `ArchetypeMaster`/`Archetype` that holds the
+        // `NonNull`. Arena is `!Send + !Sync`, so no concurrent reference
+        // can exist. We do not let `&Arena` escape `add_archetype_from_components`.
         let arena = unsafe { self.arena.as_ref() };
-        
+
         // Create a new archetype with these component IDs
         let inland_id = self.archetypes.add_archetype_from_components(
-            archetype_id, 
-            component_ids, 
+            archetype_id,
+            component_ids,
             arena
         );
         
@@ -364,12 +368,32 @@ mod tests {
         Arena::new()
     }
     
+    // Each test module owns its own ComponentId range to avoid `OnceLock`
+    // collisions across tests (see audit C-003 / Phase 1b). `archetype_master`
+    // uses 300-309. All mock components share the same backing type (`u32`)
+    // because the tests only exercise mask logic, never byte-level layout.
+    const MOCK_ID_BASE: ComponentId = 300;
+
+    /// Translate a test-local "logical" ID (1..=8) into the actual
+    /// `ComponentId` used in the registry.
+    #[inline]
+    fn mock(local: ComponentId) -> ComponentId {
+        MOCK_ID_BASE + local
+    }
+
+    /// Translate a slice of logical IDs into actual ComponentIds — keeps the
+    /// test bodies readable (`master.create_archetype(&mocks(&[1, 2, 3]))`).
+    fn mocks<const N: usize>(local: [ComponentId; N]) -> [ComponentId; N] {
+        local.map(mock)
+    }
+
     /// Register mock components for testing
     fn register_mock_components() {
-        // Register component layouts for IDs 1-8 used in tests
-        for id in 1..=8 {
-            // Use u32 as the placeholder type for our mock components
-            component_registry::register_layout::<u32>(id);
+        // Register `u32` under each test-local ID. `OnceLock::set` is
+        // idempotent: re-registration after the first call is a no-op, so
+        // running this from every test is safe.
+        for local in 1..=8 {
+            component_registry::register_layout::<u32>(mock(local));
         }
     }
     
@@ -378,214 +402,214 @@ mod tests {
         register_mock_components();
         let arena = create_test_arena();
         let mut master = ArchetypeMaster::new(&arena);
-        
+
         // Create a new archetype
-        let id1 = master.create_archetype(&[1, 2, 3]);
+        let id1 = master.create_archetype(&mocks([1, 2, 3]));
         assert_eq!(id1, 1);
-        
+
         // Create another archetype
-        let id2 = master.create_archetype(&[1, 2]);
+        let id2 = master.create_archetype(&mocks([1, 2]));
         assert_eq!(id2, 2);
-        
+
         // Try to create an archetype with the same components - should return existing ID
-        let id3 = master.create_archetype(&[1, 2, 3]);
+        let id3 = master.create_archetype(&mocks([1, 2, 3]));
         assert_eq!(id3, id1); // Should return the ID of the first archetype
-        
+
         // Verify both archetypes exist
         assert!(master.get_archetype(id1).is_some());
         assert!(master.get_archetype(id2).is_some());
     }
-    
+
     #[test]
     fn test_remove_archetype() {
         register_mock_components();
         let arena = create_test_arena();
         let mut master = ArchetypeMaster::new(&arena);
-        
+
         // Create a new archetype
-        let id = master.create_archetype(&[1, 2, 3]);
+        let id = master.create_archetype(&mocks([1, 2, 3]));
         assert!(master.get_archetype(id).is_some());
-        
+
         // Remove the archetype
         let result = master.remove_archetype(id);
         assert!(result);
-        
+
         // Verify the archetype doesn't exist anymore
         assert!(master.get_archetype(id).is_none());
-        
+
         // Try to remove a non-existent archetype
         let result = master.remove_archetype(999);
         assert!(!result);
     }
-    
+
     #[test]
     fn test_find_archetypes() {
         register_mock_components();
         let arena = create_test_arena();
         let mut master = ArchetypeMaster::new(&arena);
-        
+
         // Create different archetypes
-        let id1 = master.create_archetype(&[1, 2, 3]);
-        let id2 = master.create_archetype(&[1, 2]);
-        let id3 = master.create_archetype(&[2, 3]);
-        
+        let id1 = master.create_archetype(&mocks([1, 2, 3]));
+        let id2 = master.create_archetype(&mocks([1, 2]));
+        let id3 = master.create_archetype(&mocks([2, 3]));
+
         // Find archetypes with component 1
-        let results = master.find_archetypes_with_components(&[1]);
+        let results = master.find_archetypes_with_components(&mocks([1]));
         assert_eq!(results.len(), 2);
         assert!(results.contains(&id1));
         assert!(results.contains(&id2));
-        
+
         // Find archetypes with components 2 and 3
-        let results = master.find_archetypes_with_components(&[2, 3]);
+        let results = master.find_archetypes_with_components(&mocks([2, 3]));
         assert_eq!(results.len(), 2);
         assert!(results.contains(&id1));
         assert!(results.contains(&id3));
-        
+
         // Find archetypes with components 1, 2, and 3
-        let results = master.find_archetypes_with_components(&[1, 2, 3]);
+        let results = master.find_archetypes_with_components(&mocks([1, 2, 3]));
         assert_eq!(results.len(), 1);
         assert!(results.contains(&id1));
     }
-    
+
     #[test]
     fn test_add_component_to_archetype() {
         register_mock_components();
         let arena = create_test_arena();
         let mut master = ArchetypeMaster::new(&arena);
-        
+
         // Create an archetype with components 1 and 2
-        let id1 = master.create_archetype(&[1, 2]);
-        
+        let id1 = master.create_archetype(&mocks([1, 2]));
+
         // Add component 3 to the archetype
-        let id2 = master.add_component_to_archetype(id1, 3).unwrap();
-        
+        let id2 = master.add_component_to_archetype(id1, mock(3)).unwrap();
+
         // The new archetype should have components 1, 2, and 3
         let archetype = master.get_archetype(id2).unwrap();
-        assert!(archetype.has_component_id(1));
-        assert!(archetype.has_component_id(2));
-        assert!(archetype.has_component_id(3));
-        
+        assert!(archetype.has_component_id(mock(1)));
+        assert!(archetype.has_component_id(mock(2)));
+        assert!(archetype.has_component_id(mock(3)));
+
         // Adding a component that already exists should return the same archetype
-        let id3 = master.add_component_to_archetype(id2, 2).unwrap();
+        let id3 = master.add_component_to_archetype(id2, mock(2)).unwrap();
         assert_eq!(id3, id2);
     }
-    
+
     #[test]
     fn test_remove_component_from_archetype() {
         register_mock_components();
         let arena = create_test_arena();
         let mut master = ArchetypeMaster::new(&arena);
-        
+
         // Create an archetype with components 1, 2, and 3
-        let id1 = master.create_archetype(&[1, 2, 3]);
-        
+        let id1 = master.create_archetype(&mocks([1, 2, 3]));
+
         // Remove component 3 from the archetype
-        let id2 = master.remove_component_from_archetype(id1, 3).unwrap();
-        
+        let id2 = master.remove_component_from_archetype(id1, mock(3)).unwrap();
+
         // The new archetype should have only components 1 and 2
         let archetype = master.get_archetype(id2).unwrap();
-        assert!(archetype.has_component_id(1));
-        assert!(archetype.has_component_id(2));
-        assert!(!archetype.has_component_id(3));
-        
+        assert!(archetype.has_component_id(mock(1)));
+        assert!(archetype.has_component_id(mock(2)));
+        assert!(!archetype.has_component_id(mock(3)));
+
         // Removing a component that doesn't exist should return the same archetype
-        let id3 = master.remove_component_from_archetype(id2, 3).unwrap();
+        let id3 = master.remove_component_from_archetype(id2, mock(3)).unwrap();
         assert_eq!(id3, id2);
     }
-    
+
     #[test]
     fn test_reuse_existing_archetype() {
         register_mock_components();
         let arena = create_test_arena();
         let mut master = ArchetypeMaster::new(&arena);
-        
+
         // Create an archetype with components 1, 2, and 3
-        let id1 = master.create_archetype(&[1, 2, 3]);
-        
+        let id1 = master.create_archetype(&mocks([1, 2, 3]));
+
         // Create an archetype with components 1 and 2
-        let id2 = master.create_archetype(&[1, 2]);
-        
+        let id2 = master.create_archetype(&mocks([1, 2]));
+
         // Add component 3 to the second archetype, which should result in
         // reusing the first archetype
-        let id3 = master.add_component_to_archetype(id2, 3).unwrap();
+        let id3 = master.add_component_to_archetype(id2, mock(3)).unwrap();
         assert_eq!(id3, id1);
     }
-    
+
     #[test]
     fn test_get_archetypes_with_filter() {
         register_mock_components();
         let arena = create_test_arena();
         let mut master = ArchetypeMaster::new(&arena);
-        
+
         // Create different archetypes
-        master.create_archetype(&[1, 2]);          // Position, Velocity
-        master.create_archetype(&[1, 3]);          // Position, Health
-        master.create_archetype(&[2, 4]);          // Velocity, Damage
-        master.create_archetype(&[1, 2, 3]);       // Position, Velocity, Health
-        master.create_archetype(&[1, 2, 4]);       // Position, Velocity, Damage
-        
+        master.create_archetype(&mocks([1, 2]));          // Position, Velocity
+        master.create_archetype(&mocks([1, 3]));          // Position, Health
+        master.create_archetype(&mocks([2, 4]));          // Velocity, Damage
+        master.create_archetype(&mocks([1, 2, 3]));       // Position, Velocity, Health
+        master.create_archetype(&mocks([1, 2, 4]));       // Position, Velocity, Damage
+
         // Filter: Position AND Velocity, but NOT Damage
         let mut include_mask = ComponentMask::new();
-        include_mask.set(1);  // Position
-        include_mask.set(2);  // Velocity
-        
+        include_mask.set(mock(1));  // Position
+        include_mask.set(mock(2));  // Velocity
+
         let mut exclude_mask = ComponentMask::new();
-        exclude_mask.set(4);  // Damage
-        
+        exclude_mask.set(mock(4));  // Damage
+
         let optional_mask = ComponentMask::new();
-        
+
         // Get archetypes with references
         let archetypes = master.get_archetypes_with_filter(
             &include_mask,
             &exclude_mask,
             &optional_mask
         );
-        
+
         // Should match [Position, Velocity] and [Position, Velocity, Health]
         assert_eq!(archetypes.len(), 2);
-        
+
         // Verify components
         for archetype in archetypes {
-            assert!(archetype.has_component_id(1));  // Position
-            assert!(archetype.has_component_id(2));  // Velocity
-            assert!(!archetype.has_component_id(4)); // Not Damage
+            assert!(archetype.has_component_id(mock(1)));  // Position
+            assert!(archetype.has_component_id(mock(2)));  // Velocity
+            assert!(!archetype.has_component_id(mock(4))); // Not Damage
         }
     }
-    
+
     #[test]
     fn test_get_archetypes_with_component_filter() {
         register_mock_components();
         let arena = create_test_arena();
         let mut master = ArchetypeMaster::new(&arena);
-        
+
         // Create different archetypes
-        master.create_archetype(&[1, 2]);          // Position, Velocity
-        master.create_archetype(&[1, 3]);          // Position, Health
-        master.create_archetype(&[2, 4]);          // Velocity, Damage
-        master.create_archetype(&[1, 2, 3]);       // Position, Velocity, Health
-        master.create_archetype(&[1, 2, 4]);       // Position, Velocity, Damage
-        
+        master.create_archetype(&mocks([1, 2]));          // Position, Velocity
+        master.create_archetype(&mocks([1, 3]));          // Position, Health
+        master.create_archetype(&mocks([2, 4]));          // Velocity, Damage
+        master.create_archetype(&mocks([1, 2, 3]));       // Position, Velocity, Health
+        master.create_archetype(&mocks([1, 2, 4]));       // Position, Velocity, Damage
+
         // Filter: Position AND at least one of [Health, Damage]
-        let include = [1];                // Position
+        let include = mocks([1]);                // Position
         let exclude: [ComponentId; 0] = [];
-        let optional = [3, 4];           // Health or Damage
-        
+        let optional = mocks([3, 4]);           // Health or Damage
+
         // Get archetypes with references
         let archetypes = master.get_archetypes_with_component_filter(
             &include,
             &exclude,
             &optional
         );
-        
+
         // Should match [Position, Health], [Position, Velocity, Health], [Position, Velocity, Damage]
         assert_eq!(archetypes.len(), 3);
-        
+
         // Verify components
         for archetype in archetypes {
-            assert!(archetype.has_component_id(1));  // Position
-            
+            assert!(archetype.has_component_id(mock(1)));  // Position
+
             // At least one of Health or Damage
-            assert!(archetype.has_component_id(3) || archetype.has_component_id(4));
+            assert!(archetype.has_component_id(mock(3)) || archetype.has_component_id(mock(4)));
         }
     }
 }
