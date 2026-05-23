@@ -270,6 +270,56 @@ fn q002_regression_buffer_round_trip_on_unaligned_offset() {
     );
 }
 
+// --- N1 / N3 regression tests (post-Q-001 polish) ---
+
+/// N1 regression: the macro must reproduce field visibility 1:1 on generated substructs.
+///
+/// `pub_param` is `pub`, `crate_param` has no explicit visibility (inherited/private
+/// from the crate perspective, but accessible within this integration test crate).
+/// If the macro silently widens both to `pub`, this still compiles — but the key
+/// assertion is that fields with *no* explicit visibility keyword are accepted
+/// (i.e. `syn::Visibility::Inherited`) and the generated substruct compiles at all.
+#[test]
+fn n1_substruct_preserves_field_visibility() {
+    #[event]
+    #[allow(dead_code)]
+    struct VisEvent {
+        #[participant(components = "")]
+        pub_field: boyko_ecs::ecs::core::entity::entity::Entity,
+        #[parameter]
+        pub pub_param: u32,
+        #[parameter]
+        crate_param: u64,
+    }
+
+    // Construct the substructs directly; both fields are accessible from
+    // within this crate regardless of whether they are `pub` or inherited.
+    let _ = VisEventParameters {
+        pub_param: 0,
+        crate_param: 0,
+    };
+}
+
+/// N3 regression: verify the happy path of `components = "..."` parsing still works
+/// after switching from substring-scan to `syn::parse_nested_meta`.
+#[test]
+fn n3_components_parser_happy_path() {
+    use boyko_ecs::ecs::core::events::participants::participants::Participants;
+
+    #[event]
+    #[allow(dead_code)]
+    struct N3Event {
+        #[participant(components = "")]
+        a: boyko_ecs::ecs::core::entity::entity::Entity,
+        #[participant(components = "")]
+        b: boyko_ecs::ecs::core::entity::entity::Entity,
+        #[parameter]
+        x: u32,
+    }
+    // If the macro parsed the attributes correctly, this compiles.
+    assert_eq!(N3EventParticipants::participant_count(), 2);
+}
+
 /// Smoke test: clear() and Drop on a large buffer do not panic and leave the
 /// buffer empty. Validates that Vec<MaybeUninit<u8>> does not call Drop on
 /// stored bytes (the type system enforces this: MaybeUninit<u8> has no Drop).

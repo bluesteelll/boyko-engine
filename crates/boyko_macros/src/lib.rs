@@ -1,9 +1,7 @@
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::{format_ident, quote};
-use syn::{
-    parse_macro_input, DeriveInput, Fields, Ident, ItemStruct, Meta,
-};
+use syn::{parse_macro_input, DeriveInput, Fields, Ident, ItemStruct};
 
 /// Derive macro for implementing the Component trait.
 ///
@@ -94,6 +92,19 @@ pub fn component_macro(input: TokenStream) -> TokenStream {
 /// Event IDs are assigned lazily at runtime via a per-type `OnceLock` and the
 /// global registry — mirror of the Component ID model.
 ///
+/// # Limitations
+///
+/// User-supplied `#[derive(...)]` attributes above `#[event]` apply only to
+/// the rewritten outer struct. The generated `<Name>Participants` and
+/// `<Name>Parameters` substructs always derive `Clone, Copy` and nothing else.
+/// Trait bounds that recurse through fields (such as `Debug`, `PartialEq`,
+/// `Hash`) therefore fail to compile if used as a derive on the outer struct.
+/// If you need such traits on an event type, implement them by hand on both
+/// substructs (or on the outer struct alone if it does not recurse).
+///
+/// `#[allow(...)]`, `#[doc = "..."]`, and other non-derive outer attributes
+/// are forwarded to the outer struct only — same as `#[derive]`.
+///
 /// # Example
 /// ```rust
 /// #[event]
@@ -151,6 +162,8 @@ fn validate_event_struct(s: &ItemStruct) -> Result<(), TokenStream> {
 struct ParticipantField<'a> {
     ident: &'a Ident,
     ty: &'a syn::Type,
+    /// Visibility as written by the user (e.g. `pub`, `pub(crate)`, or inherited).
+    vis: syn::Visibility,
     /// Comma-separated component type names from `components = "..."`.
     component_names: Vec<String>,
     /// Remaining non-marker attributes (doc comments, `#[allow(...)]`, etc.).
@@ -160,6 +173,8 @@ struct ParticipantField<'a> {
 struct ParameterField<'a> {
     ident: &'a Ident,
     ty: &'a syn::Type,
+    /// Visibility as written by the user (e.g. `pub`, `pub(crate)`, or inherited).
+    vis: syn::Visibility,
     other_attrs: Vec<&'a syn::Attribute>,
 }
 
@@ -183,6 +198,7 @@ fn generate_event_impl(
     for field in &named.named {
         let field_ident = field.ident.as_ref().unwrap();
         let field_ty = &field.ty;
+        let field_vis = field.vis.clone();
 
         let mut is_participant = false;
         let mut is_parameter = false;
@@ -203,21 +219,32 @@ fn generate_event_impl(
                 }
                 is_participant = true;
 
-                // Parse components = "TypeA, TypeB" from the attribute args.
-                if let Meta::List(meta_list) = &attr.meta {
-                    let content = meta_list.tokens.to_string();
-                    if let Some(start) = content.find("components = \"") {
-                        let after = &content[start + 14..];
-                        if let Some(end) = after.find('"') {
-                            let comps_str = &after[..end];
-                            for comp in comps_str.split(',') {
-                                let comp = comp.trim();
-                                if !comp.is_empty() {
-                                    component_names.push(comp.to_string());
-                                }
+                // N3: parse `components = "TypeA, TypeB"` via syn::parse_nested_meta
+                // so that typos and unknown keys surface as a proper compile_error!.
+                let mut parse_error: Option<TokenStream> = None;
+                let result = attr.parse_nested_meta(|meta| {
+                    if meta.path.is_ident("components") {
+                        let value = meta.value()?; // consumes the `=`
+                        let lit: syn::LitStr = value.parse()?;
+                        for comp in lit.value().split(',') {
+                            let comp = comp.trim();
+                            if !comp.is_empty() {
+                                component_names.push(comp.to_string());
                             }
                         }
+                        Ok(())
+                    } else {
+                        Err(meta.error(
+                            "unknown #[participant(...)] argument; \
+                             expected `components = \"TypeA, TypeB\"`",
+                        ))
                     }
+                });
+                if let Err(e) = result {
+                    parse_error = Some(e.to_compile_error().into());
+                }
+                if let Some(ts) = parse_error {
+                    return Err(ts);
                 }
             } else if attr.path().is_ident("parameter") {
                 is_parameter = true;
@@ -259,6 +286,7 @@ fn generate_event_impl(
                 participant_fields.push(ParticipantField {
                     ident: field_ident,
                     ty: field_ty,
+                    vis: field_vis,
                     component_names,
                     other_attrs,
                 });
@@ -267,6 +295,7 @@ fn generate_event_impl(
                 parameter_fields.push(ParameterField {
                     ident: field_ident,
                     ty: field_ty,
+                    vis: field_vis,
                     other_attrs,
                 });
             }
@@ -277,24 +306,28 @@ fn generate_event_impl(
     let parameters_name = format_ident!("{}Parameters", name);
 
     // Build the Participants substruct field tokens (with non-marker attrs preserved).
+    // N1: emit the user's original visibility instead of unconditionally widening to `pub`.
     let participants_struct_fields: Vec<proc_macro2::TokenStream> = participant_fields
         .iter()
         .map(|f| {
             let attrs = &f.other_attrs;
             let ident = f.ident;
             let ty = f.ty;
-            quote! { #(#attrs)* pub #ident: #ty }
+            let vis = &f.vis;
+            quote! { #(#attrs)* #vis #ident: #ty }
         })
         .collect();
 
     // Build the Parameters substruct field tokens.
+    // N1: same visibility preservation.
     let parameters_struct_fields: Vec<proc_macro2::TokenStream> = parameter_fields
         .iter()
         .map(|f| {
             let attrs = &f.other_attrs;
             let ident = f.ident;
             let ty = f.ty;
-            quote! { #(#attrs)* pub #ident: #ty }
+            let vis = &f.vis;
+            quote! { #(#attrs)* #vis #ident: #ty }
         })
         .collect();
 
