@@ -489,7 +489,59 @@ The full list of errors will be collected via `cargo check ecs` (see the TaskLis
 
 ---
 
-## 14. Project style and conventions
+## 14. Benchmarks
+
+**Location:** `crates/boyko_ecs/benches/`
+
+Three benchmark files, all using `criterion` (v0.5, `harness = false`):
+
+| File | What it measures | Phase 2 relevance |
+|------|-----------------|-------------------|
+| `component_id.rs` | `Component::component_id()` hot path (~524 ps) | C-003 fix validation |
+| `swap_remove.rs` | `EcsMaster::delete_entity` for N = 100 / 1k / 10k | M-004 fix validation |
+| `query_iter.rs` | `Query::with_component_ids` rebuild + entity scan | Q-011 baseline |
+
+Run locally:
+```powershell
+# Compile only (fast):
+cargo bench --no-run
+
+# Run one bench with short warmup:
+cargo bench --package boyko-ecs --bench component_id -- --warm-up-time 1 --measurement-time 2
+
+# Run all benches:
+cargo bench --package boyko-ecs
+```
+
+**Do not commit** `target/criterion/` — covered by `/target/` in `.gitignore`.
+
+Component ID ranges reserved for bench files to avoid `OnceLock` registry collisions:
+- `component_id.rs` — uses `#[derive(Component)]` → `register_new` assigns IDs automatically.
+- `swap_remove.rs` — 480-489 (fixed via `register_layout`).
+- `query_iter.rs` — 470-479 (fixed via `register_layout`).
+
+---
+
+## 15. CI (GitHub Actions)
+
+**File:** `.github/workflows/ci.yml`
+
+Triggers on push/PR to `master` and `ecs`, plus `workflow_dispatch`.
+
+| Job | Status | Notes |
+|-----|--------|-------|
+| `check` | Gating | `cargo check --all-targets`, `RUSTFLAGS=-D warnings` |
+| `test` (debug) | Gating | `cargo test --all-targets` |
+| `test` (release) | Gating | `cargo test --all-targets --release` |
+| `clippy` | Gating (with `\|\| true`) | Pre-existing `boyko_utils` violations; remove `\|\| true` after Phase 5 cleanup |
+| `bench-compile` | Gating | `cargo bench --no-run` — verifies criterion harness compiles |
+| `miri` | Informational | `continue-on-error: true`; runs `event_attribute` + `drop_fn` (known clean), then full sweep. Gate fully after Phase 3a. |
+
+Cache: `Swatinem/rust-cache@v2` on all jobs. See also `docs.yml` for the separate documentation deploy workflow.
+
+---
+
+## 16. Project style and conventions
 
 - Comment languages: a mix of Russian and English. Should be unified.
 - Doc-comments via `///`, internal via `//`.

@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [master, ecs]
+  pull_request:
+    branches: [master, ecs]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    name: cargo check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --all-targets
+
+  test:
+    name: cargo test (${{ matrix.profile }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        profile: [debug, release]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test (${{ matrix.profile }})
+        run: |
+          if [ "${{ matrix.profile }}" = "release" ]; then
+            cargo test --all-targets --release
+          else
+            cargo test --all-targets
+          fi
+
+  clippy:
+    name: cargo clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo clippy
+        # boyko_utils has pre-existing clippy violations tracked in Phase 5
+        # (Q-001 tester report). Run clippy across the workspace but do not
+        # fail on its issues until they are resolved. Remove `|| true` when
+        # boyko_utils is cleaned up.
+        run: cargo clippy --all-targets -- -D warnings || true
+
+  bench-compile:
+    name: cargo bench --no-run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo bench --no-run
+
+  miri:
+    name: Miri (informational)
+    runs-on: ubuntu-latest
+    # Miri is informational: some pre-existing tests fail under it.
+    # Entity lifecycle UB is tracked for Phase 3a. Remove continue-on-error
+    # once Phase 3a lands and the full sweep is clean.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo miri setup
+        run: cargo +nightly miri setup
+      - name: cargo miri test (event_attribute — known clean)
+        run: cargo +nightly miri test --package boyko-ecs --test event_attribute
+      - name: cargo miri test (drop_fn — known clean)
+        run: cargo +nightly miri test --package boyko-ecs --test drop_fn
+      - name: cargo miri test (full sweep — may report pre-existing UB)
+        run: cargo +nightly miri test --all-targets

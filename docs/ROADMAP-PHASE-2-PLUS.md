@@ -136,13 +136,14 @@ Others are localized.
 **Effort estimate**: 2-3 sessions. M-012 is the largest (changes
 the `MemFreeBlockMaster` internal data structure).
 
-### Phase 2c — Infrastructure (prerequisite)
+### Phase 2c — Infrastructure (prerequisite) — CLOSED ✅
 
-| Task | Detail |
-|------|--------|
-| Wire `criterion` | Add to `boyko_ecs/Cargo.toml` `[dev-dependencies]`, create `benches/component_id.rs`, `benches/swap_remove.rs`, `benches/query_iter.rs` |
-| Install nightly + Miri | `rustup install nightly && rustup component add miri --toolchain nightly`; CI step `cargo +nightly miri test` |
-| (optional) `loom` | For lock-free patterns introduced in Phase 4 |
+| Task | Detail | Status |
+|------|--------|--------|
+| Wire `criterion` | `boyko_ecs/Cargo.toml` `[dev-dependencies]`; `benches/component_id.rs`, `benches/swap_remove.rs`, `benches/query_iter.rs` | ✅ Done |
+| GitHub Actions CI | `.github/workflows/ci.yml` — check / test / clippy / bench-compile / miri | ✅ Done |
+| Install nightly + Miri | `cargo +nightly miri setup`; CI runs `event_attribute` + `drop_fn` (clean) then full sweep (informational) | ✅ Done (CI) |
+| (optional) `loom` | For lock-free patterns introduced in Phase 4 | deferred |
 
 ---
 
@@ -289,9 +290,11 @@ maintainability and `cargo clippy --all-targets -- -D warnings`.
 
 ## Suggested execution order
 
+### Completed
+- **Phase 1b finish — Q-001** ✅ (commits `c12cba7`, `a618e6e`, `5f35c70`, `6ba2d38`)
+- **Phase 2c infrastructure** ✅ (`criterion` wired, CI workflow, docs updated)
+
 ### Next session
-1. **Phase 1b finish — Q-001** (one session, mostly converged)
-2. **Phase 2c infrastructure** (wire criterion, install nightly+Miri)
 
 ### Sessions 2-4
 3. **Phase 2a hot-path Vec allocations** — start with **Q-011 QueryState
