@@ -25,7 +25,7 @@ impl<U> Default for SparseSlotMap<U> {
 
 impl<U> SparseSlotMap<U> {
     /// Creates a new empty SparseSlotMap
-    #[inline(always)]
+    #[inline]
     pub fn new() -> Self {
         Self {
             sparse: Vec::new(),
@@ -35,7 +35,7 @@ impl<U> SparseSlotMap<U> {
     }
 
     /// Creates a SparseSlotMap with pre-allocated capacity
-    #[inline(always)]
+    #[inline]
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             sparse: Vec::with_capacity(capacity),
@@ -46,7 +46,7 @@ impl<U> SparseSlotMap<U> {
 
     /// Creates a new slot for a given index with generation 0
     /// This should be used for initial slot creation
-    #[inline(always)]
+    #[inline]
     pub fn create_slot(&self, index: usize) -> Slot {
         Slot::new(index, 0)
     }
@@ -140,7 +140,7 @@ impl<U> SparseSlotMap<U> {
     }
 
     /// Checks if an element exists with the specified slot, including generation verification
-    #[inline(always)]
+    #[inline]
     pub fn contains(&self, slot: Slot) -> bool {
         let idx = slot.index();
 
@@ -187,7 +187,7 @@ impl<U> SparseSlotMap<U> {
     }
 
     /// Checks if the collection is empty
-    #[inline(always)]
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.dense.is_empty()
     }

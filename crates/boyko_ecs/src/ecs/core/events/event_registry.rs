@@ -287,7 +287,7 @@ pub fn validate_event_types<E: Event>(event_id: EventId) -> bool {
 /// - [`register_event_new::<E>()`] (production path, via `E::event_id()`), or
 /// - [`register_event::<E>(event_id)`] (test-only escape hatch).
 ///   Violating either yields UB.
-#[inline(always)]
+#[inline]
 pub unsafe fn get_event_info_unchecked(event_id: EventId) -> &'static EventInfo {
     let event_id_usize = event_id as usize;
     debug_assert!(
@@ -308,7 +308,7 @@ pub unsafe fn get_event_info_unchecked(event_id: EventId) -> &'static EventInfo 
 /// - [`register_event_new::<E>()`] (production path, via `E::event_id()`), or
 /// - [`register_event::<E>(event_id)`] (test-only escape hatch).
 ///   Violating either yields UB.
-#[inline(always)]
+#[inline]
 pub unsafe fn get_participants_layout_unchecked(event_id: EventId) -> Layout {
     // SAFETY: forwarded to the unchecked accessor; caller satisfies the same contract.
     unsafe { get_event_info_unchecked(event_id).participants_layout }
@@ -322,7 +322,7 @@ pub unsafe fn get_participants_layout_unchecked(event_id: EventId) -> Layout {
 /// - [`register_event_new::<E>()`] (production path, via `E::event_id()`), or
 /// - [`register_event::<E>(event_id)`] (test-only escape hatch).
 ///   Violating either yields UB.
-#[inline(always)]
+#[inline]
 pub unsafe fn get_parameters_layout_unchecked(event_id: EventId) -> Layout {
     // SAFETY: forwarded to the unchecked accessor; caller satisfies the same contract.
     unsafe { get_event_info_unchecked(event_id).parameters_layout }

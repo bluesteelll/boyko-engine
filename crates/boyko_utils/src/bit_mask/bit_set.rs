@@ -25,52 +25,52 @@ pub trait BitInteger:
 impl BitInteger for u8 {
     const BITS: usize = 8;
     
-    #[inline(always)]
+    #[inline]
     fn count_ones(self) -> u32 { self.count_ones() }
     
-    #[inline(always)]
+    #[inline]
     fn leading_zeros(self) -> u32 { self.leading_zeros() }
     
-    #[inline(always)]
+    #[inline]
     fn trailing_zeros(self) -> u32 { self.trailing_zeros() }
 }
 
 impl BitInteger for u32 {
     const BITS: usize = 32;
     
-    #[inline(always)]
+    #[inline]
     fn count_ones(self) -> u32 { self.count_ones() }
     
-    #[inline(always)]
+    #[inline]
     fn leading_zeros(self) -> u32 { self.leading_zeros() }
     
-    #[inline(always)]
+    #[inline]
     fn trailing_zeros(self) -> u32 { self.trailing_zeros() }
 }
 
 impl BitInteger for u64 {
     const BITS: usize = 64;
     
-    #[inline(always)]
+    #[inline]
     fn count_ones(self) -> u32 { self.count_ones() }
     
-    #[inline(always)]
+    #[inline]
     fn leading_zeros(self) -> u32 { self.leading_zeros() }
     
-    #[inline(always)]
+    #[inline]
     fn trailing_zeros(self) -> u32 { self.trailing_zeros() }
 }
 
 impl BitInteger for u128 {
     const BITS: usize = 128;
     
-    #[inline(always)]
+    #[inline]
     fn count_ones(self) -> u32 { self.count_ones() }
     
-    #[inline(always)]
+    #[inline]
     fn leading_zeros(self) -> u32 { self.leading_zeros() }
     
-    #[inline(always)]
+    #[inline]
     fn trailing_zeros(self) -> u32 { self.trailing_zeros() }
 }
 
@@ -83,60 +83,60 @@ pub struct BitSet<T: BitInteger> {
 
 impl<T: BitInteger> BitSet<T> {
     /// Creates a new empty BitSet (all bits set to 0)
-    #[inline(always)]
+    #[inline]
     pub fn new() -> Self {
         Self { bits: T::default() }
     }
 
     /// Creates a BitSet with the specified initial value
-    #[inline(always)]
+    #[inline]
     pub fn from_value(value: T) -> Self {
         Self { bits: value }
     }
 
     /// Returns the underlying value
-    #[inline(always)]
+    #[inline]
     pub fn value(&self) -> T {
         self.bits
     }
 
     /// Sets the bit at position 'index' to 1
-    #[inline(always)]
+    #[inline]
     pub fn set(&mut self, index: usize) {
         debug_assert!(index < T::BITS, "Bit index out of range");
         self.bits = self.bits | (T::from(1) << index);
     }
 
     /// Sets the bit at position 'index' to 0
-    #[inline(always)]
+    #[inline]
     pub fn unset(&mut self, index: usize) {
         debug_assert!(index < T::BITS, "Bit index out of range");
         self.bits = self.bits & !(T::from(1) << index);
     }
 
     /// Creates a new BitSet with the bit at position 'index' set to 1
-    #[inline(always)]
+    #[inline]
     pub fn with_bit(mut self, index: usize) -> Self {
         self.set(index);
         self
     }
 
     /// Clears the bit at position 'index' (sets to 0)
-    #[inline(always)]
+    #[inline]
     pub fn clear(&mut self, index: usize) {
         debug_assert!(index < T::BITS, "Bit index out of range");
         self.bits = self.bits & !(T::from(1) << index);
     }
 
     /// Toggles (inverts) the bit at position 'index'
-    #[inline(always)]
+    #[inline]
     pub fn toggle(&mut self, index: usize) {
         debug_assert!(index < T::BITS, "Bit index out of range");
         self.bits = self.bits ^ (T::from(1) << index);
     }
 
     /// Checks if the bit at position 'index' is set (is 1)
-    #[inline(always)]
+    #[inline]
     pub fn is_set(&self, index: usize) -> bool {
         debug_assert!(index < T::BITS, "Bit index out of range");
         let mask = T::from(1) << index;
@@ -144,26 +144,26 @@ impl<T: BitInteger> BitSet<T> {
     }
 
     /// Returns a bitmask with only the bit at position 'index' set to 1
-    #[inline(always)]
+    #[inline]
     pub fn bit_mask(index: usize) -> Self {
         debug_assert!(index < T::BITS, "Bit index out of range");
         Self { bits: T::from(1) << index }
     }
 
     /// Checks if the BitSet is empty (all bits are 0)
-    #[inline(always)]
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.bits == T::default()
     }
 
     /// Counts the number of set bits (1s)
-    #[inline(always)]
+    #[inline]
     pub fn count_ones(&self) -> u32 {
         self.bits.count_ones()
     }
     
     /// Returns the index of the first set bit, or None if no bits are set
-    #[inline(always)]
+    #[inline]
     pub fn first_set_bit(&self) -> Option<usize> {
         if self.bits == T::default() {
             None
@@ -190,55 +190,55 @@ impl<T: BitInteger> BitSet<T> {
     }
 
     /// Returns the result of bitwise AND with another BitSet
-    #[inline(always)]
+    #[inline]
     pub fn and(&self, other: &Self) -> Self {
         Self { bits: self.bits & other.bits }
     }
 
     /// Applies bitwise AND with another BitSet in-place
-    #[inline(always)]
+    #[inline]
     pub fn and_assign(&mut self, other: &Self) {
         self.bits = self.bits & other.bits;
     }
 
     /// Returns the result of bitwise OR with another BitSet
-    #[inline(always)]
+    #[inline]
     pub fn or(&self, other: &Self) -> Self {
         Self { bits: self.bits | other.bits }
     }
 
     /// Applies bitwise OR with another BitSet in-place
-    #[inline(always)]
+    #[inline]
     pub fn or_assign(&mut self, other: &Self) {
         self.bits = self.bits | other.bits;
     }
 
     /// Returns the result of bitwise XOR with another BitSet
-    #[inline(always)]
+    #[inline]
     pub fn xor(&self, other: &Self) -> Self {
         Self { bits: self.bits ^ other.bits }
     }
 
     /// Applies bitwise XOR with another BitSet in-place
-    #[inline(always)]
+    #[inline]
     pub fn xor_assign(&mut self, other: &Self) {
         self.bits = self.bits ^ other.bits;
     }
 
     /// Returns the result of bitwise NOT (complement)
-    #[inline(always)]
+    #[inline]
     pub fn not(&self) -> Self {
         Self { bits: !self.bits }
     }
 
     /// Returns the result of shifting the bits left by 'shift' positions
-    #[inline(always)]
+    #[inline]
     pub fn shift_left(&self, shift: usize) -> Self {
         Self { bits: self.bits << shift }
     }
 
     /// Returns the result of shifting the bits right by 'shift' positions
-    #[inline(always)]
+    #[inline]
     pub fn shift_right(&self, shift: usize) -> Self {
         Self { bits: self.bits >> shift }
     }
@@ -283,7 +283,7 @@ impl<T: BitInteger> Iterator for BitSetIterator<T> {
 impl<T: BitInteger> BitAnd for BitSet<T> {
     type Output = Self;
     
-    #[inline(always)]
+    #[inline]
     fn bitand(self, rhs: Self) -> Self::Output {
         Self { bits: self.bits & rhs.bits }
     }
@@ -292,7 +292,7 @@ impl<T: BitInteger> BitAnd for BitSet<T> {
 impl<T: BitInteger> BitOr for BitSet<T> {
     type Output = Self;
     
-    #[inline(always)]
+    #[inline]
     fn bitor(self, rhs: Self) -> Self::Output {
         Self { bits: self.bits | rhs.bits }
     }
@@ -301,7 +301,7 @@ impl<T: BitInteger> BitOr for BitSet<T> {
 impl<T: BitInteger> BitXor for BitSet<T> {
     type Output = Self;
     
-    #[inline(always)]
+    #[inline]
     fn bitxor(self, rhs: Self) -> Self::Output {
         Self { bits: self.bits ^ rhs.bits }
     }
@@ -310,14 +310,14 @@ impl<T: BitInteger> BitXor for BitSet<T> {
 impl<T: BitInteger> Not for BitSet<T> {
     type Output = Self;
     
-    #[inline(always)]
+    #[inline]
     fn not(self) -> Self::Output {
         Self { bits: !self.bits }
     }
 }
 
 impl<T: BitInteger> Default for BitSet<T> {
-    #[inline(always)]
+    #[inline]
     fn default() -> Self {
         Self::new()
     }

@@ -10,26 +10,26 @@ pub struct Slot {
 
 impl Slot {
     /// Creates a new slot with the specified index and generation
-    #[inline(always)]
+    #[inline]
     pub fn new(index: usize, generation: Generation) -> Self {
         Self { index, generation }
     }
 
     /// Returns the index component of the slot
-    #[inline(always)]
+    #[inline]
     pub fn index(&self) -> usize {
         self.index
     }
 
     /// Returns the generation component of the slot
-    #[inline(always)]
+    #[inline]
     pub fn generation(&self) -> Generation {
         self.generation
     }
 
     /// Increments the generation counter, wrapping around if necessary
     /// Returns the new generation value
-    #[inline(always)]
+    #[inline]
     pub fn increment_generation(&mut self) -> Generation {
         self.generation = self.generation.wrapping_add(1);
         self.generation

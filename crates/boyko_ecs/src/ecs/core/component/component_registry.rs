@@ -268,7 +268,7 @@ pub fn get_component_memory_layout(component_id: usize) -> Option<Layout> {
 /// - [`register_new::<T>()`] (production path, via `T::component_id()`), or
 /// - [`register_layout::<T>(component_id)`] (test-only escape hatch).
 ///   Violating either yields UB.
-#[inline(always)]
+#[inline]
 pub unsafe fn get_component_size_unchecked(component_id: usize) -> usize {
     debug_assert!(
         component_id < MAX_COMPONENTS && LAYOUTS[component_id].get().is_some(),
@@ -288,7 +288,7 @@ pub unsafe fn get_component_size_unchecked(component_id: usize) -> usize {
 /// - [`register_new::<T>()`] (production path, via `T::component_id()`), or
 /// - [`register_layout::<T>(component_id)`] (test-only escape hatch).
 ///   Violating either yields UB.
-#[inline(always)]
+#[inline]
 pub unsafe fn get_component_alignment_unchecked(component_id: usize) -> usize {
     debug_assert!(
         component_id < MAX_COMPONENTS && LAYOUTS[component_id].get().is_some(),
@@ -308,7 +308,7 @@ pub unsafe fn get_component_alignment_unchecked(component_id: usize) -> usize {
 /// - [`register_new::<T>()`] (production path, via `T::component_id()`), or
 /// - [`register_layout::<T>(component_id)`] (test-only escape hatch).
 ///   Violating either yields UB.
-#[inline(always)]
+#[inline]
 pub unsafe fn get_layout_unchecked(component_id: usize) -> &'static ComponentLayout {
     debug_assert!(
         component_id < MAX_COMPONENTS && LAYOUTS[component_id].get().is_some(),
@@ -328,7 +328,7 @@ pub unsafe fn get_layout_unchecked(component_id: usize) -> &'static ComponentLay
 /// - [`register_new::<T>()`] (production path, via `T::component_id()`), or
 /// - [`register_layout::<T>(component_id)`] (test-only escape hatch).
 ///   Violating either yields UB.
-#[inline(always)]
+#[inline]
 pub unsafe fn get_component_memory_layout_unchecked(component_id: usize) -> Layout {
     // SAFETY: forwarded to the unchecked accessor; caller satisfies the same contract.
     let layout = unsafe { get_layout_unchecked(component_id) };
@@ -344,7 +344,7 @@ pub unsafe fn get_component_memory_layout_unchecked(component_id: usize) -> Layo
 /// - [`register_new::<T>()`] (production path, via `T::component_id()`), or
 /// - [`register_layout::<T>(component_id)`] (test-only escape hatch).
 ///   Violating either yields UB.
-#[inline(always)]
+#[inline]
 pub unsafe fn get_component_type_id_unchecked(component_id: usize) -> TypeId {
     // SAFETY: forwarded to the unchecked accessor; caller satisfies the same contract.
     unsafe { get_layout_unchecked(component_id).type_id }

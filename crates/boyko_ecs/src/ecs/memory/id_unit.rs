@@ -10,7 +10,7 @@ pub struct Unit {
 
 impl Unit {
     /// Creates a new Unit
-    #[inline(always)]
+    #[inline]
     pub fn new(ptr: *mut u8, buffer_index: usize) -> Self {
         Self {
             ptr,
@@ -19,13 +19,13 @@ impl Unit {
     }
 
     /// Returns the pointer to the component
-    #[inline(always)]
+    #[inline]
     pub fn ptr(&self) -> *mut u8 {
         self.ptr
     }
 
     /// Returns the buffer index
-    #[inline(always)]
+    #[inline]
     pub fn buffer_index(&self) -> usize {
         self.buffer_index
     }

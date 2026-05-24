@@ -7,13 +7,13 @@ pub struct MemFreeBlock {
 }
 
 impl MemFreeBlock {
-    #[inline(always)]
+    #[inline]
     pub fn new(start: usize, end: usize) -> Self {
         debug_assert!(end > start, "Block size should be positive");
         Self { start, end }
     }
 
-    #[inline(always)]
+    #[inline]
     pub fn size(&self) -> usize {
         self.end - self.start
     }
@@ -67,7 +67,7 @@ impl MemFreeBlockMaster {
         }
     }
 
-    #[inline(always)]
+    #[inline]
     fn add_block(&mut self, block: MemFreeBlock) -> usize {
         if let Some(index) = self.free_ind.pop() {
             self.blocks[index] = block;

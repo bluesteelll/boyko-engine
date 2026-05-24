@@ -21,7 +21,7 @@ impl<U: Clone> Default for SparseMap<U> {
 
 impl<U: Clone> SparseMap<U> {
     /// Creates a new empty SparseMap
-    #[inline(always)]
+    #[inline]
     pub fn new() -> Self {
         Self {
             sparse: Vec::new(),
@@ -31,7 +31,7 @@ impl<U: Clone> SparseMap<U> {
     }
 
     /// Creates a SparseMap with pre-allocated capacity
-    #[inline(always)]
+    #[inline]
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             sparse: Vec::with_capacity(capacity),
@@ -111,7 +111,7 @@ impl<U: Clone> SparseMap<U> {
         }
     }
     /// Checks if an element exists at the specified index
-    #[inline(always)]
+    #[inline]
     pub fn contains(&self, index: usize) -> bool {
         index < self.sparse.len() && self.sparse[index].is_some()
     }
@@ -143,13 +143,13 @@ impl<U: Clone> SparseMap<U> {
     }
 
     /// Returns the number of elements in the collection
-    #[inline(always)]
+    #[inline]
     pub fn len(&self) -> usize {
         self.dense.len()
     }
 
     /// Checks if the collection is empty
-    #[inline(always)]
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.dense.is_empty()
     }

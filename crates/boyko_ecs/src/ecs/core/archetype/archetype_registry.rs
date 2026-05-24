@@ -464,7 +464,7 @@ impl ArchetypeRegistry {
     // In release builds the debug_assert_eq! disappears; provide a no-op stub so
     // the macro expansion still resolves the symbol name.
     #[cfg(not(debug_assertions))]
-    #[inline(always)]
+    #[inline]
     fn slow_len_recompute(&self) -> usize {
         0
     }
