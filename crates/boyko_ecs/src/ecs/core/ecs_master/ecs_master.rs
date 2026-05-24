@@ -3,21 +3,31 @@ use crate::ecs::core::archetype::archetype_master::ArchetypeMaster;
 use crate::ecs::core::entity::entity::Entity;
 use crate::ecs::core::entity::entity_master::EntityMaster;
 use crate::ecs::core::entity::entity_inland::EntityInland;
+use crate::ecs::core::events::event::Event;
+use crate::ecs::core::events::event_config::EventConfig;
+use crate::ecs::core::events::event_dispatcher::EventDispatcher;
 use crate::ecs::identifiers::primitives::{ArchetypeId, EntityId, ComponentId, InlandPoolId};
 use crate::ecs::memory::arena::Arena;
 use crate::ecs::constants::DEFAULT_ARENA_SIZE;
 use crate::ecs::error::{EcsError, EcsResult};
 
-/// Main ECS manager that coordinates entities, archetypes, and memory allocation.
+/// Main ECS manager that coordinates entities, archetypes, memory, and events.
 ///
 /// # Field order (drop order)
 ///
-/// Fields are dropped in declaration order (`entity_master`, `archetype_master`,
-/// `arena`). The arena **must** be last because `ArchetypeMaster`/`Archetype`
-/// store `*const Arena` (raw provenance pointer — Phase 3a Miri retag fix;
-/// previously `NonNull<Arena>`, audit finding C-001) and `ComponentPool`s store
-/// raw pointers into the arena's backing buffer. Dropping the arena last
-/// guarantees those pointers remain valid while child `Drop`s run.
+/// Fields are dropped in declaration order: `events`, `entity_master`,
+/// `archetype_master`, `arena`.
+///
+/// `events: EventDispatcher` is the **first** field so it drops first. Event
+/// buffers live in their own heap allocations (separate from the arena) and do
+/// not reference arena memory, so dropping them before the arena is safe and
+/// correct.
+///
+/// `arena` **must** be last because `ArchetypeMaster`/`Archetype` store
+/// `*const Arena` (raw provenance pointer — Phase 3a Miri retag fix; previously
+/// `NonNull<Arena>`, audit finding C-001) and `ComponentPool`s store raw
+/// pointers into the arena's backing buffer. Dropping the arena last guarantees
+/// those pointers remain valid while child `Drop`s run.
 ///
 /// The arena lives behind `Box<Arena>` so its address stays stable across
 /// moves of the owning `EcsMaster`: without that, the original code on
@@ -37,10 +47,14 @@ use crate::ecs::error::{EcsError, EcsResult};
 /// participate in the Stacked Borrows tag stack — Miri accepts it as a shared,
 /// read-only view of the allocation (audit finding C-001 / Phase 3a).
 pub struct EcsMaster {
-    /// Entity management system
+    /// Event dispatcher — dropped first (before arena and archetypes).
+    /// Event buffers live in their own heap allocations independent of the arena.
+    events: EventDispatcher,
+
+    /// Entity management system.
     entity_master: EntityMaster,
 
-    /// Archetype management system
+    /// Archetype management system.
     archetype_master: ArchetypeMaster,
 
     /// Memory arena for component allocation. `Box` provides a stable heap
@@ -50,7 +64,7 @@ pub struct EcsMaster {
 }
 
 impl EcsMaster {
-    /// Creates a new empty EcsMaster
+    /// Creates a new empty EcsMaster.
     ///
     /// Uses two-phase construction to avoid Miri Stacked Borrows retag UB:
     /// the arena `Box` is written to its final struct field first; the raw
@@ -77,14 +91,18 @@ impl EcsMaster {
         // field drop order (arena is declared last in EcsMaster). Arena is
         // `!Send + !Sync`; single-threaded use is enforced.
         let archetype_master = unsafe { ArchetypeMaster::new(arena_ptr) };
+        // EventDispatcher::new(1) validates 1 ∈ 1..=64 — never fails.
+        let events = EventDispatcher::new(1)
+            .expect("invariant: default thread_count=1 is always valid");
         Self {
+            events,
             entity_master: EntityMaster::new(),
             archetype_master,
             arena,
         }
     }
 
-    /// Creates a new EcsMaster with pre-allocated capacity
+    /// Creates a new EcsMaster with pre-allocated capacity.
     pub fn with_capacity(entity_capacity: usize, archetype_capacity: usize) -> Self {
         let arena: Box<Arena> = Box::new(Arena::with_capacity(DEFAULT_ARENA_SIZE));
         // SAFETY: same rationale as `EcsMaster::new`.
@@ -94,7 +112,11 @@ impl EcsMaster {
         };
         // SAFETY: same contract as `EcsMaster::new`.
         let archetype_master = unsafe { ArchetypeMaster::with_capacity(arena_ptr, archetype_capacity) };
+        // EventDispatcher::new(1) validates 1 ∈ 1..=64 — never fails.
+        let events = EventDispatcher::new(1)
+            .expect("invariant: default thread_count=1 is always valid");
         Self {
+            events,
             entity_master: EntityMaster::with_capacity(entity_capacity),
             archetype_master,
             arena,
@@ -508,6 +530,80 @@ impl EcsMaster {
     #[inline]
     pub fn arena(&self) -> &Arena {
         &self.arena
+    }
+
+    // ── Event dispatch proxy methods (Phase 6) ──────────────────────────────
+
+    /// Returns a shared reference to the event dispatcher.
+    #[inline]
+    pub fn events(&self) -> &EventDispatcher {
+        &self.events
+    }
+
+    /// Returns a mutable reference to the event dispatcher.
+    #[inline]
+    pub fn events_mut(&mut self) -> &mut EventDispatcher {
+        &mut self.events
+    }
+
+    /// Preregisters event type `E` with a custom config.
+    ///
+    /// Must be called before the first `send_event::<E>` or `events_of::<E>`.
+    /// All write lanes and the reader buffer are allocated here; no allocation
+    /// occurs during steady-state `send_event` or `update_events`.
+    ///
+    /// # Errors
+    ///
+    /// Forwards errors from [`EventDispatcher::preregister`].
+    #[inline]
+    pub fn preregister_event<E: Event>(&mut self, cfg: EventConfig) -> EcsResult<()> {
+        self.events.preregister::<E>(cfg)
+    }
+
+    /// Preregisters event type `E` with default capacity and the dispatcher's
+    /// validated `default_thread_count`.
+    ///
+    /// Equivalent to calling [`preregister_event`] with
+    /// `EventConfig::default_for(self.events.default_thread_count())`.
+    ///
+    /// # Errors
+    ///
+    /// Forwards errors from [`EventDispatcher::preregister`].
+    ///
+    /// [`preregister_event`]: EcsMaster::preregister_event
+    #[inline]
+    pub fn preregister_event_default<E: Event>(&mut self) -> EcsResult<()> {
+        let cfg = EventConfig::default_for(self.events.default_thread_count())
+            .expect("invariant: default_thread_count was validated at EventDispatcher::new");
+        self.events.preregister::<E>(cfg)
+    }
+
+    /// Sends a single event of type `E` to the lane for `thread_index`.
+    ///
+    /// # Errors
+    ///
+    /// Forwards errors from [`EventDispatcher::send`].
+    #[inline]
+    pub fn send_event<E: Event>(&self, thread_index: u32, event: E) -> EcsResult<()> {
+        self.events.send::<E>(thread_index, event)
+    }
+
+    /// Returns the slice of events of type `E` from the previous frame.
+    ///
+    /// Returns an empty slice if `E` was not registered or if no events were
+    /// sent last frame. Slice remains valid until the next `update_events` call.
+    #[inline]
+    pub fn events_of<E: Event>(&self) -> &[E] {
+        self.events.events::<E>()
+    }
+
+    /// Advances the frame counter and flattens write lanes into reader buffers.
+    ///
+    /// Must be called once per frame. After this call, `events_of::<E>()` returns
+    /// the events sent during the frame that just ended.
+    #[inline]
+    pub fn update_events(&mut self) {
+        self.events.update_events();
     }
 
     /// Clears all entities and archetypes from the system
