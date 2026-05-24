@@ -196,18 +196,13 @@ impl Archetype {
             return false; // at least one required component is absent from input
         }
         
-        // Add components to pools
-        let unit_indices = match self.component_pools.add_entity_components(components) {
-            Some(indices) => indices,
-            None => return false,
-        };
-        
-        if unit_indices.is_empty() {
+        // Two-phase commit (C-009): validate all pools have capacity before
+        // writing any, so a full-pool failure cannot leave pools desynced.
+        if !self.component_pools.can_push_entity_components(&components) {
             return false;
         }
-        
-        // Use the first component's unit index
-        let unit_index = unit_indices[0];
+
+        let unit_index = self.component_pools.push_entity_components(&components);
         
         // Update the inland reference with the unit index
         inland.set_unit_index(unit_index);
