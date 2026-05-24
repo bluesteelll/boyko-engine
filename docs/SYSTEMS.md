@@ -116,11 +116,17 @@ pub struct Unit {
 
 Replaces `UnitId` from master. **Not Sync/Send** by default because of `*mut u8`.
 
-### 2.6. Iterators ✅
+### 2.6. Per-pool iterators ❌ not implemented
 
-- [sparse_iter_component_pool.rs](../crates/boyko_ecs/src/ecs/memory/sparse_iter_component_pool.rs) — `ComponentPoolSparseIter`, `ComponentPoolSparseIterMut`, `ComponentPtr`, `ComponentMutPtr`
-- [multi_pool_sparse_iter.rs](../crates/boyko_ecs/src/ecs/memory/multi_pool_sparse_iter.rs) — `MultiPoolSparseIter`, `MultiPoolSparseIterMut` for simultaneous iteration over multiple pools (components of a single entity)
-- [iterators.rs](../crates/boyko_ecs/src/ecs/memory/iterators.rs) — ⚠️ **empty file** (stub)
+Previously this section claimed three orphan files (`sparse_iter_component_pool.rs`,
+`multi_pool_sparse_iter.rs`, `iterators.rs`) as "✅ implemented". They were
+disconnected from `mod.rs`, did not compile (referenced undefined
+`TypedMultiComponentIter` / `TypedComponentIter`), allocated `Box<[ComponentPtr]>`
+per entity, and used recursive traversal. **Removed in Phase 2c.**
+
+The replacement — a zero-alloc per-entity iterator built on top of `QueryState`
+(`Query::<(&T, &U)>::iter()`, Bevy `WorldQuery` shape) — is tracked as Phase 2d
+(see `docs/ROADMAP-PHASE-2-PLUS.md`).
 
 ---
 
@@ -355,12 +361,6 @@ The long-lived cache for hot-path iteration. Key APIs:
 **Generation tracking**: uses `ArchetypeGeneration` (monotonic `NonZeroUsize`), bumped on every `create_archetype`. Never reset by `clear()` — stale `QueryState` detection is based on `state.generation <= master.archetype_generation()`. A `debug_assert!` catches post-`clear()` reuse in debug builds.
 
 **`ArchetypeBitSet`**: 1024-bit inline bitset (128 B, no heap) for O(1) dedup. `insert`/`contains` panic in all builds when `id >= MAX_ARCHETYPES`.
-
-### 7.3. SparseIter / SparseIterMut
-
-**File:** [crates/boyko_ecs/src/ecs/core/iters/sparse_iter.rs](../crates/boyko_ecs/src/ecs/core/iters/sparse_iter.rs)
-
-Iterators over query results.
 
 ### 7.3. ComponentSet
 

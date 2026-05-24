@@ -114,8 +114,8 @@ per frame = 0.5-1 ms of pure malloc overhead.
 | **Q-011** | `Query::with_*` rebuilds `Vec<&Archetype>` per call | `QueryState` cache + archetype-generation tracking (Bevy pattern) | ✅ **DONE** (2026-05-23, ~21x warm-path speedup measured) |
 | **Q-012** | `ComponentSet::component_ids() -> Vec<ComponentId>` | `&'static [ComponentId]` or const generic `[ComponentId; N]` | ✅ **DONE** (2026-05-24) |
 | **Q-013** | `find_archetypes_with_*` 4 allocations per call | `SmallVec` or reusable scratch buffer | ✅ **DONE** (2026-05-24) |
-| **Q-015** | `MultiPoolSparseIter::next_raw` per-entity `Vec<ComponentPtr>` | tuple via generics or `[ComponentPtr; N]` | open |
-| **Q-016** | `SparseIter::new` `Vec<usize>::collect(0..N)` | `Range`-based iterator, no materialization | open |
+| **Q-015** | `MultiPoolSparseIter::next_raw` per-entity `Vec<ComponentPtr>` | tuple via generics or `[ComponentPtr; N]` | ✅ **closed by Phase 2c** (orphan deleted) — subsumed by Phase 2d |
+| **Q-016** | `SparseIter::new` `Vec<usize>::collect(0..N)` | `Range`-based iterator, no materialization | ✅ **closed by Phase 2c** (orphan deleted) — subsumed by Phase 2d |
 | **Q-017** | `ParticipantBuffer::push` double allocation | Absorbed by Q-001 (Phase 1b finish) | ✅ closed |
 | **C-010** | `EcsMaster::create_entity(Vec<(ComponentId, &[u8])>)` API allocates per call | Builder pattern OR const-generic fixed-size args | open |
 | **M-019** | `ComponentPool::get_chunk_component_pointers -> Vec<*const u8>` | Return `&[Unit]` slice | open |
@@ -170,7 +170,7 @@ Others are localized.
 | **M-012** | `start_map: HashMap<usize, usize>`, `end_map: HashMap<usize, usize>` in `MemFreeBlockMaster` | `BTreeMap` for ordered key access, or `Vec<Option<usize>>` | ✅ **DONE** (2026-05-24) |
 | **M-018** | `O(N)` linear search in `mem_size_tree` indices vec | `HashSet` or reverse mapping |
 | **C-016** | `O(N×M)` "missing component" check in `Archetype::create_entity` | `ComponentMask` comparison against signature (O(8) for 512 bits) |
-| **M-007** | `Box<[ComponentPtr]>` returned per-entity from `MultiPoolSparseIter` | Const-generic array, tuple, or pre-allocated buffer |
+| **M-007** | `Box<[ComponentPtr]>` returned per-entity from `MultiPoolSparseIter` | ✅ **closed by Phase 2c** (orphan deleted) — subsumed by Phase 2d zero-alloc design |
 
 **Effort estimate**: 2-3 sessions. M-012 is the largest (changes
 the `MemFreeBlockMaster` internal data structure).
@@ -217,9 +217,19 @@ against edge cases, future refactors, and adversarial inputs.
 
 | ID | Site | Issue | Decision needed |
 |----|------|-------|-----------------|
-| **Q-008** | `core/iters/sparse_iter.rs`, `memory/multi_pool_sparse_iter.rs`, `memory/sparse_iter_component_pool.rs`, `core/containers/*` | Orphan files: not in `mod.rs`, have compile errors when included, documented as "✅ implemented" in `FEATURE_MAP.md` | **Product decision**: hook up + fix the compile errors, OR delete + update docs |
-| **Q-009** | `SparseIter::next_raw` recursive call without TCO | Stack overflow risk on 10k+ empty archetypes | Convert to `loop { match ... }` |
+| **Q-008** | `core/iters/sparse_iter.rs`, `memory/multi_pool_sparse_iter.rs`, `memory/sparse_iter_component_pool.rs`, `core/containers/*` | Orphan files: not in `mod.rs`, have compile errors when included, documented as "✅ implemented" in `FEATURE_MAP.md` | ✅ **DONE — Phase 2c** (2026-05-24): all 4 orphan files deleted, `memory/iterators.rs` stub removed, `pub mod iterators;` unwired from `memory/mod.rs`, `FEATURE_MAP.md` / `SYSTEMS.md` / `ARCHITECTURE.md` corrected. Per-entity iter replacement tracked as Phase 2d (see below). |
+| **Q-009** | `SparseIter::next_raw` recursive call without TCO | Stack overflow risk on 10k+ empty archetypes | ✅ **closed by Phase 2c** (orphan deleted) — subsumed by Phase 2d (loop-based design required from the start). |
 | **M-010** | `boyko_utils/bit_mask/{bit_mask, bit_set512, bit_storage}.rs` fully `/* commented out */` | 1000+ lines dead code; `SYSTEMS.md` claims they exist | **Product decision**: uncomment + integrate, OR delete |
+
+### Phase 2d — Per-entity query iter (Q-026 + Q-008-replacement)
+
+**Status**: open — design pending.
+
+| ID | Site | Issue | Solution direction |
+|----|------|-------|--------------------|
+| **Q-026** | `Query::iter()` returns matched archetypes, not per-entity tuples | Users must walk archetypes + index pools manually; no `(&T, &U)`-style API | Design `Query::<(&T, &U)>::iter()` (Bevy `WorldQuery` shape): zero-alloc per row (stack array of `*mut u8` sized by tuple length), loop traversal (no recursion), integrate with `QueryState` cache from Phase 2a, typed tuple adapter via variadic generics (up to N=12 like Bevy). Cycle: researcher → architect → critic → developer → tester → results-analyst. |
+
+**Why a separate phase, not "fix the orphans"**: the deleted orphan files had four fundamental issues that would require a full rewrite anyway — per-entity heap alloc (`Box<[ComponentPtr]>`), recursive `next_raw` (stack overflow risk), no integration with `QueryState`, four undefined typed-adapter types. Starting clean is cheaper than salvage.
 
 **Effort estimate**: Q-009 is 30 minutes. Q-008 + M-010 each block
 on a product decision; once decided, 1-3 sessions depending on

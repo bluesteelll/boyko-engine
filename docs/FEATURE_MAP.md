@@ -67,11 +67,8 @@ First point of contact for agents. When looking for where a particular piece of 
 
 | What | Where | Type/method |
 |------|-------|-------------|
-| Iterator over components in a single pool | [memory/sparse_iter_component_pool.rs](../crates/boyko_ecs/src/ecs/memory/sparse_iter_component_pool.rs) ✅ | `ComponentPoolSparseIter` / `ComponentPoolSparseIterMut` |
-| Wrapper for shared pointer | [memory/sparse_iter_component_pool.rs](../crates/boyko_ecs/src/ecs/memory/sparse_iter_component_pool.rs) ✅ | `ComponentPtr` |
-| Wrapper for mutable pointer | [memory/sparse_iter_component_pool.rs](../crates/boyko_ecs/src/ecs/memory/sparse_iter_component_pool.rs) ✅ | `ComponentMutPtr` |
-| Iterator across multiple pools at once | [memory/multi_pool_sparse_iter.rs](../crates/boyko_ecs/src/ecs/memory/multi_pool_sparse_iter.rs) ✅ | `MultiPoolSparseIter` / `MultiPoolSparseIterMut` |
-| Iterator over query results | [core/iters/sparse_iter.rs](../crates/boyko_ecs/src/ecs/core/iters/sparse_iter.rs) ✅ | `SparseIter` / `SparseIterMut` |
+| Archetype-level cached query (matched-archetype iter) | [core/iters/query.rs](../crates/boyko_ecs/src/ecs/core/iters/query.rs), [core/iters/query_state.rs](../crates/boyko_ecs/src/ecs/core/iters/query_state.rs) ✅ | `Query` / `QueryState` / `QueryStateIter` |
+| Per-entity tuple iter (`Query::<(&T, &U)>::iter()`) | — | ❌ **not implemented** — see Phase 2d in `docs/ROADMAP-PHASE-2-PLUS.md`. Previous orphan implementation (`sparse_iter`, `multi_pool_sparse_iter`, `sparse_iter_component_pool`) was removed in Phase 2c (per-entity heap alloc, recursive next, undefined typed adapters). |
 
 ---
 

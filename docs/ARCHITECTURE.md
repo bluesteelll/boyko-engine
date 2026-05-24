@@ -38,7 +38,7 @@ boyko-engine/
 │   │           │   ├── entity/           # Entity, EntityInland, EntityMaster (recycling)
 │   │           │   ├── archetype/        # Archetype, ArchetypeMaster, ArchetypeRegistry, ArchetypeSignature, ArchetypeBundle
 │   │           │   ├── ecs_master/       # EcsMaster — top-level facade
-│   │           │   ├── iters/            # Query, SparseIter, ComponentSet
+│   │           │   ├── iters/            # Query, QueryState, ArchetypeBitSet, ComponentSet
 │   │           │   ├── events/           # Event trait + EventPool/EventRegistry, Participants, Parameters
 │   │           │   └── containers/tuple/ # ComponentTuple for batch operations
 │   │           └── memory/
@@ -47,10 +47,11 @@ boyko-engine/
 │   │               ├── chunk.rs              # type-erased: metadata only (start_index, capacity, dirty)
 │   │               ├── component_pool.rs     # type-erased: NonNull<u8> + Vec<Unit> + chunks
 │   │               ├── id_unit.rs            # Unit { ptr: *mut u8, buffer_index }
-│   │               ├── utils.rs              # align_up
-│   │               ├── sparse_iter_component_pool.rs   # iterator over a pool
-│   │               ├── multi_pool_sparse_iter.rs       # iterator across multiple pools
-│   │               └── iterators.rs          # ⚠️ empty stub file
+│   │               └── utils.rs              # align_up
+│   │           # (Per-entity component iterators are intentionally absent. The old
+│   │           #  sparse_iter / multi_pool_sparse_iter / sparse_iter_component_pool
+│   │           #  files were removed in Phase 2c — see Phase 2d ticket for the
+│   │           #  zero-alloc replacement built on top of QueryState.)
 │   ├── boyko_macros/                     # proc-macros
 │   │   ├── Cargo.toml                    # deps: syn, quote, proc-macro2, boyko-ecs
 │   │   └── src/lib.rs                    # #[derive(Component)] + #[event]
