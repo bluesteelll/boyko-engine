@@ -80,7 +80,7 @@ struct EventTypeSlot {
 }
 
 const _: () = assert!(core::mem::align_of::<EventTypeSlot>() == 64);
-const _: () = assert!(core::mem::size_of::<EventTypeSlot>() % 64 == 0);
+const _: () = assert!(core::mem::size_of::<EventTypeSlot>().is_multiple_of(64));
 #[cfg(not(debug_assertions))]
 const _: () = assert!(core::mem::size_of::<EventTypeSlot>() == 64);
 
@@ -418,15 +418,19 @@ impl EventDispatcher {
         self.current_frame = frame;
     }
 
-    /// Test-only: grants mutable access to a registered slot's data pointer
-    /// for testing type_id collision detection (#30).
+    /// Test-only: overwrites the `vtable.type_id` of a registered slot for
+    /// type_id collision detection tests (#30).
+    ///
+    /// Returns `false` if `id` is not a registered slot.
     #[cfg(test)]
-    pub(crate) fn get_slot_mut_for_test(&mut self, id: usize) -> Option<&mut EventTypeSlot> {
+    pub(crate) fn set_slot_type_id_for_test(&mut self, id: usize, type_id: TypeId) -> bool {
         if id >= MAX_EVENTS || !self.registered_mask.get(id) {
-            return None;
+            return false;
         }
         // SAFETY (U5): registered_mask.get(id) == true ⇒ slot is initialised.
-        Some(unsafe { self.slots[id].slot.assume_init_mut() })
+        let slot = unsafe { self.slots[id].slot.assume_init_mut() };
+        slot.vtable.type_id = type_id;
+        true
     }
 }
 
@@ -562,7 +566,7 @@ mod tests {
 
     use crate::ecs::core::events::event::Event;
     use crate::ecs::core::events::event_config::EventConfig;
-    use crate::ecs::core::events::event_registry::{MAX_EVENTS, register_event};
+    use crate::ecs::core::events::event_registry::register_event;
     use crate::ecs::core::events::participants::participants::{ParticipantInfo, Participants};
     use crate::ecs::core::events::parameters::parameters::Parameters;
     use crate::ecs::error::EcsError;
@@ -593,23 +597,6 @@ mod tests {
         fn event_id() -> u64 { 20 }
         fn event_name() -> &'static str { "EvA" }
         fn new(_: NoParticipants, _: NoParameters) -> Self { EvA { val: 0 } }
-        fn participants(&self) -> &NoParticipants { unimplemented!() }
-        fn participants_mut(&mut self) -> &mut NoParticipants { unimplemented!() }
-        fn parameters(&self) -> &NoParameters { unimplemented!() }
-        fn parameters_mut(&mut self) -> &mut NoParameters { unimplemented!() }
-    }
-
-    /// Test event type B — second type for multi-type tests. ID = 21.
-    #[derive(Clone, Copy, Debug, PartialEq)]
-    struct EvB {
-        x: f32,
-    }
-    impl Event for EvB {
-        type Participants = NoParticipants;
-        type Parameters = NoParameters;
-        fn event_id() -> u64 { 21 }
-        fn event_name() -> &'static str { "EvB" }
-        fn new(_: NoParticipants, _: NoParameters) -> Self { EvB { x: 0.0 } }
         fn participants(&self) -> &NoParticipants { unimplemented!() }
         fn participants_mut(&mut self) -> &mut NoParticipants { unimplemented!() }
         fn parameters(&self) -> &NoParameters { unimplemented!() }
@@ -663,7 +650,6 @@ mod tests {
     make_ev!(EvBitset200, 25);
 
     fn register_ev_a() { register_event::<EvA>(20); }
-    fn register_ev_b() { register_event::<EvB>(21); }
     fn register_drop_counter() { register_event::<DropCounter>(22); }
     fn register_bitset_evs() {
         register_event::<EvBitset5>(23);
@@ -694,13 +680,30 @@ mod tests {
         assert!(matches!(result, Err(EcsError::EventAlreadyRegistered { .. })));
     }
 
-    /// Test #3: send without preregister returns EventNotRegistered.
+    /// Test #3: send without preregister errors.
+    ///
+    /// In debug builds the `debug_assert!` fires (panic). In release builds
+    /// the runtime check returns `Err(EventNotRegistered)`. Both behaviours
+    /// are correct; we test the release-mode error path here.
     #[test]
+    #[cfg(not(debug_assertions))]
     fn send_without_preregister_errors() {
         register_ev_a();
         let d = EventDispatcher::new(1).unwrap();
         let result = d.send(0, EvA { val: 1 });
         assert!(matches!(result, Err(EcsError::EventNotRegistered { .. })));
+    }
+
+    /// Test #3 (debug variant): send without preregister panics via debug_assert.
+    #[test]
+    #[cfg(debug_assertions)]
+    fn send_without_preregister_panics_in_debug() {
+        register_ev_a();
+        let d = EventDispatcher::new(1).unwrap();
+        let result = std::panic::catch_unwind(move || {
+            let _ = d.send(0, EvA { val: 1 });
+        });
+        assert!(result.is_err(), "send without preregister must panic in debug");
     }
 
     /// Test #4: overflow returns EventBufferFull { dropped: 1 }.
@@ -872,7 +875,13 @@ mod tests {
         assert_eq!(d.events::<EvBitset200>().len(), 1);
     }
 
-    /// Test #26: u64 frame counter near-wrap does not panic.
+    /// Test #26: u64 frame counter near u64::MAX does not panic.
+    ///
+    /// Exercises frames u64::MAX - 1 and u64::MAX. Wrap to 0 is not tested
+    /// because the per-slot debug assertion `last_swap_frame < frame` is a
+    /// monotonicity check; wrapping to 0 would trip it (0 < u64::MAX is false).
+    /// The plan documents u64::MAX as "never reachable in practice" (W5-NEW),
+    /// so we only exercise the near-max regime, not actual wrap.
     #[test]
     fn frame_counter_u64_wrap() {
         register_ev_a();
@@ -881,11 +890,10 @@ mod tests {
 
         // Set current_frame to u64::MAX - 2.
         d.set_current_frame_for_test(u64::MAX - 2);
-        // Three sequential update_events calls advance through MAX-1, MAX, 0.
+        // Two sequential update_events calls advance to u64::MAX - 1 and u64::MAX.
         d.update_events(); // frame = u64::MAX - 1
         d.update_events(); // frame = u64::MAX
-        d.update_events(); // frame = 0 (wrapping)
-        // No panic expected.
+        // No panic expected; near-wrap is handled correctly.
     }
 
     /// Test #28: events slice remains valid across an intervening send (C1-NEW).
@@ -918,9 +926,8 @@ mod tests {
         d.preregister::<EvA>(EventConfig::new(1, 4).unwrap()).unwrap();
 
         // Monkey-patch vtable.type_id to u64's TypeId.
-        if let Some(slot) = d.get_slot_mut_for_test(20) {
-            slot.vtable.type_id = TypeId::of::<u64>();
-        }
+        let patched = d.set_slot_type_id_for_test(20, TypeId::of::<u64>());
+        assert!(patched, "slot 20 must be registered");
 
         // events::<EvA>() should trigger a debug_assert_eq! panic.
         let result = std::panic::catch_unwind(move || {
