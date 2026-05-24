@@ -6,6 +6,39 @@ use crate::ecs::core::archetype::archetype_signature::ArchetypeSignature;
 use crate::ecs::core::component::component_pool_bundle::ComponentPoolBundle;
 use crate::ecs::memory::arena::Arena;
 
+/// Outcome of removing an entity from an archetype.
+///
+/// Replaces the previous `Option<EntityId>` return which was ambiguous:
+/// `None` could mean either "was the last entity" or "removal failed".
+/// This enum makes all three outcomes explicit (C-006).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoveOutcome {
+    /// The removed entity was the last one; no swap-remove was needed.
+    Last,
+    /// A swap-remove occurred: the entity that was at the last position has
+    /// been moved to the vacated slot. Callers must update that entity's
+    /// `unit_index` in `EntityMaster`.
+    Swapped {
+        /// The `EntityId` of the entity that was moved from the last slot
+        /// into the removed entity's slot.
+        moved_entity: EntityId,
+    },
+    /// The removal failed (e.g., `swap_remove_unit` returned an error).
+    /// The archetype state is unchanged.
+    PoolFailure,
+}
+
+// CR3: size guard — must match Option<EntityId> = 16 bytes (8-byte EntityId
+// + 8-byte discriminant/niche). If a new variant is added, this fires at
+// compile time before the regression can ship.
+const _: () = {
+    assert!(
+        std::mem::size_of::<RemoveOutcome>() == 16,
+        "RemoveOutcome must stay 16 bytes (matches Option<EntityId>); \
+         adding a variant without this check would silently bloat the type"
+    );
+};
+
 /// Archetype represents a unique combination of component types
 /// All entities with the same component types belong to the same archetype
 pub struct Archetype {
@@ -188,43 +221,44 @@ impl Archetype {
         true
     }
 
- /// Removes an entity and all its components from this archetype
-    /// Returns information about the swap if it occurred
-    pub fn remove_entity(&mut self, entity_inland: &EntityInland) -> Option<EntityId> {
-        debug_assert_eq!(entity_inland.archetype_id(), self.id, 
+    /// Removes an entity and all its components from this archetype.
+    ///
+    /// Returns a [`RemoveOutcome`] describing what happened:
+    /// - [`RemoveOutcome::Last`]: the entity was the last one; no swap needed.
+    /// - [`RemoveOutcome::Swapped`]: swap-remove occurred; caller must update
+    ///   the moved entity's `unit_index` in `EntityMaster`.
+    /// - [`RemoveOutcome::PoolFailure`]: removal failed; archetype is unchanged.
+    pub fn remove_entity(&mut self, entity_inland: &EntityInland) -> RemoveOutcome {
+        debug_assert_eq!(entity_inland.archetype_id(), self.id,
             "EntityInland archetype_id mismatch");
-        
+
         let removed_unit_index = entity_inland.unit_index();
         let last_unit_index = self.current_index.saturating_sub(1);
-        
-        // If removing the last entity, just pop it
+
+        // If removing the last entity, just pop it.
         if removed_unit_index == last_unit_index {
             if self.component_pools.pop_entity() {
-                // Remove the last entity ID
                 self.entity_ids.pop();
-                // Decrement entity counter
                 self.current_index -= 1;
-                return None; // No swap occurred
+                return RemoveOutcome::Last;
             } else {
-                return None; // Failed to pop
+                return RemoveOutcome::PoolFailure;
             }
         }
-        
-        // Get the entity ID that will be swapped
+
+        // Get the entity ID that will be swapped.
         let swapped_entity_id = self.entity_ids[last_unit_index];
-        
-        // Swap_remove in component pools
+
+        // Swap_remove in component pools.
         if self.component_pools.swap_remove_unit(removed_unit_index).is_err() {
-            return None; // Failed to swap_remove
+            return RemoveOutcome::PoolFailure;
         }
-        
-        // Swap_remove the entity ID as well
+
+        // Swap_remove the entity ID as well.
         self.entity_ids.swap_remove(removed_unit_index);
-        
-        // Decrement entity counter
         self.current_index -= 1;
-        
-        Some(swapped_entity_id)
+
+        RemoveOutcome::Swapped { moved_entity: swapped_entity_id }
     }
 
     /// Gets a raw pointer to a component using EntityInland for direct access
@@ -522,18 +556,18 @@ mod tests {
     // --- remove_entity ---
 
     #[test]
-    fn remove_entity_last_decrements_count_and_returns_none() {
+    fn remove_entity_last_returns_last_outcome() {
         let arena = Arena::with_capacity(4096 * 1024);
         let mut arch = make_archetype(&arena);
         let inland = add_entity(&mut arch, 55);
         // Removing the only entity — no swap needed.
         let result = arch.remove_entity(&inland);
-        assert!(result.is_none(), "no swap expected for the last entity");
+        assert_eq!(result, RemoveOutcome::Last, "no swap expected for the last entity");
         assert_eq!(arch.entity_count(), 0);
     }
 
     #[test]
-    fn remove_entity_non_last_returns_swapped_entity_id() {
+    fn remove_entity_non_last_returns_swapped_outcome() {
         let arena = Arena::with_capacity(4096 * 1024);
         let mut arch = make_archetype(&arena);
         let inland_first = add_entity(&mut arch, 10);
@@ -543,10 +577,69 @@ mod tests {
         let result = arch.remove_entity(&inland_first);
         assert_eq!(
             result,
-            Some(20),
+            RemoveOutcome::Swapped { moved_entity: 20 },
             "swapped entity ID must be 20"
         );
         assert_eq!(arch.entity_count(), 1);
+    }
+
+    // --- RemoveOutcome (C-006) ---
+
+    #[test]
+    fn remove_outcome_last_on_single_entity() {
+        // Removing the only entity must produce RemoveOutcome::Last.
+        let arena = Arena::with_capacity(4096 * 1024);
+        let mut arch = make_archetype(&arena);
+        let inland = add_entity(&mut arch, 1);
+        assert_eq!(arch.remove_entity(&inland), RemoveOutcome::Last);
+        assert_eq!(arch.entity_count(), 0);
+        assert!(arch.get_entity_id_at(0).is_none());
+    }
+
+    #[test]
+    fn remove_outcome_swapped_moves_last_entity_id() {
+        // Removing the first of three entities must produce RemoveOutcome::Swapped
+        // with the ID of the entity that was at the last position.
+        let arena = Arena::with_capacity(4096 * 1024);
+        let mut arch = make_archetype(&arena);
+        let inland_0 = add_entity(&mut arch, 10);
+        add_entity(&mut arch, 20);
+        add_entity(&mut arch, 30); // last
+
+        let result = arch.remove_entity(&inland_0);
+        assert_eq!(result, RemoveOutcome::Swapped { moved_entity: 30 });
+        // Entity 30 now occupies slot 0; slot 1 holds entity 20.
+        assert_eq!(arch.get_entity_id_at(0), Some(30));
+        assert_eq!(arch.get_entity_id_at(1), Some(20));
+        assert_eq!(arch.entity_count(), 2);
+    }
+
+    #[test]
+    fn remove_outcome_removing_second_to_last() {
+        // Removing the middle entity of two entities is a swap.
+        let arena = Arena::with_capacity(4096 * 1024);
+        let mut arch = make_archetype(&arena);
+        let inland_0 = add_entity(&mut arch, 100);
+        add_entity(&mut arch, 200); // becomes "last"
+
+        let result = arch.remove_entity(&inland_0);
+        assert_eq!(result, RemoveOutcome::Swapped { moved_entity: 200 });
+        assert_eq!(arch.entity_count(), 1);
+        assert_eq!(arch.get_entity_id_at(0), Some(200));
+    }
+
+    #[test]
+    fn remove_outcome_last_on_last_of_multiple() {
+        // Removing the last of multiple entities must produce RemoveOutcome::Last.
+        let arena = Arena::with_capacity(4096 * 1024);
+        let mut arch = make_archetype(&arena);
+        add_entity(&mut arch, 10);
+        let inland_last = add_entity(&mut arch, 20);
+
+        let result = arch.remove_entity(&inland_last);
+        assert_eq!(result, RemoveOutcome::Last);
+        assert_eq!(arch.entity_count(), 1);
+        assert_eq!(arch.get_entity_id_at(0), Some(10));
     }
 
     // --- has_component_id ---

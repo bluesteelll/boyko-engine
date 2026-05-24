@@ -1,3 +1,4 @@
+use crate::ecs::core::archetype::archetype::RemoveOutcome;
 use crate::ecs::core::archetype::archetype_master::ArchetypeMaster;
 use crate::ecs::core::entity::entity::Entity;
 use crate::ecs::core::entity::entity_master::EntityMaster;
@@ -153,58 +154,45 @@ impl EcsMaster {
         Ok(entity)
     }
 
-/// Deletes an entity and all its components from the system
-pub fn delete_entity(&mut self, entity: Entity) -> bool {
-    // Get the EntityInland data
-    let entity_inland = match self.entity_master.get_entity_inland(entity) {
-        Some(inland) => *inland,
-        None => return false,
-    };
+    /// Deletes an entity and all its components from the system.
+    ///
+    /// Returns `true` on success, `false` if the entity does not exist or if
+    /// archetype removal fails (`RemoveOutcome::PoolFailure`). The explicit
+    /// [`RemoveOutcome`] enum (C-006) replaces the previous fragile
+    /// `Option<EntityId>`-based logic.
+    pub fn delete_entity(&mut self, entity: Entity) -> bool {
+        let entity_inland = match self.entity_master.get_entity_inland(entity) {
+            Some(inland) => *inland,
+            None => return false,
+        };
 
-    let archetype_id = entity_inland.archetype_id();
-    let removed_unit_index = entity_inland.unit_index();
+        let archetype_id = entity_inland.archetype_id();
+        let removed_unit_index = entity_inland.unit_index();
 
-    // Find the archetype containing this entity
-    if let Some(archetype) = self.archetype_master.get_archetype_mut(archetype_id) {
-        // Store the entity count before removal for verification
-        let entity_count_before = archetype.entity_count();
-        
-        // Remove the entity and check if a swap occurred
+        let archetype = match self.archetype_master.get_archetype_mut(archetype_id) {
+            Some(arch) => arch,
+            None => return false,
+        };
+
         match archetype.remove_entity(&entity_inland) {
-            Some(swapped_entity_id) => {
-                // A swap occurred - update the swapped entity's inland
-                if let Some(swapped_entity) = self.entity_master.get_entity(swapped_entity_id) {
-                    // The swapped entity now occupies the removed entity's position
-                    self.entity_master.update_entity_unit_index(
-                        swapped_entity, 
-                        removed_unit_index
-                    );
-                }
-                
-                // Deallocate the deleted entity
+            RemoveOutcome::Last => {
                 self.entity_master.deallocate_entity(entity);
                 true
             }
-            None => {
-                // No swap occurred - this could mean:
-                // 1. The entity was the last one and was removed successfully
-                // 2. The removal failed
-                
-                // Check if the entity count decreased
-                if archetype.entity_count() < entity_count_before {
-                    // The entity was successfully removed (it was the last one)
-                    self.entity_master.deallocate_entity(entity);
-                    true
-                } else {
-                    // Removal failed
-                    false
+            RemoveOutcome::Swapped { moved_entity: swapped_entity_id } => {
+                // Update the swapped entity's unit_index to the vacated slot.
+                if let Some(swapped_entity) = self.entity_master.get_entity(swapped_entity_id) {
+                    self.entity_master.update_entity_unit_index(
+                        swapped_entity,
+                        removed_unit_index,
+                    );
                 }
+                self.entity_master.deallocate_entity(entity);
+                true
             }
+            RemoveOutcome::PoolFailure => false,
         }
-    } else {
-        false
     }
-}
     /// Gets a raw pointer to a component for the specified entity
     #[inline]
     pub fn get_component_raw(&self, entity: Entity, component_id: ComponentId) -> Option<*const u8> {
