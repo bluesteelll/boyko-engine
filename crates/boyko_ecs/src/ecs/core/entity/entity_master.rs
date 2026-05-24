@@ -1,6 +1,7 @@
+use crate::ecs::core::archetype::archetype::Archetype;
 use crate::ecs::core::entity::entity::Entity;
-use crate::ecs::core::entity::entity_inland::EntityInland;
-use crate::ecs::identifiers::primitives::{EntityId, ArchetypeId, InlandPoolId};
+use crate::ecs::core::entity::entity_inland::{EntityInland, EntityInlandFast};
+use crate::ecs::identifiers::primitives::{ArchetypeId, EntityId, InlandPoolId};
 use boyko_utils::sparse_map::sparse_map::SparseMap;
 
 /// Manages entity lifecycle, recycling, and internal mapping
@@ -17,9 +18,24 @@ pub struct EntityMaster {
     
     /// Next entity ID to allocate
     next_entity_id: EntityId,
-    
+
     /// Total number of active entities
     active_count: usize,
+
+    /// Phase 7: dense-indexed fast-path lookup record, sized by max-ever
+    /// `EntityId`. Slots with `archetype_ptr.is_null()` represent dead /
+    /// never-registered IDs. Written by `register_entity_with_ptr`; read
+    /// by Step 7's hot `get_component_raw` path.
+    entities_inland_fast: Vec<EntityInlandFast>,
+
+    /// Phase 7: sparse → dense map. `sparse_to_active[entity_id.0]` gives
+    /// the index into `active_ids`, or `u32::MAX` for "not active".
+    sparse_to_active: Vec<u32>,
+
+    /// Phase 7: dense list of currently-active `EntityId`s. Drives
+    /// `iter_entities` (Step 8). Order is registration-order with
+    /// swap-remove on deallocation.
+    active_ids: Vec<EntityId>,
 }
 
 impl EntityMaster {
@@ -32,6 +48,9 @@ impl EntityMaster {
             entity_map: SparseMap::new(),
             next_entity_id: EntityId(0),
             active_count: 0,
+            entities_inland_fast: Vec::new(),
+            sparse_to_active: Vec::new(),
+            active_ids: Vec::new(),
         }
     }
 
@@ -44,6 +63,9 @@ impl EntityMaster {
             entity_map: SparseMap::with_capacity(capacity),
             next_entity_id: EntityId(0),
             active_count: 0,
+            entities_inland_fast: Vec::with_capacity(capacity),
+            sparse_to_active: Vec::with_capacity(capacity),
+            active_ids: Vec::with_capacity(capacity),
         }
     }
 
@@ -84,6 +106,63 @@ impl EntityMaster {
         let entity_inland = EntityInland::new(archetype_id, unit_index, entity.generation() as usize);
         self.entity_map.insert(entity.id().0, entity_inland);
         self.active_count += 1;
+    }
+
+    /// Phase 7 fast-path entity registration.
+    ///
+    /// Writes the entity into the new fast store
+    /// (`entities_inland_fast` / `sparse_to_active` / `active_ids`) used
+    /// by the upcoming hot read path (Step 7+). The legacy store
+    /// (`entity_map`, `active_count`) is intentionally **not** touched
+    /// here — during the W7 dual-store window the upper-layer caller
+    /// (`EcsMaster::create_entity` in Step 7) keeps calling
+    /// [`register_entity`] for the legacy registration and additionally
+    /// calls this method for the fast registration. Step 8 collapses the
+    /// dual store into the fast-only path.
+    ///
+    /// `archetype_ptr` MUST be obtained from
+    /// `ArchetypeMaster::archetype_ptr_for` (write-capable provenance)
+    /// and MUST be stable for the `EntityMaster`'s lifetime (plan
+    /// invariants U1, U2). The pointer is stored verbatim; never
+    /// dereferenced inside `EntityMaster`.
+    ///
+    /// `unit_index` is the row index in `Archetype.entity_ids` produced
+    /// by the most recent `Archetype::create_entity` call.
+    #[inline]
+    pub fn register_entity_with_ptr(
+        &mut self,
+        entity: Entity,
+        archetype_ptr: *mut Archetype,
+        unit_index: u32,
+    ) {
+        debug_assert!(entity.id().0 < self.entities.len(), "Entity ID out of bounds");
+        // Check the FAST store (not legacy entity_map) — Step 7's W7 choreography
+        // calls register_entity (legacy) and register_entity_with_ptr (fast) for
+        // the same entity, in either order, so the legacy presence cannot be a
+        // precondition here. The fast-store invariant is "not yet present".
+        let sparse_idx = entity.id().0;
+        debug_assert!(
+            sparse_idx >= self.sparse_to_active.len()
+                || self.sparse_to_active[sparse_idx] == u32::MAX,
+            "Entity already present in Phase 7 fast store"
+        );
+
+        if sparse_idx >= self.entities_inland_fast.len() {
+            self.entities_inland_fast.resize(sparse_idx + 1, EntityInlandFast::NULL);
+        }
+        if sparse_idx >= self.sparse_to_active.len() {
+            self.sparse_to_active.resize(sparse_idx + 1, u32::MAX);
+        }
+
+        self.entities_inland_fast[sparse_idx] = EntityInlandFast::new(
+            archetype_ptr,
+            unit_index,
+            entity.generation(),
+        );
+
+        let dense_idx = self.active_ids.len() as u32;
+        self.active_ids.push(entity.id());
+        self.sparse_to_active[sparse_idx] = dense_idx;
     }
 
     /// Updates an entity's inland data
@@ -142,7 +221,41 @@ impl EntityMaster {
         self.free_entity_ids.push(entity_id);
         self.active_count -= 1;
 
+        // Phase 7: drop the fast-store record if present. Idempotent —
+        // safe to call when the entity was never registered via
+        // `register_entity_with_ptr` (the common case during the
+        // dual-store window).
+        self.fast_store_remove(entity_id);
+
         Some(entity_inland)
+    }
+
+    /// Removes the entity from the Phase 7 fast store. Called only by
+    /// [`deallocate_entity`]. Idempotent: if the entity is not present
+    /// in the fast store (e.g., it was registered before Phase 7 wired
+    /// the dual store, or its registration only went through the legacy
+    /// path), this is a no-op.
+    #[inline]
+    fn fast_store_remove(&mut self, entity_id: EntityId) {
+        let sparse_idx = entity_id.0;
+        if sparse_idx >= self.sparse_to_active.len() {
+            return;
+        }
+        let dense_idx = self.sparse_to_active[sparse_idx];
+        if dense_idx == u32::MAX {
+            return;
+        }
+        // Swap-remove from active_ids; the entity that gets moved into
+        // our slot needs its sparse_to_active pointer updated to the
+        // new dense index.
+        let last_dense = (self.active_ids.len() - 1) as u32;
+        self.active_ids.swap_remove(dense_idx as usize);
+        if dense_idx != last_dense {
+            let moved_entity = self.active_ids[dense_idx as usize];
+            self.sparse_to_active[moved_entity.0] = dense_idx;
+        }
+        self.sparse_to_active[sparse_idx] = u32::MAX;
+        self.entities_inland_fast[sparse_idx] = EntityInlandFast::NULL;
     }
 
     /// Gets the EntityInland for a specific entity
@@ -242,6 +355,9 @@ impl EntityMaster {
         self.entity_map.clear();
         self.next_entity_id = EntityId(0);
         self.active_count = 0;
+        self.entities_inland_fast.clear();
+        self.sparse_to_active.clear();
+        self.active_ids.clear();
     }
 
     /// Checks if the master is empty (no active entities)
