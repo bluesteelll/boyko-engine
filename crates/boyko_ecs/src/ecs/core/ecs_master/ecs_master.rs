@@ -2,7 +2,7 @@ use crate::ecs::core::archetype::archetype::{Archetype, RemoveOutcome};
 use crate::ecs::core::archetype::archetype_master::ArchetypeMaster;
 use crate::ecs::core::component::component_registry::MAX_COMPONENTS;
 use crate::ecs::core::entity::entity::Entity;
-use crate::ecs::core::entity::entity_inland::EntityInlandFast;
+use crate::ecs::core::entity::entity_inland::EntityInland;
 use crate::ecs::core::entity::entity_master::EntityMaster;
 use crate::ecs::core::events::event::Event;
 use crate::ecs::core::events::event_config::EventConfig;
@@ -153,7 +153,7 @@ impl EcsMaster {
     /// 3. If `create_entity` fails, `rewind_allocate` undoes the allocation
     ///    (fresh-ID path) so the ID is not silently wasted.
     ///
-    /// # W7 choreography (Phase 7 Step 7)
+    /// # W7 choreography (Phase 7)
     ///
     /// 1. Mint write-capable `*mut Archetype` via `archetype_ptr_for` under
     ///    `&mut self`. The raw pointer does not participate in borrow
@@ -163,11 +163,8 @@ impl EcsMaster {
     /// 3. Reborrow the raw pointer as `&mut Archetype` (scoped tightly to
     ///    the `create_entity` call) to push the new row.
     /// 4. On rejection, rewind the entity-id allocation (C-007 rewind path).
-    /// 5. On success, register the entity in BOTH stores: the legacy
-    ///    `entity_map` (kept alive to back `get_entity`, `delete_entity`
-    ///    and `query_entities`) and the Phase 7 fast store (read path of
-    ///    `get_component_raw`, `has_entity`, and friends). Step 9 removes
-    ///    the legacy registration here and deletes the legacy fields.
+    /// 5. On success, register the entity in the Phase 7 fast store
+    ///    (read path of `get_component_raw`, `has_entity`, and friends).
     ///
     /// Audit: C-010 — switched from Vec to &[...].
     pub fn create_entity(
@@ -224,20 +221,10 @@ impl EcsMaster {
             return Err(EcsError::ArchetypeRejectedEntity { archetype_id });
         }
 
-        // Step 5 of W7: dual-store registration during the Phase 7 transition.
-        //   - register_entity populates the legacy entity_map so the legacy
-        //     paths still in use (delete_entity / get_entity / query_entities)
-        //     keep working through Step 8.
-        //   - register_entity_with_ptr populates the fast store consumed by
-        //     get_component_raw, has_entity, set_component_raw, and the
-        //     typed get_component<T> / get_component_mut<T> wrappers.
-        // Step 9 removes the legacy register_entity call here and deletes the
-        // legacy fields entirely.
-        self.entity_master.register_entity(
-            entity,
-            archetype_id,
-            InlandPoolId(new_unit_index as usize),
-        );
+        // Step 5 of W7: register the entity in the Phase 7 fast store. This
+        // is the read path consumed by get_component_raw, has_entity,
+        // set_component_raw, and the typed get_component<T> /
+        // get_component_mut<T> wrappers.
         self.entity_master.register_entity_with_ptr(entity, archetype_ptr, new_unit_index);
 
         Ok(entity)
@@ -351,31 +338,39 @@ impl EcsMaster {
     /// [`RemoveOutcome`] enum (C-006) replaces the previous fragile
     /// `Option<EntityId>`-based logic.
     pub fn delete_entity(&mut self, entity: Entity) -> bool {
-        let entity_inland = match self.entity_master.get_entity_inland(entity) {
-            Some(inland) => *inland,
-            None => return false,
+        // Resolve the fast inland by value. Copying 16 B releases the
+        // entity_master borrow before we dereference the raw archetype_ptr.
+        let inland: EntityInland = {
+            let Some(slot) = self.entity_master.entities_inland.get(entity.id().0) else {
+                return false;
+            };
+            if slot.is_null() || slot.generation() != entity.generation() {
+                return false;
+            }
+            *slot
         };
+        let removed_unit_index = InlandPoolId(inland.unit_index() as usize);
 
-        let archetype_id = entity_inland.archetype_id();
-        let removed_unit_index = entity_inland.unit_index();
+        // SAFETY (U1, U2, U11, U14): archetype_ptr was minted via
+        //   archetype_ptr_for under &mut self at registration time; the
+        //   bundle slab is heap-stable for the EcsMaster's lifetime;
+        //   single-threaded &mut self gives exclusive access and no other
+        //   live borrow into this slot exists.
+        let archetype: &mut Archetype = unsafe { &mut *inland.archetype_ptr() };
+        let outcome = archetype.remove_entity(removed_unit_index);
 
-        let archetype = match self.archetype_master.get_archetype_mut(archetype_id) {
-            Some(arch) => arch,
-            None => return false,
-        };
-
-        match archetype.remove_entity(&entity_inland) {
+        match outcome {
             RemoveOutcome::Last => {
                 self.entity_master.deallocate_entity(entity);
                 true
             }
             RemoveOutcome::Swapped { moved_entity: swapped_entity_id } => {
-                // Update the swapped entity's unit_index to the vacated slot.
-                if let Some(swapped_entity) = self.entity_master.get_entity(swapped_entity_id) {
-                    self.entity_master.update_entity_unit_index(
-                        swapped_entity,
-                        removed_unit_index,
-                    );
+                // The entity that moved into the vacated slot needs its
+                // fast-store unit_index updated.
+                if let Some(slot) = self.entity_master.entities_inland
+                    .get_mut(swapped_entity_id.0)
+                {
+                    slot.set_unit_index(removed_unit_index.0 as u32);
                 }
                 self.entity_master.deallocate_entity(entity);
                 true
@@ -387,7 +382,7 @@ impl EcsMaster {
     /// Fast random access read: 3-4 cache lines, ~12-16 ns target.
     ///
     /// Lookup sequence:
-    ///   1. `entity_master.entities_inland_fast[entity.id().0]` — 1 line.
+    ///   1. `entity_master.entities_inland[entity.id().0]` — 1 line.
     ///   2. Null check + generation check (both fields in the same line as 1).
     ///   3. `(*archetype_ptr).columns[component_id.0]` — 1 line (`columns` at
     ///      offset 0; for `ComponentId.0 < 4` shares the line with the
@@ -404,8 +399,8 @@ impl EcsMaster {
         entity: Entity,
         component_id: ComponentId,
     ) -> Option<*const u8> {
-        // Line 1: entity_master.entities_inland_fast[entity.id().0]
-        let inland = self.entity_master.entities_inland_fast.get(entity.id().0)?;
+        // Line 1: entity_master.entities_inland[entity.id().0]
+        let inland = self.entity_master.entities_inland.get(entity.id().0)?;
         // Null check (dead slot) + generation check (stale handle).
         // Order chosen so the null check covers never-registered IDs first.
         if inland.is_null() {
@@ -438,7 +433,7 @@ impl EcsMaster {
         })
     }
 
-    /// Mutable fast random access. `EntityInlandFast` is `Copy`; we copy
+    /// Mutable fast random access. `EntityInland` is `Copy`; we copy
     /// 16 B to drop the `EntityMaster` borrow before reborrowing the slab
     /// pointer as `&mut Archetype` (W4 / U14).
     #[inline]
@@ -448,7 +443,7 @@ impl EcsMaster {
         component_id: ComponentId,
     ) -> Option<*mut u8> {
         // Copy the inland by value to release the entity_master borrow.
-        let inland: EntityInlandFast = *self.entity_master.entities_inland_fast
+        let inland: EntityInland = *self.entity_master.entities_inland
             .get(entity.id().0)?;
         if inland.is_null() {
             return None;
@@ -553,7 +548,7 @@ impl EcsMaster {
     /// matches the handle.
     #[inline]
     pub fn has_entity(&self, entity: Entity) -> bool {
-        let Some(inland) = self.entity_master.entities_inland_fast.get(entity.id().0) else {
+        let Some(inland) = self.entity_master.entities_inland.get(entity.id().0) else {
             return false;
         };
         !inland.is_null() && inland.generation() == entity.generation()
@@ -571,7 +566,7 @@ impl EcsMaster {
     /// single source of truth for "archetype does not host this component".
     #[inline]
     pub fn has_component(&self, entity: Entity, component_id: ComponentId) -> bool {
-        let Some(inland) = self.entity_master.entities_inland_fast.get(entity.id().0) else {
+        let Some(inland) = self.entity_master.entities_inland.get(entity.id().0) else {
             return false;
         };
         if inland.is_null() || inland.generation() != entity.generation() {
@@ -592,7 +587,7 @@ impl EcsMaster {
     /// [`Archetype::id`] — no SparseMap traversal.
     #[inline]
     pub fn get_entity_archetype_id(&self, entity: Entity) -> Option<ArchetypeId> {
-        let inland = self.entity_master.entities_inland_fast.get(entity.id().0)?;
+        let inland = self.entity_master.entities_inland.get(entity.id().0)?;
         if inland.is_null() || inland.generation() != entity.generation() {
             return None;
         }
@@ -657,7 +652,7 @@ impl EcsMaster {
         component_ids: &[ComponentId],
     ) -> Vec<(ComponentId, *const u8)> {
         let mut result = Vec::with_capacity(component_ids.len());
-        let Some(inland) = self.entity_master.entities_inland_fast.get(entity.id().0) else {
+        let Some(inland) = self.entity_master.entities_inland.get(entity.id().0) else {
             return result;
         };
         if inland.is_null() || inland.generation() != entity.generation() {
@@ -693,7 +688,7 @@ impl EcsMaster {
         component_ids: &[ComponentId],
     ) -> Vec<(ComponentId, *mut u8)> {
         let mut result = Vec::with_capacity(component_ids.len());
-        let inland: EntityInlandFast = match self.entity_master.entities_inland_fast
+        let inland: EntityInland = match self.entity_master.entities_inland
             .get(entity.id().0)
         {
             Some(i) => *i,

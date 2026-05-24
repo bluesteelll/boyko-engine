@@ -21,8 +21,7 @@ use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
 use boyko_ecs::ecs::core::component::component_registry;
 use boyko_ecs::ecs::memory::{arena::Arena, component_pool::ComponentPool};
 use boyko_ecs::ecs::core::component::component_pool_bundle::ComponentPoolBundle;
-use boyko_ecs::ecs::core::entity::entity_inland::EntityInland;
-use boyko_ecs::ecs::identifiers::primitives::{ArchetypeId, ComponentId, InlandPoolId};
+use boyko_ecs::ecs::identifiers::primitives::ComponentId;
 
 // IDs used across all tests in this file.
 const DC_ID: ComponentId = ComponentId(200);       // DropCounter component
@@ -654,10 +653,11 @@ fn bundle_set_component_typed_forwards_drop_to_pool() {
     assert_eq!(idx, Some(0), "insert must succeed");
     assert_eq!(ctr.load(Ordering::Relaxed), 0, "old value must not be dropped yet");
 
-    // Overwrite via bundle — creates an EntityInland pointing at slot 0.
-    let entity = EntityInland::new(ArchetypeId(0), InlandPoolId(0), 0);
+    // Overwrite via bundle at slot 0. Phase 7 dropped the wrapping
+    // EntityInland parameter from the bundle API; we now pass the dense
+    // unit index directly.
     let new_val = BundleComp { counter: Arc::clone(&ctr) };
-    let ok = bundle.set_component_typed(&entity, new_val);
+    let ok = bundle.set_component_typed(0, new_val);
     assert!(ok, "set_component_typed via bundle must return true (index 0, pool present)");
 
     assert_eq!(

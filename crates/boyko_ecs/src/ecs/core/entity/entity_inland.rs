@@ -1,62 +1,11 @@
 use core::ptr;
 
-use crate::ecs::identifiers::primitives::{ArchetypeId, InlandPoolId, Generation};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct EntityInland {
-    archetype_id: ArchetypeId,
-    unit_index: InlandPoolId,
-    generation: Generation,
-}
-
-impl EntityInland {
-    pub fn new(archetype_id: ArchetypeId, unit_index: InlandPoolId, generation: Generation) -> Self {
-        Self { archetype_id, unit_index, generation }
-    }
-    
-    #[inline]
-    pub fn archetype_id(&self) -> ArchetypeId {
-        self.archetype_id
-    }
-    
-    #[inline]
-    pub fn unit_index(&self) -> InlandPoolId {
-        self.unit_index
-    }
-    
-    #[inline]
-    pub fn set_archetype_id(&mut self, archetype_id: ArchetypeId) {
-        self.archetype_id = archetype_id;
-    }
-    
-    #[inline]
-    pub fn set_unit_index(&mut self, unit_index: InlandPoolId) {
-        self.unit_index = unit_index;
-    }
-
-     #[inline]
-    pub fn set_generation(&mut self, generation: Generation) {
-        self.generation = generation;
-    }
-    
-    #[inline]
-    pub fn increment_generation(&mut self) {
-        self.generation = self.generation.wrapping_add(1);
-    }
-
-    #[inline]
-    pub fn update(&mut self, archetype_id: ArchetypeId, unit_index: InlandPoolId) {
-        self.archetype_id = archetype_id;
-        self.unit_index = unit_index;
-    }
-}
-
-/// Phase-7 fast-path entity location record.
+/// Phase-7 entity location record (fast-path).
 ///
-/// Parallel to the legacy [`EntityInland`] during the Phase-7 migration
-/// (steps 2 – 9 in `docs/plans/PHASE-07-fast-random-access.md`). Once the
-/// shims are removed in step 9, this struct is renamed to `EntityInland`
-/// and the legacy struct above is deleted.
+/// Replaces the legacy three-field `EntityInland` (archetype_id +
+/// unit_index + generation) with a direct `*mut Archetype` slab pointer so
+/// the hot `get_component_raw` path can dereference into the archetype
+/// without a `SparseMap` indirection.
 ///
 /// Layout (asserted below): 16 B total, align 8.
 /// - offset 0  : `archetype_ptr` (8 B) — raw provenance pointer into the
@@ -72,19 +21,19 @@ impl EntityInland {
 /// invariant U14).
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct EntityInlandFast {
+pub struct EntityInland {
     archetype_ptr: *mut crate::ecs::core::archetype::archetype::Archetype,
     unit_index: u32,
     generation: u32,
 }
 
-const _: () = assert!(std::mem::size_of::<EntityInlandFast>() == 16);
-const _: () = assert!(std::mem::align_of::<EntityInlandFast>() == 8);
-const _: () = assert!(std::mem::offset_of!(EntityInlandFast, archetype_ptr) == 0);
-const _: () = assert!(std::mem::offset_of!(EntityInlandFast, unit_index) == 8);
-const _: () = assert!(std::mem::offset_of!(EntityInlandFast, generation) == 12);
+const _: () = assert!(std::mem::size_of::<EntityInland>() == 16);
+const _: () = assert!(std::mem::align_of::<EntityInland>() == 8);
+const _: () = assert!(std::mem::offset_of!(EntityInland, archetype_ptr) == 0);
+const _: () = assert!(std::mem::offset_of!(EntityInland, unit_index) == 8);
+const _: () = assert!(std::mem::offset_of!(EntityInland, generation) == 12);
 
-impl EntityInlandFast {
+impl EntityInland {
     /// Sentinel value for "dead" / never-registered slots.
     ///
     /// `archetype_ptr.is_null()` is the single source of truth for
@@ -96,7 +45,7 @@ impl EntityInlandFast {
         generation: 0,
     };
 
-    /// Constructs a fast-path inland record.
+    /// Constructs an entity-location record.
     ///
     /// `archetype_ptr` must point into a stable `ArchetypeBundle` slab
     /// slot for the lifetime of the owning `EcsMaster` (plan invariants
@@ -140,6 +89,9 @@ impl EntityInlandFast {
         self.archetype_ptr.is_null()
     }
 
+    /// Overwrites the generation tag. Used by tests and migration tooling;
+    /// production code should never call this directly — generation bumps
+    /// are owned by `EntityMaster::deallocate_entity`.
     #[inline]
     pub fn set_generation(&mut self, generation: u32) {
         self.generation = generation;
@@ -150,6 +102,14 @@ impl EntityInlandFast {
     #[inline]
     pub fn increment_generation(&mut self) {
         self.generation = self.generation.wrapping_add(1);
+    }
+
+    /// Updates the unit_index field in place. Used by
+    /// `EcsMaster::delete_entity` to fix up the swapped entity's row
+    /// index when `RemoveOutcome::Swapped` is returned.
+    #[inline]
+    pub fn set_unit_index(&mut self, unit_index: u32) {
+        self.unit_index = unit_index;
     }
 
     /// Test-only constructor producing a record with a **dangling but

@@ -5,7 +5,6 @@ use boyko_utils::sparse_map::sparse_map::SparseMap;
 
 use crate::ecs::core::component::component::Component;
 use crate::ecs::core::component::component_registry;
-use crate::ecs::core::entity::entity_inland::EntityInland;
 use crate::ecs::identifiers::primitives::{ComponentId, InlandPoolId};
 use crate::ecs::memory::arena::Arena;
 use crate::ecs::memory::component_pool::ComponentPool;
@@ -102,110 +101,6 @@ impl ComponentPoolBundle {
         self.pools.is_empty()
     }
 
-    /// Gets a raw pointer to a component by ComponentId and EntityInland
-    pub fn get_unit_raw(&self, component_id: ComponentId, entity_inland: &EntityInland) -> Option<*const u8> {
-        // Debug assert for component existence for better error messages
-        debug_assert!(self.contains(component_id),
-            "Component ID {} not found in bundle", component_id);
-
-        let inland_id = self.sparse_indexes.get(component_id.0)?.0;
-
-        // Debug assert for entity index bounds
-        debug_assert!(entity_inland.unit_index().0 < self.pools[inland_id].count(),
-            "Entity unit index out of bounds: {} >= {}",
-            entity_inland.unit_index(), self.pools[inland_id].count());
-
-        self.pools[inland_id].get_raw(entity_inland.unit_index().0)
-    }
-    
-    /// Gets raw pointers to multiple components for a single EntityInland
-    /// Returns a vector of (ComponentId, *const u8) pairs
-    pub fn get_units_raw_indexed(&self, component_ids: &[ComponentId], entity_inland: &EntityInland) -> Vec<(ComponentId, *const u8)> {
-        let mut result = Vec::with_capacity(component_ids.len());
-        
-        for &component_id in component_ids {
-            if let Some(ptr) = self.get_unit_raw(component_id, entity_inland) {
-                result.push((component_id, ptr));
-            }
-        }
-        
-        result
-    }
-    
-    /// Gets raw pointers to multiple components for a single EntityInland
-    /// Returns a vector of pointers in the same order as the input component IDs
-    /// Missing components will have null pointers (represented as std::ptr::null())
-    pub fn get_units_raw(&self, component_ids: &[ComponentId], entity_inland: &EntityInland) -> Vec<*const u8> {
-        let mut result = Vec::with_capacity(component_ids.len());
-        
-        for &component_id in component_ids {
-            if let Some(ptr) = self.get_unit_raw(component_id, entity_inland) {
-                result.push(ptr);
-            } else {
-                result.push(std::ptr::null());
-            }
-        }
-        
-        result
-    }
-    
-    /// Gets a mutable component by entity inland and component ID
-    pub fn get_unit_raw_mut(&mut self, component_id: ComponentId, entity_inland: &EntityInland) -> Option<*mut u8> {
-        // Debug assert for component existence for better error messages
-        debug_assert!(self.contains(component_id),
-            "Component ID {} not found in bundle", component_id);
-
-        let inland_id = self.sparse_indexes.get(component_id.0)?.0;
-
-        // Debug assert for entity index bounds
-        debug_assert!(entity_inland.unit_index().0 < self.pools[inland_id].count(),
-            "Entity unit index out of bounds: {} >= {}",
-            entity_inland.unit_index(), self.pools[inland_id].count());
-
-        self.pools[inland_id].get_raw_mut(entity_inland.unit_index().0)
-    }
-    
-    /// Gets mutable raw pointers to multiple components for a single EntityInland
-    /// Returns a vector of (ComponentId, *mut u8) pairs
-    pub fn get_units_raw_indexed_mut(&mut self, component_ids: &[ComponentId], entity_inland: &EntityInland) -> Vec<(ComponentId, *mut u8)> {
-        let mut result = Vec::with_capacity(component_ids.len());
-        
-        // We need to handle mutability carefully
-        // Can't use a simple loop because of borrow checking limitations
-        for &component_id in component_ids {
-            if let Some(inland_id) = self.sparse_indexes.get(component_id.0).copied() {
-                // Debug assert for entity index bounds
-                debug_assert!(entity_inland.unit_index().0 < self.pools[inland_id.0].count(),
-                    "Entity unit index out of bounds: {} >= {}",
-                    entity_inland.unit_index(), self.pools[inland_id.0].count());
-
-                // Get the raw pointer
-                if let Some(ptr) = self.pools[inland_id.0].get_raw_mut(entity_inland.unit_index().0) {
-                    result.push((component_id, ptr));
-                }
-            }
-        }
-        
-        result
-    }
-    
-    /// Gets mutable raw pointers to multiple components for a single EntityInland
-    /// Returns a vector of pointers in the same order as the input component IDs
-    /// Missing components will have null pointers (represented as std::ptr::null_mut())
-    pub fn get_units_raw_mut(&mut self, component_ids: &[ComponentId], entity_inland: &EntityInland) -> Vec<*mut u8> {
-        let mut result = Vec::with_capacity(component_ids.len());
-        
-        for &component_id in component_ids {
-            if let Some(ptr) = self.get_unit_raw_mut(component_id, entity_inland) {
-                result.push(ptr);
-            } else {
-                result.push(std::ptr::null_mut());
-            }
-        }
-        
-        result
-    }
-
     /// Adds a component to the appropriate pool
     pub fn add_component(&mut self, component_id: ComponentId, component_bytes: &[u8]) -> Option<usize> {
         debug_assert!(self.contains(component_id),
@@ -220,30 +115,6 @@ impl ComponentPoolBundle {
 
         let inland_id = self.sparse_indexes.get(component_id.0)?.0;
         self.pools[inland_id].add(component_bytes)
-    }
-
-    /// Sets a component's value
-    pub fn set_component(&mut self, component_id: ComponentId, entity_inland: &EntityInland, component_bytes: &[u8]) -> bool {
-        debug_assert!(self.contains(component_id),
-            "Component ID {} not found in bundle", component_id);
-
-        // Verify component size matches registry - debug only check
-        debug_assert_eq!(
-            component_bytes.len(),
-            component_registry::get_component_size(component_id.0).unwrap_or(0),
-            "Component size mismatch for ID {}", component_id
-        );
-
-        if let Some(inland_id) = self.sparse_indexes.get(component_id.0) {
-            // Debug assert for entity index bounds
-            debug_assert!(entity_inland.unit_index().0 < self.pools[inland_id.0].count(),
-                "Entity unit index out of bounds: {} >= {}",
-                entity_inland.unit_index(), self.pools[inland_id.0].count());
-
-            self.pools[inland_id.0].set_component(entity_inland.unit_index().0, component_bytes)
-        } else {
-            false
-        }
     }
 
     /// Validates that all component pools can accept one more entity (C-009).
@@ -371,12 +242,16 @@ pub fn swap_remove_unit(&mut self, unit_index: usize) -> EcsResult<()> {
     /// if the existing component's `Drop` impl panics, the pool is poisoned.
     /// See `ComponentPool::set_component_typed` docs.
     ///
+    /// `unit_index` is the dense row index inside the archetype's pool
+    /// (Phase 7 dropped the wrapping `EntityInland` parameter — the bundle
+    /// no longer knows about archetype-level locations).
+    ///
     /// # Panics (debug only)
     /// `debug_assert!` on TypeId mismatch inside the pool.
     #[inline]
     pub fn set_component_typed<T: Component>(
         &mut self,
-        entity_inland: &EntityInland,
+        unit_index: usize,
         value: T,
     ) -> bool {
         let component_id = T::component_id();
@@ -384,10 +259,10 @@ pub fn swap_remove_unit(&mut self, unit_index: usize) -> EcsResult<()> {
             return false;
         };
         debug_assert!(
-            entity_inland.unit_index().0 < self.pools[inland_id.0].count(),
+            unit_index < self.pools[inland_id.0].count(),
             "Entity unit index out of bounds"
         );
-        self.pools[inland_id.0].set_component_typed(entity_inland.unit_index().0, value)
+        self.pools[inland_id.0].set_component_typed(unit_index, value)
     }
 }
 

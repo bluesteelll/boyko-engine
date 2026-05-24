@@ -716,8 +716,7 @@ mod tests {
 
     // ---- iter_one / iter_two tests -----------------------------------------------
 
-    use crate::ecs::core::entity::entity_inland::EntityInland;
-    use crate::ecs::identifiers::primitives::{EntityId, InlandPoolId};
+    use crate::ecs::identifiers::primitives::EntityId;
 
     /// Build a fresh `(ArchetypeMaster, Box<Arena>)` pair without any archetypes.
     fn make_master() -> (ArchetypeMaster, Box<Arena>) {
@@ -734,8 +733,8 @@ mod tests {
         (master, arena)
     }
 
-    /// Push one entity with a `Position(val)` into the archetype, returning its inland.
-    fn push_position(master: &mut ArchetypeMaster, arch_id: ArchetypeId, val: u32) -> EntityInland {
+    /// Push one entity with a `Position(val)` into the archetype.
+    fn push_position(master: &mut ArchetypeMaster, arch_id: ArchetypeId, val: u32) {
         let arch = master.get_archetype_mut(arch_id).expect("archetype must exist");
         let bytes = val.to_ne_bytes();
         let mut new_unit_index: u32 = 0;
@@ -743,7 +742,6 @@ mod tests {
             (Position::component_id(), bytes.as_slice()),
         ]);
         assert!(ok, "create_entity must succeed");
-        EntityInland::new(arch.id(), InlandPoolId(new_unit_index as usize), 0)
     }
 
     /// Push one entity with a `Position(pval)` and `Velocity(vval)` into the archetype.
@@ -753,7 +751,7 @@ mod tests {
         entity_id: usize,
         pval: u32,
         vval: u32,
-    ) -> EntityInland {
+    ) {
         let arch = master.get_archetype_mut(arch_id).expect("archetype must exist");
         let pb = pval.to_ne_bytes();
         let vb = vval.to_ne_bytes();
@@ -763,7 +761,6 @@ mod tests {
             (Velocity::component_id(), vb.as_slice()),
         ]);
         assert!(ok, "create_entity must succeed");
-        EntityInland::new(arch.id(), InlandPoolId(new_unit_index as usize), 0)
     }
 
     // --- iter_one tests ---

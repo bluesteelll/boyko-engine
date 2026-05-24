@@ -1,5 +1,4 @@
 use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId, EntityId, InlandPoolId};
-use crate::ecs::core::entity::entity_inland::EntityInland;
 use crate::ecs::core::component::component_mask::ComponentMask;
 use crate::ecs::core::component::component_registry::MAX_COMPONENTS;
 use crate::ecs::core::archetype::archetype_signature::ArchetypeSignature;
@@ -352,8 +351,7 @@ impl Archetype {
     /// The previous signature accepted `&mut EntityInland` and mutated its
     /// `unit_index` / `archetype_id` fields. Phase 7 removes that coupling:
     /// the caller now receives just the `u32` slot and is responsible for
-    /// constructing whatever entity-location record it needs (legacy
-    /// `EntityInland` or Phase 7 `EntityInlandFast`).
+    /// constructing whatever entity-location record it needs.
     ///
     /// Audit: C-010 — switched from Vec to &[...]. Phase 7 Step 3 — replaced
     /// `&mut EntityInland` with `&mut u32`.
@@ -406,16 +404,19 @@ impl Archetype {
 
     /// Removes an entity and all its components from this archetype.
     ///
+    /// `removed_unit_index` is the dense row index inside the archetype's
+    /// component pools (read from the caller's `EntityInland` fast store).
+    /// The caller is responsible for ensuring the index belongs to this
+    /// archetype — there is no longer a per-call `archetype_id` debug-assert
+    /// because Phase 7 dispatches via direct `*mut Archetype` pointers and
+    /// the caller is, by construction, this archetype.
+    ///
     /// Returns a [`RemoveOutcome`] describing what happened:
     /// - [`RemoveOutcome::Last`]: the entity was the last one; no swap needed.
     /// - [`RemoveOutcome::Swapped`]: swap-remove occurred; caller must update
     ///   the moved entity's `unit_index` in `EntityMaster`.
     /// - [`RemoveOutcome::PoolFailure`]: removal failed; archetype is unchanged.
-    pub fn remove_entity(&mut self, entity_inland: &EntityInland) -> RemoveOutcome {
-        debug_assert_eq!(entity_inland.archetype_id(), self.id,
-            "EntityInland archetype_id mismatch");
-
-        let removed_unit_index = entity_inland.unit_index();
+    pub fn remove_entity(&mut self, removed_unit_index: InlandPoolId) -> RemoveOutcome {
         let last_unit_index = InlandPoolId(self.current_index.saturating_sub(1));
 
         // If removing the last entity, just pop it.
@@ -442,54 +443,6 @@ impl Archetype {
         self.current_index -= 1;
 
         RemoveOutcome::Swapped { moved_entity: swapped_entity_id }
-    }
-
-    /// Gets a raw pointer to a component using EntityInland for direct access
-    #[inline]
-    pub fn get_component_raw(&self, inland: &EntityInland, component_id: ComponentId) -> Option<*const u8> {
-        debug_assert_eq!(inland.archetype_id(), self.id, 
-            "EntityInland archetype_id mismatch");
-        
-        let unit_index = inland.unit_index();
-        
-        // Get the component pool for this component type
-        let pool = self.component_pools.get_pool(component_id)?;
-        
-        // Use the unit index directly
-        pool.get_raw(unit_index.0)
-    }
-
-    /// Gets a mutable raw pointer to a component using EntityInland for direct access
-    #[inline]
-    pub fn get_component_raw_mut(&mut self, inland: &EntityInland, component_id: ComponentId) -> Option<*mut u8> {
-        debug_assert_eq!(inland.archetype_id(), self.id,
-            "EntityInland archetype_id mismatch");
-
-        let unit_index = inland.unit_index();
-
-        // Get the component pool for this component type
-        let pool = self.component_pools.get_pool_mut(component_id)?;
-
-        // Use the unit index directly
-        pool.get_raw_mut(unit_index.0)
-    }
-
-    /// Sets a component value using EntityInland for direct access
-    #[inline]
-    pub fn set_component(&mut self, inland: &EntityInland, component_id: ComponentId, bytes: &[u8]) -> bool {
-        debug_assert_eq!(inland.archetype_id(), self.id,
-            "EntityInland archetype_id mismatch");
-
-        let unit_index = inland.unit_index();
-
-        // Get the component pool for this component type
-        let pool = match self.component_pools.get_pool_mut(component_id) {
-            Some(p) => p,
-            None => return false,
-        };
-
-        // Set the component using the unit index directly
-        pool.set_component(unit_index.0, bytes)
     }
 
     /// Gets a reference to the component pool bundle
@@ -534,9 +487,13 @@ impl Archetype {
         true
     }
     
-    /// Removes the last entity from this archetype
-    /// Takes a reference to the last entity's EntityInland to update its generation
-    pub fn pop(&mut self, last_entity_inland: &mut EntityInland) -> bool {
+    /// Removes the last entity from this archetype.
+    ///
+    /// Phase 7: generation bumping is moved out — the caller
+    /// (`EntityMaster::deallocate_entity`) handles the live-side generation
+    /// bump on its fast-store `EntityInland`. This method only mutates
+    /// archetype-local state.
+    pub fn pop(&mut self) -> bool {
         debug_assert!(self.current_index > 0, "Attempting to pop from an empty archetype");
 
         // C-008 fix: pop_entity() ran inside debug_assert!, so in release builds the
@@ -551,9 +508,6 @@ impl Archetype {
         // Q-022 fix: keep entity_ids length in sync with current_index, otherwise
         // get_entity_id_at returns stale entries after pop.
         self.entity_ids.pop();
-
-        // Increment generation of the popped entity
-        last_entity_inland.increment_generation();
 
         // Decrement entity counter
         self.current_index -= 1;
@@ -593,7 +547,9 @@ mod tests {
     }
 
     // Helper: add one entity with zero-filled bytes for both components.
-    fn add_entity(arch: &mut Archetype, entity_id: EntityId) -> EntityInland {
+    // Returns the assigned dense unit index — Phase 7 removed the
+    // `EntityInland` coupling from `Archetype::remove_entity` / `pop`.
+    fn add_entity(arch: &mut Archetype, entity_id: EntityId) -> InlandPoolId {
         let bytes_a = vec![0u8; component_registry::get_component_size(COMP_A.0).unwrap()];
         let bytes_b = vec![0u8; component_registry::get_component_size(COMP_B.0).unwrap()];
         let mut new_unit_index: u32 = 0;
@@ -602,7 +558,7 @@ mod tests {
             (COMP_B, bytes_b.as_slice()),
         ]);
         assert!(ok, "create_entity must succeed in setup helper");
-        EntityInland::new(arch.id(), InlandPoolId(new_unit_index as usize), 0)
+        InlandPoolId(new_unit_index as usize)
     }
 
     // --- create_entity ---
@@ -651,10 +607,10 @@ mod tests {
         // This test must pass under both `cargo test` and `cargo test --release`.
         let arena = Arena::with_capacity(4096 * 1024);
         let mut arch = make_archetype(&arena);
-        let mut inland = add_entity(&mut arch, EntityId(7));
+        let _idx = add_entity(&mut arch, EntityId(7));
 
         assert_eq!(arch.entity_count(), 1);
-        let popped = arch.pop(&mut inland);
+        let popped = arch.pop();
         assert!(popped, "pop must return true");
         assert_eq!(
             arch.entity_count(),
@@ -669,13 +625,12 @@ mod tests {
         // component_pools.pop_entity() — previously it was missing.
         let arena = Arena::with_capacity(4096 * 1024);
         let mut arch = make_archetype(&arena);
-        let inland0 = add_entity(&mut arch, EntityId(1));
+        let _idx0 = add_entity(&mut arch, EntityId(1));
         add_entity(&mut arch, EntityId(2));
         add_entity(&mut arch, EntityId(3));
 
         // Pop removes the last entity (ID=3).
-        let mut inland_last = EntityInland::new(arch.id(), InlandPoolId(2), 0);
-        arch.pop(&mut inland_last);
+        arch.pop();
 
         assert_eq!(
             arch.entity_count(),
@@ -696,9 +651,6 @@ mod tests {
             Some(EntityId(2)),
             "slot 1 must still hold entity ID 2"
         );
-
-        // Suppress unused-variable warning for inland0.
-        let _ = inland0;
     }
 
     #[test]
@@ -716,9 +668,8 @@ mod tests {
             let arena2 = Arena::with_capacity(4096 * 1024);
             register_test_components();
             let mut arch = Archetype::create_by_ids(ArchetypeId(99), &[COMP_A, COMP_B], &arena2);
-            let mut inland = EntityInland::new(arch.id(), InlandPoolId(0), 0);
             // In debug: panics. In release: returns false (pool is empty → pop() = false).
-            let _ = arch.pop(&mut inland);
+            let _ = arch.pop();
         }));
         // The test passes regardless of whether a panic occurred.
         let _ = arena; // keep arena alive
@@ -730,9 +681,9 @@ mod tests {
     fn remove_entity_last_returns_last_outcome() {
         let arena = Arena::with_capacity(4096 * 1024);
         let mut arch = make_archetype(&arena);
-        let inland = add_entity(&mut arch, EntityId(55));
+        let idx = add_entity(&mut arch, EntityId(55));
         // Removing the only entity — no swap needed.
-        let result = arch.remove_entity(&inland);
+        let result = arch.remove_entity(idx);
         assert_eq!(result, RemoveOutcome::Last, "no swap expected for the last entity");
         assert_eq!(arch.entity_count(), 0);
     }
@@ -741,11 +692,11 @@ mod tests {
     fn remove_entity_non_last_returns_swapped_outcome() {
         let arena = Arena::with_capacity(4096 * 1024);
         let mut arch = make_archetype(&arena);
-        let inland_first = add_entity(&mut arch, EntityId(10));
+        let idx_first = add_entity(&mut arch, EntityId(10));
         add_entity(&mut arch, EntityId(20)); // last entity
 
         // Remove first; last (20) should swap into position 0.
-        let result = arch.remove_entity(&inland_first);
+        let result = arch.remove_entity(idx_first);
         assert_eq!(
             result,
             RemoveOutcome::Swapped { moved_entity: EntityId(20) },
@@ -761,8 +712,8 @@ mod tests {
         // Removing the only entity must produce RemoveOutcome::Last.
         let arena = Arena::with_capacity(4096 * 1024);
         let mut arch = make_archetype(&arena);
-        let inland = add_entity(&mut arch, EntityId(1));
-        assert_eq!(arch.remove_entity(&inland), RemoveOutcome::Last);
+        let idx = add_entity(&mut arch, EntityId(1));
+        assert_eq!(arch.remove_entity(idx), RemoveOutcome::Last);
         assert_eq!(arch.entity_count(), 0);
         assert!(arch.get_entity_id_at(InlandPoolId(0)).is_none());
     }
@@ -773,11 +724,11 @@ mod tests {
         // with the ID of the entity that was at the last position.
         let arena = Arena::with_capacity(4096 * 1024);
         let mut arch = make_archetype(&arena);
-        let inland_0 = add_entity(&mut arch, EntityId(10));
+        let idx_0 = add_entity(&mut arch, EntityId(10));
         add_entity(&mut arch, EntityId(20));
         add_entity(&mut arch, EntityId(30)); // last
 
-        let result = arch.remove_entity(&inland_0);
+        let result = arch.remove_entity(idx_0);
         assert_eq!(result, RemoveOutcome::Swapped { moved_entity: EntityId(30) });
         // Entity 30 now occupies slot 0; slot 1 holds entity 20.
         assert_eq!(arch.get_entity_id_at(InlandPoolId(0)), Some(EntityId(30)));
@@ -790,10 +741,10 @@ mod tests {
         // Removing the middle entity of two entities is a swap.
         let arena = Arena::with_capacity(4096 * 1024);
         let mut arch = make_archetype(&arena);
-        let inland_0 = add_entity(&mut arch, EntityId(100));
+        let idx_0 = add_entity(&mut arch, EntityId(100));
         add_entity(&mut arch, EntityId(200)); // becomes "last"
 
-        let result = arch.remove_entity(&inland_0);
+        let result = arch.remove_entity(idx_0);
         assert_eq!(result, RemoveOutcome::Swapped { moved_entity: EntityId(200) });
         assert_eq!(arch.entity_count(), 1);
         assert_eq!(arch.get_entity_id_at(InlandPoolId(0)), Some(EntityId(200)));
@@ -805,9 +756,9 @@ mod tests {
         let arena = Arena::with_capacity(4096 * 1024);
         let mut arch = make_archetype(&arena);
         add_entity(&mut arch, EntityId(10));
-        let inland_last = add_entity(&mut arch, EntityId(20));
+        let idx_last = add_entity(&mut arch, EntityId(20));
 
-        let result = arch.remove_entity(&inland_last);
+        let result = arch.remove_entity(idx_last);
         assert_eq!(result, RemoveOutcome::Last);
         assert_eq!(arch.entity_count(), 1);
         assert_eq!(arch.get_entity_id_at(InlandPoolId(0)), Some(EntityId(10)));

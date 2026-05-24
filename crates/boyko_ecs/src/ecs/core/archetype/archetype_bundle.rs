@@ -19,7 +19,6 @@ use crate::ecs::core::archetype::archetype_signature::ArchetypeSignature;
 use crate::ecs::core::component::component_mask::ComponentMask;
 use crate::ecs::core::component::component_pool_bundle::ComponentPoolBundle;
 use crate::ecs::core::component::component_registry::MAX_COMPONENTS;
-use crate::ecs::core::entity::entity_inland::EntityInland;
 use crate::ecs::core::iters::MAX_ARCHETYPES;
 use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId, InlandArchetypeId};
 use crate::ecs::memory::arena::Arena;
@@ -505,27 +504,6 @@ impl ArchetypeBundle {
         true
     }
 
-    /// Returns the archetype owning `entity_inland`, if any.
-    ///
-    /// Reads the legacy `archetype_id()` accessor on `EntityInland` and
-    /// delegates to [`Self::get_archetype`]. Preserved for callers in
-    /// `entity_master.rs` during the Phase 7 shim window; once Step 9 drops
-    /// the legacy inland the method goes with it.
-    #[inline]
-    pub fn get_entity_archetype(&self, entity_inland: &EntityInland) -> Option<&Archetype> {
-        self.get_archetype(entity_inland.archetype_id())
-    }
-
-    /// Returns a unique reference to the archetype owning `entity_inland`,
-    /// if any. Same shim status as [`Self::get_entity_archetype`].
-    #[inline]
-    pub fn get_entity_archetype_mut(
-        &mut self,
-        entity_inland: &EntityInland,
-    ) -> Option<&mut Archetype> {
-        self.get_archetype_mut(entity_inland.archetype_id())
-    }
-
     /// Returns the number of occupied archetype slots.
     #[inline]
     pub fn len(&self) -> usize {
@@ -796,22 +774,6 @@ impl Index<ArchetypeId> for ArchetypeBundle {
 impl IndexMut<ArchetypeId> for ArchetypeBundle {
     fn index_mut(&mut self, index: ArchetypeId) -> &mut Self::Output {
         self.get_archetype_mut(index).expect("Archetype not found")
-    }
-}
-
-impl Index<&EntityInland> for ArchetypeBundle {
-    type Output = Archetype;
-
-    fn index(&self, entity_inland: &EntityInland) -> &Self::Output {
-        self.get_entity_archetype(entity_inland)
-            .expect("Entity not registered with any archetype")
-    }
-}
-
-impl IndexMut<&EntityInland> for ArchetypeBundle {
-    fn index_mut(&mut self, entity_inland: &EntityInland) -> &mut Self::Output {
-        self.get_entity_archetype_mut(entity_inland)
-            .expect("Entity not registered with any archetype")
     }
 }
 
