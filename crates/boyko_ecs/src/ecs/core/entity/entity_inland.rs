@@ -152,14 +152,21 @@ impl EntityInlandFast {
         self.generation = self.generation.wrapping_add(1);
     }
 
-    /// Test-only constructor producing a record with a null
-    /// `archetype_ptr`. Used by the Phase-7 step-10 migration recipe
-    /// (M1) for unit tests that need an inland value but cannot
-    /// realistically spin up an `ArchetypeBundle`.
+    /// Test-only constructor producing a record with a **dangling but
+    /// non-null** `archetype_ptr`. The pointer is never dereferenced;
+    /// `is_null()` returns `false`, distinguishing a test "live but
+    /// synthetic" inland from a real `NULL`-sentinel dead slot. Used by
+    /// the Phase-7 step-10 migration recipe (M1) for unit tests that
+    /// need an inland value but cannot realistically spin up an
+    /// `ArchetypeBundle`.
     #[cfg(test)]
-    pub(crate) fn dangling_for_test(generation: u32, unit_index: u32) -> Self {
+    #[allow(dead_code)] // Wired into M1 test migration at Phase 7 Step 10.
+    pub(crate) fn dangling_for_test(unit_index: u32, generation: u32) -> Self {
         Self {
-            archetype_ptr: ptr::null_mut(),
+            archetype_ptr: ptr::NonNull::<
+                crate::ecs::core::archetype::archetype::Archetype,
+            >::dangling()
+            .as_ptr(),
             unit_index,
             generation,
         }

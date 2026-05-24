@@ -112,30 +112,51 @@ pub struct Archetype {
     /// without touching `component_pools` (Phase 7 D4). For every `ComponentId`
     /// that is NOT in this archetype, the slot stays `Column::null()`; null is
     /// the single source of truth for "absent column".
-    columns: [Column; MAX_COMPONENTS],
+    ///
+    /// `pub(crate)` so `ArchetypeBundle::add_archetype_from_components` can
+    /// reach the field via `addr_of_mut!((*slot_ptr).columns)` for in-place
+    /// slab initialisation (Phase 7 W6 / U13). Outside the crate the layout
+    /// is opaque.
+    pub(crate) columns: [Column; MAX_COMPONENTS],
 
-    /// Unique identifier for this archetype
-    id: ArchetypeId,
+    /// Unique identifier for this archetype.
+    ///
+    /// `pub(crate)` for the same reason as `columns` — in-place initialisation
+    /// of slab slots from `ArchetypeBundle` requires field-by-field writes via
+    /// `addr_of_mut!` (Phase 7 U13).
+    pub(crate) id: ArchetypeId,
 
-    /// Storage for components organized by component type
-    component_pools: ComponentPoolBundle,
+    /// Storage for components organized by component type.
+    ///
+    /// `pub(crate)` for in-place slab construction (Phase 7 U13).
+    pub(crate) component_pools: ComponentPoolBundle,
 
-    /// Current index for the next entity (equals number of entities)
-    current_index: usize,
+    /// Current index for the next entity (equals number of entities).
+    ///
+    /// `pub(crate)` for in-place slab construction (Phase 7 U13).
+    pub(crate) current_index: usize,
 
-    /// Component signature for this archetype (bit mask of component IDs)
-    signature: ArchetypeSignature,
+    /// Component signature for this archetype (bit mask of component IDs).
+    ///
+    /// `pub(crate)` for in-place slab construction (Phase 7 U13).
+    pub(crate) signature: ArchetypeSignature,
 
     /// Raw provenance pointer to the arena used for memory allocation.
     /// Stored as `*const Arena` (raw provenance) to avoid Miri retag UB:
     /// see Phase 3a Miri retag fix in `ecs_master.rs` field-level doc.
-    arena: *const Arena,
+    ///
+    /// `pub(crate)` for in-place slab construction (Phase 7 U13).
+    pub(crate) arena: *const Arena,
 
-    /// Set of component IDs in this archetype for efficient iteration
-    component_ids: Vec<ComponentId>,
-    /// Vector of entity IDs, indexed by unit_index
-    /// This allows O(1) access to entity ID by unit index
-    entity_ids: Vec<EntityId>,
+    /// Set of component IDs in this archetype for efficient iteration.
+    ///
+    /// `pub(crate)` for in-place slab construction (Phase 7 U13).
+    pub(crate) component_ids: Vec<ComponentId>,
+    /// Vector of entity IDs, indexed by unit_index.
+    /// Allows O(1) access to entity ID by unit index.
+    ///
+    /// `pub(crate)` for in-place slab construction (Phase 7 U13).
+    pub(crate) entity_ids: Vec<EntityId>,
 }
 
 // Phase 7 U5 / D4: the inline column table MUST be at offset 0 so the fast
@@ -243,6 +264,20 @@ impl Archetype {
         self.component_ids.push(component_id);
 
         true
+    }
+
+    /// Phase 7 Step 4 helper: registers the component pool for `component_id`
+    /// without touching `signature` or `component_ids` (callers like in-place
+    /// slab construction in `ArchetypeBundle::add_archetype_from_components`
+    /// pre-populate those fields, so a full `register_component` call would
+    /// early-return on the signature check).
+    ///
+    /// Calls `component_pools.add_pool(arena, component_id)` and refreshes the
+    /// inline column entry. Intended exclusively for in-place archetype
+    /// construction — the bundle resides in the same crate (`pub(crate)`).
+    pub(crate) fn register_component_inplace(&mut self, component_id: ComponentId, arena: &Arena) {
+        self.component_pools.add_pool(arena, component_id);
+        self.refresh_column(component_id);
     }
 
     /// Re-syncs `columns[component_id.0]` with the current pool state.
