@@ -164,10 +164,10 @@ impl EcsMaster {
     ///    the `create_entity` call) to push the new row.
     /// 4. On rejection, rewind the entity-id allocation (C-007 rewind path).
     /// 5. On success, register the entity in BOTH stores: the legacy
-    ///    `entity_map` (for compatibility with the legacy read path) and
-    ///    the Phase 7 fast store (for `get_component_raw_fast` and friends).
-    ///    Step 8 switches the legacy read path to the fast store; Step 9
-    ///    deletes the legacy registration here.
+    ///    `entity_map` (kept alive to back `get_entity`, `delete_entity`
+    ///    and `query_entities`) and the Phase 7 fast store (read path of
+    ///    `get_component_raw`, `has_entity`, and friends). Step 9 removes
+    ///    the legacy registration here and deletes the legacy fields.
     ///
     /// Audit: C-010 — switched from Vec to &[...].
     pub fn create_entity(
@@ -226,12 +226,12 @@ impl EcsMaster {
 
         // Step 5 of W7: dual-store registration during the Phase 7 transition.
         //   - register_entity populates the legacy entity_map so the legacy
-        //     read path (get_component_raw, has_entity, …) keeps working
-        //     through Step 7.
-        //   - register_entity_with_ptr populates the new fast store
-        //     consumed by get_component_raw_fast and friends.
-        // Step 8 redirects the legacy read methods to the fast store; Step 9
-        // removes the legacy register_entity call here and deletes the
+        //     paths still in use (delete_entity / get_entity / query_entities)
+        //     keep working through Step 8.
+        //   - register_entity_with_ptr populates the fast store consumed by
+        //     get_component_raw, has_entity, set_component_raw, and the
+        //     typed get_component<T> / get_component_mut<T> wrappers.
+        // Step 9 removes the legacy register_entity call here and deletes the
         // legacy fields entirely.
         self.entity_master.register_entity(
             entity,
@@ -384,16 +384,7 @@ impl EcsMaster {
         }
     }
 
-    // ── Phase 7 Step 7: fast random-access read path ─────────────────────────
-    //
-    // The `*_fast` methods below resolve a component pointer in 3-4 cache
-    // lines by going through `EntityMaster.entities_inland_fast`
-    // (Vec-indexed by EntityId) and `Archetype.columns` (inline lookup
-    // table at offset 0). They are the Step 8 replacement bodies; in
-    // Step 7 they live side-by-side with the legacy methods so the
-    // dual-store invariant remains testable.
-
-    /// Phase 7 fast random access: 3-4 cache lines, ~12-16 ns target.
+    /// Fast random access read: 3-4 cache lines, ~12-16 ns target.
     ///
     /// Lookup sequence:
     ///   1. `entity_master.entities_inland_fast[entity.id().0]` — 1 line.
@@ -408,7 +399,7 @@ impl EcsMaster {
     /// components (column is null), or never-registered entities
     /// (archetype_ptr is null).
     #[inline]
-    pub fn get_component_raw_fast(
+    pub fn get_component_raw(
         &self,
         entity: Entity,
         component_id: ComponentId,
@@ -451,7 +442,7 @@ impl EcsMaster {
     /// 16 B to drop the `EntityMaster` borrow before reborrowing the slab
     /// pointer as `&mut Archetype` (W4 / U14).
     #[inline]
-    pub fn get_component_raw_mut_fast(
+    pub fn get_component_raw_mut(
         &mut self,
         entity: Entity,
         component_id: ComponentId,
@@ -474,13 +465,13 @@ impl EcsMaster {
         //     live borrow into the slot exists.
         let archetype = unsafe { &mut *inland.archetype_ptr() };
 
-        // SAFETY (U4): same as get_component_raw_fast.
+        // SAFETY (U4): same as get_component_raw.
         let column = unsafe { archetype.columns.get_unchecked(component_id.0) };
         if column.ptr.is_null() {
             return None;
         }
 
-        // SAFETY (U5, U6, U10): same as get_component_raw_fast plus
+        // SAFETY (U5, U6, U10): same as get_component_raw plus
         //   &mut self exclusivity ⇒ the returned *mut points to a uniquely
         //   accessible byte range.
         Some(unsafe {
@@ -488,31 +479,22 @@ impl EcsMaster {
         })
     }
 
-    /// Phase 7 fast existence check: 1 cache line, ~5 ns target.
-    #[inline]
-    pub fn has_entity_fast(&self, entity: Entity) -> bool {
-        let Some(inland) = self.entity_master.entities_inland_fast.get(entity.id().0) else {
-            return false;
-        };
-        !inland.is_null() && inland.generation() == entity.generation()
-    }
-
-    /// Phase 7 fast component write: `~15-18 ns` target. Returns `false`
+    /// Fast component write: `~15-18 ns` target. Returns `false`
     /// for stale entities, missing components, or never-registered entities.
     /// On success, byte-copies the provided slice into the component slot.
     ///
     /// `component_bytes.len()` must equal the pool's stride; mismatched
     /// sizes produce undefined behavior in release. Callers should obtain
     /// the slice from a properly-sized `&T` for the target component type
-    /// (see `set_component<T>` typed wrappers in future steps).
+    /// (see [`get_component_mut`] typed wrappers).
     #[inline]
-    pub fn set_component_raw_fast(
+    pub fn set_component_raw(
         &mut self,
         entity: Entity,
         component_id: ComponentId,
         component_bytes: &[u8],
     ) -> bool {
-        let Some(dst) = self.get_component_raw_mut_fast(entity, component_id) else {
+        let Some(dst) = self.get_component_raw_mut(entity, component_id) else {
             return false;
         };
         // Stride is not re-queried here; the size invariant lives at the
@@ -524,7 +506,7 @@ impl EcsMaster {
         // SAFETY (U5, U6, U10):
         //   - dst is a valid *mut u8 to a byte range of size `stride` for
         //     the target component (U5/U6 — column resolved through the
-        //     same fast path as get_component_raw_mut_fast).
+        //     same fast path as get_component_raw_mut).
         //   - The caller's slice is sized to match by API contract; typed
         //     wrappers enforce this via `size_of::<T>()`.
         //   - Single-threaded &mut self ⇒ no concurrent reader.
@@ -537,7 +519,7 @@ impl EcsMaster {
         true
     }
 
-    /// Phase 7 typed read accessor. Returns a shared reference to the
+    /// Typed read accessor. Returns a shared reference to the
     /// component of type `T` owned by `entity`, or `None` if the entity is
     /// stale, the archetype does not host `T`, or the entity was never
     /// registered.
@@ -546,7 +528,7 @@ impl EcsMaster {
         &self,
         entity: Entity,
     ) -> Option<&T> {
-        let raw = self.get_component_raw_fast(entity, T::component_id())?;
+        let raw = self.get_component_raw(entity, T::component_id())?;
         // SAFETY: the pool was registered with T::component_id(), so the
         //   bytes at `raw` are a valid `T` (M-001 drop-fn / layout guarantee
         //   from the component registry). The lifetime of the returned
@@ -554,62 +536,27 @@ impl EcsMaster {
         Some(unsafe { &*(raw as *const T) })
     }
 
-    /// Phase 7 typed mutable accessor. Symmetric counterpart of
+    /// Typed mutable accessor. Symmetric counterpart of
     /// [`get_component`] returning `&mut T`.
     #[inline]
     pub fn get_component_mut<T: crate::ecs::core::component::component::Component>(
         &mut self,
         entity: Entity,
     ) -> Option<&mut T> {
-        let raw = self.get_component_raw_mut_fast(entity, T::component_id())?;
+        let raw = self.get_component_raw_mut(entity, T::component_id())?;
         // SAFETY: same as get_component, plus &mut self ⇒ exclusive access.
         Some(unsafe { &mut *(raw as *mut T) })
     }
 
-    /// Gets a raw pointer to a component for the specified entity
-    #[inline]
-    pub fn get_component_raw(&self, entity: Entity, component_id: ComponentId) -> Option<*const u8> {
-        // Get EntityInland from the master
-        let entity_inland = self.entity_master.get_entity_inland(entity)?;
-
-        // Get the archetype and component
-        let archetype = self.archetype_master.get_archetype(entity_inland.archetype_id())?;
-        archetype.get_component_raw(entity_inland, component_id)
-    }
-
-    /// Gets a mutable raw pointer to a component for the specified entity
-    #[inline]
-    pub fn get_component_raw_mut(&mut self, entity: Entity, component_id: ComponentId) -> Option<*mut u8> {
-        // Get EntityInland from the master
-        let entity_inland = *self.entity_master.get_entity_inland(entity)?;
-
-        // Get the archetype and component
-        let archetype = self.archetype_master.get_archetype_mut(entity_inland.archetype_id())?;
-        archetype.get_component_raw_mut(&entity_inland, component_id)
-    }
-
-    /// Sets the value of a component for the specified entity
-    /// Returns true if the component was successfully set
-    #[inline]
-    pub fn set_component_raw(
-        &mut self, 
-        entity: Entity, 
-        component_id: ComponentId, 
-        component_bytes: &[u8]
-    ) -> bool {
-        // Get EntityInland from the master
-        if let Some(entity_inland) = self.entity_master.get_entity_inland(entity).copied()
-            && let Some(archetype) = self.archetype_master.get_archetype_mut(entity_inland.archetype_id())
-        {
-            return archetype.set_component(&entity_inland, component_id, component_bytes);
-        }
-        false
-    }
-
-    /// Checks if an entity exists with matching generation
+    /// Fast existence check: 1 cache line, ~5 ns target. Returns `true`
+    /// iff the slot for `entity.id()` is live AND its stored generation
+    /// matches the handle.
     #[inline]
     pub fn has_entity(&self, entity: Entity) -> bool {
-        self.entity_master.is_entity_valid(entity)
+        let Some(inland) = self.entity_master.entities_inland_fast.get(entity.id().0) else {
+            return false;
+        };
+        !inland.is_null() && inland.generation() == entity.generation()
     }
 
     /// Gets an entity by ID if it exists and is active
@@ -618,22 +565,40 @@ impl EcsMaster {
         self.entity_master.get_entity(entity_id)
     }
 
-    /// Checks if an entity has a specific component
+    /// Checks if an entity has a specific component.
+    ///
+    /// Uses the fast inland + column lookup: a null `column.ptr` is the
+    /// single source of truth for "archetype does not host this component".
     #[inline]
     pub fn has_component(&self, entity: Entity, component_id: ComponentId) -> bool {
-        if let Some(entity_inland) = self.entity_master.get_entity_inland(entity)
-            && let Some(archetype) = self.archetype_master.get_archetype(entity_inland.archetype_id())
-        {
-            return archetype.has_component_id(component_id);
+        let Some(inland) = self.entity_master.entities_inland_fast.get(entity.id().0) else {
+            return false;
+        };
+        if inland.is_null() || inland.generation() != entity.generation() {
+            return false;
         }
-        false
+        // SAFETY (U1, U2, U11): archetype_ptr is stable slab provenance.
+        let archetype = unsafe { &*inland.archetype_ptr() };
+        if component_id.0 >= MAX_COMPONENTS {
+            return false;
+        }
+        // SAFETY (U4): bounded by check above.
+        !unsafe { archetype.columns.get_unchecked(component_id.0) }.ptr.is_null()
     }
 
-    /// Gets the archetype ID containing the specified entity
+    /// Gets the archetype ID containing the specified entity.
+    ///
+    /// Derives the id from the fast inland's slab pointer via
+    /// [`Archetype::id`] — no SparseMap traversal.
     #[inline]
     pub fn get_entity_archetype_id(&self, entity: Entity) -> Option<ArchetypeId> {
-        self.entity_master.get_entity_inland(entity)
-            .map(|inland| inland.archetype_id())
+        let inland = self.entity_master.entities_inland_fast.get(entity.id().0)?;
+        if inland.is_null() || inland.generation() != entity.generation() {
+            return None;
+        }
+        // SAFETY (U1, U2, U11): same as get_component_raw.
+        let archetype = unsafe { &*inland.archetype_ptr() };
+        Some(archetype.id())
     }
 
     /// Gets the total number of active entities in the system
@@ -681,47 +646,79 @@ impl EcsMaster {
         result
     }
 
-    /// Gets raw pointers to multiple components for an entity
-    /// Returns a vector of (ComponentId, *const u8) pairs
+    /// Gets raw pointers to multiple components for an entity.
+    ///
+    /// Resolves the inland record once, then walks `component_ids` reading
+    /// the cached `Column` table inline. Returns `(ComponentId, *const u8)`
+    /// pairs only for components actually hosted by the entity's archetype.
     pub fn get_components_raw(
-        &self, 
-        entity: Entity, 
-        component_ids: &[ComponentId]
+        &self,
+        entity: Entity,
+        component_ids: &[ComponentId],
     ) -> Vec<(ComponentId, *const u8)> {
         let mut result = Vec::with_capacity(component_ids.len());
-        
-        if let Some(entity_inland) = self.entity_master.get_entity_inland(entity)
-            && let Some(archetype) = self.archetype_master.get_archetype(entity_inland.archetype_id())
-        {
-            for &component_id in component_ids {
-                if let Some(ptr) = archetype.get_component_raw(entity_inland, component_id) {
-                    result.push((component_id, ptr));
-                }
-            }
+        let Some(inland) = self.entity_master.entities_inland_fast.get(entity.id().0) else {
+            return result;
+        };
+        if inland.is_null() || inland.generation() != entity.generation() {
+            return result;
         }
-
+        // SAFETY (U1, U2, U11): archetype_ptr is stable slab provenance.
+        let archetype = unsafe { &*inland.archetype_ptr() };
+        let unit_index = inland.unit_index() as usize;
+        for &component_id in component_ids {
+            if component_id.0 >= MAX_COMPONENTS {
+                continue;
+            }
+            // SAFETY (U4): bounded by check above.
+            let column = unsafe { archetype.columns.get_unchecked(component_id.0) };
+            if column.ptr.is_null() {
+                continue;
+            }
+            // SAFETY (U5, U6, U10): same as get_component_raw.
+            let ptr = unsafe { column.ptr.add(unit_index * column.stride as usize) } as *const u8;
+            result.push((component_id, ptr));
+        }
         result
     }
 
-    /// Gets mutable raw pointers to multiple components for an entity
-    /// Returns a vector of (ComponentId, *mut u8) pairs
+    /// Gets mutable raw pointers to multiple components for an entity.
+    ///
+    /// Mutable counterpart of [`get_components_raw`]; the inland is copied
+    /// by value (16 B) to release the `entity_master` borrow before the
+    /// `archetype_ptr` is reborrowed as `&mut Archetype` (W4 / U14).
     pub fn get_components_raw_mut(
         &mut self,
         entity: Entity,
-        component_ids: &[ComponentId]
+        component_ids: &[ComponentId],
     ) -> Vec<(ComponentId, *mut u8)> {
         let mut result = Vec::with_capacity(component_ids.len());
-
-        if let Some(entity_inland) = self.entity_master.get_entity_inland(entity).copied()
-            && let Some(archetype) = self.archetype_master.get_archetype_mut(entity_inland.archetype_id())
+        let inland: EntityInlandFast = match self.entity_master.entities_inland_fast
+            .get(entity.id().0)
         {
-            for &component_id in component_ids {
-                if let Some(ptr) = archetype.get_component_raw_mut(&entity_inland, component_id) {
-                    result.push((component_id, ptr));
-                }
-            }
+            Some(i) => *i,
+            None => return result,
+        };
+        if inland.is_null() || inland.generation() != entity.generation() {
+            return result;
         }
-
+        // SAFETY (U1, U2, U11, U14): write-capable slab provenance under
+        //   &mut self; no other live borrow into this slot.
+        let archetype = unsafe { &mut *inland.archetype_ptr() };
+        let unit_index = inland.unit_index() as usize;
+        for &component_id in component_ids {
+            if component_id.0 >= MAX_COMPONENTS {
+                continue;
+            }
+            // SAFETY (U4): bounded by check above.
+            let column = unsafe { archetype.columns.get_unchecked(component_id.0) };
+            if column.ptr.is_null() {
+                continue;
+            }
+            // SAFETY (U5, U6, U10): same as get_component_raw_mut.
+            let ptr = unsafe { column.ptr.add(unit_index * column.stride as usize) };
+            result.push((component_id, ptr));
+        }
         result
     }
 
