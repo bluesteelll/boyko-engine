@@ -555,7 +555,13 @@ mod tests {
 
         // Attempt to create an entity in archetype 999 (never created).
         let result = ecs.create_entity(999, &[(POSITION_ID, &dummy_bytes)]);
-        assert!(result.is_err(), "should fail for unknown archetype");
+        // C-019: caller can pattern-match on the concrete EcsError variant
+        // (not just `is_err`) — the whole point of switching off `anyhow`.
+        assert!(
+            matches!(result, Err(EcsError::ArchetypeNotFound(999))),
+            "expected Err(ArchetypeNotFound(999)), got {:?}",
+            result
+        );
 
         // No EntityId must have been allocated: next fresh id stays at 0.
         assert_eq!(ecs.entity_master().next_entity_id(), 0,
