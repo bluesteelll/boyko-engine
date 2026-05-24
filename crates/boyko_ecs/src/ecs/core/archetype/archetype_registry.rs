@@ -57,7 +57,7 @@ impl ArchetypeRegistry {
         let signature = ArchetypeSignature::new(mask);
 
         // Get 8-bit block summary as index
-        let pattern_byte = signature.block_summary.value();
+        let pattern_byte = signature.block_summary().value();
         let block_pattern = pattern_byte as usize;
 
         // If this is a new pattern, add it to active patterns list
@@ -139,7 +139,7 @@ impl ArchetypeRegistry {
 
         for &pattern in &self.active_patterns {
             // If (query & !pattern) != 0 the query requires a block the pattern lacks.
-            if (query.block_summary.value() & !pattern) == 0 {
+            if (query.block_summary().value() & !pattern) == 0 {
                 let pattern_index = pattern as usize;
                 if let Some(group) = self.block_groups.get(pattern_index) {
                     for &(id, ref signature) in group {
@@ -172,11 +172,11 @@ impl ArchetypeRegistry {
     pub fn find_exact_match_into(&self, mask: &ComponentMask, out: &mut Vec<ArchetypeId>) {
         out.clear();
         let query = ArchetypeSignature::new(*mask);
-        let block_pattern = query.block_summary.value() as usize;
+        let block_pattern = query.block_summary().value() as usize;
 
         if let Some(group) = self.block_groups.get(block_pattern) {
             for (id, signature) in group {
-                if signature.mask == query.mask {
+                if signature.mask() == query.mask() {
                     out.push(*id);
                 }
             }
@@ -369,13 +369,13 @@ impl ArchetypeRegistry {
                 return false;
             };
             if !exclude_mask.is_empty() {
-                let intersection = &signature.mask & exclude_mask;
+                let intersection = signature.mask() & exclude_mask;
                 if !intersection.is_empty() {
                     return false;
                 }
             }
             if !optional_mask.is_empty() {
-                let intersection = &signature.mask & optional_mask;
+                let intersection = signature.mask() & optional_mask;
                 if intersection.is_empty() {
                     return false;
                 }
@@ -863,10 +863,10 @@ mod tests {
 
         // get_archetype_signature must return correct signatures for A and C
         let sig_a = registry.get_archetype_signature(10).expect("A must be present");
-        assert!(sig_a.mask.contains(1) && sig_a.mask.contains(2));
+        assert!(sig_a.mask().contains(1) && sig_a.mask().contains(2));
 
         let sig_c = registry.get_archetype_signature(30).expect("C must be present");
-        assert!(sig_c.mask.contains(1) && sig_c.mask.contains(2) && sig_c.mask.contains(4));
+        assert!(sig_c.mask().contains(1) && sig_c.mask().contains(2) && sig_c.mask().contains(4));
     }
 
     #[test]

@@ -43,7 +43,7 @@ pub struct ComponentPool {
     units: Vec<Unit>,
 
     /// Chunk metadata.
-    pub chunks: Vec<Chunk>,
+    chunks: Vec<Chunk>,
 
     /// Components per chunk.
     components_per_chunk: usize,
@@ -561,6 +561,13 @@ impl ComponentPool {
     #[inline]
     pub fn chunks_count(&self) -> usize {
         self.chunks.len()
+    }
+
+    /// Returns the chunk metadata slice. Pool internals manage chunk state;
+    /// external code should not mutate chunks directly.
+    #[inline]
+    pub fn chunks(&self) -> &[Chunk] {
+        &self.chunks
     }
 
     /// Gets the component ID.

@@ -4,9 +4,9 @@ use boyko_utils::bit_mask::bit_set::BitSet;
 use std::ops::{BitAnd, BitOr, BitXor, Not};
 /// 512-bit component mask
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(align(32))] 
+#[repr(align(32))]
 pub struct ComponentMask {
-    pub blocks: [BitSet<u64>; 8],
+    blocks: [BitSet<u64>; 8],
 }
 
 impl Default for ComponentMask {
@@ -19,7 +19,13 @@ impl ComponentMask {
     pub fn new() -> Self {
         Self { blocks: [BitSet::new(); 8] }
     }
-    
+
+    /// Returns the 64-bit block at `index` (0..8). Each block covers 64 component IDs.
+    #[inline]
+    pub fn block(&self, index: usize) -> BitSet<u64> {
+        self.blocks[index]
+    }
+
     #[inline]
     pub fn set(&mut self, component_id: ComponentId) {
         debug_assert!(

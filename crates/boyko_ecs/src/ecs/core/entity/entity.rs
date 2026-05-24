@@ -3,8 +3,8 @@ use crate::ecs::identifiers::primitives::EntityId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Entity {
-    pub id: EntityId,
-    pub generation: usize,
+    id: EntityId,
+    generation: usize,
 }
 
 impl Entity {
@@ -19,11 +19,13 @@ impl Entity {
         Self { id, generation: 0 }
     }
 
+    /// Returns the entity's unique slot index.
     #[inline]
     pub fn id(&self) -> EntityId {
         self.id
     }
 
+    /// Returns the entity's generation counter, used to detect stale handles.
     #[inline]
     pub fn generation(&self) -> usize {
         self.generation

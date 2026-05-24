@@ -122,7 +122,7 @@ impl Archetype {
     /// Registers a component type by ID
     pub fn register_component(&mut self, component_id: ComponentId) -> bool {
         // Check if this component type is already registered
-        if self.signature.mask.contains(component_id) {
+        if self.signature.mask().contains(component_id) {
             return false;
         }
 
@@ -138,7 +138,7 @@ impl Archetype {
         self.component_pools.add_pool(arena, component_id);
         
         // Update signature mask
-        let mut new_mask = self.signature.mask;
+        let mut new_mask = *self.signature.mask();
         new_mask.set(component_id);
         self.signature = ArchetypeSignature::new(new_mask);
         
@@ -151,7 +151,7 @@ impl Archetype {
     /// Checks if this archetype contains a component with the given ID
     #[inline]
     pub fn has_component_id(&self, component_id: ComponentId) -> bool {
-        self.signature.mask.contains(component_id)
+        self.signature.mask().contains(component_id)
     }
 
     /// Gets the number of component types in this archetype
@@ -195,7 +195,7 @@ impl Archetype {
             "Archetype::create_entity input contains duplicate ComponentId"
         );
 
-        if !self.signature.mask.is_subset(&input_mask) {
+        if !self.signature.mask().is_subset(&input_mask) {
             return false; // at least one required component is absent from input
         }
         
@@ -328,7 +328,7 @@ impl Archetype {
     /// Gets the component mask for this archetype
     #[inline]
     pub fn component_mask(&self) -> &ComponentMask {
-        &self.signature.mask
+        self.signature.mask()
     }
     
     /// Gets the slice of component IDs for this archetype
@@ -341,7 +341,7 @@ impl Archetype {
     pub fn matches_component_ids(&self, component_ids: &[ComponentId]) -> bool {
         // Check if this archetype contains all the requested components
         for &comp_id in component_ids {
-            if !self.signature.mask.contains(comp_id) {
+            if !self.signature.mask().contains(comp_id) {
                 return false;
             }
         }
