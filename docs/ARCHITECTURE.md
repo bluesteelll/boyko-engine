@@ -40,7 +40,8 @@ boyko-engine/
 │   │           │   ├── ecs_master/       # EcsMaster — top-level facade
 │   │           │   ├── iters/            # Query, QueryState, ArchetypeBitSet, ComponentSet
 │   │           │   ├── events/           # Event trait + EventPool/EventRegistry, Participants, Parameters
-│   │           │   └── containers/tuple/ # ComponentTuple for batch operations
+│   │           │   # (containers/tuple/ removed in Q-024 — orphan 0-byte stubs,
+│   │           │   #  never wired into mod.rs; ComponentTuple planned as Phase 2e)
 │   │           └── memory/
 │   │               ├── arena.rs              # 64 MB arena with best-fit allocator
 │   │               ├── free_mem_block.rs     # free-block tracker

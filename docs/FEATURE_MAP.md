@@ -86,7 +86,7 @@ First point of contact for agents. When looking for where a particular piece of 
 | Get a layout from the registry | [core/component/component_registry.rs](../crates/boyko_ecs/src/ecs/core/component/component_registry.rs) ✅ | `get_layout(id)`, `get_layout_unchecked(id)` |
 | Bitmask of a component set | [core/component/component_mask.rs](../crates/boyko_ecs/src/ecs/core/component/component_mask.rs) ✅ | `ComponentMask` (built on `BitSet512`) |
 | Bundle pools of different types for one archetype | [core/component/component_pool_bundle.rs](../crates/boyko_ecs/src/ecs/core/component/component_pool_bundle.rs) ✅ | `ComponentPoolBundle` |
-| Tuple-based bundle | [core/containers/tuple/component_tuple.rs](../crates/boyko_ecs/src/ecs/core/containers/tuple/component_tuple.rs) ✅ | `ComponentTuple` |
+| Tuple-based bundle | — | ❌ **not implemented** — see Phase 2e in `docs/ROADMAP-PHASE-2-PLUS.md`. The orphan `containers/tuple/` directory (empty files, unwired from `mod.rs`) was removed in Q-024. |
 
 ---
 

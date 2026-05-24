@@ -235,6 +235,19 @@ against edge cases, future refactors, and adversarial inputs.
 on a product decision; once decided, 1-3 sessions depending on
 direction.
 
+### Phase 2e — ComponentTuple ergonomic bundle API (Q-024-future)
+
+**Status**: open — design pending.
+
+| ID | Site | Issue | Solution direction |
+|----|------|-------|--------------------|
+| **Q-024** | `containers/tuple/` (removed) | Orphan 0-byte stubs `component_tuple.rs` + `component_tuple_trait.rs` were never wired into `mod.rs`; removed in Q-024 cleanup | Design `ComponentTuple`: a type-safe tuple wrapper that maps to `ComponentId` bundles, enabling ergonomic `world.spawn((Position { .. }, Velocity { .. }))` API without raw byte slices. Depends on Phase 2d (`(&T, &U)` tuple generics are shared infrastructure). Cycle: researcher → architect → critic → developer → tester → results-analyst. |
+
+**Dependency**: Phase 2d (per-entity query iter) — both features rely on tuple-over-generics
+infrastructure (variadic trait impls up to N=12). Design them in the same architect cycle.
+
+**Effort estimate**: 1-2 sessions after Phase 2d is implemented.
+
 ### Phase 3c — Unit / pool internals (3 findings)
 
 | ID | Site | Issue | Fix |

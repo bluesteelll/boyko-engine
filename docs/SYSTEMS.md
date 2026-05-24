@@ -450,14 +450,17 @@ Same storage model as `ParticipantBuffer`. `push_raw` / `get_raw` removed.
 
 ---
 
-## 9. Containers (boyko_ecs::core::containers) ✅
+## 9. Containers (boyko_ecs::core::containers) ❌ not implemented
 
-### ComponentTuple
+### ComponentTuple ❌ not implemented
 
-- [containers/tuple/component_tuple.rs](../crates/boyko_ecs/src/ecs/core/containers/tuple/component_tuple.rs)
-- [containers/tuple/component_tuple_trait.rs](../crates/boyko_ecs/src/ecs/core/containers/tuple/component_tuple_trait.rs)
+Previously this section claimed two orphan files (`containers/tuple/component_tuple.rs`,
+`containers/tuple/component_tuple_trait.rs`) as "✅ implemented". Both files were
+0-byte stubs, `containers/mod.rs` did not exist, and `core/mod.rs` never declared
+`pub mod containers;` — the compiler never saw the subtree. **Removed in Q-024.**
 
-Tuple-based component bundle for batch operations / ergonomic API.
+The replacement — a tuple-based ergonomic bundle API (planned name `ComponentTuple`)
+— is tracked as Phase 2e (see `docs/ROADMAP-PHASE-2-PLUS.md`).
 
 ---
 
