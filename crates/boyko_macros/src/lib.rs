@@ -14,7 +14,9 @@ use syn::{parse_macro_input, DeriveInput, Fields, Ident, ItemStruct};
 /// algorithm and startup warm-up contract.
 ///
 /// # Example
-/// ```rust
+///
+/// ```ignore
+/// // Used from a downstream crate that depends on `boyko-ecs` + `boyko-macros`.
 /// #[derive(Component)]
 /// struct Position {
 ///     x: f32,
@@ -22,6 +24,10 @@ use syn::{parse_macro_input, DeriveInput, Fields, Ident, ItemStruct};
 ///     z: f32,
 /// }
 /// ```
+///
+/// The example is `ignore`'d because proc-macro crates cannot consume their own
+/// macros, and `boyko-macros` cannot depend on `boyko-ecs` (that would create a
+/// cycle). Real usage lives in `boyko-ecs` integration tests.
 #[proc_macro_derive(Component)]
 pub fn component_macro(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -106,7 +112,9 @@ pub fn component_macro(input: TokenStream) -> TokenStream {
 /// are forwarded to the outer struct only — same as `#[derive]`.
 ///
 /// # Example
-/// ```rust
+///
+/// ```ignore
+/// // Used from a downstream crate that depends on `boyko-ecs` + `boyko-macros`.
 /// #[event]
 /// struct DamageEvent {
 ///     #[participant(components = "Position, Health")]
@@ -115,6 +123,10 @@ pub fn component_macro(input: TokenStream) -> TokenStream {
 ///     amount: f32,
 /// }
 /// ```
+///
+/// The example is `ignore`'d for the same reason as `#[derive(Component)]`:
+/// proc-macro crates cannot pull in their own consumers. End-to-end tests live
+/// in `boyko-ecs/tests/event_attribute.rs`.
 #[proc_macro_attribute]
 pub fn event(_args: TokenStream, input: TokenStream) -> TokenStream {
     let input2: proc_macro2::TokenStream = input.clone().into();
