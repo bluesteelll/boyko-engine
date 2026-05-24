@@ -181,6 +181,107 @@ impl EcsMaster {
         Ok(entity)
     }
 
+    /// Type-safe wrapper around [`create_entity`] for a single component (Phase 2e — Q-024 follow-up).
+    ///
+    /// The caller supplies the value by move; this function reads its bytes via
+    /// `std::slice::from_raw_parts` and forwards to `create_entity`. No heap
+    /// allocation, no `Vec` materialisation, no manual `ComponentId` lookup.
+    ///
+    /// ```ignore
+    /// // Before:
+    /// ecs.create_entity(arch_id, &[(Position::component_id(), &pos_bytes)])
+    /// // After:
+    /// ecs.spawn_one(arch_id, Position { x: 1.0, y: 2.0, z: 3.0 })
+    /// ```
+    ///
+    /// # Drop discipline
+    ///
+    /// On success, `a` is byte-copied into the pool by `ComponentPool::add`
+    /// (`ptr::copy_nonoverlapping`) and the pool's registered `drop_fn` (set up
+    /// by `register_layout::<A>`, M-001) becomes the new drop owner. The local
+    /// `a` value must NOT run its destructor — `std::mem::forget(a)` suppresses
+    /// the local drop only on the Ok path.
+    ///
+    /// On failure, NO bytes were copied into the pool (the failure modes are
+    /// either an early `ArchetypeNotFound` guard or a pool rejection that
+    /// rewinds without writing). `a` retains its full identity and runs its
+    /// destructor at function-exit scope as usual — no leak, no double-free.
+    ///
+    /// Mirrors `Query::iter_one` (Phase 2d) on the spawn side: bounded 1-arity
+    /// API today, generic tuple version is Phase 2e-extension.
+    pub fn spawn_one<A: crate::ecs::core::component::component::Component>(
+        &mut self,
+        archetype_id: ArchetypeId,
+        a: A,
+    ) -> EcsResult<Entity> {
+        // SAFETY: `a` is a valid, fully-initialised `A` living on the caller's
+        // stack; we read `size_of::<A>()` bytes out of it as `&[u8]`. The slice
+        // borrow is scoped to this call.
+        let bytes: &[u8] = unsafe {
+            std::slice::from_raw_parts(
+                std::ptr::addr_of!(a) as *const u8,
+                std::mem::size_of::<A>(),
+            )
+        };
+        let result = self.create_entity(archetype_id, &[(A::component_id(), bytes)]);
+        if result.is_ok() {
+            // Bytes are now in the pool; pool's drop_fn is the new owner.
+            std::mem::forget(a);
+        }
+        // On Err: no bytes copied; `a` drops normally at scope exit.
+        result
+    }
+
+    /// Type-safe two-component spawn — see [`spawn_one`] for rationale.
+    ///
+    /// Mirrors `Query::iter_two` (Phase 2d) on the spawn side. Bounded 2-arity.
+    ///
+    /// # Drop discipline
+    ///
+    /// Same as [`spawn_one`]: on Ok, both `a` and `b` are byte-copied into
+    /// their respective pools and `mem::forget`'d locally so their pool
+    /// `drop_fn`s become the new owners. On Err, NEITHER value was copied
+    /// (either the archetype guard fired before any copy, or the pool's
+    /// `can_push_entity_components` rejected the batch before any pool was
+    /// mutated — two-phase commit, C-009), so both values drop normally
+    /// at function-exit scope.
+    pub fn spawn_two<
+        A: crate::ecs::core::component::component::Component,
+        B: crate::ecs::core::component::component::Component,
+    >(
+        &mut self,
+        archetype_id: ArchetypeId,
+        a: A,
+        b: B,
+    ) -> EcsResult<Entity> {
+        // SAFETY: same rationale as `spawn_one`, applied to both inputs.
+        // The two slices view distinct stack locals — no aliasing.
+        let bytes_a: &[u8] = unsafe {
+            std::slice::from_raw_parts(
+                std::ptr::addr_of!(a) as *const u8,
+                std::mem::size_of::<A>(),
+            )
+        };
+        let bytes_b: &[u8] = unsafe {
+            std::slice::from_raw_parts(
+                std::ptr::addr_of!(b) as *const u8,
+                std::mem::size_of::<B>(),
+            )
+        };
+        let result = self.create_entity(
+            archetype_id,
+            &[
+                (A::component_id(), bytes_a),
+                (B::component_id(), bytes_b),
+            ],
+        );
+        if result.is_ok() {
+            std::mem::forget(a);
+            std::mem::forget(b);
+        }
+        result
+    }
+
     /// Deletes an entity and all its components from the system.
     ///
     /// Returns `true` on success, `false` if the entity does not exist or if
@@ -453,6 +554,21 @@ mod tests {
     #[repr(C)]
     struct Health { value: i32 }
 
+    // Component impls mirror what `#[derive(Component)]` generates — needed
+    // because Phase 2e `spawn_one` / `spawn_two` are bounded by `Component`,
+    // and the test types must satisfy that bound to exercise the spawn path.
+    use crate::ecs::core::component::component::Component;
+
+    impl Component for Position {
+        fn component_id() -> ComponentId { POSITION_ID }
+    }
+    impl Component for Velocity {
+        fn component_id() -> ComponentId { VELOCITY_ID }
+    }
+    impl Component for Health {
+        fn component_id() -> ComponentId { HEALTH_ID }
+    }
+
     fn register_test_components() {
         // Register components in the global registry
         component_registry::register_layout::<Position>(POSITION_ID.0);
@@ -670,5 +786,59 @@ mod tests {
         // next_entity_id was advanced to 1 and not rewound.
         assert_eq!(ecs.entity_master().next_entity_id(), EntityId(1));
         assert_eq!(ecs.recycled_entity_count(), 0);
+    }
+
+    // --- Phase 2e: spawn_one / spawn_two ergonomic wrappers ---
+
+    /// `spawn_one` is equivalent to a 1-component `create_entity` call with
+    /// auto-derived `ComponentId` and zero-alloc byte slicing.
+    #[test]
+    fn spawn_one_creates_entity_with_component() {
+        register_test_components();
+
+        let mut ecs = EcsMaster::new();
+        let arch = ecs.create_archetype(&[POSITION_ID]);
+
+        let entity = ecs.spawn_one(arch, Position { x: 1.5, y: 2.5, z: 3.5 })
+            .expect("spawn_one in valid archetype must succeed");
+
+        assert!(ecs.has_entity(entity), "spawned entity must be reachable");
+        assert_eq!(ecs.entity_count(), 1);
+    }
+
+    /// `spawn_two` packs two components in archetype-defined order; result
+    /// must be a fully-formed entity.
+    #[test]
+    fn spawn_two_creates_entity_with_both_components() {
+        register_test_components();
+
+        let mut ecs = EcsMaster::new();
+        let arch = ecs.create_archetype(&[POSITION_ID, VELOCITY_ID]);
+
+        let entity = ecs.spawn_two(
+            arch,
+            Position { x: 10.0, y: 20.0, z: 30.0 },
+            Velocity { x: 1.0, y: 2.0, z: 3.0 },
+        ).expect("spawn_two in valid archetype must succeed");
+
+        assert!(ecs.has_entity(entity));
+        assert_eq!(ecs.entity_count(), 1);
+    }
+
+    /// `spawn_one` must propagate `ArchetypeNotFound` for a bogus archetype id
+    /// AND must not consume an EntityId from the allocator (C-007 guard
+    /// behaviour carries through the wrapper).
+    #[test]
+    fn spawn_one_unknown_archetype_returns_err_no_leak() {
+        register_test_components();
+        let mut ecs = EcsMaster::new();
+        let result = ecs.spawn_one(ArchetypeId(999), Position { x: 1.0, y: 2.0, z: 3.0 });
+        assert!(
+            matches!(result, Err(EcsError::ArchetypeNotFound(ArchetypeId(999)))),
+            "spawn_one must propagate the typed error variant unchanged"
+        );
+        assert_eq!(ecs.entity_master().next_entity_id(), EntityId(0),
+            "no EntityId must be consumed when the archetype guard fires");
+        assert_eq!(ecs.entity_count(), 0);
     }
 }
