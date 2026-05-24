@@ -519,21 +519,30 @@ impl ComponentPool {
         true
     }
 
-    /// Gets all components in a chunk as raw pointers.
-    pub fn get_chunk_component_pointers(&self, chunk_index: usize) -> Option<Vec<*const u8>> {
-        if chunk_index >= self.chunks.len() {
-            return None;
+    /// Returns the slice of [`Unit`]s that physically live in `chunk_index`.
+    ///
+    /// Preferred over the old `get_chunk_component_pointers` API because it is
+    /// O(1) and zero-alloc: units belonging to a single chunk occupy the
+    /// contiguous range `[start, end)` inside the dense `units` Vec, so no
+    /// iteration or heap allocation is needed.  Callers that need raw pointers
+    /// can extract them at the call site via `unit.ptr()`.
+    ///
+    /// Returns `&[]` when `chunk_index` is past the last chunk that has any
+    /// live units (including a fully-empty pool).
+    #[inline]
+    pub fn chunk_units(&self, chunk_index: usize) -> &[Unit] {
+        debug_assert!(self.components_per_chunk > 0, "invariant: components_per_chunk > 0");
+
+        let start = chunk_index * self.components_per_chunk;
+        if start >= self.units.len() {
+            return &[];
         }
+        let end = (start + self.components_per_chunk).min(self.units.len());
 
-        let pointers = self
-            .units
-            .iter()
-            .enumerate()
-            .filter(|(idx, _)| *idx / self.components_per_chunk == chunk_index)
-            .map(|(_, unit)| unit.ptr() as *const u8)
-            .collect();
-
-        Some(pointers)
+        // SAFETY: start < self.units.len() (checked above) and
+        // end <= self.units.len() (clamped by .min()). Both bounds are within
+        // the initialised region [0, units.len()), so the slice is valid.
+        &self.units[start..end]
     }
 
     /// Gets the number of active components.
