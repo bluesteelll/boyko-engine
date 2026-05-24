@@ -162,6 +162,25 @@ impl<U: Clone> SparseMap<U> {
         self.indices.clear();
     }
 
+    /// Returns a slice of all currently-occupied external indices in dense order
+    /// (the order they were inserted, modified by swap_remove rearrangement).
+    ///
+    /// Cost: O(1) borrow, no allocation. Iteration is O(active_count), not
+    /// O(capacity) — this is the whole point of a sparse set's dense array.
+    #[inline]
+    pub fn active_indices(&self) -> &[usize] {
+        &self.indices
+    }
+
+    /// Returns an iterator over the values in dense order.
+    ///
+    /// Cost: O(active_count) total, no allocation. Pairs with [`active_indices`]
+    /// if the caller needs both the external index and the value.
+    #[inline]
+    pub fn iter_dense(&self) -> std::slice::Iter<'_, U> {
+        self.dense.iter()
+    }
+
     /// Validates internal consistency - only used for debugging
     pub fn validate(&self) -> bool {
         if self.dense.len() != self.indices.len() {
@@ -212,5 +231,53 @@ impl<U: Clone> Index<usize> for SparseMap<U> {
 impl<U: Clone> IndexMut<usize> for SparseMap<U> {
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
         self.get_mut(index).expect("Index not found in SparseMap")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn t_active_indices_after_inserts() {
+        let mut map: SparseMap<&str> = SparseMap::new();
+        map.insert(10, "a");
+        map.insert(20, "b");
+        map.insert(30, "c");
+
+        // dense order is insertion order; collect into a set to ignore order
+        let got: HashSet<usize> = map.active_indices().iter().copied().collect();
+        let expected: HashSet<usize> = [10, 20, 30].into_iter().collect();
+        assert_eq!(got, expected);
+        assert_eq!(map.active_indices().len(), 3);
+    }
+
+    #[test]
+    fn t_active_indices_after_swap_remove() {
+        let mut map: SparseMap<&str> = SparseMap::new();
+        map.insert(10, "a");
+        map.insert(20, "b");
+        map.insert(30, "c");
+
+        // remove the middle external index
+        map.swap_remove(20);
+
+        assert_eq!(map.active_indices().len(), 2);
+        let remaining: HashSet<usize> = map.active_indices().iter().copied().collect();
+        assert!(remaining.contains(&10));
+        assert!(remaining.contains(&30));
+        assert!(!remaining.contains(&20));
+    }
+
+    #[test]
+    fn t_iter_dense_matches_active_indices_count() {
+        let mut map: SparseMap<u32> = SparseMap::new();
+        for i in 0..8usize {
+            map.insert(i * 3, i as u32); // non-contiguous external indices
+        }
+
+        assert_eq!(map.iter_dense().count(), map.active_indices().len());
+        assert_eq!(map.iter_dense().count(), map.len());
     }
 }

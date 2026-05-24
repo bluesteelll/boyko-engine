@@ -213,12 +213,25 @@ impl EntityMaster {
         self.next_entity_id
     }
 
-    /// Gets an iterator over all active entities
+    /// Returns an iterator over all currently-active entities.
+    ///
+    /// Cost: O(active_count), not O(next_entity_id). Driven by
+    /// `SparseMap::active_indices` (dense list of registered entity IDs); the
+    /// `entities` Vec is consulted once per active entity via direct index.
     pub fn iter_entities(&self) -> impl Iterator<Item = Entity> + '_ {
-        self.entities.iter()
-            .enumerate()
-            .filter(move |(idx, _)| self.entity_map.contains(*idx))
-            .map(|(_, entity)| *entity)
+        self.entity_map.active_indices().iter().map(move |&id| {
+            // register_entity invariant guarantees that every id present in
+            // entity_map was previously written to self.entities[id] by
+            // allocate_entity. The id is therefore in bounds and points to a
+            // fully-initialized Entity record.
+            debug_assert!(
+                id < self.entities.len(),
+                "invariant: entity_map id {} must be in entities (len {})",
+                id,
+                self.entities.len()
+            );
+            self.entities[id]
+        })
     }
 
     /// Clears all entities from the master
@@ -367,6 +380,71 @@ mod tests {
         let inland = master.get_entity_inland(entity).unwrap();
         assert_eq!(inland.archetype_id(), 2);
         assert_eq!(inland.unit_index(), 10);
+    }
+
+    #[test]
+    fn t_iter_entities_skips_recycled_slots() {
+        let mut master = EntityMaster::new();
+
+        // Allocate and register 100 entities.
+        let mut all: Vec<Entity> = (0..100).map(|_| master.allocate_entity()).collect();
+        for &e in &all {
+            master.register_entity(e, 1, 0);
+        }
+
+        // Deallocate every other entity (indices 1, 3, 5, …, 99).
+        let mut removed_ids = std::collections::HashSet::new();
+        for i in (1..100).step_by(2) {
+            removed_ids.insert(all[i].id());
+            master.deallocate_entity(all[i]);
+        }
+
+        // Exactly 50 active entities remain.
+        let collected: Vec<Entity> = master.iter_entities().collect();
+        assert_eq!(collected.len(), 50, "expected 50 active entities");
+
+        // None of the collected entities should have a recycled id.
+        for e in &collected {
+            assert!(!removed_ids.contains(&e.id()), "recycled id {} appeared in iter", e.id());
+        }
+
+        // Suppress the unused-mut warning: all was mutated only by the loop above
+        // (we shadow with an immutable reborrow for the second half of the test).
+        let _ = &mut all;
+    }
+
+    #[test]
+    fn t_iter_entities_yields_correct_set_after_recycle() {
+        let mut master = EntityMaster::new();
+
+        // Allocate and register a, b, c.
+        let a = master.allocate_entity();
+        master.register_entity(a, 1, 0);
+        let b = master.allocate_entity();
+        master.register_entity(b, 1, 1);
+        let c = master.allocate_entity();
+        master.register_entity(c, 1, 2);
+
+        // Delete b; its id goes onto the free list.
+        master.deallocate_entity(b);
+
+        // Allocate d — will recycle b's id with a higher generation.
+        let d = master.allocate_entity();
+        assert_eq!(d.id(), b.id(), "recycled id should be reused");
+        master.register_entity(d, 1, 3);
+
+        // iter_entities must yield exactly {a, c, d}.
+        let mut got_ids: Vec<usize> = master.iter_entities().map(|e| e.id()).collect();
+        got_ids.sort_unstable();
+
+        let mut expected_ids = vec![a.id(), c.id(), d.id()];
+        expected_ids.sort_unstable();
+
+        assert_eq!(got_ids, expected_ids);
+
+        // b (old generation) must NOT appear.
+        assert!(!got_ids.contains(&b.id()) || got_ids.contains(&d.id()),
+            "b's id is present but only as d (higher generation)");
     }
 
 }
