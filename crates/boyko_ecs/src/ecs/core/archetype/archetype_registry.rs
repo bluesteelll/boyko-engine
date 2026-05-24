@@ -9,9 +9,19 @@ pub struct ArchetypeRegistry {
     /// Maps block patterns (u8 as usize) to groups of archetypes with that pattern
     /// Using SparseMap for O(1) access with better cache locality than HashMap
     block_groups: SparseMap<Vec<(ArchetypeId, ArchetypeSignature)>>,
-    
+
     /// Stores all active block patterns for faster iteration
     active_patterns: Vec<u8>,
+
+    /// Cached total archetype count. Maintained as an invariant: equals the sum
+    /// of `block_groups[p].len()` over all active patterns. Avoids O(N) re-scan
+    /// on every `len()` call.
+    total_count: usize,
+
+    /// Reverse mapping: ArchetypeId -> (block_summary_pattern, position-in-group).
+    /// Enables O(1) `unregister_archetype` and O(1) `get_archetype_signature`
+    /// without scanning `active_patterns` or cloning the pattern list.
+    id_to_location: SparseMap<(u8, usize)>,
 }
 
 impl Default for ArchetypeRegistry {
@@ -26,6 +36,8 @@ impl ArchetypeRegistry {
         Self {
             block_groups: SparseMap::new(),
             active_patterns: Vec::new(),
+            total_count: 0,
+            id_to_location: SparseMap::new(),
         }
     }
 
@@ -33,7 +45,9 @@ impl ArchetypeRegistry {
     pub fn with_capacity(_capacity: usize) -> Self {
         Self {
             block_groups: SparseMap::with_capacity(256), // 256 possible block patterns (8-bit)
-            active_patterns: Vec::with_capacity(32), // Expect fewer unique patterns
+            active_patterns: Vec::with_capacity(32),     // Expect fewer unique patterns
+            total_count: 0,
+            id_to_location: SparseMap::with_capacity(256),
         }
     }
     
@@ -41,46 +55,65 @@ impl ArchetypeRegistry {
     pub fn register_archetype(&mut self, archetype_id: ArchetypeId, mask: ComponentMask) {
         // Create hierarchical signature for the mask
         let signature = ArchetypeSignature::new(mask);
-        
+
         // Get 8-bit block summary as index
-        let block_pattern = signature.block_summary.value() as usize;
-        
+        let pattern_byte = signature.block_summary.value();
+        let block_pattern = pattern_byte as usize;
+
         // If this is a new pattern, add it to active patterns list
         if !self.block_groups.contains(block_pattern) {
-            self.active_patterns.push(signature.block_summary.value());
+            self.active_patterns.push(pattern_byte);
         }
-        
-        // Add archetype to the appropriate group
-        if let Some(group) = self.block_groups.get_mut(block_pattern) {
+
+        // Add archetype to the appropriate group and record its position
+        let pos = if let Some(group) = self.block_groups.get_mut(block_pattern) {
+            let pos = group.len();
             group.push((archetype_id, signature));
+            pos
         } else {
             self.block_groups.insert(block_pattern, vec![(archetype_id, signature)]);
-        }
+            0
+        };
+
+        self.id_to_location.insert(archetype_id, (pattern_byte, pos));
+        self.total_count += 1;
     }
     
-    /// Removes an archetype from the registry
+    /// Removes an archetype from the registry. Returns `false` if the id was not registered.
     pub fn unregister_archetype(&mut self, archetype_id: ArchetypeId) -> bool {
-        // Find the archetype in all active block groups
-        for &pattern in &self.active_patterns.clone() {
-            let pattern_index = pattern as usize;
-            if let Some(group) = self.block_groups.get_mut(pattern_index)
-                && let Some(pos) = group.iter().position(|(id, _)| *id == archetype_id)
-            {
-                // Remove the archetype from its group
-                group.swap_remove(pos);
+        // O(1) lookup via reverse map — no clone, no linear scan of active_patterns
+        let Some((pattern, pos)) = self.id_to_location.swap_remove(archetype_id) else {
+            return false;
+        };
 
-                // If group is now empty, remove the pattern from active_patterns
-                if group.is_empty()
-                    && let Some(pattern_pos) = self.active_patterns.iter().position(|&p| p == pattern)
-                {
-                    self.active_patterns.swap_remove(pattern_pos);
-                }
+        let pattern_index = pattern as usize;
+        let group = self
+            .block_groups
+            .get_mut(pattern_index)
+            .expect("invariant: pattern present in id_to_location must exist in block_groups");
 
-                return true;
-            }
+        let last_idx = group.len() - 1;
+        group.swap_remove(pos);
+
+        // swap_remove moves the last element into `pos`. Update its reverse-map entry.
+        if pos != last_idx {
+            let (moved_id, _) = group[pos];
+            let entry = self
+                .id_to_location
+                .get_mut(moved_id)
+                .expect("invariant: every archetype in a group has an id_to_location entry");
+            entry.1 = pos;
         }
 
-        false
+        // If the group is now empty, retire its pattern from active_patterns
+        if group.is_empty()
+            && let Some(pattern_pos) = self.active_patterns.iter().position(|&p| p == pattern)
+        {
+            self.active_patterns.swap_remove(pattern_pos);
+        }
+
+        self.total_count -= 1;
+        true
     }
     
     /// Finds archetypes containing all components in the query mask.
@@ -351,18 +384,13 @@ impl ArchetypeRegistry {
         });
     }
     
-    /// Get the signature for an archetype by ID
-    /// Helper method for complex queries
+    /// Returns the signature for an archetype by ID, or `None` if not registered.
+    ///
+    /// O(1) via the reverse map — no scan of active patterns.
     pub fn get_archetype_signature(&self, archetype_id: ArchetypeId) -> Option<ArchetypeSignature> {
-        for &pattern in &self.active_patterns {
-            let pattern_index = pattern as usize;
-            if let Some(group) = self.block_groups.get(pattern_index)
-                && let Some((_, signature)) = group.iter().find(|(id, _)| *id == archetype_id)
-            {
-                return Some(signature.clone());
-            }
-        }
-        None
+        let &(pattern, pos) = self.id_to_location.get(archetype_id)?;
+        let group = self.block_groups.get(pattern as usize)?;
+        Some(group[pos].1.clone())
     }
     
     /// Find archetypes with components that can be included, excluded, or optional.
@@ -406,16 +434,39 @@ impl ArchetypeRegistry {
         self.find_with_filter_into(&include_mask, &exclude_mask, &optional_mask, out);
     }
     
-    /// Returns the number of archetypes in the registry
+    /// Returns the number of archetypes in the registry.
+    ///
+    /// O(1): returns the cached `total_count` maintained by register/unregister/clear.
+    #[inline]
     pub fn len(&self) -> usize {
+        debug_assert_eq!(
+            self.total_count,
+            self.slow_len_recompute(),
+            "total_count drifted from actual archetype count"
+        );
+        self.total_count
+    }
+
+    /// Recomputes the true archetype count by scanning all groups.
+    ///
+    /// Used only in debug builds to validate that `total_count` stays in sync.
+    #[cfg(debug_assertions)]
+    fn slow_len_recompute(&self) -> usize {
         let mut count = 0;
         for &pattern in &self.active_patterns {
-            let pattern_index = pattern as usize;
-            if let Some(group) = self.block_groups.get(pattern_index) {
+            if let Some(group) = self.block_groups.get(pattern as usize) {
                 count += group.len();
             }
         }
         count
+    }
+
+    // In release builds the debug_assert_eq! disappears; provide a no-op stub so
+    // the macro expansion still resolves the symbol name.
+    #[cfg(not(debug_assertions))]
+    #[inline(always)]
+    fn slow_len_recompute(&self) -> usize {
+        0
     }
     
     /// Checks if the registry is empty
@@ -427,6 +478,8 @@ impl ArchetypeRegistry {
     pub fn clear(&mut self) {
         self.block_groups.clear();
         self.active_patterns.clear();
+        self.id_to_location.clear();
+        self.total_count = 0;
     }
 }
 
@@ -762,5 +815,79 @@ mod tests {
         registry.find_archetypes_with_components_into(&[comp_a, comp_b, comp_c], &mut out);
         assert_eq!(out.len(), 1);
         assert!(out.contains(&1));
+    }
+
+    // --- C-015 cache / reverse-map tests ---
+
+    #[test]
+    fn t_len_matches_after_register_unregister() {
+        let mut registry = ArchetypeRegistry::new();
+
+        registry.register_archetype(1, create_mask(&[1, 2]));
+        registry.register_archetype(2, create_mask(&[2, 3]));
+        registry.register_archetype(3, create_mask(&[3, 4]));
+        registry.register_archetype(4, create_mask(&[4, 5]));
+        registry.register_archetype(5, create_mask(&[5, 6]));
+        assert_eq!(registry.len(), 5);
+
+        assert!(registry.unregister_archetype(2));
+        assert!(registry.unregister_archetype(4));
+        assert_eq!(registry.len(), 3);
+
+        registry.register_archetype(6, create_mask(&[6, 7]));
+        assert_eq!(registry.len(), 4);
+
+        registry.clear();
+        assert_eq!(registry.len(), 0);
+    }
+
+    #[test]
+    fn t_unregister_swap_keeps_other_ids_findable() {
+        // All three archetypes use components 1 and 2, placing them in the same
+        // block-summary group (block 0). After B is swap_remove'd, C migrates
+        // into B's slot; id_to_location for C must be updated to reflect the new pos.
+        let mut registry = ArchetypeRegistry::new();
+        registry.register_archetype(10, create_mask(&[1, 2]));    // A — pos 0
+        registry.register_archetype(20, create_mask(&[1, 2, 3])); // B — pos 1
+        registry.register_archetype(30, create_mask(&[1, 2, 4])); // C — pos 2
+
+        // Unregister B (middle element) — C should swap into pos 1
+        assert!(registry.unregister_archetype(20));
+        assert_eq!(registry.len(), 2);
+
+        // Both A and C must still be findable via find_matching_archetypes
+        let results = registry.find_matching_archetypes(&create_mask(&[1, 2]));
+        assert_eq!(results.len(), 2);
+        assert!(results.contains(&10));
+        assert!(results.contains(&30));
+
+        // get_archetype_signature must return correct signatures for A and C
+        let sig_a = registry.get_archetype_signature(10).expect("A must be present");
+        assert!(sig_a.mask.contains(1) && sig_a.mask.contains(2));
+
+        let sig_c = registry.get_archetype_signature(30).expect("C must be present");
+        assert!(sig_c.mask.contains(1) && sig_c.mask.contains(2) && sig_c.mask.contains(4));
+    }
+
+    #[test]
+    fn t_get_archetype_signature_o1_returns_none_after_unregister() {
+        let mut registry = ArchetypeRegistry::new();
+        registry.register_archetype(42, create_mask(&[7, 8, 9]));
+
+        assert!(registry.get_archetype_signature(42).is_some());
+
+        registry.unregister_archetype(42);
+
+        assert!(registry.get_archetype_signature(42).is_none());
+    }
+
+    #[test]
+    fn t_unregister_unknown_returns_false_does_not_panic() {
+        let mut registry = ArchetypeRegistry::new();
+        registry.register_archetype(1, create_mask(&[1, 2]));
+
+        let result = registry.unregister_archetype(99999);
+        assert!(!result);
+        assert_eq!(registry.len(), 1);
     }
 }
