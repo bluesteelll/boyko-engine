@@ -11,6 +11,7 @@ boyko-utils =  { path = "../boyko_utils" }
 boyko-macros = { path = "../boyko_macros" }
 trybuild = "1"
 criterion = { version = "0.5", features = ["html_reports"] }
+proptest = "1"
 
 [[bench]]
 name = "component_id"
@@ -30,4 +31,8 @@ harness = false
 
 [[bench]]
 name = "archetype"
+harness = false
+
+[[bench]]
+name = "event_dispatch"
 harness = false
