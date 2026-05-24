@@ -1,6 +1,6 @@
 use std::ops::{Index, IndexMut};
 
-use anyhow::{Result, bail};
+use crate::ecs::error::{EcsError, EcsResult};
 use boyko_utils::sparse_map::sparse_map::SparseMap;
 
 use crate::ecs::core::component::component::Component;
@@ -330,7 +330,7 @@ impl ComponentPoolBundle {
 
 /// Removes entity components from all pools using swap_remove
 /// Returns the removed entity's index if successful
-pub fn swap_remove_unit(&mut self, unit_index: usize) -> Result<()> {
+pub fn swap_remove_unit(&mut self, unit_index: usize) -> EcsResult<()> {
     let mut success = true;
 
     // Debug check for valid unit index
@@ -343,7 +343,7 @@ pub fn swap_remove_unit(&mut self, unit_index: usize) -> Result<()> {
     }
 
     if !success {
-        bail!("Error: in ComponentPoolBundle.swap_remove_unit()")
+        return Err(EcsError::PoolSwapRemoveFailed);
     }
 
     Ok(())

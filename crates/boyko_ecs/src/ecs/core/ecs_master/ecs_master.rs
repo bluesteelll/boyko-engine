@@ -6,7 +6,7 @@ use crate::ecs::core::entity::entity_inland::EntityInland;
 use crate::ecs::identifiers::primitives::{ArchetypeId, EntityId, ComponentId};
 use crate::ecs::memory::arena::Arena;
 use crate::ecs::constants::DEFAULT_ARENA_SIZE;
-use anyhow::{Result, bail};
+use crate::ecs::error::{EcsError, EcsResult};
 
 /// Main ECS manager that coordinates entities, archetypes, and memory allocation.
 ///
@@ -135,12 +135,12 @@ impl EcsMaster {
         &mut self,
         archetype_id: ArchetypeId,
         components: &[(ComponentId, &[u8])],
-    ) -> Result<Entity> {
+    ) -> EcsResult<Entity> {
         // Guard: validate archetype exists BEFORE allocating an EntityId.
         // Previously, allocate_entity() was called first, and if the archetype
         // lookup subsequently failed the ID was permanently leaked (C-007).
         if !self.archetype_master.has_archetype(archetype_id) {
-            bail!("Archetype {} not found", archetype_id);
+            return Err(EcsError::ArchetypeNotFound(archetype_id));
         }
 
         // Allocate a new entity — only reached if the guard passed.
@@ -172,7 +172,7 @@ impl EcsMaster {
                 // the full deallocate path to put the ID back on the free list.
                 self.entity_master.deallocate_entity(entity);
             }
-            bail!("Failed to create entity in archetype");
+            return Err(EcsError::ArchetypeRejectedEntity { archetype_id });
         }
 
         // Register the entity with its inland data.
