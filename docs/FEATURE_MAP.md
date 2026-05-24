@@ -159,8 +159,8 @@ First point of contact for agents. When looking for where a particular piece of 
 | Register an event | [core/events/event_registry.rs](../crates/boyko_ecs/src/ecs/core/events/event_registry.rs) ✅ | `register_event::<E>(event_id)` |
 | Get metadata | [core/events/event_registry.rs](../crates/boyko_ecs/src/ecs/core/events/event_registry.rs) ✅ | `get_event_info(id)`, `get_event_layout(id)` |
 | Validate event types | [core/events/event_registry.rs](../crates/boyko_ecs/src/ecs/core/events/event_registry.rs) ✅ | `validate_event_types::<E>(id)` |
-| Event pool | [core/events/event_pool.rs](../crates/boyko_ecs/src/ecs/core/events/event_pool.rs) ✅ | `EventPool` |
-| Bundle of heterogeneous pools | [core/events/event_pool_bundle.rs](../crates/boyko_ecs/src/ecs/core/events/event_pool_bundle.rs) ✅ | `EventPoolBundle` |
+| Event pool | — ❌ not implemented — see future event-pool ticket | `EventPool` |
+| Bundle of heterogeneous pools | — ❌ not implemented — see future event-pool ticket | `EventPoolBundle` |
 | Participants trait (Copy-bounded) | [core/events/participants/participants.rs](../crates/boyko_ecs/src/ecs/core/events/participants/participants.rs) ✅ | `Participants: Copy`, `ParticipantInfo` |
 | Buffer for participants | [core/events/participants/participants_buffer.rs](../crates/boyko_ecs/src/ecs/core/events/participants/participants_buffer.rs) ✅ | `ParticipantBuffer` (storage: `Vec<MaybeUninit<u8>>`) |
 | Parameters trait (Copy-bounded) | [core/events/parameters/parameters.rs](../crates/boyko_ecs/src/ecs/core/events/parameters/parameters.rs) ✅ | `Parameters: Copy` |

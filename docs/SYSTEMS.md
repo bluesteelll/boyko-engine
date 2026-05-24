@@ -413,10 +413,11 @@ struct MyEvent {
 ```
 All accessors are safe typed-field reads — no unsafe pointer casts (Q-001 resolved).
 
-### 8.2. EventPool / EventPoolBundle
+### 8.2. EventPool / EventPoolBundle ❌ not implemented
 
-- [event_pool.rs](../crates/boyko_ecs/src/ecs/core/events/event_pool.rs) — `EventPool`, `EventPoolIter<'a, E>`
-- [event_pool_bundle.rs](../crates/boyko_ecs/src/ecs/core/events/event_pool_bundle.rs) — `EventPoolBundle`
+`event_pool.rs` and `event_pool_bundle.rs` were fully wrapped in block comments with
+`//TODO: rework` markers and were never wired into `events/mod.rs`. They have been
+deleted (Q-025). See a future event-pool ticket for the planned rework.
 
 ### 8.3. EventRegistry (global)
 
