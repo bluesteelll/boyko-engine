@@ -142,10 +142,83 @@ impl ArchetypeMaster {
     pub fn get_archetype(&self, archetype_id: ArchetypeId) -> Option<&Archetype> {
         self.archetypes.get_archetype(archetype_id)
     }
-    
+
     /// Gets a mutable reference to an archetype by ID
     pub fn get_archetype_mut(&mut self, archetype_id: ArchetypeId) -> Option<&mut Archetype> {
         self.archetypes.get_archetype_mut(archetype_id)
+    }
+
+    /// Returns a read-only raw pointer to the archetype with `archetype_id`,
+    /// or `None` if no archetype is registered for that id.
+    ///
+    /// Used by the Phase 7 fast read path in `EcsMaster` (Step 7+):
+    /// `EntityInland` stores `*mut Archetype` directly, and the read
+    /// fast-path dereferences through this pointer under `&EcsMaster`.
+    ///
+    /// # Provenance contract
+    /// The returned pointer carries read-only provenance under Tree Borrows
+    /// (minted via `&self` flavour of [`ArchetypeBundle::get_archetype_ptr`]).
+    /// Callers may dereference for reads (`&*ptr`) as long as the
+    /// `ArchetypeMaster` is borrowed at least immutably; the pointer is
+    /// stable for the master's lifetime by bundle invariant U1 (slab base
+    /// is heap-stable, slot addresses never move).
+    ///
+    /// The returned `*const Archetype` MUST NOT be cast to `*mut Archetype`
+    /// and dereferenced for writing — under Tree Borrows the cast does
+    /// not grant write capability and the child-write traps as retag UB.
+    /// Use [`Self::archetype_ptr_for`] for write access.
+    #[inline]
+    pub fn get_archetype_ptr(&self, archetype_id: ArchetypeId) -> Option<*const Archetype> {
+        self.archetypes.get_archetype_ptr(archetype_id)
+    }
+
+    /// Returns a write-capable raw pointer to the archetype with
+    /// `archetype_id`, or `None` if no archetype is registered for that id.
+    ///
+    /// Used by `EcsMaster::create_entity` (Step 7 W7 choreography): the
+    /// caller obtains the pointer under `&mut self`, re-borrows it as
+    /// `&mut Archetype` to fill in the new entity's row, then later stores
+    /// the same pointer inside `EntityInland` for fast random-access reads.
+    ///
+    /// # Provenance contract
+    /// The returned pointer carries write-capable provenance (minted via
+    /// `&mut self` flavour of [`ArchetypeBundle::get_archetype_ptr_mut`]).
+    /// The pointer is stable for the master's lifetime by bundle invariants
+    /// U1 (slab base stability) and U2 (slot lifetime ⊇ master lifetime).
+    /// Subsequent `create_archetype` calls do not invalidate previously-
+    /// minted pointers — the slab is a single fixed-size allocation, never
+    /// reallocated or moved.
+    #[inline]
+    pub fn archetype_ptr_for(&mut self, archetype_id: ArchetypeId) -> Option<*mut Archetype> {
+        self.archetypes.get_archetype_ptr_mut(archetype_id)
+    }
+
+    /// Registers (or reuses) an archetype with the given `component_ids` and
+    /// returns both the `ArchetypeId` and a write-capable raw pointer to the
+    /// slab slot, without performing a second lookup.
+    ///
+    /// Used by `EcsMaster::create_archetype` to atomically obtain both
+    /// pieces in one call (Step 7 W7 choreography). When
+    /// [`Self::create_archetype`] dedups against an existing archetype with
+    /// the same component set (via `ArchetypeRegistry::find_exact_match`),
+    /// the returned `ArchetypeId` and pointer reference that **existing**
+    /// archetype — not a freshly-created one. Callers relying on the
+    /// pointer pointing to a fresh slot must verify against
+    /// [`Self::has_archetype`] beforehand.
+    ///
+    /// # Provenance contract
+    /// Same as [`Self::archetype_ptr_for`]: write-capable provenance,
+    /// stable for the master's lifetime via bundle invariants U1 + U2.
+    pub fn add_archetype_and_get_ptr(
+        &mut self,
+        component_ids: &[ComponentId],
+    ) -> (ArchetypeId, *mut Archetype) {
+        let archetype_id = self.create_archetype(component_ids);
+        let ptr = self
+            .archetypes
+            .get_archetype_ptr_mut(archetype_id)
+            .expect("invariant: archetype just registered exists in bundle");
+        (archetype_id, ptr)
     }
     
     /// Finds all archetypes that contain the specified components.

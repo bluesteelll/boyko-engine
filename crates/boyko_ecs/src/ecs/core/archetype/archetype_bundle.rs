@@ -170,9 +170,9 @@ impl ArchetypeBundle {
     /// Returns a unique reference to the archetype with `index`, if present.
     #[inline]
     pub fn get_archetype_mut(&mut self, index: ArchetypeId) -> Option<&mut Archetype> {
-        let ptr = self.get_archetype_ptr_internal_mut(index)?;
+        let ptr = self.get_archetype_ptr_mut(index)?;
         // SAFETY (U1, U2, U8, U11):
-        //   - U11: `get_archetype_ptr_internal_mut` mints `ptr` from
+        //   - U11: `get_archetype_ptr_mut` mints `ptr` from
         //     `self.slots.as_mut_ptr()` (write-capable provenance) via
         //     raw arithmetic; no `&mut MaybeUninit<Archetype>` reborrow
         //     is ever created. Routing through the `&self`-flavoured
@@ -186,17 +186,26 @@ impl ArchetypeBundle {
         Some(unsafe { &mut *ptr })
     }
 
-    /// Same recipe as [`Self::get_archetype_ptr`] but minted from
-    /// `&mut self` so the resulting pointer carries write-capable
-    /// provenance under Stacked / Tree Borrows.
+    /// Returns a write-capable raw `*mut Archetype` pointer to the slot for
+    /// `archetype_id`, or `None` if no slot is registered for that id.
     ///
-    /// Private — public callers needing a `*mut Archetype` go through
-    /// [`Self::iter_occupied_ptrs_mut`] or hold their own `&mut Archetype`
-    /// taken via [`Self::get_archetype_mut`]. Step 7 stores write-capable
-    /// pointers inside `EntityInland`; this helper is the U11-compliant
-    /// production site for those pointers when an id-lookup is needed.
+    /// Phase 7 C4 / U11 + U1 — pointer minting recipe with write-capable
+    /// provenance. The pointer is minted via raw arithmetic on
+    /// `self.slots.as_mut_ptr()`; no `&mut MaybeUninit<Archetype>` reborrow
+    /// is created along the way. The `as_mut_ptr()` mint is **load-bearing**:
+    /// under Tree Borrows the `&self`-flavoured [`Self::get_archetype_ptr`]
+    /// returns `SharedReadOnly`-tagged provenance, and a `*const → *mut`
+    /// laundering cast would not grant write capability — child-writes
+    /// through that laundered pointer trip retag UB. Callers needing a
+    /// read-only pointer use [`Self::get_archetype_ptr`]; this method is
+    /// reserved for the write path (Step 7's `EntityInland` storage, the
+    /// `&mut Archetype` rematerialisation inside `EcsMaster::create_entity`,
+    /// and the internal safe accessor [`Self::get_archetype_mut`]).
+    ///
+    /// Slab base is stable for the bundle's lifetime (U1), so the pointer
+    /// remains valid until the slot is removed or the bundle is dropped.
     #[inline]
-    fn get_archetype_ptr_internal_mut(
+    pub fn get_archetype_ptr_mut(
         &mut self,
         archetype_id: ArchetypeId,
     ) -> Option<*mut Archetype> {
@@ -212,26 +221,36 @@ impl ArchetypeBundle {
         // SAFETY (U11 + U1): mint from `as_mut_ptr()` so the resulting
         //   pointer carries write-capable provenance; no `&mut MaybeUninit`
         //   reborrow is created along the way. Slab base is heap-stable
-        //   for the bundle's lifetime (U1).
+        //   for the bundle's lifetime (U1). `slot_idx < MAX_ARCHETYPES` is
+        //   enforced by the `id_to_slot` invariant (only ever populated
+        //   with indices emitted under that bound by `add_archetype_*`).
         let slab_base: *mut MaybeUninit<Archetype> = self.slots.as_mut_ptr();
         let slot_ptr_mu: *mut MaybeUninit<Archetype> =
             unsafe { slab_base.add(slot_idx as usize) };
         Some(slot_ptr_mu as *mut Archetype)
     }
 
-    /// Returns a raw `*mut Archetype` pointer to the slot for `archetype_id`,
-    /// or `None` if no slot is registered for that id.
+    /// Returns a read-only raw `*const Archetype` pointer to the slot for
+    /// `archetype_id`, or `None` if no slot is registered for that id.
     ///
-    /// Phase 7 C4 / U11 — pointer minting recipe. **Critically**, the pointer
-    /// is minted via raw arithmetic on `self.slots.as_ptr()` and the
-    /// `MaybeUninit` reborrow is avoided: under Stacked Borrows / Tree
-    /// Borrows, creating `&mut MaybeUninit<Archetype>` and casting to
-    /// `*mut Archetype` retags against the `&mut MaybeUninit` borrow stack
-    /// frame; subsequent reads through the resulting `*mut` produce retag
-    /// UB. The recipe below sidesteps that by never materialising a
-    /// reference to the slot.
+    /// Phase 7 C4 / U11 — pointer minting recipe. The pointer is minted via
+    /// raw arithmetic on `self.slots.as_ptr()` (read-only provenance); no
+    /// `&MaybeUninit<Archetype>` reborrow is ever materialised. Under
+    /// Stacked Borrows / Tree Borrows, materialising `&MaybeUninit<Archetype>`
+    /// and casting through to a `*const Archetype` would retag against the
+    /// reference's borrow-stack frame; the raw-arithmetic recipe sidesteps
+    /// that by never producing a reference to the slot.
+    ///
+    /// # Provenance contract
+    /// Callers may **only read** through the returned pointer. The pointer
+    /// carries `SharedReadOnly` provenance under Tree Borrows; casting it
+    /// to `*mut Archetype` and dereferencing for write is UB. For write
+    /// access, obtain a fresh pointer via [`Self::get_archetype_ptr_mut`].
+    ///
+    /// Slab base is stable for the bundle's lifetime (U1), so the pointer
+    /// remains valid until the slot is removed or the bundle is dropped.
     #[inline]
-    pub fn get_archetype_ptr(&self, archetype_id: ArchetypeId) -> Option<*mut Archetype> {
+    pub fn get_archetype_ptr(&self, archetype_id: ArchetypeId) -> Option<*const Archetype> {
         let raw_id = archetype_id.0;
         if raw_id >= self.id_to_slot.len() {
             return None;
@@ -244,16 +263,17 @@ impl ArchetypeBundle {
         // SAFETY (U11 — pointer minting recipe / U1 — slab stability):
         //   `self.slots.as_ptr()` returns a `*const [MaybeUninit<Archetype>; N]`
         //   without creating any & or &mut reference to a slab element. We
-        //   cast through `*const u8`-equivalent provenance via `.cast()` and
-        //   `.add()` arithmetic to land on slot `slot_idx`. The resulting
-        //   `*mut Archetype` carries Box's heap-allocation provenance
-        //   directly; subsequent reads/writes through it cannot retag
-        //   against a stale `&mut MaybeUninit` borrow stack because no such
-        //   borrow was ever created. Slab base is stable for the bundle's
-        //   lifetime (U1).
+        //   cast to `*const MaybeUninit<Archetype>` and use `.add(slot_idx)`
+        //   arithmetic to land on the slot. The resulting `*const Archetype`
+        //   carries Box's heap-allocation provenance directly with read-only
+        //   capability; subsequent reads through it cannot retag against a
+        //   stale `&MaybeUninit` borrow stack because no such borrow was
+        //   ever created. Slab base is stable for the bundle's lifetime
+        //   (U1). `slot_idx < MAX_ARCHETYPES` is enforced by the
+        //   `id_to_slot` invariant.
         let slab_base: *const MaybeUninit<Archetype> = self.slots.as_ptr().cast();
         let slot_ptr_mu: *const MaybeUninit<Archetype> = unsafe { slab_base.add(slot_idx as usize) };
-        Some(slot_ptr_mu as *mut Archetype)
+        Some(slot_ptr_mu as *const Archetype)
     }
 
     /// In-place slab construction of a new archetype.
@@ -822,20 +842,25 @@ mod miri_tests {
     }
 
     /// Exercises the W1 fix for [`ArchetypeBundle::get_archetype`] /
-    /// [`ArchetypeBundle::get_archetype_mut`] and the U11 pointer-minting
-    /// recipe. The test interleaves three classes of access against a
-    /// single slab slot:
-    ///   1. A raw `*const Archetype` minted via `get_archetype_ptr` (the
-    ///      `&self` accessor) for read-only inspection.
+    /// [`ArchetypeBundle::get_archetype_mut`] and the Step-5 read/write
+    /// pointer-API split (U11 pointer-minting recipe). The test interleaves
+    /// four classes of access against a single slab slot:
+    ///   1. A read-only `*const Archetype` minted via `get_archetype_ptr`
+    ///      (`&self` flavour) for inspection.
     ///   2. A `&mut Archetype` taken via the safe accessor
     ///      `get_archetype_mut`, which after the W1 fix internally goes
-    ///      through `get_archetype_ptr_internal_mut` (raw-arithmetic
-    ///      mint from `as_mut_ptr()`) instead of
-    ///      `self.slots[..].assume_init_mut()` (which would materialise
-    ///      a `&mut MaybeUninit<Archetype>` reborrow).
-    ///   3. A write through a raw `*mut` derived from `get_archetype_mut`
-    ///      via reference-to-pointer cast, followed by a re-mint to
-    ///      verify the write survived.
+    ///      through `get_archetype_ptr_mut` (raw-arithmetic mint from
+    ///      `as_mut_ptr()`) instead of `self.slots[..].assume_init_mut()`
+    ///      (which would materialise a `&mut MaybeUninit<Archetype>`
+    ///      reborrow).
+    ///   3. A write through a raw `*mut Archetype` minted **directly** via
+    ///      the Step-5 `get_archetype_ptr_mut` accessor (no intermediate
+    ///      `&mut Archetype`), followed by a re-mint via `get_archetype_ptr`
+    ///      to verify the write survived.
+    ///   4. A write through a `*mut Archetype` derived from a `&mut
+    ///      Archetype` (reference-to-pointer cast). Mirrors the Step-7
+    ///      `EntityInland` flow where a raw `*mut Archetype` is
+    ///      dereferenced under `&mut EcsMaster`.
     ///
     /// Under Tree Borrows the legacy `assume_init_mut()` path materialises
     /// a `&mut MaybeUninit<Archetype>` whose borrow-stack frame would,
@@ -844,8 +869,10 @@ mod miri_tests {
     /// arithmetic so no such reborrow is created.
     ///
     /// The `*const → *mut` cast is deliberately avoided for write
-    /// pathways — Tree Borrows tags `as_ptr()` provenance Frozen and
-    /// would flag any child-write through it.
+    /// pathways — Tree Borrows tags `as_ptr()` provenance `SharedReadOnly`
+    /// and would flag any child-write through it. Step 5 introduces the
+    /// dedicated `get_archetype_ptr_mut` accessor so write callers do not
+    /// have to launder provenance through `*const`.
     #[test]
     fn phase7_miri_archetype_ptr_no_retag_ub() {
         register_test_components();
@@ -856,7 +883,9 @@ mod miri_tests {
         let _ = bundle.add_archetype_from_components_fallible(id, &[COMP_X, COMP_Y], &arena);
 
         // Leg 1 — read via the `&self`-flavoured raw pointer.
-        let ptr_read1 = bundle.get_archetype_ptr(id).expect("registered above");
+        let ptr_read1: *const Archetype = bundle
+            .get_archetype_ptr(id)
+            .expect("registered above");
         // SAFETY (test): freshly-initialised slot; no aliasing &mut alive
         //   here (the bundle was only mutated via `add_*` above).
         let observed_id = unsafe { (*ptr_read1).id() };
@@ -874,7 +903,9 @@ mod miri_tests {
         }
 
         // Verify the write through a fresh `*const` mint.
-        let ptr_read2 = bundle.get_archetype_ptr(id).expect("registered above");
+        let ptr_read2: *const Archetype = bundle
+            .get_archetype_ptr(id)
+            .expect("registered above");
         assert_eq!(
             ptr_read1 as usize, ptr_read2 as usize,
             "slab pointers stable across re-mints (U1)",
@@ -883,7 +914,30 @@ mod miri_tests {
         let observed = unsafe { (*ptr_read2).current_index };
         assert_eq!(observed, 7, "write through &mut Archetype survived");
 
-        // Leg 3 — write through a `*mut Archetype` derived from a
+        // Leg 3 — write through a `*mut Archetype` minted directly via
+        // the Step-5 `get_archetype_ptr_mut` accessor. This is the
+        // production path for write capability — no `&mut Archetype` is
+        // materialised first, the raw pointer carries write provenance
+        // by construction (mint from `as_mut_ptr()`).
+        let ptr_write_direct: *mut Archetype = bundle
+            .get_archetype_ptr_mut(id)
+            .expect("registered above");
+        // SAFETY (test): pointer was just minted via raw arithmetic from
+        //   `&mut self`; no live & or &mut to this slot exists.
+        unsafe { addr_of_mut!((*ptr_write_direct).current_index).write(11) };
+
+        // Verify the direct-mint write through a fresh `*const` re-mint.
+        let ptr_read_after_direct: *const Archetype = bundle
+            .get_archetype_ptr(id)
+            .expect("registered above");
+        // SAFETY (test): `&self`-provenance read; no live & or &mut.
+        let observed_after_direct = unsafe { (*ptr_read_after_direct).current_index };
+        assert_eq!(
+            observed_after_direct, 11,
+            "raw write through get_archetype_ptr_mut survived",
+        );
+
+        // Leg 4 — write through a `*mut Archetype` derived from a
         // `&mut Archetype` taken via the safe accessor. The cast
         // `&mut → *mut` preserves write-capable provenance under Tree
         // Borrows. This mirrors the Step-7 `EntityInland` flow where a
@@ -908,7 +962,9 @@ mod miri_tests {
 
         // Final stability check: re-mint via the `&self` API and
         // confirm the slab address is unchanged after all interleaving.
-        let ptr_read3 = bundle.get_archetype_ptr(id).expect("registered above");
+        let ptr_read3: *const Archetype = bundle
+            .get_archetype_ptr(id)
+            .expect("registered above");
         assert_eq!(
             ptr_read1 as usize, ptr_read3 as usize,
             "slab pointers stay stable after interleaved access (U1)",
