@@ -9,16 +9,21 @@
 use boyko_ecs::ecs::core::archetype::archetype::Archetype;
 use boyko_ecs::ecs::core::component::component_registry;
 use boyko_ecs::ecs::core::entity::entity_inland::EntityInland;
-use boyko_ecs::ecs::identifiers::primitives::ComponentId;
+use boyko_ecs::ecs::identifiers::primitives::{ArchetypeId, ComponentId, EntityId, InlandPoolId};
 use boyko_ecs::ecs::memory::arena::Arena;
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 
 // --- Component registration ---
 
-const IDS_8: [ComponentId; 8] = [420, 421, 422, 423, 424, 425, 426, 427];
+const IDS_8: [ComponentId; 8] = [
+    ComponentId(420), ComponentId(421), ComponentId(422), ComponentId(423),
+    ComponentId(424), ComponentId(425), ComponentId(426), ComponentId(427),
+];
 const IDS_16: [ComponentId; 16] = [
-    420, 421, 422, 423, 424, 425, 426, 427,
-    428, 429, 430, 431, 432, 433, 434, 435,
+    ComponentId(420), ComponentId(421), ComponentId(422), ComponentId(423),
+    ComponentId(424), ComponentId(425), ComponentId(426), ComponentId(427),
+    ComponentId(428), ComponentId(429), ComponentId(430), ComponentId(431),
+    ComponentId(432), ComponentId(433), ComponentId(434), ComponentId(435),
 ];
 
 fn register_bench_components() {
@@ -53,7 +58,7 @@ fn bench_archetype_create_entity_8c(c: &mut Criterion) {
         // We reset via a fresh Archetype in the setup closure.
         b.iter_batched(
             || {
-                let arch = Archetype::create_by_ids(1, &IDS_8, &arena);
+                let arch = Archetype::create_by_ids(ArchetypeId(1), &IDS_8, &arena);
                 let bytes = vec![0u8; 4]; // all components are u32
                 let components: Vec<(ComponentId, Vec<u8>)> = IDS_8.iter()
                     .map(|&id| (id, bytes.clone()))
@@ -62,12 +67,12 @@ fn bench_archetype_create_entity_8c(c: &mut Criterion) {
             },
             |(mut arch, components)| {
                 for entity_id in 0..n {
-                    let mut inland = EntityInland::new(arch.id(), 0, 0);
+                    let mut inland = EntityInland::new(arch.id(), InlandPoolId(0), 0);
                     arch.init_entity_inland(&mut inland);
                     let slices: Vec<(ComponentId, &[u8])> = components.iter()
                         .map(|(id, v)| (*id, v.as_slice()))
                         .collect();
-                    let ok = arch.create_entity(entity_id, &mut inland, &slices);
+                    let ok = arch.create_entity(EntityId(entity_id), &mut inland, &slices);
                     black_box(ok);
                 }
                 black_box(arch);
@@ -91,7 +96,7 @@ fn bench_archetype_create_entity_16c(c: &mut Criterion) {
 
         b.iter_batched(
             || {
-                let arch = Archetype::create_by_ids(2, &IDS_16, &arena);
+                let arch = Archetype::create_by_ids(ArchetypeId(2), &IDS_16, &arena);
                 let bytes = vec![0u8; 4];
                 let components: Vec<(ComponentId, Vec<u8>)> = IDS_16.iter()
                     .map(|&id| (id, bytes.clone()))
@@ -100,12 +105,12 @@ fn bench_archetype_create_entity_16c(c: &mut Criterion) {
             },
             |(mut arch, components)| {
                 for entity_id in 0..n {
-                    let mut inland = EntityInland::new(arch.id(), 0, 0);
+                    let mut inland = EntityInland::new(arch.id(), InlandPoolId(0), 0);
                     arch.init_entity_inland(&mut inland);
                     let slices: Vec<(ComponentId, &[u8])> = components.iter()
                         .map(|(id, v)| (*id, v.as_slice()))
                         .collect();
-                    let ok = arch.create_entity(entity_id, &mut inland, &slices);
+                    let ok = arch.create_entity(EntityId(entity_id), &mut inland, &slices);
                     black_box(ok);
                 }
                 black_box(arch);

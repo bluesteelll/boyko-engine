@@ -40,10 +40,10 @@ use boyko_ecs::ecs::core::component::component_registry;
 fn derive_component_first_call_mints_valid_id() {
     let id = Position::component_id();
     assert!(
-        id < component_registry::MAX_COMPONENTS,
+        id.0 < component_registry::MAX_COMPONENTS,
         "component_id must be < MAX_COMPONENTS, got {id}"
     );
-    let layout = component_registry::get_layout(id)
+    let layout = component_registry::get_layout(id.0)
         .expect("registry slot must be populated after first component_id() call");
     assert_eq!(
         layout.size,
@@ -103,7 +103,7 @@ fn derive_component_registry_slot_carries_correct_type_id() {
     use std::any::TypeId;
 
     let id = Velocity::component_id();
-    let layout = component_registry::get_layout(id)
+    let layout = component_registry::get_layout(id.0)
         .expect("Velocity slot must be populated");
     assert_eq!(
         layout.type_id,

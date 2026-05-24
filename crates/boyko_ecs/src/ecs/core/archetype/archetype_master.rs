@@ -51,7 +51,7 @@ impl ArchetypeMaster {
             archetypes: ArchetypeBundle::new(),
             registry: ArchetypeRegistry::with_capacity(64),
             arena: arena_ptr,
-            next_archetype_id: 1,
+            next_archetype_id: ArchetypeId(1),
             generation: ArchetypeGeneration::FIRST,
         }
     }
@@ -65,7 +65,7 @@ impl ArchetypeMaster {
             archetypes: ArchetypeBundle::with_capacity(capacity),
             registry: ArchetypeRegistry::with_capacity(capacity),
             arena: arena_ptr,
-            next_archetype_id: 1,
+            next_archetype_id: ArchetypeId(1),
             generation: ArchetypeGeneration::FIRST,
         }
     }
@@ -84,7 +84,7 @@ impl ArchetypeMaster {
         
         // Allocate a new archetype ID
         let archetype_id = self.next_archetype_id;
-        self.next_archetype_id += 1;
+        self.next_archetype_id.0 += 1;
         self.generation.bump();
 
         // SAFETY: `self.arena` was minted from the `Box<Arena>` owned by
@@ -303,7 +303,7 @@ impl ArchetypeMaster {
 
         // Update next ID if necessary and bump generation for each new archetype slot minted
         if archetype_id >= self.next_archetype_id {
-            self.next_archetype_id = archetype_id + 1;
+            self.next_archetype_id = ArchetypeId(archetype_id.0 + 1);
             self.generation.bump();
         }
 
@@ -488,7 +488,7 @@ impl ArchetypeMaster {
     pub fn clear(&mut self) {
         self.archetypes = ArchetypeBundle::new();
         self.registry.clear();
-        self.next_archetype_id = 1;
+        self.next_archetype_id = ArchetypeId(1);
         // `generation` is NOT reset — see doc comment above.
     }
 }
@@ -506,18 +506,18 @@ mod tests {
     // collisions across tests (see audit C-003 / Phase 1b). `archetype_master`
     // uses 300-309. All mock components share the same backing type (`u32`)
     // because the tests only exercise mask logic, never byte-level layout.
-    const MOCK_ID_BASE: ComponentId = 300;
+    const MOCK_ID_BASE: ComponentId = ComponentId(300);
 
-    /// Translate a test-local "logical" ID (1..=8) into the actual
+    /// Translate a test-local "logical" usize ID (1..=8) into the actual
     /// `ComponentId` used in the registry.
     #[inline]
-    fn mock(local: ComponentId) -> ComponentId {
-        MOCK_ID_BASE + local
+    fn mock(local: usize) -> ComponentId {
+        ComponentId(MOCK_ID_BASE.0 + local)
     }
 
-    /// Translate a slice of logical IDs into actual ComponentIds — keeps the
-    /// test bodies readable (`master.create_archetype(&mocks(&[1, 2, 3]))`).
-    fn mocks<const N: usize>(local: [ComponentId; N]) -> [ComponentId; N] {
+    /// Translate a slice of local usize IDs into actual ComponentIds — keeps the
+    /// test bodies readable (`master.create_archetype(&mocks([1, 2, 3]))`).
+    fn mocks<const N: usize>(local: [usize; N]) -> [ComponentId; N] {
         local.map(mock)
     }
 
@@ -527,7 +527,7 @@ mod tests {
         // idempotent: re-registration after the first call is a no-op, so
         // running this from every test is safe.
         for local in 1..=8 {
-            component_registry::register_layout::<u32>(mock(local));
+            component_registry::register_layout::<u32>(mock(local).0);
         }
     }
     
@@ -543,11 +543,11 @@ mod tests {
 
         // Create a new archetype
         let id1 = master.create_archetype(&mocks([1, 2, 3]));
-        assert_eq!(id1, 1);
+        assert_eq!(id1, ArchetypeId(1));
 
         // Create another archetype
         let id2 = master.create_archetype(&mocks([1, 2]));
-        assert_eq!(id2, 2);
+        assert_eq!(id2, ArchetypeId(2));
 
         // Try to create an archetype with the same components - should return existing ID
         let id3 = master.create_archetype(&mocks([1, 2, 3]));
@@ -580,7 +580,7 @@ mod tests {
         assert!(master.get_archetype(id).is_none());
 
         // Try to remove a non-existent archetype
-        let result = master.remove_archetype(999);
+        let result = master.remove_archetype(ArchetypeId(999));
         assert!(!result);
     }
 

@@ -6,6 +6,9 @@ use crate::ecs::core::archetype::archetype_signature::ArchetypeSignature;
 use crate::ecs::core::component::component_pool_bundle::ComponentPoolBundle;
 use crate::ecs::memory::arena::Arena;
 
+/// `MAX_COMPONENTS` as a `ComponentId` newtype for comparison against newtype-guarded IDs.
+const MAX_COMPONENTS_ID: ComponentId = ComponentId(MAX_COMPONENTS);
+
 /// Outcome of removing an entity from an archetype.
 ///
 /// Replaces the previous `Option<EntityId>` return which was ambiguous:
@@ -182,8 +185,8 @@ impl Archetype {
         let mut input_mask = ComponentMask::new();
         for (id, _) in components {
             debug_assert!(
-                *id < MAX_COMPONENTS,
-                "component_id {} >= MAX_COMPONENTS ({})", *id, MAX_COMPONENTS
+                *id < MAX_COMPONENTS_ID,
+                "component_id {} >= MAX_COMPONENTS ({})", id.0, MAX_COMPONENTS
             );
             input_mask.set(*id);
         }
@@ -206,9 +209,9 @@ impl Archetype {
         }
 
         let unit_index = self.component_pools.push_entity_components(components);
-        
+
         // Update the inland reference with the unit index
-        inland.set_unit_index(unit_index);
+        inland.set_unit_index(InlandPoolId(unit_index));
         
         // Add the entity ID to the vector
         self.entity_ids.push(entity_id);
@@ -231,7 +234,7 @@ impl Archetype {
             "EntityInland archetype_id mismatch");
 
         let removed_unit_index = entity_inland.unit_index();
-        let last_unit_index = self.current_index.saturating_sub(1);
+        let last_unit_index = InlandPoolId(self.current_index.saturating_sub(1));
 
         // If removing the last entity, just pop it.
         if removed_unit_index == last_unit_index {
@@ -245,15 +248,15 @@ impl Archetype {
         }
 
         // Get the entity ID that will be swapped.
-        let swapped_entity_id = self.entity_ids[last_unit_index];
+        let swapped_entity_id = self.entity_ids[last_unit_index.0];
 
         // Swap_remove in component pools.
-        if self.component_pools.swap_remove_unit(removed_unit_index).is_err() {
+        if self.component_pools.swap_remove_unit(removed_unit_index.0).is_err() {
             return RemoveOutcome::PoolFailure;
         }
 
         // Swap_remove the entity ID as well.
-        self.entity_ids.swap_remove(removed_unit_index);
+        self.entity_ids.swap_remove(removed_unit_index.0);
         self.current_index -= 1;
 
         RemoveOutcome::Swapped { moved_entity: swapped_entity_id }
@@ -271,40 +274,40 @@ impl Archetype {
         let pool = self.component_pools.get_pool(component_id)?;
         
         // Use the unit index directly
-        pool.get_raw(unit_index)
+        pool.get_raw(unit_index.0)
     }
 
     /// Gets a mutable raw pointer to a component using EntityInland for direct access
     #[inline]
     pub fn get_component_raw_mut(&mut self, inland: &EntityInland, component_id: ComponentId) -> Option<*mut u8> {
-        debug_assert_eq!(inland.archetype_id(), self.id, 
+        debug_assert_eq!(inland.archetype_id(), self.id,
             "EntityInland archetype_id mismatch");
-        
+
         let unit_index = inland.unit_index();
-        
+
         // Get the component pool for this component type
         let pool = self.component_pools.get_pool_mut(component_id)?;
-        
+
         // Use the unit index directly
-        pool.get_raw_mut(unit_index)
+        pool.get_raw_mut(unit_index.0)
     }
 
     /// Sets a component value using EntityInland for direct access
     #[inline]
     pub fn set_component(&mut self, inland: &EntityInland, component_id: ComponentId, bytes: &[u8]) -> bool {
-        debug_assert_eq!(inland.archetype_id(), self.id, 
+        debug_assert_eq!(inland.archetype_id(), self.id,
             "EntityInland archetype_id mismatch");
-        
+
         let unit_index = inland.unit_index();
-        
+
         // Get the component pool for this component type
         let pool = match self.component_pools.get_pool_mut(component_id) {
             Some(p) => p,
             None => return false,
         };
-        
+
         // Set the component using the unit index directly
-        pool.set_component(unit_index, bytes)
+        pool.set_component(unit_index.0, bytes)
     }
 
     /// Gets a reference to the component pool bundle
@@ -385,9 +388,9 @@ impl Archetype {
     }
     
     /// Gets the entity ID at a specific unit index
-     #[inline]
+    #[inline]
     pub fn get_entity_id_at(&self, unit_index: InlandPoolId) -> Option<EntityId> {
-        self.entity_ids.get(unit_index).copied()
+        self.entity_ids.get(unit_index.0).copied()
     }
 }
 
@@ -398,29 +401,29 @@ mod tests {
     use crate::ecs::memory::arena::Arena;
 
     // Use high IDs to avoid collisions with other test modules.
-    const COMP_A: ComponentId = 400;
-    const COMP_B: ComponentId = 401;
+    const COMP_A: ComponentId = ComponentId(400);
+    const COMP_B: ComponentId = ComponentId(401);
 
     fn register_test_components() {
         #[repr(C)]
         struct CompA(u32);
         #[repr(C)]
         struct CompB(u64);
-        component_registry::register_layout::<CompA>(COMP_A);
-        component_registry::register_layout::<CompB>(COMP_B);
+        component_registry::register_layout::<CompA>(COMP_A.0);
+        component_registry::register_layout::<CompB>(COMP_B.0);
     }
 
     fn make_archetype(arena: &Arena) -> Archetype {
         register_test_components();
-        Archetype::create_by_ids(1, &[COMP_A, COMP_B], arena)
+        Archetype::create_by_ids(ArchetypeId(1), &[COMP_A, COMP_B], arena)
     }
 
     // Helper: add one entity with zero-filled bytes for both components.
     fn add_entity(arch: &mut Archetype, entity_id: EntityId) -> EntityInland {
-        let mut inland = EntityInland::new(arch.id(), 0, 0);
+        let mut inland = EntityInland::new(arch.id(), InlandPoolId(0), 0);
         arch.init_entity_inland(&mut inland);
-        let bytes_a = vec![0u8; component_registry::get_component_size(COMP_A).unwrap()];
-        let bytes_b = vec![0u8; component_registry::get_component_size(COMP_B).unwrap()];
+        let bytes_a = vec![0u8; component_registry::get_component_size(COMP_A.0).unwrap()];
+        let bytes_b = vec![0u8; component_registry::get_component_size(COMP_B.0).unwrap()];
         let ok = arch.create_entity(entity_id, &mut inland, &[
             (COMP_A, bytes_a.as_slice()),
             (COMP_B, bytes_b.as_slice()),
@@ -437,7 +440,7 @@ mod tests {
         let mut arch = make_archetype(&arena);
 
         assert_eq!(arch.entity_count(), 0, "fresh archetype has no entities");
-        add_entity(&mut arch, 42);
+        add_entity(&mut arch, EntityId(42));
         assert_eq!(arch.entity_count(), 1, "count must be 1 after one create");
     }
 
@@ -446,10 +449,10 @@ mod tests {
         let arena = Arena::with_capacity(4096 * 1024);
         let mut arch = make_archetype(&arena);
 
-        add_entity(&mut arch, 99);
+        add_entity(&mut arch, EntityId(99));
         assert_eq!(
-            arch.get_entity_id_at(0),
-            Some(99),
+            arch.get_entity_id_at(InlandPoolId(0)),
+            Some(EntityId(99)),
             "entity ID 99 must be accessible at slot 0"
         );
     }
@@ -459,11 +462,11 @@ mod tests {
         let arena = Arena::with_capacity(4096 * 1024);
         let mut arch = make_archetype(&arena);
 
-        let mut inland = EntityInland::new(arch.id(), 0, 0);
+        let mut inland = EntityInland::new(arch.id(), InlandPoolId(0), 0);
         arch.init_entity_inland(&mut inland);
         // Provide only COMP_A, omit COMP_B.
-        let bytes_a = vec![0u8; component_registry::get_component_size(COMP_A).unwrap()];
-        let ok = arch.create_entity(10, &mut inland, &[(COMP_A, bytes_a.as_slice())]);
+        let bytes_a = vec![0u8; component_registry::get_component_size(COMP_A.0).unwrap()];
+        let ok = arch.create_entity(EntityId(10), &mut inland, &[(COMP_A, bytes_a.as_slice())]);
         assert!(!ok, "create_entity must return false when a component is missing");
     }
 
@@ -476,7 +479,7 @@ mod tests {
         // This test must pass under both `cargo test` and `cargo test --release`.
         let arena = Arena::with_capacity(4096 * 1024);
         let mut arch = make_archetype(&arena);
-        let mut inland = add_entity(&mut arch, 7);
+        let mut inland = add_entity(&mut arch, EntityId(7));
 
         assert_eq!(arch.entity_count(), 1);
         let popped = arch.pop(&mut inland);
@@ -494,12 +497,12 @@ mod tests {
         // component_pools.pop_entity() — previously it was missing.
         let arena = Arena::with_capacity(4096 * 1024);
         let mut arch = make_archetype(&arena);
-        let inland0 = add_entity(&mut arch, 1);
-        add_entity(&mut arch, 2);
-        add_entity(&mut arch, 3);
+        let inland0 = add_entity(&mut arch, EntityId(1));
+        add_entity(&mut arch, EntityId(2));
+        add_entity(&mut arch, EntityId(3));
 
         // Pop removes the last entity (ID=3).
-        let mut inland_last = EntityInland::new(arch.id(), 2, 0);
+        let mut inland_last = EntityInland::new(arch.id(), InlandPoolId(2), 0);
         arch.pop(&mut inland_last);
 
         assert_eq!(
@@ -508,17 +511,17 @@ mod tests {
             "entity_count must be 2 after one pop"
         );
         assert!(
-            arch.get_entity_id_at(2).is_none(),
+            arch.get_entity_id_at(InlandPoolId(2)).is_none(),
             "slot 2 must be empty after pop — Q-022 regression"
         );
         assert_eq!(
-            arch.get_entity_id_at(0),
-            Some(1),
+            arch.get_entity_id_at(InlandPoolId(0)),
+            Some(EntityId(1)),
             "slot 0 must still hold entity ID 1"
         );
         assert_eq!(
-            arch.get_entity_id_at(1),
-            Some(2),
+            arch.get_entity_id_at(InlandPoolId(1)),
+            Some(EntityId(2)),
             "slot 1 must still hold entity ID 2"
         );
 
@@ -540,8 +543,8 @@ mod tests {
         let _result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let arena2 = Arena::with_capacity(4096 * 1024);
             register_test_components();
-            let mut arch = Archetype::create_by_ids(99, &[COMP_A, COMP_B], &arena2);
-            let mut inland = EntityInland::new(arch.id(), 0, 0);
+            let mut arch = Archetype::create_by_ids(ArchetypeId(99), &[COMP_A, COMP_B], &arena2);
+            let mut inland = EntityInland::new(arch.id(), InlandPoolId(0), 0);
             // In debug: panics. In release: returns false (pool is empty → pop() = false).
             let _ = arch.pop(&mut inland);
         }));
@@ -555,7 +558,7 @@ mod tests {
     fn remove_entity_last_returns_last_outcome() {
         let arena = Arena::with_capacity(4096 * 1024);
         let mut arch = make_archetype(&arena);
-        let inland = add_entity(&mut arch, 55);
+        let inland = add_entity(&mut arch, EntityId(55));
         // Removing the only entity — no swap needed.
         let result = arch.remove_entity(&inland);
         assert_eq!(result, RemoveOutcome::Last, "no swap expected for the last entity");
@@ -566,14 +569,14 @@ mod tests {
     fn remove_entity_non_last_returns_swapped_outcome() {
         let arena = Arena::with_capacity(4096 * 1024);
         let mut arch = make_archetype(&arena);
-        let inland_first = add_entity(&mut arch, 10);
-        add_entity(&mut arch, 20); // last entity
+        let inland_first = add_entity(&mut arch, EntityId(10));
+        add_entity(&mut arch, EntityId(20)); // last entity
 
         // Remove first; last (20) should swap into position 0.
         let result = arch.remove_entity(&inland_first);
         assert_eq!(
             result,
-            RemoveOutcome::Swapped { moved_entity: 20 },
+            RemoveOutcome::Swapped { moved_entity: EntityId(20) },
             "swapped entity ID must be 20"
         );
         assert_eq!(arch.entity_count(), 1);
@@ -586,10 +589,10 @@ mod tests {
         // Removing the only entity must produce RemoveOutcome::Last.
         let arena = Arena::with_capacity(4096 * 1024);
         let mut arch = make_archetype(&arena);
-        let inland = add_entity(&mut arch, 1);
+        let inland = add_entity(&mut arch, EntityId(1));
         assert_eq!(arch.remove_entity(&inland), RemoveOutcome::Last);
         assert_eq!(arch.entity_count(), 0);
-        assert!(arch.get_entity_id_at(0).is_none());
+        assert!(arch.get_entity_id_at(InlandPoolId(0)).is_none());
     }
 
     #[test]
@@ -598,15 +601,15 @@ mod tests {
         // with the ID of the entity that was at the last position.
         let arena = Arena::with_capacity(4096 * 1024);
         let mut arch = make_archetype(&arena);
-        let inland_0 = add_entity(&mut arch, 10);
-        add_entity(&mut arch, 20);
-        add_entity(&mut arch, 30); // last
+        let inland_0 = add_entity(&mut arch, EntityId(10));
+        add_entity(&mut arch, EntityId(20));
+        add_entity(&mut arch, EntityId(30)); // last
 
         let result = arch.remove_entity(&inland_0);
-        assert_eq!(result, RemoveOutcome::Swapped { moved_entity: 30 });
+        assert_eq!(result, RemoveOutcome::Swapped { moved_entity: EntityId(30) });
         // Entity 30 now occupies slot 0; slot 1 holds entity 20.
-        assert_eq!(arch.get_entity_id_at(0), Some(30));
-        assert_eq!(arch.get_entity_id_at(1), Some(20));
+        assert_eq!(arch.get_entity_id_at(InlandPoolId(0)), Some(EntityId(30)));
+        assert_eq!(arch.get_entity_id_at(InlandPoolId(1)), Some(EntityId(20)));
         assert_eq!(arch.entity_count(), 2);
     }
 
@@ -615,13 +618,13 @@ mod tests {
         // Removing the middle entity of two entities is a swap.
         let arena = Arena::with_capacity(4096 * 1024);
         let mut arch = make_archetype(&arena);
-        let inland_0 = add_entity(&mut arch, 100);
-        add_entity(&mut arch, 200); // becomes "last"
+        let inland_0 = add_entity(&mut arch, EntityId(100));
+        add_entity(&mut arch, EntityId(200)); // becomes "last"
 
         let result = arch.remove_entity(&inland_0);
-        assert_eq!(result, RemoveOutcome::Swapped { moved_entity: 200 });
+        assert_eq!(result, RemoveOutcome::Swapped { moved_entity: EntityId(200) });
         assert_eq!(arch.entity_count(), 1);
-        assert_eq!(arch.get_entity_id_at(0), Some(200));
+        assert_eq!(arch.get_entity_id_at(InlandPoolId(0)), Some(EntityId(200)));
     }
 
     #[test]
@@ -629,13 +632,13 @@ mod tests {
         // Removing the last of multiple entities must produce RemoveOutcome::Last.
         let arena = Arena::with_capacity(4096 * 1024);
         let mut arch = make_archetype(&arena);
-        add_entity(&mut arch, 10);
-        let inland_last = add_entity(&mut arch, 20);
+        add_entity(&mut arch, EntityId(10));
+        let inland_last = add_entity(&mut arch, EntityId(20));
 
         let result = arch.remove_entity(&inland_last);
         assert_eq!(result, RemoveOutcome::Last);
         assert_eq!(arch.entity_count(), 1);
-        assert_eq!(arch.get_entity_id_at(0), Some(10));
+        assert_eq!(arch.get_entity_id_at(InlandPoolId(0)), Some(EntityId(10)));
     }
 
     // --- has_component_id ---
@@ -652,7 +655,7 @@ mod tests {
     fn has_component_id_returns_false_for_absent() {
         let arena = Arena::with_capacity(4096 * 1024);
         let arch = make_archetype(&arena);
-        assert!(!arch.has_component_id(402)); // never added
+        assert!(!arch.has_component_id(ComponentId(402))); // never added
     }
 
     // --- matches_component_ids ---
@@ -670,16 +673,19 @@ mod tests {
         let arena = Arena::with_capacity(4096 * 1024);
         let arch = make_archetype(&arena);
         // 402 is not in the archetype.
-        assert!(!arch.matches_component_ids(&[COMP_A, 402]));
+        assert!(!arch.matches_component_ids(&[COMP_A, ComponentId(402)]));
     }
 
     // --- C-16: ComponentMask precheck in create_entity ---
 
     // ID range 410-419 reserved for C-16 tests (per plan, avoids collisions).
-    const C16_A: ComponentId = 410;
-    const C16_B: ComponentId = 411;
+    const C16_A: ComponentId = ComponentId(410);
+    const C16_B: ComponentId = ComponentId(411);
     // IDs 412-417 reserved for wide-mask test (8 components).
-    const C16_WIDE: [ComponentId; 8] = [410, 411, 412, 413, 414, 415, 416, 417];
+    const C16_WIDE: [ComponentId; 8] = [
+        ComponentId(410), ComponentId(411), ComponentId(412), ComponentId(413),
+        ComponentId(414), ComponentId(415), ComponentId(416), ComponentId(417),
+    ];
 
     fn register_c16_components() {
         // Register each with a distinct struct type so TypeId differs.
@@ -716,13 +722,13 @@ mod tests {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let arena = Arena::with_capacity(4096 * 1024);
             // Archetype requires only C16_A and C16_B.
-            let mut arch = Archetype::create_by_ids(50, &[C16_A, C16_B], &arena);
+            let mut arch = Archetype::create_by_ids(ArchetypeId(50), &[C16_A, C16_B], &arena);
 
-            let mut inland = EntityInland::new(arch.id(), 0, 0);
+            let mut inland = EntityInland::new(arch.id(), InlandPoolId(0), 0);
             arch.init_entity_inland(&mut inland);
 
-            let sz_a = component_registry::get_component_size(C16_A).unwrap();
-            let sz_b = component_registry::get_component_size(C16_B).unwrap();
+            let sz_a = component_registry::get_component_size(C16_A.0).unwrap();
+            let sz_b = component_registry::get_component_size(C16_B.0).unwrap();
             let bytes_a = vec![0u8; sz_a];
             let bytes_b = vec![0u8; sz_b];
 
@@ -731,10 +737,10 @@ mod tests {
             let sz_c = component_registry::get_component_size(412).unwrap();
             let bytes_c = vec![0u8; sz_c];
 
-            let ok = arch.create_entity(200, &mut inland, &[
+            let ok = arch.create_entity(EntityId(200), &mut inland, &[
                 (C16_A, bytes_a.as_slice()),
                 (C16_B, bytes_b.as_slice()),
-                (412usize, bytes_c.as_slice()), // extra: not in archetype pools
+                (ComponentId(412), bytes_c.as_slice()), // extra: not in archetype pools
             ]);
             // In release: bundle returns None for the unknown ID → create_entity returns false.
             assert!(!ok, "create_entity must return false when bundle cannot accept the extra ID");
@@ -752,9 +758,9 @@ mod tests {
         register_c16_components();
         // 8 component pools each need arena space for chunks; use a larger arena.
         let arena = Arena::with_capacity(64 * 1024 * 1024);
-        let mut arch = Archetype::create_by_ids(51, &C16_WIDE, &arena);
+        let mut arch = Archetype::create_by_ids(ArchetypeId(51), &C16_WIDE, &arena);
 
-        let mut inland = EntityInland::new(arch.id(), 0, 0);
+        let mut inland = EntityInland::new(arch.id(), InlandPoolId(0), 0);
         arch.init_entity_inland(&mut inland);
 
         // Build component data: 4 bytes each (all u32-sized).
@@ -763,7 +769,7 @@ mod tests {
             .map(|&id| (id, bytes.as_slice()))
             .collect();
 
-        let ok = arch.create_entity(300, &mut inland, &components);
+        let ok = arch.create_entity(EntityId(300), &mut inland, &components);
         assert!(ok, "create_entity must succeed for 8-component archetype");
         assert_eq!(arch.entity_count(), 1);
     }

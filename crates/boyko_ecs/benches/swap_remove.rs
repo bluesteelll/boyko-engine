@@ -11,10 +11,11 @@
 
 use boyko_ecs::ecs::core::component::component_registry;
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
+use boyko_ecs::ecs::identifiers::primitives::ComponentId;
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 
-const BENCH_POS_ID: usize = 480;
-const BENCH_VEL_ID: usize = 481;
+const BENCH_POS_ID: ComponentId = ComponentId(480);
+const BENCH_VEL_ID: ComponentId = ComponentId(481);
 
 #[repr(C)]
 struct BenchPos {
@@ -33,8 +34,8 @@ struct BenchVel {
 /// Register bench component types under fixed IDs (idempotent -- safe to call
 /// multiple times across bench functions in the same process).
 fn register_bench_components() {
-    component_registry::register_layout::<BenchPos>(BENCH_POS_ID);
-    component_registry::register_layout::<BenchVel>(BENCH_VEL_ID);
+    component_registry::register_layout::<BenchPos>(BENCH_POS_ID.0);
+    component_registry::register_layout::<BenchVel>(BENCH_VEL_ID.0);
 }
 
 /// Builds an EcsMaster populated with `n` entities, each having Pos + Vel.

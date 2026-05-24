@@ -22,16 +22,17 @@ use boyko_ecs::ecs::core::component::component_registry;
 use boyko_ecs::ecs::memory::{arena::Arena, component_pool::ComponentPool};
 use boyko_ecs::ecs::core::component::component_pool_bundle::ComponentPoolBundle;
 use boyko_ecs::ecs::core::entity::entity_inland::EntityInland;
+use boyko_ecs::ecs::identifiers::primitives::{ArchetypeId, ComponentId, InlandPoolId};
 
 // IDs used across all tests in this file.
-const DC_ID: usize = 200;       // DropCounter component
-const DC2_ID: usize = 201;      // second DropCounter for set_component_typed
-const TYPE_A_ID: usize = 202;   // TypeA component (typed-API TypeId tests)
-const TYPE_B_ID: usize = 203;   // TypeB component (wrong type for TypeId tests)
-const ZST_ID: usize = 204;      // ZstComp (ZST rejection)
-const POD_ID: usize = 205;      // u32 pod (no-drop test)
-const BUNDLE_ID: usize = 206;   // BundleComp (bundle-level tests)
-const BUNDLE_MISSING_ID: usize = 207; // BundleMissingComp (no pool in bundle)
+const DC_ID: ComponentId = ComponentId(200);       // DropCounter component
+const DC2_ID: ComponentId = ComponentId(201);      // second DropCounter for set_component_typed
+const TYPE_A_ID: ComponentId = ComponentId(202);   // TypeA component (typed-API TypeId tests)
+const TYPE_B_ID: ComponentId = ComponentId(203);   // TypeB component (wrong type for TypeId tests)
+const ZST_ID: ComponentId = ComponentId(204);      // ZstComp (ZST rejection)
+const POD_ID: ComponentId = ComponentId(205);      // u32 pod (no-drop test)
+const BUNDLE_ID: ComponentId = ComponentId(206);   // BundleComp (bundle-level tests)
+const BUNDLE_MISSING_ID: ComponentId = ComponentId(207); // BundleMissingComp (no pool in bundle)
 
 // ---- component type definitions -------------------------------------------------
 
@@ -115,13 +116,13 @@ struct ZstComp;
 // Registration is idempotent, so calling it from multiple tests is safe.
 
 fn register_all() {
-    component_registry::register_layout::<DropCounter>(DC_ID);
-    component_registry::register_layout::<DropCounter2>(DC2_ID);
-    component_registry::register_layout::<TypeA>(TYPE_A_ID);
-    component_registry::register_layout::<TypeB>(TYPE_B_ID);
-    component_registry::register_layout::<PodU32>(POD_ID);
-    component_registry::register_layout::<BundleComp>(BUNDLE_ID);
-    component_registry::register_layout::<BundleMissingComp>(BUNDLE_MISSING_ID);
+    component_registry::register_layout::<DropCounter>(DC_ID.0);
+    component_registry::register_layout::<DropCounter2>(DC2_ID.0);
+    component_registry::register_layout::<TypeA>(TYPE_A_ID.0);
+    component_registry::register_layout::<TypeB>(TYPE_B_ID.0);
+    component_registry::register_layout::<PodU32>(POD_ID.0);
+    component_registry::register_layout::<BundleComp>(BUNDLE_ID.0);
+    component_registry::register_layout::<BundleMissingComp>(BUNDLE_MISSING_ID.0);
     // ZST is registered only in the panic test because its size==0 would cause
     // ComponentPool::new to debug_assert even during setup for other tests.
 }
@@ -144,70 +145,70 @@ use boyko_ecs::ecs::core::component::component::Component;
 use std::sync::OnceLock;
 
 impl Component for DropCounter {
-    fn component_id() -> usize {
-        static ID: OnceLock<usize> = OnceLock::new();
+    fn component_id() -> ComponentId {
+        static ID: OnceLock<ComponentId> = OnceLock::new();
         *ID.get_or_init(|| {
-            component_registry::register_layout::<DropCounter>(DC_ID);
+            component_registry::register_layout::<DropCounter>(DC_ID.0);
             DC_ID
         })
     }
 }
 
 impl Component for DropCounter2 {
-    fn component_id() -> usize {
-        static ID: OnceLock<usize> = OnceLock::new();
+    fn component_id() -> ComponentId {
+        static ID: OnceLock<ComponentId> = OnceLock::new();
         *ID.get_or_init(|| {
-            component_registry::register_layout::<DropCounter2>(DC2_ID);
+            component_registry::register_layout::<DropCounter2>(DC2_ID.0);
             DC2_ID
         })
     }
 }
 
 impl Component for TypeA {
-    fn component_id() -> usize {
-        static ID: OnceLock<usize> = OnceLock::new();
+    fn component_id() -> ComponentId {
+        static ID: OnceLock<ComponentId> = OnceLock::new();
         *ID.get_or_init(|| {
-            component_registry::register_layout::<TypeA>(TYPE_A_ID);
+            component_registry::register_layout::<TypeA>(TYPE_A_ID.0);
             TYPE_A_ID
         })
     }
 }
 
 impl Component for TypeB {
-    fn component_id() -> usize {
-        static ID: OnceLock<usize> = OnceLock::new();
+    fn component_id() -> ComponentId {
+        static ID: OnceLock<ComponentId> = OnceLock::new();
         *ID.get_or_init(|| {
-            component_registry::register_layout::<TypeB>(TYPE_B_ID);
+            component_registry::register_layout::<TypeB>(TYPE_B_ID.0);
             TYPE_B_ID
         })
     }
 }
 
 impl Component for PodU32 {
-    fn component_id() -> usize {
-        static ID: OnceLock<usize> = OnceLock::new();
+    fn component_id() -> ComponentId {
+        static ID: OnceLock<ComponentId> = OnceLock::new();
         *ID.get_or_init(|| {
-            component_registry::register_layout::<PodU32>(POD_ID);
+            component_registry::register_layout::<PodU32>(POD_ID.0);
             POD_ID
         })
     }
 }
 
 impl Component for BundleComp {
-    fn component_id() -> usize {
-        static ID: OnceLock<usize> = OnceLock::new();
+    fn component_id() -> ComponentId {
+        static ID: OnceLock<ComponentId> = OnceLock::new();
         *ID.get_or_init(|| {
-            component_registry::register_layout::<BundleComp>(BUNDLE_ID);
+            component_registry::register_layout::<BundleComp>(BUNDLE_ID.0);
             BUNDLE_ID
         })
     }
 }
 
 impl Component for BundleMissingComp {
-    fn component_id() -> usize {
-        static ID: OnceLock<usize> = OnceLock::new();
+    fn component_id() -> ComponentId {
+        static ID: OnceLock<ComponentId> = OnceLock::new();
         *ID.get_or_init(|| {
-            component_registry::register_layout::<BundleMissingComp>(BUNDLE_MISSING_ID);
+            component_registry::register_layout::<BundleMissingComp>(BUNDLE_MISSING_ID.0);
             BUNDLE_MISSING_ID
         })
     }
@@ -219,7 +220,7 @@ impl Component for BundleMissingComp {
 /// Registers DropCounter under DC_ID beforehand.
 fn make_dc_pool(arena: &Arena, cap: usize) -> ComponentPool {
     register_all();
-    ComponentPool::new(arena, DC_ID, 1, cap)
+    ComponentPool::new(arena, DC_ID.0, 1, cap)
 }
 
 // ================================================================================
@@ -387,7 +388,7 @@ fn set_component_typed_drops_old_and_consumes_new() {
 fn pool_drop_skipped_for_pod_components() {
     register_all();
     let arena = Arena::new();
-    let mut pool = ComponentPool::new(&arena, POD_ID, 1, 8);
+    let mut pool = ComponentPool::new(&arena, POD_ID.0, 1, 8);
 
     // Use raw `add` because PodU32 is a POD — the typed API would also work, but raw
     // demonstrates the case where no drop_fn runs.
@@ -544,7 +545,7 @@ fn add_typed_wrong_type_panics_in_debug() {
     register_all();
     let arena = Arena::new();
     // Pool registered for TypeA (TYPE_A_ID).
-    let mut pool = ComponentPool::new(&arena, TYPE_A_ID, 1, 4);
+    let mut pool = ComponentPool::new(&arena, TYPE_A_ID.0, 1, 4);
     // Attempt to add TypeB — TypeId mismatch must fire debug_assert.
     let wrong = TypeB { y: 0 };
     pool.add_typed(wrong);
@@ -558,7 +559,7 @@ fn set_component_typed_wrong_type_panics_in_debug() {
     register_all();
     let arena = Arena::new();
     // Pool registered for TypeA.
-    let mut pool = ComponentPool::new(&arena, TYPE_A_ID, 1, 4);
+    let mut pool = ComponentPool::new(&arena, TYPE_A_ID.0, 1, 4);
     // Insert a valid TypeA first so index 0 exists.
     let valid = TypeA { x: 1 };
     pool.add_typed(valid).expect("insert valid TypeA");
@@ -578,10 +579,10 @@ fn set_component_typed_wrong_type_panics_in_debug() {
 #[should_panic(expected = "does not support zero-sized components")]
 fn pool_construction_rejects_zst_component_in_debug() {
     // Register ZST under its slot.
-    component_registry::register_layout::<ZstComp>(ZST_ID);
+    component_registry::register_layout::<ZstComp>(ZST_ID.0);
     let arena = Arena::new();
     // This must fire the debug_assert in ComponentPool::new.
-    let _pool = ComponentPool::new(&arena, ZST_ID, 1, 4);
+    let _pool = ComponentPool::new(&arena, ZST_ID.0, 1, 4);
 }
 
 // ================================================================================
@@ -654,7 +655,7 @@ fn bundle_set_component_typed_forwards_drop_to_pool() {
     assert_eq!(ctr.load(Ordering::Relaxed), 0, "old value must not be dropped yet");
 
     // Overwrite via bundle — creates an EntityInland pointing at slot 0.
-    let entity = EntityInland::new(0, 0, 0);
+    let entity = EntityInland::new(ArchetypeId(0), InlandPoolId(0), 0);
     let new_val = BundleComp { counter: Arc::clone(&ctr) };
     let ok = bundle.set_component_typed(&entity, new_val);
     assert!(ok, "set_component_typed via bundle must return true (index 0, pool present)");

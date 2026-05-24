@@ -8,10 +8,11 @@
 ///            (detectable by Miri), or double-free.
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::component::component_registry;
+use boyko_ecs::ecs::identifiers::primitives::ComponentId;
 
 // Use very high IDs to avoid colliding with in-crate test registrations.
-const DROP_POSITION_ID: usize = 480;
-const DROP_VELOCITY_ID: usize = 481;
+const DROP_POSITION_ID: ComponentId = ComponentId(480);
+const DROP_VELOCITY_ID: ComponentId = ComponentId(481);
 
 #[repr(C)]
 struct DropPosition { x: f32, y: f32, z: f32 }
@@ -20,8 +21,8 @@ struct DropPosition { x: f32, y: f32, z: f32 }
 struct DropVelocity { vx: f32, vy: f32, vz: f32 }
 
 fn register_drop_test_components() {
-    component_registry::register_layout::<DropPosition>(DROP_POSITION_ID);
-    component_registry::register_layout::<DropVelocity>(DROP_VELOCITY_ID);
+    component_registry::register_layout::<DropPosition>(DROP_POSITION_ID.0);
+    component_registry::register_layout::<DropVelocity>(DROP_VELOCITY_ID.0);
 }
 
 /// C-001 / M-001: create and drop EcsMaster in a loop without any archetype operations.

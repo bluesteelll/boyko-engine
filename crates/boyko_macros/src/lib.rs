@@ -55,7 +55,9 @@ pub fn component_macro(input: TokenStream) -> TokenStream {
             fn component_id() -> boyko_ecs::ecs::identifiers::primitives::ComponentId {
                 static ID: ::std::sync::OnceLock<boyko_ecs::ecs::identifiers::primitives::ComponentId>
                     = ::std::sync::OnceLock::new();
-                *ID.get_or_init(|| boyko_ecs::ecs::core::component::component_registry::register_new::<Self>())
+                *ID.get_or_init(|| boyko_ecs::ecs::identifiers::primitives::ComponentId(
+                    boyko_ecs::ecs::core::component::component_registry::register_new::<Self>()
+                ))
             }
 
             // NOTE: `std::any::type_name::<Self>()` is not yet stable as a const fn.

@@ -115,12 +115,12 @@ impl<A: Component> ComponentSet for A {
     fn component_ids() -> &'static [ComponentId] {
         let id = A::component_id();
         debug_assert!(
-            id < MAX_COMPONENTS,
+            id.0 < MAX_COMPONENTS,
             "ComponentId {id} out of cache range (MAX_COMPONENTS = {MAX_COMPONENTS})"
         );
         // Index by the component's own ID — unique per concrete type by the
         // component registry invariant (C-003).
-        SINGLE_COMPONENT_CACHE[id].get_or_init(|| Box::leak(vec![id].into_boxed_slice()))
+        SINGLE_COMPONENT_CACHE[id.0].get_or_init(|| Box::leak(vec![id].into_boxed_slice()))
     }
 }
 
@@ -267,9 +267,9 @@ mod tests {
     use super::*;
     use crate::ecs::core::component::component_registry;
 
-    const ID_A: ComponentId = 495;
-    const ID_B: ComponentId = 496;
-    const ID_C: ComponentId = 497;
+    const ID_A: ComponentId = ComponentId(495);
+    const ID_B: ComponentId = ComponentId(496);
+    const ID_C: ComponentId = ComponentId(497);
     // 498, 499 reserved for future tests in this module.
 
     // Minimal #[repr(C)] structs used as stand-ins for real components.
@@ -290,27 +290,21 @@ mod tests {
     // Registers all test component layouts. OnceLock inside register_layout makes
     // this idempotent: calling it from multiple tests in parallel is safe.
     fn register_test_components() {
-        component_registry::register_layout::<TestC495>(ID_A);
-        component_registry::register_layout::<TestC496>(ID_B);
-        component_registry::register_layout::<TestC497>(ID_C);
+        component_registry::register_layout::<TestC495>(ID_A.0);
+        component_registry::register_layout::<TestC496>(ID_B.0);
+        component_registry::register_layout::<TestC497>(ID_C.0);
     }
 
     // Minimal Component impls: only component_id() is required; all other
     // methods have default bodies in the trait.
     impl Component for TestC495 {
-        fn component_id() -> ComponentId {
-            ID_A
-        }
+        fn component_id() -> ComponentId { ID_A }
     }
     impl Component for TestC496 {
-        fn component_id() -> ComponentId {
-            ID_B
-        }
+        fn component_id() -> ComponentId { ID_B }
     }
     impl Component for TestC497 {
-        fn component_id() -> ComponentId {
-            ID_C
-        }
+        fn component_id() -> ComponentId { ID_C }
     }
 
     #[test]

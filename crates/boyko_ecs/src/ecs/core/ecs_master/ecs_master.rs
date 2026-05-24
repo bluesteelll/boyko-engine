@@ -3,7 +3,7 @@ use crate::ecs::core::archetype::archetype_master::ArchetypeMaster;
 use crate::ecs::core::entity::entity::Entity;
 use crate::ecs::core::entity::entity_master::EntityMaster;
 use crate::ecs::core::entity::entity_inland::EntityInland;
-use crate::ecs::identifiers::primitives::{ArchetypeId, EntityId, ComponentId};
+use crate::ecs::identifiers::primitives::{ArchetypeId, EntityId, ComponentId, InlandPoolId};
 use crate::ecs::memory::arena::Arena;
 use crate::ecs::constants::DEFAULT_ARENA_SIZE;
 use crate::ecs::error::{EcsError, EcsResult};
@@ -150,7 +150,7 @@ impl EcsMaster {
         // Create EntityInland with initial values.
         let mut entity_inland = EntityInland::new(
             archetype_id,
-            0, // unit index will be set by create_entity
+            InlandPoolId(0), // unit index will be set by create_entity
             generation,
         );
 
@@ -323,7 +323,7 @@ impl EcsMaster {
             if let Some(archetype) = self.archetype_master.get_archetype(archetype_id) {
                 // Get all entity IDs from this archetype
                 for unit_index in 0..archetype.entity_count() {
-                    if let Some(entity_id) = archetype.get_entity_id_at(unit_index)
+                    if let Some(entity_id) = archetype.get_entity_id_at(InlandPoolId(unit_index))
                         && let Some(entity) = self.entity_master.get_entity(entity_id)
                     {
                         result.push(entity);
@@ -440,9 +440,9 @@ mod tests {
     //   query       : 200-209
     //   archetype_master : 300-309
     //   archetype (unit) : 400-409
-    const POSITION_ID: ComponentId = 100;
-    const VELOCITY_ID: ComponentId = 101;
-    const HEALTH_ID: ComponentId = 102;
+    const POSITION_ID: ComponentId = ComponentId(100);
+    const VELOCITY_ID: ComponentId = ComponentId(101);
+    const HEALTH_ID: ComponentId = ComponentId(102);
 
     #[repr(C)]
     struct Position { x: f32, y: f32, z: f32 }
@@ -455,9 +455,9 @@ mod tests {
 
     fn register_test_components() {
         // Register components in the global registry
-        component_registry::register_layout::<Position>(POSITION_ID);
-        component_registry::register_layout::<Velocity>(VELOCITY_ID);
-        component_registry::register_layout::<Health>(HEALTH_ID);
+        component_registry::register_layout::<Position>(POSITION_ID.0);
+        component_registry::register_layout::<Velocity>(VELOCITY_ID.0);
+        component_registry::register_layout::<Health>(HEALTH_ID.0);
     }
 
     #[test]
@@ -554,17 +554,17 @@ mod tests {
         let dummy_bytes = [0u8; 12];
 
         // Attempt to create an entity in archetype 999 (never created).
-        let result = ecs.create_entity(999, &[(POSITION_ID, &dummy_bytes)]);
+        let result = ecs.create_entity(ArchetypeId(999), &[(POSITION_ID, &dummy_bytes)]);
         // C-019: caller can pattern-match on the concrete EcsError variant
         // (not just `is_err`) — the whole point of switching off `anyhow`.
         assert!(
-            matches!(result, Err(EcsError::ArchetypeNotFound(999))),
-            "expected Err(ArchetypeNotFound(999)), got {:?}",
+            matches!(result, Err(EcsError::ArchetypeNotFound(ArchetypeId(999)))),
+            "expected Err(ArchetypeNotFound(ArchetypeId(999))), got {:?}",
             result
         );
 
         // No EntityId must have been allocated: next fresh id stays at 0.
-        assert_eq!(ecs.entity_master().next_entity_id(), 0,
+        assert_eq!(ecs.entity_master().next_entity_id(), EntityId(0),
             "EntityId must not be consumed when the guard fires");
 
         // No active entities and no recycled slots.
@@ -581,11 +581,11 @@ mod tests {
         let dummy_bytes = [0u8; 12];
 
         for _ in 0..5 {
-            let _ = ecs.create_entity(42, &[(POSITION_ID, &dummy_bytes)]);
+            let _ = ecs.create_entity(ArchetypeId(42), &[(POSITION_ID, &dummy_bytes)]);
         }
 
         // After 5 failed guard calls the fresh-id counter must still be 0.
-        assert_eq!(ecs.entity_master().next_entity_id(), 0);
+        assert_eq!(ecs.entity_master().next_entity_id(), EntityId(0));
         assert_eq!(ecs.entity_count(), 0);
         assert_eq!(ecs.recycled_entity_count(), 0);
     }
@@ -612,7 +612,7 @@ mod tests {
         assert_eq!(ecs.recycled_entity_count(), 1);
 
         // A guard-failing call must not touch the free list.
-        let _ = ecs.create_entity(999, &[(POSITION_ID, &pos_bytes)]);
+        let _ = ecs.create_entity(ArchetypeId(999), &[(POSITION_ID, &pos_bytes)]);
         assert_eq!(ecs.recycled_entity_count(), 1,
             "free list must not be consumed when guard fires before allocate_entity");
         assert_eq!(ecs.entity_count(), 0);
@@ -630,13 +630,13 @@ mod tests {
 
         // Allocate a fresh entity without registering it.
         let entity = entity_master.allocate_entity();
-        assert_eq!(entity.id(), 0);
-        assert_eq!(entity_master.next_entity_id(), 1);
+        assert_eq!(entity.id(), EntityId(0));
+        assert_eq!(entity_master.next_entity_id(), EntityId(1));
 
         // Rewind must succeed and restore next_entity_id to 0.
         let rewound = entity_master.rewind_allocate(entity);
         assert!(rewound, "fresh-ID rewind must succeed");
-        assert_eq!(entity_master.next_entity_id(), 0,
+        assert_eq!(entity_master.next_entity_id(), EntityId(0),
             "next_entity_id must be restored after rewind");
         assert_eq!(entity_master.entity_count(), 0);
     }
@@ -668,7 +668,7 @@ mod tests {
         assert!(ecs.has_entity(entity));
         assert_eq!(ecs.entity_count(), 1);
         // next_entity_id was advanced to 1 and not rewound.
-        assert_eq!(ecs.entity_master().next_entity_id(), 1);
+        assert_eq!(ecs.entity_master().next_entity_id(), EntityId(1));
         assert_eq!(ecs.recycled_entity_count(), 0);
     }
 }

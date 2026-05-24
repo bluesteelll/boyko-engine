@@ -706,6 +706,7 @@ mod tests {
     use super::ComponentPool;
     use crate::ecs::core::component::component::Component;
     use crate::ecs::core::component::component_registry;
+    use crate::ecs::identifiers::primitives::ComponentId;
     use crate::ecs::memory::arena::Arena;
 
     // ID allocation (no collision with integration test files or other unit tests):
@@ -713,9 +714,9 @@ mod tests {
     //   drop_fn integration:           200..207
     //   drop_safety integration:       480..481
     //   typed-read tests below:        220..223
-    const POS_ID: usize = 220;
-    const VEL_ID: usize = 221;
-    const OTHER_ID: usize = 222;
+    const POS_ID: ComponentId = ComponentId(220);
+    const VEL_ID: ComponentId = ComponentId(221);
+    const OTHER_ID: ComponentId = ComponentId(222);
 
     // ---- component type definitions ------------------------------------------------
 
@@ -742,30 +743,30 @@ mod tests {
     // ---- Component impls (mirrors what #[derive(Component)] generates) -------------
 
     impl Component for Position {
-        fn component_id() -> usize {
-            static ID: OnceLock<usize> = OnceLock::new();
+        fn component_id() -> ComponentId {
+            static ID: OnceLock<ComponentId> = OnceLock::new();
             *ID.get_or_init(|| {
-                component_registry::register_layout::<Position>(POS_ID);
+                component_registry::register_layout::<Position>(POS_ID.0);
                 POS_ID
             })
         }
     }
 
     impl Component for Velocity {
-        fn component_id() -> usize {
-            static ID: OnceLock<usize> = OnceLock::new();
+        fn component_id() -> ComponentId {
+            static ID: OnceLock<ComponentId> = OnceLock::new();
             *ID.get_or_init(|| {
-                component_registry::register_layout::<Velocity>(VEL_ID);
+                component_registry::register_layout::<Velocity>(VEL_ID.0);
                 VEL_ID
             })
         }
     }
 
     impl Component for OtherComponent {
-        fn component_id() -> usize {
-            static ID: OnceLock<usize> = OnceLock::new();
+        fn component_id() -> ComponentId {
+            static ID: OnceLock<ComponentId> = OnceLock::new();
             *ID.get_or_init(|| {
-                component_registry::register_layout::<OtherComponent>(OTHER_ID);
+                component_registry::register_layout::<OtherComponent>(OTHER_ID.0);
                 OTHER_ID
             })
         }
@@ -774,14 +775,14 @@ mod tests {
     // ---- helpers -------------------------------------------------------------------
 
     fn register_all() {
-        component_registry::register_layout::<Position>(POS_ID);
-        component_registry::register_layout::<Velocity>(VEL_ID);
-        component_registry::register_layout::<OtherComponent>(OTHER_ID);
+        component_registry::register_layout::<Position>(POS_ID.0);
+        component_registry::register_layout::<Velocity>(VEL_ID.0);
+        component_registry::register_layout::<OtherComponent>(OTHER_ID.0);
     }
 
     fn make_position_pool(arena: &Arena, cap: usize) -> ComponentPool {
         register_all();
-        ComponentPool::new(arena, POS_ID, 1, cap)
+        ComponentPool::new(arena, POS_ID.0, 1, cap)
     }
 
     // ---- tests (audit C-004 typed read wrappers) -----------------------------------
@@ -850,7 +851,7 @@ mod tests {
         register_all();
         let arena = Arena::new();
         // Pool is registered for `Position` (POS_ID).
-        let mut pool = ComponentPool::new(&arena, POS_ID, 1, 4);
+        let mut pool = ComponentPool::new(&arena, POS_ID.0, 1, 4);
 
         // Insert a valid Position so that index 0 exists.
         pool.add_typed(Position { x: 1.0, y: 2.0, z: 3.0 })

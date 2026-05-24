@@ -115,12 +115,12 @@ impl QueryState {
         // per-seen-id work O(1), so total cost is O(new ids).
         for id in 1..current.get() {
             if !self.matched_archetypes.contains(id)
-                && let Some(arch) = master.get_archetype(id)
+                && let Some(arch) = master.get_archetype(ArchetypeId(id))
             {
                 let mask = arch.component_mask();
                 if self.matches(mask) {
                     self.matched_archetypes.insert(id);
-                    self.matched_ids.push(id);
+                    self.matched_ids.push(ArchetypeId(id));
                 }
                 // Unmatched IDs are not inserted into matched_archetypes.
                 // Archetype component sets are immutable post-creation, so
@@ -195,8 +195,8 @@ impl QueryState {
     /// preventing silent desync if new internal state is added in the future.
     #[inline]
     pub(crate) fn push_matched(&mut self, id: ArchetypeId) {
-        if !self.matched_archetypes.contains(id) {
-            self.matched_archetypes.insert(id);
+        if !self.matched_archetypes.contains(id.0) {
+            self.matched_archetypes.insert(id.0);
             self.matched_ids.push(id);
         }
     }
@@ -253,31 +253,23 @@ mod tests {
     struct Damage(u32);
 
     impl Component for Pos {
-        fn component_id() -> ComponentId {
-            490
-        }
+        fn component_id() -> ComponentId { ComponentId(490) }
     }
     impl Component for Vel {
-        fn component_id() -> ComponentId {
-            491
-        }
+        fn component_id() -> ComponentId { ComponentId(491) }
     }
     impl Component for Health {
-        fn component_id() -> ComponentId {
-            492
-        }
+        fn component_id() -> ComponentId { ComponentId(492) }
     }
     impl Component for Damage {
-        fn component_id() -> ComponentId {
-            493
-        }
+        fn component_id() -> ComponentId { ComponentId(493) }
     }
 
     fn register_components() {
-        component_registry::register_layout::<Pos>(Pos::component_id());
-        component_registry::register_layout::<Vel>(Vel::component_id());
-        component_registry::register_layout::<Health>(Health::component_id());
-        component_registry::register_layout::<Damage>(Damage::component_id());
+        component_registry::register_layout::<Pos>(Pos::component_id().0);
+        component_registry::register_layout::<Vel>(Vel::component_id().0);
+        component_registry::register_layout::<Health>(Health::component_id().0);
+        component_registry::register_layout::<Damage>(Damage::component_id().0);
     }
 
     fn setup() -> (ArchetypeMaster, Box<Arena>) {
@@ -416,7 +408,7 @@ mod tests {
         // For every ID in matched_ids, the bitset must say contains=true
         for &id in state.matched_ids() {
             assert!(
-                state.matched_archetypes.contains(id),
+                state.matched_archetypes.contains(id.0),
                 "id {} in matched_ids but not in bitset",
                 id
             );

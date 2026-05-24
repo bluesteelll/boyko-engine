@@ -48,7 +48,7 @@ impl Entity {
 impl From<Slot> for Entity {
     fn from(slot: Slot) -> Self {
         Entity {
-            id: slot.index(),
+            id: EntityId(slot.index()),
             generation: slot.generation(),
         }
     }
@@ -56,6 +56,6 @@ impl From<Slot> for Entity {
 
 impl From<Entity> for Slot {
     fn from(val: Entity) -> Self {
-        Slot::new(val.id(), val.generation())
+        Slot::new(val.id().0, val.generation())
     }
 }

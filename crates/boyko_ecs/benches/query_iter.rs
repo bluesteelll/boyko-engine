@@ -22,12 +22,12 @@ use boyko_ecs::ecs::core::component::component_registry;
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::iters::query::Query;
 use boyko_ecs::ecs::core::iters::query_state::QueryState;
-use boyko_ecs::ecs::identifiers::primitives::ComponentId;
+use boyko_ecs::ecs::identifiers::primitives::{ArchetypeId, ComponentId, InlandPoolId};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::hint::black_box;
 
-const QBENCH_POS_ID: usize = 470;
-const QBENCH_VEL_ID: usize = 471;
+const QBENCH_POS_ID: ComponentId = ComponentId(470);
+const QBENCH_VEL_ID: ComponentId = ComponentId(471);
 
 #[repr(C)]
 struct QBenchPos {
@@ -46,20 +46,16 @@ struct QBenchVel {
 // Manual Component impls so Query::with::<(QBenchPos, QBenchVel)> can exercise
 // the typed ComponentSet path (Q-012) in bench_query_one_shot.
 impl Component for QBenchPos {
-    fn component_id() -> ComponentId {
-        QBENCH_POS_ID
-    }
+    fn component_id() -> ComponentId { QBENCH_POS_ID }
 }
 
 impl Component for QBenchVel {
-    fn component_id() -> ComponentId {
-        QBENCH_VEL_ID
-    }
+    fn component_id() -> ComponentId { QBENCH_VEL_ID }
 }
 
 fn register_query_bench_components() {
-    component_registry::register_layout::<QBenchPos>(QBENCH_POS_ID);
-    component_registry::register_layout::<QBenchVel>(QBENCH_VEL_ID);
+    component_registry::register_layout::<QBenchPos>(QBENCH_POS_ID.0);
+    component_registry::register_layout::<QBenchVel>(QBENCH_VEL_ID.0);
 }
 
 /// Builds an EcsMaster with `n` entities split across two archetypes:
@@ -169,7 +165,7 @@ fn bench_query_iter_raw_ptr(c: &mut Criterion) {
                 let mut sum = 0.0f32;
                 for archetype in query.iter() {
                     for unit_index in 0..archetype.entity_count() {
-                        if let Some(entity_id) = archetype.get_entity_id_at(unit_index)
+                        if let Some(entity_id) = archetype.get_entity_id_at(InlandPoolId(unit_index))
                             && let Some(entity) = ecs.get_entity(entity_id)
                             && let Some(ptr) = ecs.get_component_raw(entity, QBENCH_POS_ID)
                         {
@@ -265,8 +261,7 @@ fn bench_query_one_shot(c: &mut Criterion) {
 
         // Pre-allocate the output buffer once outside the iter loop so the
         // steady-state (post-warmup) measurements reflect zero-alloc behaviour.
-        // ArchetypeId is a type alias for usize.
-        let mut out: Vec<usize> = Vec::with_capacity(8);
+        let mut out: Vec<ArchetypeId> = Vec::with_capacity(8);
         // Warmup: fill the buffer and let it reach stable capacity.
         registry.find_archetypes_with_components_into(&[QBENCH_POS_ID, QBENCH_VEL_ID], &mut out);
 

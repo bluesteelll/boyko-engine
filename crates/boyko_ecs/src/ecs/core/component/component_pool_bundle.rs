@@ -54,40 +54,40 @@ impl ComponentPoolBundle {
     /// Returns the internal index assigned to this pool
     pub fn add_pool(&mut self, arena: &Arena, component_id: ComponentId) -> InlandPoolId {
         // Check if pool for this component type already exists
-        if let Some(&inland_id) = self.sparse_indexes.get(component_id) {
+        if let Some(&inland_id) = self.sparse_indexes.get(component_id.0) {
             return inland_id;
         }
 
         // Verify component is registered - only in debug builds
-        debug_assert!(component_registry::get_layout(component_id).is_some(),
+        debug_assert!(component_registry::get_layout(component_id.0).is_some(),
             "Component ID {} not registered in layout registry", component_id);
 
         // Create a new pool for this component type
-        let pool = ComponentPool::with_default_sizes(arena, component_id);
+        let pool = ComponentPool::with_default_sizes(arena, component_id.0);
 
         // Add pool to the bundle
-        let inland_id = self.pools.len();
+        let inland_id = InlandPoolId(self.pools.len());
         self.pools.push(pool);
-        self.sparse_indexes.insert(component_id, inland_id);
+        self.sparse_indexes.insert(component_id.0, inland_id);
 
         inland_id
     }
 
     /// Gets a component pool by component ID
     pub fn get_pool(&self, component_id: ComponentId) -> Option<&ComponentPool> {
-        let inland_id = self.sparse_indexes.get(component_id)?;
-        Some(&self.pools[*inland_id])
+        let inland_id = self.sparse_indexes.get(component_id.0)?;
+        Some(&self.pools[inland_id.0])
     }
 
     /// Gets a mutable component pool by component ID
     pub fn get_pool_mut(&mut self, component_id: ComponentId) -> Option<&mut ComponentPool> {
-        let inland_id = *self.sparse_indexes.get(component_id)?;
+        let inland_id = self.sparse_indexes.get(component_id.0)?.0;
         Some(&mut self.pools[inland_id])
     }
 
     /// Checks if the bundle contains a pool for a component with the specified ID
     pub fn contains(&self, component_id: ComponentId) -> bool {
-        self.sparse_indexes.contains(component_id)
+        self.sparse_indexes.contains(component_id.0)
     }
 
     /// Gets the number of component pools in the bundle
@@ -105,17 +105,17 @@ impl ComponentPoolBundle {
     /// Gets a raw pointer to a component by ComponentId and EntityInland
     pub fn get_unit_raw(&self, component_id: ComponentId, entity_inland: &EntityInland) -> Option<*const u8> {
         // Debug assert for component existence for better error messages
-        debug_assert!(self.contains(component_id), 
+        debug_assert!(self.contains(component_id),
             "Component ID {} not found in bundle", component_id);
-            
-        let inland_id = self.sparse_indexes.get(component_id)?;
-        
+
+        let inland_id = self.sparse_indexes.get(component_id.0)?.0;
+
         // Debug assert for entity index bounds
-        debug_assert!(entity_inland.unit_index() < self.pools[*inland_id].count(),
-            "Entity unit index out of bounds: {} >= {}", 
-            entity_inland.unit_index(), self.pools[*inland_id].count());
-            
-        self.pools[*inland_id].get_raw(entity_inland.unit_index())
+        debug_assert!(entity_inland.unit_index().0 < self.pools[inland_id].count(),
+            "Entity unit index out of bounds: {} >= {}",
+            entity_inland.unit_index(), self.pools[inland_id].count());
+
+        self.pools[inland_id].get_raw(entity_inland.unit_index().0)
     }
     
     /// Gets raw pointers to multiple components for a single EntityInland
@@ -152,17 +152,17 @@ impl ComponentPoolBundle {
     /// Gets a mutable component by entity inland and component ID
     pub fn get_unit_raw_mut(&mut self, component_id: ComponentId, entity_inland: &EntityInland) -> Option<*mut u8> {
         // Debug assert for component existence for better error messages
-        debug_assert!(self.contains(component_id), 
+        debug_assert!(self.contains(component_id),
             "Component ID {} not found in bundle", component_id);
-        
-        let inland_id = *self.sparse_indexes.get(component_id)?;
-        
+
+        let inland_id = self.sparse_indexes.get(component_id.0)?.0;
+
         // Debug assert for entity index bounds
-        debug_assert!(entity_inland.unit_index() < self.pools[inland_id].count(),
-            "Entity unit index out of bounds: {} >= {}", 
+        debug_assert!(entity_inland.unit_index().0 < self.pools[inland_id].count(),
+            "Entity unit index out of bounds: {} >= {}",
             entity_inland.unit_index(), self.pools[inland_id].count());
-            
-        self.pools[inland_id].get_raw_mut(entity_inland.unit_index())
+
+        self.pools[inland_id].get_raw_mut(entity_inland.unit_index().0)
     }
     
     /// Gets mutable raw pointers to multiple components for a single EntityInland
@@ -173,14 +173,14 @@ impl ComponentPoolBundle {
         // We need to handle mutability carefully
         // Can't use a simple loop because of borrow checking limitations
         for &component_id in component_ids {
-            if let Some(inland_id) = self.sparse_indexes.get(component_id).copied() {
+            if let Some(inland_id) = self.sparse_indexes.get(component_id.0).copied() {
                 // Debug assert for entity index bounds
-                debug_assert!(entity_inland.unit_index() < self.pools[inland_id].count(),
-                    "Entity unit index out of bounds: {} >= {}", 
-                    entity_inland.unit_index(), self.pools[inland_id].count());
-                
+                debug_assert!(entity_inland.unit_index().0 < self.pools[inland_id.0].count(),
+                    "Entity unit index out of bounds: {} >= {}",
+                    entity_inland.unit_index(), self.pools[inland_id.0].count());
+
                 // Get the raw pointer
-                if let Some(ptr) = self.pools[inland_id].get_raw_mut(entity_inland.unit_index()) {
+                if let Some(ptr) = self.pools[inland_id.0].get_raw_mut(entity_inland.unit_index().0) {
                     result.push((component_id, ptr));
                 }
             }
@@ -208,39 +208,39 @@ impl ComponentPoolBundle {
 
     /// Adds a component to the appropriate pool
     pub fn add_component(&mut self, component_id: ComponentId, component_bytes: &[u8]) -> Option<usize> {
-        debug_assert!(self.contains(component_id), 
+        debug_assert!(self.contains(component_id),
             "Component ID {} not found in bundle", component_id);
-        
+
         // Verify component size matches registry - debug only check
         debug_assert_eq!(
-            component_bytes.len(), 
-            component_registry::get_component_size(component_id).unwrap_or(0),
+            component_bytes.len(),
+            component_registry::get_component_size(component_id.0).unwrap_or(0),
             "Component size mismatch for ID {}", component_id
         );
-        
-        let inland_id = *self.sparse_indexes.get(component_id)?;
+
+        let inland_id = self.sparse_indexes.get(component_id.0)?.0;
         self.pools[inland_id].add(component_bytes)
     }
 
     /// Sets a component's value
     pub fn set_component(&mut self, component_id: ComponentId, entity_inland: &EntityInland, component_bytes: &[u8]) -> bool {
-        debug_assert!(self.contains(component_id), 
+        debug_assert!(self.contains(component_id),
             "Component ID {} not found in bundle", component_id);
-            
+
         // Verify component size matches registry - debug only check
         debug_assert_eq!(
-            component_bytes.len(), 
-            component_registry::get_component_size(component_id).unwrap_or(0),
+            component_bytes.len(),
+            component_registry::get_component_size(component_id.0).unwrap_or(0),
             "Component size mismatch for ID {}", component_id
         );
-        
-        if let Some(inland_id) = self.sparse_indexes.get(component_id) {
+
+        if let Some(inland_id) = self.sparse_indexes.get(component_id.0) {
             // Debug assert for entity index bounds
-            debug_assert!(entity_inland.unit_index() < self.pools[*inland_id].count(),
-                "Entity unit index out of bounds: {} >= {}", 
-                entity_inland.unit_index(), self.pools[*inland_id].count());
-                
-            self.pools[*inland_id].set_component(entity_inland.unit_index(), component_bytes)
+            debug_assert!(entity_inland.unit_index().0 < self.pools[inland_id.0].count(),
+                "Entity unit index out of bounds: {} >= {}",
+                entity_inland.unit_index(), self.pools[inland_id.0].count());
+
+            self.pools[inland_id.0].set_component(entity_inland.unit_index().0, component_bytes)
         } else {
             false
         }
@@ -256,17 +256,17 @@ impl ComponentPoolBundle {
     /// two-phase commit pattern that prevents partial-pool desync on failure.
     pub fn can_push_entity_components(&self, components: &[(ComponentId, &[u8])]) -> bool {
         for (component_id, bytes) in components {
-            let inland_id = match self.sparse_indexes.get(*component_id) {
+            let inland_id = match self.sparse_indexes.get(component_id.0) {
                 Some(&id) => id,
                 None => return false,
             };
             // Verify component size matches registry — debug only.
             debug_assert_eq!(
                 bytes.len(),
-                component_registry::get_component_size(*component_id).unwrap_or(0),
+                component_registry::get_component_size(component_id.0).unwrap_or(0),
                 "Component size mismatch for ID {}", component_id
             );
-            if self.pools[inland_id].is_full() {
+            if self.pools[inland_id.0].is_full() {
                 return false;
             }
         }
@@ -296,9 +296,9 @@ impl ComponentPoolBundle {
         let mut first = true;
 
         for (component_id, bytes) in components {
-            let inland_id = self.sparse_indexes.get(*component_id).copied()
+            let inland_id = self.sparse_indexes.get(component_id.0).copied()
                 .expect("invariant: can_push verified all component IDs are present");
-            let idx = self.pools[inland_id].add(bytes)
+            let idx = self.pools[inland_id.0].add(bytes)
                 .expect("invariant: can_push verified all pools have capacity");
             if first {
                 unit_index = idx;
@@ -359,7 +359,7 @@ pub fn swap_remove_unit(&mut self, unit_index: usize) -> EcsResult<()> {
     pub fn add_component_typed<T: Component>(&mut self, value: T) -> Option<usize> {
         let component_id = T::component_id();
         // On miss: `value` drops at scope exit; bundle is not modified.
-        let inland_id = self.sparse_indexes.get(component_id).copied()?;
+        let inland_id = self.sparse_indexes.get(component_id.0).copied()?.0;
         self.pools[inland_id].add_typed(value)
     }
 
@@ -380,14 +380,14 @@ pub fn swap_remove_unit(&mut self, unit_index: usize) -> EcsResult<()> {
         value: T,
     ) -> bool {
         let component_id = T::component_id();
-        let Some(inland_id) = self.sparse_indexes.get(component_id).copied() else {
+        let Some(inland_id) = self.sparse_indexes.get(component_id.0).copied() else {
             return false;
         };
         debug_assert!(
-            entity_inland.unit_index() < self.pools[inland_id].count(),
+            entity_inland.unit_index().0 < self.pools[inland_id.0].count(),
             "Entity unit index out of bounds"
         );
-        self.pools[inland_id].set_component_typed(entity_inland.unit_index(), value)
+        self.pools[inland_id.0].set_component_typed(entity_inland.unit_index().0, value)
     }
 }
 
@@ -396,11 +396,11 @@ impl Index<ComponentId> for ComponentPoolBundle {
     type Output = ComponentPool;
 
     fn index(&self, component_id: ComponentId) -> &Self::Output {
-        debug_assert!(self.contains(component_id), 
+        debug_assert!(self.contains(component_id),
             "Component ID {} not found in bundle", component_id);
-            
-        let inland_id = self.sparse_indexes[component_id];
-        &self.pools[inland_id]
+
+        let inland_id = self.sparse_indexes[component_id.0];
+        &self.pools[inland_id.0]
     }
 }
 
@@ -409,8 +409,8 @@ impl IndexMut<ComponentId> for ComponentPoolBundle {
         debug_assert!(self.contains(component_id),
             "Component ID {} not found in bundle", component_id);
 
-        let inland_id = self.sparse_indexes[component_id];
-        &mut self.pools[inland_id]
+        let inland_id = self.sparse_indexes[component_id.0];
+        &mut self.pools[inland_id.0]
     }
 }
 
@@ -422,17 +422,17 @@ mod tests {
     // ID range 420-429 reserved for component_pool_bundle two-phase commit tests
     // (C-009). MAX_COMPONENTS = 512, so valid range is 0-511. Range 420-429 is
     // free: 410-417 are used by archetype C-16 tests, 430+ is unclaimed.
-    const C009_A: ComponentId = 420;
-    const C009_B: ComponentId = 421;
-    const C009_C: ComponentId = 422;
+    const C009_A: ComponentId = ComponentId(420);
+    const C009_B: ComponentId = ComponentId(421);
+    const C009_C: ComponentId = ComponentId(422);
 
     fn register_c009_components() {
         #[repr(C)] struct C009CompA(u32);
         #[repr(C)] struct C009CompB(u32);
         #[repr(C)] struct C009CompC(u32);
-        component_registry::register_layout::<C009CompA>(C009_A);
-        component_registry::register_layout::<C009CompB>(C009_B);
-        component_registry::register_layout::<C009CompC>(C009_C);
+        component_registry::register_layout::<C009CompA>(C009_A.0);
+        component_registry::register_layout::<C009CompB>(C009_B.0);
+        component_registry::register_layout::<C009CompC>(C009_C.0);
     }
 
     fn make_bundle(arena: &Arena) -> ComponentPoolBundle {

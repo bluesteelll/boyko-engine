@@ -30,7 +30,7 @@ impl EntityMaster {
             free_entity_ids: Vec::new(),
             entities: Vec::new(),
             entity_map: SparseMap::new(),
-            next_entity_id: 0,
+            next_entity_id: EntityId(0),
             active_count: 0,
         }
     }
@@ -42,7 +42,7 @@ impl EntityMaster {
             free_entity_ids: Vec::with_capacity(capacity / 4),
             entities: Vec::with_capacity(capacity),
             entity_map: SparseMap::with_capacity(capacity),
-            next_entity_id: 0,
+            next_entity_id: EntityId(0),
             active_count: 0,
         }
     }
@@ -53,23 +53,23 @@ impl EntityMaster {
     pub fn allocate_entity(&mut self) -> Entity {
         if let Some(id) = self.free_entity_ids.pop() {
             // Reuse a recycled entity ID
-            debug_assert!(id < self.entities.len(), "Free entity ID out of bounds");
-            let entity = self.entities[id];
-            debug_assert!(!self.entity_map.contains(id), "Recycled entity still in map");
+            debug_assert!(id.0 < self.entities.len(), "Free entity ID out of bounds");
+            let entity = self.entities[id.0];
+            debug_assert!(!self.entity_map.contains(id.0), "Recycled entity still in map");
             entity
         } else {
             // Create a new entity with the next available ID
             let id = self.next_entity_id;
-            self.next_entity_id += 1;
-            
+            self.next_entity_id.0 += 1;
+
             let entity = Entity::new(id, 0); // New entities start at generation 0
-            
+
             // Ensure entities vector has enough capacity
-            if id >= self.entities.len() {
-                self.entities.resize(id + 1, Entity::new(0, 0));
+            if id.0 >= self.entities.len() {
+                self.entities.resize(id.0 + 1, Entity::new(EntityId(0), 0));
             }
-            
-            self.entities[id] = entity;
+
+            self.entities[id.0] = entity;
             entity
         }
     }
@@ -78,11 +78,11 @@ impl EntityMaster {
     /// This creates the association between Entity and EntityInland
     #[inline]
     pub fn register_entity(&mut self, entity: Entity, archetype_id: ArchetypeId, unit_index: InlandPoolId) {
-        debug_assert!(entity.id() < self.entities.len(), "Entity ID out of bounds");
-        debug_assert!(!self.entity_map.contains(entity.id()), "Entity already registered");
-        
+        debug_assert!(entity.id().0 < self.entities.len(), "Entity ID out of bounds");
+        debug_assert!(!self.entity_map.contains(entity.id().0), "Entity already registered");
+
         let entity_inland = EntityInland::new(archetype_id, unit_index, entity.generation());
-        self.entity_map.insert(entity.id(), entity_inland);
+        self.entity_map.insert(entity.id().0, entity_inland);
         self.active_count += 1;
     }
 
@@ -94,7 +94,7 @@ impl EntityMaster {
             return false;
         }
 
-        if let Some(inland) = self.entity_map.get_mut(entity.id()) {
+        if let Some(inland) = self.entity_map.get_mut(entity.id().0) {
             inland.update(archetype_id, unit_index);
             true
         } else {
@@ -110,7 +110,7 @@ impl EntityMaster {
             return false;
         }
 
-        if let Some(inland) = self.entity_map.get_mut(entity.id()) {
+        if let Some(inland) = self.entity_map.get_mut(entity.id().0) {
             inland.set_unit_index(new_unit_index);
             true
         } else {
@@ -130,13 +130,13 @@ impl EntityMaster {
         }
 
         // Get the EntityInland data before removing
-        let entity_inland = self.entity_map.swap_remove(entity_id)?;
+        let entity_inland = self.entity_map.swap_remove(entity_id.0)?;
 
         // Increment generation of the deleted entity
-        debug_assert!(entity_id < self.entities.len(), "Entity ID out of bounds");
-        let old_gen = self.entities[entity_id].generation();
+        debug_assert!(entity_id.0 < self.entities.len(), "Entity ID out of bounds");
+        let old_gen = self.entities[entity_id.0].generation();
         let new_gen = old_gen.wrapping_add(1);
-        self.entities[entity_id] = Entity::new(entity_id, new_gen);
+        self.entities[entity_id.0] = Entity::new(entity_id, new_gen);
 
         // Add the ID to the free list for recycling
         self.free_entity_ids.push(entity_id);
@@ -151,7 +151,7 @@ impl EntityMaster {
         if !self.is_entity_valid(entity) {
             return None;
         }
-        self.entity_map.get(entity.id())
+        self.entity_map.get(entity.id().0)
     }
 
     /// Gets a mutable reference to the EntityInland for a specific entity
@@ -160,30 +160,30 @@ impl EntityMaster {
         if !self.is_entity_valid(entity) {
             return None;
         }
-        self.entity_map.get_mut(entity.id())
+        self.entity_map.get_mut(entity.id().0)
     }
 
     /// Gets the EntityInland for a specific entity ID (unchecked)
     /// Warning: Does not verify generation
     #[inline]
     pub fn get_entity_inland_by_id(&self, entity_id: EntityId) -> Option<&EntityInland> {
-        self.entity_map.get(entity_id)
+        self.entity_map.get(entity_id.0)
     }
 
     /// Checks if an entity is valid (exists with matching generation)
     #[inline]
     pub fn is_entity_valid(&self, entity: Entity) -> bool {
         let entity_id = entity.id();
-        entity_id < self.entities.len() &&
-            self.entities[entity_id].generation() == entity.generation() &&
-            self.entity_map.contains(entity_id)
+        entity_id.0 < self.entities.len() &&
+            self.entities[entity_id.0].generation() == entity.generation() &&
+            self.entity_map.contains(entity_id.0)
     }
 
     /// Gets an entity by ID if it exists and is active
     #[inline]
     pub fn get_entity(&self, entity_id: EntityId) -> Option<Entity> {
-        if entity_id < self.entities.len() && self.entity_map.contains(entity_id) {
-            Some(self.entities[entity_id])
+        if entity_id.0 < self.entities.len() && self.entity_map.contains(entity_id.0) {
+            Some(self.entities[entity_id.0])
         } else {
             None
         }
@@ -223,7 +223,8 @@ impl EntityMaster {
             // register_entity invariant guarantees that every id present in
             // entity_map was previously written to self.entities[id] by
             // allocate_entity. The id is therefore in bounds and points to a
-            // fully-initialized Entity record.
+            // fully-initialized Entity record. `id` is a raw `usize` from
+            // SparseMap::active_indices (boyko_utils does not know about newtypes).
             debug_assert!(
                 id < self.entities.len(),
                 "invariant: entity_map id {} must be in entities (len {})",
@@ -239,7 +240,7 @@ impl EntityMaster {
         self.free_entity_ids.clear();
         self.entities.clear();
         self.entity_map.clear();
-        self.next_entity_id = 0;
+        self.next_entity_id = EntityId(0);
         self.active_count = 0;
     }
 
@@ -287,12 +288,12 @@ impl EntityMaster {
         let id = entity.id();
         // Fresh IDs are minted sequentially from next_entity_id; a fresh entity
         // is at `next_entity_id - 1` immediately after allocate_entity returns.
-        if id + 1 == self.next_entity_id && id < self.entities.len() {
+        if id.0 + 1 == self.next_entity_id.0 && id.0 < self.entities.len() {
             // Verify it was never registered (no entry in entity_map).
-            debug_assert!(!self.entity_map.contains(id),
+            debug_assert!(!self.entity_map.contains(id.0),
                 "rewind_allocate called on a registered entity — invariant violated");
             // Undo next_entity_id increment.
-            self.next_entity_id -= 1;
+            self.next_entity_id.0 -= 1;
             true
         } else {
             // Recycled ID path or stale call — caller must use deallocate_entity.
@@ -319,12 +320,12 @@ mod tests {
         
         // Allocate first entity
         let entity1 = master.allocate_entity();
-        assert_eq!(entity1.id(), 0);
+        assert_eq!(entity1.id(), EntityId(0));
         assert_eq!(entity1.generation(), 0);
-        
+
         // Allocate second entity
         let entity2 = master.allocate_entity();
-        assert_eq!(entity2.id(), 1);
+        assert_eq!(entity2.id(), EntityId(1));
         assert_eq!(entity2.generation(), 0);
     }
 
@@ -334,14 +335,14 @@ mod tests {
         let entity = master.allocate_entity();
         
         // Register entity
-        master.register_entity(entity, 1, 0);
+        master.register_entity(entity, ArchetypeId(1), InlandPoolId(0));
         assert_eq!(master.entity_count(), 1);
         assert!(master.is_entity_valid(entity));
-        
+
         // Get inland data
         let inland = master.get_entity_inland(entity).unwrap();
-        assert_eq!(inland.archetype_id(), 1);
-        assert_eq!(inland.unit_index(), 0);
+        assert_eq!(inland.archetype_id(), ArchetypeId(1));
+        assert_eq!(inland.unit_index(), InlandPoolId(0));
     }
 
     #[test]
@@ -350,17 +351,17 @@ mod tests {
         
         // Allocate and register entity
         let entity1 = master.allocate_entity();
-        master.register_entity(entity1, 1, 0);
-        
+        master.register_entity(entity1, ArchetypeId(1), InlandPoolId(0));
+
         // Deallocate entity
         let inland = master.deallocate_entity(entity1);
         assert!(inland.is_some());
         assert_eq!(master.entity_count(), 0);
         assert_eq!(master.recycled_entity_count(), 1);
-        
+
         // Allocate again - should reuse the ID
         let entity2 = master.allocate_entity();
-        assert_eq!(entity2.id(), 0);
+        assert_eq!(entity2.id(), EntityId(0));
         assert_eq!(entity2.generation(), 1); // Generation incremented
     }
 
@@ -368,18 +369,18 @@ mod tests {
     fn test_entity_inland_update() {
         let mut master = EntityMaster::new();
         let entity = master.allocate_entity();
-        master.register_entity(entity, 1, 0);
-        
+        master.register_entity(entity, ArchetypeId(1), InlandPoolId(0));
+
         // Update unit index
-        assert!(master.update_entity_unit_index(entity, 5));
+        assert!(master.update_entity_unit_index(entity, InlandPoolId(5)));
         let inland = master.get_entity_inland(entity).unwrap();
-        assert_eq!(inland.unit_index(), 5);
-        
+        assert_eq!(inland.unit_index(), InlandPoolId(5));
+
         // Update full inland
-        assert!(master.update_entity_inland(entity, 2, 10));
+        assert!(master.update_entity_inland(entity, ArchetypeId(2), InlandPoolId(10)));
         let inland = master.get_entity_inland(entity).unwrap();
-        assert_eq!(inland.archetype_id(), 2);
-        assert_eq!(inland.unit_index(), 10);
+        assert_eq!(inland.archetype_id(), ArchetypeId(2));
+        assert_eq!(inland.unit_index(), InlandPoolId(10));
     }
 
     #[test]
@@ -389,7 +390,7 @@ mod tests {
         // Allocate and register 100 entities.
         let mut all: Vec<Entity> = (0..100).map(|_| master.allocate_entity()).collect();
         for &e in &all {
-            master.register_entity(e, 1, 0);
+            master.register_entity(e, ArchetypeId(1), InlandPoolId(0));
         }
 
         // Deallocate every other entity (indices 1, 3, 5, …, 99).
@@ -419,11 +420,11 @@ mod tests {
 
         // Allocate and register a, b, c.
         let a = master.allocate_entity();
-        master.register_entity(a, 1, 0);
+        master.register_entity(a, ArchetypeId(1), InlandPoolId(0));
         let b = master.allocate_entity();
-        master.register_entity(b, 1, 1);
+        master.register_entity(b, ArchetypeId(1), InlandPoolId(1));
         let c = master.allocate_entity();
-        master.register_entity(c, 1, 2);
+        master.register_entity(c, ArchetypeId(1), InlandPoolId(2));
 
         // Delete b; its id goes onto the free list.
         master.deallocate_entity(b);
@@ -431,10 +432,10 @@ mod tests {
         // Allocate d — will recycle b's id with a higher generation.
         let d = master.allocate_entity();
         assert_eq!(d.id(), b.id(), "recycled id should be reused");
-        master.register_entity(d, 1, 3);
+        master.register_entity(d, ArchetypeId(1), InlandPoolId(3));
 
         // iter_entities must yield exactly {a, c, d}.
-        let mut got_ids: Vec<usize> = master.iter_entities().map(|e| e.id()).collect();
+        let mut got_ids: Vec<EntityId> = master.iter_entities().map(|e| e.id()).collect();
         got_ids.sort_unstable();
 
         let mut expected_ids = vec![a.id(), c.id(), d.id()];

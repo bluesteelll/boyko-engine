@@ -7,6 +7,7 @@
 /// These tests use std::thread::scope (stable since Rust 1.63) — no external deps.
 use boyko_macros::Component;
 use boyko_ecs::ecs::core::component::component::Component;
+use boyko_ecs::ecs::identifiers::primitives::ComponentId;
 
 // Types must be declared at module scope so their TypeId is unambiguous.
 
@@ -36,7 +37,7 @@ fn concurrent_register_new_for_same_type() {
     const RUNS: usize = 10;
 
     for run in 0..RUNS {
-        let results: Vec<usize> = std::thread::scope(|s| {
+        let results: Vec<ComponentId> = std::thread::scope(|s| {
             let handles: Vec<_> = (0..N)
                 .map(|_| s.spawn(SharedComponent::component_id))
                 .collect();
@@ -59,7 +60,7 @@ fn concurrent_register_new_for_same_type() {
 #[test]
 fn concurrent_register_new_for_distinct_types() {
     // Collect IDs: each closure captures a different type's component_id() fn.
-    let ids: Vec<usize> = std::thread::scope(|s| {
+    let ids: Vec<ComponentId> = std::thread::scope(|s| {
         let h0 = s.spawn(ThreadComp0::component_id);
         let h1 = s.spawn(ThreadComp1::component_id);
         let h2 = s.spawn(ThreadComp2::component_id);
@@ -103,7 +104,7 @@ fn component_id_stable_after_concurrent_first_call() {
     const N: usize = 16;
 
     // First, run N concurrent callers.
-    let concurrent_ids: Vec<usize> = std::thread::scope(|s| {
+    let concurrent_ids: Vec<ComponentId> = std::thread::scope(|s| {
         let handles: Vec<_> = (0..N)
             .map(|_| s.spawn(SharedComponent::component_id))
             .collect();

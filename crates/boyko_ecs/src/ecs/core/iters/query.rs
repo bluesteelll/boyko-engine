@@ -200,35 +200,27 @@ mod tests {
     // Each test module owns its own ComponentId range; see the corresponding
     // comment in `ecs_master.rs` tests for the rationale. `query` uses 200-209.
     impl Component for Position {
-        fn component_id() -> ComponentId {
-            200
-        }
+        fn component_id() -> ComponentId { ComponentId(200) }
     }
 
     impl Component for Velocity {
-        fn component_id() -> ComponentId {
-            201
-        }
+        fn component_id() -> ComponentId { ComponentId(201) }
     }
 
     impl Component for Health {
-        fn component_id() -> ComponentId {
-            202
-        }
+        fn component_id() -> ComponentId { ComponentId(202) }
     }
 
     impl Component for Damage {
-        fn component_id() -> ComponentId {
-            203
-        }
+        fn component_id() -> ComponentId { ComponentId(203) }
     }
 
     fn register_mock_components() {
         // Register component layouts for testing
-        component_registry::register_layout::<Position>(Position::component_id());
-        component_registry::register_layout::<Velocity>(Velocity::component_id());
-        component_registry::register_layout::<Health>(Health::component_id());
-        component_registry::register_layout::<Damage>(Damage::component_id());
+        component_registry::register_layout::<Position>(Position::component_id().0);
+        component_registry::register_layout::<Velocity>(Velocity::component_id().0);
+        component_registry::register_layout::<Health>(Health::component_id().0);
+        component_registry::register_layout::<Damage>(Damage::component_id().0);
     }
 
     /// Build the `ArchetypeMaster` together with the `Box<Arena>` it borrows.

@@ -75,14 +75,14 @@ impl ArchetypeRegistry {
             0
         };
 
-        self.id_to_location.insert(archetype_id, (pattern_byte, pos));
+        self.id_to_location.insert(archetype_id.0, (pattern_byte, pos));
         self.total_count += 1;
     }
     
     /// Removes an archetype from the registry. Returns `false` if the id was not registered.
     pub fn unregister_archetype(&mut self, archetype_id: ArchetypeId) -> bool {
         // O(1) lookup via reverse map — no clone, no linear scan of active_patterns
-        let Some((pattern, pos)) = self.id_to_location.swap_remove(archetype_id) else {
+        let Some((pattern, pos)) = self.id_to_location.swap_remove(archetype_id.0) else {
             return false;
         };
 
@@ -100,7 +100,7 @@ impl ArchetypeRegistry {
             let (moved_id, _) = group[pos];
             let entry = self
                 .id_to_location
-                .get_mut(moved_id)
+                .get_mut(moved_id.0)
                 .expect("invariant: every archetype in a group has an id_to_location entry");
             entry.1 = pos;
         }
@@ -263,7 +263,7 @@ impl ArchetypeRegistry {
         let mut blocks_len: usize = 0;
 
         for &comp_id in components {
-            let block = ((comp_id / 64) % 8) as u8;
+            let block = ((comp_id.0 / 64) % 8) as u8;
 
             // Insertion-sort-with-dedup: find the insertion position or skip duplicate.
             let mut insert_pos = blocks_len;
@@ -388,7 +388,7 @@ impl ArchetypeRegistry {
     ///
     /// O(1) via the reverse map — no scan of active patterns.
     pub fn get_archetype_signature(&self, archetype_id: ArchetypeId) -> Option<ArchetypeSignature> {
-        let &(pattern, pos) = self.id_to_location.get(archetype_id)?;
+        let &(pattern, pos) = self.id_to_location.get(archetype_id.0)?;
         let group = self.block_groups.get(pattern as usize)?;
         Some(group[pos].1.clone())
     }
@@ -487,11 +487,11 @@ impl ArchetypeRegistry {
 mod tests {
     use super::*;
 
-    /// Creates a mask with the given component IDs
-    fn create_mask(components: &[ComponentId]) -> ComponentMask {
+    /// Creates a mask with the given component ID usize values (test helper).
+    fn create_mask(components: &[usize]) -> ComponentMask {
         let mut mask = ComponentMask::new();
         for &comp_id in components {
-            mask.set(comp_id);
+            mask.set(ComponentId(comp_id));
         }
         mask
     }
@@ -503,9 +503,9 @@ mod tests {
         assert!(registry.is_empty());
 
         // Register some archetypes
-        registry.register_archetype(1, create_mask(&[1, 2, 3]));
-        registry.register_archetype(2, create_mask(&[1, 2]));
-        registry.register_archetype(3, create_mask(&[1, 3]));
+        registry.register_archetype(ArchetypeId(1), create_mask(&[1, 2, 3]));
+        registry.register_archetype(ArchetypeId(2), create_mask(&[1, 2]));
+        registry.register_archetype(ArchetypeId(3), create_mask(&[1, 3]));
 
         assert_eq!(registry.len(), 3);
         assert!(!registry.is_empty());
@@ -514,228 +514,228 @@ mod tests {
     #[test]
     fn test_unregister() {
         let mut registry = ArchetypeRegistry::new();
-        
+
         // Register some archetypes
-        registry.register_archetype(1, create_mask(&[1, 2, 3]));
-        registry.register_archetype(2, create_mask(&[1, 2]));
-        registry.register_archetype(3, create_mask(&[1, 3]));
-        
+        registry.register_archetype(ArchetypeId(1), create_mask(&[1, 2, 3]));
+        registry.register_archetype(ArchetypeId(2), create_mask(&[1, 2]));
+        registry.register_archetype(ArchetypeId(3), create_mask(&[1, 3]));
+
         assert_eq!(registry.len(), 3);
-        
+
         // Unregister an archetype
-        let result = registry.unregister_archetype(2);
+        let result = registry.unregister_archetype(ArchetypeId(2));
         assert!(result);
         assert_eq!(registry.len(), 2);
-        
+
         // Try to unregister a non-existent archetype
-        let result = registry.unregister_archetype(999);
+        let result = registry.unregister_archetype(ArchetypeId(999));
         assert!(!result);
         assert_eq!(registry.len(), 2);
     }
-    
+
     #[test]
     fn test_clear() {
         let mut registry = ArchetypeRegistry::new();
-        
+
         // Register some archetypes
-        registry.register_archetype(1, create_mask(&[1, 2, 3]));
-        registry.register_archetype(2, create_mask(&[1, 2]));
-        
+        registry.register_archetype(ArchetypeId(1), create_mask(&[1, 2, 3]));
+        registry.register_archetype(ArchetypeId(2), create_mask(&[1, 2]));
+
         assert_eq!(registry.len(), 2);
-        
+
         // Clear the registry
         registry.clear();
         assert_eq!(registry.len(), 0);
         assert!(registry.is_empty());
     }
-    
+
     #[test]
     fn test_find_exact_match() {
         let mut registry = ArchetypeRegistry::new();
-        
+
         // Register archetypes with different component combinations
-        registry.register_archetype(1, create_mask(&[1, 2, 3]));
-        registry.register_archetype(2, create_mask(&[1, 2]));
-        registry.register_archetype(3, create_mask(&[1, 3]));
-        registry.register_archetype(4, create_mask(&[1, 2, 3])); // Duplicate signature
-        
+        registry.register_archetype(ArchetypeId(1), create_mask(&[1, 2, 3]));
+        registry.register_archetype(ArchetypeId(2), create_mask(&[1, 2]));
+        registry.register_archetype(ArchetypeId(3), create_mask(&[1, 3]));
+        registry.register_archetype(ArchetypeId(4), create_mask(&[1, 2, 3])); // Duplicate signature
+
         // Find exact matches
         let results = registry.find_exact_match(&create_mask(&[1, 2, 3]));
         assert_eq!(results.len(), 2);
-        assert!(results.contains(&1));
-        assert!(results.contains(&4));
-        
+        assert!(results.contains(&ArchetypeId(1)));
+        assert!(results.contains(&ArchetypeId(4)));
+
         let results = registry.find_exact_match(&create_mask(&[1, 2]));
         assert_eq!(results.len(), 1);
-        assert!(results.contains(&2));
-        
+        assert!(results.contains(&ArchetypeId(2)));
+
         // No match
         let results = registry.find_exact_match(&create_mask(&[4, 5]));
         assert_eq!(results.len(), 0);
     }
-    
+
     #[test]
     fn test_find_matching_archetypes() {
         let mut registry = ArchetypeRegistry::new();
-        
+
         // Register archetypes with different component combinations
-        registry.register_archetype(1, create_mask(&[1, 2, 3, 4]));
-        registry.register_archetype(2, create_mask(&[1, 2, 5]));
-        registry.register_archetype(3, create_mask(&[1, 3, 6]));
-        registry.register_archetype(4, create_mask(&[2, 3, 7]));
-        registry.register_archetype(5, create_mask(&[5, 6, 7]));
-        
+        registry.register_archetype(ArchetypeId(1), create_mask(&[1, 2, 3, 4]));
+        registry.register_archetype(ArchetypeId(2), create_mask(&[1, 2, 5]));
+        registry.register_archetype(ArchetypeId(3), create_mask(&[1, 3, 6]));
+        registry.register_archetype(ArchetypeId(4), create_mask(&[2, 3, 7]));
+        registry.register_archetype(ArchetypeId(5), create_mask(&[5, 6, 7]));
+
         // Find archetypes with component 1
         let results = registry.find_matching_archetypes(&create_mask(&[1]));
         assert_eq!(results.len(), 3);
-        assert!(results.contains(&1));
-        assert!(results.contains(&2));
-        assert!(results.contains(&3));
-        
+        assert!(results.contains(&ArchetypeId(1)));
+        assert!(results.contains(&ArchetypeId(2)));
+        assert!(results.contains(&ArchetypeId(3)));
+
         // Find archetypes with components 1 and 3
         let results = registry.find_matching_archetypes(&create_mask(&[1, 3]));
         assert_eq!(results.len(), 2);
-        assert!(results.contains(&1));
-        assert!(results.contains(&3));
-        
+        assert!(results.contains(&ArchetypeId(1)));
+        assert!(results.contains(&ArchetypeId(3)));
+
         // Find archetypes with components 5 and 7
         let results = registry.find_matching_archetypes(&create_mask(&[5, 7]));
         assert_eq!(results.len(), 1);
-        assert!(results.contains(&5));
-        
+        assert!(results.contains(&ArchetypeId(5)));
+
         // No match
         let results = registry.find_matching_archetypes(&create_mask(&[8, 9]));
         assert_eq!(results.len(), 0);
     }
-    
+
     #[test]
     fn test_component_arrays() {
         let mut registry = ArchetypeRegistry::new();
-        
+
         // Register archetypes with different component combinations
-        registry.register_archetype(1, create_mask(&[1, 2, 3, 4]));
-        registry.register_archetype(2, create_mask(&[1, 2, 5]));
-        registry.register_archetype(3, create_mask(&[1, 3, 6]));
-        registry.register_archetype(4, create_mask(&[2, 3, 7]));
-        
+        registry.register_archetype(ArchetypeId(1), create_mask(&[1, 2, 3, 4]));
+        registry.register_archetype(ArchetypeId(2), create_mask(&[1, 2, 5]));
+        registry.register_archetype(ArchetypeId(3), create_mask(&[1, 3, 6]));
+        registry.register_archetype(ArchetypeId(4), create_mask(&[2, 3, 7]));
+
         // Find using component arrays
-        let results = registry.find_archetypes_with_components(&[1]);
+        let results = registry.find_archetypes_with_components(&[ComponentId(1)]);
         assert_eq!(results.len(), 3);
-        assert!(results.contains(&1));
-        assert!(results.contains(&2));
-        assert!(results.contains(&3));
-        
+        assert!(results.contains(&ArchetypeId(1)));
+        assert!(results.contains(&ArchetypeId(2)));
+        assert!(results.contains(&ArchetypeId(3)));
+
         // Find with 2 components (small query optimization)
-        let results = registry.find_archetypes_with_components(&[2, 3]);
+        let results = registry.find_archetypes_with_components(&[ComponentId(2), ComponentId(3)]);
         assert_eq!(results.len(), 2);
-        assert!(results.contains(&1));
-        assert!(results.contains(&4));
-        
+        assert!(results.contains(&ArchetypeId(1)));
+        assert!(results.contains(&ArchetypeId(4)));
+
         // Find with 3 components (small query optimization)
-        let results = registry.find_archetypes_with_components(&[1, 2, 5]);
+        let results = registry.find_archetypes_with_components(&[ComponentId(1), ComponentId(2), ComponentId(5)]);
         assert_eq!(results.len(), 1);
-        assert!(results.contains(&2));
-        
+        assert!(results.contains(&ArchetypeId(2)));
+
         // Find with more than 3 components (uses regular query path)
-        let results = registry.find_archetypes_with_components(&[1, 2, 3, 4]);
+        let results = registry.find_archetypes_with_components(&[ComponentId(1), ComponentId(2), ComponentId(3), ComponentId(4)]);
         assert_eq!(results.len(), 1);
-        assert!(results.contains(&1));
+        assert!(results.contains(&ArchetypeId(1)));
     }
-    
+
     #[test]
     fn test_with_components_in_different_blocks() {
         let mut registry = ArchetypeRegistry::new();
-        
+
         // Components in different blocks (block 0 and block 1)
-        let comp1 = 1;        // Block 0
-        let comp2 = 65;       // Block 1 (65 / 64 = 1)
-        let comp3 = 128;      // Block 2 (128 / 64 = 2)
-        
-        registry.register_archetype(1, create_mask(&[comp1, comp2]));
-        registry.register_archetype(2, create_mask(&[comp1, comp3]));
-        registry.register_archetype(3, create_mask(&[comp2, comp3]));
-        registry.register_archetype(4, create_mask(&[comp1, comp2, comp3]));
-        
+        let comp1 = ComponentId(1);   // Block 0
+        let comp2 = ComponentId(65);  // Block 1 (65 / 64 = 1)
+        let comp3 = ComponentId(128); // Block 2 (128 / 64 = 2)
+
+        registry.register_archetype(ArchetypeId(1), create_mask(&[comp1.0, comp2.0]));
+        registry.register_archetype(ArchetypeId(2), create_mask(&[comp1.0, comp3.0]));
+        registry.register_archetype(ArchetypeId(3), create_mask(&[comp2.0, comp3.0]));
+        registry.register_archetype(ArchetypeId(4), create_mask(&[comp1.0, comp2.0, comp3.0]));
+
         // Find archetypes with components in different blocks
         let results = registry.find_archetypes_with_components(&[comp1, comp2]);
         assert_eq!(results.len(), 2);
-        assert!(results.contains(&1));
-        assert!(results.contains(&4));
-        
+        assert!(results.contains(&ArchetypeId(1)));
+        assert!(results.contains(&ArchetypeId(4)));
+
         let results = registry.find_archetypes_with_components(&[comp1, comp3]);
         assert_eq!(results.len(), 2);
-        assert!(results.contains(&2));
-        assert!(results.contains(&4));
+        assert!(results.contains(&ArchetypeId(2)));
+        assert!(results.contains(&ArchetypeId(4)));
     }
-    
+
     #[test]
     fn test_find_with_filter() {
         let mut registry = ArchetypeRegistry::new();
-        
+
         // Register archetypes with different component combinations
-        registry.register_archetype(1, create_mask(&[1, 2]));          // Position, Velocity
-        registry.register_archetype(2, create_mask(&[1, 3]));          // Position, Health
-        registry.register_archetype(3, create_mask(&[2, 4]));          // Velocity, Damage
-        registry.register_archetype(4, create_mask(&[1, 2, 3]));       // Position, Velocity, Health
-        registry.register_archetype(5, create_mask(&[1, 2, 4]));       // Position, Velocity, Damage
-        
+        registry.register_archetype(ArchetypeId(1), create_mask(&[1, 2]));
+        registry.register_archetype(ArchetypeId(2), create_mask(&[1, 3]));
+        registry.register_archetype(ArchetypeId(3), create_mask(&[2, 4]));
+        registry.register_archetype(ArchetypeId(4), create_mask(&[1, 2, 3]));
+        registry.register_archetype(ArchetypeId(5), create_mask(&[1, 2, 4]));
+
         // Find archetypes with Position, but not Damage
-        let include_mask = create_mask(&[1]);    // Position
-        let exclude_mask = create_mask(&[4]);    // Damage
+        let include_mask = create_mask(&[1]);
+        let exclude_mask = create_mask(&[4]);
         let optional_mask = ComponentMask::new();
-        
+
         let results = registry.find_with_filter(&include_mask, &exclude_mask, &optional_mask);
         assert_eq!(results.len(), 3);
-        assert!(results.contains(&1));
-        assert!(results.contains(&2));
-        assert!(results.contains(&4));
-        
+        assert!(results.contains(&ArchetypeId(1)));
+        assert!(results.contains(&ArchetypeId(2)));
+        assert!(results.contains(&ArchetypeId(4)));
+
         // Find archetypes with Position, and at least one of Health or Damage
-        let include_mask = create_mask(&[1]);    // Position
+        let include_mask = create_mask(&[1]);
         let exclude_mask = ComponentMask::new();
-        let optional_mask = create_mask(&[3, 4]);   // Health or Damage
-        
+        let optional_mask = create_mask(&[3, 4]);
+
         let results = registry.find_with_filter(&include_mask, &exclude_mask, &optional_mask);
         assert_eq!(results.len(), 3);
-        assert!(results.contains(&2));
-        assert!(results.contains(&4));
-        assert!(results.contains(&5));
-        
+        assert!(results.contains(&ArchetypeId(2)));
+        assert!(results.contains(&ArchetypeId(4)));
+        assert!(results.contains(&ArchetypeId(5)));
+
         // Find archetypes with Position AND Velocity, but NOT Damage
-        let include_mask = create_mask(&[1, 2]);  // Position AND Velocity
-        let exclude_mask = create_mask(&[4]);     // NOT Damage
+        let include_mask = create_mask(&[1, 2]);
+        let exclude_mask = create_mask(&[4]);
         let optional_mask = ComponentMask::new();
-        
+
         let results = registry.find_with_filter(&include_mask, &exclude_mask, &optional_mask);
         assert_eq!(results.len(), 2);
-        assert!(results.contains(&1));
-        assert!(results.contains(&4));
+        assert!(results.contains(&ArchetypeId(1)));
+        assert!(results.contains(&ArchetypeId(4)));
     }
-    
+
     #[test]
     fn test_find_with_component_filter() {
         let mut registry = ArchetypeRegistry::new();
-        
+
         // Register archetypes with different component combinations
-        registry.register_archetype(1, create_mask(&[1, 2]));          // Position, Velocity
-        registry.register_archetype(2, create_mask(&[1, 3]));          // Position, Health
-        registry.register_archetype(3, create_mask(&[2, 4]));          // Velocity, Damage
-        registry.register_archetype(4, create_mask(&[1, 2, 3]));       // Position, Velocity, Health
-        registry.register_archetype(5, create_mask(&[1, 2, 4]));       // Position, Velocity, Damage
-        
+        registry.register_archetype(ArchetypeId(1), create_mask(&[1, 2]));
+        registry.register_archetype(ArchetypeId(2), create_mask(&[1, 3]));
+        registry.register_archetype(ArchetypeId(3), create_mask(&[2, 4]));
+        registry.register_archetype(ArchetypeId(4), create_mask(&[1, 2, 3]));
+        registry.register_archetype(ArchetypeId(5), create_mask(&[1, 2, 4]));
+
         // Find archetypes with Position, but not Damage
-        let results = registry.find_with_component_filter(&[1], &[4], &[]);
+        let results = registry.find_with_component_filter(&[ComponentId(1)], &[ComponentId(4)], &[]);
         assert_eq!(results.len(), 3);
-        assert!(results.contains(&1));
-        assert!(results.contains(&2));
-        assert!(results.contains(&4));
-        
+        assert!(results.contains(&ArchetypeId(1)));
+        assert!(results.contains(&ArchetypeId(2)));
+        assert!(results.contains(&ArchetypeId(4)));
+
         // Find archetypes with Position, and at least one of Health or Damage
-        let results = registry.find_with_component_filter(&[1], &[], &[3, 4]);
+        let results = registry.find_with_component_filter(&[ComponentId(1)], &[], &[ComponentId(3), ComponentId(4)]);
         assert_eq!(results.len(), 3);
-        assert!(results.contains(&2));
-        assert!(results.contains(&4));
-        assert!(results.contains(&5));
+        assert!(results.contains(&ArchetypeId(2)));
+        assert!(results.contains(&ArchetypeId(4)));
+        assert!(results.contains(&ArchetypeId(5)));
     }
 
     // --- _into API tests ---
@@ -743,46 +743,46 @@ mod tests {
     #[test]
     fn t_into_writes_into_buffer() {
         let mut registry = ArchetypeRegistry::new();
-        registry.register_archetype(1, create_mask(&[1, 2]));
-        registry.register_archetype(2, create_mask(&[1, 3]));
+        registry.register_archetype(ArchetypeId(1), create_mask(&[1, 2]));
+        registry.register_archetype(ArchetypeId(2), create_mask(&[1, 3]));
 
         let mut out: Vec<ArchetypeId> = Vec::new();
-        registry.find_archetypes_with_components_into(&[1], &mut out);
+        registry.find_archetypes_with_components_into(&[ComponentId(1)], &mut out);
         assert_eq!(out.len(), 2);
-        assert!(out.contains(&1));
-        assert!(out.contains(&2));
+        assert!(out.contains(&ArchetypeId(1)));
+        assert!(out.contains(&ArchetypeId(2)));
     }
 
     #[test]
     fn t_into_clears_buffer_on_entry() {
         let mut registry = ArchetypeRegistry::new();
-        registry.register_archetype(10, create_mask(&[5, 6]));
+        registry.register_archetype(ArchetypeId(10), create_mask(&[5, 6]));
 
         // Pre-fill with garbage values.
-        let mut out: Vec<ArchetypeId> = vec![999, 888, 777];
-        registry.find_archetypes_with_components_into(&[5], &mut out);
+        let mut out: Vec<ArchetypeId> = vec![ArchetypeId(999), ArchetypeId(888), ArchetypeId(777)];
+        registry.find_archetypes_with_components_into(&[ComponentId(5)], &mut out);
 
         // Garbage must be gone; only real matches remain.
         assert_eq!(out.len(), 1);
-        assert!(out.contains(&10));
-        assert!(!out.contains(&999));
+        assert!(out.contains(&ArchetypeId(10)));
+        assert!(!out.contains(&ArchetypeId(999)));
     }
 
     #[test]
     fn t_into_is_zero_alloc_after_warmup() {
         let mut registry = ArchetypeRegistry::new();
-        registry.register_archetype(1, create_mask(&[1, 2]));
-        registry.register_archetype(2, create_mask(&[1, 3]));
+        registry.register_archetype(ArchetypeId(1), create_mask(&[1, 2]));
+        registry.register_archetype(ArchetypeId(2), create_mask(&[1, 3]));
 
         let mut out: Vec<ArchetypeId> = Vec::with_capacity(8);
         // Warmup: fill and let `out` grow to stable capacity.
-        registry.find_archetypes_with_components_into(&[1], &mut out);
+        registry.find_archetypes_with_components_into(&[ComponentId(1)], &mut out);
         out.clear();
         let cap_before = out.capacity();
 
         // Steady state: 1 000 calls — capacity must not grow.
         for _ in 0..1_000 {
-            registry.find_archetypes_with_components_into(&[1], &mut out);
+            registry.find_archetypes_with_components_into(&[ComponentId(1)], &mut out);
             out.clear();
         }
         assert_eq!(
@@ -796,25 +796,25 @@ mod tests {
     fn t_few_components_max_arity_dedup() {
         // Three component IDs all mapping to the same 64-bit block (block 0).
         // After dedup, relevant_blocks should contain exactly one entry.
-        let comp_a: ComponentId = 1;  // block 0
-        let comp_b: ComponentId = 2;  // block 0
-        let comp_c: ComponentId = 3;  // block 0
+        let comp_a = ComponentId(1); // block 0
+        let comp_b = ComponentId(2); // block 0
+        let comp_c = ComponentId(3); // block 0
 
         let mut registry = ArchetypeRegistry::new();
-        registry.register_archetype(1, create_mask(&[comp_a, comp_b, comp_c]));
-        registry.register_archetype(2, create_mask(&[comp_a, comp_b]));
-        registry.register_archetype(3, create_mask(&[comp_a]));
+        registry.register_archetype(ArchetypeId(1), create_mask(&[comp_a.0, comp_b.0, comp_c.0]));
+        registry.register_archetype(ArchetypeId(2), create_mask(&[comp_a.0, comp_b.0]));
+        registry.register_archetype(ArchetypeId(3), create_mask(&[comp_a.0]));
 
         // Query for all three — only archetype 1 qualifies.
         let results = registry.find_archetypes_with_components(&[comp_a, comp_b, comp_c]);
         assert_eq!(results.len(), 1);
-        assert!(results.contains(&1));
+        assert!(results.contains(&ArchetypeId(1)));
 
         // Via _into path — same result.
         let mut out = Vec::new();
         registry.find_archetypes_with_components_into(&[comp_a, comp_b, comp_c], &mut out);
         assert_eq!(out.len(), 1);
-        assert!(out.contains(&1));
+        assert!(out.contains(&ArchetypeId(1)));
     }
 
     // --- C-015 cache / reverse-map tests ---
@@ -823,18 +823,18 @@ mod tests {
     fn t_len_matches_after_register_unregister() {
         let mut registry = ArchetypeRegistry::new();
 
-        registry.register_archetype(1, create_mask(&[1, 2]));
-        registry.register_archetype(2, create_mask(&[2, 3]));
-        registry.register_archetype(3, create_mask(&[3, 4]));
-        registry.register_archetype(4, create_mask(&[4, 5]));
-        registry.register_archetype(5, create_mask(&[5, 6]));
+        registry.register_archetype(ArchetypeId(1), create_mask(&[1, 2]));
+        registry.register_archetype(ArchetypeId(2), create_mask(&[2, 3]));
+        registry.register_archetype(ArchetypeId(3), create_mask(&[3, 4]));
+        registry.register_archetype(ArchetypeId(4), create_mask(&[4, 5]));
+        registry.register_archetype(ArchetypeId(5), create_mask(&[5, 6]));
         assert_eq!(registry.len(), 5);
 
-        assert!(registry.unregister_archetype(2));
-        assert!(registry.unregister_archetype(4));
+        assert!(registry.unregister_archetype(ArchetypeId(2)));
+        assert!(registry.unregister_archetype(ArchetypeId(4)));
         assert_eq!(registry.len(), 3);
 
-        registry.register_archetype(6, create_mask(&[6, 7]));
+        registry.register_archetype(ArchetypeId(6), create_mask(&[6, 7]));
         assert_eq!(registry.len(), 4);
 
         registry.clear();
@@ -847,46 +847,46 @@ mod tests {
         // block-summary group (block 0). After B is swap_remove'd, C migrates
         // into B's slot; id_to_location for C must be updated to reflect the new pos.
         let mut registry = ArchetypeRegistry::new();
-        registry.register_archetype(10, create_mask(&[1, 2]));    // A — pos 0
-        registry.register_archetype(20, create_mask(&[1, 2, 3])); // B — pos 1
-        registry.register_archetype(30, create_mask(&[1, 2, 4])); // C — pos 2
+        registry.register_archetype(ArchetypeId(10), create_mask(&[1, 2]));
+        registry.register_archetype(ArchetypeId(20), create_mask(&[1, 2, 3]));
+        registry.register_archetype(ArchetypeId(30), create_mask(&[1, 2, 4]));
 
         // Unregister B (middle element) — C should swap into pos 1
-        assert!(registry.unregister_archetype(20));
+        assert!(registry.unregister_archetype(ArchetypeId(20)));
         assert_eq!(registry.len(), 2);
 
         // Both A and C must still be findable via find_matching_archetypes
         let results = registry.find_matching_archetypes(&create_mask(&[1, 2]));
         assert_eq!(results.len(), 2);
-        assert!(results.contains(&10));
-        assert!(results.contains(&30));
+        assert!(results.contains(&ArchetypeId(10)));
+        assert!(results.contains(&ArchetypeId(30)));
 
         // get_archetype_signature must return correct signatures for A and C
-        let sig_a = registry.get_archetype_signature(10).expect("A must be present");
-        assert!(sig_a.mask().contains(1) && sig_a.mask().contains(2));
+        let sig_a = registry.get_archetype_signature(ArchetypeId(10)).expect("A must be present");
+        assert!(sig_a.mask().contains(ComponentId(1)) && sig_a.mask().contains(ComponentId(2)));
 
-        let sig_c = registry.get_archetype_signature(30).expect("C must be present");
-        assert!(sig_c.mask().contains(1) && sig_c.mask().contains(2) && sig_c.mask().contains(4));
+        let sig_c = registry.get_archetype_signature(ArchetypeId(30)).expect("C must be present");
+        assert!(sig_c.mask().contains(ComponentId(1)) && sig_c.mask().contains(ComponentId(2)) && sig_c.mask().contains(ComponentId(4)));
     }
 
     #[test]
     fn t_get_archetype_signature_o1_returns_none_after_unregister() {
         let mut registry = ArchetypeRegistry::new();
-        registry.register_archetype(42, create_mask(&[7, 8, 9]));
+        registry.register_archetype(ArchetypeId(42), create_mask(&[7, 8, 9]));
 
-        assert!(registry.get_archetype_signature(42).is_some());
+        assert!(registry.get_archetype_signature(ArchetypeId(42)).is_some());
 
-        registry.unregister_archetype(42);
+        registry.unregister_archetype(ArchetypeId(42));
 
-        assert!(registry.get_archetype_signature(42).is_none());
+        assert!(registry.get_archetype_signature(ArchetypeId(42)).is_none());
     }
 
     #[test]
     fn t_unregister_unknown_returns_false_does_not_panic() {
         let mut registry = ArchetypeRegistry::new();
-        registry.register_archetype(1, create_mask(&[1, 2]));
+        registry.register_archetype(ArchetypeId(1), create_mask(&[1, 2]));
 
-        let result = registry.unregister_archetype(99999);
+        let result = registry.unregister_archetype(ArchetypeId(99999));
         assert!(!result);
         assert_eq!(registry.len(), 1);
     }

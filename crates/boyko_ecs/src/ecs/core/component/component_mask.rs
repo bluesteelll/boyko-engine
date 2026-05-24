@@ -29,33 +29,33 @@ impl ComponentMask {
     #[inline]
     pub fn set(&mut self, component_id: ComponentId) {
         debug_assert!(
-            component_id < MAX_COMPONENTS,
-            "ComponentId {component_id} out of range (MAX_COMPONENTS = {MAX_COMPONENTS})"
+            component_id.0 < MAX_COMPONENTS,
+            "ComponentId {} out of range (MAX_COMPONENTS = {MAX_COMPONENTS})", component_id.0
         );
-        let block = component_id / 64;
-        let bit = component_id % 64;
+        let block = component_id.0 / 64;
+        let bit = component_id.0 % 64;
         self.blocks[block].set(bit);
     }
 
     #[inline]
     pub fn unset(&mut self, component_id: ComponentId) {
         debug_assert!(
-            component_id < MAX_COMPONENTS,
-            "ComponentId {component_id} out of range (MAX_COMPONENTS = {MAX_COMPONENTS})"
+            component_id.0 < MAX_COMPONENTS,
+            "ComponentId {} out of range (MAX_COMPONENTS = {MAX_COMPONENTS})", component_id.0
         );
-        let block = component_id / 64;
-        let bit = component_id % 64;
+        let block = component_id.0 / 64;
+        let bit = component_id.0 % 64;
         self.blocks[block].clear(bit);
     }
 
     #[inline]
     pub fn contains(&self, component_id: ComponentId) -> bool {
         debug_assert!(
-            component_id < MAX_COMPONENTS,
-            "ComponentId {component_id} out of range (MAX_COMPONENTS = {MAX_COMPONENTS})"
+            component_id.0 < MAX_COMPONENTS,
+            "ComponentId {} out of range (MAX_COMPONENTS = {MAX_COMPONENTS})", component_id.0
         );
-        let block = component_id / 64;
-        let bit = component_id % 64;
+        let block = component_id.0 / 64;
+        let bit = component_id.0 % 64;
         self.blocks[block].is_set(bit)
     }
     
@@ -266,28 +266,28 @@ mod tests {
         let mut mask2 = ComponentMask::new();
 
         // Set bits in mask1: 1, 2, 3
-        mask1.set(1);
-        mask1.set(2);
-        mask1.set(3);
+        mask1.set(ComponentId(1));
+        mask1.set(ComponentId(2));
+        mask1.set(ComponentId(3));
 
         // Set bits in mask2: 2, 3, 4
-        mask2.set(2);
-        mask2.set(3);
-        mask2.set(4);
+        mask2.set(ComponentId(2));
+        mask2.set(ComponentId(3));
+        mask2.set(ComponentId(4));
 
         // Result should have bits 2, 3 set
         let result = mask1 & mask2;
-        assert!(result.contains(2));
-        assert!(result.contains(3));
-        assert!(!result.contains(1));
-        assert!(!result.contains(4));
+        assert!(result.contains(ComponentId(2)));
+        assert!(result.contains(ComponentId(3)));
+        assert!(!result.contains(ComponentId(1)));
+        assert!(!result.contains(ComponentId(4)));
 
         // Test reference version
         let result_ref = mask1 & mask2;
-        assert!(result_ref.contains(2));
-        assert!(result_ref.contains(3));
-        assert!(!result_ref.contains(1));
-        assert!(!result_ref.contains(4));
+        assert!(result_ref.contains(ComponentId(2)));
+        assert!(result_ref.contains(ComponentId(3)));
+        assert!(!result_ref.contains(ComponentId(1)));
+        assert!(!result_ref.contains(ComponentId(4)));
     }
 
     #[test]
@@ -296,24 +296,24 @@ mod tests {
         let mut mask2 = ComponentMask::new();
 
         // Set bits in mask1: 1, 2
-        mask1.set(1);
-        mask1.set(2);
+        mask1.set(ComponentId(1));
+        mask1.set(ComponentId(2));
 
         // Set bits in mask2: 2, 3
-        mask2.set(2);
-        mask2.set(3);
+        mask2.set(ComponentId(2));
+        mask2.set(ComponentId(3));
 
         // Result should have bits 1, 2, 3 set
         let result = mask1 | mask2;
-        assert!(result.contains(1));
-        assert!(result.contains(2));
-        assert!(result.contains(3));
+        assert!(result.contains(ComponentId(1)));
+        assert!(result.contains(ComponentId(2)));
+        assert!(result.contains(ComponentId(3)));
 
         // Test reference version
         let result_ref = mask1 | mask2;
-        assert!(result_ref.contains(1));
-        assert!(result_ref.contains(2));
-        assert!(result_ref.contains(3));
+        assert!(result_ref.contains(ComponentId(1)));
+        assert!(result_ref.contains(ComponentId(2)));
+        assert!(result_ref.contains(ComponentId(3)));
     }
 
     #[test]
@@ -322,28 +322,28 @@ mod tests {
         let mut mask2 = ComponentMask::new();
 
         // Set bits in mask1: 1, 2, 3
-        mask1.set(1);
-        mask1.set(2);
-        mask1.set(3);
+        mask1.set(ComponentId(1));
+        mask1.set(ComponentId(2));
+        mask1.set(ComponentId(3));
 
         // Set bits in mask2: 2, 3, 4
-        mask2.set(2);
-        mask2.set(3);
-        mask2.set(4);
+        mask2.set(ComponentId(2));
+        mask2.set(ComponentId(3));
+        mask2.set(ComponentId(4));
 
         // Result should have bits 1, 4 set (symmetric difference)
         let result = mask1 ^ mask2;
-        assert!(result.contains(1));
-        assert!(!result.contains(2));
-        assert!(!result.contains(3));
-        assert!(result.contains(4));
+        assert!(result.contains(ComponentId(1)));
+        assert!(!result.contains(ComponentId(2)));
+        assert!(!result.contains(ComponentId(3)));
+        assert!(result.contains(ComponentId(4)));
 
         // Test reference version
         let result_ref = mask1 ^ mask2;
-        assert!(result_ref.contains(1));
-        assert!(!result_ref.contains(2));
-        assert!(!result_ref.contains(3));
-        assert!(result_ref.contains(4));
+        assert!(result_ref.contains(ComponentId(1)));
+        assert!(!result_ref.contains(ComponentId(2)));
+        assert!(!result_ref.contains(ComponentId(3)));
+        assert!(result_ref.contains(ComponentId(4)));
     }
 
     #[test]
@@ -351,27 +351,27 @@ mod tests {
         let mut mask = ComponentMask::new();
         
         // Set bits 1, 2, 3
-        mask.set(1);
-        mask.set(2);
-        mask.set(3);
-        
+        mask.set(ComponentId(1));
+        mask.set(ComponentId(2));
+        mask.set(ComponentId(3));
+
         // Invert the mask - all bits should be set except 1, 2, 3
         let result = !mask;
-        
+
         // Check the first few bits
-        assert!(!result.contains(1));
-        assert!(!result.contains(2));
-        assert!(!result.contains(3));
-        assert!(result.contains(4));
-        assert!(result.contains(5));
-        
+        assert!(!result.contains(ComponentId(1)));
+        assert!(!result.contains(ComponentId(2)));
+        assert!(!result.contains(ComponentId(3)));
+        assert!(result.contains(ComponentId(4)));
+        assert!(result.contains(ComponentId(5)));
+
         // Test reference version
         let result_ref = !&mask;
-        assert!(!result_ref.contains(1));
-        assert!(!result_ref.contains(2));
-        assert!(!result_ref.contains(3));
-        assert!(result_ref.contains(4));
-        assert!(result_ref.contains(5));
+        assert!(!result_ref.contains(ComponentId(1)));
+        assert!(!result_ref.contains(ComponentId(2)));
+        assert!(!result_ref.contains(ComponentId(3)));
+        assert!(result_ref.contains(ComponentId(4)));
+        assert!(result_ref.contains(ComponentId(5)));
     }
 
     /// Verify that `set` panics in debug builds when `component_id >= MAX_COMPONENTS`.
@@ -382,6 +382,6 @@ mod tests {
     #[should_panic(expected = "out of range")]
     fn test_set_out_of_range_panics() {
         let mut mask = ComponentMask::new();
-        mask.set(MAX_COMPONENTS); // must panic
+        mask.set(ComponentId(MAX_COMPONENTS)); // must panic
     }
 }
