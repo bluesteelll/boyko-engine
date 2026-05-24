@@ -8,8 +8,7 @@
 
 use boyko_ecs::ecs::core::archetype::archetype::Archetype;
 use boyko_ecs::ecs::core::component::component_registry;
-use boyko_ecs::ecs::core::entity::entity_inland::EntityInland;
-use boyko_ecs::ecs::identifiers::primitives::{ArchetypeId, ComponentId, EntityId, InlandPoolId};
+use boyko_ecs::ecs::identifiers::primitives::{ArchetypeId, ComponentId, EntityId};
 use boyko_ecs::ecs::memory::arena::Arena;
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 
@@ -67,12 +66,11 @@ fn bench_archetype_create_entity_8c(c: &mut Criterion) {
             },
             |(mut arch, components)| {
                 for entity_id in 0..n {
-                    let mut inland = EntityInland::new(arch.id(), InlandPoolId(0), 0);
-                    arch.init_entity_inland(&mut inland);
                     let slices: Vec<(ComponentId, &[u8])> = components.iter()
                         .map(|(id, v)| (*id, v.as_slice()))
                         .collect();
-                    let ok = arch.create_entity(EntityId(entity_id), &mut inland, &slices);
+                    let mut new_unit_index: u32 = 0;
+                    let ok = arch.create_entity(EntityId(entity_id), &mut new_unit_index, &slices);
                     black_box(ok);
                 }
                 black_box(arch);
@@ -105,12 +103,11 @@ fn bench_archetype_create_entity_16c(c: &mut Criterion) {
             },
             |(mut arch, components)| {
                 for entity_id in 0..n {
-                    let mut inland = EntityInland::new(arch.id(), InlandPoolId(0), 0);
-                    arch.init_entity_inland(&mut inland);
                     let slices: Vec<(ComponentId, &[u8])> = components.iter()
                         .map(|(id, v)| (*id, v.as_slice()))
                         .collect();
-                    let ok = arch.create_entity(EntityId(entity_id), &mut inland, &slices);
+                    let mut new_unit_index: u32 = 0;
+                    let ok = arch.create_entity(EntityId(entity_id), &mut new_unit_index, &slices);
                     black_box(ok);
                 }
                 black_box(arch);

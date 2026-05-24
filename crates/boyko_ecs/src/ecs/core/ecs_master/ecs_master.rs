@@ -169,13 +169,6 @@ impl EcsMaster {
         let entity = self.entity_master.allocate_entity();
         let generation = entity.generation() as usize;
 
-        // Create EntityInland with initial values.
-        let mut entity_inland = EntityInland::new(
-            archetype_id,
-            InlandPoolId(0), // unit index will be set by create_entity
-            generation,
-        );
-
         // SAFETY of the get_archetype_mut call: we verified existence above.
         // This cannot return None unless the archetype was removed between the
         // guard and this call, which is impossible in a single-threaded context.
@@ -183,9 +176,12 @@ impl EcsMaster {
             .get_archetype_mut(archetype_id)
             .expect("invariant: archetype existed at guard check; single-threaded");
 
-        archetype.init_entity_inland(&mut entity_inland);
-
-        if !archetype.create_entity(entity.id(), &mut entity_inland, components) {
+        // Phase 7 Step 3: `Archetype::create_entity` now reports just the
+        // dense unit index via `&mut u32`; the caller builds the legacy
+        // `EntityInland` itself. Steps 7-9 replace the legacy inland with
+        // `EntityInlandFast` and remove this bridge.
+        let mut new_unit_index: u32 = 0;
+        if !archetype.create_entity(entity.id(), &mut new_unit_index, components) {
             // Archetype rejected the entity (e.g. can_push failed). Undo the
             // allocation so the EntityId is not leaked (C-007 rewind path).
             let rewound = self.entity_master.rewind_allocate(entity);
@@ -197,7 +193,13 @@ impl EcsMaster {
             return Err(EcsError::ArchetypeRejectedEntity { archetype_id });
         }
 
-        // Register the entity with its inland data.
+        // Construct the legacy `EntityInland` from the freshly-assigned slot
+        // and register it. Step 9 deletes this bridge entirely.
+        let entity_inland = EntityInland::new(
+            archetype_id,
+            InlandPoolId(new_unit_index as usize),
+            generation,
+        );
         self.entity_master.register_entity(entity, archetype_id, entity_inland.unit_index());
 
         Ok(entity)

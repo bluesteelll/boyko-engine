@@ -737,14 +737,13 @@ mod tests {
     /// Push one entity with a `Position(val)` into the archetype, returning its inland.
     fn push_position(master: &mut ArchetypeMaster, arch_id: ArchetypeId, val: u32) -> EntityInland {
         let arch = master.get_archetype_mut(arch_id).expect("archetype must exist");
-        let mut inland = EntityInland::new(arch.id(), InlandPoolId(0), 0);
-        arch.init_entity_inland(&mut inland);
         let bytes = val.to_ne_bytes();
-        let ok = arch.create_entity(EntityId(val as usize), &mut inland, &[
+        let mut new_unit_index: u32 = 0;
+        let ok = arch.create_entity(EntityId(val as usize), &mut new_unit_index, &[
             (Position::component_id(), bytes.as_slice()),
         ]);
         assert!(ok, "create_entity must succeed");
-        inland
+        EntityInland::new(arch.id(), InlandPoolId(new_unit_index as usize), 0)
     }
 
     /// Push one entity with a `Position(pval)` and `Velocity(vval)` into the archetype.
@@ -756,16 +755,15 @@ mod tests {
         vval: u32,
     ) -> EntityInland {
         let arch = master.get_archetype_mut(arch_id).expect("archetype must exist");
-        let mut inland = EntityInland::new(arch.id(), InlandPoolId(0), 0);
-        arch.init_entity_inland(&mut inland);
         let pb = pval.to_ne_bytes();
         let vb = vval.to_ne_bytes();
-        let ok = arch.create_entity(EntityId(entity_id), &mut inland, &[
+        let mut new_unit_index: u32 = 0;
+        let ok = arch.create_entity(EntityId(entity_id), &mut new_unit_index, &[
             (Position::component_id(), pb.as_slice()),
             (Velocity::component_id(), vb.as_slice()),
         ]);
         assert!(ok, "create_entity must succeed");
-        inland
+        EntityInland::new(arch.id(), InlandPoolId(new_unit_index as usize), 0)
     }
 
     // --- iter_one tests ---
@@ -882,12 +880,11 @@ mod tests {
         // For arch2 we need all three components; push manually.
         {
             let arch = master.get_archetype_mut(arch2).expect("arch2 must exist");
-            let mut inland = EntityInland::new(arch.id(), InlandPoolId(0), 0);
-            arch.init_entity_inland(&mut inland);
             let pb = 102u32.to_ne_bytes();
             let vb = 202u32.to_ne_bytes();
             let hb = 0u32.to_ne_bytes();
-            let ok = arch.create_entity(EntityId(2), &mut inland, &[
+            let mut new_unit_index: u32 = 0;
+            let ok = arch.create_entity(EntityId(2), &mut new_unit_index, &[
                 (Position::component_id(), pb.as_slice()),
                 (Velocity::component_id(), vb.as_slice()),
                 (Health::component_id(), hb.as_slice()),

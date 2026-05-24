@@ -9,6 +9,60 @@ use crate::ecs::memory::arena::Arena;
 /// `MAX_COMPONENTS` as a `ComponentId` newtype for comparison against newtype-guarded IDs.
 const MAX_COMPONENTS_ID: ComponentId = ComponentId(MAX_COMPONENTS);
 
+/// Pre-resolved component pointer + stride for the hot read path.
+///
+/// `ptr.is_null()` ⇔ this archetype has no pool for the `ComponentId` at this
+/// index. Stored inline in `Archetype::columns` so a random component lookup
+/// resolves to a base pointer and stride in a single cache line, bypassing the
+/// `ComponentPoolBundle` sparse map (Phase 7 D4).
+///
+/// The `_reserved` field brings the struct to a power-of-two 16 B stride so
+/// `columns[c]` lowers to `c << 4` indexing. Reserved for Phase 8; do not
+/// rely on its current value.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Column {
+    /// Base pointer to the component pool's buffer
+    /// (== `ComponentPool::buffer_ptr()`). NULL when the column is absent.
+    pub(crate) ptr: *mut u8,
+    /// Component size in bytes (== `ComponentPool::component_layout().size()`).
+    /// `unit_index * stride` gives the byte offset from `ptr`.
+    pub(crate) stride: u32,
+    /// Reserved for future use; layout-stable but value is not part of the
+    /// public contract. **Do not rely on this field for any current dispatch.**
+    pub(crate) _reserved: u32,
+}
+
+const _: () = assert!(std::mem::size_of::<Column>() == 16);
+const _: () = assert!(std::mem::align_of::<Column>() == 8);
+const _: () = assert!(std::mem::offset_of!(Column, ptr) == 0);
+const _: () = assert!(std::mem::offset_of!(Column, stride) == 8);
+const _: () = assert!(std::mem::offset_of!(Column, _reserved) == 12);
+
+impl Column {
+    /// All-zero column representing "no pool for this id".
+    ///
+    /// The all-zero representation is load-bearing: `refresh_all_columns`
+    /// resets the table via byte-zero (`*col = Column::null()` per slot).
+    /// Phase 4 will switch to a single `write_bytes(addr_of_mut!(columns), 0, ...)`
+    /// against the all-zero invariant.
+    #[inline]
+    pub const fn null() -> Self {
+        Self {
+            ptr: std::ptr::null_mut(),
+            stride: 0,
+            _reserved: 0,
+        }
+    }
+
+    /// `true` when the archetype has no pool for the component_id this column
+    /// represents. First check on every fast-path component lookup.
+    #[inline]
+    pub const fn is_null(&self) -> bool {
+        self.ptr.is_null()
+    }
+}
+
 /// Outcome of removing an entity from an archetype.
 ///
 /// Replaces the previous `Option<EntityId>` return which was ambiguous:
@@ -44,7 +98,22 @@ const _: () = {
 
 /// Archetype represents a unique combination of component types
 /// All entities with the same component types belong to the same archetype
+///
+/// `#[repr(C)]` pins the field order so `columns` is at offset 0 (Phase 7 D4 /
+/// U5). The default `repr(Rust)` reorders by alignment, which would put
+/// `ComponentPoolBundle` (align 16 via inner Vec) ahead of `columns` and break
+/// the Phase 7 fast read path's "single dependent load at offset 0" promise.
+#[repr(C)]
 pub struct Archetype {
+    /// 8 KB inline hot lookup table, indexed by `ComponentId.0`.
+    ///
+    /// Placed FIRST so it sits at fixed offset 0 from `*const Archetype` —
+    /// the Phase 7 fast read path issues a single dependent load `*(arch + c*16)`
+    /// without touching `component_pools` (Phase 7 D4). For every `ComponentId`
+    /// that is NOT in this archetype, the slot stays `Column::null()`; null is
+    /// the single source of truth for "absent column".
+    columns: [Column; MAX_COMPONENTS],
+
     /// Unique identifier for this archetype
     id: ArchetypeId,
 
@@ -69,10 +138,23 @@ pub struct Archetype {
     entity_ids: Vec<EntityId>,
 }
 
+// Phase 7 U5 / D4: the inline column table MUST be at offset 0 so the fast
+// read path can issue `*(arch + c*16)` against a freshly-minted slab pointer
+// without an extra add. The default `repr(Rust)` heuristic already places
+// `[Column; 512]` (largest align*size product) first, but the invariant is
+// load-bearing for Step 7 and Phase 8 — lock it at compile time.
+const _: () = assert!(std::mem::offset_of!(Archetype, columns) == 0);
+
 impl Archetype {
-    /// Creates a new archetype with the given ID and arena
+    /// Creates a new archetype with the given ID and arena.
+    ///
+    /// The 8 KB `columns` table is zero-initialised on the stack; Phase 4
+    /// will switch this to in-place slab construction via `addr_of_mut!`
+    /// (Phase 7 W6) once `ArchetypeBundle` lands. For now, low-frequency
+    /// creation sites pay the temporary stack cost.
     pub fn new(id: ArchetypeId, arena: &Arena) -> Self {
         Self {
+            columns: [Column::null(); MAX_COMPONENTS],
             id,
             component_pools: ComponentPoolBundle::new(),
             current_index: 0,
@@ -88,7 +170,12 @@ impl Archetype {
     }
 
 
-    /// Creates a new archetype from a slice of component IDs
+    /// Creates a new archetype from a slice of component IDs.
+    ///
+    /// After each `add_pool` call, `refresh_column` syncs the inline
+    /// `columns[comp_id.0]` entry so the hot read path can find the pool's
+    /// `(ptr, stride)` without going through the bundle's sparse map
+    /// (Phase 7 D4 / invariant U7).
     pub fn create_by_ids(id: ArchetypeId, component_ids: &[ComponentId], arena: &Arena) -> Self {
         // Create a mask from the component IDs
         let mut mask = ComponentMask::new();
@@ -98,6 +185,7 @@ impl Archetype {
 
         // Initialize archetype with mask and empty component pools
         let mut archetype = Self {
+            columns: [Column::null(); MAX_COMPONENTS],
             id,
             component_pools: ComponentPoolBundle::new(),
             current_index: 0,
@@ -107,12 +195,15 @@ impl Archetype {
             component_ids: component_ids.to_vec(),
             entity_ids: Vec::new(),
         };
-        
-        // Create component pools for each component ID
+
+        // Create component pools for each component ID. Each successful
+        // `add_pool` must be paired with `refresh_column` to keep the inline
+        // `columns` table in sync (Phase 7 invariant U7).
         for &comp_id in component_ids {
             archetype.component_pools.add_pool(arena, comp_id);
+            archetype.refresh_column(comp_id);
         }
-        
+
         archetype
     }
 
@@ -137,18 +228,66 @@ impl Archetype {
         // the reborrow is bounded to this call — it does not escape.
         let arena = unsafe { &*self.arena };
 
-        // Add a pool for this component type
+        // Add a pool for this component type, then refresh the inline column
+        // table so the hot read path can resolve `component_id` without going
+        // through the bundle's sparse map (Phase 7 invariant U7).
         self.component_pools.add_pool(arena, component_id);
-        
+        self.refresh_column(component_id);
+
         // Update signature mask
         let mut new_mask = *self.signature.mask();
         new_mask.set(component_id);
         self.signature = ArchetypeSignature::new(new_mask);
-        
+
         // Add component ID to our list
         self.component_ids.push(component_id);
 
         true
+    }
+
+    /// Re-syncs `columns[component_id.0]` with the current pool state.
+    ///
+    /// Called only after `component_pools.add_pool(...)` mints (or refreshes)
+    /// a pool's `(buffer_ptr, component_layout)`. NOT called on data-only
+    /// mutations (push / swap_remove / pop / set) — those leave the pool's
+    /// base pointer and stride unchanged (Phase 7 D5 audit / invariant U10).
+    #[inline]
+    fn refresh_column(&mut self, component_id: ComponentId) {
+        debug_assert!(
+            component_id.0 < MAX_COMPONENTS,
+            "component_id {} >= MAX_COMPONENTS ({})", component_id.0, MAX_COMPONENTS
+        );
+        match self.component_pools.get_pool(component_id) {
+            Some(pool) => {
+                self.columns[component_id.0] = Column {
+                    ptr: pool.buffer_ptr() as *mut u8,
+                    stride: pool.component_layout().size() as u32,
+                    _reserved: 0,
+                };
+            }
+            None => {
+                self.columns[component_id.0] = Column::null();
+            }
+        }
+    }
+
+    /// Refreshes the entire `columns` table from `component_pools`.
+    ///
+    /// Reserved for future arena-grow events where every pool's `buffer_ptr`
+    /// may relocate. Not used on the Phase 7 hot path.
+    #[cold]
+    #[allow(dead_code)]
+    fn refresh_all_columns(&mut self) {
+        for col in self.columns.iter_mut() {
+            *col = Column::null();
+        }
+        // Clone the IDs out so the iteration does not hold a borrow of
+        // `self.component_ids` across the `refresh_column(...)` call, which
+        // needs `&mut self`.
+        let ids: Vec<ComponentId> = self.component_ids.clone();
+        for cid in ids {
+            self.refresh_column(cid);
+        }
     }
 
     /// Checks if this archetype contains a component with the given ID
@@ -172,13 +311,23 @@ impl Archetype {
     /// Creates a new entity in this archetype with the given components.
     ///
     /// Takes a borrowed slice of `(ComponentId, &[u8])` pairs — zero allocation
-    /// on the caller side. Updates `inland` with the unit index of the new entity.
+    /// on the caller side. Writes the assigned dense unit index into
+    /// `*new_unit_index` on success.
     ///
-    /// Audit: C-010 — switched from Vec to &[...].
-    pub fn create_entity(&mut self, entity_id: EntityId, inland: &mut EntityInland, components: &[(ComponentId, &[u8])]) -> bool {
-        debug_assert_eq!(inland.archetype_id(), self.id, 
-            "EntityInland archetype_id mismatch");
-        
+    /// The previous signature accepted `&mut EntityInland` and mutated its
+    /// `unit_index` / `archetype_id` fields. Phase 7 removes that coupling:
+    /// the caller now receives just the `u32` slot and is responsible for
+    /// constructing whatever entity-location record it needs (legacy
+    /// `EntityInland` or Phase 7 `EntityInlandFast`).
+    ///
+    /// Audit: C-010 — switched from Vec to &[...]. Phase 7 Step 3 — replaced
+    /// `&mut EntityInland` with `&mut u32`.
+    pub fn create_entity(
+        &mut self,
+        entity_id: EntityId,
+        new_unit_index: &mut u32,
+        components: &[(ComponentId, &[u8])],
+    ) -> bool {
         // Build a mask of the input component IDs in O(M), then check
         // that the archetype signature is a subset in O(8 u64 ops).
         // This replaces the previous O(N*M) nested scan.
@@ -201,7 +350,7 @@ impl Archetype {
         if !self.signature.mask().is_subset(&input_mask) {
             return false; // at least one required component is absent from input
         }
-        
+
         // Two-phase commit (C-009): validate all pools have capacity before
         // writing any, so a full-pool failure cannot leave pools desynced.
         if !self.component_pools.can_push_entity_components(components) {
@@ -209,16 +358,14 @@ impl Archetype {
         }
 
         let unit_index = self.component_pools.push_entity_components(components);
+        *new_unit_index = unit_index as u32;
 
-        // Update the inland reference with the unit index
-        inland.set_unit_index(InlandPoolId(unit_index));
-        
         // Add the entity ID to the vector
         self.entity_ids.push(entity_id);
-        
+
         // Increment entity counter
         self.current_index += 1;
-        
+
         true
     }
 
@@ -352,14 +499,6 @@ impl Archetype {
         true
     }
     
-    /// Initialize an EntityInland for the next entity slot in this archetype
-    #[inline]
-    pub fn init_entity_inland(&self, inland: &mut EntityInland) {
-        inland.set_archetype_id(self.id);
-        // Unit index will be set during component creation
-        // Generation is set by the ECS master
-    }
-
     /// Removes the last entity from this archetype
     /// Takes a reference to the last entity's EntityInland to update its generation
     pub fn pop(&mut self, last_entity_inland: &mut EntityInland) -> bool {
@@ -420,16 +559,15 @@ mod tests {
 
     // Helper: add one entity with zero-filled bytes for both components.
     fn add_entity(arch: &mut Archetype, entity_id: EntityId) -> EntityInland {
-        let mut inland = EntityInland::new(arch.id(), InlandPoolId(0), 0);
-        arch.init_entity_inland(&mut inland);
         let bytes_a = vec![0u8; component_registry::get_component_size(COMP_A.0).unwrap()];
         let bytes_b = vec![0u8; component_registry::get_component_size(COMP_B.0).unwrap()];
-        let ok = arch.create_entity(entity_id, &mut inland, &[
+        let mut new_unit_index: u32 = 0;
+        let ok = arch.create_entity(entity_id, &mut new_unit_index, &[
             (COMP_A, bytes_a.as_slice()),
             (COMP_B, bytes_b.as_slice()),
         ]);
         assert!(ok, "create_entity must succeed in setup helper");
-        inland
+        EntityInland::new(arch.id(), InlandPoolId(new_unit_index as usize), 0)
     }
 
     // --- create_entity ---
@@ -462,11 +600,10 @@ mod tests {
         let arena = Arena::with_capacity(4096 * 1024);
         let mut arch = make_archetype(&arena);
 
-        let mut inland = EntityInland::new(arch.id(), InlandPoolId(0), 0);
-        arch.init_entity_inland(&mut inland);
         // Provide only COMP_A, omit COMP_B.
         let bytes_a = vec![0u8; component_registry::get_component_size(COMP_A.0).unwrap()];
-        let ok = arch.create_entity(EntityId(10), &mut inland, &[(COMP_A, bytes_a.as_slice())]);
+        let mut new_unit_index: u32 = 0;
+        let ok = arch.create_entity(EntityId(10), &mut new_unit_index, &[(COMP_A, bytes_a.as_slice())]);
         assert!(!ok, "create_entity must return false when a component is missing");
     }
 
@@ -724,9 +861,6 @@ mod tests {
             // Archetype requires only C16_A and C16_B.
             let mut arch = Archetype::create_by_ids(ArchetypeId(50), &[C16_A, C16_B], &arena);
 
-            let mut inland = EntityInland::new(arch.id(), InlandPoolId(0), 0);
-            arch.init_entity_inland(&mut inland);
-
             let sz_a = component_registry::get_component_size(C16_A.0).unwrap();
             let sz_b = component_registry::get_component_size(C16_B.0).unwrap();
             let bytes_a = vec![0u8; sz_a];
@@ -737,7 +871,8 @@ mod tests {
             let sz_c = component_registry::get_component_size(412).unwrap();
             let bytes_c = vec![0u8; sz_c];
 
-            let ok = arch.create_entity(EntityId(200), &mut inland, &[
+            let mut new_unit_index: u32 = 0;
+            let ok = arch.create_entity(EntityId(200), &mut new_unit_index, &[
                 (C16_A, bytes_a.as_slice()),
                 (C16_B, bytes_b.as_slice()),
                 (ComponentId(412), bytes_c.as_slice()), // extra: not in archetype pools
@@ -760,16 +895,14 @@ mod tests {
         let arena = Arena::with_capacity(64 * 1024 * 1024);
         let mut arch = Archetype::create_by_ids(ArchetypeId(51), &C16_WIDE, &arena);
 
-        let mut inland = EntityInland::new(arch.id(), InlandPoolId(0), 0);
-        arch.init_entity_inland(&mut inland);
-
         // Build component data: 4 bytes each (all u32-sized).
         let bytes = [0u8; 4];
         let components: Vec<(ComponentId, &[u8])> = C16_WIDE.iter()
             .map(|&id| (id, bytes.as_slice()))
             .collect();
 
-        let ok = arch.create_entity(EntityId(300), &mut inland, &components);
+        let mut new_unit_index: u32 = 0;
+        let ok = arch.create_entity(EntityId(300), &mut new_unit_index, &components);
         assert!(ok, "create_entity must succeed for 8-component archetype");
         assert_eq!(arch.entity_count(), 1);
     }
