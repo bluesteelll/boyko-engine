@@ -185,7 +185,7 @@ impl ComponentPool {
             ptr
         };
 
-        let unit = Unit::new(component_ptr, buffer_index);
+        let unit = Unit::new(component_ptr);
         let chunk_index = buffer_index / self.components_per_chunk;
         if let Some(chunk) = self.chunks.get_mut(chunk_index) {
             chunk.mark_dirty();
@@ -240,7 +240,7 @@ impl ComponentPool {
         //   exist after this call — no scope-exit drop.
         unsafe { core::ptr::write(dst.cast::<T>(), value) };
 
-        let unit = Unit::new(dst, buffer_index);
+        let unit = Unit::new(dst);
         let chunk_index = buffer_index / self.components_per_chunk;
         if let Some(chunk) = self.chunks.get_mut(chunk_index) {
             chunk.mark_dirty();
@@ -331,7 +331,7 @@ impl ComponentPool {
                 );
             }
 
-            self.units[index] = Unit::new(removed_ptr, index);
+            self.units[index] = Unit::new(removed_ptr);
 
             let chunk_idx = index / self.components_per_chunk;
             if let Some(chunk) = self.chunks.get_mut(chunk_idx) {
