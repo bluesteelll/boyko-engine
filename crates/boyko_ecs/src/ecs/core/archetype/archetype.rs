@@ -1,4 +1,3 @@
-use std::ptr::NonNull;
 use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId, EntityId, InlandPoolId};
 use crate::ecs::core::entity::entity_inland::EntityInland;
 use crate::ecs::core::component::component_mask::ComponentMask;
@@ -21,10 +20,12 @@ pub struct Archetype {
 
     /// Component signature for this archetype (bit mask of component IDs)
     signature: ArchetypeSignature,
-    
-    /// Reference to the arena used for memory allocation
-    arena: NonNull<Arena>,
-    
+
+    /// Raw provenance pointer to the arena used for memory allocation.
+    /// Stored as `*const Arena` (raw provenance) to avoid Miri retag UB:
+    /// see Phase 3a Miri retag fix in `ecs_master.rs` field-level doc.
+    arena: *const Arena,
+
     /// Set of component IDs in this archetype for efficient iteration
     component_ids: Vec<ComponentId>,
     /// Vector of entity IDs, indexed by unit_index
@@ -40,7 +41,11 @@ impl Archetype {
             component_pools: ComponentPoolBundle::new(),
             current_index: 0,
             signature: ArchetypeSignature::new(ComponentMask::new()),
-            arena: NonNull::from(arena),
+            // SAFETY: `arena` is a shared reference valid for the lifetime of
+            // the owning `EcsMaster`. Converting to a raw pointer preserves
+            // provenance; the pointer is never dereferenced here — it is
+            // forwarded to `add_pool` via a temporary `&Arena` reborrow.
+            arena: &raw const *arena,
             component_ids: Vec::new(),
             entity_ids: Vec::new(),
         }
@@ -54,14 +59,15 @@ impl Archetype {
         for &comp_id in component_ids {
             mask.set(comp_id);
         }
-        
+
         // Initialize archetype with mask and empty component pools
         let mut archetype = Self {
             id,
             component_pools: ComponentPoolBundle::new(),
             current_index: 0,
             signature: ArchetypeSignature::new(mask),
-            arena: NonNull::from(arena),
+            // SAFETY: same provenance contract as `Archetype::new`.
+            arena: &raw const *arena,
             component_ids: component_ids.to_vec(),
             entity_ids: Vec::new(),
         };
@@ -87,11 +93,13 @@ impl Archetype {
             return false;
         }
 
-        // SAFETY: `self.arena` was captured from the `Box<Arena>` owned by
-        // `EcsMaster`; that `Box` lives at a stable heap address and outlives
-        // every `Archetype` it parented (audit C-001 / drop-order invariant).
-        // Arena is `!Send + !Sync`, so no other thread holds a reference.
-        let arena = unsafe { &*self.arena.as_ptr() };
+        // SAFETY: `self.arena` was minted from the `Box<Arena>` owned by
+        // `EcsMaster` (audit C-001 / drop-order invariant, Phase 3a raw
+        // provenance fix). The `Box` lives at a stable heap address and outlives
+        // every `Archetype`. No aliasing `&mut Arena` exists: `Arena` is
+        // `!Send + !Sync`; single-threaded use is enforced. The lifetime of
+        // the reborrow is bounded to this call — it does not escape.
+        let arena = unsafe { &*self.arena };
 
         // Add a pool for this component type
         self.component_pools.add_pool(arena, component_id);

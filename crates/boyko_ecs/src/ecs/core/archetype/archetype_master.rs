@@ -1,4 +1,3 @@
-use std::ptr::NonNull;
 use crate::ecs::core::archetype::archetype_bundle::ArchetypeBundle;
 use crate::ecs::core::archetype::archetype_registry::ArchetypeRegistry;
 use crate::ecs::core::archetype::archetype::Archetype;
@@ -20,8 +19,10 @@ pub struct ArchetypeMaster {
     /// Registry for efficient component-based lookups
     registry: ArchetypeRegistry,
 
-    /// Memory arena for component allocation
-    arena: NonNull<Arena>,
+    /// Raw provenance pointer to the memory arena for component allocation.
+    /// Stored as `*const Arena` (raw provenance) to avoid Miri retag UB:
+    /// see Phase 3a Miri retag fix in `ecs_master.rs` field-level doc.
+    arena: *const Arena,
 
     /// Next available archetype ID
     next_archetype_id: ArchetypeId,
@@ -33,23 +34,37 @@ pub struct ArchetypeMaster {
 }
 
 impl ArchetypeMaster {
-    /// Creates a new ArchetypeMaster with the given arena
-    pub fn new(arena: &Arena) -> Self {
+    /// Creates a new ArchetypeMaster with a raw arena pointer.
+    ///
+    /// # Safety
+    /// `arena_ptr` must be derived from a `Box<Arena>` that outlives this
+    /// `ArchetypeMaster` and every `Archetype`/`ComponentPool` created through
+    /// it. The pointer must remain valid until all child structures are dropped.
+    /// Caller must ensure no `&mut Arena` exists concurrently (single-threaded
+    /// `!Send + !Sync` requirement).
+    ///
+    /// Use `Box::as_ptr(&arena_box)` to mint `arena_ptr` — this returns the
+    /// stable heap address without creating a temporary `&Arena` borrow that
+    /// could be invalidated by moving the `Box` into the owning struct.
+    pub unsafe fn new(arena_ptr: *const Arena) -> Self {
         Self {
             archetypes: ArchetypeBundle::new(),
             registry: ArchetypeRegistry::with_capacity(64),
-            arena: NonNull::from(arena),
+            arena: arena_ptr,
             next_archetype_id: 1,
             generation: ArchetypeGeneration::FIRST,
         }
     }
 
-    /// Creates a new ArchetypeMaster with the given capacity
-    pub fn with_capacity(arena: &Arena, capacity: usize) -> Self {
+    /// Creates a new ArchetypeMaster with the given capacity and a raw arena pointer.
+    ///
+    /// # Safety
+    /// Same contract as [`ArchetypeMaster::new`].
+    pub unsafe fn with_capacity(arena_ptr: *const Arena, capacity: usize) -> Self {
         Self {
             archetypes: ArchetypeBundle::with_capacity(capacity),
             registry: ArchetypeRegistry::with_capacity(capacity),
-            arena: NonNull::from(arena),
+            arena: arena_ptr,
             next_archetype_id: 1,
             generation: ArchetypeGeneration::FIRST,
         }
@@ -72,12 +87,14 @@ impl ArchetypeMaster {
         self.next_archetype_id += 1;
         self.generation.bump();
 
-        // SAFETY: `self.arena` was captured from the `Box<Arena>` owned by
-        // `EcsMaster` (audit C-001). The `Box` has a stable heap address and
-        // outlives every `ArchetypeMaster`/`Archetype` that holds the
-        // `NonNull`. Arena is `!Send + !Sync`, so no concurrent reference
-        // can exist. We do not let `&Arena` escape `add_archetype_from_components`.
-        let arena = unsafe { self.arena.as_ref() };
+        // SAFETY: `self.arena` was minted from the `Box<Arena>` owned by
+        // `EcsMaster` (audit C-001 / drop-order invariant, Phase 3a raw
+        // provenance fix). The `Box` lives at a stable heap address and outlives
+        // every `ArchetypeMaster`/`Archetype`. `Arena` is `!Send + !Sync`:
+        // single-threaded use ensures no concurrent `&mut` exists.
+        // The reborrow is scoped to the `add_archetype_from_components` call
+        // and does not escape this function.
+        let arena = unsafe { &*self.arena };
 
         // Create a new archetype with these component IDs
         let _inland_id = self.archetypes.add_archetype_from_components(
@@ -512,7 +529,11 @@ mod tests {
     fn test_create_archetype() {
         register_mock_components();
         let arena = create_test_arena();
-        let mut master = ArchetypeMaster::new(&arena);
+        // SAFETY: `arena` is a local variable (stack-allocated `Arena`) that
+        // outlives `master` by declaration order; no `&mut Arena` exists
+        // concurrently. `&raw const arena` takes the address of the local
+        // without creating a reference borrow (Stacked Borrows safe).
+        let mut master = unsafe { ArchetypeMaster::new(&raw const arena) };
 
         // Create a new archetype
         let id1 = master.create_archetype(&mocks([1, 2, 3]));
@@ -535,7 +556,11 @@ mod tests {
     fn test_remove_archetype() {
         register_mock_components();
         let arena = create_test_arena();
-        let mut master = ArchetypeMaster::new(&arena);
+        // SAFETY: `arena` is a local variable (stack-allocated `Arena`) that
+        // outlives `master` by declaration order; no `&mut Arena` exists
+        // concurrently. `&raw const arena` takes the address of the local
+        // without creating a reference borrow (Stacked Borrows safe).
+        let mut master = unsafe { ArchetypeMaster::new(&raw const arena) };
 
         // Create a new archetype
         let id = master.create_archetype(&mocks([1, 2, 3]));
@@ -557,7 +582,11 @@ mod tests {
     fn test_find_archetypes() {
         register_mock_components();
         let arena = create_test_arena();
-        let mut master = ArchetypeMaster::new(&arena);
+        // SAFETY: `arena` is a local variable (stack-allocated `Arena`) that
+        // outlives `master` by declaration order; no `&mut Arena` exists
+        // concurrently. `&raw const arena` takes the address of the local
+        // without creating a reference borrow (Stacked Borrows safe).
+        let mut master = unsafe { ArchetypeMaster::new(&raw const arena) };
 
         // Create different archetypes
         let id1 = master.create_archetype(&mocks([1, 2, 3]));
@@ -586,7 +615,11 @@ mod tests {
     fn test_add_component_to_archetype() {
         register_mock_components();
         let arena = create_test_arena();
-        let mut master = ArchetypeMaster::new(&arena);
+        // SAFETY: `arena` is a local variable (stack-allocated `Arena`) that
+        // outlives `master` by declaration order; no `&mut Arena` exists
+        // concurrently. `&raw const arena` takes the address of the local
+        // without creating a reference borrow (Stacked Borrows safe).
+        let mut master = unsafe { ArchetypeMaster::new(&raw const arena) };
 
         // Create an archetype with components 1 and 2
         let id1 = master.create_archetype(&mocks([1, 2]));
@@ -609,7 +642,11 @@ mod tests {
     fn test_remove_component_from_archetype() {
         register_mock_components();
         let arena = create_test_arena();
-        let mut master = ArchetypeMaster::new(&arena);
+        // SAFETY: `arena` is a local variable (stack-allocated `Arena`) that
+        // outlives `master` by declaration order; no `&mut Arena` exists
+        // concurrently. `&raw const arena` takes the address of the local
+        // without creating a reference borrow (Stacked Borrows safe).
+        let mut master = unsafe { ArchetypeMaster::new(&raw const arena) };
 
         // Create an archetype with components 1, 2, and 3
         let id1 = master.create_archetype(&mocks([1, 2, 3]));
@@ -632,7 +669,11 @@ mod tests {
     fn test_reuse_existing_archetype() {
         register_mock_components();
         let arena = create_test_arena();
-        let mut master = ArchetypeMaster::new(&arena);
+        // SAFETY: `arena` is a local variable (stack-allocated `Arena`) that
+        // outlives `master` by declaration order; no `&mut Arena` exists
+        // concurrently. `&raw const arena` takes the address of the local
+        // without creating a reference borrow (Stacked Borrows safe).
+        let mut master = unsafe { ArchetypeMaster::new(&raw const arena) };
 
         // Create an archetype with components 1, 2, and 3
         let id1 = master.create_archetype(&mocks([1, 2, 3]));
@@ -650,7 +691,11 @@ mod tests {
     fn test_get_archetypes_with_filter() {
         register_mock_components();
         let arena = create_test_arena();
-        let mut master = ArchetypeMaster::new(&arena);
+        // SAFETY: `arena` is a local variable (stack-allocated `Arena`) that
+        // outlives `master` by declaration order; no `&mut Arena` exists
+        // concurrently. `&raw const arena` takes the address of the local
+        // without creating a reference borrow (Stacked Borrows safe).
+        let mut master = unsafe { ArchetypeMaster::new(&raw const arena) };
 
         // Create different archetypes
         master.create_archetype(&mocks([1, 2]));          // Position, Velocity
@@ -691,7 +736,11 @@ mod tests {
     fn test_get_archetypes_with_component_filter() {
         register_mock_components();
         let arena = create_test_arena();
-        let mut master = ArchetypeMaster::new(&arena);
+        // SAFETY: `arena` is a local variable (stack-allocated `Arena`) that
+        // outlives `master` by declaration order; no `&mut Arena` exists
+        // concurrently. `&raw const arena` takes the address of the local
+        // without creating a reference borrow (Stacked Borrows safe).
+        let mut master = unsafe { ArchetypeMaster::new(&raw const arena) };
 
         // Create different archetypes
         master.create_archetype(&mocks([1, 2]));          // Position, Velocity

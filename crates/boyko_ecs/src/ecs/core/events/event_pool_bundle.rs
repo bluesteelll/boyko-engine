@@ -1,15 +1,15 @@
 /* use crate::ecs::core::events::event::Event;
 use crate::ecs::core::events::event_pool::EventPool;
 use crate::ecs::core::memory::arena::Arena;
-use std::ptr::NonNull;
 
 /// Bundle for multiple event pools
 pub struct EventPoolBundle {
     /// Maps event IDs to their pools
     pools: Vec<Option<EventPool>>,
-    
-    /// Arena for memory allocation
-    arena: NonNull<Arena>,
+
+    /// Raw provenance pointer to the arena for memory allocation.
+    /// Use `*const Arena` (not `NonNull<Arena>`) — Phase 3a Miri retag fix.
+    arena: *const Arena,
 }
 
 impl EventPoolBundle {
@@ -17,23 +17,27 @@ impl EventPoolBundle {
     pub fn new(arena: &Arena) -> Self {
         Self {
             pools: vec![None; 256], // Max 256 event types
-            arena: NonNull::from(arena),
+            // SAFETY: `arena` is a shared reference; raw pointer preserves provenance.
+            arena: &raw const *arena,
         }
     }
-    
+
     /// Creates a pool for a specific event type
     pub fn create_pool<E: Event>(&mut self, capacity: usize) -> bool {
         let event_id = E::event_id() as usize;
-        
+
         if event_id >= self.pools.len() {
             return false;
         }
-        
+
         if self.pools[event_id].is_some() {
             return false; // Pool already exists
         }
-        
-        let arena = unsafe { self.arena.as_ref() };
+
+        // SAFETY: `self.arena` was minted from a live `Box<Arena>`-owned
+        // allocation (Phase 3a raw provenance contract). The reborrow is
+        // scoped to this call and does not escape.
+        let arena = unsafe { &*self.arena };
         let pool = EventPool::new::<E>(arena, capacity);
         self.pools[event_id] = Some(pool);
         

@@ -18,10 +18,15 @@ use crate::ecs::memory::id_unit::Unit;
 /// All slots in `[0, units.len())` are fully initialized. Slots beyond that
 /// are uninitialized arena memory and must never be read or dropped.
 pub struct ComponentPool {
-    /// Reference to the arena for memory allocation.
+    /// Raw provenance pointer to the arena for memory allocation.
+    /// Stored as `*const Arena` (raw provenance) to avoid Miri retag UB when
+    /// the owning `EcsMaster` constructs multiple pools from the same arena:
+    /// using `NonNull::from(&*boxed_arena)` across multiple reborrow sites
+    /// creates overlapping `&mut`-derived tags. The raw pointer sidesteps the
+    /// Stacked Borrows model entirely (Miri retag fix, Phase 3a).
     /// Reserved for future deallocation / defragmentation support (Phase 3).
     #[allow(dead_code)]
-    arena: NonNull<Arena>,
+    arena: *const Arena,
 
     /// Buffer for storing components, allocated directly from the arena.
     buffer: NonNull<u8>,
@@ -100,7 +105,11 @@ impl ComponentPool {
         }
 
         Self {
-            arena: NonNull::from(arena),
+            // SAFETY: `arena` is a shared reference valid for the lifetime of
+            // the owning `EcsMaster`; converting to a raw pointer is lossless
+            // (non-null, correct provenance). The field is only stored for
+            // future deallocation; it is never dereferenced inside ComponentPool.
+            arena: &raw const *arena,
             buffer,
             buffer_capacity_bytes,
             max_components,

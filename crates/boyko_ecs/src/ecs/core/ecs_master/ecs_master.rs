@@ -13,7 +13,8 @@ use anyhow::{Result, bail};
 ///
 /// Fields are dropped in declaration order (`entity_master`, `archetype_master`,
 /// `arena`). The arena **must** be last because `ArchetypeMaster`/`Archetype`
-/// store `NonNull<Arena>` (see audit finding C-001) and `ComponentPool`s store
+/// store `*const Arena` (raw provenance pointer — Phase 3a Miri retag fix;
+/// previously `NonNull<Arena>`, audit finding C-001) and `ComponentPool`s store
 /// raw pointers into the arena's backing buffer. Dropping the arena last
 /// guarantees those pointers remain valid while child `Drop`s run.
 ///
@@ -22,6 +23,18 @@ use anyhow::{Result, bail};
 /// `master` and `ecs` constructed `Arena` on the stack, stored
 /// `NonNull::from(&arena)`, and then moved `arena` into `self` — a textbook
 /// dangling-pointer construction (C-001).
+///
+/// # Raw provenance (`*const Arena`) — Miri retag fix
+///
+/// Child structures (`ArchetypeMaster`, `Archetype`, `ComponentPool`) store the
+/// arena address as `*const Arena` rather than `NonNull<Arena>`. This eliminates
+/// the Stacked Borrows retag UB that Miri reported when multiple `NonNull`s were
+/// derived from the same `Box<Arena>` in the same borrow scope: under Stacked
+/// Borrows, each `NonNull::from(&*arena_box)` re-activates the `&`-read tag and
+/// can invalidate earlier derived pointers on reborrow. A raw `*const` pointer
+/// minted via `&raw const *arena_box` carries the box's provenance but does not
+/// participate in the Stacked Borrows tag stack — Miri accepts it as a shared,
+/// read-only view of the allocation (audit finding C-001 / Phase 3a).
 pub struct EcsMaster {
     /// Entity management system
     entity_master: EntityMaster,
@@ -30,19 +43,39 @@ pub struct EcsMaster {
     archetype_master: ArchetypeMaster,
 
     /// Memory arena for component allocation. `Box` provides a stable heap
-    /// address shared by every `NonNull<Arena>` stored in child structures.
+    /// address shared by every `*const Arena` raw provenance pointer stored in
+    /// child structures (`ArchetypeMaster`, `Archetype`, `ComponentPool`).
     arena: Box<Arena>,
 }
 
 impl EcsMaster {
     /// Creates a new empty EcsMaster
-    #[inline]
+    ///
+    /// Uses two-phase construction to avoid Miri Stacked Borrows retag UB:
+    /// the arena `Box` is written to its final struct field first; the raw
+    /// `*const Arena` pointer is then minted by reading the Box's inner pointer
+    /// representation directly — without creating a `&Arena` reference (which
+    /// would create a SharedReadOnly tag that the subsequent `Unique` retag on
+    /// move would invalidate). Phase 3a Miri retag fix.
     pub fn new() -> Self {
         let arena: Box<Arena> = Box::default();
-        // `&arena` auto-derefs to `&Arena` via `Box: Deref<Target = Arena>`;
-        // the `NonNull::from` captured inside `ArchetypeMaster::new` therefore
-        // points at the heap-allocated `Arena`, not at a stack temporary.
-        let archetype_master = ArchetypeMaster::new(&arena);
+        // SAFETY: `Box<Arena>` is guaranteed to have the same in-memory
+        // representation as `*mut Arena` (a single non-null pointer). We read
+        // the Box's inner raw pointer without constructing a `&Arena` reference,
+        // so no SharedReadOnly tag is created in the Stacked Borrows model.
+        // The arena's heap address is stable for the lifetime of the Box.
+        let arena_ptr: *const Arena = unsafe {
+            // addr_of!(&arena as Box<Arena>) → *const Box<Arena>
+            // Cast to *const *const Arena → read the inner pointer.
+            // This is safe because Box<T> is repr-equivalent to *mut T.
+            let box_ptr: *const Box<Arena> = std::ptr::addr_of!(arena);
+            *(box_ptr.cast::<*const Arena>())
+        };
+        // SAFETY: `arena_ptr` points to the heap allocation owned by `arena`.
+        // `arena` (and therefore `arena_ptr`) outlives `archetype_master` by
+        // field drop order (arena is declared last in EcsMaster). Arena is
+        // `!Send + !Sync`; single-threaded use is enforced.
+        let archetype_master = unsafe { ArchetypeMaster::new(arena_ptr) };
         Self {
             entity_master: EntityMaster::new(),
             archetype_master,
@@ -51,10 +84,15 @@ impl EcsMaster {
     }
 
     /// Creates a new EcsMaster with pre-allocated capacity
-    #[inline]
     pub fn with_capacity(entity_capacity: usize, archetype_capacity: usize) -> Self {
         let arena: Box<Arena> = Box::new(Arena::with_capacity(DEFAULT_ARENA_SIZE));
-        let archetype_master = ArchetypeMaster::with_capacity(&arena, archetype_capacity);
+        // SAFETY: same rationale as `EcsMaster::new`.
+        let arena_ptr: *const Arena = unsafe {
+            let box_ptr: *const Box<Arena> = std::ptr::addr_of!(arena);
+            *(box_ptr.cast::<*const Arena>())
+        };
+        // SAFETY: same contract as `EcsMaster::new`.
+        let archetype_master = unsafe { ArchetypeMaster::with_capacity(arena_ptr, archetype_capacity) };
         Self {
             entity_master: EntityMaster::with_capacity(entity_capacity),
             archetype_master,

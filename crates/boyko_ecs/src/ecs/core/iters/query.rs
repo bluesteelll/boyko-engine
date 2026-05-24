@@ -243,7 +243,17 @@ mod tests {
     fn setup_test_archetypes() -> (ArchetypeMaster, Box<Arena>) {
         register_mock_components();
         let arena: Box<Arena> = Box::default();
-        let mut master = ArchetypeMaster::new(&arena);
+        // Mint the raw arena pointer from the Box's inner representation without
+        // creating a `&Arena` reference (Stacked Borrows safe). See
+        // `EcsMaster::new` for the full rationale (Phase 3a Miri retag fix).
+        // SAFETY: `Box<Arena>` is repr-equivalent to `*mut Arena`; reading the
+        // Box field as `*const Arena` gives the stable heap address. `arena`
+        // is dropped after `master` (tuple drop: master is field 0, arena field 1).
+        let arena_ptr: *const Arena = unsafe {
+            let box_ptr: *const Box<Arena> = std::ptr::addr_of!(arena);
+            *(box_ptr.cast::<*const Arena>())
+        };
+        let mut master = unsafe { ArchetypeMaster::new(arena_ptr) };
 
         // Create some test archetypes
         master.create_archetype(&[Position::component_id()]);
