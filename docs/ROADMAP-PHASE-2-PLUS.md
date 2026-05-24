@@ -219,17 +219,27 @@ against edge cases, future refactors, and adversarial inputs.
 |----|------|-------|-----------------|
 | **Q-008** | `core/iters/sparse_iter.rs`, `memory/multi_pool_sparse_iter.rs`, `memory/sparse_iter_component_pool.rs`, `core/containers/*` | Orphan files: not in `mod.rs`, have compile errors when included, documented as "✅ implemented" in `FEATURE_MAP.md` | ✅ **DONE — Phase 2c** (2026-05-24): all 4 orphan files deleted, `memory/iterators.rs` stub removed, `pub mod iterators;` unwired from `memory/mod.rs`, `FEATURE_MAP.md` / `SYSTEMS.md` / `ARCHITECTURE.md` corrected. Per-entity iter replacement tracked as Phase 2d (see below). |
 | **Q-009** | `SparseIter::next_raw` recursive call without TCO | Stack overflow risk on 10k+ empty archetypes | ✅ **closed by Phase 2c** (orphan deleted) — subsumed by Phase 2d (loop-based design required from the start). |
-| **M-010** | `boyko_utils/bit_mask/{bit_mask, bit_set512, bit_storage}.rs` fully `/* commented out */` | 1000+ lines dead code; `SYSTEMS.md` claims they exist | **Product decision**: uncomment + integrate, OR delete |
+| **M-010** | `boyko_utils/bit_mask/{bit_mask, bit_set512, bit_storage}.rs` fully `/* commented out */` | 1000+ lines dead code; `SYSTEMS.md` claims they exist | ✅ **DONE — Phase 5b** (2026-05-24): 3 files (1080 LOC) deleted; `mod bit_storage;` unwired. Consistent with Q-008 / Q-024 / Q-025 cleanups. |
 
 ### Phase 2d — Per-entity query iter (Q-026 + Q-008-replacement)
 
-**Status**: open — design pending.
+**Status**: ✅ **DONE (bounded)** — Phase 2d core landed 2026-05-24. Two read-only methods on `Query<'a>` ship:
 
-| ID | Site | Issue | Solution direction |
-|----|------|-------|--------------------|
-| **Q-026** | `Query::iter()` returns matched archetypes, not per-entity tuples | Users must walk archetypes + index pools manually; no `(&T, &U)`-style API | Design `Query::<(&T, &U)>::iter()` (Bevy `WorldQuery` shape): zero-alloc per row (stack array of `*mut u8` sized by tuple length), loop traversal (no recursion), integrate with `QueryState` cache from Phase 2a, typed tuple adapter via variadic generics (up to N=12 like Bevy). Cycle: researcher → architect → critic → developer → tester → results-analyst. |
+  - `iter_one<A: Component>() -> QueryIterOne<'_, A>` yielding `&A`
+  - `iter_two<A, B: Component>() -> QueryIterTwo<'_, A, B>` yielding `(&A, &B)`
 
-**Why a separate phase, not "fix the orphans"**: the deleted orphan files had four fundamental issues that would require a full rewrite anyway — per-entity heap alloc (`Box<[ComponentPtr]>`), recursive `next_raw` (stack overflow risk), no integration with `QueryState`, four undefined typed-adapter types. Starting clean is cheaper than salvage.
+Zero-alloc per row (pointer-bump cursors + `remaining` counter), archetype-major order, loop-based (no recursion). Reuses `QueryState::matched_ids()` cache from Phase 2a. Six new tests in `query.rs` lock down the contract. `ComponentPool::buffer_ptr()` accessor added with SAFETY contract.
+
+**Open (Phase 2d-extension, separate tickets):**
+
+| Subticket | Scope | Notes |
+|-----------|-------|-------|
+| `iter_one_mut` / `iter_two_mut` | Mutable variants | Needs aliasing-discipline rework — `&mut` references can't be juggled the same way as `&` in the pointer-bump pattern; will need either internal-only `*mut` + lifetime gymnastics, or splitborrow per row. |
+| Arities ≥ 3 | `iter_three`, `iter_four`, ... up to N=8 or N=12 | Mechanical extension of the 2-arity template; can be either a macro-emitted family or a generic `Fetch` trait. |
+| `Query::iter::<(&T, &U)>` | Generic tuple-trait pattern (Bevy `WorldQuery` / hecs `Fetch`) | Replaces the named-arity methods with a unified entry. Requires variadic-tuple trait impls. Likely Phase 2d-final once arities and mut variants settle. |
+| Per-entity change-detection / filter combinators | `With<T>`, `Without<T>`, `Changed<T>` | Out of Phase 2d entirely — depends on Phase 3+ change-detection infrastructure. |
+
+**Why bounded first step**: get the user-visible API in front of consumers immediately at 2-arity (covers the vast majority of `(Position, Velocity)`-style game loops), then iterate on the trait machinery without blocking real usage. The pointer-bump skeleton is the load-bearing piece; mut/arity extensions are mechanical follow-ons.
 
 **Effort estimate**: Q-009 is 30 minutes. Q-008 + M-010 each block
 on a product decision; once decided, 1-3 sessions depending on
@@ -241,12 +251,11 @@ direction.
 
 | ID | Site | Issue | Solution direction |
 |----|------|-------|--------------------|
-| **Q-024** | `containers/tuple/` (removed) | Orphan 0-byte stubs `component_tuple.rs` + `component_tuple_trait.rs` were never wired into `mod.rs`; removed in Q-024 cleanup | Design `ComponentTuple`: a type-safe tuple wrapper that maps to `ComponentId` bundles, enabling ergonomic `world.spawn((Position { .. }, Velocity { .. }))` API without raw byte slices. Depends on Phase 2d (`(&T, &U)` tuple generics are shared infrastructure). Cycle: researcher → architect → critic → developer → tester → results-analyst. |
+| **Q-024** | `containers/tuple/` (removed) | Orphan 0-byte stubs `component_tuple.rs` + `component_tuple_trait.rs` were never wired into `mod.rs`; removed in Q-024 cleanup | Design `ComponentTuple`: a type-safe tuple wrapper that maps to `ComponentId` bundles, enabling ergonomic `world.spawn((Position { .. }, Velocity { .. }))` API without raw byte slices. Mirror Phase 2d's bounded approach: ship `spawn_one<A>(arch_id, A)` and `spawn_two<A, B>(arch_id, (A, B))` first, generalize via tuple trait later. Cycle: researcher → architect → critic → developer → tester → results-analyst. |
 
-**Dependency**: Phase 2d (per-entity query iter) — both features rely on tuple-over-generics
-infrastructure (variadic trait impls up to N=12). Design them in the same architect cycle.
+**Dependency**: same tuple-over-generics infrastructure as Phase 2d. The current bounded `iter_one` / `iter_two` could be left as-is; Phase 2e adds parallel `spawn_one` / `spawn_two` for symmetry.
 
-**Effort estimate**: 1-2 sessions after Phase 2d is implemented.
+**Effort estimate**: 1 bounded session for 1-2 arity, 1 more if generalizing the trait.
 
 ### Phase 3c — Unit / pool internals (3 findings)
 
@@ -286,13 +295,19 @@ touches many call sites).
 
 ### Phase 4b — Event system review (2 findings)
 
-| ID | Site | Question | Approach |
-|----|------|----------|----------|
-| **Q-020** | `Participants` and `Parameters` split — overengineered? | Architectural decision: keep split (current design — addressed via Q-001 native nested fields) OR collapse into single Event type (Bevy style). After Q-001 lands, evaluate. |
-| **Q-019** | `ParticipantBuffer::get<P>` lacks TypeId check | Store `TypeId` in buffer alongside `participant_size`; `debug_assert_eq!` in `get`; consider `assert!` if cheap. Deferred here from Q-001 (Phase 1b-finish) — the buffer storage migration to `Vec<MaybeUninit<u8>>` was the precondition. |
+| ID | Site | Question | Approach | Status |
+|----|------|----------|----------|--------|
+| **Q-020** | `Participants` and `Parameters` split — overengineered? | Architectural decision: keep split (current design — addressed via Q-001 native nested fields) OR collapse into single Event type (Bevy style). | **DEFERRED** — see decision note below. |
+| **Q-019** | `ParticipantBuffer::get<P>` lacks TypeId check | Store `TypeId` in buffer alongside `participant_size`; `debug_assert_eq!` in `get`. | ✅ **DONE — Phase 4a** (2026-05-24): both `ParticipantBuffer` and `ParametersBuffer` carry `TypeId` and `debug_assert_eq!` on typed access. 8 new tests cover correct round-trip and wrong-type panics. |
 
-**Effort estimate**: Q-020 is a design discussion (no code).
-Q-019 is 1 session.
+**Q-020 deferral rationale (2026-05-24)**: the split survives because Q-001 already made it sound (native nested fields, no UB cast) and Q-019 already guards type confusion. The audit's "overengineered" framing assumed a Bevy-style subscriber model where events filter by participant set at dispatch time — `boyko_ecs` does not implement that filtering today and has no committed timeline for it (event dispatch / subscriber registration are not in any open phase). Collapsing the split now would buy zero functional simplification on the consumer side while costing:
+  - one breaking macro change (`#[event]` would have to be rewritten or replaced)
+  - migration of every `Event::Participants` / `Event::Parameters` assoc-type consumer
+  - documentation churn across `SYSTEMS.md` and the public mdBook
+
+Reopen this ticket the moment a real use case for participant-filtered dispatch appears (or a competing audit demands it). Until then, the current design is preserved without further work.
+
+**Effort estimate**: Phase 4b closed (Q-019 done, Q-020 deferred-by-decision).
 
 ### Phase 4c — Remaining type-erasure hardening (1 finding)
 
@@ -413,9 +428,21 @@ repository is in English. Chat with the user is in Russian. This
 applies to roadmaps, audit reports, commit messages, doc-comments,
 inline comments, SAFETY blocks, panic messages, expect strings.
 
-`docs/AUDIT-2026-05-23.md` and `book/src/*` are still Russian
-(deferred translation, task #36). Translate inline as findings get
-closed (e.g., when finishing Q-001, translate audit § Q-001 paragraph).
+`docs/AUDIT-2026-05-23.md` and `book/src/*` remain Russian by intentional decision (task #36):
+
+  - `AUDIT-2026-05-23.md` is a **historical snapshot** of the codebase on the
+    audit date. Translating it would mutate the historical record. Per-finding
+    translations are integrated into the matching closure commit's message
+    (in English), so a reader following an audit ID has English context at
+    each fix's commit. The original Russian audit stays as the authentic
+    source-of-truth document.
+  - `book/src/*` is public-facing mdBook content. Its eventual English
+    translation is the `doc-writer` agent's responsibility once the public
+    API stabilises (the surface still shifts every phase — translating now
+    means re-translating after every API rename). Tracked as a single
+    follow-up batch task rather than a per-page deferment.
+
+Neither blocks `ecs` correctness or CI. Status: **intentionally deferred** until either (a) `doc-writer` is dispatched explicitly for the book pass, or (b) the audit reaches "archived / closed" status.
 
 ### Git policy
 - Commits authored by `Celtokisa <bluesteelll@hotmail.com>` only.
