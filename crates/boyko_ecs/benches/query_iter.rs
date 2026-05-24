@@ -103,12 +103,12 @@ fn build_query_ecs(n: usize) -> EcsMaster {
         // Entity in Pos+Vel archetype
         ecs.create_entity(
             arch_pos_vel,
-            vec![(QBENCH_POS_ID, pos_bytes), (QBENCH_VEL_ID, vel_bytes)],
+            &[(QBENCH_POS_ID, pos_bytes), (QBENCH_VEL_ID, vel_bytes)],
         )
         .expect("create_entity Pos+Vel must succeed");
 
         // Entity in Pos-only archetype
-        ecs.create_entity(arch_pos, vec![(QBENCH_POS_ID, pos_bytes)])
+        ecs.create_entity(arch_pos, &[(QBENCH_POS_ID, pos_bytes)])
             .expect("create_entity Pos must succeed");
     }
 

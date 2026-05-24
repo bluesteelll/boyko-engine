@@ -117,8 +117,9 @@ impl EcsMaster {
 
     /// Creates a new entity with components in the specified archetype.
     ///
-    /// Takes a slice of (ComponentId, &[u8]) pairs for component data.
-    /// Returns the created entity if successful.
+    /// Takes a borrowed slice of `(ComponentId, &[u8])` pairs for component data —
+    /// zero allocation per call on the components argument. Returns the created
+    /// entity if successful.
     ///
     /// # Guard pattern (C-007)
     ///
@@ -128,10 +129,12 @@ impl EcsMaster {
     /// 2. Only then is `allocate_entity` called.
     /// 3. If `create_entity` fails, `rewind_allocate` undoes the allocation
     ///    (fresh-ID path) so the ID is not silently wasted.
+    ///
+    /// Audit: C-010 — switched from Vec to &[...].
     pub fn create_entity(
         &mut self,
         archetype_id: ArchetypeId,
-        components: Vec<(ComponentId, &[u8])>,
+        components: &[(ComponentId, &[u8])],
     ) -> Result<Entity> {
         // Guard: validate archetype exists BEFORE allocating an EntityId.
         // Previously, allocate_entity() was called first, and if the archetype
@@ -486,7 +489,7 @@ mod tests {
             std::slice::from_raw_parts(&vel as *const _ as *const u8, std::mem::size_of::<Velocity>())
         };
         
-        let entity1 = ecs.create_entity(archetype_id, vec![
+        let entity1 = ecs.create_entity(archetype_id, &[
             (POSITION_ID, pos_bytes),
             (VELOCITY_ID, vel_bytes),
         ]).unwrap();
@@ -513,12 +516,12 @@ mod tests {
         // Create entities (simplified - using dummy data)
         let dummy_bytes = [0u8; 64];
 
-        let _entity1 = ecs.create_entity(arch1, vec![
+        let _entity1 = ecs.create_entity(arch1, &[
             (POSITION_ID, &dummy_bytes[..12]),
             (VELOCITY_ID, &dummy_bytes[..12]),
         ]).unwrap();
 
-        let _entity2 = ecs.create_entity(arch2, vec![
+        let _entity2 = ecs.create_entity(arch2, &[
             (POSITION_ID, &dummy_bytes[..12]),
             (HEALTH_ID, &dummy_bytes[..4]),
         ]).unwrap();
@@ -551,7 +554,7 @@ mod tests {
         let dummy_bytes = [0u8; 12];
 
         // Attempt to create an entity in archetype 999 (never created).
-        let result = ecs.create_entity(999, vec![(POSITION_ID, &dummy_bytes)]);
+        let result = ecs.create_entity(999, &[(POSITION_ID, &dummy_bytes)]);
         assert!(result.is_err(), "should fail for unknown archetype");
 
         // No EntityId must have been allocated: next fresh id stays at 0.
@@ -572,7 +575,7 @@ mod tests {
         let dummy_bytes = [0u8; 12];
 
         for _ in 0..5 {
-            let _ = ecs.create_entity(42, vec![(POSITION_ID, &dummy_bytes)]);
+            let _ = ecs.create_entity(42, &[(POSITION_ID, &dummy_bytes)]);
         }
 
         // After 5 failed guard calls the fresh-id counter must still be 0.
@@ -595,7 +598,7 @@ mod tests {
         let vel_bytes = [0u8; 12];
 
         // Create and immediately delete an entity.
-        let entity = ecs.create_entity(arch, vec![
+        let entity = ecs.create_entity(arch, &[
             (POSITION_ID, &pos_bytes),
             (VELOCITY_ID, &vel_bytes),
         ]).unwrap();
@@ -603,7 +606,7 @@ mod tests {
         assert_eq!(ecs.recycled_entity_count(), 1);
 
         // A guard-failing call must not touch the free list.
-        let _ = ecs.create_entity(999, vec![(POSITION_ID, &pos_bytes)]);
+        let _ = ecs.create_entity(999, &[(POSITION_ID, &pos_bytes)]);
         assert_eq!(ecs.recycled_entity_count(), 1,
             "free list must not be consumed when guard fires before allocate_entity");
         assert_eq!(ecs.entity_count(), 0);
@@ -651,7 +654,7 @@ mod tests {
             std::slice::from_raw_parts(&vel as *const _ as *const u8, std::mem::size_of::<Velocity>())
         };
 
-        let entity = ecs.create_entity(arch, vec![
+        let entity = ecs.create_entity(arch, &[
             (POSITION_ID, pos_bytes),
             (VELOCITY_ID, vel_bytes),
         ]).unwrap();

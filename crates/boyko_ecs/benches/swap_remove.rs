@@ -72,7 +72,7 @@ fn build_ecs(n: usize) -> (EcsMaster, Vec<boyko_ecs::ecs::core::entity::entity::
         };
 
         let entity = ecs
-            .create_entity(arch_id, vec![(BENCH_POS_ID, pos_bytes), (BENCH_VEL_ID, vel_bytes)])
+            .create_entity(arch_id, &[(BENCH_POS_ID, pos_bytes), (BENCH_VEL_ID, vel_bytes)])
             .expect("create_entity must succeed in bench setup");
         entities.push(entity);
     }

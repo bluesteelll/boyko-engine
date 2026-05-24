@@ -65,7 +65,7 @@ fn ecs_master_new_then_box_arena_addr_stable() {
 
     // create_entity uses the arena to add components — would crash/UB if arena ptr dangled.
     let entity = ecs
-        .create_entity(arch_id, vec![(DROP_POSITION_ID, pos_bytes), (DROP_VELOCITY_ID, vel_bytes)])
+        .create_entity(arch_id, &[(DROP_POSITION_ID, pos_bytes), (DROP_VELOCITY_ID, vel_bytes)])
         .expect("create_entity must succeed with a stable arena pointer");
 
     assert!(ecs.has_entity(entity), "entity must be valid after creation");

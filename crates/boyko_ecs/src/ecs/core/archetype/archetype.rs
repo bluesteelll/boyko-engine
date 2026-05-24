@@ -166,10 +166,13 @@ impl Archetype {
         self.current_index
     }
 
-    /// Creates a new entity in this archetype with the given components
-    /// Takes a reference to EntityInland and a vector of (component_id, component_bytes) pairs
-    /// Updates the EntityInland with the unit index of the new entity
-    pub fn create_entity(&mut self, entity_id: EntityId, inland: &mut EntityInland, components: Vec<(ComponentId, &[u8])>) -> bool {
+    /// Creates a new entity in this archetype with the given components.
+    ///
+    /// Takes a borrowed slice of `(ComponentId, &[u8])` pairs — zero allocation
+    /// on the caller side. Updates `inland` with the unit index of the new entity.
+    ///
+    /// Audit: C-010 — switched from Vec to &[...].
+    pub fn create_entity(&mut self, entity_id: EntityId, inland: &mut EntityInland, components: &[(ComponentId, &[u8])]) -> bool {
         debug_assert_eq!(inland.archetype_id(), self.id, 
             "EntityInland archetype_id mismatch");
         
@@ -177,7 +180,7 @@ impl Archetype {
         // that the archetype signature is a subset in O(8 u64 ops).
         // This replaces the previous O(N*M) nested scan.
         let mut input_mask = ComponentMask::new();
-        for (id, _) in &components {
+        for (id, _) in components {
             debug_assert!(
                 *id < MAX_COMPONENTS,
                 "component_id {} >= MAX_COMPONENTS ({})", *id, MAX_COMPONENTS
@@ -198,11 +201,11 @@ impl Archetype {
         
         // Two-phase commit (C-009): validate all pools have capacity before
         // writing any, so a full-pool failure cannot leave pools desynced.
-        if !self.component_pools.can_push_entity_components(&components) {
+        if !self.component_pools.can_push_entity_components(components) {
             return false;
         }
 
-        let unit_index = self.component_pools.push_entity_components(&components);
+        let unit_index = self.component_pools.push_entity_components(components);
         
         // Update the inland reference with the unit index
         inland.set_unit_index(unit_index);
@@ -418,11 +421,10 @@ mod tests {
         arch.init_entity_inland(&mut inland);
         let bytes_a = vec![0u8; component_registry::get_component_size(COMP_A).unwrap()];
         let bytes_b = vec![0u8; component_registry::get_component_size(COMP_B).unwrap()];
-        let components = vec![
+        let ok = arch.create_entity(entity_id, &mut inland, &[
             (COMP_A, bytes_a.as_slice()),
             (COMP_B, bytes_b.as_slice()),
-        ];
-        let ok = arch.create_entity(entity_id, &mut inland, components);
+        ]);
         assert!(ok, "create_entity must succeed in setup helper");
         inland
     }
@@ -461,8 +463,7 @@ mod tests {
         arch.init_entity_inland(&mut inland);
         // Provide only COMP_A, omit COMP_B.
         let bytes_a = vec![0u8; component_registry::get_component_size(COMP_A).unwrap()];
-        let components = vec![(COMP_A, bytes_a.as_slice())];
-        let ok = arch.create_entity(10, &mut inland, components);
+        let ok = arch.create_entity(10, &mut inland, &[(COMP_A, bytes_a.as_slice())]);
         assert!(!ok, "create_entity must return false when a component is missing");
     }
 
@@ -730,12 +731,11 @@ mod tests {
             let sz_c = component_registry::get_component_size(412).unwrap();
             let bytes_c = vec![0u8; sz_c];
 
-            let components = vec![
+            let ok = arch.create_entity(200, &mut inland, &[
                 (C16_A, bytes_a.as_slice()),
                 (C16_B, bytes_b.as_slice()),
                 (412usize, bytes_c.as_slice()), // extra: not in archetype pools
-            ];
-            let ok = arch.create_entity(200, &mut inland, components);
+            ]);
             // In release: bundle returns None for the unknown ID → create_entity returns false.
             assert!(!ok, "create_entity must return false when bundle cannot accept the extra ID");
         }));
@@ -763,7 +763,7 @@ mod tests {
             .map(|&id| (id, bytes.as_slice()))
             .collect();
 
-        let ok = arch.create_entity(300, &mut inland, components);
+        let ok = arch.create_entity(300, &mut inland, &components);
         assert!(ok, "create_entity must succeed for 8-component archetype");
         assert_eq!(arch.entity_count(), 1);
     }

@@ -67,7 +67,7 @@ fn bench_archetype_create_entity_8c(c: &mut Criterion) {
                     let slices: Vec<(ComponentId, &[u8])> = components.iter()
                         .map(|(id, v)| (*id, v.as_slice()))
                         .collect();
-                    let ok = arch.create_entity(entity_id, &mut inland, slices);
+                    let ok = arch.create_entity(entity_id, &mut inland, &slices);
                     black_box(ok);
                 }
                 black_box(arch);
@@ -105,7 +105,7 @@ fn bench_archetype_create_entity_16c(c: &mut Criterion) {
                     let slices: Vec<(ComponentId, &[u8])> = components.iter()
                         .map(|(id, v)| (*id, v.as_slice()))
                         .collect();
-                    let ok = arch.create_entity(entity_id, &mut inland, slices);
+                    let ok = arch.create_entity(entity_id, &mut inland, &slices);
                     black_box(ok);
                 }
                 black_box(arch);
