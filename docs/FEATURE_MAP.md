@@ -4,10 +4,11 @@ First point of contact for agents. When looking for where a particular piece of 
 
 **Legend:**
 - ✅ Implemented
-- ⚠️ Implemented, but has issues / build does not pass
+- ⚠️ Implemented, but with known caveats
 - 📋 Planned, not yet written
+- ❌ Not implemented (with reason / tracking link)
 
-> ⚠️ The branch build is currently broken. Most features are implemented in code, but can't be run until the build is fixed.
+> The `ecs` branch builds clean, passes 210+ tests, and is Miri-verified. See `docs/SYSTEMS.md` §13 for the full gate report.
 
 ---
 
@@ -20,7 +21,7 @@ First point of contact for agents. When looking for where a particular piece of 
 | Find best-fit free block | [memory/free_mem_block.rs](../crates/boyko_ecs/src/ecs/memory/free_mem_block.rs) ✅ | `MemFreeBlockMaster::find_best_fit` |
 | Return memory to the pool | [memory/free_mem_block.rs](../crates/boyko_ecs/src/ecs/memory/free_mem_block.rs) ✅ | `MemFreeBlockMaster::insert` (with automatic merging) |
 | Align an address/size | [memory/utils.rs](../crates/boyko_ecs/src/ecs/memory/utils.rs) ✅ | `align_up(value, alignment)` |
-| Free the arena | — ⚠️ | `impl Drop for Arena` **is missing** (leak) |
+| Free the arena | [memory/arena.rs](../crates/boyko_ecs/src/ecs/memory/arena.rs) ✅ | `impl Drop for Arena` (M-001 closed) |
 | Defragment the free-block list | [memory/free_mem_block.rs](../crates/boyko_ecs/src/ecs/memory/free_mem_block.rs) ✅ | `MemFreeBlockMaster::defragment` |
 | Get memory statistics | [memory/free_mem_block.rs](../crates/boyko_ecs/src/ecs/memory/free_mem_block.rs) ✅ | `MemFreeBlockMaster::get_memory_stats` |
 
@@ -234,13 +235,13 @@ First point of contact for agents. When looking for where a particular piece of 
 
 | What | Where |
 |------|-------|
-| Unit tests | ⚠️ only present in [entity_master.rs](../crates/boyko_ecs/src/ecs/core/entity/entity_master.rs) (4 tests). Coverage is minimal. |
+| Unit tests | ✅ workspace-wide: 161 lib + 40 integration + 9 utils + 4 ignored stress = 210+ tests. Coverage spans entity/archetype lifecycle, query state, drop glue, ABA prevention, type-id guards, error variants. |
 | Integration tests | 📋 **missing** — target: `crates/boyko_ecs/tests/*.rs` |
 | Benchmarks | 📋 **missing** — target: `crates/boyko_ecs/benches/*.rs` (via `criterion`) |
 | Loom tests for lock-free | 📋 **missing** |
 | Property-based (proptest) | 📋 **missing** |
 
-⚠️ **Running any tests is currently impossible — the build does not pass.**
+All tests run clean under `cargo test --workspace`. Miri verification (`cargo +nightly miri test --package boyko-ecs --lib`) also passes — confirms Stacked Borrows soundness of the arena-pointer scheme (Phase 3a fix).
 
 ---
 

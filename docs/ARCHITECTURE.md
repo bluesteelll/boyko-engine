@@ -237,12 +237,12 @@ These numbers are targets. No benchmarks exist yet.
 |--------|--------|-----|
 | ComponentPool | `ComponentPool<T: Component>` (generic) | type-erased + `ComponentRegistry` |
 | Chunk | `Chunk<T>` stores data | `Chunk` — metadata only (start_index, capacity, dirty) |
-| Addressing | `UnitId { chunk: u32, inland: u32 }` | `Unit { ptr: *mut u8, buffer_index: usize }` |
-| Entity ID | `u32` + generation `u16` | `usize` + generation `usize` |
-| EntityMaster | ⚠️ missing | ✅ with recycling |
+| Addressing | `UnitId { chunk: u32, inland: u32 }` | `Unit { ptr: *mut u8 }` (`#[repr(transparent)]`, M-005 / M-006 closed) |
+| Entity ID | `u32` + generation `u16` | newtype `EntityId(usize)` + generation `usize` (C-017 closed) |
+| EntityMaster | ⚠️ missing | ✅ with recycling + O(active) iter |
 | Archetype | ⚠️ empty stub file | ✅ full implementation |
-| EcsMaster | ⚠️ empty stub file | ✅ present, uses anyhow |
-| Query | ⚠️ missing | ✅ present |
-| Event subsystem | ⚠️ missing | ✅ present (with Participants + Parameters) |
-| boyko_utils | ⚠️ missing | ✅ present (BitSet, SparseMap, Slot) |
-| Build | ✅ builds | ❌ does not compile |
+| EcsMaster | ⚠️ empty stub file | ✅ present, returns domain `EcsResult` (C-019 closed) |
+| Query | ⚠️ missing | ✅ archetype-level cached query; per-entity `Query::<(&T, &U)>::iter()` is Phase 2d-open |
+| Event subsystem | ⚠️ missing | ✅ present (with Participants + Parameters; TypeId-guarded buffers per Q-019) |
+| boyko_utils | ⚠️ missing | ✅ present (BitSet, SparseMap, SparseSlotMap with M-016 ABA fix, Slot) |
+| Build | ✅ builds | ✅ builds clean (check + clippy + test + miri all green) |

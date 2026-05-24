@@ -4,10 +4,10 @@ Reference for every subsystem, listing code locations, key types, methods, and i
 
 **Status legend:**
 - ✅ Implemented
-- ⚠️ Present, but with issues / incomplete / does not compile
+- ⚠️ Present, but with issues / incomplete
 - 📋 Planned
 
-> ⚠️ The `ecs` branch currently **does not compile**. The descriptions below reflect both the intent and the actual code, but running/testing is blocked by the build.
+> The `ecs` branch builds clean (`cargo check --all-targets`, `cargo clippy --all-targets -- -D warnings`), passes 210+ tests (workspace), and is verified UB-free under Miri. Previous "does not compile" warnings refer to the historical state before Phase 1a — see `docs/AUDIT-2026-05-23.md` for the chronology and `docs/ROADMAP-PHASE-2-PLUS.md` for what remains open.
 
 ---
 
@@ -18,19 +18,30 @@ Reference for every subsystem, listing code locations, key types, methods, and i
 - [crates/boyko_utils/src/identifiers/primitives.rs](../crates/boyko_utils/src/identifiers/primitives.rs)
 - [crates/boyko_utils/src/identifiers/slot.rs](../crates/boyko_utils/src/identifiers/slot.rs)
 
-All IDs are unified as `usize`:
+All IDs except `Generation` are `#[repr(transparent)] pub struct X(pub usize)`
+newtypes (audit C-017 closed — Phase 4b). Zero runtime cost, but the compiler
+refuses to mix them (e.g. `archetype.has_component_id(entity.id())` is a
+type error now).
 ```rust
-pub type EntityId            = usize;
-pub type ArchetypeId         = usize;
-pub type ChunkId             = usize;
-pub type InlandChunkId       = usize;
-pub type ComponentId         = usize;
-pub type InlandUnitId        = usize;
-pub type InlandPoolId        = usize;
-pub type InlandComponentId   = usize;
-pub type InlandArchetypeId   = usize;
-pub type Generation          = usize;
+// generated via the `define_id!` macro in identifiers/primitives.rs:
+pub struct EntityId(pub usize);
+pub struct ArchetypeId(pub usize);
+pub struct ChunkId(pub usize);
+pub struct InlandChunkId(pub usize);
+pub struct ComponentId(pub usize);
+pub struct InlandUnitId(pub usize);
+pub struct InlandPoolId(pub usize);
+pub struct InlandComponentId(pub usize);
+pub struct InlandArchetypeId(pub usize);
+
+// kept as a plain alias — only ever paired with EntityId inside Entity,
+// never crossed with another ID type:
+pub type Generation = usize;
 ```
+Each newtype: `#[repr(transparent)]`, derives `Debug, Default, Clone, Copy,
+PartialEq, Eq, Hash, PartialOrd, Ord`, `const fn new(usize)` + `const fn
+get(self) -> usize`, `From<usize>` + `From<Self> for usize`, manual `Display`
+rendering as `EntityId(42)`.
 
 `Slot` (in boyko_utils):
 ```rust
@@ -54,12 +65,15 @@ Same as on master — a 64 MB pre-allocated arena with `MemFreeBlockMaster` for 
 ```rust
 pub struct Arena {
     ptr: NonNull<u8>,
-    capacity: usize,
-    cursor: UnsafeCell<usize>,         // ⚠️ unused
+    capacity: usize,                   // used for OOB debug-assert (M-008 closed)
     layout: Layout,
     free_blocks: UnsafeCell<MemFreeBlockMaster>,
 }
 ```
+
+`Arena` has an `impl Drop` (M-001 closed) and is stored as `Box<Arena>`
+inside `EcsMaster` so child pointers remain stable across moves (C-001 closed,
+Phase 3a Miri retag fix).
 
 ### 2.2. Chunk (type-erased) ✅
 
@@ -88,7 +102,7 @@ pub struct ComponentPool {
     buffer_capacity_bytes: usize,
     max_components: usize,
     units: Vec<Unit>,                     // densely packed direct pointers
-    pub chunks: Vec<Chunk>,               // metadata for windows into buffer
+    chunks: Vec<Chunk>,                   // private; expose via `chunks()` accessor (C-023 closed)
     components_per_chunk: usize,
     component_id: usize,
     component_layout: Layout,             // size + align from ComponentRegistry
@@ -148,7 +162,7 @@ pub trait Component: 'static + Sized {
 
 `mem_size()` was renamed from `size()` on master.
 
-⚠️ All methods carry `#[inline(always)]`, which triggers a warning in newer Rust versions for required trait methods (see the build notes below).
+Default-method `#[inline]` (cross-crate hint) only. `#[inline(always)]` was demoted workspace-wide in Phase 5a — see CLAUDE.md principle 7.
 
 ### 3.2. ComponentMask
 
@@ -160,7 +174,7 @@ A high-level wrapper over `BitSet512` for the "which components an archetype con
 
 **File:** [crates/boyko_ecs/src/ecs/core/component/component_pool_bundle.rs](../crates/boyko_ecs/src/ecs/core/component/component_pool_bundle.rs)
 
-A collection of type-erased `ComponentPool`s within one archetype (one per `ComponentId`). Has `swap_remove_unit` returning `anyhow::Result<()>`.
+A collection of type-erased `ComponentPool`s within one archetype (one per `ComponentId`). Has `swap_remove_unit` returning `EcsResult<()>` (C-019 closed) and a two-phase `can_push_entity_components` / `push_entity_components` API (C-009 closed).
 
 ### 3.4. ComponentRegistry (global static)
 
@@ -182,7 +196,7 @@ Uses an `AtomicUsize` counter to assign `ComponentId`. Generates:
 - `impl Component for T { fn component_id() -> ComponentId { N } }`
 - Registers the layout in the registry (via `register_layout::<T>(N)`)
 
-⚠️ `ComponentId` is unstable across builds (depends on macro expansion order).
+⚠️ `ComponentId` values are unstable across processes (assigned in first-call order via `register_new::<T>()` — C-003 closed, see component_registry.rs for the startup warm-up contract).
 
 ---
 
@@ -195,11 +209,12 @@ Uses an `AtomicUsize` counter to assign `ComponentId`. Generates:
 ```rust
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Entity {
-    pub id: EntityId,        // usize
-    pub generation: usize,
+    id: EntityId,            // newtype wrapping `usize` (C-017 closed)
+    generation: usize,
 }
 ```
 
+Fields are private (C-023 closed) — access via `Entity::id()` / `Entity::generation()`.
 Implements `From<Slot> + Into<Slot>` for compatibility with sparse collections.
 
 ### 4.2. EntityInland
@@ -304,10 +319,10 @@ API:
 - `with_capacity(entity_capacity, archetype_capacity) -> Self`
 - `create_archetype(component_ids) -> ArchetypeId`
 - `get_or_create_archetype(component_ids) -> ArchetypeId`
-- `create_entity(archetype_id, Vec<(ComponentId, &[u8])>) -> anyhow::Result<Entity>`
+- `create_entity(archetype_id, &[(ComponentId, &[u8])]) -> EcsResult<Entity>` (C-010 / C-019 closed)
 - `delete_entity(entity) -> bool`
 
-⚠️ Uses `anyhow::Result` — debatable for a library API, to be revisited when stabilizing.
+Library API uses the domain-typed `EcsResult` (C-019 closed). Variants today: `ArchetypeNotFound`, `EntityNotFound`, `ComponentPoolFull`, `UnknownComponentForArchetype`, `ArchetypeRejectedEntity`, `PoolSwapRemoveFailed` — see `crates/boyko_ecs/src/ecs/error.rs`. Marked `#[non_exhaustive]` so new variants land without major-version bumps.
 
 ---
 
@@ -519,17 +534,18 @@ Same as on master — see [constants.rs](../crates/boyko_ecs/src/ecs/constants.r
 
 ---
 
-## 13. Current build state ⚠️
+## 13. Current build state ✅
 
-The branch does not compile at the time of writing. The last fix attempt — `299a6b6 Blanket trait impl error fixed` — did not fully work.
+The branch builds clean as of the latest commit. All workspace gates pass:
 
-Known problem spots visible from commits and code:
-- Many `unused import` warnings — in boyko_ecs and boyko_utils
-- `#[inline]` attribute cannot be used on required trait methods — in [component.rs:5](../crates/boyko_ecs/src/ecs/core/component/component.rs) and similar files. This is an **error in newer Rust versions**.
-- `unused variable` in `archetype_registry.rs`, `archetype_master.rs`
-- Possible blanket trait impl collisions (judging by the last commit message)
+- `cargo check --all-targets` — clean
+- `cargo clippy --all-targets -- -D warnings` — clean (no warnings)
+- `cargo test --workspace` — 210 tests pass (161 lib + 40 integration + 9 utils), 4 ignored stress / doctest entries
+- `cargo +nightly miri test --package boyko-ecs --lib` — clean (Phase 3a Miri retag UB fix verified, ~8000 s wall clock on Windows x86_64)
 
-The full list of errors will be collected via `cargo check ecs` (see the TaskList).
+CI (`.github/workflows/ci.yml`) gates check, test, clippy, miri and bench-compile on every push to `ecs`.
+
+Historical "does not compile" warnings refer to the pre-Phase-1a state (audit `docs/AUDIT-2026-05-23.md`, baseline commit before `508398c`). All 89 audit findings are either closed or tracked as deliberate tickets in `docs/ROADMAP-PHASE-2-PLUS.md`.
 
 ---
 
