@@ -652,6 +652,33 @@ impl ComponentPool {
         self.component_layout
     }
 
+    /// Returns the base pointer of the flat component buffer.
+    ///
+    /// The buffer holds `self.count()` initialised components at stride
+    /// `self.component_layout().size()`. Slot `i` starts at
+    /// `buffer_ptr().add(i * size)` and is valid for `size` bytes.
+    ///
+    /// # Safety contract for callers
+    ///
+    /// Callers must ensure:
+    /// 1. The index used to compute an offset is less than `self.count()`,
+    ///    so the slot at that offset was written by `add` / `add_typed` and
+    ///    is fully initialised.
+    /// 2. The type `T` cast from the returned pointer matches the pool's
+    ///    registered type (`component_layout().size() == size_of::<T>()` and
+    ///    `component_layout().align() >= align_of::<T>()`). Use
+    ///    `debug_assert_eq!` on both invariants at the call site.
+    /// 3. No exclusive (`&mut`) access to the pool exists for the duration
+    ///    of the reference derived from this pointer.
+    #[inline]
+    pub fn buffer_ptr(&self) -> *const u8 {
+        // SAFETY: `NonNull::as_ptr` is always non-null. Casting to `*const u8`
+        // drops mutability but the pointer provenance is preserved. This method
+        // only returns the base; dereferencing individual slots is the caller's
+        // responsibility (see safety contract in the doc comment above).
+        self.buffer.as_ptr().cast_const()
+    }
+
     /// Checks if the pool is full.
     #[inline]
     pub fn is_full(&self) -> bool {
