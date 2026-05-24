@@ -329,14 +329,19 @@ impl<E: Event> Drop for EventBuffer<E> {
             // 3. After these drops, the `Box<[MaybeUninit<E>]>`s deallocate their
             //    slice storage naturally; `MaybeUninit` never auto-drops contents, so
             //    this manual drop loop is necessary for `E: Drop`.
-            let len = self.reader_len.load(Ordering::Relaxed) as usize;
+            // 4. Panic-safety (W2 follow-up): each length field is swapped to 0
+            //    BEFORE its drop loop runs. If `E::drop` panics on element `k`,
+            //    further unwinding through this Drop sees length = 0 for the
+            //    remaining lanes/reader and skips them — Rust's no-double-panic
+            //    convention then aborts the process, but no slot is dropped twice.
+            let len = self.reader_len.swap(0, Ordering::Relaxed) as usize;
             unsafe {
                 for i in 0..len {
                     self.reader_buf[i].assume_init_drop();
                 }
             }
             for lane in self.lanes.iter_mut() {
-                let n = lane.writer.write_len.load(Ordering::Relaxed) as usize;
+                let n = lane.writer.write_len.swap(0, Ordering::Relaxed) as usize;
                 unsafe {
                     let box_ptr: *mut Box<[MaybeUninit<E>]> = lane.writer.write_buf.get();
                     let buf_ptr: *mut MaybeUninit<E> = (*box_ptr).as_mut_ptr();

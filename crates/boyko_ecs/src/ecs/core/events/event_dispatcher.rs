@@ -74,9 +74,12 @@ struct EventTypeSlot {
     #[cfg(debug_assertions)]
     /// Frame of the last `update_events` call for this slot. u64 (W5-NEW).
     last_swap_frame: u64,
-    #[cfg(debug_assertions)]
-    /// Events visible in `reader_buf` after the last swap (unread diagnostic).
-    events_swapped_unread: u32,
+    // N2 follow-up: a per-slot `events_swapped_unread` counter was specced
+    // in the plan but never wired (would require swap_fn to return prev_len,
+    // a signature change that touches every type-erased dispatch site).
+    // Dropped from Phase 6 until the scheduler integration in Phase 7 makes
+    // the counter actually meaningful (a system-runner can verify that every
+    // event type has a reader system attached).
 }
 
 const _: () = assert!(core::mem::align_of::<EventTypeSlot>() == 64);
@@ -103,9 +106,6 @@ struct EventTypeSlotStorage {
 pub struct EventDiagnostics {
     /// The `current_frame` value at the time of the last swap for this type.
     pub last_swap_frame: u64,
-    /// Number of events that were copied to `reader_buf` during the last swap
-    /// (an approximation of "events sent but not yet consumed by systems").
-    pub events_swapped_unread: u32,
     /// Per-lane overflow counter (events rejected due to full buffer).
     pub per_lane_overflow_count: Box<[u32]>,
 }
@@ -225,8 +225,6 @@ impl EventDispatcher {
             thread_count: cfg.thread_count,
             #[cfg(debug_assertions)]
             last_swap_frame: 0,
-            #[cfg(debug_assertions)]
-            events_swapped_unread: 0,
         };
 
         // SAFETY (U2):
@@ -407,7 +405,6 @@ impl EventDispatcher {
             .collect();
         Some(EventDiagnostics {
             last_swap_frame: slot.last_swap_frame,
-            events_swapped_unread: slot.events_swapped_unread,
             per_lane_overflow_count: per_lane_overflow,
         })
     }
@@ -419,10 +416,12 @@ impl EventDispatcher {
     }
 
     /// Test-only: overwrites the `vtable.type_id` of a registered slot for
-    /// type_id collision detection tests (#30).
+    /// type_id collision detection tests (#30). Gated on `debug_assertions`
+    /// because the only consumer test is itself debug-only (the `debug_assert_eq!`
+    /// it exercises is compiled out in release).
     ///
     /// Returns `false` if `id` is not a registered slot.
-    #[cfg(test)]
+    #[cfg(all(test, debug_assertions))]
     pub(crate) fn set_slot_type_id_for_test(&mut self, id: usize, type_id: TypeId) -> bool {
         if id >= MAX_EVENTS || !self.registered_mask.get(id) {
             return false;
@@ -478,14 +477,24 @@ unsafe fn swap_and_flatten<E: Event>(data: *mut u8, _frame: u64) {
     use core::sync::atomic::Ordering;
 
     // Drop previous frame's reader_buf contents if E implements Drop.
-    let prev_len = buf.reader_len.load(Ordering::Relaxed) as usize;
+    //
+    // Panic-safety (W1 follow-up): publish `reader_len = 0` BEFORE the drop
+    // loop. If `E::drop` panics on element `k`, the panic unwinds through
+    // `swap_and_flatten` into `EventBuffer::drop`, which sees `reader_len == 0`
+    // and skips its own drop loop — no double-drop. The visible-zero window is
+    // bounded by `&mut self` on `update_events`, so no reader can observe it.
+    let prev_len = buf.reader_len.swap(0, Ordering::Relaxed) as usize;
     if core::mem::needs_drop::<E>() {
         // SAFETY (U8):
-        // 1. `i < prev_len = reader_len.load(Relaxed)`.
-        // 2. `reader_len` was set to the cursor that bounded the initialised prefix
-        //    at the end of the previous swap.
+        // 1. `i < prev_len`, the value reader_len held immediately before swap-to-0.
+        // 2. `reader_len` previously bounded the initialised prefix written by the
+        //    last `swap_and_flatten` copy loop.
         // 3. No reader holds a `&E` to this slot: convention is all readers complete
-        //    before `update_events`.
+        //    before `update_events`. Borrow checker enforces this on single-threaded
+        //    Phase 6; scheduler enforces it on multi-threaded Phase 7.
+        // 4. Panic safety: `reader_len = 0` was published before this loop, so a
+        //    `E::drop` panic that unwinds into `EventBuffer::drop` will not re-drop
+        //    the same elements (W1 follow-up to Phase 6 code review).
         unsafe {
             for i in 0..prev_len {
                 buf.reader_buf[i].assume_init_drop();
@@ -562,6 +571,10 @@ unsafe fn drop_buffer<E: Event>(data: *mut u8) {
 #[cfg(test)]
 mod tests {
     use core::sync::atomic::Ordering;
+    // TypeId is only used by the type_id_collision_debug_asserts test, which is itself
+    // gated on `cfg(debug_assertions)` — keep the import on the same gate to avoid an
+    // "unused import" warning under `cargo test --release` (N1 follow-up).
+    #[cfg(debug_assertions)]
     use std::any::TypeId;
 
     use crate::ecs::core::events::event::Event;
