@@ -9,7 +9,7 @@
 | **C3** | Critical | Pinned down slab construction recipe: `Box::<[MaybeUninit<Archetype>; MAX_ARCHETYPES]>::new_uninit().assume_init()`. Explicit `unsafe` block with SAFETY comment. Verified Rust 2024 / 1.93+ compatibility (`Box::new_uninit` stable since 1.82). |
 | **C4** | Critical | Added explicit `*mut Archetype` minting recipe via raw pointer arithmetic from slab base — no `&mut MaybeUninit` reborrow. Added invariant **U11 — Pointer minting recipe**. Added Miri test `phase7_miri_archetype_ptr_no_retag_ub`. |
 | **C5** | Critical | Added exhaustive `ComponentPoolBundle` method audit table. Rewrote U10 to state pool buffer ptr/stride is write-once at `add_pool`. Refresh called ONLY on `add_pool`. |
-| **C6** | Critical | Corrected MAX_ARCHETYPES rationale: cite `crates/boyko_ecs/src/ecs/core/iters/archetype_bit_set.rs::MAX_ARCHETYPES = 1024` — matches existing ArchetypeBitSet capacity used by query system. Defined capacity-overflow behavior: `add_archetype` now returns `Result<u16, BundleFullError>`; debug builds panic with clear message. New error variant `EcsError::ArchetypeBundleFull`. |
+| **C6** | Critical | Corrected MAX_ARCHETYPES rationale: cite `crates/boyko_ecs/src/ecs/core/iters/archetype_bit_set.rs::MAX_ARCHETYPES = 1024` — matches existing ArchetypeBitSet capacity used by query system. Defined capacity-overflow behavior: bundle layer returns `Result<u16, BundleFullError>`; `ArchetypeMaster::create_archetype` / `EcsMaster::create_archetype` panic via `expect("invariant: bundle below MAX_ARCHETYPES")` (matches "should never happen" semantics; avoids `ArchetypeId` → `EcsResult<ArchetypeId>` cascade across every test/bench/caller). `EcsError::ArchetypeBundleFull` is NOT added in Phase 7 — deferred for a future `try_create_archetype` API if needed. |
 | **C7** | Critical | Added explicit `Drop` body for `ArchetypeBundle` that walks the occupancy bitset and calls `drop_in_place` per occupied slot. Added invariant **U12 — Drop discipline**. Added Miri test `phase7_miri_bundle_drop_runs_archetype_drop_for_occupied_only`. |
 | **W1** | Important | Revised `iter_entities` cache profile claim in D3: `active_ids` walk is hot sequential, but per-entity `entities_inland[id.0]` is random access with potential L1/L2 misses for sparse populations after churn. Bench acceptance criteria reflect realistic cost. |
 | **W2** | Important | Revised perf table target from "3 cache lines / ~12 ns" to "3-4 lines / 12-16 ns average; 3 lines best case for low `ComponentId.0`". Hot path narrative updated. |
@@ -66,7 +66,7 @@
 
 **Capacity rationale** (C6 fix):
 - `MAX_ARCHETYPES = 1024` is defined in `crates/boyko_ecs/src/ecs/core/iters/archetype_bit_set.rs`. It matches `ArchetypeBitSet`'s width used by `QueryState`. The slab width = the bitset width by construction; the query layer's existing dedup bitmap defines the bound.
-- Capacity overflow behavior: `add_archetype` returns `Result<u16, BundleFullError>`. In debug builds, `expect("invariant: archetype bundle not full")` panics with a clear message. `EcsMaster::create_archetype` propagates as `EcsError::ArchetypeBundleFull`. This matches the existing capacity-error pattern (`EventBufferFull` from Phase 6).
+- Capacity overflow behavior: `add_archetype` returns `Result<u16, BundleFullError>` at the bundle level. Higher layers (`ArchetypeMaster::create_archetype`, `EcsMaster::create_archetype`) **panic** with a clear message via `expect("invariant: archetype bundle below MAX_ARCHETYPES")`. The panic discipline matches Phase 6's `EventBufferFull` (which is `debug_assert!` then `Err` — but `create_archetype` is a per-archetype-type one-shot setup call, not a per-frame hot path, so panic-on-misuse is preferable to changing every caller and test from `ArchetypeId` to `EcsResult<ArchetypeId>` for a "should never happen" condition). The `BundleFullError` variant on the bundle layer stays as a typed-failure handle for any future `try_create_archetype` API that wants to recover instead of panic. **The `EcsError::ArchetypeBundleFull` variant is NOT added in Phase 7** — defer until a Result-returning surface is needed.
 
 **Pre-condition** (W3 fix):
 This inline-Column design assumes `MAX_COMPONENTS × MAX_ARCHETYPES × size_of::<Column>() ≤ 16 MB`. Current: 512 × 1024 × 16 B = 8 MB. Beyond 16 MB total slab, the design MUST switch to sparse columns or boxed columns. Threshold documented in `crates/boyko_ecs/src/ecs/core/constants.rs`.
@@ -453,10 +453,10 @@ Each step compiles independently AND tests pass. Shim approach: add new APIs fir
 
 | Step | Files | What changes | Build state |
 |------|-------|--------------|-------------|
-| **0** | `boyko_utils/src/identifiers/primitives.rs`, `boyko_utils/src/identifiers/slot.rs` | Change `pub type Generation = usize;` → `pub type Generation = u32;`. `Slot::generation` follows alias. (C1) | All call sites that construct Slot with usize literals continue to compile via inference; explicit `let gen: usize` annotations must be updated. Tests pass. |
+| **0** | `boyko_utils/src/identifiers/primitives.rs`, `boyko_utils/src/identifiers/slot.rs`, `boyko_utils/src/sparse_map/sparse_slot_map.rs` | Change `pub type Generation = usize;` → `pub type Generation = u32;`. `Slot::generation` follows alias. **Cascade fix** (C1 follow-up from R2 critique): `SparseSlotMap::push_dense(&mut self, external_idx: usize, value: U, generation: usize)` parameter type changes to `generation: Generation` — current `usize` literal `0` callers via `Slot::new(idx, 0)` continue to compile via inference, but any `let gen: usize` annotations explicitly need retyping. | All call sites that construct Slot with usize literals continue to compile via inference. Tests pass. |
 | **1** | `crates/boyko_ecs/src/ecs/core/entity/entity.rs` | Change `Entity::generation: usize` → `u32`. Update `Entity::new`, `generation()`, `with_id`, `increment_generation`, `is_same`, `From<Slot>` / `From<Entity> for Slot`. (C1) | Code that previously took `usize` returns from `entity.generation()` now gets `u32`. Test files that pass `1usize` as generation must be updated to `1u32` or `1` (inferred). |
 | **2** | `crates/boyko_ecs/src/ecs/core/entity/entity_inland.rs` | Add new struct `EntityInlandFast { archetype_ptr: *mut Archetype, unit_index: u32, generation: u32 }`. Add layout asserts. Add `dangling_for_test()` constructor (M1). **Do not remove old `EntityInland`.** | Both structs co-exist; compiles. |
-| **3** | `crates/boyko_ecs/src/ecs/core/archetype/archetype.rs` | Add `pub struct Column`. Add `columns: [Column; MAX_COMPONENTS]` field to `Archetype` (inline, offset 0). Add `Archetype::refresh_column` / `refresh_all_columns`. In `create_by_ids` and `register_component`, call `refresh_column(c)` after `add_pool`. **Read path still goes through `component_pools.get_pool`.** | Archetype now ~8.4 KB; sub-MVP read path uses old path; tests pass. |
+| **3** | `crates/boyko_ecs/src/ecs/core/archetype/archetype.rs` (+ N2 cascade: `query.rs`, `benches/archetype.rs`, archetype tests) | Add `pub struct Column`. Add `columns: [Column; MAX_COMPONENTS]` field to `Archetype` (inline, offset 0). Add `Archetype::refresh_column` / `refresh_all_columns`. In `create_by_ids` and `register_component`, call `refresh_column(c)` after `add_pool`. **Read path still goes through `component_pools.get_pool`.** **Method-signature cascade** (N2 follow-up from R2 critique): the existing `Archetype::init_entity_inland(&self, inland: &mut EntityInland)` (which calls `inland.set_archetype_id(self.id)`) is obsoleted by the new EntityInland having no `archetype_id` field — DELETE the method. The existing `Archetype::create_entity(&mut self, entity_id, &mut EntityInland, ...)` signature changes to `Archetype::create_entity(&mut self, entity_id, &mut new_unit_index: u32, ...)` — caller no longer fills an inland, just receives the unit index. Update 7 call sites: `query.rs:741, 760, 886`, `benches/archetype.rs:71, 109`, `archetype.rs` tests at `:424, 466, 728, 764`. | Archetype now ~8.4 KB; sub-MVP read path uses old path; tests + benches updated; all green. |
 | **4** | `crates/boyko_ecs/src/ecs/core/archetype/archetype_bundle.rs` | Rewrite with slab. Add new methods: `get_archetype_ptr(id) -> Option<*mut Archetype>`, `add_archetype_from_components`, `iter_occupied_ptrs`. Old API (`get_archetype`, `get_archetype_mut`, `add_archetype`, `remove_archetype`, `iter`, `len`, `is_empty`, `clear`) preserved with new internal impl. New error type `BundleFullError`. (C2, C3, C6) | All existing callers work; slab live; tests pass. |
 | **5** | `crates/boyko_ecs/src/ecs/core/archetype/archetype_master.rs` | Add `get_archetype_ptr(id) -> Option<*mut Archetype>` wrapper. Add `archetype_ptr_for(id)` alias for create_entity choreography (W7). Add `add_archetype_and_get_ptr` for the create-archetype path. | Both old and new APIs work; tests pass. |
 | **6** | `crates/boyko_ecs/src/ecs/core/entity/entity_master.rs` | Add **new method** `register_entity_with_ptr(entity, archetype_ptr, unit_index: u32)` as shim alongside existing `register_entity(entity, archetype_id, InlandPoolId)`. Add new fields `entities_inland_fast: Vec<EntityInlandFast>`, `sparse_to_active: Vec<u32>`, `active_ids: Vec<EntityId>`. Old `entity_map` and `entities` co-exist with new fields. Writes update BOTH stores. Reads go through old path. (M2 shim) | Both representations sync'd; tests pass on old path. |
@@ -532,10 +532,22 @@ impl ArchetypeBundle {
         //   stack-allocated 8.4 KB Archetype temporary is constructed.
         unsafe {
             use core::ptr::addr_of_mut;
-            // Initialize the columns array in place. `Column::null()` is `Copy`,
-            // so this writes 8 KB of zeroed/null Column entries via a memset-like
-            // loop (compiler-optimized for [T; N] of Copy).
-            addr_of_mut!((*slot_ptr).columns).write([Column::null(); MAX_COMPONENTS]);
+            // Initialize the columns array in place via `write_bytes` — `Column::null()`
+            // is all-zero bits (ptr = null, stride = 0, _reserved = 0; verified by
+            // const_assert at the Column definition), so a memset to 0 is the
+            // semantically-correct value for every slot. This avoids constructing an
+            // 8 KB `[Column; 512]` source-level temporary, regardless of whether the
+            // compiler RVO-optimizes the array literal form (W6 closure note).
+            //
+            // SAFETY (U13.a): destination is uninit-but-aligned memory of exact size
+            //   `size_of::<[Column; MAX_COMPONENTS]>()`. Writing zero bytes is sound
+            //   for any `T: Copy + AllZerosIsValid`, and `Column { ptr: null_mut(),
+            //   stride: 0, _reserved: 0 }` is exactly the zero-bit pattern.
+            core::ptr::write_bytes(
+                addr_of_mut!((*slot_ptr).columns).cast::<Column>(),
+                0u8,
+                MAX_COMPONENTS,
+            );
             addr_of_mut!((*slot_ptr).id).write(archetype_id);
             // ComponentPoolBundle::new() does not allocate the pools array large;
             // it's a small struct with internal Vec<ComponentPool> empty initially.
@@ -805,7 +817,11 @@ const MAX_ARCHETYPES: usize = 1024;
 // slab width by construction. Do not change in isolation.
 
 /// Returned by `add_archetype` / `add_archetype_from_components` when the slab
-/// is at capacity. `EcsMaster::create_archetype` propagates as `EcsError::ArchetypeBundleFull`.
+/// is at capacity. Higher layers (`ArchetypeMaster::create_archetype`,
+/// `EcsMaster::create_archetype`) panic via `expect(...)` on this error
+/// (their public signatures stay `-> ArchetypeId`, no `EcsError::ArchetypeBundleFull`).
+/// Reserved as a typed handle for any future `try_create_archetype` API that
+/// wants to recover instead of panic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BundleFullError;
 
@@ -1001,8 +1017,7 @@ impl EntityMaster {
 | `EntityInland::dead() -> EntityInland` | Sentinel constructor |
 | `EntityInland::is_alive(&self) -> bool` | Branchless null check helper |
 | `EntityInland::dangling_for_test(u32, u32)` | Test-only (cfg(test)) constructor (M1) |
-| `EcsError::ArchetypeBundleFull` | New error variant (C6) |
-| `BundleFullError` | Public error type (C6) |
+| `BundleFullError` | Public error type at the `ArchetypeBundle` layer (C6, never reaches `EcsError` in Phase 7 — higher layers panic instead) |
 
 ### Unchanged public API (preserved)
 - `EcsMaster::create_entity / spawn_one / spawn_two`
@@ -1415,7 +1430,7 @@ See D10 table.
 - `D:\claude\BoykoEngine-ecs\crates\boyko_ecs\src\ecs\core\archetype\archetype.rs` — add `Column`, `columns: [Column; 512]`, `refresh_column`, `refresh_all_columns`, `register_component_inplace`
 - `D:\claude\BoykoEngine-ecs\crates\boyko_ecs\src\ecs\core\archetype\archetype_bundle.rs` — full rewrite with heap slab (C2, C3, C6, C7, W6)
 - `D:\claude\BoykoEngine-ecs\crates\boyko_ecs\src\ecs\core\archetype\archetype_master.rs` — add `archetype_ptr_for`, `add_archetype_and_get_ptr` (W7); propagate `BundleFullError` (C6)
-- `D:\claude\BoykoEngine-ecs\crates\boyko_ecs\src\ecs\core\ecs_master\ecs_master.rs` — rewrite read/write methods to fast path; add typed wrappers; add `EcsError::ArchetypeBundleFull` (C6)
+- `D:\claude\BoykoEngine-ecs\crates\boyko_ecs\src\ecs\core\ecs_master\ecs_master.rs` — rewrite read/write methods to fast path; add typed wrappers; `create_archetype` panics on `BundleFullError` via `expect(...)` (C6 — no new EcsError variant)
 - `D:\claude\BoykoEngine-ecs\crates\boyko_ecs\src\ecs\core\component\component_pool_bundle.rs` — minor (no API change; bundle bypassed on read)
 - `D:\claude\BoykoEngine-ecs\crates\boyko_ecs\src\ecs\core\constants.rs` — document slab-size pre-condition (W3)
 - `D:\claude\BoykoEngine-ecs\crates\boyko_ecs\src\ecs\core\iters\query.rs` / `query_state.rs` — adapt to changed `iter_entities` (signature preserved)
@@ -1447,7 +1462,7 @@ Round 2 patches the Round 1 plan to address all critic findings without redesign
 3. C3: Slab construction recipe pinned down to `Box::<...>::new_uninit().assume_init()` (stable since Rust 1.82). No stack-frame 8.6 MB temp.
 4. C4: Explicit pointer-minting recipe via raw arithmetic from slab base; new invariant U11 forbids `&mut MaybeUninit` reborrow. Miri test added.
 5. C5: Exhaustive `ComponentPoolBundle` method audit table; U10 rewritten to state pool ptr/stride is write-once at `add_pool`.
-6. C6: MAX_ARCHETYPES correctly attributed to `archetype_bit_set.rs`; `add_archetype` returns `Result<u16, BundleFullError>`; `EcsError::ArchetypeBundleFull` added.
+6. C6: MAX_ARCHETYPES correctly attributed to `archetype_bit_set.rs`; `add_archetype` returns `Result<u16, BundleFullError>` at the bundle layer; `ArchetypeMaster::create_archetype` / `EcsMaster::create_archetype` panic on overflow via `expect(...)` to preserve their `-> ArchetypeId` signature and avoid cascading `EcsResult<ArchetypeId>` through every test / bench / caller. `EcsError::ArchetypeBundleFull` is NOT introduced in Phase 7 — deferred for any future `try_create_archetype` Result-returning API.
 7. C7: Explicit `Drop` body with bitset-walk + `drop_in_place`; new invariant U12; Miri test added.
 
 **Important fixes (W1-W8) — all addressed**: realistic `iter_entities` cache profile (W1), 3-4 lines target (W2), 16 MB slab pre-condition (W3), `get_component_raw_mut` doc note (W4), `_pad` renamed `_reserved` with no Phase 8 promise (W5), in-place archetype construction with U13 (W6), `create_entity` choreography with U14 (W7), W8 same as C6.
