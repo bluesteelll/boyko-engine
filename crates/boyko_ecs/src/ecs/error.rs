@@ -35,6 +35,36 @@ pub enum EcsError {
 
     /// A swap-remove operation failed on a component pool within a bundle.
     PoolSwapRemoveFailed,
+
+    /// An event buffer lane is full; the send was rejected.
+    EventBufferFull {
+        /// Name of the event type (for diagnostics).
+        type_name: &'static str,
+        /// Index of the thread lane that overflowed.
+        thread_index: u32,
+        /// Number of events the call tried to write.
+        attempted: u32,
+        /// Number of events rejected (equals `attempted` for all-or-nothing sends).
+        dropped: u32,
+    },
+
+    /// `send` or `events` called for an event type that was never preregistered.
+    EventNotRegistered {
+        /// Name of the event type (for diagnostics).
+        type_name: &'static str,
+    },
+
+    /// `preregister` called twice for the same event type on the same dispatcher.
+    EventAlreadyRegistered {
+        /// Name of the event type (for diagnostics).
+        type_name: &'static str,
+    },
+
+    /// An `EventConfig` value failed validation.
+    InvalidEventConfig {
+        /// Human-readable description of the failing constraint.
+        reason: &'static str,
+    },
 }
 
 impl std::fmt::Display for EcsError {
@@ -64,6 +94,22 @@ impl std::fmt::Display for EcsError {
             }
             EcsError::PoolSwapRemoveFailed => {
                 write!(f, "component pool bundle swap_remove failed")
+            }
+            EcsError::EventBufferFull { type_name, thread_index, attempted, dropped } => {
+                write!(
+                    f,
+                    "event buffer full for '{}' on thread {}: attempted {}, dropped {}",
+                    type_name, thread_index, attempted, dropped
+                )
+            }
+            EcsError::EventNotRegistered { type_name } => {
+                write!(f, "event type '{}' is not registered; call preregister_event first", type_name)
+            }
+            EcsError::EventAlreadyRegistered { type_name } => {
+                write!(f, "event type '{}' is already registered on this dispatcher", type_name)
+            }
+            EcsError::InvalidEventConfig { reason } => {
+                write!(f, "invalid EventConfig: {}", reason)
             }
         }
     }

@@ -84,3 +84,15 @@ pub const INITIAL_FREE_SLOTS_CAPACITY: usize = 1024;
 
 /// Maximum percentage of empty chunks before pool reorganization is triggered
 pub const MAX_EMPTY_CHUNKS_RATIO: f32 = 0.2; // 20% empty chunks
+
+//
+// Event dispatch configuration
+//
+
+/// Maximum number of worker threads that can send events concurrently.
+/// Controls the number of per-type writer lanes in `EventBuffer<E>`.
+pub const MAX_EVENT_THREADS: u32 = 64;
+
+/// Maximum events per lane per frame in `EventBuffer<E>`.
+/// Bounds the per-lane write buffer allocation at preregister time.
+pub const MAX_EVENT_CAPACITY: u32 = 16384;

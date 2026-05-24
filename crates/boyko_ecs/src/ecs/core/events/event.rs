@@ -15,7 +15,7 @@ pub type EventId = u64;
 ///
 /// [`event_id`]: Event::event_id
 /// [`event_registry`]: crate::ecs::core::events::event_registry
-pub trait Event: 'static + Sized {
+pub trait Event: 'static + Sized + Send + Sync {
     /// The participants type for this event.
     type Participants: Participants;
 
