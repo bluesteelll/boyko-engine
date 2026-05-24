@@ -167,7 +167,7 @@ impl EcsMaster {
 
         // Allocate a new entity — only reached if the guard passed.
         let entity = self.entity_master.allocate_entity();
-        let generation = entity.generation();
+        let generation = entity.generation() as usize;
 
         // Create EntityInland with initial values.
         let mut entity_inland = EntityInland::new(

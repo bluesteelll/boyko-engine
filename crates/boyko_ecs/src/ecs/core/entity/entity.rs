@@ -4,12 +4,12 @@ use crate::ecs::identifiers::primitives::EntityId;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Entity {
     id: EntityId,
-    generation: usize,
+    generation: u32,
 }
 
 impl Entity {
     #[inline]
-    pub fn new(id: EntityId, generation: usize) -> Self {
+    pub fn new(id: EntityId, generation: u32) -> Self {
         Self { id, generation }
     }
 
@@ -27,7 +27,7 @@ impl Entity {
 
     /// Returns the entity's generation counter, used to detect stale handles.
     #[inline]
-    pub fn generation(&self) -> usize {
+    pub fn generation(&self) -> u32 {
         self.generation
     }
 

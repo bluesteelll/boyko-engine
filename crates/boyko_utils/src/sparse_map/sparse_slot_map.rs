@@ -1,4 +1,5 @@
 use std::ops::{Index, IndexMut};
+use crate::identifiers::primitives::Generation;
 use crate::identifiers::slot::Slot;
 use super::sparse_collection::SparseCollection;
 
@@ -275,7 +276,7 @@ impl<U> SparseSlotMap<U> {
     /// with the supplied generation. Common path shared by the two fresh-allocation
     /// arms of `insert` (pristine + tombstone-with-matching-gen).
     #[inline]
-    fn push_dense(&mut self, external_idx: usize, value: U, generation: usize) {
+    fn push_dense(&mut self, external_idx: usize, value: U, generation: Generation) {
         let dense_idx = self.dense.len();
         debug_assert!(
             dense_idx < TOMBSTONE_DENSE_IDX,

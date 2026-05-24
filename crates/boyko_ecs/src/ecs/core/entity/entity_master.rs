@@ -81,7 +81,7 @@ impl EntityMaster {
         debug_assert!(entity.id().0 < self.entities.len(), "Entity ID out of bounds");
         debug_assert!(!self.entity_map.contains(entity.id().0), "Entity already registered");
 
-        let entity_inland = EntityInland::new(archetype_id, unit_index, entity.generation());
+        let entity_inland = EntityInland::new(archetype_id, unit_index, entity.generation() as usize);
         self.entity_map.insert(entity.id().0, entity_inland);
         self.active_count += 1;
     }

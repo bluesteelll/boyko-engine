@@ -1,3 +1,3 @@
 
 
-pub type Generation = usize;
+pub type Generation = u32;
