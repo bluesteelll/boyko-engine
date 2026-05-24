@@ -7,3 +7,8 @@
 /build-log.txt
 /test-output.txt
 /test-full-output.txt
+
+# Stray `rustc --out-dir .` artifacts (occur when a quick rustc invocation
+# runs in the workspace root instead of going through `cargo`).
+/rust_out.exe
+/rust_out.pdb
