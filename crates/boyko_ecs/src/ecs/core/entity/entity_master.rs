@@ -26,16 +26,25 @@ pub struct EntityMaster {
     /// `EntityId`. Slots with `archetype_ptr.is_null()` represent dead /
     /// never-registered IDs. Written by `register_entity_with_ptr`; read
     /// by Step 7's hot `get_component_raw` path.
-    entities_inland_fast: Vec<EntityInlandFast>,
+    ///
+    /// `pub(crate)` for direct access from `EcsMaster::get_component_raw_fast`
+    /// and the Phase 7 hot read path. Outside the crate, the layout is opaque.
+    pub(crate) entities_inland_fast: Vec<EntityInlandFast>,
 
     /// Phase 7: sparse → dense map. `sparse_to_active[entity_id.0]` gives
     /// the index into `active_ids`, or `u32::MAX` for "not active".
-    sparse_to_active: Vec<u32>,
+    ///
+    /// `pub(crate)` for direct access from `EcsMaster::get_component_raw_fast`
+    /// and the Phase 7 hot read path. Outside the crate, the layout is opaque.
+    pub(crate) sparse_to_active: Vec<u32>,
 
     /// Phase 7: dense list of currently-active `EntityId`s. Drives
     /// `iter_entities` (Step 8). Order is registration-order with
     /// swap-remove on deallocation.
-    active_ids: Vec<EntityId>,
+    ///
+    /// `pub(crate)` for direct access from `EcsMaster::get_component_raw_fast`
+    /// and the Phase 7 hot read path. Outside the crate, the layout is opaque.
+    pub(crate) active_ids: Vec<EntityId>,
 }
 
 impl EntityMaster {

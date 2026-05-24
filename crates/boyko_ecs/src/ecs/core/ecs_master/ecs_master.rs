@@ -1,12 +1,13 @@
-use crate::ecs::core::archetype::archetype::RemoveOutcome;
+use crate::ecs::core::archetype::archetype::{Archetype, RemoveOutcome};
 use crate::ecs::core::archetype::archetype_master::ArchetypeMaster;
+use crate::ecs::core::component::component_registry::MAX_COMPONENTS;
 use crate::ecs::core::entity::entity::Entity;
+use crate::ecs::core::entity::entity_inland::EntityInlandFast;
 use crate::ecs::core::entity::entity_master::EntityMaster;
-use crate::ecs::core::entity::entity_inland::EntityInland;
 use crate::ecs::core::events::event::Event;
 use crate::ecs::core::events::event_config::EventConfig;
 use crate::ecs::core::events::event_dispatcher::EventDispatcher;
-use crate::ecs::identifiers::primitives::{ArchetypeId, EntityId, ComponentId, InlandPoolId};
+use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId, EntityId, InlandPoolId};
 use crate::ecs::memory::arena::Arena;
 use crate::ecs::constants::DEFAULT_ARENA_SIZE;
 use crate::ecs::error::{EcsError, EcsResult};
@@ -152,6 +153,22 @@ impl EcsMaster {
     /// 3. If `create_entity` fails, `rewind_allocate` undoes the allocation
     ///    (fresh-ID path) so the ID is not silently wasted.
     ///
+    /// # W7 choreography (Phase 7 Step 7)
+    ///
+    /// 1. Mint write-capable `*mut Archetype` via `archetype_ptr_for` under
+    ///    `&mut self`. The raw pointer does not participate in borrow
+    ///    checking, so it lives across the subsequent `&mut entity_master`
+    ///    call without conflict.
+    /// 2. Allocate the entity id.
+    /// 3. Reborrow the raw pointer as `&mut Archetype` (scoped tightly to
+    ///    the `create_entity` call) to push the new row.
+    /// 4. On rejection, rewind the entity-id allocation (C-007 rewind path).
+    /// 5. On success, register the entity in BOTH stores: the legacy
+    ///    `entity_map` (for compatibility with the legacy read path) and
+    ///    the Phase 7 fast store (for `get_component_raw_fast` and friends).
+    ///    Step 8 switches the legacy read path to the fast store; Step 9
+    ///    deletes the legacy registration here.
+    ///
     /// Audit: C-010 — switched from Vec to &[...].
     pub fn create_entity(
         &mut self,
@@ -165,42 +182,63 @@ impl EcsMaster {
             return Err(EcsError::ArchetypeNotFound(archetype_id));
         }
 
-        // Allocate a new entity — only reached if the guard passed.
-        let entity = self.entity_master.allocate_entity();
-        let generation = entity.generation() as usize;
-
-        // SAFETY of the get_archetype_mut call: we verified existence above.
-        // This cannot return None unless the archetype was removed between the
-        // guard and this call, which is impossible in a single-threaded context.
-        let archetype = self.archetype_master
-            .get_archetype_mut(archetype_id)
+        // Step 1 of W7: mint write-capable *mut Archetype. The raw pointer is
+        // not subject to borrow checking, so it can outlive the &mut borrow
+        // on archetype_master that produced it — see U14.
+        let archetype_ptr = self.archetype_master
+            .archetype_ptr_for(archetype_id)
             .expect("invariant: archetype existed at guard check; single-threaded");
 
-        // Phase 7 Step 3: `Archetype::create_entity` now reports just the
-        // dense unit index via `&mut u32`; the caller builds the legacy
-        // `EntityInland` itself. Steps 7-9 replace the legacy inland with
-        // `EntityInlandFast` and remove this bridge.
+        // Step 2 of W7: allocate the entity id (fresh or recycled).
+        let entity = self.entity_master.allocate_entity();
+
+        // Step 3 of W7: reborrow archetype_ptr as &mut Archetype inside a
+        // tight scope so the &mut reference is dropped before any further
+        // entity_master mutation.
         let mut new_unit_index: u32 = 0;
-        if !archetype.create_entity(entity.id(), &mut new_unit_index, components) {
-            // Archetype rejected the entity (e.g. can_push failed). Undo the
-            // allocation so the EntityId is not leaked (C-007 rewind path).
+        let pushed = {
+            // SAFETY (U14, U1, U2):
+            //   - U14: archetype_ptr was just minted via archetype_ptr_for
+            //     under &mut self, so the provenance is write-capable; the
+            //     bundle slab address is stable; no other live borrow into
+            //     this slot exists (single-threaded EcsMaster).
+            //   - U1/U2: slab address stable, slab slot lifetime ⊇
+            //     EcsMaster lifetime (bundle invariants).
+            //   - The reborrow is scoped to this block; once create_entity
+            //     returns, the &mut Archetype is dropped before any further
+            //     self.entity_master calls.
+            let archetype: &mut Archetype = unsafe { &mut *archetype_ptr };
+            archetype.create_entity(entity.id(), &mut new_unit_index, components)
+        };
+
+        if !pushed {
+            // Step 4 of W7: archetype rejected the push (capacity / signature
+            // mismatch). Undo the allocation so the EntityId is not leaked.
             let rewound = self.entity_master.rewind_allocate(entity);
             if !rewound {
-                // rewind_allocate returns false for recycled IDs; fall back to
-                // the full deallocate path to put the ID back on the free list.
+                // rewind_allocate returns false for recycled IDs; fall back
+                // to the full deallocate path so the ID returns to the free
+                // list.
                 self.entity_master.deallocate_entity(entity);
             }
             return Err(EcsError::ArchetypeRejectedEntity { archetype_id });
         }
 
-        // Construct the legacy `EntityInland` from the freshly-assigned slot
-        // and register it. Step 9 deletes this bridge entirely.
-        let entity_inland = EntityInland::new(
+        // Step 5 of W7: dual-store registration during the Phase 7 transition.
+        //   - register_entity populates the legacy entity_map so the legacy
+        //     read path (get_component_raw, has_entity, …) keeps working
+        //     through Step 7.
+        //   - register_entity_with_ptr populates the new fast store
+        //     consumed by get_component_raw_fast and friends.
+        // Step 8 redirects the legacy read methods to the fast store; Step 9
+        // removes the legacy register_entity call here and deletes the
+        // legacy fields entirely.
+        self.entity_master.register_entity(
+            entity,
             archetype_id,
             InlandPoolId(new_unit_index as usize),
-            generation,
         );
-        self.entity_master.register_entity(entity, archetype_id, entity_inland.unit_index());
+        self.entity_master.register_entity_with_ptr(entity, archetype_ptr, new_unit_index);
 
         Ok(entity)
     }
@@ -345,6 +383,189 @@ impl EcsMaster {
             RemoveOutcome::PoolFailure => false,
         }
     }
+
+    // ── Phase 7 Step 7: fast random-access read path ─────────────────────────
+    //
+    // The `*_fast` methods below resolve a component pointer in 3-4 cache
+    // lines by going through `EntityMaster.entities_inland_fast`
+    // (Vec-indexed by EntityId) and `Archetype.columns` (inline lookup
+    // table at offset 0). They are the Step 8 replacement bodies; in
+    // Step 7 they live side-by-side with the legacy methods so the
+    // dual-store invariant remains testable.
+
+    /// Phase 7 fast random access: 3-4 cache lines, ~12-16 ns target.
+    ///
+    /// Lookup sequence:
+    ///   1. `entity_master.entities_inland_fast[entity.id().0]` — 1 line.
+    ///   2. Null check + generation check (both fields in the same line as 1).
+    ///   3. `(*archetype_ptr).columns[component_id.0]` — 1 line (`columns` at
+    ///      offset 0; for `ComponentId.0 < 4` shares the line with the
+    ///      archetype deref).
+    ///   4. `column.ptr.add(unit_index * stride)` — arithmetic on the
+    ///      cached pointer; final line is the component itself.
+    ///
+    /// Returns `None` for stale entities (generation mismatch), missing
+    /// components (column is null), or never-registered entities
+    /// (archetype_ptr is null).
+    #[inline]
+    pub fn get_component_raw_fast(
+        &self,
+        entity: Entity,
+        component_id: ComponentId,
+    ) -> Option<*const u8> {
+        // Line 1: entity_master.entities_inland_fast[entity.id().0]
+        let inland = self.entity_master.entities_inland_fast.get(entity.id().0)?;
+        // Null check (dead slot) + generation check (stale handle).
+        // Order chosen so the null check covers never-registered IDs first.
+        if inland.is_null() {
+            return None;
+        }
+        if inland.generation() != entity.generation() {
+            return None;
+        }
+        // SAFETY (U1, U2, U11): archetype_ptr was minted via raw arithmetic
+        //   from the bundle slab (Step 4); slab heap address is stable for
+        //   the EcsMaster's lifetime; &self gives shared access to the slab.
+        let archetype = unsafe { &*inland.archetype_ptr() };
+
+        debug_assert!(component_id.0 < MAX_COMPONENTS);
+        // SAFETY (U4): columns is [Column; MAX_COMPONENTS]; bound checked above.
+        let column = unsafe { archetype.columns.get_unchecked(component_id.0) };
+        if column.ptr.is_null() {
+            return None;
+        }
+
+        // SAFETY (U5, U6, U10):
+        //   - U5: column.ptr / stride are set by refresh_column after add_pool.
+        //   - U6: pool buffer pointer is write-once at add_pool (Phase 7 D5
+        //     audit table).
+        //   - U10: unit_index < archetype.current_index for any alive
+        //     entity; multiplication fits because `stride * MAX_ENTITIES`
+        //     ≤ pool buffer size, and `unit_index < MAX_ENTITIES`.
+        Some(unsafe {
+            column.ptr.add(inland.unit_index() as usize * column.stride as usize) as *const u8
+        })
+    }
+
+    /// Mutable fast random access. `EntityInlandFast` is `Copy`; we copy
+    /// 16 B to drop the `EntityMaster` borrow before reborrowing the slab
+    /// pointer as `&mut Archetype` (W4 / U14).
+    #[inline]
+    pub fn get_component_raw_mut_fast(
+        &mut self,
+        entity: Entity,
+        component_id: ComponentId,
+    ) -> Option<*mut u8> {
+        // Copy the inland by value to release the entity_master borrow.
+        let inland: EntityInlandFast = *self.entity_master.entities_inland_fast
+            .get(entity.id().0)?;
+        if inland.is_null() {
+            return None;
+        }
+        if inland.generation() != entity.generation() {
+            return None;
+        }
+        debug_assert!(component_id.0 < MAX_COMPONENTS);
+
+        // SAFETY (U1, U2, U11, U14):
+        //   - U14: archetype_ptr is write-capable provenance (minted via
+        //     archetype_ptr_for under &mut EcsMaster during create_entity);
+        //     single-threaded &mut self gives exclusive access; no other
+        //     live borrow into the slot exists.
+        let archetype = unsafe { &mut *inland.archetype_ptr() };
+
+        // SAFETY (U4): same as get_component_raw_fast.
+        let column = unsafe { archetype.columns.get_unchecked(component_id.0) };
+        if column.ptr.is_null() {
+            return None;
+        }
+
+        // SAFETY (U5, U6, U10): same as get_component_raw_fast plus
+        //   &mut self exclusivity ⇒ the returned *mut points to a uniquely
+        //   accessible byte range.
+        Some(unsafe {
+            column.ptr.add(inland.unit_index() as usize * column.stride as usize)
+        })
+    }
+
+    /// Phase 7 fast existence check: 1 cache line, ~5 ns target.
+    #[inline]
+    pub fn has_entity_fast(&self, entity: Entity) -> bool {
+        let Some(inland) = self.entity_master.entities_inland_fast.get(entity.id().0) else {
+            return false;
+        };
+        !inland.is_null() && inland.generation() == entity.generation()
+    }
+
+    /// Phase 7 fast component write: `~15-18 ns` target. Returns `false`
+    /// for stale entities, missing components, or never-registered entities.
+    /// On success, byte-copies the provided slice into the component slot.
+    ///
+    /// `component_bytes.len()` must equal the pool's stride; mismatched
+    /// sizes produce undefined behavior in release. Callers should obtain
+    /// the slice from a properly-sized `&T` for the target component type
+    /// (see `set_component<T>` typed wrappers in future steps).
+    #[inline]
+    pub fn set_component_raw_fast(
+        &mut self,
+        entity: Entity,
+        component_id: ComponentId,
+        component_bytes: &[u8],
+    ) -> bool {
+        let Some(dst) = self.get_component_raw_mut_fast(entity, component_id) else {
+            return false;
+        };
+        // Stride is not re-queried here; the size invariant lives at the
+        // caller boundary (typed wrappers downcast from `&T` with
+        // `size_of::<T>()`). A debug-assertable stride check would require
+        // threading the column reference back out of the inner lookup,
+        // which defeats the fast-path goal. The pool layer carries the
+        // ultimate size guarantee through `Layout`.
+        // SAFETY (U5, U6, U10):
+        //   - dst is a valid *mut u8 to a byte range of size `stride` for
+        //     the target component (U5/U6 — column resolved through the
+        //     same fast path as get_component_raw_mut_fast).
+        //   - The caller's slice is sized to match by API contract; typed
+        //     wrappers enforce this via `size_of::<T>()`.
+        //   - Single-threaded &mut self ⇒ no concurrent reader.
+        //   - copy_nonoverlapping is sound because the slice and the pool
+        //     buffer live in disjoint allocations (slice is a caller-stack
+        //     view; the pool buffer is arena-owned).
+        unsafe {
+            std::ptr::copy_nonoverlapping(component_bytes.as_ptr(), dst, component_bytes.len());
+        }
+        true
+    }
+
+    /// Phase 7 typed read accessor. Returns a shared reference to the
+    /// component of type `T` owned by `entity`, or `None` if the entity is
+    /// stale, the archetype does not host `T`, or the entity was never
+    /// registered.
+    #[inline]
+    pub fn get_component<T: crate::ecs::core::component::component::Component>(
+        &self,
+        entity: Entity,
+    ) -> Option<&T> {
+        let raw = self.get_component_raw_fast(entity, T::component_id())?;
+        // SAFETY: the pool was registered with T::component_id(), so the
+        //   bytes at `raw` are a valid `T` (M-001 drop-fn / layout guarantee
+        //   from the component registry). The lifetime of the returned
+        //   reference is bounded by &self.
+        Some(unsafe { &*(raw as *const T) })
+    }
+
+    /// Phase 7 typed mutable accessor. Symmetric counterpart of
+    /// [`get_component`] returning `&mut T`.
+    #[inline]
+    pub fn get_component_mut<T: crate::ecs::core::component::component::Component>(
+        &mut self,
+        entity: Entity,
+    ) -> Option<&mut T> {
+        let raw = self.get_component_raw_mut_fast(entity, T::component_id())?;
+        // SAFETY: same as get_component, plus &mut self ⇒ exclusive access.
+        Some(unsafe { &mut *(raw as *mut T) })
+    }
+
     /// Gets a raw pointer to a component for the specified entity
     #[inline]
     pub fn get_component_raw(&self, entity: Entity, component_id: ComponentId) -> Option<*const u8> {
