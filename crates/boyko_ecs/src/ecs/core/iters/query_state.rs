@@ -18,16 +18,34 @@ use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId};
 /// in cache line 0. The three filter masks (192 B) and the dedup bitset (128 B)
 /// occupy later cache lines and are only touched on cache misses.
 ///
-/// # Generation and `clear()`
-/// `QueryState` stores the generation value at the time of the last sync. If
-/// `ArchetypeMaster::clear()` is called while a `QueryState` is alive, its
-/// cached IDs refer to recycled slots and must be discarded. Debug builds assert
-/// this via `debug_assert!` in `iter()` and `update_archetypes()`.
-/// Callers must call `reset()` or drop the `QueryState` before `clear()`.
+/// # Generation pair and `clear()` / `remove_archetype()`
+///
+/// `QueryState` snapshots both `archetype_generation` (bumped on every
+/// `create_archetype`) and `structural_generation` (bumped on every
+/// `remove_archetype` and on `clear()`). On the next `iter()`:
+///
+/// - `structural_generation` mismatched → drop the dedup bitset + matched_ids,
+///   re-classify every live archetype from scratch. This is the load-bearing
+///   piece of the ArchetypeId-ABA fix: without it, a recycled `ArchetypeId`
+///   (e.g. after `clear()` resets `next_archetype_id` to 1) would be skipped
+///   by the stale dedup bitset and silently absent from query results.
+/// - Only `archetype_generation` mismatched → delta-add path: skip already-seen
+///   ids via the bitset, classify only the new ids. Preserves the warm-path
+///   ~21x speedup over rebuilding `Query` from scratch.
+///
+/// A `QueryState` is therefore safe to keep alive across `clear()` and
+/// `remove_archetype()` calls — no manual `reset()` is required for
+/// correctness. `reset()` remains available for callers that want to drop
+/// capacity or rebuild the filter explicitly.
 #[repr(C, align(64))]
 pub struct QueryState {
     // Cache line 0 (hot): read on every iter() / update_archetypes() early-exit check.
     generation: ArchetypeGeneration,
+    /// Last observed `master.structural_generation()` — bumps on every
+    /// archetype removal or `clear()`. A mismatch forces a full rebuild
+    /// instead of the cheap delta-add path, eliminating the ArchetypeId-ABA
+    /// hazard documented on `ArchetypeMaster::structural_generation`.
+    structural_generation: ArchetypeGeneration,
     matched_ids: Vec<ArchetypeId>,
     // Lines 1-3 (cold-after-warmup): 3 × 64 B filter masks.
     include: ComponentMask,
@@ -45,6 +63,7 @@ impl QueryState {
     pub fn new(include: ComponentMask, exclude: ComponentMask, optional: ComponentMask) -> Self {
         Self {
             generation: ArchetypeGeneration::FIRST,
+            structural_generation: ArchetypeGeneration::FIRST,
             matched_ids: Vec::with_capacity(16),
             include,
             exclude,
@@ -72,11 +91,11 @@ impl QueryState {
     /// Warm path (generation unchanged): one load + comparison, then slice walk.
     /// Cold path (new archetypes exist): `update_archetypes` classifies the delta.
     ///
-    /// # `clear()` interaction
-    /// If `master.clear()` was called since the last `iter()` / `update_archetypes()`
-    /// invocation, this state's cache is stale and must not be used. Call `reset()`
-    /// first, or drop this state and reconstruct. Debug builds catch the violation
-    /// via `debug_assert!`; release builds silently use the stale cache.
+    /// # `clear()` / `remove_archetype()` interaction
+    /// Safe across both. The structural_generation mismatch detected here
+    /// triggers a full rebuild inside `update_archetypes`, which correctly
+    /// handles recycled `ArchetypeId`s by re-classifying the live archetype
+    /// set against this state's filter.
     pub fn iter<'a>(&'a mut self, master: &'a ArchetypeMaster) -> QueryStateIter<'a> {
         debug_assert!(
             self.generation <= master.archetype_generation(),
@@ -85,35 +104,78 @@ impl QueryState {
             self.generation,
             master.archetype_generation(),
         );
-        if self.generation != master.archetype_generation() {
+        debug_assert!(
+            self.structural_generation <= master.structural_generation(),
+            "QueryState.structural_generation ({:?}) > master.structural_generation() ({:?})",
+            self.structural_generation,
+            master.structural_generation(),
+        );
+        if self.structural_generation != master.structural_generation()
+            || self.generation != master.archetype_generation()
+        {
             self.update_archetypes(master);
         }
-        // `iter_cached` is valid because update_archetypes() just synced generation.
+        // `iter_cached` is valid because update_archetypes() just synced both gens.
         self.iter_cached(master)
     }
 
-    /// Classifies any archetypes created since the last sync against the filter.
+    /// Brings the cache in sync with the master's current archetype set.
     ///
-    /// This is the delta update path. IDs already in `matched_archetypes` are
-    /// skipped in O(1) via the dedup bitset; only truly new IDs are tested.
+    /// Two paths:
+    ///
+    /// 1. **Structural change** (`structural_generation` bumped — archetypes
+    ///    were removed, or `clear()` was called): full rebuild. The cached
+    ///    bitset + matched_ids are dropped, then every live archetype ID is
+    ///    re-classified against the filter. This is the load-bearing piece of
+    ///    the ArchetypeId-ABA fix — without it, a freshly created archetype
+    ///    reusing a recycled ID would be skipped by the dedup bitset and
+    ///    invisibly absent from query results.
+    ///
+    /// 2. **Creation-only delta** (`generation` bumped, `structural_generation`
+    ///    unchanged): delta-add. IDs already recorded in `matched_archetypes`
+    ///    are skipped in O(1); only truly new IDs are tested against the
+    ///    filter. This is the original warm-ish path that preserves the
+    ///    "create many, read many" benchmark profile (~21x speedup over
+    ///    rebuilding `Query` from scratch).
     pub fn update_archetypes(&mut self, master: &ArchetypeMaster) {
-        let current = master.archetype_generation();
+        let current_gen = master.archetype_generation();
+        let current_struct = master.structural_generation();
         debug_assert!(
-            self.generation <= current,
+            self.generation <= current_gen,
             "QueryState.generation ({:?}) > master.archetype_generation() ({:?}); \
              master.clear() was called without resetting this QueryState",
             self.generation,
-            current,
+            current_gen,
         );
-        if self.generation == current {
+        debug_assert!(
+            self.structural_generation <= current_struct,
+            "QueryState.structural_generation ({:?}) > master.structural_generation() ({:?})",
+            self.structural_generation,
+            current_struct,
+        );
+
+        if self.structural_generation != current_struct {
+            // Structural change: drop the dedup bitset and matched_ids; rebuild
+            // from scratch. `matched_archetypes.clear_all()` zeroes the 128 B
+            // bitset; `matched_ids.clear()` drops length without releasing
+            // capacity, keeping the next iter's push amortised O(1).
+            self.matched_archetypes.clear_all();
+            self.matched_ids.clear();
+        } else if self.generation == current_gen {
+            // No change at all — caller raced us; nothing to do.
             return;
         }
 
-        // Iterate all archetype IDs from 1..current.get() and skip already-seen ones.
-        // A future optimization (master.archetypes_since(n) slice) would eliminate the
-        // full sweep, but requires bundle index tracking. The dedup bitset makes the
-        // per-seen-id work O(1), so total cost is O(new ids).
-        for id in 1..current.get() {
+        // Iterate all archetype IDs from 1..current_gen.get() and skip
+        // already-seen ones via the bitset. After a structural rebuild the
+        // bitset is empty, so every live ID is freshly classified. After a
+        // creation-only delta the bitset preserves prior decisions, so only
+        // new IDs reach the `matches(mask)` check.
+        //
+        // The loop bound is O(current_gen.get()) per call. For a delta path
+        // most iterations short-circuit on the bitset hit; for a structural
+        // rebuild every live ID is tested.
+        for id in 1..current_gen.get() {
             if !self.matched_archetypes.contains(id)
                 && let Some(arch) = master.get_archetype(ArchetypeId(id))
             {
@@ -122,13 +184,14 @@ impl QueryState {
                     self.matched_archetypes.insert(id);
                     self.matched_ids.push(ArchetypeId(id));
                 }
-                // Unmatched IDs are not inserted into matched_archetypes.
-                // Archetype component sets are immutable post-creation, so
-                // the same filter applied again will still not match. The loop
-                // bound is O(current.get()) per call, bounded by MAX_ARCHETYPES.
+                // Unmatched IDs stay out of the bitset. The archetype's
+                // component mask is immutable post-creation, so the same
+                // filter applied again will not match — there's no value in
+                // remembering negative classifications.
             }
         }
-        self.generation = current;
+        self.generation = current_gen;
+        self.structural_generation = current_struct;
     }
 
     /// Tests whether a component mask satisfies the query filters.
@@ -173,6 +236,7 @@ impl QueryState {
         self.matched_ids.clear();
         self.matched_archetypes.clear_all();
         self.generation = ArchetypeGeneration::FIRST;
+        self.structural_generation = ArchetypeGeneration::FIRST;
     }
 
     /// Iterates the cached matched IDs without re-checking the generation.
@@ -201,14 +265,19 @@ impl QueryState {
         }
     }
 
-    /// Marks this state as synced with `master`'s current generation.
+    /// Marks this state as synced with `master`'s current generation pair.
     ///
     /// Call once after manually pre-populating the cache via `push_matched`
     /// (e.g., in `Query::from_archetypes` or `Query::with_exact_mask`) to
     /// prevent a redundant `update_archetypes` sweep on the next `iter()`.
+    ///
+    /// Stamps BOTH `generation` and `structural_generation` — otherwise the
+    /// first `iter()` would observe a structural mismatch and rebuild,
+    /// silently discarding the just-pushed cache contents.
     #[inline]
     pub(crate) fn mark_synced(&mut self, master: &ArchetypeMaster) {
         self.generation = master.archetype_generation();
+        self.structural_generation = master.structural_generation();
     }
 }
 
@@ -472,5 +541,69 @@ mod tests {
         // iter() must skip the now-missing id (get_archetype returns None)
         let count = state.iter(&master).count();
         assert_eq!(count, 2, "stale removed id must be skipped during iteration");
+    }
+
+    // --- ABA-prevention via structural_generation ---
+
+    /// Regression for the ArchetypeId-ABA hazard. Without `structural_generation`
+    /// bump + full-rebuild path, the following sequence used to leave a stale
+    /// id=1 entry in `matched_ids`. After a `clear()` + `create_archetype`
+    /// recycling that id with an UNRELATED component set, the query would
+    /// silently include the unrelated archetype in its results.
+    ///
+    /// With the dual-generation fix, the `iter()` after the recycle observes a
+    /// `structural_generation` mismatch, drops the dedup bitset, and rebuilds
+    /// — correctly classifying the recycled id by its current component mask.
+    #[test]
+    fn aba_recycled_archetype_id_after_clear_does_not_leak_into_query() {
+        let (mut master, _arena) = setup();
+
+        // Phase 1: create a Pos archetype, query for Pos, observe the match.
+        let pos_id_v1 = master.create_archetype(&[Pos::component_id()]);
+        let mut state = QueryState::with_component_ids(&[Pos::component_id()]);
+        let matched_v1: Vec<_> = state.iter(&master).map(|a| a.id()).collect();
+        assert_eq!(matched_v1, vec![pos_id_v1], "phase 1: Pos archetype matches");
+
+        // Phase 2: clear master, then create an UNRELATED archetype that will
+        // recycle the same numeric id (clear resets next_archetype_id to 1).
+        master.clear();
+        let vel_id = master.create_archetype(&[Vel::component_id()]);
+        assert_eq!(vel_id, pos_id_v1, "precondition: cleared master recycles id=1");
+
+        // Phase 3: iterate the stale QueryState. The ABA hazard would yield
+        // the Vel archetype as if it matched the Pos filter. With the fix,
+        // the structural_generation mismatch forces a full rebuild and the
+        // re-classification rejects Vel for not having Pos.
+        let matched_v2: Vec<_> = state.iter(&master).map(|a| a.id()).collect();
+        assert!(
+            matched_v2.is_empty(),
+            "ABA: recycled id with unrelated mask MUST NOT be surfaced by a stale QueryState; \
+             got {:?}",
+            matched_v2
+        );
+    }
+
+    /// Mirror of the above without the `clear()` step — verifies that a plain
+    /// `remove_archetype` between iterations correctly evicts the dead id
+    /// from `matched_ids`, not just from the get_archetype skip path.
+    #[test]
+    fn remove_archetype_purges_dead_id_from_matched_ids_via_rebuild() {
+        let (mut master, _arena) = setup();
+        let id_a = master.create_archetype(&[Pos::component_id()]);
+        let id_b = master.create_archetype(&[Pos::component_id(), Vel::component_id()]);
+        let mut state = QueryState::with_component_ids(&[Pos::component_id()]);
+
+        let v1: Vec<_> = state.iter(&master).map(|a| a.id()).collect();
+        assert_eq!(v1.len(), 2, "phase 1: both Pos archetypes match");
+        assert!(v1.contains(&id_a) && v1.contains(&id_b));
+
+        master.remove_archetype(id_a);
+
+        let v2: Vec<_> = state.iter(&master).map(|a| a.id()).collect();
+        assert_eq!(v2, vec![id_b], "phase 2: removed id_a is gone, id_b remains");
+
+        // Crucially, matched_ids itself was rebuilt — not just filtered during
+        // iteration. Length is exactly 1, not 2-with-skip.
+        assert_eq!(state.len(), 1, "matched_ids must be physically purged, not skip-on-iter");
     }
 }

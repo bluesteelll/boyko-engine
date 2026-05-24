@@ -27,10 +27,31 @@ pub struct ArchetypeMaster {
     /// Next available archetype ID
     next_archetype_id: ArchetypeId,
 
-    /// Monotonic generation counter. Bumped on every new archetype creation.
-    /// Never reset — even after `clear()` — so `QueryState` can detect stale
-    /// caches by comparing against a saved generation value.
+    /// Monotonic counter bumped on every `create_archetype` call that mints a
+    /// *new* archetype slot. Never reset — even after `clear()` — so a stale
+    /// `QueryState` can detect cache invalidation by comparing against the
+    /// saved value.
+    ///
+    /// This counter signals "the set of archetypes grew; classify the deltas".
+    /// It does NOT cover removals — see [`structural_generation`].
     generation: ArchetypeGeneration,
+
+    /// Monotonic counter bumped on every `remove_archetype` call that
+    /// successfully tore down an archetype, AND on every `clear()` call.
+    /// Never reset.
+    ///
+    /// This counter signals "the set of archetypes shrank, so the cached
+    /// `matched_ids` may contain dead entries that must be evicted". A
+    /// `QueryState` whose `last_structural_generation` differs from the
+    /// master's must do a full rebuild instead of a delta-add — otherwise an
+    /// ABA scenario can produce silently-wrong query results when a freshly
+    /// minted archetype reuses a recycled `ArchetypeId` (e.g. after `clear()`
+    /// resets `next_archetype_id` to 1).
+    ///
+    /// Separated from [`generation`] so the common "creates only, no removes"
+    /// fast path keeps its ~21x warm-path speedup via delta-add. Only the
+    /// rarer remove+create churn pays the full-rebuild cost.
+    structural_generation: ArchetypeGeneration,
 }
 
 impl ArchetypeMaster {
@@ -53,6 +74,7 @@ impl ArchetypeMaster {
             arena: arena_ptr,
             next_archetype_id: ArchetypeId(1),
             generation: ArchetypeGeneration::FIRST,
+            structural_generation: ArchetypeGeneration::FIRST,
         }
     }
 
@@ -67,6 +89,7 @@ impl ArchetypeMaster {
             arena: arena_ptr,
             next_archetype_id: ArchetypeId(1),
             generation: ArchetypeGeneration::FIRST,
+            structural_generation: ArchetypeGeneration::FIRST,
         }
     }
     
@@ -312,28 +335,52 @@ impl ArchetypeMaster {
 
     /// Returns the current archetype generation, monotonic across the master's
     /// entire lifetime including `clear()` calls. Used by `QueryState` to detect
-    /// cache invalidation.
+    /// cache invalidation due to new archetype creations.
     #[inline]
     pub fn archetype_generation(&self) -> ArchetypeGeneration {
         self.generation
     }
+
+    /// Returns the current structural generation — bumped on every archetype
+    /// removal and on `clear()`. `QueryState` compares against the saved value;
+    /// any change forces a full rebuild instead of a delta-add, eliminating
+    /// the ArchetypeId-ABA hazard (cached `matched_ids` holding an ID that was
+    /// freed and later reused by an unrelated archetype).
+    #[inline]
+    pub fn structural_generation(&self) -> ArchetypeGeneration {
+        self.structural_generation
+    }
     
-    /// Removes an archetype by ID
-    /// Returns true if the archetype was found and removed
+    /// Removes an archetype by ID. Returns true if the archetype was found
+    /// and removed.
+    ///
+    /// On success, bumps `structural_generation` so any live `QueryState`
+    /// referencing this master is forced to do a full rebuild on its next
+    /// `iter()` — this is the load-bearing piece of the ArchetypeId-ABA fix:
+    /// without the bump, a stale `matched_ids` could retain the just-freed ID
+    /// and silently surface a future archetype reusing that same numeric ID
+    /// (after `clear()` resets `next_archetype_id` to 1) as if it matched the
+    /// original filter.
     pub fn remove_archetype(&mut self, archetype_id: ArchetypeId) -> bool {
         // First unregister from the registry
         let registry_success = self.registry.unregister_archetype(archetype_id);
-        
+
         // If registry removal failed, the archetype wasn't registered
         if !registry_success {
             return false;
         }
-        
+
         // Now remove from the archetype bundle
         let bundle_success = self.archetypes.remove_archetype(archetype_id);
-        
+
         debug_assert!(bundle_success, "Registry and bundle are out of sync");
-        
+
+        if bundle_success {
+            // Signal cache invalidation to every outstanding QueryState.
+            // See struct-level doc on `structural_generation`.
+            self.structural_generation.bump();
+        }
+
         bundle_success
     }
     
@@ -473,23 +520,30 @@ impl ArchetypeMaster {
     
     /// Removes all archetypes and resets `next_archetype_id` to 1.
     ///
-    /// # Caller responsibility
-    /// `clear()` invalidates every outstanding `QueryState` referencing this
-    /// master. After `clear()`, new archetypes are minted from id 1 again;
-    /// a stale `QueryState`'s internal dedup bitset would silently report
-    /// these recycled IDs as "already cached", producing garbage results.
-    /// Callers MUST drop or `reset()` every `QueryState` before calling `clear()`.
-    /// Debug builds catch the violation via `debug_assert!` in `QueryState::iter`.
+    /// # Interaction with `QueryState`
+    /// Safe across outstanding `QueryState`s. `clear()` bumps
+    /// `structural_generation`, which on the next `QueryState::iter()` triggers
+    /// a full cache rebuild (the dedup bitset is dropped + every live archetype
+    /// is reclassified against the filter). This eliminates the
+    /// ArchetypeId-ABA hazard that the pre-fix code documented as a caller
+    /// burden — a freshly created archetype reusing a recycled id is now
+    /// classified correctly against the stale `QueryState`'s filter.
     ///
-    /// Note: `generation` is intentionally NOT reset by `clear()`, so a stale
-    /// state's `generation < master.archetype_generation()` invariant still
-    /// holds — but the matched IDs are now nonsense relative to the post-clear
-    /// archetype set.
+    /// `generation` is intentionally NOT reset (kept monotonic across the
+    /// master's entire lifetime — `QueryState::generation` stays `<=` master's,
+    /// preserving the debug_assert invariant). The structural counter is what
+    /// signals invalidation; the creation counter signals the delta-add path.
     pub fn clear(&mut self) {
         self.archetypes = ArchetypeBundle::new();
         self.registry.clear();
         self.next_archetype_id = ArchetypeId(1);
         // `generation` is NOT reset — see doc comment above.
+        // `structural_generation` IS bumped: `clear()` is the maximally-
+        // structural change possible. A subsequent `QueryState::iter()` will
+        // observe the mismatch and do a full rebuild, which is the only path
+        // that correctly handles `next_archetype_id` rollback (otherwise the
+        // dedup bitset would treat ID=1 as "already seen").
+        self.structural_generation.bump();
     }
 }
 
@@ -777,5 +831,63 @@ mod tests {
             // At least one of Health or Damage
             assert!(archetype.has_component_id(mock(3)) || archetype.has_component_id(mock(4)));
         }
+    }
+
+    // --- ABA-prevention via dual-generation counters ---
+
+    /// `remove_archetype` must bump `structural_generation` so any live
+    /// `QueryState` is forced to invalidate its cache on the next iter.
+    /// Without this, a `QueryState` whose `matched_ids` still contains the
+    /// just-freed ID can leak it into iteration after a future `clear()` +
+    /// `create_archetype()` cycle reuses the same numeric ID.
+    #[test]
+    fn remove_archetype_bumps_structural_generation() {
+        register_mock_components();
+        let arena: Box<Arena> = Box::default();
+        let arena_ptr: *const Arena = unsafe {
+            let box_ptr: *const Box<Arena> = std::ptr::addr_of!(arena);
+            *(box_ptr.cast::<*const Arena>())
+        };
+        let mut master = unsafe { ArchetypeMaster::new(arena_ptr) };
+
+        let id = master.create_archetype(&mocks([1, 2]));
+        let struct_before = master.structural_generation();
+
+        // No-op removal of an unknown ID must NOT bump.
+        assert!(!master.remove_archetype(ArchetypeId(9999)));
+        assert_eq!(
+            master.structural_generation(),
+            struct_before,
+            "structural_generation must not bump on failed removal"
+        );
+
+        // Successful removal MUST bump.
+        assert!(master.remove_archetype(id));
+        assert!(
+            master.structural_generation() > struct_before,
+            "structural_generation must bump on successful removal"
+        );
+    }
+
+    /// `clear()` bumps the structural counter — it is the maximally-structural
+    /// change possible (everything is gone + next_archetype_id resets to 1).
+    #[test]
+    fn clear_bumps_structural_generation() {
+        register_mock_components();
+        let arena: Box<Arena> = Box::default();
+        let arena_ptr: *const Arena = unsafe {
+            let box_ptr: *const Box<Arena> = std::ptr::addr_of!(arena);
+            *(box_ptr.cast::<*const Arena>())
+        };
+        let mut master = unsafe { ArchetypeMaster::new(arena_ptr) };
+        master.create_archetype(&mocks([1]));
+        master.create_archetype(&mocks([2]));
+
+        let struct_before = master.structural_generation();
+        master.clear();
+        assert!(
+            master.structural_generation() > struct_before,
+            "structural_generation must bump on clear()"
+        );
     }
 }
