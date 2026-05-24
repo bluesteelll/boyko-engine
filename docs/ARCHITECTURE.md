@@ -127,21 +127,28 @@ External dependencies:
 ## Data flow when creating an entity
 
 ```
-User → EcsMaster::create_entity(archetype_id, components)
+User → EcsMaster::create_entity(archetype_id, &[(ComponentId, &[u8])])
+    ├─ Guard (C-007): archetype_master.has_archetype(archetype_id)?
+    │      └─ no → return Err(EcsError::ArchetypeNotFound) before any allocation
     ├─ EntityMaster::allocate_entity()
     │      └─ either take from free_entity_ids,
-    │         or bump next_entity_id → Entity { id, generation=0 }
+    │         or bump next_entity_id → Entity { id, generation }
     ├─ ArchetypeMaster::get_archetype_mut(id) → &mut Archetype
     ├─ Archetype::create_entity(entity_id, &mut inland, components)
-    │      └─ for each pair (component_id, &[u8]):
-    │             ComponentPoolBundle::get_pool_mut(component_id)
-    │               → ComponentPool::add(...)
-    │                   ├─ if needed: ComponentRegistry::get_layout(id)
-    │                   ├─ on first allocation: arena.allocate_layout(...)
-    │                   ├─ ptr::copy(src=bytes, dst=buffer + offset, size=layout.size())
-    │                   └─ units.push(Unit { ptr, buffer_index })
+    │      ├─ Two-phase commit (C-009): bundle.can_push_entity_components(...)
+    │      │      └─ false → rewind_allocate(entity);
+    │      │                  return Err(EcsError::ArchetypeRejectedEntity)
+    │      └─ bundle.push_entity_components(...) — atomic across pools
+    │             └─ for each (component_id, &[u8]):
+    │                    ComponentPool::add(...) → memcpy into arena buffer
     └─ EntityMaster::register_entity(entity, archetype_id, unit_index)
               └─ entity_map.insert(entity.id, EntityInland { archetype_id, unit_index, generation })
+
+Failure path correctness (C-007 + C-009): the guard means EntityIds are never
+leaked on early rejection; the two-phase commit means a partial push (some
+pools succeeded, some failed) is structurally impossible — `can_push` walks
+every pool in read-only mode first, then `push` only runs after universal
+go-ahead.
 ```
 
 ## Key architectural decisions
@@ -164,9 +171,9 @@ On master, `ComponentPool<T: Component>` was generic — one pool per type. On e
 
 **Where:** [crates/boyko_ecs/src/ecs/memory/id_unit.rs](../crates/boyko_ecs/src/ecs/memory/id_unit.rs)
 
-On master there was `UnitId { chunk: u32, inland: u32 }` — 8 bytes, requiring address computation on every access. On ecs, `Unit { ptr: *mut u8, buffer_index: usize }` — 16 bytes, but component access is direct (`*ptr`).
+On master there was `UnitId { chunk: u32, inland: u32 }` — 8 bytes, requiring address computation on every access. On ecs, `Unit { ptr: *mut u8 }` — 8 bytes (`#[repr(transparent)]`, M-005 / M-006 closed), component access is direct (`*ptr`).
 
-**Trade-off:** doubling the index size in exchange for removing indirection on reads.
+**Trade-off:** no size penalty (same 8 bytes as `UnitId`), and reads skip the indirection. The dense-array position formerly carried by `buffer_index: usize` is implicit in the `Vec<Unit>` index — every former call site passed `units.len()` at insert and never read it back.
 
 ### 3. Global `ComponentRegistry` / `EventRegistry`
 
@@ -193,13 +200,38 @@ Component IDs are minted lazily on first call to `T::component_id()`; see the mo
 
 `Generation` is incremented on deallocation — preventing stale references.
 
-### 5. `anyhow::Result` in `EcsMaster`
+### 5. Domain error type `EcsError`
 
-**Where:** [ecs_master.rs:9](../crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs)
+**Where:** [error.rs](../crates/boyko_ecs/src/ecs/error.rs)
 
-`anyhow` is used to propagate top-level errors. ⚠️ A debatable choice for a library — `anyhow` is typically for applications. When stabilizing the API it's worth replacing with a domain-specific error type.
+`#[non_exhaustive] pub enum EcsError` + `pub type EcsResult<T>` — replaces the historical `anyhow::Result` from `EcsMaster` (C-019 closed). Variants: `ArchetypeNotFound`, `EntityNotFound`, `ComponentPoolFull`, `UnknownComponentForArchetype`, `ArchetypeRejectedEntity`, `PoolSwapRemoveFailed`. Hand-rolled `Display` + `std::error::Error` — no `thiserror` dep.
 
-### 6. Adaptive chunk size based on component size
+`#[non_exhaustive]` keeps the door open for new variants without major-version bumps. Callers can pattern-match on the concrete variant (the whole point of switching off `anyhow`'s erased `Error`).
+
+### 6. Newtype identifiers
+
+**Where:** [identifiers/primitives.rs](../crates/boyko_ecs/src/ecs/identifiers/primitives.rs)
+
+Every ID type (`EntityId`, `ArchetypeId`, `ComponentId`, `ChunkId`, `InlandPoolId`, etc.) is a `#[repr(transparent)] pub struct X(pub usize)` newtype defined via a single `define_id!` macro (C-017 closed). Zero runtime cost, but the compiler refuses to mix them: `archetype.has_component_id(entity.id())` is a type error.
+
+`Generation` stays a `type alias = usize` — it is only ever paired with an `EntityId` inside `Entity` and never crossed with another ID kind.
+
+### 7. Dual-generation QueryState (ABA-safety across remove/clear)
+
+**Where:** [archetype/archetype_master.rs](../crates/boyko_ecs/src/ecs/core/archetype/archetype_master.rs), [iters/query_state.rs](../crates/boyko_ecs/src/ecs/core/iters/query_state.rs)
+
+`ArchetypeMaster` carries two monotonic counters:
+- `generation` — bumps on every `create_archetype` (creation deltas).
+- `structural_generation` — bumps on `remove_archetype` and `clear()` (structural changes).
+
+`QueryState` snapshots both. On `iter()`:
+- Structural mismatch → drop the dedup bitset + matched_ids, **full rebuild** (reclassify every live archetype). This is the load-bearing piece — without it, a freshly created archetype reusing a recycled `ArchetypeId` (after `clear()` resets `next_archetype_id`) would be skipped by the stale bitset and silently absent from results.
+- Creation-only delta → original delta-add path (skip already-classified IDs via bitset).
+- Both equal → warm path (one comparison + slice walk).
+
+This eliminates the ArchetypeId-ABA hazard while keeping the ~21× Q-011 warm-path speedup (Phase 5c).
+
+### 8. Adaptive chunk size based on component size
 
 Same as on master — `TINY/SMALL/MEDIUM/LARGE_COMPONENTS_PER_CHUNK` (see [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs)).
 
@@ -211,25 +243,23 @@ Target model:
 3. **Lock-free infrastructure**: allocations, registry, archetype access — via atomics.
 
 Current state:
-- `Arena` — `UnsafeCell<MemFreeBlockMaster>`, **not thread-safe** for multi-writer.
+- `Arena` — `UnsafeCell<MemFreeBlockMaster>` + `!Send + !Sync`, **single-threaded by construction**.
 - `ComponentPool` mutability via `&mut self`.
-- `ComponentRegistry` / `EventRegistry` — `static` storage, registration thread-safety needs verification.
-- No scheduler yet.
+- `ComponentRegistry` / `EventRegistry` — `static [OnceLock<...>; N]` + `AtomicUsize` counter — lock-free, cross-thread safe (M-002 / C-002 / Q-004 / Q-010 closed).
+- No system scheduler yet — planned Phase 4+.
 
 ## Performance goals
 
-Target benchmarks (require validation via criterion benches after the build is fixed):
+Targets (with the current `criterion` harness in [benches/](../crates/boyko_ecs/benches/) — see [SYSTEMS.md §14](SYSTEMS.md#14-benchmarks)):
 
-| Operation | Target | Notes |
-|-----------|--------|-------|
-| `Arena::allocate_aligned` (no fragmentation) | ≤ 50 ns | BTreeMap lookup + 2 HashMap ops |
-| `ComponentPool::add` (space available in chunk) | ≤ 10 ns | Type-erased: pointer + memcpy + Vec::push(Unit) |
-| Component access via `Unit::ptr` | ≤ 2 ns | Direct pointer dereference |
-| Linear iteration over a pool | ~32 GB/s for tiny components | Sequential through buffer |
-| `EcsMaster::create_entity` | ≤ 150 ns | EntityMaster + ArchetypeMaster + ComponentPool::add × N |
-| Query construction (cached signature) | ≤ 50 ns | Archetype filter by mask |
-
-These numbers are targets. No benchmarks exist yet.
+| Operation | Target | Status |
+|-----------|--------|--------|
+| `Arena::allocate_aligned` (no fragmentation) | ≤ 50 ns | benched in `allocator.rs` (M-012 validation) |
+| `ComponentPool::add` (space available) | ≤ 10 ns | benched implicitly in `archetype.rs` create paths |
+| Component access via `Unit::ptr` | ≤ 2 ns | direct pointer deref |
+| Linear iter over a pool | ~32 GB/s for tiny components | per-entity `Query::iter_one/iter_two` (Phase 2d) is the foundation |
+| `EcsMaster::create_entity` | ≤ 150 ns | benched in `archetype.rs` for 2 / 8 component widths |
+| `QueryState` warm-path iter | ≤ 5 ns | **measured ~3.6 ns** in `query_iter.rs` (vs ~77 ns one-shot Query construction → ~21× speedup, Q-011 closed) |
 
 ## What differs from the `master` branch
 
