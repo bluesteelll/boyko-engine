@@ -191,18 +191,27 @@ the `MemFreeBlockMaster` internal data structure).
 Findings that don't block normal operation but harden the engine
 against edge cases, future refactors, and adversarial inputs.
 
-### Phase 3a — Entity lifecycle correctness (3 findings)
+### Phase 3a — Entity lifecycle correctness (3 findings) — DONE ✅
 
-| ID | Site | Issue | Fix |
-|----|------|-------|-----|
-| **C-006** | `EcsMaster::delete_entity` | Fragile swap-update logic; `Option<EntityId>` ambiguous (3 meanings) | `enum RemoveOutcome { Last, Swapped(EntityId), Failed }` |
-| **C-007** | `EcsMaster::create_entity` early return after `allocate_entity` | EntityId leaked on `?` in `get_archetype_mut` failure | Guard pattern: allocate after preconditions |
-| **C-009** | `ComponentPoolBundle::add_entity_components` | No rollback on partial-pool failure → pool desync | Two-phase commit OR pre-check capacity + atomic add |
+| ID | Site | Issue | Fix | Status |
+|----|------|-------|-----|--------|
+| **C-006** | `EcsMaster::delete_entity` | Fragile swap-update logic; `Option<EntityId>` ambiguous (3 meanings) | `enum RemoveOutcome { Last, Swapped { moved_entity }, PoolFailure }` | ✅ DONE |
+| **C-007** | `EcsMaster::create_entity` early return after `allocate_entity` | EntityId leaked on `?` in `get_archetype_mut` failure | Guard pattern: validate archetype before allocate; `rewind_allocate` on failure | ✅ DONE |
+| **C-009** | `ComponentPoolBundle::add_entity_components` | No rollback on partial-pool failure → pool desync | Two-phase commit: `can_push_entity_components` + `push_entity_components` | ✅ DONE |
 
-**Dependency**: C-007 and C-009 are coupled (both touch `create_entity`).
-Best done together. C-006 is independent.
+**Implementation** (4 commits):
+- Miri retag fix: `NonNull<Arena>` → `*const Arena` raw provenance throughout.
+  `.cargo/config.toml`: `MIRIFLAGS=-Zmiri-tree-borrows` (Tree Borrows required
+  for `UnsafeCell`-containing `Arena` with raw pointer aliasing).
+- C-006: `RemoveOutcome` enum in `archetype.rs`; compile-time size assertion.
+- C-009: `can_push_entity_components` + `push_entity_components`; deleted
+  `add_entity_components` (zero callers).
+- C-007: `EntityMaster::rewind_allocate` (pub(crate)); guard in
+  `EcsMaster::create_entity`; `ArchetypeMaster::has_archetype`.
+  CI `continue-on-error` removed from Miri job (Phase 3a Miri gate closed).
 
-**Effort estimate**: 1-2 sessions.
+**Test delta**: +19 total (4 C-006 + 5 C-009 + 5 C-007 + 5 rewind_allocate tests).
+**Miri**: all tests pass under Tree Borrows (`-Zmiri-tree-borrows`).
 
 ### Phase 3b — Iterators / Containers cleanup (3 findings)
 

@@ -63,12 +63,15 @@ jobs:
       - run: cargo bench --no-run
 
   miri:
-    name: Miri (informational)
+    name: Miri
     runs-on: ubuntu-latest
-    # Miri is informational: some pre-existing tests fail under it.
-    # Entity lifecycle UB is tracked for Phase 3a. Remove continue-on-error
-    # once Phase 3a lands and the full sweep is clean.
-    continue-on-error: true
+    # Phase 3a (Miri retag fix + EntityId leak guard) closed the pre-existing UB.
+    # continue-on-error removed: Miri is now a required gate.
+    # MIRIFLAGS=-Zmiri-tree-borrows is set in .cargo/config.toml (workspace-wide)
+    # because Tree Borrows (TB) correctly models *const Arena raw provenance with
+    # UnsafeCell interior mutation — Stacked Borrows (SB) falsely rejects it.
+    # Miri retag UB (Step 1) + EntityId leak (Step 4) jointly close Phase 3a.
+    # continue-on-error removed from .github/workflows/ci.yml as per Phase 3a plan.
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
@@ -81,5 +84,5 @@ jobs:
         run: cargo +nightly miri test --package boyko-ecs --test event_attribute
       - name: cargo miri test (drop_fn — known clean)
         run: cargo +nightly miri test --package boyko-ecs --test drop_fn
-      - name: cargo miri test (full sweep — may report pre-existing UB)
+      - name: cargo miri test (full sweep)
         run: cargo +nightly miri test --all-targets

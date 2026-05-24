@@ -109,6 +109,12 @@ impl ArchetypeMaster {
         archetype_id
     }
     
+    /// Returns `true` if an archetype with the given ID is registered.
+    #[inline]
+    pub fn has_archetype(&self, archetype_id: ArchetypeId) -> bool {
+        self.archetypes.get_archetype(archetype_id).is_some()
+    }
+
     /// Gets a reference to an archetype by ID
     pub fn get_archetype(&self, archetype_id: ArchetypeId) -> Option<&Archetype> {
         self.archetypes.get_archetype(archetype_id)

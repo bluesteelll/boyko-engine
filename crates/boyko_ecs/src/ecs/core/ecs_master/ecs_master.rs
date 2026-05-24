@@ -115,40 +115,64 @@ impl EcsMaster {
         self.archetype_master.get_or_create_archetype(component_ids)
     }
 
-    /// Creates a new entity with components in the specified archetype
-    /// Takes a slice of (ComponentId, &[u8]) pairs for component data
-    /// Returns the created entity if successful
+    /// Creates a new entity with components in the specified archetype.
+    ///
+    /// Takes a slice of (ComponentId, &[u8]) pairs for component data.
+    /// Returns the created entity if successful.
+    ///
+    /// # Guard pattern (C-007)
+    ///
+    /// Preconditions are validated **before** `allocate_entity` so that
+    /// no `EntityId` is leaked if the archetype lookup fails. Specifically:
+    /// 1. `has_archetype(archetype_id)` is checked first.
+    /// 2. Only then is `allocate_entity` called.
+    /// 3. If `create_entity` fails, `rewind_allocate` undoes the allocation
+    ///    (fresh-ID path) so the ID is not silently wasted.
     pub fn create_entity(
-        &mut self, 
-        archetype_id: ArchetypeId, 
-        components: Vec<(ComponentId, &[u8])>
+        &mut self,
+        archetype_id: ArchetypeId,
+        components: Vec<(ComponentId, &[u8])>,
     ) -> Result<Entity> {
-        // Allocate a new entity
+        // Guard: validate archetype exists BEFORE allocating an EntityId.
+        // Previously, allocate_entity() was called first, and if the archetype
+        // lookup subsequently failed the ID was permanently leaked (C-007).
+        if !self.archetype_master.has_archetype(archetype_id) {
+            bail!("Archetype {} not found", archetype_id);
+        }
+
+        // Allocate a new entity — only reached if the guard passed.
         let entity = self.entity_master.allocate_entity();
         let generation = entity.generation();
 
-        // Create EntityInland with initial values
+        // Create EntityInland with initial values.
         let mut entity_inland = EntityInland::new(
-            archetype_id, 
-            0, // Unit index will be set by archetype
-            generation
+            archetype_id,
+            0, // unit index will be set by create_entity
+            generation,
         );
 
-        // Get the target archetype
-        let archetype = self.archetype_master.get_archetype_mut(archetype_id)
-            .ok_or_else(|| anyhow::anyhow!("Archetype {} not found", archetype_id))?;
+        // SAFETY of the get_archetype_mut call: we verified existence above.
+        // This cannot return None unless the archetype was removed between the
+        // guard and this call, which is impossible in a single-threaded context.
+        let archetype = self.archetype_master
+            .get_archetype_mut(archetype_id)
+            .expect("invariant: archetype existed at guard check; single-threaded");
 
-        // Initialize the EntityInland with archetype info
         archetype.init_entity_inland(&mut entity_inland);
 
-        // Create the entity in the archetype with its components
         if !archetype.create_entity(entity.id(), &mut entity_inland, components) {
-            // Failed to create - recycle the entity
-            self.entity_master.deallocate_entity(entity);
+            // Archetype rejected the entity (e.g. can_push failed). Undo the
+            // allocation so the EntityId is not leaked (C-007 rewind path).
+            let rewound = self.entity_master.rewind_allocate(entity);
+            if !rewound {
+                // rewind_allocate returns false for recycled IDs; fall back to
+                // the full deallocate path to put the ID back on the free list.
+                self.entity_master.deallocate_entity(entity);
+            }
             bail!("Failed to create entity in archetype");
         }
 
-        // Register the entity with its inland data
+        // Register the entity with its inland data.
         self.entity_master.register_entity(entity, archetype_id, entity_inland.unit_index());
 
         Ok(entity)
@@ -479,32 +503,163 @@ mod tests {
     #[test]
     fn test_query_entities() {
         register_test_components();
-        
+
         let mut ecs = EcsMaster::new();
-        
+
         // Create archetypes
         let arch1 = ecs.create_archetype(&[POSITION_ID, VELOCITY_ID]);
         let arch2 = ecs.create_archetype(&[POSITION_ID, HEALTH_ID]);
-        
+
         // Create entities (simplified - using dummy data)
         let dummy_bytes = [0u8; 64];
-        
+
         let _entity1 = ecs.create_entity(arch1, vec![
             (POSITION_ID, &dummy_bytes[..12]),
             (VELOCITY_ID, &dummy_bytes[..12]),
         ]).unwrap();
-        
+
         let _entity2 = ecs.create_entity(arch2, vec![
             (POSITION_ID, &dummy_bytes[..12]),
             (HEALTH_ID, &dummy_bytes[..4]),
         ]).unwrap();
-        
+
         // Query entities with Position
         let entities_with_position = ecs.query_entities(&[POSITION_ID]);
         assert_eq!(entities_with_position.len(), 2);
-        
+
         // Query entities with Position and Velocity
         let entities_with_pos_vel = ecs.query_entities(&[POSITION_ID, VELOCITY_ID]);
         assert_eq!(entities_with_pos_vel.len(), 1);
+    }
+
+    // C-007 guard tests: validate that create_entity never leaks EntityIds.
+    //
+    // The guard sequence is:
+    //   1. has_archetype() checked BEFORE allocate_entity()
+    //   2. If archetype not found → bail! (no EntityId consumed)
+    //   3. On post-allocation failure → rewind_allocate() undoes fresh-ID
+    //      allocation, or deallocate_entity() recycles an existing one.
+
+    /// Creating an entity in a non-existent archetype must fail and must not
+    /// consume an EntityId from the allocator.
+    #[test]
+    fn test_create_entity_nonexistent_archetype_no_id_leak() {
+        register_test_components();
+
+        let mut ecs = EcsMaster::new();
+
+        let dummy_bytes = [0u8; 12];
+
+        // Attempt to create an entity in archetype 999 (never created).
+        let result = ecs.create_entity(999, vec![(POSITION_ID, &dummy_bytes)]);
+        assert!(result.is_err(), "should fail for unknown archetype");
+
+        // No EntityId must have been allocated: next fresh id stays at 0.
+        assert_eq!(ecs.entity_master().next_entity_id(), 0,
+            "EntityId must not be consumed when the guard fires");
+
+        // No active entities and no recycled slots.
+        assert_eq!(ecs.entity_count(), 0);
+        assert_eq!(ecs.recycled_entity_count(), 0);
+    }
+
+    /// Consecutive failed guard calls must not accumulate leaked EntityIds.
+    #[test]
+    fn test_repeated_guard_failures_do_not_leak_ids() {
+        register_test_components();
+
+        let mut ecs = EcsMaster::new();
+        let dummy_bytes = [0u8; 12];
+
+        for _ in 0..5 {
+            let _ = ecs.create_entity(42, vec![(POSITION_ID, &dummy_bytes)]);
+        }
+
+        // After 5 failed guard calls the fresh-id counter must still be 0.
+        assert_eq!(ecs.entity_master().next_entity_id(), 0);
+        assert_eq!(ecs.entity_count(), 0);
+        assert_eq!(ecs.recycled_entity_count(), 0);
+    }
+
+    /// A successful create_entity followed by a delete_entity returns the
+    /// EntityId to the free list. A subsequent create_entity in a bad
+    /// archetype must NOT consume that recycled slot.
+    #[test]
+    fn test_guard_does_not_consume_recycled_slot() {
+        register_test_components();
+
+        let mut ecs = EcsMaster::new();
+        let arch = ecs.create_archetype(&[POSITION_ID, VELOCITY_ID]);
+
+        let pos_bytes = [0u8; 12];
+        let vel_bytes = [0u8; 12];
+
+        // Create and immediately delete an entity.
+        let entity = ecs.create_entity(arch, vec![
+            (POSITION_ID, &pos_bytes),
+            (VELOCITY_ID, &vel_bytes),
+        ]).unwrap();
+        assert!(ecs.delete_entity(entity));
+        assert_eq!(ecs.recycled_entity_count(), 1);
+
+        // A guard-failing call must not touch the free list.
+        let _ = ecs.create_entity(999, vec![(POSITION_ID, &pos_bytes)]);
+        assert_eq!(ecs.recycled_entity_count(), 1,
+            "free list must not be consumed when guard fires before allocate_entity");
+        assert_eq!(ecs.entity_count(), 0);
+    }
+
+    /// `rewind_allocate` is the internal mechanism backing the C-007 guard.
+    /// Exercise it directly through entity_master() to verify the invariant:
+    /// rewinding a fresh (non-registered) entity decrements next_entity_id.
+    #[test]
+    fn test_rewind_allocate_restores_fresh_id() {
+        register_test_components();
+
+        let mut ecs = EcsMaster::new();
+        let entity_master = ecs.entity_master_mut();
+
+        // Allocate a fresh entity without registering it.
+        let entity = entity_master.allocate_entity();
+        assert_eq!(entity.id(), 0);
+        assert_eq!(entity_master.next_entity_id(), 1);
+
+        // Rewind must succeed and restore next_entity_id to 0.
+        let rewound = entity_master.rewind_allocate(entity);
+        assert!(rewound, "fresh-ID rewind must succeed");
+        assert_eq!(entity_master.next_entity_id(), 0,
+            "next_entity_id must be restored after rewind");
+        assert_eq!(entity_master.entity_count(), 0);
+    }
+
+    /// After a successful create_entity in a valid archetype the entity count
+    /// must be 1 and the EntityId must be stable across the rewind path
+    /// (i.e., the rewind path is never taken when creation succeeds).
+    #[test]
+    fn test_successful_create_entity_no_rewind() {
+        register_test_components();
+
+        let mut ecs = EcsMaster::new();
+        let arch = ecs.create_archetype(&[POSITION_ID, VELOCITY_ID]);
+
+        let pos = Position { x: 1.0, y: 0.0, z: 0.0 };
+        let vel = Velocity { x: 0.0, y: 1.0, z: 0.0 };
+        let pos_bytes = unsafe {
+            std::slice::from_raw_parts(&pos as *const _ as *const u8, std::mem::size_of::<Position>())
+        };
+        let vel_bytes = unsafe {
+            std::slice::from_raw_parts(&vel as *const _ as *const u8, std::mem::size_of::<Velocity>())
+        };
+
+        let entity = ecs.create_entity(arch, vec![
+            (POSITION_ID, pos_bytes),
+            (VELOCITY_ID, vel_bytes),
+        ]).unwrap();
+
+        assert!(ecs.has_entity(entity));
+        assert_eq!(ecs.entity_count(), 1);
+        // next_entity_id was advanced to 1 and not rewound.
+        assert_eq!(ecs.entity_master().next_entity_id(), 1);
+        assert_eq!(ecs.recycled_entity_count(), 0);
     }
 }

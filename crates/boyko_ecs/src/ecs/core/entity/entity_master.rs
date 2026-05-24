@@ -246,10 +246,45 @@ impl EntityMaster {
     /// Compacts the internal storage to minimize memory usage
     pub fn compact(&mut self) {
         self.free_entity_ids.shrink_to_fit();
-        
+
         // Note: We don't shrink entities vector as it would invalidate IDs
         // Instead, we just sort the free list for better cache usage
         self.free_entity_ids.sort_unstable_by(|a, b| b.cmp(a)); // Reverse order for pop()
+    }
+
+    /// Rolls back the last `allocate_entity` call for a fresh ID (not a recycled one).
+    ///
+    /// # Invariant
+    ///
+    /// `rewind_allocate` must be called immediately after `allocate_entity` and
+    /// before any other `EntityMaster` mutation, otherwise the
+    /// `id == next_entity_id - 1` heuristic for fresh-ID rollback is unsound.
+    /// The current single caller (`EcsMaster::create_entity` on guard failure)
+    /// satisfies this contract by construction. If a second caller emerges,
+    /// audit the contract or promote `rewind_allocate` to a token-based RAII
+    /// guard.
+    ///
+    /// For recycled IDs (from `free_entity_ids`) this method has no effect and
+    /// returns `false` — recycled IDs are returned to the free list by the
+    /// caller (via `deallocate_entity`) if needed. In the single-caller context,
+    /// `EcsMaster::create_entity` only calls this on the fresh-ID path (before
+    /// `register_entity`), so the recycled case never occurs in practice.
+    #[doc(hidden)]
+    pub(crate) fn rewind_allocate(&mut self, entity: Entity) -> bool {
+        let id = entity.id();
+        // Fresh IDs are minted sequentially from next_entity_id; a fresh entity
+        // is at `next_entity_id - 1` immediately after allocate_entity returns.
+        if id + 1 == self.next_entity_id && id < self.entities.len() {
+            // Verify it was never registered (no entry in entity_map).
+            debug_assert!(!self.entity_map.contains(id),
+                "rewind_allocate called on a registered entity — invariant violated");
+            // Undo next_entity_id increment.
+            self.next_entity_id -= 1;
+            true
+        } else {
+            // Recycled ID path or stale call — caller must use deallocate_entity.
+            false
+        }
     }
 
 }
