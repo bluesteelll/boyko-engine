@@ -350,6 +350,14 @@ impl Default for EntityMaster {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ecs::core::archetype::archetype::Archetype;
+
+    /// Helper: mint a non-null, never-dereferenced `*mut Archetype` for tests
+    /// that only exercise the entity-management bookkeeping (not the actual
+    /// archetype storage). Phase 7 M1 migration recipe.
+    fn dummy_archetype_ptr() -> *mut Archetype {
+        core::ptr::NonNull::<Archetype>::dangling().as_ptr()
+    }
 
     #[test]
     fn test_entity_allocation_fresh() {
@@ -364,5 +372,160 @@ mod tests {
         let entity2 = master.allocate_entity();
         assert_eq!(entity2.id(), EntityId(1));
         assert_eq!(entity2.generation(), 0);
+    }
+
+    // --- Phase 7 Step 10 (M1): tests rebuilt on the new `register_entity_with_ptr` API ---
+
+    /// `register_entity_with_ptr` round-trip: after allocate + register the
+    /// entity is reported live by `is_entity_valid`, the entity count tracks
+    /// the dense active list, and `get_entity` resolves to the same handle.
+    /// Rebuilt from the deleted `test_entity_registration`.
+    #[test]
+    fn register_entity_with_ptr_round_trip() {
+        let mut em = EntityMaster::new();
+        let entity = em.allocate_entity();
+
+        em.register_entity_with_ptr(entity, dummy_archetype_ptr(), 7);
+
+        assert!(em.is_entity_valid(entity), "registered entity must be valid");
+        assert_eq!(em.entity_count(), 1, "active count must be 1 after one register");
+        assert_eq!(em.get_entity(entity.id()), Some(entity),
+            "get_entity must resolve to the same handle");
+        // The fast-store inland reflects the registration parameters.
+        let inland = em.entities_inland[entity.id().0];
+        assert!(!inland.is_null(), "inland slot must be live after register");
+        assert_eq!(inland.unit_index(), 7);
+        assert_eq!(inland.generation(), entity.generation());
+    }
+
+    /// Deallocate then allocate: the ID is recycled and its generation is
+    /// bumped. The pre-dealloc handle becomes stale and is rejected by
+    /// `is_entity_valid`. Rebuilt from the deleted
+    /// `test_entity_deallocation_and_reuse`.
+    #[test]
+    fn deallocate_then_allocate_recycles_id_with_bumped_generation() {
+        let mut em = EntityMaster::new();
+        let e0 = em.allocate_entity();
+        em.register_entity_with_ptr(e0, dummy_archetype_ptr(), 0);
+        assert!(em.is_entity_valid(e0));
+
+        assert!(em.deallocate_entity(e0), "deallocate of a live entity must return true");
+        assert!(!em.is_entity_valid(e0), "stale handle must be rejected after dealloc");
+        assert_eq!(em.entity_count(), 0);
+        assert_eq!(em.recycled_entity_count(), 1, "id must be on the free list");
+
+        let e1 = em.allocate_entity();
+        assert_eq!(e1.id(), e0.id(), "ID must be recycled (LIFO free list)");
+        assert_eq!(
+            e1.generation(),
+            e0.generation().wrapping_add(1),
+            "generation must bump on dealloc"
+        );
+        // Re-using e0 (stale) must still report invalid even after recycle.
+        assert!(!em.is_entity_valid(e0),
+            "stale pre-dealloc handle must remain invalid after id is recycled");
+    }
+
+    /// `iter_entities` must reflect only currently-live entities. After
+    /// churning (allocate three, deallocate one), the iterator yields exactly
+    /// the surviving two — order is registration-order with swap-remove.
+    /// Rebuilt from the deleted `t_iter_entities_skips_recycled_slots` and
+    /// `t_iter_entities_yields_correct_set_after_recycle`.
+    #[test]
+    fn iter_entities_yields_only_live_entities_after_churn() {
+        let mut em = EntityMaster::new();
+        let ptr = dummy_archetype_ptr();
+        let e0 = em.allocate_entity();
+        em.register_entity_with_ptr(e0, ptr, 0);
+        let e1 = em.allocate_entity();
+        em.register_entity_with_ptr(e1, ptr, 1);
+        let e2 = em.allocate_entity();
+        em.register_entity_with_ptr(e2, ptr, 2);
+
+        assert!(em.deallocate_entity(e1), "dealloc of the middle entity must succeed");
+
+        let live: Vec<_> = em.iter_entities().collect();
+        assert_eq!(live.len(), 2, "exactly 2 entities must remain after one dealloc");
+        assert!(live.contains(&e0), "e0 must still be reported by iter_entities");
+        assert!(live.contains(&e2), "e2 must still be reported by iter_entities");
+        assert!(!live.contains(&e1), "deallocated e1 must NOT appear in iter_entities");
+    }
+
+    /// `rewind_allocate` undoes a fresh `allocate_entity` (the C-007 guard
+    /// path used by `EcsMaster::create_entity` on post-allocate failure).
+    /// Calling it without a prior allocation must report `false` (the
+    /// fresh-id heuristic doesn't fire). Rebuilt as the test-migration
+    /// recipe equivalent of `test_entity_inland_update` (the legacy
+    /// `update_entity_inland` is replaced by `EntityInland::set_unit_index`
+    /// exercised inline).
+    #[test]
+    fn rewind_allocate_decrements_next_id_on_fresh_path() {
+        let mut em = EntityMaster::new();
+        assert_eq!(em.next_entity_id(), EntityId(0));
+
+        let e = em.allocate_entity();
+        assert_eq!(em.next_entity_id(), EntityId(1));
+
+        // Rewind must succeed and restore `next_entity_id`.
+        let rewound = em.rewind_allocate(e);
+        assert!(rewound, "fresh-id rewind must succeed");
+        assert_eq!(em.next_entity_id(), EntityId(0),
+            "next_entity_id must roll back after rewind");
+        assert_eq!(em.entity_count(), 0);
+
+        // A second rewind on a stale entity must NOT decrement again.
+        let rewound_again = em.rewind_allocate(e);
+        assert!(!rewound_again,
+            "rewind on a stale entity must report false (heuristic doesn't fire)");
+        assert_eq!(em.next_entity_id(), EntityId(0),
+            "next_entity_id must not be touched by a no-op rewind");
+    }
+
+    /// `EntityInland::set_unit_index` (used by `EcsMaster::delete_entity` on
+    /// `RemoveOutcome::Swapped`) must update the live slot in place so that
+    /// subsequent fast-path lookups see the new index. Reflects the test
+    /// migration recipe — replacing the deleted legacy
+    /// `update_entity_unit_index` path.
+    #[test]
+    fn set_unit_index_on_inland_updates_fast_store() {
+        let mut em = EntityMaster::new();
+        let e = em.allocate_entity();
+        em.register_entity_with_ptr(e, dummy_archetype_ptr(), 5);
+
+        // Direct field mutation via the pub(crate) accessor — mirrors what
+        // `EcsMaster::delete_entity` does on the swap-remove path.
+        em.entities_inland[e.id().0].set_unit_index(2);
+
+        let stored = em.entities_inland[e.id().0];
+        assert!(!stored.is_null(), "slot must remain live after unit_index update");
+        assert_eq!(stored.unit_index(), 2, "unit_index must reflect the in-place update");
+        assert_eq!(stored.generation(), e.generation(),
+            "generation must NOT change as a side effect of set_unit_index");
+    }
+
+    /// Test that `deallocate_entity` on a stale handle (generation mismatch)
+    /// returns false and does not corrupt the active set. Covers the
+    /// generation-mismatch leg of the deleted
+    /// `test_entity_deallocation_and_reuse`.
+    #[test]
+    fn deallocate_entity_rejects_stale_generation_handle() {
+        let mut em = EntityMaster::new();
+        let e0 = em.allocate_entity();
+        em.register_entity_with_ptr(e0, dummy_archetype_ptr(), 0);
+
+        // Dealloc + recycle to bump the generation.
+        assert!(em.deallocate_entity(e0));
+        let e1 = em.allocate_entity();
+        em.register_entity_with_ptr(e1, dummy_archetype_ptr(), 0);
+        assert_ne!(e0.generation(), e1.generation(),
+            "recycled entity must have a different generation than its predecessor");
+
+        // Pre-recycle handle is stale; dealloc must reject it.
+        assert!(!em.deallocate_entity(e0),
+            "dealloc of stale handle must return false");
+        // Live entity still alive.
+        assert!(em.is_entity_valid(e1),
+            "stale dealloc attempt must not invalidate the live recycled entity");
+        assert_eq!(em.entity_count(), 1);
     }
 }

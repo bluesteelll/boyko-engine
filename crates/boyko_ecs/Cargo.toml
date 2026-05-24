@@ -36,3 +36,7 @@ harness = false
 [[bench]]
 name = "event_dispatch"
 harness = false
+
+[[bench]]
+name = "random_access"
+harness = false
