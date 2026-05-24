@@ -385,6 +385,76 @@ impl ComponentPool {
         Some(self.units[index].ptr())
     }
 
+    /// Type-checked shared read.
+    ///
+    /// A typed wrapper over [`get_raw`](ComponentPool::get_raw) that asserts
+    /// the caller's `T` matches the pool's registered type before casting. This
+    /// surfaces registry-mismatch bugs at the read boundary rather than
+    /// silently producing a mis-typed reference (defense-in-depth for audit C-004).
+    ///
+    /// # Returns
+    /// - `Some(&T)` if `index < self.count()`.
+    /// - `None` if `index` is out of bounds.
+    ///
+    /// # Panics (debug only)
+    /// `debug_assert!` fires if `TypeId::of::<T>()` does not match the pool's
+    /// registered type — surfaces caller bugs at the read boundary instead of
+    /// producing a mis-typed reference (audit C-004).
+    #[inline]
+    pub fn get_typed<T: Component>(&self, index: usize) -> Option<&T> {
+        debug_assert_eq!(
+            self.component_type_id,
+            TypeId::of::<T>(),
+            "ComponentPool typed read: T = {} does not match pool's registered type",
+            std::any::type_name::<T>()
+        );
+        let ptr = self.get_raw(index)?;
+        // SAFETY:
+        // - `get_raw` returns `Some(ptr)` only when `index < self.units.len()`,
+        //   meaning the slot was populated via `add` / `add_typed` and has not
+        //   been removed. All such slots are fully initialized.
+        // - The pool allocates its buffer aligned to `component_layout.align()`,
+        //   which equals `align_of::<T>()` because `TypeId::of::<T>()` matches
+        //   the registered type (asserted by `debug_assert_eq!` above). Each
+        //   slot offset is a multiple of `size_of::<T>()`, which is itself a
+        //   multiple of `align_of::<T>()` per the Rust Reference §"Type Layout".
+        // - `&self` guarantees no concurrent mutable access for the lifetime of
+        //   the returned reference.
+        Some(unsafe { &*ptr.cast::<T>() })
+    }
+
+    /// Type-checked exclusive read.
+    ///
+    /// A typed wrapper over [`get_raw_mut`](ComponentPool::get_raw_mut) that
+    /// asserts the caller's `T` matches the pool's registered type before
+    /// casting. Same defense-in-depth rationale as [`get_typed`](ComponentPool::get_typed).
+    ///
+    /// # Returns
+    /// - `Some(&mut T)` if `index < self.count()`.
+    /// - `None` if `index` is out of bounds.
+    ///
+    /// # Panics (debug only)
+    /// Same TypeId mismatch check as `get_typed`.
+    #[inline]
+    pub fn get_mut_typed<T: Component>(&mut self, index: usize) -> Option<&mut T> {
+        debug_assert_eq!(
+            self.component_type_id,
+            TypeId::of::<T>(),
+            "ComponentPool typed mut read: T = {} does not match pool's registered type",
+            std::any::type_name::<T>()
+        );
+        let ptr = self.get_raw_mut(index)?;
+        // SAFETY:
+        // - `get_raw_mut` returns `Some(ptr)` only when `index < self.units.len()`,
+        //   meaning the slot is fully initialized.
+        // - Alignment matches `align_of::<T>()` per the same reasoning as
+        //   `get_typed`: the TypeId `debug_assert_eq!` above confirms `T` is the
+        //   pool's registered type, so `component_layout.align() == align_of::<T>()`.
+        // - `&mut self` provides exclusive ownership of the pool; no other
+        //   reference to this slot exists for the lifetime of the return value.
+        Some(unsafe { &mut *ptr.cast::<T>() })
+    }
+
     /// Overwrites the component at `index` with `component_bytes` (raw API).
     ///
     /// Invokes drop glue on the existing value before overwriting.
@@ -626,5 +696,167 @@ impl Drop for ComponentPool {
             }
         }
         // Arena memory release happens via Arena::Drop (M-001).
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::OnceLock;
+
+    use super::ComponentPool;
+    use crate::ecs::core::component::component::Component;
+    use crate::ecs::core::component::component_registry;
+    use crate::ecs::memory::arena::Arena;
+
+    // ID allocation (no collision with integration test files or other unit tests):
+    //   component_registry unit tests: 450..466, 498, 499
+    //   drop_fn integration:           200..207
+    //   drop_safety integration:       480..481
+    //   typed-read tests below:        220..223
+    const POS_ID: usize = 220;
+    const VEL_ID: usize = 221;
+    const OTHER_ID: usize = 222;
+
+    // ---- component type definitions ------------------------------------------------
+
+    #[repr(C)]
+    struct Position {
+        x: f32,
+        y: f32,
+        z: f32,
+    }
+
+    #[repr(C)]
+    struct Velocity {
+        vx: f32,
+        vy: f32,
+        vz: f32,
+    }
+
+    /// A distinct type used solely for the TypeId-mismatch panic test.
+    #[repr(C)]
+    struct OtherComponent {
+        val: u64,
+    }
+
+    // ---- Component impls (mirrors what #[derive(Component)] generates) -------------
+
+    impl Component for Position {
+        fn component_id() -> usize {
+            static ID: OnceLock<usize> = OnceLock::new();
+            *ID.get_or_init(|| {
+                component_registry::register_layout::<Position>(POS_ID);
+                POS_ID
+            })
+        }
+    }
+
+    impl Component for Velocity {
+        fn component_id() -> usize {
+            static ID: OnceLock<usize> = OnceLock::new();
+            *ID.get_or_init(|| {
+                component_registry::register_layout::<Velocity>(VEL_ID);
+                VEL_ID
+            })
+        }
+    }
+
+    impl Component for OtherComponent {
+        fn component_id() -> usize {
+            static ID: OnceLock<usize> = OnceLock::new();
+            *ID.get_or_init(|| {
+                component_registry::register_layout::<OtherComponent>(OTHER_ID);
+                OTHER_ID
+            })
+        }
+    }
+
+    // ---- helpers -------------------------------------------------------------------
+
+    fn register_all() {
+        component_registry::register_layout::<Position>(POS_ID);
+        component_registry::register_layout::<Velocity>(VEL_ID);
+        component_registry::register_layout::<OtherComponent>(OTHER_ID);
+    }
+
+    fn make_position_pool(arena: &Arena, cap: usize) -> ComponentPool {
+        register_all();
+        ComponentPool::new(arena, POS_ID, 1, cap)
+    }
+
+    // ---- tests (audit C-004 typed read wrappers) -----------------------------------
+
+    /// `get_typed` must return the exact field values that were inserted via `add_typed`.
+    #[test]
+    fn get_typed_returns_inserted_value() {
+        register_all();
+        let arena = Arena::new();
+        let mut pool = make_position_pool(&arena, 4);
+
+        let index = pool
+            .add_typed(Position { x: 1.0, y: 2.0, z: 3.0 })
+            .expect("pool has capacity for 1 element");
+
+        let got = pool.get_typed::<Position>(index).expect("index 0 must be in bounds");
+        assert_eq!(got.x, 1.0, "x must round-trip through the pool");
+        assert_eq!(got.y, 2.0, "y must round-trip through the pool");
+        assert_eq!(got.z, 3.0, "z must round-trip through the pool");
+    }
+
+    /// `get_mut_typed` must allow in-place mutation; the updated value must be
+    /// visible via a subsequent `get_typed` call.
+    #[test]
+    fn get_mut_typed_round_trip() {
+        register_all();
+        let arena = Arena::new();
+        let mut pool = make_position_pool(&arena, 4);
+
+        let index = pool
+            .add_typed(Position { x: 0.0, y: 0.0, z: 0.0 })
+            .expect("pool has capacity for 1 element");
+
+        // Mutate in place.
+        pool.get_mut_typed::<Position>(index)
+            .expect("index 0 must be in bounds")
+            .x = 99.0;
+
+        // Re-read and confirm the mutation is visible.
+        let got = pool.get_typed::<Position>(index).expect("index 0 must still be in bounds");
+        assert_eq!(got.x, 99.0, "x must reflect the in-place mutation");
+    }
+
+    /// `get_typed` on an out-of-bounds index must return `None` without panicking.
+    /// (The TypeId check is on the type parameter, not the bounds — bounds are
+    /// handled by `get_raw` which returns `None`.)
+    #[test]
+    fn get_typed_out_of_bounds_returns_none() {
+        register_all();
+        let arena = Arena::new();
+        let pool = make_position_pool(&arena, 4);
+
+        // Pool is empty; index 0 is out of bounds.
+        assert!(
+            pool.get_typed::<Position>(0).is_none(),
+            "get_typed on empty pool must return None"
+        );
+    }
+
+    /// Passing a type whose `TypeId` does not match the pool's registered type
+    /// must fire a `debug_assert` in debug builds.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "does not match pool's registered type")]
+    fn get_typed_wrong_type_panics_in_debug() {
+        register_all();
+        let arena = Arena::new();
+        // Pool is registered for `Position` (POS_ID).
+        let mut pool = ComponentPool::new(&arena, POS_ID, 1, 4);
+
+        // Insert a valid Position so that index 0 exists.
+        pool.add_typed(Position { x: 1.0, y: 2.0, z: 3.0 })
+            .expect("pool must accept first element");
+
+        // Attempt to read as `OtherComponent` — TypeId mismatch must fire debug_assert.
+        let _ = pool.get_typed::<OtherComponent>(0);
     }
 }
