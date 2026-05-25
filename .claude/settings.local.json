@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rm \":TEMPcheck_box.rs\" \"D:tmpcheck_box.rs\" && git status --short)"
+    ]
+  }
+}

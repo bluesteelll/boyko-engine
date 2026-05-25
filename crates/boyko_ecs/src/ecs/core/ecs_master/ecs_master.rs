@@ -8,6 +8,10 @@ use crate::ecs::core::events::event::Event;
 use crate::ecs::core::events::event_config::EventConfig;
 use crate::ecs::core::events::event_dispatcher::EventDispatcher;
 use crate::ecs::core::resources::resources::Resources;
+use crate::ecs::core::system::{
+    fn_once_system::FnOnceSystem, system::System, system_param::SystemParam,
+    unsafe_ecs_cell::UnsafeEcsCell,
+};
 use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId, EntityId, InlandPoolId};
 use crate::ecs::memory::arena::Arena;
 use crate::ecs::constants::DEFAULT_ARENA_SIZE;
@@ -841,6 +845,67 @@ impl EcsMaster {
         self.events.update_events();
     }
 
+    // ── System execution (Phase 8a Step 8) ──────────────────────────────────
+
+    /// Runs a single [`System`] once, end-to-end.
+    ///
+    /// Generic over `S: System` so the caller's system value survives across
+    /// calls without virtual dispatch. Sequence:
+    ///   1. [`System::initialize`] — idempotent two-phase init (state then
+    ///      access surface); subsequent calls short-circuit so cross-call
+    ///      `&mut S` reuse is supported.
+    ///   2. [`UnsafeEcsCell::new_mutable`] — mints a write-capable cell
+    ///      bound to the `&mut self` borrow scope.
+    ///   3. [`System::run_unsafe`] — invokes the system body.
+    ///
+    /// Phase 9's scheduler will replace this method with a multi-system
+    /// runner that resolves aliasing via the `Access` conflict graph; for
+    /// now `&mut EcsMaster` enforces the S1 invariant trivially.
+    ///
+    /// [`System`]: crate::ecs::core::system::system::System
+    /// [`System::initialize`]: crate::ecs::core::system::system::System::initialize
+    /// [`System::run_unsafe`]: crate::ecs::core::system::system::System::run_unsafe
+    /// [`UnsafeEcsCell::new_mutable`]: crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell::new_mutable
+    pub fn run_system_once<S: System>(&mut self, system: &mut S) -> S::Out {
+        system.initialize(self);
+        // SAFETY (U_C1): `cell` does not outlive the `&mut self` borrow — it
+        //   is consumed by `run_unsafe` on the next line and cannot escape.
+        let cell = unsafe { UnsafeEcsCell::new_mutable(self) };
+        // SAFETY (S1): `&mut self` is exclusive for the entire call ⇒ no
+        //   other `System::run_unsafe` is in flight on this `EcsMaster`.
+        //   The Phase 9 scheduler will replace this trivial enforcement
+        //   with the `Access` conflict graph.
+        unsafe { system.run_unsafe(cell) }
+    }
+
+    /// Convenience wrapper around [`run_system_once`] that materialises a
+    /// [`FnOnceSystem`] from `body` (M5 RESOLUTION).
+    ///
+    /// # Turbofish requirement (W3)
+    ///
+    /// Closure-argument inference cannot deduce the [`SystemParam`] tuple
+    /// `P` from the body alone, so callers must spell `P` out:
+    ///
+    /// ```ignore
+    /// ecs.run_closure_once::<(Res<A>, ResMut<B>), _, _>(|(a, b)| { /* ... */ });
+    /// ```
+    ///
+    /// Phase 8c's `IntoSystem` adapter removes the requirement by inferring
+    /// `P` from the closure signature.
+    ///
+    /// [`run_system_once`]: EcsMaster::run_system_once
+    /// [`FnOnceSystem`]: crate::ecs::core::system::fn_once_system::FnOnceSystem
+    /// [`SystemParam`]: crate::ecs::core::system::system_param::SystemParam
+    pub fn run_closure_once<P, F, O>(&mut self, body: F) -> O
+    where
+        P: SystemParam + 'static,
+        F: for<'w, 's> FnMut(<P as SystemParam>::Item<'w, 's>) -> O + Send + Sync + 'static,
+        O: 'static,
+    {
+        let mut sys = FnOnceSystem::<P, F, O>::new(body);
+        self.run_system_once(&mut sys)
+    }
+
     /// Clears all entities and archetypes from the system
     pub fn clear(&mut self) {
         self.entity_master.clear();
@@ -1171,5 +1236,63 @@ mod tests {
         assert_eq!(ecs.entity_master().next_entity_id(), EntityId(0),
             "no EntityId must be consumed when the archetype guard fires");
         assert_eq!(ecs.entity_count(), 0);
+    }
+
+    // --- Phase 8a Step 8: `run_system_once` / `run_closure_once` smoke tests ---
+
+    /// Test resource used by the `run_closure_once` smoke tests. Lives inside
+    /// the `tests` module so its `ResourceId` is reserved on first use without
+    /// colliding with other test modules.
+    struct SystemTestRes(u32);
+
+    impl crate::ecs::core::resources::resource::Resource for SystemTestRes {
+        fn resource_id() -> crate::ecs::identifiers::primitives::ResourceId {
+            use crate::ecs::core::resources::resource_registry::register_new;
+            use crate::ecs::identifiers::primitives::ResourceId;
+            use std::sync::OnceLock;
+            static ID: OnceLock<ResourceId> = OnceLock::new();
+            *ID.get_or_init(|| ResourceId(register_new::<Self>()))
+        }
+    }
+
+    /// `run_closure_once::<(), _, _>` runs an empty closure and propagates
+    /// its return value.
+    #[test]
+    fn run_system_once_with_empty_closure_runs_once() {
+        let mut ecs = EcsMaster::new();
+        // W3: turbofish on the param tuple is required in Phase 8a.
+        let out: u32 = ecs.run_closure_once::<(), _, _>(|()| 42);
+        assert_eq!(out, 42, "run_closure_once must propagate the closure's output");
+    }
+
+    /// `run_closure_once::<Res<TestRes>, _, _>` reads back a resource that
+    /// was inserted via the `pub(crate)` `resources` field (the public
+    /// `insert_resource` facade lands in Step 9).
+    #[test]
+    fn run_closure_once_with_res_reads_value() {
+        use crate::ecs::core::system::Res;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let mut ecs = EcsMaster::new();
+        ecs.resources.insert(SystemTestRes(123));
+
+        // The closure capture must be `Send + Sync` because the `System`
+        // trait bound transitively requires it on the closure. `AtomicU32`
+        // behind `Arc` satisfies the bound and serves as a probe channel
+        // from inside the closure back to the outer test.
+        let observed = Arc::new(AtomicU32::new(0));
+        let probe = Arc::clone(&observed);
+        // W3: turbofish on the param tuple is required in Phase 8a.
+        // r: Res<SystemTestRes>; r.0: &SystemTestRes; r.0.0: u32 (the inner
+        // newtype field, accessed via auto-deref through the shared borrow).
+        ecs.run_closure_once::<Res<'_, SystemTestRes>, _, _>(move |r| {
+            probe.store(r.0.0, Ordering::Relaxed);
+        });
+        assert_eq!(
+            observed.load(Ordering::Relaxed),
+            123,
+            "Res<R> must round-trip the inserted value"
+        );
     }
 }
