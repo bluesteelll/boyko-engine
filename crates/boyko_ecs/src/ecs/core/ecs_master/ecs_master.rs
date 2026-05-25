@@ -7,6 +7,7 @@ use crate::ecs::core::entity::entity_master::EntityMaster;
 use crate::ecs::core::events::event::Event;
 use crate::ecs::core::events::event_config::EventConfig;
 use crate::ecs::core::events::event_dispatcher::EventDispatcher;
+use crate::ecs::core::resources::resource::Resource;
 use crate::ecs::core::resources::resources::Resources;
 use crate::ecs::core::system::{
     fn_once_system::FnOnceSystem, system::System, system_param::SystemParam,
@@ -906,12 +907,132 @@ impl EcsMaster {
         self.run_system_once(&mut sys)
     }
 
+    // ── Resources facade (Phase 8a Step 9) ───────────────────────────────────
+
+    /// Inserts (or replaces) the world-global resource of type `R`.
+    ///
+    /// Cold path. Forwards to [`Resources::insert`]; see its docs for the
+    /// clear-bit-first replace protocol (R4) that guards against panic-in-drop
+    /// UB on the old value.
+    ///
+    /// [`Resources::insert`]: crate::ecs::core::resources::resources::Resources::insert
+    #[cold]
+    pub fn insert_resource<R: Resource>(&mut self, value: R) {
+        self.resources.insert(value);
+    }
+
+    /// Removes the resource of type `R` from the world, returning the typed
+    /// value if it was present.
+    ///
+    /// Cold path. Forwards to [`Resources::remove`]; see invariant R5 for the
+    /// clear-bit-before-`Box::from_raw` ordering.
+    ///
+    /// [`Resources::remove`]: crate::ecs::core::resources::resources::Resources::remove
+    #[cold]
+    pub fn remove_resource<R: Resource>(&mut self) -> Option<R> {
+        self.resources.remove::<R>()
+    }
+
+    /// Returns `true` iff the world currently holds a resource of type `R`.
+    #[inline]
+    pub fn contains_resource<R: Resource>(&self) -> bool {
+        self.resources.contains::<R>()
+    }
+
+    /// Returns a shared reference to the resource of type `R`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no resource of type `R` has been inserted. Use
+    /// [`try_resource`] for the non-panicking variant.
+    ///
+    /// [`try_resource`]: EcsMaster::try_resource
+    #[inline]
+    pub fn resource<R: Resource>(&self) -> &R {
+        match self.resources.get_ptr::<R>() {
+            Some(ptr) => {
+                // SAFETY (R2): `get_ptr` returned `Some` ⇒ the slot is populated
+                //   and the bytes at `ptr` form a valid `R` (the slot was
+                //   inserted via `insert_resource::<R>` with this same TypeId
+                //   binding; the cached `ResourceId` in the registry guarantees
+                //   the type tag). The lifetime of the returned reference is
+                //   tied to `&self`, so the pointer cannot outlive the borrow.
+                unsafe { &*ptr }
+            }
+            None => missing_resource_panic_facade::<R>(),
+        }
+    }
+
+    /// Returns an exclusive reference to the resource of type `R`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no resource of type `R` has been inserted. Use
+    /// [`try_resource_mut`] for the non-panicking variant.
+    ///
+    /// [`try_resource_mut`]: EcsMaster::try_resource_mut
+    #[inline]
+    pub fn resource_mut<R: Resource>(&mut self) -> &mut R {
+        match self.resources.get_mut_ptr::<R>() {
+            Some(ptr) => {
+                // SAFETY (R2, R4): `get_mut_ptr` returned `Some` ⇒ the slot is
+                //   populated and the bytes at `ptr` form a valid `R`. `&mut
+                //   self` gives exclusive access to the resources slab, so the
+                //   `&mut R` produced here cannot alias any other reference
+                //   into the same slot for the duration of the borrow.
+                unsafe { &mut *ptr }
+            }
+            None => missing_resource_panic_facade::<R>(),
+        }
+    }
+
+    /// Returns a shared reference to the resource of type `R`, or `None` if
+    /// the resource has not been inserted. Non-panicking counterpart of
+    /// [`resource`].
+    ///
+    /// [`resource`]: EcsMaster::resource
+    #[inline]
+    pub fn try_resource<R: Resource>(&self) -> Option<&R> {
+        // SAFETY (R2): same as `resource` — `get_ptr` returns `Some` only when
+        //   the slot is populated and holds a valid `R`. Lifetime is tied to
+        //   `&self`.
+        self.resources.get_ptr::<R>().map(|p| unsafe { &*p })
+    }
+
+    /// Returns an exclusive reference to the resource of type `R`, or `None`
+    /// if the resource has not been inserted. Non-panicking counterpart of
+    /// [`resource_mut`].
+    ///
+    /// [`resource_mut`]: EcsMaster::resource_mut
+    #[inline]
+    pub fn try_resource_mut<R: Resource>(&mut self) -> Option<&mut R> {
+        // SAFETY (R2, R4): same as `resource_mut` — `get_mut_ptr` returns
+        //   `Some` only when the slot is populated and holds a valid `R`.
+        //   `&mut self` gives exclusive access for the returned borrow.
+        self.resources.get_mut_ptr::<R>().map(|p| unsafe { &mut *p })
+    }
+
     /// Clears all entities and archetypes from the system
     pub fn clear(&mut self) {
         self.entity_master.clear();
         self.archetype_master.clear();
         // Note: We don't clear the arena as it manages its own memory
     }
+}
+
+/// Cold-path panic helper for [`EcsMaster::resource`] / [`EcsMaster::resource_mut`].
+///
+/// Distinct from `params::diagnostics::missing_resource_panic` (which targets
+/// the `SystemParam` `get_param` path) — the wording here points at the
+/// direct-call API rather than the system runner.
+#[cold]
+#[inline(never)]
+fn missing_resource_panic_facade<R: Resource>() -> ! {
+    panic!(
+        "Resource `{}` not registered. Call `EcsMaster::insert_resource::<{}>(...)` first.",
+        R::debug_type_name(),
+        R::debug_type_name()
+    );
 }
 
 impl Default for EcsMaster {

@@ -118,8 +118,12 @@ pub fn resource_macro(input: TokenStream) -> TokenStream {
                 static ID: ::std::sync::OnceLock<
                     ::boyko_ecs::ecs::identifiers::primitives::ResourceId
                 > = ::std::sync::OnceLock::new();
+                // Route through the `resources` module's `pub use` of
+                // `register_new` so the macro path stays inside the public
+                // surface — the `resource_registry` module itself is
+                // `pub(crate)` per Q6 RESOLUTION.
                 *ID.get_or_init(|| ::boyko_ecs::ecs::identifiers::primitives::ResourceId(
-                    ::boyko_ecs::ecs::core::resources::resource_registry::register_new::<Self>()
+                    ::boyko_ecs::ecs::core::resources::register_new::<Self>()
                 ))
             }
         }

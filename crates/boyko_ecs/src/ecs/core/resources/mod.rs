@@ -20,3 +20,12 @@ pub mod resources;
 pub use resource::Resource;
 pub use resource_registry::RESOURCE_SLOT_COUNT;
 pub use resources::Resources;
+
+// `register_new` is re-exported through the public `resources` module so
+// `#[derive(Resource)]`-generated code in downstream crates can reach it
+// without taking a `pub(crate)` direct path on `resource_registry`. The
+// macro emits `::boyko_ecs::ecs::core::resources::register_new::<Self>()`
+// (see `boyko_macros::resource_macro`); this re-export is the matching
+// entry point. Q6 RESOLUTION: keeps the registry module gated while still
+// allowing external derive expansion.
+pub use resource_registry::register_new;
