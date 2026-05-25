@@ -407,14 +407,20 @@ impl ArchetypeBundle {
     /// acceptable because the call site is not on the hot path.
     ///
     /// If an archetype with the same id already exists, its slot is
-    /// overwritten: the previous occupant is `drop_in_place`'d first to
-    /// avoid leaking its `Vec` fields.
+    /// overwritten under the **AB-R1 clear-bit-first protocol**: the
+    /// `occupied` bit and `id_to_slot` mapping are cleared *before*
+    /// `drop_in_place` runs, so a panic inside a user component's `Drop`
+    /// cannot leave the slab in a state where `ArchetypeBundle::Drop`'s
+    /// bitset walk would revisit the half-dropped slot (double-drop UB).
+    /// `count` is intentionally left unchanged through the drop window —
+    /// the brief inconsistency with `occupied` is observable only via
+    /// `len()`, never via `Drop` or any read path.
     pub fn add_archetype(&mut self, archetype: Archetype) -> InlandArchetypeId {
         let archetype_id = archetype.id();
         let raw_id = archetype_id.0;
 
-        // Replace path: same id already registered → drop the old occupant
-        // and overwrite the slot in place.
+        // Replace path: same id already registered → clear-bit-first then
+        // drop the old occupant and overwrite the slot.
         if raw_id < self.id_to_slot.len() && self.id_to_slot[raw_id] != NO_SLOT {
             let slot_idx = self.id_to_slot[raw_id];
             let slab_base: *mut MaybeUninit<Archetype> = self.slots.as_mut_ptr();
@@ -423,15 +429,41 @@ impl ArchetypeBundle {
             //   `slot_idx < MAX_ARCHETYPES` invariant.
             let slot_ptr: *mut Archetype =
                 unsafe { slab_base.add(slot_idx as usize) as *mut Archetype };
-            // SAFETY (U12): the occupancy bit confirms a valid Archetype
-            //   currently lives at `slot_ptr`. `drop_in_place` runs its
-            //   destructor exactly once; we then immediately overwrite the
-            //   slot via `ptr::write` so the slab slot is never partially
-            //   initialised once this function returns.
-            unsafe {
-                ptr::drop_in_place(slot_ptr);
-                ptr::write(slot_ptr, archetype);
-            }
+
+            // === AB-R1: clear-bit-first ===
+            // Step 1a: clear the `occupied` bit BEFORE drop_in_place. THIS
+            //   is what gates ArchetypeBundle::Drop's bitset walk — even
+            //   if drop_in_place panics, Drop will skip this slot.
+            let word_idx = (slot_idx as usize) / 64;
+            let bit = (slot_idx as usize) % 64;
+            self.occupied[word_idx] &= !(1u64 << bit);
+
+            // Step 1b: clear the lookup too. Belt-and-suspenders for
+            //   external observers that might call `get_archetype_ptr`
+            //   mid-replace.
+            self.id_to_slot[raw_id] = NO_SLOT;
+
+            // Step 2: drop the old occupant. If this panics, the slab
+            //   cell is unreachable from both `id_to_slot` and Drop's
+            //   bitset walk — one `Archetype`'s allocations leak; no UB.
+            // SAFETY (U12 + AB-R1): the previous occupancy was confirmed
+            //   by the outer `if`; clear-bit-first ensures non-revisitation
+            //   on panic.
+            unsafe { ptr::drop_in_place(slot_ptr); }
+
+            // Step 3: write the new value. Cannot panic (POD memcpy).
+            // SAFETY (U13): the slab cell is logically empty after step 2's
+            //   drop; we transfer ownership of `archetype` byte-wise into
+            //   the slot without invoking its destructor.
+            unsafe { ptr::write(slot_ptr, archetype); }
+
+            // Step 4a: re-set the `occupied` bit. Single &mut, no
+            //   atomicity needed.
+            self.occupied[word_idx] |= 1u64 << bit;
+
+            // Step 4b: re-set the lookup.
+            self.id_to_slot[raw_id] = slot_idx;
+
             return InlandArchetypeId(slot_idx as usize);
         }
 
@@ -973,5 +1005,178 @@ mod miri_tests {
         // an uninitialised slot, so if the walk were to visit id2's freed
         // slot, this test would fail under `cargo +nightly miri test`.
         drop(bundle);
+    }
+
+    /// Phase 8a Step 12 (C-NEW-1 + C-R3-1) — verifies the **AB-R1
+    /// clear-bit-first protocol** in [`ArchetypeBundle::add_archetype`]'s
+    /// replace path: a panic inside the previous occupant's `Drop` must NOT
+    /// cause the bundle's later `Drop` to revisit the half-dropped slot
+    /// (double-drop UB).
+    ///
+    /// Mechanism:
+    /// 1. A component type [`PanicDropComp`] whose `Drop` impl bumps a
+    ///    global counter and panics whenever `PANIC_DROP_ARMED` is `true`.
+    ///    We arm the flag for the replace's `drop_in_place`, then disarm
+    ///    it before letting `Drop` of the bundle (which will not revisit
+    ///    the slot under AB-R1) finish cleanly.
+    /// 2. Insert one entity carrying `PanicDropComp` into the old
+    ///    archetype so the panicking `Drop` actually fires during
+    ///    `ComponentPool::Drop` inside `Archetype::Drop`.
+    /// 3. Catch the panic from `add_archetype(new_archetype_same_id)`.
+    /// 4. Inspect the bundle's internal state: `id_to_slot[raw_id]` must
+    ///    be `NO_SLOT` and the `occupied` bit must be cleared.
+    /// 5. Disarm the panic, drop the bundle, and assert the global drop
+    ///    counter reached exactly 1 (never 2). Under the previous
+    ///    `drop_in_place; ptr::write` shape, step 5 would observe a count
+    ///    of 2 — the bug fixed in Step 12.
+    ///
+    /// Reuses ID 482 from the archetype_bundle Phase-7 reserved range.
+    #[test]
+    fn phase7_carry_over_add_archetype_replace_panic_in_drop_no_double_drop() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        // Counts every invocation of `PanicDropComp::drop`. Static so the
+        // type-erased `drop_fn` registered via `ComponentLayout` can reach it.
+        static PANIC_DROP_COUNT: AtomicUsize = AtomicUsize::new(0);
+        // When `true`, `PanicDropComp::drop` panics after incrementing the
+        // counter. Used to gate the "first drop panics, no further drops
+        // happen" protocol.
+        static PANIC_DROP_ARMED: AtomicBool = AtomicBool::new(false);
+
+        #[repr(C)]
+        struct PanicDropComp(u32);
+
+        impl Drop for PanicDropComp {
+            fn drop(&mut self) {
+                PANIC_DROP_COUNT.fetch_add(1, Ordering::Relaxed);
+                if PANIC_DROP_ARMED.load(Ordering::Relaxed) {
+                    panic!("PanicDropComp::drop intentional panic for AB-R1 test");
+                }
+            }
+        }
+
+        const PANIC_COMP_ID: ComponentId = ComponentId(482);
+        component_registry::register_layout::<PanicDropComp>(PANIC_COMP_ID.0);
+
+        // Counter reset in case another test in the same process touched
+        // PanicDropComp via the registry (the type is module-local so this
+        // should not happen, but be defensive).
+        PANIC_DROP_COUNT.store(0, Ordering::Relaxed);
+        PANIC_DROP_ARMED.store(false, Ordering::Relaxed);
+
+        // 16 MB headroom for two 1-component archetypes.
+        let arena = Arena::with_capacity(16 * 1024 * 1024);
+        let mut bundle = ArchetypeBundle::new();
+        let arch_id = ArchetypeId(20);
+
+        // Build the OLD archetype and push one entity with a `PanicDropComp`
+        // instance so that `Archetype::Drop` will trigger the user-defined
+        // panicking drop_fn through `ComponentPool::Drop`.
+        let _ = bundle
+            .add_archetype_from_components_fallible(arch_id, &[PANIC_COMP_ID], &arena)
+            .expect("slab has free space for the old archetype");
+        {
+            let archetype: &mut Archetype = bundle
+                .get_archetype_mut(arch_id)
+                .expect("just registered");
+            let pool = archetype
+                .component_pools
+                .get_pool_mut(PANIC_COMP_ID)
+                .expect("pool was registered for PANIC_COMP_ID");
+            // PanicDropComp does not impl Component (Component trait requires
+            // 4 methods including component_id; manually impl'ing it here
+            // would shadow the registered_layout assumption). Use the
+            // byte-level pool.add API instead — the registered drop_fn from
+            // register_layout::<PanicDropComp> still fires on pool drop.
+            let value = PanicDropComp(0xDEAD_BEEF);
+            // SAFETY: value is a fully-initialised PanicDropComp; reading
+            //   size_of::<PanicDropComp>() bytes out of it as &[u8] is sound
+            //   while the &-borrow is live.
+            let bytes: &[u8] = unsafe {
+                std::slice::from_raw_parts(
+                    std::ptr::addr_of!(value) as *const u8,
+                    std::mem::size_of::<PanicDropComp>(),
+                )
+            };
+            pool.add(bytes).expect("pool has capacity for one entity");
+            // The pool now owns the bytes; suppress the local Drop so the
+            // counter only ticks once when the pool drops, not twice.
+            std::mem::forget(value);
+        }
+
+        // Snapshot the slot index BEFORE the replace so we can inspect the
+        // bitset after the panic. `get_inland_id` returns the slot the old
+        // archetype lives in.
+        let slot_idx: usize = bundle
+            .get_inland_id(arch_id)
+            .expect("old archetype must be registered")
+            .0;
+        let word_idx: usize = slot_idx / 64;
+        let bit_mask: u64 = 1u64 << (slot_idx % 64);
+        // Sanity: the bit is set BEFORE the replace.
+        assert!(
+            bundle.occupied[word_idx] & bit_mask != 0,
+            "pre-replace: occupied bit must be set for slot {slot_idx}",
+        );
+
+        // The replacement archetype: same id, but no components. Its
+        // construction never touches `PANIC_DROP_COUNT`, so its presence in
+        // the bundle after the (failed) replace is harmless to the count.
+        let new_archetype = Archetype::new(arch_id, &arena);
+
+        // Arm the panic and try the replace. We move `bundle` into the
+        // catch_unwind via `AssertUnwindSafe` because the inner closure
+        // mutates it; the panic-safety reasoning rests on the AB-R1 protocol
+        // itself, which the test is here to verify.
+        PANIC_DROP_ARMED.store(true, Ordering::Relaxed);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            bundle.add_archetype(new_archetype);
+        }));
+        // Disarm before any further drops fire.
+        PANIC_DROP_ARMED.store(false, Ordering::Relaxed);
+
+        assert!(
+            result.is_err(),
+            "add_archetype must propagate the user Drop panic",
+        );
+
+        // === AB-R1 post-conditions ===
+        // Step 1a's clearing of the bit must have been done BEFORE
+        // drop_in_place ran, so even though drop_in_place panicked the bit
+        // is now cleared.
+        let raw_id = arch_id.0;
+        assert!(
+            raw_id < bundle.id_to_slot.len(),
+            "id_to_slot must still cover raw_id after a panicked replace",
+        );
+        assert_eq!(
+            bundle.id_to_slot[raw_id], NO_SLOT,
+            "AB-R1 Step 1b: id_to_slot[{raw_id}] must be NO_SLOT after panicked replace",
+        );
+        assert_eq!(
+            bundle.occupied[word_idx] & bit_mask, 0,
+            "AB-R1 Step 1a: occupied bit for slot {slot_idx} must be cleared after panicked replace",
+        );
+
+        // The user Drop fired exactly once during the panicked replace.
+        // If AB-R1 were absent, the *next* observation (after dropping the
+        // bundle below) would see this counter rise to 2.
+        let count_after_replace = PANIC_DROP_COUNT.load(Ordering::Relaxed);
+        assert_eq!(
+            count_after_replace, 1,
+            "user Drop must have run exactly once during the replace's drop_in_place",
+        );
+
+        // Drop the bundle. With AB-R1 the bundle's Drop walks `occupied`,
+        // sees the bit for `slot_idx` cleared, and does NOT revisit the
+        // half-dropped slot. The counter must therefore stay at 1.
+        drop(bundle);
+
+        let count_after_bundle_drop = PANIC_DROP_COUNT.load(Ordering::Relaxed);
+        assert_eq!(
+            count_after_bundle_drop, 1,
+            "AB-R1 guarantee: ArchetypeBundle::Drop must NOT revisit the panicked slot \
+             (observed double-drop count = {count_after_bundle_drop}, expected 1)",
+        );
     }
 }
