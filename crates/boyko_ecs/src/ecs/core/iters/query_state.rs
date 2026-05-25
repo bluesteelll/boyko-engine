@@ -279,6 +279,72 @@ impl QueryState {
         self.generation = master.archetype_generation();
         self.structural_generation = master.structural_generation();
     }
+
+    // --- Phase 8b Step 5 helpers ---
+    //
+    // The five accessors below are consumed by `QueryDataState<D, F>`
+    // (`iters/query/state.rs`), which is implemented in Phase 8b Step 6.
+    // Step 5 lands the helpers ahead of Step 6 so the two steps can be
+    // developed in parallel. Each method carries `#[allow(dead_code)]`
+    // until Step 6 wires them up; the allow can be removed at that point.
+
+    /// Exposes the matched-ids vector for in-place mutation by
+    /// `QueryDataState::post_filter_matched` (Phase 8b Step 6).
+    ///
+    /// # Phase 8b QS1 invariant
+    /// `matched_ids` and `matched_archetypes` bitset stay synchronized via
+    /// `remove_matched_at` (the only intended mutator). Direct mutation
+    /// through this accessor MUST also clear the corresponding bit on
+    /// `matched_archetypes`; otherwise QS1 is violated and
+    /// `QueryDataState::assert_dual_invariant` will detect the desync in
+    /// debug builds.
+    #[allow(dead_code)] // Wired into QueryDataState in Phase 8b Step 6.
+    #[inline]
+    pub(crate) fn matched_ids_mut(&mut self) -> &mut Vec<ArchetypeId> {
+        &mut self.matched_ids
+    }
+
+    /// Removes the matched id at dense index `dense_idx` (via `swap_remove`
+    /// on `matched_ids`) AND clears the corresponding bit on
+    /// `matched_archetypes`. The single safe paired mutator that maintains
+    /// the M1/QS1 dual-structure invariant.
+    ///
+    /// # Panics
+    /// Panics if `dense_idx >= matched_ids.len()` (propagated from
+    /// `Vec::swap_remove`).
+    #[allow(dead_code)] // Wired into QueryDataState in Phase 8b Step 6.
+    #[inline]
+    pub(crate) fn remove_matched_at(&mut self, dense_idx: usize) {
+        let removed_id = self.matched_ids.swap_remove(dense_idx);
+        self.matched_archetypes.remove(removed_id.0);
+    }
+
+    /// Read-only accessor for the dedup bitset; consumed by
+    /// `QueryDataState::assert_dual_invariant` (Phase 8b Step 6) to verify
+    /// the M1/QS1 dual-structure invariant.
+    #[allow(dead_code)] // Wired into QueryDataState in Phase 8b Step 6.
+    #[inline]
+    pub(crate) fn matched_archetypes_bitset(&self) -> &ArchetypeBitSet {
+        &self.matched_archetypes
+    }
+
+    /// Snapshot of the last-observed master archetype generation. Used by
+    /// `QueryDataState::update` to detect that `update_archetypes` synced
+    /// the cache against a newly-created archetype.
+    #[allow(dead_code)] // Wired into QueryDataState in Phase 8b Step 6.
+    #[inline]
+    pub(crate) fn last_observed_archetype_generation(&self) -> ArchetypeGeneration {
+        self.generation
+    }
+
+    /// Snapshot of the last-observed master structural generation. Used by
+    /// `QueryDataState::update` to detect that `update_archetypes` rebuilt
+    /// the cache after a removal or `clear()`.
+    #[allow(dead_code)] // Wired into QueryDataState in Phase 8b Step 6.
+    #[inline]
+    pub(crate) fn last_observed_structural_generation(&self) -> ArchetypeGeneration {
+        self.structural_generation
+    }
 }
 
 /// Iterator over matched archetypes produced by `QueryState::iter`.
@@ -580,6 +646,77 @@ mod tests {
             "ABA: recycled id with unrelated mask MUST NOT be surfaced by a stale QueryState; \
              got {:?}",
             matched_v2
+        );
+    }
+
+    // --- Phase 8b Step 5 helpers ---
+
+    #[test]
+    fn remove_matched_at_clears_bit_and_swap_removes() {
+        let (mut master, _arena) = setup();
+        // Three archetypes that all match the Pos filter; matched_ids ends up
+        // populated with three distinct ids in insertion order.
+        let id_a = master.create_archetype(&[Pos::component_id()]);
+        let id_b = master.create_archetype(&[Pos::component_id(), Vel::component_id()]);
+        let id_c = master.create_archetype(&[Pos::component_id(), Health::component_id()]);
+
+        let mut state = QueryState::with_component_ids(&[Pos::component_id()]);
+        state.update_archetypes(&master);
+        assert_eq!(state.matched_ids(), &[id_a, id_b, id_c], "precondition: three matches in insertion order");
+        assert_eq!(state.matched_archetypes_bitset().popcount(), 3, "precondition: bitset popcount == 3");
+
+        // Remove the middle id. swap_remove semantics: last (id_c) moves to slot 1.
+        state.remove_matched_at(1);
+
+        // (a) length dropped by exactly one.
+        assert_eq!(state.matched_ids().len(), 2, "len must decrement by 1");
+        // (b) swap_remove behaviour: id_c (was last) now sits at index 1; id_a unchanged at 0.
+        assert_eq!(state.matched_ids()[0], id_a, "slot 0 must be unchanged");
+        assert_eq!(state.matched_ids()[1], id_c, "swap_remove must move last element to vacated slot");
+        // (c) bitset bit for the removed id (id_b) is cleared; the survivors stay set.
+        assert!(!state.matched_archetypes_bitset().contains(id_b.0), "removed id bit must be cleared");
+        assert!(state.matched_archetypes_bitset().contains(id_a.0), "survivor id_a bit must remain set");
+        assert!(state.matched_archetypes_bitset().contains(id_c.0), "survivor id_c bit must remain set");
+        assert_eq!(state.matched_archetypes_bitset().popcount(), 2, "popcount must match new len");
+    }
+
+    #[test]
+    fn last_observed_generations_return_current_snapshot() {
+        let (mut master, _arena) = setup();
+        master.create_archetype(&[Pos::component_id()]);
+
+        let mut state = QueryState::with_component_ids(&[Pos::component_id()]);
+        // Before any sync: state still carries FIRST.
+        assert_eq!(state.last_observed_archetype_generation(), ArchetypeGeneration::FIRST);
+        assert_eq!(state.last_observed_structural_generation(), ArchetypeGeneration::FIRST);
+
+        state.update_archetypes(&master);
+        // After update: snapshots must equal what update wrote into the fields,
+        // which themselves must equal the master's current generation pair.
+        assert_eq!(
+            state.last_observed_archetype_generation(),
+            master.archetype_generation(),
+            "archetype-generation snapshot must match master after sync",
+        );
+        assert_eq!(
+            state.last_observed_structural_generation(),
+            master.structural_generation(),
+            "structural-generation snapshot must match master after sync",
+        );
+
+        // Mutating master (new archetype) must NOT auto-update the state's snapshot —
+        // the accessors return the last-observed values, not live master values.
+        let pre_arch_gen = state.last_observed_archetype_generation();
+        master.create_archetype(&[Vel::component_id()]);
+        assert_eq!(
+            state.last_observed_archetype_generation(),
+            pre_arch_gen,
+            "snapshot must not change without an explicit update_archetypes call",
+        );
+        assert_ne!(
+            state.last_observed_archetype_generation(),
+            master.archetype_generation(),
+            "master must have advanced past the stored snapshot",
         );
     }
 
