@@ -79,6 +79,23 @@ impl BitSet256 {
             + self.words[3].count_ones()
     }
 
+    /// Returns `true` iff `self` and `other` share at least one set bit.
+    ///
+    /// Tests the four 64-bit words in turn — the loop is bounded and fully
+    /// unrolled by the compiler. Lowers to four `AND` + `OR` instructions on
+    /// x86_64; the whole bitset fits in one cache line so the cost is one
+    /// L1d load per operand.
+    #[inline]
+    pub fn intersects(&self, other: &Self) -> bool {
+        // Word 0..=3; bounded loop, compiler unrolls.
+        for i in 0..4usize {
+            if (self.words[i] & other.words[i]) != 0 {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Removes and returns the index of the lowest set bit, or `None` if empty.
     ///
     /// Uses the BLSR-equivalent `word & (word - 1)` to clear the lowest set bit
