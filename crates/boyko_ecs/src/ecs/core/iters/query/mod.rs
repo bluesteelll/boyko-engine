@@ -33,5 +33,6 @@ pub mod state;
 pub use data::{QueryData, ReadOnlyQueryData};
 pub use filter::{QueryFilter, With, Without};
 pub use query::Query;
-// `Or`, `QueryIter`, `QueryIterMut`, `QueryDataState` are re-exported when
-// Steps 4+ land their definitions.
+pub use state::QueryDataState;
+// `Or`, `QueryIter`, `QueryIterMut` are re-exported when Steps 4+/7 land
+// their definitions.

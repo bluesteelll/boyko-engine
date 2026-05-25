@@ -598,6 +598,29 @@ macro_rules! impl_read_only_query_data_tuple {
     };
 }
 
+// Empty-tuple base case: `Query<(), F>` yields `()` per row. Useful for
+// entity-only / filter-only queries (e.g. `Query<(), With<Player>>`).
+// SAFETY (QD1-QD4): vacuous — no state, no access surface, no fetched
+//   columns, no per-row dereferences. All four invariants hold trivially.
+unsafe impl QueryData for () {
+    type State = ();
+    type Fetch<'w> = ();
+    type Item<'w> = ();
+    const IS_READ_ONLY: bool = true;
+
+    #[inline] fn init_state(_world: &mut EcsMaster) -> Self::State {}
+    #[inline] fn init_access(_state: &Self::State, _access_set: &mut FilteredAccessSet) {}
+    #[inline] fn matches_component_set(_state: &Self::State, _mask: &ComponentMask) -> bool { true }
+    #[inline] fn aggregate_include(_state: &Self::State, _include: &mut ComponentMask) {}
+    #[inline] fn init_fetch<'w>(_state: &Self::State) -> Self::Fetch<'w> {}
+    #[inline] unsafe fn set_table_readonly<'w>(_f: &mut Self::Fetch<'w>, _s: &Self::State, _a: *const Archetype) {}
+    #[inline] unsafe fn set_table_mut<'w>(_f: &mut Self::Fetch<'w>, _s: &Self::State, _a: *mut Archetype) {}
+    #[inline] unsafe fn fetch<'w>(_fetch: &Self::Fetch<'w>, _row: usize) -> Self::Item<'w> {}
+}
+
+// SAFETY: () has IS_READ_ONLY = true.
+unsafe impl ReadOnlyQueryData for () {}
+
 impl_query_data_tuple!((D0, s0, f0));
 impl_query_data_tuple!((D0, s0, f0), (D1, s1, f1));
 impl_query_data_tuple!((D0, s0, f0), (D1, s1, f1), (D2, s2, f2));

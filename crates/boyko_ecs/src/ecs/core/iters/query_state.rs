@@ -283,10 +283,8 @@ impl QueryState {
     // --- Phase 8b Step 5 helpers ---
     //
     // The five accessors below are consumed by `QueryDataState<D, F>`
-    // (`iters/query/state.rs`), which is implemented in Phase 8b Step 6.
-    // Step 5 lands the helpers ahead of Step 6 so the two steps can be
-    // developed in parallel. Each method carries `#[allow(dead_code)]`
-    // until Step 6 wires them up; the allow can be removed at that point.
+    // (`iters/query/state.rs`, Phase 8b Step 6). They are `pub(crate)` only
+    // — external callers see the public `matched_ids`, `iter`, etc.
 
     /// Exposes the matched-ids vector for in-place mutation by
     /// `QueryDataState::post_filter_matched` (Phase 8b Step 6).
@@ -298,7 +296,13 @@ impl QueryState {
     /// `matched_archetypes`; otherwise QS1 is violated and
     /// `QueryDataState::assert_dual_invariant` will detect the desync in
     /// debug builds.
-    #[allow(dead_code)] // Wired into QueryDataState in Phase 8b Step 6.
+    ///
+    /// Currently consumed only by the `assert_dual_invariant` synthetic-
+    /// violation test in `iters/query/state.rs`; future Phase 8b steps may
+    /// route additional mutation paths through this accessor (e.g. tick
+    /// filters in Phase 10). The `dead_code` allow keeps non-test builds
+    /// clippy-clean without dropping the published `pub(crate)` API.
+    #[allow(dead_code)]
     #[inline]
     pub(crate) fn matched_ids_mut(&mut self) -> &mut Vec<ArchetypeId> {
         &mut self.matched_ids
@@ -312,7 +316,6 @@ impl QueryState {
     /// # Panics
     /// Panics if `dense_idx >= matched_ids.len()` (propagated from
     /// `Vec::swap_remove`).
-    #[allow(dead_code)] // Wired into QueryDataState in Phase 8b Step 6.
     #[inline]
     pub(crate) fn remove_matched_at(&mut self, dense_idx: usize) {
         let removed_id = self.matched_ids.swap_remove(dense_idx);
@@ -322,7 +325,6 @@ impl QueryState {
     /// Read-only accessor for the dedup bitset; consumed by
     /// `QueryDataState::assert_dual_invariant` (Phase 8b Step 6) to verify
     /// the M1/QS1 dual-structure invariant.
-    #[allow(dead_code)] // Wired into QueryDataState in Phase 8b Step 6.
     #[inline]
     pub(crate) fn matched_archetypes_bitset(&self) -> &ArchetypeBitSet {
         &self.matched_archetypes
@@ -331,7 +333,6 @@ impl QueryState {
     /// Snapshot of the last-observed master archetype generation. Used by
     /// `QueryDataState::update` to detect that `update_archetypes` synced
     /// the cache against a newly-created archetype.
-    #[allow(dead_code)] // Wired into QueryDataState in Phase 8b Step 6.
     #[inline]
     pub(crate) fn last_observed_archetype_generation(&self) -> ArchetypeGeneration {
         self.generation
@@ -340,7 +341,6 @@ impl QueryState {
     /// Snapshot of the last-observed master structural generation. Used by
     /// `QueryDataState::update` to detect that `update_archetypes` rebuilt
     /// the cache after a removal or `clear()`.
-    #[allow(dead_code)] // Wired into QueryDataState in Phase 8b Step 6.
     #[inline]
     pub(crate) fn last_observed_structural_generation(&self) -> ArchetypeGeneration {
         self.structural_generation
