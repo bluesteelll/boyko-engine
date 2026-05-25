@@ -8,7 +8,7 @@ use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId};
 
 /// Persistent archetype-match cache for hot-path query iteration.
 ///
-/// Unlike `Query<'a>` (which rebuilds its archetype list on every construction),
+/// Unlike `LegacyQuery<'a>` (which rebuilds its archetype list on every construction),
 /// `QueryState` is long-lived and caches the result across frames. On the warm
 /// path — when no new archetypes have been created — `iter()` costs one pointer
 /// load + comparison. The delta update path classifies only newly minted archetypes.
@@ -31,7 +31,7 @@ use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId};
 ///   by the stale dedup bitset and silently absent from query results.
 /// - Only `archetype_generation` mismatched → delta-add path: skip already-seen
 ///   ids via the bitset, classify only the new ids. Preserves the warm-path
-///   ~21x speedup over rebuilding `Query` from scratch.
+///   ~21x speedup over rebuilding `LegacyQuery` from scratch.
 ///
 /// A `QueryState` is therefore safe to keep alive across `clear()` and
 /// `remove_archetype()` calls — no manual `reset()` is required for
@@ -136,7 +136,7 @@ impl QueryState {
     ///    are skipped in O(1); only truly new IDs are tested against the
     ///    filter. This is the original warm-ish path that preserves the
     ///    "create many, read many" benchmark profile (~21x speedup over
-    ///    rebuilding `Query` from scratch).
+    ///    rebuilding `LegacyQuery` from scratch).
     pub fn update_archetypes(&mut self, master: &ArchetypeMaster) {
         let current_gen = master.archetype_generation();
         let current_struct = master.structural_generation();
@@ -268,7 +268,7 @@ impl QueryState {
     /// Marks this state as synced with `master`'s current generation pair.
     ///
     /// Call once after manually pre-populating the cache via `push_matched`
-    /// (e.g., in `Query::from_archetypes` or `Query::with_exact_mask`) to
+    /// (e.g., in `LegacyQuery::from_archetypes` or `LegacyQuery::with_exact_mask`) to
     /// prevent a redundant `update_archetypes` sweep on the next `iter()`.
     ///
     /// Stamps BOTH `generation` and `structural_generation` — otherwise the
@@ -447,7 +447,7 @@ mod tests {
         assert_eq!(
             state.len(),
             3,
-            "filter must match same 3 archetypes as Query::test_complex_filtering"
+            "filter must match same 3 archetypes as LegacyQuery::test_complex_filtering"
         );
         for arch in state.iter(&master) {
             assert!(arch.has_component_id(Pos::component_id()), "must have Pos");
