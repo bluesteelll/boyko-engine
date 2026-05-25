@@ -225,6 +225,32 @@ pub fn register_layout<T: 'static>(component_id: usize) {
     }
 }
 
+/// Reverse-lookup: returns `true` if any registered component slot in
+/// `LAYOUTS` carries the given `TypeId`.
+///
+/// Used by the resource registry (`register_new` in `resource_registry`) to
+/// enforce the Component-vs-Resource exclusivity invariant (M6): a single
+/// Rust type may not be registered as both a `Component` and a `Resource`.
+///
+/// # Cost
+/// O(MAX_COMPONENTS) — a single scan of the global `OnceLock` table. Called
+/// only during registration (cold path) and never on the hot per-frame
+/// system loop.
+///
+/// # Threading
+/// Safe to call concurrently. Each `OnceLock::get` is an acquire-load; the
+/// scan observes a monotonically growing set of populated slots.
+pub fn is_type_registered_as_component(type_id: TypeId) -> bool {
+    for slot in LAYOUTS.iter() {
+        if let Some(info) = slot.get()
+            && info.type_id == type_id
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// Retrieves layout information for a component by its ID.
 /// Returns `None` if the component hasn't been registered yet.
 #[inline]

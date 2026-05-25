@@ -4,4 +4,5 @@ pub mod ecs_master;
 pub mod entity;
 pub mod iters;
 pub mod events;
+pub mod resources;
 
