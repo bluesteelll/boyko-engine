@@ -23,11 +23,18 @@
 //! `get`). The Component/Resource exclusivity check is **best-effort** in a
 //! concurrent setting (W4) — see [`register_new`] for the rationale.
 
-// Phase 8a Step 1: the items below are exercised by this module's own
-// `#[cfg(test)]` block; their non-test consumers (`Resources` slab in
-// Step 2, `EcsMaster::insert_resource` in Step 9) are not yet checked in.
-// The blanket `dead_code` allow is removed automatically as those consumers
-// land in subsequent commits.
+// The registry's public functions (`register_new`, `get_resource_info`,
+// `get_resource_size`) and the internal `ResourceInfo::new_static` /
+// `resource_drop_in_place_glue` are consumed by `#[derive(Resource)]`-
+// generated code in downstream crates (the macro emits per-monomorphization
+// `OnceLock<ResourceId>` wrappers that call `register_new::<Self>()`). The
+// compiler cannot trace the link from the `boyko-ecs` `pub fn` to those
+// downstream impl bodies, so a `dead_code` allow is necessary at the module
+// level until at least one in-crate consumer (e.g. `EcsMaster::insert_resource`
+// in Step 9) exercises the chain directly. The Phase 8a Step 7 hot path
+// (`Res<R>::get_param`) goes through `Resources::get_ptr_by_id`, bypassing
+// the registry entirely — so wiring `Res`/`ResMut` does not unblock these
+// items.
 #![allow(dead_code)]
 
 use std::any::TypeId;

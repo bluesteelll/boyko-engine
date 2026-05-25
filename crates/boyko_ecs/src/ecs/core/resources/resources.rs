@@ -26,13 +26,6 @@
 //!   the `Box<R>`, defending against a (pathological) `R::Drop` that
 //!   recursively touches `self.contains::<R>()`.
 
-// Phase 8a Step 2: the `pub(crate)` accessors `get_ptr` / `get_mut_ptr` /
-// `get_ptr_by_id` / `get_mut_ptr_by_id` are consumed by `Res<R>` and
-// `ResMut<R>` in Step 7. Until that lands, the dead-code lint fires on the
-// uncalled internal accessors. The blanket allow is removed automatically
-// once Step 7 wires the consumers.
-#![allow(dead_code)]
-
 use std::alloc::Layout;
 use std::mem::MaybeUninit;
 
@@ -256,28 +249,37 @@ impl Resources {
         Some(*boxed)
     }
 
-    /// Returns `*const R` if the resource is present. Hot path — used by
-    /// `Res<R>::get_param` (Phase 8a Step 7).
+    /// Returns `*const R` if the resource is present.
+    ///
+    /// Typed convenience wrapper. The Phase 8a `Res<R>::get_param` hot path
+    /// goes through [`get_ptr_by_id`] using the cached `state.id`, so this
+    /// method is currently consumed only by tests and by future
+    /// `EcsMaster::resource<R>` facade (Step 9).
     ///
     /// # Safety (caller-side, R2)
     /// The returned pointer is valid only for the lifetime of the `&self`
     /// borrow. The caller must not alias with a `*mut R` produced by
     /// [`get_mut_ptr`].
     ///
+    /// [`get_ptr_by_id`]: Resources::get_ptr_by_id
     /// [`get_mut_ptr`]: Resources::get_mut_ptr
+    #[allow(dead_code)] // Wired by `EcsMaster::resource<R>` in Step 9.
     #[inline]
     pub(crate) fn get_ptr<R: Resource>(&self) -> Option<*const R> {
         let id = R::resource_id();
         self.get_ptr_by_id(id).map(|p| p.cast::<R>())
     }
 
-    /// Returns `*mut R` if the resource is present. Hot path — used by
-    /// `ResMut<R>::get_param` (Phase 8a Step 7).
+    /// Returns `*mut R` if the resource is present.
+    ///
+    /// Typed counterpart of [`get_ptr`]; see that method's docs for the
+    /// rationale on the current `dead_code` allow.
     ///
     /// # Safety (caller-side, R2)
     /// See [`get_ptr`].
     ///
     /// [`get_ptr`]: Resources::get_ptr
+    #[allow(dead_code)] // Wired by `EcsMaster::resource_mut<R>` in Step 9.
     #[inline]
     pub(crate) fn get_mut_ptr<R: Resource>(&mut self) -> Option<*mut R> {
         let id = R::resource_id();

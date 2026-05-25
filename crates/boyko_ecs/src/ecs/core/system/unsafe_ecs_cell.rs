@@ -25,17 +25,18 @@
 //! will introduce `Send/Sync` impls bound to an explicit scheduler-aliasing
 //! contract; Phase 8a does not.
 
-// Phase 8a Step 5: the `pub(crate)` cell accessors are wired by Step 7
-// (`Res::get_param`, `ResMut::get_param`) and Step 8
-// (`EcsMaster::run_system_once`). Until those consumers land, the cell's
-// methods and fields appear unused from the compiler's view. The blanket
-// allow is removed automatically once the consumers are checked in.
+// Phase 8a Step 5: the remaining `pub(crate)` cell accessors are wired by
+// Step 8 (`EcsMaster::run_system_once`). Step 7 (`Res::get_param`,
+// `ResMut::get_param`) consumes `resources()` / `resources_mut()`; the other
+// accessors (`world()`, `world_mut()`, `archetype_ptr*`) remain unused until
+// Step 8 lands.
 #![allow(dead_code)]
 
 use std::marker::PhantomData;
 
 use crate::ecs::core::archetype::archetype::Archetype;
 use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
+use crate::ecs::core::resources::resources::Resources;
 use crate::ecs::identifiers::primitives::ArchetypeId;
 
 /// Copy-on-call interior-mutability handle on an `EcsMaster`.
@@ -216,16 +217,60 @@ impl<'w> UnsafeEcsCell<'w> {
         unsafe { self.world_mut().archetype_master_mut().archetype_ptr_for(id) }
     }
 
-    // `resources()` / `resources_mut()` accessors deferred to Step 9: the
-    // `Resources` field is added to `EcsMaster` in that step, alongside the
-    // facade methods. Wiring them here would require touching
-    // `ecs_master.rs`, which is out of scope per the Step 4/5 plan section.
-    //
-    // TODO(Phase 8a Step 9): once `EcsMaster::resources` field lands, add
-    //   `pub(crate) unsafe fn resources(self) -> &'w Resources` and
-    //   `pub(crate) unsafe fn resources_mut(self) -> &'w mut Resources`
-    //   per §3.1 (lines 244-266 of the plan). Both must remain by-value
-    //   receivers (C1 / U_C2 / U_C3).
+    /// Direct read-only access to the resources subsystem. Hot path for
+    /// [`Res<R>::get_param`] — avoids the full [`world`] materialisation when
+    /// only the resources slab is needed.
+    ///
+    /// # Safety (U_C2)
+    /// * The caller asserts that the active `SystemParam::init_access`
+    ///   declared a resource read; no `&mut Resources` aliases this borrow
+    ///   through any cell copy for the returned reference's scope.
+    /// * The by-value receiver consumes a `Copy` of the cell — no `&self`
+    ///   retag occurs and the raw pointer's provenance is preserved.
+    ///
+    /// [`Res<R>::get_param`]: super::params::res::Res
+    /// [`world`]: UnsafeEcsCell::world
+    #[inline]
+    pub(crate) unsafe fn resources(self) -> &'w Resources {
+        // SAFETY (U_C2): by-value receiver; the raw `*mut EcsMaster` is not
+        //   retagged (no intermediate `&self` borrow). The `&` operator
+        //   applies directly to the projected field through `*self.ptr`,
+        //   never constructing an `&EcsMaster` temporary that would
+        //   SharedReadOnly-downgrade the pointer. `'w` lifetime is upheld by
+        //   `new_*()` postconditions.
+        unsafe { &(*self.ptr).resources }
+    }
+
+    /// Direct mutable access to the resources subsystem. Hot path for
+    /// [`ResMut<R>::get_param`].
+    ///
+    /// # Safety (U_C3)
+    /// * The caller asserts that the active `SystemParam::init_access`
+    ///   declared a resource write that does not conflict with sibling
+    ///   params or other systems; no other access through any cell copy
+    ///   aliases this borrow for the returned reference's scope.
+    /// * The cell was minted via [`new_mutable`] (debug-asserted).
+    /// * The by-value receiver consumes a `Copy` of the cell — no `&self`
+    ///   retag occurs.
+    ///
+    /// [`ResMut<R>::get_param`]: super::params::resmut::ResMut
+    /// [`new_mutable`]: UnsafeEcsCell::new_mutable
+    #[inline]
+    pub(crate) unsafe fn resources_mut(self) -> &'w mut Resources {
+        #[cfg(debug_assertions)]
+        debug_assert!(
+            self.allows_mutable_access,
+            "invariant U_C3: resources_mut() called on a read-only UnsafeEcsCell \
+             minted via new_readonly"
+        );
+        // SAFETY (U_C3): by-value receiver; raw pointer carries write-capable
+        //   provenance (minted from `&mut EcsMaster` in `new_mutable`). The
+        //   `&mut` operator projects directly through `*self.ptr` onto the
+        //   `resources` field — no intermediate `&mut EcsMaster` reborrow
+        //   that could downgrade the tag stack. Aliasing is the caller's
+        //   responsibility per the SystemParam protocol.
+        unsafe { &mut (*self.ptr).resources }
+    }
 }
 
 // `EcsMaster` is `!Send + !Sync` (it owns an `Arena` and event lanes that are

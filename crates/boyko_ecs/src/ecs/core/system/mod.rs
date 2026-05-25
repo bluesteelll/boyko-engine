@@ -14,7 +14,7 @@ pub mod unsafe_ecs_cell;
 
 pub use access::Access;
 pub use filtered_access_set::{AccessConflict, ConflictKind, FilteredAccessSet};
-pub use params::MAX_SYSTEM_PARAM_ARITY;
+pub use params::{MAX_SYSTEM_PARAM_ARITY, Res, ResMut, ResMutState, ResState};
 pub use system_meta::SystemMeta;
 pub use system_param::SystemParam;
 pub use unsafe_ecs_cell::UnsafeEcsCell;

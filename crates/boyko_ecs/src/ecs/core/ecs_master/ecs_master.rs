@@ -7,6 +7,7 @@ use crate::ecs::core::entity::entity_master::EntityMaster;
 use crate::ecs::core::events::event::Event;
 use crate::ecs::core::events::event_config::EventConfig;
 use crate::ecs::core::events::event_dispatcher::EventDispatcher;
+use crate::ecs::core::resources::resources::Resources;
 use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId, EntityId, InlandPoolId};
 use crate::ecs::memory::arena::Arena;
 use crate::ecs::constants::DEFAULT_ARENA_SIZE;
@@ -14,15 +15,20 @@ use crate::ecs::error::{EcsError, EcsResult};
 
 /// Main ECS manager that coordinates entities, archetypes, memory, and events.
 ///
-/// # Field order (drop order)
+/// # Field order (drop order — Phase 8a C5 RESOLUTION)
 ///
-/// Fields are dropped in declaration order: `events`, `entity_master`,
-/// `archetype_master`, `arena`.
+/// Fields are dropped in declaration order:
+/// `resources → events → entity_master → archetype_master → arena`.
 ///
-/// `events: EventDispatcher` is the **first** field so it drops first. Event
-/// buffers live in their own heap allocations (separate from the arena) and do
-/// not reference arena memory, so dropping them before the arena is safe and
-/// correct.
+/// `resources: Resources` is the **first** field so it drops first. A
+/// `Resource`'s `Drop` impl runs while every other subsystem is still alive;
+/// if user code violates the [`Resource`] contract and touches the world from
+/// `Drop`, the world is still fully valid. The most-defensive position
+/// prevents the worst case from being UB.
+///
+/// `events: EventDispatcher` drops next. Event buffers live in their own
+/// heap allocations (separate from the arena) and do not reference arena
+/// memory.
 ///
 /// `arena` **must** be last because `ArchetypeMaster`/`Archetype` store
 /// `*const Arena` (raw provenance pointer — Phase 3a Miri retag fix; previously
@@ -47,9 +53,21 @@ use crate::ecs::error::{EcsError, EcsResult};
 /// minted via `&raw const *arena_box` carries the box's provenance but does not
 /// participate in the Stacked Borrows tag stack — Miri accepts it as a shared,
 /// read-only view of the allocation (audit finding C-001 / Phase 3a).
+///
+/// [`Resource`]: crate::ecs::core::resources::Resource
 pub struct EcsMaster {
-    /// Event dispatcher — dropped first (before arena and archetypes).
-    /// Event buffers live in their own heap allocations independent of the arena.
+    /// World-global resources slab.
+    ///
+    /// Dropped first per the Phase 8a C5 drop-order resolution. Public facade
+    /// methods (`insert_resource`, `remove_resource`, `resource`,
+    /// `resource_mut`) are deferred to Step 9; this minimal field addition
+    /// unblocks Step 7's `Res<R>` / `ResMut<R>` `get_param` via
+    /// `UnsafeEcsCell::resources()` / `resources_mut()`.
+    pub(crate) resources: Resources,
+
+    /// Event dispatcher — dropped after `resources` and before the entity /
+    /// archetype subsystems. Event buffers live in their own heap allocations
+    /// independent of the arena.
     events: EventDispatcher,
 
     /// Entity management system.
@@ -96,6 +114,7 @@ impl EcsMaster {
         let events = EventDispatcher::new(1)
             .expect("invariant: default thread_count=1 is always valid");
         Self {
+            resources: Resources::new(),
             events,
             entity_master: EntityMaster::new(),
             archetype_master,
@@ -117,6 +136,7 @@ impl EcsMaster {
         let events = EventDispatcher::new(1)
             .expect("invariant: default thread_count=1 is always valid");
         Self {
+            resources: Resources::new(),
             events,
             entity_master: EntityMaster::with_capacity(entity_capacity),
             archetype_master,
