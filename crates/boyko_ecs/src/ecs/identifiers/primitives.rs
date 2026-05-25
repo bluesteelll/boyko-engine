@@ -62,6 +62,10 @@ define_id!(/// Internal chunk index inside one ComponentPool.
     InlandChunkId);
 define_id!(/// Component type identifier (assigned at registration).
     ComponentId);
+define_id!(/// Resource type identifier (assigned at registration in the
+    /// global resource registry; distinct from `ComponentId` because the
+    /// same Rust type cannot be registered as both — see M6).
+    ResourceId);
 define_id!(/// Internal unit index inside one ComponentPool.
     InlandUnitId);
 define_id!(/// Internal pool index inside one ComponentPoolBundle.
