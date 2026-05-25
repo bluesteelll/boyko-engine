@@ -12,7 +12,11 @@
 
 pub mod resource;
 pub(crate) mod resource_registry;
-// `resources.rs` (slab storage) is added in Phase 8a Step 2.
+// Module name mirrors the public `Resources` slab type; the parent module
+// `resources` is the subsystem namespace.
+#[allow(clippy::module_inception)]
+pub mod resources;
 
 pub use resource::Resource;
 pub use resource_registry::RESOURCE_SLOT_COUNT;
+pub use resources::Resources;
