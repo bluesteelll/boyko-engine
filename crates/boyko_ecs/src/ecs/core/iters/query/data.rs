@@ -465,6 +465,359 @@ unsafe impl<T: Component> QueryData for &mut T {
 
 // NOTE: No `ReadOnlyQueryData for &mut T` impl — `&mut T` writes.
 
+// ── Variadic tuple impls (§4.6 / §10.1, M4) ────────────────────────────────
+//
+// A single `macro_rules!` site emits `QueryData` impls for tuple arities
+// `1..=MAX_QUERY_DATA_ARITY` (= 12). The paired-ident invocation syntax
+// `((D, s, f), ...)` carries three distinct ident kinds per tuple element:
+//
+// * `$D` — type-ident used in trait bounds (`D0: QueryData`, etc.).
+// * `$s` — value-ident bound to the per-element `State` inside `let
+//   ($($s,)*) = state` destructures.
+// * `$f` — value-ident bound to the per-element `Fetch<'w>` inside `let
+//   ($($f,)*) = fetch` destructures.
+//
+// The pairing avoids `paste!` (no external dep) and the Round-1 pseudo
+// `[< state_ $d >]` syntax (rejected per M4). See plan §25 for the
+// concrete arity-3 expansion.
+//
+// `ReadOnlyQueryData` is auto-emitted alongside in a dedicated
+// `impl_read_only_query_data_tuple!` macro (avoids requiring every
+// `$D` simultaneously satisfy both `QueryData` and `ReadOnlyQueryData`
+// at the `unsafe impl` site of the working macro — the gated
+// `ReadOnlyQueryData` blanket has its own bound set).
+
+/// Emits a `QueryData` impl for a tuple of the given paired idents (one
+/// `(TypeIdent, state_value_ident, fetch_value_ident)` triple per
+/// element). Invoked for arity `1..=MAX_QUERY_DATA_ARITY`.
+macro_rules! impl_query_data_tuple {
+    ( $( ($D:ident, $s:ident, $f:ident) ),* ) => {
+        // SAFETY (QD1-QD4): the tuple impl forwards every method to its
+        //   per-element delegate, which upholds QD1-QD4 by its own
+        //   contract. `archetype` is the same pointer for every element in
+        //   one `set_table_*` call (each element caches its own column).
+        //   Intra-tuple aliasing among `$D`s is detected at `init_access`
+        //   via `FilteredAccessSet`.
+        #[allow(non_snake_case)]
+        unsafe impl< $($D: QueryData),* > QueryData for ( $($D,)* ) {
+            type State = ( $($D::State,)* );
+            type Fetch<'w> = ( $($D::Fetch<'w>,)* );
+            type Item<'w> = ( $($D::Item<'w>,)* );
+
+            const IS_READ_ONLY: bool = true $( && $D::IS_READ_ONLY )*;
+
+            #[inline]
+            fn init_state(world: &mut EcsMaster) -> Self::State {
+                ( $( <$D as QueryData>::init_state(world), )* )
+            }
+
+            #[inline]
+            fn init_access(state: &Self::State, access_set: &mut FilteredAccessSet) {
+                let ( $($s,)* ) = state;
+                $( <$D as QueryData>::init_access($s, access_set); )*
+            }
+
+            #[inline]
+            fn matches_component_set(state: &Self::State, mask: &ComponentMask) -> bool {
+                let ( $($s,)* ) = state;
+                true $( && <$D as QueryData>::matches_component_set($s, mask) )*
+            }
+
+            #[inline]
+            fn aggregate_include(state: &Self::State, include: &mut ComponentMask) {
+                let ( $($s,)* ) = state;
+                $( <$D as QueryData>::aggregate_include($s, include); )*
+            }
+
+            #[inline]
+            fn init_fetch<'w>(state: &Self::State) -> Self::Fetch<'w> {
+                let ( $($s,)* ) = state;
+                ( $( <$D as QueryData>::init_fetch($s), )* )
+            }
+
+            #[inline]
+            unsafe fn set_table_readonly<'w>(
+                fetch: &mut Self::Fetch<'w>,
+                state: &Self::State,
+                archetype: *const Archetype,
+            ) {
+                let ( $($f,)* ) = fetch;
+                let ( $($s,)* ) = state;
+                $(
+                    // SAFETY (QD3, QD4): forwarded per-element; `archetype`
+                    //   carries read-only provenance and is identical for
+                    //   every element. The caller of the tuple impl
+                    //   upheld QD3/QD4 for every `$D`.
+                    unsafe { <$D as QueryData>::set_table_readonly($f, $s, archetype); }
+                )*
+            }
+
+            #[inline]
+            unsafe fn set_table_mut<'w>(
+                fetch: &mut Self::Fetch<'w>,
+                state: &Self::State,
+                archetype: *mut Archetype,
+            ) {
+                let ( $($f,)* ) = fetch;
+                let ( $($s,)* ) = state;
+                $(
+                    // SAFETY (QD3, QD4): write-capable `archetype` is
+                    //   forwarded to every element; the caller upheld
+                    //   QD3/QD4.
+                    unsafe { <$D as QueryData>::set_table_mut($f, $s, archetype); }
+                )*
+            }
+
+            #[inline]
+            unsafe fn fetch<'w>(fetch: &Self::Fetch<'w>, row: usize) -> Self::Item<'w> {
+                let ( $($f,)* ) = fetch;
+                (
+                    $(
+                        // SAFETY (QD2, QD3): per-element fetch contract
+                        //   held by the caller; `row` is in range for the
+                        //   archetype previously cached by `set_table_*`.
+                        unsafe { <$D as QueryData>::fetch($f, row) },
+                    )*
+                )
+            }
+        }
+    };
+}
+
+/// Emits a `ReadOnlyQueryData` impl for the tuple of the given type-idents.
+/// Gated separately from [`impl_query_data_tuple!`] so the bound set is
+/// `$D: ReadOnlyQueryData` (which transitively implies `$D: QueryData`)
+/// without conflating the two trait bounds in a single `impl<>` header.
+macro_rules! impl_read_only_query_data_tuple {
+    ( $( $D:ident ),* ) => {
+        // SAFETY: every `$D` is `ReadOnlyQueryData` (each `$D::IS_READ_ONLY
+        //   = true` and the impl is gated to perform no writes). The tuple
+        //   impl forwards every fetch to per-element fetch, which is
+        //   read-only by induction.
+        unsafe impl< $($D: ReadOnlyQueryData),* > ReadOnlyQueryData for ( $($D,)* ) {}
+    };
+}
+
+impl_query_data_tuple!((D0, s0, f0));
+impl_query_data_tuple!((D0, s0, f0), (D1, s1, f1));
+impl_query_data_tuple!((D0, s0, f0), (D1, s1, f1), (D2, s2, f2));
+impl_query_data_tuple!((D0, s0, f0), (D1, s1, f1), (D2, s2, f2), (D3, s3, f3));
+impl_query_data_tuple!(
+    (D0, s0, f0), (D1, s1, f1), (D2, s2, f2), (D3, s3, f3),
+    (D4, s4, f4)
+);
+impl_query_data_tuple!(
+    (D0, s0, f0), (D1, s1, f1), (D2, s2, f2), (D3, s3, f3),
+    (D4, s4, f4), (D5, s5, f5)
+);
+impl_query_data_tuple!(
+    (D0, s0, f0), (D1, s1, f1), (D2, s2, f2), (D3, s3, f3),
+    (D4, s4, f4), (D5, s5, f5), (D6, s6, f6)
+);
+impl_query_data_tuple!(
+    (D0, s0, f0), (D1, s1, f1), (D2, s2, f2), (D3, s3, f3),
+    (D4, s4, f4), (D5, s5, f5), (D6, s6, f6), (D7, s7, f7)
+);
+impl_query_data_tuple!(
+    (D0, s0, f0), (D1, s1, f1), (D2, s2, f2), (D3, s3, f3),
+    (D4, s4, f4), (D5, s5, f5), (D6, s6, f6), (D7, s7, f7),
+    (D8, s8, f8)
+);
+impl_query_data_tuple!(
+    (D0, s0, f0), (D1, s1, f1), (D2, s2, f2), (D3, s3, f3),
+    (D4, s4, f4), (D5, s5, f5), (D6, s6, f6), (D7, s7, f7),
+    (D8, s8, f8), (D9, s9, f9)
+);
+impl_query_data_tuple!(
+    (D0, s0, f0), (D1, s1, f1), (D2, s2, f2), (D3, s3, f3),
+    (D4, s4, f4), (D5, s5, f5), (D6, s6, f6), (D7, s7, f7),
+    (D8, s8, f8), (D9, s9, f9), (D10, s10, f10)
+);
+impl_query_data_tuple!(
+    (D0, s0, f0), (D1, s1, f1), (D2, s2, f2), (D3, s3, f3),
+    (D4, s4, f4), (D5, s5, f5), (D6, s6, f6), (D7, s7, f7),
+    (D8, s8, f8), (D9, s9, f9), (D10, s10, f10), (D11, s11, f11)
+);
+
+impl_read_only_query_data_tuple!(D0);
+impl_read_only_query_data_tuple!(D0, D1);
+impl_read_only_query_data_tuple!(D0, D1, D2);
+impl_read_only_query_data_tuple!(D0, D1, D2, D3);
+impl_read_only_query_data_tuple!(D0, D1, D2, D3, D4);
+impl_read_only_query_data_tuple!(D0, D1, D2, D3, D4, D5);
+impl_read_only_query_data_tuple!(D0, D1, D2, D3, D4, D5, D6);
+impl_read_only_query_data_tuple!(D0, D1, D2, D3, D4, D5, D6, D7);
+impl_read_only_query_data_tuple!(D0, D1, D2, D3, D4, D5, D6, D7, D8);
+impl_read_only_query_data_tuple!(D0, D1, D2, D3, D4, D5, D6, D7, D8, D9);
+impl_read_only_query_data_tuple!(D0, D1, D2, D3, D4, D5, D6, D7, D8, D9, D10);
+impl_read_only_query_data_tuple!(D0, D1, D2, D3, D4, D5, D6, D7, D8, D9, D10, D11);
+
+// ── Arity-overflow stubs (arity 13..=24) — M7 + C-NEW-2 ────────────────────
+//
+// Same pattern as Phase 8a's `params/tuple_impl.rs::
+// impl_system_param_tuple_too_large!`: each method body is `const {
+// panic!(...) }`, which evaluates ONLY at monomorphization. Crates that
+// never instantiate a 13+ arity `QueryData` tuple compile cleanly.
+//
+// `compile_error!` was rejected in Phase 8a (C-NEW-2): it fires at
+// macro-expansion time, breaking the wider crate. `const { panic!() }`
+// requires `rustc >= 1.79`; boyko targets Rust 2024 (`>= 1.85`).
+
+/// Emits a stub `QueryData` impl whose every method body is
+/// `const { panic!(...) }`. The const block fires at monomorphization;
+/// the impl is never *successfully* used at runtime. `State`, `Fetch<'w>`,
+/// and `Item<'w>` collapse to `()` so the stub type-checks in isolation.
+macro_rules! impl_query_data_tuple_too_large {
+    ( $( ($D:ident, $s:ident, $f:ident) ),* ) => {
+        // SAFETY: stub impl whose every method body is `const { panic!(...) }`.
+        //   The impl is never *successfully* used at runtime — the const
+        //   block fails at monomorphization with the diagnostic in
+        //   `init_state`. QD1-QD4 are vacuously upheld because no code
+        //   path that respects the contract ever observes the impl's
+        //   effects.
+        #[allow(non_snake_case, unused_variables)]
+        unsafe impl< $($D: QueryData),* > QueryData for ( $($D,)* ) {
+            type State = ();
+            type Fetch<'w> = ();
+            type Item<'w> = ();
+            const IS_READ_ONLY: bool = true;
+
+            fn init_state(_world: &mut EcsMaster) -> Self::State {
+                const {
+                    panic!(
+                        "tuple has too many QueryData elements. \
+                         boyko-engine supports up to \
+                         MAX_QUERY_DATA_ARITY = 12. Split your query into \
+                         smaller queries or wrap related elements in a \
+                         struct that implements QueryData."
+                    )
+                }
+            }
+
+            fn init_access(_state: &Self::State, _access_set: &mut FilteredAccessSet) {
+                const { panic!("tuple too large: see init_state diagnostic") }
+            }
+
+            fn matches_component_set(_state: &Self::State, _mask: &ComponentMask) -> bool {
+                const { panic!("tuple too large: see init_state diagnostic") }
+            }
+
+            fn aggregate_include(_state: &Self::State, _include: &mut ComponentMask) {
+                const { panic!("tuple too large: see init_state diagnostic") }
+            }
+
+            fn init_fetch<'w>(_state: &Self::State) -> Self::Fetch<'w> {
+                const { panic!("tuple too large: see init_state diagnostic") }
+            }
+
+            unsafe fn set_table_readonly<'w>(
+                _fetch: &mut Self::Fetch<'w>,
+                _state: &Self::State,
+                _archetype: *const Archetype,
+            ) {
+                const { panic!("tuple too large: see init_state diagnostic") }
+            }
+
+            unsafe fn set_table_mut<'w>(
+                _fetch: &mut Self::Fetch<'w>,
+                _state: &Self::State,
+                _archetype: *mut Archetype,
+            ) {
+                const { panic!("tuple too large: see init_state diagnostic") }
+            }
+
+            unsafe fn fetch<'w>(_fetch: &Self::Fetch<'w>, _row: usize) -> Self::Item<'w> {
+                const { panic!("tuple too large: see init_state diagnostic") }
+            }
+        }
+    };
+}
+
+impl_query_data_tuple_too_large!(
+    (D0, s0, f0), (D1, s1, f1), (D2, s2, f2), (D3, s3, f3),
+    (D4, s4, f4), (D5, s5, f5), (D6, s6, f6), (D7, s7, f7),
+    (D8, s8, f8), (D9, s9, f9), (D10, s10, f10), (D11, s11, f11),
+    (D12, s12, f12)
+);
+impl_query_data_tuple_too_large!(
+    (D0, s0, f0), (D1, s1, f1), (D2, s2, f2), (D3, s3, f3),
+    (D4, s4, f4), (D5, s5, f5), (D6, s6, f6), (D7, s7, f7),
+    (D8, s8, f8), (D9, s9, f9), (D10, s10, f10), (D11, s11, f11),
+    (D12, s12, f12), (D13, s13, f13)
+);
+impl_query_data_tuple_too_large!(
+    (D0, s0, f0), (D1, s1, f1), (D2, s2, f2), (D3, s3, f3),
+    (D4, s4, f4), (D5, s5, f5), (D6, s6, f6), (D7, s7, f7),
+    (D8, s8, f8), (D9, s9, f9), (D10, s10, f10), (D11, s11, f11),
+    (D12, s12, f12), (D13, s13, f13), (D14, s14, f14)
+);
+impl_query_data_tuple_too_large!(
+    (D0, s0, f0), (D1, s1, f1), (D2, s2, f2), (D3, s3, f3),
+    (D4, s4, f4), (D5, s5, f5), (D6, s6, f6), (D7, s7, f7),
+    (D8, s8, f8), (D9, s9, f9), (D10, s10, f10), (D11, s11, f11),
+    (D12, s12, f12), (D13, s13, f13), (D14, s14, f14), (D15, s15, f15)
+);
+impl_query_data_tuple_too_large!(
+    (D0, s0, f0), (D1, s1, f1), (D2, s2, f2), (D3, s3, f3),
+    (D4, s4, f4), (D5, s5, f5), (D6, s6, f6), (D7, s7, f7),
+    (D8, s8, f8), (D9, s9, f9), (D10, s10, f10), (D11, s11, f11),
+    (D12, s12, f12), (D13, s13, f13), (D14, s14, f14), (D15, s15, f15),
+    (D16, s16, f16)
+);
+impl_query_data_tuple_too_large!(
+    (D0, s0, f0), (D1, s1, f1), (D2, s2, f2), (D3, s3, f3),
+    (D4, s4, f4), (D5, s5, f5), (D6, s6, f6), (D7, s7, f7),
+    (D8, s8, f8), (D9, s9, f9), (D10, s10, f10), (D11, s11, f11),
+    (D12, s12, f12), (D13, s13, f13), (D14, s14, f14), (D15, s15, f15),
+    (D16, s16, f16), (D17, s17, f17)
+);
+impl_query_data_tuple_too_large!(
+    (D0, s0, f0), (D1, s1, f1), (D2, s2, f2), (D3, s3, f3),
+    (D4, s4, f4), (D5, s5, f5), (D6, s6, f6), (D7, s7, f7),
+    (D8, s8, f8), (D9, s9, f9), (D10, s10, f10), (D11, s11, f11),
+    (D12, s12, f12), (D13, s13, f13), (D14, s14, f14), (D15, s15, f15),
+    (D16, s16, f16), (D17, s17, f17), (D18, s18, f18)
+);
+impl_query_data_tuple_too_large!(
+    (D0, s0, f0), (D1, s1, f1), (D2, s2, f2), (D3, s3, f3),
+    (D4, s4, f4), (D5, s5, f5), (D6, s6, f6), (D7, s7, f7),
+    (D8, s8, f8), (D9, s9, f9), (D10, s10, f10), (D11, s11, f11),
+    (D12, s12, f12), (D13, s13, f13), (D14, s14, f14), (D15, s15, f15),
+    (D16, s16, f16), (D17, s17, f17), (D18, s18, f18), (D19, s19, f19)
+);
+impl_query_data_tuple_too_large!(
+    (D0, s0, f0), (D1, s1, f1), (D2, s2, f2), (D3, s3, f3),
+    (D4, s4, f4), (D5, s5, f5), (D6, s6, f6), (D7, s7, f7),
+    (D8, s8, f8), (D9, s9, f9), (D10, s10, f10), (D11, s11, f11),
+    (D12, s12, f12), (D13, s13, f13), (D14, s14, f14), (D15, s15, f15),
+    (D16, s16, f16), (D17, s17, f17), (D18, s18, f18), (D19, s19, f19),
+    (D20, s20, f20)
+);
+impl_query_data_tuple_too_large!(
+    (D0, s0, f0), (D1, s1, f1), (D2, s2, f2), (D3, s3, f3),
+    (D4, s4, f4), (D5, s5, f5), (D6, s6, f6), (D7, s7, f7),
+    (D8, s8, f8), (D9, s9, f9), (D10, s10, f10), (D11, s11, f11),
+    (D12, s12, f12), (D13, s13, f13), (D14, s14, f14), (D15, s15, f15),
+    (D16, s16, f16), (D17, s17, f17), (D18, s18, f18), (D19, s19, f19),
+    (D20, s20, f20), (D21, s21, f21)
+);
+impl_query_data_tuple_too_large!(
+    (D0, s0, f0), (D1, s1, f1), (D2, s2, f2), (D3, s3, f3),
+    (D4, s4, f4), (D5, s5, f5), (D6, s6, f6), (D7, s7, f7),
+    (D8, s8, f8), (D9, s9, f9), (D10, s10, f10), (D11, s11, f11),
+    (D12, s12, f12), (D13, s13, f13), (D14, s14, f14), (D15, s15, f15),
+    (D16, s16, f16), (D17, s17, f17), (D18, s18, f18), (D19, s19, f19),
+    (D20, s20, f20), (D21, s21, f21), (D22, s22, f22)
+);
+impl_query_data_tuple_too_large!(
+    (D0, s0, f0), (D1, s1, f1), (D2, s2, f2), (D3, s3, f3),
+    (D4, s4, f4), (D5, s5, f5), (D6, s6, f6), (D7, s7, f7),
+    (D8, s8, f8), (D9, s9, f9), (D10, s10, f10), (D11, s11, f11),
+    (D12, s12, f12), (D13, s13, f13), (D14, s14, f14), (D15, s15, f15),
+    (D16, s16, f16), (D17, s17, f17), (D18, s18, f18), (D19, s19, f19),
+    (D20, s20, f20), (D21, s21, f21), (D22, s22, f22), (D23, s23, f23)
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -640,5 +993,60 @@ mod tests {
             write_include.contains(write_state.id),
             "&mut T::aggregate_include must set the component-id bit"
         );
+    }
+
+    // ── Variadic tuple impl tests (Step 4) ──────────────────────────────
+
+    /// Compile-only shim: instantiating `assert_impl::<T>()` proves `T`
+    /// satisfies `QueryData`. Used by the test bodies below.
+    fn assert_impl<T: QueryData>() {}
+
+    #[test]
+    fn tuple_2_is_query_data() {
+        // Compile-only existence check that the arity-2 macro invocation
+        // emitted the tuple impl.
+        assert_impl::<(&MyComp, &OtherComp)>();
+    }
+
+    #[test]
+    fn tuple_2_all_read_is_read_only() {
+        assert!(
+            <(&MyComp, &OtherComp) as QueryData>::IS_READ_ONLY,
+            "all-read tuple must AND-fold IS_READ_ONLY = true"
+        );
+    }
+
+    #[test]
+    fn tuple_2_with_mut_is_not_read_only() {
+        assert!(
+            !<(&MyComp, &mut OtherComp) as QueryData>::IS_READ_ONLY,
+            "tuple containing a &mut element must AND-fold IS_READ_ONLY = false"
+        );
+        assert!(
+            !<(&mut MyComp, &OtherComp) as QueryData>::IS_READ_ONLY,
+            "tuple containing a &mut element must AND-fold IS_READ_ONLY = false \
+             regardless of element order"
+        );
+    }
+
+    #[test]
+    fn arity_12_query_data_compiles() {
+        // The 12-arity cap from `MAX_QUERY_DATA_ARITY`. Mix `&T` and
+        // `&mut T` so the compile-only check exercises both element
+        // shapes simultaneously.
+        assert_impl::<(
+            &MyComp,
+            &OtherComp,
+            &MyComp,
+            &OtherComp,
+            &MyComp,
+            &OtherComp,
+            &MyComp,
+            &mut OtherComp,
+            &mut MyComp,
+            &mut OtherComp,
+            &mut MyComp,
+            &mut OtherComp,
+        )>();
     }
 }
