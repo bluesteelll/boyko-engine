@@ -83,6 +83,51 @@ pub fn component_macro(input: TokenStream) -> TokenStream {
     expanded.into()
 }
 
+/// Derive macro for implementing the Resource trait.
+///
+/// Generates the lazy `resource_id()` accessor backed by a per-type
+/// `OnceLock`; `debug_type_name`, `type_id`, `mem_size`, and `alignment`
+/// are inherited from the `Resource` trait's default methods.
+///
+/// Resource IDs are assigned lazily at runtime via the global resource
+/// registry — see `boyko_ecs::ecs::core::resources::resource_registry`.
+/// The registry guarantees the same Rust type cannot be registered both
+/// as a `Component` and as a `Resource` (audit M6).
+///
+/// # Example
+///
+/// ```ignore
+/// // Used from a downstream crate that depends on `boyko-ecs` + `boyko-macros`.
+/// #[derive(Resource)]
+/// struct GameTick(u32);
+/// ```
+///
+/// The example is `ignore`'d because proc-macro crates cannot consume their
+/// own macros, and `boyko-macros` cannot depend on `boyko-ecs` for tests
+/// (that would create a cycle). Real usage lives in `boyko-ecs` integration
+/// tests.
+#[proc_macro_derive(Resource)]
+pub fn resource_macro(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let name = input.ident;
+
+    let expanded = quote! {
+        impl ::boyko_ecs::ecs::core::resources::resource::Resource for #name {
+            #[inline]
+            fn resource_id() -> ::boyko_ecs::ecs::identifiers::primitives::ResourceId {
+                static ID: ::std::sync::OnceLock<
+                    ::boyko_ecs::ecs::identifiers::primitives::ResourceId
+                > = ::std::sync::OnceLock::new();
+                *ID.get_or_init(|| ::boyko_ecs::ecs::identifiers::primitives::ResourceId(
+                    ::boyko_ecs::ecs::core::resources::resource_registry::register_new::<Self>()
+                ))
+            }
+        }
+    };
+
+    expanded.into()
+}
+
 /// Attribute macro for defining an event type.
 ///
 /// Rewrites the user struct into a two-field native layout:
