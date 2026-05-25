@@ -4,6 +4,7 @@ use crate::ecs::core::archetype::archetype::Archetype;
 use crate::ecs::core::archetype::archetype_master::ArchetypeMaster;
 use crate::ecs::core::component::component::Component;
 use crate::ecs::core::component::component_mask::ComponentMask;
+use crate::ecs::core::component::component_registry::MAX_COMPONENTS;
 use crate::ecs::core::iters::component_set::ComponentSet;
 use crate::ecs::core::iters::query_state::{QueryState, QueryStateIter};
 use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId};
@@ -254,18 +255,35 @@ impl<'q, A: Component> QueryIterOne<'q, A> {
 
     /// Loads the component `A` buffer base and entity count from `arch`.
     ///
+    /// Reads directly from the inline `arch.columns[comp_id.0]` table (Phase 7
+    /// D4). The column's `ptr` is kept in sync with the pool's `buffer_ptr()`
+    /// via `refresh_column` (Phase 7 invariant U7), so this load yields the
+    /// same base pointer the previous sparse-set lookup did — bit-identical
+    /// result, one cache-line load instead of a `ComponentPoolBundle` walk.
+    ///
     /// On success, sets `current_ptr` to the first slot and
-    /// `current_remaining` to the entity count. On failure (pool missing or
-    /// empty), sets `current_remaining` to 0 so the outer loop skips ahead.
+    /// `current_remaining` to the entity count. On failure (column null or
+    /// archetype empty), sets `current_remaining` to 0 so the outer loop
+    /// skips ahead.
     fn load_archetype(&mut self, arch: &Archetype) {
         let comp_id = A::component_id();
-        let Some(pool) = arch.component_pools().get_pool(comp_id) else {
-            // Defensive: QueryState matched this archetype, so it should have A.
-            // If it doesn't (e.g. a manually-constructed query), skip it safely.
+        debug_assert!(
+            comp_id.0 < MAX_COMPONENTS,
+            "ComponentId {} >= MAX_COMPONENTS ({})", comp_id.0, MAX_COMPONENTS,
+        );
+        // SAFETY (U4): `comp_id.0 < MAX_COMPONENTS` is asserted above; the
+        // `columns` array has exactly `MAX_COMPONENTS` slots, so the index is
+        // in bounds. `&Archetype` keeps the array alive for the load.
+        let column = unsafe { arch.columns.get_unchecked(comp_id.0) };
+
+        if column.ptr.is_null() {
+            // Defensive (Q4): QueryState matched this archetype at the mask
+            // level, but the column slot is null. Treat as "no entities for
+            // this component" and let the outer loop advance.
             self.current_remaining = 0;
             self.current_ptr = std::ptr::null();
             return;
-        };
+        }
         let entity_count = arch.entity_count();
         if entity_count == 0 {
             self.current_remaining = 0;
@@ -273,28 +291,22 @@ impl<'q, A: Component> QueryIterOne<'q, A> {
             return;
         }
         debug_assert_eq!(
-            pool.component_layout().size(),
+            column.stride as usize,
             std::mem::size_of::<A>(),
-            "ComponentPool layout for {} mismatches size_of::<A> ({})",
+            "Column stride for {} mismatches size_of::<A> ({})",
             std::any::type_name::<A>(),
             std::mem::size_of::<A>(),
         );
-        debug_assert!(
-            pool.component_layout().align() >= std::mem::align_of::<A>(),
-            "ComponentPool alignment for {} ({}) is less than align_of::<A> ({})",
-            std::any::type_name::<A>(),
-            pool.component_layout().align(),
-            std::mem::align_of::<A>(),
-        );
-        // SAFETY: `pool.buffer_ptr()` returns the base of the flat dense
-        // allocation holding exactly `pool.count()` initialised `A` values.
-        // `entity_count == pool.count()` because all pools in an archetype
-        // grow in lock-step (see `ComponentPoolBundle::push_entity_components`).
-        // Casting `*const u8` to `*const A` is sound because:
-        //   - the buffer is aligned to `component_layout.align()` ≥ `align_of::<A>()`,
-        //   - `size_of::<A>()` equals `component_layout.size()` (asserted above),
-        //   - and the slot at offset 0 is initialised (entity_count > 0).
-        self.current_ptr = pool.buffer_ptr().cast::<A>();
+        // SAFETY (Phase 7 D4 / U7): `column.ptr` was set by `refresh_column`
+        // after `ComponentPoolBundle::add_pool`, so it points at the pool's
+        // `buffer_ptr()` — the base of the flat dense allocation holding
+        // exactly `pool.count()` initialised `A` values. `entity_count`
+        // matches `pool.count()` because all pools in an archetype grow in
+        // lock-step (`ComponentPoolBundle::push_entity_components`). The
+        // pool's underlying buffer is aligned to `component_layout.align()
+        // >= align_of::<A>()` (enforced at registration). Casting
+        // `*mut u8` to `*const A` is sound under these conditions.
+        self.current_ptr = column.ptr as *const A;
         self.current_remaining = entity_count;
     }
 }
@@ -373,20 +385,40 @@ impl<'q, A: Component, B: Component> QueryIterTwo<'q, A, B> {
 
     /// Loads both component buffers from `arch`.
     ///
-    /// Requires that `arch` has pools for both `A` and `B`. If either pool is
-    /// missing or the archetype is empty, sets `current_remaining` to 0.
+    /// Reads directly from `arch.columns[id_a.0]` and `arch.columns[id_b.0]`
+    /// (Phase 7 D4). The columns' `ptr` fields are kept in sync with each
+    /// pool's `buffer_ptr()` via `refresh_column` (Phase 7 invariant U7), so
+    /// these loads yield the same base pointers the previous sparse-set
+    /// lookups did — bit-identical, one cache-line load per column.
+    ///
+    /// Requires that `arch` has columns for both `A` and `B`. If either
+    /// column is null or the archetype is empty, sets `current_remaining`
+    /// to 0 so the outer loop skips ahead.
     fn load_archetype(&mut self, arch: &Archetype) {
         let id_a = A::component_id();
         let id_b = B::component_id();
-        let (Some(pool_a), Some(pool_b)) = (
-            arch.component_pools().get_pool(id_a),
-            arch.component_pools().get_pool(id_b),
-        ) else {
+        debug_assert!(
+            id_a.0 < MAX_COMPONENTS,
+            "ComponentId {} >= MAX_COMPONENTS ({})", id_a.0, MAX_COMPONENTS,
+        );
+        debug_assert!(
+            id_b.0 < MAX_COMPONENTS,
+            "ComponentId {} >= MAX_COMPONENTS ({})", id_b.0, MAX_COMPONENTS,
+        );
+        // SAFETY (U4): both `id_a.0` and `id_b.0` are `< MAX_COMPONENTS` (asserted
+        // above); the `columns` array has exactly `MAX_COMPONENTS` slots, so
+        // both indices are in bounds. `&Archetype` keeps the array alive.
+        let col_a = unsafe { arch.columns.get_unchecked(id_a.0) };
+        // SAFETY (U4): see above.
+        let col_b = unsafe { arch.columns.get_unchecked(id_b.0) };
+        if col_a.ptr.is_null() || col_b.ptr.is_null() {
+            // Defensive (Q4): mask-level match succeeded but at least one
+            // column is null. Skip safely.
             self.current_remaining = 0;
             self.ptr_a = std::ptr::null();
             self.ptr_b = std::ptr::null();
             return;
-        };
+        }
         let entity_count = arch.entity_count();
         if entity_count == 0 {
             self.current_remaining = 0;
@@ -395,32 +427,23 @@ impl<'q, A: Component, B: Component> QueryIterTwo<'q, A, B> {
             return;
         }
         debug_assert_eq!(
-            pool_a.component_layout().size(),
+            col_a.stride as usize,
             std::mem::size_of::<A>(),
-            "ComponentPool layout for {} mismatches size_of::<A>",
-            std::any::type_name::<A>(),
-        );
-        debug_assert!(
-            pool_a.component_layout().align() >= std::mem::align_of::<A>(),
-            "ComponentPool alignment for {} is less than align_of::<A>",
+            "Column stride for {} mismatches size_of::<A>",
             std::any::type_name::<A>(),
         );
         debug_assert_eq!(
-            pool_b.component_layout().size(),
+            col_b.stride as usize,
             std::mem::size_of::<B>(),
-            "ComponentPool layout for {} mismatches size_of::<B>",
+            "Column stride for {} mismatches size_of::<B>",
             std::any::type_name::<B>(),
         );
-        debug_assert!(
-            pool_b.component_layout().align() >= std::mem::align_of::<B>(),
-            "ComponentPool alignment for {} is less than align_of::<B>",
-            std::any::type_name::<B>(),
-        );
-        // SAFETY: same reasoning as `QueryIterOne::load_archetype`, applied
-        // independently to each pool. Both pools share `entity_count` because
-        // all pools in an archetype grow in lock-step.
-        self.ptr_a = pool_a.buffer_ptr().cast::<A>();
-        self.ptr_b = pool_b.buffer_ptr().cast::<B>();
+        // SAFETY (Phase 7 D4 / U7): same reasoning as
+        // `QueryIterOne::load_archetype`, applied independently to each
+        // column. Both columns share `entity_count` because all pools in an
+        // archetype grow in lock-step.
+        self.ptr_a = col_a.ptr as *const A;
+        self.ptr_b = col_b.ptr as *const B;
         self.current_remaining = entity_count;
     }
 }

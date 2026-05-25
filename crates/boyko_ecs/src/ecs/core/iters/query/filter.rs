@@ -701,7 +701,7 @@ impl_or_filter_tuple!(
 // ── Arity-overflow stubs (arity 13..=24) — M7 + C-NEW-2 ────────────────────
 //
 // Same pattern as `data.rs::impl_query_data_tuple_too_large!`: each
-// method body is `const { panic!(...) }`, evaluated only at
+// method body is `panic!(...)`, evaluated only at
 // monomorphization. The stub `QueryFilter for (F0, .., F12, ..)` impl
 // has `State = ()` / `Fetch<'w> = ()` so it type-checks in isolation.
 //
@@ -709,11 +709,11 @@ impl_or_filter_tuple!(
 // `Or<(...)>`, so the two impl shapes can co-exist.
 
 /// Emits a stub `QueryFilter` impl for an oversized tuple-as-AND. Every
-/// method body is `const { panic!(...) }`; the panic fires at
+/// method body is `panic!(...)`; the panic fires at
 /// monomorphization, not at macro-expand.
 macro_rules! impl_query_filter_tuple_and_too_large {
     ( $( ($F:ident, $s:ident, $f:ident) ),* ) => {
-        // SAFETY: stub impl with `const { panic!(...) }` method bodies.
+        // SAFETY: stub impl with `panic!(...)` method bodies.
         //   The const block prevents successful instantiation at runtime;
         //   QF1/QF2/QF3 are vacuously upheld.
         #[allow(non_snake_case, unused_variables)]
@@ -723,26 +723,24 @@ macro_rules! impl_query_filter_tuple_and_too_large {
             const IS_ARCHETYPAL: bool = true;
 
             fn init_state(_world: &mut EcsMaster) -> Self::State {
-                const {
-                    panic!(
+                panic!(
                         "tuple has too many QueryFilter elements. \
                          boyko-engine supports up to arity 12. Split your \
                          filter into smaller tuples or wrap related \
                          filters in a struct that implements QueryFilter."
                     )
-                }
             }
 
             fn init_access(_state: &Self::State, _access_set: &mut FilteredAccessSet) {
-                const { panic!("tuple too large: see init_state diagnostic") }
+                panic!("tuple too large: see init_state diagnostic")
             }
 
             fn matches_component_set(_state: &Self::State, _mask: &ComponentMask) -> bool {
-                const { panic!("tuple too large: see init_state diagnostic") }
+                panic!("tuple too large: see init_state diagnostic")
             }
 
             fn init_fetch<'w>(_state: &Self::State) -> Self::Fetch<'w> {
-                const { panic!("tuple too large: see init_state diagnostic") }
+                panic!("tuple too large: see init_state diagnostic")
             }
 
             unsafe fn set_table_readonly<'w>(
@@ -750,7 +748,7 @@ macro_rules! impl_query_filter_tuple_and_too_large {
                 _state: &Self::State,
                 _archetype: *const Archetype,
             ) {
-                const { panic!("tuple too large: see init_state diagnostic") }
+                panic!("tuple too large: see init_state diagnostic")
             }
 
             unsafe fn set_table_mut<'w>(
@@ -758,22 +756,22 @@ macro_rules! impl_query_filter_tuple_and_too_large {
                 _state: &Self::State,
                 _archetype: *mut Archetype,
             ) {
-                const { panic!("tuple too large: see init_state diagnostic") }
+                panic!("tuple too large: see init_state diagnostic")
             }
 
             unsafe fn filter_fetch<'w>(_fetch: &Self::Fetch<'w>, _row: usize) -> bool {
-                const { panic!("tuple too large: see init_state diagnostic") }
+                panic!("tuple too large: see init_state diagnostic")
             }
         }
     };
 }
 
 /// Emits a stub `QueryFilter` impl for `Or<(F0, .., F12, ..)>`. Every
-/// method body is `const { panic!(...) }`; the panic fires at
+/// method body is `panic!(...)`; the panic fires at
 /// monomorphization.
 macro_rules! impl_or_filter_tuple_too_large {
     ( $( ($F:ident, $s:ident, $f:ident) ),* ) => {
-        // SAFETY: stub impl with `const { panic!(...) }` method bodies.
+        // SAFETY: stub impl with `panic!(...)` method bodies.
         #[allow(non_snake_case, unused_variables)]
         unsafe impl< $($F: QueryFilter),* > QueryFilter for Or<( $($F,)* )> {
             type State = ();
@@ -781,26 +779,24 @@ macro_rules! impl_or_filter_tuple_too_large {
             const IS_ARCHETYPAL: bool = true;
 
             fn init_state(_world: &mut EcsMaster) -> Self::State {
-                const {
-                    panic!(
+                panic!(
                         "Or<F> has too many QueryFilter elements. \
                          boyko-engine supports up to arity 12. Split your \
                          filter into smaller Or tuples or wrap related \
                          filters in a struct that implements QueryFilter."
                     )
-                }
             }
 
             fn init_access(_state: &Self::State, _access_set: &mut FilteredAccessSet) {
-                const { panic!("Or<F> too large: see init_state diagnostic") }
+                panic!("Or<F> too large: see init_state diagnostic")
             }
 
             fn matches_component_set(_state: &Self::State, _mask: &ComponentMask) -> bool {
-                const { panic!("Or<F> too large: see init_state diagnostic") }
+                panic!("Or<F> too large: see init_state diagnostic")
             }
 
             fn init_fetch<'w>(_state: &Self::State) -> Self::Fetch<'w> {
-                const { panic!("Or<F> too large: see init_state diagnostic") }
+                panic!("Or<F> too large: see init_state diagnostic")
             }
 
             unsafe fn set_table_readonly<'w>(
@@ -808,7 +804,7 @@ macro_rules! impl_or_filter_tuple_too_large {
                 _state: &Self::State,
                 _archetype: *const Archetype,
             ) {
-                const { panic!("Or<F> too large: see init_state diagnostic") }
+                panic!("Or<F> too large: see init_state diagnostic")
             }
 
             unsafe fn set_table_mut<'w>(
@@ -816,11 +812,11 @@ macro_rules! impl_or_filter_tuple_too_large {
                 _state: &Self::State,
                 _archetype: *mut Archetype,
             ) {
-                const { panic!("Or<F> too large: see init_state diagnostic") }
+                panic!("Or<F> too large: see init_state diagnostic")
             }
 
             unsafe fn filter_fetch<'w>(_fetch: &Self::Fetch<'w>, _row: usize) -> bool {
-                const { panic!("Or<F> too large: see init_state diagnostic") }
+                panic!("Or<F> too large: see init_state diagnostic")
             }
         }
     };

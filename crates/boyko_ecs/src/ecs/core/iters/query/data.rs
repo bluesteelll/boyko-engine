@@ -18,7 +18,7 @@ use crate::ecs::identifiers::primitives::ComponentId;
 
 /// Maximum tuple arity supported by [`QueryData`] variadic impls.
 ///
-/// Tuples beyond this arity trip a `const { panic!() }` in Step 4 — the limit
+/// Tuples beyond this arity trip a `panic!()` in Step 4 — the limit
 /// keeps macro expansion bounded and the I-cache budget honest.
 pub const MAX_QUERY_DATA_ARITY: usize = 12;
 
@@ -683,16 +683,16 @@ impl_read_only_query_data_tuple!(D0, D1, D2, D3, D4, D5, D6, D7, D8, D9, D10, D1
 // never instantiate a 13+ arity `QueryData` tuple compile cleanly.
 //
 // `compile_error!` was rejected in Phase 8a (C-NEW-2): it fires at
-// macro-expansion time, breaking the wider crate. `const { panic!() }`
+// macro-expansion time, breaking the wider crate. `panic!()`
 // requires `rustc >= 1.79`; boyko targets Rust 2024 (`>= 1.85`).
 
 /// Emits a stub `QueryData` impl whose every method body is
-/// `const { panic!(...) }`. The const block fires at monomorphization;
+/// `panic!(...)`. The const block fires at monomorphization;
 /// the impl is never *successfully* used at runtime. `State`, `Fetch<'w>`,
 /// and `Item<'w>` collapse to `()` so the stub type-checks in isolation.
 macro_rules! impl_query_data_tuple_too_large {
     ( $( ($D:ident, $s:ident, $f:ident) ),* ) => {
-        // SAFETY: stub impl whose every method body is `const { panic!(...) }`.
+        // SAFETY: stub impl whose every method body is `panic!(...)`.
         //   The impl is never *successfully* used at runtime — the const
         //   block fails at monomorphization with the diagnostic in
         //   `init_state`. QD1-QD4 are vacuously upheld because no code
@@ -706,31 +706,29 @@ macro_rules! impl_query_data_tuple_too_large {
             const IS_READ_ONLY: bool = true;
 
             fn init_state(_world: &mut EcsMaster) -> Self::State {
-                const {
-                    panic!(
+                panic!(
                         "tuple has too many QueryData elements. \
                          boyko-engine supports up to \
                          MAX_QUERY_DATA_ARITY = 12. Split your query into \
                          smaller queries or wrap related elements in a \
                          struct that implements QueryData."
                     )
-                }
             }
 
             fn init_access(_state: &Self::State, _access_set: &mut FilteredAccessSet) {
-                const { panic!("tuple too large: see init_state diagnostic") }
+                panic!("tuple too large: see init_state diagnostic")
             }
 
             fn matches_component_set(_state: &Self::State, _mask: &ComponentMask) -> bool {
-                const { panic!("tuple too large: see init_state diagnostic") }
+                panic!("tuple too large: see init_state diagnostic")
             }
 
             fn aggregate_include(_state: &Self::State, _include: &mut ComponentMask) {
-                const { panic!("tuple too large: see init_state diagnostic") }
+                panic!("tuple too large: see init_state diagnostic")
             }
 
             fn init_fetch<'w>(_state: &Self::State) -> Self::Fetch<'w> {
-                const { panic!("tuple too large: see init_state diagnostic") }
+                panic!("tuple too large: see init_state diagnostic")
             }
 
             unsafe fn set_table_readonly<'w>(
@@ -738,7 +736,7 @@ macro_rules! impl_query_data_tuple_too_large {
                 _state: &Self::State,
                 _archetype: *const Archetype,
             ) {
-                const { panic!("tuple too large: see init_state diagnostic") }
+                panic!("tuple too large: see init_state diagnostic")
             }
 
             unsafe fn set_table_mut<'w>(
@@ -746,11 +744,11 @@ macro_rules! impl_query_data_tuple_too_large {
                 _state: &Self::State,
                 _archetype: *mut Archetype,
             ) {
-                const { panic!("tuple too large: see init_state diagnostic") }
+                panic!("tuple too large: see init_state diagnostic")
             }
 
             unsafe fn fetch<'w>(_fetch: &Self::Fetch<'w>, _row: usize) -> Self::Item<'w> {
-                const { panic!("tuple too large: see init_state diagnostic") }
+                panic!("tuple too large: see init_state diagnostic")
             }
         }
     };

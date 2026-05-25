@@ -44,3 +44,7 @@ harness = false
 [[bench]]
 name = "system_param"
 harness = false
+
+[[bench]]
+name = "query_dsl"
+harness = false

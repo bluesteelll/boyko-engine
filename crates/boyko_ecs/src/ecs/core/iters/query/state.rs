@@ -375,6 +375,11 @@ mod tests {
 
     /// After `new`, the dual invariant holds: every id in `matched_ids` is
     /// set in the bitset and `popcount == len`.
+    ///
+    /// Gated on `debug_assertions` because the tested method
+    /// `assert_dual_invariant` is `#[cfg(debug_assertions)]`-only and would
+    /// not exist in release-mode test builds.
+    #[cfg(debug_assertions)]
     #[test]
     fn assert_dual_invariant_passes_on_consistent_state() {
         register_test_components();

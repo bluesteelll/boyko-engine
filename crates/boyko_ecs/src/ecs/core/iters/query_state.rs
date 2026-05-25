@@ -325,7 +325,12 @@ impl QueryState {
     /// Read-only accessor for the dedup bitset; consumed by
     /// `QueryDataState::assert_dual_invariant` (Phase 8b Step 6) to verify
     /// the M1/QS1 dual-structure invariant.
+    ///
+    /// `#[allow(dead_code)]` is kept because `assert_dual_invariant` is
+    /// `#[cfg(debug_assertions)]`-only — release builds compile away the
+    /// only consumer and would otherwise warn.
     #[inline]
+    #[allow(dead_code)]
     pub(crate) fn matched_archetypes_bitset(&self) -> &ArchetypeBitSet {
         &self.matched_archetypes
     }
