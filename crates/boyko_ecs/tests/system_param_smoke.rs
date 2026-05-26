@@ -44,14 +44,14 @@ struct Score(i32);
 /// place; the side effect is observable via the public `resource::<Tick>()`
 /// facade after the call.
 ///
-/// W3 NOTE: turbofish on the param tuple IS required in Phase 8a. Closure
-/// argument inference cannot deduce `P` from the body alone — Phase 8c's
-/// `IntoSystem` adapter removes the requirement.
+/// Phase 8c Step 5: the W3 turbofish form `::<ResMut<'_, Tick>, _, _>` is
+/// replaced by a closure-arg annotation `|t: ResMut<Tick>|` — `IntoSystem`
+/// infers the `SystemParam` tuple from the signature.
 #[test]
 fn run_closure_once_resmut_increments_resource() {
     let mut ecs = EcsMaster::new();
     ecs.insert_resource(Tick(0));
-    ecs.run_closure_once::<ResMut<'_, Tick>, _, _>(|mut tick| {
+    ecs.run_closure_once(|mut tick: ResMut<Tick>| {
         tick.0 += 1;
     });
     assert_eq!(
@@ -72,7 +72,7 @@ fn run_closure_once_res_reads_resource() {
     ecs.insert_resource(Score(42));
     let observed = std::sync::Arc::new(std::sync::atomic::AtomicI32::new(0));
     let probe = observed.clone();
-    ecs.run_closure_once::<Res<'_, Score>, _, _>(move |score| {
+    ecs.run_closure_once(move |score: Res<Score>| {
         // `score: Res<Score>` derefs to `Score`; `(*score).0: i32`. The inner
         // `&'w R` field of `Res` is `pub(crate)`, so external crates must
         // reach the resource through `Deref` rather than field access.
@@ -94,7 +94,7 @@ fn run_closure_once_res_reads_resource() {
 fn res_and_resmut_same_type_in_same_system_panics() {
     let mut ecs = EcsMaster::new();
     ecs.insert_resource(Tick(0));
-    ecs.run_closure_once::<(Res<'_, Tick>, ResMut<'_, Tick>), _, _>(|(_r, _w)| {});
+    ecs.run_closure_once(|(_r, _w): (Res<Tick>, ResMut<Tick>)| {});
 }
 
 /// `Res<R>::get_param` panics via the cold-path diagnostic helper when no
@@ -106,7 +106,7 @@ fn res_and_resmut_same_type_in_same_system_panics() {
 fn res_on_unregistered_resource_panics() {
     let mut ecs = EcsMaster::new();
     // No `insert_resource::<Tick>` — `Res<Tick>::get_param` must panic.
-    ecs.run_closure_once::<Res<'_, Tick>, _, _>(|_| {});
+    ecs.run_closure_once(|_: Res<Tick>| {});
 }
 
 /// `insert_resource` → `contains_resource` → `remove_resource` →

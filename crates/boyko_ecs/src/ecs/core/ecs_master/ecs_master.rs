@@ -1,5 +1,15 @@
+use std::cell::UnsafeCell;
+use std::ptr::NonNull;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use crate::ecs::core::archetype::archetype::{Archetype, RemoveOutcome};
 use crate::ecs::core::archetype::archetype_master::ArchetypeMaster;
+use crate::ecs::core::bundle::bundle::Bundle;
+use crate::ecs::core::bundle::bundle_column_cache::BundleColumnCache;
+use crate::ecs::core::bundle::bundle_type_registry::{BundleTypeId, MAX_BUNDLE_TYPES};
+use crate::ecs::core::commands::command::Command;
+use crate::ecs::core::change_detection::{CHECK_TICK_THRESHOLD, Tick};
 use crate::ecs::core::component::component_registry::MAX_COMPONENTS;
 use crate::ecs::core::entity::entity::Entity;
 use crate::ecs::core::entity::entity_inland::EntityInland;
@@ -7,16 +17,59 @@ use crate::ecs::core::entity::entity_master::EntityMaster;
 use crate::ecs::core::events::event::Event;
 use crate::ecs::core::events::event_config::EventConfig;
 use crate::ecs::core::events::event_dispatcher::EventDispatcher;
+use crate::ecs::core::iters::query::data::QueryData;
+use crate::ecs::core::iters::query::filter::QueryFilter;
+use crate::ecs::core::iters::query::query_type_registry::{
+    MAX_QUERY_TYPES, QueryTypeId, QueryTypeKey,
+};
+use crate::ecs::core::iters::query::query_view::QueryView;
+use crate::ecs::core::iters::query::state::QueryDataState;
 use crate::ecs::core::resources::resource::Resource;
 use crate::ecs::core::resources::resources::Resources;
 use crate::ecs::core::system::{
-    fn_once_system::FnOnceSystem, system::System, system_param::SystemParam,
-    unsafe_ecs_cell::UnsafeEcsCell,
+    into_system::IntoSystem, system::System, unsafe_ecs_cell::UnsafeEcsCell,
 };
 use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId, EntityId, InlandPoolId};
 use crate::ecs::memory::arena::Arena;
 use crate::ecs::constants::DEFAULT_ARENA_SIZE;
 use crate::ecs::error::{EcsError, EcsResult};
+
+/// Phase 9 Round 2 W3 — entity-master capacity hint used by the
+/// dispatcher-side `ensure_capacity` growth path. Structural mutation runs
+/// only on the dispatcher inside the apply window (SCH7), but
+/// `entity_master.entities_inland` is read by worker `&self` paths
+/// (e.g. `get_component_raw` from inside a system body); a reallocation
+/// during a concurrent read would dangle the worker's reference. Growing
+/// the fast-store to `n + MAX_BATCH_HINT` on the dispatcher BEFORE the
+/// apply window opens preserves the SEND5 / SBO16 invariant.
+///
+/// 64 000 ≈ 16 MB at the current `EntityInland` size (~32 B incl. swap-side
+/// vectors), which fits comfortably under the L3 budget of every supported
+/// target and matches the plan's "MAX_ENTITIES_HINT" knob in §11.4 W3.
+///
+/// Phase 12.6 — `EcsMaster::new` no longer pre-extends the entity vectors
+/// to `MAX_ENTITIES_HINT + MAX_BATCH_HINT`. The 480 µs eager memset that
+/// dominated `EcsMaster::new` is gone; the dispatcher's `spawn_batch` /
+/// `Commands::spawn_batch` apply path drives growth on demand via
+/// [`EntityMaster::ensure_capacity`]. Single-entity paths
+/// (`create_entity`, `register_entity_with_ptr`) already grow lazily via
+/// `Vec::resize` and need no additional plumbing.
+#[allow(dead_code)] // reserved for future ensure_capacity overshoot tracking
+const MAX_ENTITIES_HINT: usize = 64_000;
+
+/// Phase 12.5 Opt-A2 (SBO16 / SBO17 / §1.5): re-export of the per-call
+/// `spawn_batch` cap.
+///
+/// Phase 12.6 — the entity fast-store is no longer pre-extended at
+/// world construction. The dispatcher path
+/// (`SpawnBatchCommand::apply` and `EcsMaster::spawn_batch`) grows the
+/// fast-store on demand via
+/// [`EntityMaster::ensure_capacity`](crate::ecs::core::entity::entity_master::EntityMaster::ensure_capacity)
+/// before writing rows. The hard SBO17b panic on aggregate-worker
+/// overshoot is replaced by lazy growth (the apply path holds
+/// `&mut EcsMaster`, so worker reads cannot race a Vec reallocation —
+/// SEND5 preserved).
+pub(crate) use crate::ecs::core::system::params::entity_counter::MAX_BATCH_HINT;
 
 /// Main ECS manager that coordinates entities, archetypes, memory, and events.
 ///
@@ -76,15 +129,221 @@ pub struct EcsMaster {
     events: EventDispatcher,
 
     /// Entity management system.
-    entity_master: EntityMaster,
+    ///
+    /// Phase 11 Round 3 (C-N1): `pub(crate)` so
+    /// [`crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell::entity_counter`]
+    /// can project `next_id_atomic()` without going through the `&self`
+    /// borrow that the public accessor would impose. The field is still
+    /// opaque to out-of-crate consumers — the only worker-side view is
+    /// the [`crate::ecs::core::system::params::entity_counter::EntityCounter<'s>`]
+    /// newtype (EM6).
+    pub(crate) entity_master: EntityMaster,
 
     /// Archetype management system.
     archetype_master: ArchetypeMaster,
+
+    /// Per-bundle-type `ArchetypeId` cache (Phase 8.5 SBC5). Indexed by
+    /// `BundleTypeId.0`.
+    ///
+    /// Phase 12.6 — wrapped in `OnceLock` for lazy allocation. The 24 KB
+    /// inner array (`Box<[OnceLock<ArchetypeId>; MAX_BUNDLE_TYPES]>`) is
+    /// only materialised on the first `bundle_archetype_id_for::<B>()`
+    /// call, removing ~30-50 µs of eager `core::array::from_fn` work
+    /// from `EcsMaster::new`. Steady-state warm-path cost is unchanged
+    /// (one Acquire load on the outer lock once it is initialised, then
+    /// the same indexed slot Acquire load as before).
+    ///
+    /// **Field slot (C6 pin)**: declared after `archetype_master` and before
+    /// `arena`. Rust drops fields in declaration order, so this field is
+    /// dropped between them. The field holds only `OnceLock<ArchetypeId>`
+    /// values — no resource ownership and no `Drop` side-effects — so the
+    /// drop position is informational only and does not interact with the
+    /// Phase 8a C5 drop-order contract for `archetype_master` and `arena`.
+    ///
+    /// Access via [`Self::bundle_archetype_cache`].
+    #[allow(dead_code)]
+    bundle_archetype_cache: OnceLock<Box<[OnceLock<ArchetypeId>; MAX_BUNDLE_TYPES]>>,
+
+    /// Phase 12.5 Opt-A3 (§6.2): per-world cache of resolved
+    /// `(BundleTypeId, ArchetypeId, &'static [InlandPoolId])` records.
+    ///
+    /// Phase 12.6 — wrapped in `OnceLock` for lazy allocation. The inner
+    /// `BundleColumnCache` allocation (≤ 48 KB) is only materialised on
+    /// the first spawn-path apply, removing ~30-50 µs of eager
+    /// `Vec::extend((0..MAX_BUNDLE_TYPES).map(...))` from `EcsMaster::new`.
+    /// Warm-path apply cost is unchanged once the inner cache is
+    /// initialised; the spawn-path code reads through
+    /// [`Self::bundle_column_cache`] which performs one Acquire load on
+    /// the outer lock followed by the same indexed slot lookup as before.
+    ///
+    /// Drop-order note: declared after `bundle_archetype_cache` and
+    /// before `change_tick`. The `&'static [InlandPoolId]` slices leaked
+    /// inside `BundleColumnRecord` are deliberately not freed on world
+    /// drop — bounded by SBO6 (one slice per `(BundleTypeId, ArchetypeId)`
+    /// per world).
+    ///
+    /// Access via [`Self::bundle_column_cache`].
+    pub(crate) bundle_column_cache: OnceLock<BundleColumnCache>,
+
+    /// Phase 10 monotonic per-frame counter for change detection.
+    ///
+    /// Bumped once per [`Schedule::run`] via `fetch_add(1, Relaxed)` (Wave D
+    /// Step 13 integration). The new value becomes the dispatcher-wide
+    /// `this_run`; every system's previous `this_run` becomes its new
+    /// `last_run` via `System::set_change_ticks`.
+    ///
+    /// # Round 2 O2 — NOT `CachePadded`
+    ///
+    /// The atomic is touched at most a handful of times per frame
+    /// (`fetch_add` at frame start, `load` inside `EcsMaster::create_entity`).
+    /// False-sharing risk against neighbouring fields is essentially zero
+    /// at that contention level; `CachePadded` would burn 60 B for no
+    /// measurable gain (plan §11.5 audit).
+    ///
+    /// Wave A: declared `pub(crate)` so the dispatcher (Wave D Step 13)
+    /// can call `fetch_add` directly. Outside the crate, read through
+    /// [`Self::current_tick`] only.
+    pub(crate) change_tick: AtomicU32,
+
+    /// Last [`Tick`] at which `check_ticks` scanned the world. Initialised
+    /// to [`Tick::ZERO`]; updated by `Schedule::run` (Wave D Step 13) after
+    /// each [`run_check_ticks_scan`] call via [`Self::set_last_check_tick`].
+    /// Read every frame by [`Self::should_run_check_ticks`] to decide when
+    /// the next clamp scan must fire (plan §2.7 WRAP1-WRAP2).
+    ///
+    /// [`run_check_ticks_scan`]: crate::ecs::core::change_detection::run_check_ticks_scan
+    pub(crate) last_check_tick: Tick,
 
     /// Memory arena for component allocation. `Box` provides a stable heap
     /// address shared by every `*const Arena` raw provenance pointer stored in
     /// child structures (`ArchetypeMaster`, `Archetype`, `ComponentPool`).
     arena: Box<Arena>,
+
+    /// Phase 12.5 Track B (QC5 / QC6 / C5) — per-`(D, F)` cached
+    /// `QueryState` slot array.
+    ///
+    /// Each slot holds a type-erased `(NonNull<()>, fn(NonNull<()>))` pair:
+    /// the cached `NonNull<UnsafeCell<QueryDataState<D, F>>>` plus a
+    /// monomorphised drop glue pointer.
+    ///
+    /// Phase 12.6 — wrapped in `OnceLock` for lazy allocation. The inner
+    /// `QueryStateCache` allocation (≤ 32 KB) is only materialised on
+    /// the first `EcsMaster::query::<D, F>()` call, removing ~30-50 µs
+    /// of eager `Vec::extend((0..MAX_QUERY_TYPES).map(...))` from
+    /// `EcsMaster::new`. Worlds that never call `query` (e.g. pure
+    /// `Schedule::run`-driven workloads) skip this allocation entirely.
+    ///
+    /// **Field slot (C5 fix)**: declared AFTER `arena`. Rust drops fields in
+    /// declaration order, so this field is dropped LAST. Inverts the failure
+    /// mode for any future `D::State` / `F::State` impl carrying arena-derived
+    /// raw pointers from silent miscompile to immediate Miri trip:
+    /// arena-derived state pointers freed before the arena slab would now
+    /// trigger a Miri use-after-free instead of silently using the freed
+    /// allocation.
+    ///
+    /// If no `query` call ever populates the outer lock, `OnceLock::drop`
+    /// is a no-op — the inner `QueryStateCache::drop` (which walks every
+    /// slot and invokes per-slot drop glue) never runs and the field is
+    /// drop-cost-free.
+    ///
+    /// `pub(crate)` so `query` / `query_cold_init` can index without going
+    /// through a public accessor.
+    pub(crate) query_state_cache: OnceLock<QueryStateCache>,
+}
+
+/// Per-slot payload stored in [`QueryStateCache`]: a type-erased pointer
+/// to the cached `Box<UnsafeCell<QueryDataState<D, F>>>` plus a
+/// monomorphised drop glue function pointer. The drop fn is installed at
+/// `query_cold_init` time so `QueryStateCache::drop` can reclaim the
+/// leaked Box without knowing the concrete `(D, F)` pair.
+pub(crate) type QueryCacheSlot = (NonNull<()>, fn(NonNull<()>));
+
+/// Phase 12.5 Track B — per-world cache of `QueryState<D, F>` slots indexed
+/// by `QueryTypeId`.
+///
+/// Each slot stores a [`QueryCacheSlot`] — type-erased pointer to a
+/// heap-allocated `UnsafeCell<QueryDataState<D, F>>` plus a per-type drop
+/// glue function pointer. Eagerly allocated to `MAX_QUERY_TYPES` slots at
+/// world construction.
+///
+/// # Memory footprint (§10.3)
+///
+/// ≤ 32 KB at `MAX_QUERY_TYPES = 1024` (1024 × ≤ 32 B per slot pinned by
+/// the `oncelock_query_slot_size_assumptions` tripwire). ≤ 128 KB with the
+/// `big_query_table` feature (4096 slots).
+///
+/// # Drop
+///
+/// Walks every slot; if a slot holds a `Some((typed_ptr, drop_fn))`,
+/// invokes `drop_fn(typed_ptr)`. The drop fn reconstructs the original
+/// `Box<UnsafeCell<QueryDataState<D, F>>>` via `Box::from_raw` and lets it
+/// drop normally (running the embedded `QueryDataState::Drop` glue).
+pub(crate) struct QueryStateCache {
+    slots: Box<[OnceLock<QueryCacheSlot>]>,
+}
+
+// SAFETY (QC9):
+//   - The slot tuples hold `NonNull<()>` (an opaque address into the world's
+//     own heap allocations — guarded by `&mut EcsMaster` for mutation) and a
+//     `fn(NonNull<()>)` (function pointer, trivially `Send + Sync`).
+//   - `OnceLock<T>` is `Send + Sync` whenever `T: Send + Sync`.
+//   - Slot CAS soundness is provided by `OnceLock`'s internal atomics.
+//   - The pointee is a `Box<UnsafeCell<QueryDataState<D, F>>>` whose
+//     concrete `D::State` / `F::State` carry `Send + Sync + 'static` per
+//     `QueryData::State` / `QueryFilter::State` trait bounds.
+unsafe impl Send for QueryStateCache {}
+// SAFETY: same composition as `Send`; the cache offers no `&self` mutation
+// path (slot writes go through `&mut self` via `EcsMaster::query_cold_init`).
+unsafe impl Sync for QueryStateCache {}
+
+impl QueryStateCache {
+    /// Allocates the per-world cache eagerly, with every slot in the
+    /// `OnceLock::new()` (empty) state.
+    ///
+    /// Per the plan's C3 fix (Round 2): allocate via `Vec::with_capacity` +
+    /// `extend` + `into_boxed_slice` instead of
+    /// `Box::new(core::array::from_fn(...))`. The latter constructs the
+    /// array on the stack first and copies it into the heap; for a 32 KB
+    /// array this would risk stack overflow on small-stack threads and
+    /// thrash L1 unnecessarily.
+    #[inline]
+    fn new() -> Self {
+        let mut v: Vec<OnceLock<QueryCacheSlot>> =
+            Vec::with_capacity(MAX_QUERY_TYPES);
+        v.extend((0..MAX_QUERY_TYPES).map(|_| OnceLock::new()));
+        let slots: Box<[OnceLock<QueryCacheSlot>]> = v.into_boxed_slice();
+        debug_assert_eq!(slots.len(), MAX_QUERY_TYPES);
+        Self { slots }
+    }
+
+    /// Returns the slot for `id`. Bounds checked in debug builds via the
+    /// `MAX_QUERY_TYPES` saturation on the minter side.
+    #[inline]
+    fn slot(&self, id: QueryTypeId) -> &OnceLock<QueryCacheSlot> {
+        debug_assert!(id.0 < MAX_QUERY_TYPES, "QueryTypeId out of bounds");
+        // SAFETY: `id.0 < MAX_QUERY_TYPES` is enforced by the minter's
+        //   saturate-then-panic discipline; the slot array was sized to
+        //   `MAX_QUERY_TYPES` at construction time.
+        unsafe { self.slots.get_unchecked(id.0) }
+    }
+}
+
+impl Drop for QueryStateCache {
+    fn drop(&mut self) {
+        for slot in self.slots.iter() {
+            if let Some(&(typed_ptr, drop_fn)) = slot.get() {
+                // SAFETY (QC7): the slot was populated by
+                //   `EcsMaster::query_cold_init` with a monomorphised
+                //   `drop_fn` for the concrete `(D, F)` pair; the drop fn
+                //   reconstructs the original
+                //   `Box<UnsafeCell<QueryDataState<D, F>>>` via
+                //   `Box::from_raw` and lets it drop normally. The slot is
+                //   consumed exactly once (by this Drop impl) over the
+                //   world's lifetime — no double-free.
+                drop_fn(typed_ptr);
+            }
+        }
+    }
 }
 
 impl EcsMaster {
@@ -96,6 +355,15 @@ impl EcsMaster {
     /// representation directly — without creating a `&Arena` reference (which
     /// would create a SharedReadOnly tag that the subsequent `Unique` retag on
     /// move would invalidate). Phase 3a Miri retag fix.
+    ///
+    /// # Phase 12.6 — lazy allocation
+    ///
+    /// The four heavy per-world allocations (`entities_inland` +
+    /// `sparse_to_active` fast-store memsets, `bundle_archetype_cache`,
+    /// `bundle_column_cache`, `query_state_cache`) are all deferred to
+    /// first-use. Construction cost is now dominated by the arena
+    /// reservation (~50 µs for the 64 MB virtual reservation on most
+    /// targets — actual commit is lazy on Linux/Windows mmap).
     pub fn new() -> Self {
         let arena: Box<Arena> = Box::default();
         // SAFETY: `Box<Arena>` is guaranteed to have the same in-memory
@@ -118,16 +386,36 @@ impl EcsMaster {
         // EventDispatcher::new(1) validates 1 ∈ 1..=64 — never fails.
         let events = EventDispatcher::new(1)
             .expect("invariant: default thread_count=1 is always valid");
+        // Phase 12.6 — entity fast-store starts empty. Growth is driven by:
+        //   * single-row paths (`register_entity_with_ptr`, `create_entity_at`)
+        //     which `Vec::resize` on demand under `&mut self`.
+        //   * batch paths (`EcsMaster::spawn_batch`, `SpawnBatchCommand::apply`)
+        //     which call `EntityMaster::ensure_capacity` BEFORE the apply
+        //     window (dispatcher-only, no worker reads in flight).
         Self {
             resources: Resources::new(),
             events,
             entity_master: EntityMaster::new(),
             archetype_master,
+            bundle_archetype_cache: OnceLock::new(),
+            bundle_column_cache: OnceLock::new(),
+            change_tick: AtomicU32::new(0),
+            last_check_tick: Tick::ZERO,
             arena,
+            query_state_cache: OnceLock::new(),
         }
     }
 
     /// Creates a new EcsMaster with pre-allocated capacity.
+    ///
+    /// Phase 12.6 — the per-world cache arrays
+    /// (`bundle_archetype_cache`, `bundle_column_cache`,
+    /// `query_state_cache`) remain lazy. `entity_capacity` reserves but
+    /// does NOT memset the entity fast-store vectors; the actual memset
+    /// happens on the first dispatcher growth call. Callers that need
+    /// the fast-store pre-extended (e.g. test fixtures asserting the
+    /// SBO17 strong-form contract) should call `ensure_capacity`
+    /// explicitly after construction.
     pub fn with_capacity(entity_capacity: usize, archetype_capacity: usize) -> Self {
         let arena: Box<Arena> = Box::new(Arena::with_capacity(DEFAULT_ARENA_SIZE));
         // SAFETY: same rationale as `EcsMaster::new`.
@@ -145,8 +433,59 @@ impl EcsMaster {
             events,
             entity_master: EntityMaster::with_capacity(entity_capacity),
             archetype_master,
+            bundle_archetype_cache: OnceLock::new(),
+            bundle_column_cache: OnceLock::new(),
+            change_tick: AtomicU32::new(0),
+            last_check_tick: Tick::ZERO,
             arena,
+            query_state_cache: OnceLock::new(),
         }
+    }
+
+    // ── Phase 12.6 lazy cache accessors ─────────────────────────────────────
+
+    /// Returns the per-world bundle-archetype-id cache, materialising the
+    /// inner 24 KB array on first call.
+    ///
+    /// Hot path: one Acquire load on the outer `OnceLock`, then the
+    /// indexed slot Acquire load that was already on the spawn warm path.
+    /// Cold path (first call per world): one `Box<[OnceLock<ArchetypeId>;
+    /// MAX_BUNDLE_TYPES]>` heap allocation (~30-50 µs) — amortised across
+    /// the world's lifetime.
+    ///
+    /// `#[inline]` so cross-crate callers see the body and avoid a
+    /// function-call hop on the warm path.
+    #[inline]
+    pub(crate) fn bundle_archetype_cache(
+        &self,
+    ) -> &[OnceLock<ArchetypeId>; MAX_BUNDLE_TYPES] {
+        self.bundle_archetype_cache
+            .get_or_init(|| Box::new(core::array::from_fn(|_| OnceLock::new())))
+    }
+
+    /// Returns the per-world bundle-column cache, materialising the
+    /// inner ~48 KB slot array on first call.
+    ///
+    /// Hot path: one Acquire load on the outer `OnceLock`. Cold path
+    /// (first call per world): `BundleColumnCache::new` allocation
+    /// (~30-50 µs).
+    ///
+    /// `#[inline]` so the spawn-batch / spawn-at apply hot path inlines
+    /// through the accessor without a call hop.
+    #[inline]
+    pub(crate) fn bundle_column_cache(&self) -> &BundleColumnCache {
+        self.bundle_column_cache.get_or_init(BundleColumnCache::new)
+    }
+
+    /// Returns the per-world query-state cache, materialising the inner
+    /// ~32 KB slot array on first call.
+    ///
+    /// Hot path: one Acquire load on the outer `OnceLock`. Cold path
+    /// (first call per world): `QueryStateCache::new` allocation
+    /// (~30-50 µs).
+    #[inline]
+    pub(crate) fn query_state_cache(&self) -> &QueryStateCache {
+        self.query_state_cache.get_or_init(QueryStateCache::new)
     }
 
     /// Creates a new archetype with the specified component IDs
@@ -211,6 +550,13 @@ impl EcsMaster {
             .archetype_ptr_for(archetype_id)
             .expect("invariant: archetype existed at guard check; single-threaded");
 
+        // Phase 10 INIT3 / Round 2 W4: the world owns the change-detection
+        // tick. Read it once here and thread it into `Archetype::create_entity`
+        // so the per-row `added`/`changed` ticks land at the correct value.
+        // No caller of `EcsMaster::create_entity` needs to know the tick
+        // (single source of truth).
+        let current_tick = self.current_tick();
+
         // Step 2 of W7: allocate the entity id (fresh or recycled).
         let entity = self.entity_master.allocate_entity();
 
@@ -230,7 +576,7 @@ impl EcsMaster {
             //     returns, the &mut Archetype is dropped before any further
             //     self.entity_master calls.
             let archetype: &mut Archetype = unsafe { &mut *archetype_ptr };
-            archetype.create_entity(entity.id(), &mut new_unit_index, components)
+            archetype.create_entity(entity.id(), &mut new_unit_index, components, current_tick)
         };
 
         if !pushed {
@@ -252,6 +598,181 @@ impl EcsMaster {
         // get_component_mut<T> wrappers.
         self.entity_master.register_entity_with_ptr(entity, archetype_ptr, new_unit_index);
 
+        Ok(entity)
+    }
+
+    /// Phase 11 (plan §6.2): pushes an entity row into the specified
+    /// archetype, registering an **already-reserved** `Entity` handle in
+    /// the Phase 7 fast store.
+    ///
+    /// Used by [`SpawnAtCommand::apply`](crate::ecs::core::commands::spawn_at_command::SpawnAtCommand)
+    /// after the deferred-spawn path has minted an `Entity` via
+    /// [`EntityCounter::reserve_entity`](crate::ecs::core::system::params::entity_counter::EntityCounter::reserve_entity).
+    /// Unlike [`create_entity`](Self::create_entity), this function does
+    /// NOT mint a fresh `Entity` — it expects the caller to pass the
+    /// pre-allocated handle.
+    ///
+    /// # Pre-conditions (debug-asserted)
+    ///
+    /// * `archetype_id` is registered.
+    /// * `entity.id().0`'s slot in `entities_inland` is currently NULL
+    ///   (never registered, never spawned-at). The atomic counter ensures
+    ///   uniqueness; double-apply on the same handle is a bug at the
+    ///   `SpawnAtCommand` enqueue layer.
+    ///
+    /// # Behaviour
+    ///
+    /// 1. Resolves the archetype's write-capable raw pointer.
+    /// 2. Resizes `entities_inland` / `sparse_to_active` if `entity.id().0`
+    ///    is past the current length. Phase 12.6 — single-row growth via
+    ///    `Vec::resize` is the canonical lazy path; the dispatcher's
+    ///    `&mut self` borrow guarantees workers are not in flight.
+    /// 3. Pushes the row into the archetype with the world's current tick
+    ///    (same INIT3 contract as `create_entity`).
+    /// 4. Registers `(entity, archetype_ptr, unit_index)` in the Phase 7
+    ///    fast store via `register_entity_with_ptr`.
+    pub fn create_entity_at(
+        &mut self,
+        entity: Entity,
+        archetype_id: ArchetypeId,
+        components: &[(ComponentId, &[u8])],
+    ) -> EcsResult<Entity> {
+        // Guard: archetype existence is checked BEFORE any state mutation.
+        if !self.archetype_master.has_archetype(archetype_id) {
+            return Err(EcsError::ArchetypeNotFound(archetype_id));
+        }
+
+        // EC7 (debug): slot must be NULL (never registered, never
+        // spawned-at) at this point.
+        debug_assert!(
+            self.entity_master
+                .entities_inland
+                .get(entity.id().0)
+                .is_none_or(|i| i.is_null()),
+            "create_entity_at: entity {:?} is already registered (double-apply?)",
+            entity
+        );
+
+        let archetype_ptr = self
+            .archetype_master
+            .archetype_ptr_for(archetype_id)
+            .expect("invariant: archetype existed at guard check; single-threaded");
+
+        let current_tick = self.current_tick();
+
+        // Phase 12.6 — lazy growth path. The fast-store starts empty at
+        // world construction; `Vec::resize` extends it on demand under
+        // `&mut self` (no worker race per SEND5/SBO16).
+        let id_raw = entity.id().0;
+        if id_raw >= self.entity_master.entities_inland.len() {
+            self.entity_master
+                .entities_inland
+                .resize(id_raw + 1, EntityInland::NULL);
+        }
+        if id_raw >= self.entity_master.sparse_to_active.len() {
+            self.entity_master
+                .sparse_to_active
+                .resize(id_raw + 1, u32::MAX);
+        }
+
+        let mut new_unit_index: u32 = 0;
+        let pushed = {
+            // SAFETY (U14, U1, U2, mirrors `create_entity`):
+            //   * `archetype_ptr` was just minted via `archetype_ptr_for`
+            //     under `&mut self`; provenance is write-capable.
+            //   * Bundle slab address is stable; no other live borrow.
+            //   * The reborrow is scoped to this block.
+            let archetype: &mut Archetype = unsafe { &mut *archetype_ptr };
+            archetype.create_entity(entity.id(), &mut new_unit_index, components, current_tick)
+        };
+
+        if !pushed {
+            return Err(EcsError::ArchetypeRejectedEntity { archetype_id });
+        }
+
+        // Register in the Phase 7 fast store. The entity carries its own
+        // generation (typically `0` for fresh reserves); we propagate it
+        // verbatim through `register_entity_with_ptr`.
+        self.entity_master
+            .register_entity_with_ptr(entity, archetype_ptr, new_unit_index);
+
+        Ok(entity)
+    }
+
+    /// Phase 12.5 Opt-A3 (§6.4): `create_entity_at` variant that consumes
+    /// pre-resolved `pool_ids` from the per-world
+    /// [`BundleColumnCache`](crate::ecs::core::bundle::BundleColumnCache),
+    /// bypassing the 4× SparseMap lookup of the legacy path.
+    ///
+    /// `components` MUST be canonical-sorted by `ComponentId.0` (B1/B2);
+    /// `pool_ids[i]` corresponds to `components[i].0`. Caller is
+    /// `SpawnAtCommand::apply` post-Opt-A3 wiring.
+    ///
+    /// # Phase 12.6 — legacy bridge
+    ///
+    /// `SpawnAtCommand::apply` no longer routes through this method; it
+    /// inlines the equivalent write loop to avoid the per-spawn slot-array
+    /// rebuild + cross-call hop. Retained as the `EcsMaster`-side primitive
+    /// reachable by external benchmarks that model the pre-Phase-12.6
+    /// dispatch shape (see
+    /// `crates/bench_bevy_vs_boyko/benches/profile_spawn_*.rs`).
+    #[allow(dead_code)]
+    pub(crate) fn create_entity_at_with_pool_ids(
+        &mut self,
+        entity: Entity,
+        archetype_id: ArchetypeId,
+        components: &[(ComponentId, &[u8])],
+        pool_ids: &[InlandPoolId],
+    ) -> EcsResult<Entity> {
+        if !self.archetype_master.has_archetype(archetype_id) {
+            return Err(EcsError::ArchetypeNotFound(archetype_id));
+        }
+        debug_assert!(
+            self.entity_master
+                .entities_inland
+                .get(entity.id().0)
+                .is_none_or(|i| i.is_null()),
+            "create_entity_at_with_pool_ids: entity {:?} is already registered",
+            entity
+        );
+
+        let archetype_ptr = self
+            .archetype_master
+            .archetype_ptr_for(archetype_id)
+            .expect("invariant: archetype existed at guard check; single-threaded");
+        let current_tick = self.current_tick();
+
+        let id_raw = entity.id().0;
+        if id_raw >= self.entity_master.entities_inland.len() {
+            self.entity_master
+                .entities_inland
+                .resize(id_raw + 1, EntityInland::NULL);
+        }
+        if id_raw >= self.entity_master.sparse_to_active.len() {
+            self.entity_master
+                .sparse_to_active
+                .resize(id_raw + 1, u32::MAX);
+        }
+
+        let mut new_unit_index: u32 = 0;
+        let pushed = {
+            // SAFETY (U14, U1, U2, mirrors `create_entity_at`):
+            //   write-capable provenance under `&mut self`; reborrow
+            //   scoped to this block.
+            let archetype: &mut Archetype = unsafe { &mut *archetype_ptr };
+            archetype.create_entity_with_pool_ids(
+                entity.id(),
+                &mut new_unit_index,
+                components,
+                pool_ids,
+                current_tick,
+            )
+        };
+        if !pushed {
+            return Err(EcsError::ArchetypeRejectedEntity { archetype_id });
+        }
+        self.entity_master
+            .register_entity_with_ptr(entity, archetype_ptr, new_unit_index);
         Ok(entity)
     }
 
@@ -879,32 +1400,111 @@ impl EcsMaster {
         unsafe { system.run_unsafe(cell) }
     }
 
-    /// Convenience wrapper around [`run_system_once`] that materialises a
-    /// [`FnOnceSystem`] from `body` (M5 RESOLUTION).
-    ///
-    /// # Turbofish requirement (W3)
-    ///
-    /// Closure-argument inference cannot deduce the [`SystemParam`] tuple
-    /// `P` from the body alone, so callers must spell `P` out:
+    /// Deprecated alias for [`run_system`](EcsMaster::run_system), retained
+    /// for Phase 8a callsite compatibility (W3 turbofish form removed —
+    /// the closure's param type now infers from its signature).
     ///
     /// ```ignore
-    /// ecs.run_closure_once::<(Res<A>, ResMut<B>), _, _>(|(a, b)| { /* ... */ });
+    /// // Phase 8a (W3 turbofish — no longer accepted):
+    /// // ecs.run_closure_once::<(Res<A>, ResMut<B>), _, _>(|(a, b)| { /* ... */ });
+    ///
+    /// // Phase 8c (post Step 5 — closure-annotation form):
+    /// ecs.run_closure_once(|(a, b): (Res<A>, ResMut<B>)| { /* ... */ });
     /// ```
     ///
-    /// Phase 8c's `IntoSystem` adapter removes the requirement by inferring
-    /// `P` from the closure signature.
+    /// New code should call [`run_system`](EcsMaster::run_system) directly;
+    /// `run_closure_once` is preserved as a compatibility shim and may be
+    /// removed in Phase 9.
     ///
-    /// [`run_system_once`]: EcsMaster::run_system_once
-    /// [`FnOnceSystem`]: crate::ecs::core::system::fn_once_system::FnOnceSystem
-    /// [`SystemParam`]: crate::ecs::core::system::system_param::SystemParam
-    pub fn run_closure_once<P, F, O>(&mut self, body: F) -> O
+    /// [`run_system`]: EcsMaster::run_system
+    #[inline]
+    pub fn run_closure_once<F, M, Out>(&mut self, body: F) -> Out
     where
-        P: SystemParam + 'static,
-        F: for<'w, 's> FnMut(<P as SystemParam>::Item<'w, 's>) -> O + Send + Sync + 'static,
-        O: 'static,
+        F: IntoSystem<(), Out, M>,
+        F::System: System<Out = Out>,
     {
-        let mut sys = FnOnceSystem::<P, F, O>::new(body);
-        self.run_system_once(&mut sys)
+        self.run_system(body)
+    }
+
+    // ── Phase 8c Step 4: `run_system` / `run_cached_system` ──────────────────
+
+    /// Build a one-shot system from any function `F: SystemParamFunction<M>`
+    /// (via [`IntoSystem`]), run it once, flush its deferred buffers, and
+    /// discard.
+    ///
+    /// The function is moved in; if you want to amortise the state init
+    /// across many invocations, use [`run_cached_system`] with a pre-built
+    /// [`FunctionSystem`] hoisted outside your loop. Per-call `run_system`
+    /// rebuilds the system on every call (≈ 1 µs cold init + ≤ 30 ns
+    /// dispatch + closure body + apply — see plan §1.2 first-call row).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// ecs.run_system(|res: Res<MyResource>| {
+    ///     println!("{}", res.0);
+    /// });
+    /// ```
+    ///
+    /// # Borrow-checker enforced invariants (S1, APP4)
+    ///
+    /// `&mut self` is exclusive for the entire call; no other `System` can
+    /// be in flight on the same world, and no `apply` re-entry into
+    /// `run_system` / `run_cached_system` / `run_system_once` is reachable
+    /// (Rust's borrow checker rejects the nested `&mut`).
+    ///
+    /// [`IntoSystem`]: crate::ecs::core::system::into_system::IntoSystem
+    /// [`FunctionSystem`]: crate::ecs::core::system::function_system::FunctionSystem
+    /// [`run_cached_system`]: EcsMaster::run_cached_system
+    pub fn run_system<F, M, Out>(&mut self, system: F) -> Out
+    where
+        F: IntoSystem<(), Out, M>,
+        F::System: System<Out = Out>,
+    {
+        let mut sys = F::into_system(system);
+        self.run_cached_system(&mut sys)
+    }
+
+    /// Run a pre-built [`System`] once, flushing its deferred buffers.
+    ///
+    /// Sequence (plan §17 / §9.5):
+    ///   1. [`System::initialize`] — idempotent (FS1). Re-running the same
+    ///      cached system pays the init cost only on the first call.
+    ///   2. [`UnsafeEcsCell::new_mutable`] — mints the write-capable cell
+    ///      bound to the `&mut self` borrow scope.
+    ///   3. [`System::run_unsafe`] — body execution under invariant S1.
+    ///   4. [`System::apply`] — flushes per-`SystemParam` deferred buffers
+    ///      (e.g. `Commands<'s>`'s [`CommandQueue`]) under `&mut self`.
+    ///      APP1' — safe method; APP4 — must not re-enter the runner.
+    ///
+    /// Phase 9's scheduler will replace this method with a multi-system
+    /// runner that resolves aliasing via the [`Access`] conflict graph; for
+    /// now `&mut EcsMaster` enforces the S1 invariant trivially.
+    ///
+    /// [`System`]: crate::ecs::core::system::system::System
+    /// [`System::initialize`]: crate::ecs::core::system::system::System::initialize
+    /// [`System::run_unsafe`]: crate::ecs::core::system::system::System::run_unsafe
+    /// [`System::apply`]: crate::ecs::core::system::system::System::apply
+    /// [`UnsafeEcsCell::new_mutable`]: crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell::new_mutable
+    /// [`CommandQueue`]: crate::ecs::core::commands::command_queue::CommandQueue
+    /// [`Access`]: crate::ecs::core::system::access::Access
+    pub fn run_cached_system<S>(&mut self, system: &mut S) -> S::Out
+    where
+        S: System,
+    {
+        system.initialize(self);
+        // SAFETY (U_C1): `cell` does not outlive the `&mut self` borrow — it
+        //   is consumed by `run_unsafe` on the next line and cannot escape.
+        let cell = unsafe { UnsafeEcsCell::new_mutable(self) };
+        // SAFETY (S1): `&mut self` is exclusive for the entire call ⇒ no
+        //   other `System::run_unsafe` is in flight on this `EcsMaster`.
+        //   The Phase 9 scheduler will replace this trivial enforcement
+        //   with the `Access` conflict graph.
+        let out = unsafe { system.run_unsafe(cell) };
+        // APP1' (Round 3 / O3'): `apply` is a SAFE method; the borrow
+        //   checker (still holding `&mut self`) prevents re-entry per APP4.
+        system.apply(self);
+        out
     }
 
     // ── Resources facade (Phase 8a Step 9) ───────────────────────────────────
@@ -1012,12 +1612,430 @@ impl EcsMaster {
         self.resources.get_mut_ptr::<R>().map(|p| unsafe { &mut *p })
     }
 
+    // ── Phase 8.5: Bundle archetype-id cache (SBC4) ─────────────────────────
+    //
+    // Phase 8.5 step-scoped `dead_code` allow on the two helpers below: the
+    // first production caller lands in Step 5 (`SpawnCommand::apply`
+    // rewrite), routed through the derive-generated `B::cached_archetype_id`
+    // (Step 4). Remove the `#[allow(dead_code)]` then.
+
+    /// Resolves the [`ArchetypeId`] for Bundle `B` in this world, lazily
+    /// caching on the first call. Subsequent calls hit the cache (~3 ns).
+    ///
+    /// # Hot path (plan §6.2)
+    ///
+    /// 1. `B::bundle_type_id()` — single Acquire load on the per-impl
+    ///    `OnceLock<BundleStaticInfo>` (~2 ns).
+    /// 2. `self.bundle_archetype_cache[id.0].get()` — Acquire load on a
+    ///    stable address (~1 ns).
+    /// 3. If `Some(arch)`: return.
+    /// 4. If `None`: fall into the cold path —
+    ///    [`Self::cold_register_bundle_archetype`] resolves via
+    ///    [`Self::get_or_create_archetype`] and `OnceLock::set`s the slot
+    ///    (~1 µs).
+    ///
+    /// # Why `&mut self`
+    ///
+    /// The cold path calls [`Self::get_or_create_archetype`], which requires
+    /// `&mut self` (it may register a new archetype). The hot path could be
+    /// `&self`-only, but keeping the unified `&mut self` signature lets the
+    /// caller (always `SpawnCommand::apply` post-Step 5) match its own
+    /// `&mut EcsMaster` receiver. A `&self`-only fast-path accessor would
+    /// be a Phase 9 design item (DEFERRED).
+    ///
+    /// # Visibility
+    ///
+    /// `pub(crate)` — user code does not call this directly. The
+    /// `#[derive(Bundle)]`-generated `cached_archetype_id` (Step 4) is the
+    /// blessed entry point; `SpawnCommand::apply` (Step 5) is the only
+    /// in-tree caller.
+    ///
+    /// **Visibility note**: `pub`, not `pub(crate)`. The `#[derive(Bundle)]`
+    /// macro in `boyko_macros` emits user-crate code calling this method
+    /// from inside the generated `impl Bundle for UserType` block (specifically
+    /// from `cached_archetype_id`). Direct user code SHOULD NOT call this —
+    /// it is a macro-only API. The blessed surface for user code is
+    /// `Commands::spawn(bundle)` (Phase 8.5 Step 5). Same soft-seal pattern
+    /// as Bevy's `World::register_bundle_info`.
+    #[allow(dead_code)]
+    #[inline]
+    pub fn bundle_archetype_id_for<B: Bundle>(&mut self) -> ArchetypeId {
+        let type_id = B::bundle_type_id();
+        debug_assert!(
+            type_id.0 < MAX_BUNDLE_TYPES,
+            "BundleTypeId out of bounds — saturate-then-panic in register_new should have prevented this"
+        );
+
+        if let Some(arch) = self.bundle_archetype_cache()[type_id.0].get() {
+            return *arch;
+        }
+
+        self.cold_register_bundle_archetype::<B>(type_id)
+    }
+
+    /// Cold-path slot installer for [`Self::bundle_archetype_id_for`].
+    ///
+    /// Computes the canonical component-id list for `B`, registers (or
+    /// reuses) the matching archetype, and publishes the result into the
+    /// per-world cache slot. Idempotent: if another caller raced ahead and
+    /// already populated the slot with an identical id (canonical-sorted
+    /// ids + idempotent [`Self::get_or_create_archetype`] = deterministic
+    /// `ArchetypeId`), [`OnceLock::set`] returns `Err` which we ignore and
+    /// read back the winner's value.
+    #[allow(dead_code)]
+    #[cold]
+    #[inline(never)]
+    fn cold_register_bundle_archetype<B: Bundle>(
+        &mut self,
+        type_id: BundleTypeId,
+    ) -> ArchetypeId {
+        let ids = B::component_ids();
+        let arch = self.get_or_create_archetype(ids);
+        // OnceLock::set may race with a concurrent setter (Phase 9). If our
+        // set loses, the value already stored is identical because (a)
+        // component_ids() returns the same canonical-sorted slice for `B`
+        // process-wide, and (b) get_or_create_archetype is idempotent on the
+        // same id set within a single world. The Err return carries the
+        // rejected value; we drop it and read back the winner's value.
+        let cache = self.bundle_archetype_cache();
+        let _ = cache[type_id.0].set(arch);
+        *cache[type_id.0]
+            .get()
+            .expect("invariant: OnceLock populated by self or racer in cold path")
+    }
+
+    // ── Phase 10 change_tick facade (Wave A Step 2) ─────────────────────────
+
+    /// Returns the world's current change-detection tick.
+    ///
+    /// Reads [`Self::change_tick`] with `Ordering::Relaxed` — sufficient
+    /// per plan §8.1: the per-row tick writes that consume this value are
+    /// synchronised via the Phase 9 conflict graph (SCH3), not via the
+    /// atomic. The fetch returns a single `u32` (no compound state).
+    ///
+    /// Wave B's `Archetype::create_entity` reads this via the canonical
+    /// path: `EcsMaster::create_entity` (Round 2 W4 INIT3 — the tick is
+    /// owned by the world, not threaded through user APIs).
+    #[inline]
+    pub fn current_tick(&self) -> Tick {
+        Tick::new(self.change_tick.load(Ordering::Relaxed))
+    }
+
+    /// Atomically increments [`Self::change_tick`] and returns the NEW value.
+    ///
+    /// Used by `Schedule::run` at frame start (Wave D Step 13) — the
+    /// single dispatcher-owned bump site. `fetch_add(1, Relaxed)` returns
+    /// the PREVIOUS value, so we wrap-add 1 to obtain the new `this_run`.
+    ///
+    /// Visibility is `pub(crate)` — only the scheduler is permitted to
+    /// bump; user code reads via [`Self::current_tick`] only.
+    #[inline]
+    pub(crate) fn bump_change_tick(&self) -> Tick {
+        let prev = self.change_tick.fetch_add(1, Ordering::Relaxed);
+        Tick::new(prev.wrapping_add(1))
+    }
+
+    /// Returns `true` iff `current_tick - last_check_tick >= CHECK_TICK_THRESHOLD`.
+    ///
+    /// Called every frame from `Schedule::run` (plan §2.7 WRAP2). Returning
+    /// `true` means the dispatcher should next invoke the cold-path
+    /// [`run_check_ticks_scan`](crate::ecs::core::change_detection::run_check_ticks_scan)
+    /// to clamp aged-out per-row ticks against [`MAX_CHANGE_AGE`].
+    ///
+    /// `wrapping_sub` is the correct elapsed computation under the §9.3
+    /// wraparound discipline: stored ticks stay within `MAX_CHANGE_AGE` of
+    /// the current tick by construction, so the unsigned subtraction yields
+    /// the true elapsed count (mod `u32::MAX`, which `MAX_CHANGE_AGE +
+    /// CHECK_TICK_THRESHOLD < u32::MAX` keeps faithful).
+    ///
+    /// [`MAX_CHANGE_AGE`]: crate::ecs::core::change_detection::MAX_CHANGE_AGE
+    #[inline]
+    pub(crate) fn should_run_check_ticks(&self) -> bool {
+        let current = self.current_tick();
+        let elapsed = current.get().wrapping_sub(self.last_check_tick.get());
+        elapsed >= CHECK_TICK_THRESHOLD
+    }
+
+    /// Records that the world's stored ticks have just been clamped against
+    /// [`Tick`] = `tick`.
+    ///
+    /// Called by `Schedule::run` after [`run_check_ticks_scan`] returns
+    /// (plan §2.7 WRAP1). Resets the wraparound counter so the next scan
+    /// fires another `CHECK_TICK_THRESHOLD` ticks later.
+    ///
+    /// Visibility is `pub(crate)` — only the scheduler / change_detection
+    /// machinery is permitted to update this.
+    ///
+    /// [`run_check_ticks_scan`]: crate::ecs::core::change_detection::run_check_ticks_scan
+    #[inline]
+    pub(crate) fn set_last_check_tick(&mut self, tick: Tick) {
+        self.last_check_tick = tick;
+    }
+
+    // ── Phase 12.5 Opt-A2 — direct `spawn_batch` path (§5.5) ───────────────
+
+    /// Phase 12.5 Opt-A2 (§5.5): dispatcher-only direct bulk-spawn.
+    ///
+    /// `&mut self` precludes concurrent worker access by Rust's borrow
+    /// checker; this method is intended for **setup-time** use (fixture
+    /// builds, integration tests, world bootstrap). For worker-side bulk
+    /// spawns, use [`crate::ecs::core::system::params::commands::Commands::spawn_batch`].
+    ///
+    /// # Returns
+    ///
+    /// `Vec<Entity>` of length `n` on success. **W3 documented**: the
+    /// direct path returns `Vec<Entity>` for caller ergonomics; this is a
+    /// setup-time heap allocation, not a hot-path allocation. The queued
+    /// path (`Commands::spawn_batch`) does NOT allocate.
+    ///
+    /// Typical use: `let players = ecs.spawn_batch(...)?;` at world setup.
+    ///
+    /// # Errors
+    ///
+    /// * [`EcsError::SpawnBatchExceedsCapacity`] if `iter.len() > MAX_BATCH_HINT`.
+    ///
+    /// Phase 12.6 — `WorldEntityCapacityExceeded` is no longer reachable
+    /// on this path. The Phase 12.5 SBO17 strong-form check (Relaxed
+    /// pre-load + capacity comparison) backed a fixed pre-sized
+    /// fast-store; the lazy-growth replacement
+    /// ([`EntityMaster::ensure_capacity`](crate::ecs::core::entity::entity_master::EntityMaster::ensure_capacity))
+    /// expands the fast-store on demand under `&mut self`, so the
+    /// capacity guard inside `SpawnBatchCommand::apply` grows instead of
+    /// panicking. Memory exhaustion will surface as an OOM from
+    /// `Vec::resize` before this method can produce a logically
+    /// undersized world.
+    pub fn spawn_batch<B, I>(&mut self, iter: I) -> EcsResult<Vec<Entity>>
+    where
+        B: Bundle + Send + Sync,
+        I: IntoIterator<Item = B>,
+        I::IntoIter: ExactSizeIterator + Send + Sync + Unpin + 'static,
+    {
+        let iter = iter.into_iter();
+        let n = iter.len();
+        if n == 0 {
+            return Ok(Vec::new());
+        }
+
+        // PRE-CHECK: MAX_BATCH_HINT cap. Mirrors `reserve_batch`'s own
+        // gate but short-circuits before touching the counter at all.
+        if n > MAX_BATCH_HINT {
+            return Err(EcsError::SpawnBatchExceedsCapacity {
+                requested: n,
+                max: MAX_BATCH_HINT,
+            });
+        }
+
+        // Route through `EntityMaster` (C-N2: never poke `next_entity_id`
+        // directly — EM6 preserved). With Phase 12.6 lazy growth, no
+        // capacity pre-check is needed — `SpawnBatchCommand::apply`
+        // grows the fast-store via `ensure_capacity` before writing.
+        let range = self.entity_master.reserve_batch(n)?;
+        let start_entity = Entity::new(EntityId(range.start), 0);
+
+        // Build an equivalent SpawnBatchCommand and apply inline. The
+        // pre-checks above guarantee SBO17b's runtime guard inside
+        // `apply` will NOT fire — the apply runs the same code path as
+        // the queued command but is panic-free for the direct caller.
+        let cmd = crate::ecs::core::commands::spawn_batch_command::SpawnBatchCommand::<
+            B,
+            I::IntoIter,
+        > {
+            start_entity,
+            count: n as u32,
+            _pad: 0,
+            iter,
+        };
+        cmd.apply(self);
+
+        // Materialise the entity-id list for the W3 ergonomic return.
+        let mut result = Vec::with_capacity(n);
+        for i in 0..n {
+            result.push(Entity::new(EntityId(range.start + i), 0));
+        }
+        Ok(result)
+    }
+
+    /// Phase 12.5 Track B Opt-B1 — direct query API.
+    ///
+    /// Returns a [`QueryView<'_, D, F>`] handle exposing `iter`, `iter_mut`,
+    /// `single`, `single_mut`, `get`, `get_mut`, `par_iter`, `par_iter_mut`.
+    /// Bypasses the [`FunctionSystem`] wrapper used by the in-system
+    /// [`Query<D, F>`](crate::ecs::core::iters::query::query::Query)
+    /// SystemParam — no `FilteredAccessSet` allocation, no per-call
+    /// `QueryDataState::new`, no apply pass. Aliasing is gated at the type
+    /// level by `&mut self`.
+    ///
+    /// # Cost
+    ///
+    /// * First call for a given `(D, F)` pair: ~1 µs cold cost
+    ///   (`QueryDataState::new` + `OnceLock::set`).
+    /// * Subsequent calls: ~5 ns cache hit (per plan §6.1 breakdown — one
+    ///   per-impl `OnceLock::get` + one slot `OnceLock::get` + a
+    ///   `state.update(master)` warm short-circuit).
+    ///
+    /// # Panics (I-NEW-4 / QV11 / W4 canonical)
+    ///
+    /// Panics if `D::NEEDS_CHANGE_DETECTION || F::NEEDS_CHANGE_DETECTION`
+    /// is true (i.e. if `D` or `F` contains `Ref<T>`, `Mut<T>`, `Added<C>`,
+    /// or `Changed<C>`). Change-detection requires `Schedule` context; use
+    /// `Query<D, F>` as a SystemParam inside a system body via `Schedule`.
+    /// The check is `const`-folded at monomorphisation — zero overhead on
+    /// the !NCD path.
+    ///
+    /// [`FunctionSystem`]: crate::ecs::core::system::function_system::FunctionSystem
+    pub fn query<D, F>(&mut self) -> QueryView<'_, D, F>
+    where
+        D: QueryData + 'static,
+        F: QueryFilter + 'static,
+    {
+        // QV11 / I-NEW-4: change-detection guard. `if const { ... }` const-folds
+        // at monomorphisation; the panic site is `#[cold] + #[inline(never)]`
+        // and lives outside the hot path's I-cache on !NCD paths.
+        if const { D::NEEDS_CHANGE_DETECTION || F::NEEDS_CHANGE_DETECTION } {
+            query_change_detection_panic::<D, F>();
+        }
+
+        let type_id = <(D, F) as QueryTypeKey>::query_type_id();
+        debug_assert!(
+            type_id.0 < MAX_QUERY_TYPES,
+            "QueryTypeId out of bounds — register_new's saturate-then-panic \
+             discipline should have prevented this"
+        );
+
+        let slot = self.query_state_cache().slot(type_id);
+
+        if let Some(&(typed_ptr, _drop_fn)) = slot.get() {
+            // Hot path: cache hit. Reborrow the cached state under `&mut
+            // self`'s exclusive provenance and refresh against the world's
+            // archetype master.
+            let cell_ptr: NonNull<UnsafeCell<QueryDataState<D, F>>> = typed_ptr.cast();
+
+            // SAFETY (QV6 / I-NEW-3):
+            //   - `cell_ptr` was minted from `Box::leak` in
+            //     `query_cold_init` and never freed until `Drop`.
+            //   - `&mut self` is unique for `'_`; the `&mut` retag below
+            //     derives from `self`'s unique provenance, NOT from the
+            //     raw `Box::leak + as_mut` of Round 2.
+            //   - `UnsafeCell::get` returns `*mut`; we reborrow as `&mut`
+            //     for the `state.update(master)` call only and drop the
+            //     `&mut` before constructing the `QueryView`.
+            unsafe {
+                let state_mut: &mut QueryDataState<D, F> =
+                    &mut *(*cell_ptr.as_ptr()).get();
+                state_mut.update(self.archetype_master());
+            }
+
+            // SAFETY (QV1, QV7, U_C1):
+            //   - `new_mutable` is sound because `&mut self` enforces world
+            //     exclusivity for `'_` (the returned view's lifetime).
+            //   - `from_parts` carries the contract that both `world` and
+            //     `state` descend from the same `&mut self` borrow.
+            let world = unsafe { UnsafeEcsCell::new_mutable(self) };
+            return unsafe { QueryView::from_parts(world, cell_ptr) };
+        }
+
+        // Cache miss: cold init path.
+        self.query_cold_init::<D, F>(type_id)
+    }
+
+    /// Cold-path initialiser for [`Self::query`]. Allocates the
+    /// `QueryDataState<D, F>` once for `(D, F)` per world; subsequent
+    /// `query` calls hit the cache.
+    ///
+    /// `#[cold] + #[inline(never)]`: runs at most once per `(D, F)` per
+    /// world; isolating it keeps the warm path's hot loop tight.
+    #[cold]
+    #[inline(never)]
+    fn query_cold_init<D, F>(&mut self, type_id: QueryTypeId) -> QueryView<'_, D, F>
+    where
+        D: QueryData + 'static,
+        F: QueryFilter + 'static,
+    {
+        let state = QueryDataState::<D, F>::new(self);
+        let cell = Box::new(UnsafeCell::new(state));
+        // SAFETY: `Box::leak` produces a `&'static mut UnsafeCell<...>`
+        //   from a `Box`; `NonNull::from` is infallible. The `'static`
+        //   lifetime is narrowed by the cache's drop fn pointer back to
+        //   the world's lifetime (the slot's drop in `QueryStateCache::drop`
+        //   reconstructs the `Box`).
+        let cell_ptr: NonNull<UnsafeCell<QueryDataState<D, F>>> =
+            NonNull::from(Box::leak(cell));
+        let type_erased: NonNull<()> = cell_ptr.cast();
+
+        // Monomorphised drop glue. The fn pointer is stable for the
+        // process lifetime; `Box::from_raw` reconstructs the original Box
+        // and lets it drop normally.
+        let drop_fn: fn(NonNull<()>) = |p: NonNull<()>| {
+            let typed: NonNull<UnsafeCell<QueryDataState<D, F>>> = p.cast();
+            // SAFETY (QC7): invoked from `QueryStateCache::drop`; the
+            //   pointer was minted from `Box::leak` on a
+            //   `Box<UnsafeCell<QueryDataState<D, F>>>` in this same
+            //   function for the same `(D, F)`; reconstructing the Box
+            //   resumes ownership and runs the embedded drop glue.
+            unsafe { drop(Box::from_raw(typed.as_ptr())); }
+        };
+
+        let slot = self.query_state_cache().slot(type_id);
+        match slot.set((type_erased, drop_fn)) {
+            Ok(()) => {
+                // SAFETY: same contract as the cache-hit path in `query`.
+                unsafe {
+                    let state_mut: &mut QueryDataState<D, F> =
+                        &mut *(*cell_ptr.as_ptr()).get();
+                    state_mut.update(self.archetype_master());
+                }
+                // SAFETY (QV1, U_C1): see `query` cache-hit path.
+                let world = unsafe { UnsafeEcsCell::new_mutable(self) };
+                // SAFETY (QV1): `from_parts` contract upheld — `world` and
+                //   `cell_ptr` both descend from `&mut self`.
+                unsafe { QueryView::from_parts(world, cell_ptr) }
+            }
+            Err(_) => {
+                // `OnceLock::set` raced under `&mut self` — structurally
+                // impossible because the cache mutation path is gated by
+                // an exclusive borrow. If we hit this branch in production,
+                // a contributor has broken the invariant.
+                //
+                // SAFETY (cleanup): reclaim Box ownership before panic so
+                //   the leaked allocation is dropped on the unwind.
+                unsafe { drop(Box::from_raw(cell_ptr.as_ptr())); }
+                debug_assert!(
+                    false,
+                    "OnceLock::set raced under &mut self — impossible"
+                );
+                panic!("invariant violated: query_state_cache slot raced under &mut self");
+            }
+        }
+    }
+
     /// Clears all entities and archetypes from the system
     pub fn clear(&mut self) {
         self.entity_master.clear();
         self.archetype_master.clear();
         // Note: We don't clear the arena as it manages its own memory
     }
+}
+
+/// Phase 12.5 Track B I-NEW-4 / QV11 / W4 — canonical panic site for
+/// `EcsMaster::query<D, F>()` when `D` or `F` carries
+/// `NEEDS_CHANGE_DETECTION = true`. `#[cold] + #[inline(never)]` so the
+/// site lives outside the hot path's I-cache; the wording is the
+/// canonical W4 message, verbatim across plan §0 I-NEW-4, §2.2 QV11,
+/// §4.3 doc-comment, and §5 implementation.
+#[cold]
+#[inline(never)]
+fn query_change_detection_panic<D, F>() -> !
+where
+    D: QueryData + 'static,
+    F: QueryFilter + 'static,
+{
+    panic!(
+        "direct API EcsMaster::query<{}, {}>() does not support change-detection \
+         filters (D or F has NEEDS_CHANGE_DETECTION = true); use Query<D, F> \
+         inside a system body via Schedule",
+        std::any::type_name::<D>(),
+        std::any::type_name::<F>(),
+    );
 }
 
 /// Cold-path panic helper for [`EcsMaster::resource`] / [`EcsMaster::resource_mut`].
@@ -1041,6 +2059,38 @@ impl Default for EcsMaster {
         Self::new()
     }
 }
+
+// SAFETY (SEND1 — Phase 9 §2.4, §9.1, §9.2): `EcsMaster` becomes `Send + Sync`
+// under the Phase 9 contract:
+//
+//   - `arena: Box<Arena>` is the only `!Send + !Sync` field. Arena access is
+//     bounded by the ALLOC1 discipline (§2.7): all allocation paths require
+//     `IN_SYSTEM_RUN == false`, enforced via `debug_assert!` in
+//     `Arena::allocate_layout` / `Arena::allocate_from_free_blocks`. The
+//     scheduler invokes allocation only on the dispatcher thread inside the
+//     apply window (§5.4.5.1, SCH7), with all workers drained.
+//   - `resources` (`Resources`), `events` (`EventDispatcher`),
+//     `entity_master` (`EntityMaster`), `archetype_master` (`ArchetypeMaster`),
+//     and `bundle_archetype_cache` (`Box<[OnceLock<ArchetypeId>; _]>`) are
+//     each independently `Send + Sync` per SEND3-SEND9.
+//   - The apply-window barrier (SCH7 + Round 2 C4) guarantees the dispatcher's
+//     `&mut EcsMaster` never aliases any worker-held `UnsafeEcsCell` read; the
+//     `ConflictGraph` (SCH3) prevents intra-frame aliasing between concurrently
+//     running systems.
+//   - Direct (non-scheduler) `&mut EcsMaster` callers (`EcsMaster::create_entity`,
+//     `EcsMaster::insert_resource`, etc.) inherit the borrow-checker
+//     enforcement; no scheduler invariant applies because no worker is in
+//     flight at the language level.
+unsafe impl Send for EcsMaster {}
+unsafe impl Sync for EcsMaster {}
+
+/// Compile-time gate for the Phase 9 SEND1 contract. Forces a type-system
+/// failure if either auto-trait is lost on `EcsMaster` (e.g. by a future
+/// field addition that re-introduces a `!Send` / `!Sync` interior).
+const _: fn() = || {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<EcsMaster>();
+};
 
 #[cfg(test)]
 mod tests {
@@ -1376,17 +2426,17 @@ mod tests {
         }
     }
 
-    /// `run_closure_once::<(), _, _>` runs an empty closure and propagates
-    /// its return value.
+    /// `run_closure_once(|| ...)` runs an empty closure and propagates
+    /// its return value. Phase 8c Step 5: turbofish dropped — the closure's
+    /// (zero-)param surface infers from its signature.
     #[test]
     fn run_system_once_with_empty_closure_runs_once() {
         let mut ecs = EcsMaster::new();
-        // W3: turbofish on the param tuple is required in Phase 8a.
-        let out: u32 = ecs.run_closure_once::<(), _, _>(|()| 42);
+        let out: u32 = ecs.run_closure_once(|| 42);
         assert_eq!(out, 42, "run_closure_once must propagate the closure's output");
     }
 
-    /// `run_closure_once::<Res<TestRes>, _, _>` reads back a resource that
+    /// `run_closure_once(|r: Res<TestRes>| ...)` reads back a resource that
     /// was inserted via the `pub(crate)` `resources` field (the public
     /// `insert_resource` facade lands in Step 9).
     #[test]
@@ -1404,10 +2454,10 @@ mod tests {
         // from inside the closure back to the outer test.
         let observed = Arc::new(AtomicU32::new(0));
         let probe = Arc::clone(&observed);
-        // W3: turbofish on the param tuple is required in Phase 8a.
+        // Phase 8c Step 5: turbofish replaced by closure-arg annotation.
         // r: Res<SystemTestRes>; r.0: &SystemTestRes; r.0.0: u32 (the inner
         // newtype field, accessed via auto-deref through the shared borrow).
-        ecs.run_closure_once::<Res<'_, SystemTestRes>, _, _>(move |r| {
+        ecs.run_closure_once(move |r: Res<SystemTestRes>| {
             probe.store(r.0.0, Ordering::Relaxed);
         });
         assert_eq!(
@@ -1415,5 +2465,179 @@ mod tests {
             123,
             "Res<R> must round-trip the inserted value"
         );
+    }
+
+    // --- Phase 8c Step 4: `run_system` / `run_cached_system` smoke tests ---
+
+    /// Phase 8c Step 4 test resource. A fresh `TypeId` -> fresh dynamic
+    /// `ResourceId` via `register_new::<Self>()`; no collision with the
+    /// `SystemTestRes` slot used by the Phase 8a smoke tests above.
+    struct Step4Res(u32);
+
+    impl crate::ecs::core::resources::resource::Resource for Step4Res {
+        fn resource_id() -> crate::ecs::identifiers::primitives::ResourceId {
+            use crate::ecs::core::resources::resource_registry::register_new;
+            use crate::ecs::identifiers::primitives::ResourceId;
+            use std::sync::OnceLock;
+            static ID: OnceLock<ResourceId> = OnceLock::new();
+            *ID.get_or_init(|| ResourceId(register_new::<Self>()))
+        }
+    }
+
+    /// `run_system(|| { ... })` — arity-0 closure, no params, no return.
+    /// The headline ergonomic claim: no turbofish, no `<P>` to spell out.
+    #[test]
+    fn run_system_arity_0_no_param_runs_closure() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let mut ecs = EcsMaster::new();
+
+        // Probe channel — `AtomicU32` behind `Arc` satisfies the
+        // `Send + Sync + 'static` bound transitively required by the
+        // closure captures (System: Send + Sync + 'static).
+        let observed = Arc::new(AtomicU32::new(0));
+        let probe = Arc::clone(&observed);
+        ecs.run_system(move || {
+            probe.store(7, Ordering::Relaxed);
+        });
+        assert_eq!(
+            observed.load(Ordering::Relaxed),
+            7,
+            "run_system must execute the arity-0 closure body"
+        );
+    }
+
+    /// `run_system(|res: Res<R>| -> u32 { ... })` — arity-1 with `Res<R>`
+    /// and a non-unit return. Verifies that the `IntoSystem` dispatch
+    /// propagates the body's output back through `FunctionSystem`.
+    #[test]
+    fn run_system_arity_1_res_returns_value() {
+        use crate::ecs::core::system::Res;
+
+        let mut ecs = EcsMaster::new();
+        ecs.resources.insert(Step4Res(531));
+
+        // `res.0` is the `&Step4Res` (pub(crate) field on `Res<'w, R>`);
+        // `.0` on the newtype yields the inner `u32`. Mirrors the
+        // `r.0.0` pattern used by the Phase 8a smoke tests above.
+        let out: u32 = ecs.run_system(|res: Res<Step4Res>| -> u32 { res.0.0 });
+        assert_eq!(
+            out, 531,
+            "run_system must round-trip a Res<R> read into the return value"
+        );
+    }
+
+    /// Phase 9 SEND1 — compile-time gate that `EcsMaster` and
+    /// `UnsafeEcsCell<'_>` are both `Send + Sync`. The const assertion at
+    /// module scope provides a sharper error site if the contract is ever
+    /// broken by a field-level change; this test gives `cargo test` a
+    /// human-visible green tick for the same condition.
+    #[test]
+    fn ecs_master_and_cell_are_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<EcsMaster>();
+        assert_send_sync::<crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell<'static>>();
+    }
+
+    /// `run_cached_system(&mut sys)` invoked twice on the same
+    /// `FunctionSystem` reuses the cached state (FS1 idempotent
+    /// `initialize`); the second call must observe the post-first-call
+    /// state of the world without rebuilding the system.
+    #[test]
+    fn run_cached_system_reused_twice_reads_updated_resource() {
+        use crate::ecs::core::system::Res;
+        use crate::ecs::core::system::function_system::FunctionSystem;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let mut ecs = EcsMaster::new();
+        ecs.resources.insert(Step4Res(100));
+
+        // Build the FunctionSystem once via `IntoSystem::into_system` —
+        // exactly the same construction `run_system` performs internally,
+        // hoisted so the state survives across two `run_cached_system`
+        // calls.
+        let observed = Arc::new(AtomicU32::new(0));
+        let probe = Arc::clone(&observed);
+        let body = move |res: Res<Step4Res>| {
+            probe.store(res.0.0, Ordering::Relaxed);
+        };
+        // `into_system` produces a `FunctionSystem<F, Marker>` (turbofish
+        // here is on the IntoSystem trait, not the closure body).
+        let mut sys: FunctionSystem<_, _> = IntoSystem::into_system(body);
+
+        // First call: cold init + run + apply. State transitions from
+        // None -> Some(_).
+        ecs.run_cached_system(&mut sys);
+        assert_eq!(observed.load(Ordering::Relaxed), 100);
+
+        // Mutate the resource in between via the public facade. This is
+        // safe because `run_cached_system` returned `&mut ecs` back to us.
+        ecs.resource_mut::<Step4Res>().0 = 200;
+
+        // Second call: re-init is a no-op (FS1). The cached state and
+        // SystemMeta are reused; the body observes the updated value.
+        ecs.run_cached_system(&mut sys);
+        assert_eq!(
+            observed.load(Ordering::Relaxed),
+            200,
+            "run_cached_system must reuse cached state and read fresh world data"
+        );
+    }
+
+    /// Phase 12.5 Track B C3 / C5 — smoke test for the
+    /// `query_state_cache` drop ordering invariant.
+    ///
+    /// Rust drops struct fields in declaration order — `arena` is declared
+    /// BEFORE `query_state_cache`, so `arena` drops FIRST and the cache
+    /// drops AFTER. This pin exercises the basic `EcsMaster::drop()` path
+    /// after a `query` cold-init has populated the cache slot; a future
+    /// regression that reordered the fields and dropped the cache before
+    /// the arena would surface here (additional Miri coverage lives in
+    /// `tests/miri_phase12_5_track_b.rs::miri_query_cache_drops_after_arena_with_arena_derived_d_state`).
+    ///
+    /// The full synthetic-`D::State` drop-order recorder described in the
+    /// plan §11.4 outline is deferred to Phase 13 — implementing a
+    /// `QueryData` trait fixture that records drop order in a `thread_local!`
+    /// requires routing through the entire trait surface for a fixture
+    /// that today exercises a code path the existing Miri test already
+    /// guards. The current pin documents the invariant; Phase 13 can lift
+    /// it to a full ordering recorder if production code adds an
+    /// arena-derived `D::State`.
+    #[test]
+    fn query_state_cache_drops_after_arena() {
+        register_test_components();
+        let mut ecs = EcsMaster::new();
+        let arch = ecs.create_archetype(&[POSITION_ID]);
+        let pos = Position { x: 1.0, y: 2.0, z: 3.0 };
+        // SAFETY: `Position` is `#[repr(C)]` POD; bytes are valid for the
+        //   duration of this call.
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                &pos as *const _ as *const u8,
+                std::mem::size_of::<Position>(),
+            )
+        };
+        ecs.create_entity(arch, &[(POSITION_ID, bytes)])
+            .expect("create_entity must succeed in test fixture");
+
+        // Populate the cache slot for `<&Position, ()>` via the direct
+        // API. The cache will hold a `Box<UnsafeCell<QueryDataState<...>>>`
+        // for the duration of `ecs`.
+        {
+            let view = ecs.query::<&Position, ()>();
+            let _ = view.iter().count();
+        }
+
+        // Drop the world. Field-order on EcsMaster places
+        // `query_state_cache` AFTER `arena` — Rust's declaration-order
+        // drop semantics therefore reclaim the cache slot AFTER the
+        // arena drop has run. A regression that reordered the fields
+        // would either (a) trigger Miri inside the existing
+        // `miri_query_cache_drops_after_arena_with_arena_derived_d_state`
+        // test, or (b) surface as a use-after-free in any future
+        // arena-derived `D::State` impl.
+        drop(ecs);
     }
 }

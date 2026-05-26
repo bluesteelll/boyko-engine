@@ -1,8 +1,12 @@
+use std::cell::UnsafeCell;
+
 use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId, EntityId, InlandPoolId};
-use crate::ecs::core::component::component_mask::ComponentMask;
-use crate::ecs::core::component::component_registry::MAX_COMPONENTS;
 use crate::ecs::core::archetype::archetype_signature::ArchetypeSignature;
+use crate::ecs::core::change_detection::Tick;
+use crate::ecs::core::component::component_mask::ComponentMask;
 use crate::ecs::core::component::component_pool_bundle::ComponentPoolBundle;
+use crate::ecs::core::component::component_registry::MAX_COMPONENTS;
+use crate::ecs::error::{EcsError, EcsResult};
 use crate::ecs::memory::arena::Arena;
 
 /// `MAX_COMPONENTS` as a `ComponentId` newtype for comparison against newtype-guarded IDs.
@@ -353,13 +357,24 @@ impl Archetype {
     /// the caller now receives just the `u32` slot and is responsible for
     /// constructing whatever entity-location record it needs.
     ///
+    /// # Phase 10 INIT3 — `current_tick` parameter
+    ///
+    /// The world's current change-detection tick is threaded through the
+    /// call so the newly-pushed row receives `added = changed = current_tick`
+    /// in every component pool. The canonical caller is
+    /// [`crate::ecs::core::ecs_master::EcsMaster::create_entity`], which
+    /// reads `self.change_tick.load(Relaxed)` and forwards it here (plan
+    /// §2.4 INIT3 / Round 2 W4 — single source of truth for the world tick).
+    ///
     /// Audit: C-010 — switched from Vec to &[...]. Phase 7 Step 3 — replaced
-    /// `&mut EntityInland` with `&mut u32`.
+    /// `&mut EntityInland` with `&mut u32`. Phase 10 Step 6 — added
+    /// `current_tick`.
     pub fn create_entity(
         &mut self,
         entity_id: EntityId,
         new_unit_index: &mut u32,
         components: &[(ComponentId, &[u8])],
+        current_tick: Tick,
     ) -> bool {
         // Build a mask of the input component IDs in O(M), then check
         // that the archetype signature is a subset in O(8 u64 ops).
@@ -393,6 +408,30 @@ impl Archetype {
         let unit_index = self.component_pools.push_entity_components(components);
         *new_unit_index = unit_index as u32;
 
+        // Phase 10 STORE4 / INIT1: stamp the per-row `added` and `changed`
+        // ticks of every component pool the entity contributes to. The
+        // bundle push above guarantees every `components[i].0` resolves to
+        // a live pool and that all pools share the same `unit_index`
+        // (C-009 two-phase commit).
+        for (component_id, _) in components {
+            // The pool was just pushed; `unit_index < pool.count()` holds.
+            // `get_pool_mut` returns `Some(_)` here per the bundle's
+            // pre-validation in `can_push_entity_components`.
+            if let Some(pool) = self.component_pools.get_pool_mut(*component_id) {
+                // SAFETY (STORE3 + STORE4 + SCH3):
+                //   - `unit_index < pool.count()` — the slot was written
+                //     above by `push_entity_components`.
+                //   - `&mut self` on `Archetype` gives exclusive write
+                //     access to every owned pool (Phase 9 dispatcher-only
+                //     entry per the apply window); no concurrent reader
+                //     of the tick slot exists.
+                unsafe {
+                    pool.write_added_tick(unit_index, current_tick);
+                    pool.write_changed_tick(unit_index, current_tick);
+                }
+            }
+        }
+
         // Add the entity ID to the vector
         self.entity_ids.push(entity_id);
 
@@ -400,6 +439,28 @@ impl Archetype {
         self.current_index += 1;
 
         true
+    }
+
+    /// Returns the `(added_ticks_base, changed_ticks_base)` pointer pair for
+    /// the column hosting `component_id`, or `None` when the archetype lacks
+    /// a pool for it.
+    ///
+    /// Wave C `Added<C>::set_table_*` / `Changed<C>::set_table_*` cache the
+    /// returned base pointers in their `Fetch<'w>` once per archetype
+    /// boundary (cold path), then index per-row through the `Fetch`.
+    /// The pointers are stable for the pool's lifetime (`Box<[_]>` —
+    /// never reallocated post-construction, per Phase 10 STORE2).
+    ///
+    /// Returning a tuple by value keeps the cold-path call signature
+    /// simple; per-row reads do not touch this accessor.
+    #[allow(dead_code)]
+    #[inline]
+    pub(crate) fn tick_column_base(
+        &self,
+        component_id: ComponentId,
+    ) -> Option<(*const UnsafeCell<Tick>, *const UnsafeCell<Tick>)> {
+        let pool = self.component_pools.get_pool(component_id)?;
+        Some((pool.added_ticks_ptr(), pool.changed_ticks_ptr()))
     }
 
     /// Removes an entity and all its components from this archetype.
@@ -443,6 +504,243 @@ impl Archetype {
         self.current_index -= 1;
 
         RemoveOutcome::Swapped { moved_entity: swapped_entity_id }
+    }
+
+    /// Phase 11 (plan §7.2 / C5 / W-N2): releases the row at
+    /// `removed_unit_index` WITHOUT invoking per-component `Drop`.
+    ///
+    /// Used by the archetype-migration paths in
+    /// [`crate::ecs::core::commands::migration_helpers`] after their
+    /// retained-bytes have been memcpy'd into the target archetype. The
+    /// caller MUST have already moved or explicitly dropped every
+    /// component at `removed_unit_index` — otherwise components leak (no
+    /// destructor will ever run on those bytes).
+    ///
+    /// Returns a [`RemoveOutcome`] mirroring [`Self::remove_entity`]:
+    ///
+    /// * [`RemoveOutcome::Last`] — `removed_unit_index == last_unit_index`,
+    ///   trailing slot popped, no swap needed.
+    /// * [`RemoveOutcome::Swapped`] — swap-remove occurred; caller must
+    ///   update the moved entity's `unit_index` in `EntityMaster`.
+    ///
+    /// # Differences vs [`Self::remove_entity`]
+    ///
+    /// `remove_entity` runs `drop_fn` on the source row's bytes for every
+    /// pool; this function does NOT, so the caller can re-claim ownership
+    /// of those bytes (e.g. memcpy them into a different archetype before
+    /// release). Both paths invoke the swap-remove dance over byte +
+    /// tick storage identically.
+    pub(crate) fn move_out_entity(
+        &mut self,
+        removed_unit_index: InlandPoolId,
+    ) -> RemoveOutcome {
+        let last_unit_index = InlandPoolId(self.current_index.saturating_sub(1));
+        if removed_unit_index == last_unit_index {
+            // Pop trailing slot in every pool. W-N2: no drop.
+            self.component_pools.pop_entity_no_drop();
+            self.entity_ids.pop();
+            self.current_index -= 1;
+            return RemoveOutcome::Last;
+        }
+        let moved_entity = self.entity_ids[last_unit_index.0];
+        // SAFETY: `removed_unit_index < last_unit_index < current_index`
+        //   so the index is in-bounds for every pool (each pool's
+        //   `count()` equals `current_index` by archetype invariant).
+        //   `&mut self` ⇒ exclusive access; caller upholds the
+        //   W-N2 PRECONDITION (bytes moved or dropped before this call).
+        unsafe { self.component_pools.swap_remove_unit_no_drop(removed_unit_index.0); }
+        self.entity_ids.swap_remove(removed_unit_index.0);
+        self.current_index -= 1;
+        RemoveOutcome::Swapped { moved_entity }
+    }
+
+    /// Phase 11 (plan §9.2 / Wave E Step 20): pushes a new entity row
+    /// into this archetype with **explicit** per-component
+    /// `(added_tick, changed_tick)` pairs.
+    ///
+    /// Used by the migration helpers to preserve retained components'
+    /// original ticks across archetype boundaries (insert / remove). The
+    /// bundle slots threaded through `migrate_entity_insert` already
+    /// carry `(current_tick, current_tick)` for fresh bundle bytes and
+    /// `(orig_added, orig_changed)` for retained bytes — this function
+    /// memcpys the bytes and stamps the supplied ticks in lockstep.
+    ///
+    /// On signature mismatch or pool failure returns `false` and leaves
+    /// the archetype unchanged (two-phase commit via
+    /// `can_push_entity_components`). On success, writes the assigned
+    /// dense row index into `*new_unit_index`.
+    ///
+    /// # `current_tick` parameter
+    ///
+    /// Threaded for parity with [`Self::create_entity`] — currently
+    /// unused inside this function because every per-component tick is
+    /// supplied explicitly. Reserved for the Phase 12 `is_new` flag
+    /// (OQ5) that will distinguish migration-added vs replaced bytes.
+    pub(crate) fn create_entity_with_ticks(
+        &mut self,
+        entity_id: EntityId,
+        new_unit_index: &mut u32,
+        components: &[(ComponentId, &[u8], Tick, Tick)],
+        current_tick: Tick,
+    ) -> bool {
+        let _ = current_tick; // Reserved (Phase 12 OQ5).
+
+        // Build a mask of the input ids; signature subset check (mirrors
+        // `create_entity`).
+        let mut input_mask = ComponentMask::new();
+        for (id, _, _, _) in components {
+            debug_assert!(
+                *id < MAX_COMPONENTS_ID,
+                "component_id {} >= MAX_COMPONENTS ({})", id.0, MAX_COMPONENTS
+            );
+            input_mask.set(*id);
+        }
+        debug_assert_eq!(
+            input_mask.popcount(),
+            components.len(),
+            "Archetype::create_entity_with_ticks: duplicate ComponentId in input"
+        );
+        if !self.signature.mask().is_subset(&input_mask) {
+            return false;
+        }
+
+        // Two-phase commit: pre-validate every pool has free capacity.
+        // We reuse the existing 3-tuple checker by stripping ticks.
+        let component_bytes: Vec<(ComponentId, &[u8])> = components
+            .iter()
+            .map(|(id, bytes, _, _)| (*id, *bytes))
+            .collect();
+        if !self.component_pools.can_push_entity_components(&component_bytes) {
+            return false;
+        }
+
+        // Push bytes; pools grow in lockstep, yielding a shared dense
+        // row index.
+        let unit_index = self
+            .component_pools
+            .push_entity_components(&component_bytes);
+        *new_unit_index = unit_index as u32;
+
+        // Stamp the explicit ticks per-component. The order of
+        // `components` matches `component_bytes`, and `push_entity_components`
+        // wrote each component to the same dense slot.
+        for (component_id, _, added_tick, changed_tick) in components {
+            if let Some(pool) = self.component_pools.get_pool_mut(*component_id) {
+                // SAFETY (mirrors STORE4 in `create_entity`):
+                //   * `unit_index < pool.count()` (just pushed above).
+                //   * `&mut self` ⇒ exclusive write access; Phase 9 SCH3
+                //     keeps workers off this pool during apply.
+                unsafe {
+                    pool.write_added_tick(unit_index, *added_tick);
+                    pool.write_changed_tick(unit_index, *changed_tick);
+                }
+            }
+        }
+
+        self.entity_ids.push(entity_id);
+        self.current_index += 1;
+        true
+    }
+
+    /// Phase 12.5 Opt-A3 (§6 / plan §1.3): single-row spawn that bypasses
+    /// the 4× SparseMap lookup of [`Self::create_entity`] by consuming
+    /// the pre-resolved `pool_ids` slice from [`crate::ecs::core::bundle::bundle_column_cache::BundleColumnRecord`].
+    ///
+    /// `components` MUST be in **canonical order** (sorted by
+    /// `ComponentId.0`) matching `pool_ids` slot-for-slot — guaranteed by
+    /// B1/B2 (`Bundle::component_ids()` / `for_each_component_bytes`).
+    ///
+    /// Returns `true` on success and writes the assigned dense unit
+    /// index into `*new_unit_index`. Returns `false` if any pool is full
+    /// (two-phase commit via `reserve_capacity(1)`).
+    ///
+    /// # Cost
+    ///
+    /// One `reserve_capacity(1)` (one bounds check per pool) + direct
+    /// `pool_at_unchecked_mut(pool_ids[i])` indexing + per-row tick init
+    /// via direct pool index — no SparseMap lookups on the warm path.
+    ///
+    /// # Phase 12.6 — legacy bridge
+    ///
+    /// `SpawnAtCommand::apply` no longer routes through this method;
+    /// the collapsed inline write loop lives directly inside the command
+    /// (`spawn_at_command.rs`). This method is retained as the
+    /// `Archetype`-side primitive that external benchmarks reach for to
+    /// model the pre-Phase-12.6 dispatch shape (see
+    /// `crates/bench_bevy_vs_boyko/benches/profile_spawn_*.rs`).
+    #[allow(dead_code)]
+    pub(crate) fn create_entity_with_pool_ids(
+        &mut self,
+        entity_id: EntityId,
+        new_unit_index: &mut u32,
+        components: &[(ComponentId, &[u8])],
+        pool_ids: &[InlandPoolId],
+        current_tick: Tick,
+    ) -> bool {
+        debug_assert_eq!(
+            components.len(),
+            pool_ids.len(),
+            "create_entity_with_pool_ids: components / pool_ids arity mismatch"
+        );
+        // Two-phase commit via `reserve_capacity`.
+        if self.reserve_capacity(1).is_err() {
+            return false;
+        }
+        let row = self.current_index;
+        for (canonical_idx, (component_id, bytes)) in components.iter().enumerate() {
+            debug_assert_eq!(
+                self.component_ids[canonical_idx], *component_id,
+                "create_entity_with_pool_ids: canonical order mismatch at idx {}",
+                canonical_idx
+            );
+            let pool_idx = pool_ids[canonical_idx];
+            // SAFETY (SBO13 + SBO-N + SBO-B2):
+            //   * `pool_idx.0 < pools.len()` by SBO-N (push-only) + the
+            //     cache install-time bound check.
+            //   * `row < max_components` after `reserve_capacity(1)` succeeded.
+            //   * `&mut self` ⇒ exclusive access.
+            //   * `bytes.len() == pool.component_layout.size()` by
+            //     Bundle/macro contract.
+            unsafe {
+                let pool = self
+                    .component_pools
+                    .pool_at_unchecked_mut(pool_idx);
+                pool.write_at_unchecked_initialized(row, bytes);
+                pool.commit_units(row, 1);
+                pool.fill_ticks(row, 1, current_tick);
+            }
+        }
+        self.entity_ids.push(entity_id);
+        self.current_index = row + 1;
+        *new_unit_index = row as u32;
+        true
+    }
+
+    /// Phase 12.5 Opt-A2 (SBO4 / §5.6): pre-validates that every owned
+    /// pool can reserve `n` more rows. Returns `Ok(())` on success or
+    /// `Err(EcsError::ArchetypePoolCapacityExceeded)` on overflow.
+    ///
+    /// Two-phase commit: callers (`SpawnBatchCommand::apply` direct +
+    /// queued) MUST invoke this BEFORE writing any row via
+    /// `pool_at_unchecked_mut().write_at_unchecked_initialized(...)`. On
+    /// `Err` the archetype is unchanged; no pool was mutated.
+    ///
+    /// **Never panics** — the apply-time guard converts overflow into a
+    /// recoverable error so the queued path (`I-N4`) can `.expect` it as
+    /// a logic-bug indicator while the direct path
+    /// (`EcsMaster::spawn_batch`) bubbles it up to the caller.
+    pub(crate) fn reserve_capacity(&mut self, n: usize) -> EcsResult<()> {
+        for pool in self.component_pools.pools_iter() {
+            if !pool.can_reserve(n) {
+                let (_, max) = pool.len_for_reserve();
+                return Err(EcsError::ArchetypePoolCapacityExceeded {
+                    archetype_id: self.id,
+                    pool_capacity: max,
+                    requested: n,
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Gets a reference to the component pool bundle
@@ -522,6 +820,35 @@ impl Archetype {
     }
 }
 
+// SAFETY (SEND10 — Phase 9 §2.4, §9.1):
+//
+// `Archetype` becomes `Send + Sync` under the Phase 9 contract:
+//
+//   - The owned `ComponentPoolBundle` aggregates `ComponentPool`s, which are
+//     themselves `Send + Sync` per SEND10 (see `component_pool.rs`).
+//   - The `arena: *const Arena` field is never dereferenced outside the
+//     dispatcher-only paths (`register_component`, `register_component_inplace`,
+//     archetype construction). Worker reads (`get_entity_id_at`, the inline
+//     `columns[c]` lookup) never touch the arena pointer.
+//   - The inline `columns: [Column; MAX_COMPONENTS]` table is read-only from
+//     workers; updates happen during dispatcher-only `refresh_column` /
+//     `add_pool` flows.
+//   - All `Vec`s (`component_ids`, `entity_ids`) mutate only on `&mut self`
+//     paths reached from the apply window.
+unsafe impl Send for Archetype {}
+unsafe impl Sync for Archetype {}
+
+// SAFETY (SEND10 — Phase 9 §2.4, §9.1):
+//
+// `Column` is a `Copy` POD wrapping a raw pointer + stride. The raw `*mut u8`
+// is only dereferenced inside paths governed by the scheduler's aliasing
+// contract (`EcsMaster::get_component_raw` under a worker cell; the
+// `ConflictGraph` guarantees no overlapping mutable views). The column entry
+// itself carries no shared interior mutability, so transmitting it across
+// threads is sound.
+unsafe impl Send for Column {}
+unsafe impl Sync for Column {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -556,7 +883,7 @@ mod tests {
         let ok = arch.create_entity(entity_id, &mut new_unit_index, &[
             (COMP_A, bytes_a.as_slice()),
             (COMP_B, bytes_b.as_slice()),
-        ]);
+        ], Tick::new(1));
         assert!(ok, "create_entity must succeed in setup helper");
         InlandPoolId(new_unit_index as usize)
     }
@@ -594,7 +921,12 @@ mod tests {
         // Provide only COMP_A, omit COMP_B.
         let bytes_a = vec![0u8; component_registry::get_component_size(COMP_A.0).unwrap()];
         let mut new_unit_index: u32 = 0;
-        let ok = arch.create_entity(EntityId(10), &mut new_unit_index, &[(COMP_A, bytes_a.as_slice())]);
+        let ok = arch.create_entity(
+            EntityId(10),
+            &mut new_unit_index,
+            &[(COMP_A, bytes_a.as_slice())],
+            Tick::new(1),
+        );
         assert!(!ok, "create_entity must return false when a component is missing");
     }
 
@@ -862,7 +1194,7 @@ mod tests {
                 (C16_A, bytes_a.as_slice()),
                 (C16_B, bytes_b.as_slice()),
                 (ComponentId(412), bytes_c.as_slice()), // extra: not in archetype pools
-            ]);
+            ], Tick::new(1));
             // In release: bundle returns None for the unknown ID → create_entity returns false.
             assert!(!ok, "create_entity must return false when bundle cannot accept the extra ID");
         }));
@@ -888,7 +1220,7 @@ mod tests {
             .collect();
 
         let mut new_unit_index: u32 = 0;
-        let ok = arch.create_entity(EntityId(300), &mut new_unit_index, &components);
+        let ok = arch.create_entity(EntityId(300), &mut new_unit_index, &components, Tick::new(1));
         assert!(ok, "create_entity must succeed for 8-component archetype");
         assert_eq!(arch.entity_count(), 1);
     }

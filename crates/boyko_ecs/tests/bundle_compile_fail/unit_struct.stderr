@@ -1,0 +1,5 @@
+error: Bundle requires at least one field
+ --> tests/bundle_compile_fail/unit_struct.rs:9:8
+  |
+9 | struct Marker;
+  |        ^^^^^^

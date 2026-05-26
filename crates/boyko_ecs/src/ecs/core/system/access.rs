@@ -100,6 +100,52 @@ impl Access {
         self.resource_writes.set(id.0);
     }
 
+    /// Returns `true` iff this access surface covers the entire component AND
+    /// resource space — i.e. every bit in all four bitmasks is set.
+    ///
+    /// Used by the Phase 9 scheduler to identify **exclusive systems** (those
+    /// requiring `&mut EcsMaster`, e.g. `ApplyDeferred`). A `SystemBox` caches
+    /// the result at build time as `is_exclusive` (plan §2.5 EXC2, §13.6 debug
+    /// assert). Universal access conflicts with every other non-empty access
+    /// in `conflicts_with`, so the conflict graph naturally serializes such
+    /// systems against the rest.
+    ///
+    /// # Events outside the conflict graph (plan §2.2 SCH7 / §12.5 / §16 R)
+    ///
+    /// **Events do not participate in `Access`.** Per the EVT1 invariant
+    /// (Phase 9 §2.8), each worker writes to its own `EventDispatcher` lane
+    /// via TLS routing; the dispatcher writes to lane `worker_count`. No two
+    /// systems alias an event lane mutably, so event access never needs to be
+    /// reflected here. `ApplyDeferred` (whose access *is* universal) still
+    /// blocks every other system equally, and `EventDispatcher::send_event<E>`
+    /// picks the correct lane through TLS — no `Access`-level coordination is
+    /// required. Adding `event_*` bitmasks would extend `Access` beyond 192 B
+    /// and break the 3-cache-line invariant asserted on line 61.
+    #[inline]
+    pub fn is_universal(&self) -> bool {
+        self.component_reads.is_all_set()
+            && self.component_writes.is_all_set()
+            && self.resource_reads.is_all_set()
+            && self.resource_writes.is_all_set()
+    }
+
+    /// Constructs an `Access` covering every component and every resource for
+    /// both reads and writes. Used by `ExclusiveFunctionSystem` (plan §5.2 /
+    /// §12.3) and `ApplyDeferred` (plan §8) to mark systems that must run
+    /// alone.
+    ///
+    /// See [`is_universal`](Access::is_universal) for the rationale on events
+    /// being outside the conflict graph.
+    #[inline]
+    pub fn universal() -> Self {
+        let mut access = Self::new();
+        access.component_reads.set_all();
+        access.component_writes.set_all();
+        access.resource_reads.set_all();
+        access.resource_writes.set_all();
+        access
+    }
+
     /// **Cross-system** conflict check (Phase 9 scheduler use only).
     ///
     /// Returns `true` iff `self` and `other` cannot execute concurrently.
@@ -205,5 +251,98 @@ mod tests {
         let a = Access::default();
         let b = Access::default();
         assert!(!a.conflicts_with(&b), "empty access never conflicts");
+    }
+
+    /// A freshly-constructed `Access` reports no reads/writes anywhere, so it
+    /// must not be flagged as universal. Phase 9 §12.5 / §13.1 test
+    /// `is_universal_empty_false`.
+    #[test]
+    fn access_default_is_not_universal() {
+        let a = Access::new();
+        assert!(!a.is_universal(), "empty access must not be universal");
+        let b = Access::default();
+        assert!(!b.is_universal(), "Default::default() must match new()");
+    }
+
+    /// `Access::universal()` flips every bit across all four bitmasks, so the
+    /// predicate must report `true`. Phase 9 §12.5 / §13.1 test
+    /// `is_universal_full_true`.
+    #[test]
+    fn access_universal_is_universal() {
+        let a = Access::universal();
+        assert!(a.is_universal(), "Access::universal() must satisfy is_universal()");
+    }
+
+    /// Setting only a strict subset of bits must NOT trigger `is_universal`.
+    /// Phase 9 §12.5 / §13.1 test `is_universal_partial_false`. Covers all
+    /// four bitmasks one at a time (component R/W, resource R/W).
+    #[test]
+    fn access_partial_is_not_universal() {
+        let mut only_comp_read = Access::new();
+        only_comp_read.add_component_read(ComponentId(0));
+        assert!(!only_comp_read.is_universal());
+
+        let mut only_comp_write = Access::new();
+        only_comp_write.add_component_write(ComponentId(7));
+        assert!(!only_comp_write.is_universal());
+
+        let mut only_res_read = Access::new();
+        only_res_read.add_resource_read(ResourceId(0));
+        assert!(!only_res_read.is_universal());
+
+        let mut only_res_write = Access::new();
+        only_res_write.add_resource_write(ResourceId(255));
+        assert!(!only_res_write.is_universal());
+
+        // Three of four bitmasks filled, one bit short: still not universal.
+        let mut almost = Access::universal();
+        almost.component_writes.unset(ComponentId(42));
+        assert!(!almost.is_universal(), "one missing bit must drop universality");
+    }
+
+    /// Universal access shares every read/write bit with any non-empty other
+    /// access, so `conflicts_with` must fire in both directions. This is the
+    /// graph property the scheduler relies on to serialize exclusive systems
+    /// (plan §2.5 EXC1).
+    #[test]
+    fn access_universal_conflicts_with_any_other() {
+        let universal = Access::universal();
+
+        // Other declares a single resource read — must conflict (universal
+        // writes that resource).
+        let mut other_res_read = Access::new();
+        other_res_read.add_resource_read(ResourceId(13));
+        assert!(universal.conflicts_with(&other_res_read));
+        assert!(other_res_read.conflicts_with(&universal));
+
+        // Other declares a single component write — must conflict (universal
+        // writes that component too).
+        let mut other_comp_write = Access::new();
+        other_comp_write.add_component_write(ComponentId(3));
+        assert!(universal.conflicts_with(&other_comp_write));
+        assert!(other_comp_write.conflicts_with(&universal));
+
+        // Other is itself universal — must conflict (write-vs-write).
+        let other_universal = Access::universal();
+        assert!(universal.conflicts_with(&other_universal));
+    }
+
+    /// `conflicts_with` requires the *other* side to declare at least one
+    /// bit; against an empty access, no read/write intersection exists and
+    /// the check returns `false`. The scheduler still serializes the empty
+    /// system against the universal one through the dependency graph, not
+    /// through `Access` alone — see plan §2.5 EXC2.
+    #[test]
+    fn access_universal_does_not_conflict_with_empty() {
+        let universal = Access::universal();
+        let empty = Access::new();
+        assert!(
+            !universal.conflicts_with(&empty),
+            "no bits on the other side means no intersection"
+        );
+        assert!(
+            !empty.conflicts_with(&universal),
+            "conflict relation is symmetric for the empty case"
+        );
     }
 }

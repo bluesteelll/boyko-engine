@@ -6,6 +6,22 @@ edition = "2024"
 [dependencies]
 rand = "0.9.0"
 boyko-utils =  { path = "../boyko_utils" }
+boyko-threadpool = { path = "../boyko_threadpool" }
+fixedbitset = "0.5"
+crossbeam-queue = "0.3"
+crossbeam-utils = "0.8"
+# Phase 12.5 Opt-A2: SBO-SEND1 / SBO-UNPIN pin-down via compile-time
+# `assert_impl_all!` in `commands/spawn_batch_command.rs` and
+# `bundle/bundle_column_cache.rs`. Production build asserts (not
+# `#[cfg(test)]`) per I-N5.
+static_assertions = "1.1"
+
+[features]
+default = []
+# Phase 12.5 Track B I5 — bumps `MAX_QUERY_TYPES` from 1024 to 4096 for
+# projects with an unusually high fan-out of `(D, F)` query shapes. Increases
+# the per-world `query_state_cache` footprint from ≤ 32 KB to ≤ 128 KB.
+big_query_table = []
 
 [dev-dependencies]
 boyko-macros = { path = "../boyko_macros" }
@@ -48,3 +64,29 @@ harness = false
 [[bench]]
 name = "query_dsl"
 harness = false
+
+[[bench]]
+name = "phase8cd"
+harness = false
+
+[[bench]]
+name = "bundle_static_cache"
+harness = false
+
+[[bench]]
+name = "phase9_scheduler"
+harness = false
+
+[[bench]]
+name = "phase10_change_detection"
+harness = false
+
+[[bench]]
+name = "phase12_5_spawn_batch"
+harness = false
+
+[lints.rust]
+# Phase 9 Wave 7 Step 24: opt-in stronger ALLOC1 check via
+# `RUSTFLAGS="--cfg force_alloc_panic"`. See
+# docs/PHASE-9-FORCE-ALLOC-PANIC.md.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(force_alloc_panic)'] }

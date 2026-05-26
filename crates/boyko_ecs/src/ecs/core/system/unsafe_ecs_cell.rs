@@ -33,10 +33,12 @@
 #![allow(dead_code)]
 
 use std::marker::PhantomData;
+use std::sync::atomic::AtomicUsize;
 
 use crate::ecs::core::archetype::archetype::Archetype;
 use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 use crate::ecs::core::resources::resources::Resources;
+use crate::ecs::core::system::params::entity_counter::EntityCounter;
 use crate::ecs::identifiers::primitives::ArchetypeId;
 
 /// Copy-on-call interior-mutability handle on an `EcsMaster`.
@@ -241,6 +243,51 @@ impl<'w> UnsafeEcsCell<'w> {
         unsafe { &(*self.ptr).resources }
     }
 
+    /// Phase 11 (Round 3 C-N1): mints an [`EntityCounter<'s>`] projecting
+    /// only the atomic `next_entity_id` counter from `EntityMaster`. The
+    /// returned counter cannot reach any other `EntityMaster` field — the
+    /// EM6 aliasing rule is type-enforced (the carried pointer's type is
+    /// `*const AtomicUsize`, not `*const EntityMaster`).
+    ///
+    /// The lifetime `'s` may be shorter than `'w`; the caller (typically
+    /// `Commands::get_param`) ties `'s` via `PhantomData` re-tag per the
+    /// Phase 8c IntoSystem contract (plan §8.7 — `get_param` runs once
+    /// per system invocation; `'w >= 's`).
+    ///
+    /// # Safety (U_C2, EM6)
+    ///
+    /// * The caller asserts that the active `SystemParam::init_access`
+    ///   permits conflict-free atomic-counter access — `Commands` declares
+    ///   no access in the conflict graph (EVT1 precedent + EM6).
+    /// * The by-value receiver preserves the raw pointer's provenance: no
+    ///   `&self` retag downgrades the carried `*mut EcsMaster` before the
+    ///   field projection.
+    /// * `'s <= 'w` by the caller's PhantomData re-tag (the SystemParam
+    ///   protocol enforces this on the consumer side).
+    #[inline]
+    pub(crate) unsafe fn entity_counter<'s>(self) -> EntityCounter<'s> {
+        // SAFETY (U_C2, EM6):
+        //   * By-value receiver — no `&self` retag. The underlying
+        //     `*mut EcsMaster` is valid for `'w` and carries the
+        //     original write-capable provenance from `new_mutable`.
+        //   * Projecting `(*ptr).entity_master.next_id_atomic()` produces
+        //     a `&AtomicUsize`. Going `&AtomicUsize -> *const AtomicUsize`
+        //     keeps the atomic's address; this raw pointer is what
+        //     `EntityCounter::from_ptr` re-tags to `'s`.
+        //   * The field type at the destination is `AtomicUsize` — no
+        //     compile-time path leads from the carried pointer to any
+        //     other `EntityMaster` field, type-enforcing EM6.
+        let em = unsafe { &(*self.ptr).entity_master };
+        let atomic_ptr = em.next_id_atomic() as *const AtomicUsize;
+        // SAFETY (`EntityCounter::from_ptr` contract, plan §5.5):
+        //   * Pointer was just minted from a live `EntityMaster`
+        //     reachable through `self.ptr`, valid for `'w >= 's`.
+        //   * The pointer aims at the master's `next_entity_id` field
+        //     (EM1) — the only blessed projection.
+        //   * EM6 is upheld by the destination type — see above.
+        unsafe { EntityCounter::from_ptr(atomic_ptr) }
+    }
+
     /// Direct mutable access to the resources subsystem. Hot path for
     /// [`ResMut<R>::get_param`].
     ///
@@ -273,11 +320,26 @@ impl<'w> UnsafeEcsCell<'w> {
     }
 }
 
-// `EcsMaster` is `!Send + !Sync` (it owns an `Arena` and event lanes that are
-// not thread-safe). Raw pointers are themselves `!Send` / `!Sync` by default,
-// so `UnsafeEcsCell` inherits the discipline automatically — no explicit
-// negative impl is needed. Phase 9 will add explicit `unsafe impl Send/Sync`
-// once the scheduler's aliasing-discipline contract is in place.
+// SAFETY (SEND2 / SEND3 — Phase 9 §2.4, §9.1):
+//
+// `UnsafeEcsCell<'w>` becomes `Send + Sync` under the Phase 9 contract. The
+// cell holds a raw `*mut EcsMaster` plus `PhantomData`; worker threads receive
+// `Copy` clones from the dispatcher per dispatch round (Round 2 O3). Aliasing
+// discipline is enforced upstream by:
+//
+//   - `FilteredAccessSet` accumulation at `SystemParam::init_access` time
+//     (intra-system aliasing).
+//   - The scheduler's `ConflictGraph` (SCH3) at run time (cross-system
+//     aliasing — no two concurrent systems hold overlapping `&/&mut` views
+//     through their cell copies).
+//   - The apply-window barrier (SCH7) — the only context in which the
+//     dispatcher reborrows `&mut EcsMaster` is gated on `running == 0`, so
+//     no live worker cell aliases the dispatcher reborrow.
+//
+// The cell itself never dereferences `ptr` outside an `unsafe` method whose
+// SAFETY block documents the aliasing precondition.
+unsafe impl<'w> Send for UnsafeEcsCell<'w> {}
+unsafe impl<'w> Sync for UnsafeEcsCell<'w> {}
 
 #[cfg(test)]
 mod tests {

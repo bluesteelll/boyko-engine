@@ -1,7 +1,7 @@
 use proc_macro::TokenStream;
-use proc_macro2::Span;
+use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::{format_ident, quote};
-use syn::{parse_macro_input, DeriveInput, Fields, Ident, ItemStruct};
+use syn::{Data, DeriveInput, Fields, Ident, ItemStruct, Type, parse_macro_input};
 
 /// Derive macro for implementing the Component trait.
 ///
@@ -590,4 +590,424 @@ fn build_participants_impl(
             }
         }
     }
+}
+
+/// Derive macro for the sealed [`Bundle`] trait — Phase 8.5 Step 4.
+///
+/// Generates a non-generic `impl Bundle for #Name` whose hot path is dominated
+/// by a single `OnceLock::get` Acquire load on a per-impl
+/// `static INFO: OnceLock<BundleStaticInfo>` (the O3 coalesced static — see
+/// plan §4.4 / §6.1 / Decision SBC-D5).
+///
+/// # Supported inputs
+///
+/// * `struct Foo { a: A, b: B }` — named-field struct.
+/// * `struct Foo(A, B)` — tuple struct.
+///
+/// # Rejected inputs
+///
+/// * Unit struct (`struct Foo;`) — `compile_error!("Bundle requires at least one field")`.
+/// * Generic struct (`struct Foo<T> { ... }`) — `compile_error!("Bundle derive does not support generics (Phase 8.5 scope)")`.
+/// * Enum / union — `compile_error!("Bundle can only be derived for structs")`.
+///
+/// # Generated impl summary (named-struct example)
+///
+/// ```ignore
+/// #[derive(Bundle)]
+/// struct PlayerBundle { pos: Position, vel: Velocity }
+/// ```
+///
+/// expands (sketch) to:
+///
+/// ```ignore
+/// impl ::boyko_ecs::...::sealed::BundleSealed for PlayerBundle {}
+/// impl ::boyko_ecs::...::Bundle for PlayerBundle
+/// where Position: Component, Velocity: Component {
+///     fn static_info() -> &'static BundleStaticInfo { /* OnceLock::get_or_init */ }
+///     fn cached_archetype_id(world) -> ArchetypeId { world.bundle_archetype_id_for::<Self>() }
+///     fn for_each_component_bytes<F>(self, mut f: F) where F: FnMut(...) {
+///         // ManuallyDrop UPFRONT (B4); then build [(id, *const u8, len); N];
+///         // sort by ComponentId.0 (B1); iterate, reconstruct &[u8] inside loop (C5).
+///     }
+/// }
+/// ```
+///
+/// See plan §6.3 (mandatory `for_each_component_bytes` codegen template — C5
+/// pointer-based pattern + four-clause SAFETY block) for the exact byte
+/// pattern emitted.
+///
+/// # Example
+///
+/// ```ignore
+/// // Used from a downstream crate that depends on `boyko-ecs` + `boyko-macros`.
+/// #[derive(Bundle)]
+/// struct ProjectileBundle {
+///     pos: Position,
+///     vel: Velocity,
+/// }
+/// ```
+///
+/// The example is `ignore`'d because proc-macro crates cannot consume their own
+/// macros, and `boyko-macros` cannot depend on `boyko-ecs` for tests (that
+/// would create a cycle). Real usage lives in `boyko-ecs` integration tests.
+#[proc_macro_derive(Bundle)]
+pub fn bundle_macro(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let name = input.ident.clone();
+    let name_span = name.span();
+
+    // SBC1 / Phase 8.5 scope: reject generics outright. The per-impl
+    // `static INFO: OnceLock<BundleStaticInfo>` works only when the impl is
+    // non-generic — otherwise monomorphization would create one static per
+    // (B, T1, ..., Tn) tuple, defeating the cache and breaking SBC2.
+    if !input.generics.params.is_empty() {
+        return syn::Error::new(
+            name_span,
+            "Bundle derive does not support generics (Phase 8.5 scope)",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    let data = match &input.data {
+        Data::Struct(s) => s,
+        Data::Enum(_) | Data::Union(_) => {
+            return syn::Error::new(
+                name_span,
+                "Bundle can only be derived for structs",
+            )
+            .to_compile_error()
+            .into();
+        }
+    };
+
+    let fields: Vec<BundleField> = match &data.fields {
+        Fields::Named(named) => named
+            .named
+            .iter()
+            .enumerate()
+            .map(|(idx, f)| BundleField {
+                local_ident: format_ident!("__bundle_field_{}", idx),
+                accessor: {
+                    let ident = f.ident.clone().expect("named field");
+                    quote! { self.#ident }
+                },
+                ty: f.ty.clone(),
+            })
+            .collect(),
+        Fields::Unnamed(unnamed) => unnamed
+            .unnamed
+            .iter()
+            .enumerate()
+            .map(|(idx, f)| {
+                let idx_lit = syn::Index::from(idx);
+                BundleField {
+                    local_ident: format_ident!("__bundle_field_{}", idx),
+                    accessor: quote! { self.#idx_lit },
+                    ty: f.ty.clone(),
+                }
+            })
+            .collect(),
+        Fields::Unit => {
+            return syn::Error::new(
+                name_span,
+                "Bundle requires at least one field",
+            )
+            .to_compile_error()
+            .into();
+        }
+    };
+
+    if fields.is_empty() {
+        // Defensive: tuple struct `Foo()` and named struct `Foo {}` both
+        // arrive here with zero fields. Treat identically to unit struct.
+        return syn::Error::new(
+            name_span,
+            "Bundle requires at least one field",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    let n_fields = fields.len();
+
+    // Per-field token fragments, indexed in declaration order.
+    let field_types: Vec<&Type> = fields.iter().map(|f| &f.ty).collect();
+    let field_locals: Vec<&Ident> = fields.iter().map(|f| &f.local_ident).collect();
+    let field_accessors: Vec<&TokenStream2> = fields.iter().map(|f| &f.accessor).collect();
+
+    // §6.1 build_info: each field's `T::component_id()`.
+    let component_id_exprs: Vec<TokenStream2> = field_types
+        .iter()
+        .map(|ty| {
+            quote! {
+                <#ty as ::boyko_ecs::ecs::core::component::component::Component>::component_id()
+            }
+        })
+        .collect();
+
+    // §6.3 sort-array entries: (ComponentId, *const u8, usize) triples derived
+    // from the ManuallyDrop locals. C5: pointer + length (not &[u8]) sidesteps
+    // E0521 (MaybeUninit/array lifetime invariance) — we materialize the slice
+    // inside the dispatch loop via slice::from_raw_parts.
+    let sort_entries: Vec<TokenStream2> = fields
+        .iter()
+        .map(|f| {
+            let ty = &f.ty;
+            let local = &f.local_ident;
+            quote! {
+                (
+                    <#ty as ::boyko_ecs::ecs::core::component::component::Component>::component_id(),
+                    &raw const *#local as *const u8,
+                    ::std::mem::size_of::<#ty>(),
+                )
+            }
+        })
+        .collect();
+
+    // `where T: Component` for every field — gives a sharper diagnostic than
+    // letting the `component_id()` reference fail down in the impl body. Per
+    // step spec acceptance §9 Step 4 bullet "Bound check".
+    let component_bounds: Vec<TokenStream2> = field_types
+        .iter()
+        .map(|ty| {
+            quote! {
+                #ty: ::boyko_ecs::ecs::core::component::component::Component
+            }
+        })
+        .collect();
+
+    let expanded = quote! {
+        impl ::boyko_ecs::ecs::core::bundle::bundle::sealed::BundleSealed for #name {}
+
+        impl ::boyko_ecs::ecs::core::bundle::bundle::Bundle for #name
+        where
+            #(#component_bounds),*
+        {
+            fn static_info() -> &'static ::boyko_ecs::ecs::core::bundle::bundle::BundleStaticInfo {
+                // O3 coalesced static (Decision SBC-D5). One OnceLock holds
+                // BundleTypeId + canonical-sorted component_ids slice. Cached
+                // path: single Acquire load.
+                static INFO: ::std::sync::OnceLock<
+                    ::boyko_ecs::ecs::core::bundle::bundle::BundleStaticInfo
+                > = ::std::sync::OnceLock::new();
+
+                INFO.get_or_init(|| {
+                    // B1 canonical order: collect declaration-order IDs into a
+                    // fixed-size stack array, sort ascending by ComponentId.0,
+                    // then leak the boxed array to obtain a `&'static` slice.
+                    // Leak is bounded by SBC8 (one slice per Bundle type per
+                    // process — at most MAX_BUNDLE_TYPES × N_max × 8 B).
+                    let mut arr: [
+                        ::boyko_ecs::ecs::identifiers::primitives::ComponentId;
+                        #n_fields
+                    ] = [#(#component_id_exprs),*];
+                    arr.sort_unstable_by_key(|id| id.0);
+                    let leaked: &'static [
+                        ::boyko_ecs::ecs::identifiers::primitives::ComponentId;
+                        #n_fields
+                    ] = ::std::boxed::Box::leak(::std::boxed::Box::new(arr));
+
+                    ::boyko_ecs::ecs::core::bundle::bundle::BundleStaticInfo {
+                        // BundleTypeId minted exactly once per Bundle type per
+                        // process — OnceLock::get_or_init enforces single
+                        // winner across threads (§7.3).
+                        type_id: ::boyko_ecs::ecs::core::bundle::bundle_type_registry::register_new(),
+                        component_ids: leaked.as_slice(),
+                    }
+                })
+            }
+
+            fn cached_archetype_id(
+                world: &mut ::boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster,
+            ) -> ::boyko_ecs::ecs::identifiers::primitives::ArchetypeId {
+                // Delegate to the per-world cache helper. The helper performs
+                // the hot-path Acquire load on `bundle_archetype_cache[id.0]`
+                // and falls back to a cold ArchetypeMaster registration on
+                // the first call per (Bundle, world) pair (§6.2).
+                world.bundle_archetype_id_for::<Self>()
+            }
+
+            fn for_each_component_bytes<F>(self, mut f: F)
+            where
+                F: ::std::ops::FnMut(
+                    ::boyko_ecs::ecs::identifiers::primitives::ComponentId,
+                    &[u8],
+                ),
+            {
+                // §6.3 MANDATORY codegen template — C5 pointer-based pattern.
+                //
+                // Step 1: ManuallyDrop-wrap EVERY destructured field UPFRONT,
+                // before any callback can run. This is the B4 panic-safety
+                // contract: on callback panic mid-iteration, the remaining
+                // fields' `Drop` impls are suppressed unconditionally (they
+                // leak — never double-drop alongside archetype-side ownership).
+                #(
+                    let #field_locals = ::std::mem::ManuallyDrop::new(#field_accessors);
+                )*
+
+                // Step 2: build the sort array as (ComponentId, *const u8,
+                // usize). The *const u8 + len triple sidesteps E0521 — the
+                // borrow checker treats `&[u8]` as lifetime-invariant inside
+                // array/MaybeUninit contexts, but raw pointers are fine. The
+                // slice is reconstructed inside the dispatch loop.
+                let mut sorted: [
+                    (
+                        ::boyko_ecs::ecs::identifiers::primitives::ComponentId,
+                        *const u8,
+                        usize,
+                    );
+                    #n_fields
+                ] = [#(#sort_entries),*];
+
+                // Step 3: B1 canonical sort. unstable acceptable because
+                // ComponentId values are unique per Bundle (a Bundle that
+                // declares the same Component twice fails at archetype
+                // registration, not here).
+                sorted.sort_unstable_by_key(|(id, _, _)| id.0);
+
+                // Step 4: dispatch in canonical order, materializing the
+                // shared byte slice on each iteration.
+                for &(id, ptr, len) in &sorted {
+                    // SAFETY (C5 / §6.3):
+                    //   (i)   `ptr` was derived from `&raw const *ManuallyDrop<T>`,
+                    //         where T is a live stack local in this function — ptr
+                    //         is valid for `len = size_of::<T>()` bytes for the
+                    //         duration of this loop.
+                    //   (ii)  `len` is exactly `size_of::<T>()` matching the
+                    //         component type — no over-read.
+                    //   (iii) The slice we materialize is shared (immutable) and
+                    //         non-overlapping with any other live borrow: each
+                    //         ManuallyDrop local is borrowed exactly once in this
+                    //         scope (via the iter slot above).
+                    //   (iv)  ManuallyDrop suppresses Drop on the local
+                    //         unconditionally at end-of-scope (does not "leak"
+                    //         semantically — never invokes Drop). For components
+                    //         that the callback successfully consumed (memcpy'd
+                    //         into ECS storage via create_entity), ownership has
+                    //         transferred to the archetype, and that storage now
+                    //         owns the eventual Drop on entity despawn. For
+                    //         components that the callback did not reach because
+                    //         `f` panicked on an earlier iteration, their bytes
+                    //         remain in the stack ManuallyDrop locals and leak
+                    //         unconditionally — Drop is suppressed regardless of
+                    //         panic state. This is the documented B4 panic-safety
+                    //         guarantee: panic → leak, never double-drop.
+                    let bytes: &[u8] = unsafe { ::std::slice::from_raw_parts(ptr, len) };
+                    f(id, bytes);
+                }
+            }
+        }
+    };
+
+    expanded.into()
+}
+
+/// Internal helper: a single destructured Bundle field.
+///
+/// `accessor` carries the original `self.<ident>` or `self.<index>` token
+/// stream (so the same struct shape is faithfully reproduced inside the
+/// derive output). `local_ident` is the synthetic `__bundle_field_N` ident
+/// used as the ManuallyDrop binding — uniform across named and tuple
+/// structs to keep the generated code identical in shape.
+struct BundleField {
+    local_ident: Ident,
+    accessor: TokenStream2,
+    ty: Type,
+}
+
+/// Derive macro for the [`SystemSet`] marker trait — Phase 9 Wave 7 Step 21.
+///
+/// Generates `impl SystemSet for #Name {}` for unit structs (the canonical
+/// shape for a schedule label). Set identity is the type's [`TypeId`], so
+/// the trait itself carries no methods — the derive's only responsibility
+/// is to apply the bound where the user declared the set.
+///
+/// # Supported inputs
+///
+/// * `struct PhysicsSet;` — unit struct (the recommended shape).
+///
+/// # Rejected inputs
+///
+/// * Generic struct (`struct Foo<T>;`) — Phase 9 scope. Sets are keyed by
+///   `TypeId::of::<S>()`; a generic set would mint a fresh id per
+///   monomorphisation, which is rarely what users want and conflicts with
+///   `ScheduleBuilder::set_id_of`'s `HashMap<TypeId, SystemSetId>` lookup.
+///   Reported via `compile_error!`.
+/// * Enum / union — `compile_error!`. Marker trait carries no state, so a
+///   sum type is meaningless as a set label.
+/// * Named-field or tuple structs with at least one field — `compile_error!`.
+///   The Wave 4 design intentionally disallows non-ZST set markers (a
+///   per-instance set would imply a per-value identity that the TypeId
+///   lookup cannot represent).
+///
+/// # Example
+///
+/// ```ignore
+/// // Used from a downstream crate that depends on `boyko-ecs` + `boyko-macros`.
+/// use boyko_macros::SystemSet;
+///
+/// #[derive(SystemSet)]
+/// struct PhysicsSet;
+///
+/// #[derive(SystemSet)]
+/// struct RenderSet;
+/// ```
+///
+/// The example is `ignore`'d because proc-macro crates cannot consume their
+/// own macros, and `boyko-macros` cannot depend on `boyko-ecs` for tests
+/// (that would create a cycle). Real usage lives in
+/// `boyko-ecs/tests/derive_system_set_smoke.rs`.
+///
+/// [`SystemSet`]: ../boyko_ecs/ecs/core/schedule/system_set/trait.SystemSet.html
+/// [`TypeId`]: std::any::TypeId
+#[proc_macro_derive(SystemSet)]
+pub fn system_set_macro(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let name = input.ident.clone();
+    let name_span = name.span();
+
+    // Generics: rejected. Sets are TypeId-keyed (§5.7); a generic set type
+    // would mint a fresh id per monomorphisation, which is virtually never
+    // what the user wants and breaks `ScheduleBuilder::set_id_of`'s
+    // HashMap-by-TypeId lookup.
+    if !input.generics.params.is_empty() {
+        return syn::Error::new(
+            name_span,
+            "SystemSet derive does not support generics (Phase 9 scope)",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    // Only structs. Enums / unions carry runtime state that the marker
+    // trait cannot represent.
+    let data = match &input.data {
+        Data::Struct(s) => s,
+        Data::Enum(_) | Data::Union(_) => {
+            return syn::Error::new(
+                name_span,
+                "SystemSet can only be derived for unit structs",
+            )
+            .to_compile_error()
+            .into();
+        }
+    };
+
+    // Only unit structs (no fields). A SystemSet is a pure marker; per-
+    // instance state contradicts the TypeId-keyed lookup model.
+    if !matches!(&data.fields, Fields::Unit) {
+        return syn::Error::new(
+            name_span,
+            "SystemSet derive requires a unit struct (no fields)",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    let expanded = quote! {
+        impl ::boyko_ecs::ecs::core::schedule::SystemSet for #name {}
+    };
+
+    expanded.into()
 }

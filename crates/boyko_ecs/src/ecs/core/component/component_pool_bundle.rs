@@ -3,6 +3,7 @@ use std::ops::{Index, IndexMut};
 use crate::ecs::error::{EcsError, EcsResult};
 use boyko_utils::sparse_map::sparse_map::SparseMap;
 
+use crate::ecs::core::change_detection::Tick;
 use crate::ecs::core::component::component::Component;
 use crate::ecs::core::component::component_registry;
 use crate::ecs::identifiers::primitives::{ComponentId, InlandPoolId};
@@ -232,6 +233,143 @@ pub fn swap_remove_unit(&mut self, unit_index: usize) -> EcsResult<()> {
         // On miss: `value` drops at scope exit; bundle is not modified.
         let inland_id = self.sparse_indexes.get(component_id.0).copied()?.0;
         self.pools[inland_id].add_typed(value)
+    }
+
+    // ── Phase 11 — no-drop migration forwarders (plan §7.2 / C-N2) ──────────
+
+    /// Returns `true` if a pool for `component_id` exists in this bundle.
+    /// Phase 11 W-N1 defensive check for the `apply_replace_in_place`
+    /// canonicalization guard (plan §7.4).
+    #[allow(dead_code)]
+    #[inline]
+    pub(crate) fn has_pool(&self, component_id: ComponentId) -> bool {
+        self.sparse_indexes.contains(component_id.0)
+    }
+
+    /// Forwarder: swap-removes row `idx` for byte storage + tick storage
+    /// across every pool in this bundle, without invoking `drop_fn`
+    /// (plan §7.2 W-N2).
+    ///
+    /// # Safety
+    ///
+    /// Same contract as
+    /// [`ComponentPool::swap_remove_index_no_drop`](crate::ecs::memory::component_pool::ComponentPool::swap_remove_index_no_drop):
+    /// caller has ensured `idx`'s bytes were moved or dropped for each
+    /// pool. Caller holds exclusive `&mut self`.
+    #[allow(dead_code)]
+    pub(crate) unsafe fn swap_remove_unit_no_drop(&mut self, idx: usize) {
+        debug_assert!(
+            self.pools.iter().all(|pool| idx < pool.count()),
+            "swap_remove_unit_no_drop: idx out of bounds in some pools"
+        );
+        for pool in self.pools.iter_mut() {
+            // SAFETY: per-pool delegation; `&mut self` ⇒ exclusive access
+            //   to every owned pool. The W-N2 contract is forwarded
+            //   unchanged.
+            unsafe { pool.swap_remove_index_no_drop(idx) };
+        }
+    }
+
+    /// Forwarder: pops the last row from every pool without invoking
+    /// `drop_fn` (plan §7.2 / C5).
+    #[allow(dead_code)]
+    pub(crate) fn pop_entity_no_drop(&mut self) {
+        for pool in self.pools.iter_mut() {
+            pool.pop_entity_no_drop();
+        }
+    }
+
+    // ── Phase 12.5 Opt-A2 — batch reserve / write accessors (C-N1) ──────────
+    //
+    // §5.6 of the spawn-optimisations plan. `SpawnBatchCommand::apply`
+    // pre-validates capacity via `Archetype::reserve_capacity`, indexes
+    // pools through the pre-resolved `BundleColumnRecord::pool_ids` (Opt-A3),
+    // then calls `write_at_unchecked_initialized` per row, and finally
+    // `commit_units_batch` + `fill_ticks_batch` once per batch.
+
+    /// Phase 12.5 Opt-A2 (C-N1): iterator over the bundle's owned pools.
+    ///
+    /// Used by `Archetype::reserve_capacity` to walk every pool and
+    /// validate it can accept `n` additional rows.
+    #[inline]
+    pub(crate) fn pools_iter(&self) -> impl Iterator<Item = &ComponentPool> {
+        self.pools.iter()
+    }
+
+    /// Phase 12.5 Opt-A2 (C-N1): mutable iterator counterpart.
+    ///
+    /// Plan §5.6 lists this accessor in the C-N1 surface; current
+    /// consumers (`commit_units_batch` / `fill_ticks_batch`) use direct
+    /// indexing instead. Kept as `pub(crate)` for future callers.
+    #[allow(dead_code)]
+    #[inline]
+    pub(crate) fn pools_iter_mut(&mut self) -> impl Iterator<Item = &mut ComponentPool> {
+        self.pools.iter_mut()
+    }
+
+    /// Phase 12.5 Opt-A2 (C-N1 / SBO-N): number of pools currently owned.
+    ///
+    /// Used by `BundleColumnRecord::pools_len_at_install` (SBO-N detection
+    /// invariant — the pools Vec must never shrink between cache install
+    /// and warm-path use; v1 has no archetype destruction).
+    #[inline]
+    pub(crate) fn pools_len(&self) -> usize {
+        self.pools.len()
+    }
+
+    /// Phase 12.5 Opt-A2 (C-N1): resolves `component_id` to its
+    /// `InlandPoolId` (one SparseMap lookup).
+    ///
+    /// Used by `BundleColumnCache::resolve_and_cache` at install time
+    /// (cold path) to pre-compute the `pool_ids` slice; warm-path apply
+    /// indexes `pools[pool_id]` directly via `pool_at_unchecked_mut`.
+    #[inline]
+    pub(crate) fn pool_id_for(&self, component_id: ComponentId) -> Option<InlandPoolId> {
+        self.sparse_indexes.get(component_id.0).copied()
+    }
+
+    /// Phase 12.5 Opt-A2 (C-N1): direct `&mut ComponentPool` indexing by
+    /// `InlandPoolId` — no SparseMap lookup, no bounds check.
+    ///
+    /// # Safety
+    ///
+    /// * `pool_idx.0 < self.pools.len()` — caller pre-validated through a
+    ///   prior `pool_id_for` call cached in `BundleColumnRecord::pool_ids`.
+    /// * Caller holds exclusive `&mut self` access; no concurrent reader
+    ///   exists.
+    #[inline]
+    pub(crate) unsafe fn pool_at_unchecked_mut(
+        &mut self,
+        pool_idx: InlandPoolId,
+    ) -> &mut ComponentPool {
+        debug_assert!(
+            pool_idx.0 < self.pools.len(),
+            "pool_at_unchecked_mut: pool_idx {} out of bounds (pools.len() = {})",
+            pool_idx.0,
+            self.pools.len()
+        );
+        // SAFETY: caller upholds `pool_idx.0 < self.pools.len()` (debug-asserted).
+        unsafe { self.pools.get_unchecked_mut(pool_idx.0) }
+    }
+
+    /// Phase 12.5 Opt-A2 (§5.6 / C-N1): commits `n` rows across every
+    /// owned pool in one tight loop.
+    ///
+    /// Pre: every pool's `count() == start_row` (the batch path writes
+    /// every pool's row in lockstep via `pool_at_unchecked_mut` +
+    /// `write_at_unchecked_initialized`).
+    pub(crate) fn commit_units_batch(&mut self, start_row: usize, n: usize) {
+        for pool in self.pools.iter_mut() {
+            pool.commit_units(start_row, n);
+        }
+    }
+
+    /// Phase 12.5 Opt-A2 (§5.6 / C-N1): stamps `(added, changed) = tick`
+    /// across every owned pool in one tight loop.
+    pub(crate) fn fill_ticks_batch(&mut self, start_row: usize, n: usize, tick: Tick) {
+        for pool in self.pools.iter_mut() {
+            pool.fill_ticks(start_row, n, tick);
+        }
     }
 
     /// Type-checked in-place overwrite. On missing component_id or out-of-bounds

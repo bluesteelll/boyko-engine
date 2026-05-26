@@ -65,6 +65,50 @@ pub enum EcsError {
         /// Human-readable description of the failing constraint.
         reason: &'static str,
     },
+
+    /// Phase 12.5 Opt-A2 (SBO17): a `spawn_batch` call exceeded the
+    /// hard-coded per-call cap (`MAX_BATCH_HINT = 8 192`).
+    ///
+    /// The counter was NOT advanced — the caller can retry after chunking
+    /// the batch into pieces ≤ `MAX_BATCH_HINT`.
+    SpawnBatchExceedsCapacity {
+        /// The `n` that was requested.
+        requested: usize,
+        /// The hard cap (`MAX_BATCH_HINT`).
+        max: usize,
+    },
+
+    /// Phase 12.5 Opt-A2 (SBO4): an archetype's component-pool capacity
+    /// was insufficient to reserve `requested` rows.
+    ///
+    /// Returned by [`Archetype::reserve_capacity`] when at least one owned
+    /// pool's `count + requested > max_components`. The archetype state is
+    /// unchanged — callers may either reduce the batch size or chunk
+    /// across multiple `apply` calls.
+    ArchetypePoolCapacityExceeded {
+        /// Identifier of the archetype that rejected the reserve.
+        archetype_id: ArchetypeId,
+        /// Existing per-pool capacity ceiling (`max_components`).
+        pool_capacity: usize,
+        /// Number of rows the caller asked to reserve.
+        requested: usize,
+    },
+
+    /// Phase 12.5 Opt-A2 (SBO17b / I-N1 / W2): a `spawn_batch` aggregate
+    /// would advance `EntityMaster::next_entity_id` past the world's
+    /// pre-sized entity-fast-store (`MAX_ENTITIES_HINT + MAX_BATCH_HINT`).
+    ///
+    /// On the direct path (`EcsMaster::spawn_batch`) this is detected via
+    /// a Relaxed pre-load and returned as `Err` — the counter is NOT
+    /// advanced. On the queued path (`SpawnBatchCommand::apply`) the same
+    /// condition manifests as a hard panic at apply time (workers cannot
+    /// pre-check because they race each other).
+    WorldEntityCapacityExceeded {
+        /// The would-be `end_id` (= `start + n`).
+        end_id: usize,
+        /// The world's current pre-sized fast-store length.
+        capacity: usize,
+    },
 }
 
 impl std::fmt::Display for EcsError {
@@ -110,6 +154,34 @@ impl std::fmt::Display for EcsError {
             }
             EcsError::InvalidEventConfig { reason } => {
                 write!(f, "invalid EventConfig: {}", reason)
+            }
+            EcsError::SpawnBatchExceedsCapacity { requested, max } => {
+                write!(
+                    f,
+                    "spawn_batch requested {} entities; per-call cap is {} \
+                     (chunk by the caller)",
+                    requested, max
+                )
+            }
+            EcsError::ArchetypePoolCapacityExceeded {
+                archetype_id,
+                pool_capacity,
+                requested,
+            } => {
+                write!(
+                    f,
+                    "archetype {}: pool capacity {} cannot reserve {} more rows",
+                    archetype_id, pool_capacity, requested
+                )
+            }
+            EcsError::WorldEntityCapacityExceeded { end_id, capacity } => {
+                write!(
+                    f,
+                    "spawn_batch aggregate overshoot: end_id {} exceeds \
+                     pre-sized capacity {} (SBO16+SBO17b); reduce concurrent \
+                     workers or chunk further",
+                    end_id, capacity
+                )
             }
         }
     }

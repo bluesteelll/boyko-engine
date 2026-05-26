@@ -1,4 +1,4 @@
-use crate::ecs::core::archetype::archetype_bundle::ArchetypeBundle;
+use crate::ecs::core::archetype::archetype_bundle::{ArchetypeBundle, ArchetypeBundleIterMut};
 use crate::ecs::core::archetype::archetype_registry::ArchetypeRegistry;
 use crate::ecs::core::archetype::archetype::Archetype;
 use crate::ecs::core::archetype::generation::ArchetypeGeneration;
@@ -590,6 +590,21 @@ impl ArchetypeMaster {
     pub fn iter_archetypes(&self) -> impl Iterator<Item = &Archetype> {
         self.archetypes.iter()
     }
+
+    /// Mutable iterator over every archetype.
+    ///
+    /// Mirror of [`Self::iter_archetypes`]; required by Phase 10
+    /// `run_check_ticks_scan` (plan §4.6, §9.6, §15.7) for in-place clamping
+    /// of per-row `added`/`changed` ticks via [`ComponentPool::write_added_tick`]
+    /// / [`ComponentPool::write_changed_tick`] under `&mut Archetype`.
+    ///
+    /// Delegates to [`ArchetypeBundle::iter_mut`]; disjoint `&mut Archetype`
+    /// yields are guaranteed by the bundle's bitset-driven iteration
+    /// (each slot visited at most once).
+    #[inline]
+    pub(crate) fn iter_archetypes_mut(&mut self) -> ArchetypeBundleIterMut<'_> {
+        self.archetypes.iter_mut()
+    }
     
     /// Removes all archetypes and resets `next_archetype_id` to 1.
     ///
@@ -619,6 +634,24 @@ impl ArchetypeMaster {
         self.structural_generation.bump();
     }
 }
+
+// SAFETY (SEND6 — Phase 9 §2.4, §9.1):
+//
+// `ArchetypeMaster` becomes `Send + Sync` under the Phase 9 contract:
+//
+//   - Internal `ArchetypeBundle` uses a stable-address slab
+//     (`Box<[MaybeUninit<Archetype>; _]>`); slot addresses do not move once
+//     written. Worker reads via `archetype_ptr_for` / `get_archetype` are
+//     sound because pointer-stable archetypes are immutable to workers
+//     (mutations are gated on `&mut self`).
+//   - Archetype creation (`create_archetype`, `get_or_create_archetype`,
+//     `remove_archetype`, `clear`) takes `&mut self` and runs only on the
+//     dispatcher under the apply window (SCH7); no worker holds a live
+//     cell view that aliases the slab while a new slot is being written.
+//   - The `arena: *const Arena` raw pointer is opaque to multi-thread
+//     access; arena allocation downstream is guarded by ALLOC1.
+unsafe impl Send for ArchetypeMaster {}
+unsafe impl Sync for ArchetypeMaster {}
 
 #[cfg(test)]
 mod tests {

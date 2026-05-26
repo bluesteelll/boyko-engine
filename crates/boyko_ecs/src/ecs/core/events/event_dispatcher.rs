@@ -1,6 +1,7 @@
 use core::any::{TypeId, type_name};
 use core::mem::MaybeUninit;
 use core::marker::PhantomData;
+use core::ptr::NonNull;
 
 use boyko_utils::bit_mask::bit_set_256::BitSet256;
 
@@ -239,6 +240,42 @@ impl EventDispatcher {
         Ok(())
     }
 
+    /// Sends a single event of type `E` via the per-thread lane determined
+    /// by the calling thread's TLS worker id (Phase 9 EVT1).
+    ///
+    /// Lane routing — see [`boyko_threadpool::current_worker_id_or_dispatcher_lane`]:
+    /// - **Worker thread** (`0..worker_count - 1`): writes to lane `worker_id`.
+    /// - **Dispatcher thread** (inside `ThreadPool::install`): writes to lane
+    ///   `worker_count` (the extra reserved lane).
+    /// - **Unattached thread** (no pool installed): writes to lane `0`.
+    ///
+    /// The lane bound used by the helper is the dispatcher's
+    /// `default_thread_count` field; Phase 9 callers must preregister event
+    /// types with `EventConfig::default_for(worker_count + 1)` so the
+    /// dispatcher lane (`worker_count`) is in range.
+    ///
+    /// # Errors
+    ///
+    /// Forwards errors from [`send`](Self::send).
+    ///
+    /// # Phase 9 invariant
+    ///
+    /// **EVT1** — per-thread lane single-writer. Each worker is the sole
+    /// writer of its lane; the dispatcher is the sole writer of lane
+    /// `worker_count`. This is preserved by construction because the TLS
+    /// helper returns a distinct id per thread.
+    #[inline]
+    pub fn send_event<E: Event>(&self, event: E) -> EcsResult<()> {
+        // `default_thread_count` is the total number of lanes registered with
+        // `EventConfig` (Phase 9: worker_count + 1, so the extra lane sits at
+        // index `worker_count` == `default_thread_count - 1`). The helper
+        // returns that index when called on the dispatcher.
+        let lane = boyko_threadpool::current_worker_id_or_dispatcher_lane(
+            self.default_thread_count.saturating_sub(1),
+        );
+        self.send::<E>(lane, event)
+    }
+
     /// Sends a single event of type `E` to the lane for `thread_index`.
     ///
     /// # Errors
@@ -339,6 +376,51 @@ impl EventDispatcher {
         }
     }
 
+    /// Phase 12 EXT4: returns a stable pointer to the heap-allocated
+    /// `EventBuffer<E>` for `E`.
+    ///
+    /// The returned pointer is provenance-equivalent to the one stored inside
+    /// `EventTypeSlot::data` — both derive from `Box::into_raw(boxed_buffer)`
+    /// at [`preregister`] time. Callers may cache the pointer in long-lived
+    /// state (e.g. `EventReaderState<E>` / `EventWriterState<E>`); it remains
+    /// valid for the dispatcher's lifetime.
+    ///
+    /// Returns `None` if `E` was not preregistered.
+    ///
+    /// # Stacked Borrows / Tree Borrows soundness (Phase 12 C1 / EXT5)
+    ///
+    /// The buffer lives in its own heap allocation; subsequent `&mut self`
+    /// re-borrows of the dispatcher (e.g. inside `update_events`) borrow the
+    /// dispatcher struct itself but NOT the buffer. The cached `NonNull`
+    /// retains the original allocation's tag from `Box::into_raw`. Inside
+    /// `update_events`, the buffer is reached via `slot.data as *mut
+    /// EventBuffer<E>` — the same provenance chain — so all reads/writes
+    /// share a single base tag, ruling out SB/TB violations.
+    ///
+    /// [`preregister`]: EventDispatcher::preregister
+    #[inline]
+    pub(crate) fn buffer_ptr<E: Event>(&self) -> Option<NonNull<EventBuffer<E>>> {
+        let id = E::event_id() as usize;
+        if id >= MAX_EVENTS || !self.registered_mask.get(id) {
+            return None;
+        }
+        // SAFETY (U3 mirror): `registered_mask.get(id) == true` ⇒ the slot
+        //   was initialised by `preregister`.
+        let slot: &EventTypeSlot = unsafe { self.slots[id].slot.assume_init_ref() };
+        // Debug-only type-id sanity check; the cache call site has no path to
+        // observe a stale slot because preregister is one-shot per `E`.
+        debug_assert_eq!(
+            slot.vtable.type_id,
+            TypeId::of::<E>(),
+            "type_id mismatch on buffer_ptr<E>",
+        );
+        let buf_ptr: *mut EventBuffer<E> = slot.data as *mut EventBuffer<E>;
+        // SAFETY (EXT4): slot.data is `Box::into_raw(boxed_buffer).cast::<u8>()`
+        //   from preregister — guaranteed non-null and pointing at a live
+        //   `EventBuffer<E>` for the dispatcher's lifetime.
+        Some(unsafe { NonNull::new_unchecked(buf_ptr) })
+    }
+
     /// Advances the frame counter and flattens each registered event type's
     /// write lanes into the contiguous reader buffer.
     ///
@@ -432,6 +514,32 @@ impl EventDispatcher {
         true
     }
 }
+
+// SAFETY (SEND4 / EVT1-EVT4 — Phase 9 §2.4, §2.8, §9.1):
+//
+// `EventDispatcher` becomes `Send + Sync` under the Phase 9 contract:
+//
+//   - Per-type `EventBuffer<E>` is partitioned into per-thread write lanes
+//     pre-allocated at `preregister` time. Each worker writes exclusively
+//     to its own lane (TLS-routed via
+//     `boyko_threadpool::current_worker_id_or_dispatcher_lane`), so no two
+//     threads share a writer index — the per-lane invariant is preserved by
+//     construction (EVT1, EVT3).
+//   - The dispatcher reserves an extra lane at `worker_count` for direct
+//     dispatcher-thread sends (`EventConfig::default_for(worker_count + 1)`
+//     at registration — §2.8 EVT1).
+//   - `update_events` (the lane → reader_buf swap) takes `&mut self` and runs
+//     only on the dispatcher between frames; no worker can be mid-send when
+//     the swap executes.
+//   - `current_frame` and the `registered_mask` `BitSet256` are observed
+//     through `&self` reads (worker-visible) but only mutated under
+//     `&mut self` on the dispatcher (preregister / update_events).
+//   - The raw `*mut u8` per-slot `data` pointers are bound to heap allocations
+//     owned by `Box<EventBuffer<E>>::into_raw`; their addresses are stable
+//     for the dispatcher's lifetime and never re-pointed once `preregister`
+//     populates the slot.
+unsafe impl Send for EventDispatcher {}
+unsafe impl Sync for EventDispatcher {}
 
 impl Drop for EventDispatcher {
     fn drop(&mut self) {
@@ -547,7 +655,21 @@ unsafe fn swap_and_flatten<E: Event>(data: *mut u8, _frame: u64) {
         cursor += n;
     }
 
-    // Release: matches Acquire-load in `events::<E>()` (U11).
+    // Phase 12 EXT3: snapshot frame_event_count for readers. `start_event_count`
+    // tells Phase 12 `EventReader` where the post-swap window begins in cursor
+    // space — readers compute `start_offset = cursor - start_event_count` to
+    // index into `reader_buf[..reader_len]`.
+    //
+    // We Release-store `start_event_count` BEFORE `reader_len` so any reader
+    // that observes the new `reader_len` necessarily also observes the new
+    // `start_event_count` (release-acquire chain). Both fields share a single
+    // cache line per the C3 layout, so the store-buffer flush commits both in
+    // one shot to L1d.
+    let total_count = buf.frame_event_count.load(Ordering::Relaxed);
+    let new_start = total_count.wrapping_sub(cursor as u64);
+    buf.start_event_count.store(new_start, Ordering::Release);
+    // Release: matches Acquire-load in `events::<E>()` (U11) and in
+    // `EventReader::read` / `is_empty` / `len` (Phase 12 ER2/ER9).
     buf.reader_len.store(cursor as u32, Ordering::Release);
 }
 

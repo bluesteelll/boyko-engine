@@ -7,6 +7,7 @@
 // Component ID range 420-435 reserved for this bench (verified free in test suites).
 
 use boyko_ecs::ecs::core::archetype::archetype::Archetype;
+use boyko_ecs::ecs::core::change_detection::Tick;
 use boyko_ecs::ecs::core::component::component_registry;
 use boyko_ecs::ecs::identifiers::primitives::{ArchetypeId, ComponentId, EntityId};
 use boyko_ecs::ecs::memory::arena::Arena;
@@ -70,7 +71,7 @@ fn bench_archetype_create_entity_8c(c: &mut Criterion) {
                         .map(|(id, v)| (*id, v.as_slice()))
                         .collect();
                     let mut new_unit_index: u32 = 0;
-                    let ok = arch.create_entity(EntityId(entity_id), &mut new_unit_index, &slices);
+                    let ok = arch.create_entity(EntityId(entity_id), &mut new_unit_index, &slices, Tick::new(1));
                     black_box(ok);
                 }
                 black_box(arch);
@@ -107,7 +108,7 @@ fn bench_archetype_create_entity_16c(c: &mut Criterion) {
                         .map(|(id, v)| (*id, v.as_slice()))
                         .collect();
                     let mut new_unit_index: u32 = 0;
-                    let ok = arch.create_entity(EntityId(entity_id), &mut new_unit_index, &slices);
+                    let ok = arch.create_entity(EntityId(entity_id), &mut new_unit_index, &slices, Tick::new(1));
                     black_box(ok);
                 }
                 black_box(arch);

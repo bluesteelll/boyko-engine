@@ -1,0 +1,424 @@
+//! [`Scope`] — borrow-erased fork/join over the pool.
+//!
+//! Plan §4.5. `Scope::spawn` accepts a closure with lifetime `'scope`;
+//! we transmute the lifetime to `'static` for the duration of the task
+//! body. The `'scope` correctness is upheld by [`Scope::drop`]: it
+//! blocks (via work-stealing, not parking) until every spawned task has
+//! completed, so no body outlives the `'scope` borrow.
+//!
+//! ## Work-stealing wait (plan §4.5.5)
+//!
+//! `Scope::Drop` does NOT call `std::thread::park()` unconditionally.
+//! Instead, it polls the local injector (if on a worker), the global
+//! injector, and sibling stealers. Without this, nested scopes can
+//! deadlock when every worker is itself blocked inside its own
+//! `Scope::Drop`.
+//!
+//! Note (plan §4.5.5 / Round 3 W-NEW-2): we do NOT drain the calling
+//! worker's own Chase-Lev deque from `Scope::Drop`. That deque is owned
+//! by `worker_main` on the worker's stack and is not accessible here.
+//! Sufficient progress is guaranteed via the injectors and sibling
+//! steals.
+
+use core::marker::PhantomData;
+use core::sync::atomic::{AtomicUsize, Ordering};
+use std::any::Any;
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+use std::sync::Mutex;
+use std::thread::Thread;
+use std::time::Duration;
+
+use crossbeam_deque::{Steal, Worker};
+use crossbeam_utils::{Backoff, CachePadded};
+
+use crate::thread_pool::{TaskHandle, ThreadPool};
+use crate::tls;
+use crate::worker::{push_task, unpark_one_idle};
+
+/// Shared state between [`Scope`] and its spawned tasks.
+///
+/// Allocated on the heap so that `Scope::spawn`'s closure can hold a
+/// raw pointer to it that remains stable across `Scope` moves (the
+/// `Scope` itself is small and `!Unpin` via the `Box<ScopeShared>`
+/// indirection).
+#[repr(C)]
+pub(crate) struct ScopeShared {
+    /// Count of outstanding spawned tasks. Increments on spawn, decrements
+    /// on task completion (success or panic). `Scope::Drop` waits until
+    /// this reaches zero.
+    ///
+    /// `CachePadded` because workers all decrement this on completion;
+    /// the dispatcher's `Drop` thread reads it. Without padding, the
+    /// completion traffic would false-share with neighbouring atomics.
+    pub(crate) pending: CachePadded<AtomicUsize>,
+
+    /// First panic payload observed by a task; consumed by `Scope::Drop`
+    /// and re-raised via `resume_unwind`. Mutex is cold-path only
+    /// (panics are rare).
+    pub(crate) panic_payload: Mutex<Option<Box<dyn Any + Send + 'static>>>,
+
+    /// Thread to unpark when `pending` reaches zero. Captured at
+    /// `Scope::new` time (typically `std::thread::current()` inside the
+    /// surrounding `install`/`scope` frame).
+    pub(crate) waker: Thread,
+}
+
+impl ScopeShared {
+    #[inline]
+    pub(crate) fn new(waker: Thread) -> Self {
+        Self {
+            pending: CachePadded::new(AtomicUsize::new(0)),
+            panic_payload: Mutex::new(None),
+            waker,
+        }
+    }
+}
+
+/// Send-marked raw pointer to `ScopeShared` used as a closure capture in
+/// `Scope::spawn`. Raw pointers are `!Send` by default; we wrap them so
+/// they can cross thread boundaries inside a task body.
+///
+/// The inner field is **private** so that closures cannot capture it
+/// directly (Rust 2021+ disjoint-capture would otherwise see the inner
+/// `*const ScopeShared` and reject the closure as `!Send`); access goes
+/// through [`SharedPtr::as_ref`] which only operates on `&self`.
+#[derive(Copy, Clone)]
+struct SharedPtr {
+    ptr: *const ScopeShared,
+}
+
+impl SharedPtr {
+    #[inline]
+    fn new(ptr: *const ScopeShared) -> Self {
+        Self { ptr }
+    }
+
+    /// Borrow the pointee.
+    ///
+    /// # Safety
+    /// The pointee must outlive `'a`. In `Scope::spawn` this is upheld
+    /// because the Scope's Box<ScopeShared> outlives every task body
+    /// (Scope::Drop waits for completion).
+    #[inline]
+    unsafe fn as_ref<'a>(&self) -> &'a ScopeShared {
+        // SAFETY: forwarded to the caller; see method doc.
+        unsafe { &*self.ptr }
+    }
+}
+
+// SAFETY:
+//   The pointer references a `ScopeShared` heap allocation owned by the
+//   originating `Scope`. The Scope's `Drop` blocks until every task that
+//   captured the pointer has completed (via the work-stealing wait in
+//   `join_workers_until_drained`), so the pointee outlives every use of
+//   the pointer on any worker thread. The pointee type (`ScopeShared`)
+//   contains only `Sync` interior — `AtomicUsize`, `Mutex`, `Thread` —
+//   so concurrent access through the pointer is sound.
+unsafe impl Send for SharedPtr {}
+
+/// Fork/join scope over a [`ThreadPool`].
+///
+/// Constructed by [`ThreadPool::install`] or [`ThreadPool::scope`].
+/// Spawn child tasks via [`Scope::spawn`]; the scope blocks at drop time
+/// until every spawned task has completed.
+///
+/// [`ThreadPool::install`]: crate::ThreadPool::install
+/// [`ThreadPool::scope`]: crate::ThreadPool::scope
+pub struct Scope<'scope> {
+    pool: &'scope ThreadPool,
+    pub(crate) shared: Box<ScopeShared>,
+    /// `PhantomData<&'scope mut &'scope ()>` makes the scope invariant in
+    /// `'scope`, which is what we want — `'scope` is a borrow window, not
+    /// a covariant lifetime.
+    _phantom: PhantomData<&'scope mut &'scope ()>,
+}
+
+impl<'scope> Scope<'scope> {
+    #[inline]
+    pub(crate) fn new(pool: &'scope ThreadPool, shared: Box<ScopeShared>) -> Self {
+        Self {
+            pool,
+            shared,
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Spawn a child task. The closure may borrow data with lifetime
+    /// `'scope`; the scope blocks at drop until the task completes, so
+    /// the borrow remains valid.
+    ///
+    /// # Panic semantics
+    /// A panic inside `f` is captured into the scope's panic payload and
+    /// re-raised on the calling thread when the scope drops. The first
+    /// panic wins; subsequent panics are dropped.
+    pub fn spawn<F>(&self, f: F)
+    where
+        F: FnOnce() + Send + 'scope,
+    {
+        self.shared.pending.fetch_add(1, Ordering::AcqRel);
+
+        // Raw pointer to ScopeShared — stable for the lifetime of the
+        // Box and therefore for the lifetime of every spawned task
+        // (Scope::Drop blocks until they all complete).
+        //
+        // The raw pointer needs a Send wrapper because closures can't
+        // capture `*const T` (it's `!Send`); the safety obligation is
+        // documented on `SharedPtr` below.
+        let shared_ptr = SharedPtr::new(&*self.shared as *const ScopeShared);
+
+        // Wrap the user body so that:
+        //   - We catch_unwind to keep panics inside the worker.
+        //   - We decrement `pending` on completion.
+        //   - We unpark the waker on the last completion.
+        let wrapped = move || {
+            let result = catch_unwind(AssertUnwindSafe(f));
+            // SAFETY: `shared_ptr` was minted from `&*self.shared` while
+            //   the Scope (and its Box<ScopeShared>) was alive. The Box
+            //   is owned by the Scope; `Scope::drop` will not return
+            //   until `pending` (read through this same pointer) hits
+            //   zero. Therefore the pointer is valid for the entire
+            //   duration of this closure.
+            let shared = unsafe { shared_ptr.as_ref() };
+
+            if let Err(payload) = result
+                && let Ok(mut slot) = shared.panic_payload.lock()
+                && slot.is_none()
+            {
+                *slot = Some(payload);
+            }
+            // - Multiple panics: first wins; subsequent payloads dropped.
+            // - Mutex poisoned: drop payload; Scope::Drop still completes
+            //   normally via pending hitting zero.
+
+            let prev = shared.pending.fetch_sub(1, Ordering::AcqRel);
+            if prev == 1 {
+                shared.waker.unpark();
+            }
+        };
+
+        // Box the body so the deque entry stays word-sized.
+        let body_scoped: Box<dyn FnOnce() + Send + 'scope> = Box::new(wrapped);
+
+        // SAFETY (lifetime erasure 'scope -> 'static):
+        //   The closure body borrows data with lifetime 'scope. We
+        //   transmute the trait object's lifetime to 'static so that it
+        //   can be stored in `TaskHandle` (whose body type is
+        //   `Box<dyn FnOnce() + Send + 'static>`). The transmute is
+        //   sound because:
+        //     - `Scope::drop` blocks until `pending == 0` via the
+        //       work-stealing wait (`join_workers_until_drained`).
+        //     - The blocking happens BEFORE any 'scope borrow can
+        //       expire (Scope::drop runs while `'scope` is still live;
+        //       the user's `install`/`scope` call frame still holds the
+        //       borrow).
+        //     - Even when the calling thread panics, Drop runs during
+        //       unwinding (Rust's stack-unwinding semantics).
+        //   The only edge case is `std::process::abort` / SIGKILL: if
+        //   the process is terminated mid-task, workers may continue
+        //   accessing freed stack frames in the brief window before the
+        //   kernel reclaims memory. This is observable only at the
+        //   language level; no real program can observe the UB because
+        //   the process is gone. Same edge case as rayon's `scope`.
+        let body_static: Box<dyn FnOnce() + Send + 'static> =
+            unsafe { core::mem::transmute(body_scoped) };
+
+        push_task(self.pool, TaskHandle::new(body_static));
+    }
+}
+
+impl<'scope> Drop for Scope<'scope> {
+    fn drop(&mut self) {
+        join_workers_until_drained(self.pool, &self.shared);
+
+        debug_assert_eq!(
+            self.shared.pending.load(Ordering::Acquire),
+            0,
+            "Scope::Drop returned with pending tasks still in flight"
+        );
+
+        let payload = {
+            let mut slot = self
+                .shared
+                .panic_payload
+                .lock()
+                .expect("invariant: panic_payload mutex never poisoned by us");
+            slot.take()
+        };
+        if let Some(p) = payload {
+            resume_unwind(p);
+        }
+    }
+}
+
+/// Block (with work stealing) until `shared.pending` is zero. Plan
+/// §4.5.5.
+///
+/// This function is called from `Scope::Drop`. It steals work from any
+/// stealable source (the calling worker's local injector if on a worker;
+/// the global injector; any sibling stealer) and runs the stolen tasks
+/// inline on the calling thread. When no work is stealable, it parks
+/// with a short timeout — the timeout serves as a re-poll trigger; the
+/// real wake-up arrives via `shared.waker.unpark()` from the last
+/// completing task.
+fn join_workers_until_drained(pool: &ThreadPool, shared: &ScopeShared) {
+    let wid = tls::current_worker_id();
+    let on_worker = (wid as usize) < pool.injector_local.len();
+    let local_inj_idx = wid as usize;
+
+    // A temporary deque to receive batches stolen from injectors/sibling
+    // stealers. Not exposed; lives on the dispatcher's stack frame for
+    // the duration of this wait.
+    let scratch: Worker<TaskHandle> = Worker::new_fifo();
+
+    let backoff = Backoff::new();
+
+    loop {
+        if shared.pending.load(Ordering::Acquire) == 0 {
+            return;
+        }
+
+        // 1. If we're on a worker, drain inner-spawn tasks targeted at us.
+        if on_worker
+            && let Some(t) =
+                drain_one(|| pool.injector_local[local_inj_idx].steal_batch_and_pop(&scratch))
+        {
+            t.run();
+            drain_scratch(&scratch);
+            backoff.reset();
+            continue;
+        }
+
+        // 2. Global injector.
+        if let Some(t) = drain_one(|| pool.injector_global.steal_batch_and_pop(&scratch)) {
+            t.run();
+            drain_scratch(&scratch);
+            backoff.reset();
+            continue;
+        }
+
+        // 3. Sibling steal — any worker, any deque.
+        let stolen = try_steal_any(pool, &scratch);
+        if let Some(t) = stolen {
+            t.run();
+            drain_scratch(&scratch);
+            backoff.reset();
+            continue;
+        }
+
+        // 4. Nothing to do. Either we exhaust backoff and park-with-
+        //    timeout, or we snooze and loop.
+        if backoff.is_completed() {
+            // Wake one idle worker before parking: a sibling that just
+            // pushed inner tasks into its own local injector may not
+            // have raced through unpark_one_idle yet, but the work IS
+            // visible — letting that worker grab it is also valid.
+            unpark_one_idle(pool);
+            std::thread::park_timeout(Duration::from_micros(50));
+            backoff.reset();
+        } else {
+            backoff.snooze();
+        }
+    }
+}
+
+/// Drain anything left in our local scratch deque (we may have stolen a
+/// batch where only the first task is returned and the rest live in
+/// `scratch`). We run them all inline.
+#[inline]
+fn drain_scratch(scratch: &Worker<TaskHandle>) {
+    while let Some(t) = scratch.pop() {
+        t.run();
+    }
+}
+
+/// Try to steal a task from any sibling deque, ignoring nothing.
+fn try_steal_any(pool: &ThreadPool, scratch: &Worker<TaskHandle>) -> Option<TaskHandle> {
+    for stealer in pool.stealers.iter() {
+        if let Some(t) = drain_one(|| stealer.steal_batch_and_pop(scratch)) {
+            return Some(t);
+        }
+    }
+    None
+}
+
+#[inline]
+fn drain_one<F>(mut f: F) -> Option<TaskHandle>
+where
+    F: FnMut() -> Steal<TaskHandle>,
+{
+    loop {
+        match f() {
+            Steal::Success(t) => return Some(t),
+            Steal::Empty => return None,
+            Steal::Retry => continue,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ThreadPoolBuilder;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicU32;
+
+    #[test]
+    fn scope_drain_with_no_tasks_is_noop() {
+        let pool = ThreadPoolBuilder::new().num_threads(2).build();
+        pool.install(|_scope| {
+            // no-op
+        });
+    }
+
+    #[test]
+    fn scope_spawn_can_borrow_stack_data() {
+        let pool = ThreadPoolBuilder::new().num_threads(2).build();
+        let counter = AtomicU32::new(0);
+        pool.install(|scope| {
+            for _ in 0..32 {
+                scope.spawn(|| {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                });
+            }
+        });
+        assert_eq!(counter.load(Ordering::Acquire), 32);
+    }
+
+    #[test]
+    fn scope_propagates_panic() {
+        let pool = ThreadPoolBuilder::new().num_threads(2).build();
+        let arc_pool = pool;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            arc_pool.install(|scope| {
+                scope.spawn(|| panic!("planned"));
+            });
+        }));
+        assert!(result.is_err(), "panic should propagate out of install");
+    }
+
+    #[test]
+    fn nested_scope_does_not_deadlock() {
+        let pool = ThreadPoolBuilder::new().num_threads(4).build();
+        let counter = Arc::new(AtomicU32::new(0));
+        let pool_for_outer = Arc::clone(&pool);
+
+        pool.install(|outer| {
+            for _ in 0..4 {
+                let c = Arc::clone(&counter);
+                let inner_pool = Arc::clone(&pool_for_outer);
+                outer.spawn(move || {
+                    inner_pool.scope(|inner| {
+                        for _ in 0..8 {
+                            let c2 = Arc::clone(&c);
+                            inner.spawn(move || {
+                                c2.fetch_add(1, Ordering::Relaxed);
+                            });
+                        }
+                    });
+                });
+            }
+        });
+
+        assert_eq!(counter.load(Ordering::Acquire), 32);
+    }
+}

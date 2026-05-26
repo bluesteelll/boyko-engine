@@ -260,8 +260,8 @@ fn miri_unsafe_ecs_cell_no_retag_via_by_value_methods() {
     // C1 contract had regressed (e.g. cell accessors taking `&self`
     // instead of `self`), Miri's retag check would fail somewhere inside
     // this call — most likely on the second element's `get_param`.
-    ecs.run_closure_once::<(Res<'_, PodRes>, ResMut<'_, PodRes2>), _, _>(
-        move |(r, mut w)| {
+    ecs.run_closure_once(
+        move |(r, mut w): (Res<PodRes>, ResMut<PodRes2>)| {
             probe.store((*r).0, Ordering::Relaxed);
             // Write through the &mut view. The C1 invariant guarantees
             // the cell's raw pointer keeps write-capable provenance
@@ -304,7 +304,7 @@ fn miri_res_get_param_no_retag() {
 
     let observed = Arc::new(AtomicU32::new(0));
     let probe = Arc::clone(&observed);
-    ecs.run_closure_once::<Res<'_, PodRes>, _, _>(move |r| {
+    ecs.run_closure_once(move |r: Res<PodRes>| {
         // Deref through Res<R> exercises the &*(ptr as *const R) cast.
         probe.store((*r).0, Ordering::Relaxed);
     });
@@ -324,8 +324,8 @@ fn miri_res_get_param_no_retag() {
 //   - Tuple `get_param` walk with shared cell copy.
 //   - `Res::get_param` (read path) and `ResMut::get_param` (write path)
 //     in the same call site.
-//   - Closure invocation through `FnOnceSystem::run_unsafe`.
-//   - Drop of `FnOnceSystem` (no SystemMeta leak).
+//   - Closure invocation through `FunctionSystem::run_unsafe`.
+//   - Drop of `FunctionSystem` (no SystemMeta leak).
 //
 // The probe closure captures an `Arc<AtomicU32>` so we can observe the
 // resource read without violating the `Send + Sync + 'static` bound.
@@ -343,8 +343,8 @@ fn miri_run_system_once_full_e2e() {
     let observed = Arc::new(AtomicU32::new(0));
     let probe = Arc::clone(&observed);
 
-    ecs.run_closure_once::<(Res<'_, E2eRead>, ResMut<'_, E2eWrite>), _, _>(
-        move |(r, mut w)| {
+    ecs.run_closure_once(
+        move |(r, mut w): (Res<E2eRead>, ResMut<E2eWrite>)| {
             // Read through Deref; mutate through DerefMut. Both must be
             // sound under Miri: the cell's by-value receiver preserves
             // provenance through the tuple walk.

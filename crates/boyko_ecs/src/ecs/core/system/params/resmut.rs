@@ -181,7 +181,7 @@ mod tests {
     #[test]
     fn init_state_caches_resource_id() {
         let mut ecs = EcsMaster::new();
-        let mut meta = SystemMeta::new("test");
+        let mut meta = SystemMeta::for_testing("test");
         let state = <ResMut<'_, TestMutRes> as SystemParam>::init_state(&mut ecs, &mut meta);
         assert_eq!(
             state.id,
@@ -194,7 +194,7 @@ mod tests {
     #[test]
     fn init_access_adds_resource_write() {
         let mut ecs = EcsMaster::new();
-        let mut meta = SystemMeta::new("test");
+        let mut meta = SystemMeta::for_testing("test");
         let state = <ResMut<'_, TestMutRes> as SystemParam>::init_state(&mut ecs, &mut meta);
         let mut set = FilteredAccessSet::new();
         <ResMut<'_, TestMutRes> as SystemParam>::init_access(
@@ -217,7 +217,7 @@ mod tests {
     fn get_param_returns_mutable_reference() {
         let mut ecs = EcsMaster::new();
         ecs.resources.insert(TestMutRes(1));
-        let mut meta = SystemMeta::new("test");
+        let mut meta = SystemMeta::for_testing("test");
         let mut state =
             <ResMut<'_, TestMutRes> as SystemParam>::init_state(&mut ecs, &mut meta);
 
@@ -256,7 +256,7 @@ mod tests {
     #[should_panic(expected = "boyko-B0002")]
     fn res_plus_resmut_same_type_panics_with_b0002() {
         let mut ecs = EcsMaster::new();
-        let mut meta = SystemMeta::new("test");
+        let mut meta = SystemMeta::for_testing("test");
         let mut set = FilteredAccessSet::new();
 
         let mut_state =

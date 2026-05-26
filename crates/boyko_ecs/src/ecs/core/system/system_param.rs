@@ -18,7 +18,8 @@
 //!   sibling params and other systems.
 //! * **SP4** — [`init_state`] performs no structural mutation of the
 //!   world (no archetype/resource registrations). Debug-asserted by
-//!   `FnOnceSystem::initialize` via `archetype_generation()` (Step 8).
+//!   `FunctionSystem::initialize` via `archetype_generation()`
+//!   (Phase 8c Step 4).
 //!
 //! [`init_access`]: SystemParam::init_access
 //! [`init_state`]: SystemParam::init_state
@@ -104,7 +105,7 @@ pub unsafe trait SystemParam: Sized {
     /// Implementations MUST NOT mutate the world's structural shape — no
     /// new archetype or resource registrations may be performed here.
     /// Debug-asserted via `archetype_generation()` comparison in
-    /// `FnOnceSystem::initialize` (Step 8).
+    /// `FunctionSystem::initialize` (Phase 8c Step 4).
     fn init_state(world: &mut EcsMaster, system_meta: &mut SystemMeta) -> Self::State;
 
     /// Declares this param's access surface.

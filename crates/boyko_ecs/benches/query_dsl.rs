@@ -205,7 +205,7 @@ fn bench_query_ref_iter(c: &mut Criterion) {
 
     c.bench_function("query_ref_iter_10k", |b| {
         b.iter(|| {
-            ecs.run_closure_once::<Query<'_, '_, &Position>, _, _>(|q| {
+            ecs.run_closure_once(|q: Query<'_, '_, &Position>| {
                 // Force the iterator to actually walk every row. `black_box`
                 // on the running accumulator prevents the compiler from
                 // realising the sum is unused.
@@ -234,15 +234,13 @@ fn bench_query_tuple_2_ref_iter(c: &mut Criterion) {
 
     c.bench_function("query_tuple_2_ref_iter_10k", |b| {
         b.iter(|| {
-            ecs.run_closure_once::<Query<'_, '_, (&Position, &Velocity)>, _, _>(
-                |q| {
-                    let mut acc: f32 = 0.0;
-                    for (p, v) in &q {
-                        acc += black_box(p.x) + black_box(v.vx);
-                    }
-                    black_box(acc);
-                },
-            );
+            ecs.run_closure_once(|q: Query<'_, '_, (&Position, &Velocity)>| {
+                let mut acc: f32 = 0.0;
+                for (p, v) in &q {
+                    acc += black_box(p.x) + black_box(v.vx);
+                }
+                black_box(acc);
+            });
         });
     });
 }
@@ -263,7 +261,7 @@ fn bench_query_mut_iter(c: &mut Criterion) {
 
     c.bench_function("query_mut_iter_10k", |b| {
         b.iter(|| {
-            ecs.run_closure_once::<Query<'_, '_, &mut Position>, _, _>(|mut q| {
+            ecs.run_closure_once(|mut q: Query<'_, '_, &mut Position>| {
                 // Touch the value so the DerefMut path is not elided. We
                 // increment the bit-pattern of `x` so the write is provably
                 // observable through `black_box` without producing NaN/Inf
@@ -293,15 +291,13 @@ fn bench_query_with_archetypal_filter(c: &mut Criterion) {
 
     c.bench_function("query_with_archetypal_filter_10k", |b| {
         b.iter(|| {
-            ecs.run_closure_once::<Query<'_, '_, &Position, Without<Frozen>>, _, _>(
-                |q| {
-                    let mut acc: f32 = 0.0;
-                    for p in &q {
-                        acc += black_box(p.x);
-                    }
-                    black_box(acc);
-                },
-            );
+            ecs.run_closure_once(|q: Query<'_, '_, &Position, Without<Frozen>>| {
+                let mut acc: f32 = 0.0;
+                for p in &q {
+                    acc += black_box(p.x);
+                }
+                black_box(acc);
+            });
         });
     });
 }
@@ -324,7 +320,7 @@ fn bench_query_archetype_transition(c: &mut Criterion) {
 
     c.bench_function("query_archetype_transition_2x5k", |b| {
         b.iter(|| {
-            ecs.run_closure_once::<Query<'_, '_, &Position>, _, _>(|q| {
+            ecs.run_closure_once(|q: Query<'_, '_, &Position>| {
                 // archetype_count should be 2; the iterator walks both.
                 let arches = q.archetype_count();
                 let mut acc: f32 = 0.0;
@@ -376,7 +372,7 @@ fn bench_query_cold_construction(c: &mut Criterion) {
             // `QueryDataState::new` inside Query's `init_state` + first
             // `set_table_readonly` + the 100-row inner loop.
             |mut ecs| {
-                ecs.run_closure_once::<Query<'_, '_, &Position>, _, _>(|q| {
+                ecs.run_closure_once(|q: Query<'_, '_, &Position>| {
                     let mut acc: f32 = 0.0;
                     for p in &q {
                         acc += black_box(p.x);

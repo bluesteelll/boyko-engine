@@ -21,6 +21,7 @@ use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 use crate::ecs::core::iters::query::data::{QueryData, ReadOnlyQueryData};
 use crate::ecs::core::iters::query::filter::QueryFilter;
 use crate::ecs::core::iters::query::iter::{QueryIter, QueryIterMut};
+use crate::ecs::core::iters::query::par_iter::{BatchingStrategy, ParQuery, ParQueryMut};
 use crate::ecs::core::iters::query::state::QueryDataState;
 use crate::ecs::core::system::filtered_access_set::FilteredAccessSet;
 use crate::ecs::core::system::system_meta::SystemMeta;
@@ -54,10 +55,11 @@ pub struct Query<'w, 's, D: QueryData, F: QueryFilter = ()> {
     /// Copy of the world-access cell. By-value pass; not retagged.
     world: UnsafeEcsCell<'w>,
 
-    /// Diagnostic-hook handle (consumed by Phase 9's `new_archetype` path).
-    /// Phase 8b reads no fields off this; the borrow exists so the
-    /// containing system's meta slot is held for `'s`.
-    #[allow(dead_code, reason = "Reserved for Phase 9 new_archetype hook.")]
+    /// Per-system tick snapshot + diagnostic handle. Forwarded into the
+    /// `QueryIter` / `QueryIterMut` / `ParQuery` / `ParQueryMut`
+    /// constructors so non-archetypal filters (Wave C `Added<C>` /
+    /// `Changed<C>`) and `Ref<T>` / `Mut<T>` data impls can capture
+    /// `last_run` / `this_run` (Phase 10 Round 2 C2).
     meta: &'s SystemMeta,
 
     /// Invariance over `D` and `F`. `fn() -> (D, F)` keeps the marker
@@ -100,7 +102,9 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
         //   mint) and `D::set_table_readonly(_: *const Archetype)` only.
         //   The cell `self.world` is `Copy`; passing it by value preserves
         //   the raw-pointer provenance through the call (Phase 8a C1).
-        unsafe { QueryIter::new(self.state, self.world) }
+        //   Phase 10 Round 2 C2: `self.meta` is forwarded so non-archetypal
+        //   filters and `Ref<T>` / `Mut<T>` impls can read the tick snapshot.
+        unsafe { QueryIter::new(self.state, self.world, self.meta) }
     }
 
     /// Returns a mutable iterator over `D::Item<'_>` for every entity in
@@ -124,8 +128,56 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
         // SAFETY (Q1, Q3, QD4): `&mut self` enforces cursor uniqueness;
         //   `QueryIterMut::new` will call `cell.archetype_ptr_mut(_)` per
         //   archetype boundary. If `world` carries a read-only mint and `D`
-        //   were not gated, the cell's own debug-assert fires.
-        unsafe { QueryIterMut::new(self.state, self.world) }
+        //   were not gated, the cell's own debug-assert fires. Phase 10
+        //   Round 2 C2: `self.meta` is forwarded.
+        unsafe { QueryIterMut::new(self.state, self.world, self.meta) }
+    }
+
+    /// Returns a parallel read-only iteration handle.
+    ///
+    /// Use [`ParQuery::for_each`] to run a closure on every matched row,
+    /// fanning the work across the current [`ThreadPool`]'s workers via
+    /// [`ThreadPool::scope`]. Archetypes with fewer than
+    /// [`MIN_ARCHETYPE_FOR_PARALLEL`] rows process inline on the calling
+    /// thread (plan PAR9 / Round 2 O2).
+    ///
+    /// When no pool is attached to the calling thread, `for_each`
+    /// degrades to a sequential walk on the calling thread (PAR7).
+    ///
+    /// `D` must be [`ReadOnlyQueryData`] — `&mut T` queries must use
+    /// [`Self::par_iter_mut`].
+    ///
+    /// [`ThreadPool`]: boyko_threadpool::ThreadPool
+    /// [`ThreadPool::scope`]: boyko_threadpool::ThreadPool::scope
+    /// [`MIN_ARCHETYPE_FOR_PARALLEL`]: crate::ecs::core::iters::query::par_iter::MIN_ARCHETYPE_FOR_PARALLEL
+    #[inline]
+    pub fn par_iter<'q>(&'q self) -> ParQuery<'q, 's, D, F>
+    where
+        D: ReadOnlyQueryData,
+    {
+        ParQuery {
+            state: self.state,
+            world: self.world,
+            batching: BatchingStrategy::default(),
+            meta: self.meta,
+        }
+    }
+
+    /// Returns a parallel mutable iteration handle.
+    ///
+    /// Same semantics as [`Self::par_iter`] but accepts any `D: QueryData`
+    /// (including `&mut T`). The `&mut self` borrow gates cursor
+    /// uniqueness; concurrent chunks within one `for_each` call write to
+    /// disjoint row ranges by construction (PAR2).
+    #[inline]
+    pub fn par_iter_mut<'q>(&'q mut self) -> ParQueryMut<'q, 's, D, F> {
+        ParQueryMut {
+            state: self.state,
+            world: self.world,
+            batching: BatchingStrategy::default(),
+            meta: self.meta,
+            _mut_marker: PhantomData,
+        }
     }
 }
 
@@ -184,7 +236,7 @@ where
 //     caller asserts no aliasing access through any sibling cell copy.
 //   - SP4: `init_state` calls `QueryDataState::new`, which is a pure read
 //     against the archetype master (no archetype/resource registrations).
-//     Debug-asserted by `FnOnceSystem::initialize` via the
+//     Debug-asserted by `FunctionSystem::initialize` via the
 //     `archetype_generation()` comparison.
 unsafe impl<'a, 'b, D, F> SystemParam for Query<'a, 'b, D, F>
 where
@@ -246,8 +298,8 @@ where
         // SAFETY: The `SystemParam` protocol guarantees that when
         //   `get_param` is invoked, the caller's `SystemMeta` slot lives at
         //   least as long as the `State` slot (`&'s mut Self::State` arg).
-        //   Both slots are members of the same system struct (Phase 8a
-        //   `FnOnceSystem` / Phase 9 `FunctionSystem`); the meta slot is
+        //   Both slots are members of the same system struct (Phase 8c
+        //   `FunctionSystem`); the meta slot is
         //   held by the same `&mut SystemBox` that minted `state: &'s mut
         //   ...`. The reborrow is therefore sound: the upgraded lifetime
         //   `'s` does not outlive the actual borrow scope of the
@@ -394,7 +446,7 @@ mod tests {
         let _arch_c = ecs.create_archetype(&[COMP_C]);
 
         let state = QueryDataState::<&CompA, ()>::new(&mut ecs);
-        let meta = SystemMeta::new("test");
+        let meta = SystemMeta::for_testing("test");
 
         // SAFETY (U_C1): `cell` is consumed below within this scope; it
         //   does not escape the `&mut ecs` borrow.
@@ -451,7 +503,7 @@ mod tests {
         // Driver: build a Query<&CompA>, count archetypes, and sum
         // component values. Both are returned through the closure output.
         let (arch_n, value_sum) = ecs
-            .run_closure_once::<Query<'_, '_, &CompA>, _, _>(|q: Query<'_, '_, &CompA>| {
+            .run_closure_once(|q: Query<'_, '_, &CompA>| {
                 let mut sum = 0u32;
                 for a in &q {
                     sum += a.0;

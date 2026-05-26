@@ -1,5 +1,6 @@
 use std::alloc::Layout;
 use std::any::TypeId;
+use std::cell::UnsafeCell;
 use std::ptr::NonNull;
 
 use crate::ecs::constants::{
@@ -7,6 +8,7 @@ use crate::ecs::constants::{
     MEDIUM_COMPONENT_THRESHOLD, SMALL_COMPONENTS_PER_CHUNK, SMALL_COMPONENT_THRESHOLD,
     TINY_COMPONENTS_PER_CHUNK, TINY_COMPONENT_THRESHOLD,
 };
+use crate::ecs::core::change_detection::Tick;
 use crate::ecs::core::component::component::Component;
 use crate::ecs::core::component::component_registry::{self, DropFn};
 use crate::ecs::memory::arena::Arena;
@@ -60,6 +62,29 @@ pub struct ComponentPool {
 
     /// Cached TypeId for debug-only typed-API validation.
     component_type_id: TypeId,
+
+    /// Phase 10 STORE3: per-row "added at" ticks, parallel to `units`.
+    ///
+    /// Logical row `i` (= `units[i]`) has its added-at tick at
+    /// `added_ticks[i]`. The buffer is sized to `max_components` at pool
+    /// construction and never reallocates; slots beyond `units.len()`
+    /// stay at [`Tick::ZERO`] until a future write.
+    ///
+    /// `UnsafeCell<Tick>` provides interior mutability through a shared
+    /// `&self` (used by Wave C `Added<C>::filter_fetch` reads through the
+    /// `Fetch<'w>` pointer) while still permitting the Phase 9 scheduler
+    /// to declare exclusive write access on a per-`(archetype, component)`
+    /// basis (SCH3). Adjacent-row writes from sibling `par_iter` chunks
+    /// target distinct memory locations — sound per Rust's abstract
+    /// machine even though they share a cache line (Round 2 C3, plan §11.5).
+    pub(crate) added_ticks: Box<[UnsafeCell<Tick>]>,
+
+    /// Phase 10 STORE3: per-row "last changed at" ticks, parallel to `units`.
+    ///
+    /// Same shape and discipline as [`added_ticks`]. Updated by
+    /// `Mut<T>::deref_mut` (Wave C) and by `EcsMaster::set_component_raw`
+    /// (Wave D follow-up; out of Wave B scope).
+    pub(crate) changed_ticks: Box<[UnsafeCell<Tick>]>,
 }
 
 impl ComponentPool {
@@ -104,6 +129,20 @@ impl ComponentPool {
             chunks.push(Chunk::new(start_index, components_per_chunk));
         }
 
+        // Phase 10 STORE10: per-row tick buffers zero-initialised at pool
+        // construction. Slots above `units.len()` are never read as
+        // meaningful comparands — `SystemMeta::new` sets `last_run =
+        // current_tick - MAX_CHANGE_AGE`, so any post-init write is
+        // observable. The buffers are global-allocator `Box<[_]>` per
+        // STORE2 (not arena-resident): they grow with `max_components`
+        // and stand outside the arena's free-list discipline.
+        let added_ticks: Box<[UnsafeCell<Tick>]> = (0..max_components)
+            .map(|_| UnsafeCell::new(Tick::ZERO))
+            .collect();
+        let changed_ticks: Box<[UnsafeCell<Tick>]> = (0..max_components)
+            .map(|_| UnsafeCell::new(Tick::ZERO))
+            .collect();
+
         Self {
             // SAFETY: `arena` is a shared reference valid for the lifetime of
             // the owning `EcsMaster`; converting to a raw pointer is lossless
@@ -120,6 +159,8 @@ impl ComponentPool {
             component_layout,
             drop_fn,
             component_type_id,
+            added_ticks,
+            changed_ticks,
         }
     }
 
@@ -332,6 +373,23 @@ impl ComponentPool {
             }
 
             self.units[index] = Unit::new(removed_ptr);
+
+            // Phase 10 STORE5: swap tick slots in lockstep with the data
+            // buffer. The last row's ticks move into the vacated slot so
+            // row `index` continues to carry the moved entity's lifecycle
+            // history. No tick is dropped here — `Tick` is `Copy`.
+            //
+            // SAFETY: `index != last_index` (checked above) and both
+            // indices are `< self.units.len()` (the removal precondition
+            // guards `index`, and `last_index = self.units.len() - 1`).
+            // `&mut self` gives exclusive access to the tick buffers;
+            // no concurrent reader exists per Phase 9 SCH3.
+            unsafe {
+                let added_last = *self.added_ticks[last_index].get();
+                let changed_last = *self.changed_ticks[last_index].get();
+                *self.added_ticks[index].get() = added_last;
+                *self.changed_ticks[index].get() = changed_last;
+            }
 
             let chunk_idx = index / self.components_per_chunk;
             if let Some(chunk) = self.chunks.get_mut(chunk_idx) {
@@ -690,7 +748,565 @@ impl ComponentPool {
     pub fn remaining_capacity(&self) -> usize {
         self.max_components - self.units.len()
     }
+
+    // ── Phase 11 — Unit-pointer accessors + no-drop scaffolding ─────────────
+    //
+    // Wave E Step 12 (plan §7.2 / Round 3 C-N2). The migration paths in
+    // `commands/migration_helpers.rs` need to read the raw arena pointer
+    // for row `idx` so they can build a `&[u8]` retained-bytes slice
+    // *before* swapping the row out via `swap_remove_index_no_drop`. The
+    // existing `get_raw` returns `Option<*const u8>` but with a non-trivial
+    // borrow check signature; `unit_ptr` is the trivial inline alias used
+    // exclusively by migration callers.
+
+    /// Returns the raw arena pointer for row `idx`. Panics in debug if
+    /// `idx >= self.count()`.
+    ///
+    /// Used by Phase 11 archetype migrations to read source-row bytes
+    /// before they are swap-removed (plan §7.2 retained-bytes extraction).
+    #[allow(dead_code)]
+    #[inline]
+    pub(crate) fn unit_ptr(&self, idx: usize) -> *const u8 {
+        debug_assert!(idx < self.units.len(), "unit_ptr: idx out of bounds");
+        self.units[idx].ptr().cast_const()
+    }
+
+    /// Phase 11 W-N1 defensive check (plan §7.4): returns whether `idx`
+    /// is a live row in this pool. Used by
+    /// [`crate::ecs::core::component::component_pool_bundle::ComponentPoolBundle::has_pool`]
+    /// and the `apply_replace_in_place` debug_assert site.
+    #[allow(dead_code)]
+    #[inline]
+    pub(crate) fn has_row(&self, idx: usize) -> bool {
+        idx < self.units.len()
+    }
+
+    /// Runs the registered `drop_fn` on the slot at `idx`. Logically
+    /// uninitialises the bytes (the next `write_at` or
+    /// `swap_remove_index_no_drop` rewrites them).
+    ///
+    /// # Safety (plan §7.3, C5)
+    ///
+    /// * `idx < self.count()` — debug-asserted.
+    /// * Caller holds exclusive access via `&mut self`.
+    /// * Caller will follow up with `write_at(idx, ...)` (replace-in-place)
+    ///   or `swap_remove_index_no_drop(idx)` (migration); otherwise the
+    ///   pool's `count()` continues to claim the slot as live, leading to
+    ///   read-of-uninit on next access.
+    #[allow(dead_code)]
+    pub(crate) unsafe fn drop_at(&mut self, idx: usize) {
+        debug_assert!(idx < self.units.len(), "drop_at: idx out of bounds");
+        if let Some(drop_fn) = self.drop_fn {
+            // SAFETY: `idx < self.units.len()` (debug-asserted) ⇒ the slot
+            //   was written by a prior `add` / `add_typed` and contains a
+            //   valid `T`. `&mut self` ⇒ exclusive access; the registered
+            //   `drop_fn` is `unsafe fn(*mut u8)` (= `drop_in_place::<T>`
+            //   under the hood via `register_layout::<T>`).
+            unsafe { drop_fn(self.units[idx].ptr()) };
+        }
+        let chunk_idx = idx / self.components_per_chunk;
+        if let Some(chunk) = self.chunks.get_mut(chunk_idx) {
+            chunk.mark_dirty();
+        }
+    }
+
+    /// Writes `bytes` into the slot at `idx`. The slot MUST be logically
+    /// uninitialised (just after `drop_at`) — caller responsibility.
+    ///
+    /// # Safety (plan §7.4)
+    ///
+    /// * `idx < self.count()` — debug-asserted.
+    /// * `bytes.len() == self.component_layout().size()` — debug-asserted.
+    /// * The bytes form a valid representation of the pool's registered
+    ///   type. (Mirrors the existing `set_component` raw-API contract.)
+    /// * Caller holds exclusive access via `&mut self`.
+    #[allow(dead_code)]
+    pub(crate) unsafe fn write_at(&mut self, idx: usize, bytes: &[u8]) {
+        debug_assert!(idx < self.units.len(), "write_at: idx out of bounds");
+        debug_assert_eq!(
+            bytes.len(),
+            self.component_layout.size(),
+            "write_at: bytes.len() != layout.size()"
+        );
+        // SAFETY (mirrors `set_component`):
+        //   * `idx < self.units.len()` — slot is reachable.
+        //   * `&mut self` ⇒ exclusive access.
+        //   * Source (`bytes`) and destination (arena slot) are disjoint
+        //     allocations; `copy_nonoverlapping` is sound.
+        //   * Slot is logically uninit (caller contract); no drop runs.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                self.units[idx].ptr(),
+                self.component_layout.size(),
+            );
+        }
+        let chunk_idx = idx / self.components_per_chunk;
+        if let Some(chunk) = self.chunks.get_mut(chunk_idx) {
+            chunk.mark_dirty();
+        }
+    }
+
+    /// Swap-removes row `idx` for byte storage + tick storage. NO
+    /// `drop_fn` invocation on either source or last slot (W-N2 tightening
+    /// of plan §7.2).
+    ///
+    /// Mirrors the existing [`Self::swap_remove`] flow over the chunked +
+    /// Unit-pointer storage but skips drop.
+    ///
+    /// # Safety (plan §7.2)
+    ///
+    /// * `idx < self.count()` — debug-asserted.
+    /// * Caller has ensured the source-row bytes were moved-out or
+    ///   explicitly dropped (per the `move_out_entity` PRECONDITION).
+    /// * Caller holds exclusive access via `&mut self`.
+    #[allow(dead_code)]
+    pub(crate) unsafe fn swap_remove_index_no_drop(&mut self, idx: usize) {
+        debug_assert!(
+            idx < self.units.len(),
+            "swap_remove_index_no_drop: idx out of bounds"
+        );
+        let last_index = self.units.len() - 1;
+
+        if idx != last_index {
+            let removed_ptr = self.units[idx].ptr();
+            let last_ptr = self.units[last_index].ptr();
+
+            // SAFETY (mirrors existing `swap_remove` semantics minus the
+            // drop):
+            //   * `removed_ptr` and `last_ptr` are valid arena pointers
+            //     produced by prior `add` / `add_typed`.
+            //   * Non-overlapping: `idx != last_index`; each slot is
+            //     `component_layout.size()` bytes. They may live in
+            //     different chunks (large pools span multiple), but
+            //     `copy_nonoverlapping` does not require same allocation
+            //     — only non-overlap.
+            //   * W-N2: NO `drop_fn` invocation on either slot. Caller
+            //     has already moved or dropped the bytes per the
+            //     `move_out_entity` contract.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    last_ptr,
+                    removed_ptr,
+                    self.component_layout.size(),
+                );
+            }
+
+            // Refresh the unit's pointer (preserves the invariant that
+            // `self.units[idx].ptr()` addresses the bytes for row idx).
+            self.units[idx] = crate::ecs::memory::id_unit::Unit::new(removed_ptr);
+
+            // Tick swap — mirrors the existing `swap_remove` block.
+            // SAFETY: idx != last_index, both < self.units.len().
+            //   `&mut self` ⇒ exclusive access to the tick buffers;
+            //   no concurrent reader exists per Phase 9 SCH3.
+            unsafe {
+                let added_last = *self.added_ticks[last_index].get();
+                let changed_last = *self.changed_ticks[last_index].get();
+                *self.added_ticks[idx].get() = added_last;
+                *self.changed_ticks[idx].get() = changed_last;
+            }
+
+            let chunk_idx = idx / self.components_per_chunk;
+            if let Some(chunk) = self.chunks.get_mut(chunk_idx) {
+                chunk.mark_dirty();
+            }
+            let last_chunk_idx = last_index / self.components_per_chunk;
+            if let Some(chunk) = self.chunks.get_mut(last_chunk_idx) {
+                chunk.mark_dirty();
+            }
+        }
+        // (idx == last_index): just pop. No byte/tick movement needed.
+
+        self.units.pop();
+    }
+
+    /// Pops the last row without invoking `drop_fn` (plan §7.2 / C5).
+    /// Used by [`crate::ecs::core::archetype::archetype::Archetype::move_out_entity`]
+    /// when `removed_unit_index == last_unit_index`.
+    #[allow(dead_code)]
+    #[inline]
+    pub(crate) fn pop_entity_no_drop(&mut self) {
+        debug_assert!(!self.units.is_empty(), "pop_entity_no_drop: pool empty");
+        let last_index = self.units.len() - 1;
+        let chunk_idx = last_index / self.components_per_chunk;
+        if let Some(chunk) = self.chunks.get_mut(chunk_idx) {
+            chunk.mark_dirty();
+        }
+        // W-N2: NO `drop_fn` invocation.
+        self.units.pop();
+    }
+
+    // ── Phase 10 STORE3 — tick buffer accessors ─────────────────────────────
+    //
+    // Wave B Step 5 lands the accessors. Wave C consumers (`Added<C>`,
+    // `Changed<C>`, `Mut<T>::deref_mut`) wire the per-row tick reads
+    // and the deref-time tick writes. Until Wave C lands, the four
+    // accessors below are unused; the `dead_code` allow is removed
+    // when Wave C ships.
+
+    /// Returns a base pointer to the per-row `added_ticks` buffer.
+    ///
+    /// The pointer is valid for `self.capacity()` `UnsafeCell<Tick>`
+    /// slots and stays alive for the pool's lifetime (`Box<[_]>` —
+    /// never reallocated post-construction). Wave C `Added<C>::set_table_*`
+    /// caches this base pointer in its `Fetch<'w>` and indexes per-row.
+    #[allow(dead_code)]
+    #[inline]
+    pub(crate) fn added_ticks_ptr(&self) -> *const UnsafeCell<Tick> {
+        self.added_ticks.as_ptr()
+    }
+
+    /// Returns a base pointer to the per-row `changed_ticks` buffer.
+    ///
+    /// Same shape and lifetime contract as [`Self::added_ticks_ptr`].
+    /// Wave C `Changed<C>::set_table_*` and `Mut<T>::deref_mut` both
+    /// reach the buffer through this pointer.
+    #[allow(dead_code)]
+    #[inline]
+    pub(crate) fn changed_ticks_ptr(&self) -> *const UnsafeCell<Tick> {
+        self.changed_ticks.as_ptr()
+    }
+
+    /// Writes the `added` tick for row `index`.
+    ///
+    /// Called on entity insertion (`Archetype::create_entity` → bundle
+    /// push) with the world's current tick.
+    ///
+    /// # Safety
+    ///
+    /// * `index < self.count()` — the slot must be live (initialised by
+    ///   a prior `add` / `add_typed`).
+    /// * The caller holds exclusive write access to this `(archetype,
+    ///   component)` per Phase 9 SCH3 (the scheduler's conflict graph
+    ///   guarantees no concurrent reader of the same slot exists).
+    #[inline]
+    pub(crate) unsafe fn write_added_tick(&self, index: usize, tick: Tick) {
+        debug_assert!(index < self.added_ticks.len());
+        // SAFETY: caller asserts `index < self.count() <= self.added_ticks.len()`
+        // and Phase 9 SCH3 exclusivity on this `(archetype, component)`.
+        // `UnsafeCell::get()` produces a `*mut Tick` to a distinct memory
+        // location per row — adjacent-row writes from sibling `par_iter`
+        // chunks are sound per Rust's abstract machine (Round 2 C3).
+        unsafe {
+            *self.added_ticks.get_unchecked(index).get() = tick;
+        }
+    }
+
+    /// Writes the `changed` tick for row `index`.
+    ///
+    /// Called on entity insertion (alongside [`Self::write_added_tick`]),
+    /// on `set_component`, and on `Mut<T>::deref_mut` (Wave C). The plan
+    /// §2.4 INIT3 path threads `current_tick` from
+    /// `EcsMaster::create_entity`.
+    ///
+    /// # Safety
+    ///
+    /// Same conditions as [`Self::write_added_tick`].
+    #[inline]
+    pub(crate) unsafe fn write_changed_tick(&self, index: usize, tick: Tick) {
+        debug_assert!(index < self.changed_ticks.len());
+        // SAFETY: caller asserts `index < self.count() <= self.changed_ticks.len()`
+        // and Phase 9 SCH3 exclusivity. Per-row `UnsafeCell<Tick>` is a
+        // distinct memory location (Round 2 C3).
+        unsafe {
+            *self.changed_ticks.get_unchecked(index).get() = tick;
+        }
+    }
+
+    /// Reads the `added` tick for row `index`.
+    ///
+    /// # Safety
+    ///
+    /// * `index < self.count()`.
+    /// * The caller holds at least shared access to this `(archetype,
+    ///   component)` per Phase 9 SCH3 — no concurrent writer is active.
+    #[allow(dead_code)]
+    #[inline]
+    pub(crate) unsafe fn read_added_tick(&self, index: usize) -> Tick {
+        debug_assert!(index < self.added_ticks.len());
+        // SAFETY: caller asserts `index < self.count() <= self.added_ticks.len()`
+        // and Phase 9 SCH3 (at least shared access — no writer). The
+        // dereferenced value is `Copy`.
+        unsafe { *self.added_ticks.get_unchecked(index).get() }
+    }
+
+    /// Reads the `changed` tick for row `index`.
+    ///
+    /// # Safety
+    ///
+    /// Same conditions as [`Self::read_added_tick`].
+    #[allow(dead_code)]
+    #[inline]
+    pub(crate) unsafe fn read_changed_tick(&self, index: usize) -> Tick {
+        debug_assert!(index < self.changed_ticks.len());
+        // SAFETY: caller asserts `index < self.count() <= self.changed_ticks.len()`
+        // and Phase 9 SCH3 (at least shared access — no writer).
+        unsafe { *self.changed_ticks.get_unchecked(index).get() }
+    }
+
+    // ── Phase 12.5 Opt-A2 — batch reserve / write accessors (C-N1) ──────────
+    //
+    // §5.6 of the spawn-optimisations plan. The batch path reserves
+    // capacity, writes payload bytes directly into pre-validated arena
+    // slots, then commits `units` and stamps `(added, changed)` ticks in
+    // tight loops. All accessors are `pub(crate)` — consumed exclusively
+    // by `Archetype::reserve_capacity`, `SpawnBatchCommand::apply`, and
+    // `ComponentPoolBundle::commit_units_batch` / `fill_ticks_batch`.
+
+    /// Phase 12.5 Opt-A2 (C-N1): returns `true` iff this pool can reserve
+    /// `n` more rows (i.e. `count + n ≤ max_components`).
+    ///
+    /// Cheap inline check used by `Archetype::reserve_capacity` to
+    /// pre-validate the entire bundle before any pool is mutated
+    /// (two-phase commit; mirrors `can_push_entity_components`).
+    #[inline]
+    pub(crate) fn can_reserve(&self, n: usize) -> bool {
+        self.units
+            .len()
+            .checked_add(n)
+            .is_some_and(|end| end <= self.max_components)
+    }
+
+    /// Phase 12.5 Opt-A2 (C-N1): returns `(current_count, max_components)`
+    /// for diagnostic / error-reporting paths (`EcsError::ArchetypePoolCapacityExceeded`).
+    #[inline]
+    pub(crate) fn len_for_reserve(&self) -> (usize, usize) {
+        (self.units.len(), self.max_components)
+    }
+
+    /// Phase 12.5 Opt-A2 (SBO13 / §5.6): writes `bytes` into the slot at
+    /// `idx` WITHOUT touching `units`, WITHOUT capacity checks, and
+    /// WITHOUT invoking any drop (the slot is logically uninit).
+    ///
+    /// The batch path uses this for every row in `[start_row, start_row + n)`
+    /// after `reserve_capacity` has validated the range and before
+    /// `commit_units` extends `units.len()`. Slot bookkeeping (units +
+    /// chunk dirty mark) is deferred to [`Self::commit_units`].
+    ///
+    /// # Safety
+    ///
+    /// * `idx < max_components` — caller pre-validated via `can_reserve`
+    ///   plus `reserve_capacity`'s archetype-level guard.
+    /// * `idx >= units.len()` (i.e. the slot is uninit and not yet
+    ///   committed). After the matching `commit_units(start_row, n)` call
+    ///   the slot becomes addressable.
+    /// * `bytes.len() == self.component_layout().size()` — debug-asserted.
+    /// * `bytes` forms a valid representation of the pool's registered
+    ///   type (raw-API contract identical to `write_at`).
+    /// * Caller holds exclusive `&mut self` access.
+    #[inline]
+    pub(crate) unsafe fn write_at_unchecked_initialized(
+        &mut self,
+        idx: usize,
+        bytes: &[u8],
+    ) {
+        debug_assert!(
+            idx < self.max_components,
+            "write_at_unchecked_initialized: idx {} >= max_components {}",
+            idx,
+            self.max_components
+        );
+        debug_assert_eq!(
+            bytes.len(),
+            self.component_layout.size(),
+            "write_at_unchecked_initialized: bytes.len() != layout.size()"
+        );
+        // SAFETY (mirrors `add` / `write_at`):
+        //   * `idx < max_components` ⇒ destination is within the pool
+        //     allocation.
+        //   * Source (caller stack) and destination (arena slot) live in
+        //     disjoint allocations; `copy_nonoverlapping` is sound.
+        //   * `&mut self` ⇒ exclusive access.
+        //   * The slot is logically uninit by the caller's pre-reserve
+        //     contract; no drop runs.
+        unsafe {
+            let dst = self
+                .buffer
+                .as_ptr()
+                .add(idx * self.component_layout.size());
+            std::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                dst,
+                self.component_layout.size(),
+            );
+        }
+    }
+
+    /// Phase 12.5 Opt-A2 (§5.6): commits `n` rows starting at `start_row`
+    /// into `units` after the batch path has written every row's bytes via
+    /// [`Self::write_at_unchecked_initialized`].
+    ///
+    /// Pre: `start_row == self.count()` (the rows must land contiguously
+    /// at the tail). Chunk dirty marks are stamped for every chunk the
+    /// range touches.
+    ///
+    /// # Phase 12.6 inline hint
+    ///
+    /// `#[inline]` so the count=1 caller (`SpawnAtCommand::apply`) inlines
+    /// the body and the compiler folds away the per-row constants —
+    /// `count == 1` collapses the loop, the chunk range becomes a single
+    /// `first_chunk = last_chunk` iteration, and the `get_unchecked_mut`
+    /// path below eliminates the `Vec::get_mut` `Option` branch.
+    #[inline]
+    pub(crate) fn commit_units(&mut self, start_row: usize, count: usize) {
+        // Defense-in-depth: `count == 0` would underflow the
+        // `(start_row + count - 1) / components_per_chunk` expression
+        // below. Callers (`SpawnBatchCommand::apply`) early-return on
+        // `n == 0`, but the public method must still be safe to call.
+        if count == 0 {
+            return;
+        }
+        debug_assert_eq!(
+            start_row,
+            self.units.len(),
+            "commit_units: start_row {} != current count {} (rows must extend the tail)",
+            start_row,
+            self.units.len()
+        );
+        debug_assert!(
+            start_row + count <= self.max_components,
+            "commit_units: range past max_components"
+        );
+
+        // Fused reserve + raw-pointer-write + set_len. Each
+        // `Unit { ptr: buffer.add(i * stride) }` is a `#[repr(transparent)]`
+        // wrapper around a `*mut u8`, so the inner loop is a strided
+        // pointer increment — the compiler vectorises it.
+        self.units.reserve(count);
+        let stride = self.component_layout.size();
+        // SAFETY (commit_units / SBO13):
+        //   * `self.units.reserve(count)` above guarantees capacity for
+        //     `count` more `Unit` writes past the current `len()`.
+        //   * `start_row == self.units.len()` (debug-asserted), so the
+        //     written range is exactly `[len, len + count)` — uninitialised
+        //     slots inside the existing capacity; no aliasing with
+        //     reachable `&Unit` views.
+        //   * `start_row + count <= max_components` ⇒ every computed
+        //     `base.add(i * stride)` lies inside the arena buffer
+        //     allocation, matching the `write_at_unchecked_initialized`
+        //     writes performed by the caller for the same slots.
+        //   * `Unit` is `#[repr(transparent)]` over `*mut u8` so the raw
+        //     write deposits a valid `Unit` representation.
+        unsafe {
+            let base = self.buffer.as_ptr();
+            let units_ptr = self.units.as_mut_ptr();
+            for i in 0..count {
+                let component_ptr = base.add((start_row + i) * stride);
+                std::ptr::write(units_ptr.add(start_row + i), Unit::new(component_ptr));
+            }
+            self.units.set_len(start_row + count);
+        }
+
+        // Mark every touched chunk dirty (range may span multiple).
+        //
+        // Phase 12.6: `chunks: Vec<Chunk>` is sized to `num_chunks` at
+        // pool construction (see `ComponentPool::new` — `chunks.push` in
+        // an init loop) and is NEVER mutated thereafter. `start_row +
+        // count <= max_components` (debug-asserted above) implies
+        // `last_chunk < num_chunks == chunks.len()`, so the `get_mut`
+        // bounds check is provably-true on every call — use
+        // `get_unchecked_mut` to eliminate the `Option` branch.
+        let first_chunk = start_row / self.components_per_chunk;
+        let last_chunk = (start_row + count - 1) / self.components_per_chunk;
+        debug_assert!(
+            last_chunk < self.chunks.len(),
+            "commit_units: chunk index {} >= chunks.len() {} (pool construction invariant)",
+            last_chunk,
+            self.chunks.len()
+        );
+        // SAFETY:
+        //   * `chunks` is fixed-size at pool construction (`chunks.push`
+        //     in init loop, never extended).
+        //   * `last_chunk < chunks.len()` by the debug-asserted invariant
+        //     above (precondition: `start_row + count <= max_components
+        //     == num_chunks * components_per_chunk`).
+        //   * `&mut self` ⇒ exclusive access; no concurrent reader of
+        //     `self.chunks`.
+        unsafe {
+            for chunk_idx in first_chunk..=last_chunk {
+                self.chunks.get_unchecked_mut(chunk_idx).mark_dirty();
+            }
+        }
+    }
+
+    /// Phase 12.5 Opt-A2 (§5.6 / STORE4): writes `tick` into both
+    /// `added_ticks[i]` and `changed_ticks[i]` for every `i` in
+    /// `[start_row, start_row + count)`.
+    ///
+    /// Vectorisable: the buffers are `Box<[UnsafeCell<Tick>]>` and
+    /// `UnsafeCell<Tick>` is `#[repr(transparent)]` over `Tick`
+    /// (4 B `u32`). The compiler lowers the inner loop to a
+    /// SIMD-friendly streaming write.
+    ///
+    /// Phase 12.6 — `#[inline]` so the count=1 caller
+    /// (`SpawnAtCommand::apply`) inlines the body and the compiler folds
+    /// the loop down to two unchecked-cell stores.
+    #[inline]
+    pub(crate) fn fill_ticks(&mut self, start_row: usize, count: usize, tick: Tick) {
+        // Defense-in-depth: skip the entire body on a zero-count call.
+        // Mirrors the `commit_units` guard above; keeps the public API
+        // total even for callers that have not pre-filtered `n == 0`.
+        if count == 0 {
+            return;
+        }
+        debug_assert!(
+            start_row + count <= self.added_ticks.len(),
+            "fill_ticks: range past added_ticks buffer"
+        );
+        debug_assert!(
+            start_row + count <= self.changed_ticks.len(),
+            "fill_ticks: range past changed_ticks buffer"
+        );
+        // SAFETY (STORE4 + SCH3):
+        //   * Range `[start_row, start_row + count)` is in-bounds for both
+        //     tick buffers (debug-asserted above).
+        //   * `&mut self` ⇒ exclusive write access; per-row `UnsafeCell<Tick>`
+        //     is a distinct memory location per Rust's abstract machine.
+        unsafe {
+            let added_base = self.added_ticks.as_ptr();
+            let changed_base = self.changed_ticks.as_ptr();
+            for i in 0..count {
+                *(*added_base.add(start_row + i)).get() = tick;
+                *(*changed_base.add(start_row + i)).get() = tick;
+            }
+        }
+    }
 }
+
+// SAFETY (SEND10 — Phase 9 §2.4, §9.1, §11.3 + Phase 10 STORE3 / Round 2 C3):
+//
+// `ComponentPool` becomes `Send + Sync` under the Phase 9 contract:
+//
+//   - Pool reads (component access on the Query iteration path) take
+//     non-overlapping byte ranges between parallel systems, enforced by the
+//     scheduler's `ConflictGraph` (SCH3) on the declared `Access` surface.
+//     Two concurrently running systems never hold mutable references into the
+//     same `ComponentPool` byte range.
+//   - The `arena: *const Arena` field is treated as opaque inside the pool
+//     (only the pool's own `new` ever dereferences it; that path runs at
+//     archetype creation, which is dispatcher-only via `ArchetypeMaster::
+//     create_archetype` under the apply window — §9.4 audit row 1).
+//   - Pool growth / extension (any path that may invoke `arena.allocate_*`)
+//     is restricted to the apply window by the ALLOC1 discipline; no
+//     concurrent reader can observe a half-grown pool.
+//   - `Vec<Unit>` and `Vec<Chunk>` mutations occur only on `&mut self` paths
+//     (`add`, `pop`, `swap_remove`, `set_component`); the dispatcher
+//     serialises these under the apply window. Worker reads use `&self`
+//     entry points (`get_raw`, `chunk_units`, `buffer_ptr`, `count`).
+//   - Phase 10: the `added_ticks` / `changed_ticks` buffers are
+//     `Box<[UnsafeCell<Tick>]>`. `UnsafeCell<Tick>` is `!Sync` on its own,
+//     but the pool exposes the cells only through unsafe accessors
+//     (`write_added_tick`, `write_changed_tick`, `read_added_tick`,
+//     `read_changed_tick`) whose contract requires the caller hold the
+//     SCH3 exclusivity for writes (or shared access for reads). Each
+//     `UnsafeCell<Tick>` is a distinct memory location per Rust's abstract
+//     machine — adjacent-row writes from `par_iter` chunks on the same
+//     cache line are sound (Round 2 C3 / Rustonomicon §"Data Races and
+//     Race Conditions"). The MESI cache-line ping-pong is a perf cost,
+//     not UB.
+unsafe impl Send for ComponentPool {}
+unsafe impl Sync for ComponentPool {}
 
 impl Drop for ComponentPool {
     // PANIC POLICY:

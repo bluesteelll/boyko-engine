@@ -174,10 +174,9 @@ fn build_resources_with_64() -> Resources {
 // resources()` → `Resources::get_ptr_by_id` (W1 cached id) → `&*ptr`. The
 // closure is dispatched via `EcsMaster::run_closure_once` so the per-call
 // SystemParam machinery is exercised — initialization is amortised on the
-// first call, but `run_closure_once` rebuilds the `FnOnceSystem` each time
-// (it's a one-shot wrapper).
-//
-// W3 NOTE: turbofish on the param tuple is required in Phase 8a.
+// first call, but `run_closure_once` rebuilds the `FunctionSystem` each time
+// (it's a one-shot wrapper; hoist a `FunctionSystem` and call
+// `run_cached_system` to skip the cold init for subsequent calls).
 //
 // Target: ≤ 3 ns/op for the get_param call itself. The `run_closure_once`
 // path adds dispatch overhead; the measurement therefore captures
@@ -189,7 +188,7 @@ fn bench_res_get_param_hot(c: &mut Criterion) {
 
     c.bench_function("res_get_param_hot", |b| {
         b.iter(|| {
-            ecs.run_closure_once::<Res<'_, ResBenchA>, _, _>(|r| {
+            ecs.run_closure_once(|r: Res<ResBenchA>| {
                 // Deref the borrow; black_box defeats const-fold of the
                 // inner value through the static slab pointer.
                 black_box((*r).0);
@@ -210,7 +209,7 @@ fn bench_resmut_get_param_hot(c: &mut Criterion) {
 
     c.bench_function("resmut_get_param_hot", |b| {
         b.iter(|| {
-            ecs.run_closure_once::<ResMut<'_, ResBenchB>, _, _>(|mut r| {
+            ecs.run_closure_once(|mut r: ResMut<ResBenchB>| {
                 // Touch the value so the DerefMut path is not elided.
                 r.0 = r.0.wrapping_add(1);
                 black_box(r.0);
@@ -236,30 +235,27 @@ fn bench_tuple4_get_param_hot(c: &mut Criterion) {
 
     c.bench_function("tuple4_get_param_hot", |b| {
         b.iter(|| {
-            ecs.run_closure_once::<(
-                Res<'_, R1>,
-                Res<'_, R2>,
-                Res<'_, R3>,
-                Res<'_, R4>,
-            ), _, _>(|(r1, r2, r3, r4)| {
-                // Sum the four fields through Deref; black_box prevents
-                // the compiler from realising the result is unused.
-                let s = (*r1).0
-                    .wrapping_add((*r2).0)
-                    .wrapping_add((*r3).0)
-                    .wrapping_add((*r4).0);
-                black_box(s);
-            });
+            ecs.run_closure_once(
+                |(r1, r2, r3, r4): (Res<R1>, Res<R2>, Res<R3>, Res<R4>)| {
+                    // Sum the four fields through Deref; black_box prevents
+                    // the compiler from realising the result is unused.
+                    let s = (*r1).0
+                        .wrapping_add((*r2).0)
+                        .wrapping_add((*r3).0)
+                        .wrapping_add((*r4).0);
+                    black_box(s);
+                },
+            );
         });
     });
 }
 
 // --- §18.5 #4: bench_empty_system_run_once ---
 //
-// `ecs.run_closure_once::<(), _, _>(|()| ())` — isolates the per-call
-// `FnOnceSystem` dispatch overhead with zero params. Result is the
-// baseline cost of `run_system_once` machinery (initialize +
-// UnsafeEcsCell mint + run_unsafe trampoline).
+// `ecs.run_closure_once(|| ())` — isolates the per-call `FunctionSystem`
+// dispatch overhead with zero params. Result is the baseline cost of
+// `run_system` machinery (initialize + UnsafeEcsCell mint + run_unsafe
+// trampoline + apply).
 //
 // Target: ≤ 5 ns dispatch overhead.
 fn bench_empty_system_run_once(c: &mut Criterion) {
@@ -267,7 +263,7 @@ fn bench_empty_system_run_once(c: &mut Criterion) {
 
     c.bench_function("empty_system_run_once", |b| {
         b.iter(|| {
-            ecs.run_closure_once::<(), _, _>(|()| {
+            ecs.run_closure_once(|| {
                 black_box(());
             });
         });

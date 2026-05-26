@@ -170,6 +170,32 @@ impl ComponentMask {
         }
         false
     }
+
+    /// Returns `true` iff every one of the `MAX_COMPONENTS` (= 512) bits is set.
+    ///
+    /// Used by the Phase 9 parallel scheduler to detect "universal access"
+    /// (exclusive systems / `ApplyDeferred`) whose access surface covers the
+    /// entire component space — see `Access::is_universal`.
+    #[inline]
+    pub fn is_all_set(&self) -> bool {
+        for i in 0..8 {
+            if self.blocks[i].value() != u64::MAX {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Sets every one of the `MAX_COMPONENTS` (= 512) bits to 1.
+    ///
+    /// Used by the Phase 9 parallel scheduler `Access::universal()` constructor
+    /// when building the access surface for exclusive systems.
+    #[inline]
+    pub fn set_all(&mut self) {
+        for i in 0..8 {
+            self.blocks[i] = BitSet::from_value(u64::MAX);
+        }
+    }
 }
 
 /// Implement the bitwise AND operator for ComponentMask
@@ -383,5 +409,30 @@ mod tests {
     fn test_set_out_of_range_panics() {
         let mut mask = ComponentMask::new();
         mask.set(ComponentId(MAX_COMPONENTS)); // must panic
+    }
+
+    #[test]
+    fn component_mask_is_all_set_returns_true_when_full() {
+        let mut mask = ComponentMask::new();
+        assert!(!mask.is_all_set(), "empty mask must not report all-set");
+        for i in 0..MAX_COMPONENTS {
+            mask.set(ComponentId(i));
+        }
+        assert!(mask.is_all_set(), "after setting every component bit, is_all_set must be true");
+        // Unsetting any bit must flip the result.
+        mask.unset(ComponentId(257));
+        assert!(!mask.is_all_set(), "clearing any bit must drop is_all_set to false");
+    }
+
+    #[test]
+    fn component_mask_set_all_then_is_all_set() {
+        let mut mask = ComponentMask::new();
+        mask.set_all();
+        assert!(mask.is_all_set());
+        assert_eq!(mask.popcount(), MAX_COMPONENTS);
+        // Spot-check observability through `contains`.
+        for &i in &[0usize, 1, 63, 64, 127, 256, 384, 511] {
+            assert!(mask.contains(ComponentId(i)), "bit {i} must be set after set_all");
+        }
     }
 }

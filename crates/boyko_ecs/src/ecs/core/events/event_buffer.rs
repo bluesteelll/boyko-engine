@@ -1,6 +1,8 @@
 use core::cell::UnsafeCell;
 use core::mem::MaybeUninit;
-use core::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
+
+use crossbeam_utils::CachePadded;
 
 use crate::ecs::core::events::event::Event;
 use crate::ecs::core::events::event_config::EventConfig;
@@ -129,7 +131,8 @@ pub(crate) struct ThreadLanePair<E: Event> {
 
 // ── EventBuffer ──────────────────────────────────────────────────────────────
 
-/// Per-type, per-master event storage.
+/// Per-type, per-master event storage with explicit layout for cache-line
+/// discipline (Phase 12 EXT8).
 ///
 /// Owns `thread_count` writer lanes (one per worker) and a flat reader buffer
 /// of size `thread_count * capacity_per_lane` that is populated by
@@ -137,23 +140,80 @@ pub(crate) struct ThreadLanePair<E: Event> {
 ///
 /// All allocations happen once at `preregister_event` time; no allocation
 /// occurs during `send` or `update_events`.
+///
+/// # Field grouping (Phase 12 §4.2)
+///
+/// - **Cache line 0** — `frame_event_count`. Send-path hot, written on every
+///   send via `Relaxed::fetch_add`. Wrapped in [`CachePadded`] so it does NOT
+///   share a line with any reader-side field.
+/// - **Cache line 1** — read-path hot fields shared by all readers between
+///   swaps: `start_event_count` (8 B), `reader_len` (4 B), `capacity_per_lane`
+///   (4 B), `thread_count` (4 B), `reader_buf` (Box header, 16 B).
+/// - **Cache line 2+** — `lanes` Box header (16 B); each pair is 128 B
+///   (2 lines) and lives in the heap behind the box.
+#[repr(C)]
 pub(crate) struct EventBuffer<E: Event> {
-    /// One pair per worker thread. Length = `thread_count`.
-    pub(crate) lanes: Box<[ThreadLanePair<E>]>,
+    // ── Cache line 0: send-path hot ───────────────────────────────────────
+    /// Monotonic per-type send counter (Phase 12 EXT1/EXT2). `Relaxed`
+    /// `fetch_add` on every successful send. Never reset across frames.
+    /// Wrapped in `CachePadded` (64 B on x86_64) to isolate write traffic
+    /// from reader-side fields (Phase 12 C3 resolution).
+    pub(crate) frame_event_count: CachePadded<AtomicU64>,
+
+    // ── Cache line 1: read-path hot ───────────────────────────────────────
+    /// Snapshot of `frame_event_count` at the moment of the last swap
+    /// (Phase 12 EXT3). `Release`-stored by `swap_and_flatten`; `Acquire`-
+    /// loaded by `EventReader::read` / `is_empty` / `len`.
+    pub(crate) start_event_count: AtomicU64,
+    /// Number of initialised elements in `reader_buf` after the last swap.
+    /// `Release`-stored by `swap_and_flatten`; `Acquire`-loaded by
+    /// `events::<E>()` and Phase 12 `EventReader`.
+    pub(crate) reader_len: AtomicU32,
+    /// Mirror of `EventConfig::capacity_per_lane`. Kept for diagnostics and
+    /// future APIs; not read in Phase 6 hot paths.
+    #[allow(dead_code)]
+    pub(crate) capacity_per_lane: u32,
+    /// Mirror of `EventConfig::thread_count`. Cached by `EventReaderState` /
+    /// `EventWriterState` at init time so the lane router does not chase
+    /// through the slot on every call (Phase 12 W1 resolution).
+    pub(crate) thread_count: u32,
+    /// Padding to align the trailing `Box<[..]>` header to 8 B and reserve
+    /// space inside the read-hot cache line.
+    _pad_line1: u32,
     /// Flat read buffer. Size = `thread_count * capacity_per_lane`.
     /// Populated by `swap_and_flatten`; ownership is exclusively within
     /// `EventBuffer` — `update_events` takes `&mut EventDispatcher`, giving
     /// unique access.
     pub(crate) reader_buf: Box<[MaybeUninit<E>]>,
-    /// Number of initialised elements in `reader_buf` after the last swap.
-    /// `Release`-stored by `swap_and_flatten`; `Acquire`-loaded by `events::<E>()`.
-    pub(crate) reader_len: AtomicU32,
-    // Kept for diagnostics and future APIs; not read in Phase 6 hot paths.
-    #[allow(dead_code)]
-    pub(crate) capacity_per_lane: u32,
-    pub(crate) thread_count: u32,
+
+    // ── Cache line 2+: per-thread lanes ───────────────────────────────────
+    /// One pair per worker thread. Length = `thread_count`. Each pair is
+    /// 128 B (2 cache lines) and lives in the heap behind the Box.
+    pub(crate) lanes: Box<[ThreadLanePair<E>]>,
     _marker: core::marker::PhantomData<E>,
 }
+
+// ── EventBuffer layout asserts (Phase 12 EXT8 / C3) ──────────────────────────
+//
+// Pin the layout so the send-path `frame_event_count` lives on its own cache
+// line and the reader-side fields (`start_event_count` + `reader_len`) share
+// a different line. Each assert references `LayoutAssertEvent` so that the
+// generic offsets are evaluated at monomorphisation time.
+
+const _: () = assert!(
+    core::mem::offset_of!(EventBuffer<LayoutAssertEvent>, frame_event_count) == 0,
+    "frame_event_count must be the first field of EventBuffer<E>",
+);
+const _: () = assert!(
+    core::mem::offset_of!(EventBuffer<LayoutAssertEvent>, start_event_count) >= 64,
+    "start_event_count must live on a different cache line than frame_event_count",
+);
+const _: () = assert!(
+    core::mem::offset_of!(EventBuffer<LayoutAssertEvent>, reader_len)
+        - core::mem::offset_of!(EventBuffer<LayoutAssertEvent>, start_event_count)
+        < 64,
+    "start_event_count and reader_len must share a cache line (both swap-Release)",
+);
 
 impl<E: Event> EventBuffer<E> {
     /// Allocates a new buffer for the given configuration.
@@ -200,11 +260,14 @@ impl<E: Event> EventBuffer<E> {
             .collect();
 
         Ok(EventBuffer {
-            lanes,
-            reader_buf,
+            frame_event_count: CachePadded::new(AtomicU64::new(0)),
+            start_event_count: AtomicU64::new(0),
             reader_len: AtomicU32::new(0),
             capacity_per_lane: capacity,
             thread_count,
+            _pad_line1: 0,
+            reader_buf,
+            lanes,
             _marker: core::marker::PhantomData,
         })
     }
@@ -263,6 +326,13 @@ impl<E: Event> EventBuffer<E> {
         }
         // Release: matches AcqRel on write_len.swap in swap_and_flatten (U9).
         lane.write_len.store(len + 1, Ordering::Release);
+        // Phase 12 EXT6: bump per-type monotonic send counter AFTER the
+        // Release-store on write_len. CachePadded keeps this fetch_add on its
+        // own cache line, isolating it from reader-side fields (C3).
+        // Acquire/Release ordering is not required here — readers only observe
+        // post-swap state via start_event_count, which is updated under the
+        // &mut EventDispatcher barrier in swap_and_flatten.
+        self.frame_event_count.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 
@@ -311,6 +381,8 @@ impl<E: Event> EventBuffer<E> {
         }
         // Release: matches AcqRel on write_len.swap in swap_and_flatten (U9).
         lane.write_len.store(len + n, Ordering::Release);
+        // Phase 12 EXT6 batch path: one Relaxed fetch_add for the whole batch.
+        self.frame_event_count.fetch_add(n as u64, Ordering::Relaxed);
         Ok(())
     }
 }

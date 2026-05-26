@@ -1,0 +1,16 @@
+error[E0277]: the trait bound `Foo: BundleSealed` is not satisfied
+  --> tests/bundle_compile_fail/manual_impl_blocked.rs:15:17
+   |
+15 | impl Bundle for Foo {
+   |                 ^^^ unsatisfied trait bound
+   |
+help: the trait `BundleSealed` is not implemented for `Foo`
+  --> tests/bundle_compile_fail/manual_impl_blocked.rs:13:1
+   |
+13 | struct Foo;
+   | ^^^^^^^^^^
+note: required by a bound in `Bundle`
+  --> src/ecs/core/bundle/bundle.rs
+   |
+   | pub trait Bundle: sealed::BundleSealed + Send + Sync + Unpin + 'static {
+   |                   ^^^^^^^^^^^^^^^^^^^^ required by this bound in `Bundle`

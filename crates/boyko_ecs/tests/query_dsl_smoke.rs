@@ -72,18 +72,16 @@ fn run_closure_once_with_query_yields_components() {
     let probe_x = sum_x.clone();
     let probe_y = sum_y.clone();
 
-    ecs.run_closure_once::<Query<'_, '_, &T1Position>, _, _>(
-        move |q: Query<'_, '_, &T1Position>| {
-            for pos in &q {
-                probe_count.fetch_add(1, Ordering::Relaxed);
-                // f32 sums via the AtomicU32 probe: encode the integer
-                // sum by reading `pos.x as u32` / `pos.y as u32` — the
-                // test inputs (1.0..4.0) round-trip losslessly.
-                probe_x.fetch_add(pos.x as u32, Ordering::Relaxed);
-                probe_y.fetch_add(pos.y as u32, Ordering::Relaxed);
-            }
-        },
-    );
+    ecs.run_closure_once(move |q: Query<'_, '_, &T1Position>| {
+        for pos in &q {
+            probe_count.fetch_add(1, Ordering::Relaxed);
+            // f32 sums via the AtomicU32 probe: encode the integer
+            // sum by reading `pos.x as u32` / `pos.y as u32` — the
+            // test inputs (1.0..4.0) round-trip losslessly.
+            probe_x.fetch_add(pos.x as u32, Ordering::Relaxed);
+            probe_y.fetch_add(pos.y as u32, Ordering::Relaxed);
+        }
+    });
 
     assert_eq!(
         count.load(Ordering::Relaxed),
@@ -124,25 +122,21 @@ fn run_closure_once_with_mut_query_mutates() {
         .expect("spawn 2 must succeed");
 
     // Write phase: bump every x by 10.
-    ecs.run_closure_once::<Query<'_, '_, &mut T2Position>, _, _>(
-        move |mut q: Query<'_, '_, &mut T2Position>| {
-            for pos in &mut q {
-                pos.x += 10.0;
-            }
-        },
-    );
+    ecs.run_closure_once(move |mut q: Query<'_, '_, &mut T2Position>| {
+        for pos in &mut q {
+            pos.x += 10.0;
+        }
+    });
 
     // Read phase: confirm the bumps are visible through a fresh `Query`.
     // The values must now be (11, 2) and (13, 4), summing to 24 on x.
     let sum_x = Arc::new(AtomicU32::new(0));
     let probe_x = sum_x.clone();
-    ecs.run_closure_once::<Query<'_, '_, &T2Position>, _, _>(
-        move |q: Query<'_, '_, &T2Position>| {
-            for pos in &q {
-                probe_x.fetch_add(pos.x as u32, Ordering::Relaxed);
-            }
-        },
-    );
+    ecs.run_closure_once(move |q: Query<'_, '_, &T2Position>| {
+        for pos in &q {
+            probe_x.fetch_add(pos.x as u32, Ordering::Relaxed);
+        }
+    });
 
     assert_eq!(
         sum_x.load(Ordering::Relaxed),
@@ -185,14 +179,12 @@ fn run_closure_once_with_tuple_query() {
     let probe_pos = pos_sum.clone();
     let probe_vel = vel_sum.clone();
 
-    ecs.run_closure_once::<Query<'_, '_, (&T3Position, &T3Velocity)>, _, _>(
-        move |q: Query<'_, '_, (&T3Position, &T3Velocity)>| {
-            for (pos, vel) in &q {
-                probe_pos.fetch_add(pos.x as u32, Ordering::Relaxed);
-                probe_vel.fetch_add(vel.dx as u32, Ordering::Relaxed);
-            }
-        },
-    );
+    ecs.run_closure_once(move |q: Query<'_, '_, (&T3Position, &T3Velocity)>| {
+        for (pos, vel) in &q {
+            probe_pos.fetch_add(pos.x as u32, Ordering::Relaxed);
+            probe_vel.fetch_add(vel.dx as u32, Ordering::Relaxed);
+        }
+    });
 
     assert_eq!(
         pos_sum.load(Ordering::Relaxed),
@@ -244,13 +236,11 @@ fn run_closure_once_with_with_filter() {
     let sum = Arc::new(AtomicU32::new(0));
     let probe = sum.clone();
 
-    ecs.run_closure_once::<Query<'_, '_, &T4Position, With<T4Marker>>, _, _>(
-        move |q: Query<'_, '_, &T4Position, With<T4Marker>>| {
-            for pos in &q {
-                probe.fetch_add(pos.x as u32, Ordering::Relaxed);
-            }
-        },
-    );
+    ecs.run_closure_once(move |q: Query<'_, '_, &T4Position, With<T4Marker>>| {
+        for pos in &q {
+            probe.fetch_add(pos.x as u32, Ordering::Relaxed);
+        }
+    });
 
     assert_eq!(
         sum.load(Ordering::Relaxed),
@@ -298,14 +288,12 @@ fn run_closure_once_with_without_filter() {
     let probe_sum = sum.clone();
     let probe_count = count.clone();
 
-    ecs.run_closure_once::<Query<'_, '_, &T5Position, Without<T5Frozen>>, _, _>(
-        move |q: Query<'_, '_, &T5Position, Without<T5Frozen>>| {
-            for pos in &q {
-                probe_count.fetch_add(1, Ordering::Relaxed);
-                probe_sum.fetch_add(pos.x as u32, Ordering::Relaxed);
-            }
-        },
-    );
+    ecs.run_closure_once(move |q: Query<'_, '_, &T5Position, Without<T5Frozen>>| {
+        for pos in &q {
+            probe_count.fetch_add(1, Ordering::Relaxed);
+            probe_sum.fetch_add(pos.x as u32, Ordering::Relaxed);
+        }
+    });
 
     assert_eq!(
         count.load(Ordering::Relaxed),
@@ -376,14 +364,12 @@ fn run_closure_once_with_or_filter() {
     // resolution unambiguous.
     type T6Filter = Or<(With<T6Player>, With<T6Enemy>)>;
 
-    ecs.run_closure_once::<Query<'_, '_, &T6Position, T6Filter>, _, _>(
-        move |q: Query<'_, '_, &T6Position, T6Filter>| {
-            for pos in &q {
-                probe_count.fetch_add(1, Ordering::Relaxed);
-                probe_sum.fetch_add(pos.x as u32, Ordering::Relaxed);
-            }
-        },
-    );
+    ecs.run_closure_once(move |q: Query<'_, '_, &T6Position, T6Filter>| {
+        for pos in &q {
+            probe_count.fetch_add(1, Ordering::Relaxed);
+            probe_sum.fetch_add(pos.x as u32, Ordering::Relaxed);
+        }
+    });
 
     assert_eq!(
         count.load(Ordering::Relaxed),
@@ -426,16 +412,14 @@ fn iter_into_iterator_syntax_works() {
     let sum = Arc::new(AtomicU32::new(0));
     let probe = sum.clone();
 
-    ecs.run_closure_once::<Query<'_, '_, &T7Position>, _, _>(
-        move |q: Query<'_, '_, &T7Position>| {
-            // The IntoIterator-for-&Query impl is the path under test:
-            // `&q` borrows shared; `.into_iter()` returns a `QueryIter`;
-            // the for-loop yields `&T7Position` per row.
-            for pos in &q {
-                probe.fetch_add(pos.x as u32, Ordering::Relaxed);
-            }
-        },
-    );
+    ecs.run_closure_once(move |q: Query<'_, '_, &T7Position>| {
+        // The IntoIterator-for-&Query impl is the path under test:
+        // `&q` borrows shared; `.into_iter()` returns a `QueryIter`;
+        // the for-loop yields `&T7Position` per row.
+        for pos in &q {
+            probe.fetch_add(pos.x as u32, Ordering::Relaxed);
+        }
+    });
 
     assert_eq!(
         sum.load(Ordering::Relaxed),
@@ -467,24 +451,20 @@ fn iter_mut_into_iterator_syntax_works() {
         .expect("spawn must succeed");
 
     // Mutate every row through the IntoIterator-for-&mut-Query path.
-    ecs.run_closure_once::<Query<'_, '_, &mut T8Position>, _, _>(
-        move |mut q: Query<'_, '_, &mut T8Position>| {
-            for pos in &mut q {
-                pos.x *= 100.0;
-            }
-        },
-    );
+    ecs.run_closure_once(move |mut q: Query<'_, '_, &mut T8Position>| {
+        for pos in &mut q {
+            pos.x *= 100.0;
+        }
+    });
 
     // Verify the mutations rounded through the world.
     let sum = Arc::new(AtomicU32::new(0));
     let probe = sum.clone();
-    ecs.run_closure_once::<Query<'_, '_, &T8Position>, _, _>(
-        move |q: Query<'_, '_, &T8Position>| {
-            for pos in &q {
-                probe.fetch_add(pos.x as u32, Ordering::Relaxed);
-            }
-        },
-    );
+    ecs.run_closure_once(move |q: Query<'_, '_, &T8Position>| {
+        for pos in &q {
+            probe.fetch_add(pos.x as u32, Ordering::Relaxed);
+        }
+    });
 
     assert_eq!(
         sum.load(Ordering::Relaxed),
@@ -524,15 +504,13 @@ fn empty_query_yields_nothing() {
     let probe_body = body_ran.clone();
     let probe_rows = row_count.clone();
 
-    ecs.run_closure_once::<Query<'_, '_, &T9Position>, _, _>(
-        move |q: Query<'_, '_, &T9Position>| {
-            // Mark that the closure body did run.
-            probe_body.fetch_add(1, Ordering::Relaxed);
-            for _ in &q {
-                probe_rows.fetch_add(1, Ordering::Relaxed);
-            }
-        },
-    );
+    ecs.run_closure_once(move |q: Query<'_, '_, &T9Position>| {
+        // Mark that the closure body did run.
+        probe_body.fetch_add(1, Ordering::Relaxed);
+        for _ in &q {
+            probe_rows.fetch_add(1, Ordering::Relaxed);
+        }
+    });
 
     assert_eq!(
         body_ran.load(Ordering::Relaxed),
@@ -580,14 +558,12 @@ fn intra_system_conflict_query_mut_query_ref_same_component_panics() {
     // tuple under test. The tuple `init_access` walks elements in order;
     // the first element registers a write; the second's read collides
     // and panics in `intra_system_conflict_panic` with `boyko-B0002`.
-    ecs.run_closure_once::<
-        (
+    ecs.run_closure_once(
+        |(_w, _r): (
             Query<'_, '_, &mut T10Position>,
             Query<'_, '_, &T10Position>,
-        ),
-        _,
-        _,
-    >(|(_w, _r)| {
-        // Unreachable — `init_access` panics before any closure body runs.
-    });
+        )| {
+            // Unreachable — `init_access` panics before any closure body runs.
+        },
+    );
 }

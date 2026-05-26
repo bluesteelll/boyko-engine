@@ -375,7 +375,7 @@ mod tests {
         set.add_resource_write(ResourceId(6), "ResMut<Y>")
             .expect("write must succeed");
 
-        let mut meta = SystemMeta::new("finalize_test");
+        let mut meta = SystemMeta::for_testing("finalize_test");
         set.finalize(&mut meta);
 
         // Construct a probe access that conflicts only if the meta carries

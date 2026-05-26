@@ -10,6 +10,11 @@
 
 - [Arena Allocator](memory/arena.md)
 
+# Scheduling
+
+- [Parallel Scheduler](scheduler.md)
+- [Change Detection](change_detection.md)
+
 # Reference
 
 - [Glossary](reference/glossary.md)

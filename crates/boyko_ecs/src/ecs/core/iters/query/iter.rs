@@ -52,6 +52,7 @@ use crate::ecs::core::archetype::archetype::Archetype;
 use crate::ecs::core::iters::query::data::{QueryData, ReadOnlyQueryData};
 use crate::ecs::core::iters::query::filter::QueryFilter;
 use crate::ecs::core::iters::query::state::QueryDataState;
+use crate::ecs::core::system::system_meta::SystemMeta;
 use crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell;
 use crate::ecs::identifiers::primitives::ArchetypeId;
 
@@ -88,6 +89,14 @@ pub struct QueryIter<'q, 's, D: QueryData, F: QueryFilter> {
     filter_fetch: F::Fetch<'q>,
     current_row: usize,
     current_len: usize,
+    /// Phase 10 Round 2 C2: per-system tick snapshot. Forwarded to
+    /// `set_table_*` on every archetype boundary so non-archetypal
+    /// filters (Wave C `Added<C>` / `Changed<C>`) and `Ref<T>` / `Mut<T>`
+    /// data impls can copy `last_run` / `this_run` into their `Fetch<'q>`.
+    ///
+    /// `&'s` — the meta lives in the same system-state slot as
+    /// `QueryDataState`, so they share the `'s` lifetime by construction.
+    meta: &'s SystemMeta,
     _marker: PhantomData<&'s ()>,
 }
 
@@ -100,6 +109,14 @@ where
     /// `state` must already be synced against `world` (via
     /// [`QueryDataState::update`]) — the cursor walks
     /// `state.archetype_state.matched_ids()` directly.
+    ///
+    /// # Phase 10 Round 2 C2 — `meta` parameter
+    ///
+    /// `meta` references the currently-active system's [`SystemMeta`]
+    /// (lives at `'s` because the meta slot and the state slot are both
+    /// owned by the same system struct). The cursor forwards `meta` to
+    /// every `D::set_table_readonly` / `F::set_table_readonly` call so
+    /// Wave C filters and data impls can read the per-frame tick snapshot.
     ///
     /// # Lifetime bound (`'s: 'q`)
     ///
@@ -128,6 +145,7 @@ where
     pub(crate) unsafe fn new(
         state: &'s QueryDataState<D, F>,
         world: UnsafeEcsCell<'q>,
+        meta: &'s SystemMeta,
     ) -> Self {
         Self {
             archetype_ids: state.archetype_state.matched_ids().iter(),
@@ -138,6 +156,7 @@ where
             filter_fetch: <F as QueryFilter>::init_fetch(&state.filter_state),
             current_row: 0,
             current_len: 0,
+            meta,
             _marker: PhantomData,
         }
     }
@@ -208,17 +227,46 @@ where
             //   `D: ReadOnlyQueryData` on this Iterator impl forbids
             //   instantiation with `&mut T`, which is the only `QueryData`
             //   impl that traps in `set_table_readonly`.
+            //
+            //   Phase 12.5 Track B NCD6: const-fold dispatcher. When
+            //   neither `D` nor `F` declares `NEEDS_CHANGE_DETECTION = true`,
+            //   route through the `_no_meta` variants — `self.meta` is
+            //   never loaded on this monomorphisation. The `_no_meta`
+            //   methods panic for `Ref<T>` / `Mut<T>` / `Added<C>` /
+            //   `Changed<C>` impls, so reaching them when NCD = true would
+            //   be a contract violation; the `if const` branch guarantees
+            //   that cannot happen.
+            //
+            //   Phase 10 Round 2 W7: meta-bearing branch — `self.meta`
+            //   references the active system's `SystemMeta`; non-archetypal
+            //   filters / `Ref<T>` / `Mut<T>` copy `last_run` / `this_run`
+            //   into their Fetch by value.
             unsafe {
-                <D as QueryData>::set_table_readonly(
-                    &mut self.data_fetch,
-                    self.data_state,
-                    archetype_ptr,
-                );
-                <F as QueryFilter>::set_table_readonly(
-                    &mut self.filter_fetch,
-                    self.filter_state,
-                    archetype_ptr,
-                );
+                if const { D::NEEDS_CHANGE_DETECTION || F::NEEDS_CHANGE_DETECTION } {
+                    <D as QueryData>::set_table_readonly(
+                        &mut self.data_fetch,
+                        self.data_state,
+                        archetype_ptr,
+                        self.meta,
+                    );
+                    <F as QueryFilter>::set_table_readonly(
+                        &mut self.filter_fetch,
+                        self.filter_state,
+                        archetype_ptr,
+                        self.meta,
+                    );
+                } else {
+                    <D as QueryData>::set_table_readonly_no_meta(
+                        &mut self.data_fetch,
+                        self.data_state,
+                        archetype_ptr,
+                    );
+                    <F as QueryFilter>::set_table_readonly_no_meta(
+                        &mut self.filter_fetch,
+                        self.filter_state,
+                        archetype_ptr,
+                    );
+                }
             }
 
             // Read-only probe to extract `entity_count`. The raw deref
@@ -264,6 +312,9 @@ pub struct QueryIterMut<'q, 's, D: QueryData, F: QueryFilter> {
     filter_fetch: F::Fetch<'q>,
     current_row: usize,
     current_len: usize,
+    /// Phase 10 Round 2 C2: per-system tick snapshot. Same shape and
+    /// purpose as [`QueryIter::meta`].
+    meta: &'s SystemMeta,
     _marker: PhantomData<&'s ()>,
 }
 
@@ -274,6 +325,12 @@ where
     /// Builds a fresh mutable cursor.
     ///
     /// `state` must already be synced against `world`.
+    ///
+    /// # Phase 10 Round 2 C2 — `meta` parameter
+    ///
+    /// Same contract as [`QueryIter::new`] — `meta` is forwarded to every
+    /// `D::set_table_mut` / `F::set_table_mut` call so Wave C `Mut<T>` /
+    /// `Changed<C>` impls can read the per-frame tick snapshot.
     ///
     /// # Lifetime bound (`'s: 'q`)
     ///
@@ -297,6 +354,7 @@ where
     pub(crate) unsafe fn new(
         state: &'s QueryDataState<D, F>,
         world: UnsafeEcsCell<'q>,
+        meta: &'s SystemMeta,
     ) -> Self {
         Self {
             archetype_ids: state.archetype_state.matched_ids().iter(),
@@ -307,6 +365,7 @@ where
             filter_fetch: <F as QueryFilter>::init_fetch(&state.filter_state),
             current_row: 0,
             current_len: 0,
+            meta,
             _marker: PhantomData,
         }
     }
@@ -367,17 +426,45 @@ impl<'q, 's, D: QueryData, F: QueryFilter> Iterator for QueryIterMut<'q, 's, D, 
             //   The pointer is live for `'q` (Phase 7 U1/U2 slab stability).
             //   `data_state` / `filter_state` correspond to this `D` / `F`
             //   and outlive `'s`.
+            //
+            //   Phase 12.5 Track B NCD6: const-fold dispatcher. Same
+            //   shape as the read-only cursor — when neither `D` nor
+            //   `F` declares `NEEDS_CHANGE_DETECTION = true`, route
+            //   through the `_no_meta` variants and skip the meta load
+            //   entirely. The `_no_meta` methods panic on `Ref<T>` /
+            //   `Mut<T>` / `Added<C>` / `Changed<C>` impls; the `if
+            //   const` branch guarantees they are never reached on the
+            //   wrong monomorphisation.
+            //
+            //   Phase 10 Round 2 W7: meta-bearing branch — `self.meta`
+            //   references the active system's `SystemMeta`; Wave C
+            //   consumers copy the per-frame ticks into Fetch by value.
             unsafe {
-                <D as QueryData>::set_table_mut(
-                    &mut self.data_fetch,
-                    self.data_state,
-                    archetype_ptr,
-                );
-                <F as QueryFilter>::set_table_mut(
-                    &mut self.filter_fetch,
-                    self.filter_state,
-                    archetype_ptr,
-                );
+                if const { D::NEEDS_CHANGE_DETECTION || F::NEEDS_CHANGE_DETECTION } {
+                    <D as QueryData>::set_table_mut(
+                        &mut self.data_fetch,
+                        self.data_state,
+                        archetype_ptr,
+                        self.meta,
+                    );
+                    <F as QueryFilter>::set_table_mut(
+                        &mut self.filter_fetch,
+                        self.filter_state,
+                        archetype_ptr,
+                        self.meta,
+                    );
+                } else {
+                    <D as QueryData>::set_table_mut_no_meta(
+                        &mut self.data_fetch,
+                        self.data_state,
+                        archetype_ptr,
+                    );
+                    <F as QueryFilter>::set_table_mut_no_meta(
+                        &mut self.filter_fetch,
+                        self.filter_state,
+                        archetype_ptr,
+                    );
+                }
             }
 
             // Read-only probe to extract `entity_count` from the
@@ -408,6 +495,7 @@ mod tests {
     use crate::ecs::core::component::component_registry;
     use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
     use crate::ecs::core::iters::query::filter::Without;
+    use crate::ecs::core::system::system_meta::SystemMeta;
     use crate::ecs::identifiers::primitives::ComponentId;
 
     // Component IDs 483-489 reserved for Phase 8b Step 7 iter tests.
@@ -512,12 +600,13 @@ mod tests {
         }
 
         let state = QueryDataState::<&CompA, ()>::new(&mut ecs);
+        let meta = SystemMeta::for_testing("test");
         // SAFETY (U_C1): `cell` does not outlive the `&mut ecs` borrow
         //   below — it is consumed by `iter` within this function.
         let cell = unsafe { UnsafeEcsCell::new_mutable(&mut ecs) };
         // SAFETY (Q1, QD4, U_C2): direct test of `QueryIter::next`; no
         //   aliasing accessor is live in this scope.
-        let iter = unsafe { QueryIter::<&CompA, ()>::new(&state, cell) };
+        let iter = unsafe { QueryIter::<&CompA, ()>::new(&state, cell, &meta) };
 
         let collected: Vec<u32> = iter.map(|a: &CompA| a.0).collect();
         assert_eq!(collected.len(), 3, "single archetype must yield 3 rows");
@@ -548,10 +637,11 @@ mod tests {
             "both CompA-bearing archetypes must be matched",
         );
 
+        let meta = SystemMeta::for_testing("test");
         // SAFETY (U_C1): cell consumed inside this function.
         let cell = unsafe { UnsafeEcsCell::new_mutable(&mut ecs) };
         // SAFETY (Q1, QD4, U_C2): direct cursor test, no aliasing.
-        let iter = unsafe { QueryIter::<&CompA, ()>::new(&state, cell) };
+        let iter = unsafe { QueryIter::<&CompA, ()>::new(&state, cell, &meta) };
 
         let collected: Vec<u32> = iter.map(|a: &CompA| a.0).collect();
         assert_eq!(collected.len(), 5, "two archetypes must yield 5 rows");
@@ -579,10 +669,11 @@ mod tests {
 
         let state = QueryDataState::<&CompA, ()>::new(&mut ecs);
 
+        let meta = SystemMeta::for_testing("test");
         // SAFETY (U_C1): cell consumed below.
         let cell = unsafe { UnsafeEcsCell::new_mutable(&mut ecs) };
         // SAFETY (Q1, QD4, U_C2): direct cursor test.
-        let iter = unsafe { QueryIter::<&CompA, ()>::new(&state, cell) };
+        let iter = unsafe { QueryIter::<&CompA, ()>::new(&state, cell, &meta) };
 
         let collected: Vec<u32> = iter.map(|a: &CompA| a.0).collect();
         assert_eq!(
@@ -613,11 +704,12 @@ mod tests {
         // cursor walks).
         state.archetype_state.matched_ids_mut().push(crate::ecs::identifiers::primitives::ArchetypeId(999));
 
+        let meta = SystemMeta::for_testing("test");
         // SAFETY (U_C1): cell consumed below.
         let cell = unsafe { UnsafeEcsCell::new_mutable(&mut ecs) };
         // SAFETY (Q1, QD4, U_C2, Q5): the stale id is exactly the case the
         //   `continue` branch handles.
-        let iter = unsafe { QueryIter::<&CompA, ()>::new(&state, cell) };
+        let iter = unsafe { QueryIter::<&CompA, ()>::new(&state, cell, &meta) };
 
         let collected: Vec<u32> = iter.map(|a: &CompA| a.0).collect();
         assert_eq!(
@@ -642,10 +734,11 @@ mod tests {
         // Phase 1: mutate every CompA to 99 via QueryIterMut.
         {
             let state = QueryDataState::<&mut CompA, ()>::new(&mut ecs);
+            let meta = SystemMeta::for_testing("test");
             // SAFETY (U_C1): cell consumed in this block.
             let cell = unsafe { UnsafeEcsCell::new_mutable(&mut ecs) };
             // SAFETY (Q1, QD4, U_C3): direct mut-cursor test, no aliasing.
-            let iter = unsafe { QueryIterMut::<&mut CompA, ()>::new(&state, cell) };
+            let iter = unsafe { QueryIterMut::<&mut CompA, ()>::new(&state, cell, &meta) };
             for a in iter {
                 a.0 = 99;
             }
@@ -653,10 +746,11 @@ mod tests {
 
         // Phase 2: re-read with a fresh QueryIter — every row must be 99.
         let state = QueryDataState::<&CompA, ()>::new(&mut ecs);
+        let meta = SystemMeta::for_testing("test");
         // SAFETY (U_C1): cell consumed in this block.
         let cell = unsafe { UnsafeEcsCell::new_mutable(&mut ecs) };
         // SAFETY (Q1, QD4, U_C2): no aliasing accessor live.
-        let iter = unsafe { QueryIter::<&CompA, ()>::new(&state, cell) };
+        let iter = unsafe { QueryIter::<&CompA, ()>::new(&state, cell, &meta) };
         let collected: Vec<u32> = iter.map(|a: &CompA| a.0).collect();
         assert_eq!(collected.len(), 3, "three rows must remain after mutation");
         assert!(
@@ -685,10 +779,11 @@ mod tests {
             "Without<CompB> must drop the (CompA, CompB) archetype",
         );
 
+        let meta = SystemMeta::for_testing("test");
         // SAFETY (U_C1): cell consumed below.
         let cell = unsafe { UnsafeEcsCell::new_mutable(&mut ecs) };
         // SAFETY (Q1, QD4, U_C2): direct cursor test.
-        let iter = unsafe { QueryIter::<&CompA, Without<CompB>>::new(&state, cell) };
+        let iter = unsafe { QueryIter::<&CompA, Without<CompB>>::new(&state, cell, &meta) };
 
         let collected: Vec<u32> = iter.map(|a: &CompA| a.0).collect();
         assert_eq!(
@@ -712,10 +807,11 @@ mod tests {
         let arch = ecs.create_archetype(&[COMP_A]);
         spawn_a(&mut ecs, arch, 0);
         let state = QueryDataState::<&CompA, Without<CompB>>::new(&mut ecs);
+        let meta = SystemMeta::for_testing("test");
         // SAFETY (U_C1): cell consumed below.
         let cell = unsafe { UnsafeEcsCell::new_mutable(&mut ecs) };
         // SAFETY (Q1, QD4, U_C2): const-fold path; no aliasing.
-        let iter = unsafe { QueryIter::<&CompA, Without<CompB>>::new(&state, cell) };
+        let iter = unsafe { QueryIter::<&CompA, Without<CompB>>::new(&state, cell, &meta) };
         // The very act of consuming the iterator without panic confirms that
         // the const-folded branch did not produce a runtime call that
         // mis-dispatches. The golden expand snapshot in Step 14 nails it

@@ -1,0 +1,5 @@
+error[E0596]: cannot borrow `cmds` as mutable, as it is a captured variable in a `Fn` closure
+  --> tests/par_iter_compile_fail/capture_commands.rs:40:17
+   |
+40 |         let _ = &mut cmds;
+   |                 ^^^^^^^^^ cannot borrow as mutable

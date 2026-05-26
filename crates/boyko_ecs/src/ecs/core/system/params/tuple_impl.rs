@@ -136,6 +136,27 @@ macro_rules! impl_system_param_tuple {
                     },
                 )*)
             }
+
+            /// APP3 — flush each per-element deferred buffer in
+            /// declaration order. Critical for `Commands`: without this
+            /// forwarder, `<(Commands,) as SystemParam>::apply` falls
+            /// back to the trait default no-op and the `CommandQueue`
+            /// never flushes, even for arity-1 closures like
+            /// `|cmds: Commands|` (whose `Param` is `(Commands,)` — the
+            /// `SystemParamFunction` impls always wrap in a tuple, see
+            /// `function_system_impls.rs::impl_system_param_function!`).
+            #[inline]
+            fn apply(
+                state: &mut Self::State,
+                system_meta: &SystemMeta,
+                world: &mut EcsMaster,
+            ) {
+                #[allow(non_snake_case)]
+                let ($($p,)*) = state;
+                $(
+                    <$p as SystemParam>::apply($p, system_meta, world);
+                )*
+            }
         }
     };
 }

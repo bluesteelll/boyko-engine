@@ -13,7 +13,7 @@ use boyko_ecs::ecs::core::events::event_dispatcher::EventDispatcher;
 use boyko_ecs::ecs::core::events::event_registry::register_event;
 use boyko_ecs::ecs::core::events::participants::participants::{ParticipantInfo, Participants};
 use boyko_ecs::ecs::core::events::parameters::parameters::Parameters;
-use criterion::{Criterion, criterion_group, criterion_main, BatchSize, black_box};
+use criterion::{Criterion, criterion_group, criterion_main, black_box};
 
 // ── Event stub ────────────────────────────────────────────────────────────────
 
@@ -73,19 +73,19 @@ fn bench_send_warm_cache(c: &mut Criterion) {
     let event = BenchEvent { a: 1, b: 2, c: 3, d: 4 };
 
     c.bench_function("event_send_warm_cache", |b| {
-        b.iter_batched(
-            || {
-                // Reset write_len by swapping once before each batch.
-                d.update_events();
-            },
-            |_| {
-                // Send as many events as fit in a single lane (target: < 12 ns/op).
-                for _ in 0..1000u32 {
-                    let _ = black_box(d.send(0, black_box(event)));
-                }
-            },
-            BatchSize::SmallInput,
-        )
+        b.iter(|| {
+            // Reset write_len by swapping once before each iteration. With
+            // Phase 9's `EventDispatcher: Send + Sync` impl, the
+            // `iter_batched` routine closure infers `Fn` (because `send` takes
+            // `&self`), which conflicts with the setup closure's `&mut d`
+            // borrow. Switching to `iter` collapses both phases into a single
+            // `FnMut` closure and preserves the original per-iter shape.
+            d.update_events();
+            // Send as many events as fit in a single lane (target: < 12 ns/op).
+            for _ in 0..1000u32 {
+                let _ = black_box(d.send(0, black_box(event)));
+            }
+        })
     });
 }
 

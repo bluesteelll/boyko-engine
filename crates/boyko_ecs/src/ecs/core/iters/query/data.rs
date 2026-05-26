@@ -6,14 +6,17 @@
 //!
 //! See Phase 8b plan §4 for the full design rationale.
 
+use std::cell::UnsafeCell;
 use std::marker::PhantomData;
 
 use crate::ecs::core::archetype::archetype::Archetype;
+use crate::ecs::core::change_detection::Tick;
 use crate::ecs::core::component::component::Component;
 use crate::ecs::core::component::component_mask::ComponentMask;
 use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 use crate::ecs::core::system::filtered_access_set::FilteredAccessSet;
 use crate::ecs::core::system::params::diagnostics::intra_system_conflict_panic;
+use crate::ecs::core::system::system_meta::SystemMeta;
 use crate::ecs::identifiers::primitives::ComponentId;
 
 /// Maximum tuple arity supported by [`QueryData`] variadic impls.
@@ -98,6 +101,22 @@ pub unsafe trait QueryData: Sized {
     /// `true` iff every component the impl touches is read-only.
     const IS_READ_ONLY: bool;
 
+    /// Phase 12.5 Track B NCD1 — compile-time flag for change-detection use.
+    ///
+    /// `true` iff this `QueryData` reads or writes per-row tick fields
+    /// (`Ref<T>`, `Mut<T>`, etc.). The dispatcher's NCD6 const-fold
+    /// branches on this flag at monomorphisation: `false` impls dispatch
+    /// to the `_no_meta` variant of `set_table_*` and never load
+    /// `meta.last_run` / `meta.this_run`; `true` impls dispatch to the
+    /// meta-bearing variant.
+    ///
+    /// Default: NONE — every impl MUST declare. The plan's NCD5 / I4
+    /// invariant forbids a default body because a silent fallthrough on
+    /// a future `Ref<T>`-equivalent impl would compile cleanly while
+    /// quietly disabling change detection — caught at compile time by
+    /// the lack-of-default-impl forcing explicit declaration.
+    const NEEDS_CHANGE_DETECTION: bool;
+
     /// Builds the per-system [`Self::State`].
     ///
     /// Called once per `(system, world)` pair at registration time. Performs
@@ -127,6 +146,14 @@ pub unsafe trait QueryData: Sized {
     /// Sets the `Fetch`'s cached column pointers from a read-only archetype
     /// pointer. Called by `QueryIter::next` (the read-only cursor).
     ///
+    /// # Phase 10 Round 2 W7 — `meta` parameter
+    ///
+    /// `meta` carries the active system's per-frame tick snapshot
+    /// (`last_run` / `this_run`). Wave C `Ref<T>` / `Mut<T>` impls copy
+    /// the ticks by value into `Self::Fetch<'w>`. Leaf `&T` / `&mut T`
+    /// impls accept and ignore. **`meta` is read-only INPUT** — never
+    /// stored into the `Fetch` (different lifetime domain).
+    ///
     /// # Safety
     ///
     /// * `archetype` MUST be a live `*const Archetype` for `'w`, with
@@ -136,21 +163,70 @@ pub unsafe trait QueryData: Sized {
     ///   for `&mut T` `panic!()` here as a runtime backstop; the type-level
     ///   `D: ReadOnlyQueryData` bound on `Query::iter()` prevents this in
     ///   well-typed code.
+    /// * `meta` MUST reference the currently-active system's
+    ///   [`SystemMeta`].
     unsafe fn set_table_readonly<'w>(
         fetch: &mut Self::Fetch<'w>,
         state: &Self::State,
         archetype: *const Archetype,
+        meta: &'_ SystemMeta,
     );
 
     /// Sets the `Fetch`'s cached column pointers from a write-capable
     /// archetype pointer. Called by `QueryIterMut::next` (the mutable cursor).
+    /// See [`Self::set_table_readonly`] for the `meta` contract.
     ///
     /// # Safety
     ///
     /// * `archetype` MUST be a live `*mut Archetype` for `'w`, with
     ///   write-capable provenance from `UnsafeEcsCell::archetype_ptr_mut(id)`.
     /// * `archetype` MUST contain every [`ComponentId`] in `state`.
+    /// * `meta` MUST reference the currently-active system's
+    ///   [`SystemMeta`].
     unsafe fn set_table_mut<'w>(
+        fetch: &mut Self::Fetch<'w>,
+        state: &Self::State,
+        archetype: *mut Archetype,
+        meta: &'_ SystemMeta,
+    );
+
+    /// Phase 12.5 Track B NCD5 — meta-free variant of
+    /// [`Self::set_table_readonly`].
+    ///
+    /// Dispatched by [`QueryIter::next`](crate::ecs::core::iters::query::iter::QueryIter)
+    /// / [`for_each_impl`](crate::ecs::core::iters::query::par_iter)
+    /// when `Self::NEEDS_CHANGE_DETECTION || F::NEEDS_CHANGE_DETECTION
+    /// == false` (NCD6 const-fold). Identical to `set_table_readonly`
+    /// minus the `meta` parameter — the dispatcher avoids loading the
+    /// meta when no downstream code reads it.
+    ///
+    /// **NO DEFAULT BODY** (I4): every impl must declare the body
+    /// explicitly. For `NEEDS_CHANGE_DETECTION = false` impls the body
+    /// duplicates `set_table_readonly` minus the unused `_meta`. For
+    /// `NEEDS_CHANGE_DETECTION = true` impls the body is a `#[cold]`
+    /// panic — the dispatcher should never reach the no-meta variant
+    /// when the const is true.
+    ///
+    /// # Safety
+    ///
+    /// Same contract as [`Self::set_table_readonly`] minus the `meta`
+    /// invariant. The dispatcher upholds NCD6: this method is reached
+    /// only when `Self::NEEDS_CHANGE_DETECTION == false`.
+    unsafe fn set_table_readonly_no_meta<'w>(
+        fetch: &mut Self::Fetch<'w>,
+        state: &Self::State,
+        archetype: *const Archetype,
+    );
+
+    /// Phase 12.5 Track B NCD5 — meta-free variant of
+    /// [`Self::set_table_mut`]. See [`Self::set_table_readonly_no_meta`]
+    /// for the dispatcher contract and the no-default-body rationale.
+    ///
+    /// # Safety
+    ///
+    /// Same contract as [`Self::set_table_mut`] minus the `meta`
+    /// invariant.
+    unsafe fn set_table_mut_no_meta<'w>(
         fetch: &mut Self::Fetch<'w>,
         state: &Self::State,
         archetype: *mut Archetype,
@@ -242,6 +318,8 @@ unsafe impl<T: Component> QueryData for &T {
     type Fetch<'w> = ReadFetch<'w, T>;
     type Item<'w> = &'w T;
     const IS_READ_ONLY: bool = true;
+    // Phase 12.5 Track B NCD2: `&T` reads no per-row ticks.
+    const NEEDS_CHANGE_DETECTION: bool = false;
 
     #[inline]
     fn init_state(_world: &mut EcsMaster) -> Self::State {
@@ -280,6 +358,7 @@ unsafe impl<T: Component> QueryData for &T {
         fetch: &mut Self::Fetch<'w>,
         state: &Self::State,
         archetype: *const Archetype,
+        _meta: &'_ SystemMeta,
     ) {
         // SAFETY (QD3): `archetype` is a live `*const Archetype` for `'w`
         //   (caller contract of this `unsafe fn`); `columns` is at offset 0
@@ -295,6 +374,7 @@ unsafe impl<T: Component> QueryData for &T {
         fetch: &mut Self::Fetch<'w>,
         state: &Self::State,
         archetype: *mut Archetype,
+        meta: &'_ SystemMeta,
     ) {
         // For `&T`, the mutable variant degrades to the same read. Re-borrow
         // as `*const` internally; no write-capable provenance is consumed.
@@ -302,7 +382,33 @@ unsafe impl<T: Component> QueryData for &T {
         //   additional caller guarantee that `archetype` carries fresh
         //   `archetype_ptr_mut` provenance — strictly stronger than what we
         //   need here.
-        unsafe { Self::set_table_readonly(fetch, state, archetype as *const _) }
+        unsafe { Self::set_table_readonly(fetch, state, archetype as *const _, meta) }
+    }
+
+    #[inline]
+    unsafe fn set_table_readonly_no_meta<'w>(
+        fetch: &mut Self::Fetch<'w>,
+        state: &Self::State,
+        archetype: *const Archetype,
+    ) {
+        // Meta-free re-implementation — identical body to
+        // `set_table_readonly` minus the unused `_meta` arg (NCD = false).
+        // SAFETY (QD3): same as `set_table_readonly`.
+        let column = unsafe { (*archetype).columns.get_unchecked(state.id.0) };
+        debug_assert!(!column.ptr.is_null(), "QD2: column was unexpectedly null");
+        fetch.base = column.ptr as *const T;
+    }
+
+    #[inline]
+    unsafe fn set_table_mut_no_meta<'w>(
+        fetch: &mut Self::Fetch<'w>,
+        state: &Self::State,
+        archetype: *mut Archetype,
+    ) {
+        // `&T` degrades to read; forward to the readonly path.
+        // SAFETY (QD3, QD4): `archetype` carries strictly-stronger
+        //   write-capable provenance than the read-only path requires.
+        unsafe { Self::set_table_readonly_no_meta(fetch, state, archetype as *const _) }
     }
 
     #[inline]
@@ -384,6 +490,10 @@ unsafe impl<T: Component> QueryData for &mut T {
     type Fetch<'w> = WriteFetch<'w, T>;
     type Item<'w> = &'w mut T;
     const IS_READ_ONLY: bool = false;
+    // Phase 12.5 Track B NCD2: `&mut T` writes the underlying value but
+    // does NOT consult per-row tick fields (the tick bump for `&mut T`
+    // queries lives in `Mut<T>`'s deref guard, not here).
+    const NEEDS_CHANGE_DETECTION: bool = false;
 
     #[inline]
     fn init_state(_world: &mut EcsMaster) -> Self::State {
@@ -422,6 +532,7 @@ unsafe impl<T: Component> QueryData for &mut T {
         _fetch: &mut Self::Fetch<'w>,
         _state: &Self::State,
         _archetype: *const Archetype,
+        _meta: &'_ SystemMeta,
     ) {
         // QD4: the read-only cursor calling on `&mut T` data is forbidden by
         // the trait gate `D: ReadOnlyQueryData` on `Query::iter()`. Reaching
@@ -440,6 +551,7 @@ unsafe impl<T: Component> QueryData for &mut T {
         fetch: &mut Self::Fetch<'w>,
         state: &Self::State,
         archetype: *mut Archetype,
+        _meta: &'_ SystemMeta,
     ) {
         // SAFETY (QD1, QD3): `archetype` carries write-capable provenance
         //   (caller obtained it via `archetype_ptr_mut`). `columns` at offset
@@ -447,6 +559,36 @@ unsafe impl<T: Component> QueryData for &mut T {
         //   `column.ptr` is `*mut u8` with write-capable provenance preserved
         //   from `refresh_column` at pool-add time (Phase 7 U7); the cast
         //   preserves the Unique tag.
+        let column = unsafe { (*archetype).columns.get_unchecked(state.id.0) };
+        debug_assert!(!column.ptr.is_null(), "QD2: column was unexpectedly null");
+        fetch.base = column.ptr as *mut T;
+    }
+
+    #[inline]
+    unsafe fn set_table_readonly_no_meta<'w>(
+        _fetch: &mut Self::Fetch<'w>,
+        _state: &Self::State,
+        _archetype: *const Archetype,
+    ) {
+        // QD4: read-only cursor on `&mut T` is forbidden by the trait gate
+        // `D: ReadOnlyQueryData` on `Query::iter()`. Mirrors the meta-bearing
+        // backstop above.
+        panic!(
+            "QD4 violation: set_table_readonly_no_meta called for &mut T (T = {}). \
+             Did a custom QueryData impl falsely claim ReadOnlyQueryData?",
+            std::any::type_name::<T>()
+        );
+    }
+
+    #[inline]
+    unsafe fn set_table_mut_no_meta<'w>(
+        fetch: &mut Self::Fetch<'w>,
+        state: &Self::State,
+        archetype: *mut Archetype,
+    ) {
+        // Meta-free body — identical to `set_table_mut` minus the unused
+        // `_meta`. NCD = false (`&mut T` does not consult ticks).
+        // SAFETY (QD1, QD3): same conditions as `set_table_mut`.
         let column = unsafe { (*archetype).columns.get_unchecked(state.id.0) };
         debug_assert!(!column.ptr.is_null(), "QD2: column was unexpectedly null");
         fetch.base = column.ptr as *mut T;
@@ -464,6 +606,601 @@ unsafe impl<T: Component> QueryData for &mut T {
 }
 
 // NOTE: No `ReadOnlyQueryData for &mut T` impl — `&mut T` writes.
+
+// ── Ref<'w, T> (Phase 10 Wave C Step 11 — read-only with ticks) ─────────────
+
+/// Read-only access to component `T` with attached change-detection info
+/// (plan §2.5 REF1-REF4 / §6.1).
+///
+/// Compared to `&T` (no tick exposure) and `Changed<T>` (forces a filter
+/// through the type system), `Ref<T>` is the "I want to read the tick
+/// without filtering" path. Use it when the system needs to know whether
+/// `T` was added or changed and to read the underlying value in the same
+/// pass.
+///
+/// # Boundary semantics ([`Ref::is_added`] / [`Ref::is_changed`])
+///
+/// Per plan §6.2 / §6.2-bis (Round 2 O1) — both predicates use the inclusive
+/// lower-bound trick (`last_run - 1`) so a self-write within the current
+/// system reports as changed. The match formula is
+/// `tick.is_newer_than(last_run - 1, this_run)`, equivalent to
+/// `tick >= last_run` under bounded ages. See [`Tick::is_newer_than`] for
+/// the precise wrapping semantics.
+pub struct Ref<'w, T: Component> {
+    /// Borrowed view into the component slot.
+    pub(crate) value: &'w T,
+    /// Snapshot of the row's `added` tick at fetch time.
+    pub(crate) added: Tick,
+    /// Snapshot of the row's `changed` tick at fetch time.
+    pub(crate) changed: Tick,
+    /// System's `last_run` snapshot.
+    pub(crate) last_run: Tick,
+    /// System's `this_run` snapshot.
+    pub(crate) this_run: Tick,
+}
+
+impl<'w, T: Component> Ref<'w, T> {
+    /// Returns `true` if `T` was inserted into this row since the system's
+    /// `last_run` tick.
+    ///
+    /// Uses the inclusive-lower-bound trick (plan §6.2 / Round 2 O1):
+    /// `last_run - 1` is passed as `is_newer_than`'s exclusive lower bound,
+    /// promoting it to inclusive. Equivalent to `added >= last_run` under
+    /// the bounded-age discipline of plan §9.3.
+    #[inline]
+    pub fn is_added(&self) -> bool {
+        self.added
+            .is_newer_than(Tick::new(self.last_run.get().wrapping_sub(1)), self.this_run)
+    }
+
+    /// Returns `true` if `T` was added OR mutated in this row since the
+    /// system's `last_run` tick.
+    ///
+    /// Same inclusive semantic as [`Self::is_added`] (plan §6.2-bis): a
+    /// self-write within the current frame reports as changed.
+    #[inline]
+    pub fn is_changed(&self) -> bool {
+        self.changed
+            .is_newer_than(Tick::new(self.last_run.get().wrapping_sub(1)), self.this_run)
+    }
+}
+
+impl<'w, T: Component> std::ops::Deref for Ref<'w, T> {
+    type Target = T;
+    #[inline]
+    fn deref(&self) -> &T {
+        self.value
+    }
+}
+
+/// Per-system state for `Ref<T>: QueryData`. Identical to [`ReadState`] —
+/// only the trait-impl side differs (the Fetch carries tick column bases).
+#[derive(Clone, Copy)]
+pub struct RefState<T: Component> {
+    pub(crate) id: ComponentId,
+    pub(crate) _marker: PhantomData<fn() -> T>,
+}
+
+/// Per-archetype fetch scratch for `Ref<T>: QueryData`.
+///
+/// Caches:
+/// * `value_base` — the component column for `T` (cast from `column.ptr`).
+/// * `added_base` / `changed_base` — the tick column bases returned by
+///   [`Archetype::tick_column_base`].
+/// * `last_run` / `this_run` — the system's tick snapshot captured at
+///   `set_table_*` time so the per-row hot loop pays no indirection.
+///
+/// All fields are populated by `set_table_*` before any `fetch` call; the
+/// `Box<[_]>` backing for the tick columns gives stable addresses (plan
+/// STORE2).
+pub struct RefFetch<'w, T: Component> {
+    pub(crate) value_base: *const T,
+    pub(crate) added_base: *const UnsafeCell<Tick>,
+    pub(crate) changed_base: *const UnsafeCell<Tick>,
+    pub(crate) last_run: Tick,
+    pub(crate) this_run: Tick,
+    pub(crate) _marker: PhantomData<&'w T>,
+}
+
+impl<T: Component> Clone for RefFetch<'_, T> {
+    #[inline]
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T: Component> Copy for RefFetch<'_, T> {}
+
+// SAFETY (QD1-QD4):
+//   - QD1: `state.id` is `T::component_id()`; `init_access` declares a read.
+//   - QD2: `init_fetch` produces NULL pointers; `set_table_*` overwrites
+//     them before any `fetch` call.
+//   - QD3: every cached pointer is scoped to `'w` via `PhantomData<&'w T>`.
+//   - QD4: read-only data — both `set_table_*` methods produce identical
+//     behaviour (the mutable variant delegates to the read-only path).
+unsafe impl<T: Component> QueryData for Ref<'_, T> {
+    type State = RefState<T>;
+    type Fetch<'w> = RefFetch<'w, T>;
+    type Item<'w> = Ref<'w, T>;
+    const IS_READ_ONLY: bool = true;
+    // Phase 12.5 Track B NCD2: `Ref<T>` exposes per-row tick info; the
+    // dispatcher MUST forward `meta` so `set_table_*` can copy
+    // `last_run` / `this_run` into the Fetch.
+    const NEEDS_CHANGE_DETECTION: bool = true;
+
+    #[inline]
+    fn init_state(_world: &mut EcsMaster) -> Self::State {
+        RefState {
+            id: T::component_id(),
+            _marker: PhantomData,
+        }
+    }
+
+    fn init_access(state: &Self::State, access_set: &mut FilteredAccessSet) {
+        access_set
+            .add_component_read(state.id, std::any::type_name::<Self>())
+            .unwrap_or_else(|conflict| intra_system_conflict_panic(conflict));
+    }
+
+    #[inline]
+    fn matches_component_set(state: &Self::State, mask: &ComponentMask) -> bool {
+        mask.contains(state.id)
+    }
+
+    #[inline]
+    fn aggregate_include(state: &Self::State, include: &mut ComponentMask) {
+        include.set(state.id);
+    }
+
+    #[inline]
+    fn init_fetch<'w>(_state: &Self::State) -> Self::Fetch<'w> {
+        RefFetch {
+            value_base: std::ptr::null(),
+            added_base: std::ptr::null(),
+            changed_base: std::ptr::null(),
+            last_run: Tick::ZERO,
+            this_run: Tick::ZERO,
+            _marker: PhantomData,
+        }
+    }
+
+    #[inline]
+    unsafe fn set_table_readonly<'w>(
+        fetch: &mut Self::Fetch<'w>,
+        state: &Self::State,
+        archetype: *const Archetype,
+        meta: &'_ SystemMeta,
+    ) {
+        // SAFETY (QD3): `archetype` is a live `*const Archetype` for `'w`
+        //   (caller contract); `columns` at offset 0 per Phase 7 D4;
+        //   `state.id.0 < MAX_COMPONENTS` by construction of the cached id.
+        let column = unsafe { (*archetype).columns.get_unchecked(state.id.0) };
+        debug_assert!(!column.ptr.is_null(), "QD2: column was unexpectedly null");
+        fetch.value_base = column.ptr as *const T;
+
+        // SAFETY (STORE3): shared reborrow of the archetype is sound; the
+        //   sparse map read does not produce write provenance. `archetype`
+        //   contains `state.id` per QD1 / archetype matching, so
+        //   `tick_column_base` returns `Some`.
+        let archetype_ref: &Archetype = unsafe { &*archetype };
+        let (added_base, changed_base) = archetype_ref
+            .tick_column_base(state.id)
+            .expect("QD1: matched archetype must contain T's pool");
+        fetch.added_base = added_base;
+        fetch.changed_base = changed_base;
+
+        fetch.last_run = meta.last_run();
+        fetch.this_run = meta.this_run();
+    }
+
+    #[inline]
+    unsafe fn set_table_mut<'w>(
+        fetch: &mut Self::Fetch<'w>,
+        state: &Self::State,
+        archetype: *mut Archetype,
+        meta: &'_ SystemMeta,
+    ) {
+        // For `Ref<T>`, the mutable cursor variant degrades to the same
+        // read-only setup; no write provenance is consumed.
+        // SAFETY (QD3, QD4): same conditions as `set_table_readonly` with
+        //   the strictly-stronger caller guarantee that `archetype` carries
+        //   write-capable provenance.
+        unsafe { Self::set_table_readonly(fetch, state, archetype as *const _, meta) }
+    }
+
+    #[inline(never)]
+    #[cold]
+    unsafe fn set_table_readonly_no_meta<'w>(
+        _fetch: &mut Self::Fetch<'w>,
+        _state: &Self::State,
+        _archetype: *const Archetype,
+    ) {
+        // NCD5 backstop: dispatcher's NCD6 const-fold must route Ref<T>
+        // through the meta-bearing path. Reaching here means a contributor
+        // broke the dispatch contract.
+        panic!(
+            "NCD violation: set_table_readonly_no_meta called for {} \
+             (NEEDS_CHANGE_DETECTION = true).",
+            std::any::type_name::<Self>()
+        );
+    }
+
+    #[inline(never)]
+    #[cold]
+    unsafe fn set_table_mut_no_meta<'w>(
+        _fetch: &mut Self::Fetch<'w>,
+        _state: &Self::State,
+        _archetype: *mut Archetype,
+    ) {
+        panic!(
+            "NCD violation: set_table_mut_no_meta called for {} \
+             (NEEDS_CHANGE_DETECTION = true).",
+            std::any::type_name::<Self>()
+        );
+    }
+
+    #[inline]
+    unsafe fn fetch<'w>(fetch: &Self::Fetch<'w>, row: usize) -> Self::Item<'w> {
+        // SAFETY (QD2, QD3, STORE3):
+        //   - `set_table_*` was called before `fetch` (caller contract), so
+        //     every base pointer is non-null and points at the active
+        //     archetype's column for `T`.
+        //   - `row < entity_count` (caller contract).
+        //   - The returned `Ref<'w, T>` lifetime is tied to `'w` via
+        //     `PhantomData<&'w T>` in `RefFetch`.
+        //   - Tick reads through `UnsafeCell::get()` are sound: Phase 9
+        //     SCH3 guarantees no concurrent writer of this `(archetype, T)`
+        //     slot; `Tick` is `Copy`.
+        unsafe {
+            let value = &*fetch.value_base.add(row);
+            let added = *(*fetch.added_base.add(row)).get();
+            let changed = *(*fetch.changed_base.add(row)).get();
+            Ref {
+                value,
+                added,
+                changed,
+                last_run: fetch.last_run,
+                this_run: fetch.this_run,
+            }
+        }
+    }
+}
+
+// SAFETY: `Ref<T>::IS_READ_ONLY = true`; the impl never writes.
+unsafe impl<T: Component> ReadOnlyQueryData for Ref<'_, T> {}
+
+// ── Mut<'w, T> (Phase 10 Wave C Step 11 — write with deref guard) ──────────
+
+/// Mutable access to component `T` with a deref guard that bumps the row's
+/// `changed_tick` on first `DerefMut` (plan §2.5 MUT1-MUT8 / §6.2 / §3 Q6).
+///
+/// Compared to `&mut T` (no change tracking), `Mut<T>` is the path that
+/// participates in change detection. Any `DerefMut` call counts as
+/// "changed" — the Bevy deref-bump semantic (plan §3 Q6 adopted). Use
+/// [`Self::set_if_neq`] or [`Self::bypass_change_detection`] to opt into
+/// stricter behaviour.
+///
+/// # Boundary semantics ([`Self::is_added`] / [`Self::is_changed`])
+///
+/// Inclusive lower-bound semantic (plan §6.2 / Round 2 O1 + Round 3 O1):
+/// a self-write within the same system reports as changed.
+///
+/// # Once-only deref guard
+///
+/// The first `deref_mut()` call on a given `Mut<T>` writes `this_run` to
+/// the row's `changed_tick`. Subsequent calls within the same guard
+/// instance skip the write (`deref_mut_called` flag). This is a
+/// micro-optimisation: even if the compiler does not elide the duplicate
+/// store the cost is one extra u32 store per call, and the semantic is
+/// identical.
+pub struct Mut<'w, T: Component> {
+    /// Borrowed view into the component slot.
+    pub(crate) value: &'w mut T,
+    /// Snapshot of the row's `added` tick at fetch time.
+    pub(crate) added: Tick,
+    /// Pointer to the row's `changed_tick` slot. The write target for the
+    /// deref guard. Stable for the pool's lifetime (`Box<[_]>` — plan STORE2).
+    pub(crate) changed_tick: *const UnsafeCell<Tick>,
+    /// System's `last_run` snapshot.
+    pub(crate) last_run: Tick,
+    /// System's `this_run` snapshot.
+    pub(crate) this_run: Tick,
+    /// Has `deref_mut` already bumped the changed tick this guard?
+    /// Skips duplicate stores on repeated `deref_mut()` calls.
+    pub(crate) deref_mut_called: bool,
+}
+
+impl<'w, T: Component> Mut<'w, T> {
+    /// Returns `true` if `T` was inserted into this row since the system's
+    /// `last_run` tick (inclusive lower bound; plan §6.2 / Round 2 O1).
+    #[inline]
+    pub fn is_added(&self) -> bool {
+        self.added
+            .is_newer_than(Tick::new(self.last_run.get().wrapping_sub(1)), self.this_run)
+    }
+
+    /// Returns `true` if `T` was added OR mutated in this row since the
+    /// system's `last_run` tick.
+    ///
+    /// Reads the current `changed_tick` slot (per-row); a self-write earlier
+    /// in this system reports as changed thanks to the inclusive-lower-bound
+    /// trick (plan §6.2-bis worked proof).
+    #[inline]
+    pub fn is_changed(&self) -> bool {
+        // SAFETY (STORE3, SCH3): `changed_tick` was set by `set_table_mut`
+        //   to a live slot for the row; no concurrent writer exists per
+        //   Phase 9 SCH3 (the conflict graph guarantees exclusive access
+        //   to this `(archetype, T)` from the system holding `Mut<T>`).
+        let tick: Tick = unsafe { *(*self.changed_tick).get() };
+        tick.is_newer_than(Tick::new(self.last_run.get().wrapping_sub(1)), self.this_run)
+    }
+
+    /// Sets the value only if it differs from the current one (per
+    /// `PartialEq`). Avoids triggering `Changed<T>` when the new value
+    /// equals the old.
+    ///
+    /// Returns `true` if the write happened, `false` otherwise.
+    pub fn set_if_neq(&mut self, new_value: T) -> bool
+    where
+        T: PartialEq,
+    {
+        if *self.value != new_value {
+            *self.value = new_value;
+            // The assignment above uses `DerefMut` (`*self.value`) — wait,
+            // it actually goes through the `&mut T` borrow directly. We
+            // must bump the tick manually here because the assignment did
+            // not route through `Mut::deref_mut`.
+            if !self.deref_mut_called {
+                self.deref_mut_called = true;
+                // SAFETY (STORE3, SCH3, plan §2.5 MUT4): the system declared
+                //   a write to `T`; Phase 9 SCH3 ensures no concurrent
+                //   reader of this `(archetype, T)`'s tick slot.
+                unsafe {
+                    *(*self.changed_tick).get() = self.this_run;
+                }
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Returns `&mut T` without bumping the changed tick. Breaks
+    /// `Changed<T>` for this row until the next legitimate write — use
+    /// sparingly (plan §2.5 MUT5).
+    #[inline]
+    pub fn bypass_change_detection(&mut self) -> &mut T {
+        self.value
+    }
+}
+
+impl<'w, T: Component> std::ops::Deref for Mut<'w, T> {
+    type Target = T;
+    #[inline]
+    fn deref(&self) -> &T {
+        self.value
+    }
+}
+
+impl<'w, T: Component> std::ops::DerefMut for Mut<'w, T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut T {
+        if !self.deref_mut_called {
+            self.deref_mut_called = true;
+            // SAFETY (STORE3, SCH3, plan §2.5 MUT3):
+            //   - `self.changed_tick` was set by `set_table_mut` to a live
+            //     `UnsafeCell<Tick>` slot for the cached row; the
+            //     `Box<[_]>` backing is stable for the pool's lifetime
+            //     (plan STORE2).
+            //   - Phase 9 SCH3 (conflict graph) guarantees the system
+            //     holding `Mut<T>` has exclusive access to this
+            //     `(archetype, T)` slot — no concurrent reader/writer of
+            //     this tick exists; per-row adjacent writes from sibling
+            //     `par_iter` chunks ride disjoint memory locations (Round
+            //     2 C3 — distinct `UnsafeCell<u32>`s).
+            unsafe {
+                *(*self.changed_tick).get() = self.this_run;
+            }
+        }
+        self.value
+    }
+}
+
+/// Per-system state for `Mut<T>: QueryData`. Same shape as [`WriteState`].
+#[derive(Clone, Copy)]
+pub struct MutState<T: Component> {
+    pub(crate) id: ComponentId,
+    pub(crate) _marker: PhantomData<fn() -> T>,
+}
+
+/// Per-archetype fetch scratch for `Mut<T>: QueryData`.
+///
+/// Caches the write-capable component column base plus both tick column
+/// bases (so `fetch` can produce a `Mut<T>` carrying the per-row
+/// `changed_tick` pointer for the deref guard). Tick base lifetimes ride
+/// the `Box<[_]>` stability (plan STORE2).
+pub struct MutFetch<'w, T: Component> {
+    pub(crate) value_base: *mut T,
+    pub(crate) added_base: *const UnsafeCell<Tick>,
+    pub(crate) changed_base: *const UnsafeCell<Tick>,
+    pub(crate) last_run: Tick,
+    pub(crate) this_run: Tick,
+    pub(crate) _marker: PhantomData<&'w mut T>,
+}
+
+impl<T: Component> Clone for MutFetch<'_, T> {
+    #[inline]
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T: Component> Copy for MutFetch<'_, T> {}
+
+// SAFETY (QD1-QD4):
+//   - QD1: `state.id` is `T::component_id()`; `init_access` declares a write.
+//   - QD2: `set_table_mut` overwrites the bases; `set_table_readonly`
+//     panics (QD4 runtime backstop — same as `&mut T`).
+//   - QD3: lifetime bound by `PhantomData<&'w mut T>` in `MutFetch`.
+//   - QD4: `set_table_readonly` is forbidden (the trait gate on
+//     `Query::iter()` requires `D: ReadOnlyQueryData`, which `Mut<T>` does
+//     not implement).
+unsafe impl<T: Component> QueryData for Mut<'_, T> {
+    type State = MutState<T>;
+    type Fetch<'w> = MutFetch<'w, T>;
+    type Item<'w> = Mut<'w, T>;
+    const IS_READ_ONLY: bool = false;
+    // Phase 12.5 Track B NCD2: `Mut<T>` exposes per-row tick info via the
+    // deref guard and `is_added`/`is_changed`; the dispatcher MUST forward
+    // `meta`.
+    const NEEDS_CHANGE_DETECTION: bool = true;
+
+    #[inline]
+    fn init_state(_world: &mut EcsMaster) -> Self::State {
+        MutState {
+            id: T::component_id(),
+            _marker: PhantomData,
+        }
+    }
+
+    fn init_access(state: &Self::State, access_set: &mut FilteredAccessSet) {
+        access_set
+            .add_component_write(state.id, std::any::type_name::<Self>())
+            .unwrap_or_else(|conflict| intra_system_conflict_panic(conflict));
+    }
+
+    #[inline]
+    fn matches_component_set(state: &Self::State, mask: &ComponentMask) -> bool {
+        mask.contains(state.id)
+    }
+
+    #[inline]
+    fn aggregate_include(state: &Self::State, include: &mut ComponentMask) {
+        include.set(state.id);
+    }
+
+    #[inline]
+    fn init_fetch<'w>(_state: &Self::State) -> Self::Fetch<'w> {
+        MutFetch {
+            value_base: std::ptr::null_mut(),
+            added_base: std::ptr::null(),
+            changed_base: std::ptr::null(),
+            last_run: Tick::ZERO,
+            this_run: Tick::ZERO,
+            _marker: PhantomData,
+        }
+    }
+
+    #[inline]
+    unsafe fn set_table_readonly<'w>(
+        _fetch: &mut Self::Fetch<'w>,
+        _state: &Self::State,
+        _archetype: *const Archetype,
+        _meta: &'_ SystemMeta,
+    ) {
+        // QD4: read-only cursor on `Mut<T>` is forbidden by the trait gate
+        // `D: ReadOnlyQueryData` on `Query::iter()`. Reaching here means a
+        // custom `QueryData` impl falsely claimed `ReadOnlyQueryData` for
+        // a type containing `Mut<T>`. Panic loudly.
+        panic!(
+            "QD4 violation: set_table_readonly called for Mut<T> (T = {}). \
+             Did a custom QueryData impl falsely claim ReadOnlyQueryData?",
+            std::any::type_name::<T>()
+        );
+    }
+
+    #[inline]
+    unsafe fn set_table_mut<'w>(
+        fetch: &mut Self::Fetch<'w>,
+        state: &Self::State,
+        archetype: *mut Archetype,
+        meta: &'_ SystemMeta,
+    ) {
+        // SAFETY (QD1, QD3): `archetype` carries write-capable provenance
+        //   (caller minted it via `archetype_ptr_mut`); `columns` at offset
+        //   0 per Phase 7 D4; `state.id.0 < MAX_COMPONENTS`.
+        let column = unsafe { (*archetype).columns.get_unchecked(state.id.0) };
+        debug_assert!(!column.ptr.is_null(), "QD2: column was unexpectedly null");
+        fetch.value_base = column.ptr as *mut T;
+
+        // SAFETY (STORE3): shared reborrow for the sparse-map read; no
+        //   write-capable provenance is needed for the tick column lookup
+        //   (the per-row write goes through `UnsafeCell::get()`, separately
+        //   ridden by the access-set declaration).
+        let archetype_ref: &Archetype = unsafe { &*archetype };
+        let (added_base, changed_base) = archetype_ref
+            .tick_column_base(state.id)
+            .expect("QD1: matched archetype must contain T's pool");
+        fetch.added_base = added_base;
+        fetch.changed_base = changed_base;
+
+        fetch.last_run = meta.last_run();
+        fetch.this_run = meta.this_run();
+    }
+
+    #[inline(never)]
+    #[cold]
+    unsafe fn set_table_readonly_no_meta<'w>(
+        _fetch: &mut Self::Fetch<'w>,
+        _state: &Self::State,
+        _archetype: *const Archetype,
+    ) {
+        // NCD5 backstop: dispatcher's NCD6 const-fold must route Mut<T>
+        // through the meta-bearing path (and the read-only cursor is
+        // additionally gated out by `D: ReadOnlyQueryData` on `iter`).
+        panic!(
+            "NCD violation: set_table_readonly_no_meta called for {} \
+             (NEEDS_CHANGE_DETECTION = true).",
+            std::any::type_name::<Self>()
+        );
+    }
+
+    #[inline(never)]
+    #[cold]
+    unsafe fn set_table_mut_no_meta<'w>(
+        _fetch: &mut Self::Fetch<'w>,
+        _state: &Self::State,
+        _archetype: *mut Archetype,
+    ) {
+        panic!(
+            "NCD violation: set_table_mut_no_meta called for {} \
+             (NEEDS_CHANGE_DETECTION = true).",
+            std::any::type_name::<Self>()
+        );
+    }
+
+    #[inline]
+    unsafe fn fetch<'w>(fetch: &Self::Fetch<'w>, row: usize) -> Self::Item<'w> {
+        // SAFETY (QD2, QD3, STORE3, SCH3):
+        //   - `set_table_mut` was called before `fetch` (caller contract);
+        //     every base pointer is live and non-null.
+        //   - `row < entity_count` (caller contract).
+        //   - Phase 9 SCH3 grants exclusive `(archetype, T)` access; the
+        //     `&mut *value_base.add(row)` reborrow is sound (no aliasing
+        //     reader/writer). The returned `Mut<'w, T>` lifetime is tied
+        //     to `'w` via `PhantomData<&'w mut T>` in `MutFetch`.
+        //   - The tick reads through `UnsafeCell::get()` are sound for the
+        //     same SCH3 reason; `Tick` is `Copy`.
+        //   - `changed_tick` pointer is captured as `*const UnsafeCell<Tick>`
+        //     for the row; the deref guard writes through `UnsafeCell::get()`
+        //     (per-row distinct memory location — Round 2 C3).
+        unsafe {
+            let value = &mut *fetch.value_base.add(row);
+            let added = *(*fetch.added_base.add(row)).get();
+            let changed_tick = fetch.changed_base.add(row);
+            Mut {
+                value,
+                added,
+                changed_tick,
+                last_run: fetch.last_run,
+                this_run: fetch.this_run,
+                deref_mut_called: false,
+            }
+        }
+    }
+}
+
+// NOTE: No `ReadOnlyQueryData for Mut<T>` impl — `Mut<T>` writes (deref guard).
 
 // ── Variadic tuple impls (§4.6 / §10.1, M4) ────────────────────────────────
 //
@@ -506,6 +1243,11 @@ macro_rules! impl_query_data_tuple {
 
             const IS_READ_ONLY: bool = true $( && $D::IS_READ_ONLY )*;
 
+            // Phase 12.5 Track B NCD3: tuple propagation — any element
+            // needing change detection forces the dispatcher to use the
+            // meta-bearing variant for the whole tuple.
+            const NEEDS_CHANGE_DETECTION: bool = false $( || $D::NEEDS_CHANGE_DETECTION )*;
+
             #[inline]
             fn init_state(world: &mut EcsMaster) -> Self::State {
                 ( $( <$D as QueryData>::init_state(world), )* )
@@ -540,6 +1282,7 @@ macro_rules! impl_query_data_tuple {
                 fetch: &mut Self::Fetch<'w>,
                 state: &Self::State,
                 archetype: *const Archetype,
+                meta: &'_ SystemMeta,
             ) {
                 let ( $($f,)* ) = fetch;
                 let ( $($s,)* ) = state;
@@ -547,8 +1290,9 @@ macro_rules! impl_query_data_tuple {
                     // SAFETY (QD3, QD4): forwarded per-element; `archetype`
                     //   carries read-only provenance and is identical for
                     //   every element. The caller of the tuple impl
-                    //   upheld QD3/QD4 for every `$D`.
-                    unsafe { <$D as QueryData>::set_table_readonly($f, $s, archetype); }
+                    //   upheld QD3/QD4 for every `$D`. `meta` is forwarded
+                    //   by reference per Round 2 W7.
+                    unsafe { <$D as QueryData>::set_table_readonly($f, $s, archetype, meta); }
                 )*
             }
 
@@ -557,14 +1301,48 @@ macro_rules! impl_query_data_tuple {
                 fetch: &mut Self::Fetch<'w>,
                 state: &Self::State,
                 archetype: *mut Archetype,
+                meta: &'_ SystemMeta,
             ) {
                 let ( $($f,)* ) = fetch;
                 let ( $($s,)* ) = state;
                 $(
                     // SAFETY (QD3, QD4): write-capable `archetype` is
                     //   forwarded to every element; the caller upheld
-                    //   QD3/QD4.
-                    unsafe { <$D as QueryData>::set_table_mut($f, $s, archetype); }
+                    //   QD3/QD4. `meta` forwarded by reference.
+                    unsafe { <$D as QueryData>::set_table_mut($f, $s, archetype, meta); }
+                )*
+            }
+
+            #[inline]
+            unsafe fn set_table_readonly_no_meta<'w>(
+                fetch: &mut Self::Fetch<'w>,
+                state: &Self::State,
+                archetype: *const Archetype,
+            ) {
+                let ( $($f,)* ) = fetch;
+                let ( $($s,)* ) = state;
+                $(
+                    // SAFETY (QD3, QD4): forwarded per-element; the tuple's
+                    //   NCD3 propagation guarantees this method is only
+                    //   reached when no element needs change detection,
+                    //   so every element's `_no_meta` body is the
+                    //   meta-free re-impl (not the cold panic backstop).
+                    unsafe { <$D as QueryData>::set_table_readonly_no_meta($f, $s, archetype); }
+                )*
+            }
+
+            #[inline]
+            unsafe fn set_table_mut_no_meta<'w>(
+                fetch: &mut Self::Fetch<'w>,
+                state: &Self::State,
+                archetype: *mut Archetype,
+            ) {
+                let ( $($f,)* ) = fetch;
+                let ( $($s,)* ) = state;
+                $(
+                    // SAFETY (QD3, QD4): write-capable `archetype` forwarded;
+                    //   same NCD3-propagation note as the readonly variant.
+                    unsafe { <$D as QueryData>::set_table_mut_no_meta($f, $s, archetype); }
                 )*
             }
 
@@ -607,14 +1385,18 @@ unsafe impl QueryData for () {
     type Fetch<'w> = ();
     type Item<'w> = ();
     const IS_READ_ONLY: bool = true;
+    // Phase 12.5 Track B NCD2: vacuous — `()` touches no components.
+    const NEEDS_CHANGE_DETECTION: bool = false;
 
     #[inline] fn init_state(_world: &mut EcsMaster) -> Self::State {}
     #[inline] fn init_access(_state: &Self::State, _access_set: &mut FilteredAccessSet) {}
     #[inline] fn matches_component_set(_state: &Self::State, _mask: &ComponentMask) -> bool { true }
     #[inline] fn aggregate_include(_state: &Self::State, _include: &mut ComponentMask) {}
     #[inline] fn init_fetch<'w>(_state: &Self::State) -> Self::Fetch<'w> {}
-    #[inline] unsafe fn set_table_readonly<'w>(_f: &mut Self::Fetch<'w>, _s: &Self::State, _a: *const Archetype) {}
-    #[inline] unsafe fn set_table_mut<'w>(_f: &mut Self::Fetch<'w>, _s: &Self::State, _a: *mut Archetype) {}
+    #[inline] unsafe fn set_table_readonly<'w>(_f: &mut Self::Fetch<'w>, _s: &Self::State, _a: *const Archetype, _meta: &'_ SystemMeta) {}
+    #[inline] unsafe fn set_table_mut<'w>(_f: &mut Self::Fetch<'w>, _s: &Self::State, _a: *mut Archetype, _meta: &'_ SystemMeta) {}
+    #[inline] unsafe fn set_table_readonly_no_meta<'w>(_f: &mut Self::Fetch<'w>, _s: &Self::State, _a: *const Archetype) {}
+    #[inline] unsafe fn set_table_mut_no_meta<'w>(_f: &mut Self::Fetch<'w>, _s: &Self::State, _a: *mut Archetype) {}
     #[inline] unsafe fn fetch<'w>(_fetch: &Self::Fetch<'w>, _row: usize) -> Self::Item<'w> {}
 }
 
@@ -704,6 +1486,9 @@ macro_rules! impl_query_data_tuple_too_large {
             type Fetch<'w> = ();
             type Item<'w> = ();
             const IS_READ_ONLY: bool = true;
+            // Vacuous — every method is a `panic!()` at monomorphisation,
+            // so the const is unobservable on any reachable path.
+            const NEEDS_CHANGE_DETECTION: bool = false;
 
             fn init_state(_world: &mut EcsMaster) -> Self::State {
                 panic!(
@@ -735,11 +1520,29 @@ macro_rules! impl_query_data_tuple_too_large {
                 _fetch: &mut Self::Fetch<'w>,
                 _state: &Self::State,
                 _archetype: *const Archetype,
+                _meta: &'_ SystemMeta,
             ) {
                 panic!("tuple too large: see init_state diagnostic")
             }
 
             unsafe fn set_table_mut<'w>(
+                _fetch: &mut Self::Fetch<'w>,
+                _state: &Self::State,
+                _archetype: *mut Archetype,
+                _meta: &'_ SystemMeta,
+            ) {
+                panic!("tuple too large: see init_state diagnostic")
+            }
+
+            unsafe fn set_table_readonly_no_meta<'w>(
+                _fetch: &mut Self::Fetch<'w>,
+                _state: &Self::State,
+                _archetype: *const Archetype,
+            ) {
+                panic!("tuple too large: see init_state diagnostic")
+            }
+
+            unsafe fn set_table_mut_no_meta<'w>(
                 _fetch: &mut Self::Fetch<'w>,
                 _state: &Self::State,
                 _archetype: *mut Archetype,
@@ -857,9 +1660,12 @@ mod tests {
 
     /// Primary component fixture: a simple POD struct so the QueryData impls
     /// can be type-checked end-to-end without engaging archetype storage.
+    ///
+    /// Phase 10 Wave C — `PartialEq` is required by `Mut<T>::set_if_neq`'s
+    /// trait bound; tests in the `Mut` block invoke it.
     #[repr(C)]
-    #[derive(Clone, Copy)]
-    struct MyComp(#[allow(dead_code)] u32);
+    #[derive(Clone, Copy, PartialEq)]
+    struct MyComp(u32);
 
     impl Component for MyComp {
         fn component_id() -> ComponentId {
@@ -1069,5 +1875,292 @@ mod tests {
             &mut MyComp,
             &mut OtherComp,
         )>();
+    }
+
+    // ── Ref<T> / Mut<T> tests (Phase 10 Wave C Step 11) ─────────────────
+
+    /// `Ref<T>` MUST report `IS_READ_ONLY = true` and satisfy the
+    /// `ReadOnlyQueryData` bound; `Mut<T>` MUST report `false`.
+    #[test]
+    fn ref_wrapper_is_read_only() {
+        const { assert!(<Ref<'_, MyComp> as QueryData>::IS_READ_ONLY) };
+        fn assert_read_only<T: ReadOnlyQueryData>() {}
+        assert_read_only::<Ref<'_, MyComp>>();
+    }
+
+    #[test]
+    fn mut_wrapper_is_not_read_only() {
+        const { assert!(!<Mut<'_, MyComp> as QueryData>::IS_READ_ONLY) };
+    }
+
+    /// Access surface: `Ref<T>` declares a read, `Mut<T>` declares a write
+    /// (plan §2.5 REF2 / MUT8).
+    #[test]
+    fn ref_wrapper_init_access_declares_read() {
+        register_test_components();
+        let mut ecs = EcsMaster::new();
+        let state = <Ref<'_, MyComp> as QueryData>::init_state(&mut ecs);
+        let mut set = FilteredAccessSet::new();
+        <Ref<'_, MyComp> as QueryData>::init_access(&state, &mut set);
+        let mut writer = crate::ecs::core::system::access::Access::new();
+        writer.add_component_write(state.id);
+        assert!(
+            set.combined().conflicts_with(&writer),
+            "Ref<T>::init_access must declare a read"
+        );
+    }
+
+    #[test]
+    fn mut_wrapper_init_access_declares_write() {
+        register_test_components();
+        let mut ecs = EcsMaster::new();
+        let state = <Mut<'_, MyComp> as QueryData>::init_state(&mut ecs);
+        let mut set = FilteredAccessSet::new();
+        <Mut<'_, MyComp> as QueryData>::init_access(&state, &mut set);
+        let mut reader = crate::ecs::core::system::access::Access::new();
+        reader.add_component_read(state.id);
+        assert!(
+            set.combined().conflicts_with(&reader),
+            "Mut<T>::init_access must declare a write"
+        );
+    }
+
+    /// `Ref<T>::is_added` / `is_changed` expose the tick info captured at
+    /// fetch time, with the inclusive lower-bound semantic (plan §6.2-bis).
+    #[test]
+    fn ref_provides_value_and_tick_info() {
+        let value = MyComp(42);
+        let r = Ref {
+            value: &value,
+            added: Tick::new(5),
+            changed: Tick::new(8),
+            last_run: Tick::new(2),
+            this_run: Tick::new(10),
+        };
+        assert_eq!(r.0, 42, "Deref must expose the underlying value");
+        assert!(r.is_added(), "added=5 ∈ [2, 10] under inclusive-lower-bound");
+        assert!(r.is_changed(), "changed=8 ∈ [2, 10]");
+
+        // Same `last_run` boundary — inclusive in `is_added/is_changed`
+        // semantic so a tick exactly at `last_run` reports true (plan §6.2-bis
+        // worked proof: this matches Bevy's documented `>=` semantic).
+        let r_boundary = Ref {
+            value: &value,
+            added: Tick::new(2),
+            changed: Tick::new(2),
+            last_run: Tick::new(2),
+            this_run: Tick::new(10),
+        };
+        assert!(r_boundary.is_added(), "added=last_run → inclusive lower bound");
+        assert!(r_boundary.is_changed(), "changed=last_run → inclusive lower bound");
+
+        // Strictly before last_run — must report false.
+        let r_old = Ref {
+            value: &value,
+            added: Tick::new(1),
+            changed: Tick::new(1),
+            last_run: Tick::new(2),
+            this_run: Tick::new(10),
+        };
+        assert!(!r_old.is_added());
+        assert!(!r_old.is_changed());
+    }
+
+    /// `Mut<T>::deref_mut` MUST bump the row's `changed_tick` to `this_run`
+    /// (plan §2.5 MUT3 — Bevy deref-bump semantic).
+    #[test]
+    fn mut_deref_mut_bumps_changed_tick() {
+        let mut value = MyComp(1);
+        let changed_cell = UnsafeCell::new(Tick::new(0));
+        {
+            let mut m = Mut {
+                value: &mut value,
+                added: Tick::new(5),
+                changed_tick: &changed_cell as *const UnsafeCell<Tick>,
+                last_run: Tick::new(2),
+                this_run: Tick::new(10),
+                deref_mut_called: false,
+            };
+            // Trigger the deref guard.
+            *m = MyComp(99);
+        }
+        // SAFETY: `changed_cell` is dropped at the end of this scope; the
+        //   raw pointer captured by `Mut` was valid for the prior block.
+        let observed = unsafe { *changed_cell.get() };
+        assert_eq!(
+            observed,
+            Tick::new(10),
+            "deref_mut must write this_run into the changed_tick slot"
+        );
+        assert_eq!(value.0, 99, "deref_mut must expose the underlying &mut T");
+    }
+
+    /// Subsequent `deref_mut()` calls on the same `Mut` instance MUST skip
+    /// the tick write (once-only flag). Verified by mutating the
+    /// `changed_tick` cell between the two calls and confirming the second
+    /// `deref_mut` does NOT overwrite it.
+    #[test]
+    fn mut_deref_mut_is_once_only_per_guard() {
+        let mut value = MyComp(1);
+        let changed_cell = UnsafeCell::new(Tick::new(0));
+        let mut m = Mut {
+            value: &mut value,
+            added: Tick::new(5),
+            changed_tick: &changed_cell as *const UnsafeCell<Tick>,
+            last_run: Tick::new(2),
+            this_run: Tick::new(10),
+            deref_mut_called: false,
+        };
+        // First deref_mut → bumps tick to this_run.
+        *m = MyComp(2);
+        // SAFETY: changed_cell is live in this scope.
+        unsafe {
+            *changed_cell.get() = Tick::new(42);
+        }
+        // Second deref_mut on the same guard → MUST NOT touch the slot.
+        *m = MyComp(3);
+        let observed = unsafe { *changed_cell.get() };
+        assert_eq!(
+            observed,
+            Tick::new(42),
+            "second deref_mut on the same guard must skip the tick write"
+        );
+    }
+
+    /// `Mut<T>::set_if_neq` MUST NOT bump the changed tick when the new
+    /// value equals the current one (plan §2.5 MUT4).
+    #[test]
+    fn mut_set_if_neq_no_tick_bump_when_equal() {
+        let mut value = MyComp(7);
+        let changed_cell = UnsafeCell::new(Tick::new(3));
+        let mut m = Mut {
+            value: &mut value,
+            added: Tick::new(5),
+            changed_tick: &changed_cell as *const UnsafeCell<Tick>,
+            last_run: Tick::new(2),
+            this_run: Tick::new(10),
+            deref_mut_called: false,
+        };
+        let wrote = m.set_if_neq(MyComp(7));
+        assert!(!wrote, "set_if_neq with equal value must return false");
+        // SAFETY: changed_cell live in this scope.
+        let observed = unsafe { *changed_cell.get() };
+        assert_eq!(
+            observed,
+            Tick::new(3),
+            "set_if_neq with equal value must NOT bump the tick"
+        );
+        assert_eq!(value.0, 7, "set_if_neq with equal value must not modify");
+    }
+
+    /// `Mut<T>::set_if_neq` MUST bump the changed tick when the new value
+    /// differs.
+    #[test]
+    fn mut_set_if_neq_bumps_tick_when_different() {
+        let mut value = MyComp(7);
+        let changed_cell = UnsafeCell::new(Tick::new(3));
+        let mut m = Mut {
+            value: &mut value,
+            added: Tick::new(5),
+            changed_tick: &changed_cell as *const UnsafeCell<Tick>,
+            last_run: Tick::new(2),
+            this_run: Tick::new(10),
+            deref_mut_called: false,
+        };
+        let wrote = m.set_if_neq(MyComp(99));
+        assert!(wrote, "set_if_neq with new value must return true");
+        // SAFETY: changed_cell live in this scope.
+        let observed = unsafe { *changed_cell.get() };
+        assert_eq!(observed, Tick::new(10), "set_if_neq must bump the tick to this_run");
+        assert_eq!(value.0, 99);
+    }
+
+    /// `Mut<T>::bypass_change_detection` MUST NOT bump the changed tick even
+    /// after the returned `&mut T` is used to mutate the value (plan §2.5
+    /// MUT5).
+    #[test]
+    fn mut_bypass_change_detection_no_tick_bump() {
+        let mut value = MyComp(1);
+        let changed_cell = UnsafeCell::new(Tick::new(3));
+        let mut m = Mut {
+            value: &mut value,
+            added: Tick::new(5),
+            changed_tick: &changed_cell as *const UnsafeCell<Tick>,
+            last_run: Tick::new(2),
+            this_run: Tick::new(10),
+            deref_mut_called: false,
+        };
+        let raw = m.bypass_change_detection();
+        *raw = MyComp(50);
+        // SAFETY: changed_cell live in this scope.
+        let observed = unsafe { *changed_cell.get() };
+        assert_eq!(
+            observed,
+            Tick::new(3),
+            "bypass_change_detection must NOT bump the tick"
+        );
+        assert_eq!(value.0, 50);
+    }
+
+    /// `Mut<T>::is_changed` reflects the current tick slot (re-read each
+    /// call). After `deref_mut` bumps the tick, `is_changed` MUST report
+    /// true even though the write came from this same system.
+    #[test]
+    fn mut_is_changed_after_self_write_observes_change() {
+        let mut value = MyComp(1);
+        let changed_cell = UnsafeCell::new(Tick::new(0));
+        let mut m = Mut {
+            value: &mut value,
+            added: Tick::new(5),
+            changed_tick: &changed_cell as *const UnsafeCell<Tick>,
+            last_run: Tick::new(2),
+            this_run: Tick::new(10),
+            deref_mut_called: false,
+        };
+        // Before the self-write: tick=0 < last_run=2 → not changed.
+        assert!(!m.is_changed());
+        // Trigger deref_mut → bumps tick to this_run=10.
+        *m = MyComp(2);
+        // After the self-write: tick=10 ∈ [2, 10] → is_changed reports true
+        // (plan §6.2-bis worked proof).
+        assert!(
+            m.is_changed(),
+            "self-write within the same system MUST report as changed"
+        );
+    }
+
+    /// Phase 12.5 Track B NCD5 — backstop test.
+    ///
+    /// `Ref<T>::set_table_readonly_no_meta` is the meta-free dispatch
+    /// variant. For `NEEDS_CHANGE_DETECTION = true` impls (which `Ref<T>`
+    /// is) the body is a `#[cold]` `panic!()` — reaching it means the
+    /// NCD6 const-fold dispatcher routed the wrong way. This test pins
+    /// the panic at the trait level so any future regression that drops
+    /// the backstop fails loudly.
+    #[test]
+    fn query_data_no_meta_panic_for_ref() {
+        use std::panic::{self, AssertUnwindSafe};
+        register_test_components();
+        let mut ecs = EcsMaster::new();
+        let state = <Ref<'_, MyComp> as QueryData>::init_state(&mut ecs);
+        let mut fetch = <Ref<'_, MyComp> as QueryData>::init_fetch(&state);
+        // The body never reads the `archetype` argument — it panics
+        // unconditionally — so a dangling pointer is fine here.
+        let archetype: *const Archetype = std::ptr::null();
+        // SAFETY: the trait method is `unsafe`, but in this test it is
+        //   the *panic itself* we exercise — the body short-circuits
+        //   before reading the dangling pointer, so the contract
+        //   violation (null archetype) never observes any UB.
+        let result = panic::catch_unwind(AssertUnwindSafe(|| unsafe {
+            <Ref<'_, MyComp> as QueryData>::set_table_readonly_no_meta(
+                &mut fetch,
+                &state,
+                archetype,
+            );
+        }));
+        assert!(
+            result.is_err(),
+            "Ref<T>::set_table_readonly_no_meta MUST panic (NCD5 backstop)"
+        );
     }
 }

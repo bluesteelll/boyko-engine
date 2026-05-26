@@ -88,6 +88,30 @@ impl Arena {
     /// Allocates `layout` from the arena. Panics if the arena cannot satisfy
     /// the request (no free block large enough).
     pub fn allocate_layout(&self, layout: Layout) -> NonNull<u8> {
+        // ALLOC1 (Phase 9 §2.7): no allocation may occur inside a system body.
+        // The IN_SYSTEM_RUN TLS guard is set by `InSystemRunGuard` in the
+        // scheduler's worker_main wrapper around `System::run_unsafe`. Release
+        // builds rely on the §9.4 audit + the optional Step 24
+        // `force_alloc_panic` cfg gate.
+        debug_assert!(
+            !boyko_threadpool::is_in_system_run(),
+            "Phase 9 ALLOC1 violation: Arena::allocate_layout called inside System::run_unsafe. \
+             All allocation must happen during the apply window (dispatcher-only) or at \
+             ScheduleBuilder::build time. See plan §2.7, §9.2, §9.4."
+        );
+        // Step 24 / Round 3 O-NEW-1: opt-in release-mode escalation. When
+        // built with `RUSTFLAGS="--cfg force_alloc_panic"`, the discipline
+        // panics in release too — closing the dev/release gap. See
+        // docs/PHASE-9-FORCE-ALLOC-PANIC.md.
+        #[cfg(all(not(debug_assertions), force_alloc_panic))]
+        {
+            if boyko_threadpool::is_in_system_run() {
+                panic!(
+                    "Phase 9 ALLOC1 violation (force_alloc_panic): \
+                     Arena::allocate_layout called inside System::run_unsafe."
+                );
+            }
+        }
         debug_assert!(
             layout.size() <= self.capacity,
             "allocation request {} B exceeds arena capacity {} B",
@@ -104,6 +128,29 @@ impl Arena {
     /// Attempts to allocate `layout` from the free-block tracker. Returns
     /// `None` when no suitable block exists.
     pub fn allocate_from_free_blocks(&self, layout: Layout) -> Option<NonNull<u8>> {
+        // ALLOC1 (Phase 9 §2.7): mirror the guard in `allocate_layout` for the
+        // direct entry point. `allocate_layout` already checks before
+        // delegating here, but callers that invoke this function directly
+        // (e.g. tests for the `None`-on-OOM path) must also be covered.
+        debug_assert!(
+            !boyko_threadpool::is_in_system_run(),
+            "Phase 9 ALLOC1 violation: Arena::allocate_from_free_blocks called inside \
+             System::run_unsafe. All allocation must happen during the apply window \
+             (dispatcher-only) or at ScheduleBuilder::build time. See plan §2.7, §9.2, §9.4."
+        );
+        // Step 24 / Round 3 O-NEW-1: opt-in release-mode escalation. See
+        // the matching block in `allocate_layout` and
+        // docs/PHASE-9-FORCE-ALLOC-PANIC.md.
+        #[cfg(all(not(debug_assertions), force_alloc_panic))]
+        {
+            if boyko_threadpool::is_in_system_run() {
+                panic!(
+                    "Phase 9 ALLOC1 violation (force_alloc_panic): \
+                     Arena::allocate_from_free_blocks called inside System::run_unsafe."
+                );
+            }
+        }
+
         let size = layout.size();
         let align = layout.align();
 

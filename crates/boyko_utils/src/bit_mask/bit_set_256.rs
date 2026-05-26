@@ -70,6 +70,34 @@ impl BitSet256 {
         (self.words[0] | self.words[1] | self.words[2] | self.words[3]) == 0
     }
 
+    /// Returns `true` iff every one of the 256 bits is set.
+    ///
+    /// Used by the Phase 9 parallel scheduler to detect "universal access"
+    /// (e.g. exclusive systems / `ApplyDeferred`) whose access surface covers
+    /// the entire resource or event space — see `Access::is_universal`.
+    ///
+    /// Lowers to four 64-bit equality compares; constant-fold friendly when
+    /// `self` is known statically.
+    #[inline]
+    pub fn is_all_set(&self) -> bool {
+        self.words[0] == u64::MAX
+            && self.words[1] == u64::MAX
+            && self.words[2] == u64::MAX
+            && self.words[3] == u64::MAX
+    }
+
+    /// Sets every one of the 256 bits to 1.
+    ///
+    /// Used by the Phase 9 parallel scheduler `Access::universal()` constructor
+    /// when building the access surface for exclusive systems.
+    #[inline]
+    pub fn set_all(&mut self) {
+        self.words[0] = u64::MAX;
+        self.words[1] = u64::MAX;
+        self.words[2] = u64::MAX;
+        self.words[3] = u64::MAX;
+    }
+
     /// Returns the total number of set bits (popcount across all four words).
     #[inline]
     pub fn count_ones(&self) -> u32 {
@@ -202,5 +230,30 @@ mod tests {
         bs.set(255);
         while bs.pop_lowest_set_bit().is_some() {}
         assert!(bs.is_empty());
+    }
+
+    #[test]
+    fn bit_set_256_is_all_set_returns_true_when_full() {
+        let mut bs = BitSet256::new();
+        assert!(!bs.is_all_set(), "empty bitset must not report all-set");
+        for i in 0..256usize {
+            bs.set(i);
+        }
+        assert!(bs.is_all_set(), "after setting every bit, is_all_set must be true");
+        // Clearing a single bit must flip the result.
+        bs.clear(123);
+        assert!(!bs.is_all_set(), "clearing any bit must drop is_all_set to false");
+    }
+
+    #[test]
+    fn bit_set_256_set_all_then_is_all_set() {
+        let mut bs = BitSet256::new();
+        bs.set_all();
+        assert!(bs.is_all_set());
+        assert_eq!(bs.count_ones(), 256);
+        // Every individual bit is observable as set.
+        for i in [0usize, 1, 63, 64, 127, 128, 191, 192, 254, 255] {
+            assert!(bs.get(i), "bit {i} must be set after set_all");
+        }
     }
 }

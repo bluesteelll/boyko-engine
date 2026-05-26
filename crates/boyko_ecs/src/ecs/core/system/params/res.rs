@@ -191,7 +191,7 @@ mod tests {
     #[test]
     fn init_state_caches_resource_id() {
         let mut ecs = EcsMaster::new();
-        let mut meta = SystemMeta::new("test");
+        let mut meta = SystemMeta::for_testing("test");
         let state = <Res<'_, TestRes> as SystemParam>::init_state(&mut ecs, &mut meta);
         assert_eq!(
             state.id,
@@ -205,7 +205,7 @@ mod tests {
     #[test]
     fn init_access_adds_resource_read_to_set() {
         let mut ecs = EcsMaster::new();
-        let mut meta = SystemMeta::new("test");
+        let mut meta = SystemMeta::for_testing("test");
         let state = <Res<'_, TestRes> as SystemParam>::init_state(&mut ecs, &mut meta);
         let mut set = FilteredAccessSet::new();
         <Res<'_, TestRes> as SystemParam>::init_access(&state, &mut meta, &mut set, &mut ecs);
@@ -224,7 +224,7 @@ mod tests {
     #[test]
     fn init_access_two_disjoint_reads_ok() {
         let mut ecs = EcsMaster::new();
-        let mut meta = SystemMeta::new("test");
+        let mut meta = SystemMeta::for_testing("test");
         let s1 = <Res<'_, TestRes> as SystemParam>::init_state(&mut ecs, &mut meta);
         let s2 = <Res<'_, TestRes2> as SystemParam>::init_state(&mut ecs, &mut meta);
         let mut set = FilteredAccessSet::new();
@@ -240,7 +240,7 @@ mod tests {
     fn get_param_returns_correct_value() {
         let mut ecs = EcsMaster::new();
         ecs.resources.insert(TestRes(99));
-        let mut meta = SystemMeta::new("test");
+        let mut meta = SystemMeta::for_testing("test");
         let mut state = <Res<'_, TestRes> as SystemParam>::init_state(&mut ecs, &mut meta);
 
         // SAFETY (U_C1): the cell does not outlive `&mut ecs`; the borrow

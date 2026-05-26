@@ -763,7 +763,7 @@ mod tests {
         let mut new_unit_index: u32 = 0;
         let ok = arch.create_entity(EntityId(val as usize), &mut new_unit_index, &[
             (Position::component_id(), bytes.as_slice()),
-        ]);
+        ], crate::ecs::core::change_detection::Tick::new(1));
         assert!(ok, "create_entity must succeed");
     }
 
@@ -782,7 +782,7 @@ mod tests {
         let ok = arch.create_entity(EntityId(entity_id), &mut new_unit_index, &[
             (Position::component_id(), pb.as_slice()),
             (Velocity::component_id(), vb.as_slice()),
-        ]);
+        ], crate::ecs::core::change_detection::Tick::new(1));
         assert!(ok, "create_entity must succeed");
     }
 
@@ -908,7 +908,7 @@ mod tests {
                 (Position::component_id(), pb.as_slice()),
                 (Velocity::component_id(), vb.as_slice()),
                 (Health::component_id(), hb.as_slice()),
-            ]);
+            ], crate::ecs::core::change_detection::Tick::new(1));
             assert!(ok, "create_entity for arch2 must succeed");
         }
 

@@ -1,0 +1,41 @@
+[package]
+name = "bench-bevy-vs-boyko"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+boyko-ecs = { path = "../boyko_ecs" }
+boyko-macros = { path = "../boyko_macros" }
+boyko-threadpool = { path = "../boyko_threadpool" }
+bevy_ecs = { version = "0.18.1", features = ["std", "multi_threaded"] }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "comparison"
+harness = false
+
+[[bench]]
+name = "comparison_v2"
+harness = false
+
+[[bench]]
+name = "profile_spawn"
+harness = false
+
+[[bench]]
+name = "profile_spawn_v2"
+harness = false
+
+[[bench]]
+name = "profile_query"
+harness = false
+
+[[bench]]
+name = "profile_spawn_single"
+harness = false
