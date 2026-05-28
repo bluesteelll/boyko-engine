@@ -130,6 +130,71 @@ pre-anticipated this: *"Query iter inner loop byte-identical Bevy в
 asm (5 инструкций); `black_box(p.x)` per-element блокирует SIMD
 независимо от engine."*
 
+#### Phase X.A.1 — multi-component (3-tuple) reduction (`g6b_*`)
+
+The single-component bench's parity outcome left the plan's § 13 Risk 5
+hypothesis untested: the win should **widen on multi-component
+reductions** because Bevy pays a per-row *tuple-fetch* state-machine
+cost (one `Iterator::next` advancing three column cursors and
+materialising a `(&P, &V, &A)` tuple per row) that boyko's batched path
+elides (the closure receives three contiguous column slices, one per
+component, and runs a single index loop).
+
+The `g6b_*` group reduces `pos[i] + vel[i] + acc[i]` over a 10k-entity
+`(PosF32, VelF32, AccF32)` archetype — identical harness shape to `g6`
+(single archetype, deterministic sequential spawn, `algebraic_add`,
+`black_box` only at the sink, 60 samples). Two boyko inner-loop shapes
+were benched (the inner-loop shape is the user's responsibility, not the
+dispatcher's):
+
+* **`idx`** — `for i in 0..len` over the three slices with nested
+  `algebraic_add`. The bounds check hoists once; the three
+  `SIMD_BUFFER_ALIGN`-aligned column loads fuse into a packed reduction.
+* **`zip`** — `iter().zip().zip().fold(_, algebraic_add)`. The nested
+  `Zip` adaptors defeated LLVM's column-fusion and ran **slower than
+  Bevy** in both RUSTFLAGS settings (~0.90× native), so the `idx` shape
+  is the one to use. Reported for completeness.
+
+**Measured** (`g6b_*_10k`, Windows x86_64, criterion 60 samples; the
+multi-component rows are the load-bearing ones):
+
+| RUSTFLAGS | shape | boyko median | Bevy median | Ratio (boyko-relative) |
+|-----------|-------|--------------|-------------|------------------------|
+| default | single | 947.11 ns | 1025.1 ns | 0.92× (boyko ~8 % faster) |
+| default | triple `idx` | 2.170 µs | 2.096 µs | 1.04× (boyko ~4 % slower) |
+| default | triple `zip` | 2.194 µs | 2.096 µs | 1.05× (boyko ~5 % slower) |
+| `-Ctarget-cpu=native` | single | 377.53 ns | 363.07 ns | 1.04× (boyko ~4 % slower) |
+| `-Ctarget-cpu=native` | triple `idx` | **1.032 µs** | **1.385 µs** | **0.745× → boyko 1.34× FASTER** |
+| `-Ctarget-cpu=native` | triple `zip` | 1.522 µs | 1.385 µs | 1.10× (boyko ~10 % slower) |
+
+The native `idx` win was confirmed across two back-to-back runs
+(1.032 µs / 1.070 µs boyko vs 1.385 µs / 1.365 µs Bevy → **1.34× / 1.28×
+faster**, both with criterion reporting *"No change in performance
+detected"* between runs). The single-component absolute medians drifted
+up versus the Wave 8 documented 890/851 ns values (different machine
+state, wider criterion CIs + 10–16 % high-outlier counts); the
+**within-run ratio** is the comparable quantity, not the absolute.
+
+**Verdict — Phase X.A.1: CREDIBLE WIN (1.10–5× band), native-gated.**
+The multi-component ratio **is wider** than the single-component case,
+but only with `-Ctarget-cpu=native`:
+
+* Native `idx`: **boyko 1.28–1.34× faster** — crosses the plan's
+  ≥ 1.10× "credible win" threshold (Risk 5 last bullet), confirming the
+  batched API is worthwhile where wide SIMD is enabled. The headline
+  **5× target is still NOT met** even on this wider workload.
+* Default RUSTFLAGS `idx`: ~parity (boyko ~4 % slower). The win is
+  SIMD-width-gated: at SSE2 baseline both engines bottleneck on the same
+  scalar/128-bit throughput envelope; the per-row tuple-fetch overhead
+  only dominates once the aligned-column AVX path widens boyko's
+  reduction faster than Bevy's cursor walk can feed it.
+
+This is exactly the Risk 5 last-bullet outcome the plan budgeted for:
+*"If the 5× bar fails on the single-component bench but passes on the
+multi-component bench, that's still a credible win."* The 5× headline
+remains a wider-workload aspiration (more component columns, or a
+genuinely SIMD-heavy body such as a vec3 normalise) — filed below.
+
 With `algebraic_add` (not `black_box` per-element), both engines now
 autovectorize the inner loop. The per-row state-machine cost on the
 Bevy side amortises into the same throughput envelope on a single
@@ -138,20 +203,24 @@ dispatcher (the load-bearing win — a flecs-style batched API not
 available in Bevy 0.18) holds regardless of the single-component
 perf ratio.
 
-**Filed:** Phase X.A.1 — single-component re-tune. Possible
+**Filed:** Phase X.A.1 — single-component re-tune. Status of the
 investigation paths:
 
-- Multi-component variant (`g6b_*`): the speedup typically widens on
-  reductions over multiple components because Bevy pays per-row
-  tuple-fetch state-machine overhead.
+- **Multi-component variant (`g6b_*`): DONE — credible win confirmed.**
+  boyko `idx` runs **1.28–1.34× faster** than Bevy on the native-SIMD
+  3-component reduction (≥ 1.10× threshold met; 5× not met). ~parity at
+  default RUSTFLAGS. See the "Phase X.A.1 — multi-component" subsection
+  above for the full table + verdict.
 - `cargo asm` inspection (deferred: tool not installed in dev
   environment) to identify any boyko-specific dispatch dead-weight.
-- Wider SIMD lane harness (AVX-512 via `cfg(target_feature)`).
+- Wider SIMD lane harness (AVX-512 via `cfg(target_feature)`) and a
+  genuinely SIMD-heavy body (vec3 normalise) to chase the 5× headline.
 
 The Risk 5 last-bullet mitigation from the plan is in effect:
 *"If the 5× bar fails on the single-component bench but passes on the
 multi-component bench, that's still a credible win — file Phase X.A.1
 (single-comp re-tune) as follow-up rather than blocking the phase."*
+The multi-component bench delivered that credible win (native-gated).
 Phase X.A lands.
 
 ## Code footprint
@@ -228,7 +297,9 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
 | Item | Status | Filed as |
 |------|--------|----------|
 | Multi-thread Miri for parallel `par_for_each_chunk` | DEFERRED | Phase 9.1 (Scope::spawn protected-tag) |
-| Single-component bench 5× target | NOT MET | Phase X.A.1 re-tune |
+| Single-component bench 5× target | NOT MET (~parity, both engines autovec) | Phase X.A.1 re-tune |
+| Multi-component bench (`g6b_*`) 5× target | NOT MET — but **CREDIBLE WIN** (boyko 1.28–1.34× faster, native-SIMD only; ~parity default RUSTFLAGS) | Phase X.A.1 DONE |
+| 5× headline on a wider/SIMD-heavy workload (≥4 columns or vec3 normalise) + AVX-512 harness | OPEN | Phase X.A.2 |
 | `for_each_chunk_with_mask` | OUT OF SCOPE | Phase 13.X opt-in |
 | `par_fold_chunks` reducing variant | OUT OF SCOPE | Phase 13.X |
 | `Changed<T>` / `Added<T>` / `Ref<T>` / `Mut<T>` chunk support | DELIBERATE EXCLUSION | Phase 13.X via `ChunkedTickedQueryData` |
