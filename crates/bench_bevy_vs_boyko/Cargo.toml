@@ -39,3 +39,7 @@ harness = false
 [[bench]]
 name = "profile_spawn_single"
 harness = false
+
+[[bench]]
+name = "g6_for_each_chunk"
+harness = false
