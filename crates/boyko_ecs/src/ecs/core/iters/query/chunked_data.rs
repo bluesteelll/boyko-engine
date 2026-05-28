@@ -428,3 +428,219 @@ unsafe impl ChunkedQueryData for () {
     ) -> Self::ChunkItem<'c> {
     }
 }
+
+// ── Variadic tuple impls (Wave 3 Step 3A, plan §5.1) ───────────────────────
+//
+// One `macro_rules!` site emits `ChunkedQueryData` impls for tuple arities
+// `1..=MAX_QUERY_DATA_ARITY` (= 12). Mirrors the paired-ident invocation syntax
+// of `impl_query_data_tuple!` in `data.rs:1230-1363` so the per-element idents
+// carry three distinct roles:
+//
+// * `$D` — type-ident used in trait bounds (`D0: ChunkedQueryData`).
+// * `$s` — value-ident bound to the per-element `State` inside
+//   `let ($($s,)*) = state` destructures.
+// * `$f` — value-ident bound to the per-element `ChunkFetch<'c>` inside
+//   `let ($($f,)*) = fetch` destructures.
+//
+// The tuple impl composes via trait-method calls only — it does NOT reach into
+// `ReadChunkFetch::base` / `WriteChunkFetch::base` (those fields are private to
+// the leaf impls; encapsulation preserved per Wave 2 code-review).
+
+/// Emits a `ChunkedQueryData` impl for a tuple of the given paired idents (one
+/// `(TypeIdent, state_value_ident, fetch_value_ident)` triple per element).
+/// Invoked for arity `1..=MAX_QUERY_DATA_ARITY`.
+macro_rules! impl_chunked_query_data_tuple {
+    ( $( ($D:ident, $s:ident, $f:ident) ),* ) => {
+        // SAFETY (CD1-CD4): forwarded per-element; the tuple impl is sound iff
+        //   each element's chunked impl is sound. The archetype pointer is
+        //   identical for every element (one archetype per `set_chunk_*` call),
+        //   and the row range `[start, start + len)` is identical for every
+        //   per-element `fetch_chunk` call — guaranteeing same-length slices.
+        //   Intra-tuple aliasing among `$D`s is detected at `init_access` via
+        //   `FilteredAccessSet` (the `QueryData` supertrait already covers it).
+        #[allow(non_snake_case)]
+        unsafe impl< $($D: ChunkedQueryData),* > ChunkedQueryData for ( $($D,)* ) {
+            type ChunkFetch<'c> = ( $($D::ChunkFetch<'c>,)* );
+            type ChunkItem<'c>  = ( $($D::ChunkItem<'c>,)* );
+
+            #[inline]
+            fn init_chunk_fetch<'c>(state: &Self::State) -> Self::ChunkFetch<'c> {
+                let ( $($s,)* ) = state;
+                ( $( <$D as ChunkedQueryData>::init_chunk_fetch($s), )* )
+            }
+
+            #[inline]
+            unsafe fn set_chunk_readonly<'c>(
+                fetch: &mut Self::ChunkFetch<'c>,
+                state: &Self::State,
+                archetype: *const Archetype,
+            ) {
+                let ( $($f,)* ) = fetch;
+                let ( $($s,)* ) = state;
+                $(
+                    // SAFETY (CD1, CD4): forwarded per-element; `archetype`
+                    //   carries read-only provenance and is identical for
+                    //   every element. The caller of the tuple impl upheld
+                    //   CD1/CD4 for every `$D`.
+                    unsafe { <$D as ChunkedQueryData>::set_chunk_readonly($f, $s, archetype); }
+                )*
+            }
+
+            #[inline]
+            unsafe fn set_chunk_mut<'c>(
+                fetch: &mut Self::ChunkFetch<'c>,
+                state: &Self::State,
+                archetype: *mut Archetype,
+            ) {
+                let ( $($f,)* ) = fetch;
+                let ( $($s,)* ) = state;
+                $(
+                    // SAFETY (CD1, CD4): write-capable `archetype` is forwarded
+                    //   to every element; per-element CD4 enforces wrong-kind
+                    //   dispatch prevention. Caller upheld CD1/CD4.
+                    unsafe { <$D as ChunkedQueryData>::set_chunk_mut($f, $s, archetype); }
+                )*
+            }
+
+            #[inline]
+            unsafe fn fetch_chunk<'c>(
+                fetch: &Self::ChunkFetch<'c>,
+                start: usize,
+                len: usize,
+            ) -> Self::ChunkItem<'c> {
+                let ( $($f,)* ) = fetch;
+                (
+                    $(
+                        // SAFETY (CD2, CD3): per-element `fetch_chunk` contract
+                        //   held by caller; `start..start+len` is identical
+                        //   across elements. Distinct slices into distinct
+                        //   columns are non-aliasing by archetype invariant
+                        //   (different components → different memory regions);
+                        //   intra-tuple `&mut [T]`/`&[T]` over the same column
+                        //   is rejected by `FilteredAccessSet::init_access`.
+                        unsafe { <$D as ChunkedQueryData>::fetch_chunk($f, start, len) },
+                    )*
+                )
+            }
+        }
+    };
+}
+
+impl_chunked_query_data_tuple!((D0, s0, f0));
+impl_chunked_query_data_tuple!((D0, s0, f0), (D1, s1, f1));
+impl_chunked_query_data_tuple!((D0, s0, f0), (D1, s1, f1), (D2, s2, f2));
+impl_chunked_query_data_tuple!((D0, s0, f0), (D1, s1, f1), (D2, s2, f2), (D3, s3, f3));
+impl_chunked_query_data_tuple!(
+    (D0, s0, f0), (D1, s1, f1), (D2, s2, f2), (D3, s3, f3),
+    (D4, s4, f4)
+);
+impl_chunked_query_data_tuple!(
+    (D0, s0, f0), (D1, s1, f1), (D2, s2, f2), (D3, s3, f3),
+    (D4, s4, f4), (D5, s5, f5)
+);
+impl_chunked_query_data_tuple!(
+    (D0, s0, f0), (D1, s1, f1), (D2, s2, f2), (D3, s3, f3),
+    (D4, s4, f4), (D5, s5, f5), (D6, s6, f6)
+);
+impl_chunked_query_data_tuple!(
+    (D0, s0, f0), (D1, s1, f1), (D2, s2, f2), (D3, s3, f3),
+    (D4, s4, f4), (D5, s5, f5), (D6, s6, f6), (D7, s7, f7)
+);
+impl_chunked_query_data_tuple!(
+    (D0, s0, f0), (D1, s1, f1), (D2, s2, f2), (D3, s3, f3),
+    (D4, s4, f4), (D5, s5, f5), (D6, s6, f6), (D7, s7, f7),
+    (D8, s8, f8)
+);
+impl_chunked_query_data_tuple!(
+    (D0, s0, f0), (D1, s1, f1), (D2, s2, f2), (D3, s3, f3),
+    (D4, s4, f4), (D5, s5, f5), (D6, s6, f6), (D7, s7, f7),
+    (D8, s8, f8), (D9, s9, f9)
+);
+impl_chunked_query_data_tuple!(
+    (D0, s0, f0), (D1, s1, f1), (D2, s2, f2), (D3, s3, f3),
+    (D4, s4, f4), (D5, s5, f5), (D6, s6, f6), (D7, s7, f7),
+    (D8, s8, f8), (D9, s9, f9), (D10, s10, f10)
+);
+impl_chunked_query_data_tuple!(
+    (D0, s0, f0), (D1, s1, f1), (D2, s2, f2), (D3, s3, f3),
+    (D4, s4, f4), (D5, s5, f5), (D6, s6, f6), (D7, s7, f7),
+    (D8, s8, f8), (D9, s9, f9), (D10, s10, f10), (D11, s11, f11)
+);
+
+// No `impl_chunked_query_data_tuple_too_large!` mirror needed (plan §5.4):
+//   tuples of arity > MAX_QUERY_DATA_ARITY (12) fail in `QueryData::init_state`
+//   before any `ChunkedQueryData` method is reachable. The supertrait bound
+//   `ChunkedQueryData: QueryData` forces `QueryDataState::new` to invoke
+//   `<(D0,..,D12) as QueryData>::init_state` (see `data.rs:1493-1501` for the
+//   monomorphisation-time `panic!`), which fires before any
+//   `ChunkedQueryData::init_chunk_fetch` / `set_chunk_*` call site is reached.
+
+#[cfg(test)]
+mod chunked_tuple_tests {
+    use super::ChunkedQueryData;
+    use crate::ecs::core::component::component::Component;
+
+    fn assert_chunked<D: ChunkedQueryData>() {}
+
+    // Local test components — `Component` impls are compile-only shims
+    // (`component_id` panics if ever invoked, but `assert_chunked` is a pure
+    // type-system check that never executes the body). Mirrors the
+    // `archetypal_marker_tests` pattern in `filter.rs:1753-1809`.
+    struct A;
+    struct B;
+    struct C;
+    impl Component for A {
+        fn component_id() -> crate::ecs::identifiers::primitives::ComponentId {
+            unimplemented!("compile-only test component")
+        }
+    }
+    impl Component for B {
+        fn component_id() -> crate::ecs::identifiers::primitives::ComponentId {
+            unimplemented!("compile-only test component")
+        }
+    }
+    impl Component for C {
+        fn component_id() -> crate::ecs::identifiers::primitives::ComponentId {
+            unimplemented!("compile-only test component")
+        }
+    }
+
+    #[test]
+    fn empty_tuple_compiles() {
+        assert_chunked::<()>();
+    }
+
+    #[test]
+    fn arity_one_compiles() {
+        assert_chunked::<(&A,)>();
+    }
+
+    #[test]
+    fn arity_three_mixed_tuple_is_chunked() {
+        assert_chunked::<(&A, &mut B, &C)>();
+    }
+
+    #[test]
+    fn arity_twelve_compiles() {
+        struct D;
+        struct E;
+        struct F;
+        struct G;
+        struct H;
+        struct I;
+        struct J;
+        struct K;
+        struct L;
+        macro_rules! impl_c {
+            ($($t:ident),*) => { $(
+                impl Component for $t {
+                    fn component_id() -> crate::ecs::identifiers::primitives::ComponentId {
+                        unimplemented!("compile-only test component")
+                    }
+                }
+            )* };
+        }
+        impl_c!(D, E, F, G, H, I, J, K, L);
+        assert_chunked::<(&A, &B, &C, &D, &E, &F, &G, &H, &I, &J, &K, &L)>();
+    }
+}
