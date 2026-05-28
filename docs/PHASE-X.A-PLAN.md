@@ -2,6 +2,34 @@
 
 ---
 
+## Changes from Rounds 1+2
+
+### Round 1 patches
+
+| Critic ID | Severity | Change |
+|-----------|----------|--------|
+| W1 | Important | §10.7 — collapsed two contradictory rows on `for_each_chunk` inline policy into the Phase 9 precedent shape: `#[inline]` on the public `Query::for_each_chunk` / `Query::par_for_each_chunk` methods (cross-crate visibility for closure inlining via LTO), no annotation on the internal `chunk_iter::for_each_chunk_impl` / `par_chunk::par_for_each_chunk_impl` drivers (LLVM decides). |
+| W2 | Important | §2.4 + §1.2 — added an explicit callout that `par_for_each_chunk` invokes the closure once per archetype sub-range, not once per archetype, and that reductions need a thread-safe accumulator or `par_fold_chunks` (Phase 13.X). New §1.2 row quantifies the per-call frequency target. |
+| W3 | Important | §8.1 — removed the workspace-root `rust-toolchain.toml` plan. Replaced with per-package `rust-toolchain.toml` at `crates/bench_bevy_vs_boyko/rust-toolchain.toml` (verified supported by rustup per-directory override semantics). Engine workspace stays stable-Rust clean. |
+| W4 | Important | §1.2 — rewrote the "Allocations per frame" row to acknowledge the cold-path `Box<UnsafeCell<QueryDataState<D, F>>>` allocation on first use of a new `(D, F)` pair (same shape as Phase 12.6 direct API). Steady state still 0. |
+| W5 | Important | §12 Step 1A — reordered the bullet list so `buffer_ptr_is_simd_aligned` is the **first** test the developer writes; this gates the entire wave. |
+| N1 | Nitpick | §11.6 — added a one-line `cargo asm` size check for the `for_each_chunk_impl` dispatch body; the §1.2 ≤ 256 B L1i target is kept and now has a falsification step. |
+| N2 | Nitpick | §5.2 — augmented the `Or<F>` blanket impl with a `// SAFETY:` comment explaining why `F: ArchetypalQueryFilter` is sufficient (concrete `Or<F>` impl is `Or<(F0, F1, …)>` and the tuple impl forces every element archetypal). |
+| N3 | Nitpick | §6.2 — cited `component_registry.rs:47` (`MAX_COMPONENTS = 512`) and `archetype_bit_set.rs:7` (`MAX_ARCHETYPES = 1024`) so the worst-case arithmetic is reproducible. Numbers unchanged. |
+| N4 | Nitpick | §11.2 — clarified the `aliasing_query_mut_t_mut_t_rejected.rs` shape: the test must declare a system fn taking `Query<(&mut T, &mut T), ()>` and register it in a `Schedule`; the direct `EcsMaster::query` API bypasses `FilteredAccessSet::init_access` (verified at `ecs_master.rs:1886-1939` per critic Round 1). |
+
+### Round 2 patches
+
+| Critic ID | Severity | Change |
+|-----------|----------|--------|
+| W2.1 | Important | §2.4 + §1.2 + §9.1 — fixed closure-frequency arithmetic; real formula is `worker_count × batches_per_thread` for medium-large archetypes (the per-worker shape dominates), and the `MIN_ARCHETYPE_FOR_PARALLEL = 1024` floor binds only for small archetypes where `entity_count / worker_count < 1024`. The Round 1 "100 invocations on 100k rows" example was off by ~10× — real answer is ~8 for that input on 8 workers. Accumulator-sizing guidance changed to `worker_count`, not invocation count. |
+| W2.2 | Important | §12 Step 8A + §12-trailing "New files" list + §14 Q4 — propagated the §8.1 per-package toolchain decision to every downstream mention. Removed three workspace-root references. Step 8A now creates `crates/bench_bevy_vs_boyko/rust-toolchain.toml`, not the workspace-root file; the new-files list and §14 Q4 wording match. |
+| N2.1 | Nitpick | §10.7 — extended the public-methods inline policy row to also cover the `QueryView::for_each_chunk` / `QueryView::par_for_each_chunk` direct-API mirrors. Single row, no duplication. |
+| N2.2 | Nitpick | §13 Risk 4 — renamed the alignment-lift gating test from `simd_buffer_align_lift_holds` to `buffer_ptr_is_simd_aligned` to match the name the §12 Step 1A developer is writing right now in parallel. |
+| N2.3 | Nitpick | §1.2 + §11.6 — dropped the spurious `wc -c ≤ 256 B` L1i budget. Textual `cargo asm` character count is not a sound proxy for encoded x86-64 instruction bytes (insn lengths vary 1-15 B). The check is kept but reframed qualitatively: inspect the dispatch body for the expected tight outer-loop shape. |
+
+---
+
 ## §1 Goals
 
 ### 1.1 Functional goal
@@ -21,9 +49,10 @@ The closure receives **one contiguous columnar slice per matched archetype** (a 
 | `for_each_chunk` outer-loop overhead per archetype, 0 rows | ≤ **5 ns** (CMOV + integer compare + indirect jump) | Same shape as Phase 9 PAR9 inline path; no per-row work. |
 | `for_each_chunk` outer-loop overhead per archetype, populated | ≤ **15 ns + 1 ns/row of user closure** when `F: ArchetypalFilter` and `D::NCD = false`. The "+1 ns/row" is the user's responsibility. | Const-fold of the per-row filter + tick branches; same as current `iter()` cost minus the `Iterator::next` state machine. |
 | `par_for_each_chunk` dispatch overhead per archetype-chunk | ≤ **150 ns** (Phase 9 measured ~120 ns/spawn — see PAR9) | Re-use of `pool.scope` + identical `ChunkCaptures` shape. |
-| Allocations per frame on hot path | **0** | New code path allocates nothing — same `Box<[OnceLock<...>]>` shape as Phase 8.5 cache. |
+| `par_for_each_chunk` user-visible closure-invocation frequency | ≈ **`min(worker_count × batches_per_thread, entity_count / MIN_ARCHETYPE_FOR_PARALLEL)`** invocations per archetype (real formula at `par_iter.rs:117-123`: `batch_size = (entity_count / (worker_count × batches_per_thread)).clamp(MIN_ARCHETYPE_FOR_PARALLEL, usize::MAX)`; floor binds only when `entity_count / worker_count < MIN_ARCHETYPE_FOR_PARALLEL`). Reductions need an interior-mutable accumulator (`AtomicF32`, sharded TLS, or `par_fold_chunks` in Phase 13.X — see §2.4). Size the accumulator to `worker_count`, not to invocation count. | Sub-range granularity from Phase 9; one sequential `for_each_chunk` call would be one closure invocation per archetype. |
+| Allocations per frame on hot path | **0 in steady state**; one `Box<UnsafeCell<QueryDataState<D, F>>>` per **new** `(D, F)` pair on first use (same shape as Phase 12.6 `EcsMaster::query` direct API; cached for the world's lifetime via `OnceLock<...>` in `query_state_cache`). | Phase 12.6 direct-API cost model; the chunked path reuses that cache verbatim — no new allocator hook. |
 | L1d footprint of inner loop on the canonical bench | ≤ **40 KB** working set | 10k × 4 B f32 = 40 KB; fits comfortably. |
-| L1i footprint of `for_each_chunk` per-archetype dispatch body | ≤ **~256 B** (rough; verify via `cargo asm`) | Outer loop + one indirect call; no inlined fetch logic per element. |
+| L1i footprint of `for_each_chunk` per-archetype dispatch body | **Qualitative**: outer loop + one indirect call body must fit in a small number of cache lines, verified by inspection of `cargo +nightly asm` output in §11.6. No byte-count target (encoded x86-64 instruction lengths vary 1-15 B; textual asm character count is not a sound proxy). | Outer loop + one indirect call; no inlined fetch logic per element. |
 
 ### 1.3 What this phase does NOT do
 
@@ -231,6 +260,37 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
     /// Same compile-time bounds as `for_each_chunk` plus `Func: Fn + Send +
     /// Sync` for cross-worker invocation. PAR7 fallback (no active pool →
     /// sequential walk on the calling thread) preserved.
+    ///
+    /// # Closure invocation frequency (IMPORTANT — differs from sequential)
+    ///
+    /// The closure is invoked **once per archetype sub-range, not once per
+    /// archetype**. The exact count is derived from
+    /// `BatchingStrategy::chunk_size` (`par_iter.rs:117-123`):
+    /// `batch_size = (entity_count / (worker_count × batches_per_thread))
+    /// .clamp(MIN_ARCHETYPE_FOR_PARALLEL, usize::MAX)`. Two regimes follow:
+    ///
+    /// * **Medium-large archetypes** (`entity_count / worker_count ≥
+    ///   MIN_ARCHETYPE_FOR_PARALLEL`): the per-worker shape dominates.
+    ///   Invocations ≈ `worker_count × batches_per_thread`. Example: a
+    ///   100k-row archetype on an 8-worker pool with default
+    ///   `batches_per_thread = 1` → `batch_size = 12500`, invocations
+    ///   = `100000 / 12500 = 8`.
+    ///
+    /// * **Small archetypes** (`entity_count / worker_count <
+    ///   MIN_ARCHETYPE_FOR_PARALLEL = 1024`): the floor binds.
+    ///   Invocations ≈ `entity_count / 1024`. Example: a 4096-row
+    ///   archetype on the same 8-worker pool → raw `4096 / 8 = 512`
+    ///   clamps to 1024, invocations = `4096 / 1024 = 4`.
+    ///
+    /// The sequential `for_each_chunk` would yield exactly **one**
+    /// invocation with a full `entity_count`-row slice in either case.
+    ///
+    /// For reductions, the sequential `FnMut(&mut acc, &[T])` capture pattern
+    /// does NOT translate. Use a thread-safe accumulator — `[AtomicF32; N]`,
+    /// a sharded thread-local, or wait for `par_fold_chunks` (Phase 13.X,
+    /// see §2.6) which adds the parallel reducing variant with explicit
+    /// identity + combine semantics. Size the accumulator to `worker_count`,
+    /// not to invocation count.
     ///
     /// # Granularity
     ///
@@ -452,6 +512,15 @@ impl_archetypal_filter_tuple!(F0, F1);
 
 // Or<F> — element-wise propagation. Or<(With<A>, Changed<B>)> is NOT
 // archetypal; Or<(With<A>, Without<B>)> IS.
+//
+// SAFETY: the concrete `QueryFilter for Or<F>` impl in `filter.rs:1151`
+//   is monomorphised as `Or<(F0, F1, …)>` — the inner `F` is always a
+//   tuple. The tuple impl above ensures `(F0, F1, …)` implements
+//   `ArchetypalQueryFilter` iff every element does. Therefore the bound
+//   `F: ArchetypalQueryFilter` on this blanket is sufficient: it forces
+//   the inner tuple to be archetypal element-wise, which propagates the
+//   `IS_ARCHETYPAL = true ∧ NEEDS_CHANGE_DETECTION = false` invariants
+//   transitively to the `Or<F>` wrapper.
 unsafe impl<F: ArchetypalQueryFilter> ArchetypalQueryFilter for Or<F> {}
 ```
 
@@ -502,8 +571,8 @@ let buffer_layout = Layout::from_size_align(buffer_size, buffer_align)
 
 where `SIMD_BUFFER_ALIGN: usize = 32` is added to `crates/boyko_ecs/src/ecs/constants.rs`.
 
-**Cost**:
-- At most one extra alignment gap per column allocation: `32 - 4 = 28` bytes wasted for `T = f32` columns. With 512 components × 1024 archetypes worst case = **14 MB wasted out of 64 MB arena** in pathological scenarios (every component f32, every archetype populated). Realistic workloads (most components ≥ 16 B): waste under 1 MB total. Acceptable.
+**Cost** (constants sourced from `crates/boyko_ecs/src/ecs/core/component/component_registry.rs:47` — `MAX_COMPONENTS = 512` — and `crates/boyko_ecs/src/ecs/core/iters/archetype_bit_set.rs:7` — `MAX_ARCHETYPES = 1024`):
+- At most one extra alignment gap per column allocation: `32 - 4 = 28` bytes wasted for `T = f32` columns. With `MAX_COMPONENTS = 512` components × `MAX_ARCHETYPES = 1024` archetypes worst case = `512 × 1024 × 28 B ≈ 14 MB` wasted out of the 64 MB arena in pathological scenarios (every component f32, every archetype populated). Realistic workloads (most components ≥ 16 B): waste under 1 MB total. Acceptable.
 - Zero runtime overhead — alignment lift happens once at `ComponentPool::new`, never on hot path.
 - No effect on smaller-aligned `T` reads — `align_of::<T>() ≤ 32 → 32`-byte-aligned start still respects `T`'s alignment.
 
@@ -593,20 +662,33 @@ Phase 13.X may add `Query<Mut<T>>::for_each_chunk_tracked(|values: &mut [T], tic
 
 ## §8 Bench harness decision
 
-### 8.1 Toolchain — **add `rust-toolchain.toml` at workspace root**
+### 8.1 Toolchain — **per-package `rust-toolchain.toml` at the bench crate**
 
-Currently no `rust-toolchain.toml` exists (verified via Glob). Add at `D:\claude\BoykoEngine\rust-toolchain.toml`:
+The engine workspace stays on the user's default toolchain (typically stable). The bench crate — and only the bench crate — opts into nightly. This avoids forcing nightly on `cargo check --all-targets` at the workspace root, the rustdoc deploy in `.github/workflows/docs.yml`, or any downstream consumer that vendors `boyko_ecs` against stable.
+
+**Mechanism** (verified against `https://rust-lang.github.io/rustup/overrides.html`): rustup discovers `rust-toolchain.toml` by walking up from the current working directory; the closest file wins. Placing the file inside `crates/bench_bevy_vs_boyko/` scopes the override to invocations inside that directory and its children. The workspace root and the other crates remain on the default toolchain.
+
+Add at `D:\claude\BoykoEngine\crates\bench_bevy_vs_boyko\rust-toolchain.toml`:
 
 ```toml
 [toolchain]
-channel = "nightly-2026-05-01"
+channel = "nightly"
 components = ["rustc", "cargo", "rust-std", "rust-docs", "clippy", "rustfmt"]
 profile = "minimal"
 ```
 
-**Pin to a dated nightly** so the team's CI does not break on a rustc regression. Date chosen post knowledge-cutoff (May 2026) — the developer step will use whatever the latest stable nightly is at impl time.
+The exact channel pin (e.g., `nightly-2026-MM-DD`) is selected at Wave 8A impl time using the latest stable nightly available then. No date is baked in here.
 
-**Engine library impact**: the engine crate (`boyko_ecs`) does not gain any nightly-only features. The `rust-toolchain.toml` is at workspace root; if a downstream consumer pins to stable, they can override per-crate. The bench (and only the bench) opts into `#![feature(float_algebraic)]`.
+**Canonical invocations** (matching CLAUDE.md build commands):
+
+| Command | Toolchain used | Notes |
+|---|---|---|
+| `cargo check --all-targets` (at workspace root) | Default (stable) | Engine + all non-bench crates type-check on stable. |
+| `cargo test --all-targets` (at workspace root) | Default (stable) | Tests run on stable; bench crate's tests use `#[cfg(all(test, ...))]` guards to skip nightly-only items. |
+| `cargo bench --bench g6_for_each_chunk` from inside `crates/bench_bevy_vs_boyko/` | Nightly (via per-package file) | Pulls `f32::algebraic_add` etc. |
+| `cargo +nightly bench -p bench_bevy_vs_boyko --bench g6_for_each_chunk` from workspace root | Nightly (explicit) | Equivalent; useful for CI scripts that don't `cd`. |
+
+**Engine library impact**: zero — no nightly features anywhere outside `crates/bench_bevy_vs_boyko/`. The stable engine library invariant per Phase 12.5 memory ("Engine — preferably stable; benches и SIMD-критичные пути — nightly OK") is preserved.
 
 ### 8.2 Bench file path & shape
 
@@ -714,7 +796,7 @@ If the orchestrator later vetoes the nightly toolchain, the bench can be rewritt
 
 1. The Phase 9 baseline already proved per-subrange works (2.93× win on `par_iter` 10k bench).
 2. SIMD work per row is on the order of 0.1–1 ns (orlp.net's `algebraic_add` peaks at ~1 ns/element for f32). For a single-archetype 100k-row workload, per-whole-archetype would assign all work to one worker → 100 µs serial → idle workers.
-3. Per-subrange dispatch overhead ~120 ns/spawn (Phase 9 §10.3) is ~12% on a 1024-row chunk × 1 ns/row = 1 µs of work. Acceptable.
+3. Per-subrange dispatch overhead ~120 ns/spawn (Phase 9 §10.3) is amortized over the work chunk. Worked example with the real `BatchingStrategy` formula: 100k-row archetype on 8 workers with default `batches_per_thread = 1` → `batch_size = clamp(100000 / 8, 1024, _) = 12500`, 8 closure invocations, each ~12.5 µs of work at ~1 ns/row → dispatch tax `120 ns / 12500 ns ≈ 1%`. Acceptable. The floor-bound regime (small archetypes, e.g. 4096 rows / 8 workers = 512 raw, clamped to 1024) caps invocation count at `entity_count / 1024 = 4`, each still ≥ 1 µs of work → dispatch tax ≤ 12%, still acceptable.
 4. The `MIN_ARCHETYPE_FOR_PARALLEL = 1024` inline threshold already prevents tiny archetypes from paying the dispatch tax.
 
 ### 9.2 Closure bounds
@@ -827,7 +909,7 @@ The engine does NOT emit SIMD intrinsics itself — per research §2.5 (Intel ma
 
 ### 10.7 Principle 7 — Measured inlining
 
-Inline annotations on the new code:
+Inline annotations on the new code (mirrors the Phase 9 precedent at `par_iter.rs:166-167, 216-217` for the public shim vs `par_iter.rs:244` for the internal driver):
 
 | Site | Annotation | Justification |
 |---|---|---|
@@ -836,11 +918,12 @@ Inline annotations on the new code:
 | `ChunkedQueryData::set_chunk_mut` (leaf impls) | `#[inline]` | Same |
 | `ChunkedQueryData::fetch_chunk` (leaf impls) | `#[inline]` | Same |
 | Tuple impl methods | `#[inline]` | Same |
-| `Query::for_each_chunk` outer body | NO annotation (LLVM decides) | Per CLAUDE.md principle 7: no `#[inline(always)]` without profiler evidence |
-| `Query::par_for_each_chunk` outer body | NO annotation | Same |
+| `Query::for_each_chunk` / `Query::par_for_each_chunk` plus their `QueryView::*` mirrors (public methods) | `#[inline]` | Cross-crate visibility for closure inlining via LTO; mirrors `par_iter.rs:166-167, 216-217` (`ParQuery::for_each` / `ParQueryMut::for_each` shims). The `QueryView::*` direct-API mirrors carry the same annotation for the same reason (cross-crate call from `EcsMaster::query` users). |
+| `chunk_iter::for_each_chunk_impl` / `par_chunk::par_for_each_chunk_impl` (internal drivers) | NO annotation (LLVM decides) | Mirrors `par_iter.rs:244` (`for_each_impl`); per CLAUDE.md principle 7, no `#[inline(always)]` without profiler evidence |
 | `&mut T::set_chunk_readonly` panic backstop | `#[cold]` + `#[inline(never)]` | Error path; exit the hot I-cache |
-| Per-archetype-chunk worker body | `#[inline]` | Mirror of `par_iter.rs:run_chunk_owned` |
-| `for_each_chunk` outer-loop entry | `#[inline]` | The `Query::for_each_chunk` method is cross-crate; users call it from system bodies in their own crate; LTO is opportunistic if `#[inline]` is omitted |
+| Per-archetype-chunk worker body (inside `par_chunk`) | `#[inline]` | Mirror of `par_iter.rs:run_chunk_owned` |
+
+**Phase 9 precedent rationale**: the public `Query::for_each_chunk` is the cross-crate-boundary method the user's system body calls. `#[inline]` exposes the body to LTO so the user's closure can be inlined into the driver call site. The internal `for_each_chunk_impl` driver is a single-translation-unit function — LLVM already has full visibility and decides whether to inline based on cost-model. Adding `#[inline]` there is redundant and bloats no fewer cases.
 
 **Critic-deflection note**: I deliberately do not apply `#[inline(always)]` to any per-archetype-boundary function. If profiling after Phase X.A lands shows a missed inline, we add it then — measurement-driven, not doctrine. This matches the Phase 12.6 outcome ("asm byte-identical Bevy" without `#[inline(always)]`).
 
@@ -912,9 +995,9 @@ Pattern matches Phase 9's `par_iter.rs:run_chunk_raw` SAFETY block.
 | `ref_data_rejected.rs` | `Ref<'_, T>: ChunkedQueryData` not satisfied | §4.3 gate |
 | `mut_data_rejected.rs` | `Mut<'_, T>: ChunkedQueryData` not satisfied | §4.3 gate |
 | `or_with_changed_rejected.rs` | `Or<(With<A>, Changed<B>)>: ArchetypalQueryFilter` not satisfied | §5.2 propagation |
-| `aliasing_query_mut_t_mut_t_rejected.rs` | Existing intra-system conflict B0002 | Verify the chunk path doesn't bypass `FilteredAccessSet` |
+| `aliasing_query_mut_t_mut_t_rejected.rs` | Existing intra-system conflict B0002 from `FilteredAccessSet::init_access` | SystemParam path only: the test declares `fn sys(_: Query<(&mut T, &mut T), ()>) { … }` and registers it in a `Schedule`. The direct `EcsMaster::query::<(&mut T, &mut T), ()>()` API bypasses `FilteredAccessSet` (verified in critic Round 1 at `ecs_master.rs:1886-1939`: `query_cold_init` calls `QueryDataState::new` → `init_state`, never `init_access`); only the SystemParam dispatch path triggers the aliasing check. Verifies the chunk path doesn't silently bypass the `FilteredAccessSet` gate. |
 
-The aliasing test is critical — it verifies that `Query<(&mut T, &mut T)>::for_each_chunk` rejection comes from `D::init_access` (same as `iter_mut`), not silently passes because we wrote a separate path.
+The aliasing test is critical — it verifies that `Query<(&mut T, &mut T)>::for_each_chunk` rejection comes from `D::init_access` invoked by the SystemParam pipeline (same as `iter_mut`), not silently passes because we wrote a separate path. The test MUST be written as a system fn inside a `Schedule`; a direct `EcsMaster::query::<(&mut T, &mut T), ()>::for_each_chunk(...)` invocation would type-check (no `FilteredAccessSet` involved) and run — masking the bug.
 
 ### 11.3 Property tests (`proptest`)
 
@@ -949,6 +1032,8 @@ Specifically run:
 
 - `g6_for_each_chunk_sum_10k` (§8.2): PASS bar = boyko median ≥ 5× Bevy median over 60 criterion samples. Filed as a `cargo bench` gate; if it falls below 5×, treat as regression.
 - Sanity bench: also run the existing `comparison_v2.rs` benches to confirm no regression on the per-row iter path (NCD elision must remain intact).
+- Inner-loop autovec verification: `cargo +nightly asm --bench g6_for_each_chunk -- '<bench-monomorphisation-symbol>'` should show `vaddps`/`vmovups` (AVX2) in the user closure body. Absence = autovec broke; file before declaring Phase X.A done.
+- §1.2 L1i-budget check (qualitative): `cargo +nightly asm --bench g6_for_each_chunk -- 'chunk_iter::for_each_chunk_impl'` and inspect the output by eye. The dispatch body should be a tight outer loop with one indirect call into the user closure — well under a hundred instructions, fitting comfortably in a small number of cache lines. **Do not** treat the textual asm character count (`wc -c`) as a byte budget: it counts mnemonic + operand characters and whitespace, not encoded x86-64 instruction byte length (which varies 1-15 B per insn). If the body looks bloated (visible monomorphisation cascade through tuple impls, multiple nested indirect calls, dozens of register-spill stores), file before declaring Phase X.A done.
 
 ### 11.7 Debug-assert invariants
 
@@ -970,10 +1055,10 @@ The following `debug_assert!` calls must be added during implementation:
 
 **Step 1A — `SIMD_BUFFER_ALIGN` constant + Arena/ComponentPool alignment lift**
 
+- *Test FIRST*: add `crates/boyko_ecs/src/ecs/memory/component_pool.rs::tests::buffer_ptr_is_simd_aligned`. **Rationale**: gates the entire wave; if this fails, the alignment lift is broken at the arena layer and the rest of the wave is meaningless. Write the test against the to-be-changed contract, watch it fail, then make the changes below.
 - *File*: `crates/boyko_ecs/src/ecs/constants.rs` — add `pub const SIMD_BUFFER_ALIGN: usize = 32;` with doc comment (§6).
 - *File*: `crates/boyko_ecs/src/ecs/memory/component_pool.rs` — in `ComponentPool::new` (find the buffer-allocation path), change the layout computation to use `align = component_layout.align().max(SIMD_BUFFER_ALIGN)`. Add doc to `buffer_ptr` describing the new guarantee (§6.3).
 - *File*: same — add `debug_assert!((self.buffer.as_ptr() as usize) % SIMD_BUFFER_ALIGN == 0, "SIMD-A1 ...")` in `ComponentPool::new` right after the buffer allocation.
-- *Test*: add `crates/boyko_ecs/src/ecs/memory/component_pool.rs::tests::buffer_ptr_is_simd_aligned`.
 
 **Step 1B — `ArchetypalQueryFilter` marker trait + manual impls**
 
@@ -1178,10 +1263,10 @@ fn compile_fail() {
 
 ### Wave 8 — Bench (depends on Wave 7; needs nightly toolchain)
 
-**Step 8A — Workspace toolchain pin**
+**Step 8A — Per-package toolchain pin**
 
-- *File (new)*: `D:\claude\BoykoEngine\rust-toolchain.toml` per §8.1.
-- *Verification*: `cargo +nightly build --release` succeeds at workspace root.
+- *File (new)*: `D:\claude\BoykoEngine\crates\bench_bevy_vs_boyko\rust-toolchain.toml` per §8.1.
+- *Verification*: `cargo +nightly build --release` succeeds at workspace root; `cargo bench --bench g6_for_each_chunk` from inside `crates/bench_bevy_vs_boyko/` resolves the per-package nightly.
 
 **Step 8B — Bench harness**
 
@@ -1264,7 +1349,7 @@ q.for_each_chunk(|s: &[Foo]| acc.push(&s[0].x));  // FAILS: 'c does not outlive 
 - `MemFreeBlockMaster::allocate_aligned` (existing impl) supports arbitrary power-of-2 alignment via best-fit + alignment-up. 32 is already in the supported range.
 
 **Mitigation**:
-- Step 1A adds a unit test `simd_buffer_align_lift_holds` in `component_pool.rs::tests` that creates a `ComponentPool<f32>` (or via the type-erased path with `Layout::new::<f32>()`) and asserts `(pool.buffer_ptr() as usize) % SIMD_BUFFER_ALIGN == 0`.
+- Step 1A adds a unit test `buffer_ptr_is_simd_aligned` in `component_pool.rs::tests` that creates a `ComponentPool<f32>` (or via the type-erased path with `Layout::new::<f32>()`) and asserts `(pool.buffer_ptr() as usize) % SIMD_BUFFER_ALIGN == 0`.
 - If this fails, the alignment math in `ComponentPool::new` is wrong; isolate before any downstream code touches it.
 
 **Residual risk**: medium-low. The Arena allocator is well-tested. The risk is a regression in some downstream code that assumed `align = align_of::<T>()` exactly (e.g., a manual offset calc somewhere). Mitigation: Step 1A is intentionally Wave 1's first task so any breakage surfaces before later waves depend on it.
@@ -1295,7 +1380,7 @@ q.for_each_chunk(|s: &[Foo]| acc.push(&s[0].x));  // FAILS: 'c does not outlive 
 1. **Q1 (sibling vs GAT extension)**: Resolved §4 → sibling trait `ChunkedQueryData`. Justification: 78-impl blast radius vs 15-impl additive surface; sibling preserves backward compat; `Ref`/`Mut` exclusion falls out naturally.
 2. **Q2 (alignment story)**: Resolved §6 → lift `ComponentPool` allocations to `max(align_of::<T>(), 32)`. Cost bounded (<1 MB realistic waste), zero runtime cost, documented invariant verifiable via debug_assert.
 3. **Q3 (`for_each_chunk_mut` explicit vs inferred)**: Resolved implicitly throughout — type-inferred from `D` (current pattern). One method `for_each_chunk` takes `&mut self`, dispatches readonly vs mut via `D::IS_READ_ONLY` runtime flag inside the impl.
-4. **Q4 (bench harness toolchain)**: Resolved in the prompt + §8 → nightly with `f32::algebraic_add` + `rust-toolchain.toml` at workspace root.
+4. **Q4 (bench harness toolchain)**: Resolved in the prompt + §8 → nightly with `f32::algebraic_add` + `rust-toolchain.toml` at `crates/bench_bevy_vs_boyko/` (per-package; see §8.1).
 
 The only deferral within scope is **`fold_chunks` reducing variant** (§2.6) — explicitly filed as Phase 13.X with rationale. This is not an open question; it's a documented out-of-scope decision.
 
@@ -1313,7 +1398,7 @@ Verified against the architect-role checklist:
 - **Integration**: affected modules listed (§12 file paths); existing APIs untouched (Phase 12.6 perf and Phase 10 NCD remain intact — `iter`/`iter_mut` not touched); compatible with Arena/ComponentPool/UnitId via `buffer_ptr` reuse; implementation plan broken into 9 waves with explicit parallelization graph.
 - **Validation**: tests categorized (§11.1–11.7); benches specified (§8.2, §11.6); debug_assert sites enumerated (§11.7).
 
-The plan is ready for the architecture-critic.
+The Round 3 plan is ready for the developer (Wave 1 already in flight; Wave 8 has the toolchain fixes locked in).
 
 Files relevant to this design (absolute paths, for the developer's reference):
 
@@ -1335,7 +1420,7 @@ Files relevant to this design (absolute paths, for the developer's reference):
 
 New files to be created by the developer (per §12):
 
-- D:\claude\BoykoEngine\rust-toolchain.toml (Wave 8A)
+- D:\claude\BoykoEngine\crates\bench_bevy_vs_boyko\rust-toolchain.toml (Wave 8A)
 - D:\claude\BoykoEngine\crates\boyko_ecs\src\ecs\core\iters\query\chunked_data.rs (Wave 1C)
 - D:\claude\BoykoEngine\crates\boyko_ecs\src\ecs\core\iters\query\chunk_iter.rs (Wave 4)
 - D:\claude\BoykoEngine\crates\boyko_ecs\src\ecs\core\iters\query\par_chunk.rs (Wave 6)
