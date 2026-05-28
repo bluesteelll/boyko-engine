@@ -11,6 +11,7 @@ pub mod entity_commands;
 pub mod entity_counter;
 pub mod event_reader;
 pub mod event_writer;
+pub mod local;
 pub mod res;
 pub mod resmut;
 pub(crate) mod tuple_impl;
@@ -44,6 +45,10 @@ pub use entity_counter::EntityCounter;
 pub use event_reader::{EventIter, EventReader, EventReaderState};
 #[allow(unused_imports)]
 pub use event_writer::{EventWriter, EventWriterState};
+// Phase 13: `Local<'s, T>` per-system private-state re-export. Same
+// `#[allow(unused_imports)]` rationale as `Commands` / `EventReader`.
+#[allow(unused_imports)]
+pub use local::Local;
 pub use res::{Res, ResState};
 pub use resmut::{ResMut, ResMutState};
 pub use tuple_impl::MAX_SYSTEM_PARAM_ARITY;

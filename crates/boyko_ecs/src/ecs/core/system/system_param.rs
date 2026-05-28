@@ -118,8 +118,9 @@ pub unsafe trait SystemParam: Sized {
     /// conflict with a sibling param and MUST be turned into a panic
     /// with the B0002 diagnostic (see [`AccessConflict`]).
     ///
-    /// Default impl is empty (suitable for params with no access — for
-    /// example `Local<T>` or `Commands`).
+    /// Implementations with no access — e.g. `Local<T>`, `Commands`,
+    /// `EventReader` — provide an explicit empty body (this method has **no**
+    /// default impl).
     ///
     /// [`AccessConflict`]: super::filtered_access_set::AccessConflict
     fn init_access(

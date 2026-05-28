@@ -24,7 +24,7 @@ pub use filtered_access_set::{AccessConflict, ConflictKind, FilteredAccessSet};
 pub use function_system::{FunctionSystem, SystemParamFunction};
 pub use into_system::{ExclusiveSystemMarker, IntoSystem, IsFunctionSystem};
 pub use params::{
-    Commands, EventIter, EventReader, EventReaderState, EventWriter, EventWriterState,
+    Commands, EventIter, EventReader, EventReaderState, EventWriter, EventWriterState, Local,
     MAX_SYSTEM_PARAM_ARITY, Res, ResMut, ResMutState, ResState,
 };
 pub use system::System;
