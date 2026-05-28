@@ -18,8 +18,10 @@
 use std::marker::PhantomData;
 
 use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
+use crate::ecs::core::iters::query::chunk_iter;
+use crate::ecs::core::iters::query::chunked_data::ChunkedQueryData;
 use crate::ecs::core::iters::query::data::{QueryData, ReadOnlyQueryData};
-use crate::ecs::core::iters::query::filter::QueryFilter;
+use crate::ecs::core::iters::query::filter::{ArchetypalQueryFilter, QueryFilter};
 use crate::ecs::core::iters::query::iter::{QueryIter, QueryIterMut};
 use crate::ecs::core::iters::query::par_iter::{BatchingStrategy, ParQuery, ParQueryMut};
 use crate::ecs::core::iters::query::state::QueryDataState;
@@ -177,6 +179,47 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
             batching: BatchingStrategy::default(),
             meta: self.meta,
             _mut_marker: PhantomData,
+        }
+    }
+
+    /// Invoke `f` once per matched archetype, passing a slice (or tuple of
+    /// slices) covering every row in that archetype.
+    ///
+    /// `D` must satisfy [`ChunkedQueryData`]; `F` must satisfy
+    /// [`ArchetypalQueryFilter`]. Both bounds are compile-time —
+    /// `Query<&T, Changed<U>>::for_each_chunk` is a type error,
+    /// redirecting the user to [`Self::iter`] for per-row tick filtering.
+    ///
+    /// # Performance
+    ///
+    /// Outer-loop overhead per archetype: target ≤ 15 ns + 1 ns/row
+    /// user-closure body (plan §1.2). Allocations: 0 in steady state.
+    /// Empty matched archetypes are skipped at the `entity_count == 0`
+    /// guard; stale-id entries (Q5) are skipped transparently via the
+    /// driver's `archetype_ptr_mut` `None` arm.
+    ///
+    /// [`ChunkedQueryData`]: super::chunked_data::ChunkedQueryData
+    /// [`ArchetypalQueryFilter`]: super::filter::ArchetypalQueryFilter
+    #[inline]
+    pub fn for_each_chunk<Func>(&mut self, f: Func)
+    where
+        D: ChunkedQueryData,
+        F: ArchetypalQueryFilter,
+        Func: for<'c> FnMut(D::ChunkItem<'c>),
+    {
+        // SAFETY (Q1, Q3, CD1-CD4): `&mut self` enforces cursor
+        //   uniqueness (Q3); `D::IS_READ_ONLY` selects the readonly /
+        //   mut chunk-dispatch arm inside the driver (mirrors the
+        //   `iter` / `iter_mut` split as a runtime flag — no separate
+        //   driver is needed because `D: ChunkedQueryData` excludes
+        //   `Ref` / `Mut`, forcing NCD const-fold to `false` at this
+        //   monomorphisation, eliminating the meta-bearing branch from
+        //   `iter.rs`). The cell `self.world` is `Copy`; passing by
+        //   value preserves the raw-pointer provenance through the call
+        //   (Phase 8a C1 fix).
+        let mutable = !D::IS_READ_ONLY;
+        unsafe {
+            chunk_iter::for_each_chunk_impl(self.state, self.world, mutable, f);
         }
     }
 }

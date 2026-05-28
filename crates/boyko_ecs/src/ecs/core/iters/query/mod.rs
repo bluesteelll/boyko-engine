@@ -19,6 +19,7 @@
 //! against `iters::query::{QueryData, QueryFilter, With, Without, Query}` from
 //! callers that will be written in Steps 2+.
 
+pub mod chunk_iter;
 pub mod chunked_data;
 pub mod data;
 pub mod filter;
