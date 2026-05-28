@@ -1,0 +1,18 @@
+error[E0277]: `boyko_ecs::ecs::core::iters::query::Ref<'_, T>` does not implement `ChunkedQueryData` — cannot be used in `Query::for_each_chunk`
+  --> tests/compile_fail_chunk/ref_data_rejected.rs:28:7
+   |
+28 |     q.for_each_chunk(|_slice| {});
+   |       ^^^^^^^^^^^^^^ not chunked-iterable
+   |
+   = help: the trait `ChunkedQueryData` is not implemented for `boyko_ecs::ecs::core::iters::query::Ref<'_, T>`
+   = note: members: `&T`, `&mut T`, `()`, tuples of those. `Ref<T>` / `Mut<T>` are NOT members; use `Query::iter()` instead for per-row tick state.
+   = help: the following other types implement trait `ChunkedQueryData`:
+             &T
+             &mut T
+             ()
+             (D0, D1)
+             (D0, D1, D2)
+             (D0, D1, D2, D3)
+             (D0, D1, D2, D3, D4)
+             (D0, D1, D2, D3, D4, D5)
+           and $N others

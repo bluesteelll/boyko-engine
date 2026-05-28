@@ -579,4 +579,388 @@ mod tests {
             "PAR9 inline path ⇒ total rows = spawn count",
         );
     }
+
+    // ── Phase X.A Wave 7 Step 7A — §11.4 parallel multi-thread tests ────────
+    //
+    // Component-id slot reservations (extending Wave 6's slot 466):
+    //   * 470 — `CompW7a` (used by the multi-archetype dispatch test as the
+    //                       first archetype's distinguishing component)
+    //   * 471 — `CompW7b` (used by the multi-archetype dispatch test as the
+    //                       second archetype's distinguishing component)
+    //   * 472 — `CompW7Pos` (mutable payload for the parallel-write doubling
+    //                         test)
+    //
+    // The 467-469 slots are claimed by `chunk_iter.rs::tests` (Wave 7 7A);
+    // slots 473-479 remain free for future expansion. The slot map is the
+    // single source of truth for the chunked-iter test suite — collisions
+    // here propagate as panics inside `register_layout`.
+    //
+    // # Miri limitation (deferred to Phase 9.1)
+    //
+    // The three tests below (`parallel_disjoint_subrange_full_coverage_*`,
+    // `parallel_multi_archetype_dispatch`, `parallel_mut_write_doubles`)
+    // attach an active `ThreadPool` via `pool.install` and exercise the
+    // `scope.spawn` fan-out path. Per Phase 9 closeout memory and
+    // `miri_phase9.rs:14-26`, multi-thread `Schedule::run` (and by extension
+    // any `pool.install` / `scope.spawn` invocation) triggers a Tree Borrows
+    // `protected-tag` conflict inside `boyko_threadpool::Scope::spawn` —
+    // sound by design but flagged by TB until Phase 9.1 revisits the
+    // `ScopeShared` raw-pointer protocol. The Miri runs documented in plan
+    // §11.5 therefore exclude these three tests, as called out explicitly
+    // by `Specifically run: ... The single-threaded
+    // par_for_each_chunk_no_pool_fallback (PAR7 path bypasses scope.spawn)`.
+    // Plan §11.5 already documents this gap; the tests still run cleanly
+    // under regular `cargo test` (the Tree Borrows model only fires under
+    // Miri).
+
+    /// Distinguishing component for the first archetype of the multi-archetype
+    /// dispatch test.
+    const COMP_W7A: ComponentId = ComponentId(470);
+    /// Distinguishing component for the second archetype of the multi-archetype
+    /// dispatch test.
+    const COMP_W7B: ComponentId = ComponentId(471);
+    /// Payload component for the parallel mutable-write doubling test.
+    const COMP_W7POS: ComponentId = ComponentId(472);
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct CompW7a(u32);
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct CompW7b(u32);
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct CompW7Pos(u32);
+
+    impl Component for CompW7a {
+        fn component_id() -> ComponentId {
+            COMP_W7A
+        }
+    }
+    impl Component for CompW7b {
+        fn component_id() -> ComponentId {
+            COMP_W7B
+        }
+    }
+    impl Component for CompW7Pos {
+        fn component_id() -> ComponentId {
+            COMP_W7POS
+        }
+    }
+
+    fn register_wave7_components() {
+        component_registry::register_layout::<CompW7a>(COMP_W7A.0);
+        component_registry::register_layout::<CompW7b>(COMP_W7B.0);
+        component_registry::register_layout::<CompW7Pos>(COMP_W7POS.0);
+    }
+
+    /// Spawn helper for `CompW7a`-bearing archetypes.
+    fn spawn_w7a(ecs: &mut EcsMaster, arch_id: ArchetypeId, value: u32) {
+        let comp = CompW7a(value);
+        // SAFETY: `CompW7a` is `#[repr(C)]` POD; byte slice valid for the call.
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                &comp as *const CompW7a as *const u8,
+                std::mem::size_of::<CompW7a>(),
+            )
+        };
+        ecs.create_entity(arch_id, &[(COMP_W7A, bytes)])
+            .expect("spawn_w7a: create_entity must succeed");
+    }
+
+    /// Spawn helper for `CompW7b`-bearing archetypes.
+    fn spawn_w7b(ecs: &mut EcsMaster, arch_id: ArchetypeId, value: u32) {
+        let comp = CompW7b(value);
+        // SAFETY: `CompW7b` is `#[repr(C)]` POD; byte slice valid for the call.
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                &comp as *const CompW7b as *const u8,
+                std::mem::size_of::<CompW7b>(),
+            )
+        };
+        ecs.create_entity(arch_id, &[(COMP_W7B, bytes)])
+            .expect("spawn_w7b: create_entity must succeed");
+    }
+
+    /// Spawn helper for `CompW7Pos`-bearing archetypes.
+    fn spawn_w7pos(ecs: &mut EcsMaster, arch_id: ArchetypeId, value: u32) {
+        let comp = CompW7Pos(value);
+        // SAFETY: `CompW7Pos` is `#[repr(C)]` POD; byte slice valid for the
+        //   call.
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                &comp as *const CompW7Pos as *const u8,
+                std::mem::size_of::<CompW7Pos>(),
+            )
+        };
+        ecs.create_entity(arch_id, &[(COMP_W7POS, bytes)])
+            .expect("spawn_w7pos: create_entity must succeed");
+    }
+
+    /// PAR2 / CD3 disjointness, large-archetype path: 10k entities in a single
+    /// archetype dispatched across a 4-worker pool. The atomic counter sums the
+    /// per-chunk slice lengths — full coverage (counter == 10000) verifies that
+    /// every row is processed exactly once, no row is dropped, and no overlap
+    /// double-counts.
+    ///
+    /// The driver walks `[start, start + len)` half-open ranges via the
+    /// `BatchingStrategy` monotonic walk; CD3 is therefore structural — this
+    /// test pins the structural property under a live multi-worker pool.
+    #[test]
+    fn parallel_disjoint_subrange_full_coverage_via_atomic_counter() {
+        register_test_components();
+        register_wave7_components();
+        let mut ecs = EcsMaster::new();
+        let arch = ecs.create_archetype(&[COMP_W7A]);
+        for i in 0..10_000u32 {
+            spawn_w7a(&mut ecs, arch, i);
+        }
+
+        let state = QueryDataState::<&CompW7a, ()>::new(&mut ecs);
+        // SAFETY (U_C1): cell consumed inside the `pool.install` closure
+        //   below; does not outlive the `&mut ecs` borrow.
+        let cell = unsafe { UnsafeEcsCell::new_mutable(&mut ecs) };
+
+        let counter = AtomicUsize::new(0);
+        let invocations = AtomicUsize::new(0);
+
+        let pool = boyko_threadpool::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build();
+
+        pool.install(|_scope| {
+            // SAFETY (Q1, CD1-CD4, PAR2 / CD3 / PAR9): inside the active 4-
+            //   worker pool with `entity_count = 10000 >=
+            //   MIN_ARCHETYPE_FOR_PARALLEL` ⇒ scope.spawn fan-out path. D =
+            //   &CompW7a read-only; F = () archetypal; no aliasing live; the
+            //   atomic counter is `Sync`.
+            unsafe {
+                par_for_each_chunk_impl::<&CompW7a, (), _>(
+                    &state,
+                    cell,
+                    false,
+                    BatchingStrategy::default(),
+                    |slice: &[CompW7a]| {
+                        invocations.fetch_add(1, Ordering::Relaxed);
+                        counter.fetch_add(slice.len(), Ordering::Relaxed);
+                    },
+                );
+            }
+        });
+
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            10_000,
+            "PAR2/CD3 full coverage: every row processed exactly once \
+             (counter == 10000, no overlap, no drop)",
+        );
+        // At least 2 invocations (large-archetype split fan-out); upper bound
+        // is the worker count × chunks-per-worker, but we only pin the
+        // counter-sum invariant strictly. Lower bound > 1 confirms the
+        // scope.spawn path actually fanned out instead of running inline.
+        let inv = invocations.load(Ordering::Relaxed);
+        assert!(
+            inv >= 2,
+            "scope.spawn fan-out expected ⇒ ≥ 2 invocations; got {inv}",
+        );
+    }
+
+    /// Multi-archetype dispatch — 2 disjoint archetypes (5000 + 7000 rows) on a
+    /// 4-worker pool. Each closure invocation increments a thread-shared atomic
+    /// counter by its slice length; the final sum must equal the total spawned
+    /// row count (12000).
+    ///
+    /// The two archetypes are matched by a disjunctive `Or<(With<a>,
+    /// With<b>)>` filter — only `a OR b` archetypes participate. Verifies the
+    /// per-archetype dispatch path across the matched set, with each archetype
+    /// independently fanning out across the worker pool.
+    #[test]
+    fn parallel_multi_archetype_dispatch() {
+        register_test_components();
+        register_wave7_components();
+        let mut ecs = EcsMaster::new();
+        // Two distinct archetypes — one carries `(CompA, CompW7a)`, the other
+        // `(CompA, CompW7b)`. The `Query<&CompA, ...>` shape matches both via
+        // the shared CompA column; the `Or<(With<CompW7a>, With<CompW7b>)>`
+        // filter selects only these two.
+        let arch_a = ecs.create_archetype(&[COMP_A, COMP_W7A]);
+        let arch_b = ecs.create_archetype(&[COMP_A, COMP_W7B]);
+
+        // 5000 entities into arch_a.
+        for i in 0..5000u32 {
+            let ca = CompA(i);
+            let cw = CompW7a(i);
+            // SAFETY: both `#[repr(C)]` POD; byte slices valid for the call.
+            let a_bytes = unsafe {
+                std::slice::from_raw_parts(
+                    &ca as *const CompA as *const u8,
+                    std::mem::size_of::<CompA>(),
+                )
+            };
+            let w_bytes = unsafe {
+                std::slice::from_raw_parts(
+                    &cw as *const CompW7a as *const u8,
+                    std::mem::size_of::<CompW7a>(),
+                )
+            };
+            ecs.create_entity(arch_a, &[(COMP_A, a_bytes), (COMP_W7A, w_bytes)])
+                .expect("multi-archetype spawn arch_a must succeed");
+        }
+        // 7000 entities into arch_b.
+        for i in 0..7000u32 {
+            let ca = CompA(i + 100_000);
+            let cw = CompW7b(i);
+            // SAFETY: both `#[repr(C)]` POD; byte slices valid for the call.
+            let a_bytes = unsafe {
+                std::slice::from_raw_parts(
+                    &ca as *const CompA as *const u8,
+                    std::mem::size_of::<CompA>(),
+                )
+            };
+            let w_bytes = unsafe {
+                std::slice::from_raw_parts(
+                    &cw as *const CompW7b as *const u8,
+                    std::mem::size_of::<CompW7b>(),
+                )
+            };
+            ecs.create_entity(arch_b, &[(COMP_A, a_bytes), (COMP_W7B, w_bytes)])
+                .expect("multi-archetype spawn arch_b must succeed");
+        }
+        let _ = spawn_w7a; // suppress unused-helper warning when the helper is
+        let _ = spawn_w7b; // not consumed inline above.
+
+        // Use `Or<(With<CompW7a>, With<CompW7b>)>` to pin both archetypes.
+        let state = QueryDataState::<
+            &CompA,
+            crate::ecs::core::iters::query::filter::Or<(
+                crate::ecs::core::iters::query::With<CompW7a>,
+                crate::ecs::core::iters::query::With<CompW7b>,
+            )>,
+        >::new(&mut ecs);
+        assert_eq!(
+            state.archetype_state.matched_ids().len(),
+            2,
+            "Or<(With<W7a>, With<W7b>)> must match exactly the two W7-bearing archetypes",
+        );
+
+        // SAFETY (U_C1): cell consumed inside the pool.install closure.
+        let cell = unsafe { UnsafeEcsCell::new_mutable(&mut ecs) };
+
+        let total = AtomicUsize::new(0);
+
+        let pool = boyko_threadpool::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build();
+
+        pool.install(|_scope| {
+            // SAFETY (Q1, CD1-CD4, PAR2): D = &CompA read-only across both
+            //   matched archetypes; F = Or<(With<a>, With<b>)> archetypal
+            //   (Or-propagation in filter.rs:1718-1722); no aliasing live; the
+            //   atomic counter is `Sync`.
+            unsafe {
+                par_for_each_chunk_impl::<
+                    &CompA,
+                    crate::ecs::core::iters::query::filter::Or<(
+                        crate::ecs::core::iters::query::With<CompW7a>,
+                        crate::ecs::core::iters::query::With<CompW7b>,
+                    )>,
+                    _,
+                >(
+                    &state,
+                    cell,
+                    false,
+                    BatchingStrategy::default(),
+                    |slice: &[CompA]| {
+                        total.fetch_add(slice.len(), Ordering::Relaxed);
+                    },
+                );
+            }
+        });
+
+        assert_eq!(
+            total.load(Ordering::Relaxed),
+            12_000,
+            "multi-archetype dispatch sum: 5000 + 7000 = 12000 (every row across both archetypes processed exactly once)",
+        );
+    }
+
+    /// Parallel mutable write: 4k entities in a single archetype with
+    /// `Query<&mut CompW7Pos>::par_for_each_chunk(|s| s.iter_mut().for_each(|p|
+    /// p.0 *= 2))`. Reread via the sequential driver confirms every value
+    /// doubled. Disjointness is verified implicitly — if any two workers
+    /// overlap on a row, the row would be doubled twice (× 4) and the
+    /// equality check fails.
+    #[test]
+    fn parallel_mut_write_doubles() {
+        register_test_components();
+        register_wave7_components();
+        let mut ecs = EcsMaster::new();
+        let arch = ecs.create_archetype(&[COMP_W7POS]);
+        for i in 0..4000u32 {
+            spawn_w7pos(&mut ecs, arch, i);
+        }
+
+        // Phase 1 — parallel mutate via &mut driver.
+        {
+            let state = QueryDataState::<&mut CompW7Pos, ()>::new(&mut ecs);
+            // SAFETY (U_C1): cell consumed inside the pool.install closure.
+            let cell = unsafe { UnsafeEcsCell::new_mutable(&mut ecs) };
+            let pool = boyko_threadpool::ThreadPoolBuilder::new()
+                .num_threads(4)
+                .build();
+            pool.install(|_scope| {
+                // SAFETY (Q1, CD1-CD4, PAR2 / CD3): mutable = true; D = &mut
+                //   CompW7Pos; F = () archetypal; the conflict-graph guarantee
+                //   is vacuous here (single direct driver call, no concurrent
+                //   sibling system); CD3 is structurally enforced by the
+                //   monotonic walk on disjoint `[start, start + len)` ranges.
+                unsafe {
+                    par_for_each_chunk_impl::<&mut CompW7Pos, (), _>(
+                        &state,
+                        cell,
+                        true,
+                        BatchingStrategy::default(),
+                        |slice: &mut [CompW7Pos]| {
+                            for p in slice.iter_mut() {
+                                p.0 = p.0.wrapping_mul(2);
+                            }
+                        },
+                    );
+                }
+            });
+        }
+
+        // Phase 2 — sequential read-back; every row must equal `original * 2`.
+        // Using the sequential driver here keeps the read-back independent of
+        // the par driver (so a bug in the par read-only path could not mask a
+        // bug in the par mut-write path).
+        let state = QueryDataState::<&CompW7Pos, ()>::new(&mut ecs);
+        // SAFETY (U_C1): cell consumed within this scope.
+        let cell = unsafe { UnsafeEcsCell::new_mutable(&mut ecs) };
+        let mut collected: Vec<u32> = Vec::with_capacity(4000);
+        // SAFETY (Q1, CD1-CD4): read-only re-iteration; no aliasing live.
+        unsafe {
+            chunk_iter::for_each_chunk_impl::<&CompW7Pos, (), _>(
+                &state,
+                cell,
+                false,
+                |slice: &[CompW7Pos]| {
+                    for p in slice {
+                        collected.push(p.0);
+                    }
+                },
+            );
+        }
+
+        assert_eq!(collected.len(), 4000, "every row must reappear after mutation");
+        collected.sort_unstable();
+        let expected: Vec<u32> = (0..4000u32).map(|i| i.wrapping_mul(2)).collect();
+        assert_eq!(
+            collected, expected,
+            "every CompW7Pos(i) must now read back as CompW7Pos(i*2) — \
+             implicit disjointness check: any overlap would × 4 instead of × 2",
+        );
+    }
 }

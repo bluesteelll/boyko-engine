@@ -385,4 +385,372 @@ mod tests {
             "empty archetype must trigger the `entity_count == 0` skip — closure must NOT fire",
         );
     }
+
+    // ── Phase X.A Wave 7 Step 7A — additional §11.1 unit tests ──────────────
+    //
+    // Component-id slot reservations for Wave 7 chunk_iter unit tests
+    // (in addition to the Wave 4 reservations 460-461 above):
+    //
+    //   * 467 — `CompC` (marker-style, used by the tuple-3 and With<C> tests)
+    //   * 468 — `CompD` (used by the tuple-3 test as the third element)
+    //   * 469 — `MarkerE` (used by the empty-tuple D With<MarkerE> test)
+    //
+    // The 467-479 range is reserved per Wave 7 plan §7A; the 470-479 slice is
+    // left free for future expansion.
+
+    /// Marker / payload component — third element of the 3-tuple test and the
+    /// `With<CompC>` archetype distinguisher for `multi_archetype_dispatch`.
+    const COMP_C: ComponentId = ComponentId(467);
+    /// Fourth scratch component for the 3-tuple `(&A, &mut B, &C)` test.
+    const COMP_D: ComponentId = ComponentId(468);
+    /// Pure marker used by the empty-tuple `D = ()` + `With<MarkerE>` test.
+    const COMP_E: ComponentId = ComponentId(469);
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct CompC(u32);
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct CompD(u32);
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct MarkerE(u32);
+
+    impl Component for CompC {
+        fn component_id() -> ComponentId {
+            COMP_C
+        }
+    }
+    impl Component for CompD {
+        fn component_id() -> ComponentId {
+            COMP_D
+        }
+    }
+    impl Component for MarkerE {
+        fn component_id() -> ComponentId {
+            COMP_E
+        }
+    }
+
+    /// Idempotent registry priming for the Wave 7 component pack.
+    fn register_wave7_components() {
+        component_registry::register_layout::<CompC>(COMP_C.0);
+        component_registry::register_layout::<CompD>(COMP_D.0);
+        component_registry::register_layout::<MarkerE>(COMP_E.0);
+    }
+
+    /// Spawns a `(CompA(a), CompB(b), CompD(d))` entity into `arch_id`.
+    fn spawn_abd(ecs: &mut EcsMaster, arch_id: ArchetypeId, a: u32, b: u32, d: u32) {
+        let ca = CompA(a);
+        let cb = CompB(b);
+        let cd = CompD(d);
+        // SAFETY: each component is `#[repr(C)]` POD; the byte slices are
+        //   valid for this call's duration.
+        let a_bytes = unsafe {
+            std::slice::from_raw_parts(
+                &ca as *const CompA as *const u8,
+                std::mem::size_of::<CompA>(),
+            )
+        };
+        let b_bytes = unsafe {
+            std::slice::from_raw_parts(
+                &cb as *const CompB as *const u8,
+                std::mem::size_of::<CompB>(),
+            )
+        };
+        let d_bytes = unsafe {
+            std::slice::from_raw_parts(
+                &cd as *const CompD as *const u8,
+                std::mem::size_of::<CompD>(),
+            )
+        };
+        ecs.create_entity(
+            arch_id,
+            &[(COMP_A, a_bytes), (COMP_B, b_bytes), (COMP_D, d_bytes)],
+        )
+        .expect("spawn_abd: create_entity must succeed");
+    }
+
+    /// Spawns a `(CompA(a), MarkerE)` entity into `arch_id`. The marker payload
+    /// is `0u32`; only the presence of the component is meaningful for the
+    /// `With<MarkerE>` filter.
+    fn spawn_a_marker(ecs: &mut EcsMaster, arch_id: ArchetypeId, a: u32) {
+        let ca = CompA(a);
+        let m = MarkerE(0);
+        // SAFETY: both are `#[repr(C)]` POD; byte slices valid for the call.
+        let a_bytes = unsafe {
+            std::slice::from_raw_parts(
+                &ca as *const CompA as *const u8,
+                std::mem::size_of::<CompA>(),
+            )
+        };
+        let m_bytes = unsafe {
+            std::slice::from_raw_parts(
+                &m as *const MarkerE as *const u8,
+                std::mem::size_of::<MarkerE>(),
+            )
+        };
+        ecs.create_entity(arch_id, &[(COMP_A, a_bytes), (COMP_E, m_bytes)])
+            .expect("spawn_a_marker: create_entity must succeed");
+    }
+
+    /// Q5 stale-id-skip path: push a synthetic non-existent `ArchetypeId` into
+    /// `matched_ids` via the `matched_ids_mut` escape hatch — the driver must
+    /// transparently skip it via the `archetype_ptr` `None` arm. Mirrors the
+    /// pattern from `iter.rs::stale_id_skipped` (Phase 8b regression).
+    #[test]
+    fn stale_archetype_id_skipped() {
+        register_test_components();
+        let mut ecs = EcsMaster::new();
+        let arch_a = ecs.create_archetype(&[COMP_A]);
+        let arch_ab = ecs.create_archetype(&[COMP_A, COMP_B]);
+        // Two real entities — one per archetype.
+        spawn_a(&mut ecs, arch_a, 700);
+        spawn_ab(&mut ecs, arch_ab, 701, 0);
+
+        let mut state = QueryDataState::<&CompA, ()>::new(&mut ecs);
+        assert_eq!(
+            state.archetype_state.matched_ids().len(),
+            2,
+            "both CompA-bearing archetypes must be matched before tampering",
+        );
+
+        // Push a synthetic stale ArchetypeId(999) — the master never minted
+        // this slot, so `archetype_ptr(999)` returns `None` and the driver
+        // skips via the `continue` arm.
+        state
+            .archetype_state
+            .matched_ids_mut()
+            .push(crate::ecs::identifiers::primitives::ArchetypeId(999));
+
+        // SAFETY (U_C1): cell consumed inside this scope.
+        let cell = unsafe { UnsafeEcsCell::new_mutable(&mut ecs) };
+
+        let mut invocations = 0usize;
+        let mut total: usize = 0;
+        // SAFETY (Q1, CD1-CD4): direct driver test; D = &CompA read-only; F =
+        //   () archetypal. Stale id (999) is exactly the case the `continue`
+        //   branch handles — driver returns `None` from `archetype_ptr` and
+        //   skips without touching the user closure.
+        unsafe {
+            for_each_chunk_impl::<&CompA, (), _>(&state, cell, false, |slice: &[CompA]| {
+                invocations += 1;
+                total += slice.len();
+            });
+        }
+
+        assert_eq!(
+            invocations, 2,
+            "stale id must be skipped — only the 2 live archetypes invoke the closure",
+        );
+        assert_eq!(
+            total, 2,
+            "total rows across both live archetypes = 1 + 1 = 2 (no rows attributed to the stale id)",
+        );
+    }
+
+    /// `Query<&mut CompA>::for_each_chunk` mutates every row of a 100-entity
+    /// archetype; a fresh read-only `for_each_chunk` confirms every value
+    /// doubled. Exercises the `set_chunk_mut` arm of the dispatcher and the
+    /// `&mut [T]` chunk-item materialisation for the `&mut T` impl.
+    #[test]
+    fn single_component_write_doubles() {
+        register_test_components();
+        let mut ecs = EcsMaster::new();
+        let arch = ecs.create_archetype(&[COMP_A]);
+        for i in 0..100u32 {
+            spawn_a(&mut ecs, arch, i);
+        }
+
+        // Phase 1 — mutate every row via the &mut driver.
+        {
+            let state = QueryDataState::<&mut CompA, ()>::new(&mut ecs);
+            // SAFETY (U_C1): cell consumed in this block.
+            let cell = unsafe { UnsafeEcsCell::new_mutable(&mut ecs) };
+            // SAFETY (Q1, CD1-CD4): direct mut driver test; mutable = true;
+            //   F = () archetypal; no aliasing accessor live.
+            unsafe {
+                for_each_chunk_impl::<&mut CompA, (), _>(
+                    &state,
+                    cell,
+                    true,
+                    |slice: &mut [CompA]| {
+                        for c in slice.iter_mut() {
+                            c.0 = c.0.wrapping_mul(2);
+                        }
+                    },
+                );
+            }
+        }
+
+        // Phase 2 — re-read with a fresh read-only driver; every row must be
+        // `original * 2`.
+        let state = QueryDataState::<&CompA, ()>::new(&mut ecs);
+        // SAFETY (U_C1): cell consumed in this block.
+        let cell = unsafe { UnsafeEcsCell::new_mutable(&mut ecs) };
+
+        let mut collected: Vec<u32> = Vec::with_capacity(100);
+        // SAFETY (Q1, CD1-CD4): read-only re-iteration; no aliasing live.
+        unsafe {
+            for_each_chunk_impl::<&CompA, (), _>(&state, cell, false, |slice: &[CompA]| {
+                for c in slice {
+                    collected.push(c.0);
+                }
+            });
+        }
+
+        assert_eq!(collected.len(), 100, "every row must reappear after mutation");
+        // The driver guarantees insertion-order; every spawned `i` should now
+        // appear as `i * 2`. Sort to make the check order-independent in case
+        // of future driver reordering.
+        collected.sort_unstable();
+        let expected: Vec<u32> = (0..100u32).map(|i| i.wrapping_mul(2)).collect();
+        assert_eq!(
+            collected, expected,
+            "every CompA(i) must now read back as CompA(i*2)",
+        );
+    }
+
+    /// 3-tuple `Query<(&CompA, &mut CompB, &CompD)>` on a single archetype with
+    /// 7 entities — the closure must receive a 3-tuple of slices, each of the
+    /// same length (= row count). Verifies the per-element `ChunkItem<'_>`
+    /// projection and the tuple-fetch tuple-of-slices materialisation.
+    #[test]
+    fn tuple_3_yields_three_same_length_slices() {
+        register_test_components();
+        register_wave7_components();
+        let mut ecs = EcsMaster::new();
+        let arch = ecs.create_archetype(&[COMP_A, COMP_B, COMP_D]);
+        for i in 0..7u32 {
+            spawn_abd(&mut ecs, arch, i + 10, i + 20, i + 30);
+        }
+
+        let state = QueryDataState::<(&CompA, &mut CompB, &CompD), ()>::new(&mut ecs);
+        // SAFETY (U_C1): cell consumed within this scope.
+        let cell = unsafe { UnsafeEcsCell::new_mutable(&mut ecs) };
+
+        let mut invocations = 0usize;
+        let mut observed_lens: Vec<(usize, usize, usize)> = Vec::new();
+        // SAFETY (Q1, CD1-CD4): direct driver test; tuple `(&A, &mut B, &C)`
+        //   ⇒ overall mutable (any element with `IS_READ_ONLY = false` flips
+        //   the tuple flag); F = () archetypal; no aliasing live.
+        unsafe {
+            for_each_chunk_impl::<(&CompA, &mut CompB, &CompD), (), _>(
+                &state,
+                cell,
+                true,
+                |(a, b, c): (&[CompA], &mut [CompB], &[CompD])| {
+                    invocations += 1;
+                    observed_lens.push((a.len(), b.len(), c.len()));
+                },
+            );
+        }
+
+        assert_eq!(invocations, 1, "single archetype ⇒ exactly one closure invocation");
+        assert_eq!(observed_lens.len(), 1, "exactly one slice triple observed");
+        let (la, lb, lc) = observed_lens[0];
+        assert_eq!(la, 7, "&CompA slice length must equal row count");
+        assert_eq!(lb, 7, "&mut CompB slice length must equal row count");
+        assert_eq!(lc, 7, "&CompD slice length must equal row count");
+        assert_eq!(
+            la, lb,
+            "all tuple slices must share a common length (row count)",
+        );
+        assert_eq!(
+            lb, lc,
+            "all tuple slices must share a common length (row count)",
+        );
+    }
+
+    /// `Query<(), With<MarkerE>>::for_each_chunk(|()| count += 1)` — empty
+    /// tuple `D = ()` on N matched archetypes invokes the closure with `()`
+    /// exactly N times. The driver still walks `matched_ids()`; the `()` data
+    /// fetch is a no-op materialiser that yields a unit value per non-empty
+    /// archetype.
+    #[test]
+    fn empty_tuple_d_yields_unit_per_archetype() {
+        register_test_components();
+        register_wave7_components();
+        let mut ecs = EcsMaster::new();
+        // Two archetypes carrying the `MarkerE` marker — both should match
+        // `With<MarkerE>`. A third archetype lacking the marker is the
+        // negative-control; it must NOT contribute an invocation.
+        let arch_marked_a = ecs.create_archetype(&[COMP_A, COMP_E]);
+        let arch_marked_b = ecs.create_archetype(&[COMP_A, COMP_B, COMP_E]);
+        let arch_unmarked = ecs.create_archetype(&[COMP_A]);
+
+        // Populate both marked archetypes; leave the unmarked one alone (it
+        // must still appear in the master's archetype set without participating
+        // in the `With<MarkerE>` filter).
+        spawn_a_marker(&mut ecs, arch_marked_a, 1);
+        spawn_a_marker(&mut ecs, arch_marked_a, 2);
+        // For arch_marked_b we need (A, B, MarkerE) — reuse the abd helper
+        // by passing CompD slot? No, the archetype is registered with E not D.
+        // Spawn a marker + a CompB row manually.
+        {
+            let ca = CompA(3);
+            let cb = CompB(4);
+            let m = MarkerE(0);
+            // SAFETY: each is `#[repr(C)]` POD; byte slices valid for the call.
+            let a_bytes = unsafe {
+                std::slice::from_raw_parts(
+                    &ca as *const CompA as *const u8,
+                    std::mem::size_of::<CompA>(),
+                )
+            };
+            let b_bytes = unsafe {
+                std::slice::from_raw_parts(
+                    &cb as *const CompB as *const u8,
+                    std::mem::size_of::<CompB>(),
+                )
+            };
+            let m_bytes = unsafe {
+                std::slice::from_raw_parts(
+                    &m as *const MarkerE as *const u8,
+                    std::mem::size_of::<MarkerE>(),
+                )
+            };
+            ecs.create_entity(
+                arch_marked_b,
+                &[(COMP_A, a_bytes), (COMP_B, b_bytes), (COMP_E, m_bytes)],
+            )
+            .expect("create_entity must succeed for arch_marked_b");
+        }
+        // The unmarked archetype is intentionally left without entities — we
+        // only want to confirm it does not appear in the match cache.
+        let _ = arch_unmarked;
+
+        let state = QueryDataState::<(), crate::ecs::core::iters::query::With<MarkerE>>::new(
+            &mut ecs,
+        );
+        assert_eq!(
+            state.archetype_state.matched_ids().len(),
+            2,
+            "exactly the two MarkerE-bearing archetypes must match (unmarked is filtered out)",
+        );
+
+        // SAFETY (U_C1): cell consumed within this scope.
+        let cell = unsafe { UnsafeEcsCell::new_mutable(&mut ecs) };
+
+        let mut invocations = 0usize;
+        // SAFETY (Q1, CD1-CD4): D = () (no component bytes touched); F =
+        //   With<MarkerE> archetypal. No aliasing live.
+        unsafe {
+            for_each_chunk_impl::<(), crate::ecs::core::iters::query::With<MarkerE>, _>(
+                &state,
+                cell,
+                false,
+                |_: ()| {
+                    invocations += 1;
+                },
+            );
+        }
+
+        assert_eq!(
+            invocations, 2,
+            "exactly one closure invocation per matched non-empty archetype",
+        );
+    }
 }
