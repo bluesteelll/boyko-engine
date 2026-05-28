@@ -19,6 +19,7 @@
 //! against `iters::query::{QueryData, QueryFilter, With, Without, Query}` from
 //! callers that will be written in Steps 2+.
 
+pub mod chunked_data;
 pub mod data;
 pub mod filter;
 pub mod iter;
@@ -33,6 +34,7 @@ pub mod query_type_registry;
 pub mod query_view;
 pub mod state;
 
+pub use chunked_data::ChunkedQueryData;
 pub use data::{Mut, QueryData, ReadOnlyQueryData, Ref};
 pub use filter::{Added, Changed, Or, QueryFilter, With, Without};
 pub use iter::{QueryIter, QueryIterMut};
