@@ -28,8 +28,10 @@ use std::ptr::NonNull;
 use static_assertions::assert_impl_all;
 
 use crate::ecs::core::entity::entity::Entity;
+use crate::ecs::core::iters::query::chunk_iter;
+use crate::ecs::core::iters::query::chunked_data::ChunkedQueryData;
 use crate::ecs::core::iters::query::data::{QueryData, ReadOnlyQueryData};
-use crate::ecs::core::iters::query::filter::QueryFilter;
+use crate::ecs::core::iters::query::filter::{ArchetypalQueryFilter, QueryFilter};
 use crate::ecs::core::iters::query::iter::{QueryIter, QueryIterMut};
 use crate::ecs::core::iters::query::par_iter::{BatchingStrategy, ParQuery, ParQueryMut};
 use crate::ecs::core::iters::query::state::QueryDataState;
@@ -424,6 +426,58 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
         //   `row` in range per fast store invariant.
         Some(unsafe { <D as QueryData>::fetch(&data_fetch, row) })
     }
+
+    /// Direct-API mirror of
+    /// [`Query::for_each_chunk`](super::query::Query::for_each_chunk).
+    /// Invokes `f` once per matched archetype, passing a slice (or tuple of
+    /// slices) covering every row in that archetype.
+    ///
+    /// `D` must satisfy [`ChunkedQueryData`]; `F` must satisfy
+    /// [`ArchetypalQueryFilter`]. Both bounds are compile-time —
+    /// `QueryView<&T, Changed<U>>::for_each_chunk` is a type error. Use
+    /// [`Self::iter`] / [`Self::iter_mut`] for per-row change-detection
+    /// flows; the direct API explicitly rejects change-detection filters at
+    /// `EcsMaster::query` mint time anyway (QV11 / W4).
+    ///
+    /// # Performance
+    ///
+    /// Identical cost model to
+    /// [`Query::for_each_chunk`](super::query::Query::for_each_chunk) — see
+    /// plan §1.2. Empty matched archetypes are skipped at the
+    /// `entity_count == 0` guard; stale-id entries (Q5) are skipped
+    /// transparently via the driver's `archetype_ptr(_mut)` `None` arm.
+    ///
+    /// # See also
+    ///
+    /// * [`Query::for_each_chunk`](super::query::Query::for_each_chunk)
+    ///   — SystemParam mirror used inside system bodies.
+    /// * [`Self::par_for_each_chunk`] — parallel variant (Phase X.A Wave 6).
+    ///
+    /// [`ChunkedQueryData`]: super::chunked_data::ChunkedQueryData
+    /// [`ArchetypalQueryFilter`]: super::filter::ArchetypalQueryFilter
+    #[inline]
+    pub fn for_each_chunk<Func>(&mut self, f: Func)
+    where
+        D: ChunkedQueryData,
+        F: ArchetypalQueryFilter,
+        Func: for<'c> FnMut(D::ChunkItem<'c>),
+    {
+        // SAFETY (Q1, Q3, CD1-CD4): mirrors `Query::for_each_chunk`.
+        //   `&mut self` enforces cursor uniqueness on the view;
+        //   `D::IS_READ_ONLY` selects the readonly / mut chunk-dispatch
+        //   arm inside the driver. `QueryView` does not carry `meta` —
+        //   `NEEDS_CHANGE_DETECTION` const-folds to `false` at this
+        //   monomorphisation because `D: ChunkedQueryData` excludes
+        //   `Ref<T>` / `Mut<T>` and `F: ArchetypalQueryFilter` excludes
+        //   `Added<C>` / `Changed<C>`, so the meta-bearing branch from
+        //   `iter.rs` does not appear in this driver. The cell
+        //   `self.world` is `Copy`; passing by value preserves the
+        //   raw-pointer provenance through the call (Phase 8a C1 fix).
+        let mutable = !D::IS_READ_ONLY;
+        unsafe {
+            chunk_iter::for_each_chunk_impl(self.state(), self.world, mutable, f);
+        }
+    }
 }
 
 /// Cold panic site for [`QueryView::single`] when the iterator yields zero
@@ -451,4 +505,94 @@ fn query_view_single_panic_many<D: QueryData, F: QueryFilter>() -> ! {
         std::any::type_name::<D>(),
         std::any::type_name::<F>(),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::ecs::core::component::component::Component;
+    use crate::ecs::core::component::component_registry;
+    use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
+    use crate::ecs::identifiers::primitives::ComponentId;
+
+    // Component id reserved for the Phase X.A Wave 5 QueryView chunk test.
+    // The free slot below was verified at write time against existing
+    // crate-wide allocations:
+    //   * 400-422 — archetype.rs / archetype_bundle.rs / component_pool_bundle.rs
+    //   * 450-456 — component_registry TEST_BASE+0..+6
+    //   * 457-461 — component_registry "reserved" + Phase X.A Wave 4 (460-461)
+    //   * 462    — component_registry collision_with_different_type test
+    //   * 465    — component_registry collision_with_same_type test
+    //   * 480-482 — archetype_bundle miri tests
+    //   * 483-485 — query/iter.rs
+    //   * 486-488 — query/query.rs
+    //   * 490-497 — query_state / component_set
+    //   * 503-504 — query/data.rs
+    //   * 506-510 — query/state.rs / resource_registry
+    // Slot 463 is free (between the collision-different and collision-same
+    // anchors at 462 / 465, both inside the component_registry 450-465 zone).
+    const COMP_A: ComponentId = ComponentId(463);
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct CompA(u32);
+
+    impl Component for CompA {
+        fn component_id() -> ComponentId {
+            COMP_A
+        }
+    }
+
+    /// Idempotent registry priming.
+    fn register_test_components() {
+        component_registry::register_layout::<CompA>(COMP_A.0);
+    }
+
+    /// Mirror of `chunk_iter::tests::sequential_single_archetype_yields_full_slice`
+    /// but routed through `ecs.query::<&CompA>().for_each_chunk(...)`. Verifies
+    /// the direct-API entry point hits the same driver (exactly one closure
+    /// invocation; the slice covers every row).
+    #[test]
+    fn query_view_for_each_chunk_yields_full_slice() {
+        register_test_components();
+        let mut ecs = EcsMaster::new();
+        let arch = ecs.create_archetype(&[COMP_A]);
+
+        for i in 0..10u32 {
+            let comp = CompA(i + 500);
+            // SAFETY: `CompA` is `#[repr(C)]` POD; reading its bytes
+            //   produces a valid byte slice for the duration of this call.
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    &comp as *const CompA as *const u8,
+                    std::mem::size_of::<CompA>(),
+                )
+            };
+            ecs.create_entity(arch, &[(COMP_A, bytes)])
+                .expect("query_view_for_each_chunk: create_entity must succeed");
+        }
+
+        let mut invocations = 0usize;
+        let mut collected: Vec<u32> = Vec::with_capacity(10);
+        {
+            let mut view = ecs.query::<&CompA, ()>();
+            view.for_each_chunk(|slice: &[CompA]| {
+                invocations += 1;
+                for c in slice {
+                    collected.push(c.0);
+                }
+            });
+        }
+
+        assert_eq!(
+            invocations, 1,
+            "single archetype ⇒ exactly one closure invocation",
+        );
+        assert_eq!(collected.len(), 10, "slice must cover every row");
+        for expected in 500..510u32 {
+            assert!(
+                collected.contains(&expected),
+                "row {expected} must appear in collected = {collected:?}",
+            );
+        }
+    }
 }

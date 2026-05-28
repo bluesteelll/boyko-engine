@@ -198,6 +198,10 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
     /// guard; stale-id entries (Q5) are skipped transparently via the
     /// driver's `archetype_ptr_mut` `None` arm.
     ///
+    /// # See also
+    ///
+    /// * [`Self::par_for_each_chunk`] — parallel variant (Phase X.A Wave 6).
+    ///
     /// [`ChunkedQueryData`]: super::chunked_data::ChunkedQueryData
     /// [`ArchetypalQueryFilter`]: super::filter::ArchetypalQueryFilter
     #[inline]

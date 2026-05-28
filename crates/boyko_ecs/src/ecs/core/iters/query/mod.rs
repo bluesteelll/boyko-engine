@@ -37,7 +37,7 @@ pub mod state;
 
 pub use chunked_data::ChunkedQueryData;
 pub use data::{Mut, QueryData, ReadOnlyQueryData, Ref};
-pub use filter::{Added, Changed, Or, QueryFilter, With, Without};
+pub use filter::{Added, ArchetypalQueryFilter, Changed, Or, QueryFilter, With, Without};
 pub use iter::{QueryIter, QueryIterMut};
 pub use par_iter::{BatchingStrategy, MIN_ARCHETYPE_FOR_PARALLEL, ParQuery, ParQueryMut};
 pub use query::Query;
