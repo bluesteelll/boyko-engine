@@ -1650,6 +1650,164 @@ impl_or_filter_tuple_too_large!(
     (F20, s20, f20), (F21, s21, f21), (F22, s22, f22), (F23, s23, f23)
 );
 
+// ── Phase X.A Step 1B — ArchetypalQueryFilter marker trait ──────────────────
+
+/// Marker for [`QueryFilter`] impls whose decision is **archetype-level only**
+/// — they cannot reject individual rows. Required as a bound on
+/// [`Query::for_each_chunk`] / [`Query::par_for_each_chunk`] because the
+/// chunk API yields one contiguous slice per archetype with no per-row gate.
+///
+/// # Membership
+///
+/// Stable members (Phase X.A):
+/// * `()`, `With<C>`, `Without<C>`.
+/// * `Or<F>` iff every element of `F` is `ArchetypalQueryFilter`.
+/// * Tuples `(F0, F1, ..., Fn)` for `n <= 12` iff every element is
+///   `ArchetypalQueryFilter`.
+///
+/// NOT members:
+/// * `Added<C>`, `Changed<C>` — per-row tick comparison.
+///
+/// # Safety
+///
+/// Implementations MUST have `IS_ARCHETYPAL = true` AND
+/// `NEEDS_CHANGE_DETECTION = false` at the filter level. The chunk API
+/// relies on both to elide per-row work statically.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` cannot be used as a filter in `Query::for_each_chunk` — it is not archetype-level",
+    label = "non-archetypal filter (likely `Added<T>` / `Changed<T>` / tuple containing one)",
+    note = "the chunk API yields one slice per archetype with no per-row gate; use `Query::iter()` for per-row tick filtering"
+)]
+pub unsafe trait ArchetypalQueryFilter: QueryFilter {}
+
+// === Leaf impls ===
+
+// SAFETY: `()` has `IS_ARCHETYPAL = true` and `NEEDS_CHANGE_DETECTION = false`
+//   per the `QueryFilter for ()` impl above (lines 219-284). No per-row state.
+unsafe impl ArchetypalQueryFilter for () {}
+
+// SAFETY: `With<C>` has `IS_ARCHETYPAL = true` and `NEEDS_CHANGE_DETECTION =
+//   false` per the `QueryFilter for With<C>` impl above (lines 316-392). It
+//   rejects only archetypes lacking `C`; `filter_fetch` is a vacuous `true`.
+unsafe impl<C: Component> ArchetypalQueryFilter for With<C> {}
+
+// SAFETY: `Without<C>` has `IS_ARCHETYPAL = true` and `NEEDS_CHANGE_DETECTION
+//   = false` per the `QueryFilter for Without<C>` impl above (lines 418-489).
+//   It rejects only archetypes containing `C`; `filter_fetch` is a vacuous
+//   `true`.
+unsafe impl<C: Component> ArchetypalQueryFilter for Without<C> {}
+
+// === Or<F> propagation ===
+
+// SAFETY: the concrete `QueryFilter for Or<F>` impl in this file is
+//   monomorphised as `Or<(F0, F1, …)>` — the inner `F` is always a tuple. The
+//   tuple impl below ensures `(F0, F1, …)` implements `ArchetypalQueryFilter`
+//   iff every element does. Therefore the bound `F: ArchetypalQueryFilter` is
+//   sufficient: it forces the inner tuple to be archetypal element-wise,
+//   which propagates the `IS_ARCHETYPAL = true ∧ NEEDS_CHANGE_DETECTION =
+//   false` invariants transitively to the `Or<F>` wrapper.
+//
+// The `where Or<F>: QueryFilter` clause carries the supertrait obligation:
+//   `QueryFilter` is only implemented for `Or<(F0, F1, …)>` (the tuple
+//   pattern), not for arbitrary `F`. The bound makes this dependency
+//   explicit at the type-checker level — when the user writes
+//   `Query<_, Or<(With<A>, Without<B>)>>::for_each_chunk(…)`, the tuple
+//   `ArchetypalQueryFilter` impl below populates the inner tuple bound
+//   and the existing `Or<(F0, F1)>: QueryFilter` impl populates the
+//   supertrait obligation.
+unsafe impl<F: ArchetypalQueryFilter> ArchetypalQueryFilter for Or<F>
+where
+    Or<F>: QueryFilter,
+{
+}
+
+// === Tuple propagation ===
+
+/// Emits an `ArchetypalQueryFilter` impl for a tuple `(F0, F1, …)`. The
+/// tuple is archetypal iff every element is — propagation is by per-element
+/// trait bound, identical in spirit to the `IS_ARCHETYPAL` AND-fold in the
+/// `QueryFilter` tuple impl above.
+macro_rules! impl_archetypal_filter_tuple {
+    ( $( $F:ident ),* ) => {
+        // SAFETY: every element is `ArchetypalQueryFilter`, hence each has
+        //   `IS_ARCHETYPAL = true` and `NEEDS_CHANGE_DETECTION = false`. The
+        //   tuple-AND propagation in the `QueryFilter` impl above (lines
+        //   944-951) preserves both invariants for the tuple wrapper.
+        unsafe impl< $($F: ArchetypalQueryFilter),* > ArchetypalQueryFilter for ( $($F,)* ) {}
+    };
+}
+
+impl_archetypal_filter_tuple!(F0);
+impl_archetypal_filter_tuple!(F0, F1);
+impl_archetypal_filter_tuple!(F0, F1, F2);
+impl_archetypal_filter_tuple!(F0, F1, F2, F3);
+impl_archetypal_filter_tuple!(F0, F1, F2, F3, F4);
+impl_archetypal_filter_tuple!(F0, F1, F2, F3, F4, F5);
+impl_archetypal_filter_tuple!(F0, F1, F2, F3, F4, F5, F6);
+impl_archetypal_filter_tuple!(F0, F1, F2, F3, F4, F5, F6, F7);
+impl_archetypal_filter_tuple!(F0, F1, F2, F3, F4, F5, F6, F7, F8);
+impl_archetypal_filter_tuple!(F0, F1, F2, F3, F4, F5, F6, F7, F8, F9);
+impl_archetypal_filter_tuple!(F0, F1, F2, F3, F4, F5, F6, F7, F8, F9, F10);
+impl_archetypal_filter_tuple!(F0, F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11);
+
+#[cfg(test)]
+mod archetypal_marker_tests {
+    use super::*;
+    use crate::ecs::core::component::component::Component;
+
+    fn assert_archetypal<F: ArchetypalQueryFilter>() {}
+
+    // Local test components — Component impls are compile-only shims
+    // (`component_id` panics if ever invoked, but `assert_archetypal` is a
+    // pure type-system check that never executes the body).
+    struct CA;
+    struct CB;
+    impl Component for CA {
+        fn component_id() -> crate::ecs::identifiers::primitives::ComponentId {
+            unimplemented!("compile-only test component")
+        }
+    }
+    impl Component for CB {
+        fn component_id() -> crate::ecs::identifiers::primitives::ComponentId {
+            unimplemented!("compile-only test component")
+        }
+    }
+
+    #[test]
+    fn unit_is_archetypal() {
+        assert_archetypal::<()>();
+    }
+
+    #[test]
+    fn with_is_archetypal() {
+        assert_archetypal::<With<CA>>();
+    }
+
+    #[test]
+    fn without_is_archetypal() {
+        assert_archetypal::<Without<CA>>();
+    }
+
+    #[test]
+    fn tuple_with_and_without_is_archetypal() {
+        assert_archetypal::<(With<CA>, Without<CB>)>();
+    }
+
+    #[test]
+    fn or_of_archetypal_is_archetypal() {
+        assert_archetypal::<Or<(With<CA>, Without<CB>)>>();
+    }
+
+    #[test]
+    fn tuple_arity_12_is_archetypal() {
+        assert_archetypal::<(
+            With<CA>, With<CA>, With<CA>, With<CA>,
+            With<CA>, With<CA>, With<CA>, With<CA>,
+            With<CA>, With<CA>, With<CA>, With<CA>,
+        )>();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
