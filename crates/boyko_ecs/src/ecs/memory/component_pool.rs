@@ -5,8 +5,8 @@ use std::ptr::NonNull;
 
 use crate::ecs::constants::{
     DEFAULT_CHUNKS_PER_POOL, LARGE_COMPONENTS_PER_CHUNK, MEDIUM_COMPONENTS_PER_CHUNK,
-    MEDIUM_COMPONENT_THRESHOLD, SMALL_COMPONENTS_PER_CHUNK, SMALL_COMPONENT_THRESHOLD,
-    TINY_COMPONENTS_PER_CHUNK, TINY_COMPONENT_THRESHOLD,
+    MEDIUM_COMPONENT_THRESHOLD, SIMD_BUFFER_ALIGN, SMALL_COMPONENTS_PER_CHUNK,
+    SMALL_COMPONENT_THRESHOLD, TINY_COMPONENTS_PER_CHUNK, TINY_COMPONENT_THRESHOLD,
 };
 use crate::ecs::core::change_detection::Tick;
 use crate::ecs::core::component::component::Component;
@@ -115,13 +115,39 @@ impl ComponentPool {
         let max_components = num_chunks * components_per_chunk;
         let buffer_capacity_bytes = max_components * component_layout.size();
 
-        // SAFETY: size and alignment come from a registered ComponentLayout,
-        // which was produced by size_of::<T>() / align_of::<T>() — always valid.
+        // Phase X.A SIMD-A1 (plan §6.2): lift the buffer alignment from the raw
+        // `align_of::<T>()` (which can be as low as 1 byte) to at least
+        // `SIMD_BUFFER_ALIGN = 32` so that column-start addresses are AVX2-loadable
+        // without an unaligned-prologue. For component types whose alignment
+        // already exceeds 32 (rare; e.g. `#[repr(align(64))]`), we honour the
+        // stricter requirement via `max`. The cost is at most one alignment-gap
+        // per pool (<= 31 B) on the arena side; see plan §6.2 for the bound.
+        let element_align = component_layout.align();
+        let buffer_align = element_align.max(SIMD_BUFFER_ALIGN);
+
+        // SAFETY: size and alignment are both valid Layout inputs:
+        // - `buffer_capacity_bytes` is a product of registry-validated sizes;
+        // - `buffer_align` is the max of two power-of-2 alignments
+        //   (`component_layout.align()` is a power of 2 by Layout invariant;
+        //   `SIMD_BUFFER_ALIGN = 32` is `2^5`), so the result is itself a
+        //   power of 2 and a valid alignment per `Layout::from_size_align`.
         let buffer_layout = unsafe {
-            Layout::from_size_align_unchecked(buffer_capacity_bytes, component_layout.align())
+            Layout::from_size_align_unchecked(buffer_capacity_bytes, buffer_align)
         };
 
         let buffer = arena.allocate_layout(buffer_layout);
+
+        // Phase X.A SIMD-A1 invariant (plan §6.4): `ComponentPool::new` allocates
+        // with `align = max(align_of::<T>(), SIMD_BUFFER_ALIGN)`, so the returned
+        // base MUST be SIMD_BUFFER_ALIGN-aligned. Asserted at pool construction so
+        // callers (`buffer_ptr`, future `Query::for_each_chunk` inner loops) can
+        // rely on the invariant without re-checking.
+        debug_assert!(
+            (buffer.as_ptr() as usize).is_multiple_of(SIMD_BUFFER_ALIGN),
+            "SIMD-A1: ComponentPool buffer ptr {:p} is not SIMD_BUFFER_ALIGN={}-aligned",
+            buffer.as_ptr(),
+            SIMD_BUFFER_ALIGN
+        );
 
         let mut chunks = Vec::with_capacity(num_chunks);
         for i in 0..num_chunks {
@@ -715,6 +741,30 @@ impl ComponentPool {
     /// The buffer holds `self.count()` initialised components at stride
     /// `self.component_layout().size()`. Slot `i` starts at
     /// `buffer_ptr().add(i * size)` and is valid for `size` bytes.
+    ///
+    /// # Alignment invariant (Phase X.A SIMD-A1)
+    ///
+    /// The returned pointer is guaranteed to be aligned to at least
+    /// `max(align_of::<T>(), SIMD_BUFFER_ALIGN)`. For all component types
+    /// `T` with `align_of::<T>() <= SIMD_BUFFER_ALIGN`, this is
+    /// [`SIMD_BUFFER_ALIGN`](crate::ecs::constants::SIMD_BUFFER_ALIGN)
+    /// = 32 bytes — sufficient for AVX2 aligned 256-bit loads from the
+    /// column start.
+    ///
+    /// This eliminates the cross-cache-line load penalty on archetype row 0
+    /// (Intel Optimization Manual §3.6) that the previous `align_of::<T>()`
+    /// alignment incurred for small-aligned types such as `f32`.
+    ///
+    /// Per-row alignment beyond `align_of::<T>()` is **not** guaranteed: for
+    /// non-power-of-2-sized `T` (e.g. `struct Foo([f32; 3])`, 12 B), interior
+    /// rows are aligned only to `align_of::<T>()`. Users emitting explicit
+    /// SIMD loads must use unaligned-load intrinsics (`_mm256_loadu_ps`) or
+    /// rely on LLVM autovectorisation, which handles unaligned interior rows
+    /// correctly.
+    ///
+    /// See `docs/PHASE-X.A-PLAN.md` §6.3 for the full alignment story and the
+    /// Bevy PR #6161 `Vec3` soundness postmortem that motivated rejecting
+    /// per-row alignment promises.
     ///
     /// # Safety contract for callers
     ///
@@ -1360,6 +1410,7 @@ mod tests {
     const POS_ID: ComponentId = ComponentId(220);
     const VEL_ID: ComponentId = ComponentId(221);
     const OTHER_ID: ComponentId = ComponentId(222);
+    const F32_WRAP_ID: ComponentId = ComponentId(223);
 
     // ---- component type definitions ------------------------------------------------
 
@@ -1382,6 +1433,15 @@ mod tests {
     struct OtherComponent {
         val: u64,
     }
+
+    /// Phase X.A SIMD-A1 fixture: a small-aligned (`align_of::<F32Wrap>() = 4`)
+    /// component used to exercise the SIMD-buffer-alignment lift. The wrapper
+    /// is `#[repr(transparent)]` over `f32`, so its alignment is exactly
+    /// `align_of::<f32>() = 4` — far below `SIMD_BUFFER_ALIGN = 32`. The
+    /// alignment-lift path must round the buffer alignment up to 32; without
+    /// the lift, the buffer would be only 4-byte-aligned.
+    #[repr(transparent)]
+    struct F32Wrap(#[allow(dead_code)] f32);
 
     // ---- Component impls (mirrors what #[derive(Component)] generates) -------------
 
@@ -1415,12 +1475,23 @@ mod tests {
         }
     }
 
+    impl Component for F32Wrap {
+        fn component_id() -> ComponentId {
+            static ID: OnceLock<ComponentId> = OnceLock::new();
+            *ID.get_or_init(|| {
+                component_registry::register_layout::<F32Wrap>(F32_WRAP_ID.0);
+                F32_WRAP_ID
+            })
+        }
+    }
+
     // ---- helpers -------------------------------------------------------------------
 
     fn register_all() {
         component_registry::register_layout::<Position>(POS_ID.0);
         component_registry::register_layout::<Velocity>(VEL_ID.0);
         component_registry::register_layout::<OtherComponent>(OTHER_ID.0);
+        component_registry::register_layout::<F32Wrap>(F32_WRAP_ID.0);
     }
 
     fn make_position_pool(arena: &Arena, cap: usize) -> ComponentPool {
@@ -1502,5 +1573,58 @@ mod tests {
 
         // Attempt to read as `OtherComponent` — TypeId mismatch must fire debug_assert.
         let _ = pool.get_typed::<OtherComponent>(0);
+    }
+
+    /// Phase X.A SIMD-A1 (plan §6.2, §12 Step 1A): every `ComponentPool`
+    /// backing buffer must start on a `SIMD_BUFFER_ALIGN`-aligned address so
+    /// that `Query::for_each_chunk`'s inner loops can emit AVX2 aligned loads
+    /// from the column base without an unaligned-prologue.
+    ///
+    /// The fixture component `F32Wrap` is `#[repr(transparent)]` over `f32`,
+    /// giving `align_of::<F32Wrap>() = 4` — well below
+    /// `SIMD_BUFFER_ALIGN = 32`. Without the alignment lift in
+    /// `ComponentPool::new`, the buffer pointer would only be 4-byte-aligned;
+    /// the lift rounds the buffer alignment up to 32. This test gates the
+    /// entire Phase X.A Wave 1 — if it fails, the SIMD alignment story is
+    /// broken at the arena layer.
+    ///
+    /// To prove the assertion is non-tautological, the test deliberately
+    /// pre-allocates a `Position` pool (48-byte buffer at align 4) so that
+    /// the arena cursor sits at an offset of `48 mod 32 = 16` from the
+    /// 64-byte-aligned arena base before the `F32Wrap` pool is constructed.
+    /// Without the lift, the `F32Wrap` pool's buffer (align 4) would land at
+    /// that 16-mod-32 offset and the assertion would fail; with the lift
+    /// (align = max(4, 32) = 32), the arena's `allocate_aligned` advances the
+    /// cursor to the next 32-byte boundary before placing the buffer.
+    #[test]
+    fn buffer_ptr_is_simd_aligned() {
+        use crate::ecs::constants::SIMD_BUFFER_ALIGN;
+
+        register_all();
+        let arena = Arena::new();
+
+        // Pre-allocate a non-SIMD-aligned-sized chunk so the arena cursor
+        // is misaligned relative to SIMD_BUFFER_ALIGN before the test pool
+        // is constructed. Position is 12 B with align 4; the pool's buffer
+        // (1 chunk × 4 components × 12 B = 48 B) consumes the first 48 B of
+        // the arena. 48 mod 32 = 16, so the next free byte is at offset 16
+        // from the 64-aligned arena base — i.e. NOT 32-aligned.
+        let _prefix = ComponentPool::new(&arena, POS_ID.0, 1, 4);
+
+        // Constructor arguments mirror the rest of the test module:
+        // `(arena, component_id, num_chunks, components_per_chunk)`. Using
+        // the real `ComponentPool::new` rather than replicating its
+        // alignment logic — that would make the assertion tautological.
+        let pool = ComponentPool::new(&arena, F32_WRAP_ID.0, 1, 4);
+
+        let ptr = pool.buffer_ptr() as usize;
+        assert!(
+            ptr.is_multiple_of(SIMD_BUFFER_ALIGN),
+            "ComponentPool<F32Wrap> buffer ptr {:#x} must be SIMD_BUFFER_ALIGN={}-byte aligned \
+             for AVX2 column loads (Phase X.A SIMD-A1); offset = {}",
+            ptr,
+            SIMD_BUFFER_ALIGN,
+            ptr % SIMD_BUFFER_ALIGN,
+        );
     }
 }

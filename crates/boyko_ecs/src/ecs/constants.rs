@@ -11,6 +11,16 @@ pub const CACHE_LINE_SIZE: usize = 64;
 /// requires less alignment
 pub const MIN_ALIGNMENT: usize = 8;
 
+/// Minimum alignment for `ComponentPool` backing buffers.
+///
+/// Lifted from `align_of::<T>()` to ensure column-start addresses are AVX2-loadable
+/// without an unaligned-prologue. Required by `Query::for_each_chunk` SIMD-amenable
+/// inner loops (Phase X.A). 32 = AVX2 baseline; AVX-512 (64-byte) is opt-in via a
+/// future `SIMD_BUFFER_ALIGN_AVX512` cfg-gated constant if needed.
+///
+/// See `docs/PHASE-X.A-PLAN.md` §6 for the design rationale and cost analysis.
+pub const SIMD_BUFFER_ALIGN: usize = 32;
+
 //
 // Chunk configuration
 //
