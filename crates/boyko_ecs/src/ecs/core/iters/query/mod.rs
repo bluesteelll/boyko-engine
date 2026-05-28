@@ -24,6 +24,7 @@ pub mod chunked_data;
 pub mod data;
 pub mod filter;
 pub mod iter;
+pub mod par_chunk;
 pub mod par_iter;
 // The `query` submodule houses the `Query<'w, 's, D, F>` struct itself; the
 // inception is intentional and dictated by the Phase 8b plan file layout

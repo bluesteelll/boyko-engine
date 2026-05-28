@@ -23,6 +23,7 @@ use crate::ecs::core::iters::query::chunked_data::ChunkedQueryData;
 use crate::ecs::core::iters::query::data::{QueryData, ReadOnlyQueryData};
 use crate::ecs::core::iters::query::filter::{ArchetypalQueryFilter, QueryFilter};
 use crate::ecs::core::iters::query::iter::{QueryIter, QueryIterMut};
+use crate::ecs::core::iters::query::par_chunk;
 use crate::ecs::core::iters::query::par_iter::{BatchingStrategy, ParQuery, ParQueryMut};
 use crate::ecs::core::iters::query::state::QueryDataState;
 use crate::ecs::core::system::filtered_access_set::FilteredAccessSet;
@@ -224,6 +225,77 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
         let mutable = !D::IS_READ_ONLY;
         unsafe {
             chunk_iter::for_each_chunk_impl(self.state, self.world, mutable, f);
+        }
+    }
+
+    /// Parallel mirror of [`Self::for_each_chunk`].
+    ///
+    /// Splits each matched archetype's row range into sub-ranges per
+    /// [`BatchingStrategy`] and dispatches each sub-range to a
+    /// [`boyko_threadpool::ThreadPool`] worker via
+    /// [`boyko_threadpool::ThreadPool::scope`]. Archetypes with fewer than
+    /// [`MIN_ARCHETYPE_FOR_PARALLEL`][min] rows run inline on the calling
+    /// thread (plan PAR9). When no pool is attached to the calling thread,
+    /// dispatch falls back to a sequential walk on the calling thread (PAR7).
+    ///
+    /// # Closure invocation frequency (IMPORTANT — differs from sequential)
+    ///
+    /// The closure is invoked **once per archetype sub-range, not once per
+    /// archetype** — see plan §2.4 / §1.2. Examples:
+    ///
+    /// * 100k-row archetype on an 8-worker pool with default
+    ///   `batches_per_thread = 1` → `batch_size = 12500`, 8 invocations.
+    /// * 4096-row archetype on the same pool → raw `4096 / 8 = 512`
+    ///   clamps to 1024, 4 invocations.
+    ///
+    /// For reductions, use a thread-safe accumulator
+    /// (`[AtomicU64; worker_count]`, sharded thread-local, etc.) instead of
+    /// the `FnMut(&mut acc, &[T])` capture pattern. Sequential
+    /// [`Self::for_each_chunk`] remains the right shape for single-threaded
+    /// fold reductions.
+    ///
+    /// # Compile-time bounds
+    ///
+    /// `D` must satisfy [`ChunkedQueryData`]; `F` must satisfy
+    /// [`ArchetypalQueryFilter`]; `Func` must be `Fn + Send + Sync`.
+    /// `Query<&T, Changed<U>>::par_for_each_chunk` is a type error
+    /// (`Changed` is not archetypal). Use [`Self::iter`] / [`Self::iter_mut`]
+    /// for per-row tick filtering.
+    ///
+    /// # See also
+    ///
+    /// * [`Self::for_each_chunk`] — sequential variant.
+    /// * Plan §9 for the granularity rationale and per-worker math.
+    ///
+    /// [`ChunkedQueryData`]: super::chunked_data::ChunkedQueryData
+    /// [`ArchetypalQueryFilter`]: super::filter::ArchetypalQueryFilter
+    /// [`BatchingStrategy`]: super::par_iter::BatchingStrategy
+    /// [min]: super::par_iter::MIN_ARCHETYPE_FOR_PARALLEL
+    #[inline]
+    pub fn par_for_each_chunk<Func>(&mut self, f: Func, batching: BatchingStrategy)
+    where
+        D: ChunkedQueryData,
+        F: ArchetypalQueryFilter,
+        Func: for<'c> Fn(D::ChunkItem<'c>) + Send + Sync,
+    {
+        // SAFETY (Q1, Q3, CD1-CD4, §9): `&mut self` enforces cursor
+        //   uniqueness (Q3); `D::IS_READ_ONLY` selects the readonly / mut
+        //   chunk-dispatch arm inside the driver. `D: ChunkedQueryData`
+        //   excludes `Ref<T>` / `Mut<T>` and `F: ArchetypalQueryFilter`
+        //   excludes `Added<C>` / `Changed<C>`, so `NEEDS_CHANGE_DETECTION`
+        //   const-folds to `false` and the meta-bearing branch from
+        //   `par_iter.rs` does not appear in this driver. The cell
+        //   `self.world` is `Copy`; passing by value preserves the
+        //   raw-pointer provenance through the call (Phase 8a C1 fix).
+        let mutable = !D::IS_READ_ONLY;
+        unsafe {
+            par_chunk::par_for_each_chunk_impl(
+                self.state,
+                self.world,
+                mutable,
+                batching,
+                f,
+            );
         }
     }
 }

@@ -114,7 +114,7 @@ impl BatchingStrategy {
     /// clamped to `[min_batch_size, max_batch_size]`. Returns at least 1
     /// even after the clamp so the dispatch loop always makes progress.
     #[inline]
-    fn chunk_size(&self, entity_count: usize, worker_count: usize) -> usize {
+    pub(crate) fn chunk_size(&self, entity_count: usize, worker_count: usize) -> usize {
         let divisor = worker_count
             .saturating_mul(self.batches_per_thread)
             .max(1);

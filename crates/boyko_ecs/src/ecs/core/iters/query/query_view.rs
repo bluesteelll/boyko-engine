@@ -33,6 +33,7 @@ use crate::ecs::core::iters::query::chunked_data::ChunkedQueryData;
 use crate::ecs::core::iters::query::data::{QueryData, ReadOnlyQueryData};
 use crate::ecs::core::iters::query::filter::{ArchetypalQueryFilter, QueryFilter};
 use crate::ecs::core::iters::query::iter::{QueryIter, QueryIterMut};
+use crate::ecs::core::iters::query::par_chunk;
 use crate::ecs::core::iters::query::par_iter::{BatchingStrategy, ParQuery, ParQueryMut};
 use crate::ecs::core::iters::query::state::QueryDataState;
 use crate::ecs::core::system::system_meta::SystemMeta;
@@ -476,6 +477,69 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
         let mutable = !D::IS_READ_ONLY;
         unsafe {
             chunk_iter::for_each_chunk_impl(self.state(), self.world, mutable, f);
+        }
+    }
+
+    /// Direct-API mirror of
+    /// [`Query::par_for_each_chunk`](super::query::Query::par_for_each_chunk).
+    /// Splits each matched archetype's row range into sub-ranges per
+    /// [`BatchingStrategy`] and dispatches each sub-range to a
+    /// [`boyko_threadpool::ThreadPool`] worker via
+    /// [`boyko_threadpool::ThreadPool::scope`]. Archetypes with fewer than
+    /// [`MIN_ARCHETYPE_FOR_PARALLEL`][min] rows run inline on the calling
+    /// thread (PAR9). PAR7 fallback (no active pool → sequential walk)
+    /// preserved.
+    ///
+    /// # Closure invocation frequency
+    ///
+    /// Identical semantics to
+    /// [`Query::par_for_each_chunk`](super::query::Query::par_for_each_chunk):
+    /// the closure fires once per archetype sub-range, NOT once per archetype.
+    /// See the linked method for the per-regime worked examples and the
+    /// thread-safe-accumulator pattern for reductions.
+    ///
+    /// # Compile-time bounds
+    ///
+    /// `D` must satisfy [`ChunkedQueryData`]; `F` must satisfy
+    /// [`ArchetypalQueryFilter`]; `Func` must be `Fn + Send + Sync`. The
+    /// direct-API change-detection guard at `EcsMaster::query` mint time
+    /// (QV11 / W4) is subsumed by these bounds — `Ref<T>` / `Mut<T>` /
+    /// `Added<C>` / `Changed<C>` cannot reach this method.
+    ///
+    /// # See also
+    ///
+    /// * [`Query::par_for_each_chunk`](super::query::Query::par_for_each_chunk)
+    ///   — SystemParam mirror used inside system bodies.
+    /// * [`Self::for_each_chunk`] — sequential variant.
+    ///
+    /// [`ChunkedQueryData`]: super::chunked_data::ChunkedQueryData
+    /// [`ArchetypalQueryFilter`]: super::filter::ArchetypalQueryFilter
+    /// [`BatchingStrategy`]: super::par_iter::BatchingStrategy
+    /// [min]: super::par_iter::MIN_ARCHETYPE_FOR_PARALLEL
+    #[inline]
+    pub fn par_for_each_chunk<Func>(&mut self, f: Func, batching: BatchingStrategy)
+    where
+        D: ChunkedQueryData,
+        F: ArchetypalQueryFilter,
+        Func: for<'c> Fn(D::ChunkItem<'c>) + Send + Sync,
+    {
+        // SAFETY (Q1, Q3, CD1-CD4, §9): mirrors `Query::par_for_each_chunk`.
+        //   `&mut self` enforces cursor uniqueness on the view (QV1 plus the
+        //   `&mut EcsMaster` borrow that produced the cache slot upstream).
+        //   `D::IS_READ_ONLY` selects the readonly / mut chunk-dispatch arm.
+        //   `QueryView` carries no `meta` — the `ChunkedQueryData` /
+        //   `ArchetypalQueryFilter` gates force NCD const-fold to `false`,
+        //   so the meta-bearing branch is unreachable. The cell `self.world`
+        //   is `Copy`; passing by value preserves raw-pointer provenance.
+        let mutable = !D::IS_READ_ONLY;
+        unsafe {
+            par_chunk::par_for_each_chunk_impl(
+                self.state(),
+                self.world,
+                mutable,
+                batching,
+                f,
+            );
         }
     }
 }
