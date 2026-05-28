@@ -39,9 +39,21 @@ residuals can be closed by **targeted changes** to specific subsystems.
 Each of these can be implemented WITHOUT disturbing existing perf wins.
 They are also independent of each other — any order is workable.
 
-### Phase 13 — `Local<T>` SystemParam
-Deferred from Phase 12. Lightweight: adds a per-system local-state slot
-managed by `SystemMeta`. ~3-5 days. No hot-path impact.
+### Phase 13 — `Local<T>` SystemParam — ✅ DONE
+
+Per-system private state slot. **Landed** (commits `f6b4807` impl+wiring,
+`1db3e5c` tests). `Local<'s, T>` (`T: Send + Sync + Default + 'static`),
+`#[repr(transparent)]` over `&'s mut T`, `type State = T` living in
+`FunctionSystem::state` (NOT `SystemMeta` — the original roadmap phrasing
+was loose), default-initialized once and persisted across runs of a cached
+system. Declares zero access → no conflict-graph edge → never blocks
+parallelism. A strict structural subset of the Phase 12 `EventReader`
+(no cached pointer, no `unsafe` block inside methods); critic round skipped
+on that basis. Plan: `docs/PHASE-13-LOCAL-PLAN.md`; research:
+`docs/PHASE-13-RESEARCH.md`. 5 integration tests + 4 unit + 1 trybuild,
+Miri 5/5 clean, full suite 668 pass. Decisions: A1 (`State = T`, no
+`SyncCell`), B1 (`Default`, `FromWorld` deferred — backward-compatible
+widening). Reachable at `boyko_ecs::ecs::core::system::Local`.
 
 ### Phase 14 — Observers / lifecycle hooks
 Component spawn / despawn / insert / remove callbacks. CRITICAL DESIGN
