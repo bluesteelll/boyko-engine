@@ -105,6 +105,9 @@ M-006 false alarm: `*mut u8` already opts out of `Send + Sync`).
 | Per-entity, ≥3 components | — | 📋 Phase 2d-extension |
 | Per-entity mutable | — | 📋 Phase 2d-extension |
 | Generic tuple syntax `Query::<(&A, &B)>::iter()` | — | 📋 Phase 2d-final (Bevy WorldQuery shape) |
+| Per-archetype batched slice (sequential) | [core/iters/query/chunk_iter.rs](../crates/boyko_ecs/src/ecs/core/iters/query/chunk_iter.rs), [core/iters/query/chunked_data.rs](../crates/boyko_ecs/src/ecs/core/iters/query/chunked_data.rs) ✅ | `Query::for_each_chunk(\|slice\| ...)` — yields one contiguous `&[T]` (or tuple of slices) per matched archetype. Compile-time bounds: `D: ChunkedQueryData` + `F: ArchetypalQueryFilter` (Phase X.A) |
+| Per-archetype batched slice (parallel) | [core/iters/query/par_chunk.rs](../crates/boyko_ecs/src/ecs/core/iters/query/par_chunk.rs) ✅ | `Query::par_for_each_chunk(\|slice\| ..., BatchingStrategy)` — sub-archetype-range fan-out via `boyko_threadpool::scope`; closure must be `Fn + Send + Sync` (Phase X.A) |
+| Direct-API batched (no SystemParam) | [core/iters/query/query_view.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query_view.rs) ✅ | `QueryView::for_each_chunk` / `QueryView::par_for_each_chunk` — same shape on `EcsMaster::query<D, F>()` (Phase X.A) |
 
 Cache properties (Q-011 closed): `QueryState` is reusable across frames;
 warm-path iter is one pointer load + comparison + slice walk
