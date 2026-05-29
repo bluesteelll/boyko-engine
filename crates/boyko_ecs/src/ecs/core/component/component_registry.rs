@@ -329,6 +329,44 @@ pub fn register_layout<T: 'static>(component_id: usize) {
     }
 }
 
+/// Test-only: overrides the process-global `NEXT_ID` counter.
+///
+/// Lets a test pin where the next [`register_new`]-minted [`ComponentId`]
+/// lands — e.g. driving `NEXT_ID` to `MAX_COMPONENTS - 1` to exercise the
+/// exhaustion panic, or parking it in a high range so a test's
+/// `register_new` calls do not collide with low fixed ids used elsewhere.
+///
+/// # Test isolation only
+///
+/// `NEXT_ID` is process-global and shared by every test in the binary (which
+/// run concurrently by default). This helper does NOT reset the per-slot
+/// `LAYOUTS` `OnceLock`s — those are write-once for the process lifetime and
+/// cannot be cleared. Callers must therefore choose a target value whose slot
+/// range is not already populated by another test, exactly as the existing
+/// fixed-id partitioning convention requires. Use sparingly and prefer giving
+/// the test its own private id range.
+// Preventive capability (C-3): added for the tester to write a
+// `register_new_exhaustion_panics` test; no current in-crate caller, so the
+// dead-code lint is expected and silenced rather than papered over by a fake
+// use.
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) fn set_next_id_for_test(value: usize) {
+    NEXT_ID.store(value, Ordering::Relaxed);
+}
+
+/// Test-only: reads the current value of the process-global `NEXT_ID` counter
+/// (the id the next [`register_new`] call would mint).
+///
+/// Companion to [`set_next_id_for_test`] — lets a test snapshot the counter so
+/// it can restore it afterwards, or assert on the number of ids minted. See
+/// that function's note on test isolation.
+#[cfg(test)]
+#[allow(dead_code)] // Preventive capability (C-3); see `set_next_id_for_test`.
+pub(crate) fn next_id_for_test() -> usize {
+    NEXT_ID.load(Ordering::Relaxed)
+}
+
 /// Reverse-lookup: returns `true` if any registered component slot in
 /// `LAYOUTS` carries the given `TypeId`.
 ///
@@ -673,15 +711,12 @@ mod tests {
         register_layout::<u8>(MAX_COMPONENTS);
     }
 
-    // NOTE: register_new exhaustion test (driving NEXT_ID to MAX_COMPONENTS) is NOT
-    // included because NEXT_ID is a private AtomicUsize with no test-only accessor.
-    // Options considered:
-    //   (a) Expose via #[cfg(test)] pub(crate) fn reset_next_id_for_tests(value: usize) —
-    //       requires developer to add the accessor; deferred.
-    //   (b) Loop register_new N+1 times with distinct types — pollutes the global counter
-    //       irreversibly for subsequent tests in the same process; not acceptable.
-    // TODO: developer to add #[cfg(test)] fn set_next_id_for_test(v: usize) so tester
-    // can write register_new_exhaustion_panics.
+    // NOTE: a `register_new` exhaustion test (driving NEXT_ID to MAX_COMPONENTS)
+    // is now enabled by the `#[cfg(test)] set_next_id_for_test` / `next_id_for_test`
+    // accessors above. The tester owns writing `register_new_exhaustion_panics`;
+    // because NEXT_ID is process-global and shared across concurrently-running
+    // tests, such a test must snapshot+restore the counter (or run serially) so it
+    // does not perturb sibling tests' id assignments.
 
     // ----- END NEW TESTS -----
 

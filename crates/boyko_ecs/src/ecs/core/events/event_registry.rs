@@ -193,6 +193,44 @@ pub fn register_event<E: Event>(event_id: EventId) {
     }
 }
 
+/// Test-only: overrides the process-global `NEXT_EVENT_ID` counter.
+///
+/// Mirror of
+/// [`component_registry::set_next_id_for_test`](crate::ecs::core::component::component_registry::set_next_id_for_test).
+/// Lets a test pin where the next [`register_event_new`]-minted [`EventId`]
+/// lands — e.g. driving the counter to `MAX_EVENTS - 1` to exercise the
+/// exhaustion panic.
+///
+/// # Test isolation only
+///
+/// `NEXT_EVENT_ID` is process-global and shared by every test in the binary
+/// (which run concurrently by default). This helper does NOT reset the
+/// per-slot `EVENT_INFO` `OnceLock`s — they are write-once for the process
+/// lifetime and cannot be cleared. Callers must choose a target value whose
+/// slot range is not already populated by another test, exactly as the
+/// existing fixed-id partitioning convention requires.
+// Preventive capability (C-3): added for the tester to write a
+// `register_event_new_exhaustion_panics` test; no current in-crate caller, so
+// the dead-code lint is expected and silenced rather than papered over by a
+// fake use.
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) fn set_next_event_id_for_test(value: usize) {
+    NEXT_EVENT_ID.store(value, Ordering::Relaxed);
+}
+
+/// Test-only: reads the current value of the process-global `NEXT_EVENT_ID`
+/// counter (the raw id the next [`register_event_new`] call would mint).
+///
+/// Companion to [`set_next_event_id_for_test`] — lets a test snapshot the
+/// counter so it can restore it afterwards. See that function's note on test
+/// isolation.
+#[cfg(test)]
+#[allow(dead_code)] // Preventive capability (C-3); see `set_next_event_id_for_test`.
+pub(crate) fn next_event_id_for_test() -> usize {
+    NEXT_EVENT_ID.load(Ordering::Relaxed)
+}
+
 /// Retrieves event information by its ID.
 #[inline]
 pub fn get_event_info(event_id: EventId) -> Option<&'static EventInfo> {
@@ -554,10 +592,12 @@ mod tests {
         register_event::<PingEvent>(MAX_EVENTS as EventId);
     }
 
-    // NOTE: register_event_new exhaustion test (driving NEXT_EVENT_ID to MAX_EVENTS)
-    // is NOT included. NEXT_EVENT_ID is private with no test-only reset accessor.
-    // The same limitation applies as in component_registry.rs.
-    // TODO: developer to add #[cfg(test)] fn set_next_event_id_for_test(v: usize).
+    // NOTE: a `register_event_new` exhaustion test (driving NEXT_EVENT_ID to
+    // MAX_EVENTS) is now enabled by the `#[cfg(test)] set_next_event_id_for_test`
+    // / `next_event_id_for_test` accessors above (mirror of component_registry).
+    // The tester owns writing it; because NEXT_EVENT_ID is process-global and
+    // shared across concurrently-running tests, such a test must snapshot+restore
+    // the counter (or run serially) so it does not perturb sibling tests.
 
     // ----- END NEW TESTS -----
 
