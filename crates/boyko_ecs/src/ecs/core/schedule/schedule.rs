@@ -199,6 +199,35 @@ impl Schedule {
             sys_box.system.set_change_ticks(prev_this_run, this_run);
         }
 
+        // Phase 16.1 (B-1 fix) — extend the per-frame tick snapshot dispatch to
+        // run conditions. A condition is an ordinary `System<Out = bool>`; like
+        // any system it carries a `SystemMeta` with `last_run` / `this_run`
+        // ticks. `run_condition` (`ecs_master.rs`) calls `initialize` (FS1
+        // no-op after build) + `run_unsafe` but NOT `set_change_ticks`, so
+        // without this loop a condition's ticks stay frozen at the `initialize`
+        // sentinel (`current - MAX_CHANGE_AGE`) forever — every per-row tick
+        // then reads as "changed since last_run" and a `Changed<T>` / `Added<T>`
+        // / `Ref<T>` condition silently reports ALWAYS-TRUE. Bumping the
+        // condition ticks here, with the SAME `this_run` as the systems, makes
+        // tick-based conditions observe the correct `(last_run, this_run]`
+        // window and fire only when the data actually changed.
+        //
+        // This stays on the cold once-per-frame path. The hot dispatch loop
+        // (`try_dispatch_ready`) and the 0%-gate (`has_condition.is_clear()`)
+        // are untouched: a condition-free schedule has empty
+        // `system_conditions` / `set_conditions`, so both loops below are no-ops
+        // and add only two `is_empty()`-equivalent length checks per frame.
+        for own_conds in self.system_conditions.iter_mut() {
+            for cond in own_conds.iter_mut() {
+                let prev_this_run = cond.meta().this_run();
+                cond.set_change_ticks(prev_this_run, this_run);
+            }
+        }
+        for entry in self.set_conditions.iter_mut() {
+            let prev_this_run = entry.condition.meta().this_run();
+            entry.condition.set_change_ticks(prev_this_run, this_run);
+        }
+
         if self.systems.is_empty() {
             return;
         }
@@ -977,7 +1006,7 @@ unsafe impl Send for SpawnPointers {}
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
     use boyko_threadpool::ThreadPoolBuilder;
 
@@ -1380,6 +1409,112 @@ mod tests {
         assert!(
             schedule.has_condition.is_clear(),
             "no .run_if ⇒ has_condition all-zero ⇒ Step 1.5 predicted-not-taken"
+        );
+    }
+
+    // ── Phase 16.1 (B-1) — run-condition tick threading ──────────────────────
+
+    /// A `BoolSystem` condition that records its `SystemMeta` tick snapshot on
+    /// every `run_unsafe` call. Used to prove `Schedule::run` now bumps a
+    /// condition's `(last_run, this_run)` per frame (B-1 fix) instead of leaving
+    /// them frozen at the `initialize` sentinel.
+    struct TickRecordingCondition {
+        meta: SystemMeta,
+        last_run_seen: Arc<AtomicU32>,
+        this_run_seen: Arc<AtomicU32>,
+    }
+
+    // SAFETY (S1): `run_unsafe` reads only this system's own meta and writes
+    //   foreign atomics; it never touches the world cell, so the aliasing
+    //   contract is vacuous.
+    unsafe impl System for TickRecordingCondition {
+        type Out = bool;
+        fn name(&self) -> &'static str {
+            self.meta.name()
+        }
+        fn access(&self) -> &Access {
+            self.meta.access()
+        }
+        fn initialize(&mut self, _w: &mut EcsMaster) {}
+        unsafe fn run_unsafe(&mut self, _w: UnsafeEcsCell<'_>) -> bool {
+            self.last_run_seen
+                .store(self.meta.last_run().get(), Ordering::Relaxed);
+            self.this_run_seen
+                .store(self.meta.this_run().get(), Ordering::Relaxed);
+            true // keep the gated system ready so the body dispatches
+        }
+        fn meta(&self) -> &SystemMeta {
+            &self.meta
+        }
+        fn set_change_ticks(
+            &mut self,
+            last_run: crate::ecs::core::change_detection::Tick,
+            this_run: crate::ecs::core::change_detection::Tick,
+        ) {
+            self.meta.last_run = last_run;
+            self.meta.this_run = this_run;
+        }
+    }
+
+    /// **B-1 regression.** Before the fix, `run_condition` ran a condition
+    /// without `set_change_ticks`, so its meta ticks stayed pinned to the
+    /// `initialize` sentinel forever — a `Changed<T>`/`Added<T>`/`Ref<T>`
+    /// condition then read every row as changed (silently always-true).
+    ///
+    /// This locks the mechanism that fixes that: `Schedule::run` bumps every
+    /// condition's tick snapshot per frame with the SAME `this_run` as the
+    /// systems. We attach a tick-recording condition and assert that across
+    /// consecutive frames its observed `this_run` ADVANCES (and equals the
+    /// world's current tick), and that `last_run` tracks the previous frame's
+    /// `this_run`. If the per-condition bump loop is removed, `this_run` stays
+    /// frozen at the sentinel and this test fails.
+    #[test]
+    fn run_condition_ticks_advance_per_frame() {
+        let pool = fresh_pool();
+        let mut builder = ScheduleBuilder::new(pool);
+
+        // One ordinary system carrying one tick-recording condition.
+        let last_seen = Arc::new(AtomicU32::new(0));
+        let this_seen = Arc::new(AtomicU32::new(0));
+        push_system(&mut builder, "gated", Access::new(), || {});
+        {
+            let cond = TickRecordingCondition {
+                meta: SystemMeta::for_testing("tick_probe_condition"),
+                last_run_seen: Arc::clone(&last_seen),
+                this_run_seen: Arc::clone(&this_seen),
+            };
+            let boxed: Box<dyn System<Out = bool>> = Box::new(cond);
+            builder.descriptors[0].conditions.push(boxed);
+        }
+
+        let mut world = EcsMaster::new();
+        let mut schedule = builder.build(&mut world);
+
+        // Frame 1: `this_run` is the tick bumped at the top of `run`. It must
+        // equal the world's post-bump current tick and be non-zero.
+        schedule.run(&mut world);
+        let this_f1 = this_seen.load(Ordering::Relaxed);
+        assert_eq!(
+            this_f1,
+            world.current_tick().get(),
+            "frame-1 condition this_run must equal the world's bumped current tick"
+        );
+        assert_ne!(this_f1, 0, "frame-1 condition this_run must be non-zero (was bumped)");
+
+        // Frame 2: `this_run` advances; `last_run` becomes the previous frame's
+        // `this_run` — the SAME contract a system body's ticks follow. A frozen
+        // (always-true) condition would report an unchanged `this_run` here.
+        schedule.run(&mut world);
+        let this_f2 = this_seen.load(Ordering::Relaxed);
+        let last_f2 = last_seen.load(Ordering::Relaxed);
+        assert!(
+            this_f2 > this_f1,
+            "condition this_run must advance frame-to-frame ({this_f1} -> {this_f2})"
+        );
+        assert_eq!(
+            last_f2, this_f1,
+            "condition last_run on frame 2 must equal frame 1's this_run \
+             (the per-frame (last_run, this_run] window)"
         );
     }
 }

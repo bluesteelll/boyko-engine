@@ -1725,6 +1725,20 @@ impl EcsMaster {
     /// world. The read-only contract is `debug_assert!`ed at build
     /// (`schedule_builder.rs` Step 1).
     ///
+    /// # Change-detection ticks (Phase 16.1, B-1)
+    ///
+    /// This method does NOT call [`System::set_change_ticks`] — that would be
+    /// the wrong place (a condition may be evaluated zero or one times per
+    /// frame, and a set condition is memoized across members). Instead,
+    /// [`Schedule::run`] bumps every condition's `(last_run, this_run)` snapshot
+    /// at frame start, with the SAME `this_run` as the systems, exactly as it
+    /// does for system bodies. A `Changed<T>` / `Added<T>` / `Ref<T>` condition
+    /// therefore observes the correct observation window and fires only when
+    /// the data actually changed — it is NOT silently always-true.
+    ///
+    /// [`Schedule::run`]: crate::ecs::core::schedule::schedule::Schedule::run
+    /// [`System::set_change_ticks`]: crate::ecs::core::system::system::System::set_change_ticks
+    ///
     /// # Caller precondition
     ///
     /// The dispatcher holds the unique `&mut EcsMaster`, recovered at the

@@ -164,14 +164,21 @@ impl<'a> SystemConfig<'a> {
     /// but is an API misuse; do not use `Commands` / `EventWriter` in a
     /// condition (its deferred work is dropped, never applied).
     ///
-    /// # Tick footgun (§0-P4)
+    /// # Change-detection conditions (Phase 16.1, B-1 — now supported)
     ///
     /// A condition using change detection (`Changed<T>` / `Added<T>` /
-    /// `Ref<T>`) COMPILES and passes the read-only assert, but the condition
-    /// runner does NOT call `set_change_ticks`, so its meta ticks stay at the
-    /// `initialize` sentinel and the condition silently reports **all-changed
-    /// (always true)**. Tick-aware conditions are not a supported Phase 16
-    /// feature — do not rely on a `Changed<T>` gate.
+    /// `Ref<T>`) works correctly: [`Schedule::run`] bumps every condition's
+    /// `(last_run, this_run)` tick snapshot at frame start with the same
+    /// `this_run` as the systems (mirroring the per-system dispatch), so the
+    /// condition observes the proper `(last_run, this_run]` window and fires
+    /// only when the data actually changed.
+    ///
+    /// On the FIRST frame a condition observes every pre-existing tick as
+    /// "changed since last run" (the standard late-added-system semantic — the
+    /// initial `last_run` is `current - MAX_CHANGE_AGE`), identical to how a
+    /// system's `Changed<T>` query behaves on its first run.
+    ///
+    /// [`Schedule::run`]: crate::ecs::core::schedule::schedule::Schedule::run
     #[inline]
     pub fn run_if<C, M>(self, condition: C) -> Self
     where

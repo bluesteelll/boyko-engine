@@ -601,9 +601,15 @@ impl ConfigureSet<'_> {
     /// once per frame regardless of member count (`PHASE-16-PLAN.md` §7.1).
     /// Multiple `.run_if(a).run_if(b)` accumulate into an eager AND.
     ///
-    /// The same read-only requirement and tick footgun as
+    /// The same read-only requirement as
     /// [`SystemConfig::run_if`](super::system_config::SystemConfig::run_if)
-    /// apply.
+    /// applies. Change-detection conditions (`Changed<T>` / `Added<T>` /
+    /// `Ref<T>`) work correctly here too: a set condition's tick snapshot is
+    /// bumped once per frame by [`Schedule::run`] (Phase 16.1, B-1). Note the
+    /// memoization interaction — the set condition's body runs at most once per
+    /// frame, so its observation window advances per frame just like a system's.
+    ///
+    /// [`Schedule::run`]: super::schedule::Schedule::run
     #[inline]
     pub fn run_if<C, M>(self, condition: C) -> Self
     where
