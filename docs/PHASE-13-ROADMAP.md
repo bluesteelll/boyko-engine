@@ -55,11 +55,26 @@ Miri 5/5 clean, full suite 668 pass. Decisions: A1 (`State = T`, no
 `SyncCell`), B1 (`Default`, `FromWorld` deferred — backward-compatible
 widening). Reachable at `boyko_ecs::ecs::core::system::Local`.
 
-### Phase 14 — Observers / lifecycle hooks
-Component spawn / despawn / insert / remove callbacks. CRITICAL DESIGN
-CONSTRAINT: callbacks must be `#[cold]` and opt-in to avoid hot-path
-pollution. Default-disabled per component type; enable via builder API.
-~2-3 weeks.
+### Phase 14a — Component lifecycle hooks — ✅ DONE
+Component `on_add` / `on_insert` / `on_replace` / `on_remove` callbacks fired
+at the 6 structural-op sites, gated by a per-archetype `ArchetypeFlags(u16)`
+bit-test (**0% measurable cost when no hook is registered** — bench-verified
+via clean A/B vs `b223350`). Read-only `DeferredEcsMaster` hook view + deferred
+structural-command channel drained at the outermost apply boundary via a
+**thread-local reentrancy depth counter**. Derive `#[component(on_add = f, …)]`
+XOR runtime `register_component_hooks::<C>()`. `#[cold] #[inline(never)]`
+dispatch fns per the hot-path discipline below. See `docs/PHASE-14-RESULTS.md`.
+
+Miri found + fixed two soundness bugs paper review missed (F1 drain
+re-entrancy double-apply; F2 `DeferredScopeGuard` Tree-Borrows UB → moved the
+depth counter to a thread-local). One pre-existing, non-14a TB finding (F4 —
+`EntityInland` `as_mut_ptr()` slab storage) documented + deferred
+(`docs/PHASE-14-F4-FINDING.md`).
+
+**Deferred to Phase 14b:** `on_despawn` (entity-level, distinct from
+`on_remove`); full Observers (entity-targeted, `CachedObservers`, custom
+events); mutable component access in the hook view (`get_component_mut`);
+derive+runtime *merge* (vs the current XOR).
 
 ### Phase 15 — Schedule sets / system orderings
 Bevy-style `before` / `after` / `in_set` constraints with topological
