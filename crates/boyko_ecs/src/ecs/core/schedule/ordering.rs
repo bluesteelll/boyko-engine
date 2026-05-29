@@ -90,6 +90,32 @@ impl OrderingEdge {
     }
 }
 
+/// Set-level ordering relation, collected on the **builder** (not on a
+/// per-system descriptor — a set has no single descriptor to own it).
+///
+/// Phase 15 §3.1. Expanded into `(SystemKey, SystemKey)` pairs by
+/// `expand_set_edges` during `ScheduleBuilder::build`, after the set
+/// hierarchy is flattened (D3) so `members(S)` is the transitive leaf
+/// membership. `SystemBeforeSet`/`SystemAfterSet` capture system↔set
+/// ordering (`SystemConfig::before_set`/`after_set`); `SetBeforeSet`
+/// captures set↔set ordering (`ConfigureSet::before`/`after`).
+//
+// The shared `Set` suffix is intentional and load-bearing: it marks the
+// **target** of each relation as a set (vs the system↔system `OrderingEdge`).
+// The variant names match the authoritative Phase 15 plan §3.1 verbatim;
+// renaming for the lint would obscure the system↔set vs set↔set distinction.
+#[allow(clippy::enum_variant_names)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum SetOrderEdge {
+    /// System `X` runs before every member of set `S`.
+    SystemBeforeSet(SystemKey, SystemSetId),
+    /// System `X` runs after every member of set `S`.
+    SystemAfterSet(SystemKey, SystemSetId),
+    /// Every member of set `S` runs before every member of set `T`.
+    /// Covers `configure_set(S).before(T)` and `configure_set(T).after(S)`.
+    SetBeforeSet(SystemSetId, SystemSetId),
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

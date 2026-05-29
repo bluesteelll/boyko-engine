@@ -32,15 +32,22 @@ use boyko_threadpool::ThreadPool;
 
 use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 use crate::ecs::core::schedule::conflict_graph::{ConflictGraph, SystemIndex};
-use crate::ecs::core::schedule::ordering::{OrderingEdge, SystemKey};
+use crate::ecs::core::schedule::ordering::{OrderingEdge, SetOrderEdge, SystemKey};
 use crate::ecs::core::schedule::executor_scratch::ExecutorScratch;
 use crate::ecs::core::schedule::schedule::Schedule;
 use crate::ecs::core::schedule::system_box::SystemBox;
 use crate::ecs::core::schedule::system_config::SystemConfig;
 use crate::ecs::core::schedule::system_descriptor::SystemDescriptor;
-use crate::ecs::core::schedule::system_set::SystemSetId;
+use crate::ecs::core::schedule::system_set::{SystemSet, SystemSetId};
 use crate::ecs::core::system::into_system::IntoSystem;
 use crate::ecs::core::system::system::System;
+
+/// Build-time soft cap on the expanded edge count (§2.5 / §13-P4). This is
+/// a `debug_assert!`-only early-warning rail — it vanishes in release; the
+/// real release bound is [`MAX_SYSTEMS_PER_SCHEDULE`] (which caps `N`, and
+/// therefore the worst-case `N²` cartesian expansion). `1 << 20` (1M) is
+/// the absolute ceiling at `N = 1024`.
+const MAX_EXPANDED_EDGES: usize = 1 << 20;
 
 /// Maximum number of systems a single [`Schedule`] can hold (plan §3 Q4 /
 /// §13.6). The cap fits comfortably into the `u16` used by `SystemIndex`
@@ -58,15 +65,30 @@ pub struct ScheduleBuilder {
     /// Staging slot per system. Index in this vec == `SystemKey.0`.
     pub(crate) descriptors: Vec<SystemDescriptor>,
 
-    /// `TypeId(SystemSet)` → `SystemSetId` interning. The first
-    /// `.in_set(MySet)` allocates a fresh id; subsequent calls return
-    /// the same value.
-    pub(crate) sets: HashMap<TypeId, SystemSetId>,
+    /// `(TypeId(SystemSet), discriminant)` → `SystemSetId` interning
+    /// (Phase 15 §13.1 R3-A). The first reference to a set (`in_set` /
+    /// `before_set` / `configure_set`) allocates a fresh sequential id;
+    /// subsequent references to the same type+discriminant return it.
+    pub(crate) sets: HashMap<(TypeId, u32), SystemSetId>,
 
-    /// `SystemSetId` → list of member [`SystemKey`]s. Mirrors the
-    /// `SystemDescriptor::sets` Vec the other direction. Wave 5 Step 14
-    /// consumes this for the set-expansion pass.
+    /// `SystemSetId` → list of **direct** member [`SystemKey`]s (systems
+    /// joined via `in_set`). Flattened transitively in `build` (D3).
     pub(crate) set_members: HashMap<SystemSetId, Vec<SystemKey>>,
+
+    /// Set-level ordering edges collected by `before_set` / `after_set` /
+    /// `ConfigureSet::before` / `ConfigureSet::after`, in declaration order
+    /// (determinism — §13-P3). Expanded into `(SystemKey, SystemKey)` pairs
+    /// at build by `expand_set_edges` (D1).
+    pub(crate) set_ordering: Vec<SetOrderEdge>,
+
+    /// Set hierarchy: child `SystemSetId` → its direct parent ids
+    /// (`ConfigureSet::in_set`). A `Vec` of parents permits multi-set
+    /// nesting (D3 / §4.1). Flattened transitively in `build`.
+    pub(crate) set_parents: HashMap<SystemSetId, Vec<SystemSetId>>,
+
+    /// `SystemSetId` → human-readable name (`set_name()`), for cycle /
+    /// empty-set diagnostics (§6.3 / §13-P5). Populated on first intern.
+    pub(crate) set_names: HashMap<SystemSetId, &'static str>,
 }
 
 impl ScheduleBuilder {
@@ -78,6 +100,9 @@ impl ScheduleBuilder {
             descriptors: Vec::new(),
             sets: HashMap::new(),
             set_members: HashMap::new(),
+            set_ordering: Vec::new(),
+            set_parents: HashMap::new(),
+            set_names: HashMap::new(),
         }
     }
 
@@ -110,16 +135,36 @@ impl ScheduleBuilder {
         }
     }
 
-    /// Interns the `TypeId` of a system set, returning a stable
-    /// [`SystemSetId`]. First call allocates the id; subsequent calls
-    /// return the same value.
-    #[inline]
-    pub(crate) fn set_id_of(&mut self, type_id: TypeId) -> SystemSetId {
+    /// Interns a system set value, returning a stable [`SystemSetId`].
+    ///
+    /// This is the **sole** intern entry point (Phase 15 §13-P1). The key
+    /// is `(TypeId::of::<S>(), set.set_discriminant())`, so distinct enum
+    /// variants of one type get distinct ids while a unit struct (or the
+    /// same variant) always resolves to the same id. The set's
+    /// `set_name()` is recorded alongside the id for diagnostics. First
+    /// call allocates a fresh sequential id; subsequent calls return it.
+    pub(crate) fn set_id_of_value<S: SystemSet>(&mut self, set: S) -> SystemSetId {
+        let key = (TypeId::of::<S>(), set.set_discriminant());
         let next = self.sets.len();
-        *self
-            .sets
-            .entry(type_id)
-            .or_insert_with(|| SystemSetId(next))
+        let id = *self.sets.entry(key).or_insert_with(|| SystemSetId(next));
+        self.set_names.entry(id).or_insert_with(|| set.set_name());
+        id
+    }
+
+    /// Begins configuring set `set` — order it relative to other sets, or
+    /// nest it inside a parent set. Mirrors Bevy's `configure_sets`.
+    ///
+    /// Interns `set` (so even a memberless set gets an id, letting
+    /// `before_set(set)` resolve), then returns a [`ConfigureSet`] handle
+    /// for fluent `.before(other)` / `.after(other)` / `.in_set(parent)`
+    /// chaining. All chained targets/parents are taken **by value** so
+    /// enum-variant sets work uniformly (§13-P1).
+    pub fn configure_set<S: SystemSet>(&mut self, set: S) -> ConfigureSet<'_> {
+        let set_id = self.set_id_of_value(set);
+        ConfigureSet {
+            builder: self,
+            set_id,
+        }
     }
 
     /// Number of systems registered so far (pre-build).
@@ -134,30 +179,62 @@ impl ScheduleBuilder {
         self.descriptors.is_empty()
     }
 
-    /// Finalises the schedule.
+    /// Finalises the schedule, panicking on any build error.
     ///
-    /// Round 3 W-NEW-3 mandates this body pre-destructure `self` so
-    /// that the descriptor vec can be moved into successive phases
-    /// without aliasing the builder.
+    /// Thin wrapper over [`try_build`](Self::try_build): formats the
+    /// [`ScheduleBuildError`] into a `boyko-B900x` panic (preserving the
+    /// existing message scheme — `cycle_in_before_after_panics` matches
+    /// `boyko-B9001`). Library/tool callers that want to surface schedule
+    /// errors gracefully should call [`try_build`](Self::try_build) instead.
     ///
     /// # Panics
     ///
-    /// * On cycle detection (`boyko-B9001`): the ordering DAG built
-    ///   from the user's `.before/.after/.chain` hints contains a
-    ///   strongly-connected component with > 1 node. The panic message
-    ///   lists the system names in the cycle.
+    /// * Ordering cycle among systems (`boyko-B9001`) — the DAG built from
+    ///   `.before/.after/.chain` **and the expanded set edges** contains an
+    ///   SCC with > 1 node. The message lists the system names in the cycle.
+    /// * Set-hierarchy cycle (`boyko-B9002`).
+    /// * Two ordered sets share a member (`boyko-B9004`).
+    /// * A `before/after`/`before_set` target indexes outside this builder
+    ///   (`boyko-B9005`).
     /// * `descriptors.len() > MAX_SYSTEMS_PER_SCHEDULE` (`debug_assert!`,
     ///   plan §13.6 O-NEW-3).
     pub fn build(self, world: &mut EcsMaster) -> Schedule {
+        match self.try_build(world) {
+            Ok(schedule) => schedule,
+            Err(e) => panic!("{}", e.formatted()),
+        }
+    }
+
+    /// Finalises the schedule, returning a [`ScheduleBuildError`] on failure
+    /// instead of panicking.
+    ///
+    /// Round 3 W-NEW-3 mandates this body pre-destructure `self` so that the
+    /// descriptor vec can be moved into successive phases without aliasing
+    /// the builder.
+    ///
+    /// # Build pipeline (Phase 15)
+    ///
+    /// `Step 1` init → `Step 2` names → `Step 2.5` flatten set hierarchy
+    /// (D3) → `Step 2.6` expand set edges (D1) → `Step 3` collect direct
+    /// edges + endpoint validation → `Step 4` Tarjan SCC → `Step 5` Kahn →
+    /// `Step 6-10` permute + ConflictGraph + scratch. The expanded set
+    /// edges enter the **same** `dag_edges_keys` vec that Tarjan/Kahn
+    /// consume — sets never become graph nodes (§2.4), so the executor and
+    /// `ConflictGraph::build` are untouched.
+    pub fn try_build(self, world: &mut EcsMaster) -> Result<Schedule, ScheduleBuildError> {
         // Round 3 W-NEW-3 pre-destructure: this gives independent
         // mutable handles into each field, lets us move `descriptors`
-        // by value into downstream phases, and keeps the (eventually
-        // very long) build body readable.
+        // by value into downstream phases, and keeps the (now long)
+        // build body readable. Phase 15 consumes the formerly-discarded
+        // `sets` / `set_members` (plus the new `set_*` maps).
         let Self {
             pool,
             mut descriptors,
-            sets: _sets,
-            set_members: _set_members,
+            sets,
+            set_members,
+            set_ordering,
+            set_parents,
+            set_names,
         } = self;
 
         // Step 1 — initialise every system. Allocation is allowed here
@@ -195,27 +272,70 @@ impl ScheduleBuilder {
             "ScheduleBuilder::build: descriptors.len() must fit u16"
         );
 
-        // Step 3 — collect raw DAG edges from each descriptor's
-        // ordering hints.
         let n = descriptors.len();
-        let dag_edges_keys: Vec<(SystemKey, SystemKey)> = descriptors
-            .iter()
-            .flat_map(|d| d.ordering_hints.iter().filter_map(OrderingEdge::as_dag_edge))
-            .collect();
 
-        // Step 4 — Tarjan SCC for cycle detection on the ordering DAG.
-        // `tarjan_scc` returns one Vec per strongly-connected component;
+        // Step 2.5 (D3) — flatten the set hierarchy into transitive leaf
+        // membership. A set-hierarchy cycle is caught HERE (before any
+        // system-edge Tarjan) because a membership cycle produces no
+        // *system* edge and so would be invisible to the later SCC pass.
+        let transitive_members =
+            flatten_set_membership(&set_members, &set_parents, &sets, &set_names)?;
+
+        // Step 2.6 (D1) — expand set-level ordering into system→system
+        // pairs over the flattened membership. Empty sets warn (never
+        // error); two ordered sets that share a member are a contradiction
+        // and error early with a precise message (§13-P2).
+        let expanded_set_edges =
+            expand_set_edges(&set_ordering, &transitive_members, &set_names, &names)?;
+
+        // Step 3 — collect raw DAG edges from each descriptor's ordering
+        // hints, then append the expanded set edges into the SAME vec.
+        let direct_edges = descriptors
+            .iter()
+            .flat_map(|d| d.ordering_hints.iter().filter_map(OrderingEdge::as_dag_edge));
+        let mut dag_edges_keys: Vec<(SystemKey, SystemKey)> = direct_edges.collect();
+        let n_direct = dag_edges_keys.len();
+        dag_edges_keys.extend_from_slice(&expanded_set_edges);
+
+        // §2.5 / §13-P4 build-time soft rail (debug-only). The real
+        // release bound is `MAX_SYSTEMS_PER_SCHEDULE` capping N.
+        debug_assert!(
+            dag_edges_keys.len() <= MAX_EXPANDED_EDGES,
+            "expanded edge count {} exceeds MAX_EXPANDED_EDGES {} (direct {} + set {})",
+            dag_edges_keys.len(),
+            MAX_EXPANDED_EDGES,
+            n_direct,
+            expanded_set_edges.len(),
+        );
+
+        // §6.2 — validate every endpoint is in range BEFORE Tarjan. A
+        // foreign / stale `SystemKey` (from `before(SystemKey(9999))` or a
+        // different builder with an in-range `.0`) would otherwise silently
+        // mis-index `reorder[..]` in release. This upgrades that to a
+        // precise build error in BOTH debug and release.
+        for &(a, b) in &dag_edges_keys {
+            if a.0 >= n {
+                return Err(ScheduleBuildError::UnknownSystemKey { key: a, n });
+            }
+            if b.0 >= n {
+                return Err(ScheduleBuildError::UnknownSystemKey { key: b, n });
+            }
+        }
+
+        // Step 4 — Tarjan SCC for cycle detection on the COMBINED ordering
+        // DAG (direct ++ expanded). A cycle through sets surfaces here as a
+        // system-level SCC (§8.1 C1). `tarjan_scc` returns one Vec per SCC;
         // any SCC with > 1 node is a cycle.
         let sccs = tarjan_scc(n, &dag_edges_keys);
         for scc in &sccs {
             if scc.len() > 1 {
-                let cycle_names: Vec<&'static str> =
-                    scc.iter().map(|k| names[k.0]).collect();
-                panic!(
-                    "boyko-B9001: schedule contains a cycle of {} systems: {:?}",
-                    scc.len(),
-                    cycle_names
-                );
+                // §6.3 — enrich the cycle with each system's set
+                // memberships so a set-induced cycle names the sets.
+                let systems = scc
+                    .iter()
+                    .map(|k| enrich_system_name(*k, &names, &set_members, &set_names))
+                    .collect();
+                return Err(ScheduleBuildError::OrderingCycle { systems });
             }
         }
 
@@ -252,9 +372,10 @@ impl ScheduleBuilder {
 
         // Step 7 — translate raw `SystemKey` edges to post-permutation
         // `SystemIndex` edges. Dedupe along the way — multiple
-        // `.before(other).after(other)` chains can emit duplicates that
-        // would otherwise inflate `pred_count` and trip the executor's
-        // underflow `debug_assert!`.
+        // `.before(other).after(other)` chains AND set expansion (the
+        // canonical duplicate source) can emit duplicates that would
+        // otherwise inflate `pred_count` and trip the executor's underflow
+        // `debug_assert!`.
         let mut dedup: std::collections::HashSet<(u16, u16)> = std::collections::HashSet::new();
         let mut dag_edges_idx: Vec<(SystemIndex, SystemIndex)> =
             Vec::with_capacity(dag_edges_keys.len());
@@ -272,7 +393,10 @@ impl ScheduleBuilder {
         let (descriptors_with_sync, dag_edges_with_sync) =
             insert_sync_points(ordered, dag_edges_idx);
 
-        // Step 9 — ConflictGraph build (Wave 4 Step 10).
+        // Step 9 — ConflictGraph build (Wave 4 Step 10). The expanded set
+        // edges arrive as ordinary `(SystemIndex, SystemIndex)` pairs — the
+        // conflict graph is byte-identical to a hand-written equivalent set
+        // of `.before` edges, so the executor hot path is untouched.
         let conflict_graph = ConflictGraph::build(&descriptors_with_sync, &dag_edges_with_sync);
 
         // Plan §13.6 O-NEW-3 secondary check: every pred_count fits u16.
@@ -295,12 +419,70 @@ impl ScheduleBuilder {
         let _ = n_final; // historical; preserved for symmetry with prior wave.
         let executor_scratch = ExecutorScratch::new(systems.len(), &conflict_graph);
 
-        Schedule {
+        Ok(Schedule {
             pool,
             systems,
             conflict_graph,
             executor_scratch,
-        }
+        })
+    }
+}
+
+/// Fluent handle for set-level ordering + hierarchy, returned by
+/// [`ScheduleBuilder::configure_set`]. Mirrors Bevy's `configure_sets`.
+///
+/// All targets/parents are taken **by value** (Phase 15 §13-P1) so
+/// enum-variant sets work uniformly with unit-struct sets. The handle
+/// stores only the resolved [`SystemSetId`] of the set being configured
+/// plus a borrow of the builder; each chained call interns its own fresh
+/// argument value.
+pub struct ConfigureSet<'a> {
+    builder: &'a mut ScheduleBuilder,
+    set_id: SystemSetId,
+}
+
+impl ConfigureSet<'_> {
+    /// Returns the [`SystemSetId`] of the set being configured. Useful for
+    /// tests that assert config and membership resolve to the same id.
+    #[inline]
+    pub fn id(&self) -> SystemSetId {
+        self.set_id
+    }
+
+    /// Orders this set **before** `set`: every member of this set runs
+    /// before every member of `set`.
+    #[inline]
+    pub fn before<T: SystemSet>(self, set: T) -> Self {
+        let target = self.builder.set_id_of_value(set);
+        self.builder
+            .set_ordering
+            .push(SetOrderEdge::SetBeforeSet(self.set_id, target));
+        self
+    }
+
+    /// Orders this set **after** `set`: every member of this set runs after
+    /// every member of `set` (recorded as `set`-before-this).
+    #[inline]
+    pub fn after<T: SystemSet>(self, set: T) -> Self {
+        let target = self.builder.set_id_of_value(set);
+        self.builder
+            .set_ordering
+            .push(SetOrderEdge::SetBeforeSet(target, self.set_id));
+        self
+    }
+
+    /// Nests this set inside `parent`: every member of this set
+    /// transitively joins `parent` (flattened in D3). Enables enum-variant
+    /// set hierarchy (`configure_set(E::Child).in_set(E::Parent)`).
+    #[inline]
+    pub fn in_set<P: SystemSet>(self, parent: P) -> Self {
+        let parent_id = self.builder.set_id_of_value(parent);
+        self.builder
+            .set_parents
+            .entry(self.set_id)
+            .or_default()
+            .push(parent_id);
+        self
     }
 }
 
@@ -351,6 +533,16 @@ impl ScheduleBuilder {
 /// The full algorithm is enumerated in plan §8.2; it will be wired
 /// alongside change-detection ticks (Phase 10) when `has_deferred`
 /// becomes a first-class SystemParam predicate.
+///
+/// # Phase 15 re-confirmation (§7)
+///
+/// Phase 15 only ADDS ordering edges (set membership / set-level ordering).
+/// Each expanded edge gets a `pred_remaining` dependency + conflict bit
+/// through the **unchanged** `ConflictGraph::build`, and the apply-window
+/// barrier already serialises `apply` against every edge. So every new
+/// edge inherits the same correct deferred-command-visibility semantics —
+/// the no-op pass-through remains sound under the expanded edge set, and no
+/// `ApplyDeferred` node is needed (nor permitted by the Phase 15 task).
 #[inline]
 fn insert_sync_points(
     descriptors: Vec<SystemDescriptor>,
@@ -495,6 +687,361 @@ fn kahn_topological_sort(n: usize, edges: &[(SystemKey, SystemKey)]) -> Vec<Syst
         }
     }
     out
+}
+
+/// Errors produced by [`ScheduleBuilder::try_build`]. Phase 15 §6.1 / §13.1.
+///
+/// `build` formats these into a `boyko-B900x` panic; `try_build` returns
+/// them. An interned-but-memberless set is **not** an error — it produces a
+/// build warning and zero edges (§13.1 R3-C).
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum ScheduleBuildError {
+    /// `before/after/chain` (or an expanded set relation) formed a cycle
+    /// among systems. `systems` lists the names in the cycle, enriched with
+    /// each system's set memberships (§6.3). Maps to `boyko-B9001`.
+    OrderingCycle {
+        /// System names (with set memberships appended) forming the cycle.
+        systems: Vec<String>,
+    },
+
+    /// A set-hierarchy cycle (`configure_set(S).in_set(T)` +
+    /// `configure_set(T).in_set(S)`, possibly multi-hop). `sets` lists the
+    /// involved set names. Maps to `boyko-B9002`.
+    SetHierarchyCycle {
+        /// Set names forming the hierarchy cycle.
+        sets: Vec<&'static str>,
+    },
+
+    /// Two sets ordered relative to each other share a (transitive) member,
+    /// which would expand to a `sys → sys` self-edge (a trivial cycle).
+    /// Caught with precise names before Tarjan. Maps to `boyko-B9004`.
+    SetsOrderedButIntersect {
+        /// The earlier-ordered set's name.
+        a: &'static str,
+        /// The later-ordered set's name.
+        b: &'static str,
+        /// A system present in both sets.
+        shared: &'static str,
+    },
+
+    /// A `before(key)` / `after(key)` / `before_set` endpoint indexes
+    /// outside this builder (foreign or stale `SystemKey`). Maps to
+    /// `boyko-B9005`. This is the §6.2 silent-misindex fix.
+    UnknownSystemKey {
+        /// The out-of-range key.
+        key: SystemKey,
+        /// The number of systems registered in this builder.
+        n: usize,
+    },
+}
+
+impl ScheduleBuildError {
+    /// Renders the error as a `boyko-B900x: …` string — the message body of
+    /// the panic raised by [`ScheduleBuilder::build`].
+    pub(crate) fn formatted(&self) -> String {
+        match self {
+            ScheduleBuildError::OrderingCycle { systems } => format!(
+                "boyko-B9001: schedule contains a cycle of {} systems: {:?}",
+                systems.len(),
+                systems
+            ),
+            ScheduleBuildError::SetHierarchyCycle { sets } => format!(
+                "boyko-B9002: set hierarchy contains a cycle of {} sets: {:?}",
+                sets.len(),
+                sets
+            ),
+            ScheduleBuildError::SetsOrderedButIntersect { a, b, shared } => format!(
+                "boyko-B9004: sets '{a}' and '{b}' are ordered relative to each \
+                 other but share member '{shared}' (a system cannot run both \
+                 before and after itself)"
+            ),
+            ScheduleBuildError::UnknownSystemKey { key, n } => format!(
+                "boyko-B9005: ordering references SystemKey({}) which is not in \
+                 this schedule (it has {} systems); the key is foreign or stale",
+                key.0, n
+            ),
+        }
+    }
+}
+
+impl std::fmt::Display for ScheduleBuildError {
+    #[inline]
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.formatted())
+    }
+}
+
+impl std::error::Error for ScheduleBuildError {}
+
+/// D3 — flatten the set hierarchy into transitive leaf membership.
+///
+/// Produces `transitive_members[S] = every system in S OR in any set nested
+/// (directly or transitively) under S`. Seeds an **empty** `Vec` for every
+/// interned set id (so a referenced-but-memberless set has an entry — the
+/// empty-set warning in [`expand_set_edges`] always has a name to print,
+/// §13.1 R3-B). Each result vec is **sorted ascending by `SystemKey.0` and
+/// deduped** (determinism — §13-P3).
+///
+/// A **set-hierarchy cycle** is detected here via iterative DFS colour
+/// marking (WHITE/GRAY/BLACK) before any transitive computation — a
+/// membership cycle produces no *system* edge and would be invisible to the
+/// later system-level Tarjan (§4.2). GRAY-revisit ⇒
+/// [`ScheduleBuildError::SetHierarchyCycle`].
+fn flatten_set_membership(
+    direct_members: &HashMap<SystemSetId, Vec<SystemKey>>,
+    set_parents: &HashMap<SystemSetId, Vec<SystemSetId>>,
+    sets: &HashMap<(TypeId, u32), SystemSetId>,
+    set_names: &HashMap<SystemSetId, &'static str>,
+) -> Result<HashMap<SystemSetId, Vec<SystemKey>>, ScheduleBuildError> {
+    let n_sets = sets.len();
+
+    // Child graph: parent_id → its direct children. Built by inverting
+    // `set_parents` (child → parents).
+    let mut children: HashMap<SystemSetId, Vec<SystemSetId>> = HashMap::new();
+    for (&child, parents) in set_parents {
+        for &parent in parents {
+            children.entry(parent).or_default().push(child);
+        }
+    }
+
+    // Iterative post-order DFS with colour marking over the child graph.
+    // `Color::Gray` means "on the current DFS path" → revisiting a Gray
+    // node is a hierarchy cycle. Post-order guarantees each set's children
+    // are fully computed before the set itself (memoised, computed once).
+    #[derive(Clone, Copy, PartialEq)]
+    enum Color {
+        White,
+        Gray,
+        Black,
+    }
+    let mut color: HashMap<SystemSetId, Color> = HashMap::with_capacity(n_sets);
+    let mut transitive: HashMap<SystemSetId, Vec<SystemKey>> =
+        HashMap::with_capacity(n_sets);
+
+    // Seed an empty membership for EVERY interned set (§13.1 R3-B) and mark
+    // every set White so the DFS visits ids reachable only as parents too.
+    for &id in sets.values() {
+        transitive.entry(id).or_default();
+        color.entry(id).or_insert(Color::White);
+    }
+    // A parent referenced via `set_parents` is always interned (intern
+    // happens in `configure_set`/`in_set` before recording the edge), so
+    // `sets.values()` already covers it — no extra seeding needed.
+
+    // Visit every set in ascending id order for deterministic traversal.
+    let mut start_ids: Vec<SystemSetId> = sets.values().copied().collect();
+    start_ids.sort_unstable_by_key(|s| s.0);
+
+    // Control stack frames: (set, next_child_index). On first push we mark
+    // Gray; on pop we fold children into the set and mark Black.
+    let mut ctrl: Vec<(SystemSetId, usize)> = Vec::with_capacity(n_sets);
+
+    for start in start_ids {
+        if color[&start] != Color::White {
+            continue;
+        }
+        color.insert(start, Color::Gray);
+        ctrl.push((start, 0));
+
+        while let Some(&(node, child_pos)) = ctrl.last() {
+            let node_children = children.get(&node).map(Vec::as_slice).unwrap_or(&[]);
+            if child_pos < node_children.len() {
+                let child = node_children[child_pos];
+                ctrl.last_mut().unwrap().1 += 1;
+                match color[&child] {
+                    Color::White => {
+                        color.insert(child, Color::Gray);
+                        ctrl.push((child, 0));
+                    }
+                    Color::Gray => {
+                        // Back edge in the hierarchy → cycle.
+                        return Err(ScheduleBuildError::SetHierarchyCycle {
+                            sets: collect_cycle_set_names(&ctrl, child, set_names),
+                        });
+                    }
+                    Color::Black => {} // already fully computed
+                }
+            } else {
+                // Finished `node`: fold its direct members + every child's
+                // transitive membership, then sort+dedup.
+                ctrl.pop();
+                let mut acc: Vec<SystemKey> =
+                    direct_members.get(&node).cloned().unwrap_or_default();
+                for &child in node_children {
+                    if let Some(child_members) = transitive.get(&child) {
+                        acc.extend_from_slice(child_members);
+                    }
+                }
+                acc.sort_unstable_by_key(|k| k.0);
+                acc.dedup();
+                debug_assert!(
+                    acc.windows(2).all(|w| w[0].0 < w[1].0),
+                    "transitive_members must be sorted ascending + deduped (§13-P3)"
+                );
+                transitive.insert(node, acc);
+                color.insert(node, Color::Black);
+            }
+        }
+    }
+
+    Ok(transitive)
+}
+
+/// Reconstructs the set names on the current DFS path from `start` (the
+/// re-entered Gray node) to the stack top — the hierarchy cycle.
+fn collect_cycle_set_names(
+    ctrl: &[(SystemSetId, usize)],
+    start: SystemSetId,
+    set_names: &HashMap<SystemSetId, &'static str>,
+) -> Vec<&'static str> {
+    let from = ctrl
+        .iter()
+        .position(|&(s, _)| s == start)
+        .unwrap_or(0);
+    let mut out: Vec<&'static str> = ctrl[from..]
+        .iter()
+        .map(|&(s, _)| set_name_or_default(s, set_names))
+        .collect();
+    // Close the loop back to the start for readability.
+    out.push(set_name_or_default(start, set_names));
+    out
+}
+
+/// D1 — expand set-level ordering edges into `(SystemKey, SystemKey)` pairs
+/// over the **transitive** membership (D3 output).
+///
+/// Each `SetOrderEdge` is expanded per §2.1:
+/// * `SystemBeforeSet(X, S)` → `{X → sᵢ}` for every `sᵢ ∈ members(S)`.
+/// * `SystemAfterSet(X, S)` → `{sᵢ → X}`.
+/// * `SetBeforeSet(S, T)` → `{sᵢ → tⱼ}` (cartesian product).
+///
+/// `members(S)` defaults to `&[]` for a memberless set (never errors —
+/// §13.1 R3-C). When an edge references an empty set, a single
+/// `boyko-W15xx` warning is emitted off the **edge** iteration (§13.1 R3-B)
+/// so a never-`in_set`'d target is caught loudly instead of silently
+/// producing zero edges. Two ordered sets sharing a member is the one
+/// error path ([`ScheduleBuildError::SetsOrderedButIntersect`]).
+fn expand_set_edges(
+    set_ordering: &[SetOrderEdge],
+    transitive_members: &HashMap<SystemSetId, Vec<SystemKey>>,
+    set_names: &HashMap<SystemSetId, &'static str>,
+    names: &[&'static str],
+) -> Result<Vec<(SystemKey, SystemKey)>, ScheduleBuildError> {
+    let members = |s: SystemSetId| -> &[SystemKey] {
+        transitive_members.get(&s).map(Vec::as_slice).unwrap_or(&[])
+    };
+
+    let mut out: Vec<(SystemKey, SystemKey)> = Vec::new();
+    for e in set_ordering {
+        match *e {
+            SetOrderEdge::SystemBeforeSet(x, s) => {
+                let m = members(s);
+                warn_if_empty(m, s, set_names);
+                for &sys in m {
+                    out.push((x, sys));
+                }
+            }
+            SetOrderEdge::SystemAfterSet(x, s) => {
+                let m = members(s);
+                warn_if_empty(m, s, set_names);
+                for &sys in m {
+                    out.push((sys, x));
+                }
+            }
+            SetOrderEdge::SetBeforeSet(s, t) => {
+                let ms = members(s);
+                let mt = members(t);
+                warn_if_empty(ms, s, set_names);
+                warn_if_empty(mt, t, set_names);
+                // A system transitively in BOTH sides would expand to a
+                // `sys → sys` self-edge (a trivial cycle). Detect early with
+                // a precise message rather than letting Tarjan report an
+                // opaque SCC (§2.3). Both lists are sorted (D3), so a linear
+                // merge finds the intersection in O(k + m).
+                if let Some(shared) = first_shared(ms, mt) {
+                    return Err(ScheduleBuildError::SetsOrderedButIntersect {
+                        a: set_name_or_default(s, set_names),
+                        b: set_name_or_default(t, set_names),
+                        shared: names.get(shared.0).copied().unwrap_or("<shared system>"),
+                    });
+                }
+                for &a in ms {
+                    for &b in mt {
+                        out.push((a, b));
+                    }
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Returns the first `SystemKey` present in both sorted slices, if any.
+/// Linear merge over two ascending-by-`.0` slices (D3 guarantees order).
+fn first_shared(a: &[SystemKey], b: &[SystemKey]) -> Option<SystemKey> {
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < a.len() && j < b.len() {
+        match a[i].0.cmp(&b[j].0) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => return Some(a[i]),
+        }
+    }
+    None
+}
+
+/// Emits the empty-set build warning (§6.4 / §13.1 R3-B) when an ordering
+/// edge references a set with no (transitive) members. Build-time and cold,
+/// so `eprintln!` is acceptable (no logging dependency in the ECS crate).
+#[cold]
+fn warn_if_empty(
+    members: &[SystemKey],
+    set: SystemSetId,
+    set_names: &HashMap<SystemSetId, &'static str>,
+) {
+    if members.is_empty() {
+        eprintln!(
+            "boyko-W1501: ordering references set '{}' which has no members \
+             (no system joined it via in_set); the ordering has no effect",
+            set_name_or_default(set, set_names)
+        );
+    }
+}
+
+/// Looks up a set's recorded name, falling back to a synthetic label if the
+/// id was somehow never named (should not happen — every intern records a
+/// name; defensive only).
+#[inline]
+fn set_name_or_default(
+    set: SystemSetId,
+    set_names: &HashMap<SystemSetId, &'static str>,
+) -> &'static str {
+    set_names.get(&set).copied().unwrap_or("<unknown set>")
+}
+
+/// Builds an enriched system label `"name [in: SetA, SetB]"` for cycle
+/// diagnostics (§6.3). If the system joined no sets, returns just the name.
+fn enrich_system_name(
+    key: SystemKey,
+    names: &[&'static str],
+    set_members: &HashMap<SystemSetId, Vec<SystemKey>>,
+    set_names: &HashMap<SystemSetId, &'static str>,
+) -> String {
+    let base = names.get(key.0).copied().unwrap_or("<unknown system>");
+    // Reverse lookup: which sets list `key` as a direct member. Build-time,
+    // cold (only on a cycle error path).
+    let mut joined: Vec<&'static str> = set_members
+        .iter()
+        .filter(|(_, members)| members.contains(&key))
+        .map(|(&id, _)| set_name_or_default(id, set_names))
+        .collect();
+    if joined.is_empty() {
+        base.to_string()
+    } else {
+        joined.sort_unstable();
+        format!("{base} [in: {}]", joined.join(", "))
+    }
 }
 
 #[cfg(test)]

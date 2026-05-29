@@ -1102,30 +1102,35 @@ struct BundleField {
     ty: Type,
 }
 
-/// Derive macro for the [`SystemSet`] marker trait — Phase 9 Wave 7 Step 21.
+/// Derive macro for the [`SystemSet`] marker trait — Phase 9 Wave 7 Step 21,
+/// extended in Phase 15 with enum support.
 ///
-/// Generates `impl SystemSet for #Name {}` for unit structs (the canonical
-/// shape for a schedule label). Set identity is the type's [`TypeId`], so
-/// the trait itself carries no methods — the derive's only responsibility
-/// is to apply the bound where the user declared the set.
+/// Generates `impl SystemSet for #Name { … }`. Set identity is the pair
+/// `(TypeId::of::<Self>(), set_discriminant(self))`:
+///
+/// * For a **unit struct** the derive emits an empty impl — `set_discriminant`
+///   defaults to `0`, so each distinct type is exactly one set.
+/// * For an **enum** the derive overrides `set_discriminant` with a `match`
+///   returning the variant index, and `set_name` returning `"Type::Variant"`,
+///   so each fieldless variant becomes a distinct set with a distinct name.
 ///
 /// # Supported inputs
 ///
-/// * `struct PhysicsSet;` — unit struct (the recommended shape).
+/// * `struct PhysicsSet;` — unit struct (the recommended single-label shape).
+/// * `enum CombatSet { Target, Damage, Cleanup }` — fieldless enum; each
+///   variant is its own set.
 ///
 /// # Rejected inputs
 ///
-/// * Generic struct (`struct Foo<T>;`) — Phase 9 scope. Sets are keyed by
+/// * Generic struct/enum (`struct Foo<T>;`) — sets are keyed by
 ///   `TypeId::of::<S>()`; a generic set would mint a fresh id per
-///   monomorphisation, which is rarely what users want and conflicts with
-///   `ScheduleBuilder::set_id_of`'s `HashMap<TypeId, SystemSetId>` lookup.
-///   Reported via `compile_error!`.
-/// * Enum / union — `compile_error!`. Marker trait carries no state, so a
-///   sum type is meaningless as a set label.
-/// * Named-field or tuple structs with at least one field — `compile_error!`.
-///   The Wave 4 design intentionally disallows non-ZST set markers (a
-///   per-instance set would imply a per-value identity that the TypeId
-///   lookup cannot represent).
+///   monomorphisation. Reported via `compile_error!`.
+/// * Union — `compile_error!`. A marker has no use for a union.
+/// * Named-field or tuple struct with at least one field — `compile_error!`.
+///   A per-instance set would imply a per-value identity the `(TypeId,
+///   discriminant)` key cannot represent.
+/// * Enum with a data-carrying variant — `compile_error!`. Only fieldless
+///   variants have a stable type-level identity.
 ///
 /// # Example
 ///
@@ -1137,7 +1142,7 @@ struct BundleField {
 /// struct PhysicsSet;
 ///
 /// #[derive(SystemSet)]
-/// struct RenderSet;
+/// enum CombatSet { Target, Damage, Cleanup }
 /// ```
 ///
 /// The example is `ignore`'d because proc-macro crates cannot consume their
@@ -1153,10 +1158,9 @@ pub fn system_set_macro(input: TokenStream) -> TokenStream {
     let name = input.ident.clone();
     let name_span = name.span();
 
-    // Generics: rejected. Sets are TypeId-keyed (§5.7); a generic set type
-    // would mint a fresh id per monomorphisation, which is virtually never
-    // what the user wants and breaks `ScheduleBuilder::set_id_of`'s
-    // HashMap-by-TypeId lookup.
+    // Generics: rejected for both structs and enums. Sets are keyed by
+    // `(TypeId, discriminant)`; a generic set type would mint a fresh id per
+    // monomorphisation, which is virtually never what the user wants.
     if !input.generics.params.is_empty() {
         return syn::Error::new(
             name_span,
@@ -1166,34 +1170,83 @@ pub fn system_set_macro(input: TokenStream) -> TokenStream {
         .into();
     }
 
-    // Only structs. Enums / unions carry runtime state that the marker
-    // trait cannot represent.
-    let data = match &input.data {
-        Data::Struct(s) => s,
-        Data::Enum(_) | Data::Union(_) => {
+    // Body: the `set_discriminant` / `set_name` overrides (if any). Unit
+    // structs emit nothing (trait defaults apply); enums emit both.
+    let body = match &input.data {
+        Data::Struct(s) => {
+            // Only unit structs (no fields). A SystemSet is a pure marker;
+            // per-instance state contradicts the identity model.
+            if !matches!(&s.fields, Fields::Unit) {
+                return syn::Error::new(
+                    name_span,
+                    "SystemSet derive requires a unit struct (no fields)",
+                )
+                .to_compile_error()
+                .into();
+            }
+            // Unit struct → no override; trait defaults (disc 0, type name).
+            TokenStream2::new()
+        }
+        Data::Enum(e) => match system_set_enum_body(&name, e) {
+            Ok(tokens) => tokens,
+            Err(err) => return err.to_compile_error().into(),
+        },
+        Data::Union(_) => {
             return syn::Error::new(
                 name_span,
-                "SystemSet can only be derived for unit structs",
+                "SystemSet can only be derived for unit structs or fieldless enums",
             )
             .to_compile_error()
             .into();
         }
     };
 
-    // Only unit structs (no fields). A SystemSet is a pure marker; per-
-    // instance state contradicts the TypeId-keyed lookup model.
-    if !matches!(&data.fields, Fields::Unit) {
-        return syn::Error::new(
-            name_span,
-            "SystemSet derive requires a unit struct (no fields)",
-        )
-        .to_compile_error()
-        .into();
-    }
-
     let expanded = quote! {
-        impl ::boyko_ecs::ecs::core::schedule::SystemSet for #name {}
+        impl ::boyko_ecs::ecs::core::schedule::SystemSet for #name {
+            #body
+        }
     };
 
     expanded.into()
+}
+
+/// Generates the `set_discriminant` + `set_name` method bodies for an enum
+/// `SystemSet`. Each fieldless variant maps to its index. A data-carrying
+/// variant is a hard error (no stable type-level identity).
+fn system_set_enum_body(
+    name: &Ident,
+    data: &syn::DataEnum,
+) -> syn::Result<TokenStream2> {
+    let mut disc_arms: Vec<TokenStream2> = Vec::with_capacity(data.variants.len());
+    let mut name_arms: Vec<TokenStream2> = Vec::with_capacity(data.variants.len());
+
+    for (index, variant) in data.variants.iter().enumerate() {
+        if !matches!(variant.fields, Fields::Unit) {
+            return Err(syn::Error::new(
+                variant.ident.span(),
+                "SystemSet enum variants must be unit variants (no fields)",
+            ));
+        }
+        let variant_ident = &variant.ident;
+        let disc = index as u32;
+        let qualified = format!("{name}::{variant_ident}");
+        disc_arms.push(quote! { #name::#variant_ident => #disc });
+        name_arms.push(quote! { #name::#variant_ident => #qualified });
+    }
+
+    Ok(quote! {
+        #[inline]
+        fn set_discriminant(&self) -> u32 {
+            match self {
+                #(#disc_arms),*
+            }
+        }
+
+        #[inline]
+        fn set_name(&self) -> &'static str {
+            match self {
+                #(#name_arms),*
+            }
+        }
+    })
 }

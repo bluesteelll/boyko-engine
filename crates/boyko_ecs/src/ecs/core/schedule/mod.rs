@@ -28,7 +28,9 @@ pub mod system_set;
 pub(crate) mod system_box;
 
 pub use schedule::Schedule;
-pub use schedule_builder::{MAX_SYSTEMS_PER_SCHEDULE, ScheduleBuilder};
+pub use schedule_builder::{
+    ConfigureSet, MAX_SYSTEMS_PER_SCHEDULE, ScheduleBuildError, ScheduleBuilder,
+};
 pub use system_config::SystemConfig;
 pub use system_set::{SystemSet, SystemSetId};
 

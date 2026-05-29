@@ -21,11 +21,9 @@
 //!
 //! [`ScheduleBuilder::add_system`]: super::schedule_builder::ScheduleBuilder::add_system
 
-use std::any::TypeId;
-
-use crate::ecs::core::schedule::ordering::{OrderingEdge, SystemKey};
+use crate::ecs::core::schedule::ordering::{OrderingEdge, SetOrderEdge, SystemKey};
 use crate::ecs::core::schedule::schedule_builder::ScheduleBuilder;
-use crate::ecs::core::schedule::system_set::{SystemSet, SystemSetId};
+use crate::ecs::core::schedule::system_set::SystemSet;
 
 /// Fluent chaining handle returned by
 /// [`ScheduleBuilder::add_system`].
@@ -93,31 +91,49 @@ impl<'a> SystemConfig<'a> {
         self
     }
 
-    /// Records membership in `set`. The set is looked up (or allocated)
-    /// inside the builder's `HashMap<TypeId, SystemSetId>`; subsequent
-    /// `.in_set(SameSet)` calls return the same id.
+    /// Records membership in `set`. The set is interned (or looked up) by
+    /// its `(TypeId, discriminant)` key, so subsequent `.in_set(SameSet)`
+    /// calls — and `configure_set(SameSet)` / `before_set(SameSet)` —
+    /// resolve to the **same** [`SystemSetId`] (Phase 15 §13-P1).
     ///
-    /// Set membership is recorded but **not yet expanded** into pairwise
-    /// edges — that pass is the Wave 5 Step 14 sync-point analyzer.
+    /// Membership alone contributes no ordering edge; the set's expanded
+    /// edges arise from set-level ordering (`before_set` / `configure_set`)
+    /// over the transitive members computed at `build` (D1/D3).
     #[inline]
-    pub fn in_set<S: SystemSet>(self, _set: S) -> Self {
-        let set_id = self.builder.set_id_of(TypeId::of::<S>());
+    pub fn in_set<S: SystemSet>(self, set: S) -> Self {
+        let set_id = self.builder.set_id_of_value(set);
         self.builder.descriptors[self.key.0].sets.push(set_id);
         self.builder.descriptors[self.key.0]
             .ordering_hints
             .push(OrderingEdge::InSet(self.key, set_id));
-        // The set bookkeeping is mirrored on the builder so cross-set
-        // ordering analysis (Step 14) doesn't have to walk every
-        // descriptor — keep both in sync.
+        // The set bookkeeping is mirrored on the builder so the build-time
+        // set-expansion pass doesn't have to walk every descriptor — keep
+        // both in sync.
         self.builder.set_members.entry(set_id).or_default().push(self.key);
         self
     }
 
-    /// Returns the [`SystemSetId`] of `set` for direct cross-system
-    /// references that need the raw id (e.g. when ordering against a set
-    /// without joining it). Wave 5 Step 14 will lean on this.
+    /// Records "this system runs before every (current + nested) member of
+    /// `set`". Recorded as a builder-level [`SetOrderEdge`]; expanded into
+    /// `X → member` edges at `build` over the transitive membership.
     #[inline]
-    pub fn set_id_of<S: SystemSet>(&mut self, _set: S) -> SystemSetId {
-        self.builder.set_id_of(TypeId::of::<S>())
+    pub fn before_set<S: SystemSet>(self, set: S) -> Self {
+        let set_id = self.builder.set_id_of_value(set);
+        self.builder
+            .set_ordering
+            .push(SetOrderEdge::SystemBeforeSet(self.key, set_id));
+        self
+    }
+
+    /// Records "this system runs after every member of `set`". Recorded as
+    /// a builder-level [`SetOrderEdge`]; expanded into `member → X` edges at
+    /// `build`.
+    #[inline]
+    pub fn after_set<S: SystemSet>(self, set: S) -> Self {
+        let set_id = self.builder.set_id_of_value(set);
+        self.builder
+            .set_ordering
+            .push(SetOrderEdge::SystemAfterSet(self.key, set_id));
+        self
     }
 }
