@@ -23,7 +23,10 @@
 
 use crate::ecs::core::schedule::ordering::{OrderingEdge, SetOrderEdge, SystemKey};
 use crate::ecs::core::schedule::schedule_builder::ScheduleBuilder;
+use crate::ecs::core::schedule::system_box::BoolSystem;
 use crate::ecs::core::schedule::system_set::SystemSet;
+use crate::ecs::core::system::into_system::IntoSystem;
+use crate::ecs::core::system::system::System;
 
 /// Fluent chaining handle returned by
 /// [`ScheduleBuilder::add_system`].
@@ -135,5 +138,104 @@ impl<'a> SystemConfig<'a> {
             .set_ordering
             .push(SetOrderEdge::SystemAfterSet(self.key, set_id));
         self
+    }
+
+    /// Attaches a **run condition** to this system (Phase 16). The system's
+    /// body runs in a frame only if every attached condition returns `true`.
+    ///
+    /// A condition is any `impl IntoSystem<(), bool, M>` — e.g. a
+    /// `fn() -> bool`, `fn(Res<R>) -> bool`, or the built-in
+    /// [`run_once`](crate::ecs::core::schedule::run_once).
+    ///
+    /// # Eager AND (no short-circuit)
+    ///
+    /// Multiple `.run_if(a).run_if(b)` accumulate and fold to a logical AND.
+    /// EVERY condition is evaluated every frame (the fold never
+    /// short-circuits), so a stateful condition like `run_once` advances its
+    /// own `Local` even when an earlier condition already returned `false`.
+    /// See `PHASE-16-PLAN.md` §6.
+    ///
+    /// # Read-only requirement
+    ///
+    /// A condition MUST be read-only — it must declare no component / resource
+    /// writes. This is `debug_assert!`ed at build (`PHASE-16-PLAN.md` §8.5).
+    /// Conditions are evaluated single-threaded at the apply-window barrier,
+    /// so a write-declaring condition is sound (it holds the exclusive `&mut`)
+    /// but is an API misuse; do not use `Commands` / `EventWriter` in a
+    /// condition (its deferred work is dropped, never applied).
+    ///
+    /// # Tick footgun (§0-P4)
+    ///
+    /// A condition using change detection (`Changed<T>` / `Added<T>` /
+    /// `Ref<T>`) COMPILES and passes the read-only assert, but the condition
+    /// runner does NOT call `set_change_ticks`, so its meta ticks stay at the
+    /// `initialize` sentinel and the condition silently reports **all-changed
+    /// (always true)**. Tick-aware conditions are not a supported Phase 16
+    /// feature — do not rely on a `Changed<T>` gate.
+    #[inline]
+    pub fn run_if<C, M>(self, condition: C) -> Self
+    where
+        C: IntoSystem<(), bool, M>,
+        C::System: System<Out = bool> + 'static,
+    {
+        let sys = C::into_system(condition);
+        let boxed: BoolSystem = Box::new(sys);
+        self.builder.descriptors[self.key.0].conditions.push(boxed);
+        self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::ecs::core::schedule::schedule_builder::ScheduleBuilder;
+    use boyko_threadpool::ThreadPoolBuilder;
+    use std::sync::Arc;
+
+    fn serial_builder() -> ScheduleBuilder {
+        let pool = ThreadPoolBuilder::new().num_threads(1).build();
+        ScheduleBuilder::new(pool)
+    }
+
+    /// `.run_if(cond)` pushes exactly one `BoolSystem` onto the referenced
+    /// descriptor's `conditions` vec. (Plan §10 `run_if_stores_condition`.)
+    #[test]
+    fn run_if_pushes_one_condition() {
+        let mut builder = serial_builder();
+        let key = builder.add_system(|| {}).run_if(|| true).key();
+        assert_eq!(
+            builder.descriptors[key.0].conditions.len(),
+            1,
+            "a single .run_if stores one condition"
+        );
+    }
+
+    /// `.run_if(a).run_if(b)` accumulates BOTH conditions on the descriptor
+    /// (they fold to an AND at eval; storage is additive).
+    #[test]
+    fn chained_run_if_accumulates_conditions() {
+        let mut builder = serial_builder();
+        let key = builder
+            .add_system(|| {})
+            .run_if(|| true)
+            .run_if(|| false)
+            .key();
+        assert_eq!(
+            builder.descriptors[key.0].conditions.len(),
+            2,
+            "two chained .run_if calls store two conditions"
+        );
+    }
+
+    /// An `add_system` with no `.run_if` leaves `conditions` empty — the
+    /// 0%-gate precondition at the descriptor level.
+    #[test]
+    fn no_run_if_leaves_conditions_empty() {
+        let mut builder = serial_builder();
+        let key = builder.add_system(|| {}).key();
+        let _ = Arc::clone(&builder.pool); // touch pool to keep it alive in scope
+        assert!(
+            builder.descriptors[key.0].conditions.is_empty(),
+            "a system with no .run_if has zero conditions"
+        );
     }
 }

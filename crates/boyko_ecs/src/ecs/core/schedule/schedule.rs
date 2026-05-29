@@ -39,6 +39,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use boyko_threadpool::{Scope, ThreadPool};
+use fixedbitset::FixedBitSet;
 
 use crate::ecs::core::change_detection::run_check_ticks_scan;
 use crate::ecs::core::component::hooks::scope::DeferredScopeGuard;
@@ -46,7 +47,8 @@ use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 use crate::ecs::core::schedule::bitset_intersects::bitset_intersects;
 use crate::ecs::core::schedule::conflict_graph::{ConflictGraph, SystemIndex};
 use crate::ecs::core::schedule::executor_scratch::ExecutorScratch;
-use crate::ecs::core::schedule::system_box::SystemBox;
+use crate::ecs::core::schedule::system_box::{BoolSystem, SystemBox};
+use crate::ecs::core::schedule::system_set::SystemSetId;
 use crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell;
 
 /// Park timeout used between consecutive dispatch rounds when at least one
@@ -94,6 +96,43 @@ pub struct Schedule {
 
     /// Per-frame scratch reused across `Schedule::run` calls.
     pub(crate) executor_scratch: ExecutorScratch,
+
+    // ── Phase 16 — run conditions (touched only via the gated Step 1.5) ──────
+    /// `has_condition[i]` set iff system `i` has ANY own condition OR is a
+    /// member of ANY conditioned (gating) set. THE 0%-GATE (see
+    /// `PHASE-16-PLAN.md` §4): all-zero when no `.run_if` anywhere, so the
+    /// executor's condition-eval branch is predicted-not-taken across the
+    /// whole run.
+    pub(crate) has_condition: FixedBitSet,
+
+    /// Per-system own conditions, indexed by post-topo `SystemIndex` (permuted
+    /// alongside `systems` at build, §2.5). `system_conditions[i]` is empty
+    /// unless system `i` carried `.run_if`. `len() == systems.len()`.
+    pub(crate) system_conditions: Vec<Vec<BoolSystem>>,
+
+    /// Gating sets per system, indexed by post-topo `SystemIndex`: the
+    /// transitive sets system `i` belongs to that carry at least one
+    /// condition. Empty for systems in no conditioned set.
+    /// `len() == systems.len()`.
+    pub(crate) system_gating_sets: Vec<Box<[SystemSetId]>>,
+
+    /// Flat set-condition table. The per-frame cached result lives in
+    /// `ExecutorScratch::set_cond_*` (indexed by the dense `slot` here), NOT
+    /// here. Multiple rows for one `set_id` fold to an AND (§7.1).
+    pub(crate) set_conditions: Vec<SetConditionEntry>,
+}
+
+/// One set-condition row (Phase 16, `PHASE-16-PLAN.md` §2.4). `slot` is the
+/// dense index into `ExecutorScratch::{set_cond_evaluated, set_cond_result}`
+/// used to memoize the per-frame verdict (a set condition runs exactly once
+/// per frame regardless of how many members it gates).
+pub(crate) struct SetConditionEntry {
+    /// The set this condition gates. Multiple rows may share a `set_id`.
+    pub(crate) set_id: SystemSetId,
+    /// The erased read-only predicate. Initialized at build.
+    pub(crate) condition: BoolSystem,
+    /// Dense index into the per-frame memo bitsets in `ExecutorScratch`.
+    pub(crate) slot: u16,
 }
 
 impl Schedule {
@@ -279,6 +318,36 @@ impl Schedule {
                 self.apply_window_drain(world_mut);
             }
 
+            // === Step 1.5 (Phase 16): evaluate conditions for newly-ready
+            //     systems (PHASE-16-PLAN.md §3.2). ===
+            //
+            // 0%-GATE (§4): skip the whole pass when no `.run_if` exists.
+            // `is_clear()` on a ≤16-word bitset is a few ORs; the branch is
+            // predicted-not-taken for a condition-free schedule, and
+            // `try_dispatch_ready` (Step 3) stays byte-identical.
+            if !self.has_condition.is_clear() {
+                // Race-freedom (§0-P1 / Proof a): evaluate ONLY when no worker
+                // is live. The apply-window gate above either drained every
+                // dispatched worker (so `running` is back to 0) OR `running`
+                // was already 0. We require `running.count_ones() == 0` before
+                // touching the cell as `&mut` — the SAME precondition the
+                // inline-exclusive path uses (EXC2). When workers are still in
+                // flight we defer condition eval to a later iteration (the
+                // dispatcher parks below and wakes on completion).
+                if self.executor_scratch.running.count_ones(..) == 0 {
+                    // SAFETY (SCH7 / Phase 16 CR2): `running == 0` ⇒ every
+                    //   previously dispatched worker has completed AND been
+                    //   drained (the apply window above popped them, clearing
+                    //   each `running` bit at schedule.rs:331). No worker holds
+                    //   a cell copy. This reborrow is the exclusive `&mut
+                    //   EcsMaster` for the duration of condition eval, which
+                    //   never spawns and never retains a cell-derived borrow
+                    //   (`run_condition` consumes its cell and returns a bool).
+                    let world_mut: &mut EcsMaster = unsafe { cell.world_mut() };
+                    self.evaluate_ready_conditions(world_mut);
+                }
+            }
+
             // === Step 2: termination check. ===
             if self.executor_scratch.completed.count_ones(..) == n {
                 return;
@@ -381,6 +450,146 @@ impl Schedule {
         self.executor_scratch
             .pending_apply
             .fetch_sub(target, Ordering::Relaxed);
+    }
+
+    /// Evaluate conditions for every conditioned system that is newly ready
+    /// (`pred_remaining == 0`, not running, not completed) and whose
+    /// conditions have NOT yet been folded this frame. A system whose folded
+    /// gate is `false` is marked completed and its successors decremented —
+    /// exactly as if it had run and applied, but WITHOUT running the body,
+    /// spawning a worker, or bumping `pending_apply` (PHASE-16-PLAN.md §3.3).
+    ///
+    /// # Precondition
+    ///
+    /// `running.count_ones() == 0` (caller-checked in Step 1.5). The
+    /// dispatcher holds the unique `&mut EcsMaster`; no worker is live, so
+    /// `run_condition` may read the world race-free (Proof a).
+    ///
+    /// # Cascade
+    ///
+    /// Skipping system `i` lowers its successors' `pred_remaining`. Because
+    /// this is a `for i in 0..n` pass in topo order and skip-decrements only
+    /// LOWER counts, any successor `s` (necessarily `s > i` in topo order)
+    /// that thereby reaches `pred_remaining == 0` is reached LATER in the SAME
+    /// pass with the updated count — so a contiguous all-skip chain settles in
+    /// one forward pass. A successor made ready by a REAL completion is handled
+    /// on the next loop iteration (after the next `apply_window_drain`).
+    fn evaluate_ready_conditions(&mut self, world: &mut EcsMaster) {
+        let n = self.systems.len();
+
+        for i in 0..n {
+            // Reuse the EXACT ready predicate from `try_dispatch_ready`
+            // (minus the conflict check — conflicts gate concurrent dispatch,
+            // not single-threaded condition eval).
+            if self.executor_scratch.completed.contains(i) {
+                continue;
+            }
+            // `running` is all-zero here (caller precondition), but keep the
+            // check to mirror the dispatch predicate exactly.
+            if self.executor_scratch.running.contains(i) {
+                continue;
+            }
+            if self.executor_scratch.pred_remaining[i] != 0 {
+                continue;
+            }
+            if !self.has_condition.contains(i) {
+                continue;
+            }
+            if self.executor_scratch.cond_evaluated.contains(i) {
+                continue;
+            }
+
+            self.executor_scratch.cond_evaluated.insert(i);
+
+            // EAGER FOLD (§6): run ALL own conditions + all gating-set
+            // conditions, AND the results. NO short-circuit — every condition
+            // body runs so stateful conditions (e.g. `run_once`) advance their
+            // `Local` every frame they are reached. `should_run &= r` makes the
+            // "no break" intent unambiguous (bitwise AND over materialized
+            // bools, never a control-flow short-circuit).
+            let mut should_run = true;
+
+            // Own conditions. Index by position so the `&mut
+            // self.system_conditions[i][k]` borrow is released before the next
+            // iteration; `world` is a disjoint parameter (not a field of self).
+            let own_len = self.system_conditions[i].len();
+            for k in 0..own_len {
+                let cond = self.system_conditions[i][k].as_mut();
+                let r = world.run_condition(cond);
+                should_run &= r;
+            }
+
+            // Gating-set conditions (memoized per frame). Snapshot the set ids
+            // first so the `&self.system_gating_sets[i]` borrow does not span
+            // the `&mut self` reborrow inside `set_gate`.
+            let gating_len = self.system_gating_sets[i].len();
+            for g in 0..gating_len {
+                let set_id = self.system_gating_sets[i][g];
+                should_run &= self.set_gate(world, set_id);
+            }
+
+            if !should_run {
+                // SKIP: mark completed + decrement successors, WITHOUT
+                // body / apply / spawn / pending bump.
+                self.mark_skipped(i);
+            }
+            // If `should_run == true`, do nothing — `try_dispatch_ready` picks
+            // the system up normally this same loop iteration (Step 3).
+        }
+    }
+
+    /// Mark system `i` as skipped: set `completed` + decrement successors'
+    /// `pred_remaining`. Mirrors the apply-window completion tail
+    /// (`schedule.rs:359-372`) MINUS run / apply / queue (PHASE-16-PLAN.md §3.3).
+    #[inline]
+    fn mark_skipped(&mut self, i: usize) {
+        self.executor_scratch.completed.insert(i);
+        // Decrement successors — IDENTICAL to the apply-window path
+        // (schedule.rs:364-372). A skip is invisible to the apply window's
+        // `target`/`drained` accounting (it never pushes a completion).
+        for &successor in self.conflict_graph.successors[i].iter() {
+            let s = successor.0 as usize;
+            debug_assert!(
+                self.executor_scratch.pred_remaining[s] > 0,
+                "invariant SCH13 (Phase 16): pred_remaining must not underflow on skip (system {})",
+                s,
+            );
+            self.executor_scratch.pred_remaining[s] -= 1;
+        }
+    }
+
+    /// Memoized set-condition gate (PHASE-16-PLAN.md §7.1). Returns the AND of
+    /// every set-condition row for `set_id`; each row's body runs at most ONCE
+    /// per frame (the first ready member that depends on it triggers the run;
+    /// subsequent members read the cache).
+    ///
+    /// # Borrow note (R9)
+    ///
+    /// Indexes `self.set_conditions` by position rather than holding an
+    /// iterator, so the `&mut self.set_conditions[k].condition` borrow (passed
+    /// to `run_condition`) is released before the disjoint `&mut
+    /// self.executor_scratch` memo write. `world` is a parameter, not a field.
+    fn set_gate(&mut self, world: &mut EcsMaster, set_id: SystemSetId) -> bool {
+        let mut acc = true;
+        let rows = self.set_conditions.len();
+        for k in 0..rows {
+            if self.set_conditions[k].set_id != set_id {
+                continue;
+            }
+            let slot = self.set_conditions[k].slot as usize;
+            let r = if self.executor_scratch.set_cond_evaluated.contains(slot) {
+                self.executor_scratch.set_cond_result.contains(slot)
+            } else {
+                // EAGER (§6): run the set-condition body once this frame.
+                let cond = self.set_conditions[k].condition.as_mut();
+                let v = world.run_condition(cond);
+                self.executor_scratch.set_cond_evaluated.insert(slot);
+                self.executor_scratch.set_cond_result.set(slot, v);
+                v
+            };
+            acc &= r; // eager AND across a set's own conditions
+        }
+        acc
     }
 
     /// Find and dispatch every system that is ready this round.
@@ -1090,6 +1299,87 @@ mod tests {
             apply_observed.load(Ordering::Relaxed),
             1,
             "apply() must observe the body's write through the Release/Acquire pair"
+        );
+    }
+
+    // ── Phase 16 — mark_skipped mechanics ────────────────────────────────────
+
+    /// `mark_skipped(i)` marks system `i` completed AND decrements every ordered
+    /// successor's `pred_remaining` — IDENTICAL to the apply-window completion
+    /// tail minus the body/apply/queue. Construct a 2-system DAG `a → b`, seed
+    /// the scratch for a frame, skip `a`, and assert `completed[a]` is set and
+    /// `pred_remaining[b]` dropped from 1 to 0. (Plan §10
+    /// `mark_skipped_decrements_successors`.)
+    #[test]
+    fn mark_skipped_marks_completed_and_decrements_successor() {
+        use crate::ecs::core::schedule::ordering::{OrderingEdge, SystemKey};
+
+        let pool = fresh_pool();
+        let mut builder = ScheduleBuilder::new(pool);
+        let a_idx = 0usize;
+        let b_idx = 1usize;
+        push_system(&mut builder, "a", Access::new(), || {});
+        push_system(&mut builder, "b", Access::new(), || {});
+        // a -> b: stored on a's descriptor.
+        builder.descriptors[a_idx]
+            .ordering_hints
+            .push(OrderingEdge::Before(SystemKey(a_idx), SystemKey(b_idx)));
+
+        let mut world = EcsMaster::new();
+        let mut schedule = builder.build(&mut world);
+
+        // Topo order is a, b (the edge forces it). Seed the per-frame scratch:
+        // pred_remaining[b] starts at 1 (one predecessor, a).
+        schedule
+            .executor_scratch
+            .reset_for_frame(&schedule.conflict_graph);
+        assert_eq!(
+            schedule.executor_scratch.pred_remaining[1], 1,
+            "precondition: b has one predecessor (a)"
+        );
+
+        schedule.mark_skipped(0);
+
+        assert!(
+            schedule.executor_scratch.completed.contains(0),
+            "mark_skipped sets completed[a]"
+        );
+        assert_eq!(
+            schedule.executor_scratch.pred_remaining[1], 0,
+            "mark_skipped decrements b's pred_remaining (1 -> 0)"
+        );
+        // The skip must NOT touch pending_apply / completion_queue (it is
+        // invisible to the apply-window accounting).
+        assert_eq!(
+            schedule
+                .executor_scratch
+                .pending_apply
+                .load(Ordering::Relaxed),
+            0,
+            "a skip never bumps pending_apply"
+        );
+        assert!(
+            schedule.executor_scratch.completion_queue.is_empty(),
+            "a skip never pushes a completion"
+        );
+    }
+
+    /// A conditionless schedule has an all-zero `has_condition` bitset (the
+    /// 0%-gate), so `executor_main_loop`'s Step 1.5 branch is never taken. Unit
+    /// confirmation at the `Schedule` level (complements the builder-level
+    /// `has_condition_clear_when_no_run_if`).
+    #[test]
+    fn has_condition_clear_for_plain_schedule() {
+        let pool = fresh_pool();
+        let mut builder = ScheduleBuilder::new(pool);
+        push_system(&mut builder, "a", Access::new(), || {});
+        push_system(&mut builder, "b", Access::new(), || {});
+
+        let mut world = EcsMaster::new();
+        let schedule = builder.build(&mut world);
+        assert!(
+            schedule.has_condition.is_clear(),
+            "no .run_if ⇒ has_condition all-zero ⇒ Step 1.5 predicted-not-taken"
         );
     }
 }

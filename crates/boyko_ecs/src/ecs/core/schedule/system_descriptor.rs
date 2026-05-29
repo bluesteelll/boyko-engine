@@ -22,7 +22,7 @@
 //! [`ScheduleBuilder::build`]: super::schedule_builder::ScheduleBuilder::build
 
 use crate::ecs::core::schedule::ordering::OrderingEdge;
-use crate::ecs::core::schedule::system_box::SystemBox;
+use crate::ecs::core::schedule::system_box::{BoolSystem, SystemBox};
 use crate::ecs::core::schedule::system_set::SystemSetId;
 
 /// Builder-side staging record for one system.
@@ -51,6 +51,13 @@ pub(crate) struct SystemDescriptor {
     /// into pairwise edges by the sync-point analyzer in Wave 5 Step 14;
     /// Wave 4 Step 9 ignores these for DAG construction.
     pub(crate) sets: Vec<SystemSetId>,
+
+    /// Phase 16 — own run-conditions, in declaration order. Empty for the
+    /// overwhelming majority of systems. Each is an initialized
+    /// [`BoolSystem`]; multiple `.run_if(a).run_if(b)` accumulate here and
+    /// fold to an AND (eager, never short-circuited — see `PHASE-16-PLAN.md`
+    /// §6). Moved out into `Schedule::system_conditions` at build (§2.5).
+    pub(crate) conditions: Vec<BoolSystem>,
 }
 
 impl SystemDescriptor {
@@ -62,6 +69,7 @@ impl SystemDescriptor {
             system_box,
             ordering_hints: Vec::new(),
             sets: Vec::new(),
+            conditions: Vec::new(),
         }
     }
 }

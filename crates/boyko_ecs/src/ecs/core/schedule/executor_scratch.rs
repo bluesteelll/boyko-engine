@@ -108,6 +108,33 @@ pub(crate) struct ExecutorScratch {
     /// `Schedule::systems.len()`. Stays consistent for the schedule's
     /// lifetime — Phase 9 does not support post-build mutation (SCH1).
     pub(crate) system_count: usize,
+
+    /// Phase 16 — per-frame "conditions folded" memo. Bit `i` is set once
+    /// system `i`'s own + gating-set conditions have been evaluated this
+    /// frame, preventing a re-fold (which would advance a stateful
+    /// condition's `Local` more than once — e.g. `run_once`). Reset in
+    /// [`reset_for_frame`](Self::reset_for_frame). See `PHASE-16-PLAN.md`
+    /// §3.3 / §7.3.
+    ///
+    /// **Dispatcher-owned** — touched only inside `evaluate_ready_conditions`.
+    pub(crate) cond_evaluated: FixedBitSet,
+
+    /// Phase 16 — per-frame set-condition memo flag. Bit `slot` is set once
+    /// the set-condition row at that dense `slot` has run this frame; the
+    /// result is cached in `set_cond_result[slot]`. A set condition gates
+    /// every member, so it runs exactly ONCE per frame regardless of member
+    /// count (§7.1). Zero-length when no set carries a condition.
+    ///
+    /// **Dispatcher-owned**.
+    pub(crate) set_cond_evaluated: FixedBitSet,
+
+    /// Phase 16 — per-frame set-condition result cache. Bit `slot` holds the
+    /// `bool` verdict of the set-condition row at that dense `slot`, valid
+    /// only while `set_cond_evaluated[slot]` is set. Reset each frame so the
+    /// verdict is re-derived (§7.3).
+    ///
+    /// **Dispatcher-owned**.
+    pub(crate) set_cond_result: FixedBitSet,
 }
 
 #[allow(dead_code)] // consumed by Wave 5 Step 12 executor.
@@ -115,9 +142,18 @@ impl ExecutorScratch {
     /// Allocates a scratch sized for `system_count` systems and seeds
     /// `pred_remaining` from the conflict graph's `pred_count`.
     ///
+    /// `set_condition_count` (Phase 16) sizes the set-condition memo bitsets
+    /// (`set_cond_evaluated` / `set_cond_result`); it is `0` for a schedule
+    /// with no set-level `.run_if`, in which case those bitsets are
+    /// zero-length and every memo `clear()` is a no-op.
+    ///
     /// Called once per schedule from `ScheduleBuilder::build`. Subsequent
     /// frames reuse the same allocation via [`reset_for_frame`](Self::reset_for_frame).
-    pub(crate) fn new(system_count: usize, conflict_graph: &ConflictGraph) -> Self {
+    pub(crate) fn new(
+        system_count: usize,
+        set_condition_count: usize,
+        conflict_graph: &ConflictGraph,
+    ) -> Self {
         let running = FixedBitSet::with_capacity(system_count);
         let completed = FixedBitSet::with_capacity(system_count);
         let ready_scratch = FixedBitSet::with_capacity(system_count);
@@ -131,6 +167,12 @@ impl ExecutorScratch {
         // ArrayQueue panics on capacity 0; guard the empty-schedule case.
         let completion_queue = ArrayQueue::new(system_count.max(1));
 
+        // Phase 16 — per-frame condition memos. `cond_evaluated` is sized by
+        // system count (one bit per system); the set memos by row count.
+        let cond_evaluated = FixedBitSet::with_capacity(system_count);
+        let set_cond_evaluated = FixedBitSet::with_capacity(set_condition_count);
+        let set_cond_result = FixedBitSet::with_capacity(set_condition_count);
+
         Self {
             running,
             completed,
@@ -139,6 +181,9 @@ impl ExecutorScratch {
             completion_queue,
             pending_apply: CachePadded::new(AtomicUsize::new(0)),
             system_count,
+            cond_evaluated,
+            set_cond_evaluated,
+            set_cond_result,
         }
     }
 
@@ -162,6 +207,14 @@ impl ExecutorScratch {
         self.running.clear();
         self.completed.clear();
         self.ready_scratch.clear();
+
+        // Phase 16 — clear the per-frame condition memos so stateful
+        // conditions are folded once next frame (§7.3). All three are
+        // zero-length when the schedule carries no conditions, so the
+        // clears are no-ops on the 0%-gate path.
+        self.cond_evaluated.clear();
+        self.set_cond_evaluated.clear();
+        self.set_cond_result.clear();
 
         // Plain slice copy; both are `[u16]` of length `system_count`.
         // The `?` here is purely defensive — `ScheduleBuilder::build`
@@ -253,7 +306,7 @@ mod tests {
             (SystemIndex(1), SystemIndex(2)),
         ];
         let graph = ConflictGraph::build(&descs, &edges);
-        let scratch = ExecutorScratch::new(3, &graph);
+        let scratch = ExecutorScratch::new(3, 0, &graph);
         assert_eq!(scratch.system_count, 3);
         assert_eq!(scratch.pred_remaining[0], 0);
         assert_eq!(scratch.pred_remaining[1], 0);
@@ -269,7 +322,7 @@ mod tests {
         let descs = vec![descriptor("a"), descriptor("b")];
         let edges = vec![(SystemIndex(0), SystemIndex(1))];
         let graph = ConflictGraph::build(&descs, &edges);
-        let mut scratch = ExecutorScratch::new(2, &graph);
+        let mut scratch = ExecutorScratch::new(2, 0, &graph);
 
         scratch.pred_remaining[1] = 0;
         scratch.running.insert(0);
@@ -291,7 +344,7 @@ mod tests {
     fn empty_schedule_does_not_panic() {
         let descs: Vec<SystemDescriptor> = Vec::new();
         let graph = ConflictGraph::build(&descs, &[]);
-        let scratch = ExecutorScratch::new(0, &graph);
+        let scratch = ExecutorScratch::new(0, 0, &graph);
         assert_eq!(scratch.system_count, 0);
         assert_eq!(scratch.pred_remaining.len(), 0);
     }

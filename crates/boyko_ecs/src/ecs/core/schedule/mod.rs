@@ -14,6 +14,7 @@
 //! [`ConflictGraph`]: conflict_graph::ConflictGraph
 
 pub(crate) mod bitset_intersects;
+pub mod common_conditions;
 pub(crate) mod conflict_graph;
 pub(crate) mod executor_scratch;
 pub(crate) mod ordering;
@@ -27,6 +28,7 @@ pub mod system_set;
 // Internal — `SystemBox` is consumed only by other submodules.
 pub(crate) mod system_box;
 
+pub use common_conditions::run_once;
 pub use schedule::Schedule;
 pub use schedule_builder::{
     ConfigureSet, MAX_SYSTEMS_PER_SCHEDULE, ScheduleBuildError, ScheduleBuilder,

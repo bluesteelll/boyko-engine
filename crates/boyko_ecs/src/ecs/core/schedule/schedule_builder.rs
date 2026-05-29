@@ -29,13 +29,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use boyko_threadpool::ThreadPool;
+use fixedbitset::FixedBitSet;
 
 use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 use crate::ecs::core::schedule::conflict_graph::{ConflictGraph, SystemIndex};
 use crate::ecs::core::schedule::ordering::{OrderingEdge, SetOrderEdge, SystemKey};
 use crate::ecs::core::schedule::executor_scratch::ExecutorScratch;
-use crate::ecs::core::schedule::schedule::Schedule;
-use crate::ecs::core::schedule::system_box::SystemBox;
+use crate::ecs::core::schedule::schedule::{Schedule, SetConditionEntry};
+use crate::ecs::core::schedule::system_box::{BoolSystem, SystemBox};
 use crate::ecs::core::schedule::system_config::SystemConfig;
 use crate::ecs::core::schedule::system_descriptor::SystemDescriptor;
 use crate::ecs::core::schedule::system_set::{SystemSet, SystemSetId};
@@ -89,6 +90,14 @@ pub struct ScheduleBuilder {
     /// `SystemSetId` → human-readable name (`set_name()`), for cycle /
     /// empty-set diagnostics (§6.3 / §13-P5). Populated on first intern.
     pub(crate) set_names: HashMap<SystemSetId, &'static str>,
+
+    /// Phase 16 — set-level run conditions, keyed by [`SystemSetId`]. A set
+    /// may accumulate multiple conditions (eager AND). Built into
+    /// `Schedule::set_conditions` (the flat `SetConditionEntry` table) at
+    /// build. The same `SystemSetId` keys both `set_members` and this map
+    /// (the `set_id_of_value` intern path guarantees config-id == member-id).
+    /// See `PHASE-16-PLAN.md` §2.3 / §8.2.
+    pub(crate) set_conditions: HashMap<SystemSetId, Vec<BoolSystem>>,
 }
 
 impl ScheduleBuilder {
@@ -103,6 +112,7 @@ impl ScheduleBuilder {
             set_ordering: Vec::new(),
             set_parents: HashMap::new(),
             set_names: HashMap::new(),
+            set_conditions: HashMap::new(),
         }
     }
 
@@ -235,6 +245,7 @@ impl ScheduleBuilder {
             set_ordering,
             set_parents,
             set_names,
+            mut set_conditions,
         } = self;
 
         // Step 1 — initialise every system. Allocation is allowed here
@@ -250,6 +261,27 @@ impl ScheduleBuilder {
             // the truth at the same point the executor will observe
             // it.
             d.system_box.is_exclusive = d.system_box.system.access().is_universal();
+
+            // Phase 16 (§2.5) — initialize this system's own conditions in the
+            // SAME world pass, so each condition's `Access` + `Local` state are
+            // live before the first frame. The per-frame `run_condition` call's
+            // `initialize` is then the FS1 no-op.
+            for cond in d.conditions.iter_mut() {
+                cond.initialize(world);
+                debug_assert_condition_read_only(cond.as_ref());
+            }
+        }
+
+        // Phase 16 (§2.5) — initialize every set-level condition against the
+        // same build-time world (a disjoint `&mut set_conditions` borrow,
+        // separate from the `&mut descriptors` loop above). Done here, not in
+        // `ConfigureSet::run_if` (which has no `world`), so set conditions are
+        // ready before assembly.
+        for conds in set_conditions.values_mut() {
+            for cond in conds.iter_mut() {
+                cond.initialize(world);
+                debug_assert_condition_read_only(cond.as_ref());
+            }
         }
 
         // Step 2 — capture names BEFORE the descriptors move into later
@@ -353,6 +385,33 @@ impl ScheduleBuilder {
             reorder[old_key.0] = new_idx as u16;
         }
 
+        // Step 6.5 (Phase 16, §7.2) — build `system_gating_sets`, the
+        // post-topo `SystemIndex → conditioned-set-ids` map. Reuses the
+        // Phase-15 transitive membership (already cycle-checked, sorted,
+        // deduped) inverted for the conditioned subset only: a set is
+        // "gating" iff it carries at least one `.run_if` condition. Indexed
+        // by post-topo index via `reorder`.
+        let conditioned_sets: std::collections::HashSet<SystemSetId> =
+            set_conditions.keys().copied().collect();
+        let mut gating_by_new_idx: Vec<Vec<SystemSetId>> = vec![Vec::new(); n];
+        for (&set_id, members) in &transitive_members {
+            if !conditioned_sets.contains(&set_id) {
+                continue;
+            }
+            for &member_key in members {
+                let new_idx = reorder[member_key.0] as usize;
+                gating_by_new_idx[new_idx].push(set_id);
+            }
+        }
+        let system_gating_sets: Vec<Box<[SystemSetId]>> = gating_by_new_idx
+            .into_iter()
+            .map(|mut v| {
+                v.sort_unstable_by_key(|s| s.0);
+                v.dedup();
+                v.into_boxed_slice()
+            })
+            .collect();
+
         // Permute the descriptors. We pop from a `Vec<Option<...>>` to
         // avoid double-moves while we iterate.
         let mut taking: Vec<Option<SystemDescriptor>> =
@@ -407,23 +466,71 @@ impl ScheduleBuilder {
         // necessary, and the previous `c <= u16::MAX` form is tautological
         // at the `u16` type level (clippy::absurd_extreme_comparisons).
 
-        // Step 10 — drop the descriptor envelope, keep the `SystemBox`es.
+        // Step 10 — drop the descriptor envelope, keep the `SystemBox`es and
+        // (Phase 16) move each descriptor's `conditions` Vec into
+        // `system_conditions`, aligned by post-topo index since
+        // `descriptors_with_sync` is already in topological order.
         let n_final = descriptors_with_sync.len();
-        let systems: Vec<SystemBox> = descriptors_with_sync
-            .into_iter()
-            .map(|d| d.system_box)
-            .collect();
+
+        // §0-P3 sizing guard: `system_conditions` / `system_gating_sets` /
+        // `has_condition` are indexed by post-topo `SystemIndex`, which today
+        // equals the pre-sync index because `insert_sync_points` is the
+        // IDENTITY stub (`n == n_final`). When Phase-9.1 sync-insertion injects
+        // nodes, these arrays must be sized off `n_final` and indexed off the
+        // post-sync descriptor order — revisit this assert then.
+        debug_assert_eq!(
+            n, n_final,
+            "Phase 16 condition-array indexing assumes identity sync-insertion; \
+             revisit when insert_sync_points injects nodes"
+        );
+
+        let mut systems: Vec<SystemBox> = Vec::with_capacity(n_final);
+        let mut system_conditions: Vec<Vec<BoolSystem>> = Vec::with_capacity(n_final);
+        for d in descriptors_with_sync {
+            system_conditions.push(d.conditions); // move (no clone)
+            systems.push(d.system_box);
+        }
+
+        // Phase 16 — flatten the set-condition map into the dense
+        // `SetConditionEntry` table. Each row gets a dense `slot` (its index
+        // in the table) used by the per-frame memo bitsets in
+        // `ExecutorScratch`. Conditions were already `initialize`d in Step 1.
+        let mut set_conditions_table: Vec<SetConditionEntry> = Vec::new();
+        for (set_id, conds) in set_conditions {
+            for condition in conds {
+                let slot = set_conditions_table.len() as u16;
+                set_conditions_table.push(SetConditionEntry {
+                    set_id,
+                    condition,
+                    slot,
+                });
+            }
+        }
+
+        // Phase 16 (§2.5) — `has_condition[i]` set iff system `i` has any own
+        // condition OR belongs to any conditioned (gating) set. THE 0%-GATE.
+        let mut has_condition = FixedBitSet::with_capacity(n_final);
+        for i in 0..n_final {
+            if !system_conditions[i].is_empty() || !system_gating_sets[i].is_empty() {
+                has_condition.insert(i);
+            }
+        }
 
         // Build the scratch *after* the conflict graph so we can seed
-        // `pred_remaining` from `pred_count` in one pass.
-        let _ = n_final; // historical; preserved for symmetry with prior wave.
-        let executor_scratch = ExecutorScratch::new(systems.len(), &conflict_graph);
+        // `pred_remaining` from `pred_count` in one pass. `set_conditions_table.len()`
+        // sizes the set-condition memo bitsets (§7.1).
+        let executor_scratch =
+            ExecutorScratch::new(systems.len(), set_conditions_table.len(), &conflict_graph);
 
         Ok(Schedule {
             pool,
             systems,
             conflict_graph,
             executor_scratch,
+            has_condition,
+            system_conditions,
+            system_gating_sets,
+            set_conditions: set_conditions_table,
         })
     }
 }
@@ -482,6 +589,34 @@ impl ConfigureSet<'_> {
             .entry(self.set_id)
             .or_default()
             .push(parent_id);
+        self
+    }
+
+    /// Attaches a **run condition** to this set (Phase 16). Every transitive
+    /// member of the set runs in a frame only if every set condition returns
+    /// `true`.
+    ///
+    /// The set condition is evaluated exactly ONCE per frame (memoized), not
+    /// once per member — so a stateful set condition advances its `Local`
+    /// once per frame regardless of member count (`PHASE-16-PLAN.md` §7.1).
+    /// Multiple `.run_if(a).run_if(b)` accumulate into an eager AND.
+    ///
+    /// The same read-only requirement and tick footgun as
+    /// [`SystemConfig::run_if`](super::system_config::SystemConfig::run_if)
+    /// apply.
+    #[inline]
+    pub fn run_if<C, M>(self, condition: C) -> Self
+    where
+        C: IntoSystem<(), bool, M>,
+        C::System: System<Out = bool> + 'static,
+    {
+        let sys = C::into_system(condition);
+        let boxed: BoolSystem = Box::new(sys);
+        self.builder
+            .set_conditions
+            .entry(self.set_id)
+            .or_default()
+            .push(boxed);
         self
     }
 }
@@ -550,6 +685,33 @@ fn insert_sync_points(
 ) -> (Vec<SystemDescriptor>, Vec<(SystemIndex, SystemIndex)>) {
     (descriptors, dag_edges)
 }
+
+/// Phase 16 CR1 (§8.5) — debug-only read-only contract check for a run
+/// condition. A condition MUST declare no component / resource writes.
+///
+/// The check is build-time and elided in release (the access bitmask scan
+/// vanishes). A write-declaring condition in release runs and mutates the
+/// world, which is SOUND (it holds the exclusive `&mut` at the single-threaded
+/// apply barrier) but is an API misuse; the assert turns it into a debug
+/// panic — the right severity (Bevy forbids it at compile time via a
+/// `ReadOnlySystem` bound; we forbid it via this assert + docs, deferring the
+/// marker trait).
+#[cfg(debug_assertions)]
+#[inline]
+fn debug_assert_condition_read_only(condition: &dyn System<Out = bool>) {
+    let access = condition.access();
+    debug_assert!(
+        access.component_writes.is_empty() && access.resource_writes.is_empty(),
+        "Phase 16 CR1: run condition '{}' declares writes; conditions must be read-only",
+        condition.name(),
+    );
+}
+
+/// Release no-op counterpart — the read-only check is debug-only, so release
+/// builds skip the `Access` scan entirely.
+#[cfg(not(debug_assertions))]
+#[inline(always)]
+fn debug_assert_condition_read_only(_condition: &dyn System<Out = bool>) {}
 
 /// Standard Tarjan strongly-connected-components.
 ///
@@ -1235,5 +1397,144 @@ mod tests {
         let sccs = tarjan_scc(3, &edges);
         assert!(sccs.iter().all(|s| s.len() == 1));
         assert_eq!(sccs.len(), 3);
+    }
+
+    // ── Phase 16 — run-condition build wiring ────────────────────────────────
+
+    use crate::ecs::core::schedule::system_set::SystemSet;
+
+    /// A hand-written `SystemSet` (all methods defaulted) — avoids dragging the
+    /// `#[derive(SystemSet)]` proc-macro into a lib unit test.
+    struct CondSet;
+    impl SystemSet for CondSet {}
+
+    /// `configure_set(S).run_if(c)` stores the condition under the set's id in
+    /// the builder's `set_conditions` map. (Plan §10 `configure_set_run_if_stores`.)
+    #[test]
+    fn configure_set_run_if_stores_in_set_conditions() {
+        let pool = fresh_pool();
+        let mut builder = ScheduleBuilder::new(pool);
+        let set_id = builder.configure_set(CondSet).run_if(|| true).id();
+        assert_eq!(
+            builder
+                .set_conditions
+                .get(&set_id)
+                .map(Vec::len)
+                .unwrap_or(0),
+            1,
+            "configure_set(S).run_if stores one set condition under S's id"
+        );
+    }
+
+    /// A schedule with NO `.run_if` anywhere builds with an all-zero
+    /// `has_condition` bitset — THE 0%-gate precondition. (Plan §10
+    /// `has_condition_clear_when_no_run_if`.)
+    #[test]
+    fn has_condition_clear_when_no_run_if() {
+        let pool = fresh_pool();
+        let mut builder = ScheduleBuilder::new(pool);
+        let init = Arc::new(AtomicUsize::new(0));
+        add_counting(&mut builder, "a", Arc::clone(&init));
+        add_counting(&mut builder, "b", Arc::clone(&init));
+
+        let mut world = EcsMaster::new();
+        let schedule = builder.build(&mut world);
+        assert!(
+            schedule.has_condition.is_clear(),
+            "a conditionless schedule must have an all-zero has_condition bitset (0%-gate)"
+        );
+        assert!(
+            schedule.system_conditions.iter().all(Vec::is_empty),
+            "no system carries conditions"
+        );
+        assert!(schedule.set_conditions.is_empty(), "no set conditions");
+    }
+
+    /// A schedule with a `.run_if` builds with the conditioned system's
+    /// `has_condition` bit set and its `system_conditions` slot populated
+    /// (the condition rode through the topo permutation, §2.5). Also proves the
+    /// build initialised the condition (its `Access` is non-default after init —
+    /// here a `Res`-reading condition declares a resource read).
+    #[test]
+    fn build_sets_has_condition_and_moves_conditions() {
+        use crate::ecs::core::resources::resource::Resource;
+        use crate::ecs::core::resources::resource_registry::register_new;
+        use crate::ecs::identifiers::primitives::ResourceId;
+        use std::sync::OnceLock;
+
+        #[allow(dead_code)]
+        struct Marker(u32);
+        // Mint the id via `register_new` (populating the resource_registry
+        // drop_fn slot) — a hardcoded `ResourceId` would bypass the registry
+        // and trip `Resources::insert`'s populated-slot invariant.
+        impl Resource for Marker {
+            fn resource_id() -> ResourceId {
+                static ID: OnceLock<ResourceId> = OnceLock::new();
+                *ID.get_or_init(|| ResourceId(register_new::<Self>()))
+            }
+        }
+
+        let pool = fresh_pool();
+        let mut builder = ScheduleBuilder::new(pool);
+        // One unconditioned system, one conditioned with a Res-reading cond.
+        builder.add_system(|| {});
+        builder
+            .add_system(|| {})
+            .run_if(|_m: crate::ecs::core::system::Res<Marker>| true);
+
+        let mut world = EcsMaster::new();
+        world.insert_resource(Marker(0));
+        let schedule = builder.build(&mut world);
+
+        // Exactly one system has a condition → exactly one has_condition bit.
+        assert_eq!(
+            schedule.has_condition.count_ones(..),
+            1,
+            "exactly one conditioned system ⇒ one has_condition bit"
+        );
+        // That system's system_conditions slot holds the moved BoolSystem.
+        let conditioned: Vec<usize> = (0..schedule.systems.len())
+            .filter(|&i| !schedule.system_conditions[i].is_empty())
+            .collect();
+        assert_eq!(conditioned.len(), 1, "one slot carries a condition");
+        assert_eq!(
+            schedule.system_conditions[conditioned[0]].len(),
+            1,
+            "the conditioned slot carries exactly one BoolSystem"
+        );
+    }
+
+    /// `system_gating_sets` is built for members of a conditioned set, and stays
+    /// empty for members of an UNCONDITIONED set (only sets carrying a `.run_if`
+    /// are "gating", §7.2).
+    #[test]
+    fn gating_sets_populated_only_for_conditioned_sets() {
+        struct GatingSet;
+        impl SystemSet for GatingSet {}
+        struct PlainSet;
+        impl SystemSet for PlainSet {}
+
+        let pool = fresh_pool();
+        let mut builder = ScheduleBuilder::new(pool);
+        builder.add_system(|| {}).in_set(GatingSet); // member of conditioned set
+        builder.add_system(|| {}).in_set(PlainSet); // member of unconditioned set
+        builder.configure_set(GatingSet).run_if(|| true);
+
+        let mut world = EcsMaster::new();
+        let schedule = builder.build(&mut world);
+
+        let with_gating = (0..schedule.systems.len())
+            .filter(|&i| !schedule.system_gating_sets[i].is_empty())
+            .count();
+        assert_eq!(
+            with_gating, 1,
+            "only the member of the conditioned set gets a non-empty gating-set list"
+        );
+        // The conditioned-set member also gets a has_condition bit (gated via set).
+        assert_eq!(
+            schedule.has_condition.count_ones(..),
+            1,
+            "the conditioned-set member's has_condition bit is set"
+        );
     }
 }

@@ -23,6 +23,19 @@
 
 use crate::ecs::core::system::system::System;
 
+/// Type-erased, read-only **run condition** (Phase 16).
+///
+/// A condition is any `impl IntoSystem<(), bool, M>` boxed into a
+/// `dyn System<Out = bool>`. It is stored entirely OUTSIDE [`SystemBox`]
+/// (which is pinned to `Out = ()`); the executor reaches it only through
+/// the gated Step 1.5 condition-eval pass, never on the no-condition hot
+/// path. See `PHASE-16-PLAN.md` §2.1.
+///
+/// The boxed system is `Send + Sync + 'static` because [`System`] carries
+/// the same bound, so a `BoolSystem` migrates across worker threads with
+/// the owning [`Schedule`] just like a regular system.
+pub(crate) type BoolSystem = Box<dyn System<Out = bool>>;
+
 /// Schedule-owned wrapper around a type-erased system body plus cached
 /// dispatcher metadata.
 ///

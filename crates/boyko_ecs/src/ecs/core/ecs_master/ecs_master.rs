@@ -1701,6 +1701,58 @@ impl EcsMaster {
         out
     }
 
+    /// Run a type-erased read-only **run condition** once on `&mut self`,
+    /// returning its `bool` verdict (Phase 16, `PHASE-16-PLAN.md` §5.1).
+    ///
+    /// Mirrors the [`run_cached_system`](Self::run_cached_system) sequence
+    /// but takes a `?Sized` `dyn System<Out = bool>` receiver (so it accepts
+    /// a `&mut BoolSystem` via `Box::as_mut`) and DELIBERATELY OMITS the
+    /// `apply` step:
+    ///
+    /// 1. [`System::initialize`] — idempotent (FS1); already ran at build,
+    ///    so this is a no-op every frame.
+    /// 2. [`UnsafeEcsCell::new_mutable`] — write-capable cell bound to the
+    ///    `&mut self` borrow scope.
+    /// 3. [`System::run_unsafe`] — the predicate body; returns the `bool`.
+    ///
+    /// # No `apply` (orchestrator decision, §0-P6a)
+    ///
+    /// Conditions are pure read-only predicates. A condition that uses
+    /// `Commands` / `EventWriter` is a documented logic error; its deferred
+    /// commands are DROPPED here (never flushed mid-eval-pass) rather than
+    /// applied — flushing structural mutations between two conditions in the
+    /// same eval pass would let the second condition observe a half-applied
+    /// world. The read-only contract is `debug_assert!`ed at build
+    /// (`schedule_builder.rs` Step 1).
+    ///
+    /// # Caller precondition
+    ///
+    /// The dispatcher holds the unique `&mut EcsMaster`, recovered at the
+    /// apply-window boundary where `running.count_ones() == 0` — so no
+    /// worker holds a live cell copy (the S1 contract). The only call site is
+    /// `Schedule::evaluate_ready_conditions` / `set_gate`.
+    ///
+    /// [`System`]: crate::ecs::core::system::system::System
+    /// [`System::initialize`]: crate::ecs::core::system::system::System::initialize
+    /// [`System::run_unsafe`]: crate::ecs::core::system::system::System::run_unsafe
+    /// [`UnsafeEcsCell::new_mutable`]: crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell::new_mutable
+    pub(crate) fn run_condition(&mut self, condition: &mut dyn System<Out = bool>) -> bool {
+        // FS1 no-op after build — conditions are initialized once in
+        // `ScheduleBuilder::try_build` Step 1, so their `Access` + `Local`
+        // state are already live before the first frame.
+        condition.initialize(self);
+        // SAFETY (S1 / Phase 16 CR2): `&mut self` is the dispatcher's unique
+        //   exclusive borrow on the world, recovered at the apply-window
+        //   boundary where `running == 0` (caller-checked) ⇒ no worker holds
+        //   a cell copy. `cell` is consumed by `run_unsafe` on the next line
+        //   and cannot escape, so no aliasing `UnsafeEcsCell` is minted.
+        let cell = unsafe { UnsafeEcsCell::new_mutable(self) };
+        // SAFETY (S1): as above — no other `System::run_unsafe` is in flight
+        //   on this `EcsMaster` (single-threaded eval at the barrier). The
+        //   cell does not outlive this statement.
+        unsafe { condition.run_unsafe(cell) }
+    }
+
     // ── Resources facade (Phase 8a Step 9) ───────────────────────────────────
 
     /// Inserts (or replaces) the world-global resource of type `R`.
@@ -2944,6 +2996,49 @@ mod tests {
             observed.load(Ordering::Relaxed),
             200,
             "run_cached_system must reuse cached state and read fresh world data"
+        );
+    }
+
+    /// Phase 16 — `run_condition(&mut dyn System<Out=bool>)` returns the
+    /// condition's bool verdict. A `|| true` condition returns `true`, a
+    /// `|| false` returns `false`. (Plan §10 `run_condition_returns_bool`.)
+    #[test]
+    fn run_condition_returns_constant_verdict() {
+        use crate::ecs::core::system::System;
+        use crate::ecs::core::system::function_system::FunctionSystem;
+
+        let mut ecs = EcsMaster::new();
+
+        let mut yes: FunctionSystem<_, _> = IntoSystem::into_system(|| true);
+        yes.initialize(&mut ecs);
+        assert!(ecs.run_condition(&mut yes), "`|| true` condition returns true");
+
+        let mut no: FunctionSystem<_, _> = IntoSystem::into_system(|| false);
+        no.initialize(&mut ecs);
+        assert!(!ecs.run_condition(&mut no), "`|| false` condition returns false");
+    }
+
+    /// Phase 16 — a `fn(Res<R>) -> bool` condition run via `run_condition`
+    /// reads the resource and returns the value-derived verdict. Mutating the
+    /// resource between calls flips the verdict (cached-system state reuse).
+    #[test]
+    fn run_condition_reads_resource_value() {
+        use crate::ecs::core::system::Res;
+        use crate::ecs::core::system::System;
+        use crate::ecs::core::system::function_system::FunctionSystem;
+
+        let mut ecs = EcsMaster::new();
+        ecs.resources.insert(Step4Res(5));
+
+        let mut cond: FunctionSystem<_, _> =
+            IntoSystem::into_system(|r: Res<Step4Res>| r.0.0 == 5);
+        cond.initialize(&mut ecs);
+        assert!(ecs.run_condition(&mut cond), "resource == 5 ⇒ true");
+
+        ecs.resource_mut::<Step4Res>().0 = 7;
+        assert!(
+            !ecs.run_condition(&mut cond),
+            "after mutation resource != 5 ⇒ false (cached-system state reused)"
         );
     }
 
