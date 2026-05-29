@@ -134,7 +134,7 @@ fn spawn_batch_three_component_bundle() {
                     y: i as f32,
                     z: 0.0,
                 },
-                health: Health(i as i32),
+                health: Health(i),
             }))
             .expect("1000 ≤ MAX_BATCH_HINT");
     });
@@ -396,7 +396,7 @@ fn resolve_and_cache_pool_ids_is_sorted() {
                 y: i as f32,
                 z: 0.0,
             },
-            health: Health(i as i32),
+            health: Health(i),
         }))
         .expect("16 ≤ MAX_BATCH_HINT");
     assert_eq!(ecs.entity_count(), 16);

@@ -797,61 +797,59 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// Test command: increments a static atomic counter via `apply` and
-    /// another via `Drop`. Verifies apply / drop paths independently.
-    static APPLY_COUNTER: AtomicUsize = AtomicUsize::new(0);
-    static DROP_COUNTER: AtomicUsize = AtomicUsize::new(0);
-
+    /// Test command: increments the apply-counter it borrows via `apply` and
+    /// the drop-counter via `Drop`. Verifies apply / drop paths independently.
+    ///
+    /// The counters are passed in by reference (`&'static AtomicUsize` is
+    /// `Send + Sync + 'static`, satisfying `Command: Send + 'static`) so each
+    /// test can own a dedicated pair of statics. This makes the suite immune
+    /// to parallel-execution interleaving — no two tests ever share a counter.
     struct CounterCommand {
         delta: usize,
+        apply_counter: &'static AtomicUsize,
+        drop_counter: &'static AtomicUsize,
     }
 
     impl Command for CounterCommand {
         fn apply(self, _world: &mut EcsMaster) {
-            APPLY_COUNTER.fetch_add(self.delta, Ordering::Relaxed);
+            self.apply_counter.fetch_add(self.delta, Ordering::Relaxed);
             // `self` falls out of scope here; its Drop runs next.
         }
     }
 
     impl Drop for CounterCommand {
         fn drop(&mut self) {
-            DROP_COUNTER.fetch_add(1, Ordering::Relaxed);
+            self.drop_counter.fetch_add(1, Ordering::Relaxed);
         }
-    }
-
-    /// Resets the counters between tests. Each test reads-then-resets so
-    /// the global state does not leak across tests, but parallel test
-    /// execution could interleave; the test runner is typically
-    /// `--test-threads=1`-safe enough for this module. We hedge by
-    /// reading deltas inside each test rather than asserting absolute
-    /// values across the suite.
-    fn reset_counters() -> (usize, usize) {
-        let a = APPLY_COUNTER.swap(0, Ordering::Relaxed);
-        let d = DROP_COUNTER.swap(0, Ordering::Relaxed);
-        (a, d)
     }
 
     #[test]
     fn empty_apply_is_noop() {
-        let _ = reset_counters();
+        // Per-test statics: no other test reads or writes these, so the
+        // assertions hold regardless of parallel test scheduling.
+        static APPLY: AtomicUsize = AtomicUsize::new(0);
+        static DROP: AtomicUsize = AtomicUsize::new(0);
         let mut q = CommandQueue::new();
         let mut world = EcsMaster::new();
         q.apply(&mut world);
-        let (a, d) = reset_counters();
-        assert_eq!(a, 0, "no commands ⇒ no apply");
-        assert_eq!(d, 0, "no commands ⇒ no drop");
+        assert_eq!(APPLY.load(Ordering::Relaxed), 0, "no commands ⇒ no apply");
+        assert_eq!(DROP.load(Ordering::Relaxed), 0, "no commands ⇒ no drop");
     }
 
     #[test]
     fn push_then_apply_runs_command() {
-        let _ = reset_counters();
+        static APPLY: AtomicUsize = AtomicUsize::new(0);
+        static DROP: AtomicUsize = AtomicUsize::new(0);
         let mut q = CommandQueue::new();
-        q.push(CounterCommand { delta: 7 });
+        q.push(CounterCommand {
+            delta: 7,
+            apply_counter: &APPLY,
+            drop_counter: &DROP,
+        });
         let mut world = EcsMaster::new();
         q.apply(&mut world);
-        let (a, d) = reset_counters();
-        assert_eq!(a, 7, "apply ran once with delta=7");
-        assert_eq!(d, 1, "drop ran once after apply");
+        assert_eq!(APPLY.load(Ordering::Relaxed), 7, "apply ran once with delta=7");
+        assert_eq!(DROP.load(Ordering::Relaxed), 1, "drop ran once after apply");
         // Bytes should be drained to len=0 post-apply.
         assert_eq!(q.bytes.len(), 0, "bytes drained after apply");
         assert_eq!(q.cursor, 0, "cursor reset to start after apply");
@@ -859,45 +857,61 @@ mod tests {
 
     #[test]
     fn push_many_then_apply_runs_each_command_once() {
-        let _ = reset_counters();
+        static APPLY: AtomicUsize = AtomicUsize::new(0);
+        static DROP: AtomicUsize = AtomicUsize::new(0);
         let mut q = CommandQueue::new();
         for i in 1..=10 {
-            q.push(CounterCommand { delta: i });
+            q.push(CounterCommand {
+                delta: i,
+                apply_counter: &APPLY,
+                drop_counter: &DROP,
+            });
         }
         let mut world = EcsMaster::new();
         q.apply(&mut world);
-        let (a, d) = reset_counters();
         // 1 + 2 + ... + 10 = 55.
-        assert_eq!(a, 55, "sum of deltas applied");
-        assert_eq!(d, 10, "each command dropped exactly once");
+        assert_eq!(APPLY.load(Ordering::Relaxed), 55, "sum of deltas applied");
+        assert_eq!(DROP.load(Ordering::Relaxed), 10, "each command dropped exactly once");
         assert_eq!(q.bytes.len(), 0);
     }
 
     #[test]
     fn drop_runs_drop_glue_on_unapplied_commands() {
-        let _ = reset_counters();
+        static APPLY: AtomicUsize = AtomicUsize::new(0);
+        static DROP: AtomicUsize = AtomicUsize::new(0);
         {
             let mut q = CommandQueue::new();
-            q.push(CounterCommand { delta: 42 });
-            q.push(CounterCommand { delta: 100 });
+            q.push(CounterCommand {
+                delta: 42,
+                apply_counter: &APPLY,
+                drop_counter: &DROP,
+            });
+            q.push(CounterCommand {
+                delta: 100,
+                apply_counter: &APPLY,
+                drop_counter: &DROP,
+            });
             // Don't call apply — let the queue's Drop handle it.
         }
-        let (a, d) = reset_counters();
-        assert_eq!(a, 0, "drop-only path does NOT apply");
-        assert_eq!(d, 2, "drop ran once per unapplied command");
+        assert_eq!(APPLY.load(Ordering::Relaxed), 0, "drop-only path does NOT apply");
+        assert_eq!(DROP.load(Ordering::Relaxed), 2, "drop ran once per unapplied command");
     }
 
     #[test]
     fn capacity_not_shrunk_after_apply() {
-        let _ = reset_counters();
+        static APPLY: AtomicUsize = AtomicUsize::new(0);
+        static DROP: AtomicUsize = AtomicUsize::new(0);
         let mut q = CommandQueue::new();
         for i in 1..=50 {
-            q.push(CounterCommand { delta: i });
+            q.push(CounterCommand {
+                delta: i,
+                apply_counter: &APPLY,
+                drop_counter: &DROP,
+            });
         }
         let peak_capacity = q.bytes.capacity();
         let mut world = EcsMaster::new();
         q.apply(&mut world);
-        let (_, _) = reset_counters();
         // bytes is drained (len=0) but capacity is retained (W3 policy).
         assert_eq!(q.bytes.len(), 0);
         assert_eq!(

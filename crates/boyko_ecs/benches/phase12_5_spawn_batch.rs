@@ -125,7 +125,7 @@ fn spawn_batch_10k_3comp(c: &mut Criterion) {
                                 y: (base + i) as f32,
                                 z: 0.0,
                             },
-                            health: Health((base + i) as i32),
+                            health: Health(base + i),
                         }))
                         .expect("5000 ≤ MAX_BATCH_HINT");
                 }

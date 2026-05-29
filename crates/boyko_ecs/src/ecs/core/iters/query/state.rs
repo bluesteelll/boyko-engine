@@ -212,7 +212,7 @@ mod tests {
     use super::*;
     use crate::ecs::core::component::component::Component;
     use crate::ecs::core::component::component_registry;
-    use crate::ecs::core::iters::query::filter::{Or, With, Without};
+    use crate::ecs::core::iters::query::filter::{Or, With};
     use crate::ecs::identifiers::primitives::ComponentId;
 
     // Component slots reserved for Phase 8b Step 6 unit tests. Chosen to

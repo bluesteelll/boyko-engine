@@ -11,14 +11,14 @@
 //!
 //! Covered cases (per plan §9 Step 9):
 //!
-//! * `unit_struct.rs`        — `#[derive(Bundle)] struct Marker;` →
-//!                              "Bundle requires at least one field".
-//! * `generic_struct.rs`     — `#[derive(Bundle)] struct G<T> { ... }` →
-//!                              "Bundle derive does not support generics".
-//! * `non_component_field.rs`— `#[derive(Bundle)] struct B { x: u32 }` →
-//!                              `u32: Component` is not satisfied.
-//! * `manual_impl_blocked.rs`— manual `impl Bundle for Foo` outside the
-//!                              macro → seal-trait error.
+//! * `unit_struct.rs` — `#[derive(Bundle)] struct Marker;` →
+//!   "Bundle requires at least one field".
+//! * `generic_struct.rs` — `#[derive(Bundle)] struct G<T> { ... }` →
+//!   "Bundle derive does not support generics".
+//! * `non_component_field.rs` — `#[derive(Bundle)] struct B { x: u32 }` →
+//!   `u32: Component` is not satisfied.
+//! * `manual_impl_blocked.rs` — manual `impl Bundle for Foo` outside the
+//!   macro → seal-trait error.
 
 #[cfg(not(miri))]
 #[test]

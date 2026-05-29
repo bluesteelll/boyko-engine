@@ -97,7 +97,7 @@ fn multi_type_isolation() {
     assert_eq!(d.events::<EventZ>().len(), 0, "Z untouched");
 
     // Send Y and Z; send nothing for X this frame.
-    d.send(0, EventY { y: 3.14 }).unwrap();
+    d.send(0, EventY { y: 3.5 }).unwrap();
     d.send(0, EventZ { z: 7 }).unwrap();
     d.send(0, EventZ { z: 8 }).unwrap();
     d.update_events();
@@ -107,7 +107,7 @@ fn multi_type_isolation() {
     assert_eq!(d.events::<EventZ>().len(), 2);
 
     // Validate Y content.
-    assert!((d.events::<EventY>()[0].y - 3.14_f32).abs() < 1e-5);
+    assert!((d.events::<EventY>()[0].y - 3.5_f32).abs() < 1e-5);
     // Validate Z content.
     assert_eq!(d.events::<EventZ>()[0].z, 7);
     assert_eq!(d.events::<EventZ>()[1].z, 8);

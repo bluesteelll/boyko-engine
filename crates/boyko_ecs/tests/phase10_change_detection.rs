@@ -243,6 +243,10 @@ fn changed_filter_after_mutation() {
 /// Plan §13.2 `or_added_changed_composition`:
 /// `Or<(Added<A>, Changed<B>)>` matches when either filter fires.
 #[test]
+// The `Query<&A, Or<(Added<A>, Changed<B>)>>` closure param is the query DSL
+// type under test; an alias would not aid readability (it relies on
+// SystemParam lifetime elision at the closure-arg position).
+#[allow(clippy::type_complexity)]
 fn or_filter_added_or_changed() {
     let _guard = TEST_MUTEX.lock().unwrap();
 
@@ -302,6 +306,7 @@ fn or_filter_added_or_changed() {
 /// (archetypal), short-circuiting the OR to true; the null-base branch
 /// in `Changed<B>::filter_fetch` is the safety net.
 #[test]
+#[allow(clippy::type_complexity)] // query DSL type under test; see note on or_filter_added_or_changed
 fn or_filter_with_archetypal_null_base() {
     let _guard = TEST_MUTEX.lock().unwrap();
 

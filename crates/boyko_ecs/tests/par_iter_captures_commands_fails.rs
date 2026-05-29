@@ -1,11 +1,11 @@
 //! Phase 9 PAR1 / CQ-SEND2 — trybuild compile-fail harness for the
 //! `par_iter` body capture rules.
 //!
-//! `Query::par_iter().for_each(closure)` requires `closure: Fn(D::Item<'_>)
-//! + Send + Sync` (PAR1). `Commands<'s>` is `!Sync` (CQ-SEND2 — its inner
-//! `&'s mut CommandQueue` borrow forbids shared cross-thread observation).
-//! Capturing `&mut Commands` inside the `for_each` closure therefore must
-//! fail to compile.
+//! `Query::par_iter().for_each(closure)` requires
+//! `closure: Fn(D::Item<'_>) + Send + Sync` (PAR1). `Commands<'s>` is `!Sync`
+//! (CQ-SEND2 — its inner `&'s mut CommandQueue` borrow forbids shared
+//! cross-thread observation). Capturing `&mut Commands` inside the `for_each`
+//! closure therefore must fail to compile.
 //!
 //! The trybuild test files live in `tests/par_iter_compile_fail/`. Each
 //! `.rs` file is compiled in isolation; its `.stderr` baseline is the

@@ -1840,16 +1840,21 @@ mod tests {
     // ── IS_ARCHETYPAL flags ─────────────────────────────────────────────
 
     #[test]
+    // Intentional const check: asserting a `QueryFilter` associated const is
+    // the test's purpose, so clippy's "constant in assert" lint does not apply.
+    #[allow(clippy::assertions_on_constants)]
     fn unit_filter_is_archetypal() {
         assert!(<() as QueryFilter>::IS_ARCHETYPAL);
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)] // intentional associated-const check
     fn with_filter_is_archetypal() {
         assert!(<With<A> as QueryFilter>::IS_ARCHETYPAL);
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)] // intentional associated-const check
     fn without_filter_is_archetypal() {
         assert!(<Without<A> as QueryFilter>::IS_ARCHETYPAL);
     }
@@ -2003,6 +2008,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)] // intentional associated-const check
     fn tuple_2_with_and_without_is_archetypal() {
         // (With<A>, Without<B>) is the canonical archetypal-AND tuple.
         // AND-fold of two `true` flags must yield `true`.
@@ -2086,6 +2092,7 @@ mod tests {
     // ── Or<F> tests ─────────────────────────────────────────────────────
 
     #[test]
+    #[allow(clippy::assertions_on_constants)] // intentional associated-const check
     fn or_filter_is_archetypal_iff_all_inner_archetypal() {
         // Or of two archetypal filters must AND-fold IS_ARCHETYPAL = true.
         assert!(

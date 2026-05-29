@@ -1,4 +1,10 @@
-#![feature(float_algebraic)]
+// `f32::algebraic_add` is a nightly intrinsic (`float_algebraic`). It is
+// enabled only under the `nightly` cargo feature; the `[[bench]]` entry for
+// this file carries `required-features = ["nightly"]`, so the stable
+// `--all-targets` build never compiles it (a bare `#![feature]` would be
+// `error[E0554]` on the stable channel). Run via:
+//     cargo +nightly bench --features nightly -p bench-bevy-vs-boyko
+#![cfg_attr(feature = "nightly", feature(float_algebraic))]
 
 //! Phase X.A Wave 8B + X.A.1 — bench harness for `Query::for_each_chunk`.
 //!

@@ -116,8 +116,8 @@ fn register_all() {
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 /// 1. `EventWriter::send` inside a scheduled system body writes through the
-/// per-lane buffer; events become visible via `events_of` after
-/// `update_events`.
+///    per-lane buffer; events become visible via `events_of` after
+///    `update_events`.
 #[test]
 fn event_writer_send_writes_to_buffer() {
     register_all();
@@ -157,7 +157,7 @@ fn event_writer_send_writes_to_buffer() {
 }
 
 /// 2. `EventReader::read` returns events sent during the previous frame.
-/// Two-frame protocol: frame 1 writes via raw API + update, frame 2 reads.
+///    Two-frame protocol: frame 1 writes via raw API + update, frame 2 reads.
 #[test]
 fn event_reader_reads_after_update() {
     register_all();
@@ -197,7 +197,7 @@ fn event_reader_reads_after_update() {
 }
 
 /// 3. The cursor advances on iter drop — re-running the same schedule does
-/// not re-yield the same events.
+///    not re-yield the same events.
 #[test]
 fn event_reader_cursor_skips_already_read() {
     register_all();
@@ -244,8 +244,8 @@ fn event_reader_cursor_skips_already_read() {
 }
 
 /// 4. `missed_events` reports the gap when the cursor falls behind
-/// `start_event_count` (ER7). Send a burst, swap twice without reading;
-/// cursor is left at 0, start_event_count moves forward.
+///    `start_event_count` (ER7). Send a burst, swap twice without reading;
+///    cursor is left at 0, start_event_count moves forward.
 #[test]
 fn event_reader_handles_missed_events() {
     register_all();
@@ -309,8 +309,8 @@ fn event_reader_handles_missed_events() {
 }
 
 /// 5. `is_empty` and `len` agree across all states (OQ2). When no events
-/// have been sent: both report empty. After a swap with N events: len = N,
-/// is_empty = false. After draining: len = 0, is_empty = true.
+///    have been sent: both report empty. After a swap with N events: len = N,
+///    is_empty = false. After draining: len = 0, is_empty = true.
 #[test]
 fn event_reader_is_empty_when_no_events() {
     register_all();
@@ -423,7 +423,7 @@ fn event_writer_send_many() {
 }
 
 /// 7. Mid-iteration `break` advances the cursor partially; the next
-/// `read()` resumes from where the previous one stopped.
+///    `read()` resumes from where the previous one stopped.
 #[test]
 fn event_reader_partial_iter_drops_cursor_correctly() {
     register_all();
@@ -457,17 +457,17 @@ fn event_reader_partial_iter_drops_cursor_correctly() {
         } else {
             &SECOND_PASS_COUNT
         };
-        let mut iter = reader.read();
+        let iter = reader.read();
         let limit = if phase == 0 { 2 } else { usize::MAX };
         let mut taken = 0;
-        while let Some(_ev) = iter.next() {
+        for _ev in iter {
             counter.fetch_add(1, Ordering::Relaxed);
             taken += 1;
             if taken >= limit {
                 break;
             }
         }
-        // `iter` drops here — cursor advances by `taken`.
+        // The iterator drops at the end of this `for` — cursor advances by `taken`.
     });
     let mut schedule = builder.build(&mut world);
 
@@ -486,7 +486,7 @@ fn event_reader_partial_iter_drops_cursor_correctly() {
 }
 
 /// 8. `EventWriter::send` debug-panics outside a scheduled system body
-/// (Phase 12 EW-NEW / W2). Release builds make this a no-op.
+///    (Phase 12 EW-NEW / W2). Release builds make this a no-op.
 #[test]
 #[cfg(debug_assertions)]
 fn event_writer_send_debug_panics_outside_system_run() {

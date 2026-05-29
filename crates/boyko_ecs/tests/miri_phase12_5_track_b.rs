@@ -180,9 +180,10 @@ fn miri_query_view_iter_no_provenance_violation() {
 
 /// Phase 12.5 Track B C3 — single-iteration mutable smoke under Miri.
 ///
-/// Exercises the write-capable mint path (`UnsafeEcsCell::archetype_ptr_mut`)
-/// + `set_table_mut` end-to-end. The mutable cursor returns `&mut T` items;
-/// Tree Borrows would catch any retag-into-unique-from-shared violation here.
+/// Exercises the write-capable mint path
+/// (`UnsafeEcsCell::archetype_ptr_mut` + `set_table_mut`) end-to-end. The
+/// mutable cursor returns `&mut T` items; Tree Borrows would catch any
+/// retag-into-unique-from-shared violation here.
 #[test]
 fn miri_query_view_iter_mut_no_provenance_violation() {
     register();

@@ -134,8 +134,10 @@ mod tests {
     /// world pointer, and invokes the hook (the Wave-4 dispatch contract).
     #[test]
     fn trigger_on_add_fires_installed_hook_once() {
-        let mut hooks = ComponentHooks::default();
-        hooks.on_add = Some(count_fire_installed as HookFn);
+        let hooks = ComponentHooks {
+            on_add: Some(count_fire_installed as HookFn),
+            ..ComponentHooks::default()
+        };
         // Write-once slot; first install in this binary must succeed.
         assert!(component_registry::try_set_hooks(DISPATCH_HOOKED_ID, hooks));
 

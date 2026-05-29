@@ -209,6 +209,10 @@ fn bench_mut_deref_guard_overhead(c: &mut Criterion) {
 /// archetype — including those that contain neither A nor B. This bench
 /// measures the per-archetype walk overhead at increasing archetype
 /// counts. Linear scaling expected.
+// The `Query<&CompA, Or<(Added<CompA>, Changed<CompB>)>>` closure param is the
+// query DSL type being benched; an alias would not aid readability (it relies
+// on SystemParam lifetime elision at the closure-arg position).
+#[allow(clippy::type_complexity)]
 fn bench_or_added_changed_archetype_count_dominated(c: &mut Criterion) {
     register_components();
     let pool = build_pool(4);

@@ -1692,6 +1692,10 @@ mod tests {
     }
 
     #[test]
+    // Intentional const check: asserting the value of a `QueryData` associated
+    // const is the whole point of the test, so clippy's "constant in assert"
+    // lint does not apply.
+    #[allow(clippy::assertions_on_constants)]
     fn ref_t_is_read_only() {
         assert!(
             <&MyComp as QueryData>::IS_READ_ONLY,
@@ -1700,6 +1704,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)] // intentional associated-const check
     fn mut_t_is_not_read_only() {
         assert!(
             !<&mut MyComp as QueryData>::IS_READ_ONLY,
@@ -1836,6 +1841,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)] // intentional associated-const check
     fn tuple_2_all_read_is_read_only() {
         assert!(
             <(&MyComp, &OtherComp) as QueryData>::IS_READ_ONLY,
@@ -1844,6 +1850,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)] // intentional associated-const check
     fn tuple_2_with_mut_is_not_read_only() {
         assert!(
             !<(&MyComp, &mut OtherComp) as QueryData>::IS_READ_ONLY,

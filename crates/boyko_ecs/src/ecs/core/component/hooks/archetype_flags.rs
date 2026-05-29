@@ -166,8 +166,10 @@ mod tests {
     #[test]
     fn insert_from_hooks_raises_only_declared_kinds() {
         // Install an on_add-only hook set for HOOK_ADD_ID.
-        let mut add_only = ComponentHooks::default();
-        add_only.on_add = Some(dummy as super::super::HookFn);
+        let add_only = ComponentHooks {
+            on_add: Some(dummy as super::super::HookFn),
+            ..ComponentHooks::default()
+        };
         assert!(
             component_registry::try_set_hooks(HOOK_ADD_ID.0, add_only),
             "first install into a fresh slot must succeed"
@@ -183,8 +185,10 @@ mod tests {
 
     #[test]
     fn insert_from_hooks_with_insert_only_raises_insert_bit() {
-        let mut insert_only = ComponentHooks::default();
-        insert_only.on_insert = Some(dummy as super::super::HookFn);
+        let insert_only = ComponentHooks {
+            on_insert: Some(dummy as super::super::HookFn),
+            ..ComponentHooks::default()
+        };
         assert!(component_registry::try_set_hooks(HOOK_INSERT_ID.0, insert_only));
 
         let mut f = ArchetypeFlags::empty();

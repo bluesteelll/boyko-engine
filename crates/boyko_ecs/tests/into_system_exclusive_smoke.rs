@@ -24,17 +24,18 @@ use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::system::IntoSystem;
 use boyko_ecs::ecs::core::system::system::System;
 
-/// Global probe counter — closures and fn-items below increment it so the
-/// test can assert each body executed exactly once. `AtomicUsize` is
-/// `Send + Sync`, satisfying the `Fn(&mut EcsMaster) + Send + Sync +
+/// Per-test probe counter for `into_system_exclusive_fn_compiles_and_runs`.
+/// Each test owns a distinct `static` so parallel execution cannot let a
+/// sibling's increment corrupt this test's exact-once assertion. `AtomicUsize`
+/// is `Send + Sync`, satisfying the `Fn(&mut EcsMaster) + Send + Sync +
 /// 'static` bound on the blanket.
-static COUNTER: AtomicUsize = AtomicUsize::new(0);
+static RUN_ONCE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 /// Free fn-item exclusive body. Captures no state; the function
 /// identifier itself is the closure substitute (the `IntoSystem` blanket
 /// must accept named fn items as readily as closures).
-fn exclusive_system(_world: &mut EcsMaster) {
-    COUNTER.fetch_add(1, Ordering::Relaxed);
+fn run_once_body(_world: &mut EcsMaster) {
+    RUN_ONCE_COUNTER.fetch_add(1, Ordering::Relaxed);
 }
 
 /// `IntoSystem::into_system(fn_item)` infers the
@@ -42,12 +43,14 @@ fn exclusive_system(_world: &mut EcsMaster) {
 /// `ExclusiveFunctionSystem<F>`, and `run_system_once` drives it end-to-end.
 #[test]
 fn into_system_exclusive_fn_compiles_and_runs() {
-    COUNTER.store(0, Ordering::Relaxed);
+    // `RUN_ONCE_COUNTER` is owned solely by this test (no sibling mutates it),
+    // so the exact-once assertion is immune to parallel test execution.
+    RUN_ONCE_COUNTER.store(0, Ordering::Relaxed);
     let mut world = EcsMaster::new();
-    let mut sys = IntoSystem::into_system(exclusive_system);
+    let mut sys = IntoSystem::into_system(run_once_body);
     world.run_system_once(&mut sys);
     assert_eq!(
-        COUNTER.load(Ordering::Relaxed),
+        RUN_ONCE_COUNTER.load(Ordering::Relaxed),
         1,
         "exclusive system body must execute exactly once via run_system_once"
     );
@@ -75,8 +78,14 @@ fn into_system_exclusive_closure_works() {
 /// this bit at build time.
 #[test]
 fn exclusive_system_has_universal_access() {
+    // Function-scope `static` — `'static` (the blanket bound requires it) yet
+    // visible only to this test, so no sibling can perturb it.
+    static RUNS: AtomicUsize = AtomicUsize::new(0);
+    RUNS.store(0, Ordering::Relaxed);
     let mut world = EcsMaster::new();
-    let mut sys = IntoSystem::into_system(exclusive_system);
+    let mut sys = IntoSystem::into_system(|_w: &mut EcsMaster| {
+        RUNS.fetch_add(1, Ordering::Relaxed);
+    });
     // Drive a single dispatch to exercise `initialize`; access stays
     // identical post-init because EXC2 seeds it at construction.
     world.run_system_once(&mut sys);

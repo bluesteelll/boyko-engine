@@ -130,7 +130,7 @@ fn gate_spawn_batch_10k_3comp(c: &mut Criterion) {
                         .spawn_batch((0..5_000).map(move |i| PosVelHealth {
                             pos: Position { x: (base + i) as f32, y: 0.0, z: 0.0 },
                             vel: Velocity { x: 0.0, y: (base + i) as f32, z: 0.0 },
-                            health: Health((base + i) as i32),
+                            health: Health(base + i),
                         }))
                         .expect("5000 <= MAX_BATCH_HINT");
                 }
