@@ -76,10 +76,19 @@ depth counter to a thread-local). One pre-existing, non-14a TB finding (F4 —
 events); mutable component access in the hook view (`get_component_mut`);
 derive+runtime *merge* (vs the current XOR).
 
-### Phase 15 — Schedule sets / system orderings
-Bevy-style `before` / `after` / `in_set` constraints with topological
-resolution. Phase 9's `ConflictGraph` + Kahn already handles dependency
-edges; this is mostly a builder-API addition. ~1-2 weeks.
+### Phase 15 — Schedule sets / system orderings — ✅ DONE
+Bevy-style `before` / `after` / `in_set` + set-level (`configure_set`) +
+set-hierarchy ordering, with `#[derive(SystemSet)]` enum support and
+`try_build`/`build` diagnostics. Completed Phase 9's DORMANT scaffold
+(`OrderingEdge`/`SystemKey`/Tarjan-SCC/Kahn were already present + tested —
+this finished the deferred "Wave 5 Step 14"). Build-time edge expansion +
+set-hierarchy flatten feed the EXISTING `ConflictGraph` + Kahn pipeline; the
+executor hot path is byte-identical (0%-regression verified on the 50-systems
+bench). No `unsafe` added. See `docs/PHASE-15-RESULTS.md`.
+
+Deferred: auto sync-point coalescing, `before_ignore_deferred`, dropping the
+redundant conflict bit for pure ordering edges (all parallelism micro-opts,
+benchmark-gated, would touch the 0%-protected executor).
 
 ### Phase 16 — Run conditions
 `.run_if(cond)` predicates on systems. Lazy evaluation per frame. Cheap
