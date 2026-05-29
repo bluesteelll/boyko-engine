@@ -90,9 +90,20 @@ Deferred: auto sync-point coalescing, `before_ignore_deferred`, dropping the
 redundant conflict bit for pure ordering edges (all parallelism micro-opts,
 benchmark-gated, would touch the 0%-protected executor).
 
-### Phase 16 — Run conditions
-`.run_if(cond)` predicates on systems. Lazy evaluation per frame. Cheap
-to add via SystemMeta extension. ~1 week.
+### Phase 16 — Run conditions — ✅ DONE
+`.run_if(cond)` on systems + sets; a condition is any `fn(SystemParams…) -> bool`
+(`impl IntoSystem<(), bool, M>`). Built-in `run_once`. Conditions evaluated
+single-threaded at the apply-window boundary (`running==0` ⟹ race-free); a false
+fold skips the body but its `before` successors still run; set conditions
+evaluated once/frame; eager fold (no short-circuit). **0%-regression verified**
+(new code in a separate `evaluate_ready_conditions` pass gated by a
+`has_condition` bitset; `try_dispatch_ready` + `SystemBox` byte-identical).
+`run_condition` does NOT call `apply` (pure predicates). See
+`docs/PHASE-16-RESULTS.md`.
+
+Deferred: `resource_exists` (needs `Option<Res>` param), typed combinators
+(`.and`/`.or`/`.not`), `on_event`, tick-aware conditions (`Changed`/`Added` —
+Phase 16.1), `in_state` (→ Phase 17).
 
 ### Phase 17 — States / state transitions
 Tagged enum states + `OnEnter` / `OnExit` schedule labels. Composes with
