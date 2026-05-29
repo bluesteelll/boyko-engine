@@ -353,9 +353,11 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
         if inland.generation() != entity.generation() {
             return None;
         }
-        // SAFETY (U1, U2, U11): archetype_ptr was minted via raw arithmetic
-        //   from the bundle slab at register time; slab heap address is
-        //   stable for `'w`.
+        // SAFETY (U1, U2, U11, F1): archetype_ptr was minted via the bundle's
+        //   `UnsafeCell::raw_get` helper at register time; slab heap address is
+        //   stable for `'w`, and the pointer is interior-mutable
+        //   (`SharedReadWrite`, F4-rooted) so it survives sibling structural
+        //   writes under TB/SB (whole slab element is `UnsafeCell`-wrapped).
         let arch_ptr: *const _ = inland.archetype_ptr();
         let arch_ref = unsafe { &*arch_ptr };
         // Membership check — the bitset is the dedup-mirror of matched_ids.
@@ -401,11 +403,13 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
         if inland_copy.generation() != entity.generation() {
             return None;
         }
-        // SAFETY (U1, U2, U11, U14): the inland-cached `archetype_ptr` was
-        //   minted with write-capable provenance under `&mut EcsMaster` at
-        //   register time (Phase 7 W7); slab heap address is stable for
-        //   `'w`; `&mut self` upstream of this view forbids any aliasing
-        //   `&` to the same archetype slot.
+        // SAFETY (U1, U2, U11, U14, F1): the inland-cached `archetype_ptr` was
+        //   minted with write-capable, interior-mutable (`SharedReadWrite`,
+        //   F4-rooted) provenance via the bundle's `UnsafeCell::raw_get` helper
+        //   at register time (Phase 7 W7); slab heap address is stable for
+        //   `'w`; the pointer survives sibling structural writes under TB/SB
+        //   (whole slab element is `UnsafeCell`-wrapped); `&mut self` upstream
+        //   of this view forbids any aliasing `&` to the same archetype slot.
         let arch_ptr: *mut _ = inland_copy.archetype_ptr();
         let arch_ref = unsafe { &*arch_ptr };
         let bitset = state.archetype_state.matched_archetypes_bitset();

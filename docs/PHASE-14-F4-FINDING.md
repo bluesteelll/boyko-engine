@@ -1,6 +1,19 @@
 # Phase 14a — F4 deferred finding: pre-existing remove-migration Tree-Borrows UB
 
-**Status:** DEFERRED (pre-existing, not introduced by Phase 14a). Same class as
+**Status:** ✅ RESOLVED (Phase F4 fix — `UnsafeCell`-rooted archetype slab). The
+archetype slab is now `Box<[UnsafeCell<MaybeUninit<Archetype>>; N]>`, every pointer
+minted via `UnsafeCell::raw_get` (interior-mutable `SharedReadWrite` root), so a
+stored archetype pointer survives a sibling `current_index` write. The
+`miri_dual_presence_window_swap_remove` test was un-ignored and passes under BOTH
+Tree Borrows AND Stacked Borrows; the ~12 reborrow sites are now sound with zero
+hot-path change (0%-regression). See `docs/PHASE-F4-FIX-PLAN.md`. The original
+finding is preserved below for the root-cause record.
+
+---
+
+_Original finding (now resolved):_
+
+**Status (historical):** DEFERRED (pre-existing, not introduced by Phase 14a). Same class as
 the Phase 9.1 multi-thread-Miri deferral: a sound-by-design raw-pointer pattern
 that the *experimental* Tree-Borrows rules flag.
 

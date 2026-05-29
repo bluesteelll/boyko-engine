@@ -10,9 +10,12 @@
 //! `*mut Archetype` pointers in later Phase 7 steps without ever dangling
 //! across `create_archetype` calls.
 
+use core::cell::UnsafeCell;
 use core::ptr::{self, addr_of_mut};
 use std::mem::MaybeUninit;
 use std::ops::{Index, IndexMut};
+
+use static_assertions::assert_impl_all;
 
 use crate::ecs::core::archetype::archetype::{Archetype, Column};
 use crate::ecs::core::archetype::archetype_signature::ArchetypeSignature;
@@ -33,6 +36,22 @@ const SLAB_WORDS: usize = MAX_ARCHETYPES / 64;
 const _: () = assert!(MAX_ARCHETYPES.is_multiple_of(64), "MAX_ARCHETYPES must be a multiple of 64");
 const _: () = assert!(SLAB_WORDS == 16, "SLAB_WORDS must equal 16 for MAX_ARCHETYPES=1024");
 const _: () = assert!(MAX_ARCHETYPES <= u16::MAX as usize, "slot indices must fit in u16");
+
+// Phase F4 (I8): wrapping the slab element in `UnsafeCell<MaybeUninit<_>>`
+// must not change its size, alignment, or stride versus a bare `Archetype`.
+// Both `UnsafeCell<T>` and `MaybeUninit<T>` are `#[repr(transparent)]`, so the
+// slab allocation (`size_of::<element>() * MAX_ARCHETYPES`) and the
+// `slot_idx * stride` pointer arithmetic stay byte-identical to the pre-F4
+// `Box<[MaybeUninit<Archetype>; N]>` layout. If a future libstd ever altered
+// this, these asserts trip before any UB.
+const _: () = assert!(
+    size_of::<UnsafeCell<MaybeUninit<Archetype>>>() == size_of::<Archetype>(),
+    "F4: UnsafeCell<MaybeUninit<Archetype>> must be the same size as Archetype",
+);
+const _: () = assert!(
+    align_of::<UnsafeCell<MaybeUninit<Archetype>>>() == align_of::<Archetype>(),
+    "F4: UnsafeCell<MaybeUninit<Archetype>> must have the same align as Archetype",
+);
 
 /// Sentinel marker in `id_to_slot` for "no slot for this archetype id".
 const NO_SLOT: u16 = u16::MAX;
@@ -57,12 +76,31 @@ impl std::error::Error for BundleFullError {}
 
 /// Slab-backed collection of [`Archetype`]s with stable pointer addresses.
 ///
-/// # Layout & invariants (Phase 7 D1 / U1, U2, U8, U11, U12, U13)
+/// # Layout & invariants (Phase 7 D1 / U1, U2, U8, U11, U12, U13; Phase F4 F1-F3)
 ///
-/// - `slots` is a [`Box`] of `[MaybeUninit<Archetype>; MAX_ARCHETYPES]`.
-///   The `Box` is allocated once in [`Self::new`] and **never reassigned**.
-///   The slab base address is therefore stable for the bundle's lifetime
-///   (U1) and outlives every pointer minted from it (U2).
+/// - `slots` is a [`Box`] of
+///   `[UnsafeCell<MaybeUninit<Archetype>>; MAX_ARCHETYPES]`. The `Box` is
+///   allocated once in [`Self::new`] and **never reassigned**. The slab base
+///   address is therefore stable for the bundle's lifetime (U1) and outlives
+///   every pointer minted from it (U2).
+/// - Phase F4: every slab element is wrapped in an [`UnsafeCell`] (cell
+///   OUTERMOST, `MaybeUninit` inside) so that all bytes of every slot —
+///   including `Archetype::current_index`, which a sibling spawn mutates —
+///   are interior-mutable. Pointers minted via [`UnsafeCell::raw_get`] carry
+///   `SharedReadWrite` provenance under Stacked Borrows and survive sibling
+///   structural writes under Tree Borrows. This is what lets `EntityInland`
+///   cache a `*mut Archetype` that stays legal to reborrow after later spawns
+///   into the same archetype write through a sibling pointer (F4 finding,
+///   `docs/PHASE-14-F4-FINDING.md`). Mirrors the established
+///   `Box<[UnsafeCell<Tick>]>` discipline in `component_pool.rs`.
+/// - **F4 mint discipline (load-bearing):** the SOLE entry points that mint a
+///   slot pointer are [`Self::slot_ptr_mut`] / [`Self::slot_ptr`]. No method
+///   ever calls `self.slots.as_mut_ptr()` — that would form a transient
+///   `&mut [UnsafeCell<…>; N]` array-level retag whose children re-introduce
+///   the sibling relationship one level up, defeating the fix. The `&self`
+///   helpers go through `self.slots.as_ptr()` (a shared `&[UnsafeCell; N]`
+///   whose elements' contents are interior-mutable) and never form an array
+///   `&mut`.
 /// - `occupied[w]` bit `b` is set iff slot `w * 64 + b` is fully initialised.
 ///   `Drop` walks the bitset and calls `drop_in_place` per occupied slot
 ///   exactly once (U12).
@@ -73,7 +111,14 @@ impl std::error::Error for BundleFullError {}
 ///   resized lazily on the first access to a higher id.
 pub struct ArchetypeBundle {
     /// Heap-allocated fixed-size slab. Private — never reassigned after `new()`.
-    slots: Box<[MaybeUninit<Archetype>; MAX_ARCHETYPES]>,
+    ///
+    /// Phase F4: each element is `UnsafeCell<MaybeUninit<Archetype>>` (cell
+    /// outermost = interior-mutability/provenance root, `MaybeUninit` inside =
+    /// per-slot init tracking via `self.occupied`). `UnsafeCell<T>` and
+    /// `MaybeUninit<T>` are both `#[repr(transparent)]`, so the element's
+    /// size/align/stride is identical to `Archetype` (const-asserted below);
+    /// slab allocation and `slot * stride` arithmetic are unchanged.
+    slots: Box<[UnsafeCell<MaybeUninit<Archetype>>; MAX_ARCHETYPES]>,
     /// Occupancy bitset; bit `w*64 + b` is set iff `slots[w*64 + b]` is live.
     occupied: [u64; SLAB_WORDS],
     /// Sparse map `ArchetypeId.0 → slot index`. `NO_SLOT` (= `u16::MAX`)
@@ -88,6 +133,48 @@ pub struct ArchetypeBundle {
     /// consistency invariant maintained across all mutating methods.
     count: usize,
 }
+
+// SAFETY (Phase F4 R1 / SEND10 — mirrors `ComponentPool` `component_pool.rs`):
+//
+// Wrapping the slab element in `UnsafeCell` makes `ArchetypeBundle` `!Sync`
+// (and, transitively, `!Send`) by the auto-trait rules, removing the auto
+// impls that the Phase-9 scheduler relies on for sharing `&EcsMaster` across
+// worker threads (`Archetype`, `ArchetypeMaster`, and `EcsMaster` all carry
+// MANUAL `unsafe impl Send/Sync` and would otherwise compile against a
+// `!Send`/`!Sync` field without complaint — hence the `assert_impl_all!`
+// gate below makes a regression a build error). The manual impls are sound:
+//
+//   - All slab MUTATION (`add_archetype*`, `remove_archetype`, `clear`, the
+//     in-place construction writes, and the sibling-spawn `current_index += 1`
+//     reached through a minted `*mut Archetype`) happens on `&mut self`
+//     structural-op paths that the dispatcher serialises inside the apply
+//     window (SCH3). No worker thread holds a `&mut`-derived slab pointer
+//     concurrently with another thread's structural op.
+//   - Worker threads access the bundle only through `&self` read paths
+//     (`get_archetype_ptr`, `iter_occupied_ptrs`, `iter`), reading immutable
+//     `Archetype`s; the `ConflictGraph` guarantees no overlapping mutable
+//     view is live (SCH7).
+//   - Each slot is its OWN `UnsafeCell` (per-element, mirroring the per-row
+//     `Tick` cells), so interior mutation through one slot's minted pointer
+//     is a distinct memory location from every other slot — no shared
+//     interior-mutable state is transmitted across threads beyond the
+//     dispatcher-governed window.
+//
+// The `UnsafeCell` therefore changes only the borrow-stack/tree provenance of
+// the slab pointers (the F4 fix); it introduces no new cross-thread sharing
+// beyond what the pre-F4 `Box<[MaybeUninit<Archetype>; N]>` already exposed
+// under the same scheduler contract.
+unsafe impl Send for ArchetypeBundle {}
+unsafe impl Sync for ArchetypeBundle {}
+
+// Phase F4 R1 gate (P2): the manual impls above are load-bearing for the
+// Phase-9 scheduler. A bare `cargo check` is a false-green here because
+// `Archetype` / `ArchetypeMaster` / `EcsMaster` have their own manual
+// `unsafe impl Send/Sync` and compile regardless of this type. This positive
+// assertion (a `const _:` item, fires on every compile) makes the build FAIL
+// if the manual impls are ever removed or the field change is reverted.
+// Mirrors the `QueryView` / `BundleColumnCache` Send/Sync assertions.
+assert_impl_all!(ArchetypeBundle: Send, Sync);
 
 impl Default for ArchetypeBundle {
     #[inline]
@@ -105,23 +192,28 @@ impl ArchetypeBundle {
     /// stack — W6 fix).
     #[cold]
     pub fn new() -> Self {
-        // SAFETY (slab init / C3):
+        // SAFETY (slab init / C3 + F4):
         //   `Box::<T>::new_uninit()` allocates space for `T` on the heap and
-        //   returns `Box<MaybeUninit<T>>`. For `T = [MaybeUninit<Archetype>; N]`
-        //   the resulting allocation is uninitialised memory of the correct
-        //   size and alignment, sized via the heap allocator with no stack
+        //   returns `Box<MaybeUninit<T>>`. For
+        //   `T = [UnsafeCell<MaybeUninit<Archetype>>; N]` the resulting
+        //   allocation is uninitialised memory of the correct size and
+        //   alignment, sized via the heap allocator with no stack
         //   construction of the 8.4 MB temporary.
         //
         //   `assume_init()` is sound because the array element type is
-        //   `MaybeUninit<Archetype>`: an array of `MaybeUninit<U>` is itself
-        //   always "initialised" in the type-system sense (every element is
-        //   `MaybeUninit`, which has no validity requirement). Per-slot
-        //   initialisation is tracked separately via `self.occupied`.
+        //   `UnsafeCell<MaybeUninit<Archetype>>`, which has NO validity
+        //   invariant: `MaybeUninit<Archetype>` is valid for any bit pattern
+        //   (including uninitialised), and the `#[repr(transparent)]`
+        //   `UnsafeCell` wrapper adds none. An array of such elements is
+        //   therefore always "initialised" in the type-system sense.
+        //   Per-slot initialisation of the inner `Archetype` is tracked
+        //   separately via `self.occupied`.
         //
         //   `Box::new_uninit` is stable since Rust 1.82; boyko-engine targets
         //   Rust 2024 (≥ 1.93).
         let slots = unsafe {
-            Box::<[MaybeUninit<Archetype>; MAX_ARCHETYPES]>::new_uninit().assume_init()
+            Box::<[UnsafeCell<MaybeUninit<Archetype>>; MAX_ARCHETYPES]>::new_uninit()
+                .assume_init()
         };
 
         Self {
@@ -143,6 +235,61 @@ impl ArchetypeBundle {
     #[cold]
     pub fn with_capacity(_capacity: usize) -> Self {
         Self::new()
+    }
+
+    /// Mints a write-capable `*mut Archetype` for the slab slot `slot_idx`.
+    ///
+    /// Phase F4 — **the SOLE mint entry** for slot pointers (read paths go
+    /// through [`Self::slot_ptr`], which delegates here and casts to
+    /// `*const`). Every structural-op method, iterator, and `Drop` routes its
+    /// pointer through this helper; no site calls `self.slots.as_mut_ptr()`.
+    ///
+    /// The caller is responsible for the slot being initialised (occupancy
+    /// bit set) before dereferencing the result for a read, and for upholding
+    /// the aliasing contract (`&mut self` / apply-window exclusivity, SCH3).
+    /// This helper only mints provenance; it neither reads nor writes the slot.
+    #[inline(always)]
+    fn slot_ptr_mut(&self, slot_idx: usize) -> *mut Archetype {
+        debug_assert!(slot_idx < MAX_ARCHETYPES);
+        // SAFETY (F1 / F2 / F3 + U1):
+        //   - F1: the pointer is rooted at an `UnsafeCell` element. The ENTIRE
+        //     slab element is `UnsafeCell<MaybeUninit<Archetype>>`, so every
+        //     byte of the slot — including `current_index`, which a sibling
+        //     spawn mutates — is interior-mutable. Pointers derived from the
+        //     same cell address do not Disable one another under current Tree
+        //     Borrows, and carry `SharedReadWrite` (not the `SharedReadOnly` a
+        //     `&` would give) under Stacked Borrows; a sibling's write through
+        //     a same-cell-derived pointer does not pop this one. Identical to
+        //     the `Box<[UnsafeCell<Tick>]>` precedent (`component_pool.rs`
+        //     SEND10 / write_added_tick).
+        //   - F2: `UnsafeCell::raw_get` takes a `*const UnsafeCell<T>` and
+        //     returns a `*mut T` WITHOUT forming any reference, preserving U11
+        //     (no `&MaybeUninit`/`&UnsafeCell` reborrow is ever materialised).
+        //     `self.slots.as_ptr()` under `&self` yields only a shared
+        //     `&[UnsafeCell; N]` whose elements' CONTENTS are interior-mutable
+        //     — no `&mut [UnsafeCell; N]` array-level retag forms (F4 mint
+        //     discipline; calling `as_mut_ptr()` here would defeat the fix).
+        //   - F3: `*mut MaybeUninit<Archetype> as *mut Archetype` is a
+        //     transparent no-op (`MaybeUninit` is `#[repr(transparent)]`).
+        //   - U1: `slot_idx < MAX_ARCHETYPES` keeps `add` in-bounds of the
+        //     `MAX_ARCHETYPES`-element slab, whose heap base is stable for the
+        //     bundle's lifetime.
+        unsafe {
+            UnsafeCell::raw_get(self.slots.as_ptr().add(slot_idx)).cast::<Archetype>()
+        }
+    }
+
+    /// Mints a read-only `*const Archetype` for the slab slot `slot_idx`.
+    ///
+    /// Phase F4 — delegates to [`Self::slot_ptr_mut`] (same `UnsafeCell`-rooted
+    /// provenance) and narrows to `*const`. The read/write split is a CALLER
+    /// CONTRACT, not a provenance distinction: post-F4 the underlying pointer
+    /// is `SharedReadWrite`, so casting back to `*mut` is no longer UB — but
+    /// the read-only API surface is preserved so callers cannot accidentally
+    /// write through a `&self`-derived pointer.
+    #[inline(always)]
+    fn slot_ptr(&self, slot_idx: usize) -> *const Archetype {
+        self.slot_ptr_mut(slot_idx) as *const _
     }
 
     /// Returns a shared reference to the archetype with `index`, if present.
@@ -171,14 +318,17 @@ impl ArchetypeBundle {
     #[inline]
     pub fn get_archetype_mut(&mut self, index: ArchetypeId) -> Option<&mut Archetype> {
         let ptr = self.get_archetype_ptr_mut(index)?;
-        // SAFETY (U1, U2, U8, U11):
-        //   - U11: `get_archetype_ptr_mut` mints `ptr` from
-        //     `self.slots.as_mut_ptr()` (write-capable provenance) via
-        //     raw arithmetic; no `&mut MaybeUninit<Archetype>` reborrow
-        //     is ever created. Routing through the `&self`-flavoured
-        //     `get_archetype_ptr` instead would yield `*const`-provenance
-        //     (Frozen under Tree Borrows), and the `&mut *ptr` write
-        //     access would be UB.
+        // SAFETY (U1, U2, U8, U11, F4):
+        //   - U11/F4: `get_archetype_ptr_mut` mints `ptr` through
+        //     [`Self::slot_ptr_mut`] (`UnsafeCell::raw_get`); the slab element
+        //     is `UnsafeCell`-wrapped, so the pointer addresses an
+        //     interior-mutable (`SharedReadWrite`) location and no
+        //     `&mut MaybeUninit<Archetype>` (nor `&mut [UnsafeCell; N]`)
+        //     reborrow is ever created. Post-F4 the read-only
+        //     `get_archetype_ptr` mints the SAME `SharedReadWrite` provenance,
+        //     so the read/write split is a CALLER CONTRACT, not a provenance
+        //     one — `&mut *ptr` here is the sanctioned write surface and is
+        //     legal under both Tree Borrows and Stacked Borrows.
         //   - U8: occupancy bit verified inside the helper.
         //   - U1/U2: slab is heap-stable; `&mut self` gives exclusive
         //     access to the slab, so no other live borrow into this
@@ -190,17 +340,15 @@ impl ArchetypeBundle {
     /// `archetype_id`, or `None` if no slot is registered for that id.
     ///
     /// Phase 7 C4 / U11 + U1 — pointer minting recipe with write-capable
-    /// provenance. The pointer is minted via raw arithmetic on
-    /// `self.slots.as_mut_ptr()`; no `&mut MaybeUninit<Archetype>` reborrow
-    /// is created along the way. The `as_mut_ptr()` mint is **load-bearing**:
-    /// under Tree Borrows the `&self`-flavoured [`Self::get_archetype_ptr`]
-    /// returns `SharedReadOnly`-tagged provenance, and a `*const → *mut`
-    /// laundering cast would not grant write capability — child-writes
-    /// through that laundered pointer trip retag UB. Callers needing a
-    /// read-only pointer use [`Self::get_archetype_ptr`]; this method is
-    /// reserved for the write path (Step 7's `EntityInland` storage, the
-    /// `&mut Archetype` rematerialisation inside `EcsMaster::create_entity`,
-    /// and the internal safe accessor [`Self::get_archetype_mut`]).
+    /// provenance, now F4-rooted. The pointer is minted through
+    /// [`Self::slot_ptr_mut`] (`UnsafeCell::raw_get`); no
+    /// `&mut MaybeUninit<Archetype>` reborrow is created along the way. Post-F4
+    /// the read-only [`Self::get_archetype_ptr`] mints the SAME `SharedReadWrite`
+    /// provenance, so the read/write distinction between the two methods is a
+    /// CALLER CONTRACT, not a provenance one. This method is the write surface
+    /// (Step 7's `EntityInland` storage, the `&mut Archetype` rematerialisation
+    /// inside `EcsMaster::create_entity`, and the internal safe accessor
+    /// [`Self::get_archetype_mut`]).
     ///
     /// Slab base is stable for the bundle's lifetime (U1), so the pointer
     /// remains valid until the slot is removed or the bundle is dropped.
@@ -217,35 +365,32 @@ impl ArchetypeBundle {
         if slot_idx == NO_SLOT {
             return None;
         }
-        debug_assert!((slot_idx as usize) < MAX_ARCHETYPES);
-        // SAFETY (U11 + U1): mint from `as_mut_ptr()` so the resulting
-        //   pointer carries write-capable provenance; no `&mut MaybeUninit`
-        //   reborrow is created along the way. Slab base is heap-stable
-        //   for the bundle's lifetime (U1). `slot_idx < MAX_ARCHETYPES` is
-        //   enforced by the `id_to_slot` invariant (only ever populated
-        //   with indices emitted under that bound by `add_archetype_*`).
-        let slab_base: *mut MaybeUninit<Archetype> = self.slots.as_mut_ptr();
-        let slot_ptr_mu: *mut MaybeUninit<Archetype> =
-            unsafe { slab_base.add(slot_idx as usize) };
-        Some(slot_ptr_mu as *mut Archetype)
+        // F4: mint via the sole `&self` helper (`UnsafeCell::raw_get`). A
+        // `&mut self` method calling a `&self` helper is fine and avoids the
+        // `&mut [UnsafeCell; N]` array retag that `self.slots.as_mut_ptr()`
+        // would form. `slot_idx < MAX_ARCHETYPES` is enforced by the
+        // `id_to_slot` invariant (only ever populated with in-bound indices).
+        Some(self.slot_ptr_mut(slot_idx as usize))
     }
 
     /// Returns a read-only raw `*const Archetype` pointer to the slot for
     /// `archetype_id`, or `None` if no slot is registered for that id.
     ///
-    /// Phase 7 C4 / U11 — pointer minting recipe. The pointer is minted via
-    /// raw arithmetic on `self.slots.as_ptr()` (read-only provenance); no
-    /// `&MaybeUninit<Archetype>` reborrow is ever materialised. Under
-    /// Stacked Borrows / Tree Borrows, materialising `&MaybeUninit<Archetype>`
-    /// and casting through to a `*const Archetype` would retag against the
-    /// reference's borrow-stack frame; the raw-arithmetic recipe sidesteps
-    /// that by never producing a reference to the slot.
+    /// Phase 7 C4 / U11 — pointer minting recipe, now F4-rooted. The pointer is
+    /// minted through [`Self::slot_ptr`] (`UnsafeCell::raw_get`, narrowed to
+    /// `*const`); no `&MaybeUninit<Archetype>` / `&UnsafeCell<…>` reborrow is
+    /// ever materialised — the raw-arithmetic + `raw_get` recipe never produces
+    /// a reference to the slot.
     ///
-    /// # Provenance contract
-    /// Callers may **only read** through the returned pointer. The pointer
-    /// carries `SharedReadOnly` provenance under Tree Borrows; casting it
-    /// to `*mut Archetype` and dereferencing for write is UB. For write
-    /// access, obtain a fresh pointer via [`Self::get_archetype_ptr_mut`].
+    /// # Provenance contract (updated for F4)
+    /// Callers may **only read** through the returned pointer — but this is a
+    /// CALLER CONTRACT, not a provenance distinction. Post-F4 the whole slab
+    /// element is `UnsafeCell`-wrapped, so the pointer carries `SharedReadWrite`
+    /// provenance (the same root [`Self::get_archetype_ptr_mut`] mints) rather
+    /// than the pre-F4 `SharedReadOnly`. Casting it to `*mut` and writing is no
+    /// longer provenance-UB; the read-only return type is preserved only so the
+    /// read/write surfaces stay distinct at the API level. Write callers should
+    /// still obtain a pointer via [`Self::get_archetype_ptr_mut`].
     ///
     /// Slab base is stable for the bundle's lifetime (U1), so the pointer
     /// remains valid until the slot is removed or the bundle is dropped.
@@ -259,21 +404,10 @@ impl ArchetypeBundle {
         if slot_idx == NO_SLOT {
             return None;
         }
-        debug_assert!((slot_idx as usize) < MAX_ARCHETYPES);
-        // SAFETY (U11 — pointer minting recipe / U1 — slab stability):
-        //   `self.slots.as_ptr()` returns a `*const [MaybeUninit<Archetype>; N]`
-        //   without creating any & or &mut reference to a slab element. We
-        //   cast to `*const MaybeUninit<Archetype>` and use `.add(slot_idx)`
-        //   arithmetic to land on the slot. The resulting `*const Archetype`
-        //   carries Box's heap-allocation provenance directly with read-only
-        //   capability; subsequent reads through it cannot retag against a
-        //   stale `&MaybeUninit` borrow stack because no such borrow was
-        //   ever created. Slab base is stable for the bundle's lifetime
-        //   (U1). `slot_idx < MAX_ARCHETYPES` is enforced by the
-        //   `id_to_slot` invariant.
-        let slab_base: *const MaybeUninit<Archetype> = self.slots.as_ptr().cast();
-        let slot_ptr_mu: *const MaybeUninit<Archetype> = unsafe { slab_base.add(slot_idx as usize) };
-        Some(slot_ptr_mu as *const Archetype)
+        // F4: mint via the sole `&self` read helper (`raw_get` narrowed to
+        // `*const`). `slot_idx < MAX_ARCHETYPES` is enforced by the
+        // `id_to_slot` invariant.
+        Some(self.slot_ptr(slot_idx as usize))
     }
 
     /// In-place slab construction of a new archetype.
@@ -308,25 +442,19 @@ impl ArchetypeBundle {
         let mask = ComponentMask::from_components(component_ids);
         let signature = ArchetypeSignature::new(mask);
 
-        // SAFETY (U11 — pointer minting recipe):
-        //   Same pattern as `get_archetype_ptr`: mint a `*mut MaybeUninit<Archetype>`
-        //   from `self.slots.as_mut_ptr()` and cast to `*mut Archetype` without
-        //   creating any & or &mut reference to the slot. `slot_idx < MAX_ARCHETYPES`
-        //   is enforced above (capacity check + `free_slots` only ever holds
-        //   valid indices that were emitted under the same bound).
-        let slab_base: *mut MaybeUninit<Archetype> = self.slots.as_mut_ptr();
-        // SAFETY: `slot_idx as usize < MAX_ARCHETYPES` and the slab has
-        //   `MAX_ARCHETYPES` elements, so `add(slot_idx)` stays in-bounds.
-        let slot_ptr_mu: *mut MaybeUninit<Archetype> = unsafe { slab_base.add(slot_idx as usize) };
-        let slot_ptr: *mut Archetype = slot_ptr_mu as *mut Archetype;
+        // F4: mint via the sole `&self` helper (`UnsafeCell::raw_get`).
+        // `slot_idx < MAX_ARCHETYPES` is enforced above (capacity check +
+        // `free_slots` only ever holds valid indices emitted under that bound).
+        let slot_ptr: *mut Archetype = self.slot_ptr_mut(slot_idx as usize);
 
-        // SAFETY (U13 — in-place archetype construction):
+        // SAFETY (U13 — in-place archetype construction; F1-rooted):
         //   `slot_ptr` points at uninitialised but properly-sized and
-        //   -aligned memory for one `Archetype` inside the slab. Each
-        //   field of `Archetype` is written exactly once via
-        //   `addr_of_mut!.write()` (no intermediate `&mut` reborrow), so
-        //   no stack-allocated 8.4 KB `Archetype` temporary is constructed
-        //   (Windows main-thread stack is 1 MB by default — W6).
+        //   -aligned interior-mutable memory for one `Archetype` inside the
+        //   slab (the slot's `UnsafeCell` cell). Each field of `Archetype` is
+        //   written exactly once via `addr_of_mut!.write()` (no intermediate
+        //   `&mut` reborrow), so no stack-allocated 8.4 KB `Archetype`
+        //   temporary is constructed (Windows main-thread stack is 1 MB by
+        //   default — W6).
         //
         //   The `columns` array is initialised by zero-filling
         //   `MAX_COMPONENTS * size_of::<Column>()` bytes; the all-zero
@@ -429,12 +557,10 @@ impl ArchetypeBundle {
         // drop the old occupant and overwrite the slot.
         if raw_id < self.id_to_slot.len() && self.id_to_slot[raw_id] != NO_SLOT {
             let slot_idx = self.id_to_slot[raw_id];
-            let slab_base: *mut MaybeUninit<Archetype> = self.slots.as_mut_ptr();
-            // SAFETY (U11): mint via raw arithmetic; slot_idx is in-bounds
-            //   because it was emitted by an earlier `add_*` under the
-            //   `slot_idx < MAX_ARCHETYPES` invariant.
-            let slot_ptr: *mut Archetype =
-                unsafe { slab_base.add(slot_idx as usize) as *mut Archetype };
+            // F4: mint via the sole `&self` helper; slot_idx is in-bounds
+            // because it was emitted by an earlier `add_*` under the
+            // `slot_idx < MAX_ARCHETYPES` invariant.
+            let slot_ptr: *mut Archetype = self.slot_ptr_mut(slot_idx as usize);
 
             // === AB-R1: clear-bit-first ===
             // Step 1a: clear the `occupied` bit BEFORE drop_in_place. THIS
@@ -484,17 +610,15 @@ impl ArchetypeBundle {
             self.count as u16
         };
 
-        let slab_base: *mut MaybeUninit<Archetype> = self.slots.as_mut_ptr();
-        // SAFETY (U11): mint via raw arithmetic; slot_idx is in-bounds by
-        //   the same invariant as above.
-        let slot_ptr: *mut Archetype =
-            unsafe { slab_base.add(slot_idx as usize) as *mut Archetype };
-        // SAFETY (U13 — move-into-slot variant): `slot_ptr` is
-        //   uninitialised slab memory of the correct size/alignment; we
-        //   transfer ownership of `archetype` byte-wise into the slot
-        //   without invoking its destructor. After this line, the slot is
-        //   fully initialised and the local `archetype` binding is logically
-        //   moved (no further use is permitted).
+        // F4: mint via the sole `&self` helper; slot_idx is in-bounds by the
+        // same invariant as above.
+        let slot_ptr: *mut Archetype = self.slot_ptr_mut(slot_idx as usize);
+        // SAFETY (U13 — move-into-slot variant; F1-rooted): `slot_ptr` is
+        //   uninitialised interior-mutable slab memory of the correct
+        //   size/alignment; we transfer ownership of `archetype` byte-wise
+        //   into the slot without invoking its destructor. After this line,
+        //   the slot is fully initialised and the local `archetype` binding
+        //   is logically moved (no further use is permitted).
         unsafe { ptr::write(slot_ptr, archetype) };
 
         // Publish: set occupancy bit, record id mapping, bump count.
@@ -522,14 +646,14 @@ impl ArchetypeBundle {
             return false;
         }
 
-        let slab_base: *mut MaybeUninit<Archetype> = self.slots.as_mut_ptr();
-        // SAFETY (U11): mint via raw arithmetic; slot index in-bounds.
-        let slot_ptr: *mut Archetype =
-            unsafe { slab_base.add(slot_idx as usize) as *mut Archetype };
-        // SAFETY (U12): the occupancy bit (verified via `id_to_slot != NO_SLOT`)
-        //   guarantees the slot is initialised. `drop_in_place` runs the
-        //   destructor exactly once; afterwards we clear the bit so the
-        //   slot is treated as `MaybeUninit` for all future access.
+        // F4: mint via the sole `&self` helper; slot index in-bounds.
+        let slot_ptr: *mut Archetype = self.slot_ptr_mut(slot_idx as usize);
+        // SAFETY (U12 + F1): the occupancy bit (verified via `id_to_slot !=
+        //   NO_SLOT`) guarantees the slot is initialised. `&mut self` rules
+        //   out any concurrent reader through a stored sibling pointer.
+        //   `drop_in_place` runs the destructor exactly once; afterwards we
+        //   clear the bit so the slot is treated as `MaybeUninit` for all
+        //   future access.
         unsafe { ptr::drop_in_place(slot_ptr) };
 
         let word = (slot_idx as usize) / 64;
@@ -572,18 +696,19 @@ impl ArchetypeBundle {
     /// bitset, `id_to_slot`, `free_slots`, and `count` are reset; the slab
     /// allocation is retained.
     pub fn clear(&mut self) {
-        let slab_base: *mut MaybeUninit<Archetype> = self.slots.as_mut_ptr();
         for word_idx in 0..SLAB_WORDS {
             let mut word = self.occupied[word_idx];
             while word != 0 {
                 let bit = word.trailing_zeros() as usize;
                 let slot_idx = word_idx * 64 + bit;
-                // SAFETY (U12): the bit indicates an initialised slot;
+                // F4: mint via the sole `&self` helper. `&mut self` rules out
+                // any concurrent reader through a stored sibling pointer.
+                let slot_ptr: *mut Archetype = self.slot_ptr_mut(slot_idx);
+                // SAFETY (U12 + F1): the bit indicates an initialised slot;
                 //   `drop_in_place` runs its destructor exactly once. After
                 //   the loop we clear the entire occupancy bitset, so the
                 //   slot is then treated as `MaybeUninit`.
                 unsafe {
-                    let slot_ptr: *mut Archetype = slab_base.add(slot_idx) as *mut Archetype;
                     ptr::drop_in_place(slot_ptr);
                 }
                 word &= word - 1;
@@ -599,15 +724,21 @@ impl ArchetypeBundle {
     /// to every occupied slot, in ascending slot-index order.
     ///
     /// Pointers are stable for the bundle's lifetime (U1). Callers may only
-    /// read through these pointers — Stacked Borrows tags pointers minted
-    /// from `&self` as `SharedReadOnly`, and writes through them would trip
-    /// retag UB. For write access use [`Self::iter_occupied_ptrs_mut`].
+    /// read through these pointers — this is a CALLER CONTRACT; post-F4 each
+    /// pointer is interior-mutable (`SharedReadWrite`, F1-rooted). For write
+    /// access use [`Self::iter_occupied_ptrs_mut`].
     ///
     /// Bitset walk via TZCNT (`u64::trailing_zeros`) and BLSR
     /// (`word & word.wrapping_sub(1)`) — `O(popcount(occupied))`.
     #[inline]
     pub fn iter_occupied_ptrs(&self) -> impl Iterator<Item = *const Archetype> + '_ {
-        let slab_base: *const MaybeUninit<Archetype> = self.slots.as_ptr();
+        // F4 / P6: cache the CELL-ARRAY base (array provenance over the whole
+        // slab), NOT a single per-element `*Archetype` (whose provenance would
+        // cover one cell, making `add` into other cells out-of-bounds UB).
+        // `self.slots.as_ptr()` under `&self` is a shared `&[UnsafeCell; N]`
+        // (no `&mut`-array retag). Each element is minted in the closure via
+        // `raw_get` so it carries the per-element interior-mutable provenance.
+        let cell_base: *const UnsafeCell<MaybeUninit<Archetype>> = self.slots.as_ptr();
         let occupied = self.occupied;
         (0..SLAB_WORDS).flat_map(move |word_idx| {
             let mut word = occupied[word_idx];
@@ -618,15 +749,16 @@ impl ArchetypeBundle {
                 let bit = word.trailing_zeros() as usize;
                 word &= word.wrapping_sub(1);
                 let slot_idx = word_idx * 64 + bit;
-                // SAFETY (U8 + U11 + U1): the occupancy bit guarantees an
-                //   initialised slot; `slab_base.add(slot_idx)` is in-bounds
-                //   because `slot_idx < MAX_ARCHETYPES`; minted via raw
-                //   arithmetic (no `&MaybeUninit` reborrow). Slab base is
-                //   stable for the bundle's lifetime (U1). Provenance is
-                //   read-only (`*const`), matching the `&self` borrow.
-                let slot_ptr_mu: *const MaybeUninit<Archetype> =
-                    unsafe { slab_base.add(slot_idx) };
-                Some(slot_ptr_mu as *const Archetype)
+                // SAFETY (U8 + F1/F2/F3 + U1): the occupancy bit guarantees an
+                //   initialised slot; `cell_base.add(slot_idx)` strides over
+                //   the cell array (in-bounds, array provenance) because
+                //   `slot_idx < MAX_ARCHETYPES`; `raw_get` then yields the
+                //   per-element interior-mutable pointer WITHOUT forming any
+                //   reference. Slab base is stable for the bundle's lifetime
+                //   (U1). Narrowed to `*const`: read-only by caller contract.
+                let slot_ptr: *const Archetype =
+                    unsafe { UnsafeCell::raw_get(cell_base.add(slot_idx)).cast::<Archetype>() };
+                Some(slot_ptr)
             })
         })
     }
@@ -634,14 +766,21 @@ impl ArchetypeBundle {
     /// Returns an iterator yielding raw `*mut Archetype` pointers to every
     /// occupied slot, in ascending slot-index order.
     ///
-    /// Mirrors [`Self::iter_occupied_ptrs`] but takes `&mut self` so the
-    /// returned pointers carry write provenance under Stacked Borrows /
-    /// Tree Borrows. Pointers are stable for the bundle's lifetime (U1).
+    /// Mirrors [`Self::iter_occupied_ptrs`] but takes `&mut self` (the caller
+    /// gets exclusive structural access). Pointers are stable for the bundle's
+    /// lifetime (U1) and interior-mutable (`SharedReadWrite`, F1-rooted).
     #[inline]
     pub fn iter_occupied_ptrs_mut(
         &mut self,
     ) -> impl Iterator<Item = *mut Archetype> + '_ {
-        let slab_base: *mut MaybeUninit<Archetype> = self.slots.as_mut_ptr();
+        // F4 / P4 / P6: cache the CELL-ARRAY base. NOTE `self.slots.as_ptr()`
+        // even though this is `&mut self` — `as_mut_ptr()` would form a
+        // `&mut [UnsafeCell; N]` array-level retag whose children reintroduce
+        // the sibling relationship one level up, defeating the fix. A shared
+        // array reborrow (`as_ptr` through `&mut self`) does not; write
+        // capability is restored per-element by `raw_get` (interior-mutable
+        // root), not by the array provenance.
+        let cell_base: *const UnsafeCell<MaybeUninit<Archetype>> = self.slots.as_ptr();
         let occupied = self.occupied;
         (0..SLAB_WORDS).flat_map(move |word_idx| {
             let mut word = occupied[word_idx];
@@ -652,14 +791,17 @@ impl ArchetypeBundle {
                 let bit = word.trailing_zeros() as usize;
                 word &= word.wrapping_sub(1);
                 let slot_idx = word_idx * 64 + bit;
-                // SAFETY (U8 + U11 + U1): occupancy bit ⇒ slot fully
-                //   initialised; `slot_idx < MAX_ARCHETYPES`; raw arithmetic
-                //   mint from the `&mut self` slab base, preserving write
-                //   provenance. Slab base is stable for the bundle's
-                //   lifetime (U1).
-                let slot_ptr_mu: *mut MaybeUninit<Archetype> =
-                    unsafe { slab_base.add(slot_idx) };
-                Some(slot_ptr_mu as *mut Archetype)
+                // SAFETY (U8 + F1/F2/F3 + U1): occupancy bit ⇒ slot fully
+                //   initialised; `cell_base.add(slot_idx)` strides over the
+                //   cell array in-bounds (`slot_idx < MAX_ARCHETYPES`, array
+                //   provenance); `raw_get` yields the per-element
+                //   interior-mutable `*mut` WITHOUT forming any reference (so
+                //   no `&mut [UnsafeCell; N]` retag — P4). Slab base is stable
+                //   for the bundle's lifetime (U1). The `&mut self` borrow on
+                //   the returned iterator blocks concurrent access.
+                let slot_ptr: *mut Archetype =
+                    unsafe { UnsafeCell::raw_get(cell_base.add(slot_idx)).cast::<Archetype>() };
+                Some(slot_ptr)
             })
         })
     }
@@ -667,8 +809,11 @@ impl ArchetypeBundle {
     /// Iterator over `&Archetype` references for every occupied slot.
     #[inline]
     pub fn iter(&self) -> ArchetypeBundleIter<'_> {
+        // F4 / P6: cache the CELL-ARRAY base (array provenance), not a single
+        // `*Archetype` (one-cell provenance). `next()` mints each element via
+        // `raw_get`. `self.slots.as_ptr()` is a shared `&[UnsafeCell; N]`.
         ArchetypeBundleIter {
-            slab_base: self.slots.as_ptr() as *const Archetype,
+            cell_base: self.slots.as_ptr(),
             occupied: self.occupied,
             word_idx: 0,
             word: self.occupied[0],
@@ -685,8 +830,13 @@ impl ArchetypeBundle {
     #[inline]
     pub fn iter_mut(&mut self) -> ArchetypeBundleIterMut<'_> {
         let occupied = self.occupied;
+        // F4 / P4 / P6: cache the CELL-ARRAY base via `as_ptr()` (NOT
+        // `as_mut_ptr()`, which would form a `&mut [UnsafeCell; N]` array
+        // retag). `next()` restores write capability per-element via
+        // `raw_get` (interior-mutable root). The `&mut self` borrow on the
+        // returned iterator keeps the yielded `&mut Archetype`s exclusive.
         ArchetypeBundleIterMut {
-            slab_base: self.slots.as_mut_ptr() as *mut Archetype,
+            cell_base: self.slots.as_ptr(),
             occupied,
             word_idx: 0,
             word: occupied[0],
@@ -700,24 +850,25 @@ impl Drop for ArchetypeBundle {
     /// Phase 7 C7 / U12 — drops every occupied slot exactly once before the
     /// slab allocation is freed by `Box`'s auto-Drop.
     fn drop(&mut self) {
-        let slab_base: *mut MaybeUninit<Archetype> = self.slots.as_mut_ptr();
         for word_idx in 0..SLAB_WORDS {
             let mut word = self.occupied[word_idx];
             while word != 0 {
                 let bit = word.trailing_zeros() as usize;
                 let slot_idx = word_idx * 64 + bit;
-                // SAFETY (U12): every set bit corresponds to a slot that
+                // F4: mint via the sole `&self` helper. We hold `&mut self`,
+                // so no other reference or stored sibling pointer into the
+                // slab is live.
+                let slot_ptr: *mut Archetype = self.slot_ptr_mut(slot_idx);
+                // SAFETY (U12 + F1): every set bit corresponds to a slot that
                 //   was fully initialised via the in-place construction
                 //   recipe in `add_archetype_from_components_fallible` or
                 //   `add_archetype`, and has not been dropped since (the
                 //   bit is cleared in `remove_archetype` / `clear` before
-                //   the next `drop_in_place` would run). We hold `&mut self`,
-                //   so no other reference into the slab is live. The bit
-                //   is not cleared here because the bitset itself is about
-                //   to be freed by Drop; `drop_in_place` runs the
-                //   `Archetype` destructor exactly once.
+                //   the next `drop_in_place` would run). The bit is not
+                //   cleared here because the bitset itself is about to be
+                //   freed by Drop; `drop_in_place` runs the `Archetype`
+                //   destructor exactly once.
                 unsafe {
-                    let slot_ptr: *mut Archetype = slab_base.add(slot_idx) as *mut Archetype;
                     ptr::drop_in_place(slot_ptr);
                 }
                 word &= word.wrapping_sub(1);
@@ -730,7 +881,11 @@ impl Drop for ArchetypeBundle {
 /// Iterator over `&Archetype` references for every occupied slot in an
 /// [`ArchetypeBundle`]. Created by [`ArchetypeBundle::iter`].
 pub struct ArchetypeBundleIter<'a> {
-    slab_base: *const Archetype,
+    /// F4 / P6: cell-array base (array provenance over the whole slab). Each
+    /// element is minted in `next()` via `raw_get` so the per-element pointer
+    /// carries interior-mutable provenance. Caching a single `*Archetype` base
+    /// would give one-cell provenance, making `add` into other cells UB.
+    cell_base: *const UnsafeCell<MaybeUninit<Archetype>>,
     occupied: [u64; SLAB_WORDS],
     word_idx: usize,
     word: u64,
@@ -746,10 +901,16 @@ impl<'a> Iterator for ArchetypeBundleIter<'a> {
                 let bit = self.word.trailing_zeros() as usize;
                 self.word &= self.word.wrapping_sub(1);
                 let slot_idx = self.word_idx * 64 + bit;
-                // SAFETY (U8 + U1): the bit guarantees an initialised slot;
-                //   slab base is stable; the iterator borrows the bundle
-                //   immutably for `'a`, blocking concurrent mutation.
-                let ptr = unsafe { self.slab_base.add(slot_idx) };
+                // SAFETY (U8 + F1/F2/F3 + U1): the bit guarantees an
+                //   initialised slot; `cell_base.add(slot_idx)` strides over
+                //   the cell array in-bounds (array provenance); `raw_get`
+                //   yields the per-element interior-mutable pointer without
+                //   forming a reference. Slab base is stable; the iterator
+                //   borrows the bundle immutably for `'a`, blocking
+                //   concurrent mutation.
+                let ptr: *const Archetype = unsafe {
+                    UnsafeCell::raw_get(self.cell_base.add(slot_idx)).cast::<Archetype>()
+                };
                 return Some(unsafe { &*ptr });
             }
             self.word_idx += 1;
@@ -764,7 +925,11 @@ impl<'a> Iterator for ArchetypeBundleIter<'a> {
 /// Mutable iterator over `&mut Archetype` references for every occupied slot
 /// in an [`ArchetypeBundle`]. Created by [`ArchetypeBundle::iter_mut`].
 pub struct ArchetypeBundleIterMut<'a> {
-    slab_base: *mut Archetype,
+    /// F4 / P4 / P6: cell-array base (array provenance). Each `&mut Archetype`
+    /// is minted in `next()` via `raw_get` (interior-mutable root) — never via
+    /// a strided single-element `*mut Archetype` base (one-cell provenance) and
+    /// never via `&mut [UnsafeCell; N]` (array retag that would defeat F4).
+    cell_base: *const UnsafeCell<MaybeUninit<Archetype>>,
     occupied: [u64; SLAB_WORDS],
     word_idx: usize,
     word: u64,
@@ -780,16 +945,21 @@ impl<'a> Iterator for ArchetypeBundleIterMut<'a> {
                 let bit = self.word.trailing_zeros() as usize;
                 self.word &= self.word.wrapping_sub(1);
                 let slot_idx = self.word_idx * 64 + bit;
-                // SAFETY (U8 + U1): every set bit corresponds to a fully
-                //   initialised slot (`add_archetype_*` sets the bit only
-                //   after full initialisation; `remove_archetype` /
-                //   `clear` clear the bit before dropping). The bitset
-                //   has each bit visited at most once (BLSR strictly
-                //   shrinks `self.word`), so the yielded `&mut Archetype`
-                //   pointers are disjoint and respect Rust's mutable
-                //   aliasing rule. The iterator borrows the bundle
-                //   mutably for `'a`, blocking concurrent access.
-                let ptr = unsafe { self.slab_base.add(slot_idx) };
+                // SAFETY (U8 + F1/F2/F3 + U1): every set bit corresponds to a
+                //   fully initialised slot (`add_archetype_*` sets the bit
+                //   only after full initialisation; `remove_archetype` /
+                //   `clear` clear the bit before dropping). The bitset has
+                //   each bit visited at most once (BLSR strictly shrinks
+                //   `self.word`), so the yielded `&mut Archetype` references
+                //   target disjoint slots and respect Rust's mutable aliasing
+                //   rule. `cell_base.add(slot_idx)` strides over the cell
+                //   array in-bounds (array provenance); `raw_get` yields the
+                //   per-element interior-mutable `*mut` without forming a
+                //   reference. The iterator borrows the bundle mutably for
+                //   `'a`, blocking concurrent access.
+                let ptr: *mut Archetype = unsafe {
+                    UnsafeCell::raw_get(self.cell_base.add(slot_idx)).cast::<Archetype>()
+                };
                 return Some(unsafe { &mut *ptr });
             }
             self.word_idx += 1;
@@ -849,8 +1019,8 @@ mod miri_tests {
     ///      (`&self` flavour) for inspection.
     ///   2. A `&mut Archetype` taken via the safe accessor
     ///      `get_archetype_mut`, which after the W1 fix internally goes
-    ///      through `get_archetype_ptr_mut` (raw-arithmetic mint from
-    ///      `as_mut_ptr()`) instead of `self.slots[..].assume_init_mut()`
+    ///      through `get_archetype_ptr_mut` (mint via `slot_ptr_mut`,
+    ///      `UnsafeCell::raw_get`) instead of `self.slots[..].assume_init_mut()`
     ///      (which would materialise a `&mut MaybeUninit<Archetype>`
     ///      reborrow).
     ///   3. A write through a raw `*mut Archetype` minted **directly** via
@@ -893,8 +1063,8 @@ mod miri_tests {
 
         // Leg 2 — `&mut Archetype` through the safe accessor; write a
         // probe value through it. After W1 the accessor's internal
-        // mint comes from `as_mut_ptr()`, so the resulting `&mut` does
-        // not need a `&mut MaybeUninit` reborrow.
+        // mint comes from `slot_ptr_mut` (`UnsafeCell::raw_get`), so the
+        // resulting `&mut` does not need a `&mut MaybeUninit` reborrow.
         {
             let archetype_mut: &mut Archetype = bundle
                 .get_archetype_mut(id)
@@ -918,7 +1088,7 @@ mod miri_tests {
         // the Step-5 `get_archetype_ptr_mut` accessor. This is the
         // production path for write capability — no `&mut Archetype` is
         // materialised first, the raw pointer carries write provenance
-        // by construction (mint from `as_mut_ptr()`).
+        // by construction (mint via `slot_ptr_mut`/`UnsafeCell::raw_get`).
         let ptr_write_direct: *mut Archetype = bundle
             .get_archetype_ptr_mut(id)
             .expect("registered above");
@@ -969,6 +1139,75 @@ mod miri_tests {
             ptr_read1 as usize, ptr_read3 as usize,
             "slab pointers stay stable after interleaved access (U1)",
         );
+    }
+
+    /// Phase F4 — the minimal stored-pointer-survives-sibling-write reproducer
+    /// (`docs/PHASE-14-F4-FINDING.md`). Models the engine's `EntityInland`
+    /// flow at the bundle level:
+    ///
+    ///   1. Register an archetype and STASH a read-only `*const Archetype`
+    ///      (`stored` = the `EntityInland.archetype_ptr` analogue, "T0").
+    ///   2. Mint a SEPARATE sibling `*mut Archetype` ("T1") and perform a
+    ///      foreign structural write through it (`current_index += 1`,
+    ///      exactly the `archetype.rs` write a later spawn into the same
+    ///      archetype runs). Repeat (mimics spawns B and C).
+    ///   3. READ through the originally-stashed `stored` pointer.
+    ///
+    /// Pre-F4 (`Box<[MaybeUninit<Archetype>; N]>` minted via `as_mut_ptr`),
+    /// step 2's write through the sibling T1 transitioned T0 Reserved →
+    /// Disabled under Tree Borrows, so step 3's reborrow was TB-UB. Post-F4
+    /// (`UnsafeCell`-rooted slab, `raw_get` mint), T0 and T1 derive from the
+    /// same per-slot `UnsafeCell`, so the interior-mutable write through T1
+    /// does NOT Disable T0 — the read is legal. This test is TB-clean only
+    /// with the F4 fix in place. Uses the reserved id range 483.
+    #[test]
+    fn f4_stored_ptr_survives_sibling_spawn() {
+        register_test_components();
+        // 16 MB headroom for a single 2-component archetype.
+        let arena = Arena::with_capacity(16 * 1024 * 1024);
+        let mut bundle = ArchetypeBundle::new();
+        let id = ArchetypeId(3);
+        let _ = bundle.add_archetype_from_components_fallible(id, &[COMP_X, COMP_Y], &arena);
+
+        // (1) Stash the read-only pointer — the `EntityInland.archetype_ptr`
+        // analogue. It is held UNCHANGED across all subsequent sibling writes.
+        let stored: *const Archetype = bundle
+            .get_archetype_ptr(id)
+            .expect("registered above");
+        // SAFETY (test): freshly-initialised slot; no aliasing `&mut` is live.
+        let id_before = unsafe { (*stored).id() };
+        assert_eq!(id_before, id);
+
+        // (2) Two sibling structural writes through FRESHLY-minted `*mut`
+        // pointers, each analogous to a later spawn's `current_index += 1`.
+        // Pre-F4 these foreign writes Disabled `stored` under Tree Borrows.
+        for _ in 0..2 {
+            let sibling: *mut Archetype = bundle
+                .get_archetype_ptr_mut(id)
+                .expect("registered above");
+            // SAFETY (test): `sibling` is a fresh same-cell `*mut`; no live
+            //   `&`/`&mut` to the slot exists at this point. Writing
+            //   `current_index` mirrors `Archetype::create_entity`'s bump.
+            unsafe {
+                let cur = (*sibling).current_index;
+                addr_of_mut!((*sibling).current_index).write(cur + 1);
+            }
+        }
+
+        // (3) Read through the ORIGINALLY-stashed pointer. Pre-F4 this reborrow
+        // was TB-UB (T0 Disabled by the sibling writes). Post-F4 it is legal.
+        // SAFETY (test): `stored` is F4-rooted interior-mutable provenance into
+        //   a live slot; the slab base is stable (U1); no `&mut` is live here.
+        let observed = unsafe { (*stored).current_index };
+        assert_eq!(
+            observed, 2,
+            "stored pointer observes the sibling writes (interior-mutable, F4-rooted)",
+        );
+        // The stashed pointer is also still address-stable.
+        let re_mint: *const Archetype = bundle
+            .get_archetype_ptr(id)
+            .expect("registered above");
+        assert_eq!(stored as usize, re_mint as usize, "slab address stable (U1)");
     }
 
     /// Registers three archetypes, removes the middle one (vacating its

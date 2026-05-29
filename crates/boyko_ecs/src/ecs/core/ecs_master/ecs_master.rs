@@ -582,7 +582,10 @@ impl EcsMaster {
 
         // Step 1 of W7: mint write-capable *mut Archetype. The raw pointer is
         // not subject to borrow checking, so it can outlive the &mut borrow
-        // on archetype_master that produced it — see U14.
+        // on archetype_master that produced it — see U14. F4: this is a
+        // FRESH same-frame local (no sibling structural write intervenes before
+        // its reborrows below), so it was already legal pre-fix; it is now also
+        // interior-mutable (`SharedReadWrite`, F4-rooted) like every slab ptr.
         let archetype_ptr = self.archetype_master
             .archetype_ptr_for(archetype_id)
             .expect("invariant: archetype existed at guard check; single-threaded");
@@ -1011,14 +1014,19 @@ impl EcsMaster {
         // no `to_vec()` per-despawn heap alloc. This array lives in THIS cold
         // frame, not `delete_entity`'s.
         let mut id_buf = [ComponentId(0); MAX_COMPONENTS];
-        // SAFETY: `archetype_ptr` is the caller's `inland.archetype_ptr()` —
-        //   write-capable + stable slab provenance for the EcsMaster's lifetime;
-        //   re-reading `flags` is one `u16` load (no `&mut` taken).
+        // SAFETY (F1): `archetype_ptr` is the caller's `inland.archetype_ptr()`
+        //   — write-capable, stable, interior-mutable (`SharedReadWrite`,
+        //   F4-rooted) slab provenance for the EcsMaster's lifetime; it survives
+        //   sibling structural writes under TB/SB (whole slab element is
+        //   `UnsafeCell`-wrapped). Re-reading `flags` is one `u16` load (no
+        //   `&mut` taken).
         let flags = unsafe { (*archetype_ptr).flags };
         let n = {
-            // SAFETY: transient SHARED `&Archetype` for the id copy; dropped at
-            //   the block close before `world_ptr` is minted, so no `world`-
-            //   derived `&mut`/`&` is live across the fire point (SAFETY-1).
+            // SAFETY (F1): transient SHARED `&Archetype` for the id copy; dropped
+            //   at the block close before `world_ptr` is minted, so no `world`-
+            //   derived `&mut`/`&` is live across the fire point (SAFETY-1). The
+            //   pointer is interior-mutable (`SharedReadWrite`, F4-rooted), so a
+            //   prior sibling structural write did not invalidate it.
             let arche = unsafe { &*archetype_ptr };
             let ids = arche.component_ids();
             id_buf[..ids.len()].copy_from_slice(ids);
@@ -1074,20 +1082,24 @@ impl EcsMaster {
         // live in the cold `fire_despawn_hooks` helper, so this hot fn's
         // prologue never reserves that stack slot (§8 P4).
         //
-        // SAFETY: `inland.archetype_ptr()` is write-capable + stable slab
-        //   provenance; reading `flags` is one `u16` load (no `&mut` taken).
+        // SAFETY (F1): `inland.archetype_ptr()` is write-capable, stable,
+        //   interior-mutable (`SharedReadWrite`, F4-rooted) slab provenance — it
+        //   survives sibling structural writes under TB/SB (whole slab element
+        //   is `UnsafeCell`-wrapped). Reading `flags` is one `u16` load.
         let flags = unsafe { (*inland.archetype_ptr()).flags };
         if !flags.is_empty() {
             self.fire_despawn_hooks(entity, inland.archetype_ptr());
         }
 
         // Re-resolve the `&mut Archetype` and proceed with the removal.
-        // SAFETY (U1, U2, U11, U14): archetype_ptr was minted via
+        // SAFETY (U1, U2, U11, U14, F1): archetype_ptr was minted via
         //   archetype_ptr_for under &mut self at registration time; the
-        //   bundle slab is heap-stable for the EcsMaster's lifetime;
-        //   single-threaded &mut self gives exclusive access and no other
-        //   live borrow into this slot exists. Re-resolved AFTER the hooks
-        //   returned (no live reborrow during the fire).
+        //   bundle slab is heap-stable for the EcsMaster's lifetime and the
+        //   pointer is interior-mutable (`SharedReadWrite`, F4-rooted), so it
+        //   survives sibling structural writes under TB/SB. Single-threaded
+        //   &mut self gives exclusive access and no other live borrow into
+        //   this slot exists. Re-resolved AFTER the hooks returned (no live
+        //   reborrow during the fire).
         let archetype: &mut Archetype = unsafe { &mut *inland.archetype_ptr() };
         let outcome = archetype.remove_entity(removed_unit_index);
 
@@ -1149,9 +1161,13 @@ impl EcsMaster {
         if inland.generation() != entity.generation() {
             return None;
         }
-        // SAFETY (U1, U2, U11): archetype_ptr was minted via raw arithmetic
-        //   from the bundle slab (Step 4); slab heap address is stable for
-        //   the EcsMaster's lifetime; &self gives shared access to the slab.
+        // SAFETY (U1, U2, U11, F1): archetype_ptr was minted via the bundle's
+        //   `UnsafeCell::raw_get` helper (Step 4 + F4); the slab heap address
+        //   is stable for the EcsMaster's lifetime, and the pointer is
+        //   interior-mutable (`SharedReadWrite`, F4-rooted) so it survives
+        //   sibling structural writes (e.g. a later spawn's `current_index +=
+        //   1`) under TB/SB — the whole slab element is `UnsafeCell`-wrapped.
+        //   &self gives shared access to the slab.
         let archetype = unsafe { &*inland.archetype_ptr() };
 
         debug_assert!(component_id.0 < MAX_COMPONENTS);
@@ -1193,11 +1209,14 @@ impl EcsMaster {
         }
         debug_assert!(component_id.0 < MAX_COMPONENTS);
 
-        // SAFETY (U1, U2, U11, U14):
-        //   - U14: archetype_ptr is write-capable provenance (minted via
-        //     archetype_ptr_for under &mut EcsMaster during create_entity);
+        // SAFETY (U1, U2, U11, U14, F1):
+        //   - U14: archetype_ptr is write-capable provenance (minted via the
+        //     bundle's `UnsafeCell::raw_get` helper during create_entity);
         //     single-threaded &mut self gives exclusive access; no other
         //     live borrow into the slot exists.
+        //   - F1: interior-mutable (`SharedReadWrite`, F4-rooted) — survives
+        //     sibling structural writes under TB/SB (whole slab element is
+        //     `UnsafeCell`-wrapped).
         let archetype = unsafe { &mut *inland.archetype_ptr() };
 
         // SAFETY (U4): same as get_component_raw.
@@ -1312,7 +1331,10 @@ impl EcsMaster {
         if inland.is_null() || inland.generation() != entity.generation() {
             return false;
         }
-        // SAFETY (U1, U2, U11): archetype_ptr is stable slab provenance.
+        // SAFETY (U1, U2, U11, F1): archetype_ptr is stable, interior-mutable
+        //   (`SharedReadWrite`, F4-rooted) slab provenance — survives sibling
+        //   structural writes under TB/SB (whole slab element is
+        //   `UnsafeCell`-wrapped).
         let archetype = unsafe { &*inland.archetype_ptr() };
         if component_id.0 >= MAX_COMPONENTS {
             return false;
@@ -1331,7 +1353,8 @@ impl EcsMaster {
         if inland.is_null() || inland.generation() != entity.generation() {
             return None;
         }
-        // SAFETY (U1, U2, U11): same as get_component_raw.
+        // SAFETY (U1, U2, U11, F1): same as get_component_raw — stable,
+        //   interior-mutable (`SharedReadWrite`, F4-rooted) slab provenance.
         let archetype = unsafe { &*inland.archetype_ptr() };
         Some(archetype.id())
     }
@@ -1398,7 +1421,10 @@ impl EcsMaster {
         if inland.is_null() || inland.generation() != entity.generation() {
             return result;
         }
-        // SAFETY (U1, U2, U11): archetype_ptr is stable slab provenance.
+        // SAFETY (U1, U2, U11, F1): archetype_ptr is stable, interior-mutable
+        //   (`SharedReadWrite`, F4-rooted) slab provenance — survives sibling
+        //   structural writes under TB/SB (whole slab element is
+        //   `UnsafeCell`-wrapped).
         let archetype = unsafe { &*inland.archetype_ptr() };
         let unit_index = inland.unit_index() as usize;
         for &component_id in component_ids {
@@ -1437,8 +1463,10 @@ impl EcsMaster {
         if inland.is_null() || inland.generation() != entity.generation() {
             return result;
         }
-        // SAFETY (U1, U2, U11, U14): write-capable slab provenance under
-        //   &mut self; no other live borrow into this slot.
+        // SAFETY (U1, U2, U11, U14, F1): write-capable, interior-mutable
+        //   (`SharedReadWrite`, F4-rooted) slab provenance under &mut self —
+        //   survives sibling structural writes under TB/SB (whole slab element
+        //   is `UnsafeCell`-wrapped); no other live borrow into this slot.
         let archetype = unsafe { &mut *inland.archetype_ptr() };
         let unit_index = inland.unit_index() as usize;
         for &component_id in component_ids {

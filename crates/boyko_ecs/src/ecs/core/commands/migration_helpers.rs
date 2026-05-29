@@ -204,11 +204,15 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
     // after the block the entity is fully in `target` and BOTH `&mut Archetype`
     // are dead — Phase 2 can mint `world_ptr` with no live reborrow (SAFETY-1).
     {
-        // SAFETY (U1, U2, U14, SCH7):
-        //   * `source_ptr` / `target_ptr` carry write-capable provenance
-        //     minted under `&mut self`.
+        // SAFETY (U1, U2, U14, SCH7, F1):
+        //   * `source_ptr` / `target_ptr` carry write-capable, interior-mutable
+        //     (`SharedReadWrite`, F4-rooted) provenance minted under `&mut self`
+        //     via the bundle's `UnsafeCell::raw_get` helper — each survives
+        //     sibling structural writes (incl. the OTHER archetype's
+        //     `current_index` bump) under TB/SB because every slab element is a
+        //     distinct `UnsafeCell`.
         //   * `source != target` (debug-asserted), so the two `&mut Archetype`
-        //     reborrows alias disjoint slabs.
+        //     reborrows alias disjoint slots.
         //   * `&mut EcsMaster` exclusivity prevents any sibling reader (SCH7).
         //   * The reborrows are confined to this block (Phase 1).
         let source: &mut Archetype = unsafe { &mut *source_ptr };
@@ -448,8 +452,11 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
     // PHASE 2 (§3.4 / P3): fire hooks. The entity is repointed into `target`;
     // both `&mut Archetype` are dead — only `target_ptr` (*mut, Copy) survives.
     //
-    // SAFETY: `target_ptr` is write-capable + stable slab provenance; reading
-    //   `flags` is one `u16` load (no `&mut` taken).
+    // SAFETY (F1): `target_ptr` is write-capable, stable, interior-mutable
+    //   (`SharedReadWrite`, F4-rooted) slab provenance — it survived the
+    //   Phase-1 push into `target` (which bumped `target.current_index` through
+    //   a same-cell-derived pointer) under TB/SB because the whole slab element
+    //   is `UnsafeCell`-wrapped. Reading `flags` is one `u16` load (no `&mut`).
     let flags = unsafe { (*target_ptr).flags };
     if !flags.is_empty() {
         // MINT: no `world`-derived `&mut Archetype` is live (SAFETY-1).
@@ -514,8 +521,11 @@ pub(crate) fn migrate_entity_remove<C: Component>(
     // Phase 3). The block produces only `new_row` (Copy); both `&mut Archetype`
     // drop at its close, so Phase 2 mints `world_ptr` with no live reborrow.
     let new_row: u32 = {
-        // SAFETY: same rationale as `migrate_entity_insert` (U1, U2, U14, SCH7);
-        //   confined to Phase 1.
+        // SAFETY: same rationale as `migrate_entity_insert` (U1, U2, U14, SCH7,
+        //   F1) — `source_ptr` / `target_ptr` are interior-mutable
+        //   (`SharedReadWrite`, F4-rooted) slab provenance that survives the
+        //   sibling `current_index` bump under TB/SB (whole slab element is
+        //   `UnsafeCell`-wrapped); confined to Phase 1.
         let source: &mut Archetype = unsafe { &mut *source_ptr };
         let target: &mut Archetype = unsafe { &mut *target_ptr };
 
@@ -580,8 +590,11 @@ pub(crate) fn migrate_entity_remove<C: Component>(
     // the §0 asymmetry vs insert-migration (which reads the NEW target row).
     // Both `&mut Archetype` are dead; only `source_ptr` (*mut, Copy) survives.
     //
-    // SAFETY: `source_ptr` is write-capable + stable slab provenance; reading
-    //   `flags` is one `u16` load (no `&mut` taken).
+    // SAFETY (F1): `source_ptr` is write-capable, stable, interior-mutable
+    //   (`SharedReadWrite`, F4-rooted) slab provenance — it survived the
+    //   Phase-1 push into `target` (a sibling `current_index` bump) under TB/SB
+    //   because the whole slab element is `UnsafeCell`-wrapped. Reading `flags`
+    //   is one `u16` load (no `&mut`).
     let flags = unsafe { (*source_ptr).flags };
     if flags.contains(ArchetypeFlags::ON_REPLACE_HOOK)
         || flags.contains(ArchetypeFlags::ON_REMOVE_HOOK)
@@ -603,8 +616,11 @@ pub(crate) fn migrate_entity_remove<C: Component>(
     // mutate the source archetype between Phase 2 and here — the
     // `RemoveOutcome::Swapped` fixup cannot observe a stale `source_row`.
     {
-        // SAFETY: re-resolved AFTER the Phase-2 hooks returned; `source_ptr`
-        //   write-capable + stable; single-threaded `&mut EcsMaster` (SCH7).
+        // SAFETY (F1): re-resolved AFTER the Phase-2 hooks returned;
+        //   `source_ptr` is write-capable, stable, interior-mutable
+        //   (`SharedReadWrite`, F4-rooted) slab provenance — it survived the
+        //   Phase-1 sibling `current_index` bump under TB/SB (whole slab element
+        //   is `UnsafeCell`-wrapped); single-threaded `&mut EcsMaster` (SCH7).
         let source: &mut Archetype = unsafe { &mut *source_ptr };
 
         // C5 discipline: the removed component C's bytes are STILL owned by

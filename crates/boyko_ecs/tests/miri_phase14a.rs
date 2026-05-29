@@ -188,7 +188,6 @@ struct M4Comp(u32);
 struct M4Other(u32);
 
 #[test]
-#[ignore = "F4: pre-existing remove-migration TB-UB, see docs/PHASE-14-F4-FINDING.md"]
 fn miri_dual_presence_window_swap_remove() {
     let mut ecs = EcsMaster::new();
     let arch = ecs.create_archetype(&[M4Comp::component_id(), M4Other::component_id()]);

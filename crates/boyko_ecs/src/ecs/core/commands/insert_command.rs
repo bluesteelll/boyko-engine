@@ -64,7 +64,10 @@ impl<B: Bundle> Command for InsertCommand<B> {
             debug_assert!(false, "InsertCommand::apply: stale entity {:?}", entity);
             return;
         }
-        // SAFETY (U1, U2, U11): archetype_ptr is stable slab provenance.
+        // SAFETY (U1, U2, U11, F1): `archetype_ptr` is stable, interior-mutable
+        //   (`SharedReadWrite`, F4-rooted) slab provenance — it survives sibling
+        //   structural writes under TB/SB (the whole slab element is
+        //   `UnsafeCell`-wrapped). Non-null + generation-matched above, so live.
         let source_archetype_id = unsafe { (*inland.archetype_ptr()).id() };
 
         // Compute the merged archetype id (canonical sort + dedup).
@@ -117,8 +120,10 @@ impl<B: Bundle> InsertCommand<B> {
         // to each closure call, so no `world`-derived `&mut Archetype` is live
         // when we mint `world_ptr` (SAFETY-1).
         //
-        // SAFETY: `archetype_ptr` is write-capable + stable slab provenance;
-        //   reading `flags` is one `u16` load (no `&mut` taken).
+        // SAFETY (F1): `archetype_ptr` is write-capable, stable, interior-mutable
+        //   (`SharedReadWrite`, F4-rooted) slab provenance — it survives sibling
+        //   structural writes under TB/SB (the whole slab element is
+        //   `UnsafeCell`-wrapped). Reading `flags` is one `u16` load (no `&mut`).
         let flags = unsafe { (*archetype_ptr).flags };
 
         // PRE-overwrite (Q7): fire `on_replace` for each bundle component while
@@ -153,8 +158,11 @@ impl<B: Bundle> InsertCommand<B> {
         // without any cross-call borrow overlap.
 
         self.bundle.for_each_component_bytes(|component_id, bytes| {
-            // SAFETY (U1, U2, U14, SCH7):
-            //   * archetype_ptr is write-capable + stable slab provenance.
+            // SAFETY (U1, U2, U14, SCH7, F1):
+            //   * archetype_ptr is write-capable, stable, interior-mutable
+            //     (`SharedReadWrite`, F4-rooted) slab provenance — it survives
+            //     sibling structural writes under TB/SB (whole slab element is
+            //     `UnsafeCell`-wrapped).
             //   * &mut EcsMaster (held by caller) ⇒ no sibling reader.
             //   * The &mut Archetype reborrow is scoped to this closure
             //     invocation only — it does NOT survive across calls.
