@@ -1,0 +1,5 @@
+error: SystemSet enum variants must be unit variants (no fields)
+  --> tests/system_set_compile_fail/data_carrying_variant.rs:13:5
+   |
+13 |     V(u32),
+   |     ^

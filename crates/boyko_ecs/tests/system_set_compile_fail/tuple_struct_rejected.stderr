@@ -1,0 +1,5 @@
+error: SystemSet derive requires a unit struct (no fields)
+  --> tests/system_set_compile_fail/tuple_struct_rejected.rs:10:8
+   |
+10 | struct T(u32);
+   |        ^
