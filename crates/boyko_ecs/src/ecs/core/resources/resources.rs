@@ -25,6 +25,15 @@
 //! - **R5 — clear-before-Box.** `remove` clears the bit BEFORE reconstructing
 //!   the `Box<R>`, defending against a (pathological) `R::Drop` that
 //!   recursively touches `self.contains::<R>()`.
+//! - **C-NEW-ZST — zero-sized resources.** A ZST resource (`struct Marker;`)
+//!   never hits the heap: `Box::new`/`Box::into_raw` yield a dangling-but-
+//!   aligned pointer and `Layout::new::<R>()` has `size == 0`. `insert` and
+//!   `remove` round-trip such a resource through `Box::into_raw`/`Box::from_raw`
+//!   (both ZST-safe), but the manual `std::alloc::dealloc` calls in the
+//!   replace path and in `Drop` MUST be skipped — calling `dealloc` with a
+//!   size-0 layout on a pointer the allocator never returned is UB
+//!   (`STATUS_HEAP_CORRUPTION` at exit). Every manual `dealloc` site is
+//!   guarded by `layout.size() != 0`.
 
 use std::alloc::Layout;
 use std::mem::MaybeUninit;
@@ -147,6 +156,14 @@ impl Resources {
         let layout = Layout::new::<R>();
         // `Box::new(value)` allocates with the global allocator using the
         // standard `Layout::new::<R>()`; `into_raw` hands ownership to us.
+        //
+        // ZST contract (C-NEW-ZST): for a zero-sized `R`, `Box::new` performs
+        // NO heap allocation — `Box::into_raw` returns a dangling-but-aligned
+        // pointer (`NonNull::<R>::dangling()`). The matching `remove` path
+        // reclaims it via `Box::from_raw`, which is likewise ZST-safe. The
+        // ONLY operation that must not run for a ZST is the manual
+        // `std::alloc::dealloc` (the allocator never returned this pointer);
+        // every such site below is guarded by `layout.size() != 0`.
         let raw = Box::into_raw(Box::new(value)) as *mut u8;
         let info = resource_registry::get_resource_info(id.0).expect(
             "invariant: R::resource_id() implies the resource_registry slot is populated",
@@ -196,12 +213,20 @@ impl Resources {
             // Step 4: deallocate. If `drop_fn` did not panic, this proceeds
             // normally.
             //
-            // SAFETY (R4): `old.ptr` came from `Box::<R>::into_raw` with
-            //   `old.layout == Layout::new::<R>()`. `Box` uses the global
-            //   allocator with this layout, so the matched `dealloc` is
-            //   sound.
-            unsafe {
-                std::alloc::dealloc(old.ptr, old.layout);
+            // ZST guard (C-NEW-ZST): a zero-sized `R` was never heap-allocated
+            // (`old.ptr` is `NonNull::dangling()`); calling `dealloc` on it
+            // would violate `GlobalAlloc::dealloc` (pointer not from this
+            // allocator) and corrupt the heap. Skip the manual free when the
+            // layout has no size — there is nothing to release.
+            //
+            // SAFETY (R4): when `old.layout.size() != 0`, `old.ptr` came from
+            //   `Box::<R>::into_raw` of a sized `R` with `old.layout ==
+            //   Layout::new::<R>()`. `Box` uses the global allocator with this
+            //   layout, so the matched `dealloc` is sound.
+            if old.layout.size() != 0 {
+                unsafe {
+                    std::alloc::dealloc(old.ptr, old.layout);
+                }
             }
 
             // Step 5: write the new slot. POD-only — cannot panic.
@@ -402,12 +427,19 @@ impl Drop for Resources {
                     drop_fn(slot.ptr);
                 }
             }
-            // SAFETY (R3): `slot.ptr` came from `Box::<R>::new`
-            //   (global-allocator-backed) with `slot.layout ==
-            //   Layout::new::<R>()`, so `dealloc(ptr, layout)` is the
-            //   matched pair.
-            unsafe {
-                std::alloc::dealloc(slot.ptr, slot.layout);
+            // ZST guard (C-NEW-ZST): mirror the replace-path guard. A
+            // zero-sized resource has a dangling `slot.ptr` that the allocator
+            // never handed out; `dealloc` on it is UB (heap corruption at
+            // teardown). Skip the manual free for size-0 layouts.
+            //
+            // SAFETY (R3): when `slot.layout.size() != 0`, `slot.ptr` came
+            //   from `Box::<R>::new` (global-allocator-backed) with
+            //   `slot.layout == Layout::new::<R>()`, so `dealloc(ptr, layout)`
+            //   is the matched pair.
+            if slot.layout.size() != 0 {
+                unsafe {
+                    std::alloc::dealloc(slot.ptr, slot.layout);
+                }
             }
         }
     }
@@ -512,6 +544,36 @@ mod tests {
 
     struct ResD(#[allow(dead_code)] u32);
     impl Resource for ResD {
+        fn resource_id() -> ResourceId {
+            static ID: OnceLock<ResourceId> = OnceLock::new();
+            *ID.get_or_init(|| ResourceId(register_new::<Self>()))
+        }
+    }
+
+    // ── Zero-sized resources (C-NEW-ZST) ────────────────────────────────
+
+    /// Plain ZST resource (no Drop). Exercises the `layout.size() == 0`
+    /// alloc/dealloc-skip path: `Box::into_raw` returns a dangling pointer
+    /// and the manual `dealloc` must be skipped on replace + Drop.
+    struct ZstMarker;
+    impl Resource for ZstMarker {
+        fn resource_id() -> ResourceId {
+            static ID: OnceLock<ResourceId> = OnceLock::new();
+            *ID.get_or_init(|| ResourceId(register_new::<Self>()))
+        }
+    }
+
+    static ZST_DROP_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+    /// ZST resource WITH a Drop impl — proves `drop_fn` still runs exactly
+    /// once on replace/remove/teardown even though no `dealloc` happens.
+    struct ZstWithDrop;
+    impl Drop for ZstWithDrop {
+        fn drop(&mut self) {
+            ZST_DROP_COUNT.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    impl Resource for ZstWithDrop {
         fn resource_id() -> ResourceId {
             static ID: OnceLock<ResourceId> = OnceLock::new();
             *ID.get_or_init(|| ResourceId(register_new::<Self>()))
@@ -662,6 +724,68 @@ mod tests {
         assert!(
             res.contains::<ResD>(),
             "contains must report true after re-insert"
+        );
+    }
+
+    /// **C-NEW-ZST regression (A-1).** A zero-sized resource must round-trip
+    /// through the full lifecycle — insert → read → replace → remove → drop —
+    /// without ever calling `std::alloc::dealloc` on its dangling pointer.
+    /// Before the fix this corrupted the heap (`STATUS_HEAP_CORRUPTION`) at
+    /// the replace-path `dealloc` and again on `Drop`.
+    #[test]
+    fn zst_resource_round_trips_without_dealloc() {
+        let mut res = Resources::new();
+
+        // insert → present.
+        res.insert(ZstMarker);
+        assert!(res.contains::<ZstMarker>(), "ZST must be present after insert");
+
+        // read — pointer is dangling-but-aligned; we never deref it (a ZST has
+        // no bytes), only confirm the slot reports Some.
+        assert!(
+            res.get_ptr::<ZstMarker>().is_some(),
+            "get_ptr must return Some for a present ZST resource"
+        );
+
+        // replace — exercises the manual-dealloc skip on the old ZST slot.
+        res.insert(ZstMarker);
+        assert!(res.contains::<ZstMarker>(), "ZST must remain present after replace");
+
+        // remove — `Box::from_raw` on the dangling ZST ptr is sound; returns
+        // the (zero-sized) value.
+        let removed = res.remove::<ZstMarker>();
+        assert!(removed.is_some(), "remove must return Some for a present ZST");
+        assert!(!res.contains::<ZstMarker>(), "slot empty after remove");
+
+        // Drop on teardown — re-insert then let `res` drop; the Drop-path
+        // dealloc must also be skipped.
+        res.insert(ZstMarker);
+        drop(res);
+    }
+
+    /// **C-NEW-ZST regression (A-1).** A ZST resource with a `Drop` impl runs
+    /// `drop_fn` exactly once per logical destruction (replace + final teardown)
+    /// even though no `dealloc` is performed.
+    #[test]
+    fn zst_resource_with_drop_runs_drop_glue() {
+        let before = ZST_DROP_COUNT.load(Ordering::Relaxed);
+
+        let mut res = Resources::new();
+        res.insert(ZstWithDrop); // baseline: no drop yet
+        res.insert(ZstWithDrop); // replace path: drops the prior value (no dealloc)
+
+        assert_eq!(
+            ZST_DROP_COUNT.load(Ordering::Relaxed) - before,
+            1,
+            "exactly one drop on the ZST replace path"
+        );
+
+        drop(res); // final teardown: drops the surviving value
+
+        assert_eq!(
+            ZST_DROP_COUNT.load(Ordering::Relaxed) - before,
+            2,
+            "after Resources::drop, total ZST drops must be 2 (replaced + final)"
         );
     }
 }
