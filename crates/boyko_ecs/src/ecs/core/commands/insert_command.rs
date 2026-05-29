@@ -16,11 +16,14 @@
 #![allow(dead_code)]
 
 use std::mem::{self, MaybeUninit};
+use std::ptr::NonNull;
 
 use crate::ecs::core::archetype::archetype::Archetype;
 use crate::ecs::core::bundle::Bundle;
 use crate::ecs::core::commands::command::Command;
 use crate::ecs::core::commands::migration_helpers::{merged_archetype_id, migrate_entity_insert};
+use crate::ecs::core::component::hooks::archetype_flags::ArchetypeFlags;
+use crate::ecs::core::component::hooks::dispatch::{trigger_on_insert, trigger_on_replace};
 use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 use crate::ecs::core::entity::entity::Entity;
 use crate::ecs::identifiers::primitives::ComponentId;
@@ -109,6 +112,26 @@ impl<B: Bundle> InsertCommand<B> {
         let archetype_ptr = inland.archetype_ptr();
         let row = inland.unit_index() as usize;
 
+        // Phase 14a §3.3 / O3 / Q7: read the archetype flags once. The
+        // overwrite loop below confines its per-invocation `&mut *archetype_ptr`
+        // to each closure call, so no `world`-derived `&mut Archetype` is live
+        // when we mint `world_ptr` (SAFETY-1).
+        //
+        // SAFETY: `archetype_ptr` is write-capable + stable slab provenance;
+        //   reading `flags` is one `u16` load (no `&mut` taken).
+        let flags = unsafe { (*archetype_ptr).flags };
+
+        // PRE-overwrite (Q7): fire `on_replace` for each bundle component while
+        // the row still holds the OLD value — the read-only view reads the
+        // dying bytes. `EntityInland` still points at this row. No `&mut
+        // Archetype` is live here (only `archetype_ptr`, raw).
+        if flags.contains(ArchetypeFlags::ON_REPLACE_HOOK) {
+            let world_ptr = NonNull::from(&mut *world);
+            for &cid in B::component_ids() {
+                trigger_on_replace(world_ptr, cid, entity);
+            }
+        }
+
         // BUG FIX (Phase 11 follow-up): the prior two-pass approach
         // (collect slots, then iterate) stored `&[u8]` slices that became
         // DANGLING after `for_each_component_bytes` returned — the
@@ -167,6 +190,19 @@ impl<B: Bundle> InsertCommand<B> {
                 pool.write_changed_tick(row, current_tick);
             }
         });
+
+        // POST-overwrite (Q7): fire `on_insert` for each bundle component now
+        // that the row holds the NEW value — the read-only view reads the fresh
+        // bytes. The closure's per-invocation `&mut *archetype_ptr` has dropped;
+        // only `archetype_ptr` (raw) survives, so minting `world_ptr` aliases no
+        // reborrow (SAFETY-1). `on_add` does NOT fire — the component was already
+        // present (in-place replace, Q7).
+        if flags.contains(ArchetypeFlags::ON_INSERT_HOOK) {
+            let world_ptr = NonNull::from(&mut *world);
+            for &cid in B::component_ids() {
+                trigger_on_insert(world_ptr, cid, entity);
+            }
+        }
 
         // Silence unused-import warnings now that the two-pass scratch is gone.
         let _ = (mem::size_of::<()>(), MaybeUninit::<()>::uninit, ComponentId(0));

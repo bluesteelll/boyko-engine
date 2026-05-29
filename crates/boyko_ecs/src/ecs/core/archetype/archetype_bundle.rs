@@ -19,6 +19,7 @@ use crate::ecs::core::archetype::archetype_signature::ArchetypeSignature;
 use crate::ecs::core::component::component_mask::ComponentMask;
 use crate::ecs::core::component::component_pool_bundle::ComponentPoolBundle;
 use crate::ecs::core::component::component_registry::MAX_COMPONENTS;
+use crate::ecs::core::component::hooks::archetype_flags::ArchetypeFlags;
 use crate::ecs::core::iters::MAX_ARCHETYPES;
 use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId, InlandArchetypeId};
 use crate::ecs::memory::arena::Arena;
@@ -343,6 +344,11 @@ impl ArchetypeBundle {
             addr_of_mut!((*slot_ptr).component_pools).write(ComponentPoolBundle::new());
             addr_of_mut!((*slot_ptr).current_index).write(0usize);
             addr_of_mut!((*slot_ptr).signature).write(signature);
+            // Phase 14a: every `Archetype` field must be initialised on the
+            // in-place slab path (U13) or the slot is partially uninit (UB).
+            // Start empty; the OR-compute over the registered components runs
+            // in the `register_component_inplace` loop below (Wave 2).
+            addr_of_mut!((*slot_ptr).flags).write(ArchetypeFlags::empty());
             addr_of_mut!((*slot_ptr).arena).write(arena as *const Arena);
             addr_of_mut!((*slot_ptr).component_ids).write(component_ids.to_vec());
             addr_of_mut!((*slot_ptr).entity_ids).write(Vec::new());

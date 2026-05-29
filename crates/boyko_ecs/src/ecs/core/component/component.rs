@@ -1,4 +1,5 @@
 use std::any::TypeId;
+use crate::ecs::core::component::hooks::ComponentHooks;
 use crate::ecs::identifiers::primitives::ComponentId;
 
 /// Marker trait for ECS component types.
@@ -36,6 +37,23 @@ pub trait Component: 'static + Sized {
     /// return the cached value from a per-type `OnceLock` — no atomic on the
     /// hot path after initialization.
     fn component_id() -> ComponentId;
+
+    /// Phase 14a (plan §6.2) — compile-time elision flag. `false` by default,
+    /// so components without a `#[component(...)]` attribute pay zero. Enables
+    /// `if const { C::HAS_HOOKS }` short-circuits in monomorphic typed paths
+    /// (a secondary layer; the runtime `ArchetypeFlags` is the load-bearing
+    /// gate). A backward-compatible widening — every existing impl keeps
+    /// `HAS_HOOKS = false`.
+    const HAS_HOOKS: bool = false;
+
+    /// Phase 14a (plan §6.2) — installs this component's lifecycle hooks into
+    /// `hooks`. Defaulted empty; the `#[derive(Component)]` attribute and the
+    /// runtime builder (Wave 5) override it. Called once at registration time
+    /// (`install_hooks::<Self>`), before the component can appear in any
+    /// archetype. A backward-compatible widening — every existing impl keeps
+    /// the empty default.
+    #[inline]
+    fn register_hooks(_hooks: &mut ComponentHooks) {}
 
     #[inline]
     fn debug_type_name() -> &'static str {

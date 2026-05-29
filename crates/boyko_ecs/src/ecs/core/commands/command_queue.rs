@@ -95,6 +95,19 @@ impl CommandQueue {
         }
     }
 
+    /// Returns `true` when no command bytes are queued.
+    ///
+    /// Mirrors the empty-queue early-out condition in [`Self::apply`]
+    /// (command_queue.rs:215): `panic_recovery` is OPAQUE and does not affect
+    /// emptiness — at rest it is always empty in single-level use (the Err
+    /// branch re-absorbs recovery into `bytes` in the same call). Used by
+    /// `EcsMaster::drain_deferred_hook_queue` to loop until the deferred queue
+    /// is quiescent (Phase 14a, plan §8 P2).
+    #[inline]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+
     /// Pushes `cmd: C` into the queue.
     ///
     /// # Layout written
@@ -246,6 +259,60 @@ impl CommandQueue {
             //   path. `start == 0` for single-level Phase 8d use; recovery
             //   re-absorbs into bytes before resume.
             unsafe { raw.handle_panic_recovery(0) };
+            std::panic::resume_unwind(payload);
+        }
+    }
+
+    /// Phase 14a (plan §8 P2 / SAFETY-5 / SAFETY-6): drain
+    /// `world.deferred_hook_queue` with full [`Self::apply`] semantics — the
+    /// `raw()` mint + a single `catch_unwind` + `handle_panic_recovery(0)`
+    /// survivor re-absorb — taking the world as [`NonNull<EcsMaster>`] instead
+    /// of `&mut`, because the deferred queue is a **field** of `world`.
+    ///
+    /// An associated fn (NOT a `&mut self` method) by design: a `&mut self`
+    /// receiver on the queue field plus the `&mut *world` each `cmd.apply`
+    /// forms would alias (the W5-statement hazard). Reaching the queue through
+    /// `world` instead keeps `raw()` / [`RawCommandQueue`] private to this file
+    /// and avoids the field-alias entirely.
+    ///
+    /// # Safety
+    ///
+    /// * `world` is a valid, exclusively-borrowed [`EcsMaster`] (the caller
+    ///   holds `&mut EcsMaster` and minted this `NonNull` from it; SAFETY-4
+    ///   window — `IN_SYSTEM_RUN == false`).
+    /// * All queue access (`bytes` / `cursor` / `panic_recovery`) is threaded
+    ///   through the raw twin's `NonNull` (see [`CursorSync`]'s discipline); a
+    ///   transient `&mut *world` is formed ONLY
+    ///   per `cmd.apply`, never while a `&mut`-into-the-queue is live. The
+    ///   bytes `Vec`'s heap buffer is a separate allocation from `EcsMaster`,
+    ///   so the byte walk never aliases `&mut *world`; the in-`EcsMaster`
+    ///   cursor / recovery writes are sequenced through raw pointers, never
+    ///   simultaneous with `&mut *world` (SAFETY-5).
+    pub(crate) unsafe fn apply_via_raw_twin(world: NonNull<EcsMaster>) {
+        // SAFETY: transient `&mut` to the queue field, used only to mint the
+        //   raw twin; dropped immediately after. The world is exclusively
+        //   borrowed per the fn contract.
+        let mut twin = unsafe { (*world.as_ptr()).deferred_hook_queue.raw() };
+
+        // Single catch — identical shape to `apply` (:244-250). The catch
+        // lives HERE (not in the catch-free `apply_or_drop_queued_no_catch`),
+        // so SAFETY-6's "the drain has its own single catch_unwind" holds.
+        //
+        // SAFETY (C3, CQ4, SAFETY-5):
+        //   - `twin` was derived from a live `&mut self`(queue) via `&raw mut`
+        //     (no intermediate reference on the fields); Tree Borrows OK.
+        //   - The walk forms a transient `&mut *world` per command; no
+        //     `&mut`-into-the-queue is live across it (the twin reads the
+        //     queue's heap buffers, a separate allocation).
+        let walk = AssertUnwindSafe(|| unsafe {
+            twin.apply_or_drop_queued_no_catch(Some(world));
+        });
+
+        if let Err(payload) = std::panic::catch_unwind(walk) {
+            // SAFETY: same exclusive-access invariant as the walk; `start == 0`
+            //   re-absorbs survivors into the SAME `bytes` (mirrors `apply`'s
+            //   :248 + `handle_panic_recovery` :560-566) before re-raising.
+            unsafe { twin.handle_panic_recovery(0) };
             std::panic::resume_unwind(payload);
         }
     }

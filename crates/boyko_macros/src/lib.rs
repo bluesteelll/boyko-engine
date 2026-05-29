@@ -1,7 +1,9 @@
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::{format_ident, quote};
-use syn::{Data, DeriveInput, Fields, Ident, ItemStruct, Type, parse_macro_input};
+use syn::{
+    Data, DeriveInput, Fields, Ident, ItemStruct, Path, Type, parse_macro_input,
+};
 
 /// Derive macro for implementing the Component trait.
 ///
@@ -28,10 +30,51 @@ use syn::{Data, DeriveInput, Fields, Ident, ItemStruct, Type, parse_macro_input}
 /// The example is `ignore`'d because proc-macro crates cannot consume their own
 /// macros, and `boyko-macros` cannot depend on `boyko-ecs` (that would create a
 /// cycle). Real usage lives in `boyko-ecs` integration tests.
-#[proc_macro_derive(Component)]
+///
+/// # Lifecycle hooks (Phase 14a)
+///
+/// An optional `#[component(...)]` helper attribute binds lifecycle-hook
+/// functions to the component type. Each key takes a path to an
+/// `unsafe fn(DeferredEcsMaster<'_>, HookContext)`:
+///
+/// ```ignore
+/// #[derive(Component)]
+/// #[component(on_add = my_on_add, on_remove = my_on_remove)]
+/// struct Health(u32);
+///
+/// unsafe fn my_on_add(world: DeferredEcsMaster<'_>, ctx: HookContext) { /* ... */ }
+/// unsafe fn my_on_remove(world: DeferredEcsMaster<'_>, ctx: HookContext) { /* ... */ }
+/// ```
+///
+/// Valid keys: `on_add`, `on_insert`, `on_replace`, `on_remove`. Any other key
+/// (including `on_despawn`, which is deferred to Phase 14b) is a compile error,
+/// as is a duplicate key. When at least one key is present the derive emits
+/// `const HAS_HOOKS: bool = true;` and a `register_hooks` impl; the
+/// macro-generated `component_id()` then installs the hooks into the cold
+/// `HOOKS` table on first call, atomically with ID assignment and therefore
+/// before the component can appear in any archetype (the staleness-immunity
+/// property, plan §6.1 / Q-A5).
+///
+/// Derive hooks and the runtime [`register_component_hooks`] builder are
+/// **mutually exclusive** per type: a type carrying `#[component(...)]` keeps
+/// its slot installed by `component_id()`, so calling the runtime builder for
+/// it panics. A plain `#[derive(Component)]` (no keys ⇒ `HAS_HOOKS = false`)
+/// installs nothing — its slot stays unset until the runtime builder commits.
+#[proc_macro_derive(Component, attributes(component))]
 pub fn component_macro(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = input.ident;
+
+    // Phase 14a: parse the optional `#[component(...)]` hook attribute.
+    let hooks = match parse_component_hooks(&input.attrs) {
+        Ok(h) => h,
+        Err(ts) => return ts,
+    };
+
+    // Emit `const HAS_HOOKS = true;` + a `register_hooks` impl only when at
+    // least one hook key is present; otherwise the trait defaults
+    // (`HAS_HOOKS = false`, empty `register_hooks`) apply.
+    let hook_items = hooks.codegen();
 
     let expanded = quote! {
         impl #name {
@@ -55,10 +98,24 @@ pub fn component_macro(input: TokenStream) -> TokenStream {
             fn component_id() -> boyko_ecs::ecs::identifiers::primitives::ComponentId {
                 static ID: ::std::sync::OnceLock<boyko_ecs::ecs::identifiers::primitives::ComponentId>
                     = ::std::sync::OnceLock::new();
-                *ID.get_or_init(|| boyko_ecs::ecs::identifiers::primitives::ComponentId(
-                    boyko_ecs::ecs::core::component::component_registry::register_new::<Self>()
-                ))
+                *ID.get_or_init(|| {
+                    let raw = boyko_ecs::ecs::core::component::component_registry::register_new::<Self>();
+                    // Phase 14a (plan §6.1 step 4): install this type's derive
+                    // hooks into `HOOKS[raw]` atomically with ID assignment,
+                    // before the component can appear in any archetype. Gated on
+                    // the const `Self::HAS_HOOKS` (derive XOR runtime-builder
+                    // contract): for a plain `#[derive(Component)]` the const is
+                    // `false`, so this call const-folds away and the slot stays
+                    // UNSET — which means "no hooks" everywhere downstream and
+                    // leaves the runtime builder free to commit via `set`.
+                    if Self::HAS_HOOKS {
+                        boyko_ecs::ecs::core::component::component_registry::install_hooks::<Self>(raw);
+                    }
+                    boyko_ecs::ecs::identifiers::primitives::ComponentId(raw)
+                })
             }
+
+            #hook_items
 
             // NOTE: `std::any::type_name::<Self>()` is not yet stable as a const fn.
             // Calling it from a regular fn body is fine; the compiler folds it to a
@@ -81,6 +138,135 @@ pub fn component_macro(input: TokenStream) -> TokenStream {
     };
 
     expanded.into()
+}
+
+/// Parsed `#[component(...)]` lifecycle-hook paths (Phase 14a). Each field holds
+/// the user-supplied path to an `unsafe fn(DeferredEcsMaster<'_>, HookContext)`,
+/// or `None` when the key was omitted.
+#[derive(Default)]
+struct ComponentHookPaths {
+    on_add: Option<Path>,
+    on_insert: Option<Path>,
+    on_replace: Option<Path>,
+    on_remove: Option<Path>,
+}
+
+impl ComponentHookPaths {
+    /// `true` iff at least one hook key was supplied.
+    fn any(&self) -> bool {
+        self.on_add.is_some()
+            || self.on_insert.is_some()
+            || self.on_replace.is_some()
+            || self.on_remove.is_some()
+    }
+
+    /// Emits the `const HAS_HOOKS = true;` + `register_hooks` impl when any key
+    /// is present, or an empty token stream (trait defaults apply) otherwise.
+    ///
+    /// Each provided path is assigned into the corresponding `ComponentHooks`
+    /// field. The `Option<HookFn>` field coerces the user `unsafe fn` path to
+    /// the `HookFn` pointer type, so no explicit cast is emitted.
+    fn codegen(&self) -> TokenStream2 {
+        if !self.any() {
+            return TokenStream2::new();
+        }
+
+        let mut assigns: Vec<TokenStream2> = Vec::new();
+        if let Some(p) = &self.on_add {
+            assigns.push(quote! { hooks.on_add = ::std::option::Option::Some(#p); });
+        }
+        if let Some(p) = &self.on_insert {
+            assigns.push(quote! { hooks.on_insert = ::std::option::Option::Some(#p); });
+        }
+        if let Some(p) = &self.on_replace {
+            assigns.push(quote! { hooks.on_replace = ::std::option::Option::Some(#p); });
+        }
+        if let Some(p) = &self.on_remove {
+            assigns.push(quote! { hooks.on_remove = ::std::option::Option::Some(#p); });
+        }
+
+        quote! {
+            const HAS_HOOKS: bool = true;
+
+            #[inline]
+            fn register_hooks(
+                hooks: &mut boyko_ecs::ecs::core::component::hooks::ComponentHooks,
+            ) {
+                #(#assigns)*
+            }
+        }
+    }
+}
+
+/// Parses the optional `#[component(on_add = path, ...)]` attribute (Phase 14a,
+/// plan §6.1). Mirrors the `#[event]` macro's `parse_nested_meta` idiom.
+///
+/// Accepts the four lifecycle-hook keys (`on_add` / `on_insert` / `on_replace` /
+/// `on_remove`), each `= <path>`. Rejects:
+/// - `on_despawn` (removed from 14a — deferred to 14b),
+/// - any other unknown key,
+/// - a duplicate key,
+/// - a key missing its `= <path>` value (surfaced by `meta.value()` / `parse`),
+/// - more than one `#[component(...)]` attribute on the same item.
+fn parse_component_hooks(attrs: &[syn::Attribute]) -> Result<ComponentHookPaths, TokenStream> {
+    let mut paths = ComponentHookPaths::default();
+    let mut seen_attr = false;
+
+    for attr in attrs {
+        if !attr.path().is_ident("component") {
+            continue;
+        }
+        if seen_attr {
+            return Err(syn::Error::new_spanned(
+                attr,
+                "duplicate #[component(...)] attribute; combine all hooks into one",
+            )
+            .to_compile_error()
+            .into());
+        }
+        seen_attr = true;
+
+        let result = attr.parse_nested_meta(|meta| {
+            // `on_despawn` was removed from Phase 14a — emit a clear error rather
+            // than letting it fall into the generic "unknown key" branch.
+            if meta.path.is_ident("on_despawn") {
+                return Err(meta.error(
+                    "on_despawn is not supported in this version (deferred to Phase 14b); \
+                     valid keys: on_add, on_insert, on_replace, on_remove",
+                ));
+            }
+
+            let slot = if meta.path.is_ident("on_add") {
+                &mut paths.on_add
+            } else if meta.path.is_ident("on_insert") {
+                &mut paths.on_insert
+            } else if meta.path.is_ident("on_replace") {
+                &mut paths.on_replace
+            } else if meta.path.is_ident("on_remove") {
+                &mut paths.on_remove
+            } else {
+                return Err(meta.error(
+                    "unknown #[component(...)] key; \
+                     valid keys: on_add, on_insert, on_replace, on_remove",
+                ));
+            };
+
+            if slot.is_some() {
+                return Err(meta.error(
+                    "duplicate #[component(...)] key; each hook may be set at most once",
+                ));
+            }
+            let value = meta.value()?; // consumes the `=`
+            *slot = Some(value.parse::<Path>()?);
+            Ok(())
+        });
+
+        if let Err(e) = result {
+            return Err(e.to_compile_error().into());
+        }
+    }
+
+    Ok(paths)
 }
 
 /// Derive macro for implementing the Resource trait.

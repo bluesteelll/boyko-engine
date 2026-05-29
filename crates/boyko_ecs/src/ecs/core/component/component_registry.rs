@@ -43,6 +43,9 @@ use std::any::TypeId;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use crate::ecs::core::component::component::Component;
+use crate::ecs::core::component::hooks::ComponentHooks;
+
 /// Maximum number of components supported by the ECS system.
 pub const MAX_COMPONENTS: usize = 512;
 
@@ -105,6 +108,12 @@ pub struct ComponentLayout {
     pub type_id: TypeId,
 }
 
+// Phase 14a TRIPWIRE 2 (plan §1-W2): the 56 B / one-cache-line guarantee that
+// `Q5` relies on (hooks live in the parallel cold `HOOKS` table, NOT inline in
+// `ComponentLayout`). Previously documented only in the doc comment above; now
+// a hard compile-time assertion so a future field addition trips here.
+const _: () = assert!(std::mem::size_of::<ComponentLayout>() == 56);
+
 impl ComponentLayout {
     /// Creates a new `ComponentLayout` with static information about type `T`.
     ///
@@ -145,6 +154,101 @@ static LAYOUTS: [OnceLock<ComponentLayout>; MAX_COMPONENTS] =
 /// Test code that needs explicit IDs uses [`register_layout`] and bypasses
 /// this counter — collisions between the two paths are detected per-slot.
 static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
+
+/// Phase 14a (plan Q5 / §2.4) — parallel cold table of per-component lifecycle
+/// hooks. Touched ONLY during archetype construction (to OR-compute the
+/// archetype's [`ArchetypeFlags`](crate::ecs::core::component::hooks::archetype_flags::ArchetypeFlags),
+/// plan §4.6) and at hook-registration time — never on the hot read path. Kept
+/// parallel to `LAYOUTS` rather than inlined into `ComponentLayout` so the
+/// latter stays at 56 B / one cache line (TRIPWIRE 2).
+///
+/// `[OnceLock<ComponentHooks>; MAX_COMPONENTS]` requires `ComponentHooks: Send
+/// + Sync`, which holds automatically (fn-pointer-only fields — plan §8 O1).
+/// Mirrors the `LAYOUTS` declaration exactly.
+static HOOKS: [OnceLock<ComponentHooks>; MAX_COMPONENTS] =
+    [const { OnceLock::new() }; MAX_COMPONENTS];
+
+/// Returns the registered hooks for `component_id`, or `None` when no hooks
+/// were installed for that component.
+///
+/// Cold: read only during archetype construction (flag OR-compute) and by the
+/// Wave-4 `trigger_on_*` dispatch fns — never on the per-frame hot path. One
+/// acquire-load + branch, mirroring [`get_layout`].
+#[inline]
+pub fn get_hooks(component_id: usize) -> Option<&'static ComponentHooks> {
+    debug_assert!(
+        component_id < MAX_COMPONENTS,
+        "Component ID {} is out of bounds",
+        component_id
+    );
+    if component_id >= MAX_COMPONENTS {
+        return None;
+    }
+    HOOKS[component_id].get()
+}
+
+/// Installs `C`'s lifecycle hooks into `HOOKS[component_id]` (Phase 14a /
+/// REG). Builds a [`ComponentHooks`] via [`Component::register_hooks`] and
+/// writes it once via `OnceLock::set`, mirroring [`register_new`]'s
+/// write-once discipline.
+///
+/// Called from the derive-generated registration path (Wave 5) atomically with
+/// ID assignment, before the component can appear in any archetype (so the
+/// archetype-construction flag compute reads a populated slot). A second install
+/// for the same id is a silent no-op (the slot is write-once); registering
+/// different hooks for a component already present in a live archetype is the
+/// staleness hazard the Wave-5 release scan guards against (plan §1-W3 / Q-A5).
+///
+/// The derive `component_id()` calls this ONLY when `C::HAS_HOOKS` is true
+/// (const-gated, Change 1 of the Wave-5 soundness fix). A plain
+/// `#[derive(Component)]` therefore leaves the slot UNSET, which reads as "no
+/// hooks" everywhere downstream — and, crucially, leaves the slot free for the
+/// runtime [`ComponentHooksBuilder`] to commit via `OnceLock::set`. Derive and
+/// the runtime builder are mutually exclusive per type (the XOR contract).
+#[inline]
+pub fn install_hooks<C: Component>(component_id: usize) {
+    debug_assert!(
+        component_id < MAX_COMPONENTS,
+        "Component ID {} exceeds maximum allowed ({})",
+        component_id,
+        MAX_COMPONENTS
+    );
+    let mut hooks = ComponentHooks::default();
+    C::register_hooks(&mut hooks);
+    // Write-once; a same-id re-install is a silent no-op (the first writer
+    // wins, matching `register_new`'s idempotent-slot semantics).
+    let _ = HOOKS[component_id].set(hooks);
+}
+
+/// Commits `hooks` into `HOOKS[component_id]` via `OnceLock::set`, returning
+/// `true` on success and `false` if the slot was already populated (Phase 14a
+/// runtime builder / REG §6.3).
+///
+/// This is the runtime [`ComponentHooksBuilder`]'s sole commit path. Because
+/// derive and runtime registration are mutually exclusive per type (the XOR
+/// contract — see [`install_hooks`]), the builder only ever reaches an UNSET
+/// slot in correct programs, so `set` succeeds. A `false` return means a
+/// derive-hooked type (or a hand-`impl Component` with an inconsistent
+/// `HAS_HOOKS`) slipped past the eager `register_component_hooks` collision
+/// check; the builder turns that into a panic (defense in depth).
+///
+/// `OnceLock::set` provides the acquire/release synchronization of the payload,
+/// mirroring [`install_hooks`] / [`register_new`]. No `unsafe`, no in-place
+/// re-write: writing through a pointer derived from `OnceLock::get`'s shared
+/// `&'static ComponentHooks` would be UB (read-only provenance), which is why
+/// the previous in-place `overwrite_hooks` was removed.
+pub(crate) fn try_set_hooks(component_id: usize, hooks: ComponentHooks) -> bool {
+    debug_assert!(
+        component_id < MAX_COMPONENTS,
+        "Component ID {} exceeds maximum allowed ({})",
+        component_id,
+        MAX_COMPONENTS
+    );
+    if component_id >= MAX_COMPONENTS {
+        return false;
+    }
+    HOOKS[component_id].set(hooks).is_ok()
+}
 
 /// Allocates a fresh `ComponentId` from the global counter and stores
 /// `ComponentLayout::new_static::<T>()` in the corresponding `LAYOUTS` slot.

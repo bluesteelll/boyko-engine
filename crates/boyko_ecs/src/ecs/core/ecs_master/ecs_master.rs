@@ -9,8 +9,16 @@ use crate::ecs::core::bundle::bundle::Bundle;
 use crate::ecs::core::bundle::bundle_column_cache::BundleColumnCache;
 use crate::ecs::core::bundle::bundle_type_registry::{BundleTypeId, MAX_BUNDLE_TYPES};
 use crate::ecs::core::commands::command::Command;
+use crate::ecs::core::commands::command_queue::CommandQueue;
 use crate::ecs::core::change_detection::{CHECK_TICK_THRESHOLD, Tick};
+use crate::ecs::core::component::component::Component;
 use crate::ecs::core::component::component_registry::MAX_COMPONENTS;
+use crate::ecs::core::component::hooks::archetype_flags::ArchetypeFlags;
+use crate::ecs::core::component::hooks::builder::ComponentHooksBuilder;
+use crate::ecs::core::component::hooks::dispatch::{
+    trigger_on_add, trigger_on_insert, trigger_on_remove, trigger_on_replace,
+};
+use crate::ecs::core::component::hooks::scope::{DeferredScopeGuard, hook_drain_depth};
 use crate::ecs::core::entity::entity::Entity;
 use crate::ecs::core::entity::entity_inland::EntityInland;
 use crate::ecs::core::entity::entity_master::EntityMaster;
@@ -219,6 +227,22 @@ pub struct EcsMaster {
     /// child structures (`ArchetypeMaster`, `Archetype`, `ComponentPool`).
     arena: Box<Arena>,
 
+    /// Phase 14a (plan §2.3) — world-resident channel a hook's
+    /// `DeferredCommands` enqueues into. Reachable via `&mut EcsMaster` (which
+    /// the outermost apply holds), unlike the borrow-frozen per-system
+    /// `Commands` queue. Lazy: `CommandQueue::new()` is allocation-free
+    /// (command_queue.rs:87) until first push, so a world whose hooks never
+    /// enqueue pays zero allocation.
+    ///
+    /// **Drop-order**: declared AFTER `arena` (plan §2.3), mirroring the
+    /// `query_state_cache` C5 placement. Stored commands are `Command: Send +
+    /// 'static`, so they cannot borrow arena memory — the drop order relative
+    /// to the arena slab is not a correctness hazard.
+    ///
+    /// `pub(crate)` so `DeferredCommands` (hooks module) can `push` and
+    /// `drain_deferred_hook_queue` can derive the raw twin.
+    pub(crate) deferred_hook_queue: CommandQueue,
+
     /// Phase 12.5 Track B (QC5 / QC6 / C5) — per-`(D, F)` cached
     /// `QueryState` slot array.
     ///
@@ -402,6 +426,10 @@ impl EcsMaster {
             change_tick: AtomicU32::new(0),
             last_check_tick: Tick::ZERO,
             arena,
+            // Phase 14a: lazy — alloc-free until the first deferred hook push.
+            // The reentrancy depth counter is a thread-local (see hooks::scope),
+            // so it is not a field here (fixes F2's Tree Borrows UB).
+            deferred_hook_queue: CommandQueue::new(),
             query_state_cache: OnceLock::new(),
         }
     }
@@ -438,6 +466,10 @@ impl EcsMaster {
             change_tick: AtomicU32::new(0),
             last_check_tick: Tick::ZERO,
             arena,
+            // Phase 14a: lazy — alloc-free until the first deferred hook push.
+            // The reentrancy depth counter is a thread-local (see hooks::scope),
+            // so it is not a field here (fixes F2's Tree Borrows UB).
+            deferred_hook_queue: CommandQueue::new(),
             query_state_cache: OnceLock::new(),
         }
     }
@@ -536,6 +568,11 @@ impl EcsMaster {
         archetype_id: ArchetypeId,
         components: &[(ComponentId, &[u8])],
     ) -> EcsResult<Entity> {
+        // Phase 14a §3.2 / §8 P1: RAII depth bracket. `Drop` decrements the
+        // depth on EVERY exit (Ok / Err / panic), so the early `return Err`
+        // paths below (which all PRECEDE the hook-fire point) strand nothing.
+        let scope = DeferredScopeGuard::enter();
+
         // Guard: validate archetype exists BEFORE allocating an EntityId.
         // Previously, allocate_entity() was called first, and if the archetype
         // lookup subsequently failed the ID was permanently leaked (C-007).
@@ -598,6 +635,47 @@ impl EcsMaster {
         // get_component_mut<T> wrappers.
         self.entity_master.register_entity_with_ptr(entity, archetype_ptr, new_unit_index);
 
+        // Step 6 (Phase 14a §3.2): fire on_add / on_insert hooks. The Step-3
+        // `&mut Archetype` was block-scoped (`let pushed = { ... }`) and is
+        // dead; only `archetype_ptr` (*mut, Copy) survives — no `world`-derived
+        // `&mut` is live, so minting `world_ptr` aliases no reborrow (SAFETY-1).
+        //
+        // P1 invariant: there is NO fallible step after this fire point — every
+        // `return Err` above precedes it, so no deferred command is ever
+        // enqueued on an `Err` path (nothing to strand).
+        debug_assert!(
+            self.archetype_master.has_archetype(archetype_id),
+            "P1: no fallible step may follow the hook-fire point in a bracketed body"
+        );
+        // SAFETY: `archetype_ptr` is write-capable + stable slab provenance;
+        //   reading `flags` is one `u16` load (no `&mut` taken).
+        let flags = unsafe { (*archetype_ptr).flags };
+        if !flags.is_empty() {
+            let world_ptr = NonNull::from(&mut *self);
+            if flags.contains(ArchetypeFlags::ON_ADD_HOOK) {
+                // SAFETY: `archetype_ptr` is a valid `*const Archetype`; the
+                //   shared slice is transient and not aliased by a live `&mut`.
+                let ids = unsafe { (*archetype_ptr).component_ids.as_slice() };
+                for &cid in ids {
+                    trigger_on_add(world_ptr, cid, entity);
+                }
+            }
+            if flags.contains(ArchetypeFlags::ON_INSERT_HOOK) {
+                // SAFETY: same as the on_add slice read above.
+                let ids = unsafe { (*archetype_ptr).component_ids.as_slice() };
+                for &cid in ids {
+                    trigger_on_insert(world_ptr, cid, entity);
+                }
+            }
+        }
+
+        // Direct API: drop the bracket (depth back to 0) then drain on the
+        // success path (Q-A1 / §8 P1). On a panic above, `scope`'s `Drop`
+        // restores the depth and we do NOT drain (running deferred user code
+        // mid-unwind is wrong).
+        drop(scope);
+        self.drain_deferred_hook_queue();
+
         Ok(entity)
     }
 
@@ -637,6 +715,10 @@ impl EcsMaster {
         archetype_id: ArchetypeId,
         components: &[(ComponentId, &[u8])],
     ) -> EcsResult<Entity> {
+        // Phase 14a §3.2 / §8 P1: RAII depth bracket (every `return Err` below
+        // precedes the hook-fire point, so they strand nothing).
+        let scope = DeferredScopeGuard::enter();
+
         // Guard: archetype existence is checked BEFORE any state mutation.
         if !self.archetype_master.has_archetype(archetype_id) {
             return Err(EcsError::ArchetypeNotFound(archetype_id));
@@ -695,6 +777,37 @@ impl EcsMaster {
         // verbatim through `register_entity_with_ptr`.
         self.entity_master
             .register_entity_with_ptr(entity, archetype_ptr, new_unit_index);
+
+        // Phase 14a §3.2: fire on_add / on_insert hooks (mirrors `create_entity`).
+        // The Step-3 `&mut Archetype` was block-scoped and is dead; only
+        // `archetype_ptr` survives at the mint (SAFETY-1). P1: no fallible step
+        // follows.
+        debug_assert!(
+            self.archetype_master.has_archetype(archetype_id),
+            "P1: no fallible step may follow the hook-fire point in a bracketed body"
+        );
+        // SAFETY: `archetype_ptr` is write-capable + stable slab provenance.
+        let flags = unsafe { (*archetype_ptr).flags };
+        if !flags.is_empty() {
+            let world_ptr = NonNull::from(&mut *self);
+            if flags.contains(ArchetypeFlags::ON_ADD_HOOK) {
+                // SAFETY: transient shared slice, not aliased by a live `&mut`.
+                let ids = unsafe { (*archetype_ptr).component_ids.as_slice() };
+                for &cid in ids {
+                    trigger_on_add(world_ptr, cid, entity);
+                }
+            }
+            if flags.contains(ArchetypeFlags::ON_INSERT_HOOK) {
+                // SAFETY: same as the on_add slice read above.
+                let ids = unsafe { (*archetype_ptr).component_ids.as_slice() };
+                for &cid in ids {
+                    trigger_on_insert(world_ptr, cid, entity);
+                }
+            }
+        }
+
+        drop(scope);
+        self.drain_deferred_hook_queue();
 
         Ok(entity)
     }
@@ -877,6 +990,58 @@ impl EcsMaster {
         result
     }
 
+    /// Cold despawn-hook fire (Phase 14a §3.6 / W1 / §8 P4).
+    ///
+    /// Fires `on_replace` + `on_remove` for EVERY component of the dying entity,
+    /// reading the row PRE-`remove_entity` (Bevy parity, §4.3 firing matrix).
+    /// Called by [`Self::delete_entity`] ONLY when the archetype's flag set is
+    /// non-empty (some component is hooked), so the ~4 KB id buffer below never
+    /// touches `delete_entity`'s prologue — the no-hook hot path keeps its slim
+    /// frame (the 0% bench gate). `#[cold] #[inline(never)]` keeps it out of the
+    /// hot path's I-cache footprint.
+    ///
+    /// `archetype_ptr` is the dying entity's `EntityInland::archetype_ptr()`
+    /// (write-capable, stable slab provenance); `flags` and `component_ids` are
+    /// re-read through it here so the caller carries only the pointer + entity.
+    #[cold]
+    #[inline(never)]
+    fn fire_despawn_hooks(&mut self, entity: Entity, archetype_ptr: *mut Archetype) {
+        // Stack buffer (W1): only the touched `[0..n)` prefix is written
+        // (`n` ≤ ~32 typical, ≤ MAX_COMPONENTS worst case) — no full memset,
+        // no `to_vec()` per-despawn heap alloc. This array lives in THIS cold
+        // frame, not `delete_entity`'s.
+        let mut id_buf = [ComponentId(0); MAX_COMPONENTS];
+        // SAFETY: `archetype_ptr` is the caller's `inland.archetype_ptr()` —
+        //   write-capable + stable slab provenance for the EcsMaster's lifetime;
+        //   re-reading `flags` is one `u16` load (no `&mut` taken).
+        let flags = unsafe { (*archetype_ptr).flags };
+        let n = {
+            // SAFETY: transient SHARED `&Archetype` for the id copy; dropped at
+            //   the block close before `world_ptr` is minted, so no `world`-
+            //   derived `&mut`/`&` is live across the fire point (SAFETY-1).
+            let arche = unsafe { &*archetype_ptr };
+            let ids = arche.component_ids();
+            id_buf[..ids.len()].copy_from_slice(ids);
+            ids.len()
+            // <-- `&Archetype` drops here.
+        };
+        // MINT: the shared borrow is dead; no `world`-derived `&mut` is live.
+        // The helper takes `&mut self`, so `NonNull::from(&mut *self)` reborrows
+        // the dispatcher's exclusive access for the cold fire only.
+        let world_ptr = NonNull::from(&mut *self);
+        // PRE-DROP (SAFETY-2): on_replace + on_remove for ALL, BEFORE remove.
+        if flags.contains(ArchetypeFlags::ON_REPLACE_HOOK) {
+            for &cid in &id_buf[..n] {
+                trigger_on_replace(world_ptr, cid, entity);
+            }
+        }
+        if flags.contains(ArchetypeFlags::ON_REMOVE_HOOK) {
+            for &cid in &id_buf[..n] {
+                trigger_on_remove(world_ptr, cid, entity);
+            }
+        }
+    }
+
     /// Deletes an entity and all its components from the system.
     ///
     /// Returns `true` on success, `false` if the entity does not exist or if
@@ -884,6 +1049,11 @@ impl EcsMaster {
     /// [`RemoveOutcome`] enum (C-006) replaces the previous fragile
     /// `Option<EntityId>`-based logic.
     pub fn delete_entity(&mut self, entity: Entity) -> bool {
+        // Phase 14a §3.6 / §8 P1: RAII depth bracket. The two early `return
+        // false` paths below PRECEDE the hook-fire point (no command can have
+        // been enqueued), so the guard's `Drop` simply restores the depth.
+        let scope = DeferredScopeGuard::enter();
+
         // Resolve the fast inland by value. Copying 16 B releases the
         // entity_master borrow before we dereference the raw archetype_ptr.
         let inland: EntityInland = {
@@ -897,15 +1067,31 @@ impl EcsMaster {
         };
         let removed_unit_index = InlandPoolId(inland.unit_index() as usize);
 
+        // Phase 14a §3.6 / W1: PRE-`remove_entity` fire of `on_replace` +
+        // `on_remove` for ALL components, reading the dying row. The flags read
+        // is one `u16` load (the cheap gate that stays inline here); the
+        // ~4 KB `[ComponentId; MAX_COMPONENTS]` id buffer + the trigger loops
+        // live in the cold `fire_despawn_hooks` helper, so this hot fn's
+        // prologue never reserves that stack slot (§8 P4).
+        //
+        // SAFETY: `inland.archetype_ptr()` is write-capable + stable slab
+        //   provenance; reading `flags` is one `u16` load (no `&mut` taken).
+        let flags = unsafe { (*inland.archetype_ptr()).flags };
+        if !flags.is_empty() {
+            self.fire_despawn_hooks(entity, inland.archetype_ptr());
+        }
+
+        // Re-resolve the `&mut Archetype` and proceed with the removal.
         // SAFETY (U1, U2, U11, U14): archetype_ptr was minted via
         //   archetype_ptr_for under &mut self at registration time; the
         //   bundle slab is heap-stable for the EcsMaster's lifetime;
         //   single-threaded &mut self gives exclusive access and no other
-        //   live borrow into this slot exists.
+        //   live borrow into this slot exists. Re-resolved AFTER the hooks
+        //   returned (no live reborrow during the fire).
         let archetype: &mut Archetype = unsafe { &mut *inland.archetype_ptr() };
         let outcome = archetype.remove_entity(removed_unit_index);
 
-        match outcome {
+        let result = match outcome {
             RemoveOutcome::Last => {
                 self.entity_master.deallocate_entity(entity);
                 true
@@ -922,7 +1108,15 @@ impl EcsMaster {
                 true
             }
             RemoveOutcome::PoolFailure => false,
-        }
+        };
+
+        // Direct API: drop the bracket (depth back to 0) then drain on this
+        // (post-fire) path. When this method is reached from
+        // `DespawnCommand::apply` at depth >= 1, the drain observes `depth != 0`
+        // and returns immediately — the outermost owner drains (Q-A1 / C1).
+        drop(scope);
+        self.drain_deferred_hook_queue();
+        result
     }
 
     /// Fast random access read: 3-4 cache lines, ~12-16 ns target.
@@ -1533,6 +1727,81 @@ impl EcsMaster {
         self.resources.remove::<R>()
     }
 
+    /// Registers lifecycle hooks for component type `C` at runtime, returning a
+    /// chainable [`ComponentHooksBuilder`] (Phase 14a, plan §6.3 / REG).
+    ///
+    /// ```ignore
+    /// world.register_component_hooks::<Health>()
+    ///      .on_add(my_on_add)
+    ///      .on_remove(my_on_remove);
+    /// ```
+    ///
+    /// The builder commits the accumulated hooks when it is dropped (or
+    /// [`finish`](ComponentHooksBuilder::finish)ed). It is the runtime
+    /// counterpart of the `#[component(...)]` derive attribute and covers
+    /// hand-written `impl Component` / foreign types that the derive cannot
+    /// reach.
+    ///
+    /// # Derive XOR runtime (mutually exclusive)
+    ///
+    /// A component declares hooks via EITHER `#[component(...)]` OR this runtime
+    /// builder — never both. Each `HOOKS` slot is written exactly once. Calling
+    /// this method for a type that carries `#[component(...)]` (i.e.
+    /// `C::HAS_HOOKS == true`) panics immediately: the derive already installed
+    /// the slot, and the two mechanisms must not be mixed.
+    ///
+    /// # Register-before-use (staleness rule, plan §6.4 / Q-A5)
+    ///
+    /// Hooks for `C` MUST be registered before `C` first appears in any
+    /// archetype. An archetype's [`ArchetypeFlags`] are OR-computed once at
+    /// construction from the cold `HOOKS` table; hooks installed *after* an
+    /// archetype containing `C` already exists would leave that archetype's flag
+    /// bit unset and the hook silently skipped. To make that bug impossible, this
+    /// method performs a release-level scan of every live archetype and
+    /// **panics** (in release, not just debug) if any already contains `C`. The
+    /// derive path is staleness-immune by construction (hooks install inside
+    /// `component_id()`, which always precedes the first archetype containing the
+    /// component).
+    ///
+    /// # Panics
+    ///
+    /// - If `C` declares `#[component(...)]` derive hooks (`C::HAS_HOOKS ==
+    ///   true`) — derive and the runtime builder are mutually exclusive.
+    /// - If any live archetype already contains `C` — register hooks before the
+    ///   component is first used.
+    #[cold]
+    pub fn register_component_hooks<C: Component>(&mut self) -> ComponentHooksBuilder<'_> {
+        // Force `C::component_id()`: mints the id and, for a derive-hooked type
+        // (`C::HAS_HOOKS == true`), installs those hooks into the slot. A plain
+        // `#[derive(Component)]` installs nothing, leaving the slot free for the
+        // runtime builder to commit.
+        let component_id = C::component_id();
+
+        // Eager derive-XOR-runtime collision check (Wave-5 soundness fix /
+        // Change 3): a type carrying `#[component(...)]` already owns its `HOOKS`
+        // slot, so the runtime builder must not also write it. Reject at the
+        // registration call site — a clearer, earlier error than the builder's
+        // `Drop` commit panic (which remains as defense in depth for a
+        // hand-`impl Component` with an inconsistent `HAS_HOOKS`).
+        if C::HAS_HOOKS {
+            register_component_hooks_derive_conflict_panic::<C>();
+        }
+
+        // Release-level staleness scan (Q-A5 / W3): a stale `ArchetypeFlags` bit
+        // would silently skip the hook, which is too severe a correctness
+        // surprise for a feature whose entire value is "the callback fires".
+        // Cold + one-time, so the O(archetypes) scan cost is irrelevant.
+        if self
+            .archetype_master
+            .iter_archetypes()
+            .any(|a| a.has_component_id(component_id))
+        {
+            register_component_hooks_stale_panic::<C>();
+        }
+
+        ComponentHooksBuilder::new(component_id.0)
+    }
+
     /// Returns `true` iff the world currently holds a resource of type `R`.
     #[inline]
     pub fn contains_resource<R: Resource>(&self) -> bool {
@@ -1733,6 +2002,68 @@ impl EcsMaster {
     pub(crate) fn bump_change_tick(&self) -> Tick {
         let prev = self.change_tick.fetch_add(1, Ordering::Relaxed);
         Tick::new(prev.wrapping_add(1))
+    }
+
+    // ── Phase 14a deferred-hook plumbing (plan §2.2 / §2.3 / §8 P1 / §8 P2) ──
+
+    /// Drains the world-resident deferred-hook queue at the OUTERMOST apply
+    /// boundary (plan §8 P2 / Q-A1). Re-entrant: hooks fired during the drain
+    /// enqueue into the SAME queue; the loop's transient `is_empty()` re-reads
+    /// `bytes.len()` so re-entrant appends are picked up.
+    ///
+    /// The depth gate is the whole correctness story: a nested call (inside a
+    /// `CommandQueue::apply` at `depth > 0`) returns immediately, so the single
+    /// outermost owner drains exactly once after the per-system apply returns
+    /// (the C1 single-`catch_unwind` proof). The depth lives in a thread-local
+    /// (see [`hooks::scope`]); the bracket guards are wired into the three
+    /// direct-API methods + the two schedule `system.apply` sites.
+    ///
+    /// [`hooks::scope`]: crate::ecs::core::component::hooks::scope
+    pub(crate) fn drain_deferred_hook_queue(&mut self) {
+        // Q-A1 gate (via the thread-local depth): only the outermost owner
+        // drains. A nested call (inside an `apply_via_raw_twin` that routes a
+        // hook-enqueued command through a self-draining direct-API method)
+        // observes `depth >= 1` and returns immediately.
+        if hook_drain_depth() != 0 {
+            return;
+        }
+        // SAFETY-7 (W4): hooks + their deferred commands run OUTSIDE the
+        // system-body allocation-discipline window. Verified: InSystemRunGuard
+        // wraps only `run_unsafe` (tls.rs:152-159; schedule.rs created/dropped
+        // before `apply`). If a future refactor moved `apply` inside the guard,
+        // this tripwire fires.
+        debug_assert!(
+            !boyko_threadpool::is_in_system_run(),
+            "SAFETY-7: hook drain must run with IN_SYSTEM_RUN == false"
+        );
+
+        // F1 fix: bracket the drain's OWN walk (depth 0 -> 1). Any command we
+        // apply that routes through a self-draining direct-API method
+        // (`delete_entity` / `create_entity` / `create_entity_at`) now sees
+        // `depth >= 1` and no-ops its own nested drain, so the in-flight queue
+        // is applied exactly once. Re-entrant appends during the walk are still
+        // picked up by the `while !is_empty()` loop below (the guard holds
+        // depth 1 throughout). The guard touches only TLS — it caches no
+        // `NonNull<EcsMaster>`, so it cannot be frozen by the `&mut *self`
+        // reborrow on the next line (F2 invariant).
+        let _scope = DeferredScopeGuard::enter();
+
+        let world_ptr: NonNull<EcsMaster> = NonNull::from(&mut *self);
+        loop {
+            // Transient shared borrow only for the emptiness test; dropped at
+            // the `;`. The twin re-reads `bytes.len()` each turn, so re-entrant
+            // appends pushed during a prior `apply_via_raw_twin` are seen here.
+            // SAFETY: `world_ptr` is valid + exclusive (`&mut self` at the call
+            //   site); the borrow does not escape the `if`.
+            if unsafe { (*world_ptr.as_ptr()).deferred_hook_queue.is_empty() } {
+                break;
+            }
+            // SAFETY (SAFETY-5 / SAFETY-6): full catch + recovery semantics; no
+            //   `&mut`-into-queue is held across the per-command `&mut *world`
+            //   (proven in `apply_via_raw_twin`'s SAFETY contract). The world
+            //   pointer stays exclusively ours for the call.
+            unsafe { CommandQueue::apply_via_raw_twin(world_ptr); }
+        }
     }
 
     /// Returns `true` iff `current_tick - last_check_tick >= CHECK_TICK_THRESHOLD`.
@@ -2050,6 +2381,36 @@ fn missing_resource_panic_facade<R: Resource>() -> ! {
         "Resource `{}` not registered. Call `EcsMaster::insert_resource::<{}>(...)` first.",
         R::debug_type_name(),
         R::debug_type_name()
+    );
+}
+
+/// Cold-path panic helper for [`EcsMaster::register_component_hooks`] when the
+/// release-level staleness scan finds `C` already in a live archetype (plan
+/// §6.4 / Q-A5 / W3). Kept off the hot method body via `#[cold] #[inline(never)]`.
+#[cold]
+#[inline(never)]
+fn register_component_hooks_stale_panic<C: Component>() -> ! {
+    panic!(
+        "register_component_hooks::<{}>() called after {} already appears in a live \
+         archetype; register hooks before the component is first used (the archetype's \
+         ArchetypeFlags were computed at construction and would be stale, silently \
+         skipping the hook).",
+        C::debug_type_name(),
+        C::debug_type_name(),
+    );
+}
+
+/// Cold-path panic helper for [`EcsMaster::register_component_hooks`] when `C`
+/// already declares `#[component(...)]` derive hooks (Wave-5 soundness fix /
+/// Change 3 — derive XOR runtime). Eager check at the registration call site,
+/// kept off the method body via `#[cold] #[inline(never)]`.
+#[cold]
+#[inline(never)]
+fn register_component_hooks_derive_conflict_panic<C: Component>() -> ! {
+    panic!(
+        "register_component_hooks::<{}>() on a type that declares #[component(...)] \
+         derive hooks — use the derive OR the runtime builder, not both.",
+        C::debug_type_name(),
     );
 }
 

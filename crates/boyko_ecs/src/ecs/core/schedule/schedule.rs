@@ -41,6 +41,7 @@ use std::time::Duration;
 use boyko_threadpool::{Scope, ThreadPool};
 
 use crate::ecs::core::change_detection::run_check_ticks_scan;
+use crate::ecs::core::component::hooks::scope::DeferredScopeGuard;
 use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 use crate::ecs::core::schedule::bitset_intersects::bitset_intersects;
 use crate::ecs::core::schedule::conflict_graph::{ConflictGraph, SystemIndex};
@@ -336,7 +337,24 @@ impl Schedule {
             //   - The dispatcher holds `&mut world` exclusively (it is
             //     `&mut self`'s caller borrow) — the `apply` call is a
             //     safe method whose signature already encodes that.
-            self.systems[i].system.apply(world);
+            //
+            // Phase 14a §8 P1: hold the RAII `DeferredScopeGuard` ACROSS the
+            // `apply` call. There is NO schedule-level `catch_unwind` around
+            // this site — the only catch is inside `CommandQueue::apply`. If a
+            // command panic propagates up through here, the guard's `Drop`
+            // decrements the depth during unwind (no leak). The guard touches
+            // only the thread-local depth (it caches no pointer), so it does
+            // not freeze `world` for the `apply` reborrow.
+            {
+                let scope = DeferredScopeGuard::enter();
+                self.systems[i].system.apply(world);
+                drop(scope);
+            }
+            // Depth is 0 here: drain the deferred-hook queue (Q-A1 outermost
+            // owner). A command's own hooks ran at depth >= 1 and only enqueued;
+            // they apply now. Re-entrant hook appends are picked up by the
+            // drain's `while !is_empty()` loop.
+            world.drain_deferred_hook_queue();
 
             self.executor_scratch.completed.insert(i);
 
@@ -513,7 +531,16 @@ impl Schedule {
             // Apply runs inline (no completion-queue round-trip). The
             // reborrow is via the same cell, which is rooted in the same
             // `&mut world` provenance; no aliasing.
-            self.systems[i].system.apply(world_ref);
+            //
+            // Phase 14a §8 P1: bracket `apply` with the RAII guard (same
+            // panic-safety reasoning as the concurrent site — no schedule-level
+            // catch_unwind), then drain at depth 0.
+            {
+                let scope = DeferredScopeGuard::enter();
+                self.systems[i].system.apply(world_ref);
+                drop(scope);
+            }
+            world_ref.drain_deferred_hook_queue();
             self.executor_scratch.running.set(i, false);
             self.executor_scratch.completed.insert(i);
 

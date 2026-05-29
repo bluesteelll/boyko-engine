@@ -6,6 +6,7 @@ use crate::ecs::core::change_detection::Tick;
 use crate::ecs::core::component::component_mask::ComponentMask;
 use crate::ecs::core::component::component_pool_bundle::ComponentPoolBundle;
 use crate::ecs::core::component::component_registry::MAX_COMPONENTS;
+use crate::ecs::core::component::hooks::archetype_flags::ArchetypeFlags;
 use crate::ecs::error::{EcsError, EcsResult};
 use crate::ecs::memory::arena::Arena;
 
@@ -144,6 +145,21 @@ pub struct Archetype {
     /// `pub(crate)` for in-place slab construction (Phase 7 U13).
     pub(crate) signature: ArchetypeSignature,
 
+    /// Phase 14a hook-presence bitset. OR-computed once at construction from
+    /// the cold `HOOKS` table (plan §4.6); read as a single `u16` load +
+    /// `test`/`jz` on every structural-op dispatch site.
+    ///
+    /// Placed after `signature` and before `arena` (plan §1-W2). Because
+    /// `signature` embeds a `#[repr(align(32))]` `ComponentMask`, the offset
+    /// after it was already 8-aligned with zero padding; inserting this `u16`
+    /// adds +8 B (2 B + 6 B realign), not zero — the W2 correction. `columns`
+    /// stays at offset 0 (asserted below).
+    ///
+    /// `pub(crate)` for the same in-place-slab-construction reason as the
+    /// neighbouring fields (Phase 7 U13): the slab path writes every field via
+    /// `addr_of_mut!` and must initialise this one too.
+    pub(crate) flags: ArchetypeFlags,
+
     /// Raw provenance pointer to the arena used for memory allocation.
     /// Stored as `*const Arena` (raw provenance) to avoid Miri retag UB:
     /// see Phase 3a Miri retag fix in `ecs_master.rs` field-level doc.
@@ -169,6 +185,15 @@ pub struct Archetype {
 // load-bearing for Step 7 and Phase 8 — lock it at compile time.
 const _: () = assert!(std::mem::offset_of!(Archetype, columns) == 0);
 
+// Phase 14a TRIPWIRE 1 (plan §1-W2 / §8 P5): hard size assertion pinned to a
+// MEASURED literal. With the `flags: ArchetypeFlags` (u16) field added after
+// the `#[repr(align(32))]` `signature`, the struct grows by +8 B (2 B + 6 B
+// realign) over its pre-Phase-14a size of 8472 B — measured 8480 B on the
+// x86_64 target. This guards against accidental layout drift; if a future
+// change moves `flags` or alters `signature`'s alignment, this trips before
+// the perf regression can ship.
+const _: () = assert!(std::mem::size_of::<Archetype>() == 8480);
+
 impl Archetype {
     /// Creates a new archetype with the given ID and arena.
     ///
@@ -183,6 +208,9 @@ impl Archetype {
             component_pools: ComponentPoolBundle::new(),
             current_index: 0,
             signature: ArchetypeSignature::new(ComponentMask::new()),
+            // Phase 14a: no hooks until Wave 2 computes them from the `HOOKS`
+            // table at `create_by_ids` / `register_component_inplace`.
+            flags: ArchetypeFlags::empty(),
             // SAFETY: `arena` is a shared reference valid for the lifetime of
             // the owning `EcsMaster`. Converting to a raw pointer preserves
             // provenance; the pointer is never dereferenced here — it is
@@ -214,6 +242,9 @@ impl Archetype {
             component_pools: ComponentPoolBundle::new(),
             current_index: 0,
             signature: ArchetypeSignature::new(mask),
+            // Phase 14a: initialised empty; the OR-compute happens below once
+            // the component pools are registered (Wave 2 wires `HOOKS`).
+            flags: ArchetypeFlags::empty(),
             // SAFETY: same provenance contract as `Archetype::new`.
             arena: &raw const *arena,
             component_ids: component_ids.to_vec(),
@@ -222,11 +253,16 @@ impl Archetype {
 
         // Create component pools for each component ID. Each successful
         // `add_pool` must be paired with `refresh_column` to keep the inline
-        // `columns` table in sync (Phase 7 invariant U7).
+        // `columns` table in sync (Phase 7 invariant U7). Phase 14a: OR each
+        // component's hook bits into the archetype flags from the cold `HOOKS`
+        // table (plan §4.6) — one accumulator, set once after the loop.
+        let mut flags = ArchetypeFlags::empty();
         for &comp_id in component_ids {
             archetype.component_pools.add_pool(arena, comp_id);
             archetype.refresh_column(comp_id);
+            flags.insert_from_hooks(comp_id);
         }
+        archetype.flags = flags;
 
         archetype
     }
@@ -281,6 +317,12 @@ impl Archetype {
     pub(crate) fn register_component_inplace(&mut self, component_id: ComponentId, arena: &Arena) {
         self.component_pools.add_pool(arena, component_id);
         self.refresh_column(component_id);
+        // Phase 14a (plan §4.6): OR this single component's hook bits into the
+        // archetype flags from the cold `HOOKS` table. The slab path
+        // (`add_archetype_from_components_fallible`) calls this once per
+        // component, so the accumulated OR over the whole component set is the
+        // archetype's flag value.
+        self.flags.insert_from_hooks(component_id);
     }
 
     /// Re-syncs `columns[component_id.0]` with the current pool state.
