@@ -89,6 +89,10 @@ harness = false
 name = "phase14a_hooks_gate"
 harness = false
 
+[[bench]]
+name = "phase17_states"
+harness = false
+
 [lints.rust]
 # Phase 9 Wave 7 Step 24: opt-in stronger ALLOC1 check via
 # `RUSTFLAGS="--cfg force_alloc_panic"`. See
