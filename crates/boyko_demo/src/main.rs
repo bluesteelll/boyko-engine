@@ -17,7 +17,9 @@ use boyko_demo::app::DemoApp;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast as _;
 
-/// Window title and `eframe` app id.
+/// Window title and `eframe` app id. Used only by the native window bootstrap;
+/// the wasm entry mounts on a `<canvas>` and needs no window title.
+#[cfg(not(target_arch = "wasm32"))]
 const APP_NAME: &str = "boyko_demo";
 
 /// Native entry point. Boots `eframe` with the wgpu backend and hands control to
