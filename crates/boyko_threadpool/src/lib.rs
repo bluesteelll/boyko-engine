@@ -52,6 +52,7 @@
 //! `boyko_ecs`. This crate has no dependency on the ECS.
 
 mod scope;
+pub(crate) mod sync;
 mod thread_pool;
 mod tls;
 mod worker;

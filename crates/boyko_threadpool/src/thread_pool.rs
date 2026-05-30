@@ -8,13 +8,18 @@
 
 use core::ptr::NonNull;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+// `thread::{Builder, JoinHandle}` are std-only (loom has no equivalent);
+// `Thread` here is the std thread handle stored per worker. The scope waker's
+// `Thread` (and `current()` for it) routes through `crate::sync` so that the
+// loom M1 model observes the real park/unpark happens-before — see the two
+// `crate::sync::thread::current()` call sites below.
 use std::thread::{self, JoinHandle, Thread};
 
 use crossbeam_deque::{Injector, Stealer, Worker};
 use crossbeam_utils::CachePadded;
 
 use crate::scope::{Scope, ScopeShared};
+use crate::sync::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use crate::tls;
 use crate::worker::worker_main;
 
@@ -51,28 +56,19 @@ impl TaskHandle {
     }
 }
 
-/// Per-worker control block. Cache-line padded so that idle/unpark traffic
-/// on worker `i` doesn't false-share with worker `j`.
+/// Per-worker control block. Wrapped in [`CachePadded`] by the pool so that
+/// idle/unpark traffic on worker `i` doesn't false-share with worker `j`.
 #[repr(C)]
 pub struct WorkerHandle {
     /// `std::thread::Thread` handle for `unpark`. Stable for the lifetime
     /// of the worker (set once at spawn).
     pub(crate) thread: Thread,
-
-    /// Park-counter / sticky-unpark coordination state. Reserved for
-    /// future loom-tested optimizations; the production wake-up protocol
-    /// today relies on the OS's sticky `park`/`unpark` semantics plus the
-    /// `idle` bitset on the pool.
-    pub(crate) park_state: CachePadded<AtomicU64>,
 }
 
 impl WorkerHandle {
     #[inline]
     pub(crate) fn new(thread: Thread) -> Self {
-        Self {
-            thread,
-            park_state: CachePadded::new(AtomicU64::new(0)),
-        }
+        Self { thread }
     }
 }
 
@@ -102,7 +98,7 @@ pub struct ThreadPool {
     /// Chase-Lev deque. Workers steal from siblings in randomized order.
     pub(crate) stealers: Arc<[Stealer<TaskHandle>]>,
 
-    /// Per-worker handles (thread handle + park state).
+    /// Per-worker handles (thread handle for `unpark`).
     pub(crate) workers: Arc<[CachePadded<WorkerHandle>]>,
 
     /// Idle bitset. Bit `i` is 1 iff worker `i` is parked or about to
@@ -190,7 +186,10 @@ impl ThreadPool {
             cur
         };
 
-        let shared = Box::new(ScopeShared::new(thread::current()));
+        // `crate::sync::thread::current()` so the captured waker `Thread`
+        // matches `ScopeShared.waker`'s type under both backends (loom routes
+        // park/unpark through its own `Thread`).
+        let shared = Box::new(ScopeShared::new(crate::sync::thread::current()));
         // SAFETY (scope lifetime erasure to '_):
         //   The scope is dropped before this function returns; Drop
         //   blocks until every spawned task has completed (or has
@@ -231,7 +230,9 @@ impl ThreadPool {
 
         self.active_scopes.fetch_add(1, Ordering::AcqRel);
 
-        let shared = Box::new(ScopeShared::new(thread::current()));
+        // See `install`: shimmed `current()` so the waker `Thread` type matches
+        // `ScopeShared.waker` under the loom backend.
+        let shared = Box::new(ScopeShared::new(crate::sync::thread::current()));
         let scope = Scope::new(self, shared);
 
         let result = f(&scope);

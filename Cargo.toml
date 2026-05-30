@@ -1,4 +1,13 @@
-workspace = { members = ["crates/boyko_ecs", "crates/boyko_macros", "crates/boyko_utils", "crates/boyko_threadpool", "crates/bench_bevy_vs_boyko", "crates/boyko_demo"] }
+[workspace]
+members = ["crates/boyko_ecs", "crates/boyko_macros", "crates/boyko_utils", "crates/boyko_threadpool", "crates/bench_bevy_vs_boyko", "crates/boyko_demo"]
+
+# Centralized lints opted into per-crate via `[lints] workspace = true`.
+# Only `boyko_threadpool` opts in today (Phase 9.1). Registers the
+# `cfg(loom)` model-checker flag so native `-D warnings` stays clean on the
+# `#[cfg(loom)]` / `#[cfg(not(loom))]` attributes in `boyko_threadpool::sync`.
+# `cfg(miri)` is a built-in cfg and must NOT be registered here.
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
 
 [package]
 name = "boyko-engine"

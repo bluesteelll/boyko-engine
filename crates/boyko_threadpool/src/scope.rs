@@ -21,16 +21,14 @@
 //! steals.
 
 use core::marker::PhantomData;
-use core::sync::atomic::{AtomicUsize, Ordering};
 use std::any::Any;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
-use std::sync::Mutex;
-use std::thread::Thread;
 use std::time::Duration;
 
 use crossbeam_deque::{Steal, Worker};
 use crossbeam_utils::{Backoff, CachePadded};
 
+use crate::sync::{AtomicUsize, Mutex, Ordering, Thread};
 use crate::thread_pool::{TaskHandle, ThreadPool};
 use crate::tls;
 use crate::worker::{push_task, unpark_one_idle};
@@ -71,6 +69,45 @@ impl ScopeShared {
             panic_payload: Mutex::new(None),
             waker,
         }
+    }
+
+    /// Register one outstanding task. Called by [`Scope::spawn`] before the
+    /// task body is enqueued.
+    ///
+    /// `AcqRel` so that the increment is ordered against the matching
+    /// `complete_task` decrements on worker threads (the join wait reads the
+    /// resulting count with `Acquire` in [`Self::is_drained`]).
+    #[inline]
+    pub(crate) fn register_task(&self) {
+        self.pending.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Mark one task complete and, if it was the last in flight, unpark the
+    /// scope's waker. Called from the task body wrapper *after* any panic
+    /// payload has been captured (the wrapper preserves that order; this
+    /// method performs only the counter decrement and the wakeup).
+    ///
+    /// `AcqRel` on the decrement publishes the completing task's effects to
+    /// the joiner and synchronizes with the other tasks' decrements; the
+    /// `prev == 1` test detects the last completion so exactly one `unpark`
+    /// is issued.
+    #[inline]
+    pub(crate) fn complete_task(&self) {
+        let prev = self.pending.fetch_sub(1, Ordering::AcqRel);
+        if prev == 1 {
+            self.waker.unpark();
+        }
+    }
+
+    /// Returns `true` once every spawned task has completed. Polled by the
+    /// work-stealing join wait in [`join_workers_until_drained`].
+    ///
+    /// `Acquire` pairs with the `AcqRel` decrement in [`Self::complete_task`]
+    /// so that, when this observes zero, the completing tasks' writes are
+    /// visible to the joiner.
+    #[inline]
+    pub(crate) fn is_drained(&self) -> bool {
+        self.pending.load(Ordering::Acquire) == 0
     }
 }
 
@@ -155,7 +192,7 @@ impl<'scope> Scope<'scope> {
     where
         F: FnOnce() + Send + 'scope,
     {
-        self.shared.pending.fetch_add(1, Ordering::AcqRel);
+        self.shared.register_task();
 
         // Raw pointer to ScopeShared — stable for the lifetime of the
         // Box and therefore for the lifetime of every spawned task
@@ -190,10 +227,7 @@ impl<'scope> Scope<'scope> {
             // - Mutex poisoned: drop payload; Scope::Drop still completes
             //   normally via pending hitting zero.
 
-            let prev = shared.pending.fetch_sub(1, Ordering::AcqRel);
-            if prev == 1 {
-                shared.waker.unpark();
-            }
+            shared.complete_task();
         };
 
         // Box the body so the deque entry stays word-sized.
@@ -230,9 +264,8 @@ impl<'scope> Drop for Scope<'scope> {
     fn drop(&mut self) {
         join_workers_until_drained(self.pool, &self.shared);
 
-        debug_assert_eq!(
-            self.shared.pending.load(Ordering::Acquire),
-            0,
+        debug_assert!(
+            self.shared.is_drained(),
             "Scope::Drop returned with pending tasks still in flight"
         );
 
@@ -273,7 +306,14 @@ fn join_workers_until_drained(pool: &ThreadPool, shared: &ScopeShared) {
     let backoff = Backoff::new();
 
     loop {
-        if shared.pending.load(Ordering::Acquire) == 0 {
+        // Under Miri the scheduler is cooperative: a dispatcher that steals,
+        // runs, and `continue`s without ever reaching the backoff/park branch
+        // would starve the workers. Yield each iteration so Miri can advance
+        // the other threads. Compiles to nothing natively (Phase 9.1 H2).
+        #[cfg(miri)]
+        std::thread::yield_now();
+
+        if shared.is_drained() {
             return;
         }
 
@@ -350,7 +390,13 @@ where
         match f() {
             Steal::Success(t) => return Some(t),
             Steal::Empty => return None,
-            Steal::Retry => continue,
+            Steal::Retry => {
+                // Miri-only cooperative yield in this unbounded steal-retry
+                // loop (Phase 9.1 H2). Byte-identical native: compiles away.
+                #[cfg(miri)]
+                std::thread::yield_now();
+                continue;
+            }
         }
     }
 }

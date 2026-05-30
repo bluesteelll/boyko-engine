@@ -7,11 +7,11 @@
 //! comment, never collapse it into the pre-park branch.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use crossbeam_deque::{Steal, Worker};
 use crossbeam_utils::Backoff;
 
+use crate::sync::{AtomicU64, Ordering};
 use crate::thread_pool::{TaskHandle, ThreadPool};
 use crate::tls;
 
@@ -27,6 +27,13 @@ pub(crate) fn worker_main(pool: Arc<ThreadPool>, worker_id: u32, deque: Worker<T
     let mut rng = XorShift64Star::new(splitmix64(worker_id as u64));
 
     'outer: loop {
+        // Miri-only cooperative yield at the top of the worker loop so the
+        // Miri scheduler can advance siblings even when this worker keeps
+        // finding and running tasks via the `continue 'outer` arms (Phase 9.1
+        // H2). Native: compiles to nothing — loop body byte-identical.
+        #[cfg(miri)]
+        std::thread::yield_now();
+
         // 1. Local injector — pushes that targeted this worker directly.
         if let Some(t) = pop_local_injector(pool.as_ref(), worker_id, &deque) {
             run_task(t);
@@ -184,7 +191,13 @@ where
         match f() {
             Steal::Success(t) => return Some(t),
             Steal::Empty => return None,
-            Steal::Retry => continue,
+            Steal::Retry => {
+                // Miri-only cooperative yield in this unbounded steal-retry
+                // loop (Phase 9.1 H2). Byte-identical native: compiles away.
+                #[cfg(miri)]
+                std::thread::yield_now();
+                continue;
+            }
         }
     }
 }
