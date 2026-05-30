@@ -68,6 +68,12 @@ const CANVAS_ID: &str = "boyko_demo_canvas";
 /// single-version discipline, same as `eframe::egui` / `eframe::egui_wgpu::wgpu`);
 /// `wasm_bindgen_futures` is a direct dep pinned to eframe's minor (eframe does
 /// not re-export it).
+/// The `[[bin]]` target needs a `main` symbol on every target. On wasm the real
+/// entry is [`wasm_start`] (`#[wasm_bindgen(start)]`, invoked by the JS glue on
+/// module load), so `main` is an inert stub that satisfies the bin and never runs.
+#[cfg(target_arch = "wasm32")]
+fn main() {}
+
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen(start)]
 pub fn wasm_start() {
