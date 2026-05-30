@@ -1,0 +1,33 @@
+# Trunk build config for the wasm (web) build of boyko_demo (Wave 7, plan §8.2).
+#
+# Build locally with:
+#   rustup target add wasm32-unknown-unknown   # one-time
+#   cargo install --locked trunk               # one-time
+#   trunk build --release                       # -> dist/
+#   trunk serve --release                       # local preview at 127.0.0.1:8080
+#
+# The CI (.github/workflows/docs.yml) runs `trunk build --release` and publishes
+# `dist/` under the Pages site's `/demo/` subpath (see the workflow's
+# `--public-url`). The sim runs SEQUENTIALLY on wasm (no thread pool, plan D10).
+#
+# NOTE (Wave 7): the wasm build is currently blocked UPSTREAM in `boyko_ecs` —
+# hard-coded 64-bit `const _: () = assert!(size_of/align_of/offset_of ...)` layout
+# guards fail const-eval on the 32-bit wasm32 ABI (see docs/DEMO-DOGFOODING.md
+# W7-1). This config is correct and ready; the web build comes online once those
+# core asserts are made pointer-width-aware.
+
+[build]
+# The page that drives the build (its `<link data-trunk rel="rust">` selects the
+# crate + binary). Relative to this file.
+target = "index.html"
+# Output directory for the built site (wasm + JS glue + processed index.html).
+dist = "dist"
+# `trunk build`/`serve` without `--release` produce a debug wasm; CI passes
+# `--release` explicitly. `wasm-opt` is driven by the `data-wasm-opt="z"`
+# attribute on the `<link>` in index.html (size-optimize — the wasm ships over
+# the network, so size beats a few % of runtime here).
+
+[serve]
+# Local preview address (no effect in CI). 127.0.0.1 keeps the dev server local.
+address = "127.0.0.1"
+port = 8080

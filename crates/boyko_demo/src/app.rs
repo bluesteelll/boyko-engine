@@ -14,6 +14,10 @@
 //! 5. draws the egui control/stats panel.
 
 use std::sync::Arc;
+// `std::time::Instant` panics on `wasm32-unknown-unknown` (no monotonic clock
+// without a JS shim), so the per-frame wall-clock timing is native-only; the
+// wasm path derives `frame_ms` from egui's `stable_dt` instead (see `ui`).
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
 
 use eframe::CreationContext;
@@ -25,6 +29,8 @@ use boyko_ecs::ecs::core::component::component::Component;
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::state::NextState;
 use boyko_ecs::ecs::identifiers::primitives::{ArchetypeId, ComponentId};
+// The thread pool exists only on native (wasm runs the sim sequentially, D10).
+#[cfg(not(target_arch = "wasm32"))]
 use boyko_threadpool::{ThreadPool, ThreadPoolBuilder};
 
 use crate::render::camera::CameraUniform;
@@ -108,10 +114,13 @@ impl ParticleSpawner {
 pub struct DemoApp {
     /// The ECS world: entities, components, resources.
     world: EcsMaster,
-    /// Native scheduler + fixed-timestep driver.
+    /// Fixed-timestep driver: a multi-threaded `Schedule` on native, a
+    /// sequential dispatcher on wasm (plan D10). Same API either way.
     runner: SimRunner,
     /// The work-stealing pool the schedule fans `par_iter` across. Held to keep
-    /// it alive for the schedule's lifetime and as the canonical owner.
+    /// it alive for the schedule's lifetime and as the canonical owner. Native
+    /// only — wasm runs the sim sequentially with no pool (plan D10).
+    #[cfg(not(target_arch = "wasm32"))]
     _pool: Arc<ThreadPool>,
     /// wgpu queue for the per-frame instance upload. `wgpu::Queue` is `Clone`
     /// (refcounted internally), so cloning it out of eframe's render state is
@@ -178,13 +187,24 @@ impl DemoApp {
 
         // Native: a real multi-threaded pool sized to the machine (plan D10).
         // `SimRunner::new` registers the mode state + all gated systems and
-        // inserts the boid-pipeline resources.
+        // inserts the boid-pipeline resources. wasm cannot spawn the pool's OS
+        // threads (header-less Pages has no SharedArrayBuffer, D10), so the wasm
+        // runner takes no pool and dispatches sequentially — the one pool seam
+        // (plan §8.4). The mode-sim resources + `State<Mode>` are seeded by
+        // `SimRunner::new` on both targets.
+        #[cfg(not(target_arch = "wasm32"))]
         let pool = ThreadPoolBuilder::new().build();
+        #[cfg(not(target_arch = "wasm32"))]
         let runner = SimRunner::new(Arc::clone(&pool), &mut world);
+        #[cfg(target_arch = "wasm32")]
+        let runner = SimRunner::new(&mut world);
 
         Self {
             world,
             runner,
+            // The pool is held only on native to keep it alive for the
+            // schedule's lifetime; the field does not exist on wasm.
+            #[cfg(not(target_arch = "wasm32"))]
             _pool: pool,
             queue,
             instance_buffer,
@@ -344,7 +364,11 @@ impl eframe::App for DemoApp {
     // app area; side panels and windows go on top via `ui.ctx()`.
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         // Wall clock for the per-frame stats. `Instant` is the native shell's
-        // timer; the wasm entry (Wave 7) will substitute a JS clock.
+        // timer; `std::time::Instant` panics on `wasm32-unknown-unknown` (no
+        // monotonic clock), so on wasm the per-frame timing is derived from
+        // egui's `stable_dt` below instead (the FPS readout stays live; `sim_ms`
+        // is reported as 0 — a single-threaded diagnostic, not load-bearing).
+        #[cfg(not(target_arch = "wasm32"))]
         let frame_start = Instant::now();
 
         let ctx = ui.ctx().clone();
@@ -370,11 +394,16 @@ impl eframe::App for DemoApp {
             self.spawn_click_burst(world_pos);
         }
 
-        // 3. Advance the simulation (real multi-threaded schedule, fixed dt),
-        // timing just the sim so the panel can show sim ms vs total frame ms.
+        // 3. Advance the simulation (real multi-threaded schedule on native, the
+        // sequential runner on wasm; fixed dt), timing just the sim so the panel
+        // can show sim ms vs total frame ms (native only — see the clock note).
+        #[cfg(not(target_arch = "wasm32"))]
         let sim_start = Instant::now();
         self.runner.step(&mut self.world, dt);
+        #[cfg(not(target_arch = "wasm32"))]
         let sim_ms = sim_start.elapsed().as_secs_f32() * 1000.0;
+        #[cfg(target_arch = "wasm32")]
+        let sim_ms = 0.0_f32;
 
         // 4. Zero-copy upload of the GpuInstance column (plan D2/H4).
         let instance_count = self.upload_instances();
@@ -393,8 +422,14 @@ impl eframe::App for DemoApp {
         // 6. Record this frame's stats into the fixed ring (no allocation), then
         // draw the control panel. `frame_ms` uses the whole-`ui` span up to this
         // point — the dominant cost (sim + upload + draw record); the remaining
-        // egui paint is negligible and not double-counted.
+        // egui paint is negligible and not double-counted. On wasm there is no
+        // `Instant`, so `frame_ms` is taken from egui's smoothed `stable_dt`
+        // (the same value driving the sim accumulator) — close enough for the
+        // FPS readout/plot.
+        #[cfg(not(target_arch = "wasm32"))]
         let frame_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
+        #[cfg(target_arch = "wasm32")]
+        let frame_ms = dt * 1000.0;
         let entity_count = self.world.entity_count() as u32;
         self.stats.push(frame_ms, sim_ms, entity_count);
 

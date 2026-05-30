@@ -1,0 +1,20 @@
+# Cargo config for the wasm (web) build of boyko_demo (Wave 7).
+#
+# `getrandom` 0.3 (pulled by `rand` 0.9) refuses to compile on
+# `wasm32-unknown-unknown` unless the backend is selected explicitly: the
+# `wasm_js` *feature* (declared in Cargo.toml) wires the dependency, and this
+# `--cfg getrandom_backend="wasm_js"` flag selects the Web-Crypto backend at
+# build time. Without it getrandom emits a `compile_error!` (getrandom 0.3.4
+# `src/backends.rs`). This is the demo's RNG entropy source in the browser.
+#
+# Scope: this config is discovered when cargo/trunk is invoked from THIS crate
+# directory (`crates/boyko_demo/`). The CI workflow `cd`s here before
+# `trunk build`, and the documented local build runs from here, so the flag
+# applies without a manual `RUSTFLAGS`. A workspace-root
+# `cargo build -p boyko_demo --target wasm32-unknown-unknown` does NOT pick this
+# up — run it from this directory (or export the flag).
+#
+# The flag is scoped to the wasm target only, so native builds are unaffected.
+
+[target.wasm32-unknown-unknown]
+rustflags = ['--cfg', 'getrandom_backend="wasm_js"']

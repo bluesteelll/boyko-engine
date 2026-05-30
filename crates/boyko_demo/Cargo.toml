@@ -30,3 +30,27 @@ rand = "0.9"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 env_logger = "0.11"
+
+# Web (wasm32) target deps (Wave 7, plan §2.2 / §8.2). The demo runs the sim
+# SEQUENTIALLY on wasm — no `ThreadPool`, no OS threads (D10) — so nothing here
+# pulls a threading shim.
+#
+# * `wasm-bindgen` provides the `#[wasm_bindgen(start)]` entry + `JsCast` (the
+#   canvas downcast). `web-sys` is reached via `eframe::web_sys` (re-exported),
+#   so it is NOT re-declared.
+# * `wasm-bindgen-futures` drives the async `WebRunner::start` via `spawn_local`.
+#   eframe 0.34.3 re-exports `wasm_bindgen` + `web_sys` but NOT
+#   `wasm_bindgen_futures`, so it is declared here, pinned to eframe's `0.4`
+#   minor to keep a single version in the graph.
+# * `console_error_panic_hook` + `console_log` surface panics/logs in the
+#   browser devtools.
+# * `getrandom`'s `wasm_js` feature wires `rand`'s entropy to the Web Crypto API.
+#   getrandom 0.3 ALSO requires the `--cfg getrandom_backend="wasm_js"` rustflag
+#   (set in `.cargo/config.toml`) — the feature alone is insufficient (it emits a
+#   `compile_error!` otherwise). Without both, `rand` fails to build on wasm.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+console_error_panic_hook = "0.1"
+console_log = "1"
+getrandom = { version = "0.3", features = ["wasm_js"] }
