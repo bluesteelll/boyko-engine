@@ -105,9 +105,23 @@ Deferred: `resource_exists` (needs `Option<Res>` param), typed combinators
 (`.and`/`.or`/`.not`), `on_event`, tick-aware conditions (`Changed`/`Added` —
 Phase 16.1), `in_state` (→ Phase 17).
 
-### Phase 17 — States / state transitions
-Tagged enum states + `OnEnter` / `OnExit` schedule labels. Composes with
-Phase 15 / 16. ~2-3 weeks.
+### Phase 17 — States / state transitions — ✅ DONE
+Tagged enum states (`States` trait), `State<S>` / `NextState<S>` resources,
+`in_state` / `on_enter` / `on_exit` / `on_transition` run conditions composing
+with Phase 15 / 16. Implemented the boyko-native **shape (b)** — enter/exit are
+ordinary condition-gated systems fed by a built-in per-frame transition pass —
+rather than Bevy's value-keyed sub-schedules (boyko has one schedule). **0%-gate
+held** (transition pass gated by `state_entries.is_empty()`, executor byte-
+identical, 50-systems bench "no change"). **Zero new `unsafe`**. The generic
+`State<S>` resource ids go through a `TypeId`-keyed registry (the rust#22991
+static-collapse trap — `#[derive(Resource)]` would alias every `S`). 814 tests +
+Miri (TB) 21 clean. **F1 (tester-caught CRITICAL)**: conditions as `impl FnMut`
+don't compile through `.run_if` (opaque return drops the double-`FnMut` HRTB
+bound `SystemParamFunction` needs) → fix = `impl System<Out=bool>` + the
+anticipated IS2 identity `IntoSystem` blanket. See `docs/PHASE-17-RESULTS.md`.
+
+Deferred: value-keyed sub-schedules, computed/sub-states, state-scoped
+auto-despawn, `StateTransitionEvent`, `#[derive(States)]`, `Option<Res<R>>`.
 
 ### Phase 18 — Plugin system
 Modular crate composition via `App::add_plugin(MyPlugin)`. Bevy-style. No
