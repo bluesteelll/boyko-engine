@@ -156,7 +156,22 @@ No extra frame of latency, no double-buffering needed. The flash appears on the
 same frame the collision resolves. Good Phase-10 result for the demo: change
 detection composes cleanly with explicit `.before`/`.after` ordering.
 
-### Wave-7 finding (web / wasm32 build) — HARD BLOCKER in the core (needs a core change)
+### Wave-7 finding (web / wasm32 build) — ✅ RESOLVED (was a core blocker)
+
+> **RESOLUTION (verified):** the wasm core port landed (commits `670b49f` core,
+> `c949c8a` + `9c27a71` demo). `cargo build -p boyko_demo --target
+> wasm32-unknown-unknown` now Finishes **warning-free**; native build + clippy
+> `--all-targets` + all 15 demo tests + the 494 `boyko_ecs` lib tests stay green.
+> Fix = three parts: (1) gate the 28 pointer-width `const _` layout asserts behind
+> `#[cfg(target_pointer_width = "64")]` in `boyko_ecs` (they still fire verbatim on
+> x86_64); (2) move `rand` → `boyko_ecs` `[dev-dependencies]` (its only `src/` use
+> is a `#[cfg(test)]` AVX2 test) so `getrandom` leaves the normal wasm build;
+> (3) enable the `eframe` `webgl` backend feature on the wasm target + add a
+> `#[cfg(wasm32)] fn main() {}` stub (real entry is `wasm_start`). No SIMD wall,
+> no threadpool wall, no `Instant`-in-core wall — the core was wasm-portable bar
+> the const-asserts. **Web deploy is ready pending a local `trunk build --release`
+> + a browser check (neither runnable in the agent environment).** The historical
+> blocker analysis below is retained for the record.
 
 Wave 7 added the wasm (web) build: the `#[cfg(target_arch = "wasm32")]` sequential
 runner (`sim/runner.rs`), the `wasm_bindgen(start)` → `WebRunner` entry
