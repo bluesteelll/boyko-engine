@@ -37,10 +37,10 @@ No other root edit; no edits to any `crates/boyko_*/` manifest or `src/`. The ro
 `[package] boyko-engine` with its own `src/` — the demo does not touch it.
 
 ### 2.2 `crates/boyko_demo/Cargo.toml`
-PIN `wgpu` to exactly what `eframe 0.34` resolves (version skew is the #1 build failure).
-**Wave-0 step 0**: add `eframe = "0.34.3"`, run `cargo tree -p eframe -i wgpu`, pin the printed
-version. Researcher's finding is `=29.0.1`; verify against the lockfile and treat the verified
-value as authoritative.
+Reach `wgpu`/`egui` via eframe's re-exports (no separate dep — version skew is the #1 build failure).
+**Wave-0 step 0**: add `eframe = "0.34"`, run `cargo tree -p eframe -i wgpu` + `-i egui`; the printed
+versions are authoritative (expected: egui 0.34, wgpu 25.x internal — the earlier `=29.0.1` research
+note was wrong). Pin `egui_plot` to eframe's egui minor. See the H1/H2 gate below the manifest.
 ```toml
 [package]
 name = "boyko_demo"
@@ -57,10 +57,14 @@ boyko_ecs        = { path = "../boyko_ecs" }
 boyko_macros     = { path = "../boyko_macros" }   # derives: Component, Bundle, Resource
 boyko_threadpool = { path = "../boyko_threadpool" }
 
-eframe    = { version = "0.34.3", default-features = false, features = ["wgpu", "default_fonts"] }
-egui      = "0.34"
-egui_plot = "0.35"
-wgpu      = "=29.0.1"      # PIN to eframe's exact resolution (verify via `cargo tree`)
+eframe    = { version = "0.34", default-features = false, features = ["wgpu", "default_fonts"] }
+# egui reached via `eframe::egui` re-export — do NOT add a separate `egui` dep (single-version guarantee).
+egui_plot = "0.34"        # H2: MUST match eframe's egui minor. eframe 0.34 -> egui 0.34 -> egui_plot 0.34.
+                          #     0.35 against egui 0.34 pulls a 2nd egui -> "two egui::Ui types". Verify Wave 0.
+# wgpu reached via `eframe::egui_wgpu::wgpu` re-export — do NOT add a separate `wgpu` dep.
+#     A hand-pinned wgpu that differs from eframe's makes the custom-pipeline Device/Queue/CallbackTrait
+#     types fail to unify with egui's. eframe 0.34 resolves wgpu 25.x internally (NOT 29 — that number was
+#     a research error). Wave 0 `cargo tree -p eframe -i wgpu` is the single source of truth.
 bytemuck  = { version = "1", features = ["derive"] }
 rand      = "0.9"
 log       = "0.4"
@@ -84,6 +88,14 @@ alloc_audit = []          # demo-only global-allocator counting shim for hot-pat
 ```
 `default-features = false` on eframe drops the glow (GL) renderer; keep `wgpu` + `default_fonts`.
 
+> **H1/H2 — version coherence is a binding Wave-0 gate.** The numbers above are the EXPECTED pairing
+> for eframe 0.34 (egui 0.34, wgpu 25 internal); they are NOT authoritative. Wave 0 MUST run
+> `cargo tree -p eframe -i wgpu` + `cargo tree -p eframe -i egui` and reconcile before any render code:
+> reach `wgpu` only via `eframe::egui_wgpu::wgpu`, reach `egui` only via `eframe::egui`, and pin
+> `egui_plot` to eframe's egui minor. A mismatch here is the #1 build-failure class. If eframe's
+> `wgpu` is `default-features = false` upstream, confirm a backend feature (vulkan/metal/gl) is active
+> or the scene renders nothing.
+
 ### 2.3 Core-untouched confirmation
 Only repo edits outside `crates/boyko_demo/`: one line in root `Cargo.toml`, this doc, and
 Wave-7-only `index.html`/`Trunk.toml`/CI. The demo drives ONLY public `boyko_ecs` API (§9).
@@ -91,8 +103,8 @@ Wave-7-only `index.html`/`Trunk.toml`/CI. The demo drives ONLY public `boyko_ecs
 ## 3. Decisions (numbered, justified)
 
 ### D1 — Stack: `eframe` (not raw winit+wgpu+egui glue). Pinned.
-Choice: `eframe 0.34.3` (wgpu renderer) + `egui_plot 0.35` + `bytemuck 1`, `wgpu` pinned to
-eframe's exact resolution. Why: one codebase native+web; eframe owns the winit-0.30
+Choice: `eframe 0.34` (wgpu renderer) + `egui_plot` (eframe's egui minor) + `bytemuck 1`; `wgpu`/`egui`
+reached via eframe re-exports (§2.2 H1/H2 gate). Why: one codebase native+web; eframe owns the winit-0.30
 `resumed`/surface-lifetime dance and the wasm canvas entry; `egui_wgpu::CallbackTrait`
 (prepare/paint) is confirmed sufficient for a fully custom instanced pipeline under the egui layer
 (egui `custom3d_wgpu` example). Removes ~500 lines of event-loop/surface boilerplate that is pure
@@ -154,7 +166,11 @@ frame but its SIZE is near-constant; a single stable allocation avoids per-frame
 (allocation in the frame loop is forbidden, principle 5) and keeps the vertex binding stable;
 power-of-two growth bounds reallocs to O(log cap). Rejected: ring/rotation (only helps a stall not
 yet observed; adds bookkeeping); exact-fit recreate each frame (alloc churn). Trade-off: ≤2× VRAM
-headroom transiently after growth (16 B/inst × 1M = 16 MB; 2× = 32 MB — negligible).
+headroom transiently after growth (M1: at the default 32 B `GpuInstance`, 32 B/inst × 1M = 32 MB
+base; 2× after a growth = 64 MB — still negligible). **Click-spawn must also clamp against pool
+capacity** (`ComponentPool` returns `None`/`Err` when full, `component_pool.rs:222`): the spawn count
+is `min(requested, MAX_INSTANCES - count, pool_remaining)`; at the ceiling the UI shows "at capacity"
+and the click is a no-op (M5).
 
 ### D7 — WebGPU with WebGL2 fallback (broad reach).
 Choice: target WebGPU first; keep the pipeline WebGL2-compatible (this is WHY D4 avoids storage
@@ -260,7 +276,7 @@ the engine's real machinery. Trade-off: spawn/despawn-on-transition is expressed
 `on_enter`/`on_exit`-gated systems (Bevy parity via run-conditions, not separate schedules).
 G10 resolved: no manual transition system; the builder registration + `Schedule::run` handle it.
 
-### D16 — `Mode` membership marker component for despawn-on-exit.
+### D16 — `Mode` membership marker component for despawn-on-exit (EXCLUSIVE system).
 Choice: each sim entity carries a 1-byte tag matching its mode (`ParticleTag(u8)` etc.).
 `on_exit(mode)`-gated despawn system removes all entities with that tag via
 `world.query_entities(&[ParticleTag::component_id()]) -> Vec<Entity>` (`ecs_master.rs:1390`,
@@ -268,6 +284,31 @@ Choice: each sim entity carries a 1-byte tag matching its mode (`ParticleTag(u8)
 makes "despawn the previous mode" one query + loop. Trade-off: ZST markers are UNSUPPORTED
 (`component_pool.rs:108` debug-asserts size>0), so use `ParticleTag(u8)` (1 B), not a true ZST
 (G3).
+
+> **C2 — the despawn system MUST be an EXCLUSIVE system `fn(&mut EcsMaster)`.** `query_entities`
+> is `&self` and `delete_entity` is `&mut self`, so a body calling both directly on `world` can only
+> be an exclusive system (universal access), registered `add_system(despawn_<mode>)` with signature
+> `fn(&mut EcsMaster)`. Consequence: it runs only when `running == 0` (`schedule.rs:763`), serializing
+> the frame — ACCEPTABLE because it fires only on transition frames (gated by `on_exit`).
+> **`.run_if(on_exit(Mode::X))` on an EXCLUSIVE system has ZERO in-crate precedent** (Phase-17 only
+> gated function systems) — exactly the "primitive verified, headline combo never exercised" class
+> (cf. NCD6, Phase-17's own `.run_if(in_state)` F1 gap). **Wave-5 acceptance gate (binding):** a
+> smoke test must confirm the exclusive despawn fires exactly on the exit frame and not otherwise,
+> BEFORE relying on it. Fallback if the combo misbehaves: collect ids in a `&self`/`Commands` system
+> and route deletion through `Commands::despawn(entity)` (`commands.rs:194`, deferred, non-exclusive,
+> composes cleanly) — but that splits read (ids) from delete across systems; the exclusive system is
+> the simpler default if the gate passes.
+
+> **H3 — intra-frame mode-switch ordering (pin explicitly).** Within ONE `Schedule::run` on a
+> transition frame: (1) the transition pass records exit-old/enter-new (`schedule.rs:251`, before the
+> executor loop); (2) conditions evaluate; (3) the EXCLUSIVE despawn-old mutates inline; (4) the
+> spawn-new system enqueues via `Commands` (applies at the apply-window barrier, same run). Order:
+> despawn-old `.before` spawn-new, both `.before` `sync_gpu_instance`, which is `.before` the frame's
+> end → `prepare` reads the post-apply column. So the user sees the switched set on the SAME
+> transition frame (spawn-via-Commands applies within the run), provided this ordering holds. Verify
+> `prepare`'s `total_count` reflects post-apply archetype counts. (Startup population uses direct
+> `create_entity` per C1, so the 1-frame apply delay applies only to runtime click-spawn, not mode
+> switches.)
 
 ## 4. Module / file layout (`crates/boyko_demo/`)
 ```
@@ -603,7 +644,7 @@ None require a core change — each has a demo-side workaround. Starred = candid
 | G2 | Read-only upload + change-detection rule. `query::<D,F>()` is `&mut self` (`:2391`) AND PANICS if `D`/`F` need change detection. | Confirmed. | App holds `&mut world` in `update()`; call `world.query::<&GpuInstance,()>().for_each_chunk(..)` (no CD). `Changed<T>` only inside scheduler systems. | *A `&self` `query_ref`.* |
 | G3 | ZST marker components. | Confirmed UNSUPPORTED (`component_pool.rs:108` size>0). | 1-byte tags `ParticleTag(u8)` (D16). | *ZST component support.* |
 | G4 | `#[derive(Resource)]`. | Confirmed EXISTS (`boyko_macros:301`). | Use it directly. | — |
-| G5 | `Commands::spawn_batch` for bulk population. | Confirmed (`commands.rs:242`, `I: IntoIterator<Item=B>` → `EcsResult<SpawnBatchIter>`); single `Commands::spawn(bundle)` at `:158`. | Use `spawn_batch` for the initial 10k–1M; fallback loop `spawn` / setup-time `create_entity`. | — |
+| G5 | Bulk population. **FRICTION: `Commands::spawn_batch` hard-caps at `MAX_BATCH_HINT = 8_192` per call** (`spawn_batch_command.rs:103-106` → `Err(SpawnBatchExceedsCapacity)` above it; the iterator is dropped, the counter does not advance). A single `spawn_batch(100k..1M)` FAILS at runtime (panic on `.expect()`, or silently zero entities). | Confirmed cap. | **Startup population: `world.create_entity` + direct insert at setup (NO batch cap, NO 1-frame apply delay) — see C1/§6.6/Wave 3.5.** Runtime click-spawn: loop `spawn_batch` in ≤8_192 chunks (`commands.rs:213-220` shows the `step_by(MAX_BATCH_HINT-1)` loop), each burst clamped to remaining pool capacity. | — |
 | G6 | Arena budget + pool capacity at high N. 64 MB arena (`DEFAULT_ARENA_SIZE`). Per-column pool sizes to `DEFAULT_CHUNKS_PER_POOL × per_chunk`; per-row tick buffers are `Box` (NOT arena, `component_pool.rs:80`). Physics entity ≈ Position8+Velocity8+Radius4+GpuInstance32+tag1 ≈ 53 B + SIMD-align gaps. | Confirmed mechanics; capacities to MEASURE. | Wave 2: measure per-column footprint; CONFIRM default pool capacity reaches the target N per column, else use `with_capacity` / lower the cap per mode (e.g. particles 1M, boids 250k, balls 100k). | *Configurable arena size / pool capacity.* |
 | G7 | `Entity` is NOT a query term. | Confirmed (no `impl QueryData for Entity`). | Despawn-by-tag via `world.query_entities(&[Tag::component_id()]) -> Vec<Entity>` (`:1390`, `&self`) → `delete_entity` each. Spawn returns `Entity` from `create_entity`/`spawn_one`. | *`Entity`/`EntityRef` as `QueryData`.* |
 | G8 | No built-in `Time`/`DeltaTime`. | Confirmed absent. | Demo `#[derive(Resource)] DeltaTime(f32)`; set before each `run`. | *Optional `Time`.* |
@@ -640,8 +681,8 @@ Wave 3 — wire the ECS (prove SoA→GPU zero-copy + real schedule)
 - 3.2 [P] `sim/resources.rs` (G4, `DeltaTime` G8, `InputState`).
 - 3.3 [S] `sim/systems/particles.rs` (`integrate_particles`) + `sim/systems/common.rs` (`sync_gpu_instance`).
 - 3.4 [S] `sim/runner.rs` (native): `ThreadPool` + `ScheduleBuilder` (`add_system(integrate)`, then `sync_gpu_instance.after(integrate)`) + `SimRunner` accumulator (G5).
-- 3.5 [S] `app.rs`: own `EcsMaster` + `SimRunner` (+ pool); spawn 100k particles at startup (MVP); each `update`: `runner.step(&mut world, dt, fixed)`.
-- 3.6 [S] Replace Wave-2 static upload with the ZERO-COPY path: `prepare` → `world.query::<&GpuInstance,()>().for_each_chunk(|s| write_buffer)` (G2). Milestone (MVP): ECS-driven 100k+ particles, real `Schedule::run`, real `par_iter_mut`, zero-copy upload, fixed timestep.
+- 3.5 [S] `app.rs`: own `EcsMaster` + `SimRunner` (+ pool); spawn 100k particles at startup via **direct `world.create_entity` + component insert at setup** (C1: NOT `Commands::spawn_batch` — its 8_192 cap fails at 100k; direct creation has no cap and is immediate, no 1-frame apply delay); each `update`: `runner.step(&mut world, dt, fixed)`.
+- 3.6 [S] Replace Wave-2 static upload with the ZERO-COPY path: `prepare` → `world.query::<&GpuInstance,()>().for_each_chunk(|s| write_buffer)` (G2). **H4 — resolve the borrow shape FIRST: prototype the `for_each_chunk`-from-`&mut world`-inside-`CallbackTrait::prepare` borrow before building §5.4. If `&mut world` cannot thread across the egui callback registration, fall back to: record `(byte_offset, len)` per archetype in `update()` while holding `&mut world`, then `write_buffer` in `prepare` reading the column base pointer — still zero-AoS-copy. Do NOT defer this; it gates the headline.** Milestone (MVP): ECS-driven 100k+ particles, real `Schedule::run`, real `par_iter_mut`, zero-copy upload, fixed timestep.
 
 Wave 4 — egui controls + mouse + FPS plot
 - 4.1 [P] `ui/panel.rs`: sliders/toggles → `SimParams`; readouts; `egui_plot` FPS (§7).
@@ -651,7 +692,7 @@ Wave 4 — egui controls + mouse + FPS plot
 Wave 5 — boids + grid + state switch
 - 5.1 [P] `sim/grid.rs`: `SpatialGrid` + CSR rebuild (§6.4).
 - 5.2 [P] `sim/systems/boids.rs`: snapshot, build_grid, boid_forces (`par_iter`), integrate; `BoidSnapshot`.
-- 5.3 [S] `sim/modes.rs`: `Mode` `States` impl; `builder.insert_state`; spawn/despawn systems gated `.run_if(on_enter/on_exit(Mode::X))`; per-mode sim systems `.run_if(in_state(Mode::X))`; mode buttons → `NextState<Mode>` (G6/G7/G11). Milestone: switch Particles↔Boids live, each spawns/despawns its set, boids flock.
+- 5.3 [S] `sim/modes.rs`: `Mode` `States` impl; `builder.insert_state`; **despawn-on-exit as EXCLUSIVE `fn(&mut EcsMaster)` systems gated `.run_if(on_exit(Mode::X))` (C2 — add the binding smoke test: exclusive + `.run_if(on_exit)` fires exactly on the exit frame BEFORE building the rest)**; spawn-on-enter `.run_if(on_enter(Mode::X))`; per-mode sim systems `.run_if(in_state(Mode::X))`; pin intra-frame order despawn-old `.before` spawn-new `.before` `sync_gpu_instance` (H3); mode buttons → `NextState<Mode>` (G6/G7/G11). Milestone: switch Particles↔Boids live, each spawns/despawns its set, boids flock.
 
 Wave 6 — physics
 - 6.1 [P] `sim/systems/physics.rs`: integrate_balls, build_grid (reuse), collide_balls (sequential, correct), wall bounce; `tint_collided` via `Changed<Velocity>` (in-schedule).
@@ -718,7 +759,3 @@ W7 (7.1 ‖ 7.2 prep).
    `update()` (still no intermediate AoS Vec — just record `(offset, len, archetype)` triples).
 5. Default pool worker count on native: `available_parallelism` (full showcase) vs a capped value
    to leave a core for the OS/render thread? Lean to full; expose as a `SimConfig` knob.
-
-=== END docs/DEMO-PLAN.md ===
-
-This plan is ready for `architecture-critic`. After the file is written by the orchestrator, the critic can review at `D:\claude\BoykoEngine\docs\DEMO-PLAN.md`.
