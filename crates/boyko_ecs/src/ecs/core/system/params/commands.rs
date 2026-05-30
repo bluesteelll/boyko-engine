@@ -108,6 +108,10 @@ pub struct Commands<'s> {
 // Plan §11.7: `Commands<'s>` is exactly 16 B (one cache line). Compile-time
 // guard so a future field addition is caught at the assertion site rather
 // than as a perf surprise.
+// It holds a `&mut CommandQueue` plus a pointer-width `EntityCounter`, so the
+// 16-byte size encodes the 64-bit ABI; gated to 64-bit (the engine's supported
+// platform) — see CLAUDE.md target platform.
+#[cfg(target_pointer_width = "64")]
 const _: () = assert!(core::mem::size_of::<Commands<'static>>() == 16);
 
 impl<'s> Commands<'s> {

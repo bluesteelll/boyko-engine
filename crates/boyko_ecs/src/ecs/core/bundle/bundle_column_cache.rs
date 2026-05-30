@@ -117,6 +117,11 @@ unsafe impl Send for BundleColumnRecord {}
 // SAFETY: same composition as `Send`.
 unsafe impl Sync for BundleColumnRecord {}
 
+// `BundleColumnRecord` holds an `ArchetypeId` (wraps `usize`) and a
+// `&'static [InlandPoolId]` (a pointer-width fat slice), so the 32-byte size
+// encodes the 64-bit ABI. Gated to 64-bit (the engine's supported platform) —
+// see CLAUDE.md target platform.
+#[cfg(target_pointer_width = "64")]
 const _: () = assert!(std::mem::size_of::<BundleColumnRecord>() == 32);
 
 /// Phase 12.5 Opt-A3 (§6.2): per-world cache of resolved

@@ -398,14 +398,21 @@ impl crate::ecs::core::events::event::Event for _SizeAssertEvent {
     }
 }
 
+// `EventReaderState` holds a `cursor: usize` + a `NonNull` buffer pointer, and
+// `EventReader` wraps a single pointer-width handle, so these size/align figures
+// encode the 64-bit ABI. Gated to 64-bit (the engine's supported platform) — see
+// CLAUDE.md target platform.
+#[cfg(target_pointer_width = "64")]
 const _: () = assert!(
     core::mem::size_of::<EventReaderState<_SizeAssertEvent>>() == 24,
     "EventReaderState<E> must be 24 B (Phase 12 §11.1)",
 );
+#[cfg(target_pointer_width = "64")]
 const _: () = assert!(
     core::mem::align_of::<EventReaderState<_SizeAssertEvent>>() == 8,
     "EventReaderState<E> must be 8-byte aligned (Phase 12 §11.1)",
 );
+#[cfg(target_pointer_width = "64")]
 const _: () = assert!(
     core::mem::size_of::<EventReader<'_, _SizeAssertEvent>>() == 8,
     "EventReader<'s, E> must be 8 B (Phase 12 §11.1)",

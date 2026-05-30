@@ -37,10 +37,19 @@ pub struct Column {
     pub(crate) _reserved: u32,
 }
 
-const _: () = assert!(std::mem::size_of::<Column>() == 16);
-const _: () = assert!(std::mem::align_of::<Column>() == 8);
+// Layout pinned for the 64-bit target (the engine's supported platform); the
+// size/align/offsets encode an 8-byte raw pointer (`ptr`), so they are gated to
+// 64-bit — see CLAUDE.md target platform. `offset_of(ptr) == 0` is the only
+// width-independent member (a `#[repr(C)]` first field is at offset 0 on every
+// target) and stays unconditional.
 const _: () = assert!(std::mem::offset_of!(Column, ptr) == 0);
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(std::mem::size_of::<Column>() == 16);
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(std::mem::align_of::<Column>() == 8);
+#[cfg(target_pointer_width = "64")]
 const _: () = assert!(std::mem::offset_of!(Column, stride) == 8);
+#[cfg(target_pointer_width = "64")]
 const _: () = assert!(std::mem::offset_of!(Column, _reserved) == 12);
 
 impl Column {
@@ -92,6 +101,9 @@ pub enum RemoveOutcome {
 // CR3: size guard — must match Option<EntityId> = 16 bytes (8-byte EntityId
 // + 8-byte discriminant/niche). If a new variant is added, this fires at
 // compile time before the regression can ship.
+// `EntityId` wraps a `usize`, so the 16-byte size encodes the 64-bit ABI;
+// gated to 64-bit (the engine's supported platform) — see CLAUDE.md.
+#[cfg(target_pointer_width = "64")]
 const _: () = {
     assert!(
         std::mem::size_of::<RemoveOutcome>() == 16,
@@ -192,6 +204,12 @@ const _: () = assert!(std::mem::offset_of!(Archetype, columns) == 0);
 // x86_64 target. This guards against accidental layout drift; if a future
 // change moves `flags` or alters `signature`'s alignment, this trips before
 // the perf regression can ship.
+//
+// The struct embeds raw pointers (`arena`), `Vec`s, and `usize` fields, so the
+// 8480 B figure encodes the 64-bit ABI; gated to 64-bit (the engine's supported
+// platform) — see CLAUDE.md target platform. `offset_of(columns) == 0` above is
+// width-independent (first `#[repr(C)]` field) and stays unconditional.
+#[cfg(target_pointer_width = "64")]
 const _: () = assert!(std::mem::size_of::<Archetype>() == 8480);
 
 impl Archetype {

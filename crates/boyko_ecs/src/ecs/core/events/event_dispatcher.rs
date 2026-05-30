@@ -84,8 +84,14 @@ struct EventTypeSlot {
 }
 
 const _: () = assert!(core::mem::align_of::<EventTypeSlot>() == 64);
+// The slot embeds a raw `*mut u8` and an `EventVTable` (fn pointers + `TypeId`),
+// so its exact size tracks the pointer width. On the 64-bit target (the engine's
+// supported platform) the payload fills one full 64-byte cache line; on 32-bit
+// wasm it is smaller, so the size guards are gated to 64-bit — see CLAUDE.md
+// target platform. The `align == 64` guard above is width-independent.
+#[cfg(target_pointer_width = "64")]
 const _: () = assert!(core::mem::size_of::<EventTypeSlot>().is_multiple_of(64));
-#[cfg(not(debug_assertions))]
+#[cfg(all(not(debug_assertions), target_pointer_width = "64"))]
 const _: () = assert!(core::mem::size_of::<EventTypeSlot>() == 64);
 
 // ── EventTypeSlotStorage ──────────────────────────────────────────────────────

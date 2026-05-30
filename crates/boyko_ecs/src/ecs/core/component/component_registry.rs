@@ -112,6 +112,11 @@ pub struct ComponentLayout {
 // `Q5` relies on (hooks live in the parallel cold `HOOKS` table, NOT inline in
 // `ComponentLayout`). Previously documented only in the doc comment above; now
 // a hard compile-time assertion so a future field addition trips here.
+// `ComponentLayout` embeds `&'static str`, `core::alloc::Layout` (two `usize`),
+// an `Option<unsafe fn>`, and a `TypeId`; all are pointer-width, so the 56-byte
+// size encodes the 64-bit ABI. Gated to 64-bit (the engine's supported
+// platform) — see CLAUDE.md target platform.
+#[cfg(target_pointer_width = "64")]
 const _: () = assert!(std::mem::size_of::<ComponentLayout>() == 56);
 
 impl ComponentLayout {

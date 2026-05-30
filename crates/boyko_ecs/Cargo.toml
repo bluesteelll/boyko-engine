@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-rand = "0.9.0"
 boyko-utils =  { path = "../boyko_utils" }
 boyko-threadpool = { path = "../boyko_threadpool" }
 fixedbitset = "0.5"
@@ -28,6 +27,12 @@ boyko-macros = { path = "../boyko_macros" }
 trybuild = "1"
 criterion = { version = "0.5", features = ["html_reports"] }
 proptest = "1"
+# `rand` is used only by tests/benches (the single `src/` reference is inside a
+# `#[cfg(test)] mod tests` in `schedule/bitset_intersects.rs`), so it lives in
+# dev-dependencies. This keeps its `getrandom` dependency out of the normal
+# `wasm32-unknown-unknown` build (the web-demo target), where getrandom 0.3
+# otherwise requires an explicit backend flag.
+rand = "0.9.0"
 
 [[bench]]
 name = "component_id"

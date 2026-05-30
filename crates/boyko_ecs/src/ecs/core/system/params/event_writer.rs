@@ -277,14 +277,21 @@ impl crate::ecs::core::events::event::Event for _SizeAssertEvent {
     }
 }
 
+// `EventWriterState` holds a pointer-width state (a `usize` + a `NonNull`
+// buffer pointer), and `EventWriter` wraps a single pointer-width handle, so
+// these size/align figures encode the 64-bit ABI. Gated to 64-bit (the engine's
+// supported platform) — see CLAUDE.md target platform.
+#[cfg(target_pointer_width = "64")]
 const _: () = assert!(
     core::mem::size_of::<EventWriterState<_SizeAssertEvent>>() == 24,
     "EventWriterState<E> must be 24 B (Phase 12 §11.1)",
 );
+#[cfg(target_pointer_width = "64")]
 const _: () = assert!(
     core::mem::align_of::<EventWriterState<_SizeAssertEvent>>() == 8,
     "EventWriterState<E> must be 8-byte aligned (Phase 12 §11.1)",
 );
+#[cfg(target_pointer_width = "64")]
 const _: () = assert!(
     core::mem::size_of::<EventWriter<'_, _SizeAssertEvent>>() == 8,
     "EventWriter<'s, E> must be 8 B (Phase 12 §11.1)",

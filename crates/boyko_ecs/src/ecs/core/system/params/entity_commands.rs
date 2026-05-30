@@ -87,6 +87,10 @@ pub struct EntityCommands<'a, 's> {
 // engine's `usize`-backed `EntityId` (see the layout doc above for the
 // plan-vs-implementation reconciliation). A future field addition would
 // trip this assert before silently shipping a perf regression.
+// The `usize`-backed `Entity` plus a `&mut Commands` reference make the 24-byte
+// size encode the 64-bit ABI; gated to 64-bit (the engine's supported platform)
+// — see CLAUDE.md target platform.
+#[cfg(target_pointer_width = "64")]
 const _: () = assert!(core::mem::size_of::<EntityCommands<'static, 'static>>() == 24);
 
 impl<'a, 's> EntityCommands<'a, 's> {

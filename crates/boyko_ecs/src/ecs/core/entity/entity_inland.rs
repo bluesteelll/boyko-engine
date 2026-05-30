@@ -27,10 +27,19 @@ pub struct EntityInland {
     generation: u32,
 }
 
-const _: () = assert!(std::mem::size_of::<EntityInland>() == 16);
-const _: () = assert!(std::mem::align_of::<EntityInland>() == 8);
+// Layout pinned for the 64-bit target (the engine's supported platform); the
+// size/align/offsets encode an 8-byte raw pointer (`archetype_ptr`), so they are
+// gated to 64-bit — see CLAUDE.md target platform. `offset_of(archetype_ptr) ==
+// 0` is width-independent (a `#[repr(C)]` first field is at offset 0 on every
+// target) and stays unconditional.
 const _: () = assert!(std::mem::offset_of!(EntityInland, archetype_ptr) == 0);
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(std::mem::size_of::<EntityInland>() == 16);
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(std::mem::align_of::<EntityInland>() == 8);
+#[cfg(target_pointer_width = "64")]
 const _: () = assert!(std::mem::offset_of!(EntityInland, unit_index) == 8);
+#[cfg(target_pointer_width = "64")]
 const _: () = assert!(std::mem::offset_of!(EntityInland, generation) == 12);
 
 impl EntityInland {

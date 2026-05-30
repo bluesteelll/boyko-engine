@@ -100,7 +100,12 @@ unsafe impl<'s> Send for EntityCounter<'s> {}
 unsafe impl<'s> Sync for EntityCounter<'s> {}
 
 // Compile-time size + align contract (plan §11.10 — 8 B).
+// `EntityCounter` wraps a single `*const AtomicUsize`, so its size/align equal
+// the pointer width; the 8-byte figures encode the 64-bit ABI. Gated to 64-bit
+// (the engine's supported platform) — see CLAUDE.md target platform.
+#[cfg(target_pointer_width = "64")]
 const _: () = assert!(core::mem::size_of::<EntityCounter<'static>>() == 8);
+#[cfg(target_pointer_width = "64")]
 const _: () = assert!(core::mem::align_of::<EntityCounter<'static>>() == 8);
 
 impl<'s> EntityCounter<'s> {

@@ -41,10 +41,20 @@ impl Event for LayoutAssertEvent {
 
 // ── Compile-time layout asserts ───────────────────────────────────────────────
 
+// The `align_of(...) == 64` guards come straight from `#[repr(C, align(64))]`
+// and hold on every target, so they stay unconditional. The `size_of(...)`
+// guards, however, assume each lane half fills exactly one 64-byte cache line
+// via explicit `_pad` math sized for 8-byte pointers; on 32-bit wasm the
+// pointer-bearing fields (`Box<[MaybeUninit<E>]>` / `AtomicPtr`) shrink and the
+// totals change, so the size guards are gated to 64-bit (the engine's supported
+// platform) — see CLAUDE.md target platform.
+#[cfg(target_pointer_width = "64")]
 const _: () = assert!(core::mem::size_of::<ThreadLaneWriter<LayoutAssertEvent>>() == 64);
 const _: () = assert!(core::mem::align_of::<ThreadLaneWriter<LayoutAssertEvent>>() == 64);
+#[cfg(target_pointer_width = "64")]
 const _: () = assert!(core::mem::size_of::<ThreadLaneReader<LayoutAssertEvent>>() == 64);
 const _: () = assert!(core::mem::align_of::<ThreadLaneReader<LayoutAssertEvent>>() == 64);
+#[cfg(target_pointer_width = "64")]
 const _: () = assert!(core::mem::size_of::<ThreadLanePair<LayoutAssertEvent>>() == 128);
 const _: () = assert!(core::mem::align_of::<ThreadLanePair<LayoutAssertEvent>>() == 64);
 
@@ -200,14 +210,23 @@ pub(crate) struct EventBuffer<E: Event> {
 // a different line. Each assert references `LayoutAssertEvent` so that the
 // generic offsets are evaluated at monomorphisation time.
 
+// `offset_of(frame_event_count) == 0` is width-independent (the first
+// `#[repr(C)]` field is at offset 0 on every target) and stays unconditional.
+// The two cache-line-placement guards below read the offsets of later fields,
+// which shift with pointer width (the struct embeds pointer-width `Box<[..]>`
+// headers and the explicit `_pad_line1` was sized for the 64-bit layout). They
+// hold on the 64-bit target (the engine's supported platform) but not on 32-bit
+// wasm, so they are gated to 64-bit — see CLAUDE.md target platform.
 const _: () = assert!(
     core::mem::offset_of!(EventBuffer<LayoutAssertEvent>, frame_event_count) == 0,
     "frame_event_count must be the first field of EventBuffer<E>",
 );
+#[cfg(target_pointer_width = "64")]
 const _: () = assert!(
     core::mem::offset_of!(EventBuffer<LayoutAssertEvent>, start_event_count) >= 64,
     "start_event_count must live on a different cache line than frame_event_count",
 );
+#[cfg(target_pointer_width = "64")]
 const _: () = assert!(
     core::mem::offset_of!(EventBuffer<LayoutAssertEvent>, reader_len)
         - core::mem::offset_of!(EventBuffer<LayoutAssertEvent>, start_event_count)
