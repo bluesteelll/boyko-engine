@@ -1,4 +1,4 @@
-workspace = { members = ["crates/boyko_ecs", "crates/boyko_macros", "crates/boyko_utils", "crates/boyko_threadpool", "crates/bench_bevy_vs_boyko"] }
+workspace = { members = ["crates/boyko_ecs", "crates/boyko_macros", "crates/boyko_utils", "crates/boyko_threadpool", "crates/bench_bevy_vs_boyko", "crates/boyko_demo"] }
 
 [package]
 name = "boyko-engine"

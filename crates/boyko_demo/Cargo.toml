@@ -1,0 +1,30 @@
+[package]
+name = "boyko_demo"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# NOTE (Waves 0-2): boyko_ecs / boyko_macros / boyko_threadpool are intentionally
+# NOT depended on yet. Waves 0-2 are pure rendering with no ECS wiring; the ECS
+# deps (plan §2.2) are added in Wave 3 when the movement/sync systems land. This
+# keeps the demo build decoupled from the core crate's build state until ECS
+# integration actually begins.
+
+[[bin]]
+name = "boyko_demo"
+path = "src/main.rs"
+
+[dependencies]
+# eframe brings egui + winit + wgpu integration in one versioned bundle. Reach
+# wgpu/egui THROUGH eframe re-exports (`eframe::egui`, `eframe::egui_wgpu`, and
+# `eframe::egui_wgpu::wgpu`) — do NOT add separate wgpu/egui deps. Version skew
+# across the egui/egui-wgpu/winit/wgpu quadruple is the #1 build failure
+# (plan §2.3, H1/H2). `default-features = false` drops the glow (GL) renderer;
+# keep `wgpu` + `default_fonts`.
+eframe = { version = "0.34", default-features = false, features = ["wgpu", "default_fonts"] }
+bytemuck = { version = "1", features = ["derive"] }
+log = "0.4"
+rand = "0.9"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+env_logger = "0.11"
