@@ -63,3 +63,82 @@ pub use tls::{
     InSystemRunGuard, WORKER_ID_DISPATCHER, WORKER_ID_UNATTACHED, current_worker_id,
     current_worker_id_or_dispatcher_lane, is_in_system_run, try_with_active_pool,
 };
+
+/// Phase 9.1 loom test surface (test-only; `#[cfg(loom)]`, never in the shipped
+/// artifact).
+///
+/// The loom models in `tests/loom_pool.rs` (`#![cfg(loom)]`) are an external
+/// integration crate that cannot reach the crate-internal (`pub(crate)`)
+/// synchronization primitives, and a `pub use` of a `pub(crate)` item is
+/// rejected (E0364/E0365). To honor C1 — the models must drive the *real*
+/// production methods, not copies — this module exposes thin `pub` shim wrappers
+/// that forward to the unchanged `pub(crate)` items. Each wrapper is a single
+/// call to the production method, so loom still observes the real
+/// `AcqRel`/`Acquire`/`Release` orderings of `scope.rs` / `worker.rs`.
+///
+/// The whole module is gated by `cfg(loom)`: the normal (non-loom) build never
+/// compiles it and the production declarations are left exactly as shipped
+/// (`pub(crate)`, unchanged) — byte-identical native codegen (§6
+/// zero-native-cost). No new symbol leaks into the normal public API.
+#[cfg(loom)]
+pub mod loom_exports {
+    use crate::scope::ScopeShared;
+
+    /// The loom-shimmed synchronization surface for the models, taken straight
+    /// from `loom`. Re-exporting through `crate::sync` is impossible because its
+    /// items are `pub(crate)` (a `pub use` of them is E0365); going to `loom`
+    /// directly yields the **identical** `Atomic*` / `Thread` types that
+    /// `crate::sync` aliases under `--cfg loom`, so the model and the production
+    /// methods still share one loom atomic / waker instance (C1 preserved).
+    pub mod sync {
+        pub use loom::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering, fence};
+        pub use loom::thread::{self, Thread};
+    }
+
+    /// Opaque `pub` handle wrapping the real `pub(crate) ScopeShared`, so the
+    /// external loom model can construct and drive it. Every method below is a
+    /// one-line forward to the production method — loom sees the real orderings.
+    pub struct LoomScopeShared(ScopeShared);
+
+    impl LoomScopeShared {
+        /// Construct over the real `ScopeShared::new` (loom `Thread` waker).
+        #[inline]
+        pub fn new(waker: crate::sync::Thread) -> Self {
+            Self(ScopeShared::new(waker))
+        }
+
+        /// Forwards to the real [`ScopeShared::register_task`] (`fetch_add`,
+        /// `AcqRel`).
+        #[inline]
+        pub fn register_task(&self) {
+            self.0.register_task();
+        }
+
+        /// Forwards to the real [`ScopeShared::complete_task`] (`fetch_sub`
+        /// `AcqRel` + `prev==1` unpark — the lost-wakeup-critical branch).
+        #[inline]
+        pub fn complete_task(&self) {
+            self.0.complete_task();
+        }
+
+        /// Forwards to the real [`ScopeShared::is_drained`] (`load`, `Acquire`).
+        #[inline]
+        pub fn is_drained(&self) -> bool {
+            self.0.is_drained()
+        }
+    }
+
+    /// Forwards to the real [`crate::worker::mark_idle`] (`fetch_or`,
+    /// `Release`).
+    #[inline]
+    pub fn mark_idle(idle: &crate::sync::AtomicU64, worker_id: u32) {
+        crate::worker::mark_idle(idle, worker_id);
+    }
+
+    /// Forwards to the real [`crate::worker::unmark_idle`] (`fetch_and`,
+    /// `Release`).
+    #[inline]
+    pub fn unmark_idle(idle: &crate::sync::AtomicU64, worker_id: u32) {
+        crate::worker::unmark_idle(idle, worker_id);
+    }
+}
