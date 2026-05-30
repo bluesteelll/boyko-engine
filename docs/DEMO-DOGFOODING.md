@@ -45,6 +45,26 @@ Consistency gap with E2: a derived `Bundle` cannot be handed to the direct
 
 ---
 
+### Wave-4 stack finding (egui/eframe, NOT boyko_ecs)
+
+Surfaced wiring the egui control panel (Wave 4). It is about the **rendering
+stack**, not the ECS, and is recorded only so the next person on the demo does not
+re-hit it. No core or ECS change implied.
+
+#### W4-1 — No `egui_plot` published for egui 0.34 → FPS plot hand-rolled
+`eframe 0.34.3` pins `egui 0.34.3`, but crates.io has no `egui_plot 0.34` (the
+nearest published versions are `0.35.0` and `0.33.x`). Adding `egui_plot 0.35`
+against `egui 0.34` pulls a **second** `egui` into the graph → the "two
+`egui::Ui` types" mismatch the demo plan's H2 gate warns about. Per the plan's
+documented fallback, the rolling frame-time plot is hand-rolled with
+`egui::Painter` line segments instead (fed from the same fixed-size `FrameStats`
+ring; no extra dependency, one egui version). Revisit `egui_plot` when a release
+tracks the eframe-pinned egui minor; until then the hand-rolled sparkline is the
+correct choice. (Aside for future waves: in egui 0.34 the pointer-capture query
+is `Context::egui_wants_pointer_input`; the bare `wants_pointer_input` is
+deprecated. And `Painter::rect_filled` takes a `CornerRadius` — `u8`-based — so a
+bare float literal does not infer; use `CornerRadius::ZERO`/`::same(n)`.)
+
 ### Confirmed-SOUND (not gaps — verified during the build)
 - `#[derive(Component)]` + `bytemuck::Pod` coexist: the Component derive is a pure
   marker (no injected fields/Drop/ticks), so a `#[repr(C)]` Pod component column is

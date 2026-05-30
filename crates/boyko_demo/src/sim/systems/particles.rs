@@ -32,9 +32,14 @@ pub fn integrate_particles(
     let max_speed_sq = max_speed * max_speed;
     let bound = WORLD_HALF_EXTENT;
 
-    // The well is active only while the primary button is held over the scene.
-    // Resolve it once outside the hot loop so each row sees a branch on a local.
-    let well = if input.primary_down { input.cursor_world } else { None };
+    // The well is active only while the primary button is held over the scene
+    // AND the panel's gravity toggle is on (plan §7). Resolve it once outside the
+    // hot loop so each row sees a branch on a local.
+    let well = if params.gravity_enabled && input.primary_down {
+        input.cursor_world
+    } else {
+        None
+    };
 
     // The closure item type is annotated explicitly: `for_each` is bound by
     // `Fn(D::Item<'_>) + Send + Sync`, and rustc cannot infer the higher-ranked

@@ -1,13 +1,11 @@
 //! Systems shared across every mode (plan §6.5 "Common").
 
 use boyko_ecs::ecs::core::iters::query::query::Query;
+use boyko_ecs::ecs::core::system::Res;
 
 use crate::render::instance::GpuInstance;
 use crate::sim::components::{Position, Velocity};
-
-/// Half-extent of a particle quad in world units. Small enough that 100k dots
-/// read as a field rather than a solid sheet.
-const PARTICLE_SCALE: f32 = 0.6;
+use crate::sim::resources::SimParams;
 
 /// Speed (world units/s) mapped to the top of the color ramp. Velocities at or
 /// above this render fully "hot".
@@ -18,21 +16,31 @@ const COLOR_SPEED_MAX: f32 = 200.0;
 /// Runs after integration and before the upload. It is a streaming SoA->SoA
 /// write — sequential read of `Position`/`Velocity`, sequential write of
 /// `GpuInstance`, all contiguous — so it parallelizes over disjoint rows with
-/// `par_iter_mut`. Position copies straight through; color encodes speed via a
-/// blue->cyan->white ramp so motion is legible.
+/// `par_iter_mut`. Position copies straight through; the quad half-extent comes
+/// from `SimParams.particle_size` so the panel's size slider drives the dot size
+/// live (plan §7); color encodes speed via a blue->cyan->white ramp so motion is
+/// legible.
+///
+/// `Res<SimParams>` is a shared read, broadcast to every worker for the parallel
+/// pass; `particle_size` is hoisted to a local before the loop so each row reads
+/// a register, not the resource.
 ///
 /// The closure parameter type is annotated explicitly: `par_iter_mut().for_each`
 /// takes `Body: Fn(D::Item<'_>) + Send + Sync`, and rustc cannot infer the
 /// higher-ranked closure type from an un-annotated `|(pos, vel, gpu)|` (it
 /// reports a misleading "method not found" instead). Spelling the item tuple
 /// fixes inference.
-pub fn sync_gpu_instance(mut query: Query<(&Position, &Velocity, &mut GpuInstance)>) {
+pub fn sync_gpu_instance(
+    mut query: Query<(&Position, &Velocity, &mut GpuInstance)>,
+    params: Res<SimParams>,
+) {
+    let scale = params.particle_size;
     query
         .par_iter_mut()
-        .for_each(|(pos, vel, gpu): (&Position, &Velocity, &mut GpuInstance)| {
+        .for_each(move |(pos, vel, gpu): (&Position, &Velocity, &mut GpuInstance)| {
             let speed = (vel.x * vel.x + vel.y * vel.y).sqrt();
             let t = (speed / COLOR_SPEED_MAX).clamp(0.0, 1.0);
-            *gpu = GpuInstance::new([pos.x, pos.y], PARTICLE_SCALE, speed_color(t));
+            *gpu = GpuInstance::new([pos.x, pos.y], scale, speed_color(t));
         });
 }
 
