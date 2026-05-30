@@ -1,16 +1,12 @@
-//! `boyko_demo` — interactive showcase for the boyko-engine ECS.
+//! `boyko_demo` binary entry point.
 //!
-//! Waves 0-2 cover the rendering foundation only: an `eframe` + `egui` + `wgpu`
-//! application that draws instanced quads in a single draw call. ECS wiring
-//! (components, movement, sync-to-instances) arrives in Wave 3.
-//!
-//! The native entry point is gated behind `cfg(not(target_arch = "wasm32"))` so a
-//! wasm32 entry can be added later without restructuring (plan §4 / OQ1).
+//! A thin wrapper over the [`boyko_demo`] library crate: boots `eframe` with the
+//! wgpu backend and hands control to [`boyko_demo::app::DemoApp`]. The crate is
+//! library-shaped (see `lib.rs`) so the simulation can be tested headlessly; the
+//! native entry stays gated behind `cfg(not(target_arch = "wasm32"))` so a wasm32
+//! entry can be added later without restructuring (plan §4 / OQ1).
 
-mod app;
-mod render;
-
-use app::DemoApp;
+use boyko_demo::app::DemoApp;
 
 /// Window title and `eframe` app id.
 const APP_NAME: &str = "boyko_demo";

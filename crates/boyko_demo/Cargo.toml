@@ -4,17 +4,19 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
-# NOTE (Waves 0-2): boyko_ecs / boyko_macros / boyko_threadpool are intentionally
-# NOT depended on yet. Waves 0-2 are pure rendering with no ECS wiring; the ECS
-# deps (plan §2.2) are added in Wave 3 when the movement/sync systems land. This
-# keeps the demo build decoupled from the core crate's build state until ECS
-# integration actually begins.
-
 [[bin]]
 name = "boyko_demo"
 path = "src/main.rs"
 
 [dependencies]
+# ECS core (Wave 3, plan §2.2). The demo drives ONLY the public boyko_ecs API
+# (deep module paths — there is no prelude; see plan §9 G0). `boyko_macros`
+# supplies the `Component` / `Bundle` / `Resource` derives; `boyko_threadpool`
+# the native work-stealing pool that `Schedule::run` fans `par_iter_mut` across.
+boyko-ecs = { path = "../boyko_ecs" }
+boyko-macros = { path = "../boyko_macros" }
+boyko-threadpool = { path = "../boyko_threadpool" }
+
 # eframe brings egui + winit + wgpu integration in one versioned bundle. Reach
 # wgpu/egui THROUGH eframe re-exports (`eframe::egui`, `eframe::egui_wgpu`, and
 # `eframe::egui_wgpu::wgpu`) — do NOT add separate wgpu/egui deps. Version skew

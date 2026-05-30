@@ -14,6 +14,8 @@
 
 use bytemuck::{Pod, Zeroable};
 
+use boyko_macros::Component;
+
 /// One instanced quad on the GPU. `#[repr(C)]` pins field order so the WGSL
 /// instance-buffer attribute offsets stay in lockstep with this layout.
 ///
@@ -23,10 +25,14 @@ use bytemuck::{Pod, Zeroable};
 /// - `color` -> `@location(4)` (`u32`), packed `RGBA8` (byte 0 = R … byte 3 = A;
 ///   unpacked component-wise in the shader)
 ///
-/// No boyko `Component` derive yet — that lands in Wave 3 when the ECS sync step
-/// writes these rows directly (the headline zero-copy upload, plan D2/D3).
+/// Wave 3: this is also a boyko `Component`, stored in the sim archetype next to
+/// `Position`/`Velocity`. The `Component` derive is a pure marker (it only
+/// assigns a `ComponentId` — no fields, no layout change), so it coexists with
+/// `bytemuck::Pod` and the column stays a valid GPU instance array uploaded
+/// directly via `for_each_chunk` + `cast_slice` (the headline zero-copy path,
+/// plan D2/D3/§9 G1).
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+#[derive(Component, Clone, Copy, Debug, Pod, Zeroable)]
 pub struct GpuInstance {
     /// Quad center in world coordinates.
     pub pos: [f32; 2],

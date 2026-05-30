@@ -89,4 +89,52 @@ impl CameraUniform {
             ],
         }
     }
+
+    /// Returns the visible world half-extents `(ext_x, ext_y)` for a viewport of
+    /// the given pixel size — the same values [`Self::ortho_fit`] uses to build
+    /// the projection. Shared so the inverse mapping ([`Self::screen_to_world`])
+    /// can never drift from the forward projection. Returns `None` for a
+    /// degenerate viewport.
+    pub fn world_extents(
+        viewport_w: f32,
+        viewport_h: f32,
+        half_world_w: f32,
+        half_world_h: f32,
+    ) -> Option<(f32, f32)> {
+        if viewport_w <= 0.0 || viewport_h <= 0.0 || half_world_w <= 0.0 || half_world_h <= 0.0 {
+            return None;
+        }
+        let viewport_aspect = viewport_w / viewport_h;
+        let world_aspect = half_world_w / half_world_h;
+        let extents = if viewport_aspect >= world_aspect {
+            (half_world_h * viewport_aspect, half_world_h)
+        } else {
+            (half_world_w, half_world_w / viewport_aspect)
+        };
+        Some(extents)
+    }
+
+    /// Maps a pointer position `(px, py)` given in pixels relative to the scene
+    /// rect's top-left corner (egui's +Y-down convention) to world coordinates,
+    /// inverting [`Self::ortho_fit`]. `viewport_w`/`viewport_h` are the rect's
+    /// pixel size; the world half-extents must match the projection's. Returns
+    /// `None` for a degenerate viewport.
+    pub fn screen_to_world(
+        px: f32,
+        py: f32,
+        viewport_w: f32,
+        viewport_h: f32,
+        half_world_w: f32,
+        half_world_h: f32,
+    ) -> Option<[f32; 2]> {
+        let (ext_x, ext_y) =
+            Self::world_extents(viewport_w, viewport_h, half_world_w, half_world_h)?;
+        // Pixel -> NDC in [-1, 1]; flip Y because screen-space grows downward
+        // while world/NDC grows upward.
+        let ndc_x = px / viewport_w * 2.0 - 1.0;
+        let ndc_y = 1.0 - py / viewport_h * 2.0;
+        // NDC -> world: undo the orthographic scale (no translation, origin
+        // centered).
+        Some([ndc_x * ext_x, ndc_y * ext_y])
+    }
 }

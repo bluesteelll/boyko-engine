@@ -18,13 +18,15 @@
 pub mod camera;
 pub mod instance;
 
+use std::sync::Arc;
+
 use eframe::egui::PaintCallbackInfo;
 use eframe::egui_wgpu::wgpu;
 use eframe::egui_wgpu::wgpu::util::DeviceExt;
 use eframe::egui_wgpu::{CallbackResources, CallbackTrait, ScreenDescriptor};
 
 use camera::{CAMERA_UNIFORM_SIZE, CameraUniform};
-use instance::{GPU_INSTANCE_SIZE, GpuInstance};
+use instance::GPU_INSTANCE_SIZE;
 
 /// Maximum instances the instance buffer is sized for (plan §5.2 / D6). The
 /// buffer is allocated once at this cap; per frame only the live prefix is
@@ -53,8 +55,11 @@ pub struct RenderResources {
     pipeline: wgpu::RenderPipeline,
     quad_vertex_buffer: wgpu::Buffer,
     quad_index_buffer: wgpu::Buffer,
-    /// Per-instance buffer, sized at [`MAX_INSTANCES`]; per-frame prefix upload.
-    instance_buffer: wgpu::Buffer,
+    /// Per-instance buffer, sized at [`MAX_INSTANCES`]. Shared (`Arc`) with the
+    /// app: from Wave 3 the zero-copy upload happens in `App::update` (which
+    /// holds `&mut world`), since the `'static` paint callback cannot borrow the
+    /// world (plan H4). `paint` reads the same buffer through this handle.
+    instance_buffer: Arc<wgpu::Buffer>,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
 }
@@ -65,7 +70,14 @@ impl RenderResources {
     /// `target_format` is egui's surface format
     /// (`egui_wgpu::RenderState::target_format`); the fragment output must match
     /// it or wgpu rejects the pipeline.
-    pub fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
+    ///
+    /// Returns the resources (to be stored in egui's `callback_resources`) plus a
+    /// shared handle to the instance buffer, so the app can upload into it each
+    /// frame while holding `&mut world` (plan H4).
+    pub fn new(
+        device: &wgpu::Device,
+        target_format: wgpu::TextureFormat,
+    ) -> (Self, Arc<wgpu::Buffer>) {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("boyko_demo.quad_shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
@@ -204,21 +216,22 @@ impl RenderResources {
             usage: wgpu::BufferUsages::INDEX,
         });
 
-        let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        let instance_buffer = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("boyko_demo.instances"),
             size: MAX_INSTANCES * GPU_INSTANCE_SIZE as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
-        });
+        }));
 
-        Self {
+        let resources = Self {
             pipeline,
             quad_vertex_buffer,
             quad_index_buffer,
-            instance_buffer,
+            instance_buffer: Arc::clone(&instance_buffer),
             camera_buffer,
             camera_bind_group,
-        }
+        };
+        (resources, instance_buffer)
     }
 }
 
@@ -226,26 +239,20 @@ impl RenderResources {
 /// `'static` bound on egui paint callbacks (D6 / D8 / plan H4) — never a borrow
 /// into app or ECS state.
 ///
-/// ## Wave 3 handoff (plan H4 / OQ4)
-/// Wave 2 moves an owned instance snapshot through `instances`. Wave 3 replaces
-/// it with an ECS-sourced upload. Because `prepare`/`paint` run inside egui's
-/// `'static` callback (no borrow of the world is possible here), Wave 3 must do
-/// one of:
-/// - record per-archetype `(byte_offset, row_count)` spans in `App::update`
-///   while it still holds `&mut EcsMaster`, move that `Vec<(u64, u32)>` plus the
-///   raw column base pointers into this struct, and `write_buffer` each span in
-///   `prepare` (zero intermediate AoS Vec — the plan's preferred shape); or
-/// - keep an owned `Vec<GpuInstance>` snapshot (this Wave-2 shape) if moving raw
-///   column pointers across the `'static` boundary proves unsound.
-///
-/// The key constraint learned here: the callback is `'static`, so nothing
-/// borrowed from the world survives into `prepare`/`paint`.
+/// ## Wave 3 handoff (plan H4 / OQ4 — resolved)
+/// The egui callback is `'static`, so it cannot borrow `&world`; the zero-copy
+/// `for_each_chunk` upload therefore happens in `App::update` (which holds
+/// `&mut world`) directly into the shared instance buffer, BEFORE this callback
+/// is registered. The callback then carries only the resulting `instance_count`
+/// and issues the single instanced draw. `prepare` still rebuilds the camera
+/// uniform from the viewport (the only per-frame GPU write it owns).
 pub struct RenderCallback {
     /// Viewport size in physical pixels, captured at registration time (a value
     /// copy — no borrow). Drives the camera projection rebuild in `prepare`.
     pub viewport_px: [f32; 2],
-    /// Instance rows to upload and draw this frame (owned snapshot).
-    pub instances: Vec<GpuInstance>,
+    /// Number of live instances to draw, already uploaded into the shared
+    /// instance buffer by `App::update` this frame.
+    pub instance_count: u32,
 }
 
 impl CallbackTrait for RenderCallback {
@@ -264,6 +271,7 @@ impl CallbackTrait for RenderCallback {
         };
 
         // Rebuild the world->NDC projection from this frame's viewport (M4 resize).
+        // The instance data was already uploaded in `App::update` (plan H4).
         let camera = CameraUniform::ortho_fit(
             self.viewport_px[0],
             self.viewport_px[1],
@@ -271,14 +279,6 @@ impl CallbackTrait for RenderCallback {
             WORLD_HALF_EXTENT,
         );
         queue.write_buffer(&resources.camera_buffer, 0, bytemuck::bytes_of(&camera));
-
-        // Upload the live instance prefix in one transfer (plan §5.2 / D5 / D8),
-        // zero-copy from the CPU snapshot's bytes straight into the GPU buffer —
-        // no per-element repack (plan §11.2 zero-copy assertion).
-        let upload = self.live_instances();
-        if !upload.is_empty() {
-            queue.write_buffer(&resources.instance_buffer, 0, bytemuck::cast_slice(upload));
-        }
 
         Vec::new()
     }
@@ -293,7 +293,9 @@ impl CallbackTrait for RenderCallback {
             return;
         };
 
-        let count = self.live_instances().len() as u32;
+        // Clamp against the buffer capacity so an oversized count can never
+        // index past the GPU buffer (plan D6).
+        let count = self.instance_count.min(MAX_INSTANCES as u32);
         if count == 0 {
             return;
         }
@@ -308,16 +310,5 @@ impl CallbackTrait for RenderCallback {
         );
         // One instanced draw call for the whole scene (plan D4).
         render_pass.draw_indexed(0..QUAD_INDICES.len() as u32, 0, 0..count);
-    }
-}
-
-impl RenderCallback {
-    /// The instance prefix to upload/draw, clamped to the buffer capacity so an
-    /// oversized scene can never overrun the GPU buffer (plan D6).
-    #[inline]
-    fn live_instances(&self) -> &[GpuInstance] {
-        let max = MAX_INSTANCES as usize;
-        let n = self.instances.len().min(max);
-        &self.instances[..n]
     }
 }
