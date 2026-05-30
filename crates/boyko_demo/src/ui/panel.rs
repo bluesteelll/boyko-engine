@@ -1,8 +1,11 @@
-//! The floating control/stats window (plan §7 / D14 / Wave 4).
+//! The floating control/stats window (plan §7 / D14 / Wave 4 / Wave 5).
 //!
-//! [`draw`] renders a single `egui::Window` containing the simulation sliders and
-//! toggles (which mutate the borrowed [`SimParams`] in place), live readouts, and
-//! a hand-rolled rolling frame-time plot fed from [`FrameStats`].
+//! [`draw`] renders a single `egui::Window` containing the mode buttons, the
+//! per-mode simulation sliders/toggles (which mutate the borrowed params in
+//! place), live readouts, and a hand-rolled rolling frame-time plot fed from
+//! [`FrameStats`]. It returns the [`Mode`] the user clicked, if any, so the app
+//! can queue the state transition (`NextState<Mode>`) — the panel itself owns no
+//! ECS state.
 //!
 //! ## Why the plot is hand-rolled (no `egui_plot`)
 //! The plan (§7 / H2) calls for an `egui_plot::Plot` line. `eframe 0.34` pins
@@ -16,7 +19,8 @@
 
 use eframe::egui;
 
-use crate::sim::resources::{FrameStats, SimParams};
+use crate::sim::modes::Mode;
+use crate::sim::resources::{BoidParams, FrameStats, SimParams};
 
 /// Height of the frame-time plot in logical points.
 const PLOT_HEIGHT: f32 = 64.0;
@@ -37,39 +41,91 @@ const TARGET_COUNT_MIN: u32 = 0;
 /// buffer holds.
 const TARGET_COUNT_MAX: u32 = crate::render::MAX_INSTANCES as u32;
 
-/// Draws the control/stats window for one frame (plan §7).
+/// Everything the panel reads/writes for one frame (plan §7).
 ///
-/// Mutates `params` in place as the user drags sliders / flips toggles; the app
-/// holds these as a `&mut SimParams` borrowed straight out of the ECS world, so
-/// edits are picked up by the next `Schedule::run` with no extra plumbing.
-/// `stats` is read-only (the shell produces it). `instances_drawn` is the count
-/// uploaded this frame, shown next to the live entity count. `at_capacity` is
-/// `true` when the world has reached the instance cap, which surfaces an "at
-/// capacity" note for click-to-spawn (plan D6/M5).
-//
-// `params` is mutated transitively: the sliders in `controls` bind `&mut
-// params.field`. clippy's `needless_pass_by_ref_mut` only inspects direct `&mut`
-// uses in this body and misses the reborrow forwarded into `controls`, so it
-// false-positively suggests `&SimParams` — which would defeat the panel's whole
-// purpose (mutating the live sim parameters).
-#[allow(clippy::needless_pass_by_ref_mut)]
-pub fn draw(
-    ctx: &egui::Context,
-    params: &mut SimParams,
-    stats: &FrameStats,
-    instances_drawn: u32,
-    at_capacity: bool,
-) {
+/// Bundles the borrows so [`draw`]'s signature stays small. `sim`/`boids` are
+/// `&mut` because the sliders mutate them in place (the app copies them back into
+/// the world after `draw`); `stats` is read-only (the shell produces it). `mode`
+/// is the active mode, used to highlight the selected button and show only that
+/// mode's controls.
+pub struct PanelState<'a> {
+    /// The active simulation mode (drives button highlight + which controls show).
+    pub mode: Mode,
+    /// Particle tunables, mutated in place by the Particles-mode sliders.
+    pub sim: &'a mut SimParams,
+    /// Boid tunables, mutated in place by the Boids-mode sliders.
+    pub boids: &'a mut BoidParams,
+    /// Rolling frame/sim stats for the readouts + plot.
+    pub stats: &'a FrameStats,
+    /// Instances uploaded this frame (shown next to the entity count).
+    pub instances_drawn: u32,
+    /// `true` when the world hit the instance cap (surfaces the "at capacity"
+    /// note for click-to-spawn).
+    pub at_capacity: bool,
+}
+
+/// Draws the control/stats window for one frame (plan §7 / Wave 5).
+///
+/// Returns `Some(mode)` if the user clicked a mode button this frame (the app
+/// queues the transition via `NextState<Mode>`); `None` otherwise. All slider
+/// edits land directly in the borrowed `sim`/`boids` params.
+pub fn draw(ctx: &egui::Context, state: PanelState<'_>) -> Option<Mode> {
+    let PanelState {
+        mode,
+        sim,
+        boids,
+        stats,
+        instances_drawn,
+        at_capacity,
+    } = state;
+
+    let mut requested_mode = None;
+
     egui::Window::new("boyko_demo")
         .default_pos([16.0, 16.0])
         .resizable(false)
         .show(ctx, |ui| {
+            requested_mode = mode_buttons(ui, mode);
+            ui.separator();
             readouts(ui, stats, instances_drawn);
             ui.separator();
             plot(ui, stats);
             ui.separator();
-            controls(ui, params, at_capacity);
+            // Pause is global (the runner reads `SimParams.paused` in every
+            // mode), so it lives above the per-mode split.
+            ui.checkbox(&mut sim.paused, "pause simulation");
+            ui.separator();
+            // Per-mode controls: only the active mode's tunables are shown so the
+            // panel stays focused (plan §7 "per-mode controls").
+            match mode {
+                Mode::Particles => particle_controls(ui, sim, at_capacity),
+                Mode::Boids => boid_controls(ui, boids),
+            }
         });
+
+    requested_mode
+}
+
+/// Renders the mode selector buttons; returns the clicked mode, if any
+/// (plan §7 / D15). The active mode's button is shown selected.
+fn mode_buttons(ui: &mut egui::Ui, current: Mode) -> Option<Mode> {
+    let mut requested = None;
+    ui.horizontal(|ui| {
+        ui.label("mode:");
+        if ui
+            .selectable_label(current == Mode::Particles, "Particles")
+            .clicked()
+        {
+            requested = Some(Mode::Particles);
+        }
+        if ui
+            .selectable_label(current == Mode::Boids, "Boids")
+            .clicked()
+        {
+            requested = Some(Mode::Boids);
+        }
+    });
+    requested
 }
 
 /// Live numeric readouts: FPS, frame/sim milliseconds, entity count, instances
@@ -150,10 +206,11 @@ fn plot(ui: &mut egui::Ui, stats: &FrameStats) {
     }
 }
 
-/// The slider/toggle controls that mutate [`SimParams`] (plan §7 control table).
-fn controls(ui: &mut egui::Ui, params: &mut SimParams, at_capacity: bool) {
-    // Toggles first — quick state, no dragging.
-    ui.checkbox(&mut params.paused, "pause simulation");
+/// The Particles-mode slider/toggle controls that mutate [`SimParams`]
+/// (plan §7 control table).
+fn particle_controls(ui: &mut egui::Ui, params: &mut SimParams, at_capacity: bool) {
+    // Pause is drawn above the per-mode split (it is global); here only the
+    // particle-specific gravity-well toggle.
     ui.checkbox(&mut params.gravity_enabled, "mouse gravity well");
 
     ui.add_space(4.0);
@@ -168,21 +225,37 @@ fn controls(ui: &mut egui::Ui, params: &mut SimParams, at_capacity: bool) {
     ui.add_space(4.0);
 
     ui.add(
-        egui::Slider::new(
-            &mut params.target_count,
-            TARGET_COUNT_MIN..=TARGET_COUNT_MAX,
-        )
-        .text("target count")
-        .logarithmic(true),
+        egui::Slider::new(&mut params.target_count, TARGET_COUNT_MIN..=TARGET_COUNT_MAX)
+            .text("target count")
+            .logarithmic(true),
     );
     ui.add(egui::Slider::new(&mut params.spawn_burst, 1..=20_000).text("click spawns N"));
 
     ui.add_space(4.0);
 
     if at_capacity {
-        ui.colored_label(ui.visuals().warn_fg_color, "at capacity — click spawn disabled");
+        ui.colored_label(
+            ui.visuals().warn_fg_color,
+            "at capacity — click spawn disabled",
+        );
     } else {
         ui.label(egui::RichText::new("click the field to spawn a burst").weak());
     }
     ui.label(egui::RichText::new("hold left mouse to pull particles").weak());
+}
+
+/// The Boids-mode slider controls that mutate [`BoidParams`] (plan §7 / Wave 5:
+/// "boid weights: separation/alignment/cohesion/radius").
+fn boid_controls(ui: &mut egui::Ui, params: &mut BoidParams) {
+    // `pause` lives on SimParams (shared across modes); the Boids panel exposes
+    // only the flocking weights + radius + speed.
+    ui.add(egui::Slider::new(&mut params.radius, 1.0..=20.0).text("neighbor radius"));
+    ui.add(egui::Slider::new(&mut params.separation, 0.0..=80.0).text("separation"));
+    ui.add(egui::Slider::new(&mut params.alignment, 0.0..=40.0).text("alignment"));
+    ui.add(egui::Slider::new(&mut params.cohesion, 0.0..=40.0).text("cohesion"));
+    ui.add(egui::Slider::new(&mut params.max_speed, 10.0..=200.0).text("max speed"));
+
+    ui.add_space(4.0);
+    ui.label(egui::RichText::new("boids flock via separation / alignment / cohesion").weak());
+    ui.label(egui::RichText::new("larger radius = denser neighborhoods, slower").weak());
 }

@@ -78,6 +78,75 @@ impl Default for SimParams {
     }
 }
 
+/// Tunable boid (flocking) parameters (plan §6.3 / §7 / Wave 5). The control
+/// panel mutates these in place each frame; `boid_forces` reads them. Separate
+/// from [`SimParams`] so the Boids-mode controls are self-contained.
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct BoidParams {
+    /// Neighbor radius in world units: boids within this distance influence each
+    /// other. Also the spatial-grid cell size (plan §6.4 / D11).
+    pub radius: f32,
+    /// Separation weight: strength of the push away from close neighbors.
+    pub separation: f32,
+    /// Alignment weight: strength of steering toward neighbors' average heading.
+    pub alignment: f32,
+    /// Cohesion weight: strength of steering toward neighbors' average position.
+    pub cohesion: f32,
+    /// Maximum boid speed in world units per second (velocity is clamped to it).
+    pub max_speed: f32,
+}
+
+impl Default for BoidParams {
+    fn default() -> Self {
+        // Tuned for a few tens of thousands of boids in the +/-100 world box: a
+        // radius small enough to keep the 3x3 grid neighborhood cheap, with the
+        // classic separation > alignment ~ cohesion balance that reads as
+        // flocking rather than clumping or scattering.
+        Self {
+            radius: 6.0,
+            separation: 24.0,
+            alignment: 6.0,
+            cohesion: 4.0,
+            max_speed: 60.0,
+        }
+    }
+}
+
+/// Pre-tick snapshot of one boid's state (plan D12). `#[repr(C)]` + `Copy` so the
+/// snapshot buffer is a flat, cache-friendly array.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BoidState {
+    /// World position at the start of the step.
+    pub pos: [f32; 2],
+    /// World velocity at the start of the step.
+    pub vel: [f32; 2],
+}
+
+/// Pre-tick `(position, velocity)` snapshot of every boid (plan D12).
+///
+/// The force pass reads neighbors' PREVIOUS-frame state from this snapshot while
+/// writing the live `Velocity` column, so a worker never reads a row a sibling is
+/// writing — that makes `boid_forces` a sound `par_iter` (snapshot + grid
+/// read-only, each boid writes only its own row). Refreshed each step by
+/// `snapshot_boids`; the `Vec` is sized once and refilled (no per-frame alloc).
+#[derive(Resource, Default)]
+pub struct BoidSnapshot {
+    /// One entry per boid, in archetype row order — the same order the grid
+    /// indexes and the force pass iterates.
+    pub state: Vec<BoidState>,
+}
+
+impl BoidSnapshot {
+    /// Builds a snapshot buffer pre-sized for up to `max_boids` (no later
+    /// reallocation in steady state).
+    pub fn with_capacity(max_boids: usize) -> Self {
+        Self {
+            state: Vec::with_capacity(max_boids),
+        }
+    }
+}
+
 /// Capacity of the rolling frame-time history (plan §7 / §11.2: a fixed ring, no
 /// per-frame allocation). At ~120 samples a 60 FPS plot shows the last ~2 s.
 pub const FRAME_HISTORY_LEN: usize = 120;

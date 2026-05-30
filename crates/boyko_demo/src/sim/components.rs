@@ -49,3 +49,13 @@ pub struct Velocity {
 #[derive(Component, Clone, Copy, Debug, Pod, Zeroable)]
 pub struct ParticleTag(pub u8);
 
+/// Mode-membership marker for boid entities (plan D16 / §9 G3 / Wave 5).
+///
+/// The Boids-mode analogue of [`ParticleTag`]: a 1-byte tag (a true ZST is
+/// rejected by the component pool) carried by every boid so the despawn-on-exit
+/// system can find them via `query_entities(&[BoidTag::component_id()])`. `Pod`
+/// for the same `bytemuck::bytes_of` spawn path.
+#[repr(C)]
+#[derive(Component, Clone, Copy, Debug, Pod, Zeroable)]
+pub struct BoidTag(pub u8);
+

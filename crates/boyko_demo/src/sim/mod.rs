@@ -7,6 +7,8 @@
 
 pub mod bundles;
 pub mod components;
+pub mod grid;
+pub mod modes;
 pub mod resources;
 pub mod runner;
 pub mod systems;

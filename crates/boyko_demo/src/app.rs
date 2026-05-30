@@ -23,6 +23,7 @@ use rand::Rng;
 
 use boyko_ecs::ecs::core::component::component::Component;
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
+use boyko_ecs::ecs::core::state::NextState;
 use boyko_ecs::ecs::identifiers::primitives::{ArchetypeId, ComponentId};
 use boyko_threadpool::{ThreadPool, ThreadPoolBuilder};
 
@@ -31,21 +32,20 @@ use crate::render::instance::GpuInstance;
 use crate::render::{MAX_INSTANCES, RenderCallback, RenderResources, WORLD_HALF_EXTENT};
 use crate::sim::bundles::ParticleBundle;
 use crate::sim::components::{ParticleTag, Position, Velocity};
-use crate::sim::resources::{DeltaTime, FrameStats, InputState, SimParams};
+use crate::sim::modes::Mode;
+use crate::sim::resources::{BoidParams, DeltaTime, FrameStats, InputState, SimParams};
 use crate::sim::runner::SimRunner;
 use crate::ui;
 
-/// Number of particles spawned at startup (plan §1.2 MVP: 100k+). Spawned via
-/// the direct single-entity `spawn` path (C1 — NOT `spawn_batch`, whose 8192/call
-/// cap fails at this size), so the full population exists immediately with no
-/// per-frame apply delay.
-const STARTUP_PARTICLE_COUNT: usize = 100_000;
-
-/// Initial speed range for startup particles, in world units per second.
-const INITIAL_SPEED: f32 = 40.0;
+/// Entity capacity the world is sized for at startup. Sized to the particle
+/// population (the larger of the two modes — boids are fewer per plan §6.5), so
+/// the `on_enter(Particles)` spawn on frame 1 (plan §10 W5) and any later click
+/// bursts fit without a pool resize. The boid population is strictly smaller, so
+/// switching modes never exceeds this.
+const WORLD_ENTITY_CAPACITY: usize = crate::sim::modes::PARTICLE_COUNT;
 
 /// Speed range for particles spawned by a scene click, in world units per
-/// second. Wider than [`INITIAL_SPEED`] so a click reads as an outward burst.
+/// second. Wide so a click reads as an outward burst.
 const CLICK_BURST_SPEED: f32 = 90.0;
 
 /// Pre-resolved identifiers for the particle archetype, so a spawn (startup or a
@@ -157,21 +157,28 @@ impl DemoApp {
         // the app uses for the per-frame instance upload.
         let queue = render_state.queue.clone();
 
-        // Build the world: resources first, then the startup population. One
-        // archetype (the particle bundle), so an archetype capacity of 1 is
-        // enough; the entity capacity is sized to the startup population.
-        let mut world = EcsMaster::with_capacity(STARTUP_PARTICLE_COUNT, 1);
+        // Build the world: resources first. Two archetypes now (particle +
+        // boid bundles); the entity capacity covers the larger (particle)
+        // population. The mode-tag archetypes are registered lazily on the first
+        // spawn-on-enter, so an archetype capacity of 2 is the steady state.
+        let mut world = EcsMaster::with_capacity(WORLD_ENTITY_CAPACITY, 2);
         world.insert_resource(DeltaTime(crate::sim::runner::FIXED_DT));
         world.insert_resource(InputState::default());
         world.insert_resource(SimParams::default());
 
-        // Resolve the particle spawn ids once (registers the archetype), then
-        // populate the startup cloud through the same direct path runtime
-        // click-spawn reuses (C1 / plan §9 G5).
+        // Resolve the particle spawn ids once (registers the archetype) for the
+        // runtime click-spawn path (C1 / plan §9 G5). The STARTUP population is
+        // NOT spawned here: the runner registers `Mode::Particles` as the initial
+        // state, so the synthesized initial transition (Phase 17 D7) fires
+        // `on_enter(Particles)` on the first `Schedule::run`, which spawns the
+        // startup cloud (plan §10 W5). Keeping the spawn in one place
+        // (`modes::spawn_particles`) means re-entering Particles after a switch
+        // repopulates it identically.
         let spawner = ParticleSpawner::resolve(&mut world);
-        spawn_initial_particles(&mut world, &spawner, STARTUP_PARTICLE_COUNT);
 
         // Native: a real multi-threaded pool sized to the machine (plan D10).
+        // `SimRunner::new` registers the mode state + all gated systems and
+        // inserts the boid-pipeline resources.
         let pool = ThreadPoolBuilder::new().build();
         let runner = SimRunner::new(Arc::clone(&pool), &mut world);
 
@@ -325,6 +332,11 @@ impl DemoApp {
     fn at_capacity(&self) -> bool {
         self.world.entity_count() as u64 >= MAX_INSTANCES
     }
+
+    /// The currently active simulation mode (read from `State<Mode>`).
+    fn current_mode(&self) -> Mode {
+        *self.world.state::<Mode>()
+    }
 }
 
 impl eframe::App for DemoApp {
@@ -349,8 +361,12 @@ impl eframe::App for DemoApp {
         let click_world = self.update_input(&ctx, rect, ppp);
 
         // 2. Click-to-spawn a burst at the cursor before stepping, so the new
-        // particles integrate this frame (plan §7). Capacity-clamped (M5).
-        if let Some(world_pos) = click_world {
+        // particles integrate this frame (plan §7). Capacity-clamped (M5). Only
+        // in Particles mode — a click in Boids mode would inject particle-tagged
+        // entities into a boid world (mixing modes); the well still works in both.
+        if let Some(world_pos) = click_world
+            && self.current_mode() == Mode::Particles
+        {
             self.spawn_click_burst(world_pos);
         }
 
@@ -375,48 +391,48 @@ impl eframe::App for DemoApp {
         ui.painter().add(paint_callback);
 
         // 6. Record this frame's stats into the fixed ring (no allocation), then
-        // draw the control panel. The panel mutates `SimParams` in place via the
-        // borrow out of the world, so slider edits hit the next step directly
-        // (plan §7). `frame_ms` uses the whole-`ui` span up to this point — the
-        // dominant cost (sim + upload + draw record); the remaining egui paint is
-        // negligible and not double-counted.
+        // draw the control panel. `frame_ms` uses the whole-`ui` span up to this
+        // point — the dominant cost (sim + upload + draw record); the remaining
+        // egui paint is negligible and not double-counted.
         let frame_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
         let entity_count = self.world.entity_count() as u32;
         self.stats.push(frame_ms, sim_ms, entity_count);
 
         let at_capacity = self.at_capacity();
-        let params = self.world.resource_mut::<SimParams>();
-        ui::panel::draw(&ctx, params, &self.stats, instance_count, at_capacity);
+        let mode = self.current_mode();
+
+        // `SimParams`/`BoidParams` are small `Copy` PODs. The `EcsMaster` API
+        // hands out only one `&mut` resource at a time, so the panel cannot
+        // borrow both live; instead copy them out, let the panel mutate the
+        // copies + report a requested mode switch, then write the (possibly
+        // edited) copies back. The next `Schedule::run` picks them up — same
+        // zero-plumbing path as before, one frame's indirection through a stack
+        // copy (no allocation).
+        let mut sim_params = *self.world.resource::<SimParams>();
+        let mut boid_params = *self.world.resource::<BoidParams>();
+        let panel = ui::panel::PanelState {
+            mode,
+            sim: &mut sim_params,
+            boids: &mut boid_params,
+            stats: &self.stats,
+            instances_drawn: instance_count,
+            at_capacity,
+        };
+        let requested_mode = ui::panel::draw(&ctx, panel);
+        *self.world.resource_mut::<SimParams>() = sim_params;
+        *self.world.resource_mut::<BoidParams>() = boid_params;
+
+        // A mode button writes `NextState<Mode>`; `Schedule::run` auto-applies
+        // the transition next step (plan G10 / D15). Only queue an ACTUAL change
+        // — requesting the current mode would be a no-op transition anyway, but
+        // skipping it keeps `NextState` clean.
+        if let Some(target) = requested_mode
+            && target != mode
+        {
+            self.world.resource_mut::<NextState<Mode>>().set(target);
+        }
 
         // Keep animating so the sim runs every frame and the readouts stay live.
         ctx.request_repaint();
-    }
-}
-
-/// Spawns the startup cloud: `count` particles scattered across the world box
-/// with random initial velocities, via the pre-resolved [`ParticleSpawner`]
-/// (the direct `create_entity` path, C1 / plan §9 G5).
-///
-/// There is no `world.spawn(bundle)` on `EcsMaster` — the bundle spawn path is
-/// `Commands::spawn` (deferred, system-only) which is unavailable at setup, and
-/// `spawn_batch` caps at 8192/call. The direct path resolves the archetype +
-/// component ids once (in [`ParticleSpawner::resolve`]) then writes each entity
-/// with no batch cap and no one-frame apply delay. Component bytes come from
-/// `bytemuck::bytes_of` (every component here is `Pod`), so the spawn is
-/// `unsafe`-free. The startup count is well under the cap, so a failed spawn
-/// would be a setup bug rather than a capacity condition — hence the `expect`.
-fn spawn_initial_particles(world: &mut EcsMaster, spawner: &ParticleSpawner, count: usize) {
-    let mut rng = rand::rng();
-    for _ in 0..count {
-        let x = rng.random_range(-WORLD_HALF_EXTENT..WORLD_HALF_EXTENT);
-        let y = rng.random_range(-WORLD_HALF_EXTENT..WORLD_HALF_EXTENT);
-        let vx = rng.random_range(-INITIAL_SPEED..INITIAL_SPEED);
-        let vy = rng.random_range(-INITIAL_SPEED..INITIAL_SPEED);
-
-        let ok = spawner.spawn_one(world, Position { x, y }, Velocity { x: vx, y: vy });
-        assert!(
-            ok,
-            "invariant: startup spawn is well under capacity and must succeed"
-        );
     }
 }

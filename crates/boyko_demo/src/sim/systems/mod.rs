@@ -5,5 +5,6 @@
 //! runner). They are shared, target-agnostic logic; only the dispatch shell
 //! differs per platform (plan D10).
 
+pub mod boids;
 pub mod common;
 pub mod particles;

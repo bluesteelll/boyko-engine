@@ -43,6 +43,32 @@ Consistency gap with E2: a derived `Bundle` cannot be handed to the direct
 `available_parallelism` handling on the caller. A `ThreadPool::with_available_parallelism()
 -> Arc<ThreadPool>` convenience would help (the scheduler already wants an `Arc`).
 
+## E6 — State conditions are the ONLY downstream route to transition info (LOW–MEDIUM)
+Surfaced wiring the Wave-5 mode switch (Phase-17 dogfood). `StateTransitionRecord<S>`
+and its `current()` accessor are `pub(crate)`; `Transition<S>`'s fields are
+`pub(crate)`. So a downstream crate (the demo) CANNOT read "what transition fired
+this frame" directly — the only public surface is the `on_enter`/`on_exit`/
+`on_transition`/`in_state` condition functions, consumed via `.run_if(...)`.
+This is fine in practice (the conditions cover every case the demo needs), and it
+keeps the record opaque — but it does mean the critic-suggested fallback for C2
+("collect ids in a `&self`/`Commands` system that self-gates on the transition
+record") is **not available to an out-of-crate caller**: there is no public way to
+ask the record whether `S` exited `X` this frame outside a `.run_if`. Luckily the
+primary path works (see the Confirmed-SOUND note on exclusive `.run_if`), so the
+fallback was never needed.
+**Proposal (optional):** a public read-only `EcsMaster::state_transition::<S>() ->
+Option<(Option<S>, S)>` (exited, entered) for code that wants to branch on the
+transition outside a condition. Pure additive; no behavior change.
+
+## E7 — `query_entities` allocates a fresh `Vec<Entity>` per call (LOW)
+Despawn-on-exit (plan D16) is `let ids = world.query_entities(&[Tag::id()]); for e
+in ids { world.delete_entity(e); }`. `query_entities` returns an owned
+`Vec<Entity>` (it must — `delete_entity` needs `&mut self`, so the ids can't be
+borrowed across the delete loop). This allocates once per mode switch, which is
+fine (transition frames are rare), but a hot despawn-by-tag would want a
+`query_entities_into(&mut Vec<Entity>)` reuse variant or a borrowing-then-draining
+API. Not a Wave-5 problem (switches are infrequent); noted for completeness.
+
 ---
 
 ### Wave-4 stack finding (egui/eframe, NOT boyko_ecs)
@@ -65,6 +91,28 @@ is `Context::egui_wants_pointer_input`; the bare `wants_pointer_input` is
 deprecated. And `Painter::rect_filled` takes a `CornerRadius` — `u8`-based — so a
 bare float literal does not infer; use `CornerRadius::ZERO`/`::same(n)`.)
 
+### Wave-5 finding (Phase-17 states dogfood)
+
+The Wave-5 binding gate (plan §3 C2): does an **exclusive** system
+(`fn(&mut EcsMaster)`) gated `.run_if(on_exit(Mode::X))` compile and fire exactly
+on the exit frame? Phase-17 only ever gated *function* systems with `.run_if`, so
+this combo had zero in-crate precedent.
+
+#### W5-1 — exclusive system + `.run_if(state condition)` WORKS (gate passed)
+`SystemConfig::run_if<C, M>` infers the condition's marker `M` independently of the
+system's own `IntoSystem` marker. The exclusive blanket uses
+`(ExclusiveSystemMarker, fn(&mut EcsMaster))`, disjoint from the condition's
+function-system marker, so attaching `.run_if(on_exit(..))` / `.run_if(on_enter(..))`
+to an exclusive `fn(&mut EcsMaster)` compiles and fires exactly on the transition
+frame (`tests/state_exclusive_smoke.rs`, two passing cases + an `in_state`
+function-system companion). Wave 5 therefore uses the critic's RECOMMENDED default
+(exclusive despawn/spawn gated by state conditions), NOT the `Commands::despawn`
+fallback. `.before`/`.after`/`.key()` also compose with exclusive systems, so the
+intra-frame order despawn-old `.before` spawn-new `.before` sync (plan H3) is pinned
+directly (`tests/mode_switch.rs`). This is the headline Phase-17 dogfood result:
+the states feature drives a live, switchable two-mode sandbox end-to-end through
+the public API with no core changes.
+
 ### Confirmed-SOUND (not gaps — verified during the build)
 - `#[derive(Component)]` + `bytemuck::Pod` coexist: the Component derive is a pure
   marker (no injected fields/Drop/ticks), so a `#[repr(C)]` Pod component column is
@@ -72,5 +120,12 @@ bare float literal does not infer; use `CornerRadius::ZERO`/`::same(n)`.)
 - `EcsMaster::query::<&T, ()>().for_each_chunk(...)` yields one contiguous `&[T]`
   per archetype (the SoA→GPU upload path); plain `&T` does not trip the
   change-detection panic (G2).
+- Boids `par_iter_mut` + reading a `Res` is SOUND (plan §6.5 / D12 worry): the
+  `boid_forces` pass reads `Res<BoidSnapshot>` + `Res<SpatialGrid>` + `Res<BoidParams>`
+  (shared, broadcast to every worker) while each boid writes only its own
+  `&mut Velocity` row — no aliasing, no borrow issue. Snapshotting the pre-tick
+  state (D12) is what makes it sound: workers never read a `Velocity`/`Position`
+  row a sibling is writing. Identical shape to the already-shipped
+  `sync_gpu_instance` par pass. No core change needed.
 - The `for_each_chunk` upload threads cleanly through `App::update`'s `&mut world`
   (H4 resolved): the `'static` egui callback only draws.
