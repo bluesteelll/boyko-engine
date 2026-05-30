@@ -20,7 +20,7 @@
 use eframe::egui;
 
 use crate::sim::modes::Mode;
-use crate::sim::resources::{BoidParams, FrameStats, SimParams};
+use crate::sim::resources::{BoidParams, FrameStats, PhysicsParams, SimParams};
 
 /// Height of the frame-time plot in logical points.
 const PLOT_HEIGHT: f32 = 64.0;
@@ -55,6 +55,8 @@ pub struct PanelState<'a> {
     pub sim: &'a mut SimParams,
     /// Boid tunables, mutated in place by the Boids-mode sliders.
     pub boids: &'a mut BoidParams,
+    /// Physics (ball) tunables, mutated in place by the Physics-mode sliders.
+    pub physics: &'a mut PhysicsParams,
     /// Rolling frame/sim stats for the readouts + plot.
     pub stats: &'a FrameStats,
     /// Instances uploaded this frame (shown next to the entity count).
@@ -74,6 +76,7 @@ pub fn draw(ctx: &egui::Context, state: PanelState<'_>) -> Option<Mode> {
         mode,
         sim,
         boids,
+        physics,
         stats,
         instances_drawn,
         at_capacity,
@@ -100,6 +103,7 @@ pub fn draw(ctx: &egui::Context, state: PanelState<'_>) -> Option<Mode> {
             match mode {
                 Mode::Particles => particle_controls(ui, sim, at_capacity),
                 Mode::Boids => boid_controls(ui, boids),
+                Mode::Physics => physics_controls(ui, physics),
             }
         });
 
@@ -123,6 +127,12 @@ fn mode_buttons(ui: &mut egui::Ui, current: Mode) -> Option<Mode> {
             .clicked()
         {
             requested = Some(Mode::Boids);
+        }
+        if ui
+            .selectable_label(current == Mode::Physics, "Physics")
+            .clicked()
+        {
+            requested = Some(Mode::Physics);
         }
     });
     requested
@@ -258,4 +268,19 @@ fn boid_controls(ui: &mut egui::Ui, params: &mut BoidParams) {
     ui.add_space(4.0);
     ui.label(egui::RichText::new("boids flock via separation / alignment / cohesion").weak());
     ui.label(egui::RichText::new("larger radius = denser neighborhoods, slower").weak());
+}
+
+/// The Physics-mode slider controls that mutate [`PhysicsParams`] (plan §7 /
+/// Wave 6: gravity, restitution, ball size).
+fn physics_controls(ui: &mut egui::Ui, params: &mut PhysicsParams) {
+    // Gravity defaults to 0 (free drift); the slider raises it to watch balls
+    // fall and pile up. Note: nonzero gravity writes every ball's velocity each
+    // frame, so the collision flash then highlights all balls (documented).
+    ui.add(egui::Slider::new(&mut params.gravity, 0.0..=400.0).text("gravity"));
+    ui.add(egui::Slider::new(&mut params.restitution, 0.0..=1.0).text("restitution"));
+    ui.add(egui::Slider::new(&mut params.ball_size, 0.5..=3.0).text("ball size"));
+
+    ui.add_space(4.0);
+    ui.label(egui::RichText::new("balls collide; the grid broad-phases pairs").weak());
+    ui.label(egui::RichText::new("just-collided balls flash (Changed<Velocity>)").weak());
 }

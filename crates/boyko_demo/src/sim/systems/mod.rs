@@ -8,3 +8,4 @@
 pub mod boids;
 pub mod common;
 pub mod particles;
+pub mod physics;

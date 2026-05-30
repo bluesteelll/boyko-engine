@@ -33,7 +33,7 @@ use crate::render::{MAX_INSTANCES, RenderCallback, RenderResources, WORLD_HALF_E
 use crate::sim::bundles::ParticleBundle;
 use crate::sim::components::{ParticleTag, Position, Velocity};
 use crate::sim::modes::Mode;
-use crate::sim::resources::{BoidParams, DeltaTime, FrameStats, InputState, SimParams};
+use crate::sim::resources::{BoidParams, DeltaTime, FrameStats, InputState, PhysicsParams, SimParams};
 use crate::sim::runner::SimRunner;
 use crate::ui;
 
@@ -410,10 +410,12 @@ impl eframe::App for DemoApp {
         // copy (no allocation).
         let mut sim_params = *self.world.resource::<SimParams>();
         let mut boid_params = *self.world.resource::<BoidParams>();
+        let mut physics_params = *self.world.resource::<PhysicsParams>();
         let panel = ui::panel::PanelState {
             mode,
             sim: &mut sim_params,
             boids: &mut boid_params,
+            physics: &mut physics_params,
             stats: &self.stats,
             instances_drawn: instance_count,
             at_capacity,
@@ -421,6 +423,7 @@ impl eframe::App for DemoApp {
         let requested_mode = ui::panel::draw(&ctx, panel);
         *self.world.resource_mut::<SimParams>() = sim_params;
         *self.world.resource_mut::<BoidParams>() = boid_params;
+        *self.world.resource_mut::<PhysicsParams>() = physics_params;
 
         // A mode button writes `NextState<Mode>`; `Schedule::run` auto-applies
         // the transition next step (plan G10 / D15). Only queue an ACTUAL change

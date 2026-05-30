@@ -59,3 +59,23 @@ pub struct ParticleTag(pub u8);
 #[derive(Component, Clone, Copy, Debug, Pod, Zeroable)]
 pub struct BoidTag(pub u8);
 
+/// Per-ball collision radius in world units (plan §6.1 / D13 / Wave 6).
+///
+/// Its own SoA column, read by the physics broad/narrow phases. `Pod` (a
+/// `#[repr(C)]` single `f32`, trivially Pod) so the direct ball spawn path can
+/// hand its bytes to `create_entity` via `bytemuck::bytes_of` with no `unsafe`.
+#[repr(C)]
+#[derive(Component, Clone, Copy, Debug, Pod, Zeroable)]
+pub struct Radius(pub f32);
+
+/// Mode-membership marker for physics-ball entities (plan D16 / §9 G3 / Wave 6).
+///
+/// The Physics-mode analogue of [`ParticleTag`]/[`BoidTag`]: a 1-byte tag (a true
+/// ZST is rejected by the component pool) carried by every ball so the
+/// despawn-on-exit system can find them via
+/// `query_entities(&[BallTag::component_id()])`. `Pod` for the same
+/// `bytemuck::bytes_of` spawn path.
+#[repr(C)]
+#[derive(Component, Clone, Copy, Debug, Pod, Zeroable)]
+pub struct BallTag(pub u8);
+

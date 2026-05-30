@@ -113,6 +113,49 @@ directly (`tests/mode_switch.rs`). This is the headline Phase-17 dogfood result:
 the states feature drives a live, switchable two-mode sandbox end-to-end through
 the public API with no core changes.
 
+### Wave-6 finding (physics + `Changed<T>` dogfood)
+
+Wave 6 added the Physics mode (bouncing balls + inter-ball collisions) and the
+`Changed<Velocity>` "flash recently-collided balls" showcase (plan D13). Two
+findings, both ergonomics — no bug, no core change.
+
+#### W6-1 — precise `Changed<T>` requires writing through `Mut<T>` per row, not `&mut T` and not `for_each_chunk`
+The plan asks for a `tint_collided` system using `Query<&mut GpuInstance,
+Changed<Velocity>>` that flashes only the balls whose velocity changed this frame
+(collision / wall bounce). The non-obvious part is **what makes a row count as
+`Changed<Velocity>`**: only `Mut<T>::deref_mut` bumps the per-row `changed` tick.
+A plain `&mut T` query item (the `QueryData` for `&mut Velocity`) has
+`NEEDS_CHANGE_DETECTION = false` and writes the value WITHOUT touching the tick;
+a `for_each_chunk` `&mut [Velocity]` does not touch ticks at all. So to make the
+showcase precise, the velocity write-back (`apply_ball_motion`) must:
+* take `Query<(&mut Position, Mut<Velocity>), With<BallTag>>` (note `Mut<Velocity>`,
+  imported from `...::iters::query::data::Mut`), and
+* deref-write velocity (`vel.x = ...`, which routes through `Mut::deref_mut`)
+  **only for the rows the solver flagged touched**, leaving untouched rows'
+  guards un-deref'd so their tick stays put.
+This is correct and works (the `Mut` guard's first `deref_mut` writes `this_run`
+to the row's `changed` tick), but it has a consequence the SoA story should note:
+the velocity write-back is a **per-row `iter_mut` walk, not a `par_iter_mut` or a
+chunked SoA write**, precisely because the per-row tick bump is a per-row decision.
+A blanket `par_iter_mut` over `Mut<Velocity>` would bump every row's tick
+(flashing everything); a `for_each_chunk` cannot bump ticks at all. The collision
+solve is already sequential (G12), so the sequential write-back is free here, but
+the general lesson is: **selective change-marking is inherently per-row through the
+`Mut` guard** — there is no "mark these N rows changed in bulk" API. A future
+`Mut<T>::set_changed()` / a batch tick-marking helper would let a chunked writer
+opt specific rows into change detection. Not needed for the demo (sequential
+anyway); noted as a candidate ergonomics follow-up.
+
+#### W6-2 — same-frame `Changed<T>` observation across ordered systems works (no extra frame of latency)
+Confirmed (mirrors the core's `changed_filter_after_mutation` test): within ONE
+`Schedule::run`, a downstream `Changed<Velocity>` reader (`tint_collided`) DOES
+observe the tick bumped by an upstream writer (`apply_ball_motion`) in the same
+run, **provided the two are ordered** (here via `.after(apply_ball_motion)` plus
+the natural write-Velocity / read-Velocity conflict the scheduler already orders).
+No extra frame of latency, no double-buffering needed. The flash appears on the
+same frame the collision resolves. Good Phase-10 result for the demo: change
+detection composes cleanly with explicit `.before`/`.after` ordering.
+
 ### Confirmed-SOUND (not gaps — verified during the build)
 - `#[derive(Component)]` + `bytemuck::Pod` coexist: the Component derive is a pure
   marker (no injected fields/Drop/ticks), so a `#[repr(C)]` Pod component column is

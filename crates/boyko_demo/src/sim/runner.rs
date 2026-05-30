@@ -30,12 +30,17 @@ use boyko_threadpool::ThreadPool;
 use crate::render::WORLD_HALF_EXTENT;
 use crate::sim::grid::SpatialGrid;
 use crate::sim::modes::{
-    BOID_COUNT, Mode, despawn_boids, despawn_particles, spawn_boids, spawn_particles,
+    BALL_COUNT, BOID_COUNT, Mode, despawn_balls, despawn_boids, despawn_particles, spawn_balls,
+    spawn_boids, spawn_particles,
 };
-use crate::sim::resources::{BoidParams, BoidSnapshot, DeltaTime, SimParams};
+use crate::sim::resources::{BallSnapshot, BoidParams, BoidSnapshot, DeltaTime, PhysicsParams, SimParams};
 use crate::sim::systems::boids::{boid_forces, build_grid, integrate_boids, snapshot_boids};
 use crate::sim::systems::common::sync_gpu_instance;
 use crate::sim::systems::particles::integrate_particles;
+use crate::sim::systems::physics::{
+    apply_ball_motion, build_ball_grid, collide_balls, integrate_balls, sync_ball_gpu,
+    tint_collided, wall_bounce,
+};
 
 /// Fixed simulation timestep in seconds (plan §6.7 default 1/60).
 pub const FIXED_DT: f32 = 1.0 / 60.0;
@@ -81,13 +86,22 @@ impl SimRunner {
         // Vecs are pre-sized to the max boid count so steady-state rebuilds never
         // allocate (plan §6.4 / §11.2).
         let boid_params = BoidParams::default();
+        // One shared spatial grid serves both the boid and physics broad-phases
+        // (the two modes never run in the same frame). It is sized for the larger
+        // population (boids); each mode resets the cell size each frame via
+        // `set_cell_size`, so sharing one grid resource is sound (plan D11).
         world.insert_resource(SpatialGrid::new(
             WORLD_HALF_EXTENT,
             boid_params.radius,
-            BOID_COUNT,
+            BOID_COUNT.max(BALL_COUNT),
         ));
         world.insert_resource(BoidSnapshot::with_capacity(BOID_COUNT));
         world.insert_resource(boid_params);
+
+        // Physics-mode resources (Wave 6): tunables + the reused ball snapshot /
+        // collision scratch buffers (plan D13 / §11.2).
+        world.insert_resource(PhysicsParams::default());
+        world.insert_resource(BallSnapshot::with_capacity(BALL_COUNT));
 
         let mut builder = ScheduleBuilder::new(pool);
 
@@ -108,18 +122,31 @@ impl SimRunner {
             .add_system(despawn_boids)
             .run_if(on_exit(Mode::Boids))
             .key();
+        let despawn_balls_key = builder
+            .add_system(despawn_balls)
+            .run_if(on_exit(Mode::Physics))
+            .key();
         let spawn_particles_key = builder
             .add_system(spawn_particles)
             .run_if(on_enter(Mode::Particles))
             // Despawn the outgoing mode before spawning this one (H3).
             .after(despawn_particles_key)
             .after(despawn_boids_key)
+            .after(despawn_balls_key)
             .key();
         let spawn_boids_key = builder
             .add_system(spawn_boids)
             .run_if(on_enter(Mode::Boids))
             .after(despawn_particles_key)
             .after(despawn_boids_key)
+            .after(despawn_balls_key)
+            .key();
+        let spawn_balls_key = builder
+            .add_system(spawn_balls)
+            .run_if(on_enter(Mode::Physics))
+            .after(despawn_particles_key)
+            .after(despawn_boids_key)
+            .after(despawn_balls_key)
             .key();
 
         // ── Per-mode sim systems (gated in_state) ────────────────────────────
@@ -155,16 +182,73 @@ impl SimRunner {
             .after(boid_forces_key)
             .key();
 
+        // Physics: integrate -> build_grid -> collide (sequential) -> wall ->
+        // apply (write-back), in strict order (each reads the previous stage's
+        // output). All gated in_state(Physics). The collision/wall passes mutate
+        // the snapshot; `apply_ball_motion` writes it back through the
+        // change-tracking velocity guard so `Changed<Velocity>` (the tint) is
+        // precise (plan D13 / G12).
+        let integrate_balls_key = builder
+            .add_system(integrate_balls)
+            .run_if(in_state(Mode::Physics))
+            .after(spawn_balls_key)
+            .key();
+        let build_ball_grid_key = builder
+            .add_system(build_ball_grid)
+            .run_if(in_state(Mode::Physics))
+            .after(integrate_balls_key)
+            .key();
+        let collide_balls_key = builder
+            .add_system(collide_balls)
+            .run_if(in_state(Mode::Physics))
+            .after(build_ball_grid_key)
+            .key();
+        let wall_bounce_key = builder
+            .add_system(wall_bounce)
+            .run_if(in_state(Mode::Physics))
+            .after(collide_balls_key)
+            .key();
+        let apply_ball_motion_key = builder
+            .add_system(apply_ball_motion)
+            .run_if(in_state(Mode::Physics))
+            .after(wall_bounce_key)
+            .key();
+
         // ── GPU mirror (mode-agnostic) ───────────────────────────────────────
-        // Runs after every integrator AND after the spawn systems, so the
-        // GpuInstance column reflects the post-step, post-switch state before the
-        // upload reads it (plan H3 / D3).
-        builder
+        // Runs after every integrator/write-back AND after the spawn systems, so
+        // the GpuInstance column reflects the post-step, post-switch state before
+        // the upload reads it (plan H3 / D3). In Physics mode it packs every
+        // ball's position + base (speed-ramp) color; the tint then overlays the
+        // collision flash on top.
+        let sync_gpu_key = builder
             .add_system(sync_gpu_instance)
             .after(integrate_particles_key)
             .after(integrate_boids_key)
+            .after(apply_ball_motion_key)
             .after(spawn_particles_key)
-            .after(spawn_boids_key);
+            .after(spawn_boids_key)
+            .after(spawn_balls_key)
+            .key();
+
+        // Physics GPU sync: size balls by their actual radius and write a base
+        // color, overriding the shared `sync_gpu_instance` (which sized them by
+        // the particle slider). Runs after the shared sync; gated in_state.
+        let sync_ball_gpu_key = builder
+            .add_system(sync_ball_gpu)
+            .run_if(in_state(Mode::Physics))
+            .after(apply_ball_motion_key)
+            .after(sync_gpu_key)
+            .key();
+
+        // The `Changed<Velocity>` showcase (plan D13): flash balls that collided
+        // or bounced this frame. Runs AFTER `sync_ball_gpu` so the base color it
+        // wrote is overlaid (not overwritten), and after `apply_ball_motion`
+        // (which set the velocity change ticks). Gated in_state(Physics).
+        builder
+            .add_system(tint_collided)
+            .run_if(in_state(Mode::Physics))
+            .after(apply_ball_motion_key)
+            .after(sync_ball_gpu_key);
 
         let schedule = builder.build(world);
 

@@ -8,6 +8,8 @@
 
 use boyko_macros::Resource;
 
+use crate::sim::components::{Position, Velocity};
+
 /// Fixed simulation timestep for the current run, in seconds (plan §9 G8).
 ///
 /// The engine has no built-in `Time`; the runner writes this before each
@@ -144,6 +146,101 @@ impl BoidSnapshot {
         Self {
             state: Vec::with_capacity(max_boids),
         }
+    }
+}
+
+/// Tunable physics (bouncing balls) parameters (plan §6.3 / §7 / Wave 6). The
+/// control panel mutates these in place each frame; the physics systems read
+/// them. Separate from [`SimParams`]/[`BoidParams`] so the Physics-mode controls
+/// are self-contained.
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct PhysicsParams {
+    /// Downward gravitational acceleration in world units per second². `0`
+    /// (the default) lets balls drift freely so the `Changed<Velocity>` tint
+    /// flashes only genuine collisions/bounces (see `systems::physics` docs).
+    pub gravity: f32,
+    /// Coefficient of restitution `e ∈ [0, 1]` (1 = perfectly elastic) applied to
+    /// both ball-ball impulses and wall bounces.
+    pub restitution: f32,
+    /// Rendered half-extent of a ball quad in world units. Read by the
+    /// physics GPU sync so the size slider drives the dot size live.
+    pub ball_size: f32,
+}
+
+impl Default for PhysicsParams {
+    fn default() -> Self {
+        // Gravity defaults to 0 so the change-detection tint isolates
+        // collisions/bounces (raising it flashes every ball — a documented
+        // footgun). A high restitution keeps the balls lively.
+        Self {
+            gravity: 0.0,
+            restitution: 0.9,
+            ball_size: 1.4,
+        }
+    }
+}
+
+/// Pre-tick snapshot of every ball plus the collision solver's scratch buffers
+/// (plan D13 / G12).
+///
+/// The sequential collision + wall passes need random per-row access by archetype
+/// row index, which a forward `iter_mut` cannot give; so `build_ball_grid`
+/// snapshots the ball columns into these flat `Vec`s, the solver mutates them by
+/// index on one thread, and `apply_ball_motion` writes the result back in the
+/// same row order. Every `Vec` is cleared and refilled each frame, never
+/// reallocated in steady state (plan §11.2). Row index `i` is consistent across
+/// all of `pos`/`vel`/`radius`/`touched` and matches the archetype row order.
+#[derive(Resource, Default)]
+pub struct BallSnapshot {
+    /// Ball centers, in archetype row order.
+    pub pos: Vec<Position>,
+    /// Ball velocities, parallel to [`pos`](Self::pos).
+    pub vel: Vec<Velocity>,
+    /// Ball radii, parallel to [`pos`](Self::pos).
+    pub radius: Vec<f32>,
+    /// `true` for rows whose velocity changed this frame (collision or wall
+    /// bounce). Drives the per-row velocity write-back so only those rows bump
+    /// their change tick (keeping `Changed<Velocity>` precise).
+    pub touched: Vec<bool>,
+    /// Reused scratch list of candidate neighbor row indices for the ball
+    /// currently being resolved — a per-frame-reused buffer instead of a
+    /// per-ball heap allocation in the collision loop (plan §11.2).
+    pub candidates: Vec<usize>,
+}
+
+impl BallSnapshot {
+    /// Builds snapshot buffers pre-sized for up to `max_balls` (no later
+    /// reallocation in steady state).
+    pub fn with_capacity(max_balls: usize) -> Self {
+        Self {
+            pos: Vec::with_capacity(max_balls),
+            vel: Vec::with_capacity(max_balls),
+            radius: Vec::with_capacity(max_balls),
+            touched: Vec::with_capacity(max_balls),
+            // A 3×3 neighbor block holds only a handful of balls at the chosen
+            // cell size; a small reserve avoids growth in the common case.
+            candidates: Vec::with_capacity(64),
+        }
+    }
+
+    /// Clears every per-ball buffer for a fresh frame (reusing capacity). The
+    /// `candidates` scratch is cleared per-ball by the solver, not here.
+    #[inline]
+    pub fn clear(&mut self) {
+        self.pos.clear();
+        self.vel.clear();
+        self.radius.clear();
+        self.touched.clear();
+    }
+
+    /// Appends one ball's snapshot row (position, velocity, radius), initially
+    /// untouched.
+    #[inline]
+    pub fn push(&mut self, pos: Position, vel: Velocity, radius: f32) {
+        self.pos.push(pos);
+        self.vel.push(vel);
+        self.radius.push(radius);
+        self.touched.push(false);
     }
 }
 

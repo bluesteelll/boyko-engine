@@ -33,8 +33,9 @@ use boyko_ecs::ecs::core::state::states::States;
 
 use crate::render::WORLD_HALF_EXTENT;
 use crate::render::instance::GpuInstance;
-use crate::sim::bundles::{BoidBundle, ParticleBundle};
-use crate::sim::components::{BoidTag, ParticleTag, Position, Velocity};
+use crate::sim::bundles::{BallBundle, BoidBundle, ParticleBundle};
+use crate::sim::components::{BallTag, BoidTag, ParticleTag, Position, Radius, Velocity};
+use crate::sim::systems::physics::{MAX_BALL_RADIUS, MIN_BALL_RADIUS};
 
 /// The interactive simulation modes (plan §6.6). A Phase-17 state type: the UI
 /// queues a switch via `NextState<Mode>` and the gated spawn/despawn/sim systems
@@ -50,6 +51,8 @@ pub enum Mode {
     Particles,
     /// The boids/flocking mode (Wave 5): separation / alignment / cohesion.
     Boids,
+    /// The physics mode (Wave 6): bouncing balls with inter-ball collisions.
+    Physics,
 }
 
 impl States for Mode {}
@@ -63,6 +66,15 @@ pub const PARTICLE_COUNT: usize = 100_000;
 /// N ~tens of thousands"). Smaller than the particle count because each boid does
 /// a 3x3 neighbor scan per step (O(n*k) vs the particles' O(n)).
 pub const BOID_COUNT: usize = 30_000;
+
+/// Number of balls spawned when entering [`Mode::Physics`] (plan §6.5: physics is
+/// the heaviest mode). Smaller than the boid count because the narrow-phase
+/// collision pass is sequential (plan §9 G12) and each ball can resolve against
+/// several neighbors per step.
+pub const BALL_COUNT: usize = 4_000;
+
+/// Initial speed range for spawned balls, in world units per second.
+const BALL_INITIAL_SPEED: f32 = 30.0;
 
 /// Initial speed range for spawned particles, in world units per second.
 const PARTICLE_INITIAL_SPEED: f32 = 40.0;
@@ -202,4 +214,63 @@ pub fn spawn_boids(world: &mut EcsMaster) {
 /// Removes every entity carrying [`BoidTag`].
 pub fn despawn_boids(world: &mut EcsMaster) {
     despawn_tagged(world, BoidTag::component_id());
+}
+
+/// Spawn-on-enter system for [`Mode::Physics`] (plan §6.6 / D13 / Wave 6).
+///
+/// EXCLUSIVE `fn(&mut EcsMaster)` gated `.run_if(on_enter(Mode::Physics))`.
+/// Scatter-spawns [`BALL_COUNT`] balls with random position, velocity, and radius
+/// directly via `create_entity` (C1 — no `Commands` per-call cap). A dedicated
+/// loop (not [`scatter_spawn`]) because a ball carries a fifth component
+/// ([`Radius`]) beyond the shared `(pos, vel, gpu, tag)` set. Stops early if the
+/// pool reports full mid-spawn (capacity), so the population is whatever fit.
+pub fn spawn_balls(world: &mut EcsMaster) {
+    let archetype = world.bundle_archetype_id_for::<BallBundle>();
+    let pos_id = Position::component_id();
+    let vel_id = Velocity::component_id();
+    let radius_id = Radius::component_id();
+    let gpu_id = GpuInstance::component_id();
+    let tag_id = BallTag::component_id();
+
+    let mut rng = rand::rng();
+    for _ in 0..BALL_COUNT {
+        let radius = rng.random_range(MIN_BALL_RADIUS..MAX_BALL_RADIUS);
+        // Keep spawn centers inside the wall margin so balls start legal (not
+        // already penetrating a wall).
+        let span = WORLD_HALF_EXTENT - radius;
+        let x = rng.random_range(-span..span);
+        let y = rng.random_range(-span..span);
+        let vx = rng.random_range(-BALL_INITIAL_SPEED..BALL_INITIAL_SPEED);
+        let vy = rng.random_range(-BALL_INITIAL_SPEED..BALL_INITIAL_SPEED);
+        let pos = Position { x, y };
+        let vel = Velocity { x: vx, y: vy };
+        let rad = Radius(radius);
+        // Seed a sane GpuInstance so the first frame before the physics GPU sync
+        // does not flash zeroed instances; scale tracks the radius.
+        let gpu = GpuInstance::new([x, y], radius, [120, 200, 255, 255]);
+        let tag = BallTag(0);
+        let ok = world
+            .create_entity(
+                archetype,
+                &[
+                    (pos_id, bytemuck::bytes_of(&pos)),
+                    (vel_id, bytemuck::bytes_of(&vel)),
+                    (radius_id, bytemuck::bytes_of(&rad)),
+                    (gpu_id, bytemuck::bytes_of(&gpu)),
+                    (tag_id, bytemuck::bytes_of(&tag)),
+                ],
+            )
+            .is_ok();
+        if !ok {
+            break;
+        }
+    }
+}
+
+/// Despawn-on-exit system for [`Mode::Physics`] (plan D16).
+///
+/// EXCLUSIVE `fn(&mut EcsMaster)` gated `.run_if(on_exit(Mode::Physics))`.
+/// Removes every entity carrying [`BallTag`].
+pub fn despawn_balls(world: &mut EcsMaster) {
+    despawn_tagged(world, BallTag::component_id());
 }

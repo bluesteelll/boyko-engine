@@ -7,7 +7,7 @@
 use boyko_macros::Bundle;
 
 use crate::render::instance::GpuInstance;
-use crate::sim::components::{BoidTag, ParticleTag, Position, Velocity};
+use crate::sim::components::{BallTag, BoidTag, ParticleTag, Position, Radius, Velocity};
 
 /// The archetype of a particle: position, velocity, its GPU mirror, and the
 /// mode tag (plan §6.2). `GpuInstance` is carried in the same archetype as the
@@ -40,4 +40,23 @@ pub struct BoidBundle {
     pub gpu: GpuInstance,
     /// Mode-membership marker (plan D16).
     pub tag: BoidTag,
+}
+
+/// The archetype of a physics ball (plan §6.2 / D13 / Wave 6): the `(pos, vel,
+/// gpu)` hot set plus a per-ball [`Radius`] (the collision size) and a
+/// [`BallTag`] so balls land in a distinct archetype the per-mode despawn finds.
+/// `GpuInstance` shares the column with the sim data for the same zero-copy
+/// upload (plan D2).
+#[derive(Bundle)]
+pub struct BallBundle {
+    /// World position.
+    pub pos: Position,
+    /// World velocity.
+    pub vel: Velocity,
+    /// Collision radius in world units.
+    pub radius: Radius,
+    /// Per-instance GPU record, written each frame by the physics GPU sync.
+    pub gpu: GpuInstance,
+    /// Mode-membership marker (plan D16).
+    pub tag: BallTag,
 }
