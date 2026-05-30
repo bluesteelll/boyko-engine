@@ -54,6 +54,9 @@
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
 
+// Used by the native `SimRunner` (`fn(&mut EcsMaster)` signatures); the wasm
+// `wasm_runner` module re-imports it locally, so this top-level use is native-only.
+#[cfg(not(target_arch = "wasm32"))]
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 #[cfg(not(target_arch = "wasm32"))]
 use boyko_ecs::ecs::core::schedule::{Schedule, ScheduleBuilder, in_state, on_enter, on_exit};
