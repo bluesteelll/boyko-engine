@@ -87,6 +87,47 @@ jobs:
           # Ensure GitHub Pages serves correctly
           touch _site/.nojekyll
 
+      # ── boyko_demo web build (Wave 7, plan §8.2 / §10 W7.3) ─────────────────
+      # ADDITIVE: builds the wasm demo with Trunk and folds dist/ into the same
+      # Pages artifact under /demo/. The mdBook + rustdoc deploy above is already
+      # assembled into _site/ at this point, so these steps only ADD to it.
+      #
+      # NON-FATAL by design (continue-on-error: true on the build step). As of
+      # Wave 7 the wasm build is blocked UPSTREAM in `boyko_ecs` (out of scope
+      # here): ~19 hard-coded 64-bit `const _: () = assert!(size_of/align_of/
+      # offset_of ...)` layout guards (EntityInland, Column, Commands,
+      # EventReader/Writer, ...) fail const-eval on the 32-bit wasm32 ABI. Until
+      # those asserts are made pointer-width-aware in the core, `trunk build`
+      # fails — but it MUST NOT take down the docs deploy. So the step is
+      # `continue-on-error`, and the publish step below only copies dist/ if it
+      # was actually produced. See docs/DEMO-DOGFOODING.md (Wave-7 finding).
+      - name: Add wasm target
+        if: github.ref == 'refs/heads/master'
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Install Trunk
+        if: github.ref == 'refs/heads/master'
+        uses: jetli/trunk-action@v0.5.0
+        with:
+          version: 'latest'
+
+      - name: Build boyko_demo (wasm, non-fatal until the core layout asserts are pointer-width-aware)
+        if: github.ref == 'refs/heads/master'
+        id: build_demo
+        continue-on-error: true
+        working-directory: crates/boyko_demo
+        # The demo's .cargo/config.toml (discovered from this dir) sets
+        # `--cfg getrandom_backend="wasm_js"`, required by getrandom 0.3 on wasm.
+        # `--public-url /boyko-engine/demo/` matches the Pages project subpath so
+        # the generated asset URLs resolve under the deployed /demo/ path.
+        run: trunk build --release --public-url /boyko-engine/demo/
+
+      - name: Publish boyko_demo to /demo/ (only if the wasm build succeeded)
+        if: github.ref == 'refs/heads/master' && steps.build_demo.outcome == 'success'
+        run: |
+          mkdir -p _site/demo
+          cp -r crates/boyko_demo/dist/* _site/demo/
+
       - name: Setup Pages
         if: github.ref == 'refs/heads/master'
         uses: actions/configure-pages@v5

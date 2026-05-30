@@ -156,6 +156,124 @@ No extra frame of latency, no double-buffering needed. The flash appears on the
 same frame the collision resolves. Good Phase-10 result for the demo: change
 detection composes cleanly with explicit `.before`/`.after` ordering.
 
+### Wave-7 finding (web / wasm32 build) — HARD BLOCKER in the core (needs a core change)
+
+Wave 7 added the wasm (web) build: the `#[cfg(target_arch = "wasm32")]` sequential
+runner (`sim/runner.rs`), the `wasm_bindgen(start)` → `WebRunner` entry
+(`main.rs`), `index.html` + `Trunk.toml`, and the additive Pages-CI demo job. The
+demo-side cfg-split is complete and **native stays clean**. But the binding gate —
+`cargo build -p boyko_demo --target wasm32-unknown-unknown` — **FAILS**, and the
+failure is **entirely upstream in `boyko_ecs`**, not in the demo.
+
+#### W7-1 — `boyko_ecs` has ~19 hard-coded **64-bit** `const _` layout asserts that fail const-eval on the 32-bit wasm32 ABI
+
+`wasm32-unknown-unknown` is a 32-bit target (`size_of::<usize>() == 4`,
+`size_of::<*mut T>() == 4`, pointer `align == 4`). `boyko_ecs` pins many internal
+struct layouts with **unconditional** compile-time asserts hard-coded to 64-bit
+sizes/offsets/alignments, e.g. (`crates/boyko_ecs/src/ecs/core/entity/entity_inland.rs:30`):
+
+```rust
+#[repr(C)]
+struct EntityInland { archetype_ptr: *mut Archetype, unit_index: u32, generation: u32 }
+const _: () = assert!(std::mem::size_of::<EntityInland>() == 16);          // wasm32: 12 → FAILS
+const _: () = assert!(std::mem::align_of::<EntityInland>() == 8);          // wasm32: 4  → FAILS
+const _: () = assert!(std::mem::offset_of!(EntityInland, unit_index) == 8); // wasm32: 4 → FAILS
+const _: () = assert!(std::mem::offset_of!(EntityInland, generation) == 12);// wasm32: 8 → FAILS
+```
+
+`rustc` evaluates these `const _: () = assert!(...)` items even for a library that
+is only *built* (not run), so the whole crate fails to compile on wasm32. The full
+set (19 × `error[E0080]: evaluation panicked`), all in `boyko_ecs` core:
+
+| Type (`size`/`align`/`offset` asserts) | Why it is 64-bit-only |
+|---|---|
+| `EntityInland` (size 16, align 8, off 8/12) | `*mut Archetype` is 8 B on 64-bit, 4 B on wasm32 |
+| `Column` (size 16, align 8, off `stride` 8 / `_reserved` 12) | embeds a pointer |
+| `Archetype` (size 8480) | shrinks once its pointers are 4 B |
+| `ComponentLayout` (size 56) | embeds `usize`/pointer fields |
+| `BundleColumnRecord` (size 32) | embeds `usize`/pointer fields |
+| `RemoveOutcome` (size 16) | `Option<EntityId>` niche layout |
+| `Commands<'static>` (size 16) | two references → 8 B on wasm32 |
+| `EntityCommands<'static,'static>` (size 24) | references → 12 B on wasm32 |
+| `EntityCounter<'static>` (size 8, align 8) | one reference → 4 B on wasm32 |
+| `EventReader<'s,E>` (size 8) | cached `NonNull` → 4 B on wasm32 |
+| `EventWriter<'s,E>` (size 8) | cached `NonNull` → 4 B on wasm32 |
+
+**This is out of scope for the demo** (only `crates/boyko_demo/**` + the Pages CI
+may change here) and CANNOT be worked around demo-side: the failing asserts are in
+the `boyko_ecs` dependency the demo links. The demo code itself is wasm-clean —
+the compile reaches all the way through the demo's own deps (`getrandom` wasm
+backend, `wasm-bindgen-futures`, the sequential runner type-checks) and dies in
+the upstream crate.
+
+**Proposed core fix (additive, no behavior change):** make each layout assert
+pointer-width-aware, gating the 64-bit numbers behind
+`#[cfg(target_pointer_width = "64")]` and either dropping the assert or asserting
+the matching 32-bit number under `#[cfg(target_pointer_width = "32")]`. The
+structs are already `#[repr(C)]`, so their wasm32 layout is well-defined; only the
+*assertions* assume 64-bit. A targeted sweep of the ~11 types above unblocks the
+wasm build with zero runtime change on native. (Bevy does this implicitly by not
+hard-asserting absolute sizes; the boyko asserts are a deliberate
+layout-regression guard that simply was never made portable.)
+
+Until that lands, the web build cannot compile. The demo's wasm scaffolding
+(sequential runner, entry, `index.html`/`Trunk.toml`, CI) is in place and
+correct, so the web build comes online the moment the core asserts are gated.
+The Pages CI demo step is therefore **non-fatal** (`continue-on-error`) so it
+cannot break the existing mdBook/rustdoc deploy while the blocker stands.
+
+#### W7-2 — `Arena` `!Send`/`!Sync` is NOT a wasm blocker (confirmed, not a gap)
+
+The plan worried (D10) that the `!Send`/`!Sync` arena (TLS discipline) might break
+even single-threaded wasm. It does not: the wasm runner constructs **no
+`ThreadPool`** and calls **no `Schedule::run`** — the world, arena, and every
+system run on the one main thread, so nothing is ever sent across a thread
+boundary. `!Send`/`!Sync` only constrains cross-thread moves, which the sequential
+path never performs. The single blocker is W7-1 (const-asserts), not threading.
+
+#### W7-3 — `Schedule::run` hard-requires a pool ⇒ the wasm runner is hand-rolled (option (b))
+
+Confirmed against the source: `ScheduleBuilder::new` takes an `Arc<ThreadPool>`
+and `Schedule::run` enters `pool.install(...)` and dispatches every system body
+through `Scope::spawn` (`schedule.rs`). There is **no** sequential / no-pool
+execution path in the schedule, so the wasm runner cannot reuse `Schedule` (plan
+D10 option (a) is unavailable). Instead it hand-rolls the dependency-ordered
+sequential dispatch (option (b)): it drives the SAME per-mode system functions via
+`EcsMaster::run_system` (sequential init + run + apply) in the exact `.after(...)`
+order the native builder pins, and replicates the Phase-17 transition pass +
+`on_enter`/`on_exit`/`in_state` gating inline (reading `NextState<Mode>` /
+`State<Mode>`, doing the despawn-old → spawn-new → state-swap). The system bodies
+and components are 100% shared across targets — only `runner.rs`'s dispatch is
+cfg-split. `par_iter_mut` inside a body falls back to a sequential walk with no
+pool attached (PAR7), so the bodies need no `#[cfg]`. A future
+`EcsMaster::spawn_state::<S>` or a no-pool `Schedule::run_sequential` would let the
+wasm path share the native transition logic instead of re-deriving it.
+
+#### W7-4 — wasm `Changed<T>` is an always-true footgun under `run_system` (cosmetic divergence)
+
+The native physics mode's `tint_collided` (`Changed<Velocity>`) is intentionally
+NOT run on wasm. `EcsMaster::run_system` re-`initialize`s its system each call,
+resetting the system's tick window to the `MAX_CHANGE_AGE` sentinel, so a
+`Changed<T>` filter reads as ALWAYS-TRUE (flash every ball) — the documented
+unguarded-tick footgun (W6-1). Dropping the flash on wasm makes the physics view
+render every ball at its `sync_ball_gpu` base color; the collision *response* is
+identical (it is tick-independent). This is the single behavioral difference from
+native, and it is purely cosmetic. (To get precise `Changed<T>` on the wasm
+sequential path one would need a persistent per-system tick across `run_system`
+calls — i.e. a cached `FunctionSystem` whose `set_change_ticks` is advanced
+per-frame, which the schedule does for native but the bare `run_system` does not.)
+
+#### W7-5 — getrandom 0.3 on wasm needs BOTH a feature AND a rustflag
+
+`rand` 0.9 pulls `getrandom` 0.3, which on `wasm32-unknown-unknown` requires the
+`wasm_js` *Cargo feature* (declared in `Cargo.toml`) **and** the
+`--cfg getrandom_backend="wasm_js"` *rustflag* (set in the demo's
+`.cargo/config.toml`) — the feature alone emits a `compile_error!`
+(getrandom 0.3.4 `src/backends.rs`). The config is scoped to the crate dir, so the
+CI `cd`s into `crates/boyko_demo` before `trunk build` and the documented local
+build runs from there; a workspace-root `--target wasm32` would not pick it up.
+Not a boyko gap — an ecosystem build-config detail recorded for the next person.
+
 ### Confirmed-SOUND (not gaps — verified during the build)
 - `#[derive(Component)]` + `bytemuck::Pod` coexist: the Component derive is a pure
   marker (no injected fields/Drop/ticks), so a `#[repr(C)]` Pod component column is
