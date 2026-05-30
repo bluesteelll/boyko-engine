@@ -28,7 +28,7 @@ pub mod system_set;
 // Internal — `SystemBox` is consumed only by other submodules.
 pub(crate) mod system_box;
 
-pub use common_conditions::run_once;
+pub use common_conditions::{in_state, on_enter, on_exit, on_transition, run_once};
 pub use schedule::Schedule;
 pub use schedule_builder::{
     ConfigureSet, MAX_SYSTEMS_PER_SCHEDULE, ScheduleBuildError, ScheduleBuilder,

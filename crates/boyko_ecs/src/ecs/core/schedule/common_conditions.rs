@@ -11,10 +11,19 @@
 //! * `resource_exists::<R>` — needs an `Option<Res<R>>` (or `Has<R>`)
 //!   `SystemParam` that returns instead of panicking on a missing resource;
 //!   boyko has none today, so it is deferred to a follow-up.
-//! * Typed combinators (`.and` / `.or` / `.not`), `on_event`, `in_state` —
-//!   deferred; AND-via-chaining covers the common case.
+//! * Typed combinators (`.and` / `.or` / `.not`), `on_event` — deferred;
+//!   AND-via-chaining covers the common case.
+//!
+//! Phase 17 adds the state run conditions [`in_state`] / [`on_enter`] /
+//! [`on_exit`] / [`on_transition`].
 
+use crate::ecs::core::state::State;
+use crate::ecs::core::state::states::States;
+use crate::ecs::core::state::transition_record::StateTransitionRecord;
+use crate::ecs::core::system::into_system::IntoSystem;
 use crate::ecs::core::system::params::local::Local;
+use crate::ecs::core::system::params::res::Res;
+use crate::ecs::core::system::system::System;
 
 /// A condition that returns `true` exactly once — the first frame it is
 /// evaluated — and `false` forever after.
@@ -41,6 +50,110 @@ pub fn run_once(mut has_run: Local<bool>) -> bool {
         *has_run = true;
         true
     }
+}
+
+/// A condition that holds while the current [`State<S>`] equals `target`
+/// (Phase 17 D5).
+///
+/// Reads `State<S>` (shared), so multiple `in_state`-gated systems never
+/// conflict. The returned closure captures `target` by value.
+///
+/// ```ignore
+/// builder.add_system(run_physics).run_if(in_state(AppState::InGame));
+/// ```
+///
+/// # Panics
+///
+/// The returned condition panics if `State<S>` was never inserted (require-
+/// exists, D8): register the state with `init_state::<S>()` / `insert_state`
+/// before adding any `in_state`/`on_enter`/`on_exit`/`on_transition`-gated
+/// system.
+///
+/// # Missed-events footgun (§13-OQ2)
+///
+/// An `EventReader` inside an `in_state`-gated system advances its cursor only
+/// on frames the system runs, so events sent while the state was inactive are
+/// skipped (standard Bevy behaviour). This phase does not address it; route
+/// state-spanning events through a system that is not `in_state`-gated if you
+/// must observe them.
+///
+/// [`State<S>`]: crate::ecs::core::state::state::State
+#[inline]
+pub fn in_state<S: States>(target: S) -> impl System<Out = bool> {
+    // The closure type is concrete HERE, so the double-`FnMut` HRTB bound
+    // resolves; `into_system` produces a `FunctionSystem`. Returning it as
+    // `impl System<Out = bool>` (a plain trait, unlike the closure's
+    // HRTB-projected `FnMut` bound) survives the opaque-return boundary, and
+    // the IS2 identity blanket re-bridges it to `IntoSystem` for `.run_if`.
+    IntoSystem::into_system(move |current: Res<State<S>>| current.get() == &target)
+}
+
+/// A condition that holds on the single frame state type `S` transitions
+/// *into* `target` (Phase 17 D5).
+///
+/// Fires on the exact frame the transition pass records an entry into
+/// `target`, including the synthesized initial `none → target` transition on
+/// frame 1 (D7). Reads the per-`S` transition record (shared).
+///
+/// ```ignore
+/// builder.add_system(spawn_level).run_if(on_enter(AppState::InGame));
+/// ```
+///
+/// # Panics
+///
+/// Panics if `S` was never registered — see [`in_state`].
+#[inline]
+pub fn on_enter<S: States>(target: S) -> impl System<Out = bool> {
+    // See `in_state` for why the closure is wrapped via `into_system` and
+    // returned as `impl System<Out = bool>` rather than `impl FnMut(..)`.
+    IntoSystem::into_system(move |rec: Res<StateTransitionRecord<S>>| {
+        matches!(rec.current(), Some(t) if t.entered == target)
+    })
+}
+
+/// A condition that holds on the single frame state type `S` transitions *out
+/// of* `target` (Phase 17 D5).
+///
+/// Fires on the exact frame the transition pass records an exit from `target`.
+/// The synthesized initial transition has no `exited` value, so `on_exit` is
+/// naturally false on frame 1. Reads the per-`S` transition record (shared).
+///
+/// ```ignore
+/// builder.add_system(teardown_menu).run_if(on_exit(AppState::Menu));
+/// ```
+///
+/// # Panics
+///
+/// Panics if `S` was never registered — see [`in_state`].
+#[inline]
+pub fn on_exit<S: States>(target: S) -> impl System<Out = bool> {
+    // See `in_state` for why the closure is wrapped via `into_system` and
+    // returned as `impl System<Out = bool>` rather than `impl FnMut(..)`.
+    IntoSystem::into_system(move |rec: Res<StateTransitionRecord<S>>| {
+        matches!(rec.current(), Some(t) if t.exited.as_ref() == Some(&target))
+    })
+}
+
+/// A condition that holds on the single frame state type `S` transitions
+/// exactly from `from` into `to` (Phase 17 D11).
+///
+/// Reads the same per-`S` transition record as [`on_enter`] / [`on_exit`],
+/// matching both endpoints. Fires only for the exact `(from, to)` pair.
+///
+/// ```ignore
+/// builder.add_system(fade).run_if(on_transition(AppState::Menu, AppState::InGame));
+/// ```
+///
+/// # Panics
+///
+/// Panics if `S` was never registered — see [`in_state`].
+#[inline]
+pub fn on_transition<S: States>(from: S, to: S) -> impl System<Out = bool> {
+    // See `in_state` for why the closure is wrapped via `into_system` and
+    // returned as `impl System<Out = bool>` rather than `impl FnMut(..)`.
+    IntoSystem::into_system(move |rec: Res<StateTransitionRecord<S>>| {
+        matches!(rec.current(), Some(t) if t.exited.as_ref() == Some(&from) && t.entered == to)
+    })
 }
 
 #[cfg(test)]

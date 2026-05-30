@@ -40,6 +40,8 @@ use crate::ecs::core::schedule::system_box::{BoolSystem, SystemBox};
 use crate::ecs::core::schedule::system_config::SystemConfig;
 use crate::ecs::core::schedule::system_descriptor::SystemDescriptor;
 use crate::ecs::core::schedule::system_set::{SystemSet, SystemSetId};
+use crate::ecs::core::state::states::States;
+use crate::ecs::core::state::{StateEntry, apply_state_transition};
 use crate::ecs::core::system::into_system::IntoSystem;
 use crate::ecs::core::system::system::System;
 
@@ -55,6 +57,31 @@ const MAX_EXPANDED_EDGES: usize = 1 << 20;
 /// and `pred_count`, and corresponds to ~2 KB of `pred_remaining` data
 /// plus ~128 KB of conflict bitsets — both well within L2.
 pub const MAX_SYSTEMS_PER_SCHEDULE: usize = 1024;
+
+/// Phase 17 — one recorded state registration, drained in
+/// [`ScheduleBuilder::try_build`].
+///
+/// The builder cannot insert resources at `insert_state` call time (it holds
+/// no `&mut EcsMaster`), so it records the request here and realises it at
+/// `build`: `insert` performs `world.insert_state::<S>(initial)` (the captured
+/// `initial` is moved into the boxed thunk), and `apply` is the monomorphised
+/// [`apply_state_transition::<S>`] fn-pointer that becomes the built
+/// [`StateEntry::apply`]. `type_id` keys the M2 idempotency dedup (first
+/// registration of an `S` wins; later ones are no-ops); `type_name` is carried
+/// for diagnostics. Mirrors the Phase-16 record-then-realise set-condition path.
+struct StateRegistration {
+    /// `TypeId::of::<S>()` — the M2 dedup key (one entry per `S`).
+    type_id: TypeId,
+    /// `type_name::<S>()` — diagnostics, copied into the built [`StateEntry`].
+    type_name: &'static str,
+    /// Inserts `State<S>`/`NextState<S>`/`StateTransitionRecord<S>` into the
+    /// world, carrying the captured `initial`. Called once at `try_build`
+    /// (cold), consuming the boxed closure.
+    insert: Box<dyn FnOnce(&mut EcsMaster)>,
+    /// Monomorphised `apply_state_transition::<S>` coerced to a plain fn
+    /// pointer (a safe reified-fn coercion — no `unsafe`).
+    apply: fn(&mut EcsMaster, u32, bool),
+}
 
 /// Builder for [`Schedule`]. Construct via [`ScheduleBuilder::new`];
 /// chain `add_system(...).before(...).after(...)` calls; finalise with
@@ -98,6 +125,11 @@ pub struct ScheduleBuilder {
     /// (the `set_id_of_value` intern path guarantees config-id == member-id).
     /// See `PHASE-16-PLAN.md` §2.3 / §8.2.
     pub(crate) set_conditions: HashMap<SystemSetId, Vec<BoolSystem>>,
+
+    /// Phase 17 — recorded state-type registrations (`insert_state` /
+    /// `init_state`), drained in `try_build`. Deduped by `TypeId` so each `S`
+    /// yields exactly one `Schedule::state_entries` slot (M2 idempotency).
+    state_registrations: Vec<StateRegistration>,
 }
 
 impl ScheduleBuilder {
@@ -113,6 +145,7 @@ impl ScheduleBuilder {
             set_parents: HashMap::new(),
             set_names: HashMap::new(),
             set_conditions: HashMap::new(),
+            state_registrations: Vec::new(),
         }
     }
 
@@ -175,6 +208,69 @@ impl ScheduleBuilder {
             builder: self,
             set_id,
         }
+    }
+
+    /// Registers state type `S` with initial value `initial` (Phase 17 D7).
+    ///
+    /// Records the request; the resources (`State<S>`, `NextState<S>`,
+    /// `StateTransitionRecord<S>`) are inserted into the world at
+    /// [`build`](Self::build)/[`try_build`](Self::try_build) (the builder holds
+    /// no `&mut EcsMaster` until then), which also adds the schedule-side
+    /// [`StateEntry`] that fires the initial `OnEnter` and drains transitions
+    /// each frame.
+    ///
+    /// # Idempotency
+    /// Registering the **same** `S` more than once on the **same** builder is a
+    /// no-op: the first registration wins (a later `initial` value is ignored),
+    /// guaranteeing exactly one transition pass per `S` per frame. Dedup is by
+    /// `TypeId::of::<S>()`.
+    ///
+    /// # Initial-transition interaction
+    /// Calling `set_next_state::<S>(..)` (or otherwise queuing a `Pending`)
+    /// **before the first `Schedule::run`** suppresses the initial `OnEnter`:
+    /// the synthesized `none → initial` transition is overwritten in the same
+    /// first pass by the real `initial → requested` transition, so
+    /// `on_enter(initial)`-gated systems do NOT run — only `on_enter(requested)`
+    /// does. Queue the first transition from *inside* a system (it lands on the
+    /// next frame's pass) if you need the initial `OnEnter` to fire first.
+    pub fn insert_state<S: States>(&mut self, initial: S) -> &mut Self {
+        let type_id = TypeId::of::<S>();
+        // M2 idempotency: first registration of `S` wins. A duplicate would
+        // push a second `StateEntry`, so the transition pass would synthesize
+        // the initial `OnEnter` twice and drain `NextState<S>` twice per frame.
+        if self
+            .state_registrations
+            .iter()
+            .any(|r| r.type_id == type_id)
+        {
+            return self;
+        }
+        self.state_registrations.push(StateRegistration {
+            type_id,
+            type_name: std::any::type_name::<S>(),
+            insert: Box::new(move |world: &mut EcsMaster| world.insert_state::<S>(initial)),
+            apply: apply_state_transition::<S>,
+        });
+        self
+    }
+
+    /// Registers state type `S` using `S::default()` as the initial value
+    /// (Phase 17 D7). Shorthand for `insert_state(S::default())`.
+    ///
+    /// # Idempotency
+    /// Registering the **same** `S` more than once on the **same** builder is a
+    /// no-op (the first registration wins) — see [`insert_state`](Self::insert_state).
+    ///
+    /// # Initial-transition interaction
+    /// Calling `set_next_state::<S>(..)` (or otherwise queuing a `Pending`)
+    /// **before the first `Schedule::run`** suppresses the initial `OnEnter`:
+    /// the synthesized `none → initial` transition is overwritten in the same
+    /// first pass by the real `initial → requested` transition, so
+    /// `on_enter(initial)`-gated systems do NOT run — only `on_enter(requested)`
+    /// does. Queue the first transition from *inside* a system (it lands on the
+    /// next frame's pass) if you need the initial `OnEnter` to fire first.
+    pub fn init_state<S: States + Default>(&mut self) -> &mut Self {
+        self.insert_state(S::default())
     }
 
     /// Number of systems registered so far (pre-build).
@@ -246,6 +342,7 @@ impl ScheduleBuilder {
             set_parents,
             set_names,
             mut set_conditions,
+            state_registrations,
         } = self;
 
         // Step 1 — initialise every system. Allocation is allowed here
@@ -282,6 +379,31 @@ impl ScheduleBuilder {
                 cond.initialize(world);
                 debug_assert_condition_read_only(cond.as_ref());
             }
+        }
+
+        // Phase 17 — drain recorded state registrations (record-then-realise,
+        // mirroring the set-condition path). For each registered `S`: insert its
+        // backing resources into the world (the `insert` thunk carries the
+        // captured `initial`), then build a `StateEntry { apply, pending_initial:
+        // true, type_name }`. The list was already deduped by `TypeId` at
+        // `insert_state`, so there is exactly one entry per `S`. States are
+        // inserted now, before the schedule runs, so frame 1's transition pass
+        // can fire each state's initial `OnEnter` (D7). Empty for a no-state
+        // schedule ⇒ an empty `Vec` and the §6 pass early-outs.
+        let mut state_entries: Vec<StateEntry> = Vec::with_capacity(state_registrations.len());
+        for reg in state_registrations {
+            let StateRegistration {
+                type_name,
+                insert,
+                apply,
+                ..
+            } = reg;
+            insert(world);
+            state_entries.push(StateEntry {
+                apply,
+                pending_initial: true,
+                type_name,
+            });
         }
 
         // Step 2 — capture names BEFORE the descriptors move into later
@@ -531,6 +653,7 @@ impl ScheduleBuilder {
             system_conditions,
             system_gating_sets,
             set_conditions: set_conditions_table,
+            state_entries,
         })
     }
 }

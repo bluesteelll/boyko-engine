@@ -49,6 +49,7 @@ use crate::ecs::core::schedule::conflict_graph::{ConflictGraph, SystemIndex};
 use crate::ecs::core::schedule::executor_scratch::ExecutorScratch;
 use crate::ecs::core::schedule::system_box::{BoolSystem, SystemBox};
 use crate::ecs::core::schedule::system_set::SystemSetId;
+use crate::ecs::core::state::StateEntry;
 use crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell;
 
 /// Park timeout used between consecutive dispatch rounds when at least one
@@ -120,6 +121,18 @@ pub struct Schedule {
     /// `ExecutorScratch::set_cond_*` (indexed by the dense `slot` here), NOT
     /// here. Multiple rows for one `set_id` fold to an AND (§7.1).
     pub(crate) set_conditions: Vec<SetConditionEntry>,
+
+    // ── Phase 17 — state transitions (gated, off the executor hot path) ──────
+    /// Type-erased registry of state transitions, one [`StateEntry`] per
+    /// registered `State<S>` (`PHASE-17-PLAN.md` §4.2). EMPTY for a no-state
+    /// schedule ⇒ the once-per-frame state pass early-outs on a single
+    /// `is_empty()` compare (THE 0%-gate, §6.3), the twin of `has_condition`.
+    ///
+    /// Appended as the **LAST** field (M3): every pre-existing field keeps its
+    /// exact offset, so the hot prefix
+    /// (`pool → systems → conflict_graph → executor_scratch → has_condition`)
+    /// documented above is byte-for-byte unchanged.
+    pub(crate) state_entries: Vec<StateEntry>,
 }
 
 /// One set-condition row (Phase 16, `PHASE-16-PLAN.md` §2.4). `slot` is the
@@ -228,6 +241,20 @@ impl Schedule {
             entry.condition.set_change_ticks(prev_this_run, this_run);
         }
 
+        // Phase 17 — state transition pass. THE 0%-GATE: a no-state schedule has
+        // `state_entries` empty ⇒ one `is_empty()` compare, predicted-not-taken.
+        // Runs BEFORE the executor loop so `evaluate_ready_conditions` (Step 1.5)
+        // observes the freshly-written record the SAME frame. Reuses the
+        // frame-start `this_run` (no second bump). Holds the dispatcher's unique
+        // `&mut world` directly — `pool.install` is not entered yet, no worker
+        // exists ⇒ trivially race-free, no cell, no `unsafe`.
+        if !self.state_entries.is_empty() {
+            // `this_run` is the frame-start `Tick`; the erased apply pointers
+            // take the raw `u32` counter (it stamps `recorded_tick`, not a
+            // change-detection window).
+            self.run_state_transitions(world, this_run.get());
+        }
+
         if self.systems.is_empty() {
             return;
         }
@@ -259,6 +286,39 @@ impl Schedule {
             0,
             "invariant SCH6: pending_apply must be 0 at end of frame"
         );
+    }
+
+    /// Runs each registered state's transition apply once per frame
+    /// (`PHASE-17-PLAN.md` §6.1). Cold: at most `state_entries.len()` (~4)
+    /// monomorphised applies, each a handful of slab reads/writes to cached
+    /// `ResourceId`s. Gated by `state_entries.is_empty()` at the call site (THE
+    /// 0%-gate, §7), so a no-state schedule never reaches here.
+    ///
+    /// `fire_initial` is read from each entry's `pending_initial` flag and then
+    /// cleared, so the synthesized `none → initial` transition (D7) fires on the
+    /// FIRST `Schedule::run` only. Per-entry ⇒ a state shared by two schedules
+    /// fires its initial once per schedule.
+    ///
+    /// Holds the dispatcher's unique `&mut EcsMaster` (the call site runs before
+    /// `pool.install`, so no worker is live) — no cell, no `unsafe`.
+    #[cold]
+    fn run_state_transitions(&mut self, world: &mut EcsMaster, this_run: u32) {
+        // §9 invariant: the pass stamps `recorded_tick` with the frame-start
+        // `this_run`, so it must match the world's current tick exactly (no
+        // second bump between the bump site and here).
+        debug_assert!(
+            this_run == world.current_tick().get(),
+            "invariant: state pass `this_run` must equal the world's current tick"
+        );
+        for entry in self.state_entries.iter_mut() {
+            let fire_initial = entry.pending_initial;
+            entry.pending_initial = false;
+            (entry.apply)(world, this_run, fire_initial);
+            debug_assert!(
+                !entry.pending_initial,
+                "invariant: pending_initial must be cleared after the first run"
+            );
+        }
     }
 
     /// Number of systems in the schedule (post-topological-sort).

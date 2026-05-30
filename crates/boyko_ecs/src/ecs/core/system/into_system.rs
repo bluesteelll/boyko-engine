@@ -6,8 +6,11 @@
 //! (`S: System`) and the function-system blanket (`F: SystemParamFunction`).
 //!
 //! This module ships the trait declaration plus the [`IsFunctionSystem`]
-//! marker type. The blanket impls are wired in Step 2 (identity) and
-//! Step 3 (`FunctionSystem`); see plan §24 for the step ordering.
+//! marker type, the `FunctionSystem` blanket, and the `ExclusiveFunctionSystem`
+//! blanket. The IS2 identity blanket (`impl<S: System> IntoSystem<(), _, S>
+//! for S`) — long anticipated by the `Marker` disambiguation design — landed
+//! in Phase 17 so a pre-built `System` value (e.g. a state run condition
+//! returned as `impl System<Out = bool>`) can be passed to `.run_if(..)`.
 //!
 //! [`System`]: super::system::System
 
@@ -85,6 +88,32 @@ where
     #[inline]
     fn into_system(this: Self) -> Self::System {
         FunctionSystem::new(this)
+    }
+}
+
+/// Identity blanket (IS2): any concrete [`System`] is trivially convertible
+/// into itself, using the system type `S` as its own disambiguating
+/// `Marker`. This lets a pre-built `System` value (e.g. a condition returned
+/// as `impl System<Out = bool>`) be passed to APIs bound on
+/// `IntoSystem<(), _, _>` such as `.run_if(..)`.
+///
+/// # Coherence (IS2)
+/// Disjoint from the function-system blanket (marker `(IsFunctionSystem,
+/// Marker)`) and the exclusive blanket (marker `(ExclusiveSystemMarker,
+/// fn(&mut EcsMaster))`): the `Marker` type argument differs (`S` is a bare
+/// system type, never a 2-tuple), so these are distinct `IntoSystem`
+/// instantiations and cannot overlap. Additionally no type is simultaneously
+/// a `System` and a `SystemParamFunction`/`FnMut(&mut EcsMaster)` (a closure
+/// is the latter; only `FunctionSystem`/`ExclusiveFunctionSystem` wrappers
+/// are the former), so the impls are doubly disjoint.
+///
+/// [`System`]: super::system::System
+impl<S: System> IntoSystem<(), <S as System>::Out, S> for S {
+    type System = S;
+
+    #[inline]
+    fn into_system(this: Self) -> Self::System {
+        this
     }
 }
 
