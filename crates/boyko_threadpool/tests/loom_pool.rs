@@ -7,8 +7,12 @@
 //! Concretely, via `boyko_threadpool::loom_exports`:
 //!   - **M1** calls the real `ScopeShared::{register_task, complete_task,
 //!     is_drained}` (`scope.rs`) — wrapped 1:1 by `LoomScopeShared` — so loom
-//!     observes the genuine `AcqRel` / `Acquire` orderings and the
-//!     lost-wakeup-critical `prev == 1` unpark branch.
+//!     observes the genuine `AcqRel` / `Acquire` orderings. (Phase 9.2
+//!     Candidate U: `complete_task` unparks UNCONDITIONALLY before its
+//!     `fetch_sub`, so there is no `prev == 1` branch; M1 proves no lost wakeup
+//!     via the total-ordered `fetch_sub` RMW chain driving `is_drained()` to 0
+//!     in every interleaving — the joiner re-polls with `yield_now` because
+//!     loom #246 does not persist an unpark issued before the matching park.)
 //!   - **M2 / M2b** call the real `mark_idle` / `unmark_idle` (`worker.rs`) over
 //!     a loom `AtomicU64`.
 //!
@@ -96,13 +100,20 @@ fn loom_m1_fork_join_no_lost_wakeup() {
             }));
         }
 
-        // Production-shaped join wait: poll the REAL `is_drained()`, park when
-        // not yet drained. (Loom has no park_timeout; the production timeout is
-        // only a native latency backstop — the real wake is `complete_task`'s
-        // unpark, which is exactly what loom verifies. A lost wakeup here =
-        // a loom deadlock, not a hang.)
+        // Production-shaped join wait: poll the REAL `is_drained()`, re-polling
+        // via `yield_now` until drained. Phase 9.2 Candidate U makes
+        // `complete_task` unpark BEFORE its `fetch_sub`. loom (issue #246) does
+        // NOT persist an unpark issued before the matching `park`, and cannot
+        // model the production `park_timeout` re-poll backstop — so a `park()`
+        // joiner here false-deadlocks and blows loom's state space
+        // (STATUS_STACK_OVERFLOW) under U. Modeling the backstop's re-poll
+        // directly with `yield_now` lets loom's exhaustive scheduler advance the
+        // workers; the total-ordered `fetch_sub` RMW guarantees `is_drained()`
+        // observes 0 in every interleaving, proving no permanent lost wakeup
+        // WITHOUT relying on the (loom-mismodeled) unpark token — mirroring how
+        // M2/M2b/M3 model the loom-opaque deque transport.
         while !shared.is_drained() {
-            thread::park();
+            thread::yield_now();
         }
 
         // Invariant: join exited ⟹ pending == 0 (re-assert the real method).

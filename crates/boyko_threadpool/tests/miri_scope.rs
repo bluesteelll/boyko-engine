@@ -30,46 +30,43 @@
 //!      test asserts at least one body ran on a real worker
 //!      (`id < WORKER_ID_DISPATCHER`), i.e. NOT inline on the dispatcher.
 //!
-//! ## D5.1 OUTCOME (recorded 2026-05-30): outcome (ii) — TB over-approximation
+//! ## RESOLVED in Phase 9.2 — data-race-clean + Tree-Borrows-clean
 //!
-//! Under Tree Borrows these tests REPRODUCE the Phase-9-deferred protected-tag
-//! conflict at `scope.rs:96` (`ScopeShared::complete_task`'s `pending.fetch_sub`
-//! foreign-writes a tag the dispatcher holds as a protected `Reserved
-//! (conflicted)` `&ScopeShared` across `join_workers_until_drained`). The H4
-//! forcing works (the bodies run on `boyko-worker-0/1`, NOT inline), so this is
-//! a genuine cross-thread exercise of the target, not a vacuous pass.
+//! The landed `NonNull<ScopeShared>` field refactor (the joiner takes a by-value
+//! `*const ScopeShared`, so the dispatcher holds no protected `&ScopeShared`
+//! across the workers' `pending.fetch_sub` writes) cleared the Tree-Borrows
+//! protected-tag conflict that earlier `#[ignore]`d these tests. That refactor
+//! then unmasked a *separate, real* data race: the last completer read
+//! `ScopeShared.waker` (non-atomic) AFTER its `pending.fetch_sub -> 0`, while the
+//! dispatcher, seeing `pending == 0`, freed the box — Miri's data-race checker
+//! flagged the post-decrement `waker` read vs the dispatcher's dealloc.
 //!
-//! Per the D5.1 decision tree this is **outcome (ii), a TB over-approximation,
-//! NOT a soundness bug**, established by the decisive step (b): a
-//! `std::thread::scope`-equivalent harness with the SAME shape (parent holds
-//! `&Shared` as a *protected function argument* — the analog of
-//! `join_workers_until_drained(pool, &self.shared)` — while child threads
-//! foreign-write `pending` through a raw `*const Shared` reborrow) triggers the
-//! **identical** TB error under the same flags. Since `std`'s own scope is
-//! equally TB-flagged, boyko's `Scope::spawn` (structurally identical to
-//! `std::thread::scope`) is sound and TB is over-approximating both. The
-//! authoritative model would be Stacked Borrows — but this nightly's Miri
-//! (2026-05-22) has RETIRED SB (`-Zmiri-stacked-borrows` = "unknown unstable
-//! option"), so the std-scope equivalence is the authoritative evidence here.
+//! Phase 9.2 fixes that with **Candidate U (unpark-before-decrement)**:
+//! `ScopeShared::complete_task` now calls `self.waker.unpark()` BEFORE
+//! `self.pending.fetch_sub(1, AcqRel)`. While this task has not yet decremented,
+//! `pending >= 1`, so the box cannot have been freed — the `waker` read is sound;
+//! the `fetch_sub` is then the worker's LAST byte-access to the allocation. The
+//! box is freed UNCONDITIONALLY at the single `Scope::drop` site after the join
+//! (tied to scope END, never to an intermediate wave's `pending -> 0` — that is
+//! what makes it multi-drain-safe; an earlier `free_state` "second-swapper-frees"
+//! handshake was abandoned because it double-freed across the executor's
+//! per-wave `pending` oscillation). No handshake, no extra atomics, no
+//! per-scope flag — a net deletion. These tests are now un-`#[ignore]`d and pass
+//! under `-Zmiri-tree-borrows` at the default seed (data-race checker AND Tree
+//! Borrows clean). NOTE: under `-Zmiri-many-seeds`, ~1/16 adversarial seeds hit a
+//! *liveness* timeout (NOT UB) — Candidate U's lost-wakeup window, which Miri
+//! cannot recover from because it does not model the `park_timeout` backstop that
+//! recovers it on real hardware (bench-proven). All seeds are UB-clean.
 //!
-//! A zero-cost hardening that clears the TB flag was confirmed in the same
-//! harness: take the joiner's parameter as `*const ScopeShared` (raw) instead
-//! of `&ScopeShared`, so the dispatcher holds no protected borrow across the
-//! workers' writes (the exact D5.1 candidate fix; `std`-harness variant = clean
-//! under TB). That is a developer change (production code), out of scope for the
-//! tester; see the test report.
-//!
-//! Accordingly these tests are `#[ignore]`-by-default (kept compiling + ready to
-//! run): they will pass the moment the raw-pointer hardening lands, or under any
-//! Miri that re-exposes SB. Run them explicitly with `-- --ignored` to observe
-//! the documented TB over-approximation.
-//!
-//! ## Run (plan §5 / D5.1)
+//! ## Run (plan §5 / §12)
 //! ```bash
-//! # The TB run (reproduces the documented over-approximation; #[ignore]d):
-//! MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-disable-isolation -Zmiri-many-seeds=0..16" \
-//!   cargo +nightly miri test -p boyko-threadpool --test miri_scope -- --ignored
-//! # (D5.1 step (a) SB cross-check is N/A on this Miri — SB retired upstream.)
+//! # PRIMARY boyko surface — data-race checker AND Tree Borrows clean.
+//! # `-Zmiri-permissive-provenance` isolates crossbeam's exposed-provenance
+//! # int-to-ptr noise (third-party deque transport, out of the boyko proof
+//! # surface) from boyko's own `scope.rs` frames.
+//! MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-disable-isolation -Zmiri-many-seeds=0..16 \
+//!   -Zmiri-permissive-provenance" \
+//!   cargo +nightly miri test -p boyko-threadpool --test miri_scope
 //! ```
 #![cfg(miri)]
 
@@ -102,9 +99,6 @@ fn on_worker(id: u32) -> bool {
 /// run on different threads. Records which worker executed each body and the
 /// values written through borrowed stack slots.
 #[test]
-#[ignore = "TB over-approximation at scope.rs:96 (std::thread::scope equally \
-            TB-flagged; SB retired in this Miri); see module doc / D5.1 (ii). \
-            Run with -- --ignored to observe."]
 fn miri_scope_forced_cross_thread_transmute_is_clean() {
     let pool = ThreadPoolBuilder::new().num_threads(2).build();
 
@@ -153,8 +147,6 @@ fn miri_scope_forced_cross_thread_transmute_is_clean() {
 /// to wait on a gate the *second* task opens. Exercises the read-modify-write of
 /// borrowed stack data across the transmute on (at least sometimes) a worker.
 #[test]
-#[ignore = "TB over-approximation at scope.rs:96 (see module doc / D5.1 (ii)). \
-            Run with -- --ignored to observe."]
 fn miri_scope_read_modify_write_borrowed_stack() {
     let pool = ThreadPoolBuilder::new().num_threads(2).build();
 
@@ -185,8 +177,6 @@ fn miri_scope_read_modify_write_borrowed_stack() {
 /// `go` gate so several worker-side `as_ref` reborrows overlap the dispatcher's
 /// `&ScopeShared` in the join wait.
 #[test]
-#[ignore = "TB over-approximation at scope.rs:96 (see module doc / D5.1 (ii)). \
-            Run with -- --ignored to observe."]
 fn miri_scope_multiple_distinct_borrows() {
     let pool = ThreadPoolBuilder::new().num_threads(2).build();
 

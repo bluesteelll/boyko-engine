@@ -12,18 +12,22 @@
 //!   sentinel routing (TPN13 / EVT1).
 //! - `is_in_system_run` precondition reads.
 //!
-//! # Known cross-thread limitation (deferred)
+//! # Cross-thread Miri limitation — RESOLVED in Phase 9.2
 //!
-//! Multi-thread scheduler runs trigger a Tree Borrows
-//! protected-tag conflict in `boyko_threadpool::Scope::spawn` (see
-//! `crates/boyko_threadpool/src/scope.rs:193` — `shared.pending.fetch_sub`
-//! on the worker side foreign-writes a tag the dispatcher still holds as
-//! `Reserved (conflicted)`). This is a Wave 1 layer issue independent of
-//! Wave 7 testing; Phase 9.1 will revisit the `ScopeShared` raw-pointer
-//! protocol. Until then, Miri runs of the full `Schedule::run` path under
-//! a multi-worker pool are deferred — the documented invariants (SCH7,
-//! SEND1, SEND3, EXC1) are exercised by the production `cargo test`
-//! suite and the integration tests in `tests/scheduler_*.rs`.
+//! Multi-thread scheduler runs previously tripped a Tree Borrows
+//! protected-tag conflict in `boyko_threadpool::Scope` (the worker-side
+//! `pending.fetch_sub` foreign-wrote a tag the dispatcher held as a
+//! protected `Reserved (conflicted)` `&ScopeShared` across the join).
+//! Phase 9.2 landed the `NonNull<ScopeShared>` field refactor (the joiner
+//! takes a by-value `*const ScopeShared`, so no protected borrow spans the
+//! workers' writes), and Phase 9.2's Candidate U makes `complete_task`
+//! (`crates/boyko_threadpool/src/scope.rs`) call `waker.unpark()` BEFORE its
+//! `pending.fetch_sub` — so the `fetch_sub` is the worker's last allocation
+//! access and the box is freed only at the single `Scope::drop` site, after the
+//! join, clearing the data race the refactor unmasked.
+//! The dedicated multi-worker Miri gate now lives in
+//! `crates/boyko_threadpool/tests/miri_scope.rs` (boyko surface) and
+//! `crates/boyko_ecs/tests/miri_schedule_parallel.rs` (2-worker executor).
 //!
 //! The tests below are **safe** under Miri because they:
 //!   1. Use `num_threads(1)` AND only run schedules with zero systems

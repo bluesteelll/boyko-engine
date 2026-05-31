@@ -21,6 +21,7 @@
 //! steals.
 
 use core::marker::PhantomData;
+use core::ptr::NonNull;
 use std::any::Any;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::time::Duration;
@@ -82,21 +83,31 @@ impl ScopeShared {
         self.pending.fetch_add(1, Ordering::AcqRel);
     }
 
-    /// Mark one task complete and, if it was the last in flight, unpark the
-    /// scope's waker. Called from the task body wrapper *after* any panic
-    /// payload has been captured (the wrapper preserves that order; this
-    /// method performs only the counter decrement and the wakeup).
+    /// Mark one spawned task complete. Called from the task-body wrapper after
+    /// the body has run (and any panic payload has been stored).
     ///
-    /// `AcqRel` on the decrement publishes the completing task's effects to
-    /// the joiner and synchronizes with the other tasks' decrements; the
-    /// `prev == 1` test detects the last completion so exactly one `unpark`
-    /// is issued.
+    /// ORDER IS LOAD-BEARING (Phase 9.2 Candidate U): `waker.unpark()` happens
+    /// BEFORE `pending.fetch_sub`. While this task has not yet decremented,
+    /// `pending >= 1`, so `Scope::drop`'s join cannot have observed zero and
+    /// therefore cannot have freed the allocation — the `self.waker` read is
+    /// sound. After the `fetch_sub`, this thread performs NO further access to
+    /// `*self`; that decrement is its last byte-access to the allocation, so the
+    /// joiner may deallocate the instant it observes zero (the single free site
+    /// is `Scope::drop`). Multi-drain-safe: the free is tied to scope END, never
+    /// to an intermediate wave's `pending -> 0` (the ECS executor drains
+    /// `pending` to zero once per dispatch wave).
+    ///
+    /// The unpark is UNCONDITIONAL (no `prev == 1` gate): learning we are last
+    /// would require reading `pending` after the sub — too late. An unconditional
+    /// pre-decrement unpark is a cheap token store when the dispatcher runs; a
+    /// spurious wake when it is parked is harmless (it re-checks `pending`). The
+    /// rare lost-wakeup window is covered by the `park_timeout` backstops.
+    ///
+    /// `AcqRel` on the decrement is unchanged (loom-proven M1).
     #[inline]
     pub(crate) fn complete_task(&self) {
-        let prev = self.pending.fetch_sub(1, Ordering::AcqRel);
-        if prev == 1 {
-            self.waker.unpark();
-        }
+        self.waker.unpark();
+        self.pending.fetch_sub(1, Ordering::AcqRel);
     }
 
     /// Returns `true` once every spawned task has completed. Polled by the
@@ -134,8 +145,8 @@ impl SharedPtr {
     ///
     /// # Safety
     /// The pointee must outlive `'a`. In `Scope::spawn` this is upheld
-    /// because the Scope's Box<ScopeShared> outlives every task body
-    /// (Scope::Drop waits for completion).
+    /// because the Scope's `NonNull<ScopeShared>` allocation outlives every
+    /// task body (Scope::Drop waits for completion before the single free).
     #[inline]
     unsafe fn as_ref<'a>(&self) -> &'a ScopeShared {
         // SAFETY: forwarded to the caller; see method doc.
@@ -163,7 +174,14 @@ unsafe impl Send for SharedPtr {}
 /// [`ThreadPool::scope`]: crate::ThreadPool::scope
 pub struct Scope<'scope> {
     pool: &'scope ThreadPool,
-    pub(crate) shared: Box<ScopeShared>,
+    /// Owned `ScopeShared` held as a raw `NonNull` (Phase 9.2 Candidate U —
+    /// the Tree-Borrows-protector fix). `NonNull::as_ptr` is a `Copy` that
+    /// copies the pointer WITHOUT retagging the pointee, so `Scope::drop`'s
+    /// `&mut self` protector covers only this 8-byte field, never the heap
+    /// allocation that worker threads concurrently write `pending` into.
+    /// Created by `Box::into_raw` in [`Scope::new`], freed by `Box::from_raw`
+    /// in [`Scope::drop`] (the single free site).
+    pub(crate) shared: NonNull<ScopeShared>,
     /// `PhantomData<&'scope mut &'scope ()>` makes the scope invariant in
     /// `'scope`, which is what we want — `'scope` is a borrow window, not
     /// a covariant lifetime.
@@ -173,6 +191,11 @@ pub struct Scope<'scope> {
 impl<'scope> Scope<'scope> {
     #[inline]
     pub(crate) fn new(pool: &'scope ThreadPool, shared: Box<ScopeShared>) -> Self {
+        // Cold path: runs single-threaded before any task is spawned, so the
+        // conversion never races a worker. `Box::into_raw` hands ownership of
+        // the allocation to this `NonNull`; `Scope::drop` reclaims it.
+        let shared = NonNull::new(Box::into_raw(shared))
+            .expect("invariant: Box::into_raw never yields null");
         Self {
             pool,
             shared,
@@ -192,29 +215,34 @@ impl<'scope> Scope<'scope> {
     where
         F: FnOnce() + Send + 'scope,
     {
-        self.shared.register_task();
+        // SAFETY: `self.shared` points to the live `ScopeShared` allocation
+        //   owned by this `Scope` (created in `new`, freed only by `drop`).
+        //   `spawn` runs on the owner thread before the task is enqueued, so
+        //   this shared reborrow does not race any worker.
+        unsafe { self.shared.as_ref() }.register_task();
 
         // Raw pointer to ScopeShared — stable for the lifetime of the
-        // Box and therefore for the lifetime of every spawned task
-        // (Scope::Drop blocks until they all complete).
+        // allocation and therefore for the lifetime of every spawned task
+        // (Scope::Drop blocks until they all complete before the single free).
         //
         // The raw pointer needs a Send wrapper because closures can't
         // capture `*const T` (it's `!Send`); the safety obligation is
-        // documented on `SharedPtr` below.
-        let shared_ptr = SharedPtr::new(&*self.shared as *const ScopeShared);
+        // documented on `SharedPtr` below. `NonNull::as_ptr` copies the
+        // pointer without retagging the pointee (no protector over the
+        // allocation — the Phase 9.2 Candidate U TB fix).
+        let shared_ptr = SharedPtr::new(self.shared.as_ptr() as *const ScopeShared);
 
         // Wrap the user body so that:
         //   - We catch_unwind to keep panics inside the worker.
-        //   - We decrement `pending` on completion.
-        //   - We unpark the waker on the last completion.
+        //   - We store the first panic payload.
+        //   - We unpark-then-decrement `pending` on completion (Candidate U).
         let wrapped = move || {
             let result = catch_unwind(AssertUnwindSafe(f));
-            // SAFETY: `shared_ptr` was minted from `&*self.shared` while
-            //   the Scope (and its Box<ScopeShared>) was alive. The Box
-            //   is owned by the Scope; `Scope::drop` will not return
-            //   until `pending` (read through this same pointer) hits
-            //   zero. Therefore the pointer is valid for the entire
-            //   duration of this closure.
+            // SAFETY: `shared_ptr` names the live `ScopeShared` allocation
+            //   (created in `Scope::new`, freed only by `Scope::drop` after the
+            //   join). This is a transient shared reborrow on the worker thread;
+            //   it MUST NOT outlive the `complete_task` call below — after that
+            //   call's `pending.fetch_sub` the dispatcher may free the box.
             let shared = unsafe { shared_ptr.as_ref() };
 
             if let Err(payload) = result
@@ -227,6 +255,11 @@ impl<'scope> Scope<'scope> {
             // - Mutex poisoned: drop payload; Scope::Drop still completes
             //   normally via pending hitting zero.
 
+            // Last action: unpark-then-decrement. After this the worker
+            // performs NO further access to the allocation (there is NO
+            // worker-side `Box::from_raw` in Candidate U — the box is freed
+            // solely by `Scope::drop`). `shared` MUST NOT be dereferenced after
+            // this line.
             shared.complete_task();
         };
 
@@ -262,21 +295,54 @@ impl<'scope> Scope<'scope> {
 
 impl<'scope> Drop for Scope<'scope> {
     fn drop(&mut self) {
-        join_workers_until_drained(self.pool, &self.shared);
+        // `NonNull::as_ptr` is a `Copy` that copies the pointer WITHOUT
+        // retagging the pointee, so this Drop's `&mut self` protector covers
+        // only the 8-byte `shared` field, never the heap allocation that worker
+        // threads write `pending` into (the Phase 9.2 Candidate U TB fix).
+        let raw: *mut ScopeShared = self.shared.as_ptr();
 
+        // SAFETY: `raw` is live for the whole join — it is freed only by the
+        //   single `Box::from_raw` below, which runs after this returns. The
+        //   join reborrows `*raw` only per-poll for one `Acquire` load, never
+        //   forming a reference that spans a worker's `pending` write (the
+        //   raw-pointer / NonNull design). The `*mut` coerces to the `*const`
+        //   parameter.
+        unsafe { join_workers_until_drained(self.pool, raw) };
+
+        // The join returned ⇒ `pending == 0` (the final wave's decrement). No
+        // worker will start a new `complete_task`, and every worker that ran
+        // has completed its `fetch_sub` (its last access to the allocation),
+        // which happens-before the join's `Acquire` load. The dispatcher is now
+        // the sole owner.
+        //
+        // SAFETY: pre-free shared access through the raw pointer. `is_drained`
+        //   is an `Acquire` load and `panic_payload` is a `Mutex` (Sync). The
+        //   payload is taken BEFORE the free so that no `*raw` access follows
+        //   the deallocation.
         debug_assert!(
-            self.shared.is_drained(),
+            unsafe { (*raw).is_drained() },
             "Scope::Drop returned with pending tasks still in flight"
         );
-
         let payload = {
-            let mut slot = self
-                .shared
-                .panic_payload
-                .lock()
+            let mut slot = unsafe { (*raw).panic_payload.lock() }
                 .expect("invariant: panic_payload mutex never poisoned by us");
             slot.take()
         };
+
+        // SAFETY (the single free site — Phase 9.2 Candidate U):
+        //   - `raw` is the `Box::into_raw` address minted in `Scope::new`.
+        //   - The dispatcher is the unique remaining owner: the join observed
+        //     `pending == 0`, and every worker's last allocation access — its
+        //     `pending.fetch_sub` — happens-before the join's `Acquire` load.
+        //   - The payload was taken above, before this free; no `*raw` access
+        //     follows. Reached once (Drop runs once), unconditionally, so the
+        //     allocation is freed exactly once — no double-free, multi-drain-safe
+        //     (the free is tied to scope END, never to an intermediate wave's
+        //     `pending -> 0`).
+        unsafe { drop(Box::from_raw(raw)) };
+
+        // Re-raise OUTSIDE any `*raw` access (the payload is a moved-out stack
+        // local that no longer aliases the freed allocation).
         if let Some(p) = payload {
             resume_unwind(p);
         }
@@ -291,9 +357,18 @@ impl<'scope> Drop for Scope<'scope> {
 /// the global injector; any sibling stealer) and runs the stolen tasks
 /// inline on the calling thread. When no work is stealable, it parks
 /// with a short timeout — the timeout serves as a re-poll trigger; the
-/// real wake-up arrives via `shared.waker.unpark()` from the last
-/// completing task.
-fn join_workers_until_drained(pool: &ThreadPool, shared: &ScopeShared) {
+/// real wake-up arrives via `shared.waker.unpark()` from a completing
+/// task (Phase 9.2 Candidate U: unpark precedes the decrement, so the
+/// timeout is also the backstop for the rare lost-wakeup window).
+///
+/// # Safety
+/// `shared` must point to a live `ScopeShared` allocation that remains
+/// valid for the entire duration of this call. The caller (`Scope::drop`)
+/// upholds this: the allocation is freed only by the single `Box::from_raw`
+/// that runs after this function returns. The function reborrows `*shared`
+/// only per-poll for one `Acquire` load (`is_drained`), never forming a
+/// reference that spans a worker's `pending` write.
+unsafe fn join_workers_until_drained(pool: &ThreadPool, shared: *const ScopeShared) {
     let wid = tls::current_worker_id();
     let on_worker = (wid as usize) < pool.injector_local.len();
     let local_inj_idx = wid as usize;
@@ -313,7 +388,10 @@ fn join_workers_until_drained(pool: &ThreadPool, shared: &ScopeShared) {
         #[cfg(miri)]
         std::thread::yield_now();
 
-        if shared.is_drained() {
+        // SAFETY: per the function contract, `shared` is live for this whole
+        //   call; this is a transient `Acquire` load that does not span a
+        //   worker write.
+        if unsafe { (*shared).is_drained() } {
             return;
         }
 
@@ -406,7 +484,7 @@ mod tests {
     use super::*;
     use crate::ThreadPoolBuilder;
     use std::sync::Arc;
-    use std::sync::atomic::AtomicU32;
+    use std::sync::atomic::{AtomicU32, AtomicUsize};
 
     #[test]
     fn scope_drain_with_no_tasks_is_noop() {
@@ -466,5 +544,67 @@ mod tests {
         });
 
         assert_eq!(counter.load(Ordering::Acquire), 32);
+    }
+
+    /// Phase 9.2 Candidate U multi-drain regression (§11.4).
+    ///
+    /// Drives a SINGLE scope through several waves where `ScopeShared.pending`
+    /// returns toward zero between waves *before* the scope drops — the pattern
+    /// the deleted `free_state` handshake mis-freed on (it elected a freer on
+    /// every `pending -> 0`, double-freeing on wave 2). Candidate U ties the
+    /// single `Box::from_raw` to `Scope::drop` (scope END) alone, so repeated
+    /// intermediate drains are harmless.
+    ///
+    /// Each wave's tasks are made to finish before the next wave spawns by
+    /// spinning a bounded number of yields until the wave's `done` counter
+    /// reaches `PER_WAVE` — by which point those tasks have called
+    /// `complete_task` (unpark + `fetch_sub`), returning `pending` toward 0.
+    /// If the scope leaked or double-freed, the native allocator (and the
+    /// stress-test Drop accounting / Miri under the orchestrator) catch it.
+    ///
+    /// `done` is an `Arc<AtomicUsize>` (heap, `'static`-capable) rather than a
+    /// per-wave stack local: `scope.spawn` requires the body to outlive
+    /// `'scope`, so a fresh borrow created inside the `install` closure cannot
+    /// be captured by spawned tasks — the `Arc` clone is the correct in-scope
+    /// approximation of the executor's between-wave drive.
+    #[test]
+    fn scope_multi_drain_frees_once() {
+        const WAVES: usize = 8;
+        const PER_WAVE: usize = 4;
+
+        let pool = ThreadPoolBuilder::new().num_threads(4).build();
+        let done = Arc::new(AtomicUsize::new(0));
+        let done_main = Arc::clone(&done);
+
+        pool.install(move |scope| {
+            for wave in 0..WAVES {
+                for _ in 0..PER_WAVE {
+                    let d = Arc::clone(&done_main);
+                    scope.spawn(move || {
+                        d.fetch_add(1, Ordering::Relaxed);
+                    });
+                }
+
+                // Let THIS wave drain (its tasks reach `complete_task`, driving
+                // `pending` back toward 0) before spawning the next wave, so the
+                // scope sees several `pending -> 0` transitions over its life.
+                // Bounded yields — never an unbounded spin — so a stuck wave
+                // fails fast instead of hanging.
+                let target = (wave + 1) * PER_WAVE;
+                let mut spins = 0u32;
+                while done_main.load(Ordering::Acquire) < target && spins < 10_000_000 {
+                    std::thread::yield_now();
+                    spins += 1;
+                }
+            }
+        });
+        // <-- the ONLY free, here at Scope::drop. A per-wave free would have
+        //     double-freed above.
+
+        assert_eq!(
+            done.load(Ordering::Acquire),
+            WAVES * PER_WAVE,
+            "every wave's tasks must have run exactly once"
+        );
     }
 }

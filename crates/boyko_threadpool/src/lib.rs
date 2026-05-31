@@ -114,8 +114,9 @@ pub mod loom_exports {
             self.0.register_task();
         }
 
-        /// Forwards to the real [`ScopeShared::complete_task`] (`fetch_sub`
-        /// `AcqRel` + `prev==1` unpark — the lost-wakeup-critical branch).
+        /// Forwards to the real [`ScopeShared::complete_task`] (Phase 9.2
+        /// Candidate U: unconditional `waker.unpark()` BEFORE the `fetch_sub`
+        /// `AcqRel` — the wake edge loom verifies for no-lost-wakeup).
         #[inline]
         pub fn complete_task(&self) {
             self.0.complete_task();
