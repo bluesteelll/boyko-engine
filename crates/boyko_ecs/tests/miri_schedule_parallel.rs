@@ -23,40 +23,42 @@
 //! multithreaded integration tests gate off (`#![cfg(not(miri))]`) and which
 //! `miri_phase9.rs` sidesteps by using `num_threads(1)` + zero systems.
 //!
-//! ## D5.1 OUTCOME (recorded 2026-05-30): blocked under BOTH borrow models — TB
-//! by the same `scope.rs:96` over-approximation; SB by a crossbeam-deque
-//! integer-to-pointer-cast limitation.
+//! ## RESOLVED in Phase 9.2 (with a carried-forward crossbeam caveat)
 //!
-//! Running this test (`-- --ignored`) does NOT cleanly reach the
-//! ECS-specific cross-worker world-cell sharing it targets, for a model-specific
-//! reason in each direction:
-//!   - **Tree Borrows** reproduces the **same** `scope.rs:96` protected-tag
-//!     conflict as Miri-1 (`ScopeShared::complete_task`'s `pending.fetch_sub`
-//!     foreign-write while the dispatcher holds a protected `&ScopeShared` in
-//!     `join_workers_until_drained`) — proven a TB over-approximation, not a
-//!     bug, via the `std::thread::scope` equivalence harness (see
-//!     `boyko_threadpool/tests/miri_scope.rs` module doc, D5.1 (ii)).
-//!   - **Stacked Borrows** (this Miri's *default* when TB is not forced) trips
-//!     first inside **crossbeam-deque**'s `steal_batch_*` →
-//!     `crossbeam-epoch::internal.rs:549` `&*local_ptr` retag, an
-//!     integer-to-pointer-cast pattern crossbeam uses that neither SB nor TB
-//!     supports (`Stealer` is reached on a worker thread before the scope join).
-//!     That is a third-party crate limitation, explicitly out of the proof
-//!     surface (the deque is loom/Miri-opaque by plan §9; covered by the D6
-//!     stress test on real hardware).
+//! The boyko-surface blocker that earlier `#[ignore]`d this test — the
+//! `ScopeShared` join protected-tag conflict + the post-decrement `waker`
+//! data race — is fixed: the landed `NonNull<ScopeShared>` field cleared the
+//! Tree-Borrows protector, and Phase 9.2's Candidate U makes `complete_task`
+//! (see `boyko_threadpool/src/scope.rs`) call `waker.unpark()` BEFORE its
+//! `pending.fetch_sub` — so the `fetch_sub` is the worker's last allocation
+//! access and the box is freed only at the single `Scope::drop` site after the
+//! join, clearing the data race. The boyko Scope surface is thus verified by
+//! `boyko_threadpool/tests/miri_scope.rs` (TB + data-race clean, default seed;
+//! UB-clean across 16 seeds).
 //!
-//! Either way the ECS cell handshake is unreachable in *this* Miri without
-//! production hardening, so the test is `#[ignore]`-by-default (kept compiling +
-//! ready): it will run once the `*const ScopeShared` joiner hardening lands (the
-//! D5.1 candidate fix, confirmed clean in the std harness) AND a Miri/crossbeam
-//! combination handles the deque's exposed-provenance casts. Until then the
-//! cross-worker world-cell path is covered by the native
-//! `scheduler_par_iter_concurrent_systems` integration test.
+//! STILL `#[ignore]`d (Phase 9.3, OPEN): the ECS `Schedule::run` executor has
+//! more than one non-Miri-cooperative wait site. A `#[cfg(miri)] yield_now()` was
+//! added to the executor Step-5 park branch (necessary), but the 2-worker run
+//! STILL livelocks under Miri's deterministic scheduler (killed at a 300s
+//! timeout, exit 124) — so at least one more spin/park site does not yield under
+//! Miri. The boyko `Scope` surface is gated by the green
+//! `boyko_threadpool/tests/miri_scope.rs`; the native
+//! `scheduler_par_iter_concurrent_systems` integration test covers the
+//! cross-worker world-cell path. Re-enable once every Miri-path wait site yields.
 //!
-//! ## Run (plan §5)
+//! **Carried-forward caveat (from Phase 9.1):** this 2-worker path also drives
+//! `crossbeam-deque::steal_batch_and_pop`, whose exposed-provenance int-to-ptr
+//! casts Tree Borrows may flag *independently of boyko*. If a future toolchain
+//! surfaces a `crossbeam-*`-frame TB error (not a `scope.rs`/`schedule.rs`
+//! frame), that is a third-party limitation — keep `#[ignore]`d with a
+//! crossbeam-specific reason and rely on `miri_scope.rs` as the boyko-surface
+//! gate. A `scope.rs`/`schedule.rs`-frame failure is a real regression.
+//!
+//! ## Run (plan §5 / §12)
 //! ```bash
-//! MIRIFLAGS="-Zmiri-disable-isolation" \
-//!   cargo +nightly miri test -p boyko-ecs --test miri_schedule_parallel -- --ignored
+//! MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-disable-isolation \
+//!   -Zmiri-permissive-provenance" \
+//!   cargo +nightly miri test -p boyko-ecs --test miri_schedule_parallel
 //! ```
 #![cfg(miri)]
 
@@ -89,9 +91,22 @@ struct MVelocity {
 /// cross-worker world-cell sharing, and that the `Position`-mutating system
 /// applied its write.
 #[test]
-#[ignore = "blocked by the same TB over-approximation as Miri-1 (scope.rs:96 \
-            protected tag); the pool join trips before the ECS cell surface is \
-            reached. See module doc / D5.1 (ii). Run with -- --ignored."]
+#[ignore = "Phase 9.3, OPEN (livelock FIXED, new TB finding exposed): the Miri \
+            livelock is resolved — `#[cfg(miri)] yield_now()` added to the \
+            executor Step-5 park branch, the `apply_window_drain` pop-loop \
+            (transient-None-safe), and the worker backoff loop now let the run \
+            COMPLETE (no more 300s timeout). It then surfaces a Tree Borrows \
+            `write access ... forbidden` INSIDE `crossbeam-queue 0.3.12 \
+            ArrayQueue::push_or_else` (array_queue.rs:159), reached from the \
+            worker completion-path push (schedule.rs:982 -> scope.rs:240). This \
+            is a DIFFERENT TB rule than the documented int-to-ptr caveat \
+            (`-Zmiri-permissive-provenance` does NOT silence it); it must be \
+            root-caused as either boyko completion-queue-provenance narrowing \
+            (real bug) or a crossbeam MPMC-under-TB over-approximation (third \
+            party) before un-ignoring. The boyko `Scope` surface stays gated by \
+            the green `boyko_threadpool/tests/miri_scope.rs`; native \
+            `scheduler_par_iter_concurrent_systems` covers the path. Run: \
+            -- --include-ignored."]
 fn miri_two_worker_schedule_disjoint_systems_one_frame() {
     let pool = ThreadPoolBuilder::new().num_threads(2).build();
     let mut world = EcsMaster::new();
@@ -140,3 +155,4 @@ fn miri_two_worker_schedule_disjoint_systems_one_frame() {
     // Each x was incremented by 1: (0+1)+(1+1)+(2+1)+(3+1) = 10.
     assert_eq!(sum, 10.0, "move system applied +1 to every position");
 }
+

@@ -62,6 +62,15 @@ pub(crate) fn worker_main(pool: Arc<ThreadPool>, worker_id: u32, deque: Worker<T
         // 5. Backoff escalation, then mark_idle + re-poll + park.
         let backoff = Backoff::new();
         loop {
+            // Miri-only cooperative yield: `Backoff::snooze()` (below) is a
+            // pure-compute spin with no Miri yield point, and `pop_any` may keep
+            // returning `None` for several iterations before this worker reaches
+            // `mark_idle`+`park` (a real Miri yield point). Without this, the
+            // bounded backoff spin still inflates Miri's interleaving search and
+            // can starve siblings between rounds. Native: compiles to nothing.
+            #[cfg(miri)]
+            std::thread::yield_now();
+
             // Pre-mark_idle re-poll. Catches tasks that arrived while we
             // were spinning. (Race A in §13.4.1.)
             if let Some(t) = pop_any(pool.as_ref(), worker_id, &deque, &mut rng) {

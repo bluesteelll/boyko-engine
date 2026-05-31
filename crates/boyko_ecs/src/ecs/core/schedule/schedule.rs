@@ -36,6 +36,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+#[cfg(not(miri))]
 use std::time::Duration;
 
 use boyko_threadpool::{Scope, ThreadPool};
@@ -58,6 +59,7 @@ use crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell;
 /// The completing worker unparks the dispatcher via `ScopeShared::waker`;
 /// the timeout is the backstop for the case where the wake-up raced ahead
 /// of the dispatcher's `park_timeout` call. 100 µs matches plan §5.4.5.1.
+#[cfg(not(miri))]
 const PARK_TIMEOUT: Duration = Duration::from_micros(100);
 
 /// Built schedule — a snapshot of `n` systems, their conflict graph, and
@@ -458,6 +460,16 @@ impl Schedule {
             // for the case where the wake-up raced ahead of our park
             // call — a benign no-op spin.
             if dispatched == 0 && self.executor_scratch.running.count_ones(..) > 0 {
+                // Under Miri the scheduler is cooperative and does not advance
+                // other threads across a `park_timeout` the way it does across
+                // an explicit yield; without this, the dispatcher spins this
+                // branch forever while the workers never get scheduled
+                // (livelock). Yield so Miri can run the workers to completion.
+                // Compiles to nothing natively (same discipline as
+                // `boyko_threadpool::scope::join_workers_until_drained`).
+                #[cfg(miri)]
+                std::thread::yield_now();
+                #[cfg(not(miri))]
                 std::thread::park_timeout(PARK_TIMEOUT);
             }
         }
@@ -479,11 +491,25 @@ impl Schedule {
 
         let mut drained = 0usize;
         while drained < target {
-            let idx = self
-                .executor_scratch
-                .completion_queue
-                .pop()
-                .expect("invariant SCH7: pending_apply counted; completion must be present");
+            // `pending_apply` (the `target` above) is incremented by the worker
+            // *after* its `completion_queue.push` (see the completion path), and
+            // this drain reads `target` with `Acquire`, which synchronizes-with
+            // that `Release` `fetch_add` — so a counted completion is always
+            // visible to `pop()` here on real hardware (the `None` arm is
+            // unreachable natively; it compiles to a never-taken retry, zero
+            // steady-state cost). Under Miri's cooperative scheduler the worker's
+            // push may not yet be observable on this step (and `ArrayQueue::pop`'s
+            // own internal `Backoff` spin has no Miri yield, being third-party),
+            // so yield to let the worker run instead of spinning — without this,
+            // the dispatcher livelocks here on the mandatory drain path.
+            let idx = match self.executor_scratch.completion_queue.pop() {
+                Some(idx) => idx,
+                None => {
+                    #[cfg(miri)]
+                    std::thread::yield_now();
+                    continue;
+                }
+            };
             let i = idx.0 as usize;
 
             self.executor_scratch.running.set(i, false);
