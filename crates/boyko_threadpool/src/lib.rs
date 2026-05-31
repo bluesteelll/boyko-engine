@@ -58,7 +58,9 @@ mod tls;
 mod worker;
 
 pub use scope::Scope;
-pub use thread_pool::{MAX_WORKERS, TaskHandle, ThreadPool, ThreadPoolBuilder, WorkerHandle};
+pub use thread_pool::{
+    MAX_WORKERS, PoolInner, TaskHandle, ThreadPool, ThreadPoolBuilder, WorkerHandle,
+};
 pub use tls::{
     InSystemRunGuard, WORKER_ID_DISPATCHER, WORKER_ID_UNATTACHED, current_worker_id,
     current_worker_id_or_dispatcher_lane, is_in_system_run, try_with_active_pool,

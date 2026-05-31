@@ -30,7 +30,7 @@ use crossbeam_deque::{Steal, Worker};
 use crossbeam_utils::{Backoff, CachePadded};
 
 use crate::sync::{AtomicUsize, Mutex, Ordering, Thread};
-use crate::thread_pool::{TaskHandle, ThreadPool};
+use crate::thread_pool::{PoolInner, TaskHandle};
 use crate::tls;
 use crate::worker::{push_task, unpark_one_idle};
 
@@ -173,7 +173,11 @@ unsafe impl Send for SharedPtr {}
 /// [`ThreadPool::install`]: crate::ThreadPool::install
 /// [`ThreadPool::scope`]: crate::ThreadPool::scope
 pub struct Scope<'scope> {
-    pool: &'scope ThreadPool,
+    /// The pool's worker-shared state this scope spawns into. Borrowed for
+    /// `'scope` (Phase 9.3b decision E: `&PoolInner`, not the handle — the
+    /// handle keeps `inner` alive across the `install`/`scope` frame that
+    /// borrows it, so this reference is valid for `'scope`).
+    inner: &'scope PoolInner,
     /// Owned `ScopeShared` held as a raw `NonNull` (Phase 9.2 Candidate U —
     /// the Tree-Borrows-protector fix). `NonNull::as_ptr` is a `Copy` that
     /// copies the pointer WITHOUT retagging the pointee, so `Scope::drop`'s
@@ -190,14 +194,14 @@ pub struct Scope<'scope> {
 
 impl<'scope> Scope<'scope> {
     #[inline]
-    pub(crate) fn new(pool: &'scope ThreadPool, shared: Box<ScopeShared>) -> Self {
+    pub(crate) fn new(inner: &'scope PoolInner, shared: Box<ScopeShared>) -> Self {
         // Cold path: runs single-threaded before any task is spawned, so the
         // conversion never races a worker. `Box::into_raw` hands ownership of
         // the allocation to this `NonNull`; `Scope::drop` reclaims it.
         let shared = NonNull::new(Box::into_raw(shared))
             .expect("invariant: Box::into_raw never yields null");
         Self {
-            pool,
+            inner,
             shared,
             _phantom: PhantomData,
         }
@@ -289,7 +293,7 @@ impl<'scope> Scope<'scope> {
         let body_static: Box<dyn FnOnce() + Send + 'static> =
             unsafe { core::mem::transmute(body_scoped) };
 
-        push_task(self.pool, TaskHandle::new(body_static));
+        push_task(self.inner, TaskHandle::new(body_static));
     }
 }
 
@@ -307,7 +311,7 @@ impl<'scope> Drop for Scope<'scope> {
         //   forming a reference that spans a worker's `pending` write (the
         //   raw-pointer / NonNull design). The `*mut` coerces to the `*const`
         //   parameter.
-        unsafe { join_workers_until_drained(self.pool, raw) };
+        unsafe { join_workers_until_drained(self.inner, raw) };
 
         // The join returned ⇒ `pending == 0` (the final wave's decrement). No
         // worker will start a new `complete_task`, and every worker that ran
@@ -368,9 +372,9 @@ impl<'scope> Drop for Scope<'scope> {
 /// that runs after this function returns. The function reborrows `*shared`
 /// only per-poll for one `Acquire` load (`is_drained`), never forming a
 /// reference that spans a worker's `pending` write.
-unsafe fn join_workers_until_drained(pool: &ThreadPool, shared: *const ScopeShared) {
+unsafe fn join_workers_until_drained(inner: &PoolInner, shared: *const ScopeShared) {
     let wid = tls::current_worker_id();
-    let on_worker = (wid as usize) < pool.injector_local.len();
+    let on_worker = (wid as usize) < inner.injector_local.len();
     let local_inj_idx = wid as usize;
 
     // A temporary deque to receive batches stolen from injectors/sibling
@@ -398,7 +402,7 @@ unsafe fn join_workers_until_drained(pool: &ThreadPool, shared: *const ScopeShar
         // 1. If we're on a worker, drain inner-spawn tasks targeted at us.
         if on_worker
             && let Some(t) =
-                drain_one(|| pool.injector_local[local_inj_idx].steal_batch_and_pop(&scratch))
+                drain_one(|| inner.injector_local[local_inj_idx].steal_batch_and_pop(&scratch))
         {
             t.run();
             drain_scratch(&scratch);
@@ -407,7 +411,7 @@ unsafe fn join_workers_until_drained(pool: &ThreadPool, shared: *const ScopeShar
         }
 
         // 2. Global injector.
-        if let Some(t) = drain_one(|| pool.injector_global.steal_batch_and_pop(&scratch)) {
+        if let Some(t) = drain_one(|| inner.injector_global.steal_batch_and_pop(&scratch)) {
             t.run();
             drain_scratch(&scratch);
             backoff.reset();
@@ -415,7 +419,7 @@ unsafe fn join_workers_until_drained(pool: &ThreadPool, shared: *const ScopeShar
         }
 
         // 3. Sibling steal — any worker, any deque.
-        let stolen = try_steal_any(pool, &scratch);
+        let stolen = try_steal_any(inner, &scratch);
         if let Some(t) = stolen {
             t.run();
             drain_scratch(&scratch);
@@ -430,7 +434,7 @@ unsafe fn join_workers_until_drained(pool: &ThreadPool, shared: *const ScopeShar
             // pushed inner tasks into its own local injector may not
             // have raced through unpark_one_idle yet, but the work IS
             // visible — letting that worker grab it is also valid.
-            unpark_one_idle(pool);
+            unpark_one_idle(inner);
             std::thread::park_timeout(Duration::from_micros(50));
             backoff.reset();
         } else {
@@ -450,8 +454,8 @@ fn drain_scratch(scratch: &Worker<TaskHandle>) {
 }
 
 /// Try to steal a task from any sibling deque, ignoring nothing.
-fn try_steal_any(pool: &ThreadPool, scratch: &Worker<TaskHandle>) -> Option<TaskHandle> {
-    for stealer in pool.stealers.iter() {
+fn try_steal_any(inner: &PoolInner, scratch: &Worker<TaskHandle>) -> Option<TaskHandle> {
+    for stealer in inner.stealers.iter() {
         if let Some(t) = drain_one(|| stealer.steal_batch_and_pop(scratch)) {
             return Some(t);
         }

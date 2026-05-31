@@ -3,15 +3,24 @@
 //! Phase 9 plan §2.7 (allocation discipline ALLOC1/ALLOC6) and §2.8 (event
 //! lane TLS EVT1) both rely on per-thread flags maintained here. The ECS
 //! crate consumes these helpers without depending on internal pool types.
+//!
+//! Phase 9.3b (decision E): the active-pool TLS pointer is a
+//! `*const PoolInner` (the worker-shared state behind `Arc<PoolInner>`),
+//! NOT a `*const ThreadPool` (the user-facing handle). A worker holds only
+//! `Arc<PoolInner>` and must never resurrect the handle, so it deposits the
+//! `PoolInner` pointer. `PoolInner` is opaque `pub`; consumers
+//! (`par_iter`/`par_chunk`) only call its `num_threads()`/`scope()`.
 
 use core::cell::Cell;
 use core::ptr;
 
-use crate::thread_pool::ThreadPool;
+use crate::thread_pool::PoolInner;
 
 /// Sentinel for the dispatcher thread (the calling thread inside
 /// [`ThreadPool::install`]). Distinct from worker ids so that EVT1's lane
 /// router can place dispatcher writes on an extra lane (`worker_count`).
+///
+/// [`ThreadPool::install`]: crate::ThreadPool::install
 pub const WORKER_ID_DISPATCHER: u32 = u32::MAX - 1;
 
 /// Sentinel for "no associated worker / dispatcher". Default state for
@@ -20,9 +29,11 @@ pub const WORKER_ID_UNATTACHED: u32 = u32::MAX;
 
 thread_local! {
     /// Active pool pointer for ambient `par_iter` dispatch. Set by
-    /// [`ThreadPool::install`] entry / cleared on exit. Worker threads also
-    /// have this set on `worker_main` entry. Null when no pool is attached.
-    pub(crate) static ACTIVE_POOL: Cell<*const ThreadPool> = const { Cell::new(ptr::null()) };
+    /// [`ThreadPool::install`](crate::ThreadPool::install) entry / cleared on
+    /// exit. Worker threads also have this set on `worker_main` entry. Null
+    /// when no pool is attached. Points at the shared [`PoolInner`], never the
+    /// handle (decision E).
+    pub(crate) static ACTIVE_POOL: Cell<*const PoolInner> = const { Cell::new(ptr::null()) };
 
     /// Current worker id.
     /// - `0..MAX_WORKERS-1` — running on worker `N`.
@@ -93,7 +104,7 @@ pub(crate) fn clear_current_worker_id() {
 /// Replace the active-pool pointer; returns the previous value (so the
 /// caller can restore it on exit — see `install`).
 #[inline]
-pub(crate) fn swap_active_pool(new: *const ThreadPool) -> *const ThreadPool {
+pub(crate) fn swap_active_pool(new: *const PoolInner) -> *const PoolInner {
     ACTIVE_POOL.with(|c| {
         let prev = c.get();
         c.set(new);
@@ -103,34 +114,41 @@ pub(crate) fn swap_active_pool(new: *const ThreadPool) -> *const ThreadPool {
 
 /// Read the current active-pool pointer without modifying it.
 #[inline]
-pub(crate) fn active_pool_ptr() -> *const ThreadPool {
+pub(crate) fn active_pool_ptr() -> *const PoolInner {
     ACTIVE_POOL.with(|c| c.get())
 }
 
 /// Borrow the current active pool for the duration of `f`. Returns `None`
 /// when no pool is attached to the current thread.
 ///
-/// The borrow is bracketed by the closure call — the `&ThreadPool` reference
+/// The borrow is bracketed by the closure call — the `&PoolInner` reference
 /// MUST NOT escape `f` (the function signature prevents this at compile
 /// time). Wave 6 `Query::par_iter` uses this to discover the ambient pool
 /// without an explicit pool argument on every cursor.
 #[inline]
 pub fn try_with_active_pool<F, R>(f: F) -> Option<R>
 where
-    F: FnOnce(&ThreadPool) -> R,
+    F: FnOnce(&PoolInner) -> R,
 {
     let p = active_pool_ptr();
     if p.is_null() {
         None
     } else {
-        // SAFETY: `ACTIVE_POOL` is set by `ThreadPool::install` immediately
-        //   before `f(&scope)` runs and cleared after `Scope::Drop` returns
-        //   (which itself blocks until every spawned task completes). Any
-        //   thread that observes a non-null pointer is therefore inside
-        //   the `install` frame on the same thread (TLS is per-thread), so
-        //   the pointee `ThreadPool` is live for the duration of this
-        //   closure. The closure cannot capture the borrow because of the
-        //   `FnOnce(&ThreadPool) -> R` signature; no aliasing escape.
+        // SAFETY: `ACTIVE_POOL` is set by `ThreadPool::install`/`scope`
+        //   immediately before `f(&scope)` runs and restored after
+        //   `Scope::Drop` returns (which itself blocks until every spawned
+        //   task completes). On a worker thread it is set at `worker_main`
+        //   entry from the worker's own `Arc<PoolInner>` and lives until the
+        //   worker returns (the handle joins every worker before dropping its
+        //   `Arc<PoolInner>`, so the pointee outlives the deposit). Any thread
+        //   that observes a non-null pointer is therefore inside a frame on
+        //   the same thread (TLS is per-thread) whose `PoolInner` is live for
+        //   the duration of this closure. `PoolInner` is reached only behind
+        //   `Arc` and is never borrowed `&mut` (it is dropped via `Arc`'s
+        //   internal `&mut` at refcount 0, after all workers join), so no
+        //   `&mut` protector ever spans this shared `&PoolInner`. The closure
+        //   cannot capture the borrow because of the `FnOnce(&PoolInner) -> R`
+        //   signature; no aliasing escape.
         Some(f(unsafe { &*p }))
     }
 }

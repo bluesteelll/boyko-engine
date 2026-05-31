@@ -12,16 +12,24 @@ use crossbeam_deque::{Steal, Worker};
 use crossbeam_utils::Backoff;
 
 use crate::sync::{AtomicU64, Ordering};
-use crate::thread_pool::{TaskHandle, ThreadPool};
+use crate::thread_pool::{PoolInner, TaskHandle};
 use crate::tls;
 
-/// Worker thread entry point. Runs until `pool.shutdown` is set and every
+/// Worker thread entry point. Runs until `inner.shutdown` is set and every
 /// in-flight task has been drained.
-pub(crate) fn worker_main(pool: Arc<ThreadPool>, worker_id: u32, deque: Worker<TaskHandle>) {
-    debug_assert!((worker_id as usize) < pool.workers.len());
+pub(crate) fn worker_main(inner: Arc<PoolInner>, worker_id: u32, deque: Worker<TaskHandle>) {
+    debug_assert!((worker_id as usize) < inner.workers.len());
 
     tls::set_current_worker_id(worker_id);
-    tls::swap_active_pool(Arc::as_ptr(&pool));
+    // Deposit the worker-shared state pointer (decision E): the worker holds
+    // `Arc<PoolInner>` for its whole life, so `Arc::as_ptr` is valid for the
+    // duration of the deposit. The handle joins this worker before dropping
+    // its own `Arc<PoolInner>`, so the pointee outlives this thread.
+    tls::swap_active_pool(Arc::as_ptr(&inner));
+    debug_assert!(
+        !tls::active_pool_ptr().is_null(),
+        "worker TLS pool deposit must be non-null"
+    );
 
     // SplitMix64 seed for sibling steal randomization (plan §4.3 O1).
     let mut rng = XorShift64Star::new(splitmix64(worker_id as u64));
@@ -35,7 +43,7 @@ pub(crate) fn worker_main(pool: Arc<ThreadPool>, worker_id: u32, deque: Worker<T
         std::thread::yield_now();
 
         // 1. Local injector — pushes that targeted this worker directly.
-        if let Some(t) = pop_local_injector(pool.as_ref(), worker_id, &deque) {
+        if let Some(t) = pop_local_injector(inner.as_ref(), worker_id, &deque) {
             run_task(t);
             continue;
         }
@@ -48,13 +56,13 @@ pub(crate) fn worker_main(pool: Arc<ThreadPool>, worker_id: u32, deque: Worker<T
         }
 
         // 3. Global injector — dispatcher-pushed tasks.
-        if let Some(t) = pop_global_injector(pool.as_ref(), &deque) {
+        if let Some(t) = pop_global_injector(inner.as_ref(), &deque) {
             run_task(t);
             continue;
         }
 
         // 4. Sibling steal.
-        if let Some(t) = try_steal_random(pool.as_ref(), worker_id, &deque, &mut rng) {
+        if let Some(t) = try_steal_random(inner.as_ref(), worker_id, &deque, &mut rng) {
             run_task(t);
             continue;
         }
@@ -73,34 +81,34 @@ pub(crate) fn worker_main(pool: Arc<ThreadPool>, worker_id: u32, deque: Worker<T
 
             // Pre-mark_idle re-poll. Catches tasks that arrived while we
             // were spinning. (Race A in §13.4.1.)
-            if let Some(t) = pop_any(pool.as_ref(), worker_id, &deque, &mut rng) {
+            if let Some(t) = pop_any(inner.as_ref(), worker_id, &deque, &mut rng) {
                 run_task(t);
                 continue 'outer;
             }
 
             if backoff.is_completed() {
-                mark_idle(&pool.idle, worker_id);
+                mark_idle(&inner.idle, worker_id);
 
                 // Post-mark_idle re-poll. Load-bearing against Race C: a
                 // pusher reading idle==0 right before we set our bit must
                 // not steal a wakeup that should have gone to us.
-                if let Some(t) = pop_any(pool.as_ref(), worker_id, &deque, &mut rng) {
-                    unmark_idle(&pool.idle, worker_id);
+                if let Some(t) = pop_any(inner.as_ref(), worker_id, &deque, &mut rng) {
+                    unmark_idle(&inner.idle, worker_id);
                     run_task(t);
                     continue 'outer;
                 }
 
                 // Shutdown check (Acquire) pairs with the Release-store
                 // in `ThreadPool::drop`.
-                if pool.shutdown.load(Ordering::Acquire) {
-                    unmark_idle(&pool.idle, worker_id);
+                if inner.shutdown.load(Ordering::Acquire) {
+                    unmark_idle(&inner.idle, worker_id);
                     return;
                 }
 
                 std::thread::park();
 
                 // After wakeup, clear our bit and loop back to poll.
-                unmark_idle(&pool.idle, worker_id);
+                unmark_idle(&inner.idle, worker_id);
                 continue 'outer;
             }
 
@@ -126,50 +134,50 @@ fn run_task(t: TaskHandle) {
 /// Poll all four sources once. Used by the backoff/park loop.
 #[inline]
 fn pop_any(
-    pool: &ThreadPool,
+    inner: &PoolInner,
     worker_id: u32,
     local: &Worker<TaskHandle>,
     rng: &mut XorShift64Star,
 ) -> Option<TaskHandle> {
-    if let Some(t) = pop_local_injector(pool, worker_id, local) {
+    if let Some(t) = pop_local_injector(inner, worker_id, local) {
         return Some(t);
     }
     if let Some(t) = local.pop() {
         return Some(t);
     }
-    if let Some(t) = pop_global_injector(pool, local) {
+    if let Some(t) = pop_global_injector(inner, local) {
         return Some(t);
     }
-    try_steal_random(pool, worker_id, local, rng)
+    try_steal_random(inner, worker_id, local, rng)
 }
 
 /// Drain a batch from this worker's local injector into its deque,
 /// returning the first task.
 #[inline]
 fn pop_local_injector(
-    pool: &ThreadPool,
+    inner: &PoolInner,
     worker_id: u32,
     local: &Worker<TaskHandle>,
 ) -> Option<TaskHandle> {
-    let inj = &pool.injector_local[worker_id as usize];
+    let inj = &inner.injector_local[worker_id as usize];
     drain_one(|| inj.steal_batch_and_pop(local))
 }
 
 /// Drain a batch from the global injector into the local deque.
 #[inline]
-fn pop_global_injector(pool: &ThreadPool, local: &Worker<TaskHandle>) -> Option<TaskHandle> {
-    drain_one(|| pool.injector_global.steal_batch_and_pop(local))
+fn pop_global_injector(inner: &PoolInner, local: &Worker<TaskHandle>) -> Option<TaskHandle> {
+    drain_one(|| inner.injector_global.steal_batch_and_pop(local))
 }
 
 /// Try to steal a batch from a random sibling. Returns the first stolen
 /// task; the rest (if any) remain in the local deque.
 fn try_steal_random(
-    pool: &ThreadPool,
+    inner: &PoolInner,
     worker_id: u32,
     local: &Worker<TaskHandle>,
     rng: &mut XorShift64Star,
 ) -> Option<TaskHandle> {
-    let n = pool.stealers.len();
+    let n = inner.stealers.len();
     if n <= 1 {
         return None;
     }
@@ -181,7 +189,7 @@ fn try_steal_random(
         if idx as u32 == worker_id {
             continue;
         }
-        let stealer = &pool.stealers[idx];
+        let stealer = &inner.stealers[idx];
         if let Some(t) = drain_one(|| stealer.steal_batch_and_pop(local)) {
             return Some(t);
         }
@@ -244,21 +252,21 @@ pub(crate) fn unmark_idle(idle: &AtomicU64, worker_id: u32) {
 /// The CAS spin is bounded by the number of bits set; contention is rare
 /// (the bit count equals the parked worker count, and at most one wake-up
 /// per push is required).
-pub(crate) fn unpark_one_idle(pool: &ThreadPool) -> bool {
+pub(crate) fn unpark_one_idle(inner: &PoolInner) -> bool {
     loop {
-        let mask = pool.idle.load(Ordering::Acquire);
+        let mask = inner.idle.load(Ordering::Acquire);
         if mask == 0 {
             return false;
         }
         let bit = mask & mask.wrapping_neg();
         let new = mask & !bit;
-        match pool
+        match inner
             .idle
             .compare_exchange_weak(mask, new, Ordering::AcqRel, Ordering::Acquire)
         {
             Ok(_) => {
                 let id = bit.trailing_zeros() as usize;
-                pool.workers[id].thread.unpark();
+                inner.workers[id].thread.unpark();
                 return true;
             }
             Err(_) => continue,
@@ -269,14 +277,14 @@ pub(crate) fn unpark_one_idle(pool: &ThreadPool) -> bool {
 /// Push a task into the pool, targeting the calling thread's local
 /// injector when on a worker (cache locality) and the global injector
 /// otherwise. Wakes one idle worker.
-pub(crate) fn push_task(pool: &ThreadPool, task: TaskHandle) {
+pub(crate) fn push_task(inner: &PoolInner, task: TaskHandle) {
     let wid = tls::current_worker_id();
-    if (wid as usize) < pool.injector_local.len() {
-        pool.injector_local[wid as usize].push(task);
+    if (wid as usize) < inner.injector_local.len() {
+        inner.injector_local[wid as usize].push(task);
     } else {
-        pool.injector_global.push(task);
+        inner.injector_global.push(task);
     }
-    unpark_one_idle(pool);
+    unpark_one_idle(inner);
 }
 
 /// SplitMix64 mixer (Sebastiano Vigna, 2014). Used as a seed generator

@@ -65,9 +65,21 @@
 //! # int-to-ptr noise (third-party deque transport, out of the boyko proof
 //! # surface) from boyko's own `scope.rs` frames.
 //! MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-disable-isolation -Zmiri-many-seeds=0..16 \
-//!   -Zmiri-permissive-provenance" \
+//!   -Zmiri-permissive-provenance -Zmiri-ignore-leaks" \
 //!   cargo +nightly miri test -p boyko-threadpool --test miri_scope
 //! ```
+//!
+//! `-Zmiri-ignore-leaks` is STILL required after Phase 9.3b, but NOT because of
+//! boyko: the 3 tests themselves pass clean (`test result: ok. 3 passed`), and
+//! Phase 9.3b's `ThreadPool::drop` now genuinely joins the workers (visible as
+//! `crossbeam_epoch::LocalHandle::drop` TLS-destructor frames running at join).
+//! The residual "memory leaked" reports are entirely inside `crossbeam_epoch`
+//! 0.9.18 — its epoch-GC `HANDLE` thread-local and the `SealedBag`s pushed into
+//! the global retire-queue at thread exit are not reclaimed at process teardown.
+//! That is a third-party deque-GC at-exit artifact, independent of the pool's
+//! own lifecycle (the pool, `ScopeShared`, and `PoolInner` are all freed). So
+//! 9.3b removed the *pool's* leak but cannot remove crossbeam-epoch's; the flag
+//! stays for that reason alone.
 #![cfg(miri)]
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};

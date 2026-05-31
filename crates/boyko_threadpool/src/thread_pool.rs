@@ -1,10 +1,27 @@
-//! [`ThreadPool`] — the public face of the work-stealing pool.
+//! [`ThreadPool`] — the public face of the work-stealing pool — and
+//! [`PoolInner`], the worker-shared state it wraps.
 //!
 //! Layout follows plan §4.2. Hot atomics live in [`CachePadded`] cells to
 //! avoid false sharing on push/wake paths. Each worker exposes a
 //! [`Stealer`] in a global registry, plus a local [`Injector`] that other
 //! workers / the dispatcher can target for cache-friendly enqueuing
 //! (plan §2.7 / Round 2 C2).
+//!
+//! ## Phase 9.3b — the handle/inner split (decision E)
+//!
+//! Before 9.3b every worker held an owned `Arc<ThreadPool>`, so the user's
+//! handle could never reach refcount 0 while workers lived → `Drop` (the
+//! sole writer of `shutdown`) was dead code and the threads + allocation
+//! leaked to process exit. We break the cycle the way rayon does:
+//!
+//! - [`PoolInner`] holds every field workers / [`Scope`] cross-reference;
+//!   workers hold `Arc<PoolInner>`.
+//! - [`ThreadPool`] is the user-facing handle: `{ inner: Arc<PoolInner>,
+//!   join_handles }`. Workers never see the handle, so dropping the last
+//!   `Arc<ThreadPool>` runs [`ThreadPool::drop`] exactly once (decision E
+//!   keeps `PoolInner` behind `Arc` only — never borrowed `&mut` while a
+//!   worker is alive — so no Tree-Borrows protected-tag hazard, unlike the
+//!   rejected self-pointer decision D).
 
 use core::ptr::NonNull;
 use std::sync::Arc;
@@ -73,18 +90,27 @@ impl WorkerHandle {
 }
 
 /// Internal record kept alongside each spawned worker so that
-/// [`ThreadPool::drop`] can join cleanly. Not exposed.
+/// [`ThreadPool::drop`] / [`ThreadPool::join`] can join cleanly. Not exposed.
 struct WorkerJoin {
     handle: JoinHandle<()>,
 }
 
-/// Custom Chase-Lev work-stealing thread pool.
+/// Worker-shared state of the pool (plan §4.1; decision E).
 ///
-/// See the crate docs for the Wave 1 feature set. Construct via
-/// [`ThreadPoolBuilder::build`]; the pool is wrapped in an [`Arc`] so that
-/// worker threads can hold a reference for their entire lifetime.
+/// This is the type behind `Arc<PoolInner>` that worker threads, [`Scope`],
+/// and the ambient-pool TLS all reference. It is `pub` so that it can appear
+/// in the public [`try_with_active_pool`](crate::try_with_active_pool)
+/// signature, but **opaque**: it has no public fields and exposes only the
+/// methods `par_iter`/`par_chunk` need ([`num_threads`](Self::num_threads),
+/// [`scope`](Self::scope), [`install`](Self::install)).
+///
+/// `PoolInner` is **never borrowed `&mut`** anywhere — it lives behind `Arc`
+/// and is dropped only via `Arc`'s internal `&mut` at refcount 0, i.e. AFTER
+/// every worker has joined. No `&mut PoolInner` protector ever spans a worker
+/// access, which is what keeps the cross-thread shared `&PoolInner` sound
+/// under Tree Borrows (same reasoning as the Phase 9.2 `NonNull` fix).
 #[repr(C)]
-pub struct ThreadPool {
+pub struct PoolInner {
     /// Global injector. The dispatcher (or any non-worker thread) pushes
     /// here; workers drain it in stage 2 of `worker_main`.
     pub(crate) injector_global: CachePadded<Injector<TaskHandle>>,
@@ -109,18 +135,16 @@ pub struct ThreadPool {
     /// no scope outlives the pool (drop while `> 0` is a contract bug).
     pub(crate) active_scopes: CachePadded<AtomicUsize>,
 
-    /// Shutdown flag. Set in `Drop` before unparking all workers.
+    /// Shutdown flag. Set by [`ThreadPool::drop`] before unparking all
+    /// workers.
     pub(crate) shutdown: CachePadded<AtomicBool>,
 
-    /// Worker count (cold; written once at construction).
-    worker_count: u32,
-
-    /// Join handles for the worker threads. Wrapped in a `Mutex` only for
-    /// the cold drop path; never touched on hot paths.
-    join_handles: std::sync::Mutex<Vec<WorkerJoin>>,
+    /// Worker count (cold; written once at construction). Lives here (O1) so
+    /// a worker holding `&PoolInner` can read it.
+    pub(crate) worker_count: u32,
 }
 
-impl ThreadPool {
+impl PoolInner {
     /// Returns the number of worker threads in the pool.
     #[inline]
     pub fn worker_count(&self) -> u32 {
@@ -133,28 +157,9 @@ impl ThreadPool {
         self.worker_count as usize
     }
 
-    /// Read the active pool for the current thread (the one set by the
-    /// most recent [`ThreadPool::install`] on this thread). Returns
-    /// `None` when no pool is attached.
-    ///
-    /// Wave 6 / `par_iter` uses this to grab the ambient pool without an
-    /// explicit reference parameter on the iterator.
-    #[inline]
-    pub fn current_pool() -> Option<NonNull<ThreadPool>> {
-        let p = tls::active_pool_ptr();
-        // SAFETY: `tls::active_pool_ptr` returns either a null pointer or
-        // a pointer that was deposited by `install`/`scope` while a live
-        // `&ThreadPool` was on the stack. The caller receives a `NonNull`
-        // wrapper but the dereference is the caller's responsibility; the
-        // `NonNull` itself is sound to construct from a non-null pointer.
-        NonNull::new(p as *mut ThreadPool)
-    }
-
-    /// Push a task onto the pool from outside any scope. Intended for
-    /// fire-and-forget work that does not require join semantics. The
-    /// 'static bound is the absence of any borrowing; for scoped work see
-    /// [`ThreadPool::install`] / [`ThreadPool::scope`].
-    pub fn spawn<F>(&self, f: F)
+    /// Push a task onto the pool from outside any scope. Backing
+    /// implementation of [`ThreadPool::spawn`].
+    pub(crate) fn spawn<F>(&self, f: F)
     where
         F: FnOnce() + Send + 'static,
     {
@@ -162,16 +167,9 @@ impl ThreadPool {
         crate::worker::push_task(self, task);
     }
 
-    /// Block the calling thread, running `f` to completion. The closure
-    /// receives a [`Scope`] that can spawn child tasks; the function
-    /// returns only after every spawned task has completed (work-stealing
-    /// while waiting — see [`Scope::drop`](Scope)).
-    ///
-    /// Sets the calling thread's TLS pool pointer for the duration so that
-    /// nested `par_iter` calls can find the ambient pool, and sets the
-    /// worker-id sentinel to [`WORKER_ID_DISPATCHER`].
-    ///
-    /// [`WORKER_ID_DISPATCHER`]: crate::WORKER_ID_DISPATCHER
+    /// Backing implementation of [`ThreadPool::install`]. Runs on the
+    /// calling thread; sets the ambient-pool + worker-id TLS for the
+    /// duration (restored on return *and* on unwind via [`InstallGuard`]).
     pub fn install<'scope, F, R>(&'scope self, f: F) -> R
     where
         F: FnOnce(&Scope<'scope>) -> R + Send,
@@ -179,11 +177,22 @@ impl ThreadPool {
     {
         self.active_scopes.fetch_add(1, Ordering::AcqRel);
 
-        let prev_pool = tls::swap_active_pool(self as *const _);
+        let prev_pool = tls::swap_active_pool(self as *const PoolInner);
         let prev_worker_id = {
             let cur = tls::current_worker_id();
             tls::set_current_worker_id(tls::WORKER_ID_DISPATCHER);
             cur
+        };
+
+        // O4 (Phase 9.3b): now that `ThreadPool::drop` actually runs and
+        // joins, a panic propagating out of `f`/`drop(scope)` must NOT leave
+        // `active_scopes > 0` or dirty TLS (that would trip the Drop
+        // debug-assert on unwind). The guard restores both on the normal and
+        // the unwinding path.
+        let _frame = InstallGuard {
+            inner: self,
+            prev_pool: Some(prev_pool),
+            prev_worker_id: Some(prev_worker_id),
         };
 
         // `crate::sync::thread::current()` so the captured waker `Thread`
@@ -199,25 +208,19 @@ impl ThreadPool {
 
         let result = f(&scope);
         // Explicit drop so the order is unambiguous: scope drains first,
-        // TLS restored afterwards. Otherwise the compiler is free to drop
-        // `scope` after `result` is moved, which would still be correct
-        // but harder to reason about.
+        // then `_frame` restores TLS + decrements `active_scopes`. (If `f`
+        // panicked we never reach here; `scope` and `_frame` are dropped by
+        // the unwinder in reverse declaration order — `scope` first, then
+        // `_frame` — which is the same order as this manual sequence.)
         drop(scope);
 
-        tls::set_current_worker_id(prev_worker_id);
-        tls::swap_active_pool(prev_pool);
-
-        self.active_scopes.fetch_sub(1, Ordering::AcqRel);
         result
     }
 
-    /// Re-entrant scope creation. Cheaper than [`install`](Self::install)
-    /// because it does not touch the active-pool / worker-id TLS — the
-    /// caller is assumed to already be inside an `install` frame
-    /// (typically a worker task body or the dispatcher running through
-    /// `Schedule::run`).
-    ///
-    /// Used by `Query::par_iter` (Wave 6).
+    /// Backing implementation of [`ThreadPool::scope`]. Cheaper than
+    /// [`install`](Self::install): it does not touch the ambient-pool /
+    /// worker-id TLS (the caller is assumed to already be inside an
+    /// `install` frame).
     pub fn scope<'scope, F, R>(&'scope self, f: F) -> R
     where
         F: FnOnce(&Scope<'scope>) -> R + Send,
@@ -230,6 +233,14 @@ impl ThreadPool {
 
         self.active_scopes.fetch_add(1, Ordering::AcqRel);
 
+        // O4: decrement `active_scopes` on the unwinding path too. No TLS to
+        // restore here (`scope` never swapped it), so both `prev_*` are None.
+        let _frame = InstallGuard {
+            inner: self,
+            prev_pool: None,
+            prev_worker_id: None,
+        };
+
         // See `install`: shimmed `current()` so the waker `Thread` type matches
         // `ScopeShared.waker` under the loom backend.
         let shared = Box::new(ScopeShared::new(crate::sync::thread::current()));
@@ -238,34 +249,176 @@ impl ThreadPool {
         let result = f(&scope);
         drop(scope);
 
-        self.active_scopes.fetch_sub(1, Ordering::AcqRel);
         result
     }
 }
 
-impl Drop for ThreadPool {
-    fn drop(&mut self) {
-        debug_assert_eq!(
-            self.active_scopes.load(Ordering::Acquire),
-            0,
-            "ThreadPool dropped with active scopes still in flight"
-        );
+/// RAII guard that restores the install/scope frame state (decrement
+/// `active_scopes`, restore the ambient-pool + worker-id TLS) on BOTH the
+/// normal return and the unwinding path (O4).
+///
+/// For [`PoolInner::scope`] there is no TLS to restore, so `prev_pool` /
+/// `prev_worker_id` are `None`; only the `active_scopes` decrement runs.
+struct InstallGuard<'a> {
+    inner: &'a PoolInner,
+    prev_pool: Option<*const PoolInner>,
+    prev_worker_id: Option<u32>,
+}
 
+impl Drop for InstallGuard<'_> {
+    #[inline]
+    fn drop(&mut self) {
+        if let Some(id) = self.prev_worker_id {
+            tls::set_current_worker_id(id);
+        }
+        if let Some(p) = self.prev_pool {
+            tls::swap_active_pool(p);
+        }
+        self.inner.active_scopes.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Custom Chase-Lev work-stealing thread pool — the user-facing handle.
+///
+/// See the crate docs for the Wave 1 feature set. Construct via
+/// [`ThreadPoolBuilder::build`], which returns an `Arc<ThreadPool>`. Workers
+/// hold `Arc<PoolInner>` (the inner state), NOT this handle, so dropping the
+/// last `Arc<ThreadPool>` runs [`ThreadPool::drop`] — which sets the shutdown
+/// flag, unparks every worker, and joins them — exactly once (plan §6).
+///
+/// # Shutdown contract
+///
+/// The handle (or its last clone) must **never** be dropped from inside an
+/// [`install`](Self::install) / [`scope`](Self::scope) frame on the same
+/// thread (O5): [`Drop`] now blocks on `join`, so self-joining the dispatcher
+/// thread would deadlock. In practice this cannot happen — `install`/`scope`
+/// borrow `&self`, so the handle is still owned by the caller for the whole
+/// frame.
+#[repr(C)]
+pub struct ThreadPool {
+    /// Worker-shared state. One `Arc` deref reaches every hot-path field.
+    pub(crate) inner: Arc<PoolInner>,
+
+    /// Join handles for the worker threads, owned by the handle ALONE
+    /// (workers cannot reach them, so they cannot double-join). `Option` so
+    /// that an explicit [`join`](Self::join) and [`Drop`] are
+    /// join-exactly-once via `take()`. The `Mutex` is touched only on the
+    /// cold teardown path; never on a hot path.
+    join_handles: std::sync::Mutex<Option<Vec<WorkerJoin>>>,
+}
+
+impl ThreadPool {
+    /// Returns the number of worker threads in the pool.
+    #[inline]
+    pub fn worker_count(&self) -> u32 {
+        self.inner.worker_count()
+    }
+
+    /// Convenience alias mirroring the plan's `num_threads()` naming.
+    #[inline]
+    pub fn num_threads(&self) -> usize {
+        self.inner.num_threads()
+    }
+
+    /// Read the active pool for the current thread (the one set by the
+    /// most recent [`ThreadPool::install`] on this thread). Returns
+    /// `None` when no pool is attached.
+    ///
+    /// Wave 6 / `par_iter` uses this to grab the ambient pool without an
+    /// explicit reference parameter on the iterator. The pointer is to the
+    /// shared [`PoolInner`] (decision E), never the handle.
+    #[inline]
+    pub fn current_pool() -> Option<NonNull<PoolInner>> {
+        let p = tls::active_pool_ptr();
+        // SAFETY: `tls::active_pool_ptr` returns either a null pointer or a
+        // pointer that was deposited by `install`/`scope`/`worker_main` while
+        // a live `PoolInner` (behind `Arc`) was reachable. The caller receives
+        // a `NonNull` wrapper but the dereference is the caller's
+        // responsibility; the `NonNull` itself is sound to construct from a
+        // non-null pointer.
+        NonNull::new(p as *mut PoolInner)
+    }
+
+    /// Push a task onto the pool from outside any scope. Intended for
+    /// fire-and-forget work that does not require join semantics. The
+    /// 'static bound is the absence of any borrowing; for scoped work see
+    /// [`ThreadPool::install`] / [`ThreadPool::scope`].
+    #[inline]
+    pub fn spawn<F>(&self, f: F)
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        self.inner.spawn(f);
+    }
+
+    /// Block the calling thread, running `f` to completion. The closure
+    /// receives a [`Scope`] that can spawn child tasks; the function
+    /// returns only after every spawned task has completed (work-stealing
+    /// while waiting — see [`Scope::drop`](Scope)).
+    ///
+    /// Sets the calling thread's TLS pool pointer for the duration so that
+    /// nested `par_iter` calls can find the ambient pool, and sets the
+    /// worker-id sentinel to [`WORKER_ID_DISPATCHER`].
+    ///
+    /// [`WORKER_ID_DISPATCHER`]: crate::WORKER_ID_DISPATCHER
+    #[inline]
+    pub fn install<'scope, F, R>(&'scope self, f: F) -> R
+    where
+        F: FnOnce(&Scope<'scope>) -> R + Send,
+        R: Send,
+    {
+        self.inner.install(f)
+    }
+
+    /// Re-entrant scope creation. Cheaper than [`install`](Self::install)
+    /// because it does not touch the active-pool / worker-id TLS — the
+    /// caller is assumed to already be inside an `install` frame
+    /// (typically a worker task body or the dispatcher running through
+    /// `Schedule::run`).
+    ///
+    /// Used by `Query::par_iter` (Wave 6).
+    #[inline]
+    pub fn scope<'scope, F, R>(&'scope self, f: F) -> R
+    where
+        F: FnOnce(&Scope<'scope>) -> R + Send,
+        R: Send,
+    {
+        self.inner.scope(f)
+    }
+
+    /// Explicitly shut the pool down and join every worker thread, blocking
+    /// until they exit. Idempotent with [`Drop`]: the join handles are taken
+    /// once, so calling `join()` and then dropping the handle (or vice
+    /// versa) joins exactly once and never double-joins.
+    ///
+    /// Must not be called from inside an `install`/`scope` frame on the same
+    /// thread (O5) — it would self-join the dispatcher and deadlock.
+    pub fn join(&self) {
+        let handles = self
+            .join_handles
+            .lock()
+            .expect("invariant: join_handles mutex never poisoned by us")
+            .take();
+        if let Some(handles) = handles {
+            self.shutdown_and_join(handles);
+        }
+    }
+
+    /// Shared teardown body for [`join`](Self::join) and [`Drop`]. The
+    /// caller has already `take()`n the join handles, so this runs for
+    /// exactly one of `{join(), Drop}` — the take-once discipline guarantees
+    /// no double-join.
+    fn shutdown_and_join(&self, handles: Vec<WorkerJoin>) {
         // Publish shutdown to every worker BEFORE unparking — workers
         // re-check this flag after wakeup. Release pairs with the worker's
         // Acquire load in `worker_main`.
-        self.shutdown.store(true, Ordering::Release);
+        self.inner.shutdown.store(true, Ordering::Release);
 
-        for w in self.workers.iter() {
+        for w in self.inner.workers.iter() {
             w.thread.unpark();
         }
 
-        // Join every worker. We acquire the lock once and drain.
-        let mut guard = self
-            .join_handles
-            .lock()
-            .expect("invariant: join_handles mutex never poisoned by us");
-        for j in guard.drain(..) {
+        for j in handles {
             // We deliberately ignore the result — a panicking worker has
             // already been observed via the scope's panic_payload path;
             // join here would only surface "thread aborted unexpectedly".
@@ -274,7 +427,28 @@ impl Drop for ThreadPool {
     }
 }
 
-// SAFETY (Send/Sync for ThreadPool):
+impl Drop for ThreadPool {
+    fn drop(&mut self) {
+        // Take the join handles once. If an explicit `join()` already took
+        // them, this is a no-op (join-exactly-once).
+        let handles = self
+            .join_handles
+            .lock()
+            .expect("invariant: join_handles mutex never poisoned by us")
+            .take();
+        let Some(handles) = handles else { return };
+
+        debug_assert_eq!(
+            self.inner.active_scopes.load(Ordering::Acquire),
+            0,
+            "ThreadPool dropped with active scopes still in flight"
+        );
+
+        self.shutdown_and_join(handles);
+    }
+}
+
+// SAFETY (Send/Sync for ThreadPool / PoolInner):
 //   Every field is either trivially Send/Sync (Arc, atomics, Mutex,
 //   plain `u32`) or a `CachePadded<...>` wrapper around such a type.
 //   `Injector<TaskHandle>`, `Stealer<TaskHandle>`, and `Worker<TaskHandle>`
@@ -283,12 +457,14 @@ impl Drop for ThreadPool {
 //   + 'static>` so the queues' element types are Send. No interior
 //   `!Send`/`!Sync` field exists.
 //
-//   ThreadPool itself MUST be Send + Sync because (a) the
-//   `Arc<ThreadPool>` is shared between the spawning thread and every
-//   worker thread, and (b) `Schedule` (Wave 3+) borrows `&ThreadPool` for
-//   `install` from arbitrary system contexts.
+//   `PoolInner` MUST be Send + Sync because the `Arc<PoolInner>` is shared
+//   between the spawning thread and every worker thread (and the ambient-pool
+//   TLS hands out `&PoolInner` cross-thread). `ThreadPool` MUST be Send +
+//   Sync because `Schedule` (Wave 3+) borrows `&ThreadPool` for `install`
+//   from arbitrary system contexts; its `Arc<PoolInner>` + `Mutex<Option<…>>`
+//   fields are both Send + Sync.
 //
-//   The auto-derive already gives us Send/Sync for this struct (no raw
+//   The auto-derive already gives us Send/Sync for both structs (no raw
 //   pointers / no UnsafeCell directly held), so this comment is purely
 //   documentary — we do NOT write `unsafe impl`.
 
@@ -353,8 +529,10 @@ impl ThreadPoolBuilder {
     }
 
     /// Spawn worker threads and return the pool. The returned [`Arc`] is
-    /// the canonical handle — workers hold their own copies internally so
-    /// that the pool stays alive at least until every worker exits.
+    /// the canonical handle; workers hold their own `Arc<PoolInner>` clones
+    /// internally so that the inner state stays alive at least until every
+    /// worker exits, but they do NOT hold the handle (so [`ThreadPool::drop`]
+    /// runs when the last `Arc<ThreadPool>` is dropped — plan §6).
     pub fn build(self) -> Arc<ThreadPool> {
         let requested = self.num_threads.unwrap_or_else(default_worker_count);
         let worker_count = requested.clamp(1, MAX_WORKERS);
@@ -380,20 +558,20 @@ impl ThreadPoolBuilder {
         let injector_local: Arc<[CachePadded<Injector<TaskHandle>>]> = injector_local_vec.into();
 
         // Workers are created lazily — we need their `Thread` handles to
-        // populate `pool.workers`, which means we must spawn the threads,
-        // capture their handles, and somehow let them learn their own
-        // `Arc<ThreadPool>`. The classical trick: spawn threads that block
-        // on a one-shot channel; the parent constructs the pool, then
-        // sends the Arc through the channels. We use a simpler shape
-        // because every worker just needs `pool.clone()` after construction
-        // — defer worker_main by sending the pool through a dedicated
-        // `crossbeam_deque` channel? — overkill. We use a `Once`-style
-        // handshake via `Arc<Mutex<Option<Arc<ThreadPool>>>>`.
+        // populate `inner.workers`, which means we must spawn the threads,
+        // capture their handles, and let them learn their own
+        // `Arc<PoolInner>`. The classical trick: spawn threads that block on
+        // a one-shot handshake; the parent constructs the `Arc<PoolInner>`,
+        // then publishes it. We use a `Once`-style handshake via
+        // `Arc<Mutex<Option<Arc<PoolInner>>>>` + `Condvar`; the Condvar
+        // notify happens-after the `*guard = Some(...)` store and
+        // happens-before each worker's wake, so the published `Arc<PoolInner>`
+        // is visible to every worker without any extra atomic ordering.
         //
         // Alternative considered: pre-create `WorkerHandle`s with bogus
         // Thread handles and patch them later. Rejected because Thread
         // doesn't expose a no-op constructor.
-        let bootstrap: Arc<std::sync::Mutex<Option<Arc<ThreadPool>>>> =
+        let bootstrap: Arc<std::sync::Mutex<Option<Arc<PoolInner>>>> =
             Arc::new(std::sync::Mutex::new(None));
         let bootstrap_cvar: Arc<std::sync::Condvar> = Arc::new(std::sync::Condvar::new());
 
@@ -417,8 +595,8 @@ impl ThreadPoolBuilder {
 
             let join = builder
                 .spawn(move || {
-                    // Wait for the parent to publish the Arc<ThreadPool>.
-                    let pool = {
+                    // Wait for the parent to publish the Arc<PoolInner>.
+                    let inner = {
                         let mut guard = bootstrap_cl
                             .lock()
                             .expect("invariant: bootstrap mutex never poisoned");
@@ -429,7 +607,7 @@ impl ThreadPoolBuilder {
                         }
                         Arc::clone(guard.as_ref().expect("invariant: just-checked Some"))
                     };
-                    worker_main(pool, worker_id as u32, deque);
+                    worker_main(inner, worker_id as u32, deque);
                 })
                 .expect("invariant: worker thread spawn must succeed");
 
@@ -448,7 +626,7 @@ impl ThreadPoolBuilder {
             .map(|h| WorkerJoin { handle: h })
             .collect();
 
-        let pool = Arc::new(ThreadPool {
+        let inner = Arc::new(PoolInner {
             injector_global: CachePadded::new(Injector::new()),
             injector_local,
             stealers,
@@ -457,15 +635,14 @@ impl ThreadPoolBuilder {
             active_scopes: CachePadded::new(AtomicUsize::new(0)),
             shutdown: CachePadded::new(AtomicBool::new(false)),
             worker_count: worker_count as u32,
-            join_handles: std::sync::Mutex::new(join_handles),
         });
 
-        // Publish the pool to the waiting workers.
+        // Publish the inner state to the waiting workers.
         {
             let mut guard = bootstrap
                 .lock()
                 .expect("invariant: bootstrap mutex never poisoned");
-            *guard = Some(Arc::clone(&pool));
+            *guard = Some(Arc::clone(&inner));
         }
         bootstrap_cvar.notify_all();
 
@@ -476,7 +653,10 @@ impl ThreadPoolBuilder {
             // doc-comment.
         }
 
-        pool
+        Arc::new(ThreadPool {
+            inner,
+            join_handles: std::sync::Mutex::new(Some(join_handles)),
+        })
     }
 }
 
