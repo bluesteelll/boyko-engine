@@ -91,20 +91,25 @@ struct MVelocity {
 /// cross-worker world-cell sharing, and that the `Position`-mutating system
 /// applied its write.
 #[test]
-#[ignore = "Phase 9.3, OPEN (livelock FIXED, new TB finding exposed): the Miri \
-            livelock is resolved — `#[cfg(miri)] yield_now()` added to the \
-            executor Step-5 park branch, the `apply_window_drain` pop-loop \
-            (transient-None-safe), and the worker backoff loop now let the run \
-            COMPLETE (no more 300s timeout). It then surfaces a Tree Borrows \
-            `write access ... forbidden` INSIDE `crossbeam-queue 0.3.12 \
-            ArrayQueue::push_or_else` (array_queue.rs:159), reached from the \
-            worker completion-path push (schedule.rs:982 -> scope.rs:240). This \
-            is a DIFFERENT TB rule than the documented int-to-ptr caveat \
-            (`-Zmiri-permissive-provenance` does NOT silence it); it must be \
-            root-caused as either boyko completion-queue-provenance narrowing \
-            (real bug) or a crossbeam MPMC-under-TB over-approximation (third \
-            party) before un-ignoring. The boyko `Scope` surface stays gated by \
-            the green `boyko_threadpool/tests/miri_scope.rs`; native \
+#[ignore = "Phase 9.3c CLASSIFIED, fix deferred to Phase 9.3b (executor/pool \
+            restructure). The Phase 9.3a Miri livelock is FIXED (the run now \
+            completes); it then surfaces a Tree Borrows `write access forbidden` \
+            inside `crossbeam-queue ArrayQueue::push` (array_queue.rs:159) from \
+            the worker completion-path push (schedule.rs:982 -> scope.rs:240). \
+            Classified as the SAME removable-protector class as Phase 9.1/9.2 \
+            `ScopeShared`: the worker foreign-writes `completion_queue` through a \
+            raw ptr derived `&self.executor_scratch.completion_queue as *const _` \
+            (schedule.rs:916) that is a CHILD of `executor_main_loop`/\
+            `try_dispatch_ready`'s `&mut self` protector spanning the worker \
+            pushes. NOT the int-to-ptr caveat (`-Zmiri-permissive-provenance` \
+            does not silence it). Native is clean (494 tests, no UB) — TB-only \
+            hardening. Fix family = mirror the Phase 9.2 NonNull derivation: \
+            derive the worker completion-queue/pending-apply pointers off a \
+            non-`&mut self` source (the existing `UnsafeEcsCell` world-cell \
+            pattern already does this for the world; the completion queue is the \
+            lone asymmetric exception). Invasive (architect->critic->dev->Miri); \
+            folded into Phase 9.3b. The boyko `Scope` surface is gated by the \
+            green `boyko_threadpool/tests/miri_scope.rs`; native \
             `scheduler_par_iter_concurrent_systems` covers the path. Run: \
             -- --include-ignored."]
 fn miri_two_worker_schedule_disjoint_systems_one_frame() {
