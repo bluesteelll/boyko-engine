@@ -36,30 +36,52 @@
 //! `boyko_threadpool/tests/miri_scope.rs` (TB + data-race clean, default seed;
 //! UB-clean across 16 seeds).
 //!
-//! STILL `#[ignore]`d (Phase 9.3, OPEN): the ECS `Schedule::run` executor has
-//! more than one non-Miri-cooperative wait site. A `#[cfg(miri)] yield_now()` was
-//! added to the executor Step-5 park branch (necessary), but the 2-worker run
-//! STILL livelocks under Miri's deterministic scheduler (killed at a 300s
-//! timeout, exit 124) — so at least one more spin/park site does not yield under
-//! Miri. The boyko `Scope` surface is gated by the green
+//! ## RESOLVED in Phase 9.3c (this test is now ENABLED)
+//!
+//! Two follow-on blockers were cleared after Phase 9.2:
+//!   - **Phase 9.3a** made every executor wait site Miri-cooperative
+//!     (`#[cfg(miri)] yield_now()` on the Step-5 park, the `apply_window_drain`
+//!     transient-empty pop loop, and the worker backoff), so the 2-worker run
+//!     completes instead of livelocking.
+//!   - **Phase 9.3c** relocated the cross-thread completion state
+//!     (`completion_queue` + `pending_apply`) out of the inline
+//!     `Schedule.executor_scratch` into a SEPARATE heap allocation
+//!     (`CompletionChannel`) owned as a bare `NonNull` and reached only through
+//!     a non-retagging `CompletionCell` lineage — so the worker's completion
+//!     push is no longer a foreign write to bytes covered by the dispatcher's
+//!     `&mut self` Tree-Borrows protector. This mirrors the Phase 9.2
+//!     `NonNull<ScopeShared>` relocation; the `write access forbidden` is gone.
+//!
+//! The boyko `Scope` surface remains independently gated by the green
 //! `boyko_threadpool/tests/miri_scope.rs`; the native
 //! `scheduler_par_iter_concurrent_systems` integration test covers the
-//! cross-worker world-cell path. Re-enable once every Miri-path wait site yields.
+//! cross-worker world-cell path on real hardware.
 //!
 //! **Carried-forward caveat (from Phase 9.1):** this 2-worker path also drives
 //! `crossbeam-deque::steal_batch_and_pop`, whose exposed-provenance int-to-ptr
 //! casts Tree Borrows may flag *independently of boyko*. If a future toolchain
 //! surfaces a `crossbeam-*`-frame TB error (not a `scope.rs`/`schedule.rs`
-//! frame), that is a third-party limitation — keep `#[ignore]`d with a
+//! frame), that is a third-party limitation — re-`#[ignore]` it with a
 //! crossbeam-specific reason and rely on `miri_scope.rs` as the boyko-surface
 //! gate. A `scope.rs`/`schedule.rs`-frame failure is a real regression.
+//! (As of Phase 9.3c, with `-Zmiri-permissive-provenance` set, NO crossbeam-deque
+//! TB *error* surfaces — only the crossbeam-epoch *leaks* handled below.)
 //!
 //! ## Run (plan §5 / §12)
 //! ```bash
 //! MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-disable-isolation \
-//!   -Zmiri-permissive-provenance" \
+//!   -Zmiri-permissive-provenance -Zmiri-ignore-leaks" \
 //!   cargo +nightly miri test -p boyko-ecs --test miri_schedule_parallel
 //! ```
+//!
+//! `-Zmiri-ignore-leaks` is REQUIRED (same as `miri_scope.rs`): with the Phase
+//! 9.3b worker join, the 2 worker threads + main thread each register a
+//! `crossbeam_epoch::internal::Local` and leave `SealedBag` GC nodes that
+//! crossbeam-epoch never reclaims at process exit (it has no global shutdown
+//! hook) — Miri's leak checker flags those 7 third-party allocations. They are
+//! NOT boyko allocations: the `CompletionChannel` `Box` is freed in
+//! `Drop for ExecutorScratch`. With the flag set, the run is TB-clean and
+//! UB-free (`1 passed; 0 failed`).
 #![cfg(miri)]
 
 use std::sync::Arc;
@@ -91,27 +113,6 @@ struct MVelocity {
 /// cross-worker world-cell sharing, and that the `Position`-mutating system
 /// applied its write.
 #[test]
-#[ignore = "Phase 9.3c CLASSIFIED, fix deferred to Phase 9.3b (executor/pool \
-            restructure). The Phase 9.3a Miri livelock is FIXED (the run now \
-            completes); it then surfaces a Tree Borrows `write access forbidden` \
-            inside `crossbeam-queue ArrayQueue::push` (array_queue.rs:159) from \
-            the worker completion-path push (schedule.rs:982 -> scope.rs:240). \
-            Classified as the SAME removable-protector class as Phase 9.1/9.2 \
-            `ScopeShared`: the worker foreign-writes `completion_queue` through a \
-            raw ptr derived `&self.executor_scratch.completion_queue as *const _` \
-            (schedule.rs:916) that is a CHILD of `executor_main_loop`/\
-            `try_dispatch_ready`'s `&mut self` protector spanning the worker \
-            pushes. NOT the int-to-ptr caveat (`-Zmiri-permissive-provenance` \
-            does not silence it). Native is clean (494 tests, no UB) — TB-only \
-            hardening. Fix family = mirror the Phase 9.2 NonNull derivation: \
-            derive the worker completion-queue/pending-apply pointers off a \
-            non-`&mut self` source (the existing `UnsafeEcsCell` world-cell \
-            pattern already does this for the world; the completion queue is the \
-            lone asymmetric exception). Invasive (architect->critic->dev->Miri); \
-            folded into Phase 9.3b. The boyko `Scope` surface is gated by the \
-            green `boyko_threadpool/tests/miri_scope.rs`; native \
-            `scheduler_par_iter_concurrent_systems` covers the path. Run: \
-            -- --include-ignored."]
 fn miri_two_worker_schedule_disjoint_systems_one_frame() {
     let pool = ThreadPoolBuilder::new().num_threads(2).build();
     let mut world = EcsMaster::new();
