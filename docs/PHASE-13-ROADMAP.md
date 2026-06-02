@@ -123,9 +123,24 @@ anticipated IS2 identity `IntoSystem` blanket. See `docs/PHASE-17-RESULTS.md`.
 Deferred: value-keyed sub-schedules, computed/sub-states, state-scoped
 auto-despawn, `StateTransitionEvent`, `#[derive(States)]`, `Option<Res<R>>`.
 
-### Phase 18 — Plugin system
-Modular crate composition via `App::add_plugin(MyPlugin)`. Bevy-style. No
-ECS core changes; pure builder API. ~1-2 weeks.
+### Phase 18 — Plugin system — ✅ DONE
+`App` builder facade + `Plugin` trait (`build(&self, &mut App)`; `'static` only —
+**no `Send+Sync`**, plugins are consumed-at-build) + `add_plugin` / `add_plugins((..))`
+(sealed `Plugins<Marker>` tuple, 1..=12, nesting) + duplicate-panic (`boyko-B1801`,
+cold `Vec<TypeId>`) + `boyko_ecs::prelude` (public **types**; derive re-exports
+deferred on the `boyko-macros` dev-dep cycle). **Q7 = single schedule** + a one-shot
+startup list run before the loop (not a second schedule, not a label map). `App` owns
+the pool (E5: `new`/`with_threads`/`with_pool`). **0%-gate held** — App `run_n` vs raw
+`Schedule::run` = +1.17% / −0.79% (sign-flip noise); the `run_n`/`run` loop binds
+`schedule`+`world` locals once → branch-free. **No ECS core changes** (7 lines
+touched). Zero `unsafe`. 14 tests + proptest; 829 suite pass. See
+`docs/PHASE-18-RESULTS.md`.
+
+Deferred: SubApps/render-world; Plugin `finish`/`cleanup`/`ready`;
+`PluginGroup`/`DefaultPlugins`; multi-schedule label map; `init_resource`/`FromWorld`;
+`set_runner`; the single-dep prelude-with-derives (needs the `boyko-macros` path-
+resolution / cycle refactor); the `boyko_demo` port to `App` (a restructure; the
+demo's wasm/no-pool path can't use the native-multithreaded `App`).
 
 ### Phase 19 — Hierarchies / Parent-Child
 Entity relationship via `Parent` / `Children` components + propagation
