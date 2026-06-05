@@ -13,12 +13,16 @@ use crate::ecs::core::component::component::Component;
 use crate::ecs::core::component::component_registry::{self, DropFn};
 use crate::ecs::memory::arena::Arena;
 use crate::ecs::memory::chunk::Chunk;
-use crate::ecs::memory::id_unit::Unit;
 
-/// Pool of components of a specific type with direct pointers.
+/// Pool of components of a specific type, stored as a dense byte buffer.
 ///
-/// All slots in `[0, units.len())` are fully initialized. Slots beyond that
-/// are uninitialized arena memory and must never be read or dropped.
+/// Components live contiguously in `buffer`: row `i` starts at
+/// `buffer + i * component_layout.size()`. The rows `[0, self.len)` are fully
+/// initialized; slots beyond that are uninitialized arena memory and must never
+/// be read or dropped. The row pointer is recomputed on demand via
+/// [`ComponentPool::row_ptr`] rather than cached per-row, so the pool holds no
+/// parallel pointer array (the cached pointer was always exactly the computed
+/// address — see Phase X.B).
 pub struct ComponentPool {
     /// Raw provenance pointer to the arena for memory allocation.
     /// Stored as `*const Arena` (raw provenance) to avoid Miri retag UB when
@@ -41,8 +45,8 @@ pub struct ComponentPool {
     /// Maximum number of components.
     max_components: usize,
 
-    /// Array of units with direct pointers (always densely packed).
-    units: Vec<Unit>,
+    /// Live row count; rows `[0, len)` are initialized and densely packed.
+    len: usize,
 
     /// Chunk metadata.
     chunks: Vec<Chunk>,
@@ -63,12 +67,11 @@ pub struct ComponentPool {
     /// Cached TypeId for debug-only typed-API validation.
     component_type_id: TypeId,
 
-    /// Phase 10 STORE3: per-row "added at" ticks, parallel to `units`.
+    /// Phase 10 STORE3: per-row "added at" ticks, parallel to the data rows.
     ///
-    /// Logical row `i` (= `units[i]`) has its added-at tick at
-    /// `added_ticks[i]`. The buffer is sized to `max_components` at pool
-    /// construction and never reallocates; slots beyond `units.len()`
-    /// stay at [`Tick::ZERO`] until a future write.
+    /// Logical row `i` has its added-at tick at `added_ticks[i]`. The buffer is
+    /// sized to `max_components` at pool construction and never reallocates;
+    /// slots beyond `self.len` stay at [`Tick::ZERO`] until a future write.
     ///
     /// `UnsafeCell<Tick>` provides interior mutability through a shared
     /// `&self` (used by Wave C `Added<C>::filter_fetch` reads through the
@@ -79,7 +82,7 @@ pub struct ComponentPool {
     /// machine even though they share a cache line (Round 2 C3, plan §11.5).
     pub(crate) added_ticks: Box<[UnsafeCell<Tick>]>,
 
-    /// Phase 10 STORE3: per-row "last changed at" ticks, parallel to `units`.
+    /// Phase 10 STORE3: per-row "last changed at" ticks, parallel to the data rows.
     ///
     /// Same shape and discipline as [`added_ticks`]. Updated by
     /// `Mut<T>::deref_mut` (Wave C) and by `EcsMaster::set_component_raw`
@@ -156,7 +159,7 @@ impl ComponentPool {
         }
 
         // Phase 10 STORE10: per-row tick buffers zero-initialised at pool
-        // construction. Slots above `units.len()` are never read as
+        // construction. Slots above `self.len` are never read as
         // meaningful comparands — `SystemMeta::new` sets `last_run =
         // current_tick - MAX_CHANGE_AGE`, so any post-init write is
         // observable. The buffers are global-allocator `Box<[_]>` per
@@ -178,7 +181,7 @@ impl ComponentPool {
             buffer,
             buffer_capacity_bytes,
             max_components,
-            units: Vec::with_capacity(max_components),
+            len: 0,
             chunks,
             components_per_chunk,
             component_id,
@@ -212,6 +215,23 @@ impl ComponentPool {
         }
     }
 
+    /// Byte pointer for row `idx`, computed from the stable arena base.
+    ///
+    /// # Safety
+    /// * `idx < self.max_components` (the slot lies inside the buffer allocation);
+    ///   reads of LIVE data additionally require `idx < self.len`.
+    /// * Valid for `self.component_layout.size()` bytes.
+    #[inline]
+    unsafe fn row_ptr(&self, idx: usize) -> *mut u8 {
+        debug_assert!(idx < self.max_components, "row_ptr: idx out of buffer bounds");
+        // SAFETY: idx < max_components ⇒ idx*stride + stride <= max_components*stride
+        //   == buffer_capacity_bytes, so the element span is inside the single arena
+        //   allocation backing `self.buffer`. Provenance derives from `self.buffer`
+        //   via one `add` (the same address the deleted `Unit.ptr` cached). The base
+        //   is write-once in `new` and never reallocated (fixed arena capacity).
+        unsafe { self.buffer.as_ptr().add(idx * self.component_layout.size()) }
+    }
+
     /// Adds a component to the pool via raw byte slice.
     ///
     /// The caller must ensure `component_bytes` contains a valid, initialized
@@ -228,36 +248,30 @@ impl ComponentPool {
             component_bytes.len()
         );
 
-        if self.units.len() >= self.max_components {
+        if self.len >= self.max_components {
             return None;
         }
 
-        let buffer_index = self.units.len();
+        let buffer_index = self.len;
 
-        let component_ptr = unsafe {
-            let ptr = self.buffer
-                .as_ptr()
-                .add(buffer_index * self.component_layout.size());
-
-            // SAFETY: buffer_index < max_components (checked above); the
-            // destination is within the pool allocation. The source and
-            // destination do not overlap (source is caller memory, destination
-            // is arena memory).
+        // SAFETY: buffer_index < max_components (checked above), so
+        // `row_ptr` yields a pointer to a slot inside the pool allocation.
+        // The source and destination do not overlap (source is caller
+        // memory, destination is arena memory). The row is uninitialised
+        // until this write; `self.len += 1` below marks it live.
+        unsafe {
             std::ptr::copy_nonoverlapping(
                 component_bytes.as_ptr(),
-                ptr,
+                self.row_ptr(buffer_index),
                 self.component_layout.size(),
             );
+        }
 
-            ptr
-        };
-
-        let unit = Unit::new(component_ptr);
         let chunk_index = buffer_index / self.components_per_chunk;
         if let Some(chunk) = self.chunks.get_mut(chunk_index) {
             chunk.mark_dirty();
         }
-        self.units.push(unit);
+        self.len += 1;
 
         Some(buffer_index)
     }
@@ -282,58 +296,50 @@ impl ComponentPool {
             std::any::type_name::<T>()
         );
 
-        if self.units.len() >= self.max_components {
+        if self.len >= self.max_components {
             return None; // value drops at scope exit
         }
 
-        let buffer_index = self.units.len();
-
-        // SAFETY: buffer_index < max_components (just checked); the buffer
-        // covers max_components * size_of::<T>() bytes starting at buffer base.
-        let dst = unsafe {
-            self.buffer
-                .as_ptr()
-                .add(buffer_index * self.component_layout.size())
-        };
+        let buffer_index = self.len;
 
         // SAFETY:
-        // - dst is within the pool's allocation (buffer_index < max_components).
-        // - dst is aligned to align_of::<T>(): buffer base is aligned to
+        // - buffer_index < max_components (just checked), so `row_ptr` yields a
+        //   pointer within the pool's allocation.
+        // - The slot is aligned to align_of::<T>(): buffer base is aligned to
         //   component_layout.align(); per the Rust Reference §"Type Layout",
         //   size_of::<T>() is a multiple of align_of::<T>() for every Sized T,
         //   so the stride preserves alignment.
-        // - dst is exclusively owned (&mut self); no aliasing.
+        // - The slot is exclusively owned (&mut self); no aliasing.
         // - ptr::write consumes `value` by move; the local binding ceases to
         //   exist after this call — no scope-exit drop.
-        unsafe { core::ptr::write(dst.cast::<T>(), value) };
+        unsafe { core::ptr::write(self.row_ptr(buffer_index).cast::<T>(), value) };
 
-        let unit = Unit::new(dst);
         let chunk_index = buffer_index / self.components_per_chunk;
         if let Some(chunk) = self.chunks.get_mut(chunk_index) {
             chunk.mark_dirty();
         }
-        self.units.push(unit);
+        self.len += 1;
 
         Some(buffer_index)
     }
 
     /// Removes the last component from the pool, invoking drop glue if needed.
     pub fn pop(&mut self) -> bool {
-        if self.units.is_empty() {
+        if self.len == 0 {
             return false;
         }
 
-        let last_index = self.units.len() - 1;
-        let last_ptr = self.units[last_index].ptr();
+        let last_index = self.len - 1;
 
         // SAFETY:
-        // - last_ptr came from a prior add/add_typed (initialized slot).
+        // - last_index < self.len, so `row_ptr` addresses a slot written by a
+        //   prior add/add_typed (initialized).
         // - We hold &mut self → exclusive access, no aliasing.
-        // - After drop_fn, the slot is logically uninitialized; units.pop()
-        //   removes the index entry so the slot becomes unreachable.
+        // - After drop_fn, the slot is logically uninitialized; `self.len -= 1`
+        //   below removes it from the live range so it becomes unreachable.
         unsafe {
             if let Some(drop_fn) = self.drop_fn {
-                drop_fn(last_ptr);
+                drop_fn(self.row_ptr(last_index));
             }
         }
 
@@ -341,7 +347,7 @@ impl ComponentPool {
         if let Some(chunk) = self.chunks.get_mut(chunk_index) {
             chunk.mark_dirty();
         }
-        self.units.pop();
+        self.len -= 1;
 
         true
     }
@@ -351,10 +357,10 @@ impl ComponentPool {
     /// Useful when determining what will be affected by a `swap_remove`.
     #[inline]
     pub fn last_index(&self) -> Option<usize> {
-        if self.units.is_empty() {
+        if self.len == 0 {
             None
         } else {
-            Some(self.units.len() - 1)
+            Some(self.len - 1)
         }
     }
 
@@ -363,42 +369,39 @@ impl ComponentPool {
     /// The component at `index` is dropped via the registered drop glue before
     /// the last component is memcpy'd into its slot.
     pub fn swap_remove(&mut self, index: usize) -> bool {
-        if index >= self.units.len() {
+        if index >= self.len {
             return false;
         }
 
-        let last_index = self.units.len() - 1;
+        let last_index = self.len - 1;
 
         if index != last_index {
-            let removed_ptr = self.units[index].ptr();
-            let last_ptr = self.units[last_index].ptr();
-
             // SAFETY:
-            // - removed_ptr came from a prior add/add_typed (initialized slot).
-            // - We hold &mut self → exclusive access; removed_ptr and last_ptr
-            //   are separate non-overlapping slots (index != last_index, stride
-            //   is size_of::<T>() which is > 0 (ZSTs rejected at pool construction)).
+            // - index < self.len and last_index < self.len, so both `row_ptr`
+            //   results address slots written by a prior add/add_typed
+            //   (initialized).
+            // - We hold &mut self → exclusive access; the two slots are
+            //   non-overlapping (index != last_index, stride is
+            //   component_layout.size() which is > 0 — ZSTs rejected at pool
+            //   construction).
             // - After drop_fn, the slot at `index` is logically uninitialized;
             //   the copy_nonoverlapping below overwrites it with last's bytes,
             //   restoring the invariant.
             // - PANIC CAVEAT: if T::drop panics, the slot at `index` is
-            //   uninitialized while units.len() still includes it. Per the
+            //   uninitialized while self.len still includes it. Per the
             //   Component trait panic policy this is a logic bug in the user's
             //   Drop impl; the pool is considered poisoned.
             unsafe {
+                let removed_ptr = self.row_ptr(index);
                 if let Some(drop_fn) = self.drop_fn {
                     drop_fn(removed_ptr);
                 }
-                // SAFETY: separate, non-overlapping slots; component_layout.size()
-                // bytes each; pool allocation is a flat array.
                 std::ptr::copy_nonoverlapping(
-                    last_ptr,
+                    self.row_ptr(last_index),
                     removed_ptr,
                     self.component_layout.size(),
                 );
             }
-
-            self.units[index] = Unit::new(removed_ptr);
 
             // Phase 10 STORE5: swap tick slots in lockstep with the data
             // buffer. The last row's ticks move into the vacated slot so
@@ -406,8 +409,8 @@ impl ComponentPool {
             // history. No tick is dropped here — `Tick` is `Copy`.
             //
             // SAFETY: `index != last_index` (checked above) and both
-            // indices are `< self.units.len()` (the removal precondition
-            // guards `index`, and `last_index = self.units.len() - 1`).
+            // indices are `< self.len` (the removal precondition guards
+            // `index`, and `last_index = self.len - 1`).
             // `&mut self` gives exclusive access to the tick buffers;
             // no concurrent reader exists per Phase 9 SCH3.
             unsafe {
@@ -428,14 +431,14 @@ impl ComponentPool {
             }
         } else {
             // Removing the last element: drop in place, no memcpy.
-            let removed_ptr = self.units[index].ptr();
-
-            // SAFETY: removed_ptr came from a prior add/add_typed (initialized).
-            // Exclusive access via &mut self. units.pop() below removes the
-            // entry so the slot becomes unreachable.
+            //
+            // SAFETY: index == last_index < self.len, so `row_ptr` addresses a
+            // slot written by a prior add/add_typed (initialized). Exclusive
+            // access via &mut self. `self.len -= 1` below removes it from the
+            // live range so the slot becomes unreachable.
             unsafe {
                 if let Some(drop_fn) = self.drop_fn {
-                    drop_fn(removed_ptr);
+                    drop_fn(self.row_ptr(index));
                 }
             }
 
@@ -445,28 +448,32 @@ impl ComponentPool {
             }
         }
 
-        self.units.pop();
+        self.len -= 1;
         true
     }
 
     /// Gets a pointer to a component by index.
     pub fn get_raw(&self, index: usize) -> Option<*const u8> {
-        if index >= self.units.len() {
+        if index >= self.len {
             return None;
         }
-        Some(self.units[index].ptr())
+        // SAFETY: index < self.len ⇒ within the live, initialized range; the
+        // slot was written by a prior add/add_typed.
+        Some(unsafe { self.row_ptr(index).cast_const() })
     }
 
     /// Gets a mutable pointer to a component by index.
     pub fn get_raw_mut(&mut self, index: usize) -> Option<*mut u8> {
-        if index >= self.units.len() {
+        if index >= self.len {
             return None;
         }
         let chunk_index = index / self.components_per_chunk;
         if let Some(chunk) = self.chunks.get_mut(chunk_index) {
             chunk.mark_dirty();
         }
-        Some(self.units[index].ptr())
+        // SAFETY: index < self.len ⇒ within the live, initialized range; the
+        // slot was written by a prior add/add_typed.
+        Some(unsafe { self.row_ptr(index) })
     }
 
     /// Type-checked shared read.
@@ -494,7 +501,7 @@ impl ComponentPool {
         );
         let ptr = self.get_raw(index)?;
         // SAFETY:
-        // - `get_raw` returns `Some(ptr)` only when `index < self.units.len()`,
+        // - `get_raw` returns `Some(ptr)` only when `index < self.len`,
         //   meaning the slot was populated via `add` / `add_typed` and has not
         //   been removed. All such slots are fully initialized.
         // - The pool allocates its buffer aligned to `component_layout.align()`,
@@ -529,7 +536,7 @@ impl ComponentPool {
         );
         let ptr = self.get_raw_mut(index)?;
         // SAFETY:
-        // - `get_raw_mut` returns `Some(ptr)` only when `index < self.units.len()`,
+        // - `get_raw_mut` returns `Some(ptr)` only when `index < self.len`,
         //   meaning the slot is fully initialized.
         // - Alignment matches `align_of::<T>()` per the same reasoning as
         //   `get_typed`: the TypeId `debug_assert_eq!` above confirms `T` is the
@@ -553,8 +560,8 @@ impl ComponentPool {
     ///
     /// If the existing component's `Drop` impl panics during the internal
     /// `drop_fn` call, the slot at `index` becomes logically uninitialized
-    /// while `self.units.len()` still includes it. Any subsequent operation
-    /// on the pool that touches this slot is undefined behavior.
+    /// while `self.len` still includes it. Any subsequent operation on the
+    /// pool that touches this slot is undefined behavior.
     ///
     /// Per the engine-wide policy (see `Component` trait `# Panic safety`):
     /// `Component::drop` must not panic. If a panicking `Drop` is unavoidable,
@@ -569,29 +576,28 @@ impl ComponentPool {
             component_bytes.len()
         );
 
-        if index >= self.units.len() {
+        if index >= self.len {
             return false;
         }
 
-        let ptr = self.units[index].ptr();
-
         // SAFETY:
-        // - index < units.len() (checked); units[index] is a live, initialized slot.
-        // - ptr is aligned to the pool's component type (pool allocation invariant).
+        // - index < self.len (checked); the slot is live and initialized.
+        // - row_ptr is aligned to the pool's component type (pool allocation
+        //   invariant).
         // - Exclusive access via &mut self; no aliasing.
         // - drop_fn drops the existing value; copy_nonoverlapping writes the
-        //   new bytes. Both halves use ptr as the destination/source respectively.
-        //   They are sequenced (drop then write), so there is no overlap issue.
+        //   new bytes. Both halves use the same slot as destination/source
+        //   respectively. They are sequenced (drop then write), so there is no
+        //   overlap issue.
         // - If component_bytes is not the correct type representation, the new
         //   slot contents are UB on subsequent typed access — raw API caller's
         //   responsibility (unchanged from pre-existing contract).
+        // - Source (caller memory) and destination (arena slot) do not overlap.
         unsafe {
+            let ptr = self.row_ptr(index);
             if let Some(drop_fn) = self.drop_fn {
                 drop_fn(ptr);
             }
-            // SAFETY: size verified by debug_assert; pool allocation is aligned
-            // to component type; source and destination do not overlap (source
-            // is caller memory, destination is arena memory).
             std::ptr::copy_nonoverlapping(
                 component_bytes.as_ptr(),
                 ptr,
@@ -615,14 +621,14 @@ impl ComponentPool {
     ///
     /// # Returns
     /// - `true` on success.
-    /// - `false` if `index >= self.units.len()`. `value` drops normally at
-    ///   scope exit — the pool is not modified.
+    /// - `false` if `index >= self.len`. `value` drops normally at scope exit
+    ///   — the pool is not modified.
     ///
     /// # Panic safety
     /// **This method is NOT panic-safe.** If the existing component's `Drop`
     /// impl panics during the internal drop_fn call, the slot at `index`
-    /// becomes logically uninitialized while `self.units.len()` still includes
-    /// it. Any subsequent operation on the pool that touches this slot is
+    /// becomes logically uninitialized while `self.len` still includes it.
+    /// Any subsequent operation on the pool that touches this slot is
     /// undefined behavior.
     ///
     /// This matches the engine-wide policy in the `Component` trait docs:
@@ -641,15 +647,13 @@ impl ComponentPool {
             std::any::type_name::<T>()
         );
 
-        if index >= self.units.len() {
+        if index >= self.len {
             return false; // value drops at scope exit
         }
 
-        let ptr = self.units[index].ptr();
-
         // SAFETY:
-        // - index < units.len() (checked); units[index] is a live, initialized slot.
-        // - ptr came from pool allocation; aligned to align_of::<T>() (pool
+        // - index < self.len (checked); the slot is live and initialized.
+        // - row_ptr came from pool allocation; aligned to align_of::<T>() (pool
         //   allocation invariant: buffer aligned to component_layout.align(), and
         //   stride is a multiple of that alignment).
         // - Exclusive access via &mut self.
@@ -660,6 +664,7 @@ impl ComponentPool {
         // - ptr::write is nounwind (core intrinsic); consumes `value` by move —
         //   the local binding ceases to exist after this call.
         unsafe {
+            let ptr = self.row_ptr(index);
             if let Some(drop_fn) = self.drop_fn {
                 drop_fn(ptr);
             }
@@ -673,36 +678,10 @@ impl ComponentPool {
         true
     }
 
-    /// Returns the slice of [`Unit`]s that physically live in `chunk_index`.
-    ///
-    /// Preferred over the old `get_chunk_component_pointers` API because it is
-    /// O(1) and zero-alloc: units belonging to a single chunk occupy the
-    /// contiguous range `[start, end)` inside the dense `units` Vec, so no
-    /// iteration or heap allocation is needed.  Callers that need raw pointers
-    /// can extract them at the call site via `unit.ptr()`.
-    ///
-    /// Returns `&[]` when `chunk_index` is past the last chunk that has any
-    /// live units (including a fully-empty pool).
-    #[inline]
-    pub fn chunk_units(&self, chunk_index: usize) -> &[Unit] {
-        debug_assert!(self.components_per_chunk > 0, "invariant: components_per_chunk > 0");
-
-        let start = chunk_index * self.components_per_chunk;
-        if start >= self.units.len() {
-            return &[];
-        }
-        let end = (start + self.components_per_chunk).min(self.units.len());
-
-        // SAFETY: start < self.units.len() (checked above) and
-        // end <= self.units.len() (clamped by .min()). Both bounds are within
-        // the initialised region [0, units.len()), so the slice is valid.
-        &self.units[start..end]
-    }
-
     /// Gets the number of active components.
     #[inline]
     pub fn count(&self) -> usize {
-        self.units.len()
+        self.len
     }
 
     /// Gets the total pool capacity.
@@ -790,13 +769,13 @@ impl ComponentPool {
     /// Checks if the pool is full.
     #[inline]
     pub fn is_full(&self) -> bool {
-        self.units.len() >= self.max_components
+        self.len >= self.max_components
     }
 
     /// Gets the remaining capacity.
     #[inline]
     pub fn remaining_capacity(&self) -> usize {
-        self.max_components - self.units.len()
+        self.max_components - self.len
     }
 
     // ── Phase 11 — Unit-pointer accessors + no-drop scaffolding ─────────────
@@ -817,8 +796,10 @@ impl ComponentPool {
     #[allow(dead_code)]
     #[inline]
     pub(crate) fn unit_ptr(&self, idx: usize) -> *const u8 {
-        debug_assert!(idx < self.units.len(), "unit_ptr: idx out of bounds");
-        self.units[idx].ptr().cast_const()
+        debug_assert!(idx < self.len, "unit_ptr: idx out of bounds");
+        // SAFETY: idx < self.len ⇒ within the live, initialized range; the slot
+        // was written by a prior add/add_typed.
+        unsafe { self.row_ptr(idx).cast_const() }
     }
 
     /// Phase 11 W-N1 defensive check (plan §7.4): returns whether `idx`
@@ -828,7 +809,7 @@ impl ComponentPool {
     #[allow(dead_code)]
     #[inline]
     pub(crate) fn has_row(&self, idx: usize) -> bool {
-        idx < self.units.len()
+        idx < self.len
     }
 
     /// Runs the registered `drop_fn` on the slot at `idx`. Logically
@@ -845,14 +826,14 @@ impl ComponentPool {
     ///   read-of-uninit on next access.
     #[allow(dead_code)]
     pub(crate) unsafe fn drop_at(&mut self, idx: usize) {
-        debug_assert!(idx < self.units.len(), "drop_at: idx out of bounds");
+        debug_assert!(idx < self.len, "drop_at: idx out of bounds");
         if let Some(drop_fn) = self.drop_fn {
-            // SAFETY: `idx < self.units.len()` (debug-asserted) ⇒ the slot
-            //   was written by a prior `add` / `add_typed` and contains a
-            //   valid `T`. `&mut self` ⇒ exclusive access; the registered
-            //   `drop_fn` is `unsafe fn(*mut u8)` (= `drop_in_place::<T>`
-            //   under the hood via `register_layout::<T>`).
-            unsafe { drop_fn(self.units[idx].ptr()) };
+            // SAFETY: `idx < self.len` (debug-asserted) ⇒ the slot was written
+            //   by a prior `add` / `add_typed` and contains a valid `T`.
+            //   `&mut self` ⇒ exclusive access; the registered `drop_fn` is
+            //   `unsafe fn(*mut u8)` (= `drop_in_place::<T>` under the hood via
+            //   `register_layout::<T>`).
+            unsafe { drop_fn(self.row_ptr(idx)) };
         }
         let chunk_idx = idx / self.components_per_chunk;
         if let Some(chunk) = self.chunks.get_mut(chunk_idx) {
@@ -872,14 +853,14 @@ impl ComponentPool {
     /// * Caller holds exclusive access via `&mut self`.
     #[allow(dead_code)]
     pub(crate) unsafe fn write_at(&mut self, idx: usize, bytes: &[u8]) {
-        debug_assert!(idx < self.units.len(), "write_at: idx out of bounds");
+        debug_assert!(idx < self.len, "write_at: idx out of bounds");
         debug_assert_eq!(
             bytes.len(),
             self.component_layout.size(),
             "write_at: bytes.len() != layout.size()"
         );
         // SAFETY (mirrors `set_component`):
-        //   * `idx < self.units.len()` — slot is reachable.
+        //   * `idx < self.len` — slot is reachable.
         //   * `&mut self` ⇒ exclusive access.
         //   * Source (`bytes`) and destination (arena slot) are disjoint
         //     allocations; `copy_nonoverlapping` is sound.
@@ -887,7 +868,7 @@ impl ComponentPool {
         unsafe {
             std::ptr::copy_nonoverlapping(
                 bytes.as_ptr(),
-                self.units[idx].ptr(),
+                self.row_ptr(idx),
                 self.component_layout.size(),
             );
         }
@@ -901,8 +882,8 @@ impl ComponentPool {
     /// `drop_fn` invocation on either source or last slot (W-N2 tightening
     /// of plan §7.2).
     ///
-    /// Mirrors the existing [`Self::swap_remove`] flow over the chunked +
-    /// Unit-pointer storage but skips drop.
+    /// Mirrors the existing [`Self::swap_remove`] flow over the dense byte
+    /// buffer but skips drop.
     ///
     /// # Safety (plan §7.2)
     ///
@@ -913,19 +894,17 @@ impl ComponentPool {
     #[allow(dead_code)]
     pub(crate) unsafe fn swap_remove_index_no_drop(&mut self, idx: usize) {
         debug_assert!(
-            idx < self.units.len(),
+            idx < self.len,
             "swap_remove_index_no_drop: idx out of bounds"
         );
-        let last_index = self.units.len() - 1;
+        let last_index = self.len - 1;
 
         if idx != last_index {
-            let removed_ptr = self.units[idx].ptr();
-            let last_ptr = self.units[last_index].ptr();
-
             // SAFETY (mirrors existing `swap_remove` semantics minus the
             // drop):
-            //   * `removed_ptr` and `last_ptr` are valid arena pointers
-            //     produced by prior `add` / `add_typed`.
+            //   * idx < self.len and last_index < self.len, so both `row_ptr`
+            //     results are valid arena pointers produced by prior
+            //     `add` / `add_typed`.
             //   * Non-overlapping: `idx != last_index`; each slot is
             //     `component_layout.size()` bytes. They may live in
             //     different chunks (large pools span multiple), but
@@ -936,18 +915,14 @@ impl ComponentPool {
             //     `move_out_entity` contract.
             unsafe {
                 core::ptr::copy_nonoverlapping(
-                    last_ptr,
-                    removed_ptr,
+                    self.row_ptr(last_index),
+                    self.row_ptr(idx),
                     self.component_layout.size(),
                 );
             }
 
-            // Refresh the unit's pointer (preserves the invariant that
-            // `self.units[idx].ptr()` addresses the bytes for row idx).
-            self.units[idx] = crate::ecs::memory::id_unit::Unit::new(removed_ptr);
-
             // Tick swap — mirrors the existing `swap_remove` block.
-            // SAFETY: idx != last_index, both < self.units.len().
+            // SAFETY: idx != last_index, both < self.len.
             //   `&mut self` ⇒ exclusive access to the tick buffers;
             //   no concurrent reader exists per Phase 9 SCH3.
             unsafe {
@@ -966,9 +941,9 @@ impl ComponentPool {
                 chunk.mark_dirty();
             }
         }
-        // (idx == last_index): just pop. No byte/tick movement needed.
+        // (idx == last_index): just decrement. No byte/tick movement needed.
 
-        self.units.pop();
+        self.len -= 1;
     }
 
     /// Pops the last row without invoking `drop_fn` (plan §7.2 / C5).
@@ -977,14 +952,14 @@ impl ComponentPool {
     #[allow(dead_code)]
     #[inline]
     pub(crate) fn pop_entity_no_drop(&mut self) {
-        debug_assert!(!self.units.is_empty(), "pop_entity_no_drop: pool empty");
-        let last_index = self.units.len() - 1;
+        debug_assert!(self.len != 0, "pop_entity_no_drop: pool empty");
+        let last_index = self.len - 1;
         let chunk_idx = last_index / self.components_per_chunk;
         if let Some(chunk) = self.chunks.get_mut(chunk_idx) {
             chunk.mark_dirty();
         }
         // W-N2: NO `drop_fn` invocation.
-        self.units.pop();
+        self.len -= 1;
     }
 
     // ── Phase 10 STORE3 — tick buffer accessors ─────────────────────────────
@@ -1099,9 +1074,10 @@ impl ComponentPool {
     //
     // §5.6 of the spawn-optimisations plan. The batch path reserves
     // capacity, writes payload bytes directly into pre-validated arena
-    // slots, then commits `units` and stamps `(added, changed)` ticks in
-    // tight loops. All accessors are `pub(crate)` — consumed exclusively
-    // by `Archetype::reserve_capacity`, `SpawnBatchCommand::apply`, and
+    // slots, then commits the rows (advancing `len`) and stamps
+    // `(added, changed)` ticks in tight loops. All accessors are
+    // `pub(crate)` — consumed exclusively by `Archetype::reserve_capacity`,
+    // `SpawnBatchCommand::apply`, and
     // `ComponentPoolBundle::commit_units_batch` / `fill_ticks_batch`.
 
     /// Phase 12.5 Opt-A2 (C-N1): returns `true` iff this pool can reserve
@@ -1112,8 +1088,7 @@ impl ComponentPool {
     /// (two-phase commit; mirrors `can_push_entity_components`).
     #[inline]
     pub(crate) fn can_reserve(&self, n: usize) -> bool {
-        self.units
-            .len()
+        self.len
             .checked_add(n)
             .is_some_and(|end| end <= self.max_components)
     }
@@ -1122,25 +1097,25 @@ impl ComponentPool {
     /// for diagnostic / error-reporting paths (`EcsError::ArchetypePoolCapacityExceeded`).
     #[inline]
     pub(crate) fn len_for_reserve(&self) -> (usize, usize) {
-        (self.units.len(), self.max_components)
+        (self.len, self.max_components)
     }
 
     /// Phase 12.5 Opt-A2 (SBO13 / §5.6): writes `bytes` into the slot at
-    /// `idx` WITHOUT touching `units`, WITHOUT capacity checks, and
+    /// `idx` WITHOUT advancing `len`, WITHOUT capacity checks, and
     /// WITHOUT invoking any drop (the slot is logically uninit).
     ///
     /// The batch path uses this for every row in `[start_row, start_row + n)`
     /// after `reserve_capacity` has validated the range and before
-    /// `commit_units` extends `units.len()`. Slot bookkeeping (units +
+    /// `commit_units` advances `self.len`. Slot bookkeeping (`len` +
     /// chunk dirty mark) is deferred to [`Self::commit_units`].
     ///
     /// # Safety
     ///
     /// * `idx < max_components` — caller pre-validated via `can_reserve`
     ///   plus `reserve_capacity`'s archetype-level guard.
-    /// * `idx >= units.len()` (i.e. the slot is uninit and not yet
-    ///   committed). After the matching `commit_units(start_row, n)` call
-    ///   the slot becomes addressable.
+    /// * `idx >= self.len` (i.e. the slot is uninit and not yet committed).
+    ///   After the matching `commit_units(start_row, n)` call the slot
+    ///   becomes addressable.
     /// * `bytes.len() == self.component_layout().size()` — debug-asserted.
     /// * `bytes` forms a valid representation of the pool's registered
     ///   type (raw-API contract identical to `write_at`).
@@ -1163,29 +1138,26 @@ impl ComponentPool {
             "write_at_unchecked_initialized: bytes.len() != layout.size()"
         );
         // SAFETY (mirrors `add` / `write_at`):
-        //   * `idx < max_components` ⇒ destination is within the pool
-        //     allocation.
+        //   * `idx < max_components` ⇒ `row_ptr` addresses a slot within the
+        //     pool allocation (the buffer-bounds branch of `row_ptr`'s
+        //     contract; this slot is not yet live).
         //   * Source (caller stack) and destination (arena slot) live in
         //     disjoint allocations; `copy_nonoverlapping` is sound.
         //   * `&mut self` ⇒ exclusive access.
         //   * The slot is logically uninit by the caller's pre-reserve
         //     contract; no drop runs.
         unsafe {
-            let dst = self
-                .buffer
-                .as_ptr()
-                .add(idx * self.component_layout.size());
             std::ptr::copy_nonoverlapping(
                 bytes.as_ptr(),
-                dst,
+                self.row_ptr(idx),
                 self.component_layout.size(),
             );
         }
     }
 
     /// Phase 12.5 Opt-A2 (§5.6): commits `n` rows starting at `start_row`
-    /// into `units` after the batch path has written every row's bytes via
-    /// [`Self::write_at_unchecked_initialized`].
+    /// (advancing `self.len`) after the batch path has written every row's
+    /// bytes via [`Self::write_at_unchecked_initialized`].
     ///
     /// Pre: `start_row == self.count()` (the rows must land contiguously
     /// at the tail). Chunk dirty marks are stamped for every chunk the
@@ -1209,44 +1181,23 @@ impl ComponentPool {
         }
         debug_assert_eq!(
             start_row,
-            self.units.len(),
+            self.len,
             "commit_units: start_row {} != current count {} (rows must extend the tail)",
             start_row,
-            self.units.len()
+            self.len
         );
         debug_assert!(
             start_row + count <= self.max_components,
             "commit_units: range past max_components"
         );
 
-        // Fused reserve + raw-pointer-write + set_len. Each
-        // `Unit { ptr: buffer.add(i * stride) }` is a `#[repr(transparent)]`
-        // wrapper around a `*mut u8`, so the inner loop is a strided
-        // pointer increment — the compiler vectorises it.
-        self.units.reserve(count);
-        let stride = self.component_layout.size();
-        // SAFETY (commit_units / SBO13):
-        //   * `self.units.reserve(count)` above guarantees capacity for
-        //     `count` more `Unit` writes past the current `len()`.
-        //   * `start_row == self.units.len()` (debug-asserted), so the
-        //     written range is exactly `[len, len + count)` — uninitialised
-        //     slots inside the existing capacity; no aliasing with
-        //     reachable `&Unit` views.
-        //   * `start_row + count <= max_components` ⇒ every computed
-        //     `base.add(i * stride)` lies inside the arena buffer
-        //     allocation, matching the `write_at_unchecked_initialized`
-        //     writes performed by the caller for the same slots.
-        //   * `Unit` is `#[repr(transparent)]` over `*mut u8` so the raw
-        //     write deposits a valid `Unit` representation.
-        unsafe {
-            let base = self.buffer.as_ptr();
-            let units_ptr = self.units.as_mut_ptr();
-            for i in 0..count {
-                let component_ptr = base.add((start_row + i) * stride);
-                std::ptr::write(units_ptr.add(start_row + i), Unit::new(component_ptr));
-            }
-            self.units.set_len(start_row + count);
-        }
+        // The per-row bytes were already written by the caller's
+        // `write_at_unchecked_initialized` calls into the dense buffer
+        // (rows `[start_row, start_row + count)`, which the debug_assert above
+        // proves equals `[len, len + count)`). With the parallel `Vec<Unit>`
+        // removed (Phase X.B), committing the batch is a single length bump —
+        // the rows are now addressable via `row_ptr`.
+        self.len += count;
 
         // Mark every touched chunk dirty (range may span multiple).
         //
@@ -1340,10 +1291,10 @@ impl ComponentPool {
 //   - Pool growth / extension (any path that may invoke `arena.allocate_*`)
 //     is restricted to the apply window by the ALLOC1 discipline; no
 //     concurrent reader can observe a half-grown pool.
-//   - `Vec<Unit>` and `Vec<Chunk>` mutations occur only on `&mut self` paths
+//   - `len: usize` and `Vec<Chunk>` mutations occur only on `&mut self` paths
 //     (`add`, `pop`, `swap_remove`, `set_component`); the dispatcher
 //     serialises these under the apply window. Worker reads use `&self`
-//     entry points (`get_raw`, `chunk_units`, `buffer_ptr`, `count`).
+//     entry points (`get_raw`, `buffer_ptr`, `count`).
 //   - Phase 10: the `added_ticks` / `changed_ticks` buffers are
 //     `Box<[UnsafeCell<Tick>]>`. `UnsafeCell<Tick>` is `!Sync` on its own,
 //     but the pool exposes the cells only through unsafe accessors
@@ -1376,16 +1327,17 @@ impl Drop for ComponentPool {
     fn drop(&mut self) {
         if let Some(drop_fn) = self.drop_fn {
             // SAFETY:
-            // - units[0..len] are all live and initialized per the pool's
-            //   invariant (every slot up to units.len() was written by add or
-            //   add_typed before being tracked in `units`).
-            // - Each unit's ptr() points at a properly-aligned, T-sized,
-            //   T-typed allocation (pool construction invariant).
+            // - Rows `[0, self.len)` are all live and initialized per the pool's
+            //   invariant (every slot up to `self.len` was written by add or
+            //   add_typed before `self.len` was incremented).
+            // - Each `row_ptr(row)` points at a properly-aligned, T-sized,
+            //   T-typed allocation (pool construction invariant); `row < len`
+            //   satisfies `row_ptr`'s safety contract.
             // - We have exclusive access (Drop receives &mut self).
             // - drop_fn matches the signature unsafe fn(*mut u8) and calls
             //   drop_in_place::<T> which is valid for these initialized slots.
-            for unit in &self.units {
-                unsafe { drop_fn(unit.ptr()) }
+            for row in 0..self.len {
+                unsafe { drop_fn(self.row_ptr(row)) }
             }
         }
         // Arena memory release happens via Arena::Drop (M-001).
@@ -1407,10 +1359,17 @@ mod tests {
     //   drop_fn integration:           200..207
     //   drop_safety integration:       480..481
     //   typed-read tests below:        220..223
+    //   Phase X.B dense-equivalence tests below: 224..226
     const POS_ID: ComponentId = ComponentId(220);
     const VEL_ID: ComponentId = ComponentId(221);
     const OTHER_ID: ComponentId = ComponentId(222);
     const F32_WRAP_ID: ComponentId = ComponentId(223);
+    // Phase X.B: a u64-payload component for the dense-pointer + oracle tests
+    // (a stride that is a clean power-of-2 makes the `buffer + i*stride`
+    // address arithmetic in `dense_equivalence` trivially auditable).
+    const U64_ID: ComponentId = ComponentId(224);
+    // Phase X.B: a drop-counting component for `drop_count_exact`.
+    const DROPPER_ID: ComponentId = ComponentId(225);
 
     // ---- component type definitions ------------------------------------------------
 
@@ -1625,6 +1584,605 @@ mod tests {
             ptr,
             SIMD_BUFFER_ALIGN,
             ptr % SIMD_BUFFER_ALIGN,
+        );
+    }
+
+    // ====================================================================
+    // Phase X.B — dense `Vec<Unit>` elimination: behavior-equivalence proofs.
+    //
+    // These tests pin the central refactor claim:
+    //   `(the deleted Unit at row i).ptr()  ≡  buffer_ptr() + i * stride`
+    // i.e. the row pointer that `ComponentPool` now *computes* on demand
+    // (`row_ptr`) is byte-for-byte the address the parallel `Vec<Unit>`
+    // used to cache. Every test below drives only the public / pub(crate)
+    // surface — `add_typed` / `get_raw` / `get_typed` / `swap_remove` /
+    // `pop` / `count` / `buffer_ptr` — so they verify observable behavior,
+    // not internal representation.
+    // ====================================================================
+
+    /// A 16-byte component whose two fields make a moved value distinguishable
+    /// from its destination slot. Used by the dense / swap / oracle tests.
+    #[repr(C)]
+    #[derive(Clone, Copy, PartialEq, Debug)]
+    struct U64Pair {
+        a: u64,
+        b: u64,
+    }
+
+    impl Component for U64Pair {
+        fn component_id() -> ComponentId {
+            static ID: OnceLock<ComponentId> = OnceLock::new();
+            *ID.get_or_init(|| {
+                component_registry::register_layout::<U64Pair>(U64_ID.0);
+                U64_ID
+            })
+        }
+    }
+
+    fn make_u64_pool(arena: &Arena, num_chunks: usize, per_chunk: usize) -> ComponentPool {
+        component_registry::register_layout::<U64Pair>(U64_ID.0);
+        ComponentPool::new(arena, U64_ID.0, num_chunks, per_chunk)
+    }
+
+    /// Phase X.B core proof: after a mixed `add` + `swap_remove(mid)` + `add`
+    /// sequence, every live row `i` satisfies
+    /// `get_raw(i) == buffer_ptr() + i * stride` AND the round-tripped value
+    /// matches a dense `Vec` oracle maintained with the same swap_remove rule.
+    /// This is the exact identity the deleted `Unit.ptr()` cache used to hold.
+    #[test]
+    fn dense_equivalence() {
+        let arena = Arena::new();
+        // Multiple chunks so a swap can move a value across a chunk boundary
+        // (4 chunks × 4 = 16 slots); proves row_ptr spans the whole buffer.
+        let mut pool = make_u64_pool(&arena, 4, 4);
+        let stride = pool.component_layout().size();
+        assert_eq!(stride, 16, "U64Pair stride must be 16 for this test");
+
+        // Mirror oracle: a dense Vec maintained with the same swap_remove rule.
+        let mut oracle: Vec<U64Pair> = Vec::new();
+
+        // Phase 1: add 10 distinguishable values.
+        for i in 0..10u64 {
+            let v = U64Pair { a: i, b: 1000 + i };
+            pool.add_typed(v).expect("pool has capacity for 16");
+            oracle.push(v);
+        }
+
+        // Phase 2: swap_remove a middle index (forces a cross-row memcpy).
+        let mid = 3;
+        assert!(pool.swap_remove(mid), "swap_remove(mid) in bounds");
+        oracle.swap_remove(mid);
+
+        // Phase 3: add 2 more after the hole was filled.
+        for i in 100..102u64 {
+            let v = U64Pair { a: i, b: 2000 + i };
+            pool.add_typed(v).expect("pool still has capacity");
+            oracle.push(v);
+        }
+
+        assert_eq!(
+            pool.count(),
+            oracle.len(),
+            "pool count must track the oracle length after the mixed sequence"
+        );
+
+        let base = pool.buffer_ptr() as usize;
+        // `i` indexes the pool row (`get_raw(i)`), the `i*stride` address math, AND
+        // the oracle — a genuine multi-index loop where the range form is clearest.
+        #[allow(clippy::needless_range_loop)]
+        for i in 0..pool.count() {
+            // (1) ADDRESS identity: the computed row pointer equals the address
+            //     the deleted Unit.ptr() would have held: buffer + i*stride.
+            let raw = pool.get_raw(i).expect("row i is live") as usize;
+            assert_eq!(
+                raw,
+                base + i * stride,
+                "row {} pointer must equal buffer_ptr() + {}*{} (row_ptr ≡ Unit.ptr())",
+                i,
+                i,
+                stride
+            );
+
+            // (2) VALUE identity: the bytes at that computed address round-trip
+            //     to the oracle's value, proving the address points at the
+            //     right live datum (not merely an in-bounds address).
+            let got = pool.get_typed::<U64Pair>(i).expect("row i typed read");
+            assert_eq!(
+                *got, oracle[i],
+                "row {} value must match the dense Vec oracle after swap_remove",
+                i
+            );
+        }
+    }
+
+    /// `swap_remove(k)` on a middle index must: drop the hole's value, move the
+    /// previously-last value into row `k`, decrement count, and leave every
+    /// other live row byte-unchanged.
+    #[test]
+    fn swap_remove_moves_last_value_into_hole() {
+        let arena = Arena::new();
+        let mut pool = make_u64_pool(&arena, 1, 16);
+
+        const N: u64 = 8;
+        for i in 0..N {
+            pool.add_typed(U64Pair { a: i, b: 10 + i })
+                .expect("capacity 16 holds 8");
+        }
+
+        let last_val = *pool
+            .get_typed::<U64Pair>((N - 1) as usize)
+            .expect("last row live");
+        let k = 2usize;
+        let untouched_lo = *pool.get_typed::<U64Pair>(0).expect("row 0 live");
+        let untouched_hi = *pool.get_typed::<U64Pair>(4).expect("row 4 live");
+
+        assert!(pool.swap_remove(k), "swap_remove(2) in bounds");
+
+        assert_eq!(
+            pool.count(),
+            (N - 1) as usize,
+            "count must decrement by exactly one"
+        );
+        assert_eq!(
+            *pool.get_typed::<U64Pair>(k).expect("hole now holds moved value"),
+            last_val,
+            "the previously-last value must now be readable at the hole index k"
+        );
+        // Rows outside k (and below the new len) must be byte-identical.
+        assert_eq!(
+            *pool.get_typed::<U64Pair>(0).expect("row 0 still live"),
+            untouched_lo,
+            "row 0 (in [0,k)) must be unchanged by swap_remove(k)"
+        );
+        assert_eq!(
+            *pool.get_typed::<U64Pair>(4).expect("row 4 still live"),
+            untouched_hi,
+            "row 4 (in (k, last)) must be unchanged by swap_remove(k)"
+        );
+    }
+
+    /// A drop-counting component to prove the new `Drop` loop `0..len` drops
+    /// every live row exactly once and never touches the uninitialised
+    /// `[len, max_components)` slots.
+    #[repr(C)]
+    struct Dropper {
+        counter: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Drop for Dropper {
+        fn drop(&mut self) {
+            self.counter
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    impl Component for Dropper {
+        fn component_id() -> ComponentId {
+            static ID: OnceLock<ComponentId> = OnceLock::new();
+            *ID.get_or_init(|| {
+                component_registry::register_layout::<Dropper>(DROPPER_ID.0);
+                DROPPER_ID
+            })
+        }
+    }
+
+    /// Add M rows into a pool with spare capacity, `swap_remove` one
+    /// (counter == 1), then drop the pool: counter must equal M — each
+    /// remaining live row dropped exactly once, and NONE of the uninitialised
+    /// `[len, max_components)` slots dropped (which would over-count).
+    #[test]
+    fn drop_count_exact() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        component_registry::register_layout::<Dropper>(DROPPER_ID.0);
+        let arena = Arena::new();
+        // Capacity 16, only 6 live → 10 uninit slots that must NOT be dropped.
+        let mut pool = ComponentPool::new(&arena, DROPPER_ID.0, 1, 16);
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        const M: usize = 6;
+        for _ in 0..M {
+            pool.add_typed(Dropper {
+                counter: Arc::clone(&counter),
+            })
+            .expect("capacity 16 holds 6");
+        }
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            0,
+            "no drops before any removal"
+        );
+
+        // swap_remove a middle row → exactly one drop of the removed value.
+        assert!(pool.swap_remove(2), "swap_remove(2) in bounds");
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            1,
+            "swap_remove must drop exactly the removed component"
+        );
+
+        // Drop the pool: the remaining M-1 live rows drop, total == M.
+        drop(pool);
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            M,
+            "pool Drop must drop each remaining live row exactly once \
+             (total {M}); the uninit [len, max) slots must NOT be dropped"
+        );
+    }
+
+    /// proptest oracle: drive a generated stream of `add` / `swap_remove` /
+    /// `pop` ops against a `Vec<U64Pair>` reference. After every op, assert
+    /// `count()` matches and every live row's value matches the oracle (whose
+    /// `swap_remove` mirrors the pool's last-into-hole rule). This is the
+    /// strongest evidence the *computed* row pointers behave identically to the
+    /// deleted cached pointers across an arbitrary op sequence.
+    mod oracle {
+        use super::{U64Pair, U64_ID};
+        use crate::ecs::core::component::component::Component as _;
+        use crate::ecs::core::component::component_registry;
+        use crate::ecs::memory::arena::Arena;
+        use crate::ecs::memory::component_pool::ComponentPool;
+        use proptest::prelude::*;
+
+        #[derive(Clone, Debug)]
+        enum Op {
+            Add(u64),
+            SwapRemove(usize),
+            Pop,
+        }
+
+        fn op_strategy() -> impl Strategy<Value = Op> {
+            prop_oneof![
+                any::<u64>().prop_map(Op::Add),
+                any::<usize>().prop_map(Op::SwapRemove),
+                Just(Op::Pop),
+            ]
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(64))]
+            #[test]
+            fn pool_matches_vec_oracle(ops in proptest::collection::vec(op_strategy(), 1..200)) {
+                // Force registration before pool construction.
+                let _ = U64Pair::component_id();
+                component_registry::register_layout::<U64Pair>(U64_ID.0);
+
+                let arena = Arena::new();
+                // 4 chunks × 64 = 256 capacity — comfortably above the 200-op cap.
+                let mut pool = ComponentPool::new(&arena, U64_ID.0, 4, 64);
+                let mut oracle: Vec<U64Pair> = Vec::new();
+
+                for op in ops {
+                    match op {
+                        Op::Add(seed) => {
+                            // Skip adds once the pool is full (the pool returns
+                            // None; the oracle must mirror by not pushing).
+                            if pool.count() < pool.capacity() {
+                                let v = U64Pair { a: seed, b: seed ^ 0xA5A5_A5A5_A5A5_A5A5 };
+                                let idx = pool.add_typed(v);
+                                prop_assert_eq!(idx, Some(oracle.len()));
+                                oracle.push(v);
+                            }
+                        }
+                        Op::SwapRemove(raw_idx) => {
+                            if oracle.is_empty() {
+                                // Out-of-bounds remove must be a no-op (returns false).
+                                prop_assert!(!pool.swap_remove(0));
+                            } else {
+                                let idx = raw_idx % oracle.len();
+                                prop_assert!(pool.swap_remove(idx));
+                                oracle.swap_remove(idx);
+                            }
+                        }
+                        Op::Pop => {
+                            let popped = pool.pop();
+                            prop_assert_eq!(popped, oracle.pop().is_some());
+                        }
+                    }
+
+                    // Invariant after every op: count + every live row's value.
+                    prop_assert_eq!(pool.count(), oracle.len());
+                    // multi-index: pool row (`get_typed(i)`) + oracle, by the same `i`.
+                    #[allow(clippy::needless_range_loop)]
+                    for i in 0..oracle.len() {
+                        let got = pool.get_typed::<U64Pair>(i)
+                            .expect("live row must read back");
+                        prop_assert_eq!(*got, oracle[i],
+                            "row value mismatch vs oracle at index {}", i);
+                    }
+                }
+            }
+        }
+    }
+
+    // ====================================================================
+    // Phase X.B — the three spec-named behavior-equivalence GATES.
+    //
+    // These complement (do not replace) the dev-authored `dense_equivalence`
+    // / `swap_remove_moves_last_value_into_hole` / `drop_count_exact` /
+    // `oracle::pool_matches_vec_oracle` tests above by tightening them to the
+    // exact contract the task brief enumerates:
+    //   * Gate 1 asserts the oracle + address identity AFTER EVERY op across a
+    //     multi-swap_remove interleaving (not just at the end);
+    //   * Gate 2 adds `set_component(i, v)` to the proptest op alphabet;
+    //   * Gate 3 adds the `swap_remove_index_no_drop` ZERO-drop assertion.
+    // All three drive only the public / pub(crate) surface — the computed
+    // `row_ptr` is never named, so they verify observable behavior.
+    // ====================================================================
+
+    /// Raw little-endian byte view of a `U64Pair` for the `add` / `set_component`
+    /// raw-API paths.
+    fn u64pair_bytes(p: &U64Pair) -> &[u8] {
+        // SAFETY: `U64Pair` is `#[repr(C)]` POD (two `u64`); the slice spans
+        // exactly `size_of::<U64Pair>()` initialized bytes.
+        unsafe {
+            std::slice::from_raw_parts(
+                (p as *const U64Pair).cast::<u8>(),
+                std::mem::size_of::<U64Pair>(),
+            )
+        }
+    }
+
+    /// Asserts the full substitution + value identity for every live row of
+    /// `pool` against the dense `oracle`:
+    ///   (1) `get_raw(i)` address == `buffer_ptr() + i * stride` (the deleted
+    ///       `Unit.ptr()` identity), and
+    ///   (2) `get_typed::<U64Pair>(i)` == `oracle[i]` (the moved-value identity).
+    fn assert_pool_matches_oracle(pool: &ComponentPool, oracle: &[U64Pair], stride: usize) {
+        assert_eq!(
+            pool.count(),
+            oracle.len(),
+            "count must equal the oracle length"
+        );
+        let base = pool.buffer_ptr() as usize;
+        // multi-index: pool row (`get_raw(i)`) + `i*stride` address + oracle, same `i`.
+        #[allow(clippy::needless_range_loop)]
+        for i in 0..oracle.len() {
+            let raw = pool.get_raw(i).expect("live row i must yield a raw ptr") as usize;
+            assert_eq!(
+                raw,
+                base + i * stride,
+                "row {} address must equal buffer_ptr() + {}*{} (row_ptr ≡ Unit.ptr())",
+                i,
+                i,
+                stride
+            );
+            let got = pool.get_typed::<U64Pair>(i).expect("live row i typed read");
+            assert_eq!(*got, oracle[i], "row {} value must match the oracle", i);
+        }
+    }
+
+    /// GATE 1 — `dense_equivalence_after_swap_remove`.
+    ///
+    /// Drives the exact brief sequence: add several rows, `swap_remove` a
+    /// MIDDLE row, add more, `swap_remove` again — and after EVERY structural
+    /// op asserts both the address identity and the value identity against a
+    /// `Vec` oracle maintained with the same last-into-hole semantics. This
+    /// proves the computed-pointer mapping equals the old stored-pointer
+    /// mapping across an interleaving, not merely at a single terminal state.
+    #[test]
+    fn dense_equivalence_after_swap_remove() {
+        let arena = Arena::new();
+        // 4 chunks × 4 = 16 slots: a mid-row swap can move the last row across
+        // a chunk boundary, exercising row_ptr over the whole buffer.
+        let mut pool = make_u64_pool(&arena, 4, 4);
+        let stride = pool.component_layout().size();
+        assert_eq!(stride, 16, "U64Pair stride must be 16 for the address-identity math");
+
+        let mut oracle: Vec<U64Pair> = Vec::new();
+
+        // add 6 distinct rows; check after each.
+        for i in 0..6u64 {
+            let v = U64Pair { a: i, b: 0xF00D_0000 + i };
+            let idx = pool.add_typed(v).expect("capacity 16 holds 6");
+            oracle.push(v);
+            assert_eq!(idx, oracle.len() - 1, "add must return the tail index");
+            assert_pool_matches_oracle(&pool, &oracle, stride);
+        }
+
+        // swap_remove a MIDDLE row (index 2 of 0..6) — a real last-into-hole memcpy.
+        assert!(pool.swap_remove(2), "swap_remove(2) in bounds");
+        oracle.swap_remove(2);
+        assert_pool_matches_oracle(&pool, &oracle, stride);
+
+        // add 3 more after the hole was back-filled; check after each.
+        for i in 100..103u64 {
+            let v = U64Pair { a: i, b: 0xBEEF_0000 + i };
+            pool.add_typed(v).expect("capacity 16 holds the regrowth");
+            oracle.push(v);
+            assert_pool_matches_oracle(&pool, &oracle, stride);
+        }
+
+        // swap_remove AGAIN at a different middle index (1 of the new 0..8).
+        assert!(pool.swap_remove(1), "second swap_remove(1) in bounds");
+        oracle.swap_remove(1);
+        assert_pool_matches_oracle(&pool, &oracle, stride);
+
+        // Drain via swap_remove(0) to empty; the identity must hold at every step
+        // including the final single-row (trivial last-row) removal.
+        while !oracle.is_empty() {
+            assert!(pool.swap_remove(0), "swap_remove(0) while non-empty");
+            oracle.swap_remove(0);
+            assert_pool_matches_oracle(&pool, &oracle, stride);
+        }
+        assert_eq!(pool.count(), 0, "pool drained to empty");
+    }
+
+    /// GATE 2 — `proptest_pool_vs_vec_oracle`.
+    ///
+    /// A `proptest` over the op alphabet {`add`, `swap_remove(i)`, `pop`,
+    /// `set_component(i, v)`} against a `Vec<U64Pair>` reference oracle (same
+    /// last-into-hole `swap_remove` rule). After EVERY op: `count()` matches and
+    /// every live row's value matches the oracle. This is the strongest evidence
+    /// the computed pointers behave identically across arbitrary interleavings,
+    /// and it adds the in-place-overwrite (`set_component`) path the dev oracle
+    /// omitted. 64 cases bound runtime.
+    mod gate2 {
+        use super::{U64Pair, U64_ID, u64pair_bytes};
+        use crate::ecs::core::component::component::Component as _;
+        use crate::ecs::core::component::component_registry;
+        use crate::ecs::memory::arena::Arena;
+        use crate::ecs::memory::component_pool::ComponentPool;
+        use proptest::prelude::*;
+
+        #[derive(Clone, Debug)]
+        enum Op {
+            Add(u64),
+            SwapRemove(usize),
+            Pop,
+            SetComponent(usize, u64),
+        }
+
+        fn op_strategy() -> impl Strategy<Value = Op> {
+            prop_oneof![
+                any::<u64>().prop_map(Op::Add),
+                any::<usize>().prop_map(Op::SwapRemove),
+                Just(Op::Pop),
+                (any::<usize>(), any::<u64>())
+                    .prop_map(|(i, v)| Op::SetComponent(i, v)),
+            ]
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(64))]
+            #[test]
+            fn proptest_pool_vs_vec_oracle(
+                ops in proptest::collection::vec(op_strategy(), 1..200)
+            ) {
+                let _ = U64Pair::component_id();
+                component_registry::register_layout::<U64Pair>(U64_ID.0);
+
+                let arena = Arena::new();
+                // 4 chunks × 64 = 256 capacity > the 200-op cap.
+                let mut pool = ComponentPool::new(&arena, U64_ID.0, 4, 64);
+                let mut oracle: Vec<U64Pair> = Vec::new();
+
+                for op in ops {
+                    match op {
+                        Op::Add(seed) => {
+                            if pool.count() < pool.capacity() {
+                                let v = U64Pair { a: seed, b: !seed };
+                                let idx = pool.add_typed(v);
+                                prop_assert_eq!(idx, Some(oracle.len()));
+                                oracle.push(v);
+                            }
+                        }
+                        Op::SwapRemove(raw_idx) => {
+                            if oracle.is_empty() {
+                                prop_assert!(!pool.swap_remove(0));
+                            } else {
+                                let idx = raw_idx % oracle.len();
+                                prop_assert!(pool.swap_remove(idx));
+                                oracle.swap_remove(idx);
+                            }
+                        }
+                        Op::Pop => {
+                            let popped = pool.pop();
+                            prop_assert_eq!(popped, oracle.pop().is_some());
+                        }
+                        Op::SetComponent(raw_idx, seed) => {
+                            // set_component is the in-place overwrite path; it
+                            // must mirror exactly into the oracle's same slot.
+                            if oracle.is_empty() {
+                                let v = U64Pair { a: seed, b: seed };
+                                prop_assert!(!pool.set_component(0, u64pair_bytes(&v)));
+                            } else {
+                                let idx = raw_idx % oracle.len();
+                                let v = U64Pair { a: seed, b: seed.rotate_left(32) };
+                                prop_assert!(pool.set_component(idx, u64pair_bytes(&v)));
+                                oracle[idx] = v;
+                            }
+                        }
+                    }
+
+                    prop_assert_eq!(pool.count(), oracle.len());
+                    // multi-index: pool row (`get_typed(i)`) + oracle, by the same `i`.
+                    #[allow(clippy::needless_range_loop)]
+                    for i in 0..oracle.len() {
+                        let got = pool.get_typed::<U64Pair>(i)
+                            .expect("live row must read back");
+                        prop_assert_eq!(*got, oracle[i],
+                            "row value mismatch vs oracle at index {}", i);
+                    }
+                }
+            }
+        }
+    }
+
+    /// GATE 3 — `drop_count_exactly_once`.
+    ///
+    /// Pins the three drop-accounting contracts the `Drop { for row in 0..len }`
+    /// loop and the two swap-remove variants must honour:
+    ///   (a) pool `Drop` drops each LIVE row exactly once and NEVER the
+    ///       uninitialised `[len, max_components)` slots;
+    ///   (b) `swap_remove` (the drop variant) drops the removed row exactly once;
+    ///   (c) `swap_remove_index_no_drop` drops ZERO (the migration path that
+    ///       has already moved the bytes out).
+    #[test]
+    fn drop_count_exactly_once() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        component_registry::register_layout::<Dropper>(DROPPER_ID.0);
+        let arena = Arena::new();
+        // Capacity 16, 8 live → 8 uninit slots that must NOT be dropped.
+        let mut pool = ComponentPool::new(&arena, DROPPER_ID.0, 1, 16);
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        const M: usize = 8;
+        for _ in 0..M {
+            pool.add_typed(Dropper { counter: Arc::clone(&counter) })
+                .expect("capacity 16 holds 8");
+        }
+        assert_eq!(counter.load(Ordering::Relaxed), 0, "no drops before any removal");
+
+        // (b) swap_remove (drop variant) on a middle row → exactly one drop.
+        assert!(pool.swap_remove(3), "swap_remove(3) in bounds");
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            1,
+            "swap_remove(drop) must drop exactly the removed row once"
+        );
+
+        // (c) swap_remove_index_no_drop on a middle row → ZERO additional drops.
+        // The bytes are NOT moved out here (this is a white-box drop-accounting
+        // probe, not a real migration), so the moved Arc is intentionally
+        // leaked by the no-drop semantics — we account for it below so the
+        // process-exit drop bookkeeping stays balanced.
+        let live_before = pool.count();
+        // SAFETY: idx 2 < pool.count() (== 7 here); we hold &mut pool. The
+        // no-drop contract requires the caller to have moved/dropped the source
+        // bytes — this probe deliberately exercises the ZERO-drop path, so we
+        // compensate the leaked Arc strong-count after the pool is gone.
+        unsafe { pool.swap_remove_index_no_drop(2) };
+        assert_eq!(
+            pool.count(),
+            live_before - 1,
+            "swap_remove_index_no_drop must still decrement count"
+        );
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            1,
+            "swap_remove_index_no_drop must drop ZERO (count stays at the prior 1)"
+        );
+
+        // (a) Drop the pool: the remaining live rows each drop exactly once.
+        // After swap_remove(drop) (−1 live, +1 dropped) and
+        // swap_remove_index_no_drop (−1 live, +0 dropped), 6 rows are live.
+        // The no-drop variant overwrote row 2 with the moved row's bytes WITHOUT
+        // dropping row 2's original Arc, so that one Arc strong-count is leaked
+        // by design of the probe; total observed drops at pool Drop = 1 + 6 = 7.
+        let live_at_drop = pool.count();
+        assert_eq!(live_at_drop, M - 2, "two rows removed → M-2 live");
+        drop(pool);
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            1 + live_at_drop,
+            "pool Drop must drop each of the {live_at_drop} remaining live rows \
+             exactly once (total = 1 swap_remove + {live_at_drop} live); the \
+             uninit [len, max) slots must NOT be dropped"
         );
     }
 }

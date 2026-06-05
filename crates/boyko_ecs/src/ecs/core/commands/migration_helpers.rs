@@ -10,9 +10,10 @@
 //! * [`migrate_entity_remove`] — source \\ `{C}`. Single-component remove;
 //!   absent-C is a silent no-op (W1 — Bevy Issue #10166).
 //!
-//! Both paths use the existing chunked + Unit-pointer `ComponentPool`
+//! Both paths use the existing dense byte-buffer `ComponentPool`
 //! storage (Round 3 C-N2): retained bytes are extracted via
-//! `units[source_row].ptr()` + `from_raw_parts`, copied into the target via
+//! `ComponentPool::unit_ptr(source_row)` (the computed `buffer + row*stride`) +
+//! `from_raw_parts`, copied into the target via
 //! `Archetype::create_entity_with_ticks`, and the source row is released
 //! via `Archetype::move_out_entity` (no drop on retained or removed slots —
 //! the caller owns byte tracking per W-N2).
@@ -150,7 +151,7 @@ pub(crate) fn without_component_archetype_id<C: Component>(
 }
 
 /// Performs the insert migration `source → target` over the existing
-/// chunked + Unit-pointer storage (Round 3 C-N2, plan §7.2). Caller
+/// dense byte-buffer storage (Round 3 C-N2, plan §7.2). Caller
 /// guarantees `source_archetype_id != target_archetype_id`.
 ///
 /// The retained components' bytes are memcpy'd into the target via
@@ -482,7 +483,7 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
 }
 
 /// Performs the remove migration `source → target` over the existing
-/// chunked + Unit-pointer storage (Round 3 C-N2). Caller guarantees
+/// dense byte-buffer storage (Round 3 C-N2). Caller guarantees
 /// `source_archetype_id != target_archetype_id` and that `C` is hosted by
 /// the source archetype (W1 caller-side check).
 #[cold]

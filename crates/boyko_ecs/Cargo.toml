@@ -50,6 +50,12 @@ harness = false
 name = "swap_remove"
 harness = false
 
+# Phase X.B — dense Vec<Unit>-elimination pool micro-benchmarks (add fill /
+# swap_remove / get_raw row_ptr recompute), isolated from EcsMaster setup noise.
+[[bench]]
+name = "component_pool_dense"
+harness = false
+
 [[bench]]
 name = "query_iter"
 harness = false
