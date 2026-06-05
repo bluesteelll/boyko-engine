@@ -122,7 +122,7 @@ pub struct ComponentPool {
     buffer: NonNull<u8>,                  // single block allocated from arena
     buffer_capacity_bytes: usize,
     max_components: usize,
-    units: Vec<Unit>,                     // densely packed direct pointers
+    len: usize,                           // live row count; row i at buffer + i*stride (X.B)
     chunks: Vec<Chunk>,                   // metadata only; private (C-023 closed)
     components_per_chunk: usize,
     component_id: usize,
@@ -139,9 +139,9 @@ pub struct ComponentPool {
   `set_component_typed::<T>(idx, value)`, `get_typed::<T>(idx) ->
   Option<&T>`, `get_mut_typed::<T>(idx) -> Option<&mut T>`.
 - Removal: `swap_remove(idx)` (runs `drop_fn`), `pop()` (runs `drop_fn`).
-- Iteration helpers: `chunk_units(chunk_idx) -> &[Unit]` (M-019
-  closed — was `Vec<*const u8>` per call), `buffer_ptr() -> *const u8`
-  (Phase 2d per-entity iter contract — SAFETY documented).
+- Iteration: `buffer_ptr() -> *const u8` (the dense base; row `i` is at
+  `buffer_ptr() + i*stride` — Phase 2d per-entity iter contract, SAFETY
+  documented). (Phase X.B removed the redundant `chunk_units` / `Vec<Unit>`.)
 
 ZST components are rejected at `new` with a `debug_assert!` — adding
 ZST support is a planned Phase 2-future enhancement.
@@ -156,25 +156,22 @@ which is a per-allocation killer in hot paths). `start_map` and
 insert. `M-018` closed via a reverse `block_idx -> position` map for
 O(1) `swap_remove`-from-bucket.
 
-### 2.5. Unit ✅
+### 2.5. Row addressing (no `Unit` — removed in Phase X.B) ✅
 
-**File:** [crates/boyko_ecs/src/ecs/memory/id_unit.rs](../crates/boyko_ecs/src/ecs/memory/id_unit.rs)
+`ComponentPool` rows are addressed by **computed arithmetic**, not a stored
+pointer. Row `i`'s bytes are at `buffer.as_ptr().add(i * component_layout.size())`,
+exposed internally via the private `#[inline] unsafe fn row_ptr(&self, i)`.
+`len: usize` is the live-row count (rows `[0, len)` are initialized & dense;
+`swap_remove` keeps them dense by moving the last row's bytes into the hole).
 
-```rust
-#[derive(Debug, Clone, Copy)]
-#[repr(transparent)]
-pub struct Unit {
-    ptr: *mut u8,    // direct pointer into ComponentPool::buffer
-}
-```
-
-`#[repr(transparent)]` — identical layout to a raw pointer.
-M-005 closed: the redundant `buffer_index: usize` field was removed
-(every caller passed a value equal to `units.len()` at insert time and
-no one read it back; the position is implicit in the dense `Vec<Unit>`).
-M-006 noted as a false alarm: the `*mut u8` field already opts the
-struct out of `Send + Sync`, so no `PhantomData<*mut ()>` marker is
-needed.
+Phase X.B **deleted** the former `Unit { ptr: *mut u8 }` wrapper (`id_unit.rs`)
+and its parallel `units: Vec<Unit>`: every entry was provably equal to
+`buffer + i*stride`, so the cache was pure redundancy (8 B/row + one heap
+allocation per pool). The change is behavior-preserving, **net-removes `unsafe`**
+(the old `commit_units` raw-write-into-`Vec`-spare-capacity loop is gone), and is
+Miri-Tree-Borrows clean. The two hot paths (random access via `column.ptr.add`,
+query iteration via `fetch.base.add`) never used `units`, so iteration is
+unaffected. See [docs/PHASE-XB-RESULTS.md](PHASE-XB-RESULTS.md).
 
 ### 2.6. Per-pool iterators ❌ deliberately absent
 

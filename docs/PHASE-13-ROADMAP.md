@@ -178,9 +178,20 @@ This would be a real boyko differentiator.
 
 **Estimated cost**: 1 week.
 
-### Phase X.B — `ComponentPool::Vec<Unit>` parallel storage elimination
+### Phase X.B — `ComponentPool::Vec<Unit>` parallel storage elimination — ✅ DONE
 
-**Goal**: close Phase 12.6 Residual 3 (Commands::spawn single 3× slower).
+**Result**: removed the per-row `Vec<Unit>` (cached `*mut u8`); compute `row_ptr(i) =
+buffer.add(i*stride)` from the stable arena base + an explicit `len`. Behavior-preserving
+(`units[i].ptr() ≡ buffer.add(i*stride)`; even `swap_remove`'s `Unit::new` rewrite was a self-assign
+NO-OP). **Net-removes `unsafe`** (the `commit_units` raw-Vec-spare-capacity loop gone). Deleted
+`chunk_units` (zero callers) + `Unit`/`id_unit.rs`. **Spawn measurably faster** (git-stash A/B,
+p=0.00: +88.8% @100, +6.5% @10k; spawn_batch_10k +9.5%); **iteration 0%** (hot paths use
+`column.ptr.add`, untouched); **Miri-clean** (surface shrank); 17/17 pool tests + 2 proptests; 503
+suite. Memory saving 8 B/row + one heap alloc/pool (roadmap's "24 B / 5-10 ns" was stale — `Unit`
+was already `#[repr(transparent)]` 8 B). All pub signatures unchanged (zero external-caller edits).
+See `docs/PHASE-XB-RESULTS.md`.
+
+**Goal (original)**: close Phase 12.6 Residual 3 (Commands::spawn single 3× slower).
 
 **Current**: every `ComponentPool` maintains a `Vec<Unit>` parallel to the
 component data buffer. `units[i].ptr()` returns the byte pointer for row

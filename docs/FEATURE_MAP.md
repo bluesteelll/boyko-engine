@@ -49,7 +49,7 @@ block-position lookup.
 | Read a component (raw pointer) | [memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs) ✅ | `get_raw(idx)` / `get_raw_mut(idx)` |
 | Overwrite an existing slot | [memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs) ✅ | `set_component(idx, &[u8])` / `set_component_typed::<T>(idx, value)` |
 | Remove a component (swap with last) | [memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs) ✅ | `ComponentPool::swap_remove(idx)` (runs `drop_fn` if registered) |
-| Iterate all slots as `&[Unit]` | [memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs) ✅ | `chunk_units(chunk_index)` (M-019 closed) |
+| Address row `i`'s bytes | [memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs) ✅ | private `row_ptr(i)` = `buffer_ptr() + i*stride` (Phase X.B removed `chunk_units` / `Vec<Unit>`) |
 | Get the underlying buffer pointer (for per-entity iter) | [memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs) ✅ | `buffer_ptr()` — SAFETY-contracted accessor used by `Query::iter_one/iter_two` |
 
 `ComponentPool::add_typed`, `set_component_typed`, `get_typed`,
@@ -82,16 +82,18 @@ all invoke it on the displaced slot. Verified by 16 dedicated tests in
 
 ---
 
-## Direct component pointer (Unit)
+## Row addressing (Phase X.B — `Unit` removed)
 
 | What | Where | Method |
 |------|-------|--------|
-| Construct a Unit | [memory/id_unit.rs](../crates/boyko_ecs/src/ecs/memory/id_unit.rs) ✅ | `Unit::new(ptr: *mut u8)` |
-| Get the pointer | [memory/id_unit.rs](../crates/boyko_ecs/src/ecs/memory/id_unit.rs) ✅ | `Unit::ptr()` |
+| Address row `i`'s bytes | [memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs) ✅ | private `row_ptr(i)` = `buffer.as_ptr().add(i * stride)` |
+| Live-row count | [memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs) ✅ | `count()` (the `len` field) |
 
-`Unit` is `#[repr(transparent)]` — single `*mut u8`, identical layout
-to a raw pointer (M-005 closed: dead `buffer_index` field removed;
-M-006 false alarm: `*mut u8` already opts out of `Send + Sync`).
+Phase X.B **deleted** the `Unit { ptr: *mut u8 }` wrapper (`id_unit.rs`) and the
+parallel `units: Vec<Unit>`: every entry equalled `buffer + i*stride`, so the
+cache was pure redundancy. Rows are now addressed by computed arithmetic from the
+stable arena base — behavior-preserving, net-removing `unsafe`, Miri-clean. See
+[PHASE-XB-RESULTS.md](PHASE-XB-RESULTS.md).
 
 ---
 

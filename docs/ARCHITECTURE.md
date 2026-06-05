@@ -46,8 +46,7 @@ boyko-engine/
 │   │               ├── arena.rs              # 64 MB arena with best-fit allocator
 │   │               ├── free_mem_block.rs     # free-block tracker
 │   │               ├── chunk.rs              # type-erased: metadata only (start_index, capacity, dirty)
-│   │               ├── component_pool.rs     # type-erased: NonNull<u8> + Vec<Unit> + chunks
-│   │               ├── id_unit.rs            # Unit { ptr: *mut u8, buffer_index }
+│   │               ├── component_pool.rs     # type-erased: NonNull<u8> + len + chunks; row i at buffer+i*stride (X.B)
 │   │               └── utils.rs              # align_up
 │   │           # (Per-entity component iterators are intentionally absent. The old
 │   │           #  sparse_iter / multi_pool_sparse_iter / sparse_iter_component_pool
@@ -112,7 +111,7 @@ External dependencies:
                                 ↑
 ┌────────────────────────────────────────────────────────────────┐
 │  Layer 1: Type-Erased Memory                                   │
-│  Arena → ComponentPool (type-erased) → Chunk → Unit            │
+│  Arena → ComponentPool (type-erased, row = buffer+i*stride)    │
 │  MemFreeBlockMaster (free-block tracker)                       │
 └────────────────────────────────────────────────────────────────┘
                                 ↑
@@ -167,13 +166,13 @@ On master, `ComponentPool<T: Component>` was generic — one pool per type. On e
 - Each `add` / `get` loses compile-time type checking — correctness relies on the invariant that "ComponentId matches the right type".
 - Component access requires `unsafe { &*(ptr as *const T) }` with a SAFETY comment.
 
-### 2. Direct pointer in `Unit` instead of two-level addressing
+### 2. Computed row addressing (`buffer + i*stride`)
 
-**Where:** [crates/boyko_ecs/src/ecs/memory/id_unit.rs](../crates/boyko_ecs/src/ecs/memory/id_unit.rs)
+**Where:** [crates/boyko_ecs/src/ecs/memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs)
 
-On master there was `UnitId { chunk: u32, inland: u32 }` — 8 bytes, requiring address computation on every access. On ecs, `Unit { ptr: *mut u8 }` — 8 bytes (`#[repr(transparent)]`, M-005 / M-006 closed), component access is direct (`*ptr`).
+On `master` there was `UnitId { chunk: u32, inland: u32 }` — two-level addressing. The `ecs` branch first cached a direct `Unit { ptr: *mut u8 }` per row; **Phase X.B then eliminated even that cache**: rows are addressed by `buffer.as_ptr().add(i * stride)` (the private `row_ptr(i)`) from the pool's stable, write-once arena base, with `len` the live-row count.
 
-**Trade-off:** no size penalty (same 8 bytes as `UnitId`), and reads skip the indirection. The dense-array position formerly carried by `buffer_index: usize` is implicit in the `Vec<Unit>` index — every former call site passed `units.len()` at insert and never read it back.
+**Trade-off:** the per-row `Vec<Unit>` was pure redundancy (every entry equalled `buffer + i*stride`), so removing it saves 8 B/row + one heap allocation per pool and **net-removes `unsafe`**, with zero read-path cost (the recompute is one multiply+add; the hot iteration / random-access paths already used `column.ptr.add`). Behavior-preserving + Miri-clean. See [PHASE-XB-RESULTS.md](PHASE-XB-RESULTS.md).
 
 ### 3. Global `ComponentRegistry` / `EventRegistry`
 
@@ -256,7 +255,7 @@ Targets (with the current `criterion` harness in [benches/](../crates/boyko_ecs/
 |-----------|--------|--------|
 | `Arena::allocate_aligned` (no fragmentation) | ≤ 50 ns | benched in `allocator.rs` (M-012 validation) |
 | `ComponentPool::add` (space available) | ≤ 10 ns | benched implicitly in `archetype.rs` create paths |
-| Component access via `Unit::ptr` | ≤ 2 ns | direct pointer deref |
+| Component access via `row_ptr` (`buffer + i*stride`) | ≤ 2 ns | computed offset + deref (X.B) |
 | Linear iter over a pool | ~32 GB/s for tiny components | per-entity `Query::iter_one/iter_two` (Phase 2d) is the foundation |
 | `EcsMaster::create_entity` | ≤ 150 ns | benched in `archetype.rs` for 2 / 8 component widths |
 | `QueryState` warm-path iter | ≤ 5 ns | **measured ~3.6 ns** in `query_iter.rs` (vs ~77 ns one-shot Query construction → ~21× speedup, Q-011 closed) |
@@ -267,7 +266,7 @@ Targets (with the current `criterion` harness in [benches/](../crates/boyko_ecs/
 |--------|--------|-----|
 | ComponentPool | `ComponentPool<T: Component>` (generic) | type-erased + `ComponentRegistry` |
 | Chunk | `Chunk<T>` stores data | `Chunk` — metadata only (start_index, capacity, dirty) |
-| Addressing | `UnitId { chunk: u32, inland: u32 }` | `Unit { ptr: *mut u8 }` (`#[repr(transparent)]`, M-005 / M-006 closed) |
+| Addressing | `UnitId { chunk: u32, inland: u32 }` | computed `buffer + i*stride` (`row_ptr(i)`; the cached `Unit { ptr }` was removed in Phase X.B) |
 | Entity ID | `u32` + generation `u16` | newtype `EntityId(usize)` + generation `usize` (C-017 closed) |
 | EntityMaster | ⚠️ missing | ✅ with recycling + O(active) iter |
 | Archetype | ⚠️ empty stub file | ✅ full implementation |
