@@ -200,9 +200,16 @@ reduce ComponentPool memory footprint by ~24 B/row.
 
 **Estimated cost**: 1-2 weeks (cross-cut on read paths needs careful audit).
 
-### Phase X.C — Arena `VirtualAlloc(MEM_RESERVE)`
+### Phase X.C — Arena `VirtualAlloc(MEM_RESERVE)` — ✅ DONE
 
-**Goal**: close Phase 12.6 `EcsMaster::new` residual 23-75 µs.
+**Result**: `Arena::new` **1.10 µs** (was the dominant chunk of the ~23-75 µs residual; ≈20-70×);
+`EcsMaster::new` ~23-75 µs → **7.23 µs** (~3-10×; the remaining ~6 µs is non-Arena init, out of
+scope). `VirtualAlloc(MEM_RESERVE|MEM_COMMIT)` / `mmap(MAP_PRIVATE|MAP_ANONYMOUS)` demand-zero
+backing, `cfg(any(miri, not(any(windows,unix))))` fallback to global alloc (Miri + wasm). Hot path
+byte-identical (0%-gate); Miri fallback 3/3; 13 arena tests; M-001 matching-deallocator preserved;
+`libc` target-gated to `cfg(unix)` (already in lock). See `docs/PHASE-XC-RESULTS.md`.
+
+**Goal (original)**: close Phase 12.6 `EcsMaster::new` residual 23-75 µs.
 
 **Current**: `Arena::with_capacity(64 MB)` eagerly commits 64 MB via
 global allocator on world creation. Most of that is never used.
