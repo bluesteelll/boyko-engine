@@ -15,6 +15,14 @@ crossbeam-utils = "0.8"
 # `#[cfg(test)]`) per I-N5.
 static_assertions = "1.1"
 
+# Phase X.C — arena lazy-commit backing store. The Unix arm of
+# `Arena::with_capacity` / `Drop` calls `mmap` / `munmap` via `libc`. Already
+# present in Cargo.lock at 0.2.x (transitively), so this unifies with zero new
+# compilation. Not pulled in on Windows/wasm32 (the cfg-gated arms there use
+# `VirtualAlloc` / the global allocator).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [features]
 default = []
 # Phase 12.5 Track B I5 — bumps `MAX_QUERY_TYPES` from 1024 to 4096 for
@@ -48,6 +56,11 @@ harness = false
 
 [[bench]]
 name = "allocator"
+harness = false
+
+# Phase X.C — cold-construction gate (Arena::new / EcsMaster::new <= 5 µs).
+[[bench]]
+name = "arena_new"
 harness = false
 
 [[bench]]

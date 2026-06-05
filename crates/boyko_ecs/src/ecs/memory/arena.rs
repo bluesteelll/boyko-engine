@@ -1,10 +1,49 @@
-use std::alloc::{alloc, dealloc, Layout};
+// `Layout` is always needed: the public `allocate_*` signatures use it. The
+// global-allocator `alloc`/`dealloc` are pulled in only for the fallback
+// backing (Miri / wasm32 / exotic targets); the OS-syscall arms do not use
+// them.
+use std::alloc::Layout;
+#[cfg(any(miri, not(any(windows, unix))))]
+use std::alloc::{alloc, dealloc};
 use std::cell::UnsafeCell;
 use std::ptr::NonNull;
 
 use crate::ecs::constants::{CACHE_LINE_SIZE, DEFAULT_ARENA_SIZE};
 use crate::ecs::memory::free_mem_block::MemFreeBlockMaster;
 use crate::ecs::memory::utils::align_up;
+
+/// Windows backing: hand-declared `VirtualAlloc` / `VirtualFree` (no
+/// `windows-sys` dependency). `kernel32.dll` is already linked transitively by
+/// `std`, so no `#[link(name = "kernel32")]` is required.
+///
+/// If a future toolchain breaks bare-extern `kernel32` symbol resolution, the
+/// fix is to add `#[link(name = "kernel32")]` above the `extern` block — no
+/// other change.
+///
+/// ABI types locked for Win64: `LPVOID` -> `*mut c_void`, `SIZE_T` -> `usize`,
+/// `DWORD` -> `u32`, `BOOL` -> `i32`.
+#[cfg(all(not(miri), windows))]
+mod win {
+    use core::ffi::c_void;
+
+    // SAFETY: signatures match the Win64 kernel32 ABI exactly (see the
+    // type-mapping note above). `unsafe extern` is required by the Rust 2024
+    // edition (extern blocks are unsafe to declare).
+    unsafe extern "system" {
+        pub fn VirtualAlloc(
+            lpAddress: *mut c_void,
+            dwSize: usize,
+            flAllocationType: u32,
+            flProtect: u32,
+        ) -> *mut c_void;
+        pub fn VirtualFree(lpAddress: *mut c_void, dwSize: usize, dwFreeType: u32) -> i32;
+    }
+
+    pub const MEM_COMMIT: u32 = 0x1000;
+    pub const MEM_RESERVE: u32 = 0x2000;
+    pub const MEM_RELEASE: u32 = 0x8000;
+    pub const PAGE_READWRITE: u32 = 0x04;
+}
 
 /// Pre-allocated, cache-line-aligned memory arena used as backing store for
 /// every `ComponentPool` in the ECS.
@@ -34,16 +73,36 @@ use crate::ecs::memory::utils::align_up;
 /// out a reference to `free_blocks` keeps this invariant. Concurrent
 /// `allocate_*` calls from two threads would be UB — protected against by the
 /// non-`Sync` marker.
+///
+/// # Backing store (Phase X.C)
+///
+/// The 64 MB buffer is acquired by a single OS-level reservation+commit call
+/// (`VirtualAlloc` on Windows, `mmap` on Unix) so that `EcsMaster::new` no
+/// longer pays the eager global-allocator memset; physical pages fault in
+/// lazily on first touch. Miri / wasm32 / exotic targets keep the original
+/// global-allocator path. The deallocator in `Drop` is chosen per cfg-arm to
+/// match the acquisition (audit finding M-001: free exactly once, with the
+/// matching deallocator). See [`Backing`] and `with_capacity`.
 pub struct Arena {
     /// Backing buffer pointer. Allocated in `with_capacity`, freed in `Drop`.
     ptr: NonNull<u8>,
 
-    /// Capacity of the backing buffer in bytes (cache-line aligned).
+    /// Capacity of the backing buffer in bytes (cache-line aligned). Equals the
+    /// logical `aligned_capacity`; on the syscall arms this is also the exact
+    /// reservation/mapping length (no extra page rounding is performed here).
     capacity: usize,
 
-    /// Layout used for the original `alloc`. Kept so that `Drop` can pass the
-    /// exact same `Layout` to `dealloc` (required by `GlobalAlloc` contract).
-    layout: Layout,
+    /// Per-target metadata required to release `ptr` in `Drop` with the
+    /// **matching** deallocator (M-001):
+    /// - fallback (global allocator): `dealloc(ptr, layout)`
+    /// - Windows: `VirtualFree(ptr, 0, MEM_RELEASE)` (needs only the base ptr)
+    /// - Unix: `munmap(ptr, map_len)` (needs the exact mapping length)
+    ///
+    /// Read only in `Drop` (and on Windows the deallocator needs nothing from
+    /// it, hence the cfg-scoped `allow(dead_code)` — the zero-sized field is
+    /// kept solely for cfg-arm symmetry of the struct shape).
+    #[cfg_attr(all(not(miri), windows), allow(dead_code))]
+    backing: Backing,
 
     /// Free-block tracker. Lives inside `UnsafeCell` because both
     /// `allocate_from_free_blocks` and future deallocate paths need to mutate
@@ -52,24 +111,118 @@ pub struct Arena {
     free_blocks: UnsafeCell<MemFreeBlockMaster>,
 }
 
+/// Per-target backing-store metadata for the arena's release path. cfg-gated
+/// (no enum, no runtime tag) so each build sees exactly one shape and `Drop`
+/// has zero branching overhead. Read only in `Arena::drop`.
+#[cfg(any(miri, not(any(windows, unix))))]
+struct Backing {
+    /// Layout passed to `dealloc` in `Drop` (must equal the one given to
+    /// `alloc`, per the `GlobalAlloc` contract).
+    layout: Layout,
+}
+
+/// Per-target backing-store metadata for the arena's release path. cfg-gated
+/// (no enum, no runtime tag). `VirtualFree(ptr, 0, MEM_RELEASE)` needs only the
+/// base pointer and size 0, so no fields are required.
+#[cfg(all(not(miri), windows))]
+struct Backing {}
+
+/// Per-target backing-store metadata for the arena's release path. cfg-gated
+/// (no enum, no runtime tag). `munmap` requires the exact mapping length used
+/// at `mmap` time.
+#[cfg(all(not(miri), unix, not(windows)))]
+struct Backing {
+    /// Exact length passed to `mmap`, replayed to `munmap` in `Drop`.
+    map_len: usize,
+}
+
 impl Arena {
     /// Allocates a fresh arena with `capacity` bytes, rounded up to cache-line
     /// granularity. Panics on allocation failure.
+    ///
+    /// # Backing store (Phase X.C)
+    ///
+    /// The buffer is acquired with a single OS reservation+commit
+    /// (`VirtualAlloc(MEM_RESERVE | MEM_COMMIT)` on Windows,
+    /// `mmap(PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS)` on Unix);
+    /// the OS zero-fills pages lazily on first touch, so this call no longer
+    /// pays the eager global-allocator memset. Miri / wasm32 / exotic targets
+    /// fall back to `std::alloc::alloc`.
+    ///
+    /// Commit-whole charges the full size (e.g. 64 MB) of commit up front (same
+    /// as today's eager `alloc`); on commit-limit exhaustion
+    /// `VirtualAlloc` / `mmap` returns a failure value and the
+    /// `expect` / `assert` panics — an identical failure surface to the
+    /// previous code.
     pub fn with_capacity(capacity: usize) -> Self {
         let aligned_capacity = align_up(capacity, CACHE_LINE_SIZE);
 
-        let layout = Layout::from_size_align(aligned_capacity, CACHE_LINE_SIZE)
-            .expect("Invalid layout for arena");
+        // Acquire `(ptr, backing)` from the per-target backing store. Exactly
+        // one of these three arms is compiled (the cfg matrix is total and
+        // disjoint by construction).
+        #[cfg(all(not(miri), windows))]
+        let (ptr, backing) = {
+            // SAFETY: a NULL base lets the OS choose the address; `dwSize` is
+            // the cache-line-aligned capacity (> 0 because
+            // `DEFAULT_ARENA_SIZE > 0` and `align_up` only grows). The
+            // `MEM_RESERVE | MEM_COMMIT` + `PAGE_READWRITE` flags request a
+            // demand-zero readable/writable region. The result is null-checked
+            // by `NonNull::new` before any use.
+            let raw = unsafe {
+                win::VirtualAlloc(
+                    core::ptr::null_mut(),
+                    aligned_capacity,
+                    win::MEM_RESERVE | win::MEM_COMMIT,
+                    win::PAGE_READWRITE,
+                )
+            };
+            let ptr = NonNull::new(raw as *mut u8)
+                .expect("VirtualAlloc failed to reserve+commit the arena");
+            (ptr, Backing {})
+        };
 
-        // SAFETY: layout has non-zero size (DEFAULT_ARENA_SIZE > 0) and
-        // alignment is a valid power of two (`CACHE_LINE_SIZE` is 64).
-        let raw = unsafe { alloc(layout) };
-        let ptr = NonNull::new(raw).expect("Failed to allocate memory for arena");
+        #[cfg(all(not(miri), unix, not(windows)))]
+        let (ptr, backing) = {
+            // SAFETY: a NULL base lets the OS choose the address; `len` is the
+            // cache-line-aligned capacity (> 0, see the Windows arm). The
+            // `PROT_READ | PROT_WRITE` + `MAP_PRIVATE | MAP_ANONYMOUS` flags
+            // request a private, demand-zero anonymous mapping (fd = -1,
+            // offset = 0). The return is validated below.
+            let raw = unsafe {
+                libc::mmap(
+                    core::ptr::null_mut(),
+                    aligned_capacity,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                    -1,
+                    0,
+                )
+            };
+            // `MAP_FAILED` is `(void*)-1` — NON-NULL — so it must be checked
+            // BEFORE `NonNull::new`, which would otherwise wrongly accept it.
+            assert!(raw != libc::MAP_FAILED, "mmap failed to map the arena");
+            let ptr = NonNull::new(raw as *mut u8).expect("mmap returned null");
+            (ptr, Backing { map_len: aligned_capacity })
+        };
+
+        #[cfg(any(miri, not(any(windows, unix))))]
+        let (ptr, backing) = {
+            let layout = Layout::from_size_align(aligned_capacity, CACHE_LINE_SIZE)
+                .expect("Invalid layout for arena");
+
+            // SAFETY: layout has non-zero size (DEFAULT_ARENA_SIZE > 0) and
+            // alignment is a valid power of two (`CACHE_LINE_SIZE` is 64).
+            let raw = unsafe { alloc(layout) };
+            let ptr = NonNull::new(raw).expect("Failed to allocate memory for arena");
+            (ptr, Backing { layout })
+        };
 
         Self {
             ptr,
             capacity: aligned_capacity,
-            layout,
+            backing,
+            // O4: the free-block tracker spans the logical cache-line-rounded
+            // size, not any (potentially larger) mapping length.
             free_blocks: UnsafeCell::new(MemFreeBlockMaster::new_init(aligned_capacity)),
         }
     }
@@ -187,12 +340,43 @@ impl Drop for Arena {
     /// still leak their inner heap data when their `ComponentPool` is
     /// destroyed, which is a known limitation).
     fn drop(&mut self) {
-        // SAFETY: `self.ptr` was returned by `alloc(self.layout)` in
-        // `with_capacity` and has not been freed yet (`Drop` runs once). The
-        // exact same `Layout` is passed back to `dealloc`, satisfying the
-        // `GlobalAlloc` contract. After this point `self.ptr` must not be
-        // used — which is fine because `Drop` is the last call on `self`.
-        unsafe { dealloc(self.ptr.as_ptr(), self.layout) }
+        // Release with the deallocator matching the acquisition arm in
+        // `with_capacity` (M-001). Exactly one arm is compiled.
+        #[cfg(all(not(miri), windows))]
+        {
+            // SAFETY: `self.ptr` is the exact base returned by `VirtualAlloc`
+            // in `with_capacity`, freed exactly once (`Drop` runs once).
+            // `MEM_RELEASE` requires `dwSize == 0` together with the original
+            // base address — both are satisfied. After this point `self.ptr`
+            // must not be used, which is fine because `Drop` is the last call
+            // on `self`.
+            let ok =
+                unsafe { win::VirtualFree(self.ptr.as_ptr() as *mut core::ffi::c_void, 0, win::MEM_RELEASE) };
+            debug_assert!(ok != 0, "VirtualFree(MEM_RELEASE) failed");
+        }
+
+        #[cfg(all(not(miri), unix, not(windows)))]
+        {
+            // SAFETY: `self.ptr` and `self.backing.map_len` are the exact base
+            // and length returned by `mmap` in `with_capacity`, unmapped
+            // exactly once (`Drop` runs once). After this point `self.ptr` must
+            // not be used — fine, because `Drop` is the last call on `self`.
+            let ret = unsafe {
+                libc::munmap(self.ptr.as_ptr() as *mut core::ffi::c_void, self.backing.map_len)
+            };
+            debug_assert_eq!(ret, 0, "munmap failed");
+        }
+
+        #[cfg(any(miri, not(any(windows, unix))))]
+        {
+            // SAFETY: `self.ptr` was returned by `alloc(self.backing.layout)`
+            // in `with_capacity` and has not been freed yet (`Drop` runs once).
+            // The exact same `Layout` is passed back to `dealloc`, satisfying
+            // the `GlobalAlloc` contract. After this point `self.ptr` must not
+            // be used — which is fine because `Drop` is the last call on
+            // `self`.
+            unsafe { dealloc(self.ptr.as_ptr(), self.backing.layout) }
+        }
     }
 }
 
@@ -319,8 +503,52 @@ mod tests {
         // If M-001 is re-introduced (no Drop impl), this would double-free on the
         // second iteration via sanitizers / Miri, or leak detectable via Miri.
         // Under plain cargo test it at minimum verifies no panic.
+        //
+        // Phase X.C: with the syscall-backed store, this now exercises 50 real
+        // VirtualAlloc/VirtualFree (Windows) or mmap/munmap (Unix) round trips;
+        // a mismatched or double free would crash here on the native host.
         for _ in 0..50 {
             let _arena = Arena::with_capacity(1024);
+        }
+    }
+
+    #[test]
+    fn arena_default_size_drop_loop_does_not_crash() {
+        // Phase X.C — large-mapping path coverage. The existing drop-loop above
+        // uses a 1 KB capacity, which on the syscall arms still maps at least one
+        // page but does not stress the full 64 MB reserve+commit. This loop
+        // creates and drops 20 *default-size* (64 MB) arenas back-to-back,
+        // exercising VirtualAlloc(MEM_RESERVE | MEM_COMMIT) + VirtualFree
+        // (Windows) / mmap + munmap (Unix) for the production-sized mapping.
+        //
+        // A mismatched deallocator, a double free, or a leak of the large
+        // mapping would surface here as a crash (native), a borrow/leak error
+        // (Miri fallback arm), or commit-limit exhaustion if a prior iteration's
+        // mapping were not released. Asserting the logical capacity each
+        // iteration also confirms `capacity()` stays the cache-line-rounded
+        // size (the OS may over-map to page granularity, but the logical value
+        // must not drift).
+        let expected = align_up(DEFAULT_ARENA_SIZE, CACHE_LINE_SIZE);
+        for _ in 0..20 {
+            let arena = Arena::new();
+            assert_eq!(
+                arena.capacity(),
+                expected,
+                "each default-size arena must report the rounded logical capacity"
+            );
+            // Touch the first byte to force at least one page to fault in,
+            // proving the mapping is genuinely readable/writable on every
+            // iteration (a stale/released mapping would fault here).
+            let p = arena.allocate_layout(
+                Layout::from_size_align(CACHE_LINE_SIZE, CACHE_LINE_SIZE)
+                    .expect("valid layout"),
+            );
+            // SAFETY: `p` is a fresh CACHE_LINE_SIZE-byte block inside the live
+            // arena mapping; writing one byte at offset 0 is in bounds.
+            unsafe {
+                p.as_ptr().write_volatile(0xABu8);
+            }
+            // `arena` drops at end of scope — must release the 64 MB mapping.
         }
     }
 

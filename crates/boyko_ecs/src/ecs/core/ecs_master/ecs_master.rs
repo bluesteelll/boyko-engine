@@ -388,9 +388,19 @@ impl EcsMaster {
     /// The four heavy per-world allocations (`entities_inland` +
     /// `sparse_to_active` fast-store memsets, `bundle_archetype_cache`,
     /// `bundle_column_cache`, `query_state_cache`) are all deferred to
-    /// first-use. Construction cost is now dominated by the arena
-    /// reservation (~50 µs for the 64 MB virtual reservation on most
-    /// targets — actual commit is lazy on Linux/Windows mmap).
+    /// first-use.
+    ///
+    /// # Phase X.C — arena lazy-commit backing store
+    ///
+    /// The arena's 64 MB buffer is acquired with a single OS reservation+commit
+    /// call (`VirtualAlloc(MEM_RESERVE | MEM_COMMIT)` on Windows,
+    /// `mmap(PROT_READ | PROT_WRITE)` on Unix). The OS faults physical pages in
+    /// lazily on first touch, so construction no longer pays an eager 64 MB
+    /// memset — the target is ≤ 5 µs. Miri / wasm32 / exotic targets fall back
+    /// to the global allocator (`std::alloc::alloc`). See
+    /// [`Arena::with_capacity`].
+    ///
+    /// [`Arena::with_capacity`]: crate::ecs::memory::arena::Arena::with_capacity
     pub fn new() -> Self {
         let arena: Box<Arena> = Box::default();
         // SAFETY: `Box<Arena>` is guaranteed to have the same in-memory
