@@ -153,30 +153,37 @@ Each one is a **targeted refactor of one subsystem**. They do NOT require
 architectural changes and can land at any time between feature phases.
 None of them blocks each other.
 
-### Phase X.A — `Query::for_each_chunk` batched API
+### Phase X.A — `Query::for_each_chunk` batched API — ✅ API SHIPPED; ≥1.10× goal MEASURED MARGINAL
 
 **Goal**: close Phase 12.6 Residual 2 (query iter ≥1.10× Bevy).
 
-**Design**: add `Query::for_each_chunk<F>(&mut self, f: F) where F: FnMut(&[T])`
-that yields per-archetype contiguous slices instead of per-row items. Allows
-LLVM auto-vectorization when paired with `core::intrinsics::fadd_algebraic`
-(nightly) or explicit `std::simd` reductions.
+**Status**: the **API shipped** (`Query::for_each_chunk` exists + the `g6`/`g6b`
+nightly `algebraic_add` + sink-only-`black_box` bench harness exists; `iter()` /
+`iter_mut()` untouched, no API break). It is a real differentiator — Bevy never
+shipped a batched API ([issue #1990](https://github.com/bevyengine/bevy/issues/1990)
+open since 2021); flecs' C API works exactly like this. A polish backlog remains
+(post-landing critic R3 — see task tracker).
 
-**Scope**:
-- New entry point in `crates/boyko_ecs/src/ecs/core/iters/query/query.rs`.
-- Existing `iter()` / `iter_mut()` untouched (no API break).
-- Bench harness change: drop per-element `black_box`, use slice reduction.
+**Grounding measurement (Phase X.E methodology — nightly + `--features bench-alloc`,
+3 paired runs, `g6`/`g6b` 10k):**
+- **Single-component** (`g6`): boyko `for_each_chunk` ≈ 999 ns vs Bevy `iter().fold` ≈
+  971 ns → **parity** (~3% slower, in noise). Both vectorize the scalar inner loop
+  identically → no API delta to expose, exactly as predicted.
+- **Multi-component** (`g6b` 3-tuple — the surpass surface): boyko `triple_idx`
+  vs Bevy `triple`, paired per run: **+9.6% / −6.5% / +8.3%** (boyko faster in
+  2 of 3). The predicted "Bevy pays 3 column cursors per `next()`, chunked slices
+  fuse the loads" effect IS real, but the margin is **~8% and noisy (±10%)**, NOT
+  a robust ≥1.10×. The `idx` inner-loop shape beats `zip` (inner loop matters).
 
-**Expected gain**: 5-20× on suitable workloads (per orlp.net `fadd_algebraic`
-+ Nick Wilcox `chunks_exact` measurements). On the current bench: not
-applicable (the bench uses per-element `black_box`).
-
-**Sound rationale**: flecs C API works exactly like this (`ecs_field` returns
-columnar slice; user owns inner loop). Bevy never shipped a batched API
-([issue #1990](https://github.com/bevyengine/bevy/issues/1990) open since 2021).
-This would be a real boyko differentiator.
-
-**Estimated cost**: 1 week.
+**Verdict**: boyko is **competitive-to-slightly-ahead** of Bevy on chunked
+iteration (a genuine, shippable differentiator), but a **robust, claimable
+≥1.10× surpass is NOT currently achievable** — single-component is hard-parity
+(byte-identical asm), and multi-component sits at ~8% inside the noise band.
+**Deprioritized as a "trophy" chase**: the remaining gap to a defensible ≥1.10×
+is high-effort (variance-tightening + micro-opt of the multi-component fetch) for
+uncertain payoff on an already-winning path. Revisit only with a dedicated
+low-noise harness (longer measurement + `critcmp` median-of-N) if the ≥1.10×
+claim becomes a priority. The API itself stands as delivered.
 
 ### Phase X.B — `ComponentPool::Vec<Unit>` parallel storage elimination — ✅ DONE
 
