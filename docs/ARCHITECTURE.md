@@ -268,7 +268,7 @@ Targets (with the current `criterion` harness in [benches/](../crates/boyko_ecs/
 | Chunk | `Chunk<T>` stores data | `Chunk` — metadata only (start_index, capacity, dirty) |
 | Addressing | `UnitId { chunk: u32, inland: u32 }` | computed `buffer + i*stride` (`row_ptr(i)`; the cached `Unit { ptr }` was removed in Phase X.B) |
 | Entity ID | `u32` + generation `u16` | newtype `EntityId(usize)` + generation `usize` (C-017 closed) |
-| EntityMaster | ⚠️ missing | ✅ with recycling + O(active) iter |
+| EntityMaster | ⚠️ missing | ✅ id recycling + direct `Vec<EntityInland>` fast store (O(capacity) `iter_entities` after Phase X.D slot reduction) |
 | Archetype | ⚠️ empty stub file | ✅ full implementation |
 | EcsMaster | ⚠️ empty stub file | ✅ present, returns domain `EcsResult` (C-019 closed) |
 | Query | ⚠️ missing | ✅ archetype-level cached query; per-entity `Query::<(&T, &U)>::iter()` is Phase 2d-open |

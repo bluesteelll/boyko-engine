@@ -181,7 +181,7 @@ serialised IDs require a startup warm-up contract (call
 | Get the internal metadata | [core/entity/entity_master.rs](../crates/boyko_ecs/src/ecs/core/entity/entity_master.rs) ✅ | `get_entity_inland(entity) -> Option<&EntityInland>` |
 | Validate an entity (id + generation match) | [core/entity/entity_master.rs](../crates/boyko_ecs/src/ecs/core/entity/entity_master.rs) ✅ | `is_entity_valid(entity) -> bool` |
 | Deallocate (bumps generation) | [core/entity/entity_master.rs](../crates/boyko_ecs/src/ecs/core/entity/entity_master.rs) ✅ | `deallocate_entity(entity)` |
-| Iterate only ACTIVE entities | [core/entity/entity_master.rs](../crates/boyko_ecs/src/ecs/core/entity/entity_master.rs) ✅ | `iter_entities()` — O(active), not O(capacity) (C-012/013 closed) |
+| Iterate only ACTIVE entities | [core/entity/entity_master.rs](../crates/boyko_ecs/src/ecs/core/entity/entity_master.rs) ✅ | `iter_entities()` — **O(capacity)** scan of the fast store, skips dead slots, ascending id (Phase X.D removed the `active_ids`/`sparse_to_active` dense index; cold/inspection API — hot iteration goes through `Query`/archetypes) |
 | Rewind a fresh allocation on failure | [core/entity/entity_master.rs](../crates/boyko_ecs/src/ecs/core/entity/entity_master.rs) ✅ | `rewind_allocate(entity)` — internal C-007 guard plumbing |
 
 Entity fields are private (C-023 closed) — access via `entity.id()` /

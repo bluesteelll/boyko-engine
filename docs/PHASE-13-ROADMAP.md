@@ -239,21 +239,40 @@ initialization + a few `mmap`/`VirtualAlloc` syscalls).
 
 **Estimated cost**: 3-5 days.
 
-### Phase X.D — `EntityMaster::register_entity_with_ptr` slot reduction
+### Phase X.D — `EntityMaster` slot reduction ✅ DONE
 
 **Goal**: close another part of Phase 12.6 Residual 3.
 
-**Current**: writes 3 slots per spawn (`entities_inland` + `active_ids` +
-`sparse_to_active`). Bevy writes 1.
+**Outcome**: the roadmap's "speculative / despawn-invariant-rework / 1-2 weeks"
+framing was **inverted by investigation**. `iter_entities` has **zero
+hot-path callers** (systems iterate via `Query`/archetypes), so `active_ids`
+(dense live list) and `sparse_to_active` (sparse→dense map) were an
+acceleration structure serving only a cold API. The winning move was not to
+make `sparse_to_active` lazy but to **delete both fields** and replace them
+with a single `live_count: usize` — which *deletes* the despawn swap-remove
+"invariant" rather than reworking it.
 
-**Refactor** (speculative — needs careful design):
-- `entities_inland` (queries / fast-path lookup) — REQUIRED.
-- `active_ids` (iteration) — possibly defer-batched at frame end.
-- `sparse_to_active` (despawn O(1) swap-remove) — possibly lazy.
+- `entities_inland` (queries / fast-path lookup) — REQUIRED, retained.
+- `active_ids` + `sparse_to_active` — **DELETED**.
+- `iter_entities` → O(capacity) scan of `entities_inland` (ascending id).
 
-**Estimated gain**: ~5-8 ns/entity.
+**Measured** (rigorous git-stash A/B; full architect→critic→dev→review→tester
+pipeline, Miri TB-clean, 845 tests):
+- **Despawn `delete_entity_10k` −7.65% (p=0.00)** — clean win (shed the
+  swap-remove + sparse fix-up + a branch per despawn).
+- Single `create_entity_10k` −1.38% (p=0.05); batch-spawn parity (dominated
+  by component byte-copy).
+- **−12 B/entity** resident + **−2 heap allocs/world**; **net-removes
+  `unsafe`** (deleted the `register_batch` tandem-slice write + swap-remove
+  fix-up); smaller `Send`/`Sync` surface.
+- Hot read path **0%** (touches only `entities_inland`, by construction).
+- **Cost (documented)**: `iter_entities` regresses — dense ~2×, sparse
+  ~97× (O(active)→O(capacity)) — entirely on the zero-hot-caller cold API.
+  If a hot dense-enumeration consumer ever emerges, walk archetype
+  `entity_ids` rows (already dense + co-located with components); do NOT
+  reintroduce `active_ids`.
 
-**Estimated cost**: 1-2 weeks (despawn invariant rework).
+See `docs/PHASE-XD-RESULTS.md`.
 
 ### Phase X.E — Multi-run bench methodology
 

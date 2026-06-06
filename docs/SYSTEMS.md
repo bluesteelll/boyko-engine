@@ -310,27 +310,41 @@ pub struct EntityInland {
 
 ```rust
 pub struct EntityMaster {
-    free_entity_ids: Vec<EntityId>,
-    entities: Vec<Entity>,                       // index = EntityId.0
-    entity_map: SparseMap<EntityInland>,         // active entities only
-    next_entity_id: EntityId,
-    active_count: usize,
+    free_entity_ids: Vec<EntityId>,              // LIFO recycle queue (EM2)
+    next_entity_id: AtomicUsize,                 // fresh-id minting (EM1/EM6)
+    pub(crate) entities_inland: Vec<EntityInland>, // index = EntityId.0; is_null() ⇔ dead
+    live_count: usize,                           // # live entities (Phase X.D)
 }
 ```
 
+Phase 7 replaced the old `entities` + `SparseMap<EntityInland>` pair with a
+single direct-indexed `entities_inland: Vec<EntityInland>` (the hot
+`get_component_raw` fast store; `is_null()` is the single liveness +
+generation source of truth). **Phase X.D** then removed the EnTT-style
+`active_ids` (dense live list) and `sparse_to_active` (sparse→dense map):
+their only consumer was the cold `iter_entities` API, and the despawn
+swap-remove they required was deleted with them. The live count is now a
+plain `usize` (`live_count`), dispatcher-only.
+
 **API:**
 - `allocate_entity() -> Entity` (recycles from `free_entity_ids` first,
-  bumps `next_entity_id` otherwise).
-- `register_entity(entity, arch_id, unit_idx)` — inserts into `entity_map`.
-- `deallocate_entity(entity) -> Option<EntityInland>` — bumps generation,
-  pushes id onto free list.
-- `get_entity_inland(entity)` / `get_entity_inland_mut(entity)` —
-  generation-checked lookup.
-- `is_entity_valid(entity)` — checks id-in-bounds AND generation matches
-  AND map contains.
-- `iter_entities() -> impl Iterator<Item = Entity>` — O(active), walks
-  `entity_map.active_indices()` (C-012 / C-013 closed — was O(capacity)
-  with `contains` filter on every slot).
+  else `fetch_add` on the `next_entity_id` atomic).
+- `register_entity_with_ptr(entity, *mut Archetype, unit_idx)` — writes the
+  Phase-7 fast-store slot; `live_count += 1`.
+- `register_batch(start, *mut Archetype, start_row, n)` — bulk fast-store
+  write for a contiguous reserved id range; `live_count += n`.
+- `deallocate_entity(entity) -> bool` — bumps generation in place, nulls the
+  slot, recycles the id; `live_count -= 1` (success path only — a no-op on a
+  stale/never-registered handle never decrements).
+- `is_entity_valid(entity)` / `get_entity(id) -> Option<Entity>` —
+  generation-checked liveness read straight from `entities_inland`.
+- `iter_entities() -> impl Iterator<Item = Entity>` — **O(capacity)**: scans
+  `entities_inland`, skips `is_null()` slots, yields entities in ascending
+  `EntityId` order. Cold inspection/test API only (zero hot callers; real
+  iteration goes through `Query`/archetype storage). Phase X.D traded the
+  O(active) dense walk for this O(capacity) scan to shed per-spawn/despawn
+  writes + 12 B/entity.
+- `entity_count()` / `is_empty()` — `live_count`-backed (O(1)).
 - `rewind_allocate(entity) -> bool` — internal C-007 plumbing for the
   guard pattern in `EcsMaster::create_entity`. Restores
   `next_entity_id` if the just-allocated id was fresh; for recycled IDs
@@ -502,8 +516,9 @@ constructed in sequence (Phase 3a Miri fix).
 - `get_component_raw` / `get_component_raw_mut` / `set_component_raw`
 - `has_entity` / `has_component` / `get_entity_archetype_id`
 - `entity_count` / `archetype_count` / `recycled_entity_count`
-- `iter_entities()` / `query_entities(&[id])` (allocating Vec — hot
-  paths prefer `Query::iter_one/iter_two`)
+- `iter_entities()` (O(capacity) fast-store scan — cold/inspection) /
+  `query_entities(&[id])` (allocating Vec — hot paths prefer
+  `Query::iter_one/iter_two`)
 - `get_components_raw` / `get_components_raw_mut` — batch raw access
 - `entity_master[_mut]()` / `archetype_master[_mut]()` / `arena()` —
   field accessors for power users
@@ -763,8 +778,9 @@ pub struct SparseMap<U> {
 
 `insert` / `swap_remove` / `contains` / `get` / `get_mut` / `len`.
 Exposes `active_indices() -> &[usize]` and `iter_dense() -> slice::Iter<U>`
-for O(active) iteration over live entries (used by
-`EntityMaster::iter_entities` to fix C-012 / C-013).
+for O(active) iteration over live entries. (`EntityMaster` no longer uses
+`SparseMap` — it moved to a direct `Vec<EntityInland>` in Phase 7 and dropped
+its dense index in Phase X.D; `SparseMap` is retained for other sparse stores.)
 
 ### 10.3. SparseSlotMap
 
