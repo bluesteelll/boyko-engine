@@ -274,16 +274,29 @@ pipeline, Miri TB-clean, 845 tests):
 
 See `docs/PHASE-XD-RESULTS.md`.
 
-### Phase X.E — Multi-run bench methodology
+### Phase X.E — Multi-run bench methodology ✅ DONE
 
 **Goal**: extract structural perf signals from per-iter `EcsMaster::new`
 allocator variance (±20-30% on g4 / g5 benches).
 
-**Approach**:
-- Adopt median-of-medians across multiple criterion runs.
-- Or: switch to a bench harness that builds the world ONCE and runs N
-  iterations of the work without per-iter setup.
-- Or: PGO build (`cargo pgo` or manual `-Cprofile-use`).
+**Shipped** (bench tooling only — zero engine changes):
+- **`[profile.bench] codegen-units = 1`** — deterministic codegen (hardens the
+  0%-gate / byte-identical-asm methodology). Not `lto` (Bevy compile cost +
+  shifts mean not variance).
+- **Opt-in mimalloc** behind a `bench-alloc` feature (OFF by default). Default
+  `cargo bench` = system heap (production-honest absolutes); `--features
+  bench-alloc` = low-variance signal. **Measured: −17% mean + ~2× tighter
+  run-to-run spread** on an allocator-touching bench (`create_entity_10k`).
+- **`bench.ps1`** (median-of-N: High priority + affinity-pinned cargo child +
+  per-run criterion baselines for `critcmp`) + **`docs/BENCHMARKING.md`** (full
+  A/B + median-of-N protocol, manual stabilization, read-only-vs-destructive
+  bench discipline).
+
+**Deferred** (documented in `BENCHMARKING.md`): PGO (shifts mean not variance),
+iai-callgrind (Valgrind → no Windows), `[profile.bench] lto` (Bevy compile cost).
+
+See `docs/PHASE-XE-RESULTS.md`. The build-once read-harness was already in place
+in the key query-iter benches (`g6_for_each_chunk`, `query_state_iter`).
 
 **Estimated cost**: 3-5 days.
 
