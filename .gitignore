@@ -12,3 +12,6 @@
 # runs in the workspace root instead of going through `cargo`).
 /rust_out.exe
 /rust_out.pdb
+
+# Agent worktree scratch (created by subagents with isolation: "worktree").
+/.claude/worktrees/
