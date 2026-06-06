@@ -385,10 +385,10 @@ impl EcsMaster {
     ///
     /// # Phase 12.6 — lazy allocation
     ///
-    /// The four heavy per-world allocations (`entities_inland` +
-    /// `sparse_to_active` fast-store memsets, `bundle_archetype_cache`,
-    /// `bundle_column_cache`, `query_state_cache`) are all deferred to
-    /// first-use.
+    /// The heavy per-world allocations (`entities_inland` fast-store memset,
+    /// `bundle_archetype_cache`, `bundle_column_cache`, `query_state_cache`)
+    /// are all deferred to first-use. (Phase X.D removed the parallel
+    /// `sparse_to_active` fast-store.)
     ///
     /// # Phase X.C — arena lazy-commit backing store
     ///
@@ -717,10 +717,10 @@ impl EcsMaster {
     /// # Behaviour
     ///
     /// 1. Resolves the archetype's write-capable raw pointer.
-    /// 2. Resizes `entities_inland` / `sparse_to_active` if `entity.id().0`
-    ///    is past the current length. Phase 12.6 — single-row growth via
-    ///    `Vec::resize` is the canonical lazy path; the dispatcher's
-    ///    `&mut self` borrow guarantees workers are not in flight.
+    /// 2. Resizes `entities_inland` if `entity.id().0` is past the current
+    ///    length. Phase 12.6 — single-row growth via `Vec::resize` is the
+    ///    canonical lazy path; the dispatcher's `&mut self` borrow
+    ///    guarantees workers are not in flight.
     /// 3. Pushes the row into the archetype with the world's current tick
     ///    (same INIT3 contract as `create_entity`).
     /// 4. Registers `(entity, archetype_ptr, unit_index)` in the Phase 7
@@ -766,11 +766,6 @@ impl EcsMaster {
             self.entity_master
                 .entities_inland
                 .resize(id_raw + 1, EntityInland::NULL);
-        }
-        if id_raw >= self.entity_master.sparse_to_active.len() {
-            self.entity_master
-                .sparse_to_active
-                .resize(id_raw + 1, u32::MAX);
         }
 
         let mut new_unit_index: u32 = 0;
@@ -876,11 +871,6 @@ impl EcsMaster {
             self.entity_master
                 .entities_inland
                 .resize(id_raw + 1, EntityInland::NULL);
-        }
-        if id_raw >= self.entity_master.sparse_to_active.len() {
-            self.entity_master
-                .sparse_to_active
-                .resize(id_raw + 1, u32::MAX);
         }
 
         let mut new_unit_index: u32 = 0;

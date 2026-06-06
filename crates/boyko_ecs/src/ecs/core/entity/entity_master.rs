@@ -10,23 +10,29 @@ use crate::ecs::identifiers::primitives::EntityId;
 
 /// Manages entity lifecycle, recycling, and Phase 7 fast-path lookup.
 ///
-/// Layout (post Phase-11 Wave A atomic-counter migration):
+/// Layout (post Phase-X.D slot reduction — four fields):
 ///
-/// - `entities_inland`: sparse, indexed by `EntityId.0`. A slot with
-///   `archetype_ptr.is_null()` is dead. The slot's `generation` survives
-///   deallocation so the next `allocate_entity` for that recycled id
-///   returns `Entity::new(id, current_gen)`.
-/// - `sparse_to_active`: parallel to `entities_inland`. Holds the
-///   dense index into `active_ids` for live ids, `u32::MAX` for dead.
-/// - `active_ids`: dense list of currently-live entity ids, used by
-///   `iter_entities` and updated via swap-remove on deallocation.
 /// - `free_entity_ids`: LIFO recycling queue for ids. Dispatcher-only (EM2);
-///   workers never pop. Pre-sized in `EcsMaster::new` to absorb the bulk
-///   of recycling without reallocation.
+///   workers never pop.
 /// - `next_entity_id`: monotonic atomic counter for fresh-id minting.
 ///   Phase 11 (EM1): workers call into this through the `EntityCounter<'s>`
 ///   newtype (worker-safe — atomic RMW only). The dispatcher reads/bumps
 ///   through `&mut self` on `allocate_entity`.
+/// - `entities_inland`: sparse, indexed by `EntityId.0`. A slot with
+///   `archetype_ptr.is_null()` is dead. The slot's `generation` survives
+///   deallocation so the next `allocate_entity` for that recycled id
+///   returns `Entity::new(id, current_gen)`. Read by the hot
+///   `get_component_raw` path in `EcsMaster`.
+/// - `live_count`: count of currently-live entities, maintained under
+///   `&mut self`.
+///
+/// Phase X.D removed the `active_ids` (dense live list) and
+/// `sparse_to_active` (sparse→dense map); their sole consumer was the cold
+/// `iter_entities` API (zero hot callers), and the despawn swap-remove they
+/// required is deleted with them. `iter_entities` now scans
+/// `entities_inland` directly — O(capacity) instead of O(active); accepted
+/// because real iteration goes through `Query`/archetype storage, never
+/// through here.
 pub struct EntityMaster {
     /// Pool of free entity IDs for reuse.
     free_entity_ids: Vec<EntityId>,
@@ -49,20 +55,9 @@ pub struct EntityMaster {
     /// and the Phase 7 hot read path. Outside the crate, the layout is opaque.
     pub(crate) entities_inland: Vec<EntityInland>,
 
-    /// Phase 7: sparse → dense map. `sparse_to_active[entity_id.0]` gives
-    /// the index into `active_ids`, or `u32::MAX` for "not active".
-    ///
-    /// `pub(crate)` for direct access from the Phase 7 hot read path.
-    /// Outside the crate, the layout is opaque.
-    pub(crate) sparse_to_active: Vec<u32>,
-
-    /// Phase 7: dense list of currently-active `EntityId`s. Drives
-    /// `iter_entities`. Order is registration-order with swap-remove on
-    /// deallocation.
-    ///
-    /// `pub(crate)` for direct access from the Phase 7 hot read path.
-    /// Outside the crate, the layout is opaque.
-    pub(crate) active_ids: Vec<EntityId>,
+    /// Count of currently-live entities. Maintained under `&mut self`
+    /// (dispatcher, apply window SCH7). Replaces the removed `active_ids.len()`.
+    live_count: usize,
 }
 
 impl EntityMaster {
@@ -73,8 +68,7 @@ impl EntityMaster {
             free_entity_ids: Vec::new(),
             next_entity_id: AtomicUsize::new(0),
             entities_inland: Vec::new(),
-            sparse_to_active: Vec::new(),
-            active_ids: Vec::new(),
+            live_count: 0,
         }
     }
 
@@ -85,8 +79,7 @@ impl EntityMaster {
             free_entity_ids: Vec::with_capacity(capacity / 4),
             next_entity_id: AtomicUsize::new(0),
             entities_inland: Vec::with_capacity(capacity),
-            sparse_to_active: Vec::with_capacity(capacity),
-            active_ids: Vec::with_capacity(capacity),
+            live_count: 0,
         }
     }
 
@@ -125,12 +118,9 @@ impl EntityMaster {
             // and lets us share the counter without extra branches.
             let id_raw = self.next_entity_id.fetch_add(1, Ordering::Relaxed);
             let id = EntityId(id_raw);
-            // Ensure the fast-store vectors have a slot for this id.
+            // Ensure the fast store has a slot for this id.
             if id.0 >= self.entities_inland.len() {
                 self.entities_inland.resize(id.0 + 1, EntityInland::NULL);
-            }
-            if id.0 >= self.sparse_to_active.len() {
-                self.sparse_to_active.resize(id.0 + 1, u32::MAX);
             }
             Entity::new(id, 0)
         }
@@ -212,7 +202,7 @@ impl EntityMaster {
         Ok(start..(start + n))
     }
 
-    /// Phase 12.6 — grows the entity fast-store vectors so any index in
+    /// Phase 12.6 — grows the entity fast-store vector so any index in
     /// `[0, capacity)` is in bounds.
     ///
     /// Called from dispatcher-only paths (`EcsMaster::spawn_batch` and
@@ -236,18 +226,15 @@ impl EntityMaster {
         if self.entities_inland.len() < capacity {
             self.entities_inland.resize(capacity, EntityInland::NULL);
         }
-        if self.sparse_to_active.len() < capacity {
-            self.sparse_to_active.resize(capacity, u32::MAX);
-        }
     }
 
     /// Phase 12.5 Opt-A2 (plan §5.7 / SBO15): registers a contiguous range
     /// of `n` entities in the Phase 7 fast store under dispatcher-only
     /// `&mut self` access.
     ///
-    /// Writes `entities_inland`, `sparse_to_active`, and `active_ids` for
-    /// every slot in `[start_entity.0, start_entity.0 + n)`. The slots
-    /// MUST currently be NULL (caller contract: the range was just
+    /// Writes `entities_inland` for every slot in
+    /// `[start_entity.0, start_entity.0 + n)` and bumps `live_count` by `n`.
+    /// The slots MUST currently be NULL (caller contract: the range was just
     /// returned by `reserve_batch` and the IDs have not been used yet).
     ///
     /// All `n` entities share the same `archetype_ptr`; each receives
@@ -279,13 +266,9 @@ impl EntityMaster {
             "register_batch: range past entities_inland fast-store \
              (SBO16 violation — pre-check via SBO17/SBO17b should have caught this)"
         );
-        debug_assert!(
-            end <= self.sparse_to_active.len(),
-            "register_batch: range past sparse_to_active fast-store"
-        );
 
-        // Hoist the per-slot NULL / sentinel sanity checks out of the
-        // per-row loop. One scan in debug; zero cost in release.
+        // Hoist the per-slot NULL sanity check out of the per-row loop.
+        // One scan in debug; zero cost in release.
         #[cfg(debug_assertions)]
         {
             for i in 0..n {
@@ -295,49 +278,24 @@ impl EntityMaster {
                     "register_batch: slot {} is already registered (SBO15 violation)",
                     sparse_idx
                 );
-                debug_assert!(
-                    self.sparse_to_active[sparse_idx] == u32::MAX,
-                    "register_batch: slot {} has stale sparse_to_active entry",
-                    sparse_idx
-                );
             }
         }
 
-        // active_ids may grow by exactly `n`; reserve once outside the loop.
-        self.active_ids.reserve(n);
-        let dense_base = self.active_ids.len() as u32;
-        debug_assert!(
-            (dense_base as usize)
-                .checked_add(n)
-                .is_some_and(|v| v <= u32::MAX as usize),
-            "register_batch: dense index range overflows u32"
-        );
-
-        // ── inland + sparse_to_active: tandem slice writes ──────────────
-        // Acquire `&mut [T]` views over the disjoint slot ranges so the
-        // compiler can hoist the bounds checks and vectorise the writes.
+        // ── inland: slice write ─────────────────────────────────────────
+        // Acquire a `&mut [T]` view over the slot range so the compiler can
+        // hoist the bounds checks and vectorise the writes.
         let inland_slice = &mut self.entities_inland[start..end];
-        let sparse_slice = &mut self.sparse_to_active[start..end];
-        for (i, (inland, sparse)) in inland_slice
-            .iter_mut()
-            .zip(sparse_slice.iter_mut())
-            .enumerate()
-        {
+        for (i, inland) in inland_slice.iter_mut().enumerate() {
             *inland = EntityInland::new(archetype_ptr, start_row + i as u32, 0);
-            *sparse = dense_base + i as u32;
         }
 
-        // ── active_ids: bulk extend from a TrustedLen Range<usize> ──────
-        // `EntityId` is `#[repr(transparent)]` over `usize`, so the
-        // `.map(EntityId)` closure compiles to a no-op and `Vec::extend`
-        // fast-paths to `ptr::copy_nonoverlapping`.
-        self.active_ids.extend((start..end).map(EntityId));
+        self.live_count += n;
     }
 
     /// Phase 7 fast-path entity registration.
     ///
-    /// Writes the entity into the fast store
-    /// (`entities_inland` / `sparse_to_active` / `active_ids`).
+    /// Writes the entity into the fast store (`entities_inland`) and bumps
+    /// `live_count`.
     ///
     /// `archetype_ptr` MUST be obtained from
     /// `ArchetypeMaster::archetype_ptr_for` (write-capable provenance)
@@ -360,16 +318,12 @@ impl EntityMaster {
             "register_entity_with_ptr called before allocate_entity for this id"
         );
         debug_assert!(
-            sparse_idx >= self.sparse_to_active.len()
-                || self.sparse_to_active[sparse_idx] == u32::MAX,
+            self.entities_inland.get(sparse_idx).is_none_or(|i| i.is_null()),
             "Entity already present in Phase 7 fast store"
         );
 
         if sparse_idx >= self.entities_inland.len() {
             self.entities_inland.resize(sparse_idx + 1, EntityInland::NULL);
-        }
-        if sparse_idx >= self.sparse_to_active.len() {
-            self.sparse_to_active.resize(sparse_idx + 1, u32::MAX);
         }
 
         self.entities_inland[sparse_idx] = EntityInland::new(
@@ -378,9 +332,7 @@ impl EntityMaster {
             entity.generation(),
         );
 
-        let dense_idx = self.active_ids.len() as u32;
-        self.active_ids.push(entity.id());
-        self.sparse_to_active[sparse_idx] = dense_idx;
+        self.live_count += 1;
     }
 
     /// Deallocates an entity, bumps its generation, and recycles its id.
@@ -398,17 +350,6 @@ impl EntityMaster {
         let entity_id = entity.id();
         let sparse_idx = entity_id.0;
 
-        // Remove from active_ids dense list (swap-remove pattern).
-        let dense_idx = self.sparse_to_active[sparse_idx];
-        debug_assert!(dense_idx != u32::MAX, "is_entity_valid passed but sparse_to_active is u32::MAX");
-        let last_dense = (self.active_ids.len() - 1) as u32;
-        self.active_ids.swap_remove(dense_idx as usize);
-        if dense_idx != last_dense {
-            let moved_entity = self.active_ids[dense_idx as usize];
-            self.sparse_to_active[moved_entity.0] = dense_idx;
-        }
-        self.sparse_to_active[sparse_idx] = u32::MAX;
-
         // Bump generation in place and null the archetype_ptr. The
         // generation must survive deallocation so the next allocate_entity
         // for this recycled id returns Entity::new(id, bumped_gen).
@@ -421,6 +362,16 @@ impl EntityMaster {
         );
 
         self.free_entity_ids.push(entity_id);
+
+        // Decrement only on the success path: the `is_entity_valid` early
+        // return above skips never-registered recycled ids (e.g. the
+        // `EcsMaster::create_entity` rejection fallback), for which
+        // `register*` never incremented `live_count`.
+        debug_assert!(
+            self.live_count > 0,
+            "deallocate_entity: live_count underflow (unbalanced register/deallocate accounting)"
+        );
+        self.live_count -= 1;
         true
     }
 
@@ -449,7 +400,7 @@ impl EntityMaster {
     /// Gets the total number of active entities.
     #[inline]
     pub fn entity_count(&self) -> usize {
-        self.active_ids.len()
+        self.live_count
     }
 
     /// Gets the maximum-ever entity id (= capacity of the fast store).
@@ -475,25 +426,16 @@ impl EntityMaster {
 
     /// Returns an iterator over all currently-active entities.
     ///
-    /// Cost: O(active_count). Driven by `active_ids` (dense list of live
-    /// entity IDs); the fast inland store is consulted once per active
-    /// entity via direct index for the generation tag.
+    /// Cost: O(capacity) — scans the Phase-7 fast store and skips dead
+    /// (`is_null`) slots. Yields live entities in ascending `EntityId`
+    /// order. Real entity iteration goes through `Query`/archetype storage,
+    /// never through here; this is a cold inspection/test API.
     pub fn iter_entities(&self) -> impl Iterator<Item = Entity> + '_ {
-        self.active_ids.iter().map(move |&id| {
-            debug_assert!(
-                id.0 < self.entities_inland.len(),
-                "invariant: active id {} must be in entities_inland (len {})",
-                id.0,
-                self.entities_inland.len()
-            );
-            let inland = &self.entities_inland[id.0];
-            debug_assert!(
-                !inland.is_null(),
-                "invariant: active id {} must point to a live fast-store slot",
-                id.0
-            );
-            Entity::new(id, inland.generation())
-        })
+        self.entities_inland
+            .iter()
+            .enumerate()
+            .filter(|(_, inland)| !inland.is_null())
+            .map(|(i, inland)| Entity::new(EntityId(i), inland.generation()))
     }
 
     /// Clears all entities from the master.
@@ -503,30 +445,27 @@ impl EntityMaster {
     pub fn clear(&mut self) {
         self.free_entity_ids.clear();
         self.entities_inland.clear();
-        self.sparse_to_active.clear();
-        self.active_ids.clear();
+        self.live_count = 0;
         self.next_entity_id.store(0, Ordering::Relaxed);
     }
 
     /// Checks if the master is empty (no active entities).
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.active_ids.is_empty()
+        self.live_count == 0
     }
 
     /// Gets the total memory usage in bytes (approximate).
     pub fn memory_usage(&self) -> usize {
         self.free_entity_ids.capacity() * std::mem::size_of::<EntityId>()
             + self.entities_inland.capacity() * std::mem::size_of::<EntityInland>()
-            + self.sparse_to_active.capacity() * std::mem::size_of::<u32>()
-            + self.active_ids.capacity() * std::mem::size_of::<EntityId>()
     }
 
     /// Compacts the internal storage to minimize memory usage.
     pub fn compact(&mut self) {
         self.free_entity_ids.shrink_to_fit();
 
-        // Note: we don't shrink the fast-store vectors because that would
+        // Note: we don't shrink the fast-store vector because that would
         // require renumbering live ids. Instead, we sort the free list for
         // better cache usage on subsequent allocations.
         self.free_entity_ids.sort_unstable_by(|a, b| b.cmp(a)); // Reverse order for pop()
@@ -588,23 +527,30 @@ impl Default for EntityMaster {
     }
 }
 
-// SAFETY (SEND5 — Phase 9 §2.4, §9.1):
+// SAFETY (SEND5 — Phase 9 §2.4, §9.1; updated Phase X.D):
 //
-// `EntityMaster` becomes `Send + Sync` under the Phase 9 contract:
+// `EntityMaster` is `Send + Sync` under the Phase 9 contract. Post Phase-X.D
+// the struct holds: `free_entity_ids`, `next_entity_id`, `entities_inland`,
+// `live_count`. The `active_ids` / `sparse_to_active` acceleration vectors
+// were removed (Phase X.D), shrinking the shared surface.
 //
-//   - Hot worker paths take `&self` access (`is_entity_valid`, `get_entity`,
-//     `iter_entities`, plus the inline reads from `entities_inland` /
-//     `sparse_to_active` driven by `EcsMaster::get_component_raw`); these are
-//     race-free as long as no concurrent structural mutation occurs.
+//   - Hot worker paths take `&self` (`is_entity_valid`, `get_entity`, plus the
+//     inline `entities_inland` reads driven by `EcsMaster::get_component_raw`).
+//     These are race-free as long as no concurrent structural mutation runs.
 //   - Structural mutation (`allocate_entity`, `deallocate_entity`,
-//     `register_entity_with_ptr`, `clear`, `rewind_allocate`) takes
-//     `&mut self` and runs only on the dispatcher under the apply window
-//     (SCH7). The plan's Round 2 W3 mitigation is enforced by
-//     `EcsMaster::new` pre-allocating to `MAX_ENTITIES_HINT` (= 64 000), so
-//     steady-state worker reads never observe a mid-flight `Vec` realloc.
-//   - The `*mut Archetype` raw pointers stored inside `EntityInland` slots
-//     point into the `ArchetypeMaster`'s stable-address slab (SEND6) and are
-//     never dereferenced inside `EntityMaster` itself.
+//     `register_entity_with_ptr`, `register_batch`, `ensure_capacity`,
+//     `clear`, `rewind_allocate`) takes `&mut self` and runs only on the
+//     dispatcher inside the apply window (SCH7); no worker is in flight, so a
+//     worker `&self` read can never observe a mid-flight `Vec` reallocation of
+//     `entities_inland`. (`entities_inland` is grown lazily on these
+//     dispatcher-only paths — there is no eager pre-extension at world
+//     construction.)
+//   - `next_entity_id` is the ONLY worker-reachable field, exposed solely as
+//     `*const AtomicUsize` through `EntityCounter<'s>` (EM6) — atomic RMW only.
+//   - `live_count: usize` is dispatcher-only (`&mut self`); no worker reaches it.
+//   - The `*mut Archetype` raw pointers inside `EntityInland` slots point into
+//     the `ArchetypeMaster`'s stable-address slab (SEND6) and are never
+//     dereferenced inside `EntityMaster` itself.
 unsafe impl Send for EntityMaster {}
 unsafe impl Sync for EntityMaster {}
 
@@ -689,8 +635,10 @@ mod tests {
 
     /// `iter_entities` must reflect only currently-live entities. After
     /// churning (allocate three, deallocate one), the iterator yields exactly
-    /// the surviving two — order is registration-order with swap-remove.
-    /// Rebuilt from the deleted `t_iter_entities_skips_recycled_slots` and
+    /// the surviving two — order is ascending `EntityId` (post Phase-X.D the
+    /// scan walks `entities_inland`). This test uses `.contains()`, so it is
+    /// order-insensitive. Rebuilt from the deleted
+    /// `t_iter_entities_skips_recycled_slots` and
     /// `t_iter_entities_yields_correct_set_after_recycle`.
     #[test]
     fn iter_entities_yields_only_live_entities_after_churn() {
@@ -841,5 +789,149 @@ mod tests {
         assert!(em.is_entity_valid(e1),
             "stale dealloc attempt must not invalidate the live recycled entity");
         assert_eq!(em.entity_count(), 1);
+    }
+
+    // --- Phase X.D: live_count accounting + inland-scan iter_entities ---
+
+    /// `live_count` (via `entity_count`) tracks register/deallocate balance.
+    #[test]
+    fn live_count_tracks_register_and_deallocate() {
+        let mut em = EntityMaster::new();
+        let ptr = dummy_archetype_ptr();
+        let e0 = em.allocate_entity();
+        em.register_entity_with_ptr(e0, ptr, 0);
+        let e1 = em.allocate_entity();
+        em.register_entity_with_ptr(e1, ptr, 1);
+        let e2 = em.allocate_entity();
+        em.register_entity_with_ptr(e2, ptr, 2);
+        assert_eq!(em.entity_count(), 3, "three registers must yield live_count == 3");
+
+        assert!(em.deallocate_entity(e1));
+        assert_eq!(em.entity_count(), 2, "one dealloc must drop live_count to 2");
+
+        assert!(em.deallocate_entity(e0));
+        assert!(em.deallocate_entity(e2));
+        assert_eq!(em.entity_count(), 0, "all dealloc'd → live_count == 0");
+        assert!(em.is_empty(), "is_empty must agree with live_count == 0");
+    }
+
+    /// `register_batch` bumps `live_count` by `n` and writes the inland
+    /// slots for the contiguous range.
+    #[test]
+    fn register_batch_sets_live_count() {
+        let mut em = EntityMaster::new();
+        let n = 5usize;
+        em.ensure_capacity(n);
+        em.register_batch(EntityId(0), dummy_archetype_ptr(), 0, n);
+
+        assert_eq!(em.entity_count(), 5, "register_batch must set live_count to n");
+        for i in 0..n {
+            let inland = em.entities_inland[i];
+            assert!(!inland.is_null(), "slot {} must be live after register_batch", i);
+            assert_eq!(
+                inland.unit_index(),
+                i as u32,
+                "slot {} must carry the contiguous unit index",
+                i
+            );
+        }
+    }
+
+    /// Locks the Phase-X.D ordering contract: after churn, `iter_entities`
+    /// yields the survivors in ascending `EntityId` order.
+    #[test]
+    fn iter_entities_after_sparse_churn_yields_survivors_ascending() {
+        let mut em = EntityMaster::new();
+        let ptr = dummy_archetype_ptr();
+        let mut handles = Vec::with_capacity(5);
+        for i in 0..5 {
+            let e = em.allocate_entity();
+            em.register_entity_with_ptr(e, ptr, i);
+            handles.push(e);
+        }
+
+        // Deallocate the even-id entities (0, 2, 4).
+        assert!(em.deallocate_entity(handles[0]));
+        assert!(em.deallocate_entity(handles[2]));
+        assert!(em.deallocate_entity(handles[4]));
+
+        let survivors: Vec<EntityId> = em.iter_entities().map(|e| e.id()).collect();
+        assert_eq!(
+            survivors,
+            vec![EntityId(1), EntityId(3)],
+            "iter_entities must yield the odd survivors in ascending id order"
+        );
+    }
+
+    /// `clear` resets `live_count`, emptiness, and capacity.
+    #[test]
+    fn clear_resets_live_count() {
+        let mut em = EntityMaster::new();
+        let ptr = dummy_archetype_ptr();
+        for i in 0..3 {
+            let e = em.allocate_entity();
+            em.register_entity_with_ptr(e, ptr, i);
+        }
+        assert_eq!(em.entity_count(), 3);
+
+        em.clear();
+        assert_eq!(em.entity_count(), 0, "clear must reset live_count");
+        assert!(em.is_empty(), "clear must leave the master empty");
+        assert_eq!(em.capacity(), 0, "clear must drop the fast-store capacity");
+    }
+
+    /// CRITIC C1 regression: deallocating a recycled-but-never-registered id
+    /// is a no-op that must NOT decrement `live_count` (the decrement sits
+    /// after the `is_entity_valid` guard).
+    #[test]
+    fn deallocate_unregistered_recycled_id_is_noop_and_preserves_live_count() {
+        let mut em = EntityMaster::new();
+        let e0 = em.allocate_entity();
+        em.register_entity_with_ptr(e0, dummy_archetype_ptr(), 0);
+        assert!(em.deallocate_entity(e0), "first dealloc must succeed");
+        assert_eq!(em.entity_count(), 0, "live_count back to 0 after dealloc");
+
+        // Recycle id 0: pops the free list, slot stays NULL, NOT registered.
+        let e_recycled = em.allocate_entity();
+        assert_eq!(e_recycled.id(), e0.id(), "id must be recycled");
+        assert!(
+            !em.is_entity_valid(e_recycled),
+            "recycled-but-unregistered id must be invalid (NULL slot)"
+        );
+
+        // Dealloc on the never-registered recycled id is a no-op.
+        assert!(
+            !em.deallocate_entity(e_recycled),
+            "dealloc of an unregistered recycled id must return false"
+        );
+        assert_eq!(
+            em.entity_count(),
+            0,
+            "live_count must NOT be decremented on the never-registered no-op path"
+        );
+    }
+
+    /// CRITIC W1 tripwire: `live_count` must equal the number of non-null
+    /// inland slots after arbitrary churn.
+    #[test]
+    fn live_count_equals_non_null_inland_count_after_churn() {
+        let mut em = EntityMaster::new();
+        let ptr = dummy_archetype_ptr();
+        let mut handles = Vec::with_capacity(6);
+        for i in 0..6 {
+            let e = em.allocate_entity();
+            em.register_entity_with_ptr(e, ptr, i);
+            handles.push(e);
+        }
+
+        assert!(em.deallocate_entity(handles[1]));
+        assert!(em.deallocate_entity(handles[4]));
+
+        let non_null = em.entities_inland.iter().filter(|i| !i.is_null()).count();
+        assert_eq!(
+            em.entity_count(),
+            non_null,
+            "live_count must match the non-null inland slot count after churn"
+        );
     }
 }

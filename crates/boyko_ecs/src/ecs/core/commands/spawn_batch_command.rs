@@ -311,7 +311,7 @@ where
         // Replaces the SBO17b hard-panic guard. The apply path holds
         // `&mut EcsMaster`, so workers are not in flight per SCH7;
         // growing the Vec here cannot race a `&self` worker read on
-        // `entities_inland` / `sparse_to_active` (SEND5 / SBO16).
+        // `entities_inland` (SEND5 / SBO16).
         //
         // We grow by `n + MAX_BATCH_HINT` so that subsequent worker-side
         // reads have a stable address window for at least one further

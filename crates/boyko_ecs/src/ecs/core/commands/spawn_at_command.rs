@@ -85,8 +85,8 @@ impl<B: Bundle> Command for SpawnAtCommand<B> {
     /// 2. Resolve `pool_ids` via the per-world `BundleColumnCache` (cold
     ///    branch leaks the canonical-sorted slice; warm branch hits one
     ///    Acquire load).
-    /// 3. Grow `entities_inland` / `sparse_to_active` to cover the
-    ///    pre-allocated entity slot (dispatcher-only; SEND5 preserved).
+    /// 3. Grow `entities_inland` to cover the pre-allocated entity slot
+    ///    (dispatcher-only; SEND5 preserved).
     /// 4. Reserve archetype capacity for 1 row.
     /// 5. Inside `for_each_component_bytes` (single pass), write each
     ///    component's bytes into its pool, commit the unit, and fill its
@@ -158,20 +158,13 @@ impl<B: Bundle> Command for SpawnAtCommand<B> {
         // Single-row growth — replicates the legacy
         // `create_entity_at_with_pool_ids` resize gate. The apply path
         // holds `&mut EcsMaster`, so worker `&self` reads on
-        // `entities_inland` / `sparse_to_active` cannot race a Vec
-        // reallocation here (SEND5).
+        // `entities_inland` cannot race a Vec reallocation here (SEND5).
         let id_raw = entity.id().0;
         if id_raw >= world.entity_master.entities_inland.len() {
             world
                 .entity_master
                 .entities_inland
                 .resize(id_raw + 1, EntityInland::NULL);
-        }
-        if id_raw >= world.entity_master.sparse_to_active.len() {
-            world
-                .entity_master
-                .sparse_to_active
-                .resize(id_raw + 1, u32::MAX);
         }
 
         // ── Step 4: reborrow archetype + reserve capacity ─────────────

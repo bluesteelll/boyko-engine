@@ -1,8 +1,8 @@
 //! Phase 12.6 — `EcsMaster::new` lazy-allocation contract.
 //!
-//! The four heavy per-world allocations (`entities_inland` +
-//! `sparse_to_active` fast-store memsets, `bundle_archetype_cache`,
-//! `bundle_column_cache`, `query_state_cache`) are deferred to first
+//! The four heavy per-world allocations (the `entities_inland`
+//! fast-store memset, `bundle_archetype_cache`, `bundle_column_cache`,
+//! `query_state_cache`) are deferred to first
 //! use. This test pins the contract: a freshly constructed `EcsMaster`
 //! holds no entity fast-store storage and no cache arrays; the first
 //! spawn / query call materialises them on demand.

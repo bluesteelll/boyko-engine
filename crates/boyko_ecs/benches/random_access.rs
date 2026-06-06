@@ -304,9 +304,9 @@ fn bench_set_component_raw(c: &mut Criterion) {
 
 // --- D10 #6: bench_iter_entities_dense_10k ---
 //
-// Full sweep of 10K entities, no churn — the active_ids dense list is
-// contiguous so each iteration is a simple pointer walk. Parity bench:
-// no regression vs. previous shape.
+// Full sweep of 10K entities, no churn — the fast store is scanned
+// sequentially; with no churn every slot is live, so iteration is a single
+// contiguous pass. Parity bench: no regression vs. previous shape.
 fn bench_iter_entities_dense_10k(c: &mut Criterion) {
     register_bench_components();
     let (ecs, _arch, _entities) = build_dense_ecs(10_000);
@@ -328,9 +328,10 @@ fn bench_iter_entities_dense_10k(c: &mut Criterion) {
 // 1M creates ~1.6 GB of column buffer with the current default arena, and
 // repeated criterion warm-up runs blow heap), deallocate 99% so only 1K
 // remain. Iterate the survivors. This stresses the iter_entities path on a
-// sparse layout: active_ids stays dense (it tracks live IDs after
-// swap-remove), but `entities_inland` is mostly null sentinels. Documented
-// baseline — no fail criterion.
+// sparse layout: post Phase-X.D the `active_ids` dense list no longer
+// exists, so the scan is over `entities_inland` (mostly null sentinels
+// after the churn). This bench is the documented O(capacity) baseline — no
+// fail criterion.
 fn bench_iter_entities_sparse_post_churn(c: &mut Criterion) {
     register_bench_components();
 
@@ -342,8 +343,9 @@ fn bench_iter_entities_sparse_post_churn(c: &mut Criterion) {
     let (mut ecs, _arch, entities) = build_dense_ecs(total);
 
     // Deterministic deallocation: keep `entities[i]` iff i % (total/survivors)
-    // == 0; remove the rest. Walks the list and triggers swap-remove churn on
-    // the dense active list inside EntityMaster.
+    // == 0; remove the rest. Walks the list and nulls the corresponding
+    // `entities_inland` slots inside EntityMaster, leaving null sentinels that
+    // the post-churn O(capacity) `iter_entities` scan must skip.
     let keep_step = total / survivors;
     for (i, e) in entities.iter().enumerate() {
         if i % keep_step != 0 {
@@ -362,6 +364,32 @@ fn bench_iter_entities_sparse_post_churn(c: &mut Criterion) {
             }
             black_box((count, after))
         });
+    });
+}
+
+// --- X.D: bench_delete_entity_10k (transient despawn A/B) ---
+//
+// Times ONLY a `delete_entity` loop over N pre-spawned entities. `iter_batched`
+// rebuilds a fresh dense population in `setup` so each measured pass deletes a
+// freshly-populated ECS (delete is destructive — no in-place reset). Phase X.D
+// shed per-despawn array touches (the `active_ids` swap-remove + the
+// `sparse_to_active` fixup) and a branch; this bench isolates that saving from
+// the create path. Setup cost is excluded from the timing by `iter_batched`.
+fn bench_delete_entity_10k(c: &mut Criterion) {
+    register_bench_components();
+    let n = 10_000usize;
+
+    c.bench_function("delete_entity_10k", |b| {
+        b.iter_batched(
+            || build_dense_ecs(n),
+            |(mut ecs, _arch, entities)| {
+                for e in &entities {
+                    black_box(ecs.delete_entity(black_box(*e)));
+                }
+                black_box(ecs);
+            },
+            BatchSize::LargeInput,
+        );
     });
 }
 
@@ -631,6 +659,7 @@ criterion_group!(
     bench_set_component_raw,
     bench_iter_entities_dense_10k,
     bench_iter_entities_sparse_post_churn,
+    bench_delete_entity_10k,
     bench_create_entity_10k,
     bench_get_component_stale_generation,
     bench_get_component_missing_component,
