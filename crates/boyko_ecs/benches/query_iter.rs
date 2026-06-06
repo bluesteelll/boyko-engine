@@ -17,6 +17,15 @@
 // (MAX_COMPONENTS = 512; ranges 100-109, 200-209, 300-309, 400-409, 450-465
 // are owned by unit tests; 470-479 by this bench; 480-489 by swap_remove bench.)
 
+// Phase X.E: opt-in low-variance allocator for A/B signal extraction.
+// OFF by default (`cargo bench` keeps the production system heap for honest
+// absolutes); `cargo bench --features bench-alloc` swaps in mimalloc, which
+// is far more deterministic and exposes structural signals the system heap
+// masks (the documented ±20-30% variance source). See docs/BENCHMARKING.md.
+#[cfg(feature = "bench-alloc")]
+#[global_allocator]
+static BENCH_ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use boyko_ecs::ecs::core::component::component::Component;
 use boyko_ecs::ecs::core::component::component_registry;
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;

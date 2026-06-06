@@ -19,6 +19,15 @@
 // 490-509 ComponentId range used by `random_access`. The 64 distinct types
 // used by `bench_resources_drop_64_occupied` claim consecutive ResourceIds.
 
+// Phase X.E: opt-in low-variance allocator for A/B signal extraction.
+// OFF by default (`cargo bench` keeps the production system heap for honest
+// absolutes); `cargo bench --features bench-alloc` swaps in mimalloc, which
+// is far more deterministic and exposes structural signals the system heap
+// masks (the documented ±20-30% variance source). See docs/BENCHMARKING.md.
+#[cfg(feature = "bench-alloc")]
+#[global_allocator]
+static BENCH_ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::resources::Resources;
 use boyko_ecs::ecs::core::system::filtered_access_set::FilteredAccessSet;

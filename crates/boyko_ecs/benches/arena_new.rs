@@ -32,6 +32,15 @@
 // Verdict: median <= 5 µs == PASS. The expected win is ~10-15x, far above any
 // thermal noise floor.
 
+// Phase X.E: opt-in low-variance allocator for A/B signal extraction.
+// OFF by default (`cargo bench` keeps the production system heap for honest
+// absolutes); `cargo bench --features bench-alloc` swaps in mimalloc, which
+// is far more deterministic and exposes structural signals the system heap
+// masks (the documented ±20-30% variance source). See docs/BENCHMARKING.md.
+#[cfg(feature = "bench-alloc")]
+#[global_allocator]
+static BENCH_ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::memory::arena::Arena;
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};

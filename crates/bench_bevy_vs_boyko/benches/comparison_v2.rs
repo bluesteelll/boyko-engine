@@ -10,6 +10,15 @@
 //!
 //! Run via `cargo bench -p bench-bevy-vs-boyko --bench comparison_v2`.
 
+// Phase X.E: opt-in low-variance allocator for A/B signal extraction.
+// OFF by default (`cargo bench` keeps the production system heap for honest
+// absolutes); `cargo bench --features bench-alloc` swaps in mimalloc, which
+// is far more deterministic and exposes structural signals the system heap
+// masks (the documented ±20-30% variance source). See docs/BENCHMARKING.md.
+#[cfg(feature = "bench-alloc")]
+#[global_allocator]
+static BENCH_ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -252,10 +261,15 @@ fn bench_boyko_ecs_master_spawn_batch_10k(c: &mut Criterion) {
 type _OrUsage = Or<()>;
 
 fn configure() -> Criterion {
+    // Phase X.E: a longer warm-up lets the CPU reach a steady clock/cache state
+    // before sampling, and a 5% noise threshold (criterion's default is 1%)
+    // stops this noisy Windows box from reporting routine run-to-run jitter as
+    // a regression. See docs/BENCHMARKING.md.
     Criterion::default()
         .sample_size(50)
         .measurement_time(Duration::from_secs(3))
-        .warm_up_time(Duration::from_millis(500))
+        .warm_up_time(Duration::from_secs(3))
+        .noise_threshold(0.05)
 }
 
 criterion_group! {

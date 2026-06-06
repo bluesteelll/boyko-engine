@@ -29,6 +29,15 @@
 //! (244..=259, 280..=281), Phase 8d Miri (260..=269), Phase 8.5 Step 7
 //! smoke (290..=309), Step 8 panic (310..=312), Step 8 Miri (320..=339).
 
+// Phase X.E: opt-in low-variance allocator for A/B signal extraction.
+// OFF by default (`cargo bench` keeps the production system heap for honest
+// absolutes); `cargo bench --features bench-alloc` swaps in mimalloc, which
+// is far more deterministic and exposes structural signals the system heap
+// masks (the documented ±20-30% variance source). See docs/BENCHMARKING.md.
+#[cfg(feature = "bench-alloc")]
+#[global_allocator]
+static BENCH_ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::hint::black_box;
 
 use boyko_ecs::ecs::core::bundle::Bundle;

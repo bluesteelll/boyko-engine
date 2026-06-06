@@ -6,6 +6,15 @@
 //
 // Component ID range 420-435 reserved for this bench (verified free in test suites).
 
+// Phase X.E: opt-in low-variance allocator for A/B signal extraction.
+// OFF by default (`cargo bench` keeps the production system heap for honest
+// absolutes); `cargo bench --features bench-alloc` swaps in mimalloc, which
+// is far more deterministic and exposes structural signals the system heap
+// masks (the documented ±20-30% variance source). See docs/BENCHMARKING.md.
+#[cfg(feature = "bench-alloc")]
+#[global_allocator]
+static BENCH_ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use boyko_ecs::ecs::core::archetype::archetype::Archetype;
 use boyko_ecs::ecs::core::change_detection::Tick;
 use boyko_ecs::ecs::core::component::component_registry;

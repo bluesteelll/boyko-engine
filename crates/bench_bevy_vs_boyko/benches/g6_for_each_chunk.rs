@@ -48,6 +48,15 @@
 //!
 //! Run via `cargo bench --bench g6_for_each_chunk`.
 
+// Phase X.E: opt-in low-variance allocator for A/B signal extraction.
+// OFF by default (`cargo bench` keeps the production system heap for honest
+// absolutes); `cargo bench --features bench-alloc` swaps in mimalloc, which
+// is far more deterministic and exposes structural signals the system heap
+// masks (the documented ±20-30% variance source). See docs/BENCHMARKING.md.
+#[cfg(feature = "bench-alloc")]
+#[global_allocator]
+static BENCH_ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -415,13 +424,19 @@ fn bench_bevy_iter_fold_triple(c: &mut Criterion) {
 // Plan §8.2 mandates `sample_size(60)` — ≥30 (criterion's default analytic
 // floor) with headroom for variance smoothing per Risk 5 (Phase 12.6 g5d
 // signal-to-noise lesson). `measurement_time` / `warm_up_time` matched to
-// `comparison_v2.rs` defaults so bench-vs-bench comparability is preserved.
+// `comparison_v2.rs` so bench-vs-bench comparability is preserved.
+//
+// Phase X.E: warm-up raised to 3 s (steady clock/cache before sampling) and a
+// 5% noise threshold added (criterion's default is 1%) so this noisy Windows
+// box stops flagging routine run-to-run jitter as a regression. Kept in step
+// with `comparison_v2.rs`. See docs/BENCHMARKING.md.
 
 fn configure() -> Criterion {
     Criterion::default()
         .sample_size(60)
         .measurement_time(Duration::from_secs(3))
-        .warm_up_time(Duration::from_millis(500))
+        .warm_up_time(Duration::from_secs(3))
+        .noise_threshold(0.05)
 }
 
 criterion_group! {

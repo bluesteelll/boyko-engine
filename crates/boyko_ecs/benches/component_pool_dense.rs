@@ -17,6 +17,15 @@
 //!
 //! Run: `cargo bench -p boyko-ecs --bench component_pool_dense`.
 
+// Phase X.E: opt-in low-variance allocator for A/B signal extraction.
+// OFF by default (`cargo bench` keeps the production system heap for honest
+// absolutes); `cargo bench --features bench-alloc` swaps in mimalloc, which
+// is far more deterministic and exposes structural signals the system heap
+// masks (the documented ±20-30% variance source). See docs/BENCHMARKING.md.
+#[cfg(feature = "bench-alloc")]
+#[global_allocator]
+static BENCH_ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use boyko_ecs::ecs::core::component::component_registry;
 use boyko_ecs::ecs::identifiers::primitives::ComponentId;
 use boyko_ecs::ecs::memory::arena::Arena;

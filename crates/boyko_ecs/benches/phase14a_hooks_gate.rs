@@ -28,6 +28,15 @@
 //!
 //! Invoked by the `tester`: `cargo bench -p boyko-ecs --bench phase14a_hooks_gate`.
 
+// Phase X.E: opt-in low-variance allocator for A/B signal extraction.
+// OFF by default (`cargo bench` keeps the production system heap for honest
+// absolutes); `cargo bench --features bench-alloc` swaps in mimalloc, which
+// is far more deterministic and exposes structural signals the system heap
+// masks (the documented ±20-30% variance source). See docs/BENCHMARKING.md.
+#[cfg(feature = "bench-alloc")]
+#[global_allocator]
+static BENCH_ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 use boyko_ecs::ecs::core::component::component::Component;

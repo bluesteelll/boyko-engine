@@ -9,6 +9,16 @@ members = ["crates/boyko_ecs", "crates/boyko_macros", "crates/boyko_utils", "cra
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
 
+# Phase X.E — deterministic bench codegen.
+# A single codegen unit removes the cross-build codegen-layout variance that
+# otherwise perturbs A/B bench deltas, and it hardens the "0%-gate /
+# byte-identical asm" methodology (two builds of the same source produce the
+# same machine code). This is NOT `lto`: LTO over the Bevy dependency in
+# `bench_bevy_vs_boyko` would explode compile time, and LTO shifts the mean
+# rather than the variance — out of scope for X.E. See docs/BENCHMARKING.md.
+[profile.bench]
+codegen-units = 1
+
 [package]
 name = "boyko-engine"
 version = "0.1.0"

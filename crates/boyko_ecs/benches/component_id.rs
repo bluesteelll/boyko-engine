@@ -12,6 +12,15 @@
 // API with a fresh type per iteration via a separate process or build.rs
 // code-gen. Out of scope for Phase 2c.
 
+// Phase X.E: opt-in low-variance allocator for A/B signal extraction.
+// OFF by default (`cargo bench` keeps the production system heap for honest
+// absolutes); `cargo bench --features bench-alloc` swaps in mimalloc, which
+// is far more deterministic and exposes structural signals the system heap
+// masks (the documented ±20-30% variance source). See docs/BENCHMARKING.md.
+#[cfg(feature = "bench-alloc")]
+#[global_allocator]
+static BENCH_ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use boyko_ecs::ecs::core::component::component::Component;
 use boyko_macros::Component;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};

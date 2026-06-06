@@ -12,6 +12,13 @@ boyko-ecs = { path = "../boyko_ecs" }
 boyko-macros = { path = "../boyko_macros" }
 boyko-threadpool = { path = "../boyko_threadpool" }
 bevy_ecs = { version = "0.18.1", features = ["std", "multi_threaded"] }
+# Phase X.E — optional bench-only global allocator, gated behind the
+# `bench-alloc` feature (OFF by default). Cargo forbids `optional = true` on
+# dev-dependencies, so the bench allocator lives here as a normal optional
+# dependency; because nothing enables `bench-alloc` by default, it is NEVER
+# compiled in the default build/bench graph. Enabled via
+# `cargo bench --features bench-alloc`. See docs/BENCHMARKING.md.
+mimalloc = { version = "0.1", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
@@ -22,6 +29,11 @@ criterion = { version = "0.5", features = ["html_reports"] }
 # off so it never tries to compile `#![feature(...)]` code on stable.
 # Run the nightly benches via: `cargo +nightly bench --features nightly`.
 nightly = []
+# Phase X.E — opt-in low-variance bench allocator. OFF by default so the normal
+# `cargo bench` keeps the production system heap (honest absolutes); enable via
+# `cargo bench --features bench-alloc` to swap in mimalloc for A/B signal
+# extraction. See docs/BENCHMARKING.md.
+bench-alloc = ["dep:mimalloc"]
 
 [[bench]]
 name = "comparison"
