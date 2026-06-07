@@ -1,285 +1,451 @@
 # boyko-engine architecture (branch `ecs`)
 
-> This documentation reflects the state of the **`ecs` branch**. Comparison with master is at the end.
+> This documentation reflects the state of the **`ecs` branch** — the cumulative
+> result of Phases 2 → 18, the 9.x executor-soundness series, the X.x perf
+> series, and Phases 14a/14b. Comparison with `master` is at the end. For the
+> per-subsystem catalog see [SYSTEMS.md](SYSTEMS.md); for the "where is X?"
+> lookup see [FEATURE_MAP.md](FEATURE_MAP.md).
 
 ## Goals and non-goals
 
 **Goals:**
-- Performance on par with state-of-the-art ECS engines (Bevy / flecs / Unity DOTS / EnTT)
-- Cache locality via type-erased chunked storage + archetype-grouping of components
-- Lock-free parallelism with work partitioning by chunks/archetypes
-- Minimal per-entity / per-component footprint
-- Zero-cost generics — no dynamic dispatch in the hot path
+- Performance on par with (and where measured, beating) state-of-the-art ECS
+  engines (Bevy / flecs / Unity DOTS / EnTT).
+- Cache locality via type-erased chunked storage + archetype-grouping, an inline
+  per-archetype column table for O(1) random component access (Phase 7), and a
+  SIMD-aligned columnar batched API (`for_each_chunk`, Phase X.A).
+- Lock-free parallelism: a custom Chase-Lev work-stealing pool drives a
+  Bevy-class conflict-graph scheduler (Phase 9), proven sound under loom + Miri.
+- Minimal per-entity / per-component footprint.
+- Zero-cost generics — no dynamic dispatch in the hot path.
 
-**Non-goals (at the current stage):**
-- Scripting support (Lua, Wasm)
-- Component hot-reload
-- Serialization/deserialization (deferred until the model stabilizes)
-- Cross-platform support beyond x86_64
+**Non-goals (current stage):** scripting (Lua/Wasm scripting), component
+hot-reload, serialization (deferred until the model stabilizes), cross-platform
+beyond x86_64 (wasm32 compiles but is not the perf target).
 
 ## Workspace layout
 
+The workspace is six crates (`Cargo.toml` `members`):
+
 ```
 boyko-engine/
-├── Cargo.toml                            # workspace + main binary
-├── src/main.rs                           # entry point (empty)
+├── Cargo.toml                            # workspace (6 members) + [profile.bench] + thin binary
+├── src/main.rs                           # entry point (library-shaped project)
 ├── crates/
 │   ├── boyko_ecs/                        # ECS core
-│   │   ├── Cargo.toml                    # deps: rand, anyhow, boyko-utils
+│   │   ├── Cargo.toml                    # deps: boyko-utils, boyko-threadpool, fixedbitset,
+│   │   │                                 #       crossbeam-queue, crossbeam-utils, static_assertions,
+│   │   │                                 #       optional mimalloc; unix→libc. (boyko-macros is DEV-only)
 │   │   └── src/
-│   │       ├── lib.rs                    # pub mod ecs;
+│   │       ├── lib.rs                    # pub mod ecs; pub mod prelude; re-exports App/Plugin/EcsError
+│   │       ├── prelude.rs                # curated re-exports (NO derives — macro-cycle)
 │   │       └── ecs/
-│   │           ├── mod.rs                # core, memory, constants, identifiers
-│   │           ├── constants.rs          # sizes, alignment, thresholds
-│   │           ├── identifiers/
-│   │           │   └── primitives.rs     # type aliases: EntityId, ArchetypeId, ComponentId, ...
-│   │           ├── core/
-│   │           │   ├── component/        # type-erased: Component trait, ComponentMask, ComponentPoolBundle, ComponentRegistry
-│   │           │   ├── entity/           # Entity, EntityInland, EntityMaster (recycling)
-│   │           │   ├── archetype/        # Archetype, ArchetypeMaster, ArchetypeRegistry, ArchetypeSignature, ArchetypeBundle
-│   │           │   ├── ecs_master/       # EcsMaster — top-level facade
-│   │           │   ├── iters/            # Query, QueryState, ArchetypeBitSet, ComponentSet
-│   │           │   ├── events/           # Event trait + EventPool/EventRegistry, Participants, Parameters
-│   │           │   # (containers/tuple/ removed in Q-024 — orphan 0-byte stubs,
-│   │           │   #  never wired into mod.rs; ComponentTuple planned as Phase 2e)
-│   │           └── memory/
-│   │               ├── arena.rs              # 64 MB arena with best-fit allocator
-│   │               ├── free_mem_block.rs     # free-block tracker
-│   │               ├── chunk.rs              # type-erased: metadata only (start_index, capacity, dirty)
-│   │               ├── component_pool.rs     # type-erased: NonNull<u8> + len + chunks; row i at buffer+i*stride (X.B)
-│   │               └── utils.rs              # align_up
-│   │           # (Per-entity component iterators are intentionally absent. The old
-│   │           #  sparse_iter / multi_pool_sparse_iter / sparse_iter_component_pool
-│   │           #  files were removed in Phase 2c — see Phase 2d ticket for the
-│   │           #  zero-alloc replacement built on top of QueryState.)
-│   ├── boyko_macros/                     # proc-macros
-│   │   ├── Cargo.toml                    # deps: syn, quote, proc-macro2, boyko-ecs
-│   │   └── src/lib.rs                    # #[derive(Component)] + #[event]
-│   └── boyko_utils/                      # reusable collections
-│       ├── Cargo.toml
-│       └── src/
-│           ├── lib.rs
-│           ├── identifiers/
-│           │   ├── primitives.rs         # Generation = usize
-│           │   └── slot.rs               # Slot { index, generation }
-│           ├── bit_mask/
-│           │   ├── bit_storage.rs        # BitStorage trait
-│           │   ├── bit_mask.rs           # BitMask<T: BitStorage>
-│           │   ├── bit_set.rs            # BitSet<T: BitInteger> + iterator
-│           │   └── bit_set512.rs         # BitSet512 — fixed 8×u64
-│           └── sparse_map/
-│               ├── sparse_collection.rs  # SparseCollection trait
-│               ├── sparse_map.rs         # SparseMap<U>
-│               └── sparse_slot_map.rs    # SparseSlotMap<U>
+│   │           ├── mod.rs                # core, memory, error, constants, identifiers
+│   │           ├── constants.rs          # sizes / thresholds / SIMD-align (capacities live by their registries)
+│   │           ├── error.rs              # EcsError / EcsResult (no anyhow)
+│   │           ├── identifiers/primitives.rs   # EntityId / ArchetypeId / ComponentId / … newtypes
+│   │           ├── memory/
+│   │           │   ├── arena.rs              # 64 MB arena, VirtualAlloc/mmap lazy-commit (X.C)
+│   │           │   ├── free_mem_block.rs     # best-fit free-block tracker
+│   │           │   ├── chunk.rs              # type-erased chunk metadata
+│   │           │   ├── component_pool.rs     # type-erased pool + per-row tick columns (X.B + Phase 10)
+│   │           │   └── utils.rs              # align_up
+│   │           └── core/
+│   │               ├── app/              # App builder + Plugin + Plugins + AppExit (Phase 18)
+│   │               ├── archetype/        # Archetype (inline columns), signature, registry, bundle slab, master
+│   │               ├── bundle/           # Bundle trait + derive + type registry + column cache
+│   │               ├── change_detection/ # Tick + check_ticks (Phase 10)
+│   │               ├── commands/         # CommandQueue + Spawn/Insert/Remove/Despawn/Batch + migration_helpers
+│   │               ├── component/        # Component trait, mask, registry, pool bundle, hooks/, observers/
+│   │               ├── ecs_master/       # EcsMaster — top-level facade
+│   │               ├── entity/           # Entity, EntityInland (slab ptr), EntityMaster
+│   │               ├── iters/            # QueryState, ArchetypeBitSet, LegacyQuery, component_set, query/
+│   │               ├── events/           # Event trait + dispatcher + buffer + registry + participants/parameters
+│   │               ├── resources/        # Resources slab + Resource trait + registry
+│   │               ├── schedule/         # Schedule + ScheduleBuilder + ConflictGraph + ordering + conditions
+│   │               ├── state/            # States + State/NextState + transitions (Phase 17)
+│   │               └── system/           # System/IntoSystem/FunctionSystem + SystemParam + params/
+│   ├── boyko_macros/                     # proc-macros (DEV-dep of boyko_ecs)
+│   │   └── src/lib.rs                    # #[derive(Component/Resource/Bundle/SystemSet)] + #[event]
+│   ├── boyko_utils/                      # reusable collections
+│   │   └── src/{bit_mask/, sparse_map/, identifiers/}
+│   ├── boyko_threadpool/                 # Chase-Lev work-stealing pool (on crossbeam-deque)
+│   │   └── src/{thread_pool, scope, worker, tls, sync}.rs
+│   ├── boyko_demo/                       # wgpu+egui sandbox (dogfoods the API; wasm32-capable)
+│   └── bench_bevy_vs_boyko/              # cross-engine comparison benches (pulls bevy)
 └── docs/                                 # internal documentation
 ```
 
 ## Inter-crate dependencies
 
 ```
-boyko-engine (main binary)
+boyko-engine (thin binary)
     ├── boyko_ecs
-    │       └── boyko_utils       ← new on ecs
-    └── boyko_macros
-            └── boyko_ecs         (for paths in macro-expanded code)
+    │       ├── boyko_utils
+    │       └── boyko_threadpool ──→ crossbeam-deque, crossbeam-utils
+    ├── boyko_macros ──→ boyko_ecs        (for the ::boyko_ecs::… paths the derives emit)
+    └── boyko_utils
+
+boyko_ecs (dev-dependencies): boyko_macros, criterion, proptest, trybuild, rand
+boyko_demo ──→ boyko_ecs, boyko_macros, wgpu, eframe/egui
+bench_bevy_vs_boyko ──→ boyko_ecs, boyko_macros, bevy, criterion
 ```
 
-External dependencies:
-- `boyko_ecs`: `rand`, `anyhow`, `boyko-utils`
-- `boyko_macros`: `syn`, `quote`, `proc-macro2`, `boyko-ecs`
-- `boyko_utils`: (none)
+External runtime deps of `boyko_ecs`: `fixedbitset` (scheduler conflict/condition
+bitsets), `crossbeam-queue` / `crossbeam-utils`, `static_assertions` (compile-time
+`Send`/`Unpin` pins), optional `mimalloc` (bench-only), `libc` (Unix arena
+`mmap`). **`anyhow` and `ctor` were removed** (C-019 / lazy-mint ID model).
+
+> **The `boyko-macros` cycle (Phase 18).** `boyko_macros` depends on `boyko_ecs`
+> (its derives expand to `::boyko_ecs::…` paths), so `boyko_ecs` can only keep it
+> as a **dev-dependency** — a normal dependency would form a cycle. Therefore the
+> derives are unusable inside `boyko_ecs` lib code (`AppExit` hand-impls
+> `Resource`) and the public `prelude` omits them (users
+> `use boyko_macros::{Component, …}` directly).
 
 ## Architecture layers
 
 ```
-┌────────────────────────────────────────────────────────────────┐
-│  Layer 4: Game/User Code (uses ECS API)                        │
-└────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────┐
+│  Layer 5: Game / User Code                                          │
+└────────────────────────────────────────────────────────────────────┘
                                 ↑
-┌────────────────────────────────────────────────────────────────┐
-│  Layer 3: ECS API                                              │
-│  EcsMaster, ArchetypeMaster, Query, Event, EventRegistry       │
-└────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────┐
+│  Layer 4: Application facade                                        │
+│  App + Plugin + Plugins + AppExit (Phase 18)                       │
+└────────────────────────────────────────────────────────────────────┘
                                 ↑
-┌────────────────────────────────────────────────────────────────┐
-│  Layer 2: ECS Core                                             │
-│  Entity, EntityMaster, EntityInland                            │
-│  Archetype, ArchetypeRegistry, ArchetypeSignature              │
-│  Component (trait + derive), ComponentMask, ComponentRegistry  │
-│  Event (trait + derive), Participants, Parameters              │
-└────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────┐
+│  Layer 3: Scheduling & systems                                     │
+│  Schedule / ScheduleBuilder / ConflictGraph (Tarjan+Kahn)         │
+│  System / IntoSystem / FunctionSystem / SystemParam               │
+│  Commands · States · run conditions · ordering/sets                │
+│  boyko_threadpool (Chase-Lev work-stealing + Scope)               │
+└────────────────────────────────────────────────────────────────────┘
                                 ↑
-┌────────────────────────────────────────────────────────────────┐
-│  Layer 1: Type-Erased Memory                                   │
-│  Arena → ComponentPool (type-erased, row = buffer+i*stride)    │
-│  MemFreeBlockMaster (free-block tracker)                       │
-└────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────┐
+│  Layer 2: ECS API                                                  │
+│  EcsMaster · typed Query<D, F> (+ par_iter / for_each_chunk)      │
+│  Bundle · Resources · EventDispatcher / EventReader / EventWriter │
+│  change detection (Tick / Added / Changed / Ref / Mut)            │
+│  component hooks & observers                                       │
+└────────────────────────────────────────────────────────────────────┘
                                 ↑
-┌────────────────────────────────────────────────────────────────┐
-│  Layer 0: Utils (boyko_utils)                                  │
-│  BitSet<T>, BitMask<T>, BitSet512                              │
-│  SparseMap<U>, SparseSlotMap<U>                                │
-│  Slot, identifiers/primitives                                  │
-└────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────┐
+│  Layer 1: ECS Core                                                 │
+│  Entity / EntityMaster / EntityInland (slab ptr)                  │
+│  Archetype (inline columns) / ArchetypeMaster / Registry / slab   │
+│  Component (trait + derive) / ComponentMask / ComponentRegistry   │
+│  Event (trait + derive) / Participants / Parameters               │
+└────────────────────────────────────────────────────────────────────┘
+                                ↑
+┌────────────────────────────────────────────────────────────────────┐
+│  Layer 0: Type-Erased Memory  +  Utils (boyko_utils)              │
+│  Arena → ComponentPool (type-erased, row = buffer+i*stride,       │
+│           + per-row Tick columns) · MemFreeBlockMaster             │
+│  BitSet<T> / BitSet256 · SparseMap / SparseSlotMap · Slot · IDs   │
+└────────────────────────────────────────────────────────────────────┘
 ```
 
-## Data flow when creating an entity
+## Data flow: spawning an entity (direct API)
 
 ```
 User → EcsMaster::create_entity(archetype_id, &[(ComponentId, &[u8])])
     ├─ Guard (C-007): archetype_master.has_archetype(archetype_id)?
-    │      └─ no → return Err(EcsError::ArchetypeNotFound) before any allocation
+    │      └─ no → Err(EcsError::ArchetypeNotFound) before any allocation
     ├─ EntityMaster::allocate_entity()
-    │      └─ either take from free_entity_ids,
-    │         or bump next_entity_id → Entity { id, generation }
+    │      └─ recycle from free_entity_ids, or fetch_add(next_entity_id)
+    │         → Entity { id, generation }
     ├─ ArchetypeMaster::get_archetype_mut(id) → &mut Archetype
     ├─ Archetype::create_entity(entity_id, &mut inland, components)
     │      ├─ Two-phase commit (C-009): bundle.can_push_entity_components(...)
-    │      │      └─ false → rewind_allocate(entity);
-    │      │                  return Err(EcsError::ArchetypeRejectedEntity)
-    │      └─ bundle.push_entity_components(...) — atomic across pools
-    │             └─ for each (component_id, &[u8]):
-    │                    ComponentPool::add(...) → memcpy into arena buffer
-    └─ EntityMaster::register_entity(entity, archetype_id, unit_index)
-              └─ entity_map.insert(entity.id, EntityInland { archetype_id, unit_index, generation })
-
-Failure path correctness (C-007 + C-009): the guard means EntityIds are never
-leaked on early rejection; the two-phase commit means a partial push (some
-pools succeeded, some failed) is structurally impossible — `can_push` walks
-every pool in read-only mode first, then `push` only runs after universal
-go-ahead.
+    │      │      └─ false → entity_master.rewind_allocate(entity);
+    │      │                  Err(EcsError::ArchetypeRejectedEntity)
+    │      ├─ bundle.push_entity_components(...) — lockstep memcpy into arena
+    │      └─ fill the per-row added_ticks/changed_ticks with the world's tick
+    └─ EntityMaster::register_entity_with_ptr(entity, &mut *archetype, row)
+              └─ write the EntityInland fast-store slot { archetype_ptr, row, gen };
+                 live_count += 1
 ```
 
-After the fast-store registration, the same structural op fires component
-lifecycle **hooks** (Phase 14a) and then **observers** (Phase 14b) for each
-`add` / `insert` kind — gated by the archetype's `ArchetypeFlags` `u16`
-bit-test, so a world with no callback pays one `test`/`jz`. The symmetric
-`replace` / `remove` fire happens on despawn / migration. The full catalog
-(registry, the 4 cold `fire_*_observers` dispatch fns, the 7 fire sites, and
-the OBS-FIRE-LOOP Tree-Borrows invariant) is in [SYSTEMS.md §3.6](SYSTEMS.md).
+Failure-path correctness (C-007 + C-009): the guard means no EntityIDs leak on
+early rejection; the two-phase commit makes a partial push structurally
+impossible (`can_push` walks every pool read-only first, then `push` runs only
+after a universal go-ahead).
+
+After registration, the same structural op fires component lifecycle **hooks**
+(Phase 14a) then **observers** (Phase 14b) for each `add` / `insert` kind — gated
+by the archetype's `ArchetypeFlags` `u16` bit-test (a world with no callback pays
+one `test`/`jz`). The symmetric `replace` / `remove` fire on despawn / migration.
+The deferred (`Commands`) spawn/insert/remove paths fire at the same kinds from
+their apply sites. Full catalog (registry, the 4 cold `fire_*_observers` dispatch
+fns, the 7 fire sites, and the OBS-FIRE-LOOP Tree-Borrows invariant): [SYSTEMS.md
+§3.6](SYSTEMS.md).
+
+## Data flow: a parallel frame (`Schedule::run` / `App::run`)
+
+```
+App::run / Schedule::run(&mut world)
+    ├─ world.change_tick.fetch_add(1)            # Phase 10: new this_run
+    ├─ run_state_transitions(&mut world)         # Phase 17, gated by state_entries.is_empty()
+    ├─ pool.install(|| {                         # boyko_threadpool dispatcher entry
+    │     loop {                                 # dispatch rounds (Phase 9 §5.4)
+    │       1. apply-window drain — if the gate proves running==0, run apply(&mut world)
+    │          for every completed system (Commands flush, structural mutation, tick bump)
+    │       2. all completed → break
+    │       3. mint a fresh UnsafeEcsCell from &mut world (per round; O3)
+    │       4. try_dispatch_ready — for each system with pred_remaining==0, not running,
+    │          no conflict against running, and run_if conditions true:
+    │            - exclusive (fn(&mut EcsMaster)): run inline on the dispatcher (EXC1)
+    │            - concurrent: scope.spawn(worker runs run_unsafe(cell_copy))
+    │       5. nothing dispatched & still running → park_timeout (100 µs backstop)
+    │     }
+    │  })
+    └─ run_check_ticks_scan every CHECK_TICK_THRESHOLD ticks  # Phase 10 wraparound clamp
+```
+
+Per-system `last_run`/`this_run` ticks are written via `System::set_change_ticks`
+(the Phase-10 C1 dispatcher→system channel). Run conditions are evaluated in a
+separate `evaluate_ready_conditions` pass at the apply-window boundary
+(`running==0`, race-free). Events sit OUTSIDE the conflict graph (Option A) — a
+worker writes to its own per-`E` TLS lane; `update_events` swaps lanes at the
+frame boundary.
+
+**Aliasing discipline (Phase 9 SCH7 / ALLOC1):** `&mut EcsMaster` (used by
+`apply`) is held only inside the apply window, where the gate proves no worker
+cell aliases it. `Arena::allocate_*` is `debug_assert!`-guarded against the
+`IN_SYSTEM_RUN` TLS flag, so all structural growth happens on the dispatcher or
+during `ScheduleBuilder::build`, never from a worker.
 
 ## Key architectural decisions
 
 ### 1. Type-erased `ComponentPool` (dropping generic `<T>`)
 
-**Where:** [crates/boyko_ecs/src/ecs/memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs)
+**Where:** [memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs)
 
-On master, `ComponentPool<T: Component>` was generic — one pool per type. On ecs, the pool stores **raw bytes** (`buffer: NonNull<u8>`, `buffer_capacity_bytes: usize`) and operates via `ComponentId` + `Layout` from the global `ComponentRegistry`.
+The pool stores **raw bytes** (`buffer: NonNull<u8>`) + the `Layout` from the
+global `ComponentRegistry`, not a generic `<T>`. An archetype holds many
+*different* component types, so a `Vec<ComponentPool<?>>` would otherwise need
+`Box<dyn>` or an enum. Type erasure via `Layout` is the standard approach (Bevy
+`Table`, flecs `ecs_table_t`). Cost: `get`/`add` rely on the "ComponentId matches
+the right type" invariant (a debug-only `TypeId` guard catches mismatches, C-004)
+and access uses `unsafe { &*(ptr as *const T) }` with a SAFETY comment.
 
-**Why:**
-- An archetype contains many **different** component types. With a generic pool you can't put `Vec<ComponentPool<?>>` without `Box<dyn Trait>` or an enum.
-- Type erasure via `Layout` is the standard approach (Bevy `Table`, flecs `ecs_table_t`).
+### 2. Computed row addressing + per-row tick columns
 
-**Cost:**
-- Each `add` / `get` loses compile-time type checking — correctness relies on the invariant that "ComponentId matches the right type".
-- Component access requires `unsafe { &*(ptr as *const T) }` with a SAFETY comment.
+**Where:** [memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs)
 
-### 2. Computed row addressing (`buffer + i*stride`)
+`master` used `UnitId { chunk, inland }` (two-level). `ecs` first cached a
+`Unit { ptr }` per row; **Phase X.B eliminated that cache** (every entry equalled
+`buffer + i*stride`) — rows are now `buffer.as_ptr().add(i * stride)` (the private
+`row_ptr(i)`) from the pool's stable write-once arena base, with `len` the
+live-row count. Net-removes `unsafe`, saves 8 B/row + one alloc/pool, zero
+read-path cost. **Phase 10** then added the parallel `added_ticks` /
+`changed_ticks` columns (`Box<[UnsafeCell<Tick>]>`). See
+[PHASE-XB-RESULTS.md](PHASE-XB-RESULTS.md).
 
-**Where:** [crates/boyko_ecs/src/ecs/memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs)
+### 3. Inline per-archetype column table (Phase 7 fast random access)
 
-On `master` there was `UnitId { chunk: u32, inland: u32 }` — two-level addressing. The `ecs` branch first cached a direct `Unit { ptr: *mut u8 }` per row; **Phase X.B then eliminated even that cache**: rows are addressed by `buffer.as_ptr().add(i * stride)` (the private `row_ptr(i)`) from the pool's stable, write-once arena base, with `len` the live-row count.
+**Where:** [archetype/archetype.rs](../crates/boyko_ecs/src/ecs/core/archetype/archetype.rs)
 
-**Trade-off:** the per-row `Vec<Unit>` was pure redundancy (every entry equalled `buffer + i*stride`), so removing it saves 8 B/row + one heap allocation per pool and **net-removes `unsafe`**, with zero read-path cost (the recompute is one multiply+add; the hot iteration / random-access paths already used `column.ptr.add`). Behavior-preserving + Miri-clean. See [PHASE-XB-RESULTS.md](PHASE-XB-RESULTS.md).
+`Archetype` places an 8 KB `columns: [Column; MAX_COMPONENTS]` table at offset 0
+(`#[repr(C)]`, size pinned). `Column { ptr, stride }` is the pool's base pointer +
+component size; a random component lookup is a single dependent load
+`*(arch + c*16)` plus `ptr.add(row * stride)` — no `ComponentPoolBundle` sparse
+map on the hot path. `EntityInland` stores a **direct `*mut Archetype` slab
+pointer** so `get_component_raw` reaches the table without a `SparseMap`
+indirection (~3 ns/lookup). The `ArchetypeBundle` slab gives every `Archetype` a
+stable heap address so those pointers + per-`(D,F)` caches stay valid.
 
-### 3. Global `ComponentRegistry` / `EventRegistry`
+### 4. Arena lazy-commit backing (Phase X.C)
 
-**Where:** [component_registry.rs](../crates/boyko_ecs/src/ecs/core/component/component_registry.rs), [event_registry.rs](../crates/boyko_ecs/src/ecs/core/events/event_registry.rs)
+**Where:** [memory/arena.rs](../crates/boyko_ecs/src/ecs/memory/arena.rs)
 
-`static` storage with per-slot `OnceLock<ComponentLayout>` / `OnceLock<EventInfo>`. Registration is invoked lazily on first call to `T::component_id()` / `E::event_id()` from `#[derive(Component)]` / `#[event]`-generated code. Each type carries a static `OnceLock<Id>` that memoizes the assigned ID after first initialization.
+`Arena::with_capacity` acquires its 64 MB via ONE
+reserve+demand-zero-commit syscall — `VirtualAlloc(MEM_RESERVE|MEM_COMMIT)`
+(Windows, hand-declared FFI), `mmap(MAP_PRIVATE|MAP_ANONYMOUS)` (Unix, `libc`) —
+with a global-`alloc` fallback for Miri / wasm32 / exotic targets. `Arena::new`
+≈ 1.10 µs (was ~23-75 µs); pages fault in lazily exactly as before. `Drop` uses a
+cfg-gated matching deallocator (M-001). See [PHASE-XC-RESULTS.md](PHASE-XC-RESULTS.md).
 
-Component IDs are minted lazily on first call to `T::component_id()`; see the module-level docs of `crates/boyko_ecs/src/ecs/core/component/component_registry.rs` for the assignment algorithm, collision detection, and the startup warm-up contract for external-ID consumers. Event IDs follow the same model in `event_registry.rs`.
+### 5. Global `ComponentRegistry` / `EventRegistry` / `ResourceRegistry` (lazy IDs)
 
-**Why:**
-- Type erasure requires runtime metadata (size, align, TypeId).
-- A single source of truth for all `ComponentPool` instances.
-- Lazy per-type `OnceLock` eliminates `#[ctor::ctor]` startup registration and the associated fragile global-init ordering. The `ctor` dependency has been removed.
+**Where:** [component/component_registry.rs](../crates/boyko_ecs/src/ecs/core/component/component_registry.rs),
+[events/event_registry.rs](../crates/boyko_ecs/src/ecs/core/events/event_registry.rs),
+[resources/resource_registry.rs](../crates/boyko_ecs/src/ecs/core/resources/resource_registry.rs)
 
-**Properties:**
-- `ComponentId` is assigned in first-call order — stable for the process lifetime but not across processes. External-ID consumers must warm up the registry at startup.
-- Per-slot collision detection panics immediately (both debug and release) if two types claim the same ID slot, preventing silent misidentification.
+`static [OnceLock<…>; N]` storage; IDs minted lazily on the first
+`T::component_id()` / `E::event_id()` / `R::resource_id()` call (per-type
+`OnceLock<Id>` memoizes). This replaced the `static mut` races (M-002 / C-002)
+AND the `#[ctor::ctor]` startup-registration model (the `ctor` dep is gone) with
+its fragile global-init ordering. IDs are first-call order — stable per-process,
+NOT across processes (external-ID consumers must warm up the registry at
+startup); per-slot collisions panic in debug AND release. Type-vs-type
+exclusivity (a type cannot be both Component and Resource, M6) is checked at
+`register_resource_new`. Capacities: `MAX_COMPONENTS = 512`, `MAX_EVENTS = 256`,
+`RESOURCE_SLOT_COUNT = 256`.
 
-### 4. `EntityMaster` with recycling via a free list
+### 6. `EntityMaster` — recycling + direct fast store (Phase 7 + X.D)
 
-**Where:** [entity_master.rs](../crates/boyko_ecs/src/ecs/core/entity/entity_master.rs)
+**Where:** [entity/entity_master.rs](../crates/boyko_ecs/src/ecs/core/entity/entity_master.rs)
 
-`free_entity_ids: Vec<EntityId>` for reusing slots. `entity_map: SparseMap<EntityInland>` for O(1) lookup by `EntityId`.
+Four fields: `free_entity_ids` (LIFO recycle), `next_entity_id: AtomicUsize`,
+`entities_inland: Vec<EntityInland>` (the hot fast store, indexed by `EntityId.0`,
+`is_null()` ⇔ dead), and a plain `live_count: usize`. Phase 7 dropped the
+`SparseMap<EntityInland>` indirection; **Phase X.D** dropped the EnTT-style
+`active_ids` + `sparse_to_active` (their only consumer was the cold
+`iter_entities`, and the despawn swap-remove they needed was deleted with them),
+net-removing `unsafe` and shedding −12 B/entity. `Generation` bumps on
+deallocation (the ABA defence). Workers touch only `next_entity_id` (via the
+`EntityCounter` atomic-RMW newtype); all other mutation is dispatcher-`&mut self`
+inside the apply window. See [PHASE-XD-RESULTS.md](PHASE-XD-RESULTS.md).
 
-`Generation` is incremented on deallocation — preventing stale references.
-
-### 5. Domain error type `EcsError`
+### 7. Domain error type `EcsError`
 
 **Where:** [error.rs](../crates/boyko_ecs/src/ecs/error.rs)
 
-`#[non_exhaustive] pub enum EcsError` + `pub type EcsResult<T>` — replaces the historical `anyhow::Result` from `EcsMaster` (C-019 closed). Variants: `ArchetypeNotFound`, `EntityNotFound`, `ComponentPoolFull`, `UnknownComponentForArchetype`, `ArchetypeRejectedEntity`, `PoolSwapRemoveFailed`. Hand-rolled `Display` + `std::error::Error` — no `thiserror` dep.
+`#[non_exhaustive] pub enum EcsError` + `pub type EcsResult<T>` replaced the
+historical `anyhow::Result` (C-019), so callers can pattern-match concrete
+variants. Hand-rolled `Display` + `std::error::Error` (no `thiserror`).
+`#[non_exhaustive]` keeps the door open for new variants without a major bump.
 
-`#[non_exhaustive]` keeps the door open for new variants without major-version bumps. Callers can pattern-match on the concrete variant (the whole point of switching off `anyhow`'s erased `Error`).
-
-### 6. Newtype identifiers
+### 8. Newtype identifiers
 
 **Where:** [identifiers/primitives.rs](../crates/boyko_ecs/src/ecs/identifiers/primitives.rs)
 
-Every ID type (`EntityId`, `ArchetypeId`, `ComponentId`, `ChunkId`, `InlandPoolId`, etc.) is a `#[repr(transparent)] pub struct X(pub usize)` newtype defined via a single `define_id!` macro (C-017 closed). Zero runtime cost, but the compiler refuses to mix them: `archetype.has_component_id(entity.id())` is a type error.
+Every core ID is a `#[repr(transparent)] X(usize)` newtype via one `define_id!`
+macro (C-017) — zero runtime cost, but mixing them is a type error.
+`Generation = usize` stays an alias (only paired with `EntityId`). Subsystem-local
+sizing IDs (`ResourceId`, `BundleTypeId`, `QueryTypeId`, `ObserverId`,
+`SystemSetId`) live next to their owners.
 
-`Generation` stays a `type alias = usize` — it is only ever paired with an `EntityId` inside `Entity` and never crossed with another ID kind.
+### 9. Dual-generation QueryState (ABA-safety across remove/clear)
 
-### 7. Dual-generation QueryState (ABA-safety across remove/clear)
+**Where:** [archetype/archetype_master.rs](../crates/boyko_ecs/src/ecs/core/archetype/archetype_master.rs),
+[iters/query_state.rs](../crates/boyko_ecs/src/ecs/core/iters/query_state.rs)
 
-**Where:** [archetype/archetype_master.rs](../crates/boyko_ecs/src/ecs/core/archetype/archetype_master.rs), [iters/query_state.rs](../crates/boyko_ecs/src/ecs/core/iters/query_state.rs)
+`ArchetypeMaster` carries `generation` (bumps on `create_archetype`) +
+`structural_generation` (bumps on `remove_archetype` / `clear`). `QueryState`
+snapshots both: a structural mismatch drops the dedup bitset + `matched_ids` and
+fully rebuilds; a creation-only delta classifies just the new IDs; both equal =
+warm slice walk. Without `structural_generation`, a recycled `ArchetypeId` (after
+`clear` resets `next_archetype_id`) could silently leak into a stale query. The
+per-`(D,F)` typed cache `QueryDataState<D, F>` wraps this (Phase 8b), interned by
+`QueryTypeId`. (Phase 5c.)
 
-`ArchetypeMaster` carries two monotonic counters:
-- `generation` — bumps on every `create_archetype` (creation deltas).
-- `structural_generation` — bumps on `remove_archetype` and `clear()` (structural changes).
+### 10. Parallel scheduler on a custom thread pool (Phase 9 + 9.x soundness)
 
-`QueryState` snapshots both. On `iter()`:
-- Structural mismatch → drop the dedup bitset + matched_ids, **full rebuild** (reclassify every live archetype). This is the load-bearing piece — without it, a freshly created archetype reusing a recycled `ArchetypeId` (after `clear()` resets `next_archetype_id`) would be skipped by the stale bitset and silently absent from results.
-- Creation-only delta → original delta-add path (skip already-classified IDs via bitset).
-- Both equal → warm path (one comparison + slice walk).
+**Where:** [schedule/](../crates/boyko_ecs/src/ecs/core/schedule/),
+[boyko_threadpool/](../crates/boyko_threadpool/)
 
-This eliminates the ArchetypeId-ABA hazard while keeping the ~21× Q-011 warm-path speedup (Phase 5c).
+A Bevy-class executor: `ScheduleBuilder` builds a `ConflictGraph` (per-system
+`Access` bitsets) + an ordering DAG (Tarjan SCC + Kahn topo), and `Schedule::run`
+dispatches non-conflicting systems concurrently on the custom Chase-Lev
+work-stealing pool (`boyko_threadpool`, built on `crossbeam_deque`). The
+apply-window barrier (C4) keeps `&mut EcsMaster` (used by `apply`) from aliasing
+any worker `UnsafeEcsCell`. `EcsMaster` / `UnsafeEcsCell` / `Resources` /
+`EntityMaster` / `ArchetypeMaster` / `EventDispatcher` / `ComponentPool` /
+`Archetype` carry explicit `unsafe impl Send + Sync` gated by the aliasing +
+no-alloc-in-system contracts; **`Arena` stays `!Send + !Sync`** (allocation
+restricted to the dispatcher + build, ALLOC1 TLS guard). The whole pool + `Scope`
+fork/join + parallel `Schedule::run` is proven sound and Tree-Borrows-clean
+(Phase 9.1/9.2/9.3 — loom + Miri). See
+[PHASE-9-PARALLEL-SCHEDULER-PLAN.md](PHASE-9-PARALLEL-SCHEDULER-PLAN.md),
+[PHASE-9.2-RESULTS.md](PHASE-9.2-RESULTS.md), [PHASE-9.3c-RESULTS.md](PHASE-9.3c-RESULTS.md).
 
-### 8. Adaptive chunk size based on component size
+### 11. Bevy-shape ergonomic system API (Phases 8a–8d, 11, 12, 13)
 
-Same as on master — `TINY/SMALL/MEDIUM/LARGE_COMPONENTS_PER_CHUNK` (see [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs)).
+**Where:** [system/](../crates/boyko_ecs/src/ecs/core/system/),
+[commands/](../crates/boyko_ecs/src/ecs/core/commands/)
 
-## Multi-threading model (design goal)
+GAT-based `SystemParam` (two-phase `init_state` + `init_access` conflict
+detection), `Res`/`ResMut`/`Local`/`Query`/`Commands`/`EventReader`/`EventWriter`
+leaves + tuples 0..=12, `IntoSystem`/`FunctionSystem` (function-as-system, no
+turbofish), and a per-system byte-arena `Commands` queue flushed via
+`SystemParam::apply` (no `Box<dyn Command>`, no per-command alloc). Entity-id
+reservation uses an atomic counter so `commands.spawn(b).insert(x).id()` chains
+(Phase 11). The `UnsafeEcsCell` worker cell is `Copy` with by-value receivers
+(Phase 8a C1 — no `&self` retag).
 
-Target model:
-1. **Read-heavy parallelism**: multiple threads iterate over different `Query` instances in parallel — the Rust borrow checker, via a system scheduler, guarantees the absence of component access conflicts.
-2. **Partitioned writes**: when one archetype is processed in parallel — divide chunks between threads (1 thread = 1+ chunk).
-3. **Lock-free infrastructure**: allocations, registry, archetype access — via atomics.
+### 12. Change detection, hooks/observers, states, conditions
 
-Current state:
-- `Arena` — `UnsafeCell<MemFreeBlockMaster>` + `!Send + !Sync`, **single-threaded by construction**.
-- `ComponentPool` mutability via `&mut self`.
-- `ComponentRegistry` / `EventRegistry` — `static [OnceLock<...>; N]` + `AtomicUsize` counter — lock-free, cross-thread safe (M-002 / C-002 / Q-004 / Q-010 closed).
-- No system scheduler yet — planned Phase 4+.
+Layered on the above without disturbing the hot path:
+- **Change detection** (Phase 10): per-row `Tick` columns + `Added`/`Changed`
+  filters + `Ref`/`Mut`; 0% overhead when unused (`NEEDS_CHANGE_DETECTION` const
+  elision).
+- **Hooks & observers** (Phases 14a/14b): reactive callbacks at the 4 structural
+  kinds, gated by the per-archetype `ArchetypeFlags` u16 (0% when unused).
+- **States** (Phase 17): `State`/`NextState` + `in_state`/`on_enter`/… conditions
+  + a built-in transition pass (0% when no state registered).
+- **Run conditions** (Phase 16) + **ordering/sets** (Phase 15): `.run_if`,
+  `before`/`after`/`in_set`, `#[derive(SystemSet)]`; both designed around the
+  executor's 0%-gate (a `has_condition` bitset / a `state_entries.is_empty()`
+  early-out, leaving the no-feature dispatch path byte-identical).
 
-## Performance goals
+## Adaptive chunk size based on component size
 
-Targets (with the current `criterion` harness in [benches/](../crates/boyko_ecs/benches/) — see [SYSTEMS.md §14](SYSTEMS.md#14-benchmarks)):
+Same as on `master` — `TINY/SMALL/MEDIUM/LARGE_COMPONENTS_PER_CHUNK` (see
+[constants.rs](../crates/boyko_ecs/src/ecs/constants.rs)). Pool backing buffers
+are additionally lifted to `SIMD_BUFFER_ALIGN = 32` (Phase X.A) so column starts
+are AVX2-loadable.
 
-| Operation | Target | Status |
-|-----------|--------|--------|
-| `Arena::allocate_aligned` (no fragmentation) | ≤ 50 ns | benched in `allocator.rs` (M-012 validation) |
-| `ComponentPool::add` (space available) | ≤ 10 ns | benched implicitly in `archetype.rs` create paths |
-| Component access via `row_ptr` (`buffer + i*stride`) | ≤ 2 ns | computed offset + deref (X.B) |
-| Linear iter over a pool | ~32 GB/s for tiny components | per-entity `Query::iter_one/iter_two` (Phase 2d) is the foundation |
-| `EcsMaster::create_entity` | ≤ 150 ns | benched in `archetype.rs` for 2 / 8 component widths |
-| `QueryState` warm-path iter | ≤ 5 ns | **measured ~3.6 ns** in `query_iter.rs` (vs ~77 ns one-shot Query construction → ~21× speedup, Q-011 closed) |
+## Multi-threading model (current state)
+
+1. **Read-heavy parallelism**: non-conflicting systems run concurrently; the
+   conflict graph (derived from each system's declared `Access`) guarantees the
+   absence of aliasing component access. Achieved (Phase 9).
+2. **Partitioned writes within one system**: `Query::par_iter` /
+   `par_for_each_chunk` fan archetype rows/subranges across workers via
+   `boyko_threadpool::scope`.
+3. **Lock-free infrastructure**: registries are `static [OnceLock; N]` +
+   `AtomicUsize`; the pool is Chase-Lev work-stealing.
+
+Constraints, by construction:
+- `Arena` is `!Send + !Sync` — allocation only on the dispatcher / at build
+  (ALLOC1 TLS guard).
+- Structural mutation (`apply`, archetype growth, entity-vec growth) runs only in
+  the apply window where `running == 0`.
+- Events route per-worker-TLS lane; `update_events` swaps at the frame boundary.
+
+## Performance posture (vs Bevy, measured)
+
+Per [PHASE-12.6-RESULTS.md](PHASE-12.6-RESULTS.md) +
+[PHASE-X.A-RESULTS.md](PHASE-X.A-RESULTS.md), on the comparison harness in
+[crates/bench_bevy_vs_boyko/](../crates/bench_bevy_vs_boyko/):
+
+| Workload | Result |
+|----------|--------|
+| 50 empty systems (scheduler dispatch) | **~1.72× faster than Bevy** |
+| `par_iter` 10k | **~2.93× faster than Bevy** |
+| query iter (direct API) | **~parity** (inner loop byte-identical in asm) |
+| `for_each_chunk` 3-component reduction (native SIMD) | **~1.28–1.34× faster** |
+| `EcsMaster::new` | ~7-23 µs (was 712 µs — 9-31× + the X.C Arena win) |
+| spawn (single / batch) | structurally constrained vs Bevy on single; batch warm path ~1.35× of Bevy |
+
+Bench methodology (deterministic `[profile.bench] codegen-units = 1`, opt-in
+`bench-alloc` mimalloc, median-of-N `bench.ps1`) is in
+[BENCHMARKING.md](BENCHMARKING.md) (Phase X.E).
 
 ## What differs from the `master` branch
 
 | Aspect | master | ecs |
 |--------|--------|-----|
-| ComponentPool | `ComponentPool<T: Component>` (generic) | type-erased + `ComponentRegistry` |
-| Chunk | `Chunk<T>` stores data | `Chunk` — metadata only (start_index, capacity, dirty) |
-| Addressing | `UnitId { chunk: u32, inland: u32 }` | computed `buffer + i*stride` (`row_ptr(i)`; the cached `Unit { ptr }` was removed in Phase X.B) |
-| Entity ID | `u32` + generation `u16` | newtype `EntityId(usize)` + generation `usize` (C-017 closed) |
-| EntityMaster | ⚠️ missing | ✅ id recycling + direct `Vec<EntityInland>` fast store (O(capacity) `iter_entities` after Phase X.D slot reduction) |
-| Archetype | ⚠️ empty stub file | ✅ full implementation |
-| EcsMaster | ⚠️ empty stub file | ✅ present, returns domain `EcsResult` (C-019 closed) |
-| Query | ⚠️ missing | ✅ archetype-level cached query; per-entity `Query::<(&T, &U)>::iter()` is Phase 2d-open |
-| Event subsystem | ⚠️ missing | ✅ present (with Participants + Parameters; TypeId-guarded buffers per Q-019) |
-| boyko_utils | ⚠️ missing | ✅ present (BitSet, SparseMap, SparseSlotMap with M-016 ABA fix, Slot) |
-| Build | ✅ builds | ✅ builds clean (check + clippy + test + miri all green) |
+| ComponentPool | `ComponentPool<T>` (generic) | type-erased + `ComponentRegistry` + per-row Tick columns |
+| Chunk | `Chunk<T>` stores data | `Chunk` — metadata only |
+| Row addressing | `UnitId { chunk, inland }` | computed `buffer + i*stride` (`Unit` cache removed Phase X.B) |
+| Random component access | two-level lookup | inline per-archetype `Column` table at offset 0 (Phase 7) |
+| Arena backing | global `alloc` | `VirtualAlloc`/`mmap` lazy-commit (Phase X.C) |
+| Entity ID | `u32` + gen `u16` | newtype `EntityId(usize)` + gen `usize` (C-017) |
+| EntityMaster | ⚠️ missing | ✅ recycling + direct `Vec<EntityInland>` slab-ptr fast store (Phase 7 + X.D) |
+| Archetype / EcsMaster | ⚠️ stub | ✅ full implementation |
+| Query | ⚠️ missing | ✅ typed `Query<D, F>` DSL + par_iter + for_each_chunk + change filters |
+| Systems / scheduler | ❌ none | ✅ SystemParam + IntoSystem + Commands + parallel Schedule (Phase 8/9) |
+| States / conditions / ordering | ❌ none | ✅ States + `.run_if` + sets/ordering (Phases 15/16/17) |
+| Hooks / observers | ❌ none | ✅ lifecycle hooks + observers (Phases 14a/14b) |
+| Change detection | ❌ none | ✅ Tick / Added / Changed / Ref / Mut (Phase 10) |
+| Events | ⚠️ registry only | ✅ full double-buffered dispatcher + EventReader/EventWriter (Phases 6/12) |
+| App facade | ❌ none | ✅ App + Plugin (Phase 18) |
+| Thread pool | ❌ none | ✅ `boyko_threadpool` (Chase-Lev, loom+Miri-proven) |
+| Error type | `anyhow::Result` | domain `EcsResult` (C-019) |
+| boyko_utils | ⚠️ missing | ✅ BitSet / BitSet256 / SparseMap / SparseSlotMap / Slot |
+| Build | ✅ builds | ✅ builds clean (check + clippy + test + Miri) |
