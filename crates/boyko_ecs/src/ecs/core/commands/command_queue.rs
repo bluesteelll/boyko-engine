@@ -281,40 +281,100 @@ impl CommandQueue {
     ///   holds `&mut EcsMaster` and minted this `NonNull` from it; SAFETY-4
     ///   window — `IN_SYSTEM_RUN == false`).
     /// * All queue access (`bytes` / `cursor` / `panic_recovery`) is threaded
-    ///   through the raw twin's `NonNull` (see [`CursorSync`]'s discipline); a
-    ///   transient `&mut *world` is formed ONLY
-    ///   per `cmd.apply`, never while a `&mut`-into-the-queue is live. The
-    ///   bytes `Vec`'s heap buffer is a separate allocation from `EcsMaster`,
-    ///   so the byte walk never aliases `&mut *world`; the in-`EcsMaster`
-    ///   cursor / recovery writes are sequenced through raw pointers, never
-    ///   simultaneous with `&mut *world` (SAFETY-5).
+    ///   through the audited [`Self::apply`] on a stack-local copy of the
+    ///   queue's buffers (BUG-P19-TB-1, Approach C); a transient `&mut *world`
+    ///   is formed ONLY per `cmd.apply`, never while a `&mut`-into-the-queue is
+    ///   live. The bytes `Vec`'s heap buffer is a separate allocation from
+    ///   `EcsMaster`, so the byte walk never aliases `&mut *world`.
+    ///
+    /// # BUG-P19-TB-1 (Tree Borrows soundness)
+    ///
+    /// A Phase 19 cascade / reactive hook can re-enter and `push` into the SAME
+    /// `world.deferred_hook_queue` mid-walk. The previous in-place `raw()` twin
+    /// cached `NonNull`s into that queue; the re-entrant `push`'s
+    /// `Vec::reserve` / `set_len` (through a fresh `&mut …deferred_hook_queue`)
+    /// was a TB foreign write that Disabled the twin's tags, making the next
+    /// reborrow UB. The fix walks a stack-local COPY of the queue's buffers
+    /// (moved out via `mem::take`), so the re-entrant `push` lands in a
+    /// DIFFERENT allocation and cannot foreign-write the walk.
     pub(crate) unsafe fn apply_via_raw_twin(world: NonNull<EcsMaster>) {
-        // SAFETY: transient `&mut` to the queue field, used only to mint the
-        //   raw twin; dropped immediately after. The world is exclusively
-        //   borrowed per the fn contract.
-        let mut twin = unsafe { (*world.as_ptr()).deferred_hook_queue.raw() };
-
-        // Single catch — identical shape to `apply` (:244-250). The catch
-        // lives HERE (not in the catch-free `apply_or_drop_queued_no_catch`),
-        // so SAFETY-6's "the drain has its own single catch_unwind" holds.
-        //
-        // SAFETY (C3, CQ4, SAFETY-5):
-        //   - `twin` was derived from a live `&mut self`(queue) via `&raw mut`
-        //     (no intermediate reference on the fields); Tree Borrows OK.
-        //   - The walk forms a transient `&mut *world` per command; no
-        //     `&mut`-into-the-queue is live across it (the twin reads the
-        //     queue's heap buffers, a separate allocation).
-        let walk = AssertUnwindSafe(|| unsafe {
-            twin.apply_or_drop_queued_no_catch(Some(world));
-        });
-
-        if let Err(payload) = std::panic::catch_unwind(walk) {
-            // SAFETY: same exclusive-access invariant as the walk; `start == 0`
-            //   re-absorbs survivors into the SAME `bytes` (mirrors `apply`'s
-            //   :248 + `handle_panic_recovery` :560-566) before re-raising.
-            unsafe { twin.handle_panic_recovery(0) };
-            std::panic::resume_unwind(payload);
+        // BUG-P19-TB-1 (Approach C): walk a stack-local COPY of the queue's
+        // buffers, so a re-entrant `push` (which targets the home
+        // `world.deferred_hook_queue`) lands in a DIFFERENT allocation and
+        // cannot foreign-write the walk's twin. Reuses the audited `apply`; no
+        // raw-ptr-to-local guard (critic P2). The outer `catch_unwind` re-homes
+        // BOTH survivors and re-entrant pushes on a mid-drain panic (critic P1).
+        let mut temp = CommandQueue::new();
+        // SAFETY: a transient `&mut` to the home queue, used only for the two
+        //   `mem::take`s and dropped before `temp.apply`. The world is
+        //   exclusively borrowed (fn contract); the deferred queue is at rest
+        //   (cursor == 0) when a drain turn begins.
+        unsafe {
+            let home = &mut (*world.as_ptr()).deferred_hook_queue;
+            debug_assert!(home.cursor == 0, "invariant: deferred queue at rest has cursor == 0");
+            temp.bytes = mem::take(&mut home.bytes);
+            temp.panic_recovery = mem::take(&mut home.panic_recovery);
         }
+
+        // `temp` is a SEPARATE allocation from `world.deferred_hook_queue` (its
+        // buffer is the moved-out heap buffer; its Vec header is on this stack
+        // frame). Re-entrant pushes hit the now-empty home queue and the outer
+        // `while !is_empty()` drain picks them up next turn — unchanged turn
+        // count/order vs the prior in-place compaction.
+        //
+        // SAFETY: `world` is exclusively borrowed (fn contract); `temp` and
+        //   `*world` are disjoint (`temp` is a fresh stack queue, no longer part
+        //   of `world`), so `temp.apply(&mut *world)` forms no aliasing borrow.
+        let world_ref: &mut EcsMaster = unsafe { &mut *world.as_ptr() };
+        let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            temp.apply(world_ref);
+        }));
+
+        match result {
+            Ok(()) => {
+                // `temp.apply` drained `temp.bytes` (len 0, capacity retained)
+                // and left `temp.panic_recovery` empty. W3 capacity reuse:
+                // return `temp`'s capacious buffer to the home queue when no
+                // re-entrant growth survived (the common case).
+                // SAFETY: exclusive world borrow; no command `apply` runs here.
+                unsafe {
+                    let home = &mut (*world.as_ptr()).deferred_hook_queue;
+                    if home.bytes.is_empty() {
+                        mem::swap(&mut home.bytes, &mut temp.bytes);
+                    }
+                    debug_assert!(temp.cursor == 0 && home.cursor == 0, "invariant: cursors quiescent");
+                    debug_assert!(
+                        temp.panic_recovery.is_empty() && home.panic_recovery.is_empty(),
+                        "invariant: panic_recovery empty at rest on success",
+                    );
+                }
+            }
+            Err(payload) => {
+                // Preserve-both (critic P1): `temp.apply`'s
+                // `handle_panic_recovery(0)` already re-absorbed the un-walked
+                // SURVIVORS into `temp.bytes` (and drained
+                // `temp.panic_recovery`). The home queue holds the RE-ENTRANT
+                // pushes enqueued by commands that ran before the panic. Re-home
+                // both as `[survivors][re-entrant]` — the exact order the prior
+                // in-place `handle_panic_recovery` produced — so a later drain
+                // APPLIES both rather than dropping the re-entrant work.
+                // SAFETY: `temp.apply` has fully unwound (no live borrow of
+                //   `temp`); the world is exclusively borrowed; no command
+                //   `apply` runs here.
+                unsafe {
+                    debug_assert!(
+                        temp.panic_recovery.is_empty() && temp.cursor == 0,
+                        "invariant: temp recovery drained + cursor reset by handle_panic_recovery(0)",
+                    );
+                    let home = &mut (*world.as_ptr()).deferred_hook_queue;
+                    temp.bytes.append(&mut home.bytes); // temp = [survivors][re-entrant]; home now empty
+                    mem::swap(&mut home.bytes, &mut temp.bytes); // home = [survivors][re-entrant]
+                }
+                std::panic::resume_unwind(payload);
+            }
+        }
+        // `temp` drops here: `bytes` empty (swapped/moved out),
+        // `panic_recovery` empty ⇒ no-op walk.
     }
 }
 
