@@ -3,11 +3,16 @@
 //! Pins three load-bearing invariants of the scheduler refit:
 //!
 //! 1. [`schedule_run_bumps_change_tick`] — every `Schedule::run` advances
-//!    `EcsMaster::current_tick()` exactly once (plan §4.5 PHASE9.1).
+//!    `EcsMaster::current_tick()` by TWO (Bug #56): the frame-start bump
+//!    (plan §4.5 PHASE9.1) plus the apply-window bump (`schedule.rs` ~276),
+//!    so deferred-command applies stamp at `this_run + 1` and are observed by
+//!    `Added<T>` / `Changed<T>` exactly once the next frame.
 //! 2. [`schedule_run_dispatches_before_observable_tick`] — the frame's
-//!    `change_tick` bump completes before any system body runs; an
+//!    `change_tick` bumps complete before any system body runs; an
 //!    exclusive system observes the post-bump value via
-//!    `world.current_tick()` (plan §2.6 SCT4 / §4.5).
+//!    `world.current_tick()` (plan §2.6 SCT4 / §4.5). After Bug #56 the value
+//!    it reads is the apply-window tick (`frame_start_this_run + 1`), since
+//!    the apply-window bump precedes the executor loop.
 //! 3. [`exclusive_system_initialize_refits_meta_ticks_from_world`] — the
 //!    Step 14 `ExclusiveFunctionSystem::initialize` refit (Option B)
 //!    re-seeds `meta.last_run` / `meta.this_run` against the world's
@@ -30,9 +35,17 @@ use boyko_ecs::ecs::core::system::ExclusiveFunctionSystem;
 use boyko_ecs::ecs::core::system::system::System;
 use boyko_threadpool::ThreadPoolBuilder;
 
-/// `Schedule::run` MUST bump `EcsMaster::current_tick()` by 1 on each
-/// call — this is the single dispatcher-owned `change_tick.fetch_add`
-/// site (plan §4.5 PHASE9.1).
+/// `Schedule::run` MUST bump `EcsMaster::current_tick()` by TWO on each
+/// call (Bug #56): the dispatcher-owned frame-start `change_tick.fetch_add`
+/// (plan §4.5 PHASE9.1) plus the apply-window `change_tick.fetch_add`
+/// (`schedule.rs` ~276) that lands deferred-command stamps at `this_run + 1`.
+///
+/// # Updated for Bug #56 (was: "exactly once" / 0→1, 1→3)
+///
+/// This test previously encoded the pre-#56 single-bump regime. The #56 fix
+/// adds the apply-window bump, so the per-frame advance is now 2. The
+/// `CHECK_TICK_THRESHOLD` doc comment in `change_detection/tick.rs` documents
+/// the "~2 Ticks per Schedule::run" regime this test now pins.
 #[test]
 fn schedule_run_bumps_change_tick() {
     let pool = ThreadPoolBuilder::new().num_threads(2).build();
@@ -51,20 +64,20 @@ fn schedule_run_bumps_change_tick() {
     schedule.run(&mut world);
     assert_eq!(
         world.current_tick(),
-        Tick::new(1),
-        "first Schedule::run must advance current_tick from 0 to 1"
+        Tick::new(2),
+        "first Schedule::run must advance current_tick from 0 to 2 (Bug#56: frame-start + apply-window bump)"
     );
 
     schedule.run(&mut world);
     schedule.run(&mut world);
     assert_eq!(
         world.current_tick(),
-        Tick::new(3),
-        "three Schedule::run calls must advance current_tick to 3"
+        Tick::new(6),
+        "three Schedule::run calls must advance current_tick to 6 (2 per frame, Bug#56)"
     );
 }
 
-/// The frame's `change_tick.fetch_add` MUST complete before any system
+/// The frame's `change_tick.fetch_add`s MUST complete before any system
 /// dispatch — every system body that reads `world.current_tick()` sees
 /// the new value (plan §4.5 / SCT4).
 ///
@@ -72,6 +85,15 @@ fn schedule_run_bumps_change_tick() {
 /// step in `Schedule::run` (after the tick bump, before the executor
 /// loop) — the body's observation of the new tick proves the bump ran
 /// first.
+///
+/// # Updated for Bug #56
+///
+/// The world advances by 2 per frame now (frame-start + apply-window). Both
+/// bumps execute BEFORE the executor loop (the apply-window bump sits at
+/// `schedule.rs` ~276, ahead of `pool.install`), so the body reads the
+/// apply-window tick = `frame_start_this_run + 1`. After 4 empty frames the
+/// clock is at 8; the probe frame bumps to 9 (frame start) then 10 (apply
+/// window), and the body observes 10.
 #[test]
 fn schedule_run_dispatches_before_observable_tick() {
     let pool = ThreadPoolBuilder::new().num_threads(2).build();
@@ -102,18 +124,19 @@ fn schedule_run_dispatches_before_observable_tick() {
     }
 
     let pre_tick = world.current_tick();
-    assert_eq!(pre_tick, Tick::new(4));
+    assert_eq!(pre_tick, Tick::new(8), "4 empty frames × 2 bumps/frame (Bug#56) = 8");
 
     // Now run our probe schedule once.
     schedule.run(&mut world);
 
-    // Expected: world's tick advanced from 4 → 5; the system body
-    // observed Tick(5).
-    assert_eq!(world.current_tick(), Tick::new(5));
+    // Expected (Bug#56): world's tick advanced 8 → 10 (frame-start bump to 9,
+    // apply-window bump to 10). The apply-window bump precedes the executor
+    // loop, so the exclusive body reads the apply-window tick Tick(10).
+    assert_eq!(world.current_tick(), Tick::new(10));
     assert_eq!(
         observed.load(Ordering::Relaxed),
-        Tick::new(5).get(),
-        "system body must observe the post-bump tick value"
+        Tick::new(10).get(),
+        "system body must observe the post-bump tick value (apply-window tick after Bug#56)"
     );
 }
 
@@ -131,13 +154,13 @@ fn exclusive_system_initialize_refits_meta_ticks_from_world() {
 
     // Pre-bump the world clock so the refit value (read from the world
     // at initialize time) is distinguishable from the `for_testing`
-    // sentinel (`current_tick = 1`).
+    // sentinel (`current_tick = 1`). Bug#56: 2 bumps/frame ⇒ 9 frames = 18.
     let empty = ScheduleBuilder::new(Arc::clone(&pool)).build(&mut world);
     let mut empty_sched = empty;
     for _ in 0..9 {
         empty_sched.run(&mut world);
     }
-    assert_eq!(world.current_tick(), Tick::new(9));
+    assert_eq!(world.current_tick(), Tick::new(18), "9 empty frames × 2 bumps/frame (Bug#56) = 18");
 
     // Build an ExclusiveFunctionSystem and call `initialize` directly.
     let mut sys = ExclusiveFunctionSystem::new(|_w: &mut EcsMaster| {});
@@ -156,8 +179,8 @@ fn exclusive_system_initialize_refits_meta_ticks_from_world() {
     sys.initialize(&mut world);
 
     // Post-init meta: both ticks should be `world.current_tick() -
-    // MAX_CHANGE_AGE` (mirroring `SystemMeta::new` shape).
-    let expected = Tick::new(9u32.wrapping_sub(MAX_CHANGE_AGE));
+    // MAX_CHANGE_AGE` (mirroring `SystemMeta::new` shape). current_tick == 18.
+    let expected = Tick::new(18u32.wrapping_sub(MAX_CHANGE_AGE));
     assert_eq!(
         sys.meta().last_run(),
         expected,
@@ -181,7 +204,7 @@ fn exclusive_system_initialize_refits_meta_ticks_from_world() {
     for _ in 0..5 {
         empty_sched2.run(&mut world);
     }
-    assert_eq!(world.current_tick(), Tick::new(14));
+    assert_eq!(world.current_tick(), Tick::new(28), "18 + 5 frames × 2 bumps/frame (Bug#56) = 28");
 
     sys.initialize(&mut world);
     assert_eq!(

@@ -13,10 +13,12 @@
 
 /// Frame interval between `check_ticks` wraparound scans.
 ///
-/// Mirrors Bevy's value (`bevy_ecs/src/component.rs`). At boyko's per-frame
-/// bump cadence (Round 2 W2 — one [`Tick`] bump per `Schedule::run`),
-/// `CHECK_TICK_THRESHOLD = 518_400_000` translates to one scan every
-/// ~518.4 M frames ≈ **~100 days of continuous play at 60 FPS** (§9.3, §10.6).
+/// Mirrors Bevy's value (`bevy_ecs/src/component.rs`). The world now advances
+/// ~2 [`Tick`]s per `Schedule::run` (the frame-start bump plus the Bug #56
+/// apply-window bump), so `CHECK_TICK_THRESHOLD = 518_400_000` translates to
+/// one scan every ~259.2 M frames ≈ **~50 days of continuous play at 60 FPS** —
+/// still within the wraparound headroom proved for `MAX_CHANGE_AGE` below
+/// (§9.3, §10.6).
 pub const CHECK_TICK_THRESHOLD: u32 = 518_400_000;
 
 /// Maximum age (in ticks) any stored tick may have relative to the world's

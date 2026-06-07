@@ -1367,6 +1367,21 @@ impl EcsMaster {
     /// was touched **at the current tick** ("changed relative to the current
     /// tick"), NOT "changed since a previous system run". For frame-delta
     /// semantics, query `Mut<T>` inside a system.
+    ///
+    /// ## Inside a `Schedule` frame (Bug #56 interaction)
+    ///
+    /// When called from within a running `Schedule` frame (e.g. an exclusive
+    /// `|w: &mut EcsMaster|` system), `current_tick()` is the **apply-window
+    /// tick** — one past the frame-start `this_run` that scheduled systems'
+    /// `Changed<T>` / `Added<T>` windows are keyed on (the apply-window bump that
+    /// makes deferred-command changes observable; see [`Schedule::run`]). A write
+    /// made through this guard is therefore observed by a `Changed<T>` /
+    /// `Added<T>` reader on the **following** frame (exactly once), like a
+    /// deferred-command change — NOT the same frame. For same-frame change
+    /// detection within a system, query `Mut<T>` from the system instead (it
+    /// stamps at the system's `this_run`).
+    ///
+    /// [`Schedule::run`]: crate::ecs::core::schedule::schedule::Schedule::run
     #[inline]
     pub fn get_component_mut<T: crate::ecs::core::component::component::Component>(
         &mut self,

@@ -183,9 +183,14 @@ impl Schedule {
         self.executor_scratch.reset_for_frame(&self.conflict_graph);
 
         // Phase 10 Wave D Step 13 — frame-start change-detection tick bump
-        // (plan §4.5 / PHASE9.1). One `fetch_add(Relaxed)` per
-        // `Schedule::run`; the returned value is the new `this_run`
-        // published to every system below.
+        // (plan §4.5 / PHASE9.1). The FIRST of ~2 bumps per `Schedule::run`:
+        // this one publishes the new `this_run` to every system, condition,
+        // and the state pass below; the SECOND (Bug #56) fires at the
+        // apply-window, after this `this_run` was captured and before any
+        // deferred command drains, so deferred-added components land at
+        // `this_run + 1` and are observed by Added<T>/Changed<T> exactly once
+        // on the next frame. Both are `fetch_add(Relaxed)`; only this first
+        // value is read here.
         let this_run = world.bump_change_tick();
 
         // Phase 10 Wave D Step 13 — conditional wraparound clamp scan
@@ -257,6 +262,24 @@ impl Schedule {
             // change-detection window).
             self.run_state_transitions(world, this_run.get());
         }
+
+        // Bug #56: apply-window change-tick bump. Deferred command applies
+        // (SpawnAt/Insert/migration/spawn_batch) stamp added/changed by reading
+        // current_tick() at apply time; bumping once here — after systems',
+        // conditions', and the state pass's frame-start `this_run` were captured,
+        // before any deferred drain — lands those stamps at `this_run + 1`,
+        // strictly between this frame's reader window and the next's, so
+        // Added<T>/Changed<T> observe a deferred-added component exactly once on
+        // the following frame (Bevy's ApplyDeferred-sync-point analogue). The
+        // result is intentionally discarded: only the side effect on change_tick
+        // matters; systems'/conditions'/state ticks remain pinned to `this_run`.
+        let _apply_window_tick = world.bump_change_tick();
+        debug_assert_eq!(
+            world.current_tick().get(),
+            this_run.get().wrapping_add(1),
+            "Bug#56: apply-window tick must be exactly one past the frame-start this_run \
+             (exactly one extra bump per frame)"
+        );
 
         if self.systems.is_empty() {
             return;
@@ -1576,14 +1599,18 @@ mod tests {
         let mut world = EcsMaster::new();
         let mut schedule = builder.build(&mut world);
 
-        // Frame 1: `this_run` is the tick bumped at the top of `run`. It must
-        // equal the world's post-bump current tick and be non-zero.
+        // Frame 1: `this_run` is the FRAME-START tick bumped at the top of `run`.
+        // Bug #56 adds a SECOND (apply-window) bump per frame, so the world's
+        // end-of-frame `current_tick()` is `frame_start_this_run + 1`. The
+        // condition's `this_run` is pinned to the frame-start value, hence one
+        // behind the world's current tick (NOT equal — the pre-#56 coupling).
         schedule.run(&mut world);
         let this_f1 = this_seen.load(Ordering::Relaxed);
         assert_eq!(
             this_f1,
-            world.current_tick().get(),
-            "frame-1 condition this_run must equal the world's bumped current tick"
+            world.current_tick().get().wrapping_sub(1),
+            "frame-1 condition this_run must equal the frame-start tick, one behind the \
+             world's apply-window-bumped current tick (Bug #56: 2 bumps/frame)"
         );
         assert_ne!(this_f1, 0, "frame-1 condition this_run must be non-zero (was bumped)");
 

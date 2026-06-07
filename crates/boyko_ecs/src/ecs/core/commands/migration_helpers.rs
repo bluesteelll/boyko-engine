@@ -305,11 +305,12 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
         // Step 2 + 3 (fused): write the bundle components into the same target
         // row. ALL bundle-byte consumption happens INSIDE the closure, where the
         // bundle's `ManuallyDrop` locals are alive (NEW-1). Bundle wins on
-        // overlap (Q6): a retained pool already committed `row` in Step 1, so we
-        // overwrite it via `write_at` (no drop — the old bytes are a copy of the
-        // source bytes that Step 5 releases without drop); a bundle-only
-        // (newly-added) pool has not yet reached `row`, so we
-        // `write_at_unchecked_initialized` + `commit_units` to extend it.
+        // overlap (Q6): a retained pool already committed `row` in Step 1 with a
+        // bitwise copy of the source value, so we `drop_at` that displaced value
+        // (issue #55 leak fix — mirrors `apply_replace_in_place`) and then
+        // overwrite via `write_at`; a bundle-only (newly-added) pool has not yet
+        // reached `row`, so we `write_at_unchecked_initialized` + `commit_units`
+        // to extend it.
         bundle.for_each_component_bytes(|id, bytes| {
             // Phase 14a P3: record the bundle id + whether it is newly-added
             // (NOT already in source). This read is against the pre-migration
@@ -324,21 +325,37 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
                 .get_pool_mut(id)
                 .expect("invariant: bundle component must exist in target (T = S ∪ I)");
             if dst_pool.has_row(row) {
-                // Overlap: the retained pass committed `row`. Overwrite the
-                // live slot with the bundle bytes (bundle wins, Q6).
-                // SAFETY:
-                //   * `dst_pool.has_row(row)` ⇒ `row < dst_pool.count()` (the
-                //     slot is live) — `write_at`'s precondition.
+                // Overlap: the retained pass (Step 1) committed `row` with a
+                // bitwise copy of the SOURCE value. Drop that displaced value,
+                // then overwrite the now-uninit slot with the bundle bytes
+                // (bundle wins, Q6) — mirroring
+                // `InsertCommand::apply_replace_in_place` (`insert_command.rs`
+                // ~160-209: `drop_at; write_at; write_changed_tick`).
+                // SAFETY (no-double-free):
+                //   * `dst_pool.has_row(row)` ⇒ `row < dst_pool.count()`, which
+                //     is the precondition of BOTH `drop_at` and `write_at`.
+                //   * `drop_at(row)` runs the component's type-erased `drop_fn`
+                //     (= `drop_in_place::<T>`) on the displaced (source-copy)
+                //     value. The Step-1 copy and the source original are the
+                //     SAME byte image (a bitwise copy shares any owned heap), so
+                //     this single drop frees that shared heap EXACTLY once. It
+                //     logically uninitialises the slot.
+                //   * `write_at(row, bytes)` is a memcpy with NO drop into the
+                //     now-logically-uninit slot ⇒ no double-drop of the old
+                //     value. It re-initialises the row with the bundle value.
+                //   * Step 5 (`move_out_entity`) releases the SOURCE bytes
+                //     WITHOUT drop (W-N2): the source slot is bitwise-released
+                //     and never deref'd, so the already-freed heap is NOT
+                //     double-freed. Net: the old value is dropped exactly once
+                //     (here); the new bundle value is dropped exactly once later
+                //     when `target`'s row is removed.
                 //   * `bytes.len() == dst_pool.component_layout().size()` by the
                 //     Bundle/macro contract (B/B2).
-                //   * `&mut target` ⇒ exclusive access. `write_at` is a memcpy
-                //     with NO drop: the displaced bytes are a bitwise copy of the
-                //     source bytes, which Step 5 (`move_out_entity`) releases
-                //     without drop, so the value is dropped exactly once (when
-                //     `target`'s row is eventually removed). `bytes` is live —
-                //     it borrows the bundle's `ManuallyDrop` locals inside this
+                //   * `&mut target` ⇒ exclusive access. `bytes` is live — it
+                //     borrows the bundle's `ManuallyDrop` locals inside this
                 //     closure invocation.
                 unsafe {
+                    dst_pool.drop_at(row);
                     dst_pool.write_at(row, bytes);
                     dst_pool.write_added_tick(row, current_tick);
                     dst_pool.write_changed_tick(row, current_tick);
@@ -371,14 +388,19 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
         target.entity_ids.push(entity.id());
         target.current_index = row + 1;
 
-        // Step 5: release source's bytes WITHOUT drop (C5 + W-N2). The
-        // retained components were just memcpy'd into target (Step 1); bundle
-        // components that overrode retained on overlap have their old source
-        // bytes left behind, but those are the SAME byte image already
-        // copied into target — bitwise-identical, so the bundle's new bytes
-        // logically replaced them. Either way, no drop should run on source's
-        // pools (a single drop will occur eventually when target is removed
-        // or via Drop on archetype teardown).
+        // Step 5: release source's bytes WITHOUT drop (C5 + W-N2). The source
+        // slot is bitwise-released and never deref'd, so running no drop here is
+        // required for no-double-free:
+        //   * Retained (non-overlap) components were memcpy'd into target
+        //     (Step 1) — the live value now belongs to the target row; dropping
+        //     the source copy would double-free it.
+        //   * Overlap components had their displaced source-copy ALREADY dropped
+        //     in the bundle-write closure above (the `has_row` branch's
+        //     `drop_at`), which freed any shared heap exactly once; dropping the
+        //     bitwise-identical source bytes here would double-free that heap.
+        // So the only live drops are: the overlap old value (dropped above,
+        // once) and every target value (dropped once when target is removed or
+        // on archetype teardown).
         match source.move_out_entity(InlandPoolId(source_row)) {
             RemoveOutcome::Last => {}
             RemoveOutcome::Swapped { moved_entity } => {
