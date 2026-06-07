@@ -1117,6 +1117,50 @@ impl EcsMaster {
     /// [`RemoveOutcome`] enum (C-006) replaces the previous fragile
     /// `Option<EntityId>`-based logic.
     pub fn delete_entity(&mut self, entity: Entity) -> bool {
+        let result = self.delete_entity_core(entity);
+        // Direct API: drain on this (post-fire) path. When this method is reached
+        // from `DespawnCommand::apply` at depth >= 1, the drain observes
+        // `depth != 0` and returns immediately — the outermost owner drains
+        // (Q-A1 / C1).
+        self.drain_deferred_hook_queue();
+        result
+    }
+
+    /// Despawns `entity` WITHOUT cascading to its children (Phase 19 W4).
+    ///
+    /// The opt-out to the default-recursive despawn: the [`Children`] cascade
+    /// hook is suppressed for exactly this one removal, so the children survive
+    /// — each keeps a now-**dangling** [`ChildOf`] pointing at the freed parent
+    /// (a documented footgun; reparent or despawn them explicitly). Equivalent
+    /// to Bevy 0.16's `despawn_related`-less single despawn.
+    ///
+    /// Returns `true` on success, `false` for a stale / never-registered handle
+    /// (same contract as [`delete_entity`](Self::delete_entity)).
+    ///
+    /// [`Children`]: crate::ecs::core::hierarchy::Children
+    /// [`ChildOf`]: crate::ecs::core::hierarchy::ChildOf
+    pub fn despawn_without_children(&mut self, entity: Entity) -> bool {
+        let result = {
+            // The guard spans ONLY the hook-fire core, NOT the drain below: the
+            // suppress is for THIS entity's cascade hook, and over-suppressing
+            // the subsequent drain would wrongly stop unrelated despawns enqueued
+            // by other hooks from cascading. Mirrors `DeferredScopeGuard`'s
+            // TLS-only discipline (touches no `EcsMaster` field → cannot be
+            // frozen by the `&mut self` reborrow).
+            let _suppress = crate::ecs::core::hierarchy::commands::CascadeSuppressGuard::enter();
+            self.delete_entity_core(entity)
+            // <-- `_suppress` drops here, BEFORE the drain.
+        };
+        self.drain_deferred_hook_queue();
+        result
+    }
+
+    /// Removal core shared by [`delete_entity`](Self::delete_entity) and
+    /// [`despawn_without_children`](Self::despawn_without_children): fires the
+    /// pre-remove hooks and releases the row, but does NOT drain the deferred
+    /// queue (the caller owns the drain so the suppress window can be scoped
+    /// tightly around the fire — Phase 19 W4).
+    fn delete_entity_core(&mut self, entity: Entity) -> bool {
         // Phase 14a §3.6 / §8 P1: RAII depth bracket. The two early `return
         // false` paths below PRECEDE the hook-fire point (no command can have
         // been enqueued), so the guard's `Drop` simply restores the depth.
@@ -1182,12 +1226,9 @@ impl EcsMaster {
             RemoveOutcome::PoolFailure => false,
         };
 
-        // Direct API: drop the bracket (depth back to 0) then drain on this
-        // (post-fire) path. When this method is reached from
-        // `DespawnCommand::apply` at depth >= 1, the drain observes `depth != 0`
-        // and returns immediately — the outermost owner drains (Q-A1 / C1).
+        // Drop the bracket (depth back to 0) so the caller's drain runs as the
+        // outermost owner.
         drop(scope);
-        self.drain_deferred_hook_queue();
         result
     }
 

@@ -118,6 +118,21 @@ impl<'w> DeferredEcsMaster<'w> {
         world.current_tick()
     }
 
+    /// Returns `true` iff `entity` is currently live (Phase 19 §3 — the
+    /// `ChildOf::on_insert` dangling-parent guard).
+    ///
+    /// A read-only existence check delegating to [`EcsMaster::has_entity`]; it
+    /// takes no `&mut`-into-storage, so it adds no Tree-Borrows surface. Named
+    /// `has_parent` because its sole caller probes a prospective parent, but it
+    /// is a generic liveness check on any entity.
+    #[inline]
+    pub fn has_parent(&self, entity: Entity) -> bool {
+        // SAFETY: same exclusive-borrow contract as `get_component`; this is a
+        //   shared read of a live, exclusively-borrowed world.
+        let world: &EcsMaster = unsafe { self.world.as_ref() };
+        world.has_entity(entity)
+    }
+
     /// Returns a [`DeferredCommands`] handle that enqueues structural commands
     /// into the world-resident deferred queue (plan §2.1 / Q-A1). Commands are
     /// drained at the OUTERMOST apply boundary — never inline.

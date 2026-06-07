@@ -22,6 +22,9 @@ pub use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 pub use crate::ecs::core::entity::entity::Entity;
 pub use crate::ecs::core::resources::resource::Resource;
 
+// ── Hierarchies (parent-child) ───────────────────────────────────────────────
+pub use crate::ecs::core::hierarchy::{ChildOf, Children};
+
 // ── Scheduling ───────────────────────────────────────────────────────────────
 pub use crate::ecs::core::schedule::{
     Schedule, ScheduleBuilder, SystemConfig, SystemSet, in_state, on_enter, on_exit,

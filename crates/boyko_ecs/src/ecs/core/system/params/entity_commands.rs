@@ -37,6 +37,8 @@ use crate::ecs::core::commands::insert_command::InsertCommand;
 use crate::ecs::core::commands::remove_command::RemoveCommand;
 use crate::ecs::core::component::component::Component;
 use crate::ecs::core::entity::entity::Entity;
+use crate::ecs::core::hierarchy::commands::ClearChildrenCommand;
+use crate::ecs::core::hierarchy::{ChildOf, ChildOfBundle};
 use crate::ecs::core::system::params::commands::Commands;
 
 /// Chainable handle for issuing per-entity deferred commands (Phase 11
@@ -198,6 +200,103 @@ impl<'a, 's> EntityCommands<'a, 's> {
     #[inline]
     pub fn reborrow(&mut self) -> EntityCommands<'_, 's> {
         EntityCommands { entity: self.entity, commands: &mut *self.commands }
+    }
+
+    // ── Hierarchy ergonomics (Phase 19 W5) ──────────────────────────────────
+    //
+    // The relationship is driven ENTIRELY by `ChildOf` insertion / removal —
+    // these are thin wrappers that never write `Children` directly. `Children`
+    // is maintained by `ChildOf`'s hooks (see `crate::ecs::core::hierarchy`).
+
+    /// Adds `child` as a child of this entity by inserting [`ChildOf`] on the
+    /// child (Phase 19). Chainable.
+    ///
+    /// Equivalent to `commands.entity(child).set_parent(this)`. The link
+    /// materialises at the next deferred-command drain.
+    #[inline]
+    pub fn add_child(&mut self, child: Entity) -> &mut Self {
+        let parent = self.entity;
+        self.commands
+            .queue
+            .push(InsertCommand { entity: child, bundle: ChildOfBundle(ChildOf(parent)) });
+        self
+    }
+
+    /// Adds every entity in `children` as a child of this entity (Phase 19).
+    /// Chainable. One [`ChildOf`] insert per child.
+    #[inline]
+    pub fn add_children(&mut self, children: &[Entity]) -> &mut Self {
+        let parent = self.entity;
+        for &child in children {
+            self.commands
+                .queue
+                .push(InsertCommand { entity: child, bundle: ChildOfBundle(ChildOf(parent)) });
+        }
+        self
+    }
+
+    /// Sets this entity's parent to `parent` by inserting [`ChildOf`] (Phase
+    /// 19). Chainable.
+    ///
+    /// If this entity already had a parent, the overwrite reparents it
+    /// atomically (the old parent's `on_replace` unlink is applied before the
+    /// new parent's `on_insert` link — FIFO drain order).
+    #[inline]
+    pub fn set_parent(&mut self, parent: Entity) -> &mut Self {
+        self.insert(ChildOfBundle(ChildOf(parent)))
+    }
+
+    /// Removes this entity's parent link by removing [`ChildOf`] (Phase 19).
+    /// Chainable. A no-op if this entity has no parent.
+    #[inline]
+    pub fn remove_parent(&mut self) -> &mut Self {
+        self.remove::<ChildOf>()
+    }
+
+    /// Removes every entity in `children` from this entity's children by
+    /// removing [`ChildOf`] from each (Phase 19). Chainable.
+    ///
+    /// Each child whose parent is actually this entity is unlinked; a child
+    /// whose `ChildOf` points elsewhere is unlinked from THAT parent (the
+    /// removal is unconditional on the child). The children are NOT despawned.
+    #[inline]
+    pub fn remove_children(&mut self, children: &[Entity]) -> &mut Self {
+        for &child in children {
+            self.commands.queue.push(RemoveCommand::<ChildOf>::new(child));
+        }
+        self
+    }
+
+    /// Removes [`ChildOf`] from ALL current children of this entity, clearing
+    /// its [`Children`](crate::ecs::core::hierarchy::Children) without
+    /// despawning them (Phase 19). Chainable.
+    ///
+    /// Re-reads the current children per turn at apply time (#17883-safe) and
+    /// routes a deferred `ChildOf` removal per child (the deferred removals do
+    /// not shrink the collection mid-walk, so each child is visited once).
+    #[inline]
+    pub fn clear_children(&mut self) -> &mut Self {
+        let parent = self.entity;
+        self.commands.queue.push(ClearChildrenCommand { parent });
+        self
+    }
+
+    /// Despawns this entity WITHOUT cascading to its children (Phase 19).
+    /// Chainable.
+    ///
+    /// The children survive with a now-dangling [`ChildOf`] (documented
+    /// footgun); see
+    /// [`EcsMaster::despawn_without_children`](crate::ecs::core::ecs_master::ecs_master::EcsMaster::despawn_without_children).
+    /// Note `iter_descendants` is a future addition — descent today is
+    /// `Query<&Children>` + manual recursion.
+    #[inline]
+    pub fn despawn_without_children(&mut self) -> &mut Self {
+        self.commands
+            .queue
+            .push(crate::ecs::core::hierarchy::commands::DespawnWithoutChildrenCommand {
+                entity: self.entity,
+            });
+        self
     }
 }
 

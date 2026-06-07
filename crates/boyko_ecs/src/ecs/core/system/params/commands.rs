@@ -199,6 +199,22 @@ impl<'s> Commands<'s> {
         self.queue.push(DespawnCommand { entity });
     }
 
+    /// Adds `child` as a child of `parent` by inserting
+    /// [`ChildOf`](crate::ecs::core::hierarchy::ChildOf) on the child (Phase 19).
+    ///
+    /// Equivalent to `commands.entity(parent).add_child(child)`. The whole
+    /// relationship is driven by `ChildOf` insertion — user code never writes
+    /// `Children` directly.
+    #[inline]
+    pub fn add_child(&mut self, parent: Entity, child: Entity) {
+        self.queue.push(crate::ecs::core::commands::insert_command::InsertCommand {
+            entity: child,
+            bundle: crate::ecs::core::hierarchy::ChildOfBundle(
+                crate::ecs::core::hierarchy::ChildOf(parent),
+            ),
+        });
+    }
+
     /// Phase 12.5 Opt-A2 (§5.2): enqueues a [`SpawnBatchCommand<B, I>`]
     /// covering `iter.len()` entities sharing bundle type `B`.
     ///

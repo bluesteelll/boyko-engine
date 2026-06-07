@@ -6,6 +6,7 @@ pub mod commands;
 pub mod component;
 pub mod ecs_master;
 pub mod entity;
+pub mod hierarchy;
 pub mod iters;
 pub mod events;
 pub mod resources;
