@@ -12,6 +12,7 @@
 //! 12 spare for 14b observer/despawn flags.
 
 use crate::ecs::core::component::component_registry;
+use crate::ecs::core::component::observers::{ObserverKind, ObserverRegistry};
 use crate::ecs::identifiers::primitives::ComponentId;
 
 /// Per-archetype hook-presence bitset.
@@ -32,8 +33,33 @@ impl ArchetypeFlags {
     pub const ON_REPLACE_HOOK: u16 = 1 << 2;
     /// Set iff some component in the archetype declares an `on_remove` hook.
     pub const ON_REMOVE_HOOK: u16 = 1 << 3;
-    // bit 4 RESERVED + bits 5..16 reserved for 14b observer/despawn flags
-    // (do NOT renumber the four bits above; the layout is forward-compatible).
+    // bit 4 stays RESERVED (forward-compat with a future `on_despawn` hook;
+    // do NOT renumber — keeps parity with Bevy's bit-4 = ON_DESPAWN_HOOK slot).
+
+    /// Set iff some component in the archetype has ≥1 registered `on_add`
+    /// observer (Phase 14b).
+    pub const ON_ADD_OBSERVER: u16 = 1 << 5;
+    /// Set iff some component in the archetype has ≥1 registered `on_insert`
+    /// observer (Phase 14b).
+    pub const ON_INSERT_OBSERVER: u16 = 1 << 6;
+    /// Set iff some component in the archetype has ≥1 registered `on_replace`
+    /// observer (Phase 14b).
+    pub const ON_REPLACE_OBSERVER: u16 = 1 << 7;
+    /// Set iff some component in the archetype has ≥1 registered `on_remove`
+    /// observer (Phase 14b).
+    pub const ON_REMOVE_OBSERVER: u16 = 1 << 8;
+
+    /// `on_add` gate mask: set iff the archetype has an `on_add` hook OR
+    /// observer. The structural-op fire site widens its inner test from
+    /// `ON_ADD_HOOK` to this (Phase 14b §5) — same instruction count, a
+    /// different immediate, so the no-op hot path stays byte-identical.
+    pub const ON_ADD_ANY: u16 = Self::ON_ADD_HOOK | Self::ON_ADD_OBSERVER;
+    /// `on_insert` gate mask (hook OR observer); see [`Self::ON_ADD_ANY`].
+    pub const ON_INSERT_ANY: u16 = Self::ON_INSERT_HOOK | Self::ON_INSERT_OBSERVER;
+    /// `on_replace` gate mask (hook OR observer); see [`Self::ON_ADD_ANY`].
+    pub const ON_REPLACE_ANY: u16 = Self::ON_REPLACE_HOOK | Self::ON_REPLACE_OBSERVER;
+    /// `on_remove` gate mask (hook OR observer); see [`Self::ON_ADD_ANY`].
+    pub const ON_REMOVE_ANY: u16 = Self::ON_REMOVE_HOOK | Self::ON_REMOVE_OBSERVER;
 
     /// Returns an empty flag set (no hook bits raised).
     #[inline]
@@ -53,6 +79,17 @@ impl ArchetypeFlags {
     #[inline]
     pub fn insert(&mut self, bit: u16) {
         self.0 |= bit;
+    }
+
+    /// Clears `bit` from the set, leaving every other bit untouched (Phase
+    /// 14b).
+    ///
+    /// Used by the `remove_observer` remove-last recompute to drop an
+    /// `ON_{kind}_OBSERVER` bit while preserving the hook bit and the other
+    /// kinds' bits.
+    #[inline]
+    pub fn clear(&mut self, bit: u16) {
+        self.0 &= !bit;
     }
 
     /// Returns `true` if no hook bit is raised (the no-hook hot path).
@@ -80,6 +117,41 @@ impl ArchetypeFlags {
             if hooks.on_remove.is_some() {
                 self.insert(Self::ON_REMOVE_HOOK);
             }
+        }
+    }
+
+    /// ORs every set bit of `other` into `self` (Phase 14b).
+    ///
+    /// Used by the `create_archetype` / `add_existing_archetype` seed step to
+    /// merge the observer bits computed from the registry into a freshly-built
+    /// archetype's flags WITHOUT disturbing the hook bits the slab recipe
+    /// already seeded.
+    #[inline]
+    pub fn insert_observer_bits(&mut self, other: ArchetypeFlags) {
+        self.0 |= other.0;
+    }
+
+    /// ORs into `self` the `ON_*_OBSERVER` bits the registry has registered for
+    /// component `cid` (Phase 14b).
+    ///
+    /// A no-op when the registry has no lists allocated (no observer anywhere —
+    /// the common case, one `Option::is_none()` early-out per kind) or none for
+    /// `cid`. Called per component in the archetype-construction seed step
+    /// (§4); symmetric to [`Self::insert_from_hooks`] but reads the per-world
+    /// [`ObserverRegistry`] instead of the global `HOOKS` table.
+    #[inline]
+    pub(crate) fn insert_from_observers(&mut self, cid: ComponentId, reg: &ObserverRegistry) {
+        if reg.has_observer(ObserverKind::Add, cid) {
+            self.insert(Self::ON_ADD_OBSERVER);
+        }
+        if reg.has_observer(ObserverKind::Insert, cid) {
+            self.insert(Self::ON_INSERT_OBSERVER);
+        }
+        if reg.has_observer(ObserverKind::Replace, cid) {
+            self.insert(Self::ON_REPLACE_OBSERVER);
+        }
+        if reg.has_observer(ObserverKind::Remove, cid) {
+            self.insert(Self::ON_REMOVE_OBSERVER);
         }
     }
 }
@@ -219,7 +291,99 @@ mod tests {
     #[test]
     fn archetype_flags_is_two_bytes() {
         // `#[repr(transparent)]` over u16 — the load-bearing "one u16 load"
-        // gate size (plan §3.3 / O3).
+        // gate size (plan §3.3 / O3). Bit 8 (the highest observer bit) fits.
         assert_eq!(std::mem::size_of::<ArchetypeFlags>(), 2);
+    }
+
+    // ----- Phase 14b: observer bits -----
+
+    #[test]
+    fn observer_bits_are_distinct_powers_of_two() {
+        // Forward-compat guard: observer bits stay 1<<5..1<<8 (bit 4 RESERVED
+        // for a future on_despawn hook; do NOT renumber).
+        assert_eq!(ArchetypeFlags::ON_ADD_OBSERVER, 1 << 5);
+        assert_eq!(ArchetypeFlags::ON_INSERT_OBSERVER, 1 << 6);
+        assert_eq!(ArchetypeFlags::ON_REPLACE_OBSERVER, 1 << 7);
+        assert_eq!(ArchetypeFlags::ON_REMOVE_OBSERVER, 1 << 8);
+    }
+
+    #[test]
+    fn observer_bits_do_not_overlap_hook_bits_or_reserved_bit_four() {
+        let hook_bits = ArchetypeFlags::ON_ADD_HOOK
+            | ArchetypeFlags::ON_INSERT_HOOK
+            | ArchetypeFlags::ON_REPLACE_HOOK
+            | ArchetypeFlags::ON_REMOVE_HOOK;
+        let observer_bits = ArchetypeFlags::ON_ADD_OBSERVER
+            | ArchetypeFlags::ON_INSERT_OBSERVER
+            | ArchetypeFlags::ON_REPLACE_OBSERVER
+            | ArchetypeFlags::ON_REMOVE_OBSERVER;
+        assert_eq!(hook_bits & observer_bits, 0, "hook and observer bits are disjoint");
+        assert_eq!(observer_bits & (1 << 4), 0, "bit 4 stays reserved (unused by observers)");
+    }
+
+    #[test]
+    fn any_masks_are_the_hook_or_observer_union() {
+        assert_eq!(
+            ArchetypeFlags::ON_ADD_ANY,
+            ArchetypeFlags::ON_ADD_HOOK | ArchetypeFlags::ON_ADD_OBSERVER
+        );
+        assert_eq!(
+            ArchetypeFlags::ON_INSERT_ANY,
+            ArchetypeFlags::ON_INSERT_HOOK | ArchetypeFlags::ON_INSERT_OBSERVER
+        );
+        assert_eq!(
+            ArchetypeFlags::ON_REPLACE_ANY,
+            ArchetypeFlags::ON_REPLACE_HOOK | ArchetypeFlags::ON_REPLACE_OBSERVER
+        );
+        assert_eq!(
+            ArchetypeFlags::ON_REMOVE_ANY,
+            ArchetypeFlags::ON_REMOVE_HOOK | ArchetypeFlags::ON_REMOVE_OBSERVER
+        );
+    }
+
+    #[test]
+    fn insert_observer_bits_ors_without_disturbing_hook_bits() {
+        let mut f = ArchetypeFlags::empty();
+        f.insert(ArchetypeFlags::ON_ADD_HOOK); // pretend the slab recipe seeded a hook bit
+        let mut obs = ArchetypeFlags::empty();
+        obs.insert(ArchetypeFlags::ON_REMOVE_OBSERVER);
+        f.insert_observer_bits(obs);
+        assert!(f.contains(ArchetypeFlags::ON_ADD_HOOK), "hook bit preserved");
+        assert!(f.contains(ArchetypeFlags::ON_REMOVE_OBSERVER), "observer bit merged in");
+        assert!(!f.contains(ArchetypeFlags::ON_ADD_OBSERVER), "unrelated observer bit stays clear");
+    }
+
+    #[test]
+    fn insert_from_observers_reads_the_registry() {
+        use crate::ecs::core::component::observers::{ObserverContext, ObserverFn, ObserverKind, ObserverRegistry};
+        use crate::ecs::identifiers::primitives::ComponentId;
+
+        unsafe fn dummy(
+            _w: crate::ecs::core::component::hooks::deferred_master::DeferredEcsMaster<'_>,
+            _c: ObserverContext,
+        ) {
+        }
+        let runner = dummy as ObserverFn;
+
+        let mut reg = ObserverRegistry::new();
+        // Empty registry: no bit raised (the zero-cost early-out path).
+        let mut f = ArchetypeFlags::empty();
+        f.insert_from_observers(ComponentId(20), &reg);
+        assert!(f.is_empty(), "no observer => no bit");
+
+        // Register an on_add and an on_remove observer for ComponentId(20).
+        reg.add(ObserverKind::Add, ComponentId(20), runner);
+        reg.add(ObserverKind::Remove, ComponentId(20), runner);
+        let mut g = ArchetypeFlags::empty();
+        g.insert_from_observers(ComponentId(20), &reg);
+        assert!(g.contains(ArchetypeFlags::ON_ADD_OBSERVER), "on_add bit raised from registry");
+        assert!(g.contains(ArchetypeFlags::ON_REMOVE_OBSERVER), "on_remove bit raised from registry");
+        assert!(!g.contains(ArchetypeFlags::ON_INSERT_OBSERVER), "on_insert NOT raised");
+        assert!(!g.contains(ArchetypeFlags::ON_REPLACE_OBSERVER), "on_replace NOT raised");
+
+        // A different component is unaffected.
+        let mut h = ArchetypeFlags::empty();
+        h.insert_from_observers(ComponentId(21), &reg);
+        assert!(h.is_empty(), "an unobserved component raises no bit");
     }
 }

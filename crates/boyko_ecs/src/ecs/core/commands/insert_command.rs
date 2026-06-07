@@ -24,6 +24,9 @@ use crate::ecs::core::commands::command::Command;
 use crate::ecs::core::commands::migration_helpers::{merged_archetype_id, migrate_entity_insert};
 use crate::ecs::core::component::hooks::archetype_flags::ArchetypeFlags;
 use crate::ecs::core::component::hooks::dispatch::{trigger_on_insert, trigger_on_replace};
+use crate::ecs::core::component::observers::dispatch::{
+    fire_on_insert_observers, fire_on_replace_observers,
+};
 use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 use crate::ecs::core::entity::entity::Entity;
 use crate::ecs::identifiers::primitives::ComponentId;
@@ -130,10 +133,17 @@ impl<B: Bundle> InsertCommand<B> {
         // the row still holds the OLD value — the read-only view reads the
         // dying bytes. `EntityInland` still points at this row. No `&mut
         // Archetype` is live here (only `archetype_ptr`, raw).
-        if flags.contains(ArchetypeFlags::ON_REPLACE_HOOK) {
+        if flags.contains(ArchetypeFlags::ON_REPLACE_ANY) {
             let world_ptr = NonNull::from(&mut *world);
-            for &cid in B::component_ids() {
-                trigger_on_replace(world_ptr, cid, entity);
+            if flags.contains(ArchetypeFlags::ON_REPLACE_HOOK) {
+                for &cid in B::component_ids() {
+                    trigger_on_replace(world_ptr, cid, entity);
+                }
+            }
+            if flags.contains(ArchetypeFlags::ON_REPLACE_OBSERVER) {
+                for &cid in B::component_ids() {
+                    fire_on_replace_observers(world_ptr, cid, entity);
+                }
             }
         }
 
@@ -205,10 +215,17 @@ impl<B: Bundle> InsertCommand<B> {
         // only `archetype_ptr` (raw) survives, so minting `world_ptr` aliases no
         // reborrow (SAFETY-1). `on_add` does NOT fire — the component was already
         // present (in-place replace, Q7).
-        if flags.contains(ArchetypeFlags::ON_INSERT_HOOK) {
+        if flags.contains(ArchetypeFlags::ON_INSERT_ANY) {
             let world_ptr = NonNull::from(&mut *world);
-            for &cid in B::component_ids() {
-                trigger_on_insert(world_ptr, cid, entity);
+            if flags.contains(ArchetypeFlags::ON_INSERT_HOOK) {
+                for &cid in B::component_ids() {
+                    trigger_on_insert(world_ptr, cid, entity);
+                }
+            }
+            if flags.contains(ArchetypeFlags::ON_INSERT_OBSERVER) {
+                for &cid in B::component_ids() {
+                    fire_on_insert_observers(world_ptr, cid, entity);
+                }
             }
         }
 

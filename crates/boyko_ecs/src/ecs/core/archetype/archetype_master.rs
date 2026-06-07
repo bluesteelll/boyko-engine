@@ -3,6 +3,10 @@ use crate::ecs::core::archetype::archetype_registry::ArchetypeRegistry;
 use crate::ecs::core::archetype::archetype::Archetype;
 use crate::ecs::core::archetype::generation::ArchetypeGeneration;
 use crate::ecs::core::component::component_mask::ComponentMask;
+use crate::ecs::core::component::hooks::archetype_flags::ArchetypeFlags;
+use crate::ecs::core::component::observers::{
+    ObserverFn, ObserverId, ObserverKind, ObserverRegistry,
+};
 use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId};
 use crate::ecs::memory::arena::Arena;
 use crate::ecs::core::iters::legacy_query::Query as LegacyQuery;
@@ -52,6 +56,19 @@ pub struct ArchetypeMaster {
     /// fast path keeps its ~21x warm-path speedup via delta-add. Only the
     /// rarer remove+create churn pays the full-rebuild cost.
     structural_generation: ArchetypeGeneration,
+
+    /// Phase 14b: per-`(kind, component)` lifecycle observers. Co-located here
+    /// (not on `EcsMaster`) so [`Self::create_archetype`] — the single
+    /// archetype-creation funnel — can seed each new archetype's
+    /// `ON_*_OBSERVER` flag bits at construction, and so
+    /// [`Self::add_observer`] / [`Self::remove_observer`] can maintain those
+    /// bits with one cohesive `&mut self` walk over `iter_archetypes_mut`.
+    ///
+    /// `pub(crate)` because the Wave-5 fire dispatch reads it cross-module
+    /// (`&self.observer_registry`); the seed/walk sites are methods on
+    /// `ArchetypeMaster` itself. Independently `Send + Sync` (fn-ptr-only
+    /// entries) — no `unsafe impl` (SEND6).
+    pub(crate) observer_registry: ObserverRegistry,
 }
 
 impl ArchetypeMaster {
@@ -75,6 +92,7 @@ impl ArchetypeMaster {
             next_archetype_id: ArchetypeId(1),
             generation: ArchetypeGeneration::FIRST,
             structural_generation: ArchetypeGeneration::FIRST,
+            observer_registry: ObserverRegistry::new(),
         }
     }
 
@@ -90,6 +108,7 @@ impl ArchetypeMaster {
             next_archetype_id: ArchetypeId(1),
             generation: ArchetypeGeneration::FIRST,
             structural_generation: ArchetypeGeneration::FIRST,
+            observer_registry: ObserverRegistry::new(),
         }
     }
     
@@ -125,10 +144,43 @@ impl ArchetypeMaster {
             component_ids,
             arena
         );
-        
+
         // Register the archetype with the registry
         self.registry.register_archetype(archetype_id, mask);
-        
+
+        // ── Phase 14b OBS-SEED (C1, R2 §4) ──
+        // Seed the new archetype's `ON_*_OBSERVER` bits from the registry. The
+        // slab recipe (`add_archetype_from_components`) cannot reach the
+        // registry, so we OR the observer bits in here, AFTER construction.
+        //
+        // Borrow-split: step 1 reads `&self.observer_registry` (shared) into the
+        // `Copy` local `obs` — the shared borrow ends when `obs` is filled. Step
+        // 2 writes through `&mut self.archetypes` (a disjoint field), so the two
+        // borrows never overlap.
+        let mut obs = ArchetypeFlags::empty();
+        for &cid in component_ids {
+            obs.insert_from_observers(cid, &self.observer_registry);
+        }
+        if !obs.is_empty() {
+            let ptr = self
+                .archetypes
+                .get_archetype_ptr_mut(archetype_id)
+                .expect("invariant: archetype just registered exists in bundle");
+            // SAFETY (OBS-SEED): `ptr` is write-capable stable slab provenance
+            //   (bundle invariants U1/U2), minted under `&mut self`. No other
+            //   borrow into this slot is live — the `&mut Archetype` taken by
+            //   `add_archetype_from_components` was dropped inside that call, and
+            //   the `&self.observer_registry` read above has ended (copied into
+            //   `obs`). `flags` is a `Copy` u16 read-modify-write, so the OR
+            //   touches only this archetype and aliases nothing.
+            unsafe {
+                (*ptr).flags.insert_observer_bits(obs);
+            }
+        }
+
+        #[cfg(debug_assertions)]
+        self.debug_assert_observer_flags_consistent();
+
         archetype_id
     }
     
@@ -397,11 +449,38 @@ impl ArchetypeMaster {
         // Register with the registry
         self.registry.register_archetype(archetype_id, mask);
 
+        // ── Phase 14b OBS-SEED2 (C1, R2 §4 — the one bypass) ──
+        // `add_existing_archetype` inserts a pre-built `Archetype` whose `flags`
+        // were computed elsewhere, so it does NOT funnel through
+        // `create_archetype`'s seed. Seed observer bits here too (same
+        // borrow-split + write-pointer as OBS-SEED).
+        let mut obs = ArchetypeFlags::empty();
+        for &cid in &component_ids {
+            obs.insert_from_observers(cid, &self.observer_registry);
+        }
+        if !obs.is_empty() {
+            let ptr = self
+                .archetypes
+                .get_archetype_ptr_mut(archetype_id)
+                .expect("invariant: archetype just registered exists in bundle");
+            // SAFETY (OBS-SEED2): identical to OBS-SEED — `ptr` is write-capable
+            //   stable slab provenance for the just-stored slot, minted under
+            //   `&mut self`; no other borrow into the slot is live; the
+            //   `&self.observer_registry` read above ended (copied into `obs`);
+            //   `flags` is a `Copy` u16 RMW touching only this archetype.
+            unsafe {
+                (*ptr).flags.insert_observer_bits(obs);
+            }
+        }
+
         // Update next ID if necessary and bump generation for each new archetype slot minted
         if archetype_id >= self.next_archetype_id {
             self.next_archetype_id = ArchetypeId(archetype_id.0 + 1);
             self.generation.bump();
         }
+
+        #[cfg(debug_assertions)]
+        self.debug_assert_observer_flags_consistent();
 
         archetype_id
     }
@@ -528,8 +607,20 @@ impl ArchetypeMaster {
         &self.archetypes
     }
     
-    /// Returns a mutable reference to the internal archetype bundle
-    pub fn archetype_bundle_mut(&mut self) -> &mut ArchetypeBundle {
+    /// Returns a mutable reference to the internal archetype bundle.
+    ///
+    /// `pub(crate)` (Phase 14b §1, C1): a `&mut ArchetypeBundle` exposes the
+    /// bundle bit-setters that mint archetype slots, which would bypass the
+    /// `create_archetype` observer-flag seed and corrupt the registry/id
+    /// bookkeeping. Narrowed to crate-internal to close that path (verified
+    /// zero callers in src/tests/benches). The read-only
+    /// [`Self::archetype_bundle`] stays `pub` — a `&ArchetypeBundle` has no
+    /// bit-setter.
+    // Retained crate-internal capability (no current caller after the C1
+    // narrowing); kept rather than deleted so future crate code has a guarded
+    // mutable bundle handle without re-widening the public surface.
+    #[allow(dead_code)]
+    pub(crate) fn archetype_bundle_mut(&mut self) -> &mut ArchetypeBundle {
         &mut self.archetypes
     }
     
@@ -605,7 +696,124 @@ impl ArchetypeMaster {
     pub(crate) fn iter_archetypes_mut(&mut self) -> ArchetypeBundleIterMut<'_> {
         self.archetypes.iter_mut()
     }
-    
+
+    /// Registers `runner` as a `kind` observer for component `cid`, returning a
+    /// stable [`ObserverId`] for later [`Self::remove_observer`] (Phase 14b).
+    ///
+    /// On the FIRST observer for `(kind, cid)` (the `(kind, cid)` list goes
+    /// empty → non-empty), this walks every archetype containing `cid` and
+    /// raises its `ON_{kind}_OBSERVER` bit so the structural-op fire sites
+    /// dispatch to the new observer (Bevy's `Archetypes::update_flags`). On a
+    /// non-first add the bit is already set, so no walk runs (O(1)).
+    pub fn add_observer(
+        &mut self,
+        kind: ObserverKind,
+        cid: ComponentId,
+        runner: ObserverFn,
+    ) -> ObserverId {
+        let (id, became_nonempty) = self.observer_registry.add(kind, cid, runner);
+        if became_nonempty {
+            // Add-first walk: raise the bit on every archetype containing `cid`.
+            // Idempotent OR — preserves the hook bit and every other kind's bit.
+            // `iter_archetypes_mut` borrows `self.archetypes`; the registry
+            // mutation above has already ended, so no registry borrow is live.
+            let bit = Self::observer_bit(kind);
+            for archetype in self.iter_archetypes_mut() {
+                if archetype.has_component_id(cid) {
+                    archetype.flags.insert(bit);
+                }
+            }
+            #[cfg(debug_assertions)]
+            self.debug_assert_observer_flags_consistent();
+        }
+        id
+    }
+
+    /// Removes the observer with `id`, returning `true` if it was registered
+    /// (Phase 14b).
+    ///
+    /// On removal of the LAST observer for its `(kind, cid)` pair, this
+    /// recomputes the `ON_{kind}_OBSERVER` bit on every archetype containing
+    /// `cid`: the bit stays set iff some *sibling* component in that archetype
+    /// still has a `kind` observer; otherwise it is cleared (the hook bit and
+    /// the other kinds' bits are preserved by the masked write). On a non-last
+    /// removal no walk runs (the bit stays correct, O(1)).
+    pub fn remove_observer(&mut self, id: ObserverId) -> bool {
+        let Some((kind, cid, became_empty)) = self.observer_registry.remove(id) else {
+            return false;
+        };
+        if became_empty {
+            // Remove-last recompute walk. Disjoint-field borrows: `&mut
+            // self.archetypes` (the walk) and `&self.observer_registry` (the
+            // sibling read) are different fields, so they may be live together.
+            let bit = Self::observer_bit(kind);
+            let reg = &self.observer_registry;
+            for archetype in self.archetypes.iter_mut() {
+                if archetype.has_component_id(cid) {
+                    // `cid`'s list is now empty (removed above), so this is true
+                    // iff some OTHER component in the archetype still observes
+                    // `kind`.
+                    let any_sibling = archetype
+                        .component_ids()
+                        .iter()
+                        .any(|&sib| reg.has_observer(kind, sib));
+                    if any_sibling {
+                        archetype.flags.insert(bit);
+                    } else {
+                        archetype.flags.clear(bit);
+                    }
+                }
+            }
+            #[cfg(debug_assertions)]
+            self.debug_assert_observer_flags_consistent();
+        }
+        true
+    }
+
+    /// Maps an [`ObserverKind`] to its `ON_{kind}_OBSERVER` flag bit.
+    #[inline]
+    const fn observer_bit(kind: ObserverKind) -> u16 {
+        match kind {
+            ObserverKind::Add => ArchetypeFlags::ON_ADD_OBSERVER,
+            ObserverKind::Insert => ArchetypeFlags::ON_INSERT_OBSERVER,
+            ObserverKind::Replace => ArchetypeFlags::ON_REPLACE_OBSERVER,
+            ObserverKind::Remove => ArchetypeFlags::ON_REMOVE_OBSERVER,
+        }
+    }
+
+    /// Debug-only tripwire (Phase 14b §1): asserts that every archetype's
+    /// `ON_*_OBSERVER` bits exactly reflect the registry — a bit is set iff some
+    /// component in the archetype has ≥1 observer of that kind.
+    ///
+    /// Walks the SHARED `iter_archetypes()` iterator (read-only). Called at the
+    /// three sites that can change a bit: both seed sites (`create_archetype`,
+    /// `add_existing_archetype`) and both dynamic walks (the `add_observer`
+    /// add-first and the `remove_observer` remove-last). Compiles to nothing in
+    /// release.
+    #[cfg(debug_assertions)]
+    fn debug_assert_observer_flags_consistent(&self) {
+        const KINDS: [(ObserverKind, u16); 4] = [
+            (ObserverKind::Add, ArchetypeFlags::ON_ADD_OBSERVER),
+            (ObserverKind::Insert, ArchetypeFlags::ON_INSERT_OBSERVER),
+            (ObserverKind::Replace, ArchetypeFlags::ON_REPLACE_OBSERVER),
+            (ObserverKind::Remove, ArchetypeFlags::ON_REMOVE_OBSERVER),
+        ];
+        for archetype in self.iter_archetypes() {
+            for (kind, bit) in KINDS {
+                let expected = archetype
+                    .component_ids()
+                    .iter()
+                    .any(|&cid| self.observer_registry.has_observer(kind, cid));
+                debug_assert_eq!(
+                    archetype.flags.contains(bit),
+                    expected,
+                    "observer flag bit out of sync with registry for archetype {:?}",
+                    archetype.id()
+                );
+            }
+        }
+    }
+
     /// Removes all archetypes and resets `next_archetype_id` to 1.
     ///
     /// # Interaction with `QueryState`
@@ -650,6 +858,13 @@ impl ArchetypeMaster {
 //     cell view that aliases the slab while a new slot is being written.
 //   - The `arena: *const Arena` raw pointer is opaque to multi-thread
 //     access; arena allocation downstream is guarded by ALLOC1.
+//   - `observer_registry: ObserverRegistry` (Phase 14b) is independently
+//     `Send + Sync` with NO `unsafe impl`: it holds only
+//     `Option<Box<[[Vec<ObserverEntry>; MAX_COMPONENTS]; 4]>>` + a `u64`, and
+//     `ObserverEntry` is `{ ObserverId(u64), fn-ptr }` POD — fn-pointers are
+//     unconditionally `Send + Sync`. Mutated only via `&mut self`
+//     (`add_observer` / `remove_observer`) on the dispatcher under the apply
+//     window; never touched by a worker (SCH7).
 unsafe impl Send for ArchetypeMaster {}
 unsafe impl Sync for ArchetypeMaster {}
 

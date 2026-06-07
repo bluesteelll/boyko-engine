@@ -19,13 +19,18 @@ use crate::ecs::core::component::hooks::dispatch::{
     trigger_on_add, trigger_on_insert, trigger_on_remove, trigger_on_replace,
 };
 use crate::ecs::core::component::hooks::scope::{DeferredScopeGuard, hook_drain_depth};
+use crate::ecs::core::component::observers::dispatch::{
+    fire_on_add_observers, fire_on_insert_observers, fire_on_remove_observers,
+    fire_on_replace_observers,
+};
+use crate::ecs::core::component::observers::{ObserverFn, ObserverId, ObserverKind};
 use crate::ecs::core::entity::entity::Entity;
 use crate::ecs::core::entity::entity_inland::EntityInland;
 use crate::ecs::core::entity::entity_master::EntityMaster;
 use crate::ecs::core::events::event::Event;
 use crate::ecs::core::events::event_config::EventConfig;
 use crate::ecs::core::events::event_dispatcher::EventDispatcher;
-use crate::ecs::core::iters::query::data::QueryData;
+use crate::ecs::core::iters::query::data::{Mut, QueryData};
 use crate::ecs::core::iters::query::filter::QueryFilter;
 use crate::ecs::core::iters::query::query_type_registry::{
     MAX_QUERY_TYPES, QueryTypeId, QueryTypeKey,
@@ -668,19 +673,37 @@ impl EcsMaster {
         let flags = unsafe { (*archetype_ptr).flags };
         if !flags.is_empty() {
             let world_ptr = NonNull::from(&mut *self);
-            if flags.contains(ArchetypeFlags::ON_ADD_HOOK) {
+            // Phase 14b: inner gates widen HOOK -> ANY (hook OR observer). Hooks
+            // fire first, then observers (per-kind block shape, §5). The two
+            // nested `contains` are sub-tests of the already-loaded `flags` u16
+            // (no extra load); the `ids` slice is read once per kind.
+            if flags.contains(ArchetypeFlags::ON_ADD_ANY) {
                 // SAFETY: `archetype_ptr` is a valid `*const Archetype`; the
                 //   shared slice is transient and not aliased by a live `&mut`.
                 let ids = unsafe { (*archetype_ptr).component_ids.as_slice() };
-                for &cid in ids {
-                    trigger_on_add(world_ptr, cid, entity);
+                if flags.contains(ArchetypeFlags::ON_ADD_HOOK) {
+                    for &cid in ids {
+                        trigger_on_add(world_ptr, cid, entity);
+                    }
+                }
+                if flags.contains(ArchetypeFlags::ON_ADD_OBSERVER) {
+                    for &cid in ids {
+                        fire_on_add_observers(world_ptr, cid, entity);
+                    }
                 }
             }
-            if flags.contains(ArchetypeFlags::ON_INSERT_HOOK) {
+            if flags.contains(ArchetypeFlags::ON_INSERT_ANY) {
                 // SAFETY: same as the on_add slice read above.
                 let ids = unsafe { (*archetype_ptr).component_ids.as_slice() };
-                for &cid in ids {
-                    trigger_on_insert(world_ptr, cid, entity);
+                if flags.contains(ArchetypeFlags::ON_INSERT_HOOK) {
+                    for &cid in ids {
+                        trigger_on_insert(world_ptr, cid, entity);
+                    }
+                }
+                if flags.contains(ArchetypeFlags::ON_INSERT_OBSERVER) {
+                    for &cid in ids {
+                        fire_on_insert_observers(world_ptr, cid, entity);
+                    }
                 }
             }
         }
@@ -801,18 +824,34 @@ impl EcsMaster {
         let flags = unsafe { (*archetype_ptr).flags };
         if !flags.is_empty() {
             let world_ptr = NonNull::from(&mut *self);
-            if flags.contains(ArchetypeFlags::ON_ADD_HOOK) {
+            // Phase 14b: inner gates widen HOOK -> ANY; hooks first, then
+            // observers (mirrors `create_entity`, §5).
+            if flags.contains(ArchetypeFlags::ON_ADD_ANY) {
                 // SAFETY: transient shared slice, not aliased by a live `&mut`.
                 let ids = unsafe { (*archetype_ptr).component_ids.as_slice() };
-                for &cid in ids {
-                    trigger_on_add(world_ptr, cid, entity);
+                if flags.contains(ArchetypeFlags::ON_ADD_HOOK) {
+                    for &cid in ids {
+                        trigger_on_add(world_ptr, cid, entity);
+                    }
+                }
+                if flags.contains(ArchetypeFlags::ON_ADD_OBSERVER) {
+                    for &cid in ids {
+                        fire_on_add_observers(world_ptr, cid, entity);
+                    }
                 }
             }
-            if flags.contains(ArchetypeFlags::ON_INSERT_HOOK) {
+            if flags.contains(ArchetypeFlags::ON_INSERT_ANY) {
                 // SAFETY: same as the on_add slice read above.
                 let ids = unsafe { (*archetype_ptr).component_ids.as_slice() };
-                for &cid in ids {
-                    trigger_on_insert(world_ptr, cid, entity);
+                if flags.contains(ArchetypeFlags::ON_INSERT_HOOK) {
+                    for &cid in ids {
+                        trigger_on_insert(world_ptr, cid, entity);
+                    }
+                }
+                if flags.contains(ArchetypeFlags::ON_INSERT_OBSERVER) {
+                    for &cid in ids {
+                        fire_on_insert_observers(world_ptr, cid, entity);
+                    }
                 }
             }
         }
@@ -1041,14 +1080,32 @@ impl EcsMaster {
         // the dispatcher's exclusive access for the cold fire only.
         let world_ptr = NonNull::from(&mut *self);
         // PRE-DROP (SAFETY-2): on_replace + on_remove for ALL, BEFORE remove.
-        if flags.contains(ArchetypeFlags::ON_REPLACE_HOOK) {
-            for &cid in &id_buf[..n] {
-                trigger_on_replace(world_ptr, cid, entity);
+        // Phase 14b: inner gates widen HOOK -> ANY; per kind, hooks fire first,
+        // then observers (§5). The outer `!flags.is_empty()` gate (in
+        // `delete_entity`) already covers the observer bits — same `u16` — so it
+        // is unchanged; only these inner per-kind tests widen.
+        if flags.contains(ArchetypeFlags::ON_REPLACE_ANY) {
+            if flags.contains(ArchetypeFlags::ON_REPLACE_HOOK) {
+                for &cid in &id_buf[..n] {
+                    trigger_on_replace(world_ptr, cid, entity);
+                }
+            }
+            if flags.contains(ArchetypeFlags::ON_REPLACE_OBSERVER) {
+                for &cid in &id_buf[..n] {
+                    fire_on_replace_observers(world_ptr, cid, entity);
+                }
             }
         }
-        if flags.contains(ArchetypeFlags::ON_REMOVE_HOOK) {
-            for &cid in &id_buf[..n] {
-                trigger_on_remove(world_ptr, cid, entity);
+        if flags.contains(ArchetypeFlags::ON_REMOVE_ANY) {
+            if flags.contains(ArchetypeFlags::ON_REMOVE_HOOK) {
+                for &cid in &id_buf[..n] {
+                    trigger_on_remove(world_ptr, cid, entity);
+                }
+            }
+            if flags.contains(ArchetypeFlags::ON_REMOVE_OBSERVER) {
+                for &cid in &id_buf[..n] {
+                    fire_on_remove_observers(world_ptr, cid, entity);
+                }
             }
         }
     }
@@ -1293,16 +1350,81 @@ impl EcsMaster {
         Some(unsafe { &*(raw as *const T) })
     }
 
-    /// Typed mutable accessor. Symmetric counterpart of
-    /// [`get_component`] returning `&mut T`.
+    /// Typed mutable accessor returning a change-detection-aware [`Mut<T>`]
+    /// (Phase 14b W6).
+    ///
+    /// The direct-API counterpart of querying `Mut<T>` inside a system: writing
+    /// through the returned guard (any `DerefMut`, or [`Mut::set_if_neq`]) bumps
+    /// the row's `changed_tick`, so a subsequent `Changed<T>` query observes the
+    /// write. Returns `None` if the entity is stale (wrong generation), was
+    /// never registered, or its archetype does not host `T`.
+    ///
+    /// # `is_added` / `is_changed` semantics (O4)
+    ///
+    /// Outside a system there is no `last_run` frame boundary, so this `Mut` is
+    /// constructed with `last_run == this_run == current_tick()`. Its
+    /// [`Mut::is_added`] / [`Mut::is_changed`] therefore report whether the row
+    /// was touched **at the current tick** ("changed relative to the current
+    /// tick"), NOT "changed since a previous system run". For frame-delta
+    /// semantics, query `Mut<T>` inside a system.
     #[inline]
     pub fn get_component_mut<T: crate::ecs::core::component::component::Component>(
         &mut self,
         entity: Entity,
-    ) -> Option<&mut T> {
-        let raw = self.get_component_raw_mut(entity, T::component_id())?;
-        // SAFETY: same as get_component, plus &mut self ⇒ exclusive access.
-        Some(unsafe { &mut *(raw as *mut T) })
+    ) -> Option<Mut<'_, T>> {
+        // Resolve the inland by value (releases the entity_master borrow before
+        // the raw archetype_ptr deref) — same prologue as get_component_raw_mut.
+        let inland: EntityInland = *self.entity_master.entities_inland.get(entity.id().0)?;
+        if inland.is_null() || inland.generation() != entity.generation() {
+            return None;
+        }
+        let cid = T::component_id();
+        debug_assert!(cid.0 < MAX_COMPONENTS);
+        let idx = inland.unit_index() as usize;
+        let this_run = self.current_tick();
+
+        // SAFETY (OBS-MUT1): `inland.archetype_ptr()` is write-capable, stable,
+        //   interior-mutable (`SharedReadWrite`, F4-rooted) slab provenance
+        //   (U1/U14/F1); it survives sibling structural writes under TB/SB.
+        //   `&mut self` ⇒ exclusive access — no other thread or borrow can read
+        //   or write any slot in this archetype for the `Mut`'s lifetime.
+        let archetype: &mut Archetype = unsafe { &mut *inland.archetype_ptr() };
+        // SAFETY (U4): `cid.0 < MAX_COMPONENTS` (debug-asserted above; the column
+        //   table is `[Column; MAX_COMPONENTS]`).
+        let column = unsafe { archetype.columns.get_unchecked(cid.0) };
+        if column.ptr.is_null() {
+            return None;
+        }
+
+        // Per-row tick slots come from the COLUMN BASE + idx (NOT the column base
+        // alone). `tick_column_base` returns `(added_base, changed_base)`.
+        let (added_base, changed_base) = archetype.tick_column_base(cid)?;
+
+        // SAFETY (OBS-MUT2): the row is live (`inland` non-null + generation
+        //   match), so `idx < pool.count()`; both tick bases are valid for all
+        //   capacity rows (`Box<[UnsafeCell<Tick>]>`, STORE2 stable lifetime).
+        //   The `added` read is an eager `Copy` snapshot; `changed_tick` is
+        //   offset to this row. The `&mut T` reborrows `column.ptr + idx*stride`,
+        //   whose exclusivity rests SOLELY on `&mut self` (OBS-MUT — NOT SCH3:
+        //   this is the system-less direct-API path with no conflict graph in
+        //   play). The returned `Mut<'_, T>` is tied to `&mut self`, so no
+        //   concurrent reader/writer of this row's value or tick can exist.
+        let added: Tick = unsafe { *(*added_base.add(idx)).get() };
+        let changed_tick: *const UnsafeCell<Tick> = unsafe { changed_base.add(idx) };
+        let value: &mut T =
+            unsafe { &mut *(column.ptr.add(idx * column.stride as usize) as *mut T) };
+
+        Some(Mut {
+            value,
+            added,
+            changed_tick,
+            // O4: no system ran this — there is no frame delta. `last_run ==
+            // this_run` makes is_added/is_changed report "newer than
+            // (this_run - 1)", i.e. "changed relative to the current tick".
+            last_run: this_run,
+            this_run,
+            deref_mut_called: false,
+        })
     }
 
     /// Fast existence check: 1 cache line, ~5 ns target. Returns `true`
@@ -1729,6 +1851,15 @@ impl EcsMaster {
         // APP1' (Round 3 / O3'): `apply` is a SAFE method; the borrow
         //   checker (still holding `&mut self`) prevents re-entry per APP4.
         system.apply(self);
+        // NEW-2: drain the world-resident deferred-hook queue so commands a
+        // hook/observer enqueued during `apply` (via `DeferredEcsMaster`) are
+        // actually applied. This mirrors `Schedule::run`'s apply-window barrier
+        // drain (schedule.rs:560 / :889); without it the single-system runner
+        // silently loses nested deferred commands. The drain is depth-0-gated
+        // (TLS via `hooks::scope`) and `run_cached_system` is a top-level
+        // `&mut self` entry at depth 0 — same self-draining discipline the
+        // direct-API methods (`create_entity` / `delete_entity`) use.
+        self.drain_deferred_hook_queue();
         out
     }
 
@@ -1897,6 +2028,83 @@ impl EcsMaster {
         }
 
         ComponentHooksBuilder::new(component_id.0)
+    }
+
+    // ── Phase 14b: component lifecycle observers (runtime-mutable) ──────────
+    //
+    // Unlike `register_component_hooks` (write-once per type, staleness-panics
+    // if an archetype containing `C` already exists), observers are
+    // runtime-mutable: `ArchetypeMaster::add_observer` runs the dynamic
+    // add-first archetype walk, raising the `ON_{kind}_OBSERVER` bit on every
+    // already-existing archetype containing `C`. There is therefore NO
+    // staleness panic — late registration is handled by the walk.
+
+    /// Registers an `on_add` observer for component `C`, returning a stable
+    /// [`ObserverId`] for later [`Self::remove_observer`] (Phase 14b).
+    ///
+    /// The `runner` fires after the per-component `on_add` hook at every
+    /// structural op that newly adds `C` to an entity. Observers are
+    /// runtime-mutable, so this may be called even after archetypes containing
+    /// `C` exist — the dynamic archetype walk raises the flag bit on them.
+    #[inline]
+    pub fn observe_on_add<C: Component>(&mut self, runner: ObserverFn) -> ObserverId {
+        self.archetype_master
+            .add_observer(ObserverKind::Add, C::component_id(), runner)
+    }
+
+    /// Registers an `on_insert` observer for component `C`, returning a stable
+    /// [`ObserverId`] (Phase 14b). See [`Self::observe_on_add`] for semantics.
+    #[inline]
+    pub fn observe_on_insert<C: Component>(&mut self, runner: ObserverFn) -> ObserverId {
+        self.archetype_master
+            .add_observer(ObserverKind::Insert, C::component_id(), runner)
+    }
+
+    /// Registers an `on_replace` observer for component `C`, returning a stable
+    /// [`ObserverId`] (Phase 14b). Fires before an existing `C` value is
+    /// overwritten (and, on despawn, for the dying value). See
+    /// [`Self::observe_on_add`].
+    #[inline]
+    pub fn observe_on_replace<C: Component>(&mut self, runner: ObserverFn) -> ObserverId {
+        self.archetype_master
+            .add_observer(ObserverKind::Replace, C::component_id(), runner)
+    }
+
+    /// Registers an `on_remove` observer for component `C`, returning a stable
+    /// [`ObserverId`] (Phase 14b). Fires before `C` is removed from an entity
+    /// (and, on despawn, for the dying value). See [`Self::observe_on_add`].
+    #[inline]
+    pub fn observe_on_remove<C: Component>(&mut self, runner: ObserverFn) -> ObserverId {
+        self.archetype_master
+            .add_observer(ObserverKind::Remove, C::component_id(), runner)
+    }
+
+    /// Registers `runner` as a `kind` observer for the component identified by
+    /// `cid`, returning a stable [`ObserverId`] (Phase 14b).
+    ///
+    /// The type-erased sibling of the `observe_on_*::<C>` helpers: prefer those
+    /// where the component type is statically known. This form is for callers
+    /// that already hold a resolved [`ComponentId`].
+    #[inline]
+    pub fn add_observer(
+        &mut self,
+        kind: ObserverKind,
+        cid: ComponentId,
+        runner: ObserverFn,
+    ) -> ObserverId {
+        self.archetype_master.add_observer(kind, cid, runner)
+    }
+
+    /// Removes the observer with `id`, returning `true` if it was registered
+    /// (Phase 14b).
+    ///
+    /// On removal of the last observer for its `(kind, component)` pair, the
+    /// corresponding `ON_{kind}_OBSERVER` archetype flag bits are recomputed
+    /// (cleared where no sibling component still observes that kind, hook bits
+    /// preserved).
+    #[inline]
+    pub fn remove_observer(&mut self, id: ObserverId) -> bool {
+        self.archetype_master.remove_observer(id)
     }
 
     /// Returns `true` iff the world currently holds a resource of type `R`.
@@ -2607,7 +2815,11 @@ impl Default for EcsMaster {
 //   - `resources` (`Resources`), `events` (`EventDispatcher`),
 //     `entity_master` (`EntityMaster`), `archetype_master` (`ArchetypeMaster`),
 //     and `bundle_archetype_cache` (`Box<[OnceLock<ArchetypeId>; _]>`) are
-//     each independently `Send + Sync` per SEND3-SEND9.
+//     each independently `Send + Sync` per SEND3-SEND9. Since Phase 14b
+//     `archetype_master` also owns the `ObserverRegistry` (only
+//     `Option<Box<[[Vec<ObserverEntry>; MAX_COMPONENTS]; 4]>>` + a `u64`; the
+//     entries are fn-ptr POD, unconditionally `Send + Sync`), which is
+//     `Send + Sync` by construction with no `unsafe impl` (SEND6).
 //   - The apply-window barrier (SCH7 + Round 2 C4) guarantees the dispatcher's
 //     `&mut EcsMaster` never aliases any worker-held `UnsafeEcsCell` read; the
 //     `ConflictGraph` (SCH3) prevents intra-frame aliasing between concurrently
@@ -2624,6 +2836,11 @@ unsafe impl Sync for EcsMaster {}
 /// field addition that re-introduces a `!Send` / `!Sync` interior).
 const _: fn() = || {
     fn assert_send_sync<T: Send + Sync>() {}
+    // NOTE: this gate passes via the manual `unsafe impl Send/Sync for EcsMaster`
+    // above; it does NOT independently prove field-level `Send + Sync` (a manual
+    // `unsafe impl` satisfies the bound regardless of whether an interior field is
+    // `!Send`). The per-field justification lives in SEND1 (this module) and SEND6
+    // (`archetype_master.rs`, covering the Phase 14b `ObserverRegistry`).
     assert_send_sync::<EcsMaster>();
 };
 

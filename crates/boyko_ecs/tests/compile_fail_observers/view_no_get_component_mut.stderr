@@ -1,0 +1,11 @@
+error[E0599]: no method named `get_component_mut` found for struct `DeferredEcsMaster<'w>` in the current scope
+  --> tests/compile_fail_observers/view_no_get_component_mut.rs:13:15
+   |
+13 |     let _ = w.get_component_mut(ctx.entity);
+   |               ^^^^^^^^^^^^^^^^^
+   |
+help: there is a method `get_component` with a similar name
+   |
+13 -     let _ = w.get_component_mut(ctx.entity);
+13 +     let _ = w.get_component(ctx.entity);
+   |

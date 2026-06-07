@@ -848,9 +848,14 @@ unsafe impl<T: Component> QueryData for Ref<'_, T> {
         //   - `row < entity_count` (caller contract).
         //   - The returned `Ref<'w, T>` lifetime is tied to `'w` via
         //     `PhantomData<&'w T>` in `RefFetch`.
-        //   - Tick reads through `UnsafeCell::get()` are sound: Phase 9
-        //     SCH3 guarantees no concurrent writer of this `(archetype, T)`
-        //     slot; `Tick` is `Copy`.
+        //   - STORE3: the tick reads through `UnsafeCell::get()` need no
+        //     concurrent writer of this `(archetype, T)` slot. The guarantee is
+        //     named by the construction origin: on the scheduler/query path
+        //     (the only origin that builds a read-only `Ref`), Phase 9 SCH3 —
+        //     the conflict graph — grants exclusive access; the system-less
+        //     `&mut World` path (which `EcsMaster::get_component_mut` uses for
+        //     `Mut`) would supply whole-world exclusivity instead. `Tick` is
+        //     `Copy`.
         unsafe {
             let value = &*fetch.value_base.add(row);
             let added = *(*fetch.added_base.add(row)).get();
@@ -927,10 +932,16 @@ impl<'w, T: Component> Mut<'w, T> {
     /// trick (plan §6.2-bis worked proof).
     #[inline]
     pub fn is_changed(&self) -> bool {
-        // SAFETY (STORE3, SCH3): `changed_tick` was set by `set_table_mut`
-        //   to a live slot for the row; no concurrent writer exists per
-        //   Phase 9 SCH3 (the conflict graph guarantees exclusive access
-        //   to this `(archetype, T)` from the system holding `Mut<T>`).
+        // SAFETY (STORE3): `changed_tick` is a live `UnsafeCell<Tick>` slot for
+        //   the row (set by `set_table_mut` on the query path, or by
+        //   `EcsMaster::get_component_mut` on the direct path). Exclusivity of
+        //   this read rests on the `Mut`'s construction origin: on the
+        //   scheduler/query path, Phase 9 SCH3 (the conflict graph) grants
+        //   exclusive `(archetype, T)` access; on the system-less
+        //   `EcsMaster::get_component_mut` path, `&mut World` whole-world
+        //   exclusivity (the method borrows the entire `EcsMaster` for the
+        //   `Mut`'s lifetime). Both independently guarantee no concurrent
+        //   reader/writer of this row's tick. `Tick` is `Copy`.
         let tick: Tick = unsafe { *(*self.changed_tick).get() };
         tick.is_newer_than(Tick::new(self.last_run.get().wrapping_sub(1)), self.this_run)
     }
@@ -952,9 +963,14 @@ impl<'w, T: Component> Mut<'w, T> {
             // not route through `Mut::deref_mut`.
             if !self.deref_mut_called {
                 self.deref_mut_called = true;
-                // SAFETY (STORE3, SCH3, plan §2.5 MUT4): the system declared
-                //   a write to `T`; Phase 9 SCH3 ensures no concurrent
-                //   reader of this `(archetype, T)`'s tick slot.
+                // SAFETY (STORE3, plan §2.5 MUT4): exclusivity of this
+                //   `changed_tick` write rests on the `Mut`'s construction
+                //   origin — on the scheduler/query path, Phase 9 SCH3 (the
+                //   conflict graph) grants exclusive `(archetype, T)` access (the
+                //   system declared a write to `T`); on the system-less
+                //   `EcsMaster::get_component_mut` path, `&mut World` whole-world
+                //   exclusivity. Both independently guarantee no concurrent
+                //   reader/writer of this row's tick. `Tick` is `Copy`.
                 unsafe {
                     *(*self.changed_tick).get() = self.this_run;
                 }
@@ -987,17 +1003,21 @@ impl<'w, T: Component> std::ops::DerefMut for Mut<'w, T> {
     fn deref_mut(&mut self) -> &mut T {
         if !self.deref_mut_called {
             self.deref_mut_called = true;
-            // SAFETY (STORE3, SCH3, plan §2.5 MUT3):
-            //   - `self.changed_tick` was set by `set_table_mut` to a live
-            //     `UnsafeCell<Tick>` slot for the cached row; the
+            // SAFETY (STORE3, plan §2.5 MUT3):
+            //   - `self.changed_tick` is a live `UnsafeCell<Tick>` slot for the
+            //     cached row (set by `set_table_mut` on the query path, or by
+            //     `EcsMaster::get_component_mut` on the direct path); the
             //     `Box<[_]>` backing is stable for the pool's lifetime
             //     (plan STORE2).
-            //   - Phase 9 SCH3 (conflict graph) guarantees the system
-            //     holding `Mut<T>` has exclusive access to this
-            //     `(archetype, T)` slot — no concurrent reader/writer of
-            //     this tick exists; per-row adjacent writes from sibling
-            //     `par_iter` chunks ride disjoint memory locations (Round
-            //     2 C3 — distinct `UnsafeCell<u32>`s).
+            //   - Exclusivity of this write is named by the construction origin:
+            //     on the scheduler/query path, Phase 9 SCH3 (the conflict graph)
+            //     guarantees the system holding `Mut<T>` has exclusive access to
+            //     this `(archetype, T)` slot — no concurrent reader/writer of
+            //     this tick exists, and per-row adjacent writes from sibling
+            //     `par_iter` chunks ride disjoint memory locations (Round 2 C3 —
+            //     distinct `UnsafeCell<u32>`s); on the system-less
+            //     `EcsMaster::get_component_mut` path, `&mut World` whole-world
+            //     exclusivity supplies the same guarantee. `Tick` is `Copy`.
             unsafe {
                 *(*self.changed_tick).get() = self.this_run;
             }
@@ -1171,16 +1191,20 @@ unsafe impl<T: Component> QueryData for Mut<'_, T> {
 
     #[inline]
     unsafe fn fetch<'w>(fetch: &Self::Fetch<'w>, row: usize) -> Self::Item<'w> {
-        // SAFETY (QD2, QD3, STORE3, SCH3):
+        // SAFETY (QD2, QD3, STORE3):
         //   - `set_table_mut` was called before `fetch` (caller contract);
         //     every base pointer is live and non-null.
         //   - `row < entity_count` (caller contract).
-        //   - Phase 9 SCH3 grants exclusive `(archetype, T)` access; the
-        //     `&mut *value_base.add(row)` reborrow is sound (no aliasing
-        //     reader/writer). The returned `Mut<'w, T>` lifetime is tied
-        //     to `'w` via `PhantomData<&'w mut T>` in `MutFetch`.
-        //   - The tick reads through `UnsafeCell::get()` are sound for the
-        //     same SCH3 reason; `Tick` is `Copy`.
+        //   - STORE3: exclusivity of the `&mut *value_base.add(row)` reborrow
+        //     and the tick access is named by the construction origin. This
+        //     `fetch` is the scheduler/query origin, where Phase 9 SCH3 (the
+        //     conflict graph) grants exclusive `(archetype, T)` access (no
+        //     aliasing reader/writer). The `EcsMaster::get_component_mut` direct
+        //     origin builds its `Mut` separately, resting on `&mut World`
+        //     whole-world exclusivity. The returned `Mut<'w, T>` lifetime is
+        //     tied to `'w` via `PhantomData<&'w mut T>` in `MutFetch`.
+        //   - The tick reads through `UnsafeCell::get()` are sound for the same
+        //     reason; `Tick` is `Copy`.
         //   - `changed_tick` pointer is captured as `*const UnsafeCell<Tick>`
         //     for the row; the deref guard writes through `UnsafeCell::get()`
         //     (per-row distinct memory location — Round 2 C3).

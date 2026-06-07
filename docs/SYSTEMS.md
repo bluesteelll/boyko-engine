@@ -271,6 +271,134 @@ Generates:
 
 ---
 
+### 3.6. Component lifecycle hooks (14a) & observers (14b) ✅
+
+Two complementary reactive-callback mechanisms firing at the four
+structural-op kinds (`add` / `insert` / `replace` / `remove`; a despawn
+fires `replace` + `remove` per dying component — no separate despawn kind).
+Both are gated by the per-archetype `ArchetypeFlags` `u16` bit-test so a
+world with no callback pays one `test`/`jz` and zero allocation.
+
+**Hooks (Phase 14a)** — one write-once fn-ptr per component *type*, stored
+in the process-global `HOOKS` table; bound via the `#[component(on_add =
+…)]` derive XOR the runtime `register_component_hooks` builder. The
+per-archetype `ON_*_HOOK` bits are OR-seeded at construction from `HOOKS`.
+Files: [core/component/hooks/](../crates/boyko_ecs/src/ecs/core/component/hooks/)
+(`mod.rs` = `ComponentHooks` / `HookFn` / `HookContext`, `dispatch.rs` =
+`trigger_on_*`, `deferred_master.rs` = the read-only `DeferredEcsMaster`
+view). See [PHASE-14-RESULTS.md](PHASE-14-RESULTS.md).
+
+**Observers (Phase 14b)** — the runtime-mutable sibling: an `add`/`remove`-able
+*list* of fn-ptrs keyed by `(kind, component)`, stored **per-world** (not
+global), with NO staleness panic (late registration runs a dynamic
+archetype-bit walk). At every fire site hooks run first, then observers.
+
+Key types — [core/component/observers/mod.rs](../crates/boyko_ecs/src/ecs/core/component/observers/mod.rs):
+
+```rust
+pub struct ObserverId(pub(crate) u64);              // mod.rs:46  — monotonic, never reused
+pub enum   ObserverKind { Add, Insert, Replace, Remove } // mod.rs:56 (#[repr(u8)], the [kind] index)
+pub type   ObserverFn =                             // mod.rs:75
+    unsafe fn(DeferredEcsMaster<'_>, ObserverContext);
+pub struct ObserverContext { entity, component_id, kind }; // mod.rs:84
+pub(crate) struct ObserverEntry { id, runner };     // mod.rs:101 — 16 B POD, Copy (fire loop copies by value)
+struct     ObserverLists {                          // mod.rs:114 — the lazily-boxed payload
+    by_kind_component: [[Vec<ObserverEntry>; 512]; 4],   //   [kind][cid] dense 2-multiply index
+}
+pub struct ObserverRegistry {                       // mod.rs:136 — Send + Sync (fn-ptr-only, no unsafe impl)
+    lists: Option<Box<ObserverLists>>,              //   None until the first add_observer (zero 48 KiB cost)
+    next_id: u64,
+}
+```
+
+`ObserverRegistry` lives as a `pub(crate)` field on **`ArchetypeMaster`**
+([archetype_master.rs](../crates/boyko_ecs/src/ecs/core/archetype/archetype_master.rs):71),
+NOT on `EcsMaster` (Phase 14b D3, the critic's C1 crux): co-locating it
+there lets the single creation funnel `create_archetype` seed each new
+archetype's `ON_*_OBSERVER` bits at construction (borrow-split: read
+`&self.observer_registry` into a `Copy` `ArchetypeFlags`, then OR into the
+new slot), which a recipe taking only `(ids, &Arena)` could never do from
+`&EcsMaster`. Registry API: `add` (mod.rs:166), `remove` (mod.rs:188),
+`has_observer` (mod.rs:213), `fire_list` (mod.rs:229).
+
+**Per-archetype flag bits** —
+[hooks/archetype_flags.rs](../crates/boyko_ecs/src/ecs/core/component/hooks/archetype_flags.rs).
+`ArchetypeFlags(u16)`: hook bits `ON_*_HOOK` = `1<<0..1<<3` (bit 4 reserved
+for a future `on_despawn` hook), observer bits `ON_*_OBSERVER` =
+`1<<5..1<<8` (lines 41/44/47/50), and the combined gate masks `ON_*_ANY =
+ON_*_HOOK | ON_*_OBSERVER` (lines 56/58/60/62). `insert_from_observers(cid,
+&reg)` (line 143) OR-seeds the observer bits at construction (symmetric to
+`insert_from_hooks`); `insert_observer_bits(other)` (line 130) merges them
+without disturbing the hook bits. Each structural-op fire site widens its
+inner test from `ON_*_HOOK` to `ON_*_ANY` — a different immediate in the
+same `test`/`jz`, so the no-callback hot path stays byte-identical (the
+0%-gate, bench-verified).
+
+**Dynamic bit maintenance** — `ArchetypeMaster::add_observer`
+([archetype_master.rs](../crates/boyko_ecs/src/ecs/core/archetype/archetype_master.rs):708)
+runs an add-first walk (`iter_archetypes_mut`, raise the bit on archetypes
+containing `cid`) only when the `(kind, cid)` list went empty → non-empty;
+`remove_observer` (line 741) runs a remove-last recompute (`flags = (flags
+& !bit) | (any_sibling_observes_kind ? bit : 0)`, preserving the hook bit)
+only when the list became empty. Both seed sites (`create_archetype`,
+`add_existing_archetype` line 437) and both walks are cross-checked by the
+`#[cfg(debug_assertions)]` bit⇔registry tripwire
+`debug_assert_observer_flags_consistent` (line 794).
+
+**Dispatch (the 4 `#[cold] #[inline(never)]` fire fns)** —
+[core/component/observers/dispatch.rs](../crates/boyko_ecs/src/ecs/core/component/observers/dispatch.rs):
+`fire_on_add_observers` / `fire_on_insert_observers` /
+`fire_on_replace_observers` / `fire_on_remove_observers` (emitted by the
+`define_fire_observers!` macro, line 51; instantiated at lines
+118/123/129/134). A fire fn is entered ONLY when the archetype's
+`ON_*_OBSERVER` bit proved some component carries it; it reads the
+per-world registry and fires every observer registered for `(kind,
+component_id)` in registration order.
+
+> **OBS-FIRE-LOOP invariant** (dispatch.rs:19-33, the single most dangerous
+> spot in 14b): no registry `&` — nor any `world`-derived `&` — may be live
+> across the `DeferredEcsMaster::from_world` mint or the runner call. Each
+> loop turn re-derives a fresh registry `&`, copies one 16 B `ObserverEntry`
+> by value, and lets every borrow end **before** the view is minted. The
+> registry lives *inside* the world the view reborrows, so a held `&`
+> spanning the mint is the exact Tree-Borrows protected-tag conflict (the
+> F2-class hazard) that produced UB in Phase 14a. Re-reading `len()` each
+> turn is cheap and correct (the registry is immutable across this window —
+> its only mutators need `&mut EcsMaster`). Miri `-Zmiri-tree-borrows` is
+> the soundness oracle here, not code review.
+
+**The 7 fire sites** (each: outer `!flags.is_empty()`/combined gate
+unchanged, inner `ON_*_HOOK` widened to `ON_*_ANY`, hooks fire before
+observers, observer set == hook set per site):
+
+| Site | File:line (observer calls) | Kinds |
+|------|----------------------------|-------|
+| `EcsMaster::create_entity` | [ecs_master.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs):691, 705 | add, insert |
+| `EcsMaster::create_entity_at` | [ecs_master.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs):839, 853 | add, insert |
+| `EcsMaster::fire_despawn_hooks` | [ecs_master.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs):1095, 1107 | replace, remove |
+| `SpawnAtCommand::apply` | [commands/spawn_at_command.rs](../crates/boyko_ecs/src/ecs/core/commands/spawn_at_command.rs):279, 293 | add, insert |
+| `InsertCommand::apply_replace_in_place` | [commands/insert_command.rs](../crates/boyko_ecs/src/ecs/core/commands/insert_command.rs):145, 227 | replace, insert |
+| `migrate_entity_insert` | [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):435, 448 | add, insert |
+| `migrate_entity_remove` | [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):584, 590 | replace, remove |
+
+The plan's original "6 fire sites" undercounted: Phase 14a also fires at
+the 4 deferred-command apply sites (the bottom 4 rows), so observers were
+silent for the entire `Commands` API until the tester wrote tests against
+the user-facing API.
+
+**Public API on `EcsMaster`** —
+[core/ecs_master/ecs_master.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs):
+`observe_on_add::<C>(runner) -> ObserverId` (2050) / `observe_on_insert`
+(2058) / `observe_on_replace` (2068) / `observe_on_remove` (2077); the
+type-erased `add_observer(kind, cid, runner)` (2089); `remove_observer(id)
+-> bool` (2106). Phase 14b also changed `get_component_mut::<T>(entity)`
+(1371) from `Option<&mut T>` to `Option<Mut<'_, T>>` — the
+change-detection-correct direct-API mutator (the `Mut` deref-guard bumps
+the row's change tick; zero internal callers, so the signature break was
+internally free).
+
+---
+
 ## 4. Entity subsystem ✅
 
 ### 4.1. Entity

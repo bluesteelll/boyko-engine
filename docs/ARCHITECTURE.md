@@ -150,6 +150,14 @@ every pool in read-only mode first, then `push` only runs after universal
 go-ahead.
 ```
 
+After the fast-store registration, the same structural op fires component
+lifecycle **hooks** (Phase 14a) and then **observers** (Phase 14b) for each
+`add` / `insert` kind — gated by the archetype's `ArchetypeFlags` `u16`
+bit-test, so a world with no callback pays one `test`/`jz`. The symmetric
+`replace` / `remove` fire happens on despawn / migration. The full catalog
+(registry, the 4 cold `fire_*_observers` dispatch fns, the 7 fire sites, and
+the OBS-FIRE-LOOP Tree-Borrows invariant) is in [SYSTEMS.md §3.6](SYSTEMS.md).
+
 ## Key architectural decisions
 
 ### 1. Type-erased `ComponentPool` (dropping generic `<T>`)

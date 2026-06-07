@@ -169,6 +169,36 @@ serialised IDs require a startup warm-up contract (call
 
 ---
 
+## Component lifecycle hooks & observers (reactive callbacks)
+
+Two complementary mechanisms fire user callbacks at the four structural-op
+kinds — **add / insert / replace / remove**. A despawn fires `replace` +
+`remove` per dying component (there is no separate despawn kind). Both gate
+on the per-archetype `ArchetypeFlags` `u16` bit-test, so a world with no
+hook/observer pays one `test`/`jz` and zero allocation (the "0% when
+unused" property).
+
+| What you want to do | Where | How |
+|---------------------|-------|-----|
+| **Hooks** — bind ONE write-once callback per component *type* | [core/component/hooks/](../crates/boyko_ecs/src/ecs/core/component/hooks/) ✅ | `#[component(on_add = path, …)]` derive XOR runtime `register_component_hooks::<C>()` builder (Phase 14a — see [PHASE-14-RESULTS.md](PHASE-14-RESULTS.md)) |
+| **Observers** — register an `add`/`remove`-able LIST of callbacks per `(kind, component)` | [core/component/observers/mod.rs](../crates/boyko_ecs/src/ecs/core/component/observers/mod.rs):136 ✅ | `EcsMaster::observe_on_add::<C>(runner)` / `observe_on_insert` / `observe_on_replace` / `observe_on_remove` — [ecs_master.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs):2050 (Phase 14b) |
+| Register an observer by resolved `ComponentId` (type-erased) | [core/ecs_master/ecs_master.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs):2089 ✅ | `EcsMaster::add_observer(kind, cid, runner) -> ObserverId` |
+| Remove a registered observer | [core/ecs_master/ecs_master.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs):2106 ✅ | `EcsMaster::remove_observer(id) -> bool` (recomputes the archetype bits on last-of-kind removal) |
+| The observer runner signature / context | [core/component/observers/mod.rs](../crates/boyko_ecs/src/ecs/core/component/observers/mod.rs):75 ✅ | `ObserverFn = unsafe fn(DeferredEcsMaster<'_>, ObserverContext)`; mutate the world only via the read-only view's deferred `commands()` |
+| The 4 cold dispatch fns that fire observers | [core/component/observers/dispatch.rs](../crates/boyko_ecs/src/ecs/core/component/observers/dispatch.rs):115 ✅ | `fire_on_{add,insert,replace,remove}_observers` (`#[cold] #[inline(never)]`, wired at 7 fire sites — see [SYSTEMS.md](SYSTEMS.md) §3.6) |
+| **Mutate a component via the direct API with change detection** | [core/ecs_master/ecs_master.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs):1371 ✅ | `EcsMaster::get_component_mut::<T>(entity) -> Option<Mut<'_, T>>` (Phase 14b changed it from `&mut T`; the `Mut` deref-guard bumps the change tick) |
+
+Hooks vs observers (the choice): a **hook** is a single fn-ptr bound
+write-once into the process-global `HOOKS` table per component type
+(staleness-panics if an archetype containing `C` already exists at bind
+time); an **observer** is one of an arbitrarily-long, runtime-mutable list
+keyed by `(kind, component)`, stored per-world on `ArchetypeMaster`, with
+NO staleness panic (late registration runs a dynamic archetype-bit walk).
+At every fire site hooks run first, then observers. Full subsystem catalog:
+[SYSTEMS.md](SYSTEMS.md) §3.6.
+
+---
+
 ## Entities
 
 | What you want to do | Where | How |

@@ -32,6 +32,10 @@ use crate::ecs::core::component::hooks::archetype_flags::ArchetypeFlags;
 use crate::ecs::core::component::hooks::dispatch::{
     trigger_on_add, trigger_on_insert, trigger_on_remove, trigger_on_replace,
 };
+use crate::ecs::core::component::observers::dispatch::{
+    fire_on_add_observers, fire_on_insert_observers, fire_on_remove_observers,
+    fire_on_replace_observers,
+};
 use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 use crate::ecs::core::entity::entity::Entity;
 use crate::ecs::core::entity::entity_inland::EntityInland;
@@ -219,206 +223,156 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
         let source: &mut Archetype = unsafe { &mut *source_ptr };
         let target: &mut Archetype = unsafe { &mut *target_ptr };
 
-        // Step 1: collect retained-byte slices + original ticks for
-        // components present in BOTH source and target. Same cast-via-`*mut u8`
-        // pattern as the bundle/combined arrays so retained slots can store
-        // `&[u8]` slices whose lifetime is bounded by the per-iteration
-        // `source` reborrow without forcing the outer array's invariance to
-        // outlive the loop.
-        type RetainedSlot<'b> = MaybeUninit<(ComponentId, &'b [u8], Tick, Tick)>;
-        let mut retained: [RetainedSlot<'_>; MAX_MIGRATION_COLUMNS] =
-            [const { MaybeUninit::uninit() }; MAX_MIGRATION_COLUMNS];
-        let retained_base: *mut u8 = retained.as_mut_ptr() as *mut u8;
-        let retained_stride: usize = mem::size_of::<RetainedSlot<'_>>();
-        let mut retained_count = 0usize;
+        // NEW-1 (use-after-free fix): the prior shape collected the bundle's
+        // `&[u8]` slices into a stack array inside `for_each_component_bytes`'s
+        // closure and read them back AFTER the closure returned (Steps 2-4 +
+        // `create_entity_with_ticks`). Those slices borrow the bundle's
+        // `ManuallyDrop` locals, which live ONLY for the duration of
+        // `for_each_component_bytes`'s stack frame (macro contract,
+        // `boyko_macros/src/lib.rs:1062`) — reading them afterwards is a
+        // dangling-reference UAF (Miri-TB).
+        //
+        // FIX (mirrors `SpawnAtCommand::apply` + `apply_replace_in_place`):
+        // consume every `&[u8]` AT THE POINT IT IS LIVE. Reserve one row in
+        // `target`, write the RETAINED bytes (live in `source`) into the row,
+        // then — INSIDE the closure — write each bundle component's bytes
+        // straight into the row's `target` pool (bundle wins on overlap, Q6).
+        // No `&[u8]` from the closure survives the call. The per-pool dense
+        // index stays in lockstep: every `target` pool ends with one extra
+        // committed row at `row` (retained pools committed in the loop below,
+        // bundle-only pools committed in the closure).
+        target
+            .reserve_capacity(1)
+            .expect("apply contract: target archetype must accept 1 more row for migration");
+        let new_row: u32 = target.current_index as u32;
+        let row = target.current_index;
 
+        // Step 1: write retained components (present in BOTH source and target)
+        // into the reserved target row, copying directly from the live source
+        // pool. The source `&[u8]` is valid throughout this loop (it borrows the
+        // live `source` pool), so the memcpy completes before any aliasing
+        // mutation of `source`.
         let target_cids: Vec<ComponentId> = target.component_ids().to_vec();
         for target_cid in target_cids.iter().copied() {
-            if source.component_ids().contains(&target_cid) {
-                let pool = source
-                    .component_pools()
-                    .get_pool(target_cid)
-                    .expect("invariant: retained component must exist in source");
-                debug_assert!(
-                    source_row < pool.count(),
-                    "source_row out of bounds for retained component"
-                );
-                let stride = pool.component_layout().size();
+            if !source.component_ids().contains(&target_cid) {
+                continue;
+            }
+            let src_pool = source
+                .component_pools()
+                .get_pool(target_cid)
+                .expect("invariant: retained component must exist in source");
+            debug_assert!(
+                source_row < src_pool.count(),
+                "source_row out of bounds for retained component"
+            );
+            let stride = src_pool.component_layout().size();
+            // SAFETY (Round 3 C-N2 / Phase 10 STORE3):
+            //   * `source_row < src_pool.count()` (debug-asserted) ⇒
+            //     `unit_ptr(source_row)` addresses an initialized arena slot.
+            //   * The slice borrows the live `source` pool (held via `&source`);
+            //     it is consumed by the `write_at_unchecked_initialized` memcpy
+            //     in this same iteration, before `source` is mutated (Step 5).
+            //   * `&mut source` ⇒ no concurrent writer; tick buffers are sized to
+            //     `src_pool.capacity() >= src_pool.count()`.
+            let bytes =
+                unsafe { core::slice::from_raw_parts(src_pool.unit_ptr(source_row), stride) };
+            let added = unsafe { src_pool.read_added_tick(source_row) };
+            let changed = unsafe { src_pool.read_changed_tick(source_row) };
 
-                // SAFETY (Round 3 C-N2):
-                //   * `pool.unit_ptr(source_row)` returns a valid arena
-                //     pointer (initialized slot, < pool.count()).
-                //   * Read-only valid for the lifetime of the `source`
-                //     reborrow (we hold &mut source through which we obtain
-                //     the &pool — shared reborrow).
-                //   * Bytes will be memcpy'd into target via
-                //     `create_entity_with_ticks` BEFORE we mutate source.
-                //   * Slice length is `stride` bytes; `pool.layout().size()
-                //     == stride`.
-                let bytes =
-                    unsafe { core::slice::from_raw_parts(pool.unit_ptr(source_row), stride) };
-                // SAFETY (Phase 10 STORE3): `source_row < pool.count()`;
-                //   `&mut source` ensures no concurrent writer; the tick
-                //   buffer is sized to `pool.capacity() >= pool.count()`.
-                let added = unsafe { pool.read_added_tick(source_row) };
-                // SAFETY: same as above.
-                let changed = unsafe { pool.read_changed_tick(source_row) };
-
-                debug_assert!(retained_count < MAX_MIGRATION_COLUMNS);
-                // SAFETY (E0521 workaround): same cast-via-`*mut u8` pattern
-                //   as the bundle/combined arrays — keeps the inner `&[u8]`
-                //   lifetime bound to the current iteration's `source` reborrow.
-                unsafe {
-                    let slot_ptr = retained_base.add(retained_count * retained_stride)
-                        as *mut RetainedSlot<'_>;
-                    slot_ptr.write(MaybeUninit::new((target_cid, bytes, added, changed)));
-                }
-                retained_count += 1;
+            let dst_pool = target
+                .component_pools_mut()
+                .get_pool_mut(target_cid)
+                .expect("invariant: retained component must exist in target");
+            // SAFETY (mirrors `SpawnAtCommand::apply`):
+            //   * `row == target.current_index == dst_pool.count()` (pools grow
+            //     in lockstep) and `reserve_capacity(1)` guaranteed a free slot,
+            //     so `row < dst_pool.max_components` — `write_at_unchecked_initialized`
+            //     targets a logically-uninit slot (no drop runs).
+            //   * `bytes.len() == stride == dst_pool.component_layout().size()`
+            //     (same `ComponentId` ⇒ same registry layout).
+            //   * `&mut target` ⇒ exclusive access; `commit_units(row, 1)`
+            //     extends the dense tail by one (pre: `row == count`), after
+            //     which `write_added_tick`/`write_changed_tick` stamp the
+            //     ORIGINAL source ticks into the now-live slot.
+            unsafe {
+                dst_pool.write_at_unchecked_initialized(row, bytes);
+                dst_pool.commit_units(row, 1);
+                dst_pool.write_added_tick(row, added);
+                dst_pool.write_changed_tick(row, changed);
             }
         }
 
-        // Step 2: collect bundle byte slices into a parallel stack array.
-        // ManuallyDrop discipline is upheld by `for_each_component_bytes`.
-        // Mirrors the `SpawnAtCommand::apply` cast-via-`*mut u8` pattern
-        // (E0521 workaround): the slot stores `&[u8]` whose lifetime is
-        // exactly the closure's per-call scope, so direct slot indexing
-        // would force the outer array's invariance to outlive the closure.
-        type BundleSlot<'b> = MaybeUninit<(ComponentId, &'b [u8], Tick, Tick)>;
-        let mut bundle_slots: [BundleSlot<'_>; MAX_BUNDLE_ARITY] =
-            [const { MaybeUninit::uninit() }; MAX_BUNDLE_ARITY];
-        let bundle_base: *mut u8 = bundle_slots.as_mut_ptr() as *mut u8;
-        let bundle_stride: usize = mem::size_of::<BundleSlot<'_>>();
-        let mut bundle_count = 0usize;
+        // Step 2 + 3 (fused): write the bundle components into the same target
+        // row. ALL bundle-byte consumption happens INSIDE the closure, where the
+        // bundle's `ManuallyDrop` locals are alive (NEW-1). Bundle wins on
+        // overlap (Q6): a retained pool already committed `row` in Step 1, so we
+        // overwrite it via `write_at` (no drop — the old bytes are a copy of the
+        // source bytes that Step 5 releases without drop); a bundle-only
+        // (newly-added) pool has not yet reached `row`, so we
+        // `write_at_unchecked_initialized` + `commit_units` to extend it.
         bundle.for_each_component_bytes(|id, bytes| {
-            debug_assert!(bundle_count < MAX_BUNDLE_ARITY);
-            // Phase 14a P3: record the bundle id + whether it is newly-added (NOT
-            // already in source). This runs BEFORE `move_out_entity` (Step 5), so
-            // the source membership read is against the pre-migration source row.
+            // Phase 14a P3: record the bundle id + whether it is newly-added
+            // (NOT already in source). This read is against the pre-migration
+            // `source` row (Step 5 `move_out_entity` has not run yet).
             debug_assert!(bundle_id_count < MAX_BUNDLE_ARITY);
             bundle_ids[bundle_id_count] = id;
             bundle_added[bundle_id_count] = !source.component_ids().contains(&id);
             bundle_id_count += 1;
-            // SAFETY (E0521 workaround, mirrors `SpawnAtCommand::apply`):
-            //   * `bundle_base` is a `*mut u8` minted from a live mutable
-            //     borrow of `bundle_slots`. The cast-back at the closure's
-            //     lifetime context makes the inner `&'callback [u8]` match
-            //     the slot type exactly.
-            //   * `bundle_count < MAX_BUNDLE_ARITY` (debug-asserted) keeps
-            //     the offset within the array's bounds.
-            //   * `MaybeUninit::write` is a bitwise copy into the slot.
-            unsafe {
-                let slot_ptr = bundle_base.add(bundle_count * bundle_stride) as *mut BundleSlot<'_>;
-                slot_ptr.write(MaybeUninit::new((id, bytes, current_tick, current_tick)));
+
+            let dst_pool = target
+                .component_pools_mut()
+                .get_pool_mut(id)
+                .expect("invariant: bundle component must exist in target (T = S ∪ I)");
+            if dst_pool.has_row(row) {
+                // Overlap: the retained pass committed `row`. Overwrite the
+                // live slot with the bundle bytes (bundle wins, Q6).
+                // SAFETY:
+                //   * `dst_pool.has_row(row)` ⇒ `row < dst_pool.count()` (the
+                //     slot is live) — `write_at`'s precondition.
+                //   * `bytes.len() == dst_pool.component_layout().size()` by the
+                //     Bundle/macro contract (B/B2).
+                //   * `&mut target` ⇒ exclusive access. `write_at` is a memcpy
+                //     with NO drop: the displaced bytes are a bitwise copy of the
+                //     source bytes, which Step 5 (`move_out_entity`) releases
+                //     without drop, so the value is dropped exactly once (when
+                //     `target`'s row is eventually removed). `bytes` is live —
+                //     it borrows the bundle's `ManuallyDrop` locals inside this
+                //     closure invocation.
+                unsafe {
+                    dst_pool.write_at(row, bytes);
+                    dst_pool.write_added_tick(row, current_tick);
+                    dst_pool.write_changed_tick(row, current_tick);
+                }
+            } else {
+                // Newly-added: this pool has not reached `row` yet (Step 1 skips
+                // bundle-only components). Extend the dense tail by one.
+                // SAFETY (mirrors `SpawnAtCommand::apply`):
+                //   * `row == dst_pool.count()` (lockstep with the other target
+                //     pools) and `reserve_capacity(1)` guaranteed a free slot ⇒
+                //     `write_at_unchecked_initialized` targets a logically-uninit
+                //     slot (no drop). `commit_units(row, 1)` extends the tail
+                //     (pre: `row == count`). `fill_ticks(row, 1, current_tick)`
+                //     stamps both ticks.
+                //   * `bytes.len() == dst_pool.component_layout().size()` (B/B2).
+                //   * `&mut target` ⇒ exclusive access. `bytes` is live inside
+                //     this closure invocation.
+                unsafe {
+                    dst_pool.write_at_unchecked_initialized(row, bytes);
+                    dst_pool.commit_units(row, 1);
+                    dst_pool.fill_ticks(row, 1, current_tick);
+                }
             }
-            bundle_count += 1;
         });
 
-        // Step 3: merge retained + bundle. Bundle WINS on overlap (Q6 —
-        // replace semantic). Same `*mut u8` cast pattern as bundle_slots so
-        // the entries we read back carry the inner `&[u8]`'s closure
-        // lifetime (the closure has exited; ManuallyDrop locals are still
-        // alive until `bundle` itself drops at function end — see
-        // `Bundle::for_each_component_bytes` B4 contract).
-        type CombinedSlot<'b> = MaybeUninit<(ComponentId, &'b [u8], Tick, Tick)>;
-        let mut combined: [CombinedSlot<'_>; MAX_MIGRATION_COLUMNS] =
-            [const { MaybeUninit::uninit() }; MAX_MIGRATION_COLUMNS];
-        let combined_base: *mut u8 = combined.as_mut_ptr() as *mut u8;
-        let combined_stride: usize = mem::size_of::<CombinedSlot<'_>>();
-        let mut combined_count = 0usize;
-
-        // Seed combined with retained entries.
-        for i in 0..retained_count {
-            debug_assert!(combined_count < MAX_MIGRATION_COLUMNS);
-            // SAFETY: read retained[i] through the cast-via-`*mut u8`
-            //   pattern; the inner `&[u8]` lifetime is bounded by the
-            //   `source` reborrow and is still alive here.
-            let entry = unsafe {
-                let slot_ptr = retained_base.add(i * retained_stride) as *const RetainedSlot<'_>;
-                (*slot_ptr).assume_init()
-            };
-            // SAFETY: cast-via-`*mut u8` preserves the inner lifetime; the
-            //   write is a bitwise copy.
-            unsafe {
-                let slot_ptr =
-                    combined_base.add(combined_count * combined_stride) as *mut CombinedSlot<'_>;
-                slot_ptr.write(MaybeUninit::new(entry));
-            }
-            combined_count += 1;
-        }
-
-        // Layer bundle entries on top of combined. Bundle wins on overlap.
-        for i in 0..bundle_count {
-            // SAFETY: `bundle_slots[i]` was written by the closure above;
-            //   the inner `&[u8]` lifetime is bound to `bundle`'s
-            //   ManuallyDrop locals (alive until function end).
-            let entry = unsafe {
-                let slot_ptr = bundle_base.add(i * bundle_stride) as *const BundleSlot<'_>;
-                (*slot_ptr).assume_init()
-            };
-            let (b_id, _, _, _) = entry;
-            let mut replaced = false;
-            for j in 0..combined_count {
-                // SAFETY: `combined[j]` was written by an earlier iteration
-                //   of this function. Inner `&[u8]` lifetime is still alive.
-                let (c_id, _, _, _) = unsafe {
-                    let slot_ptr =
-                        combined_base.add(j * combined_stride) as *const CombinedSlot<'_>;
-                    (*slot_ptr).assume_init()
-                };
-                if c_id == b_id {
-                    // Override: write the bundle entry into combined[j].
-                    // SAFETY: same cast pattern; replaces the existing
-                    //   initialized slot bitwise.
-                    unsafe {
-                        let slot_ptr =
-                            combined_base.add(j * combined_stride) as *mut CombinedSlot<'_>;
-                        slot_ptr.write(MaybeUninit::new(entry));
-                    }
-                    replaced = true;
-                    break;
-                }
-            }
-            if !replaced {
-                debug_assert!(combined_count < MAX_MIGRATION_COLUMNS);
-                // SAFETY: same cast pattern; appending an initialized slot.
-                unsafe {
-                    let slot_ptr = combined_base.add(combined_count * combined_stride)
-                        as *mut CombinedSlot<'_>;
-                    slot_ptr.write(MaybeUninit::new(entry));
-                }
-                combined_count += 1;
-            }
-        }
-
-        // SAFETY (mirrors `SpawnAtCommand::apply`): combined[0..combined_count]
-        //   are initialised; the cast `*const CombinedSlot<'_>` → `*const
-        //   (ComponentId, &[u8], Tick, Tick)` is layout-compatible because
-        //   `MaybeUninit<T>` and `T` share layout. The inner `&[u8]` lifetime
-        //   inherits from the bundle's ManuallyDrop locals + the source pool's
-        //   bytes (both alive until function end — bundle drops on Drop of
-        //   `self`, source-pool bytes outlive this function's `&mut source`
-        //   borrow).
-        let combined_slice: &[(ComponentId, &[u8], Tick, Tick)] = unsafe {
-            core::slice::from_raw_parts(
-                combined_base as *const (ComponentId, &[u8], Tick, Tick),
-                combined_count,
-            )
-        };
-
-        // Step 4: push into target with explicit ticks. This memcpy'd every
-        // retained byte slice INTO target's pools, completing the "move
-        // out" semantics required by `move_out_entity`'s W-N2 contract.
-        let mut new_row: u32 = 0;
-        let pushed = target.create_entity_with_ticks(
-            entity.id(),
-            &mut new_row,
-            combined_slice,
-            current_tick,
-        );
-        assert!(pushed, "target archetype rejected migration push");
+        // Step 4: complete the target row's archetype-side bookkeeping. Every
+        // target pool now holds one committed row at `row` (Step 1 + the closure
+        // above), so the entity-id list and `current_index` advance in lockstep —
+        // replicating `create_entity_with_ticks`'s tail.
+        target.entity_ids.push(entity.id());
+        target.current_index = row + 1;
 
         // Step 5: release source's bytes WITHOUT drop (C5 + W-N2). The
-        // retained components were just memcpy'd into target; bundle
+        // retained components were just memcpy'd into target (Step 1); bundle
         // components that overrode retained on overlap have their old source
         // bytes left behind, but those are the SAME byte image already
         // copied into target — bitwise-identical, so the bundle's new bytes
@@ -465,16 +419,34 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
         let bundle_id_set = &bundle_ids[..bundle_id_count];
         // Ordering (SAFETY-2): ALL on_add (over I\S — newly added), THEN ALL
         // on_insert (over I — the inserted bundle set, NOT all target_ids; P3).
-        if flags.contains(ArchetypeFlags::ON_ADD_HOOK) {
-            for (i, &cid) in bundle_id_set.iter().enumerate() {
-                if bundle_added[i] {
-                    trigger_on_add(world_ptr, cid, entity);
+        // Observers fire in the same window as their matching hook (hooks first),
+        // over the SAME iteration set — on_add keeps the `bundle_added[i]` filter.
+        if flags.contains(ArchetypeFlags::ON_ADD_ANY) {
+            if flags.contains(ArchetypeFlags::ON_ADD_HOOK) {
+                for (i, &cid) in bundle_id_set.iter().enumerate() {
+                    if bundle_added[i] {
+                        trigger_on_add(world_ptr, cid, entity);
+                    }
+                }
+            }
+            if flags.contains(ArchetypeFlags::ON_ADD_OBSERVER) {
+                for (i, &cid) in bundle_id_set.iter().enumerate() {
+                    if bundle_added[i] {
+                        fire_on_add_observers(world_ptr, cid, entity);
+                    }
                 }
             }
         }
-        if flags.contains(ArchetypeFlags::ON_INSERT_HOOK) {
-            for &cid in bundle_id_set {
-                trigger_on_insert(world_ptr, cid, entity);
+        if flags.contains(ArchetypeFlags::ON_INSERT_ANY) {
+            if flags.contains(ArchetypeFlags::ON_INSERT_HOOK) {
+                for &cid in bundle_id_set {
+                    trigger_on_insert(world_ptr, cid, entity);
+                }
+            }
+            if flags.contains(ArchetypeFlags::ON_INSERT_OBSERVER) {
+                for &cid in bundle_id_set {
+                    fire_on_insert_observers(world_ptr, cid, entity);
+                }
             }
         }
     }
@@ -597,17 +569,25 @@ pub(crate) fn migrate_entity_remove<C: Component>(
     //   because the whole slab element is `UnsafeCell`-wrapped. Reading `flags`
     //   is one `u16` load (no `&mut`).
     let flags = unsafe { (*source_ptr).flags };
-    if flags.contains(ArchetypeFlags::ON_REPLACE_HOOK)
-        || flags.contains(ArchetypeFlags::ON_REMOVE_HOOK)
+    if flags.contains(ArchetypeFlags::ON_REPLACE_ANY)
+        || flags.contains(ArchetypeFlags::ON_REMOVE_ANY)
     {
         // MINT: no `world`-derived `&mut Archetype` is live (SAFETY-1).
         let world_ptr = NonNull::from(&mut *world);
         // PRE-`drop_at` (SAFETY-2): on_replace then on_remove for the removed C.
+        // Observers fire in the same window as their matching hook (hooks first),
+        // for the SAME single `removed_id`.
         if flags.contains(ArchetypeFlags::ON_REPLACE_HOOK) {
             trigger_on_replace(world_ptr, removed_id, entity);
         }
+        if flags.contains(ArchetypeFlags::ON_REPLACE_OBSERVER) {
+            fire_on_replace_observers(world_ptr, removed_id, entity);
+        }
         if flags.contains(ArchetypeFlags::ON_REMOVE_HOOK) {
             trigger_on_remove(world_ptr, removed_id, entity);
+        }
+        if flags.contains(ArchetypeFlags::ON_REMOVE_OBSERVER) {
+            fire_on_remove_observers(world_ptr, removed_id, entity);
         }
     }
 

@@ -5,3 +5,4 @@ pub mod component;
 pub mod component_registry;
 pub mod component_pool_bundle;
 pub mod hooks;
+pub mod observers;

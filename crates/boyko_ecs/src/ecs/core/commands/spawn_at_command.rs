@@ -31,6 +31,9 @@ use crate::ecs::core::bundle::Bundle;
 use crate::ecs::core::commands::command::Command;
 use crate::ecs::core::component::hooks::archetype_flags::ArchetypeFlags;
 use crate::ecs::core::component::hooks::dispatch::{trigger_on_add, trigger_on_insert};
+use crate::ecs::core::component::observers::dispatch::{
+    fire_on_add_observers, fire_on_insert_observers,
+};
 use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 use crate::ecs::core::entity::entity::Entity;
 use crate::ecs::core::entity::entity_inland::EntityInland;
@@ -258,20 +261,37 @@ impl<B: Bundle> Command for SpawnAtCommand<B> {
             let world_ptr = NonNull::from(&mut *world);
             // Ordering (SAFETY-2): ALL on_add, THEN ALL on_insert (Bevy bundle
             // order — add-before-insert across the whole bundle, not interleaved).
-            if flags.contains(ArchetypeFlags::ON_ADD_HOOK) {
+            // Observers fire in the same window as their matching hook (hooks
+            // first, then observers over the SAME `component_ids` slice).
+            if flags.contains(ArchetypeFlags::ON_ADD_ANY) {
                 // SAFETY: `archetype_ptr` is a valid `*const Archetype`; the
                 //   shared `&[ComponentId]` is transient and not aliased by any
-                //   live `&mut` (the hooks receive `world_ptr`, not the slice).
+                //   live `&mut` (the hooks/observers receive `world_ptr`, not the
+                //   slice).
                 let ids = unsafe { (*archetype_ptr).component_ids.as_slice() };
-                for &cid in ids {
-                    trigger_on_add(world_ptr, cid, entity);
+                if flags.contains(ArchetypeFlags::ON_ADD_HOOK) {
+                    for &cid in ids {
+                        trigger_on_add(world_ptr, cid, entity);
+                    }
+                }
+                if flags.contains(ArchetypeFlags::ON_ADD_OBSERVER) {
+                    for &cid in ids {
+                        fire_on_add_observers(world_ptr, cid, entity);
+                    }
                 }
             }
-            if flags.contains(ArchetypeFlags::ON_INSERT_HOOK) {
+            if flags.contains(ArchetypeFlags::ON_INSERT_ANY) {
                 // SAFETY: same as the on_add slice read above.
                 let ids = unsafe { (*archetype_ptr).component_ids.as_slice() };
-                for &cid in ids {
-                    trigger_on_insert(world_ptr, cid, entity);
+                if flags.contains(ArchetypeFlags::ON_INSERT_HOOK) {
+                    for &cid in ids {
+                        trigger_on_insert(world_ptr, cid, entity);
+                    }
+                }
+                if flags.contains(ArchetypeFlags::ON_INSERT_OBSERVER) {
+                    for &cid in ids {
+                        fire_on_insert_observers(world_ptr, cid, entity);
+                    }
                 }
             }
         }
