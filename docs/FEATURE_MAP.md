@@ -11,10 +11,11 @@ piece of functionality lives, start here, then go to
 - ❌ Not implemented (deliberately — see linked rationale)
 
 > The `ecs` branch builds clean. The current state is the cumulative result of
-> Phases 2 → 18 plus the 9.x executor-soundness series, the X.x perf series
+> Phases 2 → 19 plus the 9.x executor-soundness series, the X.x perf series
 > (X.A `for_each_chunk`, X.B `Unit` removal, X.C arena lazy-commit, X.D
-> EntityMaster slot reduction, X.E bench methodology), and Phases 14a/14b
-> (hooks + observers). Each phase's authoritative record is its
+> EntityMaster slot reduction, X.E bench methodology), Phases 14a/14b
+> (hooks + observers), and Phase 19 (parent-child hierarchies on the hook
+> substrate). Each phase's authoritative record is its
 > `docs/PHASE-*-RESULTS.md`. Line numbers below are verified against the
 > current source; if one drifts, the file path is still correct.
 
@@ -40,6 +41,7 @@ piece of functionality lives, start here, then go to
 | Conditionally run systems | [Run conditions](#run-conditions-run_if) |
 | Application states / state machines | [States](#states) |
 | React to component add/remove | [Hooks & observers](#component-lifecycle-hooks--observers) |
+| Parent-child hierarchies | [Hierarchies](#hierarchies-parent-child) |
 | Detect changed/added components | [Change detection](#change-detection-tick--addedt--changedt) |
 | Send/read events between systems | [Events](#events) |
 | Shared global data | [Resources](#resources) |
@@ -377,6 +379,46 @@ first, then observers. Full catalog: [SYSTEMS.md §3.6](SYSTEMS.md).
 
 ---
 
+## Hierarchies (parent-child)
+
+Bevy-0.16 relationship model on the hooks substrate (Phase 19). `ChildOf` (FK on
+the child, source of truth) + `Children` (reverse collection on the parent), kept
+consistent by component hooks; default-recursive despawn cascade.
+
+**Files:** [core/hierarchy/](../crates/boyko_ecs/src/ecs/core/hierarchy/) —
+`mod.rs` (components + hand-impl `Component` + hook registration), `commands.rs`
+(Link/Unlink/Clear deferred commands + the `ChildOf`/`Children` hook bodies),
+`bundles.rs` (1-field `Bundle` newtypes routing the first-child insert through the
+audited `migrate_entity_insert`).
+
+| What you want to do | Where | How |
+|---------------------|-------|-----|
+| Parent component (FK on child) | [hierarchy/mod.rs](../crates/boyko_ecs/src/ecs/core/hierarchy/mod.rs) ✅ | `ChildOf(pub Entity)` — insert links, overwrite reparents, remove unlinks |
+| Children collection (read-only) | [hierarchy/mod.rs](../crates/boyko_ecs/src/ecs/core/hierarchy/mod.rs) ✅ | `Children` — `as_slice()` / `len()` / `is_empty()` / `contains()`; maintained reactively, never written by user code |
+| Add a child / children | [params/entity_commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/entity_commands.rs) ✅ | `commands.entity(parent).add_child(c)` / `.add_children(&[..])`; `Commands::add_child(p, c)` |
+| Set / clear parent | [params/entity_commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/entity_commands.rs) ✅ | `.set_parent(p)` / `.remove_parent()` |
+| Remove specific / all children | [params/entity_commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/entity_commands.rs) ✅ | `.remove_children(&[..])` (listed only) / `.clear_children()` (all) |
+| Despawn keeping children | [ecs_master.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs):1142 ✅ | `despawn_without_children(e)` — opt out of the default recursive cascade |
+| Recursive despawn (default) | [ecs_master.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs):1119 ✅ | `delete_entity(e)` / `commands.despawn(e)` cascades to all descendants |
+
+`Children` consistency is at the deferred-hook-queue drain (same-frame apply
+window). Guards: self-ref + dangling-parent are reactively rejected (the bad
+`ChildOf` is removed, the collection untouched); deep `ChildOf` cycles are a
+documented footgun (only self-ref is checked). Sibling order is unspecified
+(`swap_remove`); an emptied `Children` is retained (no archetype thrash). The
+net new `unsafe` for the whole feature is **one** (the `MaybeUninit` cascade
+buffer). DEFERRED: transform propagation, parallel tree walk, `iter_descendants`,
+a generic `Relationship` trait. See [PHASE-19-RESULTS.md](PHASE-19-RESULTS.md).
+
+> The cascade exposed **BUG-P19-TB-1**, a pre-existing latent Tree-Borrows UB in
+> the deferred command-queue re-entrant drain (`commands/command_queue.rs`
+> `apply_via_raw_twin` cached a `NonNull<Vec>` foreign-written by a re-entrant
+> `push`). Fixed by walking a stack-local `mem::take`'d copy of the queue (the
+> audited `apply` on a disjoint allocation). See
+> [BUG-P19-TB-1-PLAN.md](BUG-P19-TB-1-PLAN.md).
+
+---
+
 ## Change detection (Tick / `Added<T>` / `Changed<T>`)
 
 Bevy-style per-row tick storage (Phase 10).
@@ -551,12 +593,13 @@ physics via Phase-17 states, real `Schedule::run` + `par_iter` + zero-AoS-copy
 
 ## Tests / benchmarks at a glance
 
-Per the latest phase results, the workspace test suite is ~889 passing
-(`cargo test -p boyko-ecs`, Phase 14b baseline) across in-module `#[cfg(test)]`
-units + the integration files under `crates/boyko_ecs/tests/`. Miri
-(`-Zmiri-tree-borrows`) is clean for the change-detection / hooks / observers /
-states / executor-soundness suites. For the exact gate per phase, read the
-relevant `docs/PHASE-*-RESULTS.md`.
+Per the latest phase results, the `boyko-ecs` test suite is ~918 passing debug /
+903 release (`cargo test -p boyko-ecs`, Phase 19 baseline; ~983 workspace) across
+in-module `#[cfg(test)]` units + the integration files under
+`crates/boyko_ecs/tests/`. Miri (`-Zmiri-tree-borrows`, `-Zmiri-ignore-leaks` for
+the spawn-reaching suites) is clean for the change-detection / hooks / observers /
+hierarchies / states / executor-soundness suites. For the exact gate per phase,
+read the relevant `docs/PHASE-*-RESULTS.md`.
 
 **Benchmarks** (criterion, `harness = false`) live in
 [crates/boyko_ecs/benches/](../crates/boyko_ecs/benches/) (see the `[[bench]]`
