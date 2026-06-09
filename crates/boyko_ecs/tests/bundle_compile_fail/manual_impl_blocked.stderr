@@ -1,10 +1,10 @@
-error[E0277]: the trait bound `Foo: BundleSealed` is not satisfied
+error[E0277]: the trait bound `Foo: boyko_ecs::ecs::core::bundle::bundle::sealed::BundleSealed` is not satisfied
   --> tests/bundle_compile_fail/manual_impl_blocked.rs:15:17
    |
 15 | impl Bundle for Foo {
    |                 ^^^ unsatisfied trait bound
    |
-help: the trait `BundleSealed` is not implemented for `Foo`
+help: the trait `boyko_ecs::ecs::core::bundle::bundle::sealed::BundleSealed` is not implemented for `Foo`
   --> tests/bundle_compile_fail/manual_impl_blocked.rs:13:1
    |
 13 | struct Foo;

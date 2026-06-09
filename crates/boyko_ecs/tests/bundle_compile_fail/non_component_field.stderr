@@ -4,8 +4,13 @@ error[E0277]: the trait bound `u32: boyko_ecs::prelude::Component` is not satisf
 9 | #[derive(Bundle)]
   |          ^^^^^^ the trait `boyko_ecs::prelude::Component` is not implemented for `u32`
   |
-  = help: the following other types implement trait `boyko_ecs::prelude::Component`:
-            ChildOf
-            Children
+help: the following other types implement trait `boyko_ecs::prelude::Component`
+ --> src/ecs/core/hierarchy/mod.rs
+  |
+  | impl Component for ChildOf {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^ `ChildOf`
+...
+  | impl Component for Children {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Children`
   = help: see issue #48214
   = note: this error originates in the derive macro `Bundle` (in Nightly builds, run with -Z macro-backtrace for more info)

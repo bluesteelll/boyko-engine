@@ -1,5 +1,10 @@
 error[E0596]: cannot borrow `cmds` as mutable, as it is a captured variable in a `Fn` closure
   --> tests/par_iter_compile_fail/capture_commands.rs:40:17
    |
+32 | fn must_not_compile(q: Query<&Tag>, mut cmds: Commands<'_>) {
+   |                                     -------- `cmds` declared here, outside the closure
+33 |     q.par_iter().for_each(|_tag: &Tag| {
+   |                           ------------ in this closure
+...
 40 |         let _ = &mut cmds;
    |                 ^^^^^^^^^ cannot borrow as mutable
