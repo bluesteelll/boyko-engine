@@ -1943,18 +1943,21 @@ impl EcsMaster {
     /// world. The read-only contract is `debug_assert!`ed at build
     /// (`schedule_builder.rs` Step 1).
     ///
-    /// # Change-detection ticks (Phase 16.1, B-1)
+    /// # Change-detection ticks (Phase 16.1)
     ///
-    /// This method does NOT call [`System::set_change_ticks`] — that would be
-    /// the wrong place (a condition may be evaluated zero or one times per
-    /// frame, and a set condition is memoized across members). Instead,
-    /// [`Schedule::run`] bumps every condition's `(last_run, this_run)` snapshot
-    /// at frame start, with the SAME `this_run` as the systems, exactly as it
-    /// does for system bodies. A `Changed<T>` / `Added<T>` / `Ref<T>` condition
-    /// therefore observes the correct observation window and fires only when
-    /// the data actually changed — it is NOT silently always-true.
+    /// This method advances the condition's `(last_run, this_run]` snapshot via
+    /// [`System::set_change_ticks`] — but ONLY here, on a frame the condition is
+    /// actually evaluated (Bevy "since-last-actual-run" parity). `last_run`
+    /// becomes the condition's PREVIOUS `this_run` (frozen across every frame it
+    /// was skipped), and `this_run` becomes the caller's frame-start tick
+    /// (`Schedule::frame_this_run`). A condition dormant for N frames (gated by
+    /// a false set/state condition, or whose members are blocked by
+    /// `pred_remaining`) therefore resumes observing ALL changes since its last
+    /// actual run — not just since the last frame — so a `Changed<T>` /
+    /// `Added<T>` / `Ref<T>` condition no longer silently misses dormant changes
+    /// (nor reports always-true). For a condition evaluated every frame the
+    /// window is identical to the old frame-start bump.
     ///
-    /// [`Schedule::run`]: crate::ecs::core::schedule::schedule::Schedule::run
     /// [`System::set_change_ticks`]: crate::ecs::core::system::system::System::set_change_ticks
     ///
     /// # Caller precondition
@@ -1968,11 +1971,22 @@ impl EcsMaster {
     /// [`System::initialize`]: crate::ecs::core::system::system::System::initialize
     /// [`System::run_unsafe`]: crate::ecs::core::system::system::System::run_unsafe
     /// [`UnsafeEcsCell::new_mutable`]: crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell::new_mutable
-    pub(crate) fn run_condition(&mut self, condition: &mut dyn System<Out = bool>) -> bool {
+    pub(crate) fn run_condition(
+        &mut self,
+        condition: &mut dyn System<Out = bool>,
+        this_run: Tick,
+    ) -> bool {
         // FS1 no-op after build — conditions are initialized once in
         // `ScheduleBuilder::try_build` Step 1, so their `Access` + `Local`
         // state are already live before the first frame.
         condition.initialize(self);
+        // Phase 16.1 (Gap #1): advance the condition's tick snapshot ONLY now,
+        // on a frame it is actually evaluated. `prev` is the condition's
+        // PREVIOUS `this_run` (frozen across skipped frames); the new `this_run`
+        // is the dispatcher's `frame_this_run`. This is the single write site
+        // for a condition's ticks — there is NO frame-start condition bump.
+        let prev = condition.meta().this_run();
+        condition.set_change_ticks(prev, this_run);
         // SAFETY (S1 / Phase 16 CR2): `&mut self` is the dispatcher's unique
         //   exclusive borrow on the world, recovered at the apply-window
         //   boundary where `running == 0` (caller-checked) ⇒ no worker holds
@@ -3406,11 +3420,19 @@ mod tests {
 
         let mut yes: FunctionSystem<_, _> = IntoSystem::into_system(|| true);
         yes.initialize(&mut ecs);
-        assert!(ecs.run_condition(&mut yes), "`|| true` condition returns true");
+        let this_run = ecs.current_tick();
+        assert!(
+            ecs.run_condition(&mut yes, this_run),
+            "`|| true` condition returns true"
+        );
 
         let mut no: FunctionSystem<_, _> = IntoSystem::into_system(|| false);
         no.initialize(&mut ecs);
-        assert!(!ecs.run_condition(&mut no), "`|| false` condition returns false");
+        let this_run = ecs.current_tick();
+        assert!(
+            !ecs.run_condition(&mut no, this_run),
+            "`|| false` condition returns false"
+        );
     }
 
     /// Phase 16 — a `fn(Res<R>) -> bool` condition run via `run_condition`
@@ -3428,11 +3450,16 @@ mod tests {
         let mut cond: FunctionSystem<_, _> =
             IntoSystem::into_system(|r: Res<Step4Res>| r.0.0 == 5);
         cond.initialize(&mut ecs);
-        assert!(ecs.run_condition(&mut cond), "resource == 5 ⇒ true");
+        let this_run = ecs.current_tick();
+        assert!(
+            ecs.run_condition(&mut cond, this_run),
+            "resource == 5 ⇒ true"
+        );
 
         ecs.resource_mut::<Step4Res>().0 = 7;
+        let this_run = ecs.current_tick();
         assert!(
-            !ecs.run_condition(&mut cond),
+            !ecs.run_condition(&mut cond, this_run),
             "after mutation resource != 5 ⇒ false (cached-system state reused)"
         );
     }

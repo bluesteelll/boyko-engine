@@ -229,6 +229,18 @@ where
         self.meta.last_run = last_run;
         self.meta.this_run = this_run;
     }
+
+    /// Phase 16.1 (Gap #2) — wraparound clamp for this system's tick snapshot.
+    ///
+    /// Clamps both ticks behind `current` on the cold check-ticks path, the
+    /// same correctness guard as the concurrent [`FunctionSystem`].
+    ///
+    /// [`FunctionSystem`]: super::function_system::FunctionSystem
+    #[inline]
+    fn check_change_tick(&mut self, current: Tick) {
+        self.meta.last_run = self.meta.last_run.check_tick(current);
+        self.meta.this_run = self.meta.this_run.check_tick(current);
+    }
 }
 
 #[cfg(test)]

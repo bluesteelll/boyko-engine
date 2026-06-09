@@ -296,4 +296,16 @@ where
         self.meta.last_run = last_run;
         self.meta.this_run = this_run;
     }
+
+    /// Phase 16.1 (Gap #2) — wraparound clamp for this system's tick snapshot.
+    ///
+    /// Clamps both ticks behind `current` on the cold check-ticks path. Phase
+    /// 16.1 stamps a gated system's ticks only on a frame it runs, so a
+    /// long-dormant `last_run` can drift past `MAX_CHANGE_AGE`; this guard
+    /// pulls it back to the oldest still-valid tick.
+    #[inline]
+    fn check_change_tick(&mut self, current: Tick) {
+        self.meta.last_run = self.meta.last_run.check_tick(current);
+        self.meta.this_run = self.meta.this_run.check_tick(current);
+    }
 }

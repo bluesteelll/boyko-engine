@@ -160,6 +160,11 @@ mod tests {
             self.meta.last_run = last_run;
             self.meta.this_run = this_run;
         }
+
+        fn check_change_tick(&mut self, current: crate::ecs::core::change_detection::Tick) {
+            self.meta.last_run = self.meta.last_run.check_tick(current);
+            self.meta.this_run = self.meta.this_run.check_tick(current);
+        }
     }
 
     /// `SystemBox::new` caches `is_exclusive = false` for a system whose

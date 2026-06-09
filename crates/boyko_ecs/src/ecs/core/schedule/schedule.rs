@@ -42,7 +42,7 @@ use std::time::Duration;
 use boyko_threadpool::{Scope, ThreadPool};
 use fixedbitset::FixedBitSet;
 
-use crate::ecs::core::change_detection::run_check_ticks_scan;
+use crate::ecs::core::change_detection::{Tick, run_check_ticks_scan};
 use crate::ecs::core::component::hooks::scope::DeferredScopeGuard;
 use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 use crate::ecs::core::schedule::bitset_intersects::bitset_intersects;
@@ -131,11 +131,26 @@ pub struct Schedule {
     /// schedule ⇒ the once-per-frame state pass early-outs on a single
     /// `is_empty()` compare (THE 0%-gate, §6.3), the twin of `has_condition`.
     ///
-    /// Appended as the **LAST** field (M3): every pre-existing field keeps its
-    /// exact offset, so the hot prefix
+    /// The last pointer-bearing field. Every pre-existing field keeps its exact
+    /// offset, so the cross-thread hot prefix
     /// (`pool → systems → conflict_graph → executor_scratch → has_condition`)
     /// documented above is byte-for-byte unchanged.
     pub(crate) state_entries: Vec<StateEntry>,
+
+    // ── Phase 16.1 — tick-aware run conditions (W2) ──────────────────────────
+    /// Frame-start `this_run`, set ONCE at the top of [`Schedule::run`] (= the
+    /// first per-frame `bump_change_tick`). Single source of truth for the
+    /// gated-system dispatch stamp (C1) and the condition eval-site checkpoint
+    /// (Gap #1) — both must use the SAME value the every-frame systems were
+    /// stamped with, so a reached-this-frame gated system/condition observes
+    /// the identical `(last_run, this_run]` window (#56 coupling:
+    /// `frame_this_run == current_tick() - 1` after the apply-window bump).
+    ///
+    /// NOT `world.current_tick()` at use time — that reads `this_run + 1` once
+    /// the #56 apply-window bump has fired. Appended as the **LAST** field
+    /// (M3): a pointer-free trailing scalar, so it changes no pre-existing
+    /// offset and stays out of the cross-thread pointer prefix above.
+    pub(crate) frame_this_run: Tick,
 }
 
 /// One set-condition row (Phase 16, `PHASE-16-PLAN.md` §2.4). `slot` is the
@@ -193,61 +208,73 @@ impl Schedule {
         // value is read here.
         let this_run = world.bump_change_tick();
 
+        // Phase 16.1 (W2): publish the frame-start `this_run` as the single
+        // source of truth for the gated-system dispatch stamp (C1) and the
+        // condition eval-site checkpoint (Gap #1). Both stamp sites read this
+        // field, never `world.current_tick()` (which becomes `this_run + 1`
+        // after the #56 apply-window bump below).
+        self.frame_this_run = this_run;
+
         // Phase 10 Wave D Step 13 — conditional wraparound clamp scan
         // (plan §2.7 WRAP1-WRAP2). `should_run_check_ticks` fires roughly
         // every `CHECK_TICK_THRESHOLD` frames ≈ ~100 days at 60 FPS; the
         // hot-path cost is a single u32 compare per `Schedule::run`.
         if world.should_run_check_ticks() {
             run_check_ticks_scan(world);
+            // Phase 16.1 (Gap #2): the per-row pool scan above does NOT touch
+            // any system's or condition's `last_run`/`this_run`. Once Phase
+            // 16.1 advances those ticks only on a frame the system/condition
+            // runs (C1 + Gap #1), a dormant span > `MAX_CHANGE_AGE` could flip
+            // `Tick::is_newer_than`; clamp them here under the SAME `this_run`
+            // gate (no drift vs `set_last_check_tick`).
+            self.check_change_ticks(this_run);
             world.set_last_check_tick(this_run);
         }
 
-        // Phase 10 Wave D Step 13 — per-system tick snapshot dispatch
-        // (plan §2.6 SCT4 / PHASE9.2). Each system's PREVIOUS `this_run`
-        // becomes its new `last_run`; its new `this_run` is the
-        // dispatcher-wide value just bumped. This is the SINGLE write
-        // site for both ticks per frame — `System::set_change_ticks` has
-        // no default body so every impl must declare it (plan §5.4-bis).
+        // Phase 10 Wave D Step 13 / Phase 16.1 C1 — per-system tick snapshot
+        // dispatch (plan §2.6 SCT4 / PHASE9.2). Each system's PREVIOUS
+        // `this_run` becomes its new `last_run`; its new `this_run` is the
+        // dispatcher-wide value just bumped. `System::set_change_ticks` has no
+        // default body so every impl must declare it (plan §5.4-bis).
         //
-        // The write happens here (before the empty-schedule short-circuit
-        // and before the executor loop) so that workers spawned later in
-        // this same frame observe consistent tick state through
-        // `&SystemMeta` captured by Query / SystemChangeTick. The
-        // dispatcher's sequential write happens-before every worker spawn
-        // (plan §8.2).
-        for sys_box in self.systems.iter_mut() {
+        // Phase 16.1 C1: ONLY systems with `has_condition[i]` CLEAR are stamped
+        // here. They run every frame, so "advance every frame" ≡ "advance when
+        // run" — byte-identical to the old unconditional loop on the plain
+        // (no-`.run_if`) path, where `has_condition` is all-zero and the
+        // `contains(i)` branch is uniformly not-taken (THE 0%-gate, W1). A
+        // GATED system (`has_condition[i]` set) is stamped instead at its
+        // DISPATCH site (`try_dispatch_ready` / the inline-exclusive path),
+        // immediately before it runs, so a frame it is SKIPPED leaves its ticks
+        // FROZEN — on resume its `Changed<T>` body queries then observe the
+        // full dormant window (C1) instead of an empty one.
+        //
+        // The write happens here (before the empty-schedule short-circuit and
+        // before the executor loop) so that workers spawned later in this same
+        // frame observe consistent tick state through `&SystemMeta` captured by
+        // Query / SystemChangeTick; the dispatcher's sequential write
+        // happens-before every worker spawn (plan §8.2). The gated-system
+        // dispatch stamp preserves that edge: it is a dispatcher-sequential
+        // `&mut` write sequenced before that system's own `scope.spawn`.
+        for (i, sys_box) in self.systems.iter_mut().enumerate() {
+            if self.has_condition.contains(i) {
+                continue;
+            }
             let prev_this_run = sys_box.system.meta().this_run();
             sys_box.system.set_change_ticks(prev_this_run, this_run);
         }
 
-        // Phase 16.1 (B-1 fix) — extend the per-frame tick snapshot dispatch to
-        // run conditions. A condition is an ordinary `System<Out = bool>`; like
-        // any system it carries a `SystemMeta` with `last_run` / `this_run`
-        // ticks. `run_condition` (`ecs_master.rs`) calls `initialize` (FS1
-        // no-op after build) + `run_unsafe` but NOT `set_change_ticks`, so
-        // without this loop a condition's ticks stay frozen at the `initialize`
-        // sentinel (`current - MAX_CHANGE_AGE`) forever — every per-row tick
-        // then reads as "changed since last_run" and a `Changed<T>` / `Added<T>`
-        // / `Ref<T>` condition silently reports ALWAYS-TRUE. Bumping the
-        // condition ticks here, with the SAME `this_run` as the systems, makes
-        // tick-based conditions observe the correct `(last_run, this_run]`
-        // window and fire only when the data actually changed.
-        //
-        // This stays on the cold once-per-frame path. The hot dispatch loop
-        // (`try_dispatch_ready`) and the 0%-gate (`has_condition.is_clear()`)
-        // are untouched: a condition-free schedule has empty
-        // `system_conditions` / `set_conditions`, so both loops below are no-ops
-        // and add only two `is_empty()`-equivalent length checks per frame.
-        for own_conds in self.system_conditions.iter_mut() {
-            for cond in own_conds.iter_mut() {
-                let prev_this_run = cond.meta().this_run();
-                cond.set_change_ticks(prev_this_run, this_run);
-            }
-        }
-        for entry in self.set_conditions.iter_mut() {
-            let prev_this_run = entry.condition.meta().this_run();
-            entry.condition.set_change_ticks(prev_this_run, this_run);
-        }
+        // Phase 16.1 (Gap #1) — condition ticks are NOT bumped at frame start.
+        // A condition is an ordinary `System<Out = bool>` with its own
+        // `SystemMeta` ticks; `run_condition` (`ecs_master.rs`) now advances
+        // `(last_run, this_run]` itself, but ONLY on a frame the condition is
+        // actually evaluated (Bevy "since-last-actual-run" parity). A condition
+        // dormant for N frames (gated by a false set/state condition or by a
+        // `pred_remaining`-blocked member) therefore resumes observing ALL
+        // changes since its last actual run, not just since the last frame — so
+        // it no longer silently misses dormant changes. For a condition
+        // evaluated every frame the window is identical to the old frame-start
+        // bump (`prev` == last frame's `this_run`), so the every-frame case is
+        // behavior-preserving.
 
         // Phase 17 — state transition pass. THE 0%-GATE: a no-state schedule has
         // `state_entries` empty ⇒ one `is_empty()` compare, predicted-not-taken.
@@ -318,6 +345,43 @@ impl Schedule {
             0,
             "invariant SCH6: pending_apply must be 0 at end of frame"
         );
+    }
+
+    /// Phase 16.1 (Gap #2) — clamp every system's and condition's tick snapshot
+    /// against `current`, mirroring the per-row pool scan in
+    /// [`run_check_ticks_scan`].
+    ///
+    /// Bevy's `Schedule::check_change_ticks` clamps `systems` +
+    /// `system_conditions` + `set_conditions`; before Phase 16.1 the
+    /// unconditional frame-start bumps refreshed every tick each frame, masking
+    /// the hole, but once C1 + Gap #1 advance a gated system's / a dormant
+    /// condition's `last_run` only on a frame it runs, an un-refreshed
+    /// `last_run` could drift past `MAX_CHANGE_AGE` and flip
+    /// [`Tick::is_newer_than`]. This pulls each one back to the oldest
+    /// still-valid tick via [`System::check_change_tick`].
+    ///
+    /// Cold: called only inside the `should_run_check_ticks` block (≈ every
+    /// `CHECK_TICK_THRESHOLD` frames), right after `run_check_ticks_scan` and
+    /// before `pool.install`, so the dispatcher's `&mut self` is exclusive — no
+    /// worker is live, no cell, no `unsafe`.
+    ///
+    /// [`run_check_ticks_scan`]: crate::ecs::core::change_detection::run_check_ticks_scan
+    /// [`Tick::is_newer_than`]: crate::ecs::core::change_detection::Tick::is_newer_than
+    /// [`System::check_change_tick`]: crate::ecs::core::system::system::System::check_change_tick
+    #[cold]
+    #[inline(never)]
+    fn check_change_ticks(&mut self, current: Tick) {
+        for sys_box in self.systems.iter_mut() {
+            sys_box.system.check_change_tick(current);
+        }
+        for own_conds in self.system_conditions.iter_mut() {
+            for cond in own_conds.iter_mut() {
+                cond.check_change_tick(current);
+            }
+        }
+        for entry in self.set_conditions.iter_mut() {
+            entry.condition.check_change_tick(current);
+        }
     }
 
     /// Runs each registered state's transition apply once per frame
@@ -632,6 +696,11 @@ impl Schedule {
     fn evaluate_ready_conditions(&mut self, world: &mut EcsMaster) {
         let n = self.systems.len();
 
+        // Phase 16.1 (Gap #1): snapshot the frame-start tick into a `Copy`
+        // local so passing it to `run_condition` does not borrow `self` while
+        // the `&mut self.system_conditions[i][k]` condition borrow is live.
+        let this_run = self.frame_this_run;
+
         for i in 0..n {
             // Reuse the EXACT ready predicate from `try_dispatch_ready`
             // (minus the conflict check — conflicts gate concurrent dispatch,
@@ -670,7 +739,7 @@ impl Schedule {
             let own_len = self.system_conditions[i].len();
             for k in 0..own_len {
                 let cond = self.system_conditions[i][k].as_mut();
-                let r = world.run_condition(cond);
+                let r = world.run_condition(cond, this_run);
                 should_run &= r;
             }
 
@@ -727,6 +796,10 @@ impl Schedule {
     fn set_gate(&mut self, world: &mut EcsMaster, set_id: SystemSetId) -> bool {
         let mut acc = true;
         let rows = self.set_conditions.len();
+        // Phase 16.1 (Gap #1): snapshot before the `&mut self.set_conditions[k]
+        // .condition` borrow below (same borrow-conflict avoidance as
+        // `evaluate_ready_conditions`).
+        let this_run = self.frame_this_run;
         for k in 0..rows {
             if self.set_conditions[k].set_id != set_id {
                 continue;
@@ -737,7 +810,7 @@ impl Schedule {
             } else {
                 // EAGER (§6): run the set-condition body once this frame.
                 let cond = self.set_conditions[k].condition.as_mut();
-                let v = world.run_condition(cond);
+                let v = world.run_condition(cond, this_run);
                 self.executor_scratch.set_cond_evaluated.insert(slot);
                 self.executor_scratch.set_cond_result.set(slot, v);
                 v
@@ -872,6 +945,21 @@ impl Schedule {
             let i = idx.0 as usize;
             self.executor_scratch.running.insert(i);
 
+            // Phase 16.1 C1 — gated-system dispatch stamp (inline-exclusive
+            // path). A system with `has_condition[i]` set was NOT stamped at
+            // frame start (its ticks stay frozen across skipped frames); stamp
+            // it here, immediately before `run_unsafe`, so on a frame it runs
+            // its body queries observe the full dormant `(last_run, this_run]`
+            // window. Same thread, program order ⇒ the stamp is visible to the
+            // run below. The `has_condition[i]`-clear case was already stamped
+            // at frame start, so skip it (no double-advance).
+            if self.has_condition.contains(i) {
+                let prev = self.systems[i].system.meta().this_run();
+                self.systems[i]
+                    .system
+                    .set_change_ticks(prev, self.frame_this_run);
+            }
+
             // SAFETY (EXC1 — Round 3 W-NEW-5):
             //   - Universal access ⇒ conflict graph forces `running == 0`
             //     before dispatch. We checked `running_count == 0` above
@@ -950,6 +1038,33 @@ impl Schedule {
         //     all spawns complete).
         if to_spawn.is_empty() {
             return dispatched;
+        }
+
+        // Phase 16.1 C1 — gated-system dispatch stamp (concurrent path),
+        // OQ-R2-1 resolved to the PRE-PASS form. Stamp every gated index in
+        // `to_spawn` BEFORE minting `systems_ptr` below: a system with
+        // `has_condition[i]` set was not stamped at frame start (its ticks stay
+        // frozen across skipped frames), so on a frame it runs we advance its
+        // `(last_run, this_run]` window here, immediately before dispatch.
+        //
+        // Why a separate pre-pass and not inside the spawn loop: a fresh
+        // `&mut self.systems[i]` taken AFTER `systems_ptr = self.systems
+        // .as_mut_ptr()` (and while earlier-iteration workers already hold that
+        // raw pointer) would, under Tree Borrows, invalidate `systems_ptr`'s
+        // provenance — a worker's later `*system_slot` deref would then be
+        // use-after-invalidation UB. Hoisting all `&mut` stamps before the raw
+        // lift keeps every stamp sequenced before the pointer is created and
+        // before any `scope.spawn`, so the happens-before edge (dispatcher
+        // stamp → that system's worker Fetch) and the 0%-gate are unchanged.
+        // Pure ordering: same writes, same values, no new aliasing.
+        for idx in &to_spawn {
+            let i = idx.0 as usize;
+            if self.has_condition.contains(i) {
+                let prev = self.systems[i].system.meta().this_run();
+                self.systems[i]
+                    .system
+                    .set_change_ticks(prev, self.frame_this_run);
+            }
         }
 
         // Phase 9.3c: only `systems` is lifted as a raw pointer here — it
@@ -1158,6 +1273,10 @@ mod tests {
         ) {
             self.meta.last_run = last_run;
             self.meta.this_run = this_run;
+        }
+        fn check_change_tick(&mut self, current: crate::ecs::core::change_detection::Tick) {
+            self.meta.last_run = self.meta.last_run.check_tick(current);
+            self.meta.this_run = self.meta.this_run.check_tick(current);
         }
     }
 
@@ -1412,6 +1531,10 @@ mod tests {
                 self.meta.last_run = last_run;
                 self.meta.this_run = this_run;
             }
+            fn check_change_tick(&mut self, current: crate::ecs::core::change_detection::Tick) {
+                self.meta.last_run = self.meta.last_run.check_tick(current);
+                self.meta.this_run = self.meta.this_run.check_tick(current);
+            }
         }
 
         {
@@ -1563,6 +1686,10 @@ mod tests {
             self.meta.last_run = last_run;
             self.meta.this_run = this_run;
         }
+        fn check_change_tick(&mut self, current: crate::ecs::core::change_detection::Tick) {
+            self.meta.last_run = self.meta.last_run.check_tick(current);
+            self.meta.this_run = self.meta.this_run.check_tick(current);
+        }
     }
 
     /// **B-1 regression.** Before the fix, `run_condition` ran a condition
@@ -1629,5 +1756,408 @@ mod tests {
             "condition last_run on frame 2 must equal frame 1's this_run \
              (the per-frame (last_run, this_run] window)"
         );
+    }
+
+    // ── Phase 16.1 — Gap #1 / C1 dormancy + Gap #2 wraparound clamp ───────────
+    //
+    // The integration suite (`tests/phase16_1_dormant.rs`) proves the REACHABLE
+    // public-API behavior (the C1 system-body dormancy end-to-end, plus the
+    // every-frame eval-site checkpoint). These in-crate unit tests reach what the
+    // external crate cannot: (a) a CONDITION genuinely NOT evaluated for several
+    // frames (boyko's eager fold means no public single-schedule topology leaves
+    // a reachable system's condition unevaluated — OQ-1 — so the only way to
+    // drive a dormant condition is to call `run_condition` selectively, which is
+    // `pub(crate)`), and (b) `Schedule::check_change_ticks` (a private method) on
+    // a dormant condition AND a dormant system past `CHECK_TICK_THRESHOLD`
+    // (518_400_000 — unreachable by running real frames).
+
+    use crate::ecs::core::change_detection::{CHECK_TICK_THRESHOLD, MAX_CHANGE_AGE, Tick};
+
+    /// Gap #1 MECHANISM. A condition advances its `(last_run, this_run]` window
+    /// ONLY on a frame it is actually evaluated (`run_condition`), so a condition
+    /// dormant (not evaluated) for several `bump_change_tick` advances resumes
+    /// with its `last_run` FROZEN at its last actual evaluation — and therefore
+    /// its resume window spans EVERY tick that elapsed while it was dormant.
+    ///
+    /// This is the unit twin of the (unreachable-via-public-API) "state/set-gated
+    /// `Changed<T>` condition resumes and sees dormant changes" integration case.
+    /// A change stamped at a dormant-frame tick `T_mut` satisfies the resumed
+    /// window iff `last_run` stayed frozen; the assert pins exactly that, and
+    /// pins that a pre-fix unconditional frame-start bump (which would have
+    /// advanced `last_run` to the last dormant frame) would have MISSED it.
+    #[test]
+    fn dormant_condition_resume_window_spans_skipped_ticks() {
+        let mut world = EcsMaster::new();
+
+        let last_seen = Arc::new(AtomicU32::new(0));
+        let this_seen = Arc::new(AtomicU32::new(0));
+        let mut cond = TickRecordingCondition {
+            meta: SystemMeta::for_testing("dormant_cond"),
+            last_run_seen: Arc::clone(&last_seen),
+            this_run_seen: Arc::clone(&this_seen),
+        };
+        cond.initialize(&mut world);
+
+        // Frame 1 — the condition IS evaluated. `prev` is the `for_testing`
+        // sentinel; the new `this_run` is T1.
+        let t1 = world.bump_change_tick();
+        world.run_condition(&mut cond, t1);
+        let this_after_f1 = this_seen.load(Ordering::Relaxed);
+        assert_eq!(this_after_f1, t1.get(), "frame 1: condition this_run == T1");
+
+        // Frames 2..=4 — the condition is DORMANT (NOT evaluated). The world tick
+        // still advances each "frame"; a mutation lands at T_mut (frame 3).
+        let _t2 = world.bump_change_tick();
+        let t_mut = world.bump_change_tick(); // frame 3: a change is stamped here
+        let _t4 = world.bump_change_tick();
+
+        // Frame 5 — the condition is evaluated again. Its `last_run` MUST be the
+        // FROZEN T1 (its last actual evaluation), NOT T4.
+        let t5 = world.bump_change_tick();
+        world.run_condition(&mut cond, t5);
+        let last_after_f5 = last_seen.load(Ordering::Relaxed);
+        let this_after_f5 = this_seen.load(Ordering::Relaxed);
+        assert_eq!(
+            last_after_f5,
+            t1.get(),
+            "Gap #1: a dormant condition's last_run stays FROZEN at its last actual \
+             evaluation (T1), NOT advanced to the last dormant frame (T4)"
+        );
+        assert_eq!(this_after_f5, t5.get(), "frame 5: condition this_run == T5");
+
+        // The resume window (T1, T5] therefore SPANS the dormant-frame mutation
+        // at T_mut. A pre-fix frame-start bump would have produced last_run==T4,
+        // and (T4, T5] does NOT contain T_mut.
+        assert!(
+            Tick::new(t_mut.get()).is_newer_than(Tick::new(last_after_f5), Tick::new(this_after_f5)),
+            "the frozen resume window (T1, T5] must contain the dormant mutation T_mut \
+             (this is the change a Changed<T> condition would observe on resume)"
+        );
+        assert!(
+            !Tick::new(t_mut.get()).is_newer_than(Tick::new(_t4.get()), Tick::new(t5.get())),
+            "regression net: a pre-fix last_run==T4 window (T4, T5] would have MISSED T_mut"
+        );
+    }
+
+    /// A system that records the `(last_run, this_run)` its body would observe.
+    /// Mirrors `TickRecordingCondition` but for `Out = ()` so it can model a
+    /// gated SYSTEM body (C1).
+    struct TickRecordingSystem {
+        meta: SystemMeta,
+        last_run_seen: Arc<AtomicU32>,
+        this_run_seen: Arc<AtomicU32>,
+    }
+
+    // SAFETY (S1): reads only its own meta + writes foreign atomics; never
+    //   touches the world cell.
+    unsafe impl System for TickRecordingSystem {
+        type Out = ();
+        fn name(&self) -> &'static str {
+            self.meta.name()
+        }
+        fn access(&self) -> &Access {
+            self.meta.access()
+        }
+        fn initialize(&mut self, _w: &mut EcsMaster) {}
+        unsafe fn run_unsafe(&mut self, _w: UnsafeEcsCell<'_>) {
+            self.last_run_seen
+                .store(self.meta.last_run().get(), Ordering::Relaxed);
+            self.this_run_seen
+                .store(self.meta.this_run().get(), Ordering::Relaxed);
+        }
+        fn meta(&self) -> &SystemMeta {
+            &self.meta
+        }
+        fn set_change_ticks(&mut self, last_run: Tick, this_run: Tick) {
+            self.meta.last_run = last_run;
+            self.meta.this_run = this_run;
+        }
+        fn check_change_tick(&mut self, current: Tick) {
+            self.meta.last_run = self.meta.last_run.check_tick(current);
+            self.meta.this_run = self.meta.this_run.check_tick(current);
+        }
+    }
+
+    /// C1 MECHANISM (unit). A GATED system is stamped at its DISPATCH site (only
+    /// on a frame it runs); a skipped frame leaves its ticks FROZEN. So a gated
+    /// system run on frame 1, skipped frames 2..=4 (NOT stamped), run again on
+    /// frame 5, observes a body window whose `last_run` is the FROZEN frame-1
+    /// `this_run` — spanning every dormant tick.
+    ///
+    /// This drives the dispatch-stamp path directly through a real single-system
+    /// `Schedule::run` with a gate that flips, asserting the resumed body's
+    /// recorded `last_run` is frame 1's `this_run`, not frame 4's.
+    #[test]
+    fn gated_system_body_window_frozen_while_skipped() {
+        // Use a real schedule so the actual C1 dispatch-stamp path runs. The
+        // gate is a `run_once`-style external flip via a recorded condition that
+        // returns the current value of a shared bool.
+        let pool = fresh_pool();
+        let mut builder = ScheduleBuilder::new(pool);
+
+        let last_seen = Arc::new(AtomicU32::new(0));
+        let this_seen = Arc::new(AtomicU32::new(0));
+
+        // Register the gated system through the descriptor directly (the test
+        // harness style), then attach a flip-gate condition.
+        {
+            use crate::ecs::core::schedule::system_box::SystemBox;
+            use crate::ecs::core::schedule::system_descriptor::SystemDescriptor;
+            let sys = TickRecordingSystem {
+                meta: SystemMeta::for_testing("gated_body"),
+                last_run_seen: Arc::clone(&last_seen),
+                this_run_seen: Arc::clone(&this_seen),
+            };
+            let boxed: Box<dyn System<Out = ()>> = Box::new(sys);
+            builder
+                .descriptors
+                .push(SystemDescriptor::new(SystemBox::new(boxed)));
+        }
+
+        // Gate condition: returns the shared flag's current value. When false the
+        // system is skipped (NOT stamped); when true it dispatches (stamped).
+        let gate = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        {
+            let gate_cl = Arc::clone(&gate);
+            let cond = ProbeBoolSystem {
+                meta: SystemMeta::for_testing("flip_gate"),
+                verdict: gate_cl,
+            };
+            let boxed: Box<dyn System<Out = bool>> = Box::new(cond);
+            builder.descriptors[0].conditions.push(boxed);
+        }
+
+        let mut world = EcsMaster::new();
+        let mut schedule = builder.build(&mut world);
+
+        // Frame 1: gate true ⇒ system dispatches ⇒ stamped. Capture frame-1
+        // this_run (the dispatch-stamp value == frame_this_run).
+        schedule.run(&mut world);
+        let this_f1 = this_seen.load(Ordering::Relaxed);
+        assert_ne!(this_f1, 0, "frame 1: gated system ran and recorded a non-zero this_run");
+
+        // Frames 2..=4: gate false ⇒ system SKIPPED ⇒ NOT stamped (ticks frozen).
+        gate.store(false, Ordering::Relaxed);
+        schedule.run(&mut world);
+        schedule.run(&mut world);
+        schedule.run(&mut world);
+        // The recorded values are unchanged (the body never ran on 2..=4).
+        assert_eq!(
+            this_seen.load(Ordering::Relaxed),
+            this_f1,
+            "frames 2..=4: skipped ⇒ the body never ran ⇒ no new recording"
+        );
+
+        // Frame 5: gate true ⇒ system dispatches again ⇒ stamped. Its body window
+        // `last_run` MUST be the FROZEN frame-1 this_run (C1), proving a skipped
+        // span did not advance it. Pre-fix the unconditional frame-start bump
+        // would have made last_run == frame-4 this_run.
+        gate.store(true, Ordering::Relaxed);
+        schedule.run(&mut world);
+        let last_f5 = last_seen.load(Ordering::Relaxed);
+        let this_f5 = this_seen.load(Ordering::Relaxed);
+        assert_eq!(
+            last_f5, this_f1,
+            "C1: a gated system's body last_run on resume equals its LAST RUN frame (frame 1), \
+             NOT the last skipped frame — its ticks stayed frozen while skipped"
+        );
+        assert!(
+            this_f5 > this_f1,
+            "frame 5: this_run advanced past frame 1 ({this_f1} -> {this_f5})"
+        );
+    }
+
+    /// Gap #2 (wraparound) — `Schedule::check_change_ticks` clamps a DORMANT
+    /// condition's stale `last_run`/`this_run` so a span > `MAX_CHANGE_AGE` does
+    /// not flip `Tick::is_newer_than`. Seed a condition with an ancient `last_run`
+    /// (age > `MAX_CHANGE_AGE` relative to a `current` past `CHECK_TICK_THRESHOLD`)
+    /// and assert the clamp pulls it back to `current - MAX_CHANGE_AGE`.
+    #[test]
+    fn check_change_ticks_clamps_dormant_condition() {
+        let pool = fresh_pool();
+        let mut builder = ScheduleBuilder::new(pool);
+        push_system(&mut builder, "gated", Access::new(), || {});
+        {
+            // A plain condition whose meta we will stale-seed.
+            let cond = ProbeBoolSystem {
+                meta: SystemMeta::for_testing("stale_cond"),
+                verdict: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            };
+            let boxed: Box<dyn System<Out = bool>> = Box::new(cond);
+            builder.descriptors[0].conditions.push(boxed);
+        }
+
+        let mut world = EcsMaster::new();
+        let mut schedule = builder.build(&mut world);
+
+        // `current` past the threshold; seed a condition window whose age
+        // EXCEEDS MAX_CHANGE_AGE (so the clamp actually fires — `check_tick` is a
+        // no-op for in-range ticks). age = MAX_CHANGE_AGE + 100.
+        let current = Tick::new(CHECK_TICK_THRESHOLD.wrapping_add(1000));
+        let ancient = Tick::new(current.get().wrapping_sub(MAX_CHANGE_AGE).wrapping_sub(100));
+        schedule.system_conditions[0][0].set_change_ticks(ancient, ancient);
+
+        schedule.check_change_ticks(current);
+
+        let clamped = schedule.system_conditions[0][0].meta();
+        let expected = Tick::new(current.get().wrapping_sub(MAX_CHANGE_AGE));
+        assert_eq!(
+            clamped.last_run(),
+            expected,
+            "check_change_ticks clamps a dormant condition's stale last_run to \
+             current - MAX_CHANGE_AGE"
+        );
+        assert_eq!(
+            clamped.this_run(),
+            expected,
+            "check_change_ticks clamps a dormant condition's stale this_run too (OQ-4)"
+        );
+        // Post-clamp the age is bounded ⇒ is_newer_than no longer false-positives
+        // a clamped tick as "newer than current".
+        let age = current.get().wrapping_sub(clamped.last_run().get());
+        assert!(age <= MAX_CHANGE_AGE, "post-clamp age must be <= MAX_CHANGE_AGE (was {age})");
+    }
+
+    /// Gap #2 (wraparound) — `Schedule::check_change_ticks` clamps a DORMANT
+    /// SYSTEM's stale tick snapshot. This is the hole C1 specifically opens: once
+    /// a gated system's `last_run` advances only when it runs, a long dormant span
+    /// can age it past `MAX_CHANGE_AGE`. The clamp must pull it back so the
+    /// resumed body's window is well-formed.
+    #[test]
+    fn check_change_ticks_clamps_dormant_system() {
+        let pool = fresh_pool();
+        let mut builder = ScheduleBuilder::new(pool);
+        push_system(&mut builder, "dormant", Access::new(), || {});
+
+        let mut world = EcsMaster::new();
+        let mut schedule = builder.build(&mut world);
+
+        // Seed a system window aged past MAX_CHANGE_AGE so the clamp fires.
+        let current = Tick::new(CHECK_TICK_THRESHOLD.wrapping_add(7));
+        let ancient = Tick::new(current.get().wrapping_sub(MAX_CHANGE_AGE).wrapping_sub(5));
+        schedule.systems[0].system.set_change_ticks(ancient, ancient);
+
+        schedule.check_change_ticks(current);
+
+        let clamped = schedule.systems[0].system.meta();
+        let expected = Tick::new(current.get().wrapping_sub(MAX_CHANGE_AGE));
+        assert_eq!(
+            clamped.last_run(),
+            expected,
+            "check_change_ticks clamps a dormant SYSTEM's stale last_run \
+             (the hole C1 opens) to current - MAX_CHANGE_AGE"
+        );
+        assert_eq!(clamped.this_run(), expected, "and clamps this_run too");
+    }
+
+    /// Gap #2 PROPERTY — for ANY dormant span up to
+    /// `CHECK_TICK_THRESHOLD + MAX_CHANGE_AGE` over BOTH a system's and a
+    /// condition's `last_run`, after one `check_change_ticks` clamp the resumed
+    /// window (a) never reports a change older than the last actual run as "newer"
+    /// and (b) never false-positives a clamped tick. Mirrors the
+    /// `phase10_wraparound_property.rs` style but exercises the schedule-level
+    /// clamp entry point (private to this crate).
+    #[test]
+    fn prop_check_change_ticks_no_false_positive_after_clamp() {
+        use proptest::prelude::*;
+        use proptest::test_runner::{Config, TestRunner};
+
+        let mut runner = TestRunner::new(Config {
+            cases: 256,
+            ..Config::default()
+        });
+
+        runner
+            .run(
+                &(
+                    any::<u32>(),
+                    0u32..=(CHECK_TICK_THRESHOLD.wrapping_add(MAX_CHANGE_AGE)),
+                ),
+                |(current_raw, dormant_span)| {
+                    let current = Tick::new(current_raw);
+                    // The system/condition last ran `dormant_span` ticks ago.
+                    let last_actual = Tick::new(current_raw.wrapping_sub(dormant_span));
+
+                    let pool = ThreadPoolBuilder::new().num_threads(1).build();
+                    let mut builder = ScheduleBuilder::new(pool);
+                    push_system(&mut builder, "p", Access::new(), || {});
+                    {
+                        let cond = ProbeBoolSystem {
+                            meta: SystemMeta::for_testing("p_cond"),
+                            verdict: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+                        };
+                        let boxed: Box<dyn System<Out = bool>> = Box::new(cond);
+                        builder.descriptors[0].conditions.push(boxed);
+                    }
+                    let mut world = EcsMaster::new();
+                    let mut schedule = builder.build(&mut world);
+
+                    schedule.systems[0]
+                        .system
+                        .set_change_ticks(last_actual, last_actual);
+                    schedule.system_conditions[0][0]
+                        .set_change_ticks(last_actual, last_actual);
+
+                    schedule.check_change_ticks(current);
+
+                    for meta in [
+                        schedule.systems[0].system.meta(),
+                        schedule.system_conditions[0][0].meta(),
+                    ] {
+                        // (b) the clamped last_run has bounded age ⇒ no
+                        // false-positive "newer than current".
+                        let age = current.get().wrapping_sub(meta.last_run().get());
+                        prop_assert!(
+                            age <= MAX_CHANGE_AGE,
+                            "post-clamp age {} exceeds MAX_CHANGE_AGE (span={})",
+                            age,
+                            dormant_span
+                        );
+                        // A clamped tick must NOT report itself as strictly newer
+                        // than `current` under a degenerate (current, current]
+                        // window — the clamp keeps the relation well-formed.
+                        prop_assert!(
+                            !meta.last_run().is_newer_than(current, current),
+                            "a clamped last_run must not false-positive as newer than current"
+                        );
+                    }
+                    Ok(())
+                },
+            )
+            .expect("property: check_change_ticks clamp holds for all dormant spans");
+    }
+
+    /// A test-only `System<Out = bool>` returning a shared `AtomicBool`'s value
+    /// (a flip-gate), with the mandatory tick hooks. Used to drive a gated
+    /// system's skip/run across frames and to stand in as a clampable condition.
+    struct ProbeBoolSystem {
+        meta: SystemMeta,
+        verdict: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    // SAFETY (S1): reads only a foreign atomic; never touches the world cell.
+    unsafe impl System for ProbeBoolSystem {
+        type Out = bool;
+        fn name(&self) -> &'static str {
+            self.meta.name()
+        }
+        fn access(&self) -> &Access {
+            self.meta.access()
+        }
+        fn initialize(&mut self, _w: &mut EcsMaster) {}
+        unsafe fn run_unsafe(&mut self, _w: UnsafeEcsCell<'_>) -> bool {
+            self.verdict.load(Ordering::Relaxed)
+        }
+        fn meta(&self) -> &SystemMeta {
+            &self.meta
+        }
+        fn set_change_ticks(&mut self, last_run: Tick, this_run: Tick) {
+            self.meta.last_run = last_run;
+            self.meta.this_run = this_run;
+        }
+        fn check_change_tick(&mut self, current: Tick) {
+            self.meta.last_run = self.meta.last_run.check_tick(current);
+            self.meta.this_run = self.meta.this_run.check_tick(current);
+        }
     }
 }

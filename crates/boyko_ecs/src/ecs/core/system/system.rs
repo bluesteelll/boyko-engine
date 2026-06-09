@@ -167,6 +167,34 @@ pub unsafe trait System: Send + Sync + 'static {
     /// * On every subsequent dispatch, `last_run` is the PREVIOUS frame's
     ///   `this_run`.
     fn set_change_ticks(&mut self, last_run: Tick, this_run: Tick);
+
+    /// Phase 16.1 (Gap #2) — wraparound clamp for this system's tick snapshot.
+    ///
+    /// Clamps both `last_run` and `this_run` to be no older than
+    /// [`MAX_CHANGE_AGE`] ticks behind `current` (via [`Tick::check_tick`]).
+    /// Called by [`Schedule::check_change_ticks`] on the cold
+    /// `CHECK_TICK_THRESHOLD` path, right after the per-row pool scan, so that
+    /// a `last_run` left un-refreshed across a long dormant span (Phase 16.1
+    /// advances ticks only when a system actually runs) can never silently
+    /// flip [`Tick::is_newer_than`].
+    ///
+    /// # Why no default body
+    ///
+    /// Mirrors [`set_change_ticks`](Self::set_change_ticks): the clamp is a
+    /// load-bearing correctness contract, so an impl that "forgets" it must
+    /// not compile. Forcing every impl to declare `check_change_tick` without
+    /// a default body makes that mistake unrepresentable.
+    ///
+    /// # Invariants
+    ///
+    /// * Called only during the apply window (no worker live on this system),
+    ///   the same exclusivity guarantee as `set_change_ticks`.
+    ///
+    /// [`MAX_CHANGE_AGE`]: crate::ecs::core::change_detection::MAX_CHANGE_AGE
+    /// [`Tick::check_tick`]: crate::ecs::core::change_detection::Tick::check_tick
+    /// [`Tick::is_newer_than`]: crate::ecs::core::change_detection::Tick::is_newer_than
+    /// [`Schedule::check_change_ticks`]: crate::ecs::core::schedule::schedule::Schedule::check_change_ticks
+    fn check_change_tick(&mut self, current: Tick);
 }
 
 #[cfg(test)]
@@ -206,6 +234,11 @@ mod tests {
         fn set_change_ticks(&mut self, last_run: Tick, this_run: Tick) {
             self.meta.last_run = last_run;
             self.meta.this_run = this_run;
+        }
+
+        fn check_change_tick(&mut self, current: Tick) {
+            self.meta.last_run = self.meta.last_run.check_tick(current);
+            self.meta.this_run = self.meta.this_run.check_tick(current);
         }
     }
 

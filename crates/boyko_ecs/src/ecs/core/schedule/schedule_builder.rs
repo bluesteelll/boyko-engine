@@ -31,6 +31,7 @@ use std::sync::Arc;
 use boyko_threadpool::ThreadPool;
 use fixedbitset::FixedBitSet;
 
+use crate::ecs::core::change_detection::Tick;
 use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 use crate::ecs::core::schedule::conflict_graph::{ConflictGraph, SystemIndex};
 use crate::ecs::core::schedule::ordering::{OrderingEdge, SetOrderEdge, SystemKey};
@@ -654,6 +655,10 @@ impl ScheduleBuilder {
             system_gating_sets,
             set_conditions: set_conditions_table,
             state_entries,
+            // Phase 16.1 (W2): overwritten at the top of every `Schedule::run`
+            // (the frame-start `this_run`). The `ZERO` here is the pre-first-run
+            // placeholder; no system/condition reads it before `run` sets it.
+            frame_this_run: Tick::ZERO,
         })
     }
 }
@@ -1376,6 +1381,10 @@ mod tests {
         ) {
             self.meta.last_run = last_run;
             self.meta.this_run = this_run;
+        }
+        fn check_change_tick(&mut self, current: crate::ecs::core::change_detection::Tick) {
+            self.meta.last_run = self.meta.last_run.check_tick(current);
+            self.meta.this_run = self.meta.this_run.check_tick(current);
         }
     }
 
