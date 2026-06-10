@@ -228,7 +228,9 @@ impl ComponentPool {
         //   == buffer_capacity_bytes, so the element span is inside the single arena
         //   allocation backing `self.buffer`. Provenance derives from `self.buffer`
         //   via one `add` (the same address the deleted `Unit.ptr` cached). The base
-        //   is write-once in `new` and never reallocated (fixed arena capacity).
+        //   is write-once in `new` and never moves: Phase X.F growth only commits
+        //   fresh pages at the frontier of the SAME reservation; previously returned
+        //   blocks are never remapped or relocated.
         unsafe { self.buffer.as_ptr().add(idx * self.component_layout.size()) }
     }
 
@@ -1289,8 +1291,10 @@ impl ComponentPool {
 //     archetype creation, which is dispatcher-only via `ArchetypeMaster::
 //     create_archetype` under the apply window — §9.4 audit row 1).
 //   - Pool growth / extension (any path that may invoke `arena.allocate_*`)
-//     is restricted to the apply window by the ALLOC1 discipline; no
-//     concurrent reader can observe a half-grown pool.
+//     is restricted to the apply window by the ALLOC1 discipline (realized by
+//     Phase X.F: `Arena::grow_then_retry` runs inside `allocate_layout`,
+//     AFTER the ALLOC1 guards); no concurrent reader can observe a half-grown
+//     pool.
 //   - `len: usize` and `Vec<Chunk>` mutations occur only on `&mut self` paths
 //     (`add`, `pop`, `swap_remove`, `set_component`); the dispatcher
 //     serialises these under the apply window. Worker reads use `&self`

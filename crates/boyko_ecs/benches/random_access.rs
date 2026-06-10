@@ -25,11 +25,12 @@
 //   450-465: drop_fn integration tests
 //   470-479: query_iter bench
 //   480-489: swap_remove bench
-//   490-509: random_access bench (this file) — including ARCH_BIT_IDS for #11.
+//   490-509: random_access bench (this file).
+//   103-148 (less 128): bench #11 archetype-signature domain (this file).
 //
-// Note: `MAX_COMPONENTS = 512` is a hard cap; the bench fits within this range
-// by representing 1000 distinct archetype signatures as bitmask subsets over a
-// 10-component domain (2^10 = 1024 unique non-empty subsets).
+// Note: `MAX_COMPONENTS = 512` is a hard cap; bench #11 fits within it by
+// representing 1000 distinct archetype signatures as singleton + pair
+// subsets over a 45-component domain (45 + C(45,2) = 1035 >= 1000).
 //
 // Each bench builds a deterministic scenario in `b.iter_batched(...)` or in
 // the closure outer-scope; we lean on `black_box` on both inputs and outputs
@@ -56,15 +57,13 @@ use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion
 const POS_ID: ComponentId = ComponentId(490);
 const VEL_ID: ComponentId = ComponentId(491);
 
-/// 10 distinct synthetic component IDs (492-501). Bench #11 forms 1000
-/// distinct archetype signatures as bitmask subsets over this 10-id domain
-/// (2^10 = 1024 unique non-empty subsets). 10 IDs fit inside the global
-/// MAX_COMPONENTS = 512 cap.
-const ARCH_BIT_IDS: [ComponentId; 10] = [
-    ComponentId(492), ComponentId(493), ComponentId(494), ComponentId(495),
-    ComponentId(496), ComponentId(497), ComponentId(498), ComponentId(499),
-    ComponentId(500), ComponentId(501),
-];
+/// 45 distinct synthetic component IDs for bench #11: slots 103..=148 minus
+/// 128 (taken by archetype_registry tests). 45 IDs yield 45 + C(45,2) = 1035
+/// distinct signatures of size <= 2 — enough for the full 1000-archetype
+/// plan target while staying inside the global MAX_COMPONENTS = 512 cap.
+fn arch_domain_ids() -> Vec<ComponentId> {
+    (103..=148).filter(|&v| v != 128).map(ComponentId).collect()
+}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -590,59 +589,44 @@ fn bench_get_component_missing_component(c: &mut Criterion) {
 // constructed in-place inside the slab, never on the stack. If W6 regresses,
 // this bench overflows the stack on call frame 1.
 //
-// # Scaling
+// # Scaling — restored to the plan's full 1000 archetypes (Phase X.F)
 //
-// The plan asks for 1000 archetypes. In practice each archetype allocates
-// at least one ComponentPool (~256 KB chunked buffer for u8 layouts under
-// `with_default_sizes`), so 1000 single-component archetypes would need
-// ~256 MB of arena — well over the 64 MB `DEFAULT_ARENA_SIZE`. The default
-// arena saturates at ~200 single-component archetypes.
-//
-// To keep the bench self-contained and demonstrate the W6 fix at scale,
-// we scale to 200 archetypes (≈ 50 MB pool allocation, comfortably below
-// the 64 MB default arena). This is enough to: (a) prove no stack overflow,
-// since the 8 KB Archetype struct is constructed in-place inside
-// ArchetypeBundle slots — the first call would already overflow if W6
-// were broken; (b) cover bulk-creation churn for the slab path.
-//
-// We register the 10-id bit domain (492-501) and form 200 distinct
-// non-empty subsets — one archetype per subset.
+// The pre-X.F version trimmed this to 200 (in practice 55) archetypes
+// because each archetype allocates at least one ComponentPool (~256 KB
+// chunked buffer for u8 layouts under `with_default_sizes`) and the old
+// 64 MB fixed arena saturated at ~200 single-component archetypes. Phase
+// X.F arena growth (lazy slab commit inside a multi-GB reservation) removed
+// that ceiling, so the bench now runs the original plan target: 1000
+// distinct signatures (45 singletons + 955 pairs over the 45-id domain),
+// committing ~0.5 GB of pools per constructed world — bench-only weight.
 //
 // Target: completes without stack overflow. Numbers are reported for
 // reference, not as a target.
 fn bench_create_1000_archetypes_no_stack_overflow(c: &mut Criterion) {
     register_bench_components();
-    // Register the 10 bench bit-domain components once (idempotent).
-    for id in ARCH_BIT_IDS.iter() {
+    let domain = arch_domain_ids();
+    // Register the 45 bench domain components once (idempotent).
+    for id in &domain {
         component_registry::register_layout::<u8>(id.0);
     }
 
     // Pre-build distinct signatures up-front so the measured loop only does
-    // archetype-registration work, not bit-arithmetic.
-    const N_ARCHETYPES: usize = 200;
+    // archetype-registration work, not subset arithmetic: all 45 singletons,
+    // then pairs in lexicographic order until 1000 signatures total.
+    const N_ARCHETYPES: usize = 1000;
     let mut signatures: Vec<Vec<ComponentId>> = Vec::with_capacity(N_ARCHETYPES);
-    for subset_mask in 1u32..=1024u32 {
-        if signatures.len() == N_ARCHETYPES {
-            break;
-        }
-        let mut ids = Vec::with_capacity(10);
-        for (bit, cid) in ARCH_BIT_IDS.iter().enumerate() {
-            if (subset_mask >> bit) & 1 == 1 {
-                ids.push(*cid);
+    for &id in &domain {
+        signatures.push(vec![id]);
+    }
+    'pairs: for i in 0..domain.len() {
+        for j in (i + 1)..domain.len() {
+            if signatures.len() == N_ARCHETYPES {
+                break 'pairs;
             }
-        }
-        // Skip subsets with more than 2 components to bound per-archetype pool
-        // allocation count; single + pair subsets give us 10 + 45 = 55 unique
-        // signatures from the 10-bit domain.
-        if !ids.is_empty() && ids.len() <= 2 {
-            signatures.push(ids);
+            signatures.push(vec![domain[i], domain[j]]);
         }
     }
-    // 10 singletons + 45 pairs = 55 unique signatures from a 10-bit domain.
-    // For the test we just need "many archetypes back-to-back to prove no
-    // stack overflow"; 55 is comfortably above the 1-frame threshold that
-    // would matter for a broken W6 implementation.
-    let n_actual = signatures.len();
+    assert_eq!(signatures.len(), N_ARCHETYPES, "domain must yield 1000 signatures");
 
     c.bench_function("create_1000_archetypes_no_stack_overflow", |b| {
         b.iter_batched(
@@ -652,9 +636,15 @@ fn bench_create_1000_archetypes_no_stack_overflow(c: &mut Criterion) {
                     let id = ecs.create_archetype(sig);
                     black_box(id);
                 }
-                black_box((ecs, n_actual));
+                black_box(&ecs);
+                // Return the world so its ~0.5 GB of committed pools are
+                // dropped by criterion outside the timed region.
+                ecs
             },
-            BatchSize::LargeInput,
+            // PerIteration: each constructed world commits ~0.5 GB of pools;
+            // LargeInput would keep a whole batch of them alive at once
+            // (the X.C arena_new lesson, in miniature).
+            BatchSize::PerIteration,
         );
     });
 }

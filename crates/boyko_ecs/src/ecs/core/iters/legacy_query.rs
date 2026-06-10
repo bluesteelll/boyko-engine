@@ -502,9 +502,9 @@ mod tests {
     // Non-ZST wrappers around `u32` — the `MemFreeBlockMaster` allocator
     // refuses zero-byte requests (returns `None` from `allocate_aligned`),
     // which means a `ComponentPool` over a ZST cannot reserve its buffer
-    // and `with_default_sizes` panics with "Arena out of memory". Wrapping
-    // in `u32` gives a real layout (4 bytes) without changing any
-    // mask/signature behaviour the tests rely on.
+    // and `with_default_sizes` panics (post-X.F: the zero-size guard in
+    // `grow_then_retry`). Wrapping in `u32` gives a real layout (4 bytes)
+    // without changing any mask/signature behaviour the tests rely on.
     #[repr(C)]
     struct Position(u32);
     #[repr(C)]
@@ -545,10 +545,10 @@ mod tests {
     /// The arena MUST be returned to the caller and kept alive for the
     /// duration of the test: `ArchetypeMaster` stores a `NonNull<Arena>`
     /// derived from this `Box`, and dropping the arena turns that pointer
-    /// dangling — manifests as `Arena out of memory` panics in release (the
-    /// `MemFreeBlockMaster` lives in the freed buffer). This is the same
-    /// failure mode that audit C-001 fixed inside `EcsMaster`; we apply the
-    /// `Box<Arena>` pattern here too so tests don't reintroduce it.
+    /// dangling — manifests as spurious `Arena reserve exhausted` panics in
+    /// release (the `MemFreeBlockMaster` lives in the freed buffer). This is
+    /// the same failure mode that audit C-001 fixed inside `EcsMaster`; we
+    /// apply the `Box<Arena>` pattern here too so tests don't reintroduce it.
     fn setup_test_archetypes() -> (ArchetypeMaster, Box<Arena>) {
         register_mock_components();
         let arena: Box<Arena> = Box::default();

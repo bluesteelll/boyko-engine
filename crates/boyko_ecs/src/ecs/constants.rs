@@ -1,6 +1,42 @@
-/// Default arena size in bytes (64MB)
-/// This controls the total amount of memory initially allocated for the ECS system
-pub const DEFAULT_ARENA_SIZE: usize = 64 * 1024 * 1024;
+/// Default virtual-address reservation for the component-data arena
+/// (Phase X.F): 4 GiB on 64-bit OS-syscall arms. Virtual address space is
+/// effectively free (Windows user VA is 128 TB; no commit charge is paid
+/// until slabs are committed at the frontier), so the reserve is sized for
+/// headroom — ~64x the pre-X.F 64 MB ceiling.
+///
+/// Note for tooling: large `PROT_NONE`/`PAGE_NOACCESS` reservations show up
+/// in ASan/valgrind-class tooling as *address space*, not memory.
+/// Memory-constrained embedders should use
+/// `EcsMaster::with_arena_reserve` to pick a smaller ceiling.
+#[cfg(all(not(miri), any(windows, unix), target_pointer_width = "64"))]
+pub const DEFAULT_ARENA_RESERVE: usize = 4 * 1024 * 1024 * 1024;
+
+/// Default arena reservation on the fallback arm (Miri / wasm32 / 32-bit /
+/// exotic targets): 64 MiB. The fallback backing eagerly allocates the full
+/// reserve from the global allocator (no reserve/commit split exists there),
+/// so a multi-GB default would be fatal — the pre-X.F default is kept.
+#[cfg(not(all(not(miri), any(windows, unix), target_pointer_width = "64")))]
+pub const DEFAULT_ARENA_RESERVE: usize = 64 * 1024 * 1024;
+
+/// Arena commit granularity (Phase X.F): 64 KiB — the Windows reservation
+/// granularity, and a multiple of the 4 KiB commit/`mprotect` page size
+/// everywhere. The reservation length itself is rounded up to this
+/// (`os_reserve = align_up(reserve, ARENA_COMMIT_GRANULE)`) so a frontier
+/// commit can never overrun the kernel's page-rounded mapping.
+pub const ARENA_COMMIT_GRANULE: usize = 64 * 1024;
+
+/// Minimum arena commit slab (Phase X.F): 2 MiB — one slab covers a default
+/// ~3 MB component pool in <= 2 growth events. 2 MiB is also the Linux THP
+/// size (the base alignment is page-only, so any THP benefit is
+/// opportunistic — a documented non-goal).
+pub const ARENA_MIN_SLAB: usize = 2 * 1024 * 1024;
+
+/// Maximum arena commit slab (Phase X.F): 64 MiB — commit-charge overshoot
+/// never exceeds the size of the entire pre-X.F arena. Filling a 4 GiB
+/// reserve takes ~70 events lifetime, so the bound optimizes for overshoot
+/// honesty, not event count. A single request larger than this is NOT
+/// clamped (one request = one event; see `Arena::grow_then_retry`).
+pub const ARENA_MAX_SLAB: usize = 64 * 1024 * 1024;
 
 /// Typical CPU cache line size in bytes
 /// Used for memory alignment to optimize cache usage
@@ -67,14 +103,6 @@ pub const MEDIUM_COMPONENT_THRESHOLD: usize = 256;
 /// Initial entity capacity for archetypes
 /// Controls how many entities an archetype can initially store
 pub const INITIAL_ENTITY_CAPACITY: usize = 1024;
-
-/// When dynamic expansion is enabled, grow by this factor
-/// This is used when containers need to be resized
-pub const GROWTH_FACTOR: f32 = 1.5; // Grow by 50%
-
-/// Maximum potential expansion factor for pool size
-/// Limits how much a pool can grow beyond its initial size
-pub const MAX_EXPANSION_FACTOR: usize = 8; // Can grow to 8x initial size
 
 //
 // Memory management

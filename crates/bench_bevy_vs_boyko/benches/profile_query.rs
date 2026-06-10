@@ -54,8 +54,10 @@
 //! - `p2_bevy_baseline_10k` — Bevy's `state.iter(&world)` shape for
 //!   apples-to-apples comparison with `p2_boyko_baseline_*`.
 //!
-//! Multi-archetype fanout cases were deferred — see the "case (F)" comment
-//! below for the arena-sizing constraint.
+//! - `p2_boyko_query_fanout_16arch_10k` / `p2_bevy_query_fanout_16arch_10k`
+//!   — case (F): the same 10k rows split across 16 archetypes (originally
+//!   deferred on the pre-X.F 64 MB arena ceiling; resurrected by Phase X.F
+//!   arena growth). Isolates per-archetype boundary cost vs case (B).
 //!
 //! All numbers feed into `docs/PHASE-12.5-PROFILE-QUERY.md`.
 
@@ -280,23 +282,69 @@ fn bench_boyko_get_component_raw(c: &mut Criterion) {
     });
 }
 
-// ── Boyko: case (F) — fanout (multi-archetype) variant.
+// ── Boyko: case (F) — fanout (multi-archetype) variant. ────────────────────
 //
-// DEFERRED: the default `EcsMaster` arena is 64 MB. Each Position pool
-// reserves a 3 MB contiguous block (128 chunks × 2048 tiny slots ×
-// 12 B); Phase 10 additionally allocates ~2 MB of per-pool `Box<[Tick]>`
-// outside the arena. Even 3 separate archetypes hitting the same arena's
-// free-block tracker exhausts available contiguous blocks under the
-// current allocator policy (the panic fires inside
-// `Arena::allocate_from_free_blocks` for the 3rd Pos pool's 3 MB
-// request). Reproducing this with the bench would require either:
-//   (a) bumping `DEFAULT_ARENA_SIZE` (out of scope — production change), or
-//   (b) shrinking `DEFAULT_CHUNKS_PER_POOL` for benches (per-bench arena
-//       sizing — non-trivial wiring through `EcsMaster::new`).
+// Resurrected by Phase X.F: the arena now grows inside a multi-GB
+// reservation, so the multi-archetype pool demand (16 × ~3 MB Position
+// pools + 16 tag pools ≈ 52 MB — past the old 64 MB ceiling once headers
+// and tracker overhead are added) no longer panics.
 //
-// The single-archetype results above already isolate the four suspected
-// contributors (wrapper vs cached vs direct vs random access). Multi-
-// archetype boundary cost is a follow-up: see Phase 12.5 plan §P2.
+// Shape: the SAME 10k rows as cases (A)-(C), split across 16 `[Position,
+// Tag_k]` archetypes (625 rows each), iterated through the cached-system
+// path of case (B). The delta vs case (B) is pure per-archetype boundary
+// cost (15 extra `set_table_readonly` + entity_count transitions).
+//
+// Tag component slots 436-451: a free run disjoint from every other
+// reserved range in the codebase at the time of writing.
+
+const N_ARCHETYPES_F: usize = 16;
+const TAG_F_BASE: usize = 436;
+
+fn bench_boyko_query_fanout(c: &mut Criterion) {
+    register_boyko_position();
+    for k in 0..N_ARCHETYPES_F {
+        register_layout::<u8>(TAG_F_BASE + k);
+    }
+
+    let mut world = EcsMaster::new();
+    let per_arch = N_ENTITIES / N_ARCHETYPES_F; // 625
+    for k in 0..N_ARCHETYPES_F {
+        let tag_id = ComponentId(TAG_F_BASE + k);
+        let arch = world.create_archetype(&[BOYKO_POS_ID, tag_id]);
+        for i in 0..per_arch {
+            let pos = BoykoPosition { x: (k * per_arch + i) as f32, y: 0.0, z: 0.0 };
+            // SAFETY: `BoykoPosition` is `#[repr(C)]` with three f32 fields
+            // (no padding); viewing it as 12 initialized bytes is valid for
+            // the lifetime of `pos` within this iteration.
+            let pos_bytes = unsafe {
+                std::slice::from_raw_parts(
+                    (&pos as *const BoykoPosition).cast::<u8>(),
+                    std::mem::size_of::<BoykoPosition>(),
+                )
+            };
+            let tag = [k as u8];
+            world
+                .create_entity(arch, &[(BOYKO_POS_ID, pos_bytes), (tag_id, &tag)])
+                .expect("fanout spawn must succeed (Phase X.F arena growth)");
+        }
+    }
+
+    // Case (B) shape: hoisted FunctionSystem, run_cached_system per iter.
+    let closure = |q: BoykoQuery<&BoykoPosition>| {
+        let mut sum = 0.0f32;
+        for p in &q {
+            sum += p.x;
+        }
+        SUM_SINK.store(black_box(sum) as usize, Ordering::Relaxed);
+    };
+    let mut sys = IntoSystem::<(), (), _>::into_system(closure);
+
+    c.bench_function("p2_boyko_query_fanout_16arch_10k", |b| {
+        b.iter(|| {
+            world.run_cached_system(&mut sys);
+        });
+    });
+}
 
 // ── Bevy baselines for cross-check. ─────────────────────────────────────────
 
@@ -315,8 +363,66 @@ fn bench_bevy_baseline(c: &mut Criterion) {
     });
 }
 
-// Bevy fanout removed for symmetry with the deferred boyko fanout — see
-// the note above.
+// ── Bevy: fanout counterpart of case (F) — restored alongside it. ──────────
+//
+// Same 10k rows split across 16 `(BevyPosition, BevyTagK)` archetypes,
+// iterated through Bevy's cached-`QueryState` path for apples-to-apples
+// comparison with `p2_boyko_query_fanout_16arch_10k`.
+
+macro_rules! def_bevy_tag {
+    ($($name:ident),+ $(,)?) => {
+        $(
+            #[derive(BevyComponentDerive)]
+            struct $name;
+        )+
+    };
+}
+
+def_bevy_tag!(
+    BevyTag0, BevyTag1, BevyTag2, BevyTag3, BevyTag4, BevyTag5, BevyTag6, BevyTag7, BevyTag8,
+    BevyTag9, BevyTag10, BevyTag11, BevyTag12, BevyTag13, BevyTag14, BevyTag15,
+);
+
+fn bench_bevy_query_fanout(c: &mut Criterion) {
+    let mut world = World::new();
+    let per_arch = N_ENTITIES / N_ARCHETYPES_F; // 625
+    for k in 0..N_ARCHETYPES_F {
+        for i in 0..per_arch {
+            let pos = BevyPosition { x: (k * per_arch + i) as f32, y: 0.0, z: 0.0 };
+            // One match arm per tag type: each k lands in its own archetype.
+            match k {
+                0 => drop(world.spawn((pos, BevyTag0))),
+                1 => drop(world.spawn((pos, BevyTag1))),
+                2 => drop(world.spawn((pos, BevyTag2))),
+                3 => drop(world.spawn((pos, BevyTag3))),
+                4 => drop(world.spawn((pos, BevyTag4))),
+                5 => drop(world.spawn((pos, BevyTag5))),
+                6 => drop(world.spawn((pos, BevyTag6))),
+                7 => drop(world.spawn((pos, BevyTag7))),
+                8 => drop(world.spawn((pos, BevyTag8))),
+                9 => drop(world.spawn((pos, BevyTag9))),
+                10 => drop(world.spawn((pos, BevyTag10))),
+                11 => drop(world.spawn((pos, BevyTag11))),
+                12 => drop(world.spawn((pos, BevyTag12))),
+                13 => drop(world.spawn((pos, BevyTag13))),
+                14 => drop(world.spawn((pos, BevyTag14))),
+                15 => drop(world.spawn((pos, BevyTag15))),
+                _ => unreachable!("N_ARCHETYPES_F = 16"),
+            }
+        }
+    }
+    let mut state: QueryState<&BevyPosition> = world.query();
+
+    c.bench_function("p2_bevy_query_fanout_16arch_10k", |b| {
+        b.iter(|| {
+            let mut sum = 0.0f32;
+            for p in state.iter(&world) {
+                sum += p.x;
+            }
+            SUM_SINK.store(black_box(sum) as usize, Ordering::Relaxed);
+        });
+    });
+}
 
 // ── Criterion wiring ───────────────────────────────────────────────────────
 
@@ -341,7 +447,9 @@ criterion_group! {
         bench_boyko_run_system_once,
         bench_boyko_direct_pool,
         bench_boyko_get_component_raw,
+        bench_boyko_query_fanout,
         bench_bevy_baseline,
+        bench_bevy_query_fanout,
 }
 
 criterion_main!(profile_query);

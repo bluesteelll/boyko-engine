@@ -371,8 +371,11 @@ impl Archetype {
 
     /// Refreshes the entire `columns` table from `component_pools`.
     ///
-    /// Reserved for future arena-grow events where every pool's `buffer_ptr`
-    /// may relocate. Not used on the Phase 7 hot path.
+    /// Reserved for a hypothetical future RELOCATING arena where every pool's
+    /// `buffer_ptr` may move. Phase X.F confirmed address-stable growth (the
+    /// arena only commits fresh pages at the frontier of one contiguous
+    /// reservation — pool buffers never move), so this MUST remain dead code.
+    /// Not used on the Phase 7 hot path.
     #[cold]
     #[allow(dead_code)]
     fn refresh_all_columns(&mut self) {

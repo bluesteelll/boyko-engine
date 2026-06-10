@@ -237,8 +237,8 @@ fn bench_commands_spawn_enqueue(c: &mut Criterion) {
 fn bench_spawn_command_apply_arity_4(c: &mut Criterion) {
     register_bsc();
     // Per-iter EcsMaster construction would dominate the measurement
-    // (each `EcsMaster::new` allocates a 64 MB arena; per-iter drop pays
-    // the arena unmap cost ~tens of µs). Hoisting the world is also a
+    // (world setup + pool commits; per-iter drop pays the reservation
+    // release cost ~tens of µs). Hoisting the world is also a
     // trap — the per-archetype pool capacity is bounded by
     // `get_optimal_chunk_capacity` so a long sample run fills the pool
     // and `create_entity` errors out.

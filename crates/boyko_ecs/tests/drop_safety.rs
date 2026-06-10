@@ -3,8 +3,9 @@
 /// These tests verify:
 ///   C-001 — `EcsMaster` uses `Box<Arena>` so the arena address is heap-stable
 ///            and `ArchetypeMaster`'s `NonNull<Arena>` does not dangle after a move.
-///   M-001 — `impl Drop for Arena` releases the 64 MB backing buffer; creating
-///            multiple `EcsMaster` instances and dropping them must not crash, leak
+///   M-001 — `impl Drop for Arena` releases the backing reservation (post-X.F:
+///            multi-GB reserve, partially committed); creating multiple
+///            `EcsMaster` instances and dropping them must not crash, leak
 ///            (detectable by Miri), or double-free.
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::component::component_registry;

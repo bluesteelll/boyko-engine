@@ -47,7 +47,6 @@ use crate::ecs::core::system::{
 };
 use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId, EntityId, InlandPoolId};
 use crate::ecs::memory::arena::Arena;
-use crate::ecs::constants::DEFAULT_ARENA_SIZE;
 use crate::ecs::error::{EcsError, EcsResult};
 
 /// Phase 9 Round 2 W3 — entity-master capacity hint used by the
@@ -395,17 +394,19 @@ impl EcsMaster {
     /// are all deferred to first-use. (Phase X.D removed the parallel
     /// `sparse_to_active` fast-store.)
     ///
-    /// # Phase X.C — arena lazy-commit backing store
+    /// # Phase X.F — arena reserve-lazy backing store
     ///
-    /// The arena's 64 MB buffer is acquired with a single OS reservation+commit
-    /// call (`VirtualAlloc(MEM_RESERVE | MEM_COMMIT)` on Windows,
-    /// `mmap(PROT_READ | PROT_WRITE)` on Unix). The OS faults physical pages in
-    /// lazily on first touch, so construction no longer pays an eager 64 MB
-    /// memset — the target is ≤ 5 µs. Miri / wasm32 / exotic targets fall back
-    /// to the global allocator (`std::alloc::alloc`). See
-    /// [`Arena::with_capacity`].
+    /// The arena is acquired RESERVE-ONLY: one multi-GB virtual-address
+    /// reservation (`DEFAULT_ARENA_RESERVE`, 4 GiB on 64-bit OS-syscall
+    /// arms) with ZERO initial commit — no commit syscall, no commit charge.
+    /// The first archetype/pool allocation takes the cold grow path and
+    /// commits the first slab at the frontier; subsequent growth is one
+    /// syscall per slab, never an O(N) move. Miri / wasm32 / exotic targets
+    /// fall back to one eager global-allocator allocation of a 64 MiB
+    /// reserve. Memory-constrained embedders: see
+    /// [`EcsMaster::with_arena_reserve`]. See [`Arena::with_reserve`].
     ///
-    /// [`Arena::with_capacity`]: crate::ecs::memory::arena::Arena::with_capacity
+    /// [`Arena::with_reserve`]: crate::ecs::memory::arena::Arena::with_reserve
     pub fn new() -> Self {
         let arena: Box<Arena> = Box::default();
         // SAFETY: `Box<Arena>` is guaranteed to have the same in-memory
@@ -463,7 +464,9 @@ impl EcsMaster {
     /// SBO17 strong-form contract) should call `ensure_capacity`
     /// explicitly after construction.
     pub fn with_capacity(entity_capacity: usize, archetype_capacity: usize) -> Self {
-        let arena: Box<Arena> = Box::new(Arena::with_capacity(DEFAULT_ARENA_SIZE));
+        // Phase X.F: same reserve-lazy default arena as `new()` (the old
+        // eager `DEFAULT_ARENA_SIZE` commit is gone).
+        let arena: Box<Arena> = Box::default();
         // SAFETY: same rationale as `EcsMaster::new`.
         let arena_ptr: *const Arena = unsafe {
             let box_ptr: *const Box<Arena> = std::ptr::addr_of!(arena);
@@ -487,6 +490,43 @@ impl EcsMaster {
             // Phase 14a: lazy — alloc-free until the first deferred hook push.
             // The reentrancy depth counter is a thread-local (see hooks::scope),
             // so it is not a field here (fixes F2's Tree Borrows UB).
+            deferred_hook_queue: CommandQueue::new(),
+            query_state_cache: OnceLock::new(),
+        }
+    }
+
+    /// Creates a new empty `EcsMaster` whose component-data arena reserves
+    /// `arena_reserve` bytes of address space (Phase X.F).
+    ///
+    /// The reserve is the LOGICAL allocation ceiling: archetype/pool creation
+    /// commits slabs lazily at the frontier and panics loudly only when the
+    /// total live component data would exceed `arena_reserve`. Nothing is
+    /// committed up front. Intended for tests, benches, and
+    /// memory-constrained embedders that want a ceiling smaller than the
+    /// multi-GB `DEFAULT_ARENA_RESERVE` default (or a larger one).
+    pub fn with_arena_reserve(arena_reserve: usize) -> Self {
+        let arena: Box<Arena> = Box::new(Arena::with_reserve(arena_reserve, 0));
+        // SAFETY: same rationale as `EcsMaster::new`.
+        let arena_ptr: *const Arena = unsafe {
+            let box_ptr: *const Box<Arena> = std::ptr::addr_of!(arena);
+            *(box_ptr.cast::<*const Arena>())
+        };
+        // SAFETY: same contract as `EcsMaster::new`.
+        let archetype_master = unsafe { ArchetypeMaster::new(arena_ptr) };
+        // EventDispatcher::new(1) validates 1 ∈ 1..=64 — never fails.
+        let events = EventDispatcher::new(1)
+            .expect("invariant: default thread_count=1 is always valid");
+        Self {
+            resources: Resources::new(),
+            events,
+            entity_master: EntityMaster::new(),
+            archetype_master,
+            bundle_archetype_cache: OnceLock::new(),
+            bundle_column_cache: OnceLock::new(),
+            change_tick: AtomicU32::new(0),
+            last_check_tick: Tick::ZERO,
+            arena,
+            // Phase 14a: lazy — alloc-free until the first deferred hook push.
             deferred_hook_queue: CommandQueue::new(),
             query_state_cache: OnceLock::new(),
         }

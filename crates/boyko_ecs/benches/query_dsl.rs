@@ -369,9 +369,10 @@ fn bench_query_cold_construction(c: &mut Criterion) {
         b.iter_batched(
             // Setup: fresh ECS with 100 entities — small enough that the
             // per-iter setup latency stays bounded. `SmallInput` keeps
-            // criterion from accumulating ECSes across batches (each
-            // `EcsMaster::new` allocates a 64 MB arena; `LargeInput` would
-            // pile up tens of GB before the next drop wave).
+            // criterion from accumulating ECSes across batches (post-X.F a
+            // fresh world is reserve-only, but each populated world still
+            // commits real pages; `LargeInput` would pile up many live
+            // worlds before the next drop wave).
             || {
                 let (ecs, _arch) = build_single_archetype(100);
                 ecs
@@ -413,9 +414,10 @@ fn bench_query_cold_construction(c: &mut Criterion) {
 //
 // `iter_batched` would build a fresh ECS (and 50 archetypes, each
 // preallocating ~4 MB of component pools via `with_default_sizes`) on every
-// batch. With 64-MB `DEFAULT_ARENA_SIZE` even one ECS with 50 archetypes
-// runs out of arena (~200 MB needed); criterion's batched setup blows the
-// heap before the first sample completes.
+// batch — ~200 MB of pool commits per batched setup. Phase X.F removed the
+// old 64 MB arena ceiling (the default arena now grows inside a 4 GiB
+// reservation), but rebuilding hundreds of MB of pools per batch is still
+// pure setup waste.
 //
 // Instead, build ONE shared ECS with `N_ARCHETYPES` archetypes (cold,
 // once), then have each timed iteration repeatedly call
@@ -438,11 +440,12 @@ fn bench_query_cold_construction(c: &mut Criterion) {
 // archetype preallocates ~4 MB of component pool buffers
 // (`with_default_sizes` allocates `DEFAULT_CHUNKS_PER_POOL ×
 // TINY_COMPONENTS_PER_CHUNK × component_size` = 128 × 2048 × 12 ≈ 3 MB for
-// `Position` plus ~1 MB for `Tag`). 50 archetypes need ~200 MB — far above
-// the 64-MB `DEFAULT_ARENA_SIZE`; even 16 archetypes hits the arena ceiling
-// due to per-archetype headers and the empty-block tracker overhead.
+// `Position` plus ~1 MB for `Tag`). The old 64 MB arena ceiling that
+// originally forced this trim is gone (Phase X.F: the arena grows inside a
+// 4 GiB reservation), so 50 archetypes WOULD fit now — 8 is kept to bound
+// the bench's resident weight and setup time.
 //
-// 8 archetypes (~32 MB) sits comfortably inside the arena while still
+// 8 archetypes (~32 MB) keeps the working set small while still
 // exercising `update_archetypes`'s archetype-bitset scan. The measured
 // per-archetype cost is roughly linear in N (one bit-test + push per
 // matching archetype), so the 50-archetype target can be estimated by

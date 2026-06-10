@@ -178,7 +178,9 @@ fn bench_alloc_cold(c: &mut Criterion) {
 fn bench_arena_allocate_layout(c: &mut Criterion) {
     let mut group = c.benchmark_group("arena_allocate_layout");
     // Arena capacity must comfortably fit all iterations without OOM.
-    // 16k * 128 B = 2 MB; 64 MB default arena is ample.
+    // 16k * 128 B = 2 MB — the explicit per-bench `with_capacity` arenas
+    // below are sized accordingly (the default arena is reserve-lazy
+    // post-X.F and irrelevant here).
     for &n in &[1_000usize, 16_000] {
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
             let layout = Layout::from_size_align(64, 64).expect("valid layout");

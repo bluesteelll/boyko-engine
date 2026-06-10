@@ -59,6 +59,13 @@ harness = false
 name = "profile_spawn_single"
 harness = false
 
+# Phase X.F — g7/g7b growth-crossing gate (boyko slab commit vs Bevy table
+# doubling memcpy). Binding targets: total >= 1.5x faster, worst-event spike
+# <= 0.1x. See docs/PHASE-XF-PLAN.md §B5/B6 + R2 FINAL + R3-2.
+[[bench]]
+name = "growth_crossing"
+harness = false
+
 [[bench]]
 name = "g6_for_each_chunk"
 harness = false

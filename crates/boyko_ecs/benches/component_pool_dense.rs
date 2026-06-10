@@ -71,11 +71,12 @@ fn empty_pool(arena: &Arena, cap: usize) -> ComponentPool {
 
 /// A right-sized arena for `cap` `Payload` rows + alignment slack.
 ///
-/// The default `Arena::new()` reserves+commits the full 64 MB
-/// `DEFAULT_ARENA_SIZE`; criterion's batched setup would hold many such
-/// arenas alive at once and exhaust the commit charge. The pool buffer needs
-/// `cap * 16` bytes, so a 4 MB arena covers the largest (10k) case with room
-/// to spare while keeping the simultaneous-setup footprint small.
+/// Phase X.F: the default `Arena::new()` is reserve-only (multi-GB VA, zero
+/// commit), so the old commit-charge concern with criterion's batched setup
+/// holding many arenas alive is gone. A right-sized EAGER arena is kept
+/// anyway: the pool buffer needs `cap * 16` bytes, and a 4 MB
+/// `with_capacity` arena covers the largest (10k) case while keeping the
+/// bench self-contained and the timed region free of grow events.
 fn sized_arena(cap: usize) -> Arena {
     let bytes = (cap * std::mem::size_of::<Payload>()).max(4 * 1024 * 1024);
     Arena::with_capacity(bytes)

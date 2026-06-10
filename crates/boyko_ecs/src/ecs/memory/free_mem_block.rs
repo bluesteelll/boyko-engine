@@ -202,7 +202,11 @@ impl MemFreeBlockMaster {
             return None;
         }
 
-        // Search for a block accounting for the maximum possible alignment
+        // Search for a block accounting for the maximum possible alignment.
+        // COUPLING (Phase X.F GROW1): `Arena::grow_then_retry` recomputes
+        // this exact criterion (`size + align - 1`, checked there) for its
+        // pre-grow sufficiency check — if this formula changes, update
+        // `grow_then_retry` in lockstep (R3-3).
         let required_size = size + align - 1;
         let (block_index, block) = self.find_best_fit_with_index(required_size)?;
 
@@ -229,6 +233,19 @@ impl MemFreeBlockMaster {
         // assert here for the no-spill case and for clarity at function exit.
         debug_assert!(self.debug_invariants(), "MemFreeBlockMaster invariants violated after allocate_aligned");
         Some(aligned_block)
+    }
+
+    /// Read-only probe: length of the free block whose END is exactly
+    /// `offset`, or 0 when no such block exists (Phase X.F).
+    ///
+    /// Used by `Arena::grow_then_retry` to size its GROW1 sufficiency check
+    /// BEFORE any state change: the block ending at the (clamped) frontier is
+    /// the only one a frontier insert can left-coalesce with, and `end_map`
+    /// already indexes every block by its end offset for the coalescer.
+    pub(crate) fn free_block_len_ending_at(&self, offset: usize) -> usize {
+        self.end_map
+            .get(&offset)
+            .map_or(0, |&idx| self.blocks[idx].size())
     }
 
     fn find_best_fit_with_index(&self, min_size: usize) -> Option<(usize, MemFreeBlock)> {
