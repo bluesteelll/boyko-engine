@@ -525,18 +525,21 @@ now computed arithmetic, which net-removed `unsafe`. **Phase 10** added the
 
 | What you want to do | Where | Method |
 |---------------------|-------|--------|
-| Construct the arena | [memory/arena.rs](../crates/boyko_ecs/src/ecs/memory/arena.rs):139 ✅ | `Arena::with_capacity(bytes)` — `VirtualAlloc`/`mmap` lazy-commit (Phase X.C); `new()` / `Default` use `DEFAULT_ARENA_SIZE = 64 MB` |
+| Construct the arena | [memory/arena.rs](../crates/boyko_ecs/src/ecs/memory/arena.rs) ✅ | `Arena::with_reserve(reserve, initial_commit)` — 4 GiB reserve + lazy slab commit, GROWS on demand, addresses never move (Phase X.F); `with_capacity(c)` = eager back-compat; `EcsMaster::with_arena_reserve(bytes)` knob |
+| Grow the arena (automatic) | [memory/arena.rs](../crates/boyko_ecs/src/ecs/memory/arena.rs) ✅ | `#[cold] grow_then_retry` — commit next slab at the frontier + retry; panic only at reserve exhaustion. Growth-crossing spawn **1.75× faster than Bevy** ([PHASE-XF-RESULTS.md](PHASE-XF-RESULTS.md)) |
 | Allocate a block | [memory/arena.rs](../crates/boyko_ecs/src/ecs/memory/arena.rs) ✅ | `allocate_layout(layout)` / `allocate(size)` |
 | Free the arena | [memory/arena.rs](../crates/boyko_ecs/src/ecs/memory/arena.rs) ✅ | `impl Drop` — per-cfg-arm matching deallocator (M-001) |
 | Best-fit free-block tracking | [memory/free_mem_block.rs](../crates/boyko_ecs/src/ecs/memory/free_mem_block.rs) ✅ | `MemFreeBlockMaster::allocate_aligned` / `find_best_fit` / `insert` (O(1) coalesce) / `defragment` |
 | Align an address/size | [memory/utils.rs](../crates/boyko_ecs/src/ecs/memory/utils.rs) ✅ | `align_up(value, alignment)` |
 | Chunk metadata | [memory/chunk.rs](../crates/boyko_ecs/src/ecs/memory/chunk.rs) ✅ | `Chunk` — metadata window (start_index, capacity, dirty flag) |
 
-`Arena` is `!Send + !Sync` by construction. Backing acquisition: one
-reserve+demand-zero-commit syscall (`VirtualAlloc(MEM_RESERVE|MEM_COMMIT)` on
-Windows, `mmap(MAP_PRIVATE|MAP_ANONYMOUS)` on Unix); Miri / wasm32 / exotic
-targets fall back to the global allocator. `Arena::new` ≈ 1.10 µs. See
-[PHASE-XC-RESULTS.md](PHASE-XC-RESULTS.md).
+`Arena` is `!Send + !Sync` by construction. Backing acquisition (Phase X.F):
+reserve-only syscall (`VirtualAlloc(MEM_RESERVE, PAGE_NOACCESS)` on Windows,
+`mmap(PROT_NONE)` on Unix) + lazy geometric slab commits at the frontier
+(`MEM_COMMIT`/`mprotect`); Miri / wasm32 / exotic targets eagerly allocate the
+full reserve from the global allocator (growth = watermark bump). `Arena::new`
+≈ 762 ns (reserve-only, zero commit charge). See
+[PHASE-XC-RESULTS.md](PHASE-XC-RESULTS.md) + [PHASE-XF-RESULTS.md](PHASE-XF-RESULTS.md).
 
 ---
 

@@ -82,29 +82,41 @@ sparse-set collections; `Entity` implements `From<Slot>` / `Into<Slot>`.
 
 ## 2. Memory subsystem ✅
 
-### 2.1. Arena (lazy-commit backing — Phase X.C) ✅
+### 2.1. Arena (huge-reserve + lazy slab commit — Phase X.F) ✅
 
 **File:** [crates/boyko_ecs/src/ecs/memory/arena.rs](../crates/boyko_ecs/src/ecs/memory/arena.rs)
 
-64 MB cache-line-aligned arena, best-fit allocation via `MemFreeBlockMaster`.
+GROWING arena: one contiguous **4 GiB** virtual reservation (default,
+`DEFAULT_ARENA_RESERVE`), committed lazily in geometric frontier slabs
+(2 MiB → ×2 → 64 MiB clamp); best-fit allocation via `MemFreeBlockMaster`
+(offset-based — addresses NEVER move across growth).
 
 ```rust
 pub struct Arena {
-    ptr: NonNull<u8>,
-    capacity: usize,                          // logical, cache-line-aligned
+    ptr: NonNull<u8>,                         // write-once base of the reservation
+    reserve: usize,                           // logical ceiling = capacity()
+    committed: Cell<usize>,                   // frontier watermark (cold-path-only writes)
     backing: Backing,                         // cfg-gated release descriptor (M-001)
     free_blocks: UnsafeCell<MemFreeBlockMaster>,
 }
 ```
 
-- **Backing store (Phase X.C):** `with_capacity` acquires the buffer with ONE
-  reserve+demand-zero-commit syscall — `VirtualAlloc(MEM_RESERVE|MEM_COMMIT)` on
-  Windows (hand-declared `unsafe extern "system"`, no `windows-sys` dep),
-  `mmap(MAP_PRIVATE|MAP_ANONYMOUS)` on Unix (via `libc`). The `cfg(any(miri,
-  not(any(windows, unix))))` arm falls back to global `alloc` (Miri can't run
-  the syscalls; wasm has no VM API). `Arena::new` ≈ 1.10 µs (was ~23-75 µs). The
-  cfg-gated `Backing` (`{layout}` / `{}` / `{map_len}`) carries the matching
-  deallocator for `Drop` — cross-dealloc is statically impossible.
+- **Backing store (Phase X.F, supersedes X.C commit-whole):** reserve-only
+  acquisition — `VirtualAlloc(MEM_RESERVE, PAGE_NOACCESS)` on Windows
+  (hand-declared externs, no `windows-sys` dep), `mmap(PROT_NONE)` on Unix
+  (overcommit-mode-2-proof); commit per slab via `VirtualAlloc(MEM_COMMIT)` /
+  `mprotect(RW)` in `#[cold] commit_frontier`. The `cfg(any(miri, not(any(
+  windows, unix))))` arm eagerly allocates the full reserve from global `alloc`
+  (commit = watermark bump; all growth bookkeeping runs under Miri). `Arena::new`
+  = `with_reserve(4 GiB, 0)` — zero initial commit, **762 ns** (was 1.10 µs);
+  `with_capacity(c)` ≡ `with_reserve(c, c)` (eager back-compat). Exhaustion =
+  `grow_then_retry`: sufficiency check against the allocator's actual fit
+  criterion BEFORE any state change (GROW1: retry-once provably succeeds),
+  loud "Arena reserve exhausted" panic only at the true ceiling. The cfg-gated
+  `Backing` carries the matching deallocator for `Drop` — cross-dealloc is
+  statically impossible. Supported pointer alignment bound: `CACHE_LINE_SIZE`.
+  See [PHASE-XF-RESULTS.md](PHASE-XF-RESULTS.md) — growth-crossing spawn is
+  **1.75× faster than Bevy** (zero-copy growth vs realloc+memcpy doubling).
 - Lives behind `Box<Arena>` inside `EcsMaster` so child structures holding raw
   pointers to it survive moves of the owner (C-001).
 - Child structures store the arena as `*const Arena` (raw provenance, Phase 3a
@@ -1292,7 +1304,9 @@ Bundle, SystemSet};`.
 
 | Name | Value | Where defined |
 |------|-------|---------------|
-| `DEFAULT_ARENA_SIZE` | 64 MB | [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):3 |
+| `DEFAULT_ARENA_RESERVE` | 4 GiB (64-bit syscall arms) / 64 MiB (fallback) | [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs) (Phase X.F) |
+| `ARENA_COMMIT_GRANULE` | 64 KiB | [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs) (Phase X.F) |
+| `ARENA_MIN_SLAB` / `ARENA_MAX_SLAB` | 2 MiB / 64 MiB | [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs) (Phase X.F) |
 | `CACHE_LINE_SIZE` | 64 B | [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):7 |
 | `SIMD_BUFFER_ALIGN` | 32 B (AVX2) | [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):22 (Phase X.A) |
 | `TINY/SMALL/MEDIUM/LARGE_COMPONENTS_PER_CHUNK` | 2048 / 1024 / 512 / 256 | [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):44-56 |
