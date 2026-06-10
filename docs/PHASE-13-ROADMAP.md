@@ -142,10 +142,17 @@ Deferred: SubApps/render-world; Plugin `finish`/`cleanup`/`ready`;
 resolution / cycle refactor); the `boyko_demo` port to `App` (a restructure; the
 demo's wasm/no-pool path can't use the native-multithreaded `App`).
 
-### Phase 19 — Hierarchies / Parent-Child
-Entity relationship via `Parent` / `Children` components + propagation
-schedule. Could integrate with Phase 14 observers for auto-despawn-children.
-~3-4 weeks.
+### Phase 19 — Hierarchies / Parent-Child — ✅ DONE
+`ChildOf` / `Children` (Bevy-0.16 model) on the Phase 14a/14b hooks;
+default-recursive despawn cascade; 1-field Bundle newtypes reuse
+`migrate_entity_insert`. Landed `5f536bc` + TB-UB fix `670b8ca`
+(pre-existing `command_queue.rs apply_via_raw_twin` re-entrant-drain bug the
+hierarchy cascade was the first workload to expose). See
+[PHASE-19-RESULTS.md](PHASE-19-RESULTS.md).
+
+**Roadmap status: every feature phase (13-19) and every perf-polish phase
+(X.A-X.E) above is DONE.** Follow-up correctness phases landed since: 16.1
+(tick-aware run conditions, [PHASE-16.1-RESULTS.md](PHASE-16.1-RESULTS.md)).
 
 ## Performance polish (focused refactors, interleavable with features)
 

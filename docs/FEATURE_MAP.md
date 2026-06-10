@@ -331,8 +331,12 @@ See [PHASE-15-RESULTS.md](PHASE-15-RESULTS.md).
 | Executor integration | [schedule/schedule.rs](../crates/boyko_ecs/src/ecs/core/schedule/schedule.rs) ✅ | `evaluate_ready_conditions` pass at the apply-window barrier (0%-gate via `has_condition` bitset) |
 
 `run_if` conditions are pure predicates (no `apply`). Eager AND fold (no
-short-circuit). Tick-aware conditions (`Changed`/`Added`) are a documented
-footgun → Phase 16.1. See [PHASE-16-RESULTS.md](PHASE-16-RESULTS.md).
+short-circuit). Tick-aware conditions (`Changed`/`Added`/`Ref`) work correctly
+since Phase 16.1 ✅: a condition's window advances only on a frame it is
+evaluated, and a gated system's ticks advance only on a frame it runs, so
+dormant changes are never silently missed (Bevy "since-last-actual-run"
+parity). See [PHASE-16-RESULTS.md](PHASE-16-RESULTS.md) +
+[PHASE-16.1-RESULTS.md](PHASE-16.1-RESULTS.md).
 
 ---
 
@@ -581,7 +585,7 @@ physics via Phase-17 states, real `Schedule::run` + `par_iter` + zero-AoS-copy
 |---------|--------------------|
 | ZST components / resources / events | ❌ rejected (debug-assert / compile-time guard); a Phase-2-future enhancement |
 | `Option<Res<R>>` SystemParam → `resource_exists` condition | 📋 deferred (Phase 16 residual) |
-| Tick-aware run conditions (`Changed`/`Added`) | 📋 Phase 16.1 (current behavior is a documented footgun) |
+| ~~Tick-aware run conditions (`Changed`/`Added`)~~ | ✅ LANDED — Phase 16.1 (dormancy-correct ticks, [PHASE-16.1-RESULTS.md](PHASE-16.1-RESULTS.md)) |
 | `for_each_chunk` with `Changed`/`Added`/`Ref`/`Mut` | ❌ gated out at compile time; use `iter()` — Phase 13.X `ChunkedTickedQueryData` |
 | Multi-schedule label map / SubApps / `PluginGroup` | 📋 deferred (Phase 18 boundaries) |
 | Single-dep prelude including derives | 📋 deferred — needs the `boyko-macros` cycle refactor (Phase 18) |

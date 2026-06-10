@@ -764,6 +764,7 @@ pub unsafe trait System: Send + Sync + 'static {
     unsafe fn run_unsafe(&mut self, world: UnsafeEcsCell<'_>) -> Self::Out;  // :94
     fn apply(&mut self, _world: &mut EcsMaster) {}         // :120 (safe; flushes deferred state)
     fn set_change_ticks(&mut self, last_run: Tick, this_run: Tick);  // :169 (Phase 10 C1)
+    fn check_change_tick(&mut self, current: Tick);        // Phase 16.1 Gap #2 (no default body)
 }
 ```
 
@@ -972,10 +973,17 @@ See [PHASE-15-RESULTS.md](PHASE-15-RESULTS.md).
   WITHOUT running the body (skip-but-keep-dependents). The 0%-gate is the
   `has_condition` bitset `is_clear()` early-out (`try_dispatch_ready`
   byte-identical). Conditions are pure predicates (no `apply`).
-- Footgun: tick-aware conditions (`Changed`/`Added`) silently report all-changed
-  (no `set_change_ticks` on conditions) → Phase 16.1.
+- Tick-aware conditions (`Changed`/`Added`/`Ref`) are CORRECT since Phase 16.1:
+  `run_condition(cond, this_run)` checkpoints the condition's
+  `(last_run, this_run]` window at the eval site, only on a frame it is
+  actually evaluated (Bevy "since-last-actual-run" parity — a dormant condition
+  resumes seeing ALL changes accrued while dormant). There is NO frame-start
+  condition bump. `Schedule.frame_this_run` (set once at the top of `run`) is
+  the tick source — not `world.current_tick()`, which reads `this_run + 1`
+  after the #56 apply-window bump.
 
-See [PHASE-16-RESULTS.md](PHASE-16-RESULTS.md).
+See [PHASE-16-RESULTS.md](PHASE-16-RESULTS.md) +
+[PHASE-16.1-RESULTS.md](PHASE-16.1-RESULTS.md).
 
 ---
 
@@ -994,6 +1002,16 @@ Bevy-style per-row tick storage (Phase 10). Module:
 - `EcsMaster::change_tick: AtomicU32` bumped once per `Schedule::run`; per-system
   `last_run`/`this_run` snapshot on `SystemMeta`, written via
   `System::set_change_ticks` (the C1 single dispatcher→system channel).
+  **Phase 16.1 stamp contract:** UNGATED systems (`has_condition[i]` clear) are
+  stamped in the frame-start loop (they run every frame, so it is equivalent);
+  GATED systems are stamped at their DISPATCH site only on a frame they run
+  (concurrent path = pre-pass before the `systems_ptr` raw lift; inline-exclusive
+  path = before `run_unsafe`); a skipped frame freezes the ticks, so `Changed<T>`
+  body queries observe the full dormant window on resume. Conditions checkpoint
+  inside `run_condition` (eval site). `System::check_change_tick` (no default
+  body) + `#[cold] Schedule::check_change_ticks` clamp system + own-condition +
+  set-condition ticks on the `should_run_check_ticks` cold path (the dormancy
+  wraparound guard).
 - Filters `Added<C>` / `Changed<C>` (§8.2); data `Ref<T>` (immutable + flags) /
   `Mut<T>` (deref-guard bumps `changed`). `set_if_neq` / `bypass_change_detection`
   escape hatches.

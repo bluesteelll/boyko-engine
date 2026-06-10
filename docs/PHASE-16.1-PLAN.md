@@ -1,4 +1,7 @@
-# Phase 16.1 — Tick-Aware Run Conditions (COMPLETION) — Architect Plan (pending critic)
+# Phase 16.1 — Tick-Aware Run Conditions (COMPLETION) — Architect Plan (R2-FINAL, LANDED)
+
+> Status: **LANDED** as `579c738` — see [PHASE-16.1-RESULTS.md](PHASE-16.1-RESULTS.md)
+> for gates (W1 bench PASS, full Miri-TB sweep, workspace suites green).
 
 Branch `ecs`. Implementation-ready. Research: `docs/PHASE-16-RESULTS.md` §0-P4 (the original footgun record) +
 the Phase 16.1 research summary. **The "Changed/Added condition silently always-true" footgun is ALREADY
