@@ -157,7 +157,7 @@ struct BevyV2Pos {
 //   - bundle_archetype_cache = Box<[OnceLock<ArchetypeId>; 1024]>
 //   - bundle_column_cache = Box<[OnceLock<BundleColumnRecord>; 1024]>
 //   - query_state_cache = Box<[OnceLock<QueryCacheSlot>; 1024]>
-//   - arena = Box<Arena> (separate allocation)
+//   (the historical `arena = Box<Arena>` allocation was retired in X.J)
 //
 // Hypothesis: rebuilding the world per criterion iter pays a non-trivial
 // setup cost (allocation + zero-init of ~1.5 MB of fast-store slots).

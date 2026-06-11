@@ -40,7 +40,6 @@ use boyko_ecs::ecs::core::entity::entity::Entity;
 use boyko_ecs::ecs::core::iters::query::{Added, Query};
 use boyko_ecs::ecs::core::schedule::ScheduleBuilder;
 use boyko_ecs::ecs::core::system::Commands;
-use boyko_ecs::ecs::memory::arena::Arena;
 use boyko_ecs::ecs::memory::component_pool::ComponentPool;
 use boyko_macros::{Bundle, Component};
 use boyko_threadpool::{ThreadPool, ThreadPoolBuilder};
@@ -677,7 +676,7 @@ fn commands_spawn_past_reserve_ceiling_panics_with_ceiling_wording() {
     // Swap in the tiny D2-mapped pool (ceiling = 1 * 4 rows) BEFORE any row
     // exists, so the old pool drops empty.
     {
-        let small = ComponentPool::new(&Arena::new(), I5Comp::component_id().0, 1, 4);
+        let small = ComponentPool::new(I5Comp::component_id().0, 4);
         let arch = world
             .archetype_master_mut()
             .get_archetype_mut(arch_id)

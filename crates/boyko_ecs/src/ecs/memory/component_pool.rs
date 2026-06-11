@@ -10,7 +10,6 @@ use crate::ecs::constants::{
 use crate::ecs::core::change_detection::Tick;
 use crate::ecs::core::component::component::Component;
 use crate::ecs::core::component::component_registry::{self, DropFn};
-use crate::ecs::memory::arena::Arena;
 use crate::ecs::memory::vm::VmReservation;
 
 // Phase X.I D1: the tick sub-regions are sized at `reserve_rows * 4` bytes —
@@ -113,14 +112,14 @@ impl ComponentPool {
     ///
     /// # Phase X.I D2 mapping (★R1-9 — binding)
     ///
-    /// This legacy constructor produces `reserve_rows = num_chunks *
-    /// components_per_chunk` EXACTLY — it deliberately BYPASSES the
-    /// `POOL_MIN_ROWS`/`POOL_MAX_ROWS` clamp. The entire pin-test ledger
-    /// (drop_fn `1 × cap` pools, the in-file `4 × 64` proptests, the dense
-    /// bench, the X.B identity tests) depends on exact small ceilings;
-    /// routing this constructor through the clamp would be a ledger-wide
-    /// breakage. The first two parameter names are historical (the chunk
-    /// machinery was deleted by Phase X.I D7); a rename is filed for X.J.
+    /// This explicit-ceiling constructor uses `reserve_rows` EXACTLY — it
+    /// deliberately BYPASSES the `POOL_MIN_ROWS`/`POOL_MAX_ROWS` clamp. The
+    /// entire pin-test ledger (drop_fn `cap`-row pools, the in-file 256-row
+    /// proptests, the dense bench, the X.B identity tests) depends on exact
+    /// small ceilings; routing this constructor through the clamp would be
+    /// a ledger-wide breakage. (Phase X.J collapsed the historical
+    /// `num_chunks × components_per_chunk` parameter pair — `reserve_rows
+    /// = n × m` — into this single parameter.)
     ///
     /// Construction performs ONE address-space reservation (no commit
     /// charge, zero resident bytes) and computes the three write-once base
@@ -132,15 +131,9 @@ impl ComponentPool {
     /// * `reserve_rows == 0` (★R1-5) — the ceiling must be non-zero.
     /// * `component_layout.align() > 4096` — every arm's reservation base
     ///   is only guaranteed 4096-aligned.
-    /// * `reserve_rows * stride` (or `num_chunks * components_per_chunk`)
-    ///   overflowing `usize`.
+    /// * `reserve_rows * stride` overflowing `usize`.
     /// * OS reservation failure (unrecoverable misconfiguration).
-    pub fn new(
-        _arena: &Arena,
-        component_id: usize,
-        num_chunks: usize,
-        components_per_chunk: usize,
-    ) -> Self {
+    pub fn new(component_id: usize, reserve_rows: usize) -> Self {
         debug_assert!(component_id < 512, "Component ID exceeds maximum allowed");
 
         // SAFETY: component_id was checked above; caller must have registered
@@ -158,17 +151,12 @@ impl ComponentPool {
             component_id
         );
 
-        // D2 mapping (★R1-9): reserve_rows = n * m EXACTLY, clamp bypassed.
-        let reserve_rows = num_chunks
-            .checked_mul(components_per_chunk)
-            .expect("ComponentPool::new: num_chunks * components_per_chunk overflows usize");
         // ★R1-5: loud pool-level assert BEFORE the vm reservation, so a zero
         // ceiling names this constructor instead of panicking inside
         // `VmReservation::reserve(0)` with a vm-internals message.
         assert!(
             reserve_rows > 0,
-            "ComponentPool::new: reserve_rows == 0 \
-             (num_chunks * components_per_chunk must be non-zero)"
+            "ComponentPool::new: reserve_rows == 0 (the row ceiling must be non-zero)"
         );
         // ★R1-9 ceiling guard: this constructor bypasses the POOL_MAX_ROWS
         // clamp, so it must enforce the row-index representability bound
@@ -179,8 +167,7 @@ impl ComponentPool {
         // assert in constants.rs: one bound form for both constructors.
         assert!(
             reserve_rows < u32::MAX as usize,
-            "ComponentPool::new: reserve_rows = {reserve_rows} \
-             (num_chunks * components_per_chunk) exceeds the \
+            "ComponentPool::new: reserve_rows = {reserve_rows} exceeds the \
              `EntityInland.unit_index: u32` row-index ceiling \
              (must be < u32::MAX, matching the POOL_MAX_ROWS const assert)"
         );
@@ -270,10 +257,10 @@ impl ComponentPool {
     /// default ceiling:
     /// `reserve_rows = clamp(POOL_TARGET_DATA_BYTES / stride,
     /// POOL_MIN_ROWS, POOL_MAX_ROWS)`.
-    pub fn with_default_sizes(_arena: &Arena, component_id: usize) -> Self {
+    pub fn with_default_sizes(component_id: usize) -> Self {
         let component_size = component_registry::get_component_size(component_id)
             .expect("Component not registered");
-        Self::new(_arena, component_id, 1, pool_reserve_rows(component_size))
+        Self::new(component_id, pool_reserve_rows(component_size))
     }
 
     /// Phase X.I D4 — the single cold growth funnel: ensures rows `[0, n)`
@@ -824,16 +811,16 @@ impl ComponentPool {
     }
 
     /// Gets the pool's row ceiling (`reserve_rows`) — the bound exhaustion
-    /// is measured against (Phase X.I D6; the X.F precedent:
-    /// `Arena::capacity()` = reserve). Committed capacity below the ceiling
-    /// grows on demand and is reported by [`Self::committed_rows`].
+    /// is measured against (Phase X.I D6; the X.F precedent: capacity =
+    /// reserve). Committed capacity below the ceiling grows on demand and
+    /// is reported by [`Self::committed_rows`].
     #[inline]
     pub fn capacity(&self) -> usize {
         self.reserve_rows
     }
 
     /// Phase X.I D6: rows currently committed read/write — the growth
-    /// frontier (diagnostics/tests; the mirror of `Arena::committed()`).
+    /// frontier (diagnostics/tests).
     /// Invariant: `count() <= committed_rows() <= capacity()`.
     #[inline]
     pub fn committed_rows(&self) -> usize {
@@ -1201,7 +1188,7 @@ impl ComponentPool {
     // ── Phase 12.5 Opt-A2 — batch reserve / write accessors (C-N1) ──────────
     //
     // §5.6 of the spawn-optimisations plan. The batch path reserves
-    // capacity, writes payload bytes directly into pre-validated arena
+    // capacity, writes payload bytes directly into pre-validated pool
     // slots, then commits the rows (advancing `len`) and stamps
     // `(added, changed)` ticks in tight loops. All accessors are
     // `pub(crate)` — consumed exclusively by `Archetype::reserve_capacity`,
@@ -1457,7 +1444,6 @@ mod tests {
     use crate::ecs::core::component::component::Component;
     use crate::ecs::core::component::component_registry;
     use crate::ecs::identifiers::primitives::ComponentId;
-    use crate::ecs::memory::arena::Arena;
 
     // ID allocation (no collision with integration test files or other unit tests):
     //   component_registry unit tests: 450..466, 498, 499
@@ -1558,9 +1544,9 @@ mod tests {
         component_registry::register_layout::<F32Wrap>(F32_WRAP_ID.0);
     }
 
-    fn make_position_pool(arena: &Arena, cap: usize) -> ComponentPool {
+    fn make_position_pool(cap: usize) -> ComponentPool {
         register_all();
-        ComponentPool::new(arena, POS_ID.0, 1, cap)
+        ComponentPool::new(POS_ID.0, cap)
     }
 
     // ---- tests (audit C-004 typed read wrappers) -----------------------------------
@@ -1569,8 +1555,7 @@ mod tests {
     #[test]
     fn get_typed_returns_inserted_value() {
         register_all();
-        let arena = Arena::new();
-        let mut pool = make_position_pool(&arena, 4);
+        let mut pool = make_position_pool(4);
 
         let index = pool
             .add_typed(Position { x: 1.0, y: 2.0, z: 3.0 })
@@ -1587,8 +1572,7 @@ mod tests {
     #[test]
     fn get_mut_typed_round_trip() {
         register_all();
-        let arena = Arena::new();
-        let mut pool = make_position_pool(&arena, 4);
+        let mut pool = make_position_pool(4);
 
         let index = pool
             .add_typed(Position { x: 0.0, y: 0.0, z: 0.0 })
@@ -1610,8 +1594,7 @@ mod tests {
     #[test]
     fn get_typed_out_of_bounds_returns_none() {
         register_all();
-        let arena = Arena::new();
-        let pool = make_position_pool(&arena, 4);
+        let pool = make_position_pool(4);
 
         // Pool is empty; index 0 is out of bounds.
         assert!(
@@ -1627,9 +1610,8 @@ mod tests {
     #[should_panic(expected = "does not match pool's registered type")]
     fn get_typed_wrong_type_panics_in_debug() {
         register_all();
-        let arena = Arena::new();
         // Pool is registered for `Position` (POS_ID).
-        let mut pool = ComponentPool::new(&arena, POS_ID.0, 1, 4);
+        let mut pool = ComponentPool::new(POS_ID.0, 4);
 
         // Insert a valid Position so that index 0 exists.
         pool.add_typed(Position { x: 1.0, y: 2.0, z: 3.0 })
@@ -1644,35 +1626,33 @@ mod tests {
     /// that `Query::for_each_chunk`'s inner loops can emit AVX2 aligned loads
     /// from the column base without an unaligned-prologue.
     ///
-    /// Phase X.I note: the original X.A scenario (an arena cursor left
-    /// misaligned by a preceding pool, corrected by the constructor's
-    /// alignment lift) is dead — pools no longer allocate from the arena.
-    /// Post-X.I the assertion is trivially true: every arm's reservation
-    /// base is >= 4096-aligned (VirtualAlloc 64 KiB / mmap 4 KiB / fallback
-    /// `Layout` align 4096), far above `SIMD_BUFFER_ALIGN = 32`. The test
-    /// is kept as a TRIPWIRE for the SIMD-A1 contract: if a future storage
-    /// change ever hands out a buffer base below 32-byte alignment, this
-    /// fails loudly. The `_prefix` pool below is the historical
-    /// non-tautology fixture, retained unchanged (test logic frozen).
+    /// Phase X.I note: the original X.A scenario (a shared-arena cursor
+    /// left misaligned by a preceding pool, corrected by the constructor's
+    /// alignment lift) is dead — pools own their reservations (the shared
+    /// Arena itself was retired in Phase X.J). Post-X.I the assertion is
+    /// trivially true: every arm's reservation base is >= 4096-aligned
+    /// (VirtualAlloc 64 KiB / mmap 4 KiB / fallback `Layout` align 4096),
+    /// far above `SIMD_BUFFER_ALIGN = 32`. The test is kept as a TRIPWIRE
+    /// for the SIMD-A1 contract: if a future storage change ever hands out
+    /// a buffer base below 32-byte alignment, this fails loudly. The
+    /// `_prefix` pool below is the historical non-tautology fixture,
+    /// retained unchanged (test logic frozen).
     #[test]
     fn buffer_ptr_is_simd_aligned() {
         use crate::ecs::constants::SIMD_BUFFER_ALIGN;
 
         register_all();
-        let arena = Arena::new();
 
         // Historical X.A fixture: pre-X.I this pool left the shared arena
         // cursor at a 16-mod-32 offset so the next pool's buffer would be
         // misaligned without the constructor's alignment lift. Post-X.I
         // every pool owns its reservation, so this no longer influences the
         // F32Wrap pool's base — retained to keep the test logic frozen.
-        let _prefix = ComponentPool::new(&arena, POS_ID.0, 1, 4);
+        let _prefix = ComponentPool::new(POS_ID.0, 4);
 
-        // Constructor arguments mirror the rest of the test module:
-        // `(arena, component_id, num_chunks, components_per_chunk)`. Using
-        // the real `ComponentPool::new` keeps the tripwire wired to the
-        // production base-pointer derivation.
-        let pool = ComponentPool::new(&arena, F32_WRAP_ID.0, 1, 4);
+        // Using the real `ComponentPool::new` keeps the tripwire wired to
+        // the production base-pointer derivation.
+        let pool = ComponentPool::new(F32_WRAP_ID.0, 4);
 
         let ptr = pool.buffer_ptr() as usize;
         assert!(
@@ -1717,9 +1697,9 @@ mod tests {
         }
     }
 
-    fn make_u64_pool(arena: &Arena, num_chunks: usize, per_chunk: usize) -> ComponentPool {
+    fn make_u64_pool(reserve_rows: usize) -> ComponentPool {
         component_registry::register_layout::<U64Pair>(U64_ID.0);
-        ComponentPool::new(arena, U64_ID.0, num_chunks, per_chunk)
+        ComponentPool::new(U64_ID.0, reserve_rows)
     }
 
     /// Phase X.B core proof: after a mixed `add` + `swap_remove(mid)` + `add`
@@ -1729,10 +1709,9 @@ mod tests {
     /// This is the exact identity the deleted `Unit.ptr()` cache used to hold.
     #[test]
     fn dense_equivalence() {
-        let arena = Arena::new();
-        // Multiple chunks so a swap can move a value across a chunk boundary
-        // (4 chunks × 4 = 16 slots); proves row_ptr spans the whole buffer.
-        let mut pool = make_u64_pool(&arena, 4, 4);
+        // 16 slots; a mid-row swap moves a value across the whole buffer,
+        // proving row_ptr spans it.
+        let mut pool = make_u64_pool(16);
         let stride = pool.component_layout().size();
         assert_eq!(stride, 16, "U64Pair stride must be 16 for this test");
 
@@ -1798,8 +1777,7 @@ mod tests {
     /// other live row byte-unchanged.
     #[test]
     fn swap_remove_moves_last_value_into_hole() {
-        let arena = Arena::new();
-        let mut pool = make_u64_pool(&arena, 1, 16);
+        let mut pool = make_u64_pool(16);
 
         const N: u64 = 8;
         for i in 0..N {
@@ -1874,9 +1852,8 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         component_registry::register_layout::<Dropper>(DROPPER_ID.0);
-        let arena = Arena::new();
         // Capacity 16, only 6 live → 10 uninit slots that must NOT be dropped.
-        let mut pool = ComponentPool::new(&arena, DROPPER_ID.0, 1, 16);
+        let mut pool = ComponentPool::new(DROPPER_ID.0, 16);
 
         let counter = Arc::new(AtomicUsize::new(0));
         const M: usize = 6;
@@ -1920,7 +1897,6 @@ mod tests {
         use super::{U64Pair, U64_ID};
         use crate::ecs::core::component::component::Component as _;
         use crate::ecs::core::component::component_registry;
-        use crate::ecs::memory::arena::Arena;
         use crate::ecs::memory::component_pool::ComponentPool;
         use proptest::prelude::*;
 
@@ -1947,9 +1923,8 @@ mod tests {
                 let _ = U64Pair::component_id();
                 component_registry::register_layout::<U64Pair>(U64_ID.0);
 
-                let arena = Arena::new();
-                // 4 chunks × 64 = 256 capacity — comfortably above the 200-op cap.
-                let mut pool = ComponentPool::new(&arena, U64_ID.0, 4, 64);
+                // 256-row capacity — comfortably above the 200-op cap.
+                let mut pool = ComponentPool::new(U64_ID.0, 256);
                 let mut oracle: Vec<U64Pair> = Vec::new();
 
                 for op in ops {
@@ -2062,10 +2037,8 @@ mod tests {
     /// mapping across an interleaving, not merely at a single terminal state.
     #[test]
     fn dense_equivalence_after_swap_remove() {
-        let arena = Arena::new();
-        // 4 chunks × 4 = 16 slots: a mid-row swap can move the last row across
-        // a chunk boundary, exercising row_ptr over the whole buffer.
-        let mut pool = make_u64_pool(&arena, 4, 4);
+        // 16 slots: a mid-row swap exercises row_ptr over the whole buffer.
+        let mut pool = make_u64_pool(16);
         let stride = pool.component_layout().size();
         assert_eq!(stride, 16, "U64Pair stride must be 16 for the address-identity math");
 
@@ -2121,7 +2094,6 @@ mod tests {
         use super::{U64Pair, U64_ID, u64pair_bytes};
         use crate::ecs::core::component::component::Component as _;
         use crate::ecs::core::component::component_registry;
-        use crate::ecs::memory::arena::Arena;
         use crate::ecs::memory::component_pool::ComponentPool;
         use proptest::prelude::*;
 
@@ -2152,9 +2124,8 @@ mod tests {
                 let _ = U64Pair::component_id();
                 component_registry::register_layout::<U64Pair>(U64_ID.0);
 
-                let arena = Arena::new();
-                // 4 chunks × 64 = 256 capacity > the 200-op cap.
-                let mut pool = ComponentPool::new(&arena, U64_ID.0, 4, 64);
+                // 256-row capacity > the 200-op cap.
+                let mut pool = ComponentPool::new(U64_ID.0, 256);
                 let mut oracle: Vec<U64Pair> = Vec::new();
 
                 for op in ops {
@@ -2224,9 +2195,8 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         component_registry::register_layout::<Dropper>(DROPPER_ID.0);
-        let arena = Arena::new();
         // Capacity 16, 8 live → 8 uninit slots that must NOT be dropped.
-        let mut pool = ComponentPool::new(&arena, DROPPER_ID.0, 1, 16);
+        let mut pool = ComponentPool::new(DROPPER_ID.0, 16);
 
         let counter = Arc::new(AtomicUsize::new(0));
         const M: usize = 8;
@@ -2284,27 +2254,24 @@ mod tests {
         );
     }
 
-    /// Phase X.I U-P1 (★R1-5) — a zero row ceiling (`num_chunks *
-    /// components_per_chunk == 0`, reachable via the D2 constructor
-    /// mapping) must hit the loud pool-level construction assert that
-    /// names the constructor — NOT a `VmReservation::reserve(0)` panic
-    /// with a vm-internals message.
+    /// Phase X.I U-P1 (★R1-5) — a zero row ceiling must hit the loud
+    /// pool-level construction assert that names the constructor — NOT a
+    /// `VmReservation::reserve(0)` panic with a vm-internals message.
     #[test]
     #[should_panic(expected = "ComponentPool::new: reserve_rows == 0")]
     fn zero_ceiling_construction_panics_loudly() {
         register_all();
-        let arena = Arena::new();
-        let _ = ComponentPool::new(&arena, POS_ID.0, 0, 16);
+        let _ = ComponentPool::new(POS_ID.0, 0);
     }
 
     // ====================================================================
     // Phase X.I W4 — the growth test matrix (U-P2 … U-P5, U-P8).
     //
     // Geometry note shared by every test below: the fixtures use a 64-byte
-    // stride so ONE commit granule (`ARENA_COMMIT_GRANULE` = 64 KiB of DATA
+    // stride so ONE commit granule (`COMMIT_GRANULE` = 64 KiB of DATA
     // bytes) covers exactly 1024 rows — slab boundaries therefore sit at
     // rows 1024 / 2048 / 4096 under the D4 doubling policy
-    // (64 KiB -> 128 KiB -> 256 KiB), and a `1 x 4096` D2-mapped pool spans
+    // (64 KiB -> 128 KiB -> 256 KiB), and a 4096-row pool spans
     // 4 granules = 3 data-commit events when filled by an `add` loop.
     // ====================================================================
 
@@ -2336,9 +2303,9 @@ mod tests {
         }
     }
 
-    fn make_stride64_pool(arena: &Arena, cap: usize) -> ComponentPool {
+    fn make_stride64_pool(cap: usize) -> ComponentPool {
         component_registry::register_layout::<Stride64>(STRIDE64_ID.0);
-        ComponentPool::new(arena, STRIDE64_ID.0, 1, cap)
+        ComponentPool::new(STRIDE64_ID.0, cap)
     }
 
     /// U-P2 — the address-stability witness (plan §Test matrix).
@@ -2348,7 +2315,7 @@ mod tests {
     /// `changed_ticks_ptr`) and any previously returned row pointer stay
     /// bit-identical across >= 3 data-commit growth events, and pre-growth
     /// VALUES (component bytes + stamped ticks) remain readable through the
-    /// recorded pointers. A 1 x 4096 pool of 64-B rows spans 4 granules
+    /// recorded pointers. A 4096-row pool of 64-B rows spans 4 granules
     /// (256 KiB) -> the add loop drives 3 commits: 64 KiB (row 0),
     /// 128 KiB (row 1024), 256 KiB (row 2048).
     ///
@@ -2359,8 +2326,7 @@ mod tests {
     fn address_stability_across_three_slab_growths() {
         use crate::ecs::core::change_detection::Tick;
 
-        let arena = Arena::new();
-        let mut pool = make_stride64_pool(&arena, 4096);
+        let mut pool = make_stride64_pool(4096);
         assert_eq!(pool.component_layout().size(), 64, "fixture stride must be 64 B");
         assert_eq!(pool.capacity(), 4096, "D2 mapping: reserve_rows = 1 * 4096");
         assert_eq!(pool.committed_rows(), 0, "D3: zero initial commit");
@@ -2426,8 +2392,7 @@ mod tests {
     /// `capacity` / the base pointer, and `can_reserve(1)` must be false.
     #[test]
     fn ceiling_exhaustion_rejects_add_with_zero_state_change() {
-        let arena = Arena::new();
-        let mut pool = make_stride64_pool(&arena, 4);
+        let mut pool = make_stride64_pool(4);
 
         for i in 0..4u64 {
             pool.add_typed(Stride64::new(i)).expect("rows 0..4 fit under the ceiling");
@@ -2498,8 +2463,7 @@ mod tests {
     fn tick_lockstep_and_jxi_zero_at_slab_boundary() {
         use crate::ecs::core::change_detection::Tick;
 
-        let arena = Arena::new();
-        let mut pool = make_stride64_pool(&arena, 4096);
+        let mut pool = make_stride64_pool(4096);
 
         // Row 0 commits the first granule (1024 rows of data; the tick
         // granule covers 16384 slots, so ticks are committed well past the
@@ -2606,8 +2570,7 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         component_registry::register_layout::<DropPad64>(DROP_PAD_ID.0);
-        let arena = Arena::new();
-        let mut pool = ComponentPool::new(&arena, DROP_PAD_ID.0, 1, 4096);
+        let mut pool = ComponentPool::new(DROP_PAD_ID.0, 4096);
 
         let counter = Arc::new(AtomicUsize::new(0));
         const M: usize = 1500; // crosses the 1024-row boundary
@@ -2658,8 +2621,7 @@ mod tests {
     /// calls legal (the critic-Round-1 CRITICAL fix).
     #[test]
     fn grow_rows_idempotent_below_frontier() {
-        let arena = Arena::new();
-        let mut pool = make_stride64_pool(&arena, 4096);
+        let mut pool = make_stride64_pool(4096);
 
         // First real grow: request 100 -> one granule -> 1024 rows.
         assert!(pool.grow_rows(100), "grow within the ceiling succeeds");

@@ -13,6 +13,15 @@
 //! tests run cheaply enough (no million-iteration loops, all sizes <= 64)
 //! that the dev-profile cost is negligible.
 //!
+//! # Miri flags
+//!
+//! Run with `MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-ignore-leaks"`. The
+//! `-Zmiri-ignore-leaks` is REQUIRED: worlds that exercise the spawn-path
+//! caches carry deliberate, bounded `Box::leak`s (#53-class: the
+//! `BundleColumnRecord` `&'static [InlandPoolId]` slices, SBO6-bounded per
+//! `(BundleTypeId, ArchetypeId)` per world — a borrow-decoupling design
+//! choice, not a bug; the Phase X.I tester proved the report pre-existing).
+//!
 //! Plan §24 Step 12 / §15 test list:
 //!
 //!  1. `miri_command_queue_push_then_apply_no_ub`

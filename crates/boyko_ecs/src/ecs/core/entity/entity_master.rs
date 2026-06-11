@@ -479,7 +479,7 @@ impl EntityMaster {
     }
 
     /// Commit frontier of the entity fast store, in slots (diagnostics —
-    /// mirror of `Arena::committed`).
+    /// mirror of `ComponentPool::committed_rows`).
     #[inline]
     pub fn committed_slots(&self) -> usize {
         self.entities_inland.committed_slots()

@@ -40,7 +40,7 @@
 use std::ops::{Deref, DerefMut};
 
 use crate::ecs::constants::{
-    ARENA_COMMIT_GRANULE, DEFAULT_INLAND_RESERVE, INLAND_MAX_SLAB, INLAND_MIN_SLAB,
+    COMMIT_GRANULE, DEFAULT_INLAND_RESERVE, INLAND_MAX_SLAB, INLAND_MIN_SLAB,
 };
 use crate::ecs::core::entity::entity_inland::EntityInland;
 use crate::ecs::memory::vm::VmReservation;
@@ -65,7 +65,7 @@ const _: () = assert!(SLOT_SIZE == 16, "EntityInland slot size drifted");
 // the engine's target scope (CLAUDE.md: x86_64).
 #[cfg(target_pointer_width = "64")]
 const _: () = assert!(
-    ARENA_COMMIT_GRANULE.is_multiple_of(SLOT_SIZE),
+    COMMIT_GRANULE.is_multiple_of(SLOT_SIZE),
     "granule must be a whole number of slots"
 );
 
@@ -241,7 +241,7 @@ impl InlandStore {
     }
 
     /// Commit frontier in slots (diagnostics/tests — mirror of
-    /// `Arena::committed`).
+    /// `ComponentPool::committed_rows`).
     #[inline]
     pub(crate) fn committed_slots(&self) -> usize {
         self.committed_slots
@@ -252,9 +252,9 @@ impl InlandStore {
 /// of `vm::checked_align_up` specialized to the commit granule.
 fn checked_slab_round(bytes: usize) -> usize {
     bytes
-        .checked_add(ARENA_COMMIT_GRANULE - 1)
+        .checked_add(COMMIT_GRANULE - 1)
         .expect("InlandStore: slab rounding overflow")
-        & !(ARENA_COMMIT_GRANULE - 1)
+        & !(COMMIT_GRANULE - 1)
 }
 
 impl Deref for InlandStore {
@@ -298,7 +298,7 @@ mod tests {
     use super::*;
     use crate::ecs::constants::INLAND_MIN_SLAB;
 
-    const G: usize = ARENA_COMMIT_GRANULE;
+    const G: usize = COMMIT_GRANULE;
     const MIN_SLOTS: usize = INLAND_MIN_SLAB / SLOT_SIZE; // 16,384
 
     fn non_null_record(generation: u32) -> EntityInland {

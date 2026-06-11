@@ -40,7 +40,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use boyko_ecs::ecs::core::component::component::Component;
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::system::Commands;
-use boyko_ecs::ecs::memory::arena::Arena;
 use boyko_ecs::ecs::memory::component_pool::ComponentPool;
 use boyko_macros::{Bundle, Component};
 
@@ -59,9 +58,9 @@ impl Pad1K {
     }
 }
 
-fn make_pad1k_pool(arena: &Arena, cap: usize) -> ComponentPool {
+fn make_pad1k_pool(cap: usize) -> ComponentPool {
     let id = Pad1K::component_id(); // derive registers the layout on first call
-    ComponentPool::new(arena, id.0, 1, cap)
+    ComponentPool::new(id.0, cap)
 }
 
 /// M-XI (1) — multi-slab growth bookkeeping + address stability under TB.
@@ -72,8 +71,7 @@ fn make_pad1k_pool(arena: &Arena, cap: usize) -> ComponentPool {
 /// and full value round-trips through rows on every slab.
 #[test]
 fn miri_multi_slab_growth_bookkeeping_and_stability() {
-    let arena = Arena::new();
-    let mut pool = make_pad1k_pool(&arena, 256);
+    let mut pool = make_pad1k_pool(256);
     assert_eq!(pool.component_layout().size(), 1024, "fixture stride pin");
     assert_eq!(pool.capacity(), 256, "D2 mapping: reserve_rows = 1 * 256");
     assert_eq!(pool.committed_rows(), 0, "D3: zero initial commit");
@@ -122,8 +120,7 @@ fn miri_multi_slab_growth_bookkeeping_and_stability() {
 /// inside one allocated object (★R1-8).
 #[test]
 fn miri_swap_remove_across_slab_boundary() {
-    let arena = Arena::new();
-    let mut pool = make_pad1k_pool(&arena, 256);
+    let mut pool = make_pad1k_pool(256);
 
     for i in 0..130u64 {
         pool.add_typed(Pad1K::new(i)).expect("130 rows fit");
@@ -176,8 +173,7 @@ struct DropPad1KComp {
 #[test]
 fn miri_drop_count_exact_across_boundary() {
     let id = DropPad1KComp::component_id();
-    let arena = Arena::new();
-    let mut pool = ComponentPool::new(&arena, id.0, 1, 128);
+    let mut pool = ComponentPool::new(id.0, 128);
 
     let counter = Arc::new(AtomicUsize::new(0));
     const M: usize = 70;
@@ -207,8 +203,7 @@ fn miri_drop_count_exact_across_boundary() {
 /// and the no-op bookkeeping are the SAME code as native — D9 unified path).
 #[test]
 fn miri_ceiling_exhaustion_zero_state_change() {
-    let arena = Arena::new();
-    let mut pool = make_pad1k_pool(&arena, 4);
+    let mut pool = make_pad1k_pool(4);
 
     for i in 0..4u64 {
         pool.add_typed(Pad1K::new(i)).expect("rows 0..4 fit");

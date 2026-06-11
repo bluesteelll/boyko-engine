@@ -495,16 +495,13 @@ mod tests {
     use super::*;
     use crate::ecs::core::component::component::Component;
     use crate::ecs::core::component::component_registry;
-    use crate::ecs::memory::arena::Arena;
 
     // Mock component types for testing.
     //
-    // Non-ZST wrappers around `u32` — the `MemFreeBlockMaster` allocator
-    // refuses zero-byte requests (returns `None` from `allocate_aligned`),
-    // which means a `ComponentPool` over a ZST cannot reserve its buffer
-    // and `with_default_sizes` panics (post-X.F: the zero-size guard in
-    // `grow_then_retry`). Wrapping in `u32` gives a real layout (4 bytes)
-    // without changing any mask/signature behaviour the tests rely on.
+    // Non-ZST wrappers around `u32` — `ComponentPool` rejects zero-sized
+    // components at construction, so a ZST cannot back a pool. Wrapping in
+    // `u32` gives a real layout (4 bytes) without changing any
+    // mask/signature behaviour the tests rely on.
     #[repr(C)]
     struct Position(u32);
     #[repr(C)]
@@ -540,29 +537,12 @@ mod tests {
         component_registry::register_layout::<Damage>(Damage::component_id().0);
     }
 
-    /// Build the `ArchetypeMaster` together with the `Box<Arena>` it borrows.
-    ///
-    /// The arena MUST be returned to the caller and kept alive for the
-    /// duration of the test: `ArchetypeMaster` stores a `NonNull<Arena>`
-    /// derived from this `Box`, and dropping the arena turns that pointer
-    /// dangling — manifests as spurious `Arena reserve exhausted` panics in
-    /// release (the `MemFreeBlockMaster` lives in the freed buffer). This is
-    /// the same failure mode that audit C-001 fixed inside `EcsMaster`; we
-    /// apply the `Box<Arena>` pattern here too so tests don't reintroduce it.
-    fn setup_test_archetypes() -> (ArchetypeMaster, Box<Arena>) {
+    /// Build an `ArchetypeMaster` with a fixed set of test archetypes.
+    /// (Phase X.J: the historical `Box<Arena>` keep-alive companion is gone —
+    /// pools own their reservations.)
+    fn setup_test_archetypes() -> ArchetypeMaster {
         register_mock_components();
-        let arena: Box<Arena> = Box::default();
-        // Mint the raw arena pointer from the Box's inner representation without
-        // creating a `&Arena` reference (Stacked Borrows safe). See
-        // `EcsMaster::new` for the full rationale (Phase 3a Miri retag fix).
-        // SAFETY: `Box<Arena>` is repr-equivalent to `*mut Arena`; reading the
-        // Box field as `*const Arena` gives the stable heap address. `arena`
-        // is dropped after `master` (tuple drop: master is field 0, arena field 1).
-        let arena_ptr: *const Arena = unsafe {
-            let box_ptr: *const Box<Arena> = std::ptr::addr_of!(arena);
-            *(box_ptr.cast::<*const Arena>())
-        };
-        let mut master = unsafe { ArchetypeMaster::new(arena_ptr) };
+        let mut master = ArchetypeMaster::new();
 
         // Create some test archetypes
         master.create_archetype(&[Position::component_id()]);
@@ -575,12 +555,12 @@ mod tests {
             Health::component_id(),
         ]);
 
-        (master, arena)
+        master
     }
 
     #[test]
     fn test_basic_query() {
-        let (master, _arena) = setup_test_archetypes();
+        let master = setup_test_archetypes();
         let query = Query::with_component_ids(&master, &[Position::component_id()]);
 
         // Should find all archetypes with Position
@@ -594,7 +574,7 @@ mod tests {
 
     #[test]
     fn test_query_with_multiple_components() {
-        let (master, _arena) = setup_test_archetypes();
+        let master = setup_test_archetypes();
         let query = Query::with_component_ids(
             &master,
             &[Position::component_id(), Velocity::component_id()],
@@ -612,7 +592,7 @@ mod tests {
 
     #[test]
     fn test_type_safe_query() {
-        let (master, _arena) = setup_test_archetypes();
+        let master = setup_test_archetypes();
         let query = Query::with::<(Position, Velocity)>(&master);
 
         // Should find archetypes with both Position and Velocity
@@ -627,7 +607,7 @@ mod tests {
 
     #[test]
     fn test_iteration() {
-        let (master, _arena) = setup_test_archetypes();
+        let master = setup_test_archetypes();
         let query = Query::with_component_ids(&master, &[Position::component_id()]);
 
         // Manual iteration with iter()
@@ -656,7 +636,7 @@ mod tests {
 
     #[test]
     fn test_complex_filtering() {
-        let (master, _arena) = setup_test_archetypes();
+        let master = setup_test_archetypes();
 
         // Create masks for filtering
         let mut include_mask = ComponentMask::new();
@@ -703,7 +683,7 @@ mod tests {
 
     #[test]
     fn test_type_safe_filters() {
-        let (master, _arena) = setup_test_archetypes();
+        let master = setup_test_archetypes();
 
         // Create masks manually instead of using type_filters to avoid ComponentSet issues
         let mut include_mask = ComponentMask::new();
@@ -741,19 +721,10 @@ mod tests {
 
     use crate::ecs::identifiers::primitives::EntityId;
 
-    /// Build a fresh `(ArchetypeMaster, Box<Arena>)` pair without any archetypes.
-    fn make_master() -> (ArchetypeMaster, Box<Arena>) {
+    /// Build a fresh `ArchetypeMaster` without any archetypes.
+    fn make_master() -> ArchetypeMaster {
         register_mock_components();
-        let arena: Box<Arena> = Box::default();
-        // SAFETY: `Box<Arena>` is repr-equivalent to `*mut Arena`; reading the
-        // Box field as `*const Arena` gives the stable heap address. `arena`
-        // is dropped after `master` (tuple drop: master is field 0, arena field 1).
-        let arena_ptr: *const Arena = unsafe {
-            let box_ptr: *const Box<Arena> = std::ptr::addr_of!(arena);
-            *(box_ptr.cast::<*const Arena>())
-        };
-        let master = unsafe { ArchetypeMaster::new(arena_ptr) };
-        (master, arena)
+        ArchetypeMaster::new()
     }
 
     /// Push one entity with a `Position(val)` into the archetype.
@@ -791,7 +762,7 @@ mod tests {
     /// iter_one yields all entities from a single archetype with distinct values.
     #[test]
     fn iter_one_yields_all_entities_one_archetype() {
-        let (mut master, _arena) = make_master();
+        let mut master = make_master();
         let arch_id = master.create_archetype(&[Position::component_id()]);
 
         push_position(&mut master, arch_id, 10);
@@ -807,7 +778,7 @@ mod tests {
     /// iter_one crosses two archetypes and yields 2 + 3 = 5 items in archetype-major order.
     #[test]
     fn iter_one_across_two_archetypes() {
-        let (mut master, _arena) = make_master();
+        let mut master = make_master();
         let arch1 = master.create_archetype(&[Position::component_id()]);
         // A second distinct archetype (with an extra component) that also has Position.
         let arch2 = master.create_archetype(&[
@@ -837,7 +808,7 @@ mod tests {
     /// iter_one on an archetype with no entities yields nothing.
     #[test]
     fn iter_one_skips_empty_archetype() {
-        let (mut master, _arena) = make_master();
+        let mut master = make_master();
         // Create archetype but add no entities.
         master.create_archetype(&[Position::component_id()]);
 
@@ -854,7 +825,7 @@ mod tests {
     /// iter_two yields correctly paired (Position, Velocity) tuples.
     #[test]
     fn iter_two_yields_paired_components() {
-        let (mut master, _arena) = make_master();
+        let mut master = make_master();
         let arch_id = master.create_archetype(&[
             Position::component_id(),
             Velocity::component_id(),
@@ -883,7 +854,7 @@ mod tests {
     /// iter_two works across two archetypes and pairs are consistent.
     #[test]
     fn iter_two_across_two_archetypes() {
-        let (mut master, _arena) = make_master();
+        let mut master = make_master();
         let arch1 = master.create_archetype(&[
             Position::component_id(),
             Velocity::component_id(),
@@ -929,7 +900,7 @@ mod tests {
     /// iter_two on an empty query (no matched archetypes) returns None immediately.
     #[test]
     fn iter_two_returns_none_on_empty_query() {
-        let (master, _arena) = make_master();
+        let master = make_master();
         // No archetypes created at all.
         let query = Query::with_component_ids(
             &master,

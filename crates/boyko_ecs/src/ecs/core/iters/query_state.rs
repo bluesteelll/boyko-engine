@@ -377,7 +377,6 @@ mod tests {
     use super::*;
     use crate::ecs::core::component::component::Component;
     use crate::ecs::core::component::component_registry;
-    use crate::ecs::memory::arena::Arena;
 
     // Component IDs 490-493: reserved for query_state tests.
     // Note: IDs 700-799 were originally specified in the plan roadmap note, but
@@ -412,28 +411,16 @@ mod tests {
         component_registry::register_layout::<Damage>(Damage::component_id().0);
     }
 
-    fn setup() -> (ArchetypeMaster, Box<Arena>) {
+    fn setup() -> ArchetypeMaster {
         register_components();
-        let arena = Box::new(Arena::new());
-        // Mint the raw arena pointer from the Box's inner representation without
-        // creating a `&Arena` reference. See `EcsMaster::new` for the full
-        // rationale (Phase 3a Miri retag fix).
-        // SAFETY: `Box<Arena>` is repr-equivalent to `*mut Arena`; reading the
-        // Box field as `*const Arena` gives the stable heap address. `arena`
-        // is dropped after `master` (tuple drop: master is field 0, arena field 1).
-        let arena_ptr: *const Arena = unsafe {
-            let box_ptr: *const Box<Arena> = std::ptr::addr_of!(arena);
-            *(box_ptr.cast::<*const Arena>())
-        };
-        let master = unsafe { ArchetypeMaster::new(arena_ptr) };
-        (master, arena)
+        ArchetypeMaster::new()
     }
 
     // --- test 700: empty state yields nothing ---
 
     #[test]
     fn t700_empty_state_iter_yields_nothing() {
-        let (master, _arena) = setup();
+        let master = setup();
         let mut state = QueryState::with_component_ids(&[Pos::component_id()]);
         let count = state.iter(&master).count();
         assert_eq!(count, 0);
@@ -443,7 +430,7 @@ mod tests {
 
     #[test]
     fn t701_single_archetype_match_after_update() {
-        let (mut master, _arena) = setup();
+        let mut master = setup();
         master.create_archetype(&[Pos::component_id(), Vel::component_id()]);
 
         let mut state = QueryState::with_component_ids(&[Pos::component_id()]);
@@ -458,7 +445,7 @@ mod tests {
 
     #[test]
     fn t702_update_idempotent() {
-        let (mut master, _arena) = setup();
+        let mut master = setup();
         master.create_archetype(&[Pos::component_id()]);
 
         let mut state = QueryState::with_component_ids(&[Pos::component_id()]);
@@ -473,7 +460,7 @@ mod tests {
 
     #[test]
     fn t703_delta_update_only_classifies_new_archetypes() {
-        let (mut master, _arena) = setup();
+        let mut master = setup();
         master.create_archetype(&[Pos::component_id(), Vel::component_id()]);
         master.create_archetype(&[Pos::component_id(), Health::component_id()]);
 
@@ -491,7 +478,7 @@ mod tests {
 
     #[test]
     fn t704_include_exclude_optional_combinations() {
-        let (mut master, _arena) = setup();
+        let mut master = setup();
         // 5 archetypes matching query.rs::test_complex_filtering setup
         master.create_archetype(&[Pos::component_id()]);
         master.create_archetype(&[Pos::component_id(), Vel::component_id()]);
@@ -535,7 +522,7 @@ mod tests {
 
     #[test]
     fn t705_dual_structure_consistency() {
-        let (mut master, _arena) = setup();
+        let mut master = setup();
         master.create_archetype(&[Pos::component_id()]);
         master.create_archetype(&[Vel::component_id()]);
         master.create_archetype(&[Pos::component_id(), Vel::component_id()]);
@@ -575,7 +562,7 @@ mod tests {
 
     #[test]
     fn t706_reset_clears_cache() {
-        let (mut master, _arena) = setup();
+        let mut master = setup();
         master.create_archetype(&[Pos::component_id()]);
         master.create_archetype(&[Pos::component_id(), Vel::component_id()]);
 
@@ -596,7 +583,7 @@ mod tests {
 
     #[test]
     fn t707_stale_id_after_remove_is_skipped() {
-        let (mut master, _arena) = setup();
+        let mut master = setup();
         master.create_archetype(&[Pos::component_id()]);
         let id_to_remove =
             master.create_archetype(&[Pos::component_id(), Vel::component_id()]);
@@ -627,7 +614,7 @@ mod tests {
     /// — correctly classifying the recycled id by its current component mask.
     #[test]
     fn aba_recycled_archetype_id_after_clear_does_not_leak_into_query() {
-        let (mut master, _arena) = setup();
+        let mut master = setup();
 
         // Phase 1: create a Pos archetype, query for Pos, observe the match.
         let pos_id_v1 = master.create_archetype(&[Pos::component_id()]);
@@ -658,7 +645,7 @@ mod tests {
 
     #[test]
     fn remove_matched_at_clears_bit_and_swap_removes() {
-        let (mut master, _arena) = setup();
+        let mut master = setup();
         // Three archetypes that all match the Pos filter; matched_ids ends up
         // populated with three distinct ids in insertion order.
         let id_a = master.create_archetype(&[Pos::component_id()]);
@@ -687,7 +674,7 @@ mod tests {
 
     #[test]
     fn last_observed_generations_return_current_snapshot() {
-        let (mut master, _arena) = setup();
+        let mut master = setup();
         master.create_archetype(&[Pos::component_id()]);
 
         let mut state = QueryState::with_component_ids(&[Pos::component_id()]);
@@ -730,7 +717,7 @@ mod tests {
     /// from `matched_ids`, not just from the get_archetype skip path.
     #[test]
     fn remove_archetype_purges_dead_id_from_matched_ids_via_rebuild() {
-        let (mut master, _arena) = setup();
+        let mut master = setup();
         let id_a = master.create_archetype(&[Pos::component_id()]);
         let id_b = master.create_archetype(&[Pos::component_id(), Vel::component_id()]);
         let mut state = QueryState::with_component_ids(&[Pos::component_id()]);

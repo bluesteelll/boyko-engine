@@ -3,9 +3,9 @@
 // Phase X.I note: this bench is RUNNABLE AGAIN. At pre-X.I HEAD it panicked
 // ("Arena reserve exhausted"): every iter_batched setup created a fresh
 // Archetype whose pools carved ~8 MiB from ONE shared 64 MiB arena that
-// never freed across the sample run. Post-X.I pools ignore the arena
-// entirely — each pool owns its own VmReservation, released when the
-// Archetype drops — so per-setup memory is reclaimed every iteration.
+// never freed across the sample run. Post-X.I each pool owns its own
+// VmReservation, released when the Archetype drops — so per-setup memory is
+// reclaimed every iteration. (Phase X.J retired the shared Arena outright.)
 //
 // Two groups:
 //   1. archetype_create_entity_8c  — 8-component archetype, 10 000 entities per iteration
@@ -26,7 +26,6 @@ use boyko_ecs::ecs::core::archetype::archetype::Archetype;
 use boyko_ecs::ecs::core::change_detection::Tick;
 use boyko_ecs::ecs::core::component::component_registry;
 use boyko_ecs::ecs::identifiers::primitives::{ArchetypeId, ComponentId, EntityId};
-use boyko_ecs::ecs::memory::arena::Arena;
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 
 // --- Component registration ---
@@ -67,17 +66,12 @@ fn bench_archetype_create_entity_8c(c: &mut Criterion) {
     let n = 10_000usize;
 
     group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
-        // Post-X.I the arena parameter is vestigial (pools own per-pool
-        // VmReservations; the arena is retired outright in X.J) — a default
-        // reserve-only arena is all `create_by_ids` needs.
-        let arena = Arena::new();
-
         // A fresh Archetype per setup; its pools commit lazily during the
         // timed fill and release their reservations when the setup output
         // drops.
         b.iter_batched(
             || {
-                let arch = Archetype::create_by_ids(ArchetypeId(1), &IDS_8, &arena);
+                let arch = Archetype::create_by_ids(ArchetypeId(1), &IDS_8);
                 let bytes = vec![0u8; 4]; // all components are u32
                 let components: Vec<(ComponentId, Vec<u8>)> = IDS_8.iter()
                     .map(|&id| (id, bytes.clone()))
@@ -110,12 +104,9 @@ fn bench_archetype_create_entity_16c(c: &mut Criterion) {
     let n = 10_000usize;
 
     group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
-        // Vestigial arena (see the 8c group note).
-        let arena = Arena::new();
-
         b.iter_batched(
             || {
-                let arch = Archetype::create_by_ids(ArchetypeId(2), &IDS_16, &arena);
+                let arch = Archetype::create_by_ids(ArchetypeId(2), &IDS_16);
                 let bytes = vec![0u8; 4];
                 let components: Vec<(ComponentId, Vec<u8>)> = IDS_16.iter()
                     .map(|&id| (id, bytes.clone()))

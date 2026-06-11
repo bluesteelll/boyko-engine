@@ -1,7 +1,13 @@
 //! Phase 14a — Miri (Stacked / Tree Borrows) coverage for the lifecycle-hook
 //! unsafe paths. Single-thread only (multi-thread Miri deferred per Phase 9.1).
 //!
-//! Run via: `cargo +nightly miri test -p boyko-ecs --test miri_phase14a`.
+//! Run via: `cargo +nightly miri test -p boyko-ecs --test miri_phase14a`
+//! with `MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-ignore-leaks"`. The
+//! `-Zmiri-ignore-leaks` is REQUIRED: the deferred-spawn scenarios touch the
+//! bundle caches, whose `BundleColumnRecord`s carry deliberate, bounded
+//! `Box::leak`s (#53-class, SBO6-bounded per `(BundleTypeId, ArchetypeId)`
+//! per world — a borrow-decoupling design choice, not a bug; the Phase X.I
+//! tester proved the report pre-existing).
 //!
 //! Covers the four `unsafe`-bearing dispatch behaviours (plan §8 Miri subset):
 //!

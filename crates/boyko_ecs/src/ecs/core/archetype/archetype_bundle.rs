@@ -25,7 +25,6 @@ use crate::ecs::core::component::component_registry::MAX_COMPONENTS;
 use crate::ecs::core::component::hooks::archetype_flags::ArchetypeFlags;
 use crate::ecs::core::iters::MAX_ARCHETYPES;
 use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId, InlandArchetypeId};
-use crate::ecs::memory::arena::Arena;
 
 /// Number of `u64` words backing the occupancy bitset (`MAX_ARCHETYPES / 64`).
 const SLAB_WORDS: usize = MAX_ARCHETYPES / 64;
@@ -426,7 +425,6 @@ impl ArchetypeBundle {
         &mut self,
         archetype_id: ArchetypeId,
         component_ids: &[ComponentId],
-        arena: &Arena,
     ) -> Result<u16, BundleFullError> {
         let slot_idx: u16 = if let Some(idx) = self.free_slots.pop() {
             idx
@@ -478,7 +476,6 @@ impl ArchetypeBundle {
             // Start empty; the OR-compute over the registered components runs
             // in the `register_component_inplace` loop below (Wave 2).
             addr_of_mut!((*slot_ptr).flags).write(ArchetypeFlags::empty());
-            addr_of_mut!((*slot_ptr).arena).write(arena as *const Arena);
             addr_of_mut!((*slot_ptr).component_ids).write(component_ids.to_vec());
             addr_of_mut!((*slot_ptr).entity_ids).write(Vec::new());
         }
@@ -494,7 +491,7 @@ impl ArchetypeBundle {
         //   reborrow is sound and stays inside this function.
         let archetype: &mut Archetype = unsafe { &mut *slot_ptr };
         for &cid in component_ids {
-            archetype.register_component_inplace(cid, arena);
+            archetype.register_component_inplace(cid);
         }
 
         // Set the occupancy bit only after full initialisation.
@@ -524,10 +521,9 @@ impl ArchetypeBundle {
         &mut self,
         archetype_id: ArchetypeId,
         component_ids: &[ComponentId],
-        arena: &Arena,
     ) -> InlandArchetypeId {
         let slot_idx = self
-            .add_archetype_from_components_fallible(archetype_id, component_ids, arena)
+            .add_archetype_from_components_fallible(archetype_id, component_ids)
             .expect("invariant: archetype bundle below MAX_ARCHETYPES");
         InlandArchetypeId(slot_idx as usize)
     }
@@ -995,7 +991,6 @@ mod miri_tests {
     use super::*;
     use crate::ecs::core::component::component_registry;
     use crate::ecs::identifiers::primitives::ArchetypeId;
-    use crate::ecs::memory::arena::Arena;
 
     // ID range 480-489 reserved for archetype_bundle Phase-7 Miri tests
     // (collisions checked against archetype.rs (400-417),
@@ -1048,10 +1043,9 @@ mod miri_tests {
     fn phase7_miri_archetype_ptr_no_retag_ub() {
         register_test_components();
         // 16 MB headroom for a single 2-component archetype's pools.
-        let arena = Arena::with_capacity(16 * 1024 * 1024);
         let mut bundle = ArchetypeBundle::new();
         let id = ArchetypeId(1);
-        let _ = bundle.add_archetype_from_components_fallible(id, &[COMP_X, COMP_Y], &arena);
+        let _ = bundle.add_archetype_from_components_fallible(id, &[COMP_X, COMP_Y]);
 
         // Leg 1 — read via the `&self`-flavoured raw pointer.
         let ptr_read1: *const Archetype = bundle
@@ -1165,10 +1159,9 @@ mod miri_tests {
     fn f4_stored_ptr_survives_sibling_spawn() {
         register_test_components();
         // 16 MB headroom for a single 2-component archetype.
-        let arena = Arena::with_capacity(16 * 1024 * 1024);
         let mut bundle = ArchetypeBundle::new();
         let id = ArchetypeId(3);
-        let _ = bundle.add_archetype_from_components_fallible(id, &[COMP_X, COMP_Y], &arena);
+        let _ = bundle.add_archetype_from_components_fallible(id, &[COMP_X, COMP_Y]);
 
         // (1) Stash the read-only pointer — the `EntityInland.archetype_ptr`
         // analogue. It is held UNCHANGED across all subsequent sibling writes.
@@ -1223,23 +1216,19 @@ mod miri_tests {
     #[test]
     fn phase7_miri_bundle_drop_runs_archetype_drop_for_occupied_only() {
         register_test_components();
-        // 64 MB matches the precedent in `archetype.rs::create_entity_wide_archetype_8_components`;
-        // 3 archetypes × ~1.5 pools each at DEFAULT_CHUNKS_PER_POOL = 128 chunks
-        // exceeds the 4 MB used by simpler 1-archetype tests.
-        let arena = Arena::with_capacity(64 * 1024 * 1024);
         let mut bundle = ArchetypeBundle::new();
 
         let id1 = ArchetypeId(10);
         let id2 = ArchetypeId(11);
         let id3 = ArchetypeId(12);
         bundle
-            .add_archetype_from_components_fallible(id1, &[COMP_X], &arena)
+            .add_archetype_from_components_fallible(id1, &[COMP_X])
             .expect("slab has free space");
         bundle
-            .add_archetype_from_components_fallible(id2, &[COMP_X, COMP_Y], &arena)
+            .add_archetype_from_components_fallible(id2, &[COMP_X, COMP_Y])
             .expect("slab has free space");
         bundle
-            .add_archetype_from_components_fallible(id3, &[COMP_Y], &arena)
+            .add_archetype_from_components_fallible(id3, &[COMP_Y])
             .expect("slab has free space");
 
         assert_eq!(bundle.len(), 3);
@@ -1311,7 +1300,6 @@ mod miri_tests {
         PANIC_DROP_ARMED.store(false, Ordering::Relaxed);
 
         // 16 MB headroom for two 1-component archetypes.
-        let arena = Arena::with_capacity(16 * 1024 * 1024);
         let mut bundle = ArchetypeBundle::new();
         let arch_id = ArchetypeId(20);
 
@@ -1319,7 +1307,7 @@ mod miri_tests {
         // instance so that `Archetype::Drop` will trigger the user-defined
         // panicking drop_fn through `ComponentPool::Drop`.
         let _ = bundle
-            .add_archetype_from_components_fallible(arch_id, &[PANIC_COMP_ID], &arena)
+            .add_archetype_from_components_fallible(arch_id, &[PANIC_COMP_ID])
             .expect("slab has free space for the old archetype");
         {
             let archetype: &mut Archetype = bundle
@@ -1368,7 +1356,7 @@ mod miri_tests {
         // The replacement archetype: same id, but no components. Its
         // construction never touches `PANIC_DROP_COUNT`, so its presence in
         // the bundle after the (failed) replace is harmless to the count.
-        let new_archetype = Archetype::new(arch_id, &arena);
+        let new_archetype = Archetype::new(arch_id);
 
         // Arm the panic and try the replace. We move `bundle` into the
         // catch_unwind via `AssertUnwindSafe` because the inner closure

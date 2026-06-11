@@ -30,8 +30,9 @@
 //!   [`WORKER_ID_DISPATCHER`] when [`ThreadPool::install`] runs on the calling
 //!   thread, [`WORKER_ID_UNATTACHED`] otherwise.
 //! - **TLS `IN_SYSTEM_RUN`** (ALLOC1/ALLOC6) — set by the scheduler's RAII
-//!   guard around `System::run_unsafe`; consumed by `Arena::allocate_*`
-//!   debug assertions in the ECS crate (Wave 2 Step 7c).
+//!   guard around `System::run_unsafe`; consumed by context-restricted
+//!   debug assertions in the ECS crate (event send/read, `Time` access;
+//!   originally the retired shared Arena's `allocate_*`, Wave 2 Step 7c).
 //! - **TLS `ACTIVE_POOL`** — current pool pointer for ambient `par_iter`
 //!   dispatch (consumed by `Query::par_iter` in Wave 6).
 //! - **Idle bitset** (TPN6/TPN7) — `AtomicU64`-backed; supports up to

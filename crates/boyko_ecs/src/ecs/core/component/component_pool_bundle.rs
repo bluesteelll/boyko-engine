@@ -7,7 +7,6 @@ use crate::ecs::core::change_detection::Tick;
 use crate::ecs::core::component::component::Component;
 use crate::ecs::core::component::component_registry;
 use crate::ecs::identifiers::primitives::{ComponentId, InlandPoolId};
-use crate::ecs::memory::arena::Arena;
 use crate::ecs::memory::component_pool::ComponentPool;
 
 pub struct ComponentPoolBundle {
@@ -39,20 +38,20 @@ impl ComponentPoolBundle {
     }
 
     /// Creates a new ComponentPoolBundle with pools for the specified component IDs
-    pub fn with_component_ids(arena: &Arena, component_ids: &[ComponentId]) -> Self {
+    pub fn with_component_ids(component_ids: &[ComponentId]) -> Self {
         let mut bundle = Self::with_capacity(component_ids.len());
-        
+
         // Add pools for all specified component IDs
         for &component_id in component_ids {
-            bundle.add_pool(arena, component_id);
+            bundle.add_pool(component_id);
         }
-        
+
         bundle
     }
 
     /// Adds a component pool for a specific component ID
     /// Returns the internal index assigned to this pool
-    pub fn add_pool(&mut self, arena: &Arena, component_id: ComponentId) -> InlandPoolId {
+    pub fn add_pool(&mut self, component_id: ComponentId) -> InlandPoolId {
         // Check if pool for this component type already exists
         if let Some(&inland_id) = self.sparse_indexes.get(component_id.0) {
             return inland_id;
@@ -63,7 +62,7 @@ impl ComponentPoolBundle {
             "Component ID {} not registered in layout registry", component_id);
 
         // Create a new pool for this component type
-        let pool = ComponentPool::with_default_sizes(arena, component_id.0);
+        let pool = ComponentPool::with_default_sizes(component_id.0);
 
         // Add pool to the bundle
         let inland_id = InlandPoolId(self.pools.len());
@@ -435,7 +434,6 @@ impl IndexMut<ComponentId> for ComponentPoolBundle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ecs::memory::arena::Arena;
 
     // ID range 420-429 reserved for component_pool_bundle two-phase commit tests
     // (C-009). MAX_COMPONENTS = 512, so valid range is 0-511. Range 420-429 is
@@ -453,15 +451,14 @@ mod tests {
         component_registry::register_layout::<C009CompC>(C009_C.0);
     }
 
-    fn make_bundle(arena: &Arena) -> ComponentPoolBundle {
+    fn make_bundle() -> ComponentPoolBundle {
         register_c009_components();
-        ComponentPoolBundle::with_component_ids(arena, &[C009_A, C009_B])
+        ComponentPoolBundle::with_component_ids(&[C009_A, C009_B])
     }
 
     #[test]
     fn can_push_returns_true_when_all_pools_have_capacity() {
-        let arena = Arena::with_capacity(4096 * 1024);
-        let bundle = make_bundle(&arena);
+        let bundle = make_bundle();
         let bytes = [0u8; 4];
         let components = [(C009_A, bytes.as_slice()), (C009_B, bytes.as_slice())];
         assert!(bundle.can_push_entity_components(&components));
@@ -469,8 +466,7 @@ mod tests {
 
     #[test]
     fn can_push_returns_false_for_unknown_component_id() {
-        let arena = Arena::with_capacity(4096 * 1024);
-        let bundle = make_bundle(&arena);
+        let bundle = make_bundle();
         let bytes = [0u8; 4];
         // C009_C is not in the bundle.
         let components = [(C009_A, bytes.as_slice()), (C009_C, bytes.as_slice())];
@@ -479,8 +475,7 @@ mod tests {
 
     #[test]
     fn push_after_can_push_returns_same_unit_index() {
-        let arena = Arena::with_capacity(4096 * 1024);
-        let mut bundle = make_bundle(&arena);
+        let mut bundle = make_bundle();
         let bytes = [0u8; 4];
         let components = [(C009_A, bytes.as_slice()), (C009_B, bytes.as_slice())];
         assert!(bundle.can_push_entity_components(&components));
@@ -490,8 +485,7 @@ mod tests {
 
     #[test]
     fn two_consecutive_pushes_produce_sequential_indices() {
-        let arena = Arena::with_capacity(4096 * 1024);
-        let mut bundle = make_bundle(&arena);
+        let mut bundle = make_bundle();
         let bytes = [1u8; 4];
         let components = [(C009_A, bytes.as_slice()), (C009_B, bytes.as_slice())];
 
@@ -509,16 +503,14 @@ mod tests {
 
     #[test]
     fn can_push_is_false_when_pool_is_full() {
-        // Create a very small arena to force pool capacity exhaustion.
-        // We need the pool to be full: push enough entities to fill it.
-        // With default sizes this would require many entities; instead check
-        // that can_push returns false for a missing component (edge case that
-        // exercises the PoolFailure path without needing exhaustion).
+        // Filling a default-sized pool to its reserve ceiling would require
+        // millions of entities; instead check that can_push returns false for
+        // a missing component (edge case that exercises the PoolFailure path
+        // without needing exhaustion).
         //
         // The exhaustion path is covered by Archetype::create_entity returning
         // false when can_push returns false (see archetype.rs tests).
-        let arena = Arena::with_capacity(4096 * 1024);
-        let bundle = make_bundle(&arena);
+        let bundle = make_bundle();
         // An empty slice is always "pushable" (no pools to fill → vacuously true).
         // The real exhaustion scenario would require filling the pool.
         // Verify the contract with a known-absent component instead.

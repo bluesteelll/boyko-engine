@@ -1115,8 +1115,8 @@ impl Schedule {
             //     + Send + Sync + 'static>; `CompletionCell` ↑Send.
             scope.spawn(move || {
                 // Allocation discipline (ALLOC1 / ALLOC6): set the TLS
-                // flag so that any arena allocation inside the body
-                // trips the `Arena::allocate_*` debug assertion.
+                // flag so allocation-restricted paths (event send/read,
+                // Time access) can debug_assert their context.
                 let _alloc_guard = boyko_threadpool::InSystemRunGuard::enter();
 
                 // SAFETY (S1 / SCH3): see outer SAFETY block. The cell

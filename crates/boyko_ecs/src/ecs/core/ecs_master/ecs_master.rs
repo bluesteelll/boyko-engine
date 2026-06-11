@@ -46,7 +46,6 @@ use crate::ecs::core::system::{
     into_system::IntoSystem, system::System, unsafe_ecs_cell::UnsafeEcsCell,
 };
 use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId, EntityId, InlandPoolId};
-use crate::ecs::memory::arena::Arena;
 use crate::ecs::error::{EcsError, EcsResult};
 
 /// Phase 9 Round 2 W3 — entity-master capacity hint used by the
@@ -91,7 +90,7 @@ pub(crate) use crate::ecs::core::system::params::entity_counter::MAX_BATCH_HINT;
 /// # Field order (drop order — Phase 8a C5 RESOLUTION)
 ///
 /// Fields are dropped in declaration order:
-/// `resources → events → entity_master → archetype_master → arena`.
+/// `resources → events → entity_master → archetype_master → …`.
 ///
 /// `resources: Resources` is the **first** field so it drops first. A
 /// `Resource`'s `Drop` impl runs while every other subsystem is still alive;
@@ -100,32 +99,15 @@ pub(crate) use crate::ecs::core::system::params::entity_counter::MAX_BATCH_HINT;
 /// prevents the worst case from being UB.
 ///
 /// `events: EventDispatcher` drops next. Event buffers live in their own
-/// heap allocations (separate from the arena) and do not reference arena
-/// memory.
+/// heap allocations and do not reference component storage.
 ///
-/// `arena` **must** be last because `ArchetypeMaster`/`Archetype` store
-/// `*const Arena` (raw provenance pointer — Phase 3a Miri retag fix; previously
-/// `NonNull<Arena>`, audit finding C-001) and `ComponentPool`s store raw
-/// pointers into the arena's backing buffer. Dropping the arena last guarantees
-/// those pointers remain valid while child `Drop`s run.
-///
-/// The arena lives behind `Box<Arena>` so its address stays stable across
-/// moves of the owning `EcsMaster`: without that, the original code on
-/// `master` and `ecs` constructed `Arena` on the stack, stored
-/// `NonNull::from(&arena)`, and then moved `arena` into `self` — a textbook
-/// dangling-pointer construction (C-001).
-///
-/// # Raw provenance (`*const Arena`) — Miri retag fix
-///
-/// Child structures (`ArchetypeMaster`, `Archetype`, `ComponentPool`) store the
-/// arena address as `*const Arena` rather than `NonNull<Arena>`. This eliminates
-/// the Stacked Borrows retag UB that Miri reported when multiple `NonNull`s were
-/// derived from the same `Box<Arena>` in the same borrow scope: under Stacked
-/// Borrows, each `NonNull::from(&*arena_box)` re-activates the `&`-read tag and
-/// can invalidate earlier derived pointers on reborrow. A raw `*const` pointer
-/// minted via `&raw const *arena_box` carries the box's provenance but does not
-/// participate in the Stacked Borrows tag stack — Miri accepts it as a shared,
-/// read-only view of the allocation (audit finding C-001 / Phase 3a).
+/// Component storage is owned per-pool since Phase X.I: every
+/// `ComponentPool` carries its own `VmReservation`, released by the pool's
+/// own `Drop` strictly after its rows are dropped. (The historical shared
+/// `Box<Arena>` field — and the whole C-001 / Phase 3a raw-provenance
+/// story around it — was retired in Phase X.J.) `query_state_cache` stays
+/// declared LAST so cached query state always drops after the archetype
+/// subsystem it may point into.
 ///
 /// [`Resource`]: crate::ecs::core::resources::Resource
 pub struct EcsMaster {
@@ -140,7 +122,7 @@ pub struct EcsMaster {
 
     /// Event dispatcher — dropped after `resources` and before the entity /
     /// archetype subsystems. Event buffers live in their own heap allocations
-    /// independent of the arena.
+    /// independent of component storage.
     events: EventDispatcher,
 
     /// Entity management system.
@@ -168,12 +150,10 @@ pub struct EcsMaster {
     /// (one Acquire load on the outer lock once it is initialised, then
     /// the same indexed slot Acquire load as before).
     ///
-    /// **Field slot (C6 pin)**: declared after `archetype_master` and before
-    /// `arena`. Rust drops fields in declaration order, so this field is
-    /// dropped between them. The field holds only `OnceLock<ArchetypeId>`
-    /// values — no resource ownership and no `Drop` side-effects — so the
-    /// drop position is informational only and does not interact with the
-    /// Phase 8a C5 drop-order contract for `archetype_master` and `arena`.
+    /// **Field slot (C6 pin)**: declared after `archetype_master`. The field
+    /// holds only `OnceLock<ArchetypeId>` values — no resource ownership and
+    /// no `Drop` side-effects — so the drop position is informational only
+    /// and does not interact with the Phase 8a C5 drop-order contract.
     ///
     /// Access via [`Self::bundle_archetype_cache`].
     #[allow(dead_code)]
@@ -229,11 +209,6 @@ pub struct EcsMaster {
     /// [`run_check_ticks_scan`]: crate::ecs::core::change_detection::run_check_ticks_scan
     pub(crate) last_check_tick: Tick,
 
-    /// Memory arena for component allocation. `Box` provides a stable heap
-    /// address shared by every `*const Arena` raw provenance pointer stored in
-    /// child structures (`ArchetypeMaster`, `Archetype`, `ComponentPool`).
-    arena: Box<Arena>,
-
     /// Phase 14a (plan §2.3) — world-resident channel a hook's
     /// `DeferredCommands` enqueues into. Reachable via `&mut EcsMaster` (which
     /// the outermost apply holds), unlike the borrow-frozen per-system
@@ -241,10 +216,10 @@ pub struct EcsMaster {
     /// (command_queue.rs:87) until first push, so a world whose hooks never
     /// enqueue pays zero allocation.
     ///
-    /// **Drop-order**: declared AFTER `arena` (plan §2.3), mirroring the
+    /// **Drop-order**: declared late (plan §2.3), mirroring the
     /// `query_state_cache` C5 placement. Stored commands are `Command: Send +
-    /// 'static`, so they cannot borrow arena memory — the drop order relative
-    /// to the arena slab is not a correctness hazard.
+    /// 'static`, so they cannot borrow component storage — the drop order
+    /// relative to the pools is not a correctness hazard.
     ///
     /// `pub(crate)` so `DeferredCommands` (hooks module) can `push` and
     /// `drain_deferred_hook_queue` can derive the raw twin.
@@ -264,11 +239,12 @@ pub struct EcsMaster {
     /// `EcsMaster::new`. Worlds that never call `query` (e.g. pure
     /// `Schedule::run`-driven workloads) skip this allocation entirely.
     ///
-    /// **Field slot (C5 fix)**: declared AFTER `arena`. Rust drops fields in
-    /// declaration order, so this field is dropped LAST. Inverts the failure
-    /// mode for any future `D::State` / `F::State` impl carrying arena-derived
-    /// raw pointers from silent miscompile to immediate Miri trip:
-    /// arena-derived state pointers freed before the arena slab would now
+    /// **Field slot (C5 fix)**: declared LAST. Rust drops fields in
+    /// declaration order, so this field is dropped after the archetype
+    /// subsystem (whose pools own the component reservations). Inverts the
+    /// failure mode for any future `D::State` / `F::State` impl carrying
+    /// storage-derived raw pointers from silent miscompile to immediate Miri
+    /// trip: state pointers freed before the backing reservation would now
     /// trigger a Miri use-after-free instead of silently using the freed
     /// allocation.
     ///
@@ -380,13 +356,6 @@ impl Drop for QueryStateCache {
 impl EcsMaster {
     /// Creates a new empty EcsMaster.
     ///
-    /// Uses two-phase construction to avoid Miri Stacked Borrows retag UB:
-    /// the arena `Box` is written to its final struct field first; the raw
-    /// `*const Arena` pointer is then minted by reading the Box's inner pointer
-    /// representation directly — without creating a `&Arena` reference (which
-    /// would create a SharedReadOnly tag that the subsequent `Unique` retag on
-    /// move would invalidate). Phase 3a Miri retag fix.
-    ///
     /// # Phase 12.6 — lazy allocation
     ///
     /// The heavy per-world allocations (`entities_inland` fast-store memset,
@@ -394,38 +363,17 @@ impl EcsMaster {
     /// are all deferred to first-use. (Phase X.D removed the parallel
     /// `sparse_to_active` fast-store.)
     ///
-    /// # Phase X.F — arena reserve-lazy backing store
+    /// # Phase X.I — per-pool reserve-lazy backing store
     ///
-    /// The arena is acquired RESERVE-ONLY: one multi-GB virtual-address
-    /// reservation (`DEFAULT_ARENA_RESERVE`, 4 GiB on 64-bit OS-syscall
-    /// arms) with ZERO initial commit — no commit syscall, no commit charge.
-    /// The first archetype/pool allocation takes the cold grow path and
-    /// commits the first slab at the frontier; subsequent growth is one
-    /// syscall per slab, never an O(N) move. Miri / wasm32 / exotic targets
-    /// fall back to one eager global-allocator allocation of a 64 MiB
-    /// reserve. Memory-constrained embedders: see
-    /// [`EcsMaster::with_arena_reserve`]. See [`Arena::with_reserve`].
-    ///
-    /// [`Arena::with_reserve`]: crate::ecs::memory::arena::Arena::with_reserve
+    /// Component storage is acquired per `ComponentPool`, RESERVE-ONLY:
+    /// each pool holds one virtual-address reservation with ZERO initial
+    /// commit — no commit syscall, no commit charge. The first row commits
+    /// the first slab at the frontier; subsequent growth is one syscall per
+    /// slab, never an O(N) move. Miri / wasm32 / exotic targets fall back
+    /// to one eager global-allocator allocation per pool (small D2 fallback
+    /// ceilings). (Phase X.J retired the historical shared Arena.)
     pub fn new() -> Self {
-        let arena: Box<Arena> = Box::default();
-        // SAFETY: `Box<Arena>` is guaranteed to have the same in-memory
-        // representation as `*mut Arena` (a single non-null pointer). We read
-        // the Box's inner raw pointer without constructing a `&Arena` reference,
-        // so no SharedReadOnly tag is created in the Stacked Borrows model.
-        // The arena's heap address is stable for the lifetime of the Box.
-        let arena_ptr: *const Arena = unsafe {
-            // addr_of!(&arena as Box<Arena>) → *const Box<Arena>
-            // Cast to *const *const Arena → read the inner pointer.
-            // This is safe because Box<T> is repr-equivalent to *mut T.
-            let box_ptr: *const Box<Arena> = std::ptr::addr_of!(arena);
-            *(box_ptr.cast::<*const Arena>())
-        };
-        // SAFETY: `arena_ptr` points to the heap allocation owned by `arena`.
-        // `arena` (and therefore `arena_ptr`) outlives `archetype_master` by
-        // field drop order (arena is declared last in EcsMaster). Arena is
-        // `!Send + !Sync`; single-threaded use is enforced.
-        let archetype_master = unsafe { ArchetypeMaster::new(arena_ptr) };
+        let archetype_master = ArchetypeMaster::new();
         // EventDispatcher::new(1) validates 1 ∈ 1..=64 — never fails.
         let events = EventDispatcher::new(1)
             .expect("invariant: default thread_count=1 is always valid");
@@ -444,7 +392,6 @@ impl EcsMaster {
             bundle_column_cache: OnceLock::new(),
             change_tick: AtomicU32::new(0),
             last_check_tick: Tick::ZERO,
-            arena,
             // Phase 14a: lazy — alloc-free until the first deferred hook push.
             // The reentrancy depth counter is a thread-local (see hooks::scope),
             // so it is not a field here (fixes F2's Tree Borrows UB).
@@ -464,16 +411,7 @@ impl EcsMaster {
     /// SBO17 strong-form contract) should call `ensure_capacity`
     /// explicitly after construction.
     pub fn with_capacity(entity_capacity: usize, archetype_capacity: usize) -> Self {
-        // Phase X.F: same reserve-lazy default arena as `new()` (the old
-        // eager `DEFAULT_ARENA_SIZE` commit is gone).
-        let arena: Box<Arena> = Box::default();
-        // SAFETY: same rationale as `EcsMaster::new`.
-        let arena_ptr: *const Arena = unsafe {
-            let box_ptr: *const Box<Arena> = std::ptr::addr_of!(arena);
-            *(box_ptr.cast::<*const Arena>())
-        };
-        // SAFETY: same contract as `EcsMaster::new`.
-        let archetype_master = unsafe { ArchetypeMaster::with_capacity(arena_ptr, archetype_capacity) };
+        let archetype_master = ArchetypeMaster::with_capacity(archetype_capacity);
         // EventDispatcher::new(1) validates 1 ∈ 1..=64 — never fails.
         let events = EventDispatcher::new(1)
             .expect("invariant: default thread_count=1 is always valid");
@@ -486,47 +424,9 @@ impl EcsMaster {
             bundle_column_cache: OnceLock::new(),
             change_tick: AtomicU32::new(0),
             last_check_tick: Tick::ZERO,
-            arena,
             // Phase 14a: lazy — alloc-free until the first deferred hook push.
             // The reentrancy depth counter is a thread-local (see hooks::scope),
             // so it is not a field here (fixes F2's Tree Borrows UB).
-            deferred_hook_queue: CommandQueue::new(),
-            query_state_cache: OnceLock::new(),
-        }
-    }
-
-    /// Creates a new empty `EcsMaster` whose component-data arena reserves
-    /// `arena_reserve` bytes of address space (Phase X.F).
-    ///
-    /// The reserve is the LOGICAL allocation ceiling: archetype/pool creation
-    /// commits slabs lazily at the frontier and panics loudly only when the
-    /// total live component data would exceed `arena_reserve`. Nothing is
-    /// committed up front. Intended for tests, benches, and
-    /// memory-constrained embedders that want a ceiling smaller than the
-    /// multi-GB `DEFAULT_ARENA_RESERVE` default (or a larger one).
-    pub fn with_arena_reserve(arena_reserve: usize) -> Self {
-        let arena: Box<Arena> = Box::new(Arena::with_reserve(arena_reserve, 0));
-        // SAFETY: same rationale as `EcsMaster::new`.
-        let arena_ptr: *const Arena = unsafe {
-            let box_ptr: *const Box<Arena> = std::ptr::addr_of!(arena);
-            *(box_ptr.cast::<*const Arena>())
-        };
-        // SAFETY: same contract as `EcsMaster::new`.
-        let archetype_master = unsafe { ArchetypeMaster::new(arena_ptr) };
-        // EventDispatcher::new(1) validates 1 ∈ 1..=64 — never fails.
-        let events = EventDispatcher::new(1)
-            .expect("invariant: default thread_count=1 is always valid");
-        Self {
-            resources: Resources::new(),
-            events,
-            entity_master: EntityMaster::new(),
-            archetype_master,
-            bundle_archetype_cache: OnceLock::new(),
-            bundle_column_cache: OnceLock::new(),
-            change_tick: AtomicU32::new(0),
-            last_check_tick: Tick::ZERO,
-            arena,
-            // Phase 14a: lazy — alloc-free until the first deferred hook push.
             deferred_hook_queue: CommandQueue::new(),
             query_state_cache: OnceLock::new(),
         }
@@ -1403,7 +1303,7 @@ impl EcsMaster {
         //   - Single-threaded &mut self ⇒ no concurrent reader.
         //   - copy_nonoverlapping is sound because the slice and the pool
         //     buffer live in disjoint allocations (slice is a caller-stack
-        //     view; the pool buffer is arena-owned).
+        //     view; the pool buffer lives in the pool's own reservation).
         unsafe {
             std::ptr::copy_nonoverlapping(component_bytes.as_ptr(), dst, component_bytes.len());
         }
@@ -1727,12 +1627,6 @@ impl EcsMaster {
     #[inline]
     pub fn archetype_master_mut(&mut self) -> &mut ArchetypeMaster {
         &mut self.archetype_master
-    }
-
-    /// Gets a reference to the Arena
-    #[inline]
-    pub fn arena(&self) -> &Arena {
-        &self.arena
     }
 
     // ── Event dispatch proxy methods (Phase 6) ──────────────────────────────
@@ -2895,7 +2789,6 @@ impl EcsMaster {
         // (`MAX_BUNDLE_TYPES × MAX_BUNDLE_ARITY × 4 B` worst case).
         self.bundle_archetype_cache = OnceLock::new();
         self.bundle_column_cache = OnceLock::new();
-        // Note: We don't clear the arena as it manages its own memory
     }
 }
 
@@ -2976,12 +2869,12 @@ impl Default for EcsMaster {
 // SAFETY (SEND1 — Phase 9 §2.4, §9.1, §9.2): `EcsMaster` becomes `Send + Sync`
 // under the Phase 9 contract:
 //
-//   - `arena: Box<Arena>` is the only `!Send + !Sync` field. Arena access is
-//     bounded by the ALLOC1 discipline (§2.7): all allocation paths require
-//     `IN_SYSTEM_RUN == false`, enforced via `debug_assert!` in
-//     `Arena::allocate_layout` / `Arena::allocate_from_free_blocks`. The
-//     scheduler invokes allocation only on the dispatcher thread inside the
-//     apply window (§5.4.5.1, SCH7), with all workers drained.
+//   - Structural allocation is bounded by the ALLOC1 discipline (§2.7):
+//     the scheduler invokes it only on the dispatcher thread inside the
+//     apply window (§5.4.5.1, SCH7), with all workers drained. (The
+//     historical shared `arena: Box<Arena>` field — the original
+//     `!Send + !Sync` interior — was retired in Phase X.J; the manual
+//     impls remain authoritative for the raw-pointer-bearing subsystems.)
 //   - `resources` (`Resources`), `events` (`EventDispatcher`),
 //     `entity_master` (`EntityMaster`), `archetype_master` (`ArchetypeMaster`),
 //     and `bundle_archetype_cache` (`Box<[OnceLock<ArchetypeId>; _]>`) are
@@ -3567,12 +3460,14 @@ mod tests {
     /// Phase 12.5 Track B C3 / C5 — smoke test for the
     /// `query_state_cache` drop ordering invariant.
     ///
-    /// Rust drops struct fields in declaration order — `arena` is declared
-    /// BEFORE `query_state_cache`, so `arena` drops FIRST and the cache
-    /// drops AFTER. This pin exercises the basic `EcsMaster::drop()` path
-    /// after a `query` cold-init has populated the cache slot; a future
-    /// regression that reordered the fields and dropped the cache before
-    /// the arena would surface here (additional Miri coverage lives in
+    /// Rust drops struct fields in declaration order — `archetype_master`
+    /// (whose pools own the component reservations since Phase X.I; the
+    /// shared arena was retired in Phase X.J) is declared BEFORE
+    /// `query_state_cache`, so the storage drops FIRST and the cache drops
+    /// AFTER. This pin exercises the basic `EcsMaster::drop()` path after a
+    /// `query` cold-init has populated the cache slot; a future regression
+    /// that reordered the fields and dropped the cache before the storage
+    /// would surface here (additional Miri coverage lives in
     /// `tests/miri_phase12_5_track_b.rs::miri_query_cache_drops_after_arena_with_arena_derived_d_state`).
     ///
     /// The full synthetic-`D::State` drop-order recorder described in the
@@ -3609,13 +3504,14 @@ mod tests {
         }
 
         // Drop the world. Field-order on EcsMaster places
-        // `query_state_cache` AFTER `arena` — Rust's declaration-order
-        // drop semantics therefore reclaim the cache slot AFTER the
-        // arena drop has run. A regression that reordered the fields
-        // would either (a) trigger Miri inside the existing
+        // `query_state_cache` AFTER `archetype_master` — Rust's
+        // declaration-order drop semantics therefore reclaim the cache slot
+        // AFTER the component storage has dropped. A regression that
+        // reordered the fields would either (a) trigger Miri inside the
+        // existing
         // `miri_query_cache_drops_after_arena_with_arena_derived_d_state`
         // test, or (b) surface as a use-after-free in any future
-        // arena-derived `D::State` impl.
+        // storage-derived `D::State` impl.
         drop(ecs);
     }
 }

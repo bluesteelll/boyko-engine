@@ -109,7 +109,7 @@ pub struct App {
     // always dropped with no frame in flight (every `run*` takes &mut self ⇒
     // workers are idle and hold no borrow of world/schedule), so drop order is
     // not soundness-load-bearing.
-    /// The world (arena + resources + entities). Lazy per Phase 12.6 — not
+    /// The world (storage + resources + entities). Lazy per Phase 12.6 — not
     /// eagerly memset on construction.
     world: EcsMaster,
 

@@ -8,7 +8,6 @@ use crate::ecs::core::component::component_pool_bundle::ComponentPoolBundle;
 use crate::ecs::core::component::component_registry::MAX_COMPONENTS;
 use crate::ecs::core::component::hooks::archetype_flags::ArchetypeFlags;
 use crate::ecs::error::{EcsError, EcsResult};
-use crate::ecs::memory::arena::Arena;
 
 /// `MAX_COMPONENTS` as a `ComponentId` newtype for comparison against newtype-guarded IDs.
 const MAX_COMPONENTS_ID: ComponentId = ComponentId(MAX_COMPONENTS);
@@ -161,7 +160,7 @@ pub struct Archetype {
     /// the cold `HOOKS` table (plan §4.6); read as a single `u16` load +
     /// `test`/`jz` on every structural-op dispatch site.
     ///
-    /// Placed after `signature` and before `arena` (plan §1-W2). Because
+    /// Placed after `signature` (plan §1-W2). Because
     /// `signature` embeds a `#[repr(align(32))]` `ComponentMask`, the offset
     /// after it was already 8-aligned with zero padding; inserting this `u16`
     /// adds +8 B (2 B + 6 B realign), not zero — the W2 correction. `columns`
@@ -171,13 +170,6 @@ pub struct Archetype {
     /// neighbouring fields (Phase 7 U13): the slab path writes every field via
     /// `addr_of_mut!` and must initialise this one too.
     pub(crate) flags: ArchetypeFlags,
-
-    /// Raw provenance pointer to the arena used for memory allocation.
-    /// Stored as `*const Arena` (raw provenance) to avoid Miri retag UB:
-    /// see Phase 3a Miri retag fix in `ecs_master.rs` field-level doc.
-    ///
-    /// `pub(crate)` for in-place slab construction (Phase 7 U13).
-    pub(crate) arena: *const Arena,
 
     /// Set of component IDs in this archetype for efficient iteration.
     ///
@@ -199,27 +191,29 @@ const _: () = assert!(std::mem::offset_of!(Archetype, columns) == 0);
 
 // Phase 14a TRIPWIRE 1 (plan §1-W2 / §8 P5): hard size assertion pinned to a
 // MEASURED literal. With the `flags: ArchetypeFlags` (u16) field added after
-// the `#[repr(align(32))]` `signature`, the struct grows by +8 B (2 B + 6 B
-// realign) over its pre-Phase-14a size of 8472 B — measured 8480 B on the
-// x86_64 target. This guards against accidental layout drift; if a future
-// change moves `flags` or alters `signature`'s alignment, this trips before
-// the perf regression can ship.
+// the `#[repr(align(32))]` `signature`, the struct grew by +8 B (2 B + 6 B
+// realign) to 8480 B; Phase X.J deleted the vestigial `arena: *const Arena`
+// field (-8 B raw), but `align_of::<Archetype>() == 32` (via the
+// `ComponentMask` inside `signature`) rounds the size straight back up —
+// still 8480 B measured on the x86_64 target. This guards against accidental
+// layout drift; if a future change moves `flags` or alters `signature`'s
+// alignment, this trips before the perf regression can ship.
 //
-// The struct embeds raw pointers (`arena`), `Vec`s, and `usize` fields, so the
-// 8480 B figure encodes the 64-bit ABI; gated to 64-bit (the engine's supported
-// platform) — see CLAUDE.md target platform. `offset_of(columns) == 0` above is
+// The struct embeds `Vec`s and `usize` fields, so the 8480 B figure encodes
+// the 64-bit ABI; gated to 64-bit (the engine's supported platform) — see
+// CLAUDE.md target platform. `offset_of(columns) == 0` above is
 // width-independent (first `#[repr(C)]` field) and stays unconditional.
 #[cfg(target_pointer_width = "64")]
 const _: () = assert!(std::mem::size_of::<Archetype>() == 8480);
 
 impl Archetype {
-    /// Creates a new archetype with the given ID and arena.
+    /// Creates a new archetype with the given ID.
     ///
     /// The 8 KB `columns` table is zero-initialised on the stack; Phase 4
     /// will switch this to in-place slab construction via `addr_of_mut!`
     /// (Phase 7 W6) once `ArchetypeBundle` lands. For now, low-frequency
     /// creation sites pay the temporary stack cost.
-    pub fn new(id: ArchetypeId, arena: &Arena) -> Self {
+    pub fn new(id: ArchetypeId) -> Self {
         Self {
             columns: [Column::null(); MAX_COMPONENTS],
             id,
@@ -229,16 +223,10 @@ impl Archetype {
             // Phase 14a: no hooks until Wave 2 computes them from the `HOOKS`
             // table at `create_by_ids` / `register_component_inplace`.
             flags: ArchetypeFlags::empty(),
-            // SAFETY: `arena` is a shared reference valid for the lifetime of
-            // the owning `EcsMaster`. Converting to a raw pointer preserves
-            // provenance; the pointer is never dereferenced here — it is
-            // forwarded to `add_pool` via a temporary `&Arena` reborrow.
-            arena: &raw const *arena,
             component_ids: Vec::new(),
             entity_ids: Vec::new(),
         }
     }
-
 
     /// Creates a new archetype from a slice of component IDs.
     ///
@@ -246,7 +234,7 @@ impl Archetype {
     /// `columns[comp_id.0]` entry so the hot read path can find the pool's
     /// `(ptr, stride)` without going through the bundle's sparse map
     /// (Phase 7 D4 / invariant U7).
-    pub fn create_by_ids(id: ArchetypeId, component_ids: &[ComponentId], arena: &Arena) -> Self {
+    pub fn create_by_ids(id: ArchetypeId, component_ids: &[ComponentId]) -> Self {
         // Create a mask from the component IDs
         let mut mask = ComponentMask::new();
         for &comp_id in component_ids {
@@ -263,8 +251,6 @@ impl Archetype {
             // Phase 14a: initialised empty; the OR-compute happens below once
             // the component pools are registered (Wave 2 wires `HOOKS`).
             flags: ArchetypeFlags::empty(),
-            // SAFETY: same provenance contract as `Archetype::new`.
-            arena: &raw const *arena,
             component_ids: component_ids.to_vec(),
             entity_ids: Vec::new(),
         };
@@ -276,7 +262,7 @@ impl Archetype {
         // table (plan §4.6) — one accumulator, set once after the loop.
         let mut flags = ArchetypeFlags::empty();
         for &comp_id in component_ids {
-            archetype.component_pools.add_pool(arena, comp_id);
+            archetype.component_pools.add_pool(comp_id);
             archetype.refresh_column(comp_id);
             flags.insert_from_hooks(comp_id);
         }
@@ -298,18 +284,10 @@ impl Archetype {
             return false;
         }
 
-        // SAFETY: `self.arena` was minted from the `Box<Arena>` owned by
-        // `EcsMaster` (audit C-001 / drop-order invariant, Phase 3a raw
-        // provenance fix). The `Box` lives at a stable heap address and outlives
-        // every `Archetype`. No aliasing `&mut Arena` exists: `Arena` is
-        // `!Send + !Sync`; single-threaded use is enforced. The lifetime of
-        // the reborrow is bounded to this call — it does not escape.
-        let arena = unsafe { &*self.arena };
-
         // Add a pool for this component type, then refresh the inline column
         // table so the hot read path can resolve `component_id` without going
         // through the bundle's sparse map (Phase 7 invariant U7).
-        self.component_pools.add_pool(arena, component_id);
+        self.component_pools.add_pool(component_id);
         self.refresh_column(component_id);
 
         // Update signature mask
@@ -329,11 +307,11 @@ impl Archetype {
     /// pre-populate those fields, so a full `register_component` call would
     /// early-return on the signature check).
     ///
-    /// Calls `component_pools.add_pool(arena, component_id)` and refreshes the
+    /// Calls `component_pools.add_pool(component_id)` and refreshes the
     /// inline column entry. Intended exclusively for in-place archetype
     /// construction — the bundle resides in the same crate (`pub(crate)`).
-    pub(crate) fn register_component_inplace(&mut self, component_id: ComponentId, arena: &Arena) {
-        self.component_pools.add_pool(arena, component_id);
+    pub(crate) fn register_component_inplace(&mut self, component_id: ComponentId) {
+        self.component_pools.add_pool(component_id);
         self.refresh_column(component_id);
         // Phase 14a (plan §4.6): OR this single component's hook bits into the
         // archetype flags from the cold `HOOKS` table. The slab path
@@ -371,11 +349,11 @@ impl Archetype {
 
     /// Refreshes the entire `columns` table from `component_pools`.
     ///
-    /// Reserved for a hypothetical future RELOCATING arena where every pool's
-    /// `buffer_ptr` may move. Phase X.F confirmed address-stable growth (the
-    /// arena only commits fresh pages at the frontier of one contiguous
-    /// reservation — pool buffers never move), so this MUST remain dead code.
-    /// Not used on the Phase 7 hot path.
+    /// Reserved for a hypothetical future RELOCATING store where every pool's
+    /// `buffer_ptr` may move. Phase X.F/X.I confirmed address-stable growth
+    /// (each pool only commits fresh pages at the frontier of its own
+    /// contiguous reservation — pool buffers never move), so this MUST remain
+    /// dead code. Not used on the Phase 7 hot path.
     #[cold]
     #[allow(dead_code)]
     fn refresh_all_columns(&mut self) {
@@ -924,10 +902,6 @@ impl Archetype {
 //
 //   - The owned `ComponentPoolBundle` aggregates `ComponentPool`s, which are
 //     themselves `Send + Sync` per SEND10 (see `component_pool.rs`).
-//   - The `arena: *const Arena` field is never dereferenced outside the
-//     dispatcher-only paths (`register_component`, `register_component_inplace`,
-//     archetype construction). Worker reads (`get_entity_id_at`, the inline
-//     `columns[c]` lookup) never touch the arena pointer.
 //   - The inline `columns: [Column; MAX_COMPONENTS]` table is read-only from
 //     workers; updates happen during dispatcher-only `refresh_column` /
 //     `add_pool` flows.
@@ -951,7 +925,6 @@ unsafe impl Sync for Column {}
 mod tests {
     use super::*;
     use crate::ecs::core::component::component_registry;
-    use crate::ecs::memory::arena::Arena;
 
     // Use high IDs to avoid collisions with other test modules.
     const COMP_A: ComponentId = ComponentId(400);
@@ -966,9 +939,9 @@ mod tests {
         component_registry::register_layout::<CompB>(COMP_B.0);
     }
 
-    fn make_archetype(arena: &Arena) -> Archetype {
+    fn make_archetype() -> Archetype {
         register_test_components();
-        Archetype::create_by_ids(ArchetypeId(1), &[COMP_A, COMP_B], arena)
+        Archetype::create_by_ids(ArchetypeId(1), &[COMP_A, COMP_B])
     }
 
     // Helper: add one entity with zero-filled bytes for both components.
@@ -990,8 +963,7 @@ mod tests {
 
     #[test]
     fn create_entity_increments_entity_count() {
-        let arena = Arena::with_capacity(4096 * 1024);
-        let mut arch = make_archetype(&arena);
+        let mut arch = make_archetype();
 
         assert_eq!(arch.entity_count(), 0, "fresh archetype has no entities");
         add_entity(&mut arch, EntityId(42));
@@ -1000,8 +972,7 @@ mod tests {
 
     #[test]
     fn create_entity_pushes_entity_id_to_vector() {
-        let arena = Arena::with_capacity(4096 * 1024);
-        let mut arch = make_archetype(&arena);
+        let mut arch = make_archetype();
 
         add_entity(&mut arch, EntityId(99));
         assert_eq!(
@@ -1013,8 +984,7 @@ mod tests {
 
     #[test]
     fn create_entity_missing_component_returns_false() {
-        let arena = Arena::with_capacity(4096 * 1024);
-        let mut arch = make_archetype(&arena);
+        let mut arch = make_archetype();
 
         // Provide only COMP_A, omit COMP_B.
         let bytes_a = vec![0u8; component_registry::get_component_size(COMP_A.0).unwrap()];
@@ -1035,8 +1005,7 @@ mod tests {
         // Regression for C-008: in the original code, component pools were NOT
         // popped in release because pop_entity() was inside debug_assert!.
         // This test must pass under both `cargo test` and `cargo test --release`.
-        let arena = Arena::with_capacity(4096 * 1024);
-        let mut arch = make_archetype(&arena);
+        let mut arch = make_archetype();
         let _idx = add_entity(&mut arch, EntityId(7));
 
         assert_eq!(arch.entity_count(), 1);
@@ -1053,8 +1022,7 @@ mod tests {
     fn pop_removes_entity_id_from_vector() {
         // Regression for Q-022: entity_ids.pop() must be called alongside
         // component_pools.pop_entity() — previously it was missing.
-        let arena = Arena::with_capacity(4096 * 1024);
-        let mut arch = make_archetype(&arena);
+        let mut arch = make_archetype();
         let _idx0 = add_entity(&mut arch, EntityId(1));
         add_entity(&mut arch, EntityId(2));
         add_entity(&mut arch, EntityId(3));
@@ -1089,28 +1057,20 @@ mod tests {
         // In release builds, pop_entity() is called but the pools are empty
         // and pop returns false — the function returns false without decrement.
         // Both outcomes are acceptable; we use catch_unwind to allow both.
-        let arena = Arena::with_capacity(4096 * 1024);
-
-        // Build the archetype inside the closure so arena lifetime is valid.
-        // We can't move `arena` across the UnwindSafe boundary easily, so
-        // we reproduce a minimal inline version.
         let _result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let arena2 = Arena::with_capacity(4096 * 1024);
             register_test_components();
-            let mut arch = Archetype::create_by_ids(ArchetypeId(99), &[COMP_A, COMP_B], &arena2);
+            let mut arch = Archetype::create_by_ids(ArchetypeId(99), &[COMP_A, COMP_B]);
             // In debug: panics. In release: returns false (pool is empty → pop() = false).
             let _ = arch.pop();
         }));
         // The test passes regardless of whether a panic occurred.
-        let _ = arena; // keep arena alive
     }
 
     // --- remove_entity ---
 
     #[test]
     fn remove_entity_last_returns_last_outcome() {
-        let arena = Arena::with_capacity(4096 * 1024);
-        let mut arch = make_archetype(&arena);
+        let mut arch = make_archetype();
         let idx = add_entity(&mut arch, EntityId(55));
         // Removing the only entity — no swap needed.
         let result = arch.remove_entity(idx);
@@ -1120,8 +1080,7 @@ mod tests {
 
     #[test]
     fn remove_entity_non_last_returns_swapped_outcome() {
-        let arena = Arena::with_capacity(4096 * 1024);
-        let mut arch = make_archetype(&arena);
+        let mut arch = make_archetype();
         let idx_first = add_entity(&mut arch, EntityId(10));
         add_entity(&mut arch, EntityId(20)); // last entity
 
@@ -1140,8 +1099,7 @@ mod tests {
     #[test]
     fn remove_outcome_last_on_single_entity() {
         // Removing the only entity must produce RemoveOutcome::Last.
-        let arena = Arena::with_capacity(4096 * 1024);
-        let mut arch = make_archetype(&arena);
+        let mut arch = make_archetype();
         let idx = add_entity(&mut arch, EntityId(1));
         assert_eq!(arch.remove_entity(idx), RemoveOutcome::Last);
         assert_eq!(arch.entity_count(), 0);
@@ -1152,8 +1110,7 @@ mod tests {
     fn remove_outcome_swapped_moves_last_entity_id() {
         // Removing the first of three entities must produce RemoveOutcome::Swapped
         // with the ID of the entity that was at the last position.
-        let arena = Arena::with_capacity(4096 * 1024);
-        let mut arch = make_archetype(&arena);
+        let mut arch = make_archetype();
         let idx_0 = add_entity(&mut arch, EntityId(10));
         add_entity(&mut arch, EntityId(20));
         add_entity(&mut arch, EntityId(30)); // last
@@ -1169,8 +1126,7 @@ mod tests {
     #[test]
     fn remove_outcome_removing_second_to_last() {
         // Removing the middle entity of two entities is a swap.
-        let arena = Arena::with_capacity(4096 * 1024);
-        let mut arch = make_archetype(&arena);
+        let mut arch = make_archetype();
         let idx_0 = add_entity(&mut arch, EntityId(100));
         add_entity(&mut arch, EntityId(200)); // becomes "last"
 
@@ -1183,8 +1139,7 @@ mod tests {
     #[test]
     fn remove_outcome_last_on_last_of_multiple() {
         // Removing the last of multiple entities must produce RemoveOutcome::Last.
-        let arena = Arena::with_capacity(4096 * 1024);
-        let mut arch = make_archetype(&arena);
+        let mut arch = make_archetype();
         add_entity(&mut arch, EntityId(10));
         let idx_last = add_entity(&mut arch, EntityId(20));
 
@@ -1198,16 +1153,14 @@ mod tests {
 
     #[test]
     fn has_component_id_returns_true_for_registered() {
-        let arena = Arena::with_capacity(4096 * 1024);
-        let arch = make_archetype(&arena);
+        let arch = make_archetype();
         assert!(arch.has_component_id(COMP_A));
         assert!(arch.has_component_id(COMP_B));
     }
 
     #[test]
     fn has_component_id_returns_false_for_absent() {
-        let arena = Arena::with_capacity(4096 * 1024);
-        let arch = make_archetype(&arena);
+        let arch = make_archetype();
         assert!(!arch.has_component_id(ComponentId(402))); // never added
     }
 
@@ -1215,16 +1168,14 @@ mod tests {
 
     #[test]
     fn matches_component_ids_subset_returns_true() {
-        let arena = Arena::with_capacity(4096 * 1024);
-        let arch = make_archetype(&arena);
+        let arch = make_archetype();
         assert!(arch.matches_component_ids(&[COMP_A]));
         assert!(arch.matches_component_ids(&[COMP_A, COMP_B]));
     }
 
     #[test]
     fn matches_component_ids_superset_returns_false() {
-        let arena = Arena::with_capacity(4096 * 1024);
-        let arch = make_archetype(&arena);
+        let arch = make_archetype();
         // 402 is not in the archetype.
         assert!(!arch.matches_component_ids(&[COMP_A, ComponentId(402)]));
     }
@@ -1273,9 +1224,8 @@ mod tests {
 
         // Use catch_unwind to handle both debug (panic) and release (false return).
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let arena = Arena::with_capacity(4096 * 1024);
             // Archetype requires only C16_A and C16_B.
-            let mut arch = Archetype::create_by_ids(ArchetypeId(50), &[C16_A, C16_B], &arena);
+            let mut arch = Archetype::create_by_ids(ArchetypeId(50), &[C16_A, C16_B]);
 
             let sz_a = component_registry::get_component_size(C16_A.0).unwrap();
             let sz_b = component_registry::get_component_size(C16_B.0).unwrap();
@@ -1307,9 +1257,7 @@ mod tests {
     #[test]
     fn create_entity_wide_archetype_8_components() {
         register_c16_components();
-        // 8 component pools each need arena space for chunks; use a larger arena.
-        let arena = Arena::with_capacity(64 * 1024 * 1024);
-        let mut arch = Archetype::create_by_ids(ArchetypeId(51), &C16_WIDE, &arena);
+        let mut arch = Archetype::create_by_ids(ArchetypeId(51), &C16_WIDE);
 
         // Build component data: 4 bytes each (all u32-sized).
         let bytes = [0u8; 4];

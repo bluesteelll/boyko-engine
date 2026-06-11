@@ -2,9 +2,9 @@
 //!
 //! Measures `Archetype::create_by_ids` in isolation. Post-X.I an archetype's
 //! pools are RESERVE-ONLY at creation: one `VmReservation::reserve` per pool
-//! (no commit charge), zero tick allocation, no arena carve, no chunk Vec —
-//! creation collapses to a few VA-reservation syscalls plus small
-//! bookkeeping (plan D3).
+//! (no commit charge), zero tick allocation, no chunk Vec — creation
+//! collapses to a few VA-reservation syscalls plus small bookkeeping
+//! (plan D3).
 //!
 //! # Gate (binding, docs/PHASE-XI-PLAN.md §Metrics XI-B2)
 //!
@@ -18,19 +18,16 @@
 //!
 //! # Measurement shape
 //!
-//! `iter_batched_ref` with a fresh `Arena::new()` per iteration in SETUP —
-//! the arena is reserve-only (~1 us, Phase X.C) and vestigial post-X.I D8
-//! (pools ignore it; retired outright in X.J). The timed region is
-//! `create_by_ids` ONLY; the created `Archetype` is returned as the routine
-//! output so its drop (pool-reservation release) stays OUTSIDE the timed
-//! region.
+//! The timed region is `create_by_ids` ONLY; the created `Archetype` is
+//! returned as the routine output so its drop (pool-reservation release)
+//! stays OUTSIDE the timed region. (Phase X.J: the vestigial per-iteration
+//! setup `Arena::new()` is gone with the shared Arena.)
 //!
 //! `BatchSize::PerIteration`, NOT SmallInput: each 3x192B archetype reserves
-//! ~3.2 GiB of VA (~1 GiB data + 2 tick sub-regions per pool, D2 sizing) and
-//! each setup arena reserves another ~4 GiB. SmallInput materializes
-//! `iters/10` inputs per batch — at a us-scale body that is thousands of
-//! live multi-GiB reservations, which threatens the VA space / VAD budget.
-//! PerIteration holds at most one input + one output alive; its per-
+//! ~3.2 GiB of VA (~1 GiB data + 2 tick sub-regions per pool, D2 sizing).
+//! SmallInput materializes `iters/10` outputs per batch — at a us-scale body
+//! that is thousands of live multi-GiB reservations, which threatens the VA
+//! space / VAD budget. PerIteration holds at most one output alive; its per-
 //! iteration timing overhead (~tens of ns) is noise against the us-scale
 //! body.
 //!
@@ -52,7 +49,6 @@ static BENCH_ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use boyko_ecs::ecs::core::archetype::archetype::Archetype;
 use boyko_ecs::ecs::core::component::component_registry;
 use boyko_ecs::ecs::identifiers::primitives::{ArchetypeId, ComponentId};
-use boyko_ecs::ecs::memory::arena::Arena;
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 
 // --- Component registration ---
@@ -106,21 +102,20 @@ fn bench_archetype_create(c: &mut Criterion) {
 
     // XI-B2 headline: 3 components x 192 B.
     group.bench_function("3x192B", |b| {
-        b.iter_batched_ref(
-            Arena::new,
-            // The archetype keeps a vestigial never-dereferenced `*const
-            // Arena` (X.I D8); returning it as the output keeps its drop
-            // (pool VA-reservation release) outside the timed region.
-            |arena| Archetype::create_by_ids(ArchetypeId(900), &IDS_3X192, arena),
+        b.iter_batched(
+            || (),
+            // Returning the archetype as the output keeps its drop (pool
+            // VA-reservation release) outside the timed region.
+            |_| Archetype::create_by_ids(ArchetypeId(900), &IDS_3X192),
             BatchSize::PerIteration,
         );
     });
 
     // Legacy 8 x u32 shape (companion to benches/archetype.rs).
     group.bench_function("8x4B", |b| {
-        b.iter_batched_ref(
-            Arena::new,
-            |arena| Archetype::create_by_ids(ArchetypeId(901), &IDS_8X4, arena),
+        b.iter_batched(
+            || (),
+            |_| Archetype::create_by_ids(ArchetypeId(901), &IDS_8X4),
             BatchSize::PerIteration,
         );
     });

@@ -1,12 +1,13 @@
-/// Integration tests for drop safety (audit findings C-001, M-001).
+/// Integration tests for drop safety (audit findings C-001, M-001 lineage).
 ///
-/// These tests verify:
-///   C-001 — `EcsMaster` uses `Box<Arena>` so the arena address is heap-stable
-///            and `ArchetypeMaster`'s `NonNull<Arena>` does not dangle after a move.
-///   M-001 — `impl Drop for Arena` releases the backing reservation (post-X.F:
-///            multi-GB reserve, partially committed); creating multiple
-///            `EcsMaster` instances and dropping them must not crash, leak
-///            (detectable by Miri), or double-free.
+/// Phase X.J: the shared `Box<Arena>` (the original C-001 subject) is gone —
+/// component storage is per-pool `VmReservation`s (Phase X.I). These tests
+/// remain as world construct/use/teardown smoke coverage:
+///   - repeated `EcsMaster` construction + drop must not crash, leak
+///     (detectable by Miri), or double-free (M-001 lineage: every pool's
+///     reservation is released exactly once with the matching deallocator);
+///   - archetype/entity creation after construction must work (C-001
+///     lineage: no dangling storage pointers after the world is moved).
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::component::component_registry;
 use boyko_ecs::ecs::identifiers::primitives::ComponentId;
@@ -26,9 +27,8 @@ fn register_drop_test_components() {
     component_registry::register_layout::<DropVelocity>(DROP_VELOCITY_ID.0);
 }
 
-/// C-001 / M-001: create and drop EcsMaster in a loop without any archetype operations.
-/// Demonstrates that the Box<Arena> fix prevents the dangling-pointer construction and
-/// that impl Drop for Arena correctly frees memory each iteration.
+/// C-001 / M-001 lineage: create and drop EcsMaster in a loop without any
+/// archetype operations; construction + teardown must be leak- and crash-free.
 #[test]
 fn ecs_master_repeated_drop_does_not_crash() {
     for _ in 0..20 {
@@ -37,15 +37,15 @@ fn ecs_master_repeated_drop_does_not_crash() {
     }
 }
 
-/// C-001: ensure that EcsMaster operations work correctly after construction
-/// (i.e., the arena pointer inside ArchetypeMaster is not dangling).
+/// C-001 lineage: ensure that EcsMaster operations work correctly after
+/// construction (no dangling storage pointers).
 #[test]
 fn ecs_master_new_then_box_arena_addr_stable() {
     register_drop_test_components();
 
     let mut ecs = EcsMaster::new();
 
-    // Create an archetype — triggers use of the arena pointer stored in ArchetypeMaster.
+    // Create an archetype — mints per-pool reservations under ArchetypeMaster.
     let arch_id = ecs.create_archetype(&[DROP_POSITION_ID, DROP_VELOCITY_ID]);
 
     // Allocate component data.
@@ -65,14 +65,14 @@ fn ecs_master_new_then_box_arena_addr_stable() {
         )
     };
 
-    // create_entity uses the arena to add components — would crash/UB if arena ptr dangled.
+    // create_entity writes into the pools — would crash/UB on dangling storage.
     let entity = ecs
         .create_entity(arch_id, &[(DROP_POSITION_ID, pos_bytes), (DROP_VELOCITY_ID, vel_bytes)])
-        .expect("create_entity must succeed with a stable arena pointer");
+        .expect("create_entity must succeed against stable pool storage");
 
     assert!(ecs.has_entity(entity), "entity must be valid after creation");
 
-    // Drop ecs here — arena is freed, must not double-free or crash.
+    // Drop ecs here — pool reservations are released, must not double-free or crash.
 }
 
 /// M-001: with_capacity variant also goes through impl Drop.
@@ -83,12 +83,9 @@ fn ecs_master_with_capacity_drop_is_safe() {
     }
 }
 
-/// C-001 subtle: EcsMaster::new() constructs arena on heap via Box::new BEFORE
-/// passing &arena to ArchetypeMaster::new. If the old code (stack arena) were
-/// restored, Miri would report a use-after-free here because the EcsMaster is
-/// returned by value (potentially moving the stack). This test doesn't assert
-/// memory addresses but exercises the full construction + archetype usage path
-/// that would trigger Miri's dangling-pointer detection.
+/// C-001 lineage: exercises the full construction + archetype usage path
+/// that would trigger Miri's dangling-pointer detection if any storage
+/// pointer were minted against a since-moved location.
 #[test]
 fn ecs_master_multiple_archetypes_after_construction() {
     register_drop_test_components();
@@ -100,7 +97,7 @@ fn ecs_master_multiple_archetypes_after_construction() {
 
     assert_eq!(ecs.archetype_count(), 2, "two archetypes must be registered");
 
-    // Both archetypes touch the arena for their component pools.
+    // Both archetypes own live component pools at drop time.
     let _ = arch1;
     let _ = arch2;
     // Drop ecs — no panic/double-free expected.

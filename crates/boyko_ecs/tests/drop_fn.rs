@@ -19,7 +19,7 @@
 
 use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
 use boyko_ecs::ecs::core::component::component_registry;
-use boyko_ecs::ecs::memory::{arena::Arena, component_pool::ComponentPool};
+use boyko_ecs::ecs::memory::component_pool::ComponentPool;
 use boyko_ecs::ecs::core::component::component_pool_bundle::ComponentPoolBundle;
 use boyko_ecs::ecs::identifiers::primitives::ComponentId;
 
@@ -217,9 +217,9 @@ impl Component for BundleMissingComp {
 
 /// Creates a DropCounter pool with 1 chunk of `cap` slots.
 /// Registers DropCounter under DC_ID beforehand.
-fn make_dc_pool(arena: &Arena, cap: usize) -> ComponentPool {
+fn make_dc_pool(cap: usize) -> ComponentPool {
     register_all();
-    ComponentPool::new(arena, DC_ID.0, 1, cap)
+    ComponentPool::new(DC_ID.0, cap)
 }
 
 // ================================================================================
@@ -230,8 +230,7 @@ fn make_dc_pool(arena: &Arena, cap: usize) -> ComponentPool {
 #[test]
 fn pool_drop_calls_drop_fn_for_each_live_component() {
     register_all();
-    let arena = Arena::new();
-    let mut pool = make_dc_pool(&arena, 10);
+    let mut pool = make_dc_pool(10);
     let ctr = Arc::new(AtomicUsize::new(0));
 
     for _ in 0..5 {
@@ -255,8 +254,7 @@ fn pool_drop_calls_drop_fn_for_each_live_component() {
 #[test]
 fn swap_remove_calls_drop_fn_once_for_removed_component() {
     register_all();
-    let arena = Arena::new();
-    let mut pool = make_dc_pool(&arena, 10);
+    let mut pool = make_dc_pool(10);
     let ctr = Arc::new(AtomicUsize::new(0));
 
     for _ in 0..3 {
@@ -286,8 +284,7 @@ fn swap_remove_calls_drop_fn_once_for_removed_component() {
 #[test]
 fn swap_remove_last_calls_drop_fn_once() {
     register_all();
-    let arena = Arena::new();
-    let mut pool = make_dc_pool(&arena, 10);
+    let mut pool = make_dc_pool(10);
     let ctr = Arc::new(AtomicUsize::new(0));
 
     for _ in 0..3 {
@@ -317,8 +314,7 @@ fn swap_remove_last_calls_drop_fn_once() {
 #[test]
 fn pop_calls_drop_fn_once() {
     register_all();
-    let arena = Arena::new();
-    let mut pool = make_dc_pool(&arena, 10);
+    let mut pool = make_dc_pool(10);
     let ctr = Arc::new(AtomicUsize::new(0));
 
     for _ in 0..3 {
@@ -350,8 +346,7 @@ fn pop_calls_drop_fn_once() {
 #[test]
 fn set_component_typed_drops_old_and_consumes_new() {
     register_all();
-    let arena = Arena::new();
-    let mut pool = make_dc_pool(&arena, 10);
+    let mut pool = make_dc_pool(10);
     let ctr = Arc::new(AtomicUsize::new(0));
 
     // Insert old value.
@@ -386,8 +381,7 @@ fn set_component_typed_drops_old_and_consumes_new() {
 #[test]
 fn pool_drop_skipped_for_pod_components() {
     register_all();
-    let arena = Arena::new();
-    let mut pool = ComponentPool::new(&arena, POD_ID.0, 1, 8);
+    let mut pool = ComponentPool::new(POD_ID.0, 8);
 
     // Use raw `add` because PodU32 is a POD — the typed API would also work, but raw
     // demonstrates the case where no drop_fn runs.
@@ -413,9 +407,8 @@ fn pool_drop_skipped_for_pod_components() {
 #[test]
 fn add_typed_returns_none_and_value_dropped_on_pool_full() {
     register_all();
-    let arena = Arena::new();
     // Capacity = 1 slot.
-    let mut pool = make_dc_pool(&arena, 1);
+    let mut pool = make_dc_pool(1);
     let ctr = Arc::new(AtomicUsize::new(0));
 
     // Fill the pool.
@@ -445,8 +438,7 @@ fn add_typed_returns_none_and_value_dropped_on_pool_full() {
 #[test]
 fn add_typed_consumes_value_on_success() {
     register_all();
-    let arena = Arena::new();
-    let mut pool = make_dc_pool(&arena, 4);
+    let mut pool = make_dc_pool(4);
     let ctr = Arc::new(AtomicUsize::new(0));
 
     let val = DropCounter { counter: Arc::clone(&ctr) };
@@ -474,8 +466,7 @@ fn add_typed_consumes_value_on_success() {
 #[test]
 fn set_component_typed_out_of_bounds_drops_value() {
     register_all();
-    let arena = Arena::new();
-    let mut pool = make_dc_pool(&arena, 10);
+    let mut pool = make_dc_pool(10);
     let ctr = Arc::new(AtomicUsize::new(0));
 
     // Insert one real element so pool is not empty.
@@ -505,8 +496,7 @@ fn set_component_typed_out_of_bounds_drops_value() {
 #[test]
 fn set_component_typed_within_bounds_consumes_new() {
     register_all();
-    let arena = Arena::new();
-    let mut pool = make_dc_pool(&arena, 4);
+    let mut pool = make_dc_pool(4);
     let ctr = Arc::new(AtomicUsize::new(0));
 
     let old_val = DropCounter { counter: Arc::clone(&ctr) };
@@ -542,9 +532,8 @@ fn set_component_typed_within_bounds_consumes_new() {
 #[should_panic(expected = "does not match pool's registered type")]
 fn add_typed_wrong_type_panics_in_debug() {
     register_all();
-    let arena = Arena::new();
     // Pool registered for TypeA (TYPE_A_ID).
-    let mut pool = ComponentPool::new(&arena, TYPE_A_ID.0, 1, 4);
+    let mut pool = ComponentPool::new(TYPE_A_ID.0, 4);
     // Attempt to add TypeB — TypeId mismatch must fire debug_assert.
     let wrong = TypeB { y: 0 };
     pool.add_typed(wrong);
@@ -556,9 +545,8 @@ fn add_typed_wrong_type_panics_in_debug() {
 #[should_panic(expected = "does not match pool's registered type")]
 fn set_component_typed_wrong_type_panics_in_debug() {
     register_all();
-    let arena = Arena::new();
     // Pool registered for TypeA.
-    let mut pool = ComponentPool::new(&arena, TYPE_A_ID.0, 1, 4);
+    let mut pool = ComponentPool::new(TYPE_A_ID.0, 4);
     // Insert a valid TypeA first so index 0 exists.
     let valid = TypeA { x: 1 };
     pool.add_typed(valid).expect("insert valid TypeA");
@@ -579,9 +567,8 @@ fn set_component_typed_wrong_type_panics_in_debug() {
 fn pool_construction_rejects_zst_component_in_debug() {
     // Register ZST under its slot.
     component_registry::register_layout::<ZstComp>(ZST_ID.0);
-    let arena = Arena::new();
     // This must fire the debug_assert in ComponentPool::new.
-    let _pool = ComponentPool::new(&arena, ZST_ID.0, 1, 4);
+    let _pool = ComponentPool::new(ZST_ID.0, 4);
 }
 
 // ================================================================================
@@ -593,9 +580,8 @@ fn pool_construction_rejects_zst_component_in_debug() {
 #[test]
 fn bundle_add_component_typed_forwards_to_pool() {
     register_all();
-    let arena = Arena::new();
     let mut bundle = ComponentPoolBundle::new();
-    bundle.add_pool(&arena, BUNDLE_ID);
+    bundle.add_pool(BUNDLE_ID);
 
     let ctr = Arc::new(AtomicUsize::new(0));
     let val = BundleComp { counter: Arc::clone(&ctr) };
@@ -612,11 +598,10 @@ fn bundle_add_component_typed_forwards_to_pool() {
 #[test]
 fn bundle_add_component_typed_on_missing_component_returns_none_and_drops_value() {
     register_all();
-    let arena = Arena::new();
     // Create bundle with NO pool for BundleMissingComp.
     let mut bundle = ComponentPoolBundle::new();
     // Add a pool for BUNDLE_ID only — BUNDLE_MISSING_ID has no pool.
-    bundle.add_pool(&arena, BUNDLE_ID);
+    bundle.add_pool(BUNDLE_ID);
 
     let ctr = Arc::new(AtomicUsize::new(0));
 
@@ -641,9 +626,8 @@ fn bundle_add_component_typed_on_missing_component_returns_none_and_drops_value(
 #[test]
 fn bundle_set_component_typed_forwards_drop_to_pool() {
     register_all();
-    let arena = Arena::new();
     let mut bundle = ComponentPoolBundle::new();
-    bundle.add_pool(&arena, BUNDLE_ID);
+    bundle.add_pool(BUNDLE_ID);
 
     let ctr = Arc::new(AtomicUsize::new(0));
 

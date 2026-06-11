@@ -56,10 +56,6 @@ define_id!(/// Public entity identifier.
     EntityId);
 define_id!(/// Public archetype identifier.
     ArchetypeId);
-define_id!(/// Chunk identifier (top-level, within an archetype's pool bundle).
-    ChunkId);
-define_id!(/// Internal chunk index inside one ComponentPool.
-    InlandChunkId);
 define_id!(/// Component type identifier (assigned at registration).
     ComponentId);
 define_id!(/// Resource type identifier (assigned at registration in the

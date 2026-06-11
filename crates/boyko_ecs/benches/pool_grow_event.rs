@@ -28,8 +28,8 @@
 //! time per class.
 //!
 //! Instead each `iter_custom` iteration runs ONE doubling ladder: a fresh
-//! `ComponentPool::new(&arena, id, 1, 16_000_000)` (D2 mapping — explicit
-//! 16 M-row ceiling, comfortably under the u32 construction assert; 16-B
+//! `ComponentPool::new(id, 16_000_000)` (explicit 16 M-row ceiling,
+//! comfortably under the u32 construction assert; 16-B
 //! stride => 256 MB data sub-region) is filled row by row through the public
 //! `add` path. Before each add, `count() == committed_rows()` detects a
 //! frontier crossing — exactly `add`'s own internal grow predicate — and
@@ -71,7 +71,6 @@ use std::time::{Duration, Instant};
 
 use boyko_ecs::ecs::core::component::component_registry;
 use boyko_ecs::ecs::identifiers::primitives::ComponentId;
-use boyko_ecs::ecs::memory::arena::Arena;
 use boyko_ecs::ecs::memory::component_pool::ComponentPool;
 use criterion::{Criterion, criterion_group, criterion_main};
 
@@ -121,10 +120,7 @@ fn bench_pool_grow_event(c: &mut Criterion) {
         b.iter_custom(|iters| {
             let mut total = Duration::ZERO;
             for _ in 0..iters {
-                // The arena parameter is vestigial post-X.I D8 (the pool owns
-                // its own VmReservation); `Arena::new` is reserve-only ~1 us.
-                let arena = Arena::new();
-                let mut pool = ComponentPool::new(&arena, GROW_ID.0, 1, RESERVE_ROWS);
+                let mut pool = ComponentPool::new(GROW_ID.0, RESERVE_ROWS);
                 let row = GrowRow {
                     a: 0xDEAD_BEEF,
                     b: 0x5EED_F00D,
@@ -156,7 +152,6 @@ fn bench_pool_grow_event(c: &mut Criterion) {
                 // Pool drop releases its reservation; per-iteration commit
                 // charge (~288 MiB incl. ticks) does not accumulate.
                 drop(pool);
-                drop(arena);
             }
             total
         });

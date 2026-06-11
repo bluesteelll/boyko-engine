@@ -28,7 +28,6 @@ static BENCH_ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use boyko_ecs::ecs::core::component::component_registry;
 use boyko_ecs::ecs::identifiers::primitives::ComponentId;
-use boyko_ecs::ecs::memory::arena::Arena;
 use boyko_ecs::ecs::memory::component_pool::ComponentPool;
 use criterion::{
     BatchSize, BenchmarkId, Criterion, black_box, criterion_group, criterion_main,
@@ -63,23 +62,16 @@ fn payload_bytes(p: &Payload) -> &[u8] {
     }
 }
 
-/// Builds an empty pool sized to hold at least `cap` rows in a single chunk.
-fn empty_pool(arena: &Arena, cap: usize) -> ComponentPool {
-    register();
-    ComponentPool::new(arena, POOL_BENCH_ID.0, 1, cap)
-}
-
-/// A right-sized arena for `cap` `Payload` rows + alignment slack.
+/// Builds an empty pool with an exact `cap`-row ceiling.
 ///
-/// Phase X.F: the default `Arena::new()` is reserve-only (multi-GB VA, zero
-/// commit), so the old commit-charge concern with criterion's batched setup
-/// holding many arenas alive is gone. A right-sized EAGER arena is kept
-/// anyway: the pool buffer needs `cap * 16` bytes, and a 4 MB
-/// `with_capacity` arena covers the largest (10k) case while keeping the
-/// bench self-contained and the timed region free of grow events.
-fn sized_arena(cap: usize) -> Arena {
-    let bytes = (cap * std::mem::size_of::<Payload>()).max(4 * 1024 * 1024);
-    Arena::with_capacity(bytes)
+/// Phase X.I/X.J note: the pool is reserve-only at construction, so the
+/// fill loop's first adds include the pool's own cold `grow_rows` commit
+/// events — identical to the post-X.I shape of this bench (the historical
+/// `sized_arena` fixture stopped pre-committing pool memory in X.I and was
+/// deleted with the shared Arena in X.J).
+fn empty_pool(cap: usize) -> ComponentPool {
+    register();
+    ComponentPool::new(POOL_BENCH_ID.0, cap)
 }
 
 // ── add: fill a pool from empty (the removed per-row Unit-write path) ────────
@@ -90,16 +82,12 @@ fn bench_pool_fill(c: &mut Criterion) {
     for &n in &[100usize, 1_000, 10_000] {
         group.throughput(criterion::Throughput::Elements(n as u64));
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
-            // The arena alloc + pool construction are part of setup (NOT
+            // Pool construction + pre-grow are part of setup (NOT
             // measured) so the timed region is purely the `add` loop — i.e.
             // exactly the per-row work the `Vec<Unit>` removal affected.
             b.iter_batched_ref(
-                || {
-                    let arena = sized_arena(n);
-                    let pool = empty_pool(&arena, n);
-                    (arena, pool)
-                },
-                |(_arena, pool)| {
+                || empty_pool(n),
+                |pool| {
                     let p = Payload { a: 0xDEAD, b: 0xBEEF };
                     let bytes = payload_bytes(&p);
                     for _ in 0..n {
@@ -123,16 +111,15 @@ fn bench_pool_swap_remove(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
             b.iter_batched_ref(
                 || {
-                    let arena = sized_arena(n);
-                    let mut pool = empty_pool(&arena, n);
+                    let mut pool = empty_pool(n);
                     let p = Payload { a: 1, b: 2 };
                     let bytes = payload_bytes(&p);
                     for _ in 0..n {
                         pool.add(bytes).expect("setup fill within capacity");
                     }
-                    (arena, pool)
+                    pool
                 },
-                |(_arena, pool)| {
+                |pool| {
                     // Always remove index 0 → every removal is a real
                     // last-into-hole memcpy (never the trivial last-row case).
                     while pool.count() > 1 {
@@ -150,8 +137,7 @@ fn bench_pool_swap_remove(c: &mut Criterion) {
 
 fn bench_pool_get_raw(c: &mut Criterion) {
     register();
-    let arena = sized_arena(10_000);
-    let mut pool = empty_pool(&arena, 10_000);
+    let mut pool = empty_pool(10_000);
     let p = Payload { a: 7, b: 9 };
     let bytes = payload_bytes(&p);
     for _ in 0..10_000 {

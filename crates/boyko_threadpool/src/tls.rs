@@ -43,8 +43,9 @@ thread_local! {
     pub(crate) static CURRENT_WORKER_ID: Cell<u32> = const { Cell::new(WORKER_ID_UNATTACHED) };
 
     /// Allocation discipline guard (ALLOC1). Set true by the worker's
-    /// run-system RAII guard; `Arena::allocate_*` `debug_assert!`s the
-    /// negation. Reset by [`InSystemRunGuard::drop`].
+    /// run-system RAII guard; the ECS crate's context-restricted paths
+    /// `debug_assert!` it (or its negation). Reset by
+    /// [`InSystemRunGuard::drop`].
     pub(crate) static IN_SYSTEM_RUN: Cell<bool> = const { Cell::new(false) };
 }
 
@@ -155,8 +156,8 @@ where
 
 /// RAII guard around a worker's system-body execution. Sets `IN_SYSTEM_RUN`
 /// on entry, clears on drop. The ECS scheduler wraps `System::run_unsafe`
-/// in `let _g = InSystemRunGuard::enter();` so that any allocation inside
-/// the body trips the `Arena::allocate_*` debug assertion (ALLOC6).
+/// in `let _g = InSystemRunGuard::enter();` so context-restricted paths can
+/// `debug_assert!` whether they run inside a system body (ALLOC6).
 pub struct InSystemRunGuard {
     /// Prevents the guard from being constructible outside `enter`.
     _private: (),

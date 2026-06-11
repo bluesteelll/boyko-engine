@@ -23,11 +23,11 @@ static_assertions = "1.1"
 # `cargo bench --features bench-alloc`. See docs/BENCHMARKING.md.
 mimalloc = { version = "0.1", optional = true }
 
-# Phase X.C — arena lazy-commit backing store. The Unix arm of
-# `Arena::with_capacity` / `Drop` calls `mmap` / `munmap` via `libc`. Already
-# present in Cargo.lock at 0.2.x (transitively), so this unifies with zero new
-# compilation. Not pulled in on Windows/wasm32 (the cfg-gated arms there use
-# `VirtualAlloc` / the global allocator).
+# Phase X.C/X.H — lazy-commit virtual-memory backing store. The Unix arm of
+# `VmReservation` (`memory/vm.rs`) calls `mmap` / `mprotect` / `munmap` via
+# `libc`. Already present in Cargo.lock at 0.2.x (transitively), so this
+# unifies with zero new compilation. Not pulled in on Windows/wasm32 (the
+# cfg-gated arms there use `VirtualAlloc` / the global allocator).
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
@@ -73,13 +73,11 @@ harness = false
 name = "query_iter"
 harness = false
 
+# Phase X.C/X.J — cold-construction gate (EcsMaster::new <= 7.5 µs). Lived in
+# benches/arena_new.rs until Phase X.J retired the shared Arena (and the
+# arena-only groups with it).
 [[bench]]
-name = "allocator"
-harness = false
-
-# Phase X.C — cold-construction gate (Arena::new / EcsMaster::new <= 5 µs).
-[[bench]]
-name = "arena_new"
+name = "ecs_master_new"
 harness = false
 
 [[bench]]
