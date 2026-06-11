@@ -15,6 +15,10 @@
 // ── Phase 18 — App + plugins ─────────────────────────────────────────────────
 pub use crate::ecs::core::app::{App, AppExit, Plugin, Plugins};
 
+// ── Phase 20 — multi-schedule + time ─────────────────────────────────────────
+pub use crate::ecs::core::app::{CoreSchedule, EventUpdatePolicy};
+pub use crate::ecs::core::time::{FixedTime, Time, fixed_advance};
+
 // ── World + core entity/component model ──────────────────────────────────────
 pub use crate::ecs::core::bundle::Bundle;
 pub use crate::ecs::core::component::component::Component;

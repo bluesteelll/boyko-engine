@@ -878,4 +878,192 @@ mod tests {
         app.finish();
         app.set_event_update_policy(EventUpdatePolicy::EveryFrame);
     }
+
+    // ── ★C1 — the margin-aware clamp pass strictly preempts the schedules'
+    //    internal threshold blocks (plan D8 race shape; a naive near-threshold
+    //    test would pass with the race present and is NOT sufficient) ─────────
+
+    use crate::ecs::core::change_detection::{
+        CHECK_TICK_PREEMPT_MARGIN, CHECK_TICK_THRESHOLD, Tick,
+    };
+
+    /// One 64 Hz step.
+    const STEP: Duration = Duration::from_nanos(15_625_000);
+
+    /// Builds a finished Main+Fixed app (one trivial system each) and runs one
+    /// warm frame so both schedules have established `last_run` ticks.
+    fn warm_two_schedule_app() -> App {
+        let mut app = serial_app();
+        app.add_systems(|| {});
+        app.add_systems_in(CoreSchedule::Fixed, || {});
+        app.finish();
+        app.update_with_delta(STEP); // 1 substep + main ⇒ 4 bumps
+        app
+    }
+
+    /// PROVENANCE: with elapsed forced to exactly `T − MARGIN` at frame start,
+    /// the APP pass fires at step ② — `last_check_tick` ends the frame at the
+    /// frame-START current tick (set BEFORE any bump). Had a schedule's
+    /// internal block won the crossing instead (the pre-★C1 race), the value
+    /// would be that schedule's post-bump `this_run` (frame_start + 1 for
+    /// Fixed, +3 for Main).
+    #[test]
+    fn c1_app_clamp_pass_preempts_internal_blocks() {
+        let mut app = warm_two_schedule_app();
+        let frame_start = app.world.current_tick();
+        app.world.last_check_tick =
+            Tick::new(frame_start.get().wrapping_sub(CHECK_TICK_THRESHOLD - CHECK_TICK_PREEMPT_MARGIN));
+
+        app.update_with_delta(STEP);
+
+        assert_eq!(
+            app.world.last_check_tick.get(),
+            frame_start.get(),
+            "the App pass must fire at frame start (pre-bump provenance); a post-bump \
+             value means an internal block won the crossing — the ★C1 race"
+        );
+    }
+
+    /// BOUNDARY WALK: elapsed forced to `T − MARGIN − 2` at frame start — the
+    /// App pass holds, and the frame's ≤4 bumps cannot reach `T` (margin ≫
+    /// per-frame consumption), so the internal blocks hold too (counter
+    /// unchanged). The NEXT frame start crosses `T − MARGIN` and the App pass
+    /// fires — sibling starvation is impossible by construction.
+    #[test]
+    fn c1_mid_frame_crossing_waits_for_next_frame_start() {
+        let mut app = warm_two_schedule_app();
+        let frame_start = app.world.current_tick();
+        let forced = Tick::new(
+            frame_start
+                .get()
+                .wrapping_sub(CHECK_TICK_THRESHOLD - CHECK_TICK_PREEMPT_MARGIN - 2),
+        );
+        app.world.last_check_tick = forced;
+
+        // Frame A: neither the App pass (elapsed = T−M−2 < T−M) nor any
+        // internal block (mid-frame max = T−M+2 < T) fires.
+        app.update_with_delta(STEP);
+        assert_eq!(
+            app.world.last_check_tick.get(),
+            forced.get(),
+            "frame A: no clamp pass may fire below the margin line"
+        );
+
+        // Frame B: frame start elapsed = T−M+2 ≥ T−M ⇒ the App pass fires,
+        // with frame-B-start provenance.
+        let frame_b_start = app.world.current_tick();
+        app.update_with_delta(STEP);
+        assert_eq!(
+            app.world.last_check_tick.get(),
+            frame_b_start.get(),
+            "frame B: the App pass fires at frame start, covering BOTH schedules"
+        );
+    }
+
+    /// BEHAVIORAL: a dormant `Changed`-gated observation in the FIXED schedule
+    /// survives the threshold crossing with a non-inverted window — the
+    /// sibling clamp ran (the starvation outcome would be a spurious match
+    /// after `MAX_CHANGE_AGE` wrap; here the window stays empty).
+    #[test]
+    fn c1_dormant_fixed_changed_window_survives_crossing() {
+        use crate::ecs::core::iters::query::{Changed, Query};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let hits = Arc::new(AtomicU32::new(0));
+        let h = Arc::clone(&hits);
+
+        let mut app = serial_app();
+        app.add_systems(|| {});
+        app.add_systems_in(CoreSchedule::Fixed, move |q: Query<&Wob, Changed<Wob>>| {
+            h.fetch_add(q.iter().count() as u32, Ordering::Relaxed);
+        });
+        app.finish();
+        app.world
+            .spawn_batch(std::iter::once(WobBundle { w: Wob(1) }))
+            .expect("spawn");
+
+        // Warm: the spawn's Changed window matches exactly once.
+        app.update_with_delta(STEP);
+        app.update_with_delta(STEP);
+        assert_eq!(hits.load(Ordering::Relaxed), 1, "spawn observed once while warm");
+
+        // Force the crossing; the App pass fires next frame and clamps BOTH
+        // schedules' meta ticks.
+        let cur = app.world.current_tick();
+        app.world.last_check_tick =
+            Tick::new(cur.get().wrapping_sub(CHECK_TICK_THRESHOLD - CHECK_TICK_PREEMPT_MARGIN));
+        for _ in 0..3 {
+            app.update_with_delta(STEP);
+        }
+        assert_eq!(
+            hits.load(Ordering::Relaxed),
+            1,
+            "no spurious Changed match across the clamp crossing (window not inverted)"
+        );
+    }
+
+    /// Component + 1-field bundle for the behavioral ★C1 test — the in-lib
+    /// hand-written pattern (the derive lives in boyko-macros, a
+    /// dev-dependency; mirrors `hierarchy::{Children, ChildrenBundle}`).
+    #[derive(Clone, Copy)]
+    #[repr(C)]
+    struct Wob(u32);
+
+    impl crate::ecs::core::component::component::Component for Wob {
+        #[inline]
+        fn component_id() -> crate::ecs::identifiers::primitives::ComponentId {
+            use crate::ecs::core::component::component_registry;
+            use crate::ecs::identifiers::primitives::ComponentId;
+            use std::sync::OnceLock;
+            static ID: OnceLock<ComponentId> = OnceLock::new();
+            *ID.get_or_init(|| ComponentId(component_registry::register_new::<Self>()))
+        }
+    }
+
+    struct WobBundle {
+        w: Wob,
+    }
+    impl crate::ecs::core::bundle::bundle::sealed::BundleSealed for WobBundle {}
+    impl crate::ecs::core::bundle::Bundle for WobBundle {
+        fn static_info() -> &'static crate::ecs::core::bundle::bundle::BundleStaticInfo {
+            use crate::ecs::core::bundle::{bundle::BundleStaticInfo, bundle_type_registry};
+            use crate::ecs::core::component::component::Component;
+            use crate::ecs::identifiers::primitives::ComponentId;
+            use std::sync::OnceLock;
+            static INFO: OnceLock<BundleStaticInfo> = OnceLock::new();
+            INFO.get_or_init(|| {
+                let arr: [ComponentId; 1] = [<Wob as Component>::component_id()];
+                let leaked: &'static [ComponentId; 1] = Box::leak(Box::new(arr));
+                BundleStaticInfo {
+                    type_id: bundle_type_registry::register_new(),
+                    component_ids: leaked.as_slice(),
+                }
+            })
+        }
+
+        #[inline]
+        fn cached_archetype_id(
+            world: &mut EcsMaster,
+        ) -> crate::ecs::identifiers::primitives::ArchetypeId {
+            world.bundle_archetype_id_for::<Self>()
+        }
+
+        fn for_each_component_bytes<F>(self, mut f: F)
+        where
+            F: FnMut(crate::ecs::identifiers::primitives::ComponentId, &[u8]),
+        {
+            use crate::ecs::core::component::component::Component;
+            let field = std::mem::ManuallyDrop::new(self.w);
+            let id = <Wob as Component>::component_id();
+            let ptr = &raw const *field as *const u8;
+            let len = std::mem::size_of::<Wob>();
+            // SAFETY (the reproduced derive C5 byte-erasure, hierarchy/bundles.rs
+            // pattern): ptr derives from a live ManuallyDrop'd stack local, valid
+            // for exactly size_of::<Wob>() bytes; the slice is the only borrow;
+            // ownership transfers to the archetype on callback success.
+            let bytes: &[u8] = unsafe { std::slice::from_raw_parts(ptr, len) };
+            f(id, bytes);
+        }
+    }
 }

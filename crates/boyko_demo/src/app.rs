@@ -39,7 +39,7 @@ use crate::render::{MAX_INSTANCES, RenderCallback, RenderResources, WORLD_HALF_E
 use crate::sim::bundles::ParticleBundle;
 use crate::sim::components::{ParticleTag, Position, Velocity};
 use crate::sim::modes::Mode;
-use crate::sim::resources::{BoidParams, DeltaTime, FrameStats, InputState, PhysicsParams, SimParams};
+use crate::sim::resources::{BoidParams, FrameStats, InputState, PhysicsParams, SimParams};
 use crate::sim::runner::SimRunner;
 use crate::ui;
 
@@ -171,7 +171,8 @@ impl DemoApp {
         // population. The mode-tag archetypes are registered lazily on the first
         // spawn-on-enter, so an archetype capacity of 2 is the steady state.
         let mut world = EcsMaster::with_capacity(WORLD_ENTITY_CAPACITY, 2);
-        world.insert_resource(DeltaTime(crate::sim::runner::FIXED_DT));
+        // Time/FixedTime (the Phase-20 engine clocks) are seeded by
+        // `SimRunner::new` alongside the other sim resources.
         world.insert_resource(InputState::default());
         world.insert_resource(SimParams::default());
 

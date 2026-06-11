@@ -24,7 +24,8 @@ use boyko_ecs::ecs::core::system::{Res, ResMut};
 use crate::render::WORLD_HALF_EXTENT;
 use crate::sim::components::{Position, Velocity};
 use crate::sim::grid::SpatialGrid;
-use crate::sim::resources::{BoidParams, BoidSnapshot, BoidState, DeltaTime};
+use boyko_ecs::ecs::core::time::FixedTime;
+use crate::sim::resources::{BoidParams, BoidSnapshot, BoidState};
 
 /// Below this squared distance a candidate neighbor is treated as "self" and
 /// skipped. The snapshot has no per-boid identity the force pass can match, so a
@@ -93,9 +94,9 @@ pub fn boid_forces(
     snapshot: Res<BoidSnapshot>,
     grid: Res<SpatialGrid>,
     params: Res<BoidParams>,
-    dt: Res<DeltaTime>,
+    dt: Res<FixedTime>,
 ) {
-    let dt = dt.0;
+    let dt = dt.delta_secs();
     let radius_sq = params.radius * params.radius;
     let sep_w = params.separation;
     let align_w = params.alignment;
@@ -174,8 +175,8 @@ pub fn boid_forces(
 /// Velocity is `&mut` here because the wall bounce reverses it. The force pass
 /// (the other `Velocity` writer) runs earlier and finishes before this system
 /// starts (it is ordered after it), so there is no write-write conflict.
-pub fn integrate_boids(mut query: Query<(&mut Position, &mut Velocity)>, dt: Res<DeltaTime>) {
-    let dt = dt.0;
+pub fn integrate_boids(mut query: Query<(&mut Position, &mut Velocity)>, dt: Res<FixedTime>) {
+    let dt = dt.delta_secs();
     let bound = WORLD_HALF_EXTENT;
     query
         .par_iter_mut()

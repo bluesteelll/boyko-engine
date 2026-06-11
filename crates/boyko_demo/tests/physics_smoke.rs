@@ -29,8 +29,13 @@ use boyko_threadpool::ThreadPoolBuilder;
 
 use boyko_demo::sim::components::{BallTag, Position, Radius, Velocity};
 use boyko_demo::sim::modes::{BALL_COUNT, Mode, PARTICLE_COUNT};
-use boyko_demo::sim::resources::{DeltaTime, InputState, SimParams};
-use boyko_demo::sim::runner::{FIXED_DT, SimRunner};
+use boyko_demo::sim::resources::{InputState, SimParams};
+use boyko_demo::sim::runner::SimRunner;
+
+/// One engine fixed step (64 Hz, Phase 20) as an f32 display delta. A power-
+/// of-two fraction, so from_secs_f32 converts it EXACTLY to 15,625,000 ns -
+/// each step() call below expends exactly one substep with zero remainder.
+const FIXED_DT: f32 = 1.0 / 64.0;
 
 /// World half-extent the runner clamps positions to (mirrors `WORLD_HALF_EXTENT`).
 const BOUND: f32 = 100.0;
@@ -45,7 +50,6 @@ fn ball_count(world: &EcsMaster) -> usize {
 fn setup_physics() -> (EcsMaster, SimRunner) {
     // Capacity for the larger (particle) population; balls are fewer.
     let mut world = EcsMaster::with_capacity(PARTICLE_COUNT, 3);
-    world.insert_resource(DeltaTime(FIXED_DT));
     world.insert_resource(InputState::default());
     world.insert_resource(SimParams::default());
 

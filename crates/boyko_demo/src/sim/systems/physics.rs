@@ -54,7 +54,8 @@ use crate::render::WORLD_HALF_EXTENT;
 use crate::render::instance::GpuInstance;
 use crate::sim::components::{BallTag, Position, Radius, Velocity};
 use crate::sim::grid::SpatialGrid;
-use crate::sim::resources::{BallSnapshot, DeltaTime, PhysicsParams};
+use boyko_ecs::ecs::core::time::FixedTime;
+use crate::sim::resources::{BallSnapshot, PhysicsParams};
 
 /// Largest ball radius in world units. The broad-phase cell size is `2×` this so
 /// any colliding pair lands within the 3×3 cell neighborhood the grid walks.
@@ -87,10 +88,10 @@ const COLLISION_FLASH_COLOR: [u8; 4] = [255, 240, 120, 255];
 /// integrators document).
 pub fn integrate_balls(
     mut query: Query<(&mut Position, &mut Velocity, &Radius), With<BallTag>>,
-    dt: Res<DeltaTime>,
+    dt: Res<FixedTime>,
     params: Res<PhysicsParams>,
 ) {
-    let dt = dt.0;
+    let dt = dt.delta_secs();
     let gravity = params.gravity;
     query.par_iter_mut().for_each(
         move |(pos, vel, _radius): (&mut Position, &mut Velocity, &Radius)| {

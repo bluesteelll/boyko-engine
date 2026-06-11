@@ -3,19 +3,14 @@
 //! Resources are the per-frame inputs and tunables systems read. The app owns
 //! `&mut EcsMaster`, so the UI and the input pump write these directly
 //! (`world.resource_mut::<_>()`) and the next `Schedule::run` picks them up with
-//! zero plumbing. `DeltaTime` and `InputState` cover gaps the engine leaves to
-//! the application (plan §9 G8/G9: no built-in `Time`/input resource).
+//! zero plumbing. `InputState` covers the one gap the engine leaves to the
+//! application (plan §9 G9: no built-in input resource). Time is the engine's
+//! since Phase 20: systems read `Res<FixedTime>` (`delta_secs()` = the fixed
+//! step); the old demo-local `DeltaTime(f32)` stopgap is deleted.
 
 use boyko_macros::Resource;
 
 use crate::sim::components::{Position, Velocity};
-
-/// Fixed simulation timestep for the current run, in seconds (plan §9 G8).
-///
-/// The engine has no built-in `Time`; the runner writes this before each
-/// `Schedule::run` so systems integrate against a stable `dt`.
-#[derive(Resource, Clone, Copy, Debug)]
-pub struct DeltaTime(pub f32);
 
 /// Per-frame pointer state, mapped from egui into world space by the app
 /// (plan §7). Systems read it to apply the mouse gravity well.

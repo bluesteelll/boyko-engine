@@ -5,7 +5,8 @@ use boyko_ecs::ecs::core::system::Res;
 
 use crate::render::WORLD_HALF_EXTENT;
 use crate::sim::components::{Position, Velocity};
-use crate::sim::resources::{DeltaTime, InputState, SimParams};
+use boyko_ecs::ecs::core::time::FixedTime;
+use crate::sim::resources::{InputState, SimParams};
 
 /// Advances every particle one fixed step (plan §6.5).
 ///
@@ -20,11 +21,11 @@ use crate::sim::resources::{DeltaTime, InputState, SimParams};
 /// duration of the parallel pass.
 pub fn integrate_particles(
     mut query: Query<(&mut Position, &mut Velocity)>,
-    dt: Res<DeltaTime>,
+    dt: Res<FixedTime>,
     input: Res<InputState>,
     params: Res<SimParams>,
 ) {
-    let dt = dt.0;
+    let dt = dt.delta_secs();
     let gravity = params.gravity;
     // Per-step damping derived from the per-second retention factor.
     let damping = params.damping.powf(dt);

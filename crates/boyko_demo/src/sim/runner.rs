@@ -88,30 +88,29 @@ use crate::sim::systems::physics::{
     tint_collided, wall_bounce,
 };
 
-// Shared timestep constants are used by both targets.
-use crate::sim::resources::DeltaTime;
+// Phase 20: the rhythm is the ENGINE's now — `Time` (inflow clamp 250 ms,
+// pause) + `FixedTime` (64 Hz default, overstep accumulator) + `fixed_advance`
+// (the catch-up loop shared by native, wasm, and the engine's own App driver).
+// The demo-local accumulator, `FIXED_DT`/`MAX_FRAME_DT`/`MAX_SUBSTEPS`
+// constants, and the `DeltaTime` resource are DELETED; systems read
+// `Res<FixedTime>`. Behavior deltas vs the hand-rolled loop (accepted, plan
+// D10): 60 → 64 Hz; drop-backlog-on-cap → retain-with-inflow-clamp (sustained
+// overload now slow-motions instead of silently losing simulated time).
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Duration;
 
-/// Fixed simulation timestep in seconds (plan §6.7 default 1/60).
-pub const FIXED_DT: f32 = 1.0 / 60.0;
-
-/// Maximum display delta fed into the accumulator per frame, in seconds. A
-/// hitch larger than this is clamped so the sim never tries to "catch up"
-/// across a long stall (plan D9 spiral-of-death guard).
-const MAX_FRAME_DT: f32 = 0.25;
-
-/// Maximum fixed sub-steps run in one display frame (plan D9).
-const MAX_SUBSTEPS: u32 = 5;
+#[cfg(not(target_arch = "wasm32"))]
+use boyko_ecs::ecs::core::time::{FixedTime, Time, fixed_advance};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Native dispatch: real multi-threaded Schedule + thread pool.
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Owns the schedule and the fixed-timestep accumulator (plan §6.7).
+/// Owns the fixed schedule; the accumulator lives in the engine's
+/// [`FixedTime`] resource (Phase 20 — no demo-local rhythm state).
 #[cfg(not(target_arch = "wasm32"))]
 pub struct SimRunner {
     schedule: Schedule,
-    /// Carried-over fractional time not yet consumed by a fixed step.
-    accumulator: f32,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -157,6 +156,12 @@ impl SimRunner {
         // collision scratch buffers (plan D13 / §11.2).
         world.insert_resource(PhysicsParams::default());
         world.insert_resource(BallSnapshot::with_capacity(BALL_COUNT));
+
+        // Phase 20: the engine clocks. `Time` carries the clamped/pausable
+        // virtual delta; `FixedTime` (64 Hz default) carries the overstep
+        // accumulator + the fixed step the systems read via `delta_secs()`.
+        world.insert_resource(Time::default());
+        world.insert_resource(FixedTime::default());
 
         let mut builder = ScheduleBuilder::new(pool);
 
@@ -307,47 +312,35 @@ impl SimRunner {
 
         let schedule = builder.build(world);
 
-        Self {
-            schedule,
-            accumulator: 0.0,
-        }
+        Self { schedule }
     }
 
-    /// Advances the simulation by `frame_dt` seconds of display time.
+    /// Advances the simulation by `frame_dt` seconds of display time through
+    /// the ENGINE's fixed-timestep loop (Phase 20 `fixed_advance`): inflow
+    /// clamp + pause live in [`Time`], the overstep accumulator in
+    /// [`FixedTime`]. Returns the number of fixed steps run this frame.
     ///
-    /// Accumulates display time and runs the schedule once per whole `FIXED_DT`
-    /// elapsed, up to [`MAX_SUBSTEPS`] times. Returns the number of fixed steps
-    /// actually run this frame (0 when paused or when less than one step has
-    /// accumulated). Each step writes [`DeltaTime`] before running so systems
-    /// integrate against the fixed `dt`.
-    ///
-    /// A mode switch (queued via `NextState<Mode>` from the UI) applies inside
-    /// `Schedule::run`'s transition pass, so the gated spawn/despawn/sim systems
-    /// react within the steps run here (plan G10 / D15). When paused, the
-    /// schedule does not run, so a switch queued while paused applies on the
-    /// first step after unpausing.
+    /// `SimParams.paused` (the UI checkbox) is synced into [`Time::pause`]
+    /// here, so a paused frame advances real time but expends zero substeps —
+    /// and accumulates no backlog. A mode switch queued while paused applies
+    /// on the first substep after unpausing, exactly as before.
     pub fn step(&mut self, world: &mut EcsMaster, frame_dt: f32) -> u32 {
-        if world.resource::<SimParams>().paused {
-            return 0;
+        let paused = world.resource::<SimParams>().paused;
+        let time = world.resource_mut::<Time>();
+        if paused != time.is_paused() {
+            if paused {
+                time.pause();
+            } else {
+                time.unpause();
+            }
         }
+        time.advance_with(Duration::from_secs_f32(frame_dt));
 
-        self.accumulator += frame_dt.min(MAX_FRAME_DT);
-
-        let mut sub = 0;
-        while self.accumulator >= FIXED_DT && sub < MAX_SUBSTEPS {
-            world.resource_mut::<DeltaTime>().0 = FIXED_DT;
-            // The real multi-threaded schedule: par_iter systems fan out across
-            // the pool's workers here; the transition pass applies mode switches.
-            self.schedule.run(world);
-            self.accumulator -= FIXED_DT;
-            sub += 1;
-        }
-        // If we hit the substep cap, drop the backlog so we do not spiral.
-        if sub == MAX_SUBSTEPS {
-            self.accumulator = 0.0;
-        }
-        debug_assert!(sub <= MAX_SUBSTEPS);
-        sub
+        // The real multi-threaded schedule runs once per expended fixed step;
+        // par_iter systems fan out across the pool's workers, the transition
+        // pass applies mode switches per substep.
+        let schedule = &mut self.schedule;
+        fixed_advance(world, |w| schedule.run(w))
     }
 }
 
@@ -379,7 +372,9 @@ mod wasm_runner {
         wall_bounce,
     };
 
-    use super::{DeltaTime, FIXED_DT, MAX_FRAME_DT, MAX_SUBSTEPS};
+    use std::time::Duration;
+
+    use boyko_ecs::ecs::core::time::{FixedTime, Time, fixed_advance};
 
     /// Sequential simulation driver for `wasm32-unknown-unknown` (plan D10
     /// option (b)).
@@ -394,13 +389,12 @@ mod wasm_runner {
     /// The constructor takes no pool argument (one cfg seam in `app.rs`, plan
     /// §8.4): a pool cannot be built on header-less-Pages wasm.
     pub struct SimRunner {
-        /// Carried-over fractional time not yet consumed by a fixed step.
-        accumulator: f32,
         /// `true` until the synthesized initial `none -> Mode::default()`
         /// transition has fired (Phase-17 D7 equivalent). Drives the frame-1
         /// `on_enter(Particles)` spawn. Owned here (not in the world) because the
         /// wasm path drives the transition itself rather than through
-        /// `Schedule::run`'s state pass.
+        /// `Schedule::run`'s state pass. The fixed-timestep accumulator is the
+        /// ENGINE's (`FixedTime.overstep`, Phase 20) — no rhythm state here.
         pending_initial: bool,
     }
 
@@ -437,38 +431,40 @@ mod wasm_runner {
             world.insert_resource(PhysicsParams::default());
             world.insert_resource(BallSnapshot::with_capacity(BALL_COUNT));
 
+            // Phase 20 (★M2): no App/finish() exists on wasm, so the runner
+            // inserts the engine clocks directly — the SAME resources +
+            // `fixed_advance` loop as native, just with sequential dispatch.
+            world.insert_resource(Time::default());
+            world.insert_resource(FixedTime::default());
+
             Self {
-                accumulator: 0.0,
                 pending_initial: true,
             }
         }
 
         /// Advances the simulation by `frame_dt` seconds of display time
-        /// (sequential variant).
+        /// (sequential variant) through the ENGINE's `fixed_advance` loop —
+        /// identical rhythm to native; only the per-substep dispatch differs
+        /// ([`run_sim_step_sequential`] instead of `Schedule::run`). Returns
+        /// the number of fixed steps run this frame.
         ///
-        /// Identical accumulator/sub-step rhythm to the native
-        /// [`SimRunner::step`](super::SimRunner::step), but each fixed step calls
-        /// [`run_sim_step_sequential`] instead of `Schedule::run`. Returns the
-        /// number of fixed steps run this frame.
+        /// `SimParams.paused` is synced into [`Time::pause`] (★M2 — the old
+        /// pre-accumulate early-return is gone): a paused frame advances real
+        /// time, expends zero substeps, and accumulates no backlog.
         pub fn step(&mut self, world: &mut EcsMaster, frame_dt: f32) -> u32 {
-            if world.resource::<SimParams>().paused {
-                return 0;
+            let paused = world.resource::<SimParams>().paused;
+            let time = world.resource_mut::<Time>();
+            if paused != time.is_paused() {
+                if paused {
+                    time.pause();
+                } else {
+                    time.unpause();
+                }
             }
+            time.advance_with(Duration::from_secs_f32(frame_dt));
 
-            self.accumulator += frame_dt.min(MAX_FRAME_DT);
-
-            let mut sub = 0;
-            while self.accumulator >= FIXED_DT && sub < MAX_SUBSTEPS {
-                world.resource_mut::<DeltaTime>().0 = FIXED_DT;
-                run_sim_step_sequential(world, &mut self.pending_initial);
-                self.accumulator -= FIXED_DT;
-                sub += 1;
-            }
-            if sub == MAX_SUBSTEPS {
-                self.accumulator = 0.0;
-            }
-            debug_assert!(sub <= MAX_SUBSTEPS);
-            sub
+            let pending = &mut self.pending_initial;
+            fixed_advance(world, |w| run_sim_step_sequential(w, pending))
         }
     }
 

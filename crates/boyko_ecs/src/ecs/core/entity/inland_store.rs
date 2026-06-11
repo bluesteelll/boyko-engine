@@ -49,7 +49,21 @@ use crate::ecs::memory::vm::VmReservation;
 /// `entity_inland.rs`; re-pinned here because the slot/byte conversions in
 /// `grow_to` rely on it).
 const SLOT_SIZE: usize = size_of::<EntityInland>();
+// The exact-16 pin is a 64-bit fact (`EntityInland` carries a pointer-sized
+// field); on 32-bit targets (wasm32) the slot is smaller and only the
+// granule-divisibility invariant is load-bearing — the same
+// `target_pointer_width = "64"` gating as the 28 pointer-width asserts from
+// the original wasm port.
+#[cfg(target_pointer_width = "64")]
 const _: () = assert!(SLOT_SIZE == 16, "EntityInland slot size drifted");
+// Granule divisibility is load-bearing ONLY where a commit boundary exists
+// (the 64-bit syscall arms: a PROT_NONE frontier must not land mid-slot). On
+// 32-bit targets (wasm32) the slot is 12 B and does not divide the granule —
+// harmless: the only supported 32-bit arm is the fallback (one eager
+// `alloc_zeroed`, `commit` is a no-op), so no protection boundary exists and
+// the frontier bookkeeping floors safely. 32-bit *syscall* targets are out of
+// the engine's target scope (CLAUDE.md: x86_64).
+#[cfg(target_pointer_width = "64")]
 const _: () = assert!(
     ARENA_COMMIT_GRANULE.is_multiple_of(SLOT_SIZE),
     "granule must be a whole number of slots"

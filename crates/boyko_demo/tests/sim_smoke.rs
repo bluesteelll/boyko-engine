@@ -28,8 +28,13 @@ use boyko_threadpool::ThreadPoolBuilder;
 use boyko_demo::render::instance::GpuInstance;
 use boyko_demo::sim::components::Position;
 use boyko_demo::sim::modes::PARTICLE_COUNT;
-use boyko_demo::sim::resources::{DeltaTime, InputState, SimParams};
-use boyko_demo::sim::runner::{FIXED_DT, SimRunner};
+use boyko_demo::sim::resources::{InputState, SimParams};
+use boyko_demo::sim::runner::SimRunner;
+
+/// One engine fixed step (64 Hz, Phase 20) as an f32 display delta. A power-
+/// of-two fraction, so from_secs_f32 converts it EXACTLY to 15,625,000 ns -
+/// each step() call below expends exactly one substep with zero remainder.
+const FIXED_DT: f32 = 1.0 / 64.0;
 
 /// World half-extent the runner clamps positions to (mirrors the demo's
 /// `WORLD_HALF_EXTENT`). Particles must stay within this box (walls bounce).
@@ -39,7 +44,6 @@ const BOUND: f32 = 100.0;
 /// population the runner's `on_enter(Particles)` spawns on the first step.
 fn setup_world() -> EcsMaster {
     let mut world = EcsMaster::with_capacity(PARTICLE_COUNT, 2);
-    world.insert_resource(DeltaTime(FIXED_DT));
     world.insert_resource(InputState::default());
     world.insert_resource(SimParams::default());
     world
