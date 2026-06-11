@@ -15,3 +15,5 @@
 
 # Agent worktree scratch (created by subagents with isolation: "worktree").
 /.claude/worktrees/
+# graphify knowledge-graph artifacts (rebuilt per-machine by the post-commit hook)
+graphify-out/
