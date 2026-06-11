@@ -1,19 +1,33 @@
 //! The [`App`] builder facade — a thin, additive composition layer over the
 //! shipped [`EcsMaster`] + [`ScheduleBuilder`] + [`Schedule`] + [`ThreadPool`].
 //!
-//! `App` owns the world, stages one schedule, owns the worker pool, and drives
-//! the per-frame loop. It adds **no** per-frame allocation, `dyn` dispatch,
-//! atomic, or branch beyond `Schedule::run` itself: all of the
-//! `Box<dyn Plugin>` / `Vec` / `TypeId` / tuple machinery is cold, setup-only
-//! code that runs once during configuration.
+//! `App` owns the world, stages the [`CoreSchedule`]s (Main + an optional
+//! Fixed), owns the worker pool, and drives the per-frame loop (Phase 20
+//! plan D1): ① [`Time`] advance → ② margin-aware check-ticks pass → ③ gated
+//! event swap → ④ fixed catch-up loop → ⑤ Main run. It adds **no** per-frame
+//! allocation, `dyn` dispatch, or atomic beyond `Schedule::run` itself: all
+//! of the `Box<dyn Plugin>` / `Vec` / `TypeId` / tuple machinery is cold,
+//! setup-only code, and the frame driver adds only a handful of predictable
+//! branches around the runs.
+//!
+//! # Event-swap contract (plan D6)
+//!
+//! A world driven by an `App` must NOT also call
+//! [`EcsMaster::update_events`] manually — the driver owns the once-per-frame
+//! swap (gated under [`EventUpdatePolicy::WaitForFixed`]); a second manual
+//! flip would halve every reader's visibility window.
 
 use std::any::TypeId;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use boyko_threadpool::{ThreadPool, ThreadPoolBuilder};
 
 use crate::ecs::core::app::app_exit::AppExit;
 use crate::ecs::core::app::plugin::Plugin;
+use crate::ecs::core::change_detection::{
+    CHECK_TICK_PREEMPT_MARGIN, CHECK_TICK_THRESHOLD, MAX_CHANGE_AGE, run_check_ticks_scan,
+};
 use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 use crate::ecs::core::resources::resource::Resource;
 use crate::ecs::core::schedule::schedule::Schedule;
@@ -21,10 +35,60 @@ use crate::ecs::core::schedule::schedule_builder::ScheduleBuilder;
 use crate::ecs::core::state::states::States;
 use crate::ecs::core::system::into_system::IntoSystem;
 use crate::ecs::core::system::system::System;
+use crate::ecs::core::time::fixed_time::DEFAULT_FIXED_TIMESTEP;
+use crate::ecs::core::time::{FixedTime, Time, fixed_advance};
 
 /// A type-erased one-shot startup runnable, drained once in [`App::finish`].
 /// Boxed because each startup system is a distinct monomorphized closure type.
 type StartupSystem = Box<dyn FnOnce(&mut EcsMaster)>;
+
+/// The closed set of top-level schedules an [`App`] drives (Phase 20 plan D5).
+///
+/// Matched ONLY inside config-time routing methods (`add_systems_in`,
+/// `add_systems_cfg_in`, `init_state_in`, `insert_state_in`); the frame
+/// driver accesses the schedules through direct named fields — zero dispatch,
+/// no label map. New top-level slots are an engine change by design;
+/// finer-grained structure WITHIN a schedule is what Phase-15 sets are for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CoreSchedule {
+    /// The per-frame schedule (the existing one-arg `add_systems` target).
+    /// Runs exactly once per [`App::update_with_delta`], after the fixed loop.
+    Main,
+    /// The fixed-timestep schedule: runs 0..N times per frame under the
+    /// [`fixed_advance`] catch-up loop (64 Hz by default; see
+    /// [`App::set_fixed_timestep`]). Created lazily on first registration.
+    Fixed,
+}
+
+/// When the frame driver swaps the event double-buffer (Phase 20 plan D6).
+///
+/// Resolved at [`App::finish`]: a user-set value wins; otherwise
+/// `WaitForFixed` iff a Fixed schedule was configured, else `EveryFrame`.
+///
+/// # The pause hazard (plan ★M1)
+///
+/// Under `WaitForFixed`, a paused [`Time`] yields 0 substeps every frame, so
+/// the swap is held INDEFINITELY — starving ALL readers, including Main-only
+/// readers unrelated to the fixed schedule (a paused menu sending UI events
+/// is the canonical case). Held sends keep accumulating until the per-lane
+/// capacity is hit, after which `send` returns `Err(EventBufferFull)` — check
+/// that `Result` in pause-capable apps, or select `EveryFrame` when no
+/// fixed-schedule reader exists. On unpause the held backlog arrives in ONE
+/// generation (bounded, nothing lost — a stale-event burst, not a leak).
+///
+/// At cold start (plan ★m4), startup-sent events become visible at the first
+/// post-substep swap — a bounded ≈ 2-frame delay at 60 FPS / 64 Hz, never a
+/// loss.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum EventUpdatePolicy {
+    /// Swap only after the fixed schedule has run ≥ 1 substep since the last
+    /// swap, so a fixed-schedule `EventReader` never loses a buffer
+    /// generation on a 0-substep frame. With NO fixed schedule this silently
+    /// degrades to `EveryFrame` (the gate's `fixed.is_none()` arm).
+    WaitForFixed,
+    /// Swap once at the start of every frame (the single-schedule default).
+    EveryFrame,
+}
 
 /// The application builder + runner.
 ///
@@ -49,12 +113,44 @@ pub struct App {
     /// eagerly memset on construction.
     world: EcsMaster,
 
-    /// Staged schedule builder: `Some` during config, `None` after `finish`
-    /// (which consumes it by value to produce the [`Schedule`]).
+    /// Staged Main schedule builder: `Some` during config, `None` after
+    /// `finish` (which consumes it by value to produce the [`Schedule`]).
     builder: Option<ScheduleBuilder>,
 
-    /// Finalized schedule: `None` until `finish`, `Some` after. Drives `update`.
+    /// Finalized Main schedule: `None` until `finish`, `Some` after. Runs
+    /// once per frame (driver step ⑤).
     schedule: Option<Schedule>,
+
+    /// Staged Fixed schedule builder (Phase 20 D5): created lazily on the
+    /// first `*_in(CoreSchedule::Fixed, …)` registration, `None` otherwise
+    /// and after `finish`.
+    fixed_builder: Option<ScheduleBuilder>,
+
+    /// Finalized Fixed schedule: `Some` after `finish` iff `fixed_builder`
+    /// existed. `None` ⇒ the frame driver's fixed branch is one
+    /// predicted-not-taken check.
+    fixed: Option<Schedule>,
+
+    /// Config staging for the fixed timestep (default exactly 64 Hz); applied
+    /// as `FixedTime::new(fixed_timestep)` at `finish` UNLESS the user
+    /// inserted a `FixedTime` resource during config (insert-if-absent).
+    fixed_timestep: Duration,
+
+    /// User-set event policy override; `None` ⇒ auto-resolve at `finish`
+    /// (`WaitForFixed` iff a Fixed schedule was configured — plan D6).
+    event_policy_cfg: Option<EventUpdatePolicy>,
+
+    /// The resolved event policy (valid after `finish`).
+    event_policy: EventUpdatePolicy,
+
+    /// D6 gate counter: substeps run since the last event swap
+    /// (`saturating_add`; zeroed on swap). Holds the swap across consecutive
+    /// 0-substep frames under `WaitForFixed`.
+    fixed_steps_since_swap: u32,
+
+    /// D11 self-clock anchor for [`App::update`]: `None` until the first
+    /// frame (whose raw delta is therefore ZERO — Bevy parity).
+    last_instant: Option<Instant>,
 
     /// One-shot startup systems, drained ONCE before the frame loop in
     /// `finish`. Cold, setup-only.
@@ -96,6 +192,15 @@ impl App {
             world: EcsMaster::new(),
             builder: Some(builder),
             schedule: None,
+            fixed_builder: None,
+            fixed: None,
+            fixed_timestep: DEFAULT_FIXED_TIMESTEP,
+            event_policy_cfg: None,
+            // Placeholder until `finish` resolves the policy (plan D6); an
+            // App with no Fixed schedule keeps this value.
+            event_policy: EventUpdatePolicy::EveryFrame,
+            fixed_steps_since_swap: 0,
+            last_instant: None,
             startup: Vec::new(),
             plugin_type_ids: Vec::new(),
             pool,
@@ -112,6 +217,19 @@ impl App {
 
     // ── Config phase ─────────────────────────────────────────────────────────
 
+    /// Run-phase guard shared by EVERY config method: once
+    /// [`finish`](App::finish) has consumed the staged builders, a late config
+    /// call could never take effect (a fresh fixed builder, a staged setter
+    /// value, a startup push — none would ever be built or drained), so it
+    /// fails LOUDLY in both debug and release builds — one API, one failure
+    /// mode, never a silent drop.
+    #[inline]
+    fn assert_config_phase(&self, method: &'static str) {
+        if self.finished {
+            config_after_finish_panic(method);
+        }
+    }
+
     /// Inserts a resource into the world. Overwrites any existing value of the
     /// same type.
     pub fn insert_resource<R: Resource>(&mut self, resource: R) -> &mut Self {
@@ -119,12 +237,15 @@ impl App {
         self
     }
 
-    /// Registers state type `S` using `S::default()` as the initial value.
+    /// Registers state type `S` using `S::default()` as the initial value,
+    /// into the **Main** schedule (the [`CoreSchedule::Main`] routing of
+    /// [`init_state_in`](App::init_state_in)).
+    ///
+    /// # Panics
+    ///
+    /// Panics (`boyko-B1802`) if called after [`finish`](App::finish).
     pub fn init_state<S: States + Default>(&mut self) -> &mut Self {
-        debug_assert!(
-            self.builder.is_some(),
-            "App::init_state called after finish() — App is in the run phase"
-        );
+        self.assert_config_phase("init_state");
         self.builder
             .as_mut()
             .expect("invariant: config method requires the staged builder")
@@ -132,12 +253,15 @@ impl App {
         self
     }
 
-    /// Registers state type `S` with the given initial value.
+    /// Registers state type `S` with the given initial value, into the
+    /// **Main** schedule (the [`CoreSchedule::Main`] routing of
+    /// [`insert_state_in`](App::insert_state_in)).
+    ///
+    /// # Panics
+    ///
+    /// Panics (`boyko-B1802`) if called after [`finish`](App::finish).
     pub fn insert_state<S: States>(&mut self, state: S) -> &mut Self {
-        debug_assert!(
-            self.builder.is_some(),
-            "App::insert_state called after finish() — App is in the run phase"
-        );
+        self.assert_config_phase("insert_state");
         self.builder
             .as_mut()
             .expect("invariant: config method requires the staged builder")
@@ -145,11 +269,17 @@ impl App {
         self
     }
 
-    /// Registers systems with full ordering control. The closure receives the
-    /// raw `&mut ScheduleBuilder`, so the Phase-15/16/17 chaining API
+    /// Registers systems with full ordering control, into the **Main**
+    /// schedule (the [`CoreSchedule::Main`] routing of
+    /// [`add_systems_cfg_in`](App::add_systems_cfg_in)). The closure receives
+    /// the raw `&mut ScheduleBuilder`, so the Phase-15/16/17 chaining API
     /// (`.add_system(x).after(k).run_if(c)`, `.configure_set`, etc.) is
     /// available verbatim. THIS is the primary path for any non-trivial
     /// schedule.
+    ///
+    /// # Panics
+    ///
+    /// Panics (`boyko-B1802`) if called after [`finish`](App::finish).
     ///
     /// # Example
     ///
@@ -160,10 +290,7 @@ impl App {
     /// });
     /// ```
     pub fn add_systems_cfg(&mut self, f: impl FnOnce(&mut ScheduleBuilder)) -> &mut Self {
-        debug_assert!(
-            self.builder.is_some(),
-            "App::add_systems_cfg called after finish() — App is in the run phase"
-        );
+        self.assert_config_phase("add_systems_cfg");
         f(self
             .builder
             .as_mut()
@@ -171,17 +298,24 @@ impl App {
         self
     }
 
-    /// Convenience for registering a single unordered system. Equivalent to
+    /// Convenience for registering a single unordered system into the
+    /// **Main** schedule (the [`CoreSchedule::Main`] routing of
+    /// [`add_systems_in`](App::add_systems_in)). Equivalent to
     /// `add_systems_cfg(|b| { b.add_system(system); })`.
     ///
     /// For ordered registration (`.before` / `.after` / `.run_if` / sets) use
     /// [`add_systems_cfg`](App::add_systems_cfg), which exposes the full
     /// builder chaining API.
+    ///
+    /// # Panics
+    ///
+    /// Panics (`boyko-B1802`) if called after [`finish`](App::finish).
     pub fn add_systems<F, M>(&mut self, system: F) -> &mut Self
     where
         F: IntoSystem<(), (), M>,
         F::System: System<Out = ()> + 'static,
     {
+        self.assert_config_phase("add_systems");
         // The `SystemConfig` returned by `add_system` is discarded (the
         // temporary drops at the end of the closure), since this convenience
         // path registers an unordered system.
@@ -190,21 +324,167 @@ impl App {
         })
     }
 
+    // ── Multi-schedule routing (Phase 20 D5) ─────────────────────────────────
+
+    /// Returns the staged Fixed builder, creating it lazily on the first
+    /// Fixed registration with a clone of the App's own pool (plan D5: the
+    /// pool exists from construction, so the lazy creation has no ordering
+    /// hole). Cold, config-only.
+    fn fixed_builder_mut(&mut self) -> &mut ScheduleBuilder {
+        self.fixed_builder
+            .get_or_insert_with(|| ScheduleBuilder::new(Arc::clone(&self.pool)))
+    }
+
+    /// [`add_systems_cfg`](App::add_systems_cfg) with an explicit
+    /// [`CoreSchedule`] target. `Main` routes to the existing builder;
+    /// `Fixed` lazily creates the fixed builder on first use.
+    ///
+    /// # Panics
+    ///
+    /// Panics (`boyko-B1802`) if called after [`finish`](App::finish) — a
+    /// post-finish registration could never be built into a running schedule.
+    pub fn add_systems_cfg_in(
+        &mut self,
+        schedule: CoreSchedule,
+        f: impl FnOnce(&mut ScheduleBuilder),
+    ) -> &mut Self {
+        self.assert_config_phase("add_systems_cfg_in");
+        match schedule {
+            CoreSchedule::Main => self.add_systems_cfg(f),
+            CoreSchedule::Fixed => {
+                f(self.fixed_builder_mut());
+                self
+            }
+        }
+    }
+
+    /// [`add_systems`](App::add_systems) with an explicit [`CoreSchedule`]
+    /// target: registers a single unordered system into `schedule`.
+    ///
+    /// A `Fixed` system runs once per fixed substep and should read
+    /// `Res<FixedTime>` for its delta; a `Main` system runs once per frame
+    /// and reads `Res<Time>` (plan D2 — the parameter type IS the clock
+    /// documentation).
+    ///
+    /// # Panics
+    ///
+    /// Panics (`boyko-B1802`) if called after [`finish`](App::finish).
+    pub fn add_systems_in<F, M>(&mut self, schedule: CoreSchedule, system: F) -> &mut Self
+    where
+        F: IntoSystem<(), (), M>,
+        F::System: System<Out = ()> + 'static,
+    {
+        self.assert_config_phase("add_systems_in");
+        self.add_systems_cfg_in(schedule, |b| {
+            b.add_system(system);
+        })
+    }
+
+    /// [`init_state`](App::init_state) with an explicit [`CoreSchedule`]
+    /// target.
+    ///
+    /// Phase 20 D7 (binding contract): `on_enter` / `on_exit` /
+    /// `on_transition` conditions are valid only on systems in the SAME
+    /// schedule where the state is registered; `in_state` (a plain value
+    /// read) is valid anywhere at frame granularity. Do not register one
+    /// state type into both schedules (double pass + double initial).
+    ///
+    /// # Panics
+    ///
+    /// Panics (`boyko-B1802`) if called after [`finish`](App::finish).
+    pub fn init_state_in<S: States + Default>(&mut self, schedule: CoreSchedule) -> &mut Self {
+        self.assert_config_phase("init_state_in");
+        self.insert_state_in(schedule, S::default())
+    }
+
+    /// [`insert_state`](App::insert_state) with an explicit [`CoreSchedule`]
+    /// target. See [`init_state_in`](App::init_state_in) for the
+    /// same-schedule contract on edge conditions (plan D7).
+    ///
+    /// # Panics
+    ///
+    /// Panics (`boyko-B1802`) if called after [`finish`](App::finish).
+    pub fn insert_state_in<S: States>(&mut self, schedule: CoreSchedule, state: S) -> &mut Self {
+        self.assert_config_phase("insert_state_in");
+        match schedule {
+            CoreSchedule::Main => self.insert_state(state),
+            CoreSchedule::Fixed => {
+                self.fixed_builder_mut().insert_state(state);
+                self
+            }
+        }
+    }
+
+    /// Sets the fixed timestep applied at [`finish`](App::finish) as
+    /// `FixedTime::new(d)` (insert-if-absent: a user-inserted `FixedTime`
+    /// resource wins). Default: exactly 64 Hz = 15 625 000 ns.
+    ///
+    /// Lowering the timestep raises the worst-case substep count per frame
+    /// proportionally (plan D4: the bound is
+    /// `⌈(max_delta × speed + timestep) / timestep⌉`).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `d` is zero (via the same validation as
+    /// [`FixedTime::new`]); panics (`boyko-B1802`) if called after
+    /// [`finish`](App::finish) — the staged value would never be applied.
+    pub fn set_fixed_timestep(&mut self, d: Duration) -> &mut Self {
+        self.assert_config_phase("set_fixed_timestep");
+        // Route through the FixedTime constructor so the zero-timestep
+        // validation lives in exactly one place.
+        self.fixed_timestep = FixedTime::new(d).timestep();
+        self
+    }
+
+    /// Convenience for [`set_fixed_timestep`](App::set_fixed_timestep) in
+    /// frequency form: `set_fixed_hz(60.0)` preserves a legacy 60 Hz loop.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `hz` is not finite, not strictly positive, or so large that
+    /// the timestep rounds below `Duration`'s 1 ns resolution (see
+    /// [`FixedTime::from_hz`]); panics (`boyko-B1802`) if called after
+    /// [`finish`](App::finish).
+    pub fn set_fixed_hz(&mut self, hz: f64) -> &mut Self {
+        self.assert_config_phase("set_fixed_hz");
+        self.fixed_timestep = FixedTime::from_hz(hz).timestep();
+        self
+    }
+
+    /// Overrides the auto-resolved [`EventUpdatePolicy`] (plan D6: the
+    /// default is `WaitForFixed` iff a Fixed schedule was configured, else
+    /// `EveryFrame`). See the [`EventUpdatePolicy`] docs for the
+    /// `WaitForFixed` pause hazard before forcing it.
+    ///
+    /// # Panics
+    ///
+    /// Panics (`boyko-B1802`) if called after [`finish`](App::finish) — the
+    /// policy is resolved at `finish`, so a later override would be silently
+    /// ineffective.
+    pub fn set_event_update_policy(&mut self, p: EventUpdatePolicy) -> &mut Self {
+        self.assert_config_phase("set_event_update_policy");
+        self.event_policy_cfg = Some(p);
+        self
+    }
+
     /// Registers a system to run ONCE, before the frame loop (drained in
     /// [`finish`](App::finish)).
     ///
     /// Startup systems run single-threaded via [`EcsMaster::run_system`] — no
     /// pool / `par_iter` participation. For ordered or parallel setup, prefer
     /// an `on_enter`-state system (Phase 17).
+    ///
+    /// # Panics
+    ///
+    /// Panics (`boyko-B1802`) if called after [`finish`](App::finish) — the
+    /// startup queue is drained exactly once there, so a later push would
+    /// never run.
     pub fn add_startup_system<F, M, Out>(&mut self, system: F) -> &mut Self
     where
         F: IntoSystem<(), Out, M> + 'static,
         F::System: System<Out = Out>,
     {
-        debug_assert!(
-            self.builder.is_some(),
-            "App::add_startup_system called after finish() — App is in the run phase"
-        );
+        self.assert_config_phase("add_startup_system");
         self.startup.push(Box::new(move |world: &mut EcsMaster| {
             world.run_system(system);
         }));
@@ -250,13 +530,34 @@ impl App {
     /// Finalizes the config phase into the run phase. Idempotent — a second
     /// call is a no-op.
     ///
-    /// Builds the schedule (consuming the staged builder while borrowing
-    /// `&mut world`) and then drains the startup systems once, after the world
-    /// is fully initialized and before any frame runs.
+    /// Resolves the event policy, inserts the clock resources if absent,
+    /// builds the schedules (consuming the staged builders while borrowing
+    /// `&mut world`), and then drains the startup systems once, after the
+    /// world is fully initialized and before any frame runs.
     pub fn finish(&mut self) -> &mut Self {
         if self.finished {
             return self;
         }
+
+        // Phase 20 D6: resolve the event policy BEFORE the builders are
+        // consumed — the auto default reads whether a Fixed schedule was
+        // configured. A user override always wins.
+        self.event_policy = match self.event_policy_cfg {
+            Some(p) => p,
+            None if self.fixed_builder.is_some() => EventUpdatePolicy::WaitForFixed,
+            None => EventUpdatePolicy::EveryFrame,
+        };
+
+        // Phase 20 D2: insert the clock resources IF ABSENT — a user-inserted
+        // value during config wins (e.g. a custom `Time` with a different
+        // `max_delta`, or a pre-seeded `FixedTime`).
+        if !self.world.contains_resource::<Time>() {
+            self.world.insert_resource(Time::default());
+        }
+        if !self.world.contains_resource::<FixedTime>() {
+            self.world.insert_resource(FixedTime::new(self.fixed_timestep));
+        }
+
         let builder = self
             .builder
             .take()
@@ -266,6 +567,13 @@ impl App {
         // "build consumes the builder AND needs &mut world" wrinkle.
         let schedule = builder.build(&mut self.world);
         self.schedule = Some(schedule);
+
+        // The Fixed schedule, when configured, builds through the identical
+        // take-then-disjoint-borrow dance.
+        if let Some(fixed_builder) = self.fixed_builder.take() {
+            self.fixed = Some(fixed_builder.build(&mut self.world));
+        }
+
         self.finished = true;
 
         // Startup runs after build (world fully initialized), before any frame.
@@ -282,72 +590,195 @@ impl App {
         self.finished
     }
 
-    /// Runs exactly one frame. Auto-finishes on the first call; the
-    /// finish branch is cold after frame 1.
-    pub fn update(&mut self) {
+    /// Runs exactly one frame with an externally supplied raw delta — THE
+    /// frame function (Phase 20 plan D1/D11); [`update`](App::update) is its
+    /// self-clocked shell. Auto-finishes on the first call; the finish branch
+    /// is cold after frame 1.
+    ///
+    /// # Frame order (plan D1, binding)
+    ///
+    /// 1. [`Time::advance_with`]`(raw)` — clamp / scale / pause once.
+    /// 2. Margin-aware check-ticks pass (plan ★C1/D8): a single u32 compare,
+    ///    predicted-not-taken; the cold all-schedule clamp fires
+    ///    [`CHECK_TICK_PREEMPT_MARGIN`] ticks before any schedule's internal
+    ///    block could, so dormant siblings are never starved of their clamp.
+    /// 3. Gated event swap (plan D6): swap iff the policy is `EveryFrame`,
+    ///    no Fixed schedule exists, or the fixed loop ran ≥ 1 substep since
+    ///    the last swap.
+    /// 4. Fixed catch-up loop: [`fixed_advance`] with `|w| fixed.run(w)` —
+    ///    0..N opaque `Schedule::run`s (at most 16 at the defaults).
+    /// 5. Main `Schedule::run`.
+    ///
+    /// All inter-run work holds the dispatcher's own `&mut EcsMaster` with
+    /// zero workers in flight — the runs are opaque units (plan D1).
+    pub fn update_with_delta(&mut self, raw: Duration) {
         if !self.finished {
             self.finish();
         }
         debug_assert!(
-            self.schedule.is_some(),
-            "invariant: schedule must be built before update()"
+            self.finished,
+            "invariant: App must be finished before the frame driver runs"
         );
+        debug_assert!(
+            self.schedule.is_some(),
+            "invariant: schedule must be built before update_with_delta()"
+        );
+
+        // ★C1 invariant witness: one frame must consume fewer than
+        // CHECK_TICK_PREEMPT_MARGIN ticks (2 bumps × (1 + substeps) ≤ 34 at
+        // the defaults), or the margin no longer guarantees the App pass
+        // preempts the internal blocks.
+        #[cfg(debug_assertions)]
+        let frame_start_tick = self.world.current_tick().get();
+
+        // ① Advance the virtual clock (clamp → scale → pause, plan D4/★m5).
+        self.world.resource_mut::<Time>().advance_with(raw);
+
+        // ② Margin-aware all-schedule check-ticks pass (plan ★C1/D8). One
+        // u32 compare per frame; the cold body clamps EVERY schedule.
+        if self
+            .world
+            .should_run_check_ticks_with_margin(CHECK_TICK_PREEMPT_MARGIN)
+        {
+            self.check_ticks_all_schedules();
+        }
+
+        // ③ Gated event swap (plan D6). The gate reads the substep counter
+        // accumulated by PREVIOUS frames, so the hold composes across
+        // consecutive 0-substep frames; with no Fixed schedule the
+        // `fixed.is_none()` arm degrades `WaitForFixed` to every-frame.
+        if self.event_policy == EventUpdatePolicy::EveryFrame
+            || self.fixed.is_none()
+            || self.fixed_steps_since_swap > 0
+        {
+            self.world.update_events();
+            self.fixed_steps_since_swap = 0;
+        }
+
+        // ④ Fixed catch-up loop (plan D3). Disjoint field borrows: `fixed`
+        // borrows `self.fixed`, the driver passes `self.world` — the same
+        // dance `finish` uses.
+        if let Some(fixed) = self.fixed.as_mut() {
+            let steps = fixed_advance(&mut self.world, |w| fixed.run(w));
+            self.fixed_steps_since_swap = self.fixed_steps_since_swap.saturating_add(steps);
+        }
+
+        // ⑤ Main run (the pre-Phase-20 frame body, unchanged).
         self.schedule
             .as_mut()
             .expect("invariant: schedule is Some after finish()")
             .run(&mut self.world);
-    }
 
-    /// Finishes once, then runs `frames` frames. The finish is hoisted out of
-    /// the loop, so the loop body is a direct `Schedule::run`.
-    pub fn run_n(&mut self, frames: u64) {
-        self.finish();
-        debug_assert!(
-            self.schedule.is_some(),
-            "invariant: schedule must be built before run_n()"
-        );
-        // Bind `schedule` + `world` to disjoint field borrows ONCE so the loop
-        // body is provably `schedule.run(world)` with no per-frame branch.
-        let schedule = self
-            .schedule
-            .as_mut()
-            .expect("invariant: schedule is Some after finish()");
-        let world = &mut self.world;
-        for _ in 0..frames {
-            schedule.run(world);
+        #[cfg(debug_assertions)]
+        {
+            let consumed = self
+                .world
+                .current_tick()
+                .get()
+                .wrapping_sub(frame_start_tick);
+            debug_assert!(
+                consumed < CHECK_TICK_PREEMPT_MARGIN,
+                "★C1 invariant: one frame consumed {consumed} ticks, >= the preempt margin \
+                 ({CHECK_TICK_PREEMPT_MARGIN}) — the App check-ticks pass can no longer \
+                 preempt the per-schedule internal blocks (substep count too high?)"
+            );
         }
     }
 
-    /// Finishes once, then loops until a system sets `AppExit(true)`.
+    /// Runs exactly one frame, self-clocked via [`Instant`] (plan D11): the
+    /// raw delta is the wall time since the previous `update` call, ZERO on
+    /// the first frame (Bevy parity). Delegates to
+    /// [`update_with_delta`](App::update_with_delta).
+    ///
+    /// Embedders that own the clock (eframe, a wasm host, deterministic
+    /// tests) call `update_with_delta` directly instead.
+    pub fn update(&mut self) {
+        let now = Instant::now();
+        let raw = match self.last_instant {
+            Some(last) => now.duration_since(last),
+            None => Duration::ZERO,
+        };
+        self.last_instant = Some(now);
+        self.update_with_delta(raw);
+    }
+
+    /// Finishes once, then runs `frames` self-clocked frames (a
+    /// [`update`](App::update) loop).
+    pub fn run_n(&mut self, frames: u64) {
+        self.finish();
+        for _ in 0..frames {
+            self.update();
+        }
+    }
+
+    /// Finishes once, then runs `frames` frames with the SAME externally
+    /// supplied raw delta each frame — the deterministic loop for tests and
+    /// benches (plan D11/Q7: every TIMED artifact routes through this, so
+    /// `Instant::now` jitter stays out of measured loops; Miri suites use it
+    /// because `Instant` requires isolation to be disabled).
+    pub fn run_n_with_delta(&mut self, frames: u64, delta: Duration) {
+        self.finish();
+        for _ in 0..frames {
+            self.update_with_delta(delta);
+        }
+    }
+
+    /// Finishes once, then loops self-clocked frames until a system sets
+    /// `AppExit(true)`.
     ///
     /// Inserts an `AppExit(false)` resource before the loop so the per-frame
     /// read never panics on a missing resource. A system requests exit via
     /// `ResMut<AppExit>`; the flag is checked once per frame, after the frame
-    /// completes. Note: this resets `AppExit` to `false` at the start of `run`,
-    /// so a pre-loop exit request (e.g. set by a startup system) is cleared and
-    /// at least one frame always executes — request exit from a frame system.
+    /// completes (after the Main run — a Fixed-schedule exit request is
+    /// observed at the end of the same frame). Note: this resets `AppExit` to
+    /// `false` at the start of `run`, so a pre-loop exit request (e.g. set by
+    /// a startup system) is cleared and at least one frame always executes —
+    /// request exit from a frame system.
     pub fn run(&mut self) {
         self.finish();
         // Ensure the exit flag is present so the per-frame read below cannot
         // panic on an absent resource.
         self.world.insert_resource(AppExit(false));
-        debug_assert!(
-            self.schedule.is_some(),
-            "invariant: schedule must be built before run()"
-        );
-        // Bind `schedule` + `world` to disjoint field borrows ONCE; the loop
-        // body is `schedule.run(world)` plus one exit-flag read.
-        let schedule = self
-            .schedule
-            .as_mut()
-            .expect("invariant: schedule is Some after finish()");
-        let world = &mut self.world;
         loop {
-            schedule.run(world);
-            if world.resource::<AppExit>().0 {
+            self.update();
+            if self.world.resource::<AppExit>().0 {
                 break;
             }
         }
+    }
+
+    /// Phase 20 ★C1/D8 — the cold all-schedule check-ticks pass: the
+    /// world-level per-row pool scan plus BOTH schedules' system/condition
+    /// clamps, under one `current_tick` snapshot, then the shared counter
+    /// reset.
+    ///
+    /// The App is the only owner that can enumerate all schedules, and
+    /// clamping at frame start with the un-bumped `current` is sound:
+    /// `check_tick` only pulls old values forward, and the ≤ 34 ticks of
+    /// staleness vs the internal blocks is noise against the ~518 M slack.
+    #[cold]
+    #[inline(never)]
+    fn check_ticks_all_schedules(&mut self) {
+        let t = self.world.current_tick();
+        // Plan §13.1: current_tick monotone vs last_check_tick — the clamp
+        // math is faithful only while the elapsed distance stays within the
+        // §9.3 wraparound headroom (guards future call-site drift past the
+        // `should_run_check_ticks_with_margin` gate).
+        debug_assert!(
+            t.get().wrapping_sub(self.world.last_check_tick.get())
+                <= MAX_CHANGE_AGE.wrapping_add(CHECK_TICK_THRESHOLD),
+            "invariant: the elapsed tick distance since the last clamp must stay within \
+             MAX_CHANGE_AGE + CHECK_TICK_THRESHOLD when the App check-ticks pass fires"
+        );
+        run_check_ticks_scan(&mut self.world);
+        self.schedule
+            .as_mut()
+            .expect("invariant: schedule is Some after finish()")
+            .check_change_ticks(t);
+        if let Some(fixed) = self.fixed.as_mut() {
+            fixed.check_change_ticks(t);
+        }
+        self.world.set_last_check_tick(t);
     }
 }
 
@@ -363,4 +794,88 @@ impl Default for App {
 #[inline(never)]
 fn duplicate_plugin_panic(name: &'static str) -> ! {
     panic!("boyko-B1801: plugin '{name}' added more than once");
+}
+
+/// Cold run-phase config panic: [`App::finish`] consumes the staged builders,
+/// drains the startup queue, and resolves the config staging, so a
+/// post-`finish` config call could never take effect. Every config method
+/// routes here via [`App::assert_config_phase`], so debug AND release builds
+/// fail identically loudly instead of silently dropping the registration.
+#[cold]
+#[inline(never)]
+fn config_after_finish_panic(method: &'static str) -> ! {
+    panic!(
+        "boyko-B1802: App::{method} called after finish() — the App is in the run phase; \
+         perform all configuration before the first finish()/update()/run() call"
+    );
+}
+
+#[cfg(test)]
+#[cfg(not(miri))] // constructs a real ThreadPool — same gate as tests/app_plugin.rs
+mod tests {
+    use super::*;
+
+    /// One-variant state type for the post-finish routing panic test.
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+    enum GuardState {
+        A,
+    }
+    impl States for GuardState {}
+
+    fn serial_app() -> App {
+        App::with_pool(ThreadPoolBuilder::new().num_threads(1).build())
+    }
+
+    // ── M1 — post-finish config fails loudly, uniformly (debug AND release) ──
+
+    /// A Fixed-arm registration after `finish()` panics (`boyko-B1802`)
+    /// instead of silently staging into a fixed builder that is never built.
+    #[test]
+    #[should_panic(expected = "boyko-B1802: App::add_systems_in")]
+    fn add_systems_in_fixed_after_finish_panics() {
+        let mut app = serial_app();
+        app.finish();
+        app.add_systems_in(CoreSchedule::Fixed, || {});
+    }
+
+    /// A Fixed-arm state registration after `finish()` panics (`boyko-B1802`).
+    #[test]
+    #[should_panic(expected = "boyko-B1802: App::insert_state_in")]
+    fn insert_state_in_fixed_after_finish_panics() {
+        let mut app = serial_app();
+        app.finish();
+        app.insert_state_in(CoreSchedule::Fixed, GuardState::A);
+    }
+
+    /// A startup registration after `finish()` panics (`boyko-B1802`) — the
+    /// startup queue was already drained, so the system could never run.
+    #[test]
+    #[should_panic(expected = "boyko-B1802: App::add_startup_system")]
+    fn add_startup_system_after_finish_panics() {
+        let mut app = serial_app();
+        app.finish();
+        app.add_startup_system(|| {});
+    }
+
+    // ── m1 — post-finish setters fail loudly too ─────────────────────────────
+
+    /// `set_fixed_timestep` after `finish()` panics (`boyko-B1802`) instead of
+    /// staging a value that would never be applied.
+    #[test]
+    #[should_panic(expected = "boyko-B1802: App::set_fixed_timestep")]
+    fn set_fixed_timestep_after_finish_panics() {
+        let mut app = serial_app();
+        app.finish();
+        app.set_fixed_timestep(Duration::from_millis(10));
+    }
+
+    /// `set_event_update_policy` after `finish()` panics (`boyko-B1802`) — the
+    /// policy was already resolved at `finish`.
+    #[test]
+    #[should_panic(expected = "boyko-B1802: App::set_event_update_policy")]
+    fn set_event_update_policy_after_finish_panics() {
+        let mut app = serial_app();
+        app.finish();
+        app.set_event_update_policy(EventUpdatePolicy::EveryFrame);
+    }
 }

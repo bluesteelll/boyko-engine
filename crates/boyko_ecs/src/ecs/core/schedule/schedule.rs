@@ -204,8 +204,10 @@ impl Schedule {
         // apply-window, after this `this_run` was captured and before any
         // deferred command drains, so deferred-added components land at
         // `this_run + 1` and are observed by Added<T>/Changed<T> exactly once
-        // on the next frame. Both are `fetch_add(Relaxed)`; only this first
-        // value is read here.
+        // on the next RUN OF THIS SCHEDULE (Phase 20: under a multi-schedule
+        // App each `Schedule::run` carries its own window, so "frame" is the
+        // wrong unit). Both are `fetch_add(Relaxed)`; only this first value
+        // is read here.
         let this_run = world.bump_change_tick();
 
         // Phase 16.1 (W2): publish the frame-start `this_run` as the single
@@ -295,9 +297,10 @@ impl Schedule {
         // current_tick() at apply time; bumping once here — after systems',
         // conditions', and the state pass's frame-start `this_run` were captured,
         // before any deferred drain — lands those stamps at `this_run + 1`,
-        // strictly between this frame's reader window and the next's, so
+        // strictly between this run's reader window and the next's, so
         // Added<T>/Changed<T> observe a deferred-added component exactly once on
-        // the following frame (Bevy's ApplyDeferred-sync-point analogue). The
+        // the following run of this schedule (Bevy's ApplyDeferred-sync-point
+        // analogue; Phase 20 wording — "frame" ⇒ "run of that schedule"). The
         // result is intentionally discarded: only the side effect on change_tick
         // matters; systems'/conditions'/state ticks remain pinned to `this_run`.
         let _apply_window_tick = world.bump_change_tick();
@@ -368,9 +371,14 @@ impl Schedule {
     /// [`run_check_ticks_scan`]: crate::ecs::core::change_detection::run_check_ticks_scan
     /// [`Tick::is_newer_than`]: crate::ecs::core::change_detection::Tick::is_newer_than
     /// [`System::check_change_tick`]: crate::ecs::core::system::system::System::check_change_tick
+    ///
+    /// Phase 20 D8: `pub(crate)` so `App::check_ticks_all_schedules` (the
+    /// margin-aware all-schedule pass) can clamp BOTH schedules' system /
+    /// condition ticks from the frame driver. The body is unchanged; the
+    /// internal call site above stays as the standalone-single-schedule belt.
     #[cold]
     #[inline(never)]
-    fn check_change_ticks(&mut self, current: Tick) {
+    pub(crate) fn check_change_ticks(&mut self, current: Tick) {
         for sys_box in self.systems.iter_mut() {
             sys_box.system.check_change_tick(current);
         }

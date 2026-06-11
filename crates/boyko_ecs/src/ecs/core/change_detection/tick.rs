@@ -21,6 +21,28 @@
 /// (§9.3, §10.6).
 pub const CHECK_TICK_THRESHOLD: u32 = 518_400_000;
 
+/// Phase 20 ★C1/★N2 — margin by which the App-level all-schedule check-ticks
+/// pass preempts the per-schedule internal blocks.
+///
+/// The App pass (`App::check_ticks_all_schedules`) and the internal block in
+/// `Schedule::run` read the SAME world counter, but the App checks BEFORE the
+/// frame's tick bumps while each internal block checks AFTER its own
+/// frame-start bump — so at a threshold-crossing frame a margin-less App pass
+/// would lose ~75% of crossings to the first internal block, which clamps
+/// only ITS OWN systems, resets the shared counter, and starves the sibling
+/// schedule's clamp (two consecutive internal wins push a dormant sibling
+/// past `MAX_CHANGE_AGE + 2 × CHECK_TICK_THRESHOLD`, wrapping
+/// `Tick::is_newer_than`).
+///
+/// With the margin, `EcsMaster::should_run_check_ticks_with_margin` fires at
+/// `CHECK_TICK_THRESHOLD - CHECK_TICK_PREEMPT_MARGIN` elapsed ticks — and
+/// since one frame consumes at most `2 × (1 + substeps)` ticks (≤ 34 at the
+/// defaults, far below 4096; `debug_assert`ed in `App::update_with_delta`),
+/// the App check always crosses `T − 4096` at a frame start strictly before
+/// any internal block can reach `T` mid-frame. Firing 4096 ticks early is
+/// noise against the ~518 M threshold.
+pub const CHECK_TICK_PREEMPT_MARGIN: u32 = 4096;
+
 /// Maximum age (in ticks) any stored tick may have relative to the world's
 /// current tick before `check_ticks` MUST clamp it.
 ///
@@ -58,6 +80,10 @@ pub const MAX_CHANGE_AGE: u32 = u32::MAX - (2 * CHECK_TICK_THRESHOLD - 1);
 const _: () = {
     assert!(MAX_CHANGE_AGE.wrapping_add(CHECK_TICK_THRESHOLD) < u32::MAX);
     assert!(CHECK_TICK_THRESHOLD < MAX_CHANGE_AGE);
+    // Phase 20 ★C1: the preempt margin must be a strict sliver of the
+    // threshold, or `CHECK_TICK_THRESHOLD - CHECK_TICK_PREEMPT_MARGIN`
+    // underflows / degenerates to an every-frame cold scan.
+    assert!(CHECK_TICK_PREEMPT_MARGIN < CHECK_TICK_THRESHOLD);
 };
 
 /// Monotonic change-detection counter.

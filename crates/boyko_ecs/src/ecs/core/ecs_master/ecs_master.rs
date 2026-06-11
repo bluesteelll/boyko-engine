@@ -2578,6 +2578,36 @@ impl EcsMaster {
         elapsed >= CHECK_TICK_THRESHOLD
     }
 
+    /// Margin-aware variant of [`Self::should_run_check_ticks`] for the
+    /// App-level all-schedule clamp pass (Phase 20 ★C1 / D8).
+    ///
+    /// Returns `true` iff `current_tick - last_check_tick >=
+    /// CHECK_TICK_THRESHOLD - margin`, i.e. it fires `margin` ticks EARLIER
+    /// than the per-schedule internal blocks in `Schedule::run`. Both paths
+    /// read the SAME counter, but the App checks at frame start (before any
+    /// bump) while each internal block checks after its own frame-start bump
+    /// — without the margin the first internal block to bump would win most
+    /// threshold crossings, clamp only its own systems, reset the shared
+    /// counter, and starve the SIBLING schedule's clamp (the
+    /// `Tick::is_newer_than` wraparound class). The margin guarantees the App
+    /// pass crosses its earlier threshold at a frame start strictly before
+    /// any internal block can reach the full threshold mid-frame, as long as
+    /// one frame consumes fewer than `margin` ticks (`debug_assert`ed in
+    /// `App::update_with_delta`).
+    ///
+    /// The canonical `margin` is
+    /// [`CHECK_TICK_PREEMPT_MARGIN`](crate::ecs::core::change_detection::CHECK_TICK_PREEMPT_MARGIN).
+    #[inline]
+    pub(crate) fn should_run_check_ticks_with_margin(&self, margin: u32) -> bool {
+        debug_assert!(
+            margin < CHECK_TICK_THRESHOLD,
+            "invariant: the preempt margin must be a strict sliver of CHECK_TICK_THRESHOLD"
+        );
+        let current = self.current_tick();
+        let elapsed = current.get().wrapping_sub(self.last_check_tick.get());
+        elapsed >= CHECK_TICK_THRESHOLD - margin
+    }
+
     /// Records that the world's stored ticks have just been clamped against
     /// [`Tick`] = `tick`.
     ///

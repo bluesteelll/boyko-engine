@@ -18,6 +18,6 @@ pub mod tick;
 
 pub(crate) mod check_ticks;
 
-pub use tick::{CHECK_TICK_THRESHOLD, MAX_CHANGE_AGE, Tick};
+pub use tick::{CHECK_TICK_PREEMPT_MARGIN, CHECK_TICK_THRESHOLD, MAX_CHANGE_AGE, Tick};
 
 pub(crate) use check_ticks::run_check_ticks_scan;
