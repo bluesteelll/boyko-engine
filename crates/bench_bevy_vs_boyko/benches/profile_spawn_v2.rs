@@ -145,8 +145,11 @@ struct BevyV2Pos {
 // H2 — EcsMaster::new() pre-extends fast-stores to 72 192 slots
 // ===========================================================================
 //
-// Plan §5.5 / §10 SBO16: `entities_inland` and `sparse_to_active` pre-extended
-// to `MAX_ENTITIES_HINT + MAX_BATCH_HINT = 64_000 + 8_192 = 72_192`.
+// HISTORICAL (Phase 12.5 wording): `entities_inland` and `sparse_to_active`
+// pre-extended to `MAX_ENTITIES_HINT + MAX_BATCH_HINT = 64_000 + 8_192 =
+// 72_192`. Phase 12.6 made growth lazy; Phase X.D deleted
+// `sparse_to_active`; Phase X.G replaced the Vec with an address-stable
+// reserve/commit `InlandStore` (growth = frontier commit, no realloc).
 //
 // Memory layout:
 //   - EntityInland = 16 B (ptr + u32 + u32) × 72 192 = 1.155 MB

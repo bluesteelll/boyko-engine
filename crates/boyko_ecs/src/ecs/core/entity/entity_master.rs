@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::ecs::core::archetype::archetype::Archetype;
 use crate::ecs::core::entity::entity::Entity;
 use crate::ecs::core::entity::entity_inland::EntityInland;
+use crate::ecs::core::entity::inland_store::InlandStore;
 use crate::ecs::core::system::params::entity_counter::MAX_BATCH_HINT;
 use crate::ecs::error::{EcsError, EcsResult};
 use crate::ecs::identifiers::primitives::EntityId;
@@ -33,9 +34,25 @@ use crate::ecs::identifiers::primitives::EntityId;
 /// `entities_inland` directly — O(capacity) instead of O(active); accepted
 /// because real iteration goes through `Query`/archetype storage, never
 /// through here.
+// Phase X.G cache-layout note: `#[repr(C)]` pins the hot scalar cluster —
+// `entities_inland` (32 B: base/os_len/len/committed) + `next_entity_id`
+// (8 B) + `live_count` (8 B) = 48 B — inside ONE cache line at offset 0.
+// Every create/delete/register touches exactly that cluster; the recycle
+// `Vec` header follows on the next line. Measured: the repr(Rust) shuffle
+// after the 24→32 B field growth cost +6-10% on create/delete_entity_10k.
+#[repr(C)]
 pub struct EntityMaster {
-    /// Pool of free entity IDs for reuse.
-    free_entity_ids: Vec<EntityId>,
+    /// Phase 7: dense-indexed fast-path lookup record store — FIRST field:
+    /// its hot pair (base, len) sits at offsets 0/16 of the master itself.
+    ///
+    /// Phase X.G: an [`InlandStore`] (address-stable reserve/commit growth)
+    /// instead of a `Vec` — growth never reallocates, copies, or fills
+    /// (deleting the g7b doubling-memcpy spike class); reads/indexed writes
+    /// go through `Deref`/`DerefMut` with `Vec`-identical codegen.
+    ///
+    /// `pub(crate)` for direct access from `EcsMaster::get_component_raw`
+    /// and the Phase 7 hot read path. Outside the crate, the layout is opaque.
+    pub(crate) entities_inland: InlandStore,
 
     /// Phase 11 (EM1, EM6): atomic counter for fresh entity-id minting.
     ///
@@ -46,39 +63,44 @@ pub struct EntityMaster {
     /// `allocate_entity` performs `fetch_add(1, Relaxed)` on the same atomic.
     next_entity_id: AtomicUsize,
 
-    /// Phase 7: dense-indexed fast-path lookup record, sized by max-ever
-    /// `EntityId`. Slots with `archetype_ptr.is_null()` represent dead /
-    /// never-registered IDs. Written by `register_entity_with_ptr`; read
-    /// by the hot `get_component_raw` path in `EcsMaster`.
-    ///
-    /// `pub(crate)` for direct access from `EcsMaster::get_component_raw`
-    /// and the Phase 7 hot read path. Outside the crate, the layout is opaque.
-    pub(crate) entities_inland: Vec<EntityInland>,
-
     /// Count of currently-live entities. Maintained under `&mut self`
     /// (dispatcher, apply window SCH7). Replaces the removed `active_ids.len()`.
     live_count: usize,
+
+    /// Pool of free entity IDs for reuse (LIFO). Last field: the `Vec`
+    /// header lives on the second cache line; the recycle pop/push touches
+    /// it only on the create/delete paths that already paid the line.
+    free_entity_ids: Vec<EntityId>,
 }
 
 impl EntityMaster {
     /// Creates a new empty EntityMaster.
+    ///
+    /// Phase X.G: pays one address-space reservation syscall
+    /// (`DEFAULT_INLAND_RESERVE`, no commit charge, no resident pages) —
+    /// bounded by the XG-B4 `EcsMaster::new` gate.
     #[inline]
     pub fn new() -> Self {
         Self {
             free_entity_ids: Vec::new(),
             next_entity_id: AtomicUsize::new(0),
-            entities_inland: Vec::new(),
+            entities_inland: InlandStore::new(),
             live_count: 0,
         }
     }
 
     /// Creates a new EntityMaster with pre-allocated capacity.
+    ///
+    /// Phase X.G: `capacity` slots are PRECOMMITTED (no growth events for the
+    /// first `capacity` entities); a capacity above the default 67 M-slot
+    /// ceiling sizes the reservation up instead of failing (R2-W2 option b —
+    /// `Vec::with_capacity`'s "never refuse a satisfiable request" contract).
     #[inline]
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             free_entity_ids: Vec::with_capacity(capacity / 4),
             next_entity_id: AtomicUsize::new(0),
-            entities_inland: Vec::with_capacity(capacity),
+            entities_inland: InlandStore::with_capacity(capacity),
             live_count: 0,
         }
     }
@@ -118,10 +140,9 @@ impl EntityMaster {
             // and lets us share the counter without extra branches.
             let id_raw = self.next_entity_id.fetch_add(1, Ordering::Relaxed);
             let id = EntityId(id_raw);
-            // Ensure the fast store has a slot for this id.
-            if id.0 >= self.entities_inland.len() {
-                self.entities_inland.resize(id.0 + 1, EntityInland::NULL);
-            }
+            // Ensure the fast store has a slot for this id (X.G: no copy, no
+            // fill — `ensure` self-gates on `len`).
+            self.entities_inland.ensure(id.0 + 1);
             Entity::new(id, 0)
         }
     }
@@ -202,30 +223,23 @@ impl EntityMaster {
         Ok(start..(start + n))
     }
 
-    /// Phase 12.6 — grows the entity fast-store vector so any index in
+    /// Phase 12.6 — grows the entity fast store so any index in
     /// `[0, capacity)` is in bounds.
     ///
     /// Called from dispatcher-only paths (`EcsMaster::spawn_batch` and
     /// `SpawnBatchCommand::apply`) BEFORE the apply window's per-row
     /// writes. The `&mut self` receiver enforces dispatcher exclusivity
-    /// at the type-system level — workers cannot race a reallocation
-    /// here against their `&self` reads (SEND5 / SBO16).
+    /// at the type-system level (SEND5 / SBO16) — and since Phase X.G the
+    /// store's base address is additionally write-once (no reallocation
+    /// exists at all).
     ///
-    /// Idempotent and cheap when already sized: only the `Vec::resize`
-    /// branches do work. The extension memset is amortised O(n) across
-    /// the world's lifetime (each slot is written once when promoted
-    /// into the live range).
-    ///
-    /// Replaces the Phase 12.5 `EcsMaster::pre_sized_entity_master`
-    /// eager pre-extension at world construction time. The 480 µs cost
-    /// of that eager memset now happens lazily at the first batch
-    /// dispatcher call; single-row spawns (which already grow lazily via
-    /// `register_entity_with_ptr`) are unaffected.
+    /// Phase X.G: `InlandStore::ensure` — idempotent, O(1) warm; growth is a
+    /// rare cold frontier commit with ZERO copies and ZERO fills (newly
+    /// exposed slots read NULL via the invariant-J zero-tail; there is no
+    /// extension memset anymore).
     #[inline]
     pub(crate) fn ensure_capacity(&mut self, capacity: usize) {
-        if self.entities_inland.len() < capacity {
-            self.entities_inland.resize(capacity, EntityInland::NULL);
-        }
+        self.entities_inland.ensure(capacity);
     }
 
     /// Phase 12.5 Opt-A2 (plan §5.7 / SBO15): registers a contiguous range
@@ -322,9 +336,9 @@ impl EntityMaster {
             "Entity already present in Phase 7 fast store"
         );
 
-        if sparse_idx >= self.entities_inland.len() {
-            self.entities_inland.resize(sparse_idx + 1, EntityInland::NULL);
-        }
+        // Defensive growth (unreachable in practice — the debug_assert above
+        // requires allocate_entity to have sized the slot already).
+        self.entities_inland.ensure(sparse_idx + 1);
 
         self.entities_inland[sparse_idx] = EntityInland::new(
             archetype_ptr,
@@ -456,17 +470,31 @@ impl EntityMaster {
     }
 
     /// Gets the total memory usage in bytes (approximate).
+    ///
+    /// Phase X.G: reports RESIDENT truth — the committed frontier of the
+    /// entity store, not the (multi-GB, cost-free) address reservation.
     pub fn memory_usage(&self) -> usize {
         self.free_entity_ids.capacity() * std::mem::size_of::<EntityId>()
-            + self.entities_inland.capacity() * std::mem::size_of::<EntityInland>()
+            + self.entities_inland.committed_slots() * std::mem::size_of::<EntityInland>()
+    }
+
+    /// Commit frontier of the entity fast store, in slots (diagnostics —
+    /// mirror of `Arena::committed`).
+    #[inline]
+    pub fn committed_slots(&self) -> usize {
+        self.entities_inland.committed_slots()
     }
 
     /// Compacts the internal storage to minimize memory usage.
     pub fn compact(&mut self) {
         self.free_entity_ids.shrink_to_fit();
 
-        // Note: we don't shrink the fast-store vector because that would
-        // require renumbering live ids. Instead, we sort the free list for
+        // Note: we don't shrink the fast store because that would require
+        // renumbering live ids. Phase X.G adds a second reason: no decommit
+        // of `[0, len)` is EVER legal — recycled-dead slots are non-zero
+        // (bumped generations), so re-zeroing them would alias entities
+        // (invariant J's caveat); decommitting `[len, committed)` is a
+        // possible future non-goal. Instead, we sort the free list for
         // better cache usage on subsequent allocations.
         self.free_entity_ids.sort_unstable_by(|a, b| b.cmp(a)); // Reverse order for pop()
     }
@@ -541,10 +569,14 @@ impl Default for EntityMaster {
 //     `register_entity_with_ptr`, `register_batch`, `ensure_capacity`,
 //     `clear`, `rewind_allocate`) takes `&mut self` and runs only on the
 //     dispatcher inside the apply window (SCH7); no worker is in flight, so a
-//     worker `&self` read can never observe a mid-flight `Vec` reallocation of
-//     `entities_inland`. (`entities_inland` is grown lazily on these
-//     dispatcher-only paths — there is no eager pre-extension at world
-//     construction.)
+//     worker `&self` read can never race a structural mutation. Phase X.G
+//     makes the no-mid-flight-reallocation clause STRUCTURAL as well:
+//     `entities_inland` is an `InlandStore` whose base address is write-once
+//     (growth commits fresh pages at the frontier — no pointer is ever
+//     invalidated). This is defense-in-depth, NOT a relaxation: `len` is a
+//     plain non-atomic usize, so a concurrent dispatcher-grow vs worker-read
+//     would still be a data race — SCH7 exclusivity remains the normative
+//     argument.
 //   - `next_entity_id` is the ONLY worker-reachable field, exposed solely as
 //     `*const AtomicUsize` through `EntityCounter<'s>` (EM6) — atomic RMW only.
 //   - `live_count: usize` is dispatcher-only (`&mut self`); no worker reaches it.
@@ -933,5 +965,29 @@ mod tests {
             non_null,
             "live_count must match the non-null inland slot count after churn"
         );
+    }
+
+    /// Phase X.G (XG-B6, EntityMaster level) — the slot ADDRESS of an early
+    /// entity is stable while the store grows across several commit slabs.
+    /// Impossible with the pre-X.G `Vec` (every doubling relocated the
+    /// buffer).
+    #[test]
+    fn xg_b6_slot_address_stable_across_growth() {
+        let mut em = EntityMaster::new();
+        let first = em.allocate_entity();
+        em.register_entity_with_ptr(first, EntityInland::dangling_for_test(1, 0).archetype_ptr(), 0);
+        let addr_before = &em.entities_inland[first.id().0] as *const EntityInland as usize;
+
+        // Grow far past the first 256 KiB slab (16,384 slots).
+        em.ensure_capacity(100_000);
+
+        let addr_after = &em.entities_inland[first.id().0] as *const EntityInland as usize;
+        assert_eq!(
+            addr_before, addr_after,
+            "entity slot address moved across growth — X.G no-realloc contract broken"
+        );
+        assert!(em.committed_slots() >= 100_000);
+        // Never-written tail reads NULL (invariant J through the public type).
+        assert!(em.entities_inland[99_999].is_null());
     }
 }

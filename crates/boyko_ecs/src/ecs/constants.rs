@@ -100,9 +100,32 @@ pub const MEDIUM_COMPONENT_THRESHOLD: usize = 256;
 // Archetype and entity configuration
 //
 
-/// Initial entity capacity for archetypes
-/// Controls how many entities an archetype can initially store
-pub const INITIAL_ENTITY_CAPACITY: usize = 1024;
+/// Default virtual-address reservation for the entity-metadata store
+/// (`InlandStore`, Phase X.G): 1 GiB = 67,108,864 16-byte `EntityInland`
+/// slots on the 64-bit OS-syscall arms — aligned with the 4 GiB component
+/// arena ceiling (the arena exhausts long before 67 M real entities).
+/// Reservation is address space only (no commit charge, no resident pages);
+/// see `DEFAULT_ARENA_RESERVE` for the tooling note.
+#[cfg(all(not(miri), any(windows, unix), target_pointer_width = "64"))]
+pub const DEFAULT_INLAND_RESERVE: usize = 1024 * 1024 * 1024;
+/// Fallback default (Miri / wasm32 / exotic / 32-bit): the reservation is
+/// eagerly allocated ZEROED from the global allocator, so it must stay small.
+/// 16 MiB = 1,048,576 entity slots — no Miri/wasm workload approaches that.
+/// Native wasm32 cost: one eager zeroed 16 MiB per world, accepted because
+/// the shipping wasm demo creates exactly one world (Phase X.G R2-W3).
+#[cfg(not(all(not(miri), any(windows, unix), target_pointer_width = "64")))]
+pub const DEFAULT_INLAND_RESERVE: usize = 16 * 1024 * 1024;
+
+/// Smallest commit slab for the entity-metadata store (Phase X.G D2):
+/// 256 KiB = 16,384 slots — covers the 9192-slot first request (1000 +
+/// MAX_BATCH_HINT) in a single event. Granule (`ARENA_COMMIT_GRANULE`)
+/// multiple.
+pub const INLAND_MIN_SLAB: usize = 256 * 1024;
+
+/// Largest geometric commit step for the entity-metadata store (Phase X.G
+/// D2): 16 MiB = 1,048,576 slots — one max-step covers a 1 M-entity world;
+/// bounds commit-charge overshoot by one slab.
+pub const INLAND_MAX_SLAB: usize = 16 * 1024 * 1024;
 
 //
 // Memory management

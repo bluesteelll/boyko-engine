@@ -821,15 +821,11 @@ impl EcsMaster {
 
         let current_tick = self.current_tick();
 
-        // Phase 12.6 — lazy growth path. The fast-store starts empty at
-        // world construction; `Vec::resize` extends it on demand under
-        // `&mut self` (no worker race per SEND5/SBO16).
+        // Phase 12.6 — lazy growth path; Phase X.G — `InlandStore::ensure`
+        // extends it on demand under `&mut self` (no worker race per
+        // SEND5/SBO16) with zero copies and zero fills.
         let id_raw = entity.id().0;
-        if id_raw >= self.entity_master.entities_inland.len() {
-            self.entity_master
-                .entities_inland
-                .resize(id_raw + 1, EntityInland::NULL);
-        }
+        self.entity_master.entities_inland.ensure(id_raw + 1);
 
         let mut new_unit_index: u32 = 0;
         let pushed = {
@@ -946,11 +942,7 @@ impl EcsMaster {
         let current_tick = self.current_tick();
 
         let id_raw = entity.id().0;
-        if id_raw >= self.entity_master.entities_inland.len() {
-            self.entity_master
-                .entities_inland
-                .resize(id_raw + 1, EntityInland::NULL);
-        }
+        self.entity_master.entities_inland.ensure(id_raw + 1);
 
         let mut new_unit_index: u32 = 0;
         let pushed = {

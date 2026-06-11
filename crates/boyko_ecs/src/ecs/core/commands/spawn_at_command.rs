@@ -36,7 +36,6 @@ use crate::ecs::core::component::observers::dispatch::{
 };
 use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 use crate::ecs::core::entity::entity::Entity;
-use crate::ecs::core::entity::entity_inland::EntityInland;
 use crate::ecs::identifiers::primitives::InlandPoolId;
 
 /// Deferred "spawn entity with bundle `B` at the pre-allocated `entity`"
@@ -158,17 +157,12 @@ impl<B: Bundle> Command for SpawnAtCommand<B> {
         };
 
         // ── Step 3: grow entity fast-store on demand ──────────────────
-        // Single-row growth — replicates the legacy
-        // `create_entity_at_with_pool_ids` resize gate. The apply path
-        // holds `&mut EcsMaster`, so worker `&self` reads on
-        // `entities_inland` cannot race a Vec reallocation here (SEND5).
+        // Single-row growth. The apply path holds `&mut EcsMaster`, so
+        // worker `&self` reads on `entities_inland` cannot race the growth
+        // (SEND5) — and since Phase X.G the store's base is write-once
+        // anyway (`InlandStore::ensure`: frontier commit, no realloc).
         let id_raw = entity.id().0;
-        if id_raw >= world.entity_master.entities_inland.len() {
-            world
-                .entity_master
-                .entities_inland
-                .resize(id_raw + 1, EntityInland::NULL);
-        }
+        world.entity_master.entities_inland.ensure(id_raw + 1);
 
         // ── Step 4: reborrow archetype + reserve capacity ─────────────
         // SAFETY (U1, U2, U14): `archetype_ptr` is write-capable; we hold

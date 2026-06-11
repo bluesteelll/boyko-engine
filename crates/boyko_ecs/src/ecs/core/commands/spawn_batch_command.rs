@@ -309,14 +309,16 @@ where
 
         // ── Step 3: ensure entity fast-store capacity (Phase 12.6) ─────
         // Replaces the SBO17b hard-panic guard. The apply path holds
-        // `&mut EcsMaster`, so workers are not in flight per SCH7;
-        // growing the Vec here cannot race a `&self` worker read on
-        // `entities_inland` (SEND5 / SBO16).
+        // `&mut EcsMaster`, so workers are not in flight per SCH7 — and
+        // since Phase X.G the store's base is write-once anyway
+        // (`InlandStore::ensure` = frontier commit; reallocation does not
+        // exist), making the SEND5/SBO16 stable-address provision
+        // structural.
         //
-        // We grow by `n + MAX_BATCH_HINT` so that subsequent worker-side
-        // reads have a stable address window for at least one further
-        // batch without re-allocation — preserving the original Phase
-        // 12.5 SBO16 ergonomics on a per-batch basis.
+        // The `+ MAX_BATCH_HINT` overshoot is kept: it keeps `len` ahead of
+        // the reserved-id window so a subsequent batch's worker-side id
+        // RESERVATIONS stay below `len` (the bounds oracle), same as the
+        // original Phase 12.5 SBO16 ergonomics.
         let start_id = self.start_entity.id().0;
         let end_id = start_id.checked_add(n).expect(
             "invariant SBO17b: enqueue cap-check ensures start + n cannot overflow usize",
