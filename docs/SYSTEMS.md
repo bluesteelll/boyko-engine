@@ -1435,11 +1435,22 @@ NOT in `constants.rs` (which holds only sizes / thresholds / SIMD-align).
 **Crate:** [crates/boyko_demo/](../crates/boyko_demo/) — a wgpu+egui
 GPU-instanced sandbox that dogfoods the public API. Particles / boids / physics
 modes switched via Phase-17 states; drives a real `Schedule::run` + `par_iter` +
-a **zero-AoS-copy `for_each_chunk` SoA → GPU upload**. Layout: `app.rs`, `sim/`
+a **zero-AoS-copy `for_each_chunk` SoA → GPU upload**, **substep-gated** since
+Phase 20.1 (`upload_due` in `app.rs`, D5): a 0-substep display frame with a
+stable entity count uploads nothing, so uploads run at min(display, sim) rate
+(−55 % upload events at 144 Hz display / 64 Hz sim). `GpuInstance`
+(`render/instance.rs`) is the 24 B interpolated record
+`{pos, scale, color, prev_pos}`; the vertex shader renders
+`mix(prev_pos, pos, alpha)` with `alpha = FixedTime::overstep_fraction()`
+delivered through the 80 B camera uniform. `sync_gpu_instance`
+(`sim/systems/common.rs`) is the SINGLE load-bearing `prev_pos` maintainer
+(D3) — including in Physics mode, where it looks redundant but gating it out
+would kill prev maintenance. Layout: `app.rs`, `sim/`
 (`systems/`, `grid.rs`, `modes.rs`, `runner.rs`, `bundles.rs`, `components.rs`,
 `resources.rs`), `render/`, `ui/`. Compiles for wasm32 (webgl backend; 28
 pointer-width const-asserts gated to 64-bit). See [DEMO-PLAN.md](DEMO-PLAN.md) +
-[DEMO-DOGFOODING.md](DEMO-DOGFOODING.md).
+[DEMO-DOGFOODING.md](DEMO-DOGFOODING.md) +
+[PHASE-20.1-RESULTS.md](PHASE-20.1-RESULTS.md).
 
 ---
 

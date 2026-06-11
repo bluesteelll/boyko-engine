@@ -116,6 +116,7 @@ at the crate root: `boyko_ecs::{App, Plugin, Plugins, AppExit}`.
 | Configure the fixed timestep | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `set_fixed_timestep(Duration)` / `set_fixed_hz(f64)` — default exactly 64 Hz; config phase only |
 | Read the clock from a system | [core/time/](../crates/boyko_ecs/src/ecs/core/time/) ✅ | `Res<Time>` (per-frame: `delta_secs` / `elapsed` / `pause` / `set_relative_speed` / `set_max_delta`) or `Res<FixedTime>` (per-substep: `delta_secs() == timestep`, `steps_this_frame`) |
 | Interpolation alpha | [time/fixed_time.rs](../crates/boyko_ecs/src/ecs/core/time/fixed_time.rs) ✅ | `FixedTime::overstep_fraction()` ∈ [0, 1) — read from Main after the fixed loop (Phase 20 D9; snapshot/lerp layers on top) |
+| Render interpolation alpha → GPU lerp (reference consumer) | [boyko_demo render/instance.rs](../crates/boyko_demo/src/render/instance.rs) ✅ | `FixedTime::overstep_fraction()` → 80 B camera uniform → WGSL `mix(prev_pos, pos, alpha)` over the 24 B `GpuInstance` — the Phase-20.1 demo GPU mirror (`sync_gpu_instance` maintains `prev_pos`) |
 | Event swap policy | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `set_event_update_policy(EventUpdatePolicy::{WaitForFixed, EveryFrame})` — auto-resolved at `finish()` (Phase 20 D6); see the `WaitForFixed` pause-hold hazard doc |
 | Drive the rhythm without an App (wasm / hand-rolled) | [time/fixed_loop.rs](../crates/boyko_ecs/src/ecs/core/time/fixed_loop.rs) ✅ | `Time::advance_with(raw)` then `fixed_advance(world, \|w\| …)` exactly once per frame — insert `Time`/`FixedTime` manually first (the wasm demo runner's path) |
 | The plugin trait | [plugin.rs](../crates/boyko_ecs/src/ecs/core/app/plugin.rs) ✅ | `trait Plugin { fn build(&self, &mut App); fn name(&self) -> &'static str }` — `'static`, NOT `Send + Sync`; consumed at build |
@@ -595,7 +596,11 @@ Newer dense-table sizing newtypes (`ResourceId`, `BundleTypeId`, `QueryTypeId`,
 
 A wgpu+egui GPU-instanced sandbox exercising the public API (particles / boids /
 physics via Phase-17 states, real `Schedule::run` + `par_iter` + zero-AoS-copy
-`for_each_chunk` → GPU upload). Compiles for wasm32 too.
+`for_each_chunk` → GPU upload — substep-gated since Phase 20.1 to
+min(display, sim) rate via `upload_due`, −55 % upload events at 144/64, with
+GPU-side `mix(prev_pos, pos, alpha)` interpolation off the 24 B `GpuInstance`
+`{pos, scale, color, prev_pos}`; `sync_gpu_instance` is the single load-bearing
+`prev_pos` maintainer, incl. Physics). Compiles for wasm32 too.
 
 **Files:** [crates/boyko_demo/src/](../crates/boyko_demo/src/) — `app.rs`,
 `sim/` (systems, grid, modes, runner), `render/`, `ui/`. See
