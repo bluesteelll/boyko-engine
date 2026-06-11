@@ -1,10 +1,6 @@
-// `Layout` is always needed: the public `allocate_*` signatures use it. The
-// global-allocator `alloc`/`dealloc` are pulled in only for the fallback
-// backing (Miri / wasm32 / exotic targets); the OS-syscall arms do not use
-// them.
+// `Layout` is always needed: the public `allocate_*` signatures use it.
+// Phase X.H: the backing acquisition/release moved to `memory/vm.rs`.
 use std::alloc::Layout;
-#[cfg(any(miri, not(any(windows, unix))))]
-use std::alloc::{alloc, dealloc};
 use std::cell::{Cell, UnsafeCell};
 use std::ptr::NonNull;
 
@@ -12,6 +8,7 @@ use crate::ecs::constants::{
     ARENA_COMMIT_GRANULE, ARENA_MAX_SLAB, ARENA_MIN_SLAB, CACHE_LINE_SIZE, DEFAULT_ARENA_RESERVE,
 };
 use crate::ecs::memory::free_mem_block::{MemFreeBlock, MemFreeBlockMaster};
+use crate::ecs::memory::vm::VmReservation;
 
 /// Cold-path `align_up` with overflow checking (R2-N2). The unchecked
 /// `utils::align_up` stays on hot/setup paths where inputs are bounded; every
@@ -52,39 +49,11 @@ fn grow_step(committed: usize, needed: usize, os_reserve: usize) -> usize {
     step.min(os_reserve - committed)
 }
 
-/// Windows backing: hand-declared `VirtualAlloc` / `VirtualFree` (no
-/// `windows-sys` dependency). `kernel32.dll` is already linked transitively by
-/// `std`, so no `#[link(name = "kernel32")]` is required.
-///
-/// If a future toolchain breaks bare-extern `kernel32` symbol resolution, the
-/// fix is to add `#[link(name = "kernel32")]` above the `extern` block — no
-/// other change.
-///
-/// ABI types locked for Win64: `LPVOID` -> `*mut c_void`, `SIZE_T` -> `usize`,
-/// `DWORD` -> `u32`, `BOOL` -> `i32`.
-#[cfg(all(not(miri), windows))]
-mod win {
-    use core::ffi::c_void;
-
-    // SAFETY: signatures match the Win64 kernel32 ABI exactly (see the
-    // type-mapping note above). `unsafe extern` is required by the Rust 2024
-    // edition (extern blocks are unsafe to declare).
-    unsafe extern "system" {
-        pub fn VirtualAlloc(
-            lpAddress: *mut c_void,
-            dwSize: usize,
-            flAllocationType: u32,
-            flProtect: u32,
-        ) -> *mut c_void;
-        pub fn VirtualFree(lpAddress: *mut c_void, dwSize: usize, dwFreeType: u32) -> i32;
-    }
-
-    pub const MEM_COMMIT: u32 = 0x1000;
-    pub const MEM_RESERVE: u32 = 0x2000;
-    pub const MEM_RELEASE: u32 = 0x8000;
-    pub const PAGE_NOACCESS: u32 = 0x01;
-    pub const PAGE_READWRITE: u32 = 0x04;
-}
+// Phase X.H: the per-OS backing arms (the hand-declared kernel32 externs,
+// mmap/mprotect calls, and the three `Backing` shapes) moved to
+// `memory/vm.rs` (`VmReservation`) — shared with `InlandStore`. This file
+// keeps only arena POLICY: the free-block tracker, the slab-sizing math, the
+// grow/retry logic, and the alignment contract.
 
 /// Pre-allocated, cache-line-aligned memory arena used as backing store for
 /// every `ComponentPool` in the ECS.
@@ -141,69 +110,35 @@ mod win {
 /// supported alignment bound is therefore **`CACHE_LINE_SIZE` (64 B)** — the
 /// honest cross-arm bound (production's largest request is 32,
 /// `SIMD_BUFFER_ALIGN`).
+#[repr(C)] // X.H: `vm.base` is the struct's first word — the hot offset→pointer load
 pub struct Arena {
-    /// Backing buffer pointer. Acquired in `with_reserve` (write-once base of
-    /// the single reservation), freed in `Drop`. Never changes afterwards —
-    /// growth only commits fresh pages inside the same reservation.
-    ptr: NonNull<u8>,
+    /// The single OS-level reservation (Phase X.H: unified onto
+    /// [`VmReservation`] — the per-arm acquire/commit/release logic that
+    /// lived inline here through X.F is now shared with `InlandStore`).
+    /// `base()` is write-once; growth only commits fresh pages inside the
+    /// same reservation; release happens in `VmReservation::drop` with the
+    /// matching deallocator (M-001).
+    vm: VmReservation,
 
     /// Logical allocation ceiling in bytes (cache-line aligned) — what
     /// `capacity()` reports and what the reserve-exhausted panic is measured
     /// against. Plain immutable `usize`: it never changes after construction.
-    /// The OS-level reservation length is the granule-rounded `os_reserve`,
-    /// recomputed where needed (1 ALU op on the cold path).
+    /// The OS-level reservation length is `vm.os_len()` (granule-rounded).
     reserve: usize,
 
     /// Commit frontier in bytes: `[0, committed)` is committed (readable/
-    /// writable), `[committed, os_reserve)` is reserved-only. Granule-aligned,
-    /// monotonically non-decreasing, `<= os_reserve`. Interior-mutable because
+    /// writable), `[committed, os_len)` is reserved-only. Granule-aligned,
+    /// monotonically non-decreasing, `<= os_len`. Interior-mutable because
     /// the cold grow path advances it through `&self`; the M-003
     /// single-threaded argument covers the `Cell` (no concurrent reader can
     /// exist while grow mutates — `Arena` is `!Send`/`!Sync`).
     committed: Cell<usize>,
-
-    /// Per-target metadata required to release `ptr` in `Drop` with the
-    /// **matching** deallocator (M-001):
-    /// - fallback (global allocator): `dealloc(ptr, layout)`
-    /// - Windows: `VirtualFree(ptr, 0, MEM_RELEASE)` (needs only the base ptr)
-    /// - Unix: `munmap(ptr, map_len)` (needs the exact mapping length)
-    ///
-    /// Read only in `Drop` (and on Windows the deallocator needs nothing from
-    /// it, hence the cfg-scoped `allow(dead_code)` — the zero-sized field is
-    /// kept solely for cfg-arm symmetry of the struct shape).
-    #[cfg_attr(all(not(miri), windows), allow(dead_code))]
-    backing: Backing,
 
     /// Free-block tracker. Lives inside `UnsafeCell` because both
     /// `allocate_from_free_blocks` and future deallocate paths need to mutate
     /// it through `&self`. See the type-level doc-comment for the aliasing
     /// invariant.
     free_blocks: UnsafeCell<MemFreeBlockMaster>,
-}
-
-/// Per-target backing-store metadata for the arena's release path. cfg-gated
-/// (no enum, no runtime tag) so each build sees exactly one shape and `Drop`
-/// has zero branching overhead. Read only in `Arena::drop`.
-#[cfg(any(miri, not(any(windows, unix))))]
-struct Backing {
-    /// Layout passed to `dealloc` in `Drop` (must equal the one given to
-    /// `alloc`, per the `GlobalAlloc` contract).
-    layout: Layout,
-}
-
-/// Per-target backing-store metadata for the arena's release path. cfg-gated
-/// (no enum, no runtime tag). `VirtualFree(ptr, 0, MEM_RELEASE)` needs only the
-/// base pointer and size 0, so no fields are required.
-#[cfg(all(not(miri), windows))]
-struct Backing {}
-
-/// Per-target backing-store metadata for the arena's release path. cfg-gated
-/// (no enum, no runtime tag). `munmap` requires the exact mapping length used
-/// at `mmap` time.
-#[cfg(all(not(miri), unix, not(windows)))]
-struct Backing {
-    /// Exact length passed to `mmap`, replayed to `munmap` in `Drop`.
-    map_len: usize,
 }
 
 impl Arena {
@@ -254,73 +189,16 @@ impl Arena {
             "Arena reserve {os_reserve} B exceeds isize::MAX (pointer-offset contract)"
         );
 
-        // Acquire `(ptr, backing)` from the per-target backing store. Exactly
-        // one of these three arms is compiled (the cfg matrix is total and
-        // disjoint by construction).
-        #[cfg(all(not(miri), windows))]
-        let (ptr, backing) = {
-            // SAFETY (W-RES): a NULL base lets the OS choose the address;
-            // `dwSize` is `os_reserve` (> 0 because `reserve > 0` is asserted
-            // above and `align_up` only grows). `MEM_RESERVE` + `PAGE_NOACCESS`
-            // reserves address space WITHOUT committing — no charge, no
-            // access until `commit_frontier` re-protects slabs. The result is
-            // null-checked by `NonNull::new` before any use.
-            let raw = unsafe {
-                win::VirtualAlloc(
-                    core::ptr::null_mut(),
-                    os_reserve,
-                    win::MEM_RESERVE,
-                    win::PAGE_NOACCESS,
-                )
-            };
-            let ptr = NonNull::new(raw as *mut u8)
-                .expect("VirtualAlloc failed to reserve the arena address space");
-            (ptr, Backing {})
-        };
-
-        #[cfg(all(not(miri), unix, not(windows)))]
-        let (ptr, backing) = {
-            // SAFETY (U-RES): a NULL base lets the OS choose the address;
-            // `len` is `os_reserve` (> 0, see the Windows arm). `PROT_NONE` +
-            // `MAP_PRIVATE | MAP_ANONYMOUS` reserves a private anonymous
-            // range with no access (and no overcommit accounting) until
-            // `commit_frontier` mprotects slabs RW (fd = -1, offset = 0). The
-            // return is validated below.
-            let raw = unsafe {
-                libc::mmap(
-                    core::ptr::null_mut(),
-                    os_reserve,
-                    libc::PROT_NONE,
-                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-                    -1,
-                    0,
-                )
-            };
-            // `MAP_FAILED` is `(void*)-1` — NON-NULL — so it must be checked
-            // BEFORE `NonNull::new`, which would otherwise wrongly accept it.
-            assert!(raw != libc::MAP_FAILED, "mmap failed to reserve the arena address space");
-            let ptr = NonNull::new(raw as *mut u8).expect("mmap returned null");
-            // `map_len` stores the FULL reservation length passed to `mmap`
-            // (NOT the committed frontier) — `munmap` in `Drop` must replay
-            // the original mapping length. Single assignment site.
-            (ptr, Backing { map_len: os_reserve })
-        };
-
-        #[cfg(any(miri, not(any(windows, unix))))]
-        let (ptr, backing) = {
-            // R3-3: the fallback backing is sized to `os_reserve` (not the
-            // cache-line-rounded reserve) for watermark/backing uniformity
-            // with the syscall arms.
-            let layout = Layout::from_size_align(os_reserve, CACHE_LINE_SIZE)
-                .expect("Invalid layout for arena");
-
-            // SAFETY (F-RES): layout has non-zero size (`reserve > 0` asserted
-            // above, `align_up` only grows) and alignment is a valid power of
-            // two (`CACHE_LINE_SIZE` is 64).
-            let raw = unsafe { alloc(layout) };
-            let ptr = NonNull::new(raw).expect("Failed to allocate memory for arena");
-            (ptr, Backing { layout })
-        };
+        // Phase X.H: the per-target acquisition arms (W-RES / U-RES / F-RES)
+        // moved verbatim into `VmReservation` (`memory/vm.rs`), shared with
+        // `InlandStore`. `reserve_unzeroed`: the arena writes every byte
+        // before reading it (the free list only offers committed ranges and
+        // pools initialize rows on spawn), so the fallback arm skips the
+        // X.G zero-fill memset. The granule rounding + isize::MAX guard live
+        // inside `reserve_unzeroed`; `os_reserve` (validated above for the
+        // debug_assert message) equals `vm.os_len()` by construction.
+        let vm = VmReservation::reserve_unzeroed(reserve);
+        debug_assert_eq!(vm.os_len(), os_reserve);
 
         // R2-W1: the eager frontier rounds UP to the granule and clamps to
         // the reservation, so every later `commit_frontier` base stays
@@ -328,10 +206,9 @@ impl Arena {
         let committed = checked_align_up(initial_commit, ARENA_COMMIT_GRANULE).min(os_reserve);
 
         let arena = Self {
-            ptr,
+            vm,
             reserve,
             committed: Cell::new(committed),
-            backing,
             // O4: the free-block tracker spans at most the logical
             // cache-line-rounded reserve, never the (potentially larger)
             // granule-rounded mapping length.
@@ -483,13 +360,13 @@ impl Arena {
         // SAFETY: `block.start` is within `[0, self.reserve)` and
         // `block.start + size <= self.reserve` — that is the contract of
         // `allocate_aligned`. The resulting pointer is therefore inside the
-        // single allocated object that `self.ptr` heads. Phase X.F: block
-        // offsets are < reserve AND below the committed frontier (free-list
-        // ranges are only ever seeded from committed space — `with_reserve`
-        // seeds `[0, min(committed, reserve))`, `grow_then_retry` inserts
-        // `[lo, hi)` with `hi <= committed`), so the pointer is into
-        // committed, RW memory.
-        let ptr = unsafe { self.ptr.as_ptr().add(block.start) };
+        // single allocated object that `self.vm.base()` heads. Phase X.F:
+        // block offsets are < reserve AND below the committed frontier
+        // (free-list ranges are only ever seeded from committed space —
+        // `with_reserve` seeds `[0, min(committed, reserve))`,
+        // `grow_then_retry` inserts `[lo, hi)` with `hi <= committed`), so
+        // the pointer is into committed, RW memory.
+        let ptr = unsafe { self.vm.base().as_ptr().add(block.start) };
         NonNull::new(ptr)
     }
 
@@ -627,72 +504,13 @@ impl Arena {
     }
 
     /// Commits (makes readable/writable) the byte range `[old, new)` of the
-    /// reservation — the per-arm growth primitive (Phase X.F D1). `old` and
-    /// `new` are granule-aligned and `new <= os_reserve` (W1 induction,
-    /// debug-asserted); the granule is a multiple of the commit/`mprotect`
-    /// page size on every supported target.
+    /// reservation — Phase X.H: delegates to the shared per-arm primitive
+    /// [`VmReservation::commit`] (W-CMT / U-CMT / fallback-no-op SAFETY live
+    /// there). `old`/`new` are granule-aligned and `new <= os_len` by the
+    /// W1 induction; `vm.commit` re-checks them in debug builds.
     #[cold]
     fn commit_frontier(&self, old: usize, new: usize) {
-        debug_assert!(new > old, "commit_frontier: empty or backwards range");
-        debug_assert!(
-            old.is_multiple_of(ARENA_COMMIT_GRANULE) && new.is_multiple_of(ARENA_COMMIT_GRANULE),
-            "commit_frontier: range [{old}, {new}) not granule-aligned"
-        );
-        debug_assert!(
-            new <= checked_align_up(self.reserve, ARENA_COMMIT_GRANULE),
-            "commit_frontier: range end {new} overruns the OS reservation"
-        );
-
-        #[cfg(all(not(miri), windows))]
-        {
-            // SAFETY (W-CMT): `self.ptr + old .. self.ptr + new` lies inside
-            // our own reservation (`new <= os_reserve`, asserted above), is
-            // granule-aligned (=> page-aligned), and re-committing an already
-            // committed page is documented-idempotent for `VirtualAlloc`
-            // (contents and addresses of committed pages are untouched). The
-            // result is null-checked: NULL here means the OS commit charge is
-            // exhausted — the loud failure surface for genuine OOM.
-            let raw = unsafe {
-                win::VirtualAlloc(
-                    self.ptr.as_ptr().add(old) as *mut core::ffi::c_void,
-                    new - old,
-                    win::MEM_COMMIT,
-                    win::PAGE_READWRITE,
-                )
-            };
-            assert!(
-                !raw.is_null(),
-                "VirtualAlloc(MEM_COMMIT) failed committing [{old}, {new}) of the arena \
-                 reservation (commit charge exhausted?)"
-            );
-        }
-
-        #[cfg(all(not(miri), unix, not(windows)))]
-        {
-            // SAFETY (U-CMT): `self.ptr + old .. self.ptr + new` lies inside
-            // our own mapping (`new <= os_reserve == map_len`, asserted
-            // above) and is granule-aligned (the granule is a multiple of the
-            // page size), so `mprotect` gets a page-aligned base and length.
-            // The return is checked: ENOMEM here is the overcommit-mode-2
-            // failure surface (the commit charge is accounted when pages
-            // become private-writable).
-            let ret = unsafe {
-                libc::mprotect(
-                    self.ptr.as_ptr().add(old) as *mut core::ffi::c_void,
-                    new - old,
-                    libc::PROT_READ | libc::PROT_WRITE,
-                )
-            };
-            assert!(
-                ret == 0,
-                "mprotect(PROT_READ | PROT_WRITE) failed committing [{old}, {new}) of the \
-                 arena mapping (ENOMEM = overcommit limit)"
-            );
-        }
-
-        // Fallback arm (Miri / wasm32 / exotic): no-op — the whole reserve
-        // was eagerly allocated readable/writable in `with_reserve`; commit
-        // is a pure watermark bump (the `committed.set` in the caller).
+        self.vm.commit(old, new);
     }
 
     /// Convenience wrapper around `allocate_layout` for a Sized type `T`.
@@ -703,65 +521,15 @@ impl Arena {
     }
 }
 
-impl Drop for Arena {
-    /// Releases the backing reservation (audit finding M-001 — without this,
-    /// every `Arena::new()` leaks its address-space reservation plus any
-    /// committed slabs).
-    ///
-    /// Note: type-erased component `Drop` is **not** invoked here. The
-    /// components live inside this buffer, but their drop is the
-    /// responsibility of `ComponentPool::Drop` (tracked separately as a
-    /// Phase 1b refactor; today, components with non-trivial `Drop` will
-    /// still leak their inner heap data when their `ComponentPool` is
-    /// destroyed, which is a known limitation).
-    fn drop(&mut self) {
-        // Release with the deallocator matching the acquisition arm in
-        // `with_reserve` (M-001). Exactly one arm is compiled.
-        #[cfg(all(not(miri), windows))]
-        {
-            // SAFETY: `self.ptr` is the exact base returned by `VirtualAlloc`
-            // in `with_reserve`, freed exactly once (`Drop` runs once).
-            // `MEM_RELEASE` requires `dwSize == 0` together with the original
-            // base address — both are satisfied. `VirtualFree(MEM_RELEASE)`
-            // releases the ENTIRE reservation regardless of commit state
-            // (partially-committed reservations are released in full — Phase
-            // X.F). After this point `self.ptr` must not be used, which is
-            // fine because `Drop` is the last call on `self`.
-            let ok =
-                unsafe { win::VirtualFree(self.ptr.as_ptr() as *mut core::ffi::c_void, 0, win::MEM_RELEASE) };
-            debug_assert!(ok != 0, "VirtualFree(MEM_RELEASE) failed");
-        }
-
-        #[cfg(all(not(miri), unix, not(windows)))]
-        {
-            // SAFETY: `self.ptr` and `self.backing.map_len` are the exact base
-            // and length passed to `mmap` in `with_reserve` (`map_len ==
-            // os_reserve`, the FULL reservation length, NOT the committed
-            // frontier — single assignment site), unmapped exactly once
-            // (`Drop` runs once). `munmap` unmaps irrespective of per-page
-            // protection, so a partially-committed (PROT_NONE tail) mapping
-            // is released in full (Phase X.F). After this point `self.ptr`
-            // must not be used — fine, because `Drop` is the last call on
-            // `self`.
-            let ret = unsafe {
-                libc::munmap(self.ptr.as_ptr() as *mut core::ffi::c_void, self.backing.map_len)
-            };
-            debug_assert_eq!(ret, 0, "munmap failed");
-        }
-
-        #[cfg(any(miri, not(any(windows, unix))))]
-        {
-            // SAFETY: `self.ptr` was returned by `alloc(self.backing.layout)`
-            // in `with_reserve` (the layout spans the full granule-rounded
-            // `os_reserve`) and has not been freed yet (`Drop` runs once).
-            // The exact same `Layout` is passed back to `dealloc`, satisfying
-            // the `GlobalAlloc` contract. After this point `self.ptr` must not
-            // be used — which is fine because `Drop` is the last call on
-            // `self`.
-            unsafe { dealloc(self.ptr.as_ptr(), self.backing.layout) }
-        }
-    }
-}
+// Phase X.H: `Arena` no longer needs its own `Drop` — releasing the backing
+// reservation (M-001) is `VmReservation::drop`'s job (the V-DROP-* arms in
+// `memory/vm.rs`, the verbatim ports of the X.F release blocks; partially-
+// committed reservations are released in full on every arm).
+//
+// Note: type-erased component `Drop` is **not** invoked on arena teardown.
+// The components live inside this buffer, but their drop is the
+// responsibility of `ComponentPool::Drop` (a known limitation tracked since
+// Phase 1b).
 
 impl Default for Arena {
     fn default() -> Self {
@@ -784,7 +552,7 @@ mod tests {
 
     /// Offset of an allocation from the arena base (test-only probe).
     fn offset_of(arena: &Arena, ptr: NonNull<u8>) -> usize {
-        ptr.as_ptr() as usize - arena.ptr.as_ptr() as usize
+        ptr.as_ptr() as usize - arena.vm.base().as_ptr() as usize
     }
 
     // --- arena::with_capacity ---

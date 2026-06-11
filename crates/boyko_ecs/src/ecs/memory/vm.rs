@@ -7,15 +7,14 @@
 //! element length) lives in the OWNER — this type is a dumb `(base, os_len)`
 //! wrapper, exactly the role `Backing` plays inside the arena.
 //!
-//! # Twin-code note (Phase X.H unification)
+//! # Single source of truth (Phase X.H)
 //!
-//! The three cfg arms below are TWINS of the inline arms in
-//! [`arena.rs`](super::arena) (`with_reserve` W-RES/U-RES/F-RES,
-//! `commit_frontier` W-CMT/U-CMT, and the three `Drop` blocks). Any fix found
-//! in one copy MUST be mirrored in the other; migrating the arena onto this
-//! primitive (deleting its inline arms) is filed as Phase X.H. The arena copy
-//! was deliberately left untouched in X.G so the X.F asm/bench gates bound to
-//! `arena.rs` bytes stay valid (PHASE-XG-PLAN.md D1).
+//! These cfg arms are THE per-OS backing implementation for the whole
+//! engine: both the [`Arena`](super::arena::Arena) (Phase X.H migrated it
+//! off its inline X.F twins — gates re-run: allocator A/B clean,
+//! `allocate_from_free_blocks` asm-identical 56=56) and
+//! `InlandStore` build on them. The historical W-RES/U-RES/F-RES /
+//! W-CMT/U-CMT SAFETY lineage from `arena.rs` lives here now.
 //!
 //! # Zero-fill contract (Phase X.G, D1)
 //!
@@ -102,6 +101,12 @@ impl VmReservation {
     /// NOTHING on the syscall arms. Panics loudly on a zero/over-`isize`
     /// request or OS failure — reservation failure is unrecoverable
     /// misconfiguration, mirroring the arena's contract.
+    ///
+    /// The fallback arm eagerly allocates ZEROED memory (the X.G zero-fill
+    /// contract — see the module doc). Consumers that always
+    /// write-before-read (the arena) should use
+    /// [`reserve_unzeroed`](Self::reserve_unzeroed) to skip the memset on
+    /// exotic native targets (under Miri `alloc_zeroed` is free either way).
     pub(crate) fn reserve(len: usize) -> Self {
         assert!(len > 0, "VmReservation: reserve length must be non-zero");
         let os_len = checked_align_up(len, ARENA_COMMIT_GRANULE);
@@ -170,6 +175,37 @@ impl VmReservation {
             // `alloc_zeroed` — NOT `alloc` — because X.G consumers READ
             // never-program-written memory (module doc: zero-fill contract).
             let raw = unsafe { alloc_zeroed(layout) };
+            let base = NonNull::new(raw).expect("VmReservation: fallback allocation failed");
+            Self { base, os_len, layout }
+        }
+    }
+
+    /// `reserve` variant whose fallback arm uses plain `alloc` (NO zero
+    /// fill). Phase X.H: for consumers that provably write every byte before
+    /// reading it (the `Arena` — its free list only offers committed ranges
+    /// and pools initialize rows on spawn). The syscall arms are identical
+    /// to `reserve` (OS pages are zero-fill for free either way) — the
+    /// zero-fill CONTRACT simply does not apply to stores built this way.
+    pub(crate) fn reserve_unzeroed(len: usize) -> Self {
+        #[cfg(not(any(miri, not(any(windows, unix)))))]
+        {
+            Self::reserve(len)
+        }
+
+        #[cfg(any(miri, not(any(windows, unix))))]
+        {
+            assert!(len > 0, "VmReservation: reserve length must be non-zero");
+            let os_len = checked_align_up(len, ARENA_COMMIT_GRANULE);
+            assert!(
+                os_len <= isize::MAX as usize,
+                "VmReservation: {os_len} B exceeds isize::MAX (pointer-offset contract)"
+            );
+            let layout = Layout::from_size_align(os_len, ARENA_COMMIT_GRANULE.min(4096))
+                .expect("VmReservation: invalid fallback layout");
+            // SAFETY (V-RES-F-UNZ): non-zero size (asserted), power-of-two
+            // align. Plain `alloc` — the caller's contract is
+            // write-before-read (arena-class consumers only).
+            let raw = unsafe { std::alloc::alloc(layout) };
             let base = NonNull::new(raw).expect("VmReservation: fallback allocation failed");
             Self { base, os_len, layout }
         }
