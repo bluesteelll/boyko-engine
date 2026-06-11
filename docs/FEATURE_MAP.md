@@ -146,14 +146,18 @@ at the crate root: `boyko_ecs::{App, Plugin, Plugins, AppExit}`.
 | Deallocate (bumps generation) | [core/entity/entity_master.rs](../crates/boyko_ecs/src/ecs/core/entity/entity_master.rs) ✅ | `deallocate_entity(entity) -> bool` (decrements `live_count` on success only) |
 | Iterate only LIVE entities | [core/entity/entity_master.rs](../crates/boyko_ecs/src/ecs/core/entity/entity_master.rs) ✅ | `iter_entities()` — **O(capacity)** scan of `entities_inland`, skips `is_null()` slots (cold/inspection API; Phase X.D removed the dense `active_ids` index) |
 
-`EntityMaster` (Phase 7 + X.D) is four fields: `free_entity_ids`,
-`next_entity_id: AtomicUsize`, `entities_inland: Vec<EntityInland>` (the hot
-fast store, indexed by `EntityId.0`, `is_null()` ⇔ dead), and a plain
-`live_count: usize`. The fast-store record is
+`EntityMaster` (Phase 7 + X.D + X.G) is four fields (`#[repr(C)]`, hot cluster
+on cache line 0): `entities_inland: InlandStore` (the hot fast store, indexed
+by `EntityId.0`, `is_null()` ⇔ dead — since Phase X.G an address-stable
+reserve/commit store: lazy 1 GiB reservation, frontier slab commits, growth
+copies/writes NOTHING), `next_entity_id: AtomicUsize`, `live_count: usize`,
+`free_entity_ids`. The fast-store record is
 [`EntityInland`](../crates/boyko_ecs/src/ecs/core/entity/entity_inland.rs)
 = 16 B `{ archetype_ptr: *mut Archetype, unit_index: u32, generation: u32 }`
-— a **direct slab pointer** (no `SparseMap` indirection on the hot read path).
-See [SYSTEMS.md §4](SYSTEMS.md) + [PHASE-XD-RESULTS.md](PHASE-XD-RESULTS.md).
+— a **direct slab pointer** (no `SparseMap` indirection on the hot read path);
+`NULL` is all-zero bytes (demand-zero pages = free NULL fill, invariant J).
+See [SYSTEMS.md §4](SYSTEMS.md) + [PHASE-XD-RESULTS.md](PHASE-XD-RESULTS.md) +
+[PHASE-XG-RESULTS.md](PHASE-XG-RESULTS.md).
 
 The `id`/`generation` pair is the ABA defence at the entity layer.
 `SparseSlotMap` (boyko_utils) has a parallel slot-layer ABA fix (M-016).

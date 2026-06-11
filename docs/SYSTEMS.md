@@ -425,27 +425,35 @@ dereferences into the archetype without a `SparseMap` indirection.
 `archetype_ptr.is_null()` (`is_null()`, line 97) is the single liveness +
 generation source of truth.
 
-### 4.3. EntityMaster (Phase 7 + X.D)
+### 4.3. EntityMaster (Phase 7 + X.D + X.G)
 
 **File:** [crates/boyko_ecs/src/ecs/core/entity/entity_master.rs](../crates/boyko_ecs/src/ecs/core/entity/entity_master.rs)
 
 ```rust
+#[repr(C)]                                          // X.G: hot cluster on cache line 0
 pub struct EntityMaster {
-    free_entity_ids: Vec<EntityId>,                // LIFO recycle queue (dispatcher-only)
-    next_entity_id: AtomicUsize,                   // fresh-id minting (EM1/EM6)
-    pub(crate) entities_inland: Vec<EntityInland>, // index = EntityId.0; is_null() ⇔ dead
-    live_count: usize,                             // # live entities (Phase X.D)
+    pub(crate) entities_inland: InlandStore,        // index = EntityId.0; is_null() ⇔ dead
+    next_entity_id: AtomicUsize,                    // fresh-id minting (EM1/EM6)
+    live_count: usize,                              // # live entities (Phase X.D)
+    free_entity_ids: Vec<EntityId>,                 // LIFO recycle queue (dispatcher-only)
 }
 ```
 
 Phase 7 replaced the old `entities` + `SparseMap<EntityInland>` pair with the
-single direct-indexed `entities_inland` fast store. **Phase X.D** then removed
-the EnTT-style `active_ids` (dense live list) + `sparse_to_active` (sparse→dense
-map): their only consumer was the cold `iter_entities` API, and the despawn
-swap-remove they required was deleted with them. The live count is now a plain
-`usize`. This net-removed `unsafe` and shed −12 B/entity + 2 allocs; the
-trade-off is that `iter_entities` regressed to O(capacity) (accepted — zero hot
-callers). See [PHASE-XD-RESULTS.md](PHASE-XD-RESULTS.md).
+single direct-indexed `entities_inland` fast store. **Phase X.D** removed
+the EnTT-style `active_ids` + `sparse_to_active` acceleration vectors. **Phase
+X.G** replaced the backing `Vec<EntityInland>` with an
+[`InlandStore`](../crates/boyko_ecs/src/ecs/core/entity/inland_store.rs):
+one lazy 1 GiB virtual reservation (`memory/vm.rs` `VmReservation`, the
+arena's reserve/commit twin) committed in 256 KiB→×2→16 MiB frontier slabs —
+**growth never reallocates, copies, or fills** (`EntityInland::NULL` is
+all-zero 16 B; demand-zero pages ARE the NULL fill — invariant J). The
+`Deref<Target=[EntityInland]>` keeps every read/indexed-write site and the
+Phase-7 hot lookup codegen-identical; `ensure(n)` replaced every
+`resize(n, NULL)`. Production spawn path got **15–54% faster** (the per-batch
+resize-fill died); the g7b entity-store doubling spikes are GONE. See
+[PHASE-XD-RESULTS.md](PHASE-XD-RESULTS.md) +
+[PHASE-XG-RESULTS.md](PHASE-XG-RESULTS.md).
 
 **API:**
 - `allocate_entity() -> Entity` (102) — recycles from `free_entity_ids`, else
