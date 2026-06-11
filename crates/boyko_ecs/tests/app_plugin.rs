@@ -137,8 +137,10 @@ fn read_system(q: Query<&Velocity>) {
 
 /// THE parity test: building/running ≥2 real systems through `App::run_n(F)`
 /// yields a world state byte-identical to a hand-wired `EcsMaster` +
-/// `ScheduleBuilder` + `Schedule` running the SAME systems F frames. Proves the
-/// facade adds no semantic difference.
+/// `ScheduleBuilder` + `Schedule` running the SAME systems F frames — modulo
+/// the two clock resource slots (`Time` / `FixedTime`) that `App::finish`
+/// seeds since Phase 20; the assertion compares the component data the systems
+/// touch, which is unaffected. Proves the facade adds no semantic difference.
 #[test]
 fn app_builds_and_runs_n_frames_equals_manual() {
     const N: u32 = 200;

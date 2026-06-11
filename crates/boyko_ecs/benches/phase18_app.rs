@@ -1,16 +1,25 @@
-// Phase 18 — the 0%-regression gate bench for the `App` facade.
+// Phase 18 — the regression gate bench for the `App` facade.
+// RE-BASELINED in Phase 20 (plan ★m2) — see the method note below; comparisons
+// against pre-Phase-20 criterion records of Group A have no validity.
 //
-// THE claim under test: `App`'s per-frame loop (`App::run_n`) adds NO per-frame
-// overhead over a raw `EcsMaster` + `Schedule` loop. The facade's plugin / tuple
-// / TypeId machinery is all cold setup-only code; the hot path of `run_n` is, by
-// construction, bound to disjoint `schedule` + `world` field borrows ONCE and
-// then loops `schedule.run(world)` with no per-frame branch (see `app.rs`
-// `run_n`). This bench measures that equivalence directly.
+// THE claim under test (the Phase-20 declared-envelope form): `App`'s per-frame
+// loop adds at most the P20-B1(b) driver budget — **≤ 250 ns/frame** (Time
+// advance + 3 predictable branches + the empty event swap; measured directly
+// by `benches/app_overhead.rs`) — over a raw `EcsMaster` + `Schedule` loop.
+// At the µs scale of 50 exclusive dispatches that envelope is within run
+// noise, so A ≈ B is the expected reading. The facade's plugin / tuple /
+// TypeId machinery is all cold setup-only code; `Schedule::run` itself is
+// byte-identical (gate P20-B1(a), asm-verified).
 //
 // # Method
 //
 //   Group A — `app_run_n_50_systems`: build an `App` with 50 trivial exclusive
-//             systems, then time `app.run_n(1)` per criterion iteration.
+//             systems, then time `app.run_n_with_delta(1, 16 ms)` per criterion
+//             iteration — the full Phase-20 frame driver (steps ①-⑤) with a
+//             SCRIPTED delta, so `Instant::now` jitter stays out of the timed
+//             loop (plan D11/Q7: every TIMED artifact routes through
+//             `run_n_with_delta`). Phase 18 originally timed `run_n(1)`
+//             (self-clocked); Phase 20 re-pointed it — the RE-BASELINE.
 //   Group B — `raw_schedule_run_50_systems`: the SAME 50 systems wired by hand
 //             into an `EcsMaster` + `ScheduleBuilder` + `Schedule`, timed as
 //             `schedule.run(&mut world)` per iteration.
@@ -19,13 +28,14 @@
 // systems (matching `phase9_schedule_run_50_exclusive_systems`, so the absolute
 // numbers are cross-comparable). Exclusive systems serialise on the dispatcher,
 // isolating the per-frame dispatch cost from worker-spawn churn — exactly the
-// path `App::run_n` lowers to.
+// path the App frame driver lowers to.
 //
 // # Acceptance
 //
-// A within ±3% of B ⇒ the facade adds no measurable per-frame overhead. The two
-// groups run back-to-back so they share machine/thermal state; on a noisy box
-// the RELATIVE delta is the load-bearing number, not the absolute times.
+// A − B ≤ the P20-B1(b) envelope (250 ns) ⇒ the facade adds no more than the
+// declared driver budget per frame. The two groups run back-to-back so they
+// share machine/thermal state; on a noisy box the RELATIVE delta is the
+// load-bearing number, not the absolute times.
 //
 // # Why not measure `App::new` / `finish` here
 //
@@ -64,10 +74,14 @@ fn build_pool() -> Arc<ThreadPool> {
     ThreadPoolBuilder::new().num_threads(NUM_THREADS).build()
 }
 
-// ── Group A — App::run_n hot path ────────────────────────────────────────────
+// ── Group A — App frame-driver hot path ──────────────────────────────────────
+
+/// 16 ms scripted frame delta for Group A (the Phase-20 deterministic loop).
+const FRAME_16MS: Duration = Duration::from_millis(16);
 
 /// 50 trivial exclusive systems registered through the `App` facade; time one
-/// frame via `App::run_n(1)`. This is the facade's lowered per-frame loop.
+/// frame via `App::run_n_with_delta(1, 16 ms)` — the facade's lowered
+/// per-frame loop with the clock scripted (Phase 20 ★m2 re-baseline).
 fn bench_app_run_n_50_systems(c: &mut Criterion) {
     let mut app = App::with_pool(build_pool());
     for _ in 0..NUM_SYSTEMS {
@@ -76,12 +90,13 @@ fn bench_app_run_n_50_systems(c: &mut Criterion) {
         });
     }
     // Finish once OUTSIDE the timed loop so the timed body is purely the frame
-    // loop (run_n still calls finish(), but the second call is the cold no-op).
+    // loop (run_n_with_delta still calls finish(), but the second call is the
+    // cold no-op).
     app.finish();
 
     c.bench_function("phase18_app_run_n_50_systems", |b| {
         b.iter(|| {
-            black_box(&mut app).run_n(black_box(1));
+            black_box(&mut app).run_n_with_delta(black_box(1), black_box(FRAME_16MS));
         });
     });
 }

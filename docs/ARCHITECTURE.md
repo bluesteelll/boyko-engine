@@ -51,7 +51,7 @@ boyko-engine/
 │   │           │   ├── component_pool.rs     # type-erased SELF-GROWING pool, [data|added|changed] reservation (X.I)
 │   │           │   └── utils.rs              # align_up
 │   │           └── core/
-│   │               ├── app/              # App builder + Plugin + Plugins + AppExit (Phase 18)
+│   │               ├── app/              # App builder + Plugin + Plugins + AppExit (Phase 18); multi-schedule frame driver Main+Fixed (Phase 20)
 │   │               ├── archetype/        # Archetype (inline columns), signature, registry, bundle slab, master
 │   │               ├── bundle/           # Bundle trait + derive + type registry + column cache
 │   │               ├── change_detection/ # Tick + check_ticks (Phase 10)
@@ -64,6 +64,7 @@ boyko-engine/
 │   │               ├── resources/        # Resources slab + Resource trait + registry
 │   │               ├── schedule/         # Schedule + ScheduleBuilder + ConflictGraph + ordering + conditions
 │   │               ├── state/            # States + State/NextState + transitions (Phase 17)
+│   │               ├── time/             # Time + FixedTime + fixed_advance — fixed-timestep clock (Phase 20)
 │   │               └── system/           # System/IntoSystem/FunctionSystem + SystemParam + params/
 │   ├── boyko_macros/                     # proc-macros (DEV-dep of boyko_ecs)
 │   │   └── src/lib.rs                    # #[derive(Component/Resource/Bundle/SystemSet)] + #[event]
@@ -183,6 +184,15 @@ fns, the 7 fire sites, and the OBS-FIRE-LOOP Tree-Borrows invariant): [SYSTEMS.m
 §3.6](SYSTEMS.md).
 
 ## Data flow: a parallel frame (`Schedule::run` / `App::run`)
+
+Since Phase 20 the `App` frame driver (`App::update_with_delta`) wraps 1..N of
+these runs per frame in the binding D1 order: ① `Time::advance_with` →
+② margin-aware all-schedule check-ticks pass (`CHECK_TICK_PREEMPT_MARGIN`) →
+③ gated event swap (`EventUpdatePolicy`) → ④ `fixed_advance` catch-up loop
+(0..16 Fixed `Schedule::run`s at the defaults) → ⑤ the Main run below. Each
+run stays an opaque unit; all inter-run work holds the dispatcher's
+`&mut EcsMaster` with zero workers in flight. Driver cost: 14 ns/frame +
+5 ns/substep ([PHASE-20-RESULTS.md](PHASE-20-RESULTS.md)).
 
 ```
 App::run / Schedule::run(&mut world)

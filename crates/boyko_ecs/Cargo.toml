@@ -147,6 +147,14 @@ harness = false
 name = "phase18_app"
 harness = false
 
+# Phase 20 — App frame-driver overhead gates: P20-B1(b) empty-frame envelope
+# (empty_main <= 250 ns/frame) + P20-B2 substep overhead (fixed_loop_1_substep
+# minus bare_empty_schedule_run minus the (b) envelope <= 100 ns/substep).
+# See docs/PHASE-20-PLAN.md §Metrics.
+[[bench]]
+name = "app_overhead"
+harness = false
+
 [lints.rust]
 # Phase 9 Wave 7 Step 24: opt-in stronger ALLOC1 check via
 # `RUSTFLAGS="--cfg force_alloc_panic"`. See

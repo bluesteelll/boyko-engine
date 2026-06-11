@@ -31,6 +31,7 @@ piece of functionality lives, start here, then go to
 | I want to … | Go to |
 |-------------|-------|
 | Build an app with a frame loop | [App + Plugin facade](#app--plugin-facade) |
+| Fixed timestep / game clock / interpolation alpha | [App + Plugin facade](#app--plugin-facade) (Phase 20 rows) |
 | Define a component / resource / bundle / event / system-set | [Macros](#macros-derives) |
 | Spawn / despawn / mutate entities directly | [EcsMaster facade](#high-level-facade-ecsmaster) |
 | Spawn / despawn deferred (inside a system) | [Commands](#commands--entitycommands-deferred-mutation) |
@@ -108,13 +109,23 @@ at the crate root: `boyko_ecs::{App, Plugin, Plugins, AppExit}`.
 | Add systems (ordered) | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `add_systems_cfg(\|b: &mut ScheduleBuilder\| …)` (162) — full Phase-15/16/17 chaining |
 | Add a system (unordered) | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `add_systems(system)` (180) |
 | Add a one-shot startup system | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `add_startup_system(system)` (199) — runs once before the loop |
-| Run the loop | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `run()` (329) (until `AppExit(true)`), `run_n(frames)` (303), `update()` (287) |
+| Run the loop | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `run()` (until `AppExit(true)`), `run_n(frames)`, `update()` (self-clocked via `Instant`) |
+| Run one frame with an external clock | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `update_with_delta(raw)` — the Phase-20 frame driver (① Time → ② check-ticks → ③ event swap → ④ fixed loop → ⑤ Main); `run_n_with_delta(frames, delta)` — the deterministic loop for tests/benches |
+| Fixed-timestep systems | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `add_systems_in(CoreSchedule::Fixed, system)` / `add_systems_cfg_in` / `init_state_in` / `insert_state_in` — closed `CoreSchedule { Main, Fixed }` set (Phase 20 D5); fixed systems read `Res<FixedTime>` |
+| Configure the fixed timestep | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `set_fixed_timestep(Duration)` / `set_fixed_hz(f64)` — default exactly 64 Hz; config phase only |
+| Read the clock from a system | [core/time/](../crates/boyko_ecs/src/ecs/core/time/) ✅ | `Res<Time>` (per-frame: `delta_secs` / `elapsed` / `pause` / `set_relative_speed` / `set_max_delta`) or `Res<FixedTime>` (per-substep: `delta_secs() == timestep`, `steps_this_frame`) |
+| Interpolation alpha | [time/fixed_time.rs](../crates/boyko_ecs/src/ecs/core/time/fixed_time.rs) ✅ | `FixedTime::overstep_fraction()` ∈ [0, 1) — read from Main after the fixed loop (Phase 20 D9; snapshot/lerp layers on top) |
+| Event swap policy | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `set_event_update_policy(EventUpdatePolicy::{WaitForFixed, EveryFrame})` — auto-resolved at `finish()` (Phase 20 D6); see the `WaitForFixed` pause-hold hazard doc |
+| Drive the rhythm without an App (wasm / hand-rolled) | [time/fixed_loop.rs](../crates/boyko_ecs/src/ecs/core/time/fixed_loop.rs) ✅ | `Time::advance_with(raw)` then `fixed_advance(world, \|w\| …)` exactly once per frame — insert `Time`/`FixedTime` manually first (the wasm demo runner's path) |
 | The plugin trait | [plugin.rs](../crates/boyko_ecs/src/ecs/core/app/plugin.rs) ✅ | `trait Plugin { fn build(&self, &mut App); fn name(&self) -> &'static str }` — `'static`, NOT `Send + Sync`; consumed at build |
 | Exit signal | [app_exit.rs](../crates/boyko_ecs/src/ecs/core/app/app_exit.rs) ✅ | `AppExit(bool)` resource (hand-impls `Resource` — see [PHASE-18-RESULTS.md](PHASE-18-RESULTS.md) macro-cycle note) |
 
-`App` is `!Send + !Sync` (single-threaded-owned). DEFERRED: SubApps,
-`PluginGroup`/`DefaultPlugins`, multi-schedule label map, `set_runner` — see
-[PHASE-18-RESULTS.md](PHASE-18-RESULTS.md).
+`App` is `!Send + !Sync` (single-threaded-owned). Multi-schedule landed in
+Phase 20 as the CLOSED `CoreSchedule` set — a user-mintable label map remains
+deliberately rejected (D5; no `HashMap` on the frame path). Still DEFERRED:
+SubApps, `PluginGroup`/`DefaultPlugins`, `set_runner`,
+`App::with_world` (Phase 20.1) — see [PHASE-18-RESULTS.md](PHASE-18-RESULTS.md)
++ [PHASE-20-RESULTS.md](PHASE-20-RESULTS.md).
 
 ---
 
@@ -599,7 +610,8 @@ physics via Phase-17 states, real `Schedule::run` + `par_iter` + zero-AoS-copy
 | `Option<Res<R>>` SystemParam → `resource_exists` condition | 📋 deferred (Phase 16 residual) |
 | ~~Tick-aware run conditions (`Changed`/`Added`)~~ | ✅ LANDED — Phase 16.1 (dormancy-correct ticks, [PHASE-16.1-RESULTS.md](PHASE-16.1-RESULTS.md)) |
 | `for_each_chunk` with `Changed`/`Added`/`Ref`/`Mut` | ❌ gated out at compile time; use `iter()` — Phase 13.X `ChunkedTickedQueryData` |
-| Multi-schedule label map / SubApps / `PluginGroup` | 📋 deferred (Phase 18 boundaries) |
+| ~~Multi-schedule~~ | ✅ LANDED — Phase 20, as the closed `CoreSchedule { Main, Fixed }` set ([PHASE-20-RESULTS.md](PHASE-20-RESULTS.md)); a user-mintable label map stays ❌ rejected (D5) |
+| SubApps / `PluginGroup` / `App::with_world` | 📋 deferred (Phase 18 boundaries; `with_world` filed as Phase 20.1) |
 | Single-dep prelude including derives | 📋 deferred — needs the `boyko-macros` cycle refactor (Phase 18) |
 | 5× `for_each_chunk` headline on a wide/SIMD-heavy workload | 📋 Phase X.A.2 (credible 1.3× multi-component win already landed) |
 | Auto sync-point insertion (coalesced command flush) | 📋 deferred (per-system apply window already a sync point) — Phase 15 residual |

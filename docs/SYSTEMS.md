@@ -1048,7 +1048,14 @@ Bevy-style per-row tick storage (Phase 10). Module:
   inside `run_condition` (eval site). `System::check_change_tick` (no default
   body) + `#[cold] Schedule::check_change_ticks` clamp system + own-condition +
   set-condition ticks on the `should_run_check_ticks` cold path (the dormancy
-  wraparound guard).
+  wraparound guard). **Phase 20 D8/★C1:** `Schedule::check_change_ticks` is now
+  `pub(crate)`; an App-level margin-aware pass
+  (`CHECK_TICK_PREEMPT_MARGIN = 4096`, `App::check_ticks_all_schedules`) fires
+  at frame start strictly BEFORE any schedule's internal block can cross the
+  threshold, clamping the world scan + ALL schedules under one tick snapshot —
+  without the margin the first internal block to fire would reset the shared
+  counter and starve the sibling schedule's clamp. The internal block stays as
+  the standalone single-schedule belt.
 - Filters `Added<C>` / `Changed<C>` (§8.2); data `Ref<T>` (immutable + flags) /
   `Mut<T>` (deref-guard bumps `changed`). `set_if_neq` / `bypass_change_detection`
   escape hatches.
@@ -1179,9 +1186,13 @@ See [PHASE-6-EVENT-DISPATCH-PLAN.md](PHASE-6-EVENT-DISPATCH-PLAN.md) +
 ## 15. App + Plugin facade ✅
 
 The Phase-18 builder over `EcsMaster` + `ScheduleBuilder` + `Schedule` +
-`ThreadPool`. Module: [core/app/](../crates/boyko_ecs/src/ecs/core/app/);
-re-exported at the crate root (`boyko_ecs::{App, Plugin, Plugins, AppExit}`) and
-in [prelude](../crates/boyko_ecs/src/prelude.rs).
+`ThreadPool`, extended in Phase 20 into a **multi-schedule frame driver**
+(Main + Fixed) with a `Time`/`FixedTime` clock family. Modules:
+[core/app/](../crates/boyko_ecs/src/ecs/core/app/) +
+[core/time/](../crates/boyko_ecs/src/ecs/core/time/); re-exported at the crate
+root (`boyko_ecs::{App, Plugin, Plugins, AppExit}`) and in the
+[prelude](../crates/boyko_ecs/src/prelude.rs) (which adds `CoreSchedule`,
+`EventUpdatePolicy`, `Time`, `FixedTime`, `fixed_advance`).
 
 ```rust
 // app/plugin.rs
@@ -1192,15 +1203,44 @@ pub trait Plugin: 'static {                 // NOT Send + Sync — consumed at b
 ```
 
 `App` ([app/app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs)) owns `world:
-EcsMaster` + `pool: Arc<ThreadPool>` + a staged `Option<ScheduleBuilder>` → `Option<Schedule>`
-+ a one-shot startup list + a `Vec<TypeId>` plugin-dedup set. Constructors `new`
-(80) / `with_threads` (87) / `with_pool` (93). Config: `add_plugin` (224) /
-`add_plugins((..))` (sealed `Plugins` trait,
+EcsMaster` + `pool: Arc<ThreadPool>` + staged `Option<ScheduleBuilder>` →
+`Option<Schedule>` pairs for BOTH `CoreSchedule`s (Main + a lazily-created
+Fixed — Phase 20 D5: a closed enum matched only in config methods; the frame
+driver reads direct named fields, zero dispatch, no label map) + a one-shot
+startup list + a `Vec<TypeId>` plugin-dedup set. Constructors `new` /
+`with_threads` / `with_pool`. Config: `add_plugin` / `add_plugins((..))`
+(sealed `Plugins` trait,
 [app/plugins.rs](../crates/boyko_ecs/src/ecs/core/app/plugins.rs), 1..=12 +
-nesting), `insert_resource` (117), `init_state` (123) / `insert_state` (136),
-`add_systems_cfg(|b| …)` (162, the ordered path), `add_systems` (180),
-`add_startup_system` (199). Runner: `update` (287), `run_n` (303), `run` (329,
-loops until a system sets `ResMut<AppExit>(true)`). `App` is `!Send + !Sync`.
+nesting), `insert_resource`, `init_state` / `insert_state`, `add_systems_cfg` /
+`add_systems`, each with a `*_in(CoreSchedule, …)` routing form (Phase 20),
+`add_startup_system`, `set_fixed_timestep` / `set_fixed_hz`,
+`set_event_update_policy`; every config method panics loudly (`boyko-B1802`)
+after `finish()`. Runner: `update` (self-clocked via `Instant`, first frame =
+ZERO delta), `update_with_delta(raw)` — THE Phase-20 frame driver (binding
+order D1: ① `Time::advance_with` → ② margin-aware all-schedule check-ticks
+pass → ③ gated event swap (D6: held under `EventUpdatePolicy::WaitForFixed`
+until ≥ 1 substep since the last swap) → ④ `fixed_advance` catch-up loop →
+⑤ Main run), `run_n`, `run_n_with_delta` (the deterministic loop every TIMED
+artifact routes through), `run` (loops until a system sets
+`ResMut<AppExit>(true)`). Driver cost: 14 ns/frame envelope + 5 ns/substep
+(P20-B1(b)/B2). `App` is `!Send + !Sync`.
+
+**Time module** ([core/time/](../crates/boyko_ecs/src/ecs/core/time/),
+Phase 20 D2/D3/D4): `Time`
+([time/time.rs](../crates/boyko_ecs/src/ecs/core/time/time.rs)) — the virtual
+frame clock (250 ms inflow clamp, `relative_speed`, `pause`; real unclamped
+fields carried alongside) — and `FixedTime`
+([time/fixed_time.rs](../crates/boyko_ecs/src/ecs/core/time/fixed_time.rs)) —
+`timestep` (default exactly 64 Hz), `overstep` (THE accumulator),
+`overstep_fraction()` (THE interpolation alpha), `elapsed`,
+`steps_this_frame`. NO Bevy-style generic-`Time` swap — two plain resources,
+seeded by `finish()` if absent. `pub fn fixed_advance(world, step)`
+([time/fixed_loop.rs](../crates/boyko_ecs/src/ecs/core/time/fixed_loop.rs)) is
+the ONE shared catch-up driver: App, the wasm demo runner, and Miri tests
+traverse the identical integer-ns accumulate/expend path (timestep snapshotted
+at loop entry, ★M3; ≤ 16 substeps/frame at the defaults). Step counts are
+bit-deterministic for a given dt script (P20-B4). See
+[PHASE-20-RESULTS.md](PHASE-20-RESULTS.md).
 
 `AppExit(bool)` ([app/app_exit.rs](../crates/boyko_ecs/src/ecs/core/app/app_exit.rs))
 **hand-impls `Resource`** — the derive is unusable inside `boyko-ecs` lib code
