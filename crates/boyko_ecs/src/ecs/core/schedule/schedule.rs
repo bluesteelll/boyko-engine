@@ -52,6 +52,7 @@ use crate::ecs::core::schedule::system_box::{BoolSystem, SystemBox};
 use crate::ecs::core::schedule::system_set::SystemSetId;
 use crate::ecs::core::state::StateEntry;
 use crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell;
+use crate::ecs::identifiers::primitives::WorldId;
 
 /// Park timeout used between consecutive dispatch rounds when at least one
 /// system is still running but nothing new is dispatchable.
@@ -151,6 +152,20 @@ pub struct Schedule {
     /// (M3): a pointer-free trailing scalar, so it changes no pre-existing
     /// offset and stays out of the cross-thread pointer prefix above.
     pub(crate) frame_this_run: Tick,
+
+    // ── Phase 21 — world binding (H2) ────────────────────────────────────────
+    /// The [`WorldId`] of the world this schedule was built on, recorded at
+    /// [`ScheduleBuilder::try_build`]. [`Schedule::run`] release-panics on a
+    /// mismatch (Bevy parity): per-world caches held by the systems
+    /// (`EventReaderState`'s `NonNull<EventBuffer<E>>`, `QueryState`'s
+    /// generation snapshots) are valid ONLY against the build world, so a
+    /// cross-world `run` is a latent use-after-free / aliasing surface —
+    /// closed loudly at the single entry point. Appended after
+    /// `frame_this_run` (same M3 discipline): a pointer-free trailing scalar,
+    /// no pre-existing offset changes.
+    ///
+    /// [`ScheduleBuilder::try_build`]: super::schedule_builder::ScheduleBuilder::try_build
+    pub(crate) world_id: WorldId,
 }
 
 /// One set-condition row (Phase 16, `PHASE-16-PLAN.md` §2.4). `slot` is the
@@ -175,15 +190,38 @@ impl Schedule {
     /// the [`Scope::spawn`] mechanism. Returns only after every system has
     /// both run and applied.
     ///
+    /// # World binding (Phase 21 H2)
+    ///
+    /// A `Schedule` is bound to the world it was built on
+    /// ([`ScheduleBuilder::build`] records the world's [`WorldId`]). Passing
+    /// any other world panics in release builds — the systems' per-world
+    /// caches (event-buffer pointers, query-state generations) are only valid
+    /// against the build world.
+    ///
     /// # Panics
     ///
+    /// * `boyko-B9101` if `world` is not the world this schedule was built on
+    ///   (Phase 21 world-binding gate).
     /// * Re-raises the first panic observed by any worker (TPN9 / SCH11)
     ///   on the dispatcher thread, surfaced through `Scope::Drop`.
     /// * `debug_assert!`s `SystemBox::is_exclusive == access().is_universal()`
     ///   for every system (plan §13.6 SCH15).
     ///
     /// [`Scope::spawn`]: boyko_threadpool::Scope::spawn
+    /// [`ScheduleBuilder::build`]: super::schedule_builder::ScheduleBuilder::build
     pub fn run(&mut self, world: &mut EcsMaster) {
+        // Phase 21 (H2) — world-binding gate. One u64 compare per run,
+        // predicted-not-taken; the panic body is out-of-line (#[cold]).
+        // RELEASE-level (Bevy parity): a cross-world run would dereference
+        // per-world cached pointers (EventReaderState's NonNull, QueryState
+        // generations) against the wrong world — a UAF surface, so it must
+        // fail loudly, not just in debug. This single compare amends the
+        // P20-B1(a) byte-identity gate; re-verified within ±2% on the
+        // 50-system bench (see PHASE-21-RESULTS.md).
+        if world.world_id() != self.world_id {
+            schedule_world_mismatch_panic(self.world_id, world.world_id());
+        }
+
         // SCH15 (Round 2 C9 / OQ-4) — confirm the build-time cache still
         // matches the system's declared access. A future refactor that
         // mutates `Access` after build would desync; catching it here is
@@ -1209,6 +1247,19 @@ impl<'a> SpawnPointers<'a> {
         // SAFETY (S1 + SCH3): forwarded to the caller; see method doc.
         unsafe { self.systems.add(idx) }
     }
+}
+
+/// Phase 21 (H2) — cold panic site for the [`Schedule::run`] world-binding
+/// gate. Out-of-line so the hot run-entry path carries only the compare +
+/// never-taken branch.
+#[cold]
+#[inline(never)]
+fn schedule_world_mismatch_panic(built: WorldId, got: WorldId) -> ! {
+    panic!(
+        "boyko-B9101: Schedule::run called with a different world than the one it was \
+         built on (built on {built}, got {got}) — a Schedule is bound to the world it \
+         was built on; build a separate Schedule per world"
+    );
 }
 
 // SAFETY (SEND1 / SEND3 — Phase 9 §9.2, updated Phase 9.3c):

@@ -30,7 +30,7 @@ for cross-crate architecture, see [ARCHITECTURE.md](ARCHITECTURE.md).
 3. [Component subsystem](#3-component-subsystem-) — trait, mask, registry, pool bundle, **§3.6 hooks & observers**
 4. [Entity subsystem](#4-entity-subsystem-) — Entity, EntityInland (slab ptr), EntityMaster
 5. [Archetype subsystem](#5-archetype-subsystem-) — Archetype (inline columns), signature, registry, bundle slab, master
-6. [EcsMaster facade](#6-ecsmaster-top-level-facade-)
+6. [EcsMaster facade](#6-ecsmaster-top-level-facade-) — incl. **§6.1 multi-world model** (WorldId, schedule binding, hooks-global/observers-per-world)
 7. [Bundle subsystem](#7-bundle-subsystem-)
 8. [Query subsystem](#8-query-subsystem-) — typed `Query<D, F>` DSL, filters, par_iter, for_each_chunk, LegacyQuery
 9. [SystemParam + Resources + IntoSystem](#9-systemparam--resources--intosystem-)
@@ -653,6 +653,43 @@ load-bearing entries with verified lines:
 
 Error type — [`core/error.rs`](../crates/boyko_ecs/src/ecs/error.rs) `enum
 EcsError` (§16). The `anyhow` dependency is gone (C-019).
+
+### 6.1. Multi-world model (Phase 21)
+
+N `EcsMaster`s / `App`s coexist in one process; the Phase 21 audit verified
+every process-global is **metadata-only** (no world-derived state): the
+component / event / bundle-type / query-type / resource-type registries, the
+`HOOKS` table, the H1 `EVER_ARCHETYPED` bitmask, and the `WorldId` counter.
+Everything else (archetypes, pools, entities, caches, observers, resources,
+event buffers, states) is world-owned. Rules:
+
+- **`WorldId`** ([identifiers/primitives.rs](../crates/boyko_ecs/src/ecs/identifiers/primitives.rs))
+  — `u64` minted per `EcsMaster::new`/`with_capacity` from a process-global
+  atomic; accessor `EcsMaster::world_id()`.
+- **Schedule-world binding (H2)** — a `Schedule` records the build world's
+  `WorldId` at `ScheduleBuilder::try_build`; `Schedule::run` release-panics
+  (`boyko-B9101`) on a mismatch (Bevy parity). This closes the cross-world UB
+  surface of per-world cached pointers (`EventReaderState`'s
+  `NonNull<EventBuffer<E>>`, `QueryState` generation collisions) at the single
+  entry point.
+- **Hooks are process-global per type; observers are per-world** (by design —
+  hooks belong to the component type's definition, observers to a world). The
+  H1 staleness gate in `register_component_hooks` is therefore process-global:
+  it panics if the component was ever archetyped in ANY world (the
+  `EVER_ARCHETYPED` bitmask, set at both archetype-mint funnels in
+  [archetype_master.rs](../crates/boyko_ecs/src/ecs/core/archetype/archetype_master.rs)).
+- **`Entity` is NOT world-tagged** (Bevy parity, 8-byte handle): an
+  out-of-range foreign handle reads as absent; a colliding `(id, generation)`
+  handle silently resolves to the local world's row — documented behavior,
+  pinned in [tests/multi_world.rs](../crates/boyko_ecs/tests/multi_world.rs).
+- **Shared-pool event-lane contract (H4)** — Apps sharing one `ThreadPool`
+  must preregister event types with
+  `EventConfig::default_for(worker_count + 1)` so every worker lane plus the
+  dispatcher lane is in range in each world.
+- SubApp / extract-style world-to-world transfer = future work.
+
+Suite: [tests/multi_world.rs](../crates/boyko_ecs/tests/multi_world.rs);
+results: [PHASE-21-RESULTS.md](PHASE-21-RESULTS.md).
 
 ---
 

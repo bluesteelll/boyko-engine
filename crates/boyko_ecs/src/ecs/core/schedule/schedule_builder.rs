@@ -294,6 +294,11 @@ impl ScheduleBuilder {
     /// `boyko-B9001`). Library/tool callers that want to surface schedule
     /// errors gracefully should call [`try_build`](Self::try_build) instead.
     ///
+    /// The returned [`Schedule`] is **bound to `world`** (Phase 21): it
+    /// records the world's `WorldId`, and `Schedule::run` panics
+    /// (`boyko-B9101`) when handed a different world. Build a separate
+    /// schedule per world.
+    ///
     /// # Panics
     ///
     /// * Ordering cycle among systems (`boyko-B9001`) — the DAG built from
@@ -314,6 +319,9 @@ impl ScheduleBuilder {
 
     /// Finalises the schedule, returning a [`ScheduleBuildError`] on failure
     /// instead of panicking.
+    ///
+    /// The returned [`Schedule`] is **bound to `world`** (Phase 21) — see
+    /// [`build`](Self::build).
     ///
     /// Round 3 W-NEW-3 mandates this body pre-destructure `self` so that the
     /// descriptor vec can be moved into successive phases without aliasing
@@ -659,6 +667,9 @@ impl ScheduleBuilder {
             // (the frame-start `this_run`). The `ZERO` here is the pre-first-run
             // placeholder; no system/condition reads it before `run` sets it.
             frame_this_run: Tick::ZERO,
+            // Phase 21 (H2): bind the schedule to its build world. `run`
+            // release-panics (`boyko-B9101`) when handed any other world.
+            world_id: world.world_id(),
         })
     }
 }

@@ -12,7 +12,7 @@ use crate::ecs::core::commands::command::Command;
 use crate::ecs::core::commands::command_queue::CommandQueue;
 use crate::ecs::core::change_detection::{CHECK_TICK_THRESHOLD, Tick};
 use crate::ecs::core::component::component::Component;
-use crate::ecs::core::component::component_registry::MAX_COMPONENTS;
+use crate::ecs::core::component::component_registry::{self, MAX_COMPONENTS};
 use crate::ecs::core::component::hooks::archetype_flags::ArchetypeFlags;
 use crate::ecs::core::component::hooks::builder::ComponentHooksBuilder;
 use crate::ecs::core::component::hooks::dispatch::{
@@ -45,7 +45,9 @@ use crate::ecs::core::state::{NextState, State};
 use crate::ecs::core::system::{
     into_system::IntoSystem, system::System, unsafe_ecs_cell::UnsafeEcsCell,
 };
-use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId, EntityId, InlandPoolId};
+use crate::ecs::identifiers::primitives::{
+    ArchetypeId, ComponentId, EntityId, InlandPoolId, WorldId,
+};
 use crate::ecs::error::{EcsError, EcsResult};
 
 /// Phase 9 Round 2 W3 — entity-master capacity hint used by the
@@ -111,6 +113,17 @@ pub(crate) use crate::ecs::core::system::params::entity_counter::MAX_BATCH_HINT;
 ///
 /// [`Resource`]: crate::ecs::core::resources::Resource
 pub struct EcsMaster {
+    /// Process-unique world identifier (Phase 21), minted at construction.
+    ///
+    /// Read by [`Schedule::run`]'s world-binding gate — a `Schedule` records
+    /// the id of the world it was built on and panics when handed a different
+    /// one. Declared first for readability; `WorldId` is `Copy` with no drop
+    /// glue, so the Phase 8a C5 drop-order contract (`resources` drops first
+    /// among Drop-bearing fields) is unaffected.
+    ///
+    /// [`Schedule::run`]: crate::ecs::core::schedule::schedule::Schedule::run
+    world_id: WorldId,
+
     /// World-global resources slab.
     ///
     /// Dropped first per the Phase 8a C5 drop-order resolution. Public facade
@@ -384,6 +397,7 @@ impl EcsMaster {
         //     which call `EntityMaster::ensure_capacity` BEFORE the apply
         //     window (dispatcher-only, no worker reads in flight).
         Self {
+            world_id: WorldId::mint(),
             resources: Resources::new(),
             events,
             entity_master: EntityMaster::new(),
@@ -416,6 +430,7 @@ impl EcsMaster {
         let events = EventDispatcher::new(1)
             .expect("invariant: default thread_count=1 is always valid");
         Self {
+            world_id: WorldId::mint(),
             resources: Resources::new(),
             events,
             entity_master: EntityMaster::with_capacity(entity_capacity),
@@ -476,6 +491,17 @@ impl EcsMaster {
     #[inline]
     pub(crate) fn query_state_cache(&self) -> &QueryStateCache {
         self.query_state_cache.get_or_init(QueryStateCache::new)
+    }
+
+    /// Returns this world's process-unique [`WorldId`] (Phase 21).
+    ///
+    /// Minted once at construction and never reused within a process. A
+    /// [`Schedule`](crate::ecs::core::schedule::schedule::Schedule) is bound
+    /// to the world it was built on via this id; `Schedule::run` panics on a
+    /// mismatch.
+    #[inline]
+    pub fn world_id(&self) -> WorldId {
+        self.world_id
     }
 
     /// Creates a new archetype with the specified component IDs
@@ -1981,25 +2007,39 @@ impl EcsMaster {
     /// `C::HAS_HOOKS == true`) panics immediately: the derive already installed
     /// the slot, and the two mechanisms must not be mixed.
     ///
-    /// # Register-before-use (staleness rule, plan §6.4 / Q-A5)
+    /// # Register-before-use (staleness rule, plan §6.4 / Q-A5; Phase 21 H1)
     ///
     /// Hooks for `C` MUST be registered before `C` first appears in any
-    /// archetype. An archetype's [`ArchetypeFlags`] are OR-computed once at
-    /// construction from the cold `HOOKS` table; hooks installed *after* an
-    /// archetype containing `C` already exists would leave that archetype's flag
-    /// bit unset and the hook silently skipped. To make that bug impossible, this
-    /// method performs a release-level scan of every live archetype and
-    /// **panics** (in release, not just debug) if any already contains `C`. The
-    /// derive path is staleness-immune by construction (hooks install inside
-    /// `component_id()`, which always precedes the first archetype containing the
-    /// component).
+    /// archetype **of any world in this process**. An archetype's
+    /// [`ArchetypeFlags`] are OR-computed once at construction from the cold
+    /// `HOOKS` table; hooks installed *after* an archetype containing `C`
+    /// already exists would leave that archetype's flag bit unset and the hook
+    /// silently skipped. To make that bug impossible, this method checks the
+    /// process-global per-`ComponentId` "ever placed in any archetype" bitmask
+    /// (set at every archetype-creation funnel) and **panics** (in release,
+    /// not just debug) if the bit is set. The pre-Phase-21 per-world archetype
+    /// scan was world-blind: a SECOND world with `C` live would get
+    /// silently-skipped hooks because its pre-install archetypes' flags lacked
+    /// the bit — the global gate closes that hole. The derive path is
+    /// staleness-immune by construction (hooks install inside
+    /// `component_id()`, which always precedes the first archetype containing
+    /// the component).
+    ///
+    /// # Multi-world scope (Phase 21)
+    ///
+    /// Hooks are **process-global per type** — registered once, they fire in
+    /// ALL worlds (the `HOOKS` table is `static`). Observers, by contrast, are
+    /// **per-world** (`ObserverRegistry` lives on each world's
+    /// `ArchetypeMaster`). The asymmetry is by design: hooks are part of a
+    /// component type's definition; observers are runtime-mutable per-world
+    /// reactions.
     ///
     /// # Panics
     ///
     /// - If `C` declares `#[component(...)]` derive hooks (`C::HAS_HOOKS ==
     ///   true`) — derive and the runtime builder are mutually exclusive.
-    /// - If any live archetype already contains `C` — register hooks before the
-    ///   component is first used.
+    /// - If `C` was ever placed in a live archetype of ANY world in this
+    ///   process — register hooks before the component is first used.
     #[cold]
     pub fn register_component_hooks<C: Component>(&mut self) -> ComponentHooksBuilder<'_> {
         // Force `C::component_id()`: mints the id and, for a derive-hooked type
@@ -2018,15 +2058,18 @@ impl EcsMaster {
             register_component_hooks_derive_conflict_panic::<C>();
         }
 
-        // Release-level staleness scan (Q-A5 / W3): a stale `ArchetypeFlags` bit
-        // would silently skip the hook, which is too severe a correctness
-        // surprise for a feature whose entire value is "the callback fires".
-        // Cold + one-time, so the O(archetypes) scan cost is irrelevant.
-        if self
-            .archetype_master
-            .iter_archetypes()
-            .any(|a| a.has_component_id(component_id))
-        {
+        // Release-level staleness gate (Q-A5 / W3; Phase 21 H1): a stale
+        // `ArchetypeFlags` bit would silently skip the hook, which is too
+        // severe a correctness surprise for a feature whose entire value is
+        // "the callback fires". The gate is the PROCESS-GLOBAL "ever placed in
+        // any archetype" bitmask — matching the process-global scope of the
+        // `HOOKS` table itself — because the old per-world archetype scan was
+        // blind to other worlds already holding `C` (audit H1). The global
+        // subsumes the per-world scan: every archetype of this world was
+        // minted through a funnel that set the bit. Cold + one-time; one
+        // Relaxed load (the panic is a config-time courtesy, not a soundness
+        // fence).
+        if component_registry::was_ever_archetyped(component_id.0) {
             register_component_hooks_stale_panic::<C>();
         }
 
@@ -2830,16 +2873,18 @@ fn missing_resource_panic_facade<R: Resource>() -> ! {
 }
 
 /// Cold-path panic helper for [`EcsMaster::register_component_hooks`] when the
-/// release-level staleness scan finds `C` already in a live archetype (plan
-/// §6.4 / Q-A5 / W3). Kept off the hot method body via `#[cold] #[inline(never)]`.
+/// release-level staleness gate finds `C` already placed in an archetype (plan
+/// §6.4 / Q-A5 / W3; Phase 21 H1 — the gate is process-global across all
+/// worlds). Kept off the hot method body via `#[cold] #[inline(never)]`.
 #[cold]
 #[inline(never)]
 fn register_component_hooks_stale_panic<C: Component>() -> ! {
     panic!(
         "register_component_hooks::<{}>() called after {} already appears in a live \
-         archetype; register hooks before the component is first used (the archetype's \
-         ArchetypeFlags were computed at construction and would be stale, silently \
-         skipping the hook).",
+         archetype of some world in this process (hooks are process-global per type, \
+         so the gate is too); register hooks before the component is first used in ANY \
+         world (the archetype's ArchetypeFlags were computed at construction and would \
+         be stale, silently skipping the hook).",
         C::debug_type_name(),
         C::debug_type_name(),
     );

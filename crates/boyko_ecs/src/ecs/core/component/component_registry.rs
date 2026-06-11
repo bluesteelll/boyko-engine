@@ -41,7 +41,7 @@
 use std::alloc::Layout;
 use std::any::TypeId;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use crate::ecs::core::component::component::Component;
 use crate::ecs::core::component::hooks::ComponentHooks;
@@ -253,6 +253,68 @@ pub(crate) fn try_set_hooks(component_id: usize, hooks: ComponentHooks) -> bool 
         return false;
     }
     HOOKS[component_id].set(hooks).is_ok()
+}
+
+/// Phase 21 (H1) — process-global "ever placed in ANY archetype" bitmask, one
+/// bit per `ComponentId`. 512 components = 8 × `AtomicU64`.
+///
+/// Set at the archetype-creation funnels (`ArchetypeMaster::create_archetype`
+/// and the `add_existing_archetype` bypass — the same two sites that seed
+/// observer flags) for every component id in the new archetype; read by
+/// `EcsMaster::register_component_hooks`'s staleness gate.
+///
+/// # Why process-global, not per-world
+///
+/// The `HOOKS` table above is process-global: hooks registered through any
+/// world apply to the component type in EVERY world. A per-world staleness
+/// scan therefore had a hole (audit H1): world A could register hooks for `C`
+/// while world B already had `C` live in an archetype whose `ArchetypeFlags`
+/// were OR-computed without the hook bit — the hook was then silently skipped
+/// in B. This global mirrors the global scope of `HOOKS` itself, so the gate
+/// matches the table it protects. Like `LAYOUTS` / `HOOKS`, this is
+/// metadata-class global state — it never references world-owned storage.
+///
+/// Bits are never cleared (not even by `EcsMaster::clear()`): a cleared world
+/// proves nothing about OTHER worlds, and the `HOOKS` slot is write-once for
+/// the process lifetime anyway.
+static EVER_ARCHETYPED: [AtomicU64; MAX_COMPONENTS.div_ceil(64)] =
+    [const { AtomicU64::new(0) }; MAX_COMPONENTS.div_ceil(64)];
+
+/// Marks `component_id` as having been placed in at least one archetype of at
+/// least one world (Phase 21 H1). Called from the archetype-creation funnels;
+/// cold (archetype creation only), idempotent.
+///
+/// Relaxed ordering: the bit feeds a config-time courtesy panic in
+/// `register_component_hooks`, not a soundness fence — no payload is
+/// published through it, and a same-thread `&mut`-sequenced caller (the only
+/// realistic registration pattern) observes its own prior `fetch_or` anyway.
+#[inline]
+pub(crate) fn mark_ever_archetyped(component_id: usize) {
+    debug_assert!(
+        component_id < MAX_COMPONENTS,
+        "Component ID {} is out of bounds",
+        component_id
+    );
+    if component_id >= MAX_COMPONENTS {
+        return;
+    }
+    EVER_ARCHETYPED[component_id / 64].fetch_or(1u64 << (component_id % 64), Ordering::Relaxed);
+}
+
+/// Returns `true` if `component_id` was ever placed in any archetype of any
+/// world in this process (Phase 21 H1). See [`EVER_ARCHETYPED`] for ordering
+/// and scope rationale.
+#[inline]
+pub(crate) fn was_ever_archetyped(component_id: usize) -> bool {
+    debug_assert!(
+        component_id < MAX_COMPONENTS,
+        "Component ID {} is out of bounds",
+        component_id
+    );
+    if component_id >= MAX_COMPONENTS {
+        return false;
+    }
+    EVER_ARCHETYPED[component_id / 64].load(Ordering::Relaxed) & (1u64 << (component_id % 64)) != 0
 }
 
 /// Allocates a fresh `ComponentId` from the global counter and stores

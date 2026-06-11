@@ -3,15 +3,13 @@ use crate::ecs::core::archetype::archetype_registry::ArchetypeRegistry;
 use crate::ecs::core::archetype::archetype::Archetype;
 use crate::ecs::core::archetype::generation::ArchetypeGeneration;
 use crate::ecs::core::component::component_mask::ComponentMask;
+use crate::ecs::core::component::component_registry;
 use crate::ecs::core::component::hooks::archetype_flags::ArchetypeFlags;
 use crate::ecs::core::component::observers::{
     ObserverFn, ObserverId, ObserverKind, ObserverRegistry,
 };
 use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId};
 use crate::ecs::core::iters::legacy_query::Query as LegacyQuery;
-
-#[cfg(test)]
-use crate::ecs::core::component::component_registry;
 
 /// Master manager for archetypes, providing creation and lookup capabilities
 /// Integrates ArchetypeBundle for storage and ArchetypeRegistry for efficient queries
@@ -119,6 +117,16 @@ impl ArchetypeMaster {
 
         // Register the archetype with the registry
         self.registry.register_archetype(archetype_id, mask);
+
+        // ── Phase 21 H1 — process-global "ever archetyped" mark ──
+        // Set the global per-ComponentId bit for every component now living in
+        // an archetype, so `register_component_hooks`'s staleness gate sees
+        // placements in EVERY world, not just its own (the world-blind-hooks
+        // hole). The dedup early-return above is exempt by construction: an
+        // exact-match archetype set these bits when IT was first minted.
+        for &cid in component_ids {
+            component_registry::mark_ever_archetyped(cid.0);
+        }
 
         // ── Phase 14b OBS-SEED (C1, R2 §4) ──
         // Seed the new archetype's `ON_*_OBSERVER` bits from the registry. The
@@ -420,6 +428,15 @@ impl ArchetypeMaster {
 
         // Register with the registry
         self.registry.register_archetype(archetype_id, mask);
+
+        // ── Phase 21 H1 — process-global "ever archetyped" mark (bypass arm) ──
+        // Same mark as `create_archetype`: this is the second archetype-mint
+        // funnel (the OBS-SEED2 bypass below exists for the same reason), so
+        // components placed through it must also raise the global staleness
+        // bit for `register_component_hooks`.
+        for &cid in &component_ids {
+            component_registry::mark_ever_archetyped(cid.0);
+        }
 
         // ── Phase 14b OBS-SEED2 (C1, R2 §4 — the one bypass) ──
         // `add_existing_archetype` inserts a pre-built `Archetype` whose `flags`
