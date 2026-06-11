@@ -36,12 +36,12 @@
 // # Component-id range
 //
 // `MAX_COMPONENTS = 512` caps valid ids at 511. The orchestrator's
-// suggested 530-540 range is invalid (out-of-range). The existing
-// allocations in the crate top out at 509 — see the inline tables in
-// `random_access.rs`, `query/state.rs`, and `query/data.rs`. IDs 230-299
-// are free; this bench claims 230-242 (13-id span — four primitives at
-// 230-233 plus a `Tag_i` range 234-241 for the 8-archetype init_state
-// bench).
+// suggested 530-540 range is invalid (out-of-range). This bench claims
+// 230-233 (four primitives) plus 66-115 (50 `Tag_i` slots for the
+// init_state bench — Phase X.I restored the §19.3-spec 50-archetype count;
+// the 66-115 span is verified free across every bench/test binary, unlike
+// the old 234-241 run whose extension would overlap the phase8cd/miri
+// reservations at 244-269).
 
 // Phase X.E: opt-in low-variance allocator for A/B signal extraction.
 // OFF by default (`cargo bench` keeps the production system heap for honest
@@ -412,20 +412,14 @@ fn bench_query_cold_construction(c: &mut Criterion) {
 //
 // # Setup strategy — share-ECS, not iter_batched
 //
-// `iter_batched` would build a fresh ECS (and 50 archetypes, each
-// preallocating ~4 MB of component pools via `with_default_sizes`) on every
-// batch — ~200 MB of pool commits per batched setup. Phase X.F removed the
-// old 64 MB arena ceiling (the default arena now grows inside a 4 GiB
-// reservation), but rebuilding hundreds of MB of pools per batch is still
-// pure setup waste.
-//
-// Instead, build ONE shared ECS with `N_ARCHETYPES` archetypes (cold,
-// once), then have each timed iteration repeatedly call
+// Build ONE shared ECS with `N_ARCHETYPES` archetypes (cold, once), then
+// have each timed iteration repeatedly call
 // `QueryDataState::new(&mut ecs)`. The constructor reads `archetype_master`
 // but performs no archetype churn — after the first call, every subsequent
 // call sees the same archetype set, same generation, and produces an
 // equivalent state (each call is independent state-wise; we drop the state
-// immediately to avoid heap pressure inside the timed window).
+// immediately to avoid heap pressure inside the timed window). Rebuilding
+// the archetype set per batch would be pure setup waste.
 //
 // Side-effect note: `QueryDataState::new` does NOT mutate the ECS's
 // archetype master or component registries — the `&mut EcsMaster` argument
@@ -434,35 +428,33 @@ fn bench_query_cold_construction(c: &mut Criterion) {
 // share-ECS pattern is therefore semantically equivalent to a fresh-ECS
 // pattern, and faster + heap-safe.
 //
-// # Archetype count — 8, not 50
+// # Archetype count — 50 (the §19.3 spec, restored by Phase X.I)
 //
-// The §19.3 plan calls for 50 archetypes, but each `[Position, Tag_i]`
-// archetype preallocates ~4 MB of component pool buffers
-// (`with_default_sizes` allocates `DEFAULT_CHUNKS_PER_POOL ×
-// TINY_COMPONENTS_PER_CHUNK × component_size` = 128 × 2048 × 12 ≈ 3 MB for
-// `Position` plus ~1 MB for `Tag`). The old 64 MB arena ceiling that
-// originally forced this trim is gone (Phase X.F: the arena grows inside a
-// 4 GiB reservation), so 50 archetypes WOULD fit now — 8 is kept to bound
-// the bench's resident weight and setup time.
+// The 8-archetype trim history: the pre-X.F 64 MB shared-arena ceiling
+// could not fit 50 archetypes at all; after X.F removed the ceiling, 8 was
+// kept because each `with_default_sizes` pool still eagerly allocated
+// multi-MB buffers plus two 256 KiB zero-written tick Boxes per pool
+// (~4 MB resident per archetype). Phase X.I deleted both terms: pools are
+// now RESERVE-ONLY at creation (per-pool VmReservation, zero commit, ticks
+// live in demand-zero sub-regions of the same reservation), so 50 empty
+// archetypes' resident cost is ~0 — VA only. The bench therefore runs the
+// full 50-archetype scan the §19.3 target was written against.
 //
-// 8 archetypes (~32 MB) keeps the working set small while still
-// exercising `update_archetypes`'s archetype-bitset scan. The measured
-// per-archetype cost is roughly linear in N (one bit-test + push per
-// matching archetype), so the 50-archetype target can be estimated by
-// scaling: `target_at_50 ≈ measured_at_8 + (50 - 8) × per-archetype-cost`.
+// `update_archetypes`'s scan is O(archetypes) (one bit-test + push per
+// matching archetype), so setup and per-iteration cost stay sane at 50.
 fn bench_query_init_state(c: &mut Criterion) {
     register_bench_components();
 
-    // 8 distinct "tag" component ids 234..242 — within the bench-reserved
-    // range and well under `MAX_COMPONENTS = 512`. Each archetype is
-    // `[Pos, Tag_i]` so the inner `QueryState`'s include-mask matcher must
-    // iterate every archetype.
+    // 50 distinct "tag" component ids 66..116 — a span verified free across
+    // every bench/test binary, well under `MAX_COMPONENTS = 512`. Each
+    // archetype is `[Pos, Tag_i]` so the inner `QueryState`'s include-mask
+    // matcher must iterate every archetype.
     //
-    // We register the 8 ids once at the top of the bench (idempotent).
-    const N_ARCHETYPES: usize = 8;
+    // We register the 50 ids once at the top of the bench (idempotent).
+    const N_ARCHETYPES: usize = 50;
     let mut tag_ids: [ComponentId; N_ARCHETYPES] = [ComponentId(0); N_ARCHETYPES];
     for (i, slot) in tag_ids.iter_mut().enumerate() {
-        let cid = ComponentId(234 + i);
+        let cid = ComponentId(66 + i);
         *slot = cid;
         component_registry::register_layout::<Tag>(cid.0);
     }
@@ -475,7 +467,7 @@ fn bench_query_init_state(c: &mut Criterion) {
         ecs.create_archetype(&[POS_ID, *cid]);
     }
 
-    c.bench_function("query_init_state_8_archetypes", |b| {
+    c.bench_function("query_init_state_50_archetypes", |b| {
         b.iter(|| {
             // Single `QueryDataState::new` call. The bench measures
             // `D::init_state + F::init_state + aggregate_include +

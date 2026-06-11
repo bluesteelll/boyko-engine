@@ -1,5 +1,12 @@
 // Benchmark: Archetype::create_entity precheck cost (C-16 validation).
 //
+// Phase X.I note: this bench is RUNNABLE AGAIN. At pre-X.I HEAD it panicked
+// ("Arena reserve exhausted"): every iter_batched setup created a fresh
+// Archetype whose pools carved ~8 MiB from ONE shared 64 MiB arena that
+// never freed across the sample run. Post-X.I pools ignore the arena
+// entirely — each pool owns its own VmReservation, released when the
+// Archetype drops — so per-setup memory is reclaimed every iteration.
+//
 // Two groups:
 //   1. archetype_create_entity_8c  — 8-component archetype, 10 000 entities per iteration
 //   2. archetype_create_entity_16c — 16-component archetype, 10 000 entities per iteration
@@ -60,11 +67,14 @@ fn bench_archetype_create_entity_8c(c: &mut Criterion) {
     let n = 10_000usize;
 
     group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
-        // 64 MB arena: 8 pools × 10k entities × 4 bytes = ~320 KB; ample.
-        let arena = Arena::with_capacity(64 * 1024 * 1024);
+        // Post-X.I the arena parameter is vestigial (pools own per-pool
+        // VmReservations; the arena is retired outright in X.J) — a default
+        // reserve-only arena is all `create_by_ids` needs.
+        let arena = Arena::new();
 
-        // One archetype lives outside iter_batched so pools are pre-allocated.
-        // We reset via a fresh Archetype in the setup closure.
+        // A fresh Archetype per setup; its pools commit lazily during the
+        // timed fill and release their reservations when the setup output
+        // drops.
         b.iter_batched(
             || {
                 let arch = Archetype::create_by_ids(ArchetypeId(1), &IDS_8, &arena);
@@ -100,7 +110,8 @@ fn bench_archetype_create_entity_16c(c: &mut Criterion) {
     let n = 10_000usize;
 
     group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
-        let arena = Arena::with_capacity(128 * 1024 * 1024);
+        // Vestigial arena (see the 8c group note).
+        let arena = Arena::new();
 
         b.iter_batched(
             || {

@@ -11,9 +11,9 @@
 **Goals:**
 - Performance on par with (and where measured, beating) state-of-the-art ECS
   engines (Bevy / flecs / Unity DOTS / EnTT).
-- Cache locality via type-erased chunked storage + archetype-grouping, an inline
-  per-archetype column table for O(1) random component access (Phase 7), and a
-  SIMD-aligned columnar batched API (`for_each_chunk`, Phase X.A).
+- Cache locality via type-erased columnar storage + archetype-grouping, an
+  inline per-archetype column table for O(1) random component access (Phase 7),
+  and a SIMD-aligned columnar batched API (`for_each_chunk`, Phase X.A).
 - Lock-free parallelism: a custom Chase-Lev work-stealing pool drives a
   Bevy-class conflict-graph scheduler (Phase 9), proven sound under loom + Miri.
 - Minimal per-entity / per-component footprint.
@@ -45,10 +45,10 @@ boyko-engine/
 │   │           ├── error.rs              # EcsError / EcsResult (no anyhow)
 │   │           ├── identifiers/primitives.rs   # EntityId / ArchetypeId / ComponentId / … newtypes
 │   │           ├── memory/
-│   │           │   ├── arena.rs              # 64 MB arena, VirtualAlloc/mmap lazy-commit (X.C)
+│   │           │   ├── vm.rs                 # VmReservation — shared reserve/commit primitive (X.G/X.H)
+│   │           │   ├── arena.rs              # growable arena on vm.rs (X.F/X.H; client-less since X.I → X.J)
 │   │           │   ├── free_mem_block.rs     # best-fit free-block tracker
-│   │           │   ├── chunk.rs              # type-erased chunk metadata
-│   │           │   ├── component_pool.rs     # type-erased pool + per-row tick columns (X.B + Phase 10)
+│   │           │   ├── component_pool.rs     # type-erased SELF-GROWING pool, [data|added|changed] reservation (X.I)
 │   │           │   └── utils.rs              # align_up
 │   │           └── core/
 │   │               ├── app/              # App builder + Plugin + Plugins + AppExit (Phase 18)
@@ -382,12 +382,16 @@ Layered on the above without disturbing the hot path:
   executor's 0%-gate (a `has_condition` bitset / a `state_entries.is_empty()`
   early-out, leaving the no-feature dispatch path byte-identical).
 
-## Adaptive chunk size based on component size
+## Pool sizing (Phase X.I — the size classes are gone)
 
-Same as on `master` — `TINY/SMALL/MEDIUM/LARGE_COMPONENTS_PER_CHUNK` (see
-[constants.rs](../crates/boyko_ecs/src/ecs/constants.rs)). Pool backing buffers
-are additionally lifted to `SIMD_BUFFER_ALIGN = 32` (Phase X.A) so column starts
-are AVX2-loadable.
+The `master`-era size classes (`TINY/…/LARGE_COMPONENTS_PER_CHUNK`) and the
+chunk machinery are DELETED. A pool's ceiling is byte-targeted:
+`reserve_rows(stride) = clamp(POOL_TARGET_DATA_BYTES / stride, POOL_MIN_ROWS,
+POOL_MAX_ROWS)` (1 GiB / 2^16 / 2^24 on syscall arms — see
+[constants.rs](../crates/boyko_ecs/src/ecs/constants.rs)); committed memory
+grows in doubling slabs on demand and never moves. Pool backing buffers are
+lifted to `SIMD_BUFFER_ALIGN = 32` (Phase X.A) so column starts are
+AVX2-loadable (trivially satisfied — every reservation base is ≥ 4096-aligned).
 
 ## Multi-threading model (current state)
 
@@ -430,8 +434,8 @@ Bench methodology (deterministic `[profile.bench] codegen-units = 1`, opt-in
 
 | Aspect | master | ecs |
 |--------|--------|-----|
-| ComponentPool | `ComponentPool<T>` (generic) | type-erased + `ComponentRegistry` + per-row Tick columns |
-| Chunk | `Chunk<T>` stores data | `Chunk` — metadata only |
+| ComponentPool | `ComponentPool<T>` (generic, fixed) | type-erased + `ComponentRegistry`, SELF-GROWING per-pool `VmReservation [data\|added\|changed]` (X.I) |
+| Chunk | `Chunk<T>` stores data | DELETED (X.I) — vestigial metadata, written-never-read |
 | Row addressing | `UnitId { chunk, inland }` | computed `buffer + i*stride` (`Unit` cache removed Phase X.B) |
 | Random component access | two-level lookup | inline per-archetype `Column` table at offset 0 (Phase 7) |
 | Arena backing | global `alloc` | `VirtualAlloc`/`mmap` lazy-commit (Phase X.C) |

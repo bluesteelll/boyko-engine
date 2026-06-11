@@ -7,7 +7,7 @@
 //! | `component_ids_cached_lookup`      | ≤ 2 ns  |
 //! | `cached_archetype_id_cached_lookup`| ≤ 3 ns  |
 //! | `commands_spawn_enqueue`           | ≤ 18 ns |
-//! | `spawn_command_apply_arity_4`      | ≤ 200 ns|
+//! | `spawn_command_apply_arity_4_x10k` | ≤ 2 ms (10 000 × the 200 ns/command plan target; RE-BASELINED post-X.I — see bench #4) |
 //! | `batch_10k_spawn_apply`            | ≤ 1.2 ms|
 //!
 //! The batch bench's pre-Phase-8.5 baseline (Phase 8d) sat around 3 ms
@@ -224,35 +224,36 @@ fn bench_commands_spawn_enqueue(c: &mut Criterion) {
 }
 
 // =============================================================================
-// 4. spawn_command_apply_arity_4 (≤ 200 ns)
+// 4. spawn_command_apply_arity_4_x10k (≤ 2 ms = 10 000 × the 200 ns target)
 // =============================================================================
 //
-// Single arity-4 SpawnCommand from enqueue through apply. Per-iter cost:
-// push (≤ 18 ns) + apply (cached_archetype_id ≤ 3 ns + for_each callback
-// chain + create_entity memcpy of 4 components).
+// Arity-4 SpawnCommand from enqueue through apply, measured as 10 000
+// commands per timed iteration (per-command figure = reported / 10 000).
 //
-// `iter_batched` builds a fresh world per batch so entity_count doesn't
-// grow unbounded across the sample loop.
+// # Post-X.I re-baseline (population (ii), PHASE-XI-PLAN §XI-B1c)
+//
+// The pre-X.I shape ran ONE command per fresh world: hoisting the world was
+// structurally impossible because per-archetype pool capacity was FIXED
+// (`get_optimal_chunk_capacity`), so a long criterion sample run filled the
+// pool and `create_entity` errored out. Phase X.I pools GROW (eager VA
+// reserve, lazy slab commit, ceiling ≥ 16× further out), so that workaround
+// is unwound per the plan's §Integration row.
+//
+// Shape: `iter_batched` + LargeInput; setup builds a fresh world and warms
+// the bundle cache; the timed body runs 10 000 single arity-4 spawns through
+// one `run_system`. This amortizes the per-world cold-start confound
+// (first-slab commit syscalls + allocator warm-up — the XI-B1c "known
+// confound" for fresh-world spawn benches) 10 000× instead of paying it on
+// every single command, while the per-iteration population stays bounded at
+// 10 k rows so pool commit charge cannot run away across the sample run.
+//
+// RE-BASELINED: the old `spawn_command_apply_arity_4` numbers (1 command per
+// world, cold-start folded into every iteration) are NOT comparable; the
+// criterion id is renamed so no stale baseline comparison fires.
 
 fn bench_spawn_command_apply_arity_4(c: &mut Criterion) {
     register_bsc();
-    // Per-iter EcsMaster construction would dominate the measurement
-    // (world setup + pool commits; per-iter drop pays the reservation
-    // release cost ~tens of µs). Hoisting the world is also a
-    // trap — the per-archetype pool capacity is bounded by
-    // `get_optimal_chunk_capacity` so a long sample run fills the pool
-    // and `create_entity` errors out.
-    //
-    // Bench compromise: iter_batched + LargeInput so each timed iter
-    // builds + drops one fresh world. The arena cost gets folded into
-    // the per-iter cost, but the per-iter cost ALSO covers a clean
-    // create_entity + create_archetype-warm path (the cache is warmed
-    // inside the setup, so the timed body only pays the hot-path apply
-    // + a single create_entity memcpy). Reported number includes the
-    // arena unmap; the ≤ 200 ns plan target was set against a hoisted
-    // world that is structurally impossible here. Report the raw figure
-    // and note the breakdown in the bench report.
-    c.bench_function("spawn_command_apply_arity_4", |b| {
+    c.bench_function("spawn_command_apply_arity_4_x10k", |b| {
         b.iter_batched(
             || {
                 let mut ecs = EcsMaster::new();
@@ -261,12 +262,14 @@ fn bench_spawn_command_apply_arity_4(c: &mut Criterion) {
             },
             |mut ecs| {
                 ecs.run_system(|mut cmds: Commands| {
-                    cmds.spawn(BscBundle4 {
-                        a: BscA(1),
-                        b: BscB(2),
-                        c: BscC(3),
-                        d: BscD(4),
-                    });
+                    for i in 0..10_000u32 {
+                        cmds.spawn(BscBundle4 {
+                            a: BscA(i),
+                            b: BscB(i),
+                            c: BscC(i),
+                            d: BscD(i),
+                        });
+                    }
                 });
                 black_box(ecs);
             },

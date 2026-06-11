@@ -504,7 +504,9 @@ fix (Phase 5c). `MAX_ARCHETYPES = 1024`.
 
 | What you want to do | Where | Method |
 |---------------------|-------|--------|
-| Create a pool | [memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs):95 ✅ | `ComponentPool::new(arena, component_id, num_chunks, components_per_chunk)` |
+| Create a pool | [memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs) ✅ | `ComponentPool::new(_arena, component_id, n, m)` — explicit row ceiling `n × m` EXACTLY (X.I D2 mapping; arena param vestigial → X.J); `with_default_sizes` = byte-targeted clamp sizing |
+| Grow a pool (automatic) | [memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs) ✅ | `#[cold] grow_rows` — per-pool `VmReservation [data\|added\|changed]`, slab doubling 64 KiB…64 MiB, ticks lockstep, idempotent, O(1) in live rows, bases never move (Phase X.I). 1M-entity single-archetype ramp **2.24× faster than Bevy**, worst-batch spike **0.022×** ([PHASE-XI-RESULTS.md](PHASE-XI-RESULTS.md)) |
+| Committed-rows frontier (diagnostics) | [memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs) ✅ | `committed_rows()`; `capacity()` = reserve ceiling |
 | Append a component (raw bytes) | [memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs) ✅ | `add(&[u8])` |
 | Append a component (typed, TypeId-guarded) | [memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs) ✅ | `add_typed::<T>(value)` |
 | Read a component (typed) | [memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs) ✅ | `get_typed::<T>(idx)` / `get_mut_typed::<T>(idx)` (C-004) |
@@ -520,8 +522,11 @@ Type erasure: the pool stores raw bytes + the `Layout` from the
 `swap_remove` / `pop` / `set_component` / `Drop` (M-004). **Phase X.B** deleted
 the parallel `units: Vec<Unit>` (each entry == `buffer + i*stride`) — rows are
 now computed arithmetic, which net-removed `unsafe`. **Phase 10** added the
-`added_ticks` / `changed_ticks` parallel columns. See
-[PHASE-XB-RESULTS.md](PHASE-XB-RESULTS.md).
+per-row tick columns; **Phase X.I** moved them into the pool's own reservation
+(`[data | added | changed]` sub-regions), made the pool self-growing, and
+DELETED the chunk machinery (`memory/chunk.rs` — the dirty flags were
+written-never-read; a per-mutation `udiv` died with them). See
+[PHASE-XB-RESULTS.md](PHASE-XB-RESULTS.md), [PHASE-XI-RESULTS.md](PHASE-XI-RESULTS.md).
 
 ---
 
@@ -535,7 +540,7 @@ now computed arithmetic, which net-removed `unsafe`. **Phase 10** added the
 | Free the arena | [memory/arena.rs](../crates/boyko_ecs/src/ecs/memory/arena.rs) ✅ | `impl Drop` — per-cfg-arm matching deallocator (M-001) |
 | Best-fit free-block tracking | [memory/free_mem_block.rs](../crates/boyko_ecs/src/ecs/memory/free_mem_block.rs) ✅ | `MemFreeBlockMaster::allocate_aligned` / `find_best_fit` / `insert` (O(1) coalesce) / `defragment` |
 | Align an address/size | [memory/utils.rs](../crates/boyko_ecs/src/ecs/memory/utils.rs) ✅ | `align_up(value, alignment)` |
-| Chunk metadata | [memory/chunk.rs](../crates/boyko_ecs/src/ecs/memory/chunk.rs) ✅ | `Chunk` — metadata window (start_index, capacity, dirty flag) |
+| Reserve/commit a VM range | [memory/vm.rs](../crates/boyko_ecs/src/ecs/memory/vm.rs) ✅ | `VmReservation::{reserve, reserve_unzeroed, commit}` — the shared per-OS primitive under the arena, `InlandStore`, and every `ComponentPool` (X.G/X.H/X.I) |
 
 `Arena` is `!Send + !Sync` by construction. Backing acquisition (Phase X.F):
 reserve-only syscall (`VirtualAlloc(MEM_RESERVE, PAGE_NOACCESS)` on Windows,

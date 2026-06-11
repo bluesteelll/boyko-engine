@@ -26,7 +26,7 @@ for cross-crate architecture, see [ARCHITECTURE.md](ARCHITECTURE.md).
 ## Table of contents
 
 1. [Identifiers](#1-identifiers-id-types-)
-2. [Memory subsystem](#2-memory-subsystem-) — Arena (lazy-commit), ComponentPool (type-erased + tick columns), Chunk, MemFreeBlockMaster
+2. [Memory subsystem](#2-memory-subsystem-) — VmReservation, Arena (lazy-commit, client-less), ComponentPool (type-erased, self-growing, tick sub-regions), MemFreeBlockMaster
 3. [Component subsystem](#3-component-subsystem-) — trait, mask, registry, pool bundle, **§3.6 hooks & observers**
 4. [Entity subsystem](#4-entity-subsystem-) — Entity, EntityInland (slab ptr), EntityMaster
 5. [Archetype subsystem](#5-archetype-subsystem-) — Archetype (inline columns), signature, registry, bundle slab, master
@@ -127,35 +127,49 @@ pub struct Arena {
 
 See [PHASE-XC-RESULTS.md](PHASE-XC-RESULTS.md).
 
-### 2.2. Chunk (type-erased) ✅
+### 2.2. Chunk — DELETED (Phase X.I) ✅
 
-**File:** [crates/boyko_ecs/src/ecs/memory/chunk.rs](../crates/boyko_ecs/src/ecs/memory/chunk.rs)
+`memory/chunk.rs` is gone. The `{ start_index, capacity, is_dirty }` metadata
+was written by every mutation and read by NOBODY (the dirty flag predated
+Phase 10's real per-row `Tick` columns); deleting it removed a per-mutation
+runtime-divisor `udiv` + bounds-checked store from `add`/`swap_remove`/
+`set_component`/`write_at`. Query-side "chunks" (`for_each_chunk`,
+`chunk_iter`, `par_chunk`) are row-range batching — unrelated and untouched.
 
-Metadata-only window into `ComponentPool::buffer`: `{ start_index, capacity,
-is_dirty }`. The dirty flag predates change detection (Phase 10 added real
-per-row `Tick` columns on `ComponentPool` instead — §2.3, §12).
-
-### 2.3. ComponentPool (type-erased + tick columns) ✅
+### 2.3. ComponentPool (type-erased + tick sub-regions, self-growing) ✅
 
 **File:** [crates/boyko_ecs/src/ecs/memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs)
 
 ```rust
 pub struct ComponentPool {
-    arena: *const Arena,                  // raw provenance (Phase 3a)
-    buffer: NonNull<u8>,                  // single SIMD-aligned block from arena
-    buffer_capacity_bytes: usize,
-    max_components: usize,
-    len: usize,                           // live row count; row i at buffer + i*stride (X.B)
-    chunks: Vec<Chunk>,
-    components_per_chunk: usize,
+    buffer: NonNull<u8>,            // data sub-region base == vm.base(); WRITE-ONCE
+    len: usize,                     // live rows; row i at buffer + i*stride (X.B)
+    committed_rows: usize,          // warm-path capacity oracle (ONE cmp in add)
+    reserve_rows: usize,            // the ceiling = capacity(); immutable
+    component_layout: Layout,       // cached from registry
+    data_committed: usize,          // byte frontier, granule-aligned (cold)
+    ticks_committed: usize,         // byte frontier per tick region (cold)
+    added_base: NonNull<UnsafeCell<Tick>>,   // vm.base()+data_len; WRITE-ONCE
+    changed_base: NonNull<UnsafeCell<Tick>>, // +tick_len; WRITE-ONCE
     component_id: usize,
-    component_layout: Layout,             // cached from registry
     drop_fn: Option<DropFn>,              // type-erased Drop (M-004)
     component_type_id: TypeId,            // typed-API validation (C-004)
-    added_ticks: Box<[UnsafeCell<Tick>]>,    // Phase 10 STORE3
-    changed_ticks: Box<[UnsafeCell<Tick>]>,  // Phase 10 STORE3
+    vm: VmReservation,              // declared LAST: Drop's drop_fn loop runs first
 }
 ```
+
+**Phase X.I**: each pool owns one `VmReservation` laid out
+`[data | added_ticks | changed_ticks]` (granule-aligned sub-regions). Eager
+reserve, ZERO initial commit; `#[cold] grow_rows` doubles committed slabs
+`[64 KiB … 64 MiB]` with ticks in lockstep BY ROWS, an idempotent no-op arm,
+and a sufficiency proof (GROW1-XI, plan D4) — growth is O(1) in live rows,
+never copies, never moves a base. Sizing: `with_default_sizes` ⇒
+`clamp(POOL_TARGET_DATA_BYTES/stride, POOL_MIN_ROWS, POOL_MAX_ROWS)`
+(1 GiB / 2^16 / 2^24 syscall arms; 4 MiB / 256 / 2^18 fallback); the legacy
+`new(_, _, n, m)` constructor = explicit ceiling `n × m` EXACTLY (the D2
+mapping — also the small-ceiling test knob). The arena is no longer a client
+(`_arena` ignored; retirement = X.J). See
+[PHASE-XI-RESULTS.md](PHASE-XI-RESULTS.md).
 
 **API:**
 - Raw byte: `add(&[u8])` (242), `set_component(idx, &[u8])`, `get_raw(idx)`,
@@ -176,12 +190,15 @@ gone) and shrank the Miri surface. The hot read/iter paths (`column.ptr.add`,
 `fetch.base.add`) never used `units`, so iteration is unaffected. See
 [PHASE-XB-RESULTS.md](PHASE-XB-RESULTS.md).
 
-**Phase 10** added the parallel `added_ticks` / `changed_ticks` columns
-(`Box<[UnsafeCell<Tick>]>`, sized to `max_components`, slots ≥ `len` stay
-`Tick::ZERO`). `UnsafeCell` gives interior mutability through `&self` for filter
-reads while the Phase 9 scheduler's per-`(archetype, component)` exclusivity
-keeps writes sound; adjacent-row writes from sibling `par_iter` chunks target
-distinct locations (Round 2 C3).
+**Phase 10** added the per-row `added` / `changed` tick columns; **Phase X.I**
+moved them from heap `Box<[UnsafeCell<Tick>]>`es into the pool's own
+reservation (write-once `added_base`/`changed_base`, valid for the committed
+prefix; never-written slots read `Tick::ZERO` via demand-zero — the J-XI
+never-written invariant; vacated slots may hold stale ticks, write-before-read
+covers re-adds). `UnsafeCell` gives interior mutability through `&self` for
+filter reads while the Phase 9 scheduler's per-`(archetype, component)`
+exclusivity keeps writes sound; adjacent-row writes from sibling `par_iter`
+chunks target distinct locations (Round 2 C3).
 
 ZST components are rejected at `new` (`debug_assert!(size > 0)`).
 
@@ -1017,8 +1034,8 @@ Bevy-style per-row tick storage (Phase 10). Module:
   — wrapping-safe `is_newer_than(last_run, this_run)` (Round-3 C-NEW-1 fixed the
   transposed-operand formula); `MAX_CHANGE_AGE = u32::MAX - (2 *
   CHECK_TICK_THRESHOLD - 1)`, `CHECK_TICK_THRESHOLD = 518_400_000`.
-- Per-row storage: `ComponentPool::{added_ticks, changed_ticks}:
-  Box<[UnsafeCell<Tick>]>` (§2.3).
+- Per-row storage: the pool's `[added | changed]` tick sub-regions
+  (`added_base`/`changed_base: NonNull<UnsafeCell<Tick>>`, Phase X.I — §2.3).
 - `EcsMaster::change_tick: AtomicU32` bumped once per `Schedule::run`; per-system
   `last_run`/`this_run` snapshot on `SystemMeta`, written via
   `System::set_change_ticks` (the C1 single dispatcher→system channel).

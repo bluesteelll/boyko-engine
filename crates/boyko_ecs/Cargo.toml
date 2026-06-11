@@ -86,6 +86,19 @@ harness = false
 name = "archetype"
 harness = false
 
+# Phase X.I — XI-B2 archetype-creation gate (create_by_ids <= 25 us; pools
+# are reserve-only post-X.I). See docs/PHASE-XI-PLAN.md §Metrics.
+[[bench]]
+name = "archetype_create"
+harness = false
+
+# Phase X.I — XI-B4 growth-event gate (one grow_rows commit step at
+# 64 KiB / 2 MiB / 64 MiB <= 10 / 10 / 50 us). Gate figures are the printed
+# `pool_grow_event[...]` lines. See docs/PHASE-XI-PLAN.md §Metrics.
+[[bench]]
+name = "pool_grow_event"
+harness = false
+
 [[bench]]
 name = "event_dispatch"
 harness = false

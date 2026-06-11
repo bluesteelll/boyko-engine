@@ -66,6 +66,14 @@ harness = false
 name = "growth_crossing"
 harness = false
 
+# Phase X.I — g8 growth-crossing into ONE archetype: 1 M entities, 15x past
+# the old 65,536-row pool ceiling (impossible pre-X.I). Binding targets
+# (XI-B6): total >= 1.5x faster than Bevy, worst-sub-batch spike <= 0.1x.
+# See docs/PHASE-XI-PLAN.md §Metrics.
+[[bench]]
+name = "growth_crossing_pool"
+harness = false
+
 [[bench]]
 name = "g6_for_each_chunk"
 harness = false
