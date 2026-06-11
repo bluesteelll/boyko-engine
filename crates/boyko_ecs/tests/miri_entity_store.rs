@@ -19,7 +19,6 @@
 //! known class as the miri_phase8a/8cd/8_5/14a suites (PHASE-XF-RESULTS.md).
 #![cfg(miri)]
 
-use boyko_ecs::ecs::core::component::component::Component;
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_macros::{Bundle, Component};
 
@@ -32,20 +31,6 @@ struct MPayload {
 #[derive(Bundle)]
 struct MBundle {
     payload: MPayload,
-}
-
-#[derive(Component)]
-#[repr(C)]
-struct MFreshPayload {
-    value: u32,
-}
-
-/// Second bundle type for the post-`clear()` phase — sidesteps the
-/// PRE-EXISTING stale-bundle-cache-after-clear limitation (see
-/// `tests/entity_store_growth.rs` FreshBundle doc + PHASE-XG-RESULTS.md).
-#[derive(Bundle)]
-struct MFreshBundle {
-    payload: MFreshPayload,
 }
 
 /// M2 — EntityMaster churn through the public API on the fallback arm:
@@ -89,14 +74,16 @@ fn m2_entity_churn_on_fallback_arm() {
     }
 
     // Clear + regrow (the D5 memset under Miri) — fresh world semantics.
+    // Reuses the SAME bundle type as before the clear: the stale
+    // bundle-archetype cache across `clear()` is fixed (clear() resets the
+    // per-world bundle caches), so the former MFreshBundle workaround is
+    // gone. Dedicated regression suite: tests/clear_respawn.rs.
     world.clear();
     let fresh = world
-        .spawn_batch(
-            (0..60u32).map(|i| MFreshBundle { payload: MFreshPayload { value: 1000 + i } }),
-        )
+        .spawn_batch((0..60u32).map(|i| MBundle { payload: MPayload { value: 1000 + i } }))
         .expect("regrow after clear");
     for (i, &e) in fresh.iter().enumerate() {
-        let v = world.get_component::<MFreshPayload>(e).expect("fresh entity readable");
+        let v = world.get_component::<MPayload>(e).expect("fresh entity readable");
         assert_eq!(v.value, 1000 + i as u32);
     }
 }

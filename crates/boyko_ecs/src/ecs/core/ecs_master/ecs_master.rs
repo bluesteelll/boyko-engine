@@ -2860,10 +2860,41 @@ impl EcsMaster {
         }
     }
 
-    /// Clears all entities and archetypes from the system
+    /// Clears all entities and archetypes from the system.
+    ///
+    /// Also resets the per-world bundle caches ([`Self::bundle_archetype_cache`]
+    /// and [`Self::bundle_column_cache`]): both hold `ArchetypeId`s /
+    /// `InlandPoolId`s resolved against the pre-clear archetype registry, which
+    /// `archetype_master.clear()` discards (`next_archetype_id` rolls back to
+    /// `ArchetypeId(1)`). Without the reset, respawning a bundle type that was
+    /// used before the clear would read a stale id — either unregistered
+    /// (panic: "cached_archetype_id returned an unregistered id" class) or
+    /// aliased to a *different* post-clear archetype that happens to reuse the
+    /// numeric id (silent wrong-archetype writes).
+    ///
+    /// The query-state cache needs no reset: `ArchetypeMaster::clear()` bumps
+    /// `structural_generation`, and `QueryDataState::update` (run on every
+    /// `query()` call) performs a full rebuild on mismatch.
     pub fn clear(&mut self) {
         self.entity_master.clear();
         self.archetype_master.clear();
+        // Replace (not mutate) the OnceLock wrappers: the next access through
+        // `bundle_archetype_cache()` / `bundle_column_cache()` lazily
+        // re-materialises an empty cache, exactly like a fresh world
+        // (`EcsMaster::new` initialises the same fields the same way — which
+        // is also why a SECOND world in the same process never observes
+        // another world's cached ids). The warm read path is untouched: same
+        // accessors, same Acquire loads, zero added compares — `clear()` is
+        // the only writer and it holds `&mut self`.
+        //
+        // The `&'static [InlandPoolId]` slices leaked by the old
+        // `BundleColumnRecord`s stay alive by design: records are `Copy` and
+        // the slices may have escaped as `'static` borrows, so reclaiming
+        // them would be unsound. The leak per clear() is bounded by the same
+        // SBO6 bound that already applies per world
+        // (`MAX_BUNDLE_TYPES × MAX_BUNDLE_ARITY × 4 B` worst case).
+        self.bundle_archetype_cache = OnceLock::new();
+        self.bundle_column_cache = OnceLock::new();
         // Note: We don't clear the arena as it manages its own memory
     }
 }

@@ -20,25 +20,6 @@ struct GrowthBundle {
     payload: GrowthPayload,
 }
 
-#[derive(Component)]
-#[repr(C)]
-struct FreshPayload {
-    value: u64,
-}
-
-/// Second bundle type for I3's post-`clear()` respawn. PRE-EXISTING
-/// limitation (discovered by this suite, NOT an X.G regression): the
-/// Phase-8.5 process-global static bundle cache survives `EcsMaster::clear()`
-/// while the archetype registry does not, so spawning a bundle type whose
-/// cache was populated BEFORE the clear panics
-/// ("cached_archetype_id returns a registered id"). Filed in
-/// PHASE-XG-RESULTS.md; a bundle type first spawned AFTER the clear is
-/// unaffected.
-#[derive(Bundle)]
-struct FreshBundle {
-    payload: FreshPayload,
-}
-
 /// I1 â€” 100k entities via `spawn_batch` in 1,000-entity sub-batches: crosses
 /// several former Vec-doubling thresholds (9192-anchored chain: 9192, 18384,
 /// 36768, 73536) with the X.G store. Every spawned handle must stay valid and
@@ -139,20 +120,24 @@ fn i3_clear_respawn_no_stale_liveness() {
 
     // Respawn a smaller, then a larger population (regrow past the old
     // high-water on the SECOND cycle â€” the two-cycle invariant-J case).
+    // Reuses the SAME bundle type as the pre-clear population: the stale
+    // bundle-archetype cache across `clear()` is fixed (clear() resets the
+    // per-world bundle caches), so the former FreshBundle workaround is gone.
+    // The dedicated regression suite is tests/clear_respawn.rs.
     let mut fresh = Vec::with_capacity(30_000);
     for batch in 0..30u64 {
         let base = 1_000_000 + batch * 1_000;
         fresh.extend(
             world
-                .spawn_batch((0..1_000u32).map(move |i| FreshBundle {
-                    payload: FreshPayload { value: base + i as u64 },
+                .spawn_batch((0..1_000u32).map(move |i| GrowthBundle {
+                    payload: GrowthPayload { value: base + i as u64 },
                 }))
                 .expect("respawn"),
         );
     }
     for &idx in &[0usize, 19_999, 20_000, 29_999] {
         let v = world
-            .get_component::<FreshPayload>(fresh[idx])
+            .get_component::<GrowthPayload>(fresh[idx])
             .unwrap_or_else(|| panic!("fresh entity #{idx} unreadable after clear+respawn"));
         assert_eq!(v.value, 1_000_000 + idx as u64);
     }

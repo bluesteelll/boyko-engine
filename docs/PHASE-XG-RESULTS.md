@@ -87,11 +87,15 @@ spawn path is dramatically faster, and the worst-event profile is now flat.
   position rests on the documented OS zero-fill contracts + equivalence with
   `alloc_zeroed` (calloc fresh-page paths); Miri validates only the fallback arm; the
   native U-V3/U-S3 witnesses cover the syscall arms.
-- **Pre-existing bug discovered by I3 (NOT an X.G regression):** `EcsMaster::clear()`
-  leaves the Phase-8.5 process-global static bundle cache stale — spawning a bundle type
-  whose cache was populated BEFORE the clear panics ("cached_archetype_id returns a
-  registered id"). Repro + workaround documented in `tests/entity_store_growth.rs`
-  (FreshBundle); filed as a standalone task (multi-world interactions likely worse).
+- **Pre-existing bug discovered by I3 (NOT an X.G regression) — FIXED post-X.G:**
+  `EcsMaster::clear()` left the Phase-8.5 bundle caches stale — spawning a bundle type
+  whose cache was populated BEFORE the clear panicked ("cached_archetype_id returns a
+  registered id"). Investigation showed the caches are per-WORLD `EcsMaster` fields
+  (not process-global as first assumed; only the `BundleTypeId` mint is global), so the
+  fix is a per-world cache reset inside `clear()` (zero warm-path cost — no epoch
+  compare needed) and the multi-world case was never broken (`EcsMaster::new()` starts
+  cold). FreshBundle/MFreshBundle workarounds removed; regression suite:
+  `tests/clear_respawn.rs` (clear+respawn both spawn paths + the multi-world pin).
 - Phase X.H: migrate arena.rs onto vm.rs (twin-comment cross-references in place;
   the arena-side reciprocal comment was deferred to X.H to keep arena.rs byte-stable).
 - `iter_entities` dense +23% — cold inspection API; revisit only if a hot consumer
