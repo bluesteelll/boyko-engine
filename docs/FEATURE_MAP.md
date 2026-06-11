@@ -11,9 +11,10 @@ piece of functionality lives, start here, then go to
 - ❌ Not implemented (deliberately — see linked rationale)
 
 > The `ecs` branch builds clean. The current state is the cumulative result of
-> Phases 2 → 19 plus the 9.x executor-soundness series, the X.x perf series
-> (X.A `for_each_chunk`, X.B `Unit` removal, X.C arena lazy-commit, X.D
-> EntityMaster slot reduction, X.E bench methodology), Phases 14a/14b
+> Phases 2 → 20 plus the 9.x executor-soundness series, the X.x perf series
+> (X.A `for_each_chunk`, X.B `Unit` removal, X.D EntityMaster slot reduction,
+> X.E bench methodology, X.C/X.F/X.G/X.H/X.I reserve/commit storage —
+> culminating in X.J retiring the shared Arena), Phases 14a/14b
 > (hooks + observers), and Phase 19 (parent-child hierarchies on the hook
 > substrate). Each phase's authoritative record is its
 > `docs/PHASE-*-RESULTS.md`. Line numbers below are verified against the
@@ -47,42 +48,42 @@ piece of functionality lives, start here, then go to
 | Send/read events between systems | [Events](#events) |
 | Shared global data | [Resources](#resources) |
 | Low-level component byte storage | [Type-erased component storage](#type-erased-component-storage) |
-| Allocate raw memory | [Memory and allocation](#memory-and-allocation) |
+| Reserve/commit raw memory | [Memory and allocation](#memory-and-allocation) |
 
 ---
 
 ## High-level facade (EcsMaster)
 
-The world object. Owns the entity manager, archetype manager, arena, resources,
-event dispatcher, change-detection tick, the deferred-hook queue, and the
-per-`(D,F)` query/bundle caches.
+The world object. Owns the entity manager, archetype manager (whose pools own
+their backing reservations), resources, event dispatcher, change-detection
+tick, the deferred-hook queue, and the per-`(D,F)` query/bundle caches.
 
 **File:** [core/ecs_master/ecs_master.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs)
 
 | What you want to do | Method (line) |
 |---------------------|---------------|
-| Construct an ECS instance | `EcsMaster::new()` (409) / `with_capacity(entity_cap, arch_cap)` (465) |
-| Create an archetype | `create_archetype(&[ComponentId])` (544) / `get_or_create_archetype(...)` (551) |
-| Spawn (raw byte API) | `create_entity(arch_id, &[(ComponentId, &[u8])]) -> EcsResult<Entity>` (584) |
-| Spawn (typed, 1–2 comps) | `spawn_one::<A>(arch, a)` (965) / `spawn_two::<A, B>(arch, a, b)` (1001) |
-| Spawn many (typed bundle) | `spawn_batch::<B, I>(iter) -> EcsResult<Vec<Entity>>` (2535) |
-| Delete an entity | `delete_entity(entity) -> bool` (1119) |
-| Read a component (raw) | `get_component_raw(entity, id)` (1209) |
-| Mutate a component (change-tracked) | `get_component_mut::<T>(entity) -> Option<Mut<'_, T>>` (1386) |
-| Write a component (raw bytes) | `set_component_raw(entity, id, &[u8])` (1305) |
-| Check entity / component presence | `has_entity` (1449) / `has_component` (1467) |
-| Counts | `entity_count` (1504) / `archetype_count` (1510) |
-| Iterate entities (cold inspection) | `iter_entities()` (1522) — O(capacity) fast-store scan |
-| Query entity IDs by components | `query_entities(&[ComponentId]) -> Vec<Entity>` (1527) — allocates; prefer the typed `Query` |
-| Direct typed query (no SystemParam) | `query::<D, F>() -> QueryView<'_, D, F>` (2614) |
-| Run a closure as a system once | `run_system::<F, M, Out>(system) -> Out` (1821) |
-| Run a pre-built cached `System` | `run_cached_system::<S>(&mut system) -> S::Out` (1853) |
-| Resources | `insert_resource::<R>` (1957) / `resource::<R>() -> &R` (2140) (+ `_mut`) |
-| Hooks (runtime) | `register_component_hooks::<C>() -> ComponentHooksBuilder` (2016) |
-| Observers | `observe_on_{add,insert,replace,remove}::<C>(runner)` (2065/2073/2083/2092), `add_observer` (2104), `remove_observer` (2121) |
-| States (direct) | `insert_state` (2225) / `init_state` (2243) / `state::<S>()` (2254) / `set_next_state` (2277) |
-| Events (direct) | `send_event::<E>(thread_index, event)` (1710) / `update_events()` (1728) |
-| Drop everything | `clear()` (2740) |
+| Construct an ECS instance | `EcsMaster::new()` (375) / `with_capacity(entity_cap, arch_cap)` (413) |
+| Create an archetype | `create_archetype(&[ComponentId])` (484) / `get_or_create_archetype(...)` (491) |
+| Spawn (raw byte API) | `create_entity(arch_id, &[(ComponentId, &[u8])]) -> EcsResult<Entity>` (524) |
+| Spawn (typed, 1–2 comps) | `spawn_one::<A>(arch, a)` (901) / `spawn_two::<A, B>(arch, a, b)` (937) |
+| Spawn many (typed bundle) | `spawn_batch::<B, I>(iter) -> EcsResult<Vec<Entity>>` (2553) |
+| Delete an entity | `delete_entity(entity) -> bool` (1055) |
+| Read a component (raw) | `get_component_raw(entity, id)` (1186) |
+| Mutate a component (change-tracked) | `get_component_mut::<T>(entity) -> Option<Mut<'_, T>>` (1363) |
+| Write a component (raw bytes) | `set_component_raw(entity, id, &[u8])` (1282) |
+| Check entity / component presence | `has_entity` (1429) / `has_component` (1447) |
+| Counts | `entity_count` (1484) / `archetype_count` (1490) |
+| Iterate entities (cold inspection) | `iter_entities()` (1502) — O(capacity) fast-store scan |
+| Query entity IDs by components | `query_entities(&[ComponentId]) -> Vec<Entity>` (1507) — allocates; prefer the typed `Query` |
+| Direct typed query (no SystemParam) | `query::<D, F>() -> QueryView<'_, D, F>` (2632) |
+| Run a closure as a system once | `run_system::<F, M, Out>(system) -> Out` (1795) |
+| Run a pre-built cached `System` | `run_cached_system::<S>(&mut system) -> S::Out` (1827) |
+| Resources | `insert_resource::<R>` (1945) / `resource::<R>() -> &R` (2128) (+ `_mut`) |
+| Hooks (runtime) | `register_component_hooks::<C>() -> ComponentHooksBuilder` (2004) |
+| Observers | `observe_on_{add,insert,replace,remove}::<C>(runner)` (2053/2061/2071/2080), `add_observer` (2092), `remove_observer` (2109) |
+| States (direct) | `insert_state` (2213) / `init_state` (2231) / `state::<S>()` (2242) / `set_next_state` (2265) |
+| Events (direct) | `send_event::<E>(thread_index, event)` (1684) / `update_events()` (1702) |
+| Drop everything | `clear()` (2772) |
 
 Spawn / fallible paths return `EcsResult<T>` — see
 [core/error.rs](../crates/boyko_ecs/src/ecs/error.rs) for the
@@ -321,8 +322,9 @@ barrier.
 | The thread pool | [boyko_threadpool/](../crates/boyko_threadpool/src/lib.rs) ✅ | `ThreadPool` / `ThreadPoolBuilder` / `Scope` — `install` (dispatcher) vs `scope` (worker-safe, used by `par_iter`) |
 
 **Soundness:** the executor is proven sound and Tree-Borrows-clean (Phase
-9.1/9.2/9.3 — loom + Miri). `Arena` stays `!Send + !Sync`; allocation is
-restricted to the dispatcher + `ScheduleBuilder::build` (ALLOC1 TLS guard).
+9.1/9.2/9.3 — loom + Miri). Structural allocation (frontier commits, container
+growth) is restricted to the dispatcher + `ScheduleBuilder::build` (ALLOC1 TLS
+discipline).
 See [PHASE-9.2-RESULTS.md](PHASE-9.2-RESULTS.md), [PHASE-9.3c-RESULTS.md](PHASE-9.3c-RESULTS.md).
 
 ### System ordering & sets
@@ -515,7 +517,7 @@ fix (Phase 5c). `MAX_ARCHETYPES = 1024`.
 
 | What you want to do | Where | Method |
 |---------------------|-------|--------|
-| Create a pool | [memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs) ✅ | `ComponentPool::new(_arena, component_id, n, m)` — explicit row ceiling `n × m` EXACTLY (X.I D2 mapping; arena param vestigial → X.J); `with_default_sizes` = byte-targeted clamp sizing |
+| Create a pool | [memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs) ✅ | `ComponentPool::new(component_id, reserve_rows)` — explicit row ceiling EXACTLY, clamp-bypass by design (★R1-9; X.J collapsed the legacy `(arena, id, n, m)` shape, `reserve_rows = n × m`); `with_default_sizes(component_id)` = byte-targeted clamp sizing |
 | Grow a pool (automatic) | [memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs) ✅ | `#[cold] grow_rows` — per-pool `VmReservation [data\|added\|changed]`, slab doubling 64 KiB…64 MiB, ticks lockstep, idempotent, O(1) in live rows, bases never move (Phase X.I). 1M-entity single-archetype ramp **2.24× faster than Bevy**, worst-batch spike **0.022×** ([PHASE-XI-RESULTS.md](PHASE-XI-RESULTS.md)) |
 | Committed-rows frontier (diagnostics) | [memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs) ✅ | `committed_rows()`; `capacity()` = reserve ceiling |
 | Append a component (raw bytes) | [memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs) ✅ | `add(&[u8])` |
@@ -545,21 +547,20 @@ written-never-read; a per-mutation `udiv` died with them). See
 
 | What you want to do | Where | Method |
 |---------------------|-------|--------|
-| Construct the arena | [memory/arena.rs](../crates/boyko_ecs/src/ecs/memory/arena.rs) ✅ | `Arena::with_reserve(reserve, initial_commit)` — 4 GiB reserve + lazy slab commit, GROWS on demand, addresses never move (Phase X.F); `with_capacity(c)` = eager back-compat; `EcsMaster::with_arena_reserve(bytes)` knob |
-| Grow the arena (automatic) | [memory/arena.rs](../crates/boyko_ecs/src/ecs/memory/arena.rs) ✅ | `#[cold] grow_then_retry` — commit next slab at the frontier + retry; panic only at reserve exhaustion. Growth-crossing spawn **1.75× faster than Bevy** ([PHASE-XF-RESULTS.md](PHASE-XF-RESULTS.md)) |
-| Allocate a block | [memory/arena.rs](../crates/boyko_ecs/src/ecs/memory/arena.rs) ✅ | `allocate_layout(layout)` / `allocate(size)` |
-| Free the arena | [memory/arena.rs](../crates/boyko_ecs/src/ecs/memory/arena.rs) ✅ | `impl Drop` — per-cfg-arm matching deallocator (M-001) |
-| Best-fit free-block tracking | [memory/free_mem_block.rs](../crates/boyko_ecs/src/ecs/memory/free_mem_block.rs) ✅ | `MemFreeBlockMaster::allocate_aligned` / `find_best_fit` / `insert` (O(1) coalesce) / `defragment` |
+| Reserve/commit a VM range | [memory/vm.rs](../crates/boyko_ecs/src/ecs/memory/vm.rs) ✅ | `VmReservation::{reserve, commit, base, os_len}` — the single per-OS primitive under `InlandStore` and every `ComponentPool` (X.G/X.H/X.I) |
+| Grow a pool (automatic) | [memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs) ✅ | `#[cold] grow_rows` — slab doubling 64 KiB…64 MiB, ticks in lockstep, bases never move (Phase X.I; see [Type-erased component storage](#type-erased-component-storage)) |
+| Grow the entity store (automatic) | [entity/inland_store.rs](../crates/boyko_ecs/src/ecs/core/entity/inland_store.rs) ✅ | `#[cold] grow_to` via `ensure(n)` — 256 KiB…16 MiB slabs, demand-zero = `EntityInland::NULL` (Phase X.G) |
 | Align an address/size | [memory/utils.rs](../crates/boyko_ecs/src/ecs/memory/utils.rs) ✅ | `align_up(value, alignment)` |
-| Reserve/commit a VM range | [memory/vm.rs](../crates/boyko_ecs/src/ecs/memory/vm.rs) ✅ | `VmReservation::{reserve, reserve_unzeroed, commit}` — the shared per-OS primitive under the arena, `InlandStore`, and every `ComponentPool` (X.G/X.H/X.I) |
 
-`Arena` is `!Send + !Sync` by construction. Backing acquisition (Phase X.F):
-reserve-only syscall (`VirtualAlloc(MEM_RESERVE, PAGE_NOACCESS)` on Windows,
-`mmap(PROT_NONE)` on Unix) + lazy geometric slab commits at the frontier
-(`MEM_COMMIT`/`mprotect`); Miri / wasm32 / exotic targets eagerly allocate the
-full reserve from the global allocator (growth = watermark bump). `Arena::new`
-≈ 762 ns (reserve-only, zero commit charge). See
-[PHASE-XC-RESULTS.md](PHASE-XC-RESULTS.md) + [PHASE-XF-RESULTS.md](PHASE-XF-RESULTS.md).
+There is no shared allocator: **the Arena + `MemFreeBlockMaster` were DELETED
+in Phase X.J** (client-less since X.I — every pool owns its memory via a
+per-pool `VmReservation`). Backing acquisition: reserve-only syscall
+(`VirtualAlloc(MEM_RESERVE, PAGE_NOACCESS)` on Windows, `mmap(PROT_NONE)` on
+Unix) + lazy geometric slab commits at the frontier (`MEM_COMMIT` /
+`mprotect`); Miri / wasm32 / exotic targets eagerly `alloc_zeroed` the full
+reserve (commit = no-op). `Drop` uses the per-cfg-arm matching deallocator
+(M-001). See [PHASE-XI-RESULTS.md](PHASE-XI-RESULTS.md) +
+[PHASE-XJ-RESULTS.md](PHASE-XJ-RESULTS.md).
 
 ---
 

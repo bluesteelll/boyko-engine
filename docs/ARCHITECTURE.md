@@ -45,11 +45,9 @@ boyko-engine/
 │   │           ├── error.rs              # EcsError / EcsResult (no anyhow)
 │   │           ├── identifiers/primitives.rs   # EntityId / ArchetypeId / ComponentId / … newtypes
 │   │           ├── memory/
-│   │           │   ├── vm.rs                 # VmReservation — shared reserve/commit primitive (X.G/X.H)
-│   │           │   ├── arena.rs              # growable arena on vm.rs (X.F/X.H; client-less since X.I → X.J)
-│   │           │   ├── free_mem_block.rs     # best-fit free-block tracker
+│   │           │   ├── vm.rs                 # VmReservation — the per-OS reserve/commit primitive (X.G; sole backing since X.J)
 │   │           │   ├── component_pool.rs     # type-erased SELF-GROWING pool, [data|added|changed] reservation (X.I)
-│   │           │   └── utils.rs              # align_up
+│   │           │   └── utils.rs              # align_up  (arena.rs + free_mem_block.rs DELETED in X.J)
 │   │           └── core/
 │   │               ├── app/              # App builder + Plugin + Plugins + AppExit (Phase 18); multi-schedule frame driver Main+Fixed (Phase 20)
 │   │               ├── archetype/        # Archetype (inline columns), signature, registry, bundle slab, master
@@ -94,8 +92,9 @@ bench_bevy_vs_boyko ──→ boyko_ecs, boyko_macros, bevy, criterion
 
 External runtime deps of `boyko_ecs`: `fixedbitset` (scheduler conflict/condition
 bitsets), `crossbeam-queue` / `crossbeam-utils`, `static_assertions` (compile-time
-`Send`/`Unpin` pins), optional `mimalloc` (bench-only), `libc` (Unix arena
-`mmap`). **`anyhow` and `ctor` were removed** (C-019 / lazy-mint ID model).
+`Send`/`Unpin` pins), optional `mimalloc` (bench-only), `libc` (Unix
+`mmap`/`mprotect` for `VmReservation`). **`anyhow` and `ctor` were removed**
+(C-019 / lazy-mint ID model).
 
 > **The `boyko-macros` cycle (Phase 18).** `boyko_macros` depends on `boyko_ecs`
 > (its derives expand to `::boyko_ecs::…` paths), so `boyko_ecs` can only keep it
@@ -142,8 +141,8 @@ bitsets), `crossbeam-queue` / `crossbeam-utils`, `static_assertions` (compile-ti
                                 ↑
 ┌────────────────────────────────────────────────────────────────────┐
 │  Layer 0: Type-Erased Memory  +  Utils (boyko_utils)              │
-│  Arena → ComponentPool (type-erased, row = buffer+i*stride,       │
-│           + per-row Tick columns) · MemFreeBlockMaster             │
+│  VmReservation (reserve/commit) → ComponentPool (type-erased,     │
+│       self-growing, row = buffer+i*stride, + per-row Tick columns)│
 │  BitSet<T> / BitSet256 · SparseMap / SparseSlotMap · Slot · IDs   │
 └────────────────────────────────────────────────────────────────────┘
 ```
@@ -162,7 +161,7 @@ User → EcsMaster::create_entity(archetype_id, &[(ComponentId, &[u8])])
     │      ├─ Two-phase commit (C-009): bundle.can_push_entity_components(...)
     │      │      └─ false → entity_master.rewind_allocate(entity);
     │      │                  Err(EcsError::ArchetypeRejectedEntity)
-    │      ├─ bundle.push_entity_components(...) — lockstep memcpy into arena
+    │      ├─ bundle.push_entity_components(...) — lockstep memcpy into the pool columns
     │      └─ fill the per-row added_ticks/changed_ticks with the world's tick
     └─ EntityMaster::register_entity_with_ptr(entity, &mut *archetype, row)
               └─ write the EntityInland fast-store slot { archetype_ptr, row, gen };
@@ -223,9 +222,10 @@ frame boundary.
 
 **Aliasing discipline (Phase 9 SCH7 / ALLOC1):** `&mut EcsMaster` (used by
 `apply`) is held only inside the apply window, where the gate proves no worker
-cell aliases it. `Arena::allocate_*` is `debug_assert!`-guarded against the
-`IN_SYSTEM_RUN` TLS flag, so all structural growth happens on the dispatcher or
-during `ScheduleBuilder::build`, never from a worker.
+cell aliases it. All structural growth (pool/store frontier commits, container
+growth) happens on the dispatcher or during `ScheduleBuilder::build`, never
+from a worker — the `IN_SYSTEM_RUN` TLS flag (ALLOC1) lets context-restricted
+paths `debug_assert!` the discipline.
 
 ## Key architectural decisions
 
@@ -248,7 +248,7 @@ and access uses `unsafe { &*(ptr as *const T) }` with a SAFETY comment.
 `master` used `UnitId { chunk, inland }` (two-level). `ecs` first cached a
 `Unit { ptr }` per row; **Phase X.B eliminated that cache** (every entry equalled
 `buffer + i*stride`) — rows are now `buffer.as_ptr().add(i * stride)` (the private
-`row_ptr(i)`) from the pool's stable write-once arena base, with `len` the
+`row_ptr(i)`) from the pool's stable write-once reservation base, with `len` the
 live-row count. Net-removes `unsafe`, saves 8 B/row + one alloc/pool, zero
 read-path cost. **Phase 10** then added the parallel `added_ticks` /
 `changed_ticks` columns (`Box<[UnsafeCell<Tick>]>`). See
@@ -267,16 +267,24 @@ pointer** so `get_component_raw` reaches the table without a `SparseMap`
 indirection (~3 ns/lookup). The `ArchetypeBundle` slab gives every `Archetype` a
 stable heap address so those pointers + per-`(D,F)` caches stay valid.
 
-### 4. Arena lazy-commit backing (Phase X.C)
+### 4. Reserve/commit virtual-memory backing (Phases X.C → X.F → X.G/X.H → X.I/X.J)
 
-**Where:** [memory/arena.rs](../crates/boyko_ecs/src/ecs/memory/arena.rs)
+**Where:** [memory/vm.rs](../crates/boyko_ecs/src/ecs/memory/vm.rs)
 
-`Arena::with_capacity` acquires its 64 MB via ONE
-reserve+demand-zero-commit syscall — `VirtualAlloc(MEM_RESERVE|MEM_COMMIT)`
-(Windows, hand-declared FFI), `mmap(MAP_PRIVATE|MAP_ANONYMOUS)` (Unix, `libc`) —
-with a global-`alloc` fallback for Miri / wasm32 / exotic targets. `Arena::new`
-≈ 1.10 µs (was ~23-75 µs); pages fault in lazily exactly as before. `Drop` uses a
-cfg-gated matching deallocator (M-001). See [PHASE-XC-RESULTS.md](PHASE-XC-RESULTS.md).
+Every storage owner backs itself with a `VmReservation`: a write-once
+virtual-address reservation (`VirtualAlloc(MEM_RESERVE, PAGE_NOACCESS)` on
+Windows via hand-declared FFI, `mmap(PROT_NONE)` on Unix via `libc`) committed
+lazily in geometric frontier slabs (`MEM_COMMIT` / `mprotect(RW)`, demand-zero)
+— **growth never reallocates, copies, or moves a base**. A
+`cfg(any(miri, not(any(windows, unix))))` fallback arm eagerly `alloc_zeroed`s
+the full reserve (commit = no-op) so Miri / wasm32 model the same bookkeeping;
+`Drop` uses the per-cfg-arm matching deallocator (M-001). The lineage: X.C
+taught the shared Arena lazy commit, X.F gave it the huge reserve + frontier
+slabs, X.G extracted `VmReservation` for the entity `InlandStore`, X.I gave
+every `ComponentPool` its own `[data|added|changed]` reservation — and X.J
+**deleted the then-client-less shared Arena** (+ `MemFreeBlockMaster`)
+outright. See [PHASE-XI-RESULTS.md](PHASE-XI-RESULTS.md) +
+[PHASE-XJ-RESULTS.md](PHASE-XJ-RESULTS.md).
 
 ### 5. Global `ComponentRegistry` / `EventRegistry` / `ResourceRegistry` (lazy IDs)
 
@@ -356,8 +364,10 @@ apply-window barrier (C4) keeps `&mut EcsMaster` (used by `apply`) from aliasing
 any worker `UnsafeEcsCell`. `EcsMaster` / `UnsafeEcsCell` / `Resources` /
 `EntityMaster` / `ArchetypeMaster` / `EventDispatcher` / `ComponentPool` /
 `Archetype` carry explicit `unsafe impl Send + Sync` gated by the aliasing +
-no-alloc-in-system contracts; **`Arena` stays `!Send + !Sync`** (allocation
-restricted to the dispatcher + build, ALLOC1 TLS guard). The whole pool + `Scope`
+no-alloc-in-system contracts; structural allocation stays restricted to the
+dispatcher + build (ALLOC1 TLS discipline; the shared `!Send + !Sync` Arena
+that anchored the historical wording was retired in X.J — the SEND1
+justification is updated in place). The whole pool + `Scope`
 fork/join + parallel `Schedule::run` is proven sound and Tree-Borrows-clean
 (Phase 9.1/9.2/9.3 — loom + Miri). See
 [PHASE-9-PARALLEL-SCHEDULER-PLAN.md](PHASE-9-PARALLEL-SCHEDULER-PLAN.md),
@@ -415,8 +425,8 @@ AVX2-loadable (trivially satisfied — every reservation base is ≥ 4096-aligne
    `AtomicUsize`; the pool is Chase-Lev work-stealing.
 
 Constraints, by construction:
-- `Arena` is `!Send + !Sync` — allocation only on the dispatcher / at build
-  (ALLOC1 TLS guard).
+- Structural allocation (frontier commits, container growth) only on the
+  dispatcher / at build (ALLOC1 TLS discipline).
 - Structural mutation (`apply`, archetype growth, entity-vec growth) runs only in
   the apply window where `running == 0`.
 - Events route per-worker-TLS lane; `update_events` swaps at the frame boundary.
@@ -433,7 +443,7 @@ Per [PHASE-12.6-RESULTS.md](PHASE-12.6-RESULTS.md) +
 | `par_iter` 10k | **~2.93× faster than Bevy** |
 | query iter (direct API) | **~parity** (inner loop byte-identical in asm) |
 | `for_each_chunk` 3-component reduction (native SIMD) | **~1.28–1.34× faster** |
-| `EcsMaster::new` | ~7-23 µs (was 712 µs — 9-31× + the X.C Arena win) |
+| `EcsMaster::new` | ~4.24 µs (was 712 µs — the 12.6/X.C/X.F lazy-init chain + the X.J arena retirement) |
 | spawn (single / batch) | structurally constrained vs Bevy on single; batch warm path ~1.35× of Bevy |
 
 Bench methodology (deterministic `[profile.bench] codegen-units = 1`, opt-in
@@ -448,7 +458,7 @@ Bench methodology (deterministic `[profile.bench] codegen-units = 1`, opt-in
 | Chunk | `Chunk<T>` stores data | DELETED (X.I) — vestigial metadata, written-never-read |
 | Row addressing | `UnitId { chunk, inland }` | computed `buffer + i*stride` (`Unit` cache removed Phase X.B) |
 | Random component access | two-level lookup | inline per-archetype `Column` table at offset 0 (Phase 7) |
-| Arena backing | global `alloc` | `VirtualAlloc`/`mmap` lazy-commit (Phase X.C) |
+| Memory backing | shared `Arena` on global `alloc` | per-pool `VmReservation` reserve/commit (`VirtualAlloc`/`mmap`, X.G/X.I); the shared Arena RETIRED in X.J |
 | Entity ID | `u32` + gen `u16` | newtype `EntityId(usize)` + gen `usize` (C-017) |
 | EntityMaster | ⚠️ missing | ✅ recycling + direct `Vec<EntityInland>` slab-ptr fast store (Phase 7 + X.D) |
 | Archetype / EcsMaster | ⚠️ stub | ✅ full implementation |
