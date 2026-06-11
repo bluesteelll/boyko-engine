@@ -74,8 +74,12 @@ const COINCIDENT_EPSILON_SQ: f32 = 1e-6;
 /// Speed (world units/s) mapped to the top of the ball base-color ramp.
 const BALL_COLOR_SPEED_MAX: f32 = 120.0;
 
-/// Packed RGBA8 flash color for a just-collided ball (a hot white-yellow).
-const COLLISION_FLASH_COLOR: [u8; 4] = [255, 240, 120, 255];
+/// Flash color (RGBA8 components) for a just-collided ball (a hot
+/// white-yellow). `pub` so the T4 interpolation test can re-derive the packed
+/// tint via `GpuInstance::pack_rgba8` instead of duplicating the magic bytes
+/// (Phase 20.1 ★n10; integration tests are an external crate, so `pub(crate)`
+/// would not reach them).
+pub const COLLISION_FLASH_COLOR: [u8; 4] = [255, 240, 120, 255];
 
 /// Applies gravity and integrates every ball's position (plan §6.5 Physics).
 ///
@@ -334,6 +338,12 @@ pub fn apply_ball_motion(
 /// speed-cued base color. [`tint_collided`] then overlays the collision flash on
 /// top. Keeping this in a separate physics system leaves the shared
 /// `sync_gpu_instance` untouched for the other modes.
+///
+/// Phase 20.1 D3: **field-granular writes, never `prev_pos`** — the shared
+/// `sync_gpu_instance` is the single prev maintainer (its shuffle already ran
+/// this substep). The `pos` write is kept even though the shared sync wrote
+/// the same value (Q2 ruling): same bytes, zero cost, and it removes a hidden
+/// ordering dependency on the shared pass having written pos first.
 pub fn sync_ball_gpu(
     mut query: Query<(&Position, &Velocity, &Radius, &mut GpuInstance), With<BallTag>>,
     params: Res<PhysicsParams>,
@@ -344,7 +354,9 @@ pub fn sync_ball_gpu(
             // Base color cues speed (slow = teal, fast = warm) so motion reads
             // even before a collision; the tint overlays the flash afterward.
             let speed = (vel.x * vel.x + vel.y * vel.y).sqrt();
-            *inst = GpuInstance::new([pos.x, pos.y], radius.0 * size_scale, ball_base_color(speed));
+            inst.pos = [pos.x, pos.y];
+            inst.scale = radius.0 * size_scale;
+            inst.color = GpuInstance::pack_rgba8(ball_base_color(speed));
         },
     );
 }
@@ -357,17 +369,14 @@ pub fn sync_ball_gpu(
 /// rows [`apply_ball_motion`] wrote velocity to (collisions + wall bounces), and
 /// is valid here because the system runs INSIDE the schedule — the direct
 /// `EcsMaster::query()` API would panic on a change-detection filter (plan §9
-/// G2). Only the `color` field is rewritten; the position and scale `sync_ball_gpu`
-/// wrote are preserved, so the flash reads as a recolor of the same dot.
+/// G2). Only the `color` field is written (Phase 20.1 D3 — a single field
+/// write through the `&mut GpuInstance` item; no read-modify-write of
+/// pos/scale, and `prev_pos` is never touched), so the flash reads as a
+/// recolor of the same dot.
 pub fn tint_collided(mut query: Query<&mut GpuInstance, Changed<Velocity>>) {
+    let flash = GpuInstance::pack_rgba8(COLLISION_FLASH_COLOR);
     for inst in query.iter_mut() {
-        // Read-modify-write: keep the position/scale `sync_ball_gpu` wrote this
-        // frame, replace only the color with the collision flash. The item is a
-        // plain `&mut GpuInstance` (no change tracking on `GpuInstance` itself),
-        // so the field reads and the `*inst = ...` write are direct.
-        let pos = inst.pos;
-        let scale = inst.scale;
-        *inst = GpuInstance::new(pos, scale, COLLISION_FLASH_COLOR);
+        inst.color = flash;
     }
 }
 

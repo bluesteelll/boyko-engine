@@ -127,8 +127,10 @@ impl RenderResources {
             offset: 0,
             shader_location: 0,
         }];
-        // Slot 1: per-instance GpuInstance. shader_locations 2/3/4 (location 1 is
-        // left unused so the instance block has a distinct attribute base).
+        // Slot 1: per-instance GpuInstance. shader_locations 2/3/4/5 (location 1
+        // is left unused so the instance block has a distinct attribute base).
+        // Phase 20.1 D4: prev_pos is APPENDED at offset 16, so locations 2/3/4
+        // keep their byte offsets.
         let instance_attrs = [
             // pos: [f32; 2] at offset 0
             wgpu::VertexAttribute {
@@ -147,6 +149,12 @@ impl RenderResources {
                 format: wgpu::VertexFormat::Uint32,
                 offset: 12,
                 shader_location: 4,
+            },
+            // prev_pos: [f32; 2] at offset 16 (the GPU lerp's other endpoint)
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x2,
+                offset: 16,
+                shader_location: 5,
             },
         ];
 
@@ -216,6 +224,8 @@ impl RenderResources {
             usage: wgpu::BufferUsages::INDEX,
         });
 
+        // 24 B × 1 M = 24 MiB device-local (Phase 20.1 D4 — was 16 MiB at the
+        // 16 B stride).
         let instance_buffer = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("boyko_demo.instances"),
             size: MAX_INSTANCES * GPU_INSTANCE_SIZE as u64,
@@ -251,8 +261,15 @@ pub struct RenderCallback {
     /// copy — no borrow). Drives the camera projection rebuild in `prepare`.
     pub viewport_px: [f32; 2],
     /// Number of live instances to draw, already uploaded into the shared
-    /// instance buffer by `App::update` this frame.
+    /// instance buffer by `App::update` this frame (or cached from the last
+    /// upload on a skipped frame, Phase 20.1 D5).
     pub instance_count: u32,
+    /// Interpolation alpha ∈ [0, 1), sampled from
+    /// `FixedTime::overstep_fraction()` AFTER the fixed loop in `App::ui`
+    /// (Phase 20.1 D7). A `Copy` value, so the `'static` callback bound holds.
+    /// `prepare` writes it into the camera uniform; the vertex shader lerps
+    /// `mix(prev_pos, pos, alpha)`.
+    pub alpha: f32,
 }
 
 impl CallbackTrait for RenderCallback {
@@ -270,13 +287,16 @@ impl CallbackTrait for RenderCallback {
             return Vec::new();
         };
 
-        // Rebuild the world->NDC projection from this frame's viewport (M4 resize).
-        // The instance data was already uploaded in `App::update` (plan H4).
+        // Rebuild the world->NDC projection from this frame's viewport (M4
+        // resize) and carry this frame's interpolation alpha (Phase 20.1 D7) —
+        // the SAME single 80 B write_buffer the camera already issued, zero
+        // additional GPU writes.
         let camera = CameraUniform::ortho_fit(
             self.viewport_px[0],
             self.viewport_px[1],
             WORLD_HALF_EXTENT,
             WORLD_HALF_EXTENT,
+            self.alpha,
         );
         queue.write_buffer(&resources.camera_buffer, 0, bytemuck::bytes_of(&camera));
 

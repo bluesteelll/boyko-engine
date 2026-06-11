@@ -28,6 +28,7 @@ use rand::Rng;
 use boyko_ecs::ecs::core::component::component::Component;
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::state::NextState;
+use boyko_ecs::ecs::core::time::FixedTime;
 use boyko_ecs::ecs::identifiers::primitives::{ArchetypeId, ComponentId};
 // The thread pool exists only on native (wasm runs the sim sequentially, D10).
 #[cfg(not(target_arch = "wasm32"))]
@@ -105,6 +106,64 @@ impl ParticleSpawner {
     }
 }
 
+/// The Phase-20.1 D5 upload gate: the instance column is re-uploaded only when
+/// this frame ran at least one substep (`steps > 0` — every in-schedule
+/// mutation: integration, mode transitions, spawns/despawns, tint) or the
+/// entity count changed out-of-substep (`entity_count != last_uploaded_count`
+/// — the click burst, which spawns directly BEFORE `runner.step`).
+///
+/// Skipping is correct because the GPU buffer still holds the last substep's
+/// exact `{prev_pos, pos}` pair; only the camera alpha (D7) changes between
+/// substeps — precisely the interpolation contract. `last_uploaded_count`
+/// starts at `u64::MAX` so the first frame always evaluates the upload.
+#[inline]
+fn upload_due(steps: u32, entity_count: u64, last_uploaded_count: u64) -> bool {
+    steps > 0 || entity_count != last_uploaded_count
+}
+
+/// Rolling upload-traffic probe for the panel (Phase 20.1 ★R1-3 / Q7 KEEP —
+/// the only witness of the D5 upload-event cut visible in the wasm deploy).
+///
+/// Accumulates upload events + bytes over a ~1 s window of display time (the
+/// same `stable_dt` deltas that drive the sim accumulator — wasm-safe, no
+/// `Instant`), then latches the rates. Plain `Copy` scalars; no allocation.
+#[derive(Clone, Copy, Debug, Default)]
+struct UploadProbe {
+    /// Display time accumulated into the current window, in seconds.
+    window_secs: f32,
+    /// Upload events recorded in the current window.
+    window_events: u32,
+    /// Bytes uploaded in the current window.
+    window_bytes: u64,
+    /// Latched rate: upload events per second over the last full window.
+    events_per_s: f32,
+    /// Latched rate: megabytes uploaded per second over the last full window.
+    mb_per_s: f32,
+}
+
+impl UploadProbe {
+    /// Length of the averaging window in seconds of display time.
+    const WINDOW_SECS: f32 = 1.0;
+
+    /// Records one frame: `dt` is the display delta; `uploaded_bytes` is
+    /// `Some(bytes)` if the upload fired this frame, `None` on a skipped
+    /// frame. Latches the per-second rates once the window fills.
+    fn frame(&mut self, dt: f32, uploaded_bytes: Option<u64>) {
+        self.window_secs += dt;
+        if let Some(bytes) = uploaded_bytes {
+            self.window_events += 1;
+            self.window_bytes += bytes;
+        }
+        if self.window_secs >= Self::WINDOW_SECS {
+            self.events_per_s = self.window_events as f32 / self.window_secs;
+            self.mb_per_s = (self.window_bytes as f32 / self.window_secs) / 1_000_000.0;
+            self.window_secs = 0.0;
+            self.window_events = 0;
+            self.window_bytes = 0;
+        }
+    }
+}
+
 /// The demo application state (plan §4).
 ///
 /// Holds the ECS world and the native runner. GPU handles are limited to what
@@ -133,6 +192,14 @@ pub struct DemoApp {
     /// Rolling frame/sim timing + entity-count history for the panel readouts and
     /// FPS plot (plan §7 / §11.2). A fixed-size ring — no per-frame allocation.
     stats: FrameStats,
+    /// Entity count at the last fired upload (Phase 20.1 D5 gate state).
+    /// `u64::MAX` at init so the first frame always evaluates the upload.
+    last_uploaded_count: u64,
+    /// Instance count from the last fired upload, reused as the draw count on
+    /// skipped frames (the GPU buffer still holds that population, D5).
+    cached_instance_count: u32,
+    /// Upload events/s + MB/s probe for the panel (Phase 20.1 ★R1-3).
+    upload_probe: UploadProbe,
 }
 
 impl DemoApp {
@@ -211,6 +278,11 @@ impl DemoApp {
             instance_buffer,
             spawner,
             stats: FrameStats::default(),
+            // u64::MAX forces the D5 gate to fire on the first frame even if it
+            // expends zero substeps (Phase 20.1 §Soundness edge cases).
+            last_uploaded_count: u64::MAX,
+            cached_instance_count: 0,
+            upload_probe: UploadProbe::default(),
         }
     }
 
@@ -400,22 +472,46 @@ impl eframe::App for DemoApp {
         // can show sim ms vs total frame ms (native only — see the clock note).
         #[cfg(not(target_arch = "wasm32"))]
         let sim_start = Instant::now();
-        self.runner.step(&mut self.world, dt);
+        // Bind the substep count (Phase 20.1 D5): it is one of the two inputs
+        // of the upload gate below.
+        let steps = self.runner.step(&mut self.world, dt);
         #[cfg(not(target_arch = "wasm32"))]
         let sim_ms = sim_start.elapsed().as_secs_f32() * 1000.0;
         #[cfg(target_arch = "wasm32")]
         let sim_ms = 0.0_f32;
 
-        // 4. Zero-copy upload of the GpuInstance column (plan D2/H4).
-        let instance_count = self.upload_instances();
+        // 4. Upload gate (Phase 20.1 D5): re-upload the GpuInstance column
+        // (zero-copy, plan D2/H4) only when a substep ran or the entity count
+        // changed out-of-substep (click burst). On a skipped frame the GPU
+        // buffer still holds the last substep's exact {prev, pos} pair — only
+        // the camera alpha changes — so we reuse the cached draw count and run
+        // NO column walk and NO write_buffer.
+        let entity_count = self.world.entity_count() as u64;
+        let uploaded_bytes = if upload_due(steps, entity_count, self.last_uploaded_count) {
+            let count = self.upload_instances();
+            self.last_uploaded_count = entity_count;
+            self.cached_instance_count = count;
+            Some(count as u64 * size_of::<GpuInstance>() as u64)
+        } else {
+            None
+        };
+        let instance_count = self.cached_instance_count;
+        self.upload_probe.frame(dt, uploaded_bytes);
+
+        // Interpolation alpha (Phase 20.1 D7): sampled strictly AFTER the fixed
+        // loop, so `overstep < timestep` holds and the value is pinned to
+        // [0, 1). While paused the overstep (and thus alpha) freezes mid-value
+        // — a static frame mid-lerp, no snap (D7).
+        let alpha = self.world.resource::<FixedTime>().overstep_fraction();
 
         // 5. Register the paint callback for this rect. It is `'static`: it owns
-        // only the viewport size and the instance count — never a borrow of the
-        // world (D6 / D8 / plan H4).
+        // only the viewport size, the instance count, and the alpha — never a
+        // borrow of the world (D6 / D8 / plan H4).
         let viewport_px = [rect.width() * ppp, rect.height() * ppp];
         let callback = RenderCallback {
             viewport_px,
             instance_count,
+            alpha,
         };
         let paint_callback = eframe::egui_wgpu::Callback::new_paint_callback(rect, callback);
         ui.painter().add(paint_callback);
@@ -455,6 +551,8 @@ impl eframe::App for DemoApp {
             stats: &self.stats,
             instances_drawn: instance_count,
             at_capacity,
+            upload_events_per_s: self.upload_probe.events_per_s,
+            upload_mb_per_s: self.upload_probe.mb_per_s,
         };
         let requested_mode = ui::panel::draw(&ctx, panel);
         *self.world.resource_mut::<SimParams>() = sim_params;
@@ -473,5 +571,99 @@ impl eframe::App for DemoApp {
 
         // Keep animating so the sim runs every frame and the readouts stay live.
         ctx.request_repaint();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::upload_due;
+
+    /// The engine's fixed timestep in seconds (64 Hz) for the synthetic frame
+    /// sequences below.
+    const TIMESTEP: f64 = 1.0 / 64.0;
+
+    /// Drives a synthetic display-frame sequence through the same
+    /// accumulator arithmetic `fixed_advance` uses (acc += dt; expend whole
+    /// timesteps) and the D5 gate, returning `(fired, skipped)` counts.
+    ///
+    /// `counts` yields the entity count per frame (constant for the steady
+    /// state, stepped for the burst rows); `last` starts at `u64::MAX` like
+    /// `DemoApp::new`.
+    fn run_sequence(frame_dt: f64, frames: usize, counts: impl Fn(usize) -> u64) -> (u32, u32) {
+        let mut acc = 0.0_f64;
+        let mut last = u64::MAX;
+        let (mut fired, mut skipped) = (0_u32, 0_u32);
+        for i in 0..frames {
+            acc += frame_dt;
+            let mut steps = 0_u32;
+            while acc >= TIMESTEP {
+                acc -= TIMESTEP;
+                steps += 1;
+            }
+            let count = counts(i);
+            if upload_due(steps, count, last) {
+                fired += 1;
+                last = count;
+            } else {
+                skipped += 1;
+            }
+        }
+        (fired, skipped)
+    }
+
+    /// T5 (Phase 20.1): the gate truth table — substeps force an upload, a
+    /// count change forces an upload, and only (0 substeps, unchanged count)
+    /// skips.
+    #[test]
+    fn upload_due_truth_table() {
+        // (0 steps, count == last) -> skip.
+        assert!(!upload_due(0, 100, 100));
+        // (>= 1 step, any count) -> fire.
+        assert!(upload_due(1, 100, 100));
+        assert!(upload_due(3, 100, 100));
+        assert!(upload_due(1, 100, 50));
+        // (0 steps, count != last) -> fire (the click-burst path).
+        assert!(upload_due(0, 101, 100));
+        // First frame: last = u64::MAX always fires.
+        assert!(upload_due(0, 0, u64::MAX));
+    }
+
+    /// T5 / G1: synthetic 144 Hz display / 64 Hz sim sequence, 1000 frames,
+    /// constant entity count — the gate fires only on substep-bearing frames
+    /// (plus the forced first frame) and the skip rate is >= 55 %.
+    #[test]
+    fn gate_skip_rate_at_144_over_64() {
+        let (fired, skipped) = run_sequence(1.0 / 144.0, 1000, |_| 100_000);
+        assert_eq!(fired + skipped, 1000);
+        // 1000 * 64/144 = 444.4 substep-bearing frames + the forced first
+        // frame (0 substeps, last == u64::MAX) = 445 fires, 555 skips.
+        assert_eq!(fired, 445, "fires = substep-bearing frames + first frame");
+        let skip_rate = skipped as f64 / 1000.0;
+        assert!(
+            skip_rate >= 0.55,
+            "skip rate must be >= 55 % at 144/64 (got {skip_rate})"
+        );
+    }
+
+    /// T5: while paused (zero substeps every frame, stable count) the gate
+    /// never fires after the initial upload.
+    #[test]
+    fn gate_paused_never_fires() {
+        // Paused: fixed_advance expends nothing regardless of dt; model it as
+        // 0 accumulated time. Frame 1 fires (last == u64::MAX), the rest skip.
+        let (fired, skipped) = run_sequence(0.0, 500, |_| 4_000);
+        assert_eq!(fired, 1, "only the forced first frame fires while paused");
+        assert_eq!(skipped, 499);
+    }
+
+    /// T5: a click burst landing on a 0-substep frame fires the gate exactly
+    /// once — the next 0-substep frame (count now matching) skips again.
+    #[test]
+    fn gate_burst_on_zero_substep_frame_fires_once() {
+        // 0-substep frames throughout (paused-style); the count steps up once
+        // at frame 100 (the burst) and stays there.
+        let (fired, _) = run_sequence(0.0, 500, |i| if i < 100 { 1_000 } else { 3_000 });
+        // Frame 0 (u64::MAX) + frame 100 (burst) = 2 fires total.
+        assert_eq!(fired, 2, "the burst fires the gate exactly once");
     }
 }

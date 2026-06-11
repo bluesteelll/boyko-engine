@@ -10,17 +10,30 @@ use bytemuck::{Pod, Zeroable};
 
 /// GPU-side camera uniform (bind group 0, binding 0).
 ///
-/// Holds a column-major 4x4 world->NDC matrix. `#[repr(C)]` matches WGSL's
-/// `mat4x4<f32>` uniform layout (four 16 B columns).
+/// Holds a column-major 4x4 world->NDC matrix plus the Phase-20.1
+/// interpolation alpha (D7). `#[repr(C)]` matches WGSL's uniform layout: the
+/// `mat4x4<f32>` (four 16 B columns) + `alpha` round the WGSL struct size up
+/// to align(16) = 80 B, mirrored here with an explicit padding field.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct CameraUniform {
     /// Column-major world->NDC transform consumed as `mat4x4<f32>` in WGSL.
     pub view_proj: [[f32; 4]; 4],
+    /// Interpolation alpha ∈ [0, 1) for the GPU lerp
+    /// `mix(prev_pos, pos, alpha)` (Phase 20.1 D1/D7); `1.0` in
+    /// [`Self::identity`] (snap semantics).
+    pub alpha: f32,
+    /// Explicit uniform-layout padding mirroring WGSL's align(16) size
+    /// round-up. An explicit zeroed field (rather than relying on implicit
+    /// padding) keeps the uploaded uniform bytes deterministic — implicit
+    /// padding bytes are uninitialized and `cast`-ing them to the GPU would
+    /// upload garbage (Phase 20.1 ★n8).
+    pub _pad: [f32; 3],
 }
 
-/// Expected size of [`CameraUniform`] (one `mat4` = 64 B).
-pub const CAMERA_UNIFORM_SIZE: usize = 64;
+/// Expected size of [`CameraUniform`] (`mat4` 64 B + alpha 4 B + pad 12 B = 80 B,
+/// the WGSL uniform struct size rounded to align(16)).
+pub const CAMERA_UNIFORM_SIZE: usize = 80;
 
 const _: () = assert!(size_of::<CameraUniform>() == CAMERA_UNIFORM_SIZE);
 const _: () = assert!(align_of::<CameraUniform>() == 4);
@@ -28,6 +41,11 @@ const _: () = assert!(align_of::<CameraUniform>() == 4);
 impl CameraUniform {
     /// Identity transform; the initial uniform value before the first `prepare`
     /// rebuilds it from the real viewport.
+    ///
+    /// `alpha` is `1.0` — snap semantics: `mix(prev, pos, 1.0) == pos`, so an
+    /// identity frame renders the latest packed position with no lerp. This is
+    /// also what the degenerate-viewport guard in [`Self::ortho_fit`] returns
+    /// (Phase 20.1 ★R1-2 — nothing renders in a zero viewport anyway).
     #[inline]
     pub const fn identity() -> Self {
         Self {
@@ -37,6 +55,8 @@ impl CameraUniform {
                 [0.0, 0.0, 1.0, 0.0],
                 [0.0, 0.0, 0.0, 1.0],
             ],
+            alpha: 1.0,
+            _pad: [0.0; 3],
         }
     }
 
@@ -51,14 +71,21 @@ impl CameraUniform {
     ///
     /// The projection keeps the standard +Y-up NDC: our own quad geometry is
     /// symmetric about the origin, so no screen-space (y-down) flip is needed.
+    ///
+    /// `alpha` is the Phase-20.1 interpolation alpha (D7), stored verbatim into
+    /// the uniform on the non-degenerate path; the shader lerps
+    /// `mix(prev_pos, pos, alpha)` per vertex.
     pub fn ortho_fit(
         viewport_w: f32,
         viewport_h: f32,
         half_world_w: f32,
         half_world_h: f32,
+        alpha: f32,
     ) -> Self {
         // Guard against a zero/negative viewport (a collapsed panel) so we never
-        // divide by zero; fall back to identity.
+        // divide by zero; fall back to identity. NOTE (★R1-2): identity carries
+        // alpha = 1.0 (snap), not the caller's alpha — documented semantics for
+        // a zero viewport, where nothing renders anyway.
         if viewport_w <= 0.0 || viewport_h <= 0.0 || half_world_w <= 0.0 || half_world_h <= 0.0 {
             return Self::identity();
         }
@@ -87,6 +114,8 @@ impl CameraUniform {
                 [0.0, 0.0, 1.0, 0.0],
                 [0.0, 0.0, 0.0, 1.0],
             ],
+            alpha,
+            _pad: [0.0; 3],
         }
     }
 
@@ -136,5 +165,41 @@ impl CameraUniform {
         // NDC -> world: undo the orthographic scale (no translation, origin
         // centered).
         Some([ndc_x * ext_x, ndc_y * ext_y])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// T2 (Phase 20.1): the host mirror is exactly 80 B — the WGSL uniform
+    /// struct size (mat4 64 + alpha 4, rounded to align(16)).
+    #[test]
+    fn camera_uniform_is_80_bytes() {
+        assert_eq!(size_of::<CameraUniform>(), CAMERA_UNIFORM_SIZE);
+        assert_eq!(CAMERA_UNIFORM_SIZE, 80);
+    }
+
+    /// T2: `identity()` carries snap semantics (`alpha == 1.0`).
+    #[test]
+    fn identity_alpha_is_one() {
+        assert_eq!(CameraUniform::identity().alpha, 1.0);
+    }
+
+    /// T2: `ortho_fit` stores alpha verbatim on the non-degenerate path.
+    #[test]
+    fn ortho_fit_stores_alpha_verbatim() {
+        let alpha = 0.4375_f32;
+        let cam = CameraUniform::ortho_fit(800.0, 600.0, 100.0, 100.0, alpha);
+        assert_eq!(cam.alpha.to_bits(), alpha.to_bits());
+    }
+
+    /// T2 (★R1-2): the degenerate-viewport guard returns identity, whose alpha
+    /// is 1.0 (documented snap semantics — nothing renders in a zero viewport).
+    #[test]
+    fn ortho_fit_degenerate_viewport_returns_identity_alpha() {
+        let cam = CameraUniform::ortho_fit(0.0, 600.0, 100.0, 100.0, 0.25);
+        assert_eq!(cam.alpha, 1.0);
+        assert_eq!(cam.view_proj, CameraUniform::identity().view_proj);
     }
 }

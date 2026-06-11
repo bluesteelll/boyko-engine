@@ -59,11 +59,17 @@ pub struct PanelState<'a> {
     pub physics: &'a mut PhysicsParams,
     /// Rolling frame/sim stats for the readouts + plot.
     pub stats: &'a FrameStats,
-    /// Instances uploaded this frame (shown next to the entity count).
+    /// Instances drawn this frame (shown next to the entity count). With the
+    /// Phase-20.1 D5 upload gate this is the CACHED count on skipped frames.
     pub instances_drawn: u32,
     /// `true` when the world hit the instance cap (surfaces the "at capacity"
     /// note for click-to-spawn).
     pub at_capacity: bool,
+    /// Upload events per second (Phase 20.1 ★R1-3 probe) — the visible witness
+    /// of the D5 gate: ~64/s at a 144 Hz display instead of 144/s.
+    pub upload_events_per_s: f32,
+    /// Megabytes uploaded per second (Phase 20.1 ★R1-3 probe).
+    pub upload_mb_per_s: f32,
 }
 
 /// Draws the control/stats window for one frame (plan §7 / Wave 5).
@@ -80,6 +86,8 @@ pub fn draw(ctx: &egui::Context, state: PanelState<'_>) -> Option<Mode> {
         stats,
         instances_drawn,
         at_capacity,
+        upload_events_per_s,
+        upload_mb_per_s,
     } = state;
 
     let mut requested_mode = None;
@@ -90,7 +98,7 @@ pub fn draw(ctx: &egui::Context, state: PanelState<'_>) -> Option<Mode> {
         .show(ctx, |ui| {
             requested_mode = mode_buttons(ui, mode);
             ui.separator();
-            readouts(ui, stats, instances_drawn);
+            readouts(ui, stats, instances_drawn, upload_events_per_s, upload_mb_per_s);
             ui.separator();
             plot(ui, stats);
             ui.separator();
@@ -138,9 +146,15 @@ fn mode_buttons(ui: &mut egui::Ui, current: Mode) -> Option<Mode> {
     requested
 }
 
-/// Live numeric readouts: FPS, frame/sim milliseconds, entity count, instances
-/// (plan §7 readouts).
-fn readouts(ui: &mut egui::Ui, stats: &FrameStats, instances_drawn: u32) {
+/// Live numeric readouts: FPS, frame/sim milliseconds, entity count, instances,
+/// and the Phase-20.1 upload probe (plan §7 readouts / 20.1 ★R1-3).
+fn readouts(
+    ui: &mut egui::Ui,
+    stats: &FrameStats,
+    instances_drawn: u32,
+    upload_events_per_s: f32,
+    upload_mb_per_s: f32,
+) {
     // FPS from the measured frame time; guard the divide for the first frame.
     let fps = if stats.frame_ms > f32::EPSILON {
         1000.0 / stats.frame_ms
@@ -154,6 +168,11 @@ fn readouts(ui: &mut egui::Ui, stats: &FrameStats, instances_drawn: u32) {
     ));
     ui.label(format!("entities: {}", stats.entity_count));
     ui.label(format!("instances drawn: {instances_drawn}"));
+    // The D5 upload-gate witness: ~sim-Hz events/s at any display Hz >= sim Hz
+    // (was display-Hz before Phase 20.1).
+    ui.label(format!(
+        "uploads: {upload_events_per_s:.0}/s   {upload_mb_per_s:.1} MB/s"
+    ));
 }
 
 /// Draws the rolling frame-time history as a polyline via [`egui::Painter`]

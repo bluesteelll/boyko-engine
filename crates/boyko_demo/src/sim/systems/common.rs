@@ -11,15 +11,30 @@ use crate::sim::resources::SimParams;
 /// above this render fully "hot".
 const COLOR_SPEED_MAX: f32 = 200.0;
 
-/// Packs `GpuInstance` from the sim state each frame (plan D3).
+/// Packs `GpuInstance` from the sim state every substep (plan D3, Phase 20.1
+/// D2) and maintains the interpolation pair: the OLD `gpu.pos` (the previous
+/// substep's packed position) is shuffled into `prev_pos` before the full 24 B
+/// record is rewritten, so the GPU lerp `mix(prev_pos, pos, alpha)` always
+/// spans exactly one substep.
 ///
 /// Runs after integration and before the upload. It is a streaming SoA->SoA
-/// write — sequential read of `Position`/`Velocity`, sequential write of
-/// `GpuInstance`, all contiguous — so it parallelizes over disjoint rows with
-/// `par_iter_mut`. Position copies straight through; the quad half-extent comes
-/// from `SimParams.particle_size` so the panel's size slider drives the dot size
+/// write — sequential read of `Position`/`Velocity`, sequential read of the old
+/// `gpu.pos` (the same line being written), sequential write of `GpuInstance`,
+/// all contiguous — so it parallelizes over disjoint rows with `par_iter_mut`.
+/// Position copies straight through; the quad half-extent comes from
+/// `SimParams.particle_size` so the panel's size slider drives the dot size
 /// live (plan §7); color encodes speed via a blue->cyan->white ramp so motion is
 /// legible.
+///
+/// ## Load-bearing in EVERY mode (Phase 20.1 ★n6)
+///
+/// This system is the SINGLE `prev_pos` maintainer (D3): the shuffle here is
+/// the only per-substep `prev_pos` writer in the whole demo. In Physics mode
+/// `sync_ball_gpu` overrides pos/scale/color AFTER this pass with field writes
+/// that never touch `prev_pos` — so a future "optimization" that gates this
+/// system out of Physics (it looks redundant there) would kill prev
+/// maintenance and freeze the lerp's rear endpoint. It must run every substep
+/// in all three modes.
 ///
 /// `Res<SimParams>` is a shared read, broadcast to every worker for the parallel
 /// pass; `particle_size` is hoisted to a local before the loop so each row reads
@@ -40,7 +55,10 @@ pub fn sync_gpu_instance(
         .for_each(move |(pos, vel, gpu): (&Position, &Velocity, &mut GpuInstance)| {
             let speed = (vel.x * vel.x + vel.y * vel.y).sqrt();
             let t = (speed / COLOR_SPEED_MAX).clamp(0.0, 1.0);
-            *gpu = GpuInstance::new([pos.x, pos.y], scale, speed_color(t));
+            // Prev shuffle (Phase 20.1 D2): the old packed pos becomes the
+            // lerp's rear endpoint, exactly one substep behind.
+            let prev = gpu.pos;
+            *gpu = GpuInstance::with_prev(prev, [pos.x, pos.y], scale, speed_color(t));
         });
 }
 
