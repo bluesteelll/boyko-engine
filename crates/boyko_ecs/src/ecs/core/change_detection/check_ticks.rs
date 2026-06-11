@@ -86,9 +86,10 @@ pub(crate) fn run_check_ticks_scan(world: &mut EcsMaster) {
                 //   `world: &mut EcsMaster` is the dispatcher's exclusive
                 //   borrow inside the apply window; no worker holds a
                 //   cell-mediated borrow on any tick column at this
-                //   moment. `i < pool.count() <= pool.added_ticks.len()`
-                //   by the parallel-array invariant in `ComponentPool::new`
-                //   / `swap_remove_unit` (plan §2.2 STORE1 + STORE5).
+                //   moment. `i < pool.count() <= committed_rows` (Phase X.I
+                //   committed-prefix invariant, maintained by `grow_rows` /
+                //   the removal paths), so both tick accesses stay inside
+                //   the committed prefix of the pool's tick sub-regions.
                 let added = unsafe { pool.read_added_tick(i) };
                 let clamped = added.check_tick(current);
                 if clamped != added {

@@ -678,8 +678,12 @@ impl EcsMaster {
         };
 
         if !pushed {
-            // Step 4 of W7: archetype rejected the push (capacity / signature
-            // mismatch). Undo the allocation so the EntityId is not leaked.
+            // Step 4 of W7: archetype rejected the push — signature mismatch,
+            // or the pool reserve ceiling (rows). Phase X.I: committed
+            // capacity below the ceiling grows on demand inside the pools,
+            // so a capacity rejection here means the archetype outgrew a
+            // pool's reserve_rows. Undo the allocation so the EntityId is
+            // not leaked.
             let rewound = self.entity_master.rewind_allocate(entity);
             if !rewound {
                 // rewind_allocate returns false for recycled IDs; fall back
@@ -1489,8 +1493,11 @@ impl EcsMaster {
         let (added_base, changed_base) = archetype.tick_column_base(cid)?;
 
         // SAFETY (OBS-MUT2): the row is live (`inland` non-null + generation
-        //   match), so `idx < pool.count()`; both tick bases are valid for all
-        //   capacity rows (`Box<[UnsafeCell<Tick>]>`, STORE2 stable lifetime).
+        //   match), so `idx < pool.count() <= committed_rows`; both tick bases
+        //   are write-once sub-region pointers into the pool's own
+        //   `VmReservation` (address-stable for the pool's lifetime — Phase
+        //   X.I), and the access stays inside the committed prefix
+        //   `[0, committed_rows)` by the bound above.
         //   The `added` read is an eager `Copy` snapshot; `changed_tick` is
         //   offset to this row. The `&mut T` reborrows `column.ptr + idx*stride`,
         //   whose exclusivity rests SOLELY on `&mut self` (OBS-MUT — NOT SCH3:

@@ -511,8 +511,10 @@ impl Archetype {
     /// Wave C `Added<C>::set_table_*` / `Changed<C>::set_table_*` cache the
     /// returned base pointers in their `Fetch<'w>` once per archetype
     /// boundary (cold path), then index per-row through the `Fetch`.
-    /// The pointers are stable for the pool's lifetime (`Box<[_]>` —
-    /// never reallocated post-construction, per Phase 10 STORE2).
+    /// The pointers are stable for the pool's lifetime: Phase X.I made
+    /// them write-once vm-reservation sub-region bases (growth commits
+    /// fresh pages in place and never moves them) — strictly stronger
+    /// than the old Phase 10 STORE2 "Box never reallocates" promise.
     ///
     /// Returning a tuple by value keeps the cold-path call signature
     /// simple; per-row reads do not touch this accessor.
@@ -714,8 +716,9 @@ impl Archetype {
     /// B1/B2 (`Bundle::component_ids()` / `for_each_component_bytes`).
     ///
     /// Returns `true` on success and writes the assigned dense unit
-    /// index into `*new_unit_index`. Returns `false` if any pool is full
-    /// (two-phase commit via `reserve_capacity(1)`).
+    /// index into `*new_unit_index`. Returns `false` if any pool's
+    /// reserve ceiling is exhausted (two-phase grow via
+    /// `reserve_capacity(1)` — Phase X.I).
     ///
     /// # Cost
     ///
@@ -760,7 +763,8 @@ impl Archetype {
             // SAFETY (SBO13 + SBO-N + SBO-B2):
             //   * `pool_idx.0 < pools.len()` by SBO-N (push-only) + the
             //     cache install-time bound check.
-            //   * `row < max_components` after `reserve_capacity(1)` succeeded.
+            //   * `row < committed_rows` after `reserve_capacity(1)`
+            //     succeeded (Phase X.I: Phase B grew every pool).
             //   * `&mut self` ⇒ exclusive access.
             //   * `bytes.len() == pool.component_layout.size()` by
             //     Bundle/macro contract.
@@ -779,29 +783,60 @@ impl Archetype {
         true
     }
 
-    /// Phase 12.5 Opt-A2 (SBO4 / §5.6): pre-validates that every owned
-    /// pool can reserve `n` more rows. Returns `Ok(())` on success or
-    /// `Err(EcsError::ArchetypePoolCapacityExceeded)` on overflow.
+    /// Phase X.I D5 — the single batch/migration grow funnel: ensures every
+    /// owned pool has committed capacity for `n` more rows, growing IN
+    /// PLACE (no relocation, no copy) when needed.
     ///
-    /// Two-phase commit: callers (`SpawnBatchCommand::apply` direct +
-    /// queued) MUST invoke this BEFORE writing any row via
-    /// `pool_at_unchecked_mut().write_at_unchecked_initialized(...)`. On
-    /// `Err` the archetype is unchanged; no pool was mutated.
+    /// Two-phase contract (preserved from Phase 12.5 Opt-A2 — on `Err` the
+    /// archetype is unchanged; no pool was mutated):
     ///
-    /// **Never panics** — the apply-time guard converts overflow into a
-    /// recoverable error so the queued path (`I-N4`) can `.expect` it as
-    /// a logic-bug indicator while the direct path
-    /// (`EcsMaster::spawn_batch`) bubbles it up to the caller.
+    /// * **Phase A (read-only)**: every pool must satisfy
+    ///   `count + n <= reserve_rows` (the reserve ceiling). On violation
+    ///   returns `Err(EcsError::ArchetypePoolCapacityExceeded)` with NO
+    ///   mutation.
+    /// * **Phase B**: unconditional `grow_rows(count + n)` on every pool.
+    ///   Calling unconditionally is legal ONLY because of `grow_rows`'s
+    ///   idempotent no-op arm (★R1-1 / GROW1-XI proof 0): the common case
+    ///   (`reserve_capacity(1)` with capacity already committed) is P warm
+    ///   compares, ZERO syscalls, ZERO state change. Phase A proved the
+    ///   ceiling for every pool, so `grow_rows` cannot return `false`
+    ///   here; it can only panic on genuine OS commit failure (world
+    ///   poisoned — the documented OOM policy).
+    ///
+    /// Callers (`SpawnBatchCommand::apply` direct + queued, the spawn /
+    /// migration apply paths) MUST invoke this BEFORE writing any row via
+    /// `pool_at_unchecked_mut().write_at_unchecked_initialized(...)`. The
+    /// queued path (`I-N4`) `.expect`s the result (an `Err` there means
+    /// the archetype outgrew its pools' reserve ceiling) while the direct
+    /// path (`EcsMaster::spawn_batch`) bubbles it up to the caller.
     pub(crate) fn reserve_capacity(&mut self, n: usize) -> EcsResult<()> {
+        // Phase A: read-only ceiling validation over every pool.
         for pool in self.component_pools.pools_iter() {
             if !pool.can_reserve(n) {
-                let (_, max) = pool.len_for_reserve();
+                let (_, ceiling) = pool.len_for_reserve();
                 return Err(EcsError::ArchetypePoolCapacityExceeded {
                     archetype_id: self.id,
-                    pool_capacity: max,
+                    pool_capacity: ceiling,
                     requested: n,
                 });
             }
+        }
+        // Phase B: grow every pool to `count + n` committed rows.
+        for pool in self.component_pools.pools_iter_mut() {
+            // Belt: Phase A's `can_reserve` checked_add proved `count + n`
+            // on the same unmutated lens — re-assert per pool so the proof
+            // does not silently couple to loop ordering / future edits.
+            debug_assert!(
+                pool.count().checked_add(n).is_some(),
+                "reserve_capacity Phase B: count + n overflows usize despite Phase A"
+            );
+            let target = pool.count() + n;
+            let grown = pool.grow_rows(target);
+            debug_assert!(
+                grown,
+                "GROW1-XI: phase A proved `count + n <= reserve_rows`; \
+                 grow_rows cannot hit the ceiling here"
+            );
         }
         Ok(())
     }

@@ -83,10 +83,12 @@ impl Tick {
     /// Per plan §2.1 TICK8 the value `Tick::ZERO` MUST NOT appear as a
     /// meaningful comparand on the hot path: `SystemMeta::new(name,
     /// current_tick)` (Round 2 W5) initialises `last_run = current_tick -
-    /// MAX_CHANGE_AGE`, guaranteeing every per-row tick stored at or after
-    /// initialisation either equals `current_tick` (a real write) or stays
-    /// at `Tick::ZERO` (an unused buffer slot — and slots below
-    /// `pool.count()` are written before being read; see plan §2.2 STORE10).
+    /// MAX_CHANGE_AGE`. Phase X.I ★R1-4 never-written form (supersedes the
+    /// absolute Phase 10 STORE10 wording): a tick slot that has NEVER been
+    /// written reads `Tick::ZERO` (vm zero-fill contract); slots VACATED by
+    /// pop/swap_remove may hold a stale live tick — fine, because nothing
+    /// reads at or above `len`, and every re-add re-stamps the slot before
+    /// any read (write-before-read is the load-bearing property).
     pub const ZERO: Tick = Tick(0);
 
     /// Constructs a [`Tick`] from a raw `u32` counter value.

@@ -635,8 +635,9 @@ unsafe impl<C: Component> QueryFilter for Added<C> {
         //   - `meta` is read-only INPUT (Round 2 W7); ticks are `Copy`-extracted
         //     into the Fetch by value.
         let archetype_ref: &Archetype = unsafe { &*archetype };
-        // STORE3: `added_ticks_ptr` returns the base of `Box<[UnsafeCell<Tick>]>`;
-        // pointer is stable for the pool's lifetime (Phase 10 STORE2).
+        // STORE3: `tick_column_base` returns the write-once added-tick
+        // sub-region base of the pool's own `VmReservation`; the pointer is
+        // stable for the pool's lifetime (Phase X.I vm-reservation stability).
         fetch.tick_base = match archetype_ref.tick_column_base(state.id) {
             Some((added_base, _changed_base)) => added_base,
             // Round 2 C4 — `Or<F>` may walk archetypes that lack `C`;
@@ -703,9 +704,11 @@ unsafe impl<C: Component> QueryFilter for Added<C> {
         // SAFETY (STORE3, QF3, plan §5.4-bis):
         //   - `fetch.tick_base` is the `added_ticks` base for the archetype
         //     cached by the prior `set_table_*` call (QF3 contract).
-        //   - `row < archetype.entity_count()` per QF3; the buffer length
-        //     equals `pool.max_components()` (plan STORE1) which bounds
-        //     `entity_count()` from above (the pool is the row's storage).
+        //   - `row < archetype.entity_count()` per QF3, and
+        //     `entity_count() <= committed_rows` (Phase X.I: growth runs only
+        //     inside `&mut` apply windows where no Fetch is live, and every
+        //     `set_table_*` re-reads the bases per archetype), so the read
+        //     stays inside the committed prefix of the tick sub-region.
         //   - Reading through `UnsafeCell::get()` is sound: Phase 9 SCH3
         //     guarantees no concurrent writer of this `(archetype, C)` slot,
         //     and `Tick` is `Copy` (plain `u32`).

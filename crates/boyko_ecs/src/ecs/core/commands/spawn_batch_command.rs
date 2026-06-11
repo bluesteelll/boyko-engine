@@ -335,9 +335,10 @@ where
 
         // ── Step 4: reserve pool capacity (I-N4 .expect) ───────────────
         archetype.reserve_capacity(n).expect(
-            "apply contract: SpawnBatchCommand reservation should have been \
-             validated at enqueue (SBO17 cap-check); overrun here indicates \
-             an aggregate-worker overshoot or a logic bug in enqueue",
+            "SpawnBatchCommand: pool reserve ceiling (rows) exhausted — committed \
+             capacity grows on demand (Phase X.I), so this fires only when the \
+             archetype outgrows a pool's reserve_rows (aggregate-worker overshoot \
+             or a logic bug in enqueue)",
         );
         let start_row = archetype.current_index;
 
@@ -359,8 +360,9 @@ where
                 );
                 let pool_idx = pool_ids[canonical_idx];
                 // SAFETY (SBO13):
-                //   - `row < start_row + n` and `start_row + n ≤
-                //     pool.max_components` after `reserve_capacity` succeeded.
+                //   - `row < start_row + n` and `start_row + n <= the
+                //     pool's committed_rows` after `reserve_capacity`
+                //     succeeded (Phase X.I: Phase B grew every pool).
                 //   - `pool_idx.0 < pools.len()` by SBO-B2 (canonical match
                 //     with `B::component_ids()`).
                 //   - Pool is exclusively accessed via `&mut archetype`.

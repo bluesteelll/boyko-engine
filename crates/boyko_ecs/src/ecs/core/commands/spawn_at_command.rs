@@ -172,7 +172,11 @@ impl<B: Bundle> Command for SpawnAtCommand<B> {
         let archetype: &mut Archetype = unsafe { &mut *archetype_ptr };
         archetype
             .reserve_capacity(1)
-            .expect("apply contract: archetype must accept 1 more row for SpawnAtCommand");
+            .expect(
+                "SpawnAtCommand: pool reserve ceiling (rows) exhausted — committed \
+                 capacity grows on demand (Phase X.I), so this fires only when the \
+                 archetype outgrows a pool's reserve_rows",
+            );
         let row = archetype.current_index;
 
         // ── Step 5: per-component inline write ────────────────────────
@@ -208,7 +212,8 @@ impl<B: Bundle> Command for SpawnAtCommand<B> {
             //     the cache install-time bound check; the canonical
             //     ordering match above proves index alignment with
             //     `B::component_ids()`.
-            //   - `row < max_components` post `reserve_capacity(1)`.
+            //   - `row < committed_rows` post `reserve_capacity(1)`
+            //     (Phase X.I: Phase B grew every pool).
             //   - `&mut archetype` provides exclusive access; no
             //     concurrent reader of this slot exists.
             //   - `bytes.len() == pool.component_layout().size()` by

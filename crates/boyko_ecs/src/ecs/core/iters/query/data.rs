@@ -691,8 +691,9 @@ pub struct RefState<T: Component> {
 ///   `set_table_*` time so the per-row hot loop pays no indirection.
 ///
 /// All fields are populated by `set_table_*` before any `fetch` call; the
-/// `Box<[_]>` backing for the tick columns gives stable addresses (plan
-/// STORE2).
+/// tick columns are write-once sub-regions of the pool's own
+/// `VmReservation`, so their base addresses are stable for the pool's
+/// lifetime (Phase X.I vm-reservation stability).
 pub struct RefFetch<'w, T: Component> {
     pub(crate) value_base: *const T,
     pub(crate) added_base: *const UnsafeCell<Tick>,
@@ -904,7 +905,8 @@ pub struct Mut<'w, T: Component> {
     /// Snapshot of the row's `added` tick at fetch time.
     pub(crate) added: Tick,
     /// Pointer to the row's `changed_tick` slot. The write target for the
-    /// deref guard. Stable for the pool's lifetime (`Box<[_]>` — plan STORE2).
+    /// deref guard. Stable for the pool's lifetime (write-once tick
+    /// sub-region of the pool's own `VmReservation` — Phase X.I).
     pub(crate) changed_tick: *const UnsafeCell<Tick>,
     /// System's `last_run` snapshot.
     pub(crate) last_run: Tick,
@@ -1007,8 +1009,9 @@ impl<'w, T: Component> std::ops::DerefMut for Mut<'w, T> {
             //   - `self.changed_tick` is a live `UnsafeCell<Tick>` slot for the
             //     cached row (set by `set_table_mut` on the query path, or by
             //     `EcsMaster::get_component_mut` on the direct path); the
-            //     `Box<[_]>` backing is stable for the pool's lifetime
-            //     (plan STORE2).
+            //     slot lives in a write-once tick sub-region of the pool's
+            //     own `VmReservation`, address-stable for the pool's
+            //     lifetime (Phase X.I).
             //   - Exclusivity of this write is named by the construction origin:
             //     on the scheduler/query path, Phase 9 SCH3 (the conflict graph)
             //     guarantees the system holding `Mut<T>` has exclusive access to
@@ -1038,7 +1041,8 @@ pub struct MutState<T: Component> {
 /// Caches the write-capable component column base plus both tick column
 /// bases (so `fetch` can produce a `Mut<T>` carrying the per-row
 /// `changed_tick` pointer for the deref guard). Tick base lifetimes ride
-/// the `Box<[_]>` stability (plan STORE2).
+/// the vm-reservation address stability (write-once sub-regions of the
+/// pool's own reservation — Phase X.I).
 pub struct MutFetch<'w, T: Component> {
     pub(crate) value_base: *mut T,
     pub(crate) added_base: *const UnsafeCell<Tick>,

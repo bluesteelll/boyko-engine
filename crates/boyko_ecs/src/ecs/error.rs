@@ -78,17 +78,21 @@ pub enum EcsError {
         max: usize,
     },
 
-    /// Phase 12.5 Opt-A2 (SBO4): an archetype's component-pool capacity
-    /// was insufficient to reserve `requested` rows.
+    /// Phase 12.5 Opt-A2 (SBO4) / Phase X.I: an archetype's pool reserve
+    /// ceiling (rows) was insufficient to accept `requested` more rows.
     ///
     /// Returned by [`Archetype::reserve_capacity`] when at least one owned
-    /// pool's `count + requested > max_components`. The archetype state is
-    /// unchanged — callers may either reduce the batch size or chunk
-    /// across multiple `apply` calls.
+    /// pool's `count + requested` exceeds its reserve ceiling
+    /// (`reserve_rows`). Committed capacity BELOW the ceiling grows on
+    /// demand (Phase X.I `grow_rows`) and never produces this error — it
+    /// fires only when the archetype outgrows the pool's whole
+    /// reservation. The archetype state is unchanged — callers may either
+    /// reduce the batch size or chunk across multiple `apply` calls.
     ArchetypePoolCapacityExceeded {
         /// Identifier of the archetype that rejected the reserve.
         archetype_id: ArchetypeId,
-        /// Existing per-pool capacity ceiling (`max_components`).
+        /// The pool's reserve ceiling in rows (`reserve_rows`; the field
+        /// name predates Phase X.I and is kept for compatibility).
         pool_capacity: usize,
         /// Number of rows the caller asked to reserve.
         requested: usize,
@@ -170,7 +174,7 @@ impl std::fmt::Display for EcsError {
             } => {
                 write!(
                     f,
-                    "archetype {}: pool capacity {} cannot reserve {} more rows",
+                    "archetype {}: pool reserve ceiling ({} rows) cannot accept {} more rows",
                     archetype_id, pool_capacity, requested
                 )
             }

@@ -92,7 +92,8 @@ impl std::error::Error for BundleFullError {}
 ///   cache a `*mut Archetype` that stays legal to reborrow after later spawns
 ///   into the same archetype write through a sibling pointer (F4 finding,
 ///   `docs/PHASE-14-F4-FINDING.md`). Mirrors the established
-///   `Box<[UnsafeCell<Tick>]>` discipline in `component_pool.rs`.
+///   `UnsafeCell<Tick>`-slot discipline in the tick sub-regions of
+///   `component_pool.rs` (Phase X.I vm-reservation form).
 /// - **F4 mint discipline (load-bearing):** the SOLE entry points that mint a
 ///   slot pointer are [`Self::slot_ptr_mut`] / [`Self::slot_ptr`]. No method
 ///   ever calls `self.slots.as_mut_ptr()` — that would form a transient
@@ -260,8 +261,8 @@ impl ArchetypeBundle {
         //     Borrows, and carry `SharedReadWrite` (not the `SharedReadOnly` a
         //     `&` would give) under Stacked Borrows; a sibling's write through
         //     a same-cell-derived pointer does not pop this one. Identical to
-        //     the `Box<[UnsafeCell<Tick>]>` precedent (`component_pool.rs`
-        //     SEND10 / write_added_tick).
+        //     the `UnsafeCell<Tick>`-slot precedent in the tick sub-regions
+        //     of `component_pool.rs` (SEND10 / write_added_tick).
         //   - F2: `UnsafeCell::raw_get` takes a `*const UnsafeCell<T>` and
         //     returns a `*mut T` WITHOUT forming any reference, preserving U11
         //     (no `&MaybeUninit`/`&UnsafeCell` reborrow is ever materialised).

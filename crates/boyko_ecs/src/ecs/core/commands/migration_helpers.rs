@@ -243,7 +243,11 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
         // bundle-only pools committed in the closure).
         target
             .reserve_capacity(1)
-            .expect("apply contract: target archetype must accept 1 more row for migration");
+            .expect(
+                "insert-migration: target pool reserve ceiling (rows) exhausted — \
+                 committed capacity grows on demand (Phase X.I), so this fires only \
+                 when the target archetype outgrows a pool's reserve_rows",
+            );
         let new_row: u32 = target.current_index as u32;
         let row = target.current_index;
 
@@ -272,8 +276,8 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
             //   * The slice borrows the live `source` pool (held via `&source`);
             //     it is consumed by the `write_at_unchecked_initialized` memcpy
             //     in this same iteration, before `source` is mutated (Step 5).
-            //   * `&mut source` ⇒ no concurrent writer; tick buffers are sized to
-            //     `src_pool.capacity() >= src_pool.count()`.
+            //   * `&mut source` ⇒ no concurrent writer; the tick sub-regions
+            //     are committed for every row `< src_pool.count()` (Phase X.I).
             let bytes =
                 unsafe { core::slice::from_raw_parts(src_pool.unit_ptr(source_row), stride) };
             let added = unsafe { src_pool.read_added_tick(source_row) };
@@ -285,9 +289,10 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
                 .expect("invariant: retained component must exist in target");
             // SAFETY (mirrors `SpawnAtCommand::apply`):
             //   * `row == target.current_index == dst_pool.count()` (pools grow
-            //     in lockstep) and `reserve_capacity(1)` guaranteed a free slot,
-            //     so `row < dst_pool.max_components` — `write_at_unchecked_initialized`
-            //     targets a logically-uninit slot (no drop runs).
+            //     in lockstep) and `reserve_capacity(1)` guaranteed a committed
+            //     slot (Phase X.I Phase B), so `row < dst_pool committed_rows` —
+            //     `write_at_unchecked_initialized` targets a logically-uninit
+            //     slot (no drop runs).
             //   * `bytes.len() == stride == dst_pool.component_layout().size()`
             //     (same `ComponentId` ⇒ same registry layout).
             //   * `&mut target` ⇒ exclusive access; `commit_units(row, 1)`
@@ -365,7 +370,8 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
                 // bundle-only components). Extend the dense tail by one.
                 // SAFETY (mirrors `SpawnAtCommand::apply`):
                 //   * `row == dst_pool.count()` (lockstep with the other target
-                //     pools) and `reserve_capacity(1)` guaranteed a free slot ⇒
+                //     pools) and `reserve_capacity(1)` guaranteed a committed
+                //     slot (Phase X.I Phase B) ⇒
                 //     `write_at_unchecked_initialized` targets a logically-uninit
                 //     slot (no drop). `commit_units(row, 1)` extends the tail
                 //     (pre: `row == count`). `fill_ticks(row, 1, current_tick)`
@@ -574,7 +580,12 @@ pub(crate) fn migrate_entity_remove<C: Component>(
             combined_slice,
             current_tick,
         );
-        assert!(pushed);
+        assert!(
+            pushed,
+            "remove-migration: target archetype rejected the push — pool reserve \
+             ceiling (rows) exhausted (committed capacity grows on demand per \
+             Phase X.I) or signature mismatch",
+        );
         new_row
         // <-- `source` / `target` `&mut Archetype` DROP here (block close).
     };

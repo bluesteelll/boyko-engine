@@ -1,19 +1,28 @@
-//! Phase X.F — arena growth integration tests (plan §Test matrix I1-I2).
+//! ECS growth + data-integrity integration tests.
 //!
-//! * **I1** — a DEFAULT `EcsMaster` creates ~30 single-component archetypes
-//!   (~90-100 MB of component pools): past the pre-X.F 64 MB arena ceiling,
-//!   where archetype creation used to panic inside
-//!   `Arena::allocate_from_free_blocks`. The default arena now grows inside
-//!   its multi-GB reservation. `#[cfg_attr(miri, ignore)]` (R2-W3b): the
-//!   Miri fallback default reserve is 64 MiB, and growth under Miri is
-//!   already covered by I2 + `tests/miri_arena_growth.rs`; I1's purpose is
-//!   the real-OS past-the-old-ceiling witness.
+//! **Scope note (Phase X.I)**: these tests were written for Phase X.F as
+//! arena-growth witnesses (plan §Test matrix I1-I2), but Phase X.I moved
+//! `ComponentPool` storage off the arena and onto per-pool `VmReservation`s
+//! — pools are no longer arena clients, so I1/I2 no longer exercise arena
+//! growth. X.F arena coverage lives in the in-file tests of
+//! `src/ecs/memory/arena.rs` (`grow_*` / `committed_*`). I1/I2 survive here
+//! as end-to-end ECS data-integrity tests that now traverse the POOL grow
+//! path (`ComponentPool::grow_rows` frontier commits) through the public
+//! `EcsMaster` API.
 //!
-//! * **I2** — `EcsMaster::with_arena_reserve(16 MiB)` spawns across 4
-//!   archetypes whose pool allocations cross >= 2 commit slabs, then full
-//!   query iteration validates data integrity: values written into slabs
-//!   committed at different times must read back exactly (pointer-stability
-//!   witness — growth never moves previously returned blocks).
+//! * **I1** — a DEFAULT `EcsMaster` creates 30 single-component archetypes
+//!   and spawns into each: every pool takes the cold first-grow path, and
+//!   the read-back loop witnesses that values written before later pools'
+//!   commits survive bit-exactly. `#[cfg_attr(miri, ignore)]`: 30
+//!   default-ceiling pools are needlessly heavy under Miri, and the pool
+//!   grow path under Miri is already traversed by I2 (not Miri-ignored);
+//!   I1's purpose is the real-OS many-pool witness.
+//!
+//! * **I2** — `EcsMaster::with_arena_reserve(16 MiB)` spawns 2000 rows into
+//!   each of 4 archetypes, then full query iteration validates data
+//!   integrity: values written before and after intervening pool commits
+//!   must read back exactly (pointer-stability witness — `grow_rows` never
+//!   moves previously returned row pointers).
 //!
 //! # Component-slot ranges
 //!
@@ -29,9 +38,10 @@ use boyko_macros::Bundle;
 
 // ── I1 — default world past the old 64 MB ceiling ───────────────────────────
 
-/// 12-byte payload: with the default pool sizing (`DEFAULT_CHUNKS_PER_POOL =
-/// 128` x `TINY_COMPONENTS_PER_CHUNK = 2048` x 12 B) every single-component
-/// archetype's pool takes a contiguous 3 MiB arena block.
+/// 12-byte payload: with the Phase X.I D2 default sizing every
+/// single-component archetype's pool reserves the `POOL_MAX_ROWS` ceiling
+/// of virtual address space (no commit charge); the first spawn into each
+/// archetype takes the cold `grow_rows` commit path.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Fat12 {
@@ -44,7 +54,7 @@ const I1_SLOT_BASE: usize = 66;
 const I1_ARCHETYPES: usize = 30;
 
 #[test]
-#[cfg_attr(miri, ignore)] // R2-W3b: exceeds the 64 MiB Miri fallback default.
+#[cfg_attr(miri, ignore)] // 30 default-ceiling pools are needlessly heavy under Miri; I2 covers growth.
 fn default_world_grows_past_old_64mb_ceiling() {
     // One layout registered under 30 distinct ids — each id gets its own
     // 3 MiB pool (the registry maps id -> Layout; the Rust type is shared).
@@ -194,10 +204,11 @@ fn small_reserve_multi_slab_growth_query_integrity() {
     register_i2();
     let mut ecs = EcsMaster::with_arena_reserve(16 * 1024 * 1024);
 
-    // Round 0 creates the 4 archetypes lazily (4 x ~3 MiB Pos pools + tag
-    // pools ~= 13 MiB of arena demand inside the 16 MiB reserve — multiple
-    // 2-3 MiB-class commit slabs). Round 1 then writes into slab-0 memory
-    // AFTER the later slabs were committed — the pointer-stability witness.
+    // Round 0 creates the 4 archetypes lazily; each spawn batch drives the
+    // pools' `grow_rows` frontier commits (Phase X.I — pools own their
+    // reservations; the arena reserve above only sizes the remaining arena
+    // clients). Round 1 then writes into memory committed in round 0 AFTER
+    // later commits happened — the pointer-stability witness.
     for round in 0..ROUNDS {
         for arch in 0..4 {
             spawn_round(&mut ecs, arch, round);

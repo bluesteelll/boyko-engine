@@ -122,7 +122,11 @@ impl ComponentPoolBundle {
     ///
     /// Returns `true` only if:
     /// - Every `ComponentId` in `components` is present in this bundle.
-    /// - Every corresponding pool has at least one free slot (`!is_full()`).
+    /// - Every corresponding pool is below its reserve ceiling
+    ///   (`!is_full()`). Phase X.I: this is a CEILING pre-check — committed
+    ///   capacity below the ceiling grows on demand inside
+    ///   `ComponentPool::add`, so "full" means the pool's `reserve_rows`
+    ///   is exhausted, not that a fixed buffer ran out.
     ///
     /// This must be called before [`push_entity_components`] to implement the
     /// two-phase commit pattern that prevents partial-pool desync on failure.
@@ -151,14 +155,17 @@ impl ComponentPoolBundle {
     /// for the same `components` slice immediately before this call and without
     /// any intervening mutation. If the precondition is violated, individual
     /// pools may reject the push (`add` returns `None`), leaving the bundle in
-    /// a partially-written state — this is a caller bug.
+    /// a partially-written state — this is a caller bug. Phase X.I: `add`
+    /// grows committed capacity inline, so `None` means the pool's reserve
+    /// ceiling was exhausted.
     ///
     /// Returns the unit index assigned to the entity (all pools receive the
     /// same dense index because they grow in lock-step).
     ///
     /// # Panics
-    /// Panics in debug builds if a pool is full (violated precondition) or if
-    /// a `ComponentId` is not present in the bundle.
+    /// Panics in debug builds if a pool's reserve ceiling is exhausted
+    /// (violated precondition) or if a `ComponentId` is not present in the
+    /// bundle.
     pub fn push_entity_components(&mut self, components: &[(ComponentId, &[u8])]) -> usize {
         debug_assert!(self.can_push_entity_components(components),
             "push_entity_components called without a preceding successful \
@@ -298,10 +305,8 @@ pub fn swap_remove_unit(&mut self, unit_index: usize) -> EcsResult<()> {
 
     /// Phase 12.5 Opt-A2 (C-N1): mutable iterator counterpart.
     ///
-    /// Plan §5.6 lists this accessor in the C-N1 surface; current
-    /// consumers (`commit_units_batch` / `fill_ticks_batch`) use direct
-    /// indexing instead. Kept as `pub(crate)` for future callers.
-    #[allow(dead_code)]
+    /// Used by `Archetype::reserve_capacity` Phase B (Phase X.I) to grow
+    /// every pool's committed capacity after the Phase A ceiling check.
     #[inline]
     pub(crate) fn pools_iter_mut(&mut self) -> impl Iterator<Item = &mut ComponentPool> {
         self.pools.iter_mut()
