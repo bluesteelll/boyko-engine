@@ -35,6 +35,10 @@ pub mod query;
 pub mod query_type_registry;
 pub mod query_view;
 pub mod state;
+// Phase 22 D4: stack-only dynamic-tag terms. The `TagTerms` carrier itself is
+// crate-internal (terms are added via `with_tag` / `without_tag` builders);
+// only the term-count ceiling is part of the public contract.
+pub mod tag_terms;
 
 pub use chunked_data::ChunkedQueryData;
 pub use data::{Mut, QueryData, ReadOnlyQueryData, Ref};
@@ -45,4 +49,5 @@ pub use query::Query;
 pub use query_type_registry::{MAX_QUERY_TYPES, QueryTypeId, QueryTypeKey};
 pub use query_view::QueryView;
 pub use state::QueryDataState;
+pub use tag_terms::MAX_DYN_TAG_TERMS;
 // `Or` is re-exported when Step 4 lands its definition.

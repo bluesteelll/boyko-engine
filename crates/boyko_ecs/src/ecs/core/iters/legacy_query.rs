@@ -22,6 +22,12 @@ use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId};
 /// references could dangle. The new implementation stores `Vec<ArchetypeId>`
 /// inside `QueryState`, resolving live references on demand via
 /// `master.get_archetype(id)`. Stale IDs are transparently skipped.
+///
+/// # Phase 22 D4 — term-free by design
+/// The legacy surface has NO `with_tag` / `without_tag` API (deliberate,
+/// documented in the plan): every matched-list read below goes through the
+/// `_pre_terms` accessors mechanically, with no term test — there is no
+/// per-view term state to apply.
 pub struct Query<'a> {
     state: QueryState,
     master: &'a ArchetypeMaster,
@@ -134,13 +140,13 @@ impl<'a> Query<'a> {
     /// Returns the number of matched archetypes.
     #[inline]
     pub fn len(&self) -> usize {
-        self.state.len()
+        self.state.len_pre_terms()
     }
 
     /// Returns true if no archetypes matched.
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.state.is_empty()
+        self.state.is_empty_pre_terms()
     }
 
     /// Materializes matched archetypes as a `Vec<&Archetype>`.
@@ -149,7 +155,7 @@ impl<'a> Query<'a> {
     /// are silently skipped. For hot-path iteration, prefer `iter()`.
     pub fn archetypes(&self) -> Vec<&'a Archetype> {
         self.state
-            .matched_ids()
+            .matched_ids_pre_terms()
             .iter()
             .filter_map(|&id| self.master.get_archetype(id))
             .collect()
@@ -163,7 +169,7 @@ impl<'a> Query<'a> {
     /// The `&'a self` bound ensures the iterator's `ArchetypeId` slice
     /// lives for at least `'a`, matching the lifetime of `master`.
     pub fn iter(&'a self) -> QueryStateIter<'a> {
-        self.state.iter_cached(self.master)
+        self.state.iter_cached_pre_terms(self.master)
     }
 
     /// Returns a per-entity iterator over component `A` for every matched archetype.
@@ -181,7 +187,7 @@ impl<'a> Query<'a> {
     /// }
     /// ```
     pub fn iter_one<A: Component>(&self) -> QueryIterOne<'_, A> {
-        QueryIterOne::new(self.state.matched_ids(), self.master)
+        QueryIterOne::new(self.state.matched_ids_pre_terms(), self.master)
     }
 
     /// Returns a per-entity iterator over component pair `(A, B)` for every
@@ -201,7 +207,7 @@ impl<'a> Query<'a> {
     /// }
     /// ```
     pub fn iter_two<A: Component, B: Component>(&self) -> QueryIterTwo<'_, A, B> {
-        QueryIterTwo::new(self.state.matched_ids(), self.master)
+        QueryIterTwo::new(self.state.matched_ids_pre_terms(), self.master)
     }
 }
 
@@ -211,7 +217,7 @@ impl<'a> IntoIterator for &'a Query<'a> {
     type IntoIter = QueryStateIter<'a>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.state.iter_cached(self.master)
+        self.state.iter_cached_pre_terms(self.master)
     }
 }
 

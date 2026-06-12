@@ -57,6 +57,7 @@ use crate::ecs::core::iters::query::chunked_data::ChunkedQueryData;
 use crate::ecs::core::iters::query::filter::ArchetypalQueryFilter;
 use crate::ecs::core::iters::query::par_iter::{BatchingStrategy, MIN_ARCHETYPE_FOR_PARALLEL};
 use crate::ecs::core::iters::query::state::QueryDataState;
+use crate::ecs::core::iters::query::tag_terms::{TagTerms, archetype_passes_tag_terms};
 use crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell;
 
 /// Parallel chunked-iter driver. Shared between
@@ -86,7 +87,7 @@ use crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell;
 ///   aliases any column touched by `D` for the current dispatch round.
 /// * **State-sync** — `state` must already be synced against the live
 ///   archetype set via [`QueryDataState::update`]. The driver does not call
-///   `update` itself; it walks `state.archetype_state.matched_ids()`
+///   `update` itself; it walks `state.archetype_state.matched_ids_pre_terms()`
 ///   verbatim. Stale ids (Q5) are skipped transparently via the
 ///   `archetype_ptr(_mut)` `None` arm.
 ///
@@ -98,6 +99,7 @@ pub(crate) unsafe fn par_for_each_chunk_impl<'q, 's, D, F, Func>(
     world: UnsafeEcsCell<'q>,
     mutable: bool,
     batching: BatchingStrategy,
+    terms: &TagTerms,
     f: Func,
 ) where
     D: ChunkedQueryData + 's,
@@ -117,7 +119,7 @@ pub(crate) unsafe fn par_for_each_chunk_impl<'q, 's, D, F, Func>(
         // `Schedule::run` (Wave 5). `scope`'s Drop performs work-stealing so
         // nested invocations cannot deadlock (plan §4.5.5 / Round 2 C3).
         pool.scope(|scope| {
-            for &arch_id in state.archetype_state.matched_ids() {
+            for &arch_id in state.archetype_state.matched_ids_pre_terms() {
                 // SAFETY (U_C2 / U_C3): mirrors the read-only / write-capable
                 //   mint split from `chunk_iter::for_each_chunk_impl`
                 //   (`chunk_iter.rs:113-125`) and `par_iter::for_each_impl`
@@ -141,6 +143,18 @@ pub(crate) unsafe fn par_for_each_chunk_impl<'q, 's, D, F, Func>(
                         }
                     }
                 };
+
+                // Phase 22 D4: archetype-level dynamic-tag term test in the
+                // (single-threaded) distribution loop — workers never see a
+                // term-rejected archetype; one predicted not-taken branch
+                // per transition when no terms are set.
+                //
+                // SAFETY (U1 / U2): same bounded shared-reborrow discipline
+                //   as the `entity_count` probe below; the `&Archetype`
+                //   dies inside the call.
+                if !archetype_passes_tag_terms(terms, unsafe { &*arch_ptr }) {
+                    continue;
+                }
 
                 // SAFETY (U1 / U2 — Phase 7 slab stability): `arch_ptr` is
                 //   live for the surrounding cell scope (`'q`); the
@@ -248,9 +262,11 @@ pub(crate) unsafe fn par_for_each_chunk_impl<'q, 's, D, F, Func>(
         //   user's `Fn` composes trivially. No allocation, no Send/Sync use.
         // SAFETY (forwarded): caller upheld the read/write contract for `D`
         //   and the state-sync contract for `state`; `chunk_iter` itself
-        //   enforces no further preconditions.
+        //   enforces no further preconditions. Phase 22 D4: `terms` is
+        //   forwarded — the sequential driver applies the identical
+        //   archetype-transition term test.
         unsafe {
-            chunk_iter::for_each_chunk_impl(state, world, mutable, |item| f(item));
+            chunk_iter::for_each_chunk_impl(state, world, mutable, terms, |item| f(item));
         }
     }
 }
@@ -497,6 +513,7 @@ mod tests {
                 cell,
                 false,
                 BatchingStrategy::default(),
+                &TagTerms::EMPTY,
                 |slice: &[CompA]| {
                     invocations.fetch_add(1, Ordering::Relaxed);
                     total.fetch_add(slice.len(), Ordering::Relaxed);
@@ -559,6 +576,7 @@ mod tests {
                     cell,
                     false,
                     BatchingStrategy::default(),
+                    &TagTerms::EMPTY,
                     |slice: &[CompA]| {
                         invocations.fetch_add(1, Ordering::Relaxed);
                         total.fetch_add(slice.len(), Ordering::Relaxed);
@@ -742,6 +760,7 @@ mod tests {
                     cell,
                     false,
                     BatchingStrategy::default(),
+                    &TagTerms::EMPTY,
                     |slice: &[CompW7a]| {
                         invocations.fetch_add(1, Ordering::Relaxed);
                         counter.fetch_add(slice.len(), Ordering::Relaxed);
@@ -840,7 +859,7 @@ mod tests {
             )>,
         >::new(&mut ecs);
         assert_eq!(
-            state.archetype_state.matched_ids().len(),
+            state.archetype_state.matched_ids_pre_terms().len(),
             2,
             "Or<(With<W7a>, With<W7b>)> must match exactly the two W7-bearing archetypes",
         );
@@ -872,6 +891,7 @@ mod tests {
                     cell,
                     false,
                     BatchingStrategy::default(),
+                    &TagTerms::EMPTY,
                     |slice: &[CompA]| {
                         total.fetch_add(slice.len(), Ordering::Relaxed);
                     },
@@ -922,6 +942,7 @@ mod tests {
                         cell,
                         true,
                         BatchingStrategy::default(),
+                        &TagTerms::EMPTY,
                         |slice: &mut [CompW7Pos]| {
                             for p in slice.iter_mut() {
                                 p.0 = p.0.wrapping_mul(2);
@@ -946,6 +967,7 @@ mod tests {
                 &state,
                 cell,
                 false,
+                &TagTerms::EMPTY,
                 |slice: &[CompW7Pos]| {
                     for p in slice {
                         collected.push(p.0);

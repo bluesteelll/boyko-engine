@@ -35,7 +35,9 @@ use crate::ecs::core::bundle::Bundle;
 use crate::ecs::core::commands::despawn_command::DespawnCommand;
 use crate::ecs::core::commands::insert_command::InsertCommand;
 use crate::ecs::core::commands::remove_command::RemoveCommand;
+use crate::ecs::core::commands::tag_commands::{AddTagCommand, RemoveTagCommand};
 use crate::ecs::core::component::component::Component;
+use crate::ecs::core::component::component_registry::TagId;
 use crate::ecs::core::entity::entity::Entity;
 use crate::ecs::core::hierarchy::commands::ClearChildrenCommand;
 use crate::ecs::core::hierarchy::ChildOf;
@@ -153,6 +155,34 @@ impl<'a, 's> EntityCommands<'a, 's> {
     #[inline]
     pub fn despawn(&mut self) -> &mut Self {
         self.commands.queue.push(DespawnCommand { entity: self.entity });
+        self
+    }
+
+    /// Enqueues an [`AddTagCommand`] attaching the dynamic tag `tag` to this
+    /// entity (Phase 22 D9). Chainable.
+    ///
+    /// On apply: an absent tag migrates the entity to `source ∪ {tag}`
+    /// (`on_add` + `on_insert` fire for the tag); a present tag takes the
+    /// in-place replace semantics (`on_replace` + `on_insert` fire, changed
+    /// tick stamped); a dead / stale entity is a silent no-op (a despawn may
+    /// legitimately race this command within the frame).
+    #[inline]
+    pub fn add_tag(&mut self, tag: TagId) -> &mut Self {
+        self.commands.queue.push(AddTagCommand { entity: self.entity, tag });
+        self
+    }
+
+    /// Enqueues a [`RemoveTagCommand`] detaching the dynamic tag `tag` from
+    /// this entity (Phase 22 D9). Chainable.
+    ///
+    /// On apply: a present tag migrates the entity to `source \ {tag}`
+    /// (`on_replace` + `on_remove` fire for the tag; removing the last
+    /// component routes the entity into the EMPTY archetype — it stays alive
+    /// with zero components); an absent tag or a dead / stale entity is a
+    /// silent no-op (W1 parity with [`remove`](Self::remove)).
+    #[inline]
+    pub fn remove_tag(&mut self, tag: TagId) -> &mut Self {
+        self.commands.queue.push(RemoveTagCommand { entity: self.entity, tag });
         self
     }
 

@@ -24,6 +24,7 @@ pub mod send_event_command;
 pub mod spawn_at_command;
 pub mod spawn_batch_command;
 pub mod spawn_batch_iter;
+pub mod tag_commands;
 
 pub use command::Command;
 // `CommandQueue` is promoted to `pub` because it is the `State` associated
@@ -50,6 +51,10 @@ pub(crate) use send_event_command::SendEventCommand;
 pub(crate) use spawn_at_command::SpawnAtCommand;
 #[allow(unused_imports)]
 pub(crate) use spawn_batch_command::SpawnBatchCommand;
+// Phase 22 tag commands follow the same `pub(crate)` discipline — users go
+// through `EntityCommands::add_tag` / `remove_tag`.
+#[allow(unused_imports)]
+pub(crate) use tag_commands::{AddTagCommand, RemoveTagCommand};
 // Phase 12.5 Opt-A2: `SpawnBatchIter` is the user-facing return type of
 // `Commands::spawn_batch`. Promoted to `pub` so user code can name it in
 // function signatures (without the bundle-iterator type leaking per W5).

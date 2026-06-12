@@ -46,6 +46,17 @@ pub struct QueryState {
     /// instead of the cheap delta-add path, eliminating the ArchetypeId-ABA
     /// hazard documented on `ArchetypeMaster::structural_generation`.
     structural_generation: ArchetypeGeneration,
+    /// # Phase 22 D4 — the `_pre_terms` module boundary
+    ///
+    /// This is the SHARED, term-agnostic archetype-match cache. Dynamic-tag
+    /// terms (`with_tag` / `without_tag`) are per-view state applied at each
+    /// driver's archetype-transition point and NEVER mutate this cache (the
+    /// QS1 dual-structure invariant stays intact — the cache is shared across
+    /// all instances of a `(D, F)` query type). Every accessor that exposes
+    /// this list carries the `_pre_terms` suffix, so a consumer outside this
+    /// module cannot read the matched list without consciously typing
+    /// `_pre_terms`; inside this module the private field is touched only by
+    /// the QS1 cache-maintenance code, which is pre-terms by definition.
     matched_ids: Vec<ArchetypeId>,
     // Lines 1-3 (cold-after-warmup): 3 × 64 B filter masks.
     include: ComponentMask,
@@ -91,12 +102,17 @@ impl QueryState {
     /// Warm path (generation unchanged): one load + comparison, then slice walk.
     /// Cold path (new archetypes exist): `update_archetypes` classifies the delta.
     ///
+    /// # Phase 22 D4 — pre-terms
+    /// Iterates the raw matched list **term-agnostically**; reserved for the
+    /// legacy surface, benches, and cache maintenance. Dynamic-tag terms are
+    /// applied by the typed drivers only (the D4 funnel).
+    ///
     /// # `clear()` / `remove_archetype()` interaction
     /// Safe across both. The structural_generation mismatch detected here
     /// triggers a full rebuild inside `update_archetypes`, which correctly
     /// handles recycled `ArchetypeId`s by re-classifying the live archetype
     /// set against this state's filter.
-    pub fn iter<'a>(&'a mut self, master: &'a ArchetypeMaster) -> QueryStateIter<'a> {
+    pub fn iter_pre_terms<'a>(&'a mut self, master: &'a ArchetypeMaster) -> QueryStateIter<'a> {
         debug_assert!(
             self.generation <= master.archetype_generation(),
             "QueryState.generation ({:?}) > master.archetype_generation() ({:?}); \
@@ -115,8 +131,9 @@ impl QueryState {
         {
             self.update_archetypes(master);
         }
-        // `iter_cached` is valid because update_archetypes() just synced both gens.
-        self.iter_cached(master)
+        // `iter_cached_pre_terms` is valid because update_archetypes() just
+        // synced both gens.
+        self.iter_cached_pre_terms(master)
     }
 
     /// Brings the cache in sync with the master's current archetype set.
@@ -210,21 +227,26 @@ impl QueryState {
         include_ok && exclude_ok && optional_ok
     }
 
-    /// Returns the number of matched archetypes.
+    /// Returns the number of matched archetypes — **pre-terms** (Phase 22
+    /// D4): dynamic-tag terms are per-view and not visible at this layer.
     #[inline]
-    pub fn len(&self) -> usize {
+    pub(crate) fn len_pre_terms(&self) -> usize {
         self.matched_ids.len()
     }
 
-    /// Returns true if no archetypes are matched.
+    /// Returns true if no archetypes are matched — **pre-terms** (Phase 22
+    /// D4): dynamic-tag terms are per-view and not visible at this layer.
     #[inline]
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty_pre_terms(&self) -> bool {
         self.matched_ids.is_empty()
     }
 
-    /// Returns a slice of all matched archetype IDs.
+    /// Returns a slice of all matched archetype IDs — **pre-terms** (Phase 22
+    /// D4): the raw shared cache, before any per-view dynamic-tag term is
+    /// applied. Every driver that consumes this slice MUST apply
+    /// `archetype_passes_tag_terms` at its archetype-transition point.
     #[inline]
-    pub fn matched_ids(&self) -> &[ArchetypeId] {
+    pub fn matched_ids_pre_terms(&self) -> &[ArchetypeId] {
         &self.matched_ids
     }
 
@@ -239,12 +261,17 @@ impl QueryState {
         self.structural_generation = ArchetypeGeneration::FIRST;
     }
 
-    /// Iterates the cached matched IDs without re-checking the generation.
+    /// Iterates the cached matched IDs without re-checking the generation —
+    /// **pre-terms** (Phase 22 D4): term-agnostic raw-cache walk, reserved
+    /// for the legacy surface and cache maintenance.
     ///
     /// Requires that `update_archetypes` has already been called and
     /// `self.generation == master.archetype_generation()`.
     #[inline]
-    pub(crate) fn iter_cached<'a>(&'a self, master: &'a ArchetypeMaster) -> QueryStateIter<'a> {
+    pub(crate) fn iter_cached_pre_terms<'a>(
+        &'a self,
+        master: &'a ArchetypeMaster,
+    ) -> QueryStateIter<'a> {
         QueryStateIter {
             master,
             ids: self.matched_ids.iter(),
@@ -302,9 +329,13 @@ impl QueryState {
     /// route additional mutation paths through this accessor (e.g. tick
     /// filters in Phase 10). The `dead_code` allow keeps non-test builds
     /// clippy-clean without dropping the published `pub(crate)` API.
+    ///
+    /// Phase 22 D4: renamed `_pre_terms` for sweep completeness — this is the
+    /// QS1 cache-maintenance writer (delta-update), pre-terms by definition,
+    /// and its return derefs to a readable slice.
     #[allow(dead_code)]
     #[inline]
-    pub(crate) fn matched_ids_mut(&mut self) -> &mut Vec<ArchetypeId> {
+    pub(crate) fn matched_ids_pre_terms_mut(&mut self) -> &mut Vec<ArchetypeId> {
         &mut self.matched_ids
     }
 
@@ -422,7 +453,7 @@ mod tests {
     fn t700_empty_state_iter_yields_nothing() {
         let master = setup();
         let mut state = QueryState::with_component_ids(&[Pos::component_id()]);
-        let count = state.iter(&master).count();
+        let count = state.iter_pre_terms(&master).count();
         assert_eq!(count, 0);
     }
 
@@ -436,8 +467,8 @@ mod tests {
         let mut state = QueryState::with_component_ids(&[Pos::component_id()]);
         state.update_archetypes(&master);
 
-        assert_eq!(state.len(), 1);
-        let arch = state.iter(&master).next().expect("one archetype expected");
+        assert_eq!(state.len_pre_terms(), 1);
+        let arch = state.iter_pre_terms(&master).next().expect("one archetype expected");
         assert!(arch.has_component_id(Pos::component_id()));
     }
 
@@ -450,10 +481,10 @@ mod tests {
 
         let mut state = QueryState::with_component_ids(&[Pos::component_id()]);
         state.update_archetypes(&master);
-        let len_first = state.len();
+        let len_first = state.len_pre_terms();
 
         state.update_archetypes(&master);
-        assert_eq!(state.len(), len_first, "second update must be a no-op");
+        assert_eq!(state.len_pre_terms(), len_first, "second update must be a no-op");
     }
 
     // --- test 703: delta update classifies only new archetypes ---
@@ -466,12 +497,12 @@ mod tests {
 
         let mut state = QueryState::with_component_ids(&[Pos::component_id()]);
         state.update_archetypes(&master);
-        assert_eq!(state.len(), 2, "both Pos+Vel and Pos+Health should match");
+        assert_eq!(state.len_pre_terms(), 2, "both Pos+Vel and Pos+Health should match");
 
         // Add a third archetype and delta-update
         master.create_archetype(&[Pos::component_id(), Damage::component_id()]);
         state.update_archetypes(&master);
-        assert_eq!(state.len(), 3, "third archetype must be picked up on delta");
+        assert_eq!(state.len_pre_terms(), 3, "third archetype must be picked up on delta");
     }
 
     // --- test 704: include/exclude/optional filter semantics ---
@@ -503,11 +534,11 @@ mod tests {
         // [Pos] alone fails optional (no Vel or Health)
         // [Health] alone fails include (no Pos)
         assert_eq!(
-            state.len(),
+            state.len_pre_terms(),
             3,
             "filter must match same 3 archetypes as LegacyQuery::test_complex_filtering"
         );
-        for arch in state.iter(&master) {
+        for arch in state.iter_pre_terms(&master) {
             assert!(arch.has_component_id(Pos::component_id()), "must have Pos");
             assert!(!arch.has_component_id(Damage::component_id()), "must not have Damage");
             assert!(
@@ -533,7 +564,7 @@ mod tests {
         state.update_archetypes(&master);
 
         // For every ID in matched_ids, the bitset must say contains=true
-        for &id in state.matched_ids() {
+        for &id in state.matched_ids_pre_terms() {
             assert!(
                 state.matched_archetypes.contains(id.0),
                 "id {} in matched_ids but not in bitset",
@@ -552,7 +583,7 @@ mod tests {
             });
         if let Some(id) = vel_only_id {
             assert!(
-                !state.matched_ids().contains(&id),
+                !state.matched_ids_pre_terms().contains(&id),
                 "vel-only archetype must not be in matched_ids"
             );
         }
@@ -568,15 +599,15 @@ mod tests {
 
         let mut state = QueryState::with_component_ids(&[Pos::component_id()]);
         state.update_archetypes(&master);
-        assert_eq!(state.len(), 2, "two archetypes before reset");
+        assert_eq!(state.len_pre_terms(), 2, "two archetypes before reset");
 
         state.reset();
-        assert_eq!(state.len(), 0, "len must be 0 after reset");
-        assert!(state.is_empty(), "is_empty must be true after reset");
+        assert_eq!(state.len_pre_terms(), 0, "len must be 0 after reset");
+        assert!(state.is_empty_pre_terms(), "is_empty must be true after reset");
 
         // After reset the bitset must also be clean: re-run update and verify no dups
         state.update_archetypes(&master);
-        assert_eq!(state.len(), 2, "must re-match after reset+update");
+        assert_eq!(state.len_pre_terms(), 2, "must re-match after reset+update");
     }
 
     // --- test 707: stale id after remove is skipped ---
@@ -591,13 +622,13 @@ mod tests {
 
         let mut state = QueryState::with_component_ids(&[Pos::component_id()]);
         state.update_archetypes(&master);
-        assert_eq!(state.len(), 3);
+        assert_eq!(state.len_pre_terms(), 3);
 
         // Remove one archetype from master
         master.remove_archetype(id_to_remove);
 
         // iter() must skip the now-missing id (get_archetype returns None)
-        let count = state.iter(&master).count();
+        let count = state.iter_pre_terms(&master).count();
         assert_eq!(count, 2, "stale removed id must be skipped during iteration");
     }
 
@@ -619,7 +650,7 @@ mod tests {
         // Phase 1: create a Pos archetype, query for Pos, observe the match.
         let pos_id_v1 = master.create_archetype(&[Pos::component_id()]);
         let mut state = QueryState::with_component_ids(&[Pos::component_id()]);
-        let matched_v1: Vec<_> = state.iter(&master).map(|a| a.id()).collect();
+        let matched_v1: Vec<_> = state.iter_pre_terms(&master).map(|a| a.id()).collect();
         assert_eq!(matched_v1, vec![pos_id_v1], "phase 1: Pos archetype matches");
 
         // Phase 2: clear master, then create an UNRELATED archetype that will
@@ -632,7 +663,7 @@ mod tests {
         // the Vel archetype as if it matched the Pos filter. With the fix,
         // the structural_generation mismatch forces a full rebuild and the
         // re-classification rejects Vel for not having Pos.
-        let matched_v2: Vec<_> = state.iter(&master).map(|a| a.id()).collect();
+        let matched_v2: Vec<_> = state.iter_pre_terms(&master).map(|a| a.id()).collect();
         assert!(
             matched_v2.is_empty(),
             "ABA: recycled id with unrelated mask MUST NOT be surfaced by a stale QueryState; \
@@ -654,17 +685,17 @@ mod tests {
 
         let mut state = QueryState::with_component_ids(&[Pos::component_id()]);
         state.update_archetypes(&master);
-        assert_eq!(state.matched_ids(), &[id_a, id_b, id_c], "precondition: three matches in insertion order");
+        assert_eq!(state.matched_ids_pre_terms(), &[id_a, id_b, id_c], "precondition: three matches in insertion order");
         assert_eq!(state.matched_archetypes_bitset().popcount(), 3, "precondition: bitset popcount == 3");
 
         // Remove the middle id. swap_remove semantics: last (id_c) moves to slot 1.
         state.remove_matched_at(1);
 
         // (a) length dropped by exactly one.
-        assert_eq!(state.matched_ids().len(), 2, "len must decrement by 1");
+        assert_eq!(state.matched_ids_pre_terms().len(), 2, "len must decrement by 1");
         // (b) swap_remove behaviour: id_c (was last) now sits at index 1; id_a unchanged at 0.
-        assert_eq!(state.matched_ids()[0], id_a, "slot 0 must be unchanged");
-        assert_eq!(state.matched_ids()[1], id_c, "swap_remove must move last element to vacated slot");
+        assert_eq!(state.matched_ids_pre_terms()[0], id_a, "slot 0 must be unchanged");
+        assert_eq!(state.matched_ids_pre_terms()[1], id_c, "swap_remove must move last element to vacated slot");
         // (c) bitset bit for the removed id (id_b) is cleared; the survivors stay set.
         assert!(!state.matched_archetypes_bitset().contains(id_b.0), "removed id bit must be cleared");
         assert!(state.matched_archetypes_bitset().contains(id_a.0), "survivor id_a bit must remain set");
@@ -722,17 +753,17 @@ mod tests {
         let id_b = master.create_archetype(&[Pos::component_id(), Vel::component_id()]);
         let mut state = QueryState::with_component_ids(&[Pos::component_id()]);
 
-        let v1: Vec<_> = state.iter(&master).map(|a| a.id()).collect();
+        let v1: Vec<_> = state.iter_pre_terms(&master).map(|a| a.id()).collect();
         assert_eq!(v1.len(), 2, "phase 1: both Pos archetypes match");
         assert!(v1.contains(&id_a) && v1.contains(&id_b));
 
         master.remove_archetype(id_a);
 
-        let v2: Vec<_> = state.iter(&master).map(|a| a.id()).collect();
+        let v2: Vec<_> = state.iter_pre_terms(&master).map(|a| a.id()).collect();
         assert_eq!(v2, vec![id_b], "phase 2: removed id_a is gone, id_b remains");
 
         // Crucially, matched_ids itself was rebuilt — not just filtered during
         // iteration. Length is exactly 1, not 2-with-skip.
-        assert_eq!(state.len(), 1, "matched_ids must be physically purged, not skip-on-iter");
+        assert_eq!(state.len_pre_terms(), 1, "matched_ids must be physically purged, not skip-on-iter");
     }
 }

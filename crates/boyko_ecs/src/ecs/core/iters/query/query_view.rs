@@ -27,6 +27,7 @@ use std::ptr::NonNull;
 
 use static_assertions::assert_impl_all;
 
+use crate::ecs::core::component::component_registry::TagId;
 use crate::ecs::core::entity::entity::Entity;
 use crate::ecs::core::iters::query::chunk_iter;
 use crate::ecs::core::iters::query::chunked_data::ChunkedQueryData;
@@ -36,6 +37,9 @@ use crate::ecs::core::iters::query::iter::{QueryIter, QueryIterMut};
 use crate::ecs::core::iters::query::par_chunk;
 use crate::ecs::core::iters::query::par_iter::{BatchingStrategy, ParQuery, ParQueryMut};
 use crate::ecs::core::iters::query::state::QueryDataState;
+use crate::ecs::core::iters::query::tag_terms::{
+    TagTerms, any_term_matched, archetype_passes_tag_terms, count_term_matched,
+};
 use crate::ecs::core::system::system_meta::SystemMeta;
 use crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell;
 
@@ -61,10 +65,13 @@ use crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell;
 /// W4 message. Use `Query<D, F>` as a SystemParam inside a system body via
 /// `Schedule` for change-detection queries.
 ///
-/// # Layout (§10.2)
+/// # Layout (§10.2, amended by Phase 22 D4)
 ///
-/// 16 B total — `UnsafeEcsCell<'w>` (8 B) + `NonNull<UnsafeCell<...>>` (8 B)
-/// + ZST `PhantomData`. Single cache-line addressable on x86_64.
+/// `UnsafeEcsCell<'w>` (8 B) + `NonNull<UnsafeCell<...>>` (8 B) + inline
+/// [`TagTerms`] (stack-only, `MAX_DYN_TAG_TERMS` slots) + ZST `PhantomData`.
+/// Hot pointer fields plus an inline 72-B term block; no heap indirection.
+/// Field order is left to rustc (no `#[repr(C)]`); the no-terms fast path
+/// reads only the terms' `len == 0` byte once per archetype transition.
 pub struct QueryView<'w, D: QueryData, F: QueryFilter = ()> {
     /// World-access cell. By-value copy — `UnsafeEcsCell` is `Copy + Send + Sync`
     /// per SEND3 and never holds a `&` retag.
@@ -79,6 +86,12 @@ pub struct QueryView<'w, D: QueryData, F: QueryFilter = ()> {
     /// across distinct `query` calls; `UnsafeCell::get` mints a `*mut`
     /// without raising a SharedReadOnly retag.
     state: NonNull<UnsafeCell<QueryDataState<D, F>>>,
+
+    /// Phase 22 D4: per-view dynamic-tag terms. Stack-only `Copy` payload —
+    /// EMPTY for every `EcsMaster::query`-minted view; populated by
+    /// [`Self::with_tag`] / [`Self::without_tag`]. NEVER written into the
+    /// world-owned cached `QueryDataState` (QS1 stays term-agnostic).
+    terms: TagTerms,
 
     /// Lifetime binding to `&'w mut EcsMaster` plus invariance over
     /// `(D, F)`. Two separate marker fields keep the type signature
@@ -160,9 +173,43 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
         Self {
             world,
             state,
+            // Phase 22 D4: a freshly minted view carries no dynamic-tag
+            // terms; `with_tag` / `without_tag` populate them.
+            terms: TagTerms::EMPTY,
             _world_borrow: PhantomData,
             _data_filter_invariance: PhantomData,
         }
+    }
+
+    /// Adds a dynamic-tag presence term (Phase 22 D4): only archetypes
+    /// carrying `tag` participate in every driver of this view
+    /// (`iter`/`iter_mut`, `par_iter`/`par_iter_mut`, `for_each_chunk`,
+    /// `par_for_each_chunk`, `get`/`get_mut`, `single`/`single_mut`,
+    /// `archetype_count`/`is_empty`).
+    ///
+    /// Archetype-level filtering only — zero per-row cost; the no-terms fast
+    /// path stays byte-identical (one predicted branch per archetype
+    /// transition).
+    ///
+    /// # Panics
+    /// Loud release panic past
+    /// [`MAX_DYN_TAG_TERMS`](crate::ecs::core::iters::query::MAX_DYN_TAG_TERMS)
+    /// combined `with_tag`/`without_tag` terms (setup-time, cold).
+    #[must_use]
+    #[inline]
+    pub fn with_tag(mut self, tag: TagId) -> Self {
+        self.terms.push_with(tag);
+        self
+    }
+
+    /// Adds a dynamic-tag absence term (Phase 22 D4): archetypes carrying
+    /// `tag` are excluded. Same cost model and panic contract as
+    /// [`Self::with_tag`].
+    #[must_use]
+    #[inline]
+    pub fn without_tag(mut self, tag: TagId) -> Self {
+        self.terms.push_without(tag);
+        self
     }
 
     /// Shared reborrow of the cached state.
@@ -189,19 +236,42 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
 
     /// Returns the number of currently-matched archetypes.
     ///
-    /// O(1) — reads the length of the cached `matched_ids` slice.
+    /// No-terms path: O(1) — reads the length of the cached `matched_ids`
+    /// slice. With dynamic-tag terms: O(matched) signature-filtered walk
+    /// (archetype-level membership only — `entity_count` is never consulted,
+    /// matching the no-terms semantics; stale removed ids do not count on
+    /// the term path, since the term test needs the live signature).
     #[inline]
     pub fn archetype_count(&self) -> usize {
-        self.state().archetype_state.matched_ids().len()
+        let state = self.state();
+        let ids = state.archetype_state.matched_ids_pre_terms();
+        if self.terms.is_empty() {
+            return ids.len();
+        }
+        // SAFETY (U_C2): shared read mint — `world()` yields `&EcsMaster`
+        //   scoped to this statement; no `&mut` access occurs through it
+        //   (same pattern as `get`'s world reborrow).
+        let master = unsafe { self.world.world().archetype_master() };
+        count_term_matched(&self.terms, master, ids)
     }
 
     /// Returns `true` if no archetypes are currently matched.
     ///
     /// Same caveat as [`Query::is_empty`](super::query::Query::is_empty):
     /// an archetype-count of zero does not imply a zero-row iteration.
+    ///
+    /// Term semantics mirror [`Self::archetype_count`].
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.state().archetype_state.matched_ids().is_empty()
+        let state = self.state();
+        let ids = state.archetype_state.matched_ids_pre_terms();
+        if self.terms.is_empty() {
+            return ids.is_empty();
+        }
+        // SAFETY (U_C2): shared read mint scoped to this statement — see
+        //   `archetype_count`.
+        let master = unsafe { self.world.world().archetype_master() };
+        !any_term_matched(&self.terms, master, ids)
     }
 
     /// Returns a read-only iterator over `D::Item<'_>` for every matched row.
@@ -227,8 +297,9 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
         //   passing it by value preserves raw-pointer provenance.
         //   `SystemMeta::dummy()` returns a stable `'static` reference
         //   (NCD7); the NCD6 const-fold makes the dummy contents
-        //   unobservable on the !NCD path.
-        unsafe { QueryIter::new(self.state(), self.world, SystemMeta::dummy()) }
+        //   unobservable on the !NCD path. Phase 22 D4: `self.terms` is
+        //   copied into the cursor — applied at each archetype transition.
+        unsafe { QueryIter::new(self.state(), self.world, SystemMeta::dummy(), self.terms) }
     }
 
     /// Returns a mutable iterator over `D::Item<'_>` for every matched row.
@@ -241,8 +312,9 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
         // SAFETY (Q1, Q3, QD4, U_C3): `&mut self` enforces cursor
         //   uniqueness; the cell carries write-capable provenance from
         //   the upstream `&mut EcsMaster` (QV1). See `iter` SAFETY for
-        //   meta plumbing rationale.
-        unsafe { QueryIterMut::new(self.state(), self.world, SystemMeta::dummy()) }
+        //   meta plumbing rationale. Phase 22 D4: `self.terms` is copied
+        //   into the cursor.
+        unsafe { QueryIterMut::new(self.state(), self.world, SystemMeta::dummy(), self.terms) }
     }
 
     /// Returns a parallel read-only iteration handle.
@@ -262,6 +334,7 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
             world: self.world,
             batching: BatchingStrategy::default(),
             meta: SystemMeta::dummy(),
+            terms: self.terms,
         }
     }
 
@@ -277,6 +350,7 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
             world: self.world,
             batching: BatchingStrategy::default(),
             meta: SystemMeta::dummy(),
+            terms: self.terms,
             _mut_marker: PhantomData,
         }
     }
@@ -365,6 +439,11 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
         if !bitset.contains(arch_ref.id().0) {
             return None;
         }
+        // Phase 22 D4: per-entity term test on the in-hand archetype ref —
+        // ≤ 8 signature bit tests; `len == 0` is one predicted branch.
+        if !archetype_passes_tag_terms(&self.terms, arch_ref) {
+            return None;
+        }
         let row = inland.unit_index() as usize;
         let mut data_fetch = <D as QueryData>::init_fetch(&state.data_state);
         // SAFETY (QD3, QD4): read-only mint via the raw pointer; the
@@ -414,6 +493,11 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
         let arch_ref = unsafe { &*arch_ptr };
         let bitset = state.archetype_state.matched_archetypes_bitset();
         if !bitset.contains(arch_ref.id().0) {
+            return None;
+        }
+        // Phase 22 D4: per-entity term test on the in-hand archetype ref —
+        // mirrors `get`.
+        if !archetype_passes_tag_terms(&self.terms, arch_ref) {
             return None;
         }
         let row = inland_copy.unit_index() as usize;
@@ -480,7 +564,7 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
         //   raw-pointer provenance through the call (Phase 8a C1 fix).
         let mutable = !D::IS_READ_ONLY;
         unsafe {
-            chunk_iter::for_each_chunk_impl(self.state(), self.world, mutable, f);
+            chunk_iter::for_each_chunk_impl(self.state(), self.world, mutable, &self.terms, f);
         }
     }
 
@@ -542,6 +626,7 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
                 self.world,
                 mutable,
                 batching,
+                &self.terms,
                 f,
             );
         }

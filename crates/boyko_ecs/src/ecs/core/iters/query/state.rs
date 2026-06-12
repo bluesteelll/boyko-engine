@@ -119,7 +119,11 @@ impl<D: QueryData, F: QueryFilter> QueryDataState<D, F> {
     ) {
         let mut idx = 0;
         loop {
-            let ids = archetype_state.matched_ids();
+            // Phase 22 D4: pre-terms by design — this is QS1 cache
+            // maintenance over the SHARED archetype-match cache; dynamic-tag
+            // terms are per-view and must never affect (or read through)
+            // the shared cache.
+            let ids = archetype_state.matched_ids_pre_terms();
             if idx >= ids.len() {
                 break;
             }
@@ -151,7 +155,9 @@ impl<D: QueryData, F: QueryFilter> QueryDataState<D, F> {
     /// * `bitset.popcount() as usize == matched_ids.len()` — bijection.
     #[cfg(debug_assertions)]
     fn assert_dual_invariant(archetype_state: &QueryState) {
-        let ids = archetype_state.matched_ids();
+        // Phase 22 D4: pre-terms by design — QS1 dual-structure verification
+        // runs against the shared term-agnostic cache.
+        let ids = archetype_state.matched_ids_pre_terms();
         let bitset = archetype_state.matched_archetypes_bitset();
         for id in ids {
             debug_assert!(
@@ -283,7 +289,7 @@ mod tests {
         let state = QueryDataState::<&CompA, ()>::new(&mut ecs);
 
         assert_eq!(
-            state.archetype_state.matched_ids(),
+            state.archetype_state.matched_ids_pre_terms(),
             &[matching],
             "new must match exactly the CompA archetype",
         );
@@ -301,15 +307,15 @@ mod tests {
         ecs.create_archetype(&[COMP_A, COMP_B]);
 
         let mut state = QueryDataState::<&CompA, ()>::new(&mut ecs);
-        let snapshot: Vec<_> = state.archetype_state.matched_ids().to_vec();
+        let snapshot: Vec<_> = state.archetype_state.matched_ids_pre_terms().to_vec();
 
         // First update: cache is already in sync — no churn, no rebuild.
         state.update(ecs.archetype_master());
-        assert_eq!(state.archetype_state.matched_ids(), snapshot.as_slice());
+        assert_eq!(state.archetype_state.matched_ids_pre_terms(), snapshot.as_slice());
 
         // Second update: still no churn.
         state.update(ecs.archetype_master());
-        assert_eq!(state.archetype_state.matched_ids(), snapshot.as_slice());
+        assert_eq!(state.archetype_state.matched_ids_pre_terms(), snapshot.as_slice());
     }
 
     /// `Query<(), Or<(With<A>, With<B>)>>` with no archetype matching either
@@ -328,9 +334,9 @@ mod tests {
             QueryDataState::<(), Or<(With<CompA>, With<CompB>)>>::new(&mut ecs);
 
         assert!(
-            state.archetype_state.matched_ids().is_empty(),
+            state.archetype_state.matched_ids_pre_terms().is_empty(),
             "Or<(With<A>, With<B>)> against {{C, D}} archetypes must yield empty matches; got {:?}",
-            state.archetype_state.matched_ids(),
+            state.archetype_state.matched_ids_pre_terms(),
         );
 
         // Sanity: adding a CompA archetype makes the Or filter pick it up.
@@ -338,7 +344,7 @@ mod tests {
         let mut state = state;
         state.update(ecs.archetype_master());
         assert_eq!(
-            state.archetype_state.matched_ids(),
+            state.archetype_state.matched_ids_pre_terms(),
             &[with_a],
             "Or filter must accept a CompA-bearing archetype after update",
         );
@@ -393,7 +399,7 @@ mod tests {
         // No panic + manually re-check the conditions.
         QueryDataState::<&CompA, ()>::assert_dual_invariant(&state.archetype_state);
         let bitset = state.archetype_state.matched_archetypes_bitset();
-        let ids = state.archetype_state.matched_ids();
+        let ids = state.archetype_state.matched_ids_pre_terms();
         assert_eq!(ids.len(), 3, "three CompA archetypes matched");
         assert_eq!(
             bitset.popcount() as usize,
@@ -425,7 +431,7 @@ mod tests {
         // matched_ids vector. The bitset bit for `real` is already set, so
         // this creates a 2-vs-1 popcount mismatch that
         // `assert_dual_invariant` MUST detect.
-        state.archetype_state.matched_ids_mut().push(real);
+        state.archetype_state.matched_ids_pre_terms_mut().push(real);
 
         QueryDataState::<&CompA, ()>::assert_dual_invariant(&state.archetype_state);
     }

@@ -17,6 +17,7 @@
 
 use std::marker::PhantomData;
 
+use crate::ecs::core::component::component_registry::TagId;
 use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 use crate::ecs::core::iters::query::chunk_iter;
 use crate::ecs::core::iters::query::chunked_data::ChunkedQueryData;
@@ -26,6 +27,7 @@ use crate::ecs::core::iters::query::iter::{QueryIter, QueryIterMut};
 use crate::ecs::core::iters::query::par_chunk;
 use crate::ecs::core::iters::query::par_iter::{BatchingStrategy, ParQuery, ParQueryMut};
 use crate::ecs::core::iters::query::state::QueryDataState;
+use crate::ecs::core::iters::query::tag_terms::{TagTerms, any_term_matched, count_term_matched};
 use crate::ecs::core::system::filtered_access_set::FilteredAccessSet;
 use crate::ecs::core::system::system_meta::SystemMeta;
 use crate::ecs::core::system::system_param::SystemParam;
@@ -65,18 +67,66 @@ pub struct Query<'w, 's, D: QueryData, F: QueryFilter = ()> {
     /// `last_run` / `this_run` (Phase 10 Round 2 C2).
     meta: &'s SystemMeta,
 
+    /// Phase 22 D4: per-view dynamic-tag terms. Stack-only `Copy` payload —
+    /// EMPTY for every `get_param`-minted query; populated by
+    /// [`Self::with_tag`] / [`Self::without_tag`]. NEVER written into the
+    /// shared per-system `QueryDataState` (QS1 stays term-agnostic).
+    terms: TagTerms,
+
     /// Invariance over `D` and `F`. `fn() -> (D, F)` keeps the marker
     /// `Send + Sync` regardless of `D`/`F` bounds.
     _marker: PhantomData<fn() -> (D, F)>,
 }
 
 impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
+    /// Adds a dynamic-tag presence term (Phase 22 D4): only archetypes
+    /// carrying `tag` participate in every driver of this query view
+    /// (`iter`/`iter_mut`, `par_iter`/`par_iter_mut`, `for_each_chunk`,
+    /// `par_for_each_chunk`, `archetype_count`/`is_empty`).
+    ///
+    /// Archetype-level filtering only — zero per-row cost; the no-terms fast
+    /// path stays byte-identical (one predicted branch per archetype
+    /// transition).
+    ///
+    /// # Panics
+    /// Loud release panic past
+    /// [`MAX_DYN_TAG_TERMS`](crate::ecs::core::iters::query::MAX_DYN_TAG_TERMS)
+    /// combined `with_tag`/`without_tag` terms (setup-time, cold).
+    #[must_use]
+    #[inline]
+    pub fn with_tag(mut self, tag: TagId) -> Self {
+        self.terms.push_with(tag);
+        self
+    }
+
+    /// Adds a dynamic-tag absence term (Phase 22 D4): archetypes carrying
+    /// `tag` are excluded. Same cost model and panic contract as
+    /// [`Self::with_tag`].
+    #[must_use]
+    #[inline]
+    pub fn without_tag(mut self, tag: TagId) -> Self {
+        self.terms.push_without(tag);
+        self
+    }
+
     /// Returns the number of currently-matched archetypes.
     ///
-    /// O(1) — reads the length of the cached `matched_ids` slice.
+    /// No-terms path: O(1) — reads the length of the cached `matched_ids`
+    /// slice. With dynamic-tag terms: O(matched) signature-filtered walk
+    /// (archetype-level membership only — `entity_count` is never consulted,
+    /// matching the no-terms semantics; stale removed ids do not count on
+    /// the term path, since the term test needs the live signature).
     #[inline]
     pub fn archetype_count(&self) -> usize {
-        self.state.archetype_state.matched_ids().len()
+        let ids = self.state.archetype_state.matched_ids_pre_terms();
+        if self.terms.is_empty() {
+            return ids.len();
+        }
+        // SAFETY (U_C2): shared read mint — `world()` yields `&EcsMaster`
+        //   scoped to this statement; no `&mut` access occurs through it
+        //   (same pattern as `get_param`'s master reborrow).
+        let master = unsafe { self.world.world().archetype_master() };
+        count_term_matched(&self.terms, master, ids)
     }
 
     /// Returns `true` if no archetypes are currently matched.
@@ -85,9 +135,18 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
     /// iteration (a matched archetype with no live entities still counts);
     /// conversely, `is_empty() == false` does not guarantee a non-zero
     /// iteration length. Use the iterator for an exact row count.
+    ///
+    /// Term semantics mirror [`Self::archetype_count`].
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.state.archetype_state.matched_ids().is_empty()
+        let ids = self.state.archetype_state.matched_ids_pre_terms();
+        if self.terms.is_empty() {
+            return ids.is_empty();
+        }
+        // SAFETY (U_C2): shared read mint scoped to this statement — see
+        //   `archetype_count`.
+        let master = unsafe { self.world.world().archetype_master() };
+        !any_term_matched(&self.terms, master, ids)
     }
 
     /// Returns a read-only iterator over `D::Item<'_>` for every entity in
@@ -107,7 +166,9 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
         //   the raw-pointer provenance through the call (Phase 8a C1).
         //   Phase 10 Round 2 C2: `self.meta` is forwarded so non-archetypal
         //   filters and `Ref<T>` / `Mut<T>` impls can read the tick snapshot.
-        unsafe { QueryIter::new(self.state, self.world, self.meta) }
+        //   Phase 22 D4: `self.terms` is copied into the cursor — applied at
+        //   each archetype transition.
+        unsafe { QueryIter::new(self.state, self.world, self.meta, self.terms) }
     }
 
     /// Returns a mutable iterator over `D::Item<'_>` for every entity in
@@ -132,8 +193,9 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
         //   `QueryIterMut::new` will call `cell.archetype_ptr_mut(_)` per
         //   archetype boundary. If `world` carries a read-only mint and `D`
         //   were not gated, the cell's own debug-assert fires. Phase 10
-        //   Round 2 C2: `self.meta` is forwarded.
-        unsafe { QueryIterMut::new(self.state, self.world, self.meta) }
+        //   Round 2 C2: `self.meta` is forwarded. Phase 22 D4: `self.terms`
+        //   is copied into the cursor.
+        unsafe { QueryIterMut::new(self.state, self.world, self.meta, self.terms) }
     }
 
     /// Returns a parallel read-only iteration handle.
@@ -163,6 +225,7 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
             world: self.world,
             batching: BatchingStrategy::default(),
             meta: self.meta,
+            terms: self.terms,
         }
     }
 
@@ -179,6 +242,7 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
             world: self.world,
             batching: BatchingStrategy::default(),
             meta: self.meta,
+            terms: self.terms,
             _mut_marker: PhantomData,
         }
     }
@@ -224,7 +288,7 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
         //   (Phase 8a C1 fix).
         let mutable = !D::IS_READ_ONLY;
         unsafe {
-            chunk_iter::for_each_chunk_impl(self.state, self.world, mutable, f);
+            chunk_iter::for_each_chunk_impl(self.state, self.world, mutable, &self.terms, f);
         }
     }
 
@@ -294,6 +358,7 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
                 self.world,
                 mutable,
                 batching,
+                &self.terms,
                 f,
             );
         }
@@ -433,6 +498,9 @@ where
             state,
             world,
             meta: meta_s,
+            // Phase 22 D4: a freshly minted SystemParam query carries no
+            // dynamic-tag terms; `with_tag` / `without_tag` populate them.
+            terms: TagTerms::EMPTY,
             _marker: PhantomData,
         }
     }
@@ -574,13 +642,14 @@ mod tests {
             state: &state,
             world: cell,
             meta: &meta,
+            terms: TagTerms::EMPTY,
             _marker: PhantomData,
         };
 
         assert_eq!(q.archetype_count(), 2, "both CompA archetypes must be matched");
         assert!(!q.is_empty(), "two archetypes matched ⇒ not empty");
         // Sanity: matched_ids contains exactly the two CompA archetypes.
-        let ids = state.archetype_state.matched_ids();
+        let ids = state.archetype_state.matched_ids_pre_terms();
         assert!(ids.contains(&arch_a), "arch_a must be in matched_ids");
         assert!(ids.contains(&arch_ab), "arch_ab must be in matched_ids");
     }

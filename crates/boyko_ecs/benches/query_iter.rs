@@ -215,8 +215,10 @@ fn bench_query_state_iter(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter(|| {
                 // Warm path: generation unchanged, no archetype scan.
+                // Phase 22 D4: `iter_pre_terms` — the raw term-agnostic walk
+                // (this bench measures the shared cache, not tag terms).
                 let mut sum = 0usize;
-                for arch in state.iter(ecs.archetype_master()) {
+                for arch in state.iter_pre_terms(ecs.archetype_master()) {
                     sum += arch.entity_count();
                 }
                 black_box(sum)

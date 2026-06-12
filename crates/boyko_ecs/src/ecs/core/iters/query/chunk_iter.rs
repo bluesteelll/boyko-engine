@@ -7,7 +7,7 @@
 //!
 //! # Hot loop shape
 //!
-//! For each `arch_id` in `state.archetype_state.matched_ids()`:
+//! For each `arch_id` in `state.archetype_state.matched_ids_pre_terms()`:
 //!
 //! 1. Mint a `*mut Archetype` (`mutable == true`) or reborrow `*const`
 //!    as `*mut` (`mutable == false`) via [`UnsafeEcsCell::archetype_ptr_mut`]
@@ -47,6 +47,7 @@ use crate::ecs::core::archetype::archetype::Archetype;
 use crate::ecs::core::iters::query::chunked_data::ChunkedQueryData;
 use crate::ecs::core::iters::query::filter::ArchetypalQueryFilter;
 use crate::ecs::core::iters::query::state::QueryDataState;
+use crate::ecs::core::iters::query::tag_terms::{TagTerms, archetype_passes_tag_terms};
 use crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell;
 
 /// Sequential chunked-iter driver. Shared between
@@ -54,7 +55,7 @@ use crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell;
 ///
 /// # Hot loop
 ///
-/// Outer loop iterates `state.archetype_state.matched_ids()`. Per
+/// Outer loop iterates `state.archetype_state.matched_ids_pre_terms()`. Per
 /// archetype: skip stale ids (Q5), skip empty archetypes, refresh
 /// `ChunkFetch`, hand the full slice to `f`.
 ///
@@ -79,7 +80,7 @@ use crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell;
 ///   on the current dispatch round.
 /// * **State-sync** — `state` must already be synced against the live
 ///   archetype set via [`QueryDataState::update`]. The driver does not
-///   call `update` itself; it walks `state.archetype_state.matched_ids()`
+///   call `update` itself; it walks `state.archetype_state.matched_ids_pre_terms()`
 ///   verbatim. Stale ids (archetypes removed after the last sync) are
 ///   skipped transparently via the `archetype_ptr(_mut)` `None` arm.
 ///
@@ -90,6 +91,7 @@ pub(crate) unsafe fn for_each_chunk_impl<'q, 's, D, F, Func>(
     state: &'s QueryDataState<D, F>,
     world: UnsafeEcsCell<'q>,
     mutable: bool,
+    terms: &TagTerms,
     mut f: Func,
 ) where
     D: ChunkedQueryData,
@@ -98,7 +100,7 @@ pub(crate) unsafe fn for_each_chunk_impl<'q, 's, D, F, Func>(
 {
     let mut chunk_fetch = <D as ChunkedQueryData>::init_chunk_fetch(&state.data_state);
 
-    for &arch_id in state.archetype_state.matched_ids() {
+    for &arch_id in state.archetype_state.matched_ids_pre_terms() {
         // SAFETY (U_C2 / U_C3, Q5): mirrors the read-only / write-capable
         //   mint split from `iter.rs:217-220` (`QueryIter`) and
         //   `iter.rs:419-422` (`QueryIterMut`). The cell is scoped to
@@ -123,6 +125,17 @@ pub(crate) unsafe fn for_each_chunk_impl<'q, 's, D, F, Func>(
                 }
             }
         };
+
+        // Phase 22 D4: archetype-level dynamic-tag term test at the
+        // transition point — one predicted not-taken branch when no terms
+        // are set; the user closure never sees a term-rejected archetype.
+        //
+        // SAFETY (U1 / U2): same bounded shared-reborrow discipline as the
+        //   `entity_count` probe below; the `&Archetype` dies inside the
+        //   call.
+        if !archetype_passes_tag_terms(terms, unsafe { &*arch_ptr }) {
+            continue;
+        }
 
         // SAFETY (U1 / U2 — Phase 7 slab stability): `arch_ptr` is live
         //   for the surrounding cell scope (`'q`); the `&Archetype`
@@ -283,7 +296,7 @@ mod tests {
         //   live in this scope. `D = &CompA` ⇒ `IS_READ_ONLY = true` ⇒
         //   `mutable = false`. `F = ()` ⇒ archetypal.
         unsafe {
-            for_each_chunk_impl::<&CompA, (), _>(&state, cell, false, |slice: &[CompA]| {
+            for_each_chunk_impl::<&CompA, (), _>(&state, cell, false, &TagTerms::EMPTY, |slice: &[CompA]| {
                 invocations += 1;
                 for c in slice {
                     collected.push(c.0);
@@ -322,7 +335,7 @@ mod tests {
 
         let state = QueryDataState::<&CompA, ()>::new(&mut ecs);
         assert_eq!(
-            state.archetype_state.matched_ids().len(),
+            state.archetype_state.matched_ids_pre_terms().len(),
             2,
             "both CompA-bearing archetypes must be matched",
         );
@@ -335,7 +348,7 @@ mod tests {
         // SAFETY (Q1, CD1-CD4): direct driver test; `D = &CompA` read-only;
         //   `F = ()` archetypal. No aliasing live.
         unsafe {
-            for_each_chunk_impl::<&CompA, (), _>(&state, cell, false, |slice: &[CompA]| {
+            for_each_chunk_impl::<&CompA, (), _>(&state, cell, false, &TagTerms::EMPTY, |slice: &[CompA]| {
                 slice_lens.push(slice.len());
                 total += slice.len();
             });
@@ -363,7 +376,7 @@ mod tests {
         // Matched-ids should still contain the empty archetype — the
         // archetype-match cache is rows-agnostic.
         assert_eq!(
-            state.archetype_state.matched_ids().len(),
+            state.archetype_state.matched_ids_pre_terms().len(),
             1,
             "the empty CompA archetype must still be matched at the cache level",
         );
@@ -375,7 +388,7 @@ mod tests {
         // SAFETY (Q1, CD1-CD4): direct driver test; read-only; archetypal
         //   filter; no aliasing live.
         unsafe {
-            for_each_chunk_impl::<&CompA, (), _>(&state, cell, false, |_slice: &[CompA]| {
+            for_each_chunk_impl::<&CompA, (), _>(&state, cell, false, &TagTerms::EMPTY, |_slice: &[CompA]| {
                 invocations += 1;
             });
         }
@@ -512,7 +525,7 @@ mod tests {
 
         let mut state = QueryDataState::<&CompA, ()>::new(&mut ecs);
         assert_eq!(
-            state.archetype_state.matched_ids().len(),
+            state.archetype_state.matched_ids_pre_terms().len(),
             2,
             "both CompA-bearing archetypes must be matched before tampering",
         );
@@ -522,7 +535,7 @@ mod tests {
         // skips via the `continue` arm.
         state
             .archetype_state
-            .matched_ids_mut()
+            .matched_ids_pre_terms_mut()
             .push(crate::ecs::identifiers::primitives::ArchetypeId(999));
 
         // SAFETY (U_C1): cell consumed inside this scope.
@@ -535,7 +548,7 @@ mod tests {
         //   branch handles — driver returns `None` from `archetype_ptr` and
         //   skips without touching the user closure.
         unsafe {
-            for_each_chunk_impl::<&CompA, (), _>(&state, cell, false, |slice: &[CompA]| {
+            for_each_chunk_impl::<&CompA, (), _>(&state, cell, false, &TagTerms::EMPTY, |slice: &[CompA]| {
                 invocations += 1;
                 total += slice.len();
             });
@@ -576,6 +589,7 @@ mod tests {
                     &state,
                     cell,
                     true,
+                    &TagTerms::EMPTY,
                     |slice: &mut [CompA]| {
                         for c in slice.iter_mut() {
                             c.0 = c.0.wrapping_mul(2);
@@ -594,7 +608,7 @@ mod tests {
         let mut collected: Vec<u32> = Vec::with_capacity(100);
         // SAFETY (Q1, CD1-CD4): read-only re-iteration; no aliasing live.
         unsafe {
-            for_each_chunk_impl::<&CompA, (), _>(&state, cell, false, |slice: &[CompA]| {
+            for_each_chunk_impl::<&CompA, (), _>(&state, cell, false, &TagTerms::EMPTY, |slice: &[CompA]| {
                 for c in slice {
                     collected.push(c.0);
                 }
@@ -641,6 +655,7 @@ mod tests {
                 &state,
                 cell,
                 true,
+                &TagTerms::EMPTY,
                 |(a, b, c): (&[CompA], &mut [CompB], &[CompD])| {
                     invocations += 1;
                     observed_lens.push((a.len(), b.len(), c.len()));
@@ -666,7 +681,7 @@ mod tests {
 
     /// `Query<(), With<MarkerE>>::for_each_chunk(|()| count += 1)` — empty
     /// tuple `D = ()` on N matched archetypes invokes the closure with `()`
-    /// exactly N times. The driver still walks `matched_ids()`; the `()` data
+    /// exactly N times. The driver still walks `matched_ids_pre_terms()`; the `()` data
     /// fetch is a no-op materialiser that yields a unit value per non-empty
     /// archetype.
     #[test]
@@ -726,7 +741,7 @@ mod tests {
             &mut ecs,
         );
         assert_eq!(
-            state.archetype_state.matched_ids().len(),
+            state.archetype_state.matched_ids_pre_terms().len(),
             2,
             "exactly the two MarkerE-bearing archetypes must match (unmarked is filtered out)",
         );
@@ -742,6 +757,7 @@ mod tests {
                 &state,
                 cell,
                 false,
+                &TagTerms::EMPTY,
                 |_: ()| {
                     invocations += 1;
                 },

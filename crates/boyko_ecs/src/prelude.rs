@@ -26,6 +26,10 @@ pub use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 pub use crate::ecs::core::entity::entity::Entity;
 pub use crate::ecs::core::resources::resource::Resource;
 
+// ── Phase 22 — dynamic tags ──────────────────────────────────────────────────
+pub use crate::ecs::core::component::component_registry::TagId;
+pub use crate::ecs::core::component::hooks::HooksError;
+
 // ── Hierarchies (parent-child) ───────────────────────────────────────────────
 pub use crate::ecs::core::hierarchy::{ChildOf, Children};
 

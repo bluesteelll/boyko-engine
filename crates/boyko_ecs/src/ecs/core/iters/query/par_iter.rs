@@ -57,6 +57,7 @@ use crate::ecs::core::archetype::archetype::Archetype;
 use crate::ecs::core::iters::query::data::{QueryData, ReadOnlyQueryData};
 use crate::ecs::core::iters::query::filter::QueryFilter;
 use crate::ecs::core::iters::query::state::QueryDataState;
+use crate::ecs::core::iters::query::tag_terms::{TagTerms, archetype_passes_tag_terms};
 use crate::ecs::core::system::system_meta::SystemMeta;
 use crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell;
 
@@ -140,6 +141,10 @@ pub struct ParQuery<'q, 's, D: QueryData, F: QueryFilter> {
     /// Phase 10 Round 2 W6: per-system tick snapshot forwarded into every
     /// chunk dispatch path (inline + owned + PAR7 fallback).
     pub(super) meta: &'s SystemMeta,
+    /// Phase 22 D4: per-view dynamic-tag terms, applied in the per-archetype
+    /// distribution loop (already archetype-granular — workers receive only
+    /// term-passing archetypes' chunks).
+    pub(super) terms: TagTerms,
 }
 
 impl<'q, 's, D, F> ParQuery<'q, 's, D, F>
@@ -168,7 +173,15 @@ where
     where
         Body: Fn(D::Item<'_>) + Send + Sync,
     {
-        for_each_impl::<D, F, Body>(self.state, self.world, self.batching, self.meta, body, false);
+        for_each_impl::<D, F, Body>(
+            self.state,
+            self.world,
+            self.batching,
+            self.meta,
+            &self.terms,
+            body,
+            false,
+        );
     }
 }
 
@@ -188,6 +201,8 @@ pub struct ParQueryMut<'q, 's, D: QueryData, F: QueryFilter> {
     pub(super) batching: BatchingStrategy,
     /// Phase 10 Round 2 W6: per-system tick snapshot (see [`ParQuery::meta`]).
     pub(super) meta: &'s SystemMeta,
+    /// Phase 22 D4: per-view dynamic-tag terms (see [`ParQuery::terms`]).
+    pub(super) terms: TagTerms,
     /// `&'q mut` reborrow marker — the [`Query::par_iter_mut`] entry takes
     /// `&mut self` so the type system already enforces cursor uniqueness;
     /// this marker keeps the handle invariant in `'q`.
@@ -218,7 +233,15 @@ where
     where
         Body: Fn(D::Item<'_>) + Send + Sync,
     {
-        for_each_impl::<D, F, Body>(self.state, self.world, self.batching, self.meta, body, true);
+        for_each_impl::<D, F, Body>(
+            self.state,
+            self.world,
+            self.batching,
+            self.meta,
+            &self.terms,
+            body,
+            true,
+        );
     }
 }
 
@@ -241,11 +264,18 @@ where
 /// per-spawn cost. Two monomorphic drivers would duplicate the (already
 /// long) chunk loop without observable speedup; sharing keeps the I-cache
 /// footprint smaller.
+// Phase 22 D4: `terms` is the per-view dynamic-tag term list; the test runs
+// in the per-archetype distribution loop (already archetype-granular), so
+// workers receive only term-passing archetypes' chunks. The 7-arg signature
+// mirrors `run_chunk_raw`'s rationale: bundling into a struct would add a
+// deref layer at both call sites for no codegen win.
+#[allow(clippy::too_many_arguments)]
 fn for_each_impl<D, F, Body>(
     state: &QueryDataState<D, F>,
     world: UnsafeEcsCell<'_>,
     batching: BatchingStrategy,
     meta: &SystemMeta,
+    terms: &TagTerms,
     body: Body,
     mutable: bool,
 ) where
@@ -269,7 +299,7 @@ fn for_each_impl<D, F, Body>(
         // performs work-stealing so nested invocations cannot deadlock
         // (plan §4.5.5 / Round 2 C3).
         pool.scope(|scope| {
-            for &arch_id in state.archetype_state.matched_ids() {
+            for &arch_id in state.archetype_state.matched_ids_pre_terms() {
                 // SAFETY (U_C2 / U_C3): the cell is scoped to `'_` (caller
                 //   contract on `for_each`); the mint path matches the
                 //   `mutable` flag — the cell carries write-capable
@@ -288,6 +318,18 @@ fn for_each_impl<D, F, Body>(
                         }
                     }
                 };
+
+                // Phase 22 D4: archetype-level dynamic-tag term test in the
+                // (single-threaded) distribution loop — one predicted
+                // not-taken branch per archetype transition when no terms
+                // are set; workers never see term-rejected archetypes.
+                //
+                // SAFETY (U1 / U2): same bounded shared-reborrow discipline
+                //   as the `entity_count` probe below; the `&Archetype`
+                //   dies inside the call.
+                if !archetype_passes_tag_terms(terms, unsafe { &*arch_ptr }) {
+                    continue;
+                }
 
                 // SAFETY (U1 / U2 — Phase 7 slab stability): `arch_ptr`
                 //   is live for the surrounding cell scope; the `&Archetype`
@@ -382,7 +424,7 @@ fn for_each_impl<D, F, Body>(
         // walk per archetype (mirrors what `Query::iter` / `iter_mut`
         // would produce; we avoid going through `Query` itself to keep
         // the borrow shape compatible with the by-value `world` cell).
-        for &arch_id in state.archetype_state.matched_ids() {
+        for &arch_id in state.archetype_state.matched_ids_pre_terms() {
             // SAFETY (U_C2 / U_C3): same as in the dispatched branch.
             let arch_ptr: *mut Archetype = unsafe {
                 if mutable {
@@ -397,6 +439,13 @@ fn for_each_impl<D, F, Body>(
                     }
                 }
             };
+            // Phase 22 D4: term test on the PAR7 sequential fallback — same
+            // contract as the dispatched branch above.
+            //
+            // SAFETY (U1 / U2): bounded shared reborrow; dies inside the call.
+            if !archetype_passes_tag_terms(terms, unsafe { &*arch_ptr }) {
+                continue;
+            }
             // SAFETY (U1 / U2): slab-stable archetype pointer; the
             //   `&Archetype` reborrow is bounded to this expression.
             let entity_count = unsafe { (*arch_ptr).entity_count() };
