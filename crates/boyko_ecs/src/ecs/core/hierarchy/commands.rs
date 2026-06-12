@@ -32,7 +32,7 @@ use crate::ecs::core::component::hooks::HookContext;
 use crate::ecs::core::component::hooks::deferred_master::DeferredEcsMaster;
 use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 use crate::ecs::core::entity::entity::Entity;
-use crate::ecs::core::hierarchy::{CASCADE_FANOUT_INLINE, ChildOf, Children, ChildrenBundle};
+use crate::ecs::core::hierarchy::{CASCADE_FANOUT_INLINE, ChildOf, Children};
 
 // ===========================================================================
 // Deferred commands (W2)
@@ -108,9 +108,10 @@ impl Command for LinkChildCommand {
             Some(mut children) => children.push(child),
             None => {
                 // First child: route the insert through the audited migration
-                // machinery via the `ChildrenBundle` newtype (R2 C1). This fires
-                // `on_add` + `on_insert` only — `Children` registers neither, so
-                // no spurious cascade.
+                // machinery — `Children` is a `Bundle` itself (Phase 22 D7,
+                // `impl_self_bundle!`; the Phase-19 newtype is deleted). This
+                // fires `on_add` + `on_insert` only — `Children` registers
+                // neither, so no spurious cascade.
                 //
                 // `has_entity(parent)` above proved the slot is non-null and
                 // generation-matched; the sequential exclusive borrows
@@ -125,13 +126,13 @@ impl Command for LinkChildCommand {
                 //   Non-null + generation-matched by the preceding `has_entity`,
                 //   so the slot is live.
                 let src = unsafe { (*inland.archetype_ptr()).id() };
-                let tgt = merged_archetype_id::<ChildrenBundle>(world, src);
-                migrate_entity_insert::<ChildrenBundle>(
+                let tgt = merged_archetype_id::<Children>(world, src);
+                migrate_entity_insert::<Children>(
                     world,
                     parent,
                     src,
                     tgt,
-                    ChildrenBundle(Children::with_one(child)),
+                    Children::with_one(child),
                 );
             }
         }

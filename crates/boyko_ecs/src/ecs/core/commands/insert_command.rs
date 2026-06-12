@@ -13,8 +13,6 @@
 //!   releases source row via `move_out_entity`. ~590 ns / 3-component
 //!   bundle, warm path.
 
-#![allow(dead_code)]
-
 use std::mem::{self, MaybeUninit};
 use std::ptr::NonNull;
 
@@ -30,11 +28,6 @@ use crate::ecs::core::component::observers::dispatch::{
 use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 use crate::ecs::core::entity::entity::Entity;
 use crate::ecs::identifiers::primitives::ComponentId;
-
-/// Stack-collector ceiling. Matches the `MAX_BUNDLE_ARITY` used by
-/// `SpawnAtCommand` / `SpawnCommand` so that any bundle the derive macro
-/// accepts fits in the replace-in-place fast path's scratch.
-const MAX_BUNDLE_ARITY: usize = 8;
 
 /// Deferred "insert bundle `B` into existing entity" command.
 ///

@@ -169,26 +169,10 @@ impl Children {
     }
 }
 
-/// Private 1-field bundle newtype used to route the first-child `Children`
-/// insert through the audited `migrate_entity_insert` machinery (Phase 19 R2
-/// C1). `Bundle` is sealed and all insert machinery is `B: Bundle`-bound, so a
-/// bare `Children` cannot reuse it — a 1-field newtype can.
-///
-/// `boyko-macros` is a dev-dependency only (it cannot be a normal dependency
-/// without an architectural change), so `#[derive(Bundle)]` is unavailable in
-/// library source. The `Bundle` impl is therefore hand-written to mirror the
-/// derive output exactly — the established codebase pattern (see the hand-impl
-/// `Component`s at `ecs_master.rs` test module / `component_pool.rs`). See
-/// [`bundles`] for the impl + the SAFETY accounting of the reproduced
-/// `for_each_component_bytes` byte-erasure.
-pub(crate) struct ChildrenBundle(pub(crate) Children);
-
-/// Private 1-field bundle newtype for inserting `ChildOf` through the audited
-/// insert machinery (symmetry with [`ChildrenBundle`]; Phase 19 R2 C1).
-///
-/// `Bundle` impl is hand-written for the same dev-only-macros reason as
-/// [`ChildrenBundle`] — see [`bundles`].
-pub(crate) struct ChildOfBundle(pub(crate) ChildOf);
+// Phase 22 D7: the Phase-19 `ChildrenBundle` / `ChildOfBundle` 1-field
+// newtypes were deleted — `ChildOf` / `Children` implement `Bundle` directly
+// via `impl_self_bundle!` (see [`bundles`]) and ride the audited insert
+// machinery as themselves.
 
 impl Component for ChildOf {
     #[inline]

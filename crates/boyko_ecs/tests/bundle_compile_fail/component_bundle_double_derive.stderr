@@ -1,0 +1,19 @@
+error[E0119]: conflicting implementations of trait `boyko_ecs::ecs::core::bundle::bundle::sealed::BundleSealed` for type `DoubleDerive`
+  --> tests/bundle_compile_fail/component_bundle_double_derive.rs:13:21
+   |
+13 | #[derive(Component, Bundle)]
+   |          ---------  ^^^^^^ conflicting implementation for `DoubleDerive`
+   |          |
+   |          first implementation here
+   |
+   = note: this error originates in the derive macro `Bundle` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0119]: conflicting implementations of trait `Bundle` for type `DoubleDerive`
+  --> tests/bundle_compile_fail/component_bundle_double_derive.rs:13:21
+   |
+13 | #[derive(Component, Bundle)]
+   |          ---------  ^^^^^^ conflicting implementation for `DoubleDerive`
+   |          |
+   |          first implementation here
+   |
+   = note: this error originates in the derive macro `Bundle` (in Nightly builds, run with -Z macro-backtrace for more info)

@@ -40,11 +40,13 @@
 
 use std::alloc::Layout;
 use std::any::TypeId;
-use std::sync::OnceLock;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 use crate::ecs::core::component::component::Component;
-use crate::ecs::core::component::hooks::ComponentHooks;
+use crate::ecs::core::component::hooks::{ComponentHooks, HooksError};
+use crate::ecs::identifiers::primitives::ComponentId;
 
 /// Maximum number of components supported by the ECS system.
 pub const MAX_COMPONENTS: usize = 512;
@@ -147,6 +149,26 @@ impl ComponentLayout {
         self.size == 0
     }
 
+    /// Phase 22 (D3): layout for a runtime-minted **dynamic tag**.
+    ///
+    /// Size 0, alignment 1, no drop glue; `type_id` is the private
+    /// [`DynamicTagMarker`] sentinel, shared by EVERY dynamic tag. Because the
+    /// sentinel is uninhabited and private it can never collide with a user
+    /// type, and the typed-pool `debug_assert(component_type_id ==
+    /// TypeId::of::<T>())` correctly rejects typed access to dynamic-tag ids.
+    ///
+    /// `name` is the interned tag name (leaked once per unique tag by the
+    /// [`TAG_NAMES`] mint path) — it doubles as `type_name` for diagnostics.
+    pub fn new_dynamic_tag(name: &'static str) -> Self {
+        Self {
+            size: 0,
+            alignment: 1,
+            drop_fn: None,
+            type_name: name,
+            type_id: TypeId::of::<DynamicTagMarker>(),
+        }
+    }
+
     /// Returns a memory layout object for this component.
     #[inline]
     pub fn layout(&self) -> Layout {
@@ -155,6 +177,56 @@ impl ComponentLayout {
         // language definition — alignment is a power of two and size fits in
         // `isize::MAX` (otherwise `T` would not have a layout).
         unsafe { Layout::from_size_align_unchecked(self.size, self.alignment) }
+    }
+}
+
+/// Phase 22 (D3): private uninhabited sentinel — the `TypeId` of every dynamic
+/// tag. Can never collide with a user type (it is unnameable outside this
+/// module); typed-pool debug guards therefore correctly reject typed access to
+/// dynamic-tag ids.
+///
+/// Because all dynamic tags share this one `TypeId`, idempotency for dynamic
+/// mints is NAME-keyed (the [`TAG_NAMES`] intern), never TypeId-keyed —
+/// [`register_new`]'s same-TypeId idempotent arm would alias two distinct tag
+/// names to one id (plan O2).
+enum DynamicTagMarker {}
+
+/// Filter-only dynamic-tag handle (Phase 22 D3). `repr(transparent)` over
+/// [`ComponentId`]: zero-cost, but type-distinct so data-fetch APIs cannot
+/// accept it (a dynamic tag has no data by definition).
+///
+/// # One-way bridge (W3)
+///
+/// `TagId → ComponentId` is public — [`TagId::component_id`] and the
+/// `From<TagId> for ComponentId` impl — because the id-keyed surfaces a
+/// dynamic tag needs downstream ([`register_hooks_by_id`],
+/// `EcsMaster::add_observer`) take [`ComponentId`]. The reverse direction has
+/// NO constructor: a `TagId` is a proof that the id was minted as a size-0
+/// dynamic tag, and only the [`TAG_NAMES`] mint path can issue one.
+///
+/// # Identity stability
+///
+/// Like every [`ComponentId`], the numeric value is first-call-order
+/// process-unstable; the **name** is the stable serialization key
+/// (`tag_by_name`).
+#[repr(transparent)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct TagId(pub(crate) ComponentId);
+
+impl TagId {
+    /// Bridges to the shared [`ComponentId`] space (Phase 22 W3) — the
+    /// vocabulary of the id-keyed hook/observer surfaces
+    /// ([`register_hooks_by_id`], `EcsMaster::add_observer`).
+    #[inline]
+    pub const fn component_id(self) -> ComponentId {
+        self.0
+    }
+}
+
+impl From<TagId> for ComponentId {
+    #[inline]
+    fn from(tag: TagId) -> Self {
+        tag.component_id()
     }
 }
 
@@ -326,6 +398,50 @@ pub(crate) fn was_ever_archetyped(component_id: usize) -> bool {
     EVER_ARCHETYPED[component_id / 64].load(Ordering::Relaxed) & (1u64 << (component_id % 64)) != 0
 }
 
+/// Id-keyed hook registration (Phase 22 D8) — the single entry point into the
+/// write-once `HOOKS` table for ids that have no Rust type to name (dynamic
+/// tags), and the delegation target of the typed runtime path
+/// ([`ComponentHooksBuilder`](crate::ecs::core::component::hooks::builder::ComponentHooksBuilder)'s
+/// commit).
+///
+/// # Errors
+///
+/// - [`HooksError::AlreadyArchetyped`] — `component_id` was already placed in
+///   an archetype of some world in this process (Phase-21 H1 staleness gate).
+///   An archetype's `ArchetypeFlags` hook bits are OR-computed once at
+///   creation; hooks registered after the fact would silently never fire
+///   there. Without this gate the NATURAL dynamic-tag call order
+///   `register_tag → add_tag → register_hooks_by_id` would compile, succeed,
+///   and lie. **Contract: mint → register hooks → first attach.**
+/// - [`HooksError::AlreadyRegistered`] — the slot is already populated
+///   (write-once semantics, unchanged from the typed paths).
+///
+/// # Panics
+///
+/// If `component_id.0 >= MAX_COMPONENTS` — an out-of-range id is a caller bug
+/// (every id minted by this registry is in range), mirroring
+/// [`register_layout`]'s release-active bound assert.
+pub fn register_hooks_by_id(
+    component_id: ComponentId,
+    hooks: ComponentHooks,
+) -> Result<(), HooksError> {
+    assert!(
+        component_id.0 < MAX_COMPONENTS,
+        "Component ID {} exceeds maximum allowed ({})",
+        component_id.0,
+        MAX_COMPONENTS
+    );
+    // H1 staleness gate first: even an unoccupied slot is rejected once the id
+    // has been archetyped — the flags of that archetype are already frozen.
+    if was_ever_archetyped(component_id.0) {
+        return Err(HooksError::AlreadyArchetyped { component_id });
+    }
+    if !try_set_hooks(component_id.0, hooks) {
+        return Err(HooksError::AlreadyRegistered { component_id });
+    }
+    Ok(())
+}
+
 /// Allocates a fresh `ComponentId` from the global counter and stores
 /// `ComponentLayout::new_static::<T>()` in the corresponding `LAYOUTS` slot.
 ///
@@ -365,6 +481,131 @@ pub fn register_new<T: 'static>() -> usize {
             }
         }
     }
+}
+
+/// Phase 22 (D3): process-global name → id intern for dynamic tags. COLD:
+/// touched at mint/lookup only (setup time) — never on the per-frame hot path.
+///
+/// `Mutex + HashMap` is justified per the Phase-12.5 `QueryTypeId`-intern
+/// precedent; one concrete global (not a generic-fn-body static) avoids the
+/// monomorphization-collapse trap. Capacity + idempotency are atomic under
+/// this lock; idempotency is NAME-keyed, never TypeId-keyed (all dynamic tags
+/// share [`DynamicTagMarker`]'s TypeId — plan O2). Names are leaked once per
+/// successfully minted unique tag (bounded ≤ [`MAX_COMPONENTS`], the #53
+/// bounded-leak precedent).
+static TAG_NAMES: OnceLock<Mutex<HashMap<Box<str>, TagId>>> = OnceLock::new();
+
+/// Lazily initializes and returns the [`TAG_NAMES`] intern table.
+fn tag_names() -> &'static Mutex<HashMap<Box<str>, TagId>> {
+    TAG_NAMES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Name-keyed dynamic-tag mint (Phase 22 D3 mint protocol). Idempotent per
+/// name: a present name returns its existing [`TagId`] (success), even after
+/// the budget is exhausted. `None` means the shared `MAX_COMPONENTS` budget is
+/// exhausted and `name` was never minted.
+///
+/// The whole decision — lookup, capacity check, mint, intern — runs under the
+/// [`TAG_NAMES`] lock, so two threads racing the same name cannot double-mint.
+///
+/// # Leak bound
+///
+/// The name is leaked (`Box::leak`) only on the mint path, after the
+/// early-return budget check. One residual window exists: a concurrent typed
+/// [`register_new`] (whose `fetch_add` is not under this lock) can claim the
+/// last slot between our budget peek and the CAS in [`try_register_dynamic`],
+/// leaking one name copy. Past exhaustion `NEXT_ID` never decreases, so every
+/// later failing call returns at the peek, allocation-free — the leak is
+/// bounded by the number of distinct names racing the exact exhaustion
+/// boundary, in practice zero.
+pub(crate) fn try_register_tag_by_name(name: &str) -> Option<TagId> {
+    let mut names = tag_names()
+        .lock()
+        .expect("invariant: TAG_NAMES lock poisoned only after a registry-invariant panic (dynamic_slot_occupied_panic under the guard) — process already condemned");
+    if let Some(&tag) = names.get(name) {
+        return Some(tag);
+    }
+    if NEXT_ID.load(Ordering::Relaxed) >= MAX_COMPONENTS {
+        return None;
+    }
+    let leaked: &'static str = Box::leak(Box::<str>::from(name));
+    let id = try_register_dynamic(ComponentLayout::new_dynamic_tag(leaked))?;
+    let tag = TagId(id);
+    names.insert(Box::from(name), tag);
+    Some(tag)
+}
+
+/// Cold name → [`TagId`] lookup (Phase 22 D3). `None` if `name` was never
+/// successfully minted. Never mints.
+pub(crate) fn tag_by_name(name: &str) -> Option<TagId> {
+    tag_names()
+        .lock()
+        .expect("invariant: TAG_NAMES lock poisoned only after a registry-invariant panic (dynamic_slot_occupied_panic under the guard) — process already condemned")
+        .get(name)
+        .copied()
+}
+
+/// Crate-internal fallible mint (Phase 22 D3): allocates a fresh
+/// [`ComponentId`] via a bounded CAS on the shared [`NEXT_ID`] and stores
+/// `layout` in the slot. Returns `None` at the `MAX_COMPONENTS` ceiling — it
+/// does NOT inherit [`register_new`]'s release exhaustion assert (dynamic
+/// mints are user-data-driven; the panic is opt-in via `register_tag`).
+///
+/// Coexistence with [`register_new`]'s `fetch_add` is sound: a concurrent
+/// `fetch_add` merely makes the CAS retry on the fresh value; the CAS path
+/// never pushes `NEXT_ID` past `MAX_COMPONENTS`.
+///
+/// # Panics
+///
+/// If the freshly CAS-minted slot is already occupied (plan O2). That is an
+/// invariant violation — reachable only via the test-only [`register_layout`]
+/// slot-pinning escape hatch overlapping the production counter — and it MUST
+/// panic rather than take [`register_new`]'s same-TypeId idempotent return:
+/// every dynamic tag shares [`DynamicTagMarker`]'s TypeId, so the idempotent
+/// arm would alias two distinct tag names to one id.
+pub(crate) fn try_register_dynamic(layout: ComponentLayout) -> Option<ComponentId> {
+    let mut current = NEXT_ID.load(Ordering::Relaxed);
+    loop {
+        if current >= MAX_COMPONENTS {
+            return None;
+        }
+        // Relaxed on success AND failure: this CAS only provides uniqueness of
+        // the minted index. The `OnceLock::set` below remains the
+        // acquire/release synchronization point publishing the layout payload
+        // — the exact contract `register_new`'s Relaxed `fetch_add` documents
+        // (module-level "Threading" notes).
+        match NEXT_ID.compare_exchange_weak(
+            current,
+            current + 1,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => break,
+            Err(actual) => current = actual,
+        }
+    }
+    if LAYOUTS[current].set(layout).is_err() {
+        dynamic_slot_occupied_panic(current);
+    }
+    Some(ComponentId(current))
+}
+
+/// Cold panic site for [`try_register_dynamic`]'s slot-occupied invariant
+/// violation (plan O2). Kept out of line so the mint body stays compact.
+#[cold]
+#[inline(never)]
+fn dynamic_slot_occupied_panic(component_id: usize) -> ! {
+    let existing = LAYOUTS[component_id]
+        .get()
+        .map(|l| l.type_name)
+        .unwrap_or("<unknown>");
+    panic!(
+        "try_register_dynamic: freshly minted ComponentId {component_id} is already \
+         occupied by type {existing} — a slot was pinned out-of-band (test-only \
+         `register_layout` overlapping the production counter). Refusing the \
+         same-TypeId idempotent return: dynamic tags share one sentinel TypeId, so \
+         it would alias two distinct tag names to one id."
+    );
 }
 
 /// Test-only escape hatch: registers `T` under an explicit `component_id`.

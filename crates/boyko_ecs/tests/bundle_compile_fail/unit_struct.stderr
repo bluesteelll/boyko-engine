@@ -1,4 +1,4 @@
-error: Bundle requires at least one field
+error: Bundle requires at least one field; to spawn an entity with zero components use Commands::spawn_empty()
  --> tests/bundle_compile_fail/unit_struct.rs:9:8
   |
 9 | struct Marker;

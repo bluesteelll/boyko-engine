@@ -60,12 +60,38 @@ use syn::{
 /// its slot installed by `component_id()`, so calling the runtime builder for
 /// it panics. A plain `#[derive(Component)]` (no keys ⇒ `HAS_HOOKS = false`)
 /// installs nothing — its slot stays unset until the runtime builder commits.
+///
+/// # Single-component `Bundle` emission (Phase 22, D7)
+///
+/// By default the derive ALSO emits `impl Bundle for Self` (a one-component
+/// bundle), so `commands.spawn(PlayerTag)` / `.insert(Velocity { .. })` work
+/// for every derived component without a wrapper struct. Because
+/// `Bundle: Send + Sync + Unpin + 'static`, the derive tightens the effective
+/// requirements on the derived type — a named const-assert
+/// (`_boyko_component_as_bundle_requires_send_sync_unpin`) leads the
+/// diagnostics with a readable, comment-bearing error when the bounds fail.
+///
+/// Opt out with the `no_bundle` flag key:
+///
+/// ```ignore
+/// #[derive(Component)]
+/// #[component(no_bundle)]
+/// struct Exotic(std::rc::Rc<u32>); // !Send — storable, but not spawnable
+/// ```
+///
+/// `no_bundle` suppresses BOTH the const-assert and the `Bundle` /
+/// `BundleSealed` impls. The type remains a full `Component` (usable through
+/// the type-erased direct API); it simply cannot be passed where a `Bundle`
+/// is expected (wrap it in a `#[derive(Bundle)]` struct instead). The flag is
+/// also the escape hatch when a type must derive BOTH `Component` and
+/// `Bundle` — without it the two derives now collide on the `Bundle` impl.
 #[proc_macro_derive(Component, attributes(component))]
 pub fn component_macro(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = input.ident;
 
-    // Phase 14a: parse the optional `#[component(...)]` hook attribute.
+    // Phase 14a: parse the optional `#[component(...)]` hook attribute
+    // (extended in Phase 22 with the bare `no_bundle` flag key).
     let hooks = match parse_component_hooks(&input.attrs) {
         Ok(h) => h,
         Err(ts) => return ts,
@@ -76,7 +102,17 @@ pub fn component_macro(input: TokenStream) -> TokenStream {
     // (`HAS_HOOKS = false`, empty `register_hooks`) apply.
     let hook_items = hooks.codegen();
 
+    // Phase 22 D7: single-component Bundle emission (suppressed by
+    // `#[component(no_bundle)]`).
+    let bundle_items = if hooks.no_bundle {
+        TokenStream2::new()
+    } else {
+        component_self_bundle_codegen(&name)
+    };
+
     let expanded = quote! {
+        #bundle_items
+
         impl #name {
             /// Size of this component in bytes.
             pub const SIZE: usize = std::mem::size_of::<Self>();
@@ -143,12 +179,16 @@ pub fn component_macro(input: TokenStream) -> TokenStream {
 /// Parsed `#[component(...)]` lifecycle-hook paths (Phase 14a). Each field holds
 /// the user-supplied path to an `unsafe fn(DeferredEcsMaster<'_>, HookContext)`,
 /// or `None` when the key was omitted.
+///
+/// Phase 22: also carries the bare `no_bundle` flag key, which suppresses the
+/// derive's single-component `Bundle` emission (D7 opt-out).
 #[derive(Default)]
 struct ComponentHookPaths {
     on_add: Option<Path>,
     on_insert: Option<Path>,
     on_replace: Option<Path>,
     on_remove: Option<Path>,
+    no_bundle: bool,
 }
 
 impl ComponentHookPaths {
@@ -202,7 +242,8 @@ impl ComponentHookPaths {
 /// plan §6.1). Mirrors the `#[event]` macro's `parse_nested_meta` idiom.
 ///
 /// Accepts the four lifecycle-hook keys (`on_add` / `on_insert` / `on_replace` /
-/// `on_remove`), each `= <path>`. Rejects:
+/// `on_remove`), each `= <path>`, plus the bare `no_bundle` flag key (Phase 22
+/// D7 — suppresses the single-component `Bundle` emission). Rejects:
 /// - `on_despawn` (removed from 14a — deferred to 14b),
 /// - any other unknown key,
 /// - a duplicate key,
@@ -232,8 +273,19 @@ fn parse_component_hooks(attrs: &[syn::Attribute]) -> Result<ComponentHookPaths,
             if meta.path.is_ident("on_despawn") {
                 return Err(meta.error(
                     "on_despawn is not supported in this version (deferred to Phase 14b); \
-                     valid keys: on_add, on_insert, on_replace, on_remove",
+                     valid keys: on_add, on_insert, on_replace, on_remove, no_bundle",
                 ));
+            }
+
+            // Phase 22 D7: bare flag key — no `= <value>` follows.
+            if meta.path.is_ident("no_bundle") {
+                if paths.no_bundle {
+                    return Err(meta.error(
+                        "duplicate #[component(...)] key; no_bundle may be set at most once",
+                    ));
+                }
+                paths.no_bundle = true;
+                return Ok(());
             }
 
             let slot = if meta.path.is_ident("on_add") {
@@ -247,7 +299,7 @@ fn parse_component_hooks(attrs: &[syn::Attribute]) -> Result<ComponentHookPaths,
             } else {
                 return Err(meta.error(
                     "unknown #[component(...)] key; \
-                     valid keys: on_add, on_insert, on_replace, on_remove",
+                     valid keys: on_add, on_insert, on_replace, on_remove, no_bundle",
                 ));
             };
 
@@ -267,6 +319,106 @@ fn parse_component_hooks(attrs: &[syn::Attribute]) -> Result<ComponentHookPaths,
     }
 
     Ok(paths)
+}
+
+/// Phase 22 D7: emits the single-component `Bundle` impl block for
+/// `#[derive(Component)]` — the whole `self` is the one component.
+///
+/// Emitted items, in this order:
+///
+/// 1. A **named const-assert** (`_boyko_component_as_bundle_requires_send_sync_unpin`)
+///    placed before the impls so its readable, comment-bearing E0277 leads the
+///    diagnostics when the type is `!Send` / `!Sync` / `!Unpin`. It does NOT
+///    suppress the impl-level supertrait E0277 (supertrait obligations on a
+///    concrete impl cannot be silenced) — both diagnostics appear; the named
+///    symbol is the anchor.
+/// 2. `impl BundleSealed for T {}` + `impl Bundle for T` mirroring the
+///    `#[derive(Bundle)]` expansion for a one-component bundle: per-type
+///    concrete `static INFO: OnceLock<BundleStaticInfo>` (sidesteps the
+///    Phase-12.5 generic-fn-static collapse trap), a 1-element id slice
+///    (trivially canonical — B1), `cached_archetype_id` delegating to the
+///    per-world cache helper (SBC4), and the `ManuallyDrop`-upfront (B4) +
+///    pointer-based byte-erasure (C5) `for_each_component_bytes`.
+///
+/// The in-crate `impl_self_bundle!` macro
+/// (`boyko_ecs::ecs::core::bundle::self_bundle`) is the hand-written mirror of
+/// this emission — keep the two in lock-step.
+fn component_self_bundle_codegen(name: &Ident) -> TokenStream2 {
+    quote! {
+        const _: () = {
+            // Single-component bundle emission requires Send + Sync + Unpin.
+            // Opt out with #[component(no_bundle)] for intentionally exotic types.
+            const fn _boyko_component_as_bundle_requires_send_sync_unpin<
+                T: Send + Sync + Unpin,
+            >() {}
+            _boyko_component_as_bundle_requires_send_sync_unpin::<#name>();
+        };
+
+        impl ::boyko_ecs::ecs::core::bundle::bundle::sealed::BundleSealed for #name {}
+
+        impl ::boyko_ecs::ecs::core::bundle::bundle::Bundle for #name {
+            fn static_info() -> &'static ::boyko_ecs::ecs::core::bundle::bundle::BundleStaticInfo {
+                // O3 coalesced static (Decision SBC-D5). One OnceLock holds
+                // BundleTypeId + the 1-element component-ids slice. Cached
+                // path: single Acquire load.
+                static INFO: ::std::sync::OnceLock<
+                    ::boyko_ecs::ecs::core::bundle::bundle::BundleStaticInfo
+                > = ::std::sync::OnceLock::new();
+
+                INFO.get_or_init(|| {
+                    // B1 canonical order: a 1-element slice is trivially
+                    // sorted. Leak bounded by SBC8 (once per type per process).
+                    let leaked: &'static [
+                        ::boyko_ecs::ecs::identifiers::primitives::ComponentId;
+                        1
+                    ] = ::std::boxed::Box::leak(::std::boxed::Box::new([
+                        <#name as ::boyko_ecs::ecs::core::component::component::Component>::component_id()
+                    ]));
+
+                    ::boyko_ecs::ecs::core::bundle::bundle::BundleStaticInfo {
+                        type_id: ::boyko_ecs::ecs::core::bundle::bundle_type_registry::register_new(),
+                        component_ids: leaked.as_slice(),
+                    }
+                })
+            }
+
+            fn cached_archetype_id(
+                world: &mut ::boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster,
+            ) -> ::boyko_ecs::ecs::identifiers::primitives::ArchetypeId {
+                // Per-world cache helper (SBC4) — hot path is one Acquire load.
+                world.bundle_archetype_id_for::<Self>()
+            }
+
+            fn for_each_component_bytes<F>(self, mut f: F)
+            where
+                F: ::std::ops::FnMut(
+                    ::boyko_ecs::ecs::identifiers::primitives::ComponentId,
+                    &[u8],
+                ),
+            {
+                // B4: ManuallyDrop the whole value UPFRONT, before the callback
+                // runs — a callback panic suppresses Drop (leak, never
+                // double-drop with archetype-side ownership).
+                let this = ::std::mem::ManuallyDrop::new(self);
+                let id = <#name as ::boyko_ecs::ecs::core::component::component::Component>::component_id();
+                let ptr = &raw const *this as *const u8;
+                let len = ::std::mem::size_of::<#name>();
+                // SAFETY (C5 byte-erasure, single-component arm):
+                //   (i)   `ptr` derives from `&raw const *ManuallyDrop<Self>` over a
+                //         live stack local — valid for `len = size_of::<Self>()` bytes
+                //         for the duration of this call.
+                //   (ii)  `len` is exactly `size_of::<Self>()` — no over-read; for a
+                //         ZST this is a valid zero-length slice over a non-null,
+                //         u8-aligned pointer.
+                //   (iii) The materialized slice is shared/immutable and the only
+                //         live borrow of `this`; on callback success ownership of the
+                //         bytes transfers to the archetype, on panic the ManuallyDrop
+                //         suppresses Drop.
+                let bytes: &[u8] = unsafe { ::std::slice::from_raw_parts(ptr, len) };
+                f(id, bytes);
+            }
+        }
+    }
 }
 
 /// Derive macro for implementing the Resource trait.
@@ -792,9 +944,12 @@ fn build_participants_impl(
 ///
 /// # Rejected inputs
 ///
-/// * Unit struct (`struct Foo;`) — `compile_error!("Bundle requires at least one field")`.
+/// * Unit struct (`struct Foo;`) — `compile_error!` pointing at
+///   `Commands::spawn_empty()` for zero-component spawns (Phase 22 D5/D7).
 /// * Generic struct (`struct Foo<T> { ... }`) — `compile_error!("Bundle derive does not support generics (Phase 8.5 scope)")`.
 /// * Enum / union — `compile_error!("Bundle can only be derived for structs")`.
+/// * More than [`MAX_BUNDLE_ARITY`] (16) fields — the runtime apply paths use
+///   fixed-size stack collectors sized to this ceiling (Phase 22: 8 → 16).
 ///
 /// # Generated impl summary (named-struct example)
 ///
@@ -838,6 +993,14 @@ fn build_participants_impl(
 /// would create a cycle). Real usage lives in `boyko-ecs` integration tests.
 #[proc_macro_derive(Bundle)]
 pub fn bundle_macro(input: TokenStream) -> TokenStream {
+    /// Maximum component count for a derived `Bundle` (Phase 22: 8 → 16).
+    ///
+    /// Kept in lock-step with the `MAX_BUNDLE_ARITY` stack-collector ceilings
+    /// in `boyko_ecs` (`spawn_at_command.rs` / `insert_command.rs` /
+    /// `migration_helpers.rs`): rejecting wider bundles at macro time makes
+    /// the runtime debug_asserts unreachable for derived bundles.
+    const MAX_BUNDLE_ARITY: usize = 16;
+
     let input = parse_macro_input!(input as DeriveInput);
     let name = input.ident.clone();
     let name_span = name.span();
@@ -897,7 +1060,8 @@ pub fn bundle_macro(input: TokenStream) -> TokenStream {
         Fields::Unit => {
             return syn::Error::new(
                 name_span,
-                "Bundle requires at least one field",
+                "Bundle requires at least one field; \
+                 to spawn an entity with zero components use Commands::spawn_empty()",
             )
             .to_compile_error()
             .into();
@@ -909,7 +1073,21 @@ pub fn bundle_macro(input: TokenStream) -> TokenStream {
         // arrive here with zero fields. Treat identically to unit struct.
         return syn::Error::new(
             name_span,
-            "Bundle requires at least one field",
+            "Bundle requires at least one field; \
+             to spawn an entity with zero components use Commands::spawn_empty()",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    // Phase 22: hard arity ceiling, mirrored by the runtime stack collectors.
+    if fields.len() > MAX_BUNDLE_ARITY {
+        return syn::Error::new(
+            name_span,
+            format!(
+                "Bundle supports at most {MAX_BUNDLE_ARITY} components (MAX_BUNDLE_ARITY); \
+                 split the bundle and insert the remainder with EntityCommands::insert"
+            ),
         )
         .to_compile_error()
         .into();

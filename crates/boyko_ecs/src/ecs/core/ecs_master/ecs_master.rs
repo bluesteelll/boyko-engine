@@ -997,6 +997,26 @@ impl EcsMaster {
         result
     }
 
+    /// Spawns an entity with ZERO components (Phase 22 D5(4)).
+    ///
+    /// The EMPTY archetype is resolved lazily through the normal
+    /// [`get_or_create_archetype`](Self::get_or_create_archetype) funnel on
+    /// first use — no reserved constant, no eager creation (the Phase 12.6
+    /// lazy `EcsMaster::new` budget is preserved) — and is found by the
+    /// registry's exact-mask match thereafter.
+    ///
+    /// The returned entity matches NO component query (the empty signature
+    /// is matched only by zero-required-component filters — flecs-invariant
+    /// subset matching, D5(5)) and can receive components later through the
+    /// ordinary insert/migration funnel.
+    pub fn spawn_empty(&mut self) -> Entity {
+        let empty_archetype_id = self.get_or_create_archetype(&[]);
+        self.create_entity(empty_archetype_id, &[]).expect(
+            "invariant: the empty archetype accepts every zero-component push \
+             (signature-subset and pool-capacity checks are vacuous)",
+        )
+    }
+
     /// Cold despawn-hook fire (Phase 14a §3.6 / W1 / §8 P4).
     ///
     /// Fires `on_replace` + `on_remove` for EVERY component of the dying entity,

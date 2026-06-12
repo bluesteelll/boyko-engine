@@ -13,6 +13,8 @@
 //! Waves 1-3 ship only the data structures, the per-archetype flag bitset, the
 //! cold `HOOKS` table plumbing, the deferred queue, and the read-only view.
 
+use std::fmt;
+
 use crate::ecs::core::component::hooks::deferred_master::DeferredEcsMaster;
 use crate::ecs::core::entity::entity::Entity;
 use crate::ecs::identifiers::primitives::ComponentId;
@@ -81,6 +83,57 @@ pub struct HookContext {
     /// Which component triggered the hook.
     pub component_id: ComponentId,
 }
+
+/// Error returned by
+/// [`register_hooks_by_id`](crate::ecs::core::component::component_registry::register_hooks_by_id)
+/// (Phase 22 D8) — the id-keyed hook-registration entry point.
+///
+/// Both variants are configuration errors caught at registration time (cold
+/// path); neither is reachable from the per-frame hot path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HooksError {
+    /// The `HOOKS` slot for this id is already populated. The table is
+    /// write-once (`OnceLock::set`): hooks are registered exactly once per
+    /// `ComponentId` for the process lifetime, via EITHER the
+    /// `#[component(...)]` derive OR a runtime registration — never both,
+    /// never twice.
+    AlreadyRegistered {
+        /// The id whose slot was already occupied.
+        component_id: ComponentId,
+    },
+    /// The id was already placed in at least one archetype of some world in
+    /// this process (Phase-21 H1 staleness gate). That archetype's
+    /// [`ArchetypeFlags`](crate::ecs::core::component::hooks::archetype_flags::ArchetypeFlags)
+    /// were OR-computed without the hook bits, so the hooks would silently
+    /// never fire there — the compile-but-lie class this gate exists to
+    /// reject. Contract: *mint → register hooks → first attach*.
+    AlreadyArchetyped {
+        /// The id that already appeared in a live archetype.
+        component_id: ComponentId,
+    },
+}
+
+impl fmt::Display for HooksError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AlreadyRegistered { component_id } => write!(
+                f,
+                "hooks for {component_id} are already registered (the HOOKS table is \
+                 write-once per id; derive `#[component(...)]` and runtime registration \
+                 are mutually exclusive)"
+            ),
+            Self::AlreadyArchetyped { component_id } => write!(
+                f,
+                "{component_id} already appears in a live archetype of some world in this \
+                 process (Phase-21 H1 staleness gate): its ArchetypeFlags were computed \
+                 without the hook bits and the hooks would silently never fire. Register \
+                 hooks before the first attach: mint -> register hooks -> first attach"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for HooksError {}
 
 #[cfg(test)]
 mod tests {

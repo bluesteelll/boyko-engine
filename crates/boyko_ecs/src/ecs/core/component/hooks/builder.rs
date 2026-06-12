@@ -33,8 +33,9 @@
 use core::marker::PhantomData;
 
 use crate::ecs::core::component::component_registry;
-use crate::ecs::core::component::hooks::{ComponentHooks, HookFn};
+use crate::ecs::core::component::hooks::{ComponentHooks, HookFn, HooksError};
 use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
+use crate::ecs::identifiers::primitives::ComponentId;
 
 /// Chainable builder that writes a component's lifecycle hooks into the cold
 /// `HOOKS` table on drop (Phase 14a, plan §6.3).
@@ -127,14 +128,31 @@ impl<'a> ComponentHooksBuilder<'a> {
 impl Drop for ComponentHooksBuilder<'_> {
     #[inline]
     fn drop(&mut self) {
-        // Safe commit via `OnceLock::set` (no `unsafe`). In correct programs the
-        // slot is unset (derive XOR runtime — `register_component_hooks` panics
-        // eagerly for a derive-hooked type), so `set` succeeds. A `false` return
-        // means the slot was already populated — a derive-vs-runtime collision
-        // that slipped past the eager check (only reachable via a hand-`impl
-        // Component` with an inconsistent `HAS_HOOKS`). Panic as defense in depth.
-        if !component_registry::try_set_hooks(self.component_id, self.hooks) {
-            hooks_already_installed_panic(self.component_id);
+        // Safe commit (no `unsafe`), delegated to the Phase-22 id-keyed funnel
+        // so the typed runtime path and dynamic-tag registration share ONE
+        // entry point into the write-once `HOOKS` table (plan D8). In correct
+        // programs the commit succeeds: `register_component_hooks` already ran
+        // both eager gates (derive XOR runtime; Phase-21 H1 staleness) before
+        // minting this builder. The error arms are defense in depth:
+        // - `AlreadyRegistered`: a derive-vs-runtime collision that slipped
+        //   past the eager check (a hand-`impl Component` with an inconsistent
+        //   `HAS_HOOKS`).
+        // - `AlreadyArchetyped`: ANOTHER world archetyped the component
+        //   between the eager gate and this commit — concurrently, or on this
+        //   very thread between builder creation and drop (this world is
+        //   exclusively borrowed for the builder's lifetime, so it cannot be
+        //   the source; a second world on the same thread can be).
+        match component_registry::register_hooks_by_id(
+            ComponentId(self.component_id),
+            self.hooks,
+        ) {
+            Ok(()) => {}
+            Err(HooksError::AlreadyRegistered { .. }) => {
+                hooks_already_installed_panic(self.component_id)
+            }
+            Err(HooksError::AlreadyArchetyped { .. }) => {
+                hooks_stale_at_commit_panic(self.component_id)
+            }
         }
     }
 }
@@ -152,5 +170,26 @@ fn hooks_already_installed_panic(component_id: usize) -> ! {
         "register_component_hooks::<{type_name}>(): {type_name} already has hooks \
          installed (derive `#[component(...)]` and the runtime builder are mutually \
          exclusive — use one)."
+    );
+}
+
+/// Cold panic site for an H1 staleness violation detected at the builder's
+/// COMMIT (Phase 22 D8 defense in depth). Reachable when ANOTHER world places
+/// the component in an archetype between `register_component_hooks`' eager
+/// gate and this commit — concurrently, or on this very thread between builder
+/// creation and drop. The builder's exclusive `&mut EcsMaster` borrow rules
+/// out only the registering world itself, not sibling worlds.
+#[cold]
+#[inline(never)]
+fn hooks_stale_at_commit_panic(component_id: usize) -> ! {
+    let type_name = component_registry::get_layout(component_id)
+        .map(|l| l.type_name)
+        .unwrap_or("<unknown>");
+    panic!(
+        "register_component_hooks::<{type_name}>(): {type_name} was placed in a live \
+         archetype by another world (concurrent, or used on this thread between \
+         builder creation and drop) between the eager staleness gate and the \
+         builder's commit — register hooks before the component first appears in ANY \
+         world (mint -> register hooks -> first attach)."
     );
 }

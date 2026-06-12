@@ -38,7 +38,7 @@ use crate::ecs::core::commands::remove_command::RemoveCommand;
 use crate::ecs::core::component::component::Component;
 use crate::ecs::core::entity::entity::Entity;
 use crate::ecs::core::hierarchy::commands::ClearChildrenCommand;
-use crate::ecs::core::hierarchy::{ChildOf, ChildOfBundle};
+use crate::ecs::core::hierarchy::ChildOf;
 use crate::ecs::core::system::params::commands::Commands;
 
 /// Chainable handle for issuing per-entity deferred commands (Phase 11
@@ -218,7 +218,7 @@ impl<'a, 's> EntityCommands<'a, 's> {
         let parent = self.entity;
         self.commands
             .queue
-            .push(InsertCommand { entity: child, bundle: ChildOfBundle(ChildOf(parent)) });
+            .push(InsertCommand { entity: child, bundle: ChildOf(parent) });
         self
     }
 
@@ -230,7 +230,7 @@ impl<'a, 's> EntityCommands<'a, 's> {
         for &child in children {
             self.commands
                 .queue
-                .push(InsertCommand { entity: child, bundle: ChildOfBundle(ChildOf(parent)) });
+                .push(InsertCommand { entity: child, bundle: ChildOf(parent) });
         }
         self
     }
@@ -243,7 +243,7 @@ impl<'a, 's> EntityCommands<'a, 's> {
     /// new parent's `on_insert` link — FIFO drain order).
     #[inline]
     pub fn set_parent(&mut self, parent: Entity) -> &mut Self {
-        self.insert(ChildOfBundle(ChildOf(parent)))
+        self.insert(ChildOf(parent))
     }
 
     /// Removes this entity's parent link by removing [`ChildOf`] (Phase 19).

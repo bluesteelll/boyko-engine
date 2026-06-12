@@ -51,7 +51,8 @@ const MAX_MIGRATION_COLUMNS: usize = MAX_COMPONENTS;
 /// Stack capacity for the bundle slot array — mirrors
 /// `MAX_BUNDLE_ARITY` from `SpawnAtCommand` / `SpawnCommand`. Bundles
 /// larger than this are rejected at the derive macro layer.
-const MAX_BUNDLE_ARITY: usize = 8;
+/// Phase 22: kept in lock-step with the derive macro's ceiling (16).
+const MAX_BUNDLE_ARITY: usize = 16;
 
 /// Resolves the `(source, target)` archetype-id pair for an insert
 /// migration (plan §6.3). Falls back to `get_or_create_archetype` for the
@@ -138,19 +139,14 @@ pub(crate) fn without_component_archetype_id<C: Component>(
         .copied()
         .collect();
 
-    // Edge case: removing the only component leaves an empty archetype.
-    // Phase 11 ships without empty-archetype support; debug_assert + bail.
-    // Real ECSs end up with at least one component per live entity, so
-    // this branch is reachable only via test code.
-    debug_assert!(
-        !kept.is_empty(),
-        "RemoveCommand: removing the only component yields an empty archetype \
-         (unsupported in Phase 11; see plan §7.3 limitation)"
-    );
-    if kept.is_empty() {
-        return None;
-    }
-
+    // Phase 22 D5(2): removing the only component routes the entity to the
+    // EMPTY archetype — `kept` is empty and `get_or_create_archetype(&[])`
+    // lazily creates (and thereafter exact-mask-caches) the zero-component
+    // archetype through the same funnel as any other migration target.
+    // (Phase 11 shipped a debug_assert + bail here, silently no-op'ing the
+    // removal.) The subsequent `migrate_entity_remove` then runs as an
+    // ordinary migration: zero retained columns, hooks/observers fire on the
+    // dying source row exactly as for any other remove.
     Some(world.get_or_create_archetype(&kept))
 }
 

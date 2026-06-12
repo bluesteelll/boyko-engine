@@ -446,29 +446,47 @@ impl Archetype {
             return false;
         }
 
-        let unit_index = self.component_pools.push_entity_components(components);
-        *new_unit_index = unit_index as u32;
+        // Phase 22 D5(3): the dense row is `current_index`, taken BEFORE the
+        // pool push. `push_entity_components` returns the FIRST pool's add
+        // index, which is a vacuous 0 when `components` is empty (the EMPTY
+        // archetype hosts zero pools) — propagating it gave every empty
+        // entity row 0 and corrupted its archetype-mates' identity on
+        // swap-remove. Pools grow in lock-step with `current_index`
+        // (archetype invariant), so for a non-empty input the pushed index
+        // must equal `row`; together with `push_entity_components`'
+        // internal cross-pool agreement assert this proves EVERY pool's add
+        // index == `current_index`.
+        let row = self.current_index;
+        let _pushed_index = self.component_pools.push_entity_components(components);
+        debug_assert!(
+            components.is_empty() || _pushed_index == row,
+            "pool desync: push_entity_components returned row {} but archetype \
+             current_index is {}",
+            _pushed_index,
+            row
+        );
+        *new_unit_index = row as u32;
 
         // Phase 10 STORE4 / INIT1: stamp the per-row `added` and `changed`
         // ticks of every component pool the entity contributes to. The
         // bundle push above guarantees every `components[i].0` resolves to
-        // a live pool and that all pools share the same `unit_index`
-        // (C-009 two-phase commit).
+        // a live pool and that all pools share the same dense row `row`
+        // (C-009 two-phase commit + the D5(3) agreement assert above).
         for (component_id, _) in components {
-            // The pool was just pushed; `unit_index < pool.count()` holds.
+            // The pool was just pushed; `row < pool.count()` holds.
             // `get_pool_mut` returns `Some(_)` here per the bundle's
             // pre-validation in `can_push_entity_components`.
             if let Some(pool) = self.component_pools.get_pool_mut(*component_id) {
                 // SAFETY (STORE3 + STORE4 + SCH3):
-                //   - `unit_index < pool.count()` — the slot was written
-                //     above by `push_entity_components`.
+                //   - `row < pool.count()` — the slot was written above by
+                //     `push_entity_components` (agreement debug-asserted).
                 //   - `&mut self` on `Archetype` gives exclusive write
                 //     access to every owned pool (Phase 9 dispatcher-only
                 //     entry per the apply window); no concurrent reader
                 //     of the tick slot exists.
                 unsafe {
-                    pool.write_added_tick(unit_index, current_tick);
-                    pool.write_changed_tick(unit_index, current_tick);
+                    pool.write_added_tick(row, current_tick);
+                    pool.write_changed_tick(row, current_tick);
                 }
             }
         }
@@ -659,23 +677,39 @@ impl Archetype {
 
         // Push bytes; pools grow in lockstep, yielding a shared dense
         // row index.
-        let unit_index = self
+        //
+        // Phase 22 D5(3): the row is `current_index`, taken BEFORE the push —
+        // mirroring `create_entity`. The remove-last→EMPTY migration
+        // (`migrate_entity_remove` with a zero-component target) calls this
+        // with an EMPTY retained slice, where `push_entity_components`'
+        // return is a vacuous 0. For non-empty inputs the pushed index must
+        // agree with `row` (pools grow in lock-step with `current_index`).
+        let row = self.current_index;
+        let _pushed_index = self
             .component_pools
             .push_entity_components(&component_bytes);
-        *new_unit_index = unit_index as u32;
+        debug_assert!(
+            component_bytes.is_empty() || _pushed_index == row,
+            "pool desync: push_entity_components returned row {} but archetype \
+             current_index is {}",
+            _pushed_index,
+            row
+        );
+        *new_unit_index = row as u32;
 
         // Stamp the explicit ticks per-component. The order of
         // `components` matches `component_bytes`, and `push_entity_components`
-        // wrote each component to the same dense slot.
+        // wrote each component to the same dense slot `row`.
         for (component_id, _, added_tick, changed_tick) in components {
             if let Some(pool) = self.component_pools.get_pool_mut(*component_id) {
                 // SAFETY (mirrors STORE4 in `create_entity`):
-                //   * `unit_index < pool.count()` (just pushed above).
+                //   * `row < pool.count()` (just pushed above; agreement
+                //     debug-asserted).
                 //   * `&mut self` ⇒ exclusive write access; Phase 9 SCH3
                 //     keeps workers off this pool during apply.
                 unsafe {
-                    pool.write_added_tick(unit_index, *added_tick);
-                    pool.write_changed_tick(unit_index, *changed_tick);
+                    pool.write_added_tick(row, *added_tick);
+                    pool.write_changed_tick(row, *changed_tick);
                 }
             }
         }

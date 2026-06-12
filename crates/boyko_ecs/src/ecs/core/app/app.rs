@@ -1011,7 +1011,7 @@ mod tests {
 
     /// Component + 1-field bundle for the behavioral ★C1 test — the in-lib
     /// hand-written pattern (the derive lives in boyko-macros, a
-    /// dev-dependency; mirrors `hierarchy::{Children, ChildrenBundle}`).
+    /// dev-dependency; cf. `impl_self_bundle!` used by `hierarchy::Children`).
     #[derive(Clone, Copy)]
     #[repr(C)]
     struct Wob(u32);

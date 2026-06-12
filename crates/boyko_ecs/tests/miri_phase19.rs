@@ -94,7 +94,8 @@ fn spawn_entities(ecs: &mut EcsMaster, n: usize) -> Vec<Entity> {
 ///     `&ChildOf`, then `commands().add(LinkChildCommand)`);
 ///   * `LinkChildCommand::apply`'s None-arm: `world.entity_master
 ///     .entities_inland[..]` + the `unsafe { (*inland.archetype_ptr()).id() }`
-///     deref + `merged_archetype_id::<ChildrenBundle>` + `migrate_entity_insert`.
+///     deref + `merged_archetype_id::<Children>` + `migrate_entity_insert`
+///     (Phase 22: `Children` is the Bundle itself; the newtype is deleted).
 /// This is the first-child structural insert under the depth-guarded drain.
 #[test]
 fn miri_link_first_child_migrate() {

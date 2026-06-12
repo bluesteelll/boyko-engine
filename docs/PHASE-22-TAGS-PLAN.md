@@ -477,3 +477,5 @@ Minor residuals to carry into the developer waves:
 
 2. [MINOR] Wave sequencing: Wave 1B's H1 three-case test and W3 reachability chain require an attach step ('â†’ attach â†’ both fire'), but add_tag ships in Wave 2A. Specify in the Wave 1B brief that attach is driven through the existing id-keyed surface available today (get_or_create_archetype(&[tag_id]) + the direct create_entity path, whose hook loop is id-driven and empty-safe), or move those two tests to Wave 2 â€” otherwise the parallel wave stalls on a missing API.
 
+Implementation deviation: TagId lives in component_registry.rs (mint-protocol locality + constructor privacy), not the planned identifiers/tag_id.rs â€” internal-docs sync (Wave 3) must point FEATURE_MAP at the actual file.
+

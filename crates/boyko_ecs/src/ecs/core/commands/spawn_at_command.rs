@@ -191,9 +191,14 @@ impl<B: Bundle> Command for SpawnAtCommand<B> {
         // from the bundle's `ManuallyDrop` locals which live only for
         // the duration of `for_each_component_bytes`'s stack frame.
         let mut canonical_idx = 0usize;
+        // Phase 22 D5(4): a zero-component bundle (`Commands::spawn_empty` /
+        // `EmptyBundle`) is legal — `pool_ids` is empty and the per-component
+        // closure below runs zero times; `row` already comes from
+        // `archetype.current_index` (line above), so the empty-archetype row
+        // math is correct without it.
         debug_assert!(
-            !pool_ids.is_empty() && pool_ids.len() <= MAX_BUNDLE_ARITY,
-            "Phase 11 arity ceiling: 1..={} (got {})",
+            pool_ids.len() <= MAX_BUNDLE_ARITY,
+            "Phase 11 arity ceiling: 0..={} (got {})",
             MAX_BUNDLE_ARITY,
             pool_ids.len(),
         );
@@ -302,4 +307,5 @@ impl<B: Bundle> Command for SpawnAtCommand<B> {
 
 /// Mirrors the Phase 8.5 `SpawnCommand::apply` ceiling (`SBC10`). Kept
 /// in step with the derive macro's per-bundle arity check.
-const MAX_BUNDLE_ARITY: usize = 8;
+/// Phase 22: kept in lock-step with the derive macro's ceiling (16).
+const MAX_BUNDLE_ARITY: usize = 16;

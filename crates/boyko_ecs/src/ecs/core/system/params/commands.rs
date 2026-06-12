@@ -38,7 +38,7 @@
 // existing suppression on Step 6's `command_queue.rs`.
 #![allow(dead_code)]
 
-use crate::ecs::core::bundle::Bundle;
+use crate::ecs::core::bundle::{Bundle, EmptyBundle};
 use crate::ecs::core::commands::Command;
 use crate::ecs::core::commands::command_queue::CommandQueue;
 use crate::ecs::core::commands::despawn_command::DespawnCommand;
@@ -165,6 +165,24 @@ impl<'s> Commands<'s> {
         EntityCommands::new(entity, self)
     }
 
+    /// Pre-allocates an [`Entity`] and enqueues a spawn with **zero
+    /// components** (Phase 22 D5). Returns an [`EntityCommands<'_, 's>`]
+    /// handle for chaining (`.insert(...)`, `.id()`, ...).
+    ///
+    /// The entity lands in the empty archetype
+    /// (`get_or_create_archetype(&[])`), created lazily on the first empty
+    /// spawn per world. Resolution goes through the ordinary static bundle
+    /// cache ([`EmptyBundle`] owns its own `BundleTypeId`), so the warm path
+    /// costs the same sub-ns cached lookup as any bundle spawn (SBC4).
+    ///
+    /// Tag-only and component-less entities are first-class: the result is
+    /// invisible to every component query (the empty signature matches only
+    /// zero-required-component queries) until components or tags are added.
+    #[inline]
+    pub fn spawn_empty(&mut self) -> EntityCommands<'_, 's> {
+        self.spawn(EmptyBundle)
+    }
+
     /// Returns an [`EntityCommands<'_, 's>`] handle for an existing entity
     /// (Phase 11 §5.4).
     ///
@@ -209,9 +227,7 @@ impl<'s> Commands<'s> {
     pub fn add_child(&mut self, parent: Entity, child: Entity) {
         self.queue.push(crate::ecs::core::commands::insert_command::InsertCommand {
             entity: child,
-            bundle: crate::ecs::core::hierarchy::ChildOfBundle(
-                crate::ecs::core::hierarchy::ChildOf(parent),
-            ),
+            bundle: crate::ecs::core::hierarchy::ChildOf(parent),
         });
     }
 

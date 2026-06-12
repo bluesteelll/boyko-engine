@@ -232,7 +232,7 @@ where
     /// 2. Resolve column ids via the Opt-A3 `BundleColumnCache` — one
     ///    Acquire load if warm, full SparseMap walk + leak if cold.
     /// 3. (W4 hoist) SBO-N + SBO-B2 + arity invariants asserted ONCE
-    ///    per batch in debug builds (cheap: ≤ MAX_BUNDLE_ARITY = 8 ops).
+    ///    per batch in debug builds (cheap: ≤ `MAX_BUNDLE_ARITY` ops).
     /// 4. SBO17b runtime guard: `end_id <= entities_inland.len()`. On
     ///    overshoot, hard-panic with `WorldEntityCapacityExceeded` —
     ///    aggregate-worker overshoot becomes observable, not silent UB.

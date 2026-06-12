@@ -1,4 +1,4 @@
-error: unknown #[component(...)] key; valid keys: on_add, on_insert, on_replace, on_remove
+error: unknown #[component(...)] key; valid keys: on_add, on_insert, on_replace, on_remove, no_bundle
   --> tests/compile_fail_hooks/unknown_key_rejected.rs:13:13
    |
 13 | #[component(bogus = h)]
