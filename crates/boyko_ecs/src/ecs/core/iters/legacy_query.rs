@@ -498,9 +498,9 @@ mod tests {
 
     // Mock component types for testing.
     //
-    // Non-ZST wrappers around `u32` — `ComponentPool` rejects zero-sized
-    // components at construction, so a ZST cannot back a pool. Wrapping in
-    // `u32` gives a real layout (4 bytes) without changing any
+    // Non-ZST wrappers around `u32` — these tests exercise real data
+    // columns; ZST (tag) pools are covered by the Phase-22 suite. Wrapping
+    // in `u32` gives a real layout (4 bytes) without changing any
     // mask/signature behaviour the tests rely on.
     #[repr(C)]
     struct Position(u32);

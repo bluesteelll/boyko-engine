@@ -44,7 +44,12 @@ const _: () = assert!(std::mem::align_of::<UnsafeCell<Tick>>() == 4);
 // never load pool fields — Phase X.I D10). Field ORDER groups the warm trio
 // (`buffer`, `len`, `committed_rows`).
 pub struct ComponentPool {
-    /// Data sub-region base (== `vm.base()`); WRITE-ONCE (invariant U6 twin).
+    /// Data sub-region base; WRITE-ONCE (invariant U6 twin).
+    ///
+    /// `stride > 0`: `== vm.base()`. Phase 22 D1 (`stride == 0`, tag pools):
+    /// a dangling, provenance-free pointer at address
+    /// `SIMD_BUFFER_ALIGN.max(align)` — non-null, SIMD-A1-aligned, valid
+    /// ONLY for zero-size access (the data sub-region is vacuous).
     buffer: NonNull<u8>,
 
     /// Live row count; rows `[0, len)` are initialized and densely packed.
@@ -144,13 +149,6 @@ impl ComponentPool {
         let drop_fn = registry_layout.drop_fn;
         let component_type_id = registry_layout.type_id;
 
-        debug_assert!(
-            component_layout.size() > 0,
-            "ComponentPool does not support zero-sized components (component_id = {}); \
-             ZST registration is a Phase 2 enhancement",
-            component_id
-        );
-
         // ★R1-5: loud pool-level assert BEFORE the vm reservation, so a zero
         // ceiling names this constructor instead of panicking inside
         // `VmReservation::reserve(0)` with a vm-internals message.
@@ -193,17 +191,23 @@ impl ComponentPool {
         // never-written-reads-zero (J-XI below), and the fallback arm
         // models the OS zero-fill with `alloc_zeroed`.
         let vm = VmReservation::reserve(layout.os_len);
-        let buffer = vm.base();
+        // Phase 22 O1 ordering (binding): `base` is the LIVE reservation
+        // base; every derived pointer below (the tick bases in particular)
+        // MUST come from it. `buffer` is set per-arm LAST, because the
+        // ZST arm's buffer is a dangling pointer — deriving tick bases from
+        // it would be UB at the first `fill_ticks`.
+        let base = vm.base();
 
         // Phase X.A SIMD-A1 invariant (plan §6.4): the data base MUST be
         // SIMD_BUFFER_ALIGN-aligned so callers (`buffer_ptr`,
         // `Query::for_each_chunk` inner loops) can rely on it without
-        // re-checking. Holds trivially post-X.I: every arm's reservation
-        // base is >= 4096-aligned (see the D10 note above).
+        // re-checking. Asserted against `base` (the reservation base — its
+        // >= 4096 alignment guarantee is what this actually verifies; holds
+        // trivially post-X.I, see the D10 note above).
         debug_assert!(
-            (buffer.as_ptr() as usize).is_multiple_of(SIMD_BUFFER_ALIGN),
-            "SIMD-A1: ComponentPool buffer ptr {:p} is not SIMD_BUFFER_ALIGN={}-aligned",
-            buffer.as_ptr(),
+            (base.as_ptr() as usize).is_multiple_of(SIMD_BUFFER_ALIGN),
+            "SIMD-A1: ComponentPool reservation base {:p} is not SIMD_BUFFER_ALIGN={}-aligned",
+            base.as_ptr(),
             SIMD_BUFFER_ALIGN
         );
 
@@ -212,18 +216,48 @@ impl ComponentPool {
         // math, all checked; `os_len <= isize::MAX` asserted by `reserve`),
         // so each `add` stays inside the one allocated object — ★R1-8: the
         // data region and BOTH tick regions are ONE allocated object, the
-        // pool's own reservation. Alignment: granule(64 KiB)-aligned
-        // offsets from a >= 4096-aligned base yield alignment >= 4096 >= 4
-        // = align_of::<UnsafeCell<Tick>> (const-asserted at the top of this
-        // file). The bases are derived once and never reassigned
-        // (write-once); the reservation ADDRESS is stable for the pool's
-        // lifetime, so they remain valid after `vm` moves into the struct
-        // below.
+        // pool's own reservation. Phase 22 ZST arm: for `stride == 0` the
+        // data sub-region is empty (`added_off == 0`, `changed_off ==
+        // tick_len`); `buffer` (set below) is a dangling aligned pointer
+        // valid only for zero-size access per the Rust reference — both
+        // tick bases derive from `base` (the single LIVE reservation, O1),
+        // and tick-tick disjointness is unchanged. Alignment:
+        // granule(64 KiB)-aligned offsets from a >= 4096-aligned base yield
+        // alignment >= 4096 >= 4 = align_of::<UnsafeCell<Tick>>
+        // (const-asserted at the top of this file). The bases are derived
+        // once and never reassigned (write-once); the reservation ADDRESS
+        // is stable for the pool's lifetime, so they remain valid after
+        // `vm` moves into the struct below.
         let (added_base, changed_base) = unsafe {
             (
-                buffer.add(layout.added_off).cast::<UnsafeCell<Tick>>(),
-                buffer.add(layout.changed_off).cast::<UnsafeCell<Tick>>(),
+                base.add(layout.added_off).cast::<UnsafeCell<Tick>>(),
+                base.add(layout.changed_off).cast::<UnsafeCell<Tick>>(),
             )
+        };
+
+        // O1: `buffer` per-arm, LAST — after every live-reservation-derived
+        // pointer is already bound.
+        let buffer = if stride > 0 {
+            base
+        } else {
+            // Phase 22 D1/D6: a ZST pool stores no data bytes. The buffer
+            // is a dangling, provenance-free pointer at address
+            // `SIMD_BUFFER_ALIGN.max(element_align)`: non-null, aligned for
+            // the component type AND a multiple of SIMD_BUFFER_ALIGN (the
+            // max of two powers of two is a multiple of both; element_align
+            // <= 4096 asserted above), so the `buffer_ptr()` /
+            // `for_each_chunk` SIMD-A1 alignment contract holds unchanged.
+            // Used ONLY for zero-size access (reads/writes/drops of 0 bytes).
+            let addr = SIMD_BUFFER_ALIGN.max(element_align);
+            // SIMD-A1 belt: the dangling base must satisfy the same
+            // alignment contract the live base does.
+            debug_assert!(
+                addr.is_multiple_of(SIMD_BUFFER_ALIGN),
+                "SIMD-A1 belt: ZST dangling buffer address {addr:#x} is not \
+                 SIMD_BUFFER_ALIGN={SIMD_BUFFER_ALIGN}-aligned"
+            );
+            NonNull::new(std::ptr::without_provenance_mut::<u8>(addr))
+                .expect("invariant: SIMD_BUFFER_ALIGN.max(align) >= 32 is non-zero")
         };
 
         // Phase 10 STORE10, re-worded to the Phase X.I J-XI never-written
@@ -296,6 +330,15 @@ impl ComponentPool {
             return true; // ★R1-1 idempotent no-op; ZERO syscalls, ZERO state change
         }
 
+        // Phase 22 D6: ZST (tag) pools have a vacuous data region — row
+        // capacity is tick-driven. The stride > 0 body below divides by
+        // stride and commits the data region, both meaningless at stride 0;
+        // branch out before touching either (the stride > 0 path below
+        // stays byte-identical to its pre-Phase-22 form).
+        if self.component_layout.size() == 0 {
+            return self.grow_rows_zst(n);
+        }
+
         let stride = self.component_layout.size();
         // The sub-region geometry is a pure function of immutable fields —
         // recomputed on this cold path instead of stored (D1).
@@ -363,7 +406,121 @@ impl ComponentPool {
         true
     }
 
+    /// Phase 22 D6 — tick-region-driven growth for ZST (tag) pools.
+    ///
+    /// `#[cold]` sibling of [`grow_rows`](Self::grow_rows), reached ONLY
+    /// through its early `stride == 0` branch AFTER the ceiling and
+    /// idempotency guards: on entry `committed_rows < n <= reserve_rows`
+    /// holds (debug-asserted).
+    ///
+    /// # GROW1-ZST proof chain (Z1–Z6)
+    ///
+    /// * **Z1 (driver)**: for `stride == 0`, row capacity is bounded by the
+    ///   tick sub-regions alone; `data_committed` is invariantly 0 forever
+    ///   (debug-asserted below) and `vm.commit` is NEVER called on the
+    ///   (vacuous) data region — the vm `new > old` assert on a data commit
+    ///   and the stride>0 path's `new_d / stride` division are structurally
+    ///   unreachable.
+    /// * **Z2 (policy)**: reuses `pool_commit_step(ticks_committed,
+    ///   needed_t)` with `needed_t = align_up(n * 4, G)` — the same
+    ///   request-dominant doubling, applied to the tick byte frontier.
+    /// * **Z3 (in-bounds)**: `n <= reserve_rows ⇒ n*4 <= reserve_rows*4 ⇒
+    ///   needed_t <= tick_len` (tick_len is a granule multiple), and
+    ///   `t_new = (ticks_committed + step).min(tick_len)` never overruns
+    ///   the sub-region.
+    /// * **Z4 (strict growth)**: past the guards `n > committed_rows`. The
+    ///   reserve-clamp case is excluded (`committed_rows == reserve_rows`
+    ///   would contradict `n <= reserve_rows < n`), so `committed_rows =
+    ///   ticks_committed / 4` exactly (granule multiples are divisible by
+    ///   4), hence `n*4 > ticks_committed`, hence `needed_t >= n*4 >
+    ///   ticks_committed`, and with Z3 `t_new >= needed_t >
+    ///   ticks_committed` — BOTH tick commits satisfy the vm `new > old`
+    ///   assert.
+    /// * **Z5 (sufficiency)**: `committed_rows' = (t_new / 4)
+    ///   .min(reserve_rows) >= n`, since `t_new >= needed_t >= n*4` and
+    ///   `n <= reserve_rows` (debug-asserted — the GROW1-XI step-3
+    ///   analogue). Callers never retry.
+    /// * **Z6 (panic coherence)**: `ticks_committed` and `committed_rows`
+    ///   are written only AFTER both commits succeed (★Q6 pattern
+    ///   preserved — a mid-grow OS OOM leaves the frontier fields
+    ///   describing only committed pages).
+    #[cold]
+    #[inline(never)]
+    fn grow_rows_zst(&mut self, n: usize) -> bool {
+        debug_assert_eq!(
+            self.component_layout.size(),
+            0,
+            "grow_rows_zst: reachable only for stride == 0 pools"
+        );
+        // Z1: the data region of a ZST pool is vacuous and never committed.
+        debug_assert_eq!(
+            self.data_committed, 0,
+            "Z1: a ZST pool must never commit data bytes"
+        );
+        // Entry contract established by grow_rows' two guards.
+        debug_assert!(
+            self.committed_rows < n && n <= self.reserve_rows,
+            "grow_rows_zst: entry contract (committed_rows < n <= reserve_rows) violated"
+        );
+
+        // Pure function of immutable fields — recomputed on this cold path
+        // instead of stored (D1), mirroring the stride > 0 body.
+        let layout = pool_byte_layout(self.reserve_rows, 0);
+        debug_assert_eq!(layout.data_len, 0, "Z1: vacuous data region");
+        debug_assert_eq!(layout.added_off, 0, "Z1: added ticks start at the base");
+
+        // Z2: the tick byte frontier drives the policy. The mul cannot
+        // overflow: `reserve_rows * 4` was overflow-checked by
+        // `pool_byte_layout` at construction and `n <= reserve_rows`.
+        let needed_t = pool_align_up_granule(n * 4);
+        debug_assert!(
+            needed_t <= layout.tick_len,
+            "Z3: tick request overruns the tick sub-region"
+        );
+        debug_assert!(
+            needed_t > self.ticks_committed,
+            "Z4: grow_rows_zst reached the commit path with a satisfied request"
+        );
+
+        let step = pool_commit_step(self.ticks_committed, needed_t);
+        let t_new = (self.ticks_committed + step).min(layout.tick_len);
+        debug_assert!(
+            t_new > self.ticks_committed,
+            "Z4: the tick frontier must grow strictly (vm `new > old` precondition)"
+        );
+
+        // Z3 + Z4: both ranges are granule-aligned (granule-multiple offsets
+        // plus granule-multiple frontiers), strictly growing, and in-bounds
+        // of the reservation (`changed_off + tick_len == os_len`). Panics
+        // only on genuine OS OOM (same contract as the stride > 0 path).
+        self.vm.commit(
+            layout.added_off + self.ticks_committed,
+            layout.added_off + t_new,
+        );
+        self.vm.commit(
+            layout.changed_off + self.ticks_committed,
+            layout.changed_off + t_new,
+        );
+
+        // Z5: the min(reserve_rows) is LOAD-BEARING — granule padding can
+        // make tick_len / 4 exceed reserve_rows.
+        let rows = (t_new / 4).min(self.reserve_rows);
+        debug_assert!(
+            rows >= n,
+            "Z5: post-grow committed_rows must cover the request"
+        );
+
+        // Z6: frontier fields written only AFTER both commits succeeded.
+        self.ticks_committed = t_new;
+        self.committed_rows = rows;
+        true
+    }
+
     /// Byte pointer for row `idx`, computed from the stable reservation base.
+    ///
+    /// Phase 22 D6: for `stride == 0` (tag pools) every row returns the
+    /// dangling aligned base — valid because only zero-size reads, writes,
+    /// and drops ever go through it.
     ///
     /// # Safety
     /// * `idx < self.committed_rows` (the slot lies inside the committed
@@ -373,16 +530,20 @@ impl ComponentPool {
     #[inline]
     unsafe fn row_ptr(&self, idx: usize) -> *mut u8 {
         debug_assert!(idx < self.committed_rows, "row_ptr: idx out of committed bounds");
-        // SAFETY: idx < committed_rows <= reserve_rows ⇒ idx*stride + stride
-        //   <= reserve_rows*stride <= data_len, so the element span lies
-        //   inside the data sub-region of the pool's OWN reservation, within
-        //   committed (read/write) pages. Provenance derives from
-        //   `self.buffer` via one `add` — and the data region plus BOTH tick
-        //   regions are ONE allocated object (★R1-8: a single
-        //   `VmReservation` per pool). The base is write-once in `new` and
-        //   never moves: Phase X.I growth only commits fresh pages at the
-        //   frontier of the SAME reservation; previously returned pointers
-        //   are never remapped or relocated.
+        // SAFETY: stride > 0 — idx < committed_rows <= reserve_rows ⇒
+        //   idx*stride + stride <= reserve_rows*stride <= data_len, so the
+        //   element span lies inside the data sub-region of the pool's OWN
+        //   reservation, within committed (read/write) pages. Provenance
+        //   derives from `self.buffer` via one `add` — and the data region
+        //   plus BOTH tick regions are ONE allocated object (★R1-8: a
+        //   single `VmReservation` per pool). The base is write-once in
+        //   `new` and never moves: Phase X.I growth only commits fresh
+        //   pages at the frontier of the SAME reservation; previously
+        //   returned pointers are never remapped or relocated.
+        //   stride == 0 (Phase 22) — the offset is `idx * 0 == 0` and
+        //   `add(0)` is valid for ANY pointer, so every row yields the
+        //   dangling, T-aligned base, which is valid exclusively for
+        //   zero-size access (the only access a ZST pool ever performs).
         unsafe { self.buffer.as_ptr().add(idx * self.component_layout.size()) }
     }
 
@@ -533,10 +694,14 @@ impl ComponentPool {
             // - index < self.len and last_index < self.len, so both `row_ptr`
             //   results address slots written by a prior add/add_typed
             //   (initialized).
-            // - We hold &mut self → exclusive access; the two slots are
-            //   non-overlapping (index != last_index, stride is
-            //   component_layout.size() which is > 0 — ZSTs rejected at pool
-            //   construction).
+            // - We hold &mut self → exclusive access. Non-overlap: for
+            //   stride > 0 the two slots are distinct stride multiples
+            //   (index != last_index); for stride == 0 (Phase 22 tag pools)
+            //   this is a ZERO-byte copy between equal dangling pointers —
+            //   trivially non-overlapping and explicitly allowed
+            //   (`copy_nonoverlapping` with count 0 imposes no validity
+            //   requirements beyond alignment, which the dangling base
+            //   satisfies by construction).
             // - After drop_fn, the slot at `index` is logically uninitialized;
             //   the copy_nonoverlapping below overwrites it with last's bytes,
             //   restoring the invariant.
@@ -1025,11 +1190,12 @@ impl ComponentPool {
             //   * idx < self.len and last_index < self.len, so both `row_ptr`
             //     results are valid committed-slot pointers produced by prior
             //     `add` / `add_typed`.
-            //   * Non-overlapping: `idx != last_index`; each slot is
-            //     `component_layout.size()` bytes at distinct stride
-            //     multiples of the same data sub-region —
-            //     `copy_nonoverlapping` requires only non-overlap, which
-            //     distinct row indices guarantee.
+            //   * Non-overlapping: `idx != last_index`; for stride > 0 each
+            //     slot is `component_layout.size()` bytes at distinct stride
+            //     multiples of the same data sub-region — distinct row
+            //     indices guarantee non-overlap. For stride == 0 (Phase 22
+            //     tag pools) this is a zero-byte copy between equal dangling
+            //     pointers — trivially non-overlapping and allowed.
             //   * W-N2: NO `drop_fn` invocation on either slot. Caller
             //     has already moved or dropped the bytes per the
             //     `move_out_entity` contract.
@@ -1424,6 +1590,11 @@ impl Drop for ComponentPool {
             // - We have exclusive access (Drop receives &mut self).
             // - drop_fn matches the signature unsafe fn(*mut u8) and calls
             //   drop_in_place::<T> which is valid for these initialized slots.
+            // - Phase 22 (stride == 0): a ZST with a Drop impl is legal
+            //   (`needs_drop` true). Every `row_ptr(row)` is the dangling
+            //   aligned base; `drop_in_place::<T>` for a ZST reads no bytes,
+            //   so one call per logical live row at the shared dangling
+            //   address is sound — `len` bounds the call count exactly.
             for row in 0..self.len {
                 unsafe { drop_fn(self.row_ptr(row)) }
             }
@@ -1451,6 +1622,8 @@ mod tests {
     //   drop_safety integration:       480..481
     //   typed-read tests below:        220..223
     //   Phase X.B dense-equivalence tests below: 224..226
+    //   Phase X.I growth tests below:  226, 227
+    //   Phase 22 ZST (tag) pool tests below: 228, 229
     const POS_ID: ComponentId = ComponentId(220);
     const VEL_ID: ComponentId = ComponentId(221);
     const OTHER_ID: ComponentId = ComponentId(222);
@@ -2658,5 +2831,272 @@ mod tests {
             "a rejected (ceiling) grow must leave committed_rows EXACTLY unchanged"
         );
         assert_eq!(pool.capacity(), 4096, "the ceiling itself never moves");
+    }
+
+    // ====================================================================
+    // Phase 22 D6 — positive ZST (tag) pool coverage.
+    //
+    // Replaces the retired `tests/drop_fn.rs` ZST-rejection test: size 0 is
+    // now a valid, distinct pool layout (vacuous data region, dangling
+    // SIMD-A1-aligned buffer, tick-driven GROW1-ZST growth). The tests pin
+    // add/swap_remove/pop semantics, tick stamping + swap lockstep,
+    // Drop-impl-ZST teardown accounting, the with_default_sizes routing,
+    // and the double-commit growth gate.
+    // ====================================================================
+
+    /// A data-less tag (no Drop impl ⇒ `drop_fn == None`).
+    struct ZstTag;
+
+    const ZST_TAG_ID: ComponentId = ComponentId(228);
+
+    impl Component for ZstTag {
+        fn component_id() -> ComponentId {
+            static ID: OnceLock<ComponentId> = OnceLock::new();
+            *ID.get_or_init(|| {
+                component_registry::register_layout::<ZstTag>(ZST_TAG_ID.0);
+                ZST_TAG_ID
+            })
+        }
+    }
+
+    fn make_zst_pool(reserve_rows: usize) -> ComponentPool {
+        component_registry::register_layout::<ZstTag>(ZST_TAG_ID.0);
+        ComponentPool::new(ZST_TAG_ID.0, reserve_rows)
+    }
+
+    /// Phase 22 — construction + add/swap_remove/pop on a ZST pool, with
+    /// the dangling-base address identity: every live row reads back at the
+    /// SIMD-A1-aligned dangling base (`row_ptr ≡ buffer` at stride 0).
+    #[test]
+    fn zst_pool_add_swap_remove_pop() {
+        use crate::ecs::constants::SIMD_BUFFER_ALIGN;
+
+        let mut pool = make_zst_pool(8);
+        assert_eq!(pool.component_layout().size(), 0, "fixture must be a ZST");
+        assert_eq!(pool.capacity(), 8);
+        assert_eq!(pool.committed_rows(), 0, "D3: zero initial commit");
+
+        // The dangling base: SIMD_BUFFER_ALIGN.max(align_of::<ZstTag>())
+        // == 32 for an align-1 tag (the per-arm address the plan pins).
+        let base = pool.buffer_ptr() as usize;
+        assert_eq!(base, SIMD_BUFFER_ALIGN, "align-1 ZST dangling base sits at 32");
+
+        // add: tail indices + count tracking; the first add takes the
+        // grow_rows → grow_rows_zst path (early-branch integration).
+        for i in 0..5usize {
+            assert_eq!(pool.add_typed(ZstTag), Some(i), "add returns the tail index");
+        }
+        assert_eq!(pool.count(), 5);
+        assert!(pool.committed_rows() >= 5, "first add grew the tick frontier");
+        assert_eq!(pool.data_committed, 0, "Z1: no data bytes ever committed");
+
+        // Every live row's pointer is the dangling base (idx * 0 == 0) and
+        // typed ZST reads succeed (a &ZST at a dangling aligned address is
+        // a valid reference).
+        for i in 0..5 {
+            assert_eq!(pool.get_raw(i).expect("live row") as usize, base);
+            assert!(pool.get_typed::<ZstTag>(i).is_some(), "typed ZST read");
+        }
+        assert!(pool.get_raw(5).is_none(), "out-of-bounds read is None");
+
+        // swap_remove a middle row: 0-byte copy + tick lockstep.
+        assert!(pool.swap_remove(1), "swap_remove(1) in bounds");
+        assert_eq!(pool.count(), 4);
+
+        // pop the tail.
+        assert!(pool.pop(), "pop while non-empty");
+        assert_eq!(pool.count(), 3);
+
+        // Drain; empty-pool ops are no-ops.
+        while pool.count() > 0 {
+            assert!(pool.swap_remove(0));
+        }
+        assert!(!pool.swap_remove(0), "swap_remove on an empty pool is a no-op");
+        assert!(!pool.pop(), "pop on an empty pool is a no-op");
+        assert_eq!(pool.data_committed, 0, "Z1 holds across the whole sequence");
+    }
+
+    /// Phase 22 — tick stamping on a ZST pool: `fill_ticks` and the
+    /// single-row writers round-trip, and `swap_remove` moves the LAST
+    /// row's ticks into the vacated slot (lockstep) exactly as for data
+    /// pools.
+    #[test]
+    fn zst_pool_tick_stamping_and_swap_lockstep() {
+        use crate::ecs::core::change_detection::Tick;
+
+        let mut pool = make_zst_pool(16);
+        for _ in 0..4 {
+            pool.add_typed(ZstTag).expect("under the 16-row ceiling");
+        }
+
+        // Bulk-stamp all rows, then over-stamp the last row distinctly.
+        pool.fill_ticks(0, 4, Tick::new(10));
+        // SAFETY: 3 < count() == 4; this test holds exclusive access.
+        unsafe {
+            pool.write_added_tick(3, Tick::new(99));
+            pool.write_changed_tick(3, Tick::new(99));
+        }
+
+        // SAFETY: 0 < count(); shared reads, no concurrent writer.
+        let (a0, c0) = unsafe { (pool.read_added_tick(0), pool.read_changed_tick(0)) };
+        assert_eq!(a0, Tick::new(10), "bulk-stamped added tick reads back");
+        assert_eq!(c0, Tick::new(10), "bulk-stamped changed tick reads back");
+
+        // swap_remove(0): row 3's ticks (99) must move into slot 0.
+        assert!(pool.swap_remove(0));
+        // SAFETY: 0 < count() == 3; shared reads, no concurrent writer.
+        let (a0_after, c0_after) =
+            unsafe { (pool.read_added_tick(0), pool.read_changed_tick(0)) };
+        assert_eq!(a0_after, Tick::new(99), "tick lockstep: last row's added tick moved");
+        assert_eq!(c0_after, Tick::new(99), "tick lockstep: last row's changed tick moved");
+    }
+
+    /// A ZST WITH a Drop impl (`needs_drop` true ⇒ `drop_fn` Some). The
+    /// counter is a static — a counting FIELD would make the type
+    /// non-zero-sized — so this fixture is used by exactly ONE test.
+    struct ZstDropTag;
+
+    static ZST_DROP_COUNT: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
+    impl Drop for ZstDropTag {
+        fn drop(&mut self) {
+            ZST_DROP_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    const ZST_DROP_ID: ComponentId = ComponentId(229);
+
+    impl Component for ZstDropTag {
+        fn component_id() -> ComponentId {
+            static ID: OnceLock<ComponentId> = OnceLock::new();
+            *ID.get_or_init(|| {
+                component_registry::register_layout::<ZstDropTag>(ZST_DROP_ID.0);
+                ZST_DROP_ID
+            })
+        }
+    }
+
+    /// Phase 22 — Drop-impl-ZST teardown: `drop_in_place::<ZST>` at the
+    /// dangling base reads no bytes; swap_remove / pop / pool-Drop must
+    /// each account exactly one drop per logical row.
+    #[test]
+    fn zst_pool_drop_impl_teardown_counts_exactly() {
+        use std::sync::atomic::Ordering;
+
+        assert_eq!(std::mem::size_of::<ZstDropTag>(), 0, "fixture must be a ZST");
+        assert!(std::mem::needs_drop::<ZstDropTag>(), "fixture must carry drop glue");
+
+        component_registry::register_layout::<ZstDropTag>(ZST_DROP_ID.0);
+        let mut pool = ComponentPool::new(ZST_DROP_ID.0, 16);
+
+        let base = ZST_DROP_COUNT.load(Ordering::Relaxed);
+        const M: usize = 6;
+        for _ in 0..M {
+            pool.add_typed(ZstDropTag).expect("under the 16-row ceiling");
+        }
+        assert_eq!(
+            ZST_DROP_COUNT.load(Ordering::Relaxed) - base,
+            0,
+            "adds (by-move) must not drop"
+        );
+
+        assert!(pool.swap_remove(2), "swap_remove(2) in bounds");
+        assert_eq!(
+            ZST_DROP_COUNT.load(Ordering::Relaxed) - base,
+            1,
+            "swap_remove drops the removed ZST exactly once"
+        );
+
+        assert!(pool.pop(), "pop while non-empty");
+        assert_eq!(
+            ZST_DROP_COUNT.load(Ordering::Relaxed) - base,
+            2,
+            "pop drops the tail ZST exactly once"
+        );
+
+        let live = pool.count();
+        assert_eq!(live, M - 2, "two rows removed → M-2 live");
+        drop(pool);
+        assert_eq!(
+            ZST_DROP_COUNT.load(Ordering::Relaxed) - base,
+            2 + live,
+            "pool Drop drops each remaining logical row exactly once \
+             (one drop_in_place per row at the shared dangling base)"
+        );
+    }
+
+    /// Phase 22 — `with_default_sizes` on a ZST routes through the
+    /// `pool_reserve_rows` ZST arm: ceiling == POOL_MAX_ROWS (tick-bounded,
+    /// address-space-only reservation, zero commit).
+    #[test]
+    fn zst_pool_default_sizes_route_to_max_rows() {
+        use crate::ecs::constants::POOL_MAX_ROWS;
+
+        component_registry::register_layout::<ZstTag>(ZST_TAG_ID.0);
+        let pool = ComponentPool::with_default_sizes(ZST_TAG_ID.0);
+        assert_eq!(pool.capacity(), POOL_MAX_ROWS, "D6: tick-bounded ceiling");
+        assert_eq!(pool.committed_rows(), 0, "zero commit at construction");
+        assert_eq!(pool.data_committed, 0, "Z1 at construction");
+    }
+
+    /// Phase 22 — THE GROW1-ZST growth gate: two successive
+    /// `grow_rows_zst` invocations that EACH reach `vm.commit`, with strict
+    /// tick-frontier growth (Z4), request coverage (Z5), `data_committed ==
+    /// 0` throughout (Z1), and stable base pointers across both commits.
+    ///
+    /// Geometry: ticks are 4 B/row, so one granule (64 KiB) covers 16,384
+    /// rows. `grow(1)` commits the first granule; `grow(20_000)` drives the
+    /// request past that frontier (20,000 × 4 B > 64 KiB) — the second call
+    /// MUST commit again (doubling: 64 KiB → 128 KiB).
+    #[test]
+    fn zst_pool_growth_two_successive_commits() {
+        use crate::ecs::constants::COMMIT_GRANULE as G;
+
+        let mut pool = make_zst_pool(100_000);
+        assert_eq!(pool.committed_rows(), 0, "D3: zero initial commit");
+        assert_eq!(pool.ticks_committed, 0);
+        assert_eq!(pool.data_committed, 0, "Z1 before any growth");
+
+        let buffer_before = pool.buffer_ptr();
+        let added_before = pool.added_ticks_ptr();
+        let changed_before = pool.changed_ticks_ptr();
+
+        // First grow: 0 → one granule of ticks (first vm.commit pair).
+        assert!(pool.grow_rows(1), "grow within the ceiling succeeds");
+        assert_eq!(pool.ticks_committed, G, "first commit = one tick granule");
+        assert_eq!(pool.committed_rows(), G / 4, "G/4 = 16,384 rows of 4 B ticks");
+        assert_eq!(pool.data_committed, 0, "Z1 after the first commit");
+
+        // Idempotent no-op arm below the frontier: zero state change.
+        let frontier = (pool.ticks_committed, pool.committed_rows());
+        assert!(pool.grow_rows(100), "no-op grow below the frontier");
+        assert_eq!(
+            (pool.ticks_committed, pool.committed_rows()),
+            frontier,
+            "idempotent arm must not move the frontier"
+        );
+
+        // Second grow: n = 20,000 > 16,384 — past the first commit step, so
+        // grow_rows_zst reaches vm.commit AGAIN (doubling to two granules).
+        assert!(pool.grow_rows(20_000), "second grow within the ceiling");
+        assert_eq!(pool.ticks_committed, 2 * G, "STRICT frontier growth: G → 2·G (Z4)");
+        assert_eq!(pool.committed_rows(), 2 * G / 4, "2G/4 = 32,768 rows");
+        assert!(pool.committed_rows() >= 20_000, "Z5: request covered");
+        assert_eq!(pool.data_committed, 0, "Z1 after the second commit");
+
+        // Base pointers never move across ZST growth (write-once contract).
+        assert_eq!(pool.buffer_ptr(), buffer_before, "dangling data base stable");
+        assert_eq!(pool.added_ticks_ptr(), added_before, "added tick base stable");
+        assert_eq!(pool.changed_ticks_ptr(), changed_before, "changed tick base stable");
+
+        // Ceiling arm: false, zero state change (the shared grow_rows guard).
+        let before = (pool.ticks_committed, pool.committed_rows());
+        assert!(!pool.grow_rows(100_001), "grow past reserve_rows must fail");
+        assert_eq!(
+            (pool.ticks_committed, pool.committed_rows()),
+            before,
+            "rejected grow leaves the frontier untouched"
+        );
     }
 }

@@ -117,11 +117,19 @@ pub(crate) const fn pool_align_up_granule(value: usize) -> usize {
 /// POOL_MIN_ROWS, POOL_MAX_ROWS)`. Used by
 /// `ComponentPool::with_default_sizes` ONLY — the legacy explicit-ceiling
 /// constructor `ComponentPool::new` bypasses the clamp by design (★R1-9).
+///
+/// Phase 22 D6 (ZST/tag pools): `stride == 0` routes straight to
+/// [`POOL_MAX_ROWS`] — row capacity is bounded by the tick sub-regions
+/// alone, the same ceiling a 1-byte component hits. The reservation is
+/// address space only (zero commit charge): at the ceiling a ZST pool
+/// reserves `2 × tick_len` = 2^24 rows × 4 B × 2 regions = **128 MiB of
+/// virtual address space per tag pool per hosting archetype** (2 MiB under
+/// the cfg-fallback `POOL_MAX_ROWS = 262_144`), with zero resident bytes
+/// until rows commit.
 pub(crate) const fn pool_reserve_rows(stride: usize) -> usize {
-    assert!(
-        stride > 0,
-        "pool_reserve_rows: zero-sized components are not supported"
-    );
+    if stride == 0 {
+        return POOL_MAX_ROWS;
+    }
     let by_bytes = POOL_TARGET_DATA_BYTES / stride;
     if by_bytes < POOL_MIN_ROWS {
         POOL_MIN_ROWS
@@ -145,6 +153,13 @@ pub(crate) const fn pool_reserve_rows(stride: usize) -> usize {
 ///
 /// The `4` is `size_of::<UnsafeCell<Tick>>()` — pinned by a const assert in
 /// `component_pool.rs` and the U-P6 transmute test.
+///
+/// Phase 22 D6 (ZST/tag pools): for `stride == 0` the data sub-region is
+/// vacuous (`[0, 0)`) — `data_bytes = 0`, `data_len = align_up(0) = 0`,
+/// `added_off = 0`, `changed_off = tick_len`, `os_len = 2 × tick_len`. The
+/// two tick regions remain disjoint (`[0, tick_len)` / `[tick_len,
+/// 2·tick_len)`): the ★R1-8 disjointness proof becomes vacuous for
+/// data-vs-tick and is unchanged for tick-vs-tick.
 pub(crate) struct PoolByteLayout {
     /// Granule-aligned data sub-region length (also `added_off`).
     pub(crate) data_len: usize,
@@ -160,13 +175,11 @@ pub(crate) struct PoolByteLayout {
 
 /// Computes the D1 layout with checked arithmetic (overflow panics loudly).
 pub(crate) const fn pool_byte_layout(reserve_rows: usize, stride: usize) -> PoolByteLayout {
-    // Belt asserts — `ComponentPool::new` fires the loud constructor-naming
-    // asserts (★R1-5) before reaching this math.
+    // Belt assert — `ComponentPool::new` fires the loud constructor-naming
+    // asserts (★R1-5) before reaching this math. `stride == 0` is a VALID
+    // input (Phase 22 D6): the math degrades to the vacuous-data-region
+    // layout documented on `PoolByteLayout` with no further branching.
     assert!(reserve_rows > 0, "pool_byte_layout: reserve_rows must be non-zero");
-    assert!(
-        stride > 0,
-        "pool_byte_layout: zero-sized components are not supported"
-    );
 
     let data_bytes = match reserve_rows.checked_mul(stride) {
         Some(v) => v,
@@ -207,8 +220,9 @@ pub(crate) const fn pool_byte_layout(reserve_rows: usize, stride: usize) -> Pool
 ///           .max(needed.saturating_sub(data_committed))`
 ///
 /// The `saturating_sub` is a belt: `grow_rows` proves `needed >
-/// data_committed` before calling (GROW1-XI corollary 0a), so the sub never
-/// actually saturates on the real path.
+/// data_committed` before calling (GROW1-XI corollary 0a), and
+/// `grow_rows_zst` proves the tick analogue `needed_t > ticks_committed`
+/// (Z4), so the sub never actually saturates on either real path.
 pub(crate) const fn pool_commit_step(data_committed: usize, needed: usize) -> usize {
     let doubling = if data_committed < POOL_MIN_SLAB {
         POOL_MIN_SLAB
@@ -341,6 +355,50 @@ mod tests {
         assert_eq!(l3.data_len, G, "1200 B rounds up to one granule");
         assert_eq!(l3.tick_len, G, "400 B rounds up to one granule");
         assert!(l3.data_len >= 100 * 12 && l3.tick_len >= 100 * 4);
+    }
+
+    /// Phase 22 D6 — `stride == 0` (ZST/tag pool) layout math: the data
+    /// sub-region is vacuous and the reservation degenerates to exactly the
+    /// two tick regions.
+    #[test]
+    fn pool_byte_layout_zst_vacuous_data_region() {
+        // The `align_up(0) == 0` pin — the keystone that collapses the data
+        // region: `data_len = align_up(reserve_rows × 0) = align_up(0) = 0`.
+        assert_eq!(
+            pool_align_up_granule(0),
+            0,
+            "align_up(0) must be 0 (vacuous data region keystone)"
+        );
+
+        // Small geometry: 256 rows of 4 B ticks round up to one granule each.
+        let l = pool_byte_layout(256, 0);
+        assert_eq!(l.data_len, 0, "ZST pool has no data bytes");
+        assert_eq!(l.added_off, 0, "added ticks start at the reservation base");
+        assert_eq!(l.tick_len, G, "256 × 4 B rounds up to one granule");
+        assert_eq!(l.changed_off, l.tick_len, "changed region follows added directly");
+        assert_eq!(l.os_len, 2 * l.tick_len, "overall span is exactly 2 × tick_len");
+
+        // Ceiling geometry: the D6 VA-budget shape (2 × tick_len at
+        // POOL_MAX_ROWS — 128 MiB on the syscall arms, 2 MiB on the fallback).
+        let l2 = pool_byte_layout(POOL_MAX_ROWS, 0);
+        assert_eq!(l2.data_len, 0, "vacuous data region at the row ceiling");
+        assert_eq!(l2.added_off, 0);
+        assert_eq!(l2.tick_len, pool_align_up_granule(POOL_MAX_ROWS * 4));
+        assert_eq!(l2.changed_off, l2.tick_len);
+        assert_eq!(l2.os_len, 2 * l2.tick_len, "span == 2 × tick_len at the ceiling");
+        assert!(l2.tick_len.is_multiple_of(G), "tick region stays granule-aligned");
+    }
+
+    /// Phase 22 D6 — the `pool_reserve_rows` ZST arm routes to
+    /// `POOL_MAX_ROWS`: rows are bounded by the tick sub-regions only, the
+    /// same ceiling a 1-byte component hits.
+    #[test]
+    fn pool_reserve_rows_zst_routes_to_max_rows() {
+        assert_eq!(
+            pool_reserve_rows(0),
+            POOL_MAX_ROWS,
+            "stride 0: tick-bounded row ceiling"
+        );
     }
 
     /// U-P1 — D4 step policy table: MIN floor, in-band doubling, MAX clamp,

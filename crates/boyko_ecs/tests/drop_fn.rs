@@ -10,7 +10,9 @@
 //   201  — DropCounter2 (set_component_typed: two separate DropCounter instances)
 //   202  — TypeA (TypeId-check tests)
 //   203  — TypeB (TypeId-check tests, wrong type)
-//   204  — ZstComp (ZST rejection test — size==0, triggers debug_assert)
+//   204  — (retired: ZstComp ZST-rejection test — Phase 22 made size==0 a
+//          valid pool layout; positive ZST coverage lives in the
+//          component_pool.rs unit tests)
 //   205  — u32 (POD / no-drop test)
 //   206  — BundleComp (bundle-level tests)
 //   207  — BundleMissing (bundle tests: type with no pool)
@@ -28,7 +30,6 @@ const DC_ID: ComponentId = ComponentId(200);       // DropCounter component
 const DC2_ID: ComponentId = ComponentId(201);      // second DropCounter for set_component_typed
 const TYPE_A_ID: ComponentId = ComponentId(202);   // TypeA component (typed-API TypeId tests)
 const TYPE_B_ID: ComponentId = ComponentId(203);   // TypeB component (wrong type for TypeId tests)
-const ZST_ID: ComponentId = ComponentId(204);      // ZstComp (ZST rejection)
 const POD_ID: ComponentId = ComponentId(205);      // u32 pod (no-drop test)
 const BUNDLE_ID: ComponentId = ComponentId(206);   // BundleComp (bundle-level tests)
 const BUNDLE_MISSING_ID: ComponentId = ComponentId(207); // BundleMissingComp (no pool in bundle)
@@ -105,11 +106,6 @@ impl Drop for BundleMissingComp {
     }
 }
 
-/// ZstComp: zero-sized type for the ZST rejection test.
-/// Only used in the `#[cfg(debug_assertions)]` test.
-#[repr(C)]
-struct ZstComp;
-
 // We need Component-like IDs. We use register_layout directly — these types
 // do NOT #[derive(Component)]; they only need a registry entry.
 // Registration is idempotent, so calling it from multiple tests is safe.
@@ -122,8 +118,6 @@ fn register_all() {
     component_registry::register_layout::<PodU32>(POD_ID.0);
     component_registry::register_layout::<BundleComp>(BUNDLE_ID.0);
     component_registry::register_layout::<BundleMissingComp>(BUNDLE_MISSING_ID.0);
-    // ZST is registered only in the panic test because its size==0 would cause
-    // ComponentPool::new to debug_assert even during setup for other tests.
 }
 
 // We need the Component trait so add_typed / set_component_typed compile.
@@ -556,20 +550,11 @@ fn set_component_typed_wrong_type_panics_in_debug() {
 }
 
 // ================================================================================
-// Group 3: ZST rejection (debug_assert)
+// Group 3 (RETIRED — Phase 22): the ZST-rejection `should_panic` test is gone.
+// Zero-sized components are now a valid, distinct pool layout (vacuous data
+// region, tick-driven growth — plan D6); positive ZST coverage lives in the
+// `component_pool.rs` unit tests (`zst_pool_*`).
 // ================================================================================
-
-/// ComponentPool::new must debug_assert if the registered component has size == 0.
-/// ZstComp has size_of::<ZstComp>() == 0.
-#[test]
-#[cfg(debug_assertions)]
-#[should_panic(expected = "does not support zero-sized components")]
-fn pool_construction_rejects_zst_component_in_debug() {
-    // Register ZST under its slot.
-    component_registry::register_layout::<ZstComp>(ZST_ID.0);
-    // This must fire the debug_assert in ComponentPool::new.
-    let _pool = ComponentPool::new(ZST_ID.0, 4);
-}
 
 // ================================================================================
 // Group 4: Bundle-level tests

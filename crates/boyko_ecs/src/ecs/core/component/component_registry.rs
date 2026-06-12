@@ -138,6 +138,15 @@ impl ComponentLayout {
         }
     }
 
+    /// Phase 22 D2: `true` iff the component is zero-sized (a tag).
+    ///
+    /// Tag-ness is a property of the registered layout, not of the derive —
+    /// manual `Component` impls and `PhantomData` wrappers qualify equally.
+    #[inline]
+    pub const fn is_zst(&self) -> bool {
+        self.size == 0
+    }
+
     /// Returns a memory layout object for this component.
     #[inline]
     pub fn layout(&self) -> Layout {
