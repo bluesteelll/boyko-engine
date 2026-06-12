@@ -17,3 +17,6 @@
 /.claude/worktrees/
 # graphify knowledge-graph artifacts (rebuilt per-machine by the post-commit hook)
 graphify-out/
+
+# mdBook build output (the source is book/src/; CI rebuilds for GitHub Pages)
+/book/output/

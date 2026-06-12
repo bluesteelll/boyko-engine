@@ -4,9 +4,9 @@
 
 ## Status
 
-**Early development.** The memory subsystem is implemented on `master`. The full ECS layer (archetypes, queries, events) lives on the `ecs` branch and has not been merged yet.
+**Early development.** The original memory subsystem lives on `master`; the full ECS layer (archetypes, queries, systems, the parallel scheduler, change detection, tags) is developed on the `ecs` branch and has not been merged yet.
 
-This documentation reflects the current state of `master` unless explicitly noted.
+Individual pages note which branch they describe: the memory pages document `master`, while the newer pages (scheduler, change detection, tags, storage trade-offs) document `ecs`.
 
 ## Why another ECS?
 

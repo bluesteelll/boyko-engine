@@ -5,6 +5,12 @@
 # Architecture
 
 - [Design Principles](architecture/principles.md)
+- [Storage Trade-offs: Tags, Churn, and Fragmentation](architecture/storage-tradeoffs.md)
+
+# Concepts
+
+- [Tags](concepts/tags.md)
+- [Dynamic Tags](concepts/dynamic-tags.md)
 
 # Memory Subsystem
 

@@ -40,7 +40,11 @@ A reference of terms used throughout Boyko Engine and ECS architecture in genera
 
 **ECS** (Entity Component System) — An architectural pattern that separates data (components) from behavior (systems), with entities acting as identifiers that group components.
 
+**Empty archetype** — The archetype with zero components. On the `ecs` branch entities may legally hold no components: removing the last component migrates the entity here instead of despawning it, and `spawn_empty()` creates entities here directly. See [Tags](../concepts/tags.md). *(Available on the `ecs` branch.)*
+
 **Entity** — A lightweight identifier (an `id: u32` + `generation: u16` in Boyko Engine) that represents a "thing" in the game world. Entities themselves hold no data — their data lives in components.
+
+**Existence-based processing** — Encoding state as component *presence* rather than a data field, so systems filter at archetype granularity instead of branching per row. The rationale behind tags. See [Storage Trade-offs](../architecture/storage-tradeoffs.md).
 
 ## F
 
@@ -95,6 +99,12 @@ A reference of terms used throughout Boyko Engine and ECS architecture in genera
 **System** — A function that operates on entities matching a query. In a typical ECS frame, systems run in scheduled order, possibly in parallel.
 
 **swap_remove** — An O(1) deletion strategy: replace the removed element with the last one and shrink the array. Breaks ordering but avoids shifting.
+
+## T
+
+**Tag** — A zero-sized component: it carries no data, only the fact of its presence on an entity. Stored as a tick-only pool (8 B/row), so `Added<Tag>`/`Changed<Tag>` work like on any component. See [Tags](../concepts/tags.md). *(Available on the `ecs` branch.)*
+
+**TagId** — The handle of a *dynamic* tag, minted at runtime from a string name (`world.register_tag("name")`). A transparent, one-way-bridgeable wrapper over `ComponentId`. See [Dynamic Tags](../concepts/dynamic-tags.md). *(Available on the `ecs` branch.)*
 
 ## U
 

@@ -170,7 +170,7 @@ The apply window contract (SCH7):
   within the apply window — which matches the topological order modulo
   parallel-completion timing.
 
-**Commands::send_event<E>(event)** also lives here — events emitted via
+**`Commands::send_event::<E>(event)`** also lives here — events emitted via
 the user-facing `send_event` wrapper enqueue into the dispatcher's lane
 (`worker_count` slot of the event dispatcher) during the apply window.
 Direct emission from a worker body uses the worker's own lane via TLS

@@ -230,7 +230,6 @@ fn click_path_spawn_seeds_prev_equal_to_pos() {
         let vel = Velocity { x: 3.0, y: -4.0 };
         // The exact seed app.rs's spawn_one writes.
         let gpu = GpuInstance::new([pos.x, pos.y], 0.6, [80, 160, 255, 255]);
-        let tag = ParticleTag(0);
         world
             .create_entity(
                 archetype,
@@ -238,7 +237,8 @@ fn click_path_spawn_seeds_prev_equal_to_pos() {
                     (pos_id, bytemuck::bytes_of(&pos)),
                     (vel_id, bytemuck::bytes_of(&vel)),
                     (gpu_id, bytemuck::bytes_of(&gpu)),
-                    (tag_id, bytemuck::bytes_of(&tag)),
+                    // ZST tag (Phase 22): the marker contributes no bytes.
+                    (tag_id, &[]),
                 ],
             )
             .expect("invariant: capacity 64 holds 16 spawns");

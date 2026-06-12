@@ -91,7 +91,6 @@ impl ParticleSpawner {
         // Filled by `sync_gpu_instance` on the next step; a sane initial value
         // avoids a one-frame flash of zeroed instances.
         let gpu = GpuInstance::new([pos.x, pos.y], 0.6, [80, 160, 255, 255]);
-        let tag = ParticleTag(0);
         world
             .create_entity(
                 self.archetype,
@@ -99,7 +98,8 @@ impl ParticleSpawner {
                     (self.pos_id, bytemuck::bytes_of(&pos)),
                     (self.vel_id, bytemuck::bytes_of(&vel)),
                     (self.gpu_id, bytemuck::bytes_of(&gpu)),
-                    (self.tag_id, bytemuck::bytes_of(&tag)),
+                    // ZST tag (Phase 22): the marker contributes no bytes.
+                    (self.tag_id, &[]),
                 ],
             )
             .is_ok()

@@ -178,9 +178,11 @@ After registration, the same structural op fires component lifecycle **hooks**
 by the archetype's `ArchetypeFlags` `u16` bit-test (a world with no callback pays
 one `test`/`jz`). The symmetric `replace` / `remove` fire on despawn / migration.
 The deferred (`Commands`) spawn/insert/remove paths fire at the same kinds from
-their apply sites. Full catalog (registry, the 4 cold `fire_*_observers` dispatch
-fns, the 7 fire sites, and the OBS-FIRE-LOOP Tree-Borrows invariant): [SYSTEMS.md
-§3.6](SYSTEMS.md).
+their apply sites, and the Phase-22 dynamic-tag migration paths
+(`migrate_entity_attach_ids` / `migrate_entity_detach_ids` / `retag_in_place`)
+joined the ledger. Full catalog (registry, the 4 cold `fire_*_observers` dispatch
+fns, the **10** fire sites, and the OBS-FIRE-LOOP Tree-Borrows invariant):
+[SYSTEMS.md §3.6](SYSTEMS.md).
 
 ## Data flow: a parallel frame (`Schedule::run` / `App::run`)
 
@@ -401,6 +403,45 @@ Layered on the above without disturbing the hot path:
   `before`/`after`/`in_set`, `#[derive(SystemSet)]`; both designed around the
   executor's 0%-gate (a `has_condition` bitset / a `state_entries.is_empty()`
   early-out, leaving the no-feature dispatch path byte-identical).
+
+### 13. Tags share the ComponentId space; storage is tick-only (Phase 22)
+
+**Where:** [component_registry.rs](../crates/boyko_ecs/src/ecs/core/component/component_registry.rs)
+(`TagId` :214, mint protocol :496-609 — the planned `identifiers/tag_id.rs`
+was NOT created, a recorded deviation),
+[ecs_master/tag_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/tag_api.rs),
+[memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs),
+[query/tag_terms.rs](../crates/boyko_ecs/src/ecs/core/iters/query/tag_terms.rs),
+[core/iters/query_state.rs](../crates/boyko_ecs/src/ecs/core/iters/query_state.rs).
+
+Three load-bearing choices:
+
+- **Dynamic tags are ordinary `ComponentId`s** (name-keyed mint into the shared
+  512-slot registry, sentinel TypeId). A separate id namespace would have grown
+  `Archetype` past its 8480 B pin and forked the hottest matching code; sharing
+  means mask build, `find_exact_match`, hooks, observers and migration work
+  unmodified (Bevy precedent). One-way public bridge
+  `TagId::component_id() -> ComponentId` reaches the id-keyed hook/observer
+  surfaces.
+- **ZST storage keeps the tick pair (8 B/row)** in a data-less pool rather than
+  going signature-only (flecs-style 0 B/row): `Added<Tag>`/`Changed<Tag>` stay
+  genuinely functional with zero filter changes — the 0-byte alternative is a
+  compile-but-lie (the #56 bug class). Columns stay non-null (dangling aligned
+  base), preserving the Phase-7 single-dependent-load read path.
+- **Runtime query terms filter at archetype granularity through one funnel**:
+  per-view `TagTerms` (never the shared interned `QueryState` — QS1 stays
+  term-agnostic) + the `_pre_terms` rename sweep over every matched-list
+  accessor, so an un-migrated driver fails to compile instead of silently
+  bypassing terms (the Phase-14b enumeration-by-memory lesson, structurally
+  enforced). Cost: one predicted branch per archetype transition; the inner
+  row loop is byte-identical.
+
+Entities may hold zero components (the lazy EMPTY archetype; remove-last is an
+ordinary migration edge). Accepted ceilings, all loud: 512 shared ids, 2^N tag
+combinations within `MAX_ARCHETYPES = 1024` (mitigation deferred to
+enable-bits; seams reserved), 8 dynamic terms, bundle arity 16. Each tag pool
+reserves 128 MiB of address space per hosting archetype (2 MiB cfg fallback) —
+zero resident until commit.
 
 ## Pool sizing (Phase X.I — the size classes are gone)
 

@@ -2,9 +2,11 @@
 //!
 //! Each component is its own SoA column inside the archetype; the engine stores
 //! columns contiguously, which is exactly what the zero-copy GPU upload relies
-//! on (plan D2). All components are `#[repr(C)]` so their byte layout is stable;
-//! the ones that are uploaded ([`Position`], and `GpuInstance` in
-//! [`crate::render::instance`]) are additionally `bytemuck::Pod`.
+//! on (plan D2). Data components are `#[repr(C)]` so their byte layout is
+//! stable; the ones that are uploaded ([`Position`], and `GpuInstance` in
+//! [`crate::render::instance`]) are additionally `bytemuck::Pod`. The mode
+//! markers ([`ParticleTag`], [`BoidTag`], [`BallTag`]) are real ZST tags
+//! (Phase 22): tick-only pools, zero bytes per row, no layout to pin.
 //!
 //! The boyko `Component` derive is a pure marker — it adds no fields and only
 //! assigns a lazily-allocated `ComponentId` — so it coexists with `Pod`
@@ -37,27 +39,21 @@ pub struct Velocity {
 
 /// Mode-membership marker for particle entities (plan D16 / §9 G3).
 ///
-/// A true ZST is rejected by the component pool (`component_pool.rs` debug-asserts
-/// `size > 0`), so this is a 1-byte tag rather than an empty struct. It marks an
-/// entity as belonging to the Particles mode for despawn-on-exit in later waves;
-/// for the Wave-3 MVP it simply tags every spawned particle.
-///
-/// `Pod` is derived (it is a `#[repr(C)]` single `u8`, trivially Pod) so the
-/// startup spawn path can hand its bytes to `create_entity` via
-/// `bytemuck::bytes_of` with no `unsafe` (see `app::spawn_particles`).
-#[repr(C)]
-#[derive(Component, Clone, Copy, Debug, Pod, Zeroable)]
-pub struct ParticleTag(pub u8);
+/// A real ZST tag (Phase 22): the engine stores it in a tick-only pool — no
+/// data column, no bytes per row. It marks an entity as belonging to the
+/// Particles mode for despawn-on-exit. The direct `create_entity` spawn path
+/// contributes a 0-length byte slice for it (`(tag_id, &[])`); no `Pod`
+/// ceremony is needed because there is no payload to serialize.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct ParticleTag;
 
 /// Mode-membership marker for boid entities (plan D16 / §9 G3 / Wave 5).
 ///
-/// The Boids-mode analogue of [`ParticleTag`]: a 1-byte tag (a true ZST is
-/// rejected by the component pool) carried by every boid so the despawn-on-exit
-/// system can find them via `query_entities(&[BoidTag::component_id()])`. `Pod`
-/// for the same `bytemuck::bytes_of` spawn path.
-#[repr(C)]
-#[derive(Component, Clone, Copy, Debug, Pod, Zeroable)]
-pub struct BoidTag(pub u8);
+/// The Boids-mode analogue of [`ParticleTag`]: a real ZST tag (Phase 22)
+/// carried by every boid so the despawn-on-exit system can find them via
+/// `query_entities(&[BoidTag::component_id()])`.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct BoidTag;
 
 /// Per-ball collision radius in world units (plan §6.1 / D13 / Wave 6).
 ///
@@ -70,12 +66,27 @@ pub struct Radius(pub f32);
 
 /// Mode-membership marker for physics-ball entities (plan D16 / §9 G3 / Wave 6).
 ///
-/// The Physics-mode analogue of [`ParticleTag`]/[`BoidTag`]: a 1-byte tag (a true
-/// ZST is rejected by the component pool) carried by every ball so the
-/// despawn-on-exit system can find them via
-/// `query_entities(&[BallTag::component_id()])`. `Pod` for the same
-/// `bytemuck::bytes_of` spawn path.
-#[repr(C)]
-#[derive(Component, Clone, Copy, Debug, Pod, Zeroable)]
-pub struct BallTag(pub u8);
+/// The Physics-mode analogue of [`ParticleTag`]/[`BoidTag`]: a real ZST tag
+/// (Phase 22) carried by every ball so the despawn-on-exit system can find
+/// them via `query_entities(&[BallTag::component_id()])`, and so the physics
+/// systems can scope their queries with `With<BallTag>`.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct BallTag;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Phase 22: the mode markers are real ZSTs (tick-only pools). A
+    /// regression to a sized payload would silently reintroduce per-row bytes
+    /// and break the `(tag_id, &[])` contract every direct spawn path
+    /// (`app::ParticleSpawner::spawn_one`, `modes::scatter_spawn`,
+    /// `modes::spawn_balls`) relies on.
+    #[test]
+    fn mode_tags_are_zero_sized() {
+        assert_eq!(size_of::<ParticleTag>(), 0, "ParticleTag must be a ZST");
+        assert_eq!(size_of::<BoidTag>(), 0, "BoidTag must be a ZST");
+        assert_eq!(size_of::<BallTag>(), 0, "BallTag must be a ZST");
+    }
+}
 

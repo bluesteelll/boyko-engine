@@ -107,12 +107,13 @@ struct SpawnIds {
 /// Spawns `count` entities scattered across the world box with random initial
 /// velocities, via the direct `create_entity` path (C1 / plan §9 G5).
 ///
-/// `ids` carries the pre-resolved archetype + column ids; `tag_byte` is the
-/// 1-byte tag value written into the mode-tag column. Component bytes come from
-/// `bytemuck::bytes_of` (every component here is `Pod`), so the spawn is
+/// `ids` carries the pre-resolved archetype + column ids; the mode tag is a
+/// real ZST (Phase 22), so its column entry is a 0-length byte slice — the
+/// marker has no payload to write. Data-component bytes come from
+/// `bytemuck::bytes_of` (every data component here is `Pod`), so the spawn is
 /// `unsafe`-free. Stops early if the pool reports full mid-spawn (capacity), so a
 /// failed spawn is a capacity condition, not a panic.
-fn scatter_spawn(world: &mut EcsMaster, ids: &SpawnIds, count: usize, speed: f32, tag_byte: u8) {
+fn scatter_spawn(world: &mut EcsMaster, ids: &SpawnIds, count: usize, speed: f32) {
     let mut rng = rand::rng();
     for _ in 0..count {
         let x = rng.random_range(-WORLD_HALF_EXTENT..WORLD_HALF_EXTENT);
@@ -124,7 +125,6 @@ fn scatter_spawn(world: &mut EcsMaster, ids: &SpawnIds, count: usize, speed: f32
         // Seed a sane GpuInstance so the first frame before `sync_gpu_instance`
         // does not flash zeroed instances.
         let gpu = GpuInstance::new([x, y], 0.6, [80, 160, 255, 255]);
-        let tag = tag_byte;
         let ok = world
             .create_entity(
                 ids.archetype,
@@ -132,7 +132,8 @@ fn scatter_spawn(world: &mut EcsMaster, ids: &SpawnIds, count: usize, speed: f32
                     (ids.pos, bytemuck::bytes_of(&pos)),
                     (ids.vel, bytemuck::bytes_of(&vel)),
                     (ids.gpu, bytemuck::bytes_of(&gpu)),
-                    (ids.tag, bytemuck::bytes_of(&tag)),
+                    // ZST tag (Phase 22): the marker contributes no bytes.
+                    (ids.tag, &[]),
                 ],
             )
             .is_ok();
@@ -180,7 +181,7 @@ pub fn spawn_particles(world: &mut EcsMaster) {
         gpu: GpuInstance::component_id(),
         tag: ParticleTag::component_id(),
     };
-    scatter_spawn(world, &ids, PARTICLE_COUNT, PARTICLE_INITIAL_SPEED, 0);
+    scatter_spawn(world, &ids, PARTICLE_COUNT, PARTICLE_INITIAL_SPEED);
 }
 
 /// Despawn-on-exit system for [`Mode::Particles`] (plan D16).
@@ -205,7 +206,7 @@ pub fn spawn_boids(world: &mut EcsMaster) {
         gpu: GpuInstance::component_id(),
         tag: BoidTag::component_id(),
     };
-    scatter_spawn(world, &ids, BOID_COUNT, BOID_INITIAL_SPEED, 0);
+    scatter_spawn(world, &ids, BOID_COUNT, BOID_INITIAL_SPEED);
 }
 
 /// Despawn-on-exit system for [`Mode::Boids`] (plan D16).
@@ -248,7 +249,6 @@ pub fn spawn_balls(world: &mut EcsMaster) {
         // Seed a sane GpuInstance so the first frame before the physics GPU sync
         // does not flash zeroed instances; scale tracks the radius.
         let gpu = GpuInstance::new([x, y], radius, [120, 200, 255, 255]);
-        let tag = BallTag(0);
         let ok = world
             .create_entity(
                 archetype,
@@ -257,7 +257,8 @@ pub fn spawn_balls(world: &mut EcsMaster) {
                     (vel_id, bytemuck::bytes_of(&vel)),
                     (radius_id, bytemuck::bytes_of(&rad)),
                     (gpu_id, bytemuck::bytes_of(&gpu)),
-                    (tag_id, bytemuck::bytes_of(&tag)),
+                    // ZST tag (Phase 22): the marker contributes no bytes.
+                    (tag_id, &[]),
                 ],
             )
             .is_ok();
