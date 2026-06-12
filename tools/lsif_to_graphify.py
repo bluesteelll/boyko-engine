@@ -12,11 +12,15 @@ semantic agents recover some of that linkage at token cost. rust-analyzer's
 name resolution is exact (methods, traits, generics) and free.
 
 Usage:
-    python tools/lsif_to_graphify.py [graphify-out/index.lsif]
+    python tools/lsif_to_graphify.py [graphify-out/index.lsif]   # full convert
+    python tools/lsif_to_graphify.py --apply                     # fast re-apply
 
-Re-run after `rust-analyzer lsif . > graphify-out/index.lsif` whenever the
-graph is rebuilt from scratch (the post-commit hook covers AST refreshes; a
-full re-extract wipes these edges until this script is re-run).
+The full convert also writes graphify-out/lsif_edges.json (a sidecar of the
+mapped edges). `--apply` merges the sidecar back into graph.json in under a
+second — use it after a FULL re-extract (which rebuilds graph.json from the
+extraction cache and so drops this layer). Incremental post-commit hook
+rebuilds preserve these edges on their own (both-endpoints-alive rule), so
+no per-commit action is needed.
 """
 
 import json
@@ -26,7 +30,30 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 GRAPH = ROOT / 'graphify-out' / 'graph.json'
+SIDECAR = ROOT / 'graphify-out' / 'lsif_edges.json'
 RELATION = 'references'
+
+
+def apply_sidecar():
+    """Merge the previously converted edges back into graph.json (fast path).
+
+    Filters to edges whose BOTH endpoints still exist (a re-extract may have
+    renamed/dropped nodes) and dedups against edges already present.
+    """
+    graph = json.loads(GRAPH.read_text(encoding='utf-8'))
+    sidecar = json.loads(SIDECAR.read_text(encoding='utf-8'))
+    ids = {n['id'] for n in graph['nodes']}
+    existing = {(e['source'], e['target']) for e in graph['links']}
+    added = [
+        e for e in sidecar
+        if e['source'] in ids and e['target'] in ids
+        and (e['source'], e['target']) not in existing
+    ]
+    graph['links'].extend(added)
+    GRAPH.write_text(json.dumps(graph, ensure_ascii=False), encoding='utf-8')
+    print(f'sidecar: {len(sidecar)} edges, re-applied {len(added)} '
+          f'(dropped {len(sidecar) - len(added)} dup/orphaned); '
+          f"graph now {len(graph['links'])} links")
 
 
 def load_lsif(path):
@@ -101,6 +128,9 @@ def enclosing(by_file, rel, line):
 
 
 def main():
+    if '--apply' in sys.argv:
+        apply_sidecar()
+        return
     lsif_path = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / 'graphify-out' / 'index.lsif'
     graph = json.loads(GRAPH.read_text(encoding='utf-8'))
     uri_by_doc, range_line, doc_of_range, next_of, defres_of, items = load_lsif(lsif_path)
@@ -152,9 +182,17 @@ def main():
 
     graph['links'].extend(new_edges)
     GRAPH.write_text(json.dumps(graph, ensure_ascii=False), encoding='utf-8')
+    # Sidecar: ALL mapped edges (incl. ones that already existed in graph.json)
+    # so --apply can restore the full layer after a from-scratch re-extract.
+    all_mapped = new_edges + [
+        e for e in graph['links']
+        if e.get('origin') == 'rust-analyzer-lsif' and (e['source'], e['target']) not in seen
+    ]
+    SIDECAR.write_text(json.dumps(all_mapped, ensure_ascii=False), encoding='utf-8')
     print(f"lsif refs={stats['refs']} cross-file={stats['cross']} "
           f"new unique edges merged={stats['mapped']}; "
-          f"graph now {len(graph['nodes'])} nodes / {len(graph['links'])} links")
+          f"graph now {len(graph['nodes'])} nodes / {len(graph['links'])} links; "
+          f'sidecar {len(all_mapped)} edges')
 
 
 if __name__ == '__main__':
