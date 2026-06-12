@@ -145,6 +145,14 @@ harness = false
 name = "phase18_app"
 harness = false
 
+# Phase 22 — tag benches: tag-only / mixed-bundle spawn, has_tag, dynamic
+# attach/detach toggle (cold vs warm attribution split), 1-dynamic-term query
+# overhead on both drivers, ZST tick-only pool grow ladder. See
+# docs/PHASE-22-TAGS-PLAN.md §"New benches".
+[[bench]]
+name = "phase22_tags"
+harness = false
+
 # Phase 20 — App frame-driver overhead gates: P20-B1(b) empty-frame envelope
 # (empty_main <= 250 ns/frame) + P20-B2 substep overhead (fixed_loop_1_substep
 # minus bare_empty_schedule_run minus the (b) envelope <= 100 ns/substep).

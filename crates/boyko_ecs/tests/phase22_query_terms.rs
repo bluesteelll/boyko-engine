@@ -680,3 +680,31 @@ fn terms_compose_with_changed_filter() {
         "frame 2: no mutations since frame 1 — Changed must yield zero rows"
     );
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// F1 review O4: every matched archetype fails the term — zero yields, clean
+// termination of both pull cursors (pins the zero-row-window exhaustion path
+// against future loop-shape edits in iter.rs).
+// ════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn iter_terminates_when_all_archetypes_fail_the_term() {
+    let mut f = fixture();
+    let orphan_tag = f.ecs.register_tag("p22qt_o4_orphan");
+    {
+        let view = f.ecs.query::<&Payload, ()>().with_tag(orphan_tag);
+        let mut yields = 0usize;
+        for _ in view.iter() {
+            yields += 1;
+        }
+        assert_eq!(yields, 0, "no archetype carries the orphan tag — iter must yield nothing");
+    }
+    {
+        let mut view = f.ecs.query::<&mut Payload, ()>().with_tag(orphan_tag);
+        let mut yields = 0usize;
+        for _ in view.iter_mut() {
+            yields += 1;
+        }
+        assert_eq!(yields, 0, "mut cursor must also yield nothing and terminate");
+    }
+}

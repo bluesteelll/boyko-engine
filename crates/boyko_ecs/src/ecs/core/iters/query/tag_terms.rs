@@ -104,18 +104,73 @@ impl TagTerms {
     }
 }
 
-/// THE single term test (plan D4) — every matched-list driver calls this at
-/// its archetype-transition point, enforced by the `_pre_terms` rename sweep
+/// THE single term test (plan D4) — every matched-list driver except
+/// `QueryIterMut::next` (see the F1 exception below) calls this at its
+/// archetype-transition point, enforced by the `_pre_terms` rename sweep
 /// over ALL `QueryState` matched-list accessors.
 ///
 /// ≤ [`MAX_DYN_TAG_TERMS`] signature bit tests against the archetype mask on
 /// safe references — **zero unsafe**. `len == 0` short-circuits with one
 /// predicted not-taken branch.
+///
+/// # Phase 22 F1 (I-cache)
+///
+/// Only the `len == 0` test is inlined at the call sites; the scan body is
+/// `#[cold]`-outlined in [`term_scan_cold`]. Inlining the scan loop into
+/// `QueryIter::next` pushed that body past LLVM's inline threshold —
+/// `next()` stopped inlining into caller loops and `query_ref_iter_10k`
+/// regressed +247% (asm-verified). The split keeps the no-terms cost
+/// contract (one branch) byte-identical and moves the term-bearing scan off
+/// the callers' inline budget.
+///
+/// `QueryIterMut::next` is the ONE exception — it must use
+/// [`archetype_passes_tag_terms_inline_scan`] instead (see its doc).
 #[inline]
 pub(crate) fn archetype_passes_tag_terms(terms: &TagTerms, arch: &Archetype) -> bool {
     if terms.len == 0 {
         return true;
     }
+    term_scan_cold(terms, arch)
+}
+
+/// Inline-scan variant of [`archetype_passes_tag_terms`] — used ONLY by
+/// `QueryIterMut::next` (Phase 22 F1).
+///
+/// The mut cursor's monomorphisations sit on the opposite side of LLVM's
+/// inline threshold from the read-only cursor's: `next()` stays inlined even
+/// with the scan body inline, but a reachable `call` inside its loop nest
+/// (the `#[cold] #[inline(never)]` scan) forces the register allocator to
+/// spill the row cursor (`current_row` / `current_len` / fetch base) to the
+/// stack — `query_mut_iter_10k` +47% with the cold call vs +26% with the
+/// inline scan (criterion-verified, same session, p = 0.00). Do not "unify"
+/// the two variants without re-running that A/B.
+#[inline]
+pub(crate) fn archetype_passes_tag_terms_inline_scan(
+    terms: &TagTerms,
+    arch: &Archetype,
+) -> bool {
+    if terms.len == 0 {
+        return true;
+    }
+    term_scan_body(terms, arch)
+}
+
+/// Cold term-scan wrapper — runs only on term-bearing query views: once per
+/// archetype transition on the iteration drivers, once per lookup on
+/// `QueryView::get`/`get_mut` (their term test guards a single random-access
+/// row, not a loop). Outlined so the inline cost of
+/// [`archetype_passes_tag_terms`] at every driver's transition point is one
+/// compare-and-branch (see the F1 note above).
+#[cold]
+#[inline(never)]
+fn term_scan_cold(terms: &TagTerms, arch: &Archetype) -> bool {
+    term_scan_body(terms, arch)
+}
+
+/// The shared scan body — `caller` decides inline vs cold-outlined dispatch
+/// (see [`archetype_passes_tag_terms`] / [`term_scan_cold`]).
+#[inline]
+fn term_scan_body(terms: &TagTerms, arch: &Archetype) -> bool {
     let len = terms.len as usize;
     for (i, tag) in terms.ids[..len].iter().enumerate() {
         let want = (terms.polarity >> i) & 1 != 0;

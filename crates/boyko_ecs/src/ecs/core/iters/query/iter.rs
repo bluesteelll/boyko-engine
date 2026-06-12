@@ -15,7 +15,7 @@
 //!   per-archetype refresh through [`QueryData::set_table_mut`] /
 //!   [`QueryFilter::set_table_mut`].
 //!
-//! # Hot loop shape (M2)
+//! # Hot loop shape (M2, Phase 22 F1)
 //!
 //! `next()` is a two-level `loop { while { ... } }`: the outer loop advances
 //! the archetype cursor, the inner loop walks the rows of the current
@@ -23,6 +23,29 @@
 //! `if !const { F::IS_ARCHETYPAL }`, which const-folds the entire branch away
 //! for archetypal filters at monomorphisation time. See §7.1 of the Phase 8b
 //! plan and the §7.2 walkthrough for the per-row cost model.
+//!
+//! Phase 22 F1 (I-cache): inlining the Wave-2B tag-term *scan body* into the
+//! archetype transition grew `QueryIter::next` past LLVM's inline threshold —
+//! `next()` stopped inlining into caller loops (asm-verified: an outlined
+//! ~180-line `next` symbol with per-row `callq` sites; `query_ref_iter_10k`
+//! +247%). The transition block stays inline (its pre-Phase-22 shape); the
+//! term test is one inline `len == 0` branch, and a term failure zeroes the
+//! row window instead of `continue`-ing (observably identical; simpler loop
+//! nest). The scan-body dispatch is ASYMMETRIC per cursor — both directions
+//! are criterion-A/B-pinned (same session, p = 0.00):
+//!
+//! * `QueryIter` uses `archetype_passes_tag_terms` (scan `#[cold]`-outlined):
+//!   with the scan inline, `next()` falls out of the callers
+//!   (`query_ref_iter_10k` +216%).
+//! * `QueryIterMut` uses `archetype_passes_tag_terms_inline_scan`: its
+//!   `next()` stays inlined either way, but a reachable scan *call* in the
+//!   loop nest spills the row cursor to the stack (`query_mut_iter_10k`
+//!   +47% vs +26%).
+//!
+//! Do NOT outline the whole transition into a `&mut self` helper: the
+//! escaped iterator alloca blocks SROA register promotion, and the row loop
+//! reloads `current_row` / `current_len` / fetch bases from the stack per
+//! row (criterion-verified +38% mut / +46% tuple).
 //!
 //! # Stale id skip (Q5)
 //!
@@ -52,7 +75,9 @@ use crate::ecs::core::archetype::archetype::Archetype;
 use crate::ecs::core::iters::query::data::{QueryData, ReadOnlyQueryData};
 use crate::ecs::core::iters::query::filter::QueryFilter;
 use crate::ecs::core::iters::query::state::QueryDataState;
-use crate::ecs::core::iters::query::tag_terms::{TagTerms, archetype_passes_tag_terms};
+use crate::ecs::core::iters::query::tag_terms::{
+    TagTerms, archetype_passes_tag_terms, archetype_passes_tag_terms_inline_scan,
+};
 use crate::ecs::core::system::system_meta::SystemMeta;
 use crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell;
 use crate::ecs::identifiers::primitives::ArchetypeId;
@@ -230,15 +255,20 @@ where
             // Phase 22 D4: archetype-level dynamic-tag term test — one
             // predicted not-taken branch per archetype transition when no
             // terms are set; the inner row loop above stays byte-identical.
+            // Phase 22 F1: the scan body is `#[cold]`-outlined inside
+            // `archetype_passes_tag_terms` so only the `len == 0` test is
+            // inlined here — keeping `next()` under LLVM's inline threshold.
+            // A term failure does NOT `continue`: it zeroes the row window
+            // below instead, keeping the outer loop's single pre-Phase-22
+            // backedge (measured neutral vs `continue`; kept for the simpler
+            // loop nest).
             //
             // SAFETY (U1, U2): same bounded shared-reborrow discipline as
             //   the `entity_count` probe below — `archetype_ptr` is
             //   slab-stable for `'q` and the `&Archetype` dies inside the
             //   call; no aliasing `&mut Archetype` exists on the read-only
             //   path.
-            if !archetype_passes_tag_terms(&self.terms, unsafe { &*archetype_ptr }) {
-                continue;
-            }
+            let passes = archetype_passes_tag_terms(&self.terms, unsafe { &*archetype_ptr });
 
             // SAFETY (QD3, QD4, QF3): `set_table_readonly` accepts a
             //   `*const Archetype` directly — no provenance cast. The pointer
@@ -292,7 +322,10 @@ where
 
             // Read-only probe to extract `entity_count`. The raw deref
             // materialises only an immutable view; no `&mut Archetype` is
-            // constructed.
+            // constructed. A term-failing archetype gets a zero-length row
+            // window — observably identical to skipping it (the inner loop
+            // never runs; the outer loop advances), without a second
+            // outer-loop backedge (Phase 22 F1, see the term-test comment).
             //
             // SAFETY (U1, U2): `archetype_ptr` is live for `'q` (slab
             //   stability); the `&Archetype` reborrow is scoped to this
@@ -300,7 +333,7 @@ where
             //   path.
             let arch_ref: &Archetype = unsafe { &*archetype_ptr };
             self.current_row = 0;
-            self.current_len = arch_ref.entity_count();
+            self.current_len = if passes { arch_ref.entity_count() } else { 0 };
         }
     }
 
@@ -449,15 +482,19 @@ impl<'q, 's, D: QueryData, F: QueryFilter> Iterator for QueryIterMut<'q, 's, D, 
 
             // Phase 22 D4: archetype-level dynamic-tag term test — mirrors
             // the read-only cursor; one predicted branch per transition,
-            // inner row loop untouched.
+            // inner row loop untouched. Phase 22 F1: this cursor uses the
+            // INLINE-scan variant — a reachable `#[inline(never)]` scan call
+            // in this loop nest spills the row cursor to the stack
+            // (`query_mut_iter_10k` +47% vs +26%, criterion A/B; see
+            // `archetype_passes_tag_terms_inline_scan`). A term failure
+            // zeroes the row window below instead of `continue`-ing.
             //
             // SAFETY (U1, U2): bounded shared reborrow of the slab-stable
             //   archetype; it dies inside the call, before the
             //   write-capable `set_table_mut` dispatch below — no aliasing
             //   `&mut Archetype` exists while it is live.
-            if !archetype_passes_tag_terms(&self.terms, unsafe { &*archetype_ptr }) {
-                continue;
-            }
+            let passes =
+                archetype_passes_tag_terms_inline_scan(&self.terms, unsafe { &*archetype_ptr });
 
             // SAFETY (QD3, QD4, QF3): `set_table_mut` accepts a
             //   `*mut Archetype` directly — no provenance cast or downgrade.
@@ -509,13 +546,15 @@ impl<'q, 's, D: QueryData, F: QueryFilter> Iterator for QueryIterMut<'q, 's, D, 
             // write-capable pointer. No `&mut Archetype` is materialised;
             // the raw deref produces only an `&Archetype` view that lives
             // exactly for the duration of the `entity_count()` call.
+            // Term-failing archetypes get a zero-length row window — same
+            // rationale as the read-only cursor (Phase 22 F1).
             //
             // SAFETY (U1, U2): `archetype_ptr` is slab-stable for `'q`.
             //   The `&Archetype` is scoped to this block; no aliasing
             //   `&mut Archetype` reborrow exists in this scope.
             let arch_ref: &Archetype = unsafe { &*archetype_ptr };
             self.current_row = 0;
-            self.current_len = arch_ref.entity_count();
+            self.current_len = if passes { arch_ref.entity_count() } else { 0 };
         }
     }
 
