@@ -371,3 +371,187 @@ arbitrary components.
   `boyko_reflect`) — the load-bearing invariant that keeps "Debug-only" honest.
 - The compile-boundary hot-path proof ("the symbol does not exist") — stronger than
   the 14a/14b runtime-branch discipline.
+
+---
+
+# Appendix A — v1 compound-value model (scope B: String + nested + `#[repr(Int)]` enum)
+
+Owner decision 2026-06-15: v1 covers **POD + `String` + nested `#[derive(Reflect)]`
+structs + `#[repr(Int)]` fieldless enums**, so the inspector can dogfood the engine's
+own `Name(String)`, a nested `Transform`-like struct, and `#[repr(u8)] enum State`.
+This appendix is a second architect→2-critic round; it folds the two critiques'
+CRITICAL/MAJOR findings in as **resolved decisions**. It is purely additive to §1–§8.
+
+## A.1 Scope line (honest)
+
+**v1:** primitives, `String` (read+write), nested `Reflect` structs (read+write at
+any depth), fieldless `#[repr(Int)]` enums (read + set-variant). Tuple structs
+supported (with the naming caveat A.4).
+**v2 (explicitly excluded, with reasons):** `Vec`/`Map`/collections; **data-carrying
+enums** (no Reference-guaranteed variant-field layout); **`Option<T>`** (it is the
+smallest data-carrying enum — niche optimization means *no* guaranteed discriminant
+location, so it inherits the full data-enum hazard; **not "cheap enough"**); generics;
+`repr(packed)`; `FieldMut` borrowed handles.
+
+## A.2 Value taxonomy (with the two correctness fixes baked in)
+
+```rust
+#[repr(u8)] enum ScalarKind { Bool,U8,U16,U32,U64,I8,I16,I32,I64,F32,F64,EntityId }
+#[repr(C)]  struct Scalar { kind: ScalarKind, bits: u64 }   // 16 B POD Copy (unchanged)
+
+#[repr(u8)] enum ValueKind { Prim(ScalarKind), Str, Nested, Enum, Opaque }
+
+#[non_exhaustive]
+pub enum FieldValue<'a> {
+    Scalar(Scalar),            // POD by copy
+    Str(&'a str),              // borrows the live String buffer — ZERO alloc
+    Nested(NestedCursor<'a>),  // the ONLY nested shape (the bare {ptr,info} variant is DELETED, was M2/O3)
+    Enum { discr: Scalar, info: &'static EnumInfo },
+}
+
+/// Re-rootable READ cursor. The `'a` (compiler-enforced) IS the validity guarantee —
+/// there is no "documented contract"; it cannot coexist with `&mut EcsMaster`.
+#[derive(Clone, Copy)]
+pub struct NestedCursor<'a> { ptr: *const u8, info: &'static TypeInfo, _pd: PhantomData<&'a ()> }
+impl<'a> NestedCursor<'a> {
+    pub fn type_info(&self) -> &'static TypeInfo { self.info }   // FIX (completeness-C1):
+    pub fn fields(&self) -> &'static [FieldInfo] { self.info.fields } // enumeration at depth ≥ 1
+}
+pub fn fields_of_type(info: &'static TypeInfo) -> &'static [FieldInfo] { info.fields }
+```
+
+`FieldInfo` get/set are **`Option<fn>` for every kind** (FIX completeness-C2 / Mi2 —
+**no "poison stub" exists**); `field_value` dispatches on `kind` and only calls the
+accessor that kind installs. Per-kind payload: `nested: Option<&'static TypeInfo>`
+(Nested), `enum_info: Option<&'static EnumInfo>` (Enum), `get_str`/`set_str` (Str),
+`get_discr`/`set_discr` (Enum). The scalar API `get_field` **returns `None` for any
+non-`Prim` field** (FIX Mi2 — no silent garbage `Scalar`).
+
+`EnumInfo { repr: EnumRepr, variants: &'static [VariantInfo] }`, where
+`VariantInfo { name: &'static str, discr_bits: u64 }` stores the discriminant
+**already narrowed to the repr width** (FIX C2/O1 — *not* a lossy `i128 as u64` at the
+call site); reads sign-extend per `EnumRepr` for `Ix` reprs.
+
+## A.3 Read paths (all zero-allocation — the audit survived)
+
+- `field_value(&ecs, e, id, f)`: `base.add(off)` → `match kind` → by-copy `Scalar` /
+  by-borrow `&str` / `NestedCursor` / `Enum{discr,info}`. **0 alloc** in every arm.
+- Nested descent: `cursor.fields()` to enumerate, `cursor.ptr.add(inner_off)` to
+  descend — **one `add` per level**, `&'static TypeInfo` reused (no flattened path
+  table). Acyclic by construction (a `Sized` value type cannot contain itself by value;
+  all indirections are v2) → no runtime cycle guard needed.
+- Enumerate: returns the baked `&'static [FieldInfo]`. **0 alloc.**
+- `String` read justification (FIX M1): the returned `&str` is sound **because the
+  shared `&EcsMaster` borrow `'a` statically excludes any `&mut` op (set_str /
+  structural move) for `'a`** — *not* because "the buffer lives as long as the
+  component" (that wrong reason would also "justify" a UAF across a `set_str`).
+
+## A.4 Write paths (soundness-first)
+
+- **`String` write — the highest-risk surface (FIX C1, the headline catch).** The
+  setter does **raw `ptr::drop_in_place(p as *mut String)` then `ptr::write(p as *mut
+  String, s.to_owned())`**, operating on the original arena `*mut` provenance — it
+  **never forms an intermediate `&mut String`**. This sidesteps the `Unique` retag
+  through the arena's deliberately-`SharedReadWrite` interior-mutable provenance, which
+  is the 14a-F2 / Phase-19 TB-UB class. The earlier draft's `*slot = s.to_owned()` via
+  `&mut String` is **rejected**; its pre-declared "TB is avoided" verdict is struck.
+  **Miri-TB under `-Zmiri-tree-borrows` is the gate, not an argument** (the project's
+  hard-won lesson: critics approve TB-UB; only Miri is the oracle). Alloc accounting:
+  exactly 1 alloc (new) + 1 free (old), no leak, no double-free.
+- **Enum write (FIX C2):** `set_enum_variant_index` does a **release** bounds check
+  (`idx < variants.len()` → else `false`, not a `debug_assert!`); only a **baked
+  variant discriminant** is ever written (every fieldless `#[repr(Int)]` variant value
+  is a valid inhabitant) → no invalid-value UB; the kind check is the load-bearing
+  release `-> bool`.
+- **Nested-leaf write (FIX W1):** in v1 via a `&mut`-rooted `NestedCursorMut<'a>` whose
+  setter performs the store **internally** through the same audited primitive/`str`
+  glue at the composed offset — **no field handle escapes** (so it is *not* the
+  `FieldMut` class). Same raw-store / `drop_in_place`+`write` discipline as A.4 String;
+  Miri-TB gated. If TB proves troublesome, nested-leaf write slips to v2 (nested stays
+  read-only) — but it is specified, not left implicit.
+- All writers take `&mut EcsMaster` (exclusive); release kind-check on every setter.
+
+## A.5 Install mechanism — the load-bearing unresolved item (was O-1 / W2)
+
+The two-derive `#[cfg_attr(feature="reflect", derive(Reflect))]` from §2 cannot cleanly
+hook the lazy `component_id()` install funnel, because that funnel is emitted by the
+**`Component` derive**, and a *separate* `Reflect` derive cannot inject into the same
+`impl Component`. Resolution:
+
+**Recommended: a single `#[derive(Component)]` + an opt-in `#[reflect]` helper
+attribute.** When `#[reflect]` is present, the Component derive emits the `Reflect`
+impl, the `TYPE_INFO` static, and the `install_type_info` call **all wrapped in
+`#[cfg(feature = "reflect")]`** (cfg in derive output is evaluated in the *consumer*
+crate). Feature off → tokens stripped → zero, `boyko_reflect` absent. Feature on (the
+consumer's `reflect` feature, which pulls the optional `boyko_reflect` dep) → full
+reflection. `boyko_ecs`/`boyko_macros` **never depend on `boyko_reflect`** — they only
+emit cfg-gated *tokens* that name it (the directional rule is about crate deps, not
+emitted tokens). One naming convention: the consumer's reflect-enabling feature MUST be
+named `reflect`. This supersedes the §2 `cfg_attr`-two-derive sketch.
+
+**This is a proc-macro/Cargo mechanism that only a compile settles** (cf. the toolchain
+lesson) → Wave 0 must include a PoC that compiles a consumer crate with the feature
+both on and off. **Guaranteed fallback** if the lazy mechanism misbehaves: explicit
+`boyko_reflect::register::<T>()` at startup (bevy-style) — slightly less ergonomic, but
+zero mechanism risk.
+
+## A.6 Serialize/deserialize boundary (the one `dyn`)
+
+`Sink`/`Source` traits, **by field name throughout** (stable across reorder — except
+tuple structs, see below). Deserialize-side contract (FIX W3): `Source::str_field`'s
+returned `&str` **must be consumed by `set_str` (copied) before the next `&mut self`
+`Source` call** — stated as a hard contract (or use a `&mut dyn FnMut(&str)` callback
+form). `Opaque` fields (FIX O2): the derive **refuses to serialize a type containing an
+`Opaque` field** (hard error) rather than silently dropping it — the wire format is
+shared with the future shipping serializer, so silent omission is unacceptable.
+
+**Tuple structs (FIX completeness-C3):** `FieldInfo.name` for a tuple field is `"0"`,
+`"1"`, … . **For tuple structs, by-name == by-position**, so the reorder-stability the
+spine advertises does **not** hold for them — documented explicitly. `Name(String)` is
+a tuple struct; it works, but reordering a tuple struct's fields is a breaking save
+change. Named-field structs are recommended for any serialized reflectable type.
+
+## A.7 Allocation audit (compound paths)
+
+| Path | Alloc | Class |
+|---|---|---|
+| `field_value` (any kind read) / nested descent / enumerate / enum read / `get_field` / `set_field` (Prim) | **0** | none |
+| `set_str_field` | 1 alloc + 1 free | caller-data-driven, cold, explicit |
+| `set_enum_variant[_index]` | **0** | none |
+| serialize (in `boyko_reflect`) | **0** | sink-owned, reused |
+| deserialize `String` field | 1 / occurrence | loader-owned, cold, irreducible |
+| `add_default` | **0 bespoke** | routes through existing structural insert |
+| name/TypeId→ComponentId resolve | 1 dense `Vec` / load | cold setup, in `boyko_ecs`, once per type |
+
+The **read / enumerate / nested-walk tree is provably zero-allocation** — a `String`
+field is touched only by borrowing `&str` (ptr+len), never cloned. The only two alloc
+sites materialize *payload from caller data* and are cold + explicit.
+
+## A.8 `add_default` drop-safety for compounds (FIX W4)
+
+`default_in_place` writes into **uninitialized arena bytes only** (the structural-insert
+contract — never over a live value, so no leak/double-free of an existing owning field);
+nested defaults recurse; empty struct (`fields: &'static []`) → walk/serialize is a
+no-op, not a panic. If a scratch buffer is used it is `align`-correct and bytes are
+**moved (forgotten after copy), not dropped**. Validation adds a **drop-count test** for
+`add_default` of a `{ pod, String, Nested{String} }` type.
+
+## A.9 Validation (incl. the dogfood acceptance test — FIX O4)
+
+Beyond the §7 strategy: a single **end-to-end acceptance test** instantiating a real
+`{ Name(String), Transform { translation: Vec3{f32,f32,f32}, … }, State(#[repr(u8)]) }`
+entity — enumerate top-level fields, read each kind, **descend into `Transform` and read
+a leaf**, set the `String`, set the enum variant, set a nested leaf, re-read. (This test
+would have surfaced the nested-enumeration gap immediately.) **Miri-TB is mandatory** on:
+the String `drop_in_place`+`write`, nested-leaf write, enum discr read/write, nested
+offset composition — these are the second TB-critical surface after the executor series.
+Missing-`repr` fieldless enum → **compile error** (FIX Mi3), not a silent `Opaque`.
+
+## A.10 Net
+
+The zero-alloc inspection core (crux a) survives the audit intact. Two CRITICAL
+soundness items (String-replace TB retag; enum invalid-value write) and the install
+mechanism were the real findings — all resolved above, with **Miri-TB as the gate for
+every new `unsafe`, not an after-the-fact claim**. The v1/v2 line is honest:
+read-everything + write-(scalar/String/enum/nested-leaf) in v1; collections, data-enums,
+`Option`, generics, `FieldMut` in v2.
