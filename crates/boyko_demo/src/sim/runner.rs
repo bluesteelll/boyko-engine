@@ -81,7 +81,7 @@ use crate::sim::systems::boids::{boid_forces, build_grid, integrate_boids, snaps
 #[cfg(not(target_arch = "wasm32"))]
 use crate::sim::systems::common::sync_gpu_instance;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::sim::systems::particles::integrate_particles;
+use crate::sim::systems::particles::{freeze_pulse, integrate_particles};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::sim::systems::physics::{
     apply_ball_motion, build_ball_grid, collide_balls, integrate_balls, sync_ball_gpu,
@@ -210,13 +210,25 @@ impl SimRunner {
             .key();
 
         // ── Per-mode sim systems (gated in_state) ────────────────────────────
-        // Particles: a single integration pass.
+        // Particles: refresh the Frozen enable-bit, then a single integration
+        // pass. `freeze_pulse` is EXCLUSIVE (it calls `enable`/`disable`, both
+        // `&mut self`) — the EnableTag dogfood (Wave 6 / Step 11). It runs after
+        // the (possible) spawn so a freshly entered population is tagged this
+        // frame, and before `integrate_particles` so the integrator's
+        // `Disabled<Frozen>` filter sees a stable frozen set.
+        let freeze_pulse_key = builder
+            .add_system(freeze_pulse)
+            .run_if(in_state(Mode::Particles))
+            .after(spawn_particles_key)
+            .key();
         let integrate_particles_key = builder
             .add_system(integrate_particles)
             .run_if(in_state(Mode::Particles))
             // Integrate only after this frame's (possible) spawn so a freshly
-            // entered population is advanced the same frame.
+            // entered population is advanced the same frame, and after the freeze
+            // refresh so the per-row Frozen bit is current.
             .after(spawn_particles_key)
+            .after(freeze_pulse_key)
             .key();
 
         // Boids: snapshot -> build_grid -> forces -> integrate, in strict order
@@ -366,7 +378,7 @@ mod wasm_runner {
     };
     use crate::sim::systems::boids::{boid_forces, build_grid, integrate_boids, snapshot_boids};
     use crate::sim::systems::common::sync_gpu_instance;
-    use crate::sim::systems::particles::integrate_particles;
+    use crate::sim::systems::particles::{freeze_pulse, integrate_particles};
     use crate::sim::systems::physics::{
         apply_ball_motion, build_ball_grid, collide_balls, integrate_balls, sync_ball_gpu,
         wall_bounce,
@@ -512,6 +524,12 @@ mod wasm_runner {
         // ── 2. Per-mode systems, in the native `.after(...)` dependency order ─
         match mode {
             Mode::Particles => {
+                // EnableTag dogfood: refresh the Frozen bit, then integrate the
+                // non-frozen rows (Disabled<Frozen>). Same order the native
+                // schedule pins via `.after(freeze_pulse_key)`. `freeze_pulse` is
+                // exclusive (`fn(&mut EcsMaster)`), driven here directly rather
+                // than through `run_system` (which is for `SystemParam` fns).
+                freeze_pulse(world);
                 world.run_system(integrate_particles);
             }
             Mode::Boids => {

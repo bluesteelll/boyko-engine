@@ -73,6 +73,21 @@ pub struct Radius(pub f32);
 #[derive(Component, Clone, Copy, Debug)]
 pub struct BallTag;
 
+/// Transient per-particle freeze flag — the **enable-bit (bitset) tag** dogfood
+/// (EnableTag Wave 6 / Step 11).
+///
+/// `#[component(storage = "bitset")]` makes this a non-fragmenting per-row bit:
+/// it is NOT part of any archetype signature and has no `ComponentPool`, so
+/// toggling it is O(1) (`enable`/`disable`) with no archetype migration, no
+/// structural generation bump, and no per-row bytes. A frozen particle is
+/// skipped by the integrator via the `Disabled<Frozen>` query filter (see
+/// [`crate::sim::systems::particles::integrate_particles`]), so it holds its
+/// position while the rest of the cloud flows — the showcase for an O(1) toggle
+/// + `Enabled`/`Disabled` query in a real frame loop.
+#[derive(Component, Clone, Copy, Debug)]
+#[component(storage = "bitset")]
+pub struct Frozen;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,6 +102,28 @@ mod tests {
         assert_eq!(size_of::<ParticleTag>(), 0, "ParticleTag must be a ZST");
         assert_eq!(size_of::<BoidTag>(), 0, "BoidTag must be a ZST");
         assert_eq!(size_of::<BallTag>(), 0, "BallTag must be a ZST");
+    }
+
+    /// The `Frozen` enable-bit tag is a ZST: a `storage = "bitset"` tag has no
+    /// data column and no per-row bytes — only a per-row bit toggled via
+    /// `enable`/`disable`.
+    #[test]
+    fn frozen_enable_tag_is_zero_sized() {
+        assert_eq!(size_of::<Frozen>(), 0, "Frozen must be a ZST bitset tag");
+    }
+
+    /// The derive must override the trait default so `Frozen` is classified as a
+    /// bitset (enable-bit) tag — the contract that keeps it out of every
+    /// archetype signature and routes `enable`/`Disabled<Frozen>` to the
+    /// per-row bit backend.
+    #[test]
+    fn frozen_storage_is_bitset() {
+        const {
+            assert!(
+                <Frozen as boyko_ecs::ecs::core::component::component::Component>::STORAGE_IS_BITSET,
+                "Frozen must derive storage = \"bitset\""
+            );
+        }
     }
 }
 
