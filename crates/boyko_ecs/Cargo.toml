@@ -104,6 +104,13 @@ harness = false
 name = "pool_grow_event"
 harness = false
 
+# D6 micro-experiment — splits the g5 spawn_batch cold-world cost into the
+# `vm.commit` syscall vs demand-zero page faults (decides Decision 6
+# feasibility). See benches/d6_commit_vs_faults.rs.
+[[bench]]
+name = "d6_commit_vs_faults"
+harness = false
+
 [[bench]]
 name = "event_dispatch"
 harness = false
