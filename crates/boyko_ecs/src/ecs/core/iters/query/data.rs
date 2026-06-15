@@ -130,6 +130,28 @@ pub unsafe trait QueryData: Sized {
     /// mis-classify the query shape).
     const HAS_DATA_COMPONENT: bool;
 
+    /// `true` iff this data needs a per-archetype post-filter trim — i.e. its
+    /// [`Self::matches_component_set`] is **not** unconditionally `true`.
+    ///
+    /// Only [`AnyOf`] sets this (its ≥1-member OR predicate must run in the
+    /// post-filter pass). Every leaf (`&T`, `&mut T`, `Ref`, `Mut`) requires
+    /// the matched archetype to contain its component, so the existing
+    /// `aggregate_include` / candidate-seed path already bounds them — no trim
+    /// needed. `Option<D>` is `false` too: its `matches_component_set` is
+    /// unconditionally `true`, so there is nothing to trim away.
+    ///
+    /// # Why defaulted (vs the no-default `NEEDS_CHANGE_DETECTION` / I4 rule)
+    ///
+    /// A `false` default is SAFE: it only ever needs flipping for an
+    /// OR-matching data type, and a future such type forgetting to set it
+    /// affects only the exotic `Query<AnyOf<…>, Enabled<C>>` candidate-seed
+    /// combo, never a common hot path. The default keeps the
+    /// [`QueryDataState::IS_CANDIDATE_SEEDED`] formula identical for every
+    /// existing impl (0%-gate: additive, cold-only use).
+    ///
+    /// [`QueryDataState::IS_CANDIDATE_SEEDED`]: crate::ecs::core::iters::query::state::QueryDataState
+    const REQUIRES_POST_FILTER_TRIM: bool = false;
+
     /// Builds the per-system [`Self::State`].
     ///
     /// Called once per `(system, world)` pair at registration time. Performs
@@ -1251,6 +1273,568 @@ unsafe impl<T: Component> QueryData for Mut<'_, T> {
 
 // NOTE: No `ReadOnlyQueryData for Mut<T>` impl — `Mut<T>` writes (deref guard).
 
+// ── Option<D> (task #9 — non-filtering optional data) ──────────────────────
+//
+// `Option<D>` yields `Some(D::Item)` for archetypes that contain `D`'s
+// component(s) and `None` for those that do not — WITHOUT filtering the
+// archetype out. This is the inverse of every leaf: `matches_component_set`
+// is unconditionally `true` (the archetype is admitted either way), and the
+// per-archetype `set_table_*` GATES the inner forward on whether the inner
+// `D` actually matches (Decision 1).
+
+/// Per-archetype fetch scratch for `Option<D>: QueryData`.
+///
+/// Holds the inner `D::Fetch<'w>` plus a `matches` flag computed in
+/// `set_table_*` (`true` iff the active archetype contains `D`'s
+/// component(s)). When `matches` is `false`, `inner` stays at its
+/// `D::init_fetch` NULL-init value and is NEVER read (`fetch` returns `None`).
+///
+/// `Copy` / `Clone` are implemented manually so the auto-derive does not
+/// require `D::Fetch<'w>: Copy` via an unwanted blanket bound (it already is
+/// `Copy` per the `QueryData::Fetch: Copy` bound, but the manual impls mirror
+/// `ReadFetch` and keep the derive heuristics out of the picture).
+pub struct OptionFetch<'w, D: QueryData> {
+    /// Inner fetch. Valid only when `matches` is `true`; otherwise the
+    /// NULL-init value from `D::init_fetch` (never dereferenced).
+    pub(crate) inner: D::Fetch<'w>,
+    /// `true` iff the active archetype contains `D`'s component(s).
+    pub(crate) matches: bool,
+}
+
+impl<D: QueryData> Clone for OptionFetch<'_, D> {
+    #[inline]
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<D: QueryData> Copy for OptionFetch<'_, D> {}
+
+// SAFETY (QD1-QD4):
+//   - QD1: `init_access` forwards to `D::init_access`, declaring `D`'s exact
+//     read/write surface (Decision 8 — conservative, correct; still trips
+//     B0002 for `(&mut A, Option<&A>)`).
+//   - QD2: `init_fetch` produces `(D::init_fetch (NULL), matches = false)`;
+//     `set_table_*` overwrites `matches` and, when `matches == true`, the
+//     inner via the gated forward, before any `fetch` call.
+//   - QD3: `OptionFetch<'w, D>` carries `D::Fetch<'w>`, so the inner's
+//     lifetime invariants ride `'w`.
+//   - QD4: each `set_table_*` variant forwards to the matching inner variant
+//     (readonly→readonly, mut→mut, no_meta→no_meta); the inner's own QD4
+//     backstop-panic is preserved (NEVER gated away — only the FORWARD is
+//     gated on `matches`).
+unsafe impl<D: QueryData> QueryData for Option<D> {
+    type State = D::State;
+    type Fetch<'w> = OptionFetch<'w, D>;
+    type Item<'w> = Option<D::Item<'w>>;
+
+    const IS_READ_ONLY: bool = D::IS_READ_ONLY;
+    // The inner participates in change detection iff `D` does; the dispatcher
+    // routes via the same `if const { D::NCD || F::NCD }` const-fold.
+    const NEEDS_CHANGE_DETECTION: bool = D::NEEDS_CHANGE_DETECTION;
+    // Non-filtering: `Option<D>` contributes NO positive include bit (it never
+    // requires `D`'s component present), so it is NOT a bounding data
+    // component for an `Enabled`/`Disabled` term.
+    const HAS_DATA_COMPONENT: bool = false;
+    // `matches_component_set` is unconditionally `true` ⇒ nothing to trim.
+    const REQUIRES_POST_FILTER_TRIM: bool = false;
+
+    #[inline]
+    fn init_state(world: &mut EcsMaster) -> Self::State {
+        D::init_state(world)
+    }
+
+    fn init_access(state: &Self::State, access_set: &mut FilteredAccessSet) {
+        // Decision 8: forward — declares `D`'s read/write surface so
+        // `(&mut A, Option<&A>)` and `AnyOf<(&mut A, …)>` still trip B0002.
+        D::init_access(state, access_set);
+    }
+
+    #[inline]
+    fn matches_component_set(_state: &Self::State, _mask: &ComponentMask) -> bool {
+        // Non-filtering: the archetype is admitted whether or not it contains
+        // `D`. The per-archetype `matches` flag (computed in `set_table_*`)
+        // decides Some vs None per row, NOT archetype membership.
+        true
+    }
+
+    #[inline]
+    fn aggregate_include(_state: &Self::State, _include: &mut ComponentMask) {
+        // No-op: `Option<D>` adds no required bit (Decision: do NOT populate
+        // `include` — that would WRONGLY require `D`'s component present).
+    }
+
+    #[inline]
+    fn init_fetch<'w>(state: &Self::State) -> Self::Fetch<'w> {
+        OptionFetch {
+            inner: D::init_fetch(state),
+            matches: false,
+        }
+    }
+
+    #[inline]
+    unsafe fn set_table_readonly<'w>(
+        fetch: &mut Self::Fetch<'w>,
+        state: &Self::State,
+        archetype: *const Archetype,
+        meta: &'_ SystemMeta,
+    ) {
+        // SAFETY (Decision 1, QD3, QD4): `archetype` is a live `*const
+        //   Archetype` for `'w` (caller contract). `matches` re-derives the
+        //   inner predicate from the archetype's own mask. When `matches ==
+        //   true`, `D::matches_component_set` held ⇒ every column `D` reads is
+        //   non-null ⇒ the forwarded `D::set_table_readonly`'s QD1/QD3 + its
+        //   internal `debug_assert!(!ptr.is_null())` hold; the inner's QD4
+        //   readonly backstop-panic (for a write-inner) is reached only if a
+        //   custom impl falsely claimed `ReadOnlyQueryData for Option<&mut T>`
+        //   — preserved verbatim. When `matches == false`, the forward is
+        //   skipped and `fetch.inner` stays at its NULL-init value, NEVER read
+        //   (`fetch` returns `None`).
+        let matches = D::matches_component_set(state, unsafe { (*archetype).component_mask() });
+        if matches {
+            unsafe { D::set_table_readonly(&mut fetch.inner, state, archetype, meta) };
+        }
+        fetch.matches = matches;
+    }
+
+    #[inline]
+    unsafe fn set_table_mut<'w>(
+        fetch: &mut Self::Fetch<'w>,
+        state: &Self::State,
+        archetype: *mut Archetype,
+        meta: &'_ SystemMeta,
+    ) {
+        // SAFETY (Decision 1, QD1, QD3, QD4): same gate as
+        //   `set_table_readonly` with the strictly-stronger caller guarantee
+        //   that `archetype` carries write-capable provenance. When `matches
+        //   == true`, the forwarded `D::set_table_mut` consumes that
+        //   provenance for `D`'s columns. When `false`, the inner stays
+        //   NULL-init and is never read. The mask read uses a shared reborrow
+        //   (`component_mask` needs no write provenance).
+        let matches =
+            D::matches_component_set(state, unsafe { (*archetype).component_mask() });
+        if matches {
+            unsafe { D::set_table_mut(&mut fetch.inner, state, archetype, meta) };
+        }
+        fetch.matches = matches;
+    }
+
+    #[inline]
+    unsafe fn set_table_readonly_no_meta<'w>(
+        fetch: &mut Self::Fetch<'w>,
+        state: &Self::State,
+        archetype: *const Archetype,
+    ) {
+        // SAFETY (Decision 1/2, QD3, QD4): identical gate to
+        //   `set_table_readonly` minus the unused `meta`. For an NCD=false
+        //   inner (`&T`) this forwards to the inner's real meta-free body
+        //   (Decision 2 row 1). For an NCD=true inner (`Ref<T>`) the forward
+        //   reaches the inner's `#[cold]` no-meta panic — UNREACHABLE, because
+        //   `Option<Ref<T>>::NCD = true` routes the driver
+        //   (iter.rs:298 `if const { D::NCD || F::NCD }`) to the meta path
+        //   (Decision 2 note b). The inner's QD4 readonly backstop on a
+        //   write-inner is preserved verbatim.
+        let matches = D::matches_component_set(state, unsafe { (*archetype).component_mask() });
+        if matches {
+            unsafe { D::set_table_readonly_no_meta(&mut fetch.inner, state, archetype) };
+        }
+        fetch.matches = matches;
+    }
+
+    #[inline]
+    unsafe fn set_table_mut_no_meta<'w>(
+        fetch: &mut Self::Fetch<'w>,
+        state: &Self::State,
+        archetype: *mut Archetype,
+    ) {
+        // SAFETY (Decision 1/2, QD1, QD3, QD4): same gate, write-capable
+        //   `archetype`, meta-free. For an NCD=false inner (`&mut T`) this
+        //   forwards to the inner's real meta-free body (Decision 2 row 2).
+        //   For an NCD=true inner (`Mut<T>`) the forward reaches the inner's
+        //   `#[cold]` no-meta panic — UNREACHABLE because `Option<Mut<T>>::NCD
+        //   = true` routes through the meta path.
+        let matches =
+            D::matches_component_set(state, unsafe { (*archetype).component_mask() });
+        if matches {
+            unsafe { D::set_table_mut_no_meta(&mut fetch.inner, state, archetype) };
+        }
+        fetch.matches = matches;
+    }
+
+    #[inline]
+    unsafe fn fetch<'w>(fetch: &Self::Fetch<'w>, row: usize) -> Self::Item<'w> {
+        // SAFETY (Decision 1, QD2, QD3): when `fetch.matches`, the inner was
+        //   initialised by the gated `set_table_*` forward (caller called
+        //   `set_table_*` before any `fetch`), so `D::fetch`'s contract holds
+        //   (`row < entity_count`, inner bases non-null). When `!fetch.matches`
+        //   the inner is the NULL-init value — NOT read here (we return
+        //   `None`).
+        if fetch.matches {
+            Some(unsafe { D::fetch(&fetch.inner, row) })
+        } else {
+            None
+        }
+    }
+}
+
+// SAFETY: `Option<D>` performs no writes when `D` does not — `IS_READ_ONLY =
+//   D::IS_READ_ONLY`, and `D: ReadOnlyQueryData` guarantees `D::IS_READ_ONLY
+//   = true`. So `Option<&mut T>` / `Option<Mut<T>>` are rejected from
+//   `iter()` / `par_iter()` (only `iter_mut()` admits them).
+unsafe impl<D: ReadOnlyQueryData> ReadOnlyQueryData for Option<D> {}
+
+// ── AnyOf<(D0, D1, …)> (task #9 — OR over real-component leaves) ────────────
+//
+// `AnyOf<(D0, …, Dn)>` yields a tuple `(Option<D0::Item>, …)` where at least
+// one element is `Some`. It is the OR analogue of a data tuple's AND.
+//
+// Cost note (Decision 8): a SOLE `Query<AnyOf<(&A, &B)>>` has an EMPTY include
+// mask ⇒ `update_archetypes` matches EVERY live archetype, then
+// `post_filter_matched` trims to those containing (A or B). This is the
+// `Or<F>` cost profile — paid per generation bump (per `update`), NOT per
+// `iter()`. A `Query<(&A, AnyOf<(&B, &C)>)>` is bounded by `&A`'s include and
+// pays no full-world scan. The full-world-scan cost scales with archetype
+// count; do not mistake it for a bug (filed as an archetype-count-scaling
+// bench note).
+
+/// Sealed marker for the leaf types admissible as an [`AnyOf`] arm.
+///
+/// `AnyOf<(D0, …)>` bounds every arm `Di: AnyOfArm`. The seal compile-rejects
+/// arms whose `matches_component_set` is not a single-component predicate —
+/// `Option<_>` (unconditionally `true`), `()` (unconditionally `true`), nested
+/// `AnyOf`, and tuple arms — every one of which would break the OR's ≥1-member
+/// trim by matching the whole world (Decision 3). Mirrors the sealed
+/// `OrComposable` bound (`filter.rs`).
+///
+/// # Members
+///
+/// `&T`, `&mut T`, [`Ref<'_, T>`](Ref), [`Mut<'_, T>`](Mut) for any
+/// `T: Component`. NOT members: `Option<_>`, `()`, `AnyOf<_>`, tuples.
+///
+/// # Safety
+///
+/// A purely declarative marker — no method contract. `unsafe` signals that
+/// membership is a deliberate, audited choice: an `AnyOfArm` must have a
+/// single-component `matches_component_set` so the OR-trim is well-defined.
+pub unsafe trait AnyOfArm: QueryData {}
+
+// SAFETY: `&T::matches_component_set` is `mask.contains(id)` — a single
+//   real-component predicate; the OR-trim over arms is well-defined.
+unsafe impl<T: Component> AnyOfArm for &T {}
+
+// SAFETY: `&mut T::matches_component_set` is `mask.contains(id)` — same.
+unsafe impl<T: Component> AnyOfArm for &mut T {}
+
+// SAFETY: `Ref<T>::matches_component_set` is `mask.contains(id)` — same.
+unsafe impl<T: Component> AnyOfArm for Ref<'_, T> {}
+
+// SAFETY: `Mut<T>::matches_component_set` is `mask.contains(id)` — same.
+unsafe impl<T: Component> AnyOfArm for Mut<'_, T> {}
+
+/// OR-combinator query data: yields `(Option<D0::Item>, …)` with the ≥1-member
+/// guarantee (at least one arm is `Some` for every yielded row).
+///
+/// Every arm must be an [`AnyOfArm`] (a real-component leaf: `&T`, `&mut T`,
+/// `Ref<T>`, `Mut<T>`). `Option`, `()`, nested `AnyOf`, and tuple arms are
+/// compile-rejected (Decision 3). An empty `AnyOf<()>` has no impl ⇒
+/// trait-not-satisfied compile error (Decision 7).
+///
+/// # Semantics
+///
+/// * `AnyOf<(&A, &B)>` → `(Option<&A>, Option<&B>)`, matched against
+///   archetypes containing A OR B; at least one is `Some` per row.
+/// * `AnyOf<(&A,)>` single arm → `(Option<&A>,)`, bounded to A-present
+///   archetypes (always `Some`) — NOT equivalent to `&A` (the item is a
+///   1-tuple of `Option`).
+/// * `AnyOf<(&A, &A)>` overlapping read+read → legal.
+/// * `AnyOf<(&mut A, &A)>` / `(&mut A, &mut A)` → trips the B0002 aliasing
+///   detector (`init_access` forwards each arm).
+///
+/// # Cost
+///
+/// A SOLE `Query<AnyOf<…>>` scans the full archetype set on every generation
+/// bump (empty include ⇒ the `Or<F>` cost profile) — see the module note
+/// above. Bound it with a positive term (`Query<(&A, AnyOf<…>)>`) when
+/// possible.
+pub struct AnyOf<T>(PhantomData<fn() -> T>);
+
+/// Emits a `QueryData` impl for `AnyOf<(D0, …)>` over the given paired idents.
+/// Each arm is bounded `$D: AnyOfArm` (the seal — Decision 3). Mirrors
+/// [`impl_query_data_tuple!`]'s `(TypeIdent, state_ident, fetch_ident)`
+/// triples; the `bool` flag rides alongside each arm's `Fetch` as
+/// `($D::Fetch<'w>, bool)`.
+macro_rules! impl_any_of {
+    ( $( ($D:ident, $s:ident, $f:ident) ),+ ) => {
+        // SAFETY (QD1-QD4): each arm forwards to its own `QueryData` impl
+        //   (QD1-QD4 by induction). Per-arm `set_table` is GATED on that
+        //   arm's own `matches` (Decision 1) — never an unconditional
+        //   forward. `archetype` is identical for every arm in one call.
+        //   Intra-`AnyOf` aliasing among arms is detected at `init_access`
+        //   via `FilteredAccessSet` (Decision 8).
+        #[allow(non_snake_case)]
+        unsafe impl< $($D: AnyOfArm),+ > QueryData for AnyOf<( $($D,)+ )> {
+            type State = ( $($D::State,)+ );
+            type Fetch<'w> = ( $(($D::Fetch<'w>, bool),)+ );
+            type Item<'w> = ( $(Option<$D::Item<'w>>,)+ );
+
+            const IS_READ_ONLY: bool = true $( && $D::IS_READ_ONLY )+;
+            const NEEDS_CHANGE_DETECTION: bool = false $( || $D::NEEDS_CHANGE_DETECTION )+;
+            // Non-filtering at the archetype level (the OR-trim lives in
+            // `post_filter_matched`, not in a positive include bit).
+            const HAS_DATA_COMPONENT: bool = false;
+            // The ≥1-member OR-trim runs in the post-filter pass — so
+            // `Query<AnyOf<…>, Enabled<C>>` must NOT be candidate-seeded
+            // (Decision 4).
+            const REQUIRES_POST_FILTER_TRIM: bool = true;
+
+            #[inline]
+            fn init_state(world: &mut EcsMaster) -> Self::State {
+                ( $( <$D as QueryData>::init_state(world), )+ )
+            }
+
+            #[inline]
+            fn init_access(state: &Self::State, access_set: &mut FilteredAccessSet) {
+                let ( $($s,)+ ) = state;
+                // Decision 8: forward each arm — declares the full read/write
+                // surface so `AnyOf<(&mut A, &A)>` trips B0002.
+                $( <$D as QueryData>::init_access($s, access_set); )+
+            }
+
+            #[inline]
+            fn matches_component_set(state: &Self::State, mask: &ComponentMask) -> bool {
+                let ( $($s,)+ ) = state;
+                // OR of arms (the ≥1-member predicate).
+                false $( || <$D as QueryData>::matches_component_set($s, mask) )+
+            }
+
+            #[inline]
+            fn aggregate_include(_state: &Self::State, _include: &mut ComponentMask) {
+                // No-op: AnyOf's OR predicate has NO common required bit; the
+                // membership trim is applied in `post_filter_matched` via
+                // `matches_component_set`. Populating `include` would WRONGLY
+                // require ALL arms present (an AND, not an OR).
+            }
+
+            #[inline]
+            fn init_fetch<'w>(state: &Self::State) -> Self::Fetch<'w> {
+                let ( $($s,)+ ) = state;
+                ( $( (<$D as QueryData>::init_fetch($s), false), )+ )
+            }
+
+            #[inline]
+            unsafe fn set_table_readonly<'w>(
+                fetch: &mut Self::Fetch<'w>,
+                state: &Self::State,
+                archetype: *const Archetype,
+                meta: &'_ SystemMeta,
+            ) {
+                let ( $($f,)+ ) = fetch;
+                let ( $($s,)+ ) = state;
+                $(
+                    // SAFETY (Decision 1, QD3, QD4): per-arm gate. The mask
+                    //   read uses a shared reborrow; `matches` re-derives the
+                    //   arm's predicate. When `true`, the forwarded
+                    //   `set_table_readonly`'s QD1/QD3 hold (arm's columns
+                    //   non-null); the arm's QD4 readonly backstop on a
+                    //   write-arm is preserved (unreachable in well-typed
+                    //   `iter()` code). When `false`, the arm's inner stays
+                    //   NULL-init and is never read.
+                    {
+                        let m = <$D as QueryData>::matches_component_set(
+                            $s,
+                            unsafe { (*archetype).component_mask() },
+                        );
+                        if m {
+                            unsafe {
+                                <$D as QueryData>::set_table_readonly(
+                                    &mut $f.0, $s, archetype, meta,
+                                );
+                            }
+                        }
+                        $f.1 = m;
+                    }
+                )+
+            }
+
+            #[inline]
+            unsafe fn set_table_mut<'w>(
+                fetch: &mut Self::Fetch<'w>,
+                state: &Self::State,
+                archetype: *mut Archetype,
+                meta: &'_ SystemMeta,
+            ) {
+                let ( $($f,)+ ) = fetch;
+                let ( $($s,)+ ) = state;
+                $(
+                    // SAFETY (Decision 1, QD1, QD3, QD4): per-arm gate with
+                    //   write-capable `archetype`. When `true`, the forwarded
+                    //   `set_table_mut` consumes that arm's write provenance.
+                    {
+                        let m = <$D as QueryData>::matches_component_set(
+                            $s,
+                            unsafe { (*archetype).component_mask() },
+                        );
+                        if m {
+                            unsafe {
+                                <$D as QueryData>::set_table_mut(
+                                    &mut $f.0, $s, archetype, meta,
+                                );
+                            }
+                        }
+                        $f.1 = m;
+                    }
+                )+
+            }
+
+            #[inline]
+            unsafe fn set_table_readonly_no_meta<'w>(
+                fetch: &mut Self::Fetch<'w>,
+                state: &Self::State,
+                archetype: *const Archetype,
+            ) {
+                let ( $($f,)+ ) = fetch;
+                let ( $($s,)+ ) = state;
+                $(
+                    // SAFETY (Decision 1/2, QD3, QD4): per-arm gate, meta-free.
+                    //   Reached only when no arm needs change detection
+                    //   (`AnyOf::NCD == false` ⇒ every arm's NCD == false ⇒
+                    //   every arm's `_no_meta` is its real meta-free body, not
+                    //   the cold panic).
+                    {
+                        let m = <$D as QueryData>::matches_component_set(
+                            $s,
+                            unsafe { (*archetype).component_mask() },
+                        );
+                        if m {
+                            unsafe {
+                                <$D as QueryData>::set_table_readonly_no_meta(
+                                    &mut $f.0, $s, archetype,
+                                );
+                            }
+                        }
+                        $f.1 = m;
+                    }
+                )+
+            }
+
+            #[inline]
+            unsafe fn set_table_mut_no_meta<'w>(
+                fetch: &mut Self::Fetch<'w>,
+                state: &Self::State,
+                archetype: *mut Archetype,
+            ) {
+                let ( $($f,)+ ) = fetch;
+                let ( $($s,)+ ) = state;
+                $(
+                    // SAFETY (Decision 1/2, QD1, QD3, QD4): per-arm gate,
+                    //   write-capable, meta-free. Same NCD-propagation note as
+                    //   the readonly variant.
+                    {
+                        let m = <$D as QueryData>::matches_component_set(
+                            $s,
+                            unsafe { (*archetype).component_mask() },
+                        );
+                        if m {
+                            unsafe {
+                                <$D as QueryData>::set_table_mut_no_meta(
+                                    &mut $f.0, $s, archetype,
+                                );
+                            }
+                        }
+                        $f.1 = m;
+                    }
+                )+
+            }
+
+            #[inline]
+            unsafe fn fetch<'w>(fetch: &Self::Fetch<'w>, row: usize) -> Self::Item<'w> {
+                let ( $($f,)+ ) = fetch;
+                (
+                    $(
+                        // SAFETY (Decision 1, QD2, QD3): when the arm's flag is
+                        //   set, its inner was initialised by the gated
+                        //   `set_table_*` forward and `row` is in range; when
+                        //   clear, the inner is NULL-init and not read.
+                        if $f.1 {
+                            Some(unsafe { <$D as QueryData>::fetch(&$f.0, row) })
+                        } else {
+                            None
+                        },
+                    )+
+                )
+            }
+        }
+    };
+}
+
+/// Emits a `ReadOnlyQueryData` impl for `AnyOf<(D0, …)>` — read-only iff every
+/// arm is. Gated separately from [`impl_any_of!`] so the bound is
+/// `$D: AnyOfArm + ReadOnlyQueryData` without conflating the two at the
+/// working impl's header.
+macro_rules! impl_any_of_read_only {
+    ( $( $D:ident ),+ ) => {
+        // SAFETY: every arm is `ReadOnlyQueryData` (each arm's
+        //   `IS_READ_ONLY = true`); `AnyOf`'s per-arm fetch forwards to
+        //   read-only arm fetches by induction.
+        unsafe impl< $($D: AnyOfArm + ReadOnlyQueryData),+ > ReadOnlyQueryData
+            for AnyOf<( $($D,)+ )> {}
+    };
+}
+
+impl_any_of!((D0, s0, f0));
+impl_any_of!((D0, s0, f0), (D1, s1, f1));
+impl_any_of!((D0, s0, f0), (D1, s1, f1), (D2, s2, f2));
+impl_any_of!((D0, s0, f0), (D1, s1, f1), (D2, s2, f2), (D3, s3, f3));
+impl_any_of!(
+    (D0, s0, f0), (D1, s1, f1), (D2, s2, f2), (D3, s3, f3),
+    (D4, s4, f4)
+);
+impl_any_of!(
+    (D0, s0, f0), (D1, s1, f1), (D2, s2, f2), (D3, s3, f3),
+    (D4, s4, f4), (D5, s5, f5)
+);
+impl_any_of!(
+    (D0, s0, f0), (D1, s1, f1), (D2, s2, f2), (D3, s3, f3),
+    (D4, s4, f4), (D5, s5, f5), (D6, s6, f6)
+);
+impl_any_of!(
+    (D0, s0, f0), (D1, s1, f1), (D2, s2, f2), (D3, s3, f3),
+    (D4, s4, f4), (D5, s5, f5), (D6, s6, f6), (D7, s7, f7)
+);
+impl_any_of!(
+    (D0, s0, f0), (D1, s1, f1), (D2, s2, f2), (D3, s3, f3),
+    (D4, s4, f4), (D5, s5, f5), (D6, s6, f6), (D7, s7, f7),
+    (D8, s8, f8)
+);
+impl_any_of!(
+    (D0, s0, f0), (D1, s1, f1), (D2, s2, f2), (D3, s3, f3),
+    (D4, s4, f4), (D5, s5, f5), (D6, s6, f6), (D7, s7, f7),
+    (D8, s8, f8), (D9, s9, f9)
+);
+impl_any_of!(
+    (D0, s0, f0), (D1, s1, f1), (D2, s2, f2), (D3, s3, f3),
+    (D4, s4, f4), (D5, s5, f5), (D6, s6, f6), (D7, s7, f7),
+    (D8, s8, f8), (D9, s9, f9), (D10, s10, f10)
+);
+impl_any_of!(
+    (D0, s0, f0), (D1, s1, f1), (D2, s2, f2), (D3, s3, f3),
+    (D4, s4, f4), (D5, s5, f5), (D6, s6, f6), (D7, s7, f7),
+    (D8, s8, f8), (D9, s9, f9), (D10, s10, f10), (D11, s11, f11)
+);
+
+impl_any_of_read_only!(D0);
+impl_any_of_read_only!(D0, D1);
+impl_any_of_read_only!(D0, D1, D2);
+impl_any_of_read_only!(D0, D1, D2, D3);
+impl_any_of_read_only!(D0, D1, D2, D3, D4);
+impl_any_of_read_only!(D0, D1, D2, D3, D4, D5);
+impl_any_of_read_only!(D0, D1, D2, D3, D4, D5, D6);
+impl_any_of_read_only!(D0, D1, D2, D3, D4, D5, D6, D7);
+impl_any_of_read_only!(D0, D1, D2, D3, D4, D5, D6, D7, D8);
+impl_any_of_read_only!(D0, D1, D2, D3, D4, D5, D6, D7, D8, D9);
+impl_any_of_read_only!(D0, D1, D2, D3, D4, D5, D6, D7, D8, D9, D10);
+impl_any_of_read_only!(D0, D1, D2, D3, D4, D5, D6, D7, D8, D9, D10, D11);
+
 // ── Variadic tuple impls (§4.6 / §10.1, M4) ────────────────────────────────
 //
 // A single `macro_rules!` site emits `QueryData` impls for tuple arities
@@ -1300,6 +1884,13 @@ macro_rules! impl_query_data_tuple {
             // EnableTag C2: a tuple touches a data component iff ANY element
             // does (OR-fold) — bounds an enable term's matched set.
             const HAS_DATA_COMPONENT: bool = false $( || $D::HAS_DATA_COMPONENT )*;
+
+            // Task #9 M1: a tuple requires post-filter trim iff ANY element
+            // does (OR-fold). Without this, a tuple wrapping `AnyOf<..>` falls
+            // back to the trait default `false`, which re-seeds the candidate
+            // path and skips `post_filter_matched` — AnyOf's >=1-member OR-trim
+            // never runs, yielding phantom `(None,)` rows.
+            const REQUIRES_POST_FILTER_TRIM: bool = false $( || $D::REQUIRES_POST_FILTER_TRIM )*;
 
             #[inline]
             fn init_state(world: &mut EcsMaster) -> Self::State {

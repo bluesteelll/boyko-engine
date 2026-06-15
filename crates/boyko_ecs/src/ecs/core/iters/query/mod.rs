@@ -51,7 +51,7 @@ pub mod tag_terms;
 pub mod term_list;
 
 pub use chunked_data::ChunkedQueryData;
-pub use data::{Mut, QueryData, ReadOnlyQueryData, Ref};
+pub use data::{AnyOf, Mut, QueryData, ReadOnlyQueryData, Ref};
 pub use filter::{Added, ArchetypalQueryFilter, Changed, Or, QueryFilter, With, Without};
 pub use filter_enable::{Disabled, Enabled};
 pub use iter::{QueryIter, QueryIterMut};

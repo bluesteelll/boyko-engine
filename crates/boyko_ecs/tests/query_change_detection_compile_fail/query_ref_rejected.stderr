@@ -4,12 +4,12 @@ error[E0080]: evaluation panicked: EcsMaster::query<D, F>() does not support cha
 23 | const _: () = assert_query_no_change_detection::<Ref<'static, P>, ()>();
    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `_` failed inside this call
    |
-note: inside `assert_query_no_change_detection::<boyko_ecs::ecs::core::iters::query::Ref<'_, P>, ()>`
+note: inside `assert_query_no_change_detection::<boyko_ecs::prelude::Ref<'_, P>, ()>`
   --> src/ecs/core/ecs_master/ecs_master.rs
    |
    |     eval_query_no_change_detection::<D, F>();
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-note: inside `boyko_ecs::ecs::core::ecs_master::ecs_master::eval_query_no_change_detection::<boyko_ecs::ecs::core::iters::query::Ref<'_, P>, ()>`
+note: inside `boyko_ecs::ecs::core::ecs_master::ecs_master::eval_query_no_change_detection::<boyko_ecs::prelude::Ref<'_, P>, ()>`
   --> $RUST/core/src/panic.rs
    |
    = note: the failure occurred here

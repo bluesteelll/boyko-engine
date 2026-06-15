@@ -109,8 +109,17 @@ impl<D: QueryData, F: QueryFilter> QueryDataState<D, F> {
     /// bounded `EnablePresence[A]` candidate snapshot instead of the
     /// `1..gen` sweep. `false` for every other shape (positive-term enable,
     /// non-enable, or a rejected enable-tuple — which never compiles).
-    const IS_CANDIDATE_SEEDED: bool =
-        F::IS_SOLE_SINGLE_ENABLE && !D::HAS_DATA_COMPONENT && !F::HAS_POSITIVE_ARCHETYPAL;
+    /// task #9 / Decision 4 — `!D::REQUIRES_POST_FILTER_TRIM` keeps an
+    /// `AnyOf<…>` data term OUT of the candidate-seed fast path: its ≥1-member
+    /// OR-trim lives ONLY in `post_filter_matched`, which the candidate-seed
+    /// branch skips. Without this term `Query<AnyOf<(&A, &B)>, Enabled<C>>`
+    /// would visit a C-present archetype lacking both A and B and yield a
+    /// `(None, None)` row — a contract violation. The default-`false` const
+    /// keeps the formula identical for every non-`AnyOf` data term (0%-gate).
+    const IS_CANDIDATE_SEEDED: bool = F::IS_SOLE_SINGLE_ENABLE
+        && !D::HAS_DATA_COMPONENT
+        && !F::HAS_POSITIVE_ARCHETYPAL
+        && !D::REQUIRES_POST_FILTER_TRIM;
 
     /// The shape-assert body (amendment A3 / Step 7a). Called from BOTH the
     /// codegen-time trigger (`new`'s inline `const {}` block — fires under

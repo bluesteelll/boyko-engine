@@ -1,0 +1,41 @@
+error[E0277]: the trait bound `(): AnyOfArm` is not satisfied
+  --> tests/option_anyof_compile_fail/anyof_arm_unit_rejected.rs:21:24
+   |
+21 | fn must_not_compile(q: Query<AnyOf<((), &A)>>) {
+   |                        ^^^^^^^^^^^^^^^^^^^^^^ the trait `AnyOfArm` is not implemented for `()`
+   |
+help: the following other types implement trait `AnyOfArm`
+  --> src/ecs/core/iters/query/data.rs
+   |
+   | unsafe impl<T: Component> AnyOfArm for &T {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `&T`
+...
+   | unsafe impl<T: Component> AnyOfArm for &mut T {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `&mut T`
+...
+   | unsafe impl<T: Component> AnyOfArm for Ref<'_, T> {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `boyko_ecs::prelude::Ref<'_, T>`
+...
+   | unsafe impl<T: Component> AnyOfArm for Mut<'_, T> {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Mut<'_, T>`
+   = note: required for `AnyOf<((), &A)>` to implement `QueryData`
+note: required by a bound in `boyko_ecs::prelude::Query`
+  --> src/ecs/core/iters/query/query.rs
+   |
+   | pub struct Query<'w, 's, D: QueryData, F: QueryFilter = ()> {
+   |                             ^^^^^^^^^ required by this bound in `Query`
+
+error[E0599]: the method `iter` exists for struct `boyko_ecs::prelude::Query<'_, '_, AnyOf<((), &A)>>`, but its trait bounds were not satisfied
+  --> tests/option_anyof_compile_fail/anyof_arm_unit_rejected.rs:22:16
+   |
+22 |     for _ in q.iter() {}
+   |                ^^^^ method cannot be called on `boyko_ecs::prelude::Query<'_, '_, AnyOf<((), &A)>>` due to unsatisfied trait bounds
+   |
+  ::: src/ecs/core/iters/query/data.rs
+   |
+   | pub struct AnyOf<T>(PhantomData<fn() -> T>);
+   | ------------------- doesn't satisfy `AnyOf<((), &A)>: QueryData`
+   |
+   = note: the following trait bounds were not satisfied:
+           `(): AnyOfArm`
+           which is required by `AnyOf<((), &A)>: QueryData`

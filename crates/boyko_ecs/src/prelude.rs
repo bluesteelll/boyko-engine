@@ -41,6 +41,9 @@ pub use crate::ecs::core::schedule::{
 
 // ── Queries ──────────────────────────────────────────────────────────────────
 pub use crate::ecs::core::iters::query::Query;
+// task #9: optional / OR query data (`Option<&T>` is std; `AnyOf` is new). The
+// change-detection data views `Ref` / `Mut` ride along (Decision 6).
+pub use crate::ecs::core::iters::query::{AnyOf, Mut, Ref};
 // EnableTag filters: per-row gates over the bitset storage backend.
 pub use crate::ecs::core::iters::query::filter_enable::{Disabled, Enabled};
 
