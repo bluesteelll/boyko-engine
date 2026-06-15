@@ -258,6 +258,13 @@ impl EnablePresence {
     /// reverse index exists). Acceptable — it runs only on a structural bump.
     /// The bit clear mirrors `note_column_alloc`'s `fetch_or(Release)` with
     /// `fetch_and(Release)`.
+    ///
+    /// Cross-module invariant (O1): this clear does NOT bump the presence
+    /// `epoch()` — only `note_column_alloc` does. The positive-term cull's
+    /// warm-only re-cull (`QueryDataState::update`) invalidates off `epoch()`,
+    /// so it relies on this clear ALWAYS being paired with a
+    /// `structural_generation` bump (archetype removal), which routes that
+    /// `update` into its structural-rebuild branch instead.
     pub(crate) fn clear_archetype(&self, arch: ArchetypeId) {
         if arch.0 >= PRESENCE_CAPACITY {
             return;

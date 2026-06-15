@@ -165,10 +165,13 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
     /// the term path, since the term test needs the live signature).
     #[inline]
     pub fn archetype_count(&self) -> usize {
-        let ids = self.state.archetype_state.matched_ids_pre_terms();
         if self.terms.is_empty() {
-            return ids.len();
+            // EnableTag Decision 6: route the no-terms arm through the cull set
+            // so count stays consistent with `iter` (const-folds to
+            // `matched_ids_pre_terms()` for non-enable `F`).
+            return self.state.enable_driver_ids().len();
         }
+        let ids = self.state.archetype_state.matched_ids_pre_terms();
         // SAFETY (U_C2): shared read mint — `world()` yields `&EcsMaster`
         //   scoped to this statement; no `&mut` access occurs through it
         //   (same pattern as `get_param`'s master reborrow).
@@ -186,10 +189,11 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
     /// Term semantics mirror [`Self::archetype_count`].
     #[inline]
     pub fn is_empty(&self) -> bool {
-        let ids = self.state.archetype_state.matched_ids_pre_terms();
         if self.terms.is_empty() {
-            return ids.is_empty();
+            // EnableTag Decision 6: consistent with `iter` / `archetype_count`.
+            return self.state.enable_driver_ids().is_empty();
         }
+        let ids = self.state.archetype_state.matched_ids_pre_terms();
         // SAFETY (U_C2): shared read mint scoped to this statement — see
         //   `archetype_count`.
         let master = unsafe { self.world.world().archetype_master() };
@@ -210,7 +214,10 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
     #[inline]
     fn driver_ids(&self) -> &'s [ArchetypeId] {
         if self.terms.is_empty() {
-            return self.state.archetype_state.matched_ids_pre_terms();
+            // EnableTag Decision 3: the no-terms fast path. For a positive-term
+            // enable `F` this is `culled_ids`; for non-enable `F` it const-folds
+            // to `matched_ids_pre_terms()` (the 0%-gate — identical load).
+            return self.state.enable_driver_ids();
         }
         self.driver_ids_term_slow()
     }

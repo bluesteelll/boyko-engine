@@ -23,6 +23,7 @@ use std::cell::UnsafeCell;
 use std::marker::PhantomData;
 
 use crate::ecs::core::archetype::archetype::Archetype;
+use crate::ecs::core::archetype::archetype_master::ArchetypeMaster;
 use crate::ecs::core::change_detection::Tick;
 use crate::ecs::core::component::component::Component;
 use crate::ecs::core::component::component_mask::ComponentMask;
@@ -30,7 +31,7 @@ use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 use crate::ecs::core::system::filtered_access_set::FilteredAccessSet;
 use crate::ecs::core::system::params::diagnostics::intra_system_conflict_panic;
 use crate::ecs::core::system::system_meta::SystemMeta;
-use crate::ecs::identifiers::primitives::ComponentId;
+use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId};
 
 /// Filter applied to query matches.
 ///
@@ -176,6 +177,29 @@ pub unsafe trait QueryFilter: Sized {
     /// Contributes bits to the `exclude` mask. Default no-op.
     #[inline]
     fn aggregate_exclude(_state: &Self::State, _exclude: &mut ComponentMask) {}
+
+    /// EnableTag positive-term cull verdict (Decision 2) — `true` iff archetype
+    /// `arch` MAY contain a row this filter matches.
+    ///
+    /// Consulted ONLY under `const { F::CONTAINS_ENABLE_TERM }` by
+    /// `QueryDataState`'s recull to drop archetypes that the typed enable term
+    /// proves row-empty (an `Enabled<A>` archetype with no `A` column has every
+    /// row disabled ⇒ no `Enabled<A>` row survives). Default: keep (no cull) —
+    /// every non-enable leaf (`()`, `With`, `Without`, `Added`, `Changed`, `Or`)
+    /// inherits this and is never reached anyway (their `CONTAINS_ENABLE_TERM`
+    /// is `false`, so the gated recull never calls them).
+    ///
+    /// Conservative direction: returning `true` is always sound (the per-row
+    /// `filter_fetch` still applies the exact gate); returning `false` MUST be
+    /// proven row-empty for the term, or it would silently drop matching rows.
+    #[inline]
+    fn enable_cull_keeps_archetype(
+        _state: &Self::State,
+        _master: &ArchetypeMaster,
+        _arch: ArchetypeId,
+    ) -> bool {
+        true
+    }
 
     /// Creates the initial per-archetype `Fetch` slot (typically all-NULL or
     /// the unit `()`).
@@ -1226,6 +1250,23 @@ macro_rules! impl_query_filter_tuple_and {
                 true $(
                     // SAFETY (QF1): per-element contract; `row` in range.
                     && unsafe { <$F as QueryFilter>::filter_fetch($f, row) }
+                )*
+            }
+
+            // EnableTag Decision 2: AND-compose the cull verdict over the
+            // elements — keep `arch` iff EVERY member keeps it. Conservative:
+            // drop only when some member proves the archetype row-empty for its
+            // term. Non-enable elements inherit the default `true`, so the fold
+            // reduces to the enable member(s)' verdict.
+            #[inline]
+            fn enable_cull_keeps_archetype(
+                state: &Self::State,
+                master: &ArchetypeMaster,
+                arch: ArchetypeId,
+            ) -> bool {
+                let ( $($s,)* ) = state;
+                true $(
+                    && <$F as QueryFilter>::enable_cull_keeps_archetype($s, master, arch)
                 )*
             }
         }

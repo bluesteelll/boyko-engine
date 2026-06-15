@@ -45,13 +45,14 @@
 use std::marker::PhantomData;
 
 use crate::ecs::core::archetype::archetype::Archetype;
+use crate::ecs::core::archetype::archetype_master::ArchetypeMaster;
 use crate::ecs::core::component::component::Component;
 use crate::ecs::core::component::component_registry::{self, StorageKind};
 use crate::ecs::core::component::enable::enable_store::EnableColumn;
 use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 use crate::ecs::core::system::filtered_access_set::FilteredAccessSet;
 use crate::ecs::core::system::system_meta::SystemMeta;
-use crate::ecs::identifiers::primitives::ComponentId;
+use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId};
 
 use super::filter::QueryFilter;
 
@@ -222,6 +223,20 @@ unsafe impl<T: Component> QueryFilter for Enabled<T> {
     }
 
     #[inline]
+    fn enable_cull_keeps_archetype(
+        state: &Self::State,
+        master: &ArchetypeMaster,
+        arch: ArchetypeId,
+    ) -> bool {
+        // Decision 2: keep `arch` iff it owns an allocated column for the tag.
+        // A no-column archetype has every row disabled (A1.1) ⇒ NO `Enabled<T>`
+        // row can survive ⇒ drop it. Uses the O(1) presence oracle (one pointer
+        // load + one word load + one bit test) rather than minting an
+        // `&Archetype` — the oracle is the module's documented cull consumer.
+        master.enable_presence().contains(state.id, arch)
+    }
+
+    #[inline]
     fn init_fetch<'w>(_state: &Self::State) -> Self::Fetch<'w> {
         EnableFetch { col: std::ptr::null(), _marker: PhantomData }
     }
@@ -357,6 +372,22 @@ unsafe impl<T: Component> QueryFilter for Disabled<T> {
     #[inline]
     fn sole_enable_tag_id(state: &Self::State) -> ComponentId {
         state.id
+    }
+
+    #[inline]
+    fn enable_cull_keeps_archetype(
+        _state: &Self::State,
+        _master: &ArchetypeMaster,
+        _arch: ArchetypeId,
+    ) -> bool {
+        // Decision 2 / A1.1 — EXPLICIT `true`, NOT inherited: a `Disabled<T>`
+        // term MUST NOT cull. A no-column archetype has every row "disabled"
+        // (no bit ⇒ clear ⇒ matches `Disabled<T>`), so dropping no-column
+        // archetypes here would wrongly hide the very rows a positive-term
+        // `Query<&D, Disabled<T>>` is meant to visit. The presence cull is a
+        // no-op for the disabled polarity; correctness rests on per-row
+        // `filter_fetch` (NULL column ⇒ `true`).
+        true
     }
 
     #[inline]

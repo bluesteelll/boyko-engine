@@ -16,7 +16,7 @@ use crate::ecs::core::iters::query::filter::QueryFilter;
 use crate::ecs::core::iters::query::term_list::TermScratch;
 use crate::ecs::core::iters::query_state::QueryState;
 use crate::ecs::core::system::filtered_access_set::FilteredAccessSet;
-use crate::ecs::identifiers::primitives::ComponentId;
+use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId};
 
 /// Per-system state cache for a `Query<D, F>`.
 ///
@@ -55,19 +55,42 @@ pub struct QueryDataState<D: QueryData, F: QueryFilter> {
     /// the slot-exclusive mint funnels. Auto `Send + Sync`; soundness carried
     /// by the protocol P1–P4 (see [`term_list`](super::term_list)).
     pub(crate) term_scratch: TermScratch,
-    /// EnableTag O2 (amendment A4.2) — last-observed `enable_generation`.
+    /// EnableTag candidate-seeded O2 (amendment A4.2) — last-observed
+    /// `enable_generation` (Relaxed) for the SOLE single-enable candidate path.
     ///
     /// Present in EVERY monomorphization but READ/WRITTEN only on the
-    /// `CONTAINS_ENABLE_TERM` (enable-bearing) paths — both the positive-term
-    /// cull and the candidate-seeded global scan share this one slot (the two
-    /// shapes are const-disjoint write sites; A4.2 honest field-reuse). A
-    /// column-alloc first-toggle into a new archetype bumps
-    /// `ArchetypeMaster::enable_generation`, and the next `update` re-culls /
-    /// re-seeds. The 8-byte tail is never touched by non-enable queries (the
-    /// 0%-gate: `update`'s warm path is gated by `if const { has_enable_term }`,
-    /// so this load is not even emitted into a non-enable monomorphization).
+    /// `IS_CANDIDATE_SEEDED` (sole single-enable) paths. A column-alloc
+    /// first-toggle into a new archetype bumps `ArchetypeMaster::enable_generation`,
+    /// and the next `update` re-seeds. The 8-byte tail is never touched by
+    /// non-enable queries (the 0%-gate: `update`'s candidate branch is gated by
+    /// `if const { Self::IS_CANDIDATE_SEEDED }`, so this load is not even emitted
+    /// into a non-candidate monomorphization).
     last_observed_enable_generation: u64,
+    /// EnableTag positive-term cull (Decision 1, Model B) — the recomputed
+    /// culled id list plus its `EnablePresence::epoch()` invalidation stamp.
+    ///
+    /// READ/WRITTEN only on the positive-term `CONTAINS_ENABLE_TERM` paths
+    /// (`HAS_ENABLE_TERM && !IS_CANDIDATE_SEEDED`). `Vec::new()` is alloc-free,
+    /// so for every other `(D, F)` this is a zero-capacity Vec constructed once
+    /// and never read — every access is `const { Self::HAS_ENABLE_TERM }`-gated
+    /// (the 0%-gate). A plain `Vec` mutated only under `&mut QueryDataState`
+    /// (`new` builds it locally; `update`'s recull writes it): NO interior
+    /// mutability, NO raw-pointer caching (Decision 8 — unlike `term_scratch`).
+    enable_cull: EnableCull,
     _marker: PhantomData<fn() -> (D, F)>,
+}
+
+/// EnableTag positive-term cull state (Decision 1, Model B). A cold tail on
+/// [`QueryDataState`]; see that field's doc for the gating contract.
+pub(crate) struct EnableCull {
+    /// `matched_ids` minus enable-rejected archetypes — the driver id list for a
+    /// positive-term enable query. Recomputed wholesale from the full
+    /// `matched_ids` on each invalidation (Model B never mutates `matched_ids`).
+    culled_ids: Vec<ArchetypeId>,
+    /// Invalidation stamp = [`EnablePresence::epoch()`](crate::ecs::core::component::enable::enable_presence::EnablePresence::epoch)
+    /// (Acquire, Decision 4) at the last recull. A change means a column was
+    /// allocated, so the cull verdict may have moved ⇒ re-cull.
+    last_observed_enable_epoch: u64,
 }
 
 impl<D: QueryData, F: QueryFilter> QueryDataState<D, F> {
@@ -195,6 +218,11 @@ impl<D: QueryData, F: QueryFilter> QueryDataState<D, F> {
         // `snapshot_present`, and `sole_enable_tag_id` are NEVER emitted there.
         // The non-enable path is byte-identical to pre-EnableTag (the 0%-gate).
         let mut last_observed_enable_generation = 0u64;
+        // Decision 8 / W1: `self` does not exist yet, so the positive-term cull
+        // recomputes into a LOCAL Vec moved into the struct literal below. Empty
+        // for every non-positive-term shape (alloc-free).
+        let mut culled_ids: Vec<ArchetypeId> = Vec::new();
+        let mut last_observed_enable_epoch = 0u64;
         if const { Self::IS_CANDIDATE_SEEDED } {
             // Bounded candidate snapshot (popcount-walked by seed_from_candidates).
             let tag = <F as QueryFilter>::sole_enable_tag_id(&filter_state);
@@ -211,10 +239,18 @@ impl<D: QueryData, F: QueryFilter> QueryDataState<D, F> {
                 &filter_state,
                 world.archetype_master(),
             );
-            // Positive-term enable shapes seed the O2 generation here too.
+            // Positive-term enable shapes recompute the cull list + stamp its
+            // epoch here (Decision 3/4). `IS_CANDIDATE_SEEDED` is false in this
+            // arm, so `HAS_ENABLE_TERM` here is exactly the positive-term shape.
             if const { Self::HAS_ENABLE_TERM } {
-                Self::cull_enable_archetypes(&mut archetype_state, &filter_state, world.archetype_master());
-                last_observed_enable_generation = world.archetype_master().enable_generation();
+                Self::recull(
+                    archetype_state.matched_ids_pre_terms(),
+                    &filter_state,
+                    world.archetype_master(),
+                    &mut culled_ids,
+                );
+                last_observed_enable_epoch =
+                    world.archetype_master().enable_presence().epoch();
             }
         }
 
@@ -224,6 +260,10 @@ impl<D: QueryData, F: QueryFilter> QueryDataState<D, F> {
             filter_state,
             term_scratch: TermScratch::new(),
             last_observed_enable_generation,
+            enable_cull: EnableCull {
+                culled_ids,
+                last_observed_enable_epoch,
+            },
             _marker: PhantomData,
         }
     }
@@ -353,60 +393,117 @@ impl<D: QueryData, F: QueryFilter> QueryDataState<D, F> {
                 master,
             );
             // Positive-term enable shapes re-cull after a structural rebuild.
+            // (Decision 5 structural-rebuild branch: `matched_ids` was rebuilt,
+            // so the cull must recompute from the fresh set.)
             if const { Self::HAS_ENABLE_TERM } {
-                Self::cull_enable_archetypes(&mut self.archetype_state, &self.filter_state, master);
-                self.last_observed_enable_generation = master.enable_generation();
+                Self::recull(
+                    self.archetype_state.matched_ids_pre_terms(),
+                    &self.filter_state,
+                    master,
+                    &mut self.enable_cull.culled_ids,
+                );
+                self.enable_cull.last_observed_enable_epoch =
+                    master.enable_presence().epoch();
             }
         } else if const { Self::HAS_ENABLE_TERM } {
             // No archetype churn, but a column-alloc first-toggle may have
-            // bumped enable_generation (a new archetype gained the tag's
+            // bumped the presence epoch (a new archetype gained the tag's
             // column). Re-cull over the bounded matched set if so. Gated by
             // `has_enable_term` ⇒ the load is not emitted for non-enable queries
             // (the 0%-gate warm path stays byte-identical above).
-            let cur_enable_gen = master.enable_generation();
-            if self.last_observed_enable_generation != cur_enable_gen {
-                // A column-alloc cannot retroactively change which archetypes
-                // satisfy the positive term, so the matched set already contains
-                // every candidate; re-running the cull narrows it to the
-                // now-present ones. (Bounded over matched_ids — C2.)
-                Self::cull_enable_archetypes(&mut self.archetype_state, &self.filter_state, master);
-                self.last_observed_enable_generation = cur_enable_gen;
+            //
+            // Decision 4: the stamp is `EnablePresence::epoch()` (Acquire,
+            // purpose-built) NOT `enable_generation()` (Relaxed) — the Acquire
+            // trigger pairs with the Acquire `contains` oracle the cull reads.
+            //
+            // Decision 5 (re-add invariant): this warm-only branch is reached
+            // iff both archetype + structural generations are unchanged ⇒
+            // `matched_ids` is identical to its value at the last full recompute
+            // ⇒ any archetype that newly satisfies the cull (gained a column)
+            // was ALREADY in `matched_ids` (the positive term is enable-toggle
+            // independent, and Model B never removes from `matched_ids`).
+            // Recompute-from-`matched_ids` therefore re-adds it.
+            //
+            // CROSS-MODULE INVARIANT (O1): `epoch()` is bumped ONLY by
+            // `note_column_alloc` (column-additions over an unchanged
+            // `matched_ids`), so this warm-only branch deliberately handles ONLY
+            // that case. A presence-bit CLEAR (archetype removal via
+            // `EnablePresence::clear_archetype`) does NOT bump `epoch()` — it is
+            // ALWAYS accompanied by a `structural_generation` bump, which routes
+            // `update` into the structural-rebuild branch above. That branch
+            // reculls from a fresh `matched_ids` (already lacking the removed id),
+            // so the cleared bit needs no epoch signal here. Correctness rests on
+            // this pairing (clear ⇒ structural bump); breaking it would silently
+            // strand a stale id in `culled_ids`.
+            let cur_epoch = master.enable_presence().epoch();
+            if self.enable_cull.last_observed_enable_epoch != cur_epoch {
+                Self::recull(
+                    self.archetype_state.matched_ids_pre_terms(),
+                    &self.filter_state,
+                    master,
+                    &mut self.enable_cull.culled_ids,
+                );
+                self.enable_cull.last_observed_enable_epoch = cur_epoch;
             }
         }
     }
 
-    /// EnableTag positive-term presence cull (plan D2 / Step 7a) — narrows the
-    /// already-bounded matched set to archetypes present for the enable tag.
+    /// EnableTag positive-term presence cull (Decision 3, Model B) — recomputes
+    /// `out` as `matched` minus the archetypes the typed enable term proves
+    /// row-empty.
     ///
-    /// Runs ONLY for `CONTAINS_ENABLE_TERM` shapes, over `matched_ids` (bounded
-    /// by the required positive term — C2), NEVER an empty-include full scan.
+    /// Runs ONLY for positive-term `CONTAINS_ENABLE_TERM` shapes, over
+    /// `matched_ids` (bounded by the required positive term — C2), NEVER an
+    /// empty-include full scan. `out` is recomputed wholesale (`clear` +
+    /// `extend` over a filtered `Copy` iterator) so the warm-only re-cull
+    /// re-adds any archetype that newly gained a column (Decision 5: the
+    /// re-add-by-construction invariant).
     ///
-    /// # Current scope (FLAGGED — see report)
-    ///
-    /// A correct coarse cull must (a) resolve the enable tag id and (b) know the
-    /// term's polarity (`Enabled` culls no-column archetypes; `Disabled` must
-    /// NOT — amendment A1.1). The v1 `QueryFilter` trait exposes neither a
-    /// tuple-enable tag resolver nor a polarity/`cull_keeps_archetype` hook
-    /// (`sole_enable_tag_id` resolves only a SOLE single leaf). Applying a
-    /// present-cull without the polarity discriminator would wrongly drop the
-    /// no-column archetypes a positive-term `Disabled<A>` must visit.
-    ///
-    /// Therefore this pass is a CORRECTNESS-PRESERVING NO-OP in v1: per-row
-    /// `filter_fetch` (Step 7) already delivers exact results; the cull is a
-    /// pure optimization. It is structurally wired (the `update` re-cull
-    /// trigger, the O2 generation stamp) so a Step-7 follow-up that adds a
-    /// `QueryFilter::enable_cull_keeps_archetype(state, presence, arch)` hook
-    /// (default: keep all) can drop in the per-archetype verdict here with no
-    /// further changes to `new` / `update`.
-    #[inline]
-    fn cull_enable_archetypes(
-        _archetype_state: &mut QueryState,
-        _filter_state: &F::State,
-        _master: &ArchetypeMaster,
+    /// Per-archetype verdict = [`QueryFilter::enable_cull_keeps_archetype`]:
+    /// `Enabled<T>` keeps iff present (O(1) oracle); `Disabled<T>` keeps all
+    /// (A1.1); an AND-tuple keeps iff every member keeps. No new `unsafe` —
+    /// single-threaded `new`/`update`, reads the Acquire presence oracle, writes
+    /// a plain Vec (Decision 3/8).
+    fn recull(
+        matched: &[ArchetypeId],
+        filter_state: &F::State,
+        master: &ArchetypeMaster,
+        out: &mut Vec<ArchetypeId>,
     ) {
-        // NO-OP in v1 — see method doc (the polarity/tag resolver gap). The
-        // wiring (this call site, the O2 generation stamp) is the seam for the
-        // Step-7 follow-up hook.
+        out.clear();
+        out.extend(
+            matched
+                .iter()
+                .copied()
+                .filter(|&a| F::enable_cull_keeps_archetype(filter_state, master, a)),
+        );
+    }
+
+    /// The id slice a positive-term enable query's drivers walk (Decision 3).
+    ///
+    /// Three const-disjoint arms, all `const`-folded at monomorphization:
+    /// * non-enable `F` (`!HAS_ENABLE_TERM`): the shared `matched_ids_pre_terms()`
+    ///   load, byte-identical to pre-EnableTag (the 0%-gate — this method folds
+    ///   to a single field load that the caller's no-terms arm already emitted).
+    /// * candidate-seeded sole enable (`IS_CANDIDATE_SEEDED`): the seed already
+    ///   bounded `matched_ids` to present-for-tag archetypes — no separate cull
+    ///   list, so the pre-terms slice IS the driver set.
+    /// * positive-term enable (`HAS_ENABLE_TERM && !IS_CANDIDATE_SEEDED`): the
+    ///   recomputed [`EnableCull::culled_ids`].
+    ///
+    /// Routed by both `Query::driver_ids` and `QueryView::driver_ids` (and the
+    /// count/is_empty no-terms arms — Decision 6) on the no-terms fast path.
+    #[inline]
+    pub(crate) fn enable_driver_ids(&self) -> &[ArchetypeId] {
+        if const { Self::HAS_ENABLE_TERM } {
+            if const { Self::IS_CANDIDATE_SEEDED } {
+                self.archetype_state.matched_ids_pre_terms()
+            } else {
+                &self.enable_cull.culled_ids
+            }
+        } else {
+            self.archetype_state.matched_ids_pre_terms()
+        }
     }
 
     /// Declares the read/write access surface of `D` and `F` to the active
@@ -997,5 +1094,355 @@ mod enable_global_scan {
             // With-bounded enable ⇒ NOT candidate-seeded.
             assert!(!QueryDataState::<(), (With<P>, Enabled<TagA>)>::IS_CANDIDATE_SEEDED);
         }
+    }
+
+    // ── Positive-term archetype cull (task #5, ENABLE-CULL-PLAN Decisions 1–7) ──
+    //
+    // These exercise the Model-B `recull` + `enable_driver_ids` routing for the
+    // POSITIVE-TERM enable shape `Query<&D, Enabled<A>>` (`HAS_ENABLE_TERM &&
+    // !IS_CANDIDATE_SEEDED`) — distinct from the candidate-seeded sole-term path
+    // tested above. They reuse the parent fixtures (`register`, `spawn_p`,
+    // `spawn_into`, `fresh_marker`, `TagA`/`TagB`/`P`) via `use super::*`.
+
+    /// Decision 5 #1 (THE load-bearing re-add test): a positive-term
+    /// `Query<&P, Enabled<A>>` over a world where archetype X has `P` but NO
+    /// A-column culls X (0 rows visited). After `enable::<A>` on a row IN X (no
+    /// structural churn — `set_enable_bit` allocates the column + bumps the
+    /// `EnablePresence` epoch but never the structural/archetype generation), a
+    /// fresh `update`+iter MUST re-add X and visit that row. Proves Model B
+    /// re-adds an archetype that gained a column later (the recompute reads the
+    /// untouched `matched_ids`, which always contained X).
+    #[test]
+    fn cull_then_enable_readds() {
+        register();
+        let mut ecs = EcsMaster::new();
+        // Archetype X: holds `P`, never an A-column at first.
+        let x = ecs.create_archetype(&[P::component_id()]);
+        let ex = spawn_p(&mut ecs, x, 100);
+
+        // Drive the state directly so we control update timing precisely.
+        let mut state = QueryDataState::<&P, Enabled<TagA>>::new(&mut ecs);
+        // No A-column anywhere ⇒ X is culled out of the driver ids on `new`.
+        assert!(
+            state.enable_driver_ids().is_empty(),
+            "no A-column ⇒ X culled ⇒ empty driver ids; got {:?}",
+            state.enable_driver_ids(),
+        );
+
+        // The view confirms 0 rows before the enable.
+        {
+            let pre = ecs.query::<&P, Enabled<TagA>>();
+            assert_eq!(pre.iter().count(), 0, "no enabled rows before enable::<A>");
+        }
+
+        // Enable A on the row in X — allocates X's A-column, bumps the
+        // EnablePresence epoch, but performs NO structural migration.
+        ecs.enable::<TagA>(ex);
+
+        // Re-cull: the epoch moved ⇒ recompute from the (unchanged) matched_ids
+        // ⇒ X re-enters the driver set.
+        state.update(ecs.archetype_master());
+        assert_eq!(
+            state.enable_driver_ids(),
+            &[x],
+            "Model B re-adds X after it gains an A-column (re-add invariant)",
+        );
+
+        // And the public view now visits ex.
+        let post = ecs.query::<&P, Enabled<TagA>>();
+        let got: Vec<u32> = post.iter().map(|p: &P| p.v).collect();
+        assert_eq!(got, vec![100], "the newly-enabled row in X is now visited");
+    }
+
+    /// Decision 5 #2: create a NEW archetype Y AND `enable::<A>` into it between
+    /// two updates. Y's appearance bumps the structural/archetype generation, so
+    /// the structural-rebuild branch of `update` runs (not the warm-only epoch
+    /// branch). The rebuild must re-cull, surfacing Y's enabled row.
+    #[test]
+    fn enable_into_new_archetype_interleaved() {
+        register();
+        let mut ecs = EcsMaster::new();
+        // A present-A archetype so the first cull is non-empty.
+        let base = ecs.create_archetype(&[P::component_id()]);
+        let eb = spawn_p(&mut ecs, base, 1);
+        ecs.enable::<TagA>(eb);
+
+        let mut state = QueryDataState::<&P, Enabled<TagA>>::new(&mut ecs);
+        assert_eq!(state.enable_driver_ids(), &[base], "base present-A on new");
+
+        // Create a brand-new archetype Y (distinct signature) AND enable A in it
+        // — both a structural churn (new archetype) and an epoch bump.
+        let marker = fresh_marker();
+        let y_comps = [P::component_id(), marker];
+        let y = ecs.create_archetype(&y_comps);
+        let ey = spawn_into(&mut ecs, y, &y_comps, 2);
+        ecs.enable::<TagA>(ey);
+
+        state.update(ecs.archetype_master());
+        let mut ids: Vec<_> = state.enable_driver_ids().to_vec();
+        ids.sort_unstable_by_key(|a| a.0);
+        let mut expected = vec![base, y];
+        expected.sort_unstable_by_key(|a| a.0);
+        assert_eq!(
+            ids, expected,
+            "structural-rebuild branch re-culls ⇒ Y present-A appears",
+        );
+
+        let view = ecs.query::<&P, Enabled<TagA>>();
+        let mut got: Vec<u32> = view.iter().map(|p: &P| p.v).collect();
+        got.sort_unstable();
+        assert_eq!(got, vec![1, 2], "both enabled rows visited (base + Y)");
+    }
+
+    /// Decision 5 #3: `culled_ids` is filled in `new` (NOT empty until the first
+    /// `update`). Over a world with K present-A archetypes, the positive-term
+    /// query's driver set equals exactly those K on the FIRST query — without any
+    /// explicit `update` between `new` and the read.
+    #[test]
+    fn new_populates_culled_ids() {
+        register();
+        let mut ecs = EcsMaster::new();
+        // K = 3 present-A archetypes + 2 no-A-column archetypes, all holding P.
+        let mut present = Vec::new();
+        for i in 0..3u32 {
+            let marker = fresh_marker();
+            let comps = [P::component_id(), marker];
+            let arch = ecs.create_archetype(&comps);
+            let e = spawn_into(&mut ecs, arch, &comps, i);
+            ecs.enable::<TagA>(e);
+            present.push(arch);
+        }
+        for i in 0..2u32 {
+            let marker = fresh_marker();
+            let comps = [P::component_id(), marker];
+            let arch = ecs.create_archetype(&comps);
+            let _e = spawn_into(&mut ecs, arch, &comps, 100 + i);
+            // No enable ⇒ no A-column ⇒ must be culled.
+        }
+
+        // No `update` call between `new` and the read.
+        let state = QueryDataState::<&P, Enabled<TagA>>::new(&mut ecs);
+        let mut ids: Vec<_> = state.enable_driver_ids().to_vec();
+        ids.sort_unstable_by_key(|a| a.0);
+        present.sort_unstable_by_key(|a| a.0);
+        assert_eq!(
+            ids, present,
+            "culled_ids filled in `new` = exactly the K present-A archetypes",
+        );
+    }
+
+    /// Amendment A1.1 (disabled_does_not_cull): a positive-term
+    /// `Query<&P, Disabled<A>>` over a world with a no-A-column archetype Z MUST
+    /// visit Z's rows (no column ⇒ every row "disabled" ⇒ match). The
+    /// `Disabled<T>` cull verdict is an explicit `true` (no cull), so Z stays in
+    /// the driver set.
+    #[test]
+    fn disabled_does_not_cull() {
+        register();
+        let mut ecs = EcsMaster::new();
+        // Z: holds P, never an A-column ⇒ every row disabled.
+        let z = ecs.create_archetype(&[P::component_id()]);
+        let _e0 = spawn_p(&mut ecs, z, 30);
+        let _e1 = spawn_p(&mut ecs, z, 31);
+
+        let state = QueryDataState::<&P, Disabled<TagA>>::new(&mut ecs);
+        assert_eq!(
+            state.enable_driver_ids(),
+            &[z],
+            "Disabled<A> MUST NOT cull the no-A-column archetype Z",
+        );
+
+        let view = ecs.query::<&P, Disabled<TagA>>();
+        let mut got: Vec<u32> = view.iter().map(|p: &P| p.v).collect();
+        got.sort_unstable();
+        assert_eq!(got, vec![30, 31], "all of Z's rows visited (no-column = disabled)");
+    }
+
+    /// Tuple cull `(With<P>, Enabled<A>)`: the AND-composed cull drops a
+    /// no-A-column archetype that HAS `P` but keeps a with-A-column one. Verifies
+    /// the tuple macro AND-folds `enable_cull_keeps_archetype` (drop iff some
+    /// member proves the archetype row-empty for the enable term).
+    #[test]
+    fn tuple_cull() {
+        register();
+        let mut ecs = EcsMaster::new();
+        // with_col: holds P, gains an A-column (e_on enabled).
+        let with_col = ecs.create_archetype(&[P::component_id()]);
+        let e_on = spawn_p(&mut ecs, with_col, 1);
+        ecs.enable::<TagA>(e_on);
+        // no_col: a DISTINCT archetype that has P (so With<P> matches) but never
+        // an A-column ⇒ the Enabled<A> member culls it.
+        let marker = fresh_marker();
+        let no_col_comps = [P::component_id(), marker];
+        let no_col = ecs.create_archetype(&no_col_comps);
+        let _e_off = spawn_into(&mut ecs, no_col, &no_col_comps, 2);
+
+        let state = QueryDataState::<&P, (With<P>, Enabled<TagA>)>::new(&mut ecs);
+        assert_eq!(
+            state.enable_driver_ids(),
+            &[with_col],
+            "(With<P>, Enabled<A>) culls the no-A-column archetype, keeps with_col",
+        );
+
+        let view = ecs.query::<&P, (With<P>, Enabled<TagA>)>();
+        let got: Vec<u32> = view.iter().map(|p: &P| p.v).collect();
+        assert_eq!(got, vec![1], "only the with-A-column enabled row is visited");
+    }
+
+    /// Decision 7 (dynamic_term_mixed): a typed `Query<&P, Enabled<A>>` combined
+    /// with a dynamic `with_enabled(B)` / `without_enabled(B)` term still matches
+    /// a brute-force per-row oracle over a culled world. The typed cull only
+    /// drops archetypes with ZERO typed-A rows, so it can never hide a row a
+    /// dynamic term would surface.
+    #[test]
+    fn dynamic_term_mixed() {
+        use crate::ecs::core::component::component_registry::EnableTagId;
+        register();
+        let mut ecs = EcsMaster::new();
+
+        // arch1 [P]: gains an A-column. e0 (A on, B on), e1 (A on, B off).
+        let arch1 = ecs.create_archetype(&[P::component_id()]);
+        let e0 = spawn_p(&mut ecs, arch1, 10);
+        let e1 = spawn_p(&mut ecs, arch1, 11);
+        // arch2 [P, marker]: a distinct present-A archetype. e2 (A on, B on).
+        let marker = fresh_marker();
+        let a2 = [P::component_id(), marker];
+        let arch2 = ecs.create_archetype(&a2);
+        let e2 = spawn_into(&mut ecs, arch2, &a2, 12);
+        // arch3 [P, marker2]: NO A-column (culled). e3 (B on) — must never
+        // surface under `Enabled<A>` regardless of the dynamic B term.
+        let marker2 = fresh_marker();
+        let a3 = [P::component_id(), marker2];
+        let arch3 = ecs.create_archetype(&a3);
+        let e3 = spawn_into(&mut ecs, arch3, &a3, 13);
+
+        // Toggle A (typed term) and B (dynamic term).
+        ecs.enable::<TagA>(e0);
+        ecs.enable::<TagA>(e1);
+        ecs.enable::<TagA>(e2);
+        ecs.enable::<TagB>(e0);
+        ecs.enable::<TagB>(e2);
+        ecs.enable::<TagB>(e3);
+
+        let b_tag = EnableTagId(TagB::component_id());
+
+        // Oracle: a row matches `Enabled<A> AND with_enabled(B)` iff A-set && B-set.
+        // Over our world that is exactly {e0, e2}. e1 has A but not B; e3 has B
+        // but no A-column (culled) ⇒ excluded.
+        let with_view = ecs.query::<&P, Enabled<TagA>>().with_enabled(b_tag);
+        let mut got_with: Vec<u32> = with_view.iter().map(|p: &P| p.v).collect();
+        got_with.sort_unstable();
+        assert_eq!(
+            got_with,
+            vec![10, 12],
+            "Enabled<A> AND with_enabled(B): only A&&B rows (cull keeps no extra/loses none)",
+        );
+
+        // Oracle: `Enabled<A> AND without_enabled(B)` ⇒ A-set && B-clear ⇒ {e1}.
+        let without_view = ecs.query::<&P, Enabled<TagA>>().without_enabled(b_tag);
+        let got_without: Vec<u32> = without_view.iter().map(|p: &P| p.v).collect();
+        assert_eq!(
+            got_without,
+            vec![11],
+            "Enabled<A> AND without_enabled(B): only the A-set, B-clear row",
+        );
+
+        // Sanity: e3 (B-set but in a culled no-A-column archetype) never appears.
+        assert!(
+            !got_with.contains(&13) && !got_without.contains(&13),
+            "the culled no-A-column row e3 is invisible to both dynamic polarities",
+        );
+        let _ = arch1; // silence unused in case of refactor
+        let _ = arch2;
+        let _ = arch3;
+    }
+
+    /// get_iter_agree: `QueryView::get` on an entity in a no-A-column archetype
+    /// with `Query<&P, Enabled<A>>` returns `None` (per-row exact), proving `get`
+    /// and `iter` agree at the row level even though `get` uses the per-row
+    /// bitset test while `iter` walks the culled archetype set.
+    #[test]
+    fn get_iter_agree() {
+        register();
+        let mut ecs = EcsMaster::new();
+        // present: a with-A-column archetype; e_on enabled.
+        let present = ecs.create_archetype(&[P::component_id()]);
+        let e_on = spawn_p(&mut ecs, present, 1);
+        ecs.enable::<TagA>(e_on);
+        // no_col: a distinct no-A-column archetype holding e_off.
+        let marker = fresh_marker();
+        let comps = [P::component_id(), marker];
+        let no_col = ecs.create_archetype(&comps);
+        let e_off = spawn_into(&mut ecs, no_col, &comps, 2);
+
+        let view = ecs.query::<&P, Enabled<TagA>>();
+        // get on the no-A-column row ⇒ None (per-row enable test fails).
+        assert!(
+            view.get(e_off).is_none(),
+            "get on a no-A-column row returns None (agrees with cull/iter)",
+        );
+        // get on the enabled row ⇒ Some.
+        assert!(
+            view.get(e_on).is_some(),
+            "get on the enabled row returns Some",
+        );
+        // iter never yields e_off's value either.
+        let got: Vec<u32> = view.iter().map(|p: &P| p.v).collect();
+        assert_eq!(got, vec![1], "iter visits only the enabled row — agrees with get");
+    }
+
+    /// QS1 after cull: the dual invariant (matched_ids ⇔ dedup bitset bijection)
+    /// still holds after a positive-term cull. Model B never mutates
+    /// `matched_ids`, so the cull cannot desync QS1 — the bitset/popcount track
+    /// the FULL matched set, while `culled_ids` is the separate driver list.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn qs1_after_cull() {
+        register();
+        let mut ecs = EcsMaster::new();
+        // Two with-A-column archetypes + one no-A-column ⇒ matched_ids has all 3
+        // (the positive term &P matches every one), culled_ids has only the 2.
+        let a1 = ecs.create_archetype(&[P::component_id()]);
+        let e1 = spawn_p(&mut ecs, a1, 1);
+        ecs.enable::<TagA>(e1);
+        let m2 = fresh_marker();
+        let c2 = [P::component_id(), m2];
+        let a2 = ecs.create_archetype(&c2);
+        let e2 = spawn_into(&mut ecs, a2, &c2, 2);
+        ecs.enable::<TagA>(e2);
+        let m3 = fresh_marker();
+        let c3 = [P::component_id(), m3];
+        let a3 = ecs.create_archetype(&c3);
+        let _e3 = spawn_into(&mut ecs, a3, &c3, 3); // no A-column ⇒ culled
+
+        let state = QueryDataState::<&P, Enabled<TagA>>::new(&mut ecs);
+
+        // QS1 holds against the FULL matched set (untouched by the cull).
+        QueryDataState::<&P, Enabled<TagA>>::assert_dual_invariant(&state.archetype_state);
+        let bitset = state.archetype_state.matched_archetypes_bitset();
+        let matched = state.archetype_state.matched_ids_pre_terms();
+        assert_eq!(
+            matched.len(),
+            3,
+            "matched_ids holds all 3 &P archetypes (Model B leaves it untouched)",
+        );
+        assert_eq!(
+            bitset.popcount() as usize,
+            matched.len(),
+            "popcount == matched_ids len after the cull (QS1 bijection intact)",
+        );
+        for id in matched {
+            assert!(
+                bitset.contains(id.0),
+                "matched id {} set in the dedup bitset post-cull",
+                id.0,
+            );
+        }
+        // The cull is a STRICT subset of matched_ids (2 of 3), not a mutation.
+        assert_eq!(
+            state.enable_driver_ids().len(),
+            2,
+            "culled driver set = 2 present-A archetypes ⊂ the 3 matched_ids",
+        );
     }
 }

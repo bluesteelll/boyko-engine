@@ -301,7 +301,10 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
     #[inline]
     fn driver_ids(&self) -> &[ArchetypeId] {
         if self.terms.is_empty() {
-            return self.state().archetype_state.matched_ids_pre_terms();
+            // EnableTag Decision 3: the no-terms fast path — `culled_ids` for a
+            // positive-term enable `F`, else const-folds to
+            // `matched_ids_pre_terms()` (the 0%-gate).
+            return self.state().enable_driver_ids();
         }
         self.driver_ids_term_slow()
     }
@@ -335,10 +338,13 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
     #[inline]
     pub fn archetype_count(&self) -> usize {
         let state = self.state();
-        let ids = state.archetype_state.matched_ids_pre_terms();
         if self.terms.is_empty() {
-            return ids.len();
+            // EnableTag Decision 6: route the no-terms arm through the cull set
+            // so count stays consistent with `iter` (const-folds to
+            // `matched_ids_pre_terms()` for non-enable `F`).
+            return state.enable_driver_ids().len();
         }
+        let ids = state.archetype_state.matched_ids_pre_terms();
         // SAFETY (U_C2): shared read mint — `world()` yields `&EcsMaster`
         //   scoped to this statement; no `&mut` access occurs through it
         //   (same pattern as `get`'s world reborrow).
@@ -355,10 +361,11 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
     #[inline]
     pub fn is_empty(&self) -> bool {
         let state = self.state();
-        let ids = state.archetype_state.matched_ids_pre_terms();
         if self.terms.is_empty() {
-            return ids.is_empty();
+            // EnableTag Decision 6: consistent with `iter` / `archetype_count`.
+            return state.enable_driver_ids().is_empty();
         }
+        let ids = state.archetype_state.matched_ids_pre_terms();
         // SAFETY (U_C2): shared read mint scoped to this statement — see
         //   `archetype_count`.
         let master = unsafe { self.world.world().archetype_master() };
