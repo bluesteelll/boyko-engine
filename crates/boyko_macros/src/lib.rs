@@ -1344,6 +1344,136 @@ pub fn bundle_macro(input: TokenStream) -> TokenStream {
         })
         .collect();
 
+    // Decision 4 (D4b): the typed-write threshold. Mirrors
+    // `boyko_ecs::ecs::core::bundle::MAX_TYPED_WRITE_ARITY` (the macro cannot
+    // import boyko_ecs; the cross-check `const _: () = assert!(... == 16)` in
+    // bundle.rs pins this literal in lock-step).
+    const MAX_TYPED_WRITE_ARITY: usize = 16;
+    let has_typed_write = n_fields <= MAX_TYPED_WRITE_ARITY;
+
+    // Decision 4 (W3): per-field perm-build statements for `write_row_perm`.
+    // For each DECLARATION field `k`:
+    //   - ZST field (`size_of::<Tk>() == 0`) → `out_perm[k] = PERM_SKIP`
+    //     (const-folds: the branch picks the SKIP arm at monomorphisation);
+    //   - otherwise find `Tk::component_id()`'s position in the canonical
+    //     `data_component_ids` slice (linear scan; arity is ≤ 16) and store it
+    //     as the canonical data-column slot. Correct-by-construction IDENTITY:
+    //     the slot is keyed on the field's ComponentId, never on size.
+    let perm_build_stmts: Vec<TokenStream2> = fields
+        .iter()
+        .enumerate()
+        .map(|(k, f)| {
+            let ty = &f.ty;
+            quote! {
+                if ::std::mem::size_of::<#ty>() == 0 {
+                    out_perm[#k] =
+                        ::boyko_ecs::ecs::core::bundle::BundleColumnPtrs::PERM_SKIP;
+                } else {
+                    let __cid = <#ty as ::boyko_ecs::ecs::core::component::component::Component>::component_id();
+                    let mut __slot = usize::MAX;
+                    let mut __i = 0usize;
+                    while __i < data_component_ids.len() {
+                        if data_component_ids[__i] == __cid {
+                            __slot = __i;
+                            break;
+                        }
+                        __i += 1;
+                    }
+                    debug_assert!(
+                        __slot != usize::MAX,
+                        "write_row_perm: field {} ComponentId not found in canonical data_component_ids", #k
+                    );
+                    debug_assert!(
+                        __slot < (::boyko_ecs::ecs::core::bundle::BundleColumnPtrs::PERM_SKIP as usize),
+                        "write_row_perm: data-column slot exceeds PERM_SKIP sentinel"
+                    );
+                    out_perm[#k] = __slot as u8;
+                }
+            }
+        })
+        .collect();
+
+    // Decision 4: per-field typed-store statements for `write_row_typed`,
+    // const-unrolled in DECLARATION order. Each field `k`:
+    //   - skips at compile time if `size_of::<Tk>() == 0` (ZST const-folds out
+    //     — the whole `if` block disappears, matching the byte path's ZST
+    //     elision and the per-batch `data_pool_ids` filter);
+    //   - otherwise relocates field `k` via `ManuallyDrop::take` (suppressing
+    //     the source Drop — B4/O1) into its destination column with a
+    //     FIXED-WIDTH `ptr::write::<Tk>` store at `base.add(row * STRIDE_k)`.
+    // The destination column slot is `dst.perm(k)` (declaration field → data
+    // column slot, built once per batch by the caller). W3 IDENTITY assert +
+    // Q1 row-bound assert are debug-only.
+    let typed_write_stmts: Vec<TokenStream2> = fields
+        .iter()
+        .enumerate()
+        .map(|(k, f)| {
+            let ty = &f.ty;
+            let local = &f.local_ident;
+            quote! {
+                if ::std::mem::size_of::<#ty>() != 0 {
+                    // Declaration field `k` → its canonical data-column slot.
+                    let __slot = dst.perm(#k) as usize;
+                    debug_assert!(
+                        __slot != (::boyko_ecs::ecs::core::bundle::BundleColumnPtrs::PERM_SKIP as usize),
+                        "write_row_typed: non-ZST field {} mapped to PERM_SKIP", #k
+                    );
+                    // W3 IDENTITY: the resolved column's ComponentId must equal
+                    // this field's ComponentId — two same-size, different-type
+                    // components must NEVER silently swap columns.
+                    #[cfg(debug_assertions)]
+                    debug_assert_eq!(
+                        dst.column_comp_id(__slot),
+                        <#ty as ::boyko_ecs::ecs::core::component::component::Component>::component_id(),
+                        "write_row_typed: column identity mismatch for field {}", #k
+                    );
+                    // Stride parity: the resolved column's stride must equal the
+                    // field's size (the registry layout reflects `size_of::<Tk>()`).
+                    #[cfg(debug_assertions)]
+                    debug_assert_eq!(
+                        dst.column_stride(__slot),
+                        ::std::mem::size_of::<#ty>(),
+                        "write_row_typed: column stride mismatch for field {}", #k
+                    );
+                    // Q1: restore the `idx < committed_rows` guard the byte path
+                    // has at write_at_unchecked_initialized (the typed path
+                    // bypasses it).
+                    #[cfg(debug_assertions)]
+                    debug_assert!(
+                        row < dst.column_committed_rows(__slot),
+                        "write_row_typed: row {} >= committed_rows for field {}", row, #k
+                    );
+                    // SAFETY (D4 §"Unsafe delta"): the caller's `write_row_typed`
+                    //   contract (1)-(4) guarantees:
+                    //   - `dst.column_base(__slot)` carries write-capable,
+                    //     unaliased provenance for this column resolved once per
+                    //     batch under a single &mut that has ended (W2);
+                    //   - `row < committed_rows` (debug-asserted above; the
+                    //     caller pre-grew via reserve_capacity);
+                    //   - `base.add(row * size_of::<Tk>())` is in-bounds of the
+                    //     column data sub-region and `Tk`-aligned (column-base
+                    //     alignment contract);
+                    //   - the slot is uninit (commit happens post-loop, B4), so
+                    //     no Drop runs on the destination;
+                    //   - `ManuallyDrop::take` performs a bitwise relocation that
+                    //     suppresses the source Drop and cannot panic (no user
+                    //     code), so this body is panic-free — the only batch
+                    //     panic source is `iter.next()` between rows.
+                    unsafe {
+                        let __dst_ptr = dst
+                            .column_base(__slot)
+                            .add(row * ::std::mem::size_of::<#ty>())
+                            as *mut #ty;
+                        ::std::ptr::write(
+                            __dst_ptr,
+                            ::std::mem::ManuallyDrop::take(&mut #local),
+                        );
+                    }
+                }
+            }
+        })
+        .collect();
+
     let expanded = quote! {
         impl ::boyko_ecs::ecs::core::bundle::bundle::sealed::BundleSealed for #name {}
 
@@ -1527,6 +1657,46 @@ pub fn bundle_macro(input: TokenStream) -> TokenStream {
                     let bytes: &[u8] = unsafe { ::std::slice::from_raw_parts(ptr, len) };
                     f(id, bytes);
                 }
+            }
+
+            // Decision 4 (D4b): every derived bundle within the arity ceiling
+            // takes the typed fixed-width write path. The retained byte path
+            // (`for_each_data_component_bytes`) is the fallback for any future
+            // lowering of the threshold.
+            const HAS_TYPED_WRITE: bool = #has_typed_write;
+
+            fn write_row_perm(
+                data_component_ids: &[::boyko_ecs::ecs::identifiers::primitives::ComponentId],
+                out_perm: &mut [u8],
+            ) {
+                debug_assert!(
+                    out_perm.len() >= #n_fields,
+                    "write_row_perm: out_perm too short for declaration arity"
+                );
+                #(#perm_build_stmts)*
+            }
+
+            unsafe fn write_row_typed(
+                self,
+                dst: &::boyko_ecs::ecs::core::bundle::BundleColumnPtrs,
+                row: usize,
+            ) {
+                // B4 / O1 drop-suppression discipline (identical to
+                // `for_each_component_bytes`): ManuallyDrop-wrap EVERY field
+                // UPFRONT, before any relocation runs. `write_row_typed` is
+                // panic-free internally (ptr::write / ManuallyDrop::take cannot
+                // panic), so on this path the wrap simply makes the move-out
+                // explicit — each field is relocated exactly once into its
+                // column slot and never dropped at end-of-scope.
+                #(
+                    let mut #field_locals =
+                        ::std::mem::ManuallyDrop::new(#field_accessors);
+                )*
+
+                // Const-unrolled, DECLARATION-order, fixed-width stores. ZST
+                // fields const-fold out (their `if size_of != 0` block
+                // disappears at monomorphisation).
+                #(#typed_write_stmts)*
             }
         }
     };

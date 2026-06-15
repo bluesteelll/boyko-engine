@@ -41,6 +41,240 @@ use crate::ecs::core::bundle::bundle_type_registry::BundleTypeId;
 use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId};
 
+/// Maximum component count for a derived `Bundle`. Mirrors the macro's
+/// `MAX_BUNDLE_ARITY` and the sibling stack collectors in
+/// `spawn_batch_command.rs` / `spawn_at_command.rs` / `migration_helpers.rs`.
+/// Sizes the fixed-width [`BundleColumnPtrs`] / [`ColumnPtr`] stack arrays so
+/// the per-batch typed-write resolve never allocates.
+pub const MAX_BUNDLE_ARITY: usize = 16;
+
+/// Phase D4b (Q2): arity ceiling at or below which `#[derive(Bundle)]` emits a
+/// const-unrolled [`Bundle::write_row_typed`] (`HAS_TYPED_WRITE = true`).
+///
+/// Initialised to [`MAX_BUNDLE_ARITY`] so every derived bundle takes the typed
+/// path; the retained byte path
+/// ([`Bundle::for_each_data_component_bytes`]) is the fallback for any future
+/// lowering of this threshold (a high-arity unrolled body that bloats the spawn
+/// I-cache). The proc-macro mirrors the literal `16` and cross-checks it
+/// against this constant via a `const _: () = assert!(...)` (the macro cannot
+/// import `boyko_ecs`).
+pub const MAX_TYPED_WRITE_ARITY: usize = 16;
+
+// CONFIRM / D4b cross-check: the `#[derive(Bundle)]` proc-macro cannot import
+// `boyko_ecs`, so it mirrors the literal `16` for the `HAS_TYPED_WRITE`
+// threshold and the `write_row_typed` perm indexing. This assert pins the two
+// in lock-step — bumping `MAX_TYPED_WRITE_ARITY` here without updating the macro
+// (or vice versa) fails the build.
+const _: () = assert!(MAX_TYPED_WRITE_ARITY == 16);
+const _: () = assert!(MAX_TYPED_WRITE_ARITY <= MAX_BUNDLE_ARITY);
+
+/// One resolved destination column for the typed batch-write path (Decision 4).
+///
+/// Built **once per batch** by
+/// [`ComponentPoolBundle::resolve_column_ptrs`](crate::ecs::core::component::component_pool_bundle::ComponentPoolBundle::resolve_column_ptrs)
+/// under a single `&mut` borrow of the pool bundle that is then dropped before
+/// the row loop begins (W2 single-provenance). The row loop holds only the raw
+/// `base` pointer and the const-known `stride`; it never re-borrows the
+/// archetype/pool bundle (the 14a-F2 / 9.3c cached-pointer-then-reborrow
+/// antidote).
+///
+/// # Fields
+///
+/// * `base` — write-capable provenance for the column's data sub-region; the
+///   pool's write-once, vm-reservation-stable base (Phase X.I).
+/// * `stride` — `component_layout.size()` of the column's registered type. A
+///   typed store at row `r` targets `base.add(r * stride)`.
+///
+/// # Debug-only invariant carriers
+///
+/// * `committed_rows` (Q1) — the pool's committed-row ceiling at resolve time;
+///   `write_row_typed` asserts `row < committed_rows` per store, restoring the
+///   guard the byte path has at `ComponentPool::write_at_unchecked_initialized`.
+/// * `comp_id` (W3) — the column's [`ComponentId`]; `write_row_typed` asserts
+///   `Tk::component_id() == comp_id` at IDENTITY level (two same-size,
+///   different-type components must never silently swap columns).
+#[derive(Clone, Copy)]
+pub struct ColumnPtr {
+    /// Write-capable base of the column's data sub-region (W2 single
+    /// provenance). Cast to `*mut Tk` at the store site.
+    base: *mut u8,
+
+    /// `size_of::<Tk>()` for the column's registered type — the per-row stride.
+    /// The typed store at the derive site uses the **compile-time** constant
+    /// `size_of::<Tk>()` directly (a fixed-width store — the whole point of D4),
+    /// so this runtime copy is read only by the debug stride-parity assert
+    /// (`column_stride`). Retained as a field per the architect's `ColumnPtr`
+    /// spec and to keep the resolved column self-describing.
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
+    stride: usize,
+
+    /// Q1: the column's committed-row ceiling at resolve time, asserted by
+    /// `write_row_typed` (`row < committed_rows`).
+    #[cfg(debug_assertions)]
+    committed_rows: usize,
+
+    /// W3: the column's [`ComponentId`] for the per-field IDENTITY assert.
+    #[cfg(debug_assertions)]
+    comp_id: ComponentId,
+}
+
+impl ColumnPtr {
+    /// Constructs a resolved column. `pub(crate)` so only the pool bundle's
+    /// `resolve_column_ptrs` (which owns the provenance) can mint one.
+    #[inline]
+    pub(crate) fn new(
+        base: *mut u8,
+        stride: usize,
+        #[cfg(debug_assertions)] committed_rows: usize,
+        #[cfg(debug_assertions)] comp_id: ComponentId,
+    ) -> Self {
+        Self {
+            base,
+            stride,
+            #[cfg(debug_assertions)]
+            committed_rows,
+            #[cfg(debug_assertions)]
+            comp_id,
+        }
+    }
+}
+
+/// Stack-local per-batch resolution of every DATA column for the typed
+/// batch-write path (Decision 4).
+///
+/// Built once per batch by
+/// [`ComponentPoolBundle::resolve_column_ptrs`](crate::ecs::core::component::component_pool_bundle::ComponentPoolBundle::resolve_column_ptrs);
+/// lives entirely within `SpawnBatchCommand::apply`'s frame and is consumed
+/// without any intervening `&mut EcsMaster` / `&mut Archetype` reborrow (M3 TB
+/// contract). The derive-emitted [`Bundle::write_row_typed`] reads it per row.
+///
+/// # Field semantics
+///
+/// * `col[..data_len]` — resolved columns in canonical **DATA-column** order
+///   (the canonical `pool_ids` filtered to non-ZST, identical to the byte
+///   path's `data_pool_ids` order).
+/// * `perm[k]` — for declaration field `k`, the canonical data-column slot to
+///   store into (`u8::MAX` = ZST field, skipped). Built correct-by-construction
+///   from the canonical `data_pool_ids` (W3).
+/// * `data_len` — number of populated `col` entries (== non-ZST pool columns).
+pub struct BundleColumnPtrs {
+    /// Resolved columns, `col[..data_len]` valid, canonical data-column order.
+    col: [ColumnPtr; MAX_BUNDLE_ARITY],
+
+    /// `perm[k]` = canonical data-column slot for declaration field `k`;
+    /// `u8::MAX` marks a ZST field (skipped by `write_row_typed`).
+    perm: [u8; MAX_BUNDLE_ARITY],
+
+    /// Count of populated `col` entries.
+    data_len: usize,
+}
+
+impl BundleColumnPtrs {
+    /// Sentinel `perm` entry for a ZST / skipped declaration field.
+    pub const PERM_SKIP: u8 = u8::MAX;
+
+    /// Creates an empty, zeroed scratch suitable for repeated
+    /// [`ComponentPoolBundle::resolve_column_ptrs`](crate::ecs::core::component::component_pool_bundle::ComponentPoolBundle::resolve_column_ptrs)
+    /// fills. `base`s are null and `data_len == 0` until a resolve runs.
+    #[inline]
+    pub fn new() -> Self {
+        Self {
+            col: [ColumnPtr {
+                base: core::ptr::null_mut(),
+                stride: 0,
+                #[cfg(debug_assertions)]
+                committed_rows: 0,
+                #[cfg(debug_assertions)]
+                comp_id: ComponentId(0),
+            }; MAX_BUNDLE_ARITY],
+            perm: [Self::PERM_SKIP; MAX_BUNDLE_ARITY],
+            data_len: 0,
+        }
+    }
+
+    /// Number of populated DATA columns (== non-ZST pool columns).
+    #[inline]
+    pub fn data_len(&self) -> usize {
+        self.data_len
+    }
+
+    /// Writer used by `resolve_column_ptrs` to populate data-column slot `i`'s
+    /// resolved base. `pub(crate)` — only the pool bundle resolves.
+    #[inline]
+    pub(crate) fn set_column_base(&mut self, i: usize, col: ColumnPtr) {
+        debug_assert!(i < MAX_BUNDLE_ARITY);
+        self.col[i] = col;
+    }
+
+    /// Sets the populated-column count after a resolve pass.
+    #[inline]
+    pub(crate) fn set_data_len(&mut self, len: usize) {
+        debug_assert!(len <= MAX_BUNDLE_ARITY);
+        self.data_len = len;
+    }
+
+    /// Copies the caller-built `perm` (declaration field → canonical data-column
+    /// slot, [`Self::PERM_SKIP`] for a ZST field) into this scratch. Any field
+    /// beyond `perm.len()` keeps the all-skip default.
+    #[inline]
+    pub(crate) fn set_perm_from(&mut self, perm: &[u8]) {
+        debug_assert!(perm.len() <= MAX_BUNDLE_ARITY);
+        self.perm = [Self::PERM_SKIP; MAX_BUNDLE_ARITY];
+        self.perm[..perm.len()].copy_from_slice(perm);
+    }
+
+    /// The canonical data-column slot for declaration field `k`
+    /// ([`Self::PERM_SKIP`] for a ZST field). Read by the derive-emitted
+    /// `write_row_typed`.
+    #[inline]
+    pub fn perm(&self, k: usize) -> u8 {
+        debug_assert!(k < MAX_BUNDLE_ARITY);
+        self.perm[k]
+    }
+
+    /// The write-capable base of data column `slot`. Read by the
+    /// derive-emitted `write_row_typed`; the caller guarantees `slot` came
+    /// from [`Self::perm`] (`< data_len`).
+    #[inline]
+    pub fn column_base(&self, slot: usize) -> *mut u8 {
+        debug_assert!(slot < self.data_len, "column_base: slot out of range");
+        self.col[slot].base
+    }
+
+    /// The committed-row ceiling of data column `slot` (debug only, Q1).
+    #[cfg(debug_assertions)]
+    #[inline]
+    pub fn column_committed_rows(&self, slot: usize) -> usize {
+        debug_assert!(slot < self.data_len);
+        self.col[slot].committed_rows
+    }
+
+    /// The [`ComponentId`] of data column `slot` (debug only, W3 identity
+    /// check).
+    #[cfg(debug_assertions)]
+    #[inline]
+    pub fn column_comp_id(&self, slot: usize) -> ComponentId {
+        debug_assert!(slot < self.data_len);
+        self.col[slot].comp_id
+    }
+
+    /// The const-known stride of data column `slot` (debug only — the typed
+    /// store uses `size_of::<Tk>()` directly).
+    #[cfg(debug_assertions)]
+    #[inline]
+    pub fn column_stride(&self, slot: usize) -> usize {
+        debug_assert!(slot < self.data_len);
+        self.col[slot].stride
+    }
+}
+
+impl Default for BundleColumnPtrs {
+    #[inline]
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Seal module — the trait inside is referenced only as a supertrait bound
 /// on [`Bundle`]. Because the trait is `pub` inside a non-`pub` module, no
 /// external crate (and no other module inside `boyko_ecs` outside this
@@ -272,6 +506,115 @@ pub trait Bundle: sealed::BundleSealed + Send + Sync + Unpin + 'static {
     /// intermediate to sidestep E0521, ManuallyDrop-upfront for **B4**,
     /// sort by `ComponentId.0` for **B1**).
     fn for_each_component_bytes<F: FnMut(ComponentId, &[u8])>(self, f: F);
+
+    /// Decision 4 (D4b): `true` iff `#[derive(Bundle)]` emitted a
+    /// const-unrolled [`Self::write_row_typed`] for this bundle.
+    ///
+    /// `false` by default so hand-written `Bundle` impls (the Phase-19
+    /// hierarchy newtypes, the `assert_impl_all!` pin stub, internal test
+    /// stubs) inherit the retained byte path
+    /// ([`Self::for_each_data_component_bytes`]) and are never asked for a
+    /// typed write. The derive overrides it to
+    /// `(n_fields <= MAX_TYPED_WRITE_ARITY)`. `SpawnBatchCommand::apply`
+    /// branches on `if const { B::HAS_TYPED_WRITE }`, so for `false` bundles
+    /// the typed arm — including the `write_row_typed` call — is compiled out
+    /// (statically uncallable, never force-monomorphized; CONFIRM-1).
+    const HAS_TYPED_WRITE: bool = false;
+
+    /// Decision 4 (W3) — fills `out_perm[k]` for each **declaration** field
+    /// `k` with the canonical data-column slot it writes
+    /// ([`BundleColumnPtrs::PERM_SKIP`] for a ZST field), built **once per
+    /// batch** from the canonical `data_component_ids` (the non-ZST
+    /// `ComponentId`s in the same canonical order as
+    /// [`Self::component_ids`] / `data_pool_ids`).
+    ///
+    /// `perm` is correct-by-construction: each non-ZST field's slot is the
+    /// position of its `ComponentId` within `data_component_ids`, so two
+    /// same-size, different-type components can never alias the wrong column
+    /// (the IDENTITY guarantee the byte path enforces per-row at
+    /// `spawn_batch_command.rs`). The default body is `unreachable!()` (never
+    /// monomorphized — gated by `if const { HAS_TYPED_WRITE }` like
+    /// [`Self::write_row_typed`]); the derive overrides it.
+    ///
+    /// `out_perm` must be at least the declaration-field count long; entries
+    /// beyond the bundle's arity are left untouched (the caller pre-fills
+    /// [`BundleColumnPtrs::PERM_SKIP`]).
+    fn write_row_perm(data_component_ids: &[ComponentId], out_perm: &mut [u8])
+    where
+        Self: Sized,
+    {
+        let _ = (data_component_ids, out_perm);
+        unreachable!(
+            "Bundle::write_row_perm default body is statically uncallable: \
+             only reached behind `if const {{ B::HAS_TYPED_WRITE }}`"
+        )
+    }
+
+    /// Decision 4 — relocates every component of `self` into its destination
+    /// column at `row`, using **fixed-width** `ptr::write::<Tk>` stores (no
+    /// per-row sort, no runtime-length memcpy).
+    ///
+    /// The default body is `unreachable!()` and is never *executed*: it is
+    /// codegen'd as the dead arm of `if const { false }` and eliminated, so it
+    /// can never panic at runtime. `SpawnBatchCommand::apply` only reaches this
+    /// method through `if const { B::HAS_TYPED_WRITE }`, which is `false` for every bundle
+    /// that does not override it (CONFIRM-1). The derive overrides it with a
+    /// declaration-field-unrolled body where each field `k`:
+    ///
+    /// * skips at compile time if `size_of::<Tk>() == 0` (ZST const-folds out);
+    /// * otherwise `ptr::write::<Tk>(dst.column_base(dst.perm(k)).add(row *
+    ///   size_of::<Tk>()) as *mut Tk, ManuallyDrop::take(&mut field_k))`.
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee:
+    ///
+    /// 1. **Provenance / aliasing (W2, M3):** `dst` was built by
+    ///    [`ComponentPoolBundle::resolve_column_ptrs`](crate::ecs::core::component::component_pool_bundle::ComponentPoolBundle::resolve_column_ptrs)
+    ///    under a single `&mut` borrow of the pool bundle that has **ended**
+    ///    before this call. Each `dst.column_base(..)` carries write-capable
+    ///    provenance for the column's data sub-region and is **not** aliased by
+    ///    any live reference. The caller must not re-borrow the archetype /
+    ///    pool bundle between resolving `dst` and the last `write_row_typed`
+    ///    call. This is sound on the `SpawnBatchCommand` path because its
+    ///    `I: ... + 'static` bound forbids the iterator from capturing any
+    ///    borrow of world/archetype/pools, and there is no TLS /
+    ///    `DeferredEcsMaster` / hook / observer re-entry in this command, so
+    ///    `iter.next()` cannot invalidate the resolved bases mid-loop. D4
+    ///    NARROWS the TB surface versus the byte path (which re-borrows
+    ///    `component_pools_mut()` every row).
+    /// 2. **In-bounds (Q1):** `row < committed_rows` for every column the
+    ///    bundle writes (the caller pre-grew capacity via
+    ///    `Archetype::reserve_capacity`). Debug builds assert it per store.
+    /// 3. **Column identity (W3):** `dst.perm(k)` selects the column whose
+    ///    `ComponentId` equals `Tk::component_id()`. Debug builds assert it at
+    ///    IDENTITY level per field.
+    /// 4. **Disjoint, uninit, aligned slots:** the target slot is uninit (the
+    ///    caller commits + tick-stamps the row only *after* the whole write
+    ///    loop, B4), and `base.add(row * size_of::<Tk>())` is `Tk`-aligned by
+    ///    the column-base alignment contract.
+    ///
+    /// # Panic safety (B4 / O1)
+    ///
+    /// Each field is relocated via `ManuallyDrop::take` (a bitwise move that
+    /// suppresses the source `Drop`); `ptr::write` / `ManuallyDrop::take` are
+    /// panic-free (no user code runs during the move). The only panic source
+    /// on the batch path is `iter.next()` **between** rows — never inside
+    /// `write_row_typed`. A completed row's fields are logically owned by the
+    /// archetype (drop suppressed at the source); a not-yet-written row never
+    /// had `write_row_typed` called → no double-drop, no half-row exposed
+    /// (commit happens post-loop).
+    unsafe fn write_row_typed(self, dst: &BundleColumnPtrs, row: usize)
+    where
+        Self: Sized,
+    {
+        let _ = (dst, row);
+        unreachable!(
+            "Bundle::write_row_typed default body is statically uncallable: \
+             SpawnBatchCommand::apply gates it behind `if const \
+             {{ B::HAS_TYPED_WRITE }}`, which is false for this bundle"
+        )
+    }
 
     /// Phase 22.1 D-E — invokes `f` once per **non-ZST** component in
     /// canonical order, eliding zero-size (ZST tag) columns from the

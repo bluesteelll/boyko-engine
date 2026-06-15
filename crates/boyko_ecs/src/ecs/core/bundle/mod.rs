@@ -17,7 +17,10 @@ pub mod bundle_column_cache;
 pub mod bundle_type_registry;
 pub(crate) mod self_bundle;
 
-pub use bundle::{Bundle, BundleStaticInfo};
+pub use bundle::{
+    Bundle, BundleColumnPtrs, BundleStaticInfo, ColumnPtr, MAX_BUNDLE_ARITY,
+    MAX_TYPED_WRITE_ARITY,
+};
 pub use bundle_column_cache::{BundleColumnCache, BundleColumnRecord};
 pub use bundle_type_registry::{BundleTypeId, MAX_BUNDLE_TYPES};
 pub(crate) use self_bundle::EmptyBundle;

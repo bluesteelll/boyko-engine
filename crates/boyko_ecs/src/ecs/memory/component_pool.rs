@@ -1055,6 +1055,40 @@ impl ComponentPool {
         self.buffer.as_ptr().cast_const()
     }
 
+    /// Returns the WRITE-CAPABLE base pointer of the flat component buffer
+    /// (Decision 4 / O1). The mutable counterpart of [`Self::buffer_ptr`].
+    ///
+    /// The base is **write-once and vm-reservation-stable** (Phase X.I): set
+    /// in `new`, never moved — growth only commits fresh pages at the frontier
+    /// of the SAME reservation, so a previously returned base stays valid
+    /// across `grow_rows`. The typed batch-write path
+    /// ([`ColumnPtr`](crate::ecs::core::bundle::ColumnPtr)) reads this base
+    /// once per batch under a single `&mut` borrow of the pool bundle, then
+    /// writes through it row-by-row without re-borrowing the pool.
+    ///
+    /// # Safety contract for callers
+    ///
+    /// Mirrors [`Self::buffer_ptr`] for write access:
+    /// 1. A row index `r` used to compute `base.add(r * stride)` must satisfy
+    ///    `r < self.committed_rows()` (the slot lies inside the committed
+    ///    prefix). Reads of LIVE data additionally require `r < self.count()`.
+    /// 2. The type `T` cast from a derived pointer must match the pool's
+    ///    registered type (`component_layout().size() == size_of::<T>()` and
+    ///    `component_layout().align() >= align_of::<T>()`).
+    /// 3. The caller holds exclusive (`&mut`) access to the pool for the
+    ///    duration of every write derived from this pointer (the typed batch
+    ///    path resolves under `&mut`, ends that borrow, then writes through the
+    ///    raw base while no other access path to the pool is live — W2).
+    #[inline]
+    pub fn buffer_ptr_mut(&mut self) -> *mut u8 {
+        // SAFETY: `NonNull::as_ptr` is always non-null; the returned `*mut u8`
+        // carries the pool's write-capable provenance. Dereferencing
+        // individual slots is the caller's responsibility (see the safety
+        // contract above; the write-once-stable-base promise is the Phase X.I
+        // invariant documented on the `buffer` field).
+        self.buffer.as_ptr()
+    }
+
     /// `true` when the pool's reserve ceiling is exhausted
     /// (`len >= reserve_rows`). Phase X.I D5: committed capacity below the
     /// ceiling grows on demand and does NOT count as full.

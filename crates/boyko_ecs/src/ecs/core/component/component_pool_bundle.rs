@@ -356,6 +356,93 @@ pub fn swap_remove_unit(&mut self, unit_index: usize) -> EcsResult<()> {
         unsafe { self.pools.get_unchecked_mut(pool_idx.0) }
     }
 
+    /// Decision 4 (W2 — single-provenance): resolves the typed-write
+    /// destination bases for every DATA column in one pass, filling `out` by
+    /// value.
+    ///
+    /// `data_pool_ids` is the canonical DATA (non-ZST) column slice already
+    /// built by `SpawnBatchCommand::apply` Step 2.6 (the canonical `pool_ids`
+    /// filtered to non-ZST, in `ComponentId` order). `perm` maps each
+    /// **declaration field** index to the canonical data-column slot it writes
+    /// ([`BundleColumnPtrs::PERM_SKIP`] for a ZST field), also built by the
+    /// caller alongside `data_pool_ids`. `out` is populated so that
+    /// `out.column_base(slot)` is the write base for `data_pool_ids[slot]` and
+    /// `out.perm(field)` resolves the declaration field's data-column slot.
+    ///
+    /// # W2 single-provenance contract (the 14a-F2 / 9.3c antidote)
+    ///
+    /// All bases are read under ONE `&mut`-borrow of the pool bundle, derived
+    /// from a single raw `*mut ComponentPool` base of the `pools` Vec — this
+    /// does NOT call `pool_at_unchecked_mut` per column (which would re-tag the
+    /// whole `pools` slice on every call under Tree Borrows). The function
+    /// RETURNS with the borrow ENDED; the caller then holds only the raw `*mut
+    /// u8` bases in `out` and never re-borrows the bundle inside the row loop
+    /// (CONFIRM-2).
+    ///
+    /// # Safety
+    ///
+    /// * Every `data_pool_ids[slot].0 < self.pools.len()` (the caller copied
+    ///   each entry from a valid `pool_ids` slot — debug-asserted).
+    /// * `perm.len()` equals the number of declaration fields; each entry is
+    ///   either a valid data-column slot `< data_pool_ids.len()` or
+    ///   [`BundleColumnPtrs::PERM_SKIP`] for a ZST field.
+    /// * Caller holds exclusive `&mut self`; no concurrent reader exists.
+    #[inline]
+    pub(crate) fn resolve_column_ptrs(
+        &mut self,
+        data_pool_ids: &[InlandPoolId],
+        perm: &[u8],
+        out: &mut crate::ecs::core::bundle::BundleColumnPtrs,
+    ) {
+        debug_assert!(
+            data_pool_ids.len() <= crate::ecs::core::bundle::MAX_BUNDLE_ARITY
+        );
+        out.set_perm_from(perm);
+
+        // Single overarching provenance: one raw base of the `pools` Vec. We
+        // never form a `&mut self.pools` reborrow inside the loop — each base
+        // is read through `(*pools_base.add(idx)).buffer_ptr_mut()`, derived
+        // from this one pointer (W2). `&mut self` keeps it exclusive.
+        let pools_len = self.pools.len();
+        let pools_base: *mut ComponentPool = self.pools.as_mut_ptr();
+
+        for (slot, &pool_idx) in data_pool_ids.iter().enumerate() {
+            debug_assert!(
+                pool_idx.0 < pools_len,
+                "resolve_column_ptrs: pool_idx {} out of bounds (pools.len() = {})",
+                pool_idx.0,
+                pools_len
+            );
+            // SAFETY (W2):
+            //   - `pool_idx.0 < pools_len` (debug-asserted; the caller copied
+            //     it from a valid canonical `pool_ids` slot).
+            //   - `pools_base` is the live `pools` Vec base under `&mut self`;
+            //     `add(pool_idx.0)` addresses a valid `ComponentPool`. The
+            //     `&mut *` reborrow is scoped to this one statement (the base
+            //     read), derived from the single `pools_base` provenance — no
+            //     per-call re-tag of the whole slice.
+            let pool: &mut ComponentPool =
+                unsafe { &mut *pools_base.add(pool_idx.0) };
+            let base = pool.buffer_ptr_mut();
+            let stride = pool.component_layout().size();
+            #[cfg(debug_assertions)]
+            let committed_rows = pool.committed_rows();
+            #[cfg(debug_assertions)]
+            let comp_id = ComponentId(pool.component_id());
+
+            let column = crate::ecs::core::bundle::ColumnPtr::new(
+                base,
+                stride,
+                #[cfg(debug_assertions)]
+                committed_rows,
+                #[cfg(debug_assertions)]
+                comp_id,
+            );
+            out.set_column_base(slot, column);
+        }
+        out.set_data_len(data_pool_ids.len());
+    }
+
     /// Phase 12.5 Opt-A2 (§5.6 / C-N1): commits `n` rows across every
     /// owned pool in one tight loop.
     ///

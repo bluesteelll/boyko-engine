@@ -335,9 +335,11 @@ where
             B::component_ids();
         let mut data_pool_ids: [InlandPoolId; MAX_BUNDLE_ARITY] =
             [InlandPoolId(0); MAX_BUNDLE_ARITY];
-        // Compacted non-ZST component ids, parallel to `data_pool_ids` — used
-        // only by the per-row B2 emit-order debug_assert (debug builds).
-        #[cfg(debug_assertions)]
+        // Compacted non-ZST component ids, parallel to `data_pool_ids`. Used by
+        // (a) the per-row B2 emit-order debug_assert (debug builds) AND (b) the
+        // Decision-4 typed-write `perm` build (all builds — `write_row_perm`
+        // keys each field's data-column slot on its ComponentId, W3). Cheap:
+        // ≤ MAX_BUNDLE_ARITY entries, built once per batch.
         let mut data_component_ids: [crate::ecs::identifiers::primitives::ComponentId;
             MAX_BUNDLE_ARITY] =
             [crate::ecs::identifiers::primitives::ComponentId(0); MAX_BUNDLE_ARITY];
@@ -361,17 +363,26 @@ where
                 if layout_size != 0 {
                     debug_assert!(data_len < MAX_BUNDLE_ARITY);
                     data_pool_ids[data_len] = pool_ids[canonical_idx];
-                    #[cfg(debug_assertions)]
-                    {
-                        data_component_ids[data_len] = cid;
-                    }
+                    data_component_ids[data_len] = cid;
                     data_len += 1;
                 }
             }
         }
         let data_pool_ids = &data_pool_ids[..data_len];
-        #[cfg(debug_assertions)]
         let data_component_ids = &data_component_ids[..data_len];
+
+        // ── Step 2.7 (Decision 4): per-batch typed-write `perm` build ──────
+        // `perm[k]` maps declaration field `k` to its canonical data-column
+        // slot (`PERM_SKIP` for a ZST field). Built ONCE per batch from the
+        // canonical `data_component_ids` (W3 correct-by-construction). For a
+        // `HAS_TYPED_WRITE == false` bundle (hand-written impls), the typed
+        // arm is compiled out (`if const`) and this build is dead — gated so
+        // `write_row_perm`'s `unreachable!` default is never reached.
+        let mut perm: [u8; MAX_BUNDLE_ARITY] =
+            [crate::ecs::core::bundle::BundleColumnPtrs::PERM_SKIP; MAX_BUNDLE_ARITY];
+        if const { B::HAS_TYPED_WRITE } {
+            B::write_row_perm(data_component_ids, &mut perm);
+        }
 
         // ── Step 3: ensure entity fast-store capacity (Phase 12.6) ─────
         // Replaces the SBO17b hard-panic guard. The apply path holds
@@ -420,46 +431,80 @@ where
         // pre-22.1 walk: same indexed load from a small stack array, same
         // deref chain, same memcpy.
         let mut iter = self.iter;
-        for i in 0..n {
-            let row = start_row + i;
-            let bundle = iter.next().expect(
-                "ExactSizeIterator contract: len() reported n, iter yielded < n",
-            );
-            let mut k = 0usize;
-            bundle.for_each_data_component_bytes(|_component_id, bytes| {
-                debug_assert!(k < data_pool_ids.len());
-                // `data_component_ids` exists only under `cfg(debug_assertions)`
-                // (debug-only parallel array); gate the whole check so release
-                // builds — where the binding is absent from the AST — still
-                // name-resolve. `debug_assert_eq!`'s own runtime gate does NOT
-                // remove its body from compilation, so the cfg is required here.
-                #[cfg(debug_assertions)]
-                debug_assert_eq!(
-                    data_component_ids[k], _component_id,
-                    "B2/SBO-B2 violation: bundle data-emit order mismatch"
+        if const { B::HAS_TYPED_WRITE } {
+            // ── Decision 4 typed path ──────────────────────────────────────
+            // W2 single-provenance: resolve every data column's write base
+            // ONCE, under a single `&mut` borrow of the pool bundle that is
+            // ENDED before the row loop. The row loop then holds only the raw
+            // `*mut u8` bases inside `col_ptrs` and NEVER re-borrows
+            // `component_pools_mut()` (CONFIRM-2 / the 14a-F2/9.3c antidote).
+            let mut col_ptrs = crate::ecs::core::bundle::BundleColumnPtrs::new();
+            archetype
+                .component_pools_mut()
+                .resolve_column_ptrs(data_pool_ids, &perm, &mut col_ptrs);
+            // The `&mut ComponentPoolBundle` borrow above has ended here; from
+            // now on only `col_ptrs` (raw bases) is read in the loop.
+            for i in 0..n {
+                let row = start_row + i;
+                let bundle = iter.next().expect(
+                    "ExactSizeIterator contract: len() reported n, iter yielded < n",
                 );
-                let pool_idx = data_pool_ids[k];
-                // SAFETY (SBO13):
-                //   - `row < start_row + n` and `start_row + n <= the
-                //     pool's committed_rows` after `reserve_capacity`
-                //     succeeded (Phase X.I: Phase B grew every pool).
-                //   - `pool_idx.0 < pools.len()` because `data_pool_ids` is a
-                //     filtered subset of the canonical `pool_ids` (SBO-B2),
-                //     each entry copied straight from a valid `pool_ids` slot.
-                //   - Pool is exclusively accessed via `&mut archetype`.
-                //   - `bytes.len()` matches `component_layout.size()` per
-                //     Bundle/macro contract (non-empty by construction here).
+                // SAFETY (D4 — W1/W2/Q1/W3, see `Bundle::write_row_typed` doc):
+                //   - `col_ptrs` bases were resolved once under the &mut that
+                //     has ended; the row loop holds only raw bases and does not
+                //     re-borrow the pools (W2 single provenance). `B`'s
+                //     `I: ... + 'static` bound forbids `iter.next()` from
+                //     capturing any world/archetype/pool borrow, and there is no
+                //     TLS/DeferredEcsMaster/hook/observer re-entry in this
+                //     command, so `next()` cannot invalidate the bases (W1).
+                //   - `row < start_row + n <= committed_rows` after
+                //     `reserve_capacity` (Q1, debug-asserted per store).
+                //   - `perm` keys each field's slot on its ComponentId (W3,
+                //     IDENTITY-asserted per store in debug).
+                //   - Each slot is uninit (commit happens post-loop, B4); each
+                //     field is relocated once via ManuallyDrop::take.
                 unsafe {
-                    archetype
-                        .component_pools_mut()
-                        .pool_at_unchecked_mut(pool_idx)
-                        .write_at_unchecked_initialized(row, bytes);
+                    bundle.write_row_typed(&col_ptrs, row);
                 }
-                k += 1;
-            });
-            // D-E alignment pin: the bundle's data walk emitted exactly the
-            // non-ZST columns the per-batch filter counted.
-            debug_assert_eq!(k, data_pool_ids.len());
+            }
+        } else {
+            // ── RETAINED byte path (verbatim; HAS_TYPED_WRITE == false) ─────
+            for i in 0..n {
+                let row = start_row + i;
+                let bundle = iter.next().expect(
+                    "ExactSizeIterator contract: len() reported n, iter yielded < n",
+                );
+                let mut k = 0usize;
+                bundle.for_each_data_component_bytes(|_component_id, bytes| {
+                    debug_assert!(k < data_pool_ids.len());
+                    debug_assert_eq!(
+                        data_component_ids[k], _component_id,
+                        "B2/SBO-B2 violation: bundle data-emit order mismatch"
+                    );
+                    let pool_idx = data_pool_ids[k];
+                    // SAFETY (SBO13):
+                    //   - `row < start_row + n` and `start_row + n <= the
+                    //     pool's committed_rows` after `reserve_capacity`
+                    //     succeeded (Phase X.I: Phase B grew every pool).
+                    //   - `pool_idx.0 < pools.len()` because `data_pool_ids` is
+                    //     a filtered subset of the canonical `pool_ids`
+                    //     (SBO-B2), each entry copied straight from a valid
+                    //     `pool_ids` slot.
+                    //   - Pool is exclusively accessed via `&mut archetype`.
+                    //   - `bytes.len()` matches `component_layout.size()` per
+                    //     Bundle/macro contract (non-empty by construction).
+                    unsafe {
+                        archetype
+                            .component_pools_mut()
+                            .pool_at_unchecked_mut(pool_idx)
+                            .write_at_unchecked_initialized(row, bytes);
+                    }
+                    k += 1;
+                });
+                // D-E alignment pin: the bundle's data walk emitted exactly the
+                // non-ZST columns the per-batch filter counted.
+                debug_assert_eq!(k, data_pool_ids.len());
+            }
         }
 
         // ── Step 6: bulk-commit units + tick init ──────────────────────
