@@ -160,6 +160,14 @@ harness = false
 name = "phase22_tags"
 harness = false
 
+# EnableTag (Wave 6) — enable-bit non-fragmenting tag benches: warm O(1) bit
+# toggle, Query<&P, Enabled<A>> iteration, spawn+enable vs plain spawn (no
+# archetype churn), and a >4096-row toggle forcing a 2nd EnablePage. See
+# benches/enable_tags.rs.
+[[bench]]
+name = "enable_tags"
+harness = false
+
 # Phase 20 — App frame-driver overhead gates: P20-B1(b) empty-frame envelope
 # (empty_main <= 250 ns/frame) + P20-B2 substep overhead (fixed_loop_1_substep
 # minus bare_empty_schedule_run minus the (b) envelope <= 100 ns/substep).
