@@ -11,6 +11,8 @@ use crate::ecs::core::component::observers::{
 use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId};
 use crate::ecs::core::iters::legacy_query::Query as LegacyQuery;
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
 /// Master manager for archetypes, providing creation and lookup capabilities
 /// Integrates ArchetypeBundle for storage and ArchetypeRegistry for efficient queries
 pub struct ArchetypeMaster {
@@ -61,6 +63,27 @@ pub struct ArchetypeMaster {
     /// `ArchetypeMaster` itself. Independently `Send + Sync` (fn-ptr-only
     /// entries) — no `unsafe impl` (SEND6).
     pub(crate) observer_registry: ObserverRegistry,
+
+    /// EnableTag column-allocation epoch (Decision D1 sub-decision W2).
+    ///
+    /// Bumped exactly once per `EnableColumn` allocation (the first time a tag
+    /// is toggled into an archetype). A `QueryState` that named an `Enabled`/
+    /// `Disabled` term records this value when it last culled and re-checks it
+    /// on the next `update`: a change means "an archetype gained an enable
+    /// column" ⇒ re-run the presence cull (Decision D2 / O2). It is held
+    /// **separate** from [`structural_generation`] on purpose — a structural
+    /// bump force-rebuilds *every* cache (query_state delta-add path), whereas a
+    /// per-toggle column-alloc must invalidate only enable-bearing caches; a
+    /// full structural invalidation per toggle would be catastrophic.
+    ///
+    /// **W2 forward seam.** It is `AtomicU64` purely so the deferred D7
+    /// worker-marking model (a `&self` toggle from a live worker) can bump it
+    /// without an exclusive borrow. In v1 it is bumped only under `&mut self`
+    /// (the structural/apply window) and read single-threaded in `update`, so
+    /// `Relaxed` is sound *only because no concurrent access exists in v1*. When
+    /// worker-marking lands (D8), the bump/read here gain real Acquire/Release
+    /// plus a loom proof — do NOT loosen the v1 ordering assumption elsewhere.
+    enable_generation: AtomicU64,
 }
 
 impl ArchetypeMaster {
@@ -77,6 +100,7 @@ impl ArchetypeMaster {
             generation: ArchetypeGeneration::FIRST,
             structural_generation: ArchetypeGeneration::FIRST,
             observer_registry: ObserverRegistry::new(),
+            enable_generation: AtomicU64::new(0),
         }
     }
 
@@ -89,10 +113,11 @@ impl ArchetypeMaster {
             generation: ArchetypeGeneration::FIRST,
             structural_generation: ArchetypeGeneration::FIRST,
             observer_registry: ObserverRegistry::new(),
+            enable_generation: AtomicU64::new(0),
         }
     }
-    
-    
+
+
     /// Creates a new archetype from a slice of component IDs
     /// Returns the ID of the created archetype
     pub fn create_archetype(&mut self, component_ids: &[ComponentId]) -> ArchetypeId {
@@ -491,7 +516,50 @@ impl ArchetypeMaster {
     pub fn structural_generation(&self) -> ArchetypeGeneration {
         self.structural_generation
     }
-    
+
+    /// Returns the current EnableTag column-allocation epoch (Decision D1 / W2).
+    ///
+    /// Bumped once per `EnableColumn` allocation (the first toggle of a tag into
+    /// an archetype). A `QueryState` carrying an `Enabled`/`Disabled` term
+    /// compares against the saved value on `update`; any change re-runs the
+    /// presence cull (Decision D2 / O2). Distinct from
+    /// [`Self::structural_generation`]: a column-alloc must invalidate only
+    /// enable-bearing caches, never force the full structural rebuild.
+    ///
+    /// `Relaxed` is sound in v1 because the value is bumped only under
+    /// `&mut self` and read single-threaded in `update` — see the field's
+    /// W2 forward-seam note. (D7 worker-marking is the seam that upgrades this
+    /// to Acquire/Release with a loom proof.)
+    #[inline]
+    pub fn enable_generation(&self) -> u64 {
+        self.enable_generation.load(Ordering::Relaxed)
+    }
+
+    /// Bumps the EnableTag column-allocation epoch (Decision D1 / W2).
+    ///
+    /// Called by the toggle path (Step 5) on the first `EnableColumn`
+    /// allocation for a `(tag, archetype)` pair — exactly the site that also
+    /// sets the tag's `EnablePresence` bit — so the two stay consistent
+    /// (Decision D1 inv 5: bumped exactly once per column).
+    ///
+    /// `&mut self` in v1: the toggle runs in the structural/apply window with
+    /// exclusive world access, so `Relaxed` cannot race (W2 forward-seam note
+    /// on the field). The `&mut self` receiver is the v1 enforcement of that
+    /// exclusivity; D7 worker-marking is where it relaxes to a shared `&self`
+    /// bump under real Acquire/Release.
+    // Forward seam W2: the sole caller is the EnableTag toggle path landing in
+    // Step 5 (Wave 2). Added in Step 3 (Wave 1) so the `enable_generation`
+    // counter ships complete with its accessor + bump in one cohesive unit;
+    // `#[allow(dead_code)]` (scoped, justified — mirrors `archetype_bundle_mut`)
+    // keeps the crate clippy-clean under `-D warnings` until Step 5 wires it.
+    #[allow(dead_code)]
+    #[inline]
+    pub(crate) fn bump_enable_generation(&mut self) {
+        // Relaxed: sound only because no concurrent access exists in v1 (the
+        // `&mut self` receiver proves exclusivity). Forward seam W2 / D7.
+        self.enable_generation.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Removes an archetype by ID. Returns true if the archetype was found
     /// and removed.
     ///
@@ -1148,6 +1216,62 @@ mod tests {
         assert!(
             master.structural_generation() > struct_before,
             "structural_generation must bump on clear()"
+        );
+    }
+
+    // --- EnableTag column-allocation epoch (W2 forward seam) ---
+
+    /// A fresh master starts at `enable_generation == 0`.
+    #[test]
+    fn enable_generation_starts_at_zero() {
+        let master = ArchetypeMaster::new();
+        assert_eq!(master.enable_generation(), 0);
+        let master = ArchetypeMaster::with_capacity(8);
+        assert_eq!(master.enable_generation(), 0);
+    }
+
+    /// Each `bump_enable_generation` advances the epoch by exactly one — the
+    /// "bumps once per column alloc" invariant the toggle path relies on
+    /// (Decision D1 inv 5).
+    #[test]
+    fn enable_generation_bumps_exactly_once_per_call() {
+        let mut master = ArchetypeMaster::new();
+        let before = master.enable_generation();
+        master.bump_enable_generation();
+        assert_eq!(
+            master.enable_generation(),
+            before + 1,
+            "one bump must advance the epoch by exactly one"
+        );
+        master.bump_enable_generation();
+        master.bump_enable_generation();
+        assert_eq!(master.enable_generation(), before + 3);
+    }
+
+    /// `enable_generation` is independent of the structural generation: bumping
+    /// one must not move the other (Decision D1 — a column-alloc must not force
+    /// a full structural rebuild).
+    #[test]
+    fn enable_generation_independent_of_structural_generation() {
+        register_mock_components();
+        let mut master = ArchetypeMaster::new();
+
+        let struct_before = master.structural_generation();
+        master.bump_enable_generation();
+        assert_eq!(
+            master.structural_generation(),
+            struct_before,
+            "bumping enable_generation must not touch structural_generation"
+        );
+
+        // Conversely, a structural op must not move enable_generation.
+        let enable_before = master.enable_generation();
+        let id = master.create_archetype(&mocks([1, 2]));
+        assert!(master.remove_archetype(id));
+        assert_eq!(
+            master.enable_generation(),
+            enable_before,
+            "structural ops must not touch enable_generation"
         );
     }
 }

@@ -280,6 +280,19 @@ pub const MAX_EVENT_THREADS: u32 = 64;
 /// Bounds the per-lane write buffer allocation at preregister time.
 pub const MAX_EVENT_CAPACITY: u32 = 16384;
 
+//
+// Enable-tag (bitset storage) configuration
+//
+
+/// Maximum number of dynamic enable-tag terms (`with_enabled` /
+/// `without_enabled`) a single query may carry (EnableTag plan, D2).
+///
+/// Bounds the inline `EnableTerms` stack struct in the query cursor so dynamic
+/// enable filtering never spills to the heap on the hot path. Typed
+/// `Enabled<T>` / `Disabled<T>` terms do not consume this budget — only the
+/// runtime-added dynamic terms do.
+pub const MAX_ENABLE_TERMS: usize = 8;
+
 // ── Phase X.I W1 — U-P1 sizing/slab table tests + U-P6 Tick::ZERO pin ──────
 
 #[cfg(test)]

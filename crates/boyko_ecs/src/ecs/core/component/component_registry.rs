@@ -41,7 +41,7 @@
 use std::alloc::Layout;
 use std::any::TypeId;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use crate::ecs::core::component::component::Component;
@@ -230,6 +230,49 @@ impl From<TagId> for ComponentId {
     }
 }
 
+/// Filter-only enable-tag handle (EnableTag plan, D5). `repr(transparent)` over
+/// [`ComponentId`]: zero-cost, but type-distinct so data-fetch APIs cannot
+/// accept it (an enable tag has no `ComponentPool` by construction — D6).
+///
+/// An enable tag uses the **bitset** storage backend ([`StorageKind::Bitset`]):
+/// its id is filtered out of every archetype signature and toggled with a
+/// single per-row bit instead of triggering a migration. It is minted via
+/// [`try_register_enable_tag_by_name`], which sets the id's
+/// [`STORAGE_KIND`] to [`StorageKind::Bitset`].
+///
+/// # One-way bridge
+///
+/// `EnableTagId → ComponentId` is public — [`EnableTagId::component_id`] and the
+/// `From<EnableTagId> for ComponentId` impl — because the id-keyed enable
+/// surfaces (`enable_id` / `disable_id` / `is_enabled_id`, `with_enabled`) take
+/// a [`ComponentId`]. The reverse direction has NO constructor: an
+/// `EnableTagId` is a proof that the id was minted as a bitset enable tag, and
+/// only the mint path can issue one.
+///
+/// # Identity stability
+///
+/// Like every [`ComponentId`], the numeric value is first-call-order
+/// process-unstable; the **name** is the stable serialization key.
+#[repr(transparent)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct EnableTagId(pub(crate) ComponentId);
+
+impl EnableTagId {
+    /// Bridges to the shared [`ComponentId`] space — the vocabulary of the
+    /// id-keyed enable/disable surfaces and the `with_enabled` query terms.
+    #[inline]
+    pub const fn component_id(self) -> ComponentId {
+        self.0
+    }
+}
+
+impl From<EnableTagId> for ComponentId {
+    #[inline]
+    fn from(tag: EnableTagId) -> Self {
+        tag.component_id()
+    }
+}
+
 /// Static storage for component layouts. Each slot is independent and
 /// initialized at most once via `OnceLock::set`. Read path is a single
 /// acquire-load + branch — no `Mutex`, no `static mut`, no data race.
@@ -334,6 +377,160 @@ pub(crate) fn try_set_hooks(component_id: usize, hooks: ComponentHooks) -> bool 
         return false;
     }
     HOOKS[component_id].set(hooks).is_ok()
+}
+
+/// Storage backend selected for a component id (EnableTag plan, D5).
+///
+/// The default for every id is [`Table`](StorageKind::Table) — the standard
+/// signature-fragmenting, per-archetype `ComponentPool` storage. An id minted
+/// as an **enable tag** (`#[component(storage = "bitset")]` or
+/// [`try_register_enable_tag_by_name`]) is [`Bitset`](StorageKind::Bitset):
+/// filtered out of every archetype signature, no `ComponentPool`, toggled with
+/// a single per-row bit.
+///
+/// `#[repr(u8)]` with explicit discriminants so the value round-trips losslessly
+/// through the parallel cold [`STORAGE_KIND`] `AtomicU8` table. The discriminant
+/// space is intentionally extensible (D7: a future relationship kind = 2).
+#[repr(u8)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum StorageKind {
+    /// Standard signature storage: the id is part of the archetype signature
+    /// and backed by a per-archetype `ComponentPool`.
+    Table = 0,
+    /// Enable-bit storage: the id is NOT in any archetype signature and has no
+    /// `ComponentPool`; presence is a per-row bit in an `EnableColumn`.
+    Bitset = 1,
+}
+
+/// EnableTag plan (D5) — parallel cold table of per-component storage backends,
+/// one [`AtomicU8`] per `ComponentId`. Mirrors the [`HOOKS`] / [`LAYOUTS`]
+/// declarations rather than adding a sixth [`ComponentLayout`] field, so
+/// `ComponentLayout` stays pinned at 56 B / one cache line (TRIPWIRE 2).
+///
+/// Touched ONLY at registration time (write-once via [`set_storage_kind`]) and
+/// at archetype construction (one `Relaxed` load per id to decide signature
+/// membership) — never on the per-frame hot read path.
+///
+/// `Relaxed` is sufficient: the kind is a registration-time, write-once datum
+/// with no payload published through it. A `#[derive(Component)]` registration
+/// (or the runtime mint) sets the kind atomically with id assignment, before
+/// the component can appear in any archetype, so the archetype-construction read
+/// observes a settled value. The default `0` reads back as
+/// [`StorageKind::Table`] for every id that was never explicitly classified.
+static STORAGE_KIND: [AtomicU8; MAX_COMPONENTS] =
+    [const { AtomicU8::new(StorageKind::Table as u8) }; MAX_COMPONENTS];
+
+/// Returns the storage backend registered for `component_id` (EnableTag plan,
+/// D5). Defaults to [`StorageKind::Table`] for any id never classified via
+/// [`set_storage_kind`].
+///
+/// Cold: read at archetype construction (signature-membership decision), never
+/// on the per-frame hot path. One `Relaxed` load + branch.
+///
+/// # Panics
+///
+/// Never. An out-of-range id reads back as [`StorageKind::Table`] (the safe
+/// default) after a debug assertion, mirroring [`get_hooks`]'s bounds discipline.
+#[inline]
+pub fn storage_kind(component_id: usize) -> StorageKind {
+    debug_assert!(
+        component_id < MAX_COMPONENTS,
+        "Component ID {} is out of bounds",
+        component_id
+    );
+    if component_id >= MAX_COMPONENTS {
+        return StorageKind::Table;
+    }
+    match STORAGE_KIND[component_id].load(Ordering::Relaxed) {
+        x if x == StorageKind::Bitset as u8 => StorageKind::Bitset,
+        // 0 (the default) and any future-but-unknown discriminant fall back to
+        // the safe signature default — `set_storage_kind` is the only writer
+        // and only ever stores a valid discriminant.
+        _ => StorageKind::Table,
+    }
+}
+
+/// Classifies `component_id`'s storage backend (EnableTag plan, D5).
+/// **Write-once**: the first classification of an id wins for the process
+/// lifetime, mirroring the [`LAYOUTS`] / [`HOOKS`] write-once discipline.
+///
+/// Called from the registration path (the bitset mint and the derive's
+/// `storage = "bitset"` arm) atomically with id assignment, before the
+/// component can enter any archetype. A non-`Bitset` id is left at the table
+/// default and never needs an explicit call.
+///
+/// # Panics (debug only)
+///
+/// A debug assertion fires if an id is RE-classified to a *different* kind —
+/// reclassification is an invariant violation (the same id cannot be both a
+/// table component and an enable tag). In release the first writer's kind is
+/// preserved (the store is skipped) so a buggy double-classify degrades to the
+/// initial decision rather than silently corrupting live archetype layouts.
+// Forward capability (EnableTag plan, Step 1): the production consumers are the
+// archetype-construction signature filter (Step 4) and the derive's
+// `storage = "bitset"` arm (Step 10). Until those waves land there is no
+// non-test caller, so the dead-code lint is expected and silenced rather than
+// papered over — mirroring `set_next_id_for_test`.
+#[allow(dead_code)]
+pub(crate) fn set_storage_kind(component_id: usize, kind: StorageKind) {
+    debug_assert!(
+        component_id < MAX_COMPONENTS,
+        "Component ID {} exceeds maximum allowed ({})",
+        component_id,
+        MAX_COMPONENTS
+    );
+    if component_id >= MAX_COMPONENTS {
+        return;
+    }
+    let current = STORAGE_KIND[component_id].load(Ordering::Relaxed);
+    if current == kind as u8 {
+        // Idempotent same-kind (re)classification — no-op.
+        return;
+    }
+    debug_assert!(
+        current == StorageKind::Table as u8,
+        "set_storage_kind: ComponentId {} already classified as {:?}, refused to \
+         reclassify as {:?} (storage kind is write-once)",
+        component_id,
+        storage_kind(component_id),
+        kind
+    );
+    if current == StorageKind::Table as u8 {
+        STORAGE_KIND[component_id].store(kind as u8, Ordering::Relaxed);
+    }
+}
+
+/// Name-keyed enable-tag mint (EnableTag plan, D5). Mirrors
+/// [`try_register_tag_by_name`] — idempotent per name, returns `None` when the
+/// shared `MAX_COMPONENTS` budget is exhausted and `name` was never minted —
+/// but additionally classifies the minted id as [`StorageKind::Bitset`] so it
+/// is filtered out of every archetype signature.
+///
+/// A name already minted as a *non-bitset* dynamic tag is returned as-is in
+/// debug only after the same-kind reclassification assertion fires (storage
+/// kind is write-once); the two name spaces are otherwise independent
+/// (`tag_by_name` vs the enable-tag name).
+///
+/// Lookup, capacity check, mint, and name-intern run under the shared
+/// name-intern lock (inside [`try_register_tag_by_name`]), so two threads racing
+/// the same name cannot double-mint. The kind classification
+/// ([`set_storage_kind`]) runs AFTER that lock is released — this is sound
+/// because storage kind is write-once-idempotent and registration completes
+/// before any archetype can read the kind (the same registration-before-
+/// construction ordering the `STORAGE_KIND` table relies on). See
+/// [`try_register_tag_by_name`] for the leak bound (identical; no extra alloc).
+// Forward capability (EnableTag plan, Step 1): the production consumer is the
+// `EcsMaster::register_enable_tag` wrapper (Step 5/9), mirroring how
+// `EcsMaster::register_tag` delegates to `try_register_tag_by_name`. No
+// non-test caller exists until that wave, so the dead-code lint is silenced.
+#[allow(dead_code)]
+pub(crate) fn try_register_enable_tag_by_name(name: &str) -> Option<EnableTagId> {
+    let tag = try_register_tag_by_name(name)?;
+    // Classify the minted id as bitset storage. Write-once: a re-mint of the
+    // same name re-runs this with the already-bitset id, which is the idempotent
+    // same-kind no-op above.
+    set_storage_kind(tag.0.0, StorageKind::Bitset);
+    Some(EnableTagId(tag.0))
 }
 
 /// Phase 21 (H1) — process-global "ever placed in ANY archetype" bitmask, one
@@ -1112,5 +1309,107 @@ mod tests {
             get_component_memory_layout(id).expect("must return Some after register");
         assert_eq!(mem_layout.size(), std::mem::size_of::<u128>());
         assert_eq!(mem_layout.align(), std::mem::align_of::<u128>());
+    }
+
+    // --- EnableTag plan, Step 1: STORAGE_KIND + EnableTagId bridge ---
+    //
+    // Dedicated id range 470-475 for the direct storage-kind classification
+    // tests. STORAGE_KIND is process-global write-once like LAYOUTS, so each id
+    // here must be unique across the whole test binary (the fixed-id
+    // partitioning convention). These ids do NOT overlap the layout tests'
+    // 450-465 / 498-499 range.
+
+    #[test]
+    fn storage_kind_defaults_to_table() {
+        // An id never classified reads back as the table default.
+        assert_eq!(
+            storage_kind(470),
+            StorageKind::Table,
+            "unclassified id must default to StorageKind::Table"
+        );
+    }
+
+    #[test]
+    fn set_storage_kind_round_trips_bitset() {
+        set_storage_kind(471, StorageKind::Bitset);
+        assert_eq!(
+            storage_kind(471),
+            StorageKind::Bitset,
+            "set_storage_kind(Bitset) must round-trip through storage_kind"
+        );
+    }
+
+    #[test]
+    fn set_storage_kind_same_kind_is_idempotent() {
+        // Two identical classifications are a silent no-op (no panic).
+        set_storage_kind(472, StorageKind::Bitset);
+        set_storage_kind(472, StorageKind::Bitset);
+        assert_eq!(storage_kind(472), StorageKind::Bitset);
+    }
+
+    #[test]
+    fn set_storage_kind_explicit_table_round_trips() {
+        // Explicitly classifying Table on a fresh id is a same-kind no-op and
+        // leaves the default in place.
+        set_storage_kind(473, StorageKind::Table);
+        assert_eq!(storage_kind(473), StorageKind::Table);
+    }
+
+    /// Write-once enforcement: reclassifying an id to a DIFFERENT kind must trip
+    /// the debug assertion. Runs only in debug builds (where `debug_assert!`
+    /// is active) — release skips the store and preserves the first kind.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "already classified")]
+    fn set_storage_kind_reclassify_different_kind_panics_in_debug() {
+        set_storage_kind(474, StorageKind::Bitset);
+        // Reclassifying to a different kind is an invariant violation.
+        set_storage_kind(474, StorageKind::Table);
+    }
+
+    #[test]
+    fn enable_tag_id_bridges_to_component_id_round_trip() {
+        let cid = ComponentId(475);
+        let tag = EnableTagId(cid);
+        assert_eq!(
+            tag.component_id(),
+            cid,
+            "EnableTagId::component_id must return the wrapped ComponentId"
+        );
+        let via_from: ComponentId = tag.into();
+        assert_eq!(
+            via_from, cid,
+            "From<EnableTagId> for ComponentId must round-trip"
+        );
+    }
+
+    #[test]
+    fn register_enable_tag_mints_and_sets_kind_bitset() {
+        // Dynamic mint allocates a fresh id from NEXT_ID (no fixed-id collision)
+        // and classifies it as bitset storage.
+        let tag = try_register_enable_tag_by_name("enable_tag_step1_mint")
+            .expect("budget must not be exhausted in this test binary");
+        assert_eq!(
+            storage_kind(tag.component_id().0),
+            StorageKind::Bitset,
+            "a minted enable tag must be classified as StorageKind::Bitset"
+        );
+    }
+
+    #[test]
+    fn register_enable_tag_is_idempotent_per_name() {
+        let a = try_register_enable_tag_by_name("enable_tag_step1_idem")
+            .expect("first mint must succeed");
+        let b = try_register_enable_tag_by_name("enable_tag_step1_idem")
+            .expect("second mint of the same name must succeed");
+        assert_eq!(
+            a, b,
+            "an enable tag mint is idempotent per name (same id returned)"
+        );
+        assert_eq!(
+            storage_kind(a.component_id().0),
+            StorageKind::Bitset,
+            "the re-minted id stays bitset (write-once same-kind no-op)"
+        );
     }
 }
