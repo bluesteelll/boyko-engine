@@ -500,6 +500,45 @@ pub(crate) fn set_storage_kind(component_id: usize, kind: StorageKind) {
     }
 }
 
+/// Installs the storage backend for a derived component into the cold
+/// `STORAGE_KIND` table from the type's compile-time [`Component::STORAGE_IS_BITSET`]
+/// const (EnableTag plan, D5 — the `#[component(storage = "bitset")]` derive arm,
+/// Wave 5 Step 10).
+///
+/// This is the **public** counterpart of the `pub(crate)` [`set_storage_kind`]:
+/// `#[derive(Component)]` expands into downstream crates, where the `pub(crate)`
+/// writer is unreachable, so the derive's `component_id()` install path calls
+/// this `pub` wrapper instead — exactly mirroring how it calls [`install_hooks`]
+/// for `C::HAS_HOOKS`. The derive emits this call ONLY when
+/// `C::STORAGE_IS_BITSET` is `true` (const-gated), so a plain
+/// `#[derive(Component)]` const-folds it away and the id stays at the
+/// [`StorageKind::Table`] default — zero cost for non-tag components.
+///
+/// Write-once and idempotent through [`set_storage_kind`]: it runs once per
+/// type per process (behind the `component_id()` `OnceLock`), atomically with id
+/// assignment and therefore before the id can enter any archetype.
+///
+/// # Panics
+///
+/// In debug, if `component_id` is reclassified to a different kind (see
+/// [`set_storage_kind`]). The XOR-by-construction discipline (a single
+/// `STORAGE_IS_BITSET` const per type) makes this unreachable for derived types.
+#[inline]
+pub fn install_storage_kind<C: Component>(component_id: usize) {
+    debug_assert!(
+        component_id < MAX_COMPONENTS,
+        "Component ID {} exceeds maximum allowed ({})",
+        component_id,
+        MAX_COMPONENTS
+    );
+    // The derive const-gates this call on `C::STORAGE_IS_BITSET`, so in practice
+    // the branch is always taken; the explicit test keeps the wrapper correct if
+    // a hand-`impl Component` calls it with the table default.
+    if C::STORAGE_IS_BITSET {
+        set_storage_kind(component_id, StorageKind::Bitset);
+    }
+}
+
 /// Name-keyed enable-tag mint (EnableTag plan, D5). Mirrors
 /// [`try_register_tag_by_name`] — idempotent per name, returns `None` when the
 /// shared `MAX_COMPONENTS` budget is exhausted and `name` was never minted —

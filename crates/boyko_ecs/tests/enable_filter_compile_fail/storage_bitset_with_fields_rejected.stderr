@@ -1,0 +1,5 @@
+error: #[component(storage = "bitset")] requires a fieldless struct (e.g. `struct Stunned;`): a bitset enable tag has no ComponentPool, so any field data would have nowhere to live
+  --> tests/enable_filter_compile_fail/storage_bitset_with_fields_rejected.rs:10:8
+   |
+10 | struct Bad(u32);
+   |        ^^^

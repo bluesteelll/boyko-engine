@@ -88,23 +88,65 @@ use syn::{
 #[proc_macro_derive(Component, attributes(component))]
 pub fn component_macro(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    let name = input.ident;
 
     // Phase 14a: parse the optional `#[component(...)]` hook attribute
-    // (extended in Phase 22 with the bare `no_bundle` flag key).
+    // (extended in Phase 22 with the bare `no_bundle` flag key, and in EnableTag
+    // Wave 5 with the `storage = "bitset"` NameValue key).
     let hooks = match parse_component_hooks(&input.attrs) {
         Ok(h) => h,
         Err(ts) => return ts,
     };
+
+    // EnableTag D5: a bitset enable tag has NO `ComponentPool`, so its data has
+    // nowhere to live — a fielded `storage = "bitset"` struct is nonsensical.
+    // Reject it loudly (fail-loud, plan Step 10 (3)). The macro cannot see the
+    // runtime size, so it enforces the syntactic rule "a bitset tag must be a
+    // fieldless struct" (unit struct, or an empty named/tuple struct), which is
+    // the common ZST tag shape the plan targets (`struct Stunned;`). Enums and
+    // unions are rejected for the same reason.
+    if hooks.storage_bitset
+        && let Err(ts) = reject_non_zst_bitset_tag(&input)
+    {
+        return ts;
+    }
+
+    // EnableTag D5 (Step 10 hardening A): a bitset enable tag has NO
+    // `ComponentPool`, so the structural lifecycle hooks (on_add / on_insert /
+    // on_replace / on_remove) can NEVER fire for it — enable/disable is a
+    // per-row bit RMW, not a structural component op. Silently accepting the
+    // combination would install dead hooks (a compile-but-lie footgun), so
+    // reject it loudly at macro time. (A future enable-bit observer, if any,
+    // would be a SEPARATE key, not these structural hooks.)
+    if hooks.storage_bitset && hooks.any() {
+        return syn::Error::new(
+            input.ident.span(),
+            "#[component(storage = \"bitset\")] cannot combine with lifecycle hooks \
+             (on_add/on_insert/on_replace/on_remove): an enable-bit tag has no \
+             ComponentPool, so these hooks never fire. Remove the hook(s), or drop \
+             `storage = \"bitset\"` to use a normal component.",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    let name = input.ident;
 
     // Emit `const HAS_HOOKS = true;` + a `register_hooks` impl only when at
     // least one hook key is present; otherwise the trait defaults
     // (`HAS_HOOKS = false`, empty `register_hooks`) apply.
     let hook_items = hooks.codegen();
 
+    // EnableTag D5: emit `const STORAGE_IS_BITSET = true;` (overriding the trait
+    // default) and the install call for the minted id, only for a bitset tag.
+    let storage_items = hooks.storage_codegen();
+    let storage_install = hooks.storage_install_codegen();
+
     // Phase 22 D7: single-component Bundle emission (suppressed by
-    // `#[component(no_bundle)]`).
-    let bundle_items = if hooks.no_bundle {
+    // `#[component(no_bundle)]`). EnableTag D6: `storage = "bitset"` ALSO
+    // suppresses it — a bitset tag has no `ComponentPool` and must not be
+    // spawnable as a one-component bundle (`storage = "bitset"` implies
+    // `no_bundle`).
+    let bundle_items = if hooks.no_bundle || hooks.storage_bitset {
         TokenStream2::new()
     } else {
         component_self_bundle_codegen(&name)
@@ -147,9 +189,12 @@ pub fn component_macro(input: TokenStream) -> TokenStream {
                     if Self::HAS_HOOKS {
                         boyko_ecs::ecs::core::component::component_registry::install_hooks::<Self>(raw);
                     }
+                    #storage_install
                     boyko_ecs::ecs::identifiers::primitives::ComponentId(raw)
                 })
             }
+
+            #storage_items
 
             #hook_items
 
@@ -182,6 +227,13 @@ pub fn component_macro(input: TokenStream) -> TokenStream {
 ///
 /// Phase 22: also carries the bare `no_bundle` flag key, which suppresses the
 /// derive's single-component `Bundle` emission (D7 opt-out).
+///
+/// EnableTag (Wave 5 Step 10 / D5): also carries the `storage = "bitset"`
+/// NameValue key (a `LitStr`, NOT a bare flag — W1-r6). When set, the derive
+/// emits `const STORAGE_IS_BITSET = true`, routes the minted id's registration
+/// through `install_storage_kind::<Self>` (classifying it `StorageKind::Bitset`),
+/// and suppresses the single-component `Bundle` emission (a bitset tag has no
+/// `ComponentPool` and must not be spawnable — D6 implies `no_bundle`).
 #[derive(Default)]
 struct ComponentHookPaths {
     on_add: Option<Path>,
@@ -189,6 +241,8 @@ struct ComponentHookPaths {
     on_replace: Option<Path>,
     on_remove: Option<Path>,
     no_bundle: bool,
+    /// `true` iff `storage = "bitset"` was supplied (EnableTag D5).
+    storage_bitset: bool,
 }
 
 impl ComponentHookPaths {
@@ -236,18 +290,106 @@ impl ComponentHookPaths {
             }
         }
     }
+
+    /// EnableTag D5: emits `const STORAGE_IS_BITSET = true;` (overriding the
+    /// `Component` trait default of `false`) when `storage = "bitset"` was
+    /// supplied, or an empty token stream (trait default applies) otherwise.
+    ///
+    /// This const is what makes `Added<T>` / `Changed<T>` on the tag a compile
+    /// error (the D4 per-monomorphization const-asserts read it) and what
+    /// `install_storage_kind::<Self>` const-gates on.
+    fn storage_codegen(&self) -> TokenStream2 {
+        if !self.storage_bitset {
+            return TokenStream2::new();
+        }
+        quote! {
+            const STORAGE_IS_BITSET: bool = true;
+        }
+    }
+
+    /// EnableTag D5: emits the registration-time call that classifies the minted
+    /// id as `StorageKind::Bitset`, or an empty token stream otherwise.
+    ///
+    /// Emitted into the derive's `component_id()` `OnceLock` init closure,
+    /// AFTER `register_new` mints `raw` and (when present) hooks install — the
+    /// same atomic-with-id-assignment, before-any-archetype ordering that
+    /// `install_hooks` relies on. Routed through the `pub` wrapper
+    /// `install_storage_kind::<Self>` because the underlying `set_storage_kind`
+    /// is `pub(crate)` and unreachable from a downstream crate's derive output.
+    fn storage_install_codegen(&self) -> TokenStream2 {
+        if !self.storage_bitset {
+            return TokenStream2::new();
+        }
+        quote! {
+            boyko_ecs::ecs::core::component::component_registry::install_storage_kind::<Self>(raw);
+        }
+    }
+}
+
+/// EnableTag D5 (Step 10 (3)): rejects a `#[component(storage = "bitset")]` on
+/// anything other than a fieldless struct.
+///
+/// A bitset enable tag has no `ComponentPool`, so component data has nowhere to
+/// live — a tag carrying fields is nonsensical. The proc-macro cannot compute
+/// the runtime size of `T`, so it enforces the conservative syntactic rule "a
+/// bitset tag must be a fieldless struct" (a unit struct `struct Stunned;`, or
+/// an empty `struct Stunned {}` / `struct Stunned()`), which is exactly the ZST
+/// tag shape the plan targets. Enums and unions are rejected as well — they have
+/// no fieldless single-shape meaning for a tag. The fail-loud diagnostic names
+/// the requirement so the user fixes it at the declaration.
+///
+/// # Generic-tag limitation
+///
+/// A bitset tag must be a **true fieldless struct**. Generic type or lifetime
+/// parameters are permitted ONLY as long as the struct still carries no fields:
+/// `struct Tag<'a>;` and `struct Tag<T>;` are accepted, but
+/// `struct Tag<T>(PhantomData<T>);` is rejected — the `PhantomData<T>` field
+/// (though a runtime ZST) is a field, so it falls into the reject arm. This is
+/// an intentional conservative limitation: a proc-macro sees only the surface
+/// syntax and cannot prove the runtime ZST-ness of an arbitrary field type, so
+/// it refuses anything with a field rather than accept a tag whose data has no
+/// `ComponentPool` to live in. Wrap the phantom-carrying type in a plain
+/// `#[derive(Component)]` if it truly needs to carry a parameter; a bitset tag
+/// that must be generic should hold its parameter in the struct head, not a
+/// field.
+fn reject_non_zst_bitset_tag(input: &DeriveInput) -> Result<(), TokenStream> {
+    let err = |span: Span, msg: &str| -> TokenStream {
+        syn::Error::new(span, msg).to_compile_error().into()
+    };
+
+    match &input.data {
+        Data::Struct(s) => match &s.fields {
+            Fields::Unit => Ok(()),
+            Fields::Named(named) if named.named.is_empty() => Ok(()),
+            Fields::Unnamed(unnamed) if unnamed.unnamed.is_empty() => Ok(()),
+            _ => Err(err(
+                input.ident.span(),
+                "#[component(storage = \"bitset\")] requires a fieldless struct \
+                 (e.g. `struct Stunned;`): a bitset enable tag has no ComponentPool, \
+                 so any field data would have nowhere to live",
+            )),
+        },
+        Data::Enum(_) | Data::Union(_) => Err(err(
+            input.ident.span(),
+            "#[component(storage = \"bitset\")] requires a fieldless struct \
+             (e.g. `struct Stunned;`); enums and unions cannot be enable tags",
+        )),
+    }
 }
 
 /// Parses the optional `#[component(on_add = path, ...)]` attribute (Phase 14a,
 /// plan §6.1). Mirrors the `#[event]` macro's `parse_nested_meta` idiom.
 ///
 /// Accepts the four lifecycle-hook keys (`on_add` / `on_insert` / `on_replace` /
-/// `on_remove`), each `= <path>`, plus the bare `no_bundle` flag key (Phase 22
-/// D7 — suppresses the single-component `Bundle` emission). Rejects:
+/// `on_remove`), each `= <path>`, the bare `no_bundle` flag key (Phase 22
+/// D7 — suppresses the single-component `Bundle` emission), and the
+/// `storage = "bitset"` NameValue key (EnableTag D5 — a `LitStr` value, Wave 5
+/// Step 10). Rejects:
 /// - `on_despawn` (removed from 14a — deferred to 14b),
 /// - any other unknown key,
 /// - a duplicate key,
 /// - a key missing its `= <path>` value (surfaced by `meta.value()` / `parse`),
+/// - an unknown `storage` string (only `"bitset"` is supported),
 /// - more than one `#[component(...)]` attribute on the same item.
 fn parse_component_hooks(attrs: &[syn::Attribute]) -> Result<ComponentHookPaths, TokenStream> {
     let mut paths = ComponentHookPaths::default();
@@ -273,7 +415,8 @@ fn parse_component_hooks(attrs: &[syn::Attribute]) -> Result<ComponentHookPaths,
             if meta.path.is_ident("on_despawn") {
                 return Err(meta.error(
                     "on_despawn is not supported in this version (deferred to Phase 14b); \
-                     valid keys: on_add, on_insert, on_replace, on_remove, no_bundle",
+                     valid keys: on_add, on_insert, on_replace, on_remove, no_bundle, \
+                     storage = \"bitset\"",
                 ));
             }
 
@@ -288,6 +431,33 @@ fn parse_component_hooks(attrs: &[syn::Attribute]) -> Result<ComponentHookPaths,
                 return Ok(());
             }
 
+            // EnableTag D5 (Wave 5 Step 10): `storage = "bitset"` — a NameValue
+            // key whose value is a STRING LITERAL (W1-r6: parsed as a `LitStr`,
+            // NOT a bare-key flag and NOT a path). Any other string is rejected
+            // with a message naming the allowed value.
+            if meta.path.is_ident("storage") {
+                if paths.storage_bitset {
+                    return Err(meta.error(
+                        "duplicate #[component(...)] key; storage may be set at most once",
+                    ));
+                }
+                let value = meta.value()?; // consumes the `=`
+                let lit: syn::LitStr = value.parse()?;
+                match lit.value().as_str() {
+                    "bitset" => paths.storage_bitset = true,
+                    other => {
+                        return Err(syn::Error::new_spanned(
+                            &lit,
+                            format!(
+                                "unknown component storage {other:?}; \
+                                 the only supported value is \"bitset\""
+                            ),
+                        ));
+                    }
+                }
+                return Ok(());
+            }
+
             let slot = if meta.path.is_ident("on_add") {
                 &mut paths.on_add
             } else if meta.path.is_ident("on_insert") {
@@ -299,7 +469,8 @@ fn parse_component_hooks(attrs: &[syn::Attribute]) -> Result<ComponentHookPaths,
             } else {
                 return Err(meta.error(
                     "unknown #[component(...)] key; \
-                     valid keys: on_add, on_insert, on_replace, on_remove, no_bundle",
+                     valid keys: on_add, on_insert, on_replace, on_remove, no_bundle, \
+                     storage = \"bitset\"",
                 ));
             };
 
