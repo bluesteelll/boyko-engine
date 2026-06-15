@@ -28,9 +28,19 @@ Full ECS core + scheduler + the entire feature line is landed:
 ## Remaining gaps (prioritized)
 
 ### P0 — foundational, unlock multiple downstream features
-- **Reflection / runtime type registry.** No field-level type introspection
-  (Bevy `bevy_reflect`). Blocks editors, generic serialization, scripting,
-  runtime inspection. The single highest-leverage gap.
+- **Reflection / runtime type registry — OPTIONAL / tooling-driven, NOT a perf
+  risk.** No field-level type introspection (Bevy `bevy_reflect`). Enables
+  editors, generic serialization, scripting, runtime inspection. **Perf note
+  (a real concern, answered):** reflection is a BOUNDARY feature — the ECS hot
+  path (query iter / spawn / schedule) is statically monomorphized and never
+  touches it; reflection is invoked only at serialize/inspect/script boundaries
+  (cold, infrequent). Designed Bevy/flecs-style — separate crate, opt-in
+  `#[derive(Reflect)]`, `static` type-info tables, HARD-forbidden on the ECS hot
+  path (same discipline as 14a hooks) → **0% hot-path cost**. It is **only worth
+  doing IF an editor / generic serialization / scripting is a goal**; EnTT (the
+  perf-king ECS) ships WITHOUT reflection, and save-load can use a manual
+  per-component serializer without it. So: P0 *conditionally* (tooling), else
+  skippable for a lean perf ECS.
 - **General Relations.** Only the hardcoded `ChildOf`/`Children` exists. flecs'
   headline feature — arbitrary entity↔entity relationships with query traversal
   (`(Likes, *)`, transitive, exclusive). Currently each relation would be
