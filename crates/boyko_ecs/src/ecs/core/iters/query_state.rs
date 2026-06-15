@@ -211,6 +211,81 @@ impl QueryState {
         self.structural_generation = current_struct;
     }
 
+    /// Seeds the matched set directly from a bounded candidate archetype
+    /// bitset — the EnableTag candidate-seeded global scan (amendment A1.3 /
+    /// Step 7a).
+    ///
+    /// This is the rebuild primitive for a SOLE single `Enabled<A>` /
+    /// `Disabled<A>` query (empty include mask, no positive data term). It
+    /// **replaces** [`Self::update_archetypes`]'s `1..current_gen` sweep for
+    /// this shape — the candidate bitset (`EnablePresence[A]` snapshot) is the
+    /// membership predicate, so `self.matches(mask)` is never called.
+    ///
+    /// # Boundedness (the M2/C2 resolution)
+    ///
+    /// The walk is popcount-bounded: [`ArchetypeBitSet::for_each_set_bit`]
+    /// visits exactly `candidates.popcount()` ids, never `MAX_ARCHETYPES` and
+    /// never `current_gen`. `EnablePresence[A]` is structurally `<=` the live
+    /// archetype count, so this never degrades into a full-world scan on ANY
+    /// path (delta-add OR the structural full-clear below).
+    ///
+    /// # Two paths (mirroring `update_archetypes`)
+    ///
+    /// * **Structural change** (`structural_generation` bumped — archetype
+    ///   removal / `clear()`): drop the dual structure, then re-push from the
+    ///   candidate snapshot. This purges recycled/removed ids exactly like
+    ///   `update_archetypes`'s ABA rebuild (amendment A1.5), still
+    ///   popcount-bounded.
+    /// * **Creation/enable delta** (no structural change): delta-add only the
+    ///   newly-present candidates the dedup bitset has not yet recorded.
+    ///
+    /// Liveness is intersected via `master.get_archetype(id)`: a stale
+    /// candidate id whose archetype was removed is skipped (identical to
+    /// `update_archetypes`). `push_matched` preserves the QS1 dual-structure
+    /// invariant by construction.
+    pub(crate) fn seed_from_candidates(
+        &mut self,
+        candidates: &ArchetypeBitSet,
+        master: &ArchetypeMaster,
+    ) {
+        let current_gen = master.archetype_generation();
+        let current_struct = master.structural_generation();
+        debug_assert!(
+            self.generation <= current_gen,
+            "QueryState.generation ({:?}) > master.archetype_generation() ({:?})",
+            self.generation,
+            current_gen,
+        );
+        debug_assert!(
+            self.structural_generation <= current_struct,
+            "QueryState.structural_generation ({:?}) > master.structural_generation() ({:?})",
+            self.structural_generation,
+            current_struct,
+        );
+
+        if self.structural_generation != current_struct {
+            // Structural change ⇒ full clear, then re-push from the (bounded)
+            // candidate snapshot. Capacity is retained for amortised O(1).
+            self.matched_archetypes.clear_all();
+            self.matched_ids.clear();
+        }
+
+        // Popcount-bounded walk over the candidate bitset. `push_matched`
+        // O(1)-skips ids already recorded (the delta-add fast path), so a
+        // re-seed with an unchanged candidate set is cheap.
+        candidates.for_each_set_bit(|id| {
+            let arch_id = ArchetypeId(id);
+            if !self.matched_archetypes.contains(id)
+                && master.get_archetype(arch_id).is_some()
+            {
+                self.push_matched(arch_id);
+            }
+        });
+
+        self.generation = current_gen;
+        self.structural_generation = current_struct;
+    }
+
     /// Tests whether a component mask satisfies the query filters.
     ///
     /// - include: every bit in `self.include` must be set in `mask`.

@@ -23,6 +23,9 @@ pub mod chunk_iter;
 pub mod chunked_data;
 pub mod data;
 pub mod filter;
+// EnableTag Step 7: the `Enabled<T>` / `Disabled<T>` non-archetypal per-row
+// filters over the bitset storage backend.
+pub mod filter_enable;
 pub mod iter;
 pub mod par_chunk;
 pub mod par_iter;
@@ -46,6 +49,7 @@ pub mod term_list;
 pub use chunked_data::ChunkedQueryData;
 pub use data::{Mut, QueryData, ReadOnlyQueryData, Ref};
 pub use filter::{Added, ArchetypalQueryFilter, Changed, Or, QueryFilter, With, Without};
+pub use filter_enable::{Disabled, Enabled};
 pub use iter::{QueryIter, QueryIterMut};
 pub use par_iter::{BatchingStrategy, MIN_ARCHETYPE_FOR_PARALLEL, ParQuery, ParQueryMut};
 pub use query::Query;

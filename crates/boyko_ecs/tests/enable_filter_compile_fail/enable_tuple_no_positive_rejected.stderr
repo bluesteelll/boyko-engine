@@ -1,0 +1,26 @@
+error[E0080]: evaluation panicked: `Enabled<T>`/`Disabled<T>` with no positive term is supported ONLY as a SINGLE sole term (`Query<(), Enabled<A>>`). A tuple of enable terms without a positive archetypal term is not bounded in v1 — add `With<_>` / a data component, or split into separate single-term queries.
+  --> tests/enable_filter_compile_fail/enable_tuple_no_positive_rejected.rs:31:15
+   |
+31 | const _: () = QueryDataState::<(), (Enabled<A>, Enabled<B>)>::assert_query_shape();
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `_` failed inside this call
+   |
+note: inside `QueryDataState::<(), (Enabled<A>, Enabled<B>)>::assert_query_shape`
+  --> src/ecs/core/iters/query/state.rs
+   |
+   |         Self::eval_shape_asserts();
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: inside `QueryDataState::<(), (Enabled<A>, Enabled<B>)>::eval_shape_asserts`
+  --> $RUST/core/src/panic.rs
+   |
+   = note: the failure occurred here
+   |
+  ::: src/ecs/core/iters/query/state.rs
+   |
+   | /         assert!(
+   | |             !F::CONTAINS_ENABLE_TERM
+   | |                 || D::HAS_DATA_COMPONENT
+   | |                 || F::HAS_POSITIVE_ARCHETYPAL
+...  |
+   | |              component, or split into separate single-term queries."
+   | |         );
+   | |_________- in this macro invocation

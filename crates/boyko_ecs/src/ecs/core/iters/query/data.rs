@@ -117,6 +117,19 @@ pub unsafe trait QueryData: Sized {
     /// the lack-of-default-impl forcing explicit declaration.
     const NEEDS_CHANGE_DETECTION: bool;
 
+    /// EnableTag C2 — `true` iff this data touches at least one real component
+    /// (`&T`, `&mut T`, `Ref<T>`, `Mut<T>`, or a tuple containing one); `false`
+    /// for `()`.
+    ///
+    /// A real data component contributes a positive include bit, bounding an
+    /// `Enabled<T>`/`Disabled<T>` term's matched set. Feeds the `(D, F)`
+    /// shape const-assert at the construction seam (Step 7a).
+    ///
+    /// No default — every impl MUST declare (mirrors the `NEEDS_CHANGE_DETECTION`
+    /// I4 discipline: a silent fallthrough on a future leaf would
+    /// mis-classify the query shape).
+    const HAS_DATA_COMPONENT: bool;
+
     /// Builds the per-system [`Self::State`].
     ///
     /// Called once per `(system, world)` pair at registration time. Performs
@@ -320,6 +333,8 @@ unsafe impl<T: Component> QueryData for &T {
     const IS_READ_ONLY: bool = true;
     // Phase 12.5 Track B NCD2: `&T` reads no per-row ticks.
     const NEEDS_CHANGE_DETECTION: bool = false;
+    // EnableTag C2: `&T` is a real data component (positive include bit).
+    const HAS_DATA_COMPONENT: bool = true;
 
     #[inline]
     fn init_state(_world: &mut EcsMaster) -> Self::State {
@@ -494,6 +509,8 @@ unsafe impl<T: Component> QueryData for &mut T {
     // does NOT consult per-row tick fields (the tick bump for `&mut T`
     // queries lives in `Mut<T>`'s deref guard, not here).
     const NEEDS_CHANGE_DETECTION: bool = false;
+    // EnableTag C2: `&mut T` is a real data component (positive include bit).
+    const HAS_DATA_COMPONENT: bool = true;
 
     #[inline]
     fn init_state(_world: &mut EcsMaster) -> Self::State {
@@ -728,6 +745,8 @@ unsafe impl<T: Component> QueryData for Ref<'_, T> {
     // dispatcher MUST forward `meta` so `set_table_*` can copy
     // `last_run` / `this_run` into the Fetch.
     const NEEDS_CHANGE_DETECTION: bool = true;
+    // EnableTag C2: `Ref<T>` is a real data component (positive include bit).
+    const HAS_DATA_COMPONENT: bool = true;
 
     #[inline]
     fn init_state(_world: &mut EcsMaster) -> Self::State {
@@ -1078,6 +1097,8 @@ unsafe impl<T: Component> QueryData for Mut<'_, T> {
     // deref guard and `is_added`/`is_changed`; the dispatcher MUST forward
     // `meta`.
     const NEEDS_CHANGE_DETECTION: bool = true;
+    // EnableTag C2: `Mut<T>` is a real data component (positive include bit).
+    const HAS_DATA_COMPONENT: bool = true;
 
     #[inline]
     fn init_state(_world: &mut EcsMaster) -> Self::State {
@@ -1276,6 +1297,10 @@ macro_rules! impl_query_data_tuple {
             // meta-bearing variant for the whole tuple.
             const NEEDS_CHANGE_DETECTION: bool = false $( || $D::NEEDS_CHANGE_DETECTION )*;
 
+            // EnableTag C2: a tuple touches a data component iff ANY element
+            // does (OR-fold) — bounds an enable term's matched set.
+            const HAS_DATA_COMPONENT: bool = false $( || $D::HAS_DATA_COMPONENT )*;
+
             #[inline]
             fn init_state(world: &mut EcsMaster) -> Self::State {
                 ( $( <$D as QueryData>::init_state(world), )* )
@@ -1415,6 +1440,8 @@ unsafe impl QueryData for () {
     const IS_READ_ONLY: bool = true;
     // Phase 12.5 Track B NCD2: vacuous — `()` touches no components.
     const NEEDS_CHANGE_DETECTION: bool = false;
+    // EnableTag C2: `()` touches no data component (no positive include bit).
+    const HAS_DATA_COMPONENT: bool = false;
 
     #[inline] fn init_state(_world: &mut EcsMaster) -> Self::State {}
     #[inline] fn init_access(_state: &Self::State, _access_set: &mut FilteredAccessSet) {}
@@ -1517,6 +1544,7 @@ macro_rules! impl_query_data_tuple_too_large {
             // Vacuous — every method is a `panic!()` at monomorphisation,
             // so the const is unobservable on any reachable path.
             const NEEDS_CHANGE_DETECTION: bool = false;
+            const HAS_DATA_COMPONENT: bool = false;
 
             fn init_state(_world: &mut EcsMaster) -> Self::State {
                 panic!(

@@ -49,6 +49,7 @@ use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 use loom::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 
 use crate::ecs::core::component::component_registry::MAX_COMPONENTS;
+use crate::ecs::core::iters::archetype_bit_set::ArchetypeBitSet;
 use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId};
 
 /// `u64` words per tag's archetype bitset. `16 * 64 = 1024` archetype ids of
@@ -194,6 +195,91 @@ impl EnablePresence {
     #[inline]
     pub(crate) fn epoch(&self) -> u64 {
         self.epoch.load(Ordering::Acquire)
+    }
+
+    /// Bounded snapshot of `tag`'s present-archetype bitset (amendment A1.4 /
+    /// D7 candidate-seeded global scan).
+    ///
+    /// Returns an owned [`ArchetypeBitSet`] whose set bits are exactly the
+    /// archetype ids that currently own an allocated `EnableColumn` for `tag`.
+    /// A never-allocated tag (null slot) yields an empty bitset (zero
+    /// candidates ⇒ a never-toggled tag has no enabled/disabled rows — correct).
+    ///
+    /// The body is a fixed 16-`AtomicU64` Acquire-load loop (NOT a memcpy of
+    /// atomics — the per-tag words are `AtomicU64`). It is bounded by
+    /// construction: it touches one tag's 16 words, never the live-archetype
+    /// count. The caller (`QueryState::seed_from_candidates`) then walks the
+    /// snapshot's set bits popcount-bounded.
+    ///
+    /// Concurrency (amendment A1.4 / D1): a plain bounded read under the v1
+    /// single-threaded `&mut EcsMaster` / apply-window discipline — `new` /
+    /// `update` run at registration or the apply-window barrier where no worker
+    /// is live. The atomics are the D7 forward seam; no epoch-retry protocol is
+    /// needed in v1 because no concurrent writer exists.
+    pub(crate) fn snapshot_present(&self, tag: ComponentId) -> ArchetypeBitSet {
+        let mut out = ArchetypeBitSet::new();
+        if tag.0 >= MAX_COMPONENTS {
+            return out;
+        }
+        // Acquire: pairs with the publishing Release CAS in `get_or_alloc_words`.
+        let ptr = self.tags[tag.0].load(Ordering::Acquire);
+        if ptr.is_null() {
+            // Never-toggled tag ⇒ no present archetypes ⇒ empty candidate set.
+            return out;
+        }
+        // SAFETY: `ptr` is non-null ⇒ published by `get_or_alloc_words` via
+        //   `Box::into_raw`; never freed until `self` is dropped (see `Drop`);
+        //   the Acquire load above synchronises with the publishing Release CAS
+        //   so the array is fully initialised. A shared `&` reborrow only; the
+        //   words are `AtomicU64`, so a concurrent `fetch_or` cannot tear the
+        //   per-word loads below.
+        let words = unsafe { &*ptr };
+        // `PRESENCE_WORDS == ARCH_BITSET_WORDS == 16` (both = MAX_ARCHETYPES/64);
+        // the index spaces coincide, so word `i` of the presence array maps to
+        // word `i` of the output bitset 1:1.
+        for (i, word) in words.iter().enumerate() {
+            // Acquire: pairs with the `fetch_or` Release in `note_column_alloc`.
+            out.set_word(i, word.load(Ordering::Acquire));
+        }
+        out
+    }
+
+    /// Clears `arch`'s presence bit across **every** tag (amendment A4.4 /
+    /// Step 4 archetype-removal wiring).
+    ///
+    /// Called only on archetype removal / `clear()` — a rare structural-
+    /// generation bump, off the hot path. Without it, a recycled `ArchetypeId`
+    /// whose new archetype lacks a column could falsely persist as a candidate
+    /// for the candidate-seeded global scan; `seed_from_candidates`'s liveness
+    /// and structural-rebuild guards already drop it, but clearing the bit keeps
+    /// the presence oracle exact.
+    ///
+    /// Cost: a `MAX_COMPONENTS`-slot walk skipping null tags (no per-archetype
+    /// reverse index exists). Acceptable — it runs only on a structural bump.
+    /// The bit clear mirrors `note_column_alloc`'s `fetch_or(Release)` with
+    /// `fetch_and(Release)`.
+    pub(crate) fn clear_archetype(&self, arch: ArchetypeId) {
+        if arch.0 >= PRESENCE_CAPACITY {
+            return;
+        }
+        let word = arch.0 >> 6;
+        let mask = !(1u64 << (arch.0 & 63));
+        for slot in &self.tags {
+            // Acquire: pairs with the publishing Release CAS in
+            // `get_or_alloc_words` — a non-null pointer is fully initialised.
+            let ptr = slot.load(Ordering::Acquire);
+            if ptr.is_null() {
+                continue;
+            }
+            // SAFETY: non-null ⇒ published via `Box::into_raw`, never freed
+            //   until `Drop`, Acquire-synchronised with the publish ⇒ fully
+            //   initialised. Shared `&` reborrow only; `AtomicU64::fetch_and`
+            //   is a sound concurrent mutation of the published word.
+            let words = unsafe { &*ptr };
+            // Release: publishes the cleared bit to a subsequent Acquire reader,
+            // mirroring `note_column_alloc`'s `fetch_or(Release)` discipline.
+            words[word].fetch_and(mask, Ordering::Release);
+        }
     }
 
     /// Lazily publishes (or adopts) the per-tag word array for `tag_idx`,

@@ -41,6 +41,8 @@ pub use crate::ecs::core::schedule::{
 
 // ── Queries ──────────────────────────────────────────────────────────────────
 pub use crate::ecs::core::iters::query::Query;
+// EnableTag filters: per-row gates over the bitset storage backend.
+pub use crate::ecs::core::iters::query::filter_enable::{Disabled, Enabled};
 
 // ── System params ────────────────────────────────────────────────────────────
 pub use crate::ecs::core::system::{Commands, EventReader, EventWriter, Local, Res, ResMut};

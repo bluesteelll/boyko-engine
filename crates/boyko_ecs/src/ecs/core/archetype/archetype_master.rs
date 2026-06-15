@@ -615,12 +615,10 @@ impl ArchetypeMaster {
     /// The query cull (Wave 3) consults [`EnablePresence::contains`] /
     /// [`EnablePresence::epoch`] over the bounded matched set. Per-world (keyed
     /// by this world's `ArchetypeId`s), co-located with `enable_generation`.
-    // Forward seam (EnableTag plan, Step 5): the production consumer is the
-    // `cull_enable_archetypes` pass landing in Wave 3 (Step 7a). Shipped here so
-    // the per-world presence oracle is complete with its accessor in one unit;
-    // `#[allow(dead_code)]` (scoped, justified — mirrors `enable_column_ptr`)
-    // keeps the crate clippy-clean until Wave 3 wires it. Tests exercise it.
-    #[allow(dead_code)]
+    // Production consumer (Wave 3 / Step 7a): the `cull_enable_archetypes`
+    // presence cull and the candidate-seeded global scan in
+    // `QueryDataState::new` / `update` consult this oracle over the bounded
+    // matched set / candidate snapshot.
     #[inline]
     pub(crate) fn enable_presence(&self) -> &EnablePresence {
         &self.enable_presence
@@ -651,6 +649,11 @@ impl ArchetypeMaster {
         debug_assert!(bundle_success, "Registry and bundle are out of sync");
 
         if bundle_success {
+            // EnableTag amendment A4.4 / Step 4: drop this archetype's presence
+            // bit across every tag so a recycled id never falsely persists as a
+            // candidate for the candidate-seeded global scan. Runs only on this
+            // structural-removal path (rare), off the hot path.
+            self.enable_presence.clear_archetype(archetype_id);
             // Signal cache invalidation to every outstanding QueryState.
             // See struct-level doc on `structural_generation`.
             self.structural_generation.bump();
@@ -975,6 +978,15 @@ impl ArchetypeMaster {
         self.archetypes = ArchetypeBundle::new();
         self.registry.clear();
         self.next_archetype_id = ArchetypeId(1);
+        // EnableTag amendment A4.4 / Step 4: `clear()` recycles every
+        // ArchetypeId from 1, so the presence oracle's per-tag bits are wholly
+        // stale. Replace it with a fresh oracle (`&mut self` makes this a plain
+        // field swap — no atomics needed) so no recycled id is a stale
+        // candidate. `enable_generation` is intentionally left monotonic: the
+        // structural bump below already forces the candidate path's full
+        // re-seed (a fresh oracle yields an empty candidate set until the first
+        // post-clear column alloc bumps it again).
+        self.enable_presence = EnablePresence::new();
         // `generation` is NOT reset — see doc comment above.
         // `structural_generation` IS bumped: `clear()` is the maximally-
         // structural change possible. A subsequent `QueryState::iter()` will

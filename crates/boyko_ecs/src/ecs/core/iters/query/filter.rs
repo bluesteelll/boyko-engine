@@ -98,6 +98,64 @@ pub unsafe trait QueryFilter: Sized {
     /// `Or<F>` propagates by AND/OR of inner elements (see NCD4).
     const NEEDS_CHANGE_DETECTION: bool;
 
+    /// EnableTag C2 — `true` iff this filter contributes a **positive
+    /// archetypal include bit** (`With<C>`, or an AND-tuple containing one).
+    ///
+    /// Feeds the `(D, F)`-construction-seam shape const-assert (Step 7a):
+    /// an `Enabled<T>`/`Disabled<T>` term is only admitted when the query is
+    /// bounded by a positive term — a data component (`D::HAS_DATA_COMPONENT`)
+    /// or a `With<_>` (this flag). Additive default `false`; only `With<C>`
+    /// (and tuples containing one — OR-folded by the tuple/`Or` macros) set it
+    /// `true`. Zero ABI change to existing filters; zero runtime cost.
+    const HAS_POSITIVE_ARCHETYPAL: bool = false;
+
+    /// EnableTag C2/C3 — `true` iff this filter contains an `Enabled<T>` or
+    /// `Disabled<T>` term (a leaf, an AND-tuple, or an `Or` containing one —
+    /// OR-folded).
+    ///
+    /// Input to the `(D, F)` shape const-asserts (Step 7a). Additive default
+    /// `false`; only the [`Enabled`](super::filter_enable::Enabled) /
+    /// [`Disabled`](super::filter_enable::Disabled) leaves set it `true`.
+    const CONTAINS_ENABLE_TERM: bool = false;
+
+    /// EnableTag C3 — `true` iff this filter contains a change-detection term
+    /// (`Added<C>` / `Changed<C>`, a leaf or a tuple/`Or` containing one —
+    /// OR-folded).
+    ///
+    /// Input to the C3 shape const-assert (Step 7a): an enable term cannot be
+    /// combined with change detection in one query (point lookups apply the
+    /// enable bit but not change detection, which would silently mislead).
+    /// Additive default `false`; only `Added<C>` / `Changed<C>` set it `true`.
+    const CONTAINS_CHANGE_DETECTION: bool = false;
+
+    /// EnableTag amendment A3.3 — `true` ONLY for a single `Enabled<T>` /
+    /// `Disabled<T>` leaf.
+    ///
+    /// `false` for `()`, `With`, `Without`, `Added`, `Changed`, **every**
+    /// tuple, and `Or` (the tuple/`Or` macros do NOT override the default).
+    /// Distinguishes the candidate-seedable sole-single-enable shape
+    /// (`Query<(), Enabled<A>>`) — admitted by the narrowed `_C2` assert — from
+    /// an enable-tuple with no positive term (still rejected). Consumed by
+    /// Step 7a's `IS_CANDIDATE_SEEDED` classification at the `(D, F)` seam.
+    const IS_SOLE_SINGLE_ENABLE: bool = false;
+
+    /// EnableTag amendment A2.1 — returns the resolved tag id of a SOLE enable
+    /// term.
+    ///
+    /// Default = an `unreachable!()` backstop; overridden ONLY by the
+    /// [`Enabled`](super::filter_enable::Enabled) /
+    /// [`Disabled`](super::filter_enable::Disabled) leaves to return
+    /// `state.id`. Step 7a calls it ONLY under `if const {
+    /// IS_CANDIDATE_SEEDED }` (a sole single enable term), so for any non-sole
+    /// filter the unreachable backstop is never emitted into a reachable path.
+    #[inline]
+    fn sole_enable_tag_id(_state: &Self::State) -> ComponentId {
+        unreachable!(
+            "sole_enable_tag_id called on a filter that is not a sole single \
+             Enabled<T>/Disabled<T> term (IS_SOLE_SINGLE_ENABLE = false)"
+        )
+    }
+
     /// Builds the per-system state. Called once at system registration.
     fn init_state(world: &mut EcsMaster) -> Self::State;
 
@@ -320,6 +378,9 @@ unsafe impl<C: Component> QueryFilter for With<C> {
     // Phase 12.5 Track B NCD2: `With<C>` reads only the archetype mask bit
     // (compile-time on the QueryDataState path); no per-row ticks.
     const NEEDS_CHANGE_DETECTION: bool = false;
+    // EnableTag C2: `With<C>` contributes a positive archetypal include bit
+    // (`aggregate_include` sets `state.id`), so it bounds an enable term.
+    const HAS_POSITIVE_ARCHETYPAL: bool = true;
 
     #[inline]
     fn init_state(_world: &mut EcsMaster) -> Self::State {
@@ -577,6 +638,9 @@ unsafe impl<C: Component> QueryFilter for Added<C> {
     // dispatcher MUST forward `meta` so `set_table_*` captures the
     // (last_run, this_run] window.
     const NEEDS_CHANGE_DETECTION: bool = true;
+    // EnableTag C3: `Added<C>` is a change-detection term; it cannot be mixed
+    // with an enable term in one query (enforced at the (D, F) seam — Step 7a).
+    const CONTAINS_CHANGE_DETECTION: bool = true;
 
     #[inline]
     fn init_state(_world: &mut EcsMaster) -> Self::State {
@@ -788,6 +852,8 @@ unsafe impl<C: Component> QueryFilter for Changed<C> {
     const IS_ARCHETYPAL: bool = false;
     // Phase 12.5 Track B NCD2: same rationale as `Added<C>`.
     const NEEDS_CHANGE_DETECTION: bool = true;
+    // EnableTag C3: `Changed<C>` is a change-detection term — see `Added<C>`.
+    const CONTAINS_CHANGE_DETECTION: bool = true;
 
     #[inline]
     fn init_state(_world: &mut EcsMaster) -> Self::State {
@@ -952,6 +1018,18 @@ macro_rules! impl_query_filter_tuple_and {
             // non-archetypal element forces the meta-bearing dispatch path.
             const NEEDS_CHANGE_DETECTION: bool =
                 false $( || $F::NEEDS_CHANGE_DETECTION )*;
+            // EnableTag C2/C3: OR-fold the shape consts over the elements. An
+            // AND-tuple has a positive archetypal term iff ANY element does;
+            // it contains an enable / change-detection term iff ANY element
+            // does. `IS_SOLE_SINGLE_ENABLE` is deliberately NOT overridden
+            // (stays default `false`) — a tuple is never a single leaf, so an
+            // enable-tuple with no positive term remains compile-rejected.
+            const HAS_POSITIVE_ARCHETYPAL: bool =
+                false $( || $F::HAS_POSITIVE_ARCHETYPAL )*;
+            const CONTAINS_ENABLE_TERM: bool =
+                false $( || $F::CONTAINS_ENABLE_TERM )*;
+            const CONTAINS_CHANGE_DETECTION: bool =
+                false $( || $F::CONTAINS_CHANGE_DETECTION )*;
 
             #[inline]
             fn init_state(world: &mut EcsMaster) -> Self::State {
@@ -1150,8 +1228,13 @@ macro_rules! impl_or_filter_tuple {
         //     read.
         //   - QF3: per-element forwarding; `archetype` shared across
         //     elements.
+        // M1 (EnableTag): every element must be `OrComposable` — the sealed
+        // marker NOT implemented by `Enabled<T>`/`Disabled<T>`. This makes
+        // `Or<(Enabled<A>, ..)>` a compile error: an `Or` folds a
+        // non-archetypal per-row `filter_fetch` against an archetypal
+        // element's unconditional `true`, which would leak disabled rows.
         #[allow(non_snake_case)]
-        unsafe impl< $($F: QueryFilter),* > QueryFilter for Or<( $($F,)* )> {
+        unsafe impl< $($F: QueryFilter + OrComposable),* > QueryFilter for Or<( $($F,)* )> {
             type State = ( $($F::State,)* );
             type Fetch<'w> = ( $($F::Fetch<'w>,)* );
             const IS_ARCHETYPAL: bool = true $( && $F::IS_ARCHETYPAL )*;
@@ -1163,6 +1246,19 @@ macro_rules! impl_or_filter_tuple {
             // `meta` to satisfy the meta-bearing variant of any inner element).
             const NEEDS_CHANGE_DETECTION: bool =
                 false $( || $F::NEEDS_CHANGE_DETECTION )*;
+            // EnableTag C3: OR-fold the enable / change-detection shape consts.
+            // `Enabled`/`Disabled` are NOT `OrComposable` (M1), so an enable
+            // term can never actually reach here, but the fold keeps the const
+            // honest if a future composable enable variant lands.
+            // `HAS_POSITIVE_ARCHETYPAL` stays default `false`: `Or` is a
+            // disjunction whose `aggregate_include` is a no-op — it does NOT
+            // contribute a positive include bit that bounds the matched set,
+            // so it must not be reported as a positive archetypal term.
+            // `IS_SOLE_SINGLE_ENABLE` stays default `false` (never a leaf).
+            const CONTAINS_ENABLE_TERM: bool =
+                false $( || $F::CONTAINS_ENABLE_TERM )*;
+            const CONTAINS_CHANGE_DETECTION: bool =
+                false $( || $F::CONTAINS_CHANGE_DETECTION )*;
 
             #[inline]
             fn init_state(world: &mut EcsMaster) -> Self::State {
@@ -1413,8 +1509,11 @@ macro_rules! impl_query_filter_tuple_and_too_large {
 macro_rules! impl_or_filter_tuple_too_large {
     ( $( ($F:ident, $s:ident, $f:ident) ),* ) => {
         // SAFETY: stub impl with `panic!(...)` method bodies.
+        // M1 (EnableTag): carries the `OrComposable` element bound for parity
+        // with the in-range `impl_or_filter_tuple!` impls — an oversized
+        // `Or<(Enabled<A>, ..)>` is rejected at the bound, not the arity.
         #[allow(non_snake_case, unused_variables)]
-        unsafe impl< $($F: QueryFilter),* > QueryFilter for Or<( $($F,)* )> {
+        unsafe impl< $($F: QueryFilter + OrComposable),* > QueryFilter for Or<( $($F,)* )> {
             type State = ();
             type Fetch<'w> = ();
             const IS_ARCHETYPAL: bool = true;
@@ -1652,6 +1751,83 @@ impl_or_filter_tuple_too_large!(
     (F16, s16, f16), (F17, s17, f17), (F18, s18, f18), (F19, s19, f19),
     (F20, s20, f20), (F21, s21, f21), (F22, s22, f22), (F23, s23, f23)
 );
+
+// ── OrComposable seal (EnableTag M1) ────────────────────────────────────────
+
+/// Sealed marker for [`QueryFilter`] types that may appear **inside** an
+/// [`Or<F>`] combinator.
+///
+/// `Or<(F0, F1, ..)>` requires every element to be `OrComposable`. The seal
+/// exists to compile-reject [`Enabled<T>`](super::filter_enable::Enabled) /
+/// [`Disabled<T>`](super::filter_enable::Disabled) inside `Or` (EnableTag M1):
+/// `Or` folds a non-archetypal element's per-row `filter_fetch` against an
+/// archetypal element's unconditional `true`, which would leak disabled rows on
+/// the archetypal branch. Until a safe `Or`-aware enable Fetch lands (the D7
+/// seam), an enable term in `Or` is forbidden at the type level.
+///
+/// # Membership
+///
+/// * `()`, `With<C>`, `Without<C>`, `Added<C>`, `Changed<C>`.
+/// * Nested `Or<F>` (iff every element of `F` is `OrComposable`).
+/// * Tuples `(F0, .., Fn)` for `n <= 12` (iff every element is `OrComposable`).
+///
+/// NOT members: `Enabled<T>`, `Disabled<T>`.
+///
+/// # Safety
+///
+/// A purely declarative marker — it adds no method contract. `unsafe` only to
+/// signal that membership is a deliberate, audited choice (an element placed in
+/// `Or` must have an `Or`-correct `filter_fetch` / archetypal predicate).
+pub(crate) unsafe trait OrComposable: QueryFilter {}
+
+// SAFETY: `()` is the no-op filter — vacuously `Or`-correct.
+unsafe impl OrComposable for () {}
+
+// SAFETY: `With<C>` is archetypal; its `matches_component_set` is the
+//   `Or`-folded predicate and `filter_fetch` is a vacuous `true`.
+unsafe impl<C: Component> OrComposable for With<C> {}
+
+// SAFETY: `Without<C>` is archetypal; same reasoning as `With<C>`.
+unsafe impl<C: Component> OrComposable for Without<C> {}
+
+// SAFETY: `Added<C>` carries the Round 2 C4 NULL-base short-circuit in
+//   `filter_fetch`, so it returns `false` on `C`-absent archetypes reached via
+//   the `Or` post-filter path — the existing, audited `Or`-correct behaviour.
+unsafe impl<C: Component> OrComposable for Added<C> {}
+
+// SAFETY: `Changed<C>` mirrors `Added<C>` (NULL-base short-circuit).
+unsafe impl<C: Component> OrComposable for Changed<C> {}
+
+// SAFETY: a nested `Or<F>` is `Or`-correct iff every element of `F` is — the
+//   tuple `OrComposable` impl below forces that element-wise. The
+//   `where Or<F>: QueryFilter` clause carries the supertrait obligation (the
+//   `QueryFilter for Or<(..)>` impl is only emitted for tuple `F` whose
+//   elements are `OrComposable`).
+unsafe impl<F: OrComposable> OrComposable for Or<F> where Or<F>: QueryFilter {}
+
+/// Emits an `OrComposable` impl for a tuple `(F0, F1, ..)` — composable iff
+/// every element is. The element bound also satisfies the supertrait
+/// `QueryFilter for (F0, ..)` obligation.
+macro_rules! impl_or_composable_tuple {
+    ( $( $F:ident ),* ) => {
+        // SAFETY: every element is `OrComposable`; the tuple-as-AND
+        //   `QueryFilter` impl preserves the per-element `Or`-correctness.
+        unsafe impl< $($F: OrComposable),* > OrComposable for ( $($F,)* ) {}
+    };
+}
+
+impl_or_composable_tuple!(F0);
+impl_or_composable_tuple!(F0, F1);
+impl_or_composable_tuple!(F0, F1, F2);
+impl_or_composable_tuple!(F0, F1, F2, F3);
+impl_or_composable_tuple!(F0, F1, F2, F3, F4);
+impl_or_composable_tuple!(F0, F1, F2, F3, F4, F5);
+impl_or_composable_tuple!(F0, F1, F2, F3, F4, F5, F6);
+impl_or_composable_tuple!(F0, F1, F2, F3, F4, F5, F6, F7);
+impl_or_composable_tuple!(F0, F1, F2, F3, F4, F5, F6, F7, F8);
+impl_or_composable_tuple!(F0, F1, F2, F3, F4, F5, F6, F7, F8, F9);
+impl_or_composable_tuple!(F0, F1, F2, F3, F4, F5, F6, F7, F8, F9, F10);
+impl_or_composable_tuple!(F0, F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11);
 
 // ── Phase X.A Step 1B — ArchetypalQueryFilter marker trait ──────────────────
 

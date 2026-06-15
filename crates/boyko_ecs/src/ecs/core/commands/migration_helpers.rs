@@ -28,6 +28,7 @@ use crate::ecs::core::bundle::Bundle;
 use crate::ecs::core::change_detection::Tick;
 use crate::ecs::core::component::component::Component;
 use crate::ecs::core::component::component_registry::{self, MAX_COMPONENTS};
+use crate::ecs::core::component::enable::enable_store::SmallList4;
 use crate::ecs::core::component::hooks::archetype_flags::ArchetypeFlags;
 use crate::ecs::core::component::hooks::dispatch::{
     trigger_on_add, trigger_on_insert, trigger_on_remove, trigger_on_replace,
@@ -53,6 +54,122 @@ const MAX_MIGRATION_COLUMNS: usize = MAX_COMPONENTS;
 /// larger than this are rejected at the derive macro layer.
 /// Phase 22: kept in lock-step with the derive macro's ceiling (16).
 const MAX_BUNDLE_ARITY: usize = 16;
+
+// ═════════════════════════════════════════════════════════════════════════════
+// EnableTag Step 6 — cross-archetype enable-bit migration (Decision D1 / D3 /
+// the C4 READ-before-swap ordering).
+//
+// When an entity migrates archetypes, its EnableTag bits live per-archetype-
+// per-row, so they must be COPIED from the source row to the target append row
+// — otherwise a toggled flag is silently lost on the next structural op. The
+// copy is a 3-phase, borrow-free, single-fire snapshot+restore of the MIGRATING
+// entity's bits ONLY:
+//
+//   PHASE 1 (READ): snapshot the source row's bits into a borrow-free owned
+//     `SmallList4<(ComponentId, bool)>` scratch BEFORE the source
+//     `move_out_entity` runs (the C4 ordering — the source swap-fix in
+//     `move_out_entity`, already wired in Wave 2, relocates the source's OTHER
+//     rows' bits, so the migrating entity's bits must be snapshotted first).
+//     The snapshot owns plain `bool`s (never a borrow into the source store),
+//     so it survives the source mutation (W3-r6 — the Phase-11 dangling-slice
+//     class does not apply).
+//
+//   PHASE 2 (WRITE): after the target append (the entity is at `target_row`),
+//     write each snapshotted bit into the target archetype's `EnableStore`. A
+//     genuinely-new target column triggers the one-time O2 bookkeeping
+//     (`note_enable_column_alloc`) — fired by the caller AFTER both
+//     `&mut Archetype` reborrows drop (it touches `world.archetype_master`,
+//     mirroring `set_enable_bit`'s Step 4 borrow discipline).
+//
+// The source-row swap-fix is ALREADY handled by `move_out_entity` (Wave 2,
+// O1-r7); Step 6 is ONLY the migrating entity's source→target copy, so the bit
+// op fires exactly once per migration.
+//
+// 0%-gate (non-enable entities): a source archetype with an empty `EnableStore`
+// skips the entire copy via the `is_empty()` fast path, so a migration of an
+// entity that never touched any EnableTag is byte-identical to before Step 6.
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// PHASE 1: snapshots the migrating entity's enable bits at `source_row` into
+/// the borrow-free `scratch` (cleared first), returning `true` iff any column
+/// was present (i.e. the WRITE phase has work to do).
+///
+/// Gated by [`EnableStore::is_empty`]: a source archetype that owns no enable
+/// columns leaves `scratch` empty and returns `false` (the 0%-gate fast path).
+/// MUST be called BEFORE the source `move_out_entity` (the C4 READ-before-swap
+/// ordering — see the module banner above).
+#[inline]
+fn read_source_enable_bits(
+    source: &Archetype,
+    source_row: usize,
+    scratch: &mut SmallList4<(ComponentId, bool)>,
+) -> bool {
+    // 0%-gate: skip the snapshot for an enable-free source.
+    if source.enable_store.is_empty() {
+        scratch.clear();
+        return false;
+    }
+    // Borrow-free Copy snapshot (W3-r6): `scratch` owns its bools and does NOT
+    // borrow `source`, so it survives the later source `move_out_entity`.
+    source.enable_store.read_row_bits(source_row, scratch);
+    !scratch.is_empty()
+}
+
+/// PHASE 2: writes the snapshotted `scratch` bits into `target`'s `EnableStore`
+/// at `target_row`, appending each tag whose first column had to be allocated to
+/// `newly_allocated` so the caller can fire the one-time O2 bookkeeping once the
+/// `&mut Archetype` reborrows drop.
+///
+/// A clear (`false`) bit never allocates a column or page
+/// ([`EnableStore::write_row_bit`] short-circuits it), so only a `true` bit into
+/// a previously-absent target column counts as a new allocation.
+#[inline]
+fn write_target_enable_bits(
+    target: &mut Archetype,
+    target_row: usize,
+    scratch: &SmallList4<(ComponentId, bool)>,
+    newly_allocated: &mut SmallList4<ComponentId>,
+) {
+    if scratch.is_empty() {
+        return;
+    }
+    let reserve_rows = target.enable_reserve_rows();
+    for &(tag, value) in scratch.iter() {
+        // A `true` bit into an absent target column allocates it — record that
+        // tag so the caller fires `note_enable_column_alloc` exactly once (O2),
+        // mirroring `Archetype::set_enable_bit`'s `newly_allocated` return.
+        if value && target.enable_store.column(tag).is_none() {
+            newly_allocated.push(tag);
+        }
+        target
+            .enable_store
+            .write_row_bit(tag, target_row, value, reserve_rows);
+    }
+}
+
+/// O2 bookkeeping: records the per-world presence bit + bumps `enable_generation`
+/// once for every target tag whose first column was allocated by the migration
+/// copy ([`write_target_enable_bits`]).
+///
+/// MUST be called with NO `&mut Archetype` reborrow live: it borrows
+/// `world.archetype_master`, which aliases the slab the migration's
+/// `&mut Archetype` reborrows are derived from (mirrors `set_enable_bit`'s
+/// Step-4 discipline — Phase 14a §3.4). An empty list is a no-op (the common
+/// case: no new column, or an enable-free migration).
+#[inline]
+fn fire_enable_column_alloc_bookkeeping(
+    world: &mut EcsMaster,
+    target_archetype_id: ArchetypeId,
+    newly_allocated: &SmallList4<ComponentId>,
+) {
+    if newly_allocated.is_empty() {
+        return;
+    }
+    let master = world.archetype_master_mut();
+    for &tag in newly_allocated.iter() {
+        master.note_enable_column_alloc(tag, target_archetype_id);
+    }
+}
 
 /// Resolves the `(source, target)` archetype-id pair for an insert
 /// migration (plan §6.3). Falls back to `get_or_create_archetype` for the
@@ -199,6 +316,13 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
     let mut bundle_added = [false; MAX_BUNDLE_ARITY];
     let mut bundle_id_count = 0usize;
 
+    // EnableTag Step 6: borrow-free scratch for the migrating entity's enable
+    // bits (READ in Phase 1 before the source swap, WRITTEN into the target row)
+    // and the list of target tags whose first column had to be allocated (O2
+    // bookkeeping fired after the block, when no `&mut Archetype` is live).
+    let mut enable_scratch: SmallList4<(ComponentId, bool)> = SmallList4::new();
+    let mut enable_newly_allocated: SmallList4<ComponentId> = SmallList4::new();
+
     // Phase 14a §3.4 (C2): the entire `source` / `target` `&mut` lifetime is
     // confined to this Phase-1 block. The Step-6 `EntityInland` repoint is
     // HOISTED INTO it (it touches `world.entity_master`, not the archetypes), so
@@ -218,6 +342,13 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
         //   * The reborrows are confined to this block (Phase 1).
         let source: &mut Archetype = unsafe { &mut *source_ptr };
         let target: &mut Archetype = unsafe { &mut *target_ptr };
+
+        // EnableTag Step 6 PHASE 1 (C4 READ-before-swap): snapshot the migrating
+        // entity's enable bits at `source_row` into the borrow-free scratch
+        // BEFORE the source `move_out_entity` (Step 5) relocates the source's
+        // OTHER rows' bits. The 0%-gate `is_empty()` fast path skips this for an
+        // enable-free source.
+        read_source_enable_bits(source, source_row, &mut enable_scratch);
 
         // NEW-1 (use-after-free fix): the prior shape collected the bundle's
         // `&[u8]` slices into a stack array inside `for_each_component_bytes`'s
@@ -390,6 +521,18 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
         target.entity_ids.push(entity.id());
         target.current_index = row + 1;
 
+        // EnableTag Step 6 PHASE 2: restore the snapshotted enable bits into the
+        // target's new row (`new_row`). Must precede the source `move_out_entity`
+        // only insofar as both touch the archetypes — the scratch is borrow-free,
+        // so ordering vs the source swap is immaterial; placed here (before
+        // Step 5) so the whole copy completes while `target` is `&mut`-live.
+        write_target_enable_bits(
+            target,
+            new_row as usize,
+            &enable_scratch,
+            &mut enable_newly_allocated,
+        );
+
         // Step 5: release source's bytes WITHOUT drop (C5 + W-N2). The source
         // slot is bitwise-released and never deref'd, so running no drop here is
         // required for no-double-free:
@@ -427,6 +570,13 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
             EntityInland::new(target_ptr, new_row, entity.generation());
         // <-- `source` / `target` `&mut Archetype` DROP here (block close).
     }
+
+    // EnableTag Step 6 O2: fire the one-time presence + `enable_generation`
+    // bookkeeping for every target column the copy newly allocated. Deferred to
+    // here (no `&mut Archetype` is live) because `note_enable_column_alloc`
+    // borrows `world.archetype_master`, which aliases the slab the dropped
+    // `&mut Archetype` reborrows came from (mirrors `set_enable_bit`'s Step 4).
+    fire_enable_column_alloc_bookkeeping(world, target_archetype_id, &enable_newly_allocated);
 
     // PHASE 2 (§3.4 / P3): fire hooks. The entity is repointed into `target`;
     // both `&mut Archetype` are dead — only `target_ptr` (*mut, Copy) survives.
@@ -511,6 +661,12 @@ pub(crate) fn migrate_entity_remove<C: Component>(
 
     let removed_id = C::component_id();
 
+    // EnableTag Step 6: borrow-free scratch for the migrating entity's enable
+    // bits + the list of target tags whose first column had to be allocated (O2
+    // bookkeeping fired after Phase 3, when no `&mut Archetype` is live).
+    let mut enable_scratch: SmallList4<(ComponentId, bool)> = SmallList4::new();
+    let mut enable_newly_allocated: SmallList4<ComponentId> = SmallList4::new();
+
     // PHASE 1 (§3.5 / C2): confine `source` / `target` `&mut` to this block —
     // collect retained byte slices and push them into `target`. After the push
     // the entity exists in BOTH the source row (`C` still live) and the target
@@ -525,6 +681,13 @@ pub(crate) fn migrate_entity_remove<C: Component>(
         //   `UnsafeCell`-wrapped); confined to Phase 1.
         let source: &mut Archetype = unsafe { &mut *source_ptr };
         let target: &mut Archetype = unsafe { &mut *target_ptr };
+
+        // EnableTag Step 6 PHASE 1 (C4 READ-before-swap): snapshot the migrating
+        // entity's enable bits at `source_row` BEFORE the Phase-3
+        // `move_out_entity` relocates the source's OTHER rows' bits. The scratch
+        // is borrow-free, so it survives that later source mutation (W3-r6).
+        // 0%-gate via `is_empty()`.
+        read_source_enable_bits(source, source_row, &mut enable_scratch);
 
         // Step 1: collect retained byte slices (target ⊂ source). Same cast-
         // via-`*mut u8` E0521 workaround as `migrate_entity_insert`.
@@ -582,6 +745,18 @@ pub(crate) fn migrate_entity_remove<C: Component>(
              ceiling (rows) exhausted (committed capacity grows on demand per \
              Phase X.I) or signature mismatch",
         );
+
+        // EnableTag Step 6 PHASE 2: restore the snapshotted enable bits into the
+        // target's new row while `target` is `&mut`-live (the entity is now in
+        // BOTH rows; `EntityInland` still points at SOURCE until Phase 3 — the
+        // copy writes the TARGET row regardless).
+        write_target_enable_bits(
+            target,
+            new_row as usize,
+            &enable_scratch,
+            &mut enable_newly_allocated,
+        );
+
         new_row
         // <-- `source` / `target` `&mut Archetype` DROP here (block close).
     };
@@ -665,6 +840,12 @@ pub(crate) fn migrate_entity_remove<C: Component>(
 
     world.entity_master.entities_inland[entity.id().0] =
         EntityInland::new(target_ptr, new_row, entity.generation());
+
+    // EnableTag Step 6 O2: fire presence + `enable_generation` bookkeeping for
+    // every target column the copy newly allocated. Deferred to here (after the
+    // Phase-3 `&mut source` dropped) so `note_enable_column_alloc`'s
+    // `&mut world.archetype_master` aliases no live `&mut Archetype` reborrow.
+    fire_enable_column_alloc_bookkeeping(world, target_archetype_id, &enable_newly_allocated);
     // NO drain (Q-A1): runs at depth >= 1 inside the per-system apply; the
     // outermost schedule drive drains.
 }
@@ -876,6 +1057,12 @@ pub(crate) fn migrate_entity_attach_ids(
     );
     let source_row = inland.unit_index() as usize;
 
+    // EnableTag Step 6: borrow-free scratch for the migrating entity's enable
+    // bits + the list of target tags whose first column had to be allocated (O2
+    // bookkeeping fired after the block).
+    let mut enable_scratch: SmallList4<(ComponentId, bool)> = SmallList4::new();
+    let mut enable_newly_allocated: SmallList4<ComponentId> = SmallList4::new();
+
     // Phase 14a §3.4 (C2): the entire `source` / `target` `&mut` lifetime is
     // confined to this Phase-1 block. The EntityInland repoint is HOISTED INTO
     // it (it touches `world.entity_master`, not the archetypes), so after the
@@ -894,6 +1081,11 @@ pub(crate) fn migrate_entity_attach_ids(
         //   * The reborrows are confined to this block (Phase 1).
         let source: &mut Archetype = unsafe { &mut *source_ptr };
         let target: &mut Archetype = unsafe { &mut *target_ptr };
+
+        // EnableTag Step 6 PHASE 1 (C4 READ-before-swap): snapshot the migrating
+        // entity's enable bits BEFORE the source `move_out_entity` (Step 4)
+        // relocates the source's OTHER rows' bits. 0%-gate via `is_empty()`.
+        read_source_enable_bits(source, source_row, &mut enable_scratch);
 
         debug_assert!(
             added.iter().all(|&cid| !source.component_ids().contains(&cid)),
@@ -996,6 +1188,15 @@ pub(crate) fn migrate_entity_attach_ids(
         target.entity_ids.push(entity.id());
         target.current_index = row + 1;
 
+        // EnableTag Step 6 PHASE 2: restore the snapshotted enable bits into the
+        // target's new row while `target` is `&mut`-live.
+        write_target_enable_bits(
+            target,
+            new_row as usize,
+            &enable_scratch,
+            &mut enable_newly_allocated,
+        );
+
         // Step 4: release source's bytes WITHOUT drop (C5 + W-N2). Every
         // retained value was memcpy'd into target (Step 1) and now belongs to
         // the target row — dropping the source copy would double-free. The
@@ -1024,6 +1225,10 @@ pub(crate) fn migrate_entity_attach_ids(
             EntityInland::new(target_ptr, new_row, entity.generation());
         // <-- `source` / `target` `&mut Archetype` DROP here (block close).
     }
+
+    // EnableTag Step 6 O2: fire presence + `enable_generation` bookkeeping for
+    // every target column the copy newly allocated (no `&mut Archetype` live).
+    fire_enable_column_alloc_bookkeeping(world, target_archetype_id, &enable_newly_allocated);
 
     // PHASE 2 (§3.4): fire on_add, then on_insert, for the ADDED ids. The
     // entity is repointed into `target`; both `&mut Archetype` are dead —
@@ -1128,6 +1333,12 @@ pub(crate) fn migrate_entity_detach_ids(
     );
     let source_row = inland.unit_index() as usize;
 
+    // EnableTag Step 6: borrow-free scratch for the migrating entity's enable
+    // bits + the list of target tags whose first column had to be allocated (O2
+    // bookkeeping fired after Phase 3, when no `&mut Archetype` is live).
+    let mut enable_scratch: SmallList4<(ComponentId, bool)> = SmallList4::new();
+    let mut enable_newly_allocated: SmallList4<ComponentId> = SmallList4::new();
+
     // PHASE 1 (§3.5 / C2): confine `source` / `target` `&mut` to this block —
     // collect retained byte slices and push them into `target`. After the push
     // the entity exists in BOTH the source row (removed ids still live) and
@@ -1143,6 +1354,12 @@ pub(crate) fn migrate_entity_detach_ids(
         //   `UnsafeCell`-wrapped); confined to Phase 1.
         let source: &mut Archetype = unsafe { &mut *source_ptr };
         let target: &mut Archetype = unsafe { &mut *target_ptr };
+
+        // EnableTag Step 6 PHASE 1 (C4 READ-before-swap): snapshot the migrating
+        // entity's enable bits at `source_row` BEFORE the Phase-3
+        // `move_out_entity` relocates the source's OTHER rows' bits. The scratch
+        // is borrow-free (W3-r6). 0%-gate via `is_empty()`.
+        read_source_enable_bits(source, source_row, &mut enable_scratch);
 
         debug_assert!(
             removed.iter().all(|&cid| source.has_component_id(cid)),
@@ -1222,6 +1439,16 @@ pub(crate) fn migrate_entity_detach_ids(
              ceiling (rows) exhausted (committed capacity grows on demand per \
              Phase X.I) or signature mismatch",
         );
+
+        // EnableTag Step 6 PHASE 2: restore the snapshotted enable bits into the
+        // target's new row while `target` is `&mut`-live.
+        write_target_enable_bits(
+            target,
+            new_row as usize,
+            &enable_scratch,
+            &mut enable_newly_allocated,
+        );
+
         new_row
         // <-- `source` / `target` `&mut Archetype` DROP here (block close).
     };
@@ -1317,6 +1544,11 @@ pub(crate) fn migrate_entity_detach_ids(
 
     world.entity_master.entities_inland[entity.id().0] =
         EntityInland::new(target_ptr, new_row, entity.generation());
+
+    // EnableTag Step 6 O2: fire presence + `enable_generation` bookkeeping for
+    // every target column the copy newly allocated (after the Phase-3
+    // `&mut source` dropped — no live `&mut Archetype` reborrow).
+    fire_enable_column_alloc_bookkeeping(world, target_archetype_id, &enable_newly_allocated);
     // NO drain (Q-A1): the caller owns the drain — see `migrate_entity_attach_ids`.
 }
 
@@ -1403,4 +1635,480 @@ pub(crate) fn retag_in_place(world: &mut EcsMaster, entity: Entity, ids: &[Compo
         }
     }
     // NO drain (Q-A1): the caller owns the drain — see `migrate_entity_attach_ids`.
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// EnableTag Step 6 — cross-archetype enable-bit copy tests.
+//
+// Fixed component ids live in the grep-verified-free block [328, 340) (disjoint
+// from the 320-327 EnableTag-test usage and every other test fixed-id range).
+// The tests drive the four `pub(crate)` migration helpers DIRECTLY so the
+// source/target archetypes and the migrating entity's row are fully controlled;
+// the post-migration target row is read back from `entities_inland`.
+// ═════════════════════════════════════════════════════════════════════════════
+#[cfg(test)]
+mod step6_enable_migration_tests {
+    use std::collections::{HashMap, HashSet};
+
+    use proptest::prelude::*;
+
+    use super::*;
+    use crate::ecs::core::component::component_registry::{self, StorageKind};
+    use crate::ecs::identifiers::primitives::ComponentId;
+
+    // ── Fixed ids: free sub-block [335, 340) ─────────────────────────────────
+    //
+    // The shared lib-test process registers ComponentIds process-globally, so
+    // these must be disjoint from EVERY other `#[cfg(test)]` module in the lib.
+    // The Step-7 wave-mate's `filter_enable.rs` claims 328-330 inside this same
+    // lib-test binary, so this Step-6 module uses the upper sub-block 335-339
+    // (grep-verified free in `src/`) to avoid the Wave-2-class full-suite-only
+    // id-collision regression.
+    //
+    // The `migrate_entity_insert` helper is generic over `B: Bundle`, and the
+    // sealed `Bundle` trait can only be implemented by `#[derive(Bundle)]`, whose
+    // generated code references the EXTERNAL `boyko_ecs` crate path — unavailable
+    // inside this crate. The insert path is therefore covered by the companion
+    // integration test `tests/enable_tag_migration_step6.rs` (which drives the
+    // public `EntityCommands::insert` + a dynamic enable tag, verified via the
+    // public `is_enabled_id`). These in-crate unit tests cover the other three
+    // helpers (`remove` / `attach_ids` / `detach_ids`) DIRECTLY; `attach_ids`
+    // shares the insert path's exact single-block READ-then-WRITE Step-6 shape.
+    const SRC_DATA: ComponentId = ComponentId(335); // table anchor (source+target)
+    const BUNDLE_DATA: ComponentId = ComponentId(336); // removable data component
+    const TAG_ENABLE: ComponentId = ComponentId(337); // enable tag (Bitset), copied bit
+    const TAG_ENABLE2: ComponentId = ComponentId(338); // second enable tag (Bitset)
+    const NORMAL_ZST_TAG: ComponentId = ComponentId(339); // Table ZST tag (attach/detach id)
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct SrcData(u32);
+    impl Component for SrcData {
+        fn component_id() -> ComponentId {
+            SRC_DATA
+        }
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct BundleData(u32);
+    impl Component for BundleData {
+        fn component_id() -> ComponentId {
+            BUNDLE_DATA
+        }
+    }
+
+    /// Enable-tag flag types (classified `StorageKind::Bitset`, mirroring what
+    /// `#[component(storage = "bitset")]` emits — filtered out of every archetype
+    /// signature, so they never enter a migration's component union).
+    #[repr(C)]
+    struct TagEnable;
+    impl Component for TagEnable {
+        fn component_id() -> ComponentId {
+            TAG_ENABLE
+        }
+    }
+    #[repr(C)]
+    struct TagEnable2;
+    impl Component for TagEnable2 {
+        fn component_id() -> ComponentId {
+            TAG_ENABLE2
+        }
+    }
+
+    /// Normal-storage ZST tag (`StorageKind::Table`, size 0): the id attached /
+    /// detached by the dynamic `attach_ids` / `detach_ids` migrations.
+    #[repr(C)]
+    struct NormalZstTag;
+    impl Component for NormalZstTag {
+        fn component_id() -> ComponentId {
+            NORMAL_ZST_TAG
+        }
+    }
+
+    fn register() {
+        component_registry::register_layout::<SrcData>(SRC_DATA.0);
+        component_registry::register_layout::<BundleData>(BUNDLE_DATA.0);
+        component_registry::register_layout::<TagEnable>(TAG_ENABLE.0);
+        component_registry::register_layout::<TagEnable2>(TAG_ENABLE2.0);
+        component_registry::register_layout::<NormalZstTag>(NORMAL_ZST_TAG.0);
+        component_registry::set_storage_kind(TAG_ENABLE.0, StorageKind::Bitset);
+        component_registry::set_storage_kind(TAG_ENABLE2.0, StorageKind::Bitset);
+    }
+
+    /// Spawns one `SrcData` entity into `arch`.
+    fn spawn_src(ecs: &mut EcsMaster, arch: ArchetypeId, v: u32) -> Entity {
+        let d = SrcData(v);
+        // SAFETY (test): `d` outlives the borrow; byte view of a `#[repr(C)]`.
+        let bytes = unsafe {
+            core::slice::from_raw_parts(
+                &d as *const _ as *const u8,
+                core::mem::size_of::<SrcData>(),
+            )
+        };
+        ecs.create_entity(arch, &[(SRC_DATA, bytes)])
+            .expect("spawn must succeed")
+    }
+
+    /// Reads `entity`'s current `(archetype_ptr, row)` from its inland slot.
+    fn current_loc(ecs: &EcsMaster, e: Entity) -> (*mut Archetype, usize) {
+        let inland = ecs.entity_master.entities_inland[e.id().0];
+        assert!(!inland.is_null() && inland.generation() == e.generation());
+        (inland.archetype_ptr(), inland.unit_index() as usize)
+    }
+
+    /// Tests the enable bit for `tag` at `entity`'s current row.
+    fn entity_bit(ecs: &EcsMaster, e: Entity, tag: ComponentId) -> bool {
+        let (arch_ptr, row) = current_loc(ecs, e);
+        // SAFETY (test): `arch_ptr` is live slab provenance (generation-matched);
+        //   a shared reborrow reading an `AtomicU64` enable bit — no `&mut`.
+        let arch = unsafe { &*arch_ptr };
+        match arch.enable_store.column(tag) {
+            Some(col) => col.test(row),
+            None => false,
+        }
+    }
+
+    // ── Per-helper bit-survival tests ────────────────────────────────────────
+
+    #[test]
+    fn remove_migration_preserves_enable_bit() {
+        register();
+        let mut ecs = EcsMaster::new();
+        // Source hosts SrcData + a real data component so the remove has a
+        // distinct target. Use BundleData as the removable component.
+        let src = ecs.create_archetype(&[SRC_DATA, BUNDLE_DATA]);
+        // Spawn with both components.
+        let d = SrcData(1);
+        let b = BundleData(2);
+        // SAFETY (test): both locals outlive the borrow; byte views of #[repr(C)].
+        let sd = unsafe {
+            core::slice::from_raw_parts(&d as *const _ as *const u8, core::mem::size_of::<SrcData>())
+        };
+        let bd = unsafe {
+            core::slice::from_raw_parts(
+                &b as *const _ as *const u8,
+                core::mem::size_of::<BundleData>(),
+            )
+        };
+        let e = ecs
+            .create_entity(src, &[(SRC_DATA, sd), (BUNDLE_DATA, bd)])
+            .expect("spawn");
+        ecs.enable::<TagEnable>(e);
+
+        let target = without_component_archetype_id::<BundleData>(&mut ecs, src)
+            .expect("BundleData is hosted by source");
+        assert_ne!(src, target);
+        migrate_entity_remove::<BundleData>(&mut ecs, e, src, target);
+
+        assert!(
+            entity_bit(&ecs, e, TAG_ENABLE),
+            "remove-migration must copy the enable bit to the target append row"
+        );
+    }
+
+    #[test]
+    fn attach_ids_migration_preserves_enable_bit() {
+        register();
+        let mut ecs = EcsMaster::new();
+        let src = ecs.create_archetype(&[SRC_DATA]);
+        let e = spawn_src(&mut ecs, src, 5);
+        ecs.enable::<TagEnable>(e);
+
+        let added = [NORMAL_ZST_TAG];
+        let target = merged_archetype_id_dyn(&mut ecs, src, &added);
+        assert_ne!(src, target);
+        migrate_entity_attach_ids(&mut ecs, e, src, target, &added);
+
+        assert!(
+            entity_bit(&ecs, e, TAG_ENABLE),
+            "attach_ids-migration must copy the enable bit to the target append row"
+        );
+    }
+
+    #[test]
+    fn detach_ids_migration_preserves_enable_bit() {
+        register();
+        let mut ecs = EcsMaster::new();
+        let src = ecs.create_archetype(&[SRC_DATA, NORMAL_ZST_TAG]);
+        // Spawn with the ZST tag present.
+        let d = SrcData(3);
+        // SAFETY (test): local outlives the borrow; byte view of a #[repr(C)].
+        let sd = unsafe {
+            core::slice::from_raw_parts(&d as *const _ as *const u8, core::mem::size_of::<SrcData>())
+        };
+        let e = ecs
+            .create_entity(src, &[(SRC_DATA, sd), (NORMAL_ZST_TAG, &[])])
+            .expect("spawn");
+        ecs.enable::<TagEnable>(e);
+
+        let removed = [NORMAL_ZST_TAG];
+        let target = without_ids_archetype_id(&mut ecs, src, &removed);
+        assert_ne!(src, target);
+        migrate_entity_detach_ids(&mut ecs, e, src, target, &removed);
+
+        assert!(
+            entity_bit(&ecs, e, TAG_ENABLE),
+            "detach_ids-migration must copy the enable bit to the target append row"
+        );
+    }
+
+    // ── Multi-tag + clear-bit fidelity ──────────────────────────────────────
+
+    #[test]
+    fn attach_migration_preserves_multiple_tags_and_clears() {
+        register();
+        let mut ecs = EcsMaster::new();
+        let src = ecs.create_archetype(&[SRC_DATA]);
+        let e = spawn_src(&mut ecs, src, 1);
+        // TagEnable set, TagEnable2 explicitly toggled then cleared (allocating
+        // its source column so the snapshot carries a `false` for it).
+        ecs.enable::<TagEnable>(e);
+        ecs.enable::<TagEnable2>(e);
+        ecs.disable::<TagEnable2>(e);
+        assert!(ecs.is_enabled::<TagEnable>(e));
+        assert!(!ecs.is_enabled::<TagEnable2>(e));
+
+        let added = [NORMAL_ZST_TAG];
+        let target = merged_archetype_id_dyn(&mut ecs, src, &added);
+        migrate_entity_attach_ids(&mut ecs, e, src, target, &added);
+
+        assert!(entity_bit(&ecs, e, TAG_ENABLE), "set tag must survive");
+        assert!(
+            !entity_bit(&ecs, e, TAG_ENABLE2),
+            "cleared tag must stay cleared at the target (no spurious set)"
+        );
+    }
+
+    // ── 0%-gate: enable-free migration must not allocate an enable column ─────
+
+    #[test]
+    fn no_enable_entity_migration_skips_copy() {
+        register();
+        let mut ecs = EcsMaster::new();
+        let src = ecs.create_archetype(&[SRC_DATA]);
+        let e = spawn_src(&mut ecs, src, 4);
+        // No enable toggle: the source EnableStore stays empty.
+        let enable_before = ecs.archetype_master().enable_generation();
+
+        let added = [NORMAL_ZST_TAG];
+        let target = merged_archetype_id_dyn(&mut ecs, src, &added);
+        migrate_entity_attach_ids(&mut ecs, e, src, target, &added);
+
+        // The fast path skipped the copy: no column allocated anywhere, so
+        // enable_generation is unmoved (the byte-identical-to-pre-Step-6 path).
+        assert_eq!(
+            ecs.archetype_master().enable_generation(),
+            enable_before,
+            "an enable-free migration must not allocate a column / bump enable_generation"
+        );
+        let (arch_ptr, _) = current_loc(&ecs, e);
+        // SAFETY (test): live slab provenance, shared reborrow.
+        let arch = unsafe { &*arch_ptr };
+        assert!(
+            arch.enable_store.is_empty(),
+            "target EnableStore must stay empty for an enable-free migration"
+        );
+    }
+
+    // ── Single-fire: enable_generation bumps exactly once per new column ──────
+
+    #[test]
+    fn single_fire_enable_generation_bumps_once_per_migration() {
+        register();
+        let mut ecs = EcsMaster::new();
+        let src = ecs.create_archetype(&[SRC_DATA]);
+        let e = spawn_src(&mut ecs, src, 2);
+        ecs.enable::<TagEnable>(e); // first source column → one bump already counted
+        let before = ecs.archetype_master().enable_generation();
+
+        let added = [NORMAL_ZST_TAG];
+        let target = merged_archetype_id_dyn(&mut ecs, src, &added);
+        migrate_entity_attach_ids(&mut ecs, e, src, target, &added);
+
+        // Exactly one NEW column was allocated (the target's TagEnable column), so
+        // the migration bookkeeping fires exactly once — never double-counted
+        // (O1-r7: the source swap-fix in move_out_entity allocates no column).
+        assert_eq!(
+            ecs.archetype_master().enable_generation(),
+            before + 1,
+            "a single-tag migration must bump enable_generation exactly once (the new \
+             target column), proving the O2 bookkeeping is not double-fired"
+        );
+
+        // A SECOND migration of another entity carrying the same tag from `src`
+        // into the SAME target reuses the existing target column → no further bump.
+        let e2 = spawn_src(&mut ecs, src, 3);
+        ecs.disable::<TagEnable>(e2); // touches the source column only (already present)
+        ecs.enable::<TagEnable>(e2);
+        let before2 = ecs.archetype_master().enable_generation();
+        let target2 = merged_archetype_id_dyn(&mut ecs, src, &added);
+        assert_eq!(target, target2, "same union resolves to the same target archetype");
+        migrate_entity_attach_ids(&mut ecs, e2, src, target2, &added);
+        assert_eq!(
+            ecs.archetype_master().enable_generation(),
+            before2,
+            "reusing the target's existing column must NOT bump enable_generation again"
+        );
+    }
+
+    // ── Cross-page: source row in page 0, target append in page 1 (>4096) ─────
+
+    #[test]
+    fn cross_page_migration_source_page0_target_page1() {
+        register();
+        let mut ecs = EcsMaster::new();
+        let src = ecs.create_archetype(&[SRC_DATA]);
+        // Pre-fill the target archetype past one 4096-row page so the migrated
+        // entity's append row lands in page 1.
+        let target = ecs.create_archetype(&[SRC_DATA, NORMAL_ZST_TAG]);
+        let fill = ROWS_PER_PAGE_TEST + 1; // 4097 rows in target
+        for i in 0..fill {
+            let d = SrcData(i as u32);
+            // SAFETY (test): local outlives the borrow; #[repr(C)] byte view.
+            let sd = unsafe {
+                core::slice::from_raw_parts(
+                    &d as *const _ as *const u8,
+                    core::mem::size_of::<SrcData>(),
+                )
+            };
+            ecs.create_entity(target, &[(SRC_DATA, sd), (NORMAL_ZST_TAG, &[])])
+                .expect("fill spawn");
+        }
+
+        // Migrating entity: source row 0 (page 0), enable bit set.
+        let e = spawn_src(&mut ecs, src, 99);
+        ecs.enable::<TagEnable>(e);
+        let (_, src_row) = current_loc(&ecs, e);
+        assert_eq!(src_row, 0, "migrating entity is at source page 0");
+
+        let added = [NORMAL_ZST_TAG];
+        migrate_entity_attach_ids(&mut ecs, e, src, target, &added);
+
+        let (_, target_row) = current_loc(&ecs, e);
+        assert!(
+            target_row >= ROWS_PER_PAGE_TEST,
+            "target append row {target_row} must be in page 1 (>= {ROWS_PER_PAGE_TEST})"
+        );
+        assert!(
+            entity_bit(&ecs, e, TAG_ENABLE),
+            "the enable bit must survive a cross-page (page0 -> page1) migration"
+        );
+    }
+
+    // Local mirror of `ROWS_PER_PAGE` (the enable_store paging constant) so the
+    // cross-page test reads naturally without importing the private const.
+    const ROWS_PER_PAGE_TEST: usize = 4096;
+
+    // ── proptest oracle: READ-before-swap correctness under interleaving ──────
+    //
+    // Models a sequence of (toggle, migrate, despawn-causing-swap) operations on
+    // a small entity set and checks the engine's per-entity enable bit against a
+    // ground-truth `HashMap<Entity, HashSet<tag>>`. The migrate step exercises
+    // the Step-6 copy; the despawn step exercises the source swap-fix that the
+    // copy's READ must precede.
+
+    #[derive(Clone, Debug)]
+    enum Op {
+        Enable(usize),
+        Disable(usize),
+        Migrate(usize),
+        Despawn(usize),
+    }
+
+    fn op_strategy(n: usize) -> impl Strategy<Value = Op> {
+        prop_oneof![
+            (0..n).prop_map(Op::Enable),
+            (0..n).prop_map(Op::Disable),
+            (0..n).prop_map(Op::Migrate),
+            (0..n).prop_map(Op::Despawn),
+        ]
+    }
+
+    proptest! {
+        // `failure_persistence: None` keeps proptest from touching the
+        // filesystem, so the test is runnable under Miri's `-Zmiri-disable-
+        // isolation`-free default (the persistence file write is the only fs op).
+        #![proptest_config(ProptestConfig {
+            cases: 48,
+            failure_persistence: None,
+            ..ProptestConfig::default()
+        })]
+        #[test]
+        fn enable_bit_survives_migration_and_swap_oracle(
+            ops in {
+                const N: usize = 6;
+                proptest::collection::vec(op_strategy(N), 1..40)
+            }
+        ) {
+            register();
+            let mut ecs = EcsMaster::new();
+            let src = ecs.create_archetype(&[SRC_DATA]);
+
+            // Live entities indexed by their original spawn slot; None once
+            // despawned. The oracle tracks the set of set tags per slot.
+            const N: usize = 6;
+            let mut ents: Vec<Option<Entity>> = Vec::with_capacity(N);
+            let mut oracle: HashMap<usize, HashSet<ComponentId>> = HashMap::new();
+            for i in 0..N {
+                let e = spawn_src(&mut ecs, src, i as u32);
+                ents.push(Some(e));
+                oracle.insert(i, HashSet::new());
+            }
+
+            for op in ops {
+                match op {
+                    Op::Enable(i) => {
+                        if let Some(e) = ents[i] {
+                            ecs.enable::<TagEnable>(e);
+                            oracle.get_mut(&i).unwrap().insert(TAG_ENABLE);
+                        }
+                    }
+                    Op::Disable(i) => {
+                        if let Some(e) = ents[i] {
+                            ecs.disable::<TagEnable>(e);
+                            oracle.get_mut(&i).unwrap().remove(&TAG_ENABLE);
+                        }
+                    }
+                    Op::Migrate(i) => {
+                        if let Some(e) = ents[i] {
+                            // Only migrate from `src` (single-hop): resolve a
+                            // distinct target and copy the bit.
+                            let cur = current_loc(&ecs, e).0;
+                            // SAFETY (test): live slab provenance, shared read.
+                            let cur_id = unsafe { (*cur).id() };
+                            let target = merged_archetype_id_dyn(
+                                &mut ecs, cur_id, &[NORMAL_ZST_TAG],
+                            );
+                            if target != cur_id {
+                                migrate_entity_attach_ids(
+                                    &mut ecs, e, cur_id, target, &[NORMAL_ZST_TAG],
+                                );
+                            }
+                        }
+                    }
+                    Op::Despawn(i) => {
+                        if let Some(e) = ents[i] {
+                            ecs.despawn_without_children(e);
+                            ents[i] = None;
+                            oracle.remove(&i);
+                        }
+                    }
+                }
+            }
+
+            // Verify every live entity's enable bit matches the oracle.
+            for (i, slot) in ents.iter().enumerate() {
+                if let Some(e) = slot {
+                    let want = oracle.get(&i).map(|s| s.contains(&TAG_ENABLE)).unwrap_or(false);
+                    let got = entity_bit(&ecs, *e, TAG_ENABLE);
+                    prop_assert_eq!(
+                        got, want,
+                        "entity slot {} enable bit mismatch (got {}, want {})",
+                        i, got, want
+                    );
+                }
+            }
+        }
+    }
 }

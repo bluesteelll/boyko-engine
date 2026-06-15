@@ -77,6 +77,25 @@ impl ArchetypeBitSet {
         self.bits = [0u64; ARCH_BITSET_WORDS];
     }
 
+    /// Overwrites word `word_idx` with `value`.
+    ///
+    /// Used by `EnablePresence::snapshot_present` to build a plain bitset from
+    /// the per-tag `AtomicU64` words in one pass (word index spaces coincide —
+    /// both arrays are `MAX_ARCHETYPES / 64 == 16` words wide).
+    ///
+    /// # Panics
+    /// Panics (debug) if `word_idx >= ARCH_BITSET_WORDS`.
+    #[inline]
+    pub fn set_word(&mut self, word_idx: usize, value: u64) {
+        debug_assert!(
+            word_idx < ARCH_BITSET_WORDS,
+            "invariant: word_idx {} < ARCH_BITSET_WORDS ({})",
+            word_idx,
+            ARCH_BITSET_WORDS,
+        );
+        self.bits[word_idx] = value;
+    }
+
     /// Clears the bit for `archetype_id`. Required by
     /// `QueryState::remove_matched_at` to preserve the M1/QS1
     /// dual-structure invariant.
@@ -101,6 +120,27 @@ impl ArchetypeBitSet {
     #[inline]
     pub fn popcount(&self) -> u32 {
         self.bits.iter().map(|w| w.count_ones()).sum()
+    }
+
+    /// Invokes `f` with each set archetype id, in ascending order.
+    ///
+    /// The walk is **popcount-bounded**: each word is consumed via a
+    /// `trailing_zeros` + clear-lowest-set-bit loop, so the body runs exactly
+    /// `popcount()` times, never `MAX_ARCHETYPES`. This is the bounded
+    /// enumeration primitive the EnableTag candidate-seeded global scan
+    /// (`QueryState::seed_from_candidates`, amendment A1.3) walks — it must
+    /// never degrade into a full `0..MAX_ARCHETYPES` sweep (the M2 hazard).
+    #[inline]
+    pub fn for_each_set_bit(&self, mut f: impl FnMut(usize)) {
+        for (word_idx, &word) in self.bits.iter().enumerate() {
+            let mut w = word;
+            while w != 0 {
+                let bit = w.trailing_zeros() as usize;
+                f((word_idx << 6) | bit);
+                // Clear the lowest set bit; the loop runs once per set bit.
+                w &= w - 1;
+            }
+        }
     }
 }
 
