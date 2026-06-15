@@ -1320,7 +1320,14 @@ macro_rules! impl_or_filter_tuple {
         #[allow(non_snake_case)]
         unsafe impl< $($F: QueryFilter + OrComposable),* > QueryFilter for Or<( $($F,)* )> {
             type State = ( $($F::State,)* );
-            type Fetch<'w> = ( $($F::Fetch<'w>,)* );
+            // BUG-ENABLE-PRE-1 (Bevy `OrFetch` pattern): each arm's fetch is
+            // paired with a per-archetype `matches: bool` — does THIS arm match
+            // the CURRENT archetype. An archetypal arm (`With`/`Without`) returns
+            // `true` unconditionally from its `filter_fetch` (it assumes the
+            // archetype already admitted it). But under `Or` the archetype may
+            // have been admitted via a DIFFERENT arm, so the unconditional `true`
+            // must be gated by this flag in the non-archetypal per-row fold.
+            type Fetch<'w> = ( $( ($F::Fetch<'w>, bool), )* );
             const IS_ARCHETYPAL: bool = true $( && $F::IS_ARCHETYPAL )*;
             // Phase 12.5 Track B NCD4: `Or<F>` propagates the AND/OR of
             // inner-element flags — any element with `NEEDS_CHANGE_DETECTION
@@ -1376,9 +1383,21 @@ macro_rules! impl_or_filter_tuple {
             #[inline]
             fn init_fetch<'w>(state: &Self::State) -> Self::Fetch<'w> {
                 let ( $($s,)* ) = state;
-                ( $( <$F as QueryFilter>::init_fetch($s), )* )
+                // BUG-ENABLE-PRE-1: each arm's matches flag starts `false`;
+                // `set_table_*` sets it per archetype before any `filter_fetch`
+                // runs (QF3-analogue — the Fetch is refreshed per archetype).
+                ( $( (<$F as QueryFilter>::init_fetch($s), false), )* )
             }
 
+            // BUG-ENABLE-PRE-1: every `set_table_*` variant first forwards to
+            // the arm's own `set_table_*` on `$f.0` (sound even when the arm
+            // does NOT match this archetype: `With`/`Without` are no-ops and
+            // `Added`/`Changed` set a NULL tick base), then records whether the
+            // arm matches THIS archetype in `$f.1`. The per-row `filter_fetch`
+            // then gates each archetypal arm's unconditional `true` by `$f.1`.
+            // The match computation is skipped for a fully-archetypal `Or`
+            // (`filter_fetch` const-folds to `true`, so the flags are never
+            // read) — keeping that path at zero added cost.
             #[inline]
             unsafe fn set_table_readonly<'w>(
                 fetch: &mut Self::Fetch<'w>,
@@ -1392,7 +1411,16 @@ macro_rules! impl_or_filter_tuple {
                     // SAFETY (QF3): per-element forwarding; `archetype`
                     //   carries read-only provenance. `meta` forwarded
                     //   by reference per Round 2 W7.
-                    unsafe { <$F as QueryFilter>::set_table_readonly($f, $s, archetype, meta); }
+                    unsafe { <$F as QueryFilter>::set_table_readonly(&mut $f.0, $s, archetype, meta); }
+                    if !const { Self::IS_ARCHETYPAL } {
+                        // SAFETY: `archetype` is a live `*const Archetype` for
+                        //   the duration of this call (caller contract of this
+                        //   `unsafe fn`); the shared reborrow is scoped to the
+                        //   `component_mask()` read.
+                        $f.1 = <$F as QueryFilter>::matches_component_set(
+                            $s, unsafe { (*archetype).component_mask() },
+                        );
+                    }
                 )*
             }
 
@@ -1408,7 +1436,15 @@ macro_rules! impl_or_filter_tuple {
                 $(
                     // SAFETY (QF3): write-capable `archetype` forwarded
                     //   per-element; `meta` forwarded by reference.
-                    unsafe { <$F as QueryFilter>::set_table_mut($f, $s, archetype, meta); }
+                    unsafe { <$F as QueryFilter>::set_table_mut(&mut $f.0, $s, archetype, meta); }
+                    if !const { Self::IS_ARCHETYPAL } {
+                        // SAFETY: `archetype` is a live `*mut Archetype` for the
+                        //   duration of this call; reborrowed shared for a
+                        //   `component_mask()` read only (no write).
+                        $f.1 = <$F as QueryFilter>::matches_component_set(
+                            $s, unsafe { (*archetype).component_mask() },
+                        );
+                    }
                 )*
             }
 
@@ -1424,7 +1460,14 @@ macro_rules! impl_or_filter_tuple {
                     // SAFETY (QF3): per-element forwarding. NCD4 propagation
                     //   guarantees this method only fires when every inner
                     //   element is `NEEDS_CHANGE_DETECTION = false`.
-                    unsafe { <$F as QueryFilter>::set_table_readonly_no_meta($f, $s, archetype); }
+                    unsafe { <$F as QueryFilter>::set_table_readonly_no_meta(&mut $f.0, $s, archetype); }
+                    if !const { Self::IS_ARCHETYPAL } {
+                        // SAFETY: same as `set_table_readonly` — read-only
+                        //   reborrow of a live `*const Archetype`.
+                        $f.1 = <$F as QueryFilter>::matches_component_set(
+                            $s, unsafe { (*archetype).component_mask() },
+                        );
+                    }
                 )*
             }
 
@@ -1439,7 +1482,14 @@ macro_rules! impl_or_filter_tuple {
                 $(
                     // SAFETY (QF3): write-capable forwarding; same NCD4
                     //   note as the readonly variant.
-                    unsafe { <$F as QueryFilter>::set_table_mut_no_meta($f, $s, archetype); }
+                    unsafe { <$F as QueryFilter>::set_table_mut_no_meta(&mut $f.0, $s, archetype); }
+                    if !const { Self::IS_ARCHETYPAL } {
+                        // SAFETY: same as `set_table_mut` — shared reborrow of a
+                        //   live `*mut Archetype` for a `component_mask()` read.
+                        $f.1 = <$F as QueryFilter>::matches_component_set(
+                            $s, unsafe { (*archetype).component_mask() },
+                        );
+                    }
                 )*
             }
 
@@ -1449,9 +1499,15 @@ macro_rules! impl_or_filter_tuple {
                     return true;
                 }
                 let ( $($f,)* ) = fetch;
+                // BUG-ENABLE-PRE-1: gate each arm's per-row result by its
+                // per-archetype `matches` flag (`$f.1`). An archetypal arm whose
+                // `matches_component_set` was false for THIS archetype must NOT
+                // contribute its unconditional `true` to the OR fold.
                 false $(
-                    // SAFETY (QF1): per-element contract; `row` in range.
-                    || unsafe { <$F as QueryFilter>::filter_fetch($f, row) }
+                    // SAFETY (QF1): per-element contract; `row` in range. The
+                    //   arm's `filter_fetch` is only evaluated when `$f.1` (the
+                    //   arm matches this archetype) holds.
+                    || ( $f.1 && unsafe { <$F as QueryFilter>::filter_fetch(&$f.0, row) } )
                 )*
             }
         }
