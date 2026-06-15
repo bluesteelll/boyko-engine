@@ -64,9 +64,11 @@ use crate::ecs::identifiers::primitives::ArchetypeId;
 ///
 /// The direct API does **not** support change-detection filters. Any
 /// `EcsMaster::query<D, F>()` call with `D::NEEDS_CHANGE_DETECTION ||
-/// F::NEEDS_CHANGE_DETECTION == true` panics at runtime with the canonical
-/// W4 message. Use `Query<D, F>` as a SystemParam inside a system body via
-/// `Schedule` for change-detection queries.
+/// F::NEEDS_CHANGE_DETECTION == true` is a **compile error** (the call fails
+/// to compile via the W4 `const`-assert in `EcsMaster::query`). A `QueryView`
+/// carrying change-detection therefore cannot be constructed at all. Use
+/// `Query<D, F>` as a SystemParam inside a system body via `Schedule` for
+/// change-detection queries.
 ///
 /// # Layout (§10.2, amended by Phase 22 D4)
 ///
@@ -524,11 +526,12 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
     /// # Note (C3-r7-c)
     ///
     /// Non-archetypal **change-detection** filters (`Changed<C>` / `Added<C>`)
-    /// are NOT applied by point lookups — `get` only honors archetypal and
-    /// enable terms. Use iteration ([`Self::iter`]) for per-row change
-    /// detection. (Mixing an enable term with `Changed`/`Added` in one query
-    /// is a compile error, so the misleading partial-filter shape cannot be
-    /// constructed.)
+    /// can never reach a `QueryView`: `EcsMaster::query<D, F>()` rejects any
+    /// change-detection `D`/`F` at compile time (W4 `const`-assert). So `get`
+    /// only ever sees archetypal and enable terms — there is no silent-ignore
+    /// path. For per-row change detection, use `Query<D, F>` as a SystemParam
+    /// inside a system body via `Schedule`. (Independently, mixing an enable
+    /// term with `Changed`/`Added` in one query is also a compile error.)
     ///
     /// # Cost
     ///
@@ -627,8 +630,13 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
     /// # Note (C3-r7-c)
     ///
     /// Non-archetypal **change-detection** filters (`Changed<C>` / `Added<C>`)
-    /// are NOT applied by point lookups; use iteration ([`Self::iter_mut`]) for
-    /// per-row change detection.
+    /// can never reach a `QueryView`: `EcsMaster::query<D, F>()` rejects any
+    /// change-detection `D`/`F` at compile time (W4 `const`-assert). So
+    /// `get_mut` only ever sees archetypal and enable terms — there is no
+    /// silent-ignore path. For per-row change detection, use `Query<D, F>` as a
+    /// SystemParam inside a system body via `Schedule`. (Independently, mixing
+    /// an enable term with `Changed`/`Added` in one query is also a compile
+    /// error.)
     pub fn get_mut(&mut self, entity: Entity) -> Option<D::Item<'_>> {
         let state = self.state();
         // SAFETY (U_C2): cell scoped to '_; `world()` returns a shared

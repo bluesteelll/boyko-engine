@@ -14,7 +14,7 @@
 use boyko_ecs::ecs::core::component::component::Component;
 use boyko_ecs::ecs::core::component::component_registry::register_layout;
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
-use boyko_ecs::ecs::core::iters::query::{Changed, Ref, With};
+use boyko_ecs::ecs::core::iters::query::With;
 use boyko_ecs::ecs::identifiers::primitives::ComponentId;
 
 // ── Test component fixtures ──────────────────────────────────────────────
@@ -210,31 +210,14 @@ fn query_view_with_filter_smoke() {
     assert_eq!(collected, vec![42.0], "With<Tag> must match only the Tag-bearing row");
 }
 
-// ── Wave B4 — change-detection panic surface ─────────────────────────────
-
-/// `query_view_change_detection_panic_smoke` (plan §11.1 / §11.2 / I-NEW-4 /
-/// W4) — `EcsMaster::query::<Ref<P>, ()>()` panics with the canonical W4
-/// message.
-#[test]
-#[should_panic(expected = "direct API EcsMaster::query")]
-fn query_view_change_detection_panic_for_ref() {
-    register_test_components();
-    let mut ecs = EcsMaster::new();
-    // Touching `query::<Ref<Position>, ()>()` is enough — the const-folded
-    // panic site fires inside `query<D, F>` before any IO.
-    let _ = ecs.query::<Ref<'_, Position>, ()>();
-}
-
-/// `query_view_change_detection_panic_for_changed_filter` — `Changed<C>`
-/// in the filter slot triggers the same canonical panic (NCD3 propagation
-/// covers `F::NEEDS_CHANGE_DETECTION`).
-#[test]
-#[should_panic(expected = "use Query<D, F> inside a system body via Schedule")]
-fn query_view_change_detection_panic_for_changed_filter() {
-    register_test_components();
-    let mut ecs = EcsMaster::new();
-    let _ = ecs.query::<&Position, Changed<Position>>();
-}
+// ── Wave B4 — change-detection reject surface ────────────────────────────
+//
+// W4 / I-NEW-4 / QV11: `EcsMaster::query<D, F>()` with a change-detection
+// `D`/`F` is now a COMPILE error (the W4 `const`-assert), not a runtime panic.
+// The former `#[should_panic]` smoke tests can no longer compile, so they were
+// converted to `trybuild` `compile_fail` fixtures in
+// `tests/query_change_detection_compile_fail/` (harness
+// `tests/query_change_detection_compile_fail.rs`).
 
 // ── NCD const surface — compile-only assertions ─────────────────────────
 

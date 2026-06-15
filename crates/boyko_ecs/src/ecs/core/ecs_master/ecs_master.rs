@@ -2682,14 +2682,15 @@ impl EcsMaster {
     ///   per-impl `OnceLock::get` + one slot `OnceLock::get` + a
     ///   `state.update(master)` warm short-circuit).
     ///
-    /// # Panics (I-NEW-4 / QV11 / W4 canonical)
+    /// # Compile errors (I-NEW-4 / QV11 / W4 canonical)
     ///
-    /// Panics if `D::NEEDS_CHANGE_DETECTION || F::NEEDS_CHANGE_DETECTION`
-    /// is true (i.e. if `D` or `F` contains `Ref<T>`, `Mut<T>`, `Added<C>`,
-    /// or `Changed<C>`). Change-detection requires `Schedule` context; use
-    /// `Query<D, F>` as a SystemParam inside a system body via `Schedule`.
-    /// The check is `const`-folded at monomorphisation — zero overhead on
-    /// the !NCD path.
+    /// Fails to compile if `D::NEEDS_CHANGE_DETECTION ||
+    /// F::NEEDS_CHANGE_DETECTION` is true (i.e. if `D` or `F` contains
+    /// `Ref<T>`, `Mut<T>`, `Added<C>`, or `Changed<C>`). Change-detection
+    /// requires `Schedule` context; use `Query<D, F>` as a SystemParam inside
+    /// a system body via `Schedule`. The check is a `const`-block assertion
+    /// evaluated at monomorphisation — it produces a compile error at the
+    /// offending call site and const-folds to nothing on the !NCD path.
     ///
     /// [`FunctionSystem`]: crate::ecs::core::system::function_system::FunctionSystem
     pub fn query<D, F>(&mut self) -> QueryView<'_, D, F>
@@ -2697,12 +2698,17 @@ impl EcsMaster {
         D: QueryData + 'static,
         F: QueryFilter + 'static,
     {
-        // QV11 / I-NEW-4: change-detection guard. `if const { ... }` const-folds
-        // at monomorphisation; the panic site is `#[cold] + #[inline(never)]`
-        // and lives outside the hot path's I-cache on !NCD paths.
-        if const { D::NEEDS_CHANGE_DETECTION || F::NEEDS_CHANGE_DETECTION } {
-            query_change_detection_panic::<D, F>();
-        }
+        // QV11 / I-NEW-4 / W4: change-detection guard. The inline `const {}`
+        // block is the CODEGEN-time trigger — it fires at monomorphisation
+        // (build / test), producing a compile error at the call site with no
+        // trait-bound surface (the EnableTag const-reject idiom). The
+        // CHECK-time trigger for `trybuild` `compile_fail` is the public
+        // `assert_query_no_change_detection::<D, F>()` in a `const ITEM`
+        // context — a generic-fn `const {}` block is NOT evaluated under a
+        // metadata-only `cargo check` of an external caller. On the !NCD path
+        // the assert is `assert!(true)` and const-folds to nothing, so the hot
+        // path is byte-identical and the cold panic-fn reference is gone.
+        const { eval_query_no_change_detection::<D, F>() };
 
         let type_id = <(D, F) as QueryTypeKey>::query_type_id();
         debug_assert!(
@@ -2861,26 +2867,50 @@ impl EcsMaster {
     }
 }
 
-/// Phase 12.5 Track B I-NEW-4 / QV11 / W4 — canonical panic site for
-/// `EcsMaster::query<D, F>()` when `D` or `F` carries
-/// `NEEDS_CHANGE_DETECTION = true`. `#[cold] + #[inline(never)]` so the
-/// site lives outside the hot path's I-cache; the wording is the
-/// canonical W4 message, verbatim across plan §0 I-NEW-4, §2.2 QV11,
-/// §4.3 doc-comment, and §5 implementation.
-#[cold]
-#[inline(never)]
-fn query_change_detection_panic<D, F>() -> !
+/// Phase 12.5 Track B I-NEW-4 / QV11 / W4 — the change-detection reject for
+/// [`EcsMaster::query<D, F>()`](EcsMaster::query), shared by both trigger sites.
+///
+/// A `const fn` so it can be forced from a `const ITEM` context (the check-time
+/// trigger) as well as an inline `const {}` block (the codegen-time trigger).
+/// The assert fires when `D` or `F` carries `NEEDS_CHANGE_DETECTION = true`
+/// (`Ref<T>`, `Mut<T>`, `Added<C>`, or `Changed<C>`). The message is a
+/// `&'static str` literal — the offending `(D, F)` is identified by the call
+/// site span, not by `type_name` interpolation (which is not `const`).
+const fn eval_query_no_change_detection<D, F>()
 where
     D: QueryData + 'static,
     F: QueryFilter + 'static,
 {
-    panic!(
-        "direct API EcsMaster::query<{}, {}>() does not support change-detection \
-         filters (D or F has NEEDS_CHANGE_DETECTION = true); use Query<D, F> \
-         inside a system body via Schedule",
-        std::any::type_name::<D>(),
-        std::any::type_name::<F>(),
+    assert!(
+        !(D::NEEDS_CHANGE_DETECTION || F::NEEDS_CHANGE_DETECTION),
+        "EcsMaster::query<D, F>() does not support change-detection filters \
+         (D or F has NEEDS_CHANGE_DETECTION = true, i.e. Ref/Mut/Added/Changed); \
+         use Query<D, F> as a SystemParam inside a system body via Schedule."
     );
+}
+
+/// Check-time trigger for the [`EcsMaster::query`] change-detection reject
+/// (I-NEW-4 / QV11 / W4).
+///
+/// A `pub const fn` so an external `trybuild` `compile_fail` test can force the
+/// assert in a `const ITEM` context:
+///
+/// ```ignore
+/// const _: () = assert_query_no_change_detection::<Ref<'_, P>, ()>();
+/// ```
+///
+/// A `const fn` call inside a `const _: () = ...` item is eagerly
+/// const-evaluated even under a metadata-only `cargo check` — unlike the inline
+/// generic-fn `const {}` block in [`EcsMaster::query`], which fires only at
+/// codegen. Both triggers are required: neither alone covers every build path
+/// (the Phase-12.5 "const must be in a forcing context" lesson, mirrored from
+/// `QueryDataState::assert_query_shape`).
+pub const fn assert_query_no_change_detection<D, F>()
+where
+    D: QueryData + 'static,
+    F: QueryFilter + 'static,
+{
+    eval_query_no_change_detection::<D, F>();
 }
 
 /// Cold-path panic helper for [`EcsMaster::resource`] / [`EcsMaster::resource_mut`].
