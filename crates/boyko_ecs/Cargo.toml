@@ -175,6 +175,15 @@ harness = false
 name = "enable_tags"
 harness = false
 
+# Task #5 — EnableTag positive-term archetype-cull DIAGNOSTIC (profile-first; the
+# cull is NOT implemented). Measures whether visiting no-column archetypes in a
+# `Query<&EtPos, Enabled<EtFlag>>` is measurable against same-binary scenarios
+# (A/B cull_full vs cull_equiv, R-sweep, M-sweep, all-have-column control). See
+# benches/cull_diagnostic.rs.
+[[bench]]
+name = "cull_diagnostic"
+harness = false
+
 # Phase 20 — App frame-driver overhead gates: P20-B1(b) empty-frame envelope
 # (empty_main <= 250 ns/frame) + P20-B2 substep overhead (fixed_loop_1_substep
 # minus bare_empty_schedule_run minus the (b) envelope <= 100 ns/substep).
