@@ -45,6 +45,8 @@ use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::iters::query::Query as BoykoQuery;
 use boyko_ecs::ecs::core::schedule::ScheduleBuilder;
 use boyko_ecs::ecs::core::system::Commands as BoykoCommands;
+use boyko_ecs::ecs::core::system::into_system::IntoSystem as BoykoIntoSystem;
+use boyko_ecs::ecs::core::system::system::System as BoykoSystem;
 use boyko_ecs::ecs::identifiers::primitives::ComponentId;
 use boyko_macros::Bundle;
 use boyko_threadpool::{ThreadPool, ThreadPoolBuilder};
@@ -258,6 +260,64 @@ fn bench_bevy_query_iter_10k(c: &mut Criterion) {
     });
 }
 
+// ── GROUP 2c — honest cached SystemParam steady-state (Wave-0 Decision 1) ──
+//
+// Co-located with g2 so it shares the SAME bench binary and is apples-to-apples
+// with the clean g2 number (the `comparison_v2` copy is shadowed by a per-binary
+// memory-placement artifact that inflates EVERY boyko query iter ~5x there).
+//
+// Builds the `FunctionSystem` ONCE (the `into_system` + `FunctionSystem::new`
+// that g2's `run_system` repeats per-iter), warms `initialize` once outside the
+// timed loop (FS1 short-circuits later calls), then the timed loop calls
+// `run_cached_system(&mut sys)` — mirroring Bevy's pre-built `QueryState`. The
+// g2 vs g2c delta is the per-iter rebuild artifact; the g2c vs g2_bevy delta is
+// the real SystemParam steady-state envelope (get_param + apply/drain tail).
+
+fn build_boyko_system<F, M>(f: F) -> F::System
+where
+    F: BoykoIntoSystem<(), (), M>,
+    F::System: BoykoSystem<Out = ()>,
+{
+    F::into_system(f)
+}
+
+fn bench_boyko_query_iter_10k_cached(c: &mut Criterion) {
+    register_boyko_position();
+    let mut world = EcsMaster::new();
+    let arch = world.create_archetype(&[BOYKO_POS_ID]);
+    for i in 0..N_ENTITIES {
+        world
+            .spawn_one(
+                arch,
+                BoykoPosition {
+                    x: i as f32,
+                    y: 0.0,
+                    z: 0.0,
+                },
+            )
+            .expect("spawn must succeed");
+    }
+
+    static SUM_SINK: AtomicUsize = AtomicUsize::new(0);
+
+    let mut sys = build_boyko_system(|q: BoykoQuery<&BoykoPosition>| {
+        let mut sum = 0.0f32;
+        for p in &q {
+            sum += p.x;
+        }
+        SUM_SINK.store(black_box(sum) as usize, Ordering::Relaxed);
+    });
+    // Warm `initialize` once outside the timed loop (cold 24 KB
+    // FilteredAccessSet alloc is NOT charged per-iter).
+    world.run_cached_system(&mut sys);
+
+    c.bench_function("g2c_boyko_query_iter_10k_cached", |b| {
+        b.iter(|| {
+            world.run_cached_system(black_box(&mut sys));
+        });
+    });
+}
+
 // ===========================================================================
 // GROUP 3 — par_iter over 10k entities (parallel, 8 threads)
 // ===========================================================================
@@ -429,6 +489,7 @@ criterion_group! {
         bench_bevy_50_empty_systems,
         bench_boyko_query_iter_10k,
         bench_bevy_query_iter_10k,
+        bench_boyko_query_iter_10k_cached,
         bench_boyko_par_iter_10k,
         bench_bevy_par_iter_10k,
         bench_boyko_commands_spawn_10k,
