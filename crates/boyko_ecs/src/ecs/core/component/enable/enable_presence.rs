@@ -25,7 +25,7 @@
 //! # Lock-free epoch read (Phase-22.1 `term_list` discipline)
 //!
 //! A column allocation ([`EnablePresence::note_column_alloc`]) sets one bit and
-//! bumps a process-global epoch. A cache (e.g. a `QueryState` that culled an
+//! bumps a per-world epoch. A cache (e.g. a `QueryState` that culled an
 //! enable-bearing query) snapshots [`EnablePresence::epoch`] and re-checks it
 //! before reusing a culled set: an epoch change means "some archetype gained a
 //! column since I last culled" — invalidate and re-cull. The read path is
@@ -67,7 +67,7 @@ pub(crate) const PRESENCE_CAPACITY: usize = PRESENCE_WORDS * 64;
 /// set in place with `fetch_or`.
 type PresenceWords = [AtomicU64; PRESENCE_WORDS];
 
-/// Process-global per-tag archetype-presence bitset — the EnableTag cull
+/// Per-world per-tag archetype-presence bitset — the EnableTag cull
 /// oracle (Decision D1 / D2).
 ///
 /// One lazily-allocated `Box<[AtomicU64; 16]>` per EnableTag id, indexed by the

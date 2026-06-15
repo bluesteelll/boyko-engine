@@ -21,7 +21,8 @@ use crate::ecs::core::archetype::archetype::{Archetype, Column};
 use crate::ecs::core::archetype::archetype_signature::ArchetypeSignature;
 use crate::ecs::core::component::component_mask::ComponentMask;
 use crate::ecs::core::component::component_pool_bundle::ComponentPoolBundle;
-use crate::ecs::core::component::component_registry::MAX_COMPONENTS;
+use crate::ecs::core::component::component_registry::{self, MAX_COMPONENTS};
+use crate::ecs::core::component::enable::enable_store::EnableStore;
 use crate::ecs::core::component::hooks::archetype_flags::ArchetypeFlags;
 use crate::ecs::core::iters::MAX_ARCHETYPES;
 use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId, InlandArchetypeId};
@@ -438,7 +439,19 @@ impl ArchetypeBundle {
         // Build the signature mask up-front so it can be written directly
         // into the slot — avoids an &mut self.signature reborrow after
         // in-place construction.
-        let mask = ComponentMask::from_components(component_ids);
+        //
+        // EnableTag C1 premise (Step 4 / Decision D5): `StorageKind::Bitset`
+        // ids are FILTERED OUT of the signature here, the in-place twin of
+        // `Archetype::create_by_ids`. Paired with the pool skip in
+        // `register_component_inplace` below, a bitset id never enters the
+        // signature and never gains a `ComponentPool` (D1 inv 3).
+        let mut mask = ComponentMask::new();
+        for &cid in component_ids {
+            if component_registry::storage_kind(cid.0) == component_registry::StorageKind::Bitset {
+                continue;
+            }
+            mask.set(cid);
+        }
         let signature = ArchetypeSignature::new(mask);
 
         // F4: mint via the sole `&self` helper (`UnsafeCell::raw_get`).
@@ -467,6 +480,12 @@ impl ArchetypeBundle {
                 0u8,
                 MAX_COMPONENTS,
             );
+            // EnableTag plan (Step 4): the new `enable_store` field MUST be
+            // initialised on the in-place slab path (U13) or the slot is
+            // partially uninit (UB). An empty `EnableStore` allocates nothing —
+            // an archetype that never toggles an enable tag pays only the
+            // inline `SmallList4` header.
+            addr_of_mut!((*slot_ptr).enable_store).write(EnableStore::new());
             addr_of_mut!((*slot_ptr).id).write(archetype_id);
             addr_of_mut!((*slot_ptr).component_pools).write(ComponentPoolBundle::new());
             addr_of_mut!((*slot_ptr).current_index).write(0usize);

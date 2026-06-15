@@ -466,12 +466,12 @@ pub fn storage_kind(component_id: usize) -> StorageKind {
 /// table component and an enable tag). In release the first writer's kind is
 /// preserved (the store is skipped) so a buggy double-classify degrades to the
 /// initial decision rather than silently corrupting live archetype layouts.
-// Forward capability (EnableTag plan, Step 1): the production consumers are the
-// archetype-construction signature filter (Step 4) and the derive's
-// `storage = "bitset"` arm (Step 10). Until those waves land there is no
-// non-test caller, so the dead-code lint is expected and silenced rather than
-// papered over — mirroring `set_next_id_for_test`.
-#[allow(dead_code)]
+// Step 4/5 (Wave 2) wired live consumers: the archetype-construction signature
+// filter (`Archetype::create_by_ids` / `register_component_inplace`) reads
+// `storage_kind`, and `try_register_enable_tag_by_name` (now live via
+// `EcsMaster::register_enable_tag`) writes through this. The Step-1 forward-seam
+// `#[allow(dead_code)]` is therefore removed. (The derive's `storage = "bitset"`
+// arm — Step 10 — is the remaining future writer.)
 pub(crate) fn set_storage_kind(component_id: usize, kind: StorageKind) {
     debug_assert!(
         component_id < MAX_COMPONENTS,
@@ -519,11 +519,10 @@ pub(crate) fn set_storage_kind(component_id: usize, kind: StorageKind) {
 /// before any archetype can read the kind (the same registration-before-
 /// construction ordering the `STORAGE_KIND` table relies on). See
 /// [`try_register_tag_by_name`] for the leak bound (identical; no extra alloc).
-// Forward capability (EnableTag plan, Step 1): the production consumer is the
-// `EcsMaster::register_enable_tag` wrapper (Step 5/9), mirroring how
-// `EcsMaster::register_tag` delegates to `try_register_tag_by_name`. No
-// non-test caller exists until that wave, so the dead-code lint is silenced.
-#[allow(dead_code)]
+// Step 5 (Wave 2) wired the live caller: `EcsMaster::register_enable_tag` /
+// `try_register_enable_tag` delegate here, mirroring how `EcsMaster::register_tag`
+// delegates to `try_register_tag_by_name`. The Step-1 forward-seam
+// `#[allow(dead_code)]` is therefore removed.
 pub(crate) fn try_register_enable_tag_by_name(name: &str) -> Option<EnableTagId> {
     let tag = try_register_tag_by_name(name)?;
     // Classify the minted id as bitset storage. Write-once: a re-mint of the
@@ -1331,9 +1330,13 @@ mod tests {
 
     #[test]
     fn set_storage_kind_round_trips_bitset() {
-        set_storage_kind(471, StorageKind::Bitset);
+        // 404-407 reserved for these storage-kind tests; the prior 471-474
+        // collided with par_chunk's COMP_W7B(471)/COMP_W7POS(472) data ids —
+        // marking them Bitset made C1 filter them out of the signature, so
+        // par_chunk's create_entity failed in the shared lib-test process.
+        set_storage_kind(404, StorageKind::Bitset);
         assert_eq!(
-            storage_kind(471),
+            storage_kind(404),
             StorageKind::Bitset,
             "set_storage_kind(Bitset) must round-trip through storage_kind"
         );
@@ -1342,17 +1345,17 @@ mod tests {
     #[test]
     fn set_storage_kind_same_kind_is_idempotent() {
         // Two identical classifications are a silent no-op (no panic).
-        set_storage_kind(472, StorageKind::Bitset);
-        set_storage_kind(472, StorageKind::Bitset);
-        assert_eq!(storage_kind(472), StorageKind::Bitset);
+        set_storage_kind(405, StorageKind::Bitset);
+        set_storage_kind(405, StorageKind::Bitset);
+        assert_eq!(storage_kind(405), StorageKind::Bitset);
     }
 
     #[test]
     fn set_storage_kind_explicit_table_round_trips() {
         // Explicitly classifying Table on a fresh id is a same-kind no-op and
         // leaves the default in place.
-        set_storage_kind(473, StorageKind::Table);
-        assert_eq!(storage_kind(473), StorageKind::Table);
+        set_storage_kind(406, StorageKind::Table);
+        assert_eq!(storage_kind(406), StorageKind::Table);
     }
 
     /// Write-once enforcement: reclassifying an id to a DIFFERENT kind must trip
@@ -1362,9 +1365,9 @@ mod tests {
     #[test]
     #[should_panic(expected = "already classified")]
     fn set_storage_kind_reclassify_different_kind_panics_in_debug() {
-        set_storage_kind(474, StorageKind::Bitset);
+        set_storage_kind(407, StorageKind::Bitset);
         // Reclassifying to a different kind is an invariant violation.
-        set_storage_kind(474, StorageKind::Table);
+        set_storage_kind(407, StorageKind::Table);
     }
 
     #[test]

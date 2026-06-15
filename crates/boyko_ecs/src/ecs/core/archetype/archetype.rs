@@ -5,7 +5,8 @@ use crate::ecs::core::archetype::archetype_signature::ArchetypeSignature;
 use crate::ecs::core::change_detection::Tick;
 use crate::ecs::core::component::component_mask::ComponentMask;
 use crate::ecs::core::component::component_pool_bundle::ComponentPoolBundle;
-use crate::ecs::core::component::component_registry::MAX_COMPONENTS;
+use crate::ecs::core::component::component_registry::{self, MAX_COMPONENTS, StorageKind};
+use crate::ecs::core::component::enable::enable_store::{EnableColumn, EnableStore};
 use crate::ecs::core::component::hooks::archetype_flags::ArchetypeFlags;
 use crate::ecs::error::{EcsError, EcsResult};
 
@@ -134,6 +135,20 @@ pub struct Archetype {
     /// is opaque.
     pub(crate) columns: [Column; MAX_COMPONENTS],
 
+    /// EnableTag bitset columns owned by this archetype (Decision D1 / Step 4).
+    ///
+    /// Parallel to [`Self::component_pools`] but for `StorageKind::Bitset` tags:
+    /// each toggled `(archetype, tag)` owns a lazily-paged [`EnableColumn`]
+    /// (no signature membership, no `ComponentPool`). Empty by default — an
+    /// archetype that never has an enable tag toggled pays one `SmallList4`
+    /// inline header and zero heap allocations.
+    ///
+    /// Placed immediately AFTER `columns` so the single-load hot read path
+    /// (`*(arch + c*16)` at offset 0) is undisturbed; the enable store is
+    /// touched only by the cold toggle/migration/swap-remove paths, never by
+    /// the per-row component fetch.
+    pub(crate) enable_store: EnableStore,
+
     /// Unique identifier for this archetype.
     ///
     /// `pub(crate)` for the same reason as `columns` — in-place initialisation
@@ -189,22 +204,26 @@ pub struct Archetype {
 // load-bearing for Step 7 and Phase 8 — lock it at compile time.
 const _: () = assert!(std::mem::offset_of!(Archetype, columns) == 0);
 
-// Phase 14a TRIPWIRE 1 (plan §1-W2 / §8 P5): hard size assertion pinned to a
-// MEASURED literal. With the `flags: ArchetypeFlags` (u16) field added after
-// the `#[repr(align(32))]` `signature`, the struct grew by +8 B (2 B + 6 B
-// realign) to 8480 B; Phase X.J deleted the vestigial `arena: *const Arena`
-// field (-8 B raw), but `align_of::<Archetype>() == 32` (via the
-// `ComponentMask` inside `signature`) rounds the size straight back up —
-// still 8480 B measured on the x86_64 target. This guards against accidental
-// layout drift; if a future change moves `flags` or alters `signature`'s
-// alignment, this trips before the perf regression can ship.
+// TRIPWIRE 1 (Phase 14a §1-W2 / §8 P5; EnableTag plan Step 4): hard size
+// assertion pinned to a MEASURED literal. History: the `flags: ArchetypeFlags`
+// (u16) field grew the struct to 8480 B (Phase 14a); Phase X.J deleted the
+// vestigial `arena: *const Arena` field (-8 B raw) but `align_of == 32` (via
+// the `ComponentMask` inside `signature`) rounded straight back to 8480 B.
 //
-// The struct embeds `Vec`s and `usize` fields, so the 8480 B figure encodes
+// EnableTag Step 4 inserts the `enable_store: EnableStore` field (112 B,
+// align 8) immediately after `columns`. Net +96 B (it consumed some existing
+// trailing align-32 padding rather than a full +112) → 8576 B measured on the
+// x86_64 target. `columns` stays at offset 0 (asserted above) so the Phase 7
+// single-load hot read path is undisturbed. This guards against accidental
+// layout drift; if a future change reorders fields or alters `signature`'s
+// alignment, this trips before a perf regression can ship.
+//
+// The struct embeds `Vec`s and `usize` fields, so the 8576 B figure encodes
 // the 64-bit ABI; gated to 64-bit (the engine's supported platform) — see
 // CLAUDE.md target platform. `offset_of(columns) == 0` above is
 // width-independent (first `#[repr(C)]` field) and stays unconditional.
 #[cfg(target_pointer_width = "64")]
-const _: () = assert!(std::mem::size_of::<Archetype>() == 8480);
+const _: () = assert!(std::mem::size_of::<Archetype>() == 8576);
 
 impl Archetype {
     /// Creates a new archetype with the given ID.
@@ -216,6 +235,7 @@ impl Archetype {
     pub fn new(id: ArchetypeId) -> Self {
         Self {
             columns: [Column::null(); MAX_COMPONENTS],
+            enable_store: EnableStore::new(),
             id,
             component_pools: ComponentPoolBundle::new(),
             current_index: 0,
@@ -234,16 +254,44 @@ impl Archetype {
     /// `columns[comp_id.0]` entry so the hot read path can find the pool's
     /// `(ptr, stride)` without going through the bundle's sparse map
     /// (Phase 7 D4 / invariant U7).
-    pub fn create_by_ids(id: ArchetypeId, component_ids: &[ComponentId]) -> Self {
-        // Create a mask from the component IDs
+    /// Builds the archetype-signature mask for `component_ids`, FILTERING OUT
+    /// every `StorageKind::Bitset` id (EnableTag plan C1 premise / Decision D5).
+    ///
+    /// This is the single signature-filtering implementation. Every archetype
+    /// signature — the archetype's own [`Self::create_by_ids`] mask AND the
+    /// parallel registry-index mask built at the `ArchetypeMaster`
+    /// create/get-or-create funnels — MUST route through here so the registry
+    /// signature is byte-identical to the archetype's own filtered signature.
+    /// Without it, the registry would index an archetype under a signature that
+    /// includes a bitset bit while the archetype's real signature excludes it,
+    /// breaking dedup (`find_exact_match`) and diverging the query-match path.
+    ///
+    /// `pub(crate)`: the only off-archetype caller is `ArchetypeMaster`; both
+    /// live in this crate. Cold path (archetype creation), so the per-id
+    /// `storage_kind` lookup is fine.
+    pub(crate) fn filtered_signature_mask(component_ids: &[ComponentId]) -> ComponentMask {
         let mut mask = ComponentMask::new();
         for &comp_id in component_ids {
+            if component_registry::storage_kind(comp_id.0) == StorageKind::Bitset {
+                continue;
+            }
             mask.set(comp_id);
         }
+        mask
+    }
+
+    pub fn create_by_ids(id: ArchetypeId, component_ids: &[ComponentId]) -> Self {
+        // Create a mask from the component IDs. EnableTag plan C1 premise:
+        // `StorageKind::Bitset` ids are FILTERED OUT of the signature mask so
+        // they never fragment the archetype space (Decision D5). Routed through
+        // the single shared filter so the registry signature minted at the
+        // `ArchetypeMaster` funnels matches this one bit-for-bit.
+        let mask = Self::filtered_signature_mask(component_ids);
 
         // Initialize archetype with mask and empty component pools
         let mut archetype = Self {
             columns: [Column::null(); MAX_COMPONENTS],
+            enable_store: EnableStore::new(),
             id,
             component_pools: ComponentPoolBundle::new(),
             current_index: 0,
@@ -260,8 +308,18 @@ impl Archetype {
         // `columns` table in sync (Phase 7 invariant U7). Phase 14a: OR each
         // component's hook bits into the archetype flags from the cold `HOOKS`
         // table (plan §4.6) — one accumulator, set once after the loop.
+        //
+        // EnableTag C1 premise: a `StorageKind::Bitset` id gets NO
+        // `ComponentPool` (and never enters the signature, filtered above) — a
+        // sibling `&mut C` data param on a bitset id is therefore structurally
+        // impossible, which is what makes the Enable filter's no-op
+        // `init_access` sound (Decision D8 / D1 inv 3).
         let mut flags = ArchetypeFlags::empty();
         for &comp_id in component_ids {
+            if component_registry::storage_kind(comp_id.0) == StorageKind::Bitset {
+                Self::debug_assert_bitset_premise(&archetype, comp_id);
+                continue;
+            }
             archetype.component_pools.add_pool(comp_id);
             archetype.refresh_column(comp_id);
             flags.insert_from_hooks(comp_id);
@@ -279,6 +337,15 @@ impl Archetype {
 
     /// Registers a component type by ID
     pub fn register_component(&mut self, component_id: ComponentId) -> bool {
+        // EnableTag C1 premise: a `StorageKind::Bitset` id is never part of a
+        // signature and never gets a `ComponentPool`. Refuse to register one as
+        // a table component (Decision D5 / D1 inv 3) — toggling is the only way
+        // a bitset tag enters an archetype.
+        if component_registry::storage_kind(component_id.0) == StorageKind::Bitset {
+            Self::debug_assert_bitset_premise(self, component_id);
+            return false;
+        }
+
         // Check if this component type is already registered
         if self.signature.mask().contains(component_id) {
             return false;
@@ -311,6 +378,16 @@ impl Archetype {
     /// inline column entry. Intended exclusively for in-place archetype
     /// construction — the bundle resides in the same crate (`pub(crate)`).
     pub(crate) fn register_component_inplace(&mut self, component_id: ComponentId) {
+        // EnableTag C1 premise (Decision D5 / D1 inv 3): a `StorageKind::Bitset`
+        // id gets NO `ComponentPool` and no hook bits. The slab path's caller
+        // (`add_archetype_from_components_fallible`) is responsible for keeping
+        // the bit out of the signature mask too; here we skip the pool so the
+        // bitset id never gains a backing column (the no-`ComponentPool`
+        // structural premise behind D8's no-op `init_access`).
+        if component_registry::storage_kind(component_id.0) == StorageKind::Bitset {
+            Self::debug_assert_bitset_premise(self, component_id);
+            return;
+        }
         self.component_pools.add_pool(component_id);
         self.refresh_column(component_id);
         // Phase 14a (plan §4.6): OR this single component's hook bits into the
@@ -319,6 +396,118 @@ impl Archetype {
         // component, so the accumulated OR over the whole component set is the
         // archetype's flag value.
         self.flags.insert_from_hooks(component_id);
+    }
+
+    /// Debug-only tripwire for the EnableTag C1 premise (Decision D1 inv 3 /
+    /// D8): a `StorageKind::Bitset` id must NEVER appear in this archetype's
+    /// signature mask AND must NEVER have a `ComponentPool`. A sibling data
+    /// access on a bitset id is then structurally impossible — the soundness
+    /// ground for the Enable filter's no-op `init_access`.
+    ///
+    /// Called at every construction/signature site that skips a bitset id.
+    /// Compiles to nothing in release.
+    #[inline]
+    fn debug_assert_bitset_premise(this: &Self, component_id: ComponentId) {
+        debug_assert!(
+            !this.signature.mask().contains(component_id),
+            "C1 premise: bitset id {} must not be in the archetype signature",
+            component_id.0
+        );
+        debug_assert!(
+            !this.component_pools.contains(component_id),
+            "C1 premise: bitset id {} must not have a ComponentPool",
+            component_id.0
+        );
+    }
+
+    /// Returns the directory bound (`reserve_rows`) for this archetype's enable
+    /// columns: a row count guaranteed to be `> unit_index` for every live row.
+    ///
+    /// An `EnableColumn`'s page directory is sized to cover this many rows
+    /// (Decision D1 sub-decision: backing & regrow). Live rows are bounded by
+    /// `current_index`, which in turn never exceeds any owned pool's reserve
+    /// ceiling (the `reserve_capacity` two-phase contract validates
+    /// `count + n <= reserve_rows` for every pool before any row is written).
+    /// The EMPTY archetype owns no pools, so this falls back to
+    /// `current_index` (rows are still bounded by the entity count).
+    ///
+    /// The `+ 1` floor guarantees a non-zero, row-covering bound even at
+    /// `current_index == 0` (the `EnableColumn::new` directory always holds at
+    /// least one slot).
+    #[inline]
+    pub(crate) fn enable_reserve_rows(&self) -> usize {
+        // Any pool's capacity bounds `current_index`; pick the first. Empty
+        // archetype ⇒ no pools ⇒ fall back to the entity count.
+        let pool_ceiling = self
+            .component_pools
+            .pools_iter()
+            .map(|p| p.capacity())
+            .max();
+        match pool_ceiling {
+            Some(ceiling) => ceiling.max(self.current_index + 1),
+            None => self.current_index + 1,
+        }
+    }
+
+    /// Returns a raw pointer to the [`EnableColumn`] for `tag`, or null if this
+    /// archetype has never toggled that tag (Decision D2 — the Fetch cache
+    /// caches this, NULL ⇒ "all rows disabled").
+    ///
+    /// The pointer is valid while `&self` is borrowed; the enable store lives
+    /// inline in the (pointer-stable) slab slot, so it does not move for the
+    /// archetype's lifetime. Used by the query filter `set_table_*` cold path
+    /// (Wave 3) and by tests.
+    // Forward seam (EnableTag plan, Step 4): the production consumer is the
+    // `Enabled<T>`/`Disabled<T>` filter `set_table_*_no_meta` cold path landing
+    // in Wave 3 (Step 7). Shipped here so the archetype-side enable accessor is
+    // complete in one unit; `#[allow(dead_code)]` (scoped, justified — mirrors
+    // the Wave-1 `set_storage_kind` seam) keeps the crate clippy-clean under
+    // `-D warnings` until Wave 3 wires it. Tests in this module exercise it.
+    #[allow(dead_code)]
+    #[inline]
+    pub(crate) fn enable_column_ptr(&self, tag: ComponentId) -> *const EnableColumn {
+        match self.enable_store.column(tag) {
+            Some(col) => col as *const EnableColumn,
+            None => core::ptr::null(),
+        }
+    }
+
+    /// Sets (or clears) the enable bit for `tag` at `row` (the cold
+    /// toggle/migration path — Decision D3), returning `true` iff this call
+    /// allocated the tag's [`EnableColumn`] for the FIRST time.
+    ///
+    /// On a `true` return the caller (the toggle API, Step 5) performs the
+    /// one-time bookkeeping exactly once: record
+    /// `EnablePresence::note_column_alloc` + bump `enable_generation`
+    /// (Decision D1 inv 5 / O2). This method owns only the per-archetype
+    /// storage and computes the directory bound from
+    /// [`Self::enable_reserve_rows`].
+    ///
+    /// Clearing (`value == false`) never allocates a column or page: the
+    /// never-toggled default is already clear, so a clear into an absent column
+    /// is a no-op and returns `false`.
+    #[inline]
+    pub(crate) fn set_enable_bit(&mut self, tag: ComponentId, row: usize, value: bool) -> bool {
+        debug_assert_eq!(
+            component_registry::storage_kind(tag.0),
+            StorageKind::Bitset,
+            "set_enable_bit: id {} is not a bitset enable tag",
+            tag.0
+        );
+        let reserve_rows = self.enable_reserve_rows();
+        if !value {
+            // Clear: only touch an existing column; never allocate to store a
+            // zero. `write_row_bit` already short-circuits the clear-no-column
+            // case, but go through the column directly to avoid a redundant
+            // scan when the column is absent.
+            self.enable_store.write_row_bit(tag, row, false, reserve_rows);
+            return false;
+        }
+        let newly_allocated = self.enable_store.column(tag).is_none();
+        self.enable_store
+            .get_or_alloc_column(tag, reserve_rows)
+            .set(row, true, reserve_rows);
+        newly_allocated
     }
 
     /// Re-syncs `columns[component_id.0]` with the current pool state.
@@ -541,11 +730,27 @@ impl Archetype {
     pub fn remove_entity(&mut self, removed_unit_index: InlandPoolId) -> RemoveOutcome {
         let last_unit_index = InlandPoolId(self.current_index.saturating_sub(1));
 
+        // EnableTag swap-remove fix (Decision O1-r7): captured from the PRE-removal
+        // state so the directory bound still covers `last`. The bit op fires
+        // exactly ONCE here (the DROP path) — never inside the migration helper
+        // bodies, which take the disjoint `move_out_entity` no-drop path. Skipped
+        // entirely when the archetype owns no enable columns (the common case).
+        let enable_reserve_rows = self.enable_reserve_rows();
+
         // If removing the last entity, just pop it.
         if removed_unit_index == last_unit_index {
             if self.component_pools.pop_entity() {
                 self.entity_ids.pop();
                 self.current_index -= 1;
+                // O1-r7 Last/pop: clear the popped row's bit in every enable
+                // column (`removed == last` ⇒ a single `clear(last)`).
+                if !self.enable_store.is_empty() {
+                    self.enable_store.swap_remove_row(
+                        last_unit_index.0,
+                        last_unit_index.0,
+                        enable_reserve_rows,
+                    );
+                }
                 return RemoveOutcome::Last;
             } else {
                 return RemoveOutcome::PoolFailure;
@@ -563,6 +768,18 @@ impl Archetype {
         // Swap_remove the entity ID as well.
         self.entity_ids.swap_remove(removed_unit_index.0);
         self.current_index -= 1;
+
+        // O1-r7 Swapped: the entity that was at `last` moved into `removed`'s
+        // slot, so `removed` must inherit `last`'s bit and `last` must clear —
+        // READ-first inside `swap_remove_bit` (Decision C2/C4). Sequenced at the
+        // same point as the component-byte `swap_remove_unit` above.
+        if !self.enable_store.is_empty() {
+            self.enable_store.swap_remove_row(
+                removed_unit_index.0,
+                last_unit_index.0,
+                enable_reserve_rows,
+            );
+        }
 
         RemoveOutcome::Swapped { moved_entity: swapped_entity_id }
     }
@@ -596,11 +813,30 @@ impl Archetype {
         removed_unit_index: InlandPoolId,
     ) -> RemoveOutcome {
         let last_unit_index = InlandPoolId(self.current_index.saturating_sub(1));
+
+        // EnableTag swap-remove fix (Decision O1-r7 / critic note 3): the SOURCE
+        // swap-fix bit op lives HERE (the no-drop path taken by all 4 migration
+        // helpers via this single funnel), NEVER in the helper bodies — so it
+        // fires exactly once per migration. The migrating entity's bit was
+        // already READ by the helper's phase-1 `read_row_bits` BEFORE this call
+        // (C4 READ-before-swap ordering); this op only fixes the swapped-in
+        // survivor. Captured from the PRE-removal state so the bound covers
+        // `last`. Skipped when the archetype owns no enable columns.
+        let enable_reserve_rows = self.enable_reserve_rows();
+
         if removed_unit_index == last_unit_index {
             // Pop trailing slot in every pool. W-N2: no drop.
             self.component_pools.pop_entity_no_drop();
             self.entity_ids.pop();
             self.current_index -= 1;
+            // O1-r7 Last/pop: clear the popped row's bit (`removed == last`).
+            if !self.enable_store.is_empty() {
+                self.enable_store.swap_remove_row(
+                    last_unit_index.0,
+                    last_unit_index.0,
+                    enable_reserve_rows,
+                );
+            }
             return RemoveOutcome::Last;
         }
         let moved_entity = self.entity_ids[last_unit_index.0];
@@ -612,6 +848,15 @@ impl Archetype {
         unsafe { self.component_pools.swap_remove_unit_no_drop(removed_unit_index.0); }
         self.entity_ids.swap_remove(removed_unit_index.0);
         self.current_index -= 1;
+        // O1-r7 Swapped: READ-first fix-up at the same sequence point as the
+        // component-byte `swap_remove_unit_no_drop` above (Decision C4).
+        if !self.enable_store.is_empty() {
+            self.enable_store.swap_remove_row(
+                removed_unit_index.0,
+                last_unit_index.0,
+                enable_reserve_rows,
+            );
+        }
         RemoveOutcome::Swapped { moved_entity }
     }
 
@@ -1303,5 +1548,197 @@ mod tests {
         let ok = arch.create_entity(EntityId(300), &mut new_unit_index, &components, Tick::new(1));
         assert!(ok, "create_entity must succeed for 8-component archetype");
         assert_eq!(arch.entity_count(), 1);
+    }
+
+    // --- EnableTag Step 4: bitset-storage filtering + swap-remove bit wiring ---
+    //
+    // ID range 490-499 reserved for these tests (collisions checked against
+    // 400-417, 480-481, 410-417, 300-308, 420-429).
+
+    /// A table component (signature storage) and an enable tag (bitset storage)
+    /// for the Step-4 wiring tests. The tag uses `set_storage_kind` directly to
+    /// classify the id as bitset without minting through the name registry.
+    // Reserved free block 320-322 (grep-verified empty in [320,340); disjoint
+    // from ecs_master 100-109, archetype_master 300-309, registry TEST_BASE
+    // 450-461, par_chunk 466-472, query_state ~490, resource 510). The prior
+    // 490-492 collided with query_state's `Pos`, and 453-455 with the registry
+    // TEST_BASE block's f32/f64 fixtures — both in the shared lib-test process.
+    const STEP4_TABLE_A: ComponentId = ComponentId(320);
+    const STEP4_TABLE_B: ComponentId = ComponentId(321);
+    const STEP4_TAG: ComponentId = ComponentId(322);
+
+    fn register_step4_components() {
+        #[repr(C)]
+        struct Step4TableA(u32);
+        #[repr(C)]
+        struct Step4TableB(u64);
+        #[repr(C)]
+        struct Step4Tag;
+        component_registry::register_layout::<Step4TableA>(STEP4_TABLE_A.0);
+        component_registry::register_layout::<Step4TableB>(STEP4_TABLE_B.0);
+        component_registry::register_layout::<Step4Tag>(STEP4_TAG.0);
+        // Classify the tag id as bitset storage (write-once / idempotent).
+        component_registry::set_storage_kind(
+            STEP4_TAG.0,
+            component_registry::StorageKind::Bitset,
+        );
+    }
+
+    /// Adds one zero-filled entity to a `[STEP4_TABLE_A, STEP4_TABLE_B]`
+    /// archetype, returning the assigned dense row.
+    fn add_step4_entity(arch: &mut Archetype, entity_id: EntityId) -> InlandPoolId {
+        let bytes_a = vec![0u8; component_registry::get_component_size(STEP4_TABLE_A.0).unwrap()];
+        let bytes_b = vec![0u8; component_registry::get_component_size(STEP4_TABLE_B.0).unwrap()];
+        let mut new_unit_index: u32 = 0;
+        let ok = arch.create_entity(
+            entity_id,
+            &mut new_unit_index,
+            &[(STEP4_TABLE_A, bytes_a.as_slice()), (STEP4_TABLE_B, bytes_b.as_slice())],
+            Tick::new(1),
+        );
+        assert!(ok, "create_entity must succeed in the Step-4 setup helper");
+        InlandPoolId(new_unit_index as usize)
+    }
+
+    /// C1 premise: a bitset id passed to `create_by_ids` alongside table ids is
+    /// FILTERED OUT of the signature and gets NO `ComponentPool`.
+    #[test]
+    fn bitset_id_never_in_signature_and_never_gets_a_pool() {
+        register_step4_components();
+        // Mix the tag in with two table components.
+        let arch = Archetype::create_by_ids(
+            ArchetypeId(1),
+            &[STEP4_TABLE_A, STEP4_TAG, STEP4_TABLE_B],
+        );
+        // Table ids ARE in the signature; the bitset id is NOT.
+        assert!(arch.has_component_id(STEP4_TABLE_A), "table A must be in signature");
+        assert!(arch.has_component_id(STEP4_TABLE_B), "table B must be in signature");
+        assert!(
+            !arch.has_component_id(STEP4_TAG),
+            "bitset tag must be filtered OUT of the signature (C1 premise)"
+        );
+        // The bitset id has no pool; the table ids do.
+        assert!(
+            arch.component_pools().get_pool(STEP4_TAG).is_none(),
+            "bitset tag must NOT have a ComponentPool (C1 premise)"
+        );
+        assert!(arch.component_pools().get_pool(STEP4_TABLE_A).is_some());
+        assert!(arch.component_pools().get_pool(STEP4_TABLE_B).is_some());
+        // The bitset id never even enters the inline column table.
+        assert!(arch.columns[STEP4_TAG.0].is_null(), "bitset tag column must be null");
+    }
+
+    /// `register_component` refuses a bitset id (it cannot be a table component).
+    #[test]
+    fn register_component_refuses_bitset_id() {
+        register_step4_components();
+        let mut arch = Archetype::new(ArchetypeId(2));
+        let added = arch.register_component(STEP4_TAG);
+        assert!(!added, "register_component must refuse a bitset id");
+        assert!(!arch.has_component_id(STEP4_TAG));
+        assert!(arch.component_pools().get_pool(STEP4_TAG).is_none());
+    }
+
+    /// `set_enable_bit` reports `newly_allocated == true` only on the first
+    /// column for a tag; the column survives re-fetch; a clear never allocates.
+    #[test]
+    fn set_enable_bit_first_touch_flag() {
+        register_step4_components();
+        let mut arch = Archetype::create_by_ids(ArchetypeId(3), &[STEP4_TABLE_A, STEP4_TABLE_B]);
+        let row = add_step4_entity(&mut arch, EntityId(1));
+
+        // A clear into an absent column never allocates (returns false).
+        assert!(!arch.set_enable_bit(STEP4_TAG, row.0, false));
+        assert!(arch.enable_column_ptr(STEP4_TAG).is_null(), "clear must not allocate");
+
+        let newly = arch.set_enable_bit(STEP4_TAG, row.0, true);
+        assert!(newly, "first set must report newly_allocated");
+        let newly = arch.set_enable_bit(STEP4_TAG, row.0, true);
+        assert!(!newly, "second set of the same tag must NOT report newly_allocated");
+        assert!(!arch.enable_column_ptr(STEP4_TAG).is_null());
+        assert!(arch.enable_store.column(STEP4_TAG).unwrap().test(row.0));
+    }
+
+    /// O1-r7 Swapped: removing a non-last entity moves the former-last entity's
+    /// enable bit into the vacated row (READ-first), and clears `last`.
+    #[test]
+    fn swap_remove_preserves_swapped_entity_bit_read_first() {
+        register_step4_components();
+        let mut arch = Archetype::create_by_ids(ArchetypeId(4), &[STEP4_TABLE_A, STEP4_TABLE_B]);
+        let row0 = add_step4_entity(&mut arch, EntityId(10)); // row 0
+        let row1 = add_step4_entity(&mut arch, EntityId(20)); // row 1
+        let row2 = add_step4_entity(&mut arch, EntityId(30)); // row 2 (will be last)
+
+        // Toggle the tag ON for row2 (the entity that will be swapped in), and
+        // OFF (implicitly) for row0.
+        arch.set_enable_bit(STEP4_TAG, row2.0, true);
+        assert!(arch.enable_store.column(STEP4_TAG).unwrap().test(row2.0));
+        assert!(!arch.enable_store.column(STEP4_TAG).unwrap().test(row0.0));
+
+        // Remove row0 (non-last) → row2's entity (EntityId 30) swaps into row0.
+        let outcome = arch.remove_entity(row0);
+        assert_eq!(outcome, RemoveOutcome::Swapped { moved_entity: EntityId(30) });
+
+        // The swapped entity's bit moved from `last` (row2) into row0, and the
+        // popped `last` slot is clear.
+        let col = arch.enable_store.column(STEP4_TAG).unwrap();
+        assert!(col.test(row0.0), "swapped entity's set bit must move into the vacated row");
+        assert!(!col.test(row2.0), "the popped last row's bit must be cleared");
+        // row1 is untouched.
+        let _ = row1;
+    }
+
+    /// O1-r7 Last/pop: removing the last entity clears its enable bit (no swap).
+    #[test]
+    fn remove_outcome_last_clears_popped_bit() {
+        register_step4_components();
+        let mut arch = Archetype::create_by_ids(ArchetypeId(5), &[STEP4_TABLE_A, STEP4_TABLE_B]);
+        add_step4_entity(&mut arch, EntityId(1)); // row 0
+        let last = add_step4_entity(&mut arch, EntityId(2)); // row 1 (last)
+
+        arch.set_enable_bit(STEP4_TAG, last.0, true);
+        assert!(arch.enable_store.column(STEP4_TAG).unwrap().test(last.0));
+
+        let outcome = arch.remove_entity(last);
+        assert_eq!(outcome, RemoveOutcome::Last);
+        assert!(
+            !arch.enable_store.column(STEP4_TAG).unwrap().test(last.0),
+            "O1-r7: the popped last row's bit must be cleared"
+        );
+        assert_eq!(arch.entity_count(), 1);
+    }
+
+    /// `move_out_entity` (the no-drop migration path) wires the same swap-remove
+    /// bit fix-up exactly once, READ-first.
+    #[test]
+    fn move_out_entity_preserves_swapped_bit() {
+        register_step4_components();
+        let mut arch = Archetype::create_by_ids(ArchetypeId(6), &[STEP4_TABLE_A, STEP4_TABLE_B]);
+        let row0 = add_step4_entity(&mut arch, EntityId(10));
+        add_step4_entity(&mut arch, EntityId(20));
+        let row2 = add_step4_entity(&mut arch, EntityId(30)); // last
+
+        arch.set_enable_bit(STEP4_TAG, row2.0, true);
+
+        // Caller contract: bytes already moved out elsewhere; here we only
+        // exercise the no-drop swap path's enable-bit fix-up.
+        let outcome = arch.move_out_entity(row0);
+        assert_eq!(outcome, RemoveOutcome::Swapped { moved_entity: EntityId(30) });
+
+        let col = arch.enable_store.column(STEP4_TAG).unwrap();
+        assert!(col.test(row0.0), "no-drop swap must move the bit into the vacated row");
+        assert!(!col.test(row2.0));
+    }
+
+    /// The `Archetype` size pin holds after the `enable_store` field addition.
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn archetype_size_pin_holds() {
+        assert_eq!(
+            std::mem::size_of::<Archetype>(),
+            8576,
+            "Archetype size pin must match the const-assert tripwire"
+        );
+        assert_eq!(std::mem::offset_of!(Archetype, columns), 0, "columns must stay at offset 0");
     }
 }

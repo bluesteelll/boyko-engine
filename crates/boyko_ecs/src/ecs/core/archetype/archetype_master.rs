@@ -4,6 +4,7 @@ use crate::ecs::core::archetype::archetype::Archetype;
 use crate::ecs::core::archetype::generation::ArchetypeGeneration;
 use crate::ecs::core::component::component_mask::ComponentMask;
 use crate::ecs::core::component::component_registry;
+use crate::ecs::core::component::enable::enable_presence::EnablePresence;
 use crate::ecs::core::component::hooks::archetype_flags::ArchetypeFlags;
 use crate::ecs::core::component::observers::{
     ObserverFn, ObserverId, ObserverKind, ObserverRegistry,
@@ -84,6 +85,22 @@ pub struct ArchetypeMaster {
     /// worker-marking lands (D8), the bump/read here gain real Acquire/Release
     /// plus a loom proof — do NOT loosen the v1 ordering assumption elsewhere.
     enable_generation: AtomicU64,
+
+    /// EnableTag per-tag archetype-presence cull oracle (Decision D1 / D2).
+    ///
+    /// Records, for each EnableTag id, the set of THIS world's archetypes that
+    /// own an allocated `EnableColumn`. The query cull (Wave 3) consults it as
+    /// the O(1) `contains` oracle over the bounded matched set.
+    ///
+    /// **Per-WORLD, NOT process-global.** The Wave-1 module doc described it as
+    /// "process-global", but it is keyed by [`ArchetypeId`], and `ArchetypeId`s
+    /// are per-world (every world's `next_archetype_id` starts at 1). A
+    /// process-global instance would conflate `ArchetypeId(1)` across worlds and
+    /// trip `note_column_alloc`'s "genuine first column" assertion (verified by
+    /// the Step-5 multi-world tests). Co-located with `enable_generation` so the
+    /// two stay consistent: `note_enable_column_alloc` updates BOTH exactly once
+    /// per column (Decision D1 inv 5).
+    enable_presence: EnablePresence,
 }
 
 impl ArchetypeMaster {
@@ -101,6 +118,7 @@ impl ArchetypeMaster {
             structural_generation: ArchetypeGeneration::FIRST,
             observer_registry: ObserverRegistry::new(),
             enable_generation: AtomicU64::new(0),
+            enable_presence: EnablePresence::new(),
         }
     }
 
@@ -114,6 +132,7 @@ impl ArchetypeMaster {
             structural_generation: ArchetypeGeneration::FIRST,
             observer_registry: ObserverRegistry::new(),
             enable_generation: AtomicU64::new(0),
+            enable_presence: EnablePresence::new(),
         }
     }
 
@@ -121,8 +140,15 @@ impl ArchetypeMaster {
     /// Creates a new archetype from a slice of component IDs
     /// Returns the ID of the created archetype
     pub fn create_archetype(&mut self, component_ids: &[ComponentId]) -> ArchetypeId {
-        // First check if an archetype with exactly these components already exists
-        let mask = ComponentMask::from_components(component_ids);
+        // First check if an archetype with exactly these components already
+        // exists. EnableTag plan C1 premise (Decision D5): the registry-index
+        // signature mask MUST filter out every `StorageKind::Bitset` id, exactly
+        // as `Archetype::create_by_ids` does for the archetype's own signature.
+        // Using the raw `ComponentMask::from_components` here would register the
+        // archetype under a signature that INCLUDES the bitset bit while the
+        // archetype's real signature EXCLUDES it — defeating `find_exact_match`
+        // dedup and diverging the query-match path from the per-row enable cull.
+        let mask = Archetype::filtered_signature_mask(component_ids);
         let existing = self.registry.find_exact_match(&mask);
         
         if let Some(first_id) = existing.first() {
@@ -149,7 +175,20 @@ impl ArchetypeMaster {
         // placements in EVERY world, not just its own (the world-blind-hooks
         // hole). The dedup early-return above is exempt by construction: an
         // exact-match archetype set these bits when IT was first minted.
+        //
+        // EnableTag plan C1 premise (Decision D5): a `StorageKind::Bitset` id is
+        // NEVER in this (or any) archetype's signature and has NO `ComponentPool`,
+        // so it can never make an archetype's `ArchetypeFlags` stale w.r.t. a
+        // hook — the precise staleness the H1 gate guards against is structurally
+        // impossible for it (toggling fires no hooks/observers, Decision D3).
+        // Marking it would add no protection and could mislead the gate into a
+        // spurious "already archetyped" panic if a tag id were ever (mis)used
+        // with `register_component_hooks`, so it is filtered out — keeping
+        // EVER_ARCHETYPED's meaning exactly "this id entered a real signature".
         for &cid in component_ids {
+            if component_registry::storage_kind(cid.0) == component_registry::StorageKind::Bitset {
+                continue;
+            }
             component_registry::mark_ever_archetyped(cid.0);
         }
 
@@ -448,8 +487,15 @@ impl ArchetypeMaster {
         // Register with the bundle
         self.archetypes.add_archetype(archetype);
 
-        // Create a mask from the component IDs
-        let mask = ComponentMask::from_components(&component_ids);
+        // Create the registry-index mask from the component IDs. EnableTag plan
+        // C1 premise (Decision D5): this third archetype-mint funnel must apply
+        // the SAME `StorageKind::Bitset` filter as `create_archetype` /
+        // `get_or_create_archetype` / `Archetype::create_by_ids`, otherwise a
+        // pre-built archetype carrying a bitset id in its raw `component_ids`
+        // would be registered under a signature that includes the bitset bit
+        // (the archetype's own signature already excludes it via `create_by_ids`),
+        // breaking dedup against the table-only twin.
+        let mask = Archetype::filtered_signature_mask(&component_ids);
 
         // Register with the registry
         self.registry.register_archetype(archetype_id, mask);
@@ -458,8 +504,13 @@ impl ArchetypeMaster {
         // Same mark as `create_archetype`: this is the second archetype-mint
         // funnel (the OBS-SEED2 bypass below exists for the same reason), so
         // components placed through it must also raise the global staleness
-        // bit for `register_component_hooks`.
+        // bit for `register_component_hooks`. The same `StorageKind::Bitset`
+        // filter applies (see `create_archetype`'s H1 loop): a bitset id can
+        // never make an archetype's flags stale, so it is excluded.
         for &cid in &component_ids {
+            if component_registry::storage_kind(cid.0) == component_registry::StorageKind::Bitset {
+                continue;
+            }
             component_registry::mark_ever_archetyped(cid.0);
         }
 
@@ -535,29 +586,44 @@ impl ArchetypeMaster {
         self.enable_generation.load(Ordering::Relaxed)
     }
 
-    /// Bumps the EnableTag column-allocation epoch (Decision D1 / W2).
+    /// Records the FIRST `EnableColumn` allocation for `(tag, archetype)`
+    /// (Decision D1 inv 5 / O2). Updates the cull oracle AND bumps the epoch
+    /// **atomically together**, exactly once per column — the toggle path (Step
+    /// 5) calls this iff `Archetype::set_enable_bit` reported a fresh column.
     ///
-    /// Called by the toggle path (Step 5) on the first `EnableColumn`
-    /// allocation for a `(tag, archetype)` pair — exactly the site that also
-    /// sets the tag's `EnablePresence` bit — so the two stay consistent
-    /// (Decision D1 inv 5: bumped exactly once per column).
+    /// Co-locating the two updates here (instead of two separate calls from the
+    /// toggle path) is what keeps the D1 inv-5 pairing impossible to desync:
+    /// the presence bit and the generation bump can never get out of step.
     ///
     /// `&mut self` in v1: the toggle runs in the structural/apply window with
-    /// exclusive world access, so `Relaxed` cannot race (W2 forward-seam note
-    /// on the field). The `&mut self` receiver is the v1 enforcement of that
-    /// exclusivity; D7 worker-marking is where it relaxes to a shared `&self`
-    /// bump under real Acquire/Release.
-    // Forward seam W2: the sole caller is the EnableTag toggle path landing in
-    // Step 5 (Wave 2). Added in Step 3 (Wave 1) so the `enable_generation`
-    // counter ships complete with its accessor + bump in one cohesive unit;
-    // `#[allow(dead_code)]` (scoped, justified — mirrors `archetype_bundle_mut`)
-    // keeps the crate clippy-clean under `-D warnings` until Step 5 wires it.
-    #[allow(dead_code)]
+    /// exclusive world access, so the `Relaxed` epoch bump cannot race (W2
+    /// forward-seam note on the field). D7 worker-marking is where the receiver
+    /// relaxes to `&self` under real Acquire/Release.
     #[inline]
-    pub(crate) fn bump_enable_generation(&mut self) {
+    pub(crate) fn note_enable_column_alloc(&mut self, tag: ComponentId, arch: ArchetypeId) {
+        // Presence bit first, then the epoch bump — `note_column_alloc`'s own
+        // Release pairs the bit publish with the epoch's Acquire reader (the
+        // ordering is the forward seam; v1 is `&mut self`-exclusive).
+        self.enable_presence.note_column_alloc(tag, arch);
         // Relaxed: sound only because no concurrent access exists in v1 (the
         // `&mut self` receiver proves exclusivity). Forward seam W2 / D7.
         self.enable_generation.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Returns this world's EnableTag presence cull oracle (Decision D2).
+    ///
+    /// The query cull (Wave 3) consults [`EnablePresence::contains`] /
+    /// [`EnablePresence::epoch`] over the bounded matched set. Per-world (keyed
+    /// by this world's `ArchetypeId`s), co-located with `enable_generation`.
+    // Forward seam (EnableTag plan, Step 5): the production consumer is the
+    // `cull_enable_archetypes` pass landing in Wave 3 (Step 7a). Shipped here so
+    // the per-world presence oracle is complete with its accessor in one unit;
+    // `#[allow(dead_code)]` (scoped, justified — mirrors `enable_column_ptr`)
+    // keeps the crate clippy-clean until Wave 3 wires it. Tests exercise it.
+    #[allow(dead_code)]
+    #[inline]
+    pub(crate) fn enable_presence(&self) -> &EnablePresence {
+        &self.enable_presence
     }
 
     /// Removes an archetype by ID. Returns true if the archetype was found
@@ -596,8 +662,13 @@ impl ArchetypeMaster {
     /// Finds or creates an archetype with the specified component IDs
     /// This is an optimized version that first tries to find an existing archetype
     pub fn get_or_create_archetype(&mut self, component_ids: &[ComponentId]) -> ArchetypeId {
-        // First try to find an existing archetype with the exact components
-        let mask = ComponentMask::from_components(component_ids);
+        // First try to find an existing archetype with the exact components.
+        // Same C1-premise filter as `create_archetype`: the lookup mask must
+        // exclude `StorageKind::Bitset` ids so it keys on the SAME filtered
+        // signature the archetype was registered under (else the spawn funnel
+        // `cold_register_bundle_archetype` would miss the dedup and mint a
+        // duplicate registry entry for a structurally-identical archetype).
+        let mask = Archetype::filtered_signature_mask(component_ids);
         let existing = self.registry.find_exact_match(&mask);
         
         if let Some(first_id) = existing.first() {
@@ -615,20 +686,34 @@ impl ArchetypeMaster {
         source_archetype_id: ArchetypeId, 
         component_id: ComponentId
     ) -> Option<ArchetypeId> {
+        // EnableTag plan C1 premise (Decision D5): the appended id must NOT be a
+        // bitset enable tag — those never enter a signature and route to
+        // `enable`/`disable`, not a structural add. The registry signature is
+        // already bitset-safe (`get_or_create_archetype` filters), so a misrouted
+        // bitset id cannot corrupt the registry; this debug_assert surfaces the
+        // misuse instead of silently producing a structurally-identical archetype.
+        debug_assert_ne!(
+            component_registry::storage_kind(component_id.0),
+            component_registry::StorageKind::Bitset,
+            "add_component_to_archetype: id {} is a bitset enable tag; toggle it \
+             via enable/disable, do not migrate it into a signature",
+            component_id.0
+        );
+
         // Get the source archetype
         let source_archetype = self.get_archetype(source_archetype_id)?;
-        
+
         // Get all component IDs from the source archetype
         let mut new_components = source_archetype.component_ids().to_vec();
-        
+
         // Check if the component already exists in the archetype
         if new_components.contains(&component_id) {
             return Some(source_archetype_id); // No change needed
         }
-        
+
         // Add the new component ID
         new_components.push(component_id);
-        
+
         // Create or get the new archetype
         Some(self.get_or_create_archetype(&new_components))
     }
@@ -1230,38 +1315,44 @@ mod tests {
         assert_eq!(master.enable_generation(), 0);
     }
 
-    /// Each `bump_enable_generation` advances the epoch by exactly one — the
+    /// Each `note_enable_column_alloc` advances the epoch by exactly one — the
     /// "bumps once per column alloc" invariant the toggle path relies on
-    /// (Decision D1 inv 5).
+    /// (Decision D1 inv 5). Distinct `(tag, arch)` pairs satisfy the
+    /// "genuine first column" assertion in `note_column_alloc`.
     #[test]
     fn enable_generation_bumps_exactly_once_per_call() {
         let mut master = ArchetypeMaster::new();
         let before = master.enable_generation();
-        master.bump_enable_generation();
+        master.note_enable_column_alloc(ComponentId(20), ArchetypeId(1));
         assert_eq!(
             master.enable_generation(),
             before + 1,
-            "one bump must advance the epoch by exactly one"
+            "one column alloc must advance the epoch by exactly one"
         );
-        master.bump_enable_generation();
-        master.bump_enable_generation();
+        master.note_enable_column_alloc(ComponentId(20), ArchetypeId(2));
+        master.note_enable_column_alloc(ComponentId(21), ArchetypeId(1));
         assert_eq!(master.enable_generation(), before + 3);
+        // The presence oracle reflects every recorded column.
+        assert!(master.enable_presence().contains(ComponentId(20), ArchetypeId(1)));
+        assert!(master.enable_presence().contains(ComponentId(20), ArchetypeId(2)));
+        assert!(master.enable_presence().contains(ComponentId(21), ArchetypeId(1)));
+        assert!(!master.enable_presence().contains(ComponentId(21), ArchetypeId(2)));
     }
 
-    /// `enable_generation` is independent of the structural generation: bumping
-    /// one must not move the other (Decision D1 — a column-alloc must not force
-    /// a full structural rebuild).
+    /// `enable_generation` is independent of the structural generation: a column
+    /// alloc must not move the structural generation (Decision D1 — a column
+    /// alloc must not force a full structural rebuild).
     #[test]
     fn enable_generation_independent_of_structural_generation() {
         register_mock_components();
         let mut master = ArchetypeMaster::new();
 
         let struct_before = master.structural_generation();
-        master.bump_enable_generation();
+        master.note_enable_column_alloc(ComponentId(22), ArchetypeId(7));
         assert_eq!(
             master.structural_generation(),
             struct_before,
-            "bumping enable_generation must not touch structural_generation"
+            "a column alloc must not touch structural_generation"
         );
 
         // Conversely, a structural op must not move enable_generation.
@@ -1273,5 +1364,101 @@ mod tests {
             enable_before,
             "structural ops must not touch enable_generation"
         );
+    }
+
+    // --- EnableTag W1: registry-mask bitset filter (C1-premise completeness) ---
+    //
+    // ID range 325-327 reserved for these tests. Grep-verified free within
+    // `src/` (320-322 = archetype Step-4, 323-324 = enable_tag_api, the
+    // archetype_master mock block is 300-308). 325-329 appear only in the
+    // separate `tests/miri_phase8_5.rs` integration binary, which is a distinct
+    // process from the lib unit-test binary this module compiles into, so there
+    // is no `OnceLock`/`STORAGE_KIND` collision.
+    const W1_TABLE: ComponentId = ComponentId(325);
+    const W1_TAG: ComponentId = ComponentId(326);
+
+    /// Registers a table component and classifies a sibling id as a bitset
+    /// enable tag (write-once / idempotent across repeated test runs).
+    fn register_w1_components() {
+        component_registry::register_layout::<u32>(W1_TABLE.0);
+        component_registry::register_layout::<u32>(W1_TAG.0);
+        component_registry::set_storage_kind(W1_TAG.0, component_registry::StorageKind::Bitset);
+    }
+
+    /// W1 (C1-premise completeness): the REGISTRY-index mask built at
+    /// `create_archetype` must filter out `StorageKind::Bitset` ids exactly as
+    /// the archetype's own signature does. Without it, `create_archetype(&[T,
+    /// Tag])` and `create_archetype(&[T])` register two distinct registry
+    /// signatures for the structurally-identical archetype `{T}`, defeating
+    /// `find_exact_match` dedup, and the registry signature carries a bitset bit
+    /// the archetype's real signature lacks.
+    ///
+    /// This gap was invisible to every Wave-2 test because they all created
+    /// table-only archetypes and reached the tag only by toggling (Phase-14b
+    /// "behavioral coverage catches what per-plan APPROVED misses").
+    #[test]
+    fn create_archetype_dedups_table_only_against_table_plus_bitset_tag() {
+        register_w1_components();
+        let mut master = ArchetypeMaster::new();
+
+        // (a) The table-only archetype and the table+bitset-tag archetype must
+        //     dedup to the SAME ArchetypeId (structurally identical signature).
+        let id_table_only = master.create_archetype(&[W1_TABLE]);
+        let id_with_tag = master.create_archetype(&[W1_TABLE, W1_TAG]);
+        assert_eq!(
+            id_with_tag, id_table_only,
+            "create_archetype(&[T, Tag]) must dedup against create_archetype(&[T]) — \
+             the bitset tag is filtered out of the registry signature"
+        );
+        // Order-independent: tag-first also dedups (the filter precedes the lookup).
+        let id_tag_first = master.create_archetype(&[W1_TAG, W1_TABLE]);
+        assert_eq!(id_tag_first, id_table_only);
+        // Exactly one archetype was minted.
+        assert_eq!(master.archetype_count(), 1);
+
+        // (b) The registry signature for that archetype contains NO bitset bit.
+        let sig = master
+            .archetype_registry()
+            .get_archetype_signature(id_table_only)
+            .expect("invariant: the archetype is registered");
+        assert!(
+            sig.mask().contains(W1_TABLE),
+            "registry signature must contain the table id"
+        );
+        assert!(
+            !sig.mask().contains(W1_TAG),
+            "registry signature must NOT contain the bitset tag bit (C1 premise)"
+        );
+
+        // The archetype's own signature agrees, and it holds no pool for the tag.
+        let arch = master
+            .get_archetype(id_table_only)
+            .expect("invariant: the archetype exists in the bundle");
+        assert!(arch.has_component_id(W1_TABLE));
+        assert!(
+            !arch.has_component_id(W1_TAG),
+            "archetype signature must exclude the bitset tag"
+        );
+        assert!(
+            arch.component_pools().get_pool(W1_TAG).is_none(),
+            "the bitset tag must have NO ComponentPool (C1 premise)"
+        );
+    }
+
+    /// `get_or_create_archetype` applies the same registry-mask filter (the spawn
+    /// funnel `cold_register_bundle_archetype` routes through it), so it returns
+    /// the existing table-only archetype when handed the table+tag id set.
+    #[test]
+    fn get_or_create_archetype_dedups_through_bitset_filter() {
+        register_w1_components();
+        let mut master = ArchetypeMaster::new();
+
+        let id_table_only = master.create_archetype(&[W1_TABLE]);
+        let id_via_goc = master.get_or_create_archetype(&[W1_TABLE, W1_TAG]);
+        assert_eq!(
+            id_via_goc, id_table_only,
+            "get_or_create_archetype(&[T, Tag]) must reuse the table-only archetype"
+        );
+        assert_eq!(master.archetype_count(), 1);
     }
 }

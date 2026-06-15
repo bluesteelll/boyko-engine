@@ -1,7 +1,7 @@
 //! Enable-bit (sparse, non-fragmenting) tag storage backend.
 //!
 //! This module hosts the per-archetype, row-indexed, **paged** bitset storage
-//! for `EnableTag` components (Decision D1) plus the process-global per-tag
+//! for `EnableTag` components (Decision D1) plus the per-world per-tag
 //! archetype-presence oracle used by the query cull (Decision D2).
 //!
 //! Unlike signature (table) storage, an `EnableTag` never enters an archetype
