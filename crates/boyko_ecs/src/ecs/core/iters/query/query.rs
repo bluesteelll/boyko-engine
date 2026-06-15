@@ -17,11 +17,12 @@
 
 use std::marker::PhantomData;
 
-use crate::ecs::core::component::component_registry::TagId;
+use crate::ecs::core::component::component_registry::{EnableTagId, TagId};
 use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 use crate::ecs::core::iters::query::chunk_iter;
 use crate::ecs::core::iters::query::chunked_data::ChunkedQueryData;
 use crate::ecs::core::iters::query::data::{QueryData, ReadOnlyQueryData};
+use crate::ecs::core::iters::query::enable_terms::EnableTerms;
 use crate::ecs::core::iters::query::filter::{ArchetypalQueryFilter, QueryFilter};
 use crate::ecs::core::iters::query::iter::{QueryIter, QueryIterMut};
 use crate::ecs::core::iters::query::par_chunk;
@@ -74,6 +75,14 @@ pub struct Query<'w, 's, D: QueryData, F: QueryFilter = ()> {
     /// shared per-system `QueryDataState` (QS1 stays term-agnostic).
     terms: TagTerms,
 
+    /// EnableTag Step 9: per-view dynamic **per-row** enable terms (the dynamic
+    /// twin of typed `Enabled<T>` / `Disabled<T>`). Stack-only `Copy` payload —
+    /// EMPTY for every `get_param`-minted query; populated by
+    /// [`Self::with_enabled`] / [`Self::without_enabled`]. NEVER written into
+    /// the shared per-system `QueryDataState`. A no-enable-term query takes the
+    /// byte-identical cursor fast path (0%-gate).
+    enable_terms: EnableTerms,
+
     /// Invariance over `D` and `F`. `fn() -> (D, F)` keeps the marker
     /// `Send + Sync` regardless of `D`/`F` bounds.
     _marker: PhantomData<fn() -> (D, F)>,
@@ -107,6 +116,43 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
     #[inline]
     pub fn without_tag(mut self, tag: TagId) -> Self {
         self.terms.push_without(tag);
+        self
+    }
+
+    /// Adds a dynamic **per-row** enable term (EnableTag Decision D2 / Step 9):
+    /// only rows whose `tag` enable bit is SET participate in every iteration
+    /// driver of this query view (`iter`/`iter_mut`, `par_iter`/`par_iter_mut`).
+    /// The dynamic twin of the typed [`Enabled<T>`](super::filter_enable::Enabled).
+    ///
+    /// Per-row filtering: a `tag` whose archetype has no allocated enable column
+    /// reads as all-disabled, so no row in it survives a `with_enabled` term —
+    /// identical polarity to `Enabled<T>`. The no-enable-term fast path stays
+    /// byte-identical (one predicted `is_empty()` branch per row — 0%-gate).
+    ///
+    /// # Panics
+    /// Loud release panic past
+    /// [`MAX_ENABLE_TERMS`](crate::ecs::constants::MAX_ENABLE_TERMS) combined
+    /// `with_enabled`/`without_enabled` terms (setup-time, cold — C2 dynamic
+    /// enforcement).
+    #[must_use]
+    #[inline]
+    pub fn with_enabled(mut self, tag: EnableTagId) -> Self {
+        self.enable_terms.push_with(tag);
+        self
+    }
+
+    /// Adds a dynamic **per-row** enable term (EnableTag Decision D2 / Step 9):
+    /// only rows whose `tag` enable bit is CLEAR participate. The dynamic twin
+    /// of the typed [`Disabled<T>`](super::filter_enable::Disabled). Same
+    /// per-row cost model and panic contract as [`Self::with_enabled`].
+    ///
+    /// A `tag` whose archetype has no allocated enable column reads as
+    /// all-disabled, so every row in it survives a `without_enabled` term
+    /// (clear bit ⇒ matches — identical polarity to `Disabled<T>`).
+    #[must_use]
+    #[inline]
+    pub fn without_enabled(mut self, tag: EnableTagId) -> Self {
+        self.enable_terms.push_without(tag);
         self
     }
 
@@ -208,7 +254,7 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
         //   pre-terms slice; terms → memoised filtered slice); the cursor
         //   walks it term-free.
         let ids = self.driver_ids();
-        unsafe { QueryIter::new(self.state, ids, self.world, self.meta) }
+        unsafe { QueryIter::new(self.state, ids, self.world, self.meta, self.enable_terms) }
     }
 
     /// Returns a mutable iterator over `D::Item<'_>` for every entity in
@@ -237,7 +283,7 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
         //   slice (term-free for the cursor) is resolved once here; it lives
         //   at `'s` so it does not conflict with the `&mut self` reborrow.
         let ids = self.driver_ids();
-        unsafe { QueryIterMut::new(self.state, ids, self.world, self.meta) }
+        unsafe { QueryIterMut::new(self.state, ids, self.world, self.meta, self.enable_terms) }
     }
 
     /// Returns a parallel read-only iteration handle.
@@ -272,6 +318,7 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
             world: self.world,
             batching: BatchingStrategy::default(),
             meta: self.meta,
+            enable_terms: self.enable_terms,
         }
     }
 
@@ -293,6 +340,7 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
             world: self.world,
             batching: BatchingStrategy::default(),
             meta: self.meta,
+            enable_terms: self.enable_terms,
             _mut_marker: PhantomData,
         }
     }
@@ -565,6 +613,9 @@ where
             // Phase 22 D4: a freshly minted SystemParam query carries no
             // dynamic-tag terms; `with_tag` / `without_tag` populate them.
             terms: TagTerms::EMPTY,
+            // EnableTag Step 9: no dynamic enable terms until `with_enabled` /
+            // `without_enabled` populate them.
+            enable_terms: EnableTerms::EMPTY,
             _marker: PhantomData,
         }
     }
@@ -707,6 +758,7 @@ mod tests {
             world: cell,
             meta: &meta,
             terms: TagTerms::EMPTY,
+            enable_terms: EnableTerms::EMPTY,
             _marker: PhantomData,
         };
 

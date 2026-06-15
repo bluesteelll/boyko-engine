@@ -27,6 +27,13 @@
 //!   positive term is not a single leaf and is unbounded in v1 (amendment
 //!   A3.2/A3.3). The SOLE single shape `Query<(), Enabled<A>>` is, by contrast,
 //!   accepted (candidate-seeded).
+//! * `added_on_bitset_tag_rejected.rs` — `Added<C>` on a `STORAGE_IS_BITSET`
+//!   component → the D4 storage-shape const-assert
+//!   `Added::assert_storage_supports_change_detection` fires (a bitset enable
+//!   tag has no per-row tick storage).
+//! * `changed_on_bitset_tag_rejected.rs` — `Changed<C>` on a `STORAGE_IS_BITSET`
+//!   component → the D4 const-assert `Changed::assert_storage_supports_change_detection`
+//!   fires (the polarity twin).
 
 #[cfg(not(miri))]
 #[test]

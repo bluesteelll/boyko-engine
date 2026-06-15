@@ -17,6 +17,7 @@
 pub mod command;
 pub mod command_queue;
 pub mod despawn_command;
+pub mod enable_tag_commands;
 pub mod insert_command;
 pub mod migration_helpers;
 pub mod remove_command;
@@ -55,6 +56,10 @@ pub(crate) use spawn_batch_command::SpawnBatchCommand;
 // through `EntityCommands::add_tag` / `remove_tag`.
 #[allow(unused_imports)]
 pub(crate) use tag_commands::{AddTagCommand, RemoveTagCommand};
+// EnableTag Step 9 deferred toggle command follows the same `pub(crate)`
+// discipline — users go through `EntityCommands::enable` / `disable`.
+#[allow(unused_imports)]
+pub(crate) use enable_tag_commands::EnableTagCommand;
 // Phase 12.5 Opt-A2: `SpawnBatchIter` is the user-facing return type of
 // `Commands::spawn_batch`. Promoted to `pub` so user code can name it in
 // function signatures (without the bundle-iterator type leaking per W5).

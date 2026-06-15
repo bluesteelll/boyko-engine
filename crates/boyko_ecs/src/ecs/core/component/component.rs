@@ -46,6 +46,20 @@ pub trait Component: 'static + Sized {
     /// `HAS_HOOKS = false`.
     const HAS_HOOKS: bool = false;
 
+    /// EnableTag D4 — compile-time storage discriminator. `false` by default
+    /// (table/signature storage, the only backend before EnableTag), so every
+    /// existing `Component` impl keeps the default and pays zero. The
+    /// `#[component(storage = "bitset")]` derive (Wave 5) overrides it to
+    /// `true` for enable-bit tags.
+    ///
+    /// It feeds the `Added<C>` / `Changed<C>` per-monomorphization const-asserts
+    /// (`filter::Added::assert_storage_supports_change_detection`): a bitset
+    /// enable tag has NO per-row tick storage, so change detection on it is
+    /// meaningless and is compile-rejected rather than silently compiling to a
+    /// lie (the Phase-22 D1 "compile-but-lie" lesson). A backward-compatible
+    /// widening — purely a compile-time const, zero ABI break, zero runtime cost.
+    const STORAGE_IS_BITSET: bool = false;
+
     /// Phase 14a (plan §6.2) — installs this component's lifecycle hooks into
     /// `hooks`. Defaulted empty; the `#[derive(Component)]` attribute and the
     /// runtime builder (Wave 5) override it. Called once at registration time

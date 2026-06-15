@@ -55,6 +55,7 @@ use std::marker::PhantomData;
 
 use crate::ecs::core::archetype::archetype::Archetype;
 use crate::ecs::core::iters::query::data::{QueryData, ReadOnlyQueryData};
+use crate::ecs::core::iters::query::enable_terms::{EnableTermCols, EnableTerms};
 use crate::ecs::core::iters::query::filter::QueryFilter;
 use crate::ecs::core::iters::query::state::QueryDataState;
 use crate::ecs::core::system::system_meta::SystemMeta;
@@ -147,6 +148,10 @@ pub struct ParQuery<'q, 's, D: QueryData, F: QueryFilter> {
     /// Phase 10 Round 2 W6: per-system tick snapshot forwarded into every
     /// chunk dispatch path (inline + owned + PAR7 fallback).
     pub(super) meta: &'s SystemMeta,
+    /// EnableTag Step 9: per-view dynamic enable terms (`Copy`). `EMPTY` for
+    /// every handle without a `with_enabled` / `without_enabled` builder —
+    /// gated behind one `is_empty()` branch in the chunk loop (0%-gate).
+    pub(super) enable_terms: EnableTerms,
 }
 
 impl<'q, 's, D, F> ParQuery<'q, 's, D, F>
@@ -181,6 +186,7 @@ where
             self.world,
             self.batching,
             self.meta,
+            self.enable_terms,
             body,
             false,
         );
@@ -205,6 +211,9 @@ pub struct ParQueryMut<'q, 's, D: QueryData, F: QueryFilter> {
     pub(super) batching: BatchingStrategy,
     /// Phase 10 Round 2 W6: per-system tick snapshot (see [`ParQuery::meta`]).
     pub(super) meta: &'s SystemMeta,
+    /// EnableTag Step 9: per-view dynamic enable terms (see
+    /// [`ParQuery::enable_terms`]).
+    pub(super) enable_terms: EnableTerms,
     /// `&'q mut` reborrow marker — the [`Query::par_iter_mut`] entry takes
     /// `&mut self` so the type system already enforces cursor uniqueness;
     /// this marker keeps the handle invariant in `'q`.
@@ -241,6 +250,7 @@ where
             self.world,
             self.batching,
             self.meta,
+            self.enable_terms,
             body,
             true,
         );
@@ -279,6 +289,7 @@ fn for_each_impl<D, F, Body>(
     world: UnsafeEcsCell<'_>,
     batching: BatchingStrategy,
     meta: &SystemMeta,
+    enable_terms: EnableTerms,
     body: Body,
     mutable: bool,
 ) where
@@ -347,6 +358,7 @@ fn for_each_impl<D, F, Body>(
                         entity_count,
                         mutable,
                         meta,
+                        enable_terms,
                         body_ref,
                     );
                     continue;
@@ -371,6 +383,9 @@ fn for_each_impl<D, F, Body>(
                         // chunk completes, so the borrow that produced
                         // `meta` outlives the closure body.
                         meta: meta as *const SystemMeta,
+                        // EnableTag Step 9: `Copy` stack value — no pointer, so
+                        // it travels into the worker closure verbatim.
+                        enable_terms,
                     };
 
                     // SAFETY (PAR2 / PAR3 / S1 / SEND1 / SEND3):
@@ -443,7 +458,16 @@ fn for_each_impl<D, F, Body>(
             // Phase 10 Round 2 W6: forward `meta` so Wave C consumers
             // see the active system's tick snapshot even on the no-pool
             // fallback path.
-            run_chunk_inline::<D, F, Body>(state, arch_ptr, 0, entity_count, mutable, meta, &body);
+            run_chunk_inline::<D, F, Body>(
+                state,
+                arch_ptr,
+                0,
+                entity_count,
+                mutable,
+                meta,
+                enable_terms,
+                &body,
+            );
         }
     }
 }
@@ -469,6 +493,9 @@ struct ChunkCaptures<D: QueryData, F: QueryFilter> {
     /// `run_chunk_owned`; the surrounding `scope.Drop` keeps the meta
     /// alive for the entire chunk lifetime.
     meta: *const SystemMeta,
+    /// EnableTag Step 9: per-view dynamic enable terms (`Copy` stack value, no
+    /// pointer — does not affect the `Send` argument below).
+    enable_terms: EnableTerms,
 }
 
 // SAFETY (PAR2 / SEND1 / SEND3 — Phase 9 §9.2 + Phase 10 Round 2 W6):
@@ -530,6 +557,7 @@ unsafe fn run_chunk_owned<D: QueryData, F: QueryFilter, Body>(
             captured.end,
             captured.mutable,
             &*captured.meta,
+            captured.enable_terms,
             body,
         );
     }
@@ -543,6 +571,7 @@ unsafe fn run_chunk_owned<D: QueryData, F: QueryFilter, Body>(
 ///
 /// # Safety
 /// Same as [`run_chunk_raw`].
+#[allow(clippy::too_many_arguments)]
 #[inline]
 fn run_chunk_inline<D: QueryData, F: QueryFilter, Body>(
     state: &QueryDataState<D, F>,
@@ -551,6 +580,7 @@ fn run_chunk_inline<D: QueryData, F: QueryFilter, Body>(
     end: usize,
     mutable: bool,
     meta: &SystemMeta,
+    enable_terms: EnableTerms,
     body: &Body,
 ) where
     Body: Fn(D::Item<'_>) + Send + Sync,
@@ -569,6 +599,7 @@ fn run_chunk_inline<D: QueryData, F: QueryFilter, Body>(
             end,
             mutable,
             meta,
+            enable_terms,
             body,
         );
     }
@@ -602,12 +633,28 @@ unsafe fn run_chunk_raw<D: QueryData, F: QueryFilter, Body>(
     end: usize,
     mutable: bool,
     meta: &SystemMeta,
+    enable_terms: EnableTerms,
     body: &Body,
 ) where
     Body: Fn(D::Item<'_>) + Send + Sync,
 {
     let mut data_fetch = <D as QueryData>::init_fetch(data_state);
     let mut filter_fetch = <F as QueryFilter>::init_fetch(filter_state);
+
+    // EnableTag Step 9: resolve the per-archetype enable-term columns ONCE for
+    // this chunk's archetype, ONLY when terms are set (the no-term path never
+    // touches this — the 0%-gate). All rows in `[start..end)` share the
+    // archetype, so the resolve is hoisted out of the row loop.
+    let enable_cols = if enable_terms.is_empty() {
+        EnableTermCols::EMPTY
+    } else {
+        // SAFETY (U1 / U2): `archetype` is slab-stable for the chunk's lifetime
+        //   (caller contract); the `&Archetype` reborrow is scoped to this
+        //   expression — no `&mut Archetype` is produced (the enable bit is read
+        //   shared). `enable_column_ptr` is an `&self` scan.
+        let arch_ref: &Archetype = unsafe { &*archetype };
+        enable_terms.resolve(arch_ref)
+    };
 
     // Phase 12.5 Track B NCD6: const-fold dispatcher. When neither
     // `D` nor `F` declares `NEEDS_CHANGE_DETECTION = true`, route
@@ -685,6 +732,21 @@ unsafe fn run_chunk_raw<D: QueryData, F: QueryFilter, Body>(
             // SAFETY (QF1): `set_table_*` ran above for this archetype;
             //   `row < end <= entity_count()` (caller contract).
             let pass = unsafe { <F as QueryFilter>::filter_fetch(&filter_fetch, row) };
+            if !pass {
+                row += 1;
+                continue;
+            }
+        }
+
+        // EnableTag Step 9: dynamic per-row enable terms, gated behind one
+        // `is_empty()` branch so the no-term chunk loop is byte-identical
+        // (0%-gate; mirrors `QueryIter::next`).
+        if !enable_terms.is_empty() {
+            // SAFETY (ENBL-9): `enable_cols` was resolved above for THIS chunk's
+            //   archetype; `row < end <= entity_count()` (caller contract); the
+            //   cached column pointers are valid for the chunk lifetime (the
+            //   archetype is slab-stable and no toggler is live during iteration).
+            let pass = unsafe { enable_cols.passes(row) };
             if !pass {
                 row += 1;
                 continue;

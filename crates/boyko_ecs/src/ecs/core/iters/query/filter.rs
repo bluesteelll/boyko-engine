@@ -622,6 +622,69 @@ impl Clone for AddedFetch<'_> {
 
 impl Copy for AddedFetch<'_> {}
 
+impl<C: Component> Added<C> {
+    /// EnableTag D4 — the storage-shape const-assert for `Added<C>`.
+    ///
+    /// A bitset enable tag (`C::STORAGE_IS_BITSET == true`) has NO per-row tick
+    /// storage, so `Added<C>` cannot be honored on it. Compile-rejecting the
+    /// monomorphization is the correct fix rather than silently matching nothing
+    /// (the Phase-22 D1 "compile-but-lie" lesson).
+    ///
+    /// Two triggers are required, exactly as the `(D, F)`-seam
+    /// `QueryDataState::assert_query_shape` (Step 7a): an inline `const {}` block
+    /// in [`Added::init_state`] fires at CODEGEN (`build` / `test`), while this
+    /// `pub const fn` is referenced from a `const ITEM` in the `trybuild`
+    /// `compile_fail` fixture to force evaluation under a metadata-only
+    /// `cargo check` (the mode `trybuild` runs). Neither trigger alone covers
+    /// every build path — a generic-fn `const {}` block is evaluated only at
+    /// codegen, and `trybuild` checks.
+    ///
+    /// # Examples
+    ///
+    /// A normal table-storage component keeps the trait default
+    /// `STORAGE_IS_BITSET == false`, so the assert is a no-op and
+    /// `Added<C>` compiles:
+    ///
+    /// ```
+    /// use boyko_ecs::ecs::core::component::component::Component;
+    /// use boyko_ecs::ecs::core::iters::query::Added;
+    /// use boyko_ecs::ecs::identifiers::primitives::ComponentId;
+    ///
+    /// struct Health(u32);
+    /// impl Component for Health {
+    ///     fn component_id() -> ComponentId { ComponentId(1) }
+    /// }
+    ///
+    /// // `STORAGE_IS_BITSET == false` (the default) ⇒ the assert passes.
+    /// const _: () = Added::<Health>::assert_storage_supports_change_detection();
+    /// ```
+    ///
+    /// A bitset enable tag has no per-row tick storage, so the assert fails to
+    /// compile (a bitset tag's `Added<C>` would silently match nothing):
+    ///
+    /// ```compile_fail
+    /// use boyko_ecs::ecs::core::component::component::Component;
+    /// use boyko_ecs::ecs::core::iters::query::Added;
+    /// use boyko_ecs::ecs::identifiers::primitives::ComponentId;
+    ///
+    /// struct Stunned(u32);
+    /// impl Component for Stunned {
+    ///     const STORAGE_IS_BITSET: bool = true; // an enable tag
+    ///     fn component_id() -> ComponentId { ComponentId(1) }
+    /// }
+    ///
+    /// // `STORAGE_IS_BITSET == true` ⇒ compile error: no tick storage.
+    /// const _: () = Added::<Stunned>::assert_storage_supports_change_detection();
+    /// ```
+    pub const fn assert_storage_supports_change_detection() {
+        assert!(
+            !C::STORAGE_IS_BITSET,
+            "Added/Changed are not supported on bitset enable tags (no tick \
+             storage); use Enabled<T>/with_enabled or query the underlying data"
+        );
+    }
+}
+
 // SAFETY (QF1, QF2, QF3):
 //   - QF1: `IS_ARCHETYPAL = false`; `filter_fetch` performs a real per-row
 //     check (tick compare with null-base short-circuit).
@@ -644,6 +707,10 @@ unsafe impl<C: Component> QueryFilter for Added<C> {
 
     #[inline]
     fn init_state(_world: &mut EcsMaster) -> Self::State {
+        // EnableTag D4 — codegen-time trigger (fires under `build` / `test`).
+        // The check-time trigger for `trybuild` is the referenced `pub const fn`
+        // `Self::assert_storage_supports_change_detection` in a `const ITEM`.
+        const { Self::assert_storage_supports_change_detection() };
         AddedState {
             id: C::component_id(),
             _marker: PhantomData,
@@ -842,6 +909,20 @@ impl Clone for ChangedFetch<'_> {
 
 impl Copy for ChangedFetch<'_> {}
 
+impl<C: Component> Changed<C> {
+    /// EnableTag D4 — the storage-shape const-assert for `Changed<C>`. Identical
+    /// reasoning and two-trigger pattern to
+    /// [`Added::assert_storage_supports_change_detection`]: a bitset enable tag
+    /// has no per-row tick storage, so `Changed<C>` on it is compile-rejected.
+    pub const fn assert_storage_supports_change_detection() {
+        assert!(
+            !C::STORAGE_IS_BITSET,
+            "Added/Changed are not supported on bitset enable tags (no tick \
+             storage); use Enabled<T>/with_enabled or query the underlying data"
+        );
+    }
+}
+
 // SAFETY (QF1, QF2, QF3): identical reasoning to `Added<C>` — see the
 //   `unsafe impl QueryFilter for Added<C>` above. The only behavioural
 //   delta is the source column (`changed_ticks` vs `added_ticks`); the
@@ -857,6 +938,9 @@ unsafe impl<C: Component> QueryFilter for Changed<C> {
 
     #[inline]
     fn init_state(_world: &mut EcsMaster) -> Self::State {
+        // EnableTag D4 — codegen-time trigger; the check-time `trybuild` trigger
+        // is `Self::assert_storage_supports_change_detection` in a `const ITEM`.
+        const { Self::assert_storage_supports_change_detection() };
         ChangedState {
             id: C::component_id(),
             _marker: PhantomData,

@@ -426,6 +426,64 @@ unsafe impl<T: Component> QueryFilter for Disabled<T> {
 //   error. They also do NOT implement
 //   `super::filter::ArchetypalQueryFilter`, so `for_each_chunk` rejects them.
 
+// ── Point-lookup typed enable test (C3-r5 / Step 9) ──────────────────────────
+
+/// Applies the typed enable filter `F` to a single in-hand `(archetype, row)`
+/// for the `QueryView::get` / `get_mut` point-lookup path (Decision C3-r5 /
+/// Step 9).
+///
+/// Today `get` / `get_mut` apply only the archetype-level matched-set
+/// membership check, never the per-row `filter_fetch` — so a typed
+/// `Enabled<T>` / `Disabled<T>` term would be silently ignored (the C3
+/// "compile-but-lie" bug). This helper closes that gap by reusing the same
+/// generic `init_fetch` → `set_table_readonly_no_meta` → `filter_fetch`
+/// pipeline the cursors run, applied once to the in-hand row.
+///
+/// The whole helper is gated behind `const { F::CONTAINS_ENABLE_TERM }` by the
+/// caller, so it is emitted ONLY for enable-bearing filters — the no-enable
+/// point lookup is byte-identical to today (the 0%-gate). It is correct for
+/// every `F`:
+/// * Archetypal-only `F` (`With` / `Without` / `Or`) has
+///   `IS_ARCHETYPAL = true`, so `filter_fetch` returns `true` unconditionally
+///   (already enforced at the matched-set membership check) — but those `F`
+///   have `CONTAINS_ENABLE_TERM = false` and never reach here.
+/// * `Enabled<T>` / `Disabled<T>` (and AND-tuples containing them) run the real
+///   per-row bit test.
+/// * `Added` / `Changed` cannot be mixed with an enable term (C3-r7 compile
+///   reject), so any `F` reaching here has `NEEDS_CHANGE_DETECTION = false`;
+///   the meta-free `set_table_readonly_no_meta` route is correct and never hits
+///   the `_no_meta` backstop. Change-detection filters on their own are NOT
+///   applied by point lookups (BUG-ENABLE-PRE-2, documented).
+///
+/// # Safety
+///
+/// `archetype` MUST be a live `*const Archetype` for the duration of this call
+/// (the caller's slab-stable pointer), with the archetype already confirmed to
+/// be in the query's matched set. `row` MUST be in range
+/// (`row < archetype.entity_count()`).
+#[inline]
+pub(crate) unsafe fn query_view_enable_passes<F: QueryFilter>(
+    filter_state: &F::State,
+    archetype: *const Archetype,
+    row: usize,
+) -> bool {
+    let mut fetch = <F as QueryFilter>::init_fetch(filter_state);
+    // SAFETY (ENBL-PT): `archetype` is the caller's live, matched, slab-stable
+    //   `*const Archetype`. Any `F` reaching here has
+    //   `NEEDS_CHANGE_DETECTION = false` (C3-r7 forbids the enable+change mix),
+    //   so the meta-free table refresh is the correct, panic-free route — it
+    //   caches the enable column pointer (or NULL) for this archetype into
+    //   `fetch`.
+    unsafe {
+        <F as QueryFilter>::set_table_readonly_no_meta(&mut fetch, filter_state, archetype);
+    }
+    // SAFETY (ENBL-PT): `set_table_readonly_no_meta` cached the per-archetype
+    //   fetch above; `row < entity_count()` per the caller contract. For an
+    //   enable filter this tests the bit at `(archetype, row)` (Enabled: set;
+    //   Disabled: clear) — identical to the cursor's per-row gate.
+    unsafe { <F as QueryFilter>::filter_fetch(&fetch, row) }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::OnceLock;

@@ -33,11 +33,12 @@
 
 use crate::ecs::core::bundle::Bundle;
 use crate::ecs::core::commands::despawn_command::DespawnCommand;
+use crate::ecs::core::commands::enable_tag_commands::EnableTagCommand;
 use crate::ecs::core::commands::insert_command::InsertCommand;
 use crate::ecs::core::commands::remove_command::RemoveCommand;
 use crate::ecs::core::commands::tag_commands::{AddTagCommand, RemoveTagCommand};
 use crate::ecs::core::component::component::Component;
-use crate::ecs::core::component::component_registry::TagId;
+use crate::ecs::core::component::component_registry::{EnableTagId, TagId};
 use crate::ecs::core::entity::entity::Entity;
 use crate::ecs::core::hierarchy::commands::ClearChildrenCommand;
 use crate::ecs::core::hierarchy::ChildOf;
@@ -183,6 +184,76 @@ impl<'a, 's> EntityCommands<'a, 's> {
     #[inline]
     pub fn remove_tag(&mut self, tag: TagId) -> &mut Self {
         self.commands.queue.push(RemoveTagCommand { entity: self.entity, tag });
+        self
+    }
+
+    // ── EnableTag deferred toggle (EnableTag Decision D3 / Step 9) ───────────
+
+    /// Enqueues a deferred toggle that **enables** the EnableTag `T` on this
+    /// entity (Decision D3). Chainable. The typed twin of
+    /// [`enable_id`](Self::enable_id).
+    ///
+    /// On apply (under exclusive `&mut EcsMaster`): one O(1) per-row atomic
+    /// read-modify-write at `(archetype, row)` — no migration, no
+    /// structural-generation bump, no hook / observer fire. A dead / stale
+    /// entity is a silent no-op (a despawn may legitimately race this toggle
+    /// within the frame); the row is resolved via the live `inland.unit_index()`
+    /// at apply time, so a swap-remove moving another entity into the target
+    /// row is honored.
+    ///
+    /// `T` must be a bitset enable tag (`#[component(storage = "bitset")]` /
+    /// `register_enable_tag`); a debug build asserts the storage kind at apply
+    /// time inside the direct API. Mirrors the direct `EcsMaster::enable::<T>`
+    /// surface.
+    #[inline]
+    pub fn enable<T: Component>(&mut self) -> &mut Self {
+        // `EnableTagId`'s tuple field is crate-private (the public surface treats
+        // ComponentId → EnableTagId as a proof-of-mint); constructing it here is
+        // the in-crate analogue of `EcsMaster::enable::<T>`'s direct id resolve.
+        self.commands.queue.push(EnableTagCommand {
+            entity: self.entity,
+            tag: EnableTagId(T::component_id()),
+            value: true,
+        });
+        self
+    }
+
+    /// Enqueues a deferred toggle that **disables** the EnableTag `T` on this
+    /// entity (Decision D3). Chainable. Same O(1), no-migration apply profile
+    /// as [`enable`](Self::enable). Clearing a never-set flag is a no-op.
+    #[inline]
+    pub fn disable<T: Component>(&mut self) -> &mut Self {
+        self.commands.queue.push(EnableTagCommand {
+            entity: self.entity,
+            tag: EnableTagId(T::component_id()),
+            value: false,
+        });
+        self
+    }
+
+    /// Dynamic twin of [`enable`](Self::enable): enqueues a deferred enable of
+    /// the runtime [`EnableTagId`] `tag` on this entity (Decision D3).
+    /// Chainable.
+    #[inline]
+    pub fn enable_id(&mut self, tag: EnableTagId) -> &mut Self {
+        self.commands.queue.push(EnableTagCommand {
+            entity: self.entity,
+            tag,
+            value: true,
+        });
+        self
+    }
+
+    /// Dynamic twin of [`disable`](Self::disable): enqueues a deferred disable
+    /// of the runtime [`EnableTagId`] `tag` on this entity (Decision D3).
+    /// Chainable.
+    #[inline]
+    pub fn disable_id(&mut self, tag: EnableTagId) -> &mut Self {
+        self.commands.queue.push(EnableTagCommand {
+            entity: self.entity,
+            tag,
+            value: false,
+        });
         self
     }
 

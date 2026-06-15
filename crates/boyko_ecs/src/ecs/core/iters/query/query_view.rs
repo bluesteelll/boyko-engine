@@ -27,12 +27,14 @@ use std::ptr::NonNull;
 
 use static_assertions::assert_impl_all;
 
-use crate::ecs::core::component::component_registry::TagId;
+use crate::ecs::core::component::component_registry::{EnableTagId, TagId};
 use crate::ecs::core::entity::entity::Entity;
 use crate::ecs::core::iters::query::chunk_iter;
 use crate::ecs::core::iters::query::chunked_data::ChunkedQueryData;
 use crate::ecs::core::iters::query::data::{QueryData, ReadOnlyQueryData};
+use crate::ecs::core::iters::query::enable_terms::EnableTerms;
 use crate::ecs::core::iters::query::filter::{ArchetypalQueryFilter, QueryFilter};
+use crate::ecs::core::iters::query::filter_enable::query_view_enable_passes;
 use crate::ecs::core::iters::query::iter::{QueryIter, QueryIterMut};
 use crate::ecs::core::iters::query::par_chunk;
 use crate::ecs::core::iters::query::par_iter::{BatchingStrategy, ParQuery, ParQueryMut};
@@ -93,6 +95,13 @@ pub struct QueryView<'w, D: QueryData, F: QueryFilter = ()> {
     /// [`Self::with_tag`] / [`Self::without_tag`]. NEVER written into the
     /// world-owned cached `QueryDataState` (QS1 stays term-agnostic).
     terms: TagTerms,
+
+    /// EnableTag Step 9: per-view dynamic **per-row** enable terms (the dynamic
+    /// twin of typed `Enabled<T>` / `Disabled<T>`). Stack-only `Copy` payload —
+    /// EMPTY for every `EcsMaster::query`-minted view; populated by
+    /// [`Self::with_enabled`] / [`Self::without_enabled`]. A no-enable-term view
+    /// takes the byte-identical cursor / point-lookup fast path (0%-gate).
+    enable_terms: EnableTerms,
 
     /// Lifetime binding to `&'w mut EcsMaster` plus invariance over
     /// `(D, F)`. Two separate marker fields keep the type signature
@@ -177,6 +186,9 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
             // Phase 22 D4: a freshly minted view carries no dynamic-tag
             // terms; `with_tag` / `without_tag` populate them.
             terms: TagTerms::EMPTY,
+            // EnableTag Step 9: no dynamic enable terms until `with_enabled` /
+            // `without_enabled` populate them.
+            enable_terms: EnableTerms::EMPTY,
             _world_borrow: PhantomData,
             _data_filter_invariance: PhantomData,
         }
@@ -210,6 +222,45 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
     #[inline]
     pub fn without_tag(mut self, tag: TagId) -> Self {
         self.terms.push_without(tag);
+        self
+    }
+
+    /// Adds a dynamic **per-row** enable term (EnableTag Decision D2 / Step 9):
+    /// only rows whose `tag` enable bit is SET participate in every driver of
+    /// this view (`iter`/`iter_mut`, `par_iter`/`par_iter_mut`, `get`/`get_mut`,
+    /// `single`/`single_mut`). The dynamic twin of the typed
+    /// [`Enabled<T>`](super::filter_enable::Enabled).
+    ///
+    /// Per-row filtering: a `tag` with no allocated enable column in an
+    /// archetype reads as all-disabled, so no row in it survives a
+    /// `with_enabled` term — identical polarity to `Enabled<T>`. The
+    /// no-enable-term fast path stays byte-identical (one predicted `is_empty()`
+    /// branch — 0%-gate).
+    ///
+    /// # Panics
+    /// Loud release panic past
+    /// [`MAX_ENABLE_TERMS`](crate::ecs::constants::MAX_ENABLE_TERMS) combined
+    /// `with_enabled`/`without_enabled` terms (setup-time, cold — C2 dynamic
+    /// enforcement).
+    #[must_use]
+    #[inline]
+    pub fn with_enabled(mut self, tag: EnableTagId) -> Self {
+        self.enable_terms.push_with(tag);
+        self
+    }
+
+    /// Adds a dynamic **per-row** enable term (EnableTag Decision D2 / Step 9):
+    /// only rows whose `tag` enable bit is CLEAR participate. The dynamic twin
+    /// of the typed [`Disabled<T>`](super::filter_enable::Disabled). Same
+    /// per-row cost model and panic contract as [`Self::with_enabled`].
+    ///
+    /// A `tag` with no allocated enable column reads as all-disabled, so every
+    /// row survives a `without_enabled` term (clear bit ⇒ matches — identical
+    /// polarity to `Disabled<T>`).
+    #[must_use]
+    #[inline]
+    pub fn without_enabled(mut self, tag: EnableTagId) -> Self {
+        self.enable_terms.push_without(tag);
         self
     }
 
@@ -339,7 +390,9 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
         //   resolved ONCE here (no terms → pre-terms slice; terms → memoised
         //   filtered slice); the cursor walks it term-free.
         let ids = self.driver_ids();
-        unsafe { QueryIter::new(self.state(), ids, self.world, SystemMeta::dummy()) }
+        unsafe {
+            QueryIter::new(self.state(), ids, self.world, SystemMeta::dummy(), self.enable_terms)
+        }
     }
 
     /// Returns a mutable iterator over `D::Item<'_>` for every matched row.
@@ -357,7 +410,9 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
         //   the state through the same `&self`-scoped `state()` reborrow as
         //   `driver_ids`, so there is no conflict with the `&mut self` gate.
         let ids = self.driver_ids();
-        unsafe { QueryIterMut::new(self.state(), ids, self.world, SystemMeta::dummy()) }
+        unsafe {
+            QueryIterMut::new(self.state(), ids, self.world, SystemMeta::dummy(), self.enable_terms)
+        }
     }
 
     /// Returns a parallel read-only iteration handle.
@@ -381,6 +436,7 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
             world: self.world,
             batching: BatchingStrategy::default(),
             meta: SystemMeta::dummy(),
+            enable_terms: self.enable_terms,
         }
     }
 
@@ -400,6 +456,7 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
             world: self.world,
             batching: BatchingStrategy::default(),
             meta: SystemMeta::dummy(),
+            enable_terms: self.enable_terms,
             _mut_marker: PhantomData,
         }
     }
@@ -456,6 +513,23 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
     /// `D` must be [`ReadOnlyQueryData`]. For the mutable variant use
     /// [`Self::get_mut`].
     ///
+    /// # Enable filters (EnableTag Step 9 — C3-r5)
+    ///
+    /// A typed [`Enabled<T>`](super::filter_enable::Enabled) /
+    /// [`Disabled<T>`](super::filter_enable::Disabled) in `F`, and any dynamic
+    /// [`with_enabled`](Self::with_enabled) / [`without_enabled`](Self::without_enabled)
+    /// term, IS applied per-row here: a disabled (resp. enabled) entity returns
+    /// `None`.
+    ///
+    /// # Note (C3-r7-c)
+    ///
+    /// Non-archetypal **change-detection** filters (`Changed<C>` / `Added<C>`)
+    /// are NOT applied by point lookups — `get` only honors archetypal and
+    /// enable terms. Use iteration ([`Self::iter`]) for per-row change
+    /// detection. (Mixing an enable term with `Changed`/`Added` in one query
+    /// is a compile error, so the misleading partial-filter shape cannot be
+    /// constructed.)
+    ///
     /// # Cost
     ///
     /// O(1) entity-master lookup + a single archetype dispatch. The
@@ -494,6 +568,32 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
             return None;
         }
         let row = inland.unit_index() as usize;
+        // EnableTag Step 9 (C3-r5): point lookups must honor enable filters too,
+        // else a typed `Enabled<T>` would be silently ignored ("compile-but-lie").
+        // Typed term: gated behind `const { F::CONTAINS_ENABLE_TERM }`, so the
+        // call is emitted ONLY for enable-bearing filters — the no-enable get is
+        // byte-identical (0%-gate). C3-r7 forbids mixing with `Changed`/`Added`,
+        // so any such `F` is NCD = false and the meta-free route is correct.
+        if const { F::CONTAINS_ENABLE_TERM } {
+            // SAFETY (ENBL-PT): `arch_ptr` is the live, matched, slab-stable
+            //   archetype pointer; `row < entity_count` per the fast-store
+            //   invariant. The helper caches the enable column for this
+            //   archetype and tests the row bit (Enabled: set; Disabled: clear).
+            if !unsafe { query_view_enable_passes::<F>(&state.filter_state, arch_ptr, row) } {
+                return None;
+            }
+        }
+        // Dynamic per-row enable terms: gated behind one `is_empty()` branch so
+        // a no-dynamic-term get is unchanged.
+        if !self.enable_terms.is_empty() {
+            // SAFETY (ENBL-9): `arch_ref` is the live, matched archetype;
+            //   `row < entity_count`. `resolve` scans the archetype's
+            //   EnableStore (`&self`) and `passes` tests each term's bit.
+            let cols = self.enable_terms.resolve(arch_ref);
+            if !unsafe { cols.passes(row) } {
+                return None;
+            }
+        }
         let mut data_fetch = <D as QueryData>::init_fetch(&state.data_state);
         // SAFETY (QD3, QD4): read-only mint via the raw pointer; the
         //   archetype was matched by `D::matches_component_set` (post-filter
@@ -516,6 +616,19 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
     /// lives in a matched archetype.
     ///
     /// Accepts any `D: QueryData`.
+    ///
+    /// # Enable filters (EnableTag Step 9 — C3-r5)
+    ///
+    /// Mirrors [`Self::get`]: typed [`Enabled<T>`](super::filter_enable::Enabled)
+    /// / [`Disabled<T>`](super::filter_enable::Disabled) and dynamic
+    /// [`with_enabled`](Self::with_enabled) / [`without_enabled`](Self::without_enabled)
+    /// terms ARE applied per-row (a filtered-out entity returns `None`).
+    ///
+    /// # Note (C3-r7-c)
+    ///
+    /// Non-archetypal **change-detection** filters (`Changed<C>` / `Added<C>`)
+    /// are NOT applied by point lookups; use iteration ([`Self::iter_mut`]) for
+    /// per-row change detection.
     pub fn get_mut(&mut self, entity: Entity) -> Option<D::Item<'_>> {
         let state = self.state();
         // SAFETY (U_C2): cell scoped to '_; `world()` returns a shared
@@ -550,6 +663,27 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
             return None;
         }
         let row = inland_copy.unit_index() as usize;
+        // EnableTag Step 9 (C3-r5): per-row enable test — mirrors `get`. The
+        // enable bit is read shared regardless of the cursor's mutability, so a
+        // `*const` reborrow of `arch_ptr` is the correct read surface here.
+        if const { F::CONTAINS_ENABLE_TERM } {
+            // SAFETY (ENBL-PT): `arch_ptr` is the live, matched, slab-stable
+            //   archetype pointer; `row < entity_count`. The typed enable test
+            //   reads the bit shared; see `get` for the full rationale.
+            if !unsafe {
+                query_view_enable_passes::<F>(&state.filter_state, arch_ptr as *const _, row)
+            } {
+                return None;
+            }
+        }
+        if !self.enable_terms.is_empty() {
+            // SAFETY (ENBL-9): `arch_ref` is the live, matched archetype;
+            //   `row < entity_count`; the enable bit is read shared.
+            let cols = self.enable_terms.resolve(arch_ref);
+            if !unsafe { cols.passes(row) } {
+                return None;
+            }
+        }
         let mut data_fetch = <D as QueryData>::init_fetch(&state.data_state);
         // SAFETY (QD3, QD4): write-capable mint; archetype matched.
         unsafe {

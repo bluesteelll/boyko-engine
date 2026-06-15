@@ -62,6 +62,7 @@ use std::marker::PhantomData;
 
 use crate::ecs::core::archetype::archetype::Archetype;
 use crate::ecs::core::iters::query::data::{QueryData, ReadOnlyQueryData};
+use crate::ecs::core::iters::query::enable_terms::{EnableTermCols, EnableTerms};
 use crate::ecs::core::iters::query::filter::QueryFilter;
 use crate::ecs::core::iters::query::state::QueryDataState;
 use crate::ecs::core::system::system_meta::SystemMeta;
@@ -110,6 +111,15 @@ pub struct QueryIter<'q, 's, D: QueryData, F: QueryFilter> {
     /// `&'s` — the meta lives in the same system-state slot as
     /// `QueryDataState`, so they share the `'s` lifetime by construction.
     meta: &'s SystemMeta,
+    /// EnableTag Step 9: per-view dynamic enable terms (the per-row twin of
+    /// typed `Enabled<T>` / `Disabled<T>`). `EMPTY` for every query without a
+    /// `with_enabled` / `without_enabled` builder — gated behind one
+    /// `is_empty()` branch so the no-term cursor is byte-identical (0%-gate).
+    enable_terms: EnableTerms,
+    /// Per-archetype resolved enable-term columns, refreshed at each archetype
+    /// transition ONLY when `enable_terms` is non-empty (mirrors the typed
+    /// `EnableFetch` `set_table_*` discipline).
+    enable_cols: EnableTermCols,
     _marker: PhantomData<&'s ()>,
 }
 
@@ -163,6 +173,7 @@ where
         ids: &'q [ArchetypeId],
         world: UnsafeEcsCell<'q>,
         meta: &'s SystemMeta,
+        enable_terms: EnableTerms,
     ) -> Self {
         Self {
             archetype_ids: ids.iter(),
@@ -174,6 +185,8 @@ where
             current_row: 0,
             current_len: 0,
             meta,
+            enable_terms,
+            enable_cols: EnableTermCols::EMPTY,
             _marker: PhantomData,
         }
     }
@@ -206,6 +219,26 @@ where
                     let pass = unsafe {
                         <F as QueryFilter>::filter_fetch(&self.filter_fetch, row)
                     };
+                    if !pass {
+                        continue;
+                    }
+                }
+
+                // EnableTag Step 9: dynamic per-row enable terms. Gated behind
+                // one predicted-not-taken `is_empty()` branch so a query with no
+                // `with_enabled`/`without_enabled` term is byte-identical to
+                // today (the 0%-gate); when set, `enable_cols` was resolved for
+                // this archetype at the transition below.
+                if !self.enable_terms.is_empty() {
+                    // SAFETY (ENBL-9): `enable_cols` was resolved by
+                    //   `EnableTerms::resolve` for the current archetype at the
+                    //   outer-loop transition below; `row < self.current_len ==
+                    //   entity_count()` per the inner-loop guard. The cached
+                    //   column pointers are valid for `'q` (the archetype
+                    //   outlives the cursor; a directory regrow runs only inside
+                    //   a `&mut` apply window where no cursor is live — same
+                    //   contract as the typed `EnableFetch`).
+                    let pass = unsafe { self.enable_cols.passes(row) };
                     if !pass {
                         continue;
                     }
@@ -297,6 +330,12 @@ where
             let arch_ref: &Archetype = unsafe { &*archetype_ptr };
             self.current_row = 0;
             self.current_len = arch_ref.entity_count();
+            // EnableTag Step 9: refresh the per-archetype enable-term columns
+            // ONLY when terms are set (the no-term cursor never touches this —
+            // 0%-gate). `arch_ref` is the live `&Archetype` for this transition.
+            if !self.enable_terms.is_empty() {
+                self.enable_cols = self.enable_terms.resolve(arch_ref);
+            }
         }
     }
 
@@ -332,6 +371,12 @@ pub struct QueryIterMut<'q, 's, D: QueryData, F: QueryFilter> {
     /// Phase 10 Round 2 C2: per-system tick snapshot. Same shape and
     /// purpose as [`QueryIter::meta`].
     meta: &'s SystemMeta,
+    /// EnableTag Step 9: per-view dynamic enable terms. Same shape and 0%-gate
+    /// discipline as [`QueryIter::enable_terms`].
+    enable_terms: EnableTerms,
+    /// EnableTag Step 9: per-archetype resolved enable-term columns. Same shape
+    /// as [`QueryIter::enable_cols`].
+    enable_cols: EnableTermCols,
     _marker: PhantomData<&'s ()>,
 }
 
@@ -377,6 +422,7 @@ where
         ids: &'q [ArchetypeId],
         world: UnsafeEcsCell<'q>,
         meta: &'s SystemMeta,
+        enable_terms: EnableTerms,
     ) -> Self {
         Self {
             archetype_ids: ids.iter(),
@@ -388,6 +434,8 @@ where
             current_row: 0,
             current_len: 0,
             meta,
+            enable_terms,
+            enable_cols: EnableTermCols::EMPTY,
             _marker: PhantomData,
         }
     }
@@ -413,6 +461,19 @@ impl<'q, 's, D: QueryData, F: QueryFilter> Iterator for QueryIterMut<'q, 's, D, 
                     let pass = unsafe {
                         <F as QueryFilter>::filter_fetch(&self.filter_fetch, row)
                     };
+                    if !pass {
+                        continue;
+                    }
+                }
+
+                // EnableTag Step 9: dynamic per-row enable terms (see
+                // `QueryIter::next` for the 0%-gate rationale). The enable bit
+                // is read shared regardless of the cursor's mutability.
+                if !self.enable_terms.is_empty() {
+                    // SAFETY (ENBL-9): `enable_cols` was resolved for the current
+                    //   archetype at the transition below; `row < self.current_len`
+                    //   per the inner-loop guard; column pointers valid for `'q`.
+                    let pass = unsafe { self.enable_cols.passes(row) };
                     if !pass {
                         continue;
                     }
@@ -500,6 +561,13 @@ impl<'q, 's, D: QueryData, F: QueryFilter> Iterator for QueryIterMut<'q, 's, D, 
             let arch_ref: &Archetype = unsafe { &*archetype_ptr };
             self.current_row = 0;
             self.current_len = arch_ref.entity_count();
+            // EnableTag Step 9: refresh per-archetype enable-term columns only
+            // when terms are set (the no-term cursor never touches this). The
+            // enable bit is read shared, so the `&Archetype` view suffices even
+            // on the mutable cursor.
+            if !self.enable_terms.is_empty() {
+                self.enable_cols = self.enable_terms.resolve(arch_ref);
+            }
         }
     }
 
@@ -629,7 +697,7 @@ mod tests {
         let ids = state.archetype_state.matched_ids_pre_terms();
         // SAFETY (Q1, QD4, U_C2): direct test of `QueryIter::next`; no
         //   aliasing accessor is live in this scope.
-        let iter = unsafe { QueryIter::<&CompA, ()>::new(&state, ids, cell, &meta) };
+        let iter = unsafe { QueryIter::<&CompA, ()>::new(&state, ids, cell, &meta, crate::ecs::core::iters::query::enable_terms::EnableTerms::EMPTY) };
 
         let collected: Vec<u32> = iter.map(|a: &CompA| a.0).collect();
         assert_eq!(collected.len(), 3, "single archetype must yield 3 rows");
@@ -665,7 +733,7 @@ mod tests {
         let cell = unsafe { UnsafeEcsCell::new_mutable(&mut ecs) };
         let ids = state.archetype_state.matched_ids_pre_terms();
         // SAFETY (Q1, QD4, U_C2): direct cursor test, no aliasing.
-        let iter = unsafe { QueryIter::<&CompA, ()>::new(&state, ids, cell, &meta) };
+        let iter = unsafe { QueryIter::<&CompA, ()>::new(&state, ids, cell, &meta, crate::ecs::core::iters::query::enable_terms::EnableTerms::EMPTY) };
 
         let collected: Vec<u32> = iter.map(|a: &CompA| a.0).collect();
         assert_eq!(collected.len(), 5, "two archetypes must yield 5 rows");
@@ -698,7 +766,7 @@ mod tests {
         let cell = unsafe { UnsafeEcsCell::new_mutable(&mut ecs) };
         let ids = state.archetype_state.matched_ids_pre_terms();
         // SAFETY (Q1, QD4, U_C2): direct cursor test.
-        let iter = unsafe { QueryIter::<&CompA, ()>::new(&state, ids, cell, &meta) };
+        let iter = unsafe { QueryIter::<&CompA, ()>::new(&state, ids, cell, &meta, crate::ecs::core::iters::query::enable_terms::EnableTerms::EMPTY) };
 
         let collected: Vec<u32> = iter.map(|a: &CompA| a.0).collect();
         assert_eq!(
@@ -735,7 +803,7 @@ mod tests {
         let ids = state.archetype_state.matched_ids_pre_terms();
         // SAFETY (Q1, QD4, U_C2, Q5): the stale id is exactly the case the
         //   `continue` branch handles.
-        let iter = unsafe { QueryIter::<&CompA, ()>::new(&state, ids, cell, &meta) };
+        let iter = unsafe { QueryIter::<&CompA, ()>::new(&state, ids, cell, &meta, crate::ecs::core::iters::query::enable_terms::EnableTerms::EMPTY) };
 
         let collected: Vec<u32> = iter.map(|a: &CompA| a.0).collect();
         assert_eq!(
@@ -765,7 +833,7 @@ mod tests {
             let cell = unsafe { UnsafeEcsCell::new_mutable(&mut ecs) };
             let ids = state.archetype_state.matched_ids_pre_terms();
             // SAFETY (Q1, QD4, U_C3): direct mut-cursor test, no aliasing.
-            let iter = unsafe { QueryIterMut::<&mut CompA, ()>::new(&state, ids, cell, &meta) };
+            let iter = unsafe { QueryIterMut::<&mut CompA, ()>::new(&state, ids, cell, &meta, crate::ecs::core::iters::query::enable_terms::EnableTerms::EMPTY) };
             for a in iter {
                 a.0 = 99;
             }
@@ -778,7 +846,7 @@ mod tests {
         let cell = unsafe { UnsafeEcsCell::new_mutable(&mut ecs) };
         let ids = state.archetype_state.matched_ids_pre_terms();
         // SAFETY (Q1, QD4, U_C2): no aliasing accessor live.
-        let iter = unsafe { QueryIter::<&CompA, ()>::new(&state, ids, cell, &meta) };
+        let iter = unsafe { QueryIter::<&CompA, ()>::new(&state, ids, cell, &meta, crate::ecs::core::iters::query::enable_terms::EnableTerms::EMPTY) };
         let collected: Vec<u32> = iter.map(|a: &CompA| a.0).collect();
         assert_eq!(collected.len(), 3, "three rows must remain after mutation");
         assert!(
@@ -812,7 +880,7 @@ mod tests {
         let cell = unsafe { UnsafeEcsCell::new_mutable(&mut ecs) };
         let ids = state.archetype_state.matched_ids_pre_terms();
         // SAFETY (Q1, QD4, U_C2): direct cursor test.
-        let iter = unsafe { QueryIter::<&CompA, Without<CompB>>::new(&state, ids, cell, &meta) };
+        let iter = unsafe { QueryIter::<&CompA, Without<CompB>>::new(&state, ids, cell, &meta, crate::ecs::core::iters::query::enable_terms::EnableTerms::EMPTY) };
 
         let collected: Vec<u32> = iter.map(|a: &CompA| a.0).collect();
         assert_eq!(
@@ -841,7 +909,7 @@ mod tests {
         let cell = unsafe { UnsafeEcsCell::new_mutable(&mut ecs) };
         let ids = state.archetype_state.matched_ids_pre_terms();
         // SAFETY (Q1, QD4, U_C2): const-fold path; no aliasing.
-        let iter = unsafe { QueryIter::<&CompA, Without<CompB>>::new(&state, ids, cell, &meta) };
+        let iter = unsafe { QueryIter::<&CompA, Without<CompB>>::new(&state, ids, cell, &meta, crate::ecs::core::iters::query::enable_terms::EnableTerms::EMPTY) };
         // The very act of consuming the iterator without panic confirms that
         // the const-folded branch did not produce a runtime call that
         // mis-dispatches. The golden expand snapshot in Step 14 nails it

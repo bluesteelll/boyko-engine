@@ -22,6 +22,10 @@
 pub mod chunk_iter;
 pub mod chunked_data;
 pub mod data;
+// EnableTag Step 9: stack-only dynamic per-row enable terms (the `with_enabled`
+// / `without_enabled` builders). Crate-internal carrier; the term ceiling is
+// `crate::ecs::constants::MAX_ENABLE_TERMS`.
+pub mod enable_terms;
 pub mod filter;
 // EnableTag Step 7: the `Enabled<T>` / `Disabled<T>` non-archetypal per-row
 // filters over the bitset storage backend.

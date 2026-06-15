@@ -1,0 +1,19 @@
+error[E0080]: evaluation panicked: Added/Changed are not supported on bitset enable tags (no tick storage); use Enabled<T>/with_enabled or query the underlying data
+  --> tests/enable_filter_compile_fail/changed_on_bitset_tag_rejected.rs:27:15
+   |
+27 | const _: () = Changed::<BitsetTag>::assert_storage_supports_change_detection();
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `_` failed inside this call
+   |
+note: inside `Changed::<BitsetTag>::assert_storage_supports_change_detection`
+  --> $RUST/core/src/panic.rs
+   |
+   = note: the failure occurred here
+   |
+  ::: src/ecs/core/iters/query/filter.rs
+   |
+   | /         assert!(
+   | |             !C::STORAGE_IS_BITSET,
+   | |             "Added/Changed are not supported on bitset enable tags (no tick \
+   | |              storage); use Enabled<T>/with_enabled or query the underlying data"
+   | |         );
+   | |_________- in this macro invocation
