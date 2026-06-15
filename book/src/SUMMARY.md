@@ -11,6 +11,7 @@
 
 - [Tags](concepts/tags.md)
 - [Dynamic Tags](concepts/dynamic-tags.md)
+- [Enable Tags (Bitset Storage)](concepts/enable-tags.md)
 
 # Memory Subsystem
 

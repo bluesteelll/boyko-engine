@@ -27,7 +27,7 @@ for cross-crate architecture, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 1. [Identifiers](#1-identifiers-id-types-)
 2. [Memory subsystem](#2-memory-subsystem-) — VmReservation (per-OS reserve/commit), ComponentPool (type-erased, self-growing, tick sub-regions); Arena + MemFreeBlockMaster DELETED (X.J)
-3. [Component subsystem](#3-component-subsystem-) — trait, mask, registry, pool bundle, **§3.6 hooks & observers**, **§3.7 tags (static ZST + dynamic) + empty archetype**
+3. [Component subsystem](#3-component-subsystem-) — trait, mask, registry, pool bundle, **§3.6 hooks & observers**, **§3.7 tags (static ZST + dynamic) + empty archetype**, **§3.8 EnableTag (enable-bit, non-fragmenting tag backend)**
 4. [Entity subsystem](#4-entity-subsystem-) — Entity, EntityInland (slab ptr), EntityMaster
 5. [Archetype subsystem](#5-archetype-subsystem-) — Archetype (inline columns), signature, registry, bundle slab, master
 6. [EcsMaster facade](#6-ecsmaster-top-level-facade-) — incl. **§6.1 multi-world model** (WorldId, schedule binding, hooks-global/observers-per-world)
@@ -503,6 +503,206 @@ Suites: [tests/phase22_tags.rs](../crates/boyko_ecs/tests/phase22_tags.rs)
 (out-of-crate reachability — W3), `phase22_tags_exhaustion.rs` (own process,
 drains the registry), `phase22_query_terms.rs` (per-driver),
 `phase22_bundles.rs`, `phase22_static_tags.rs`, `phase22_empty_archetype.rs`.
+
+---
+
+### 3.8. EnableTag — enable-bit, non-fragmenting tag backend ✅
+
+The **second tag storage backend**. §3.7 tags use the *signature/table* backend
+(membership = an archetype-signature bit + a tick-only `ComponentPool`); an
+**EnableTag** uses the *bitset* backend: its id is filtered out of every
+archetype signature and owns no pool — presence is a single per-row bit in a
+paged per-archetype bitset. Toggling is therefore **O(1): no migration, no
+structural-generation bump, no hook/observer fire, no deferred drain** (flecs
+`CanToggle`). The cost: no per-row tick storage, so `Added<T>`/`Changed<T>` are
+compile-rejected on a bitset tag (the Phase-22 "compile-but-lie" lesson). Use it
+for high-churn transient flags (`Stunned`, `Visible`, `Sleeping`). Authoritative
+design: [ENABLE-TAG-PLAN.md](ENABLE-TAG-PLAN.md) +
+[ENABLE-TAG-PLAN-AMENDMENT-D7.md](ENABLE-TAG-PLAN-AMENDMENT-D7.md).
+
+**Storage model (D1)** — three layers in
+[component/enable/enable_store.rs](../crates/boyko_ecs/src/ecs/core/component/enable/enable_store.rs):
+
+```text
+EnableStore   per-archetype; inline-4 SmallList4<(ComponentId, EnableColumn)>   (enable_store.rs:259)
+  └ EnableColumn   one per (archetype, tag); lazily-paged page directory          (enable_store.rs:117)
+      └ EnablePage   #[repr(C, align(64))] [AtomicU64; 64] = 512 B / 4096 rows    (enable_store.rs:60)
+```
+
+The bit's home is `(archetype, row)` — exactly like component data + Phase-10
+tick columns — so it travels through the existing swap-remove / migration row
+loops and never leaks across entity recycling. A page is allocated only on the
+first toggle into its 4096-row range (`get_or_alloc_page`, `#[cold]`), capping
+any single allocation at 512 B (a `const _` size+align pin enforces it,
+enable_store.rs:65-66). Index arithmetic: `page = row >> 12`,
+`word = (row >> 6) & 63`, `bit = row & 63`. `EnableColumn::test` (enable_store.rs:149)
+reads a `None` page as `false` (all-disabled). `swap_remove_bit`
+(enable_store.rs:219) is **READ-first** (snapshot `last`'s bit before any write)
+so an adjacent `removed == last - 1` / same-word pair cannot corrupt; the
+store-level `swap_remove_row` (enable_store.rs:322) fires it across every
+allocated column once per structural op. Migration uses a borrow-free owned
+snapshot: `read_row_bits` (enable_store.rs:357, Phase-1 READ) → owned
+`(ComponentId, bool)` `Copy` values that survive a later `swap_remove_row` of the
+very columns read (structurally not the NEW-1 dangling-slice class) →
+`write_row_bit` (enable_store.rs:369, Phase-2 WRITE; a clear never allocates a
+column/page).
+
+**StorageKind classifier (D5)** —
+[component/component_registry.rs](../crates/boyko_ecs/src/ecs/core/component/component_registry.rs):
+`enum StorageKind { Table = 0, Bitset = 1 }` (:396), recorded in the cold
+parallel `static STORAGE_KIND: [AtomicU8; MAX_COMPONENTS]` (:420) — kept parallel
+to `LAYOUTS`/`HOOKS` rather than as a sixth `ComponentLayout` field so
+`ComponentLayout` stays pinned at 56 B (TRIPWIRE 2). `storage_kind(id)` (:435,
+one `Relaxed` load, out-of-range → `Table`); write-once `set_storage_kind`
+(:475, debug-panics on re-classify to a *different* kind); `install_storage_kind::<C>`
+(:527, const-gated on `C::STORAGE_IS_BITSET`); the dynamic mint
+`try_register_enable_tag_by_name` (:565). `EnableTagId` (:258) is a
+`#[repr(transparent)]` proof-of-mint over `ComponentId` with a one-way public
+bridge `component_id()` (:264) / `From<EnableTagId> for ComponentId` (:269) — no
+reverse constructor. The compile-time discriminator is the new
+`Component::STORAGE_IS_BITSET` const (default `false`,
+[component/component.rs](../crates/boyko_ecs/src/ecs/core/component/component.rs):61),
+which the `Added`/`Changed` per-monomorphization const-asserts read to
+compile-reject change detection on a bitset tag.
+
+**Signature filtering (Step 4)** — archetype construction skips any id with
+`storage_kind == Bitset`. The signature mask is built through the single shared
+`filtered_signature_mask` helper (archetype.rs:272, the :275 filter — so the
+registry-minted signature matches bit-for-bit), and the pool bundle skips the
+same ids at `Archetype::create_by_ids` (archetype.rs:283, the :319 filter) and
+`register_component_inplace` (archetype.rs:380, the :387 filter). The
+`enable_store` field
+([archetype.rs](../crates/boyko_ecs/src/ecs/core/archetype/archetype.rs):150)
+sits on every `Archetype` (`EnableStore::new()` at both construction sites);
+`set_enable_bit` (archetype.rs:490) flips the paged bit and returns
+`newly_allocated == true` only on the first column for the tag; `enable_column_ptr`
+(archetype.rs:468) hands the query fetch a borrowed `*const EnableColumn` (or
+NULL). `swap_remove_row` / remove paths fire `enable_store.swap_remove_row` only
+when `!enable_store.is_empty()` (the 0%-gate for enable-free archetypes,
+archetype.rs:747/:776/:833/:853).
+
+**The cull oracle (D2)** —
+[component/enable/enable_presence.rs](../crates/boyko_ecs/src/ecs/core/component/enable/enable_presence.rs)
+`EnablePresence`: per-world, one lazily-`AtomicPtr`-published
+`Box<[AtomicU64; 16]>` (128 B) per tag id, a bit per `ArchetypeId`
+(`PRESENCE_WORDS = 16`, `PRESENCE_CAPACITY = 1024`). `contains(tag, arch)`
+(:164) is O(1) (one pointer load + one word load + one bit test); a never-toggled
+tag (null slot) → `false` = "no column ⇒ every row disabled ⇒ drop the
+archetype". It is consulted ONLY as the `contains` oracle over an
+already-bounded matched set — **never a driver** (deliberately no
+`for_each_present`): a presence-driven enumeration would be the unbounded
+sole-`Enabled` path the plan compile-rejects. `note_column_alloc` (:120, `&self`,
+sets one bit + bumps a lock-free `epoch` with `Release`) and `snapshot_present`
+(:219, a bounded 16-word `Acquire`-load loop into an `ArchetypeBitSet`) back the
+D7 candidate-seeded scan. The atomic words are the forward seam for the D7
+worker-marking toggle; v1's `Relaxed`/single-thread discipline needs no retry.
+`clear_archetype` (:261) clears one arch's bit across every tag on archetype
+removal/`clear()`. It lives on `ArchetypeMaster` next to `enable_generation`
+([archetype_master.rs](../crates/boyko_ecs/src/ecs/core/archetype/archetype_master.rs):103/:87)
+so the presence-bit set and the generation bump pair atomically inside
+`note_enable_column_alloc` (archetype_master.rs:603) — keyed by *this* world's
+`ArchetypeId` (multi-world-correct). `enable_generation` (:585) is independent of
+`structural_generation` (a toggle never bumps the latter) and is left monotonic
+across `clear()` (a recycled id can never be a stale candidate).
+
+**API (D3/D5)** —
+[ecs_master/enable_tag_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/enable_tag_api.rs):
+registration `register_enable_tag` (:60) / `try_register_enable_tag` (:72);
+typed toggle `enable::<T>` (:87) / `disable::<T>` (:95) / `is_enabled::<T>` (:104);
+dynamic `enable_id` / `disable_id` / `is_enabled_id` (:113/:119/:126). All
+mutators take `&mut self` (the v1 soundness ground for the `Relaxed` atomics —
+do NOT relax to `&self` without the D7 loom proof); dead/stale entities are
+silent no-ops. The internal core `set_enable_bit` (:148) resolves the live
+inland → current post-swap row → reborrows `&mut Archetype` (confined, dropped
+before touching `archetype_master`) → flips the bit → fires
+`note_enable_column_alloc` once per genuinely-new column. Deferred toggle:
+`EntityCommands::{enable, disable, enable_id, disable_id}`
+([params/entity_commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/entity_commands.rs):209/:226/:235)
+→ the POD `EnableTagCommand { entity, tag, value }`
+([commands/enable_tag_commands.rs](../crates/boyko_ecs/src/ecs/core/commands/enable_tag_commands.rs):45)
+whose `apply` calls `enable_id`/`disable_id` at the apply window. Cross-archetype
+migration copies the enable bits via the borrow-free two-phase snapshot in
+[commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs)
+(`read_source_enable_bits` :102 PHASE-1 / `write_target_enable_bits` :127
+PHASE-2 / `fire_enable_column_alloc_bookkeeping` :160 O2), each gated by
+`EnableStore::is_empty` so an enable-free entity is byte-identical to before.
+
+**Query integration (D2/D4/D7)** — three shapes, all archetype-granularity cull
++ per-row bit test:
+- **Typed filters** —
+  [query/filter_enable.rs](../crates/boyko_ecs/src/ecs/core/iters/query/filter_enable.rs):
+  `Enabled<T>` / `Disabled<T>`, non-archetypal per-row `QueryFilter`s
+  (`IS_ARCHETYPAL = false`, `NEEDS_CHANGE_DETECTION = false`,
+  `CONTAINS_ENABLE_TERM = true`). The per-archetype `EnableFetch`
+  (`*const EnableColumn` or NULL) is refreshed in `set_table_*` like the
+  `Added`/`Changed` `tick_base`; a NULL column reads as disabled (`Disabled`
+  inverts it). Both have a no-op `init_access` (the `Without<C>` precedent — they
+  declare no component access) and implement NEITHER `OrComposable` (so
+  `Or<(Enabled<A>, ..)>` is a compile error — M1) nor `ArchetypalQueryFilter`
+  (so `for_each_chunk` rejects them).
+- **Dynamic terms** —
+  [query/enable_terms.rs](../crates/boyko_ecs/src/ecs/core/iters/query/enable_terms.rs):
+  `EnableTerms` (per-view, ≤ `MAX_ENABLE_TERMS = 8`,
+  [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):294) populated by
+  `with_enabled` / `without_enabled` on `Query`
+  ([query.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query.rs):139/:154)
+  and `QueryView`
+  ([query_view.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query_view.rs):247/:262);
+  NEVER stored in the shared interned `QueryState` (QS1 stays term-agnostic —
+  like `TagTerms`). Polarity bit `i`: `1` = `with_enabled` (bit must be set),
+  `0` = `without_enabled` (bit must be clear). **Gate caveat:** unlike the
+  Phase-22.1 archetype-level `TagTerms` (which leaves ZERO term code in the row
+  loop), an enable term is a genuine per-row predicate, so the `is_empty()` gate
+  stays a RUNTIME branch *inside* the row loop — but it is loop-invariant
+  (`enable_terms` is never written mid-iteration), so the compiler hoists it to
+  one predicted-not-taken branch (bench-flat).
+- **The `(D, F)` seam** —
+  [query/state.rs](../crates/boyko_ecs/src/ecs/core/iters/query/state.rs):
+  `ASSERT_SHAPE` const-asserts (state.rs:112) reject an enable tuple with no
+  positive bound (must be paired with a `With<_>` or be a SOLE single leaf;
+  `CONTAINS_ENABLE_TERM && CONTAINS_CHANGE_DETECTION` is also rejected,
+  state.rs:123). `HAS_ENABLE_TERM = F::CONTAINS_ENABLE_TERM` (state.rs:80) gates
+  the whole enable machinery off for non-enable `(D, F)`. The candidate-seeded
+  branch `IS_CANDIDATE_SEEDED` (state.rs:90 — sole single-enable, no data
+  component, no positive archetypal) seeds the matched set from the bounded
+  `EnablePresence::snapshot_present` candidate snapshot
+  (state.rs:201, popcount-walked by `seed_from_candidates`) instead of the full
+  live-archetype set (the D7 bounded global scan — the answer to "data-less
+  global scan of enabled/disabled entities"). On `update`, the
+  `last_observed_enable_generation` slot (state.rs:69) is re-checked against
+  `ArchetypeMaster::enable_generation`: a bump means "an archetype gained a
+  column" ⇒ re-snapshot + re-cull (state.rs:324-373).
+
+**Derive (Wave 5)** — `#[component(storage = "bitset")]`
+([boyko_macros/src/lib.rs](../crates/boyko_macros/src/lib.rs):107/:120/:301/:319):
+must be a ZST (a fielded bitset tag has no pool to hold data — rejected at macro
+time, lib.rs:107); cannot combine with lifecycle hooks (an enable-bit op fires no
+hook — rejected, lib.rs:120); emits `const STORAGE_IS_BITSET = true` + an
+`install_storage_kind::<Self>` call routing the minted id to `StorageKind::Bitset`;
+suppresses the single-component `Bundle` emission (no pool ⇒ not spawnable as a
+one-component bundle).
+
+**Key invariants:**
+1. **No change detection on a bitset tag** — `Added<T>`/`Changed<T>` over a
+   `STORAGE_IS_BITSET` type is a compile error (no per-row ticks; compile-but-lie
+   guard).
+2. **A toggle is a structural-class `&mut EcsMaster` op** — O(1), but NOT a
+   read: no `&self` toggle in v1 (the `Relaxed` atomics rely on `&mut`
+   exclusivity; the `AtomicU64` words reserve the D7 `Acquire`/`Release` seam).
+3. **0%-gate** — an enable-free archetype skips `swap_remove_row`
+   (`is_empty()`); an enable-free `(D, F)` const-folds the entire machinery away
+   (`HAS_ENABLE_TERM = false`); a query with no dynamic term takes the
+   byte-identical no-term path. The runtime per-row enable-term branch is
+   loop-invariant-hoisted (bench-flat), the one acknowledged non-const gate.
+4. **`enable_generation ⊥ structural_generation`** — a toggle bumps only
+   `enable_generation` (and only on a first column per archetype); a structural
+   op never touches `enable_generation`.
+
+Suites: [tests/loom_term_list.rs](../crates/boyko_ecs/tests/loom_term_list.rs)
+(the lock-free publish/read protocol), [tests/miri_phase22_1.rs](../crates/boyko_ecs/tests/miri_phase22_1.rs),
+and the per-file `#[cfg(test)]` units in `enable_store.rs` / `enable_presence.rs`
+/ `enable_tag_api.rs` / `archetype.rs` / `archetype_master.rs` /
+`component_registry.rs`.
 
 ---
 

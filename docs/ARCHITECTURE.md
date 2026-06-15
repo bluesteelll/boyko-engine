@@ -438,10 +438,54 @@ Three load-bearing choices:
 
 Entities may hold zero components (the lazy EMPTY archetype; remove-last is an
 ordinary migration edge). Accepted ceilings, all loud: 512 shared ids, 2^N tag
-combinations within `MAX_ARCHETYPES = 1024` (mitigation deferred to
-enable-bits; seams reserved), 8 dynamic terms, bundle arity 16. Each tag pool
-reserves 128 MiB of address space per hosting archetype (2 MiB cfg fallback) —
-zero resident until commit.
+combinations within `MAX_ARCHETYPES = 1024` (the fragmentation mitigation —
+the EnableTag enable-bit backend — landed; see decision 14), 8 dynamic terms,
+bundle arity 16. Each tag pool reserves 128 MiB of address space per hosting
+archetype (2 MiB cfg fallback) — zero resident until commit.
+
+### 14. EnableTag — the enable-bit, non-fragmenting tag backend
+
+**Where:** [component/enable/](../crates/boyko_ecs/src/ecs/core/component/enable/)
+(`enable_store.rs` = `EnablePage`/`EnableColumn`/`EnableStore`, `enable_presence.rs`
+= the `EnablePresence` cull oracle),
+[component_registry.rs](../crates/boyko_ecs/src/ecs/core/component/component_registry.rs)
+(`StorageKind` + `STORAGE_KIND` table + `EnableTagId`),
+[ecs_master/enable_tag_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/enable_tag_api.rs),
+[query/filter_enable.rs](../crates/boyko_ecs/src/ecs/core/iters/query/filter_enable.rs)
++ [query/enable_terms.rs](../crates/boyko_ecs/src/ecs/core/iters/query/enable_terms.rs).
+Design: [ENABLE-TAG-PLAN.md](ENABLE-TAG-PLAN.md) +
+[ENABLE-TAG-PLAN-AMENDMENT-D7.md](ENABLE-TAG-PLAN-AMENDMENT-D7.md).
+
+The **second tag storage path** alongside decision 13's signature/table backend.
+A component id is classified once at registration as `StorageKind::{Table,
+Bitset}` (a cold parallel `[AtomicU8; 512]`, kept out of the 56 B
+`ComponentLayout`). A `Bitset` (EnableTag) id is filtered out of every archetype
+signature and owns no `ComponentPool`; its presence is a single per-row bit in a
+paged per-archetype bitset (`EnablePage` = 512 B / 4096 rows, the bit's home is
+`(archetype, row)` so it rides the existing swap-remove / migration loops). Three
+load-bearing choices:
+
+- **Toggle is O(1), not a migration** (flecs `CanToggle`): `enable`/`disable`
+  flip one `AtomicU64` bit — no archetype migration, no `structural_generation`
+  bump, no hook/observer fire, no deferred drain. This is the fragmentation
+  answer for high-churn transient flags. The trade-off is no per-row tick
+  storage, so `Added<T>`/`Changed<T>` are compile-rejected on a bitset tag
+  (the decision-13 "compile-but-lie" guard, via `Component::STORAGE_IS_BITSET`).
+- **The cull oracle is a bounded `contains`, never a driver**: `EnablePresence`
+  (per-world, one lazily-published `Box<[AtomicU64; 16]>` per tag) answers
+  O(1) "does archetype A own a column for tag T?" over an *already-bounded*
+  matched set. There is deliberately no presence-driven enumeration — a sole
+  `Enabled<T>` with no positive bound is candidate-seeded from a *bounded*
+  presence snapshot (the D7 global scan), and `ASSERT_SHAPE` const-rejects the
+  unbounded shape. A lock-free `epoch` / `enable_generation` pair invalidates
+  the culled set when an archetype gains a column.
+- **v1 is `&mut`-exclusive; the atomics reserve the parallel seam**: a toggle
+  takes `&mut EcsMaster`, which makes the `Relaxed` enable-bit / `enable_generation`
+  stores sound with no live worker (decision-10 apply-window discipline). The
+  `AtomicU64` words and the `EnablePresence` `Acquire`/`Release` epoch are the
+  forward seam for the deferred D7 `&self` worker-marking toggle (which must add
+  a loom proof before relaxing the receiver). Full catalog +
+  invariants: [SYSTEMS.md §3.8](SYSTEMS.md).
 
 ## Pool sizing (Phase X.I — the size classes are gone)
 

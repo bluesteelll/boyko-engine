@@ -40,6 +40,10 @@ piece of functionality lives, start here, then go to
 | Iterate entities with components | [Typed Query DSL](#typed-query-dsl-queryd-f) |
 | Tag entities (zero-data markers, static or runtime-named) | [Tags](#tags-static-zst--dynamic-runtime--phase-22) |
 | Spawn an entity with zero components | [Tags](#tags-static-zst--dynamic-runtime--phase-22) (`spawn_empty`) |
+| Enable/disable a transient flag with NO archetype migration | [EnableTag (enable-bit backend)](#enabletag-enable-bit-non-fragmenting-tag-backend) |
+| High-churn / non-fragmenting tag (toggle is O(1), no migration) | [EnableTag (enable-bit backend)](#enabletag-enable-bit-non-fragmenting-tag-backend) |
+| `Enabled<T>` / `Disabled<T>` query filter | [EnableTag (enable-bit backend)](#enabletag-enable-bit-non-fragmenting-tag-backend) |
+| Data-less bounded global scan of (en/dis)abled entities | [EnableTag (enable-bit backend)](#enabletag-enable-bit-non-fragmenting-tag-backend) (candidate-seeded, D7) |
 | SIMD/batched columnar iteration | [for_each_chunk](#chunked--parallel-iteration) |
 | Run systems in parallel | [Schedule + scheduler](#schedule--parallel-scheduler) |
 | Order systems / group into sets | [Ordering & sets](#system-ordering--sets) |
@@ -232,9 +236,48 @@ lazy). Public-book pages: `book/src/concepts/tags.md`,
 
 Ceilings (all loud): 512 shared ComponentIds, `MAX_ARCHETYPES = 1024`
 (N tags → up to 2^N hosting archetypes — the fragmentation ceiling; churn
-ladder + enable-bits mitigation documented in the book), 8 dynamic terms per
+ladder + the EnableTag enable-bit mitigation below), 8 dynamic terms per
 query, bundle arity 16. Suites: `tests/phase22_{tags,tags_exhaustion,
 query_terms,static_tags,bundles,empty_archetype}.rs`.
+
+---
+
+## EnableTag (enable-bit, non-fragmenting tag backend)
+
+The **second tag storage backend** (the first is the signature/table backend of
+[Tags](#tags-static-zst--dynamic-runtime--phase-22)). An EnableTag is NOT part
+of any archetype signature and owns no `ComponentPool`; its presence is a single
+per-row bit in a paged per-archetype bitset. Toggling is therefore **O(1): no
+archetype migration, no structural-generation bump, no hook/observer fire, no
+deferred drain** (flecs `CanToggle` semantics) — the right backend for
+high-churn transient flags (`Stunned`, `Visible`, `Sleeping`). The trade-off:
+no per-row tick storage, so `Added<T>`/`Changed<T>` are compile-rejected on a
+bitset tag (the "compile-but-lie" guard). Authoritative design:
+[ENABLE-TAG-PLAN.md](ENABLE-TAG-PLAN.md) +
+[ENABLE-TAG-PLAN-AMENDMENT-D7.md](ENABLE-TAG-PLAN-AMENDMENT-D7.md). Details +
+invariants: [SYSTEMS.md §3.8](SYSTEMS.md).
+
+| What you want to do | Where | How |
+|---------------------|-------|-----|
+| Define a static enable tag | derive ✅ | `#[component(storage = "bitset")] struct Stunned;` — must be a ZST (a fielded bitset tag is a compile error: no pool to hold data); emits `const STORAGE_IS_BITSET = true` + an `install_storage_kind::<Self>` call; suppresses the single-component Bundle ([boyko_macros/src/lib.rs](../crates/boyko_macros/src/lib.rs):107/:120/:301/:319) |
+| Mint a dynamic enable tag by name | [ecs_master/enable_tag_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/enable_tag_api.rs):60/:72 ✅ | `register_enable_tag(name) -> EnableTagId` (panicking) / `try_register_enable_tag(name) -> Option<EnableTagId>`; NAME-keyed, classifies the id `StorageKind::Bitset`, cold |
+| Toggle (typed) | [enable_tag_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/enable_tag_api.rs):87/:95/:104 ✅ | `enable::<T>(entity)` / `disable::<T>(entity)` / `is_enabled::<T>(entity)` — dead/stale entity = silent no-op |
+| Toggle (dynamic) | [enable_tag_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/enable_tag_api.rs):113/:119/:126 ✅ | `enable_id` / `disable_id` / `is_enabled_id` (take `EnableTagId`) |
+| Toggle (deferred, in a system) | [params/entity_commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/entity_commands.rs):209/:226/:235 ✅ | `commands.entity(e).enable::<T>()` / `.disable::<T>()` / `.enable_id(tag)` → [enable_tag_commands.rs](../crates/boyko_ecs/src/ecs/core/commands/enable_tag_commands.rs):45 `EnableTagCommand` (POD `{entity, tag, value}`) |
+| The id handle + bridge | [component_registry.rs](../crates/boyko_ecs/src/ecs/core/component/component_registry.rs):258 ✅ | `EnableTagId` (`#[repr(transparent)]` over `ComponentId`, proof-of-mint); one-way `component_id()` (:264) / `From<EnableTagId> for ComponentId` (:269) |
+| The storage-kind classifier | [component_registry.rs](../crates/boyko_ecs/src/ecs/core/component/component_registry.rs):396 ✅ | `enum StorageKind { Table = 0, Bitset = 1 }`; cold parallel `STORAGE_KIND: [AtomicU8; 512]` (:420), `storage_kind(id)` (:435), write-once `set_storage_kind` (:475), `install_storage_kind::<C>` (:527), `try_register_enable_tag_by_name` (:565) |
+| Typed query filter | [query/filter_enable.rs](../crates/boyko_ecs/src/ecs/core/iters/query/filter_enable.rs) ✅ | `Enabled<T>` / `Disabled<T>` — non-archetypal per-row `QueryFilter` (NULL column reads as disabled); rejects `Or<…>` and `for_each_chunk` at the bound |
+| Dynamic query terms | [query/enable_terms.rs](../crates/boyko_ecs/src/ecs/core/iters/query/enable_terms.rs) ✅ | `with_enabled(EnableTagId)` / `without_enabled(EnableTagId)` on `Query` ([query.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query.rs):139/:154) AND `QueryView` ([query_view.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query_view.rs):247/:262); `EnableTerms` (per-view, ≤ `MAX_ENABLE_TERMS = 8`, [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):294); per-row runtime gate (loop-invariant `is_empty()`, bench-flat 0%-gate) |
+| The cull oracle | [component/enable/enable_presence.rs](../crates/boyko_ecs/src/ecs/core/component/enable/enable_presence.rs) ✅ | `EnablePresence` — per-world per-tag archetype bitset; O(1) `contains` + lock-free `epoch`; the bounded candidate snapshot for the D7 global scan (`snapshot_present`) |
+| The bit storage | [component/enable/enable_store.rs](../crates/boyko_ecs/src/ecs/core/component/enable/enable_store.rs) ✅ | `EnableStore` (per-archetype, inline-4 `SmallList4`) → `EnableColumn` (lazily-paged) → `EnablePage` (512 B = `[AtomicU64; 64]`, 4096 rows); read-first `swap_remove_bit` |
+
+`EnableTagId` shares the 512-slot `ComponentId` budget with typed components and
+both dynamic-tag flavors (exhaustion = loud panic / `None`). Toggle is a
+structural-class `&mut EcsMaster` op (v1 `Relaxed` atomics are sound under
+`&mut`-exclusivity; the `AtomicU64` words are the forward seam for the D7
+worker-marking `&self` toggle). Suites: `tests/loom_term_list.rs`,
+`tests/miri_phase22_1.rs`, the per-file `#[cfg(test)]` units, and the EnableTag
+plan's named test ranges.
 
 ---
 
@@ -667,7 +710,7 @@ GPU-side `mix(prev_pos, pos, alpha)` interpolation off the 24 B `GpuInstance`
 | Missing | Why / where tracked |
 |---------|--------------------|
 | ~~ZST components~~ | ✅ LANDED — Phase 22 tags (tick-only pools); ZST **resources / events** remain ❌ rejected (compile-time guard) |
-| Non-fragmenting tag toggle (enable bits) | 📋 future phase — seams reserved (`Column._reserved`, the D4 term funnel); until then the churn ladder applies (tags are free to carry, not free to toggle) |
+| ~~Non-fragmenting tag toggle (enable bits)~~ | ✅ LANDED — the EnableTag enable-bit backend (`#[component(storage = "bitset")]` / `register_enable_tag` + `Enabled`/`Disabled` filters); see [EnableTag](#enabletag-enable-bit-non-fragmenting-tag-backend). v1 toggle is `&mut`; the `&self` worker-marking toggle (D7) is the deferred seam |
 | Typed `Added`/`Changed` for dynamic tags | 📋 follow-up (`DynAdded(TagId)` term — ticks already maintained, no storage change needed) |
 | `Option<Res<R>>` SystemParam → `resource_exists` condition | 📋 deferred (Phase 16 residual) |
 | ~~Tick-aware run conditions (`Changed`/`Added`)~~ | ✅ LANDED — Phase 16.1 (dormancy-correct ticks, [PHASE-16.1-RESULTS.md](PHASE-16.1-RESULTS.md)) |

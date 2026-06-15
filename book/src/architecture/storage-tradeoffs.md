@@ -1,22 +1,28 @@
 # Storage Trade-offs: Tags, Churn, and Fragmentation
 
-> Tags are free to carry and free to query — but not free to toggle, and not free to combine without limit. This page is the cost model.
+> Tags are free to carry and free to query — but not free to toggle, and not free to combine without limit. This page is the cost model, and the Table-vs-Bitset decision matrix.
 
-*(Branch: `ecs`, Phase 22.)*
+*(Branch: `ecs`, Phase 22 + EnableTag.)*
 
 ## Problem
 
 Every game has boolean-ish state: *frozen*, *selected*, *poisoned*, *dirty*.
-An archetype ECS gives you two ways to model it, with opposite cost profiles:
+An archetype ECS gives you three ways to model it, with different cost profiles:
 
 1. **A data field** (`struct Status { frozen: bool }`) — cheap to flip, but
    every system pays a per-row load + branch, forever, even when nothing is
    frozen.
-2. **A tag** (`struct Frozen;`) — the branch vanishes from the hot loop
-   (existence-based processing: non-matching entities live in archetypes the
-   query never visits), but *flipping* the state is an archetype migration.
+2. **An archetype (table) tag** (`struct Frozen;`) — the branch vanishes from
+   the hot loop (existence-based processing: non-matching entities live in
+   archetypes the query never visits), but *flipping* the state is an archetype
+   migration.
+3. **An enable (bitset) tag** (`#[component(storage = "bitset")] struct Frozen;`)
+   — presence is a per-row bit, flipped in place: no migration, no
+   fragmentation, at the price of a per-row bit test during iteration and **no
+   change detection**.
 
-Neither is universally right. Choosing by toggle frequency is the discipline.
+None is universally right. The two tag backends are an **explicit choice**, and
+the axis that decides it is toggle frequency.
 
 ## The churn ladder
 
@@ -28,23 +34,31 @@ pay for.
 
 ```mermaid
 flowchart TD
-    Q{How often does the<br/>boolean flip?} -->|every frame /<br/>most frames| F[Data field<br/>branch per row]
-    Q -->|occasionally:<br/>seconds, events| T[Tag<br/>archetype move per flip]
-    Q -->|rarely / never:<br/>spawn-time identity| T2[Tag — ideal case]
-    F -.->|future| E[Enable bits<br/>planned, non-fragmenting]
+    Q{How often does the<br/>boolean flip?} -->|every frame /<br/>most frames,<br/>many entities| E[Enable bitset tag<br/>O&#40;1&#41; bit flip in place]
+    Q -->|occasionally:<br/>seconds, events| T[Archetype tag<br/>archetype move per flip]
+    Q -->|rarely / never:<br/>spawn-time identity| T2[Archetype tag — ideal case]
+    E -.->|need Added/Changed?| F[Data field<br/>branch per row]
 ```
 
 Rules of thumb:
 
-- **Per-frame booleans are not tags.** A state that flips every frame on many
-  entities turns the structural `#[cold]` migration path into your hot path.
-  Use a data field (and `Changed<T>` if you need reactivity).
-- **Persistent, low-frequency state is the tag sweet spot.** Identity-like
-  markers (`Player`, `Boss`) toggle never; status effects that change on
-  gameplay events (seconds apart) are fine.
-- **Querying is always free.** However the tag got there, `With`/`Without`
-  and dynamic tag terms resolve at archetype granularity — zero per-row cost.
-  The carry cost is 8 B/row (the tick pair — see [Tags](../concepts/tags.md)).
+- **Per-frame booleans on many entities are enable tags.** A state that flips
+  every frame turns an archetype tag's structural `#[cold]` migration path into
+  your hot path. Use an [enable bitset tag](../concepts/enable-tags.md) — the
+  flip is an O(1) in-place bit RMW with no migration. (Use a plain data field
+  instead only when you also need `Added`/`Changed`, which enable tags do not
+  support.)
+- **Persistent, low-frequency state is the archetype-tag sweet spot.**
+  Identity-like markers (`Player`, `Boss`) toggle never; status effects that
+  change on gameplay events (seconds apart) are fine. Archetype-level
+  `With`/`Without` filtering is free per row.
+- **Archetype-tag querying is free; enable-tag querying is nearly free.** An
+  archetype tag's `With`/`Without` (and dynamic tag terms) resolve at archetype
+  granularity — zero per-row cost — while an enable tag costs about one
+  predicted-not-taken branch per row (bench-flat for queries that do not name
+  one). The carry cost inverts: an archetype tag is 8 B/row resident (the tick
+  pair — see [Tags](../concepts/tags.md)); an enable tag is 0 B/row until a row
+  is toggled.
 
 ## The fragmentation ceiling
 
@@ -103,18 +117,71 @@ The recurring trade in this design is *honest costs over silent lies*:
 | `Added`/`Changed` on tags | yes | yes | n/a (different reactive model) |
 | Toggle cost | archetype move | archetype move | archetype move; opt-in non-fragmenting toggle (`DontFragment`/enable bits) |
 | Dynamic (runtime) tags | name-keyed `TagId` in the shared id space | dynamic components share `ComponentId` space | tags are entities |
-| Fragmentation mitigation | planned enable-bits (below) | none built-in | enable bits / union storage |
+| Fragmentation mitigation | enable bitset tags (below) | none built-in | enable bits / union storage |
 
-## Future: enable bits
+## The second backend: enable bitset tags
 
-The planned non-fragmenting escape hatch is a **per-archetype enable mask**: a
-bit per row per tag, flipped in place — no migration, at the price of a
-per-row mask test during iteration. The seams are already reserved (an unused
-`Column` field and the single query-term funnel where the mask test would
-slot in), so adopting it later will not disturb the storage layout. Until it
-lands, the churn ladder above is the guidance.
+The non-fragmenting escape hatch landed as a second tag backend. An **enable
+tag** (`#[component(storage = "bitset")]` or `register_enable_tag`) encodes
+presence in a per-archetype **paged bitset** — one bit per row — instead of the
+archetype signature. Toggling is an O(1) atomic bit read-modify-write in place:
+no migration, no fragmentation, no spawn-time tick-pool floor. The full concept
+page is [Enable Tags](../concepts/enable-tags.md); this section is the
+trade-off side.
+
+### Table vs Bitset decision matrix
+
+| Axis | Archetype (table) tag | Enable (bitset) tag |
+|------|------------------------|----------------------|
+| Best for | low-churn, query-defining identity | high-churn transient flags (per-frame) |
+| Presence encoded in | archetype signature bit | per-archetype paged bitset (one bit/row) |
+| Toggle cost | archetype migration (whole row moves) | O(1) atomic bit RMW, in place |
+| Fragmentation | yes — N tags → up to 2^N archetypes | **none** — toggling never mints an archetype |
+| Carry cost | 8 B/row resident (tick pair) | 0 B/row until a row is toggled |
+| Spawn-time floor | tick-pool floor per hosting archetype | none |
+| Query cull | whole archetypes included/excluded — **free** | per-row bit test (≈ 1 branch/row); positive-term archetype cull is a planned follow-up |
+| Change detection | `Added`/`Changed` work | **compile-rejected** (the bit has no per-row tick) |
+| `Or<…>` composition | `With`/`Without` compose freely | `Enabled`/`Disabled` are sealed against `Or` |
+| Data-less sole query | n/a | `Query<(), Enabled/Disabled<A>>` — bounded global scan |
+
+### The cull-cost asymmetry
+
+This is the one axis that is not strictly in the bitset tag's favour. An
+archetype tag culls at archetype granularity: a query that excludes `Frozen`
+never even enters a frozen archetype's row loop — the work is *zero* for the
+excluded rows. An enable tag currently filters **per row**: every candidate row
+is visited and its bit tested, even rows that will be rejected. The cost is
+small (one predicted branch per row, bench-flat for queries that name no enable
+tag), but it is not zero.
+
+A positive-term archetype-level cull for enable tags — skipping an archetype
+whose presence bitset shows no enabled rows for the tag — is a **planned
+follow-up**, not yet implemented. Until it lands, an `Enabled<A>` positive-term
+query scans every row of every archetype that satisfies its data term, gating
+per row. The data-less sole `Query<(), Enabled<A>>` is already bounded the other
+way: it seeds its candidate archetypes from the per-world presence bitset, so it
+visits only archetypes where `A` is a property — never a full-world sweep.
+
+### Paging
+
+An enable column is stored as lazily allocated 512-byte pages: one page is
+`[AtomicU64; 64]` = 4096 bits, covering 4096 rows. A tag with no toggles in an
+archetype allocates **nothing** there; a tag whose touched rows all sit in the
+first 4096-row block allocates exactly one page. This is why the carry cost is
+0 B/row until a row is toggled — the bitset backend has no address-space
+reservation profile comparable to the archetype-tag tick pools above.
+
+### The access contract (D8)
+
+`enable` / `disable` take `&mut EcsMaster` — they are **structural-class**
+operations, and that exclusivity is what makes the bit's `Relaxed` atomics sound
+in v1 (no worker is live during a toggle). Queries read the bit **shared**
+(`&self`). The discipline is identical to ordinary structural operations:
+**toggling an enable bit during query iteration is not allowed.**
 
 ## See also
+
+- [Enable Tags (Bitset Storage)](../concepts/enable-tags.md) — the full concept, API, and rejected shapes
 
 - [Tags](../concepts/tags.md) — the 8 B/row cost model and change detection on tags
 - [Dynamic Tags](../concepts/dynamic-tags.md) — runtime tags, budgets, query terms
