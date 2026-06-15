@@ -57,9 +57,9 @@ use crate::ecs::core::archetype::archetype::Archetype;
 use crate::ecs::core::iters::query::data::{QueryData, ReadOnlyQueryData};
 use crate::ecs::core::iters::query::filter::QueryFilter;
 use crate::ecs::core::iters::query::state::QueryDataState;
-use crate::ecs::core::iters::query::tag_terms::{TagTerms, archetype_passes_tag_terms};
 use crate::ecs::core::system::system_meta::SystemMeta;
 use crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell;
+use crate::ecs::identifiers::primitives::ArchetypeId;
 
 /// Row count below which an archetype is processed inline on the calling
 /// thread rather than dispatched to workers (plan PAR9 / Round 2 O2).
@@ -136,15 +136,17 @@ impl BatchingStrategy {
 /// [`Query::par_iter`]: crate::ecs::core::iters::query::Query::par_iter
 pub struct ParQuery<'q, 's, D: QueryData, F: QueryFilter> {
     pub(super) state: &'s QueryDataState<D, F>,
+    /// Phase 22.1 Area A: the pre-resolved id slice the dispatcher walks
+    /// (no terms → `matched_ids_pre_terms()`; terms → the per-epoch memoised
+    /// filtered slice). Resolved ONCE at handle mint; `for_each` forwards it
+    /// to both the scoped loop and the PAR7 fallback (one load per for_each
+    /// entry, D-B cost model). The driver carries no term code.
+    pub(super) ids: &'q [ArchetypeId],
     pub(super) world: UnsafeEcsCell<'q>,
     pub(super) batching: BatchingStrategy,
     /// Phase 10 Round 2 W6: per-system tick snapshot forwarded into every
     /// chunk dispatch path (inline + owned + PAR7 fallback).
     pub(super) meta: &'s SystemMeta,
-    /// Phase 22 D4: per-view dynamic-tag terms, applied in the per-archetype
-    /// distribution loop (already archetype-granular — workers receive only
-    /// term-passing archetypes' chunks).
-    pub(super) terms: TagTerms,
 }
 
 impl<'q, 's, D, F> ParQuery<'q, 's, D, F>
@@ -175,10 +177,10 @@ where
     {
         for_each_impl::<D, F, Body>(
             self.state,
+            self.ids,
             self.world,
             self.batching,
             self.meta,
-            &self.terms,
             body,
             false,
         );
@@ -197,12 +199,12 @@ where
 /// [`Query::par_iter_mut`]: crate::ecs::core::iters::query::Query::par_iter_mut
 pub struct ParQueryMut<'q, 's, D: QueryData, F: QueryFilter> {
     pub(super) state: &'s QueryDataState<D, F>,
+    /// Phase 22.1 Area A: the pre-resolved id slice (see [`ParQuery::ids`]).
+    pub(super) ids: &'q [ArchetypeId],
     pub(super) world: UnsafeEcsCell<'q>,
     pub(super) batching: BatchingStrategy,
     /// Phase 10 Round 2 W6: per-system tick snapshot (see [`ParQuery::meta`]).
     pub(super) meta: &'s SystemMeta,
-    /// Phase 22 D4: per-view dynamic-tag terms (see [`ParQuery::terms`]).
-    pub(super) terms: TagTerms,
     /// `&'q mut` reborrow marker — the [`Query::par_iter_mut`] entry takes
     /// `&mut self` so the type system already enforces cursor uniqueness;
     /// this marker keeps the handle invariant in `'q`.
@@ -235,10 +237,10 @@ where
     {
         for_each_impl::<D, F, Body>(
             self.state,
+            self.ids,
             self.world,
             self.batching,
             self.meta,
-            &self.terms,
             body,
             true,
         );
@@ -264,18 +266,19 @@ where
 /// per-spawn cost. Two monomorphic drivers would duplicate the (already
 /// long) chunk loop without observable speedup; sharing keeps the I-cache
 /// footprint smaller.
-// Phase 22 D4: `terms` is the per-view dynamic-tag term list; the test runs
-// in the per-archetype distribution loop (already archetype-granular), so
-// workers receive only term-passing archetypes' chunks. The 7-arg signature
-// mirrors `run_chunk_raw`'s rationale: bundling into a struct would add a
-// deref layer at both call sites for no codegen win.
+// Phase 22.1 Area A: `ids` is the pre-resolved id slice (resolved once at the
+// `par_iter` / `par_iter_mut` handle mint); the dispatcher walks it and the
+// PAR7 fallback forwards the SAME slice — no per-archetype term test, no
+// re-resolve. The 7-arg signature mirrors `run_chunk_raw`'s rationale:
+// bundling into a struct would add a deref layer at both call sites for no
+// codegen win.
 #[allow(clippy::too_many_arguments)]
 fn for_each_impl<D, F, Body>(
     state: &QueryDataState<D, F>,
+    ids: &[ArchetypeId],
     world: UnsafeEcsCell<'_>,
     batching: BatchingStrategy,
     meta: &SystemMeta,
-    terms: &TagTerms,
     body: Body,
     mutable: bool,
 ) where
@@ -299,7 +302,7 @@ fn for_each_impl<D, F, Body>(
         // performs work-stealing so nested invocations cannot deadlock
         // (plan §4.5.5 / Round 2 C3).
         pool.scope(|scope| {
-            for &arch_id in state.archetype_state.matched_ids_pre_terms() {
+            for &arch_id in ids {
                 // SAFETY (U_C2 / U_C3): the cell is scoped to `'_` (caller
                 //   contract on `for_each`); the mint path matches the
                 //   `mutable` flag — the cell carries write-capable
@@ -318,18 +321,6 @@ fn for_each_impl<D, F, Body>(
                         }
                     }
                 };
-
-                // Phase 22 D4: archetype-level dynamic-tag term test in the
-                // (single-threaded) distribution loop — one predicted
-                // not-taken branch per archetype transition when no terms
-                // are set; workers never see term-rejected archetypes.
-                //
-                // SAFETY (U1 / U2): same bounded shared-reborrow discipline
-                //   as the `entity_count` probe below; the `&Archetype`
-                //   dies inside the call.
-                if !archetype_passes_tag_terms(terms, unsafe { &*arch_ptr }) {
-                    continue;
-                }
 
                 // SAFETY (U1 / U2 — Phase 7 slab stability): `arch_ptr`
                 //   is live for the surrounding cell scope; the `&Archetype`
@@ -424,7 +415,9 @@ fn for_each_impl<D, F, Body>(
         // walk per archetype (mirrors what `Query::iter` / `iter_mut`
         // would produce; we avoid going through `Query` itself to keep
         // the borrow shape compatible with the by-value `world` cell).
-        for &arch_id in state.archetype_state.matched_ids_pre_terms() {
+        // Phase 22.1 Area A: forward the SAME pre-resolved `ids` slice (no
+        // re-resolve) — matches D-B's one-load-per-for_each cost model.
+        for &arch_id in ids {
             // SAFETY (U_C2 / U_C3): same as in the dispatched branch.
             let arch_ptr: *mut Archetype = unsafe {
                 if mutable {
@@ -439,13 +432,6 @@ fn for_each_impl<D, F, Body>(
                     }
                 }
             };
-            // Phase 22 D4: term test on the PAR7 sequential fallback — same
-            // contract as the dispatched branch above.
-            //
-            // SAFETY (U1 / U2): bounded shared reborrow; dies inside the call.
-            if !archetype_passes_tag_terms(terms, unsafe { &*arch_ptr }) {
-                continue;
-            }
             // SAFETY (U1 / U2): slab-stable archetype pointer; the
             //   `&Archetype` reborrow is bounded to this expression.
             let entity_count = unsafe { (*arch_ptr).entity_count() };

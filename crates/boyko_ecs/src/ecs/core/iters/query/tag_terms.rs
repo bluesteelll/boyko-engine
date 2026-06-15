@@ -1,16 +1,24 @@
-//! Phase 22 (D4) — runtime archetype-level dynamic-tag query terms.
+//! Phase 22 (D4) / 22.1 (Area A) — runtime archetype-level dynamic-tag query
+//! terms.
 //!
 //! [`TagTerms`] is the per-view term list populated by
 //! `Query::with_tag` / `Query::without_tag` (and the `QueryView` mirrors).
-//! It is **stack-only, `Copy`, allocation-free** and is threaded by value /
-//! `&TagTerms` through every matched-list driver (the D4 disposition table).
+//! It is **stack-only, `Copy`, allocation-free** and serves as the *epoch
+//! fingerprint* (stamp key) for the per-state-slot
+//! [`TermList`](super::term_list::TermList) memo.
 //!
-//! # Cost contract (plan D4)
+//! # Cost contract (Phase 22.1)
 //!
-//! `len == 0` costs **one predicted not-taken branch per archetype
-//! transition** — outside the row loop, never per row. The inner row loop of
-//! every driver must remain byte-identical to the pre-Phase-22 code
-//! (asm-gated in Wave 3).
+//! Terms resolve **once per epoch at the driver entry**, not per archetype
+//! transition and never per row. The cursors and chunk/par drivers walk a
+//! plain `&[ArchetypeId]` (either the shared pre-terms slice, or the memoised
+//! term-filtered slice) and contain **zero** term code — the no-terms hot
+//! path is byte-identical to the pre-Phase-22 code (asm-gated). The single
+//! reusable [`archetype_passes_tag_terms`] test below backs three remaining
+//! consumers: [`TermList::build`](super::term_list::TermList)'s per-id pass,
+//! `QueryView::get` / `get_mut` (per-lookup random access — a prefilter
+//! cannot help a single in-hand archetype), and
+//! [`count_term_matched`] / [`any_term_matched`] (read-only count/any).
 //!
 //! # QS1 invariant
 //!
@@ -18,8 +26,7 @@
 //! (it is shared across all instances of a `(D, F)` query type). The cache
 //! stays term-agnostic; every accessor that exposes it carries the
 //! `_pre_terms` suffix (see `query_state.rs`), and the term test below is the
-//! single post-cache filter applied at each driver's archetype-transition
-//! point.
+//! single post-cache filter applied during the per-epoch prefilter build.
 
 use crate::ecs::core::archetype::archetype::Archetype;
 use crate::ecs::core::archetype::archetype_master::ArchetypeMaster;
@@ -73,6 +80,24 @@ impl TagTerms {
         self.len as usize
     }
 
+    /// Live-prefix equality — the epoch fingerprint compare used by the
+    /// [`TermList`](super::term_list::TermList) memo fast path (Phase 22.1
+    /// D-D).
+    ///
+    /// Compares `len`, `polarity`, and only the live `ids[..len]` prefix.
+    /// The trailing `[len, MAX_DYN_TAG_TERMS)` slots are placeholders that
+    /// `push` never reads; comparing only the live prefix is both correct
+    /// today (trailing slots are always [`TagId(ComponentId(0))`]) and robust
+    /// against any future mutation path that leaves stale data past `len`.
+    #[inline]
+    pub(crate) fn same(&self, other: &TagTerms) -> bool {
+        if self.len != other.len || self.polarity != other.polarity {
+            return false;
+        }
+        let len = self.len as usize;
+        self.ids[..len] == other.ids[..len]
+    }
+
     /// Appends a `with` term (archetype must carry `tag`).
     ///
     /// # Panics
@@ -104,71 +129,32 @@ impl TagTerms {
     }
 }
 
-/// THE single term test (plan D4) — every matched-list driver except
-/// `QueryIterMut::next` (see the F1 exception below) calls this at its
-/// archetype-transition point, enforced by the `_pre_terms` rename sweep
-/// over ALL `QueryState` matched-list accessors.
+/// THE single term test (Phase 22.1 Area A). Three consumers only — NONE on
+/// a row loop:
+///
+/// * [`TermList::build`](super::term_list::TermList) — one call per matched
+///   archetype during the per-epoch prefilter build (cold, once per epoch).
+/// * `QueryView::get` / `get_mut` — per-lookup on the single in-hand
+///   archetype (random access; a prefilter slice cannot help a point query).
+/// * [`count_term_matched`] / [`any_term_matched`] — read-only count/any.
+///
+/// The cursors (`QueryIter::next` / `QueryIterMut::next`) and the
+/// chunk/par drivers no longer call this at all — they walk a pre-resolved
+/// `&[ArchetypeId]` and carry zero term code (the Phase 22 F1 cold/inline
+/// scan asymmetry is gone with the per-transition test that needed it).
 ///
 /// ≤ [`MAX_DYN_TAG_TERMS`] signature bit tests against the archetype mask on
 /// safe references — **zero unsafe**. `len == 0` short-circuits with one
 /// predicted not-taken branch.
-///
-/// # Phase 22 F1 (I-cache)
-///
-/// Only the `len == 0` test is inlined at the call sites; the scan body is
-/// `#[cold]`-outlined in [`term_scan_cold`]. Inlining the scan loop into
-/// `QueryIter::next` pushed that body past LLVM's inline threshold —
-/// `next()` stopped inlining into caller loops and `query_ref_iter_10k`
-/// regressed +247% (asm-verified). The split keeps the no-terms cost
-/// contract (one branch) byte-identical and moves the term-bearing scan off
-/// the callers' inline budget.
-///
-/// `QueryIterMut::next` is the ONE exception — it must use
-/// [`archetype_passes_tag_terms_inline_scan`] instead (see its doc).
 #[inline]
 pub(crate) fn archetype_passes_tag_terms(terms: &TagTerms, arch: &Archetype) -> bool {
     if terms.len == 0 {
         return true;
     }
-    term_scan_cold(terms, arch)
-}
-
-/// Inline-scan variant of [`archetype_passes_tag_terms`] — used ONLY by
-/// `QueryIterMut::next` (Phase 22 F1).
-///
-/// The mut cursor's monomorphisations sit on the opposite side of LLVM's
-/// inline threshold from the read-only cursor's: `next()` stays inlined even
-/// with the scan body inline, but a reachable `call` inside its loop nest
-/// (the `#[cold] #[inline(never)]` scan) forces the register allocator to
-/// spill the row cursor (`current_row` / `current_len` / fetch base) to the
-/// stack — `query_mut_iter_10k` +47% with the cold call vs +26% with the
-/// inline scan (criterion-verified, same session, p = 0.00). Do not "unify"
-/// the two variants without re-running that A/B.
-#[inline]
-pub(crate) fn archetype_passes_tag_terms_inline_scan(
-    terms: &TagTerms,
-    arch: &Archetype,
-) -> bool {
-    if terms.len == 0 {
-        return true;
-    }
     term_scan_body(terms, arch)
 }
 
-/// Cold term-scan wrapper — runs only on term-bearing query views: once per
-/// archetype transition on the iteration drivers, once per lookup on
-/// `QueryView::get`/`get_mut` (their term test guards a single random-access
-/// row, not a loop). Outlined so the inline cost of
-/// [`archetype_passes_tag_terms`] at every driver's transition point is one
-/// compare-and-branch (see the F1 note above).
-#[cold]
-#[inline(never)]
-fn term_scan_cold(terms: &TagTerms, arch: &Archetype) -> bool {
-    term_scan_body(terms, arch)
-}
-
-/// The shared scan body — `caller` decides inline vs cold-outlined dispatch
-/// (see [`archetype_passes_tag_terms`] / [`term_scan_cold`]).
+/// The shared scan body — ≤ [`MAX_DYN_TAG_TERMS`] signature bit tests.
 #[inline]
 fn term_scan_body(terms: &TagTerms, arch: &Archetype) -> bool {
     let len = terms.len as usize;

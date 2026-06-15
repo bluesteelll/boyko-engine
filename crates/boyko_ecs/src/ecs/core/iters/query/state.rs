@@ -13,6 +13,7 @@ use crate::ecs::core::component::component_mask::ComponentMask;
 use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 use crate::ecs::core::iters::query::data::QueryData;
 use crate::ecs::core::iters::query::filter::QueryFilter;
+use crate::ecs::core::iters::query::term_list::TermScratch;
 use crate::ecs::core::iters::query_state::QueryState;
 use crate::ecs::core::system::filtered_access_set::FilteredAccessSet;
 
@@ -46,6 +47,13 @@ pub struct QueryDataState<D: QueryData, F: QueryFilter> {
     pub(crate) archetype_state: QueryState,
     pub(crate) data_state: D::State,
     pub(crate) filter_state: F::State,
+    /// Phase 22.1 Area A: cold 16-byte tail (two `AtomicPtr`) memoising the
+    /// term-prefiltered id list per epoch. NEVER touched by the no-terms
+    /// paths — term-bearing driver entries resolve once through it via
+    /// [`TermScratch::resolve_term_filtered`], reclaiming the retired list at
+    /// the slot-exclusive mint funnels. Auto `Send + Sync`; soundness carried
+    /// by the protocol P1–P4 (see [`term_list`](super::term_list)).
+    pub(crate) term_scratch: TermScratch,
     _marker: PhantomData<fn() -> (D, F)>,
 }
 
@@ -92,6 +100,7 @@ impl<D: QueryData, F: QueryFilter> QueryDataState<D, F> {
             archetype_state,
             data_state,
             filter_state,
+            term_scratch: TermScratch::new(),
             _marker: PhantomData,
         }
     }

@@ -70,7 +70,12 @@ use crate::ecs::core::bundle::Bundle;
 use crate::ecs::core::commands::command::Command;
 use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 use crate::ecs::core::entity::entity::Entity;
-use crate::ecs::identifiers::primitives::EntityId;
+use crate::ecs::identifiers::primitives::{EntityId, InlandPoolId};
+
+/// Maximum component count for a derived `Bundle`. Mirrors the macro's
+/// `MAX_BUNDLE_ARITY` and the sibling stack collectors in `spawn_at_command.rs`
+/// / `migration_helpers.rs`; sizes the Phase 22.1 `data_pool_ids` stack array.
+const MAX_BUNDLE_ARITY: usize = 16;
 
 /// Phase 12.5 Opt-A2 (§5.2): deferred "spawn N entities sharing bundle
 /// type `B`, sourced from iterator `I`" command.
@@ -307,6 +312,67 @@ where
             debug_assert_eq!(pool_ids.len(), B::component_ids().len());
         }
 
+        // ── Step 2.6 (Phase 22.1 D-E): compacted data-column pool ids ──
+        // Filter the canonical `pool_ids` down to the DATA (non-ZST)
+        // columns, in the same canonical `ComponentId.0` order. The per-row
+        // write loop walks only this compacted slice via
+        // `for_each_data_component_bytes`, so a ZST tag column costs zero
+        // per-row instructions (the dynamic-size memcpy is never reached).
+        //
+        // Alignment proof (D-E MINOR): the derive's data walk emits entries
+        // sorted by `ComponentId` filtered by `size_of::<FieldTy>() == 0`;
+        // this slice is the canonical `pool_ids` (also sorted by
+        // `ComponentId`) filtered by `layout.size() == 0`. The predicate is
+        // identical because `write_at_unchecked_initialized` copies
+        // `component_layout.size()` bytes from the SAME component registry
+        // the macro's `size_of` reflects. The per-row
+        // `debug_assert_eq!(k, data_len)` pins the 1:1 correspondence.
+        //
+        // No per-row allocation: a fixed `MAX_BUNDLE_ARITY` stack array
+        // (matching the sibling collectors) + a runtime length. Built once
+        // per batch from `≤ N` pool-layout reads — negligible at 10k rows.
+        let component_ids_static: &'static [crate::ecs::identifiers::primitives::ComponentId] =
+            B::component_ids();
+        let mut data_pool_ids: [InlandPoolId; MAX_BUNDLE_ARITY] =
+            [InlandPoolId(0); MAX_BUNDLE_ARITY];
+        // Compacted non-ZST component ids, parallel to `data_pool_ids` — used
+        // only by the per-row B2 emit-order debug_assert (debug builds).
+        #[cfg(debug_assertions)]
+        let mut data_component_ids: [crate::ecs::identifiers::primitives::ComponentId;
+            MAX_BUNDLE_ARITY] =
+            [crate::ecs::identifiers::primitives::ComponentId(0); MAX_BUNDLE_ARITY];
+        let mut data_len: usize = 0;
+        {
+            // SAFETY: the shared `&Archetype` borrow lives only within this
+            //   block and is dropped before the `&mut Archetype` reborrow in
+            //   Step 3 below; the apply window holds exclusive
+            //   `&mut EcsMaster`, so no concurrent mutation occurs.
+            let archetype_shared: &Archetype = unsafe { &*archetype_ptr };
+            let pools = archetype_shared.component_pools();
+            for (canonical_idx, &cid) in component_ids_static.iter().enumerate() {
+                let layout_size = pools
+                    .get_pool(cid)
+                    .expect(
+                        "invariant: cached archetype hosts every component in \
+                         B::component_ids() (Bundle / ArchetypeMaster contract)",
+                    )
+                    .component_layout()
+                    .size();
+                if layout_size != 0 {
+                    debug_assert!(data_len < MAX_BUNDLE_ARITY);
+                    data_pool_ids[data_len] = pool_ids[canonical_idx];
+                    #[cfg(debug_assertions)]
+                    {
+                        data_component_ids[data_len] = cid;
+                    }
+                    data_len += 1;
+                }
+            }
+        }
+        let data_pool_ids = &data_pool_ids[..data_len];
+        #[cfg(debug_assertions)]
+        let data_component_ids = &data_component_ids[..data_len];
+
         // ── Step 3: ensure entity fast-store capacity (Phase 12.6) ─────
         // Replaces the SBO17b hard-panic guard. The apply path holds
         // `&mut EcsMaster`, so workers are not in flight per SCH7 — and
@@ -342,41 +408,58 @@ where
         );
         let start_row = archetype.current_index;
 
-        // ── Step 5: write rows ─────────────────────────────────────────
+        // ── Step 5: write rows (Phase 22.1 D-E filtered walk) ──────────
+        // The data walk visits ONLY non-ZST columns, so `data_pool_ids[k]`
+        // selects the destination pool and `k` advances once per data
+        // column. ZST tag columns are never visited here — their bytes are
+        // empty and their slots are committed + tick-stamped in Step 6 over
+        // ALL pools (the `Added<Tag>` contract is preserved).
+        //
+        // For a 2-data-only bundle `data_pool_ids == pool_ids` (no ZST
+        // filtered out), so this loop body is instruction-identical to the
+        // pre-22.1 walk: same indexed load from a small stack array, same
+        // deref chain, same memcpy.
         let mut iter = self.iter;
-        let component_ids_static: &'static [crate::ecs::identifiers::primitives::ComponentId] =
-            B::component_ids();
         for i in 0..n {
             let row = start_row + i;
             let bundle = iter.next().expect(
                 "ExactSizeIterator contract: len() reported n, iter yielded < n",
             );
-            let mut canonical_idx = 0usize;
-            bundle.for_each_component_bytes(|component_id, bytes| {
-                debug_assert!(canonical_idx < pool_ids.len());
+            let mut k = 0usize;
+            bundle.for_each_data_component_bytes(|_component_id, bytes| {
+                debug_assert!(k < data_pool_ids.len());
+                // `data_component_ids` exists only under `cfg(debug_assertions)`
+                // (debug-only parallel array); gate the whole check so release
+                // builds — where the binding is absent from the AST — still
+                // name-resolve. `debug_assert_eq!`'s own runtime gate does NOT
+                // remove its body from compilation, so the cfg is required here.
+                #[cfg(debug_assertions)]
                 debug_assert_eq!(
-                    component_ids_static[canonical_idx], component_id,
-                    "B2/SBO-B2 violation: bundle emit order mismatch"
+                    data_component_ids[k], _component_id,
+                    "B2/SBO-B2 violation: bundle data-emit order mismatch"
                 );
-                let pool_idx = pool_ids[canonical_idx];
+                let pool_idx = data_pool_ids[k];
                 // SAFETY (SBO13):
                 //   - `row < start_row + n` and `start_row + n <= the
                 //     pool's committed_rows` after `reserve_capacity`
                 //     succeeded (Phase X.I: Phase B grew every pool).
-                //   - `pool_idx.0 < pools.len()` by SBO-B2 (canonical match
-                //     with `B::component_ids()`).
+                //   - `pool_idx.0 < pools.len()` because `data_pool_ids` is a
+                //     filtered subset of the canonical `pool_ids` (SBO-B2),
+                //     each entry copied straight from a valid `pool_ids` slot.
                 //   - Pool is exclusively accessed via `&mut archetype`.
                 //   - `bytes.len()` matches `component_layout.size()` per
-                //     Bundle/macro contract.
+                //     Bundle/macro contract (non-empty by construction here).
                 unsafe {
                     archetype
                         .component_pools_mut()
                         .pool_at_unchecked_mut(pool_idx)
                         .write_at_unchecked_initialized(row, bytes);
                 }
-                canonical_idx += 1;
+                k += 1;
             });
-            debug_assert_eq!(canonical_idx, pool_ids.len());
+            // D-E alignment pin: the bundle's data walk emitted exactly the
+            // non-ZST columns the per-batch filter counted.
+            debug_assert_eq!(k, data_pool_ids.len());
         }
 
         // ── Step 6: bulk-commit units + tick init ──────────────────────

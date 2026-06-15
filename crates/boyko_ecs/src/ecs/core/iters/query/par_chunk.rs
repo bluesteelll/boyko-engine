@@ -57,8 +57,8 @@ use crate::ecs::core::iters::query::chunked_data::ChunkedQueryData;
 use crate::ecs::core::iters::query::filter::ArchetypalQueryFilter;
 use crate::ecs::core::iters::query::par_iter::{BatchingStrategy, MIN_ARCHETYPE_FOR_PARALLEL};
 use crate::ecs::core::iters::query::state::QueryDataState;
-use crate::ecs::core::iters::query::tag_terms::{TagTerms, archetype_passes_tag_terms};
 use crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell;
+use crate::ecs::identifiers::primitives::ArchetypeId;
 
 /// Parallel chunked-iter driver. Shared between
 /// [`Query::par_for_each_chunk`] and [`QueryView::par_for_each_chunk`].
@@ -87,19 +87,25 @@ use crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell;
 ///   aliases any column touched by `D` for the current dispatch round.
 /// * **State-sync** — `state` must already be synced against the live
 ///   archetype set via [`QueryDataState::update`]. The driver does not call
-///   `update` itself; it walks `state.archetype_state.matched_ids_pre_terms()`
-///   verbatim. Stale ids (Q5) are skipped transparently via the
-///   `archetype_ptr(_mut)` `None` arm.
+///   `update` itself; it walks the caller-supplied `ids` slice verbatim.
+///   Stale ids (Q5) are skipped transparently via the `archetype_ptr(_mut)`
+///   `None` arm.
+///
+/// Phase 22.1 Area A: `ids` is resolved ONCE on the calling thread at the
+/// driver entry (no terms → `matched_ids_pre_terms()`; terms → the per-epoch
+/// memoised filtered slice) BEFORE `pool.scope`, so workers receive only
+/// term-passing archetypes' chunks and this driver carries no term code. The
+/// PAR7 fallback forwards the SAME slice (no re-resolve).
 ///
 /// [`Query::par_for_each_chunk`]: super::query::Query::par_for_each_chunk
 /// [`QueryView::par_for_each_chunk`]: super::query_view::QueryView
 /// [`UnsafeEcsCell::new_mutable`]: crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell::new_mutable
 pub(crate) unsafe fn par_for_each_chunk_impl<'q, 's, D, F, Func>(
     state: &'s QueryDataState<D, F>,
+    ids: &[ArchetypeId],
     world: UnsafeEcsCell<'q>,
     mutable: bool,
     batching: BatchingStrategy,
-    terms: &TagTerms,
     f: Func,
 ) where
     D: ChunkedQueryData + 's,
@@ -119,7 +125,7 @@ pub(crate) unsafe fn par_for_each_chunk_impl<'q, 's, D, F, Func>(
         // `Schedule::run` (Wave 5). `scope`'s Drop performs work-stealing so
         // nested invocations cannot deadlock (plan §4.5.5 / Round 2 C3).
         pool.scope(|scope| {
-            for &arch_id in state.archetype_state.matched_ids_pre_terms() {
+            for &arch_id in ids {
                 // SAFETY (U_C2 / U_C3): mirrors the read-only / write-capable
                 //   mint split from `chunk_iter::for_each_chunk_impl`
                 //   (`chunk_iter.rs:113-125`) and `par_iter::for_each_impl`
@@ -143,18 +149,6 @@ pub(crate) unsafe fn par_for_each_chunk_impl<'q, 's, D, F, Func>(
                         }
                     }
                 };
-
-                // Phase 22 D4: archetype-level dynamic-tag term test in the
-                // (single-threaded) distribution loop — workers never see a
-                // term-rejected archetype; one predicted not-taken branch
-                // per transition when no terms are set.
-                //
-                // SAFETY (U1 / U2): same bounded shared-reborrow discipline
-                //   as the `entity_count` probe below; the `&Archetype`
-                //   dies inside the call.
-                if !archetype_passes_tag_terms(terms, unsafe { &*arch_ptr }) {
-                    continue;
-                }
 
                 // SAFETY (U1 / U2 — Phase 7 slab stability): `arch_ptr` is
                 //   live for the surrounding cell scope (`'q`); the
@@ -262,11 +256,11 @@ pub(crate) unsafe fn par_for_each_chunk_impl<'q, 's, D, F, Func>(
         //   user's `Fn` composes trivially. No allocation, no Send/Sync use.
         // SAFETY (forwarded): caller upheld the read/write contract for `D`
         //   and the state-sync contract for `state`; `chunk_iter` itself
-        //   enforces no further preconditions. Phase 22 D4: `terms` is
-        //   forwarded — the sequential driver applies the identical
-        //   archetype-transition term test.
+        //   enforces no further preconditions. Phase 22.1 Area A: the SAME
+        //   pre-resolved `ids` slice is forwarded (no re-resolve) — the
+        //   sequential driver walks it identically.
         unsafe {
-            chunk_iter::for_each_chunk_impl(state, world, mutable, terms, |item| f(item));
+            chunk_iter::for_each_chunk_impl(state, ids, world, mutable, |item| f(item));
         }
     }
 }
@@ -508,12 +502,13 @@ mod tests {
         //   No active pool attached on this thread ⇒ PAR7 sequential fallback
         //   is the only path exercised here.
         unsafe {
+            let ids = state.archetype_state.matched_ids_pre_terms();
             par_for_each_chunk_impl::<&CompA, (), _>(
                 &state,
+                ids,
                 cell,
                 false,
                 BatchingStrategy::default(),
-                &TagTerms::EMPTY,
                 |slice: &[CompA]| {
                     invocations.fetch_add(1, Ordering::Relaxed);
                     total.fetch_add(slice.len(), Ordering::Relaxed);
@@ -571,12 +566,13 @@ mod tests {
             //   the dispatch loop's inline branch. `D = &CompA` ⇒ read-only;
             //   `F = ()` ⇒ archetypal. No aliasing live.
             unsafe {
+                let ids = state.archetype_state.matched_ids_pre_terms();
                 par_for_each_chunk_impl::<&CompA, (), _>(
                     &state,
+                    ids,
                     cell,
                     false,
                     BatchingStrategy::default(),
-                    &TagTerms::EMPTY,
                     |slice: &[CompA]| {
                         invocations.fetch_add(1, Ordering::Relaxed);
                         total.fetch_add(slice.len(), Ordering::Relaxed);
@@ -755,12 +751,13 @@ mod tests {
             //   &CompW7a read-only; F = () archetypal; no aliasing live; the
             //   atomic counter is `Sync`.
             unsafe {
+                let ids = state.archetype_state.matched_ids_pre_terms();
                 par_for_each_chunk_impl::<&CompW7a, (), _>(
                     &state,
+                    ids,
                     cell,
                     false,
                     BatchingStrategy::default(),
-                    &TagTerms::EMPTY,
                     |slice: &[CompW7a]| {
                         invocations.fetch_add(1, Ordering::Relaxed);
                         counter.fetch_add(slice.len(), Ordering::Relaxed);
@@ -879,6 +876,7 @@ mod tests {
             //   (Or-propagation in filter.rs:1718-1722); no aliasing live; the
             //   atomic counter is `Sync`.
             unsafe {
+                let ids = state.archetype_state.matched_ids_pre_terms();
                 par_for_each_chunk_impl::<
                     &CompA,
                     crate::ecs::core::iters::query::filter::Or<(
@@ -888,10 +886,10 @@ mod tests {
                     _,
                 >(
                     &state,
+                    ids,
                     cell,
                     false,
                     BatchingStrategy::default(),
-                    &TagTerms::EMPTY,
                     |slice: &[CompA]| {
                         total.fetch_add(slice.len(), Ordering::Relaxed);
                     },
@@ -937,12 +935,13 @@ mod tests {
                 //   sibling system); CD3 is structurally enforced by the
                 //   monotonic walk on disjoint `[start, start + len)` ranges.
                 unsafe {
+                    let ids = state.archetype_state.matched_ids_pre_terms();
                     par_for_each_chunk_impl::<&mut CompW7Pos, (), _>(
                         &state,
+                        ids,
                         cell,
                         true,
                         BatchingStrategy::default(),
-                        &TagTerms::EMPTY,
                         |slice: &mut [CompW7Pos]| {
                             for p in slice.iter_mut() {
                                 p.0 = p.0.wrapping_mul(2);
@@ -963,11 +962,12 @@ mod tests {
         let mut collected: Vec<u32> = Vec::with_capacity(4000);
         // SAFETY (Q1, CD1-CD4): read-only re-iteration; no aliasing live.
         unsafe {
+            let ids = state.archetype_state.matched_ids_pre_terms();
             chunk_iter::for_each_chunk_impl::<&CompW7Pos, (), _>(
                 &state,
+                ids,
                 cell,
                 false,
-                &TagTerms::EMPTY,
                 |slice: &[CompW7Pos]| {
                     for p in slice {
                         collected.push(p.0);

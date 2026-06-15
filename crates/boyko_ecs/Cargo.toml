@@ -31,6 +31,13 @@ mimalloc = { version = "0.1", optional = true }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# Phase 22.1: loom is pulled in ONLY under `--cfg loom` (mirrors
+# boyko_threadpool's Phase-9.1 setup). `term_list.rs` aliases its atomics to
+# `loom::sync::atomic` under `cfg(loom)` so the loom harness drives the REAL
+# resolve/reclaim protocol; the normal build graph never lists loom.
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"
+
 [features]
 default = []
 # Phase 12.5 Track B I5 — bumps `MAX_QUERY_TYPES` from 1024 to 4096 for
@@ -165,4 +172,4 @@ harness = false
 # Phase 9 Wave 7 Step 24: opt-in stronger ALLOC1 check via
 # `RUSTFLAGS="--cfg force_alloc_panic"`. See
 # docs/PHASE-9-FORCE-ALLOC-PANIC.md.
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(force_alloc_panic)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(force_alloc_panic)', 'cfg(loom)'] }

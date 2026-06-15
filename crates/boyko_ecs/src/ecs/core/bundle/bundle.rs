@@ -272,4 +272,43 @@ pub trait Bundle: sealed::BundleSealed + Send + Sync + Unpin + 'static {
     /// intermediate to sidestep E0521, ManuallyDrop-upfront for **B4**,
     /// sort by `ComponentId.0` for **B1**).
     fn for_each_component_bytes<F: FnMut(ComponentId, &[u8])>(self, f: F);
+
+    /// Phase 22.1 D-E — invokes `f` once per **non-ZST** component in
+    /// canonical order, eliding zero-size (ZST tag) columns from the
+    /// per-row byte-copy walk.
+    ///
+    /// The spawn-batch write loop consumes this together with a per-batch
+    /// compacted `data_pool_ids` (canonical `pool_ids` filtered by
+    /// `layout.size() != 0`) so that a ZST tag column costs **zero**
+    /// per-row instructions. Tick stamping (`Added<Tag>`) still happens
+    /// for ALL columns via `fill_ticks_batch` — that walk is independent
+    /// of this method.
+    ///
+    /// # Default body
+    ///
+    /// Forwards to [`Self::for_each_component_bytes`] and drops the
+    /// empty-slice callbacks at runtime. This keeps hand-written `Bundle`
+    /// impls (the Phase-19 hierarchy newtypes, internal test stubs)
+    /// correct without per-impl codegen — they are off the gated bench and
+    /// carry no ZST columns anyway. The derive macro **overrides** this
+    /// with a const-filtered emission where ZST fields fold out at
+    /// monomorphisation *before* the canonical sort.
+    ///
+    /// # Panic safety
+    ///
+    /// Identical to [`Self::for_each_component_bytes`] (**B4**): the
+    /// callback observes only `ComponentId`s whose byte slice is non-empty;
+    /// ManuallyDrop ownership transfer is handled inside the underlying
+    /// emission.
+    #[inline]
+    fn for_each_data_component_bytes<F: FnMut(ComponentId, &[u8])>(self, mut f: F)
+    where
+        Self: Sized,
+    {
+        self.for_each_component_bytes(|id, bytes| {
+            if !bytes.is_empty() {
+                f(id, bytes);
+            }
+        });
+    }
 }

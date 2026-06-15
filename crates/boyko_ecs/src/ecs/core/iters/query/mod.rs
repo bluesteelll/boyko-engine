@@ -39,6 +39,9 @@ pub mod state;
 // crate-internal (terms are added via `with_tag` / `without_tag` builders);
 // only the term-count ceiling is part of the public contract.
 pub mod tag_terms;
+// Phase 22.1 Area A: immutable epoch lists + lock-free CAS publication. The
+// SOUNDNESS-CRITICAL term-prefilter memo (protocol P1–P4); crate-internal.
+pub mod term_list;
 
 pub use chunked_data::ChunkedQueryData;
 pub use data::{Mut, QueryData, ReadOnlyQueryData, Ref};

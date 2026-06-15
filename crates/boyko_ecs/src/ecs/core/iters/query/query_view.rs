@@ -42,6 +42,7 @@ use crate::ecs::core::iters::query::tag_terms::{
 };
 use crate::ecs::core::system::system_meta::SystemMeta;
 use crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell;
+use crate::ecs::identifiers::primitives::ArchetypeId;
 
 /// Direct query iteration handle returned by
 /// [`EcsMaster::query`](crate::ecs::core::ecs_master::ecs_master::EcsMaster::query).
@@ -234,6 +235,43 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
         unsafe { &*(*self.state.as_ptr()).get() }
     }
 
+    /// Resolves the id slice every iteration-style driver walks (Phase 22.1
+    /// Area A, D-C funnel — mirror of `Query::driver_ids`).
+    ///
+    /// No terms: returns the shared `matched_ids_pre_terms()` slice exactly
+    /// as pre-Phase-22 — one predicted branch, no master mint, the term
+    /// scratch is never loaded. Terms: routes to the cold
+    /// [`Self::driver_ids_term_slow`]. The returned slice borrows `&self`
+    /// (sub-lifetime of `'w`); `iter_mut` already reads the state through the
+    /// `&self`-scoped `state()` reborrow, so no conflict with its `&mut self`
+    /// uniqueness gate.
+    #[inline]
+    fn driver_ids(&self) -> &[ArchetypeId] {
+        if self.terms.is_empty() {
+            return self.state().archetype_state.matched_ids_pre_terms();
+        }
+        self.driver_ids_term_slow()
+    }
+
+    /// Cold term-bearing arm of [`Self::driver_ids`] — mints the master and
+    /// resolves the memoised term-filtered slice (P1–P4).
+    #[cold]
+    #[inline(never)]
+    fn driver_ids_term_slow(&self) -> &[ArchetypeId] {
+        let state = self.state();
+        // SAFETY (U_C2): shared read mint — `world()` yields `&EcsMaster`
+        //   scoped to this statement; no `&mut` access occurs through it
+        //   (same pattern as `get`'s world reborrow). The borrow ends at the
+        //   `archetype_master()` deref; the resolved slice borrows the cached
+        //   state's term scratch, not the cell.
+        let master = unsafe { self.world.world().archetype_master() };
+        state.term_scratch.resolve_term_filtered(
+            &self.terms,
+            master,
+            &state.archetype_state,
+        )
+    }
+
     /// Returns the number of currently-matched archetypes.
     ///
     /// No-terms path: O(1) — reads the length of the cached `matched_ids`
@@ -297,9 +335,11 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
         //   passing it by value preserves raw-pointer provenance.
         //   `SystemMeta::dummy()` returns a stable `'static` reference
         //   (NCD7); the NCD6 const-fold makes the dummy contents
-        //   unobservable on the !NCD path. Phase 22 D4: `self.terms` is
-        //   copied into the cursor — applied at each archetype transition.
-        unsafe { QueryIter::new(self.state(), self.world, SystemMeta::dummy(), self.terms) }
+        //   unobservable on the !NCD path. Phase 22.1 Area A: the id slice is
+        //   resolved ONCE here (no terms → pre-terms slice; terms → memoised
+        //   filtered slice); the cursor walks it term-free.
+        let ids = self.driver_ids();
+        unsafe { QueryIter::new(self.state(), ids, self.world, SystemMeta::dummy()) }
     }
 
     /// Returns a mutable iterator over `D::Item<'_>` for every matched row.
@@ -312,9 +352,12 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
         // SAFETY (Q1, Q3, QD4, U_C3): `&mut self` enforces cursor
         //   uniqueness; the cell carries write-capable provenance from
         //   the upstream `&mut EcsMaster` (QV1). See `iter` SAFETY for
-        //   meta plumbing rationale. Phase 22 D4: `self.terms` is copied
-        //   into the cursor.
-        unsafe { QueryIterMut::new(self.state(), self.world, SystemMeta::dummy(), self.terms) }
+        //   meta plumbing rationale. Phase 22.1 Area A: the id slice is
+        //   resolved once here (term-free for the cursor); `iter_mut` reads
+        //   the state through the same `&self`-scoped `state()` reborrow as
+        //   `driver_ids`, so there is no conflict with the `&mut self` gate.
+        let ids = self.driver_ids();
+        unsafe { QueryIterMut::new(self.state(), ids, self.world, SystemMeta::dummy()) }
     }
 
     /// Returns a parallel read-only iteration handle.
@@ -329,12 +372,15 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
     where
         D: ReadOnlyQueryData,
     {
+        // Phase 22.1 Area A: resolve once at handle mint; `for_each` forwards
+        // the slice to both the scoped loop and the PAR7 fallback.
+        let ids = self.driver_ids();
         ParQuery {
             state: self.state(),
+            ids,
             world: self.world,
             batching: BatchingStrategy::default(),
             meta: SystemMeta::dummy(),
-            terms: self.terms,
         }
     }
 
@@ -345,12 +391,15 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
     /// `&mut self` borrow gates cursor uniqueness.
     #[inline]
     pub fn par_iter_mut<'q>(&'q mut self) -> ParQueryMut<'q, 'q, D, F> {
+        // Phase 22.1 Area A: resolve once before the mutable handle is handed
+        // out; `for_each` forwards the slice.
+        let ids = self.driver_ids();
         ParQueryMut {
             state: self.state(),
+            ids,
             world: self.world,
             batching: BatchingStrategy::default(),
             meta: SystemMeta::dummy(),
-            terms: self.terms,
             _mut_marker: PhantomData,
         }
     }
@@ -562,9 +611,12 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
         //   `iter.rs` does not appear in this driver. The cell
         //   `self.world` is `Copy`; passing by value preserves the
         //   raw-pointer provenance through the call (Phase 8a C1 fix).
+        // Phase 22.1 Area A: resolve the id slice once before dispatch; the
+        // driver walks it term-free.
+        let ids = self.driver_ids();
         let mutable = !D::IS_READ_ONLY;
         unsafe {
-            chunk_iter::for_each_chunk_impl(self.state(), self.world, mutable, &self.terms, f);
+            chunk_iter::for_each_chunk_impl(self.state(), ids, self.world, mutable, f);
         }
     }
 
@@ -619,14 +671,17 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
         //   `ArchetypalQueryFilter` gates force NCD const-fold to `false`,
         //   so the meta-bearing branch is unreachable. The cell `self.world`
         //   is `Copy`; passing by value preserves raw-pointer provenance.
+        // Phase 22.1 Area A: resolve the id slice once on the calling thread
+        // before `pool.scope`.
+        let ids = self.driver_ids();
         let mutable = !D::IS_READ_ONLY;
         unsafe {
             par_chunk::par_for_each_chunk_impl(
                 self.state(),
+                ids,
                 self.world,
                 mutable,
                 batching,
-                &self.terms,
                 f,
             );
         }

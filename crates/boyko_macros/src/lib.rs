@@ -1129,6 +1129,38 @@ pub fn bundle_macro(input: TokenStream) -> TokenStream {
         })
         .collect();
 
+    // Phase 22.1 D-E: per-field push fragments for the `data`-only walk. Each
+    // push is wrapped in `if size_of::<FieldTy>() != 0 { ... }`. Because the
+    // size is a monomorphisation-time constant, the branch folds entirely:
+    // a ZST field's entry never enters the array, so the subsequent sort and
+    // dispatch loop run over data columns only — the ZST byte-copy is elided
+    // BEFORE the runtime sort (unlike a post-sort `bytes.is_empty()` guard,
+    // which would launder into a per-column-per-row runtime branch).
+    let data_push_stmts: Vec<TokenStream2> = fields
+        .iter()
+        .map(|f| {
+            let ty = &f.ty;
+            let local = &f.local_ident;
+            quote! {
+                if ::std::mem::size_of::<#ty>() != 0 {
+                    // SAFETY (C5 / §6.3, identical to `for_each_component_bytes`):
+                    //   `__data_len < #n_fields` because at most `#n_fields`
+                    //   entries are ever pushed (one per field, and only when
+                    //   non-ZST). `&raw const *#local` is a valid `*const u8`
+                    //   for `size_of::<#ty>()` bytes for this function's scope.
+                    unsafe {
+                        *__data_sorted.get_unchecked_mut(__data_len) = (
+                            <#ty as ::boyko_ecs::ecs::core::component::component::Component>::component_id(),
+                            &raw const *#local as *const u8,
+                            ::std::mem::size_of::<#ty>(),
+                        );
+                    }
+                    __data_len += 1;
+                }
+            }
+        })
+        .collect();
+
     // `where T: Component` for every field — gives a sharper diagnostic than
     // letting the `component_id()` reference fail down in the impl body. Per
     // step spec acceptance §9 Step 4 bullet "Bound check".
@@ -1257,6 +1289,70 @@ pub fn bundle_macro(input: TokenStream) -> TokenStream {
                     //         unconditionally — Drop is suppressed regardless of
                     //         panic state. This is the documented B4 panic-safety
                     //         guarantee: panic → leak, never double-drop.
+                    let bytes: &[u8] = unsafe { ::std::slice::from_raw_parts(ptr, len) };
+                    f(id, bytes);
+                }
+            }
+
+            fn for_each_data_component_bytes<F>(self, mut f: F)
+            where
+                F: ::std::ops::FnMut(
+                    ::boyko_ecs::ecs::identifiers::primitives::ComponentId,
+                    &[u8],
+                ),
+            {
+                // Phase 22.1 D-E: identical to `for_each_component_bytes`
+                // EXCEPT zero-size (ZST tag) fields are filtered out at
+                // monomorphisation (the `size_of::<FieldTy>() != 0` guards
+                // below const-fold). The callback is invoked once per
+                // NON-ZST component in canonical `ComponentId.0` order.
+                //
+                // B4 panic-safety is unchanged: EVERY field (ZST or not) is
+                // ManuallyDrop-wrapped upfront, so a callback panic leaks the
+                // remaining fields' bytes rather than double-dropping. ZST
+                // fields carry no bytes — their `ManuallyDrop` is a no-op —
+                // but the wrap is uniform to keep the contract obvious.
+                #(
+                    let #field_locals = ::std::mem::ManuallyDrop::new(#field_accessors);
+                )*
+
+                // Worst-case-sized stack array (all fields non-ZST). The
+                // const-folded push guards keep `__data_len` at exactly the
+                // non-ZST field count; only `__data_sorted[..__data_len]` is
+                // ever read. A single placeholder initialiser keeps the array
+                // a plain `[T; N]` (no MaybeUninit churn) — every written slot
+                // is overwritten before use.
+                let mut __data_sorted: [
+                    (
+                        ::boyko_ecs::ecs::identifiers::primitives::ComponentId,
+                        *const u8,
+                        usize,
+                    );
+                    #n_fields
+                ] = [
+                    (
+                        ::boyko_ecs::ecs::identifiers::primitives::ComponentId(0),
+                        ::std::ptr::null(),
+                        0usize,
+                    );
+                    #n_fields
+                ];
+                let mut __data_len: usize = 0;
+                #(#data_push_stmts)*
+
+                // B1 canonical sort over the populated prefix only.
+                __data_sorted[..__data_len].sort_unstable_by_key(|(id, _, _)| id.0);
+
+                for &(id, ptr, len) in &__data_sorted[..__data_len] {
+                    debug_assert!(len != 0, "ZST entry leaked into the data walk");
+                    // SAFETY (C5 / §6.3): `ptr` was derived from
+                    //   `&raw const *ManuallyDrop<T>` for a NON-ZST live stack
+                    //   local; it is valid for `len = size_of::<T>()` bytes for
+                    //   the duration of this loop. The slice is shared,
+                    //   non-overlapping (each local borrowed once), and Drop is
+                    //   suppressed by ManuallyDrop (B4: panic → leak, never
+                    //   double-drop). Identical invariants to
+                    //   `for_each_component_bytes`.
                     let bytes: &[u8] = unsafe { ::std::slice::from_raw_parts(ptr, len) };
                     f(id, bytes);
                 }

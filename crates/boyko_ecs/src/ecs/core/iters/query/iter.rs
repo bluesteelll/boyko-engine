@@ -15,7 +15,7 @@
 //!   per-archetype refresh through [`QueryData::set_table_mut`] /
 //!   [`QueryFilter::set_table_mut`].
 //!
-//! # Hot loop shape (M2, Phase 22 F1)
+//! # Hot loop shape (M2; Phase 22.1 Area A — term-free cursors)
 //!
 //! `next()` is a two-level `loop { while { ... } }`: the outer loop advances
 //! the archetype cursor, the inner loop walks the rows of the current
@@ -24,28 +24,17 @@
 //! for archetypal filters at monomorphisation time. See §7.1 of the Phase 8b
 //! plan and the §7.2 walkthrough for the per-row cost model.
 //!
-//! Phase 22 F1 (I-cache): inlining the Wave-2B tag-term *scan body* into the
-//! archetype transition grew `QueryIter::next` past LLVM's inline threshold —
-//! `next()` stopped inlining into caller loops (asm-verified: an outlined
-//! ~180-line `next` symbol with per-row `callq` sites; `query_ref_iter_10k`
-//! +247%). The transition block stays inline (its pre-Phase-22 shape); the
-//! term test is one inline `len == 0` branch, and a term failure zeroes the
-//! row window instead of `continue`-ing (observably identical; simpler loop
-//! nest). The scan-body dispatch is ASYMMETRIC per cursor — both directions
-//! are criterion-A/B-pinned (same session, p = 0.00):
-//!
-//! * `QueryIter` uses `archetype_passes_tag_terms` (scan `#[cold]`-outlined):
-//!   with the scan inline, `next()` falls out of the callers
-//!   (`query_ref_iter_10k` +216%).
-//! * `QueryIterMut` uses `archetype_passes_tag_terms_inline_scan`: its
-//!   `next()` stays inlined either way, but a reachable scan *call* in the
-//!   loop nest spills the row cursor to the stack (`query_mut_iter_10k`
-//!   +47% vs +26%).
-//!
-//! Do NOT outline the whole transition into a `&mut self` helper: the
-//! escaped iterator alloca blocks SROA register promotion, and the row loop
-//! reloads `current_row` / `current_len` / fetch bases from the stack per
-//! row (criterion-verified +38% mut / +46% tuple).
+//! Phase 22.1 Area A restored both `next()` bodies to their byte-identical
+//! pre-Phase-22 form. The cursors carry **no term state** and walk a plain
+//! caller-supplied `&[ArchetypeId]` slice — either the shared
+//! `matched_ids_pre_terms()` cache (no terms) or a per-epoch memoised
+//! term-filtered slice (resolved once at the driver entry; see
+//! [`term_list`](super::term_list)). The Phase 22 F1 per-transition tag-term
+//! test (and its cold/inline scan asymmetry across the two cursors) measured
+//! a nonzero floor in `next()` even when no terms were set (+3.6% on a bare
+//! len-read with an unreachable scan); only the ABSENCE of all term code
+//! reaches the 0% gate. The transition block is now: `slice-iter next →
+//! archetype_ptr(_mut)` None-skip (Q5) → `set_table_*` → `entity_count`.
 //!
 //! # Stale id skip (Q5)
 //!
@@ -75,9 +64,6 @@ use crate::ecs::core::archetype::archetype::Archetype;
 use crate::ecs::core::iters::query::data::{QueryData, ReadOnlyQueryData};
 use crate::ecs::core::iters::query::filter::QueryFilter;
 use crate::ecs::core::iters::query::state::QueryDataState;
-use crate::ecs::core::iters::query::tag_terms::{
-    TagTerms, archetype_passes_tag_terms, archetype_passes_tag_terms_inline_scan,
-};
 use crate::ecs::core::system::system_meta::SystemMeta;
 use crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell;
 use crate::ecs::identifiers::primitives::ArchetypeId;
@@ -92,10 +78,11 @@ use crate::ecs::identifiers::primitives::ArchetypeId;
 ///
 /// # Fields
 ///
-/// * `archetype_ids` — slice cursor over `QueryDataState::matched_ids`. Owns
-///   the `'q` lifetime relationship to the world: as long as the iterator
-///   holds the slice iter, the underlying `Vec<ArchetypeId>` (inside the
-///   cached `QueryState`) cannot be mutated.
+/// * `archetype_ids` — slice cursor over a caller-supplied `&'q
+///   [ArchetypeId]` (Phase 22.1: either the shared
+///   `matched_ids_pre_terms()` slice, or a per-epoch memoised term-filtered
+///   slice — both live at `'q`). As long as the iterator holds the slice
+///   iter, the underlying ids cannot be mutated.
 /// * `data_state` / `filter_state` — borrowed references to the per-system
 ///   cached states; consumed by `set_table_readonly` on every archetype
 ///   transition.
@@ -123,11 +110,6 @@ pub struct QueryIter<'q, 's, D: QueryData, F: QueryFilter> {
     /// `&'s` — the meta lives in the same system-state slot as
     /// `QueryDataState`, so they share the `'s` lifetime by construction.
     meta: &'s SystemMeta,
-    /// Phase 22 D4: per-view dynamic-tag terms, copied into the cursor
-    /// (heap-/stack-resident per the Phase 12.5 cursor discipline). Applied
-    /// once per archetype transition; `len == 0` costs one predicted
-    /// not-taken branch and leaves the inner row loop byte-identical.
-    terms: TagTerms,
     _marker: PhantomData<&'s ()>,
 }
 
@@ -135,11 +117,14 @@ impl<'q, 's, D: QueryData, F: QueryFilter> QueryIter<'q, 's, D, F>
 where
     's: 'q,
 {
-    /// Builds a fresh read-only cursor.
+    /// Builds a fresh read-only cursor over the caller-supplied `ids` slice.
     ///
     /// `state` must already be synced against `world` (via
-    /// [`QueryDataState::update`]) — the cursor walks
-    /// `state.archetype_state.matched_ids_pre_terms()` directly.
+    /// [`QueryDataState::update`]). Phase 22.1 Area A: the driver entry
+    /// resolves the id slice ONCE before constructing the cursor — no terms
+    /// → `state.archetype_state.matched_ids_pre_terms()`; terms →
+    /// [`TermScratch::resolve_term_filtered`](super::term_list::TermScratch::resolve_term_filtered).
+    /// The cursor itself carries no term state.
     ///
     /// # Phase 10 Round 2 C2 — `meta` parameter
     ///
@@ -175,12 +160,12 @@ where
     #[inline]
     pub(crate) unsafe fn new(
         state: &'s QueryDataState<D, F>,
+        ids: &'q [ArchetypeId],
         world: UnsafeEcsCell<'q>,
         meta: &'s SystemMeta,
-        terms: TagTerms,
     ) -> Self {
         Self {
-            archetype_ids: state.archetype_state.matched_ids_pre_terms().iter(),
+            archetype_ids: ids.iter(),
             data_state: &state.data_state,
             filter_state: &state.filter_state,
             world,
@@ -189,7 +174,6 @@ where
             current_row: 0,
             current_len: 0,
             meta,
-            terms,
             _marker: PhantomData,
         }
     }
@@ -252,24 +236,6 @@ where
                 continue;
             };
 
-            // Phase 22 D4: archetype-level dynamic-tag term test — one
-            // predicted not-taken branch per archetype transition when no
-            // terms are set; the inner row loop above stays byte-identical.
-            // Phase 22 F1: the scan body is `#[cold]`-outlined inside
-            // `archetype_passes_tag_terms` so only the `len == 0` test is
-            // inlined here — keeping `next()` under LLVM's inline threshold.
-            // A term failure does NOT `continue`: it zeroes the row window
-            // below instead, keeping the outer loop's single pre-Phase-22
-            // backedge (measured neutral vs `continue`; kept for the simpler
-            // loop nest).
-            //
-            // SAFETY (U1, U2): same bounded shared-reborrow discipline as
-            //   the `entity_count` probe below — `archetype_ptr` is
-            //   slab-stable for `'q` and the `&Archetype` dies inside the
-            //   call; no aliasing `&mut Archetype` exists on the read-only
-            //   path.
-            let passes = archetype_passes_tag_terms(&self.terms, unsafe { &*archetype_ptr });
-
             // SAFETY (QD3, QD4, QF3): `set_table_readonly` accepts a
             //   `*const Archetype` directly — no provenance cast. The pointer
             //   is live for `'q` (Phase 7 U1/U2 slab stability); `data_state`
@@ -322,10 +288,7 @@ where
 
             // Read-only probe to extract `entity_count`. The raw deref
             // materialises only an immutable view; no `&mut Archetype` is
-            // constructed. A term-failing archetype gets a zero-length row
-            // window — observably identical to skipping it (the inner loop
-            // never runs; the outer loop advances), without a second
-            // outer-loop backedge (Phase 22 F1, see the term-test comment).
+            // constructed.
             //
             // SAFETY (U1, U2): `archetype_ptr` is live for `'q` (slab
             //   stability); the `&Archetype` reborrow is scoped to this
@@ -333,7 +296,7 @@ where
             //   path.
             let arch_ref: &Archetype = unsafe { &*archetype_ptr };
             self.current_row = 0;
-            self.current_len = if passes { arch_ref.entity_count() } else { 0 };
+            self.current_len = arch_ref.entity_count();
         }
     }
 
@@ -369,9 +332,6 @@ pub struct QueryIterMut<'q, 's, D: QueryData, F: QueryFilter> {
     /// Phase 10 Round 2 C2: per-system tick snapshot. Same shape and
     /// purpose as [`QueryIter::meta`].
     meta: &'s SystemMeta,
-    /// Phase 22 D4: per-view dynamic-tag terms — same shape and purpose as
-    /// [`QueryIter::terms`].
-    terms: TagTerms,
     _marker: PhantomData<&'s ()>,
 }
 
@@ -379,9 +339,13 @@ impl<'q, 's, D: QueryData, F: QueryFilter> QueryIterMut<'q, 's, D, F>
 where
     's: 'q,
 {
-    /// Builds a fresh mutable cursor.
+    /// Builds a fresh mutable cursor over the caller-supplied `ids` slice.
     ///
-    /// `state` must already be synced against `world`.
+    /// `state` must already be synced against `world`. Phase 22.1 Area A: the
+    /// driver entry resolves the id slice ONCE before constructing the cursor
+    /// (no terms → `matched_ids_pre_terms()`; terms →
+    /// [`TermScratch::resolve_term_filtered`](super::term_list::TermScratch::resolve_term_filtered)).
+    /// The cursor carries no term state.
     ///
     /// # Phase 10 Round 2 C2 — `meta` parameter
     ///
@@ -410,12 +374,12 @@ where
     #[inline]
     pub(crate) unsafe fn new(
         state: &'s QueryDataState<D, F>,
+        ids: &'q [ArchetypeId],
         world: UnsafeEcsCell<'q>,
         meta: &'s SystemMeta,
-        terms: TagTerms,
     ) -> Self {
         Self {
-            archetype_ids: state.archetype_state.matched_ids_pre_terms().iter(),
+            archetype_ids: ids.iter(),
             data_state: &state.data_state,
             filter_state: &state.filter_state,
             world,
@@ -424,7 +388,6 @@ where
             current_row: 0,
             current_len: 0,
             meta,
-            terms,
             _marker: PhantomData,
         }
     }
@@ -480,22 +443,6 @@ impl<'q, 's, D: QueryData, F: QueryFilter> Iterator for QueryIterMut<'q, 's, D, 
                 continue;
             };
 
-            // Phase 22 D4: archetype-level dynamic-tag term test — mirrors
-            // the read-only cursor; one predicted branch per transition,
-            // inner row loop untouched. Phase 22 F1: this cursor uses the
-            // INLINE-scan variant — a reachable `#[inline(never)]` scan call
-            // in this loop nest spills the row cursor to the stack
-            // (`query_mut_iter_10k` +47% vs +26%, criterion A/B; see
-            // `archetype_passes_tag_terms_inline_scan`). A term failure
-            // zeroes the row window below instead of `continue`-ing.
-            //
-            // SAFETY (U1, U2): bounded shared reborrow of the slab-stable
-            //   archetype; it dies inside the call, before the
-            //   write-capable `set_table_mut` dispatch below — no aliasing
-            //   `&mut Archetype` exists while it is live.
-            let passes =
-                archetype_passes_tag_terms_inline_scan(&self.terms, unsafe { &*archetype_ptr });
-
             // SAFETY (QD3, QD4, QF3): `set_table_mut` accepts a
             //   `*mut Archetype` directly — no provenance cast or downgrade.
             //   The pointer is live for `'q` (Phase 7 U1/U2 slab stability).
@@ -546,15 +493,13 @@ impl<'q, 's, D: QueryData, F: QueryFilter> Iterator for QueryIterMut<'q, 's, D, 
             // write-capable pointer. No `&mut Archetype` is materialised;
             // the raw deref produces only an `&Archetype` view that lives
             // exactly for the duration of the `entity_count()` call.
-            // Term-failing archetypes get a zero-length row window — same
-            // rationale as the read-only cursor (Phase 22 F1).
             //
             // SAFETY (U1, U2): `archetype_ptr` is slab-stable for `'q`.
             //   The `&Archetype` is scoped to this block; no aliasing
             //   `&mut Archetype` reborrow exists in this scope.
             let arch_ref: &Archetype = unsafe { &*archetype_ptr };
             self.current_row = 0;
-            self.current_len = if passes { arch_ref.entity_count() } else { 0 };
+            self.current_len = arch_ref.entity_count();
         }
     }
 
@@ -681,9 +626,10 @@ mod tests {
         // SAFETY (U_C1): `cell` does not outlive the `&mut ecs` borrow
         //   below — it is consumed by `iter` within this function.
         let cell = unsafe { UnsafeEcsCell::new_mutable(&mut ecs) };
+        let ids = state.archetype_state.matched_ids_pre_terms();
         // SAFETY (Q1, QD4, U_C2): direct test of `QueryIter::next`; no
         //   aliasing accessor is live in this scope.
-        let iter = unsafe { QueryIter::<&CompA, ()>::new(&state, cell, &meta, TagTerms::EMPTY) };
+        let iter = unsafe { QueryIter::<&CompA, ()>::new(&state, ids, cell, &meta) };
 
         let collected: Vec<u32> = iter.map(|a: &CompA| a.0).collect();
         assert_eq!(collected.len(), 3, "single archetype must yield 3 rows");
@@ -717,8 +663,9 @@ mod tests {
         let meta = SystemMeta::for_testing("test");
         // SAFETY (U_C1): cell consumed inside this function.
         let cell = unsafe { UnsafeEcsCell::new_mutable(&mut ecs) };
+        let ids = state.archetype_state.matched_ids_pre_terms();
         // SAFETY (Q1, QD4, U_C2): direct cursor test, no aliasing.
-        let iter = unsafe { QueryIter::<&CompA, ()>::new(&state, cell, &meta, TagTerms::EMPTY) };
+        let iter = unsafe { QueryIter::<&CompA, ()>::new(&state, ids, cell, &meta) };
 
         let collected: Vec<u32> = iter.map(|a: &CompA| a.0).collect();
         assert_eq!(collected.len(), 5, "two archetypes must yield 5 rows");
@@ -749,8 +696,9 @@ mod tests {
         let meta = SystemMeta::for_testing("test");
         // SAFETY (U_C1): cell consumed below.
         let cell = unsafe { UnsafeEcsCell::new_mutable(&mut ecs) };
+        let ids = state.archetype_state.matched_ids_pre_terms();
         // SAFETY (Q1, QD4, U_C2): direct cursor test.
-        let iter = unsafe { QueryIter::<&CompA, ()>::new(&state, cell, &meta, TagTerms::EMPTY) };
+        let iter = unsafe { QueryIter::<&CompA, ()>::new(&state, ids, cell, &meta) };
 
         let collected: Vec<u32> = iter.map(|a: &CompA| a.0).collect();
         assert_eq!(
@@ -784,9 +732,10 @@ mod tests {
         let meta = SystemMeta::for_testing("test");
         // SAFETY (U_C1): cell consumed below.
         let cell = unsafe { UnsafeEcsCell::new_mutable(&mut ecs) };
+        let ids = state.archetype_state.matched_ids_pre_terms();
         // SAFETY (Q1, QD4, U_C2, Q5): the stale id is exactly the case the
         //   `continue` branch handles.
-        let iter = unsafe { QueryIter::<&CompA, ()>::new(&state, cell, &meta, TagTerms::EMPTY) };
+        let iter = unsafe { QueryIter::<&CompA, ()>::new(&state, ids, cell, &meta) };
 
         let collected: Vec<u32> = iter.map(|a: &CompA| a.0).collect();
         assert_eq!(
@@ -814,8 +763,9 @@ mod tests {
             let meta = SystemMeta::for_testing("test");
             // SAFETY (U_C1): cell consumed in this block.
             let cell = unsafe { UnsafeEcsCell::new_mutable(&mut ecs) };
+            let ids = state.archetype_state.matched_ids_pre_terms();
             // SAFETY (Q1, QD4, U_C3): direct mut-cursor test, no aliasing.
-            let iter = unsafe { QueryIterMut::<&mut CompA, ()>::new(&state, cell, &meta, TagTerms::EMPTY) };
+            let iter = unsafe { QueryIterMut::<&mut CompA, ()>::new(&state, ids, cell, &meta) };
             for a in iter {
                 a.0 = 99;
             }
@@ -826,8 +776,9 @@ mod tests {
         let meta = SystemMeta::for_testing("test");
         // SAFETY (U_C1): cell consumed in this block.
         let cell = unsafe { UnsafeEcsCell::new_mutable(&mut ecs) };
+        let ids = state.archetype_state.matched_ids_pre_terms();
         // SAFETY (Q1, QD4, U_C2): no aliasing accessor live.
-        let iter = unsafe { QueryIter::<&CompA, ()>::new(&state, cell, &meta, TagTerms::EMPTY) };
+        let iter = unsafe { QueryIter::<&CompA, ()>::new(&state, ids, cell, &meta) };
         let collected: Vec<u32> = iter.map(|a: &CompA| a.0).collect();
         assert_eq!(collected.len(), 3, "three rows must remain after mutation");
         assert!(
@@ -859,8 +810,9 @@ mod tests {
         let meta = SystemMeta::for_testing("test");
         // SAFETY (U_C1): cell consumed below.
         let cell = unsafe { UnsafeEcsCell::new_mutable(&mut ecs) };
+        let ids = state.archetype_state.matched_ids_pre_terms();
         // SAFETY (Q1, QD4, U_C2): direct cursor test.
-        let iter = unsafe { QueryIter::<&CompA, Without<CompB>>::new(&state, cell, &meta, TagTerms::EMPTY) };
+        let iter = unsafe { QueryIter::<&CompA, Without<CompB>>::new(&state, ids, cell, &meta) };
 
         let collected: Vec<u32> = iter.map(|a: &CompA| a.0).collect();
         assert_eq!(
@@ -887,8 +839,9 @@ mod tests {
         let meta = SystemMeta::for_testing("test");
         // SAFETY (U_C1): cell consumed below.
         let cell = unsafe { UnsafeEcsCell::new_mutable(&mut ecs) };
+        let ids = state.archetype_state.matched_ids_pre_terms();
         // SAFETY (Q1, QD4, U_C2): const-fold path; no aliasing.
-        let iter = unsafe { QueryIter::<&CompA, Without<CompB>>::new(&state, cell, &meta, TagTerms::EMPTY) };
+        let iter = unsafe { QueryIter::<&CompA, Without<CompB>>::new(&state, ids, cell, &meta) };
         // The very act of consuming the iterator without panic confirms that
         // the const-folded branch did not produce a runtime call that
         // mis-dispatches. The golden expand snapshot in Step 14 nails it

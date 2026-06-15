@@ -2731,6 +2731,12 @@ impl EcsMaster {
             unsafe {
                 let state_mut: &mut QueryDataState<D, F> =
                     &mut *(*cell_ptr.as_ptr()).get();
+                // Phase 22.1 Area A (P2): this is the slot-exclusive mint
+                // funnel (`&mut self`). Free the retired term list (if any)
+                // here, where no resolve on this slot can be in flight — fast
+                // path is one Relaxed null-load + a predicted-not-taken
+                // branch (off the row loop; 50-systems bench gated).
+                state_mut.term_scratch.reclaim_retired();
                 state_mut.update(self.archetype_master());
             }
 

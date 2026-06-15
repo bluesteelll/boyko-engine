@@ -381,6 +381,21 @@ impl QueryState {
     pub(crate) fn last_observed_structural_generation(&self) -> ArchetypeGeneration {
         self.structural_generation
     }
+
+    /// `true` when this state's cached generations match `master`'s current
+    /// generations — i.e. `update_archetypes` has been run against the live
+    /// archetype set and no churn has occurred since.
+    ///
+    /// Phase 22.1 Area A (O1): the term prefilter's cold rebuild arm
+    /// (`TermScratch::rebuild_publish`) `debug_assert!`s this so any entry
+    /// point that resolves terms without a prior `QueryDataState::update` is
+    /// caught — a stale memo would otherwise persist a wrong filtered list
+    /// until the next generation bump.
+    #[inline]
+    pub(crate) fn generations_synced(&self, master: &ArchetypeMaster) -> bool {
+        self.generation == master.archetype_generation()
+            && self.structural_generation == master.structural_generation()
+    }
 }
 
 /// Iterator over matched archetypes produced by `QueryState::iter`.

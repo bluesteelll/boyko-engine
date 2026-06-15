@@ -32,6 +32,7 @@ use crate::ecs::core::system::filtered_access_set::FilteredAccessSet;
 use crate::ecs::core::system::system_meta::SystemMeta;
 use crate::ecs::core::system::system_param::SystemParam;
 use crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell;
+use crate::ecs::identifiers::primitives::ArchetypeId;
 
 /// Typed component query — the canonical Phase 8b iteration handle.
 ///
@@ -149,6 +150,43 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
         !any_term_matched(&self.terms, master, ids)
     }
 
+    /// Resolves the id slice every iteration-style driver walks (Phase 22.1
+    /// Area A, D-C funnel).
+    ///
+    /// No terms: returns the shared `matched_ids_pre_terms()` slice exactly
+    /// as pre-Phase-22 — one predicted branch, no master mint, the term
+    /// scratch is never loaded. Terms: routes to the cold
+    /// [`Self::driver_ids_term_slow`] which mints the master and resolves the
+    /// per-epoch memoised filtered slice. Both arms return a `&'s` slice (the
+    /// pre-terms slice lives in the cached `QueryState`; the filtered slice in
+    /// the published `TermList` inside the `'s` state slot), decoupled from
+    /// `&self` so `iter_mut`'s `&mut self` reborrow does not conflict.
+    #[inline]
+    fn driver_ids(&self) -> &'s [ArchetypeId] {
+        if self.terms.is_empty() {
+            return self.state.archetype_state.matched_ids_pre_terms();
+        }
+        self.driver_ids_term_slow()
+    }
+
+    /// Cold term-bearing arm of [`Self::driver_ids`] — mints the master and
+    /// resolves the memoised term-filtered slice (P1–P4).
+    #[cold]
+    #[inline(never)]
+    fn driver_ids_term_slow(&self) -> &'s [ArchetypeId] {
+        // SAFETY (U_C2): shared read mint — `world()` yields `&EcsMaster`
+        //   scoped to this statement; no `&mut` access occurs through it
+        //   (same pattern as `get_param`'s master reborrow). The borrow ends
+        //   at the `archetype_master()` deref; the resolved slice borrows the
+        //   `'s` state's term scratch, not the cell.
+        let master = unsafe { self.world.world().archetype_master() };
+        self.state.term_scratch.resolve_term_filtered(
+            &self.terms,
+            master,
+            &self.state.archetype_state,
+        )
+    }
+
     /// Returns a read-only iterator over `D::Item<'_>` for every entity in
     /// every matched archetype.
     ///
@@ -166,9 +204,11 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
         //   the raw-pointer provenance through the call (Phase 8a C1).
         //   Phase 10 Round 2 C2: `self.meta` is forwarded so non-archetypal
         //   filters and `Ref<T>` / `Mut<T>` impls can read the tick snapshot.
-        //   Phase 22 D4: `self.terms` is copied into the cursor — applied at
-        //   each archetype transition.
-        unsafe { QueryIter::new(self.state, self.world, self.meta, self.terms) }
+        //   Phase 22.1 Area A: the id slice is resolved ONCE here (no terms →
+        //   pre-terms slice; terms → memoised filtered slice); the cursor
+        //   walks it term-free.
+        let ids = self.driver_ids();
+        unsafe { QueryIter::new(self.state, ids, self.world, self.meta) }
     }
 
     /// Returns a mutable iterator over `D::Item<'_>` for every entity in
@@ -193,9 +233,11 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
         //   `QueryIterMut::new` will call `cell.archetype_ptr_mut(_)` per
         //   archetype boundary. If `world` carries a read-only mint and `D`
         //   were not gated, the cell's own debug-assert fires. Phase 10
-        //   Round 2 C2: `self.meta` is forwarded. Phase 22 D4: `self.terms`
-        //   is copied into the cursor.
-        unsafe { QueryIterMut::new(self.state, self.world, self.meta, self.terms) }
+        //   Round 2 C2: `self.meta` is forwarded. Phase 22.1 Area A: the id
+        //   slice (term-free for the cursor) is resolved once here; it lives
+        //   at `'s` so it does not conflict with the `&mut self` reborrow.
+        let ids = self.driver_ids();
+        unsafe { QueryIterMut::new(self.state, ids, self.world, self.meta) }
     }
 
     /// Returns a parallel read-only iteration handle.
@@ -220,12 +262,16 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
     where
         D: ReadOnlyQueryData,
     {
+        // Phase 22.1 Area A: resolve the id slice once at handle mint (one
+        // load per for_each entry per D-B's cost model); `for_each` forwards
+        // it to both the scoped loop and the PAR7 fallback unchanged.
+        let ids = self.driver_ids();
         ParQuery {
             state: self.state,
+            ids,
             world: self.world,
             batching: BatchingStrategy::default(),
             meta: self.meta,
-            terms: self.terms,
         }
     }
 
@@ -237,12 +283,16 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
     /// disjoint row ranges by construction (PAR2).
     #[inline]
     pub fn par_iter_mut<'q>(&'q mut self) -> ParQueryMut<'q, 's, D, F> {
+        // Phase 22.1 Area A: resolve once before handing out the mutable
+        // handle. The slice lives at `'s` so it does not conflict with the
+        // `&mut self` reborrow gate.
+        let ids = self.driver_ids();
         ParQueryMut {
             state: self.state,
+            ids,
             world: self.world,
             batching: BatchingStrategy::default(),
             meta: self.meta,
-            terms: self.terms,
             _mut_marker: PhantomData,
         }
     }
@@ -286,9 +336,12 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
         //   `iter.rs`). The cell `self.world` is `Copy`; passing by
         //   value preserves the raw-pointer provenance through the call
         //   (Phase 8a C1 fix).
+        // Phase 22.1 Area A: resolve the id slice once before dispatch; the
+        // driver walks it term-free.
+        let ids = self.driver_ids();
         let mutable = !D::IS_READ_ONLY;
         unsafe {
-            chunk_iter::for_each_chunk_impl(self.state, self.world, mutable, &self.terms, f);
+            chunk_iter::for_each_chunk_impl(self.state, ids, self.world, mutable, f);
         }
     }
 
@@ -351,14 +404,18 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
         //   `par_iter.rs` does not appear in this driver. The cell
         //   `self.world` is `Copy`; passing by value preserves the
         //   raw-pointer provenance through the call (Phase 8a C1 fix).
+        // Phase 22.1 Area A: resolve the id slice once on the calling thread
+        // before `pool.scope`; workers receive only term-passing archetypes'
+        // chunks.
+        let ids = self.driver_ids();
         let mutable = !D::IS_READ_ONLY;
         unsafe {
             par_chunk::par_for_each_chunk_impl(
                 self.state,
+                ids,
                 self.world,
                 mutable,
                 batching,
-                &self.terms,
                 f,
             );
         }
@@ -491,6 +548,13 @@ where
         //   borrow stack (we do not produce a separate `&mut SystemMeta`
         //   alias).
         let meta_s: &'s SystemMeta = unsafe { &*(system_meta as *const SystemMeta) };
+
+        // Phase 22.1 Area A (P2): this is the slot-exclusive mint funnel
+        // (`&'s mut Self::State`). Free the retired term list (if any) here,
+        // where no resolve on this slot can be in flight — fast path is one
+        // Relaxed null-load + a predicted-not-taken branch (off the row loop;
+        // covered by the 50-systems schedule bench gate).
+        state.term_scratch.reclaim_retired();
 
         state.update(master);
 
