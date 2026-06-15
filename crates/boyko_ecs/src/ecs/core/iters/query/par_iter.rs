@@ -739,8 +739,9 @@ unsafe fn run_chunk_raw<D: QueryData, F: QueryFilter, Body>(
         }
 
         // EnableTag Step 9: dynamic per-row enable terms, gated behind one
-        // `is_empty()` branch so the no-term chunk loop is byte-identical
-        // (0%-gate; mirrors `QueryIter::next`).
+        // loop-invariant RUNTIME `is_empty()` branch so the no-term chunk loop
+        // costs a single predicted-not-taken branch (0%-gate, bench-verified
+        // flat; see `QueryIter::next` and the `enable_terms` module doc).
         if !enable_terms.is_empty() {
             // SAFETY (ENBL-9): `enable_cols` was resolved above for THIS chunk's
             //   archetype; `row < end <= entity_count()` (caller contract); the

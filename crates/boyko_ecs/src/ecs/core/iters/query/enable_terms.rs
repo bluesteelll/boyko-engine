@@ -10,12 +10,20 @@
 //!
 //! # Cost contract (the 0%-gate — Decision D2 / Step 9)
 //!
-//! A query with no dynamic enable term must be byte-identical to today. This
-//! is delivered by gating the per-row scan behind a single
+//! A query with no dynamic enable term gates the per-row scan behind a single
 //! [`EnableTerms::is_empty`] (`len == 0`) branch — when no term is set, the
-//! cursors never load the resolved-column scratch and never run the bit loop
-//! (mirrors the Phase-22.1 `TagTerms` `is_empty` discipline and the Wave-3
-//! `filter_fetch` `if !const { F::IS_ARCHETYPAL }` gate).
+//! cursors never load the resolved-column scratch and never run the bit loop.
+//!
+//! This is NOT a free const-gate. Unlike the Phase-22.1
+//! [`TagTerms`](super::tag_terms::TagTerms) gate (archetype-level — it leaves
+//! ZERO term code in the row loop) and unlike the Wave-3 `filter_fetch`
+//! `if !const { F::IS_ARCHETYPAL }` guard (const-folded away entirely), an
+//! enable term is a genuine per-row predicate, so the `is_empty()` guard stays
+//! inside the row loop as a RUNTIME branch. It is loop-invariant
+//! (`enable_terms` is never written during iteration), so the compiler hoists
+//! the `len` load and the residual is one predicted-not-taken branch —
+//! bench-verified flat (the `query_iter` / `par_iter` gate benches show no
+//! measurable change vs. a no-enable build).
 //!
 //! # Per-archetype resolution
 //!

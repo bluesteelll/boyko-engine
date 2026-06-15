@@ -225,10 +225,13 @@ where
                 }
 
                 // EnableTag Step 9: dynamic per-row enable terms. Gated behind
-                // one predicted-not-taken `is_empty()` branch so a query with no
-                // `with_enabled`/`without_enabled` term is byte-identical to
-                // today (the 0%-gate); when set, `enable_cols` was resolved for
-                // this archetype at the transition below.
+                // one RUNTIME `is_empty()` branch — loop-invariant, so the
+                // compiler hoists it and a query with no
+                // `with_enabled`/`without_enabled` term pays a single
+                // predicted-not-taken branch (the 0%-gate; bench-verified flat,
+                // NOT a const-fold — the enable bit is genuinely per-row). When
+                // set, `enable_cols` was resolved for this archetype at the
+                // transition below.
                 if !self.enable_terms.is_empty() {
                     // SAFETY (ENBL-9): `enable_cols` was resolved by
                     //   `EnableTerms::resolve` for the current archetype at the
