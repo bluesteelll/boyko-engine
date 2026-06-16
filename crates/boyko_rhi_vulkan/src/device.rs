@@ -24,12 +24,21 @@
 //! `vkDestroyInstance` → `FreeLibrary`) so a dropped context leaves no leaked
 //! Vulkan objects or DLL references.
 
+use core::cell::{OnceCell, RefCell};
 use core::ffi::{CStr, c_char, c_void};
 use core::mem;
 use core::ptr;
 
 use crate::debug::{self, DebugMessengerState};
 use crate::ffi::*;
+use crate::memory::HostVisibleBlock;
+use crate::rhi_impl::ComputeLayouts;
+
+/// Capacity of the device's shared host-visible block backing
+/// [`RhiDevice::create_buffer`](boyko_rhi::RhiDevice::create_buffer) (plan Q1: the
+/// foundation routes every buffer through one block). 64 MiB comfortably holds
+/// the Slice-0 storage buffers and any near-term compute working set.
+const SHARED_HOST_BLOCK_CAPACITY: u64 = 64 * 1024 * 1024;
 
 /// Errors that can occur while bootstrapping a Vulkan device.
 ///
@@ -208,7 +217,37 @@ pub struct VulkanContext {
     /// AFTER the messenger is destroyed in `Drop`.
     debug_state: Option<Box<DebugMessengerState>>,
     instance_fns: InstanceFns,
-    device_fns: DeviceFns,
+    /// The resolved device command table, **heap-boxed** so its address is stable
+    /// across moves of this (`pub`, by-value-returned) context (plan A1). The host
+    /// block, the [`VulkanQueue`](crate::rhi_impl::VulkanQueue) and the
+    /// [`VulkanCommandEncoder`](crate::rhi_impl::VulkanCommandEncoder) cache a raw
+    /// `*const DeviceFns` pointing into this allocation; a context move relocates
+    /// the `Box` handle but NOT the pointee, so those caches survive the move.
+    /// Dropped implicitly last (after the host block + compute layouts in `Drop`),
+    /// so it outlives every cache that points into it.
+    device_fns: Box<DeviceFns>,
+    /// The shared compute descriptor-set + pipeline layouts (one STORAGE_BUFFER
+    /// @ set0/binding0 + a 4-byte push range), cached on first
+    /// `create_compute_pipeline` / `create_command_encoder` (plan Q1/W2).
+    ///
+    /// Created lazily through [`VulkanContext::compute_layouts`]; `OnceCell` is
+    /// the single-threaded once-init primitive — the RHI is touched only by the
+    /// dispatcher in the apply-window (`!Send + !Sync`, plan §5.3), so no atomic
+    /// `OnceLock` is needed. Torn down in `Drop` BEFORE `vkDestroyDevice`, so the
+    /// layouts never outlive their device.
+    compute_layouts: OnceCell<ComputeLayouts>,
+    /// The single shared host-visible+coherent block every
+    /// [`RhiDevice::create_buffer`](boyko_rhi::RhiDevice::create_buffer) sub-allocates
+    /// from (plan Q1), created lazily on first use.
+    ///
+    /// The block caches a raw `*const DeviceFns` into the boxed `device_fns`
+    /// (plan A1): the box gives the fn-table a stable heap address, so the cached
+    /// pointer survives any move of this context — no false `'static` lifetime is
+    /// claimed. The block is torn down in `Drop` BEFORE `vkDestroyDevice` + before
+    /// the boxed fn-table is freed, so the pointer is live for every block use.
+    /// The `RefCell` provides the `&mut` the sub-allocator needs from `&self`
+    /// calls (single-threaded, `!Sync`).
+    host_block: OnceCell<RefCell<HostVisibleBlock>>,
 }
 
 impl VulkanContext {
@@ -394,7 +433,12 @@ impl VulkanContext {
             debug_messenger,
             debug_state,
             instance_fns,
-            device_fns,
+            // Heap-box the fn-table so its address is stable across context moves
+            // (plan A1): caches into it (host block / queue / encoder) hold a
+            // `*const DeviceFns` that a move must not invalidate.
+            device_fns: Box::new(device_fns),
+            compute_layouts: OnceCell::new(),
+            host_block: OnceCell::new(),
         })
     }
 
@@ -476,6 +520,64 @@ impl VulkanContext {
     pub fn validation_enabled(&self) -> bool {
         self.debug_state.is_some()
     }
+
+    /// The shared compute descriptor-set + pipeline layouts, created on first
+    /// use and cached for the device's lifetime (plan Q1/W2).
+    ///
+    /// One STORAGE_BUFFER @ set0/binding0 (COMPUTE) + a 4-byte COMPUTE push
+    /// range — the fixed layout every Slice-0 compute pipeline + command encoder
+    /// shares. The Phase-6 bind-group seam supersedes it. Returns a
+    /// [`VulkanError`](crate::error::VulkanError) if layout creation fails.
+    pub(crate) fn compute_layouts(&self) -> Result<&ComputeLayouts, crate::error::VulkanError> {
+        // `get_or_init` cannot carry an error, so try-init only when empty and
+        // surface the failure to the caller (a transient layout-create failure
+        // must not be cached as a poisoned cell).
+        if let Some(layouts) = self.compute_layouts.get() {
+            return Ok(layouts);
+        }
+        let created = ComputeLayouts::new(self.device, &self.device_fns)?;
+        // Race-free: `&self` here is single-threaded (RHI is `!Sync`), so the
+        // cell is empty and this `set` succeeds; the `Err` arm cannot occur.
+        let _ = self.compute_layouts.set(created);
+        Ok(self
+            .compute_layouts
+            .get()
+            .expect("invariant: compute_layouts was just set"))
+    }
+
+    /// The single shared host-visible+coherent block, created on first use and
+    /// cached for the device's lifetime (plan Q1). Every
+    /// [`RhiDevice::create_buffer`](boyko_rhi::RhiDevice::create_buffer) sub-allocates
+    /// from it. Returns a [`VulkanError`](crate::error::VulkanError) if the block
+    /// allocation fails.
+    pub(crate) fn host_block(
+        &self,
+    ) -> Result<&RefCell<HostVisibleBlock>, crate::error::VulkanError> {
+        if let Some(block) = self.host_block.get() {
+            return Ok(block);
+        }
+        // Plan A1: the block caches a raw `*const DeviceFns` pointing into the
+        // boxed `device_fns` — a stable heap address. NO `'static` lifetime is
+        // fabricated; `HostVisibleBlock::new` captures the borrow as a raw pointer
+        // internally. The invariant that makes this sound: the boxed fn-table
+        // address does not move when the context moves, and the block is dropped
+        // in this context's `Drop` (via `host_block.take()`) BEFORE the boxed
+        // fn-table is freed and before `vkDestroyDevice`, so the pointee outlives
+        // every block use. The context is `!Send + !Sync`, so it never crosses a
+        // thread.
+        let block = HostVisibleBlock::new(
+            self.device(),
+            self.device_fns(),
+            self.memory_properties(),
+            SHARED_HOST_BLOCK_CAPACITY,
+        )?;
+        // Race-free: `&self` is single-threaded; the cell is empty here.
+        let _ = self.host_block.set(RefCell::new(block));
+        Ok(self
+            .host_block
+            .get()
+            .expect("invariant: host_block was just set"))
+    }
 }
 
 impl Drop for VulkanContext {
@@ -487,6 +589,31 @@ impl Drop for VulkanContext {
         // dropped only after this `drop` returns (the field outlives the
         // messenger). `module` is the live HMODULE freed once. No handle is
         // used after its destroyer runs.
+        //
+        // The shared host-visible block (if ever created) is torn down FIRST: its
+        // own `Drop` calls `vkUnmapMemory` + `vkFreeMemory` through the raw
+        // `*const DeviceFns` it cached, which targets the still-live boxed
+        // `device_fns` (the box is a field of `self`, dropped implicitly AFTER this
+        // `drop` body runs — plan A1), and it must precede `vkDestroyDevice`. Any
+        // buffers sub-allocated from it were already destroyed via
+        // `RhiDevice::destroy_buffer` / the registry's `destroy_all` before the
+        // context dropped.
+        if let Some(block) = self.host_block.take() {
+            drop(block);
+        }
+        // The shared compute layouts (if ever created) are destroyed next — they
+        // are device children, so they must go before `vkDestroyDevice` (plan
+        // Q1/W2). `ComputeLayouts::destroy` consumes them exactly once.
+        if let Some(layouts) = self.compute_layouts.take() {
+            // SAFETY: `layouts` were created on `self.device` via
+            // `ComputeLayouts::new` and are destroyed here exactly once (the
+            // `take` removes them from the cell). No compute pipeline or command
+            // encoder referencing them is still in flight: the registry's
+            // `destroy_all` (and the encoder/pipeline `destroy_*`) run before the
+            // context is dropped, and `vkDestroyDevice` below would otherwise
+            // wait-idle the device anyway.
+            unsafe { layouts.destroy(self.device, &self.device_fns) };
+        }
         unsafe {
             (self.device_fns.destroy_device)(self.device, ptr::null());
             if !self.debug_messenger.is_null()
@@ -977,10 +1104,14 @@ fn create_instance(
     // only when the caller asks for it (both verified present above). The
     // extension is what makes `vkCreateDebugUtilsMessengerEXT` resolvable and
     // the messenger functional; enabling the layer alone would emit no messages
-    // to our callback. A windowed context additionally enables the always-present
-    // WSI extensions `VK_KHR_surface` + `VK_KHR_win32_surface` (they are NOT
-    // validation-gated). The extension pointer array is sized for the maximum
-    // (debug-utils + 2 surface) and a running count selects the live prefix.
+    // to our callback. When validation is on we additionally enable
+    // `VK_EXT_validation_features` (plan G2) so the chained `VkValidationFeaturesEXT`
+    // (sync-validation) is recognized — chaining the struct WITHOUT enabling the
+    // extension is what crashed the loader/layer. A windowed context additionally
+    // enables the always-present WSI extensions `VK_KHR_surface` +
+    // `VK_KHR_win32_surface` (they are NOT validation-gated). The extension pointer
+    // array is sized for the maximum (debug-utils + validation-features + 2
+    // surface) and a running count selects the live prefix.
     let layer_ptrs: [*const c_char; 1] = [VALIDATION_LAYER.as_ptr()];
     let (layer_count, pp_layers) = if config.enable_validation {
         (1u32, layer_ptrs.as_ptr())
@@ -988,10 +1119,20 @@ fn create_instance(
         (0u32, ptr::null())
     };
 
-    let mut ext_ptrs: [*const c_char; 3] = [ptr::null(); 3];
+    // Whether `VK_EXT_validation_features` (sync-validation, plan G2) can be
+    // enabled — only if it is present on this host. Its absence downgrades to plain
+    // validation rather than crashing on an unrecognized chained struct.
+    let sync_validation_available =
+        config.enable_validation && is_instance_extension_present(global, VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME)?;
+
+    let mut ext_ptrs: [*const c_char; 4] = [ptr::null(); 4];
     let mut ext_count: u32 = 0;
     if config.enable_validation {
         ext_ptrs[ext_count as usize] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME.as_ptr();
+        ext_count += 1;
+    }
+    if sync_validation_available {
+        ext_ptrs[ext_count as usize] = VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME.as_ptr();
         ext_count += 1;
     }
     if config.windowed {
@@ -1014,6 +1155,34 @@ fn create_instance(
     // callback no-ops on a null user-data pointer but still logs the message
     // text, so a create/destroy-time error is still surfaced to the log. The
     // create-info lives on this stack frame and is only read during the call.
+    // Plan G2: enable SYNCHRONIZATION validation via `VkValidationFeaturesEXT`,
+    // chained into the instance `p_next`. Sync-validation is what flags a missing
+    // / wrong pipeline barrier (a WARNING/ERROR), so the chained-barrier golden
+    // test genuinely proves the barrier's correctness — not just that it lowers
+    // without crashing. The enable array + this struct are stack locals read only
+    // during the `vkCreateInstance` call below. The validation-features node is the
+    // head of the chain; the create-time messenger follows it (canonical order:
+    // the messenger must see messages emitted while the layer initializes its
+    // validation features).
+    let sync_validation: [i32; 1] = [VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT];
+    let mut validation_features = VkValidationFeaturesExt {
+        s_type: VkStructureType::ValidationFeaturesExt,
+        p_next: ptr::null(),
+        enabled_validation_feature_count: sync_validation.len() as u32,
+        p_enabled_validation_features: sync_validation.as_ptr(),
+        disabled_validation_feature_count: 0,
+        p_disabled_validation_features: ptr::null(),
+    };
+
+    // A create-time messenger threaded through `p_next` captures validation
+    // messages emitted DURING `vkCreateInstance` / `vkDestroyInstance` — the
+    // window the persistent messenger cannot cover (it does not exist before the
+    // instance, and is destroyed before it). Its `p_user_data` is null because
+    // the heap state Box does not exist yet at instance-creation time; the
+    // callback no-ops on a null user-data pointer but still logs the message
+    // text, so a create/destroy-time error is still surfaced to the log. The
+    // create-info lives on this stack frame and is only read during the call. It is
+    // chained as the SECOND node, behind the validation-features struct.
     let ci_messenger = VkDebugUtilsMessengerCreateInfoExt {
         s_type: VkStructureType::DebugUtilsMessengerCreateInfoExt,
         p_next: ptr::null(),
@@ -1023,7 +1192,16 @@ fn create_instance(
         pfn_user_callback: debug::debug_callback,
         p_user_data: ptr::null_mut(),
     };
-    let p_next: *const c_void = if config.enable_validation {
+    validation_features.p_next =
+        (&ci_messenger as *const VkDebugUtilsMessengerCreateInfoExt).cast();
+
+    // Chain head selection: with sync-validation available, the validation-features
+    // node leads (its `p_next` already points at the messenger). With validation on
+    // but the extension absent, fall back to just the create-time messenger
+    // (original behavior). Off → no chain.
+    let p_next: *const c_void = if sync_validation_available {
+        (&validation_features as *const VkValidationFeaturesExt).cast()
+    } else if config.enable_validation {
         (&ci_messenger as *const VkDebugUtilsMessengerCreateInfoExt).cast()
     } else {
         ptr::null()
@@ -1043,9 +1221,11 @@ fn create_instance(
     let mut instance = VkInstance::NULL;
     // SAFETY: `create_info` is a fully-initialized `#[repr(C)]`
     // `VkInstanceCreateInfo` whose pointer members (`p_application_info`, the
-    // optional layer/extension arrays, the optional `p_next` create-time
-    // messenger) all outlive the call (they are locals of this frame). `&mut
-    // instance` is a valid out-pointer. NULL allocator selects the default.
+    // optional layer/extension arrays, the optional `p_next` chain
+    // [`VkValidationFeaturesEXT` → create-time messenger], including the
+    // `sync_validation` enable array) all outlive the call (they are locals of this
+    // frame). `&mut instance` is a valid out-pointer. NULL allocator selects the
+    // default.
     let raw = unsafe { (global.create_instance)(&create_info, ptr::null(), &mut instance) };
     let result = VkResult::from_raw(raw);
     if !result.is_success() {

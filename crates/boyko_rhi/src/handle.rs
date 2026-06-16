@@ -133,6 +133,15 @@ impl<U> Kind<U> {
     fn is_empty(&self) -> bool {
         self.map.is_empty()
     }
+
+    /// Counts live entries by walking `[0, watermark)` (the `SparseSlotMap` has no
+    /// `len`). Cold-path only (the release leak diagnostic in `Drop`).
+    #[cold]
+    fn live_count(&self) -> usize {
+        (0..self.watermark)
+            .filter(|&index| self.map.get(self.map.create_slot(index)).is_some())
+            .count()
+    }
 }
 
 /// Owns every RHI resource behind a generational handle, one [`SparseSlotMap`]
@@ -143,12 +152,16 @@ impl<U> Kind<U> {
 /// `resolve_*` is the ~3 ns generation-checked lookup; `register_*`/`take_*` are
 /// the allocate/free pair.
 ///
-/// # Teardown
+/// # Teardown (a HARD invariant)
 /// The owned resources cannot self-`Drop` (a backend resource needs `&Device` to
-/// be destroyed), so the owner MUST call [`ResourceRegistry::destroy_all`] before
-/// dropping the registry — a structural, release-present teardown step (plan W4).
-/// A `debug_assert!`-every-map-empty on `Drop` is a secondary leak tripwire, not
-/// the primary guard.
+/// be destroyed), so the owner **MUST** call [`ResourceRegistry::destroy_all`]
+/// before dropping the registry — a structural, release-present teardown step
+/// (plan W4). Dropping a non-empty registry leaks **every** live GPU resource.
+/// `Drop` enforces this with a release-surviving `eprintln!` hard-error
+/// diagnostic (plan E1) plus a `debug_assert!` that fails tests; both are
+/// tripwires, not the primary guard (which is the required `destroy_all` call).
+/// The originating device/context must still be alive when `destroy_all` runs
+/// (see its docs).
 pub struct ResourceRegistry<A: RhiApi> {
     buffers: Kind<A::Buffer>,
     pipelines: Kind<A::ComputePipeline>,
@@ -265,58 +278,114 @@ impl<A: RhiApi> ResourceRegistry<A> {
     ///
     /// `&mut self` because draining the maps mutates them; after this returns,
     /// every map is empty.
+    ///
+    /// # Safety / lifetime contract (plan F1 / RL-1)
+    ///
+    /// `device` MUST be the live originating device/context — the same one whose
+    /// `create_*` minted the registered resources, still alive at this call.
+    /// Draining the registry after that device/context has been dropped is
+    /// **undefined behavior** (the owned resources hold raw fn-table pointers into
+    /// the context). There is intentionally **no** compile-time `'ctx` lifetime
+    /// tie this phase (the accepted plan-D2 trade-off); the structural `'ctx`
+    /// parameter on the owned types is deferred to the Phase-2-3 on-screen-in-trait
+    /// work.
     pub fn destroy_all(&mut self, device: &A::Device) {
         // Belt-and-braces: ensure no submission is still touching a resource
-        // before any destroy. Errors here are non-recoverable at teardown; the
-        // backend logs them — we proceed to free regardless to avoid leaking.
-        let _ = device.wait_idle();
+        // before any destroy (plan A4 / RL-4). `wait_idle` either succeeds (the GPU
+        // is now idle, so every resource is safe to destroy) OR returns `Err`,
+        // which at teardown can only mean the device is LOST (driver crash / TDR /
+        // removal). On device loss every child handle is already implicitly invalid
+        // and `destroy_*` is a defined no-op (destroying a child of a lost device
+        // is not a use-after-free), so we proceed to drain + destroy regardless —
+        // both branches keep the per-resource `unsafe` sound, and proceeding also
+        // empties the maps so the registry's leak tripwire stays accurate.
+        let wait = device.wait_idle();
+        debug_assert!(
+            wait.is_ok(),
+            "destroy_all: wait_idle failed (device lost) — child destroys are no-ops"
+        );
+        let _ = wait;
 
         // Reverse resource-order teardown. Each `take` reclaims the index and
         // the bumped generation makes the freed handle permanently stale.
         drain_kind(&mut self.fences, |fence| {
-            // SAFETY: `wait_idle` above guarantees the GPU is no longer using
-            // `fence`; the `take` removes it from the map so it is destroyed
-            // exactly once (no other owner can reach it).
+            // SAFETY: either `wait_idle` succeeded (the GPU is idle, so it no longer
+            // uses `fence`) or the device is lost (destroying a child of a lost
+            // device is a defined no-op, not a UAF). `take` removes it from the map
+            // so it is destroyed exactly once (no other owner can reach it).
             unsafe { device.destroy_fence(fence) }
         });
         drain_kind(&mut self.pipelines, |pipeline| {
-            // SAFETY: `wait_idle` above guarantees no submission using `pipeline`
-            // is pending; `take` ensures it is destroyed exactly once.
+            // SAFETY: either `wait_idle` succeeded (no submission using `pipeline`
+            // is pending) or the device is lost (the destroy is a defined no-op);
+            // `take` ensures it is destroyed exactly once.
             unsafe { device.destroy_compute_pipeline(pipeline) }
         });
         drain_kind(&mut self.shaders, |module| {
-            // SAFETY: `wait_idle` above guarantees no pipeline referencing
-            // `module` is in flight; `take` ensures it is destroyed exactly once.
+            // SAFETY: either `wait_idle` succeeded (no pipeline referencing
+            // `module` is in flight) or the device is lost (the destroy is a defined
+            // no-op); `take` ensures it is destroyed exactly once.
             unsafe { device.destroy_shader_module(module) }
         });
         drain_kind(&mut self.buffers, |buffer| {
-            // SAFETY: `wait_idle` above guarantees the GPU is no longer using
-            // `buffer`; `take` ensures it is destroyed exactly once.
+            // SAFETY: either `wait_idle` succeeded (the GPU no longer uses `buffer`)
+            // or the device is lost (the destroy is a defined no-op); `take` ensures
+            // it is destroyed exactly once.
             unsafe { device.destroy_buffer(buffer) }
         });
 
         debug_assert!(
-            self.fences.is_empty()
-                && self.pipelines.is_empty()
-                && self.shaders.is_empty()
-                && self.buffers.is_empty(),
+            self.is_fully_drained(),
             "invariant: every resource map must be empty after destroy_all"
         );
+    }
+
+    /// Whether every resource map is empty (no live handle remains).
+    ///
+    /// `true` after a successful [`destroy_all`](Self::destroy_all); the `Drop`
+    /// leak guard checks it. Public so an owner can assert it before dropping.
+    #[inline]
+    pub fn is_fully_drained(&self) -> bool {
+        self.fences.is_empty()
+            && self.pipelines.is_empty()
+            && self.shaders.is_empty()
+            && self.buffers.is_empty()
     }
 }
 
 impl<A: RhiApi> Drop for ResourceRegistry<A> {
     fn drop(&mut self) {
-        // Secondary leak tripwire (plan W4): a non-empty map on drop means the
-        // owner skipped `destroy_all`, leaking GPU resources. The structural
-        // guard is the required `destroy_all` call, not this assert.
-        debug_assert!(
-            self.fences.is_empty()
-                && self.pipelines.is_empty()
-                && self.shaders.is_empty()
-                && self.buffers.is_empty(),
-            "invariant: ResourceRegistry dropped with live resources — call destroy_all first"
-        );
+        // Leak guard (plan E1 / RL-3): a non-empty map on drop means the owner
+        // skipped `destroy_all` — the owned `A::Buffer`/etc. cannot self-`Drop`
+        // (they need `&Device`), so EVERY live GPU resource leaks. The structural
+        // guard is the required `destroy_all` call; this is the tripwire.
+        if !self.is_fully_drained() {
+            // Hard, best-effort diagnostic that survives in RELEASE (a bare
+            // `debug_assert!` would vanish, making the leak silent). We do not
+            // panic in `Drop` (a double-panic would abort), but we make the leak
+            // loud on stderr with the live counts.
+            #[cold]
+            #[inline(never)]
+            fn report_leak(buffers: usize, pipelines: usize, shaders: usize, fences: usize) {
+                eprintln!(
+                    "boyko_rhi: ResourceRegistry dropped with {} live resource(s) \
+                     (buffers={buffers}, pipelines={pipelines}, shaders={shaders}, \
+                     fences={fences}) — destroy_all was not called (LEAK)",
+                    buffers + pipelines + shaders + fences
+                );
+            }
+            report_leak(
+                self.buffers.live_count(),
+                self.pipelines.live_count(),
+                self.shaders.live_count(),
+                self.fences.live_count(),
+            );
+            // Still trip in debug so a test catches the leak as a hard failure.
+            debug_assert!(
+                false,
+                "invariant: ResourceRegistry dropped with live resources — call destroy_all first"
+            );
+        }
     }
 }
 

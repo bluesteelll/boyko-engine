@@ -13,14 +13,25 @@
 //!    one large host-visible + host-coherent block ([`memory`],
 //!    [`suballocator`]), proven by a buffer write/read round-trip.
 //! 3. **0c** — one compute dispatch from a committed `.spv` writes a known
-//!    pattern → fence → readback → assert ([`compute`]).
+//!    pattern → fence → readback → assert (the [`compute`] assets driven through
+//!    the [`rhi_impl`] trait surface).
 //! 4. **0d** — a SECOND compute pass transforms the same buffer, chained through
-//!    a `vkCmdPipelineBarrier`, submitted once → diff vs a CPU golden
-//!    ([`compute::ComputeHarness::run_chained`]).
+//!    a `vkCmdPipelineBarrier`, submitted once → diff vs a CPU golden (the
+//!    [`rhi_impl::VulkanCommandEncoder::pipeline_barrier`] lowering).
 //!
 //! The single readback in 0c/0d is the TEST ORACLE, not a per-frame path; the
 //! validation messenger asserted to zero messages is the soundness oracle that
 //! substitutes for Miri on the raw-FFI path (plan §6).
+//!
+//! # `boyko_rhi` trait surface (Phase 1, compute path)
+//!
+//! [`rhi_impl`] implements the backend-agnostic [`boyko_rhi`] RHI traits for this
+//! backend over the headless compute path: [`rhi_impl::Vulkan`] is the
+//! [`RhiApi`](boyko_rhi::RhiApi) marker, [`device::VulkanContext`] is the
+//! [`RhiDevice`](boyko_rhi::RhiDevice), [`rhi_impl::VulkanQueue`] the
+//! [`RhiQueue`](boyko_rhi::RhiQueue), and [`rhi_impl::VulkanCommandEncoder`] the
+//! hot [`RhiCommandEncoder`](boyko_rhi::RhiCommandEncoder). The on-screen path
+//! ([`swapchain`]) stays concrete this phase (a Phase-2-3 seam).
 //!
 //! # Slice 1 — on-screen path (plan §7 Phase 1-3, D8 = our window)
 //!
@@ -69,11 +80,14 @@
 //! # let _ = bound;
 //! ```
 
+pub mod abi_guard;
 pub mod compute;
 pub mod debug;
 pub mod device;
+pub mod error;
 pub mod ffi;
 pub mod memory;
+pub mod rhi_impl;
 pub mod suballocator;
 pub mod swapchain;
 pub mod window;

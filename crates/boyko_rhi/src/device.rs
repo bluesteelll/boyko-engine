@@ -55,6 +55,17 @@ pub struct BindGroupDesc {
 /// longer using the resource (fence-waited / `wait_idle`'d) and that the
 /// resource is destroyed exactly once — the by-value move already encodes the
 /// "exactly once" half in the type system (plan D2).
+///
+/// # Lifetime contract (plan F1 / RL-1)
+///
+/// An `A::Buffer`/`A::Fence`/etc. produced by this device, and the `&self` device
+/// itself, are **not** tied by a compile-time lifetime to the originating context.
+/// The originating device/context MUST still be alive when any `destroy_*` (or a
+/// `RhiQueue::submit` referencing these resources) runs — destroying or submitting
+/// after the context is dropped is **undefined behavior** (backend resources hold
+/// raw pointers into the context's fn-table). This is the accepted plan-D2
+/// trade-off; the structural `'ctx` lifetime parameter is **deferred to Phase 2-3**
+/// (the on-screen-in-trait work), not added now.
 pub trait RhiDevice<A: RhiApi> {
     /// One unified per-backend error type (plan D4). The bound is `From<RhiError>`
     /// **only** (one direction) so a seam stub can `Err(RhiError::…​.into())`; the

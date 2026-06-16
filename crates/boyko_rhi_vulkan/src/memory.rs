@@ -33,6 +33,12 @@ pub enum MemoryError {
 
 /// A bound, sub-allocated buffer: the `VkBuffer`, its block offset, and the CPU
 /// pointer to its first byte inside the persistently-mapped block.
+///
+/// Deliberately **not** `Copy`/`Clone` (plan A5/SEAM-2): destruction is by-value
+/// (`destroy_bound_buffer` consumes it) so the move encodes "destroyed exactly
+/// once" in the type system. A `Copy`/`Clone` would let a `BoundBuffer` be
+/// duplicated and freed twice (double-free of the `VkBuffer` + double-return of
+/// the sub-allocation), defeating that guarantee.
 pub struct BoundBuffer {
     /// The Vulkan buffer handle.
     pub buffer: VkBuffer,
@@ -46,9 +52,23 @@ pub struct BoundBuffer {
 
 /// One host-visible + host-coherent `VkDeviceMemory` block with a sub-allocator
 /// and a persistent CPU mapping.
-pub struct HostVisibleBlock<'d> {
+///
+/// # Address-stability contract (plan A1)
+///
+/// `fns` is a raw `*const DeviceFns`, **not** a `&'static DeviceFns`. The block is
+/// owned by a [`VulkanContext`](crate::device::VulkanContext) whose `device_fns`
+/// is heap-boxed: the pointer therefore targets a stable heap address that a
+/// context move does not invalidate, and the context tears the block down in its
+/// `Drop` BEFORE `vkDestroyDevice` (so the fn-table is alive for every block use).
+/// No `'static` lifetime is fabricated — the raw pointer states the real,
+/// non-`'static` invariant. The block is `!Send + !Sync` (the raw pointer makes
+/// it so) and is touched single-threaded (plan §5.3).
+pub struct HostVisibleBlock {
     device: VkDevice,
-    fns: &'d DeviceFns,
+    /// Raw pointer into the owning context's boxed [`DeviceFns`] (stable address,
+    /// outlives the block per the context's reverse-order `Drop`). See the type
+    /// docs for the full invariant; not `&'static` — no false lifetime claim.
+    fns: *const DeviceFns,
     memory: VkDeviceMemory,
     /// Persistent CPU mapping of `[0, capacity)`.
     map_base: NonNull<u8>,
@@ -56,15 +76,19 @@ pub struct HostVisibleBlock<'d> {
     suballoc: SubAllocator,
 }
 
-impl<'d> HostVisibleBlock<'d> {
+impl HostVisibleBlock {
     /// Allocates and persistently maps a `capacity`-byte host-visible +
     /// host-coherent block.
     ///
     /// The memory type is chosen from `mem_props` as the first type carrying
     /// both `HOST_VISIBLE` and `HOST_COHERENT`. `capacity` must be non-zero.
+    ///
+    /// `fns` is captured as a raw `*const DeviceFns`; the caller must guarantee it
+    /// targets a stable address (the context's boxed fn-table) that outlives the
+    /// returned block (plan A1).
     pub fn new(
         device: VkDevice,
-        fns: &'d DeviceFns,
+        fns: &DeviceFns,
         mem_props: &VkPhysicalDeviceMemoryProperties,
         capacity: u64,
     ) -> Result<Self, MemoryError> {
@@ -123,7 +147,9 @@ impl<'d> HostVisibleBlock<'d> {
 
         Ok(Self {
             device,
-            fns,
+            // Store the borrow as a raw pointer (plan A1): the caller guarantees a
+            // stable, block-outliving address (the context's boxed fn-table).
+            fns: fns as *const DeviceFns,
             memory,
             map_base,
             capacity,
@@ -154,6 +180,12 @@ impl<'d> HostVisibleBlock<'d> {
         size: u64,
         usage: VkFlags,
     ) -> Result<BoundBuffer, MemoryError> {
+        debug_assert!(size > 0, "invariant: zero-size buffer");
+        // SAFETY (plan A1): `self.fns` targets the owning context's boxed
+        // `DeviceFns` — a stable heap address that outlives this block (the
+        // context drops the block before `vkDestroyDevice`). Single-threaded use
+        // (`!Send + !Sync`). The borrow is live only for this call.
+        let fns = unsafe { &*self.fns };
         let create_info = VkBufferCreateInfo {
             s_type: VkStructureType::BufferCreateInfo,
             p_next: ptr::null(),
@@ -169,7 +201,7 @@ impl<'d> HostVisibleBlock<'d> {
         // SAFETY: `device` is live; `create_info` is a fully-initialized
         // `#[repr(C)]` struct; `&mut buffer` is a valid out-pointer.
         let raw =
-            unsafe { (self.fns.create_buffer)(self.device, &create_info, ptr::null(), &mut buffer) };
+            unsafe { (fns.create_buffer)(self.device, &create_info, ptr::null(), &mut buffer) };
         let result = VkResult::from_raw(raw);
         if !result.is_success() {
             return Err(MemoryError::VkError("vkCreateBuffer", result));
@@ -180,14 +212,14 @@ impl<'d> HostVisibleBlock<'d> {
         let mut reqs = VkMemoryRequirements { size: 0, alignment: 1, memory_type_bits: 0 };
         // SAFETY: `buffer` was just created on `device`; `&mut reqs` is a valid
         // out-pointer for the `#[repr(C)]` `VkMemoryRequirements`.
-        unsafe { (self.fns.get_buffer_memory_requirements)(self.device, buffer, &mut reqs) };
+        unsafe { (fns.get_buffer_memory_requirements)(self.device, buffer, &mut reqs) };
 
         // Sub-allocate honoring the driver's alignment + size.
         let align = reqs.alignment.max(1);
         let Some(offset) = self.suballoc.alloc(reqs.size, align) else {
             // SAFETY: `buffer` was created above and is not yet bound; destroying
             // it here is the matching teardown on this error path.
-            unsafe { (self.fns.destroy_buffer)(self.device, buffer, ptr::null()) };
+            unsafe { (fns.destroy_buffer)(self.device, buffer, ptr::null()) };
             return Err(MemoryError::SubAllocExhausted);
         };
 
@@ -196,14 +228,14 @@ impl<'d> HostVisibleBlock<'d> {
         // `[0, capacity)` with `reqs.size` bytes free (the sub-allocator
         // guarantees both). vkBindBufferMemory binds it exactly once.
         let raw = unsafe {
-            (self.fns.bind_buffer_memory)(self.device, buffer, self.memory, offset)
+            (fns.bind_buffer_memory)(self.device, buffer, self.memory, offset)
         };
         let result = VkResult::from_raw(raw);
         if !result.is_success() {
             self.suballoc.free(offset);
             // SAFETY: bind failed, the buffer is created-but-unbound; destroy it
             // once on this error path.
-            unsafe { (self.fns.destroy_buffer)(self.device, buffer, ptr::null()) };
+            unsafe { (fns.destroy_buffer)(self.device, buffer, ptr::null()) };
             return Err(MemoryError::VkError("vkBindBufferMemory", result));
         }
 
@@ -223,26 +255,40 @@ impl<'d> HostVisibleBlock<'d> {
     /// block and not already destroyed (its `VkBuffer` is destroyed exactly
     /// once and its offset is returned to the sub-allocator exactly once).
     pub unsafe fn destroy_bound_buffer(&mut self, bound: BoundBuffer) {
+        // SAFETY (plan A1): `self.fns` targets the context's boxed `DeviceFns`,
+        // alive for this call (see the type docs); single-threaded.
+        let fns = unsafe { &*self.fns };
         // SAFETY: by the function contract `bound.buffer` was created on
         // `self.device` and not yet destroyed; `vkDestroyBuffer` releases it
         // exactly once. The mapping stays valid (the buffer's backing is the
         // block, which outlives the buffer).
-        unsafe { (self.fns.destroy_buffer)(self.device, bound.buffer, ptr::null()) };
-        self.suballoc.free(bound.offset);
+        unsafe { (fns.destroy_buffer)(self.device, bound.buffer, ptr::null()) };
+        // Plan A5: `free` returns whether `offset` named a live allocation. A
+        // `false` here means a double-free or an unknown offset (a violated
+        // by-value-destroy contract) — trip it in debug. `BoundBuffer` is not
+        // `Copy`/`Clone`, so the only way to reach this twice is a contract
+        // breach the caller's `unsafe` accepted responsibility for.
+        let freed = self.suballoc.free(bound.offset);
+        debug_assert!(freed, "invariant: freeing a live sub-allocation");
     }
 }
 
-impl Drop for HostVisibleBlock<'_> {
+impl Drop for HostVisibleBlock {
     fn drop(&mut self) {
+        // SAFETY (plan A1): `self.fns` targets the context's boxed `DeviceFns`.
+        // `HostVisibleBlock` is dropped in the context's `Drop` BEFORE
+        // `vkDestroyDevice` and before the boxed fn-table is freed, so the
+        // pointer is still live here; single-threaded.
+        let fns = unsafe { &*self.fns };
         // SAFETY: `memory` is the block's allocation, mapped once at creation;
         // `vkUnmapMemory` then `vkFreeMemory` are its matching teardown, each
         // called exactly once in reverse order. Any buffers bound into the
-        // block must already be destroyed by the caller (the borrow on `fns`
-        // and `&mut self` enforces single-ownership). NULL allocator matches
-        // the allocation's NULL allocator.
+        // block must already be destroyed by the caller (the `&mut self`
+        // enforces single-ownership). NULL allocator matches the allocation's
+        // NULL allocator.
         unsafe {
-            (self.fns.unmap_memory)(self.device, self.memory);
-            (self.fns.free_memory)(self.device, self.memory, ptr::null());
+            (fns.unmap_memory)(self.device, self.memory);
+            (fns.free_memory)(self.device, self.memory, ptr::null());
         }
     }
 }

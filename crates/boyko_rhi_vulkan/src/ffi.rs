@@ -496,6 +496,9 @@ pub enum VkStructureType {
     SemaphoreCreateInfo = 9,
     ImageViewCreateInfo = 15,
     DebugUtilsMessengerCreateInfoExt = 1_000_128_004,
+    /// `VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT` — chained into the instance
+    /// `p_next` to turn on synchronization validation (plan G2).
+    ValidationFeaturesExt = 1_000_011_000,
     // --- Slice-1 surface / swapchain / dynamic rendering. ---
     Win32SurfaceCreateInfoKhr = 1_000_009_000,
     SwapchainCreateInfoKhr = 1_000_001_000,
@@ -527,7 +530,11 @@ pub const VK_MEMORY_PROPERTY_HOST_COHERENT_BIT: VkFlags = 0x0000_0004;
 /// must be a valid usage).
 pub const VK_BUFFER_USAGE_TRANSFER_SRC_BIT: VkFlags = 0x0000_0001;
 pub const VK_BUFFER_USAGE_TRANSFER_DST_BIT: VkFlags = 0x0000_0002;
+/// `VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT`.
+pub const VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT: VkFlags = 0x0000_0010;
 pub const VK_BUFFER_USAGE_STORAGE_BUFFER_BIT: VkFlags = 0x0000_0020;
+/// `VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT`.
+pub const VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT: VkFlags = 0x0000_0100;
 
 /// `VkSharingMode::VK_SHARING_MODE_EXCLUSIVE`.
 pub const VK_SHARING_MODE_EXCLUSIVE: i32 = 0;
@@ -549,6 +556,13 @@ pub const VK_MAX_MEMORY_HEAPS: usize = 16;
 /// `VK_EXT_debug_utils` extension name, as a static NUL-terminated string.
 pub const VK_EXT_DEBUG_UTILS_EXTENSION_NAME: &core::ffi::CStr = c"VK_EXT_debug_utils";
 
+/// `VK_EXT_validation_features` extension name. Enabled alongside the validation
+/// layer so a `VkValidationFeaturesEXT` chained into `VkInstanceCreateInfo.p_next`
+/// (sync-validation, plan G2) is recognized — the loader/layer require the
+/// extension to be enabled before they will interpret the chained struct.
+pub const VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME: &core::ffi::CStr =
+    c"VK_EXT_validation_features";
+
 /// `VkDebugUtilsMessageSeverityFlagBitsEXT`.
 pub const VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT: VkFlags = 0x0000_0001;
 pub const VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT: VkFlags = 0x0000_0010;
@@ -562,6 +576,10 @@ pub const VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT: VkFlags = 0x0000_0004
 
 // --- Slice-0 0c/0d (compute) constants. ---
 
+/// `VkShaderStageFlagBits::VK_SHADER_STAGE_VERTEX_BIT`.
+pub const VK_SHADER_STAGE_VERTEX_BIT: VkFlags = 0x0000_0001;
+/// `VkShaderStageFlagBits::VK_SHADER_STAGE_FRAGMENT_BIT`.
+pub const VK_SHADER_STAGE_FRAGMENT_BIT: VkFlags = 0x0000_0010;
 /// `VkShaderStageFlagBits::VK_SHADER_STAGE_COMPUTE_BIT`.
 pub const VK_SHADER_STAGE_COMPUTE_BIT: VkFlags = 0x0000_0020;
 
@@ -582,10 +600,16 @@ pub const VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT: VkFlags = 0x0000_0001;
 
 /// `VkPipelineStageFlagBits::VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT`.
 pub const VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT: VkFlags = 0x0000_0800;
+/// `VkPipelineStageFlagBits::VK_PIPELINE_STAGE_TRANSFER_BIT`.
+pub const VK_PIPELINE_STAGE_TRANSFER_BIT: VkFlags = 0x0000_1000;
 
 /// `VkAccessFlagBits` (subset used by the 0d buffer barrier).
 pub const VK_ACCESS_SHADER_READ_BIT: VkFlags = 0x0000_0020;
 pub const VK_ACCESS_SHADER_WRITE_BIT: VkFlags = 0x0000_0040;
+/// `VkAccessFlagBits::VK_ACCESS_TRANSFER_READ_BIT`.
+pub const VK_ACCESS_TRANSFER_READ_BIT: VkFlags = 0x0000_0800;
+/// `VkAccessFlagBits::VK_ACCESS_TRANSFER_WRITE_BIT`.
+pub const VK_ACCESS_TRANSFER_WRITE_BIT: VkFlags = 0x0000_1000;
 
 /// `VK_QUEUE_FAMILY_IGNORED` — no queue-family-ownership transfer in a barrier.
 pub const VK_QUEUE_FAMILY_IGNORED: u32 = u32::MAX;
@@ -907,6 +931,26 @@ pub struct VkDebugUtilsMessengerCreateInfoExt {
     pub message_type: VkFlags,
     pub pfn_user_callback: PfnVkDebugUtilsMessengerCallbackExt,
     pub p_user_data: *mut c_void,
+}
+
+/// `VkValidationFeatureEnableEXT::VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT`.
+///
+/// Turns on the validation layer's **synchronization validation**, which flags a
+/// missing / wrong pipeline barrier as a WARNING/ERROR — the oracle that makes the
+/// chained-barrier golden test actually prove the barrier (plan G2). It is part of
+/// `VkValidationFeatureEnableEXT`, an `i32` C enum.
+pub const VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT: i32 = 3;
+
+/// `VkValidationFeaturesEXT` — chained into `VkInstanceCreateInfo::p_next` to
+/// enable extra validation features (here: synchronization validation, plan G2).
+#[repr(C)]
+pub struct VkValidationFeaturesExt {
+    pub s_type: VkStructureType,
+    pub p_next: *const c_void,
+    pub enabled_validation_feature_count: u32,
+    pub p_enabled_validation_features: *const i32,
+    pub disabled_validation_feature_count: u32,
+    pub p_disabled_validation_features: *const i32,
 }
 
 // ---------------------------------------------------------------------------

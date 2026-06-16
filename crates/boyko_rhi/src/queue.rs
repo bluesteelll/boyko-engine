@@ -20,6 +20,14 @@ pub trait RhiQueue<A: RhiApi> {
     /// Submits one recorded `encoder`, signaling `signal_fence` on completion.
     ///
     /// No semaphores: the headless path's only sync point is the fence.
+    ///
+    /// # Lifetime contract (plan F1 / RL-1)
+    ///
+    /// The originating device/context (the one this queue, `encoder` and
+    /// `signal_fence` came from) MUST still be alive — submitting after it is
+    /// dropped is **undefined behavior** (backend resources hold raw pointers into
+    /// the context). No compile-time `'ctx` tie this phase; the structural fix is
+    /// deferred to Phase 2-3.
     fn submit(
         &self,
         encoder: &A::CommandEncoder,
