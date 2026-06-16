@@ -152,6 +152,50 @@ non_dispatchable_handle!(
     VkBuffer
 );
 
+// --- Slice-0 0c/0d compute-pipeline handles (all non-dispatchable / 64-bit). ---
+
+non_dispatchable_handle!(
+    /// `VkShaderModule` — a compiled SPIR-V module.
+    VkShaderModule
+);
+non_dispatchable_handle!(
+    /// `VkDescriptorSetLayout` — the layout of one descriptor set.
+    VkDescriptorSetLayout
+);
+non_dispatchable_handle!(
+    /// `VkPipelineLayout` — descriptor-set-layouts + push-constant ranges.
+    VkPipelineLayout
+);
+non_dispatchable_handle!(
+    /// `VkPipeline` — a compute (or graphics) pipeline.
+    VkPipeline
+);
+non_dispatchable_handle!(
+    /// `VkDescriptorPool` — allocates `VkDescriptorSet`s.
+    VkDescriptorPool
+);
+non_dispatchable_handle!(
+    /// `VkDescriptorSet` — a bound set of descriptors.
+    VkDescriptorSet
+);
+non_dispatchable_handle!(
+    /// `VkCommandPool` — allocates command buffers.
+    VkCommandPool
+);
+non_dispatchable_handle!(
+    /// `VkFence` — a host-visible GPU-completion sync primitive.
+    VkFence
+);
+non_dispatchable_handle!(
+    /// `VkDebugUtilsMessengerEXT` — the validation-message callback registration.
+    VkDebugUtilsMessengerEXT
+);
+
+dispatchable_handle!(
+    /// `VkCommandBuffer` — a recorded command stream (a dispatchable handle).
+    VkCommandBuffer
+);
+
 // ---------------------------------------------------------------------------
 // VkResult.
 // ---------------------------------------------------------------------------
@@ -233,8 +277,23 @@ pub enum VkStructureType {
     InstanceCreateInfo = 1,
     DeviceQueueCreateInfo = 2,
     DeviceCreateInfo = 3,
+    SubmitInfo = 4,
     MemoryAllocateInfo = 5,
+    FenceCreateInfo = 8,
     BufferCreateInfo = 12,
+    BufferMemoryBarrier = 44,
+    ShaderModuleCreateInfo = 16,
+    PipelineLayoutCreateInfo = 30,
+    ComputePipelineCreateInfo = 29,
+    PipelineShaderStageCreateInfo = 18,
+    DescriptorSetLayoutCreateInfo = 32,
+    DescriptorPoolCreateInfo = 33,
+    DescriptorSetAllocateInfo = 34,
+    WriteDescriptorSet = 35,
+    CommandPoolCreateInfo = 39,
+    CommandBufferAllocateInfo = 40,
+    CommandBufferBeginInfo = 42,
+    DebugUtilsMessengerCreateInfoExt = 1_000_128_004,
 }
 
 // ---------------------------------------------------------------------------
@@ -274,6 +333,55 @@ pub const VK_WHOLE_SIZE: VkDeviceSize = u64::MAX;
 pub const VK_MAX_MEMORY_TYPES: usize = 32;
 /// `VK_MAX_MEMORY_HEAPS`.
 pub const VK_MAX_MEMORY_HEAPS: usize = 16;
+
+// --- Slice-0 0a (validation) constants. ---
+
+/// `VK_EXT_debug_utils` extension name, as a static NUL-terminated string.
+pub const VK_EXT_DEBUG_UTILS_EXTENSION_NAME: &core::ffi::CStr = c"VK_EXT_debug_utils";
+
+/// `VkDebugUtilsMessageSeverityFlagBitsEXT`.
+pub const VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT: VkFlags = 0x0000_0001;
+pub const VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT: VkFlags = 0x0000_0010;
+pub const VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT: VkFlags = 0x0000_0100;
+pub const VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT: VkFlags = 0x0000_1000;
+
+/// `VkDebugUtilsMessageTypeFlagBitsEXT`.
+pub const VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT: VkFlags = 0x0000_0001;
+pub const VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT: VkFlags = 0x0000_0002;
+pub const VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT: VkFlags = 0x0000_0004;
+
+// --- Slice-0 0c/0d (compute) constants. ---
+
+/// `VkShaderStageFlagBits::VK_SHADER_STAGE_COMPUTE_BIT`.
+pub const VK_SHADER_STAGE_COMPUTE_BIT: VkFlags = 0x0000_0020;
+
+/// `VkDescriptorType::VK_DESCRIPTOR_TYPE_STORAGE_BUFFER`.
+pub const VK_DESCRIPTOR_TYPE_STORAGE_BUFFER: i32 = 7;
+
+/// `VkPipelineBindPoint::VK_PIPELINE_BIND_POINT_COMPUTE`.
+pub const VK_PIPELINE_BIND_POINT_COMPUTE: i32 = 1;
+
+/// `VkCommandBufferLevel::VK_COMMAND_BUFFER_LEVEL_PRIMARY`.
+pub const VK_COMMAND_BUFFER_LEVEL_PRIMARY: i32 = 0;
+
+/// `VkCommandPoolCreateFlagBits::VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT`.
+pub const VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT: VkFlags = 0x0000_0002;
+
+/// `VkCommandBufferUsageFlagBits::VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT`.
+pub const VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT: VkFlags = 0x0000_0001;
+
+/// `VkPipelineStageFlagBits::VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT`.
+pub const VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT: VkFlags = 0x0000_0800;
+
+/// `VkAccessFlagBits` (subset used by the 0d buffer barrier).
+pub const VK_ACCESS_SHADER_READ_BIT: VkFlags = 0x0000_0020;
+pub const VK_ACCESS_SHADER_WRITE_BIT: VkFlags = 0x0000_0040;
+
+/// `VK_QUEUE_FAMILY_IGNORED` — no queue-family-ownership transfer in a barrier.
+pub const VK_QUEUE_FAMILY_IGNORED: u32 = u32::MAX;
+
+/// Timeout sentinel for `vkWaitForFences` (wait indefinitely).
+pub const VK_TIMEOUT_INFINITE: u64 = u64::MAX;
 
 // ---------------------------------------------------------------------------
 // #[repr(C)] structs — declare only fields we read or write.
@@ -450,6 +558,303 @@ pub struct VkBufferCreateInfo {
     pub p_queue_family_indices: *const u32,
 }
 
+/// `VkLayerProperties` — one entry from `vkEnumerateInstanceLayerProperties`.
+/// Written BY the driver, so the layout is ABI-exact: two fixed char arrays
+/// (`layerName[256]`, `description[256]`) bracketing two `u32` versions.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct VkLayerProperties {
+    pub layer_name: [c_char; 256],
+    pub spec_version: u32,
+    pub implementation_version: u32,
+    pub description: [c_char; 256],
+}
+
+/// `VkExtensionProperties` — one entry from the extension enumerators. Written
+/// BY the driver: a fixed `extensionName[256]` char array + a `u32` version.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct VkExtensionProperties {
+    pub extension_name: [c_char; 256],
+    pub spec_version: u32,
+}
+
+// FFI layout guards for the driver-written enumeration structs.
+const _: () = assert!(core::mem::size_of::<VkLayerProperties>() == 520);
+const _: () = assert!(core::mem::size_of::<VkExtensionProperties>() == 260);
+
+// ---------------------------------------------------------------------------
+// Slice-0 0a — VK_EXT_debug_utils (validation-message oracle) structs.
+// ---------------------------------------------------------------------------
+
+/// `PFN_vkDebugUtilsMessengerCallbackEXT` — the validation callback the loader
+/// invokes for each message. Returns a `VkBool32` that must be `VK_FALSE`
+/// (returning `VK_TRUE` is reserved for the layer-development case and aborts
+/// the triggering call). `extern "system"` matches the loader's call ABI.
+pub type PfnVkDebugUtilsMessengerCallbackExt = unsafe extern "system" fn(
+    message_severity: VkFlags,
+    message_types: VkFlags,
+    p_callback_data: *const VkDebugUtilsMessengerCallbackDataExt,
+    p_user_data: *mut c_void,
+) -> VkBool32;
+
+/// `VkDebugUtilsMessengerCallbackDataEXT` — the per-message payload the driver
+/// fills and passes to the callback. Only the fields the callback reads are
+/// named; the trailing label/object arrays are reserved as ABI-exact footprints
+/// (pointer + count pairs) so the struct's size/layout match the C ABI the
+/// driver writes through. `pMessage` is the human-readable validation text.
+#[repr(C)]
+pub struct VkDebugUtilsMessengerCallbackDataExt {
+    pub s_type: VkStructureType,
+    pub p_next: *const c_void,
+    pub flags: VkFlags,
+    pub p_message_id_name: *const c_char,
+    pub message_id_number: i32,
+    pub p_message: *const c_char,
+    pub queue_label_count: u32,
+    pub p_queue_labels: *const c_void,
+    pub cmd_buf_label_count: u32,
+    pub p_cmd_buf_labels: *const c_void,
+    pub object_count: u32,
+    pub p_objects: *const c_void,
+}
+
+/// `VkDebugUtilsMessengerCreateInfoEXT`.
+#[repr(C)]
+pub struct VkDebugUtilsMessengerCreateInfoExt {
+    pub s_type: VkStructureType,
+    pub p_next: *const c_void,
+    pub flags: VkFlags,
+    pub message_severity: VkFlags,
+    pub message_type: VkFlags,
+    pub pfn_user_callback: PfnVkDebugUtilsMessengerCallbackExt,
+    pub p_user_data: *mut c_void,
+}
+
+// ---------------------------------------------------------------------------
+// Slice-0 0c/0d — compute pipeline / descriptor / command structs.
+// ---------------------------------------------------------------------------
+
+/// `VkShaderModuleCreateInfo`. `p_code` is a `*const u32` to the SPIR-V word
+/// stream; `code_size` is in BYTES (the spec is explicit) and must be a
+/// multiple of 4.
+#[repr(C)]
+pub struct VkShaderModuleCreateInfo {
+    pub s_type: VkStructureType,
+    pub p_next: *const c_void,
+    pub flags: VkFlags,
+    pub code_size: usize,
+    pub p_code: *const u32,
+}
+
+/// `VkDescriptorSetLayoutBinding` — one binding within a set layout.
+#[repr(C)]
+pub struct VkDescriptorSetLayoutBinding {
+    pub binding: u32,
+    /// `VkDescriptorType`.
+    pub descriptor_type: i32,
+    pub descriptor_count: u32,
+    /// `VkShaderStageFlags`.
+    pub stage_flags: VkFlags,
+    /// `const VkSampler*` — null for non-sampler descriptors.
+    pub p_immutable_samplers: *const c_void,
+}
+
+/// `VkDescriptorSetLayoutCreateInfo`.
+#[repr(C)]
+pub struct VkDescriptorSetLayoutCreateInfo {
+    pub s_type: VkStructureType,
+    pub p_next: *const c_void,
+    pub flags: VkFlags,
+    pub binding_count: u32,
+    pub p_bindings: *const VkDescriptorSetLayoutBinding,
+}
+
+/// `VkPushConstantRange`.
+#[repr(C)]
+pub struct VkPushConstantRange {
+    /// `VkShaderStageFlags`.
+    pub stage_flags: VkFlags,
+    pub offset: u32,
+    pub size: u32,
+}
+
+/// `VkPipelineLayoutCreateInfo`.
+#[repr(C)]
+pub struct VkPipelineLayoutCreateInfo {
+    pub s_type: VkStructureType,
+    pub p_next: *const c_void,
+    pub flags: VkFlags,
+    pub set_layout_count: u32,
+    pub p_set_layouts: *const VkDescriptorSetLayout,
+    pub push_constant_range_count: u32,
+    pub p_push_constant_ranges: *const VkPushConstantRange,
+}
+
+/// `VkPipelineShaderStageCreateInfo`.
+#[repr(C)]
+pub struct VkPipelineShaderStageCreateInfo {
+    pub s_type: VkStructureType,
+    pub p_next: *const c_void,
+    pub flags: VkFlags,
+    /// `VkShaderStageFlagBits` (a single bit for a stage).
+    pub stage: VkFlags,
+    pub module: VkShaderModule,
+    pub p_name: *const c_char,
+    /// `const VkSpecializationInfo*` — null (no specialization constants).
+    pub p_specialization_info: *const c_void,
+}
+
+/// `VkComputePipelineCreateInfo`.
+#[repr(C)]
+pub struct VkComputePipelineCreateInfo {
+    pub s_type: VkStructureType,
+    pub p_next: *const c_void,
+    pub flags: VkFlags,
+    pub stage: VkPipelineShaderStageCreateInfo,
+    pub layout: VkPipelineLayout,
+    /// `VkPipeline basePipelineHandle` — null (no derivative).
+    pub base_pipeline_handle: VkPipeline,
+    pub base_pipeline_index: i32,
+}
+
+/// `VkDescriptorPoolSize`.
+#[repr(C)]
+pub struct VkDescriptorPoolSize {
+    /// `VkDescriptorType`.
+    pub descriptor_type: i32,
+    pub descriptor_count: u32,
+}
+
+/// `VkDescriptorPoolCreateInfo`.
+#[repr(C)]
+pub struct VkDescriptorPoolCreateInfo {
+    pub s_type: VkStructureType,
+    pub p_next: *const c_void,
+    pub flags: VkFlags,
+    pub max_sets: u32,
+    pub pool_size_count: u32,
+    pub p_pool_sizes: *const VkDescriptorPoolSize,
+}
+
+/// `VkDescriptorSetAllocateInfo`.
+#[repr(C)]
+pub struct VkDescriptorSetAllocateInfo {
+    pub s_type: VkStructureType,
+    pub p_next: *const c_void,
+    pub descriptor_pool: VkDescriptorPool,
+    pub descriptor_set_count: u32,
+    pub p_set_layouts: *const VkDescriptorSetLayout,
+}
+
+/// `VkDescriptorBufferInfo`.
+#[repr(C)]
+pub struct VkDescriptorBufferInfo {
+    pub buffer: VkBuffer,
+    pub offset: VkDeviceSize,
+    pub range: VkDeviceSize,
+}
+
+/// `VkWriteDescriptorSet`.
+#[repr(C)]
+pub struct VkWriteDescriptorSet {
+    pub s_type: VkStructureType,
+    pub p_next: *const c_void,
+    pub dst_set: VkDescriptorSet,
+    pub dst_binding: u32,
+    pub dst_array_element: u32,
+    pub descriptor_count: u32,
+    /// `VkDescriptorType`.
+    pub descriptor_type: i32,
+    /// `const VkDescriptorImageInfo*` — null for a storage buffer.
+    pub p_image_info: *const c_void,
+    pub p_buffer_info: *const VkDescriptorBufferInfo,
+    /// `const VkBufferView*` — null for a storage buffer.
+    pub p_texel_buffer_view: *const c_void,
+}
+
+/// `VkCommandPoolCreateInfo`.
+#[repr(C)]
+pub struct VkCommandPoolCreateInfo {
+    pub s_type: VkStructureType,
+    pub p_next: *const c_void,
+    pub flags: VkFlags,
+    pub queue_family_index: u32,
+}
+
+/// `VkCommandBufferAllocateInfo`.
+#[repr(C)]
+pub struct VkCommandBufferAllocateInfo {
+    pub s_type: VkStructureType,
+    pub p_next: *const c_void,
+    pub command_pool: VkCommandPool,
+    /// `VkCommandBufferLevel`.
+    pub level: i32,
+    pub command_buffer_count: u32,
+}
+
+/// `VkCommandBufferBeginInfo`.
+#[repr(C)]
+pub struct VkCommandBufferBeginInfo {
+    pub s_type: VkStructureType,
+    pub p_next: *const c_void,
+    pub flags: VkFlags,
+    /// `const VkCommandBufferInheritanceInfo*` — null for a primary buffer.
+    pub p_inheritance_info: *const c_void,
+}
+
+/// `VkBufferMemoryBarrier` — the §5.5 edge→barrier lowering in miniature (0d).
+#[repr(C)]
+pub struct VkBufferMemoryBarrier {
+    pub s_type: VkStructureType,
+    pub p_next: *const c_void,
+    /// `VkAccessFlags` made available by the source scope.
+    pub src_access_mask: VkFlags,
+    /// `VkAccessFlags` made visible to the destination scope.
+    pub dst_access_mask: VkFlags,
+    pub src_queue_family_index: u32,
+    pub dst_queue_family_index: u32,
+    pub buffer: VkBuffer,
+    pub offset: VkDeviceSize,
+    pub size: VkDeviceSize,
+}
+
+/// `VkFenceCreateInfo`.
+#[repr(C)]
+pub struct VkFenceCreateInfo {
+    pub s_type: VkStructureType,
+    pub p_next: *const c_void,
+    pub flags: VkFlags,
+}
+
+/// `VkSubmitInfo`.
+#[repr(C)]
+pub struct VkSubmitInfo {
+    pub s_type: VkStructureType,
+    pub p_next: *const c_void,
+    pub wait_semaphore_count: u32,
+    pub p_wait_semaphores: *const c_void,
+    /// `const VkPipelineStageFlags*` — null (no wait stages).
+    pub p_wait_dst_stage_mask: *const VkFlags,
+    pub command_buffer_count: u32,
+    pub p_command_buffers: *const VkCommandBuffer,
+    pub signal_semaphore_count: u32,
+    pub p_signal_semaphores: *const c_void,
+}
+
+// FFI layout guards for the new structs. The callback-data struct is written BY
+// the driver and read through the callback, so its size/align must match the C
+// ABI; the create-infos/barriers are written BY us but their layout still must
+// match for the driver to read them. These break the build on any drift.
+const _: () = assert!(core::mem::size_of::<VkDebugUtilsMessengerCallbackDataExt>() == 96);
+const _: () = assert!(core::mem::align_of::<VkDebugUtilsMessengerCallbackDataExt>() == 8);
+const _: () = assert!(core::mem::size_of::<VkBufferMemoryBarrier>() == 56);
+const _: () = assert!(core::mem::align_of::<VkBufferMemoryBarrier>() == 8);
+const _: () = assert!(core::mem::size_of::<VkDescriptorBufferInfo>() == 24);
+const _: () = assert!(core::mem::size_of::<VkDescriptorSetLayoutBinding>() == 24);
+const _: () = assert!(core::mem::size_of::<VkPushConstantRange>() == 12);
+const _: () = assert!(core::mem::size_of::<VkDescriptorPoolSize>() == 8);
+
 // ---------------------------------------------------------------------------
 // Function-pointer typedefs — the loader fills these in at runtime.
 //
@@ -478,6 +883,20 @@ pub type PfnVkCreateInstance = unsafe extern "system" fn(
     p_create_info: *const VkInstanceCreateInfo,
     p_allocator: *const c_void,
     p_instance: *mut VkInstance,
+) -> i32;
+
+/// `PFN_vkEnumerateInstanceLayerProperties` — a global command (NULL instance).
+pub type PfnVkEnumerateInstanceLayerProperties = unsafe extern "system" fn(
+    p_count: *mut u32,
+    p_properties: *mut VkLayerProperties,
+) -> i32;
+
+/// `PFN_vkEnumerateInstanceExtensionProperties` — a global command. `p_layer_name`
+/// is null to query the instance's own (non-layer) extensions.
+pub type PfnVkEnumerateInstanceExtensionProperties = unsafe extern "system" fn(
+    p_layer_name: *const c_char,
+    p_count: *mut u32,
+    p_properties: *mut VkExtensionProperties,
 ) -> i32;
 
 /// `PFN_vkDestroyInstance`.
@@ -581,3 +1000,240 @@ pub type PfnVkMapMemory = unsafe extern "system" fn(
 
 /// `PFN_vkUnmapMemory`.
 pub type PfnVkUnmapMemory = unsafe extern "system" fn(device: VkDevice, memory: VkDeviceMemory);
+
+// ---------------------------------------------------------------------------
+// Slice-0 0a — VK_EXT_debug_utils PFNs (instance-scope extension commands).
+// ---------------------------------------------------------------------------
+
+/// `PFN_vkCreateDebugUtilsMessengerEXT`.
+pub type PfnVkCreateDebugUtilsMessengerExt = unsafe extern "system" fn(
+    instance: VkInstance,
+    p_create_info: *const VkDebugUtilsMessengerCreateInfoExt,
+    p_allocator: *const c_void,
+    p_messenger: *mut VkDebugUtilsMessengerEXT,
+) -> i32;
+
+/// `PFN_vkDestroyDebugUtilsMessengerEXT`.
+pub type PfnVkDestroyDebugUtilsMessengerExt = unsafe extern "system" fn(
+    instance: VkInstance,
+    messenger: VkDebugUtilsMessengerEXT,
+    p_allocator: *const c_void,
+);
+
+// ---------------------------------------------------------------------------
+// Slice-0 0c/0d — compute / descriptor / command device-scope PFNs.
+// ---------------------------------------------------------------------------
+
+/// `PFN_vkCreateShaderModule`.
+pub type PfnVkCreateShaderModule = unsafe extern "system" fn(
+    device: VkDevice,
+    p_create_info: *const VkShaderModuleCreateInfo,
+    p_allocator: *const c_void,
+    p_shader_module: *mut VkShaderModule,
+) -> i32;
+
+/// `PFN_vkDestroyShaderModule`.
+pub type PfnVkDestroyShaderModule = unsafe extern "system" fn(
+    device: VkDevice,
+    shader_module: VkShaderModule,
+    p_allocator: *const c_void,
+);
+
+/// `PFN_vkCreateDescriptorSetLayout`.
+pub type PfnVkCreateDescriptorSetLayout = unsafe extern "system" fn(
+    device: VkDevice,
+    p_create_info: *const VkDescriptorSetLayoutCreateInfo,
+    p_allocator: *const c_void,
+    p_set_layout: *mut VkDescriptorSetLayout,
+) -> i32;
+
+/// `PFN_vkDestroyDescriptorSetLayout`.
+pub type PfnVkDestroyDescriptorSetLayout = unsafe extern "system" fn(
+    device: VkDevice,
+    set_layout: VkDescriptorSetLayout,
+    p_allocator: *const c_void,
+);
+
+/// `PFN_vkCreatePipelineLayout`.
+pub type PfnVkCreatePipelineLayout = unsafe extern "system" fn(
+    device: VkDevice,
+    p_create_info: *const VkPipelineLayoutCreateInfo,
+    p_allocator: *const c_void,
+    p_pipeline_layout: *mut VkPipelineLayout,
+) -> i32;
+
+/// `PFN_vkDestroyPipelineLayout`.
+pub type PfnVkDestroyPipelineLayout = unsafe extern "system" fn(
+    device: VkDevice,
+    pipeline_layout: VkPipelineLayout,
+    p_allocator: *const c_void,
+);
+
+/// `PFN_vkCreateComputePipelines`. `pipeline_cache` is null for Slice 0;
+/// `create_info_count` pipelines are written into `p_pipelines`.
+pub type PfnVkCreateComputePipelines = unsafe extern "system" fn(
+    device: VkDevice,
+    pipeline_cache: u64,
+    create_info_count: u32,
+    p_create_infos: *const VkComputePipelineCreateInfo,
+    p_allocator: *const c_void,
+    p_pipelines: *mut VkPipeline,
+) -> i32;
+
+/// `PFN_vkDestroyPipeline`.
+pub type PfnVkDestroyPipeline =
+    unsafe extern "system" fn(device: VkDevice, pipeline: VkPipeline, p_allocator: *const c_void);
+
+/// `PFN_vkCreateDescriptorPool`.
+pub type PfnVkCreateDescriptorPool = unsafe extern "system" fn(
+    device: VkDevice,
+    p_create_info: *const VkDescriptorPoolCreateInfo,
+    p_allocator: *const c_void,
+    p_descriptor_pool: *mut VkDescriptorPool,
+) -> i32;
+
+/// `PFN_vkDestroyDescriptorPool`.
+pub type PfnVkDestroyDescriptorPool = unsafe extern "system" fn(
+    device: VkDevice,
+    descriptor_pool: VkDescriptorPool,
+    p_allocator: *const c_void,
+);
+
+/// `PFN_vkAllocateDescriptorSets`.
+pub type PfnVkAllocateDescriptorSets = unsafe extern "system" fn(
+    device: VkDevice,
+    p_allocate_info: *const VkDescriptorSetAllocateInfo,
+    p_descriptor_sets: *mut VkDescriptorSet,
+) -> i32;
+
+/// `PFN_vkUpdateDescriptorSets`.
+pub type PfnVkUpdateDescriptorSets = unsafe extern "system" fn(
+    device: VkDevice,
+    descriptor_write_count: u32,
+    p_descriptor_writes: *const VkWriteDescriptorSet,
+    descriptor_copy_count: u32,
+    p_descriptor_copies: *const c_void,
+);
+
+/// `PFN_vkCreateCommandPool`.
+pub type PfnVkCreateCommandPool = unsafe extern "system" fn(
+    device: VkDevice,
+    p_create_info: *const VkCommandPoolCreateInfo,
+    p_allocator: *const c_void,
+    p_command_pool: *mut VkCommandPool,
+) -> i32;
+
+/// `PFN_vkDestroyCommandPool`.
+pub type PfnVkDestroyCommandPool = unsafe extern "system" fn(
+    device: VkDevice,
+    command_pool: VkCommandPool,
+    p_allocator: *const c_void,
+);
+
+/// `PFN_vkAllocateCommandBuffers`.
+pub type PfnVkAllocateCommandBuffers = unsafe extern "system" fn(
+    device: VkDevice,
+    p_allocate_info: *const VkCommandBufferAllocateInfo,
+    p_command_buffers: *mut VkCommandBuffer,
+) -> i32;
+
+/// `PFN_vkFreeCommandBuffers`.
+pub type PfnVkFreeCommandBuffers = unsafe extern "system" fn(
+    device: VkDevice,
+    command_pool: VkCommandPool,
+    command_buffer_count: u32,
+    p_command_buffers: *const VkCommandBuffer,
+);
+
+/// `PFN_vkBeginCommandBuffer`.
+pub type PfnVkBeginCommandBuffer = unsafe extern "system" fn(
+    command_buffer: VkCommandBuffer,
+    p_begin_info: *const VkCommandBufferBeginInfo,
+) -> i32;
+
+/// `PFN_vkEndCommandBuffer`.
+pub type PfnVkEndCommandBuffer =
+    unsafe extern "system" fn(command_buffer: VkCommandBuffer) -> i32;
+
+/// `PFN_vkCmdBindPipeline`.
+pub type PfnVkCmdBindPipeline = unsafe extern "system" fn(
+    command_buffer: VkCommandBuffer,
+    pipeline_bind_point: i32,
+    pipeline: VkPipeline,
+);
+
+/// `PFN_vkCmdBindDescriptorSets`.
+pub type PfnVkCmdBindDescriptorSets = unsafe extern "system" fn(
+    command_buffer: VkCommandBuffer,
+    pipeline_bind_point: i32,
+    layout: VkPipelineLayout,
+    first_set: u32,
+    descriptor_set_count: u32,
+    p_descriptor_sets: *const VkDescriptorSet,
+    dynamic_offset_count: u32,
+    p_dynamic_offsets: *const u32,
+);
+
+/// `PFN_vkCmdPushConstants`.
+pub type PfnVkCmdPushConstants = unsafe extern "system" fn(
+    command_buffer: VkCommandBuffer,
+    layout: VkPipelineLayout,
+    stage_flags: VkFlags,
+    offset: u32,
+    size: u32,
+    p_values: *const c_void,
+);
+
+/// `PFN_vkCmdDispatch`.
+pub type PfnVkCmdDispatch = unsafe extern "system" fn(
+    command_buffer: VkCommandBuffer,
+    group_count_x: u32,
+    group_count_y: u32,
+    group_count_z: u32,
+);
+
+/// `PFN_vkCmdPipelineBarrier`.
+pub type PfnVkCmdPipelineBarrier = unsafe extern "system" fn(
+    command_buffer: VkCommandBuffer,
+    src_stage_mask: VkFlags,
+    dst_stage_mask: VkFlags,
+    dependency_flags: VkFlags,
+    memory_barrier_count: u32,
+    p_memory_barriers: *const c_void,
+    buffer_memory_barrier_count: u32,
+    p_buffer_memory_barriers: *const VkBufferMemoryBarrier,
+    image_memory_barrier_count: u32,
+    p_image_memory_barriers: *const c_void,
+);
+
+/// `PFN_vkCreateFence`.
+pub type PfnVkCreateFence = unsafe extern "system" fn(
+    device: VkDevice,
+    p_create_info: *const VkFenceCreateInfo,
+    p_allocator: *const c_void,
+    p_fence: *mut VkFence,
+) -> i32;
+
+/// `PFN_vkDestroyFence`.
+pub type PfnVkDestroyFence =
+    unsafe extern "system" fn(device: VkDevice, fence: VkFence, p_allocator: *const c_void);
+
+/// `PFN_vkWaitForFences`.
+pub type PfnVkWaitForFences = unsafe extern "system" fn(
+    device: VkDevice,
+    fence_count: u32,
+    p_fences: *const VkFence,
+    wait_all: VkBool32,
+    timeout: u64,
+) -> i32;
+
+/// `PFN_vkQueueSubmit`.
+pub type PfnVkQueueSubmit = unsafe extern "system" fn(
+    queue: VkQueue,
+    submit_count: u32,
+    p_submits: *const VkSubmitInfo,
+    fence: VkFence,
+) -> i32;
+
+/// `PFN_vkDeviceWaitIdle`.
+pub type PfnVkDeviceWaitIdle = unsafe extern "system" fn(device: VkDevice) -> i32;

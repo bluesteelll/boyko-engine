@@ -46,6 +46,7 @@
 //! # let _ = bound;
 //! ```
 
+pub mod debug;
 pub mod device;
 pub mod ffi;
 pub mod memory;

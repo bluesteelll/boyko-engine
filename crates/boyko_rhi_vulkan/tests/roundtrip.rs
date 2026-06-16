@@ -179,6 +179,67 @@ fn sub_alloc_reuse_on_real_block() {
     drop(ctx);
 }
 
+/// Slice-0 step 0a — the validation-layer oracle. Boots WITH
+/// `VK_LAYER_KHRONOS_validation` + a `VK_EXT_debug_utils` messenger enabled, runs
+/// real device ops (allocate a host-visible block + a buffer, then tear them
+/// down) under the layer, and asserts the messenger recorded ZERO warning/error
+/// validation messages. A validation fault FAILS this test — this counter is the
+/// soundness oracle that substitutes for Miri on the raw-FFI path (plan §6).
+/// Skips gracefully when the SDK's validation layer is absent (boot returns the
+/// `ValidationLayerUnavailable` error) or there is no GPU.
+#[test]
+fn validation_layer_clean_on_device_ops() {
+    let ctx = match VulkanContext::boot(InstanceConfig {
+        enable_validation: true,
+    }) {
+        Ok(ctx) => ctx,
+        Err(e) => {
+            eprintln!(
+                "SKIP validation_layer_clean_on_device_ops: validation layer / GPU unavailable ({e:?})"
+            );
+            return;
+        }
+    };
+    println!("Vulkan device (validation on): {}", ctx.device_name());
+    assert!(
+        ctx.validation_enabled(),
+        "validation must be active when InstanceConfig::enable_validation is set"
+    );
+
+    // Exercise a real device-memory path under the validation layer.
+    let mut block = HostVisibleBlock::new(
+        ctx.device(),
+        ctx.device_fns(),
+        ctx.memory_properties(),
+        1024 * 1024,
+    )
+    .expect("host-visible block");
+    let b = block
+        .create_bound_buffer(4096, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)
+        .expect("buffer create + bind under validation");
+    // SAFETY: `b` was created on this block and is destroyed exactly once.
+    unsafe { block.destroy_bound_buffer(b) };
+    drop(block);
+
+    // The oracle: a clean run records zero validation messages. A non-zero count
+    // means the layer caught a real API misuse (the `[vk-validation]` log lines
+    // identify it) — fail loudly.
+    let state = ctx
+        .debug_state()
+        .expect("validation enabled => a debug-messenger state is present");
+    assert_eq!(
+        state.total(),
+        0,
+        "validation layer reported {} message(s) during device ops — see the [vk-validation] log",
+        state.total()
+    );
+
+    // Teardown (Drop) destroys the messenger before the instance; any
+    // destroy-time fault is logged by the create-time messenger threaded through
+    // `p_next` (it logs but does not count, so it cannot be asserted here).
+    drop(ctx);
+}
+
 /// Surfaces the variant names so an `unused` lint does not fire if a future
 /// refactor stops constructing one (keeps the public error enum honest).
 #[allow(dead_code)]

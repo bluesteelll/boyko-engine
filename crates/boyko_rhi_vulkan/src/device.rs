@@ -28,6 +28,7 @@ use core::ffi::{CStr, c_char, c_void};
 use core::mem;
 use core::ptr;
 
+use crate::debug::{self, DebugMessengerState};
 use crate::ffi::*;
 
 /// Errors that can occur while bootstrapping a Vulkan device.
@@ -49,19 +50,30 @@ pub enum BootError {
     NoPhysicalDevice,
     /// No queue family on the chosen GPU supports graphics + compute.
     NoSuitableQueueFamily,
+    /// Validation was requested but `VK_LAYER_KHRONOS_validation` is not
+    /// installed (the SDK is absent). The caller decides whether this is fatal
+    /// (the compute tests treat it as "skip gracefully").
+    ValidationUnavailable,
 }
 
-/// Whether to attempt enabling the Khronos validation layer.
+/// Bootstrap options for the instance.
 #[derive(Clone, Copy, Default)]
 pub struct InstanceConfig {
-    /// Request `VK_LAYER_KHRONOS_validation` **iff it is installed**. Defaults
-    /// to `false`; an absent layer silently downgrades to no validation.
+    /// Request `VK_LAYER_KHRONOS_validation` + a `VK_EXT_debug_utils` messenger
+    /// that records WARNING/ERROR validation messages as the test oracle
+    /// (plan §6 / Slice-0 step 0a). Defaults to `false`.
+    ///
+    /// If `true` but the layer or the `VK_EXT_debug_utils` extension is absent,
+    /// boot fails with [`BootError::ValidationUnavailable`] rather than silently
+    /// running without the oracle — a missing oracle must never be invisible.
     pub enable_validation: bool,
 }
 
 /// Global-scope Vulkan commands (resolved with a NULL instance).
 struct GlobalFns {
     create_instance: PfnVkCreateInstance,
+    enumerate_instance_layer_properties: PfnVkEnumerateInstanceLayerProperties,
+    enumerate_instance_extension_properties: PfnVkEnumerateInstanceExtensionProperties,
 }
 
 /// Instance-scope Vulkan commands.
@@ -73,9 +85,13 @@ struct InstanceFns {
     get_physical_device_queue_family_properties: PfnVkGetPhysicalDeviceQueueFamilyProperties,
     create_device: PfnVkCreateDevice,
     get_device_proc_addr: PfnVkGetDeviceProcAddr,
+    /// `VK_EXT_debug_utils` destroyer — `Some` only when validation is enabled
+    /// (the extension command resolves only with the extension enabled).
+    destroy_debug_messenger: Option<PfnVkDestroyDebugUtilsMessengerExt>,
 }
 
-/// Device-scope Vulkan commands needed for the buffer round-trip.
+/// Device-scope Vulkan commands needed for the buffer round-trip and the
+/// Slice-0 0c/0d compute dispatch + chained-barrier passes.
 pub struct DeviceFns {
     pub destroy_device: PfnVkDestroyDevice,
     pub get_device_queue: PfnVkGetDeviceQueue,
@@ -87,6 +103,35 @@ pub struct DeviceFns {
     pub bind_buffer_memory: PfnVkBindBufferMemory,
     pub map_memory: PfnVkMapMemory,
     pub unmap_memory: PfnVkUnmapMemory,
+    // --- 0c/0d compute commands. ---
+    pub create_shader_module: PfnVkCreateShaderModule,
+    pub destroy_shader_module: PfnVkDestroyShaderModule,
+    pub create_descriptor_set_layout: PfnVkCreateDescriptorSetLayout,
+    pub destroy_descriptor_set_layout: PfnVkDestroyDescriptorSetLayout,
+    pub create_pipeline_layout: PfnVkCreatePipelineLayout,
+    pub destroy_pipeline_layout: PfnVkDestroyPipelineLayout,
+    pub create_compute_pipelines: PfnVkCreateComputePipelines,
+    pub destroy_pipeline: PfnVkDestroyPipeline,
+    pub create_descriptor_pool: PfnVkCreateDescriptorPool,
+    pub destroy_descriptor_pool: PfnVkDestroyDescriptorPool,
+    pub allocate_descriptor_sets: PfnVkAllocateDescriptorSets,
+    pub update_descriptor_sets: PfnVkUpdateDescriptorSets,
+    pub create_command_pool: PfnVkCreateCommandPool,
+    pub destroy_command_pool: PfnVkDestroyCommandPool,
+    pub allocate_command_buffers: PfnVkAllocateCommandBuffers,
+    pub free_command_buffers: PfnVkFreeCommandBuffers,
+    pub begin_command_buffer: PfnVkBeginCommandBuffer,
+    pub end_command_buffer: PfnVkEndCommandBuffer,
+    pub cmd_bind_pipeline: PfnVkCmdBindPipeline,
+    pub cmd_bind_descriptor_sets: PfnVkCmdBindDescriptorSets,
+    pub cmd_push_constants: PfnVkCmdPushConstants,
+    pub cmd_dispatch: PfnVkCmdDispatch,
+    pub cmd_pipeline_barrier: PfnVkCmdPipelineBarrier,
+    pub create_fence: PfnVkCreateFence,
+    pub destroy_fence: PfnVkDestroyFence,
+    pub wait_for_fences: PfnVkWaitForFences,
+    pub queue_submit: PfnVkQueueSubmit,
+    pub device_wait_idle: PfnVkDeviceWaitIdle,
 }
 
 /// A booted Vulkan context: a loaded loader, an instance, a logical device and
@@ -103,6 +148,13 @@ pub struct VulkanContext {
     memory_properties: VkPhysicalDeviceMemoryProperties,
     /// Human-readable device name (from `VkPhysicalDeviceProperties`).
     device_name: String,
+    /// The validation-message messenger (`NULL` when validation is disabled).
+    debug_messenger: VkDebugUtilsMessengerEXT,
+    /// Heap-owned callback state pointed-to by the messenger's `p_user_data`.
+    /// `None` when validation is disabled. Boxed so its address is stable across
+    /// moves of the context (the messenger holds a raw pointer into it); dropped
+    /// AFTER the messenger is destroyed in `Drop`.
+    debug_state: Option<Box<DebugMessengerState>>,
     instance_fns: InstanceFns,
     device_fns: DeviceFns,
 }
@@ -160,13 +212,17 @@ impl VulkanContext {
             module,
             instance,
             get_instance_proc_addr,
+            config,
         );
         match result {
             Ok(ctx) => Ok(ctx),
             Err((e, instance_fns)) => {
                 // SAFETY: `instance` was created above and not yet stored in a
                 // live context; `destroy_instance` is the matching teardown,
-                // called exactly once before the loader is freed.
+                // called exactly once before the loader is freed. Any debug
+                // messenger created inside `boot_with_instance` is already
+                // destroyed there before this error is surfaced, so no messenger
+                // outlives its instance.
                 unsafe { (instance_fns.destroy_instance)(instance, ptr::null()) };
                 // SAFETY: `module` is live and freed exactly once here.
                 unsafe { free_vulkan_loader(module) };
@@ -177,13 +233,16 @@ impl VulkanContext {
 
     /// Continues the boot once the instance exists. On error it returns the
     /// loaded [`InstanceFns`] so the caller can destroy the instance with the
-    /// correct command pointer.
+    /// correct command pointer. Any debug messenger this creates is destroyed
+    /// in-place on the error paths (before returning), so the caller only ever
+    /// has to destroy the instance + free the loader.
     fn boot_with_instance(
         module: *mut c_void,
         instance: VkInstance,
         gipa: PfnVkGetInstanceProcAddr,
+        config: InstanceConfig,
     ) -> Result<Self, (BootError, InstanceFns)> {
-        let instance_fns = match load_instance_fns(gipa, instance) {
+        let instance_fns = match load_instance_fns(gipa, instance, config.enable_validation) {
             Ok(f) => f,
             // No fns loaded → we cannot even destroy the instance with a typed
             // pointer; load just the destroyer best-effort. If even that is
@@ -192,33 +251,62 @@ impl VulkanContext {
             Err(e) => return Err((e, fallback_instance_fns(gipa, instance))),
         };
 
+        // --- 3b. Create the validation messenger (Slice-0 0a oracle). ---
+        // Boxed so the callback's `p_user_data` pointer is address-stable.
+        // `debug_messenger`/`debug_state` are NULL/None when validation is off.
+        let (debug_messenger, debug_state) =
+            match create_debug_messenger(gipa, instance, config.enable_validation) {
+                Ok(pair) => pair,
+                Err(e) => return Err((e, instance_fns)),
+            };
+
+        // After this point every error path MUST destroy the messenger before
+        // returning (the instance destroyer alone would leave it dangling).
+        macro_rules! fail {
+            ($err:expr) => {{
+                // SAFETY: `debug_messenger` (if non-null) was just created on
+                // `instance` with `instance_fns.destroy_debug_messenger`
+                // resolved (it is `Some` exactly when a messenger exists);
+                // destroying it here once, before the caller destroys the
+                // instance, keeps teardown ordered. `debug_state` is dropped at
+                // end of scope AFTER the messenger no longer references it.
+                if !debug_messenger.is_null() {
+                    if let Some(destroy) = instance_fns.destroy_debug_messenger {
+                        unsafe { destroy(instance, debug_messenger, ptr::null()) };
+                    }
+                }
+                drop(debug_state);
+                return Err(($err, instance_fns));
+            }};
+        }
+
         // --- 4. Pick a physical device (prefer a discrete GPU). ---
         let (physical_device, device_name, memory_properties) =
             match pick_physical_device(&instance_fns, instance) {
                 Ok(p) => p,
-                Err(e) => return Err((e, instance_fns)),
+                Err(e) => fail!(e),
             };
 
         // --- 5. Find a graphics+compute queue family. ---
         let queue_family_index = match find_queue_family(&instance_fns, physical_device) {
             Ok(q) => q,
-            Err(e) => return Err((e, instance_fns)),
+            Err(e) => fail!(e),
         };
 
         // --- 6. Create the logical device + retrieve the queue. ---
         let device = match create_device(&instance_fns, physical_device, queue_family_index) {
             Ok(d) => d,
-            Err(e) => return Err((e, instance_fns)),
+            Err(e) => fail!(e),
         };
 
         let device_fns = match load_device_fns(instance_fns.get_device_proc_addr, device) {
             Ok(f) => f,
             Err(e) => {
-                // The device was created but its commands are unloadable: we
-                // have no typed destroyer, so this is an unrecoverable broken
-                // loader. Surface the error; the instance is torn down by the
-                // caller. (A conformant loader always exports these.)
-                return Err((e, instance_fns));
+                // The device was created but its commands are unloadable: a
+                // broken loader. We cannot destroy the device with a typed
+                // pointer, so the device leaks (a spec-impossible corner), but
+                // we still tear down the messenger + instance to minimize leaks.
+                fail!(e)
             }
         };
 
@@ -237,6 +325,8 @@ impl VulkanContext {
             queue_family_index,
             memory_properties,
             device_name,
+            debug_messenger,
+            debug_state,
             instance_fns,
             device_fns,
         })
@@ -283,16 +373,41 @@ impl VulkanContext {
     pub fn memory_properties(&self) -> &VkPhysicalDeviceMemoryProperties {
         &self.memory_properties
     }
+
+    /// The validation-message recorder, present iff validation was enabled.
+    ///
+    /// Tests assert `state.total() == 0` after a clean GPU run; a non-zero count
+    /// means the validation layer flagged a WARNING/ERROR — the soundness oracle
+    /// (plan §6). Returns `None` when [`InstanceConfig::enable_validation`] was
+    /// `false`.
+    #[inline]
+    pub fn debug_state(&self) -> Option<&DebugMessengerState> {
+        self.debug_state.as_deref()
+    }
+
+    /// Whether a validation messenger is active on this context.
+    #[inline]
+    pub fn validation_enabled(&self) -> bool {
+        self.debug_state.is_some()
+    }
 }
 
 impl Drop for VulkanContext {
     fn drop(&mut self) {
         // SAFETY: `device`/`instance` are the exact handles created in `boot`,
         // each destroyed exactly once here in reverse creation order with its
-        // matching destroyer. `module` is the live HMODULE freed once. No
-        // handle is used after its destroyer runs.
+        // matching destroyer. The debug messenger (if any) is destroyed BEFORE
+        // the instance — it is an instance child — and its `debug_state` Box is
+        // dropped only after this `drop` returns (the field outlives the
+        // messenger). `module` is the live HMODULE freed once. No handle is
+        // used after its destroyer runs.
         unsafe {
             (self.device_fns.destroy_device)(self.device, ptr::null());
+            if !self.debug_messenger.is_null()
+                && let Some(destroy) = self.instance_fns.destroy_debug_messenger
+            {
+                destroy(self.instance, self.debug_messenger, ptr::null());
+            }
             (self.instance_fns.destroy_instance)(self.instance, ptr::null());
             free_vulkan_loader(self.module);
         }
@@ -441,18 +556,46 @@ fn leak_name(name: &'static CStr) -> &'static str {
 fn load_global_fns(gipa: PfnVkGetInstanceProcAddr) -> Result<GlobalFns, BootError> {
     // SAFETY: global commands resolve with a NULL instance; each `T` matches
     // its command's PFN typedef.
-    let create_instance =
-        unsafe { load_instance_command(gipa, VkInstance::NULL, c"vkCreateInstance")? };
-    Ok(GlobalFns { create_instance })
+    unsafe {
+        Ok(GlobalFns {
+            create_instance: load_instance_command(gipa, VkInstance::NULL, c"vkCreateInstance")?,
+            enumerate_instance_layer_properties: load_instance_command(
+                gipa,
+                VkInstance::NULL,
+                c"vkEnumerateInstanceLayerProperties",
+            )?,
+            enumerate_instance_extension_properties: load_instance_command(
+                gipa,
+                VkInstance::NULL,
+                c"vkEnumerateInstanceExtensionProperties",
+            )?,
+        })
+    }
 }
 
 fn load_instance_fns(
     gipa: PfnVkGetInstanceProcAddr,
     instance: VkInstance,
+    enable_validation: bool,
 ) -> Result<InstanceFns, BootError> {
     // SAFETY: instance commands resolve with the live `instance`; each `T`
     // matches its command's PFN typedef.
     unsafe {
+        // The debug-utils destroyer is an extension command; it only resolves
+        // when `VK_EXT_debug_utils` is enabled on the instance (which we do iff
+        // validation is requested). Resolve it eagerly so the messenger can be
+        // destroyed even on later error paths.
+        let destroy_debug_messenger: Option<PfnVkDestroyDebugUtilsMessengerExt> =
+            if enable_validation {
+                Some(load_instance_command(
+                    gipa,
+                    instance,
+                    c"vkDestroyDebugUtilsMessengerEXT",
+                )?)
+            } else {
+                None
+            };
+
         Ok(InstanceFns {
             destroy_instance: load_instance_command(gipa, instance, c"vkDestroyInstance")?,
             enumerate_physical_devices: load_instance_command(
@@ -477,6 +620,7 @@ fn load_instance_fns(
             )?,
             create_device: load_instance_command(gipa, instance, c"vkCreateDevice")?,
             get_device_proc_addr: load_instance_command(gipa, instance, c"vkGetDeviceProcAddr")?,
+            destroy_debug_messenger,
         })
     }
 }
@@ -502,6 +646,8 @@ fn fallback_instance_fns(gipa: PfnVkGetInstanceProcAddr, instance: VkInstance) -
         get_physical_device_queue_family_properties: noop_get_qf_props,
         create_device: noop_create_device,
         get_device_proc_addr: noop_get_device_proc_addr,
+        // No messenger is ever created on the fallback path.
+        destroy_debug_messenger: None,
     }
 }
 
@@ -559,6 +705,67 @@ fn load_device_fns(gdpa: PfnVkGetDeviceProcAddr, device: VkDevice) -> Result<Dev
             bind_buffer_memory: load_device_command(gdpa, device, c"vkBindBufferMemory")?,
             map_memory: load_device_command(gdpa, device, c"vkMapMemory")?,
             unmap_memory: load_device_command(gdpa, device, c"vkUnmapMemory")?,
+            // --- 0c/0d compute commands. ---
+            create_shader_module: load_device_command(gdpa, device, c"vkCreateShaderModule")?,
+            destroy_shader_module: load_device_command(gdpa, device, c"vkDestroyShaderModule")?,
+            create_descriptor_set_layout: load_device_command(
+                gdpa,
+                device,
+                c"vkCreateDescriptorSetLayout",
+            )?,
+            destroy_descriptor_set_layout: load_device_command(
+                gdpa,
+                device,
+                c"vkDestroyDescriptorSetLayout",
+            )?,
+            create_pipeline_layout: load_device_command(gdpa, device, c"vkCreatePipelineLayout")?,
+            destroy_pipeline_layout: load_device_command(
+                gdpa,
+                device,
+                c"vkDestroyPipelineLayout",
+            )?,
+            create_compute_pipelines: load_device_command(
+                gdpa,
+                device,
+                c"vkCreateComputePipelines",
+            )?,
+            destroy_pipeline: load_device_command(gdpa, device, c"vkDestroyPipeline")?,
+            create_descriptor_pool: load_device_command(gdpa, device, c"vkCreateDescriptorPool")?,
+            destroy_descriptor_pool: load_device_command(
+                gdpa,
+                device,
+                c"vkDestroyDescriptorPool",
+            )?,
+            allocate_descriptor_sets: load_device_command(
+                gdpa,
+                device,
+                c"vkAllocateDescriptorSets",
+            )?,
+            update_descriptor_sets: load_device_command(gdpa, device, c"vkUpdateDescriptorSets")?,
+            create_command_pool: load_device_command(gdpa, device, c"vkCreateCommandPool")?,
+            destroy_command_pool: load_device_command(gdpa, device, c"vkDestroyCommandPool")?,
+            allocate_command_buffers: load_device_command(
+                gdpa,
+                device,
+                c"vkAllocateCommandBuffers",
+            )?,
+            free_command_buffers: load_device_command(gdpa, device, c"vkFreeCommandBuffers")?,
+            begin_command_buffer: load_device_command(gdpa, device, c"vkBeginCommandBuffer")?,
+            end_command_buffer: load_device_command(gdpa, device, c"vkEndCommandBuffer")?,
+            cmd_bind_pipeline: load_device_command(gdpa, device, c"vkCmdBindPipeline")?,
+            cmd_bind_descriptor_sets: load_device_command(
+                gdpa,
+                device,
+                c"vkCmdBindDescriptorSets",
+            )?,
+            cmd_push_constants: load_device_command(gdpa, device, c"vkCmdPushConstants")?,
+            cmd_dispatch: load_device_command(gdpa, device, c"vkCmdDispatch")?,
+            cmd_pipeline_barrier: load_device_command(gdpa, device, c"vkCmdPipelineBarrier")?,
+            create_fence: load_device_command(gdpa, device, c"vkCreateFence")?,
+            destroy_fence: load_device_command(gdpa, device, c"vkDestroyFence")?,
+            wait_for_fences: load_device_command(gdpa, device, c"vkWaitForFences")?,
+            queue_submit: load_device_command(gdpa, device, c"vkQueueSubmit")?,
+            device_wait_idle: load_device_command(gdpa, device, c"vkDeviceWaitIdle")?,
         })
     }
 }
@@ -575,6 +782,20 @@ fn create_instance(
     _gipa: PfnVkGetInstanceProcAddr,
     config: InstanceConfig,
 ) -> Result<VkInstance, BootError> {
+    // When validation is requested, BOTH the layer and the `VK_EXT_debug_utils`
+    // extension must be present, else the messenger (the oracle) cannot be
+    // created — a missing oracle must never be invisible (plan §6). Query
+    // presence up front and fail loud with `ValidationUnavailable` so the
+    // caller's tests treat an SDK-less host as "skip", not "pass blind".
+    if config.enable_validation {
+        if !is_validation_layer_present(global)? {
+            return Err(BootError::ValidationUnavailable);
+        }
+        if !is_debug_utils_extension_present(global)? {
+            return Err(BootError::ValidationUnavailable);
+        }
+    }
+
     let app_info = VkApplicationInfo {
         s_type: VkStructureType::ApplicationInfo,
         p_next: ptr::null(),
@@ -585,42 +806,228 @@ fn create_instance(
         api_version: VK_API_VERSION_1_3,
     };
 
-    // Validation layer is requested only when the caller asks for it. Whether
-    // it is actually *present* is a query the SDK-gated steps add; for the
-    // NO-SDK sub-step the flag is never set, so the layer array is empty and
-    // instance creation does not require the layer. If a future caller sets the
-    // flag and the layer is absent, `vkCreateInstance` returns
-    // `VK_ERROR_LAYER_NOT_PRESENT`, surfaced as a loud `VkError` (never a
-    // silent requirement).
+    // Validation layer + `VK_EXT_debug_utils` extension are enabled together,
+    // only when the caller asks for it (both verified present above). The
+    // extension is what makes `vkCreateDebugUtilsMessengerEXT` resolvable and
+    // the messenger functional; enabling the layer alone would emit no messages
+    // to our callback.
     let layer_ptrs: [*const c_char; 1] = [VALIDATION_LAYER.as_ptr()];
-    let (layer_count, pp_layers) = if config.enable_validation {
-        (1u32, layer_ptrs.as_ptr())
+    let ext_ptrs: [*const c_char; 1] = [VK_EXT_DEBUG_UTILS_EXTENSION_NAME.as_ptr()];
+    let (layer_count, pp_layers, ext_count, pp_exts) = if config.enable_validation {
+        (1u32, layer_ptrs.as_ptr(), 1u32, ext_ptrs.as_ptr())
     } else {
-        (0u32, ptr::null())
+        (0u32, ptr::null(), 0u32, ptr::null())
+    };
+
+    // A create-time messenger threaded through `p_next` captures validation
+    // messages emitted DURING `vkCreateInstance` / `vkDestroyInstance` — the
+    // window the persistent messenger cannot cover (it does not exist before the
+    // instance, and is destroyed before it). Its `p_user_data` is null because
+    // the heap state Box does not exist yet at instance-creation time; the
+    // callback no-ops on a null user-data pointer but still logs the message
+    // text, so a create/destroy-time error is still surfaced to the log. The
+    // create-info lives on this stack frame and is only read during the call.
+    let ci_messenger = VkDebugUtilsMessengerCreateInfoExt {
+        s_type: VkStructureType::DebugUtilsMessengerCreateInfoExt,
+        p_next: ptr::null(),
+        flags: 0,
+        message_severity: debug::MESSENGER_SEVERITY,
+        message_type: debug::MESSENGER_TYPE,
+        pfn_user_callback: debug::debug_callback,
+        p_user_data: ptr::null_mut(),
+    };
+    let p_next: *const c_void = if config.enable_validation {
+        (&ci_messenger as *const VkDebugUtilsMessengerCreateInfoExt).cast()
+    } else {
+        ptr::null()
     };
 
     let create_info = VkInstanceCreateInfo {
         s_type: VkStructureType::InstanceCreateInfo,
-        p_next: ptr::null(),
+        p_next,
         flags: 0,
         p_application_info: &app_info,
         enabled_layer_count: layer_count,
         pp_enabled_layer_names: pp_layers,
-        enabled_extension_count: 0,
-        pp_enabled_extension_names: ptr::null(),
+        enabled_extension_count: ext_count,
+        pp_enabled_extension_names: pp_exts,
     };
 
     let mut instance = VkInstance::NULL;
     // SAFETY: `create_info` is a fully-initialized `#[repr(C)]`
-    // `VkInstanceCreateInfo` whose pointer members (`p_application_info`,
-    // optional layer array) outlive the call; `&mut instance` is a valid
-    // out-pointer. NULL allocator selects the default.
+    // `VkInstanceCreateInfo` whose pointer members (`p_application_info`, the
+    // optional layer/extension arrays, the optional `p_next` create-time
+    // messenger) all outlive the call (they are locals of this frame). `&mut
+    // instance` is a valid out-pointer. NULL allocator selects the default.
     let raw = unsafe { (global.create_instance)(&create_info, ptr::null(), &mut instance) };
     let result = VkResult::from_raw(raw);
     if !result.is_success() {
         return Err(BootError::VkError("vkCreateInstance", result));
     }
     Ok(instance)
+}
+
+/// Whether `VK_LAYER_KHRONOS_validation` is installed (queried via the global
+/// `vkEnumerateInstanceLayerProperties`).
+fn is_validation_layer_present(global: &GlobalFns) -> Result<bool, BootError> {
+    let mut count: u32 = 0;
+    // SAFETY: count-query call with a null array; `&mut count` is a valid
+    // out-pointer.
+    let raw = unsafe { (global.enumerate_instance_layer_properties)(&mut count, ptr::null_mut()) };
+    let result = VkResult::from_raw(raw);
+    if !result.is_success() && result != VkResult::INCOMPLETE {
+        return Err(BootError::VkError(
+            "vkEnumerateInstanceLayerProperties(count)",
+            result,
+        ));
+    }
+    if count == 0 {
+        return Ok(false);
+    }
+
+    let mut layers = vec![
+        VkLayerProperties {
+            layer_name: [0; 256],
+            spec_version: 0,
+            implementation_version: 0,
+            description: [0; 256],
+        };
+        count as usize
+    ];
+    // SAFETY: `layers` has exactly `count` slots; the array pointer is valid for
+    // `count` writes of the driver-written `#[repr(C)]` `VkLayerProperties`.
+    let raw =
+        unsafe { (global.enumerate_instance_layer_properties)(&mut count, layers.as_mut_ptr()) };
+    let result = VkResult::from_raw(raw);
+    if !result.is_success() && result != VkResult::INCOMPLETE {
+        return Err(BootError::VkError(
+            "vkEnumerateInstanceLayerProperties(fill)",
+            result,
+        ));
+    }
+    layers.truncate(count as usize);
+
+    Ok(layers
+        .iter()
+        .any(|l| cstr_array_eq(&l.layer_name, VALIDATION_LAYER)))
+}
+
+/// Whether the `VK_EXT_debug_utils` instance extension is advertised (queried
+/// via the global `vkEnumerateInstanceExtensionProperties` with a null layer).
+fn is_debug_utils_extension_present(global: &GlobalFns) -> Result<bool, BootError> {
+    let mut count: u32 = 0;
+    // SAFETY: null `p_layer_name` queries the instance's own extensions; the
+    // count-query call passes a null array; `&mut count` is a valid out-pointer.
+    let raw = unsafe {
+        (global.enumerate_instance_extension_properties)(ptr::null(), &mut count, ptr::null_mut())
+    };
+    let result = VkResult::from_raw(raw);
+    if !result.is_success() && result != VkResult::INCOMPLETE {
+        return Err(BootError::VkError(
+            "vkEnumerateInstanceExtensionProperties(count)",
+            result,
+        ));
+    }
+    if count == 0 {
+        return Ok(false);
+    }
+
+    let mut exts = vec![
+        VkExtensionProperties {
+            extension_name: [0; 256],
+            spec_version: 0,
+        };
+        count as usize
+    ];
+    // SAFETY: `exts` has exactly `count` slots; the array pointer is valid for
+    // `count` writes of the driver-written `#[repr(C)]` `VkExtensionProperties`.
+    let raw = unsafe {
+        (global.enumerate_instance_extension_properties)(
+            ptr::null(),
+            &mut count,
+            exts.as_mut_ptr(),
+        )
+    };
+    let result = VkResult::from_raw(raw);
+    if !result.is_success() && result != VkResult::INCOMPLETE {
+        return Err(BootError::VkError(
+            "vkEnumerateInstanceExtensionProperties(fill)",
+            result,
+        ));
+    }
+    exts.truncate(count as usize);
+
+    Ok(exts
+        .iter()
+        .any(|e| cstr_array_eq(&e.extension_name, VK_EXT_DEBUG_UTILS_EXTENSION_NAME)))
+}
+
+/// Compares a fixed-size NUL-terminated `c_char` name array against a `&CStr`
+/// without allocating: byte-for-byte up to and including the NUL.
+fn cstr_array_eq(name: &[c_char; 256], want: &CStr) -> bool {
+    let want_bytes = want.to_bytes_with_nul();
+    if want_bytes.len() > name.len() {
+        return false;
+    }
+    name.iter()
+        .zip(want_bytes.iter())
+        .all(|(&a, &b)| a as u8 == b)
+}
+
+/// Creates the `VK_EXT_debug_utils` validation messenger (Slice-0 0a oracle).
+///
+/// Returns `(NULL, None)` when `enable_validation` is `false`. Otherwise it
+/// boxes a fresh [`DebugMessengerState`] (so the callback's `p_user_data`
+/// pointer is address-stable), resolves `vkCreateDebugUtilsMessengerEXT` via
+/// `gipa`, and creates a messenger wired to [`debug::debug_callback`] that
+/// records WARNING/ERROR messages into the boxed state. The caller stores the
+/// returned messenger + Box on the context and destroys the messenger BEFORE
+/// the instance in `Drop` (and drops the Box only after).
+fn create_debug_messenger(
+    gipa: PfnVkGetInstanceProcAddr,
+    instance: VkInstance,
+    enable_validation: bool,
+) -> Result<(VkDebugUtilsMessengerEXT, Option<Box<DebugMessengerState>>), BootError> {
+    if !enable_validation {
+        return Ok((VkDebugUtilsMessengerEXT::NULL, None));
+    }
+
+    // SAFETY: the create command is an instance-scope extension command,
+    // resolvable because `VK_EXT_debug_utils` is enabled on this instance (we
+    // verified its presence and enabled it in `create_instance`); `T` is the
+    // matching PFN typedef.
+    let create: PfnVkCreateDebugUtilsMessengerExt =
+        unsafe { load_instance_command(gipa, instance, c"vkCreateDebugUtilsMessengerEXT")? };
+
+    // Box the state FIRST so its heap address is fixed before the messenger
+    // captures a raw pointer into it.
+    let state = Box::new(DebugMessengerState::new());
+    let p_user_data = (&*state as *const DebugMessengerState) as *mut c_void;
+
+    let create_info = VkDebugUtilsMessengerCreateInfoExt {
+        s_type: VkStructureType::DebugUtilsMessengerCreateInfoExt,
+        p_next: ptr::null(),
+        flags: 0,
+        message_severity: debug::MESSENGER_SEVERITY,
+        message_type: debug::MESSENGER_TYPE,
+        pfn_user_callback: debug::debug_callback,
+        p_user_data,
+    };
+
+    let mut messenger = VkDebugUtilsMessengerEXT::NULL;
+    // SAFETY: `instance` is live with `VK_EXT_debug_utils` enabled; `create` is
+    // the resolved command; `create_info` is a fully-initialized `#[repr(C)]`
+    // struct whose `p_user_data` points to the live boxed state (which the
+    // caller keeps alive until after the messenger is destroyed); `&mut
+    // messenger` is a valid out-pointer; NULL allocator selects the default.
+    let raw = unsafe { create(instance, &create_info, ptr::null(), &mut messenger) };
+    let result = VkResult::from_raw(raw);
+    if !result.is_success() {
+        // The Box drops here on the error path (no messenger references it).
+        return Err(BootError::VkError("vkCreateDebugUtilsMessengerEXT", result));
+    }
+
+    Ok((messenger, Some(state)))
 }
 
 /// Picks a physical device (prefer a discrete GPU, else the first), returning
