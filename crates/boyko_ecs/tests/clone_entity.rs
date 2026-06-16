@@ -209,6 +209,10 @@ fn clone_owning_component_deep_copies_string_drop_count_exact() {
 struct T3Trap(u32);
 
 impl Copy for T3Trap {}
+// The panic IS the test: a `Copy`-no-`Entity` component must batch-memcpy and
+// NEVER call `clone()`. The clone impl is therefore deliberately non-canonical
+// (it does not return `*self`), so the newer clippy lint is expected here.
+#[allow(clippy::non_canonical_clone_impl)]
 impl Clone for T3Trap {
     fn clone(&self) -> Self {
         panic!("T3Trap::clone must NEVER be called — Copy components batch-memcpy");
