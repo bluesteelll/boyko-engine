@@ -12,6 +12,7 @@ pub mod iters;
 pub mod events;
 pub mod resources;
 pub mod schedule;
+pub mod serialize;
 pub mod state;
 pub mod system;
 pub mod time;

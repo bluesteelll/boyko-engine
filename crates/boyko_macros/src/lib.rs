@@ -85,7 +85,7 @@ use syn::{
 /// is expected (wrap it in a `#[derive(Bundle)]` struct instead). The flag is
 /// also the escape hatch when a type must derive BOTH `Component` and
 /// `Bundle` — without it the two derives now collide on the `Bundle` impl.
-#[proc_macro_derive(Component, attributes(component, require))]
+#[proc_macro_derive(Component, attributes(component, require, entities))]
 pub fn component_macro(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
 
@@ -141,8 +141,31 @@ pub fn component_macro(input: TokenStream) -> TokenStream {
 
     // Feature 3 (D3 gate): scan the struct fields for an `Entity` / `ChildOf` type
     // BEFORE `input.ident` is moved out below. A `Copy`-with-`Entity` component is
-    // forced to `CloneViaFn` so the deep-clone remap can run.
+    // forced to `CloneViaFn` so the deep-clone remap can run. Serialization S0
+    // (C3) reuses the same scan to suppress the POB arm for an Entity-bearing type.
     let has_entity_field = struct_has_entity_field(&input);
+
+    // Serialization S0 (C4): accept (acceptance-only — no codegen yet) the
+    // `#[entities]` field attribute; reject a malformed `#[entities(..)]` shape.
+    if let Err(ts) = validate_entities_attrs(&input) {
+        return ts;
+    }
+
+    // Serialization S0 (plan §3.7, §5 C1–C3): compute the serialize classification
+    // overrides (the `SerializeProbe` invocation + `SerPod` proof + fingerprint +
+    // stable_name + format_version) BEFORE `input.ident` moves. Suppressed for a
+    // bitset enable tag (no `ComponentPool`, so it must classify `Ignore` and never
+    // enter a serialized column set — mirrors the clone suppression below).
+    let (serialize_items, serialize_module_items) = if hooks.storage_bitset {
+        // A bitset tag stays at the trait defaults (`Ignore` / version 0 /
+        // fingerprint 0 / type-name key) — emit nothing.
+        (TokenStream2::new(), TokenStream2::new())
+    } else {
+        match serialize_codegen(&input, &input.ident, &hooks, has_entity_field) {
+            Ok(items) => items,
+            Err(ts) => return ts,
+        }
+    };
 
     let name = input.ident;
 
@@ -197,6 +220,22 @@ pub fn component_macro(input: TokenStream) -> TokenStream {
         )
     };
 
+    // Serialization S0 (plan §3.7): the UNGATED install calls in `component_id()`
+    // (like `install_clone_fn`) — one cold `OnceLock::set` (the `SERIALIZE` table)
+    // + one `Mutex` insert (the C1 `STABLE_NAME_INDEX`) per type per process, the
+    // 0%-gate. Suppressed for a bitset enable tag (no `ComponentPool` → never
+    // serialized): the `serialize_items` above already emit nothing for it, so the
+    // table would record the `Ignore` trait default — keep the metadata table
+    // consistent by also skipping the install + name-index registration.
+    let serialize_install = if hooks.storage_bitset {
+        TokenStream2::new()
+    } else {
+        quote! {
+            boyko_ecs::ecs::core::component::component_registry::install_serialize_fn::<Self>(raw);
+            boyko_ecs::ecs::core::component::component_registry::register_stable_name::<Self>(raw);
+        }
+    };
+
     // Phase 22 D7: single-component Bundle emission (suppressed by
     // `#[component(no_bundle)]`). EnableTag D6: `storage = "bitset"` ALSO
     // suppresses it — a bitset tag has no `ComponentPool` and must not be
@@ -212,6 +251,8 @@ pub fn component_macro(input: TokenStream) -> TokenStream {
         #bundle_items
 
         #require_ctor_fns
+
+        #serialize_module_items
 
         impl #name {
             /// Size of this component in bytes.
@@ -250,6 +291,7 @@ pub fn component_macro(input: TokenStream) -> TokenStream {
                     #storage_install
                     #require_install
                     #clone_install
+                    #serialize_install
                     boyko_ecs::ecs::identifiers::primitives::ComponentId(raw)
                 })
             }
@@ -261,6 +303,8 @@ pub fn component_macro(input: TokenStream) -> TokenStream {
             #require_items
 
             #clone_items
+
+            #serialize_items
 
             // NOTE: `std::any::type_name::<Self>()` is not yet stable as a const fn.
             // Calling it from a regular fn body is fine; the compiler folds it to a
@@ -315,6 +359,16 @@ struct ComponentHookPaths {
     /// `unsafe fn(*const u8, *mut u8)` (the `CloneFn` shape) the user installs as the
     /// custom clone. Mutually exclusive with `no_clone`.
     clone_with: Option<Path>,
+    /// Serialization S0: `true` iff the bare `no_serialize` flag was supplied — opts
+    /// the component out of serialization (`Serializability::Ignore`), even if the
+    /// type is otherwise POB / `Clone`.
+    no_serialize: bool,
+    /// Serialization S0 (C1): `Some(name)` iff `stable_name = "..."` was supplied —
+    /// overrides the default fully-qualified type name as the stable on-disk key.
+    stable_name: Option<String>,
+    /// Serialization S0 (§3.5): `Some(v)` iff `format_version = N` was supplied —
+    /// the human-facing layout/semantic version. Default `0` when omitted.
+    format_version: Option<u16>,
 }
 
 impl ComponentHookPaths {
@@ -488,7 +542,8 @@ fn parse_component_hooks(attrs: &[syn::Attribute]) -> Result<ComponentHookPaths,
                 return Err(meta.error(
                     "on_despawn is not supported in this version (deferred to Phase 14b); \
                      valid keys: on_add, on_insert, on_replace, on_remove, no_bundle, \
-                     no_clone, clone = <fn>, storage = \"bitset\"",
+                     no_clone, clone = <fn>, storage = \"bitset\", no_serialize, \
+                     stable_name = \"..\", format_version = N",
                 ));
             }
 
@@ -539,6 +594,47 @@ fn parse_component_hooks(attrs: &[syn::Attribute]) -> Result<ComponentHookPaths,
                 return Ok(());
             }
 
+            // Serialization S0: bare flag key `no_serialize` — opt out of
+            // serialization (`Serializability::Ignore`).
+            if meta.path.is_ident("no_serialize") {
+                if paths.no_serialize {
+                    return Err(meta.error(
+                        "duplicate #[component(...)] key; no_serialize may be set at most once",
+                    ));
+                }
+                paths.no_serialize = true;
+                return Ok(());
+            }
+
+            // Serialization S0 (C1): NameValue key `stable_name = "..."` — the
+            // stable on-disk type key (a STRING LITERAL). Overrides the default
+            // fully-qualified type name.
+            if meta.path.is_ident("stable_name") {
+                if paths.stable_name.is_some() {
+                    return Err(meta.error(
+                        "duplicate #[component(...)] key; stable_name may be set at most once",
+                    ));
+                }
+                let value = meta.value()?; // consumes the `=`
+                let lit: syn::LitStr = value.parse()?;
+                paths.stable_name = Some(lit.value());
+                return Ok(());
+            }
+
+            // Serialization S0 (§3.5): NameValue key `format_version = N` — the
+            // human-facing layout/semantic version (a `u16` INTEGER LITERAL).
+            if meta.path.is_ident("format_version") {
+                if paths.format_version.is_some() {
+                    return Err(meta.error(
+                        "duplicate #[component(...)] key; format_version may be set at most once",
+                    ));
+                }
+                let value = meta.value()?; // consumes the `=`
+                let lit: syn::LitInt = value.parse()?;
+                paths.format_version = Some(lit.base10_parse::<u16>()?);
+                return Ok(());
+            }
+
             // EnableTag D5 (Wave 5 Step 10): `storage = "bitset"` — a NameValue
             // key whose value is a STRING LITERAL (W1-r6: parsed as a `LitStr`,
             // NOT a bare-key flag and NOT a path). Any other string is rejected
@@ -578,7 +674,8 @@ fn parse_component_hooks(attrs: &[syn::Attribute]) -> Result<ComponentHookPaths,
                 return Err(meta.error(
                     "unknown #[component(...)] key; \
                      valid keys: on_add, on_insert, on_replace, on_remove, no_bundle, \
-                     no_clone, clone = <fn>, storage = \"bitset\"",
+                     no_clone, clone = <fn>, storage = \"bitset\", no_serialize, \
+                     stable_name = \"..\", format_version = N",
                 ));
             };
 
@@ -1091,6 +1188,406 @@ fn clone_codegen(name: &Ident, hooks: &ComponentHookPaths, has_entity_field: boo
             (&&&probe).clone_fn_ptr()
         }
     }
+}
+
+// ── Serialization S0 derive support (plan §3.6 C2, §3.5 C1, §5 C3) ──────────────
+
+/// The `#[repr(...)]` kind relevant to serialization (plan §3.6 / C2). Only the
+/// layout-stable reprs (`C`, `transparent`) make a type blittable; `Rust` (the
+/// default) and `packed` do not (the compiler may reorder fields). Folded into the
+/// layout fingerprint so a `#[repr]` change is detected, and gates POB eligibility.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReprKind {
+    /// The default Rust repr — field order is unspecified, NOT blittable.
+    RustDefault,
+    /// `#[repr(C)]` — a fixed, predictable layout. Blittable.
+    C,
+    /// `#[repr(transparent)]` — single-field newtype, same layout as the field.
+    /// Blittable.
+    Transparent,
+    /// Any other repr (`packed`, `align(N)`, a primitive enum repr, …). Treated as
+    /// non-blittable for POB (conservative): the macro folds the kind into the
+    /// fingerprint but never classifies it `PlainOldBytes`.
+    Other,
+}
+
+impl ReprKind {
+    /// A stable `u64` tag for the layout fingerprint (plan §3.6). Distinct values
+    /// so a `#[repr(C)]` → `#[repr(transparent)]` (or → default) change perturbs
+    /// the fingerprint.
+    fn fingerprint_tag(self) -> u64 {
+        match self {
+            ReprKind::RustDefault => 0,
+            ReprKind::C => 1,
+            ReprKind::Transparent => 2,
+            ReprKind::Other => 3,
+        }
+    }
+
+    /// `true` iff a POB classification is layout-permitted by the repr (plan §3.6
+    /// C2: `#[repr(C)]`/`#[repr(transparent)]` required for blittable).
+    fn pob_layout_ok(self) -> bool {
+        matches!(self, ReprKind::C | ReprKind::Transparent)
+    }
+}
+
+/// Parses the `#[repr(...)]` attribute(s) into a [`ReprKind`] (plan §3.6 / C2).
+/// Recognizes `C` and `transparent`; everything else (including `packed`,
+/// `align(N)`, primitive enum reprs, or no `#[repr]` at all) maps to a
+/// non-blittable kind. `C` wins if both `C` and an alignment/other modifier are
+/// present (`#[repr(C, align(8))]` is still C-layout for blit purposes).
+fn parse_repr(attrs: &[syn::Attribute]) -> ReprKind {
+    let mut kind = ReprKind::RustDefault;
+    for attr in attrs {
+        if !attr.path().is_ident("repr") {
+            continue;
+        }
+        // Each `#[repr(...)]` is a comma-separated list of idents/calls.
+        let _ = attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("C") {
+                kind = ReprKind::C;
+            } else if meta.path.is_ident("transparent") {
+                // Do not let `transparent` downgrade an already-seen `C`.
+                if kind != ReprKind::C {
+                    kind = ReprKind::Transparent;
+                }
+            } else if kind == ReprKind::RustDefault {
+                // `packed` / `align` / primitive enum reprs / unknown → Other,
+                // but never overwrite a recognized C/transparent.
+                kind = ReprKind::Other;
+            }
+            // `parse_nested_meta` wants every nested item consumed; `align(N)`
+            // carries a parenthesized value — swallow it so parsing succeeds.
+            if meta.input.peek(syn::token::Paren) {
+                let _ = meta.parse_nested_meta(|_| Ok(()));
+            }
+            Ok(())
+        });
+    }
+    kind
+}
+
+/// Collects every field type of a struct (named or tuple), in declaration order
+/// (plan §3.6 / C2 — the fingerprint and the `SerPod` field gate both need them).
+/// Returns `None` for a unit struct (no fields — a ZST tag) and for enums/unions
+/// (no single field shape; never POB). The `bool` is `true` for a unit struct
+/// (distinguishes "zero fields, blittable ZST" from "not a plain struct").
+fn struct_field_types(input: &DeriveInput) -> Option<(Vec<Type>, Vec<FieldAccess>)> {
+    match &input.data {
+        Data::Struct(s) => match &s.fields {
+            Fields::Named(named) => {
+                let tys = named.named.iter().map(|f| f.ty.clone()).collect();
+                let access = named
+                    .named
+                    .iter()
+                    .map(|f| FieldAccess::Named(f.ident.clone().expect("named field has ident")))
+                    .collect();
+                Some((tys, access))
+            }
+            Fields::Unnamed(unnamed) => {
+                let tys = unnamed.unnamed.iter().map(|f| f.ty.clone()).collect();
+                let access = (0..unnamed.unnamed.len()).map(FieldAccess::Index).collect();
+                Some((tys, access))
+            }
+            // Unit struct: zero fields. A blittable ZST tag (no field-validity
+            // concern). Returned as empty vectors.
+            Fields::Unit => Some((Vec::new(), Vec::new())),
+        },
+        // Enums and unions are never POB (no single-field-shape, validity-invariant
+        // discriminant / overlapping fields). Returning None routes them to the
+        // ViaFn / Ignore arms and suppresses the fingerprint's offset_of terms.
+        Data::Enum(_) | Data::Union(_) => None,
+    }
+}
+
+/// A field accessor for `offset_of!` — either a named field or a tuple index.
+enum FieldAccess {
+    Named(Ident),
+    Index(usize),
+}
+
+impl FieldAccess {
+    /// Emits the field selector token for `::core::mem::offset_of!(Ty, <sel>)`.
+    fn offset_of_selector(&self) -> TokenStream2 {
+        match self {
+            FieldAccess::Named(id) => quote! { #id },
+            FieldAccess::Index(i) => {
+                let idx = syn::Index::from(*i);
+                quote! { #idx }
+            }
+        }
+    }
+}
+
+/// Emits the `const LAYOUT_FINGERPRINT: u64` override (plan §3.6 / C2):
+/// a `const fn`-folded hash of `(size_of, align_of, repr_tag, [offset_of!(C, f)
+/// for each field f], per-field size_of, field_count)`. NO field-type-NAME
+/// dependency (C2 — a proc-macro cannot see a field's stable type name; only
+/// `offset_of!`/`size_of`, which are derivable). Catches a same-size field reorder
+/// IFF it changes an offset; a pure same-size swap of two identical-type fields is
+/// layout-invisible (the bytes are interchangeable) and therefore safe to blit —
+/// documented in the plan.
+///
+/// Reuses the registry's `fnv1a_64` over a little-endian byte buffer of the layout
+/// scalars so the hash is identical to what the loader would recompute.
+fn layout_fingerprint_codegen(
+    name: &Ident,
+    repr: ReprKind,
+    field_access: &[FieldAccess],
+    field_tys: &[Type],
+) -> TokenStream2 {
+    let repr_tag = repr.fingerprint_tag();
+    let field_count = field_access.len() as u64;
+
+    // Per-field `(offset_of!(Name, f), size_of::<FieldTy>())` u64 pairs, pushed
+    // into the byte buffer in declaration order.
+    let field_terms: Vec<TokenStream2> = field_access
+        .iter()
+        .zip(field_tys.iter())
+        .map(|(acc, ty)| {
+            let sel = acc.offset_of_selector();
+            quote! {
+                __boyko_fp_push(
+                    &mut __buf,
+                    &mut __len,
+                    ::core::mem::offset_of!(#name, #sel) as u64,
+                );
+                __boyko_fp_push(
+                    &mut __buf,
+                    &mut __len,
+                    ::core::mem::size_of::<#ty>() as u64,
+                );
+            }
+        })
+        .collect();
+
+    quote! {
+        const LAYOUT_FINGERPRINT: u64 = {
+            // A fixed-capacity scratch buffer + a const-fn FNV-1a fold: no alloc,
+            // fully const-evaluable. 8 scalars of header + 2 per field; 64 fields
+            // is far above any realistic component arity.
+            const __CAP: usize = 8 * (2 + 2 * 64);
+            let mut __buf = [0u8; __CAP];
+            let mut __len: usize = 0;
+
+            const fn __boyko_fp_push(buf: &mut [u8; __CAP], len: &mut usize, value: u64) {
+                let bytes = value.to_le_bytes();
+                let mut i = 0;
+                while i < 8 {
+                    buf[*len] = bytes[i];
+                    *len += 1;
+                    i += 1;
+                }
+            }
+
+            __boyko_fp_push(&mut __buf, &mut __len, ::core::mem::size_of::<#name>() as u64);
+            __boyko_fp_push(&mut __buf, &mut __len, ::core::mem::align_of::<#name>() as u64);
+            __boyko_fp_push(&mut __buf, &mut __len, #repr_tag);
+            __boyko_fp_push(&mut __buf, &mut __len, #field_count);
+            #(#field_terms)*
+
+            // `__len <= __CAP` by construction (4 header pushes + 2 per field; the
+            // field count is bounded by the 64-field capacity above — a struct with
+            // > 64 fields overflows `__buf` and the const eval fails loudly at
+            // compile time, never at runtime). The `[..__len]` const-slice hands the
+            // exact written prefix to the same FNV-1a the loader recomputes.
+            let __slice: &[u8] = __buf.split_at(__len).0;
+            ::boyko_ecs::ecs::core::component::component_registry::fnv1a_64(__slice)
+        };
+    }
+}
+
+/// Emits the serialization classification overrides (plan §3.7, §5 C3): the
+/// `SERIALIZABILITY` const + `serializability_runtime()` method (via the autoref
+/// `SerializeProbe`, STRICTER than clone), the conditional `unsafe impl SerPod`
+/// (the all-bits-valid aggregate proof for the POB arm), the `FORMAT_VERSION`
+/// const, the `stable_name()` override, and the `LAYOUT_FINGERPRINT` const.
+///
+/// * `#[component(no_serialize)]` → `Ignore` (emit only the metadata consts;
+///   `serializability_runtime` stays the `Ignore` default — return early).
+/// * `#[repr(C/transparent)]` + no `Entity` field → `POB_ELIGIBLE = true` + a
+///   `where`-gated `unsafe impl SerPod for Self` so the POB arm fires ONLY if every
+///   field is `SerPod` (all-bits-valid). A `bool`/`char`/enum/niche field fails the
+///   `where` clause, the `impl SerPod` does not apply, and the autoref probe falls
+///   to `SerializeViaFn` (C3).
+/// * else → `POB_ELIGIBLE = false`: the probe resolves `SerializeViaFn` (Clone) or
+///   `Ignore` (non-Clone).
+///
+/// Returns `(trait_items, module_items)`: the trait-body items (consts + methods,
+/// spliced into `impl Component for Self`) and the MODULE-SCOPE items (the
+/// `unsafe impl SerPod for Self`, which is a top-level item and CANNOT live inside
+/// an `impl` block — it is emitted alongside the single-component `Bundle` impl).
+fn serialize_codegen(
+    input: &DeriveInput,
+    name: &Ident,
+    hooks: &ComponentHookPaths,
+    has_entity_field: bool,
+) -> Result<(TokenStream2, TokenStream2), TokenStream> {
+    let repr = parse_repr(&input.attrs);
+
+    // Field shape: None for enums/unions (never POB). For POB eligibility the type
+    // must be a plain struct AND repr-C/transparent AND have no Entity field.
+    let fields = struct_field_types(input);
+
+    // `format_version` const + `stable_name()` override are emitted regardless of
+    // the classification (a ViaFn / Ignore component still carries a stable key +
+    // version once it opts in via a future encode path; and the fingerprint guards
+    // even a decode-path mismatch — C2).
+    let format_version = hooks.format_version.unwrap_or(0);
+    let format_version_item = quote! {
+        const FORMAT_VERSION: u16 = #format_version;
+    };
+    let stable_name_item = match &hooks.stable_name {
+        Some(s) => quote! {
+            #[inline]
+            fn stable_name() -> &'static str { #s }
+        },
+        None => TokenStream2::new(),
+    };
+
+    // The layout fingerprint. For an enum/union (no field shape) the fingerprint
+    // folds only size/align/repr/field_count==0 — still a valid guard, never POB.
+    let (field_access, field_tys): (Vec<FieldAccess>, Vec<Type>) = match &fields {
+        Some((tys, access)) => {
+            // Unzip preserving order.
+            let a: Vec<FieldAccess> = access
+                .iter()
+                .map(|f| match f {
+                    FieldAccess::Named(id) => FieldAccess::Named(id.clone()),
+                    FieldAccess::Index(i) => FieldAccess::Index(*i),
+                })
+                .collect();
+            (a, tys.clone())
+        }
+        None => (Vec::new(), Vec::new()),
+    };
+    let fingerprint_item = layout_fingerprint_codegen(name, repr, &field_access, &field_tys);
+
+    // `no_serialize`: classify Ignore. Emit the metadata consts (so the file key /
+    // version / fingerprint are still recorded) but leave `serializability_runtime`
+    // at the `Ignore` trait default.
+    if hooks.no_serialize {
+        let trait_items = quote! {
+            const SERIALIZABILITY:
+                ::boyko_ecs::ecs::core::component::component_registry::Serializability =
+                ::boyko_ecs::ecs::core::component::component_registry::Serializability::Ignore;
+            #format_version_item
+            #fingerprint_item
+            #stable_name_item
+        };
+        // `no_serialize` never emits a `SerPod` impl (the type must not be POB).
+        return Ok((trait_items, TokenStream2::new()));
+    }
+
+    // POB eligibility (C2 + C3): a plain struct, repr-C/transparent, no Entity
+    // field. The all-bits-valid FIELD proof is NOT done here — it is the
+    // `Fields: SerPodTuple` bound on the autoref POB arm (a generic bound the
+    // resolver can leave un-matched, demoting to ViaFn — never a hard error). So a
+    // `#[repr(Rust)]` struct (POB_ELIGIBLE == false) is a SILENT demotion to ViaFn,
+    // and a repr-C struct with a bool/char/enum/niche field also silently demotes
+    // (its field tuple is not `SerPodTuple`). This realizes the plan's "not
+    // provably POB → SerializeViaFn" (§5 C3) without a hard error, which matches
+    // the decode path always being sound.
+    let is_plain_struct = fields.is_some();
+    let pob_eligible = is_plain_struct && repr.pob_layout_ok() && !has_entity_field;
+
+    let pob_flag = if pob_eligible {
+        quote! { true }
+    } else {
+        quote! { false }
+    };
+
+    // The field tuple `(F0, F1, …)` the probe's `Fields` parameter carries — the
+    // `SerPodTuple` field-validity proof operates on it. A unit struct / non-plain
+    // struct uses `()` (vacuously `SerPodTuple` when POB_ELIGIBLE, but a non-plain
+    // type carries POB_ELIGIBLE == false so the POB arm never fires anyway).
+    let field_tuple = quote! { ( #(#field_tys,)* ) };
+
+    let trait_items = quote! {
+        #[inline]
+        fn serializability_runtime()
+            -> ::boyko_ecs::ecs::core::component::component_registry::Serializability {
+            // Bring the autoref-arm traits into scope so method resolution can pick
+            // the `&&` (POB) / `&` (ViaFn) arms over the by-value (Ignore) inherent.
+            use ::boyko_ecs::ecs::core::component::component_registry::{
+                SerIgnoreArm as _, SerViaFnArm as _, SerPobArm as _,
+            };
+            // The probe is invoked through THREE refs (`(&&&probe).method()`): the
+            // resolver reaches all three `&self` arms and picks the highest-priority
+            // APPLICABLE one — most-ref'd `Self` wins (`&&` = POB → `&` = ViaFn →
+            // by-value = Ignore). The ref count MUST stay `&&&` (a `&&` call would
+            // misclassify). `POB_ELIGIBLE` suppresses the POB arm for a non-repr-C /
+            // Entity-bearing type; the `Fields: SerPodTuple` bound on the POB arm
+            // additionally suppresses it when a field is not all-bits-valid (C3) —
+            // a deferral (demote to ViaFn), never a hard error.
+            let probe = ::boyko_ecs::ecs::core::component::component_registry::SerializeProbe::<
+                #name, #field_tuple, #pob_flag,
+            >::new();
+            (&&&probe).serializability()
+        }
+
+        #format_version_item
+        #fingerprint_item
+        #stable_name_item
+    };
+
+    // No module-scope items: the field-validity proof lives in the probe arm's
+    // `Fields: SerPodTuple` bound, not a per-struct `SerPod` impl (a conditional
+    // `impl SerPod for Struct where Field: SerPod` is rejected for a concrete
+    // non-SerPod field — the compiler eagerly evaluates the false bound).
+    Ok((trait_items, TokenStream2::new()))
+}
+
+/// Serialization S0 (C4 acceptance-only): rejects an unknown `#[entities]` field
+/// attribute usage shape and otherwise accepts it. v1 does NOT auto-emit a remap
+/// from `#[entities]` (that is S2+, built on the hand-written `ChildOf` path); S0
+/// only PARSES the attribute so a user can annotate `#[entities] target: Entity`
+/// without a compile error, and so a future phase can wire the remap. An
+/// `#[entities]` on a non-field position is impossible (it is a field attribute);
+/// a malformed `#[entities(...)]` with arguments is rejected (none are defined).
+fn validate_entities_attrs(input: &DeriveInput) -> Result<(), TokenStream> {
+    let check = |attrs: &[syn::Attribute]| -> Result<(), TokenStream> {
+        for attr in attrs {
+            if !attr.path().is_ident("entities") {
+                continue;
+            }
+            // S0 accepts only the bare `#[entities]` form (a path-style attribute).
+            // Any argument list is reserved for a future phase and rejected now so a
+            // typo is loud rather than silently ignored.
+            if !matches!(attr.meta, syn::Meta::Path(_)) {
+                return Err(syn::Error::new_spanned(
+                    attr,
+                    "#[entities] takes no arguments in this version; write a bare \
+                     `#[entities]` on the Entity-bearing field (its remap is wired \
+                     in a later serialization phase)",
+                )
+                .to_compile_error()
+                .into());
+            }
+        }
+        Ok(())
+    };
+
+    match &input.data {
+        Data::Struct(s) => {
+            for f in s.fields.iter() {
+                check(&f.attrs)?;
+            }
+        }
+        Data::Enum(e) => {
+            for v in &e.variants {
+                for f in v.fields.iter() {
+                    check(&f.attrs)?;
+                }
+            }
+        }
+        Data::Union(u) => {
+            for f in &u.fields.named {
+                check(&f.attrs)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Derive macro for implementing the Resource trait.

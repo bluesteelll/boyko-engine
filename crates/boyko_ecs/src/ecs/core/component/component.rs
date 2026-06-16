@@ -1,5 +1,8 @@
 use std::any::TypeId;
-use crate::ecs::core::component::component_registry::{CloneFn, Cloneability, RequiredDirectEntry};
+use crate::ecs::core::component::component_registry::{
+    CloneFn, Cloneability, DeserializeFn, LoadMapEntitiesFn, RequiredDirectEntry, Serializability,
+    SerializeFn,
+};
 use crate::ecs::core::component::hooks::ComponentHooks;
 use crate::ecs::identifiers::primitives::ComponentId;
 
@@ -108,6 +111,89 @@ pub trait Component: 'static + Sized {
     #[inline]
     fn clone_behavior() -> Cloneability {
         Self::CLONE_BEHAVIOR
+    }
+
+    /// Serialization (Phase S0, plan §3.7) — compile-time serialization
+    /// classification. Defaults to [`Serializability::Ignore`] (no serialize fns
+    /// installed) so EVERY existing / hand-written impl keeps the default and the
+    /// component is non-serializable until it opts in. Needs NO `Clone` / `Copy`
+    /// bound on `Component` (existing impls keep compiling — the 0%-gate).
+    ///
+    /// The `#[derive(Component)]` macro overrides it via a STRICTER autoref probe
+    /// than clone: `PlainOldBytes` for a `#[repr(C/transparent)]` type whose every
+    /// field is all-bits-valid (no `bool`/`char`/enum/niche/`Entity`),
+    /// `SerializeViaFn` for any other `Clone` type, `Ignore` for
+    /// `#[component(no_serialize)]` or a non-`Clone` type. A backward-compatible
+    /// widening — purely a compile-time const, zero ABI break, zero hot-path cost.
+    const SERIALIZABILITY: Serializability = Serializability::Ignore;
+
+    /// Serialization (Phase S0, plan §3.5) — per-component on-disk format version,
+    /// the human-facing layout/semantic-change gate. Default `0`; the derive
+    /// overrides it from `#[component(format_version = N)]`. Read once at
+    /// registration; never on a per-frame path.
+    const FORMAT_VERSION: u16 = 0;
+
+    /// Serialization (Phase S0, plan §3.6 / C2) — the derive-computed blit-validity
+    /// fingerprint: a best-effort hash of `(size, align, repr, per-field offsets,
+    /// field_count)`. Default `0` (hand-written / non-serializable impls); the
+    /// derive overrides it. Guards "the struct changed shape since the save";
+    /// `FORMAT_VERSION` is the human-facing gate. Read once at registration.
+    const LAYOUT_FINGERPRINT: u64 = 0;
+
+    /// Serialization (Phase S0, plan §3.5 / C1) — the stable serialization key.
+    /// Defaults to the fully-qualified type name ([`std::any::type_name`]);
+    /// the derive overrides it from `#[component(stable_name = "...")]`. The
+    /// on-disk type key — `ComponentId` is process-unstable, the name is stable.
+    /// Read once at registration (the [`register_stable_name`] index key).
+    ///
+    /// A METHOD, not a const: `std::any::type_name` is not yet stable as a
+    /// `const fn` (same reason `debug_type_name` is a method). The compiler still
+    /// folds the call to a string literal at codegen, so there is no overhead.
+    ///
+    /// [`register_stable_name`]: crate::ecs::core::component::component_registry::register_stable_name
+    #[inline]
+    fn stable_name() -> &'static str {
+        std::any::type_name::<Self>()
+    }
+
+    /// Serialization (Phase S0) — the per-component serialize glue fn-ptr.
+    /// Defaulted to `None` (consistent with the `Ignore` const); the derive
+    /// overrides it with `Some(..)` for a `SerializeViaFn` type. A `PlainOldBytes`
+    /// type ALSO keeps the `None` default — the whole-column blit is driven by the
+    /// pool layout, never this pointer. Read once at registration by
+    /// `install_serialize_fn`; never on a per-frame path. (S0: the derive returns
+    /// `None` for now — the encode glue lands in S1; the table shape is pinned.)
+    #[inline]
+    fn serialize_fn() -> Option<SerializeFn> {
+        None
+    }
+
+    /// Serialization (Phase S0) — the per-component deserialize glue fn-ptr.
+    /// Defaulted to `None`; the derive overrides it for a `SerializeViaFn` type.
+    /// (S0: `None` — see [`Self::serialize_fn`].)
+    #[inline]
+    fn deserialize_fn() -> Option<DeserializeFn> {
+        None
+    }
+
+    /// Serialization (Phase S0, C4) — the load-direction entity-remap fn-ptr.
+    /// Defaulted to `None`; installed ONLY for entity-bearing components (v1:
+    /// `ChildOf` + explicit `#[entities]` fields). (S0: `None` — the hand-written
+    /// `ChildOf` remap lands with the loader.)
+    #[inline]
+    fn map_entities_fn() -> Option<LoadMapEntitiesFn> {
+        None
+    }
+
+    /// Serialization (Phase S0) — the serialization classification as a METHOD
+    /// (vs the [`Self::SERIALIZABILITY`] const), so the derive can compute it via
+    /// the autoref `SerializeProbe` (a const cannot run autoref). Defaults to the
+    /// const (so hand-written impls that set only `SERIALIZABILITY` keep working).
+    /// The derive overrides this from the same autoref probe. Read once at
+    /// registration by `install_serialize_fn`; never on a per-frame path.
+    #[inline]
+    fn serializability_runtime() -> Serializability {
+        Self::SERIALIZABILITY
     }
 
     /// Phase 14a (plan §6.2) — installs this component's lifecycle hooks into
