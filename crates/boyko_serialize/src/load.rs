@@ -9,13 +9,20 @@
 //! [`load_archetype`](boyko_ecs::ecs::core::serialize::load_archetype) — the
 //! `boyko_ecs`-side WRITER that owns the crate-private row-write primitives.
 //!
-//! # Scope (Phase S2)
+//! # Scope (Phase S2 + S2.5)
 //!
-//! Non-Entity-bearing worlds only (the headline round-trip). Entity fields load
-//! with their RAW saved ids; the saved→fresh remap (`map_entities_fn`) is deferred
-//! to S2.5. The [`LoadEntityMap`](boyko_ecs::ecs::core::serialize::LoadEntityMap)
-//! is populated during the load so it is ready for that pass. `MmapInPlace` (S3)
-//! and `PreserveIds` (W2) are out of scope — only `CopyIntoWorld` + `Remap`.
+//! S2 ships the headline `CopyIntoWorld` round-trip; S2.5 adds the ENTITY-REMAP
+//! pass so saved `Entity` references survive a round-trip. Each archetype is loaded
+//! with its Entity fields holding their RAW saved ids and the
+//! [`LoadEntityMap`](boyko_ecs::ecs::core::serialize::LoadEntityMap) records the
+//! saved→fresh mapping; then a SEPARATE whole-world pass
+//! ([`remap_loaded_entities`](boyko_ecs::ecs::core::serialize::remap_loaded_entities),
+//! invoked here after the archetype loop) rewrites every remappable component
+//! (`ChildOf` / an `#[entities]`-annotated field) to its freshly-allocated
+//! `Entity`. A plain `Entity` field WITHOUT `#[entities]` stays the raw saved id
+//! (the C4 explicit-opt-in decision). An unmapped saved id is a loud `LoadError`
+//! (`Decode(UnmappedEntity)`), never silent dangling-ref corruption. `MmapInPlace`
+//! (S3) and `PreserveIds` (W2) are out of scope — only `CopyIntoWorld` + `Remap`.
 //!
 //! # Untrusted-bytes discipline (C3)
 //!
@@ -31,7 +38,7 @@ use std::path::Path;
 use boyko_ecs::ecs::core::component::component_registry::{self, Serializability};
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::serialize::{
-    LoadColumn, LoadEntityMap, load_archetype, required_ctor_in_set,
+    LoadColumn, LoadEntityMap, load_archetype, remap_loaded_entities, required_ctor_in_set,
 };
 use boyko_ecs::ecs::identifiers::primitives::{ComponentId, EntityId};
 
@@ -143,6 +150,15 @@ pub fn load_world(
             &mut report,
         )?;
     }
+
+    // ── Step 5: the entity-remap pass (S2.5 / C4) ──────────────────────────────
+    // A SEPARATE whole-world pass AFTER every archetype is loaded: rewrite each
+    // saved `Entity` reference inside a remappable component (`ChildOf` / an
+    // `#[entities]` field) to its freshly-allocated `Entity` via `map`. An unmapped
+    // saved id is a loud `LoadError::Decode(UnmappedEntity)`, never a silent
+    // dangling reference. A world with no remappable component pays nothing (no
+    // pool's `map_entities_fn` is set, so no row is ever visited).
+    remap_loaded_entities(world, &map)?;
 
     Ok(report)
 }

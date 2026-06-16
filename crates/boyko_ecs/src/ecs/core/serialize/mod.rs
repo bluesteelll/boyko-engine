@@ -21,7 +21,7 @@
 pub mod load_writer;
 pub mod wire;
 
-pub use load_writer::{LoadColumn, load_archetype};
+pub use load_writer::{LoadColumn, load_archetype, remap_loaded_entities};
 pub use wire::{Wire, WireRefTuple, WireTuple};
 
 // Re-export the registry's per-component deserialize fn-ptr alias here so the
@@ -238,6 +238,12 @@ pub enum DecodeError {
     /// validate-on-read obligation. Surfaced by the per-element `deserialize_fn`
     /// (S2 derive emission), not by the cursor itself.
     InvalidBitPattern,
+    /// The S2.5 entity-remap pass found a saved `Entity` reference whose id was
+    /// not in the [`LoadEntityMap`] (a referenced entity absent from the file, or
+    /// a corrupt id) — the C4 loud-error path. Surfaced ONLY by a
+    /// [`LoadMapEntitiesFn`](crate::ecs::core::component::component_registry::LoadMapEntitiesFn)
+    /// during the remap pass; never silently dropped into a dangling reference.
+    UnmappedEntity,
 }
 
 /// Load-direction entity remap table: saved `EntityId.0` → freshly-allocated

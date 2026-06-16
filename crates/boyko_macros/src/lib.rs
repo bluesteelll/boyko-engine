@@ -145,11 +145,24 @@ pub fn component_macro(input: TokenStream) -> TokenStream {
     // (C3) reuses the same scan to suppress the POB arm for an Entity-bearing type.
     let has_entity_field = struct_has_entity_field(&input);
 
-    // Serialization S0 (C4): accept (acceptance-only — no codegen yet) the
-    // `#[entities]` field attribute; reject a malformed `#[entities(..)]` shape.
+    // Serialization S0 (C4): accept the `#[entities]` field attribute; reject a
+    // malformed `#[entities(..)]` shape.
     if let Err(ts) = validate_entities_attrs(&input) {
         return ts;
     }
+
+    // Serialization S2.5 (C4): emit the `map_entities_fn()` override + the
+    // monomorphized remap free fn for a component with `#[entities]`-annotated
+    // Entity field(s). A component with no annotated field emits nothing (the trait
+    // default `map_entities_fn() == None` applies — a plain Entity field keeps its
+    // raw saved id, the explicit-opt-in decision). Computed BEFORE `input.ident`
+    // moves; suppressed for a bitset enable tag (no `ComponentPool` → never
+    // serialized, mirrors the serialize / clone suppression).
+    let (entities_items, entities_module_items) = if hooks.storage_bitset {
+        (TokenStream2::new(), TokenStream2::new())
+    } else {
+        entities_map_codegen(&input, &input.ident)
+    };
 
     // Serialization S0 (plan §3.7, §5 C1–C3): compute the serialize classification
     // overrides (the `SerializeProbe` invocation + `SerPod` proof + fingerprint +
@@ -254,6 +267,8 @@ pub fn component_macro(input: TokenStream) -> TokenStream {
 
         #serialize_module_items
 
+        #entities_module_items
+
         impl #name {
             /// Size of this component in bytes.
             pub const SIZE: usize = std::mem::size_of::<Self>();
@@ -305,6 +320,8 @@ pub fn component_macro(input: TokenStream) -> TokenStream {
             #clone_items
 
             #serialize_items
+
+            #entities_items
 
             // NOTE: `std::any::type_name::<Self>()` is not yet stable as a const fn.
             // Calling it from a regular fn body is fine; the compiler folds it to a
@@ -1721,6 +1738,135 @@ fn validate_entities_attrs(input: &DeriveInput) -> Result<(), TokenStream> {
         }
     }
     Ok(())
+}
+
+/// Serialization S2.5 (C4): collects the field accessors of every `#[entities]`-
+/// annotated field of a plain struct (named or tuple), in declaration order.
+///
+/// Returns `None` for an enum / union (S2.5 supports `#[entities]` only on a plain
+/// struct field — an annotated enum-variant field is parse-accepted by
+/// [`validate_entities_attrs`] but emits no remap, a documented v1 gap mirroring
+/// the `WireBridge` "plain struct only" boundary) and for a struct with no
+/// annotated field. A non-annotated `Entity` field is NOT collected — the C4
+/// explicit-opt-in decision (a plain `Entity` field without `#[entities]` keeps its
+/// raw saved id on load).
+fn entities_field_accessors(input: &DeriveInput) -> Option<Vec<FieldAccess>> {
+    let has_entities_attr = |f: &syn::Field| f.attrs.iter().any(|a| a.path().is_ident("entities"));
+    let Data::Struct(s) = &input.data else {
+        return None;
+    };
+    let accessors: Vec<FieldAccess> = match &s.fields {
+        Fields::Named(named) => named
+            .named
+            .iter()
+            .filter(|f| has_entities_attr(f))
+            .map(|f| FieldAccess::Named(f.ident.clone().expect("named field has ident")))
+            .collect(),
+        Fields::Unnamed(unnamed) => unnamed
+            .unnamed
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| has_entities_attr(f))
+            .map(|(i, _)| FieldAccess::Index(i))
+            .collect(),
+        Fields::Unit => Vec::new(),
+    };
+    if accessors.is_empty() {
+        None
+    } else {
+        Some(accessors)
+    }
+}
+
+/// Serialization S2.5 (C4): emits the `map_entities_fn()` trait override for a
+/// component with at least one `#[entities]`-annotated field, plus the monomorphized
+/// free fn it returns. The fn rewrites each annotated `Entity` field in place via the
+/// load-direction saved→fresh [`LoadEntityMap`], returning
+/// [`DecodeError::UnmappedEntity`] on a dangling saved id (loud — never a silent
+/// stale reference). A component with NO annotated field emits nothing (the trait
+/// default `map_entities_fn() == None` applies — the field keeps its raw saved id).
+///
+/// Each annotated field is taken to be a plain `Entity` (the v1 shape the test suite
+/// and the hand-written `ChildOf` cover); a wrapped form (`Option<Entity>` /
+/// `Vec<Entity>`) is out of v1 scope (a documented boundary — the generated body
+/// calls `Entity::id()` directly, so a non-`Entity` annotated field is a loud type
+/// error at the user's struct, not a silent skip).
+///
+/// Returns `(trait_items, module_items)`: the `map_entities_fn()` override (spliced
+/// into `impl Component`) and the module-scope free fn (it cannot live inside the
+/// `impl` block as a free fn).
+fn entities_map_codegen(input: &DeriveInput, name: &Ident) -> (TokenStream2, TokenStream2) {
+    let Some(accessors) = entities_field_accessors(input) else {
+        return (TokenStream2::new(), TokenStream2::new());
+    };
+
+    // Per-field in-place remap: look up the saved id, rewrite on a hit, error on a
+    // miss. `&mut (*value).<sel>` is a `&mut Entity` (a non-`Entity` annotated field
+    // is a loud type error at `Entity::id`).
+    let field_remaps: Vec<TokenStream2> = accessors
+        .iter()
+        .map(|acc| {
+            let sel = acc.offset_of_selector();
+            quote! {
+                {
+                    let __field: &mut ::boyko_ecs::ecs::core::entity::entity::Entity =
+                        &mut (*__value).#sel;
+                    match __map.get(__field.id().0) {
+                        ::std::option::Option::Some(__fresh) => { *__field = __fresh; }
+                        ::std::option::Option::None => {
+                            return ::std::result::Result::Err(
+                                ::boyko_ecs::ecs::core::serialize::DecodeError::UnmappedEntity,
+                            );
+                        }
+                    }
+                }
+            }
+        })
+        .collect();
+
+    let fn_ident = format_ident!("__boyko_map_entities_{}", name);
+
+    let module_items = quote! {
+        /// Serialization S2.5 — derive-generated load-direction entity-remap for a
+        /// `#[entities]`-bearing component. Rewrites each annotated `Entity` field
+        /// through the saved→fresh `LoadEntityMap`; errors loudly on an unmapped
+        /// saved id (C4). Panic-free by construction.
+        ///
+        /// # Safety
+        /// `value` points at a live, initialized `Self`; `__map` is shared and not
+        /// aliased mutably (the `LoadMapEntitiesFn` contract).
+        #[doc(hidden)]
+        #[allow(non_snake_case)]
+        unsafe fn #fn_ident(
+            value: *mut u8,
+            __map: &::boyko_ecs::ecs::core::serialize::LoadEntityMap,
+        ) -> ::std::result::Result<(), ::boyko_ecs::ecs::core::serialize::DecodeError> {
+            // SAFETY: `value` is a live, initialized `#name` (the load remap pass
+            //   derives it from the pool's live-row pointer). We form `&mut #name`
+            //   to rewrite its annotated `Entity` field(s) in place; no other
+            //   reference aliases it (single-threaded `&mut EcsMaster`).
+            let __value: *mut #name = value.cast::<#name>();
+            unsafe {
+                #(#field_remaps)*
+            }
+            ::std::result::Result::Ok(())
+        }
+    };
+
+    let trait_items = quote! {
+        #[inline]
+        fn map_entities_fn()
+            -> ::std::option::Option<
+                ::boyko_ecs::ecs::core::component::component_registry::LoadMapEntitiesFn
+            > {
+            ::std::option::Option::Some(
+                #fn_ident
+                    as ::boyko_ecs::ecs::core::component::component_registry::LoadMapEntitiesFn
+            )
+        }
+    };
+
+    (trait_items, module_items)
 }
 
 /// Derive macro for implementing the Resource trait.

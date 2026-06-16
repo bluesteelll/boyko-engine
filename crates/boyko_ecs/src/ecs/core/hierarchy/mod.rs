@@ -39,9 +39,13 @@ use std::sync::OnceLock;
 
 use crate::ecs::core::clone::map::EntityCloneMap;
 use crate::ecs::core::component::component::Component;
-use crate::ecs::core::component::component_registry::{self, Cloneability, CloneFn};
+use crate::ecs::core::component::component_registry::{
+    self, Cloneability, CloneFn, DeserializeFn, LoadMapEntitiesFn, SerializeFn, Serializability,
+    WireBridge,
+};
 use crate::ecs::core::component::hooks::{ComponentHooks, HookFn};
 use crate::ecs::core::entity::entity::Entity;
+use crate::ecs::core::serialize::{DecodeError, LoadEntityMap};
 use crate::ecs::identifiers::primitives::ComponentId;
 
 pub mod bundles;
@@ -197,6 +201,62 @@ unsafe fn child_of_map_entities(dst: *mut u8, map: &EntityCloneMap) {
     // else: parent is outside the cloned subtree → keep verbatim (shared sibling).
 }
 
+/// Remaps a LOADED `ChildOf`'s parent through the load-direction saved→fresh map
+/// (Serialization S2.5, plan §3.11 step 5 / C4). Installed for `ChildOf` (the
+/// hand-written v1 relationship remap) via
+/// [`install_serialize_fn`](component_registry::install_serialize_fn) reading the
+/// `map_entities_fn()` override below, and invoked by the loader's
+/// [`remap_loaded_entities`](crate::ecs::core::serialize::remap_loaded_entities)
+/// pass. Mirrors the clone-side [`child_of_map_entities`] but errors (rather than
+/// keeping verbatim) on an unmapped saved id — a load references only entities that
+/// were themselves saved, so a missing mapping is a corrupt / dangling reference,
+/// not an external sibling (C4: loud, never silent dangling-ref corruption).
+///
+/// # Safety (the [`LoadMapEntitiesFn`] contract)
+/// `dst` points at a live, initialized `ChildOf` (a `#[repr(transparent)]` over
+/// `Entity`); `map` is a shared, non-aliased reference for the call's duration.
+unsafe fn child_of_load_map_entities(
+    dst: *mut u8,
+    map: &LoadEntityMap,
+) -> Result<(), DecodeError> {
+    // SAFETY: `dst` is a live, aligned, initialized `ChildOf` row (the load remap
+    //   pass derives it from the pool's live-row pointer for an archetype that hosts
+    //   `ChildOf`). We form `&mut ChildOf` to rewrite its inner `Entity` in place; no
+    //   other reference aliases it (single-threaded `&mut EcsMaster`).
+    let child_of: &mut ChildOf = unsafe { &mut *dst.cast::<ChildOf>() };
+    match map.get(child_of.0.id().0) {
+        Some(fresh) => {
+            child_of.0 = fresh; // the loaded child points at the loaded parent
+            Ok(())
+        }
+        // C4: the saved parent id is not in this load's map — a dangling reference.
+        // Surface it loudly; the loader turns it into a `LoadError::Decode`.
+        None => Err(DecodeError::UnmappedEntity),
+    }
+}
+
+/// Serialization S2.5 — the bound-free `WireBridge` for `ChildOf` (the hand-written
+/// equivalent of what `#[derive(Component)]` emits for a one-field struct). Maps
+/// `ChildOf` to its single `Entity` field tuple so the generic
+/// [`serialize_via_wire`](component_registry::serialize_via_wire) /
+/// [`deserialize_via_wire`](component_registry::deserialize_via_wire) glue can
+/// encode it through the [`Wire`](crate::ecs::core::serialize::Wire) `Entity` codec
+/// (the raw saved id; the remap above rewrites it on load).
+impl WireBridge for ChildOf {
+    type Owned = (Entity,);
+    type Refs<'a> = (&'a Entity,);
+
+    #[inline]
+    fn as_refs(&self) -> Self::Refs<'_> {
+        (&self.0,)
+    }
+
+    #[inline]
+    fn from_owned(owned: Self::Owned) -> Self {
+        ChildOf(owned.0)
+    }
+}
+
 impl Component for ChildOf {
     #[inline]
     fn component_id() -> ComponentId {
@@ -220,6 +280,14 @@ impl Component for ChildOf {
                 raw,
                 child_of_map_entities as component_registry::MapEntitiesFn,
             );
+            // Serialization S2.5: a hand-written `component_id()` MUST install the
+            // serialize metadata too (the derive does this ungated for derived
+            // types). `ChildOf` is `SerializeViaFn` (it carries an `Entity`, never
+            // blittable) with a load-direction `map_entities_fn` — without these
+            // installs the saver would classify `ChildOf` as `Ignore` and skip it,
+            // and the loader would have no remap fn (the C4 boundary).
+            component_registry::install_serialize_fn::<Self>(raw);
+            component_registry::register_stable_name::<Self>(raw);
             ComponentId(raw)
         })
     }
@@ -233,6 +301,60 @@ impl Component for ChildOf {
     #[inline]
     fn clone_fn() -> Option<CloneFn> {
         Some(component_registry::clone_via_clone::<Self> as CloneFn)
+    }
+
+    /// Serialization S2.5: `ChildOf` carries an `Entity`, so it is NEVER blittable
+    /// (the saved id must be remapped on load) — `SerializeViaFn`, encoded through
+    /// the `WireBridge` glue below (mirrors the derive's classification for an
+    /// Entity-bearing component, C3 / C4).
+    const SERIALIZABILITY: Serializability = Serializability::SerializeViaFn;
+
+    /// Serialization S2.5: the same value the derive would fold for a
+    /// `#[repr(transparent)]` one-`Entity`-field struct — a layout-change guard (C2).
+    /// Hand-mirrored so a `ChildOf` shape change is detected on load.
+    const LAYOUT_FINGERPRINT: u64 = {
+        const fn push(buf: &mut [u8; 48], len: &mut usize, value: u64) {
+            let bytes = value.to_le_bytes();
+            let mut i = 0;
+            while i < 8 {
+                buf[*len] = bytes[i];
+                *len += 1;
+                i += 1;
+            }
+        }
+        let mut buf = [0u8; 8 * 6];
+        let mut len = 0usize;
+        push(&mut buf, &mut len, size_of::<ChildOf>() as u64);
+        push(&mut buf, &mut len, align_of::<ChildOf>() as u64);
+        // repr tag 2 == transparent (matches the derive's `ReprKind::Transparent`).
+        push(&mut buf, &mut len, 2);
+        push(&mut buf, &mut len, 1); // field_count
+        push(&mut buf, &mut len, 0); // offset_of the single field (transparent)
+        push(&mut buf, &mut len, size_of::<Entity>() as u64);
+        let slice: &[u8] = buf.split_at(len).0;
+        component_registry::fnv1a_64(slice)
+    };
+
+    /// Serialization S2.5: the per-element encoder, through the generic
+    /// `serialize_via_wire` glue + the `WireBridge` above (the `Entity` field is
+    /// encoded as its raw saved id via the `Wire` codec).
+    #[inline]
+    fn serialize_fn() -> Option<SerializeFn> {
+        Some(component_registry::serialize_via_wire::<Self> as SerializeFn)
+    }
+
+    /// Serialization S2.5: the per-element decoder (the inverse of `serialize_fn`).
+    #[inline]
+    fn deserialize_fn() -> Option<DeserializeFn> {
+        Some(component_registry::deserialize_via_wire::<Self> as DeserializeFn)
+    }
+
+    /// Serialization S2.5 (C4): the load-direction entity-remap fn — the v1
+    /// relationship remap that rewrites the saved parent id to the loaded parent's
+    /// fresh `Entity`. Installed via `install_serialize_fn` reading this method.
+    #[inline]
+    fn map_entities_fn() -> Option<LoadMapEntitiesFn> {
+        Some(child_of_load_map_entities as LoadMapEntitiesFn)
     }
 
     /// `ChildOf` links on insert and unlinks on replace (Phase 19 §3). It does

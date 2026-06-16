@@ -1473,11 +1473,19 @@ pub type DeserializeFn = unsafe fn(
 /// explicit `#[entities]` fields); every other id leaves its slot unset, so the
 /// remap pass touches only the annotated components.
 ///
-/// # Safety (caller-guaranteed at the load remap call site, S2)
+/// Rewrites every remappable `Entity` field of the value at `dst` in place,
+/// translating each SAVED id to the freshly-allocated `Entity` via `map`. Returns
+/// [`DecodeError::UnmappedEntity`](crate::ecs::core::serialize::DecodeError::UnmappedEntity)
+/// when a referenced saved id is absent from `map` (a dangling reference — the C4
+/// loud-error path; never silently kept as a stale id).
+///
+/// # Safety (caller-guaranteed at the load remap call site, S2.5)
 /// - `dst` points at a live, initialized value of THIS `ComponentId`'s type.
 /// - `map` outlives the call and is not aliased mutably.
-pub type LoadMapEntitiesFn =
-    unsafe fn(dst: *mut u8, map: &crate::ecs::core::serialize::LoadEntityMap);
+pub type LoadMapEntitiesFn = unsafe fn(
+    dst: *mut u8,
+    map: &crate::ecs::core::serialize::LoadEntityMap,
+) -> Result<(), crate::ecs::core::serialize::DecodeError>;
 
 /// Per-component serialization classification (plan §3.7 / C3). STRICTER than the
 /// clone [`Cloneability`]: serialization ingests **untrusted bytes**, so the
