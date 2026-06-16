@@ -1,0 +1,10 @@
+[package]
+name = "boyko_rhi"
+version = "0.1.0"
+edition = "2024"
+description = "Backend-agnostic RHI trait surface for boyko-engine. Pure trait + handle registry + enums. NO FFI."
+
+[dependencies]
+# The package is named `boyko-utils`; rename it to the underscore crate name the
+# source imports (`use boyko_utils::...`). Provides Slot, SparseSlotMap, Generation.
+boyko_utils = { package = "boyko-utils", path = "../boyko_utils" }
