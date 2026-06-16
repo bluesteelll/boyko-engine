@@ -33,8 +33,11 @@ impl ArchetypeFlags {
     pub const ON_REPLACE_HOOK: u16 = 1 << 2;
     /// Set iff some component in the archetype declares an `on_remove` hook.
     pub const ON_REMOVE_HOOK: u16 = 1 << 3;
-    // bit 4 stays RESERVED (forward-compat with a future `on_despawn` hook;
-    // do NOT renumber — keeps parity with Bevy's bit-4 = ON_DESPAWN_HOOK slot).
+    /// Set iff some component in the archetype declares an `on_despawn` hook
+    /// (Feature 2 — the Phase-14a reserved bit, now claimed). `on_despawn` is
+    /// an entity-level despawn hook distinct from `on_remove`; it fires once per
+    /// dying entity at the despawn site, BEFORE components drop.
+    pub const ON_DESPAWN_HOOK: u16 = 1 << 4;
 
     /// Set iff some component in the archetype has ≥1 registered `on_add`
     /// observer (Phase 14b).
@@ -48,6 +51,22 @@ impl ArchetypeFlags {
     /// Set iff some component in the archetype has ≥1 registered `on_remove`
     /// observer (Phase 14b).
     pub const ON_REMOVE_OBSERVER: u16 = 1 << 8;
+    /// Set iff some component in the archetype has ≥1 registered `on_despawn`
+    /// observer (Feature 2).
+    pub const ON_DESPAWN_OBSERVER: u16 = 1 << 9;
+
+    /// Set iff ANY entity currently or formerly in this archetype has an
+    /// entity-targeted observer (Feature 2, FIX W2/C4/C5).
+    ///
+    /// **STICKY: set-once, NEVER cleared.** Like the `EVER_ARCHETYPED`
+    /// staleness gate, this is raised under `&mut
+    /// EcsMaster` (on `observe_entity*` and on migration to a NEW archetype) and
+    /// never decremented. A live archetype's `flags` are read locklessly as a
+    /// stable `u16` during a structural fire, so a runtime-mutable bit would
+    /// race; making it sticky dissolves that race. The `SparseMap` probe behind
+    /// this gate then misses cheaply for un-observed entities in a once-observed
+    /// archetype (the acceptable cost — observed archetypes are rare).
+    pub const HAS_ENTITY_OBSERVER: u16 = 1 << 10;
 
     /// `on_add` gate mask: set iff the archetype has an `on_add` hook OR
     /// observer. The structural-op fire site widens its inner test from
@@ -60,6 +79,8 @@ impl ArchetypeFlags {
     pub const ON_REPLACE_ANY: u16 = Self::ON_REPLACE_HOOK | Self::ON_REPLACE_OBSERVER;
     /// `on_remove` gate mask (hook OR observer); see [`Self::ON_ADD_ANY`].
     pub const ON_REMOVE_ANY: u16 = Self::ON_REMOVE_HOOK | Self::ON_REMOVE_OBSERVER;
+    /// `on_despawn` gate mask (hook OR observer); see [`Self::ON_ADD_ANY`].
+    pub const ON_DESPAWN_ANY: u16 = Self::ON_DESPAWN_HOOK | Self::ON_DESPAWN_OBSERVER;
 
     /// Returns an empty flag set (no hook bits raised).
     #[inline]
@@ -117,6 +138,9 @@ impl ArchetypeFlags {
             if hooks.on_remove.is_some() {
                 self.insert(Self::ON_REMOVE_HOOK);
             }
+            if hooks.on_despawn.is_some() {
+                self.insert(Self::ON_DESPAWN_HOOK);
+            }
         }
     }
 
@@ -152,6 +176,9 @@ impl ArchetypeFlags {
         }
         if reg.has_observer(ObserverKind::Remove, cid) {
             self.insert(Self::ON_REMOVE_OBSERVER);
+        }
+        if reg.has_observer(ObserverKind::Despawn, cid) {
+            self.insert(Self::ON_DESPAWN_OBSERVER);
         }
     }
 }
@@ -277,6 +304,7 @@ mod tests {
             on_insert: Some(f),
             on_replace: Some(f),
             on_remove: Some(f),
+            on_despawn: Some(f),
         };
         assert!(component_registry::try_set_hooks(HOOK_ALL_ID.0, all));
 

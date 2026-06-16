@@ -18,10 +18,18 @@
 //!
 //! # Zero-cost when unused
 //!
-//! [`ObserverRegistry`] holds its 4×512 `Vec` headers behind an
-//! `Option<Box<ObserverLists>>` that stays `None` until the first
-//! `add_observer`. A world that registers no observers pays no allocation and
-//! one `Option::is_none()` early-out on every registry read.
+//! [`ObserverRegistry`] holds its 5×512 `Vec` headers (Feature 2 widened the
+//! kind dimension 4→5 for `Despawn`) behind an `Option<Box<ObserverLists>>` that
+//! stays `None` until the first `add_observer`. A world that registers no
+//! observers pays no allocation and one `Option::is_none()` early-out on every
+//! registry read.
+//!
+//! # Feature 2 additions
+//!
+//! [`entity_store`] holds per-entity observers (a `SparseMap<u32>` handle + a
+//! side arena), [`trigger`] holds custom-trigger types + the global trigger
+//! registry, [`traversal`] / [`propagate`] back propagation, and [`dispatch_key`]
+//! unifies lifecycle-kind and custom-trigger keys.
 //!
 //! Waves 1-3 ship the data structures, the per-archetype flag bits, and the
 //! `ArchetypeMaster` integration (seed + dynamic walk). The cold
@@ -29,6 +37,11 @@
 //! wired at the six structural-op fire sites by `EcsMaster` (Wave 5).
 
 pub(crate) mod dispatch;
+pub(crate) mod dispatch_key;
+pub(crate) mod entity_store;
+pub mod propagate;
+pub mod traversal;
+pub mod trigger;
 
 use crate::ecs::core::component::component_registry::MAX_COMPONENTS;
 use crate::ecs::core::component::hooks::deferred_master::DeferredEcsMaster;
@@ -45,12 +58,13 @@ use crate::ecs::identifiers::primitives::ComponentId;
 #[repr(transparent)]
 pub struct ObserverId(pub(crate) u64);
 
-/// The four observer kinds — 1:1 with the lifecycle-hook kinds.
+/// The five observer kinds — 1:1 with the lifecycle-hook kinds.
 ///
-/// There is intentionally no `Despawn` kind (Phase 14b D1): an entity despawn
-/// fires the per-dying-component `Replace` + `Remove` observers, exactly as it
-/// fires the matching hooks. The discriminants are the dense `[kind]` index
-/// into [`ObserverLists::by_kind_component`].
+/// Feature 2 added `Despawn` (the Phase-14b note that there was "intentionally
+/// no `Despawn` kind" is reversed): an entity despawn now fires per-component
+/// `Despawn` observers FIRST (whole-entity cleanup), then the per-component
+/// `Replace` + `Remove` observers — all pre-drop. The discriminants are the
+/// dense `[kind]` index into [`ObserverLists::by_kind_component`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ObserverKind {
@@ -62,7 +76,16 @@ pub enum ObserverKind {
     Replace = 2,
     /// Fired before a component is removed (reads the dying value).
     Remove = 3,
+    /// Fired once per dying entity at despawn, BEFORE components drop
+    /// (Feature 2). Per the despawn fire site, this fires FIRST (before the
+    /// per-component `Replace`/`Remove` passes), so a handler reads the
+    /// fully-intact dying entity.
+    Despawn = 4,
 }
+
+/// Number of [`ObserverKind`] variants — the dense first dimension of
+/// [`ObserverLists::by_kind_component`].
+pub(crate) const NUM_OBSERVER_KINDS: usize = 5;
 
 /// Type-erased observer runner. Mirrors [`HookFn`](crate::ecs::core::component::hooks::HookFn)
 /// exactly (Phase 14b D2).
@@ -113,7 +136,7 @@ pub(crate) struct ObserverEntry {
 /// archetype-bit walk both index `by_kind_component[kind][cid.0]` directly.
 struct ObserverLists {
     /// `[ObserverKind as usize][ComponentId.0]` → the observers for that pair.
-    by_kind_component: [[Vec<ObserverEntry>; MAX_COMPONENTS]; 4],
+    by_kind_component: [[Vec<ObserverEntry>; MAX_COMPONENTS]; NUM_OBSERVER_KINDS],
 }
 
 impl Default for ObserverLists {
@@ -187,11 +210,12 @@ impl ObserverRegistry {
     /// is irrelevant — entries are matched by id, never by position).
     pub fn remove(&mut self, id: ObserverId) -> Option<(ObserverKind, ComponentId, bool)> {
         let lists = self.lists.as_mut()?;
-        const KINDS: [ObserverKind; 4] = [
+        const KINDS: [ObserverKind; NUM_OBSERVER_KINDS] = [
             ObserverKind::Add,
             ObserverKind::Insert,
             ObserverKind::Replace,
             ObserverKind::Remove,
+            ObserverKind::Despawn,
         ];
         for kind in KINDS {
             let per_component = &mut lists.by_kind_component[kind as usize];

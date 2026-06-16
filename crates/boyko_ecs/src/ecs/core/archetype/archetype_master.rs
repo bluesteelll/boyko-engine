@@ -923,6 +923,7 @@ impl ArchetypeMaster {
             ObserverKind::Insert => ArchetypeFlags::ON_INSERT_OBSERVER,
             ObserverKind::Replace => ArchetypeFlags::ON_REPLACE_OBSERVER,
             ObserverKind::Remove => ArchetypeFlags::ON_REMOVE_OBSERVER,
+            ObserverKind::Despawn => ArchetypeFlags::ON_DESPAWN_OBSERVER,
         }
     }
 
@@ -937,11 +938,12 @@ impl ArchetypeMaster {
     /// release.
     #[cfg(debug_assertions)]
     fn debug_assert_observer_flags_consistent(&self) {
-        const KINDS: [(ObserverKind, u16); 4] = [
+        const KINDS: [(ObserverKind, u16); 5] = [
             (ObserverKind::Add, ArchetypeFlags::ON_ADD_OBSERVER),
             (ObserverKind::Insert, ArchetypeFlags::ON_INSERT_OBSERVER),
             (ObserverKind::Replace, ArchetypeFlags::ON_REPLACE_OBSERVER),
             (ObserverKind::Remove, ArchetypeFlags::ON_REMOVE_OBSERVER),
+            (ObserverKind::Despawn, ArchetypeFlags::ON_DESPAWN_OBSERVER),
         ];
         for archetype in self.iter_archetypes() {
             for (kind, bit) in KINDS {

@@ -37,6 +37,8 @@ use crate::ecs::core::component::observers::dispatch::{
     fire_on_add_observers, fire_on_insert_observers, fire_on_remove_observers,
     fire_on_replace_observers,
 };
+use crate::ecs::core::component::observers::ObserverKind;
+use crate::ecs::core::component::observers::entity_store::fire_entity_observers;
 use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 use crate::ecs::core::entity::entity::Entity;
 use crate::ecs::core::entity::entity_inland::EntityInland;
@@ -693,6 +695,22 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
     // `&mut Archetype` reborrows came from (mirrors `set_enable_bit`'s Step 4).
     fire_enable_column_alloc_bookkeeping(world, target_archetype_id, &enable_newly_allocated);
 
+    // Feature 2 (FIX C1): raise the sticky HAS_ENTITY_OBSERVER bit on the
+    // DESTINATION archetype BEFORE the destination `flags` are read for this
+    // entity's fires. On the FIRST migration of an observed entity into an
+    // archetype that never held an observed member, the destination's bit 10 is
+    // still clear; raising it AFTER the flags read (the prior shape) skipped the
+    // entity-targeted on_add/on_insert observers for exactly this migration and
+    // raised the bit one frame too late. The entity is fully repointed into
+    // `target` now (Phase-1 block closed), so `&mut world` is usable and the
+    // probe resolves against the destination archetype. `migrate_entity_observer_bit`
+    // is gated by `has_observer(entity)` — a no-op (one `Option::is_none()`) for
+    // an entity with no entity observer (the 0%-gate). The bit is sticky, so the
+    // subsequent `flags` read observes the raise. (The remove path raises on the
+    // SOURCE archetype where the bit was already present, so it does NOT need
+    // this hoist — see `migrate_entity_remove`.)
+    world.migrate_entity_observer_bit(entity);
+
     // PHASE 2 (§3.4 / P3): fire hooks. The entity is repointed into `target`;
     // both `&mut Archetype` are dead — only `target_ptr` (*mut, Copy) survives.
     //
@@ -701,6 +719,9 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
     //   Phase-1 push into `target` (which bumped `target.current_index` through
     //   a same-cell-derived pointer) under TB/SB because the whole slab element
     //   is `UnsafeCell`-wrapped. Reading `flags` is one `u16` load (no `&mut`).
+    //   The C1 `migrate_entity_observer_bit` call above may have just set
+    //   HAS_ENTITY_OBSERVER on this same archetype; the bit is sticky and the
+    //   write completed under `&mut world` before this read, so it is observed.
     let flags = unsafe { (*target_ptr).flags };
     if !flags.is_empty() {
         // MINT: no `world`-derived `&mut Archetype` is live (SAFETY-1).
@@ -762,7 +783,30 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
                 }
             }
         }
+        // Feature 2 — entity-targeted on_add / on_insert observers, over the
+        // SAME iteration sets as the component-level fires above, gated by the
+        // archetype's sticky HAS_ENTITY_OBSERVER bit.
+        if flags.contains(ArchetypeFlags::HAS_ENTITY_OBSERVER) {
+            for (i, &cid) in bundle_id_set.iter().enumerate() {
+                if bundle_added[i] {
+                    fire_entity_observers(world_ptr, ObserverKind::Add, cid, entity);
+                }
+            }
+            for &cid in required_fire_set {
+                fire_entity_observers(world_ptr, ObserverKind::Add, cid, entity);
+            }
+            for &cid in bundle_id_set {
+                fire_entity_observers(world_ptr, ObserverKind::Insert, cid, entity);
+            }
+            for &cid in required_fire_set {
+                fire_entity_observers(world_ptr, ObserverKind::Insert, cid, entity);
+            }
+        }
     }
+    // Feature 2 (FIX C1): the sticky HAS_ENTITY_OBSERVER bit was raised on the
+    // DESTINATION archetype BEFORE the `flags` read above (so the entity-targeted
+    // fires for THIS migration are not skipped), superseding the prior late
+    // re-raise that sat here.
     // NO drain (Q-A1): runs at depth >= 1 inside the per-system apply; the
     // outermost schedule drive drains.
 }
@@ -914,6 +958,7 @@ pub(crate) fn migrate_entity_remove<C: Component>(
     let flags = unsafe { (*source_ptr).flags };
     if flags.contains(ArchetypeFlags::ON_REPLACE_ANY)
         || flags.contains(ArchetypeFlags::ON_REMOVE_ANY)
+        || flags.contains(ArchetypeFlags::HAS_ENTITY_OBSERVER)
     {
         // MINT: no `world`-derived `&mut Archetype` is live (SAFETY-1).
         let world_ptr = NonNull::from(&mut *world);
@@ -931,6 +976,13 @@ pub(crate) fn migrate_entity_remove<C: Component>(
         }
         if flags.contains(ArchetypeFlags::ON_REMOVE_OBSERVER) {
             fire_on_remove_observers(world_ptr, removed_id, entity);
+        }
+        // Feature 2 — entity-targeted on_replace / on_remove observers for the
+        // removed component, gated by the SOURCE archetype's sticky
+        // HAS_ENTITY_OBSERVER bit (the entity still lives in source here).
+        if flags.contains(ArchetypeFlags::HAS_ENTITY_OBSERVER) {
+            fire_entity_observers(world_ptr, ObserverKind::Replace, removed_id, entity);
+            fire_entity_observers(world_ptr, ObserverKind::Remove, removed_id, entity);
         }
     }
 
@@ -985,6 +1037,10 @@ pub(crate) fn migrate_entity_remove<C: Component>(
     // Phase-3 `&mut source` dropped) so `note_enable_column_alloc`'s
     // `&mut world.archetype_master` aliases no live `&mut Archetype` reborrow.
     fire_enable_column_alloc_bookkeeping(world, target_archetype_id, &enable_newly_allocated);
+    // Feature 2 (FIX W2/C4/C5): re-raise the sticky HAS_ENTITY_OBSERVER bit on
+    // the DESTINATION archetype if this entity still carries an entity observer.
+    // A no-op for an entity with no entity observer (the 0%-gate).
+    world.migrate_entity_observer_bit(entity);
     // NO drain (Q-A1): runs at depth >= 1 inside the per-system apply; the
     // outermost schedule drive drains.
 }

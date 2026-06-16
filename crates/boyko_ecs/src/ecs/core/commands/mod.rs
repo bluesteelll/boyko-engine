@@ -20,6 +20,7 @@ pub mod despawn_command;
 pub mod enable_tag_commands;
 pub mod insert_command;
 pub mod migration_helpers;
+pub mod observe_entity_command;
 pub mod remove_command;
 pub mod send_event_command;
 pub mod spawn_at_command;

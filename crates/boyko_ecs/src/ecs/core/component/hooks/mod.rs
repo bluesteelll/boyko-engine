@@ -4,10 +4,12 @@
 //! `on_replace` / `on_remove` callbacks bound to component types. See
 //! `docs/PHASE-14-OBSERVERS-PLAN-ROUND2.md`.
 //!
-//! `on_despawn` (an entity-level despawn hook, distinct from `on_remove`) is
-//! deferred to Phase 14b: a no-fire stub on the 14a surface would let users
-//! register a hook that never runs, so the kind is intentionally absent until
-//! its dispatch site exists.
+//! `on_despawn` (an entity-level despawn hook, distinct from `on_remove`) was
+//! deferred past Phase 14a and is now present (Feature 2): it fires once per
+//! dying entity at the despawn site, BEFORE any component drops, gated by
+//! [`ArchetypeFlags::ON_DESPAWN_HOOK`].
+//!
+//! [`ArchetypeFlags::ON_DESPAWN_HOOK`]: crate::ecs::core::component::hooks::archetype_flags::ArchetypeFlags::ON_DESPAWN_HOOK
 //!
 //! Wave 4 adds the `dispatch.rs` `trigger_on_*` fns that actually fire hooks;
 //! Waves 1-3 ship only the data structures, the per-archetype flag bitset, the
@@ -70,6 +72,12 @@ pub struct ComponentHooks {
     pub on_replace: Option<HookFn>,
     /// Fired before a component is removed (reads the dying value).
     pub on_remove: Option<HookFn>,
+    /// Fired once per dying entity at despawn, BEFORE any component drops
+    /// (Feature 2 — the entity-level despawn hook the Phase-14a surface cut).
+    /// Distinct from `on_remove`: `on_despawn` means "the whole entity is
+    /// dying", and a handler reads the fully-intact entity (Despawn fires before
+    /// the per-component `on_replace`/`on_remove` passes).
+    pub on_despawn: Option<HookFn>,
 }
 
 /// Context passed to every hook. Bevy's `MaybeLocation` /
@@ -147,6 +155,7 @@ mod tests {
         assert!(h.on_insert.is_none(), "Default on_insert is None");
         assert!(h.on_replace.is_none(), "Default on_replace is None");
         assert!(h.on_remove.is_none(), "Default on_remove is None");
+        assert!(h.on_despawn.is_none(), "Default on_despawn is None");
     }
 
     #[test]

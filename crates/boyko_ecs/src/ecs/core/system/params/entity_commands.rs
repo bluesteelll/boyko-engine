@@ -35,10 +35,12 @@ use crate::ecs::core::bundle::Bundle;
 use crate::ecs::core::commands::despawn_command::DespawnCommand;
 use crate::ecs::core::commands::enable_tag_commands::EnableTagCommand;
 use crate::ecs::core::commands::insert_command::InsertCommand;
+use crate::ecs::core::commands::observe_entity_command::ObserveEntityCommand;
 use crate::ecs::core::commands::remove_command::RemoveCommand;
 use crate::ecs::core::commands::tag_commands::{AddTagCommand, RemoveTagCommand};
 use crate::ecs::core::component::component::Component;
 use crate::ecs::core::component::component_registry::{EnableTagId, TagId};
+use crate::ecs::core::component::observers::trigger::{Trigger, TriggerFn};
 use crate::ecs::core::entity::entity::Entity;
 use crate::ecs::core::hierarchy::commands::ClearChildrenCommand;
 use crate::ecs::core::hierarchy::ChildOf;
@@ -143,6 +145,15 @@ impl<'a, 's> EntityCommands<'a, 's> {
     #[inline]
     pub fn remove<C: Component>(&mut self) -> &mut Self {
         self.commands.queue.push(RemoveCommand::<C>::new(self.entity));
+        self
+    }
+
+    /// Defer-attaches an entity-targeted observer for custom trigger `E` on this
+    /// entity (Feature 2). Chainable. Applied at the next command drain via
+    /// [`ObserveEntityCommand`], which raises the entity's sticky archetype bit.
+    #[inline]
+    pub fn observe<E: Trigger>(&mut self, runner: TriggerFn) -> &mut Self {
+        self.commands.queue.push(ObserveEntityCommand::<E>::new(self.entity, runner));
         self
     }
 

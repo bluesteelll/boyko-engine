@@ -25,6 +25,8 @@ use crate::ecs::core::component::hooks::dispatch::{trigger_on_insert, trigger_on
 use crate::ecs::core::component::observers::dispatch::{
     fire_on_insert_observers, fire_on_replace_observers,
 };
+use crate::ecs::core::component::observers::ObserverKind;
+use crate::ecs::core::component::observers::entity_store::fire_entity_observers;
 use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 use crate::ecs::core::entity::entity::Entity;
 use crate::ecs::identifiers::primitives::ComponentId;
@@ -139,6 +141,14 @@ impl<B: Bundle> InsertCommand<B> {
                 }
             }
         }
+        // Feature 2 — entity-targeted on_replace observers (in-place overwrite),
+        // gated by the archetype's sticky HAS_ENTITY_OBSERVER bit.
+        if flags.contains(ArchetypeFlags::HAS_ENTITY_OBSERVER) {
+            let world_ptr = NonNull::from(&mut *world);
+            for &cid in B::component_ids() {
+                fire_entity_observers(world_ptr, ObserverKind::Replace, cid, entity);
+            }
+        }
 
         // BUG FIX (Phase 11 follow-up): the prior two-pass approach
         // (collect slots, then iterate) stored `&[u8]` slices that became
@@ -219,6 +229,14 @@ impl<B: Bundle> InsertCommand<B> {
                 for &cid in B::component_ids() {
                     fire_on_insert_observers(world_ptr, cid, entity);
                 }
+            }
+        }
+        // Feature 2 — entity-targeted on_insert observers (in-place overwrite),
+        // gated by the archetype's sticky HAS_ENTITY_OBSERVER bit.
+        if flags.contains(ArchetypeFlags::HAS_ENTITY_OBSERVER) {
+            let world_ptr = NonNull::from(&mut *world);
+            for &cid in B::component_ids() {
+                fire_entity_observers(world_ptr, ObserverKind::Insert, cid, entity);
             }
         }
 

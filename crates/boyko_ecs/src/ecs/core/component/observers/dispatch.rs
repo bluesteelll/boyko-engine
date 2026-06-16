@@ -133,3 +133,9 @@ define_fire_observers! {
     /// component is about to be removed; the view still reads the dying value).
     fire_on_remove_observers, ObserverKind::Remove, 3
 }
+define_fire_observers! {
+    /// Fires every `on_despawn` observer for `component_id` on `entity` (the
+    /// entity is being despawned; the view still reads the fully-intact dying
+    /// row — Feature 2, Despawn-first ordering).
+    fire_on_despawn_observers, ObserverKind::Despawn, 4
+}

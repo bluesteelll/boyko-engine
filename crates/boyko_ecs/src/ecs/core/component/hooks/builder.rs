@@ -1,16 +1,11 @@
 //! `ComponentHooksBuilder` — the runtime hook-registration builder (Phase 14a,
 //! plan §6.3 / REG).
 //!
-//! Returned by [`EcsMaster::register_component_hooks`], it offers four chainable
-//! setters (`on_add` / `on_insert` / `on_replace` / `on_remove`) and commits the
-//! accumulated [`ComponentHooks`] into the cold `HOOKS` table when the builder is
-//! dropped (or [`finish`](ComponentHooksBuilder::finish)ed explicitly).
-//!
-//! # Why no `on_despawn`
-//!
-//! The entity-level despawn hook (distinct from `on_remove`) is deferred to
-//! Phase 14b — the [`ComponentHooks`] struct has no `on_despawn` field in 14a, so
-//! the builder exposes only the four supported kinds.
+//! Returned by [`EcsMaster::register_component_hooks`], it offers five chainable
+//! setters (`on_add` / `on_insert` / `on_replace` / `on_remove` / `on_despawn`)
+//! and commits the accumulated [`ComponentHooks`] into the cold `HOOKS` table
+//! when the builder is dropped (or
+//! [`finish`](ComponentHooksBuilder::finish)ed explicitly).
 //!
 //! # Derive XOR runtime (mutually exclusive)
 //!
@@ -110,6 +105,15 @@ impl<'a> ComponentHooksBuilder<'a> {
     #[inline]
     pub fn on_remove(mut self, f: HookFn) -> Self {
         self.hooks.on_remove = Some(f);
+        self
+    }
+
+    /// Sets the `on_despawn` hook (fired once per dying entity at despawn,
+    /// BEFORE any component drops; the view reads the fully-intact dying entity
+    /// — Feature 2). Chainable.
+    #[inline]
+    pub fn on_despawn(mut self, f: HookFn) -> Self {
+        self.hooks.on_despawn = Some(f);
         self
     }
 

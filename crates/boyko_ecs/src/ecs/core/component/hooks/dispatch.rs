@@ -93,12 +93,13 @@ define_trigger! {
     /// to be removed; the view still reads the dying value).
     trigger_on_remove, on_remove, "`ArchetypeFlags::ON_REMOVE_HOOK`"
 }
-
-// `trigger_on_despawn` (the entity-level despawn hook, distinct from
-// `on_remove`) is deferred to Phase 14b: no 14a structural-op site fires it, so
-// emitting it now would be dead code referencing a removed `ComponentHooks`
-// field. The despawn path (§3.6) fires `on_replace` + `on_remove` for every
-// component (Bevy parity), mirroring the §4.3 firing matrix.
+define_trigger! {
+    /// Fires `on_despawn` for `component_id` on `entity` (the entity is being
+    /// despawned; the view still reads the fully-intact dying row — Feature 2,
+    /// Despawn-first ordering, before the per-component `on_replace`/`on_remove`
+    /// passes).
+    trigger_on_despawn, on_despawn, "`ArchetypeFlags::ON_DESPAWN_HOOK`"
+}
 
 #[cfg(test)]
 mod tests {

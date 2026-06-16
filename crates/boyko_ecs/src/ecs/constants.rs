@@ -293,6 +293,19 @@ pub const MAX_EVENT_CAPACITY: u32 = 16384;
 /// runtime-added dynamic terms do.
 pub const MAX_ENABLE_TERMS: usize = 8;
 
+//
+// Observer propagation configuration (Feature 2)
+//
+
+/// Maximum number of `ChildOf` hops a single custom-trigger propagation walk may
+/// take before a debug tripwire fires (Feature 2 D5).
+///
+/// A `ChildOf` cycle (A→B→…→A) would loop the bubble walk indefinitely. Cycles
+/// are a documented footgun (only direct self-reference is guarded in the
+/// hierarchy), so this is a `debug_assert!` cap — free in release, catches a
+/// malformed hierarchy in debug. Sized far above any realistic scene depth.
+pub const MAX_PROPAGATION_DEPTH: usize = 1024;
+
 // ── Phase X.I W1 — U-P1 sizing/slab table tests + U-P6 Tick::ZERO pin ──────
 
 #[cfg(test)]

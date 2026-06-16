@@ -15,13 +15,23 @@ use crate::ecs::core::component::component::Component;
 use crate::ecs::core::component::component_registry::{self, MAX_COMPONENTS};
 use crate::ecs::core::component::hooks::archetype_flags::ArchetypeFlags;
 use crate::ecs::core::component::hooks::builder::ComponentHooksBuilder;
+use crate::ecs::core::component::hooks::deferred_master::DeferredEcsMaster;
 use crate::ecs::core::component::hooks::dispatch::{
-    trigger_on_add, trigger_on_insert, trigger_on_remove, trigger_on_replace,
+    trigger_on_add, trigger_on_despawn, trigger_on_insert, trigger_on_remove, trigger_on_replace,
 };
 use crate::ecs::core::component::hooks::scope::{DeferredScopeGuard, hook_drain_depth};
 use crate::ecs::core::component::observers::dispatch::{
-    fire_on_add_observers, fire_on_insert_observers, fire_on_remove_observers,
-    fire_on_replace_observers,
+    fire_on_add_observers, fire_on_despawn_observers, fire_on_insert_observers,
+    fire_on_remove_observers, fire_on_replace_observers,
+};
+use crate::ecs::core::component::observers::entity_store::{
+    EntityObserverStore, fire_entity_observers, fire_entity_triggers,
+};
+use crate::ecs::core::component::observers::propagate::{PropagateGuard, get_propagate};
+use crate::ecs::core::component::observers::traversal::Traversal;
+use crate::ecs::core::component::observers::trigger::{
+    Trigger, TriggerContext, TriggerFn, TriggerId, TriggerRegistry, fire_global_triggers,
+    static_trigger_id,
 };
 use crate::ecs::core::component::observers::{ObserverFn, ObserverId, ObserverKind};
 use crate::ecs::core::entity::entity::Entity;
@@ -269,6 +279,19 @@ pub struct EcsMaster {
     /// `pub(crate)` so `query` / `query_cold_init` can index without going
     /// through a public accessor.
     pub(crate) query_state_cache: OnceLock<QueryStateCache>,
+
+    /// Feature 2 — per-world entity-targeted observer store (lazy `Option<Box>`).
+    ///
+    /// Holds only POD (`SparseMap<u32>` handles + fn-ptr-as-`usize` entries), so
+    /// it carries no storage-derived pointer and its drop order relative to the
+    /// pools is not a hazard. `pub(crate)` so the cold `fire_entity_observers` /
+    /// `fire_entity_triggers` dispatch can re-derive `&world.entity_observers`.
+    pub(crate) entity_observers: EntityObserverStore,
+
+    /// Feature 2 — per-world global custom-trigger observer registry (lazy
+    /// `Option<Box>`). fn-ptr-only payload; `pub(crate)` so the cold trigger
+    /// walk can re-derive `&world.triggers`.
+    pub(crate) triggers: TriggerRegistry,
 }
 
 /// Per-slot payload stored in [`QueryStateCache`]: a type-erased pointer
@@ -411,6 +434,10 @@ impl EcsMaster {
             // so it is not a field here (fixes F2's Tree Borrows UB).
             deferred_hook_queue: CommandQueue::new(),
             query_state_cache: OnceLock::new(),
+            // Feature 2: lazy — alloc-free until the first entity observer /
+            // custom-trigger observer registration.
+            entity_observers: EntityObserverStore::new(),
+            triggers: TriggerRegistry::new(),
         }
     }
 
@@ -444,6 +471,10 @@ impl EcsMaster {
             // so it is not a field here (fixes F2's Tree Borrows UB).
             deferred_hook_queue: CommandQueue::new(),
             query_state_cache: OnceLock::new(),
+            // Feature 2: lazy — alloc-free until the first entity observer /
+            // custom-trigger observer registration.
+            entity_observers: EntityObserverStore::new(),
+            triggers: TriggerRegistry::new(),
         }
     }
 
@@ -1017,10 +1048,11 @@ impl EcsMaster {
         )
     }
 
-    /// Cold despawn-hook fire (Phase 14a §3.6 / W1 / §8 P4).
+    /// Cold despawn-hook fire (Phase 14a §3.6 / W1 / §8 P4; Feature 2 despawn).
     ///
-    /// Fires `on_replace` + `on_remove` for EVERY component of the dying entity,
-    /// reading the row PRE-`remove_entity` (Bevy parity, §4.3 firing matrix).
+    /// Fires `on_despawn` (Feature 2, Despawn-FIRST), then `on_replace` +
+    /// `on_remove`, for EVERY component of the dying entity, reading the row
+    /// PRE-`remove_entity`.
     /// Called by [`Self::delete_entity`] ONLY when the archetype's flag set is
     /// non-empty (some component is hooked), so the ~4 KB id buffer below never
     /// touches `delete_entity`'s prologue — the no-hook hot path keeps its slim
@@ -1061,6 +1093,36 @@ impl EcsMaster {
         // The helper takes `&mut self`, so `NonNull::from(&mut *self)` reborrows
         // the dispatcher's exclusive access for the cold fire only.
         let world_ptr = NonNull::from(&mut *self);
+        // PRE-DROP (Feature 2, Despawn-FIRST): on_despawn for ALL components,
+        // BEFORE the on_replace/on_remove passes and BEFORE remove. The handler
+        // reads the fully-intact dying entity (every component still present and
+        // un-replaced). Within one entity the order is Despawn -> Replace ->
+        // Remove (all pre-drop). For the parent-first cascade contract (FIX
+        // W10): the parent's on_despawn fires here (seeing its intact subtree),
+        // then the parent's `Children::on_replace` enqueues the children for
+        // deferred despawn, so each child's on_despawn fires later as the
+        // deferred cascade drains.
+        if flags.contains(ArchetypeFlags::ON_DESPAWN_ANY) {
+            if flags.contains(ArchetypeFlags::ON_DESPAWN_HOOK) {
+                for &cid in &id_buf[..n] {
+                    trigger_on_despawn(world_ptr, cid, entity);
+                }
+            }
+            if flags.contains(ArchetypeFlags::ON_DESPAWN_OBSERVER) {
+                for &cid in &id_buf[..n] {
+                    fire_on_despawn_observers(world_ptr, cid, entity);
+                }
+            }
+        }
+        // Feature 2 — entity-targeted on_despawn observers (one fire per dying
+        // entity, gated by the archetype's sticky HAS_ENTITY_OBSERVER bit). Per
+        // component cid so an entity observer registered for a specific
+        // component's despawn fires; the fire loop filters by (key, component).
+        if flags.contains(ArchetypeFlags::HAS_ENTITY_OBSERVER) {
+            for &cid in &id_buf[..n] {
+                fire_entity_observers(world_ptr, ObserverKind::Despawn, cid, entity);
+            }
+        }
         // PRE-DROP (SAFETY-2): on_replace + on_remove for ALL, BEFORE remove.
         // Phase 14b: inner gates widen HOOK -> ANY; per kind, hooks fire first,
         // then observers (§5). The outer `!flags.is_empty()` gate (in
@@ -1176,6 +1238,12 @@ impl EcsMaster {
         if !flags.is_empty() {
             self.fire_despawn_hooks(entity, inland.archetype_ptr());
         }
+
+        // Feature 2 — reclaim this entity's entity-targeted observer slot AFTER
+        // its on_despawn observers fired, so a recycled `EntityId` never inherits
+        // a dead observer (the recycle guard). Idempotent + lazy: a no-op (one
+        // `Option::is_none()`) for a world that has no entity observers.
+        self.entity_observers.retire(entity);
 
         // Re-resolve the `&mut Archetype` and proceed with the removal.
         // SAFETY (U1, U2, U11, U14, F1): archetype_ptr was minted via
@@ -2171,6 +2239,269 @@ impl EcsMaster {
     #[inline]
     pub fn remove_observer(&mut self, id: ObserverId) -> bool {
         self.archetype_master.remove_observer(id)
+    }
+
+    // ── Feature 2: entity-targeted observers + custom triggers ──────────────
+
+    /// Raises the STICKY [`ArchetypeFlags::HAS_ENTITY_OBSERVER`] bit on
+    /// `entity`'s current archetype (FIX W2/C4/C5).
+    ///
+    /// Set-once, never cleared: runs under `&mut self` (no fire in flight), a
+    /// single `|=` before any fire reads the flag. A no-op for a stale / dead
+    /// entity handle (its archetype, if any, is left untouched).
+    fn raise_entity_observer_bit(&mut self, entity: Entity) {
+        // Copy the 16 B inland by value to release the `entity_master` borrow
+        // before dereferencing the raw `archetype_ptr` (the established idiom —
+        // the write targets the archetype slab, a disjoint allocation).
+        let inland: EntityInland = match self.entity_master.entities_inland.get(entity.id().0) {
+            Some(slot) => *slot,
+            None => return,
+        };
+        if inland.is_null() || inland.generation() != entity.generation() {
+            return;
+        }
+        let archetype_ptr = inland.archetype_ptr();
+        // SAFETY (F1): `archetype_ptr` is the entity's stable, interior-mutable
+        //   (`SharedReadWrite`, F4-rooted) slab provenance for the EcsMaster's
+        //   lifetime. We run under `&mut self` (no concurrent reader), so this
+        //   `|=` does not race a lockless flags read. The bit is sticky (never
+        //   cleared), so no re-raise can lose a concurrent set.
+        unsafe {
+            (*archetype_ptr).flags.insert(ArchetypeFlags::HAS_ENTITY_OBSERVER);
+        }
+    }
+
+    /// Re-raises the sticky `HAS_ENTITY_OBSERVER` bit on `entity`'s CURRENT
+    /// (post-migration) archetype iff `entity` still has an entity-targeted
+    /// observer (FIX W2/C4/C5 — the migration-to-a-new-archetype half).
+    ///
+    /// Called at the migration completion sites. Gated by the store's
+    /// `has_observer` probe so it is a no-op (one `Option::is_none()`) for an
+    /// entity with no entity observer — the 0%-gate. The bit on the SOURCE
+    /// archetype is never cleared (sticky).
+    pub(crate) fn migrate_entity_observer_bit(&mut self, entity: Entity) {
+        if self.entity_observers.has_observer(entity) {
+            self.raise_entity_observer_bit(entity);
+        }
+    }
+
+    /// Attaches an entity-targeted lifecycle observer: fires only when `kind`
+    /// happens to `cid` ON `entity`. Returns a stable [`ObserverId`].
+    ///
+    /// Raises the sticky `HAS_ENTITY_OBSERVER` bit on `entity`'s archetype so
+    /// the fire sites probe the per-entity store for this archetype.
+    ///
+    /// # Live-entity contract
+    ///
+    /// `entity` MUST be LIVE (already spawned, not yet despawned). An
+    /// entity-targeted lifecycle observer fires for events that happen to that
+    /// live entity AFTER attachment:
+    ///
+    /// * `on_add` / `on_insert` fire when a component is LATER added or inserted
+    ///   via the migration path — NOT retroactively for components already
+    ///   present on `entity`, and NOT at the entity's initial spawn (the spawn
+    ///   flow is spawn-THEN-observe).
+    /// * `on_replace` / `on_remove` / `on_despawn` fire when the matching event
+    ///   later happens to the live entity.
+    ///
+    /// Attaching to a reserved-but-not-yet-spawned or already-dead handle will
+    /// NOT fire (a debug build asserts liveness; release silently ignores it,
+    /// matching the rest of the stale-handle API).
+    pub fn observe_entity(
+        &mut self,
+        entity: Entity,
+        kind: ObserverKind,
+        cid: ComponentId,
+        runner: ObserverFn,
+    ) -> ObserverId {
+        debug_assert!(
+            self.is_entity_live(entity),
+            "observe_entity: entity is not live (live-entity contract) — an \
+             entity-targeted observer must be attached to an already-spawned, \
+             not-yet-despawned entity; it fires for events AFTER attachment, \
+             never retroactively or at spawn"
+        );
+        let id = self
+            .entity_observers
+            .observe_entity_lifecycle(entity, kind, cid, runner);
+        self.raise_entity_observer_bit(entity);
+        id
+    }
+
+    /// Typed sugar: attach an `on_despawn` entity observer for component `C` on
+    /// `entity` (the Feature-2 entity-level despawn callback).
+    ///
+    /// `entity` MUST be LIVE — see [`observe_entity`](Self::observe_entity)'s
+    /// live-entity contract (the liveness `debug_assert!` is enforced there).
+    #[inline]
+    pub fn observe_entity_on_despawn<C: Component>(
+        &mut self,
+        entity: Entity,
+        runner: ObserverFn,
+    ) -> ObserverId {
+        self.observe_entity(entity, ObserverKind::Despawn, C::component_id(), runner)
+    }
+
+    /// Registers a GLOBAL observer for custom trigger `E` (fires for any
+    /// target). Returns a stable [`ObserverId`].
+    pub fn observe<E: Trigger>(&mut self, runner: TriggerFn) -> ObserverId {
+        let tid = Self::trigger_id::<E>();
+        self.triggers.add(tid, runner)
+    }
+
+    /// Registers an ENTITY-TARGETED observer for custom trigger `E` on `entity`.
+    /// Returns a stable [`ObserverId`]. Raises the sticky archetype bit.
+    ///
+    /// # Live-entity contract
+    ///
+    /// `entity` MUST be LIVE (already spawned, not yet despawned). The observer
+    /// fires only for `trigger::<E>(entity, ..)` calls that target this live
+    /// entity AFTER attachment (custom triggers are explicit, never retroactive
+    /// and never raised at spawn). Attaching to a reserved-but-not-yet-spawned
+    /// or already-dead handle will NOT fire (a debug build asserts liveness;
+    /// release silently ignores it).
+    pub fn observe_entity_event<E: Trigger>(
+        &mut self,
+        entity: Entity,
+        runner: TriggerFn,
+    ) -> ObserverId {
+        debug_assert!(
+            self.is_entity_live(entity),
+            "observe_entity_event: entity is not live (live-entity contract) — \
+             an entity-targeted trigger observer must be attached to an \
+             already-spawned, not-yet-despawned entity; it fires only for \
+             triggers raised at this entity AFTER attachment"
+        );
+        let tid = Self::trigger_id::<E>();
+        let id = self.entity_observers.observe_entity_custom(entity, tid, runner);
+        self.raise_entity_observer_bit(entity);
+        id
+    }
+
+    /// Fires a custom trigger at `target`: runs global observers for `E`, then
+    /// entity-targeted observers for `target`, then bubbles up `E::Traversal`
+    /// if propagation is requested.
+    ///
+    /// `event` is moved in and lives on this frame until the walk ends; runners
+    /// read it through a read-only `*const u8` and cannot move or free it.
+    pub fn trigger<E: Trigger>(&mut self, target: Entity, event: E) {
+        let tid = Self::trigger_id::<E>();
+        self.trigger_walk::<E>(tid, target, &event);
+    }
+
+    /// Fires a global-only (untargeted) custom trigger — runs only the global
+    /// observers for `E` (no entity targeting, no propagation).
+    pub fn trigger_global<E: Trigger>(&mut self, event: E) {
+        let tid = Self::trigger_id::<E>();
+        let world_ptr = NonNull::from(&mut *self);
+        // A sentinel target: `trigger_global` never reads it (global-only). The
+        // ctx is required by the shared TriggerFn shape.
+        let ctx = TriggerContext {
+            target: Entity::new(EntityId(usize::MAX), 0),
+            original_target: Entity::new(EntityId(usize::MAX), 0),
+            trigger_id: tid,
+        };
+        fire_global_triggers(world_ptr, tid, ctx, (&event as *const E).cast());
+    }
+
+    /// Removes any Feature-2 observer (entity-targeted lifecycle/custom or
+    /// global trigger) by its id, returning `true` if it was registered.
+    ///
+    /// Does NOT clear the sticky `HAS_ENTITY_OBSERVER` bit (set-once forever).
+    pub fn remove_observer_any(&mut self, id: ObserverId) -> bool {
+        self.entity_observers.remove(id) || self.triggers.remove(id)
+    }
+
+    /// Returns the process-stable dense [`TriggerId`] for `E`, cached per type.
+    #[inline]
+    fn trigger_id<E: Trigger>() -> TriggerId {
+        static_trigger_id::<E>()
+    }
+
+    /// The custom-trigger fire + propagation walk (Feature 2 algorithm B).
+    ///
+    /// Re-derives all `world`-borrows per turn (OBS-FIRE-LOOP); the propagation
+    /// `propagate` bool lives in TLS via [`PropagateGuard`] (FIX W9). `target` /
+    /// `original_target` travel in [`TriggerContext`] BY VALUE.
+    fn trigger_walk<E: Trigger>(&mut self, tid: TriggerId, target: Entity, event: &E) {
+        let event_ptr: *const u8 = (event as *const E).cast();
+        let original = target;
+        let mut current = target;
+        // Save/restore the propagation TLS across this (possibly re-entrant)
+        // walk; seed it with the event's compile-time AUTO_PROPAGATE.
+        let _guard = PropagateGuard::enter(E::AUTO_PROPAGATE);
+        let mut hops = 0usize;
+        loop {
+            let ctx = TriggerContext { target: current, original_target: original, trigger_id: tid };
+            // Probe the sticky bit FIRST (a `&self` read), BEFORE minting any raw
+            // `world_ptr`, so no shared reborrow spans a raw-pointer use (F2).
+            let has_entity_obs = self.entity_archetype_has_entity_observer(current);
+            // Global observers — mint `world_ptr` fresh immediately before use.
+            fire_global_triggers(NonNull::from(&mut *self), tid, ctx, event_ptr);
+            // Entity-targeted observers for the current target, gated by the
+            // archetype's sticky HAS_ENTITY_OBSERVER bit. Re-mint `world_ptr`.
+            if has_entity_obs {
+                fire_entity_triggers(NonNull::from(&mut *self), tid, ctx, event_ptr);
+            }
+            // FIX F1: decide whether to bubble purely from the propagation TLS.
+            // `PropagateGuard::enter(E::AUTO_PROPAGATE)` (above) SEEDED the TLS
+            // with the compile-time `AUTO_PROPAGATE` constant, so the const-fold
+            // of the non-bubbling case lives in the seed — NOT in this condition.
+            // Reading only `get_propagate()` keeps both directions correct:
+            //   * a bubbling event (seed `true`) keeps walking until an observer
+            //     calls `propagate(false)` to STOP it (the prior `const { .. } ||`
+            //     short-circuit elided this read, making `propagate(false)` a
+            //     silent no-op);
+            //   * a non-bubbling event (seed `false`) breaks after this single
+            //     hop unless an observer opted in with `propagate(true)`.
+            if !get_propagate() {
+                break;
+            }
+            hops += 1;
+            debug_assert!(
+                hops < crate::ecs::constants::MAX_PROPAGATION_DEPTH,
+                "trigger propagation exceeded MAX_PROPAGATION_DEPTH ({}) — ChildOf cycle?",
+                crate::ecs::constants::MAX_PROPAGATION_DEPTH
+            );
+            // Re-derive the next hop through a fresh read-only view (no `&` spans
+            // the next fire). The view is minted and dropped within this block.
+            let next = {
+                let view = unsafe { DeferredEcsMaster::from_world(NonNull::from(&mut *self)) };
+                E::Traversal::next(&view, current)
+            };
+            match next {
+                Some(parent) => current = parent,
+                None => break,
+            }
+        }
+    }
+
+    /// `true` iff `entity`'s current archetype has the sticky
+    /// `HAS_ENTITY_OBSERVER` bit set. A stale / dead handle returns `false`.
+    #[inline]
+    fn entity_archetype_has_entity_observer(&self, entity: Entity) -> bool {
+        let Some(slot) = self.entity_master.entities_inland.get(entity.id().0) else {
+            return false;
+        };
+        if slot.is_null() || slot.generation() != entity.generation() {
+            return false;
+        }
+        // SAFETY (F1): stable, interior-mutable slab provenance; `&self` shared
+        //   read of a `u16` flag (no `&mut` taken).
+        unsafe { (*slot.archetype_ptr()).flags.contains(ArchetypeFlags::HAS_ENTITY_OBSERVER) }
+    }
+
+    /// `true` iff `entity` is currently LIVE: its `entities_inland` slot is
+    /// resolvable, non-null (spawned, not a reserved-only handle), and its
+    /// generation matches (not despawned / recycled). Used by the Feature-2
+    /// `observe_entity*` attach paths to enforce the live-entity contract via a
+    /// debug-only assertion (see [`observe_entity`](Self::observe_entity)).
+    #[inline]
+    fn is_entity_live(&self, entity: Entity) -> bool {
+        match self.entity_master.entities_inland.get(entity.id().0) {
+            Some(slot) => !slot.is_null() && slot.generation() == entity.generation(),
+            None => false,
+        }
     }
 
     /// Returns `true` iff the world currently holds a resource of type `R`.
