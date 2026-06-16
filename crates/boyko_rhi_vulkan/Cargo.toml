@@ -1,0 +1,11 @@
+[package]
+name = "boyko_rhi_vulkan"
+version = "0.1.0"
+edition = "2024"
+description = "Raw hand-FFI Vulkan backend for boyko-engine (Slice 0 foundation: loader + device + VkDeviceMemory sub-allocator). std-only, no third-party crates."
+
+# INVIOLABLE: this crate depends on `std` ONLY. No ash / vulkano / windows-sys /
+# libc. The Vulkan surface is hand-declared raw FFI mirroring the
+# `boyko_ecs::ecs::memory::vm.rs` discipline (`unsafe extern "system"` blocks +
+# `// SAFETY:` ABI comments + `cfg(windows)`).
+[dependencies]
