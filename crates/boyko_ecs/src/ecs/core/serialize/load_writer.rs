@@ -247,6 +247,13 @@ impl Drop for ArchetypeLoadGuard {
 /// `panic`s only on an internal invariant violation (a bug): an archetype id the
 /// master just created not resolving, or a column id with no pool in the fresh
 /// archetype. Both are `expect`-guarded.
+///
+/// The "column id with no pool" `expect` is UNREACHABLE from any file input: the
+/// only ids whose freshly-created archetype lacks a pool are enable tags
+/// (`StorageKind::Bitset`, filtered out of the signature), and the file-format
+/// parser (`boyko_serialize::load`) excludes a bitset-classified id from `ids` /
+/// `columns` in pass 1 (the W1 hardening), so every id reaching here has a pool. A
+/// fire would mean the parser passed a bitset id, i.e. a caller-side bug.
 pub fn load_archetype(
     world: &mut EcsMaster,
     ids: &[ComponentId],

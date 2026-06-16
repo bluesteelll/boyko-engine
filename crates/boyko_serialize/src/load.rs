@@ -32,10 +32,25 @@
 //! blit (C2); a mismatch with no decode fallback is a HARD error. The per-element
 //! `deserialize_fn` validates each bit-restricted field on read; on its first `Err`
 //! the partially-loaded archetype is rolled back to empty by the writer.
+//!
+//! Two additional robustness guards harden the path against a HOSTILE (not just
+//! truncated) file (the S2 review W1/W2):
+//!
+//! * **W1 (enable-tag column)**: a file column whose stable name resolves to a
+//!   registered enable tag ([`StorageKind::Bitset`]) is SKIPPED in pass 1. A bitset
+//!   id is filtered out of every archetype signature and has no `ComponentPool`, so
+//!   feeding it to the writer would hit a pool-less `expect`; skipping it (counted
+//!   in [`LoadReport::types_bitset_skipped`]) keeps a corrupt/foreign file a clean
+//!   skip, never a panic. A self-save never emits such a column.
+//! * **W2 (allocation DoS)**: every `Vec::with_capacity` driven by an untrusted
+//!   count (`type_count`, `entity_count`, `component_count`) is capped against the
+//!   bytes that could possibly back it (`capacity_hint`), so a forged count cannot
+//!   force a multi-GiB reservation before the per-element bounds check rejects the
+//!   stream.
 
 use std::path::Path;
 
-use boyko_ecs::ecs::core::component::component_registry::{self, Serializability};
+use boyko_ecs::ecs::core::component::component_registry::{self, Serializability, StorageKind};
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::serialize::{
     LoadColumn, LoadEntityMap, load_archetype, remap_loaded_entities, required_ctor_in_set,
@@ -44,8 +59,8 @@ use boyko_ecs::ecs::identifiers::primitives::{ComponentId, EntityId};
 
 use crate::error::LoadError;
 use crate::format::{
-    ArchetypeBlock, ENDIAN_LITTLE, FORMAT_VERSION, MAGIC, SaveHeader, TypeTableEntry,
-    native_endianness,
+    ArchetypeBlock, ColumnRegion, ENDIAN_LITTLE, FORMAT_VERSION, MAGIC, SaveHeader,
+    TypeTableEntry, native_endianness,
 };
 
 /// Which strategy the loader uses to place saved entities (plan §3.10). v1 ships
@@ -73,6 +88,15 @@ pub struct LoadReport {
     /// File types that resolved to NO registered component in this build (W1
     /// lenient default): their columns were skipped entirely.
     pub types_skipped: u32,
+    /// File types that resolved to a registered component classified as an enable
+    /// tag ([`StorageKind::Bitset`]): these have NO `ComponentPool` (filtered out of
+    /// every archetype signature), so their columns were skipped entirely (W1
+    /// hardening). A self-save never emits such a column — the saver's signature
+    /// excludes a bitset id — but a corrupt/foreign file CAN name one, and skipping
+    /// it (rather than feeding the pool-less id to the writer) keeps a hostile file
+    /// a clean skip instead of a panic. The owning entity stays valid without the
+    /// tag (matching the clone path, which also drops the enable bit).
+    pub types_bitset_skipped: u32,
     /// Columns that carried no data (a ViaFn column with no decoder, or an
     /// `Ignore`/skipped component the running archetype still includes) and were
     /// default-constructed via a `#[require]` ctor — or, when no ctor exists,
@@ -227,7 +251,11 @@ fn resolve_type_table(
 ) -> Result<Vec<ResolvedType>, LoadError> {
     let table_off = usize_off(header.type_table_off, "type_table_off")?;
     let count = header.type_count as usize;
-    let mut out = Vec::with_capacity(count);
+    // W2: cap the reservation against the input — a `count` larger than
+    // `bytes.len() / TypeTableEntry::SIZE` is a guaranteed truncation (each entry is
+    // a fixed `SIZE`-byte record), so a hostile `type_count` cannot force a huge
+    // up-front allocation before the per-entry bounds check rejects the stream.
+    let mut out = Vec::with_capacity(capacity_hint(count, bytes, TypeTableEntry::SIZE));
 
     for i in 0..count {
         let entry_off = table_off
@@ -292,7 +320,10 @@ fn load_one_archetype(
 
     // Parse the per-row saved EntityIds (the entity-row table).
     let rows_off = block.entity_rows_off as usize;
-    let mut saved_entity_ids = Vec::with_capacity(entity_count);
+    // W2: cap against the input — the entity-row table is `u64[entity_count]`, so a
+    // `count` larger than `bytes.len() / 8` is a guaranteed truncation; the loop
+    // below still bounds-checks every row read.
+    let mut saved_entity_ids = Vec::with_capacity(capacity_hint(entity_count, bytes, 8));
     for r in 0..entity_count {
         let off = rows_off
             .checked_add(r.checked_mul(8).ok_or(OVF)?)
@@ -307,9 +338,16 @@ fn load_one_archetype(
     let type_indices_off = block.type_indices_off as usize;
     let column_regions_off = block.column_regions_off as usize;
 
-    let mut descs: Vec<ColumnDesc> = Vec::with_capacity(column_count);
-    let mut present_ids: Vec<ComponentId> = Vec::with_capacity(column_count);
+    // W2: cap against the input — every column mandates a 4-byte file-local type
+    // index AND a 16-byte `ColumnRegion`, so it occupies at least 20 bytes on the
+    // wire; a `column_count` larger than `bytes.len() / 20` is a guaranteed
+    // truncation. The loop below still bounds-checks each index + region read.
+    const MIN_COLUMN_BYTES: usize = 4 + ColumnRegion::SIZE;
+    let column_cap = capacity_hint(column_count, bytes, MIN_COLUMN_BYTES);
+    let mut descs: Vec<ColumnDesc> = Vec::with_capacity(column_cap);
+    let mut present_ids: Vec<ComponentId> = Vec::with_capacity(column_cap);
     let mut skipped = 0u32;
+    let mut bitset_skipped = 0u32;
 
     for c in 0..column_count {
         let ti_off = type_indices_off
@@ -327,6 +365,19 @@ fn load_one_archetype(
         let byte_len = usize_off(read_u64(bytes, region_off + 8)?, "column byte_len")?;
 
         match resolved[type_index].component_id {
+            // W1: a resolved id that is an enable tag (`StorageKind::Bitset`) is
+            // filtered OUT of every archetype signature and has NO `ComponentPool`
+            // (see `ArchetypeMaster::create_archetype` /
+            // `Archetype::filtered_signature_mask`). The saver never emits a bitset
+            // column (a self-save's signature excludes it), but a corrupt/foreign
+            // file CAN name one — and pushing it into `present_ids` / `descs` would
+            // make the writer's `get_pool_mut(cid).expect(...)` panic for an id with
+            // no pool. Treat it like an absent type (skip it; the entity stays valid
+            // without the tag), mirroring the bitset skip in
+            // `clone/materialize.rs`. Counted in `types_bitset_skipped`.
+            Some(cid) if component_registry::storage_kind(cid.0) == StorageKind::Bitset => {
+                bitset_skipped += 1;
+            }
             Some(cid) => {
                 present_ids.push(cid);
                 descs.push(ColumnDesc {
@@ -396,6 +447,7 @@ fn load_one_archetype(
     report.columns_blitted += blitted;
     report.columns_decoded += decoded;
     report.types_skipped += skipped;
+    report.types_bitset_skipped += bitset_skipped;
     report.types_defaulted += defaulted;
 
     // Advance to the next block: past this block's entity-row table.
@@ -529,6 +581,28 @@ fn construct_or_exclude<'a>(
 
 /// A reusable "size overflow" load error.
 const OVF: LoadError = LoadError::Truncated("offset/length arithmetic overflow");
+
+/// Caps a file-supplied element `count` against the bytes that could possibly back
+/// it, returning a safe `Vec::with_capacity` hint (W2 — allocation-DoS guard).
+///
+/// A `count` is untrusted: a hostile header/block can name `0xFFFF_FFFF` elements
+/// to force a multi-GiB up-front reservation BEFORE the per-element bounds checks
+/// in the parse loop would catch the truncation. Each element occupies at least
+/// `min_elem_size` bytes on the wire (1 for a `u64` row-id table, the record size
+/// for a fixed-width entry table), so a `count` larger than
+/// `bytes.len() / min_elem_size` is a guaranteed truncation and cannot be satisfied.
+///
+/// The returned hint is `count.min(bytes.len() / min_elem_size)`: for a valid file
+/// it equals `count` (the full capacity hint is kept), and for a hostile count it
+/// is clamped to at most the input length — the subsequent parse loop still
+/// bounds-checks every element and surfaces the real truncation as a [`LoadError`].
+/// `min_elem_size` must be `>= 1` (a zero would divide-by-zero); every caller passes
+/// a fixed positive record stride.
+#[inline]
+fn capacity_hint(count: usize, bytes: &[u8], min_elem_size: usize) -> usize {
+    debug_assert!(min_elem_size >= 1, "capacity_hint: min_elem_size must be >= 1");
+    count.min(bytes.len() / min_elem_size)
+}
 
 /// Converts a file `u64` offset to a `usize`, rejecting an overflow on a narrower
 /// target (already excluded by the ptr-width check, but kept robust). `what` names
