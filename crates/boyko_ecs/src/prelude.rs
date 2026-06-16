@@ -33,6 +33,9 @@ pub use crate::ecs::core::component::hooks::HooksError;
 // ── Hierarchies (parent-child) ───────────────────────────────────────────────
 pub use crate::ecs::core::hierarchy::{ChildOf, Children};
 
+// ── Entity cloning (Feature 3) ───────────────────────────────────────────────
+pub use crate::ecs::core::clone::{EntityCloner, EntityClonerBuilder};
+
 // ── Scheduling ───────────────────────────────────────────────────────────────
 pub use crate::ecs::core::schedule::{
     Schedule, ScheduleBuilder, SystemConfig, SystemSet, in_state, on_enter, on_exit,

@@ -39,7 +39,9 @@
 #![allow(dead_code)]
 
 use crate::ecs::core::bundle::{Bundle, EmptyBundle};
+use crate::ecs::core::clone::EntityCloner;
 use crate::ecs::core::commands::Command;
+use crate::ecs::core::commands::clone_spawn_command::CloneSpawnCommand;
 use crate::ecs::core::commands::command_queue::CommandQueue;
 use crate::ecs::core::commands::despawn_command::DespawnCommand;
 use crate::ecs::core::commands::send_event_command::SendEventCommand;
@@ -181,6 +183,39 @@ impl<'s> Commands<'s> {
     #[inline]
     pub fn spawn_empty(&mut self) -> EntityCommands<'_, 's> {
         self.spawn(EmptyBundle)
+    }
+
+    /// Deferred clone-and-spawn (Feature 3, §8): pre-allocates a destination
+    /// [`Entity`] via the atomic counter and enqueues a [`CloneSpawnCommand`] that
+    /// clones `source` (opt-out, shallow, fires hooks — Bevy `clone_and_spawn`
+    /// parity) at the apply window. Returns an [`EntityCommands<'_, 's>`] handle for
+    /// chaining (`.insert(...).id()`).
+    ///
+    /// The returned id is valid synchronously (the counter mints it now); the actual
+    /// clone runs deferred. If the queue drops without an apply, the id leaks (one
+    /// per missed apply — the same contract as `spawn`).
+    #[inline]
+    pub fn clone_and_spawn(&mut self, source: Entity) -> EntityCommands<'_, 's> {
+        self.clone_and_spawn_with(source, EntityCloner::default_built())
+    }
+
+    /// Deferred clone-and-spawn with an explicit [`EntityCloner`] config (filter,
+    /// shallow/deep, fire-hooks, strict, preserve-ticks). The `cloner` is `Copy`, so
+    /// it is moved into the queued command by value. Returns an
+    /// [`EntityCommands<'_, 's>`] handle for the (root) clone.
+    #[inline]
+    pub fn clone_and_spawn_with(
+        &mut self,
+        source: Entity,
+        cloner: EntityCloner,
+    ) -> EntityCommands<'_, 's> {
+        let entity = self.entity_counter.reserve_entity();
+        self.queue.push(CloneSpawnCommand {
+            entity,
+            source,
+            cloner,
+        });
+        EntityCommands::new(entity, self)
     }
 
     /// Returns an [`EntityCommands<'_, 's>`] handle for an existing entity

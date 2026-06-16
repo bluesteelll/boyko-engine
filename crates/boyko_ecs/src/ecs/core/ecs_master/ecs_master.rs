@@ -1199,6 +1199,59 @@ impl EcsMaster {
         result
     }
 
+    // ── Entity cloning (Feature 3) ──────────────────────────────────────────
+
+    /// Clones `source` into a brand-new entity, cloning all cloneable components
+    /// (opt-out, Bevy `clone_and_spawn` parity). Shallow, fires `on_add` /
+    /// `on_insert`. Returns the new entity.
+    ///
+    /// Drains the deferred-hook queue at the outermost depth, like the spawn /
+    /// despawn direct APIs.
+    ///
+    /// # Panics
+    ///
+    /// If `source` is not alive (stale / never-registered handle).
+    #[inline]
+    pub fn clone_and_spawn(&mut self, source: Entity) -> Entity {
+        let cloner = crate::ecs::core::clone::EntityCloner::default_built();
+        self.clone_and_spawn_with(source, &cloner)
+    }
+
+    /// Clones `source` into a new entity using `cloner`'s configuration (filter,
+    /// shallow/deep, fire-hooks, strict, preserve-ticks). Returns the new (root)
+    /// entity. Panics if `source` is not alive.
+    pub fn clone_and_spawn_with(
+        &mut self,
+        source: Entity,
+        cloner: &crate::ecs::core::clone::EntityCloner,
+    ) -> Entity {
+        assert!(
+            self.has_entity(source),
+            "clone_and_spawn: source entity {:?} is not alive",
+            source
+        );
+        // Depth bracket + outermost drain (mirrors `create_entity`): nested fires
+        // (from on_add/on_insert) enqueue commands; only the outermost owner drains.
+        let scope = DeferredScopeGuard::enter();
+        let entity = if cloner.is_deep() {
+            crate::ecs::core::clone::deep::clone_subtree(self, source, cloner)
+        } else {
+            crate::ecs::core::clone::materialize::materialize_clone(self, source, cloner).entity
+        };
+        drop(scope);
+        self.drain_deferred_hook_queue();
+        entity
+    }
+
+    /// Deep-clones `source` and its `ChildOf` subtree (convenience for
+    /// `EntityCloner::new().linked(true)`). Returns the cloned root. Panics if
+    /// `source` is not alive.
+    #[inline]
+    pub fn clone_subtree(&mut self, source: Entity) -> Entity {
+        let cloner = crate::ecs::core::clone::EntityCloner::new().linked(true).build();
+        self.clone_and_spawn_with(source, &cloner)
+    }
+
     /// Removal core shared by [`delete_entity`](Self::delete_entity) and
     /// [`despawn_without_children`](Self::despawn_without_children): fires the
     /// pre-remove hooks and releases the row, but does NOT drain the deferred

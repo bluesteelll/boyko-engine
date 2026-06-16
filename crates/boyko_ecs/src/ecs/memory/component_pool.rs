@@ -1522,6 +1522,37 @@ impl ComponentPool {
         }
     }
 
+    /// Feature 3 (clone): returns the raw `*mut u8` of the reserved (committed-
+    /// capacity, not-yet-live) row `idx`, for a caller that must WRITE THROUGH the
+    /// pointer (a per-element `CloneFn`) rather than memcpy a `&[u8]`. Sibling of
+    /// [`Self::write_at_unchecked_initialized`] / [`Self::construct_at_uninitialized`]
+    /// — same pre-reserve contract, different write mechanism.
+    ///
+    /// # Safety
+    /// * `idx < committed_rows` — the caller pre-grew via
+    ///   `Archetype::reserve_capacity` (Phase X.I committed the rows).
+    /// * The slot is logically uninit (not yet committed via `commit_units`); the
+    ///   returned pointer is aligned to the pool's registered type and valid for
+    ///   `component_layout().size()` bytes.
+    /// * The caller holds exclusive `&mut self` access and writes exactly one value
+    ///   of the registered type into the slot (without dropping the uninit prior
+    ///   contents), then `commit_units(idx, 1)`.
+    #[inline]
+    pub(crate) unsafe fn reserved_row_ptr(&mut self, idx: usize) -> *mut u8 {
+        debug_assert!(
+            idx < self.committed_rows,
+            "reserved_row_ptr: idx {} >= committed_rows {} (callers pre-grow via \
+             reserve_capacity)",
+            idx,
+            self.committed_rows
+        );
+        // SAFETY: `idx < committed_rows` ⇒ `row_ptr` addresses a committed slot
+        //   within the pool's reservation (this slot is not yet live). `&mut self`
+        //   gives exclusive write access; the returned pointer carries the pool's
+        //   own reservation provenance.
+        unsafe { self.row_ptr(idx) }
+    }
+
     /// Phase 12.5 Opt-A2 (§5.6): commits `n` rows starting at `start_row`
     /// (advancing `self.len`) after the batch path has written every row's
     /// bytes via [`Self::write_at_unchecked_initialized`].

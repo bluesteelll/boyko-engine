@@ -1,5 +1,5 @@
 use std::any::TypeId;
-use crate::ecs::core::component::component_registry::RequiredDirectEntry;
+use crate::ecs::core::component::component_registry::{CloneFn, Cloneability, RequiredDirectEntry};
 use crate::ecs::core::component::hooks::ComponentHooks;
 use crate::ecs::identifiers::primitives::ComponentId;
 
@@ -68,6 +68,47 @@ pub trait Component: 'static + Sized {
     /// `HAS_HOOKS`). A backward-compatible widening — every existing impl keeps
     /// `HAS_REQUIRES = false`.
     const HAS_REQUIRES: bool = false;
+
+    /// Entity cloning (Feature 3, D2) — compile-time clone classification.
+    /// Defaults to [`Cloneability::Ignore`] (no clone-fn installed) so EVERY
+    /// existing / hand-written impl keeps the default and the component is
+    /// non-cloneable until it opts in. CRUCIALLY this needs NO `Clone` bound on
+    /// `Component` (existing non-`Clone` components keep compiling — the 0%-gate).
+    ///
+    /// The `#[derive(Component)]` macro overrides it: `TriviallyCopyable` for a
+    /// `Copy`-no-`Entity`-field type, `CloneViaFn` for a `Clone` (owning, or
+    /// `Copy`-with-`Entity`) type, `Ignore` for `#[component(no_clone)]` or a
+    /// non-`Clone` type. A backward-compatible widening — purely a compile-time
+    /// const, zero ABI break, zero runtime cost on the hot path.
+    const CLONE_BEHAVIOR: Cloneability = Cloneability::Ignore;
+
+    /// Entity cloning (Feature 3, D2) — the per-component clone glue fn-ptr.
+    /// Defaulted to `None` (consistent with the `Ignore` const above); the derive
+    /// overrides it with `Some(clone_via_clone::<Self>)` for a `CloneViaFn` type.
+    /// Per O2 a `TriviallyCopyable` type ALSO keeps the `None` default — the
+    /// whole-column batch memcpy is driven by the pool layout, never this pointer.
+    ///
+    /// Returning the fn-ptr (rather than BEING the fn) lets `install_clone_fn` read
+    /// it generically into the cold `CLONE` table at registration time. Called once
+    /// per type per process (behind the `component_id()` `OnceLock`); never on a
+    /// per-frame path. A backward-compatible widening — every existing impl keeps
+    /// the `None` default.
+    #[inline]
+    fn clone_fn() -> Option<CloneFn> {
+        None
+    }
+
+    /// Entity cloning (Feature 3) — the per-component clone classification as a
+    /// METHOD (vs the [`Self::CLONE_BEHAVIOR`] const), so the derive can compute it
+    /// via autoref specialization (a `const` cannot run autoref method resolution).
+    /// Defaults to the const (so hand-written impls that set only `CLONE_BEHAVIOR` —
+    /// like `ChildOf` — keep working). The derive overrides BOTH this and
+    /// [`Self::clone_fn`] from the same autoref probe. Read once at registration by
+    /// `install_clone_fn`; never on a per-frame path.
+    #[inline]
+    fn clone_behavior() -> Cloneability {
+        Self::CLONE_BEHAVIOR
+    }
 
     /// Phase 14a (plan §6.2) — installs this component's lifecycle hooks into
     /// `hooks`. Defaulted empty; the `#[derive(Component)]` attribute and the

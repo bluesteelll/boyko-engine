@@ -14,6 +14,7 @@
 //! The Phase 8d primitives (`Command` trait, `CommandQueue`,
 //! `consume_and_drop_glue`) survive unchanged.
 
+pub mod clone_spawn_command;
 pub mod command;
 pub mod command_queue;
 pub mod despawn_command;
@@ -39,6 +40,8 @@ pub use command_queue::CommandQueue;
 // Phase 11 command types stay `pub(crate)` — users go through the
 // `Commands` / `EntityCommands` enqueue methods, which materialise the
 // payloads internally.
+#[allow(unused_imports)]
+pub(crate) use clone_spawn_command::CloneSpawnCommand;
 #[allow(unused_imports)]
 pub(crate) use despawn_command::DespawnCommand;
 #[allow(unused_imports)]

@@ -37,8 +37,9 @@
 
 use std::sync::OnceLock;
 
+use crate::ecs::core::clone::map::EntityCloneMap;
 use crate::ecs::core::component::component::Component;
-use crate::ecs::core::component::component_registry;
+use crate::ecs::core::component::component_registry::{self, Cloneability, CloneFn};
 use crate::ecs::core::component::hooks::{ComponentHooks, HookFn};
 use crate::ecs::core::entity::entity::Entity;
 use crate::ecs::identifiers::primitives::ComponentId;
@@ -174,6 +175,28 @@ impl Children {
 // via `impl_self_bundle!` (see [`bundles`]) and ride the audited insert
 // machinery as themselves.
 
+/// Remaps a cloned `ChildOf`'s parent through the deep-clone source→clone map
+/// (Feature 3, D5). Installed ONLY for `ChildOf` (the single relationship remap in
+/// v1) via [`install_map_entities_fn`](component_registry::install_map_entities_fn)
+/// in `ChildOf::component_id()`. A parent inside the cloned subtree is rewritten to
+/// the cloned parent; a parent OUTSIDE the subtree (the cloned root's external
+/// parent) is left verbatim.
+///
+/// # Safety (the [`crate::ecs::core::component::component_registry::MapEntitiesFn`] contract)
+/// `dst` points at a live, initialized `ChildOf` (a `#[repr(transparent)]` over
+/// `Entity`); `map` is a shared, non-aliased reference for the call's duration.
+unsafe fn child_of_map_entities(dst: *mut u8, map: &EntityCloneMap) {
+    // SAFETY: `dst` is a live, aligned, initialized `ChildOf` row (the deep-clone
+    //   remap pass resolves it through the fast store for an archetype that hosts
+    //   `ChildOf`). We form `&mut ChildOf` to rewrite its inner `Entity` in place;
+    //   no other reference aliases it (single-threaded `&mut EcsMaster`).
+    let child_of: &mut ChildOf = unsafe { &mut *dst.cast::<ChildOf>() };
+    if let Some(mapped) = map.get(child_of.0) {
+        child_of.0 = mapped; // clone points at the cloned parent
+    }
+    // else: parent is outside the cloned subtree → keep verbatim (shared sibling).
+}
+
 impl Component for ChildOf {
     #[inline]
     fn component_id() -> ComponentId {
@@ -187,11 +210,30 @@ impl Component for ChildOf {
             if Self::HAS_HOOKS {
                 component_registry::install_hooks::<Self>(raw);
             }
+            // Feature 3: a hand-written `component_id()` MUST install the clone
+            // metadata too (the derive does this ungated for derived types). `ChildOf`
+            // is `Copy`-with-an-`Entity`-field, so it is classified `CloneViaFn` (NOT
+            // `TriviallyCopyable`) so the deep-clone `ChildOf` remap can run.
+            component_registry::install_clone_fn::<Self>(raw);
+            // Feature 3 D5: install the SINGLE relationship remap fn (ChildOf only).
+            component_registry::install_map_entities_fn(
+                raw,
+                child_of_map_entities as component_registry::MapEntitiesFn,
+            );
             ComponentId(raw)
         })
     }
 
     const HAS_HOOKS: bool = true;
+
+    /// Feature 3: `ChildOf` is `Copy`-with-an-`Entity`-field → `CloneViaFn` (NOT
+    /// trivially copyable) so the deep-clone remap pass runs.
+    const CLONE_BEHAVIOR: Cloneability = Cloneability::CloneViaFn;
+
+    #[inline]
+    fn clone_fn() -> Option<CloneFn> {
+        Some(component_registry::clone_via_clone::<Self> as CloneFn)
+    }
 
     /// `ChildOf` links on insert and unlinks on replace (Phase 19 §3). It does
     /// NOT register `on_add` / `on_remove`: `on_add` would double-fire alongside
@@ -213,6 +255,11 @@ impl Component for Children {
             if Self::HAS_HOOKS {
                 component_registry::install_hooks::<Self>(raw);
             }
+            // Feature 3: populate the clone slot (ungated, like the derive).
+            // `Children` keeps the default `Cloneability::Ignore` / `clone_fn ==
+            // None`: it is a derived reverse index, ALWAYS cloner-denied (a deep
+            // clone rebuilds it via `LinkChildCommand`, never byte-copies it).
+            component_registry::install_clone_fn::<Self>(raw);
             ComponentId(raw)
         })
     }
@@ -233,7 +280,51 @@ impl Component for Children {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ecs::core::component::component_registry::get_hooks;
+    use crate::ecs::core::component::component_registry::{
+        get_clone_info, get_hooks, get_map_entities_fn,
+    };
+
+    /// Feature 3 install-probe (mirrors `hooks_install_for_child_of_and_children`).
+    ///
+    /// A hand-written `component_id()` that omits the `install_clone_fn` /
+    /// `install_map_entities_fn` calls would leave `CLONE_BEHAVIOR == CloneViaFn`
+    /// but the cold `CLONE` / `MAP_ENTITIES` slots unset — silently breaking deep
+    /// clone (the `ChildOf` remap would never run). This asserts both installs
+    /// fired with the expected shape.
+    #[test]
+    fn clone_install_for_child_of_and_children() {
+        let child_of = get_clone_info(ChildOf::component_id().0)
+            .expect("ChildOf clone info must be installed by component_id()");
+        assert_eq!(
+            child_of.cloneability,
+            Cloneability::CloneViaFn,
+            "ChildOf is Copy-with-Entity ⇒ CloneViaFn (so deep-clone remap runs)"
+        );
+        assert!(
+            child_of.clone_fn.is_some(),
+            "ChildOf installs Some(clone_via_clone::<ChildOf>)"
+        );
+        assert!(
+            get_map_entities_fn(ChildOf::component_id().0).is_some(),
+            "ChildOf installs its map_entities_fn (the v1 relationship remap)"
+        );
+
+        let children = get_clone_info(Children::component_id().0)
+            .expect("Children clone info must be installed by component_id()");
+        assert_eq!(
+            children.cloneability,
+            Cloneability::Ignore,
+            "Children is always cloner-denied (derived reverse index)"
+        );
+        assert!(
+            children.clone_fn.is_none(),
+            "Children installs no clone fn (never byte-copied)"
+        );
+        assert!(
+            get_map_entities_fn(Children::component_id().0).is_none(),
+            "Children installs no remap fn (only ChildOf does in v1)"
+        );
+    }
 
     /// C2 install-probe (Phase 19 R2 §C2) — the foundation tripwire.
     ///

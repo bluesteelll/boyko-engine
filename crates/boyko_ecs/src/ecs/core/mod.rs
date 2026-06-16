@@ -2,6 +2,7 @@ pub mod app;
 pub mod archetype;
 pub mod bundle;
 pub mod change_detection;
+pub mod clone;
 pub mod commands;
 pub mod component;
 pub mod ecs_master;

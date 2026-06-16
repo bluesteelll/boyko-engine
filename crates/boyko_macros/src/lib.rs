@@ -139,6 +139,11 @@ pub fn component_macro(input: TokenStream) -> TokenStream {
         .into();
     }
 
+    // Feature 3 (D3 gate): scan the struct fields for an `Entity` / `ChildOf` type
+    // BEFORE `input.ident` is moved out below. A `Copy`-with-`Entity` component is
+    // forced to `CloneViaFn` so the deep-clone remap can run.
+    let has_entity_field = struct_has_entity_field(&input);
+
     let name = input.ident;
 
     // Emit `const HAS_HOOKS = true;` + a `register_hooks` impl only when at
@@ -159,6 +164,38 @@ pub fn component_macro(input: TokenStream) -> TokenStream {
     let require_ctor_fns = requires.ctor_fns_codegen(&name);
     let require_items = requires.codegen(&name);
     let require_install = requires.install_codegen();
+
+    // Entity cloning (Feature 3): emit the `CLONE_BEHAVIOR` const + `clone_fn()`
+    // override classifying the type, and the UNGATED `install_clone_fn::<Self>(raw)`
+    // call in `component_id()`. The classification (`TriviallyCopyable` /
+    // `CloneViaFn` / `Ignore`) is decided by:
+    //   * `#[component(no_clone)]`  → `Ignore` (the trait defaults — emit nothing);
+    //   * `#[component(clone = f)]` → `CloneViaFn` with the user free fn `f`;
+    //   * else → autoref specialization at the type level: a `Copy`-no-`Entity`
+    //     type is `TriviallyCopyable` (batch memcpy, `clone_fn = None`), a `Clone`
+    //     type (incl. `Copy`-with-`Entity`) is `CloneViaFn` with
+    //     `clone_via_clone::<Self>`, a non-`Clone` type is `Ignore`.
+    // The `Entity`-field scan is syntactic (forces `CloneViaFn` so the deep-clone
+    // remap can run; computed above before `input.ident` was moved). The install is
+    // ALWAYS emitted (ungated) — one cold `OnceLock::set` per type, the 0%-gate
+    // (registration-time only).
+    //
+    // W1 (b): `storage = "bitset"` SUPPRESSES the clone override AND the install — a
+    // bitset enable tag has NO `ComponentPool`, so it must classify `Ignore` (the
+    // trait default `CLONE_BEHAVIOR` / `clone_fn`) and never enter a clone's column
+    // set. The clone materialization additionally skips any bitset id (W1 (a)); the
+    // suppression here keeps the metadata table consistent (`Ignore` / `None`) and
+    // mirrors the single-component `Bundle` suppression below.
+    let (clone_items, clone_install) = if hooks.storage_bitset {
+        (TokenStream2::new(), TokenStream2::new())
+    } else {
+        (
+            clone_codegen(&name, &hooks, has_entity_field),
+            quote! {
+                boyko_ecs::ecs::core::component::component_registry::install_clone_fn::<Self>(raw);
+            },
+        )
+    };
 
     // Phase 22 D7: single-component Bundle emission (suppressed by
     // `#[component(no_bundle)]`). EnableTag D6: `storage = "bitset"` ALSO
@@ -212,6 +249,7 @@ pub fn component_macro(input: TokenStream) -> TokenStream {
                     }
                     #storage_install
                     #require_install
+                    #clone_install
                     boyko_ecs::ecs::identifiers::primitives::ComponentId(raw)
                 })
             }
@@ -221,6 +259,8 @@ pub fn component_macro(input: TokenStream) -> TokenStream {
             #hook_items
 
             #require_items
+
+            #clone_items
 
             // NOTE: `std::any::type_name::<Self>()` is not yet stable as a const fn.
             // Calling it from a regular fn body is fine; the compiler folds it to a
@@ -267,6 +307,14 @@ struct ComponentHookPaths {
     no_bundle: bool,
     /// `true` iff `storage = "bitset"` was supplied (EnableTag D5).
     storage_bitset: bool,
+    /// Feature 3: `true` iff the bare `no_clone` flag was supplied — opts the
+    /// component out of cloning (`Cloneability::Ignore`, `clone_fn = None`), even if
+    /// the type is `Clone` / `Copy`.
+    no_clone: bool,
+    /// Feature 3: `Some(path)` iff `clone = <free fn>` was supplied — a capture-free
+    /// `unsafe fn(*const u8, *mut u8)` (the `CloneFn` shape) the user installs as the
+    /// custom clone. Mutually exclusive with `no_clone`.
+    clone_with: Option<Path>,
 }
 
 impl ComponentHookPaths {
@@ -440,7 +488,7 @@ fn parse_component_hooks(attrs: &[syn::Attribute]) -> Result<ComponentHookPaths,
                 return Err(meta.error(
                     "on_despawn is not supported in this version (deferred to Phase 14b); \
                      valid keys: on_add, on_insert, on_replace, on_remove, no_bundle, \
-                     storage = \"bitset\"",
+                     no_clone, clone = <fn>, storage = \"bitset\"",
                 ));
             }
 
@@ -452,6 +500,42 @@ fn parse_component_hooks(attrs: &[syn::Attribute]) -> Result<ComponentHookPaths,
                     ));
                 }
                 paths.no_bundle = true;
+                return Ok(());
+            }
+
+            // Feature 3: bare flag key `no_clone` — opt out of cloning.
+            if meta.path.is_ident("no_clone") {
+                if paths.no_clone {
+                    return Err(meta.error(
+                        "duplicate #[component(...)] key; no_clone may be set at most once",
+                    ));
+                }
+                if paths.clone_with.is_some() {
+                    return Err(meta.error(
+                        "#[component(no_clone)] conflicts with #[component(clone = ...)]: \
+                         a component is EITHER non-cloneable OR has a custom clone fn",
+                    ));
+                }
+                paths.no_clone = true;
+                return Ok(());
+            }
+
+            // Feature 3: NameValue key `clone = <free fn path>` — a custom
+            // capture-free `unsafe fn(*const u8, *mut u8)` clone (the `CloneFn` shape).
+            if meta.path.is_ident("clone") {
+                if paths.clone_with.is_some() {
+                    return Err(meta.error(
+                        "duplicate #[component(...)] key; clone may be set at most once",
+                    ));
+                }
+                if paths.no_clone {
+                    return Err(meta.error(
+                        "#[component(clone = ...)] conflicts with #[component(no_clone)]: \
+                         a component is EITHER non-cloneable OR has a custom clone fn",
+                    ));
+                }
+                let value = meta.value()?; // consumes the `=`
+                paths.clone_with = Some(value.parse::<Path>()?);
                 return Ok(());
             }
 
@@ -494,7 +578,7 @@ fn parse_component_hooks(attrs: &[syn::Attribute]) -> Result<ComponentHookPaths,
                 return Err(meta.error(
                     "unknown #[component(...)] key; \
                      valid keys: on_add, on_insert, on_replace, on_remove, no_bundle, \
-                     storage = \"bitset\"",
+                     no_clone, clone = <fn>, storage = \"bitset\"",
                 ));
             };
 
@@ -880,6 +964,133 @@ fn parse_require_entry(expr: Expr) -> Result<RequireEntry, TokenStream> {
 /// `#[require(B, B)]` / `#[require(B)] #[require(B)]` duplicate at compile time.
 fn path_eq(a: &Path, b: &Path) -> bool {
     quote!(#a).to_string() == quote!(#b).to_string()
+}
+
+/// Feature 3 (D3 gate): conservative SYNTACTIC scan for an `Entity` / `ChildOf`
+/// field anywhere in the struct's field types. A `Copy` component carrying an
+/// `Entity` reference is bitwise-copyable but a blind memcpy would NOT remap the
+/// entity under deep clone, so the derive must classify it `CloneViaFn` (NOT
+/// `TriviallyCopyable`) — this flag suppresses the `Copy` autoref arm. Conservative:
+/// a false positive only costs a fn-call (never correctness); a path spelled
+/// differently than `Entity` / `ChildOf` is NOT caught (documented v1 boundary —
+/// the general per-field `#[entities]` remap is out of v1, D5).
+fn struct_has_entity_field(input: &DeriveInput) -> bool {
+    fn ty_mentions_entity(ty: &Type) -> bool {
+        // Match the token text — catches `Entity`, `ChildOf`, `Option<Entity>`,
+        // `[Entity; N]`, `Vec<Entity>`, `path::Entity`, etc. (substring on the
+        // last path segment text). Cheap and conservative.
+        let text = quote!(#ty).to_string();
+        text.contains("Entity") || text.contains("ChildOf")
+    }
+    let fields = match &input.data {
+        Data::Struct(s) => &s.fields,
+        // Enums/unions: scan every field of every variant conservatively.
+        Data::Enum(e) => {
+            return e
+                .variants
+                .iter()
+                .flat_map(|v| v.fields.iter())
+                .any(|f| ty_mentions_entity(&f.ty));
+        }
+        Data::Union(u) => {
+            return u.fields.named.iter().any(|f| ty_mentions_entity(&f.ty));
+        }
+    };
+    match fields {
+        Fields::Named(named) => named.named.iter().any(|f| ty_mentions_entity(&f.ty)),
+        Fields::Unnamed(unnamed) => unnamed.unnamed.iter().any(|f| ty_mentions_entity(&f.ty)),
+        Fields::Unit => false,
+    }
+}
+
+/// Feature 3: emits the `CLONE_BEHAVIOR` const + `clone_behavior()` /
+/// `clone_fn()` method overrides classifying the derived component for cloning.
+///
+/// * `#[component(no_clone)]` → `Ignore` / `None` (emit the trait defaults — return
+///   an empty token stream so the const stays `Ignore` and `clone_fn` stays `None`).
+/// * `#[component(clone = f)]` → `CloneViaFn` with the user free fn `f` (cast to the
+///   `CloneFn` shape).
+/// * else → AUTOREF specialization (`CloneProbe`): `TriviallyCopyable` for a
+///   `Copy`-no-`Entity` type, `CloneViaFn` for a `Clone` (incl. `Copy`-with-`Entity`)
+///   type, `Ignore` for a non-`Clone` type. `clone_behavior()` carries the runtime
+///   result (a const cannot run autoref); the `CLONE_BEHAVIOR` const is left at the
+///   trait default (`Ignore`) on this path — only `install_clone_fn` reads the
+///   method, and the secondary `if const { ... }` const checks treat the derive
+///   default as "no static guarantee", which is correct.
+fn clone_codegen(name: &Ident, hooks: &ComponentHookPaths, has_entity_field: bool) -> TokenStream2 {
+    // `no_clone`: keep the trait defaults (Ignore / None) — emit nothing.
+    if hooks.no_clone {
+        return TokenStream2::new();
+    }
+
+    // `clone = f`: a custom capture-free clone fn → CloneViaFn with `f`.
+    if let Some(f) = &hooks.clone_with {
+        return quote! {
+            const CLONE_BEHAVIOR:
+                ::boyko_ecs::ecs::core::component::component_registry::Cloneability =
+                ::boyko_ecs::ecs::core::component::component_registry::Cloneability::CloneViaFn;
+
+            #[inline]
+            fn clone_behavior()
+                -> ::boyko_ecs::ecs::core::component::component_registry::Cloneability {
+                ::boyko_ecs::ecs::core::component::component_registry::Cloneability::CloneViaFn
+            }
+
+            #[inline]
+            fn clone_fn()
+                -> ::std::option::Option<
+                    ::boyko_ecs::ecs::core::component::component_registry::CloneFn
+                > {
+                ::std::option::Option::Some(
+                    #f as ::boyko_ecs::ecs::core::component::component_registry::CloneFn
+                )
+            }
+        };
+    }
+
+    // Default path: autoref specialization. `TRIVIAL` is the syntactic "no Entity
+    // field" flag — `false` suppresses the `Copy` arm so a `Copy`-with-`Entity` type
+    // falls to `CloneViaFn` (D3). The probe is invoked through THREE refs
+    // (`(&&&probe).method()`): with three leading refs the resolver reaches all three
+    // `&self` arms and picks the highest-priority APPLICABLE one — the most-ref'd
+    // `Self` wins (`&&CloneProbe` = Copy → `&CloneProbe` = Clone → `CloneProbe` =
+    // Ignore), i.e. Copy → Clone → neither. The ref count MUST stay `&&&` to agree
+    // with the arm receiver depths in `component_registry` (a `&&` call misclassifies
+    // every `Copy` type as `CloneViaFn` — the C1 bug).
+    let trivial = if has_entity_field {
+        quote! { false }
+    } else {
+        quote! { true }
+    };
+    quote! {
+        #[inline]
+        fn clone_behavior()
+            -> ::boyko_ecs::ecs::core::component::component_registry::Cloneability {
+            // Bring the autoref-arm traits into scope so method resolution can pick
+            // the `&` (Clone) / `&&` (Copy) arms over the by-value (Ignore) inherent.
+            use ::boyko_ecs::ecs::core::component::component_registry::{
+                CloneIgnoreArm as _, CloneViaFnArm as _, TriviallyCopyableArm as _,
+            };
+            let probe = ::boyko_ecs::ecs::core::component::component_registry::CloneProbe::<
+                #name, #trivial,
+            >::new();
+            (&&&probe).clone_behavior()
+        }
+
+        #[inline]
+        fn clone_fn()
+            -> ::std::option::Option<
+                ::boyko_ecs::ecs::core::component::component_registry::CloneFn
+            > {
+            use ::boyko_ecs::ecs::core::component::component_registry::{
+                CloneIgnoreArm as _, CloneViaFnArm as _, TriviallyCopyableArm as _,
+            };
+            let probe = ::boyko_ecs::ecs::core::component::component_registry::CloneProbe::<
+                #name, #trivial,
+            >::new();
+            (&&&probe).clone_fn_ptr()
+        }
+    }
 }
 
 /// Derive macro for implementing the Resource trait.
