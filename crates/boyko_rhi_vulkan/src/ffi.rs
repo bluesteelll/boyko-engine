@@ -63,6 +63,7 @@ pub type VkFlags = u32;
 pub type VkDeviceSize = u64;
 
 pub const VK_FALSE: VkBool32 = 0;
+pub const VK_TRUE: VkBool32 = 1;
 
 // ---------------------------------------------------------------------------
 // Handles.

@@ -1,21 +1,26 @@
 //! `boyko_rhi_vulkan` — raw hand-FFI Vulkan backend for boyko-engine.
 //!
-//! This crate is the **NO-SDK sub-step of Slice 0** of the render foundation
-//! (see `docs/RENDER-PHYSICS-GPU-PLAN.md` §0, §4, §5.4, §7 Phase 0, §11). It
-//! proves the plan's highest-risk item in miniature **without the Vulkan SDK**
-//! (no shaders, no validation layers required):
+//! This crate is **Slice 0** of the render foundation (see
+//! `docs/RENDER-PHYSICS-GPU-PLAN.md` §0, §4, §5.4, §7 Phase 0, §11). It proves
+//! the plan's highest-risk item — zero-readback chained GPU work on a
+//! hand-rolled Vulkan backend — in miniature, with `boyko_ecs` untouched:
 //!
-//! 1. A hand-rolled loader + `VkInstance` + `VkDevice` (one graphics+compute
-//!    queue), all via raw FFI mirroring `boyko_ecs::ecs::memory::vm.rs`.
-//! 2. A `VkDeviceMemory` sub-allocator (free-list with coalescing) over one
-//!    large host-visible + host-coherent block.
-//! 3. A host-visible buffer write/read round-trip: create a `VkBuffer`,
-//!    sub-allocate an aligned offset, bind, map, write, read back, assert.
+//! 1. **0a** — a hand-rolled loader + `VkInstance` + `VkDevice` (one
+//!    graphics+compute queue) via raw FFI mirroring
+//!    `boyko_ecs::ecs::memory::vm.rs`, with the `VK_LAYER_KHRONOS_validation`
+//!    messenger wired as the test oracle ([`debug`], [`device`]).
+//! 2. **0b** — a `VkDeviceMemory` sub-allocator (free-list with coalescing) over
+//!    one large host-visible + host-coherent block ([`memory`],
+//!    [`suballocator`]), proven by a buffer write/read round-trip.
+//! 3. **0c** — one compute dispatch from a committed `.spv` writes a known
+//!    pattern → fence → readback → assert ([`compute`]).
+//! 4. **0d** — a SECOND compute pass transforms the same buffer, chained through
+//!    a `vkCmdPipelineBarrier`, submitted once → diff vs a CPU golden
+//!    ([`compute::ComputeHarness::run_chained`]).
 //!
-//! Compute dispatch, SPIR-V, validation-layer-as-oracle and the chained-pass
-//! barrier (Slice 0 steps 3-4) are **SDK-gated and deferred** — but the
-//! [`device::InstanceConfig::enable_validation`] seam is wired so they can flip
-//! on without reshaping the bootstrap.
+//! The single readback in 0c/0d is the TEST ORACLE, not a per-frame path; the
+//! validation messenger asserted to zero messages is the soundness oracle that
+//! substitutes for Miri on the raw-FFI path (plan §6).
 //!
 //! # Constraints
 //!
@@ -46,6 +51,7 @@
 //! # let _ = bound;
 //! ```
 
+pub mod compute;
 pub mod debug;
 pub mod device;
 pub mod ffi;
