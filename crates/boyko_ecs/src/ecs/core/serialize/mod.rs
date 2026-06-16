@@ -18,11 +18,39 @@
 //!
 //! These types are NOT a hot path — they exist only on the cold save/load path.
 
+pub mod load_writer;
 pub mod wire;
 
+pub use load_writer::{LoadColumn, load_archetype};
 pub use wire::{Wire, WireRefTuple, WireTuple};
 
+// Re-export the registry's per-component deserialize fn-ptr alias here so the
+// loader's `LoadColumn::Decode` variant (and the `boyko_serialize` parser) name it
+// from the serialize boundary module rather than reaching into the registry.
+pub use crate::ecs::core::component::component_registry::{DeserializeFn, RequiredCtor};
+
+use crate::ecs::core::component::component_registry;
 use crate::ecs::core::entity::entity::Entity;
+use crate::ecs::identifiers::primitives::ComponentId;
+
+/// Resolves the capture-free `#[require]` ctor that materializes `target_id` within
+/// the transitive require-closure of `base_ids` (plan §3.11 step 4 default-construct
+/// path, C2). Returns `None` when `target_id` is not reachable as a required
+/// component from any base id — the loader then EXCLUDES that no-data column from
+/// the fresh archetype (it has no default value to construct).
+///
+/// A thin `pub` boundary over the crate-private
+/// `component_registry::required_ctor_for` so the `boyko_serialize` file-format
+/// parser can decide construct-vs-exclude for a no-data column without reaching into
+/// the registry. COLD — called only from `boyko_serialize::load_world` (the C1
+/// 0%-gate: never a per-frame path).
+#[inline]
+pub fn required_ctor_in_set(
+    base_ids: &[ComponentId],
+    target_id: ComponentId,
+) -> Option<RequiredCtor> {
+    component_registry::required_ctor_for(base_ids, target_id)
+}
 
 /// Append-only write cursor over a preallocated byte buffer (plan §3.8).
 ///
@@ -223,18 +251,15 @@ pub enum DecodeError {
 ///
 /// [`LoadMapEntitiesFn`]: crate::ecs::core::component::component_registry::LoadMapEntitiesFn
 //
-// S1 forward-seam: the `sparse` backing has no in-crate caller until S2 wires
-// `load.rs` (the same ahead-of-consumer pattern the cursors carried in S0). The
-// narrow `#[allow(dead_code)]` is removed when S2 lands the loader.
-#[allow(dead_code)]
 #[derive(Default)]
 pub struct LoadEntityMap {
-    /// `saved EntityId.0` → freshly-allocated `Entity`. S2 backs this with a
-    /// `SparseMap<Entity>` (the `EntityCloneMap` template); S1 keeps it empty.
+    /// `saved EntityId.0` → freshly-allocated `Entity`. Backed by a
+    /// `SparseMap<Entity>` (the `EntityCloneMap` template). S2's
+    /// [`load_archetype`](load_writer::load_archetype) populates one entry per
+    /// loaded entity; the S2.5 remap pass reads it through [`Self::get`].
     sparse: boyko_utils::sparse_map::sparse_map::SparseMap<Entity>,
 }
 
-#[allow(dead_code)]
 impl LoadEntityMap {
     /// Creates an empty map.
     #[inline]
@@ -244,11 +269,31 @@ impl LoadEntityMap {
         }
     }
 
+    /// Records that the saved `saved_entity_id` (`EntityId.0`) maps to the
+    /// freshly-allocated `fresh` entity. Returns the previous mapping for that
+    /// saved id, if any (a duplicate saved id in one file — a corrupt save).
+    #[inline]
+    pub fn insert(&mut self, saved_entity_id: usize, fresh: Entity) -> Option<Entity> {
+        self.sparse.insert(saved_entity_id, fresh)
+    }
+
     /// Returns the freshly-allocated `Entity` for a saved `EntityId.0`, or `None`
     /// when the saved id was never registered in this load (an unmapped reference —
     /// the C4 loud-error path the loader turns into a release error).
     #[inline]
     pub fn get(&self, saved_entity_id: usize) -> Option<Entity> {
         self.sparse.get(saved_entity_id).copied()
+    }
+
+    /// Number of saved→fresh mappings recorded.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.sparse.len()
+    }
+
+    /// `true` when no mappings have been recorded.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.sparse.is_empty()
     }
 }
