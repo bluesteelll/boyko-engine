@@ -22,6 +22,24 @@
 //! validation messenger asserted to zero messages is the soundness oracle that
 //! substitutes for Miri on the raw-FFI path (plan §6).
 //!
+//! # Slice 1 — on-screen path (plan §7 Phase 1-3, D8 = our window)
+//!
+//! On top of Slice 0, [`window`] + [`swapchain`] add a fully in-house on-screen
+//! path with ZERO third-party crates:
+//!
+//! - [`window::Window`] — a raw Win32 window via hand-FFI to `user32`/`kernel32`
+//!   (`#[cfg(windows)]`; a non-Windows stub keeps the crate cross-target).
+//! - [`swapchain::Surface`] — `vkCreateWin32SurfaceKHR` over the window's
+//!   `HWND`/`HINSTANCE`, with a present-capable queue family + color format.
+//! - [`swapchain::Swapchain`] — a FIFO swapchain of `COLOR_ATTACHMENT` images +
+//!   one view per image, recreated on resize / out-of-date.
+//! - [`swapchain::Renderer`] — acquire → record (barrier → Vulkan 1.3
+//!   `vkCmdBeginRendering` CLEAR → `vkCmdEndRendering` → barrier) → submit →
+//!   present, 2 frames in flight, no `VkRenderPass`/`VkFramebuffer`.
+//!
+//! Enabled by [`device::InstanceConfig::windowed`]; the headless
+//! [`device::VulkanContext::boot`] path is unchanged when it is `false`.
+//!
 //! # Constraints
 //!
 //! - **std-only**: no third-party crates (no ash/vulkano/windows-sys/libc).
@@ -57,3 +75,5 @@ pub mod device;
 pub mod ffi;
 pub mod memory;
 pub mod suballocator;
+pub mod swapchain;
+pub mod window;

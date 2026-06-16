@@ -191,6 +191,7 @@ fn sub_alloc_reuse_on_real_block() {
 fn validation_layer_clean_on_device_ops() {
     let ctx = match VulkanContext::boot(InstanceConfig {
         enable_validation: true,
+        ..InstanceConfig::default()
     }) {
         Ok(ctx) => ctx,
         Err(e) => {

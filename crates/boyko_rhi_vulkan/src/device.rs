@@ -54,6 +54,10 @@ pub enum BootError {
     /// installed (the SDK is absent). The caller decides whether this is fatal
     /// (the compute tests treat it as "skip gracefully").
     ValidationUnavailable,
+    /// A windowed context was requested but a required WSI / dynamic-rendering
+    /// extension or feature is not present on this driver (the test treats it as
+    /// "skip gracefully").
+    WindowingUnavailable,
 }
 
 /// Bootstrap options for the instance.
@@ -67,6 +71,19 @@ pub struct InstanceConfig {
     /// boot fails with [`BootError::ValidationUnavailable`] rather than silently
     /// running without the oracle — a missing oracle must never be invisible.
     pub enable_validation: bool,
+
+    /// Build an on-screen-capable context (Slice 1): enable the `VK_KHR_surface`
+    /// and `VK_KHR_win32_surface` instance extensions and the `VK_KHR_swapchain`
+    /// device extension, request the `dynamicRendering` (Vulkan 1.3) feature, and
+    /// load the surface/swapchain command tables.
+    ///
+    /// Defaults to `false`, so the headless [`VulkanContext::boot`] path is
+    /// byte-for-byte unchanged.
+    ///
+    /// The surface itself is created later from a window via
+    /// [`crate::swapchain::Surface::new`]; this flag only wires the extensions
+    /// the surface/swapchain need at instance/device-creation time.
+    pub windowed: bool,
 }
 
 /// Global-scope Vulkan commands (resolved with a NULL instance).
@@ -88,6 +105,31 @@ struct InstanceFns {
     /// `VK_EXT_debug_utils` destroyer — `Some` only when validation is enabled
     /// (the extension command resolves only with the extension enabled).
     destroy_debug_messenger: Option<PfnVkDestroyDebugUtilsMessengerExt>,
+    /// `VK_KHR_surface` / `VK_KHR_win32_surface` instance commands — `Some` only
+    /// when a windowed context is requested (they resolve only with the surface
+    /// extensions enabled).
+    surface: Option<SurfaceInstanceFns>,
+}
+
+/// `VK_KHR_surface` + `VK_KHR_win32_surface` instance-scope commands (windowed
+/// contexts only). `SurfaceFns` (the public swapchain-facing view) is built from
+/// these by [`crate::swapchain`].
+pub struct SurfaceInstanceFns {
+    pub create_win32_surface: PfnVkCreateWin32SurfaceKhr,
+    pub destroy_surface: PfnVkDestroySurfaceKhr,
+    pub get_surface_support: PfnVkGetPhysicalDeviceSurfaceSupportKhr,
+    pub get_surface_capabilities: PfnVkGetPhysicalDeviceSurfaceCapabilitiesKhr,
+    pub get_surface_formats: PfnVkGetPhysicalDeviceSurfaceFormatsKhr,
+    pub get_surface_present_modes: PfnVkGetPhysicalDeviceSurfacePresentModesKhr,
+}
+
+/// `VK_KHR_swapchain` device-scope commands (windowed contexts only).
+pub struct SwapchainDeviceFns {
+    pub create_swapchain: PfnVkCreateSwapchainKhr,
+    pub destroy_swapchain: PfnVkDestroySwapchainKhr,
+    pub get_swapchain_images: PfnVkGetSwapchainImagesKhr,
+    pub acquire_next_image: PfnVkAcquireNextImageKhr,
+    pub queue_present: PfnVkQueuePresentKhr,
 }
 
 /// Device-scope Vulkan commands needed for the buffer round-trip and the
@@ -132,6 +174,16 @@ pub struct DeviceFns {
     pub wait_for_fences: PfnVkWaitForFences,
     pub queue_submit: PfnVkQueueSubmit,
     pub device_wait_idle: PfnVkDeviceWaitIdle,
+    // --- Slice-1 core (Vulkan 1.0 / 1.3) commands, always loaded. ---
+    pub reset_fences: PfnVkResetFences,
+    pub create_image_view: PfnVkCreateImageView,
+    pub destroy_image_view: PfnVkDestroyImageView,
+    pub create_semaphore: PfnVkCreateSemaphore,
+    pub destroy_semaphore: PfnVkDestroySemaphore,
+    pub cmd_begin_rendering: PfnVkCmdBeginRendering,
+    pub cmd_end_rendering: PfnVkCmdEndRendering,
+    // --- Slice-1 `VK_KHR_swapchain` device commands — `Some` only when windowed. ---
+    pub swapchain: Option<SwapchainDeviceFns>,
 }
 
 /// A booted Vulkan context: a loaded loader, an instance, a logical device and
@@ -236,13 +288,18 @@ impl VulkanContext {
     /// correct command pointer. Any debug messenger this creates is destroyed
     /// in-place on the error paths (before returning), so the caller only ever
     /// has to destroy the instance + free the loader.
+    // `InstanceFns` is a command table of function pointers carried back on the
+    // COLD error path purely so the caller can destroy the instance with the
+    // right destroyer; boxing it would add a heap alloc to a once-per-boot
+    // failure path with no benefit (the table is moved, not copied around).
+    #[allow(clippy::result_large_err)]
     fn boot_with_instance(
         module: *mut c_void,
         instance: VkInstance,
         gipa: PfnVkGetInstanceProcAddr,
         config: InstanceConfig,
     ) -> Result<Self, (BootError, InstanceFns)> {
-        let instance_fns = match load_instance_fns(gipa, instance, config.enable_validation) {
+        let instance_fns = match load_instance_fns(gipa, instance, config) {
             Ok(f) => f,
             // No fns loaded → we cannot even destroy the instance with a typed
             // pointer; load just the destroyer best-effort. If even that is
@@ -294,12 +351,21 @@ impl VulkanContext {
         };
 
         // --- 6. Create the logical device + retrieve the queue. ---
-        let device = match create_device(&instance_fns, physical_device, queue_family_index) {
+        let device = match create_device(
+            &instance_fns,
+            physical_device,
+            queue_family_index,
+            config.windowed,
+        ) {
             Ok(d) => d,
             Err(e) => fail!(e),
         };
 
-        let device_fns = match load_device_fns(instance_fns.get_device_proc_addr, device) {
+        let device_fns = match load_device_fns(
+            instance_fns.get_device_proc_addr,
+            device,
+            config.windowed,
+        ) {
             Ok(f) => f,
             Err(e) => {
                 // The device was created but its commands are unloadable: a
@@ -372,6 +438,26 @@ impl VulkanContext {
     #[inline]
     pub fn memory_properties(&self) -> &VkPhysicalDeviceMemoryProperties {
         &self.memory_properties
+    }
+
+    /// The `VkInstance` handle (needed to create / destroy a `VkSurfaceKHR`).
+    #[inline]
+    pub fn instance(&self) -> VkInstance {
+        self.instance
+    }
+
+    /// The `VK_KHR_surface` / `VK_KHR_win32_surface` instance command table, or
+    /// `None` for a headless context ([`InstanceConfig::windowed`] was `false`).
+    #[inline]
+    pub fn surface_fns(&self) -> Option<&SurfaceInstanceFns> {
+        self.instance_fns.surface.as_ref()
+    }
+
+    /// The `VK_KHR_swapchain` device command table, or `None` for a headless
+    /// context.
+    #[inline]
+    pub fn swapchain_fns(&self) -> Option<&SwapchainDeviceFns> {
+        self.device_fns.swapchain.as_ref()
     }
 
     /// The validation-message recorder, present iff validation was enabled.
@@ -576,7 +662,7 @@ fn load_global_fns(gipa: PfnVkGetInstanceProcAddr) -> Result<GlobalFns, BootErro
 fn load_instance_fns(
     gipa: PfnVkGetInstanceProcAddr,
     instance: VkInstance,
-    enable_validation: bool,
+    config: InstanceConfig,
 ) -> Result<InstanceFns, BootError> {
     // SAFETY: instance commands resolve with the live `instance`; each `T`
     // matches its command's PFN typedef.
@@ -586,7 +672,7 @@ fn load_instance_fns(
         // validation is requested). Resolve it eagerly so the messenger can be
         // destroyed even on later error paths.
         let destroy_debug_messenger: Option<PfnVkDestroyDebugUtilsMessengerExt> =
-            if enable_validation {
+            if config.enable_validation {
                 Some(load_instance_command(
                     gipa,
                     instance,
@@ -595,6 +681,41 @@ fn load_instance_fns(
             } else {
                 None
             };
+
+        // The surface commands resolve only when the surface extensions are
+        // enabled (which we do iff a windowed context is requested).
+        let surface: Option<SurfaceInstanceFns> = if config.windowed {
+            Some(SurfaceInstanceFns {
+                create_win32_surface: load_instance_command(
+                    gipa,
+                    instance,
+                    c"vkCreateWin32SurfaceKHR",
+                )?,
+                destroy_surface: load_instance_command(gipa, instance, c"vkDestroySurfaceKHR")?,
+                get_surface_support: load_instance_command(
+                    gipa,
+                    instance,
+                    c"vkGetPhysicalDeviceSurfaceSupportKHR",
+                )?,
+                get_surface_capabilities: load_instance_command(
+                    gipa,
+                    instance,
+                    c"vkGetPhysicalDeviceSurfaceCapabilitiesKHR",
+                )?,
+                get_surface_formats: load_instance_command(
+                    gipa,
+                    instance,
+                    c"vkGetPhysicalDeviceSurfaceFormatsKHR",
+                )?,
+                get_surface_present_modes: load_instance_command(
+                    gipa,
+                    instance,
+                    c"vkGetPhysicalDeviceSurfacePresentModesKHR",
+                )?,
+            })
+        } else {
+            None
+        };
 
         Ok(InstanceFns {
             destroy_instance: load_instance_command(gipa, instance, c"vkDestroyInstance")?,
@@ -621,6 +742,7 @@ fn load_instance_fns(
             create_device: load_instance_command(gipa, instance, c"vkCreateDevice")?,
             get_device_proc_addr: load_instance_command(gipa, instance, c"vkGetDeviceProcAddr")?,
             destroy_debug_messenger,
+            surface,
         })
     }
 }
@@ -648,6 +770,8 @@ fn fallback_instance_fns(gipa: PfnVkGetInstanceProcAddr, instance: VkInstance) -
         get_device_proc_addr: noop_get_device_proc_addr,
         // No messenger is ever created on the fallback path.
         destroy_debug_messenger: None,
+        // No surface table on the fallback path.
+        surface: None,
     }
 }
 
@@ -686,10 +810,34 @@ unsafe extern "system" fn noop_get_device_proc_addr(
     None
 }
 
-fn load_device_fns(gdpa: PfnVkGetDeviceProcAddr, device: VkDevice) -> Result<DeviceFns, BootError> {
+fn load_device_fns(
+    gdpa: PfnVkGetDeviceProcAddr,
+    device: VkDevice,
+    windowed: bool,
+) -> Result<DeviceFns, BootError> {
     // SAFETY: device commands resolve with the live `device`; each `T` matches
     // its command's PFN typedef.
     unsafe {
+        // `VK_KHR_swapchain` device commands resolve only with the extension
+        // enabled (which we do iff windowed). The core dynamic-rendering /
+        // image-view / semaphore / reset-fences commands are Vulkan 1.0 / 1.3
+        // core and always present, so they load unconditionally below.
+        let swapchain: Option<SwapchainDeviceFns> = if windowed {
+            Some(SwapchainDeviceFns {
+                create_swapchain: load_device_command(gdpa, device, c"vkCreateSwapchainKHR")?,
+                destroy_swapchain: load_device_command(gdpa, device, c"vkDestroySwapchainKHR")?,
+                get_swapchain_images: load_device_command(
+                    gdpa,
+                    device,
+                    c"vkGetSwapchainImagesKHR",
+                )?,
+                acquire_next_image: load_device_command(gdpa, device, c"vkAcquireNextImageKHR")?,
+                queue_present: load_device_command(gdpa, device, c"vkQueuePresentKHR")?,
+            })
+        } else {
+            None
+        };
+
         Ok(DeviceFns {
             destroy_device: load_device_command(gdpa, device, c"vkDestroyDevice")?,
             get_device_queue: load_device_command(gdpa, device, c"vkGetDeviceQueue")?,
@@ -766,6 +914,17 @@ fn load_device_fns(gdpa: PfnVkGetDeviceProcAddr, device: VkDevice) -> Result<Dev
             wait_for_fences: load_device_command(gdpa, device, c"vkWaitForFences")?,
             queue_submit: load_device_command(gdpa, device, c"vkQueueSubmit")?,
             device_wait_idle: load_device_command(gdpa, device, c"vkDeviceWaitIdle")?,
+            // --- Slice-1 core (Vulkan 1.0 / 1.3) commands. ---
+            reset_fences: load_device_command(gdpa, device, c"vkResetFences")?,
+            create_image_view: load_device_command(gdpa, device, c"vkCreateImageView")?,
+            destroy_image_view: load_device_command(gdpa, device, c"vkDestroyImageView")?,
+            create_semaphore: load_device_command(gdpa, device, c"vkCreateSemaphore")?,
+            destroy_semaphore: load_device_command(gdpa, device, c"vkDestroySemaphore")?,
+            // `vkCmdBeginRendering` / `vkCmdEndRendering` are Vulkan 1.3 core
+            // (no `KHR` suffix) — promoted from `VK_KHR_dynamic_rendering`.
+            cmd_begin_rendering: load_device_command(gdpa, device, c"vkCmdBeginRendering")?,
+            cmd_end_rendering: load_device_command(gdpa, device, c"vkCmdEndRendering")?,
+            swapchain,
         })
     }
 }
@@ -795,6 +954,14 @@ fn create_instance(
             return Err(BootError::ValidationUnavailable);
         }
     }
+    // A windowed context needs the WSI extensions advertised by the instance.
+    // Their absence means no on-screen path on this host → skip gracefully.
+    if config.windowed
+        && (!is_instance_extension_present(global, VK_KHR_SURFACE_EXTENSION_NAME)?
+            || !is_instance_extension_present(global, VK_KHR_WIN32_SURFACE_EXTENSION_NAME)?)
+    {
+        return Err(BootError::WindowingUnavailable);
+    }
 
     let app_info = VkApplicationInfo {
         s_type: VkStructureType::ApplicationInfo,
@@ -810,13 +977,33 @@ fn create_instance(
     // only when the caller asks for it (both verified present above). The
     // extension is what makes `vkCreateDebugUtilsMessengerEXT` resolvable and
     // the messenger functional; enabling the layer alone would emit no messages
-    // to our callback.
+    // to our callback. A windowed context additionally enables the always-present
+    // WSI extensions `VK_KHR_surface` + `VK_KHR_win32_surface` (they are NOT
+    // validation-gated). The extension pointer array is sized for the maximum
+    // (debug-utils + 2 surface) and a running count selects the live prefix.
     let layer_ptrs: [*const c_char; 1] = [VALIDATION_LAYER.as_ptr()];
-    let ext_ptrs: [*const c_char; 1] = [VK_EXT_DEBUG_UTILS_EXTENSION_NAME.as_ptr()];
-    let (layer_count, pp_layers, ext_count, pp_exts) = if config.enable_validation {
-        (1u32, layer_ptrs.as_ptr(), 1u32, ext_ptrs.as_ptr())
+    let (layer_count, pp_layers) = if config.enable_validation {
+        (1u32, layer_ptrs.as_ptr())
     } else {
-        (0u32, ptr::null(), 0u32, ptr::null())
+        (0u32, ptr::null())
+    };
+
+    let mut ext_ptrs: [*const c_char; 3] = [ptr::null(); 3];
+    let mut ext_count: u32 = 0;
+    if config.enable_validation {
+        ext_ptrs[ext_count as usize] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME.as_ptr();
+        ext_count += 1;
+    }
+    if config.windowed {
+        ext_ptrs[ext_count as usize] = VK_KHR_SURFACE_EXTENSION_NAME.as_ptr();
+        ext_count += 1;
+        ext_ptrs[ext_count as usize] = VK_KHR_WIN32_SURFACE_EXTENSION_NAME.as_ptr();
+        ext_count += 1;
+    }
+    let pp_exts: *const *const c_char = if ext_count == 0 {
+        ptr::null()
+    } else {
+        ext_ptrs.as_ptr()
     };
 
     // A create-time messenger threaded through `p_next` captures validation
@@ -912,9 +1099,17 @@ fn is_validation_layer_present(global: &GlobalFns) -> Result<bool, BootError> {
         .any(|l| cstr_array_eq(&l.layer_name, VALIDATION_LAYER)))
 }
 
-/// Whether the `VK_EXT_debug_utils` instance extension is advertised (queried
-/// via the global `vkEnumerateInstanceExtensionProperties` with a null layer).
+/// Whether the `VK_EXT_debug_utils` instance extension is advertised.
 fn is_debug_utils_extension_present(global: &GlobalFns) -> Result<bool, BootError> {
+    is_instance_extension_present(global, VK_EXT_DEBUG_UTILS_EXTENSION_NAME)
+}
+
+/// Whether the named instance extension is advertised (queried via the global
+/// `vkEnumerateInstanceExtensionProperties` with a null layer).
+fn is_instance_extension_present(
+    global: &GlobalFns,
+    want: &core::ffi::CStr,
+) -> Result<bool, BootError> {
     let mut count: u32 = 0;
     // SAFETY: null `p_layer_name` queries the instance's own extensions; the
     // count-query call passes a null array; `&mut count` is a valid out-pointer.
@@ -957,9 +1152,7 @@ fn is_debug_utils_extension_present(global: &GlobalFns) -> Result<bool, BootErro
     }
     exts.truncate(count as usize);
 
-    Ok(exts
-        .iter()
-        .any(|e| cstr_array_eq(&e.extension_name, VK_EXT_DEBUG_UTILS_EXTENSION_NAME)))
+    Ok(exts.iter().any(|e| cstr_array_eq(&e.extension_name, want)))
 }
 
 /// Compares a fixed-size NUL-terminated `c_char` name array against a `&CStr`
@@ -1160,10 +1353,16 @@ fn find_queue_family(fns: &InstanceFns, device: VkPhysicalDevice) -> Result<u32,
 }
 
 /// Creates a logical device with one queue from `queue_family_index`.
+///
+/// When `windowed`, the `VK_KHR_swapchain` device extension is enabled and the
+/// Vulkan 1.3 `dynamicRendering` feature is requested through a
+/// `VkPhysicalDeviceVulkan13Features` chained into `p_next` (Slice 1 renders
+/// without `VkRenderPass`/`VkFramebuffer`).
 fn create_device(
     fns: &InstanceFns,
     physical_device: VkPhysicalDevice,
     queue_family_index: u32,
+    windowed: bool,
 ) -> Result<VkDevice, BootError> {
     let priority: f32 = 1.0;
     let queue_info = VkDeviceQueueCreateInfo {
@@ -1175,24 +1374,59 @@ fn create_device(
         p_queue_priorities: &priority,
     };
 
+    // Windowed: enable `VK_KHR_swapchain` + chain `dynamicRendering`. The feature
+    // struct lives on this stack frame and is only read during the call; all
+    // feature bools except `dynamic_rendering` are zero.
+    let swapchain_ext: [*const c_char; 1] = [VK_KHR_SWAPCHAIN_EXTENSION_NAME.as_ptr()];
+    let features13 = VkPhysicalDeviceVulkan13Features {
+        s_type: VkStructureType::PhysicalDeviceVulkan13Features,
+        p_next: ptr::null_mut(),
+        robust_image_access: VK_FALSE,
+        inline_uniform_block: VK_FALSE,
+        descriptor_binding_inline_uniform_block_update_after_bind: VK_FALSE,
+        pipeline_creation_cache_control: VK_FALSE,
+        private_data: VK_FALSE,
+        shader_demote_to_helper_invocation: VK_FALSE,
+        shader_terminate_invocation: VK_FALSE,
+        subgroup_size_control: VK_FALSE,
+        compute_full_subgroups: VK_FALSE,
+        synchronization2: VK_FALSE,
+        texture_compression_astc_hdr: VK_FALSE,
+        shader_zero_initialize_workgroup_memory: VK_FALSE,
+        dynamic_rendering: VK_TRUE,
+        shader_integer_dot_product: VK_FALSE,
+        maintenance4: VK_FALSE,
+    };
+    let (p_next, ext_count, pp_exts): (*const c_void, u32, *const *const c_char) = if windowed {
+        (
+            (&features13 as *const VkPhysicalDeviceVulkan13Features).cast(),
+            1,
+            swapchain_ext.as_ptr(),
+        )
+    } else {
+        (ptr::null(), 0, ptr::null())
+    };
+
     let create_info = VkDeviceCreateInfo {
         s_type: VkStructureType::DeviceCreateInfo,
-        p_next: ptr::null(),
+        p_next,
         flags: 0,
         queue_create_info_count: 1,
         p_queue_create_infos: &queue_info,
         enabled_layer_count: 0,
         pp_enabled_layer_names: ptr::null(),
-        enabled_extension_count: 0,
-        pp_enabled_extension_names: ptr::null(),
+        enabled_extension_count: ext_count,
+        pp_enabled_extension_names: pp_exts,
         p_enabled_features: ptr::null(),
     };
 
     let mut device = VkDevice::NULL;
     // SAFETY: `physical_device` is valid; `create_info` is a fully-initialized
     // `#[repr(C)]` struct whose `p_queue_create_infos`/`p_queue_priorities`
-    // pointers (`&queue_info`, `&priority`) outlive the call; `&mut device` is
-    // a valid out-pointer; NULL allocator picks the default.
+    // pointers (`&queue_info`, `&priority`) and the optional `p_next`
+    // feature-chain / extension array (`&features13`, `swapchain_ext`) all
+    // outlive the call (locals of this frame); `&mut device` is a valid
+    // out-pointer; NULL allocator picks the default.
     let raw =
         unsafe { (fns.create_device)(physical_device, &create_info, ptr::null(), &mut device) };
     let result = VkResult::from_raw(raw);

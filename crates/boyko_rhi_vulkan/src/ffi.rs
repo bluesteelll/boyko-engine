@@ -49,6 +49,170 @@ pub mod os {
         pub fn GetProcAddress(hModule: *mut c_void, lpProcName: *const c_char) -> *mut c_void;
         pub fn FreeLibrary(hModule: *mut c_void) -> i32;
     }
+
+    // --- Slice-1 raw Win32 windowing (kernel32 + user32). ---
+
+    /// `WPARAM` — a `UINT_PTR` (pointer-width on Win64).
+    pub type WPARAM = usize;
+    /// `LPARAM` — a `LONG_PTR` (pointer-width on Win64).
+    pub type LPARAM = isize;
+    /// `LRESULT` — a `LONG_PTR`.
+    pub type LRESULT = isize;
+    /// `ATOM` — the `RegisterClassExW` return type (a `WORD`, widened to u16).
+    pub type ATOM = u16;
+
+    /// `WNDPROC` — the window-procedure callback the OS calls per message.
+    /// `extern "system"` matches the Win32 calling convention.
+    pub type WndProc = unsafe extern "system" fn(
+        hwnd: *mut c_void,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT;
+
+    /// `WNDCLASSEXW` — read BY user32 in `RegisterClassExW`; ABI-exact (its
+    /// layout is fixed by the Win32 header). `cbSize` MUST be `size_of::<Self>()`.
+    #[repr(C)]
+    pub struct WNDCLASSEXW {
+        pub cb_size: u32,
+        pub style: u32,
+        pub lpfn_wnd_proc: Option<WndProc>,
+        pub cb_cls_extra: i32,
+        pub cb_wnd_extra: i32,
+        pub h_instance: *mut c_void,
+        pub h_icon: *mut c_void,
+        pub h_cursor: *mut c_void,
+        pub hbr_background: *mut c_void,
+        pub lpsz_menu_name: *const u16,
+        pub lpsz_class_name: *const u16,
+        pub h_icon_sm: *mut c_void,
+    }
+
+    /// `POINT`.
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    pub struct POINT {
+        pub x: i32,
+        pub y: i32,
+    }
+
+    /// `MSG` — written BY user32 in `PeekMessageW`; ABI-exact.
+    #[repr(C)]
+    pub struct MSG {
+        pub hwnd: *mut c_void,
+        pub message: u32,
+        pub w_param: WPARAM,
+        pub l_param: LPARAM,
+        pub time: u32,
+        pub pt: POINT,
+        /// `lPrivate` (Win64-only trailing DWORD; present in the OS struct).
+        pub l_private: u32,
+    }
+
+    /// `RECT` — written BY user32 in `AdjustWindowRectEx`/`GetClientRect`.
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    pub struct RECT {
+        pub left: i32,
+        pub top: i32,
+        pub right: i32,
+        pub bottom: i32,
+    }
+
+    // SAFETY: signatures match the Win64 user32/kernel32 ABI exactly. HWND /
+    // HINSTANCE / HMODULE / HCURSOR are opaque handles (`*mut c_void`); wide
+    // strings are `*const u16` (LPCWSTR); BOOLs are `i32`. user32 is linked via
+    // the `#[link]` attribute below; kernel32 is linked transitively by std.
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        pub fn RegisterClassExW(unnamed: *const WNDCLASSEXW) -> ATOM;
+        pub fn UnregisterClassW(lpClassName: *const u16, hInstance: *mut c_void) -> i32;
+        #[allow(clippy::too_many_arguments)]
+        pub fn CreateWindowExW(
+            dwExStyle: u32,
+            lpClassName: *const u16,
+            lpWindowName: *const u16,
+            dwStyle: u32,
+            x: i32,
+            y: i32,
+            nWidth: i32,
+            nHeight: i32,
+            hWndParent: *mut c_void,
+            hMenu: *mut c_void,
+            hInstance: *mut c_void,
+            lpParam: *mut c_void,
+        ) -> *mut c_void;
+        pub fn DestroyWindow(hWnd: *mut c_void) -> i32;
+        pub fn ShowWindow(hWnd: *mut c_void, nCmdShow: i32) -> i32;
+        pub fn UpdateWindow(hWnd: *mut c_void) -> i32;
+        pub fn DefWindowProcW(
+            hWnd: *mut c_void,
+            msg: u32,
+            wParam: WPARAM,
+            lParam: LPARAM,
+        ) -> LRESULT;
+        pub fn PeekMessageW(
+            lpMsg: *mut MSG,
+            hWnd: *mut c_void,
+            wMsgFilterMin: u32,
+            wMsgFilterMax: u32,
+            wRemoveMsg: u32,
+        ) -> i32;
+        pub fn TranslateMessage(lpMsg: *const MSG) -> i32;
+        pub fn DispatchMessageW(lpMsg: *const MSG) -> LRESULT;
+        pub fn PostQuitMessage(nExitCode: i32);
+        pub fn LoadCursorW(hInstance: *mut c_void, lpCursorName: *const u16) -> *mut c_void;
+        pub fn GetClientRect(hWnd: *mut c_void, lpRect: *mut RECT) -> i32;
+        pub fn AdjustWindowRectEx(
+            lpRect: *mut RECT,
+            dwStyle: u32,
+            bMenu: i32,
+            dwExStyle: u32,
+        ) -> i32;
+    }
+
+    // SAFETY: `GetModuleHandleW(null)` returns the HMODULE of the calling
+    // process image (an HINSTANCE for windowing); the ABI is a single LPCWSTR
+    // argument returning an HMODULE. kernel32 is linked transitively by std.
+    unsafe extern "system" {
+        pub fn GetModuleHandleW(lpModuleName: *const u16) -> *mut c_void;
+    }
+
+    // --- Win32 message / style / show constants used by the window. ---
+
+    /// `WM_DESTROY`.
+    pub const WM_DESTROY: u32 = 0x0002;
+    /// `WM_CLOSE`.
+    pub const WM_CLOSE: u32 = 0x0010;
+    /// `WM_QUIT` (posted by `PostQuitMessage`).
+    pub const WM_QUIT: u32 = 0x0012;
+
+    /// `PM_REMOVE` for `PeekMessageW` (remove the message from the queue).
+    pub const PM_REMOVE: u32 = 0x0001;
+
+    /// `WS_OVERLAPPEDWINDOW` — a standard titled, resizable window.
+    pub const WS_OVERLAPPEDWINDOW: u32 = 0x00CF_0000;
+
+    /// `SW_SHOW` for `ShowWindow`.
+    pub const SW_SHOW: i32 = 5;
+
+    /// `CW_USEDEFAULT` window-position sentinel.
+    pub const CW_USEDEFAULT: i32 = i32::MIN; // 0x80000000 as i32
+
+    /// `IDC_ARROW` — the standard arrow cursor (a `MAKEINTRESOURCE(32512)`).
+    pub const IDC_ARROW: u16 = 32512;
+
+    /// `CS_HREDRAW | CS_VREDRAW` — redraw on horizontal/vertical resize.
+    pub const CS_HREDRAW: u32 = 0x0002;
+    pub const CS_VREDRAW: u32 = 0x0001;
+
+    // FFI layout guards on the OS-written structs (the OS writes `MSG` in
+    // `PeekMessageW`; `WNDCLASSEXW` is read by `RegisterClassExW`). A drift here
+    // would make the OS read/write out of bounds.
+    const _: () = assert!(core::mem::size_of::<MSG>() == 48);
+    const _: () = assert!(core::mem::size_of::<WNDCLASSEXW>() == 80);
+    const _: () = assert!(core::mem::size_of::<POINT>() == 8);
+    const _: () = assert!(core::mem::size_of::<RECT>() == 16);
 }
 
 // ---------------------------------------------------------------------------
@@ -197,6 +361,29 @@ dispatchable_handle!(
     VkCommandBuffer
 );
 
+// --- Slice-1 surface / swapchain / dynamic-rendering handles (non-dispatchable). ---
+
+non_dispatchable_handle!(
+    /// `VkSurfaceKHR` — a platform window surface to present to.
+    VkSurfaceKHR
+);
+non_dispatchable_handle!(
+    /// `VkSwapchainKHR` — a swapchain of presentable images over a surface.
+    VkSwapchainKHR
+);
+non_dispatchable_handle!(
+    /// `VkImage` — an image resource (here, a swapchain color image).
+    VkImage
+);
+non_dispatchable_handle!(
+    /// `VkImageView` — a typed view of one `VkImage` mip/array range.
+    VkImageView
+);
+non_dispatchable_handle!(
+    /// `VkSemaphore` — a GPU↔GPU queue-ordering sync primitive.
+    VkSemaphore
+);
+
 // ---------------------------------------------------------------------------
 // VkResult.
 // ---------------------------------------------------------------------------
@@ -225,6 +412,14 @@ impl VkResult {
     pub const ERROR_FEATURE_NOT_PRESENT: Self = Self(-8);
     pub const ERROR_INCOMPATIBLE_DRIVER: Self = Self(-9);
     pub const ERROR_TOO_MANY_OBJECTS: Self = Self(-10);
+    /// `VK_SUBOPTIMAL_KHR` — present succeeded but the swapchain no longer matches
+    /// the surface optimally (a positive, non-error status; recreate at leisure).
+    pub const SUBOPTIMAL_KHR: Self = Self(1_000_001_003);
+    /// `VK_ERROR_OUT_OF_DATE_KHR` — the swapchain is incompatible with the surface
+    /// (e.g. after a resize) and MUST be recreated before further use.
+    pub const ERROR_OUT_OF_DATE_KHR: Self = Self(-1_000_001_004);
+    /// `VK_ERROR_SURFACE_LOST_KHR` — the surface is no longer available.
+    pub const ERROR_SURFACE_LOST_KHR: Self = Self(-1_000_000_000);
 
     /// Reconstructs a `VkResult` from the raw `i32` an FFI command returned.
     #[inline]
@@ -259,6 +454,9 @@ impl core::fmt::Debug for VkResult {
             Self::ERROR_FEATURE_NOT_PRESENT => "VK_ERROR_FEATURE_NOT_PRESENT",
             Self::ERROR_INCOMPATIBLE_DRIVER => "VK_ERROR_INCOMPATIBLE_DRIVER",
             Self::ERROR_TOO_MANY_OBJECTS => "VK_ERROR_TOO_MANY_OBJECTS",
+            Self::SUBOPTIMAL_KHR => "VK_SUBOPTIMAL_KHR",
+            Self::ERROR_OUT_OF_DATE_KHR => "VK_ERROR_OUT_OF_DATE_KHR",
+            Self::ERROR_SURFACE_LOST_KHR => "VK_ERROR_SURFACE_LOST_KHR",
             _ => return write!(f, "VkResult({})", self.0),
         };
         f.write_str(name)
@@ -294,7 +492,18 @@ pub enum VkStructureType {
     CommandPoolCreateInfo = 39,
     CommandBufferAllocateInfo = 40,
     CommandBufferBeginInfo = 42,
+    ImageMemoryBarrier = 45,
+    SemaphoreCreateInfo = 9,
+    ImageViewCreateInfo = 15,
     DebugUtilsMessengerCreateInfoExt = 1_000_128_004,
+    // --- Slice-1 surface / swapchain / dynamic rendering. ---
+    Win32SurfaceCreateInfoKhr = 1_000_009_000,
+    SwapchainCreateInfoKhr = 1_000_001_000,
+    PresentInfoKhr = 1_000_001_001,
+    /// `VkPhysicalDeviceVulkan13Features` — chained to enable dynamic rendering.
+    PhysicalDeviceVulkan13Features = 53,
+    RenderingInfo = 1_000_044_000,
+    RenderingAttachmentInfo = 1_000_044_001,
 }
 
 // ---------------------------------------------------------------------------
@@ -383,6 +592,74 @@ pub const VK_QUEUE_FAMILY_IGNORED: u32 = u32::MAX;
 
 /// Timeout sentinel for `vkWaitForFences` (wait indefinitely).
 pub const VK_TIMEOUT_INFINITE: u64 = u64::MAX;
+
+// --- Slice-1 instance / device extension names. ---
+
+/// `VK_KHR_surface` instance-extension name.
+pub const VK_KHR_SURFACE_EXTENSION_NAME: &core::ffi::CStr = c"VK_KHR_surface";
+/// `VK_KHR_win32_surface` instance-extension name (Windows-only WSI).
+pub const VK_KHR_WIN32_SURFACE_EXTENSION_NAME: &core::ffi::CStr = c"VK_KHR_win32_surface";
+/// `VK_KHR_swapchain` device-extension name.
+pub const VK_KHR_SWAPCHAIN_EXTENSION_NAME: &core::ffi::CStr = c"VK_KHR_swapchain";
+
+// --- Slice-1 format / color-space / present-mode / image enums. ---
+
+/// `VkFormat::VK_FORMAT_B8G8R8A8_UNORM` — a universally-supported swapchain format.
+pub const VK_FORMAT_B8G8R8A8_UNORM: i32 = 44;
+/// `VkFormat::VK_FORMAT_B8G8R8A8_SRGB`.
+pub const VK_FORMAT_B8G8R8A8_SRGB: i32 = 50;
+/// `VkFormat::VK_FORMAT_R8G8B8A8_UNORM`.
+pub const VK_FORMAT_R8G8B8A8_UNORM: i32 = 37;
+/// `VkFormat::VK_FORMAT_R8G8B8A8_SRGB`.
+pub const VK_FORMAT_R8G8B8A8_SRGB: i32 = 43;
+/// `VkFormat::VK_FORMAT_UNDEFINED`.
+pub const VK_FORMAT_UNDEFINED: i32 = 0;
+
+/// `VkColorSpaceKHR::VK_COLOR_SPACE_SRGB_NONLINEAR_KHR` — the always-present space.
+pub const VK_COLOR_SPACE_SRGB_NONLINEAR_KHR: i32 = 0;
+
+/// `VkPresentModeKHR::VK_PRESENT_MODE_FIFO_KHR` — the only mode the spec guarantees.
+pub const VK_PRESENT_MODE_FIFO_KHR: i32 = 2;
+
+/// `VkImageUsageFlagBits::VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT`.
+pub const VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT: VkFlags = 0x0000_0010;
+/// `VkImageUsageFlagBits::VK_IMAGE_USAGE_TRANSFER_DST_BIT`.
+pub const VK_IMAGE_USAGE_TRANSFER_DST_BIT: VkFlags = 0x0000_0002;
+
+/// `VkSurfaceTransformFlagBitsKHR::VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR`.
+pub const VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR: VkFlags = 0x0000_0001;
+/// `VkCompositeAlphaFlagBitsKHR::VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR`.
+pub const VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR: VkFlags = 0x0000_0001;
+
+/// `VkImageViewType::VK_IMAGE_VIEW_TYPE_2D`.
+pub const VK_IMAGE_VIEW_TYPE_2D: i32 = 1;
+
+/// `VkImageAspectFlagBits::VK_IMAGE_ASPECT_COLOR_BIT`.
+pub const VK_IMAGE_ASPECT_COLOR_BIT: VkFlags = 0x0000_0001;
+
+/// `VkComponentSwizzle::VK_COMPONENT_SWIZZLE_IDENTITY`.
+pub const VK_COMPONENT_SWIZZLE_IDENTITY: i32 = 0;
+
+/// `VkImageLayout` discriminants used by the present barriers.
+pub const VK_IMAGE_LAYOUT_UNDEFINED: i32 = 0;
+pub const VK_IMAGE_LAYOUT_PRESENT_SRC_KHR: i32 = 1_000_001_002;
+/// `VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL`.
+pub const VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL: i32 = 2;
+
+/// `VkPipelineStageFlagBits` used by the present barriers / submit wait stage.
+pub const VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT: VkFlags = 0x0000_0001;
+pub const VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT: VkFlags = 0x0000_0400;
+pub const VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT: VkFlags = 0x0000_2000;
+
+/// `VkAccessFlagBits` used by the color-attachment present barriers.
+pub const VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT: VkFlags = 0x0000_0100;
+
+/// `VkAttachmentLoadOp` / `VkAttachmentStoreOp` discriminants for dynamic rendering.
+pub const VK_ATTACHMENT_LOAD_OP_CLEAR: i32 = 1;
+pub const VK_ATTACHMENT_STORE_OP_STORE: i32 = 0;
+
+/// `VkSampleCountFlagBits::VK_SAMPLE_COUNT_1_BIT`.
+pub const VK_SAMPLE_COUNT_1_BIT: VkFlags = 0x0000_0001;
 
 // ---------------------------------------------------------------------------
 // #[repr(C)] structs — declare only fields we read or write.
@@ -843,6 +1120,280 @@ pub struct VkSubmitInfo {
     pub p_signal_semaphores: *const c_void,
 }
 
+// ---------------------------------------------------------------------------
+// Slice-1 — surface / swapchain / dynamic-rendering / image-barrier structs.
+// ---------------------------------------------------------------------------
+
+/// `VkWin32SurfaceCreateInfoKHR` — the Windows WSI surface-creation struct.
+/// `hinstance`/`hwnd` are the Win32 HINSTANCE / HWND (opaque pointers).
+#[repr(C)]
+pub struct VkWin32SurfaceCreateInfoKhr {
+    pub s_type: VkStructureType,
+    pub p_next: *const c_void,
+    pub flags: VkFlags,
+    pub hinstance: *mut c_void,
+    pub hwnd: *mut c_void,
+}
+
+/// `VkExtent2D` — a width/height pair (used by surface caps + swapchain extent).
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct VkExtent2D {
+    pub width: u32,
+    pub height: u32,
+}
+
+/// `VkSurfaceCapabilitiesKHR` — written BY the driver; ABI-exact (it ends with
+/// two `VkExtent2D`s and three flag/usage `u32`s after the count + extent
+/// fields). Every field is read to size the swapchain.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct VkSurfaceCapabilitiesKhr {
+    pub min_image_count: u32,
+    pub max_image_count: u32,
+    pub current_extent: VkExtent2D,
+    pub min_image_extent: VkExtent2D,
+    pub max_image_extent: VkExtent2D,
+    pub max_image_array_layers: u32,
+    /// `VkSurfaceTransformFlagsKHR`.
+    pub supported_transforms: VkFlags,
+    /// `VkSurfaceTransformFlagBitsKHR`.
+    pub current_transform: VkFlags,
+    /// `VkCompositeAlphaFlagsKHR`.
+    pub supported_composite_alpha: VkFlags,
+    /// `VkImageUsageFlags`.
+    pub supported_usage_flags: VkFlags,
+}
+
+/// `VkSurfaceFormatKHR` — written BY the driver: a `VkFormat` + `VkColorSpaceKHR`
+/// (both `i32` C enums).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct VkSurfaceFormatKhr {
+    pub format: i32,
+    pub color_space: i32,
+}
+
+/// `VkSwapchainCreateInfoKHR`.
+#[repr(C)]
+pub struct VkSwapchainCreateInfoKhr {
+    pub s_type: VkStructureType,
+    pub p_next: *const c_void,
+    pub flags: VkFlags,
+    pub surface: VkSurfaceKHR,
+    pub min_image_count: u32,
+    /// `VkFormat`.
+    pub image_format: i32,
+    /// `VkColorSpaceKHR`.
+    pub image_color_space: i32,
+    pub image_extent: VkExtent2D,
+    pub image_array_layers: u32,
+    /// `VkImageUsageFlags`.
+    pub image_usage: VkFlags,
+    /// `VkSharingMode`.
+    pub image_sharing_mode: i32,
+    pub queue_family_index_count: u32,
+    pub p_queue_family_indices: *const u32,
+    /// `VkSurfaceTransformFlagBitsKHR`.
+    pub pre_transform: VkFlags,
+    /// `VkCompositeAlphaFlagBitsKHR`.
+    pub composite_alpha: VkFlags,
+    /// `VkPresentModeKHR`.
+    pub present_mode: i32,
+    pub clipped: VkBool32,
+    pub old_swapchain: VkSwapchainKHR,
+}
+
+/// `VkComponentMapping` — per-channel swizzle for an image view (identity here).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct VkComponentMapping {
+    pub r: i32,
+    pub g: i32,
+    pub b: i32,
+    pub a: i32,
+}
+
+/// `VkImageSubresourceRange`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct VkImageSubresourceRange {
+    /// `VkImageAspectFlags`.
+    pub aspect_mask: VkFlags,
+    pub base_mip_level: u32,
+    pub level_count: u32,
+    pub base_array_layer: u32,
+    pub layer_count: u32,
+}
+
+/// `VkImageViewCreateInfo`.
+#[repr(C)]
+pub struct VkImageViewCreateInfo {
+    pub s_type: VkStructureType,
+    pub p_next: *const c_void,
+    pub flags: VkFlags,
+    pub image: VkImage,
+    /// `VkImageViewType`.
+    pub view_type: i32,
+    /// `VkFormat`.
+    pub format: i32,
+    pub components: VkComponentMapping,
+    pub subresource_range: VkImageSubresourceRange,
+}
+
+/// `VkSemaphoreCreateInfo`.
+#[repr(C)]
+pub struct VkSemaphoreCreateInfo {
+    pub s_type: VkStructureType,
+    pub p_next: *const c_void,
+    pub flags: VkFlags,
+}
+
+/// `VkImageMemoryBarrier` — the layout transition for the dynamic-rendering
+/// present path (UNDEFINED→COLOR_ATTACHMENT_OPTIMAL→PRESENT_SRC_KHR).
+#[repr(C)]
+pub struct VkImageMemoryBarrier {
+    pub s_type: VkStructureType,
+    pub p_next: *const c_void,
+    pub src_access_mask: VkFlags,
+    pub dst_access_mask: VkFlags,
+    /// `VkImageLayout`.
+    pub old_layout: i32,
+    /// `VkImageLayout`.
+    pub new_layout: i32,
+    pub src_queue_family_index: u32,
+    pub dst_queue_family_index: u32,
+    pub image: VkImage,
+    pub subresource_range: VkImageSubresourceRange,
+}
+
+/// `VkClearColorValue` (the `float32[4]` member of the union — the only variant
+/// the clear uses). A bare `[f32; 4]` matches the union's size/align (16 bytes).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct VkClearColorValue {
+    pub float32: [f32; 4],
+}
+
+/// `VkClearValue` (union of color / depth-stencil). Slice-1 only ever clears
+/// color, and `VkClearColorValue` is the largest variant, so a transparent
+/// wrapper over it is the correct 16-byte/align-4 footprint.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct VkClearValue {
+    pub color: VkClearColorValue,
+}
+
+/// `VkRenderingAttachmentInfo` — one color attachment for `vkCmdBeginRendering`.
+#[repr(C)]
+pub struct VkRenderingAttachmentInfo {
+    pub s_type: VkStructureType,
+    pub p_next: *const c_void,
+    pub image_view: VkImageView,
+    /// `VkImageLayout` the attachment is in during rendering.
+    pub image_layout: i32,
+    /// `VkResolveModeFlagBits` — `0` (`VK_RESOLVE_MODE_NONE`), no MSAA resolve.
+    pub resolve_mode: VkFlags,
+    pub resolve_image_view: VkImageView,
+    /// `VkImageLayout` of the (unused) resolve target.
+    pub resolve_image_layout: i32,
+    /// `VkAttachmentLoadOp`.
+    pub load_op: i32,
+    /// `VkAttachmentStoreOp`.
+    pub store_op: i32,
+    pub clear_value: VkClearValue,
+}
+
+/// `VkOffset2D`.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct VkOffset2D {
+    pub x: i32,
+    pub y: i32,
+}
+
+/// `VkRect2D` — the render area.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct VkRect2D {
+    pub offset: VkOffset2D,
+    pub extent: VkExtent2D,
+}
+
+/// `VkRenderingInfo` — the Vulkan 1.3 dynamic-rendering scope (no render pass).
+#[repr(C)]
+pub struct VkRenderingInfo {
+    pub s_type: VkStructureType,
+    pub p_next: *const c_void,
+    /// `VkRenderingFlags` — `0`.
+    pub flags: VkFlags,
+    pub render_area: VkRect2D,
+    pub layer_count: u32,
+    pub view_mask: u32,
+    pub color_attachment_count: u32,
+    pub p_color_attachments: *const VkRenderingAttachmentInfo,
+    /// `const VkRenderingAttachmentInfo*` depth — null (no depth attachment).
+    pub p_depth_attachment: *const c_void,
+    /// `const VkRenderingAttachmentInfo*` stencil — null.
+    pub p_stencil_attachment: *const c_void,
+}
+
+/// `VkPhysicalDeviceVulkan13Features` — chained into `VkDeviceCreateInfo` to
+/// enable `dynamicRendering` + `synchronization2` (we use only `dynamicRendering`).
+/// All other feature bools are zero. The struct is large in the real header; we
+/// declare exactly the fields up to `dynamicRendering` and reserve the tail as an
+/// ABI-exact opaque footprint (it is written BY us with zeros, but its size must
+/// match so the driver does not read past our struct when walking `p_next`).
+#[repr(C)]
+pub struct VkPhysicalDeviceVulkan13Features {
+    pub s_type: VkStructureType,
+    pub p_next: *mut c_void,
+    pub robust_image_access: VkBool32,
+    pub inline_uniform_block: VkBool32,
+    pub descriptor_binding_inline_uniform_block_update_after_bind: VkBool32,
+    pub pipeline_creation_cache_control: VkBool32,
+    pub private_data: VkBool32,
+    pub shader_demote_to_helper_invocation: VkBool32,
+    pub shader_terminate_invocation: VkBool32,
+    pub subgroup_size_control: VkBool32,
+    pub compute_full_subgroups: VkBool32,
+    pub synchronization2: VkBool32,
+    pub texture_compression_astc_hdr: VkBool32,
+    pub shader_zero_initialize_workgroup_memory: VkBool32,
+    pub dynamic_rendering: VkBool32,
+    pub shader_integer_dot_product: VkBool32,
+    pub maintenance4: VkBool32,
+}
+
+/// `VkPresentInfoKHR`.
+#[repr(C)]
+pub struct VkPresentInfoKhr {
+    pub s_type: VkStructureType,
+    pub p_next: *const c_void,
+    pub wait_semaphore_count: u32,
+    pub p_wait_semaphores: *const VkSemaphore,
+    pub swapchain_count: u32,
+    pub p_swapchains: *const VkSwapchainKHR,
+    pub p_image_indices: *const u32,
+    /// `VkResult*` per-swapchain out-results — null (one swapchain, the call
+    /// result suffices).
+    pub p_results: *mut i32,
+}
+
+// FFI layout guards for the Slice-1 driver-written + driver-read structs.
+// `VkSurfaceCapabilitiesKHR` / `VkSurfaceFormatKHR` are written BY the driver →
+// their size/align MUST match the C ABI or the driver overruns our out-buffer.
+const _: () = assert!(core::mem::size_of::<VkSurfaceCapabilitiesKhr>() == 52);
+const _: () = assert!(core::mem::size_of::<VkSurfaceFormatKhr>() == 8);
+const _: () = assert!(core::mem::size_of::<VkExtent2D>() == 8);
+const _: () = assert!(core::mem::size_of::<VkImageMemoryBarrier>() == 72);
+const _: () = assert!(core::mem::align_of::<VkImageMemoryBarrier>() == 8);
+const _: () = assert!(core::mem::size_of::<VkImageSubresourceRange>() == 20);
+const _: () = assert!(core::mem::size_of::<VkComponentMapping>() == 16);
+const _: () = assert!(core::mem::size_of::<VkClearValue>() == 16);
+const _: () = assert!(core::mem::size_of::<VkRect2D>() == 16);
+const _: () = assert!(core::mem::size_of::<VkPhysicalDeviceVulkan13Features>() == 80);
+
 // FFI layout guards for the new structs. The callback-data struct is written BY
 // the driver and read through the callback, so its size/align must match the C
 // ABI; the create-infos/barriers are written BY us but their layout still must
@@ -1238,3 +1789,136 @@ pub type PfnVkQueueSubmit = unsafe extern "system" fn(
 
 /// `PFN_vkDeviceWaitIdle`.
 pub type PfnVkDeviceWaitIdle = unsafe extern "system" fn(device: VkDevice) -> i32;
+
+// ---------------------------------------------------------------------------
+// Slice-1 — surface / swapchain / dynamic-rendering / image PFNs.
+// ---------------------------------------------------------------------------
+
+/// `PFN_vkCreateWin32SurfaceKHR` (instance-scope; `VK_KHR_win32_surface`).
+pub type PfnVkCreateWin32SurfaceKhr = unsafe extern "system" fn(
+    instance: VkInstance,
+    p_create_info: *const VkWin32SurfaceCreateInfoKhr,
+    p_allocator: *const c_void,
+    p_surface: *mut VkSurfaceKHR,
+) -> i32;
+
+/// `PFN_vkDestroySurfaceKHR` (instance-scope; `VK_KHR_surface`).
+pub type PfnVkDestroySurfaceKhr = unsafe extern "system" fn(
+    instance: VkInstance,
+    surface: VkSurfaceKHR,
+    p_allocator: *const c_void,
+);
+
+/// `PFN_vkGetPhysicalDeviceSurfaceSupportKHR`.
+pub type PfnVkGetPhysicalDeviceSurfaceSupportKhr = unsafe extern "system" fn(
+    physical_device: VkPhysicalDevice,
+    queue_family_index: u32,
+    surface: VkSurfaceKHR,
+    p_supported: *mut VkBool32,
+) -> i32;
+
+/// `PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR`.
+pub type PfnVkGetPhysicalDeviceSurfaceCapabilitiesKhr = unsafe extern "system" fn(
+    physical_device: VkPhysicalDevice,
+    surface: VkSurfaceKHR,
+    p_capabilities: *mut VkSurfaceCapabilitiesKhr,
+) -> i32;
+
+/// `PFN_vkGetPhysicalDeviceSurfaceFormatsKHR`.
+pub type PfnVkGetPhysicalDeviceSurfaceFormatsKhr = unsafe extern "system" fn(
+    physical_device: VkPhysicalDevice,
+    surface: VkSurfaceKHR,
+    p_count: *mut u32,
+    p_formats: *mut VkSurfaceFormatKhr,
+) -> i32;
+
+/// `PFN_vkGetPhysicalDeviceSurfacePresentModesKHR`.
+pub type PfnVkGetPhysicalDeviceSurfacePresentModesKhr = unsafe extern "system" fn(
+    physical_device: VkPhysicalDevice,
+    surface: VkSurfaceKHR,
+    p_count: *mut u32,
+    p_present_modes: *mut i32,
+) -> i32;
+
+/// `PFN_vkCreateSwapchainKHR` (device-scope; `VK_KHR_swapchain`).
+pub type PfnVkCreateSwapchainKhr = unsafe extern "system" fn(
+    device: VkDevice,
+    p_create_info: *const VkSwapchainCreateInfoKhr,
+    p_allocator: *const c_void,
+    p_swapchain: *mut VkSwapchainKHR,
+) -> i32;
+
+/// `PFN_vkDestroySwapchainKHR`.
+pub type PfnVkDestroySwapchainKhr = unsafe extern "system" fn(
+    device: VkDevice,
+    swapchain: VkSwapchainKHR,
+    p_allocator: *const c_void,
+);
+
+/// `PFN_vkGetSwapchainImagesKHR`.
+pub type PfnVkGetSwapchainImagesKhr = unsafe extern "system" fn(
+    device: VkDevice,
+    swapchain: VkSwapchainKHR,
+    p_count: *mut u32,
+    p_images: *mut VkImage,
+) -> i32;
+
+/// `PFN_vkAcquireNextImageKHR`.
+pub type PfnVkAcquireNextImageKhr = unsafe extern "system" fn(
+    device: VkDevice,
+    swapchain: VkSwapchainKHR,
+    timeout: u64,
+    semaphore: VkSemaphore,
+    fence: VkFence,
+    p_image_index: *mut u32,
+) -> i32;
+
+/// `PFN_vkQueuePresentKHR`.
+pub type PfnVkQueuePresentKhr =
+    unsafe extern "system" fn(queue: VkQueue, p_present_info: *const VkPresentInfoKhr) -> i32;
+
+/// `PFN_vkCreateImageView`.
+pub type PfnVkCreateImageView = unsafe extern "system" fn(
+    device: VkDevice,
+    p_create_info: *const VkImageViewCreateInfo,
+    p_allocator: *const c_void,
+    p_view: *mut VkImageView,
+) -> i32;
+
+/// `PFN_vkDestroyImageView`.
+pub type PfnVkDestroyImageView = unsafe extern "system" fn(
+    device: VkDevice,
+    image_view: VkImageView,
+    p_allocator: *const c_void,
+);
+
+/// `PFN_vkCreateSemaphore`.
+pub type PfnVkCreateSemaphore = unsafe extern "system" fn(
+    device: VkDevice,
+    p_create_info: *const VkSemaphoreCreateInfo,
+    p_allocator: *const c_void,
+    p_semaphore: *mut VkSemaphore,
+) -> i32;
+
+/// `PFN_vkDestroySemaphore`.
+pub type PfnVkDestroySemaphore = unsafe extern "system" fn(
+    device: VkDevice,
+    semaphore: VkSemaphore,
+    p_allocator: *const c_void,
+);
+
+/// `PFN_vkResetFences`.
+pub type PfnVkResetFences = unsafe extern "system" fn(
+    device: VkDevice,
+    fence_count: u32,
+    p_fences: *const VkFence,
+) -> i32;
+
+/// `PFN_vkCmdBeginRendering` (Vulkan 1.3 core dynamic rendering).
+pub type PfnVkCmdBeginRendering = unsafe extern "system" fn(
+    command_buffer: VkCommandBuffer,
+    p_rendering_info: *const VkRenderingInfo,
+);
+
+/// `PFN_vkCmdEndRendering`.
+pub type PfnVkCmdEndRendering = unsafe extern "system" fn(command_buffer: VkCommandBuffer);

@@ -38,6 +38,7 @@ const N: u32 = 4096 + 17;
 fn boot_or_skip(test: &str) -> Option<VulkanContext> {
     match VulkanContext::boot(InstanceConfig {
         enable_validation: true,
+        ..InstanceConfig::default()
     }) {
         Ok(ctx) => Some(ctx),
         Err(e) => {
