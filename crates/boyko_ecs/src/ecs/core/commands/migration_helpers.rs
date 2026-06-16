@@ -222,6 +222,25 @@ pub(crate) fn merged_archetype_id<B: Bundle>(
         }
     }
 
+    // Required components (Feature 1, D4): union the transitive closure of the
+    // BUNDLE ids' `#[require]`s into the effective set (present⇒skip is handled
+    // by the `contains` check — a required id already in source OR bundle is not
+    // re-added). For a require-free bundle `for_each_required_id_excluding` runs
+    // zero inner iterations — the 0%-gate. The closure is computed over
+    // `bundle_ids` (the inserted set); a component required only by an
+    // already-present source component is not auto-inserted (Bevy parity:
+    // requires expand the INSERTED bundle, not the resident archetype).
+    component_registry::for_each_required_id_excluding(bundle_ids, |cid| {
+        if !combined[..len].contains(&cid) {
+            debug_assert!(
+                len < MAX_MIGRATION_COLUMNS,
+                "migration union exceeds MAX_COMPONENTS (required expansion)"
+            );
+            combined[len] = cid;
+            len += 1;
+        }
+    });
+
     // Canonical-sort the combined set so `get_or_create_archetype`'s
     // `find_exact_match(ComponentMask::from_components(...))` collapses
     // equivalent unions to the same ArchetypeId regardless of insertion
@@ -315,6 +334,31 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
     let mut bundle_ids = [ComponentId(0); MAX_BUNDLE_ARITY];
     let mut bundle_added = [false; MAX_BUNDLE_ARITY];
     let mut bundle_id_count = 0usize;
+
+    // Required components (Feature 1, MAJOR 0%-gate): the ENTIRE Step-2b required
+    // block — the constructor pass, the `required_fire_ids` 4 KiB scratch, and the
+    // `for_each_required_id_excluding`/`Vec`-allocating walk — is gated behind this
+    // one-shot `any_requires` early-out (mirrors the `merged_archetype_id` required
+    // expansion 0%-gate, ~:225). `any_requires` is alloc-free: a ≤MAX_BUNDLE_ARITY
+    // loop over `get_required_plan(cid).entries.is_empty()` (all empty + memoized
+    // for a require-free bundle — NO `Vec`). On a require-free insert the block does
+    // not allocate, does not zero a 4 KiB array (its decl is moved INSIDE the
+    // guard), and does not loop. `B::component_ids()` is the inserted set — the same
+    // set `merged_archetype_id` expanded over.
+    let has_requires = component_registry::any_requires(B::component_ids());
+
+    // C1 + C2: the constructed-required fire scratch, materialised ONLY on a
+    // require-bearing insert. `None` on the require-free path leaves the 4 KiB
+    // `[ComponentId; MAX_MIGRATION_COLUMNS]` array unallocated + unzeroed (the
+    // 0%-gate). Sized `MAX_MIGRATION_COLUMNS` (NOT `MAX_BUNDLE_ARITY` — required
+    // components are an archetype-level concern with the larger bound; C2). Every
+    // entry is absent-in-source AND absent-in-bundle, so it fires on_add
+    // (added=true) AND on_insert in Phase 2 exactly once (C1: the bundle-only fire
+    // loop would otherwise cover NEITHER hook for a constructed required id).
+    // Filled by the gated Step-2b constructor pass inside the Phase-1 block; read in
+    // Phase 2. `Box<[..]>` keeps the 4 KiB off the stack frame entirely on the cold
+    // require-bearing path.
+    let mut required_fire: Option<(Box<[ComponentId; MAX_MIGRATION_COLUMNS]>, usize)> = None;
 
     // EnableTag Step 6: borrow-free scratch for the migrating entity's enable
     // bits (READ in Phase 1 before the source swap, WRITTEN into the target row)
@@ -514,10 +558,81 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
             }
         });
 
+        // Step 2b: required-component constructor pass (Feature 1, D5 + C1 + C2).
+        // GATED behind the `has_requires` 0%-gate (MAJOR fix): for a require-free
+        // insert this whole block is skipped — no `required_fire` allocation, no
+        // 4 KiB array, no `for_each_required_id_excluding`/`Vec` walk.
+        //
+        // For each transitively-required component the BUNDLE pulls that is absent
+        // in BOTH the source AND the bundle (present⇒skip), construct one value via
+        // its capture-free ctor directly into `row`, commit it, fill its ticks, AND
+        // push its id into `required_fire` so the Phase-2 fire loop covers it (C1: a
+        // constructed required id is not a bundle id, so without this it would fire
+        // NEITHER on_add NOR on_insert on the insert path — the Phase-14b
+        // "undercounting fire sites" class).
+        //
+        // `B::component_ids()` is the supplied (inserted) set — the walk is computed
+        // over it, matching the `merged_archetype_id` expansion. The
+        // `source.component_ids().contains` / `bundle_id_set` checks together yield
+        // "in target, absent in source, absent in bundle" = exactly the constructed
+        // set.
+        if has_requires {
+            let bundle_supplied = B::component_ids();
+            let bundle_id_set = &bundle_ids[..bundle_id_count];
+            // Materialise the fire scratch lazily — only on this require-bearing
+            // path. `Box::new([..])` zeroes the 4 KiB on the heap (cold path).
+            let (fire_ids, fire_count) =
+                required_fire.get_or_insert_with(|| (Box::new([ComponentId(0); MAX_MIGRATION_COLUMNS]), 0));
+            component_registry::for_each_required_id_excluding(bundle_supplied, |req_id| {
+                // present⇒skip: a required id already hosted by the source keeps
+                // its existing value (no overwrite, no construct, no re-fire —
+                // C1's "present does not fire" path). A required id supplied by
+                // the bundle was already written by the closure above.
+                if source.component_ids().contains(&req_id) || bundle_id_set.contains(&req_id) {
+                    return;
+                }
+                // Resolve the ctor for `req_id` from the bundle's transitive
+                // closure (the same W1-resolved ctor the expansion used).
+                let ctor = component_registry::required_ctor_for(bundle_supplied, req_id).expect(
+                    "invariant: req_id came from the bundle's required closure, so a ctor \
+                     exists for it",
+                );
+                let dst_pool = target
+                    .component_pools_mut()
+                    .get_pool_mut(req_id)
+                    .expect("invariant: target hosts every required id (expanded archetype)");
+                debug_assert!(
+                    !dst_pool.has_row(row),
+                    "required ctor pass: pool already committed row (id supplied twice?)"
+                );
+                // SAFETY (mirrors the bundle newly-added arm + SpawnAtCommand):
+                //   * `row == dst_pool.count()` (lockstep) and `reserve_capacity(1)`
+                //     committed the slot ⇒ `construct_at_uninitialized` targets a
+                //     logically-uninit slot (no drop). `commit_units(row, 1)`
+                //     extends the tail; `fill_ticks` stamps both ticks.
+                //   * `ctor` writes one value of `req_id`'s registered type into
+                //     the slot (registry-paired). `&mut target` ⇒ exclusive.
+                unsafe {
+                    dst_pool.construct_at_uninitialized(row, ctor);
+                    dst_pool.commit_units(row, 1);
+                    dst_pool.fill_ticks(row, 1, current_tick);
+                }
+                // C2: `*fire_count < MAX_MIGRATION_COLUMNS` holds — the constructed
+                // set ⊆ target ids ⊆ MAX_MIGRATION_COLUMNS columns.
+                debug_assert!(
+                    *fire_count < MAX_MIGRATION_COLUMNS,
+                    "required fire scratch overflow (constructed > MAX_MIGRATION_COLUMNS)"
+                );
+                fire_ids[*fire_count] = req_id;
+                *fire_count += 1;
+            });
+        }
+
         // Step 4: complete the target row's archetype-side bookkeeping. Every
         // target pool now holds one committed row at `row` (Step 1 + the closure
-        // above), so the entity-id list and `current_index` advance in lockstep —
-        // replicating `create_entity_with_ticks`'s tail.
+        // above + the required ctor pass), so the entity-id list and
+        // `current_index` advance in lockstep — replicating
+        // `create_entity_with_ticks`'s tail.
         target.entity_ids.push(entity.id());
         target.current_index = row + 1;
 
@@ -591,16 +706,31 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
         // MINT: no `world`-derived `&mut Archetype` is live (SAFETY-1).
         let world_ptr = NonNull::from(&mut *world);
         let bundle_id_set = &bundle_ids[..bundle_id_count];
-        // Ordering (SAFETY-2): ALL on_add (over I\S — newly added), THEN ALL
-        // on_insert (over I — the inserted bundle set, NOT all target_ids; P3).
-        // Observers fire in the same window as their matching hook (hooks first),
-        // over the SAME iteration set — on_add keeps the `bundle_added[i]` filter.
+        // Required components (Feature 1, C1): the constructed required ids. EVERY
+        // entry here is absent-in-source AND absent-in-bundle, so it is ALWAYS
+        // newly-added (the on_add filter is unconditional, unlike `bundle_added`)
+        // AND is inserted (on_insert). Iterated alongside the bundle set in both
+        // windows so the existing insert fire loop covers it — the C1 headline
+        // fix (a constructed required id is not a bundle id, so without this it
+        // fires NEITHER on_add NOR on_insert on the insert path).
+        let required_fire_set: &[ComponentId] = match &required_fire {
+            Some((ids, count)) => &ids[..*count],
+            None => &[],
+        };
+        // Ordering (SAFETY-2): ALL on_add (over I\S — newly added — PLUS the
+        // constructed required ids), THEN ALL on_insert (over I PLUS the
+        // constructed required ids). Observers fire in the same window as their
+        // matching hook (hooks first), over the SAME iteration set — on_add keeps
+        // the `bundle_added[i]` filter for the bundle ids.
         if flags.contains(ArchetypeFlags::ON_ADD_ANY) {
             if flags.contains(ArchetypeFlags::ON_ADD_HOOK) {
                 for (i, &cid) in bundle_id_set.iter().enumerate() {
                     if bundle_added[i] {
                         trigger_on_add(world_ptr, cid, entity);
                     }
+                }
+                for &cid in required_fire_set {
+                    trigger_on_add(world_ptr, cid, entity);
                 }
             }
             if flags.contains(ArchetypeFlags::ON_ADD_OBSERVER) {
@@ -609,6 +739,9 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
                         fire_on_add_observers(world_ptr, cid, entity);
                     }
                 }
+                for &cid in required_fire_set {
+                    fire_on_add_observers(world_ptr, cid, entity);
+                }
             }
         }
         if flags.contains(ArchetypeFlags::ON_INSERT_ANY) {
@@ -616,9 +749,15 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
                 for &cid in bundle_id_set {
                     trigger_on_insert(world_ptr, cid, entity);
                 }
+                for &cid in required_fire_set {
+                    trigger_on_insert(world_ptr, cid, entity);
+                }
             }
             if flags.contains(ArchetypeFlags::ON_INSERT_OBSERVER) {
                 for &cid in bundle_id_set {
+                    fire_on_insert_observers(world_ptr, cid, entity);
+                }
+                for &cid in required_fire_set {
                     fire_on_insert_observers(world_ptr, cid, entity);
                 }
             }

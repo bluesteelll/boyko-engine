@@ -139,10 +139,19 @@ impl<B: Bundle> Command for SpawnAtCommand<B> {
         // Acquire load on the outer OnceLock per spawn. The inner
         // `get_resolved::<B>()` performs ONE Acquire load on the per-bundle
         // slot. Cold path runs `resolve_and_cache` once per (B, world).
-        let pool_ids: &'static [InlandPoolId] = {
+        //
+        // Required components (Feature 1, D4): the same record carries
+        // `required_missing` + `required_pool_ids` — empty `&'static []` for a
+        // require-free bundle (the apply-time 0%-gate). Captured here so Step 5b
+        // (the constructor pass) does not re-touch the cache.
+        let (pool_ids, required_missing, required_pool_ids): (
+            &'static [InlandPoolId],
+            &'static [crate::ecs::core::component::component_registry::RequiredEntry],
+            &'static [InlandPoolId],
+        ) = {
             let cache = world.bundle_column_cache();
-            if let Some(r) = cache.get_resolved::<B>() {
-                r.pool_ids
+            let record = if let Some(r) = cache.get_resolved::<B>() {
+                *r
             } else {
                 // SAFETY (U1, U2, U14): `archetype_ptr` is write-capable
                 //   provenance under `&mut EcsMaster`; the shared
@@ -150,10 +159,13 @@ impl<B: Bundle> Command for SpawnAtCommand<B> {
                 //   dropped before the subsequent `&mut Archetype`
                 //   reborrow below.
                 let archetype_shared: &Archetype = unsafe { &*archetype_ptr };
-                cache
-                    .resolve_and_cache::<B>(archetype_id, archetype_shared)
-                    .pool_ids
-            }
+                *cache.resolve_and_cache::<B>(archetype_id, archetype_shared)
+            };
+            (
+                record.pool_ids,
+                record.required_missing,
+                record.required_pool_ids,
+            )
         };
 
         // ── Step 3: grow entity fast-store on demand ──────────────────
@@ -240,6 +252,40 @@ impl<B: Bundle> Command for SpawnAtCommand<B> {
             canonical_idx,
             pool_ids.len(),
         );
+
+        // ── Step 5b: required-component constructor pass (Feature 1, D5) ──
+        // For each transitively-required component the bundle did NOT supply,
+        // construct one value via its capture-free ctor directly into the
+        // reserved-but-uncommitted slot at `row`, commit it, and fill its ticks.
+        // The spawn fire (Step 8) iterates the FULL archetype `component_ids`, so
+        // these constructed columns fire on_add/on_insert automatically there —
+        // no second fire here (C1: spawn-path fire already covers the full
+        // archetype). For a require-free bundle `required_missing` is empty and
+        // this loop runs zero iterations (the 0%-gate).
+        debug_assert_eq!(
+            required_missing.len(),
+            required_pool_ids.len(),
+            "required_missing / required_pool_ids length mismatch",
+        );
+        for (entry, &pool_idx) in required_missing.iter().zip(required_pool_ids.iter()) {
+            // SAFETY (mirrors the bundle write above; Feature 1 D5):
+            //   - `pool_idx.0 < pools.len()` — resolved at cache install time
+            //     against the same archetype (`resolve_required_missing`).
+            //   - `row < committed_rows` post `reserve_capacity(1)` (Phase X.I).
+            //   - `&mut archetype` provides exclusive access; no concurrent
+            //     reader of this slot exists.
+            //   - `entry.ctor` writes exactly one value of the pool's registered
+            //     type (the registry paired the ctor with `entry.component_id`,
+            //     and `pool_idx` is that id's column).
+            unsafe {
+                let pool = archetype
+                    .component_pools_mut()
+                    .pool_at_unchecked_mut(pool_idx);
+                pool.construct_at_uninitialized(row, entry.ctor);
+                pool.commit_units(row, 1);
+                pool.fill_ticks(row, 1, current_tick);
+            }
+        }
 
         // ── Step 6: archetype-side bookkeeping ────────────────────────
         archetype.entity_ids.push(entity.id());

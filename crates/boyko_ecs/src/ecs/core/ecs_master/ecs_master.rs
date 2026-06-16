@@ -2407,7 +2407,23 @@ impl EcsMaster {
         type_id: BundleTypeId,
     ) -> ArchetypeId {
         let ids = B::component_ids();
-        let arch = self.get_or_create_archetype(ids);
+        // Required components (Feature 1, D4): expand the declared bundle ids
+        // with the transitive closure of every component's `#[require]`s, then
+        // canonical-sort, so the cached archetype already hosts every required
+        // column. For a require-free bundle `for_each_required_id_excluding`
+        // runs zero inner iterations and the effective set == `ids` — the
+        // 0%-gate. Cold path only (once per (B, world)); the warm path reads the
+        // OnceLock slot below.
+        let arch = if component_registry::any_requires(ids) {
+            let mut effective: Vec<ComponentId> = ids.to_vec();
+            component_registry::for_each_required_id_excluding(ids, |cid| {
+                effective.push(cid);
+            });
+            effective.sort_unstable_by_key(|c| c.0);
+            self.get_or_create_archetype(&effective)
+        } else {
+            self.get_or_create_archetype(ids)
+        };
         // OnceLock::set may race with a concurrent setter (Phase 9). If our
         // set loses, the value already stored is identical because (a)
         // component_ids() returns the same canonical-sorted slice for `B`

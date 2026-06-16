@@ -285,6 +285,14 @@ where
             cache.resolve_and_cache::<B>(archetype_id, archetype_shared)
         };
         let pool_ids = cache_record.pool_ids;
+        // Required components (Feature 1, D5 — batch parity with
+        // `SpawnAtCommand::apply` Step 5b): the same record carries the
+        // transitively-required entries the bundle does NOT supply
+        // (`required_missing`) and their resolved columns (`required_pool_ids`).
+        // Both are empty `&'static []` for a require-free bundle — the
+        // apply-time 0%-gate (the constructor pass below is skipped entirely).
+        let required_missing = cache_record.required_missing;
+        let required_pool_ids = cache_record.required_pool_ids;
 
         // ── Step 2.5 (W4): once-per-batch SBO-B2 + SBO-N debug invariants
         // SAFETY (SBO-N + SBO-B2 + B2):
@@ -504,6 +512,68 @@ where
                 // D-E alignment pin: the bundle's data walk emitted exactly the
                 // non-ZST columns the per-batch filter counted.
                 debug_assert_eq!(k, data_pool_ids.len());
+            }
+        }
+
+        // ── Step 5b: required-component constructor pass (Feature 1, D5) ──
+        // CRITICAL UB FIX: `cold_register_bundle_archetype` resolves the
+        // archetype with the required columns ALREADY present, and Step 6's
+        // `commit_units_batch` / `fill_ticks_batch` commit + tick-stamp EVERY
+        // pool — including the required columns the row loop never wrote. Without
+        // this pass those `n` rows would be committed-but-uninitialized:
+        // garbage reads + a `drop_in_place` on uninit at teardown (UB).
+        //
+        // For EACH row in `[start_row, start_row + n)` and EACH required column,
+        // construct one value via its capture-free ctor directly into the
+        // reserved-but-uncommitted slot. Step 6 then commits + ticks these
+        // columns alongside the bundle's own (the batch commit walks all pools),
+        // so no per-row commit/fill is done here (mirrors `SpawnAtCommand::apply`
+        // Step 5b, looped over n).
+        //
+        // NOTE (pre-existing gap, NOT fixed here per task scope):
+        // `SpawnBatchCommand::apply` fires NO on_add/on_insert hooks or observers
+        // for ANY component — not even the bundle's own (there is no
+        // flags/`trigger_on_add` block in this command, unlike
+        // `SpawnAtCommand::apply` Step 8). Since the batch path fires for nobody,
+        // the constructed required columns match the existing behaviour (silent).
+        // The "spawn_batch fires no lifecycle hooks" gap is reported as a finding.
+        //
+        // 0%-gate: `required_missing` is empty for a require-free bundle, so the
+        // outer `if` is skipped entirely and this pass costs zero.
+        debug_assert_eq!(
+            required_missing.len(),
+            required_pool_ids.len(),
+            "required_missing / required_pool_ids length mismatch",
+        );
+        if !required_missing.is_empty() {
+            for i in 0..n {
+                let row = start_row + i;
+                for (entry, &pool_idx) in
+                    required_missing.iter().zip(required_pool_ids.iter())
+                {
+                    // SAFETY (mirrors `SpawnAtCommand::apply` Step 5b; Feature 1 D5):
+                    //   - `pool_idx.0 < pools.len()` — resolved at cache install
+                    //     time against the same archetype (`resolve_required_missing`).
+                    //   - `row < start_row + n <= committed_rows` after
+                    //     `reserve_capacity(n)` (Phase X.I), and the required pool's
+                    //     `len` is still `start_row` (never written by the row loop),
+                    //     so `row >= len` for every `i` — the slot is uninit, so
+                    //     `construct_at_uninitialized` runs no drop. Step 6's
+                    //     `commit_units_batch(start_row, n)` then advances every
+                    //     pool's `len` by `n` in lockstep (precondition
+                    //     `start_row == len` still holds for the required pools).
+                    //   - `&mut archetype` provides exclusive access; no concurrent
+                    //     reader of this slot exists.
+                    //   - `entry.ctor` writes exactly one value of the pool's
+                    //     registered type (the registry paired the ctor with
+                    //     `entry.component_id`, and `pool_idx` is that id's column).
+                    unsafe {
+                        archetype
+                            .component_pools_mut()
+                            .pool_at_unchecked_mut(pool_idx)
+                            .construct_at_uninitialized(row, entry.ctor);
+                    }
+                }
             }
         }
 

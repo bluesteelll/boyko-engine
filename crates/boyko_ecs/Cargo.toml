@@ -192,6 +192,14 @@ harness = false
 name = "app_overhead"
 harness = false
 
+# Feature 1 (required components) — the 0%-gate (sacred). Drives the
+# require-free spawn + insert/migration paths so the tester can run a
+# same-binary A/B (--save-baseline / --baseline) to confirm no regression on
+# the require-free path. See docs/REQUIRED-COMPONENTS-PLAN.md §"0%-gate".
+[[bench]]
+name = "gate_spawn_no_require"
+harness = false
+
 [lints.rust]
 # Phase 9 Wave 7 Step 24: opt-in stronger ALLOC1 check via
 # `RUSTFLAGS="--cfg force_alloc_panic"`. See

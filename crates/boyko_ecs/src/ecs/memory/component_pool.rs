@@ -1476,6 +1476,52 @@ impl ComponentPool {
         }
     }
 
+    /// Required components (Feature 1, D5): runs the capture-free `ctor` to
+    /// construct one value of this pool's registered type directly into the
+    /// reserved-but-uncommitted slot `idx`. Mirrors
+    /// [`Self::write_at_unchecked_initialized`] but materializes the value via a
+    /// constructor function pointer instead of a memcpy — used by the
+    /// constructor pass for a required component that the user bundle does not
+    /// supply.
+    ///
+    /// # Safety
+    ///
+    /// * `idx < committed_rows` — caller pre-grew via
+    ///   `Archetype::reserve_capacity` (Phase X.I committed the rows).
+    /// * `idx >= self.len` (the slot is uninit and not yet committed); after the
+    ///   matching `commit_units(idx, 1)` the slot becomes addressable.
+    /// * `ctor` constructs a value whose layout matches this pool's registered
+    ///   type — guaranteed by the registry: `ctor` came from `REQUIRES_ALL`
+    ///   keyed by this column's `ComponentId`, the same id this pool was created
+    ///   for.
+    /// * Caller holds exclusive `&mut self` access.
+    #[inline]
+    pub(crate) unsafe fn construct_at_uninitialized(
+        &mut self,
+        idx: usize,
+        ctor: crate::ecs::core::component::component_registry::RequiredCtor,
+    ) {
+        debug_assert!(
+            idx < self.committed_rows,
+            "construct_at_uninitialized: idx {} >= committed_rows {} \
+             (callers pre-grow via reserve_capacity)",
+            idx,
+            self.committed_rows
+        );
+        // SAFETY:
+        //   * `idx < committed_rows` ⇒ `row_ptr` addresses a committed slot
+        //     within the pool's reservation (this slot is not yet live).
+        //   * `ctor` writes exactly one value of this pool's registered type
+        //     into `dst` (the registry pairs the ctor with this column's id),
+        //     and `ptr::write` (inside the derive-generated ctor) does not drop
+        //     the uninit destination.
+        //   * `&mut self` ⇒ exclusive access; the slot is logically uninit by
+        //     the caller's pre-reserve contract, so no drop runs.
+        unsafe {
+            ctor(self.row_ptr(idx));
+        }
+    }
+
     /// Phase 12.5 Opt-A2 (§5.6): commits `n` rows starting at `start_row`
     /// (advancing `self.len`) after the batch path has written every row's
     /// bytes via [`Self::write_at_unchecked_initialized`].

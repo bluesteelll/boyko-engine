@@ -2,7 +2,7 @@ use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::{format_ident, quote};
 use syn::{
-    Data, DeriveInput, Fields, Ident, ItemStruct, Path, Type, parse_macro_input,
+    Data, DeriveInput, Expr, Fields, Ident, ItemStruct, Path, Type, parse_macro_input,
 };
 
 /// Derive macro for implementing the Component trait.
@@ -85,7 +85,7 @@ use syn::{
 /// is expected (wrap it in a `#[derive(Bundle)]` struct instead). The flag is
 /// also the escape hatch when a type must derive BOTH `Component` and
 /// `Bundle` — without it the two derives now collide on the `Bundle` impl.
-#[proc_macro_derive(Component, attributes(component))]
+#[proc_macro_derive(Component, attributes(component, require))]
 pub fn component_macro(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
 
@@ -94,6 +94,16 @@ pub fn component_macro(input: TokenStream) -> TokenStream {
     // Wave 5 with the `storage = "bitset"` NameValue key).
     let hooks = match parse_component_hooks(&input.attrs) {
         Ok(h) => h,
+        Err(ts) => return ts,
+    };
+
+    // Required components (Feature 1): parse the optional `#[require(...)]`
+    // attribute(s). Each key is a component type with an optional ctor:
+    // `B` (uses `B::default()`), `C = expr` (a capture-free expression), or
+    // `D(args)` (a call expression `D(args)`). Duplicate same-id keys are a
+    // compile error.
+    let requires = match parse_requires(&input.attrs) {
+        Ok(r) => r,
         Err(ts) => return ts,
     };
 
@@ -141,6 +151,15 @@ pub fn component_macro(input: TokenStream) -> TokenStream {
     let storage_items = hooks.storage_codegen();
     let storage_install = hooks.storage_install_codegen();
 
+    // Required components (Feature 1): emit `const HAS_REQUIRES = true;`, the
+    // `register_required` impl, and the free `__require_ctor_*` fns when at least
+    // one `#[require(...)]` key is present; the gated `install_required::<Self>`
+    // install call in `component_id()`. A require-free derive emits NOTHING here
+    // (the trait defaults apply) — the 0%-gate.
+    let require_ctor_fns = requires.ctor_fns_codegen(&name);
+    let require_items = requires.codegen(&name);
+    let require_install = requires.install_codegen();
+
     // Phase 22 D7: single-component Bundle emission (suppressed by
     // `#[component(no_bundle)]`). EnableTag D6: `storage = "bitset"` ALSO
     // suppresses it — a bitset tag has no `ComponentPool` and must not be
@@ -154,6 +173,8 @@ pub fn component_macro(input: TokenStream) -> TokenStream {
 
     let expanded = quote! {
         #bundle_items
+
+        #require_ctor_fns
 
         impl #name {
             /// Size of this component in bytes.
@@ -190,6 +211,7 @@ pub fn component_macro(input: TokenStream) -> TokenStream {
                         boyko_ecs::ecs::core::component::component_registry::install_hooks::<Self>(raw);
                     }
                     #storage_install
+                    #require_install
                     boyko_ecs::ecs::identifiers::primitives::ComponentId(raw)
                 })
             }
@@ -197,6 +219,8 @@ pub fn component_macro(input: TokenStream) -> TokenStream {
             #storage_items
 
             #hook_items
+
+            #require_items
 
             // NOTE: `std::any::type_name::<Self>()` is not yet stable as a const fn.
             // Calling it from a regular fn body is fine; the compiler folds it to a
@@ -590,6 +614,272 @@ fn component_self_bundle_codegen(name: &Ident) -> TokenStream2 {
             }
         }
     }
+}
+
+/// One parsed `#[require(...)]` entry (Feature 1). The required component `ty`
+/// is constructed by one of three forms:
+///
+/// * `B`        → `B::default()` (requires `B: Default`);
+/// * `C = expr` → the capture-free expression `expr` (the no-`Default` escape
+///   hatch — must evaluate to a `C`);
+/// * `D(args)`  → the call expression `D(args)` (sugar for `= D(args)`).
+struct RequireEntry {
+    /// The required component type (also the constructed value's type).
+    ty: Path,
+    /// The constructor expression. `None` means "use `<ty>::default()`".
+    ctor: Option<Expr>,
+}
+
+/// All parsed `#[require(...)]` declarations on one component (Feature 1).
+#[derive(Default)]
+struct RequiresSpec {
+    entries: Vec<RequireEntry>,
+}
+
+impl RequiresSpec {
+    /// `true` iff at least one `#[require(...)]` key is present.
+    fn any(&self) -> bool {
+        !self.entries.is_empty()
+    }
+
+    /// Emits the free `unsafe fn __require_ctor_N(dst: *mut u8)` constructor
+    /// functions (D2) — one per `#[require]` entry, in declaration order. Each
+    /// writes one fully-initialized value of the required type into `dst` via a
+    /// capture-free expression; it never touches the world (F2-immune). Empty
+    /// when no `#[require]` key is present (the 0%-gate).
+    fn ctor_fns_codegen(&self, owner: &Ident) -> TokenStream2 {
+        if !self.any() {
+            return TokenStream2::new();
+        }
+        let fns: Vec<TokenStream2> = self
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(i, e)| {
+                let fn_ident = format_ident!("__require_ctor_{}_{}", owner, i);
+                let ty = &e.ty;
+                let value: TokenStream2 = match &e.ctor {
+                    Some(expr) => quote! { #expr },
+                    None => quote! { <#ty as ::std::default::Default>::default() },
+                };
+                quote! {
+                    /// Capture-free required-component constructor (Feature 1, D2).
+                    ///
+                    /// # Safety
+                    /// `dst` must point at properly-aligned, writable, uninitialized
+                    /// memory of at least `size_of` of the required type. Upheld by
+                    /// the constructor pass (`SpawnAtCommand` / `migrate_entity_insert`),
+                    /// which writes into a reserved, logically-uninit pool slot.
+                    #[doc(hidden)]
+                    // BUG-REQ-SNAKE-1: the fn name embeds the owner type's
+                    // CamelCase identifier (`__require_ctor_<Owner>_<i>`), which
+                    // trips `non_snake_case` under `clippy -D warnings` on every
+                    // `#[require]` user. Standard derive hygiene: allow it here.
+                    #[allow(non_snake_case)]
+                    unsafe fn #fn_ident(dst: *mut u8) {
+                        // SAFETY: the caller (the engine's constructor pass) guarantees
+                        // `dst` is an aligned, uninit slot of the required type's layout
+                        // and is exclusively owned for this call. `write` does not drop
+                        // the (uninit) destination.
+                        unsafe {
+                            ::std::ptr::write(dst.cast::<#ty>(), { #value });
+                        }
+                    }
+                }
+            })
+            .collect();
+        quote! { #(#fns)* }
+    }
+
+    /// Emits `const HAS_REQUIRES = true;` + the `register_required` impl when any
+    /// `#[require]` key is present, or an empty token stream otherwise. The
+    /// `register_required` body pushes one `(component_id, ctor)` pair per entry
+    /// into the builder, in declaration order (the W1 first-DFS precedence).
+    fn codegen(&self, owner: &Ident) -> TokenStream2 {
+        if !self.any() {
+            return TokenStream2::new();
+        }
+        let pushes: Vec<TokenStream2> = self
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(i, e)| {
+                let fn_ident = format_ident!("__require_ctor_{}_{}", owner, i);
+                let ty = &e.ty;
+                quote! {
+                    // BUG-REQ-CYCLE-1: pass `component_id` as an UNCALLED fn item
+                    // (no parentheses) so registering this edge does NOT resolve
+                    // the required type's id inside the requiring type's own
+                    // `component_id()` `OnceLock` init. The resolver is invoked
+                    // lazily in `build_required_plan` at archetype-expansion time;
+                    // a `#[require]` cycle then re-enters there (on the BUILDING
+                    // stack) and panics instead of deadlocking.
+                    builder.require(
+                        <#ty as ::boyko_ecs::ecs::core::component::component::Component>::component_id
+                            as ::boyko_ecs::ecs::core::component::component_registry::RequiredIdFn,
+                        #fn_ident as ::boyko_ecs::ecs::core::component::component_registry::RequiredCtor,
+                    );
+                }
+            })
+            .collect();
+        quote! {
+            const HAS_REQUIRES: bool = true;
+
+            #[inline]
+            fn register_required(
+                builder: &mut ::boyko_ecs::ecs::core::component::component::RequiredBuilder,
+            ) {
+                #(#pushes)*
+            }
+        }
+    }
+
+    /// Emits the registration-time `install_required::<Self>(raw)` call into the
+    /// derive's `component_id()` `OnceLock` init closure (after `register_new` +
+    /// hooks + storage), or an empty token stream when no `#[require]` key is
+    /// present (the 0%-gate — const-folds away exactly like `install_hooks`).
+    fn install_codegen(&self) -> TokenStream2 {
+        if !self.any() {
+            return TokenStream2::new();
+        }
+        quote! {
+            if Self::HAS_REQUIRES {
+                boyko_ecs::ecs::core::component::component_registry::install_required::<Self>(raw);
+            }
+        }
+    }
+}
+
+/// Parses every `#[require(...)]` attribute on the item (Feature 1). Each
+/// attribute is a comma-separated list of entries; each entry is one of:
+///
+/// * `B`        — bare path, constructed via `B::default()`;
+/// * `C = expr` — a NameValue: the capture-free expression `expr`;
+/// * `D(args)`  — a call expression (sugar for `= D(args)`).
+///
+/// Multiple `#[require(...)]` attributes accumulate. Rejects:
+/// * a duplicate same-id required component (two entries naming the SAME type
+///   path) — a compile error (strictly better than Bevy's runtime panic);
+/// * an empty `#[require()]` (no entries).
+fn parse_requires(attrs: &[syn::Attribute]) -> Result<RequiresSpec, TokenStream> {
+    let mut spec = RequiresSpec::default();
+
+    for attr in attrs {
+        if !attr.path().is_ident("require") {
+            continue;
+        }
+
+        // Parse the comma-separated list of entry expressions. Each entry is an
+        // `Expr`: a bare path (`B`), an assignment (`C = expr`), or a call
+        // (`D(args)`). `parse_terminated` over `Expr` accepts all three.
+        let parsed = attr.parse_args_with(
+            syn::punctuated::Punctuated::<Expr, syn::Token![,]>::parse_terminated,
+        );
+        let list = match parsed {
+            Ok(l) => l,
+            Err(e) => return Err(e.to_compile_error().into()),
+        };
+
+        if list.is_empty() {
+            return Err(syn::Error::new_spanned(
+                attr,
+                "empty #[require(...)]: list at least one required component, e.g. \
+                 #[require(Velocity, Mass = Mass(1.0))]",
+            )
+            .to_compile_error()
+            .into());
+        }
+
+        for expr in list {
+            let entry = parse_require_entry(expr)?;
+            // Reject a SYNTACTICALLY-IDENTICAL duplicate required component
+            // (compile-time): `path_eq` compares the type path's token text, so it
+            // catches `#[require(B, B)]` / `#[require(B)] #[require(B)]` where the
+            // two paths are spelled the same. Differently-spelled paths to the SAME
+            // type (`B` vs `crate::B` vs `self::B`) are NOT caught here — the macro
+            // cannot resolve a path to a `ComponentId` — but they are harmless: the
+            // registry's W1 dedup in `build_required_plan` collapses them to a single
+            // entry by `ComponentId` downstream (last/direct ctor wins). This check
+            // is therefore a best-effort early diagnostic, strictly better than
+            // Bevy's runtime panic, never a soundness gate.
+            if spec
+                .entries
+                .iter()
+                .any(|prev| path_eq(&prev.ty, &entry.ty))
+            {
+                let ty = &entry.ty;
+                return Err(syn::Error::new_spanned(
+                    ty,
+                    "duplicate #[require(...)] for the same component; each required \
+                     component may be listed at most once",
+                )
+                .to_compile_error()
+                .into());
+            }
+            spec.entries.push(entry);
+        }
+    }
+
+    Ok(spec)
+}
+
+/// Lowers one `#[require(...)]` list element [`Expr`] into a [`RequireEntry`].
+fn parse_require_entry(expr: Expr) -> Result<RequireEntry, TokenStream> {
+    let err = |e: Expr, msg: &str| -> TokenStream {
+        syn::Error::new_spanned(e, msg).to_compile_error().into()
+    };
+    match expr {
+        // `B` — bare path ⇒ `B::default()`.
+        Expr::Path(p) => Ok(RequireEntry {
+            ty: p.path,
+            ctor: None,
+        }),
+        // `C = expr` — explicit capture-free ctor expression.
+        Expr::Assign(assign) => {
+            let ty = match *assign.left {
+                Expr::Path(p) => p.path,
+                other => {
+                    return Err(err(
+                        other,
+                        "#[require(C = expr)]: the left side must be a component type path",
+                    ));
+                }
+            };
+            Ok(RequireEntry {
+                ty,
+                ctor: Some(*assign.right),
+            })
+        }
+        // `D(args)` — call expression ⇒ ctor is the whole call, type is the
+        // callee path (sugar for `D = D(args)`).
+        Expr::Call(ref call) => {
+            let ty = match call.func.as_ref() {
+                Expr::Path(p) => p.path.clone(),
+                _ => {
+                    return Err(err(
+                        expr,
+                        "#[require(D(...))]: the callee must be a component type path",
+                    ));
+                }
+            };
+            Ok(RequireEntry {
+                ty,
+                ctor: Some(expr),
+            })
+        }
+        other => Err(err(
+            other,
+            "unsupported #[require(...)] entry; use `B`, `C = expr`, or `D(args)`",
+        )),
+    }
+}
+
+/// Conservative structural equality for two type paths (Feature 1 dup check):
+/// compares the token-stream text of each path. Two entries with the same path
+/// text resolve to the same `ComponentId`, so this catches the
+/// `#[require(B, B)]` / `#[require(B)] #[require(B)]` duplicate at compile time.
+fn path_eq(a: &Path, b: &Path) -> bool {
+    quote!(#a).to_string() == quote!(#b).to_string()
 }
 
 /// Derive macro for implementing the Resource trait.

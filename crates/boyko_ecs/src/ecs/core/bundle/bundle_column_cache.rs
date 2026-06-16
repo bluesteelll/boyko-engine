@@ -65,22 +65,36 @@ use static_assertions::assert_impl_all;
 use crate::ecs::core::archetype::archetype::Archetype;
 use crate::ecs::core::bundle::bundle::Bundle;
 use crate::ecs::core::bundle::bundle_type_registry::MAX_BUNDLE_TYPES;
-use crate::ecs::identifiers::primitives::{ArchetypeId, InlandPoolId};
+use crate::ecs::core::component::component_registry::{self, RequiredEntry};
+use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId, InlandPoolId};
 
 /// Phase 12.5 Opt-A3 (§6.2 / §8.3): per-`(BundleTypeId, ArchetypeId)`
 /// resolved column-ids record.
 ///
-/// # Layout (32 B)
+/// # Layout (64 B — deliberate 32→64 B trade-off)
 ///
-/// `#[repr(C)]` to pin the field order; the struct fits in a single
-/// cache line. Loaded once per batch at the top of
+/// Feature 1 (required components) grew this record from the original 32 B
+/// (`archetype_id` + `pool_ids` + the two `u32`s) to **64 B = one full cache
+/// line** by adding the two fat slices `required_missing` + `required_pool_ids`.
+/// The trade-off is intentional: for a require-free bundle both new slices are
+/// the empty `&'static []` (a null-len fat pointer, zero leaked bytes), so the
+/// only cost is +32 B of zeroed inline storage per record. In exchange the
+/// constructor pass reads the required plan as TWO plain indexed loads off the
+/// SAME already-hot record — no extra pointer indirection, no second cache
+/// lookup, no `OnceLock` chase. One-line-per-record keeps the warm spawn path
+/// branch-free; padding the record to exactly one cache line (the `const _:`
+/// assert below) also rules out a record straddling two lines.
+///
+/// `#[repr(C)]` pins the field order. Loaded once per batch at the top of
 /// `SpawnBatchCommand::apply` and indexed inline thereafter.
 ///
 /// ```text
-/// +0  : archetype_id: ArchetypeId         (8 B)
-/// +8  : pool_ids: &'static [InlandPoolId] (16 B fat pointer)
-/// +24 : pools_len_at_install: u32         (4 B)
-/// +28 : _pad: u32                         (4 B)
+/// +0  : archetype_id: ArchetypeId               (8 B)
+/// +8  : pool_ids: &'static [InlandPoolId]        (16 B fat pointer)
+/// +24 : required_missing: &'static [RequiredEntry] (16 B fat pointer)
+/// +40 : required_pool_ids: &'static [InlandPoolId]  (16 B fat pointer)
+/// +56 : pools_len_at_install: u32               (4 B)
+/// +60 : _pad: u32                               (4 B)
 /// ```
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -95,6 +109,20 @@ pub struct BundleColumnRecord {
     /// exactly once per `(BundleTypeId, ArchetypeId)` per world (SBO6).
     pub pool_ids: &'static [InlandPoolId],
 
+    /// Required components (Feature 1, D4): the transitive required entries
+    /// (ctor + id) that `B` does NOT supply directly and must be constructed
+    /// at spawn/insert (`B::component_ids()` is the "supplied" set, present⇒skip).
+    /// **Empty `&'static []` for a require-free bundle** — the load-bearing
+    /// apply-time 0%-gate (an empty-slice check; the constructor pass runs zero
+    /// iterations). Leaked once per `(BundleTypeId, ArchetypeId)` per world.
+    pub required_missing: &'static [RequiredEntry],
+
+    /// Required components (Feature 1, D4): the resolved `InlandPoolId` of each
+    /// entry in [`Self::required_missing`], in the SAME order. The constructor
+    /// pass indexes `required_pool_ids[i]` to find the column for
+    /// `required_missing[i]`. Empty for a require-free bundle.
+    pub required_pool_ids: &'static [InlandPoolId],
+
     /// SBO-N snapshot: `archetype.component_pools.pools_len()` at the
     /// moment this record was installed. The warm-path apply
     /// `debug_assert!`s `pools_len_at_install <= pools_len()` (push-only
@@ -102,7 +130,7 @@ pub struct BundleColumnRecord {
     /// archetype-destruction path.
     pub pools_len_at_install: u32,
 
-    /// Padding to round the struct up to 32 B. Reserved for future use
+    /// Padding to round the struct up to 64 B. Reserved for future use
     /// (e.g. an explicit `flags` field).
     pub _pad: u32,
 }
@@ -117,12 +145,12 @@ unsafe impl Send for BundleColumnRecord {}
 // SAFETY: same composition as `Send`.
 unsafe impl Sync for BundleColumnRecord {}
 
-// `BundleColumnRecord` holds an `ArchetypeId` (wraps `usize`) and a
-// `&'static [InlandPoolId]` (a pointer-width fat slice), so the 32-byte size
-// encodes the 64-bit ABI. Gated to 64-bit (the engine's supported platform) —
-// see CLAUDE.md target platform.
+// `BundleColumnRecord` holds an `ArchetypeId` (wraps `usize`), three
+// pointer-width fat slices, and two `u32`s, so the 64-byte size encodes the
+// 64-bit ABI (one cache line). Gated to 64-bit (the engine's supported
+// platform) — see CLAUDE.md target platform.
 #[cfg(target_pointer_width = "64")]
-const _: () = assert!(std::mem::size_of::<BundleColumnRecord>() == 32);
+const _: () = assert!(std::mem::size_of::<BundleColumnRecord>() == 64);
 
 /// Phase 12.5 Opt-A3 (§6.2): per-world cache of resolved
 /// `(BundleTypeId, ArchetypeId, &'static [InlandPoolId])` records.
@@ -263,9 +291,19 @@ impl BundleColumnCache {
         let pool_ids_boxed: Box<[InlandPoolId]> = pool_ids_owned.into_boxed_slice();
         let pool_ids: &'static [InlandPoolId] = Box::leak(pool_ids_boxed);
 
+        // Required components (Feature 1, D4 / Step 5): compute the entries the
+        // bundle does NOT supply directly (`B::component_ids()` is the supplied
+        // set, present⇒skip) and resolve each to its `InlandPoolId` in the
+        // resolved archetype. Empty `&'static []` for a require-free bundle — the
+        // apply-time 0%-gate. Leaked once per `(BundleTypeId, ArchetypeId)`.
+        let (required_missing, required_pool_ids) =
+            Self::resolve_required_missing(component_ids, archetype);
+
         let record = BundleColumnRecord {
             archetype_id,
             pool_ids,
+            required_missing,
+            required_pool_ids,
             pools_len_at_install,
             _pad: 0,
         };
@@ -285,6 +323,64 @@ impl BundleColumnCache {
         slot.get()
             .expect("invariant: OnceLock populated by self or racer in cold path")
     }
+
+    /// Required components (Feature 1, D4 / Step 5): computes the transitive
+    /// required entries the bundle does NOT supply directly (present⇒skip
+    /// against `supplied_ids = B::component_ids()`) and resolves each to its
+    /// `InlandPoolId` in the resolved archetype.
+    ///
+    /// Returns `(required_missing, required_pool_ids)` — two parallel leaked
+    /// `&'static` slices in the SAME order. Both are empty `&'static []` for a
+    /// require-free bundle (the apply-time 0%-gate). The archetype hosts every
+    /// required id by construction (the expansion union ran at
+    /// `cold_register_bundle_archetype` / `merged_archetype_id` BEFORE the
+    /// archetype was resolved), so `pool_id_for` always succeeds.
+    ///
+    /// Cold path only — runs once per `(BundleTypeId, ArchetypeId)` per world.
+    fn resolve_required_missing(
+        supplied_ids: &[ComponentId],
+        archetype: &Archetype,
+    ) -> (&'static [RequiredEntry], &'static [InlandPoolId]) {
+        // 0%-gate: a require-free bundle leaks nothing and returns empty slices.
+        if !component_registry::any_requires(supplied_ids) {
+            return (&[], &[]);
+        }
+
+        // Build the missing set: each transitively-required id paired with the
+        // ctor the closure resolved for it (W1 conflict rule already applied).
+        // present⇒skip is enforced by `for_each_required_id_excluding`, which
+        // never emits an id already in `supplied_ids`.
+        let mut missing: Vec<RequiredEntry> = Vec::new();
+        let mut missing_pools: Vec<InlandPoolId> = Vec::new();
+        for &supplied in supplied_ids {
+            for &entry in component_registry::get_required_plan(supplied.0).entries {
+                // Skip ids the bundle supplies directly (present⇒skip) and ids
+                // already collected (diamond dedup).
+                if supplied_ids.contains(&entry.component_id)
+                    || missing.iter().any(|e| e.component_id == entry.component_id)
+                {
+                    continue;
+                }
+                let inland = archetype
+                    .component_pools()
+                    .pool_id_for(entry.component_id)
+                    .expect(
+                        "invariant: the archetype was expanded with every required id at \
+                         cold_register_bundle_archetype / merged_archetype_id, so it hosts \
+                         every transitively-required component",
+                    );
+                missing.push(entry);
+                missing_pools.push(inland);
+            }
+        }
+
+        // Leak both parallel slices to `&'static` (bounded by SBO6-class: one
+        // pair per (BundleTypeId, ArchetypeId) per world).
+        let required_missing: &'static [RequiredEntry] = Box::leak(missing.into_boxed_slice());
+        let required_pool_ids: &'static [InlandPoolId] =
+            Box::leak(missing_pools.into_boxed_slice());
+        (required_missing, required_pool_ids)
+    }
 }
 
 impl Default for BundleColumnCache {
@@ -300,9 +396,9 @@ mod tests {
 
     #[test]
     fn bundle_column_record_layout() {
-        // Locked in by `const _: () = assert!(size_of::<...>() == 32)` at
+        // Locked in by `const _: () = assert!(size_of::<...>() == 64)` at
         // module scope. Repeat here as a human-visible smoke check.
-        assert_eq!(std::mem::size_of::<BundleColumnRecord>(), 32);
+        assert_eq!(std::mem::size_of::<BundleColumnRecord>(), 64);
     }
 
     #[test]
