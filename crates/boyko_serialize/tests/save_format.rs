@@ -217,8 +217,8 @@ fn owning_string_component_encodes_and_is_marked_via_fn() {
         .spawn_one(arch, Label { text: "world!!".to_string() })
         .expect("spawn owning");
 
-    // Must NOT panic on an owning component (the S1 boundary: no encoder is
-    // installed yet, so the column is zero-length, but the save completes).
+    // Must NOT panic on an owning component; with the S1.5 derived encoder the
+    // column now carries real bytes (was zero-length under the S1 boundary).
     let mut out = Vec::new();
     let written = save_world(&world, &SaveOptions::default(), &mut out).expect("save owning");
     assert_eq!(written, out.len());
@@ -237,15 +237,27 @@ fn owning_string_component_encodes_and_is_marked_via_fn() {
         "an owning String component must be marked SerializeViaFn in the type table"
     );
 
-    // The Label column region exists (zero-length under the S1 boundary).
+    // The Label column now encodes via the derived `serialize_fn` (Phase S1.5): each
+    // `String` is a `u32` LE length prefix + the UTF-8 bytes. "hello" → 4 + 5 = 9,
+    // "world!!" → 4 + 7 = 11, total 20 bytes for the two rows.
     let block = parse_block(&out, header.archetype_table_off);
     assert_eq!(block.component_count, 1);
     assert_eq!(block.entity_count, 2);
     let region = parse_column_region(&out, block.column_regions_off, 0);
+    let expected = (4 + 5) + (4 + 7);
     assert_eq!(
-        region.byte_len, 0,
-        "S1 boundary: SerializeViaFn column is zero-length until the encoder is derived"
+        region.byte_len, expected,
+        "S1.5: a SerializeViaFn String column encodes u32-length-prefixed UTF-8 bytes"
     );
+    assert!(region.byte_len > 0, "owning column must now carry real bytes");
+
+    // The encoded bytes must appear verbatim at the recorded offset: row 0's prefix
+    // is 5, then "hello"; row 1's prefix is 7, then "world!!".
+    let start = region.data_off as usize;
+    assert_eq!(read_u32(&out, start), 5, "row 0 String length prefix");
+    assert_eq!(&out[start + 4..start + 9], b"hello", "row 0 UTF-8 bytes");
+    assert_eq!(read_u32(&out, start + 9), 7, "row 1 String length prefix");
+    assert_eq!(&out[start + 13..start + 20], b"world!!", "row 1 UTF-8 bytes");
 }
 
 // ════════════════════════════════════════════════════════════════════════════

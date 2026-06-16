@@ -1598,15 +1598,29 @@ pub fn install_serialize_fn<C: Component>(component_id: usize) {
         MAX_COMPONENTS
     );
     let stable_name = C::stable_name();
+    // Read the METHOD (not the const): the derive overrides
+    // `serializability_runtime()` with the autoref-probe result (a const cannot run
+    // autoref). Hand-written impls default the method to their `SERIALIZABILITY`
+    // const.
+    let serializability = C::serializability_runtime();
+    // Gate the encode/decode fn-ptrs on the RUNTIME classification — the single
+    // source of truth for "POB installs None" (plan §3.7). The derive's
+    // `serialize_fn()` / `deserialize_fn()` return `Some(glue)` whenever every field
+    // is `Wire` (it does NOT see the runtime POB/ViaFn split), so a genuinely
+    // `PlainOldBytes` component (all SerPod primitives, which are also all `Wire`)
+    // would otherwise install a live encoder. Only `SerializeViaFn` keeps the
+    // `Some`; `PlainOldBytes` (blit path) and `Ignore` drop to `None`.
+    let is_via_fn = serializability == Serializability::SerializeViaFn;
+    let (serialize_fn, deserialize_fn) = if is_via_fn {
+        (C::serialize_fn(), C::deserialize_fn())
+    } else {
+        (None, None)
+    };
     let info = SerializeInfo {
-        serialize_fn: C::serialize_fn(),
-        deserialize_fn: C::deserialize_fn(),
+        serialize_fn,
+        deserialize_fn,
         map_entities_fn: C::map_entities_fn(),
-        // Read the METHOD (not the const): the derive overrides
-        // `serializability_runtime()` with the autoref-probe result (a const
-        // cannot run autoref). Hand-written impls default the method to their
-        // `SERIALIZABILITY` const.
-        serializability: C::serializability_runtime(),
+        serializability,
         format_version: C::FORMAT_VERSION,
         layout_fingerprint: C::LAYOUT_FINGERPRINT,
         stable_name,
@@ -1912,6 +1926,217 @@ impl<C: Copy + 'static, Fields: SerPodTuple> SerPobArm for &&SerializeProbe<C, F
     #[inline]
     fn serializability(&self) -> Serializability {
         Serializability::PlainOldBytes
+    }
+}
+
+// ── Owning / bit-restricted encode glue (Phase S1.5, plan §3.1 / §3.7) ──────────
+//
+// The `SerializeViaFn` encode path runs a per-element `serialize_fn` /
+// `deserialize_fn` that walks a component's fields through the `Wire` codec. The
+// derive CANNOT emit a verbatim `field.wire_write(sink)` body unconditionally: that
+// would impose `FieldTy: Wire` on EVERY derived component (a concrete inherent impl
+// with an unsatisfiable bound is a hard `E0277`, not a silent skip — confirmed), so
+// an existing `Clone` component with a non-`Wire` field (`Box<u32>`, `Rc<u32>`, …)
+// would fail to compile. Instead the derive emits a thin, bound-free `WireBridge`
+// (struct ↔ field-tuple) and the GENERIC glue below carries the `Wire` bound on the
+// field tuple. The encode-fn autoref arm (`WireFnProbe`) selects the glue ptr ONLY
+// when `C::Owned: WireTuple` holds (every field `Wire`) AND the type is not
+// POB-eligible — otherwise it DEFERS to the `None` fallback (the graceful demotion
+// the `SerPodTuple` POB gate already uses, mirroring the house style).
+
+/// Struct ↔ field-tuple bridge the derive emits for a serializable component (plan
+/// §3.7). Carries NO `Wire` bound (so it compiles for ANY plain struct, including
+/// one with non-`Wire` fields, and — crucially — one that implements `Drop`) — the
+/// `Wire` requirement lives on the generic [`serialize_via_wire`] /
+/// [`deserialize_via_wire`] glue's `WireRefTuple` / [`WireTuple`] bounds, which the
+/// encode-fn autoref arm checks and defers on.
+///
+/// The derive maps a component `struct C { f0: F0, f1: F1, … }` to:
+/// - `Owned = (F0, F1, …)` and `from_owned(t) = C { f0: t.0, f1: t.1, … }` (the
+///   §3.7 "fields in declaration order" read constructor);
+/// - `Refs<'a> = (&'a F0, &'a F1, …)` and `as_refs(&self) = (&self.f0, …)` — a tuple
+///   of **borrows**, so the write path never MOVES a field out of `self` (which a
+///   `Drop` component forbids — `E0509`) and never needs `Clone`.
+///
+/// A unit struct maps to `Owned = ()` / `Refs<'a> = ()`.
+pub trait WireBridge: Sized {
+    /// The component's fields as an OWNED tuple, in declaration order — the decode
+    /// target (`from_owned` rebuilds the struct from it).
+    type Owned;
+
+    /// The component's fields as a tuple of BORROWS, in declaration order — the
+    /// encode source (`as_refs` produces it without moving any field, so a `Drop`
+    /// component is fine). The GAT lifetime ties the borrows to `&self`.
+    type Refs<'a>
+    where
+        Self: 'a;
+
+    /// Borrows the component's fields into the ref tuple (the encode source). No
+    /// move-out, no `Clone`, no `Wire` bound — pure field borrows.
+    fn as_refs(&self) -> Self::Refs<'_>;
+
+    /// Reconstructs the component from a decoded owned field tuple (the `C { … }`
+    /// constructor, §3.7). Pure value move into the fields — no allocation, no
+    /// `Wire` bound.
+    fn from_owned(owned: Self::Owned) -> Self;
+}
+
+/// Owning / bit-restricted serialize glue (plan §3.1 / §3.7): read `&C`, borrow its
+/// fields into the ref tuple, and write each through [`WireRefTuple`]. The single
+/// monomorphized free fn the derive installs as the [`SerializeFn`] for a
+/// [`Serializability::SerializeViaFn`] component — no vtable, no `Box<dyn>`, no
+/// clone (mirrors [`clone_via_clone`]'s reach-no-world-state boundary).
+///
+/// # W7 — cannot reach world state
+/// Receives ONLY `*const u8` / a `&mut SaveCursor`; it has no world view, so the
+/// user `Wire::wire_write` code it runs cannot create the F2 protected-tag conflict
+/// (same boundary as [`clone_via_clone`]).
+///
+/// # Safety
+///
+/// The caller must uphold the [`SerializeFn`] contract:
+/// - `src` is a live, aligned, initialized `C` (established at the save call site by
+///   the column row-pointer walk); we form a shared `&C` only.
+/// - `sink` is a valid, append-only cursor; the fn only appends.
+pub unsafe fn serialize_via_wire<C>(
+    src: *const u8,
+    sink: &mut crate::ecs::core::serialize::SaveCursor<'_>,
+) where
+    C: WireBridge,
+    for<'a> C::Refs<'a>: crate::ecs::core::serialize::WireRefTuple,
+{
+    use crate::ecs::core::serialize::WireRefTuple as _;
+    // SAFETY: `src` is a valid, live, aligned, initialized `C` (the `SerializeFn`
+    // contract, established at the column row-pointer call site). The shared `&C`
+    // lives only for the borrow + write; the source row is read-only during the save
+    // (the saver never mutates the world), so no `&mut C` aliases it.
+    let value = unsafe { &*src.cast::<C>() };
+    value.as_refs().ref_tuple_write(sink);
+}
+
+/// Owning / bit-restricted deserialize glue (plan §3.1 / §3.7): read each field
+/// through [`WireTuple`] in declaration order, then `ptr::write` the reconstructed
+/// `C` into the UNINITIALIZED `dst`. The single monomorphized free fn the derive
+/// installs as the [`DeserializeFn`] for a [`Serializability::SerializeViaFn`]
+/// component.
+///
+/// On a malformed stream the field read fails BEFORE the `ptr::write`, so `dst` is
+/// left uninitialized and the caller (S2) must not drop it — the W5 partial-row
+/// contract.
+///
+/// # Safety
+///
+/// The caller must uphold the [`DeserializeFn`] contract:
+/// - `dst` points at writable, **uninitialized** space of `>= size_of::<C>()`
+///   bytes, aligned to `align_of::<C>()`.
+/// - On `Ok`, `dst` holds an initialized `C` written exactly once (no prior value
+///   is dropped); on `Err`, `dst` is left uninitialized.
+pub unsafe fn deserialize_via_wire<C>(
+    src: &mut crate::ecs::core::serialize::LoadCursor<'_>,
+    dst: *mut u8,
+) -> Result<(), crate::ecs::core::serialize::DecodeError>
+where
+    C: WireBridge,
+    C::Owned: crate::ecs::core::serialize::WireTuple,
+{
+    // Read every field first; on a malformed stream this returns `Err` and `dst` is
+    // never written (the value is built fully before any write). The trait method is
+    // called fully-qualified, so no `use` is needed here.
+    let owned = <C::Owned as crate::ecs::core::serialize::WireTuple>::tuple_read(src)?;
+    let value = C::from_owned(owned);
+    // SAFETY: `dst` is writable, uninitialized, aligned space for one `C` (the
+    // `DeserializeFn` contract). `ptr::write` initializes it WITHOUT dropping the
+    // uninitialized prior contents; `value` is moved in exactly once.
+    unsafe {
+        core::ptr::write(dst.cast::<C>(), value);
+    }
+    Ok(())
+}
+
+/// Autoref probe selecting the [`SerializeFn`] / [`DeserializeFn`] pair for a
+/// component (plan §3.7 / C3 graceful demotion). The `&`-`Self` "some" arm requires
+/// `C: WireBridge`, `for<'a> C::Refs<'a>: WireRefTuple`, and `C::Owned: WireTuple`
+/// (every field `Wire`); the by-value "none" arm (no bound) is the fallback.
+///
+/// This probe does NOT key on the syntactic POB-eligibility flag: a
+/// `#[repr(C)]`-but-not-all-bits-valid struct (e.g. a `String` field) is
+/// `POB_ELIGIBLE == true` syntactically yet classified `SerializeViaFn` at runtime,
+/// so suppressing the encoder on the syntactic flag would wrongly leave it
+/// `None`. Instead the encoder is selected whenever every field is `Wire`, and
+/// [`install_serialize_fn`] gates the install on the RUNTIME `Serializability`:
+/// `SerializeViaFn` keeps the `Some`, while `PlainOldBytes` (blit path) / `Ignore`
+/// store `None` — the single source of truth for "POB installs None".
+///
+/// Invoked through TWO refs (`(&&probe).serialize_fn_ptr()`): the resolver tries the
+/// more-specific `&`-`Self` "some" arm first; if its bounds hold it returns
+/// `Some(glue)`, otherwise it DEFERS to the by-value "none" arm (`None`) — never a
+/// hard error (the §5 C3 / `SerPodTuple` graceful-demotion discipline).
+#[doc(hidden)]
+pub struct WireFnProbe<C>(pub core::marker::PhantomData<C>);
+
+impl<C> WireFnProbe<C> {
+    /// Constructs the probe (derive-generated code only).
+    #[doc(hidden)]
+    #[inline]
+    pub const fn new() -> Self {
+        Self(core::marker::PhantomData)
+    }
+}
+
+/// By-value-`Self` fallback arm (no bound): a component with a non-`Wire` field
+/// installs `None`. The LEAST-specific `Self`, LOWEST priority — wins only when the
+/// `&`-`Self` "some" arm's bound does not hold.
+#[doc(hidden)]
+pub trait WireFnNoneArm {
+    #[doc(hidden)]
+    fn serialize_fn_ptr(&self) -> Option<SerializeFn>;
+    #[doc(hidden)]
+    fn deserialize_fn_ptr(&self) -> Option<DeserializeFn>;
+}
+
+impl<C> WireFnNoneArm for WireFnProbe<C> {
+    #[inline]
+    fn serialize_fn_ptr(&self) -> Option<SerializeFn> {
+        None
+    }
+
+    #[inline]
+    fn deserialize_fn_ptr(&self) -> Option<DeserializeFn> {
+        None
+    }
+}
+
+/// `&`-`Self` "some" arm gated `C: WireBridge`, `for<'a> C::Refs<'a>: WireRefTuple`,
+/// `C::Owned: WireTuple` (the MORE specific `Self`, HIGHER priority): a component
+/// whose every field is `Wire` installs the [`serialize_via_wire`] /
+/// [`deserialize_via_wire`] glue. A type with a non-`Wire` field fails the
+/// `WireRefTuple` / `WireTuple` bound and the resolver leaves this arm un-matched,
+/// DEFERRING to the `None` fallback (C3 graceful demotion). A genuinely POB type's
+/// fields are all SerPod primitives (which are all `Wire`), so this arm produces a
+/// `Some` for it too — [`install_serialize_fn`] then drops it to `None` because the
+/// runtime `Serializability` is `PlainOldBytes` (the blit path).
+#[doc(hidden)]
+pub trait WireFnSomeArm {
+    #[doc(hidden)]
+    fn serialize_fn_ptr(&self) -> Option<SerializeFn>;
+    #[doc(hidden)]
+    fn deserialize_fn_ptr(&self) -> Option<DeserializeFn>;
+}
+
+impl<C> WireFnSomeArm for &WireFnProbe<C>
+where
+    C: WireBridge + 'static,
+    for<'a> C::Refs<'a>: crate::ecs::core::serialize::WireRefTuple,
+    C::Owned: crate::ecs::core::serialize::WireTuple,
+{
+    #[inline]
+    fn serialize_fn_ptr(&self) -> Option<SerializeFn> {
+        Some(serialize_via_wire::<C> as SerializeFn)
+    }
+
+    #[inline]
+    fn deserialize_fn_ptr(&self) -> Option<DeserializeFn> {
+        Some(deserialize_via_wire::<C> as DeserializeFn)
     }
 }
 

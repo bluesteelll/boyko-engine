@@ -1503,6 +1503,30 @@ fn serialize_codegen(
     // type carries POB_ELIGIBLE == false so the POB arm never fires anyway).
     let field_tuple = quote! { ( #(#field_tys,)* ) };
 
+    // Phase S1.5 (plan §3.1 / §3.7): the per-element encode glue. A plain struct
+    // with AT LEAST ONE field emits a bound-free `WireBridge` (struct ↔ field tuple)
+    // + `serialize_fn` / `deserialize_fn` overrides that select the generic
+    // `serialize_via_wire` / `deserialize_via_wire` glue through the `WireFnProbe`
+    // autoref arm. The arm installs `Some(glue)` ONLY when every field is `Wire` AND
+    // the type is not POB-eligible; otherwise it DEFERS to `None` (graceful demotion
+    // — a non-`Wire` field does NOT hard-error, matching the `SerPodTuple` house
+    // style).
+    //
+    // A ZERO-field struct (unit / empty tuple struct) emits NEITHER: it is a ZST tag
+    // with no field bytes, so it stays at the trait `None` defaults (a POB ZST tag is
+    // blitted as zero bytes; a non-POB ZST tag encodes zero bytes via the zero-length
+    // ViaFn path). Emitting a `WireBridge` over `()` would also trip the `unused_unit`
+    // clippy lint at the call site. An enum/union (no field shape) likewise emits
+    // neither — a `SerializeViaFn`-classified enum stays zero-length (a documented
+    // S1.5 gap; enum encoding is a later macro phase).
+    let (wire_fn_items, wire_bridge_item) = if is_plain_struct && !field_access.is_empty() {
+        let bridge = wire_bridge_codegen(name, &field_access, &field_tys);
+        let fns = wire_fn_overrides_codegen(name);
+        (fns, bridge)
+    } else {
+        (TokenStream2::new(), TokenStream2::new())
+    };
+
     let trait_items = quote! {
         #[inline]
         fn serializability_runtime()
@@ -1526,16 +1550,125 @@ fn serialize_codegen(
             (&&&probe).serializability()
         }
 
+        #wire_fn_items
+
         #format_version_item
         #fingerprint_item
         #stable_name_item
     };
 
-    // No module-scope items: the field-validity proof lives in the probe arm's
-    // `Fields: SerPodTuple` bound, not a per-struct `SerPod` impl (a conditional
-    // `impl SerPod for Struct where Field: SerPod` is rejected for a concrete
-    // non-SerPod field — the compiler eagerly evaluates the false bound).
-    Ok((trait_items, TokenStream2::new()))
+    // Module-scope item: the `WireBridge` impl (a top-level `impl`, cannot live
+    // inside the `impl Component` block). The field-validity proof still lives in the
+    // glue's `C::Owned: WireTuple` bound (checked by the `WireFnProbe` arm), NOT a
+    // per-struct bound — so the bridge compiles even for a struct with a non-`Wire`
+    // field, and that field merely demotes the component to `serialize_fn = None`.
+    Ok((trait_items, wire_bridge_item))
+}
+
+/// Phase S1.5 (plan §3.7): emits the bound-free `WireBridge` impl mapping a plain
+/// struct to its field tuple. `Owned = (F0, F1, …)` with `from_owned(t) =
+/// Name { f0: t.0, … }` / `Name(t.0, …)` (declaration order, the read constructor);
+/// `Refs<'a> = (&'a F0, …)` with `as_refs(&self) = (&self.f0, …)` (the write source —
+/// BORROWS, never a field move-out, so a `Drop` component is fine — `E0509`-free).
+/// Carries NO `Wire` bound — the requirement lives on the generic glue's
+/// `WireRefTuple` / `WireTuple` bounds, so this compiles for ANY plain struct (a
+/// non-`Wire` field merely makes the encode-fn arm defer to `None`). A unit struct
+/// maps to `Owned = ()` / `Refs<'a> = ()`.
+fn wire_bridge_codegen(
+    name: &Ident,
+    field_access: &[FieldAccess],
+    field_tys: &[Type],
+) -> TokenStream2 {
+    // `as_refs`: borrow each field into the ref tuple in declaration order. NO move,
+    // NO clone — works for a `Drop` component (a field move-out would be `E0509`).
+    let ref_terms: Vec<TokenStream2> = field_access
+        .iter()
+        .map(|acc| {
+            let sel = acc.offset_of_selector();
+            quote! { &self.#sel }
+        })
+        .collect();
+
+    // `from_owned`: rebuild the struct from the decoded owned tuple. Named structs
+    // use `Name { f0: owned.0, … }`; tuple structs use `Name(owned.0, …)`. The caller
+    // only invokes this for a struct with at least one field (a zero-field ZST tag
+    // emits no bridge), so `field_access` is never empty here.
+    let is_tuple_struct = matches!(field_access.first(), Some(FieldAccess::Index(_)));
+    let from_body = if is_tuple_struct {
+        let owned_idx = (0..field_access.len()).map(syn::Index::from);
+        quote! { #name( #( owned.#owned_idx ),* ) }
+    } else {
+        let field_idents: Vec<TokenStream2> = field_access
+            .iter()
+            .map(|acc| acc.offset_of_selector())
+            .collect();
+        let owned_idx = (0..field_access.len()).map(syn::Index::from);
+        quote! { #name { #( #field_idents: owned.#owned_idx ),* } }
+    };
+
+    quote! {
+        impl ::boyko_ecs::ecs::core::component::component_registry::WireBridge for #name {
+            type Owned = ( #(#field_tys,)* );
+            type Refs<'__boyko_wire> = ( #( &'__boyko_wire #field_tys, )* )
+            where
+                Self: '__boyko_wire;
+
+            #[inline]
+            fn as_refs(&self) -> Self::Refs<'_> {
+                ( #(#ref_terms,)* )
+            }
+
+            #[inline]
+            fn from_owned(owned: Self::Owned) -> Self {
+                #from_body
+            }
+        }
+    }
+}
+
+/// Phase S1.5 (plan §3.7): emits the `serialize_fn()` / `deserialize_fn()` trait
+/// overrides selecting the per-element glue through the `WireFnProbe` autoref arm.
+/// Invoked through TWO refs (`(&&probe).method()`): the `&`-`Self` "some" arm
+/// (gated `C: WireBridge`, `for<'a> C::Refs<'a>: WireRefTuple`, `C::Owned: WireTuple`)
+/// wins when every field is `Wire`; otherwise the by-value "none" arm wins (`None`).
+/// The ref count MUST stay `&&` to agree with the arm receiver depths (`&Self` some /
+/// by-value none).
+///
+/// The probe does NOT key on POB-eligibility — a `#[repr(C)]`-but-not-all-bits-valid
+/// struct (a `String` field) is POB-eligible syntactically yet `SerializeViaFn` at
+/// runtime, so it must still install the encoder. `install_serialize_fn` gates the
+/// resulting `Some` on the runtime `Serializability`, dropping a genuinely
+/// `PlainOldBytes` component back to `None` (the blit path).
+fn wire_fn_overrides_codegen(name: &Ident) -> TokenStream2 {
+    quote! {
+        #[inline]
+        fn serialize_fn()
+            -> ::std::option::Option<
+                ::boyko_ecs::ecs::core::component::component_registry::SerializeFn
+            > {
+            use ::boyko_ecs::ecs::core::component::component_registry::{
+                WireFnNoneArm as _, WireFnSomeArm as _,
+            };
+            let probe = ::boyko_ecs::ecs::core::component::component_registry::WireFnProbe::<
+                #name,
+            >::new();
+            (&&probe).serialize_fn_ptr()
+        }
+
+        #[inline]
+        fn deserialize_fn()
+            -> ::std::option::Option<
+                ::boyko_ecs::ecs::core::component::component_registry::DeserializeFn
+            > {
+            use ::boyko_ecs::ecs::core::component::component_registry::{
+                WireFnNoneArm as _, WireFnSomeArm as _,
+            };
+            let probe = ::boyko_ecs::ecs::core::component::component_registry::WireFnProbe::<
+                #name,
+            >::new();
+            (&&probe).deserialize_fn_ptr()
+        }
+    }
 }
 
 /// Serialization S0 (C4 acceptance-only): rejects an unknown `#[entities]` field

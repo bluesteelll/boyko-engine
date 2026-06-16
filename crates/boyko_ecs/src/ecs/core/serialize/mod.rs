@@ -18,6 +18,10 @@
 //!
 //! These types are NOT a hot path — they exist only on the cold save/load path.
 
+pub mod wire;
+
+pub use wire::{Wire, WireRefTuple, WireTuple};
+
 use crate::ecs::core::entity::entity::Entity;
 
 /// Append-only write cursor over a preallocated byte buffer (plan §3.8).
