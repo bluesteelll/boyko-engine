@@ -364,6 +364,27 @@ impl StoreOp {
     }
 }
 
+/// The primitive-assembly topology a graphics pipeline rasterizes
+/// (`VkPrimitiveTopology` family, Phase-6 S0 rung 2).
+///
+/// `#[repr(i32)]`; discriminants equal the matching `VkPrimitiveTopology`
+/// constants (asserted backend-side). Rung 2 draws a single `TriangleList`;
+/// the family grows per phase.
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PrimitiveTopology {
+    /// `VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST` — every three vertices a triangle.
+    TriangleList = 3,
+}
+
+impl PrimitiveTopology {
+    /// The raw `i32` discriminant — equal to the matching `VkPrimitiveTopology`.
+    #[inline]
+    pub const fn as_i32(self) -> i32 {
+        self as i32
+    }
+}
+
 /// Image-aspect bitflags for an image subresource. Values equal the
 /// `VK_IMAGE_ASPECT_*` bits.
 #[repr(transparent)]

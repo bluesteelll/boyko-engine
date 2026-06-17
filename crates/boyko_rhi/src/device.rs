@@ -8,7 +8,7 @@
 //! stable across phases.
 
 use crate::api::RhiApi;
-use crate::descriptor::{BufferDesc, ComputePipelineDesc};
+use crate::descriptor::{BufferDesc, ComputePipelineDesc, GraphicsPipelineDesc};
 use crate::enums::{Format, ImageUsage, TextureDimension};
 use crate::error::RhiError;
 
@@ -40,13 +40,6 @@ pub struct TextureDesc {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SamplerDesc {
     /// Reserved; the sampler seam's fields land in Phase 6+.
-    pub _reserved: (),
-}
-
-/// Minimal placeholder descriptor for the Phase-6+ graphics-pipeline seam.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct GraphicsPipelineDesc {
-    /// Reserved; the graphics-pipeline seam's fields land in Phase 6+.
     pub _reserved: (),
 }
 
@@ -194,14 +187,39 @@ pub trait RhiDevice<A: RhiApi> {
         Err(RhiError::unsupported("create_sampler").into())
     }
 
-    /// Creates a graphics pipeline. Seam: Phase 6+.
+    /// Creates a graphics pipeline (Phase-6 S0 rung 2: a Vulkan 1.3
+    /// dynamic-rendering pipeline — vertex + fragment stages, an empty pipeline
+    /// layout, dynamic viewport/scissor, single color attachment whose format is
+    /// declared in `desc`).
+    ///
+    /// The default body is `#[cold] #[inline(never)]` and errors `Unsupported`; a
+    /// backend with a graphics path (Vulkan) overrides it. Keeps the trait ABI
+    /// stable for a backend (e.g. the Mock) without one.
     #[cold]
     #[inline(never)]
     fn create_graphics_pipeline(
         &self,
-        _desc: &GraphicsPipelineDesc,
+        _desc: &GraphicsPipelineDesc<A>,
     ) -> Result<A::GraphicsPipeline, Self::Error> {
         Err(RhiError::unsupported("create_graphics_pipeline").into())
+    }
+
+    /// Destroys `pipeline`, consuming it (Phase-6 S0 rung 2).
+    ///
+    /// The default body drops the value (a no-op for a backend whose
+    /// `GraphicsPipeline` is zero-sized, e.g. the Mock); a backend whose pipeline
+    /// owns GPU objects (Vulkan) overrides it. Keeps the trait ABI stable.
+    ///
+    /// # Safety
+    /// No submission using `pipeline` is pending (the GPU is fence-waited /
+    /// `wait_idle`'d), and it is destroyed exactly once (the by-value move enforces
+    /// the latter).
+    #[cold]
+    #[inline(never)]
+    unsafe fn destroy_graphics_pipeline(&self, pipeline: A::GraphicsPipeline) {
+        // Default seam: drop the value. A zero-sized `GraphicsPipeline` (Mock)
+        // drops to a no-op; a backend with GPU-owned pipeline objects overrides it.
+        drop(pipeline);
     }
 
     /// Creates a bind-group layout. Seam: Phase 6+ (supersedes the fixed compute

@@ -39,8 +39,8 @@ use core::ptr::{self, NonNull};
 
 use boyko_rhi::{
     BarrierDesc, BufferBarrier, BufferCopy, BufferDesc, BufferImageCopy, ComputePipelineDesc,
-    ImageBarrierDesc, ImageLayout, MemoryLocation, RenderingDesc, RhiApi, RhiCommandEncoder,
-    RhiDevice, RhiQueue, ShaderStage, TextureDesc,
+    GraphicsPipelineDesc, ImageBarrierDesc, ImageLayout, MemoryLocation, RenderArea, RenderingDesc,
+    RhiApi, RhiCommandEncoder, RhiDevice, RhiQueue, ShaderStage, TextureDesc, Viewport,
 };
 
 use crate::compute::ComputeError;
@@ -136,7 +136,9 @@ impl RhiApi for Vulkan {
     type Semaphore = VkSemaphore;
     type Texture = VulkanTexture;
     type Sampler = ();
-    type GraphicsPipeline = ();
+    // `GraphicsPipeline` binds to the S0 rung-2 [`VulkanGraphicsPipeline`] now that
+    // `create_graphics_pipeline` is implemented.
+    type GraphicsPipeline = VulkanGraphicsPipeline;
     type BindGroup = ();
     type BindGroupLayout = ();
 }
@@ -272,6 +274,28 @@ pub struct VulkanShaderModule {
 pub struct ComputePipeline {
     /// The `VkPipeline` handle; destroyed by `destroy_compute_pipeline`.
     pub(crate) pipeline: VkPipeline,
+}
+
+/// An owned graphics pipeline ([`RhiApi::GraphicsPipeline`], Phase-6 S0 rung 2).
+///
+/// Holds the `VkPipeline` **and** its own `VkPipelineLayout`. Unlike a compute
+/// pipeline (which shares the device's [`ComputeLayouts::pipeline_layout`]), a
+/// rung-2 graphics pipeline uses a dedicated **empty** layout (no descriptor sets,
+/// no push constants), created at `create_graphics_pipeline` and torn down with the
+/// pipeline (reverse creation order: pipeline → layout) in
+/// `destroy_graphics_pipeline`. Its shader modules are separate caller-owned
+/// [`VulkanShaderModule`]s (the trait splits module + pipeline creation).
+///
+/// # Safety
+///
+/// The originating [`VulkanContext`] MUST still be alive when this pipeline is
+/// bound or destroyed: each goes through the context's device fn-table. No
+/// compile-time `'ctx` tie this phase (plan F1; deferred to Phase 2-3).
+pub struct VulkanGraphicsPipeline {
+    /// The `VkPipeline` handle; destroyed first by `destroy_graphics_pipeline`.
+    pub(crate) pipeline: VkPipeline,
+    /// The dedicated empty `VkPipelineLayout`; destroyed after the pipeline.
+    pub(crate) layout: VkPipelineLayout,
 }
 
 /// An owned fence ([`RhiApi::Fence`]).
@@ -578,6 +602,247 @@ impl RhiDevice<Vulkan> for VulkanContext {
         unsafe {
             (self.device_fns().destroy_pipeline)(self.device(), pipeline.pipeline, ptr::null())
         };
+    }
+
+    fn create_graphics_pipeline(
+        &self,
+        desc: &GraphicsPipelineDesc<Vulkan>,
+    ) -> Result<VulkanGraphicsPipeline, VulkanError> {
+        let device = self.device();
+        let fns = self.device_fns();
+
+        // --- An EMPTY pipeline layout (rung 2: no descriptor sets, no push
+        //     constants). Created first; if pipeline creation fails below, it is
+        //     torn down before the error returns (reverse-order rollback). ---
+        let pl_info = VkPipelineLayoutCreateInfo {
+            s_type: VkStructureType::PipelineLayoutCreateInfo,
+            p_next: ptr::null(),
+            flags: 0,
+            set_layout_count: 0,
+            p_set_layouts: ptr::null(),
+            push_constant_range_count: 0,
+            p_push_constant_ranges: ptr::null(),
+        };
+        let mut layout = VkPipelineLayout::NULL;
+        // SAFETY: `device` is live; `pl_info` is a fully-initialized empty layout
+        // (zero sets, zero push ranges → null array pointers valid for count 0);
+        // `&mut layout` is a valid out-pointer; NULL allocator.
+        let raw =
+            unsafe { (fns.create_pipeline_layout)(device, &pl_info, ptr::null(), &mut layout) };
+        let result = VkResult::from_raw(raw);
+        if !result.is_success() {
+            return Err(VulkanError::Vk("vkCreatePipelineLayout(graphics)", result));
+        }
+
+        // --- Two shader stages (vertex + fragment). ---
+        let stages = [
+            VkPipelineShaderStageCreateInfo {
+                s_type: VkStructureType::PipelineShaderStageCreateInfo,
+                p_next: ptr::null(),
+                flags: 0,
+                stage: VK_SHADER_STAGE_VERTEX_BIT,
+                module: desc.vertex_module.module,
+                p_name: desc.vertex_entry.as_ptr(),
+                p_specialization_info: ptr::null(),
+            },
+            VkPipelineShaderStageCreateInfo {
+                s_type: VkStructureType::PipelineShaderStageCreateInfo,
+                p_next: ptr::null(),
+                flags: 0,
+                stage: VK_SHADER_STAGE_FRAGMENT_BIT,
+                module: desc.fragment_module.module,
+                p_name: desc.fragment_entry.as_ptr(),
+                p_specialization_info: ptr::null(),
+            },
+        ];
+
+        // --- Empty vertex input (positions come from the vertex shader's
+        //     SV_VertexID — no vertex buffer, rung 2). ---
+        let vertex_input = VkPipelineVertexInputStateCreateInfo {
+            s_type: VkStructureType::PipelineVertexInputStateCreateInfo,
+            p_next: ptr::null(),
+            flags: 0,
+            vertex_binding_description_count: 0,
+            p_vertex_binding_descriptions: ptr::null(),
+            vertex_attribute_description_count: 0,
+            p_vertex_attribute_descriptions: ptr::null(),
+        };
+
+        let input_assembly = VkPipelineInputAssemblyStateCreateInfo {
+            s_type: VkStructureType::PipelineInputAssemblyStateCreateInfo,
+            p_next: ptr::null(),
+            flags: 0,
+            // The agnostic `PrimitiveTopology` discriminant equals the
+            // `VkPrimitiveTopology` constant (asserted in `abi_guard.rs`).
+            topology: desc.topology.as_i32(),
+            primitive_restart_enable: VK_FALSE,
+        };
+
+        // Dynamic viewport + scissor: counts of 1 with null pointers (the rects come
+        // from `cmd_set_viewport`/`cmd_set_scissor`, recorded before the draw).
+        let viewport_state = VkPipelineViewportStateCreateInfo {
+            s_type: VkStructureType::PipelineViewportStateCreateInfo,
+            p_next: ptr::null(),
+            flags: 0,
+            viewport_count: 1,
+            p_viewports: ptr::null(),
+            scissor_count: 1,
+            p_scissors: ptr::null(),
+        };
+
+        let rasterization = VkPipelineRasterizationStateCreateInfo {
+            s_type: VkStructureType::PipelineRasterizationStateCreateInfo,
+            p_next: ptr::null(),
+            flags: 0,
+            depth_clamp_enable: VK_FALSE,
+            rasterizer_discard_enable: VK_FALSE,
+            polygon_mode: VK_POLYGON_MODE_FILL,
+            cull_mode: VK_CULL_MODE_NONE,
+            front_face: VK_FRONT_FACE_COUNTER_CLOCKWISE,
+            depth_bias_enable: VK_FALSE,
+            depth_bias_constant_factor: 0.0,
+            depth_bias_clamp: 0.0,
+            depth_bias_slope_factor: 0.0,
+            line_width: 1.0,
+        };
+
+        let multisample = VkPipelineMultisampleStateCreateInfo {
+            s_type: VkStructureType::PipelineMultisampleStateCreateInfo,
+            p_next: ptr::null(),
+            flags: 0,
+            rasterization_samples: VK_SAMPLE_COUNT_1_BIT,
+            sample_shading_enable: VK_FALSE,
+            min_sample_shading: 0.0,
+            p_sample_mask: ptr::null(),
+            alpha_to_coverage_enable: VK_FALSE,
+            alpha_to_one_enable: VK_FALSE,
+        };
+
+        // One opaque (blend-disabled) color attachment with an all-channel write
+        // mask so the fragment color reaches every channel of the attachment.
+        let blend_attachment = VkPipelineColorBlendAttachmentState {
+            blend_enable: VK_FALSE,
+            src_color_blend_factor: 0,
+            dst_color_blend_factor: 0,
+            color_blend_op: 0,
+            src_alpha_blend_factor: 0,
+            dst_alpha_blend_factor: 0,
+            alpha_blend_op: 0,
+            color_write_mask: VK_COLOR_COMPONENT_R_BIT
+                | VK_COLOR_COMPONENT_G_BIT
+                | VK_COLOR_COMPONENT_B_BIT
+                | VK_COLOR_COMPONENT_A_BIT,
+        };
+        let color_blend = VkPipelineColorBlendStateCreateInfo {
+            s_type: VkStructureType::PipelineColorBlendStateCreateInfo,
+            p_next: ptr::null(),
+            flags: 0,
+            logic_op_enable: VK_FALSE,
+            logic_op: 0,
+            attachment_count: 1,
+            p_attachments: &blend_attachment,
+            blend_constants: [0.0; 4],
+        };
+
+        let dynamic_states = [VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR];
+        let dynamic_state = VkPipelineDynamicStateCreateInfo {
+            s_type: VkStructureType::PipelineDynamicStateCreateInfo,
+            p_next: ptr::null(),
+            flags: 0,
+            dynamic_state_count: dynamic_states.len() as u32,
+            p_dynamic_states: dynamic_states.as_ptr(),
+        };
+
+        // The dynamic-rendering attachment-format chain (no `VkRenderPass`). The
+        // single color-attachment format declared here is the W2-b SAFETY contract:
+        // it MUST equal the format of every `begin_rendering` color attachment any
+        // bound pipeline renders into, or the validation layer faults at DRAW time.
+        // The agnostic `Format` discriminant equals the `VkFormat` constant
+        // (asserted in `abi_guard.rs`).
+        let color_format = desc.color_format.as_i32();
+        let rendering_info = VkPipelineRenderingCreateInfo {
+            s_type: VkStructureType::PipelineRenderingCreateInfo,
+            p_next: ptr::null(),
+            view_mask: 0,
+            color_attachment_count: 1,
+            p_color_attachment_formats: &color_format,
+            depth_attachment_format: VK_FORMAT_UNDEFINED,
+            stencil_attachment_format: VK_FORMAT_UNDEFINED,
+        };
+
+        let gp_info = VkGraphicsPipelineCreateInfo {
+            s_type: VkStructureType::GraphicsPipelineCreateInfo,
+            // Chain the dynamic-rendering format struct (no render pass, OQ-6).
+            p_next: (&rendering_info as *const VkPipelineRenderingCreateInfo).cast(),
+            flags: 0,
+            stage_count: stages.len() as u32,
+            p_stages: stages.as_ptr(),
+            p_vertex_input_state: &vertex_input,
+            p_input_assembly_state: &input_assembly,
+            p_tessellation_state: ptr::null(),
+            p_viewport_state: &viewport_state,
+            p_rasterization_state: &rasterization,
+            p_multisample_state: &multisample,
+            p_depth_stencil_state: ptr::null(),
+            p_color_blend_state: &color_blend,
+            p_dynamic_state: &dynamic_state,
+            layout,
+            // Dynamic rendering: no render pass object (OQ-6, CLOSED).
+            render_pass: 0,
+            subpass: 0,
+            base_pipeline_handle: VkPipeline::NULL,
+            base_pipeline_index: -1,
+        };
+
+        let mut pipeline = VkPipeline::NULL;
+        // SAFETY: `device` is live; null pipeline cache (`0`) is valid; one
+        // fully-initialized `VkGraphicsPipelineCreateInfo` references the live empty
+        // `layout`, the two live caller-owned shader modules (via `stages`, alive for
+        // the call), and the complete set of fixed-function sub-state structs +
+        // dynamic-rendering format chain (all stack locals alive for the call); every
+        // unused state (tessellation, depth-stencil) is null and `render_pass` is
+        // `VK_NULL_HANDLE` (dynamic rendering). `&mut pipeline` is a valid out-pointer
+        // for the single pipeline; NULL allocator.
+        //
+        // FORMAT CONTRACT (W2-b): `rendering_info.p_color_attachment_formats` declares
+        // `desc.color_format`; this MUST equal the format of every `begin_rendering`
+        // color attachment the pipeline is later bound inside, or validation faults at
+        // draw time (not here). The agnostic↔Vk discriminant equality is asserted in
+        // `abi_guard.rs`; the cross-check against the bound rendering scope is the
+        // caller's contract (encoded in `GraphicsPipelineDesc`↔`RenderingDesc`).
+        let raw = unsafe {
+            (fns.create_graphics_pipelines)(device, 0, 1, &gp_info, ptr::null(), &mut pipeline)
+        };
+        let result = VkResult::from_raw(raw);
+        if !result.is_success() {
+            // SAFETY: the empty `layout` was created above and is not yet owned by any
+            // pipeline (creation failed); destroy it exactly once on this error path
+            // so it never leaks. NOTE: this single-handle rollback is correct ONLY
+            // because `create_info_count == 1` above; a future BATCHED create path must
+            // additionally destroy the successfully-created pipelines that
+            // `vkCreateGraphicsPipelines` writes alongside VK_NULL_HANDLE on partial
+            // failure (per-handle cleanup), or they leak.
+            unsafe { (fns.destroy_pipeline_layout)(device, layout, ptr::null()) };
+            return Err(VulkanError::Vk("vkCreateGraphicsPipelines", result));
+        }
+
+        Ok(VulkanGraphicsPipeline { pipeline, layout })
+    }
+
+    unsafe fn destroy_graphics_pipeline(&self, pipeline: VulkanGraphicsPipeline) {
+        // SAFETY: both handles were created on this device by
+        // `create_graphics_pipeline`, no submission using the pipeline is pending
+        // (caller contract), and the by-value move destroys each exactly once.
+        // Reverse creation order: the pipeline (created last) is destroyed before its
+        // dedicated empty layout (created first).
+        unsafe {
+            (self.device_fns().destroy_pipeline)(self.device(), pipeline.pipeline, ptr::null());
+            (self.device_fns().destroy_pipeline_layout)(
+                self.device(),
+                pipeline.layout,
+                ptr::null(),
+            );
+        }
     }
 
     fn create_fence(&self, signaled: bool) -> Result<VulkanFence, VulkanError> {
@@ -1274,6 +1539,91 @@ impl RhiCommandEncoder<Vulkan> for VulkanCommandEncoder {
         // into the context's boxed fn-table (alive per the type contract).
         let fns = unsafe { &*self.fns };
         unsafe { (fns.cmd_end_rendering)(self.command_buffer) };
+    }
+
+    fn bind_graphics_pipeline(&mut self, pipeline: &VulkanGraphicsPipeline) {
+        // SAFETY: recording is open; `pipeline.pipeline` is a live graphics pipeline
+        // (its declared color format must match the enclosing `begin_rendering`
+        // scope — the W2-b draw-time contract); the GRAPHICS bind point matches its
+        // creation. `self.fns` points into the context's boxed fn-table (alive per
+        // the type contract).
+        let fns = unsafe { &*self.fns };
+        unsafe {
+            (fns.cmd_bind_pipeline)(
+                self.command_buffer,
+                VK_PIPELINE_BIND_POINT_GRAPHICS,
+                pipeline.pipeline,
+            );
+        }
+    }
+
+    fn set_viewport(&mut self, viewport: &Viewport) {
+        // The agnostic `Viewport` is `#[repr(C)] { x, y, width, height, min_depth,
+        // max_depth: f32 }` — byte-identical to `VkViewport` (same field order +
+        // `f32` types), so the `*const Viewport` casts directly to `*const VkViewport`
+        // without a per-call copy. The size + align match is enforced at build time.
+        const _: () = assert!(
+            core::mem::size_of::<Viewport>() == core::mem::size_of::<VkViewport>(),
+            "Viewport and VkViewport must share size for the pointer reinterpret"
+        );
+        const _: () = assert!(
+            core::mem::align_of::<Viewport>() == core::mem::align_of::<VkViewport>(),
+            "Viewport and VkViewport must share alignment for the pointer reinterpret"
+        );
+        let vk_viewport = (viewport as *const Viewport).cast::<VkViewport>();
+        // SAFETY: recording is open; `Viewport`/`VkViewport` share layout (asserted),
+        // so reading one `VkViewport` from `vk_viewport` (the live `viewport` borrow,
+        // alive for the call) is ABI-valid; `first_viewport = 0`, `count = 1` matches
+        // the pipeline's single dynamic viewport. `self.fns` points into the context's
+        // boxed fn-table (alive per the type contract).
+        let fns = unsafe { &*self.fns };
+        unsafe { (fns.cmd_set_viewport)(self.command_buffer, 0, 1, vk_viewport) };
+    }
+
+    fn set_scissor(&mut self, scissor: &RenderArea) {
+        let rect = VkRect2D {
+            offset: VkOffset2D {
+                x: scissor.x,
+                y: scissor.y,
+            },
+            extent: VkExtent2D {
+                width: scissor.width,
+                height: scissor.height,
+            },
+        };
+        // SAFETY: recording is open; one fully-initialized `VkRect2D` (the `rect`
+        // local, alive for the call) describes the scissor; `first_scissor = 0`,
+        // `count = 1` matches the pipeline's single dynamic scissor. `self.fns` points
+        // into the context's boxed fn-table (alive per the type contract).
+        let fns = unsafe { &*self.fns };
+        unsafe { (fns.cmd_set_scissor)(self.command_buffer, 0, 1, &rect) };
+    }
+
+    fn draw(
+        &mut self,
+        vertex_count: u32,
+        instance_count: u32,
+        first_vertex: u32,
+        first_instance: u32,
+    ) {
+        // A zero `vertex_count`/`instance_count` is a legal Vulkan no-op — a culled or
+        // GPU-driven-indirect path may legitimately issue one — so the RHI deliberately
+        // permits it rather than asserting non-zero (API-faithful for the future
+        // indirect/culled draw rungs).
+        // SAFETY: recording is open and inside a `begin_rendering` scope with a bound
+        // graphics pipeline + a set dynamic viewport/scissor (caller contract);
+        // `vkCmdDraw` issues the non-indexed draw. `self.fns` points into the
+        // context's boxed fn-table (alive per the type contract).
+        let fns = unsafe { &*self.fns };
+        unsafe {
+            (fns.cmd_draw)(
+                self.command_buffer,
+                vertex_count,
+                instance_count,
+                first_vertex,
+                first_instance,
+            );
+        }
     }
 
     fn copy_image_to_buffer(

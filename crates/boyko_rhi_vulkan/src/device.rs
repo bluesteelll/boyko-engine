@@ -211,6 +211,12 @@ pub struct DeviceFns {
     pub get_image_memory_requirements: PfnVkGetImageMemoryRequirements,
     pub bind_image_memory: PfnVkBindImageMemory,
     pub cmd_copy_image_to_buffer: PfnVkCmdCopyImageToBuffer,
+    // --- Phase-6 S0 rung-2 graphics-pipeline + draw commands, Vulkan 1.0 core,
+    //     always loaded. ---
+    pub create_graphics_pipelines: PfnVkCreateGraphicsPipelines,
+    pub cmd_set_viewport: PfnVkCmdSetViewport,
+    pub cmd_set_scissor: PfnVkCmdSetScissor,
+    pub cmd_draw: PfnVkCmdDraw,
     // --- Slice-1 `VK_KHR_swapchain` device commands — `Some` only when windowed. ---
     pub swapchain: Option<SwapchainDeviceFns>,
 }
@@ -1147,6 +1153,15 @@ fn load_device_fns(
                 device,
                 c"vkCmdCopyImageToBuffer",
             )?,
+            // Phase-6 S0 rung-2 graphics-pipeline + draw commands (Vulkan 1.0 core).
+            create_graphics_pipelines: load_device_command(
+                gdpa,
+                device,
+                c"vkCreateGraphicsPipelines",
+            )?,
+            cmd_set_viewport: load_device_command(gdpa, device, c"vkCmdSetViewport")?,
+            cmd_set_scissor: load_device_command(gdpa, device, c"vkCmdSetScissor")?,
+            cmd_draw: load_device_command(gdpa, device, c"vkCmdDraw")?,
             swapchain,
         })
     }

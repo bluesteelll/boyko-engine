@@ -6,8 +6,8 @@
 
 use crate::api::RhiApi;
 use crate::enums::{
-    BarrierAccess, BarrierStage, BufferUsage, ImageAspect, ImageLayout, LoadOp, MemoryLocation,
-    StoreOp,
+    BarrierAccess, BarrierStage, BufferUsage, Format, ImageAspect, ImageLayout, LoadOp,
+    MemoryLocation, PrimitiveTopology, StoreOp,
 };
 
 /// Parameters for [`crate::device::RhiDevice::create_buffer`].
@@ -58,6 +58,39 @@ pub struct ComputePipelineDesc<'a, A: RhiApi> {
     /// Size in bytes of the push-constant range bound at pipeline-layout time
     /// (4, today — the foundation's single u32 push constant).
     pub push_constant_bytes: u32,
+}
+
+/// Parameters for [`crate::device::RhiDevice::create_graphics_pipeline`]
+/// (Phase-6 S0 rung 2: a Vulkan 1.3 dynamic-rendering graphics pipeline).
+///
+/// Generic over the backend `A` because it borrows that backend's owned vertex +
+/// fragment shader modules by reference; the `'a` lifetime ties the descriptor to
+/// the borrowed modules + entry names for the create call (the backend copies what
+/// it needs; nothing is retained past the call). Rung 2 binds **no** descriptor
+/// sets (an empty pipeline layout) and **no** vertex buffer (the vertex shader
+/// generates its positions from the vertex index), so the descriptor carries only
+/// what the rasterizer + dynamic-rendering attachment-format chain needs.
+///
+/// **Format contract (S0 SAFETY obligation, W2-b):** `color_format` MUST equal the
+/// format of every color attachment of any [`RenderingDesc`] this pipeline is bound
+/// inside — the `VkPipelineRenderingCreateInfo` attachment format must match the
+/// dynamic-rendering scope, or the validation layer faults at **draw** time, not at
+/// create time. The contract is documented on the Vulkan creation block and
+/// re-stated on [`RenderingAttachment`].
+pub struct GraphicsPipelineDesc<'a, A: RhiApi> {
+    /// The compiled vertex-stage shader module.
+    pub vertex_module: &'a A::ShaderModule,
+    /// The vertex-stage entry-point name (today `c"main"`).
+    pub vertex_entry: &'a core::ffi::CStr,
+    /// The compiled fragment-stage shader module.
+    pub fragment_module: &'a A::ShaderModule,
+    /// The fragment-stage entry-point name (today `c"main"`).
+    pub fragment_entry: &'a core::ffi::CStr,
+    /// The single color attachment's format (the
+    /// `VkPipelineRenderingCreateInfo` format — see the format contract above).
+    pub color_format: Format,
+    /// The primitive-assembly topology (rung 2: `TriangleList`).
+    pub topology: PrimitiveTopology,
 }
 
 /// A single buffer's access transition inside a [`BarrierDesc`].
@@ -116,6 +149,29 @@ pub struct RenderArea {
     pub width: u32,
     /// Height of the render area, in texels.
     pub height: u32,
+}
+
+/// A viewport for [`crate::encoder::RhiCommandEncoder::set_viewport`] (the dynamic
+/// viewport state a graphics pipeline reads, Phase-6 S0 rung 2).
+///
+/// `#[repr(C)]` mirroring `VkViewport`'s `(x, y, width, height, min_depth,
+/// max_depth)` `f32` layout so a backend reads it without reordering. Vulkan's
+/// viewport y-axis points down; rung 2 uses the full surface with depth `[0, 1]`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Viewport {
+    /// X offset of the viewport, in texels.
+    pub x: f32,
+    /// Y offset of the viewport, in texels.
+    pub y: f32,
+    /// Width of the viewport, in texels (`> 0`).
+    pub width: f32,
+    /// Height of the viewport, in texels (`> 0`).
+    pub height: f32,
+    /// Minimum depth (typically `0.0`).
+    pub min_depth: f32,
+    /// Maximum depth (typically `1.0`).
+    pub max_depth: f32,
 }
 
 /// One color attachment for [`crate::encoder::RhiCommandEncoder::begin_rendering`].

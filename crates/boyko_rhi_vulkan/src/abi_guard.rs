@@ -15,7 +15,7 @@
 
 use boyko_rhi::enums::{
     BarrierAccess, BarrierStage, BufferUsage, Format, ImageAspect, ImageLayout, ImageUsage, LoadOp,
-    ShaderStage, StoreOp, TextureDimension,
+    PrimitiveTopology, ShaderStage, StoreOp, TextureDimension,
 };
 
 use crate::ffi::{
@@ -32,8 +32,8 @@ use crate::ffi::{
     VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
     VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-    VK_PIPELINE_STAGE_TRANSFER_BIT, VK_SHADER_STAGE_COMPUTE_BIT, VK_SHADER_STAGE_FRAGMENT_BIT,
-    VK_SHADER_STAGE_VERTEX_BIT,
+    VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_SHADER_STAGE_COMPUTE_BIT,
+    VK_SHADER_STAGE_FRAGMENT_BIT, VK_SHADER_STAGE_VERTEX_BIT,
 };
 
 // ===== BufferUsage (identity-cast in `create_buffer`). =====
@@ -216,4 +216,17 @@ const _: () = assert!(
 const _: () = assert!(
     StoreOp::Store.as_i32() == VK_ATTACHMENT_STORE_OP_STORE,
     "StoreOp::Store must equal VK_ATTACHMENT_STORE_OP_STORE"
+);
+
+// ===========================================================================
+// Phase-6 S0 rung-2 graphics-pipeline contracts. `PrimitiveTopology` `as_i32()` is
+// mapped in `create_graphics_pipeline` (the `VkPipelineInputAssemblyStateCreateInfo`
+// topology); the `Viewport`↔`VkViewport` byte-for-byte layout match (a direct slice
+// reinterpret in `set_viewport`) is asserted at the cast site in `rhi_impl.rs`.
+// ===========================================================================
+
+// --- PrimitiveTopology `as_i32()` (mapped in `create_graphics_pipeline`). ---
+const _: () = assert!(
+    PrimitiveTopology::TriangleList.as_i32() == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+    "PrimitiveTopology::TriangleList must equal VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST"
 );

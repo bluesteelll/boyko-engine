@@ -485,6 +485,18 @@ pub enum VkStructureType {
     PipelineLayoutCreateInfo = 30,
     ComputePipelineCreateInfo = 29,
     PipelineShaderStageCreateInfo = 18,
+    // --- Phase-6 S0 rung-2 graphics-pipeline sub-state sTypes. ---
+    GraphicsPipelineCreateInfo = 28,
+    PipelineVertexInputStateCreateInfo = 19,
+    PipelineInputAssemblyStateCreateInfo = 20,
+    PipelineViewportStateCreateInfo = 22,
+    PipelineRasterizationStateCreateInfo = 23,
+    PipelineMultisampleStateCreateInfo = 24,
+    PipelineColorBlendStateCreateInfo = 26,
+    PipelineDynamicStateCreateInfo = 27,
+    /// `VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO` — the dynamic-rendering
+    /// attachment-format chain (no `VkRenderPass`), Vulkan 1.3 core.
+    PipelineRenderingCreateInfo = 1_000_044_002,
     DescriptorSetLayoutCreateInfo = 32,
     DescriptorPoolCreateInfo = 33,
     DescriptorSetAllocateInfo = 34,
@@ -592,6 +604,30 @@ pub const VK_DESCRIPTOR_TYPE_STORAGE_BUFFER: i32 = 7;
 
 /// `VkPipelineBindPoint::VK_PIPELINE_BIND_POINT_COMPUTE`.
 pub const VK_PIPELINE_BIND_POINT_COMPUTE: i32 = 1;
+
+// --- Phase-6 S0 rung-2 graphics-pipeline state constants. ---
+
+/// `VkPipelineBindPoint::VK_PIPELINE_BIND_POINT_GRAPHICS`.
+pub const VK_PIPELINE_BIND_POINT_GRAPHICS: i32 = 0;
+/// `VkPrimitiveTopology::VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST`.
+pub const VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST: i32 = 3;
+/// `VkPolygonMode::VK_POLYGON_MODE_FILL`.
+pub const VK_POLYGON_MODE_FILL: i32 = 0;
+/// `VkCullModeFlagBits::VK_CULL_MODE_NONE` (rung 2 disables culling so the
+/// triangle rasterizes regardless of winding).
+pub const VK_CULL_MODE_NONE: VkFlags = 0;
+/// `VkFrontFace::VK_FRONT_FACE_COUNTER_CLOCKWISE`.
+pub const VK_FRONT_FACE_COUNTER_CLOCKWISE: i32 = 0;
+/// `VkDynamicState::VK_DYNAMIC_STATE_VIEWPORT`.
+pub const VK_DYNAMIC_STATE_VIEWPORT: i32 = 0;
+/// `VkDynamicState::VK_DYNAMIC_STATE_SCISSOR`.
+pub const VK_DYNAMIC_STATE_SCISSOR: i32 = 1;
+/// `VkColorComponentFlagBits` — the RGBA write-mask bits (all four = write all
+/// channels), so the fragment color reaches every channel of the attachment.
+pub const VK_COLOR_COMPONENT_R_BIT: VkFlags = 0x0000_0001;
+pub const VK_COLOR_COMPONENT_G_BIT: VkFlags = 0x0000_0002;
+pub const VK_COLOR_COMPONENT_B_BIT: VkFlags = 0x0000_0004;
+pub const VK_COLOR_COMPONENT_A_BIT: VkFlags = 0x0000_0008;
 
 /// `VkCommandBufferLevel::VK_COMMAND_BUFFER_LEVEL_PRIMARY`.
 pub const VK_COMMAND_BUFFER_LEVEL_PRIMARY: i32 = 0;
@@ -1064,6 +1100,202 @@ pub struct VkComputePipelineCreateInfo {
     pub flags: VkFlags,
     pub stage: VkPipelineShaderStageCreateInfo,
     pub layout: VkPipelineLayout,
+    /// `VkPipeline basePipelineHandle` — null (no derivative).
+    pub base_pipeline_handle: VkPipeline,
+    pub base_pipeline_index: i32,
+}
+
+// ---------------------------------------------------------------------------
+// Phase-6 S0 rung-2 — graphics-pipeline create-info chain. Every struct is read
+// BY the driver in `vkCreateGraphicsPipelines`, so the `#[repr(C)]` layout must
+// match the C ABI (the layout guards below break the build on any drift).
+// ---------------------------------------------------------------------------
+
+/// `VkPipelineVertexInputStateCreateInfo` — rung 2 binds NO vertex buffer (the
+/// vertex shader generates positions from `SV_VertexID`), so both binding/attribute
+/// arrays are empty.
+#[repr(C)]
+pub struct VkPipelineVertexInputStateCreateInfo {
+    pub s_type: VkStructureType,
+    pub p_next: *const c_void,
+    pub flags: VkFlags,
+    pub vertex_binding_description_count: u32,
+    /// `const VkVertexInputBindingDescription*` — null (no vertex buffer).
+    pub p_vertex_binding_descriptions: *const c_void,
+    pub vertex_attribute_description_count: u32,
+    /// `const VkVertexInputAttributeDescription*` — null (no vertex buffer).
+    pub p_vertex_attribute_descriptions: *const c_void,
+}
+
+/// `VkPipelineInputAssemblyStateCreateInfo`.
+#[repr(C)]
+pub struct VkPipelineInputAssemblyStateCreateInfo {
+    pub s_type: VkStructureType,
+    pub p_next: *const c_void,
+    pub flags: VkFlags,
+    /// `VkPrimitiveTopology`.
+    pub topology: i32,
+    pub primitive_restart_enable: VkBool32,
+}
+
+/// `VkViewport` — a dynamic viewport (set via `vkCmdSetViewport`). Declared so the
+/// agnostic `boyko_rhi::Viewport` (same `(x, y, w, h, minDepth, maxDepth)` `f32`
+/// layout) is passed straight through (the layout match is asserted in `abi_guard`).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct VkViewport {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub min_depth: f32,
+    pub max_depth: f32,
+}
+
+/// `VkPipelineViewportStateCreateInfo` — rung 2 uses DYNAMIC viewport + scissor, so
+/// the counts are 1 but the pointers are null (the actual rects come from
+/// `vkCmdSetViewport`/`vkCmdSetScissor`).
+#[repr(C)]
+pub struct VkPipelineViewportStateCreateInfo {
+    pub s_type: VkStructureType,
+    pub p_next: *const c_void,
+    pub flags: VkFlags,
+    pub viewport_count: u32,
+    /// `const VkViewport*` — null (dynamic viewport).
+    pub p_viewports: *const VkViewport,
+    pub scissor_count: u32,
+    /// `const VkRect2D*` — null (dynamic scissor).
+    pub p_scissors: *const VkRect2D,
+}
+
+/// `VkPipelineRasterizationStateCreateInfo`. `line_width` MUST be `1.0` unless the
+/// `wideLines` feature is enabled (rung 2 fills triangles, so it is `1.0`).
+#[repr(C)]
+pub struct VkPipelineRasterizationStateCreateInfo {
+    pub s_type: VkStructureType,
+    pub p_next: *const c_void,
+    pub flags: VkFlags,
+    pub depth_clamp_enable: VkBool32,
+    pub rasterizer_discard_enable: VkBool32,
+    /// `VkPolygonMode`.
+    pub polygon_mode: i32,
+    /// `VkCullModeFlags`.
+    pub cull_mode: VkFlags,
+    /// `VkFrontFace`.
+    pub front_face: i32,
+    pub depth_bias_enable: VkBool32,
+    pub depth_bias_constant_factor: f32,
+    pub depth_bias_clamp: f32,
+    pub depth_bias_slope_factor: f32,
+    pub line_width: f32,
+}
+
+/// `VkPipelineMultisampleStateCreateInfo` — rung 2 is single-sampled.
+#[repr(C)]
+pub struct VkPipelineMultisampleStateCreateInfo {
+    pub s_type: VkStructureType,
+    pub p_next: *const c_void,
+    pub flags: VkFlags,
+    /// `VkSampleCountFlagBits`.
+    pub rasterization_samples: VkFlags,
+    pub sample_shading_enable: VkBool32,
+    pub min_sample_shading: f32,
+    /// `const VkSampleMask*` — null (no custom sample mask).
+    pub p_sample_mask: *const u32,
+    pub alpha_to_coverage_enable: VkBool32,
+    pub alpha_to_one_enable: VkBool32,
+}
+
+/// `VkPipelineColorBlendAttachmentState` — one per color attachment. Rung 2
+/// disables blending (opaque write) with an all-channel write mask.
+#[repr(C)]
+pub struct VkPipelineColorBlendAttachmentState {
+    pub blend_enable: VkBool32,
+    /// `VkBlendFactor`.
+    pub src_color_blend_factor: i32,
+    /// `VkBlendFactor`.
+    pub dst_color_blend_factor: i32,
+    /// `VkBlendOp`.
+    pub color_blend_op: i32,
+    /// `VkBlendFactor`.
+    pub src_alpha_blend_factor: i32,
+    /// `VkBlendFactor`.
+    pub dst_alpha_blend_factor: i32,
+    /// `VkBlendOp`.
+    pub alpha_blend_op: i32,
+    /// `VkColorComponentFlags`.
+    pub color_write_mask: VkFlags,
+}
+
+/// `VkPipelineColorBlendStateCreateInfo`.
+#[repr(C)]
+pub struct VkPipelineColorBlendStateCreateInfo {
+    pub s_type: VkStructureType,
+    pub p_next: *const c_void,
+    pub flags: VkFlags,
+    pub logic_op_enable: VkBool32,
+    /// `VkLogicOp`.
+    pub logic_op: i32,
+    pub attachment_count: u32,
+    pub p_attachments: *const VkPipelineColorBlendAttachmentState,
+    pub blend_constants: [f32; 4],
+}
+
+/// `VkPipelineDynamicStateCreateInfo` — rung 2 marks viewport + scissor dynamic.
+#[repr(C)]
+pub struct VkPipelineDynamicStateCreateInfo {
+    pub s_type: VkStructureType,
+    pub p_next: *const c_void,
+    pub flags: VkFlags,
+    pub dynamic_state_count: u32,
+    /// `const VkDynamicState*`.
+    pub p_dynamic_states: *const i32,
+}
+
+/// `VkPipelineRenderingCreateInfo` — the dynamic-rendering attachment-format chain
+/// (no `VkRenderPass`), chained into `VkGraphicsPipelineCreateInfo.p_next`. The
+/// color-attachment format declared here MUST equal the format of every
+/// `begin_rendering` scope the pipeline is bound inside (the W2-b SAFETY contract).
+#[repr(C)]
+pub struct VkPipelineRenderingCreateInfo {
+    pub s_type: VkStructureType,
+    pub p_next: *const c_void,
+    pub view_mask: u32,
+    pub color_attachment_count: u32,
+    /// `const VkFormat*` (an `i32` per format).
+    pub p_color_attachment_formats: *const i32,
+    /// `VkFormat` depth attachment — `VK_FORMAT_UNDEFINED` (no depth, rung 2).
+    pub depth_attachment_format: i32,
+    /// `VkFormat` stencil attachment — `VK_FORMAT_UNDEFINED`.
+    pub stencil_attachment_format: i32,
+}
+
+/// `VkGraphicsPipelineCreateInfo` — the top-level graphics-pipeline create-info.
+/// `p_next` chains the [`VkPipelineRenderingCreateInfo`]; `render_pass` is
+/// `VK_NULL_HANDLE` and `subpass` is `0` (dynamic rendering, OQ-6). Tessellation +
+/// depth-stencil state are unused (null) for rung 2.
+#[repr(C)]
+pub struct VkGraphicsPipelineCreateInfo {
+    pub s_type: VkStructureType,
+    pub p_next: *const c_void,
+    pub flags: VkFlags,
+    pub stage_count: u32,
+    pub p_stages: *const VkPipelineShaderStageCreateInfo,
+    pub p_vertex_input_state: *const VkPipelineVertexInputStateCreateInfo,
+    pub p_input_assembly_state: *const VkPipelineInputAssemblyStateCreateInfo,
+    /// `const VkPipelineTessellationStateCreateInfo*` — null.
+    pub p_tessellation_state: *const c_void,
+    pub p_viewport_state: *const VkPipelineViewportStateCreateInfo,
+    pub p_rasterization_state: *const VkPipelineRasterizationStateCreateInfo,
+    pub p_multisample_state: *const VkPipelineMultisampleStateCreateInfo,
+    /// `const VkPipelineDepthStencilStateCreateInfo*` — null (no depth, rung 2).
+    pub p_depth_stencil_state: *const c_void,
+    pub p_color_blend_state: *const VkPipelineColorBlendStateCreateInfo,
+    pub p_dynamic_state: *const VkPipelineDynamicStateCreateInfo,
+    pub layout: VkPipelineLayout,
+    /// `VkRenderPass` — `VK_NULL_HANDLE` (dynamic rendering, no render pass).
+    pub render_pass: u64,
+    pub subpass: u32,
     /// `VkPipeline basePipelineHandle` — null (no derivative).
     pub base_pipeline_handle: VkPipeline,
     pub base_pipeline_index: i32,
@@ -1593,6 +1825,27 @@ const _: () = assert!(core::mem::size_of::<VkDescriptorSetLayoutBinding>() == 24
 const _: () = assert!(core::mem::size_of::<VkPushConstantRange>() == 12);
 const _: () = assert!(core::mem::size_of::<VkDescriptorPoolSize>() == 8);
 
+// Phase-6 S0 rung-2 graphics-pipeline create-info layout guards. Each struct is
+// read BY the driver in `vkCreateGraphicsPipelines`, so the Rust `#[repr(C)]`
+// layout MUST match the C ABI or the driver reads garbage at a shifted offset.
+// (Sizes are the x86_64 / LP64 C ABI footprints with 8-byte pointer alignment.)
+const _: () = assert!(core::mem::size_of::<VkViewport>() == 24);
+const _: () = assert!(core::mem::size_of::<VkPipelineVertexInputStateCreateInfo>() == 48);
+const _: () = assert!(core::mem::size_of::<VkPipelineInputAssemblyStateCreateInfo>() == 32);
+const _: () = assert!(core::mem::size_of::<VkPipelineViewportStateCreateInfo>() == 48);
+const _: () = assert!(core::mem::align_of::<VkPipelineViewportStateCreateInfo>() == 8);
+const _: () = assert!(core::mem::size_of::<VkPipelineRasterizationStateCreateInfo>() == 64);
+const _: () = assert!(core::mem::size_of::<VkPipelineMultisampleStateCreateInfo>() == 48);
+const _: () = assert!(core::mem::align_of::<VkPipelineMultisampleStateCreateInfo>() == 8);
+const _: () = assert!(core::mem::size_of::<VkPipelineColorBlendAttachmentState>() == 32);
+const _: () = assert!(core::mem::size_of::<VkPipelineColorBlendStateCreateInfo>() == 56);
+const _: () = assert!(core::mem::align_of::<VkPipelineColorBlendStateCreateInfo>() == 8);
+const _: () = assert!(core::mem::size_of::<VkPipelineDynamicStateCreateInfo>() == 32);
+const _: () = assert!(core::mem::size_of::<VkPipelineRenderingCreateInfo>() == 40);
+const _: () = assert!(core::mem::align_of::<VkPipelineRenderingCreateInfo>() == 8);
+const _: () = assert!(core::mem::size_of::<VkGraphicsPipelineCreateInfo>() == 144);
+const _: () = assert!(core::mem::align_of::<VkGraphicsPipelineCreateInfo>() == 8);
+
 // ---------------------------------------------------------------------------
 // Function-pointer typedefs — the loader fills these in at runtime.
 //
@@ -1818,6 +2071,17 @@ pub type PfnVkCreateComputePipelines = unsafe extern "system" fn(
     p_pipelines: *mut VkPipeline,
 ) -> i32;
 
+/// `PFN_vkCreateGraphicsPipelines` (Phase-6 S0 rung 2). `pipeline_cache` is null;
+/// `create_info_count` pipelines are written into `p_pipelines`.
+pub type PfnVkCreateGraphicsPipelines = unsafe extern "system" fn(
+    device: VkDevice,
+    pipeline_cache: u64,
+    create_info_count: u32,
+    p_create_infos: *const VkGraphicsPipelineCreateInfo,
+    p_allocator: *const c_void,
+    p_pipelines: *mut VkPipeline,
+) -> i32;
+
 /// `PFN_vkDestroyPipeline`.
 pub type PfnVkDestroyPipeline =
     unsafe extern "system" fn(device: VkDevice, pipeline: VkPipeline, p_allocator: *const c_void);
@@ -1928,6 +2192,34 @@ pub type PfnVkCmdDispatch = unsafe extern "system" fn(
     group_count_x: u32,
     group_count_y: u32,
     group_count_z: u32,
+);
+
+// --- Phase-6 S0 rung-2 graphics draw commands (Vulkan 1.0 core). ---
+
+/// `PFN_vkCmdSetViewport` — dynamic viewport state (`first_viewport`/`count` +
+/// `p_viewports`).
+pub type PfnVkCmdSetViewport = unsafe extern "system" fn(
+    command_buffer: VkCommandBuffer,
+    first_viewport: u32,
+    viewport_count: u32,
+    p_viewports: *const VkViewport,
+);
+
+/// `PFN_vkCmdSetScissor` — dynamic scissor state.
+pub type PfnVkCmdSetScissor = unsafe extern "system" fn(
+    command_buffer: VkCommandBuffer,
+    first_scissor: u32,
+    scissor_count: u32,
+    p_scissors: *const VkRect2D,
+);
+
+/// `PFN_vkCmdDraw` — a non-indexed draw.
+pub type PfnVkCmdDraw = unsafe extern "system" fn(
+    command_buffer: VkCommandBuffer,
+    vertex_count: u32,
+    instance_count: u32,
+    first_vertex: u32,
+    first_instance: u32,
 );
 
 /// `PFN_vkCmdPipelineBarrier`.
