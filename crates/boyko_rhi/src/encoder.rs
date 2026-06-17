@@ -6,7 +6,7 @@
 //! (plan D3): explicit caller-side barriers per plan §5.5, no auto-tracking.
 
 use crate::api::RhiApi;
-use crate::descriptor::BarrierDesc;
+use crate::descriptor::{BarrierDesc, BufferCopy};
 use crate::enums::ShaderStage;
 use crate::error::RhiError;
 
@@ -43,6 +43,24 @@ pub trait RhiCommandEncoder<A: RhiApi> {
 
     /// Records an explicit buffer pipeline barrier (plan §5.5; no auto-tracking).
     fn pipeline_barrier(&mut self, barrier: &BarrierDesc<A>);
+
+    // ===== DEFAULT-BODY SEAM (Phase 5 staging copy; Mock + ABI untouched) =====
+
+    /// Records a buffer-to-buffer copy of `regions` from `src` to `dst`.
+    ///
+    /// The Phase-5 `GpuColumn` staging upload (host-visible → device-local) and
+    /// the test-only readback (device-local → host-visible) go through this.
+    /// Only a backend that supports device-local transfers (Vulkan) overrides it;
+    /// the default body is a no-op marked `#[cold] #[inline(never)]` so it never
+    /// touches the hot recording path's I-cache when not overridden, mirroring
+    /// [`Self::dispatch_indirect`]. The Mock backend and the trait ABI are
+    /// therefore unaffected by adding it.
+    #[cold]
+    #[inline(never)]
+    fn copy_buffer(&mut self, _src: &A::Buffer, _dst: &A::Buffer, _regions: &[BufferCopy]) {
+        // Phase-5 default seam: a backend without a device-local transfer path
+        // (e.g. the Mock) leaves this a no-op; the Vulkan backend overrides it.
+    }
 
     // ===== DEFERRED SEAM (Phase 6+) =====
 
