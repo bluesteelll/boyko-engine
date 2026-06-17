@@ -7,7 +7,7 @@
 use crate::api::RhiApi;
 use crate::enums::{
     BarrierAccess, BarrierStage, BufferUsage, Format, ImageAspect, ImageLayout, LoadOp,
-    MemoryLocation, PrimitiveTopology, StoreOp,
+    MemoryLocation, PrimitiveTopology, StoreOp, VertexFormat,
 };
 
 /// Parameters for [`crate::device::RhiDevice::create_buffer`].
@@ -60,16 +60,51 @@ pub struct ComputePipelineDesc<'a, A: RhiApi> {
     pub push_constant_bytes: u32,
 }
 
+/// One vertex attribute within a [`VertexBufferLayout`] (Phase-6 S0 rung 3).
+///
+/// `#[repr(C)]` so the field layout is stable for a backend to read. Maps onto a
+/// `VkVertexInputAttributeDescription`'s `(location, format, offset)` — the
+/// `binding` is supplied by the enclosing [`VertexBufferLayout`].
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VertexAttribute {
+    /// The shader input location (`layout(location = N)` / the HLSL semantic slot).
+    pub location: u32,
+    /// The attribute's byte offset within a single vertex.
+    pub offset: u32,
+    /// The attribute's component format.
+    pub format: VertexFormat,
+}
+
+/// A single vertex buffer's layout for a [`GraphicsPipelineDesc`] (Phase-6 S0 rung
+/// 3): the per-vertex stride + the attributes packed within each vertex.
+///
+/// Maps onto one `VkVertexInputBindingDescription` (binding `0`, per-vertex input
+/// rate) plus one `VkVertexInputAttributeDescription` per `attributes` entry. The
+/// `'a` lifetime borrows the attribute slice for the `create_graphics_pipeline`
+/// call only (the backend copies what it needs).
+pub struct VertexBufferLayout<'a> {
+    /// The byte stride between consecutive vertices in the buffer.
+    pub stride: u32,
+    /// The attributes packed within each vertex (rung 3: position + color).
+    pub attributes: &'a [VertexAttribute],
+}
+
 /// Parameters for [`crate::device::RhiDevice::create_graphics_pipeline`]
 /// (Phase-6 S0 rung 2: a Vulkan 1.3 dynamic-rendering graphics pipeline).
 ///
 /// Generic over the backend `A` because it borrows that backend's owned vertex +
 /// fragment shader modules by reference; the `'a` lifetime ties the descriptor to
-/// the borrowed modules + entry names for the create call (the backend copies what
-/// it needs; nothing is retained past the call). Rung 2 binds **no** descriptor
-/// sets (an empty pipeline layout) and **no** vertex buffer (the vertex shader
-/// generates its positions from the vertex index), so the descriptor carries only
-/// what the rasterizer + dynamic-rendering attachment-format chain needs.
+/// the borrowed modules + entry names + the vertex layout for the create call (the
+/// backend copies what it needs; nothing is retained past the call).
+///
+/// Rung 3 adds a real **vertex input** layout (`vertex_layout`: binding stride +
+/// position/color attributes) and a single **push-constant range** (`push_constant_
+/// bytes`, a `VERTEX`-stage MVP `float4x4` = 64 bytes); a rung-3 pipeline still binds
+/// **no** descriptor sets (the layout has only the push range). A `None`
+/// `vertex_layout` keeps the rung-2 vertex-less (`SV_VertexID`) path, and `0`
+/// `push_constant_bytes` keeps the rung-2 empty layout — so the rung-2 triangle test
+/// stays valid against the same descriptor.
 ///
 /// **Format contract (S0 SAFETY obligation, W2-b):** `color_format` MUST equal the
 /// format of every color attachment of any [`RenderingDesc`] this pipeline is bound
@@ -89,8 +124,14 @@ pub struct GraphicsPipelineDesc<'a, A: RhiApi> {
     /// The single color attachment's format (the
     /// `VkPipelineRenderingCreateInfo` format — see the format contract above).
     pub color_format: Format,
-    /// The primitive-assembly topology (rung 2: `TriangleList`).
+    /// The primitive-assembly topology (rung 2/3: `TriangleList`).
     pub topology: PrimitiveTopology,
+    /// The vertex-buffer input layout, or `None` for a vertex-buffer-less pipeline
+    /// (the rung-2 `SV_VertexID`-generated triangle).
+    pub vertex_layout: Option<VertexBufferLayout<'a>>,
+    /// The `VERTEX`-stage push-constant range size in bytes at offset `0` (rung 3:
+    /// `64` for an MVP `float4x4`); `0` builds an empty pipeline layout (rung 2).
+    pub push_constant_bytes: u32,
 }
 
 /// A single buffer's access transition inside a [`BarrierDesc`].

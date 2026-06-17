@@ -181,6 +181,9 @@ fn triangle_draw_golden_round_trip() {
             fragment_entry: c"main",
             color_format: Format::R8G8B8A8Unorm,
             topology: PrimitiveTopology::TriangleList,
+            // Rung 2: no vertex buffer (SV_VertexID-generated) + an empty layout.
+            vertex_layout: None,
+            push_constant_bytes: 0,
         })
         .expect("graphics pipeline");
 

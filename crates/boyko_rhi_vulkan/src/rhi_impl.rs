@@ -39,8 +39,9 @@ use core::ptr::{self, NonNull};
 
 use boyko_rhi::{
     BarrierDesc, BufferBarrier, BufferCopy, BufferDesc, BufferImageCopy, ComputePipelineDesc,
-    GraphicsPipelineDesc, ImageBarrierDesc, ImageLayout, MemoryLocation, RenderArea, RenderingDesc,
-    RhiApi, RhiCommandEncoder, RhiDevice, RhiQueue, ShaderStage, TextureDesc, Viewport,
+    GraphicsPipelineDesc, ImageBarrierDesc, ImageLayout, IndexType, MemoryLocation, RenderArea,
+    RenderingDesc, RhiApi, RhiCommandEncoder, RhiDevice, RhiQueue, ShaderStage, TextureDesc,
+    Viewport,
 };
 
 use crate::compute::ComputeError;
@@ -59,6 +60,12 @@ const MAX_RENDERING_COLOR_ATTACHMENTS: usize = 8;
 /// The maximum number of image→buffer copy regions recorded inline without heap
 /// allocation. The basic-slice golden readback uses a single full-image region.
 const MAX_IMAGE_COPY_REGIONS: usize = 4;
+
+/// The maximum number of vertex attributes a rung-3 graphics pipeline declares
+/// inline without heap allocation. Rung 3 uses two (position + color); the cap has
+/// headroom for the basic-slice mesh vertex (position/normal/uv/color ≈ 4). A
+/// `debug_assert!` traps an over-count at `create_graphics_pipeline`.
+const MAX_VERTEX_ATTRIBUTES: usize = 8;
 
 /// A zeroed [`VkBufferImageCopy`] the inline-region array's unused tail slots
 /// hold (never read: only the first `regions.len()` are passed to the driver).
@@ -280,11 +287,13 @@ pub struct ComputePipeline {
 ///
 /// Holds the `VkPipeline` **and** its own `VkPipelineLayout`. Unlike a compute
 /// pipeline (which shares the device's [`ComputeLayouts::pipeline_layout`]), a
-/// rung-2 graphics pipeline uses a dedicated **empty** layout (no descriptor sets,
-/// no push constants), created at `create_graphics_pipeline` and torn down with the
-/// pipeline (reverse creation order: pipeline → layout) in
-/// `destroy_graphics_pipeline`. Its shader modules are separate caller-owned
-/// [`VulkanShaderModule`]s (the trait splits module + pipeline creation).
+/// graphics pipeline uses a dedicated layout with no descriptor sets and either no
+/// push range (rung 2) or one `VERTEX`-stage push range (rung 3's MVP `float4x4`),
+/// created at `create_graphics_pipeline` and torn down with the pipeline (reverse
+/// creation order: pipeline → layout) in `destroy_graphics_pipeline`. The layout is
+/// also the target of [`RhiCommandEncoder::push_graphics_constants`]. Its shader
+/// modules are separate caller-owned [`VulkanShaderModule`]s (the trait splits
+/// module + pipeline creation).
 ///
 /// # Safety
 ///
@@ -294,7 +303,8 @@ pub struct ComputePipeline {
 pub struct VulkanGraphicsPipeline {
     /// The `VkPipeline` handle; destroyed first by `destroy_graphics_pipeline`.
     pub(crate) pipeline: VkPipeline,
-    /// The dedicated empty `VkPipelineLayout`; destroyed after the pipeline.
+    /// The dedicated `VkPipelineLayout` (no descriptor sets; either no push range
+    /// — rung 2 — or one VERTEX-stage push range — rung 3); destroyed after the pipeline.
     pub(crate) layout: VkPipelineLayout,
 }
 
@@ -611,22 +621,38 @@ impl RhiDevice<Vulkan> for VulkanContext {
         let device = self.device();
         let fns = self.device_fns();
 
-        // --- An EMPTY pipeline layout (rung 2: no descriptor sets, no push
-        //     constants). Created first; if pipeline creation fails below, it is
-        //     torn down before the error returns (reverse-order rollback). ---
+        // --- The pipeline layout. Rung 2 uses an EMPTY layout (no sets, no push
+        //     range); rung 3 declares ONE `VERTEX`-stage push-constant range of
+        //     `desc.push_constant_bytes` bytes at offset 0 (the MVP `float4x4`). No
+        //     descriptor sets either way. Created first; if pipeline creation fails
+        //     below, it is torn down before the error returns (reverse-order
+        //     rollback). The `push_range` local must outlive the create call, so it
+        //     is bound here (the layout-info pointer below references it). ---
+        let push_range = VkPushConstantRange {
+            stage_flags: VK_SHADER_STAGE_VERTEX_BIT,
+            offset: 0,
+            size: desc.push_constant_bytes,
+        };
+        let has_push = desc.push_constant_bytes > 0;
         let pl_info = VkPipelineLayoutCreateInfo {
             s_type: VkStructureType::PipelineLayoutCreateInfo,
             p_next: ptr::null(),
             flags: 0,
             set_layout_count: 0,
             p_set_layouts: ptr::null(),
-            push_constant_range_count: 0,
-            p_push_constant_ranges: ptr::null(),
+            push_constant_range_count: u32::from(has_push),
+            p_push_constant_ranges: if has_push {
+                &push_range
+            } else {
+                ptr::null()
+            },
         };
         let mut layout = VkPipelineLayout::NULL;
-        // SAFETY: `device` is live; `pl_info` is a fully-initialized empty layout
-        // (zero sets, zero push ranges → null array pointers valid for count 0);
-        // `&mut layout` is a valid out-pointer; NULL allocator.
+        // SAFETY: `device` is live; `pl_info` is fully initialized with zero
+        // descriptor sets (null array valid for count 0) and either zero push ranges
+        // (null array valid for count 0) or one range pointing at the `push_range`
+        // local (alive for this whole fn) when `has_push`; `&mut layout` is a valid
+        // out-pointer; NULL allocator.
         let raw =
             unsafe { (fns.create_pipeline_layout)(device, &pl_info, ptr::null(), &mut layout) };
         let result = VkResult::from_raw(raw);
@@ -656,16 +682,66 @@ impl RhiDevice<Vulkan> for VulkanContext {
             },
         ];
 
-        // --- Empty vertex input (positions come from the vertex shader's
-        //     SV_VertexID — no vertex buffer, rung 2). ---
+        // --- Vertex input. Rung 2: empty (positions come from the vertex shader's
+        //     SV_VertexID — no vertex buffer). Rung 3: one binding (binding 0,
+        //     per-vertex rate, the layout's stride) + one attribute per layout entry.
+        //     The `binding`/`attributes` locals must outlive the create call below;
+        //     they are bound here so the `vertex_input` pointers stay valid. The
+        //     unused tail of `attributes` (slots >= the layout's count) is never read:
+        //     `vertex_attribute_description_count` bounds the driver's read. ---
+        let mut vk_bindings: [VkVertexInputBindingDescription; 1] =
+            [VkVertexInputBindingDescription {
+                binding: 0,
+                stride: 0,
+                input_rate: VK_VERTEX_INPUT_RATE_VERTEX,
+            }];
+        let mut vk_attributes: [VkVertexInputAttributeDescription; MAX_VERTEX_ATTRIBUTES] =
+            core::array::from_fn(|_| VkVertexInputAttributeDescription {
+                location: 0,
+                binding: 0,
+                format: VK_FORMAT_UNDEFINED,
+                offset: 0,
+            });
+        let attribute_count = match &desc.vertex_layout {
+            None => 0usize,
+            Some(layout) => {
+                debug_assert!(
+                    layout.attributes.len() <= MAX_VERTEX_ATTRIBUTES,
+                    "invariant: rung-3 vertex layout has <= MAX_VERTEX_ATTRIBUTES attributes"
+                );
+                vk_bindings[0].stride = layout.stride;
+                // The agnostic `VertexFormat` discriminant equals the `VkFormat`
+                // constant (asserted in `abi_guard.rs`).
+                for (slot, attr) in vk_attributes.iter_mut().zip(layout.attributes.iter()) {
+                    slot.location = attr.location;
+                    slot.binding = 0;
+                    slot.format = attr.format.as_i32();
+                    slot.offset = attr.offset;
+                }
+                // Release-safe: the count handed to the driver never exceeds the
+                // initialized inline slots, even if a (debug-asserted above) over-count
+                // were to slip through in a release build — `vertex_attribute_description_count`
+                // then matches exactly the slots written by the `zip` loop.
+                layout.attributes.len().min(MAX_VERTEX_ATTRIBUTES)
+            }
+        };
+        let has_vertex_layout = attribute_count > 0;
         let vertex_input = VkPipelineVertexInputStateCreateInfo {
             s_type: VkStructureType::PipelineVertexInputStateCreateInfo,
             p_next: ptr::null(),
             flags: 0,
-            vertex_binding_description_count: 0,
-            p_vertex_binding_descriptions: ptr::null(),
-            vertex_attribute_description_count: 0,
-            p_vertex_attribute_descriptions: ptr::null(),
+            vertex_binding_description_count: u32::from(has_vertex_layout),
+            p_vertex_binding_descriptions: if has_vertex_layout {
+                vk_bindings.as_ptr()
+            } else {
+                ptr::null()
+            },
+            vertex_attribute_description_count: attribute_count as u32,
+            p_vertex_attribute_descriptions: if has_vertex_layout {
+                vk_attributes.as_ptr()
+            } else {
+                ptr::null()
+            },
         };
 
         let input_assembly = VkPipelineInputAssemblyStateCreateInfo {
@@ -796,13 +872,18 @@ impl RhiDevice<Vulkan> for VulkanContext {
 
         let mut pipeline = VkPipeline::NULL;
         // SAFETY: `device` is live; null pipeline cache (`0`) is valid; one
-        // fully-initialized `VkGraphicsPipelineCreateInfo` references the live empty
-        // `layout`, the two live caller-owned shader modules (via `stages`, alive for
-        // the call), and the complete set of fixed-function sub-state structs +
-        // dynamic-rendering format chain (all stack locals alive for the call); every
-        // unused state (tessellation, depth-stencil) is null and `render_pass` is
-        // `VK_NULL_HANDLE` (dynamic rendering). `&mut pipeline` is a valid out-pointer
-        // for the single pipeline; NULL allocator.
+        // fully-initialized `VkGraphicsPipelineCreateInfo` references the live
+        // `layout` (which references the `push_range` local for `has_push`, alive for
+        // this whole fn), the two live caller-owned shader modules (via `stages`,
+        // alive for the call), and the complete set of fixed-function sub-state
+        // structs + dynamic-rendering format chain (all stack locals alive for the
+        // call). `vertex_input` points at the `vk_bindings`/`vk_attributes` locals
+        // when `has_vertex_layout`, whose first `attribute_count` (<= cap, asserted)
+        // entries are initialized and bound by the driver's matching counts; an empty
+        // layout uses null arrays with count 0. Every unused state (tessellation,
+        // depth-stencil) is null and `render_pass` is `VK_NULL_HANDLE` (dynamic
+        // rendering). `&mut pipeline` is a valid out-pointer for the single pipeline;
+        // NULL allocator.
         //
         // FORMAT CONTRACT (W2-b): `rendering_info.p_color_attachment_formats` declares
         // `desc.color_format`; this MUST equal the format of every `begin_rendering`
@@ -815,7 +896,7 @@ impl RhiDevice<Vulkan> for VulkanContext {
         };
         let result = VkResult::from_raw(raw);
         if !result.is_success() {
-            // SAFETY: the empty `layout` was created above and is not yet owned by any
+            // SAFETY: the `layout` was created above and is not yet owned by any
             // pipeline (creation failed); destroy it exactly once on this error path
             // so it never leaks. NOTE: this single-handle rollback is correct ONLY
             // because `create_info_count == 1` above; a future BATCHED create path must
@@ -1597,6 +1678,77 @@ impl RhiCommandEncoder<Vulkan> for VulkanCommandEncoder {
         // into the context's boxed fn-table (alive per the type contract).
         let fns = unsafe { &*self.fns };
         unsafe { (fns.cmd_set_scissor)(self.command_buffer, 0, 1, &rect) };
+    }
+
+    fn bind_vertex_buffer(&mut self, buffer: &BoundBuffer, binding: u32, offset: u64) {
+        let buffers = [buffer.buffer];
+        let offsets = [offset as VkDeviceSize];
+        // SAFETY: recording is open; `buffer.buffer` is a live buffer (created on this
+        // device, carrying VERTEX usage); `buffers`/`offsets` are single-element stack
+        // locals alive for the call, so `binding_count = 1` matches both array
+        // pointers; `offset` is a byte offset within the bound buffer (the caller's
+        // contract). `self.fns` points into the context's boxed fn-table (alive per
+        // the type contract).
+        let fns = unsafe { &*self.fns };
+        unsafe {
+            (fns.cmd_bind_vertex_buffers)(
+                self.command_buffer,
+                binding,
+                1,
+                buffers.as_ptr(),
+                offsets.as_ptr(),
+            );
+        }
+    }
+
+    fn bind_index_buffer(&mut self, buffer: &BoundBuffer, offset: u64, index_type: IndexType) {
+        // The agnostic `IndexType` discriminant equals the `VkIndexType` constant
+        // (asserted in `abi_guard.rs`).
+        // SAFETY: recording is open; `buffer.buffer` is a live buffer (created on this
+        // device, carrying INDEX usage); `offset` is a byte offset within it (the
+        // caller's contract); `index_type` is a valid `VkIndexType`. `self.fns` points
+        // into the context's boxed fn-table (alive per the type contract).
+        let fns = unsafe { &*self.fns };
+        unsafe {
+            (fns.cmd_bind_index_buffer)(
+                self.command_buffer,
+                buffer.buffer,
+                offset as VkDeviceSize,
+                index_type.as_i32(),
+            );
+        }
+    }
+
+    fn push_graphics_constants(
+        &mut self,
+        pipeline: &VulkanGraphicsPipeline,
+        stage: ShaderStage,
+        offset: u32,
+        bytes: &[u8],
+    ) {
+        // The agnostic `ShaderStage` bits equal `VK_SHADER_STAGE_*` (plan D5,
+        // asserted in `abi_guard.rs`).
+        let stage_flags: VkFlags = stage.bits();
+        // SAFETY: recording is open; `pipeline.layout` is the graphics pipeline's own
+        // layout (created in `create_graphics_pipeline` with a VERTEX-stage push range
+        // at offset 0). The encoder does NOT carry the layout's declared push size, so
+        // it cannot statically bound `stage`/`offset`/`bytes` against it — an over-range
+        // or wrong-stage push is caught at runtime by the Vulkan validation layer (the
+        // GPU-half soundness oracle), not by a debug_assert here (contrast the compute
+        // sibling, whose FIXED 4-byte/COMPUTE layout makes a static assert trivial).
+        // `bytes.as_ptr()` points to `bytes.len()` bytes alive for the call; `self.fns`
+        // points into the context's boxed fn-table (alive per the type contract).
+        let fns = unsafe { &*self.fns };
+        unsafe {
+            (fns.cmd_push_constants)(
+                self.command_buffer,
+                pipeline.layout,
+                stage_flags,
+                offset,
+                bytes.len() as u32,
+                bytes.as_ptr().cast::<c_void>(),
+            );
+        }
     }
 
     fn draw(

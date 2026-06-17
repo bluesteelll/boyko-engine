@@ -35,6 +35,11 @@ impl BufferUsage {
     pub const STORAGE: BufferUsage = BufferUsage(0x0000_0020);
     /// `VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT`.
     pub const INDIRECT: BufferUsage = BufferUsage(0x0000_0100);
+    /// `VK_BUFFER_USAGE_VERTEX_BUFFER_BIT` (Phase-6 S0 rung 3).
+    pub const VERTEX: BufferUsage = BufferUsage(0x0000_0080);
+    /// `VK_BUFFER_USAGE_INDEX_BUFFER_BIT` (Phase-6 S0 rung 3 seam; rung 3 draws
+    /// non-indexed, so this is defined for the `bind_index_buffer` verb but unused).
+    pub const INDEX: BufferUsage = BufferUsage(0x0000_0040);
 
     /// The empty set (no usage bits).
     pub const NONE: BufferUsage = BufferUsage(0);
@@ -379,6 +384,53 @@ pub enum PrimitiveTopology {
 
 impl PrimitiveTopology {
     /// The raw `i32` discriminant — equal to the matching `VkPrimitiveTopology`.
+    #[inline]
+    pub const fn as_i32(self) -> i32 {
+        self as i32
+    }
+}
+
+/// The format of a single vertex attribute (`VkFormat` family, Phase-6 S0 rung 3).
+///
+/// `#[repr(i32)]` with discriminants equal to the matching `VkFormat` constants
+/// (asserted backend-side). Only the attribute formats rung 3 needs (a 3-float
+/// position + a 4-float color) are defined; the family grows per phase. This is a
+/// distinct enum from [`Format`] so the vertex-attribute set stays a small,
+/// purpose-scoped vocabulary, but the discriminants share the `VkFormat` space.
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VertexFormat {
+    /// `VK_FORMAT_R32G32B32_SFLOAT` — three 32-bit floats (a vec3 position).
+    Float32x3 = 106,
+    /// `VK_FORMAT_R32G32B32A32_SFLOAT` — four 32-bit floats (a vec4 color).
+    Float32x4 = 109,
+}
+
+impl VertexFormat {
+    /// The raw `i32` discriminant — equal to the matching `VkFormat` constant.
+    #[inline]
+    pub const fn as_i32(self) -> i32 {
+        self as i32
+    }
+}
+
+/// The index width for [`crate::encoder::RhiCommandEncoder::bind_index_buffer`]
+/// (`VkIndexType` family, Phase-6 S0 rung-3 seam).
+///
+/// `#[repr(i32)]`; discriminants equal the matching `VkIndexType` constants. Rung 3
+/// draws non-indexed, so this exists only so the `bind_index_buffer` verb has a
+/// stable, typed width argument for the later rung that uses indices.
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IndexType {
+    /// `VK_INDEX_TYPE_UINT16`.
+    Uint16 = 0,
+    /// `VK_INDEX_TYPE_UINT32`.
+    Uint32 = 1,
+}
+
+impl IndexType {
+    /// The raw `i32` discriminant — equal to the matching `VkIndexType`.
     #[inline]
     pub const fn as_i32(self) -> i32 {
         self as i32

@@ -43,13 +43,14 @@ pub use api::RhiApi;
 pub use descriptor::{
     BarrierDesc, BufferBarrier, BufferCopy, BufferDesc, BufferImageCopy, ComputePipelineDesc,
     GraphicsPipelineDesc, ImageBarrierDesc, ImageSubresourceRange, RenderArea, RenderingAttachment,
-    RenderingDesc, Viewport,
+    RenderingDesc, VertexAttribute, VertexBufferLayout, Viewport,
 };
 pub use device::{BindGroupDesc, BindGroupLayoutDesc, RhiDevice, SamplerDesc, TextureDesc};
 pub use encoder::RhiCommandEncoder;
 pub use enums::{
     BarrierAccess, BarrierStage, BufferUsage, Format, ImageAspect, ImageLayout, ImageUsage,
-    LoadOp, MemoryLocation, PrimitiveTopology, ShaderStage, StoreOp, TextureDimension,
+    IndexType, LoadOp, MemoryLocation, PrimitiveTopology, ShaderStage, StoreOp, TextureDimension,
+    VertexFormat,
 };
 pub use error::RhiError;
 pub use handle::{

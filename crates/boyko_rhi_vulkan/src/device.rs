@@ -217,6 +217,10 @@ pub struct DeviceFns {
     pub cmd_set_viewport: PfnVkCmdSetViewport,
     pub cmd_set_scissor: PfnVkCmdSetScissor,
     pub cmd_draw: PfnVkCmdDraw,
+    // --- Phase-6 S0 rung-3 vertex/index buffer bind commands, Vulkan 1.0 core,
+    //     always loaded. ---
+    pub cmd_bind_vertex_buffers: PfnVkCmdBindVertexBuffers,
+    pub cmd_bind_index_buffer: PfnVkCmdBindIndexBuffer,
     // --- Slice-1 `VK_KHR_swapchain` device commands — `Some` only when windowed. ---
     pub swapchain: Option<SwapchainDeviceFns>,
 }
@@ -1162,6 +1166,13 @@ fn load_device_fns(
             cmd_set_viewport: load_device_command(gdpa, device, c"vkCmdSetViewport")?,
             cmd_set_scissor: load_device_command(gdpa, device, c"vkCmdSetScissor")?,
             cmd_draw: load_device_command(gdpa, device, c"vkCmdDraw")?,
+            // Phase-6 S0 rung-3 vertex/index buffer bind commands (Vulkan 1.0 core).
+            cmd_bind_vertex_buffers: load_device_command(
+                gdpa,
+                device,
+                c"vkCmdBindVertexBuffers",
+            )?,
+            cmd_bind_index_buffer: load_device_command(gdpa, device, c"vkCmdBindIndexBuffer")?,
             swapchain,
         })
     }

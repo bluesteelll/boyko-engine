@@ -9,7 +9,7 @@ use crate::api::RhiApi;
 use crate::descriptor::{
     BarrierDesc, BufferCopy, BufferImageCopy, ImageBarrierDesc, RenderArea, RenderingDesc, Viewport,
 };
-use crate::enums::{ImageLayout, ShaderStage};
+use crate::enums::{ImageLayout, IndexType, ShaderStage};
 use crate::error::RhiError;
 
 /// Records commands into a one-time-submit command buffer.
@@ -153,6 +153,51 @@ pub trait RhiCommandEncoder<A: RhiApi> {
     #[cold]
     #[inline(never)]
     fn set_scissor(&mut self, _scissor: &RenderArea) {
+        // Phase-6 S0 default seam: overridden by the Vulkan backend.
+    }
+
+    /// Binds `buffer` as the vertex buffer at `binding`, reading from byte `offset`
+    /// (Phase-6 S0 rung 3). Must be recorded before a [`Self::draw`] that consumes a
+    /// vertex layout. Rung 3 binds binding `0` at offset `0`.
+    ///
+    /// The default body is a no-op marked `#[cold] #[inline(never)]`; the Vulkan
+    /// backend overrides it (`vkCmdBindVertexBuffers`).
+    #[cold]
+    #[inline(never)]
+    fn bind_vertex_buffer(&mut self, _buffer: &A::Buffer, _binding: u32, _offset: u64) {
+        // Phase-6 S0 default seam: overridden by the Vulkan backend.
+    }
+
+    /// Binds `buffer` as the index buffer (from byte `offset`, with index width
+    /// `index_type`) for a subsequent indexed draw (Phase-6 S0 rung-3 seam). Rung 3
+    /// itself draws non-indexed, so the foundation does not call this yet; it is
+    /// defined so the encoder surface + ABI are stable for the indexed-draw rung.
+    ///
+    /// The default body is a no-op marked `#[cold] #[inline(never)]`; the Vulkan
+    /// backend overrides it (`vkCmdBindIndexBuffer`).
+    #[cold]
+    #[inline(never)]
+    fn bind_index_buffer(&mut self, _buffer: &A::Buffer, _offset: u64, _index_type: IndexType) {
+        // Phase-6 S0 default seam: overridden by the Vulkan backend.
+    }
+
+    /// Records a push-constant update against a **graphics** pipeline's layout
+    /// (Phase-6 S0 rung 3 — the MVP `float4x4`). Distinct from [`Self::push_constants`]
+    /// (which targets the fixed compute layout): this reads the layout from the
+    /// passed graphics `pipeline`, so the MVP can be pushed to the rung-3 pipeline's
+    /// `VERTEX`-stage range without touching the compute path.
+    ///
+    /// The default body is a no-op marked `#[cold] #[inline(never)]`; the Vulkan
+    /// backend overrides it (`vkCmdPushConstants` against the pipeline's layout).
+    #[cold]
+    #[inline(never)]
+    fn push_graphics_constants(
+        &mut self,
+        _pipeline: &A::GraphicsPipeline,
+        _stage: ShaderStage,
+        _offset: u32,
+        _bytes: &[u8],
+    ) {
         // Phase-6 S0 default seam: overridden by the Vulkan backend.
     }
 

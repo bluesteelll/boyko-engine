@@ -629,6 +629,19 @@ pub const VK_COLOR_COMPONENT_G_BIT: VkFlags = 0x0000_0002;
 pub const VK_COLOR_COMPONENT_B_BIT: VkFlags = 0x0000_0004;
 pub const VK_COLOR_COMPONENT_A_BIT: VkFlags = 0x0000_0008;
 
+// --- Phase-6 S0 rung-3 vertex-input + index + buffer-usage constants. ---
+
+/// `VkVertexInputRate::VK_VERTEX_INPUT_RATE_VERTEX` — one attribute set per vertex.
+pub const VK_VERTEX_INPUT_RATE_VERTEX: i32 = 0;
+/// `VkIndexType::VK_INDEX_TYPE_UINT16`.
+pub const VK_INDEX_TYPE_UINT16: i32 = 0;
+/// `VkIndexType::VK_INDEX_TYPE_UINT32`.
+pub const VK_INDEX_TYPE_UINT32: i32 = 1;
+/// `VkBufferUsageFlagBits::VK_BUFFER_USAGE_VERTEX_BUFFER_BIT` (rung 3).
+pub const VK_BUFFER_USAGE_VERTEX_BUFFER_BIT: VkFlags = 0x0000_0080;
+/// `VkBufferUsageFlagBits::VK_BUFFER_USAGE_INDEX_BUFFER_BIT` (rung-3 seam).
+pub const VK_BUFFER_USAGE_INDEX_BUFFER_BIT: VkFlags = 0x0000_0040;
+
 /// `VkCommandBufferLevel::VK_COMMAND_BUFFER_LEVEL_PRIMARY`.
 pub const VK_COMMAND_BUFFER_LEVEL_PRIMARY: i32 = 0;
 
@@ -678,6 +691,12 @@ pub const VK_FORMAT_R8G8B8A8_UNORM: i32 = 37;
 pub const VK_FORMAT_R8G8B8A8_SRGB: i32 = 43;
 /// `VkFormat::VK_FORMAT_UNDEFINED`.
 pub const VK_FORMAT_UNDEFINED: i32 = 0;
+/// `VkFormat::VK_FORMAT_R32G32B32_SFLOAT` — three 32-bit floats (a vec3 vertex
+/// position, Phase-6 S0 rung 3).
+pub const VK_FORMAT_R32G32B32_SFLOAT: i32 = 106;
+/// `VkFormat::VK_FORMAT_R32G32B32A32_SFLOAT` — four 32-bit floats (a vec4 vertex
+/// color, Phase-6 S0 rung 3).
+pub const VK_FORMAT_R32G32B32A32_SFLOAT: i32 = 109;
 
 /// `VkColorSpaceKHR::VK_COLOR_SPACE_SRGB_NONLINEAR_KHR` — the always-present space.
 pub const VK_COLOR_SPACE_SRGB_NONLINEAR_KHR: i32 = 0;
@@ -1111,20 +1130,42 @@ pub struct VkComputePipelineCreateInfo {
 // match the C ABI (the layout guards below break the build on any drift).
 // ---------------------------------------------------------------------------
 
-/// `VkPipelineVertexInputStateCreateInfo` — rung 2 binds NO vertex buffer (the
-/// vertex shader generates positions from `SV_VertexID`), so both binding/attribute
-/// arrays are empty.
+/// `VkVertexInputBindingDescription` — one vertex buffer binding's stride + input
+/// rate (Phase-6 S0 rung 3).
+#[repr(C)]
+pub struct VkVertexInputBindingDescription {
+    pub binding: u32,
+    pub stride: u32,
+    /// `VkVertexInputRate`.
+    pub input_rate: i32,
+}
+
+/// `VkVertexInputAttributeDescription` — one attribute's `(location, binding,
+/// format, offset)` within a vertex (Phase-6 S0 rung 3).
+#[repr(C)]
+pub struct VkVertexInputAttributeDescription {
+    pub location: u32,
+    pub binding: u32,
+    /// `VkFormat`.
+    pub format: i32,
+    pub offset: u32,
+}
+
+/// `VkPipelineVertexInputStateCreateInfo`. Rung 2 binds NO vertex buffer (the
+/// vertex shader generates positions from `SV_VertexID`) so both arrays are empty
+/// (count `0`, null pointers); rung 3 supplies one binding + one attribute per
+/// vertex-layout entry.
 #[repr(C)]
 pub struct VkPipelineVertexInputStateCreateInfo {
     pub s_type: VkStructureType,
     pub p_next: *const c_void,
     pub flags: VkFlags,
     pub vertex_binding_description_count: u32,
-    /// `const VkVertexInputBindingDescription*` — null (no vertex buffer).
-    pub p_vertex_binding_descriptions: *const c_void,
+    /// `const VkVertexInputBindingDescription*` — null when count is `0`.
+    pub p_vertex_binding_descriptions: *const VkVertexInputBindingDescription,
     pub vertex_attribute_description_count: u32,
-    /// `const VkVertexInputAttributeDescription*` — null (no vertex buffer).
-    pub p_vertex_attribute_descriptions: *const c_void,
+    /// `const VkVertexInputAttributeDescription*` — null when count is `0`.
+    pub p_vertex_attribute_descriptions: *const VkVertexInputAttributeDescription,
 }
 
 /// `VkPipelineInputAssemblyStateCreateInfo`.
@@ -1830,6 +1871,10 @@ const _: () = assert!(core::mem::size_of::<VkDescriptorPoolSize>() == 8);
 // layout MUST match the C ABI or the driver reads garbage at a shifted offset.
 // (Sizes are the x86_64 / LP64 C ABI footprints with 8-byte pointer alignment.)
 const _: () = assert!(core::mem::size_of::<VkViewport>() == 24);
+// Phase-6 S0 rung-3 vertex-input descriptions (read BY the driver in
+// `vkCreateGraphicsPipelines`): `(u32, u32, i32)` = 12 B; `(u32, u32, i32, u32)` = 16 B.
+const _: () = assert!(core::mem::size_of::<VkVertexInputBindingDescription>() == 12);
+const _: () = assert!(core::mem::size_of::<VkVertexInputAttributeDescription>() == 16);
 const _: () = assert!(core::mem::size_of::<VkPipelineVertexInputStateCreateInfo>() == 48);
 const _: () = assert!(core::mem::size_of::<VkPipelineInputAssemblyStateCreateInfo>() == 32);
 const _: () = assert!(core::mem::size_of::<VkPipelineViewportStateCreateInfo>() == 48);
@@ -2220,6 +2265,25 @@ pub type PfnVkCmdDraw = unsafe extern "system" fn(
     instance_count: u32,
     first_vertex: u32,
     first_instance: u32,
+);
+
+/// `PFN_vkCmdBindVertexBuffers` — binds `binding_count` vertex buffers starting at
+/// `first_binding` (rung 3 binds one).
+pub type PfnVkCmdBindVertexBuffers = unsafe extern "system" fn(
+    command_buffer: VkCommandBuffer,
+    first_binding: u32,
+    binding_count: u32,
+    p_buffers: *const VkBuffer,
+    p_offsets: *const VkDeviceSize,
+);
+
+/// `PFN_vkCmdBindIndexBuffer` — binds an index buffer (rung-3 seam; non-indexed
+/// rung 3 does not call it).
+pub type PfnVkCmdBindIndexBuffer = unsafe extern "system" fn(
+    command_buffer: VkCommandBuffer,
+    buffer: VkBuffer,
+    offset: VkDeviceSize,
+    index_type: i32,
 );
 
 /// `PFN_vkCmdPipelineBarrier`.

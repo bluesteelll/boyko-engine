@@ -14,26 +14,28 @@
 //! `push_constants`, `pipeline_barrier`) is covered.
 
 use boyko_rhi::enums::{
-    BarrierAccess, BarrierStage, BufferUsage, Format, ImageAspect, ImageLayout, ImageUsage, LoadOp,
-    PrimitiveTopology, ShaderStage, StoreOp, TextureDimension,
+    BarrierAccess, BarrierStage, BufferUsage, Format, ImageAspect, ImageLayout, ImageUsage,
+    IndexType, LoadOp, PrimitiveTopology, ShaderStage, StoreOp, TextureDimension, VertexFormat,
 };
 
 use crate::ffi::{
     VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_SHADER_WRITE_BIT,
     VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ATTACHMENT_LOAD_OP_CLEAR,
-    VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE, VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
-    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-    VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_FORMAT_B8G8R8A8_UNORM,
-    VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_UNDEFINED, VK_IMAGE_ASPECT_COLOR_BIT,
-    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
-    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-    VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_TYPE_2D, VK_IMAGE_TYPE_3D,
-    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_USAGE_STORAGE_BIT,
-    VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-    VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-    VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_SHADER_STAGE_COMPUTE_BIT,
-    VK_SHADER_STAGE_FRAGMENT_BIT, VK_SHADER_STAGE_VERTEX_BIT,
+    VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+    VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+    VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+    VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_FORMAT_B8G8R8A8_UNORM,
+    VK_FORMAT_R32G32B32A32_SFLOAT, VK_FORMAT_R32G32B32_SFLOAT, VK_FORMAT_R8G8B8A8_UNORM,
+    VK_FORMAT_UNDEFINED, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+    VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_TYPE_2D,
+    VK_IMAGE_TYPE_3D, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_USAGE_SAMPLED_BIT,
+    VK_IMAGE_USAGE_STORAGE_BIT, VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+    VK_INDEX_TYPE_UINT16, VK_INDEX_TYPE_UINT32, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+    VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+    VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_SHADER_STAGE_COMPUTE_BIT, VK_SHADER_STAGE_FRAGMENT_BIT,
+    VK_SHADER_STAGE_VERTEX_BIT,
 };
 
 // ===== BufferUsage (identity-cast in `create_buffer`). =====
@@ -56,6 +58,14 @@ const _: () = assert!(
 const _: () = assert!(
     BufferUsage::INDIRECT.bits() == VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
     "BufferUsage::INDIRECT must equal VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT"
+);
+const _: () = assert!(
+    BufferUsage::VERTEX.bits() == VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+    "BufferUsage::VERTEX must equal VK_BUFFER_USAGE_VERTEX_BUFFER_BIT"
+);
+const _: () = assert!(
+    BufferUsage::INDEX.bits() == VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+    "BufferUsage::INDEX must equal VK_BUFFER_USAGE_INDEX_BUFFER_BIT"
 );
 
 // ===== ShaderStage (identity-cast in `push_constants`). =====
@@ -229,4 +239,31 @@ const _: () = assert!(
 const _: () = assert!(
     PrimitiveTopology::TriangleList.as_i32() == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
     "PrimitiveTopology::TriangleList must equal VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST"
+);
+
+// ===========================================================================
+// Phase-6 S0 rung-3 vertex-input + index contracts. `VertexFormat` `as_i32()` is
+// mapped in `create_graphics_pipeline` (the `VkVertexInputAttributeDescription`
+// format); `IndexType` `as_i32()` is mapped in `bind_index_buffer`. These pin the
+// agnostic↔`VkFormat`/`VkIndexType` discriminant equality.
+// ===========================================================================
+
+// --- VertexFormat `as_i32()` (mapped in `create_graphics_pipeline`). ---
+const _: () = assert!(
+    VertexFormat::Float32x3.as_i32() == VK_FORMAT_R32G32B32_SFLOAT,
+    "VertexFormat::Float32x3 must equal VK_FORMAT_R32G32B32_SFLOAT"
+);
+const _: () = assert!(
+    VertexFormat::Float32x4.as_i32() == VK_FORMAT_R32G32B32A32_SFLOAT,
+    "VertexFormat::Float32x4 must equal VK_FORMAT_R32G32B32A32_SFLOAT"
+);
+
+// --- IndexType `as_i32()` (mapped in `bind_index_buffer`). ---
+const _: () = assert!(
+    IndexType::Uint16.as_i32() == VK_INDEX_TYPE_UINT16,
+    "IndexType::Uint16 must equal VK_INDEX_TYPE_UINT16"
+);
+const _: () = assert!(
+    IndexType::Uint32.as_i32() == VK_INDEX_TYPE_UINT32,
+    "IndexType::Uint32 must equal VK_INDEX_TYPE_UINT32"
 );
