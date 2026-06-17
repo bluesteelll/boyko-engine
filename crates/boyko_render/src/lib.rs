@@ -23,15 +23,21 @@
 //! # Wave C scope
 //!
 //! Wave C adds the hand-written [`GpuSystem`] (`impl boyko_ecs::System`) — the MF-5
-//! mechanism. It declares EMPTY access + the `is_gpu` marker, projects the `!Send`
-//! [`RhiContext`] from the world's NonSend slab inside `run_unsafe` (via the public
-//! [`UnsafeEcsCell::nonsend_resource_mut`], WITHOUT `mark_universal`), resolves its
-//! target column indirectly by `(archetype, component)` (MF-7), and records +
-//! submits the `gpu_integrate` compute dispatch. The compute pipeline is built once
-//! at setup from the committed [`gpu_integrate_spirv`] via
+//! mechanism, in its shipped Phase 5 Option-C shape. It declares EMPTY access + the
+//! `is_gpu` marker, projects the `!Send` [`RhiContext`] from the world's NonSend
+//! slab inside [`GpuSystem::run_dispatcher`](GpuSystem) through the dispatcher-only
+//! [`DispatcherToken::nonsend_resource_mut`] (NOT `run_unsafe`, and NOT a raw cell
+//! accessor — the superseded MF-5 `UnsafeEcsCell::nonsend_resource_mut` was DELETED
+//! because it was reachable on the concurrent worker path and its `'w` return
+//! lifetime allowed two live `&mut R` aliases). The token is mintable ONLY on the
+//! dispatcher-solo path (`running == 0`), so a worker never reaches the `!Send`
+//! context, and `run_unsafe` is a debug-panic no-op. The system resolves its target
+//! column indirectly by `(archetype, component)` (MF-7), and records + submits the
+//! `gpu_integrate` compute dispatch. The compute pipeline is built once at setup
+//! from the committed [`gpu_integrate_spirv`] via
 //! [`RhiContext::create_compute_pipeline`].
 //!
-//! [`UnsafeEcsCell::nonsend_resource_mut`]: boyko_ecs::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell::nonsend_resource_mut
+//! [`DispatcherToken::nonsend_resource_mut`]: boyko_ecs::ecs::core::system::dispatcher_token::DispatcherToken::nonsend_resource_mut
 //!
 //! # Wave D scope
 //!

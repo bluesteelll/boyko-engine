@@ -1,20 +1,47 @@
-//! Wave-E capstone golden test: the lowered barrier is LOAD-BEARING (Phase 5 D6 /
-//! MF-6 / MF-7 / the §6 validation oracle).
+//! Wave-E capstone golden test: the barrier mechanism (Phase 5 D6 / MF-6 / MF-7 /
+//! the §6 validation oracle). The two halves prove two DISTINCT, complementary
+//! properties — they are NOT both load-bearing demonstrations:
 //!
-//! Two halves:
-//!
-//! * **Test A** (`lowered_barrier_is_accepted_and_correct`) — drive the
+//! * **Test A** (`lowered_barrier_is_accepted_and_correct`) — proves the
+//!   PRODUCTION-LOWERED plan is ACCEPTED + NON-corrupting. It drives the
 //!   [`GpuSystem`] with the barrier plan produced by the production lowering path
-//!   `lower_barriers(Schedule::gpu_barrier_inputs(), consumer_key)`. The recorded
-//!   `vkCmdPipelineBarrier` is ACCEPTED by the validation layer (total == 0) and
-//!   the result is the correct `+100` — the lowered barrier is a valid barrier.
+//!   `lower_barriers(Schedule::gpu_barrier_inputs(), consumer_key)` for the demo's
+//!   CPU-producer→GpuSystem edge. The recorded `vkCmdPipelineBarrier` is ACCEPTED
+//!   by the validation layer (total == 0) and the result is the correct `+100`.
+//!   This is NOT a load-bearing demonstration: for the CPU-producer edge the
+//!   lowered barrier is DEGENERATE — `fold_intent` on the empty CPU-producer
+//!   intent yields `src_access == BarrierAccess::NONE` (barrier.rs), so in a
+//!   single-dispatch frame it orders nothing. The test proves the production
+//!   lowering output is a VALID, accepted, non-corrupting barrier — not that
+//!   removing it manifests a hazard.
 //!
-//! * **Test B** (`omitting_the_barrier_manifests_a_hazard`) — record a REAL
+//! * **Test B** (`omitting_the_barrier_manifests_a_hazard`) — proves a barrier is
+//!   LOAD-BEARING (removing it manifests a real hazard). It records a REAL
 //!   intra-submit hazard: TWO `gpu_integrate` compute passes over the SAME device
 //!   column in ONE `vkQueueSubmit` (so the per-op fence does NOT order them; only
 //!   a barrier can). With the barrier between the passes the run is clean and the
 //!   result is the deterministic `+200`; WITHOUT it the passes are unsynchronized
-//!   and the dependency is broken.
+//!   and the dependency is broken. The barrier exercised here is HAND-WRITTEN
+//!   (`dispatch_compute_twice_one_submit`'s in-line `COMPUTE_SHADER`
+//!   `SHADER_WRITE`→`SHADER_READ|SHADER_WRITE` mask), NOT a lowered
+//!   [`PlannedBarrier`] — it proves a barrier of that shape is load-bearing.
+//!
+//! # What is deferred: a NON-degenerate LOWERED barrier proven load-bearing
+//!
+//! No test here exercises a non-degenerate lowered [`PlannedBarrier`] (one with
+//! `src_access == SHADER_WRITE`) AS load-bearing. Such a barrier would be lowered
+//! from a GPU-producer→GPU-consumer edge on the SAME column, but the production
+//! frame path cannot manifest its removal as a hazard: every [`GpuSystem`]
+//! dispatches solo and `GpuColumnManager::dispatch_compute` creates its OWN fence
+//! and `wait_fence(u64::MAX)` before returning, so two GPU systems are two SEPARATE
+//! fence-waited submits — the per-op fence ALREADY orders them, and removing the
+//! consumer's barrier would change nothing observable (the honest 3-way oracle
+//! below would deterministically hit its `neither` branch). A load-bearing
+//! REMOVAL is only observable for an INTRA-submit overlap (one `vkQueueSubmit`
+//! recording two passes), which the production schedule never emits — it records
+//! exactly one pass per submit. Proving a non-degenerate LOWERED barrier
+//! load-bearing therefore requires the Phase-6 deferred/batched-submit GPU
+//! scheduler (multiple GPU passes in one submit) and is out of scope for Phase 5.
 //!
 //! # The Test-B oracle (HONEST — see deliverable b)
 //!
@@ -99,8 +126,11 @@ fn setup(
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// Test A — the LOWERED barrier is accepted by validation AND gives the correct
-//          result (the barrier the production path produces is valid).
+// Test A — the PRODUCTION-LOWERED barrier is ACCEPTED by validation AND gives the
+//          correct result (the barrier the production path produces is valid and
+//          non-corrupting). NOT a load-bearing demonstration: for the CPU-producer
+//          edge the lowered barrier is degenerate (src_access == NONE) — see the
+//          module docstring. Load-bearing-ness is Test B's job.
 // ════════════════════════════════════════════════════════════════════════════
 
 #[test]

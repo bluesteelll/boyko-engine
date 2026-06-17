@@ -546,7 +546,13 @@ static RESIDENCY_CLASS: [AtomicU8; MAX_COMPONENTS] =
 
 /// Number of 64-bit words in the [`GPU_COMPONENT_SET`] bitset
 /// (`MAX_COMPONENTS / 64`).
-pub const GPU_COMPONENT_SET_WORDS: usize = MAX_COMPONENTS / 64;
+///
+/// `pub(crate)`: the raw residency-bitset word geometry is an internal detail of
+/// the W1 query-construction footgun check (`QueryState::new`, same crate).
+/// Downstream code that needs residency uses the public [`residency_class`] /
+/// [`classify_component_residency`] surface, never the raw process-global word
+/// accessor.
+pub(crate) const GPU_COMPONENT_SET_WORDS: usize = MAX_COMPONENTS / 64;
 
 /// Phase 5 W1 — process-global bitset of every `ComponentId` whose
 /// [`residency_class`] is [`ResidencyKind::Gpu`], one bit per id.
@@ -579,8 +585,12 @@ static GPU_COMPONENT_SET: [AtomicU64; GPU_COMPONENT_SET_WORDS] =
 /// # Panics (debug only)
 ///
 /// A debug assertion fires if `word_index >= GPU_COMPONENT_SET_WORDS`.
+///
+/// `pub(crate)`: the sole caller is `QueryState::new` (same crate). Exposing the
+/// raw process-global GPU residency bitset word-accessor downstream is a footgun —
+/// downstream code that needs residency uses the public [`residency_class`].
 #[inline]
-pub fn gpu_component_set_word(word_index: usize) -> u64 {
+pub(crate) fn gpu_component_set_word(word_index: usize) -> u64 {
     // FIX-5: no runtime `>= WORDS` guard — the sole caller (`QueryState::new`)
     // bounds `w` to `0..GPU_COMPONENT_SET_WORDS`, so an out-of-bounds index is
     // unreachable. A silent `return 0` would make the W1 diagnostic MISS rather
