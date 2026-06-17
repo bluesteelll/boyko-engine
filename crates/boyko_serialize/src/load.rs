@@ -117,9 +117,22 @@ struct ResolvedType {
     /// `true` when a `deserialize_fn` is installed for the running type (a ViaFn
     /// decode is permitted, or a POB fingerprint mismatch can demote to decode).
     has_decoder: bool,
+    /// `true` when the running type's per-component `format_version` matches the
+    /// file's (a POB blit is permitted). Meaningless when `component_id` is `None`
+    /// (set `false`). The version is the deliberate user signal that a component's
+    /// on-disk bytes changed meaning (plan §3.5; S3 item 1), so it gates the blit
+    /// fast path INDEPENDENTLY of `fingerprint_ok`.
+    version_ok: bool,
+    /// The per-component `format_version` recorded in the file, for a
+    /// `VersionMismatch` diagnostic.
+    file_format_version: u16,
+    /// The running type's per-component `format_version`, for a `VersionMismatch`
+    /// diagnostic. `0` when `component_id` is `None`.
+    running_format_version: u16,
     /// The file's per-column stride (`size`), used to validate a POB `byte_len`.
     size: usize,
-    /// The running type's stable name, for a `FingerprintMismatch` diagnostic.
+    /// The running type's stable name, for a `FingerprintMismatch` /
+    /// `VersionMismatch` diagnostic.
     stable_name: &'static str,
 }
 
@@ -138,11 +151,25 @@ struct ResolvedType {
 /// resolves the file's stable names against already-registered ids. A file type
 /// with no registered match is counted `types_skipped` (lenient).
 ///
+/// # Version protection (W1 asymmetry)
+///
+/// Per-component `format_version` protection (S3 item 1) applies to BLITTABLE
+/// (`PlainOldBytes`) columns ONLY. A blittable column whose file `format_version`
+/// differs from the running type's is a hard [`LoadError::VersionMismatch`] — never
+/// a silent blit of stale bytes, even when the `layout_fingerprint` still matches
+/// (a same-shape semantic reinterpretation). An OWNING (`SerializeViaFn`) component
+/// is RE-DECODED across a `format_version` bump (its `deserialize_fn` rebuilds the
+/// value from the wire structure), and the loader CANNOT detect a purely-semantic
+/// field reinterpretation that leaves the wire structure unchanged — encode such a
+/// change as a wire-structure change (caught by the fingerprint / decoder) or await
+/// the future migration hook (plan §6).
+///
 /// # Errors
 ///
 /// [`LoadError`] on bad magic, an unsupported version, an endianness / ptr-width
 /// mismatch, a truncated / corrupt stream, a POB fingerprint mismatch with no
-/// decoder, or a `deserialize_fn` rejection.
+/// decoder, a POB per-component version mismatch ([`LoadError::VersionMismatch`]),
+/// or a `deserialize_fn` rejection.
 pub fn load_world(
     world: &mut EcsMaster,
     bytes: &[u8],
@@ -174,6 +201,11 @@ pub fn load_world(
             &mut report,
         )?;
     }
+
+    // Seal the saved→fresh table before the remap pass; the build is
+    // insert-all-then-lookup, so sorting once here lets every `get` below
+    // binary-search (and trips the debug guard if a `get` ever precedes this).
+    map.finalize();
 
     // ── Step 5: the entity-remap pass (S2.5 / C4) ──────────────────────────────
     // A SEPARATE whole-world pass AFTER every archetype is loaded: rewrite each
@@ -278,23 +310,36 @@ fn resolve_type_table(
         let component_id = component_registry::resolve_stable_name(entry.stable_name_hash, name)
             .map(ComponentId);
 
-        let (fingerprint_ok, has_decoder, stable_name) = match component_id {
-            Some(cid) => {
-                let info = component_registry::get_serialize_info(cid.0);
-                let running_fp = info.map(|i| i.layout_fingerprint).unwrap_or(0);
-                let fingerprint_ok = running_fp == entry.layout_fingerprint;
-                let has_decoder = info.is_some_and(|i| i.deserialize_fn.is_some());
-                let stable_name = info.map(|i| i.stable_name).unwrap_or("<unknown>");
-                (fingerprint_ok, has_decoder, stable_name)
-            }
-            None => (false, false, "<unresolved>"),
-        };
+        let (fingerprint_ok, has_decoder, version_ok, running_format_version, stable_name) =
+            match component_id {
+                Some(cid) => {
+                    let info = component_registry::get_serialize_info(cid.0);
+                    let running_fp = info.map(|i| i.layout_fingerprint).unwrap_or(0);
+                    let fingerprint_ok = running_fp == entry.layout_fingerprint;
+                    let has_decoder = info.is_some_and(|i| i.deserialize_fn.is_some());
+                    // Per-component version gate (S3 item 1). A self-save writes
+                    // `entry.format_version == info.format_version` (save.rs:543), so
+                    // `version_ok` is ALWAYS true on a self-save — existing round-trip
+                    // tests are unaffected. The `unwrap_or(0)` (an absent serialize
+                    // info) makes a missing-info running type compare against the file
+                    // version, which is only reachable for an unregistered id —
+                    // already filtered into the `None` arm below.
+                    let running_version = info.map(|i| i.format_version).unwrap_or(0);
+                    let version_ok = running_version == entry.format_version;
+                    let stable_name = info.map(|i| i.stable_name).unwrap_or("<unknown>");
+                    (fingerprint_ok, has_decoder, version_ok, running_version, stable_name)
+                }
+                None => (false, false, false, 0, "<unresolved>"),
+            };
 
         out.push(ResolvedType {
             component_id,
             serializability,
             fingerprint_ok,
             has_decoder,
+            version_ok,
+            file_format_version: entry.format_version,
+            running_format_version,
             size: entry.size as usize,
             stable_name,
         });
@@ -394,6 +439,18 @@ fn load_one_archetype(
         }
     }
 
+    // ── Pool-capacity gate (C2): authoritative on the WRITER side ──────────────
+    // The writer's `Archetype::reserve_capacity(n)` is the SINGLE authoritative pool
+    // row-ceiling gate. A forged `entity_count` (== `n`) for a ZST/tiny-stride column
+    // — or two file blocks that dedup-collapse onto ONE running archetype, summing to
+    // `e1 + e2 > ceiling` on an ADDITIVE pool `len` — is rejected by the writer as a
+    // LOUD `LoadWriteError::CapacityExceeded` (mapped to `LoadError::CapacityExceeded`
+    // via `?` below), never an `.expect()` panic. The earlier per-block load-side
+    // pre-check could NOT see the additive pool `len`, so it could not shadow the
+    // block-collapse case; the writer-side gate does. (`load_archetype` /
+    // `reserve_capacity` are reachable ONLY from `load_world`, a cold path — the
+    // C1 0%-gate is preserved.)
+
     // ── Column pass 2: classify each present column into a LoadColumn ───────────
     let mut ids: Vec<ComponentId> = Vec::with_capacity(descs.len());
     let mut columns: Vec<LoadColumn<'_>> = Vec::with_capacity(descs.len());
@@ -492,7 +549,11 @@ fn classify_column<'a>(
 ) -> Result<ColumnPlan<'a>, LoadError> {
     match rt.serializability {
         Serializability::PlainOldBytes => {
-            if rt.fingerprint_ok {
+            // The blit fast path requires BOTH a matching layout fingerprint AND a
+            // matching per-component `format_version` (S3 item 1): the version is the
+            // deliberate user signal that the bytes changed meaning, so a same-shape
+            // semantic reinterpretation (fingerprint still matches) is still rejected.
+            if rt.fingerprint_ok && rt.version_ok {
                 // POB blit fast path. RELEASE-validate `byte_len == n * stride` (C3:
                 // a corrupt shorter length would leave the pool tail uninit; a longer
                 // one would overrun the reserved region — both UB), then slice it.
@@ -508,18 +569,42 @@ fn classify_column<'a>(
                     bytes: col_bytes,
                 }))
             } else if rt.has_decoder {
-                // C2: fingerprint mismatch but a decoder exists → demote to decode.
-                // (S1.5 installs a Wire decoder for every Wire-able component, so a
-                // POB type that gained a niche field but kept its Wire decode can
-                // still load.)
+                // NOTE (W2): this demote branch is DEAD for POB today —
+                // `install_serialize_fn` installs `(None, None)` for a `PlainOldBytes`
+                // type (component_registry.rs ~1866), so `rt.has_decoder` is always
+                // false on this arm. It is kept SYMMETRIC with the fingerprint path
+                // (and so a future POB decoder would activate here). If a POB decoder
+                // is ever installed, this branch decodes UNTRUSTED bytes — it MUST get
+                // a dedicated fuzz case before that activation ships.
+                debug_assert!(
+                    rt.serializability != Serializability::PlainOldBytes,
+                    "W2: a POB column reached the has_decoder demote branch — \
+                     install_serialize_fn installs no POB decoder, so this is dead \
+                     today; a future activation must add a fuzz case first"
+                );
                 decode_column(bytes, d)
+            } else if !rt.version_ok {
+                // W4 VERSION-FIRST precedence: the version is the deliberate user
+                // signal, so a simultaneous version + fingerprint mismatch reports
+                // VersionMismatch. HARD error — never a silent stale-bytes blit.
+                Err(LoadError::VersionMismatch {
+                    name: rt.stable_name,
+                    file: rt.file_format_version,
+                    running: rt.running_format_version,
+                })
             } else {
-                // C2 HARD ERROR: a blittable column whose shape changed, with no
-                // decode fallback — never a silent garbage blit.
+                // C2 HARD ERROR: a blittable column whose shape changed (version still
+                // matches), with no decode fallback — never a silent garbage blit.
                 Err(LoadError::FingerprintMismatch(rt.stable_name))
             }
         }
         Serializability::SerializeViaFn => {
+            // TODO(S-future): explicit ViaFn version-migration policy hook — see
+            // SERIALIZATION-PLAN.md §6. A ViaFn column is re-decoded across a
+            // `format_version` bump (W1 asymmetry): the loader cannot detect a
+            // purely-semantic field reinterpretation that leaves the wire structure
+            // unchanged. Until the migration hook lands, encode such a change as a
+            // wire-structure change (caught by the fingerprint / decoder).
             if d.byte_len == 0 || !rt.has_decoder {
                 // The S1.5 non-Wire demotion case (column carries no data) OR no
                 // decoder installed: default-construct via a require ctor if one

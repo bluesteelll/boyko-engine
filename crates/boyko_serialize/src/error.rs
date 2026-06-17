@@ -9,7 +9,8 @@
 use std::fmt;
 use std::io;
 
-use boyko_ecs::ecs::core::serialize::DecodeError;
+use boyko_ecs::ecs::core::serialize::{DecodeError, LoadWriteError};
+use boyko_ecs::ecs::identifiers::primitives::ComponentId;
 
 /// A failure during [`save_world`](crate::save_world) /
 /// [`save_world_to_file`](crate::save_world_to_file).
@@ -92,10 +93,51 @@ pub enum LoadError {
     /// `format_version` (the C2 hard error — never a silent garbage blit). Carries
     /// the offending component's stable name.
     FingerprintMismatch(&'static str),
+    /// A blittable (`PlainOldBytes`) column's per-component `format_version` does
+    /// not match the running type's (plan §3.5; S3 item 1). The version is the
+    /// DELIBERATE user signal that a component's on-disk bytes changed meaning, so
+    /// a mismatch is a HARD error rather than a silent blit of stale bytes — even
+    /// when the `layout_fingerprint` still matches (a same-shape semantic
+    /// reinterpretation). Carries the component's stable `name` plus the `file` and
+    /// `running` versions.
+    ///
+    /// # Asymmetry (W1)
+    ///
+    /// This protection applies to BLITTABLE columns only. An owning
+    /// (`SerializeViaFn`) component is RE-DECODED across a `format_version` bump
+    /// (its `deserialize_fn` rebuilds the value from the wire structure), and the
+    /// loader cannot detect a purely-semantic field reinterpretation that leaves
+    /// the wire structure unchanged — encode such a change as a wire-structure
+    /// change (caught by the fingerprint / decoder) or await the future migration
+    /// hook (plan §6).
+    VersionMismatch {
+        /// The running component's stable name.
+        name: &'static str,
+        /// The per-component `format_version` recorded in the file.
+        file: u16,
+        /// The per-component `format_version` of the running build's type.
+        running: u16,
+    },
     /// A per-element `deserialize_fn` rejected a malformed/truncated column run
     /// (the C3 validate-on-read obligation). Carries the underlying
     /// [`DecodeError`]. The partially-loaded archetype was rolled back.
     Decode(DecodeError),
+    /// The file declares more rows for one archetype than a hosted component pool
+    /// can hold — its reserve ceiling (`POOL_MAX_ROWS` / a per-stride bound). The
+    /// row count is ADDITIVE on the running pool when two file blocks dedup-collapse
+    /// onto the same archetype, so a stream whose blocks each pass the per-block
+    /// guard can still overflow the pool in aggregate (the C2 block-collapse case).
+    /// The load WRITER surfaces this as a LOUD `Err` (formerly an `.expect()` panic
+    /// at `Archetype::reserve_capacity`); no row is written, so the world is
+    /// untouched. Carries the offending column id and the rejected additive row
+    /// request.
+    CapacityExceeded {
+        /// The component column whose pool reserve ceiling was exceeded.
+        component: ComponentId,
+        /// The additive row count (`running_len + n`) the reserve would have grown
+        /// the pool to.
+        requested: usize,
+    },
 }
 
 impl fmt::Display for LoadError {
@@ -121,7 +163,18 @@ impl fmt::Display for LoadError {
                  deserialize_fn for the file's format_version (bump format_version on a \
                  layout change)"
             ),
+            LoadError::VersionMismatch { name, file, running } => write!(
+                f,
+                "load: per-component format_version mismatch for blittable component '{name}' \
+                 (file version {file}, this build {running}); install a Wire/deserialize \
+                 migration for this component or load with the matching build version"
+            ),
             LoadError::Decode(e) => write!(f, "load: malformed component stream ({e:?})"),
+            LoadError::CapacityExceeded { component, requested } => write!(
+                f,
+                "load: archetype row count {requested} exceeds the reserve ceiling of \
+                 component pool {component:?} (a forged or block-collapse-summed entity_count)"
+            ),
         }
     }
 }
@@ -136,5 +189,22 @@ impl From<DecodeError> for LoadError {
     #[inline]
     fn from(e: DecodeError) -> Self {
         LoadError::Decode(e)
+    }
+}
+
+impl From<LoadWriteError> for LoadError {
+    #[inline]
+    fn from(e: LoadWriteError) -> Self {
+        match e {
+            LoadWriteError::Decode(d) => LoadError::Decode(d),
+            LoadWriteError::CapacityExceeded { component, requested } => {
+                LoadError::CapacityExceeded { component, requested }
+            }
+            // `LoadWriteError` is `#[non_exhaustive]`: a future writer-side failure
+            // variant degrades to a loud, generic load rejection rather than failing
+            // to compile this downstream crate. Revisit with a dedicated `LoadError`
+            // variant when such a variant is added.
+            _ => LoadError::Truncated("load writer reported an unrecognized failure"),
+        }
     }
 }

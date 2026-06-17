@@ -21,7 +21,7 @@
 pub mod load_writer;
 pub mod wire;
 
-pub use load_writer::{LoadColumn, load_archetype, remap_loaded_entities};
+pub use load_writer::{LoadColumn, LoadWriteError, load_archetype, remap_loaded_entities};
 pub use wire::{Wire, WireRefTuple, WireTuple};
 
 // Re-export the registry's per-component deserialize fn-ptr alias here so the
@@ -249,57 +249,181 @@ pub enum DecodeError {
 /// Load-direction entity remap table: saved `EntityId.0` → freshly-allocated
 /// `Entity` (S2 `entity_map.rs`).
 ///
-/// Mirrors the clone subsystem's `EntityCloneMap` template (`SparseMap<Entity>`
-/// keyed by `EntityId.0`, plan §3.13). S1 keeps this a **placeholder**: the
-/// `LoadMapEntitiesFn` alias type-checks against it and the saver never touches it
-/// (the remap pass is load-direction). S2 fills in the build-on-load population
-/// from the saved entity table.
+/// # Why a sorted `Vec`, not a value-indexed sparse map (the F1 abort fix)
+///
+/// A saved `EntityId.0` is an UNTRUSTED value read straight from the file. An
+/// earlier design backed this map with a value-indexed dense `SparseMap<Entity>`
+/// (the clone-side `EntityCloneMap` template), whose backing store grows to
+/// `O(max saved-id value)`: a single bit-flipped saved id (e.g. `~2^40`) drove a
+/// multi-terabyte allocation that ABORTED the process — bypassing `catch_unwind`
+/// and killing the loader / fuzzer outright.
+///
+/// This map stores `(saved id, fresh Entity)` PAIRS in a `Vec`, so its memory is
+/// `O(entries)` — bounded by the total loaded entity count, which the loader has
+/// already capped (W2). It is NEVER keyed on a saved id VALUE, so no untrusted
+/// value can drive a pathological allocation.
+///
+/// # Two-phase contract: insert-all → `finalize` → `get`
+///
+/// The load path is insert-all-then-lookup. Every saved→fresh pair is appended via
+/// [`insert`](Self::insert) (push-only, `O(1)` amortized, in load order) during the
+/// per-archetype pass. Once every pair is recorded the loader calls
+/// [`finalize`](Self::finalize) ONCE — it sorts the pairs by saved id so the
+/// subsequent remap pass can resolve each lookup with a `binary_search`
+/// ([`get`](Self::get), `O(log n)`). In debug builds the phase transition is
+/// guarded: a `get` before `finalize`, or an `insert` after it, panics on a
+/// `debug_assert`.
 ///
 /// [`LoadMapEntitiesFn`]: crate::ecs::core::component::component_registry::LoadMapEntitiesFn
-//
 #[derive(Default)]
 pub struct LoadEntityMap {
-    /// `saved EntityId.0` → freshly-allocated `Entity`. Backed by a
-    /// `SparseMap<Entity>` (the `EntityCloneMap` template). S2's
-    /// [`load_archetype`](load_writer::load_archetype) populates one entry per
-    /// loaded entity; the S2.5 remap pass reads it through [`Self::get`].
-    sparse: boyko_utils::sparse_map::sparse_map::SparseMap<Entity>,
+    /// `(saved EntityId.0, fresh Entity)` pairs — pushed in load order, then sorted
+    /// by saved id ONCE in [`finalize`](Self::finalize) before the remap pass's
+    /// first [`get`](Self::get). Memory is `O(entries)` (== total loaded entities,
+    /// already W2-count-capped), NEVER keyed on a saved id VALUE — so no untrusted
+    /// value can drive a pathological allocation (the F1 abort fix).
+    entries: Vec<(u64, Entity)>,
+    /// Debug-only phase guard: `false` until [`finalize`](Self::finalize) seals the
+    /// table, then `true`. Enforces the insert-all → finalize → get contract.
+    #[cfg(debug_assertions)]
+    sealed: bool,
 }
 
 impl LoadEntityMap {
     /// Creates an empty map.
     #[inline]
     pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Creates an empty map preallocated for `n` saved→fresh pairs. Use this when a
+    /// pre-loop total entity count is cheaply available so the insert pass never
+    /// reallocates; otherwise [`new`](Self::new) is fine.
+    #[inline]
+    pub fn with_capacity(n: usize) -> Self {
         Self {
-            sparse: boyko_utils::sparse_map::sparse_map::SparseMap::new(),
+            entries: Vec::with_capacity(n),
+            #[cfg(debug_assertions)]
+            sealed: false,
         }
     }
 
     /// Records that the saved `saved_entity_id` (`EntityId.0`) maps to the
-    /// freshly-allocated `fresh` entity. Returns the previous mapping for that
-    /// saved id, if any (a duplicate saved id in one file — a corrupt save).
+    /// freshly-allocated `fresh` entity.
+    ///
+    /// Push-only: the pair is appended in load order; [`finalize`](Self::finalize)
+    /// sorts the table afterwards. Duplicate saved ids are not detected here (the
+    /// loader does not rely on it). Must be called only in the insert phase, before
+    /// [`finalize`](Self::finalize).
     #[inline]
-    pub fn insert(&mut self, saved_entity_id: usize, fresh: Entity) -> Option<Entity> {
-        self.sparse.insert(saved_entity_id, fresh)
+    pub fn insert(&mut self, saved_entity_id: usize, fresh: Entity) {
+        debug_assert!(!self.sealed, "LoadEntityMap: insert after finalize");
+        self.entries.push((saved_entity_id as u64, fresh));
+    }
+
+    /// Seals the table for lookups: sorts the recorded pairs by saved id so
+    /// [`get`](Self::get) can binary-search them. Call ONCE after the last
+    /// [`insert`](Self::insert) and before the first [`get`](Self::get).
+    #[inline]
+    pub fn finalize(&mut self) {
+        self.entries.sort_unstable_by_key(|&(k, _)| k);
+        #[cfg(debug_assertions)]
+        {
+            self.sealed = true;
+        }
     }
 
     /// Returns the freshly-allocated `Entity` for a saved `EntityId.0`, or `None`
     /// when the saved id was never registered in this load (an unmapped reference —
     /// the C4 loud-error path the loader turns into a release error).
+    ///
+    /// Must be called only after [`finalize`](Self::finalize) (the table must be
+    /// sorted for the binary search to be correct).
     #[inline]
     pub fn get(&self, saved_entity_id: usize) -> Option<Entity> {
-        self.sparse.get(saved_entity_id).copied()
+        debug_assert!(self.sealed, "LoadEntityMap: get before finalize");
+        self.entries
+            .binary_search_by_key(&(saved_entity_id as u64), |&(k, _)| k)
+            .ok()
+            .map(|i| self.entries[i].1)
     }
 
     /// Number of saved→fresh mappings recorded.
     #[inline]
     pub fn len(&self) -> usize {
-        self.sparse.len()
+        self.entries.len()
     }
 
     /// `true` when no mappings have been recorded.
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.sparse.is_empty()
+        self.entries.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ecs::identifiers::primitives::EntityId;
+
+    /// Mints a distinct fresh `Entity` for a test fixture (generation 0, matching
+    /// the loader's `Entity::new(EntityId(id), 0)` minting in `load_writer`).
+    fn fresh(id: usize) -> Entity {
+        Entity::new(EntityId(id), 0)
+    }
+
+    #[test]
+    fn load_entity_map_get_after_finalize_roundtrips() {
+        let mut map = LoadEntityMap::new();
+        // Insert OUT OF ORDER to prove `finalize` sorts before the binary search.
+        map.insert(40, fresh(100));
+        map.insert(10, fresh(101));
+        map.insert(30, fresh(102));
+        map.insert(20, fresh(103));
+        map.finalize();
+
+        assert_eq!(map.get(40), Some(fresh(100)));
+        assert_eq!(map.get(10), Some(fresh(101)));
+        assert_eq!(map.get(30), Some(fresh(102)));
+        assert_eq!(map.get(20), Some(fresh(103)));
+        // An absent key resolves to `None` (the C4 unmapped-reference path).
+        assert_eq!(map.get(25), None);
+        assert_eq!(map.get(0), None);
+        assert_eq!(map.len(), 4);
+    }
+
+    #[test]
+    fn load_entity_map_huge_saved_id_no_abort() {
+        // The exact F1 bug value: a value-indexed sparse map would try to allocate
+        // `O(2^40)` slots here and abort. A sorted-Vec stores exactly one pair.
+        let huge = 1usize << 40;
+        let mut map = LoadEntityMap::new();
+        map.insert(huge, fresh(7));
+        map.finalize();
+
+        assert_eq!(map.get(huge), Some(fresh(7)));
+        // Memory is O(entries), not O(max key value): one insert => one entry.
+        assert_eq!(map.len(), 1);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "LoadEntityMap: get before finalize")]
+    fn load_entity_map_get_before_finalize_panics() {
+        let mut map = LoadEntityMap::new();
+        map.insert(1, fresh(1));
+        // No `finalize` — the lookup phase guard must trip.
+        let _ = map.get(1);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "LoadEntityMap: insert after finalize")]
+    fn load_entity_map_insert_after_finalize_panics() {
+        let mut map = LoadEntityMap::new();
+        map.insert(1, fresh(1));
+        map.finalize();
+        // Inserting after sealing must trip the insert-phase guard.
+        map.insert(2, fresh(2));
     }
 }

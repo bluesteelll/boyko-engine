@@ -57,6 +57,61 @@ use crate::ecs::core::serialize::{DecodeError, DeserializeFn, LoadCursor, LoadEn
 use crate::ecs::core::system::params::entity_counter::MAX_BATCH_HINT;
 use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId, EntityId};
 
+/// A failure surfaced by the load-direction WRITER ([`load_archetype`]).
+///
+/// The writer ingests file-derived row counts and per-element decoder output, both
+/// of which can be hostile (C3). Two distinct failure classes can occur:
+///
+/// * **`Decode`** — a per-element `deserialize_fn` rejected a malformed/truncated
+///   column run; the partially-loaded archetype was rolled back to empty.
+/// * **`CapacityExceeded`** — the file's archetype row count (`n`, possibly summed
+///   across dedup-collapsed blocks appending onto one running archetype) exceeds a
+///   hosted pool's reserve ceiling. This was previously an `.expect()` PANIC at the
+///   `reserve_capacity` call; it is now a LOUD, release-level `Err` (C2) because the
+///   per-block load-side guard cannot see the ADDITIVE pool `len` when two file
+///   blocks collapse onto the same archetype (`e1 <= ceiling`, `e2 <= ceiling`, but
+///   `e1 + e2 > ceiling`). No row is written before the reserve, so the world is
+///   untouched on this path.
+///
+/// COLD — produced only on the `boyko_serialize::load_world` path (the C1 0%-gate;
+/// never a per-frame allocation/iteration site).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[non_exhaustive]
+pub enum LoadWriteError {
+    /// A per-element `deserialize_fn` (or the entity-remap pass) rejected the
+    /// stream. Carries the underlying [`DecodeError`]; the archetype was rolled
+    /// back to empty.
+    Decode(DecodeError),
+    /// The file declares more rows for this archetype than a hosted
+    /// [`ComponentPool`](crate::ecs::memory::component_pool::ComponentPool) can
+    /// hold (its reserve ceiling). Carries the offending column's [`ComponentId`]
+    /// and the rejected additive row request (`current_len + n`).
+    CapacityExceeded {
+        /// The column whose pool ceiling was exceeded.
+        component: ComponentId,
+        /// The additive row count the reserve would have grown the pool to.
+        requested: usize,
+    },
+}
+
+impl From<DecodeError> for LoadWriteError {
+    #[inline]
+    fn from(e: DecodeError) -> Self {
+        LoadWriteError::Decode(e)
+    }
+}
+
+/// The destination [`ComponentId`] of a load-column instruction (every variant
+/// names exactly one). Used to identify the offending column on a reserve failure.
+#[inline]
+fn load_column_id(col: &LoadColumn<'_>) -> ComponentId {
+    match col {
+        LoadColumn::Blit { component_id, .. }
+        | LoadColumn::Decode { component_id, .. }
+        | LoadColumn::Construct { component_id, .. } => *component_id,
+    }
+}
+
 /// One column's load instruction, resolved by the file-format parser before the
 /// world write (plan §3.11 step 4). Each variant names the destination
 /// [`ComponentId`] (a column of the freshly-created archetype) and how its `n`
@@ -238,9 +293,12 @@ impl Drop for ArchetypeLoadGuard {
 /// `EntityId`s (used only to populate `map`; the fresh ids are independent).
 ///
 /// On success returns the number of entities loaded (`n`). On a malformed
-/// `Decode` column it rolls the fresh archetype back to empty and returns the
-/// [`DecodeError`] — the world is left consistent (the archetype exists but holds
-/// no rows, `entity_master` untouched).
+/// `Decode` column it rolls the fresh archetype back to empty and returns
+/// [`LoadWriteError::Decode`] — the world is left consistent (the archetype exists
+/// but holds no rows, `entity_master` untouched). When the file declares more rows
+/// than a hosted pool can hold (a forged or block-collapse-summed `entity_count`)
+/// it returns [`LoadWriteError::CapacityExceeded`] BEFORE any row is written (C2 —
+/// formerly an `.expect()` panic at the reserve site).
 ///
 /// # Panics
 ///
@@ -260,7 +318,7 @@ pub fn load_archetype(
     columns: &[LoadColumn<'_>],
     saved_entity_ids: &[EntityId],
     map: &mut LoadEntityMap,
-) -> Result<usize, DecodeError> {
+) -> Result<usize, LoadWriteError> {
     let n = saved_entity_ids.len();
     let current_tick = world.current_tick();
 
@@ -295,14 +353,36 @@ pub fn load_archetype(
     let start_row = unsafe { (*archetype_ptr).current_index };
 
     // ── Reserve pool capacity for n MORE rows (additive: count + n) ────────────
+    // `reserve_capacity` is ADDITIVE (`Err` iff some pool's `len + n` exceeds its
+    // reserve ceiling). The load-side per-block guard cannot see `len` when two file
+    // blocks dedup-collapse onto ONE running archetype, so this is the SINGLE
+    // authoritative gate (C2): propagate a LOUD `Err` instead of panicking. No row is
+    // written before this point, so the archetype/world is untouched on failure.
     {
         // SAFETY: `archetype_ptr` is write-capable slab provenance under
         //   `&mut EcsMaster`; this reborrow is confined to the reserve call.
         let archetype: &mut Archetype = unsafe { &mut *archetype_ptr };
-        archetype.reserve_capacity(n).expect(
-            "load: fresh archetype pool reserve ceiling (rows) exhausted — committed \
-             capacity grows on demand (Phase X.I)",
-        );
+        if archetype.reserve_capacity(n).is_err() {
+            // Identify the offending column for the diagnostic: the first column id
+            // whose pool cannot hold `n` MORE rows (the additive ceiling check). A
+            // column whose pool is absent (impossible here — every present id has a
+            // pool) is skipped.
+            let requested = start_row.saturating_add(n);
+            let pools = archetype.component_pools();
+            let component = columns
+                .iter()
+                .map(load_column_id)
+                .find(|&cid| pools.get_pool(cid).is_some_and(|pool| !pool.can_reserve(n)))
+                .unwrap_or_else(|| {
+                    // Unreachable in practice (some pool rejected the reserve), but
+                    // stay total: name the first column rather than panic.
+                    columns.first().map(load_column_id).unwrap_or(ComponentId(0))
+                });
+            return Err(LoadWriteError::CapacityExceeded {
+                component,
+                requested,
+            });
+        }
     }
 
     let mut guard = ArchetypeLoadGuard::new(archetype_ptr, columns.len());
@@ -402,7 +482,7 @@ pub fn load_archetype(
                         // pending partial column + every prior full column) and bail.
                         guard.rollback_committed();
                         guard.disarm();
-                        return Err(e);
+                        return Err(LoadWriteError::Decode(e));
                     }
 
                     // Commit + stamp this row immediately so the rollback path can
