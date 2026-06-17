@@ -4,6 +4,18 @@
 
 ---
 
+## 0. Kickoff re-validation (S0, against the live `ecs` tip)
+
+A read-only pass confirmed **S0 is safe to start**: the RHI graphics-surface stubs (`boyko_rhi/src/device.rs:152-187`), the new encoder verbs being genuinely net-new, the swapchain/window/boot/`DeviceFns` path, the `DispatcherToken`/`RhiContext`/`GpuSystem` seam, the HLSL→DXC→committed-`.spv` shader path, and the `abi_guard.rs` const-assert discipline are all present as this plan assumes — and **the `boyko_rhi` / `boyko_rhi_vulkan` / `boyko-render` crates build clean** (the repo-root "`ecs` does not build" banner is STALE for them). Three corrections the S0 developer must apply:
+
+1. **`dynamicRendering` is enabled ONLY in the `windowed` device-creation branch** (`boyko_rhi_vulkan/src/device.rs` ~1639-1647), but S0's acceptance ladder is **headless offscreen** → S0 must route the `VkPhysicalDeviceVulkan13Features` chain into the headless `create_device` path too, or the first `cmd_begin_rendering` faults. **Highest priority — fix in rung 1.** (NOTE: the feature is already requested for windowed, so S0 *extends* it to headless + asserts support; it does not enable it from scratch.)
+2. **No fail-fast support assert exists** — the code sets `dynamic_rendering = VK_TRUE` without first querying `vkGetPhysicalDeviceFeatures2` / `VkPhysicalDeviceVulkan13Features`. S0 adds the OQ-6-mandated assert (clear error if the feature is absent, reusing the pinned `VkPhysicalDeviceVulkan13Features` struct, `ffi.rs:1451`).
+3. **There is NO `build.rs` anywhere in the workspace** → §3.8's layout const-assert is **greenfield**, not "extend an existing build path". This is an SDFrep/S1 obligation (S0 ships no GPU-resident component struct), and §3.8's hand-maintained-constant fallback applies if the build-script proves heavy.
+
+(Cosmetic: `dispatch_indirect` is at `encoder.rs:75`, not `:73`. New `#[repr(C)]` graphics descriptors must add matching `abi_guard.rs` const-asserts — the established pattern.)
+
+---
+
 ## 1. Thesis + integrated model
 
 ### 1.1 The one-sentence thesis
