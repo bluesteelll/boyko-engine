@@ -13,3 +13,11 @@ boyko-ecs = { path = "../boyko_ecs" }
 
 [dev-dependencies]
 boyko-macros = { path = "../boyko_macros" }
+# Workspace-pinned criterion 0.5 (same major as every other crate's bench).
+criterion = { version = "0.5", features = ["html_reports"] }
+
+# POB save/load throughput (GB/s): proves the codegen-blit path is memcpy-bound
+# (whole-column `copy_nonoverlapping`, no per-field / reflection overhead).
+[[bench]]
+name = "pob_throughput"
+harness = false
