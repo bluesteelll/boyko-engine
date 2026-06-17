@@ -1208,6 +1208,17 @@ impl Archetype {
     pub fn get_entity_id_at(&self, unit_index: InlandPoolId) -> Option<EntityId> {
         self.entity_ids.get(unit_index.0).copied()
     }
+
+    /// The archetype's entity-id column as a contiguous slice, in row order.
+    ///
+    /// Lets serialization bulk-copy the entity-row table in one memcpy instead
+    /// of a per-row gather: `EntityId` is `#[repr(transparent)]` over `usize`,
+    /// so on a 64-bit little-endian target this slice's byte image equals the
+    /// saved little-endian `u64[]` table.
+    #[inline]
+    pub fn entity_ids_slice(&self) -> &[EntityId] {
+        &self.entity_ids
+    }
 }
 
 /// Phase 4 Seam 2 (D2): the loud archetype-mint rejection for a signature that

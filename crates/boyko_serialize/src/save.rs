@@ -34,7 +34,7 @@ use std::ptr;
 use boyko_ecs::ecs::core::component::component_registry::{self, Serializability};
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::serialize::SaveCursor;
-use boyko_ecs::ecs::identifiers::primitives::{ComponentId, InlandPoolId};
+use boyko_ecs::ecs::identifiers::primitives::{ComponentId, EntityId};
 
 use crate::error::SaveError;
 use crate::format::{
@@ -77,8 +77,12 @@ struct ColumnPlan {
 struct ArchetypePlan {
     columns: Vec<ColumnPlan>,
     entity_count: usize,
-    /// Saved `EntityId.0`s in row order (the entity-row table, plan §3.9).
-    entity_ids: Vec<u64>,
+    /// Base pointer of the archetype's `entity_ids: Vec<EntityId>` column,
+    /// captured O(1) in Pass 1 (no copy, no intermediate `Vec`). Pass 2 blits
+    /// `entity_count` little-endian `u64`s from it in one memcpy (O-1). Valid
+    /// for the whole `&world` borrow — a read-only save runs no structural op
+    /// (Phase X.I stable-base discipline, same as the POB column `src_base`).
+    entity_ids_base: *const EntityId,
     block_off: usize,
     type_indices_off: usize,
     column_regions_off: usize,
@@ -216,18 +220,22 @@ pub fn save_world(
             });
         }
 
-        let mut entity_ids = Vec::with_capacity(entity_count);
-        for row in 0..entity_count {
-            let eid = archetype
-                .get_entity_id_at(InlandPoolId(row))
-                .expect("row < entity_count must have a saved EntityId");
-            entity_ids.push(eid.0 as u64);
-        }
+        // O-1: capture the entity-id column base (O(1) — no per-row gather, no
+        // intermediate `Vec<u64>`). Pass 2 blits it in one memcpy. The base is
+        // stable for the whole `&world` borrow (a read-only save runs no
+        // structural op), exactly like the POB column `src_base`.
+        let id_slice = archetype.entity_ids_slice();
+        debug_assert_eq!(
+            id_slice.len(),
+            entity_count,
+            "entity_ids slice length must equal the archetype entity count"
+        );
+        let entity_ids_base = id_slice.as_ptr();
 
         archetype_plans.push(ArchetypePlan {
             columns,
             entity_count,
-            entity_ids,
+            entity_ids_base,
             block_off: 0,
             type_indices_off: 0,
             column_regions_off: 0,
@@ -388,12 +396,42 @@ pub fn save_world(
             out.extend_from_slice(column_region_bytes(&region));
         }
         // Entity-row table (`u64[entity_count]`): the saved `EntityId.0`s in row
-        // order, batched into one bulk byte append (secondary optimization #2). The
-        // little-endian `u64` images are byte-identical to the previous per-row
-        // 8-byte writes; on little-endian targets the build path stays sound and
-        // produces the same bytes.
-        for &eid in &plan.entity_ids {
-            out.extend_from_slice(&eid.to_le_bytes());
+        // order. O-1: on a 64-bit little-endian target the archetype's
+        // `&[EntityId]` byte image IS the little-endian `u64[]` table, so blit
+        // the whole column in ONE memcpy instead of a per-row loop.
+        #[cfg(all(target_endian = "little", target_pointer_width = "64"))]
+        {
+            // The reinterpret is byte-identical to the per-row
+            // `(eid.0 as u64).to_le_bytes()` form ONLY when `EntityId` is
+            // exactly 8 bytes (usize == u64); the cfg guarantees that here, and
+            // this const guard documents/locks the invariant.
+            const _: () = assert!(core::mem::size_of::<EntityId>() == 8);
+            let len = plan.entity_count * core::mem::size_of::<EntityId>();
+            // SAFETY: `entity_ids_base` is the stable base of the archetype's
+            // `entity_ids: Vec<EntityId>`, captured in Pass 1; `world` is
+            // borrowed `&` and no structural op runs during the read-only save,
+            // so it is valid for `entity_count` initialized `EntityId`s
+            // (asserted == slice len in Pass 1). `EntityId` is
+            // `#[repr(transparent)]` over `usize`, so on a 64-bit little-endian
+            // target these `len` bytes equal the previous per-row LE `u64`
+            // images byte-for-byte. The slice is read-only and consumed
+            // immediately by `extend_from_slice` (a copy into `out`), disjoint
+            // from the engine VM.
+            let bytes =
+                unsafe { core::slice::from_raw_parts(plan.entity_ids_base as *const u8, len) };
+            out.extend_from_slice(bytes);
+        }
+        #[cfg(not(all(target_endian = "little", target_pointer_width = "64")))]
+        {
+            // Scalar fallback (big-endian or non-64-bit usize): reproduce the
+            // canonical little-endian `u64[]` table element by element.
+            // SAFETY: same stable-base contract as the fast arm; reconstruct the
+            // `&[EntityId]` for `entity_count` elements (== slice len, Pass 1).
+            let ids =
+                unsafe { core::slice::from_raw_parts(plan.entity_ids_base, plan.entity_count) };
+            for &eid in ids {
+                out.extend_from_slice(&(eid.0 as u64).to_le_bytes());
+            }
         }
     }
 
