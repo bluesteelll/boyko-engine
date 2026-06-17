@@ -63,6 +63,13 @@ static TRANSFORM_ADD_SPV: SpirvBlob<968> = SpirvBlob(*include_bytes!(concat!(
     "/shaders/transform_add.comp.spv"
 )));
 
+/// The committed SPIR-V for Phase-6 rung 8 (sphere-trace one analytic sphere into
+/// a packed-RGBA storage buffer — `shaders/sdf_spheretrace.hlsl`).
+static SDF_SPHERETRACE_SPV: SpirvBlob<3316> = SpirvBlob(*include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/shaders/sdf_spheretrace.comp.spv"
+)));
+
 /// A 4-byte-aligned wrapper around a committed SPIR-V byte blob so its address is
 /// a valid `*const u32` and it can be re-viewed as a `&[u32]` word stream.
 #[repr(C, align(4))]
@@ -103,6 +110,18 @@ pub fn transform_add_spirv() -> &'static [u32] {
     TRANSFORM_ADD_SPV.as_words()
 }
 
+/// The committed Phase-6 rung-8 SDF sphere-trace SPIR-V as a `u32` word stream,
+/// ready for [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module).
+///
+/// The shader reuses the rung-1 compute contract verbatim: binding 0 (set 0) is
+/// one `RWStructuredBuffer<uint>` at COMPUTE + a 4-byte `uint count` push
+/// constant; everything else (camera/sphere/light) is hardcoded in the shader,
+/// mirrored host-side by [`golden_sdf_pixel`].
+#[inline]
+pub fn sdf_spheretrace_spirv() -> &'static [u32] {
+    SDF_SPHERETRACE_SPV.as_words()
+}
+
 /// Errors from the compute-pipeline flow. `VkError` carries the failing command
 /// name + the raw `VkResult`; `Memory` forwards a buffer/allocation failure.
 ///
@@ -138,4 +157,157 @@ pub fn golden_write_pattern(i: u32) -> u32 {
 #[inline]
 pub fn golden_chained(i: u32) -> u32 {
     golden_write_pattern(i).wrapping_add(100)
+}
+
+// ---------------------------------------------------------------------------
+// Phase-6 rung-8 SDF sphere-trace golden (single source of truth, CPU mirror of
+// `shaders/sdf_spheretrace.hlsl`).
+//
+// These constants and math MUST match the shader exactly so the center-pixel
+// (HIT) and corner-pixel (MISS) colors are computed host-side without re-running
+// the GPU. The test diffs the GPU readback against this golden within a small
+// per-channel tolerance (DXC `mad`/`fma` rounding makes a bit-exact match
+// brittle across drivers, so a hit/miss + small-tolerance diff is the oracle —
+// it still proves the sphere-trace ran a sphere, not a constant fill).
+// ---------------------------------------------------------------------------
+
+/// SDF image width (pixels) — matches the shader's `IMG_W`.
+pub const SDF_IMG_W: u32 = 64;
+/// SDF image height (pixels) — matches the shader's `IMG_H`.
+pub const SDF_IMG_H: u32 = 64;
+
+const SDF_CAM_Z: f32 = 2.0;
+const SDF_HALF_EXTENT: f32 = 1.0;
+const SDF_SPHERE_CENTER: [f32; 3] = [0.0, 0.0, 0.0];
+const SDF_SPHERE_RADIUS: f32 = 0.5;
+const SDF_LIGHT_DIR: [f32; 3] = [0.0, 0.0, 1.0];
+const SDF_BASE_COLOR: [f32; 3] = [0.8, 0.3, 0.2];
+const SDF_AMBIENT: f32 = 0.1;
+const SDF_BACKGROUND: [f32; 3] = [0.05, 0.05, 0.1];
+
+const SDF_EPS: f32 = 0.001;
+const SDF_T_MAX: f32 = 10.0;
+const SDF_MAX_IT: u32 = 128;
+const SDF_GRAD_H: f32 = 0.0005;
+
+#[inline]
+fn v_sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+#[inline]
+fn v_len(a: [f32; 3]) -> f32 {
+    (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt()
+}
+
+#[inline]
+fn v_dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+#[inline]
+fn v_normalize(a: [f32; 3]) -> [f32; 3] {
+    let len = v_len(a);
+    [a[0] / len, a[1] / len, a[2] / len]
+}
+
+/// `sdf(p) = length(p - center) - radius` — the analytic field, mirroring the
+/// shader's `sdf_sphere`. Exposed so a later CPU physics evaluator can be
+/// conformance-checked against this exact source of truth.
+#[inline]
+pub fn sdf_sphere(p: [f32; 3]) -> f32 {
+    v_len(v_sub(p, SDF_SPHERE_CENTER)) - SDF_SPHERE_RADIUS
+}
+
+/// Surface normal via central differences (the gradient of [`sdf_sphere`]),
+/// mirroring the shader's `sdf_normal`.
+#[inline]
+fn sdf_normal(p: [f32; 3]) -> [f32; 3] {
+    let h = SDF_GRAD_H;
+    let n = [
+        sdf_sphere([p[0] + h, p[1], p[2]]) - sdf_sphere([p[0] - h, p[1], p[2]]),
+        sdf_sphere([p[0], p[1] + h, p[2]]) - sdf_sphere([p[0], p[1] - h, p[2]]),
+        sdf_sphere([p[0], p[1], p[2] + h]) - sdf_sphere([p[0], p[1], p[2] - h]),
+    ];
+    v_normalize(n)
+}
+
+/// Packs a linear `[0,1]` RGB into `0xAABBGGRR` (alpha `0xFF`), mirroring the
+/// shader's `pack_rgba`.
+#[inline]
+pub fn pack_rgba(c: [f32; 3]) -> u32 {
+    let q = |x: f32| -> u32 { (x.clamp(0.0, 1.0) * 255.0 + 0.5) as u32 };
+    let r = q(c[0]);
+    let g = q(c[1]);
+    let b = q(c[2]);
+    (0xFF << 24) | (b << 16) | (g << 8) | r
+}
+
+/// The CPU golden for one SDF pixel: reconstructs the orthographic ray for
+/// `(px, py)`, sphere-traces the analytic field, lights the hit (Lambert +
+/// ambient) or returns the background on a miss, and returns the packed
+/// `0xAABBGGRR` color.
+///
+/// This is the single source of truth the rung-8 test asserts against: the
+/// center pixel HITS (lit sphere color) and a corner pixel MISSES (background).
+pub fn golden_sdf_pixel(px: u32, py: u32) -> u32 {
+    let u = (((px as f32) + 0.5) / (SDF_IMG_W as f32)) * 2.0 - 1.0;
+    let v = -((((py as f32) + 0.5) / (SDF_IMG_H as f32)) * 2.0 - 1.0);
+    let ro = [u * SDF_HALF_EXTENT, v * SDF_HALF_EXTENT, SDF_CAM_Z];
+    let rd = [0.0, 0.0, -1.0];
+
+    let mut t = 0.0_f32;
+    let mut hit = false;
+    for _ in 0..SDF_MAX_IT {
+        let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
+        let d = sdf_sphere(p);
+        if d < SDF_EPS {
+            hit = true;
+            break;
+        }
+        t += d;
+        if t > SDF_T_MAX {
+            break;
+        }
+    }
+
+    let color = if hit {
+        let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
+        let n = sdf_normal(p);
+        let l = v_normalize(SDF_LIGHT_DIR);
+        let ndotl = v_dot(n, l).max(0.0);
+        [
+            SDF_BASE_COLOR[0] * ndotl + SDF_BASE_COLOR[0] * SDF_AMBIENT,
+            SDF_BASE_COLOR[1] * ndotl + SDF_BASE_COLOR[1] * SDF_AMBIENT,
+            SDF_BASE_COLOR[2] * ndotl + SDF_BASE_COLOR[2] * SDF_AMBIENT,
+        ]
+    } else {
+        SDF_BACKGROUND
+    };
+    pack_rgba(color)
+}
+
+/// Whether the orthographic ray for pixel `(px, py)` HITS the analytic sphere.
+/// The rung-8 test uses this to pick a guaranteed-hit pixel (the center) and a
+/// guaranteed-miss pixel (a corner) host-side, so the assertion is independent
+/// of the exact lit color.
+pub fn sdf_pixel_hits(px: u32, py: u32) -> bool {
+    let u = (((px as f32) + 0.5) / (SDF_IMG_W as f32)) * 2.0 - 1.0;
+    let v = -((((py as f32) + 0.5) / (SDF_IMG_H as f32)) * 2.0 - 1.0);
+    let ro = [u * SDF_HALF_EXTENT, v * SDF_HALF_EXTENT, SDF_CAM_Z];
+    let rd = [0.0, 0.0, -1.0];
+
+    let mut t = 0.0_f32;
+    for _ in 0..SDF_MAX_IT {
+        let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
+        let d = sdf_sphere(p);
+        if d < SDF_EPS {
+            return true;
+        }
+        t += d;
+        if t > SDF_T_MAX {
+            return false;
+        }
+    }
+    false
 }
