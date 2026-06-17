@@ -7,9 +7,12 @@
 //!    `rot = rot.integrate(angvel, dt)` (first-order quaternion advance). The
 //!    only real-work stage in the foundation; a sound parallel pass over
 //!    disjoint rows (each body writes only its own row).
-//! 2. [`physics_gather`] — snapshots `(&RigidBody, &RigidBodyMass)` IN ROW ORDER
-//!    into the dense [`SolverScratch::bodies`](crate::resources::SolverScratch)
-//!    and resets the touched mask (the seam's gather boundary, IM-1).
+//! 2. [`physics_gather`] — snapshots `(&RigidBody, &RigidBodyMass, &Collider)`
+//!    IN ROW ORDER into the dense
+//!    [`SolverScratch::bodies`](crate::resources::SolverScratch), derives each
+//!    body's local + world inverse inertia, stamps the step `dt` into
+//!    [`PhysicsConfig`], and resets the touched mask (the seam's gather
+//!    boundary, IM-1 / OQ-1).
 //! 3. [`physics_broadphase`] — fills [`ContactPairs`] with `(BodyIndex,
 //!    BodyIndex)` candidate pairs in deterministic `(min, max)` order (D4); the
 //!    foundation runs a real circle-circle-feasible all-pairs over the snapshot
@@ -36,7 +39,7 @@ use boyko_ecs::ecs::core::iters::query::query::Query;
 use boyko_ecs::ecs::core::system::{Res, ResMut};
 use boyko_ecs::ecs::core::time::FixedTime;
 
-use crate::components::{ColliderShape, RigidBody, RigidBodyMass};
+use crate::components::{Collider, ColliderShape, RigidBody, RigidBodyMass};
 use crate::manifold::{BodyIndex, ContactPoint, Manifold};
 use crate::math::Vec3;
 use crate::resources::{BodyState, ContactPairs, Manifolds, PhysicsConfig, SolverScratch};
@@ -70,36 +73,51 @@ pub fn physics_integrate(
     });
 }
 
-/// Snapshots every body into the dense, row-indexed solver scratch (plan IM-1,
-/// the gather boundary).
+/// Snapshots every body into the dense, row-indexed solver scratch and stamps
+/// the step `dt` (plan IM-1 / OQ-1, the gather boundary).
 ///
-/// Walks the bodies in archetype-row order via `iter_mut` (the same order
+/// Walks the bodies in archetype-row order via `iter()` (the same order
 /// [`physics_apply`] re-walks to write back), projecting the hot [`RigidBody`] +
-/// cold [`RigidBodyMass`] columns into [`BodyState`] rows. The dense row index
-/// IS the [`BodyIndex`]. Resets the touched mask to the body count. The
-/// snapshot `Vec`s are cleared and refilled, capacity reused (no per-step
-/// alloc).
+/// cold [`RigidBodyMass`] + [`Collider`] columns into [`BodyState`] rows
+/// (deriving each body's local + world inverse inertia from its shape, P2 W1).
+/// The dense row index IS the [`BodyIndex`]. Resets the touched mask to the body
+/// count. The snapshot `Vec`s are cleared and refilled, capacity reused (no
+/// per-step alloc).
+///
+/// Before the per-body loop it stamps [`PhysicsConfig::dt`] from the fixed
+/// clock ([`FixedTime::delta_secs`]) ONCE per gather (OQ-1): no separate `dt`
+/// system, and the TGS solver later reads `h = dt / substeps`. The stamp is
+/// gather-time so a hand-set `cfg.dt` is overwritten.
 ///
 /// The row→entity projection (for the gameplay
 /// [`Contact`](crate::components::Contact) producer) is NOT gathered in the
 /// foundation: `Entity` is not a `QueryData` in the engine, so it is deferred to
 /// the Phase-10 `Contact` producer (the only consumer) — see [`SolverScratch`].
 //
-// `clippy::needless_pass_by_value`: `ResMut<_>` is a by-value `SystemParam`
-// mutated through a `&mut *scratch` reborrow — the same false-positive as the
+// `clippy::needless_pass_by_value`: `ResMut<_>` / `Res<_>` are by-value
+// `SystemParam`s mutated/read through reborrows — the same false-positive as the
 // demo's `ResMut` systems.
 #[allow(clippy::needless_pass_by_value)]
 pub fn physics_gather(
-    query: Query<(&RigidBody, &RigidBodyMass)>,
+    query: Query<(&RigidBody, &RigidBodyMass, &Collider)>,
     mut scratch: ResMut<SolverScratch>,
+    mut cfg: ResMut<PhysicsConfig>,
+    fixed_time: Res<FixedTime>,
 ) {
+    // OQ-1: stamp the fixed step delta once, before snapshotting, so the solver
+    // reads a fresh `dt` each gather (deterministic — `FixedTime` is the
+    // schedule's fixed clock).
+    cfg.dt = fixed_time.delta_secs();
+
     let scratch = &mut *scratch;
     scratch.clear();
     // Read-only `iter()` walks the rows in archetype-row order — the same order
     // `physics_apply`'s mutable walk re-visits, so row `i` is the same body in
     // both passes (the IM-1 gather/apply addressing invariant).
-    for (body, mass) in query.iter() {
-        scratch.bodies.push(BodyState::from_columns(body, mass));
+    for (body, mass, collider) in query.iter() {
+        scratch
+            .bodies
+            .push(BodyState::from_columns(body, mass, collider));
     }
     scratch.touched.reset(scratch.bodies.len());
 }

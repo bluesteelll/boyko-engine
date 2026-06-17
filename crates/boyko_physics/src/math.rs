@@ -324,6 +324,99 @@ impl Mat3 {
             self.rows[2].dot(v),
         )
     }
+
+    /// A diagonal matrix `diag(d.x, d.y, d.z)`.
+    ///
+    /// The local inverse inertia of a principal-axis-aligned shape is diagonal
+    /// (sphere, box); the gather builds it here, then rotates it into world
+    /// space via `R · self · Rᵀ` (see [`from_quat`](Self::from_quat)).
+    #[inline]
+    pub const fn from_diagonal(d: Vec3) -> Self {
+        Self::from_rows(
+            Vec3::new(d.x, 0.0, 0.0),
+            Vec3::new(0.0, d.y, 0.0),
+            Vec3::new(0.0, 0.0, d.z),
+        )
+    }
+
+    /// The row-major rotation matrix of the (unit) quaternion `q`.
+    ///
+    /// Built so that [`mul_vec`](Self::mul_vec) (per-row dot) reproduces
+    /// [`Quat::rotate`](Quat::rotate): `Mat3::from_quat(q).mul_vec(v) ==
+    /// q.rotate(v)` for a unit `q`. With `q = (x, y, z, w)` the standard
+    /// rotation matrix is
+    ///
+    /// ```text
+    /// | 1-2(y²+z²)   2(xy-wz)    2(xz+wy)  |
+    /// | 2(xy+wz)    1-2(x²+z²)   2(yz-wx)  |
+    /// | 2(xz-wy)     2(yz+wx)   1-2(x²+y²) |
+    /// ```
+    ///
+    /// where `rows[i]` is row `i` (matching the module's row-major convention).
+    /// `q` is assumed unit (the crate keeps orientations normalized); a
+    /// non-unit `q` scales the result by `|q|²`.
+    #[inline]
+    pub fn from_quat(q: Quat) -> Self {
+        let (x, y, z, w) = (q.x, q.y, q.z, q.w);
+        let (xx, yy, zz) = (x * x, y * y, z * z);
+        let (xy, xz, yz) = (x * y, x * z, y * z);
+        let (wx, wy, wz) = (w * x, w * y, w * z);
+        Self::from_rows(
+            Vec3::new(
+                1.0 - 2.0 * (yy + zz),
+                2.0 * (xy - wz),
+                2.0 * (xz + wy),
+            ),
+            Vec3::new(
+                2.0 * (xy + wz),
+                1.0 - 2.0 * (xx + zz),
+                2.0 * (yz - wx),
+            ),
+            Vec3::new(
+                2.0 * (xz - wy),
+                2.0 * (yz + wx),
+                1.0 - 2.0 * (xx + yy),
+            ),
+        )
+    }
+
+    /// The transpose `selfᵀ` (rows become columns).
+    ///
+    /// For a rotation matrix `R`, `Rᵀ == R⁻¹`; the world inverse inertia is
+    /// `R · I⁻¹_local · Rᵀ`.
+    #[inline]
+    pub fn transpose(self) -> Self {
+        let r = &self.rows;
+        Self::from_rows(
+            Vec3::new(r[0].x, r[1].x, r[2].x),
+            Vec3::new(r[0].y, r[1].y, r[2].y),
+            Vec3::new(r[0].z, r[1].z, r[2].z),
+        )
+    }
+}
+
+impl Mul for Mat3 {
+    type Output = Self;
+
+    /// Matrix product `self · rhs` (row-major: `out[i][j] = Σ_k a[i][k]·b[k][j]`).
+    ///
+    /// Each output row `i` is `self.rows[i]` left-multiplied by `rhs`: column
+    /// `j` of the output is `self.rows[i] · rhs.column(j)`. Composing the
+    /// world-inertia rotation `R · I⁻¹_local · Rᵀ` uses this directly.
+    #[inline]
+    fn mul(self, rhs: Self) -> Self {
+        // Each output row is `a` (a row of `self`) combined with `rhs`'s
+        // columns; with row-major storage, column `j` of `rhs` is
+        // `(rhs.rows[0][j], rhs.rows[1][j], rhs.rows[2][j])`.
+        let row = |a: Vec3| {
+            Vec3::new(
+                a.x * rhs.rows[0].x + a.y * rhs.rows[1].x + a.z * rhs.rows[2].x,
+                a.x * rhs.rows[0].y + a.y * rhs.rows[1].y + a.z * rhs.rows[2].y,
+                a.x * rhs.rows[0].z + a.y * rhs.rows[1].z + a.z * rhs.rows[2].z,
+            )
+        };
+        Self::from_rows(row(self.rows[0]), row(self.rows[1]), row(self.rows[2]))
+    }
 }
 
 impl Default for Mat3 {
@@ -442,5 +535,141 @@ mod tests {
             m.mul_vec(Vec3::new(1.0, 1.0, 1.0)),
             Vec3::new(2.0, 3.0, 4.0)
         );
+    }
+
+    /// `from_diagonal` builds `diag(d)` — a diagonal scale.
+    #[test]
+    fn mat3_from_diagonal() {
+        let d = Vec3::new(2.0, 3.0, 4.0);
+        let m = Mat3::from_diagonal(d);
+        let v = Vec3::new(5.0, 6.0, 7.0);
+        assert_eq!(
+            m.mul_vec(v),
+            Vec3::new(d.x * v.x, d.y * v.y, d.z * v.z)
+        );
+    }
+
+    /// `from_quat(IDENTITY)` is the identity matrix.
+    #[test]
+    fn mat3_from_quat_identity() {
+        assert_eq!(Mat3::from_quat(Quat::IDENTITY), Mat3::IDENTITY);
+    }
+
+    /// A 90°-about-z quaternion yields the expected rotation matrix (+x → +y,
+    /// +y → −x).
+    #[test]
+    fn mat3_from_quat_known_z90() {
+        let half = std::f32::consts::FRAC_PI_4; // θ/2 for θ = 90°
+        let q = Quat::new(0.0, 0.0, half.sin(), half.cos());
+        let m = Mat3::from_quat(q);
+        // Expected R_z(90°) (row-major): [[0,-1,0],[1,0,0],[0,0,1]].
+        let expected = Mat3::from_rows(
+            Vec3::new(0.0, -1.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, 1.0),
+        );
+        for i in 0..3 {
+            assert!((m.rows[i].x - expected.rows[i].x).abs() < 1e-6);
+            assert!((m.rows[i].y - expected.rows[i].y).abs() < 1e-6);
+            assert!((m.rows[i].z - expected.rows[i].z).abs() < 1e-6);
+        }
+    }
+
+    /// `from_quat(q).mul_vec(v)` agrees with `q.rotate(v)` for several q, v —
+    /// the matrix form must reproduce the quaternion rotation.
+    #[test]
+    fn mat3_from_quat_matches_rotate() {
+        let quats = [
+            Quat::IDENTITY,
+            Quat::new(0.0, 0.0, 0.3826834, 0.9238795), // 45° about +z
+            Quat::new(0.5, 0.5, 0.5, 0.5),             // 120° about (1,1,1)
+            Quat::new(0.1, -0.2, 0.3, 0.9).normalize(),
+        ];
+        let vecs = [
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(1.0, -2.0, 3.0),
+            Vec3::new(-4.0, 5.0, -6.0),
+        ];
+        for &q in &quats {
+            let m = Mat3::from_quat(q);
+            for &v in &vecs {
+                let a = m.mul_vec(v);
+                let b = q.rotate(v);
+                assert!((a.x - b.x).abs() < 1e-5, "x: {a:?} vs {b:?}");
+                assert!((a.y - b.y).abs() < 1e-5, "y: {a:?} vs {b:?}");
+                assert!((a.z - b.z).abs() < 1e-5, "z: {a:?} vs {b:?}");
+            }
+        }
+    }
+
+    /// `transpose` is an involution (`m.transpose().transpose() == m`).
+    #[test]
+    fn mat3_transpose_involution() {
+        let m = Mat3::from_rows(
+            Vec3::new(1.0, 2.0, 3.0),
+            Vec3::new(4.0, 5.0, 6.0),
+            Vec3::new(7.0, 8.0, 9.0),
+        );
+        assert_eq!(m.transpose().transpose(), m);
+        // Transpose swaps off-diagonal elements.
+        let t = m.transpose();
+        assert_eq!(t.rows[0], Vec3::new(1.0, 4.0, 7.0));
+        assert_eq!(t.rows[1], Vec3::new(2.0, 5.0, 8.0));
+        assert_eq!(t.rows[2], Vec3::new(3.0, 6.0, 9.0));
+    }
+
+    /// The matrix product is associative with `mul_vec`:
+    /// `(A·B).mul_vec(v) ≈ A.mul_vec(B.mul_vec(v))`.
+    #[test]
+    fn mat3_mul_agrees_with_mul_vec() {
+        let a = Mat3::from_rows(
+            Vec3::new(1.0, 2.0, 0.0),
+            Vec3::new(0.0, 1.0, 3.0),
+            Vec3::new(4.0, 0.0, 1.0),
+        );
+        let b = Mat3::from_rows(
+            Vec3::new(2.0, 0.0, 1.0),
+            Vec3::new(1.0, 3.0, 0.0),
+            Vec3::new(0.0, 1.0, 2.0),
+        );
+        let v = Vec3::new(5.0, -3.0, 2.0);
+        let lhs = (a * b).mul_vec(v);
+        let rhs = a.mul_vec(b.mul_vec(v));
+        assert!((lhs.x - rhs.x).abs() < 1e-5);
+        assert!((lhs.y - rhs.y).abs() < 1e-5);
+        assert!((lhs.z - rhs.z).abs() < 1e-5);
+    }
+
+    /// `IDENTITY` is the multiplicative identity for the matrix product.
+    #[test]
+    fn mat3_mul_identity() {
+        let m = Mat3::from_rows(
+            Vec3::new(1.0, 2.0, 3.0),
+            Vec3::new(4.0, 5.0, 6.0),
+            Vec3::new(7.0, 8.0, 9.0),
+        );
+        assert_eq!(m * Mat3::IDENTITY, m);
+        assert_eq!(Mat3::IDENTITY * m, m);
+    }
+
+    /// The inertia round-trip `R · I_local · Rᵀ` is symmetric, and equals
+    /// `I_local` when `R == IDENTITY` (the gather's world-tensor construction).
+    #[test]
+    fn mat3_inertia_round_trip() {
+        let i_local = Mat3::from_diagonal(Vec3::new(2.0, 5.0, 11.0));
+
+        // R == IDENTITY ⇒ the world tensor equals the local tensor.
+        let r_id = Mat3::from_quat(Quat::IDENTITY);
+        let world_id = r_id * i_local * r_id.transpose();
+        assert_eq!(world_id, i_local);
+
+        // For any rotation R, R·I·Rᵀ is symmetric (I diagonal ⇒ symmetric).
+        let q = Quat::new(0.2, -0.4, 0.5, 0.8).normalize();
+        let r = Mat3::from_quat(q);
+        let world = r * i_local * r.transpose();
+        assert!((world.rows[0].y - world.rows[1].x).abs() < 1e-5, "M[0][1] == M[1][0]");
+        assert!((world.rows[0].z - world.rows[2].x).abs() < 1e-5, "M[0][2] == M[2][0]");
+        assert!((world.rows[1].z - world.rows[2].y).abs() < 1e-5, "M[1][2] == M[2][1]");
     }
 }
