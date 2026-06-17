@@ -309,14 +309,23 @@ pub fn save_world(
     let var_data_off = entity_table_off;
     let added = var_data_off; // file size == appended slice length.
 
-    // Grow ONCE to the exact total. No realloc after this point.
-    out.resize(start_len + added, 0);
+    // Reserve capacity ONCE — capacity only, NO zero-fill (principle 5). Pass 2
+    // appends every byte of the body sequentially in file-offset order, so each
+    // byte is written exactly once: real content via `extend_from_slice` /
+    // `copy_nonoverlapping`, alignment-padding gaps via an explicit zero-append.
+    // The previous `out.resize(start_len + added, 0)` zero-filled the whole ~14 MB
+    // body only to overwrite almost all of it — pure memset waste.
+    out.reserve(added);
 
-    // ── Pass 2: fill the reserved regions ──
-    // File offset `o` maps to `out[start_len + o]`.
-    let base = start_len;
+    // ── Pass 2: write the body sequentially, file-offset order ──
+    // `out.len()` advances in lockstep with the file offset; `start_len + o` is the
+    // buffer position of file offset `o`. The regions below are emitted in EXACTLY
+    // the order Pass 1 laid them out (header → type table → name pool → archetype
+    // blocks/bodies → column data), so a plain append reproduces the layout with no
+    // backpatch and no gaps other than the column-region alignment padding.
 
-    // Header.
+    // Header — section offsets are all known from Pass 1, so write the real header
+    // up front (no backpatch needed).
     let mut header = SaveHeader::new();
     header.type_table_off = type_table_off as u64;
     header.archetype_table_off = archetype_table_off as u64;
@@ -326,10 +335,13 @@ pub fn save_world(
     header.archetype_count =
         u32::try_from(archetype_plans.len()).map_err(|_| SaveError::SizeOverflow)?;
     header.entity_count = world.entity_count() as u64;
-    write_at_off(out, base, header.as_bytes());
+    out.extend_from_slice(header.as_bytes());
 
-    // Type table + name pool.
-    for (i, t) in types.iter().enumerate() {
+    // Type table (contiguous `TypeTableEntry[]`), then the name pool (the
+    // concatenated stable names, in the same interning order their `name_off`s were
+    // assigned in Pass 1 — so appending each entry then, separately, each name
+    // reproduces the type-table-then-name-pool layout).
+    for t in &types {
         let entry = TypeTableEntry {
             stable_name_hash: t.stable_name_hash,
             layout_fingerprint: t.layout_fingerprint,
@@ -341,12 +353,15 @@ pub fn save_world(
             serializability: t.serializability as u8,
             _pad: [0; 5],
         };
-        let off = type_table_off + i * TypeTableEntry::SIZE;
-        write_at_off(out, base + off, type_entry_bytes(&entry));
-        write_at_off(out, base + t.name_off as usize, t.name.as_bytes());
+        out.extend_from_slice(type_entry_bytes(&entry));
+    }
+    for t in &types {
+        out.extend_from_slice(t.name.as_bytes());
     }
 
-    // Archetype blocks + bodies + column data.
+    // Archetype-block region: per block `[header | type_indices | column_regions |
+    // entity_rows]`, contiguous with no inter-section gaps (Pass 1 used plain
+    // `checked_add` with no alignment rounding here).
     for plan in &archetype_plans {
         let cc = u32::try_from(plan.columns.len()).map_err(|_| SaveError::SizeOverflow)?;
         let block = ArchetypeBlock {
@@ -360,62 +375,96 @@ pub fn save_world(
                 .map_err(|_| SaveError::SizeOverflow)?,
             _pad: 0,
         };
-        write_at_off(out, base + plan.block_off, archetype_block_bytes(&block));
+        out.extend_from_slice(archetype_block_bytes(&block));
 
-        for (i, col) in plan.columns.iter().enumerate() {
-            let off = plan.type_indices_off + i * 4;
-            write_at_off(out, base + off, &col.type_index.to_le_bytes());
+        for col in &plan.columns {
+            out.extend_from_slice(&col.type_index.to_le_bytes());
         }
-        for (i, col) in plan.columns.iter().enumerate() {
+        for col in &plan.columns {
             let region = ColumnRegion {
                 data_off: col.data_off,
                 byte_len: col.byte_len,
             };
-            let off = plan.column_regions_off + i * ColumnRegion::SIZE;
-            write_at_off(out, base + off, column_region_bytes(&region));
+            out.extend_from_slice(column_region_bytes(&region));
         }
-        for (row, eid) in plan.entity_ids.iter().enumerate() {
-            let off = plan.entity_rows_off + row * 8;
-            write_at_off(out, base + off, &eid.to_le_bytes());
+        // Entity-row table (`u64[entity_count]`): the saved `EntityId.0`s in row
+        // order, batched into one bulk byte append (secondary optimization #2). The
+        // little-endian `u64` images are byte-identical to the previous per-row
+        // 8-byte writes; on little-endian targets the build path stays sound and
+        // produces the same bytes.
+        for &eid in &plan.entity_ids {
+            out.extend_from_slice(&eid.to_le_bytes());
         }
+    }
 
+    // Column data region: per column, in plan order. Each non-empty column was laid
+    // out at a `COLUMN_REGION_ALIGN`-rounded offset (`col.data_off`); the rounding
+    // bytes between the previous region's end and this column's start are the ONLY
+    // gaps in the body and are zeroed explicitly here. An empty column (`byte_len ==
+    // 0`) reserved no bytes and was given the un-rounded cursor as its `data_off`,
+    // so it contributes nothing and needs no padding.
+    for plan in &archetype_plans {
         for col in &plan.columns {
+            if col.byte_len == 0 {
+                continue; // ZST tag / Ignore / S1-boundary ViaFn: zero-length region.
+            }
+            // Explicit zero-fill of the alignment-padding gap. `col.data_off` is the
+            // 32-rounded file offset; `out.len() - start_len` is the current file
+            // offset (the previous region's end). The difference is the pad width.
+            let cur_off = out.len() - start_len;
+            let pad = (col.data_off as usize) - cur_off;
+            debug_assert!(
+                pad < COLUMN_REGION_ALIGN,
+                "alignment padding must be smaller than the alignment"
+            );
+            out.resize(out.len() + pad, 0);
+            debug_assert_eq!(
+                out.len() - start_len,
+                col.data_off as usize,
+                "write head must be at the column's planned offset after padding"
+            );
+
             match col.serializability {
                 Serializability::PlainOldBytes => {
-                    if col.byte_len == 0 {
-                        continue; // ZST tag column.
-                    }
                     debug_assert!(!col.src_base.is_null());
-                    let dst_off = base + col.data_off as usize;
                     let len = col.byte_len as usize;
+                    // Append the column blit in one shot. `extend_from_slice` over a
+                    // `&[u8]` aliasing the live column copies `len` bytes with no
+                    // zero-fill; build the source slice from the captured base.
+                    //
                     // SAFETY: `src_base` is the live POB column base captured in
-                    // Pass 1 from `ComponentPool::buffer_ptr` (a write-once
-                    // VM-stable base, valid for `count*stride == len` initialized
-                    // bytes — every byte of a POB type is all-bits-valid, plan C3).
-                    // `world` is still borrowed `&` and no structural op ran since
-                    // capture, so the base is valid. `dst` is the just-reserved,
-                    // distinct region inside `out` (`[dst_off, dst_off+len)` lies
-                    // within the resized buffer; `align_up` placed it disjoint from
-                    // every other region). Source and dest do not overlap (`out` is
-                    // a fresh Vec / appended region, the pool is engine-owned VM).
-                    unsafe {
-                        ptr::copy_nonoverlapping(
-                            col.src_base,
-                            out.as_mut_ptr().add(dst_off),
-                            len,
-                        );
-                    }
+                    // Pass 1 from `ComponentPool::buffer_ptr` (a write-once VM-stable
+                    // base, valid for `count*stride == len` initialized bytes — every
+                    // byte of a POB type is all-bits-valid, plan C3). `world` is still
+                    // borrowed `&` and no structural op ran since capture, so the base
+                    // is valid for reads of `len` bytes. The slice is consumed
+                    // immediately by `extend_from_slice` (a `copy_nonoverlapping` into
+                    // freshly-reserved `out` capacity), so it never outlives the
+                    // borrow; source and dest are disjoint (engine-owned VM vs `out`).
+                    let src = unsafe { std::slice::from_raw_parts(col.src_base, len) };
+                    out.extend_from_slice(src);
                 }
                 Serializability::SerializeViaFn => {
-                    if col.via_fn_bytes.is_empty() {
-                        continue; // S1 boundary: no encoder installed yet.
-                    }
-                    write_at_off(out, base + col.data_off as usize, &col.via_fn_bytes);
+                    // `byte_len != 0` here ⇒ an encoder was installed and produced
+                    // these bytes in Pass 1.
+                    out.extend_from_slice(&col.via_fn_bytes);
                 }
                 Serializability::Ignore => {}
             }
         }
     }
+
+    // Every byte of the `added` region has now been written exactly once: the header
+    // image, type table, name pool, and each archetype block/body via
+    // `extend_from_slice`, the column blits via `extend_from_slice`, and each
+    // alignment gap via an explicit zero `resize`. No `set_len` over uninit capacity
+    // was used. This proves no uninitialized byte reaches the file (the info-leak /
+    // non-reproducible-save hazard).
+    debug_assert_eq!(
+        out.len(),
+        start_len + added,
+        "Pass 2 must write exactly `total` bytes; mismatch means a region was mis-sized or mis-ordered"
+    );
 
     Ok(added)
 }
@@ -510,10 +559,4 @@ fn column_region_bytes(region: &ColumnRegion) -> &[u8] {
             ColumnRegion::SIZE,
         )
     }
-}
-
-/// Writes `bytes` starting at absolute buffer offset `off`.
-#[inline]
-fn write_at_off(out: &mut [u8], off: usize, bytes: &[u8]) {
-    out[off..off + bytes.len()].copy_from_slice(bytes);
 }
