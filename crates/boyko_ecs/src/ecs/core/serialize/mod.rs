@@ -317,6 +317,10 @@ impl LoadEntityMap {
     /// [`finalize`](Self::finalize).
     #[inline]
     pub fn insert(&mut self, saved_entity_id: usize, fresh: Entity) {
+        // `sealed` is `#[cfg(debug_assertions)]`-only, so the assert (whose
+        // argument is type-checked in every profile) must itself be gated, or a
+        // release build fails to resolve `self.sealed`.
+        #[cfg(debug_assertions)]
         debug_assert!(!self.sealed, "LoadEntityMap: insert after finalize");
         self.entries.push((saved_entity_id as u64, fresh));
     }
@@ -341,6 +345,8 @@ impl LoadEntityMap {
     /// sorted for the binary search to be correct).
     #[inline]
     pub fn get(&self, saved_entity_id: usize) -> Option<Entity> {
+        // Gated like `insert`: `sealed` exists only under `debug_assertions`.
+        #[cfg(debug_assertions)]
         debug_assert!(self.sealed, "LoadEntityMap: get before finalize");
         self.entries
             .binary_search_by_key(&(saved_entity_id as u64), |&(k, _)| k)
