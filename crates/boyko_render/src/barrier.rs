@@ -17,7 +17,7 @@
 //! # The durable key (MF-7)
 //!
 //! A [`PlannedBarrier`] is keyed by the stable `(ArchetypeId, ComponentId)`
-//! pair, NEVER a raw [`DeviceColumnHandle`] `u64`: a grow rotates the handle but
+//! pair, NEVER a raw [`DeviceColumnHandle`](boyko_ecs::ecs::memory::device_column::DeviceColumnHandle) `u64`: a grow rotates the handle but
 //! the pair is stable, so the [`GpuSystem`](crate::GpuSystem) resolves the pair
 //! to the CURRENT device buffer each frame (one cold lookup, same indirect path
 //! as its `target_key`). The build-time `u32` consumer index from

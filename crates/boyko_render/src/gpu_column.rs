@@ -2,9 +2,9 @@
 //!
 //! Phase 5 Wave B mints REAL device-local component pools: [`GpuColumnManager`]
 //! allocates a `DeviceLocal` (VRAM) buffer through the [`boyko_rhi`] registry,
-//! packs its generational [`Slot`] into the opaque graphics-pure
+//! packs its generational `Slot` into the opaque graphics-pure
 //! [`DeviceColumnHandle`] the `boyko_ecs` core stores, and drives the A2 seam
-//! [`Archetype::make_component_device_backed`] to flip the CPU pool to
+//! [`Archetype::make_component_device_backed`](boyko_ecs::ecs::core::archetype::archetype::Archetype::make_component_device_backed) to flip the CPU pool to
 //! device-backing (and null its column cache — the C1 fix that keeps the dangling
 //! Host base CPU-unreachable).
 //!
@@ -57,7 +57,7 @@ pub const LOCAL_SIZE_X: u32 = 64;
 ///
 /// `#[repr(C)]` for a stable, predictable layout (~32 B). The durable identity of
 /// a column is the `(archetype, component)` pair (MF-7), NOT its `handle`, which a
-/// grow rotates. Stored in [`GpuColumnManager::meta`] as a flat, pair-keyed
+/// grow rotates. Stored in `GpuColumnManager::meta` as a flat, pair-keyed
 /// association — exactly ONE entry per `(archetype, component)`, looked up by the
 /// pair (never by the registry buffer-slot index, which is shared with staging and
 /// churns across grows — the X1/X2 fix).
@@ -368,7 +368,7 @@ impl GpuColumnManager {
     ///
     /// Steps:
     /// 1. `device.create_buffer(DeviceLocal, STORAGE)` → a never-mapped VRAM
-    ///    [`BoundBuffer`] (the device-local path also adds `TRANSFER_SRC|DST`).
+    ///    `BoundBuffer` (the device-local path also adds `TRANSFER_SRC|DST`).
     /// 2. `registry.register_buffer` → a generational [`BufferHandle`] →
     ///    [`slot_to_u64`] → the opaque [`DeviceColumnHandle`] the core stores.
     /// 3. Record `GpuColumnMeta` at the packed slot index.
