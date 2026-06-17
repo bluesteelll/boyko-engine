@@ -1996,6 +1996,19 @@ unsafe impl SerPod for f64 {}
 unsafe impl<T: 'static> SerPod for *const T {}
 unsafe impl<T: 'static> SerPod for *mut T {}
 
+// SAFETY: an array `[T; N]` has NO padding between or after its elements
+// (`size_of::<[T; N]>() == N * size_of::<T>()`), so its bytes are exactly `N`
+// contiguous `T` values laid end to end. If every bit pattern of `size_of::<T>()`
+// bytes is a valid `T` (`T: SerPod`), then every bit pattern of
+// `size_of::<[T; N]>()` bytes is a valid `[T; N]`. (`T: SerPod` already implies
+// `T: 'static`, so `[T; N]: 'static` holds.) This is the standard `Pod`-for-arrays
+// rule (cf. bytemuck/zerocopy `Pod for [T; N]`). Its absence silently demoted
+// every component with an array field — `[f32; N]` transforms, vectors, the
+// common case — from the whole-column `PlainOldBytes` blit to the per-row
+// `SerializeViaFn` encode path (the C3 demotion), so adding it restores the fast
+// path the POB design intended.
+unsafe impl<T: SerPod, const N: usize> SerPod for [T; N] {}
+
 /// "Every element of this tuple is [`SerPod`]" — the field-validity proof for the
 /// [`SerPobArm`] (C3). Implemented by GENERIC tuple impls (arity 0..=16, the
 /// realistic component field count), so the POB arm's `F: SerPodTuple` bound is a
