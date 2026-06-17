@@ -34,8 +34,13 @@
 
 use core::ptr;
 
+use boyko_rhi::{Format, ImageUsage, RhiDevice, TextureDesc, TextureDimension};
+
 use crate::device::{DeviceFns, SurfaceInstanceFns, SwapchainDeviceFns, VulkanContext};
 use crate::ffi::*;
+use crate::memory::BoundBuffer;
+use crate::rhi_impl::VulkanGraphicsPipeline;
+use crate::texture::VulkanTexture;
 
 /// The number of frames the [`Renderer`] keeps in flight (double-buffered CPU↔GPU
 /// overlap). Per-frame: an acquire semaphore + an in-flight fence; render-finished
@@ -58,6 +63,9 @@ pub enum SwapchainError {
     ZeroExtent,
     /// A Vulkan command returned a non-success `VkResult`.
     VkError(&'static str, VkResult),
+    /// The rung-7 scene's per-extent depth image could not be (re)created (resource
+    /// creation through the RHI texture path failed).
+    DepthImage(crate::error::VulkanError),
 }
 
 /// A `VkSurfaceKHR` over a Win32 window plus the present queue family + chosen
@@ -366,7 +374,13 @@ impl<'ctx> Swapchain<'ctx> {
             image_color_space: surface.color_space,
             image_extent: extent,
             image_array_layers: 1,
-            image_usage: VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+            // `COLOR_ATTACHMENT` for the clear (Slice 1) + scene draw (rung 7);
+            // `TRANSFER_SRC` so the rung-7 acceptance test can `vkCmdCopyImageToBuffer`
+            // ONE rendered swapchain image into a host-visible staging buffer for a
+            // golden readback (the on-screen-render proof). `TRANSFER_SRC` is a
+            // caps-universal swapchain usage and is never used on the steady present
+            // path, only on the test's flagged frame.
+            image_usage: VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
             image_sharing_mode: VK_SHARING_MODE_EXCLUSIVE,
             queue_family_index_count: 0,
             p_queue_family_indices: ptr::null(),
@@ -474,6 +488,15 @@ impl<'ctx> Swapchain<'ctx> {
     #[inline]
     pub fn image_count(&self) -> usize {
         self.image_views.len()
+    }
+
+    /// The swapchain's color `VkFormat` (the `i32` family). A rung-7 scene
+    /// graphics pipeline MUST declare this as its single color-attachment format
+    /// (the W2-b format-matching contract — the pipeline's declared format must
+    /// equal the `begin_rendering` color attachment's, here the swapchain image).
+    #[inline]
+    pub fn format(&self) -> i32 {
+        self.format
     }
 }
 
@@ -911,6 +934,526 @@ impl<'ctx> Renderer<'ctx> {
         Ok(())
     }
 
+    /// Renders + presents ONE depth-tested SCENE frame (Phase-6 S1 rung 7 — the
+    /// first real 3D geometry ON SCREEN) into `swapchain`, recreating it on resize /
+    /// out-of-date / suboptimal.
+    ///
+    /// Unlike [`render_frame`](Self::render_frame) (which only clears), this binds
+    /// `scene`'s graphics pipeline + vertex buffer + MVP push constant and draws a
+    /// depth-tested mesh into the swapchain image against `scene`'s depth attachment
+    /// (recreated to match the swapchain extent on resize, see [`Scene::sync_depth`]).
+    ///
+    /// `clear` is the background color the draw composites over.
+    ///
+    /// If `readback` is `Some`, on THIS frame — after the draw, before present — the
+    /// rendered swapchain image is `vkCmdCopyImageToBuffer`'d into the supplied
+    /// host-visible staging buffer (transitioning COLOR → TRANSFER_SRC → PRESENT
+    /// instead of COLOR → PRESENT). This is the rung-7 acceptance test's golden
+    /// readback path (proving real geometry reached the swapchain image, not just a
+    /// clear); the steady present path passes `None` and pays nothing for it.
+    ///
+    /// Return / error semantics are identical to [`render_frame`](Self::render_frame):
+    /// `Ok(true)` presented, `Ok(false)` swapchain (re)created this call, `Err`
+    /// terminal.
+    ///
+    /// # Safety
+    ///
+    /// `scene`'s pipeline / vertex buffer were created on the same device as this
+    /// renderer and outlive the call; `scene.depth` has been synced to `swapchain`'s
+    /// current extent (the call does this via [`Scene::sync_depth`] when needed). A
+    /// `Some(readback)` buffer must be a host-visible buffer of at least
+    /// `extent.width * extent.height * 4` bytes (R8G8B8A8/B8G8R8A8 is 4 B/texel).
+    #[allow(clippy::too_many_arguments)]
+    pub unsafe fn render_scene_frame(
+        &mut self,
+        ctx: &VulkanContext,
+        surface: &Surface<'_>,
+        swapchain: &mut Swapchain<'ctx>,
+        scene: &mut Scene,
+        width: u32,
+        height: u32,
+        clear: [f32; 4],
+        readback: Option<&BoundBuffer>,
+    ) -> Result<bool, SwapchainError> {
+        let frame = &self.frames[self.frame_index];
+
+        // --- Wait + (later) reset this frame slot's in-flight fence. ---
+        // SAFETY: `device` is live; `&frame.in_flight` names this slot's fence; an
+        // infinite wait blocks until this slot's previous submit completed, so its
+        // command buffer + acquire semaphore (and the depth image it used) are free.
+        let raw = unsafe {
+            (self.fns.wait_for_fences)(self.device, 1, &frame.in_flight, VK_TRUE, VK_TIMEOUT_INFINITE)
+        };
+        let result = VkResult::from_raw(raw);
+        if !result.is_success() {
+            return Err(SwapchainError::VkError("vkWaitForFences", result));
+        }
+
+        // Ensure the depth image matches the current swapchain extent. The fence
+        // wait above guarantees no in-flight frame still references the old depth
+        // image, so recreating it here is safe. (The first call creates it.)
+        scene.sync_depth(ctx, swapchain.extent)?;
+
+        // --- Acquire the next image (signals this frame's acquire semaphore). ---
+        let mut image_index: u32 = 0;
+        // SAFETY: `device` + `swapchain` are live; an infinite timeout + this slot's
+        // acquire semaphore (null fence) is the standard acquire; `&mut image_index`
+        // is a valid out-pointer.
+        let raw = unsafe {
+            (self.swap_fns.acquire_next_image)(
+                self.device,
+                swapchain.swapchain,
+                VK_TIMEOUT_INFINITE,
+                frame.acquire,
+                VkFence::NULL,
+                &mut image_index,
+            )
+        };
+        let acquire_result = VkResult::from_raw(raw);
+        if acquire_result == VkResult::ERROR_OUT_OF_DATE_KHR {
+            self.recreate(surface, swapchain, width, height)?;
+            return Ok(false);
+        }
+        if !acquire_result.is_success() && acquire_result != VkResult::SUBOPTIMAL_KHR {
+            return Err(SwapchainError::VkError("vkAcquireNextImageKHR", acquire_result));
+        }
+
+        // Only reset the fence once we are committing to a submit (mirrors the
+        // `render_frame` out-of-date discipline so an early return never leaves the
+        // fence unsignalled).
+        // SAFETY: `device` is live; `&frame.in_flight` names this slot's
+        // already-waited fence; resetting it is valid.
+        let raw = unsafe { (self.fns.reset_fences)(self.device, 1, &frame.in_flight) };
+        let result = VkResult::from_raw(raw);
+        if !result.is_success() {
+            return Err(SwapchainError::VkError("vkResetFences", result));
+        }
+
+        let cmd = self.command_buffers[self.frame_index];
+        let image = swapchain_image_for(swapchain, image_index as usize);
+        let view = swapchain.image_views[image_index as usize];
+        let render_finished = self.render_finished[image_index as usize];
+
+        // SAFETY: this slot's fence was just waited so `cmd` is recordable; the
+        // image/view belong to `swapchain`; `scene` was created on this device and
+        // its depth is synced to `swapchain.extent`; the recorded path is the
+        // UNDEFINED→COLOR(+DEPTH)→draw→PRESENT (or →TRANSFER_SRC→readback→PRESENT)
+        // scene path.
+        unsafe {
+            self.record_scene(
+                cmd,
+                image,
+                view,
+                swapchain.extent,
+                clear,
+                scene,
+                readback,
+            )?
+        };
+
+        // --- Submit: wait acquire @ COLOR_ATTACHMENT_OUTPUT, signal render-finished + fence. ---
+        let wait_stage: VkFlags = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        let submit = VkSubmitInfo {
+            s_type: VkStructureType::SubmitInfo,
+            p_next: ptr::null(),
+            wait_semaphore_count: 1,
+            p_wait_semaphores: (&frame.acquire as *const VkSemaphore).cast(),
+            p_wait_dst_stage_mask: &wait_stage,
+            command_buffer_count: 1,
+            p_command_buffers: &cmd,
+            signal_semaphore_count: 1,
+            p_signal_semaphores: (&render_finished as *const VkSemaphore).cast(),
+        };
+        // SAFETY: `queue` is the live present/graphics queue; one submit naming the
+        // recorded `cmd`, waiting this frame's acquire semaphore at
+        // COLOR_ATTACHMENT_OUTPUT, signalling this image's render-finished semaphore
+        // + this frame's in-flight fence; all referenced locals outlive the call.
+        let raw = unsafe { (self.fns.queue_submit)(self.queue, 1, &submit, frame.in_flight) };
+        let result = VkResult::from_raw(raw);
+        if !result.is_success() {
+            return Err(SwapchainError::VkError("vkQueueSubmit", result));
+        }
+
+        // --- Present: wait render-finished. ---
+        let present = VkPresentInfoKhr {
+            s_type: VkStructureType::PresentInfoKhr,
+            p_next: ptr::null(),
+            wait_semaphore_count: 1,
+            p_wait_semaphores: &render_finished,
+            swapchain_count: 1,
+            p_swapchains: &swapchain.swapchain,
+            p_image_indices: &image_index,
+            p_results: ptr::null_mut(),
+        };
+        // SAFETY: `queue` supports present (confirmed in `Surface::new`); the
+        // present-info names the live swapchain + acquired `image_index`, waiting
+        // this image's render-finished semaphore; all locals outlive the call.
+        let raw = unsafe { (self.swap_fns.queue_present)(self.queue, &present) };
+        let present_result = VkResult::from_raw(raw);
+
+        self.frame_index = (self.frame_index + 1) % FRAMES_IN_FLIGHT;
+
+        if present_result == VkResult::ERROR_OUT_OF_DATE_KHR
+            || present_result == VkResult::SUBOPTIMAL_KHR
+        {
+            self.recreate(surface, swapchain, width, height)?;
+            return Ok(false);
+        }
+        if !present_result.is_success() {
+            return Err(SwapchainError::VkError("vkQueuePresentKHR", present_result));
+        }
+        Ok(true)
+    }
+
+    /// Records the rung-7 scene into `cmd`: barriers (color UNDEFINED→COLOR + depth
+    /// UNDEFINED→DEPTH), `vkCmdBeginRendering` (color CLEAR + depth CLEAR to the far
+    /// plane), bind the pipeline + push the MVP + bind the vertex buffer + dynamic
+    /// viewport/scissor, `vkCmdDraw`, `vkCmdEndRendering`, then either color
+    /// COLOR→PRESENT (steady path) or color COLOR→TRANSFER_SRC, copy-to-buffer,
+    /// COLOR (TRANSFER_SRC)→PRESENT (the test readback path).
+    ///
+    /// # Safety
+    ///
+    /// `cmd` must be recordable (waited free); `image`/`view` must belong to the
+    /// swapchain image rendered this frame; `scene.depth` must be `Some` and sized to
+    /// `extent` (the caller syncs it); `scene`'s pipeline / vertex buffer are live on
+    /// this device; a `Some(readback)` buffer is host-visible and ≥ the image's byte
+    /// size.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn record_scene(
+        &self,
+        cmd: VkCommandBuffer,
+        image: VkImage,
+        view: VkImageView,
+        extent: VkExtent2D,
+        clear: [f32; 4],
+        scene: &Scene,
+        readback: Option<&BoundBuffer>,
+    ) -> Result<(), SwapchainError> {
+        let depth = scene
+            .depth
+            .as_ref()
+            .expect("invariant: Scene::sync_depth made the depth image present before record");
+
+        let begin = VkCommandBufferBeginInfo {
+            s_type: VkStructureType::CommandBufferBeginInfo,
+            p_next: ptr::null(),
+            flags: VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+            p_inheritance_info: ptr::null(),
+        };
+        // SAFETY: `cmd` is recordable per this fn's contract; `begin` is a
+        // fully-initialized one-time-submit begin-info.
+        let raw = unsafe { (self.fns.begin_command_buffer)(cmd, &begin) };
+        let result = VkResult::from_raw(raw);
+        if !result.is_success() {
+            return Err(SwapchainError::VkError("vkBeginCommandBuffer", result));
+        }
+
+        // Barrier (color): UNDEFINED → COLOR_ATTACHMENT_OPTIMAL.
+        let to_color = VkImageMemoryBarrier {
+            s_type: VkStructureType::ImageMemoryBarrier,
+            p_next: ptr::null(),
+            src_access_mask: 0,
+            dst_access_mask: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+            old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+            new_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+            dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+            image,
+            subresource_range: COLOR_SUBRESOURCE_RANGE,
+        };
+        // SAFETY: recording is open; one image barrier on the live `image`;
+        // TOP_OF_PIPE→COLOR_ATTACHMENT_OUTPUT with UNDEFINED→COLOR is the
+        // superset-correct acquire→render transition; `&to_color` outlives the call.
+        unsafe {
+            (self.fns.cmd_pipeline_barrier)(
+                cmd,
+                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                0,
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                1,
+                (&to_color as *const VkImageMemoryBarrier).cast(),
+            );
+        }
+
+        // Barrier (depth): UNDEFINED → DEPTH_ATTACHMENT_OPTIMAL at the
+        // early/late-fragment-test stage (the depth-write access, DEPTH aspect).
+        let to_depth = VkImageMemoryBarrier {
+            s_type: VkStructureType::ImageMemoryBarrier,
+            p_next: ptr::null(),
+            src_access_mask: 0,
+            dst_access_mask: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+            old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+            new_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+            src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+            dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+            image: depth.texture.image,
+            subresource_range: DEPTH_SUBRESOURCE_RANGE,
+        };
+        // SAFETY: recording is open; one image barrier on the live depth image;
+        // TOP_OF_PIPE→(EARLY|LATE)_FRAGMENT_TESTS with UNDEFINED→DEPTH is the
+        // superset-correct first depth transition; `&to_depth` outlives the call.
+        unsafe {
+            (self.fns.cmd_pipeline_barrier)(
+                cmd,
+                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
+                    | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                0,
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                1,
+                (&to_depth as *const VkImageMemoryBarrier).cast(),
+            );
+        }
+
+        // Dynamic rendering: one color attachment (CLEAR/STORE) + the depth
+        // attachment (CLEAR to the far plane 1.0 / STORE). The pipeline's declared
+        // color format equals the swapchain format and its depth format equals the
+        // depth image's (the W2-b contract is upheld at `Scene::new` / `sync_depth`).
+        let color_attachment = VkRenderingAttachmentInfo {
+            s_type: VkStructureType::RenderingAttachmentInfo,
+            p_next: ptr::null(),
+            image_view: view,
+            image_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            resolve_mode: 0,
+            resolve_image_view: VkImageView::NULL,
+            resolve_image_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+            load_op: VK_ATTACHMENT_LOAD_OP_CLEAR,
+            store_op: VK_ATTACHMENT_STORE_OP_STORE,
+            clear_value: VkClearValue {
+                color: VkClearColorValue { float32: clear },
+            },
+        };
+        let depth_attachment = VkRenderingAttachmentInfo {
+            s_type: VkStructureType::RenderingAttachmentInfo,
+            p_next: ptr::null(),
+            image_view: depth.texture.view,
+            image_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+            resolve_mode: 0,
+            resolve_image_view: VkImageView::NULL,
+            resolve_image_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+            load_op: VK_ATTACHMENT_LOAD_OP_CLEAR,
+            store_op: VK_ATTACHMENT_STORE_OP_STORE,
+            clear_value: VkClearValue {
+                depth_stencil: VkClearDepthStencilValue {
+                    depth: 1.0,
+                    stencil: 0,
+                },
+            },
+        };
+        let rendering = VkRenderingInfo {
+            s_type: VkStructureType::RenderingInfo,
+            p_next: ptr::null(),
+            flags: 0,
+            render_area: VkRect2D {
+                offset: VkOffset2D { x: 0, y: 0 },
+                extent,
+            },
+            layer_count: 1,
+            view_mask: 0,
+            color_attachment_count: 1,
+            p_color_attachments: &color_attachment,
+            p_depth_attachment: (&depth_attachment as *const VkRenderingAttachmentInfo).cast(),
+            p_stencil_attachment: ptr::null(),
+        };
+        let viewport = VkViewport {
+            x: 0.0,
+            y: 0.0,
+            width: extent.width as f32,
+            height: extent.height as f32,
+            min_depth: 0.0,
+            max_depth: 1.0,
+        };
+        let scissor = VkRect2D {
+            offset: VkOffset2D { x: 0, y: 0 },
+            extent,
+        };
+        let vertex_offset: VkDeviceSize = 0;
+        // SAFETY: recording is open; `rendering` is fully initialized — its color
+        // attachment names the live `view` (now COLOR_ATTACHMENT_OPTIMAL) and its
+        // depth attachment names the live depth view (now DEPTH_ATTACHMENT_OPTIMAL);
+        // dynamic rendering is enabled on this device. The pipeline + push range +
+        // vertex buffer all belong to this device (caller contract) and the
+        // pipeline's declared formats equal the bound attachments' (W2-b). The MVP
+        // push is `MVP_BYTES` bytes at offset 0 into the pipeline's VERTEX range;
+        // `vertex_offset`/`viewport`/`scissor` locals outlive the bracketed calls;
+        // `draw(3, 1, 0, 0)` reads the three bound vertices. Begin/End bracket the
+        // scene exactly.
+        unsafe {
+            (self.fns.cmd_begin_rendering)(cmd, &rendering);
+            (self.fns.cmd_bind_pipeline)(
+                cmd,
+                VK_PIPELINE_BIND_POINT_GRAPHICS,
+                scene.pipeline.pipeline,
+            );
+            (self.fns.cmd_push_constants)(
+                cmd,
+                scene.pipeline.layout,
+                VK_SHADER_STAGE_VERTEX_BIT,
+                0,
+                scene.mvp.len() as u32,
+                scene.mvp.as_ptr().cast(),
+            );
+            (self.fns.cmd_bind_vertex_buffers)(
+                cmd,
+                0,
+                1,
+                &scene.vertex_buffer.buffer,
+                &vertex_offset,
+            );
+            (self.fns.cmd_set_viewport)(cmd, 0, 1, &viewport);
+            (self.fns.cmd_set_scissor)(cmd, 0, 1, &scissor);
+            (self.fns.cmd_draw)(cmd, scene.vertex_count, 1, 0, 0);
+            (self.fns.cmd_end_rendering)(cmd);
+        }
+
+        // The post-draw color transition depends on whether a readback is requested.
+        match readback {
+            // Steady present path: COLOR_ATTACHMENT_OPTIMAL → PRESENT_SRC_KHR.
+            None => {
+                let to_present = VkImageMemoryBarrier {
+                    s_type: VkStructureType::ImageMemoryBarrier,
+                    p_next: ptr::null(),
+                    src_access_mask: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                    dst_access_mask: 0,
+                    old_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                    new_layout: VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                    src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                    dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                    image,
+                    subresource_range: COLOR_SUBRESOURCE_RANGE,
+                };
+                // SAFETY: recording is open; COLOR_ATTACHMENT_OUTPUT→BOTTOM_OF_PIPE
+                // with COLOR→PRESENT makes the draw's writes visible to the present
+                // engine; `&to_present` outlives the call.
+                unsafe {
+                    (self.fns.cmd_pipeline_barrier)(
+                        cmd,
+                        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                        0,
+                        0,
+                        ptr::null(),
+                        0,
+                        ptr::null(),
+                        1,
+                        (&to_present as *const VkImageMemoryBarrier).cast(),
+                    );
+                }
+            }
+            // Test readback path: COLOR → TRANSFER_SRC, copy image → buffer, then
+            // TRANSFER_SRC → PRESENT (the image is still presented after the copy).
+            Some(staging) => {
+                let to_transfer = VkImageMemoryBarrier {
+                    s_type: VkStructureType::ImageMemoryBarrier,
+                    p_next: ptr::null(),
+                    src_access_mask: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                    dst_access_mask: VK_ACCESS_TRANSFER_READ_BIT,
+                    old_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                    new_layout: VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                    dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                    image,
+                    subresource_range: COLOR_SUBRESOURCE_RANGE,
+                };
+                // SAFETY: recording is open; COLOR_ATTACHMENT_OUTPUT→TRANSFER with
+                // COLOR→TRANSFER_SRC makes the draw's writes available to the copy;
+                // `&to_transfer` outlives the call.
+                unsafe {
+                    (self.fns.cmd_pipeline_barrier)(
+                        cmd,
+                        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        0,
+                        0,
+                        ptr::null(),
+                        0,
+                        ptr::null(),
+                        1,
+                        (&to_transfer as *const VkImageMemoryBarrier).cast(),
+                    );
+                }
+
+                let region = VkBufferImageCopy {
+                    buffer_offset: 0,
+                    buffer_row_length: 0,
+                    buffer_image_height: 0,
+                    image_subresource: VkImageSubresourceLayers {
+                        aspect_mask: VK_IMAGE_ASPECT_COLOR_BIT,
+                        mip_level: 0,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    },
+                    image_offset: VkOffset3D { x: 0, y: 0, z: 0 },
+                    image_extent: VkExtent3D {
+                        width: extent.width,
+                        height: extent.height,
+                        depth: 1,
+                    },
+                };
+                // SAFETY: recording is open; the image is TRANSFER_SRC_OPTIMAL per the
+                // barrier above; one full-image tightly-packed color region copies
+                // into the live host-visible `staging.buffer` (≥ the image's byte size
+                // per this fn's contract); `&region` outlives the call.
+                unsafe {
+                    (self.fns.cmd_copy_image_to_buffer)(
+                        cmd,
+                        image,
+                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                        staging.buffer,
+                        1,
+                        &region,
+                    );
+                }
+
+                let to_present = VkImageMemoryBarrier {
+                    s_type: VkStructureType::ImageMemoryBarrier,
+                    p_next: ptr::null(),
+                    src_access_mask: VK_ACCESS_TRANSFER_READ_BIT,
+                    dst_access_mask: 0,
+                    old_layout: VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    new_layout: VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                    src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                    dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                    image,
+                    subresource_range: COLOR_SUBRESOURCE_RANGE,
+                };
+                // SAFETY: recording is open; TRANSFER→BOTTOM_OF_PIPE with
+                // TRANSFER_SRC→PRESENT releases the image to the present engine after
+                // the readback copy; `&to_present` outlives the call.
+                unsafe {
+                    (self.fns.cmd_pipeline_barrier)(
+                        cmd,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                        0,
+                        0,
+                        ptr::null(),
+                        0,
+                        ptr::null(),
+                        1,
+                        (&to_present as *const VkImageMemoryBarrier).cast(),
+                    );
+                }
+            }
+        }
+
+        // SAFETY: recording is open; ending it matches the `begin` above.
+        let raw = unsafe { (self.fns.end_command_buffer)(cmd) };
+        let result = VkResult::from_raw(raw);
+        if !result.is_success() {
+            return Err(SwapchainError::VkError("vkEndCommandBuffer", result));
+        }
+        Ok(())
+    }
+
     /// Waits the device idle, recreates the swapchain to `width`×`height`, and
     /// rebuilds the per-image render-finished semaphores (the image count may
     /// change). A `ZeroExtent` (minimized) is swallowed — the caller retries.
@@ -949,6 +1492,158 @@ impl<'ctx> Renderer<'ctx> {
     }
 }
 
+/// The MVP push-constant size (a `float4x4`), matching the committed rung-3/4 MVP
+/// vertex shader's `VERTEX`-stage push range.
+pub const SCENE_MVP_BYTES: usize = 64;
+
+/// A device-local depth image (`D32_SFLOAT` + DEPTH-aspect view) sized to one
+/// swapchain extent. Recreated when the extent changes (resize); the wrapping
+/// [`VulkanTexture`] owns the image/view/memory and is torn down through the
+/// originating [`VulkanContext`].
+struct DepthImage {
+    /// The owned `VkImage` + DEPTH view + dedicated allocation.
+    texture: VulkanTexture,
+    /// The extent the depth image was created at (so [`Scene::sync_depth`] can detect
+    /// a resize and recreate it).
+    extent: VkExtent2D,
+}
+
+/// The rung-7 on-screen scene resources: the depth-tested graphics pipeline, the
+/// hardcoded mesh's vertex buffer, the MVP push constant, and the per-extent depth
+/// image — everything [`Renderer::render_scene_frame`] needs beyond the swapchain.
+///
+/// The pipeline + vertex buffer are created by the caller through the
+/// [`RhiDevice`](boyko_rhi::RhiDevice) trait (so the proven S0 pipeline-creation
+/// path is reused, not duplicated) and moved into the `Scene`; the depth image is
+/// created + resized internally via the same device's `create_texture` path. The
+/// `Scene` is **not** `Copy`/`Clone`: it is torn down by value through
+/// [`Scene::destroy`] (the move encodes "destroyed exactly once").
+///
+/// The pipeline's declared color format MUST equal the swapchain's color format and
+/// its declared depth format MUST equal [`Format::D32Sfloat`](boyko_rhi::Format) —
+/// the W2-b format-matching contract — or the validation layer faults at draw time.
+///
+/// # Safety
+///
+/// The originating [`VulkanContext`] MUST still be alive whenever the scene is
+/// rendered or destroyed: each of its owned handles is torn down through that
+/// context's device fn-table. There is no compile-time `'ctx` tie this phase (plan
+/// F1; mirrors the other S0 graphics resources).
+pub struct Scene {
+    /// The depth-tested graphics pipeline (raw `VkPipeline` + `VkPipelineLayout`),
+    /// created via `RhiDevice::create_graphics_pipeline` and owned here.
+    pipeline: VulkanGraphicsPipeline,
+    /// The hardcoded mesh's host-visible vertex buffer (position + color), created
+    /// via `RhiDevice::create_buffer` and owned here.
+    vertex_buffer: BoundBuffer,
+    /// The number of vertices to `draw` (the hardcoded mesh's vertex count).
+    vertex_count: u32,
+    /// The MVP `float4x4` pushed to the pipeline's VERTEX range each frame.
+    mvp: [u8; SCENE_MVP_BYTES],
+    /// The per-extent depth image, created lazily on the first frame and recreated
+    /// on resize ([`Scene::sync_depth`]).
+    depth: Option<DepthImage>,
+}
+
+impl Scene {
+    /// Bundles a caller-created depth-tested graphics pipeline + vertex buffer + MVP
+    /// into a renderable scene. The depth image is created lazily on the first frame
+    /// (sized to the swapchain extent then), so no extent is needed here.
+    ///
+    /// `pipeline` MUST declare the swapchain's color format as its single color
+    /// attachment and [`Format::D32Sfloat`](boyko_rhi::Format) as its depth format
+    /// (W2-b); `vertex_buffer` holds `vertex_count` vertices in the pipeline's
+    /// declared vertex layout; `mvp` is the 64-byte `float4x4` push constant.
+    #[inline]
+    pub fn new(
+        pipeline: VulkanGraphicsPipeline,
+        vertex_buffer: BoundBuffer,
+        vertex_count: u32,
+        mvp: [u8; SCENE_MVP_BYTES],
+    ) -> Self {
+        Self {
+            pipeline,
+            vertex_buffer,
+            vertex_count,
+            mvp,
+            depth: None,
+        }
+    }
+
+    /// Ensures the depth image exists and matches `extent`, (re)creating it through
+    /// `ctx` when it is absent (first frame) or stale (resize). The caller
+    /// ([`Renderer::render_scene_frame`]) calls this only after fence-waiting the
+    /// frame slot, so no in-flight frame still references an old depth image.
+    fn sync_depth(&mut self, ctx: &VulkanContext, extent: VkExtent2D) -> Result<(), SwapchainError> {
+        if let Some(d) = &self.depth
+            && d.extent.width == extent.width
+            && d.extent.height == extent.height
+        {
+            return Ok(());
+        }
+
+        // A (re)create is rare (first frame + resize). When REPLACING an existing
+        // depth image, wait the device idle first: with multiple frames in flight a
+        // sibling slot may still reference the old depth image, and the caller only
+        // fence-waited THIS slot. The idle guarantees no submission references the old
+        // image before it is freed (the same belt-and-braces the swapchain `recreate`
+        // uses). The first-ever create (no old image) needs no idle.
+        if self.depth.is_some() {
+            // SAFETY: `ctx` is live; waiting idle guarantees every prior submission —
+            // including any sibling-slot frame still referencing the old depth image —
+            // has completed before it is destroyed below.
+            unsafe { (ctx.device_fns().device_wait_idle)(ctx.device()) };
+        }
+
+        // Build the new depth image BEFORE tearing down the old one so an allocation
+        // failure leaves the previous (still-valid) depth image in place.
+        let desc = TextureDesc {
+            width: extent.width,
+            height: extent.height,
+            depth: 1,
+            format: Format::D32Sfloat,
+            dimension: TextureDimension::D2,
+            usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT,
+        };
+        let texture = RhiDevice::create_texture(ctx, &desc).map_err(SwapchainError::DepthImage)?;
+
+        // Destroy the previous depth image (the device was waited idle above, so no
+        // submission references it).
+        if let Some(old) = self.depth.take() {
+            // SAFETY: the old depth texture was created on `ctx` by a prior
+            // `sync_depth`; the device was waited idle above so its last referencing
+            // frame completed; the by-value move destroys it exactly once.
+            unsafe { RhiDevice::destroy_texture(ctx, old.texture) };
+        }
+
+        self.depth = Some(DepthImage { texture, extent });
+        Ok(())
+    }
+
+    /// Tears down the scene's owned resources (depth image, vertex buffer, graphics
+    /// pipeline) through `ctx`, consuming `self`. The caller MUST have made the
+    /// device idle (e.g. dropped the [`Renderer`], whose `Drop` waits idle) so no
+    /// submission still references them.
+    ///
+    /// # Safety
+    ///
+    /// `ctx` is the live context the scene's resources were created on; no GPU work
+    /// referencing them is in flight (caller `wait_idle`'d / dropped the renderer);
+    /// each is destroyed exactly once (the by-value `self` enforces the latter).
+    pub unsafe fn destroy(mut self, ctx: &VulkanContext) {
+        // SAFETY: per the contract `ctx` is live and nothing references these
+        // resources; each was created on `ctx` and is destroyed exactly once, in
+        // reverse acquisition order (depth → vertex buffer → pipeline).
+        unsafe {
+            if let Some(depth) = self.depth.take() {
+                RhiDevice::destroy_texture(ctx, depth.texture);
+            }
+            RhiDevice::destroy_buffer(ctx, self.vertex_buffer);
+            RhiDevice::destroy_graphics_pipeline(ctx, self.pipeline);
+        }
+    }
+}
+
 impl Drop for Renderer<'_> {
     fn drop(&mut self) {
         // SAFETY: `device` is live; waiting idle ensures no command buffer /
@@ -978,6 +1673,17 @@ impl Drop for Renderer<'_> {
 /// swapchain image view + barrier.
 const COLOR_SUBRESOURCE_RANGE: VkImageSubresourceRange = VkImageSubresourceRange {
     aspect_mask: VK_IMAGE_ASPECT_COLOR_BIT,
+    base_mip_level: 0,
+    level_count: 1,
+    base_array_layer: 0,
+    layer_count: 1,
+};
+
+/// The single-mip, single-layer DEPTH-aspect subresource range used for the
+/// rung-7 scene depth image's barrier (the depth counterpart of
+/// [`COLOR_SUBRESOURCE_RANGE`]).
+const DEPTH_SUBRESOURCE_RANGE: VkImageSubresourceRange = VkImageSubresourceRange {
+    aspect_mask: VK_IMAGE_ASPECT_DEPTH_BIT,
     base_mip_level: 0,
     level_count: 1,
     base_array_layer: 0,
