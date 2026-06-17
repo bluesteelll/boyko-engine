@@ -91,4 +91,5 @@ pub mod memory;
 pub mod rhi_impl;
 pub mod suballocator;
 pub mod swapchain;
+pub mod texture;
 pub mod window;

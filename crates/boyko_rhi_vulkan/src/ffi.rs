@@ -495,6 +495,10 @@ pub enum VkStructureType {
     ImageMemoryBarrier = 45,
     SemaphoreCreateInfo = 9,
     ImageViewCreateInfo = 15,
+    /// `VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO` (S0 `create_texture`).
+    ImageCreateInfo = 14,
+    /// `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2` (S0 dynamic-rendering query).
+    PhysicalDeviceFeatures2 = 1_000_059_000,
     DebugUtilsMessengerCreateInfoExt = 1_000_128_004,
     /// `VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT` — chained into the instance
     /// `p_next` to turn on synchronization validation (plan G2).
@@ -649,6 +653,28 @@ pub const VK_PRESENT_MODE_FIFO_KHR: i32 = 2;
 pub const VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT: VkFlags = 0x0000_0010;
 /// `VkImageUsageFlagBits::VK_IMAGE_USAGE_TRANSFER_DST_BIT`.
 pub const VK_IMAGE_USAGE_TRANSFER_DST_BIT: VkFlags = 0x0000_0002;
+/// `VkImageUsageFlagBits::VK_IMAGE_USAGE_TRANSFER_SRC_BIT`.
+pub const VK_IMAGE_USAGE_TRANSFER_SRC_BIT: VkFlags = 0x0000_0001;
+/// `VkImageUsageFlagBits::VK_IMAGE_USAGE_SAMPLED_BIT`.
+pub const VK_IMAGE_USAGE_SAMPLED_BIT: VkFlags = 0x0000_0004;
+/// `VkImageUsageFlagBits::VK_IMAGE_USAGE_STORAGE_BIT`.
+pub const VK_IMAGE_USAGE_STORAGE_BIT: VkFlags = 0x0000_0008;
+
+/// `VkImageType` discriminants (S0 `create_texture`).
+pub const VK_IMAGE_TYPE_2D: i32 = 1;
+/// `VkImageType::VK_IMAGE_TYPE_3D` (deferred SDF storage image).
+pub const VK_IMAGE_TYPE_3D: i32 = 2;
+/// `VkImageViewType::VK_IMAGE_VIEW_TYPE_3D`.
+pub const VK_IMAGE_VIEW_TYPE_3D: i32 = 2;
+
+/// `VkImageTiling::VK_IMAGE_TILING_OPTIMAL`.
+pub const VK_IMAGE_TILING_OPTIMAL: i32 = 0;
+
+/// `VkImageLayout` discriminants used by the S0 transfer/storage transitions
+/// (the buffer-path `VK_ACCESS_TRANSFER_*`/stage consts are reused for images).
+pub const VK_IMAGE_LAYOUT_GENERAL: i32 = 1;
+pub const VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL: i32 = 6;
+pub const VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL: i32 = 7;
 
 /// `VkSurfaceTransformFlagBitsKHR::VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR`.
 pub const VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR: VkFlags = 0x0000_0001;
@@ -679,8 +705,11 @@ pub const VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT: VkFlags = 0x0000_2000;
 pub const VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT: VkFlags = 0x0000_0100;
 
 /// `VkAttachmentLoadOp` / `VkAttachmentStoreOp` discriminants for dynamic rendering.
+pub const VK_ATTACHMENT_LOAD_OP_LOAD: i32 = 0;
 pub const VK_ATTACHMENT_LOAD_OP_CLEAR: i32 = 1;
+pub const VK_ATTACHMENT_LOAD_OP_DONT_CARE: i32 = 2;
 pub const VK_ATTACHMENT_STORE_OP_STORE: i32 = 0;
+pub const VK_ATTACHMENT_STORE_OP_DONT_CARE: i32 = 1;
 
 /// `VkSampleCountFlagBits::VK_SAMPLE_COUNT_1_BIT`.
 pub const VK_SAMPLE_COUNT_1_BIT: VkFlags = 0x0000_0001;
@@ -1394,6 +1423,92 @@ pub struct VkRenderingInfo {
     pub p_stencil_attachment: *const c_void,
 }
 
+/// `VkExtent3D` — a width/height/depth triple (image extent for `create_texture`).
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct VkExtent3D {
+    pub width: u32,
+    pub height: u32,
+    pub depth: u32,
+}
+
+/// `VkImageCreateInfo` — the S0 2D/3D image creation parameters
+/// (`vkCreateImage`). Declared with the exact C ABI field order.
+#[repr(C)]
+pub struct VkImageCreateInfo {
+    pub s_type: VkStructureType,
+    pub p_next: *const c_void,
+    pub flags: VkFlags,
+    /// `VkImageType`.
+    pub image_type: i32,
+    /// `VkFormat`.
+    pub format: i32,
+    pub extent: VkExtent3D,
+    pub mip_levels: u32,
+    pub array_layers: u32,
+    /// `VkSampleCountFlagBits`.
+    pub samples: VkFlags,
+    /// `VkImageTiling`.
+    pub tiling: i32,
+    /// `VkImageUsageFlags`.
+    pub usage: VkFlags,
+    /// `VkSharingMode`.
+    pub sharing_mode: i32,
+    pub queue_family_index_count: u32,
+    pub p_queue_family_indices: *const u32,
+    /// `VkImageLayout` — the layout the image is created in (`UNDEFINED`).
+    pub initial_layout: i32,
+}
+
+/// `VkImageSubresourceLayers` — the mip/layer selector for a `VkBufferImageCopy`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct VkImageSubresourceLayers {
+    /// `VkImageAspectFlags`.
+    pub aspect_mask: VkFlags,
+    pub mip_level: u32,
+    pub base_array_layer: u32,
+    pub layer_count: u32,
+}
+
+/// `VkBufferImageCopy` — one image↔buffer copy region (the S0 readback uses
+/// `vkCmdCopyImageToBuffer` for the offscreen image → host-visible staging path).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct VkBufferImageCopy {
+    pub buffer_offset: VkDeviceSize,
+    /// `0` = tightly packed (row length = image width).
+    pub buffer_row_length: u32,
+    /// `0` = tightly packed (image height = extent height).
+    pub buffer_image_height: u32,
+    pub image_subresource: VkImageSubresourceLayers,
+    pub image_offset: VkOffset3D,
+    pub image_extent: VkExtent3D,
+}
+
+/// `VkOffset3D` — a texel offset for a buffer↔image copy region.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct VkOffset3D {
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+}
+
+/// `VkPhysicalDeviceFeatures2` — the head struct for `vkGetPhysicalDeviceFeatures2`
+/// (S0 fail-fast `dynamicRendering` support query). The `features` member is the
+/// large `VkPhysicalDeviceFeatures` block (55 `VkBool32`s = 220 bytes), reserved
+/// here as an ABI-exact opaque footprint: we only read the chained
+/// `VkPhysicalDeviceVulkan13Features.dynamic_rendering` written through `p_next`.
+#[repr(C)]
+pub struct VkPhysicalDeviceFeatures2 {
+    pub s_type: VkStructureType,
+    pub p_next: *mut c_void,
+    /// `VkPhysicalDeviceFeatures features` — 55 `VkBool32`s (opaque, written by
+    /// the driver; we do not read it for the dynamic-rendering query).
+    pub features: [VkBool32; 55],
+}
+
 /// `VkPhysicalDeviceVulkan13Features` — chained into `VkDeviceCreateInfo` to
 /// enable `dynamicRendering` + `synchronization2` (we use only `dynamicRendering`).
 /// All other feature bools are zero. The struct is large in the real header; we
@@ -1449,6 +1564,19 @@ const _: () = assert!(core::mem::size_of::<VkComponentMapping>() == 16);
 const _: () = assert!(core::mem::size_of::<VkClearValue>() == 16);
 const _: () = assert!(core::mem::size_of::<VkRect2D>() == 16);
 const _: () = assert!(core::mem::size_of::<VkPhysicalDeviceVulkan13Features>() == 80);
+// S0 image / features2 layout guards. `VkImageCreateInfo` is read BY the driver;
+// `VkPhysicalDeviceFeatures2` is written BY the driver through its out-pointer, so
+// both must match the C ABI exactly.
+const _: () = assert!(core::mem::size_of::<VkExtent3D>() == 12);
+const _: () = assert!(core::mem::size_of::<VkImageCreateInfo>() == 88);
+const _: () = assert!(core::mem::align_of::<VkImageCreateInfo>() == 8);
+const _: () = assert!(core::mem::size_of::<VkImageSubresourceLayers>() == 16);
+const _: () = assert!(core::mem::size_of::<VkBufferImageCopy>() == 56);
+const _: () = assert!(core::mem::align_of::<VkBufferImageCopy>() == 8);
+// 16-byte head (sType + 4 pad + pNext) + [VkBool32; 55] = 220 bytes → 236, rounded
+// up to the struct's 8-byte alignment = 240.
+const _: () = assert!(core::mem::size_of::<VkPhysicalDeviceFeatures2>() == 240);
+const _: () = assert!(core::mem::align_of::<VkPhysicalDeviceFeatures2>() == 8);
 
 // FFI layout guards for the new structs. The callback-data struct is written BY
 // the driver and read through the callback, so its size/align must match the C
@@ -1995,3 +2123,51 @@ pub type PfnVkCmdBeginRendering = unsafe extern "system" fn(
 
 /// `PFN_vkCmdEndRendering`.
 pub type PfnVkCmdEndRendering = unsafe extern "system" fn(command_buffer: VkCommandBuffer);
+
+// --- Phase-6 S0 image / features2 / image-copy commands. ---
+
+/// `PFN_vkCreateImage`.
+pub type PfnVkCreateImage = unsafe extern "system" fn(
+    device: VkDevice,
+    p_create_info: *const VkImageCreateInfo,
+    p_allocator: *const c_void,
+    p_image: *mut VkImage,
+) -> i32;
+
+/// `PFN_vkDestroyImage`.
+pub type PfnVkDestroyImage =
+    unsafe extern "system" fn(device: VkDevice, image: VkImage, p_allocator: *const c_void);
+
+/// `PFN_vkGetImageMemoryRequirements`.
+pub type PfnVkGetImageMemoryRequirements = unsafe extern "system" fn(
+    device: VkDevice,
+    image: VkImage,
+    p_requirements: *mut VkMemoryRequirements,
+);
+
+/// `PFN_vkBindImageMemory`.
+pub type PfnVkBindImageMemory = unsafe extern "system" fn(
+    device: VkDevice,
+    image: VkImage,
+    memory: VkDeviceMemory,
+    memory_offset: VkDeviceSize,
+) -> i32;
+
+/// `PFN_vkCmdCopyImageToBuffer` — the S0 offscreen-image → host-visible-staging
+/// readback transfer.
+pub type PfnVkCmdCopyImageToBuffer = unsafe extern "system" fn(
+    command_buffer: VkCommandBuffer,
+    src_image: VkImage,
+    // `src_image_layout`: `VkImageLayout` the source image is in (`TRANSFER_SRC_OPTIMAL`).
+    src_image_layout: i32,
+    dst_buffer: VkBuffer,
+    region_count: u32,
+    p_regions: *const VkBufferImageCopy,
+);
+
+/// `PFN_vkGetPhysicalDeviceFeatures2` — the S0 fail-fast `dynamicRendering`
+/// support query (Vulkan 1.1 core; the `2` suffix, no `KHR`).
+pub type PfnVkGetPhysicalDeviceFeatures2 = unsafe extern "system" fn(
+    physical_device: VkPhysicalDevice,
+    p_features: *mut VkPhysicalDeviceFeatures2,
+);

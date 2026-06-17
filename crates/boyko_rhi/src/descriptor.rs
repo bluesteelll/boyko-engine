@@ -5,7 +5,10 @@
 //! during the apply-window (plan §5.3), so false-sharing is not a concern.
 
 use crate::api::RhiApi;
-use crate::enums::{BarrierAccess, BarrierStage, BufferUsage, MemoryLocation};
+use crate::enums::{
+    BarrierAccess, BarrierStage, BufferUsage, ImageAspect, ImageLayout, LoadOp, MemoryLocation,
+    StoreOp,
+};
 
 /// Parameters for [`crate::device::RhiDevice::create_buffer`].
 ///
@@ -87,4 +90,165 @@ pub struct BarrierDesc<'a, A: RhiApi> {
     pub dst_stage: BarrierStage,
     /// The buffer transitions covered by this barrier (foundation: 0 or 1).
     pub buffers: &'a [BufferBarrier<'a, A>],
+}
+
+// ===========================================================================
+// Phase-6 graphics-surface descriptors (S0). The `image_barrier` + dynamic-
+// rendering verbs the rung-1 offscreen-clear path needs, abstracting the
+// concrete `swapchain.rs::record_clear` image-barrier + `VkRenderingInfo`
+// pattern into the trait. Recording is single-threaded on the dispatcher in the
+// apply-window (plan §5.3), so false sharing is not a concern.
+// ===========================================================================
+
+/// A texel-rectangle for a [`RenderingDesc`]'s render area (the `VkRect2D`
+/// the dynamic-rendering scope covers).
+///
+/// `#[repr(C)]` mirroring `VkRect2D`'s `(offset, extent)` `i32 x,y` + `u32 w,h`
+/// layout so a backend reads it without reordering.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RenderArea {
+    /// X offset of the render area, in texels.
+    pub x: i32,
+    /// Y offset of the render area, in texels.
+    pub y: i32,
+    /// Width of the render area, in texels.
+    pub width: u32,
+    /// Height of the render area, in texels.
+    pub height: u32,
+}
+
+/// One color attachment for [`crate::encoder::RhiCommandEncoder::begin_rendering`].
+///
+/// Borrows the backend texture (whose image view is the attachment) for the
+/// `begin_rendering` call only. `clear_color` is applied iff `load_op` is
+/// [`LoadOp::Clear`].
+///
+/// **Format contract (S0 SAFETY obligation, W2-b):** the attachment's texture
+/// format MUST equal the format declared at `create_graphics_pipeline` time for
+/// any pipeline bound inside this rendering scope — a mismatch faults at draw
+/// time in the validation layer, not at create time. Rung 1 binds no pipeline, so
+/// the contract is vacuously satisfied; it is documented here for the later rung.
+pub struct RenderingAttachment<'a, A: RhiApi> {
+    /// The texture whose image view is bound as this color attachment.
+    pub texture: &'a A::Texture,
+    /// The layout the attachment is in during rendering (typically
+    /// [`ImageLayout::ColorAttachmentOptimal`]).
+    pub layout: ImageLayout,
+    /// What to do with the attachment's existing contents at scope entry.
+    pub load_op: LoadOp,
+    /// What to do with the rendered result at scope exit.
+    pub store_op: StoreOp,
+    /// The RGBA clear value used when `load_op == LoadOp::Clear`.
+    pub clear_color: [f32; 4],
+}
+
+/// Parameters for [`crate::encoder::RhiCommandEncoder::begin_rendering`]
+/// (Vulkan 1.3 dynamic rendering — no `VkRenderPass`/`VkFramebuffer`).
+///
+/// The `colors` slice is a stack local the backend walks once; rung 1 supplies
+/// exactly one color attachment and no depth attachment.
+pub struct RenderingDesc<'a, A: RhiApi> {
+    /// The region the rendering scope covers.
+    pub render_area: RenderArea,
+    /// The color attachments bound for this scope (rung 1: exactly one).
+    pub colors: &'a [RenderingAttachment<'a, A>],
+}
+
+/// An image's `[base_mip, base_mip + level_count) × [base_layer, base_layer +
+/// layer_count)` subresource range for an [`ImageBarrierDesc`].
+///
+/// `#[repr(C)]` mirroring `VkImageSubresourceRange`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageSubresourceRange {
+    /// Which aspect(s) of the image the range covers (color/depth).
+    pub aspect: ImageAspect,
+    /// First mip level in the range.
+    pub base_mip_level: u32,
+    /// Number of mip levels (`1` for a single-level image).
+    pub level_count: u32,
+    /// First array layer in the range.
+    pub base_array_layer: u32,
+    /// Number of array layers (`1` for a non-array image).
+    pub layer_count: u32,
+}
+
+impl ImageSubresourceRange {
+    /// The full single-mip, single-layer color range — the rung-1 default.
+    pub const COLOR: ImageSubresourceRange = ImageSubresourceRange {
+        aspect: ImageAspect::COLOR,
+        base_mip_level: 0,
+        level_count: 1,
+        base_array_layer: 0,
+        layer_count: 1,
+    };
+}
+
+/// One image→buffer copy region for
+/// [`crate::encoder::RhiCommandEncoder::copy_image_to_buffer`] (the S0 offscreen
+/// golden-readback transfer).
+///
+/// `#[repr(C)]` mirroring `VkBufferImageCopy`'s `(buffer_offset,
+/// buffer_row_length, buffer_image_height, image_subresource, image_offset,
+/// image_extent)` layout so a backend reads it without reordering. The
+/// `image_subresource` is flattened to its four scalar members and the
+/// `image_offset`/`image_extent` to their scalar components, keeping this a
+/// dependency-free POD on the `boyko_rhi` side (the backend asserts the layout
+/// match against `VkBufferImageCopy`).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BufferImageCopy {
+    /// Byte offset within the destination buffer.
+    pub buffer_offset: u64,
+    /// Row length in texels (`0` = tightly packed to the image width).
+    pub buffer_row_length: u32,
+    /// Image height in texels (`0` = tightly packed to the image height).
+    pub buffer_image_height: u32,
+    /// Image-aspect bits the copy reads (typically [`ImageAspect::COLOR`]).
+    pub aspect: ImageAspect,
+    /// Mip level to copy from.
+    pub mip_level: u32,
+    /// First array layer to copy from.
+    pub base_array_layer: u32,
+    /// Number of array layers to copy (`1` for a non-array image).
+    pub layer_count: u32,
+    /// X texel offset of the copied region.
+    pub image_offset_x: i32,
+    /// Y texel offset of the copied region.
+    pub image_offset_y: i32,
+    /// Z texel offset of the copied region.
+    pub image_offset_z: i32,
+    /// Width of the copied region, in texels.
+    pub image_extent_w: u32,
+    /// Height of the copied region, in texels.
+    pub image_extent_h: u32,
+    /// Depth of the copied region, in texels (`1` for 2D).
+    pub image_extent_d: u32,
+}
+
+/// Parameters for [`crate::encoder::RhiCommandEncoder::image_barrier`] (the
+/// Phase-2-3 `ImageBarrier` seam, RHI plan D3/C1, now needed for S0).
+///
+/// One image-layout transition: old/new layout, the subresource range, and the
+/// src/dst stage + access scopes. Borrows the backend texture for the record
+/// call only. Abstracts the concrete UNDEFINED→COLOR / COLOR→TRANSFER_SRC
+/// `VkImageMemoryBarrier`s of `swapchain.rs::record_clear`.
+pub struct ImageBarrierDesc<'a, A: RhiApi> {
+    /// The texture whose image's layout is transitioning.
+    pub texture: &'a A::Texture,
+    /// Pipeline stage(s) that must complete before the barrier.
+    pub src_stage: BarrierStage,
+    /// Pipeline stage(s) that wait on the barrier.
+    pub dst_stage: BarrierStage,
+    /// Access scope before the barrier.
+    pub src_access: BarrierAccess,
+    /// Access scope after the barrier.
+    pub dst_access: BarrierAccess,
+    /// The layout the image is in before the barrier.
+    pub old_layout: ImageLayout,
+    /// The layout the image is in after the barrier.
+    pub new_layout: ImageLayout,
+    /// The subresource range the transition covers.
+    pub range: ImageSubresourceRange,
 }

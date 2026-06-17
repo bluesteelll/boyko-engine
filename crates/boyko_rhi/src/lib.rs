@@ -40,12 +40,18 @@ pub mod handle;
 pub mod queue;
 
 pub use api::RhiApi;
-pub use descriptor::{BarrierDesc, BufferBarrier, BufferCopy, BufferDesc, ComputePipelineDesc};
+pub use descriptor::{
+    BarrierDesc, BufferBarrier, BufferCopy, BufferDesc, BufferImageCopy, ComputePipelineDesc,
+    ImageBarrierDesc, ImageSubresourceRange, RenderArea, RenderingAttachment, RenderingDesc,
+};
 pub use device::{
     BindGroupDesc, BindGroupLayoutDesc, GraphicsPipelineDesc, RhiDevice, SamplerDesc, TextureDesc,
 };
 pub use encoder::RhiCommandEncoder;
-pub use enums::{BarrierAccess, BarrierStage, BufferUsage, MemoryLocation, ShaderStage};
+pub use enums::{
+    BarrierAccess, BarrierStage, BufferUsage, Format, ImageAspect, ImageLayout, ImageUsage,
+    LoadOp, MemoryLocation, ShaderStage, StoreOp, TextureDimension,
+};
 pub use error::RhiError;
 pub use handle::{
     slot_to_u64, u64_to_slot, BufferHandle, ComputePipelineHandle, FenceHandle, ResourceRegistry,

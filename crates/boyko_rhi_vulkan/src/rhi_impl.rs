@@ -38,8 +38,9 @@ use core::ffi::c_void;
 use core::ptr::{self, NonNull};
 
 use boyko_rhi::{
-    BarrierDesc, BufferBarrier, BufferCopy, BufferDesc, ComputePipelineDesc, MemoryLocation,
-    RhiApi, RhiCommandEncoder, RhiDevice, RhiQueue, ShaderStage,
+    BarrierDesc, BufferBarrier, BufferCopy, BufferDesc, BufferImageCopy, ComputePipelineDesc,
+    ImageBarrierDesc, ImageLayout, MemoryLocation, RenderingDesc, RhiApi, RhiCommandEncoder,
+    RhiDevice, RhiQueue, ShaderStage, TextureDesc,
 };
 
 use crate::compute::ComputeError;
@@ -47,6 +48,66 @@ use crate::device::{DeviceFns, VulkanContext};
 use crate::error::VulkanError;
 use crate::ffi::*;
 use crate::memory::BoundBuffer;
+use crate::texture::VulkanTexture;
+
+/// The maximum number of color attachments a single `begin_rendering` scope
+/// binds inline without heap allocation (Phase-6 S0). Sized for the basic-slice
+/// deferred G-buffer (depth + albedo + normal + material ≈ 4) with headroom; rung
+/// 1 binds exactly one. A `debug_assert!` traps an over-count.
+const MAX_RENDERING_COLOR_ATTACHMENTS: usize = 8;
+
+/// The maximum number of image→buffer copy regions recorded inline without heap
+/// allocation. The basic-slice golden readback uses a single full-image region.
+const MAX_IMAGE_COPY_REGIONS: usize = 4;
+
+/// A zeroed [`VkBufferImageCopy`] the inline-region array's unused tail slots
+/// hold (never read: only the first `regions.len()` are passed to the driver).
+const DEFAULT_BUFFER_IMAGE_COPY: VkBufferImageCopy = VkBufferImageCopy {
+    buffer_offset: 0,
+    buffer_row_length: 0,
+    buffer_image_height: 0,
+    image_subresource: VkImageSubresourceLayers {
+        aspect_mask: VK_IMAGE_ASPECT_COLOR_BIT,
+        mip_level: 0,
+        base_array_layer: 0,
+        layer_count: 1,
+    },
+    image_offset: VkOffset3D { x: 0, y: 0, z: 0 },
+    image_extent: VkExtent3D {
+        width: 0,
+        height: 0,
+        depth: 1,
+    },
+};
+
+/// Lowers one agnostic [`BufferImageCopy`] to the FFI `VkBufferImageCopy`
+/// (mapping the flattened scalar fields into the nested Vulkan structs). The
+/// agnostic `aspect` bits equal the `VK_IMAGE_ASPECT_*` bits (identity cast,
+/// asserted in `abi_guard.rs`).
+#[inline]
+fn vk_buffer_image_copy(r: &BufferImageCopy) -> VkBufferImageCopy {
+    VkBufferImageCopy {
+        buffer_offset: r.buffer_offset,
+        buffer_row_length: r.buffer_row_length,
+        buffer_image_height: r.buffer_image_height,
+        image_subresource: VkImageSubresourceLayers {
+            aspect_mask: r.aspect.bits(),
+            mip_level: r.mip_level,
+            base_array_layer: r.base_array_layer,
+            layer_count: r.layer_count,
+        },
+        image_offset: VkOffset3D {
+            x: r.image_offset_x,
+            y: r.image_offset_y,
+            z: r.image_offset_z,
+        },
+        image_extent: VkExtent3D {
+            width: r.image_extent_w,
+            height: r.image_extent_h,
+            depth: r.image_extent_d,
+        },
+    }
+}
 
 /// The zero-sized Vulkan backend marker implementing [`RhiApi`] (plan D1).
 ///
@@ -68,11 +129,12 @@ impl RhiApi for Vulkan {
     // and used directly (scope decision); they cannot satisfy a `'static`
     // associated type, so `()` stands in until the Phase-2-3 on-screen-in-trait
     // surface lands. `Semaphore` binds to the concrete `VkSemaphore` (a `'static`
-    // `u64` newtype) since that one fits.
+    // `u64` newtype) since that one fits. `Texture` binds to the S0
+    // [`VulkanTexture`] now that `create_texture` is implemented.
     type Surface = ();
     type Swapchain = ();
     type Semaphore = VkSemaphore;
-    type Texture = ();
+    type Texture = VulkanTexture;
     type Sampler = ();
     type GraphicsPipeline = ();
     type BindGroup = ();
@@ -387,6 +449,29 @@ impl RhiDevice<Vulkan> for VulkanContext {
         // device-local buffer carries `None` (it is never mapped, plan D3/MF-8),
         // honoring the device.rs:91 "`None` if not host-mappable" contract.
         buffer.mapped
+    }
+
+    fn create_texture(&self, desc: &TextureDesc) -> Result<VulkanTexture, VulkanError> {
+        // SAFETY: `self.device()`/`self.device_fns()` are the live device + its
+        // command table; `self.memory_properties()` are this physical device's
+        // properties; `VulkanTexture::create` upholds the rest of the FFI
+        // invariants internally (documented per `unsafe` block there).
+        unsafe {
+            VulkanTexture::create(
+                self.device(),
+                self.device_fns(),
+                self.memory_properties(),
+                desc,
+            )
+        }
+    }
+
+    unsafe fn destroy_texture(&self, texture: VulkanTexture) {
+        // SAFETY: `texture` was created on this device by `create_texture`; the GPU
+        // is no longer using it (caller fence-waited / `wait_idle`'d per the trait
+        // contract); the by-value move destroys it exactly once. `destroy` tears
+        // down the view → image → dedicated memory in reverse order.
+        unsafe { texture.destroy(self.device(), self.device_fns()) };
     }
 
     fn create_shader_module(&self, spirv: &[u32]) -> Result<VulkanShaderModule, VulkanError> {
@@ -1037,6 +1122,207 @@ impl RhiCommandEncoder<Vulkan> for VulkanCommandEncoder {
             );
         }
     }
+
+    fn image_barrier(&mut self, barrier: &ImageBarrierDesc<Vulkan>) {
+        // Map the agnostic stage/access masks via identity casts (the
+        // `BarrierStage`/`BarrierAccess` bit values equal the `VK_PIPELINE_STAGE_*`
+        // / `VK_ACCESS_*` constants — asserted in `abi_guard.rs`); `ImageLayout` /
+        // `ImageAspect` are the `i32`/`u32` FFI families mapped by `as_i32()`/
+        // `bits()`. This abstracts the concrete `swapchain.rs::record_clear`
+        // `VkImageMemoryBarrier`.
+        let src_stage: VkFlags = barrier.src_stage.bits();
+        let dst_stage: VkFlags = barrier.dst_stage.bits();
+        debug_assert!(
+            src_stage != 0 && dst_stage != 0,
+            "invariant: an image barrier needs non-empty src+dst stages"
+        );
+        let image_barrier = VkImageMemoryBarrier {
+            s_type: VkStructureType::ImageMemoryBarrier,
+            p_next: ptr::null(),
+            src_access_mask: barrier.src_access.bits(),
+            dst_access_mask: barrier.dst_access.bits(),
+            old_layout: barrier.old_layout.as_i32(),
+            new_layout: barrier.new_layout.as_i32(),
+            src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+            dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+            image: barrier.texture.image,
+            subresource_range: VkImageSubresourceRange {
+                aspect_mask: barrier.range.aspect.bits(),
+                base_mip_level: barrier.range.base_mip_level,
+                level_count: barrier.range.level_count,
+                base_array_layer: barrier.range.base_array_layer,
+                layer_count: barrier.range.layer_count,
+            },
+        };
+        // SAFETY: recording is open; `src_stage`/`dst_stage` are the mapped stage
+        // masks; one fully-initialized `VkImageMemoryBarrier` (the `image_barrier`
+        // local, alive for the call) names the live `barrier.texture.image` with the
+        // requested old→new layout + access scopes; zero global/buffer barriers
+        // (null arrays valid for count 0). `self.fns` points into the context's
+        // boxed fn-table (alive per the type contract).
+        let fns = unsafe { &*self.fns };
+        unsafe {
+            (fns.cmd_pipeline_barrier)(
+                self.command_buffer,
+                src_stage,
+                dst_stage,
+                0,
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                1,
+                (&image_barrier as *const VkImageMemoryBarrier).cast(),
+            );
+        }
+    }
+
+    fn begin_rendering(&mut self, desc: &RenderingDesc<Vulkan>) {
+        // Abstracts the concrete `swapchain.rs::record_clear` `VkRenderingInfo`
+        // begin (one color attachment, loadOp/storeOp/clear from the desc). The
+        // basic slice's G-buffer has a small, fixed attachment count, so the
+        // attachment array is a stack local sized for `MAX_RENDERING_COLOR_ATTACHMENTS`
+        // — zero heap allocation on the record path.
+        let count = desc.colors.len();
+        debug_assert!(
+            count <= MAX_RENDERING_COLOR_ATTACHMENTS,
+            "invariant: begin_rendering color-attachment count exceeds the fixed cap"
+        );
+        let count = count.min(MAX_RENDERING_COLOR_ATTACHMENTS);
+
+        // Build the fixed-capacity attachment array: the first `count` slots map the
+        // caller's color attachments; the tail slots hold a neutral default that is
+        // never read (only `count` entries are passed to the driver). `from_fn`
+        // avoids requiring `Copy` on the raw-pointer-bearing `VkRenderingAttachmentInfo`.
+        let attachments: [VkRenderingAttachmentInfo; MAX_RENDERING_COLOR_ATTACHMENTS] =
+            core::array::from_fn(|i| {
+                if i < count {
+                    let color = &desc.colors[i];
+                    VkRenderingAttachmentInfo {
+                        s_type: VkStructureType::RenderingAttachmentInfo,
+                        p_next: ptr::null(),
+                        image_view: color.texture.view,
+                        image_layout: color.layout.as_i32(),
+                        resolve_mode: 0,
+                        resolve_image_view: VkImageView::NULL,
+                        resolve_image_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+                        load_op: color.load_op.as_i32(),
+                        store_op: color.store_op.as_i32(),
+                        clear_value: VkClearValue {
+                            color: VkClearColorValue {
+                                float32: color.clear_color,
+                            },
+                        },
+                    }
+                } else {
+                    VkRenderingAttachmentInfo {
+                        s_type: VkStructureType::RenderingAttachmentInfo,
+                        p_next: ptr::null(),
+                        image_view: VkImageView::NULL,
+                        image_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+                        resolve_mode: 0,
+                        resolve_image_view: VkImageView::NULL,
+                        resolve_image_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+                        load_op: VK_ATTACHMENT_LOAD_OP_CLEAR,
+                        store_op: VK_ATTACHMENT_STORE_OP_STORE,
+                        clear_value: VkClearValue {
+                            color: VkClearColorValue { float32: [0.0; 4] },
+                        },
+                    }
+                }
+            });
+
+        let rendering = VkRenderingInfo {
+            s_type: VkStructureType::RenderingInfo,
+            p_next: ptr::null(),
+            flags: 0,
+            render_area: VkRect2D {
+                offset: VkOffset2D {
+                    x: desc.render_area.x,
+                    y: desc.render_area.y,
+                },
+                extent: VkExtent2D {
+                    width: desc.render_area.width,
+                    height: desc.render_area.height,
+                },
+            },
+            layer_count: 1,
+            view_mask: 0,
+            color_attachment_count: count as u32,
+            p_color_attachments: if count == 0 {
+                ptr::null()
+            } else {
+                attachments.as_ptr()
+            },
+            p_depth_attachment: ptr::null(),
+            p_stencil_attachment: ptr::null(),
+        };
+        // SAFETY: recording is open; `rendering` is fully initialized and its
+        // `p_color_attachments` points to the first `count` entries of the live
+        // `attachments` stack array (each naming the caller's live image view, now
+        // in the declared layout per a prior `image_barrier`); no depth/stencil
+        // (null); dynamic rendering is enabled on the device (`dynamicRendering`
+        // feature, Correction #1). All locals outlive the call. `self.fns` points
+        // into the context's boxed fn-table (alive per the type contract).
+        let fns = unsafe { &*self.fns };
+        unsafe { (fns.cmd_begin_rendering)(self.command_buffer, &rendering) };
+    }
+
+    fn end_rendering(&mut self) {
+        // SAFETY: recording is open and a `begin_rendering` opened the scope (caller
+        // contract); `vkCmdEndRendering` is its matching close. `self.fns` points
+        // into the context's boxed fn-table (alive per the type contract).
+        let fns = unsafe { &*self.fns };
+        unsafe { (fns.cmd_end_rendering)(self.command_buffer) };
+    }
+
+    fn copy_image_to_buffer(
+        &mut self,
+        src: &VulkanTexture,
+        src_layout: ImageLayout,
+        dst: &BoundBuffer,
+        regions: &[BufferImageCopy],
+    ) {
+        debug_assert!(
+            !regions.is_empty(),
+            "invariant: copy_image_to_buffer needs >= 1 region"
+        );
+        // The basic-slice readback uses a single full-image region; the inline cap
+        // avoids any heap allocation on that path. A larger batch (never hit by S0)
+        // falls into the cold heap helper, mirroring `pipeline_barrier_many`.
+        if regions.len() <= MAX_IMAGE_COPY_REGIONS {
+            // Invariant (mirrors `begin_rendering`'s belt-and-suspenders): inside this
+            // branch the count is provably `<= MAX_IMAGE_COPY_REGIONS`, so the
+            // `inline_regions[..regions.len()]` slice fill is in-bounds and the
+            // `regions.len() as u32` region count handed to Vulkan is `<= CAP`. The
+            // `> CAP` case is routed to the cold heap helper below, never here — this
+            // assert traps any future refactor that loosens the branch condition.
+            debug_assert!(regions.len() <= MAX_IMAGE_COPY_REGIONS);
+            let mut inline_regions = [DEFAULT_BUFFER_IMAGE_COPY; MAX_IMAGE_COPY_REGIONS];
+            for (slot, region) in inline_regions.iter_mut().zip(regions.iter()) {
+                *slot = vk_buffer_image_copy(region);
+            }
+            // SAFETY: recording is open; `src.image` is a live image currently in
+            // `src_layout` (the caller transitioned it via `image_barrier`);
+            // `dst.buffer` is a live host-visible buffer carrying TRANSFER_DST usage;
+            // `inline_regions[..regions.len()]` are fully-initialized `VkBufferImageCopy`s
+            // (alive for the call) describing in-bounds sub-rects. `self.fns` points
+            // into the context's boxed fn-table (alive per the type contract).
+            let fns = unsafe { &*self.fns };
+            unsafe {
+                (fns.cmd_copy_image_to_buffer)(
+                    self.command_buffer,
+                    src.image,
+                    src_layout.as_i32(),
+                    dst.buffer,
+                    regions.len() as u32,
+                    inline_regions.as_ptr(),
+                );
+            }
+            return;
+        }
+        self.copy_image_to_buffer_many(src.image, src_layout.as_i32(), dst.buffer, regions);
+    }
 }
 
 impl VulkanCommandEncoder {
@@ -1085,6 +1371,41 @@ impl VulkanCommandEncoder {
                 heap_buf.as_ptr(),
                 0,
                 ptr::null(),
+            );
+        }
+    }
+
+    /// The cold multi-region fallback for [`RhiCommandEncoder::copy_image_to_buffer`]:
+    /// builds a heap `Vec<VkBufferImageCopy>` and records the copy. The basic-slice
+    /// readback uses a single region, so this path (and its only allocation) is kept
+    /// off the common path's I-cache via `#[cold] #[inline(never)]`.
+    #[cold]
+    #[inline(never)]
+    fn copy_image_to_buffer_many(
+        &mut self,
+        src_image: VkImage,
+        src_layout: i32,
+        dst_buffer: VkBuffer,
+        regions: &[BufferImageCopy],
+    ) {
+        let mut heap_regions: Vec<VkBufferImageCopy> = Vec::with_capacity(regions.len());
+        for r in regions {
+            heap_regions.push(vk_buffer_image_copy(r));
+        }
+        // SAFETY: recording is open; `src_image` is a live image in `src_layout`;
+        // `dst_buffer` is a live TRANSFER_DST buffer; `heap_regions` holds
+        // `regions.len()` fully-initialized `VkBufferImageCopy`s alive for the call.
+        // `self.fns` points into the context's boxed fn-table (alive per the type
+        // contract).
+        let fns = unsafe { &*self.fns };
+        unsafe {
+            (fns.cmd_copy_image_to_buffer)(
+                self.command_buffer,
+                src_image,
+                src_layout,
+                dst_buffer,
+                heap_regions.len() as u32,
+                heap_regions.as_ptr(),
             );
         }
     }

@@ -19,7 +19,7 @@
 
 use boyko_rhi::{
     BufferDesc, BufferUsage, ComputePipelineDesc, MemoryLocation, ResourceRegistry, RhiDevice,
-    RhiError, TextureDesc,
+    RhiError, SamplerDesc,
 };
 
 use boyko_rhi_vulkan::compute::write_pattern_spirv;
@@ -367,13 +367,15 @@ fn seam_stub_returns_unsupported_through_backend() {
     };
     let device: &VulkanContext = &ctx;
 
-    // `create_texture` is a Phase-6+ seam — the default stub returns Unsupported.
-    let tex = device.create_texture(&TextureDesc::default());
-    let err = tex.expect_err("create_texture is a seam stub — must return Err");
+    // `create_sampler` is a Phase-6+ seam (rung 2+) — the default stub returns
+    // Unsupported. (`create_texture` is now implemented as of Phase-6 S0 rung 1, so
+    // the sampler stub is the still-unimplemented seam exercising the projection.)
+    let sampler = device.create_sampler(&SamplerDesc::default());
+    let err = sampler.expect_err("create_sampler is a seam stub — must return Err");
     assert_eq!(
         RhiError::from(err),
-        RhiError::Unsupported("create_texture"),
-        "seam error must project to RhiError::Unsupported(create_texture)"
+        RhiError::Unsupported("create_sampler"),
+        "seam error must project to RhiError::Unsupported(create_sampler)"
     );
 
     // `map_buffer` is a Phase-5 seam — same shape.

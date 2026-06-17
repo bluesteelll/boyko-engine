@@ -116,6 +116,9 @@ struct InstanceFns {
     get_physical_device_properties: PfnVkGetPhysicalDeviceProperties,
     get_physical_device_memory_properties: PfnVkGetPhysicalDeviceMemoryProperties,
     get_physical_device_queue_family_properties: PfnVkGetPhysicalDeviceQueueFamilyProperties,
+    /// `vkGetPhysicalDeviceFeatures2` (Vulkan 1.1 core) — the S0 fail-fast
+    /// `dynamicRendering` support query (Correction #2). Always present at API 1.3.
+    get_physical_device_features2: PfnVkGetPhysicalDeviceFeatures2,
     create_device: PfnVkCreateDevice,
     get_device_proc_addr: PfnVkGetDeviceProcAddr,
     /// `VK_EXT_debug_utils` destroyer — `Some` only when validation is enabled
@@ -201,6 +204,13 @@ pub struct DeviceFns {
     pub destroy_semaphore: PfnVkDestroySemaphore,
     pub cmd_begin_rendering: PfnVkCmdBeginRendering,
     pub cmd_end_rendering: PfnVkCmdEndRendering,
+    // --- Phase-6 S0 image (`create_texture`) + image-copy (readback) commands,
+    //     Vulkan 1.0 core, always loaded. ---
+    pub create_image: PfnVkCreateImage,
+    pub destroy_image: PfnVkDestroyImage,
+    pub get_image_memory_requirements: PfnVkGetImageMemoryRequirements,
+    pub bind_image_memory: PfnVkBindImageMemory,
+    pub cmd_copy_image_to_buffer: PfnVkCmdCopyImageToBuffer,
     // --- Slice-1 `VK_KHR_swapchain` device commands — `Some` only when windowed. ---
     pub swapchain: Option<SwapchainDeviceFns>,
 }
@@ -924,6 +934,13 @@ fn load_instance_fns(
                 instance,
                 c"vkGetPhysicalDeviceQueueFamilyProperties",
             )?,
+            // Vulkan 1.1 core (the `2` suffix, no `KHR`) — always present on a
+            // 1.3 instance. The S0 fail-fast dynamic-rendering query (Correction #2).
+            get_physical_device_features2: load_instance_command(
+                gipa,
+                instance,
+                c"vkGetPhysicalDeviceFeatures2",
+            )?,
             create_device: load_instance_command(gipa, instance, c"vkCreateDevice")?,
             get_device_proc_addr: load_instance_command(gipa, instance, c"vkGetDeviceProcAddr")?,
             destroy_debug_messenger,
@@ -951,6 +968,7 @@ fn fallback_instance_fns(gipa: PfnVkGetInstanceProcAddr, instance: VkInstance) -
         get_physical_device_properties: noop_get_props,
         get_physical_device_memory_properties: noop_get_mem_props,
         get_physical_device_queue_family_properties: noop_get_qf_props,
+        get_physical_device_features2: noop_get_features2,
         create_device: noop_create_device,
         get_device_proc_addr: noop_get_device_proc_addr,
         // No messenger is ever created on the fallback path.
@@ -978,6 +996,11 @@ unsafe extern "system" fn noop_get_qf_props(
     _: VkPhysicalDevice,
     _: *mut u32,
     _: *mut VkQueueFamilyProperties,
+) {
+}
+unsafe extern "system" fn noop_get_features2(
+    _: VkPhysicalDevice,
+    _: *mut VkPhysicalDeviceFeatures2,
 ) {
 }
 unsafe extern "system" fn noop_create_device(
@@ -1110,6 +1133,20 @@ fn load_device_fns(
             // (no `KHR` suffix) — promoted from `VK_KHR_dynamic_rendering`.
             cmd_begin_rendering: load_device_command(gdpa, device, c"vkCmdBeginRendering")?,
             cmd_end_rendering: load_device_command(gdpa, device, c"vkCmdEndRendering")?,
+            // Phase-6 S0 image + image-copy commands (Vulkan 1.0 core).
+            create_image: load_device_command(gdpa, device, c"vkCreateImage")?,
+            destroy_image: load_device_command(gdpa, device, c"vkDestroyImage")?,
+            get_image_memory_requirements: load_device_command(
+                gdpa,
+                device,
+                c"vkGetImageMemoryRequirements",
+            )?,
+            bind_image_memory: load_device_command(gdpa, device, c"vkBindImageMemory")?,
+            cmd_copy_image_to_buffer: load_device_command(
+                gdpa,
+                device,
+                c"vkCmdCopyImageToBuffer",
+            )?,
             swapchain,
         })
     }
@@ -1591,33 +1628,11 @@ fn find_queue_family(fns: &InstanceFns, device: VkPhysicalDevice) -> Result<u32,
     Err(BootError::NoSuitableQueueFamily)
 }
 
-/// Creates a logical device with one queue from `queue_family_index`.
-///
-/// When `windowed`, the `VK_KHR_swapchain` device extension is enabled and the
-/// Vulkan 1.3 `dynamicRendering` feature is requested through a
-/// `VkPhysicalDeviceVulkan13Features` chained into `p_next` (Slice 1 renders
-/// without `VkRenderPass`/`VkFramebuffer`).
-fn create_device(
-    fns: &InstanceFns,
-    physical_device: VkPhysicalDevice,
-    queue_family_index: u32,
-    windowed: bool,
-) -> Result<VkDevice, BootError> {
-    let priority: f32 = 1.0;
-    let queue_info = VkDeviceQueueCreateInfo {
-        s_type: VkStructureType::DeviceQueueCreateInfo,
-        p_next: ptr::null(),
-        flags: 0,
-        queue_family_index,
-        queue_count: 1,
-        p_queue_priorities: &priority,
-    };
-
-    // Windowed: enable `VK_KHR_swapchain` + chain `dynamicRendering`. The feature
-    // struct lives on this stack frame and is only read during the call; all
-    // feature bools except `dynamic_rendering` are zero.
-    let swapchain_ext: [*const c_char; 1] = [VK_KHR_SWAPCHAIN_EXTENSION_NAME.as_ptr()];
-    let features13 = VkPhysicalDeviceVulkan13Features {
+/// A zeroed [`VkPhysicalDeviceVulkan13Features`] except for `s_type` — the
+/// shared template the support query (Correction #2) and device creation
+/// (Correction #1) both build on.
+fn zeroed_features13() -> VkPhysicalDeviceVulkan13Features {
+    VkPhysicalDeviceVulkan13Features {
         s_type: VkStructureType::PhysicalDeviceVulkan13Features,
         p_next: ptr::null_mut(),
         robust_image_access: VK_FALSE,
@@ -1632,18 +1647,81 @@ fn create_device(
         synchronization2: VK_FALSE,
         texture_compression_astc_hdr: VK_FALSE,
         shader_zero_initialize_workgroup_memory: VK_FALSE,
-        dynamic_rendering: VK_TRUE,
+        dynamic_rendering: VK_FALSE,
         shader_integer_dot_product: VK_FALSE,
         maintenance4: VK_FALSE,
+    }
+}
+
+/// Whether the GPU supports the Vulkan 1.3 `dynamicRendering` feature
+/// (Correction #2 / OQ-6 fail-fast). Queries `vkGetPhysicalDeviceFeatures2` with a
+/// chained [`VkPhysicalDeviceVulkan13Features`] and reads back `dynamic_rendering`.
+///
+/// Both the headless and windowed device-creation paths request
+/// `dynamicRendering` (Correction #1), so this check must pass on either path or
+/// the first `cmd_begin_rendering` faults — a CLEAR error here beats an opaque
+/// `vkCreateDevice` failure.
+fn supports_dynamic_rendering(fns: &InstanceFns, physical_device: VkPhysicalDevice) -> bool {
+    let mut features13 = zeroed_features13();
+    let mut features2 = VkPhysicalDeviceFeatures2 {
+        s_type: VkStructureType::PhysicalDeviceFeatures2,
+        p_next: (&mut features13 as *mut VkPhysicalDeviceVulkan13Features).cast(),
+        features: [VK_FALSE; 55],
     };
-    let (p_next, ext_count, pp_exts): (*const c_void, u32, *const *const c_char) = if windowed {
-        (
-            (&features13 as *const VkPhysicalDeviceVulkan13Features).cast(),
-            1,
-            swapchain_ext.as_ptr(),
-        )
+    // SAFETY: `physical_device` is a valid enumerated GPU; `features2` is a
+    // fully-initialized `#[repr(C)]` struct whose `p_next` chains the live
+    // `features13` local (both outlive the call). The driver writes the supported
+    // feature bools through the out-pointer + the chained struct.
+    unsafe { (fns.get_physical_device_features2)(physical_device, &mut features2) };
+    features13.dynamic_rendering == VK_TRUE
+}
+
+/// Creates a logical device with one queue from `queue_family_index`.
+///
+/// The Vulkan 1.3 `dynamicRendering` feature is ALWAYS requested through a
+/// `VkPhysicalDeviceVulkan13Features` chained into `p_next` — including the
+/// **headless** path (Correction #1): every S0 acceptance path records
+/// `cmd_begin_rendering`, which faults without the feature enabled. Support is
+/// verified up front by [`supports_dynamic_rendering`] (Correction #2). When
+/// `windowed`, the `VK_KHR_swapchain` device extension is additionally enabled.
+fn create_device(
+    fns: &InstanceFns,
+    physical_device: VkPhysicalDevice,
+    queue_family_index: u32,
+    windowed: bool,
+) -> Result<VkDevice, BootError> {
+    // Correction #2 (OQ-6): fail fast with a CLEAR error if the GPU does not
+    // support dynamic rendering, rather than letting `vkCreateDevice` fail opaquely
+    // (or, worse, succeed and fault at `cmd_begin_rendering`).
+    if !supports_dynamic_rendering(fns, physical_device) {
+        return Err(BootError::VkError(
+            "dynamicRendering (VkPhysicalDeviceVulkan13Features) unsupported",
+            VkResult::ERROR_FEATURE_NOT_PRESENT,
+        ));
+    }
+
+    let priority: f32 = 1.0;
+    let queue_info = VkDeviceQueueCreateInfo {
+        s_type: VkStructureType::DeviceQueueCreateInfo,
+        p_next: ptr::null(),
+        flags: 0,
+        queue_family_index,
+        queue_count: 1,
+        p_queue_priorities: &priority,
+    };
+
+    // Correction #1: chain `dynamicRendering` on BOTH the headless and windowed
+    // paths. The feature struct lives on this stack frame and is only read during
+    // the call; all feature bools except `dynamic_rendering` are zero. The
+    // `VK_KHR_swapchain` extension stays windowed-only.
+    let swapchain_ext: [*const c_char; 1] = [VK_KHR_SWAPCHAIN_EXTENSION_NAME.as_ptr()];
+    let mut features13 = zeroed_features13();
+    features13.dynamic_rendering = VK_TRUE;
+    let p_next: *const c_void = (&features13 as *const VkPhysicalDeviceVulkan13Features).cast();
+    let (ext_count, pp_exts): (u32, *const *const c_char) = if windowed {
+        (1, swapchain_ext.as_ptr())
     } else {
-        (ptr::null(), 0, ptr::null())
+        (0, ptr::null())
     };
 
     let create_info = VkDeviceCreateInfo {
@@ -1662,10 +1740,11 @@ fn create_device(
     let mut device = VkDevice::NULL;
     // SAFETY: `physical_device` is valid; `create_info` is a fully-initialized
     // `#[repr(C)]` struct whose `p_queue_create_infos`/`p_queue_priorities`
-    // pointers (`&queue_info`, `&priority`) and the optional `p_next`
-    // feature-chain / extension array (`&features13`, `swapchain_ext`) all
-    // outlive the call (locals of this frame); `&mut device` is a valid
-    // out-pointer; NULL allocator picks the default.
+    // pointers (`&queue_info`, `&priority`), the always-present `p_next`
+    // `dynamicRendering` feature chain (`&features13`), and the windowed-only
+    // extension array (`swapchain_ext`) all outlive the call (locals of this
+    // frame); `&mut device` is a valid out-pointer; NULL allocator picks the
+    // default. The feature is verified supported above (Correction #2).
     let raw =
         unsafe { (fns.create_device)(physical_device, &create_info, ptr::null(), &mut device) };
     let result = VkResult::from_raw(raw);

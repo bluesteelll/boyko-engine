@@ -9,15 +9,31 @@
 
 use crate::api::RhiApi;
 use crate::descriptor::{BufferDesc, ComputePipelineDesc};
+use crate::enums::{Format, ImageUsage, TextureDimension};
 use crate::error::RhiError;
 
-/// Minimal placeholder descriptor for the Phase-6+ texture seam (plan D7).
+/// Parameters for [`RhiDevice::create_texture`] (Phase-6 S0 graphics surface).
 ///
-/// Intentionally empty: the real fields land with `create_texture` in Phase 6+.
-#[derive(Debug, Clone, Copy, Default)]
+/// `#[repr(C)]` POD with an explicit field order (dimension + format are the
+/// `i32` FFI seam per `enums.rs`, the extent + usage follow) so a backend can read
+/// it without depending on Rust's default field reordering. Rung 1 creates a 2D
+/// color image with `COLOR_ATTACHMENT | TRANSFER_SRC` usage (clear → readback);
+/// `D3` + `STORAGE` are reserved for the deferred SDF storage image.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TextureDesc {
-    /// Reserved; the texture seam's fields land in Phase 6+.
-    pub _reserved: (),
+    /// Width in texels (`> 0`).
+    pub width: u32,
+    /// Height in texels (`> 0`).
+    pub height: u32,
+    /// Depth in texels for a [`TextureDimension::D3`] image; `1` for a 2D image.
+    pub depth: u32,
+    /// The texel format.
+    pub format: Format,
+    /// 2D or 3D.
+    pub dimension: TextureDimension,
+    /// The usage bits the image must support.
+    pub usage: ImageUsage,
 }
 
 /// Minimal placeholder descriptor for the Phase-6+ sampler seam (plan D7).
@@ -146,11 +162,29 @@ pub trait RhiDevice<A: RhiApi> {
 
     // ===== DEFERRED SEAM (Phase 5/6+) — default-erroring stubs =====
 
-    /// Creates a texture. Seam: Phase 6+ (SDF 3D storage image).
+    /// Creates a texture (Phase-6 S0: a 2D/3D color image + view + bound memory).
     #[cold]
     #[inline(never)]
     fn create_texture(&self, _desc: &TextureDesc) -> Result<A::Texture, Self::Error> {
         Err(RhiError::unsupported("create_texture").into())
+    }
+
+    /// Destroys `texture`, consuming it (Phase-6 S0).
+    ///
+    /// The default body drops the value (a no-op for a backend whose `Texture` is
+    /// zero-sized, e.g. the Mock); a backend whose texture owns GPU objects (Vulkan)
+    /// overrides it to tear them down. This keeps the trait ABI stable.
+    ///
+    /// # Safety
+    /// The GPU must no longer be using `texture` (a submission referencing it has
+    /// completed — fence-waited or `wait_idle`'d). The by-value move guarantees it
+    /// is destroyed at most once.
+    #[cold]
+    #[inline(never)]
+    unsafe fn destroy_texture(&self, texture: A::Texture) {
+        // Default seam: drop the value. A zero-sized `Texture` (Mock) drops to a
+        // no-op; a backend with GPU-owned image objects overrides this.
+        drop(texture);
     }
 
     /// Creates a sampler. Seam: Phase 6+.

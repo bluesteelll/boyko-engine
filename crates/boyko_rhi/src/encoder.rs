@@ -6,8 +6,10 @@
 //! (plan D3): explicit caller-side barriers per plan §5.5, no auto-tracking.
 
 use crate::api::RhiApi;
-use crate::descriptor::{BarrierDesc, BufferCopy};
-use crate::enums::ShaderStage;
+use crate::descriptor::{
+    BarrierDesc, BufferCopy, BufferImageCopy, ImageBarrierDesc, RenderingDesc,
+};
+use crate::enums::{ImageLayout, ShaderStage};
 use crate::error::RhiError;
 
 /// Records commands into a one-time-submit command buffer.
@@ -60,6 +62,63 @@ pub trait RhiCommandEncoder<A: RhiApi> {
     fn copy_buffer(&mut self, _src: &A::Buffer, _dst: &A::Buffer, _regions: &[BufferCopy]) {
         // Phase-5 default seam: a backend without a device-local transfer path
         // (e.g. the Mock) leaves this a no-op; the Vulkan backend overrides it.
+    }
+
+    // ===== GRAPHICS-SURFACE SEAM (Phase 6 S0; default bodies keep Mock + ABI) =====
+
+    /// Records an image-layout transition (the Phase-2-3 `ImageBarrier` seam, RHI
+    /// plan D3/C1, needed by the Phase-6 S0 dynamic-rendering path).
+    ///
+    /// The default body is a no-op marked `#[cold] #[inline(never)]` so a backend
+    /// without an image path (the Mock) leaves it a no-op and the trait ABI is
+    /// unaffected; the Vulkan backend overrides it (mirroring [`Self::copy_buffer`]).
+    #[cold]
+    #[inline(never)]
+    fn image_barrier(&mut self, _barrier: &ImageBarrierDesc<A>) {
+        // Phase-6 S0 default seam: a backend without an image path leaves this a
+        // no-op; the Vulkan backend overrides it.
+    }
+
+    /// Begins a Vulkan 1.3 dynamic-rendering scope (no `VkRenderPass`), binding the
+    /// color attachments in `desc` with their load/store ops + clear values.
+    /// Must be paired with [`Self::end_rendering`]. Seam: Phase 6 S0.
+    ///
+    /// The default body is a no-op marked `#[cold] #[inline(never)]`; the Vulkan
+    /// backend overrides it.
+    #[cold]
+    #[inline(never)]
+    fn begin_rendering(&mut self, _desc: &RenderingDesc<A>) {
+        // Phase-6 S0 default seam: overridden by the Vulkan backend.
+    }
+
+    /// Ends the dynamic-rendering scope opened by [`Self::begin_rendering`].
+    /// Seam: Phase 6 S0.
+    ///
+    /// The default body is a no-op marked `#[cold] #[inline(never)]`; the Vulkan
+    /// backend overrides it.
+    #[cold]
+    #[inline(never)]
+    fn end_rendering(&mut self) {
+        // Phase-6 S0 default seam: overridden by the Vulkan backend.
+    }
+
+    /// Records an image→buffer copy of `regions` from `src` (currently in
+    /// `src_layout`, typically [`ImageLayout::TransferSrcOptimal`]) to `dst`.
+    /// The S0 offscreen golden-readback transfer (the image counterpart of
+    /// [`Self::copy_buffer`]). Seam: Phase 6 S0.
+    ///
+    /// The default body is a no-op marked `#[cold] #[inline(never)]`; the Vulkan
+    /// backend overrides it.
+    #[cold]
+    #[inline(never)]
+    fn copy_image_to_buffer(
+        &mut self,
+        _src: &A::Texture,
+        _src_layout: ImageLayout,
+        _dst: &A::Buffer,
+        _regions: &[BufferImageCopy],
+    ) {
+        // Phase-6 S0 default seam: overridden by the Vulkan backend.
     }
 
     // ===== DEFERRED SEAM (Phase 6+) =====
