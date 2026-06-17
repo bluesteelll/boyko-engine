@@ -67,6 +67,28 @@ const MAX_IMAGE_COPY_REGIONS: usize = 4;
 /// `debug_assert!` traps an over-count at `create_graphics_pipeline`.
 const MAX_VERTEX_ATTRIBUTES: usize = 8;
 
+/// The maximum number of COMBINED_IMAGE_SAMPLER bindings a single bind group / its
+/// layout declares inline without heap allocation (Phase-6 S0 rung 6). Sized for the
+/// deferred-lighting pass's two G-buffer inputs (albedo + normal) with headroom; a
+/// `debug_assert!` traps an over-count at `create_bind_group_layout`/`create_bind_group`.
+const MAX_BIND_GROUP_BINDINGS: usize = 8;
+
+/// The cap on a graphics pipeline's color (MRT) attachment count, shared by the
+/// pipeline's color-blend + dynamic-rendering format arrays (Phase-6 S0 rung 6). The
+/// basic-slice G-buffer geometry pass uses two (albedo + normal); the cap matches the
+/// `begin_rendering` color-attachment cap so a pipeline can target every attachment a
+/// rendering scope binds. A `debug_assert!` traps an over-count.
+const MAX_COLOR_ATTACHMENTS: usize = MAX_RENDERING_COLOR_ATTACHMENTS;
+
+// The pipeline's MRT format/blend cap MUST NOT exceed the `begin_rendering`
+// attachment cap, or a pipeline could declare more color targets than any rendering
+// scope can bind — a guaranteed draw-time format/count mismatch (W2-b). Pinned at
+// build time so a future cap edit cannot silently break the invariant.
+const _: () = assert!(
+    MAX_COLOR_ATTACHMENTS <= MAX_RENDERING_COLOR_ATTACHMENTS,
+    "graphics-pipeline MRT cap must not exceed the begin_rendering attachment cap"
+);
+
 /// A zeroed [`VkBufferImageCopy`] the inline-region array's unused tail slots
 /// hold (never read: only the first `regions.len()` are passed to the driver).
 const DEFAULT_BUFFER_IMAGE_COPY: VkBufferImageCopy = VkBufferImageCopy {
@@ -626,27 +648,41 @@ impl RhiDevice<Vulkan> for VulkanContext {
         &self,
         desc: &BindGroupLayoutDesc,
     ) -> Result<VulkanBindGroupLayout, VulkanError> {
-        // One COMBINED_IMAGE_SAMPLER @ set0/binding0 at the desc's stage (rung 5:
-        // FRAGMENT). The agnostic `ShaderStage` bits equal `VK_SHADER_STAGE_*`
-        // (identity cast, asserted in `abi_guard.rs`).
-        let binding = VkDescriptorSetLayoutBinding {
-            binding: 0,
-            descriptor_type: VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            descriptor_count: 1,
-            stage_flags: desc.stage.bits(),
-            p_immutable_samplers: ptr::null(),
-        };
+        // `desc.binding_count` consecutive COMBINED_IMAGE_SAMPLER bindings at
+        // set0/binding 0..N at the desc's stage (rung 5: 1 binding; rung 6 lighting: 2
+        // — albedo + normal). The agnostic `ShaderStage` bits equal `VK_SHADER_STAGE_*`
+        // (identity cast, asserted in `abi_guard.rs`). The bindings are a fixed-capacity
+        // inline array — zero heap allocation.
+        let count = desc.binding_count as usize;
+        debug_assert!(
+            (1..=MAX_BIND_GROUP_BINDINGS).contains(&count),
+            "invariant: bind-group-layout binding_count must be in 1..=MAX_BIND_GROUP_BINDINGS"
+        );
+        // Release-safe: clamp to the inline capacity (and a floor of 1) so the count
+        // handed to the driver never exceeds the initialized slots even if a
+        // (debug-asserted) out-of-range count slipped through a release build.
+        let count = count.clamp(1, MAX_BIND_GROUP_BINDINGS);
+        let stage_flags = desc.stage.bits();
+        let bindings: [VkDescriptorSetLayoutBinding; MAX_BIND_GROUP_BINDINGS] =
+            core::array::from_fn(|i| VkDescriptorSetLayoutBinding {
+                binding: i as u32,
+                descriptor_type: VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                descriptor_count: 1,
+                stage_flags,
+                p_immutable_samplers: ptr::null(),
+            });
         let info = VkDescriptorSetLayoutCreateInfo {
             s_type: VkStructureType::DescriptorSetLayoutCreateInfo,
             p_next: ptr::null(),
             flags: 0,
-            binding_count: 1,
-            p_bindings: &binding,
+            binding_count: count as u32,
+            p_bindings: bindings.as_ptr(),
         };
         let mut set_layout = VkDescriptorSetLayout::NULL;
         // SAFETY: `device` is live; `info` is fully initialized and its `p_bindings`
-        // points to the single `binding` local (alive for the call); `&mut
-        // set_layout` is a valid out-pointer; NULL allocator.
+        // points to the first `count` (<= cap) entries of the live `bindings` inline
+        // array (alive for the call), each a COMBINED_IMAGE_SAMPLER at binding `i`;
+        // `&mut set_layout` is a valid out-pointer; NULL allocator.
         let raw = unsafe {
             (self.device_fns().create_descriptor_set_layout)(
                 self.device(),
@@ -685,10 +721,20 @@ impl RhiDevice<Vulkan> for VulkanContext {
         let device = self.device();
         let fns = self.device_fns();
 
-        // A dedicated pool sized for exactly one COMBINED_IMAGE_SAMPLER set.
+        // One COMBINED_IMAGE_SAMPLER descriptor per `desc.entries` entry, written into
+        // bindings 0..N (rung 5: 1 entry; rung 6 lighting: 2 — albedo + normal). The
+        // count must equal the layout's `binding_count` (caller contract, W2-b).
+        let count = desc.entries.len();
+        debug_assert!(
+            (1..=MAX_BIND_GROUP_BINDINGS).contains(&count),
+            "invariant: bind-group entry count must be in 1..=MAX_BIND_GROUP_BINDINGS"
+        );
+        let count = count.clamp(1, MAX_BIND_GROUP_BINDINGS);
+
+        // A dedicated pool sized for `count` COMBINED_IMAGE_SAMPLER descriptors in one set.
         let pool_size = VkDescriptorPoolSize {
             descriptor_type: VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            descriptor_count: 1,
+            descriptor_count: count as u32,
         };
         let dp_info = VkDescriptorPoolCreateInfo {
             s_type: VkStructureType::DescriptorPoolCreateInfo,
@@ -736,37 +782,58 @@ impl RhiDevice<Vulkan> for VulkanContext {
             ));
         }
 
-        // Write the (sampler, image view, layout) triple into binding 0. The texture
-        // MUST already be in SHADER_READ_ONLY_OPTIMAL when SAMPLED at draw time — the
-        // caller transitions it via `image_barrier` (the rung-5 SAFETY contract); the
-        // layout declared here is the layout the descriptor records, which validation
-        // cross-checks against the image's actual layout at draw.
-        let image_info = VkDescriptorImageInfo {
-            sampler: desc.sampler.sampler,
-            image_view: desc.texture.view,
-            image_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-        };
-        let write = VkWriteDescriptorSet {
-            s_type: VkStructureType::WriteDescriptorSet,
-            p_next: ptr::null(),
-            dst_set: descriptor_set,
-            dst_binding: 0,
-            dst_array_element: 0,
-            descriptor_count: 1,
-            descriptor_type: VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            // A combined-image-sampler write reads `p_image_info`, not the buffer /
-            // texel-view pointers (which stay null).
-            p_image_info: (&image_info as *const VkDescriptorImageInfo).cast(),
-            p_buffer_info: ptr::null(),
-            p_texel_buffer_view: ptr::null(),
-        };
-        // SAFETY: `device` is live; one write references the freshly-allocated
-        // `descriptor_set` + the `image_info` local (which names the caller's live
-        // sampler + image view); `p_image_info` is a valid `VkDescriptorImageInfo*`
-        // for the COMBINED_IMAGE_SAMPLER type; zero copies. The set is not bound to
-        // any pending command buffer (it was just allocated), so writing it is sound.
-        // The `image_info` local outlives the call.
-        unsafe { (fns.update_descriptor_sets)(device, 1, &write, 0, ptr::null()) };
+        // Write each entry's (sampler, image view, layout) triple into binding `i`. The
+        // textures MUST already be in SHADER_READ_ONLY_OPTIMAL when SAMPLED at draw
+        // time — the caller transitions each via `image_barrier` (the rung-5/6 SAFETY
+        // contract); the layout declared here is what the descriptor records, which
+        // validation cross-checks against each image's actual layout at draw. The
+        // image-info + write arrays are fixed-capacity inline (zero heap allocation);
+        // each `VkWriteDescriptorSet[i].p_image_info` points at `image_infos[i]`, so
+        // both arrays must outlive the `update_descriptor_sets` call (they are stack
+        // locals alive through it).
+        let image_infos: [VkDescriptorImageInfo; MAX_BIND_GROUP_BINDINGS] =
+            core::array::from_fn(|i| {
+                if i < count {
+                    let entry = &desc.entries[i];
+                    VkDescriptorImageInfo {
+                        sampler: entry.sampler.sampler,
+                        image_view: entry.texture.view,
+                        image_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    }
+                } else {
+                    VkDescriptorImageInfo {
+                        sampler: VkSampler::NULL,
+                        image_view: VkImageView::NULL,
+                        image_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+                    }
+                }
+            });
+        let writes: [VkWriteDescriptorSet; MAX_BIND_GROUP_BINDINGS] = core::array::from_fn(|i| {
+            VkWriteDescriptorSet {
+                s_type: VkStructureType::WriteDescriptorSet,
+                p_next: ptr::null(),
+                dst_set: descriptor_set,
+                dst_binding: i as u32,
+                dst_array_element: 0,
+                descriptor_count: 1,
+                descriptor_type: VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                // A combined-image-sampler write reads `p_image_info`, not the buffer /
+                // texel-view pointers (which stay null). Points at the matching inline
+                // `image_infos[i]` local (alive through the update call below).
+                p_image_info: (&image_infos[i] as *const VkDescriptorImageInfo).cast(),
+                p_buffer_info: ptr::null(),
+                p_texel_buffer_view: ptr::null(),
+            }
+        });
+        // SAFETY: `device` is live; the first `count` (<= cap) `writes` reference the
+        // freshly-allocated `descriptor_set` at distinct bindings 0..count, each
+        // `p_image_info` pointing at the matching `image_infos[i]` local (which names
+        // the caller's live sampler + image view); `p_image_info` is a valid
+        // `VkDescriptorImageInfo*` for the COMBINED_IMAGE_SAMPLER type; zero copies.
+        // The set is not bound to any pending command buffer (it was just allocated),
+        // so writing it is sound. Both inline arrays outlive the call; only the first
+        // `count` entries are passed (the count bounds the driver's read).
+        unsafe { (fns.update_descriptor_sets)(device, count as u32, writes.as_ptr(), 0, ptr::null()) };
 
         Ok(VulkanBindGroup {
             descriptor_pool,
@@ -1085,29 +1152,49 @@ impl RhiDevice<Vulkan> for VulkanContext {
             alpha_to_one_enable: VK_FALSE,
         };
 
-        // One opaque (blend-disabled) color attachment with an all-channel write
-        // mask so the fragment color reaches every channel of the attachment.
-        let blend_attachment = VkPipelineColorBlendAttachmentState {
-            blend_enable: VK_FALSE,
-            src_color_blend_factor: 0,
-            dst_color_blend_factor: 0,
-            color_blend_op: 0,
-            src_alpha_blend_factor: 0,
-            dst_alpha_blend_factor: 0,
-            alpha_blend_op: 0,
-            color_write_mask: VK_COLOR_COMPONENT_R_BIT
-                | VK_COLOR_COMPONENT_G_BIT
-                | VK_COLOR_COMPONENT_B_BIT
-                | VK_COLOR_COMPONENT_A_BIT,
-        };
+        // One opaque (blend-disabled) color-blend attachment state PER color (MRT)
+        // attachment, each with an all-channel write mask so the fragment color reaches
+        // every channel of its target (Phase-6 S0 rung 6). The G-buffer geometry pass
+        // declares two (albedo + normal); rungs 2..5 declare one (`color_formats.len()
+        // == 1`). The count MUST equal the dynamic-rendering format count below, or the
+        // driver rejects the pipeline. The first `color_attachment_count` entries are
+        // identical opaque states; the inline tail is never read (the count bounds it).
+        debug_assert!(
+            !desc.color_formats.is_empty(),
+            "invariant: a graphics pipeline needs >= 1 color attachment format"
+        );
+        debug_assert!(
+            desc.color_formats.len() <= MAX_COLOR_ATTACHMENTS,
+            "invariant: graphics pipeline color-attachment count exceeds the fixed cap"
+        );
+        // Release-safe: the count handed to the driver never exceeds the initialized
+        // inline slots even if a (debug-asserted) over-count slipped through a release
+        // build — it is clamped to the cap, matching the arrays' length.
+        let color_attachment_count = desc.color_formats.len().min(MAX_COLOR_ATTACHMENTS);
+        // `from_fn` (not `[x; N]`) avoids requiring `Copy` on the FFI struct; every
+        // slot is the identical opaque, all-channel-write state.
+        let blend_attachments: [VkPipelineColorBlendAttachmentState; MAX_COLOR_ATTACHMENTS] =
+            core::array::from_fn(|_| VkPipelineColorBlendAttachmentState {
+                blend_enable: VK_FALSE,
+                src_color_blend_factor: 0,
+                dst_color_blend_factor: 0,
+                color_blend_op: 0,
+                src_alpha_blend_factor: 0,
+                dst_alpha_blend_factor: 0,
+                alpha_blend_op: 0,
+                color_write_mask: VK_COLOR_COMPONENT_R_BIT
+                    | VK_COLOR_COMPONENT_G_BIT
+                    | VK_COLOR_COMPONENT_B_BIT
+                    | VK_COLOR_COMPONENT_A_BIT,
+            });
         let color_blend = VkPipelineColorBlendStateCreateInfo {
             s_type: VkStructureType::PipelineColorBlendStateCreateInfo,
             p_next: ptr::null(),
             flags: 0,
             logic_op_enable: VK_FALSE,
             logic_op: 0,
-            attachment_count: 1,
-            p_attachments: &blend_attachment,
+            attachment_count: color_attachment_count as u32,
+            p_attachments: blend_attachments.as_ptr(),
             blend_constants: [0.0; 4],
         };
 
@@ -1153,19 +1240,27 @@ impl RhiDevice<Vulkan> for VulkanContext {
         };
 
         // The dynamic-rendering attachment-format chain (no `VkRenderPass`). The
-        // single color-attachment format declared here is the W2-b SAFETY contract:
-        // it MUST equal the format of every `begin_rendering` color attachment any
-        // bound pipeline renders into, or the validation layer faults at DRAW time.
+        // color-attachment formats declared here are the W2-b SAFETY contract: each
+        // MUST equal the format of the same-index `begin_rendering` color attachment
+        // any bound pipeline renders into — AND the count must equal the rendering
+        // scope's color-attachment count — or the validation layer faults at DRAW
+        // time. The format count equals `color_attachment_count` (the same value the
+        // color-blend `attachment_count` above uses, so the two stay consistent).
         // `depth_attachment_format` carries the same contract for the depth attachment
         // (rung 4). The agnostic `Format` discriminant equals the `VkFormat` constant
-        // (asserted in `abi_guard.rs`).
-        let color_format = desc.color_format.as_i32();
+        // (asserted in `abi_guard.rs`). The `color_formats` inline array's first
+        // `color_attachment_count` entries are lowered from the desc; the tail is never
+        // read (the count bounds the driver's read).
+        let mut color_formats: [i32; MAX_COLOR_ATTACHMENTS] = [VK_FORMAT_UNDEFINED; MAX_COLOR_ATTACHMENTS];
+        for (slot, fmt) in color_formats.iter_mut().zip(desc.color_formats.iter()) {
+            *slot = fmt.as_i32();
+        }
         let rendering_info = VkPipelineRenderingCreateInfo {
             s_type: VkStructureType::PipelineRenderingCreateInfo,
             p_next: ptr::null(),
             view_mask: 0,
-            color_attachment_count: 1,
-            p_color_attachment_formats: &color_format,
+            color_attachment_count: color_attachment_count as u32,
+            p_color_attachment_formats: color_formats.as_ptr(),
             depth_attachment_format,
             stencil_attachment_format: VK_FORMAT_UNDEFINED,
         };
@@ -1210,11 +1305,20 @@ impl RhiDevice<Vulkan> for VulkanContext {
         // is `VK_NULL_HANDLE` (dynamic rendering). `&mut pipeline` is a valid
         // out-pointer for the single pipeline; NULL allocator.
         //
+        // `p_color_blend_state` points at the `color_blend` local whose
+        // `p_attachments` is the `blend_attachments` inline array (alive for the call),
+        // its first `color_attachment_count` entries (= the format count below) read by
+        // the driver. The dynamic-rendering format chain's `p_color_attachment_formats`
+        // is the `color_formats` inline array (alive for the call), first
+        // `color_attachment_count` entries valid.
+        //
         // FORMAT CONTRACT (W2-b): `rendering_info.p_color_attachment_formats` declares
-        // `desc.color_format` and `.depth_attachment_format` declares the rung-4 depth
-        // format; each MUST equal the format of every `begin_rendering` color/depth
-        // attachment the pipeline is later bound inside, or validation faults at draw
-        // time (not here). The agnostic↔Vk discriminant equality is asserted in
+        // `desc.color_formats` (count + per-index format) and `.depth_attachment_format`
+        // declares the rung-4 depth format; each MUST equal the same-index format (and
+        // the count) of every `begin_rendering` color/depth attachment the pipeline is
+        // later bound inside, or validation faults at draw time (not here). The MRT
+        // color-blend `attachment_count` equals the format count, so the two never
+        // disagree. The agnostic↔Vk discriminant equality is asserted in
         // `abi_guard.rs`; the cross-check against the bound rendering scope is the
         // caller's contract (encoded in `GraphicsPipelineDesc`↔`RenderingDesc`).
         let raw = unsafe {

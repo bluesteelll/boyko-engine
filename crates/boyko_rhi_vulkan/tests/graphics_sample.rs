@@ -42,8 +42,8 @@ use core::slice;
 
 use boyko_rhi::enums::{AddressMode, BarrierAccess, BarrierStage, Filter};
 use boyko_rhi::{
-    BindGroupDesc, BindGroupLayoutDesc, BufferDesc, BufferImageCopy, BufferUsage, Format,
-    GraphicsPipelineDesc, ImageAspect, ImageBarrierDesc, ImageLayout, ImageSubresourceRange,
+    BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BufferDesc, BufferImageCopy, BufferUsage,
+    Format, GraphicsPipelineDesc, ImageAspect, ImageBarrierDesc, ImageLayout, ImageSubresourceRange,
     ImageUsage, LoadOp, MemoryLocation, PrimitiveTopology, RenderArea, RenderingAttachment,
     RenderingDesc, RhiCommandEncoder, RhiDevice, RhiQueue, SamplerDesc, ShaderStage, StoreOp,
     TextureDesc, TextureDimension, Viewport,
@@ -220,7 +220,7 @@ fn render_sampled(device: &VulkanContext) -> Vec<u8> {
             vertex_entry: c"main",
             fragment_module: &tri_fs,
             fragment_entry: c"main",
-            color_format: Format::R8G8B8A8Unorm,
+            color_formats: &[Format::R8G8B8A8Unorm],
             depth_format: None,
             topology: PrimitiveTopology::TriangleList,
             vertex_layout: None,
@@ -242,6 +242,7 @@ fn render_sampled(device: &VulkanContext) -> Vec<u8> {
     let bind_group_layout = device
         .create_bind_group_layout(&BindGroupLayoutDesc {
             stage: ShaderStage::FRAGMENT,
+            binding_count: 1,
         })
         .expect("bind-group layout");
 
@@ -260,7 +261,7 @@ fn render_sampled(device: &VulkanContext) -> Vec<u8> {
             vertex_entry: c"main",
             fragment_module: &sample_fs,
             fragment_entry: c"main",
-            color_format: Format::R8G8B8A8Unorm,
+            color_formats: &[Format::R8G8B8A8Unorm],
             depth_format: None,
             topology: PrimitiveTopology::TriangleList,
             vertex_layout: None,
@@ -274,8 +275,10 @@ fn render_sampled(device: &VulkanContext) -> Vec<u8> {
     let bind_group = device
         .create_bind_group(&BindGroupDesc {
             layout: &bind_group_layout,
-            texture: &source,
-            sampler: &sampler,
+            entries: &[BindGroupEntry {
+                texture: &source,
+                sampler: &sampler,
+            }],
         })
         .expect("bind group (T, sampler)");
 

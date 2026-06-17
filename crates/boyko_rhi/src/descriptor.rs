@@ -106,12 +106,20 @@ pub struct VertexBufferLayout<'a> {
 /// `push_constant_bytes` keeps the rung-2 empty layout — so the rung-2 triangle test
 /// stays valid against the same descriptor.
 ///
-/// **Format contract (S0 SAFETY obligation, W2-b):** `color_format` MUST equal the
-/// format of every color attachment of any [`RenderingDesc`] this pipeline is bound
-/// inside — the `VkPipelineRenderingCreateInfo` attachment format must match the
-/// dynamic-rendering scope, or the validation layer faults at **draw** time, not at
-/// create time. The contract is documented on the Vulkan creation block and
-/// re-stated on [`RenderingAttachment`].
+/// Rung 6 turns `color_formats` into a **slice** so a single pipeline can declare
+/// **N color attachments** — the deferred-shading G-buffer's multiple render targets
+/// (MRT). The backend builds one `VkPipelineColorBlendAttachmentState` per element
+/// and an N-format `VkPipelineRenderingCreateInfo` array. A **one-element** slice
+/// (e.g. `&[Format::R8G8B8A8Unorm]`) is the no-MRT path rungs 2..5 use; the geometry
+/// G-buffer pass passes two (albedo + normal). The slice must be non-empty.
+///
+/// **Format contract (S0 SAFETY obligation, W2-b):** `color_formats[i]` MUST equal
+/// the format of color attachment `i` of every [`RenderingDesc`] this pipeline is
+/// bound inside — including the **count** (the pipeline's attachment count must equal
+/// the rendering scope's) — the `VkPipelineRenderingCreateInfo` attachment formats
+/// must match the dynamic-rendering scope, or the validation layer faults at **draw**
+/// time, not at create time. The contract is documented on the Vulkan creation block
+/// and re-stated on [`RenderingAttachment`].
 pub struct GraphicsPipelineDesc<'a, A: RhiApi> {
     /// The compiled vertex-stage shader module.
     pub vertex_module: &'a A::ShaderModule,
@@ -121,9 +129,12 @@ pub struct GraphicsPipelineDesc<'a, A: RhiApi> {
     pub fragment_module: &'a A::ShaderModule,
     /// The fragment-stage entry-point name (today `c"main"`).
     pub fragment_entry: &'a core::ffi::CStr,
-    /// The single color attachment's format (the
-    /// `VkPipelineRenderingCreateInfo` format — see the format contract above).
-    pub color_format: Format,
+    /// The color attachments' formats, one per MRT target (the
+    /// `VkPipelineRenderingCreateInfo` formats — see the format contract above). A
+    /// one-element slice is the no-MRT path; the G-buffer geometry pass passes two
+    /// (albedo + normal). Borrowed for the `create_graphics_pipeline` call only;
+    /// must be non-empty.
+    pub color_formats: &'a [Format],
     /// The depth attachment's format, or `None` for a depth-less pipeline (rungs
     /// 1..3). `Some(fmt)` (rung 4: [`Format::D32Sfloat`]) enables the pipeline's
     /// depth-stencil state (`depthTestEnable`/`depthWriteEnable`, compare op
@@ -235,10 +246,12 @@ pub struct Viewport {
 /// [`LoadOp::Clear`].
 ///
 /// **Format contract (S0 SAFETY obligation, W2-b):** the attachment's texture
-/// format MUST equal the format declared at `create_graphics_pipeline` time for
-/// any pipeline bound inside this rendering scope — a mismatch faults at draw
-/// time in the validation layer, not at create time. Rung 1 binds no pipeline, so
-/// the contract is vacuously satisfied; it is documented here for the later rung.
+/// format MUST equal the format declared at `create_graphics_pipeline` time for the
+/// same color-attachment index, for any pipeline bound inside this rendering scope —
+/// and the rendering scope's attachment **count** must equal the bound pipeline's
+/// `color_formats` length (rung 6 MRT) — a mismatch faults at draw time in the
+/// validation layer, not at create time. Rung 1 binds no pipeline, so the contract
+/// is vacuously satisfied; it is documented here for the later rung.
 pub struct RenderingAttachment<'a, A: RhiApi> {
     /// The texture whose image view is bound as this color attachment.
     pub texture: &'a A::Texture,
@@ -284,11 +297,14 @@ pub struct DepthAttachment<'a, A: RhiApi> {
 ///
 /// The `colors` slice is a stack local the backend walks once; rung 1 supplies
 /// exactly one color attachment and no depth attachment. Rung 4 adds an optional
-/// `depth` attachment (`None` keeps the rungs-1..3 no-depth path valid).
+/// `depth` attachment (`None` keeps the rungs-1..3 no-depth path valid). Rung 6 binds
+/// N color attachments (the G-buffer MRT) — the count must equal the bound pipeline's
+/// `color_formats` length (W2-b).
 pub struct RenderingDesc<'a, A: RhiApi> {
     /// The region the rendering scope covers.
     pub render_area: RenderArea,
-    /// The color attachments bound for this scope (rung 1: exactly one).
+    /// The color attachments bound for this scope (rung 1: exactly one; rung 6: the
+    /// G-buffer's N targets, in the same order as the pipeline's `color_formats`).
     pub colors: &'a [RenderingAttachment<'a, A>],
     /// The optional depth attachment (Phase-6 S0 rung 4); `None` for the no-depth
     /// rungs-1..3 path.

@@ -179,7 +179,7 @@ fn triangle_draw_golden_round_trip() {
             vertex_entry: c"main",
             fragment_module: &fs,
             fragment_entry: c"main",
-            color_format: Format::R8G8B8A8Unorm,
+            color_formats: &[Format::R8G8B8A8Unorm],
             depth_format: None,
             topology: PrimitiveTopology::TriangleList,
             // Rung 2: no vertex buffer (SV_VertexID-generated) + an empty layout.

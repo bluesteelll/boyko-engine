@@ -69,38 +69,59 @@ impl Default for SamplerDesc {
 
 /// Parameters for [`RhiDevice::create_bind_group_layout`] (Phase-6 S0 rung 5).
 ///
-/// Declares ONE COMBINED_IMAGE_SAMPLER binding at `(set 0, binding 0)`, visible to
-/// the `stage` shader stage(s). Rung 5 uses [`ShaderStage::FRAGMENT`] (the sampling
-/// happens in the fragment stage). The basic slice's bind groups are a single
-/// combined-image-sampler; the multi-binding form is a later-rung extension.
+/// Declares `binding_count` consecutive COMBINED_IMAGE_SAMPLER bindings at
+/// `(set 0, binding 0..binding_count)`, all visible to the `stage` shader stage(s).
+/// Rung 5 uses [`ShaderStage::FRAGMENT`] + `binding_count == 1` (one sampled
+/// texture). Rung 6's deferred-lighting pass uses `binding_count == 2` — the two
+/// G-buffer inputs (albedo + normal) sampled together in one fragment shader. The
+/// backend caps the count at a small fixed maximum (a `debug_assert!` traps an
+/// over-count).
 #[derive(Debug, Clone, Copy)]
 pub struct BindGroupLayoutDesc {
-    /// The shader stage(s) the combined-image-sampler binding is visible to.
+    /// The shader stage(s) every combined-image-sampler binding is visible to.
     pub stage: ShaderStage,
+    /// The number of consecutive COMBINED_IMAGE_SAMPLER bindings (rung 5: `1`;
+    /// rung 6 deferred lighting: `2`). Must be `>= 1` and within the backend cap.
+    pub binding_count: u32,
 }
 
-/// Parameters for [`RhiDevice::create_bind_group`] (Phase-6 S0 rung 5).
+/// One `(texture view, sampler)` entry written into a [`BindGroupDesc`]'s descriptor
+/// set at the entry's positional binding index (Phase-6 S0 rung 6).
+///
+/// Borrows the texture + sampler for the `create_bind_group` call only — but the
+/// resulting bind group retains them BY RAW HANDLE (see [`BindGroupDesc`]'s caller
+/// contract). The texture MUST be in
+/// [`crate::enums::ImageLayout::ShaderReadOnlyOptimal`] before a draw samples it.
+pub struct BindGroupEntry<'a, A: RhiApi> {
+    /// The texture whose image view is bound as the sampled image at this binding.
+    pub texture: &'a A::Texture,
+    /// The sampler bound alongside the image (the COMBINED part).
+    pub sampler: &'a A::Sampler,
+}
+
+/// Parameters for [`RhiDevice::create_bind_group`] (Phase-6 S0 rung 5/6).
 ///
 /// Carries the [`RhiDevice::create_bind_group_layout`] layout the set is allocated
-/// against plus the `(texture view, sampler)` pair written into its single
-/// COMBINED_IMAGE_SAMPLER binding. The texture MUST be in
+/// against plus one [`BindGroupEntry`] per COMBINED_IMAGE_SAMPLER binding, written
+/// into bindings `0..entries.len()` in slice order. Rung 5 supplies one entry; rung 6
+/// deferred lighting supplies two (albedo + normal). `entries.len()` MUST equal the
+/// layout's `binding_count`. Every entry's texture MUST be in
 /// [`crate::enums::ImageLayout::ShaderReadOnlyOptimal`] (transitioned via
 /// [`crate::encoder::RhiCommandEncoder::image_barrier`]) before a draw samples the
 /// bound set, or the validation layer faults at draw time. The `'a` lifetime
-/// borrows the layout + texture + sampler for the `create_bind_group` call only —
-/// **but the resulting bind group retains the texture's image view and the sampler
-/// BY RAW HANDLE in its descriptor set.** CALLER CONTRACT: the texture and sampler
-/// MUST outlive every submission that binds this group; dropping either before the
+/// borrows the layout + entries for the `create_bind_group` call only —
+/// **but the resulting bind group retains each texture's image view and sampler
+/// BY RAW HANDLE in its descriptor set.** CALLER CONTRACT: every texture and sampler
+/// MUST outlive every submission that binds this group; dropping any before the
 /// binding submission completes is use-after-free of a destroyed view/sampler
 /// (caught by the validation layer, not the Rust type system — the compile-time
 /// lifetime tie is deferred to Phase 2-3, plan F1).
 pub struct BindGroupDesc<'a, A: RhiApi> {
     /// The layout the descriptor set is allocated + written against.
     pub layout: &'a A::BindGroupLayout,
-    /// The texture whose image view is bound as the sampled image.
-    pub texture: &'a A::Texture,
-    /// The sampler bound alongside the image (the COMBINED part).
-    pub sampler: &'a A::Sampler,
+    /// One `(texture, sampler)` entry per binding, in binding order; its length must
+    /// equal the layout's `binding_count`.
+    pub entries: &'a [BindGroupEntry<'a, A>],
 }
 
 /// The logical device: creates and destroys backend resources, maps buffers,
@@ -292,10 +313,10 @@ pub trait RhiDevice<A: RhiApi> {
         drop(pipeline);
     }
 
-    /// Creates a bind-group layout (Phase-6 S0 rung 5: a `VkDescriptorSetLayout`
-    /// with one COMBINED_IMAGE_SAMPLER binding at `(set 0, binding 0)` at the
-    /// desc's stage). Supersedes the fixed compute descriptor layout for the
-    /// graphics sampling path.
+    /// Creates a bind-group layout (Phase-6 S0 rung 5/6: a `VkDescriptorSetLayout`
+    /// with `desc.binding_count` COMBINED_IMAGE_SAMPLER bindings at
+    /// `(set 0, binding 0..binding_count)` at the desc's stage). Supersedes the fixed
+    /// compute descriptor layout for the graphics sampling path.
     ///
     /// The default body is `#[cold] #[inline(never)]` and errors `Unsupported`; a
     /// backend with a descriptor path (Vulkan) overrides it.
@@ -325,9 +346,9 @@ pub trait RhiDevice<A: RhiApi> {
         drop(layout);
     }
 
-    /// Creates a bind group (Phase-6 S0 rung 5: a `VkDescriptorPool` + a single
-    /// `VkDescriptorSet` allocated against `desc.layout` and written with the
-    /// desc's `(texture view, sampler)` as its COMBINED_IMAGE_SAMPLER, in
+    /// Creates a bind group (Phase-6 S0 rung 5/6: a `VkDescriptorPool` + a single
+    /// `VkDescriptorSet` allocated against `desc.layout` and written with one
+    /// `(texture view, sampler)` COMBINED_IMAGE_SAMPLER per `desc.entries` entry, in
     /// `SHADER_READ_ONLY_OPTIMAL`).
     ///
     /// The default body is `#[cold] #[inline(never)]` and errors `Unsupported`; a

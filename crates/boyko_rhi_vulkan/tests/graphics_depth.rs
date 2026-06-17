@@ -308,7 +308,7 @@ fn render_two_triangles(
             vertex_entry: c"main",
             fragment_module: &fs,
             fragment_entry: c"main",
-            color_format: Format::R8G8B8A8Unorm,
+            color_formats: &[Format::R8G8B8A8Unorm],
             depth_format: Some(Format::D32Sfloat),
             topology: PrimitiveTopology::TriangleList,
             vertex_layout: Some(VertexBufferLayout {

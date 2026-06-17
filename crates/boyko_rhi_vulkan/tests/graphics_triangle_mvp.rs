@@ -283,7 +283,7 @@ fn vertex_buffer_mvp_triangle_golden_round_trip() {
             vertex_entry: c"main",
             fragment_module: &fs,
             fragment_entry: c"main",
-            color_format: Format::R8G8B8A8Unorm,
+            color_formats: &[Format::R8G8B8A8Unorm],
             depth_format: None,
             topology: PrimitiveTopology::TriangleList,
             vertex_layout: Some(VertexBufferLayout {

@@ -45,7 +45,9 @@ pub use descriptor::{
     DepthAttachment, GraphicsPipelineDesc, ImageBarrierDesc, ImageSubresourceRange, RenderArea,
     RenderingAttachment, RenderingDesc, VertexAttribute, VertexBufferLayout, Viewport,
 };
-pub use device::{BindGroupDesc, BindGroupLayoutDesc, RhiDevice, SamplerDesc, TextureDesc};
+pub use device::{
+    BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, RhiDevice, SamplerDesc, TextureDesc,
+};
 pub use encoder::RhiCommandEncoder;
 pub use enums::{
     AddressMode, BarrierAccess, BarrierStage, BufferUsage, Filter, Format, ImageAspect, ImageLayout,
