@@ -29,7 +29,7 @@ pub mod system_set;
 pub(crate) mod system_box;
 
 pub use common_conditions::{in_state, on_enter, on_exit, on_transition, run_once};
-pub use schedule::Schedule;
+pub use schedule::{GpuBarrierEdge, Schedule};
 pub use schedule_builder::{
     ConfigureSet, MAX_SYSTEMS_PER_SCHEDULE, ScheduleBuildError, ScheduleBuilder,
 };

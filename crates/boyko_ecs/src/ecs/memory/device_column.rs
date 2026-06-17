@@ -86,6 +86,18 @@ impl DeviceColumn {
         self.handle
     }
 
+    /// Overwrites the opaque device-column handle (Phase 5 MF-2/3).
+    ///
+    /// Called by `ComponentPool::set_device_handle` after a `boyko_render` grow
+    /// reallocs the device column and mints a NEW handle. Mutating the handle is
+    /// sound because no CPU code caches a device row pointer (D3): the handle is
+    /// an opaque token resolved indirectly each frame through the
+    /// `(archetype, component)` key (MF-7), never persisted raw across a grow.
+    #[inline]
+    pub(crate) fn set_handle(&mut self, handle: DeviceColumnHandle) {
+        self.handle = handle;
+    }
+
     /// Returns the device-side live row count (the device twin of
     /// `ComponentPool::len`).
     #[inline]

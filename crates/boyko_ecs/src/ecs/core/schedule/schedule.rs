@@ -51,6 +51,8 @@ use crate::ecs::core::schedule::executor_scratch::{CompletionCell, ExecutorScrat
 use crate::ecs::core::schedule::system_box::{BoolSystem, SystemBox};
 use crate::ecs::core::schedule::system_set::SystemSetId;
 use crate::ecs::core::state::StateEntry;
+use crate::ecs::core::system::gpu_intent::{GpuAccessIntent, GpuStage};
+use crate::ecs::core::system::system_kind::SystemKind;
 use crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell;
 use crate::ecs::identifiers::primitives::WorldId;
 
@@ -1244,6 +1246,95 @@ impl Schedule {
 
         dispatched
     }
+
+    /// Yields the GPU barrier-lowering inputs for this schedule (Phase 5 MF-6).
+    ///
+    /// Walks the conflict graph's directed `successors` edges and yields one
+    /// [`GpuBarrierEdge`] per `producer → consumer` edge whose CONSUMER is a
+    /// [`SystemKind::GpuCompute`] system. Each edge carries the producer's and
+    /// consumer's [`GpuAccessIntent`] (a CPU producer with no declared intent
+    /// yields an empty `Compute`-stage intent — it touches no device column).
+    /// `boyko_render`'s `lower_barriers` consumes this iterator to emit precise
+    /// Vulkan buffer barriers; the abstract-to-`Vk*` lowering lives entirely in
+    /// `boyko_render` (no graphics type crosses this seam).
+    ///
+    /// # O2 — the `u32` indices are TRANSIENT
+    ///
+    /// `GpuBarrierEdge::{producer, consumer}` are a build-time `SystemIndex`
+    /// projection valid ONLY against THIS `Schedule` and consumed in the same
+    /// build pass by `lower_barriers`. They are NOT durable — **never persist a
+    /// `u32` past the build pass.** The durable barrier key is the stable
+    /// `(ArchetypeId, ComponentId)` (MF-7), which `lower_barriers` derives from
+    /// the intent's device-column touches.
+    ///
+    /// Cold (schedule build time); never on the per-frame run path.
+    pub fn gpu_barrier_inputs(&self) -> impl Iterator<Item = GpuBarrierEdge> + '_ {
+        // An empty Compute-stage intent stands in for a producer / consumer that
+        // declares none (a CPU producer touches no device column).
+        let empty_intent = GpuAccessIntent::new(GpuStage::Compute);
+        self.conflict_graph
+            .successors
+            .iter()
+            .enumerate()
+            .flat_map(move |(producer, succs)| {
+                let producer = producer as u32;
+                let empty_intent = empty_intent.clone();
+                succs.iter().filter_map(move |&consumer_idx| {
+                    let consumer = consumer_idx.0 as usize;
+                    if self.systems[consumer].kind != SystemKind::GpuCompute {
+                        return None;
+                    }
+                    let producer_intent = self.systems[producer as usize]
+                        .system
+                        .meta()
+                        .gpu_intent()
+                        .cloned()
+                        .unwrap_or_else(|| empty_intent.clone());
+                    let consumer_intent = self.systems[consumer]
+                        .system
+                        .meta()
+                        .gpu_intent()
+                        .cloned()
+                        .unwrap_or_else(|| empty_intent.clone());
+                    Some(GpuBarrierEdge {
+                        producer,
+                        consumer: consumer_idx.0 as u32,
+                        producer_intent,
+                        consumer_intent,
+                    })
+                })
+            })
+    }
+}
+
+/// One directed producer→consumer GPU barrier-lowering input (Phase 5 MF-6).
+///
+/// Yielded by [`Schedule::gpu_barrier_inputs`]; consumed by `boyko_render`'s
+/// `lower_barriers` to emit a precise Vulkan buffer barrier. A PUBLIC POD that
+/// leaks NO internal type — it exposes only `u32` system indices and the public
+/// [`GpuAccessIntent`].
+///
+/// # O2 — `producer` / `consumer` are TRANSIENT
+///
+/// The `u32` indices are a build-time `SystemIndex` projection valid ONLY against
+/// the producing `Schedule`, consumed in the same build pass. They are NOT
+/// durable — **never persist a `u32` past the build pass.** The durable barrier
+/// key is the stable `(ArchetypeId, ComponentId)` (MF-7), derived by
+/// `lower_barriers` from the intents' device-column touches.
+#[derive(Clone, Debug)]
+pub struct GpuBarrierEdge {
+    /// Transient build-time index of the producer system (a `SystemIndex.0`
+    /// projection — see the O2 note).
+    pub producer: u32,
+    /// Transient build-time index of the consumer system. The consumer is always
+    /// a [`SystemKind::GpuCompute`] system (the filter predicate).
+    pub consumer: u32,
+    /// The producer's declared GPU access intent (an empty `Compute`-stage intent
+    /// when the producer is a CPU system touching no device column).
+    pub producer_intent: GpuAccessIntent,
+    /// The consumer's declared GPU access intent (the GPU-compute system's
+    /// device-column touches that drive the barrier's `dst` masks).
+    pub consumer_intent: GpuAccessIntent,
 }
 
 /// Bundle captured by each spawn closure in

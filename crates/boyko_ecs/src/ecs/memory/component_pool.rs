@@ -1745,33 +1745,100 @@ impl ComponentPool {
         }
     }
 
-    /// Test-only: swaps a freshly-constructed (empty, `len == 0`) Host pool's
-    /// backing to a stub `Device` arm (Phase 4 Seam 3 CR-C coverage).
+    /// Flips a freshly-constructed (empty, `len == 0`) Host pool's backing to a
+    /// `Device` arm wrapping `handle` (Phase 5 MF-2 / O1).
     ///
-    /// Phase 4 mints no device pool through any production path, so this exists
-    /// only to exercise the `PoolBacking::Device` arm + the CR-C `Drop` contract
-    /// in tests. The caller MUST hold `self.len == 0` (asserted) — overwriting
-    /// `backing` drops the old Host `VmReservation` (clean: an empty pool owns
-    /// no live rows), and the device pool then keeps Host `len == 0` for life.
+    /// This is the real device-mint primitive that `boyko_render` reaches through
+    /// the archetype-level funnel [`Archetype::make_component_device_backed`]
+    /// (Wave B). It is `#[cfg(not(miri))]` (aligned with [`DeviceColumn`], NOT
+    /// `cfg(test)`): Miri cannot run the RHI syscalls a real device column needs,
+    /// and `PoolBacking::Device` is compiled out under Miri.
+    ///
+    /// # O1 — release data-loss guard
+    ///
+    /// Carries a **release** `assert!(self.len == 0)`: switching a populated pool
+    /// to `Device` would silently leak the live Host rows (overwriting `backing`
+    /// drops the Host `VmReservation`). A device pool then keeps Host `len == 0`
+    /// for life (CR-C), so the assert is a partition-integrity guard, not a
+    /// hot-path check.
     ///
     /// **Dangling Host bases (FIX-8 / PB-2).** Overwriting `backing` releases the
     /// Host `VmReservation`, so the three write-once base pointers `buffer`,
-    /// `added_base`, and `changed_base` become DANGLING after this swap — they
-    /// are NOT cleared. Soundness rests entirely on the `len == 0` invariant
-    /// (held for life on a Device pool, CR-C): every base-reading accessor
-    /// (`row_ptr`, the tick-fill loops, `Drop`'s per-row walk) is bounded by
-    /// `0..self.len`, so with `len == 0` not one of them ever dereferences a base
-    /// pointer. A future maintainer MUST NOT add a post-swap read of `buffer` /
-    /// `added_base` / `changed_base` (it would deref the freed Host reservation);
-    /// device row data lives behind the `PoolBacking::Device` handle instead.
-    #[cfg(all(test, not(miri)))]
-    pub(crate) fn make_device_backed_for_test(&mut self, handle: u64) {
+    /// `added_base`, and `changed_base` become DANGLING after this flip — they
+    /// are NOT cleared. Soundness rests on two guards (C1 / SEND10): (1) the
+    /// Query-path skip (`update_archetypes` skips GPU-resident archetypes so
+    /// `row_ptr` on a device pool is never reached), and (2) the archetype-level
+    /// funnel NULLs `columns[cid]` so every direct-access null-check returns
+    /// `None`/`false`/skip. With `len == 0` no base-reading accessor
+    /// (`row_ptr`, the tick-fill loops, `Drop`'s per-row walk) ever dereferences
+    /// a base pointer regardless. A future maintainer MUST NOT add a post-flip
+    /// read of `buffer` / `added_base` / `changed_base`.
+    ///
+    /// `#[allow(dead_code)]`: the production caller is `boyko_render`'s device
+    /// mint (Wave B), not yet in tree — same Phase-5 forward-seam discipline as
+    /// the `DeviceColumn` accessors. Exercised in tests.
+    #[cfg(not(miri))]
+    #[allow(dead_code)]
+    pub(crate) fn make_device_backed(&mut self, handle: u64) {
+        // O1: release-present data-loss guard — only an empty pool may flip.
         assert_eq!(
             self.len, 0,
-            "make_device_backed_for_test: only an empty pool may switch to Device backing (CR-C)"
+            "make_device_backed: only an empty pool may switch to Device backing (CR-C / O1)"
         );
         use crate::ecs::memory::device_column::{DeviceColumn, DeviceColumnHandle};
         self.backing = PoolBacking::Device(Box::new(DeviceColumn::new(DeviceColumnHandle(handle))));
+        // CR-C post-condition: a device pool keeps Host `len == 0` for life.
+        debug_assert!(
+            self.backing.is_device() && self.len == 0,
+            "make_device_backed post-condition: backing is Device with Host len == 0"
+        );
+    }
+
+    /// Test-only thin wrapper over [`Self::make_device_backed`] (Phase 4 Seam 3
+    /// CR-C coverage), kept so existing tests keep their call name.
+    #[cfg(all(test, not(miri)))]
+    pub(crate) fn make_device_backed_for_test(&mut self, handle: u64) {
+        self.make_device_backed(handle);
+    }
+
+    /// Overwrites the device handle on a `Device`-backed pool (Phase 5 MF-2/3).
+    ///
+    /// Called by `boyko_render`'s `grow_column` after it reallocs the device
+    /// column and mints a NEW handle. **MF-3:** this mutates ONLY the boxed
+    /// [`DeviceColumn`]'s handle — DISTINCT from the write-once `buffer` /
+    /// `added_base` / `changed_base` (which dangle after the device flip) — so it
+    /// violates no base-pointer invariant, and it does NOT call
+    /// `grow_rows` / `host_vm_mut` (the `unreachable!` Host-only grow arm stays
+    /// unreachable). A no-op on a Host pool (defensive — `boyko_render` only calls
+    /// it on a device pool); the device grow keeps Host `len == 0` (debug-asserted).
+    ///
+    /// `#[allow(dead_code)]`: consumed by `boyko_render`'s `grow_column` (Wave B),
+    /// not yet in tree — the Phase-5 forward-seam discipline.
+    #[cfg(not(miri))]
+    #[allow(dead_code)]
+    pub(crate) fn set_device_handle(&mut self, handle: crate::ecs::memory::device_column::DeviceColumnHandle) {
+        debug_assert!(
+            self.len == 0,
+            "set_device_handle: a Device pool keeps Host len == 0 (CR-C); got len = {}",
+            self.len
+        );
+        if let PoolBacking::Device(dc) = &mut self.backing {
+            dc.set_handle(handle);
+        }
+    }
+
+    /// Returns the device handle of a `Device`-backed pool, or `None` for a Host
+    /// pool (Phase 5 MF-2/3).
+    ///
+    /// `#[allow(dead_code)]`: read by `boyko_render`'s frame-path resolve (Wave
+    /// B), not yet in tree — the Phase-5 forward-seam discipline.
+    #[cfg(not(miri))]
+    #[allow(dead_code)]
+    pub(crate) fn device_handle(&self) -> Option<crate::ecs::memory::device_column::DeviceColumnHandle> {
+        match &self.backing {
+            PoolBacking::Host(_) => None,
+            PoolBacking::Device(dc) => Some(dc.handle()),
+        }
     }
 }
 
@@ -1812,17 +1879,32 @@ impl ComponentPool {
 //     from `par_iter` chunks on the same cache line are sound (Round 2 C3
 //     / Rustonomicon §"Data Races and Race Conditions"). The MESI
 //     cache-line ping-pong is a perf cost, not UB.
-//   - Phase 4 Seam 3 (IM-5): the `backing: PoolBacking` field is `Send + Sync`
-//     in both arms. `Host(VmReservation)` carries the same `NonNull<u8>` +
-//     `usize` the old `vm` field did (the discipline above is unchanged).
-//     `Device(Box<DeviceColumn>)` carries a `Copy` POD `u64`
+//   - Phase 4 Seam 3 (IM-5) + Phase 5 (C1): the `backing: PoolBacking` field is
+//     `Send + Sync` in both arms. `Host(VmReservation)` carries the same
+//     `NonNull<u8>` + `usize` the old `vm` field did (the discipline above is
+//     unchanged). `Device(Box<DeviceColumn>)` carries a `Copy` POD `u64`
 //     `DeviceColumnHandle` + two `usize` counters: the handle is never a
 //     pointer the CPU dereferences, the device backing is never touched
-//     concurrently by CPU code (per D4 the CPU `Query` skips GPU-resident
-//     archetypes at collection time, so `row_ptr` on a device pool is never
-//     reached), and a device pool keeps Host `len == 0` (CR-C) so there is no
-//     Host-side aliasing. `DeviceColumn: Send + Sync` is independently witnessed
-//     by `device_column::_assert`.
+//     concurrently by CPU code, and a device pool keeps Host `len == 0` (CR-C)
+//     so there is no Host-side aliasing. `DeviceColumn: Send + Sync` is
+//     independently witnessed by `device_column::_assert`.
+//
+//     After `make_device_backed` flips a Host pool to `Device`, the freed Host
+//     `VmReservation`'s three write-once base pointers (`buffer` / `added_base`
+//     / `changed_base`) DANGLE but stay non-null. They are proven CPU-unreachable
+//     by BOTH Phase-5 guards (C1, the device-mint contract):
+//       (1) the QUERY-PATH SKIP — `QueryState::update_archetypes` skips every
+//           `is_gpu_resident()` archetype at collection time, so the hot
+//           `row_ptr` / `for_each_chunk` readers never see a device pool; AND
+//       (2) the DIRECT-ACCESS NULL-COLUMN — the archetype-level funnel
+//           `Archetype::make_component_device_backed` NULLs `columns[cid]`, so
+//           every direct reader's existing null-check returns `None`/`false`/skip.
+//     Enumerated direct readers, ALL covered by guard (2):
+//     `EcsMaster::get_component_raw{,_mut}`, `get_component{,_mut}`,
+//     `set_component_raw` (via the mut path), `has_component`,
+//     `get_components_raw{,_mut}`. `query_entities` reads no `columns[].ptr`
+//     (it exposes only entity handles). With `len == 0` no base-reading accessor
+//     dereferences a base pointer regardless of the guards.
 unsafe impl Send for ComponentPool {}
 unsafe impl Sync for ComponentPool {}
 

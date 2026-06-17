@@ -544,6 +544,57 @@ pub enum ResidencyKind {
 static RESIDENCY_CLASS: [AtomicU8; MAX_COMPONENTS] =
     [const { AtomicU8::new(ResidencyKind::Cpu as u8) }; MAX_COMPONENTS];
 
+/// Number of 64-bit words in the [`GPU_COMPONENT_SET`] bitset
+/// (`MAX_COMPONENTS / 64`).
+pub const GPU_COMPONENT_SET_WORDS: usize = MAX_COMPONENTS / 64;
+
+/// Phase 5 W1 — process-global bitset of every `ComponentId` whose
+/// [`residency_class`] is [`ResidencyKind::Gpu`], one bit per id.
+///
+/// Maintained write-once in [`set_residency_class`] (the same write-once
+/// discipline as [`RESIDENCY_CLASS`]); read at `QueryState::new` to LOUDLY reject
+/// a CPU query that NAMES a `Gpu` component in its `include` mask (a device
+/// component is absent from the CPU surface, so such a query would silently match
+/// nothing). `MAX_COMPONENTS / 64` words; touched only at registration time and
+/// at query construction — never on the per-frame hot loop, so the collection
+/// loop stays byte-identical (the 0%-gate). A CPU-only world leaves it all-zero.
+///
+/// `Relaxed` is sufficient (M1, same as `RESIDENCY_CLASS`): a registration-time,
+/// write-once datum with no payload published through it.
+///
+/// FIX-6 — dual-table discipline: [`set_residency_class`] writes this bitset and
+/// `RESIDENCY_CLASS` as a PAIR under the one `current == Cpu` first-touch guard,
+/// so the pair inherits and depends on the SAME single-threaded,
+/// write-once-at-registration-before-archetype-entry discipline already
+/// documented for the registry — that is what keeps the two tables coherent.
+static GPU_COMPONENT_SET: [AtomicU64; GPU_COMPONENT_SET_WORDS] =
+    [const { AtomicU64::new(0) }; GPU_COMPONENT_SET_WORDS];
+
+/// Returns the `word_index`-th 64-bit word of [`GPU_COMPONENT_SET`] (Phase 5 W1).
+///
+/// `word_index` covers component ids `[word_index * 64, word_index * 64 + 64)`.
+/// Cold: read at query construction only (the W1 footgun check), never on the
+/// per-frame hot path.
+///
+/// # Panics (debug only)
+///
+/// A debug assertion fires if `word_index >= GPU_COMPONENT_SET_WORDS`.
+#[inline]
+pub fn gpu_component_set_word(word_index: usize) -> u64 {
+    // FIX-5: no runtime `>= WORDS` guard — the sole caller (`QueryState::new`)
+    // bounds `w` to `0..GPU_COMPONENT_SET_WORDS`, so an out-of-bounds index is
+    // unreachable. A silent `return 0` would make the W1 diagnostic MISS rather
+    // than fail loudly; instead the `debug_assert!` catches a misuse in debug,
+    // and the index access panics honestly if ever called out of bounds.
+    debug_assert!(
+        word_index < GPU_COMPONENT_SET_WORDS,
+        "gpu_component_set_word: word_index {} >= {}",
+        word_index,
+        GPU_COMPONENT_SET_WORDS
+    );
+    GPU_COMPONENT_SET[word_index].load(Ordering::Relaxed)
+}
+
 /// Returns the residency class registered for `component_id` (Phase 4 Seam 1,
 /// D1). Defaults to [`ResidencyKind::Cpu`] for any id never classified via
 /// [`set_residency_class`].
@@ -616,6 +667,15 @@ pub(crate) fn set_residency_class(component_id: usize, kind: ResidencyKind) {
     );
     if current == ResidencyKind::Cpu as u8 {
         RESIDENCY_CLASS[component_id].store(kind as u8, Ordering::Relaxed);
+        // Phase 5 W1: mirror a `Gpu` classification into the GPU_COMPONENT_SET
+        // bitset (write-once, same discipline). Only `Gpu` raises a bit — `Cpu`
+        // is the default (never reached here, the early-out above) and
+        // `CpuPinned` is non-Gpu, so neither sets a bit.
+        if kind == ResidencyKind::Gpu {
+            let word = component_id / 64;
+            let bit = component_id % 64;
+            GPU_COMPONENT_SET[word].fetch_or(1u64 << bit, Ordering::Relaxed);
+        }
     }
 }
 

@@ -322,23 +322,25 @@ impl Archetype {
         // classification into the SAME walk — one extra cold `residency_class`
         // load per id + a 2-bool fold, no new loop:
         //   * per-component `GPU_RESIDENT` OR rides the hook-bit accumulator;
-        //   * the set-level `saw_gpu && saw_cpu_pinned` conflict is detected over
-        //     the full slice and rejected loudly AFTER the walk.
+        //   * the set-level `saw_gpu && saw_non_gpu` conflict (Phase 5 C2:
+        //     GPU-resident ⇒ all-components-Gpu) is detected over the full slice
+        //     and rejected loudly AFTER the walk.
         let mut flags = ArchetypeFlags::empty();
         let mut saw_gpu = false;
-        let mut saw_cpu_pinned = false;
+        let mut saw_non_gpu = false;
         for &comp_id in component_ids {
             // Residency is scanned for EVERY id in the signature, including a
-            // bitset tag (always `Cpu` — no `ComponentPool` — so it never trips
-            // the scan, but the read keeps the funnel honest if that ever
-            // changes).
+            // bitset tag (always `Cpu` — no `ComponentPool` — so it counts as
+            // non-Gpu, which is correct: a bitset EnableTag is never device-
+            // resident).
             match component_registry::residency_class(comp_id.0) {
                 ResidencyKind::Gpu => {
                     saw_gpu = true;
                     flags.insert(ArchetypeFlags::GPU_RESIDENT);
                 }
-                ResidencyKind::CpuPinned => saw_cpu_pinned = true,
-                ResidencyKind::Cpu => {}
+                // C2: ANY non-Gpu component (Cpu OR CpuPinned) makes a Gpu
+                // signature impure → rejected after the walk.
+                ResidencyKind::CpuPinned | ResidencyKind::Cpu => saw_non_gpu = true,
             }
             if component_registry::storage_kind(comp_id.0) == StorageKind::Bitset {
                 Self::debug_assert_bitset_premise(&archetype, comp_id);
@@ -348,7 +350,7 @@ impl Archetype {
             archetype.refresh_column(comp_id);
             flags.insert_from_hooks(comp_id);
         }
-        if saw_gpu && saw_cpu_pinned {
+        if saw_gpu && saw_non_gpu {
             residency_conflict_panic(component_ids);
         }
         archetype.flags = flags;
@@ -569,6 +571,95 @@ impl Archetype {
                 self.columns[component_id.0] = Column::null();
             }
         }
+    }
+
+    /// Flips component `cid`'s pool to device-resident behind `handle`, then NULLs
+    /// its inline column cache (Phase 5 C1 — the LOAD-BEARING device-mint funnel).
+    ///
+    /// This is the archetype-level funnel `boyko_render` (Wave B) calls to mint a
+    /// device column. It performs two steps in order:
+    ///   (a) flip the pool via [`ComponentPool::make_device_backed`] + record the
+    ///       opaque handle via [`ComponentPool::set_device_handle`]; THEN
+    ///   (b) `self.columns[cid.0] = Column::null()` **DIRECTLY** — NOT
+    ///       `refresh_column`.
+    ///
+    /// # Why direct-null, not `refresh_column` (C1)
+    ///
+    /// `Column.ptr` caches the pool's `buffer_ptr()`. After `make_device_backed`
+    /// frees the Host `VmReservation`, that cached base DANGLES but stays
+    /// non-null, so every direct reader's null-check (`Column::is_null`) would
+    /// PASS → use-after-free. `refresh_column` would RE-CACHE the now-dangling
+    /// Host base (it reads `pool.buffer_ptr()` even on a device pool — the base
+    /// fields are not cleared on the flip, see `refresh_column` at the lines
+    /// above). Nulling the column directly makes the existing null-checks return
+    /// `None`/`false`/skip — the correct "the CPU cannot touch GPU bytes"
+    /// contract (umbrella §2).
+    ///
+    /// `#[cfg(not(miri))]` — the device backing arm + its pool primitives are
+    /// compiled out under Miri (Phase 4 / `DeviceColumn`).
+    ///
+    /// # Postcondition verified here (PER-COMPONENT only)
+    ///
+    /// This is a per-component site: Wave B calls it once per column. Its
+    /// funnel-tail `debug_assert` verifies ONLY the per-component postcondition —
+    /// the just-flipped `columns[cid.0]` is null. The whole-archetype "all GPU
+    /// columns null" property is NOT — and CANNOT be — checked here: `GPU_RESIDENT`
+    /// is stamped at MINT over the full signature, so it is already true on the
+    /// first flip, while components are flipped one at a time. A not-yet-flipped
+    /// sibling's pool is still Host-backed and VALID (its reservation is freed only
+    /// when ITS OWN flip runs) and its column correctly non-null; queries skip the
+    /// whole archetype via `is_gpu_resident()` (mint-stamped, column-state-
+    /// independent), so every intermediate state is sound. The whole-archetype
+    /// property holds BY CONSTRUCTION once every component has been flipped.
+    ///
+    /// # Panics
+    ///
+    /// Release-panics (via [`ComponentPool::make_device_backed`]'s O1 guard) if
+    /// the pool is non-empty (`len != 0`) — a populated pool must never flip to
+    /// device backing (data-loss guard).
+    ///
+    /// `#[allow(dead_code)]`: the production caller is `boyko_render` (Wave B),
+    /// not yet in tree — the Phase-5 forward-seam discipline. Exercised in tests.
+    #[cfg(not(miri))]
+    #[allow(dead_code)]
+    pub(crate) fn make_component_device_backed(
+        &mut self,
+        cid: ComponentId,
+        handle: crate::ecs::memory::device_column::DeviceColumnHandle,
+    ) {
+        debug_assert!(
+            cid.0 < MAX_COMPONENTS,
+            "make_component_device_backed: component_id {} >= MAX_COMPONENTS ({})",
+            cid.0,
+            MAX_COMPONENTS
+        );
+        let pool = self
+            .component_pools
+            .get_pool_mut(cid)
+            .expect("invariant: make_component_device_backed targets a component with a pool");
+        // (a) flip + record the opaque handle on the boxed DeviceColumn.
+        pool.make_device_backed(handle.0);
+        pool.set_device_handle(handle);
+        // (b) NULL the inline column DIRECTLY — never `refresh_column` (it would
+        // re-cache the now-dangling Host base, C1). The existing null-checks on
+        // every direct reader then return None/false/skip.
+        self.columns[cid.0] = Column::null();
+
+        // Funnel-tail invariant (C1): this PER-COMPONENT site can only verify the
+        // PER-COMPONENT postcondition — the just-flipped column is null. The
+        // whole-archetype "all GPU columns null" property is NOT checkable here:
+        // `GPU_RESIDENT` is stamped at MINT over the full signature, so it is
+        // already true on the first flip, while Wave B flips components one at a
+        // time. Between flips a not-yet-flipped component's pool is still
+        // Host-backed and VALID (its reservation is freed only when ITS OWN flip
+        // runs), so its column is correctly non-null; queries skip the whole
+        // archetype via `is_gpu_resident()` (mint-stamped, column-state-
+        // independent), so the intermediate state is sound. The whole-archetype
+        // property holds BY CONSTRUCTION once every component has been flipped.
+        debug_assert!(
+            self.columns[cid.0].is_null(),
+            "make_component_device_backed must null the just-flipped column"
+        );
     }
 
     /// Refreshes the entire `columns` table from `component_pools`.
@@ -1216,18 +1307,26 @@ impl Archetype {
 ///
 /// `#[cold] #[inline(never)]`: this is the OFF-the-hot-path reject arm — keeping
 /// it out of line stops the diagnostic string-formatting from bloating the
-/// `create_by_ids` mint funnel's I-cache footprint. A **release-present** panic
-/// (NOT a `debug_assert`): a silently-built wrong-residency archetype would
-/// corrupt the CPU/GPU population partition (the readback trap, D2), so the
-/// check fires in every build. A default/unclassified `Cpu` component is always
-/// compatible with a `Gpu` signature, so only the `Gpu`+`CpuPinned` mix trips.
+/// mint funnel's I-cache footprint. A **release-present** panic (NOT a
+/// `debug_assert`): a silently-built wrong-residency archetype would corrupt the
+/// CPU/GPU population partition (the readback trap, D2), so the check fires in
+/// every build.
+///
+/// # Phase 5 C2 — GPU-resident archetypes are GPU-PURE
+///
+/// The reject now fires on `saw_gpu && saw_non_gpu` — a `ResidencyKind::Gpu`
+/// component alongside ANY non-Gpu component (`Cpu` OR `CpuPinned`). The semantic
+/// is `GPU_RESIDENT ⇔ all-components-Gpu` (was OR-of-any-Gpu). Permitting a
+/// `Gpu + ordinary Cpu` mix would let the blanket query-skip silently drop a
+/// `Query<&CpuComp>` over the mixed archetype — a correctness regression; whole
+/// -archetype device residency (umbrella §2 / §5.1) closes it.
 #[cold]
 #[inline(never)]
 pub(crate) fn residency_conflict_panic(component_ids: &[ComponentId]) -> ! {
     panic!(
-        "residency conflict at archetype mint: signature {:?} mixes a \
-         ResidencyKind::Gpu component with a ResidencyKind::CpuPinned component \
-         (a CpuPinned component must never become a device column)",
+        "a GPU-resident archetype must be GPU-pure: mixes Gpu and non-Gpu \
+         (signature {:?} pairs a ResidencyKind::Gpu component with a non-Gpu \
+         component — Cpu or CpuPinned)",
         component_ids
     );
 }
@@ -1817,19 +1916,39 @@ mod tests {
     const RES_CPU_A: ComponentId = ComponentId(332);
     const RES_CPU_B: ComponentId = ComponentId(333);
     const RES_PINNED: ComponentId = ComponentId(334);
+    // Phase 5 C2 — a SECOND Gpu id so a GPU-PURE multi-component archetype can
+    // be built (the new semantic: GPU_RESIDENT ⇔ all-components-Gpu). 345 sits in
+    // the free 345-399 gap (disjoint from migration_helpers' 335-339).
+    const RES_GPU_C: ComponentId = ComponentId(345);
 
     #[test]
-    fn create_by_ids_stamps_gpu_resident_when_a_gpu_component_present() {
+    fn create_by_ids_stamps_gpu_resident_when_all_components_gpu() {
+        // Phase 5 C2: GPU_RESIDENT ⇔ all-components-Gpu. A GPU-pure signature
+        // stamps GPU_RESIDENT; a mixed Gpu + Cpu signature now PANICS (covered
+        // separately), so this test uses two Gpu ids.
         component_registry::register_layout::<ResComp>(RES_GPU_A.0);
-        component_registry::register_layout::<ResComp>(RES_CPU_A.0);
+        component_registry::register_layout::<ResComp>(RES_GPU_C.0);
         component_registry::set_residency_class(RES_GPU_A.0, ResidencyKind::Gpu);
-        // RES_CPU_A stays at the default Cpu.
+        component_registry::set_residency_class(RES_GPU_C.0, ResidencyKind::Gpu);
 
-        let arch = Archetype::create_by_ids(ArchetypeId(50), &[RES_GPU_A, RES_CPU_A]);
+        let arch = Archetype::create_by_ids(ArchetypeId(50), &[RES_GPU_A, RES_GPU_C]);
         assert!(
             arch.flags.is_gpu_resident(),
-            "a signature with ≥1 Gpu component must stamp GPU_RESIDENT"
+            "a GPU-pure signature must stamp GPU_RESIDENT"
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "must be GPU-pure")]
+    fn create_by_ids_mixed_gpu_and_cpu_panics() {
+        // Phase 5 C2: a Gpu component alongside an ordinary Cpu component is now
+        // a reject (GPU-resident ⇒ all-Gpu) — NOT just the old Gpu+CpuPinned mix.
+        component_registry::register_layout::<ResComp>(RES_GPU_C.0);
+        component_registry::register_layout::<ResComp>(RES_CPU_A.0);
+        component_registry::set_residency_class(RES_GPU_C.0, ResidencyKind::Gpu);
+        // RES_CPU_A stays at the default Cpu.
+
+        let _ = Archetype::create_by_ids(ArchetypeId(54), &[RES_GPU_C, RES_CPU_A]);
     }
 
     #[test]
@@ -1847,7 +1966,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "residency conflict")]
+    #[should_panic(expected = "must be GPU-pure")]
     fn create_by_ids_mixed_gpu_and_cpu_pinned_panics() {
         component_registry::register_layout::<ResComp>(RES_GPU_B.0);
         component_registry::register_layout::<ResComp>(RES_PINNED.0);
@@ -1870,6 +1989,102 @@ mod tests {
         assert!(
             arch.flags.is_gpu_resident(),
             "register_component_inplace must OR in GPU_RESIDENT for a Gpu id"
+        );
+    }
+
+    // ----- Phase 5 C1: make_component_device_backed nulls the column -----
+
+    /// `make_component_device_backed` flips the pool to Device backing AND nulls
+    /// the inline `columns[cid]` cache (the C1 fix), so every direct reader's
+    /// null-check returns absent — the "CPU can't touch GPU bytes" contract.
+    ///
+    /// Device-backing is `#[cfg(not(miri))]` (the `PoolBacking::Device` arm and
+    /// its primitives are compiled out under Miri), so this test is gated to
+    /// match.
+    #[test]
+    #[cfg(all(test, not(miri)))]
+    fn make_component_device_backed_nulls_the_column() {
+        use crate::ecs::memory::device_column::DeviceColumnHandle;
+
+        component_registry::register_layout::<ResComp>(RES_GPU_A.0);
+        component_registry::set_residency_class(RES_GPU_A.0, ResidencyKind::Gpu);
+
+        // A GPU-pure single-component archetype. Empty (len == 0) — the O1
+        // data-loss guard requires it before the device flip.
+        let mut arch = Archetype::create_by_ids(ArchetypeId(55), &[RES_GPU_A]);
+        assert!(arch.flags.is_gpu_resident(), "GPU-pure archetype is GPU-resident");
+        // Before the flip, the column is populated (non-null base from the pool).
+        assert!(
+            !arch.columns[RES_GPU_A.0].is_null(),
+            "a host-backed component column must have a non-null base before the flip"
+        );
+
+        arch.make_component_device_backed(RES_GPU_A, DeviceColumnHandle(0xDEAD_BEEF));
+
+        assert!(
+            arch.columns[RES_GPU_A.0].is_null(),
+            "make_component_device_backed must NULL the column (C1)"
+        );
+        // The pool now reports the device handle (MF-2/3 round-trip).
+        let pool = arch
+            .component_pools
+            .get_pool(RES_GPU_A)
+            .expect("pool still present after device flip");
+        assert_eq!(
+            pool.device_handle(),
+            Some(DeviceColumnHandle(0xDEAD_BEEF)),
+            "set_device_handle / device_handle must round-trip the opaque handle"
+        );
+    }
+
+    /// FIX-1 regression: a GPU-pure MULTI-component archetype is flipped one
+    /// component at a time. `GPU_RESIDENT` is mint-stamped over the whole
+    /// signature, so the OLD whole-archetype funnel-tail assert tripped on the
+    /// intermediate state after the FIRST flip (the sibling's column still
+    /// non-null). The per-component assert must NOT panic on that state.
+    ///
+    /// Asserts (a) NO panic on the intermediate (one-flipped) state and (b) after
+    /// every component is flipped, all component columns are null.
+    #[test]
+    #[cfg(all(test, not(miri)))]
+    fn make_component_device_backed_multi_component_no_intermediate_panic() {
+        use crate::ecs::memory::device_column::DeviceColumnHandle;
+
+        component_registry::register_layout::<ResComp>(RES_GPU_A.0);
+        component_registry::register_layout::<ResComp>(RES_GPU_C.0);
+        component_registry::set_residency_class(RES_GPU_A.0, ResidencyKind::Gpu);
+        component_registry::set_residency_class(RES_GPU_C.0, ResidencyKind::Gpu);
+
+        // A GPU-pure two-component archetype. Empty (len == 0) — the O1 data-loss
+        // guard requires it before each device flip.
+        let mut arch = Archetype::create_by_ids(ArchetypeId(56), &[RES_GPU_A, RES_GPU_C]);
+        assert!(
+            arch.flags.is_gpu_resident(),
+            "a GPU-pure multi-component archetype is GPU-resident at mint"
+        );
+
+        // First flip: the OLD whole-archetype assert would PANIC here because the
+        // sibling RES_GPU_C column is still non-null while GPU_RESIDENT is set.
+        // The per-component assert must pass (this call not panicking is (a)).
+        arch.make_component_device_backed(RES_GPU_A, DeviceColumnHandle(0x0000_0001));
+        assert!(
+            arch.columns[RES_GPU_A.0].is_null(),
+            "first flip must null its own column"
+        );
+        // (a) The intermediate state is valid: the not-yet-flipped sibling's
+        // Host column is still non-null and correct.
+        assert!(
+            !arch.columns[RES_GPU_C.0].is_null(),
+            "the not-yet-flipped sibling's Host column stays non-null mid-flip"
+        );
+
+        // Second (last) flip completes the whole-archetype property.
+        arch.make_component_device_backed(RES_GPU_C, DeviceColumnHandle(0x0000_0002));
+
+        // (b) After every component is flipped, all columns are null.
+        assert!(
+            arch.component_ids.iter().all(|c| arch.columns[c.0].is_null()),
+            "after the last flip every GPU component column must be null"
         );
     }
 }

@@ -2,6 +2,9 @@ use crate::ecs::core::archetype::archetype::Archetype;
 use crate::ecs::core::archetype::archetype_master::ArchetypeMaster;
 use crate::ecs::core::archetype::generation::ArchetypeGeneration;
 use crate::ecs::core::component::component_mask::ComponentMask;
+use crate::ecs::core::component::component_registry::{
+    GPU_COMPONENT_SET_WORDS, gpu_component_set_word,
+};
 use crate::ecs::core::iters::archetype_bit_set::ArchetypeBitSet;
 use crate::ecs::core::iters::component_set::ComponentSet;
 use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId};
@@ -71,7 +74,44 @@ impl QueryState {
     ///
     /// The state starts at `FIRST` generation — a call to `update_archetypes`
     /// or `iter` is required before any archetypes are matched.
+    ///
+    /// # Phase 5 W1 — CPU query over a Gpu component (release-present panic)
+    ///
+    /// If `include` names ANY component whose `residency_class` is
+    /// [`ResidencyKind::Gpu`](crate::ecs::core::component::component_registry::ResidencyKind::Gpu),
+    /// this panics LOUDLY. A device component is absent from the CPU surface
+    /// (its archetype is GPU-resident and skipped at collection time), so such a
+    /// query would silently match nothing — a footgun caught here, at build, not
+    /// in the hot loop. Only `include` is checked (`exclude` / `optional` are
+    /// harmless — they never produce a device read). The check is the single
+    /// funnel for every typed / legacy query construction. 0%-gate: a CPU-only
+    /// world leaves `GPU_COMPONENT_SET` all-zero, so the intersect is `0` and the
+    /// branch predicts not-taken; the collection loop is untouched.
+    ///
+    /// ## W1 ordering contract (FIX-4)
+    ///
+    /// The W1 diagnostic is a ONE-SHOT read of `GPU_COMPONENT_SET`, so it is
+    /// guaranteed to fire only when every `Gpu` component is classified BEFORE
+    /// any `QueryState` naming it is constructed. Typed queries satisfy this by
+    /// construction (`init_state` resolves `component_id()`, which installs the
+    /// residency class and sets the bit, before any scan). The raw-mask paths
+    /// [`Query::with_mask`](crate::ecs::core::iters::query::legacy_query) /
+    /// `Query::with_filters` copy a caller-built mask WITHOUT resolving ids, so a
+    /// `Gpu` component classified AFTER such a `QueryState` is built would be
+    /// missed — raw-mask callers must honor the same registration-before-query
+    /// ordering. A missed W1 is NOT a soundness hole: `update_archetypes`'
+    /// `is_gpu_resident()` skip is stamped at archetype mint (timing-independent),
+    /// so soundness is upheld unconditionally — a missed W1 degrades only to
+    /// "silently matches nothing", never UB.
     pub fn new(include: ComponentMask, exclude: ComponentMask, optional: ComponentMask) -> Self {
+        // W1 footgun: a CPU query naming a Gpu component is a build-time error.
+        // `MAX_COMPONENTS / 64` words of bitwise-AND, cold; non-zero ⇒ a named
+        // include bit is a Gpu component.
+        for w in 0..GPU_COMPONENT_SET_WORDS {
+            if include.block(w).value() & gpu_component_set_word(w) != 0 {
+                cpu_query_over_gpu_component_panic();
+            }
+        }
         Self {
             generation: ArchetypeGeneration::FIRST,
             structural_generation: ArchetypeGeneration::FIRST,
@@ -196,6 +236,18 @@ impl QueryState {
             if !self.matched_archetypes.contains(id)
                 && let Some(arch) = master.get_archetype(ArchetypeId(id))
             {
+                // Phase 5 D7 / MF-4 — SOUNDNESS PREREQUISITE: a CPU `Query` must
+                // never collect a GPU-resident archetype. Its component pools are
+                // device-backed and their inline columns are nulled (C1), so
+                // `row_ptr` / `for_each_chunk` on a device pool is never reached.
+                // A CPU-only world never sets the bit, so this is one
+                // `test`/`jz` on the already-loaded `flags` `u16` that predicts
+                // not-taken (the 0%-gate). The W1 check at `new` already rejects
+                // a query that NAMES a Gpu component, so this skip only fires for
+                // a query whose include set is disjoint from the GPU archetype.
+                if arch.flags.is_gpu_resident() {
+                    continue;
+                }
                 let mask = arch.component_mask();
                 if self.matches(mask) {
                     self.matched_archetypes.insert(id);
@@ -276,8 +328,21 @@ impl QueryState {
         candidates.for_each_set_bit(|id| {
             let arch_id = ArchetypeId(id);
             if !self.matched_archetypes.contains(id)
-                && master.get_archetype(arch_id).is_some()
+                && let Some(arch) = master.get_archetype(arch_id)
             {
+                // Phase 5 W2 — a GPU-pure archetype is structurally absent from
+                // any `EnablePresence[A]` candidate set: EnableTags are always
+                // `StorageKind::Bitset` / `ResidencyKind::Cpu`, so a GPU-pure
+                // archetype (all-components-Gpu, C2) carries no enable tag and
+                // never enters a candidate bitset. A `continue` here would
+                // SILENTLY mask a regression that smuggled a GPU archetype into a
+                // candidate set; assert it cannot happen instead. Reuses the
+                // existing `get_archetype` Some-binding (zero extra lookup).
+                debug_assert!(
+                    !arch.flags.is_gpu_resident(),
+                    "seed_from_candidates: a GPU-resident archetype must never appear \
+                     in an EnableTag candidate set (EnableTags are always Cpu)"
+                );
                 self.push_matched(arch_id);
             }
         });
@@ -471,6 +536,25 @@ impl QueryState {
         self.generation == master.archetype_generation()
             && self.structural_generation == master.structural_generation()
     }
+}
+
+/// Phase 5 W1 — cold reject for a CPU query that NAMES a `Gpu` component in its
+/// `include` mask (resolve OQ4: release-present panic, matching the residency
+/// reject at archetype mint).
+///
+/// `#[cold] #[inline(never)]` so the diagnostic stays out of line and the
+/// `QueryState::new` intersect check carries only the never-taken branch (the
+/// collection loop is untouched — the 0%-gate).
+#[cold]
+#[inline(never)]
+fn cpu_query_over_gpu_component_panic() -> ! {
+    panic!(
+        "a CPU Query names a ResidencyKind::Gpu component in its `include` set: a \
+         device component is absent from the CPU surface (its archetype is \
+         GPU-resident and skipped at query collection), so this query would \
+         silently match nothing — drive the device column from a GPU-compute \
+         system (`.gpu()`) instead, not a CPU Query"
+    );
 }
 
 /// Iterator over matched archetypes produced by `QueryState::iter`.
@@ -855,5 +939,90 @@ mod tests {
         // Crucially, matched_ids itself was rebuilt — not just filtered during
         // iteration. Length is exactly 1, not 2-with-skip.
         assert_eq!(state.len_pre_terms(), 1, "matched_ids must be physically purged, not skip-on-iter");
+    }
+
+    // ----- Phase 5 (MF-4 / D7) — GPU-resident archetype query skip + W1 -----
+    //
+    // Component ids 346/347 reserved for the GPU-residency query tests (the free
+    // 345-399 gap; 345 is taken by archetype.rs's residency tests, the
+    // RESIDENCY_CLASS / LAYOUTS tables are process-global across the test binary).
+    // Both are GPU-pure, so a `[346, 347]` archetype is GPU-resident (C2).
+    #[repr(C)]
+    struct GpuA(u32);
+    #[repr(C)]
+    struct GpuB(u32);
+
+    const GPU_A_ID: ComponentId = ComponentId(346);
+    const GPU_B_ID: ComponentId = ComponentId(347);
+
+    fn register_gpu_components() {
+        use crate::ecs::core::component::component_registry::ResidencyKind;
+        component_registry::register_layout::<GpuA>(GPU_A_ID.0);
+        component_registry::register_layout::<GpuB>(GPU_B_ID.0);
+        component_registry::set_residency_class(GPU_A_ID.0, ResidencyKind::Gpu);
+        component_registry::set_residency_class(GPU_B_ID.0, ResidencyKind::Gpu);
+    }
+
+    /// A GPU-pure (`GPU_RESIDENT`) archetype is SKIPPED by the CPU query
+    /// collection — `update_archetypes` never adds it to `matched_ids`, so
+    /// `row_ptr` on its device pools is never reached (the C1 / D7 soundness
+    /// prerequisite). An empty-filter `QueryState` matches every CPU archetype
+    /// but never the GPU-resident one.
+    #[test]
+    fn t720_gpu_resident_archetype_is_skipped_by_query() {
+        let mut master = setup();
+        register_gpu_components();
+
+        // A CPU archetype + a GPU-pure archetype.
+        let cpu_id = master.create_archetype(&[Pos::component_id()]);
+        let gpu_id = master.create_archetype(&[GPU_A_ID, GPU_B_ID]);
+        assert!(
+            master
+                .get_archetype(gpu_id)
+                .expect("gpu archetype exists")
+                .flags
+                .is_gpu_resident(),
+            "the [GpuA, GpuB] archetype must be GPU-resident (C2: all-components-Gpu)"
+        );
+
+        // An empty-filter state matches every archetype EXCEPT the GPU-resident
+        // one (the skip). It does NOT name any Gpu component, so W1 does not fire.
+        let mut state = QueryState::new(
+            ComponentMask::new(),
+            ComponentMask::new(),
+            ComponentMask::new(),
+        );
+        state.update_archetypes(&master);
+
+        let ids: Vec<_> = state.iter_pre_terms(&master).map(|a| a.id()).collect();
+        assert!(ids.contains(&cpu_id), "the CPU archetype must be matched");
+        assert!(
+            !ids.contains(&gpu_id),
+            "the GPU-resident archetype must be SKIPPED at collection (MF-4 / D7)"
+        );
+    }
+
+    /// W1 footgun: constructing a `QueryState` whose `include` NAMES a
+    /// `ResidencyKind::Gpu` component is a release-present panic — a device
+    /// component is absent from the CPU surface, so the query would silently
+    /// match nothing.
+    #[test]
+    #[should_panic(expected = "names a ResidencyKind::Gpu component")]
+    fn t721_cpu_query_naming_a_gpu_component_panics() {
+        register_gpu_components();
+        let mut include = ComponentMask::new();
+        include.set(GPU_A_ID);
+        let _ = QueryState::new(include, ComponentMask::new(), ComponentMask::new());
+    }
+
+    /// An `exclude` mask naming a Gpu component is HARMLESS — only `include`
+    /// triggers the W1 panic (exclude/optional never produce a device read).
+    #[test]
+    fn t722_exclude_naming_a_gpu_component_is_harmless() {
+        register_gpu_components();
+        let mut exclude = ComponentMask::new();
+        exclude.set(GPU_A_ID);
+        // Must NOT panic.
+        let _ = QueryState::new(ComponentMask::new(), exclude, ComponentMask::new());
     }
 }
