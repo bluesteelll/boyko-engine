@@ -1753,6 +1753,17 @@ impl ComponentPool {
     /// in tests. The caller MUST hold `self.len == 0` (asserted) — overwriting
     /// `backing` drops the old Host `VmReservation` (clean: an empty pool owns
     /// no live rows), and the device pool then keeps Host `len == 0` for life.
+    ///
+    /// **Dangling Host bases (FIX-8 / PB-2).** Overwriting `backing` releases the
+    /// Host `VmReservation`, so the three write-once base pointers `buffer`,
+    /// `added_base`, and `changed_base` become DANGLING after this swap — they
+    /// are NOT cleared. Soundness rests entirely on the `len == 0` invariant
+    /// (held for life on a Device pool, CR-C): every base-reading accessor
+    /// (`row_ptr`, the tick-fill loops, `Drop`'s per-row walk) is bounded by
+    /// `0..self.len`, so with `len == 0` not one of them ever dereferences a base
+    /// pointer. A future maintainer MUST NOT add a post-swap read of `buffer` /
+    /// `added_base` / `changed_base` (it would deref the freed Host reservation);
+    /// device row data lives behind the `PoolBacking::Device` handle instead.
     #[cfg(all(test, not(miri)))]
     pub(crate) fn make_device_backed_for_test(&mut self, handle: u64) {
         assert_eq!(

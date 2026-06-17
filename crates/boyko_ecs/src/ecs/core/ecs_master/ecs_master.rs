@@ -154,15 +154,19 @@ pub struct EcsMaster {
     /// `resources` still drops first; the NonSend slab drops next, both
     /// before the entity / archetype subsystems.
     ///
-    /// **SEND1 (SEND10 / CR-A)**: the slab is the type-erased pointer slab
-    /// (raw `*mut u8` + drop fn + `TypeId`, no inline `R` value) — exactly the
-    /// shape of the sibling `resources` slab, which is itself a `!Send`-
-    /// interior field already covered by the manual `unsafe impl Send/Sync for
-    /// EcsMaster`. Adding it therefore needs NO new `unsafe impl` and does not
-    /// weaken SEND1: the `!Send` payload is reachable only through the
-    /// `unsafe` `NonSendRes`/`NonSendResMut::get_param` accessors, whose SAFETY
-    /// contract holds only on the dispatcher (a NonSend system declares
-    /// universal access → `CpuExclusive` → solo when `running == 0`).
+    /// **SEND1 (SEND10 / CR-A — FIX-6 / FSC-I1)**: `EcsMaster: Send` is forced
+    /// by the blanket `unsafe impl Send/Sync for EcsMaster` REGARDLESS of this
+    /// field, so type erasure of the slot (raw `*mut u8` + drop fn + `TypeId`,
+    /// no inline `R`) is NOT what makes it sound — it only means the field does
+    /// not add a fresh `!Send` auto-trait obligation. The `!Send` payload is
+    /// sound ONLY by the runtime CpuExclusive-routing discipline: a NonSend
+    /// `SystemParam` declares universal access → `CpuExclusive` →
+    /// `runs_on_dispatcher()` → solo when `running == 0`, so the value is only
+    /// ever touched single-threaded on the dispatcher, reachable through the
+    /// `unsafe` `NonSendRes`/`NonSendResMut::get_param` accessors. There is no
+    /// compile-time tripwire enforcing the routing — the behavioral test
+    /// `nonsend_system_runs_on_dispatcher_and_observes_resource` is the guard.
+    /// See the SEND10 bullet on the `unsafe impl Send for EcsMaster`.
     pub(crate) nonsend_resources: Option<Box<NonSendResources>>,
 
     /// Event dispatcher — dropped after `resources` and before the entity /
@@ -3519,19 +3523,25 @@ impl Default for EcsMaster {
 //     `EcsMaster::insert_resource`, etc.) inherit the borrow-checker
 //     enforcement; no scheduler invariant applies because no worker is in
 //     flight at the language level.
-//   - SEND10 (Phase 4 Seam 2 / CR-A): `nonsend_resources`
-//     (`Option<Box<NonSendResources>>`) is the type-erased pointer slab — raw
-//     `*mut u8` data ptr + drop fn + `TypeId`, never an inline `R` value —
-//     exactly the shape of the sibling `resources` slab whose `!Send`
-//     raw-pointer interior this manual impl already covers. It therefore adds
-//     NO new `!Send` value reachable by a worker cell: its `!Send` payload is
-//     touched EXCLUSIVELY on the dispatcher thread in the apply window, routed
-//     by `runs_on_dispatcher()` — every NonSend `SystemParam` declares
-//     universal access (CR-B) → `SystemKind::CpuExclusive` → runs solo when
-//     `running == 0`. The slab is reachable (the field is `Send` by erasure)
-//     but the value needs an `unsafe` accessor (`NonSendRes`/`NonSendResMut::
-//     get_param` via `UnsafeEcsCell::nonsend_resources[_mut]`) whose SAFETY
-//     contract holds only on-dispatcher. SEND1 is unchanged.
+//   - SEND10 (Phase 4 Seam 2 / CR-A — FIX-6 / FSC-I1): `EcsMaster: Send` is
+//     forced by THIS blanket `unsafe impl` REGARDLESS of what
+//     `nonsend_resources` (`Option<Box<NonSendResources>>`) holds — the impl is
+//     unconditional, so type erasure is NOT what makes the field sound. (Erasure
+//     of the slot — raw `*mut u8` + drop fn + `TypeId`, never an inline `R` —
+//     only means the field does not by ITSELF re-introduce a `!Send` auto-trait
+//     obligation that the impl would have to override; it provides no run-time
+//     guarantee.) The actual soundness of the `!Send` payload rests ENTIRELY on
+//     the runtime CpuExclusive-routing discipline: every NonSend `SystemParam`
+//     declares universal access (CR-B) → resolves `SystemKind::CpuExclusive` →
+//     `runs_on_dispatcher()` runs it solo on the dispatcher thread when
+//     `running == 0`, so the `!Send` value is constructed / projected / dropped
+//     single-threaded, never concurrently with a worker. That payload is
+//     reachable only through the `unsafe` `NonSendRes`/`NonSendResMut::get_param`
+//     accessors (via `UnsafeEcsCell::nonsend_resources[_mut]`), whose SAFETY
+//     contract holds ONLY on-dispatcher. There is NO compile-time tripwire that
+//     enforces the routing — it is guarded by the behavioral test
+//     `nonsend_system_runs_on_dispatcher_and_observes_resource`. SEND1 is
+//     unchanged.
 unsafe impl Send for EcsMaster {}
 unsafe impl Sync for EcsMaster {}
 

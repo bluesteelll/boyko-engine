@@ -260,10 +260,15 @@ impl NonSendResources {
         if !self.registered_mask.get(id.0) {
             return None;
         }
-        // SAFETY (N1): the bit is set ⇒ the slot is initialised; `&mut self`
-        //   gives exclusive access, so handing out the raw `*mut u8` does not
-        //   alias any other accessor.
-        let slot = unsafe { self.slots[id.0].slot.assume_init_ref() };
+        // SAFETY (N1, FIX-4 / X3): the bit is set ⇒ the slot is initialised;
+        //   `&mut self` gives exclusive access. Project through `assume_init_mut`
+        //   (a MUTABLE place) rather than `assume_init_ref`, so the returned
+        //   `*mut u8` is derived from a write-capable provenance — deriving a
+        //   `*mut` through a shared `assume_init_ref` projection would narrow
+        //   provenance to read-only under Tree Borrows, a write-UB hazard for the
+        //   `NonSendResMut` caller. Handing out the raw pointer does not alias
+        //   any other accessor (exclusive `&mut self`).
+        let slot = unsafe { self.slots[id.0].slot.assume_init_mut() };
         Some(slot.ptr)
     }
 

@@ -21,7 +21,8 @@ use std::thread::{self, ThreadId};
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::resources::resource::NonSendResource;
 use boyko_ecs::ecs::core::schedule::ScheduleBuilder;
-use boyko_ecs::ecs::core::system::NonSendResMut;
+use boyko_ecs::ecs::core::system::{NonSendResMut, ResMut};
+use boyko_macros::Resource;
 use boyko_threadpool::ThreadPoolBuilder;
 
 /// `!Send` resource: the raw `*const u8` makes the type `!Send` (no auto
@@ -126,6 +127,84 @@ fn nonsend_trait_accepts_non_send_type_and_send1_holds() {
     // negative-impl detector (not available on stable). The behavioral test
     // above is the load-bearing dispatcher-only proof.
     let _ = std::ptr::null::<u8>();
+}
+
+/// Phase 4 FIX-1 / X2 — a system mixing a NonSend param with a second
+/// (`Res`/`ResMut`) param must BUILD without panic and RUN both fetches.
+///
+/// The tuple `init_access` forwards to params in declaration order. A NonSend
+/// param declares **universal access** first (`mark_universal`), which sets
+/// every read+write bit; a subsequent `ResMut<Foo>::init_access` calls
+/// `add_resource_write(Foo)`. Before FIX-1 that `add_*` saw Foo's write bit
+/// already set by the universal grant and flagged a FALSE intra-system conflict
+/// → build panic. FIX-1 short-circuits every `add_*` once the set is universal.
+///
+/// Both declaration orders are exercised — `(NonSendResMut, ResMut)` (the
+/// poisoning order) and `(ResMut, NonSendResMut)` (NonSend last) — and each
+/// system is actually RUN to prove both params are fetched.
+#[derive(Resource)]
+struct Foo(u32);
+
+#[test]
+fn nonsend_plus_resmut_builds_and_runs_both_orders() {
+    static NONSEND_FIRST_RAN: AtomicUsize = AtomicUsize::new(0);
+    static RES_FIRST_RAN: AtomicUsize = AtomicUsize::new(0);
+    NONSEND_FIRST_RAN.store(0, Ordering::Relaxed);
+    RES_FIRST_RAN.store(0, Ordering::Relaxed);
+
+    let pool = ThreadPoolBuilder::new().num_threads(2).build();
+    let mut world = EcsMaster::new();
+
+    world.insert_non_send_resource(NonSendProbe {
+        counter: 0,
+        observed_thread: None,
+        _not_send: std::ptr::null(),
+    });
+    world.insert_resource(Foo(0));
+
+    let mut builder = ScheduleBuilder::new(Arc::clone(&pool));
+
+    // Poisoning order: NonSend (universal) declared BEFORE ResMut<Foo>.
+    builder.add_system(|mut probe: NonSendResMut<NonSendProbe>, mut foo: ResMut<Foo>| {
+        probe.counter += 1;
+        foo.0 += 10;
+        NONSEND_FIRST_RAN.fetch_add(1, Ordering::Relaxed);
+    });
+
+    // Reverse order: ResMut<Foo> declared BEFORE NonSend.
+    builder.add_system(|mut foo: ResMut<Foo>, mut probe: NonSendResMut<NonSendProbe>| {
+        probe.counter += 1;
+        foo.0 += 100;
+        RES_FIRST_RAN.fetch_add(1, Ordering::Relaxed);
+    });
+
+    // `build` runs every system's `init_access`; before FIX-1 it panicked here.
+    let mut schedule = builder.build(&mut world);
+    schedule.run(&mut world);
+
+    assert_eq!(
+        NONSEND_FIRST_RAN.load(Ordering::Relaxed),
+        1,
+        "the (NonSendResMut, ResMut) system must build and run exactly once"
+    );
+    assert_eq!(
+        RES_FIRST_RAN.load(Ordering::Relaxed),
+        1,
+        "the (ResMut, NonSendResMut) system must build and run exactly once"
+    );
+
+    // Both params were fetched in both systems: NonSend counter bumped twice,
+    // Foo bumped by 10 + 100.
+    assert_eq!(
+        world.non_send_resource::<NonSendProbe>().counter,
+        2,
+        "the NonSend param must be fetched in both two-param systems"
+    );
+    assert_eq!(
+        world.resource::<Foo>().0,
+        110,
+        "the ResMut<Foo> param must be fetched in both two-param systems"
+    );
 }
 
 #[test]

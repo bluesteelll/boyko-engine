@@ -61,9 +61,11 @@ pub(crate) type BoolSystem = Box<dyn System<Out = bool>>;
 ///
 /// `system → kind → name` — by access frequency from the dispatcher's hot
 /// loop. The boxed system pointer is touched every dispatch (to call
-/// `run_unsafe` / `apply`), the `kind` tag is touched at the apply-window
-/// gate (SCH7) and the exclusive-path branch (EXC2), and `name` is touched
-/// only for diagnostics / panic messages.
+/// `run_unsafe` / `apply`); the `kind` tag is read ONLY at the EXC2 dispatch
+/// branch (`runs_on_dispatcher()` in `try_dispatch_ready`) and the SCH15
+/// `debug_assert!` in `Schedule::run` — NOT at the apply-window gate, which is
+/// pending/running-count based and never reads `kind` (FIX-7 / SCH15-M2); and
+/// `name` is touched only for diagnostics / panic messages.
 ///
 /// # Layout (Phase 4 D5)
 ///
@@ -83,8 +85,10 @@ pub(crate) struct SystemBox {
     /// Build-time dispatch classification (Phase 4 D5). Resolved at
     /// [`ScheduleBuilder::build`] from `(is_gpu, access().is_universal())`:
     /// the GPU marker wins, else universal access ⇒ `CpuExclusive`, else
-    /// `CpuConcurrent`. Read by the executor's apply-window gate (SCH7) and
-    /// exclusive-path dispatcher branch (EXC2) on every round via
+    /// `CpuConcurrent`. Read ONLY by the executor's EXC2 dispatcher branch
+    /// (`runs_on_dispatcher()` in `try_dispatch_ready`) and the SCH15
+    /// `debug_assert!` in `Schedule::run` — NOT by the apply-window gate, which
+    /// is pending/running-count based (FIX-7 / SCH15-M2) — via
     /// [`SystemKind::runs_on_dispatcher`].
     pub(crate) kind: SystemKind,
 

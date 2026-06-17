@@ -125,6 +125,13 @@ pub struct FilteredAccessSet {
     /// Per-slot ownership map. Heap-allocated to keep stack frames small;
     /// 24 KB transient allocation per system per init call.
     bit_owners: Box<[&'static str; OWNERSHIP_SLOT_COUNT]>,
+    /// Set once [`mark_universal`] is called. While `true`, every subsequent
+    /// `add_*` short-circuits as already-covered: a single system that
+    /// declared universal access cannot intra-conflict with itself, because
+    /// universal access subsumes any later per-bit add (Phase 4 FIX-1 / X2).
+    ///
+    /// [`mark_universal`]: FilteredAccessSet::mark_universal
+    universal: bool,
 }
 
 impl FilteredAccessSet {
@@ -137,6 +144,7 @@ impl FilteredAccessSet {
         Self {
             combined: Access::new(),
             bit_owners: Box::new([""; OWNERSHIP_SLOT_COUNT]),
+            universal: false,
         }
     }
 
@@ -148,6 +156,11 @@ impl FilteredAccessSet {
         id: ResourceId,
         param_name: &'static str,
     ) -> Result<(), AccessConflict> {
+        // FIX-1 / X2: a system that already declared universal access subsumes
+        // any later per-bit add — it cannot intra-conflict with itself.
+        if self.universal {
+            return Ok(());
+        }
         let idx = id.0;
         debug_assert!(idx < RESOURCE_SLOT_COUNT, "ResourceId out of range: {idx}");
         if self.combined.resource_writes.get(idx) {
@@ -171,6 +184,10 @@ impl FilteredAccessSet {
         id: ResourceId,
         param_name: &'static str,
     ) -> Result<(), AccessConflict> {
+        // FIX-1 / X2: universal access already covers this write.
+        if self.universal {
+            return Ok(());
+        }
         let idx = id.0;
         debug_assert!(idx < RESOURCE_SLOT_COUNT, "ResourceId out of range: {idx}");
         if self.combined.resource_reads.get(idx) {
@@ -202,6 +219,10 @@ impl FilteredAccessSet {
         id: ComponentId,
         param_name: &'static str,
     ) -> Result<(), AccessConflict> {
+        // FIX-1 / X2: universal access already covers this read.
+        if self.universal {
+            return Ok(());
+        }
         let idx = id.0;
         debug_assert!(idx < MAX_COMPONENTS, "ComponentId out of range: {idx}");
         if self.combined.component_writes.contains(id) {
@@ -225,6 +246,10 @@ impl FilteredAccessSet {
         id: ComponentId,
         param_name: &'static str,
     ) -> Result<(), AccessConflict> {
+        // FIX-1 / X2: universal access already covers this write.
+        if self.universal {
+            return Ok(());
+        }
         let idx = id.0;
         debug_assert!(idx < MAX_COMPONENTS, "ComponentId out of range: {idx}");
         if self.combined.component_reads.contains(id) {
@@ -264,9 +289,18 @@ impl FilteredAccessSet {
     /// universal grant — universal access already conflicts with everything
     /// cross-system, and a NonSend system is dispatcher-solo regardless.
     ///
+    /// Setting the `universal` flag also makes every *subsequent* `add_*` from
+    /// a sibling param a no-op: a tuple param such as
+    /// `(NonSendResMut<R>, ResMut<Foo>)` forwards `init_access` in declaration
+    /// order, so the universal grant lands first and must not poison the later
+    /// `add_resource_write(Foo)` into a FALSE intra-system conflict (FIX-1 /
+    /// X2). Universal already subsumes any per-bit add, so silently accepting
+    /// the later add is correct.
+    ///
     /// [`finalize`]: FilteredAccessSet::finalize
     pub fn mark_universal(&mut self) {
         self.combined = Access::universal();
+        self.universal = true;
     }
 
     /// Returns a shared view of the accumulated [`Access`] so far.

@@ -937,16 +937,16 @@ impl Schedule {
         completion: CompletionCell<'scope>,
     ) -> usize {
         let n = self.systems.len();
-        let running_count = self.executor_scratch.running.count_ones(..);
 
         // Cheap scratch — bounded by the number of systems (≤ 1024).
         // The scratch is a stack-local Vec because we cannot easily reuse
         // the `executor_scratch.ready_scratch` bitset and at the same time
         // iterate it while mutating `self.executor_scratch.running` below.
         //
-        // Two buckets so exclusive systems can short-circuit when
-        // `running_count > 0`. Allocation cost is dominated by the dispatch
-        // path itself (~120 ns/spawn per plan §10.5); negligible.
+        // Two buckets so dispatcher-only systems can short-circuit when the
+        // LIVE running set is non-empty (FIX-3 — the snapshot would be stale by
+        // the time a later index is examined). Allocation cost is dominated by
+        // the dispatch path itself (~120 ns/spawn per plan §10.5); negligible.
         let mut exclusive_to_run: Vec<SystemIndex> = Vec::new();
         let mut to_spawn: Vec<SystemIndex> = Vec::new();
 
@@ -972,12 +972,23 @@ impl Schedule {
             }
 
             if self.systems[i].kind.runs_on_dispatcher() {
-                // EXC2: dispatcher-only systems (CpuExclusive AND Phase-4
-                // GpuCompute) require `running == 0` at dispatch time. If
-                // anything is running we defer to the next round (the apply
-                // window will drain and the next call to this function will
-                // reconsider).
-                if running_count > 0 {
+                // EXC2 (Phase 4 FIX-3 / SCH15-C1): dispatcher-only systems
+                // (CpuExclusive AND Phase-4 GpuCompute) require `running == 0` at
+                // dispatch time. Gate on the LIVE running set, NOT the
+                // `running_count` snapshot captured at function entry: concurrent
+                // systems are inserted into `running` earlier in THIS loop
+                // (below), so the snapshot can be stale and would otherwise let a
+                // dispatcher-only system be co-dispatched with a concurrent one
+                // in the same round. For `CpuExclusive` the conflict graph also
+                // serializes (universal access ⇒ `bitset_intersects` above already
+                // rejects), so this is belt-and-suspenders; for `GpuCompute`
+                // (non-universal, marker-only) the conflict graph CANNOT enforce
+                // solo-ness, so the live check is the ONLY guard. (GpuCompute is
+                // not creatable end-to-end in Phase 4 — no builder API; the
+                // end-to-end GpuCompute scheduling test is a Phase-5 obligation,
+                // finding X5.) If anything is running we defer to the next round
+                // (the apply window drains, and the next call reconsiders).
+                if self.executor_scratch.running.count_ones(..) > 0 {
                     continue;
                 }
                 exclusive_to_run.push(SystemIndex(i as u16));
@@ -1011,6 +1022,16 @@ impl Schedule {
         // === Exclusive path (plan §2.5 EXC1, Step 13). ===
         for idx in &exclusive_to_run {
             let i = idx.0 as usize;
+            // FIX-3 / SCH15: a dispatcher-only system is accepted into
+            // `exclusive_to_run` ONLY when the LIVE running set is empty (the
+            // EXC2 gate above), and the `break` after the push guarantees no
+            // concurrent system was inserted into `running` afterwards in this
+            // call. So at this point the running set still holds nothing — the
+            // dispatcher-solo invariant the inline `run_unsafe` below relies on.
+            debug_assert!(
+                self.executor_scratch.running.count_ones(..) == 0,
+                "EXC2/FIX-3: a dispatcher-only system must dispatch solo (running == 0)",
+            );
             self.executor_scratch.running.insert(i);
 
             // Phase 16.1 C1 — gated-system dispatch stamp (inline-exclusive
@@ -1028,11 +1049,15 @@ impl Schedule {
                     .set_change_ticks(prev, self.frame_this_run);
             }
 
-            // SAFETY (EXC1 — Round 3 W-NEW-5):
-            //   - Universal access ⇒ conflict graph forces `running == 0`
-            //     before dispatch. We checked `running_count == 0` above
-            //     before pushing to `exclusive_to_run`; nothing was spawned
-            //     in this call.
+            // SAFETY (EXC1 — Round 3 W-NEW-5; FIX-3):
+            //   - For `CpuExclusive`, universal access ⇒ the conflict graph
+            //     forces `running == 0` before dispatch. Independently, the EXC2
+            //     gate checks the LIVE `running.count_ones()` (NOT a stale
+            //     snapshot) before pushing to `exclusive_to_run`, and the `break`
+            //     after the push means nothing was spawned in this call — the
+            //     `debug_assert!(running == 0)` at the top of this loop pins it.
+            //     For `GpuCompute` (marker-only, non-universal) the live EXC2
+            //     check is the sole solo-ness guard.
             //   - `cell.world_mut()` reborrows `&mut EcsMaster` from the
             //     cell minted in the current dispatch round from the
             //     dispatcher's own &mut world. No other reference exists.

@@ -38,6 +38,14 @@ use crate::ecs::core::resources::resource::NonSendResource;
 ///
 /// Matches [`RESOURCE_SLOT_COUNT`](super::resource_registry::RESOURCE_SLOT_COUNT)
 /// (256) — the non-send slab is the same shape as the `Send` slab.
+///
+/// **Process-global id space (FSC-M3 / NSS-5).** Like `ResourceId`, the
+/// [`NonSendResourceId`](crate::ecs::identifiers::primitives::NonSendResourceId)
+/// counter is a single process-wide `static` — this 256 cap counts the number
+/// of **distinct NonSend types registered across the whole process and ALL
+/// `EcsMaster` worlds**, NOT per-world. Two worlds that each register the same
+/// `R` share its one id; 256 distinct NonSend types across the entire program
+/// exhaust the registry.
 pub const NON_SEND_RESOURCE_SLOT_COUNT: usize = 256;
 
 /// Type-erased drop function pointer for a non-send resource type `R`.
@@ -123,6 +131,13 @@ static NEXT_NON_SEND_RESOURCE_ID: AtomicUsize = AtomicUsize::new(0);
 /// Called from `NonSendRes<R>` / `NonSendResMut<R>` `init_state` via a
 /// per-monomorphization `OnceLock`. Each concrete `R` gets exactly one id
 /// across the process lifetime.
+///
+/// **Process-global counter (FSC-M3 / NSS-5).** `NEXT_NON_SEND_RESOURCE_ID` is
+/// a single process-wide `static`, so ids are NOT scoped to one `EcsMaster`
+/// world — the [`NON_SEND_RESOURCE_SLOT_COUNT`] cap counts distinct NonSend
+/// types across the entire process and all worlds combined (the `ResourceId`
+/// model). Re-registering the same `R` (in this or any other world) returns the
+/// already-minted id.
 ///
 /// # Panics
 /// - If `NEXT_NON_SEND_RESOURCE_ID` reaches `NON_SEND_RESOURCE_SLOT_COUNT`.

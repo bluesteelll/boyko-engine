@@ -509,8 +509,26 @@ impl ArchetypeBundle {
         //   (private slab + `&mut self` borrow). The `&mut Archetype`
         //   reborrow is sound and stays inside this function.
         let archetype: &mut Archetype = unsafe { &mut *slot_ptr };
+        // Phase 4 Seam 2 (D2 / FSC-C1 / FIX-2): this is the LIVE archetype-mint
+        // funnel (`ArchetypeMaster::create_archetype` reaches it, NOT
+        // `Archetype::create_by_ids`). `register_component_inplace` STAMPS the
+        // per-component `GPU_RESIDENT` bit; the set-level
+        // `saw_gpu && saw_cpu_pinned` conflict must be rejected HERE — fold the
+        // residency classification into the existing per-component walk (one
+        // extra cold `residency_class` load per id + a 2-bool fold, no new loop)
+        // and reject loudly AFTER the walk.
+        let mut saw_gpu = false;
+        let mut saw_cpu_pinned = false;
         for &cid in component_ids {
+            match component_registry::residency_class(cid.0) {
+                component_registry::ResidencyKind::Gpu => saw_gpu = true,
+                component_registry::ResidencyKind::CpuPinned => saw_cpu_pinned = true,
+                component_registry::ResidencyKind::Cpu => {}
+            }
             archetype.register_component_inplace(cid);
+        }
+        if saw_gpu && saw_cpu_pinned {
+            crate::ecs::core::archetype::archetype::residency_conflict_panic(component_ids);
         }
 
         // Set the occupancy bit only after full initialisation.

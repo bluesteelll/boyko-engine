@@ -531,10 +531,7 @@ impl ArchetypeMaster {
         for &cid in &component_ids {
             obs.insert_from_observers(cid, &self.observer_registry);
             match component_registry::residency_class(cid.0) {
-                component_registry::ResidencyKind::Gpu => {
-                    saw_gpu = true;
-                    obs.insert(ArchetypeFlags::GPU_RESIDENT);
-                }
+                component_registry::ResidencyKind::Gpu => saw_gpu = true,
                 component_registry::ResidencyKind::CpuPinned => saw_cpu_pinned = true,
                 component_registry::ResidencyKind::Cpu => {}
             }
@@ -542,7 +539,16 @@ impl ArchetypeMaster {
         if saw_gpu && saw_cpu_pinned {
             crate::ecs::core::archetype::archetype::residency_conflict_panic(&component_ids);
         }
-        if !obs.is_empty() {
+        // Phase 4 Seam 1 (FIX-5 / X4): the `GPU_RESIDENT` write is DECOUPLED
+        // from the observer-bit write — a pure-GPU archetype with zero observer
+        // bits must still persist the residency stamp. Fold the GPU bit into the
+        // `obs` set so a single `insert_observer_bits` RMW writes both, and gate
+        // on `saw_gpu || !obs.is_empty()` so the residency bit is never gated
+        // behind the presence of an observer bit.
+        if saw_gpu {
+            obs.insert(ArchetypeFlags::GPU_RESIDENT);
+        }
+        if saw_gpu || !obs.is_empty() {
             let ptr = self
                 .archetypes
                 .get_archetype_ptr_mut(archetype_id)
@@ -1493,5 +1499,68 @@ mod tests {
             "get_or_create_archetype(&[T, Tag]) must reuse the table-only archetype"
         );
         assert_eq!(master.archetype_count(), 1);
+    }
+
+    // ----- Phase 4 FIX-2 / FSC-C1: residency stamp + reject on the LIVE mint
+    // funnel (`create_archetype` → `add_archetype_from_components_fallible`,
+    // NOT the dead `Archetype::create_by_ids`). EcsMaster::create_archetype
+    // delegates to ArchetypeMaster::create_archetype verbatim, so this IS the
+    // live spawn path. Fresh disjoint id range 340-349 (write-once
+    // RESIDENCY_CLASS must not collide with the 330-339 archetype.rs tests).
+
+    use crate::ecs::core::component::component_registry::{
+        ResidencyKind, classify_component_residency,
+    };
+
+    const LIVE_GPU: ComponentId = ComponentId(340);
+    const LIVE_CPU_A: ComponentId = ComponentId(341);
+    const LIVE_CPU_B: ComponentId = ComponentId(342);
+    const LIVE_PINNED: ComponentId = ComponentId(343);
+
+    /// A pure-`Gpu` signature minted through the LIVE funnel stamps
+    /// `is_gpu_resident()`.
+    #[test]
+    fn live_funnel_stamps_gpu_resident_for_a_gpu_signature() {
+        component_registry::register_layout::<u32>(LIVE_GPU.0);
+        component_registry::register_layout::<u32>(LIVE_CPU_A.0);
+        classify_component_residency(LIVE_GPU.0, ResidencyKind::Gpu);
+
+        let mut master = ArchetypeMaster::new();
+        let id = master.create_archetype(&[LIVE_GPU, LIVE_CPU_A]);
+        let arch = master.get_archetype(id).expect("archetype just created");
+        assert!(
+            arch.flags.is_gpu_resident(),
+            "a Gpu signature minted through the LIVE funnel must stamp GPU_RESIDENT"
+        );
+    }
+
+    /// A `Cpu`-only signature minted through the LIVE funnel never stamps
+    /// `is_gpu_resident()` (the 0%-gate).
+    #[test]
+    fn live_funnel_cpu_only_never_stamps_gpu_resident() {
+        component_registry::register_layout::<u32>(LIVE_CPU_A.0);
+        component_registry::register_layout::<u32>(LIVE_CPU_B.0);
+
+        let mut master = ArchetypeMaster::new();
+        let id = master.create_archetype(&[LIVE_CPU_A, LIVE_CPU_B]);
+        let arch = master.get_archetype(id).expect("archetype just created");
+        assert!(
+            !arch.flags.is_gpu_resident(),
+            "a Cpu-only signature minted through the LIVE funnel must never stamp GPU_RESIDENT"
+        );
+    }
+
+    /// A `Gpu` + `CpuPinned` mix minted through the LIVE funnel rejects loudly
+    /// (release-present panic) — the FIX-2 reject now lives on the live path.
+    #[test]
+    #[should_panic(expected = "residency conflict")]
+    fn live_funnel_mixed_gpu_and_cpu_pinned_rejects() {
+        component_registry::register_layout::<u32>(LIVE_GPU.0);
+        component_registry::register_layout::<u32>(LIVE_PINNED.0);
+        classify_component_residency(LIVE_GPU.0, ResidencyKind::Gpu);
+        classify_component_residency(LIVE_PINNED.0, ResidencyKind::CpuPinned);
+
+        let mut master = ArchetypeMaster::new();
+        let _ = master.create_archetype(&[LIVE_GPU, LIVE_PINNED]);
     }
 }
