@@ -68,6 +68,16 @@ impl ArchetypeFlags {
     /// archetype (the acceptable cost — observed archetypes are rare).
     pub const HAS_ENTITY_OBSERVER: u16 = 1 << 10;
 
+    /// Set iff ≥1 component in the archetype is [`ResidencyKind::Gpu`]
+    /// (Phase 4 Seam 1, D1). OR-computed once at mint from the cold
+    /// `RESIDENCY_CLASS` table, then read as a single `test`/`jz` on the
+    /// already-loaded `flags` `u16` — the same 0%-when-unused mechanism as the
+    /// hook/observer bits. A CPU-only world never sets it.
+    ///
+    /// Bits 0..=10 are claimed above (`HAS_ENTITY_OBSERVER = 1 << 10`); bit 11 is
+    /// the first free bit.
+    pub const GPU_RESIDENT: u16 = 1 << 11;
+
     /// `on_add` gate mask: set iff the archetype has an `on_add` hook OR
     /// observer. The structural-op fire site widens its inner test from
     /// `ON_ADD_HOOK` to this (Phase 14b §5) — same instruction count, a
@@ -117,6 +127,18 @@ impl ArchetypeFlags {
     #[inline]
     pub const fn is_empty(self) -> bool {
         self.0 == 0
+    }
+
+    /// Returns `true` if the archetype is GPU-resident (Phase 4 Seam 1, D1) —
+    /// ≥1 component is [`ResidencyKind::Gpu`](crate::ecs::core::component::component_registry::ResidencyKind).
+    ///
+    /// One `test`/`jz` on the already-loaded `flags` `u16`. The Phase-5 CPU
+    /// `Query` archetype-collection skip reads this once per query rebuild (cold);
+    /// a CPU-only world never sets the bit, so the candidate set is identical and
+    /// the test predicts not-taken — the 0%-gate.
+    #[inline]
+    pub const fn is_gpu_resident(self) -> bool {
+        self.contains(Self::GPU_RESIDENT)
     }
 
     /// ORs into `self` the hook bits declared by component `cid`, reading the
@@ -347,6 +369,40 @@ mod tests {
             | ArchetypeFlags::ON_REMOVE_OBSERVER;
         assert_eq!(hook_bits & observer_bits, 0, "hook and observer bits are disjoint");
         assert_eq!(observer_bits & (1 << 4), 0, "bit 4 stays reserved (unused by observers)");
+    }
+
+    // ----- Phase 4 Seam 1: GPU_RESIDENT bit -----
+
+    #[test]
+    fn gpu_resident_is_bit_eleven_and_distinct() {
+        // Pin: bits 0..=10 are claimed (HAS_ENTITY_OBSERVER = 1<<10); 11 is the
+        // first free bit. Do NOT renumber.
+        assert_eq!(ArchetypeFlags::GPU_RESIDENT, 1 << 11);
+        let other_bits = ArchetypeFlags::ON_ADD_HOOK
+            | ArchetypeFlags::ON_INSERT_HOOK
+            | ArchetypeFlags::ON_REPLACE_HOOK
+            | ArchetypeFlags::ON_REMOVE_HOOK
+            | ArchetypeFlags::ON_DESPAWN_HOOK
+            | ArchetypeFlags::ON_ADD_OBSERVER
+            | ArchetypeFlags::ON_INSERT_OBSERVER
+            | ArchetypeFlags::ON_REPLACE_OBSERVER
+            | ArchetypeFlags::ON_REMOVE_OBSERVER
+            | ArchetypeFlags::ON_DESPAWN_OBSERVER
+            | ArchetypeFlags::HAS_ENTITY_OBSERVER;
+        assert_eq!(
+            ArchetypeFlags::GPU_RESIDENT & other_bits,
+            0,
+            "GPU_RESIDENT must not overlap any hook/observer/entity-observer bit"
+        );
+    }
+
+    #[test]
+    fn is_gpu_resident_reads_the_bit() {
+        let mut f = ArchetypeFlags::empty();
+        assert!(!f.is_gpu_resident(), "empty flags are not GPU-resident");
+        f.insert(ArchetypeFlags::GPU_RESIDENT);
+        assert!(f.is_gpu_resident(), "GPU_RESIDENT raised => is_gpu_resident");
+        assert!(!f.contains(ArchetypeFlags::ON_ADD_HOOK), "unrelated bits untouched");
     }
 
     #[test]

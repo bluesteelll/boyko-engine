@@ -12,6 +12,8 @@ pub mod entity_counter;
 pub mod event_reader;
 pub mod event_writer;
 pub mod local;
+pub mod nonsend_res;
+pub mod nonsend_resmut;
 pub mod res;
 pub mod resmut;
 pub(crate) mod tuple_impl;
@@ -49,6 +51,14 @@ pub use event_writer::{EventWriter, EventWriterState};
 // `#[allow(unused_imports)]` rationale as `Commands` / `EventReader`.
 #[allow(unused_imports)]
 pub use local::Local;
+// Phase 4 Seam 2: `NonSendRes` / `NonSendResMut` re-exports. Same
+// `#[allow(unused_imports)]` rationale as the other params — the SystemParam
+// impls + in-file tests exercise the full path; cross-module lib consumers
+// land with Phase 5.
+#[allow(unused_imports)]
+pub use nonsend_res::{NonSendRes, NonSendResState};
+#[allow(unused_imports)]
+pub use nonsend_resmut::{NonSendResMut, NonSendResMutState};
 pub use res::{Res, ResState};
 pub use resmut::{ResMut, ResMutState};
 pub use tuple_impl::MAX_SYSTEM_PARAM_ARITY;

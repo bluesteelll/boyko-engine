@@ -71,3 +71,37 @@ pub trait Resource: 'static + Send + Sync + Sized {
         std::mem::align_of::<Self>()
     }
 }
+
+/// Marker trait for **non-`Send`** world-global singleton types (Phase 4
+/// Seam 2 — D6 + CR-A).
+///
+/// Unlike [`Resource`], a `NonSendResource` carries **no `Send + Sync`
+/// bound** — that is the entire point. It homes types that legitimately
+/// cannot cross thread boundaries: RHI `Device`/`Queue` handles, FFI
+/// pointers, `Rc<T>`-wrapped state. Implemented for any `'static` type
+/// (manually or via a future derive).
+///
+/// # Where the `!Send` payload is touched (CR-A)
+///
+/// The value lives in a **separate** type-erased slab
+/// ([`NonSendResources`]) on `EcsMaster`, kept structurally `Send + Sync`
+/// by erasing the type to a raw pointer + drop fn + `TypeId` — exactly like
+/// [`Resources`]. The `!Send` payload `R` is reachable only through the
+/// `unsafe` `NonSendRes`/`NonSendResMut::get_param` accessors, whose SAFETY
+/// contract is the apply-window single-thread-touch invariant: a system
+/// that takes a NonSend param declares **universal access**, so it resolves
+/// to `SystemKind::CpuExclusive` and runs ONLY on the dispatcher thread when
+/// `running == 0` (no worker is live, no concurrent touch). This reuses the
+/// existing apply-window discipline — it introduces **no new soundness
+/// model**, mirroring Bevy's separate non-send storage.
+///
+/// # Drop discipline (C5)
+///
+/// As with [`Resource`], a `NonSendResource`'s `Drop` impl MUST NOT call
+/// back into `EcsMaster`. The non-send slab drops AFTER the `Send + Sync`
+/// resources slab (it is declared immediately after `resources` — the C5
+/// drop-order contract keeps `resources` first).
+///
+/// [`Resources`]: crate::ecs::core::resources::resources::Resources
+/// [`NonSendResources`]: crate::ecs::core::resources::nonsend_resources::NonSendResources
+pub trait NonSendResource: 'static {}

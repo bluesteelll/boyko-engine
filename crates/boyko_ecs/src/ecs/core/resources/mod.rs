@@ -10,6 +10,11 @@
 //!
 //! [`ResourceId`]: crate::ecs::identifiers::primitives::ResourceId
 
+// Phase 4 Seam 2 — non-`Send` resource storage. Parallel of `resources` /
+// `resource_registry`, for types that carry no `Send + Sync` bound (RHI
+// handles, FFI pointers). See `NonSendResource` (D6 + CR-A).
+pub(crate) mod nonsend_resource_registry;
+pub mod nonsend_resources;
 pub mod resource;
 pub(crate) mod resource_registry;
 // Module name mirrors the public `Resources` slab type; the parent module
@@ -17,7 +22,8 @@ pub(crate) mod resource_registry;
 #[allow(clippy::module_inception)]
 pub mod resources;
 
-pub use resource::Resource;
+pub use nonsend_resources::NonSendResources;
+pub use resource::{NonSendResource, Resource};
 pub use resource_registry::RESOURCE_SLOT_COUNT;
 pub use resources::Resources;
 

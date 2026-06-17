@@ -47,7 +47,8 @@ use crate::ecs::core::iters::query::query_type_registry::{
 };
 use crate::ecs::core::iters::query::query_view::QueryView;
 use crate::ecs::core::iters::query::state::QueryDataState;
-use crate::ecs::core::resources::resource::Resource;
+use crate::ecs::core::resources::nonsend_resources::NonSendResources;
+use crate::ecs::core::resources::resource::{NonSendResource, Resource};
 use crate::ecs::core::resources::resources::Resources;
 use crate::ecs::core::state::states::States;
 use crate::ecs::core::state::transition_record::StateTransitionRecord;
@@ -142,6 +143,27 @@ pub struct EcsMaster {
     /// unblocks Step 7's `Res<R>` / `ResMut<R>` `get_param` via
     /// `UnsafeEcsCell::resources()` / `resources_mut()`.
     pub(crate) resources: Resources,
+
+    /// Phase 4 Seam 2 (D6 / CR-A / P5) — world-global **non-`Send`** resource
+    /// slab. LAZY (`Option<Box<NonSendResources>>`): `None` until the first
+    /// `insert_non_send_resource`, so a world that never homes a NonSend
+    /// resource pays ZERO allocation (the 0%-gate) and ZERO `EcsMaster::new`
+    /// cost.
+    ///
+    /// **Drop-order (C5)**: declared immediately AFTER `resources`, so
+    /// `resources` still drops first; the NonSend slab drops next, both
+    /// before the entity / archetype subsystems.
+    ///
+    /// **SEND1 (SEND10 / CR-A)**: the slab is the type-erased pointer slab
+    /// (raw `*mut u8` + drop fn + `TypeId`, no inline `R` value) — exactly the
+    /// shape of the sibling `resources` slab, which is itself a `!Send`-
+    /// interior field already covered by the manual `unsafe impl Send/Sync for
+    /// EcsMaster`. Adding it therefore needs NO new `unsafe impl` and does not
+    /// weaken SEND1: the `!Send` payload is reachable only through the
+    /// `unsafe` `NonSendRes`/`NonSendResMut::get_param` accessors, whose SAFETY
+    /// contract holds only on the dispatcher (a NonSend system declares
+    /// universal access → `CpuExclusive` → solo when `running == 0`).
+    pub(crate) nonsend_resources: Option<Box<NonSendResources>>,
 
     /// Event dispatcher — dropped after `resources` and before the entity /
     /// archetype subsystems. Event buffers live in their own heap allocations
@@ -422,6 +444,8 @@ impl EcsMaster {
         Self {
             world_id: WorldId::mint(),
             resources: Resources::new(),
+            // Phase 4 — lazy: alloc-free until the first NonSend resource insert.
+            nonsend_resources: None,
             events,
             entity_master: EntityMaster::new(),
             archetype_master,
@@ -459,6 +483,8 @@ impl EcsMaster {
         Self {
             world_id: WorldId::mint(),
             resources: Resources::new(),
+            // Phase 4 — lazy: alloc-free until the first NonSend resource insert.
+            nonsend_resources: None,
             events,
             entity_master: EntityMaster::with_capacity(entity_capacity),
             archetype_master,
@@ -2636,6 +2662,94 @@ impl EcsMaster {
         self.resources.get_mut_ptr::<R>().map(|p| unsafe { &mut *p })
     }
 
+    // ── NonSend resources facade (Phase 4 Seam 2 — D6 / CR-A) ─────────────────
+
+    /// Inserts (or replaces) the world-global **non-`Send`** resource of type
+    /// `R`, lazily materialising the NonSend slab on first call (P5 — zero
+    /// allocation until then).
+    ///
+    /// Cold path. `R` is `!Send`, so this MUST be called on `R`'s owning
+    /// thread — the typical caller is the dispatcher during setup. The world
+    /// itself stays `Send + Sync` (the slab erases types to a raw pointer +
+    /// drop fn + `TypeId`; SEND10).
+    #[cold]
+    pub fn insert_non_send_resource<R: NonSendResource>(&mut self, value: R) {
+        self.nonsend_resources
+            .get_or_insert_with(|| Box::new(NonSendResources::new()))
+            .insert(value);
+    }
+
+    /// Removes the non-`Send` resource of type `R`, returning it if present.
+    ///
+    /// Cold path; runs on `R`'s owning thread (the returned `R` is `!Send`).
+    /// Returns `None` if the NonSend slab was never materialised or the slot
+    /// is empty.
+    #[cold]
+    pub fn remove_non_send_resource<R: NonSendResource>(&mut self) -> Option<R> {
+        self.nonsend_resources.as_mut()?.remove::<R>()
+    }
+
+    /// Returns `true` iff the world currently holds a non-`Send` resource of
+    /// type `R`.
+    #[inline]
+    pub fn contains_non_send_resource<R: NonSendResource>(&self) -> bool {
+        self.nonsend_resources
+            .as_ref()
+            .is_some_and(|slab| slab.contains::<R>())
+    }
+
+    /// Returns a shared reference to the non-`Send` resource of type `R`.
+    ///
+    /// # Panics
+    /// Panics if no non-`Send` resource of type `R` has been inserted. Use
+    /// [`try_non_send_resource`](Self::try_non_send_resource) for the
+    /// non-panicking variant.
+    #[inline]
+    pub fn non_send_resource<R: NonSendResource>(&self) -> &R {
+        match self.try_non_send_resource::<R>() {
+            Some(r) => r,
+            None => missing_non_send_resource_panic::<R>(),
+        }
+    }
+
+    /// Returns an exclusive reference to the non-`Send` resource of type `R`.
+    ///
+    /// # Panics
+    /// Panics if no non-`Send` resource of type `R` has been inserted. Use
+    /// [`try_non_send_resource_mut`](Self::try_non_send_resource_mut) for the
+    /// non-panicking variant.
+    #[inline]
+    pub fn non_send_resource_mut<R: NonSendResource>(&mut self) -> &mut R {
+        match self.try_non_send_resource_mut::<R>() {
+            Some(r) => r,
+            None => missing_non_send_resource_panic::<R>(),
+        }
+    }
+
+    /// Returns a shared reference to the non-`Send` resource of type `R`, or
+    /// `None` if it has not been inserted. Non-panicking counterpart of
+    /// [`non_send_resource`](Self::non_send_resource).
+    #[inline]
+    pub fn try_non_send_resource<R: NonSendResource>(&self) -> Option<&R> {
+        let slab = self.nonsend_resources.as_ref()?;
+        // SAFETY (N2): `get_ptr` returns `Some` only when the slot is
+        //   populated and the bytes form a valid `R` (the id is type-bound to
+        //   `R` inside the slab); the `&self` borrow bounds the lifetime. `R`
+        //   is `!Send`, but the direct-API caller is on the owning thread.
+        slab.get_ptr::<R>().map(|p| unsafe { &*p })
+    }
+
+    /// Returns an exclusive reference to the non-`Send` resource of type `R`,
+    /// or `None` if it has not been inserted. Non-panicking counterpart of
+    /// [`non_send_resource_mut`](Self::non_send_resource_mut).
+    #[inline]
+    pub fn try_non_send_resource_mut<R: NonSendResource>(&mut self) -> Option<&mut R> {
+        let slab = self.nonsend_resources.as_mut()?;
+        // SAFETY (N2): same as `try_non_send_resource`; `&mut self` gives
+        //   exclusive access for the returned borrow.
+        slab.get_mut_ptr::<R>().map(|p| unsafe { &mut *p })
+    }
+
     // ── Phase 17: State facade ──────────────────────────────────────────────
 
     /// Inserts the three resources that back state type `S` — `State<S> =
@@ -3328,6 +3442,19 @@ fn missing_resource_panic_facade<R: Resource>() -> ! {
     );
 }
 
+/// Cold-path panic helper for [`EcsMaster::non_send_resource`] /
+/// [`EcsMaster::non_send_resource_mut`] (Phase 4 Seam 2). Mirrors
+/// [`missing_resource_panic_facade`] for the NonSend slab.
+#[cold]
+#[inline(never)]
+fn missing_non_send_resource_panic<R: NonSendResource>() -> ! {
+    let name = std::any::type_name::<R>();
+    panic!(
+        "NonSend resource `{name}` not registered. \
+         Call `EcsMaster::insert_non_send_resource::<{name}>(...)` first."
+    );
+}
+
 /// Cold-path panic helper for [`EcsMaster::register_component_hooks`] when the
 /// release-level staleness gate finds `C` already placed in an archetype (plan
 /// §6.4 / Q-A5 / W3; Phase 21 H1 — the gate is process-global across all
@@ -3392,6 +3519,19 @@ impl Default for EcsMaster {
 //     `EcsMaster::insert_resource`, etc.) inherit the borrow-checker
 //     enforcement; no scheduler invariant applies because no worker is in
 //     flight at the language level.
+//   - SEND10 (Phase 4 Seam 2 / CR-A): `nonsend_resources`
+//     (`Option<Box<NonSendResources>>`) is the type-erased pointer slab — raw
+//     `*mut u8` data ptr + drop fn + `TypeId`, never an inline `R` value —
+//     exactly the shape of the sibling `resources` slab whose `!Send`
+//     raw-pointer interior this manual impl already covers. It therefore adds
+//     NO new `!Send` value reachable by a worker cell: its `!Send` payload is
+//     touched EXCLUSIVELY on the dispatcher thread in the apply window, routed
+//     by `runs_on_dispatcher()` — every NonSend `SystemParam` declares
+//     universal access (CR-B) → `SystemKind::CpuExclusive` → runs solo when
+//     `running == 0`. The slab is reachable (the field is `Send` by erasure)
+//     but the value needs an `unsafe` accessor (`NonSendRes`/`NonSendResMut::
+//     get_param` via `UnsafeEcsCell::nonsend_resources[_mut]`) whose SAFETY
+//     contract holds only on-dispatcher. SEND1 is unchanged.
 unsafe impl Send for EcsMaster {}
 unsafe impl Sync for EcsMaster {}
 

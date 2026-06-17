@@ -204,8 +204,10 @@ impl Schedule {
     ///   (Phase 21 world-binding gate).
     /// * Re-raises the first panic observed by any worker (TPN9 / SCH11)
     ///   on the dispatcher thread, surfaced through `Scope::Drop`.
-    /// * `debug_assert!`s `SystemBox::is_exclusive == access().is_universal()`
-    ///   for every system (plan §13.6 SCH15).
+    /// * `debug_assert!`s the SCH15 equality `(SystemBox::kind ==
+    ///   CpuExclusive) == access().is_universal()` for every CPU system
+    ///   (plan §13.6 SCH15 / Phase 4 CR-B); `GpuCompute` is the marker-set
+    ///   carve-out excluded from the equality.
     ///
     /// [`Scope::spawn`]: boyko_threadpool::Scope::spawn
     /// [`ScheduleBuilder::build`]: super::schedule_builder::ScheduleBuilder::build
@@ -222,15 +224,34 @@ impl Schedule {
             schedule_world_mismatch_panic(self.world_id, world.world_id());
         }
 
-        // SCH15 (Round 2 C9 / OQ-4) — confirm the build-time cache still
-        // matches the system's declared access. A future refactor that
-        // mutates `Access` after build would desync; catching it here is
-        // load-bearing for the exclusive-system gate inside the loop.
+        // SCH15 (Round 2 C9 / OQ-4 / Phase 4 CR-B) — confirm the build-time
+        // `kind` cache still matches the system's declared access. A future
+        // refactor that mutates `Access` after build would desync; catching
+        // it here is load-bearing for the dispatcher-only gate inside the
+        // loop.
+        //
+        // CR-B form: the invariant stays an EQUALITY on the CpuExclusive
+        // axis — `(kind == CpuExclusive) <==> access().is_universal()` — for
+        // every CPU system. `GpuCompute` is the one marker-set carve-out
+        // that carries NO access constraint (Phase-5-scheduled), so it is
+        // excluded from the equality (a GpuCompute system may declare any
+        // access). Excluding it is sound because the resolution at
+        // `ScheduleBuilder::build` sets `GpuCompute` BEFORE the universal
+        // check, so a `GpuCompute` `kind` can never be a desynced
+        // `CpuExclusive`.
         debug_assert!(
-            self.systems
-                .iter()
-                .all(|sb| sb.is_exclusive == sb.system.access().is_universal()),
-            "invariant SCH15: SystemBox::is_exclusive desynced from access().is_universal()"
+            self.systems.iter().all(|sb| {
+                use crate::ecs::core::system::system_kind::SystemKind;
+                if sb.kind == SystemKind::GpuCompute {
+                    // Marker carve-out: no access constraint.
+                    true
+                } else {
+                    (sb.kind == SystemKind::CpuExclusive)
+                        == sb.system.access().is_universal()
+                }
+            }),
+            "invariant SCH15: SystemBox::kind desynced from access().is_universal() \
+             on the CpuExclusive axis"
         );
 
         self.executor_scratch.reset_for_frame(&self.conflict_graph);
@@ -950,11 +971,12 @@ impl Schedule {
                 continue;
             }
 
-            if self.systems[i].is_exclusive {
-                // EXC2: exclusive systems require `running == 0` at
-                // dispatch time. If anything is running we defer to the
-                // next round (the apply window will drain and the next
-                // call to this function will reconsider).
+            if self.systems[i].kind.runs_on_dispatcher() {
+                // EXC2: dispatcher-only systems (CpuExclusive AND Phase-4
+                // GpuCompute) require `running == 0` at dispatch time. If
+                // anything is running we defer to the next round (the apply
+                // window will drain and the next call to this function will
+                // reconsider).
                 if running_count > 0 {
                     continue;
                 }
@@ -1499,14 +1521,15 @@ mod tests {
                 log_cl.lock().unwrap().push(2);
             };
             let mut sys = ExclusiveFunctionSystem::new(body);
-            // Pre-initialise so SystemBox::new caches is_exclusive=true.
+            // Pre-initialise so SystemBox::new resolves CpuExclusive.
             let mut world_pre = EcsMaster::new();
             sys.initialize(&mut world_pre);
             let boxed: Box<dyn System<Out = ()>> = Box::new(sys);
             let system_box = SystemBox::new(boxed);
-            assert!(
-                system_box.is_exclusive,
-                "ExclusiveFunctionSystem must populate is_exclusive=true"
+            assert_eq!(
+                system_box.kind,
+                crate::ecs::core::system::system_kind::SystemKind::CpuExclusive,
+                "ExclusiveFunctionSystem must resolve SystemKind::CpuExclusive"
             );
             builder
                 .descriptors

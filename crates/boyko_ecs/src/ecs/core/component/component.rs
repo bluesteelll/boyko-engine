@@ -1,7 +1,7 @@
 use std::any::TypeId;
 use crate::ecs::core::component::component_registry::{
-    CloneFn, Cloneability, DeserializeFn, LoadMapEntitiesFn, RequiredDirectEntry, Serializability,
-    SerializeFn,
+    CloneFn, Cloneability, DeserializeFn, LoadMapEntitiesFn, RequiredDirectEntry, ResidencyKind,
+    Serializability, SerializeFn,
 };
 use crate::ecs::core::component::hooks::ComponentHooks;
 use crate::ecs::identifiers::primitives::ComponentId;
@@ -63,6 +63,22 @@ pub trait Component: 'static + Sized {
     /// lie (the Phase-22 D1 "compile-but-lie" lesson). A backward-compatible
     /// widening — purely a compile-time const, zero ABI break, zero runtime cost.
     const STORAGE_IS_BITSET: bool = false;
+
+    /// Phase 4 Seam 1 (D1) — compile-time residency class.
+    /// [`ResidencyKind::Cpu`] by default (host-memory `ComponentPool` storage,
+    /// the only backend before Phase 4), so EVERY existing `Component` impl keeps
+    /// the default and pays zero — a CPU-only world never stamps `GPU_RESIDENT`.
+    ///
+    /// A `boyko_render` device-column type overrides it to
+    /// [`ResidencyKind::Gpu`] (the archetype is stamped `GPU_RESIDENT` at mint);
+    /// a host-pinned-for-life type overrides to [`ResidencyKind::CpuPinned`]. A
+    /// signature mixing `Gpu` and `CpuPinned` is rejected at archetype mint.
+    ///
+    /// Read once at registration by the derive-emitted `install_residency_class`
+    /// (const-gated: a `Cpu` const const-folds the call to a no-op). A
+    /// backward-compatible widening — purely a compile-time const, zero ABI
+    /// break, zero runtime cost on the hot path.
+    const RESIDENCY: ResidencyKind = ResidencyKind::Cpu;
 
     /// Required components (Feature 1) — compile-time elision flag. `false` by
     /// default, so components without a `#[require(...)]` attribute pay zero.

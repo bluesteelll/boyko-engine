@@ -45,6 +45,7 @@ use crate::ecs::core::state::states::States;
 use crate::ecs::core::state::{StateEntry, apply_state_transition};
 use crate::ecs::core::system::into_system::IntoSystem;
 use crate::ecs::core::system::system::System;
+use crate::ecs::core::system::system_kind::SystemKind;
 
 /// Build-time soft cap on the expanded edge count (§2.5 / §13-P4). This is
 /// a `debug_assert!`-only early-warning rail — it vanishes in release; the
@@ -359,14 +360,26 @@ impl ScheduleBuilder {
         // active (ALLOC2).
         for d in &mut descriptors {
             d.system_box.system.initialize(world);
-            // SCH15 / Round 2 C9 invariant: refresh the cached
-            // `is_exclusive` flag now that `Access` is filled in.
-            // `SystemBox::new` recorded the post-construction value
-            // (often all-zero before init); `initialize` may have
-            // mutated `meta.access`. We re-read once here to freeze
-            // the truth at the same point the executor will observe
-            // it.
-            d.system_box.is_exclusive = d.system_box.system.access().is_universal();
+            // SCH15 / Round 2 C9 / Phase 4 D5 + CR-B: refresh the cached
+            // `kind` now that `Access` is filled in. `SystemBox::new`
+            // recorded the post-construction value (often `CpuConcurrent`
+            // before init); `initialize` may have mutated `meta.access`.
+            // We re-resolve once here to freeze the truth at the same point
+            // the executor will observe it.
+            //
+            // Resolution (CR-B): GpuCompute-marker FIRST → else
+            // `is_universal()` ⇒ `CpuExclusive` → else `CpuConcurrent`.
+            // Byte-identical to the previous `is_exclusive` derivation for
+            // every non-GPU system (`is_gpu` defaults false). `GpuCompute`
+            // carries NO access constraint — it is set by the explicit
+            // marker, not derived from access.
+            d.system_box.kind = if d.is_gpu {
+                SystemKind::GpuCompute
+            } else if d.system_box.system.access().is_universal() {
+                SystemKind::CpuExclusive
+            } else {
+                SystemKind::CpuConcurrent
+            };
 
             // Phase 16 (§2.5) — initialize this system's own conditions in the
             // SAME world pass, so each condition's `Access` + `Local` state are
@@ -1453,6 +1466,76 @@ mod tests {
         let schedule = builder.build(&mut world);
         assert_eq!(init.load(Ordering::Relaxed), 3);
         assert_eq!(schedule.len(), 3);
+    }
+
+    /// Phase 4 D5 + CR-B — `SystemKind` resolution at `build`:
+    ///   * a non-universal CPU system resolves `CpuConcurrent`;
+    ///   * a universal-access system resolves `CpuExclusive`;
+    ///   * the `SystemDescriptor::is_gpu` marker resolves `GpuCompute`
+    ///     regardless of access (marker wins first).
+    ///
+    /// The resulting `kind` is read directly off the built schedule's
+    /// `systems` slice (post-topological-order). With no `.before/.after`
+    /// edges the topo sort preserves insertion order, so the indices line up.
+    #[test]
+    fn build_resolves_system_kind() {
+        let pool = fresh_pool();
+        let mut builder = ScheduleBuilder::new(pool);
+        let init = Arc::new(AtomicUsize::new(0));
+
+        // [0] plain CPU system (empty access) → CpuConcurrent.
+        let _concurrent = add_counting(&mut builder, "concurrent", Arc::clone(&init));
+
+        // [1] universal-access system → CpuExclusive.
+        {
+            let mut meta = SystemMeta::for_testing("universal");
+            meta.access = Access::universal();
+            let sys = CountingSystem {
+                meta,
+                init_count: Arc::clone(&init),
+            };
+            let boxed: Box<dyn System<Out = ()>> = Box::new(sys);
+            builder
+                .descriptors
+                .push(SystemDescriptor::new(SystemBox::new(boxed)));
+        }
+
+        // [2] GPU-marked system with EMPTY access → GpuCompute (the marker
+        // wins before the universal check; GpuCompute carries no access
+        // constraint).
+        {
+            let sys = CountingSystem {
+                meta: SystemMeta::for_testing("gpu"),
+                init_count: Arc::clone(&init),
+            };
+            let boxed: Box<dyn System<Out = ()>> = Box::new(sys);
+            let mut d = SystemDescriptor::new(SystemBox::new(boxed));
+            d.is_gpu = true;
+            builder.descriptors.push(d);
+        }
+
+        let mut world = EcsMaster::new();
+        let schedule = builder.build(&mut world);
+
+        assert_eq!(schedule.systems.len(), 3);
+        assert_eq!(
+            schedule.systems[0].kind,
+            SystemKind::CpuConcurrent,
+            "non-universal CPU system must resolve CpuConcurrent"
+        );
+        assert!(!schedule.systems[0].kind.runs_on_dispatcher());
+        assert_eq!(
+            schedule.systems[1].kind,
+            SystemKind::CpuExclusive,
+            "universal-access system must resolve CpuExclusive"
+        );
+        assert!(schedule.systems[1].kind.runs_on_dispatcher());
+        assert_eq!(
+            schedule.systems[2].kind,
+            SystemKind::GpuCompute,
+            "is_gpu marker must resolve GpuCompute even with empty access"
+        );
+        assert!(schedule.systems[2].kind.runs_on_dispatcher());
     }
 
     /// `.before(other)` + `.after(other)` on the same pair forms a cycle

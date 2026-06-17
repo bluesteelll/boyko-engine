@@ -37,8 +37,10 @@ use crate::ecs::core::schedule::system_set::SystemSetId;
 /// final `Schedule` on build, so it sits first to keep the move cheap on
 /// the hot `build` path; the other two are dropped in place.
 pub(crate) struct SystemDescriptor {
-    /// Erased system body + cached `is_exclusive` flag + name. Moved
-    /// out by `build` into the final `Schedule::systems` slice.
+    /// Erased system body + cached [`SystemKind`] + name. Moved out by
+    /// `build` into the final `Schedule::systems` slice.
+    ///
+    /// [`SystemKind`]: crate::ecs::core::system::system_kind::SystemKind
     pub(crate) system_box: SystemBox,
 
     /// Pre-build ordering edges collected by `SystemConfig::before` /
@@ -58,6 +60,14 @@ pub(crate) struct SystemDescriptor {
     /// fold to an AND (eager, never short-circuited — see `PHASE-16-PLAN.md`
     /// §6). Moved out into `Schedule::system_conditions` at build (§2.5).
     pub(crate) conditions: Vec<BoolSystem>,
+
+    /// Phase 4 D5 / CR-B — GPU-compute marker. `false` for every existing
+    /// system (zero change), so the `SystemKind` resolution at
+    /// `ScheduleBuilder::build` stays byte-identical to the previous
+    /// `is_exclusive` derivation. When `true`, the descriptor resolves
+    /// [`SystemKind::GpuCompute`](crate::ecs::core::system::system_kind::SystemKind::GpuCompute)
+    /// — a marker carve-out that is NOT derived from access (Phase-5-set).
+    pub(crate) is_gpu: bool,
 }
 
 impl SystemDescriptor {
@@ -70,6 +80,8 @@ impl SystemDescriptor {
             ordering_hints: Vec::new(),
             sets: Vec::new(),
             conditions: Vec::new(),
+            // Phase 4 D5 — default false: a plain `add_system` is never GPU.
+            is_gpu: false,
         }
     }
 }

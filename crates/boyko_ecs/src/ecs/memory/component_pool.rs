@@ -10,6 +10,8 @@ use crate::ecs::constants::{
 use crate::ecs::core::change_detection::Tick;
 use crate::ecs::core::component::component::Component;
 use crate::ecs::core::component::component_registry::{self, DropFn};
+#[cfg(not(miri))]
+use crate::ecs::memory::device_column::DeviceColumn;
 use crate::ecs::memory::vm::VmReservation;
 
 // Phase X.I D1: the tick sub-regions are sized at `reserve_rows * 4` bytes —
@@ -17,6 +19,105 @@ use crate::ecs::memory::vm::VmReservation;
 // the literal 4) can never drift from the real slot type.
 const _: () = assert!(std::mem::size_of::<UnsafeCell<Tick>>() == 4);
 const _: () = assert!(std::mem::align_of::<UnsafeCell<Tick>>() == 4);
+
+// Phase 4 Seam 3 (IM-1 / IM-6): the `vm: VmReservation` -> `backing:
+// PoolBacking` swap must add ZERO bytes. `PoolBacking::Device(Box<DeviceColumn>)`
+// is 8 B (a single `Box`), <= `VmReservation`'s 16 B (host) — so on the host
+// build `PoolBacking` stays 16 B (same as `vm`), and `ComponentPool` stays at
+// its pre-Phase-4 128 B. Under `#[cfg(miri)]` the `Device` arm is compiled out,
+// so `PoolBacking` is a single-variant enum niche-optimized to `VmReservation`'s
+// exact layout (24 B + the fallback `Layout` field = 32 B for the field), and
+// `ComponentPool` stays at its pre-Phase-4 144 B (P7). Two pins because the
+// fallback `VmReservation` carries an extra `Layout` field.
+#[cfg(not(miri))]
+const _: () = assert!(
+    std::mem::size_of::<ComponentPool>() == 128,
+    "Phase 4 IM-1: the vm->backing swap must NOT grow ComponentPool (host = 128 B)"
+);
+#[cfg(miri)]
+const _: () = assert!(
+    std::mem::size_of::<ComponentPool>() == 144,
+    "Phase 4 IM-1: the vm->backing swap must NOT grow ComponentPool (miri = 144 B)"
+);
+
+/// Phase 4 Seam 3 (D3, CR-C) — where a [`ComponentPool`]'s rows physically live.
+///
+/// The Host arm wraps the pre-Phase-4 [`VmReservation`] verbatim (one
+/// virtual-address reservation, lazy-committed); the Device arm wraps a boxed
+/// [`DeviceColumn`] (a graphics-pure handle + device-side row counters). The
+/// three write-once base pointers (`buffer` / `added_base` / `changed_base`)
+/// stay TOP-LEVEL `ComponentPool` fields derived from the Host arm in `new`, so
+/// the hot [`ComponentPool::row_ptr`] reads `self.buffer` and NEVER matches on
+/// `backing` — byte-identical codegen (the 0%-gate, D4).
+///
+/// `Device` is `#[cfg(not(miri))]` (Phase 4 mints no device pool; Miri cannot
+/// run the RHI syscalls), so under Miri this is a single-variant enum
+/// niche-optimized to `VmReservation`'s exact layout (P7). The Device payload is
+/// boxed (8 B ≤ the 16-B Host arm) so the enum stays ≤ 16 B (IM-1).
+pub(crate) enum PoolBacking {
+    /// Host-memory backing: the pool's own virtual-address reservation. The
+    /// ONLY arm `new` constructs in Phase 4; its `Drop` releases the
+    /// reservation (declared last in `ComponentPool`, same slot as the old
+    /// `vm`).
+    Host(VmReservation),
+    /// Device-memory backing (Phase 5 fill). Boxed so `PoolBacking` stays
+    /// ≤ 16 B; Phase 4 never constructs it (the residency table is empty until a
+    /// GPU component registers, and no production path mints a device pool), so
+    /// `#[allow(dead_code)]` until Phase 5 wires the RHI mint. Exercised in tests
+    /// via `ComponentPool::make_device_backed_for_test`.
+    #[cfg(not(miri))]
+    #[allow(dead_code)]
+    Device(Box<DeviceColumn>),
+}
+
+impl PoolBacking {
+    /// Returns `true` iff this is the Device arm (Phase 4: always `false` — no
+    /// device pool is minted). Used by the `Drop` CR-C debug-assert.
+    #[inline]
+    pub(crate) fn is_device(&self) -> bool {
+        match self {
+            PoolBacking::Host(_) => false,
+            #[cfg(not(miri))]
+            PoolBacking::Device(_) => true,
+        }
+    }
+
+    /// Returns `&mut VmReservation` for the Host arm — the grow funnels' commit
+    /// accessor (IM-3).
+    ///
+    /// # Panics
+    ///
+    /// `unreachable!` on the Device arm: Phase 4 mints no device pool, and growth
+    /// is Host-only. Phase 5 replaces the Device arm of `grow_rows` with the RHI
+    /// realloc+copy+fence path BEFORE any device pool can exist, so this is
+    /// genuinely unreachable until then.
+    #[cfg(not(miri))]
+    #[inline]
+    pub(crate) fn host_vm_mut(&mut self) -> &mut VmReservation {
+        match self {
+            PoolBacking::Host(vm) => vm,
+            PoolBacking::Device(_) => Self::grow_is_host_only(),
+        }
+    }
+
+    /// Single-variant Miri build: the Device arm is compiled out, so this is an
+    /// irrefutable bind with no panic arm.
+    #[cfg(miri)]
+    #[inline]
+    pub(crate) fn host_vm_mut(&mut self) -> &mut VmReservation {
+        let PoolBacking::Host(vm) = self;
+        vm
+    }
+
+    /// The cold, never-taken "growth is Host-only in Phase 4" reject arm,
+    /// factored out so `host_vm_mut` stays a one-line match (IM-3).
+    #[cfg(not(miri))]
+    #[cold]
+    #[inline(never)]
+    fn grow_is_host_only() -> ! {
+        unreachable!("Phase 4 mints no Device pool; ComponentPool grow is Host-only")
+    }
+}
 
 /// Pool of components of a specific type, stored as a dense byte buffer.
 ///
@@ -103,13 +204,15 @@ pub struct ComponentPool {
     /// Cached TypeId for debug-only typed-API validation.
     component_type_id: TypeId,
 
-    /// The pool's single reservation. Declared LAST: `Drop::drop`'s body
-    /// (the `drop_fn` loop over rows `[0, len)`) runs before field drops,
-    /// so the reservation is released strictly after its last use
-    /// (release-after-use; M-001 per-arm deallocator carried by
-    /// `VmReservation`, V-DROP releases partially committed reservations
-    /// in full).
-    vm: VmReservation,
+    /// The pool's backing storage (Phase 4 Seam 3 — was `vm: VmReservation`).
+    /// Declared LAST: `Drop::drop`'s body (the `drop_fn` loop over rows
+    /// `[0, len)`) runs before field drops, so the backing is released strictly
+    /// after its last use (release-after-use; M-001 per-arm deallocator carried
+    /// by `VmReservation` inside the `Host` arm, V-DROP releases partially
+    /// committed reservations in full). For a Device pool (Phase 5) the Box's
+    /// drop releases the device column; per CR-C `len == 0` so the `drop_fn`
+    /// loop is a no-op.
+    backing: PoolBacking,
 }
 
 impl ComponentPool {
@@ -283,7 +386,12 @@ impl ComponentPool {
             component_id,
             drop_fn,
             component_type_id,
-            vm,
+            // Phase 4 Seam 3: `new` ALWAYS constructs the Host arm (Phase 4
+            // mints no device pool). The three base pointers above were derived
+            // from `vm.base()` before this move, so wrapping it here changes
+            // nothing about `row_ptr` (which reads `self.buffer`, never
+            // `self.backing`).
+            backing: PoolBacking::Host(vm),
         }
     }
 
@@ -369,7 +477,9 @@ impl ComponentPool {
         // new_d > data_committed strictly (the vm.rs `new > old`
         // debug_assert is unreachable from this caller — GROW1-XI 0b).
         let new_d = (self.data_committed + step).min(layout.data_len);
-        self.vm.commit(self.data_committed, new_d); // panics only on genuine OS OOM
+        // IM-3: grow is Host-only in Phase 4 (`host_vm_mut` unreachable!s on a
+        // Device pool, which is never minted). Panics only on genuine OS OOM.
+        self.backing.host_vm_mut().commit(self.data_committed, new_d);
 
         // GROW1-XI proofs 3 + 4: new_d >= needed >= n*stride =>
         // floor(new_d/stride) >= n; the min(reserve_rows) is LOAD-BEARING —
@@ -389,11 +499,13 @@ impl ComponentPool {
             "GROW1-XI step 5: tick commit overruns the tick sub-region"
         );
         if t_new > self.ticks_committed {
-            self.vm.commit(
+            // IM-3: Host-only grow (see the data commit above).
+            let vm = self.backing.host_vm_mut();
+            vm.commit(
                 layout.added_off + self.ticks_committed,
                 layout.added_off + t_new,
             );
-            self.vm.commit(
+            vm.commit(
                 layout.changed_off + self.ticks_committed,
                 layout.changed_off + t_new,
             );
@@ -493,11 +605,13 @@ impl ComponentPool {
         // plus granule-multiple frontiers), strictly growing, and in-bounds
         // of the reservation (`changed_off + tick_len == os_len`). Panics
         // only on genuine OS OOM (same contract as the stride > 0 path).
-        self.vm.commit(
+        // IM-3: Host-only grow (a ZST device pool is never minted in Phase 4).
+        let vm = self.backing.host_vm_mut();
+        vm.commit(
             layout.added_off + self.ticks_committed,
             layout.added_off + t_new,
         );
-        self.vm.commit(
+        vm.commit(
             layout.changed_off + self.ticks_committed,
             layout.changed_off + t_new,
         );
@@ -1630,6 +1744,24 @@ impl ComponentPool {
             }
         }
     }
+
+    /// Test-only: swaps a freshly-constructed (empty, `len == 0`) Host pool's
+    /// backing to a stub `Device` arm (Phase 4 Seam 3 CR-C coverage).
+    ///
+    /// Phase 4 mints no device pool through any production path, so this exists
+    /// only to exercise the `PoolBacking::Device` arm + the CR-C `Drop` contract
+    /// in tests. The caller MUST hold `self.len == 0` (asserted) — overwriting
+    /// `backing` drops the old Host `VmReservation` (clean: an empty pool owns
+    /// no live rows), and the device pool then keeps Host `len == 0` for life.
+    #[cfg(all(test, not(miri)))]
+    pub(crate) fn make_device_backed_for_test(&mut self, handle: u64) {
+        assert_eq!(
+            self.len, 0,
+            "make_device_backed_for_test: only an empty pool may switch to Device backing (CR-C)"
+        );
+        use crate::ecs::memory::device_column::{DeviceColumn, DeviceColumnHandle};
+        self.backing = PoolBacking::Device(Box::new(DeviceColumn::new(DeviceColumnHandle(handle))));
+    }
 }
 
 // SAFETY (SEND10 — Phase 9 §2.4, §9.1, §11.3 + Phase 10 STORE3 / Round 2 C3
@@ -1669,6 +1801,17 @@ impl ComponentPool {
 //     from `par_iter` chunks on the same cache line are sound (Round 2 C3
 //     / Rustonomicon §"Data Races and Race Conditions"). The MESI
 //     cache-line ping-pong is a perf cost, not UB.
+//   - Phase 4 Seam 3 (IM-5): the `backing: PoolBacking` field is `Send + Sync`
+//     in both arms. `Host(VmReservation)` carries the same `NonNull<u8>` +
+//     `usize` the old `vm` field did (the discipline above is unchanged).
+//     `Device(Box<DeviceColumn>)` carries a `Copy` POD `u64`
+//     `DeviceColumnHandle` + two `usize` counters: the handle is never a
+//     pointer the CPU dereferences, the device backing is never touched
+//     concurrently by CPU code (per D4 the CPU `Query` skips GPU-resident
+//     archetypes at collection time, so `row_ptr` on a device pool is never
+//     reached), and a device pool keeps Host `len == 0` (CR-C) so there is no
+//     Host-side aliasing. `DeviceColumn: Send + Sync` is independently witnessed
+//     by `device_column::_assert`.
 unsafe impl Send for ComponentPool {}
 unsafe impl Sync for ComponentPool {}
 
@@ -1688,6 +1831,17 @@ impl Drop for ComponentPool {
     //   - benefit: marginal — a user who violates the contract has already
     //     exhibited a logic bug.
     fn drop(&mut self) {
+        // CR-C: a Device pool keeps Host `self.len == 0` for life — the device
+        // row count lives in `PoolBacking::Device(..).device_len`. So the
+        // `drop_fn` loop over `[0, len)` below is a no-op for a device pool and
+        // never `drop_in_place`s over uninitialized / device-resident bytes.
+        // Device teardown is `DeviceColumn::drop` (Phase 5: RHI release),
+        // reached via the boxed `Device` arm's field drop, NOT the CPU `drop_fn`.
+        debug_assert!(
+            !self.backing.is_device() || self.len == 0,
+            "CR-C: a Device ComponentPool must keep Host len == 0 (len = {})",
+            self.len
+        );
         if let Some(drop_fn) = self.drop_fn {
             // SAFETY:
             // - Rows `[0, self.len)` are all live and initialized per the pool's
@@ -1710,11 +1864,13 @@ impl Drop for ComponentPool {
                 unsafe { drop_fn(self.row_ptr(row)) }
             }
         }
-        // The reservation itself is released by the `vm` field's Drop
-        // (declared LAST in the struct): this body runs BEFORE field drops,
-        // so release happens strictly after the last use. V-DROP releases
-        // partially committed reservations in full; M-001 per-arm
-        // deallocator lives inside `VmReservation`.
+        // The backing itself is released by the `backing` field's Drop
+        // (declared LAST in the struct): this body runs BEFORE field drops, so
+        // release happens strictly after the last use. For `Host` the
+        // `VmReservation` arm releases the reservation (V-DROP releases partially
+        // committed reservations in full; M-001 per-arm deallocator lives inside
+        // `VmReservation`); for `Device` (Phase 5) the boxed `DeviceColumn`'s
+        // drop releases the device column.
     }
 }
 
@@ -3208,6 +3364,77 @@ mod tests {
             (pool.ticks_committed, pool.committed_rows()),
             before,
             "rejected grow leaves the frontier untouched"
+        );
+    }
+
+    // ----- Phase 4 Seam 3: PoolBacking -----
+
+    /// A `PoolBacking::Host` pool round-trips add + `row_ptr` byte-identically
+    /// to the pre-Phase-4 behavior (the swap is a no-op for the Host arm).
+    #[test]
+    fn host_backing_round_trips_add_and_row_ptr() {
+        let mut pool = make_u64_pool(8);
+
+        let r0 = U64Pair { a: 1, b: 2 };
+        let r1 = U64Pair { a: 3, b: 4 };
+        let i0 = pool
+            .add(u64pair_bytes(&r0))
+            .expect("capacity 8 holds the first row");
+        let i1 = pool
+            .add(u64pair_bytes(&r1))
+            .expect("capacity 8 holds the second row");
+        assert_eq!((i0, i1), (0, 1), "dense row indices");
+
+        // Read back through the same row_ptr the hot path uses.
+        // SAFETY: rows 0 and 1 are live (just added) and < committed_rows; each
+        // slot holds a properly-aligned, initialized U64Pair.
+        let (v0, v1) = unsafe {
+            (
+                *pool.row_ptr(0).cast::<U64Pair>(),
+                *pool.row_ptr(1).cast::<U64Pair>(),
+            )
+        };
+        assert_eq!((v0, v1), (r0, r1), "Host backing round-trips the bytes");
+    }
+
+    /// CR-C: a `Device`-backed pool keeps Host `len == 0` for life, so its `Drop`
+    /// runs the CPU `drop_fn` ZERO times even for a `needs_drop` layout — device
+    /// teardown is the boxed `DeviceColumn`'s drop, never the CPU `drop_fn`.
+    #[cfg(not(miri))]
+    #[test]
+    fn device_pool_host_len_stays_zero_on_drop() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        component_registry::register_layout::<Dropper>(DROPPER_ID.0);
+        // A needs_drop layout: if the swap ever let the CPU drop_fn run over a
+        // device pool, the counter would tick.
+        let mut pool = ComponentPool::new(DROPPER_ID.0, 16);
+        assert_eq!(pool.len, 0, "fresh pool has no live rows");
+
+        // Switch the empty pool to the stub Device backing (CR-C: len == 0).
+        pool.make_device_backed_for_test(0xDEAD_BEEF);
+        assert!(pool.backing.is_device(), "backing switched to Device");
+        assert_eq!(pool.len, 0, "Device pool keeps Host len == 0 (CR-C)");
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        // We do NOT add any row through the Host path (a device pool's rows live
+        // device-side; Host len stays 0). Keep `counter` referenced so the test
+        // type is exercised; assert the drop_fn never fires.
+        let _probe = Dropper {
+            counter: Arc::clone(&counter),
+        };
+        assert_eq!(counter.load(Ordering::Relaxed), 0, "no drop before teardown");
+
+        drop(pool); // Device pool: drop_fn loop is a no-op (len == 0).
+        // `_probe` is still alive here; only its own scope-exit drop fires (==1),
+        // never the pool's drop_fn — prove the pool contributed ZERO drops.
+        drop(_probe);
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            1,
+            "only the local probe dropped (==1); the Device pool's CPU drop_fn \
+             ran 0 times (CR-C: Host len == 0)"
         );
     }
 }

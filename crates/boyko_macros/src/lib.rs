@@ -233,6 +233,16 @@ pub fn component_macro(input: TokenStream) -> TokenStream {
         )
     };
 
+    // Phase 4 Seam 1 (D1): the UNGATED residency install. One cold read of the
+    // `C::RESIDENCY` const per type per process (behind the `component_id()`
+    // `OnceLock`); `install_residency_class` self-gates on the default `Cpu`
+    // const, so a plain `#[derive(Component)]` short-circuits to a no-op (the
+    // 0%-gate). Always emitted — like `install_clone_fn`, not gated on a derive
+    // flag — so a hand-set `const RESIDENCY` (no attribute) is still installed.
+    let residency_install = quote! {
+        boyko_ecs::ecs::core::component::component_registry::install_residency_class::<Self>(raw);
+    };
+
     // Serialization S0 (plan §3.7): the UNGATED install calls in `component_id()`
     // (like `install_clone_fn`) — one cold `OnceLock::set` (the `SERIALIZE` table)
     // + one `Mutex` insert (the C1 `STABLE_NAME_INDEX`) per type per process, the
@@ -306,6 +316,7 @@ pub fn component_macro(input: TokenStream) -> TokenStream {
                     #storage_install
                     #require_install
                     #clone_install
+                    #residency_install
                     #serialize_install
                     boyko_ecs::ecs::identifiers::primitives::ComponentId(raw)
                 })

@@ -5,7 +5,9 @@ use crate::ecs::core::archetype::archetype_signature::ArchetypeSignature;
 use crate::ecs::core::change_detection::Tick;
 use crate::ecs::core::component::component_mask::ComponentMask;
 use crate::ecs::core::component::component_pool_bundle::ComponentPoolBundle;
-use crate::ecs::core::component::component_registry::{self, MAX_COMPONENTS, StorageKind};
+use crate::ecs::core::component::component_registry::{
+    self, MAX_COMPONENTS, ResidencyKind, StorageKind,
+};
 use crate::ecs::core::component::enable::enable_store::{EnableColumn, EnableStore};
 use crate::ecs::core::component::hooks::archetype_flags::ArchetypeFlags;
 use crate::ecs::error::{EcsError, EcsResult};
@@ -314,8 +316,30 @@ impl Archetype {
         // sibling `&mut C` data param on a bitset id is therefore structurally
         // impossible, which is what makes the Enable filter's no-op
         // `init_access` sound (Decision D8 / D1 inv 3).
+        //
+        // Phase 4 Seam 1/2 (D1/D2, IM-2): this is the single full-slice mint
+        // funnel (both `ArchetypeMaster` paths reach it). Fold the residency
+        // classification into the SAME walk — one extra cold `residency_class`
+        // load per id + a 2-bool fold, no new loop:
+        //   * per-component `GPU_RESIDENT` OR rides the hook-bit accumulator;
+        //   * the set-level `saw_gpu && saw_cpu_pinned` conflict is detected over
+        //     the full slice and rejected loudly AFTER the walk.
         let mut flags = ArchetypeFlags::empty();
+        let mut saw_gpu = false;
+        let mut saw_cpu_pinned = false;
         for &comp_id in component_ids {
+            // Residency is scanned for EVERY id in the signature, including a
+            // bitset tag (always `Cpu` — no `ComponentPool` — so it never trips
+            // the scan, but the read keeps the funnel honest if that ever
+            // changes).
+            match component_registry::residency_class(comp_id.0) {
+                ResidencyKind::Gpu => {
+                    saw_gpu = true;
+                    flags.insert(ArchetypeFlags::GPU_RESIDENT);
+                }
+                ResidencyKind::CpuPinned => saw_cpu_pinned = true,
+                ResidencyKind::Cpu => {}
+            }
             if component_registry::storage_kind(comp_id.0) == StorageKind::Bitset {
                 Self::debug_assert_bitset_premise(&archetype, comp_id);
                 continue;
@@ -323,6 +347,9 @@ impl Archetype {
             archetype.component_pools.add_pool(comp_id);
             archetype.refresh_column(comp_id);
             flags.insert_from_hooks(comp_id);
+        }
+        if saw_gpu && saw_cpu_pinned {
+            residency_conflict_panic(component_ids);
         }
         archetype.flags = flags;
 
@@ -396,6 +423,14 @@ impl Archetype {
         // component, so the accumulated OR over the whole component set is the
         // archetype's flag value.
         self.flags.insert_from_hooks(component_id);
+        // Phase 4 Seam 1 (D1, IM-2): PURE bit-stamp — OR `GPU_RESIDENT` if this
+        // single id is `Gpu`. This single-component path NEVER rejects: the
+        // set-level `saw_gpu && saw_cpu_pinned` conflict scan lives at the
+        // full-slice `create_by_ids` funnel (the slab signature is validated
+        // there). One cold `residency_class` load.
+        if component_registry::residency_class(component_id.0) == ResidencyKind::Gpu {
+            self.flags.insert(ArchetypeFlags::GPU_RESIDENT);
+        }
     }
 
     /// Debug-only tripwire for the EnableTag C1 premise (Decision D1 inv 3 /
@@ -1175,6 +1210,28 @@ impl Archetype {
     }
 }
 
+/// Phase 4 Seam 2 (D2): the loud archetype-mint rejection for a signature that
+/// mixes a [`ResidencyKind::Gpu`] component with a [`ResidencyKind::CpuPinned`]
+/// component.
+///
+/// `#[cold] #[inline(never)]`: this is the OFF-the-hot-path reject arm — keeping
+/// it out of line stops the diagnostic string-formatting from bloating the
+/// `create_by_ids` mint funnel's I-cache footprint. A **release-present** panic
+/// (NOT a `debug_assert`): a silently-built wrong-residency archetype would
+/// corrupt the CPU/GPU population partition (the readback trap, D2), so the
+/// check fires in every build. A default/unclassified `Cpu` component is always
+/// compatible with a `Gpu` signature, so only the `Gpu`+`CpuPinned` mix trips.
+#[cold]
+#[inline(never)]
+pub(crate) fn residency_conflict_panic(component_ids: &[ComponentId]) -> ! {
+    panic!(
+        "residency conflict at archetype mint: signature {:?} mixes a \
+         ResidencyKind::Gpu component with a ResidencyKind::CpuPinned component \
+         (a CpuPinned component must never become a device column)",
+        component_ids
+    );
+}
+
 // SAFETY (SEND10 — Phase 9 §2.4, §9.1):
 //
 // `Archetype` becomes `Send + Sync` under the Phase 9 contract:
@@ -1740,5 +1797,79 @@ mod tests {
             "Archetype size pin must match the const-assert tripwire"
         );
         assert_eq!(std::mem::offset_of!(Archetype, columns), 0, "columns must stay at offset 0");
+    }
+
+    // ----- Phase 4 Seam 1/2: residency stamp + conflict reject -----
+    //
+    // Fixed ids 330-339 reserved for these residency tests (disjoint from
+    // STEP4 320-322, COMP_A/B 400-401, C16 410-425). Each id is given a
+    // registered layout (so `create_by_ids` can `add_pool`) and a residency
+    // class via the `pub(crate)` `set_residency_class`. The `RESIDENCY_CLASS`
+    // table is a global write-once-per-id array, so these ids must not be
+    // reclassified to a different class elsewhere.
+    use crate::ecs::core::component::component_registry::ResidencyKind;
+
+    #[repr(C)]
+    struct ResComp(u32);
+
+    const RES_GPU_A: ComponentId = ComponentId(330);
+    const RES_GPU_B: ComponentId = ComponentId(331);
+    const RES_CPU_A: ComponentId = ComponentId(332);
+    const RES_CPU_B: ComponentId = ComponentId(333);
+    const RES_PINNED: ComponentId = ComponentId(334);
+
+    #[test]
+    fn create_by_ids_stamps_gpu_resident_when_a_gpu_component_present() {
+        component_registry::register_layout::<ResComp>(RES_GPU_A.0);
+        component_registry::register_layout::<ResComp>(RES_CPU_A.0);
+        component_registry::set_residency_class(RES_GPU_A.0, ResidencyKind::Gpu);
+        // RES_CPU_A stays at the default Cpu.
+
+        let arch = Archetype::create_by_ids(ArchetypeId(50), &[RES_GPU_A, RES_CPU_A]);
+        assert!(
+            arch.flags.is_gpu_resident(),
+            "a signature with ≥1 Gpu component must stamp GPU_RESIDENT"
+        );
+    }
+
+    #[test]
+    fn create_by_ids_cpu_only_never_stamps_gpu_resident() {
+        // Property: a Cpu-only signature NEVER carries GPU_RESIDENT.
+        component_registry::register_layout::<ResComp>(RES_CPU_B.0);
+        // RES_CPU_A registered above (or here, idempotent register_layout).
+        component_registry::register_layout::<ResComp>(RES_CPU_A.0);
+
+        let arch = Archetype::create_by_ids(ArchetypeId(51), &[RES_CPU_A, RES_CPU_B]);
+        assert!(
+            !arch.flags.is_gpu_resident(),
+            "a Cpu-only signature must never stamp GPU_RESIDENT (the 0%-gate)"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "residency conflict")]
+    fn create_by_ids_mixed_gpu_and_cpu_pinned_panics() {
+        component_registry::register_layout::<ResComp>(RES_GPU_B.0);
+        component_registry::register_layout::<ResComp>(RES_PINNED.0);
+        component_registry::set_residency_class(RES_GPU_B.0, ResidencyKind::Gpu);
+        component_registry::set_residency_class(RES_PINNED.0, ResidencyKind::CpuPinned);
+
+        // A Gpu + CpuPinned mix is a residency conflict — loud release panic.
+        let _ = Archetype::create_by_ids(ArchetypeId(52), &[RES_GPU_B, RES_PINNED]);
+    }
+
+    #[test]
+    fn register_component_inplace_stamps_gpu_resident() {
+        component_registry::register_layout::<ResComp>(RES_GPU_A.0);
+        component_registry::set_residency_class(RES_GPU_A.0, ResidencyKind::Gpu);
+
+        // Build an empty archetype, then stamp via the single-component path.
+        let mut arch = Archetype::create_by_ids(ArchetypeId(53), &[]);
+        assert!(!arch.flags.is_gpu_resident(), "empty archetype is not GPU-resident");
+        arch.register_component_inplace(RES_GPU_A);
+        assert!(
+            arch.flags.is_gpu_resident(),
+            "register_component_inplace must OR in GPU_RESIDENT for a Gpu id"
+        );
     }
 }

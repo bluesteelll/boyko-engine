@@ -6,7 +6,7 @@
 //! L1i footprint (principle 3 / I-cache discipline).
 
 use crate::ecs::core::events::event::Event;
-use crate::ecs::core::resources::resource::Resource;
+use crate::ecs::core::resources::resource::{NonSendResource, Resource};
 use crate::ecs::core::system::filtered_access_set::AccessConflict;
 
 /// Cold-path diagnostic when `Res<R>` / `ResMut<R>::get_param` is invoked
@@ -22,6 +22,20 @@ pub(crate) fn missing_resource_panic<R: Resource>() -> ! {
          Call `EcsMaster::insert_resource::<{}>(...)` before running systems that read it.",
         R::debug_type_name(),
         R::debug_type_name()
+    );
+}
+
+/// Cold-path diagnostic when `NonSendRes<R>` / `NonSendResMut<R>::get_param`
+/// is invoked against a NonSend slab with no live entry for `R` (Phase 4
+/// Seam 2). Mirrors [`missing_resource_panic`] for the NonSend path.
+#[cold]
+#[inline(never)]
+pub(crate) fn missing_non_send_resource_panic<R: NonSendResource>() -> ! {
+    let name = std::any::type_name::<R>();
+    panic!(
+        "NonSend resource `{name}` not registered. \
+         Call `EcsMaster::insert_non_send_resource::<{name}>(...)` before running \
+         systems that read it."
     );
 }
 

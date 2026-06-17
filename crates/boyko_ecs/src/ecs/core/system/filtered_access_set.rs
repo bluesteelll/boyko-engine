@@ -248,6 +248,27 @@ impl FilteredAccessSet {
         Ok(())
     }
 
+    /// Declares that the active param requires **universal access** — it
+    /// reads and writes every component and every resource (Phase 4 CR-B).
+    ///
+    /// Used by the NonSend `SystemParam`s (`NonSendRes` / `NonSendResMut`):
+    /// declaring universal access makes `meta.access().is_universal()` true
+    /// after [`finalize`], so the existing `SystemKind` derivation resolves
+    /// the system to `CpuExclusive` and the conflict graph serializes it —
+    /// the NonSend payload is then touched only on the dispatcher when
+    /// `running == 0` (the apply-window single-thread-touch invariant).
+    ///
+    /// Unlike `add_resource_*` / `add_component_*` this cannot conflict with
+    /// a sibling param's prior bits (it is a superset), so it returns no
+    /// `Result`. Per-bit `bit_owners` ownership is NOT tracked for the
+    /// universal grant — universal access already conflicts with everything
+    /// cross-system, and a NonSend system is dispatcher-solo regardless.
+    ///
+    /// [`finalize`]: FilteredAccessSet::finalize
+    pub fn mark_universal(&mut self) {
+        self.combined = Access::universal();
+    }
+
     /// Returns a shared view of the accumulated [`Access`] so far.
     /// Intended for inspection during init (e.g. debug logging).
     #[inline]

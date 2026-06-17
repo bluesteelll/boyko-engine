@@ -105,10 +105,10 @@ impl Access {
     ///
     /// Used by the Phase 9 scheduler to identify **exclusive systems** (those
     /// requiring `&mut EcsMaster`, e.g. `ApplyDeferred`). A `SystemBox` caches
-    /// the result at build time as `is_exclusive` (plan §2.5 EXC2, §13.6 debug
-    /// assert). Universal access conflicts with every other non-empty access
-    /// in `conflicts_with`, so the conflict graph naturally serializes such
-    /// systems against the rest.
+    /// the result at build time as `SystemKind::CpuExclusive` (Phase 4 D5;
+    /// plan §2.5 EXC2, §13.6 SCH15 debug assert). Universal access conflicts
+    /// with every other non-empty access in `conflicts_with`, so the conflict
+    /// graph naturally serializes such systems against the rest.
     ///
     /// # Events outside the conflict graph (plan §2.2 SCH7 / §12.5 / §16 R)
     ///

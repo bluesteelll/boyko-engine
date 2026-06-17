@@ -519,9 +519,28 @@ impl ArchetypeMaster {
         // were computed elsewhere, so it does NOT funnel through
         // `create_archetype`'s seed. Seed observer bits here too (same
         // borrow-split + write-pointer as OBS-SEED).
+        //
+        // Phase 4 Seam 1/2 (D1/D2, IM-2): RE-DERIVE the `GPU_RESIDENT` bit and
+        // RE-RUN the set-level conflict scan from THIS funnel's OWN
+        // `component_ids` — NEVER trust the incoming pre-built `archetype.flags`
+        // (defensive; this path is currently dead code, O1). Folded into the
+        // same OBS-SEED2 walk so the GPU bit rides the existing observer-bit OR.
         let mut obs = ArchetypeFlags::empty();
+        let mut saw_gpu = false;
+        let mut saw_cpu_pinned = false;
         for &cid in &component_ids {
             obs.insert_from_observers(cid, &self.observer_registry);
+            match component_registry::residency_class(cid.0) {
+                component_registry::ResidencyKind::Gpu => {
+                    saw_gpu = true;
+                    obs.insert(ArchetypeFlags::GPU_RESIDENT);
+                }
+                component_registry::ResidencyKind::CpuPinned => saw_cpu_pinned = true,
+                component_registry::ResidencyKind::Cpu => {}
+            }
+        }
+        if saw_gpu && saw_cpu_pinned {
+            crate::ecs::core::archetype::archetype::residency_conflict_panic(&component_ids);
         }
         if !obs.is_empty() {
             let ptr = self

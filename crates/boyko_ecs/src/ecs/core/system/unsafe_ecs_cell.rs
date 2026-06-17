@@ -37,6 +37,7 @@ use std::sync::atomic::AtomicUsize;
 
 use crate::ecs::core::archetype::archetype::Archetype;
 use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
+use crate::ecs::core::resources::nonsend_resources::NonSendResources;
 use crate::ecs::core::resources::resources::Resources;
 use crate::ecs::core::system::params::entity_counter::EntityCounter;
 use crate::ecs::identifiers::primitives::ArchetypeId;
@@ -317,6 +318,65 @@ impl<'w> UnsafeEcsCell<'w> {
         //   that could downgrade the tag stack. Aliasing is the caller's
         //   responsibility per the SystemParam protocol.
         unsafe { &mut (*self.ptr).resources }
+    }
+
+    /// Direct read-only access to the **non-`Send`** resource slab, or `None`
+    /// if it was never materialised (Phase 4 Seam 2). Hot path for
+    /// [`NonSendRes<R>::get_param`].
+    ///
+    /// # Safety (U_C2 + CR-A — the apply-window single-thread-touch invariant)
+    /// * The caller asserts that the active `SystemParam::init_access`
+    ///   declared the NonSend access (universal — CR-B), so the system
+    ///   resolves `SystemKind::CpuExclusive` and runs ONLY on the dispatcher
+    ///   thread inside the apply window (`running == 0`). At that point no
+    ///   worker is live, so the `!Send` payload reachable through the
+    ///   returned slab is touched single-threaded on its owning thread — the
+    ///   external-synchronisation contract `!Send` types need.
+    /// * The by-value receiver consumes a `Copy` of the cell — no `&self`
+    ///   retag occurs; the raw pointer's provenance is preserved.
+    ///
+    /// [`NonSendRes<R>::get_param`]: super::params::nonsend_res::NonSendRes
+    #[inline]
+    pub(crate) unsafe fn nonsend_resources(self) -> Option<&'w NonSendResources> {
+        // SAFETY (U_C2, CR-A): by-value receiver; the raw `*mut EcsMaster` is
+        //   not retagged. The `&` projects through `*self.ptr` onto the lazy
+        //   `nonsend_resources` field; `as_deref()` yields `Option<&'w
+        //   NonSendResources>`. The single-thread-touch invariant above makes
+        //   reading the `!Send` payload behind it sound. `'w` is upheld by
+        //   `new_*()` postconditions.
+        unsafe { (*self.ptr).nonsend_resources.as_deref() }
+    }
+
+    /// Direct mutable access to the **non-`Send`** resource slab, or `None`
+    /// if it was never materialised (Phase 4 Seam 2). Hot path for
+    /// [`NonSendResMut<R>::get_param`].
+    ///
+    /// # Safety (U_C3 + CR-A)
+    /// * Same single-thread-touch invariant as [`nonsend_resources`]: the
+    ///   NonSend system is `CpuExclusive`, so this runs on the dispatcher when
+    ///   `running == 0` — no worker aliases the `&mut`.
+    /// * The cell was minted via [`new_mutable`] (debug-asserted).
+    /// * By-value receiver — no `&self` retag.
+    ///
+    /// [`nonsend_resources`]: UnsafeEcsCell::nonsend_resources
+    /// [`NonSendResMut<R>::get_param`]: super::params::nonsend_resmut::NonSendResMut
+    /// [`new_mutable`]: UnsafeEcsCell::new_mutable
+    #[inline]
+    pub(crate) unsafe fn nonsend_resources_mut(self) -> Option<&'w mut NonSendResources> {
+        #[cfg(debug_assertions)]
+        debug_assert!(
+            self.allows_mutable_access,
+            "invariant U_C3: nonsend_resources_mut() called on a read-only \
+             UnsafeEcsCell minted via new_readonly"
+        );
+        // SAFETY (U_C3, CR-A): by-value receiver; the raw pointer carries
+        //   write-capable provenance (minted from `&mut EcsMaster`). The
+        //   `&mut` projects through `*self.ptr` onto the `nonsend_resources`
+        //   field; `as_deref_mut()` yields `Option<&'w mut NonSendResources>`.
+        //   The CpuExclusive dispatcher-solo invariant guarantees no aliasing
+        //   worker cell. Aliasing is the caller's responsibility per the
+        //   SystemParam protocol.
+        unsafe { (*self.ptr).nonsend_resources.as_deref_mut() }
     }
 }
 

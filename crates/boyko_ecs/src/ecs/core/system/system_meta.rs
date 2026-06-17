@@ -31,6 +31,7 @@ use std::sync::OnceLock;
 use crate::ecs::core::archetype::generation::ArchetypeGeneration;
 use crate::ecs::core::change_detection::{MAX_CHANGE_AGE, Tick};
 use crate::ecs::core::system::access::Access;
+use crate::ecs::core::system::gpu_intent::GpuAccessIntent;
 
 /// Phase 12.5 Track B W3 — BSS footprint tripwire.
 ///
@@ -111,6 +112,33 @@ pub struct SystemMeta {
     ///
     /// [`System::set_change_ticks`]: super::system::System::set_change_ticks
     pub(crate) this_run: Tick,
+
+    /// Phase 4 Seam 4 (D7 / IM-6) — abstract per-system GPU access descriptor.
+    ///
+    /// `None` for every CPU system (the 0%-gate): zero alloc, never deref'd.
+    /// A GPU-compute system sets it via [`set_gpu_intent`](Self::set_gpu_intent)
+    /// so a future `boyko_render` can lower `(conflict edge, intent_src,
+    /// intent_dst)` into a precise `vkCmdPipelineBarrier`. Graphics-pure:
+    /// [`GpuAccessIntent`] names no `Vk*` type.
+    ///
+    /// `#[repr(C)]` append-only — added AFTER `this_run` so the existing
+    /// fields keep their offsets; the 8-byte `Option<Box<_>>` (niche-optimised
+    /// to a nullable pointer) fits the struct's 24-byte tail padding (232 + 8
+    /// + 1 = 241 ≤ 256), so `size_of::<SystemMeta>()` stays 256 (IM-6 pin).
+    pub(crate) gpu_intent: Option<Box<GpuAccessIntent>>,
+
+    /// Phase 4 Seam 2 (D6 / CR-B / IM-4) — `true` iff a `SystemParam` in this
+    /// system requires the dispatcher thread (currently any NonSend param).
+    ///
+    /// Set by `NonSendRes` / `NonSendResMut::init_access` via
+    /// [`mark_requires_dispatcher`](Self::mark_requires_dispatcher). Those
+    /// params ALSO declare universal access (CR-B), so the existing
+    /// `is_universal()` derivation resolves the system to
+    /// `SystemKind::CpuExclusive` independently — this flag is the explicit
+    /// record of WHY (diagnostics + a future non-universal dispatcher kind).
+    /// `false` for every existing system (the 0%-gate). Fits the same tail
+    /// padding as `gpu_intent`.
+    pub(crate) requires_dispatcher: bool,
 }
 
 impl SystemMeta {
@@ -152,6 +180,10 @@ impl SystemMeta {
             // Pre-first-run sentinel; updated by `set_change_ticks` on the
             // next dispatch (plan §9.4 PHASE9.4).
             this_run: last_run,
+            // Phase 4 — no GPU intent / no dispatcher requirement by default
+            // (the 0%-gate: every CPU system starts here).
+            gpu_intent: None,
+            requires_dispatcher: false,
         }
     }
 
@@ -202,6 +234,42 @@ impl SystemMeta {
         self.this_run
     }
 
+    /// Returns this system's abstract GPU access descriptor, or `None`
+    /// (Phase 4 Seam 4 / D7). `None` for every CPU system.
+    #[inline]
+    pub fn gpu_intent(&self) -> Option<&GpuAccessIntent> {
+        self.gpu_intent.as_deref()
+    }
+
+    /// Sets this system's abstract GPU access descriptor (Phase 4 Seam 4).
+    ///
+    /// Cold setup path — called by a GPU system's adapter during init. Boxes
+    /// the intent so `SystemMeta`'s footprint stays at 8 B for the field
+    /// (and 0 B of heap for the CPU-only common case where this is never
+    /// called).
+    #[inline]
+    pub fn set_gpu_intent(&mut self, intent: GpuAccessIntent) {
+        self.gpu_intent = Some(Box::new(intent));
+    }
+
+    /// Returns `true` iff a `SystemParam` in this system requires the
+    /// dispatcher thread (Phase 4 Seam 2 / D6). Set by NonSend params.
+    #[inline]
+    pub fn requires_dispatcher(&self) -> bool {
+        self.requires_dispatcher
+    }
+
+    /// Marks this system as requiring the dispatcher thread (Phase 4 Seam 2).
+    ///
+    /// Called by `NonSendRes` / `NonSendResMut::init_access`. Idempotent
+    /// (sets a flag). The param ALSO declares universal access (CR-B), which
+    /// is what actually drives the `SystemKind::CpuExclusive` resolution; this
+    /// flag records the requirement explicitly.
+    #[inline]
+    pub fn mark_requires_dispatcher(&mut self) {
+        self.requires_dispatcher = true;
+    }
+
     /// Phase 12.5 Track B NCD7 (C-NEW-1 / W2) — lazy `'static` dummy meta.
     ///
     /// Sole consumer:
@@ -247,6 +315,8 @@ impl SystemMeta {
             last_structural_generation: ArchetypeGeneration::FIRST,
             last_run: Tick::ZERO,
             this_run: Tick::ZERO,
+            gpu_intent: None,
+            requires_dispatcher: false,
         })
     }
 }
@@ -329,6 +399,65 @@ mod tests {
         // alignment-driven tail padding: 32 B alignment implies size is a
         // multiple of 32 B.
         assert_eq!(core::mem::align_of::<SystemMeta>(), 32);
+    }
+
+    /// Phase 4 IM-6 — appending `gpu_intent` (8 B) + `requires_dispatcher`
+    /// (1 B) after `this_run` consumed only the existing 24 B tail padding
+    /// (232 + 9 = 241 ≤ 256), so `SystemMeta` stays exactly 256 B and the
+    /// `OnceLock<SystemMeta> <= 320` BSS tripwire (module-level const-assert)
+    /// is unaffected.
+    #[test]
+    fn system_meta_stays_256_after_phase4_fields() {
+        // The const-assert at the top of this module already pins
+        // `OnceLock<SystemMeta> <= 320`; assert the 256 B size again here so a
+        // future field addition that pushes past the tail padding is caught
+        // with a Phase-4-specific message.
+        assert_eq!(
+            core::mem::size_of::<SystemMeta>(),
+            256,
+            "Phase 4 gpu_intent + requires_dispatcher must fit the 24 B tail padding"
+        );
+    }
+
+    /// Phase 4 D7 — a fresh meta carries no GPU intent (the 0%-gate default).
+    #[test]
+    fn gpu_intent_defaults_to_none() {
+        let meta = SystemMeta::for_testing("gpu_default");
+        assert!(
+            meta.gpu_intent().is_none(),
+            "a CPU system must carry no GPU intent"
+        );
+        assert!(
+            !meta.requires_dispatcher(),
+            "a CPU system must not require the dispatcher"
+        );
+    }
+
+    /// Phase 4 D7 — set/get round-trip for the GPU intent.
+    #[test]
+    fn gpu_intent_set_get_round_trip() {
+        use crate::ecs::core::system::gpu_intent::{GpuAccess, GpuAccessIntent, GpuStage};
+        use crate::ecs::memory::device_column::DeviceColumnHandle;
+
+        let mut meta = SystemMeta::for_testing("gpu_set");
+        let mut intent = GpuAccessIntent::new(GpuStage::Compute);
+        intent.push(DeviceColumnHandle(3), GpuAccess::Write);
+        meta.set_gpu_intent(intent);
+
+        let got = meta.gpu_intent().expect("intent must be Some after set");
+        assert_eq!(got.stage(), GpuStage::Compute);
+        assert_eq!(got.touches().len(), 1);
+        assert_eq!(got.touches()[0].column, DeviceColumnHandle(3));
+        assert_eq!(got.touches()[0].access, GpuAccess::Write);
+    }
+
+    /// Phase 4 D6 — `mark_requires_dispatcher` flips the flag.
+    #[test]
+    fn mark_requires_dispatcher_sets_flag() {
+        let mut meta = SystemMeta::for_testing("dispatcher_mark");
+        assert!(!meta.requires_dispatcher());
+        meta.mark_requires_dispatcher();
+        assert!(meta.requires_dispatcher());
     }
 
     /// Phase 12.5 Track B C3 — `SystemMeta::dummy()` field-value pin.

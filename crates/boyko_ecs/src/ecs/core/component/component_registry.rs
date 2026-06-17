@@ -501,6 +501,180 @@ pub(crate) fn set_storage_kind(component_id: usize, kind: StorageKind) {
     }
 }
 
+/// Residency class selected for a component id (Phase 4 Seam 1, D1).
+///
+/// The default for every id is [`Cpu`](ResidencyKind::Cpu) — the standard
+/// host-memory `ComponentPool` storage. A `boyko_render` device column type
+/// classifies its id as [`Gpu`](ResidencyKind::Gpu) (the archetype becomes
+/// GPU-resident); a host-pinned-for-life type classifies as
+/// [`CpuPinned`](ResidencyKind::CpuPinned). A signature mixing `Gpu` and
+/// `CpuPinned` is a residency conflict and is rejected loudly at archetype mint.
+///
+/// `#[repr(u8)]` with explicit discriminants so the value round-trips losslessly
+/// through the parallel cold [`RESIDENCY_CLASS`] `AtomicU8` table — exactly as
+/// [`StorageKind`] rides [`STORAGE_KIND`].
+#[repr(u8)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ResidencyKind {
+    /// Host-memory storage (the default). Compatible with any signature.
+    Cpu = 0,
+    /// Device-memory storage — the archetype is stamped `GPU_RESIDENT` at mint.
+    Gpu = 1,
+    /// Host-memory storage that must NEVER migrate to a device column. Conflicts
+    /// with [`Gpu`](ResidencyKind::Gpu) in the same signature.
+    CpuPinned = 2,
+}
+
+/// Phase 4 (Seam 1, D1) — parallel cold table of per-component residency
+/// classes, one [`AtomicU8`] per `ComponentId`. Mirrors [`STORAGE_KIND`]
+/// rather than adding a `ComponentLayout` field, so `ComponentLayout` stays
+/// pinned at one cache line.
+///
+/// Touched ONLY at registration time (write-once via [`set_residency_class`])
+/// and at archetype construction (one `Relaxed` load per id to decide the
+/// `GPU_RESIDENT` stamp + the conflict scan) — never on the per-frame hot read
+/// path.
+///
+/// `Relaxed` is sufficient (M1): the class is a registration-time, write-once
+/// datum with no payload published through it. A `#[derive(Component)]`
+/// registration (or the public runtime classify) sets the class atomically with
+/// id assignment, before the component can appear in any archetype, so the
+/// archetype-construction read observes a settled value. The default `0` reads
+/// back as [`ResidencyKind::Cpu`] for every id never explicitly classified.
+static RESIDENCY_CLASS: [AtomicU8; MAX_COMPONENTS] =
+    [const { AtomicU8::new(ResidencyKind::Cpu as u8) }; MAX_COMPONENTS];
+
+/// Returns the residency class registered for `component_id` (Phase 4 Seam 1,
+/// D1). Defaults to [`ResidencyKind::Cpu`] for any id never classified via
+/// [`set_residency_class`].
+///
+/// Cold: read at archetype construction (the `GPU_RESIDENT` stamp + conflict
+/// scan), never on the per-frame hot path. One `Relaxed` load + branch.
+///
+/// # Panics
+///
+/// Never. An out-of-range id reads back as [`ResidencyKind::Cpu`] (the safe
+/// default) after a debug assertion, mirroring [`storage_kind`]'s discipline.
+#[inline]
+pub fn residency_class(component_id: usize) -> ResidencyKind {
+    debug_assert!(
+        component_id < MAX_COMPONENTS,
+        "Component ID {} is out of bounds",
+        component_id
+    );
+    if component_id >= MAX_COMPONENTS {
+        return ResidencyKind::Cpu;
+    }
+    match RESIDENCY_CLASS[component_id].load(Ordering::Relaxed) {
+        x if x == ResidencyKind::Gpu as u8 => ResidencyKind::Gpu,
+        x if x == ResidencyKind::CpuPinned as u8 => ResidencyKind::CpuPinned,
+        // 0 (the default) and any future-but-unknown discriminant fall back to
+        // the safe host default — `set_residency_class` is the only writer and
+        // only ever stores a valid discriminant.
+        _ => ResidencyKind::Cpu,
+    }
+}
+
+/// Classifies `component_id`'s residency class (Phase 4 Seam 1, D1).
+/// **Write-once**: the first classification of an id wins for the process
+/// lifetime, mirroring [`set_storage_kind`]'s discipline exactly.
+///
+/// Called from the registration path (the derive's `install_residency_class`
+/// and the public runtime [`classify_component_residency`]) atomically with id
+/// assignment, before the component can enter any archetype. A `Cpu` id is left
+/// at the host default and never needs an explicit call.
+///
+/// # Panics (debug only)
+///
+/// A debug assertion fires if an id is RE-classified to a *different* class —
+/// reclassification is an invariant violation (the same id cannot be both a CPU
+/// and a GPU component). In release the first writer's class is preserved (the
+/// store is skipped) so a buggy double-classify degrades to the initial
+/// decision rather than silently corrupting the residency partition (M1).
+pub(crate) fn set_residency_class(component_id: usize, kind: ResidencyKind) {
+    debug_assert!(
+        component_id < MAX_COMPONENTS,
+        "Component ID {} exceeds maximum allowed ({})",
+        component_id,
+        MAX_COMPONENTS
+    );
+    if component_id >= MAX_COMPONENTS {
+        return;
+    }
+    let current = RESIDENCY_CLASS[component_id].load(Ordering::Relaxed);
+    if current == kind as u8 {
+        // Idempotent same-class (re)classification — no-op.
+        return;
+    }
+    debug_assert!(
+        current == ResidencyKind::Cpu as u8,
+        "set_residency_class: ComponentId {} already classified as {:?}, refused \
+         to reclassify as {:?} (residency class is write-once)",
+        component_id,
+        residency_class(component_id),
+        kind
+    );
+    if current == ResidencyKind::Cpu as u8 {
+        RESIDENCY_CLASS[component_id].store(kind as u8, Ordering::Relaxed);
+    }
+}
+
+/// Installs the residency class for a derived component into the cold
+/// `RESIDENCY_CLASS` table from the type's compile-time [`Component::RESIDENCY`]
+/// const (Phase 4 Seam 1, D1 — the derive emit, mirroring
+/// [`install_storage_kind`]).
+///
+/// This is the derive-emitted counterpart of the public runtime
+/// [`classify_component_residency`]: `#[derive(Component)]` expands into
+/// downstream crates where the `pub(crate)` [`set_residency_class`] is
+/// unreachable, so the derive's `component_id()` install path calls this `pub`
+/// wrapper instead — exactly mirroring how it calls [`install_clone_fn`].
+///
+/// The call is emitted UNGATED (one cold read of the const per type per
+/// process, behind the `component_id()` `OnceLock`); a `Cpu` const (the default
+/// for every existing component) short-circuits to a no-op, so a plain
+/// `#[derive(Component)]` pays zero — the 0%-gate.
+///
+/// # Panics
+///
+/// In debug, if `component_id` is reclassified to a different class (see
+/// [`set_residency_class`]). Unreachable for derived types (a single
+/// `RESIDENCY` const per type).
+#[inline]
+pub fn install_residency_class<C: Component>(component_id: usize) {
+    debug_assert!(
+        component_id < MAX_COMPONENTS,
+        "Component ID {} exceeds maximum allowed ({})",
+        component_id,
+        MAX_COMPONENTS
+    );
+    // The default `Cpu` const short-circuits, so a plain `#[derive(Component)]`
+    // never touches the table (the 0%-gate); only a GPU/CpuPinned type writes.
+    if C::RESIDENCY != ResidencyKind::Cpu {
+        set_residency_class(component_id, C::RESIDENCY);
+    }
+}
+
+/// Classifies `component_id`'s residency class at runtime (Phase 4 Seam 1, D1 —
+/// Q4 public path).
+///
+/// The public counterpart to the derive-only [`install_residency_class`]: it
+/// lets `boyko_render` (or any non-derive caller) classify a foreign component
+/// id whose type it does not own the `Component` impl for. Same write-once /
+/// reclassify-panic discipline as [`set_residency_class`].
+///
+/// Must be called at registration time, before the id can enter any archetype
+/// (the same ordering the `RESIDENCY_CLASS` table relies on).
+///
+/// # Panics (debug only)
+///
+/// If `component_id` is reclassified to a different class (see
+/// [`set_residency_class`]).
+#[inline]
+pub fn classify_component_residency(component_id: usize, kind: ResidencyKind) {
+    set_residency_class(component_id, kind);
+}
+
 /// Installs the storage backend for a derived component into the cold
 /// `STORAGE_KIND` table from the type's compile-time [`Component::STORAGE_IS_BITSET`]
 /// const (EnableTag plan, D5 — the `#[component(storage = "bitset")]` derive arm,
@@ -2924,5 +3098,72 @@ mod tests {
             StorageKind::Bitset,
             "the re-minted id stays bitset (write-once same-kind no-op)"
         );
+    }
+
+    // ----- Phase 4 Seam 1: residency classification -----
+    //
+    // Fixed ids 408-412 reserved for these residency tests, adjacent to the
+    // storage-kind 404-407 block and disjoint from every other fixed-id range
+    // (layout 450-465 / 498-499; storage 470-475).
+
+    #[test]
+    fn residency_class_defaults_to_cpu() {
+        // An id never classified reads back as the host default.
+        assert_eq!(
+            residency_class(408),
+            ResidencyKind::Cpu,
+            "unclassified id must default to ResidencyKind::Cpu"
+        );
+    }
+
+    #[test]
+    fn set_residency_class_round_trips_gpu() {
+        set_residency_class(409, ResidencyKind::Gpu);
+        assert_eq!(
+            residency_class(409),
+            ResidencyKind::Gpu,
+            "set_residency_class(Gpu) must round-trip through residency_class"
+        );
+    }
+
+    #[test]
+    fn set_residency_class_round_trips_cpu_pinned() {
+        set_residency_class(410, ResidencyKind::CpuPinned);
+        assert_eq!(
+            residency_class(410),
+            ResidencyKind::CpuPinned,
+            "set_residency_class(CpuPinned) must round-trip through residency_class"
+        );
+    }
+
+    #[test]
+    fn set_residency_class_same_kind_is_idempotent() {
+        // Two identical classifications are a silent no-op (no panic).
+        set_residency_class(411, ResidencyKind::Gpu);
+        set_residency_class(411, ResidencyKind::Gpu);
+        assert_eq!(residency_class(411), ResidencyKind::Gpu);
+    }
+
+    #[test]
+    fn classify_component_residency_public_path_round_trips() {
+        // The public runtime entry mirrors set_residency_class for foreign ids.
+        classify_component_residency(412, ResidencyKind::Gpu);
+        assert_eq!(
+            residency_class(412),
+            ResidencyKind::Gpu,
+            "classify_component_residency must round-trip through residency_class"
+        );
+    }
+
+    /// Write-once enforcement: reclassifying an id to a DIFFERENT class must trip
+    /// the debug assertion. Runs only in debug builds (where `debug_assert!` is
+    /// active) — release skips the store and preserves the first class.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "already classified")]
+    fn set_residency_class_reclassify_different_kind_panics_in_debug() {
+        set_residency_class(413, ResidencyKind::Gpu);
+        // Reclassifying to a different class is an invariant violation.
+        set_residency_class(413, ResidencyKind::CpuPinned);
     }
 }
