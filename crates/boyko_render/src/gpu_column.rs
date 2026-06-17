@@ -1,0 +1,803 @@
+//! The GPU-resident column manager + the `!Send` RHI context that owns it.
+//!
+//! Phase 5 Wave B mints REAL device-local component pools: [`GpuColumnManager`]
+//! allocates a `DeviceLocal` (VRAM) buffer through the [`boyko_rhi`] registry,
+//! packs its generational [`Slot`] into the opaque graphics-pure
+//! [`DeviceColumnHandle`] the `boyko_ecs` core stores, and drives the A2 seam
+//! [`Archetype::make_component_device_backed`] to flip the CPU pool to
+//! device-backing (and null its column cache — the C1 fix that keeps the dangling
+//! Host base CPU-unreachable).
+//!
+//! # The handle indirection (D1 / MF-7)
+//!
+//! The core stores ONLY a `u64`. The manager owns the registry (the `Slot ↔
+//! BoundBuffer` map) plus a side [`GpuColumnMeta`] table keyed by the stable
+//! `(ArchetypeId, ComponentId)` pair (NOT the registry buffer-slot index, which is
+//! shared with staging and churns across grows — the X1/X2 fix). A grow reallocs
+//! the device buffer and mints a NEW handle; the OLD `u64` resolves loudly to
+//! `None` because the registry bumps the freed slot's generation (MF-7
+//! take-before-register), and the pair-keyed table is upserted in place so exactly
+//! one entry survives. No CPU code ever caches a device row pointer.
+//!
+//! # Single-thread discipline (`!Send`)
+//!
+//! [`RhiContext`] is `!Send + !Sync` (it owns the [`VulkanContext`], which is) and
+//! `impl boyko_ecs::NonSendResource`. The orphan rule forces this impl to live
+//! here (neither `NonSendResource` nor `VulkanContext` is local to the other
+//! crate). For Wave B the context simply exists and owns the manager; the
+//! dispatcher-side projection lands with `GpuSystem` in Wave C.
+
+use boyko_ecs::ecs::core::component::component_registry::{self, ResidencyKind};
+use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
+use boyko_ecs::ecs::core::resources::resource::NonSendResource;
+use boyko_ecs::ecs::identifiers::primitives::{ArchetypeId, ComponentId};
+use boyko_ecs::ecs::memory::device_column::DeviceColumnHandle;
+
+use boyko_rhi::{
+    BufferCopy, BufferDesc, BufferHandle, BufferUsage, MemoryLocation, ResourceRegistry,
+    RhiCommandEncoder, RhiDevice, RhiQueue, slot_to_u64, u64_to_slot,
+};
+use boyko_rhi_vulkan::device::VulkanContext;
+use boyko_rhi_vulkan::rhi_impl::Vulkan;
+
+use crate::error::GpuColumnError;
+
+/// A `boyko_render`-side record for one device-resident column (cold, side-table).
+///
+/// `#[repr(C)]` for a stable, predictable layout (~32 B). The durable identity of
+/// a column is the `(archetype, component)` pair (MF-7), NOT its `handle`, which a
+/// grow rotates. Stored in [`GpuColumnManager::meta`] as a flat, pair-keyed
+/// association — exactly ONE entry per `(archetype, component)`, looked up by the
+/// pair (never by the registry buffer-slot index, which is shared with staging and
+/// churns across grows — the X1/X2 fix).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpuColumnMeta {
+    /// The CURRENT opaque device-column handle (rotated on a grow).
+    pub handle: DeviceColumnHandle,
+    /// Byte stride of one component row (the element size).
+    pub stride: u32,
+    /// Device-side live row count (the device twin of `ComponentPool::len`).
+    pub device_len: u32,
+    /// Device-side committed row capacity (rows the device buffer can hold).
+    pub device_cap: u32,
+    /// The archetype this column belongs to (the durable key, part 1).
+    pub archetype: ArchetypeId,
+    /// The component this column stores (the durable key, part 2).
+    pub component: ComponentId,
+}
+
+/// The result of a [`GpuColumnManager::resolve`] — the current handle plus its
+/// row geometry. A pure-POD copy of the parts of [`GpuColumnMeta`] a frame-path
+/// caller needs, so the borrow of the manager ends at the call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedColumn {
+    /// The CURRENT device-column handle for the resolved key.
+    pub handle: DeviceColumnHandle,
+    /// Byte stride of one component row.
+    pub stride: u32,
+    /// Device-side live row count.
+    pub device_len: u32,
+    /// Device-side committed row capacity.
+    pub device_cap: u32,
+}
+
+/// The concrete `!Send` RHI handle the dispatcher reaches (MF-5).
+///
+/// Owns the [`VulkanContext`] (device + the validation messenger) and the
+/// [`GpuColumnManager`]. `impl `[`NonSendResource`]: the orphan rule REQUIRES this
+/// impl to live in `boyko_render` (neither trait nor [`VulkanContext`] is local to
+/// the other crate). For Wave B it just exists and owns the manager; Wave C's
+/// `GpuSystem` projects it off the world on the dispatcher to record + submit.
+///
+/// `!Send + !Sync` by [`VulkanContext`]'s own raw-pointer fields — the RHI is
+/// touched only on the owning (dispatcher) thread (§5.3).
+pub struct RhiContext {
+    /// The Vulkan device + queue origin + validation messenger.
+    context: VulkanContext,
+    /// The device-column manager (registry + meta + staging).
+    manager: GpuColumnManager,
+}
+
+impl RhiContext {
+    /// Wraps a booted [`VulkanContext`] + a fresh [`GpuColumnManager`].
+    #[inline]
+    pub fn new(context: VulkanContext) -> Self {
+        Self {
+            context,
+            manager: GpuColumnManager::new(),
+        }
+    }
+
+    /// Borrows the owned [`VulkanContext`] (the RHI device origin).
+    #[inline]
+    pub fn context(&self) -> &VulkanContext {
+        &self.context
+    }
+
+    /// Borrows the device-column manager.
+    #[inline]
+    pub fn manager(&self) -> &GpuColumnManager {
+        &self.manager
+    }
+
+    /// Mutably borrows the device-column manager (the setup-path entry point).
+    #[inline]
+    pub fn manager_mut(&mut self) -> &mut GpuColumnManager {
+        &mut self.manager
+    }
+
+    /// Splits into `(&VulkanContext, &mut GpuColumnManager)` so a manager call can
+    /// take the device by reference while mutating the manager — the borrow split
+    /// the setup/grow/upload paths need.
+    #[inline]
+    pub fn split_mut(&mut self) -> (&VulkanContext, &mut GpuColumnManager) {
+        (&self.context, &mut self.manager)
+    }
+
+    /// Tears down every device resource (forwards to the manager).
+    ///
+    /// IDEMPOTENT (FIX-C2): a second call on an already-drained manager is a
+    /// harmless no-op (the registry is empty + a `wait_idle` on an idle device is
+    /// benign), so the explicit call AND the [`Drop`] impl below can BOTH run
+    /// without double-free. Calling it explicitly is no longer mandatory — the
+    /// [`Drop`] impl guarantees teardown in production — but tests still call it to
+    /// assert the drained state before drop.
+    pub fn destroy_all(&mut self) {
+        self.manager.destroy_all(&self.context);
+    }
+}
+
+impl Drop for RhiContext {
+    /// FIX-C2: the production teardown path. The ECS world's `NonSend` slab drops
+    /// the [`RhiContext`] resource; without this impl `destroy_all` was only ever
+    /// called in tests, so in production EVERY device buffer leaked (the
+    /// `VulkanContext` field would drop first — freeing device memory + the device
+    /// — then the registry's `Drop` would find live buffers → release leak / debug
+    /// panic).
+    ///
+    /// `Drop::drop` runs BEFORE the struct's fields drop, so `self.context` is
+    /// still alive here (the registry's `destroy_all` lifetime contract is
+    /// satisfied). `manager.destroy_all` is idempotent, so a prior explicit
+    /// `destroy_all()` call does not double-free.
+    fn drop(&mut self) {
+        self.manager.destroy_all(&self.context);
+    }
+}
+
+// SAFETY (no `unsafe`): `RhiContext` is `!Send + !Sync` automatically — its
+// `VulkanContext` field holds raw `*const DeviceFns` pointers (so it is neither
+// `Send` nor `Sync`), and that property propagates to `RhiContext`. The
+// `NonSendResource` contract is exactly "only ever touched on the owning thread",
+// which the `!Send` bound enforces structurally. No `unsafe impl` is added.
+impl NonSendResource for RhiContext {}
+
+/// Owns every device-resident column behind the [`boyko_rhi`] registry (D1).
+///
+/// - `registry`: the generational `Slot ↔ BoundBuffer` map over the [`Vulkan`]
+///   backend. Resolving a handle is a generation-checked array index (~3 ns).
+/// - `meta`: a flat side table keyed by the durable `(ArchetypeId, ComponentId)`
+///   pair, NOT by the registry buffer-slot index (X1/X2). The buffer-slot index
+///   space is SHARED with the staging buffer and churns across grows, so an
+///   index-keyed table could let staging null a live column's entry or leave two
+///   entries for one column. Keying by the pair makes the mapping single-valued by
+///   construction: one entry per column, found by a cold linear scan over the tiny
+///   GPU-resident set (Regime-C) — no per-frame `HashMap`/alloc.
+/// - `staging` / `staging_cap`: ONE reused host-visible staging buffer for the
+///   setup upload + the test-only readback, grown on demand. Registered in
+///   `registry` so `destroy_all` frees it uniformly. Has NO `meta` entry — staging
+///   is never a column, so it can never collide with a column's pair key.
+pub struct GpuColumnManager {
+    /// The generational device-buffer registry over the Vulkan backend.
+    registry: ResourceRegistry<Vulkan>,
+    /// Flat pair-keyed column table: exactly one [`GpuColumnMeta`] per live
+    /// `(archetype, component)`. Searched by the pair (never by buffer-slot index).
+    meta: Vec<GpuColumnMeta>,
+    /// The reused host-visible staging buffer (registered in `registry`).
+    staging: Option<BufferHandle>,
+    /// Current staging-buffer capacity in bytes (0 when no staging exists).
+    staging_cap: u64,
+}
+
+impl Default for GpuColumnManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl GpuColumnManager {
+    /// Creates an empty manager (no device buffers, no staging).
+    #[inline]
+    pub fn new() -> Self {
+        Self {
+            registry: ResourceRegistry::new(),
+            meta: Vec::new(),
+            staging: None,
+            staging_cap: 0,
+        }
+    }
+
+    /// Test-only: whether the registry holds NO live resource (every column +
+    /// staging buffer destroyed). Used by the C2 drop-without-`destroy_all` leak
+    /// test to confirm the production drop path drained everything.
+    #[cfg(any(test, feature = "test-readback"))]
+    #[inline]
+    pub fn is_fully_drained(&self) -> bool {
+        self.registry.is_fully_drained()
+    }
+
+    /// Allocates a `DeviceLocal` device buffer for `(archetype, component)`,
+    /// registers it, records its [`GpuColumnMeta`], and flips the CPU pool to
+    /// device-backing through the A2 seam.
+    ///
+    /// Steps:
+    /// 1. `device.create_buffer(DeviceLocal, STORAGE)` → a never-mapped VRAM
+    ///    [`BoundBuffer`] (the device-local path also adds `TRANSFER_SRC|DST`).
+    /// 2. `registry.register_buffer` → a generational [`BufferHandle`] →
+    ///    [`slot_to_u64`] → the opaque [`DeviceColumnHandle`] the core stores.
+    /// 3. Record `GpuColumnMeta` at the packed slot index.
+    /// 4. Drive the A2 funnel
+    ///    [`Archetype::make_component_device_backed`](boyko_ecs::ecs::core::archetype::archetype::Archetype::make_component_device_backed):
+    ///    flip the pool + null its column cache. SOUND post-A2 — the CPU-query
+    ///    skip + the null-column direct-reader guard keep the now-dangling Host
+    ///    base CPU-unreachable.
+    ///
+    /// `stride` is the byte size of one component row; `cap_rows` the initial row
+    /// capacity. Returns the minted [`DeviceColumnHandle`].
+    ///
+    /// # Precondition (X3)
+    /// `component` MUST be statically classed [`ResidencyKind::Gpu`]. Flipping an
+    /// ordinary (`Cpu`) component to device backing would create a CPU-reachable
+    /// dangling column (the C1 UAF class the A2 seam guards only for GPU-pure
+    /// archetypes). Checked with a **release-present** `assert!` (setup-time, not a
+    /// hot path), so the unsound state can never be built even in release — the
+    /// caller is responsible for only minting device columns for `Gpu` components.
+    /// A `Gpu`-classed component implies its archetype was stamped `GPU_RESIDENT`
+    /// at mint (GPU_RESIDENT ⇔ all-components-Gpu, C2), so this also transitively
+    /// guarantees the target archetype is GPU-resident.
+    ///
+    /// # Errors
+    /// [`GpuColumnError::Rhi`] if the device buffer allocation fails.
+    pub fn create_column(
+        &mut self,
+        device: &VulkanContext,
+        ecs: &mut EcsMaster,
+        archetype: ArchetypeId,
+        component: ComponentId,
+        stride: u32,
+        cap_rows: u32,
+    ) -> Result<DeviceColumnHandle, GpuColumnError> {
+        debug_assert!(stride > 0, "create_column: zero stride");
+        debug_assert!(cap_rows > 0, "create_column: zero capacity");
+        // X3 (release-present): only a statically `Gpu`-classed component may be
+        // flipped to device backing. A `Cpu` component would leave a CPU-reachable
+        // dangling column. Setup-time, so a release assert costs nothing on the
+        // hot path. A `Gpu` class also implies the archetype is `GPU_RESIDENT`
+        // (C2: GPU_RESIDENT ⇔ all-components-Gpu).
+        assert_eq!(
+            component_registry::residency_class(component.0),
+            ResidencyKind::Gpu,
+            "create_column: component {} is not ResidencyKind::Gpu — flipping a \
+             Cpu component to device backing would create a dangling CPU column (X3)",
+            component.0
+        );
+
+        let size = stride as u64 * cap_rows as u64;
+        let buffer = device.create_buffer(&BufferDesc {
+            size,
+            usage: BufferUsage::STORAGE,
+            location: MemoryLocation::DeviceLocal,
+        })?;
+
+        let buffer_handle = self.registry.register_buffer(buffer);
+        let handle = DeviceColumnHandle(slot_to_u64(buffer_handle.0));
+
+        let meta = GpuColumnMeta {
+            handle,
+            stride,
+            device_len: 0,
+            device_cap: cap_rows,
+            archetype,
+            component,
+        };
+        // Pair-keyed upsert (X1/X2): one entry per (archetype, component).
+        self.store_meta(meta);
+
+        // Drive the A2 device-mint seam: flip the CPU pool to device-backing and
+        // null its column cache (the C1 fix). Reached through the public
+        // `archetype_master_mut().get_archetype_mut(id)` chain.
+        let arch = ecs
+            .archetype_master_mut()
+            .get_archetype_mut(archetype)
+            .expect("invariant: create_column targets an existing archetype");
+        arch.make_component_device_backed(component, handle);
+
+        Ok(handle)
+    }
+
+    /// Resolves the CURRENT column geometry for `(archetype, component)`, or
+    /// `None` if no live column matches (MF-7).
+    ///
+    /// Cost is an `O(N_device_columns)` COLD linear scan of the pair-keyed `meta`
+    /// table (the GPU-resident set is tiny in the stable-residency foundation —
+    /// Regime-C), then a generation-checked `resolve_buffer` (the ~3 ns registry
+    /// index step) to confirm the found handle is still live. No per-frame
+    /// `HashMap`/alloc — the scan is over a handful of entries. The table is
+    /// single-valued per pair (X1/X2), so the FIRST match is THE column. A stale
+    /// handle (post-grow) resolves `None` loudly. Returns no `Result`: a
+    /// missing/stale column is `None`, not an error.
+    pub fn resolve(
+        &self,
+        archetype: ArchetypeId,
+        component: ComponentId,
+    ) -> Option<ResolvedColumn> {
+        let m = self
+            .meta
+            .iter()
+            .find(|m| m.archetype == archetype && m.component == component)?;
+        // Confirm the handle is still live (a grow bumps the generation, so a
+        // stale entry would resolve to no buffer). The pair table is updated in
+        // lock-step with grows, so this is belt-and-braces.
+        let buffer_handle = BufferHandle(u64_to_slot(m.handle.0));
+        self.registry.resolve_buffer(buffer_handle)?;
+        debug_assert!(
+            m.device_len <= m.device_cap,
+            "resolve: device_len exceeds device_cap"
+        );
+        Some(ResolvedColumn {
+            handle: m.handle,
+            stride: m.stride,
+            device_len: m.device_len,
+            device_cap: m.device_cap,
+        })
+    }
+
+    /// Whether `handle` still resolves to a LIVE device buffer in the registry.
+    ///
+    /// The direct MF-7 staleness probe: after a [`grow_column`](Self::grow_column)
+    /// the OLD handle's `u64` carries a generation the reused slot no longer
+    /// matches, so this returns `false` (loud). The NEW handle returns `true`.
+    #[inline]
+    pub fn is_handle_live(&self, handle: DeviceColumnHandle) -> bool {
+        let buffer_handle = BufferHandle(u64_to_slot(handle.0));
+        self.registry.resolve_buffer(buffer_handle).is_some()
+    }
+
+    /// SETUP-only: stages `bytes` into the host-visible staging buffer, copies
+    /// them into the device column behind `handle`, and fence-waits.
+    ///
+    /// Grows the staging buffer if `bytes` exceeds its capacity. This is the ONLY
+    /// CPU→GPU transfer and it runs at setup, never on the frame path (D2). The
+    /// device buffer is never mapped — the bytes reach VRAM through a real
+    /// `vkCmdCopyBuffer`.
+    ///
+    /// # Errors
+    /// [`GpuColumnError`] on a stale handle, a missing staging mapping, or any
+    /// RHI failure (buffer create, encoder, submit, fence wait).
+    pub fn upload_initial(
+        &mut self,
+        device: &VulkanContext,
+        handle: DeviceColumnHandle,
+        bytes: &[u8],
+    ) -> Result<(), GpuColumnError> {
+        let size = bytes.len() as u64;
+        self.ensure_staging(device, size)?;
+        let staging = self.staging.expect("invariant: ensure_staging set staging");
+
+        // Write the bytes into the host-coherent staging buffer.
+        {
+            let staging_buf = self
+                .registry
+                .resolve_buffer(staging)
+                .ok_or(GpuColumnError::StaleHandle)?;
+            let dst = device
+                .buffer_mapped_ptr(staging_buf)
+                .ok_or(GpuColumnError::StagingNotMapped)?;
+            // SAFETY: `dst` is the persistently-mapped first byte of a host-visible
+            // + host-coherent staging buffer whose capacity is `>= size` (ensured
+            // just above by `ensure_staging`). `bytes.len() == size` bytes fit, and
+            // no other live alias touches this staging sub-region during the write
+            // (the manager is `&mut self`). Host-coherent => no explicit flush.
+            unsafe {
+                core::ptr::copy_nonoverlapping(bytes.as_ptr(), dst.as_ptr(), bytes.len());
+            }
+        }
+
+        let device_handle = BufferHandle(u64_to_slot(handle.0));
+        // Record + submit: copy staging → device, then fence-wait so the upload
+        // completes before this returns (setup is synchronous).
+        let regions = [BufferCopy { src_offset: 0, dst_offset: 0, size }];
+        self.run_copy(device, staging, device_handle, &regions)?;
+
+        // Update the live row count from the uploaded byte span (if the meta is
+        // tracked — it always is for a manager-minted column).
+        if let Some(meta) = self.meta_mut(device_handle)
+            && meta.stride > 0
+        {
+            meta.device_len = (size / meta.stride as u64) as u32;
+            debug_assert!(
+                meta.device_len <= meta.device_cap,
+                "upload_initial: uploaded rows exceed device_cap"
+            );
+        }
+        Ok(())
+    }
+
+    /// Reallocates the device column behind `old` to `new_cap_rows`, copying the
+    /// old contents into the new buffer, and returns the NEW handle (MF-7).
+    ///
+    /// `#[inline(never)]`: a cold realloc, kept off the I-cache of any caller.
+    ///
+    /// # MF-7 ordering (take BEFORE register)
+    /// The registry bumps a slot's generation on `take` then LIFO-reuses the freed
+    /// index on the next `register`. So the old buffer MUST be taken BEFORE the new
+    /// one is registered: the reused index then carries the bumped generation, so
+    /// the stale `old` `u64` resolves `None` (loud). Register-then-take would mint
+    /// a fresh index and leave `old` resolving to a LIVE (aliasing) buffer.
+    ///
+    /// # Errors
+    /// [`GpuColumnError`] on a stale `old` handle or any RHI failure.
+    #[inline(never)]
+    pub fn grow_column(
+        &mut self,
+        device: &VulkanContext,
+        ecs: &mut EcsMaster,
+        old: DeviceColumnHandle,
+        new_cap_rows: u32,
+    ) -> Result<DeviceColumnHandle, GpuColumnError> {
+        let old_handle = BufferHandle(u64_to_slot(old.0));
+        let old_meta = *self
+            .meta(old_handle)
+            .ok_or(GpuColumnError::StaleHandle)?;
+        debug_assert!(
+            new_cap_rows >= old_meta.device_cap,
+            "grow_column: new capacity must not shrink the column"
+        );
+
+        let new_size = old_meta.stride as u64 * new_cap_rows as u64;
+        let copy_size = old_meta.stride as u64 * old_meta.device_len as u64;
+
+        // Allocate the NEW device buffer first (so a failed create leaves the old
+        // buffer intact and resolvable — no partial state).
+        let new_buffer = device.create_buffer(&BufferDesc {
+            size: new_size,
+            usage: BufferUsage::STORAGE,
+            location: MemoryLocation::DeviceLocal,
+        })?;
+
+        // FIX-C1: from here until `new_buffer` is registered it is a LIVE VkBuffer
+        // + suballocation NOT in the registry, so `destroy_all` cannot reach it.
+        // EVERY error edge below must destroy it exactly once before returning, or
+        // it leaks permanently (`BoundBuffer` has no `Drop`). This mirrors the
+        // rollback discipline in `memory.rs::create_bound_buffer` / encoder `new`.
+
+        // Copy old → new BEFORE the old buffer is taken (both must be live to
+        // resolve during the copy). The new buffer is a local `BoundBuffer` not yet
+        // in the registry, so record against the raw buffers.
+        if copy_size > 0 {
+            let regions = [BufferCopy { src_offset: 0, dst_offset: 0, size: copy_size }];
+            let old_buf = match self.registry.resolve_buffer(old_handle) {
+                Some(b) => b,
+                None => {
+                    // SAFETY: `new_buffer` was just created on `device`, was never
+                    // registered (owned exclusively here, destroyed once) and never
+                    // submitted to, so no GPU work references it.
+                    unsafe { device.destroy_buffer(new_buffer) };
+                    return Err(GpuColumnError::StaleHandle);
+                }
+            };
+            if let Err(e) = self.run_copy_raw(device, old_buf, &new_buffer, &regions) {
+                // SAFETY: `new_buffer` was created on `device`, never registered
+                // (owned exclusively here, destroyed once). `run_copy_raw` already
+                // tore down its own transient encoder/fence and — on its
+                // submit-failed / wait path — left no work in flight against
+                // `new_buffer`, so no GPU read references it.
+                unsafe { device.destroy_buffer(new_buffer) };
+                return Err(e);
+            }
+        }
+
+        // ===== MF-7: take BEFORE register. =====
+        // `take_buffer(old)` bumps the freed slot's generation and pushes its index
+        // onto the LIFO free list; the very next `register_buffer` pops THAT index
+        // with the bumped generation. So the new handle reuses the old index but
+        // with a fresh generation → the stale `old` u64 resolves `None` (loud).
+        let old_owned = match self.registry.take_buffer(old_handle) {
+            Some(b) => b,
+            None => {
+                // SAFETY: `new_buffer` was created on `device`, never registered
+                // (owned exclusively here, destroyed once). The copy above (if any)
+                // fence-waited, so no GPU work is in flight against `new_buffer`.
+                unsafe { device.destroy_buffer(new_buffer) };
+                return Err(GpuColumnError::StaleHandle);
+            }
+        };
+        // The old column's pair entry is updated by the `store_meta` upsert below
+        // (single-valued by pair), so there is no separate index-keyed clear.
+
+        let new_handle_buf = self.registry.register_buffer(new_buffer);
+        let new_handle = DeviceColumnHandle(slot_to_u64(new_handle_buf.0));
+
+        // Destroy the old device buffer now that its contents are copied + its slot
+        // is freed.
+        // SAFETY: `old_owned` was just removed from the registry (owned exclusively
+        // here, destroyed exactly once) and was created on `device`. The GPU is no
+        // longer reading it on EITHER path (FIX-W1):
+        //   * `copy_size > 0`: the `run_copy_raw` above fence-waited, ordering this
+        //     destroy after the copy that read `old_owned`.
+        //   * `copy_size == 0`: NO submission ever referenced `old_owned` (nothing
+        //     was copied into the old device buffer when `device_len == 0`, and no
+        //     copy reads from it here), so there is no in-flight GPU read to order
+        //     against — the destroy is unconditionally safe.
+        unsafe {
+            device.destroy_buffer(old_owned);
+        }
+
+        // Record the rotated handle + grown capacity (carry the live row count).
+        // Pair-keyed upsert (X1/X2): updates the SINGLE entry for this column's
+        // (archetype, component) in place — no second entry can survive a grow.
+        let new_meta = GpuColumnMeta {
+            handle: new_handle,
+            stride: old_meta.stride,
+            device_len: old_meta.device_len,
+            device_cap: new_cap_rows,
+            archetype: old_meta.archetype,
+            component: old_meta.component,
+        };
+        self.store_meta(new_meta);
+
+        // Write the new handle back into the core pool through the A2 grow write
+        // funnel (MF-2/3): it updates ONLY the boxed DeviceColumn.handle (no
+        // re-flip, no Box churn, no column touch — the pool is already
+        // device-backed and its column already null).
+        let arch = ecs
+            .archetype_master_mut()
+            .get_archetype_mut(old_meta.archetype)
+            .expect("invariant: grow_column targets an existing archetype");
+        arch.set_component_device_handle(old_meta.component, new_handle);
+
+        Ok(new_handle)
+    }
+
+    /// TEST-ONLY: copies the device column behind `handle` into the staging buffer,
+    /// fence-waits, and reads the bytes back into a fresh `Vec`.
+    ///
+    /// The single CPU readback path — used by the round-trip oracle. NOT a frame
+    /// path: steady state does zero readback (D2). Gated to test builds.
+    ///
+    /// # Precondition (FIX-U2)
+    /// `len` MUST NOT exceed the column's byte capacity (`device_cap * stride`).
+    /// The device→staging copy region is built from `len`, so a `len` larger than
+    /// the device buffer would over-read it. Asserted below (test-only path, but
+    /// the bound is explicit).
+    ///
+    /// # Errors
+    /// [`GpuColumnError`] on a stale handle, a missing staging mapping, or any
+    /// RHI failure.
+    #[cfg(any(test, feature = "test-readback"))]
+    pub fn readback_for_test(
+        &mut self,
+        device: &VulkanContext,
+        handle: DeviceColumnHandle,
+        len: usize,
+    ) -> Result<Vec<u8>, GpuColumnError> {
+        let size = len as u64;
+        let device_handle = BufferHandle(u64_to_slot(handle.0));
+        // FIX-U2: bound the read against the column's byte capacity so the
+        // device→staging copy region can never over-read the device buffer.
+        let column = self.meta(device_handle).ok_or(GpuColumnError::StaleHandle)?;
+        let byte_cap = column.device_cap as u64 * column.stride as u64;
+        assert!(
+            size <= byte_cap,
+            "readback_for_test: requested {size} bytes exceeds column byte capacity {byte_cap}"
+        );
+        self.ensure_staging(device, size)?;
+        let staging = self.staging.expect("invariant: ensure_staging set staging");
+
+        // Copy device → staging, then fence-wait.
+        let regions = [BufferCopy { src_offset: 0, dst_offset: 0, size }];
+        self.run_copy(device, device_handle, staging, &regions)?;
+
+        // Map-read the staging buffer.
+        let staging_buf = self
+            .registry
+            .resolve_buffer(staging)
+            .ok_or(GpuColumnError::StaleHandle)?;
+        let src = device
+            .buffer_mapped_ptr(staging_buf)
+            .ok_or(GpuColumnError::StagingNotMapped)?;
+        let mut out = vec![0u8; len];
+        // SAFETY: `src` is the persistently-mapped first byte of a host-coherent
+        // staging buffer of capacity `>= size`; the `run_copy` above fence-waited,
+        // so the GPU readback is complete + coherent; reading `len` bytes is
+        // in-bounds; `out` is a distinct, non-overlapping `len`-byte allocation.
+        unsafe {
+            core::ptr::copy_nonoverlapping(src.as_ptr(), out.as_mut_ptr(), len);
+        }
+        Ok(out)
+    }
+
+    /// Tears down every device buffer + the staging buffer before drop (W4).
+    ///
+    /// `registry.destroy_all` waits the device idle, then destroys every
+    /// registered buffer (the columns + the staging buffer) in reverse order.
+    ///
+    /// IDEMPOTENT (FIX-C2): if the registry is already fully drained (a prior
+    /// explicit `destroy_all` ran, e.g. in a test that then drops the owning
+    /// [`RhiContext`]), this early-returns BEFORE touching the device — so the
+    /// `RhiContext::Drop` second call neither double-frees nor issues a redundant
+    /// `wait_idle`. The first call does the real teardown.
+    pub fn destroy_all(&mut self, device: &VulkanContext) {
+        if self.registry.is_fully_drained() {
+            // Already torn down (or never used). Keep the side state coherent and
+            // return without re-touching the device.
+            self.meta.clear();
+            self.staging = None;
+            self.staging_cap = 0;
+            return;
+        }
+        self.registry.destroy_all(device);
+        self.meta.clear();
+        self.staging = None;
+        self.staging_cap = 0;
+        debug_assert!(
+            self.registry.is_fully_drained(),
+            "destroy_all: registry not fully drained"
+        );
+    }
+
+    // ===== internals =====
+
+    /// Ensures the staging buffer has capacity `>= need` bytes, (re)allocating it
+    /// host-visible if absent or too small. The old staging buffer is destroyed
+    /// before the new one is registered (no double-resolve risk — staging is never
+    /// resolved across a regrow within one op).
+    fn ensure_staging(&mut self, device: &VulkanContext, need: u64) -> Result<(), GpuColumnError> {
+        if self.staging_cap >= need && self.staging.is_some() {
+            return Ok(());
+        }
+        // Round up to avoid frequent re-allocs; never below `need`.
+        let new_cap = need.max(self.staging_cap.saturating_mul(2)).max(1);
+        let buffer = device.create_buffer(&BufferDesc {
+            size: new_cap,
+            usage: BufferUsage::TRANSFER_SRC | BufferUsage::TRANSFER_DST,
+            location: MemoryLocation::HostVisibleCoherent,
+        })?;
+        // Take + destroy the old staging buffer (if any) before registering the new
+        // one. `take` bumps the freed slot's generation; the old handle is local to
+        // the manager (never handed out) so there is no stale-resolve concern.
+        //
+        // X1/X2: staging has NO `meta` entry (it is never a column), so there is NO
+        // `clear_meta` here. The old index-keyed `clear_meta(old_staging)` was the
+        // silent-data-loss bug: the freed staging slot index is SHARED with column
+        // slots, so it could null a LIVE column's entry. The pair-keyed table makes
+        // that collision impossible — staging simply has no key.
+        if let Some(old) = self.staging.take()
+            && let Some(old_owned) = self.registry.take_buffer(old)
+        {
+            // SAFETY: `old_owned` was just removed from the registry (owned
+            // exclusively here, destroyed once), created on `device`. Staging is
+            // only used inside fence-waited `run_copy` calls, so no GPU work is in
+            // flight against it at a regrow (each op fence-waits before returning).
+            unsafe {
+                device.destroy_buffer(old_owned);
+            }
+        }
+        let handle = self.registry.register_buffer(buffer);
+        self.staging = Some(handle);
+        self.staging_cap = new_cap;
+        Ok(())
+    }
+
+    /// Records + submits a single buffer copy between two REGISTERED buffers, then
+    /// fence-waits (setup/readback are synchronous). Creates a fresh encoder +
+    /// fence, destroys both by value when done.
+    fn run_copy(
+        &self,
+        device: &VulkanContext,
+        src: BufferHandle,
+        dst: BufferHandle,
+        regions: &[BufferCopy],
+    ) -> Result<(), GpuColumnError> {
+        let src_buf = self
+            .registry
+            .resolve_buffer(src)
+            .ok_or(GpuColumnError::StaleHandle)?;
+        let dst_buf = self
+            .registry
+            .resolve_buffer(dst)
+            .ok_or(GpuColumnError::StaleHandle)?;
+        self.run_copy_raw(device, src_buf, dst_buf, regions)
+    }
+
+    /// Records + submits a single copy between two raw `BoundBuffer`s (used when
+    /// one endpoint is not yet registered, e.g. the new buffer in `grow_column`),
+    /// then fence-waits. Tears down the transient encoder + fence.
+    fn run_copy_raw(
+        &self,
+        device: &VulkanContext,
+        src_buf: &boyko_rhi_vulkan::memory::BoundBuffer,
+        dst_buf: &boyko_rhi_vulkan::memory::BoundBuffer,
+        regions: &[BufferCopy],
+    ) -> Result<(), GpuColumnError> {
+        let fence = device.create_fence(false)?;
+        let mut encoder = device.create_command_encoder()?;
+        let queue = device.rhi_queue();
+
+        // Track whether the submit succeeded SEPARATELY from the wait result: a
+        // wait-Err AFTER an Ok submit leaves GPU work in flight referencing the
+        // encoder + fence, so they must NOT be torn down until the device is idle
+        // (FIX-U1).
+        let mut submitted = false;
+        let record = (|| -> Result<(), GpuColumnError> {
+            encoder.begin()?;
+            encoder.copy_buffer(src_buf, dst_buf, regions);
+            encoder.end()?;
+            queue.submit(&encoder, &fence)?;
+            submitted = true;
+            device.wait_fence(&fence, u64::MAX)?;
+            Ok(())
+        })();
+
+        // FIX-U1: if the submit succeeded but the fence wait failed, work may still
+        // be in flight against the encoder + fence. Block on `wait_idle` BEFORE
+        // destroying them so the destroy is not a UAF (prefer wait_idle-then-destroy
+        // over leak-or-UAF). When the submit never succeeded (begin/end/submit
+        // error), no work was enqueued, so no extra wait is needed.
+        if record.is_err() && submitted {
+            // Best-effort: if `wait_idle` ALSO fails the device is lost, and
+            // destroying children of a lost device is a defined no-op (mirrors the
+            // registry `destroy_all` reasoning), so we proceed to destroy either
+            // way.
+            let _ = device.wait_idle();
+        }
+
+        // Tear down the transient encoder + fence.
+        // SAFETY: `encoder` + `fence` were created on `device` and each is moved by
+        // value here => destroyed exactly once. No GPU work is in flight against
+        // them at this point:
+        //   * `record` is `Ok`: the fence wait completed the submission.
+        //   * `record` is `Err` && `!submitted`: the submit never happened (begin/
+        //     end/submit error), so nothing was enqueued.
+        //   * `record` is `Err` && `submitted`: the `wait_idle` above drained the
+        //     in-flight submission (or the device is lost, making the destroy a
+        //     defined no-op).
+        unsafe {
+            device.destroy_command_encoder(encoder);
+            device.destroy_fence(fence);
+        }
+        record
+    }
+
+    /// Upserts `meta` keyed by its durable `(archetype, component)` pair (X1/X2).
+    ///
+    /// Single-valued by construction: if an entry for the pair already exists (a
+    /// grow rotated the handle), it is OVERWRITTEN in place; otherwise the entry is
+    /// pushed. So exactly one entry per column survives, regardless of buffer-slot
+    /// churn — no staging collision, no double entry after a grow.
+    fn store_meta(&mut self, meta: GpuColumnMeta) {
+        match self
+            .meta
+            .iter_mut()
+            .find(|m| m.archetype == meta.archetype && m.component == meta.component)
+        {
+            Some(slot) => *slot = meta,
+            None => self.meta.push(meta),
+        }
+    }
+
+    /// Borrows the meta entry whose CURRENT handle equals `handle` (generation-
+    /// exact). A stale handle (post-grow, whose generation no longer matches the
+    /// stored current handle) returns `None`.
+    fn meta(&self, handle: BufferHandle) -> Option<&GpuColumnMeta> {
+        let target = slot_to_u64(handle.0);
+        self.meta.iter().find(|m| m.handle.0 == target)
+    }
+
+    /// Mutably borrows the meta entry whose CURRENT handle equals `handle`
+    /// (generation-exact like [`Self::meta`]).
+    fn meta_mut(&mut self, handle: BufferHandle) -> Option<&mut GpuColumnMeta> {
+        let target = slot_to_u64(handle.0);
+        self.meta.iter_mut().find(|m| m.handle.0 == target)
+    }
+}

@@ -618,11 +618,19 @@ impl Archetype {
     /// the pool is non-empty (`len != 0`) — a populated pool must never flip to
     /// device backing (data-loss guard).
     ///
-    /// `#[allow(dead_code)]`: the production caller is `boyko_render` (Wave B),
-    /// not yet in tree — the Phase-5 forward-seam discipline. Exercised in tests.
+    /// Visibility: `pub` because the production caller is `boyko_render`'s
+    /// `GpuColumnManager::create_column`, a SEPARATE crate (Phase-5 Wave B). It is
+    /// reached through the existing public chain
+    /// `EcsMaster::archetype_master_mut().get_archetype_mut(id)` → `&mut Archetype`.
+    /// It introduces NO graphics type into `boyko_ecs` — the only non-core type in
+    /// its signature is the graphics-PURE [`DeviceColumnHandle`](crate::ecs::memory::device_column::DeviceColumnHandle)
+    /// (a `#[repr(transparent)]` `u64`), so the purity invariant holds.
+    ///
+    /// `#[cfg(not(miri))]`: the device-backing arm + its pool primitives are
+    /// compiled out under Miri (Phase 4 / `DeviceColumn`); cross-crate callers
+    /// build native, so the `pub` surface is present exactly where it is callable.
     #[cfg(not(miri))]
-    #[allow(dead_code)]
-    pub(crate) fn make_component_device_backed(
+    pub fn make_component_device_backed(
         &mut self,
         cid: ComponentId,
         handle: crate::ecs::memory::device_column::DeviceColumnHandle,
@@ -632,6 +640,19 @@ impl Archetype {
             "make_component_device_backed: component_id {} >= MAX_COMPONENTS ({})",
             cid.0,
             MAX_COMPONENTS
+        );
+        // X4 (release-present soundness guard): ONLY a statically `Gpu`-classed
+        // component may flip to device backing. A `debug_assert!` here would vanish
+        // in release, letting an external caller flip a `Cpu` component → a
+        // CPU-reachable dangling column (the X3 unsound state). This is a setup-time
+        // call (not the CPU hot path), so the release `assert!` does not affect the
+        // 0%-gate. (Keep the existing per-component column-null behavior below.)
+        assert_eq!(
+            component_registry::residency_class(cid.0),
+            ResidencyKind::Gpu,
+            "make_component_device_backed: component {} is not ResidencyKind::Gpu — \
+             a Cpu component must never be flipped to device backing (X4)",
+            cid.0
         );
         let pool = self
             .component_pools
@@ -660,6 +681,71 @@ impl Archetype {
             self.columns[cid.0].is_null(),
             "make_component_device_backed must null the just-flipped column"
         );
+    }
+
+    /// Writes a NEW device-column handle onto an already-device-backed component
+    /// `cid` (Phase 5 MF-2/3 — the grow write path).
+    ///
+    /// `boyko_render`'s `GpuColumnManager::grow_column` calls this after it
+    /// reallocs the device column and mints a NEW handle: it updates ONLY the
+    /// boxed [`DeviceColumn`]'s handle (via [`ComponentPool::set_device_handle`]) —
+    /// it does NOT re-flip the backing (no `Box` churn, no lost device counters)
+    /// and does NOT touch the already-null column cache. DISTINCT from the
+    /// write-once `buffer`/`added_base`/`changed_base`, so it violates no
+    /// base-pointer invariant (MF-3); the `unreachable!` Host-grow arm stays
+    /// unreachable.
+    ///
+    /// Visibility: `pub` for the same cross-crate reason as
+    /// [`make_component_device_backed`](Self::make_component_device_backed),
+    /// reached through `EcsMaster::archetype_master_mut().get_archetype_mut(id)`.
+    /// Introduces NO graphics type (the only non-core type is the graphics-pure
+    /// [`DeviceColumnHandle`](crate::ecs::memory::device_column::DeviceColumnHandle)).
+    ///
+    /// `#[cfg(not(miri))]` — matches the device-backing arm compiled out under
+    /// Miri (Phase 4 / `DeviceColumn`).
+    ///
+    /// # Panics
+    ///
+    /// **Release** (X5): panics if the targeted pool is NOT already `Device`-backed
+    /// — `ComponentPool::set_device_handle` silently no-ops on a Host pool, so the
+    /// guard is release-present to prevent a silently-dropped handle write.
+    /// (Debug) if the targeted column is not null (a device-backed component's
+    /// column is nulled at the original flip and stays null), or if the pool's
+    /// Host `len != 0`.
+    #[cfg(not(miri))]
+    pub fn set_component_device_handle(
+        &mut self,
+        cid: ComponentId,
+        handle: crate::ecs::memory::device_column::DeviceColumnHandle,
+    ) {
+        debug_assert!(
+            cid.0 < MAX_COMPONENTS,
+            "set_component_device_handle: component_id {} >= MAX_COMPONENTS ({})",
+            cid.0,
+            MAX_COMPONENTS
+        );
+        debug_assert!(
+            self.columns[cid.0].is_null(),
+            "set_component_device_handle: a device-backed component's column must stay null"
+        );
+        let pool = self
+            .component_pools
+            .get_pool_mut(cid)
+            .expect("invariant: set_component_device_handle targets a component with a pool");
+        // X5 (release-present soundness guard): the pool MUST already be
+        // `Device`-backed. `ComponentPool::set_device_handle` silently no-ops on a
+        // Host pool (its `PoolBacking::Device` match arm), so a `debug_assert!`
+        // would vanish in release and let a stale-key grow silently DROP the new
+        // handle write — leaving the core pool pointing at the freed old buffer.
+        // `device_handle()` returns `Some` iff the pool is the `Device` arm. Setup-
+        // time (the grow write path), so the release `assert!` is off the hot path.
+        assert!(
+            pool.device_handle().is_some(),
+            "set_component_device_handle: component {} pool is not Device-backed — \
+             the handle write would be silently dropped on a Host pool (X5)",
+            cid.0
+        );
+        pool.set_device_handle(handle);
     }
 
     /// Refreshes the entire `columns` table from `component_pools`.
