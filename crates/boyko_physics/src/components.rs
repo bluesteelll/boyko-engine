@@ -13,24 +13,28 @@ use boyko_ecs::ecs::identifiers::primitives::EntityId;
 use boyko_macros::{Bundle, Component};
 
 use crate::manifold::Manifold;
-use crate::math::Vec2;
+use crate::math::{Mat3, Quat, Vec3};
 
 /// HOT integrator state of a rigid body (plan D5) — its own SoA column.
 ///
 /// Contains ONLY the fields the integrate loop touches every step, so
 /// `Query<&mut RigidBody>` streams a tight, cache-dense column. Mass/material
 /// lives in the separate [`RigidBodyMass`] column.
+///
+/// `Default` is derived: `Vec3` fields default to zero and `rotation` defaults
+/// to [`Quat::IDENTITY`] (the `Quat` `Default` impl), so a default body has a
+/// valid identity orientation, not an invalid all-zero quaternion.
 #[repr(C)]
 #[derive(Component, Clone, Copy, Debug, Default, PartialEq)]
 pub struct RigidBody {
     /// World position (center of mass), in world units.
-    pub position: Vec2,
+    pub position: Vec3,
     /// Linear velocity, in world units per second.
-    pub linear_velocity: Vec2,
-    /// Orientation, in radians.
-    pub rotation: f32,
-    /// Angular velocity, in radians per second.
-    pub angular_velocity: f32,
+    pub linear_velocity: Vec3,
+    /// Orientation (unit quaternion).
+    pub rotation: Quat,
+    /// Angular velocity (world-frame axis-angle rate), in radians per second.
+    pub angular_velocity: Vec3,
 }
 
 /// The simulation role of a body (plan D5).
@@ -54,14 +58,23 @@ pub enum BodyType {
 ///
 /// Read by the solve, never by the integrate loop, so keeping it out of
 /// [`RigidBody`] keeps the hot integrate path's cache lines clean (D5). Stores
-/// inverse mass/inertia (so a static body is simply `inv_mass == 0`, no branch).
+/// inverse mass and the inverse inertia TENSOR (so a static body is simply
+/// `inv_mass == 0` / `inv_inertia == Mat3::ZERO`, no branch).
 #[repr(C)]
 #[derive(Component, Clone, Copy, Debug, PartialEq)]
 pub struct RigidBodyMass {
+    /// Inverse inertia TENSOR (`Mat3::ZERO` = infinite inertia). Maps an
+    /// angular impulse/torque to the body's angular response (`Δω = I⁻¹ · τ`).
+    ///
+    /// **Convention (locks the contract for the Phase-10 solver):** this is the
+    /// **world-space** inverse inertia tensor, so `Δω = inv_inertia · τ_world`
+    /// pairs directly with [`RigidBody`]'s `angular_velocity` and the world-frame
+    /// [`Quat::integrate`](crate::math::Quat::integrate) (which premultiplies a
+    /// world-frame `ω`). A solver that keeps a body-space tensor must rotate it
+    /// into world space (`R · I⁻¹_body · Rᵀ`) before applying torques here.
+    pub inv_inertia: Mat3,
     /// Inverse mass (`0` = infinite mass / immovable).
     pub inv_mass: f32,
-    /// Inverse rotational inertia (`0` = infinite inertia).
-    pub inv_inertia: f32,
     /// Coefficient of restitution `e ∈ [0, 1]` (1 = perfectly elastic).
     pub restitution: f32,
     /// Coulomb friction coefficient.
@@ -73,9 +86,11 @@ pub struct RigidBodyMass {
 impl Default for RigidBodyMass {
     fn default() -> Self {
         // A unit-mass dynamic body with light bounce — the common spawn default.
+        // Identity inverse inertia is the unit-tensor placeholder until a real
+        // shape-derived tensor is computed (Phase 10).
         Self {
+            inv_inertia: Mat3::IDENTITY,
             inv_mass: 1.0,
-            inv_inertia: 1.0,
             restitution: 0.5,
             friction: 0.3,
             body_type: BodyType::Dynamic,
@@ -86,26 +101,26 @@ impl Default for RigidBodyMass {
 /// The collision shape of a [`Collider`] (plan D5).
 ///
 /// A zero-`dyn` tagged union (`#[repr(C)]` enum) — no `Box<dyn Shape>`, no
-/// vtable, no heap (principle 1). New 2D shapes extend the enum; a real
+/// vtable, no heap (principle 1). New 3D shapes extend the enum; a real
 /// narrowphase matches on the variant.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ColliderShape {
-    /// A circle of the given radius (world units).
-    Circle {
+    /// A sphere of the given radius (world units).
+    Sphere {
         /// Radius in world units.
         radius: f32,
     },
     /// An axis-aligned box given by its half-extents (world units).
     Aabb {
         /// Half-extents along each axis.
-        half_extents: Vec2,
+        half_extents: Vec3,
     },
 }
 
 impl Default for ColliderShape {
     fn default() -> Self {
-        Self::Circle { radius: 0.5 }
+        Self::Sphere { radius: 0.5 }
     }
 }
 

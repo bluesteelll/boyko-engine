@@ -30,9 +30,11 @@ pub use components::{
     BodyType, Collider, ColliderShape, Contact, RigidBody, RigidBodyBundle, RigidBodyMass,
 };
 pub use manifold::{BodyIndex, ContactPoint, Manifold};
-pub use math::{MAX_CONTACT_POINTS, Vec2};
+pub use math::{MAX_CONTACT_POINTS, Mat3, Quat, Vec3};
 pub use plugin::{PhysicsStageKeys, add_physics_systems};
-pub use resources::{BodyState, ContactPairs, Manifolds, PhysicsConfig, SolverScratch, TouchedMask};
+pub use resources::{
+    BodyState, ContactPairs, Manifolds, PhysicsConfig, SolverScratch, TouchedMask,
+};
 pub use solver::{NoopSolver, RigidSolver};
 pub use systems::{
     physics_apply, physics_broadphase, physics_gather, physics_integrate, physics_narrowphase,

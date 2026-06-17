@@ -4,8 +4,9 @@
 //! [`add_physics_systems`](crate::plugin::add_physics_systems)):
 //!
 //! 1. [`physics_integrate`] — `par_iter_mut`: gravity + `pos += vel·dt` +
-//!    `rot += angvel·dt`. The only real-work stage in the foundation; a sound
-//!    parallel pass over disjoint rows (each body writes only its own row).
+//!    `rot = rot.integrate(angvel, dt)` (first-order quaternion advance). The
+//!    only real-work stage in the foundation; a sound parallel pass over
+//!    disjoint rows (each body writes only its own row).
 //! 2. [`physics_gather`] — snapshots `(&RigidBody, &RigidBodyMass)` IN ROW ORDER
 //!    into the dense [`SolverScratch::bodies`](crate::resources::SolverScratch)
 //!    and resets the touched mask (the seam's gather boundary, IM-1).
@@ -37,17 +38,16 @@ use boyko_ecs::ecs::core::time::FixedTime;
 
 use crate::components::{ColliderShape, RigidBody, RigidBodyMass};
 use crate::manifold::{BodyIndex, ContactPoint, Manifold};
-use crate::math::Vec2;
-use crate::resources::{
-    BodyState, ContactPairs, Manifolds, PhysicsConfig, SolverScratch,
-};
+use crate::math::Vec3;
+use crate::resources::{BodyState, ContactPairs, Manifolds, PhysicsConfig, SolverScratch};
 use crate::solver::RigidSolver;
 
 /// Integrates every body's hot state for one step (plan D3 stage 1).
 ///
 /// A sound `par_iter_mut` over disjoint rows: each body reads/writes only its
-/// own [`RigidBody`]. Applies gravity to linear velocity, then advances position
-/// and rotation by the fixed `dt`. Not gated by the solver — the integrate loop
+/// own [`RigidBody`]. Applies gravity to linear velocity, advances position by
+/// the fixed `dt`, then advances orientation by integrating the quaternion
+/// against the angular velocity. Not gated by the solver — the integrate loop
 /// always runs (the foundation's only real work).
 //
 // `clippy::needless_pass_by_value`: `Res<_>` is a by-value `SystemParam` by
@@ -66,7 +66,7 @@ pub fn physics_integrate(
     query.par_iter_mut().for_each(move |body: &mut RigidBody| {
         body.linear_velocity = body.linear_velocity + gravity * dt;
         body.position = body.position + body.linear_velocity * dt;
-        body.rotation += body.angular_velocity * dt;
+        body.rotation = body.rotation.integrate(body.angular_velocity, dt);
     });
 }
 
@@ -144,11 +144,13 @@ pub fn physics_broadphase(scratch: Res<SolverScratch>, mut pairs: ResMut<Contact
 /// Produces a [`Manifold`] for each overlapping pair into [`Manifolds`]
 /// (plan D3 stage 3).
 ///
-/// A real circle-circle narrowphase over the candidate pairs: for an
-/// overlapping pair it emits a single contact point with the separation along
-/// the center-to-center normal (the foundation's end-to-end seam exercise —
-/// the no-op solver still ignores these manifolds). Manifolds are BodyIndex-
-/// keyed (IM-1). The buffer is cleared and refilled, capacity reused.
+/// A real sphere-sphere narrowphase over the candidate pairs: for an
+/// overlapping pair it emits a single contact point (`count = 1`; the capacity
+/// is 4 but spheres need only one) with the separation along the
+/// center-to-center 3D normal (the foundation's end-to-end seam exercise — the
+/// no-op solver still ignores these manifolds). A full box-box 4-point clipper
+/// is Phase-10+ work. Manifolds are BodyIndex-keyed (IM-1). The buffer is
+/// cleared and refilled, capacity reused.
 //
 // `clippy::needless_pass_by_value`: see `physics_gather`.
 #[allow(clippy::needless_pass_by_value)]
@@ -176,7 +178,7 @@ pub fn physics_narrowphase(
             delta * dist.recip()
         } else {
             // Coincident centers: pick a stable arbitrary normal.
-            Vec2::new(1.0, 0.0)
+            Vec3::new(1.0, 0.0, 0.0)
         };
         let contact = bodies[ia].position + normal * ra;
         let mut manifold = Manifold::new(a, b);
@@ -257,6 +259,9 @@ pub fn physics_apply(mut query: Query<Mut<RigidBody>>, scratch: Res<SolverScratc
                 rotation: state.rotation,
                 angular_velocity: state.angular_velocity,
             };
+            // Note: the field set/order of `RigidBody` and `BodyState` differ
+            // (the hot column vs the gathered SoA snapshot), so this is an
+            // explicit field projection, not a `*body = *state`.
         }
         row += 1;
     }
@@ -279,12 +284,17 @@ fn body_bounding_radius(_body: &BodyState) -> f32 {
     DEFAULT_BODY_RADIUS
 }
 
-/// Narrow-phase circle radius of a body (the foundation's circle-circle test).
+/// Narrow-phase bounding-sphere radius of a body (the foundation's
+/// sphere-sphere test).
+///
+/// A sphere contributes its radius directly; a box contributes the length of
+/// its half-extents diagonal (`half_extents.length()`), the smallest sphere
+/// enclosing the box.
 #[inline]
 fn collider_radius(_body: &BodyState) -> f32 {
     match DEFAULT_SHAPE {
-        ColliderShape::Circle { radius } => radius,
-        ColliderShape::Aabb { half_extents } => half_extents.x.max(half_extents.y),
+        ColliderShape::Sphere { radius } => radius,
+        ColliderShape::Aabb { half_extents } => half_extents.length(),
     }
 }
 
@@ -293,6 +303,6 @@ fn collider_radius(_body: &BodyState) -> f32 {
 const DEFAULT_BODY_RADIUS: f32 = 0.5;
 
 /// Default collider shape used by the foundation narrowphase.
-const DEFAULT_SHAPE: ColliderShape = ColliderShape::Circle {
+const DEFAULT_SHAPE: ColliderShape = ColliderShape::Sphere {
     radius: DEFAULT_BODY_RADIUS,
 };

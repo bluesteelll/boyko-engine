@@ -41,7 +41,12 @@ pub trait RigidSolver: Resource + 'static {
     ///
     /// `config` carries the global tunables (e.g. `substeps`, reserved for
     /// Phase 10); `manifolds` is the deterministic, dense contact buffer.
-    fn solve(&mut self, config: &PhysicsConfig, manifolds: &[Manifold], scratch: &mut SolverScratch);
+    fn solve(
+        &mut self,
+        config: &PhysicsConfig,
+        manifolds: &[Manifold],
+        scratch: &mut SolverScratch,
+    );
 
     /// Returns `true` when this solver does no work — lets the step system
     /// early-out before touching the scratch/manifolds (the 0%-gate for the

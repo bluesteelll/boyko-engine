@@ -12,7 +12,7 @@ use boyko_utils::bit_mask::bit_set_256::BitSet256;
 
 use crate::components::{BodyType, RigidBody, RigidBodyMass};
 use crate::manifold::{BodyIndex, Manifold};
-use crate::math::Vec2;
+use crate::math::{Mat3, Quat, Vec3};
 
 /// Number of bits in one [`BitSet256`] chunk.
 const BITS_PER_CHUNK: usize = 256;
@@ -26,7 +26,7 @@ const BITS_PER_CHUNK: usize = 256;
 pub struct PhysicsConfig {
     /// Constant acceleration applied to dynamic bodies each step (world
     /// units/s²).
-    pub gravity: Vec2,
+    pub gravity: Vec3,
     /// Solver substep count, reserved for Phase 10 (default `1`).
     pub substeps: u32,
 }
@@ -34,8 +34,8 @@ pub struct PhysicsConfig {
 impl Default for PhysicsConfig {
     fn default() -> Self {
         Self {
-            // Earth-like downward gravity by default.
-            gravity: Vec2::new(0.0, -9.81),
+            // Earth-like downward gravity by default (−Y is "down").
+            gravity: Vec3::new(0.0, -9.81, 0.0),
             substeps: 1,
         }
     }
@@ -91,18 +91,19 @@ impl Manifolds {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct BodyState {
+    /// Inverse inertia TENSOR (mirrors [`RigidBodyMass::inv_inertia`]); read by
+    /// the solve. Placed first so the larger-aligned fields lead the struct.
+    pub inv_inertia: Mat3,
     /// World position (mirrors [`RigidBody::position`]).
-    pub position: Vec2,
+    pub position: Vec3,
     /// Linear velocity (mirrors [`RigidBody::linear_velocity`]).
-    pub linear_velocity: Vec2,
-    /// Orientation in radians (mirrors [`RigidBody::rotation`]).
-    pub rotation: f32,
+    pub linear_velocity: Vec3,
     /// Angular velocity (mirrors [`RigidBody::angular_velocity`]).
-    pub angular_velocity: f32,
+    pub angular_velocity: Vec3,
+    /// Orientation (mirrors [`RigidBody::rotation`]).
+    pub rotation: Quat,
     /// Inverse mass (`0` = immovable); read by the solve.
     pub inv_mass: f32,
-    /// Inverse inertia; read by the solve.
-    pub inv_inertia: f32,
     /// Restitution; read by the solve.
     pub restitution: f32,
     /// Friction; read by the solve.
@@ -117,12 +118,12 @@ impl BodyState {
     #[inline]
     pub fn from_columns(body: &RigidBody, mass: &RigidBodyMass) -> Self {
         Self {
+            inv_inertia: mass.inv_inertia,
             position: body.position,
             linear_velocity: body.linear_velocity,
-            rotation: body.rotation,
             angular_velocity: body.angular_velocity,
+            rotation: body.rotation,
             inv_mass: mass.inv_mass,
-            inv_inertia: mass.inv_inertia,
             restitution: mass.restitution,
             friction: mass.friction,
             body_type: mass.body_type,
