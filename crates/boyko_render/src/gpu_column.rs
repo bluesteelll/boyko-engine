@@ -38,6 +38,8 @@ use boyko_rhi::{
     ComputePipelineDesc, ComputePipelineHandle, MemoryLocation, ResourceRegistry,
     RhiCommandEncoder, RhiDevice, RhiQueue, ShaderHandle, ShaderStage, slot_to_u64, u64_to_slot,
 };
+#[cfg(any(test, feature = "test-readback"))]
+use boyko_rhi::enums::{BarrierAccess, BarrierStage};
 use boyko_rhi_vulkan::device::VulkanContext;
 use boyko_rhi_vulkan::rhi_impl::Vulkan;
 
@@ -186,6 +188,48 @@ impl RhiContext {
             .dispatch_compute(&self.context, pipeline, archetype, component, barriers)
     }
 
+    /// TEST-ONLY (Phase 5 Wave E `sync_validation` oracle): records two
+    /// `gpu_integrate` passes over the same column in ONE submit, with an optional
+    /// barrier between them. Forwards to
+    /// [`GpuColumnManager::dispatch_compute_twice_one_submit`](GpuColumnManager::dispatch_compute_twice_one_submit).
+    ///
+    /// # Errors
+    /// [`GpuColumnError`] on a stale handle or any RHI failure.
+    #[cfg(any(test, feature = "test-readback"))]
+    #[inline]
+    pub fn dispatch_compute_twice_one_submit(
+        &self,
+        pipeline: ComputePipelineHandle,
+        archetype: ArchetypeId,
+        component: ComponentId,
+        barrier_between: bool,
+    ) -> Result<bool, GpuColumnError> {
+        self.manager.dispatch_compute_twice_one_submit(
+            &self.context,
+            pipeline,
+            archetype,
+            component,
+            barrier_between,
+        )
+    }
+
+    /// TEST-ONLY: the owned manager's device→host readback count (Phase 5 Wave E
+    /// zero-readback oracle). Forwards to
+    /// [`GpuColumnManager::readback_count`](GpuColumnManager::readback_count).
+    #[cfg(any(test, feature = "test-readback"))]
+    #[inline]
+    pub fn readback_count(&self) -> u64 {
+        self.manager.readback_count()
+    }
+
+    /// TEST-ONLY: zeroes the owned manager's readback counter. Forwards to
+    /// [`GpuColumnManager::reset_readback_count`](GpuColumnManager::reset_readback_count).
+    #[cfg(any(test, feature = "test-readback"))]
+    #[inline]
+    pub fn reset_readback_count(&self) {
+        self.manager.reset_readback_count();
+    }
+
     /// Tears down every device resource (forwards to the manager).
     ///
     /// IDEMPOTENT (FIX-C2): a second call on an already-drained manager is a
@@ -248,6 +292,18 @@ pub struct GpuColumnManager {
     staging: Option<BufferHandle>,
     /// Current staging-buffer capacity in bytes (0 when no staging exists).
     staging_cap: u64,
+    /// TEST-ONLY: how many times [`readback_for_test`](Self::readback_for_test)
+    /// has device→host copied since the last [`reset_readback_count`](Self::reset_readback_count).
+    ///
+    /// The zero-readback oracle (Phase 5 Wave E): a steady-state frame performs
+    /// ZERO host readbacks, so this counter MUST stay 0 across every
+    /// `Schedule::run` frame. Only the final test-oracle `readback_for_test`
+    /// bumps it. Gated to test builds — it does not exist on the production frame
+    /// path. `Relaxed`: the manager is `!Send` (touched only on its owning
+    /// thread), so there is no cross-thread ordering to establish; the count is a
+    /// plain single-threaded tally.
+    #[cfg(any(test, feature = "test-readback"))]
+    readback_count: core::sync::atomic::AtomicU64,
 }
 
 impl Default for GpuColumnManager {
@@ -265,7 +321,36 @@ impl GpuColumnManager {
             meta: Vec::new(),
             staging: None,
             staging_cap: 0,
+            #[cfg(any(test, feature = "test-readback"))]
+            readback_count: core::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    /// TEST-ONLY: the number of device→host readbacks since the last
+    /// [`reset_readback_count`](Self::reset_readback_count) (Phase 5 Wave E
+    /// zero-readback oracle).
+    ///
+    /// A steady-state frame does ZERO readbacks (D2): the `zero_readback`
+    /// integration test asserts this returns 0 after every `Schedule::run`
+    /// frame, and exactly 1 after the single post-loop test-oracle readback.
+    #[cfg(any(test, feature = "test-readback"))]
+    #[inline]
+    pub fn readback_count(&self) -> u64 {
+        // Relaxed: a single-threaded tally on a `!Send` manager — no cross-thread
+        // ordering to establish.
+        self.readback_count.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// TEST-ONLY: zeroes the readback counter (call before a measured frame
+    /// window so [`readback_count`](Self::readback_count) reflects only that
+    /// window).
+    #[cfg(any(test, feature = "test-readback"))]
+    #[inline]
+    pub fn reset_readback_count(&self) {
+        // Relaxed: see `readback_count` — single-threaded tally on a `!Send`
+        // manager.
+        self.readback_count
+            .store(0, core::sync::atomic::Ordering::Relaxed);
     }
 
     /// Test-only: whether the registry holds NO live resource (every column +
@@ -609,6 +694,130 @@ impl GpuColumnManager {
         record.map(|()| true)
     }
 
+    /// TEST-ONLY (Phase 5 Wave E `sync_validation` oracle): records TWO
+    /// `gpu_integrate` compute passes over the SAME device column into ONE command
+    /// buffer and submits them in ONE `vkQueueSubmit`, with an optional
+    /// `vkCmdPipelineBarrier` between them, then fence-waits.
+    ///
+    /// This is the ONLY path that exposes an INTRA-submit hazard: both passes read
+    /// AND write the same SSBO (`Data[i] = Data[i] + 100`), so pass 2's reads
+    /// depend on pass 1's writes (a read-after-write + write-after-write hazard on
+    /// the same `(buffer, range)`). The per-op fence in [`dispatch_compute`](Self::dispatch_compute)
+    /// does NOT order these two passes — they are in the SAME submit — so a
+    /// `COMPUTE_SHADER`→`COMPUTE_SHADER` `SHADER_WRITE`→`SHADER_READ|SHADER_WRITE`
+    /// barrier between them is LOAD-BEARING:
+    ///
+    /// * `barrier_between == true`  → the hazard is resolved; the synchronization-
+    ///   validation layer stays silent and the result is the deterministic
+    ///   `+200` (two `+100` passes applied in order).
+    /// * `barrier_between == false` → the two passes are unsynchronized; Vulkan
+    ///   synchronization validation flags a `SYNC-HAZARD-*` (the authoritative
+    ///   oracle). The numeric result is then UNDEFINED (it may or may not corrupt
+    ///   depending on the GPU's actual overlap), so a caller must use the
+    ///   validation-layer signal — not the bytes — as the primary oracle.
+    ///
+    /// Returns `Ok(false)` if the column does not resolve; `Ok(true)` on a
+    /// recorded-and-waited two-pass submit. Gated to test builds — it is NEVER on
+    /// the frame path (which records exactly one pass per submit).
+    ///
+    /// # Errors
+    /// [`GpuColumnError`] on a stale pipeline/column handle or any RHI failure.
+    #[cfg(any(test, feature = "test-readback"))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn dispatch_compute_twice_one_submit(
+        &self,
+        device: &VulkanContext,
+        pipeline: ComputePipelineHandle,
+        archetype: ArchetypeId,
+        component: ComponentId,
+        barrier_between: bool,
+    ) -> Result<bool, GpuColumnError> {
+        let Some(resolved) = self.resolve(archetype, component) else {
+            return Ok(false);
+        };
+        let buffer_handle = BufferHandle(u64_to_slot(resolved.handle.0));
+        let buffer = self
+            .registry
+            .resolve_buffer(buffer_handle)
+            .ok_or(GpuColumnError::StaleHandle)?;
+        let pipe = self
+            .registry
+            .resolve_compute_pipeline(pipeline)
+            .ok_or(GpuColumnError::StaleHandle)?;
+
+        let count = resolved.device_len;
+        if count == 0 {
+            return Ok(true);
+        }
+        let group_count_x = count.div_ceil(LOCAL_SIZE_X);
+
+        let fence = device.create_fence(false)?;
+        let mut encoder = match device.create_command_encoder() {
+            Ok(e) => e,
+            Err(e) => {
+                // SAFETY: `fence` was just created on `device`, moved by value here
+                // ⇒ destroyed once; nothing was submitted, so no GPU work
+                // references it.
+                unsafe { device.destroy_fence(fence) };
+                return Err(GpuColumnError::Rhi(e));
+            }
+        };
+        let queue = device.rhi_queue();
+
+        let mut submitted = false;
+        let record = (|| -> Result<(), GpuColumnError> {
+            encoder.begin()?;
+
+            // Pass 1: read+write the column.
+            encoder.bind_compute_pipeline(pipe);
+            encoder.bind_storage_buffer(buffer, 0, 0);
+            encoder.push_constants(ShaderStage::COMPUTE, 0, &count.to_ne_bytes());
+            encoder.dispatch(group_count_x, 1, 1);
+
+            // The load-bearing barrier: order pass 1's SHADER_WRITE before pass
+            // 2's SHADER_READ|SHADER_WRITE on the same buffer. Omitting it leaves
+            // the intra-submit hazard for synchronization validation to catch.
+            if barrier_between {
+                let buffers = [BufferBarrier {
+                    buffer,
+                    src_access: BarrierAccess::SHADER_WRITE,
+                    dst_access: BarrierAccess::SHADER_READ | BarrierAccess::SHADER_WRITE,
+                }];
+                encoder.pipeline_barrier(&BarrierDesc {
+                    src_stage: BarrierStage::COMPUTE_SHADER,
+                    dst_stage: BarrierStage::COMPUTE_SHADER,
+                    buffers: &buffers,
+                });
+            }
+
+            // Pass 2: read+write the column again (depends on pass 1).
+            encoder.bind_compute_pipeline(pipe);
+            encoder.bind_storage_buffer(buffer, 0, 0);
+            encoder.push_constants(ShaderStage::COMPUTE, 0, &count.to_ne_bytes());
+            encoder.dispatch(group_count_x, 1, 1);
+
+            encoder.end()?;
+            queue.submit(&encoder, &fence)?;
+            submitted = true;
+            device.wait_fence(&fence, u64::MAX)?;
+            Ok(())
+        })();
+
+        if record.is_err() && submitted {
+            let _ = device.wait_idle();
+        }
+
+        // SAFETY: `encoder` + `fence` were created on `device`, each moved by value
+        // here ⇒ destroyed once. No GPU work is in flight: `Ok` ⇒ the wait
+        // completed; `Err && !submitted` ⇒ nothing was enqueued; `Err && submitted`
+        // ⇒ the `wait_idle` above drained it.
+        unsafe {
+            device.destroy_command_encoder(encoder);
+            device.destroy_fence(fence);
+        }
+        record.map(|()| true)
+    }
+
     /// SETUP-only: stages `bytes` into the host-visible staging buffer, copies
     /// them into the device column behind `handle`, and fence-waits.
     ///
@@ -827,6 +1036,11 @@ impl GpuColumnManager {
         handle: DeviceColumnHandle,
         len: usize,
     ) -> Result<Vec<u8>, GpuColumnError> {
+        // Zero-readback oracle (Phase 5 Wave E): count every device→host readback
+        // so a test can prove the steady-state frame path performed NONE. Relaxed:
+        // single-threaded tally on a `!Send` manager.
+        self.readback_count
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         let size = len as u64;
         let device_handle = BufferHandle(u64_to_slot(handle.0));
         // FIX-U2: bound the read against the column's byte capacity so the
