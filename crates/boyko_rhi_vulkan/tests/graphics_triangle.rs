@@ -180,6 +180,7 @@ fn triangle_draw_golden_round_trip() {
             fragment_module: &fs,
             fragment_entry: c"main",
             color_format: Format::R8G8B8A8Unorm,
+            depth_format: None,
             topology: PrimitiveTopology::TriangleList,
             // Rung 2: no vertex buffer (SV_VertexID-generated) + an empty layout.
             vertex_layout: None,
@@ -231,6 +232,7 @@ fn triangle_draw_golden_round_trip() {
     encoder.begin_rendering(&RenderingDesc {
         render_area: full,
         colors: &attachment,
+        depth: None,
     });
     encoder.bind_graphics_pipeline(&pipeline);
     encoder.set_viewport(&Viewport {

@@ -124,6 +124,12 @@ pub struct GraphicsPipelineDesc<'a, A: RhiApi> {
     /// The single color attachment's format (the
     /// `VkPipelineRenderingCreateInfo` format — see the format contract above).
     pub color_format: Format,
+    /// The depth attachment's format, or `None` for a depth-less pipeline (rungs
+    /// 1..3). `Some(fmt)` (rung 4: [`Format::D32Sfloat`]) enables the pipeline's
+    /// depth-stencil state (`depthTestEnable`/`depthWriteEnable`, compare op
+    /// `LESS`, no stencil) and sets `VkPipelineRenderingCreateInfo.depthAttachmentFormat`
+    /// — so the format MUST equal every [`DepthAttachment`]'s texture format (W2-b).
+    pub depth_format: Option<Format>,
     /// The primitive-assembly topology (rung 2/3: `TriangleList`).
     pub topology: PrimitiveTopology,
     /// The vertex-buffer input layout, or `None` for a vertex-buffer-less pipeline
@@ -240,16 +246,46 @@ pub struct RenderingAttachment<'a, A: RhiApi> {
     pub clear_color: [f32; 4],
 }
 
+/// The optional depth attachment for [`crate::encoder::RhiCommandEncoder::begin_rendering`]
+/// (Phase-6 S0 rung 4 — `VkRenderingInfo.pDepthAttachment`).
+///
+/// Borrows the backend texture (whose DEPTH-aspect image view is the attachment)
+/// for the `begin_rendering` call only. `clear_depth` is applied iff `load_op` is
+/// [`LoadOp::Clear`] (rung 4 clears to `1.0`, the far plane, so a smaller fragment
+/// `z` always wins the `LESS` test).
+///
+/// **Format contract (S0 SAFETY obligation, W2-b):** the attachment's texture
+/// format MUST equal the depth format declared at `create_graphics_pipeline` time
+/// (`GraphicsPipelineDesc::depth_format`) for any pipeline bound inside this
+/// rendering scope — a mismatch faults at draw time in the validation layer.
+pub struct DepthAttachment<'a, A: RhiApi> {
+    /// The texture whose DEPTH-aspect image view is bound as the depth attachment.
+    pub texture: &'a A::Texture,
+    /// The layout the depth attachment is in during rendering (typically
+    /// [`ImageLayout::DepthAttachmentOptimal`]).
+    pub layout: ImageLayout,
+    /// What to do with the depth contents at scope entry (rung 4: [`LoadOp::Clear`]).
+    pub load_op: LoadOp,
+    /// What to do with the rendered depth at scope exit (rung 4: [`StoreOp::Store`]).
+    pub store_op: StoreOp,
+    /// The depth clear value used when `load_op == LoadOp::Clear` (rung 4: `1.0`).
+    pub clear_depth: f32,
+}
+
 /// Parameters for [`crate::encoder::RhiCommandEncoder::begin_rendering`]
 /// (Vulkan 1.3 dynamic rendering — no `VkRenderPass`/`VkFramebuffer`).
 ///
 /// The `colors` slice is a stack local the backend walks once; rung 1 supplies
-/// exactly one color attachment and no depth attachment.
+/// exactly one color attachment and no depth attachment. Rung 4 adds an optional
+/// `depth` attachment (`None` keeps the rungs-1..3 no-depth path valid).
 pub struct RenderingDesc<'a, A: RhiApi> {
     /// The region the rendering scope covers.
     pub render_area: RenderArea,
     /// The color attachments bound for this scope (rung 1: exactly one).
     pub colors: &'a [RenderingAttachment<'a, A>],
+    /// The optional depth attachment (Phase-6 S0 rung 4); `None` for the no-depth
+    /// rungs-1..3 path.
+    pub depth: Option<DepthAttachment<'a, A>>,
 }
 
 /// An image's `[base_mip, base_mip + level_count) × [base_layer, base_layer +
@@ -275,6 +311,16 @@ impl ImageSubresourceRange {
     /// The full single-mip, single-layer color range — the rung-1 default.
     pub const COLOR: ImageSubresourceRange = ImageSubresourceRange {
         aspect: ImageAspect::COLOR,
+        base_mip_level: 0,
+        level_count: 1,
+        base_array_layer: 0,
+        layer_count: 1,
+    };
+
+    /// The full single-mip, single-layer DEPTH range — the rung-4 depth-attachment
+    /// barrier default (the depth counterpart of [`Self::COLOR`]).
+    pub const DEPTH: ImageSubresourceRange = ImageSubresourceRange {
+        aspect: ImageAspect::DEPTH,
         base_mip_level: 0,
         level_count: 1,
         base_array_layer: 0,

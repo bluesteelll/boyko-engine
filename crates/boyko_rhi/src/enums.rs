@@ -113,6 +113,12 @@ impl BarrierStage {
     pub const TRANSFER: BarrierStage = BarrierStage(0x0000_1000);
     /// `VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT` (graphics seam: Phase 6+).
     pub const COLOR_ATTACHMENT_OUTPUT: BarrierStage = BarrierStage(0x0000_0400);
+    /// `VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT` — the depth-test stage before
+    /// the fragment shader (Phase-6 S0 rung 4: the depth-attachment barrier).
+    pub const EARLY_FRAGMENT_TESTS: BarrierStage = BarrierStage(0x0000_0100);
+    /// `VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT` — the depth-write stage after
+    /// the fragment shader (Phase-6 S0 rung 4: the depth-attachment barrier).
+    pub const LATE_FRAGMENT_TESTS: BarrierStage = BarrierStage(0x0000_0200);
     /// `VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT`.
     pub const BOTTOM_OF_PIPE: BarrierStage = BarrierStage(0x0000_2000);
 
@@ -159,6 +165,11 @@ impl BarrierAccess {
     pub const TRANSFER_WRITE: BarrierAccess = BarrierAccess(0x0000_1000);
     /// `VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT` (graphics seam: Phase 6+).
     pub const COLOR_ATTACHMENT_WRITE: BarrierAccess = BarrierAccess(0x0000_0100);
+    /// `VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT` (Phase-6 S0 rung 4).
+    pub const DEPTH_STENCIL_ATTACHMENT_READ: BarrierAccess = BarrierAccess(0x0000_0200);
+    /// `VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT` — the depth write the
+    /// UNDEFINED → DEPTH_ATTACHMENT_OPTIMAL barrier makes available (rung 4).
+    pub const DEPTH_STENCIL_ATTACHMENT_WRITE: BarrierAccess = BarrierAccess(0x0000_0400);
 
     /// The empty set (no access bits).
     pub const NONE: BarrierAccess = BarrierAccess(0);
@@ -252,6 +263,10 @@ pub enum ImageLayout {
     TransferSrcOptimal = 6,
     /// `VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL` — a transfer/copy destination.
     TransferDstOptimal = 7,
+    /// `VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL` — bound as a depth attachment
+    /// (Vulkan 1.2 core, Phase-6 S0 rung 4). The depth-only counterpart of
+    /// [`Self::ColorAttachmentOptimal`]; no stencil aspect.
+    DepthAttachmentOptimal = 1_000_241_000,
 }
 
 impl ImageLayout {
@@ -284,6 +299,9 @@ impl ImageUsage {
     pub const STORAGE: ImageUsage = ImageUsage(0x0000_0008);
     /// `VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT`.
     pub const COLOR_ATTACHMENT: ImageUsage = ImageUsage(0x0000_0010);
+    /// `VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT` (Phase-6 S0 rung 4: the depth
+    /// buffer). An image carrying this bit is created with a DEPTH-aspect view.
+    pub const DEPTH_STENCIL_ATTACHMENT: ImageUsage = ImageUsage(0x0000_0020);
 
     /// The empty set (no usage bits).
     pub const NONE: ImageUsage = ImageUsage(0);
@@ -446,7 +464,8 @@ pub struct ImageAspect(u32);
 impl ImageAspect {
     /// `VK_IMAGE_ASPECT_COLOR_BIT`.
     pub const COLOR: ImageAspect = ImageAspect(0x0000_0001);
-    /// `VK_IMAGE_ASPECT_DEPTH_BIT` (deferred depth-attachment use).
+    /// `VK_IMAGE_ASPECT_DEPTH_BIT` (Phase-6 S0 rung 4: the depth attachment +
+    /// its barrier/subresource range).
     pub const DEPTH: ImageAspect = ImageAspect(0x0000_0002);
 
     /// Returns the raw `u32` bit pattern — equal to the Vulkan `VkFlags` value.

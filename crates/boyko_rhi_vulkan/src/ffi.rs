@@ -492,6 +492,8 @@ pub enum VkStructureType {
     PipelineViewportStateCreateInfo = 22,
     PipelineRasterizationStateCreateInfo = 23,
     PipelineMultisampleStateCreateInfo = 24,
+    /// `VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO` (rung 4).
+    PipelineDepthStencilStateCreateInfo = 25,
     PipelineColorBlendStateCreateInfo = 26,
     PipelineDynamicStateCreateInfo = 27,
     /// `VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO` — the dynamic-rendering
@@ -697,6 +699,9 @@ pub const VK_FORMAT_R32G32B32_SFLOAT: i32 = 106;
 /// `VkFormat::VK_FORMAT_R32G32B32A32_SFLOAT` — four 32-bit floats (a vec4 vertex
 /// color, Phase-6 S0 rung 3).
 pub const VK_FORMAT_R32G32B32A32_SFLOAT: i32 = 109;
+/// `VkFormat::VK_FORMAT_D32_SFLOAT` — a 32-bit float depth attachment (Phase-6 S0
+/// rung 4). Spec-mandated as a depth attachment on every conformant device.
+pub const VK_FORMAT_D32_SFLOAT: i32 = 126;
 
 /// `VkColorSpaceKHR::VK_COLOR_SPACE_SRGB_NONLINEAR_KHR` — the always-present space.
 pub const VK_COLOR_SPACE_SRGB_NONLINEAR_KHR: i32 = 0;
@@ -714,6 +719,9 @@ pub const VK_IMAGE_USAGE_TRANSFER_SRC_BIT: VkFlags = 0x0000_0001;
 pub const VK_IMAGE_USAGE_SAMPLED_BIT: VkFlags = 0x0000_0004;
 /// `VkImageUsageFlagBits::VK_IMAGE_USAGE_STORAGE_BIT`.
 pub const VK_IMAGE_USAGE_STORAGE_BIT: VkFlags = 0x0000_0008;
+/// `VkImageUsageFlagBits::VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT` (Phase-6 S0
+/// rung 4: the depth buffer).
+pub const VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT: VkFlags = 0x0000_0020;
 
 /// `VkImageType` discriminants (S0 `create_texture`).
 pub const VK_IMAGE_TYPE_2D: i32 = 1;
@@ -741,6 +749,8 @@ pub const VK_IMAGE_VIEW_TYPE_2D: i32 = 1;
 
 /// `VkImageAspectFlagBits::VK_IMAGE_ASPECT_COLOR_BIT`.
 pub const VK_IMAGE_ASPECT_COLOR_BIT: VkFlags = 0x0000_0001;
+/// `VkImageAspectFlagBits::VK_IMAGE_ASPECT_DEPTH_BIT` (Phase-6 S0 rung 4).
+pub const VK_IMAGE_ASPECT_DEPTH_BIT: VkFlags = 0x0000_0002;
 
 /// `VkComponentSwizzle::VK_COMPONENT_SWIZZLE_IDENTITY`.
 pub const VK_COMPONENT_SWIZZLE_IDENTITY: i32 = 0;
@@ -750,14 +760,28 @@ pub const VK_IMAGE_LAYOUT_UNDEFINED: i32 = 0;
 pub const VK_IMAGE_LAYOUT_PRESENT_SRC_KHR: i32 = 1_000_001_002;
 /// `VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL`.
 pub const VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL: i32 = 2;
+/// `VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL` (Vulkan 1.2 core, Phase-6 S0 rung 4).
+pub const VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL: i32 = 1_000_241_000;
 
 /// `VkPipelineStageFlagBits` used by the present barriers / submit wait stage.
 pub const VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT: VkFlags = 0x0000_0001;
 pub const VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT: VkFlags = 0x0000_0400;
+/// `VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT` (Phase-6 S0 rung 4 depth barrier).
+pub const VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT: VkFlags = 0x0000_0100;
+/// `VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT` (Phase-6 S0 rung 4 depth barrier).
+pub const VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT: VkFlags = 0x0000_0200;
 pub const VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT: VkFlags = 0x0000_2000;
 
 /// `VkAccessFlagBits` used by the color-attachment present barriers.
 pub const VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT: VkFlags = 0x0000_0100;
+/// `VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT` (Phase-6 S0 rung 4 depth barrier).
+pub const VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT: VkFlags = 0x0000_0200;
+/// `VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT` (Phase-6 S0 rung 4 depth barrier).
+pub const VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT: VkFlags = 0x0000_0400;
+
+/// `VkCompareOp::VK_COMPARE_OP_LESS` — the rung-4 depth-test compare op (a smaller
+/// fragment `z` passes, i.e. nearer geometry wins).
+pub const VK_COMPARE_OP_LESS: i32 = 1;
 
 /// `VkAttachmentLoadOp` / `VkAttachmentStoreOp` discriminants for dynamic rendering.
 pub const VK_ATTACHMENT_LOAD_OP_LOAD: i32 = 0;
@@ -1282,6 +1306,47 @@ pub struct VkPipelineColorBlendStateCreateInfo {
     pub blend_constants: [f32; 4],
 }
 
+/// `VkStencilOpState` — one face's stencil op set. Rung 4 disables stencil, so all
+/// fields are zero/no-op; the struct exists because [`VkPipelineDepthStencilStateCreateInfo`]
+/// embeds two of them by value (front + back) and the C ABI lays them out inline.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct VkStencilOpState {
+    /// `VkStencilOp` fail op.
+    pub fail_op: i32,
+    /// `VkStencilOp` pass op.
+    pub pass_op: i32,
+    /// `VkStencilOp` depth-fail op.
+    pub depth_fail_op: i32,
+    /// `VkCompareOp`.
+    pub compare_op: i32,
+    pub compare_mask: u32,
+    pub write_mask: u32,
+    pub reference: u32,
+}
+
+/// `VkPipelineDepthStencilStateCreateInfo` — the rung-4 depth-test state
+/// (`depthTestEnable`/`depthWriteEnable` = TRUE, `depthCompareOp` = LESS, no
+/// depth-bounds, no stencil). Pointed to by `VkGraphicsPipelineCreateInfo.
+/// p_depth_stencil_state` ONLY when a depth format is declared; the rungs-1..3
+/// no-depth path leaves that pointer null.
+#[repr(C)]
+pub struct VkPipelineDepthStencilStateCreateInfo {
+    pub s_type: VkStructureType,
+    pub p_next: *const c_void,
+    pub flags: VkFlags,
+    pub depth_test_enable: VkBool32,
+    pub depth_write_enable: VkBool32,
+    /// `VkCompareOp`.
+    pub depth_compare_op: i32,
+    pub depth_bounds_test_enable: VkBool32,
+    pub stencil_test_enable: VkBool32,
+    pub front: VkStencilOpState,
+    pub back: VkStencilOpState,
+    pub min_depth_bounds: f32,
+    pub max_depth_bounds: f32,
+}
+
 /// `VkPipelineDynamicStateCreateInfo` — rung 2 marks viewport + scissor dynamic.
 #[repr(C)]
 pub struct VkPipelineDynamicStateCreateInfo {
@@ -1329,7 +1394,9 @@ pub struct VkGraphicsPipelineCreateInfo {
     pub p_viewport_state: *const VkPipelineViewportStateCreateInfo,
     pub p_rasterization_state: *const VkPipelineRasterizationStateCreateInfo,
     pub p_multisample_state: *const VkPipelineMultisampleStateCreateInfo,
-    /// `const VkPipelineDepthStencilStateCreateInfo*` — null (no depth, rung 2).
+    /// `const VkPipelineDepthStencilStateCreateInfo*` — null on the no-depth path
+    /// (rungs 2-3); points at a live `VkPipelineDepthStencilStateCreateInfo` when a
+    /// depth format is supplied (rung 4).
     pub p_depth_stencil_state: *const c_void,
     pub p_color_blend_state: *const VkPipelineColorBlendStateCreateInfo,
     pub p_dynamic_state: *const VkPipelineDynamicStateCreateInfo,
@@ -1633,13 +1700,26 @@ pub struct VkClearColorValue {
     pub float32: [f32; 4],
 }
 
-/// `VkClearValue` (union of color / depth-stencil). Slice-1 only ever clears
-/// color, and `VkClearColorValue` is the largest variant, so a transparent
-/// wrapper over it is the correct 16-byte/align-4 footprint.
+/// `VkClearDepthStencilValue` (the `{ float depth; uint32_t stencil; }` member of
+/// the [`VkClearValue`] union — used by the rung-4 depth attachment's `CLEAR`).
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct VkClearValue {
+pub struct VkClearDepthStencilValue {
+    pub depth: f32,
+    pub stencil: u32,
+}
+
+/// `VkClearValue` — the C union of `VkClearColorValue` (16 B, the largest variant)
+/// and `VkClearDepthStencilValue` (8 B). A `#[repr(C)] union` is the exact ABI
+/// shape (16-byte size, 4-byte align). A color attachment writes `.color`; a depth
+/// attachment writes `.depth_stencil` (Phase-6 S0 rung 4). Reading the union is
+/// unsafe (the active field is implied by the attachment's aspect, never read by
+/// this crate — only written and handed to the driver).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub union VkClearValue {
     pub color: VkClearColorValue,
+    pub depth_stencil: VkClearDepthStencilValue,
 }
 
 /// `VkRenderingAttachmentInfo` — one color attachment for `vkCmdBeginRendering`.
@@ -1690,7 +1770,9 @@ pub struct VkRenderingInfo {
     pub view_mask: u32,
     pub color_attachment_count: u32,
     pub p_color_attachments: *const VkRenderingAttachmentInfo,
-    /// `const VkRenderingAttachmentInfo*` depth — null (no depth attachment).
+    /// `const VkRenderingAttachmentInfo*` depth — null on the no-depth path; points
+    /// at a live depth `VkRenderingAttachmentInfo` when a depth attachment is supplied
+    /// (rung 4).
     pub p_depth_attachment: *const c_void,
     /// `const VkRenderingAttachmentInfo*` stencil — null.
     pub p_stencil_attachment: *const c_void,
@@ -1886,6 +1968,18 @@ const _: () = assert!(core::mem::size_of::<VkPipelineColorBlendAttachmentState>(
 const _: () = assert!(core::mem::size_of::<VkPipelineColorBlendStateCreateInfo>() == 56);
 const _: () = assert!(core::mem::align_of::<VkPipelineColorBlendStateCreateInfo>() == 8);
 const _: () = assert!(core::mem::size_of::<VkPipelineDynamicStateCreateInfo>() == 32);
+// Phase-6 S0 rung-4 depth-stencil state (read BY the driver in
+// `vkCreateGraphicsPipelines` when a depth format is declared). `VkStencilOpState`
+// is 7 × u32 = 28 B; the depth-stencil create-info is the standard 104-B LP64
+// footprint. `VkClearDepthStencilValue` is `{ f32, u32 }` = 8 B, and the
+// `VkClearValue` union is still 16 B / align 4 (the color variant remains largest).
+const _: () = assert!(core::mem::size_of::<VkStencilOpState>() == 28);
+const _: () = assert!(core::mem::size_of::<VkPipelineDepthStencilStateCreateInfo>() == 104);
+const _: () = assert!(core::mem::align_of::<VkPipelineDepthStencilStateCreateInfo>() == 8);
+const _: () = assert!(core::mem::size_of::<VkClearDepthStencilValue>() == 8);
+// VkClearValue size (== 16) is already asserted in the base layout-guard block
+// above; the union conversion newly needs only the align guard.
+const _: () = assert!(core::mem::align_of::<VkClearValue>() == 4);
 const _: () = assert!(core::mem::size_of::<VkPipelineRenderingCreateInfo>() == 40);
 const _: () = assert!(core::mem::align_of::<VkPipelineRenderingCreateInfo>() == 8);
 const _: () = assert!(core::mem::size_of::<VkGraphicsPipelineCreateInfo>() == 144);

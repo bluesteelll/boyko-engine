@@ -284,6 +284,7 @@ fn vertex_buffer_mvp_triangle_golden_round_trip() {
             fragment_module: &fs,
             fragment_entry: c"main",
             color_format: Format::R8G8B8A8Unorm,
+            depth_format: None,
             topology: PrimitiveTopology::TriangleList,
             vertex_layout: Some(VertexBufferLayout {
                 stride: VERTEX_STRIDE,
@@ -334,6 +335,7 @@ fn vertex_buffer_mvp_triangle_golden_round_trip() {
     encoder.begin_rendering(&RenderingDesc {
         render_area: full,
         colors: &attachment,
+        depth: None,
     });
     encoder.bind_graphics_pipeline(&pipeline);
     // Push the MVP to the pipeline's VERTEX-stage range, then bind the vertex buffer.

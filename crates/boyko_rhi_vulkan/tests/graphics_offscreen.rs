@@ -154,6 +154,7 @@ fn offscreen_clear_golden_round_trip() {
             height: HEIGHT,
         },
         colors: &attachment,
+        depth: None,
     });
     encoder.end_rendering();
 

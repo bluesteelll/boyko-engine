@@ -1,8 +1,9 @@
 //! Phase-6 S0 — the device-local image (`VkImage` + `VkImageView` + a dedicated
 //! `VkDeviceMemory` allocation) backing [`RhiDevice::create_texture`].
 //!
-//! A texture is a 2D (rung 1) or 3D (deferred) `OPTIMAL`-tiling color image bound
-//! to its own `DEVICE_LOCAL` allocation, plus one full-subresource `VkImageView`.
+//! A texture is a 2D (rung 1) or 3D (deferred) `OPTIMAL`-tiling color image — or a
+//! 2D depth image (rung 4, `DEPTH_STENCIL_ATTACHMENT` usage → DEPTH-aspect view) —
+//! bound to its own `DEVICE_LOCAL` allocation, plus one full-subresource `VkImageView`.
 //! Unlike a buffer (which sub-allocates from the shared block), each image gets a
 //! **dedicated** `vkAllocateMemory` (S0 has a handful of attachments — a dedicated
 //! allocation is the simplest sound binding, and `OPTIMAL`-tiling images have
@@ -27,8 +28,9 @@ use crate::error::VulkanError;
 use crate::ffi::*;
 use crate::memory::select_memory_type;
 
-/// An owned device-local color image + its full-subresource view + the dedicated
-/// `VkDeviceMemory` it is bound to ([`RhiApi::Texture`](boyko_rhi::RhiApi::Texture)).
+/// An owned device-local image (color, or depth for a `DEPTH_STENCIL_ATTACHMENT`
+/// usage) + its full-subresource view + the dedicated `VkDeviceMemory` it is bound
+/// to ([`RhiApi::Texture`](boyko_rhi::RhiApi::Texture)).
 ///
 /// # Safety
 ///
@@ -48,8 +50,9 @@ pub struct VulkanTexture {
 }
 
 impl VulkanTexture {
-    /// Creates a 2D/3D color image per `desc`, allocates + binds a dedicated
-    /// device-local block, and creates one full-subresource color view.
+    /// Creates a 2D/3D image per `desc` (color, or depth when the usage carries
+    /// `DEPTH_STENCIL_ATTACHMENT`), allocates + binds a dedicated device-local
+    /// block, and creates one full-subresource view with the matching aspect.
     ///
     /// On any partial failure every object created so far is torn down in reverse
     /// order before the error returns (no leak on the error path).
@@ -79,6 +82,17 @@ impl VulkanTexture {
         // The agnostic `ImageUsage` bits equal the `VK_IMAGE_USAGE_*` bits (identity
         // cast, asserted in `abi_guard.rs`).
         let usage: VkFlags = desc.usage.bits();
+
+        // The view aspect is DEPTH for a depth-stencil-attachment image (rung 4),
+        // else COLOR (rungs 1..3 color images + the deferred D3 storage image). A
+        // mismatched aspect makes `vkCreateImageView` fault under validation; this
+        // routes the single new depth case while leaving the color path byte-identical.
+        let is_depth = (usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0;
+        let aspect_mask = if is_depth {
+            VK_IMAGE_ASPECT_DEPTH_BIT
+        } else {
+            VK_IMAGE_ASPECT_COLOR_BIT
+        };
 
         let image_info = VkImageCreateInfo {
             s_type: VkStructureType::ImageCreateInfo,
@@ -167,7 +181,8 @@ impl VulkanTexture {
             return Err(VulkanError::Vk("vkBindImageMemory", result));
         }
 
-        // One full-subresource color view (mirrors the swapchain image-view path).
+        // One full-subresource view with the format's aspect (COLOR or DEPTH;
+        // mirrors the swapchain image-view path for the color case).
         let view_info = VkImageViewCreateInfo {
             s_type: VkStructureType::ImageViewCreateInfo,
             p_next: ptr::null(),
@@ -182,7 +197,7 @@ impl VulkanTexture {
                 a: VK_COMPONENT_SWIZZLE_IDENTITY,
             },
             subresource_range: VkImageSubresourceRange {
-                aspect_mask: VK_IMAGE_ASPECT_COLOR_BIT,
+                aspect_mask,
                 base_mip_level: 0,
                 level_count: 1,
                 base_array_layer: 0,

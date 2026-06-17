@@ -42,8 +42,8 @@ pub mod queue;
 pub use api::RhiApi;
 pub use descriptor::{
     BarrierDesc, BufferBarrier, BufferCopy, BufferDesc, BufferImageCopy, ComputePipelineDesc,
-    GraphicsPipelineDesc, ImageBarrierDesc, ImageSubresourceRange, RenderArea, RenderingAttachment,
-    RenderingDesc, VertexAttribute, VertexBufferLayout, Viewport,
+    DepthAttachment, GraphicsPipelineDesc, ImageBarrierDesc, ImageSubresourceRange, RenderArea,
+    RenderingAttachment, RenderingDesc, VertexAttribute, VertexBufferLayout, Viewport,
 };
 pub use device::{BindGroupDesc, BindGroupLayoutDesc, RhiDevice, SamplerDesc, TextureDesc};
 pub use encoder::RhiCommandEncoder;

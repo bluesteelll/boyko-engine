@@ -829,11 +829,44 @@ impl RhiDevice<Vulkan> for VulkanContext {
             p_dynamic_states: dynamic_states.as_ptr(),
         };
 
+        // Depth-stencil state (Phase-6 S0 rung 4). Declared ONLY when a depth format
+        // is present: depth test + write enabled, compare op LESS (nearer fragment
+        // wins), no depth-bounds, no stencil. A `None` `depth_format` (rungs 1..3)
+        // leaves both the depth-stencil pointer null and `depth_attachment_format`
+        // UNDEFINED, so the rung-2/3 no-depth pipelines stay byte-identical. The
+        // `depth_state` local must outlive the create call, so it is bound here. The
+        // agnostic `Format` discriminant equals the `VkFormat` constant (asserted in
+        // `abi_guard.rs`); `VK_COMPARE_OP_LESS` is the FFI constant.
+        let depth_state = VkPipelineDepthStencilStateCreateInfo {
+            s_type: VkStructureType::PipelineDepthStencilStateCreateInfo,
+            p_next: ptr::null(),
+            flags: 0,
+            depth_test_enable: VK_TRUE,
+            depth_write_enable: VK_TRUE,
+            depth_compare_op: VK_COMPARE_OP_LESS,
+            depth_bounds_test_enable: VK_FALSE,
+            stencil_test_enable: VK_FALSE,
+            front: VkStencilOpState::default(),
+            back: VkStencilOpState::default(),
+            min_depth_bounds: 0.0,
+            max_depth_bounds: 1.0,
+        };
+        let depth_attachment_format = match desc.depth_format {
+            Some(fmt) => fmt.as_i32(),
+            None => VK_FORMAT_UNDEFINED,
+        };
+        let p_depth_stencil_state: *const c_void = if desc.depth_format.is_some() {
+            (&depth_state as *const VkPipelineDepthStencilStateCreateInfo).cast()
+        } else {
+            ptr::null()
+        };
+
         // The dynamic-rendering attachment-format chain (no `VkRenderPass`). The
         // single color-attachment format declared here is the W2-b SAFETY contract:
         // it MUST equal the format of every `begin_rendering` color attachment any
         // bound pipeline renders into, or the validation layer faults at DRAW time.
-        // The agnostic `Format` discriminant equals the `VkFormat` constant
+        // `depth_attachment_format` carries the same contract for the depth attachment
+        // (rung 4). The agnostic `Format` discriminant equals the `VkFormat` constant
         // (asserted in `abi_guard.rs`).
         let color_format = desc.color_format.as_i32();
         let rendering_info = VkPipelineRenderingCreateInfo {
@@ -842,7 +875,7 @@ impl RhiDevice<Vulkan> for VulkanContext {
             view_mask: 0,
             color_attachment_count: 1,
             p_color_attachment_formats: &color_format,
-            depth_attachment_format: VK_FORMAT_UNDEFINED,
+            depth_attachment_format,
             stencil_attachment_format: VK_FORMAT_UNDEFINED,
         };
 
@@ -859,7 +892,7 @@ impl RhiDevice<Vulkan> for VulkanContext {
             p_viewport_state: &viewport_state,
             p_rasterization_state: &rasterization,
             p_multisample_state: &multisample,
-            p_depth_stencil_state: ptr::null(),
+            p_depth_stencil_state,
             p_color_blend_state: &color_blend,
             p_dynamic_state: &dynamic_state,
             layout,
@@ -880,15 +913,17 @@ impl RhiDevice<Vulkan> for VulkanContext {
         // call). `vertex_input` points at the `vk_bindings`/`vk_attributes` locals
         // when `has_vertex_layout`, whose first `attribute_count` (<= cap, asserted)
         // entries are initialized and bound by the driver's matching counts; an empty
-        // layout uses null arrays with count 0. Every unused state (tessellation,
-        // depth-stencil) is null and `render_pass` is `VK_NULL_HANDLE` (dynamic
-        // rendering). `&mut pipeline` is a valid out-pointer for the single pipeline;
-        // NULL allocator.
+        // layout uses null arrays with count 0. Tessellation state is null; the
+        // depth-stencil state is the `depth_state` local (alive for this whole fn)
+        // when `desc.depth_format` is `Some`, else null (rungs 1..3). `render_pass`
+        // is `VK_NULL_HANDLE` (dynamic rendering). `&mut pipeline` is a valid
+        // out-pointer for the single pipeline; NULL allocator.
         //
         // FORMAT CONTRACT (W2-b): `rendering_info.p_color_attachment_formats` declares
-        // `desc.color_format`; this MUST equal the format of every `begin_rendering`
-        // color attachment the pipeline is later bound inside, or validation faults at
-        // draw time (not here). The agnostic↔Vk discriminant equality is asserted in
+        // `desc.color_format` and `.depth_attachment_format` declares the rung-4 depth
+        // format; each MUST equal the format of every `begin_rendering` color/depth
+        // attachment the pipeline is later bound inside, or validation faults at draw
+        // time (not here). The agnostic↔Vk discriminant equality is asserted in
         // `abi_guard.rs`; the cross-check against the bound rendering scope is the
         // caller's contract (encoded in `GraphicsPipelineDesc`↔`RenderingDesc`).
         let raw = unsafe {
@@ -1578,6 +1613,36 @@ impl RhiCommandEncoder<Vulkan> for VulkanCommandEncoder {
                 }
             });
 
+        // The optional depth attachment (Phase-6 S0 rung 4). When present, build one
+        // `VkRenderingAttachmentInfo` whose clear value uses the depth-stencil variant
+        // of the `VkClearValue` union (depth = `clear_depth`, e.g. 1.0; stencil unused).
+        // The `depth_attachment` local must outlive the `cmd_begin_rendering` call, so
+        // it is bound here and `p_depth_attachment` points at it; `None` leaves the
+        // pointer null (the rungs-1..3 no-depth path). `as_i32()` lowerings equal the
+        // `VkImageLayout`/`VkAttachmentLoadOp`/`VkAttachmentStoreOp` constants (asserted
+        // in `abi_guard.rs`).
+        let depth_attachment = desc.depth.as_ref().map(|d| VkRenderingAttachmentInfo {
+            s_type: VkStructureType::RenderingAttachmentInfo,
+            p_next: ptr::null(),
+            image_view: d.texture.view,
+            image_layout: d.layout.as_i32(),
+            resolve_mode: 0,
+            resolve_image_view: VkImageView::NULL,
+            resolve_image_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+            load_op: d.load_op.as_i32(),
+            store_op: d.store_op.as_i32(),
+            clear_value: VkClearValue {
+                depth_stencil: VkClearDepthStencilValue {
+                    depth: d.clear_depth,
+                    stencil: 0,
+                },
+            },
+        });
+        let p_depth_attachment: *const c_void = match &depth_attachment {
+            Some(att) => (att as *const VkRenderingAttachmentInfo).cast(),
+            None => ptr::null(),
+        };
+
         let rendering = VkRenderingInfo {
             s_type: VkStructureType::RenderingInfo,
             p_next: ptr::null(),
@@ -1600,16 +1665,19 @@ impl RhiCommandEncoder<Vulkan> for VulkanCommandEncoder {
             } else {
                 attachments.as_ptr()
             },
-            p_depth_attachment: ptr::null(),
+            p_depth_attachment,
             p_stencil_attachment: ptr::null(),
         };
         // SAFETY: recording is open; `rendering` is fully initialized and its
         // `p_color_attachments` points to the first `count` entries of the live
         // `attachments` stack array (each naming the caller's live image view, now
-        // in the declared layout per a prior `image_barrier`); no depth/stencil
-        // (null); dynamic rendering is enabled on the device (`dynamicRendering`
-        // feature, Correction #1). All locals outlive the call. `self.fns` points
-        // into the context's boxed fn-table (alive per the type contract).
+        // in the declared layout per a prior `image_barrier`). `p_depth_attachment`
+        // points at the live `depth_attachment` local (alive for this call) naming the
+        // caller's live DEPTH-aspect view in DEPTH_ATTACHMENT_OPTIMAL (per a prior
+        // depth `image_barrier`) when a depth attachment is requested, else null. No
+        // stencil (null). Dynamic rendering is enabled on the device (`dynamicRendering`
+        // feature, Correction #1). All locals outlive the call. `self.fns` points into
+        // the context's boxed fn-table (alive per the type contract).
         let fns = unsafe { &*self.fns };
         unsafe { (fns.cmd_begin_rendering)(self.command_buffer, &rendering) };
     }
