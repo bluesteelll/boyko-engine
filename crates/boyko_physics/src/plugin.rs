@@ -1,0 +1,117 @@
+//! Physics-pipeline wiring — the `PhysicsPlugin`-shaped free function (plan D3 /
+//! MINOR-1).
+//!
+//! There is no `Plugin` trait in the engine (the demo wires systems via a free
+//! fn taking `&mut ScheduleBuilder`), so [`add_physics_systems`] is the faithful
+//! idiom: it inserts the physics resources on the world and registers the six
+//! pipeline stages on the builder in deterministic `.after(...)` order, returning
+//! the stage handles so the caller can identify the physics block.
+//!
+//! Per MINOR-1 it does NOT call `builder.build(world)` — that consumes the
+//! builder and is the caller's job.
+
+use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
+use boyko_ecs::ecs::core::schedule::ScheduleBuilder;
+
+use crate::resources::{ContactPairs, Manifolds, PhysicsConfig, SolverScratch};
+use crate::solver::RigidSolver;
+use crate::systems::{
+    physics_apply, physics_broadphase, physics_gather, physics_integrate, physics_narrowphase,
+    physics_solve_step,
+};
+
+/// The pre-build stage handles of the physics pipeline (plan MINOR-1 / OQ3).
+///
+/// Each field is the stage system's **descriptor index** — the `usize` inside the
+/// engine's `SystemKey` (`SystemConfig::key().0`), captured as the pipeline is
+/// registered. Returned by [`add_physics_systems`] so the caller can identify /
+/// inspect the physics block (e.g. assert the registration order, or correlate a
+/// schedule diagnostic to a stage).
+///
+/// # Why the index, not the `SystemKey`
+///
+/// The engine's `SystemKey` newtype lives in a `pub(crate)` module and is not
+/// re-exported, so it cannot be named by path from this crate — and the physics
+/// crate makes ZERO core edits. `SystemKey`'s inner `usize` IS public
+/// (`SystemKey(pub usize)`), so the stable, nameable handle this crate can expose
+/// is that index. The physics block's intra-order is fully wired internally by
+/// [`add_physics_systems`] via `.after(..)`; an external caller wishing to order
+/// its OWN systems relative to a physics stage needs a real `SystemKey`, which the
+/// engine's privacy currently keeps internal (a pre-existing engine limitation,
+/// not introduced here — a future `pub use` of `SystemKey` would let this struct
+/// carry the keys directly).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PhysicsStageKeys {
+    /// Descriptor index of the [`physics_integrate`] stage — the **block head**.
+    /// A caller ordering its own systems before the whole physics block keys off
+    /// this (the integrate stage is the first to run and carries no `.after`).
+    pub integrate: usize,
+    /// Descriptor index of the [`physics_gather`] stage.
+    pub gather: usize,
+    /// Descriptor index of the [`physics_broadphase`] stage.
+    pub broadphase: usize,
+    /// Descriptor index of the [`physics_narrowphase`] stage.
+    pub narrowphase: usize,
+    /// Descriptor index of the [`physics_solve_step`] stage.
+    pub solve: usize,
+    /// Descriptor index of the [`physics_apply`] stage.
+    pub apply: usize,
+}
+
+/// Initial reserve for the reused step buffers.
+///
+/// The buffers grow on demand (and keep their capacity across steps), so this is
+/// only the first-frame reserve to avoid early reallocation churn — not a cap.
+const INITIAL_BODY_CAPACITY: usize = 1024;
+
+/// Inserts the physics resources on `world` and registers the physics pipeline
+/// on `builder`, returning the stage handles (plan D3 / MINOR-1).
+///
+/// Resources inserted: [`PhysicsConfig`], [`ContactPairs`], [`Manifolds`],
+/// [`SolverScratch`] (all reused, capacity-preserving), and the chosen solver
+/// `S::default()` (the `ResMut<S>` the generic step system dispatches on, D2).
+///
+/// Stages registered in deterministic order via `.after(...)`:
+/// `integrate → gather → broadphase → narrowphase → solve_step::<S> → apply`
+/// (D3). `integrate` carries no `.after` (it is the block head); each later stage
+/// `.after`s its predecessor — so the whole block runs in a fixed intra-order
+/// regardless of registration interleaving with the caller's own systems.
+///
+/// Per MINOR-1 this does NOT call `builder.build(world)` — the caller owns the
+/// build (`runner.rs:325` precedent).
+pub fn add_physics_systems<S: RigidSolver + Default>(
+    builder: &mut ScheduleBuilder,
+    world: &mut EcsMaster,
+) -> PhysicsStageKeys {
+    // Reused, capacity-preserving step buffers (principle 5 — no per-step alloc).
+    world.insert_resource(PhysicsConfig::default());
+    world.insert_resource(ContactPairs::with_capacity(INITIAL_BODY_CAPACITY));
+    world.insert_resource(Manifolds::with_capacity(INITIAL_BODY_CAPACITY));
+    world.insert_resource(SolverScratch::with_capacity(INITIAL_BODY_CAPACITY));
+    world.insert_resource(S::default());
+
+    // Block head: integrate runs first, unordered relative to the caller's
+    // pre-physics systems. `.key().0` is the public descriptor index of the
+    // engine's `SystemKey` (see `PhysicsStageKeys`).
+    let integrate = builder.add_system(physics_integrate).key();
+    let gather = builder.add_system(physics_gather).after(integrate).key();
+    let broadphase = builder.add_system(physics_broadphase).after(gather).key();
+    let narrowphase = builder
+        .add_system(physics_narrowphase)
+        .after(broadphase)
+        .key();
+    let solve = builder
+        .add_system(physics_solve_step::<S>)
+        .after(narrowphase)
+        .key();
+    let apply = builder.add_system(physics_apply).after(solve).key();
+
+    PhysicsStageKeys {
+        integrate: integrate.0,
+        gather: gather.0,
+        broadphase: broadphase.0,
+        narrowphase: narrowphase.0,
+        solve: solve.0,
+        apply: apply.0,
+    }
+}

@@ -1,0 +1,24 @@
+[package]
+name = "boyko-physics"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "boyko_physics"
+path = "src/lib.rs"
+
+[dependencies]
+# Physics builds ONLY on the public boyko_ecs API (Component / Resource / Bundle
+# derives, Query<D, F>, Res / ResMut / Mut, Schedule / ScheduleBuilder, EcsMaster,
+# FixedTime). `boyko_threadpool` supplies the work-stealing pool that
+# `Schedule::run` fans `par_iter_mut` across; `boyko_utils` supplies the
+# `BitSet256` chunk the touched-row mask is built from. NO graphics deps — this
+# crate is solver/seam only (the real solver lands in Phase 10).
+boyko-ecs = { path = "../boyko_ecs" }
+boyko-macros = { path = "../boyko_macros" }
+boyko-utils = { path = "../boyko_utils" }
+boyko-threadpool = { path = "../boyko_threadpool" }
+
+[dev-dependencies]
+proptest = "1"
