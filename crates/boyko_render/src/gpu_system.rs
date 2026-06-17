@@ -54,6 +54,7 @@ use boyko_ecs::ecs::identifiers::primitives::{ArchetypeId, ComponentId};
 
 use boyko_rhi::ComputePipelineHandle;
 
+use crate::barrier::PlannedBarrier;
 use crate::gpu_column::RhiContext;
 
 /// The committed `gpu_integrate` SPIR-V (`Data[i] = Data[i] + 100`), embedded at
@@ -118,22 +119,6 @@ pub fn gpu_integrate_spirv() -> &'static [u32] {
     GPU_INTEGRATE_SPV.as_words()
 }
 
-/// A planned `vkCmdPipelineBarrier` for one device column, lowered at schedule-
-/// build time from a directed conflict edge + the two systems' intents (Wave D).
-///
-/// `#[repr(C)]` POD so a `Box<[PlannedBarrier]>` is a flat, cache-friendly run.
-/// For Wave C this slice is EMPTY (no barrier replay yet — Wave D fills it). The
-/// `buffer` key is the durable `(archetype, component)`-resolved handle at replay
-/// time, never a cached raw `u64` (MF-7); Wave D resolves it indirectly each frame.
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PlannedBarrier {
-    /// The archetype of the column this barrier transitions (durable key, part 1).
-    pub archetype: ArchetypeId,
-    /// The component of the column this barrier transitions (durable key, part 2).
-    pub component: ComponentId,
-}
-
 /// A hand-written `boyko_ecs` [`System`] that records + submits the `gpu_integrate`
 /// compute dispatch on a GPU-resident ECS column (Phase 5 Wave C / MF-5).
 ///
@@ -160,8 +145,12 @@ pub struct GpuSystem {
     /// off the schedule.
     intent: GpuAccessIntent,
 
-    /// The lowered per-system barrier plan, replayed on the frame path before the
-    /// dispatch (Wave D). EMPTY for Wave C — no barrier is replayed yet.
+    /// The lowered per-system barrier plan (Wave D), REPLAYED on the frame path
+    /// before the compute dispatch: each [`PlannedBarrier`]'s durable
+    /// `(archetype, component)` key is resolved to the current device buffer and
+    /// recorded as a `vkCmdPipelineBarrier` into the SAME encoder as the dispatch,
+    /// so the planned `src → dst` stage/access ordering is established on the GPU
+    /// timeline before this dispatch reads/writes the column. EMPTY ⇒ no barrier.
     barriers: Box<[PlannedBarrier]>,
 
     /// Per-system metadata (name, access, tick snapshots, the GPU intent). The
@@ -218,10 +207,39 @@ impl GpuSystem {
         &self.intent
     }
 
-    /// Returns the lowered per-system barrier plan (EMPTY for Wave C).
+    /// Returns the lowered per-system barrier plan (EMPTY until Wave D's
+    /// `lower_barriers` assigns one via [`set_barriers`](Self::set_barriers)).
     #[inline]
     pub fn barriers(&self) -> &[PlannedBarrier] {
         &self.barriers
+    }
+
+    /// Assigns the lowered barrier plan after a schedule build (Wave D seam).
+    ///
+    /// The barrier plan can only be lowered once the [`Schedule`] exists (it walks
+    /// the conflict graph's directed edges), which is AFTER the `GpuSystem` was
+    /// constructed and added. So the build-time wiring is two-phase: construct each
+    /// `GpuSystem` (with an EMPTY plan), build the schedule, call
+    /// [`lower_barriers`](crate::lower_barriers)`(schedule.gpu_barrier_inputs(), …)`
+    /// to obtain the per-consumer `(consumer_index, Box<[PlannedBarrier]>)` plans,
+    /// then hand each plan to its `GpuSystem` through this setter.
+    ///
+    /// # The seam (foundation)
+    ///
+    /// `boyko_render` cannot downcast the `Box<dyn System>`s inside the built
+    /// `Schedule`, so the orchestrating code (which owns the concrete `GpuSystem`
+    /// instances and knows each one's transient consumer `SystemIndex.0` from the
+    /// add order) performs the match: `for (consumer, plan) in plans { gpu_systems[
+    /// consumer].set_barriers(plan); }`. The TRANSIENT `u32` consumer index (O2) is
+    /// used ONLY to route the plan here and then discarded — the durable key lives
+    /// inside each [`PlannedBarrier`]. A full Schedule-internal auto-wire is a
+    /// later refinement (Wave E end-to-end); the setter keeps the foundation seam
+    /// explicit and `boyko_ecs`-free.
+    ///
+    /// [`Schedule`]: boyko_ecs::ecs::core::schedule::schedule::Schedule
+    #[inline]
+    pub fn set_barriers(&mut self, barriers: Box<[PlannedBarrier]>) {
+        self.barriers = barriers;
     }
 }
 
@@ -320,13 +338,20 @@ unsafe impl System for GpuSystem {
             }
         };
 
-        // (b)+(c)+(d) Resolve the target column INDIRECTLY by (archetype, component)
+        // (b) REPLAY the lowered barrier plan (Wave D): each PlannedBarrier's
+        // durable (archetype, component) key is resolved to the CURRENT device
+        // buffer (MF-7 — same indirect path as `target_key`, surviving a grow) and
+        // recorded as a `vkCmdPipelineBarrier` into the SAME encoder, BEFORE the
+        // dispatch. This is the load-bearing synchronisation between a prior GPU
+        // write and this dispatch's read/write — an empty plan records nothing.
+        //
+        // (c)+(d) Resolve the target column INDIRECTLY by (archetype, component)
         // (MF-7), bind the pipeline + the device buffer as storage binding 0, push
         // the live row count as `count`, dispatch `ceil(len/64)` groups, submit +
         // fence. Wave C uses a straightforward submit+wait; deferred-wait overlap is
         // a Phase-6 refinement (the manager owns the seam).
         let (archetype, component) = self.target_key;
-        match ctx.dispatch_compute(self.pipeline, archetype, component) {
+        match ctx.dispatch_compute(self.pipeline, archetype, component, &self.barriers) {
             Ok(true) => {}
             Ok(false) => {
                 // The column did not resolve — a stale key or a not-yet-created

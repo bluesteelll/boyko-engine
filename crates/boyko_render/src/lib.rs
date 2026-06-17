@@ -33,13 +33,24 @@
 //!
 //! [`UnsafeEcsCell::nonsend_resource_mut`]: boyko_ecs::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell::nonsend_resource_mut
 //!
-//! Barrier lowering (`PlannedBarrier` replay) is a LATER wave (D); the Wave-C
-//! `GpuSystem` carries an EMPTY barrier plan.
+//! # Wave D scope
+//!
+//! Wave D adds barrier lowering ([`barrier`]): it consumes the schedule's
+//! [`Schedule::gpu_barrier_inputs`](boyko_ecs::ecs::core::schedule::schedule::Schedule::gpu_barrier_inputs)
+//! ([`GpuBarrierEdge`](boyko_ecs::ecs::core::schedule::schedule::GpuBarrierEdge))
+//! and lowers each producer→GPU-consumer edge + its `GpuAccessIntent`s into a
+//! per-consumer [`PlannedBarrier`] plan (keyed by the durable
+//! `(ArchetypeId, ComponentId)` — MF-7). A [`GpuSystem`] then REPLAYS its plan
+//! (resolve key → current device buffer → `vkCmdPipelineBarrier`) into the same
+//! encoder as its compute dispatch, BEFORE the dispatch — the load-bearing
+//! synchronisation between a prior GPU write and this dispatch's read/write.
 
+pub mod barrier;
 pub mod error;
 pub mod gpu_column;
 pub mod gpu_system;
 
+pub use barrier::{PlannedBarrier, lower_barriers};
 pub use error::GpuColumnError;
 pub use gpu_column::{GpuColumnManager, GpuColumnMeta, LOCAL_SIZE_X, ResolvedColumn, RhiContext};
-pub use gpu_system::{GpuSystem, PlannedBarrier, gpu_integrate_spirv};
+pub use gpu_system::{GpuSystem, gpu_integrate_spirv};

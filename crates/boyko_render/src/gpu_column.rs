@@ -34,13 +34,14 @@ use boyko_ecs::ecs::identifiers::primitives::{ArchetypeId, ComponentId};
 use boyko_ecs::ecs::memory::device_column::DeviceColumnHandle;
 
 use boyko_rhi::{
-    BufferCopy, BufferDesc, BufferHandle, BufferUsage, ComputePipelineDesc, ComputePipelineHandle,
-    MemoryLocation, ResourceRegistry, RhiCommandEncoder, RhiDevice, RhiQueue, ShaderHandle,
-    ShaderStage, slot_to_u64, u64_to_slot,
+    BarrierDesc, BufferBarrier, BufferCopy, BufferDesc, BufferHandle, BufferUsage,
+    ComputePipelineDesc, ComputePipelineHandle, MemoryLocation, ResourceRegistry,
+    RhiCommandEncoder, RhiDevice, RhiQueue, ShaderHandle, ShaderStage, slot_to_u64, u64_to_slot,
 };
 use boyko_rhi_vulkan::device::VulkanContext;
 use boyko_rhi_vulkan::rhi_impl::Vulkan;
 
+use crate::barrier::PlannedBarrier;
 use crate::error::GpuColumnError;
 
 /// The `local_size_x` of the `gpu_integrate` compute shader (`[numthreads(64,1,1)]`).
@@ -161,12 +162,15 @@ impl RhiContext {
     }
 
     /// Records + submits the `gpu_integrate` compute dispatch on the column
-    /// resolved indirectly by `(archetype, component)` (MF-7), fence-waiting before
-    /// it returns. Returns `Ok(false)` if the column does not resolve (skip),
+    /// resolved indirectly by `(archetype, component)` (MF-7), REPLAYING the
+    /// lowered `barriers` plan before the dispatch, fence-waiting before it
+    /// returns. Returns `Ok(false)` if the column does not resolve (skip),
     /// `Ok(true)` on a recorded + waited dispatch.
     ///
-    /// The frame-path entry point `GpuSystem::run_unsafe` calls after projecting
-    /// the `&mut RhiContext`.
+    /// The frame-path entry point `GpuSystem::run_dispatcher` calls after
+    /// projecting the `&mut RhiContext`. Each [`PlannedBarrier`] in `barriers` is
+    /// resolved to its current device buffer by its durable key and recorded as a
+    /// `vkCmdPipelineBarrier` into the dispatch encoder (Wave D).
     ///
     /// # Errors
     /// [`GpuColumnError`] on a stale pipeline handle or any RHI failure.
@@ -176,9 +180,10 @@ impl RhiContext {
         pipeline: ComputePipelineHandle,
         archetype: ArchetypeId,
         component: ComponentId,
+        barriers: &[PlannedBarrier],
     ) -> Result<bool, GpuColumnError> {
         self.manager
-            .dispatch_compute(&self.context, pipeline, archetype, component)
+            .dispatch_compute(&self.context, pipeline, archetype, component, barriers)
     }
 
     /// Tears down every device resource (forwards to the manager).
@@ -458,11 +463,15 @@ impl GpuColumnManager {
     }
 
     /// Records and submits the `gpu_integrate` compute dispatch on the device
-    /// column resolved INDIRECTLY by `(archetype, component)` (MF-7), then
-    /// fence-waits (Wave C — a straightforward submit+wait; deferred-wait overlap
-    /// is a Phase-6 refinement).
+    /// column resolved INDIRECTLY by `(archetype, component)` (MF-7), REPLAYING the
+    /// lowered `barriers` plan first, then fence-waits (a straightforward
+    /// submit+wait; deferred-wait overlap is a Phase-6 refinement).
     ///
-    /// Resolves the current column each call (never caches the raw `u64`), binds
+    /// Resolves the current column each call (never caches the raw `u64`), then —
+    /// BEFORE the dispatch — replays `barriers`: each [`PlannedBarrier`]'s durable
+    /// `(archetype, component)` key is resolved to its CURRENT device buffer (the
+    /// same indirect path, surviving a grow) and recorded as a
+    /// `vkCmdPipelineBarrier` into the SAME encoder (Wave D). It then binds
     /// `pipeline`, binds the column's device buffer as storage binding 0, pushes
     /// the live row count as the shader's `count` push constant, and dispatches
     /// `ceil(device_len / LOCAL_SIZE_X)` workgroups along X. A `device_len == 0`
@@ -471,9 +480,9 @@ impl GpuColumnManager {
     /// non-zero-group debug_assert, and an empty pass buys nothing).
     ///
     /// Returns `Ok(false)` if the column does not resolve (a stale handle or a key
-    /// with no live column) — the caller (`GpuSystem::run_unsafe`) treats this as a
-    /// skip and `debug_assert!`s against it. Returns `Ok(true)` on a recorded +
-    /// fence-waited dispatch.
+    /// with no live column) — the caller (`GpuSystem::run_dispatcher`) treats this
+    /// as a skip and `debug_assert!`s against it. Returns `Ok(true)` on a recorded
+    /// + fence-waited dispatch.
     ///
     /// # Errors
     /// [`GpuColumnError`] on a stale pipeline handle or any RHI failure (encoder,
@@ -484,6 +493,7 @@ impl GpuColumnManager {
         pipeline: ComputePipelineHandle,
         archetype: ArchetypeId,
         component: ComponentId,
+        barriers: &[PlannedBarrier],
     ) -> Result<bool, GpuColumnError> {
         // MF-7: resolve the target column indirectly by its durable key each call.
         // A grow rotates the handle but the (archetype, component) key is stable.
@@ -534,6 +544,35 @@ impl GpuColumnManager {
         let mut submitted = false;
         let record = (|| -> Result<(), GpuColumnError> {
             encoder.begin()?;
+            // (Wave D) Replay the lowered barriers FIRST, so the planned
+            // `src → dst` stage/access ordering is established on the GPU timeline
+            // before this dispatch touches the column. Each PlannedBarrier's
+            // durable `(archetype, component)` key is resolved to its CURRENT
+            // device buffer (the same MF-7 indirect path, surviving a grow). A
+            // barrier whose key does not resolve is SKIPPED (its producer column is
+            // gone — nothing to order against). This is cold (apply-window), so the
+            // per-barrier resolve is the same lookup as `target_key`; no per-frame
+            // allocation (each barrier records a single-entry stack-local set).
+            for b in barriers {
+                let (b_arch, b_comp) = b.key();
+                let Some(b_resolved) = self.resolve(b_arch, b_comp) else {
+                    continue;
+                };
+                let b_handle = BufferHandle(u64_to_slot(b_resolved.handle.0));
+                let Some(b_buf) = self.registry.resolve_buffer(b_handle) else {
+                    continue;
+                };
+                let buffers = [BufferBarrier {
+                    buffer: b_buf,
+                    src_access: b.src_access,
+                    dst_access: b.dst_access,
+                }];
+                encoder.pipeline_barrier(&BarrierDesc {
+                    src_stage: b.src_stage,
+                    dst_stage: b.dst_stage,
+                    buffers: &buffers,
+                });
+            }
             encoder.bind_compute_pipeline(pipe);
             encoder.bind_storage_buffer(buffer, 0, 0);
             encoder.push_constants(ShaderStage::COMPUTE, 0, &count.to_ne_bytes());
