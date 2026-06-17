@@ -316,6 +316,8 @@ fn render_two_triangles(
                 attributes: &attributes,
             }),
             push_constant_bytes: MVP_BYTES,
+            // Rung 4 binds no descriptor sets (the rung-5 bind-group-layout seam).
+            bind_group_layout: None,
         })
         .expect("depth-testing graphics pipeline");
 

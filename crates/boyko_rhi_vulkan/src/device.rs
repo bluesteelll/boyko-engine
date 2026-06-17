@@ -221,6 +221,9 @@ pub struct DeviceFns {
     //     always loaded. ---
     pub cmd_bind_vertex_buffers: PfnVkCmdBindVertexBuffers,
     pub cmd_bind_index_buffer: PfnVkCmdBindIndexBuffer,
+    // --- Phase-6 S0 rung-5 sampler create/destroy, Vulkan 1.0 core, always loaded. ---
+    pub create_sampler: PfnVkCreateSampler,
+    pub destroy_sampler: PfnVkDestroySampler,
     // --- Slice-1 `VK_KHR_swapchain` device commands — `Some` only when windowed. ---
     pub swapchain: Option<SwapchainDeviceFns>,
 }
@@ -1173,6 +1176,9 @@ fn load_device_fns(
                 c"vkCmdBindVertexBuffers",
             )?,
             cmd_bind_index_buffer: load_device_command(gdpa, device, c"vkCmdBindIndexBuffer")?,
+            // Phase-6 S0 rung-5 sampler commands (Vulkan 1.0 core).
+            create_sampler: load_device_command(gdpa, device, c"vkCreateSampler")?,
+            destroy_sampler: load_device_command(gdpa, device, c"vkDestroySampler")?,
             swapchain,
         })
     }

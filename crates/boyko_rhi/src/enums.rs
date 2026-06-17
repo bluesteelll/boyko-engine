@@ -113,6 +113,11 @@ impl BarrierStage {
     pub const TRANSFER: BarrierStage = BarrierStage(0x0000_1000);
     /// `VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT` (graphics seam: Phase 6+).
     pub const COLOR_ATTACHMENT_OUTPUT: BarrierStage = BarrierStage(0x0000_0400);
+    /// `VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT` — the fragment-shader stage that
+    /// SAMPLES a texture (Phase-6 S0 rung 5: the COLOR_ATTACHMENT → SHADER_READ
+    /// transition's destination stage, so the sampling draw waits on the prior
+    /// pass's color write).
+    pub const FRAGMENT_SHADER: BarrierStage = BarrierStage(0x0000_0080);
     /// `VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT` — the depth-test stage before
     /// the fragment shader (Phase-6 S0 rung 4: the depth-attachment barrier).
     pub const EARLY_FRAGMENT_TESTS: BarrierStage = BarrierStage(0x0000_0100);
@@ -259,6 +264,10 @@ pub enum ImageLayout {
     General = 1,
     /// `VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL` — bound as a color attachment.
     ColorAttachmentOptimal = 2,
+    /// `VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL` — read-only sampling by a shader
+    /// (Phase-6 S0 rung 5: the layout a sampled texture must be in for a
+    /// COMBINED_IMAGE_SAMPLER read in the fragment stage).
+    ShaderReadOnlyOptimal = 5,
     /// `VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL` — a transfer/copy source.
     TransferSrcOptimal = 6,
     /// `VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL` — a transfer/copy destination.
@@ -449,6 +458,54 @@ pub enum IndexType {
 
 impl IndexType {
     /// The raw `i32` discriminant — equal to the matching `VkIndexType`.
+    #[inline]
+    pub const fn as_i32(self) -> i32 {
+        self as i32
+    }
+}
+
+/// A sampler magnification/minification filter (`VkFilter` family, Phase-6 S0
+/// rung 5).
+///
+/// `#[repr(i32)]`; discriminants equal the matching `VkFilter` constants (asserted
+/// backend-side). Rung 5 picks [`Self::Nearest`] for a deterministic 1:1 sample
+/// (no interpolation across texels), so a sampled texel maps to exactly one source
+/// texel and the golden assertion is exact.
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Filter {
+    /// `VK_FILTER_NEAREST` — nearest-texel sampling (no interpolation).
+    Nearest = 0,
+    /// `VK_FILTER_LINEAR` — bilinear interpolation between texels.
+    Linear = 1,
+}
+
+impl Filter {
+    /// The raw `i32` discriminant — equal to the matching `VkFilter` constant.
+    #[inline]
+    pub const fn as_i32(self) -> i32 {
+        self as i32
+    }
+}
+
+/// A sampler texture-coordinate address mode (`VkSamplerAddressMode` family,
+/// Phase-6 S0 rung 5).
+///
+/// `#[repr(i32)]`; discriminants equal the matching `VkSamplerAddressMode`
+/// constants (asserted backend-side). Rung 5 uses [`Self::ClampToEdge`] (the
+/// simplest deterministic mode — an out-of-`[0, 1]` UV clamps to the edge texel
+/// rather than wrapping or hitting a border color).
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AddressMode {
+    /// `VK_SAMPLER_ADDRESS_MODE_REPEAT` — wrap the coordinate.
+    Repeat = 0,
+    /// `VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE` — clamp to the nearest edge texel.
+    ClampToEdge = 2,
+}
+
+impl AddressMode {
+    /// The raw `i32` discriminant — equal to the matching `VkSamplerAddressMode`.
     #[inline]
     pub const fn as_i32(self) -> i32 {
         self as i32

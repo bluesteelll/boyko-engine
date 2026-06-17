@@ -48,9 +48,9 @@ pub use descriptor::{
 pub use device::{BindGroupDesc, BindGroupLayoutDesc, RhiDevice, SamplerDesc, TextureDesc};
 pub use encoder::RhiCommandEncoder;
 pub use enums::{
-    BarrierAccess, BarrierStage, BufferUsage, Format, ImageAspect, ImageLayout, ImageUsage,
-    IndexType, LoadOp, MemoryLocation, PrimitiveTopology, ShaderStage, StoreOp, TextureDimension,
-    VertexFormat,
+    AddressMode, BarrierAccess, BarrierStage, BufferUsage, Filter, Format, ImageAspect, ImageLayout,
+    ImageUsage, IndexType, LoadOp, MemoryLocation, PrimitiveTopology, ShaderStage, StoreOp,
+    TextureDimension, VertexFormat,
 };
 pub use error::RhiError;
 pub use handle::{

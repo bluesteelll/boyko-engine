@@ -291,6 +291,8 @@ fn vertex_buffer_mvp_triangle_golden_round_trip() {
                 attributes: &attributes,
             }),
             push_constant_bytes: MVP_BYTES,
+            // Rung 3 binds no descriptor sets (the rung-5 bind-group-layout seam).
+            bind_group_layout: None,
         })
         .expect("graphics pipeline");
 

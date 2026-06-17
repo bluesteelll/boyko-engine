@@ -185,6 +185,8 @@ fn triangle_draw_golden_round_trip() {
             // Rung 2: no vertex buffer (SV_VertexID-generated) + an empty layout.
             vertex_layout: None,
             push_constant_bytes: 0,
+            // Rung 2 binds no descriptor sets (the rung-5 bind-group-layout seam).
+            bind_group_layout: None,
         })
         .expect("graphics pipeline");
 

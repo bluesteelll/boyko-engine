@@ -384,6 +384,13 @@ non_dispatchable_handle!(
     VkSemaphore
 );
 
+// --- Phase-6 S0 rung-5 sampler handle (non-dispatchable). ---
+
+non_dispatchable_handle!(
+    /// `VkSampler` — a texture-sampling state object (filter + address mode).
+    VkSampler
+);
+
 // ---------------------------------------------------------------------------
 // VkResult.
 // ---------------------------------------------------------------------------
@@ -499,6 +506,8 @@ pub enum VkStructureType {
     /// `VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO` — the dynamic-rendering
     /// attachment-format chain (no `VkRenderPass`), Vulkan 1.3 core.
     PipelineRenderingCreateInfo = 1_000_044_002,
+    /// `VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO` (Phase-6 S0 rung 5).
+    SamplerCreateInfo = 31,
     DescriptorSetLayoutCreateInfo = 32,
     DescriptorPoolCreateInfo = 33,
     DescriptorSetAllocateInfo = 34,
@@ -603,6 +612,10 @@ pub const VK_SHADER_STAGE_COMPUTE_BIT: VkFlags = 0x0000_0020;
 
 /// `VkDescriptorType::VK_DESCRIPTOR_TYPE_STORAGE_BUFFER`.
 pub const VK_DESCRIPTOR_TYPE_STORAGE_BUFFER: i32 = 7;
+
+/// `VkDescriptorType::VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER` (Phase-6 S0 rung
+/// 5: the sampled texture's binding type).
+pub const VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER: i32 = 1;
 
 /// `VkPipelineBindPoint::VK_PIPELINE_BIND_POINT_COMPUTE`.
 pub const VK_PIPELINE_BIND_POINT_COMPUTE: i32 = 1;
@@ -760,11 +773,17 @@ pub const VK_IMAGE_LAYOUT_UNDEFINED: i32 = 0;
 pub const VK_IMAGE_LAYOUT_PRESENT_SRC_KHR: i32 = 1_000_001_002;
 /// `VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL`.
 pub const VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL: i32 = 2;
+/// `VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL` (Phase-6 S0 rung 5: the layout a
+/// sampled texture must be in for a COMBINED_IMAGE_SAMPLER read).
+pub const VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL: i32 = 5;
 /// `VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL` (Vulkan 1.2 core, Phase-6 S0 rung 4).
 pub const VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL: i32 = 1_000_241_000;
 
 /// `VkPipelineStageFlagBits` used by the present barriers / submit wait stage.
 pub const VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT: VkFlags = 0x0000_0001;
+/// `VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT` (Phase-6 S0 rung 5: the COLOR → SHADER_READ
+/// barrier's destination stage — the sampling draw's fragment stage waits on it).
+pub const VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT: VkFlags = 0x0000_0080;
 pub const VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT: VkFlags = 0x0000_0400;
 /// `VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT` (Phase-6 S0 rung 4 depth barrier).
 pub const VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT: VkFlags = 0x0000_0100;
@@ -792,6 +811,25 @@ pub const VK_ATTACHMENT_STORE_OP_DONT_CARE: i32 = 1;
 
 /// `VkSampleCountFlagBits::VK_SAMPLE_COUNT_1_BIT`.
 pub const VK_SAMPLE_COUNT_1_BIT: VkFlags = 0x0000_0001;
+
+// --- Phase-6 S0 rung-5 sampler-state constants (`vkCreateSampler`). ---
+
+/// `VkFilter::VK_FILTER_NEAREST` — nearest-texel sampling (rung-5 1:1 sample).
+pub const VK_FILTER_NEAREST: i32 = 0;
+/// `VkFilter::VK_FILTER_LINEAR` — bilinear interpolation.
+pub const VK_FILTER_LINEAR: i32 = 1;
+/// `VkSamplerMipmapMode::VK_SAMPLER_MIPMAP_MODE_NEAREST` — no mip interpolation
+/// (rung-5 textures have a single mip level).
+pub const VK_SAMPLER_MIPMAP_MODE_NEAREST: i32 = 0;
+/// `VkSamplerAddressMode::VK_SAMPLER_ADDRESS_MODE_REPEAT`.
+pub const VK_SAMPLER_ADDRESS_MODE_REPEAT: i32 = 0;
+/// `VkSamplerAddressMode::VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE` (rung 5).
+pub const VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE: i32 = 2;
+/// `VkBorderColor::VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK` — unused under
+/// CLAMP_TO_EDGE, but a valid required value for the create-info field.
+pub const VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK: i32 = 0;
+/// `VkCompareOp::VK_COMPARE_OP_NEVER` — the sampler's (disabled) compare op.
+pub const VK_COMPARE_OP_NEVER: i32 = 0;
 
 // ---------------------------------------------------------------------------
 // #[repr(C)] structs — declare only fields we read or write.
@@ -1446,6 +1484,49 @@ pub struct VkDescriptorBufferInfo {
     pub range: VkDeviceSize,
 }
 
+/// `VkDescriptorImageInfo` — the `(sampler, image view, layout)` triple written
+/// into a COMBINED_IMAGE_SAMPLER descriptor (Phase-6 S0 rung 5).
+#[repr(C)]
+pub struct VkDescriptorImageInfo {
+    pub sampler: VkSampler,
+    pub image_view: VkImageView,
+    /// `VkImageLayout` the image is in when sampled (SHADER_READ_ONLY_OPTIMAL).
+    pub image_layout: i32,
+}
+
+/// `VkSamplerCreateInfo` — read BY the driver in `vkCreateSampler` (Phase-6 S0
+/// rung 5). The `#[repr(C)]` layout must match the C ABI (the layout guard at the
+/// bottom of this module breaks the build on any drift).
+#[repr(C)]
+pub struct VkSamplerCreateInfo {
+    pub s_type: VkStructureType,
+    pub p_next: *const c_void,
+    pub flags: VkFlags,
+    /// `VkFilter`.
+    pub mag_filter: i32,
+    /// `VkFilter`.
+    pub min_filter: i32,
+    /// `VkSamplerMipmapMode`.
+    pub mipmap_mode: i32,
+    /// `VkSamplerAddressMode` (U axis).
+    pub address_mode_u: i32,
+    /// `VkSamplerAddressMode` (V axis).
+    pub address_mode_v: i32,
+    /// `VkSamplerAddressMode` (W axis).
+    pub address_mode_w: i32,
+    pub mip_lod_bias: f32,
+    pub anisotropy_enable: VkBool32,
+    pub max_anisotropy: f32,
+    pub compare_enable: VkBool32,
+    /// `VkCompareOp`.
+    pub compare_op: i32,
+    pub min_lod: f32,
+    pub max_lod: f32,
+    /// `VkBorderColor`.
+    pub border_color: i32,
+    pub unnormalized_coordinates: VkBool32,
+}
+
 /// `VkWriteDescriptorSet`.
 #[repr(C)]
 pub struct VkWriteDescriptorSet {
@@ -1948,6 +2029,17 @@ const _: () = assert!(core::mem::size_of::<VkDescriptorSetLayoutBinding>() == 24
 const _: () = assert!(core::mem::size_of::<VkPushConstantRange>() == 12);
 const _: () = assert!(core::mem::size_of::<VkDescriptorPoolSize>() == 8);
 
+// Phase-6 S0 rung-5 sampler + combined-image-sampler descriptor layout guards.
+// `VkDescriptorImageInfo` = (VkSampler u64, VkImageView u64, i32 layout + 4 pad) =
+// 24 B. `VkSamplerCreateInfo`: 16-byte head (sType + 4 pad + pNext), then flags +
+// 5×i32 (mag/min/mipmap/u/v) = 24 B → 40, +i32 w + f32 bias = 48, +VkBool32 +
+// f32 + VkBool32 + i32 + f32 + f32 + i32 + VkBool32 = 8×4 = 80 B. No 8-byte
+// member after the head, so the tail packs to 80 with the struct's 8-byte align.
+const _: () = assert!(core::mem::size_of::<VkDescriptorImageInfo>() == 24);
+const _: () = assert!(core::mem::align_of::<VkDescriptorImageInfo>() == 8);
+const _: () = assert!(core::mem::size_of::<VkSamplerCreateInfo>() == 80);
+const _: () = assert!(core::mem::align_of::<VkSamplerCreateInfo>() == 8);
+
 // Phase-6 S0 rung-2 graphics-pipeline create-info layout guards. Each struct is
 // read BY the driver in `vkCreateGraphicsPipelines`, so the Rust `#[repr(C)]`
 // layout MUST match the C ABI or the driver reads garbage at a shifted offset.
@@ -2168,6 +2260,18 @@ pub type PfnVkDestroyShaderModule = unsafe extern "system" fn(
     shader_module: VkShaderModule,
     p_allocator: *const c_void,
 );
+
+/// `PFN_vkCreateSampler` (Phase-6 S0 rung 5).
+pub type PfnVkCreateSampler = unsafe extern "system" fn(
+    device: VkDevice,
+    p_create_info: *const VkSamplerCreateInfo,
+    p_allocator: *const c_void,
+    p_sampler: *mut VkSampler,
+) -> i32;
+
+/// `PFN_vkDestroySampler` (Phase-6 S0 rung 5).
+pub type PfnVkDestroySampler =
+    unsafe extern "system" fn(device: VkDevice, sampler: VkSampler, p_allocator: *const c_void);
 
 /// `PFN_vkCreateDescriptorSetLayout`.
 pub type PfnVkCreateDescriptorSetLayout = unsafe extern "system" fn(

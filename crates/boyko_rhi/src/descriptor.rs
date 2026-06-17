@@ -138,6 +138,13 @@ pub struct GraphicsPipelineDesc<'a, A: RhiApi> {
     /// The `VERTEX`-stage push-constant range size in bytes at offset `0` (rung 3:
     /// `64` for an MVP `float4x4`); `0` builds an empty pipeline layout (rung 2).
     pub push_constant_bytes: u32,
+    /// The bind-group layout the pipeline layout includes at `set 0` (Phase-6 S0
+    /// rung 5: one COMBINED_IMAGE_SAMPLER for the sampled texture), or `None` for a
+    /// descriptor-less pipeline (rungs 1..4). `Some(layout)` makes the pipeline
+    /// layout declare that set, so a [`crate::encoder::RhiCommandEncoder::bind_descriptor_set`]
+    /// can bind a matching bind group before the sampling draw; `None` keeps the
+    /// rungs-1..4 no-descriptor path valid (empty / push-only pipeline layout).
+    pub bind_group_layout: Option<&'a A::BindGroupLayout>,
 }
 
 /// A single buffer's access transition inside a [`BarrierDesc`].

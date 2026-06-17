@@ -9,7 +9,7 @@
 
 use crate::api::RhiApi;
 use crate::descriptor::{BufferDesc, ComputePipelineDesc, GraphicsPipelineDesc};
-use crate::enums::{Format, ImageUsage, TextureDimension};
+use crate::enums::{AddressMode, Filter, Format, ImageUsage, ShaderStage, TextureDimension};
 use crate::error::RhiError;
 
 /// Parameters for [`RhiDevice::create_texture`] (Phase-6 S0 graphics surface).
@@ -36,25 +36,71 @@ pub struct TextureDesc {
     pub usage: ImageUsage,
 }
 
-/// Minimal placeholder descriptor for the Phase-6+ sampler seam (plan D7).
-#[derive(Debug, Clone, Copy, Default)]
+/// Parameters for [`RhiDevice::create_sampler`] (Phase-6 S0 rung 5).
+///
+/// `#[repr(C)]` POD with an explicit field order (the two `i32` `VkFilter` seam
+/// fields, then the `i32` `VkSamplerAddressMode`) so a backend reads it without
+/// depending on Rust's default field reordering. Rung 5 picks
+/// [`Filter::Nearest`] + [`AddressMode::ClampToEdge`] — the simplest deterministic
+/// 1:1 sample (one source texel per sampled texel, an out-of-range UV clamps to
+/// the edge). The same address mode is applied to all three coordinate axes.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SamplerDesc {
-    /// Reserved; the sampler seam's fields land in Phase 6+.
-    pub _reserved: (),
+    /// The magnification filter (sampling a texel larger than one source texel).
+    pub mag_filter: Filter,
+    /// The minification filter (sampling a texel smaller than one source texel).
+    pub min_filter: Filter,
+    /// The address mode applied to every texture-coordinate axis.
+    pub address_mode: AddressMode,
 }
 
-/// Minimal placeholder descriptor for the Phase-6+ bind-group-layout seam.
-#[derive(Debug, Clone, Copy, Default)]
+impl Default for SamplerDesc {
+    /// The deterministic 1:1 rung-5 default: nearest mag/min + clamp-to-edge.
+    #[inline]
+    fn default() -> Self {
+        SamplerDesc {
+            mag_filter: Filter::Nearest,
+            min_filter: Filter::Nearest,
+            address_mode: AddressMode::ClampToEdge,
+        }
+    }
+}
+
+/// Parameters for [`RhiDevice::create_bind_group_layout`] (Phase-6 S0 rung 5).
+///
+/// Declares ONE COMBINED_IMAGE_SAMPLER binding at `(set 0, binding 0)`, visible to
+/// the `stage` shader stage(s). Rung 5 uses [`ShaderStage::FRAGMENT`] (the sampling
+/// happens in the fragment stage). The basic slice's bind groups are a single
+/// combined-image-sampler; the multi-binding form is a later-rung extension.
+#[derive(Debug, Clone, Copy)]
 pub struct BindGroupLayoutDesc {
-    /// Reserved; the bind-group-layout seam's fields land in Phase 6+.
-    pub _reserved: (),
+    /// The shader stage(s) the combined-image-sampler binding is visible to.
+    pub stage: ShaderStage,
 }
 
-/// Minimal placeholder descriptor for the Phase-6+ bind-group seam.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct BindGroupDesc {
-    /// Reserved; the bind-group seam's fields land in Phase 6+.
-    pub _reserved: (),
+/// Parameters for [`RhiDevice::create_bind_group`] (Phase-6 S0 rung 5).
+///
+/// Carries the [`RhiDevice::create_bind_group_layout`] layout the set is allocated
+/// against plus the `(texture view, sampler)` pair written into its single
+/// COMBINED_IMAGE_SAMPLER binding. The texture MUST be in
+/// [`crate::enums::ImageLayout::ShaderReadOnlyOptimal`] (transitioned via
+/// [`crate::encoder::RhiCommandEncoder::image_barrier`]) before a draw samples the
+/// bound set, or the validation layer faults at draw time. The `'a` lifetime
+/// borrows the layout + texture + sampler for the `create_bind_group` call only —
+/// **but the resulting bind group retains the texture's image view and the sampler
+/// BY RAW HANDLE in its descriptor set.** CALLER CONTRACT: the texture and sampler
+/// MUST outlive every submission that binds this group; dropping either before the
+/// binding submission completes is use-after-free of a destroyed view/sampler
+/// (caught by the validation layer, not the Rust type system — the compile-time
+/// lifetime tie is deferred to Phase 2-3, plan F1).
+pub struct BindGroupDesc<'a, A: RhiApi> {
+    /// The layout the descriptor set is allocated + written against.
+    pub layout: &'a A::BindGroupLayout,
+    /// The texture whose image view is bound as the sampled image.
+    pub texture: &'a A::Texture,
+    /// The sampler bound alongside the image (the COMBINED part).
+    pub sampler: &'a A::Sampler,
 }
 
 /// The logical device: creates and destroys backend resources, maps buffers,
@@ -180,11 +226,35 @@ pub trait RhiDevice<A: RhiApi> {
         drop(texture);
     }
 
-    /// Creates a sampler. Seam: Phase 6+.
+    /// Creates a sampler (Phase-6 S0 rung 5: a `VkSampler` with the desc's
+    /// mag/min filter + address mode — rung 5 uses nearest + clamp-to-edge for a
+    /// deterministic 1:1 sample).
+    ///
+    /// The default body is `#[cold] #[inline(never)]` and errors `Unsupported`; a
+    /// backend with a sampler path (Vulkan) overrides it. Keeps the trait ABI
+    /// stable for a backend (e.g. the Mock) without one.
     #[cold]
     #[inline(never)]
     fn create_sampler(&self, _desc: &SamplerDesc) -> Result<A::Sampler, Self::Error> {
         Err(RhiError::unsupported("create_sampler").into())
+    }
+
+    /// Destroys `sampler`, consuming it (Phase-6 S0 rung 5).
+    ///
+    /// The default body drops the value (a no-op for a backend whose `Sampler` is
+    /// zero-sized, e.g. the Mock); a backend whose sampler owns a GPU object
+    /// (Vulkan) overrides it. Keeps the trait ABI stable.
+    ///
+    /// # Safety
+    /// The GPU must no longer be using `sampler` (a submission referencing it has
+    /// completed — fence-waited or `wait_idle`'d). The by-value move guarantees it
+    /// is destroyed at most once.
+    #[cold]
+    #[inline(never)]
+    unsafe fn destroy_sampler(&self, sampler: A::Sampler) {
+        // Default seam: drop the value. A zero-sized `Sampler` (Mock) drops to a
+        // no-op; a backend with a GPU-owned sampler object overrides this.
+        drop(sampler);
     }
 
     /// Creates a graphics pipeline (Phase-6 S0 rung 2: a Vulkan 1.3
@@ -222,8 +292,13 @@ pub trait RhiDevice<A: RhiApi> {
         drop(pipeline);
     }
 
-    /// Creates a bind-group layout. Seam: Phase 6+ (supersedes the fixed compute
-    /// descriptor layout).
+    /// Creates a bind-group layout (Phase-6 S0 rung 5: a `VkDescriptorSetLayout`
+    /// with one COMBINED_IMAGE_SAMPLER binding at `(set 0, binding 0)` at the
+    /// desc's stage). Supersedes the fixed compute descriptor layout for the
+    /// graphics sampling path.
+    ///
+    /// The default body is `#[cold] #[inline(never)]` and errors `Unsupported`; a
+    /// backend with a descriptor path (Vulkan) overrides it.
     #[cold]
     #[inline(never)]
     fn create_bind_group_layout(
@@ -233,11 +308,55 @@ pub trait RhiDevice<A: RhiApi> {
         Err(RhiError::unsupported("create_bind_group_layout").into())
     }
 
-    /// Creates a bind group. Seam: Phase 6+.
+    /// Destroys `layout`, consuming it (Phase-6 S0 rung 5).
+    ///
+    /// The default body drops the value (a no-op for a backend whose
+    /// `BindGroupLayout` is zero-sized, e.g. the Mock); a backend whose layout
+    /// owns a GPU object (Vulkan) overrides it. Keeps the trait ABI stable.
+    ///
+    /// # Safety
+    /// No bind group / pipeline still referencing `layout` is in flight, and it is
+    /// destroyed exactly once (the move enforces the latter).
     #[cold]
     #[inline(never)]
-    fn create_bind_group(&self, _desc: &BindGroupDesc) -> Result<A::BindGroup, Self::Error> {
+    unsafe fn destroy_bind_group_layout(&self, layout: A::BindGroupLayout) {
+        // Default seam: drop the value. A zero-sized `BindGroupLayout` (Mock) drops
+        // to a no-op; a backend with a GPU-owned set-layout overrides this.
+        drop(layout);
+    }
+
+    /// Creates a bind group (Phase-6 S0 rung 5: a `VkDescriptorPool` + a single
+    /// `VkDescriptorSet` allocated against `desc.layout` and written with the
+    /// desc's `(texture view, sampler)` as its COMBINED_IMAGE_SAMPLER, in
+    /// `SHADER_READ_ONLY_OPTIMAL`).
+    ///
+    /// The default body is `#[cold] #[inline(never)]` and errors `Unsupported`; a
+    /// backend with a descriptor path (Vulkan) overrides it.
+    #[cold]
+    #[inline(never)]
+    fn create_bind_group(
+        &self,
+        _desc: &BindGroupDesc<A>,
+    ) -> Result<A::BindGroup, Self::Error> {
         Err(RhiError::unsupported("create_bind_group").into())
+    }
+
+    /// Destroys `group`, consuming it (Phase-6 S0 rung 5).
+    ///
+    /// The default body drops the value (a no-op for a backend whose `BindGroup`
+    /// is zero-sized, e.g. the Mock); a backend whose bind group owns a GPU object
+    /// (Vulkan: a `VkDescriptorPool`) overrides it. Keeps the trait ABI stable.
+    ///
+    /// # Safety
+    /// No submission using `group` is pending (the GPU is fence-waited /
+    /// `wait_idle`'d), and it is destroyed exactly once (the move enforces the
+    /// latter).
+    #[cold]
+    #[inline(never)]
+    unsafe fn destroy_bind_group(&self, group: A::BindGroup) {
+        // Default seam: drop the value. A zero-sized `BindGroup` (Mock) drops to a
+        // no-op; a backend with a GPU-owned descriptor pool overrides this.
+        drop(group);
     }
 
     /// Maps a non-coherent buffer's range to a host pointer. Seam: Phase 5

@@ -133,6 +133,21 @@ pub trait RhiCommandEncoder<A: RhiApi> {
         // Phase-6 S0 default seam: overridden by the Vulkan backend.
     }
 
+    /// Binds `group` (a descriptor set) at `set 0` of `pipeline`'s layout for the
+    /// GRAPHICS bind point (Phase-6 S0 rung 5). Must be recorded after
+    /// [`Self::bind_graphics_pipeline`] and before a [`Self::draw`] that samples the
+    /// bound texture; `pipeline` supplies the pipeline layout the set is bound
+    /// against (the layout must have been built with the same bind-group layout via
+    /// `GraphicsPipelineDesc::bind_group_layout`).
+    ///
+    /// The default body is a no-op marked `#[cold] #[inline(never)]`; the Vulkan
+    /// backend overrides it (`vkCmdBindDescriptorSets`, GRAPHICS bind point).
+    #[cold]
+    #[inline(never)]
+    fn bind_descriptor_set(&mut self, _group: &A::BindGroup, _pipeline: &A::GraphicsPipeline) {
+        // Phase-6 S0 default seam: overridden by the Vulkan backend.
+    }
+
     /// Sets the dynamic viewport (Phase-6 S0 rung 2). The pipeline is created with
     /// dynamic viewport state, so this must be recorded before [`Self::draw`].
     ///

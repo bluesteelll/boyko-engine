@@ -14,8 +14,9 @@
 //! `push_constants`, `pipeline_barrier`) is covered.
 
 use boyko_rhi::enums::{
-    BarrierAccess, BarrierStage, BufferUsage, Format, ImageAspect, ImageLayout, ImageUsage,
-    IndexType, LoadOp, PrimitiveTopology, ShaderStage, StoreOp, TextureDimension, VertexFormat,
+    AddressMode, BarrierAccess, BarrierStage, BufferUsage, Filter, Format, ImageAspect, ImageLayout,
+    ImageUsage, IndexType, LoadOp, PrimitiveTopology, ShaderStage, StoreOp, TextureDimension,
+    VertexFormat,
 };
 
 use crate::ffi::{
@@ -26,21 +27,23 @@ use crate::ffi::{
     VK_BUFFER_USAGE_INDEX_BUFFER_BIT, VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
     VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-    VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_D32_SFLOAT,
-    VK_FORMAT_R32G32B32A32_SFLOAT, VK_FORMAT_R32G32B32_SFLOAT, VK_FORMAT_R8G8B8A8_UNORM,
-    VK_FORMAT_UNDEFINED, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_ASPECT_DEPTH_BIT,
-    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-    VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+    VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_FILTER_LINEAR, VK_FILTER_NEAREST, VK_FORMAT_B8G8R8A8_UNORM,
+    VK_FORMAT_D32_SFLOAT, VK_FORMAT_R32G32B32A32_SFLOAT, VK_FORMAT_R32G32B32_SFLOAT,
+    VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_UNDEFINED, VK_IMAGE_ASPECT_COLOR_BIT,
+    VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+    VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
+    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_TYPE_2D,
     VK_IMAGE_TYPE_3D, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
     VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_IMAGE_USAGE_SAMPLED_BIT,
     VK_IMAGE_USAGE_STORAGE_BIT, VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
     VK_INDEX_TYPE_UINT16, VK_INDEX_TYPE_UINT32, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
     VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-    VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT, VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-    VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-    VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_SHADER_STAGE_COMPUTE_BIT, VK_SHADER_STAGE_FRAGMENT_BIT,
-    VK_SHADER_STAGE_VERTEX_BIT,
+    VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+    VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+    VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+    VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, VK_SAMPLER_ADDRESS_MODE_REPEAT,
+    VK_SHADER_STAGE_COMPUTE_BIT, VK_SHADER_STAGE_FRAGMENT_BIT, VK_SHADER_STAGE_VERTEX_BIT,
 };
 
 // ===== BufferUsage (identity-cast in `create_buffer`). =====
@@ -329,4 +332,49 @@ const _: () = assert!(
 const _: () = assert!(
     ImageLayout::DepthAttachmentOptimal.as_i32() == VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
     "ImageLayout::DepthAttachmentOptimal must equal VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL"
+);
+
+// ===========================================================================
+// Phase-6 S0 rung-5 sampler + combined-image-sampler contracts. The sampling
+// surface adds: the `FRAGMENT_SHADER` stage bit (identity-cast in `image_barrier`
+// for the COLOR → SHADER_READ barrier); the `ShaderReadOnlyOptimal` layout (mapped
+// in `image_barrier` / written into the descriptor's image-info); and the
+// `Filter`/`AddressMode` `as_i32()` families (mapped in `create_sampler`). These
+// pin the agnostic↔`VK_*` equality the rung-5 lowerings identity-cast / `as_i32()`-
+// lower. (`ShaderStage::FRAGMENT` for the bind-group-layout stage is already pinned
+// above; `VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER` is a backend-only constant the
+// agnostic surface never names, so it has no agnostic counterpart to assert.)
+// ===========================================================================
+
+// --- BarrierStage::FRAGMENT_SHADER (identity-cast in `image_barrier`). ---
+const _: () = assert!(
+    BarrierStage::FRAGMENT_SHADER.bits() == VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+    "BarrierStage::FRAGMENT_SHADER must equal VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT"
+);
+
+// --- ImageLayout::ShaderReadOnlyOptimal `as_i32()` (mapped in `image_barrier` /
+//     the bind-group's descriptor image-info). ---
+const _: () = assert!(
+    ImageLayout::ShaderReadOnlyOptimal.as_i32() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+    "ImageLayout::ShaderReadOnlyOptimal must equal VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL"
+);
+
+// --- Filter `as_i32()` (mapped in `create_sampler`). ---
+const _: () = assert!(
+    Filter::Nearest.as_i32() == VK_FILTER_NEAREST,
+    "Filter::Nearest must equal VK_FILTER_NEAREST"
+);
+const _: () = assert!(
+    Filter::Linear.as_i32() == VK_FILTER_LINEAR,
+    "Filter::Linear must equal VK_FILTER_LINEAR"
+);
+
+// --- AddressMode `as_i32()` (mapped in `create_sampler`). ---
+const _: () = assert!(
+    AddressMode::Repeat.as_i32() == VK_SAMPLER_ADDRESS_MODE_REPEAT,
+    "AddressMode::Repeat must equal VK_SAMPLER_ADDRESS_MODE_REPEAT"
+);
+const _: () = assert!(
+    AddressMode::ClampToEdge.as_i32() == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+    "AddressMode::ClampToEdge must equal VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE"
 );

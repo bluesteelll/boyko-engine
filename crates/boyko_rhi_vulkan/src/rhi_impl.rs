@@ -38,10 +38,10 @@ use core::ffi::c_void;
 use core::ptr::{self, NonNull};
 
 use boyko_rhi::{
-    BarrierDesc, BufferBarrier, BufferCopy, BufferDesc, BufferImageCopy, ComputePipelineDesc,
-    GraphicsPipelineDesc, ImageBarrierDesc, ImageLayout, IndexType, MemoryLocation, RenderArea,
-    RenderingDesc, RhiApi, RhiCommandEncoder, RhiDevice, RhiQueue, ShaderStage, TextureDesc,
-    Viewport,
+    BarrierDesc, BindGroupDesc, BindGroupLayoutDesc, BufferBarrier, BufferCopy, BufferDesc,
+    BufferImageCopy, ComputePipelineDesc, GraphicsPipelineDesc, ImageBarrierDesc, ImageLayout,
+    IndexType, MemoryLocation, RenderArea, RenderingDesc, RhiApi, RhiCommandEncoder, RhiDevice,
+    RhiQueue, SamplerDesc, ShaderStage, TextureDesc, Viewport,
 };
 
 use crate::compute::ComputeError;
@@ -142,12 +142,15 @@ impl RhiApi for Vulkan {
     type Swapchain = ();
     type Semaphore = VkSemaphore;
     type Texture = VulkanTexture;
-    type Sampler = ();
+    // `Sampler`/`BindGroupLayout`/`BindGroup` bind to the S0 rung-5 concrete types
+    // now that `create_sampler`/`create_bind_group_layout`/`create_bind_group` are
+    // implemented (the combined-image-sampler graphics descriptor surface).
+    type Sampler = VulkanSampler;
     // `GraphicsPipeline` binds to the S0 rung-2 [`VulkanGraphicsPipeline`] now that
     // `create_graphics_pipeline` is implemented.
     type GraphicsPipeline = VulkanGraphicsPipeline;
-    type BindGroup = ();
-    type BindGroupLayout = ();
+    type BindGroup = VulkanBindGroup;
+    type BindGroupLayout = VulkanBindGroupLayout;
 }
 
 /// The fixed Slice-0 compute layouts shared by every compute pipeline + command
@@ -306,6 +309,66 @@ pub struct VulkanGraphicsPipeline {
     /// The dedicated `VkPipelineLayout` (no descriptor sets; either no push range
     /// — rung 2 — or one VERTEX-stage push range — rung 3); destroyed after the pipeline.
     pub(crate) layout: VkPipelineLayout,
+}
+
+/// An owned texture sampler ([`RhiApi::Sampler`], Phase-6 S0 rung 5).
+///
+/// Holds the `VkSampler` handle; destroyed by value through `destroy_sampler`
+/// (the move encodes "destroyed exactly once"). A sampler is device-global state
+/// (no memory binding), so teardown is a single `vkDestroySampler`.
+///
+/// # Safety
+///
+/// The originating [`VulkanContext`] MUST still be alive when this sampler is used
+/// (written into a bind group) or destroyed: each goes through the context's device
+/// fn-table. No compile-time `'ctx` tie this phase (plan F1; deferred to Phase 2-3).
+pub struct VulkanSampler {
+    /// The `VkSampler` handle; destroyed by `destroy_sampler`.
+    pub(crate) sampler: VkSampler,
+}
+
+/// An owned bind-group (descriptor-set) layout ([`RhiApi::BindGroupLayout`],
+/// Phase-6 S0 rung 5).
+///
+/// Holds the `VkDescriptorSetLayout` with one COMBINED_IMAGE_SAMPLER binding at
+/// `(set 0, binding 0)`. Distinct from the device's shared compute
+/// [`ComputeLayouts::set_layout`] (a runtime-mutable graphics layout, NOT the
+/// fixed compute one). Read at `create_bind_group` (set allocation) +
+/// `create_graphics_pipeline` (pipeline layout). Destroyed by value through
+/// `destroy_bind_group_layout`.
+///
+/// # Safety
+///
+/// The originating [`VulkanContext`] MUST still be alive when this layout is used
+/// or destroyed: each goes through the context's device fn-table. No compile-time
+/// `'ctx` tie this phase (plan F1; deferred to Phase 2-3).
+pub struct VulkanBindGroupLayout {
+    /// The `VkDescriptorSetLayout` (one COMBINED_IMAGE_SAMPLER @ set0/binding0).
+    pub(crate) set_layout: VkDescriptorSetLayout,
+}
+
+/// An owned bind group ([`RhiApi::BindGroup`], Phase-6 S0 rung 5).
+///
+/// Owns a dedicated `VkDescriptorPool` (sized for one COMBINED_IMAGE_SAMPLER) plus
+/// the single `VkDescriptorSet` allocated + written from it. Unlike the encoder's
+/// compute descriptor pool (one per encoder, fixed STORAGE_BUFFER layout), a bind
+/// group is a standalone, caller-owned resource the sampling draw binds. The set is
+/// freed implicitly by destroying its pool, so teardown is one
+/// `vkDestroyDescriptorPool` in `destroy_bind_group` (the by-value move encodes
+/// "destroyed exactly once").
+///
+/// # Safety
+///
+/// The originating [`VulkanContext`] MUST still be alive when this bind group is
+/// bound or destroyed: each goes through the context's device fn-table. No
+/// compile-time `'ctx` tie this phase (plan F1; deferred to Phase 2-3).
+pub struct VulkanBindGroup {
+    /// The dedicated `VkDescriptorPool`; destroyed by `destroy_bind_group` (which
+    /// also frees the set allocated from it).
+    pub(crate) descriptor_pool: VkDescriptorPool,
+    /// The single `VkDescriptorSet` allocated FROM `descriptor_pool` (read by
+    /// `bind_descriptor_set`); freed implicitly when the pool is destroyed.
+    pub(crate) descriptor_set: VkDescriptorSet,
 }
 
 /// An owned fence ([`RhiApi::Fence`]).
@@ -508,6 +571,224 @@ impl RhiDevice<Vulkan> for VulkanContext {
         unsafe { texture.destroy(self.device(), self.device_fns()) };
     }
 
+    fn create_sampler(&self, desc: &SamplerDesc) -> Result<VulkanSampler, VulkanError> {
+        // Rung 5: a deterministic 1:1 sampler. The agnostic `Filter`/`AddressMode`
+        // discriminants equal the `VkFilter`/`VkSamplerAddressMode` constants
+        // (`as_i32()` no-op lowering, asserted in `abi_guard.rs`); the single
+        // address mode applies to all three axes. With NEAREST + CLAMP_TO_EDGE,
+        // anisotropy / mip-bias / compare are all disabled (no `samplerAnisotropy`
+        // feature is requested at device creation, so anisotropy MUST be FALSE).
+        let address = desc.address_mode.as_i32();
+        let info = VkSamplerCreateInfo {
+            s_type: VkStructureType::SamplerCreateInfo,
+            p_next: ptr::null(),
+            flags: 0,
+            mag_filter: desc.mag_filter.as_i32(),
+            min_filter: desc.min_filter.as_i32(),
+            mipmap_mode: VK_SAMPLER_MIPMAP_MODE_NEAREST,
+            address_mode_u: address,
+            address_mode_v: address,
+            address_mode_w: address,
+            mip_lod_bias: 0.0,
+            anisotropy_enable: VK_FALSE,
+            max_anisotropy: 1.0,
+            compare_enable: VK_FALSE,
+            compare_op: VK_COMPARE_OP_NEVER,
+            min_lod: 0.0,
+            max_lod: 0.0,
+            border_color: VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK,
+            unnormalized_coordinates: VK_FALSE,
+        };
+        let mut sampler = VkSampler::NULL;
+        // SAFETY: `device` is live; `info` is a fully-initialized `#[repr(C)]`
+        // `VkSamplerCreateInfo` (null `p_next`, no GPU memory backing a sampler);
+        // `&mut sampler` is a valid out-pointer; NULL allocator.
+        let raw = unsafe {
+            (self.device_fns().create_sampler)(self.device(), &info, ptr::null(), &mut sampler)
+        };
+        let result = VkResult::from_raw(raw);
+        if !result.is_success() {
+            return Err(VulkanError::Vk("vkCreateSampler", result));
+        }
+        Ok(VulkanSampler { sampler })
+    }
+
+    unsafe fn destroy_sampler(&self, sampler: VulkanSampler) {
+        // SAFETY: `sampler.sampler` was created on this device by `create_sampler`,
+        // the GPU is no longer using it (caller fence-waited / `wait_idle`'d per the
+        // trait contract), and the by-value move destroys it exactly once.
+        unsafe {
+            (self.device_fns().destroy_sampler)(self.device(), sampler.sampler, ptr::null())
+        };
+    }
+
+    fn create_bind_group_layout(
+        &self,
+        desc: &BindGroupLayoutDesc,
+    ) -> Result<VulkanBindGroupLayout, VulkanError> {
+        // One COMBINED_IMAGE_SAMPLER @ set0/binding0 at the desc's stage (rung 5:
+        // FRAGMENT). The agnostic `ShaderStage` bits equal `VK_SHADER_STAGE_*`
+        // (identity cast, asserted in `abi_guard.rs`).
+        let binding = VkDescriptorSetLayoutBinding {
+            binding: 0,
+            descriptor_type: VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            descriptor_count: 1,
+            stage_flags: desc.stage.bits(),
+            p_immutable_samplers: ptr::null(),
+        };
+        let info = VkDescriptorSetLayoutCreateInfo {
+            s_type: VkStructureType::DescriptorSetLayoutCreateInfo,
+            p_next: ptr::null(),
+            flags: 0,
+            binding_count: 1,
+            p_bindings: &binding,
+        };
+        let mut set_layout = VkDescriptorSetLayout::NULL;
+        // SAFETY: `device` is live; `info` is fully initialized and its `p_bindings`
+        // points to the single `binding` local (alive for the call); `&mut
+        // set_layout` is a valid out-pointer; NULL allocator.
+        let raw = unsafe {
+            (self.device_fns().create_descriptor_set_layout)(
+                self.device(),
+                &info,
+                ptr::null(),
+                &mut set_layout,
+            )
+        };
+        let result = VkResult::from_raw(raw);
+        if !result.is_success() {
+            return Err(VulkanError::Vk(
+                "vkCreateDescriptorSetLayout(bind group)",
+                result,
+            ));
+        }
+        Ok(VulkanBindGroupLayout { set_layout })
+    }
+
+    unsafe fn destroy_bind_group_layout(&self, layout: VulkanBindGroupLayout) {
+        // SAFETY: `layout.set_layout` was created on this device by
+        // `create_bind_group_layout`, no bind group or pipeline referencing it is in
+        // flight (caller contract), and the by-value move destroys it exactly once.
+        unsafe {
+            (self.device_fns().destroy_descriptor_set_layout)(
+                self.device(),
+                layout.set_layout,
+                ptr::null(),
+            )
+        };
+    }
+
+    fn create_bind_group(
+        &self,
+        desc: &BindGroupDesc<Vulkan>,
+    ) -> Result<VulkanBindGroup, VulkanError> {
+        let device = self.device();
+        let fns = self.device_fns();
+
+        // A dedicated pool sized for exactly one COMBINED_IMAGE_SAMPLER set.
+        let pool_size = VkDescriptorPoolSize {
+            descriptor_type: VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            descriptor_count: 1,
+        };
+        let dp_info = VkDescriptorPoolCreateInfo {
+            s_type: VkStructureType::DescriptorPoolCreateInfo,
+            p_next: ptr::null(),
+            flags: 0,
+            max_sets: 1,
+            pool_size_count: 1,
+            p_pool_sizes: &pool_size,
+        };
+        let mut descriptor_pool = VkDescriptorPool::NULL;
+        // SAFETY: `device` is live; `dp_info` is fully initialized referencing the
+        // `pool_size` local (alive for the call); `&mut descriptor_pool` is a valid
+        // out-pointer; NULL allocator.
+        let raw = unsafe {
+            (fns.create_descriptor_pool)(device, &dp_info, ptr::null(), &mut descriptor_pool)
+        };
+        let result = VkResult::from_raw(raw);
+        if !result.is_success() {
+            return Err(VulkanError::Vk("vkCreateDescriptorPool(bind group)", result));
+        }
+
+        let set_layout = desc.layout.set_layout;
+        let ds_alloc = VkDescriptorSetAllocateInfo {
+            s_type: VkStructureType::DescriptorSetAllocateInfo,
+            p_next: ptr::null(),
+            descriptor_pool,
+            descriptor_set_count: 1,
+            p_set_layouts: &set_layout,
+        };
+        let mut descriptor_set = VkDescriptorSet::NULL;
+        // SAFETY: `device` is live; `ds_alloc` names the live pool + references the
+        // caller's live `set_layout` (the `set_layout` local, alive for the call);
+        // `&mut descriptor_set` is a valid out-pointer.
+        let raw =
+            unsafe { (fns.allocate_descriptor_sets)(device, &ds_alloc, &mut descriptor_set) };
+        let result = VkResult::from_raw(raw);
+        if !result.is_success() {
+            // SAFETY: `descriptor_pool` was just created and owns no live set yet
+            // (allocation failed); destroy it once on this error path so it never
+            // leaks (this also frees any partially-allocated set).
+            unsafe { (fns.destroy_descriptor_pool)(device, descriptor_pool, ptr::null()) };
+            return Err(VulkanError::Vk(
+                "vkAllocateDescriptorSets(bind group)",
+                result,
+            ));
+        }
+
+        // Write the (sampler, image view, layout) triple into binding 0. The texture
+        // MUST already be in SHADER_READ_ONLY_OPTIMAL when SAMPLED at draw time — the
+        // caller transitions it via `image_barrier` (the rung-5 SAFETY contract); the
+        // layout declared here is the layout the descriptor records, which validation
+        // cross-checks against the image's actual layout at draw.
+        let image_info = VkDescriptorImageInfo {
+            sampler: desc.sampler.sampler,
+            image_view: desc.texture.view,
+            image_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        };
+        let write = VkWriteDescriptorSet {
+            s_type: VkStructureType::WriteDescriptorSet,
+            p_next: ptr::null(),
+            dst_set: descriptor_set,
+            dst_binding: 0,
+            dst_array_element: 0,
+            descriptor_count: 1,
+            descriptor_type: VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            // A combined-image-sampler write reads `p_image_info`, not the buffer /
+            // texel-view pointers (which stay null).
+            p_image_info: (&image_info as *const VkDescriptorImageInfo).cast(),
+            p_buffer_info: ptr::null(),
+            p_texel_buffer_view: ptr::null(),
+        };
+        // SAFETY: `device` is live; one write references the freshly-allocated
+        // `descriptor_set` + the `image_info` local (which names the caller's live
+        // sampler + image view); `p_image_info` is a valid `VkDescriptorImageInfo*`
+        // for the COMBINED_IMAGE_SAMPLER type; zero copies. The set is not bound to
+        // any pending command buffer (it was just allocated), so writing it is sound.
+        // The `image_info` local outlives the call.
+        unsafe { (fns.update_descriptor_sets)(device, 1, &write, 0, ptr::null()) };
+
+        Ok(VulkanBindGroup {
+            descriptor_pool,
+            descriptor_set,
+        })
+    }
+
+    unsafe fn destroy_bind_group(&self, group: VulkanBindGroup) {
+        // SAFETY: `group.descriptor_pool` was created on this device by
+        // `create_bind_group`, no submission using its set is pending (caller
+        // fence-waited / `wait_idle`'d per the trait contract), and the by-value move
+        // destroys it exactly once. Destroying the pool frees the set allocated from
+        // it (no separate set free needed).
+        unsafe {
+            (self.device_fns().destroy_descriptor_pool)(
+                self.device(),
+                group.descriptor_pool,
+                ptr::null(),
+            )
+        };
+    }
+
     fn create_shader_module(&self, spirv: &[u32]) -> Result<VulkanShaderModule, VulkanError> {
         debug_assert!(!spirv.is_empty(), "invariant: SPIR-V word slice is non-empty");
         let sm_info = VkShaderModuleCreateInfo {
@@ -621,25 +902,33 @@ impl RhiDevice<Vulkan> for VulkanContext {
         let device = self.device();
         let fns = self.device_fns();
 
-        // --- The pipeline layout. Rung 2 uses an EMPTY layout (no sets, no push
-        //     range); rung 3 declares ONE `VERTEX`-stage push-constant range of
-        //     `desc.push_constant_bytes` bytes at offset 0 (the MVP `float4x4`). No
-        //     descriptor sets either way. Created first; if pipeline creation fails
-        //     below, it is torn down before the error returns (reverse-order
-        //     rollback). The `push_range` local must outlive the create call, so it
-        //     is bound here (the layout-info pointer below references it). ---
+        // --- The pipeline layout. Rungs 2..4 use a layout with NO descriptor sets
+        //     (rung 2 empty; rung 3/4 add ONE `VERTEX`-stage push-constant range of
+        //     `desc.push_constant_bytes` bytes at offset 0 — the MVP `float4x4`).
+        //     Rung 5 ADDS one bind-group layout at `set 0` (the COMBINED_IMAGE_SAMPLER)
+        //     when `desc.bind_group_layout` is `Some`, so a `bind_descriptor_set` can
+        //     bind a matching group before the sampling draw; `None` keeps the
+        //     rungs-2..4 no-descriptor path byte-identical (count 0, null array).
+        //     Created first; if pipeline creation fails below, it is torn down before
+        //     the error returns (reverse-order rollback). The `push_range` +
+        //     `set_layout` locals must outlive the create call, so they are bound
+        //     here (the layout-info pointers below reference them). ---
         let push_range = VkPushConstantRange {
             stage_flags: VK_SHADER_STAGE_VERTEX_BIT,
             offset: 0,
             size: desc.push_constant_bytes,
         };
         let has_push = desc.push_constant_bytes > 0;
+        let set_layout = desc
+            .bind_group_layout
+            .map_or(VkDescriptorSetLayout::NULL, |bgl| bgl.set_layout);
+        let has_set = desc.bind_group_layout.is_some();
         let pl_info = VkPipelineLayoutCreateInfo {
             s_type: VkStructureType::PipelineLayoutCreateInfo,
             p_next: ptr::null(),
             flags: 0,
-            set_layout_count: 0,
-            p_set_layouts: ptr::null(),
+            set_layout_count: u32::from(has_set),
+            p_set_layouts: if has_set { &set_layout } else { ptr::null() },
             push_constant_range_count: u32::from(has_push),
             p_push_constant_ranges: if has_push {
                 &push_range
@@ -648,11 +937,13 @@ impl RhiDevice<Vulkan> for VulkanContext {
             },
         };
         let mut layout = VkPipelineLayout::NULL;
-        // SAFETY: `device` is live; `pl_info` is fully initialized with zero
-        // descriptor sets (null array valid for count 0) and either zero push ranges
-        // (null array valid for count 0) or one range pointing at the `push_range`
-        // local (alive for this whole fn) when `has_push`; `&mut layout` is a valid
-        // out-pointer; NULL allocator.
+        // SAFETY: `device` is live; `pl_info` is fully initialized with either zero
+        // descriptor sets (null array valid for count 0) or one set pointing at the
+        // `set_layout` local (the caller's live bind-group set-layout, alive for this
+        // whole fn) when `has_set`, and either zero push ranges (null array valid for
+        // count 0) or one range pointing at the `push_range` local (alive for this
+        // whole fn) when `has_push`; `&mut layout` is a valid out-pointer; NULL
+        // allocator.
         let raw =
             unsafe { (fns.create_pipeline_layout)(device, &pl_info, ptr::null(), &mut layout) };
         let result = VkResult::from_raw(raw);
@@ -1702,6 +1993,35 @@ impl RhiCommandEncoder<Vulkan> for VulkanCommandEncoder {
                 self.command_buffer,
                 VK_PIPELINE_BIND_POINT_GRAPHICS,
                 pipeline.pipeline,
+            );
+        }
+    }
+
+    fn bind_descriptor_set(
+        &mut self,
+        group: &VulkanBindGroup,
+        pipeline: &VulkanGraphicsPipeline,
+    ) {
+        // SAFETY: recording is open and inside a `begin_rendering` scope with the
+        // matching graphics pipeline bound (caller contract); `pipeline.layout` is
+        // that pipeline's own layout, built with the same bind-group set-layout at
+        // `set 0` (`GraphicsPipelineDesc::bind_group_layout`), so binding
+        // `group.descriptor_set` there for the GRAPHICS bind point is type-compatible.
+        // `&group.descriptor_set` is a single-element local (alive for the call), so
+        // `first_set = 0`, `descriptor_set_count = 1` matches it; zero dynamic offsets
+        // (null valid for count 0). `self.fns` points into the context's boxed
+        // fn-table (alive per the type contract).
+        let fns = unsafe { &*self.fns };
+        unsafe {
+            (fns.cmd_bind_descriptor_sets)(
+                self.command_buffer,
+                VK_PIPELINE_BIND_POINT_GRAPHICS,
+                pipeline.layout,
+                0,
+                1,
+                &group.descriptor_set,
+                0,
+                ptr::null(),
             );
         }
     }
