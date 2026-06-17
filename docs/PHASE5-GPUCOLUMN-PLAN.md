@@ -343,3 +343,33 @@ CR-C Drop check + the C1 column-null post-condition stay `debug_assert!`. **O2:*
    `QueryState::new` intersect check + `cpu_query_over_gpu_component_panic`.
    Plus zero-code: the SEND10 comment update, the W2 `debug_assert` swap, the O1 `assert!` wording, the O2 doc.
 All stay inside `boyko_ecs` (no graphics types — purity grep holds).
+
+## MF-5 amendment (Phase 5 Option C — supersedes the raw cell projection)
+
+The original MF-5 mechanism reached the `!Send` `RhiContext` from `GpuSystem::run_unsafe`
+through a PUBLIC `UnsafeEcsCell::nonsend_resource_mut` (the `NonSendResMut::get_param`
+projection minus `mark_universal`). The Wave-C review found that accessor opened 3 real UB
+paths: **C1** — it was reachable on the concurrent WORKER path (any system holding a cell
+copy could project the `!Send` payload off-dispatcher); **M1** — its `'w` return lifetime let
+two back-to-back calls hand out two live `&mut R` aliases; **M2 (latent)** — no tripwire caught
+a wrong-thread touch.
+
+**Option C** replaces the raw cell projection with a dispatcher-only capability,
+`DispatcherToken<'w>` (`crates/boyko_ecs/src/ecs/core/system/dispatcher_token.rs`):
+
+- The public `UnsafeEcsCell::nonsend_resource_mut` is **DELETED** (C1/M1 kill — the
+  worker-reachable surface is gone; a `compile_fail` test proves it).
+- `System` gains two DEFAULT-bodied methods: `is_gpu()` (defense-in-depth GPU marker, the
+  builder ORs it with `SystemConfig::gpu()`) and `unsafe fn run_dispatcher(token)` (the
+  default forwards to `run_unsafe` via `token.into_cell()`, so every CPU system is
+  byte-identical — the 0%-gate).
+- The scheduler's dispatcher-solo path (and `EcsMaster::run_system_once`) mints a
+  `DispatcherToken` at `running == 0` and calls `run_dispatcher`; the CPU-concurrent WORKER
+  path is untouched (still `run_unsafe(cell_copy)`).
+- `GpuSystem` overrides `run_dispatcher` to project `token.nonsend_resource_mut::<RhiContext>()`
+  (return lifetime tied to `&mut self` — the M1 fix), and its `run_unsafe` becomes a loud
+  debug-panic no-op (it has no token, so `RhiContext` is structurally unreachable on a worker).
+- `DispatcherToken` is NOT `Copy`/`Clone` (the borrowck M1 fix depends on it) and names no
+  graphics type (`boyko_ecs` stays graphics-pure).
+- A debug-only `NonSendResources::owning_thread` stamp (M2) tripwires any projection off the
+  slab's owning thread, on both the `DispatcherToken` and the existing `NonSendResMut` paths.

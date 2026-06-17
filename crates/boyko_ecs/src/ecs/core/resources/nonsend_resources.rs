@@ -93,6 +93,17 @@ pub struct NonSendResources {
     /// Tracks which slots are initialised. Iterated with TZCNT via
     /// `pop_lowest_set_bit` for O(k) teardown.
     registered_mask: BitSet256,
+    /// Phase 5 Option C (M2) — debug-only tripwire: the thread that first
+    /// inserted a `!Send` value (the slab's owning thread). Every projection
+    /// (`UnsafeEcsCell::nonsend_resources[_mut]` + `DispatcherToken`) asserts
+    /// the current thread against this via [`debug_assert_owning_thread`], so a
+    /// projection from the wrong thread fails loud in debug long before it can
+    /// be UB in release. `None` until the first insert (an empty slab has no
+    /// `!Send` payload to touch). Zero release cost.
+    ///
+    /// [`debug_assert_owning_thread`]: NonSendResources::debug_assert_owning_thread
+    #[cfg(debug_assertions)]
+    owning_thread: Option<std::thread::ThreadId>,
 }
 
 impl NonSendResources {
@@ -114,6 +125,8 @@ impl NonSendResources {
         Self {
             slots,
             registered_mask: BitSet256::new(),
+            #[cfg(debug_assertions)]
+            owning_thread: None,
         }
     }
 
@@ -129,6 +142,22 @@ impl NonSendResources {
     /// `EcsMaster` facade calls it under `&mut self` on the dispatcher.
     #[cold]
     pub fn insert<R: NonSendResource>(&mut self, value: R) {
+        // M2 (Phase 5 Option C): stamp the owning thread on the FIRST insert —
+        // the thread that homes the `!Send` payload. Every subsequent
+        // projection asserts against it. Debug-only; zero release cost.
+        #[cfg(debug_assertions)]
+        {
+            let current = std::thread::current().id();
+            match self.owning_thread {
+                None => self.owning_thread = Some(current),
+                Some(owner) => debug_assert_eq!(
+                    current, owner,
+                    "invariant M2/N2: NonSendResources::insert ran on a thread \
+                     other than the slab's owning thread — !Send values must be \
+                     inserted only on the owning (dispatcher) thread"
+                ),
+            }
+        }
         let id = nonsend_id::<R>();
         let layout = Layout::new::<R>();
         // ZST contract (N5): for a zero-sized `R`, `Box::new` performs NO heap
@@ -318,6 +347,29 @@ impl NonSendResources {
     pub fn is_empty(&self) -> bool {
         self.registered_mask.is_empty()
     }
+
+    /// Phase 5 Option C (M2) — debug-only tripwire that the current thread is
+    /// the slab's owning (dispatcher) thread.
+    ///
+    /// Called by every `!Send` projection
+    /// (`UnsafeEcsCell::nonsend_resources[_mut]`) so a projection from the wrong
+    /// thread fails loud in debug. Compiles to NOTHING in release (the whole
+    /// body is `#[cfg(debug_assertions)]`), so it costs zero on the hot path.
+    /// A slab with no insert yet has no `owning_thread` and no `!Send` payload,
+    /// so the check is vacuous there.
+    #[inline]
+    pub(crate) fn debug_assert_owning_thread(&self) {
+        #[cfg(debug_assertions)]
+        if let Some(owner) = self.owning_thread {
+            debug_assert_eq!(
+                std::thread::current().id(),
+                owner,
+                "invariant M2/N2: a NonSend resource was projected off the slab's \
+                 owning (dispatcher) thread — the !Send payload must be touched \
+                 only on the thread that inserted it"
+            );
+        }
+    }
 }
 
 /// Mints (once) and returns the [`NonSendResourceId`] for `R`.
@@ -439,6 +491,51 @@ mod tests {
         //   `NonSendA`; we read its first field on the owning thread.
         let v = unsafe { (*(ptr as *const NonSendA)).0 };
         assert_eq!(v, 42, "stored value must round-trip");
+    }
+
+    /// Phase 5 Option C (M2) — a NonSend resource inserted on thread A and
+    /// projected on thread B trips the debug-only owning-thread tripwire.
+    ///
+    /// `NonSendResources` is `!Send` (raw-pointer interior), so the slab cannot
+    /// be moved to thread B directly; we hand the checker a raw `*const` across
+    /// the boundary (sound for the read-only `debug_assert_owning_thread` call,
+    /// which the test only reaches to PROVE it panics). Debug-only — the M2 stamp
+    /// + check compile to nothing in release, so the panic cannot fire there.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn projection_off_owning_thread_trips_m2() {
+        // Insert on thread A (this thread) → stamps `owning_thread = A`.
+        let res = {
+            let mut r = NonSendResources::new();
+            r.insert(NonSendA(1, std::ptr::null()));
+            r
+        };
+
+        /// Carries a `*const NonSendResources` across the thread boundary. The
+        /// pointee stays pinned on thread A for the join; thread B only calls the
+        /// read-only checker, which we EXPECT to panic.
+        struct SendPtr(*const NonSendResources);
+        // SAFETY: the test keeps `res` alive on thread A across the join below,
+        //   and thread B touches it only through the read-only
+        //   `debug_assert_owning_thread` (which panics before any field access).
+        unsafe impl Send for SendPtr {}
+
+        let ptr = SendPtr(&res as *const NonSendResources);
+        let handle = std::thread::spawn(move || {
+            let ptr = ptr; // move the wrapper in
+            // SAFETY (test-only): `ptr.0` points at the live `res` on thread A;
+            //   `debug_assert_owning_thread` reads only `owning_thread` and panics
+            //   because the current thread (B) != the stamped owner (A).
+            let slab: &NonSendResources = unsafe { &*ptr.0 };
+            slab.debug_assert_owning_thread();
+        });
+        let joined = handle.join();
+        assert!(
+            joined.is_err(),
+            "M2: projecting a NonSend resource off the owning thread must panic in debug"
+        );
+        // Keep `res` alive until after the join.
+        drop(res);
     }
 
     #[test]

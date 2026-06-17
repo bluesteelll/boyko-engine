@@ -51,6 +51,7 @@ use crate::ecs::core::schedule::executor_scratch::{CompletionCell, ExecutorScrat
 use crate::ecs::core::schedule::system_box::{BoolSystem, SystemBox};
 use crate::ecs::core::schedule::system_set::SystemSetId;
 use crate::ecs::core::state::StateEntry;
+use crate::ecs::core::system::dispatcher_token::DispatcherToken;
 use crate::ecs::core::system::gpu_intent::{GpuAccessIntent, GpuStage};
 use crate::ecs::core::system::system_kind::SystemKind;
 use crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell;
@@ -199,6 +200,19 @@ impl Schedule {
     /// any other world panics in release builds — the systems' per-world
     /// caches (event-buffer pointers, query-state generations) are only valid
     /// against the build world.
+    ///
+    /// # Caller obligation (NSND-THREAD — Phase 5 Option C)
+    ///
+    /// If the world holds any `!Send` resource, `run` MUST be called on that
+    /// slab's owning thread (the thread of the first
+    /// [`EcsMaster::insert_non_send_resource`]). A `GpuCompute` / `CpuExclusive`
+    /// system reaches a `!Send` resource on the dispatcher-solo path (the
+    /// `DispatcherToken` / NonSend `SystemParam` projections), which is sound
+    /// ONLY when the dispatcher thread is that owning thread. Workers never touch
+    /// the `!Send` slab (the token/cell-accessor surface is dispatcher-only). The
+    /// M2 debug tripwire catches a wrong-thread `run`.
+    ///
+    /// [`EcsMaster::insert_non_send_resource`]: crate::ecs::core::ecs_master::ecs_master::EcsMaster::insert_non_send_resource
     ///
     /// # Panics
     ///
@@ -1051,7 +1065,7 @@ impl Schedule {
                     .set_change_ticks(prev, self.frame_this_run);
             }
 
-            // SAFETY (EXC1 — Round 3 W-NEW-5; FIX-3):
+            // SAFETY (EXC1 — Round 3 W-NEW-5; FIX-3; Phase 5 Option C):
             //   - For `CpuExclusive`, universal access ⇒ the conflict graph
             //     forces `running == 0` before dispatch. Independently, the EXC2
             //     gate checks the LIVE `running.count_ones()` (NOT a stale
@@ -1063,23 +1077,41 @@ impl Schedule {
             //   - `cell.world_mut()` reborrows `&mut EcsMaster` from the
             //     cell minted in the current dispatch round from the
             //     dispatcher's own &mut world. No other reference exists.
-            //   - The exclusive system body must not retain any
-            //     cell-derived borrow past return. The dispatcher
-            //     reborrows via the same cell for `apply` immediately
-            //     below; a stashed pointer would alias the apply
-            //     reborrow.
-            //   - Calling `run_unsafe(cell)` is safe under S1 because no
+            //   - We mint a `DispatcherToken` from that SAME reborrow and call
+            //     `run_dispatcher` (not `run_unsafe`). The token is the Option-C
+            //     capability for reaching `!Send` resources; minting it here is
+            //     sound because the EXC2 gate above guarantees `running == 0`
+            //     (no worker holds an aliasing cell — the token's `new`
+            //     contract). The default `run_dispatcher` forwards to
+            //     `run_unsafe` via the cell, so every CPU system is
+            //     byte-identical; only a `GpuCompute` system overrides it.
+            //   - The token + the `&mut EcsMaster` reborrow it carries do not
+            //     escape: `run_dispatcher` consumes the token by value, and the
+            //     dispatcher reborrows via the same cell for `apply` only after
+            //     the token's borrow has ended. A stashed pointer would alias
+            //     the apply reborrow — the system body must not retain one.
+            //   - Calling `run_dispatcher(token)` is safe under S1' because no
             //     worker is running.
-            let world_ref: &mut EcsMaster = unsafe { cell.world_mut() };
-            // Use the `&mut self.systems[i].system` borrow ONLY locally;
-            // it does not escape because we are not in a spawn closure
-            // here. The cell carries write capability; reborrowing
-            // `world_ref` for `apply` after `run_unsafe` returns is fine
-            // because `run_unsafe` consumed its `cell` argument by value
-            // and the cell's lifetime is `'scope >= 'fn-body`.
-            unsafe {
-                self.systems[i].system.run_unsafe(cell);
+            {
+                // SAFETY (Option C / S1'): EXC2 guarantees `running == 0`, so the
+                //   dispatcher is solo — exactly the context `DispatcherToken::new`
+                //   requires. The reborrow's `'scope` lifetime outlives the call.
+                let world_ref: &mut EcsMaster = unsafe { cell.world_mut() };
+                let token = unsafe { DispatcherToken::new(world_ref) };
+                unsafe {
+                    self.systems[i].system.run_dispatcher(token);
+                }
             }
+            // Reborrow for `apply` AFTER the token's borrow has ended (it was
+            // consumed by `run_dispatcher` above). The cell carries write
+            // capability; this is the same `&mut world` provenance, no aliasing.
+            //
+            // SAFETY (U_C3, S1): `running == 0` (EXC2), so no worker aliases the
+            //   reborrow; the cell was minted via `new_mutable` from the
+            //   dispatcher's own `&mut world`. The prior token's borrow ended
+            //   when `run_dispatcher` consumed it, so this reborrow is the sole
+            //   live `&mut EcsMaster`.
+            let world_ref: &mut EcsMaster = unsafe { cell.world_mut() };
             // Apply runs inline (no completion-queue round-trip). The
             // reborrow is via the same cell, which is rooted in the same
             // `&mut world` provenance; no aliasing.

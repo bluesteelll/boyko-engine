@@ -18,12 +18,28 @@
 //!   the core stores, and drives the A2 seam
 //!   [`Archetype::make_component_device_backed`](boyko_ecs::ecs::core::archetype::archetype::Archetype::make_component_device_backed).
 //! - [`RhiContext`] is the `!Send` handle (`impl NonSendResource`) the dispatcher
-//!   later reaches; for Wave B it owns the manager.
+//!   reaches; it owns the manager.
 //!
-//! The `GpuSystem` / barrier lowering / shaders are LATER waves (C/D).
+//! # Wave C scope
+//!
+//! Wave C adds the hand-written [`GpuSystem`] (`impl boyko_ecs::System`) — the MF-5
+//! mechanism. It declares EMPTY access + the `is_gpu` marker, projects the `!Send`
+//! [`RhiContext`] from the world's NonSend slab inside `run_unsafe` (via the public
+//! [`UnsafeEcsCell::nonsend_resource_mut`], WITHOUT `mark_universal`), resolves its
+//! target column indirectly by `(archetype, component)` (MF-7), and records +
+//! submits the `gpu_integrate` compute dispatch. The compute pipeline is built once
+//! at setup from the committed [`gpu_integrate_spirv`] via
+//! [`RhiContext::create_compute_pipeline`].
+//!
+//! [`UnsafeEcsCell::nonsend_resource_mut`]: boyko_ecs::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell::nonsend_resource_mut
+//!
+//! Barrier lowering (`PlannedBarrier` replay) is a LATER wave (D); the Wave-C
+//! `GpuSystem` carries an EMPTY barrier plan.
 
 pub mod error;
 pub mod gpu_column;
+pub mod gpu_system;
 
 pub use error::GpuColumnError;
-pub use gpu_column::{GpuColumnManager, GpuColumnMeta, ResolvedColumn, RhiContext};
+pub use gpu_column::{GpuColumnManager, GpuColumnMeta, LOCAL_SIZE_X, ResolvedColumn, RhiContext};
+pub use gpu_system::{GpuSystem, PlannedBarrier, gpu_integrate_spirv};

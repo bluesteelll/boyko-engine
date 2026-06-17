@@ -6,6 +6,7 @@
 //! plan §3..§9 for the design.
 
 pub mod access;
+pub mod dispatcher_token;
 pub mod exclusive_function_system;
 pub mod filtered_access_set;
 pub mod function_system;
@@ -21,6 +22,7 @@ pub mod system_param;
 pub mod unsafe_ecs_cell;
 
 pub use access::Access;
+pub use dispatcher_token::DispatcherToken;
 pub use exclusive_function_system::ExclusiveFunctionSystem;
 pub use filtered_access_set::{AccessConflict, ConflictKind, FilteredAccessSet};
 pub use gpu_intent::{GpuAccess, GpuAccessIntent, GpuStage, GpuTouch, MAX_GPU_TOUCHES};

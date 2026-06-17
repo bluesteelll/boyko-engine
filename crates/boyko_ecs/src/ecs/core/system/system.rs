@@ -25,6 +25,7 @@
 use crate::ecs::core::change_detection::Tick;
 use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 use crate::ecs::core::system::access::Access;
+use crate::ecs::core::system::dispatcher_token::DispatcherToken;
 use crate::ecs::core::system::system_meta::SystemMeta;
 use crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell;
 
@@ -92,6 +93,52 @@ pub unsafe trait System: Send + Sync + 'static {
     ///
     /// [`EcsMaster::run_system_once`]: crate::ecs::core::ecs_master::ecs_master::EcsMaster::run_system_once
     unsafe fn run_unsafe(&mut self, world: UnsafeEcsCell<'_>) -> Self::Out;
+
+    /// Phase 5 Option C — defense-in-depth GPU-compute marker.
+    ///
+    /// Returns `false` by default (every CPU system). A hand-written
+    /// out-of-crate `System` that dispatches GPU work (the `boyko_render`
+    /// `GpuSystem`) overrides this to `true`. The schedule builder consults it
+    /// (in addition to the explicit `SystemConfig::gpu()` descriptor flag) so a
+    /// system that IS GPU-resident cannot be mis-resolved to a CPU kind even if
+    /// the caller forgot the explicit opt-in — the dispatcher-solo discipline a
+    /// `GpuCompute` system relies on is then never silently dropped.
+    #[inline]
+    fn is_gpu(&self) -> bool {
+        false
+    }
+
+    /// Phase 5 Option C — the dispatcher-solo run entry point.
+    ///
+    /// Called instead of [`run_unsafe`](Self::run_unsafe) on the dispatcher-solo
+    /// path (the scheduler's `running == 0` window and
+    /// [`EcsMaster::run_system_once`]). The default forwards to `run_unsafe`
+    /// through [`DispatcherToken::into_cell`], so every existing system is
+    /// byte-identical — only a system needing `!Send` access (the
+    /// `boyko_render` `GpuSystem`) overrides it to project through the
+    /// [`DispatcherToken`] instead of the [`UnsafeEcsCell`].
+    ///
+    /// # Safety
+    ///
+    /// **S1'** — The caller MUST guarantee `running == 0` on the dispatcher for
+    /// the duration of this call (no worker live, no other `run_unsafe` /
+    /// `run_dispatcher` in flight on the same world). The [`DispatcherToken`] is
+    /// mintable ONLY in that context (see [`DispatcherToken::new`]), so passing
+    /// one IS the witness that S1' holds.
+    ///
+    /// [`DispatcherToken`]: super::dispatcher_token::DispatcherToken
+    /// [`DispatcherToken::new`]: super::dispatcher_token::DispatcherToken::new
+    /// [`DispatcherToken::into_cell`]: super::dispatcher_token::DispatcherToken::into_cell
+    /// [`EcsMaster::run_system_once`]: crate::ecs::core::ecs_master::ecs_master::EcsMaster::run_system_once
+    #[inline]
+    unsafe fn run_dispatcher(&mut self, token: DispatcherToken<'_>) -> Self::Out {
+        // SAFETY (S1'): the caller guarantees `running == 0` (the token is
+        //   mintable only there). `token.into_cell()` reconstructs the
+        //   write-capable cell from the same `&mut EcsMaster` provenance that
+        //   minted the token; the dispatcher-solo context upholds the cell's S1
+        //   contract.
+        unsafe { self.run_unsafe(token.into_cell()) }
+    }
 
     /// Hook for deferred mutations after [`run_unsafe`](Self::run_unsafe)
     /// returns. The default implementation is a no-op; concrete systems

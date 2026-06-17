@@ -54,7 +54,8 @@ use crate::ecs::core::state::states::States;
 use crate::ecs::core::state::transition_record::StateTransitionRecord;
 use crate::ecs::core::state::{NextState, State};
 use crate::ecs::core::system::{
-    into_system::IntoSystem, system::System, unsafe_ecs_cell::UnsafeEcsCell,
+    dispatcher_token::DispatcherToken, into_system::IntoSystem, system::System,
+    unsafe_ecs_cell::UnsafeEcsCell,
 };
 use crate::ecs::identifiers::primitives::{
     ArchetypeId, ComponentId, EntityId, InlandPoolId, WorldId,
@@ -1909,28 +1910,37 @@ impl EcsMaster {
     ///   1. [`System::initialize`] — idempotent two-phase init (state then
     ///      access surface); subsequent calls short-circuit so cross-call
     ///      `&mut S` reuse is supported.
-    ///   2. [`UnsafeEcsCell::new_mutable`] — mints a write-capable cell
+    ///   2. [`DispatcherToken::new`] — mints the dispatcher-solo capability
     ///      bound to the `&mut self` borrow scope.
-    ///   3. [`System::run_unsafe`] — invokes the system body.
+    ///   3. [`System::run_dispatcher`] — invokes the system body. The default
+    ///      forwards to [`System::run_unsafe`] via the token's cell, so a CPU
+    ///      system is byte-identical to the prior `run_unsafe` path; a
+    ///      `GpuCompute` system overrides it to reach its `!Send` resource
+    ///      through the token (Phase 5 Option C).
     ///
-    /// Phase 9's scheduler will replace this method with a multi-system
-    /// runner that resolves aliasing via the `Access` conflict graph; for
-    /// now `&mut EcsMaster` enforces the S1 invariant trivially.
+    /// This is a dispatcher-solo entry point: `&mut self` is exclusive for the
+    /// whole call, so `running == 0` at the language level (no worker is live).
+    /// Phase 9's scheduler runs the same `run_dispatcher` on its own
+    /// dispatcher-solo path.
     ///
     /// [`System`]: crate::ecs::core::system::system::System
     /// [`System::initialize`]: crate::ecs::core::system::system::System::initialize
     /// [`System::run_unsafe`]: crate::ecs::core::system::system::System::run_unsafe
-    /// [`UnsafeEcsCell::new_mutable`]: crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell::new_mutable
+    /// [`System::run_dispatcher`]: crate::ecs::core::system::system::System::run_dispatcher
+    /// [`DispatcherToken::new`]: crate::ecs::core::system::dispatcher_token::DispatcherToken::new
     pub fn run_system_once<S: System>(&mut self, system: &mut S) -> S::Out {
         system.initialize(self);
-        // SAFETY (U_C1): `cell` does not outlive the `&mut self` borrow — it
-        //   is consumed by `run_unsafe` on the next line and cannot escape.
-        let cell = unsafe { UnsafeEcsCell::new_mutable(self) };
-        // SAFETY (S1): `&mut self` is exclusive for the entire call ⇒ no
-        //   other `System::run_unsafe` is in flight on this `EcsMaster`.
-        //   The Phase 9 scheduler will replace this trivial enforcement
-        //   with the `Access` conflict graph.
-        unsafe { system.run_unsafe(cell) }
+        // SAFETY (Option C / S1'): `&mut self` is exclusive for the entire call
+        //   ⇒ `running == 0` (no worker is live, no other `run_unsafe` /
+        //   `run_dispatcher` in flight on this `EcsMaster`) — exactly the
+        //   dispatcher-solo context `DispatcherToken::new` requires. The token
+        //   does not outlive the `&mut self` borrow: it is consumed by
+        //   `run_dispatcher` on the next line and cannot escape.
+        let token = unsafe { DispatcherToken::new(self) };
+        // SAFETY (S1'): the token witnesses `running == 0` (it is mintable only
+        //   in the dispatcher-solo context above), so no other system body is in
+        //   flight on this world.
+        unsafe { system.run_dispatcher(token) }
     }
 
     /// Deprecated alias for [`run_system`](EcsMaster::run_system), retained
@@ -2676,6 +2686,19 @@ impl EcsMaster {
     /// thread — the typical caller is the dispatcher during setup. The world
     /// itself stays `Send + Sync` (the slab erases types to a raw pointer +
     /// drop fn + `TypeId`; SEND10).
+    ///
+    /// # Caller obligation (NSND-THREAD — Phase 5 Option C)
+    ///
+    /// The thread that makes the FIRST `insert_non_send_resource` call becomes
+    /// the slab's OWNING thread (stamped in debug as
+    /// [`NonSendResources::owning_thread`]). Every subsequent insert, projection
+    /// (`NonSendRes` / `NonSendResMut` / `DispatcherToken`), and drop of a
+    /// `!Send` value MUST happen on that same thread. In practice this is the
+    /// dispatcher thread that also drives [`Schedule::run`]. A wrong-thread touch
+    /// is UB in release; in debug the M2 tripwire (`debug_assert_eq!`) catches it.
+    ///
+    /// [`NonSendResources::owning_thread`]: crate::ecs::core::resources::nonsend_resources::NonSendResources
+    /// [`Schedule::run`]: crate::ecs::core::schedule::schedule::Schedule::run
     #[cold]
     pub fn insert_non_send_resource<R: NonSendResource>(&mut self, value: R) {
         self.nonsend_resources
@@ -3542,6 +3565,24 @@ impl Default for EcsMaster {
 //     enforces the routing — it is guarded by the behavioral test
 //     `nonsend_system_runs_on_dispatcher_and_observes_resource`. SEND1 is
 //     unchanged.
+//
+//     Phase 5 Option C amendment (NSND-THREAD): a hand-written out-of-crate
+//     System (the `boyko_render` `GpuSystem`) reaches the `!Send` payload NOT
+//     through a public `UnsafeEcsCell` accessor — the Wave-C
+//     `pub unsafe fn UnsafeEcsCell::nonsend_resource_mut` was DELETED because it
+//     was reachable on the concurrent worker path (C1) and its `'w` return
+//     lifetime allowed two aliasing `&mut R` (M1). It now reaches it ONLY through
+//     `DispatcherToken::nonsend_resource_mut`, a capability mintable solely on the
+//     dispatcher-solo path (scheduler `running == 0` + `run_system_once`), with a
+//     `&mut self`-tied return lifetime that makes a second `&mut R` un-aliasable.
+//     A DEBUG-ONLY thread tripwire (M2) — `NonSendResources::owning_thread`,
+//     stamped at the first `insert_non_send_resource` and asserted by every
+//     projection (`UnsafeEcsCell::nonsend_resources[_mut]` +
+//     `DispatcherToken`) — catches a wrong-thread touch loud in debug. The
+//     routing is still behaviorally (not compile-time) enforced; M2 is the
+//     debug backstop. NSND-THREAD caller obligation: callers of
+//     `insert_non_send_resource` and `Schedule::run` MUST keep the world on a
+//     single owning (dispatcher) thread for the `!Send` slab's lifetime.
 unsafe impl Send for EcsMaster {}
 unsafe impl Sync for EcsMaster {}
 

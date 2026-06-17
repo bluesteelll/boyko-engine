@@ -1,0 +1,5 @@
+error[E0599]: no method named `nonsend_resource_mut` found for struct `UnsafeEcsCell<'w>` in the current scope
+  --> tests/compile_fail_dispatcher_token/unsafe_cell_nonsend_accessor_deleted.rs:26:27
+   |
+26 |     let _ = unsafe { cell.nonsend_resource_mut::<NonSendCounter>() };
+   |                           ^^^^^^^^^^^^^^^^^^^^ method not found in `UnsafeEcsCell<'_>`

@@ -34,13 +34,21 @@ use boyko_ecs::ecs::identifiers::primitives::{ArchetypeId, ComponentId};
 use boyko_ecs::ecs::memory::device_column::DeviceColumnHandle;
 
 use boyko_rhi::{
-    BufferCopy, BufferDesc, BufferHandle, BufferUsage, MemoryLocation, ResourceRegistry,
-    RhiCommandEncoder, RhiDevice, RhiQueue, slot_to_u64, u64_to_slot,
+    BufferCopy, BufferDesc, BufferHandle, BufferUsage, ComputePipelineDesc, ComputePipelineHandle,
+    MemoryLocation, ResourceRegistry, RhiCommandEncoder, RhiDevice, RhiQueue, ShaderHandle,
+    ShaderStage, slot_to_u64, u64_to_slot,
 };
 use boyko_rhi_vulkan::device::VulkanContext;
 use boyko_rhi_vulkan::rhi_impl::Vulkan;
 
 use crate::error::GpuColumnError;
+
+/// The `local_size_x` of the `gpu_integrate` compute shader (`[numthreads(64,1,1)]`).
+///
+/// The dispatch group count along X is `ceil(row_count / LOCAL_SIZE_X)`; the
+/// shader's `if (i >= count) return;` bounds check absorbs the tail of a
+/// non-multiple row count.
+pub const LOCAL_SIZE_X: u32 = 64;
 
 /// A `boyko_render`-side record for one device-resident column (cold, side-table).
 ///
@@ -133,6 +141,44 @@ impl RhiContext {
     #[inline]
     pub fn split_mut(&mut self) -> (&VulkanContext, &mut GpuColumnManager) {
         (&self.context, &mut self.manager)
+    }
+
+    /// SETUP-only: builds a compute pipeline from `spirv` (registered in the owned
+    /// manager's registry) and returns its handle (Wave C).
+    ///
+    /// Convenience over `self.manager.create_compute_pipeline(&self.context, …)`:
+    /// the `GpuSystem` setup path holds the projected `&mut RhiContext` and creates
+    /// its `gpu_integrate` pipeline once through this.
+    ///
+    /// # Errors
+    /// [`GpuColumnError::Rhi`] if shader-module / pipeline creation fails.
+    #[inline]
+    pub fn create_compute_pipeline(
+        &mut self,
+        spirv: &[u32],
+    ) -> Result<ComputePipelineHandle, GpuColumnError> {
+        self.manager.create_compute_pipeline(&self.context, spirv)
+    }
+
+    /// Records + submits the `gpu_integrate` compute dispatch on the column
+    /// resolved indirectly by `(archetype, component)` (MF-7), fence-waiting before
+    /// it returns. Returns `Ok(false)` if the column does not resolve (skip),
+    /// `Ok(true)` on a recorded + waited dispatch.
+    ///
+    /// The frame-path entry point `GpuSystem::run_unsafe` calls after projecting
+    /// the `&mut RhiContext`.
+    ///
+    /// # Errors
+    /// [`GpuColumnError`] on a stale pipeline handle or any RHI failure.
+    #[inline]
+    pub fn dispatch_compute(
+        &self,
+        pipeline: ComputePipelineHandle,
+        archetype: ArchetypeId,
+        component: ComponentId,
+    ) -> Result<bool, GpuColumnError> {
+        self.manager
+            .dispatch_compute(&self.context, pipeline, archetype, component)
     }
 
     /// Tears down every device resource (forwards to the manager).
@@ -361,6 +407,167 @@ impl GpuColumnManager {
     pub fn is_handle_live(&self, handle: DeviceColumnHandle) -> bool {
         let buffer_handle = BufferHandle(u64_to_slot(handle.0));
         self.registry.resolve_buffer(buffer_handle).is_some()
+    }
+
+    /// SETUP-only: builds a compute pipeline from `spirv` and registers both the
+    /// shader module and the pipeline in the manager's registry, returning the
+    /// pipeline handle (Wave C).
+    ///
+    /// The shader module + pipeline are owned by the registry, so the existing
+    /// [`destroy_all`](Self::destroy_all) tears them down uniformly (the registry
+    /// destroys pipelines → shaders → buffers in order). The descriptor-set layout
+    /// is the device's shared one — a single STORAGE_BUFFER at set 0 / binding 0,
+    /// COMPUTE stage — and the pipeline carries a 4-byte (`u32`) push-constant
+    /// range, matching the `gpu_integrate` shader contract.
+    ///
+    /// `spirv` must be the 4-byte-aligned `u32` word stream of a compute shader
+    /// whose layout matches that fixed contract; the caller (`GpuSystem` setup)
+    /// supplies the committed `gpu_integrate.comp.spv`.
+    ///
+    /// # Errors
+    /// [`GpuColumnError::Rhi`] if the shader-module or pipeline creation fails. On
+    /// a pipeline-create failure the just-created shader module is destroyed before
+    /// the error returns (no leak), since it is not yet in the registry.
+    pub fn create_compute_pipeline(
+        &mut self,
+        device: &VulkanContext,
+        spirv: &[u32],
+    ) -> Result<ComputePipelineHandle, GpuColumnError> {
+        let module = device.create_shader_module(spirv)?;
+        let pipeline = match device.create_compute_pipeline(&ComputePipelineDesc {
+            module: &module,
+            entry: c"main",
+            push_constant_bytes: 4,
+        }) {
+            Ok(p) => p,
+            Err(e) => {
+                // SAFETY: `module` was just created on `device`, was never
+                // registered (owned exclusively here, destroyed once), and no
+                // pipeline references it (the create failed), so no GPU work uses
+                // it.
+                unsafe { device.destroy_shader_module(module) };
+                return Err(GpuColumnError::Rhi(e));
+            }
+        };
+
+        // Register both so `destroy_all` reclaims them. The shader-module handle is
+        // intentionally not returned: the pipeline owns the compiled stage and the
+        // module is only needed for teardown ordering, which the registry handles.
+        let _shader: ShaderHandle = self.registry.register_shader(module);
+        Ok(self.registry.register_compute_pipeline(pipeline))
+    }
+
+    /// Records and submits the `gpu_integrate` compute dispatch on the device
+    /// column resolved INDIRECTLY by `(archetype, component)` (MF-7), then
+    /// fence-waits (Wave C — a straightforward submit+wait; deferred-wait overlap
+    /// is a Phase-6 refinement).
+    ///
+    /// Resolves the current column each call (never caches the raw `u64`), binds
+    /// `pipeline`, binds the column's device buffer as storage binding 0, pushes
+    /// the live row count as the shader's `count` push constant, and dispatches
+    /// `ceil(device_len / LOCAL_SIZE_X)` workgroups along X. A `device_len == 0`
+    /// column is a documented no-op: it returns `Ok(true)` WITHOUT recording a
+    /// pass (a zero-group `dispatch(0, 1, 1)` would trip the encoder's
+    /// non-zero-group debug_assert, and an empty pass buys nothing).
+    ///
+    /// Returns `Ok(false)` if the column does not resolve (a stale handle or a key
+    /// with no live column) — the caller (`GpuSystem::run_unsafe`) treats this as a
+    /// skip and `debug_assert!`s against it. Returns `Ok(true)` on a recorded +
+    /// fence-waited dispatch.
+    ///
+    /// # Errors
+    /// [`GpuColumnError`] on a stale pipeline handle or any RHI failure (encoder,
+    /// submit, fence wait).
+    pub fn dispatch_compute(
+        &self,
+        device: &VulkanContext,
+        pipeline: ComputePipelineHandle,
+        archetype: ArchetypeId,
+        component: ComponentId,
+    ) -> Result<bool, GpuColumnError> {
+        // MF-7: resolve the target column indirectly by its durable key each call.
+        // A grow rotates the handle but the (archetype, component) key is stable.
+        let Some(resolved) = self.resolve(archetype, component) else {
+            return Ok(false);
+        };
+        let buffer_handle = BufferHandle(u64_to_slot(resolved.handle.0));
+        let buffer = self
+            .registry
+            .resolve_buffer(buffer_handle)
+            .ok_or(GpuColumnError::StaleHandle)?;
+        let pipe = self
+            .registry
+            .resolve_compute_pipeline(pipeline)
+            .ok_or(GpuColumnError::StaleHandle)?;
+
+        let count = resolved.device_len;
+
+        // Zero-row column: a documented no-op. EARLY-RETURN before recording —
+        // `encoder.dispatch(0, 1, 1)` would trip the encoder's non-zero-group
+        // debug_assert, and recording an empty pass buys nothing. We have not yet
+        // created the fence/encoder here, so there is nothing to tear down.
+        if count == 0 {
+            return Ok(true);
+        }
+        let group_count_x = count.div_ceil(LOCAL_SIZE_X);
+
+        let fence = device.create_fence(false)?;
+        // If encoder creation fails AFTER the fence was created, the fence would
+        // leak (the Wave-B C1 leak class on the dispatch path). Destroy it before
+        // propagating the error so every fence/encoder is destroyed exactly once
+        // on every edge.
+        let mut encoder = match device.create_command_encoder() {
+            Ok(e) => e,
+            Err(e) => {
+                // SAFETY: `fence` was just created on `device` and is moved by
+                // value here ⇒ destroyed exactly once; no GPU work references it
+                // (nothing was submitted), so the destroy is not a UAF.
+                unsafe { device.destroy_fence(fence) };
+                return Err(GpuColumnError::Rhi(e));
+            }
+        };
+        let queue = device.rhi_queue();
+
+        // Track submit success separately from the wait result (FIX-U1 mirror): a
+        // wait-Err after an Ok submit leaves GPU work in flight referencing the
+        // encoder + fence, so they must not be torn down until the device is idle.
+        let mut submitted = false;
+        let record = (|| -> Result<(), GpuColumnError> {
+            encoder.begin()?;
+            encoder.bind_compute_pipeline(pipe);
+            encoder.bind_storage_buffer(buffer, 0, 0);
+            encoder.push_constants(ShaderStage::COMPUTE, 0, &count.to_ne_bytes());
+            encoder.dispatch(group_count_x, 1, 1);
+            encoder.end()?;
+            queue.submit(&encoder, &fence)?;
+            submitted = true;
+            device.wait_fence(&fence, u64::MAX)?;
+            Ok(())
+        })();
+
+        // FIX-U1 mirror: if the submit succeeded but the wait failed, drain the
+        // device before destroying the transient encoder + fence (prefer
+        // wait_idle-then-destroy over a UAF). On a never-submitted error nothing was
+        // enqueued, so no extra wait is needed.
+        if record.is_err() && submitted {
+            let _ = device.wait_idle();
+        }
+
+        // Tear down the transient encoder + fence.
+        // SAFETY: `encoder` + `fence` were created on `device` and each is moved by
+        // value here ⇒ destroyed exactly once. No GPU work is in flight against
+        // them at this point:
+        //   * `record` is `Ok`: the fence wait completed the submission.
+        //   * `record` is `Err` && `!submitted`: the submit never happened, so
+        //     nothing was enqueued.
+        //   * `record` is `Err` && `submitted`: the `wait_idle` above drained the
+        //     in-flight submission (or the device is lost, making the destroy a
+        //     defined no-op).
+        unsafe {
+            device.destroy_command_encoder(encoder);
+            device.destroy_fence(fence);
+        }
+        record.map(|()| true)
     }
 
     /// SETUP-only: stages `bytes` into the host-visible staging buffer, copies
@@ -721,7 +928,20 @@ impl GpuColumnManager {
         regions: &[BufferCopy],
     ) -> Result<(), GpuColumnError> {
         let fence = device.create_fence(false)?;
-        let mut encoder = device.create_command_encoder()?;
+        // If encoder creation fails AFTER the fence was created, the fence would
+        // leak (the Wave-B C1 leak class on the copy path). Destroy it before
+        // propagating the error so every fence/encoder is destroyed exactly once
+        // on every edge.
+        let mut encoder = match device.create_command_encoder() {
+            Ok(e) => e,
+            Err(e) => {
+                // SAFETY: `fence` was just created on `device` and is moved by
+                // value here ⇒ destroyed exactly once; no GPU work references it
+                // (nothing was submitted), so the destroy is not a UAF.
+                unsafe { device.destroy_fence(fence) };
+                return Err(GpuColumnError::Rhi(e));
+            }
+        };
         let queue = device.rhi_queue();
 
         // Track whether the submit succeeded SEPARATELY from the wait result: a
