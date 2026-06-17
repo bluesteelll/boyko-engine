@@ -234,6 +234,35 @@ impl SystemMeta {
         self.this_run
     }
 
+    /// Writes both change-detection tick snapshots in place (Phase 5 MF-5
+    /// enabling).
+    ///
+    /// The public setter that a HAND-WRITTEN out-of-crate [`System`] impl (the
+    /// `boyko_render` `GpuSystem`) forwards from its
+    /// [`System::set_change_ticks`](super::system::System::set_change_ticks) so
+    /// the dispatcher's tick-snapshot contract holds without exposing the
+    /// `pub(crate)` `last_run` / `this_run` fields. In-crate systems write the
+    /// fields directly; this is the cross-crate equivalent.
+    #[inline]
+    pub fn set_change_ticks(&mut self, last_run: Tick, this_run: Tick) {
+        self.last_run = last_run;
+        self.this_run = this_run;
+    }
+
+    /// Clamps both tick snapshots to be no older than
+    /// [`MAX_CHANGE_AGE`](crate::ecs::core::change_detection::MAX_CHANGE_AGE)
+    /// ticks behind `current` (Phase 5 MF-5 enabling).
+    ///
+    /// The public counterpart of the in-crate
+    /// [`Tick::check_tick`](crate::ecs::core::change_detection::Tick::check_tick)
+    /// clamp, forwarded by an out-of-crate [`System`]'s
+    /// [`System::check_change_tick`](super::system::System::check_change_tick).
+    #[inline]
+    pub fn clamp_change_ticks(&mut self, current: Tick) {
+        self.last_run = self.last_run.check_tick(current);
+        self.this_run = self.this_run.check_tick(current);
+    }
+
     /// Returns this system's abstract GPU access descriptor, or `None`
     /// (Phase 4 Seam 4 / D7). `None` for every CPU system.
     #[inline]

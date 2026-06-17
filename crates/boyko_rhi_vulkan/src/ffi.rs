@@ -1141,6 +1141,18 @@ pub struct VkBufferMemoryBarrier {
     pub size: VkDeviceSize,
 }
 
+/// `VkBufferCopy` — one buffer-to-buffer copy region for `vkCmdCopyBuffer`
+/// (Phase-5 staging upload + readback). Field order + `VkDeviceSize` (u64) types
+/// match the agnostic `boyko_rhi::BufferCopy` exactly, so the encoder can pass a
+/// `&[BufferCopy]` straight through as a `&[VkBufferCopy]` (layout match asserted
+/// below + at the cast site).
+#[repr(C)]
+pub struct VkBufferCopy {
+    pub src_offset: VkDeviceSize,
+    pub dst_offset: VkDeviceSize,
+    pub size: VkDeviceSize,
+}
+
 /// `VkFenceCreateInfo`.
 #[repr(C)]
 pub struct VkFenceCreateInfo {
@@ -1446,6 +1458,8 @@ const _: () = assert!(core::mem::size_of::<VkDebugUtilsMessengerCallbackDataExt>
 const _: () = assert!(core::mem::align_of::<VkDebugUtilsMessengerCallbackDataExt>() == 8);
 const _: () = assert!(core::mem::size_of::<VkBufferMemoryBarrier>() == 56);
 const _: () = assert!(core::mem::align_of::<VkBufferMemoryBarrier>() == 8);
+const _: () = assert!(core::mem::size_of::<VkBufferCopy>() == 24);
+const _: () = assert!(core::mem::align_of::<VkBufferCopy>() == 8);
 const _: () = assert!(core::mem::size_of::<VkDescriptorBufferInfo>() == 24);
 const _: () = assert!(core::mem::size_of::<VkDescriptorSetLayoutBinding>() == 24);
 const _: () = assert!(core::mem::size_of::<VkPushConstantRange>() == 12);
@@ -1800,6 +1814,21 @@ pub type PfnVkCmdPipelineBarrier = unsafe extern "system" fn(
     p_buffer_memory_barriers: *const VkBufferMemoryBarrier,
     image_memory_barrier_count: u32,
     p_image_memory_barriers: *const c_void,
+);
+
+/// `PFN_vkCmdCopyBuffer`.
+///
+/// SAFETY (ABI): the signature mirrors the Vulkan spec's `vkCmdCopyBuffer`
+/// — `(VkCommandBuffer, VkBuffer src, VkBuffer dst, u32 regionCount,
+/// const VkBufferCopy* pRegions)`, all parameter types `#[repr(C)]`/transparent
+/// — so transmuting the loader-resolved function pointer to this typedef is
+/// sound (size-checked by `load_device_command`'s `debug_assert`).
+pub type PfnVkCmdCopyBuffer = unsafe extern "system" fn(
+    command_buffer: VkCommandBuffer,
+    src_buffer: VkBuffer,
+    dst_buffer: VkBuffer,
+    region_count: u32,
+    p_regions: *const VkBufferCopy,
 );
 
 /// `PFN_vkCreateFence`.

@@ -38,8 +38,8 @@ use core::ffi::c_void;
 use core::ptr::{self, NonNull};
 
 use boyko_rhi::{
-    BarrierDesc, BufferBarrier, BufferDesc, ComputePipelineDesc, MemoryLocation, RhiApi,
-    RhiCommandEncoder, RhiDevice, RhiQueue, ShaderStage,
+    BarrierDesc, BufferBarrier, BufferCopy, BufferDesc, ComputePipelineDesc, MemoryLocation,
+    RhiApi, RhiCommandEncoder, RhiDevice, RhiQueue, ShaderStage,
 };
 
 use crate::compute::ComputeError;
@@ -325,43 +325,68 @@ impl RhiDevice<Vulkan> for VulkanContext {
         // silent 0→1 size divergence (the created size, the stored
         // `BoundBuffer.size`, and the later descriptor `range` are all `desc.size`).
         debug_assert!(desc.size > 0, "invariant: zero-size buffer");
-        // The foundation routes every buffer through the device's one shared
-        // host-visible+coherent block (plan Q1). `DeviceLocal` is a Phase-5 seam
-        // (staging + flush) — surface it as Unsupported rather than silently
-        // mapping host memory.
-        if desc.location != MemoryLocation::HostVisibleCoherent {
-            return Err(VulkanError::Unsupported("create_buffer(DeviceLocal)"));
-        }
         // The agnostic `BufferUsage` bits equal the Vulkan `VK_BUFFER_USAGE_*`
         // bits (plan D5), so the projection is an identity cast on the u32 family.
         let usage: VkFlags = desc.usage.bits();
-        let block = self.host_block()?;
-        let bound = block.borrow_mut().create_bound_buffer(desc.size, usage)?;
-        Ok(bound)
+        match desc.location {
+            // The host-visible foundation block (plan Q1).
+            MemoryLocation::HostVisibleCoherent => {
+                let block = self.host_block()?;
+                let bound = block.borrow_mut().create_bound_buffer(desc.size, usage)?;
+                Ok(bound)
+            }
+            // The Phase-5 device-local (VRAM) block (plan D3/MF-8). Always add the
+            // `TRANSFER_SRC | TRANSFER_DST` usage so the staging upload + the
+            // test-only readback (`vkCmdCopyBuffer`) can name the buffer as either
+            // copy endpoint regardless of the caller's declared usage. The result
+            // carries `mapped == None` — never host-mappable.
+            MemoryLocation::DeviceLocal => {
+                let usage = usage
+                    | VK_BUFFER_USAGE_TRANSFER_SRC_BIT
+                    | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+                let block = self.device_block()?;
+                let bound = block.borrow_mut().create_bound_buffer(desc.size, usage)?;
+                Ok(bound)
+            }
+        }
     }
 
     unsafe fn destroy_buffer(&self, buffer: BoundBuffer) {
-        // Plan A3: if a `BoundBuffer` exists, it was sub-allocated from the shared
-        // block, so the block MUST already be initialized. A silent early-return on
-        // `Err` here would drop the owned `buffer` WITHOUT destroying its `VkBuffer`
-        // / returning its sub-allocation — a leak. `host_block()` only fails on the
-        // first-ever allocation (which already happened to mint `buffer`), so this
-        // `expect` is unreachable by construction.
-        let block = self
-            .host_block()
-            .expect("invariant: host block initialized when a BoundBuffer exists");
-        // SAFETY: `buffer` was produced by `create_buffer` on this device's shared
-        // block, the GPU is no longer using it (caller fence-waited per the trait
-        // contract), and the by-value move destroys it exactly once (the buffer
-        // handle is destroyed once + its sub-region returned to the allocator
-        // once). The block is borrowed `&mut` single-threaded.
-        unsafe { block.borrow_mut().destroy_bound_buffer(buffer) };
+        // Plan A3: if a `BoundBuffer` exists, it was sub-allocated from one of the
+        // shared blocks, so that block MUST already be initialized. A silent
+        // early-return on `Err` here would drop the owned `buffer` WITHOUT
+        // destroying its `VkBuffer` / returning its sub-allocation — a leak. The
+        // matching block's `*_block()` only fails on the first-ever allocation
+        // (which already happened to mint `buffer`), so these `expect`s are
+        // unreachable by construction. `mapped` discriminates the origin block: a
+        // host-visible buffer carries `Some(ptr)`, a device-local one `None`.
+        if buffer.mapped.is_some() {
+            let block = self
+                .host_block()
+                .expect("invariant: host block initialized when a host BoundBuffer exists");
+            // SAFETY: `buffer` was produced by `create_buffer(HostVisibleCoherent)`
+            // on this device's shared host block, the GPU is no longer using it
+            // (caller fence-waited per the trait contract), and the by-value move
+            // destroys it exactly once. The block is borrowed `&mut`
+            // single-threaded.
+            unsafe { block.borrow_mut().destroy_bound_buffer(buffer) };
+        } else {
+            let block = self
+                .device_block()
+                .expect("invariant: device block initialized when a device BoundBuffer exists");
+            // SAFETY: `buffer` was produced by `create_buffer(DeviceLocal)` on this
+            // device's shared device-local block, the GPU is no longer using it
+            // (caller fence-waited), and the by-value move destroys it exactly once.
+            // The block is borrowed `&mut` single-threaded.
+            unsafe { block.borrow_mut().destroy_bound_buffer(buffer) };
+        }
     }
 
     fn buffer_mapped_ptr(&self, buffer: &BoundBuffer) -> Option<NonNull<u8>> {
-        // The foundation's buffers live in a host-visible-coherent block, so the
-        // persistent mapping always exists.
-        Some(buffer.mapped)
+        // A host-visible buffer carries its persistent map pointer in `mapped`; a
+        // device-local buffer carries `None` (it is never mapped, plan D3/MF-8),
+        // honoring the device.rs:91 "`None` if not host-mappable" contract.
+        buffer.mapped
     }
 
     fn create_shader_module(&self, spirv: &[u32]) -> Result<VulkanShaderModule, VulkanError> {
@@ -973,6 +998,44 @@ impl RhiCommandEncoder<Vulkan> for VulkanCommandEncoder {
         }
 
         self.pipeline_barrier_many(src_stage, dst_stage, barrier.buffers);
+    }
+
+    fn copy_buffer(&mut self, src: &BoundBuffer, dst: &BoundBuffer, regions: &[BufferCopy]) {
+        debug_assert!(!regions.is_empty(), "invariant: copy_buffer needs >= 1 region");
+        // The agnostic `BufferCopy` is `#[repr(C)] { src_offset, dst_offset, size:
+        // u64 }` — byte-identical to the Vulkan `VkBufferCopy` (same field order +
+        // `u64` types), so a `&[BufferCopy]` reinterprets directly as a
+        // `&[VkBufferCopy]` without a per-region copy. The size + alignment match
+        // is enforced at build time here.
+        const _: () = assert!(
+            core::mem::size_of::<BufferCopy>() == core::mem::size_of::<VkBufferCopy>(),
+            "BufferCopy and VkBufferCopy must share size for the slice reinterpret"
+        );
+        const _: () = assert!(
+            core::mem::align_of::<BufferCopy>() == core::mem::align_of::<VkBufferCopy>(),
+            "BufferCopy and VkBufferCopy must share alignment for the slice reinterpret"
+        );
+        // SAFETY: `BufferCopy` and `VkBufferCopy` are both `#[repr(C)]` with the
+        // identical `(u64, u64, u64)` layout (size + align asserted above), so
+        // casting the `*const BufferCopy` to `*const VkBufferCopy` and reading
+        // `regions.len()` elements is in-bounds and ABI-valid — every field maps
+        // 1:1. The slice is alive for the call.
+        let vk_regions = regions.as_ptr().cast::<VkBufferCopy>();
+        // SAFETY: recording is open; `src.buffer`/`dst.buffer` are live buffers
+        // (created on this device, carrying the `TRANSFER_SRC`/`TRANSFER_DST` usage
+        // the device-local path always adds); `vk_regions` points to `regions.len()`
+        // fully-initialized `VkBufferCopy`s alive for the call. `self.fns` points
+        // into the context's boxed fn-table (alive per the type contract).
+        let fns = unsafe { &*self.fns };
+        unsafe {
+            (fns.cmd_copy_buffer)(
+                self.command_buffer,
+                src.buffer,
+                dst.buffer,
+                regions.len() as u32,
+                vk_regions,
+            );
+        }
     }
 }
 

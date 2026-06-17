@@ -512,22 +512,31 @@ impl ArchetypeBundle {
         // Phase 4 Seam 2 (D2 / FSC-C1 / FIX-2): this is the LIVE archetype-mint
         // funnel (`ArchetypeMaster::create_archetype` reaches it, NOT
         // `Archetype::create_by_ids`). `register_component_inplace` STAMPS the
-        // per-component `GPU_RESIDENT` bit; the set-level
-        // `saw_gpu && saw_cpu_pinned` conflict must be rejected HERE — fold the
-        // residency classification into the existing per-component walk (one
-        // extra cold `residency_class` load per id + a 2-bool fold, no new loop)
-        // and reject loudly AFTER the walk.
+        // per-component `GPU_RESIDENT` bit; the set-level conflict must be
+        // rejected HERE — fold the residency classification into the existing
+        // per-component walk (one extra cold `residency_class` load per id + a
+        // 2-bool fold, no new loop) and reject loudly AFTER the walk.
+        //
+        // Phase 5 C2: the reject is `saw_gpu && saw_non_gpu` — a Gpu component
+        // alongside ANY non-Gpu component (Cpu OR CpuPinned). The semantic is
+        // `GPU_RESIDENT ⇔ all-components-Gpu`; a mixed archetype would let the
+        // blanket query-skip silently drop a `Query<&CpuComp>` over it.
         let mut saw_gpu = false;
-        let mut saw_cpu_pinned = false;
+        let mut saw_non_gpu = false;
         for &cid in component_ids {
             match component_registry::residency_class(cid.0) {
                 component_registry::ResidencyKind::Gpu => saw_gpu = true,
-                component_registry::ResidencyKind::CpuPinned => saw_cpu_pinned = true,
-                component_registry::ResidencyKind::Cpu => {}
+                component_registry::ResidencyKind::CpuPinned
+                | component_registry::ResidencyKind::Cpu => saw_non_gpu = true,
             }
             archetype.register_component_inplace(cid);
         }
-        if saw_gpu && saw_cpu_pinned {
+        // FIX-3 non-publication ordering: this reject MUST precede the occupancy
+        // -bit set below — the panic unwinds before the slot is marked occupied,
+        // so a rejected (mixed-residency) archetype is never published into the
+        // slab (and `create_archetype` runs this before `register_archetype`,
+        // so it is never registered either). Do NOT move the reject below.
+        if saw_gpu && saw_non_gpu {
             crate::ecs::core::archetype::archetype::residency_conflict_panic(component_ids);
         }
 

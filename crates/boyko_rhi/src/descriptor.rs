@@ -22,6 +22,25 @@ pub struct BufferDesc {
     pub location: MemoryLocation,
 }
 
+/// One buffer-to-buffer copy region for
+/// [`crate::encoder::RhiCommandEncoder::copy_buffer`].
+///
+/// `#[repr(C)]` with the exact `(src_offset, dst_offset, size)` field order and
+/// `u64` types of Vulkan's `VkBufferCopy`, so a Vulkan backend can reinterpret a
+/// `&[BufferCopy]` as a `&[VkBufferCopy]` without a per-region copy (the layout
+/// match is asserted backend-side, plan MF-8). Used for the Phase-5 staging
+/// upload + the test-only readback.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BufferCopy {
+    /// Byte offset within the source buffer.
+    pub src_offset: u64,
+    /// Byte offset within the destination buffer.
+    pub dst_offset: u64,
+    /// Number of bytes to copy.
+    pub size: u64,
+}
+
 /// Parameters for [`crate::device::RhiDevice::create_compute_pipeline`].
 ///
 /// Generic over the backend `A` because it borrows that backend's owned shader

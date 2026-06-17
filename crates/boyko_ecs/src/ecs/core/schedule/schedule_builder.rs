@@ -370,10 +370,21 @@ impl ScheduleBuilder {
             // Resolution (CR-B): GpuCompute-marker FIRST → else
             // `is_universal()` ⇒ `CpuExclusive` → else `CpuConcurrent`.
             // Byte-identical to the previous `is_exclusive` derivation for
-            // every non-GPU system (`is_gpu` defaults false). `GpuCompute`
+            // every non-GPU system (both GPU sources default false). `GpuCompute`
             // carries NO access constraint — it is set by the explicit
             // marker, not derived from access.
-            d.system_box.kind = if d.is_gpu {
+            //
+            // Phase 5 Option C: the GPU marker is the OR of the explicit
+            // `SystemConfig::gpu()` descriptor flag AND the System trait's own
+            // `is_gpu()` (which the `boyko_render` `GpuSystem` overrides to
+            // `true`). Consulting the trait method is defense-in-depth: a system
+            // that IS GPU-resident cannot be mis-resolved to a CPU kind even if
+            // the caller forgot the explicit opt-in, so the dispatcher-solo
+            // discipline a `GpuCompute` system relies on is never silently
+            // dropped. `is_gpu()` defaults `false`, so every CPU system is
+            // byte-identical to the prior derivation.
+            let resolved_gpu = d.is_gpu || d.system_box.system.is_gpu();
+            d.system_box.kind = if resolved_gpu {
                 SystemKind::GpuCompute
             } else if d.system_box.system.access().is_universal() {
                 SystemKind::CpuExclusive
@@ -1412,6 +1423,45 @@ mod tests {
         }
     }
 
+    /// Phase 5 Option C — a test `System` whose `is_gpu()` trait override
+    /// returns `true` (mimicking the `boyko_render` `GpuSystem`), WITHOUT the
+    /// explicit `SystemConfig::gpu()` descriptor flag. Drives
+    /// `is_gpu_trait_method_resolves_gpu_compute`.
+    struct GpuMarkerSystem {
+        meta: SystemMeta,
+    }
+
+    // SAFETY (S1): `run_unsafe` is empty; the trait contract is vacuous.
+    unsafe impl System for GpuMarkerSystem {
+        type Out = ();
+        fn name(&self) -> &'static str {
+            self.meta.name()
+        }
+        fn access(&self) -> &Access {
+            self.meta.access()
+        }
+        fn is_gpu(&self) -> bool {
+            true
+        }
+        fn initialize(&mut self, _world: &mut EcsMaster) {}
+        unsafe fn run_unsafe(&mut self, _world: UnsafeEcsCell<'_>) -> Self::Out {}
+        fn meta(&self) -> &SystemMeta {
+            &self.meta
+        }
+        fn set_change_ticks(
+            &mut self,
+            last_run: crate::ecs::core::change_detection::Tick,
+            this_run: crate::ecs::core::change_detection::Tick,
+        ) {
+            self.meta.last_run = last_run;
+            self.meta.this_run = this_run;
+        }
+        fn check_change_tick(&mut self, current: crate::ecs::core::change_detection::Tick) {
+            self.meta.last_run = self.meta.last_run.check_tick(current);
+            self.meta.this_run = self.meta.this_run.check_tick(current);
+        }
+    }
+
     /// Wrapper that turns a `CountingSystem` into an `IntoSystem<(), ()>`
     /// via the identity-style closure pattern — easier than dragging the
     /// full `SystemParamFunction` chain in for a unit test.
@@ -1536,6 +1586,38 @@ mod tests {
             "is_gpu marker must resolve GpuCompute even with empty access"
         );
         assert!(schedule.systems[2].kind.runs_on_dispatcher());
+    }
+
+    /// Phase 5 Option C — a system whose `System::is_gpu()` trait override
+    /// returns `true` resolves to `SystemKind::GpuCompute` EVEN WITHOUT the
+    /// explicit `SystemConfig::gpu()` descriptor flag (`d.is_gpu == false`). The
+    /// builder ORs the descriptor flag with the trait method, so a GPU-resident
+    /// system can never be mis-resolved to a CPU kind.
+    #[test]
+    fn is_gpu_trait_method_resolves_gpu_compute() {
+        let pool = fresh_pool();
+        let mut builder = ScheduleBuilder::new(pool);
+
+        // A GpuMarkerSystem (empty access, `is_gpu() == true`) pushed WITHOUT
+        // touching `d.is_gpu` — it stays the default `false`.
+        let sys = GpuMarkerSystem {
+            meta: SystemMeta::for_testing("gpu_via_trait"),
+        };
+        let boxed: Box<dyn System<Out = ()>> = Box::new(sys);
+        let d = SystemDescriptor::new(SystemBox::new(boxed));
+        assert!(!d.is_gpu, "descriptor flag must be the default false");
+        builder.descriptors.push(d);
+
+        let mut world = EcsMaster::new();
+        let schedule = builder.build(&mut world);
+
+        assert_eq!(schedule.systems.len(), 1);
+        assert_eq!(
+            schedule.systems[0].kind,
+            SystemKind::GpuCompute,
+            "System::is_gpu() == true must resolve GpuCompute without .gpu()"
+        );
+        assert!(schedule.systems[0].kind.runs_on_dispatcher());
     }
 
     /// `.before(other)` + `.after(other)` on the same pair forms a cycle

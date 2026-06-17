@@ -190,6 +190,35 @@ impl<'a> SystemConfig<'a> {
         self.builder.descriptors[self.key.0].conditions.push(boxed);
         self
     }
+
+    /// Marks this system as a **GPU-compute** system (Phase 5 MF-1).
+    ///
+    /// Sets the descriptor's `is_gpu` flag, which the build-time `SystemKind`
+    /// resolution ([`ScheduleBuilder::build`]) reads to classify the system as
+    /// [`SystemKind::GpuCompute`](crate::ecs::core::system::system_kind::SystemKind::GpuCompute)
+    /// — a marker carve-out that is NOT derived from access. A `GpuCompute`
+    /// system runs dispatcher-solo at the apply-window barrier (`running == 0`),
+    /// the sound site for recording/submitting through the `!Send` RHI.
+    ///
+    /// # Why an explicit marker (not derived)
+    ///
+    /// `is_gpu` cannot be inferred from access or `requires_dispatcher`: the
+    /// latter is also raised by every `NonSendResMut` CPU system, so deriving
+    /// from it would mis-mark them `GpuCompute`. The marker is the single source
+    /// of truth (MF-1, rejected-alternative rationale).
+    ///
+    /// # 0%-gate
+    ///
+    /// Kind resolution is build-time/cold. A schedule that never calls `.gpu()`
+    /// leaves every descriptor at the default `is_gpu = false`, so the resolution
+    /// is byte-identical to the previous `is_exclusive` derivation.
+    ///
+    /// [`ScheduleBuilder::build`]: super::schedule_builder::ScheduleBuilder::build
+    #[inline]
+    pub fn gpu(self) -> Self {
+        self.builder.descriptors[self.key.0].is_gpu = true;
+        self
+    }
 }
 
 #[cfg(test)]

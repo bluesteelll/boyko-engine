@@ -40,7 +40,7 @@ pub mod handle;
 pub mod queue;
 
 pub use api::RhiApi;
-pub use descriptor::{BarrierDesc, BufferBarrier, BufferDesc, ComputePipelineDesc};
+pub use descriptor::{BarrierDesc, BufferBarrier, BufferCopy, BufferDesc, ComputePipelineDesc};
 pub use device::{
     BindGroupDesc, BindGroupLayoutDesc, GraphicsPipelineDesc, RhiDevice, SamplerDesc, TextureDesc,
 };

@@ -76,7 +76,8 @@
 //! let bound = block
 //!     .create_bound_buffer(4096, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)
 //!     .expect("buffer");
-//! // `bound.mapped` is a CPU pointer to the buffer's first byte.
+//! // `bound.mapped` is `Some(ptr)` — the CPU pointer to the buffer's first byte
+//! // (a host-visible block always maps; a device-local block carries `None`).
 //! # let _ = bound;
 //! ```
 

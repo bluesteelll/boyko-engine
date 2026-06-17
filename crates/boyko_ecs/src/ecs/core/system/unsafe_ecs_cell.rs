@@ -344,7 +344,10 @@ impl<'w> UnsafeEcsCell<'w> {
         //   NonSendResources>`. The single-thread-touch invariant above makes
         //   reading the `!Send` payload behind it sound. `'w` is upheld by
         //   `new_*()` postconditions.
-        unsafe { (*self.ptr).nonsend_resources.as_deref() }
+        let slab = unsafe { (*self.ptr).nonsend_resources.as_deref() }?;
+        // M2 (Phase 5 Option C): tripwire a projection off the owning thread.
+        slab.debug_assert_owning_thread();
+        Some(slab)
     }
 
     /// Direct mutable access to the **non-`Send`** resource slab, or `None`
@@ -376,7 +379,10 @@ impl<'w> UnsafeEcsCell<'w> {
         //   The CpuExclusive dispatcher-solo invariant guarantees no aliasing
         //   worker cell. Aliasing is the caller's responsibility per the
         //   SystemParam protocol.
-        unsafe { (*self.ptr).nonsend_resources.as_deref_mut() }
+        let slab = unsafe { (*self.ptr).nonsend_resources.as_deref_mut() }?;
+        // M2 (Phase 5 Option C): tripwire a projection off the owning thread.
+        slab.debug_assert_owning_thread();
+        Some(slab)
     }
 }
 

@@ -31,7 +31,7 @@ use core::ptr;
 
 use crate::debug::{self, DebugMessengerState};
 use crate::ffi::*;
-use crate::memory::HostVisibleBlock;
+use crate::memory::{DeviceLocalBlock, HostVisibleBlock};
 use crate::rhi_impl::ComputeLayouts;
 
 /// Capacity of the device's shared host-visible block backing
@@ -39,6 +39,13 @@ use crate::rhi_impl::ComputeLayouts;
 /// foundation routes every buffer through one block). 64 MiB comfortably holds
 /// the Slice-0 storage buffers and any near-term compute working set.
 const SHARED_HOST_BLOCK_CAPACITY: u64 = 64 * 1024 * 1024;
+
+/// Capacity of the device's shared device-local (VRAM) block backing
+/// [`RhiDevice::create_buffer`](boyko_rhi::RhiDevice::create_buffer) with
+/// [`MemoryLocation::DeviceLocal`](boyko_rhi::MemoryLocation::DeviceLocal) (the
+/// Phase-5 `GpuColumn` seam). 64 MiB matches the host block's working-set budget;
+/// the block is created lazily on the first device-local buffer.
+const SHARED_DEVICE_BLOCK_CAPACITY: u64 = 64 * 1024 * 1024;
 
 /// Errors that can occur while bootstrapping a Vulkan device.
 ///
@@ -178,6 +185,9 @@ pub struct DeviceFns {
     pub cmd_push_constants: PfnVkCmdPushConstants,
     pub cmd_dispatch: PfnVkCmdDispatch,
     pub cmd_pipeline_barrier: PfnVkCmdPipelineBarrier,
+    /// `vkCmdCopyBuffer` — the Phase-5 staging upload + readback transfer
+    /// (Vulkan 1.0 core, always present).
+    pub cmd_copy_buffer: PfnVkCmdCopyBuffer,
     pub create_fence: PfnVkCreateFence,
     pub destroy_fence: PfnVkDestroyFence,
     pub wait_for_fences: PfnVkWaitForFences,
@@ -248,6 +258,13 @@ pub struct VulkanContext {
     /// The `RefCell` provides the `&mut` the sub-allocator needs from `&self`
     /// calls (single-threaded, `!Sync`).
     host_block: OnceCell<RefCell<HostVisibleBlock>>,
+    /// The single shared device-local (VRAM) block every
+    /// [`RhiDevice::create_buffer`](boyko_rhi::RhiDevice::create_buffer) with
+    /// [`MemoryLocation::DeviceLocal`](boyko_rhi::MemoryLocation::DeviceLocal)
+    /// sub-allocates from (the Phase-5 `GpuColumn` seam), created lazily on first
+    /// use. Never mapped (plan D3/MF-8). Caches the same plan-A1 `*const DeviceFns`
+    /// and is torn down in `Drop` BEFORE `vkDestroyDevice` + the boxed fn-table.
+    device_block: OnceCell<RefCell<DeviceLocalBlock>>,
 }
 
 impl VulkanContext {
@@ -439,6 +456,7 @@ impl VulkanContext {
             device_fns: Box::new(device_fns),
             compute_layouts: OnceCell::new(),
             host_block: OnceCell::new(),
+            device_block: OnceCell::new(),
         })
     }
 
@@ -578,6 +596,37 @@ impl VulkanContext {
             .get()
             .expect("invariant: host_block was just set"))
     }
+
+    /// The single shared device-local (VRAM) block, created on first use and
+    /// cached for the device's lifetime (plan D3/MF-8). Every
+    /// [`RhiDevice::create_buffer`](boyko_rhi::RhiDevice::create_buffer) with
+    /// [`MemoryLocation::DeviceLocal`](boyko_rhi::MemoryLocation::DeviceLocal)
+    /// sub-allocates from it. The block is never mapped. Returns a
+    /// [`VulkanError`](crate::error::VulkanError) if the block allocation fails.
+    pub(crate) fn device_block(
+        &self,
+    ) -> Result<&RefCell<DeviceLocalBlock>, crate::error::VulkanError> {
+        if let Some(block) = self.device_block.get() {
+            return Ok(block);
+        }
+        // Plan A1 (identical to `host_block`): the block caches a raw
+        // `*const DeviceFns` into the boxed `device_fns` — a stable heap address.
+        // The block is dropped in this context's `Drop` (via `device_block.take()`)
+        // BEFORE the boxed fn-table is freed and before `vkDestroyDevice`, so the
+        // pointee outlives every block use. The context is `!Send + !Sync`.
+        let block = DeviceLocalBlock::new(
+            self.device(),
+            self.device_fns(),
+            self.memory_properties(),
+            SHARED_DEVICE_BLOCK_CAPACITY,
+        )?;
+        // Race-free: `&self` is single-threaded; the cell is empty here.
+        let _ = self.device_block.set(RefCell::new(block));
+        Ok(self
+            .device_block
+            .get()
+            .expect("invariant: device_block was just set"))
+    }
 }
 
 impl Drop for VulkanContext {
@@ -599,6 +648,15 @@ impl Drop for VulkanContext {
         // `RhiDevice::destroy_buffer` / the registry's `destroy_all` before the
         // context dropped.
         if let Some(block) = self.host_block.take() {
+            drop(block);
+        }
+        // The shared device-local block (if ever created) is torn down next, also
+        // BEFORE `vkDestroyDevice`. Its `Drop` calls only `vkFreeMemory` (it was
+        // never mapped) through the same plan-A1 raw `*const DeviceFns` into the
+        // still-live boxed `device_fns`. Any device-local buffers sub-allocated
+        // from it were already destroyed via `RhiDevice::destroy_buffer` / the
+        // registry's `destroy_all` before the context dropped.
+        if let Some(block) = self.device_block.take() {
             drop(block);
         }
         // The shared compute layouts (if ever created) are destroyed next — they
@@ -1036,6 +1094,7 @@ fn load_device_fns(
             cmd_push_constants: load_device_command(gdpa, device, c"vkCmdPushConstants")?,
             cmd_dispatch: load_device_command(gdpa, device, c"vkCmdDispatch")?,
             cmd_pipeline_barrier: load_device_command(gdpa, device, c"vkCmdPipelineBarrier")?,
+            cmd_copy_buffer: load_device_command(gdpa, device, c"vkCmdCopyBuffer")?,
             create_fence: load_device_command(gdpa, device, c"vkCreateFence")?,
             destroy_fence: load_device_command(gdpa, device, c"vkDestroyFence")?,
             wait_for_fences: load_device_command(gdpa, device, c"vkWaitForFences")?,

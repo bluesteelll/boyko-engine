@@ -1,0 +1,27 @@
+[package]
+name = "boyko-render"
+version = "0.1.0"
+edition = "2024"
+description = "GPU-resident ECS columns: the boyko_render manager that mints device-local component pools behind the boyko_rhi registry and drives the boyko_ecs A2 device-mint seam (Phase 5)."
+
+# Dependency fan-out (no cycle): boyko_render depends DIRECTLY on boyko_ecs +
+# boyko_rhi + boyko_rhi_vulkan + boyko_utils. boyko_rhi itself depends only on
+# boyko_utils (NOT on boyko_ecs). boyko_render is the ONLY crate allowed to name
+# both the graphics RHI and the graphics-pure ECS core, so the
+# `RhiContext: NonSendResource` orphan impl lives here (Phase 5 MF-5).
+[lib]
+name = "boyko_render"
+
+[features]
+# The TEST-ONLY device→host readback path (`GpuColumnManager::readback_for_test`).
+# Enabled by default so the GPU round-trip integration test can reach it under a
+# plain `cargo test`; a production consumer drops it via `default-features =
+# false` (steady state does ZERO readback — D2). Not part of the frame path.
+default = ["test-readback"]
+test-readback = []
+
+[dependencies]
+boyko-ecs = { path = "../boyko_ecs" }
+boyko_rhi = { path = "../boyko_rhi" }
+boyko_rhi_vulkan = { path = "../boyko_rhi_vulkan" }
+boyko-utils = { path = "../boyko_utils" }
