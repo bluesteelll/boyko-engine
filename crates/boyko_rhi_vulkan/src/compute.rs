@@ -78,6 +78,15 @@ static SDF_EDITLIST_SPV: SpirvBlob<24368> = SpirvBlob(*include_bytes!(concat!(
     "/shaders/sdf_editlist.comp.spv"
 )));
 
+/// The committed SPIR-V for Phase-6 rung 10 (SDF + mesh hybrid composite via a
+/// shared depth buffer — `shaders/sdf_depth_composite.hlsl`). It reuses the rung-9
+/// edit-list fold + lighting + camera verbatim and adds the per-pixel mesh-depth
+/// read that BOUNDS the march so the mesh and the SDF occlude each other.
+static SDF_DEPTH_COMPOSITE_SPV: SpirvBlob<24936> = SpirvBlob(*include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/shaders/sdf_depth_composite.comp.spv"
+)));
+
 /// A 4-byte-aligned wrapper around a committed SPIR-V byte blob so its address is
 /// a valid `*const u32` and it can be re-viewed as a `&[u32]` word stream.
 #[repr(C, align(4))]
@@ -143,6 +152,23 @@ pub fn sdf_spheretrace_spirv() -> &'static [u32] {
 #[inline]
 pub fn sdf_editlist_spirv() -> &'static [u32] {
     SDF_EDITLIST_SPV.as_words()
+}
+
+/// The committed Phase-6 rung-10 SDF + mesh hybrid composite SPIR-V as a `u32`
+/// word stream, ready for
+/// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module).
+///
+/// Reuses the rung-1 one-binding compute contract verbatim (binding 0 = one
+/// `RWStructuredBuffer<uint>` at COMPUTE + a 4-byte `uint count` push constant).
+/// The buffer extends the rung-9 packed-header layout with a DEPTH region between
+/// the edit array and the pixel output: the host writes the edit header via
+/// [`encode_edit_list`], the GPU image→buffer copy writes the rasterized mesh
+/// depth into [`COMPOSITE_DEPTH_BASE_WORDS`], and the shader reads both, bounds the
+/// march by the per-pixel mesh depth, and composites into [`COMPOSITE_PIXEL_BASE_WORDS`].
+/// The fold + lighting are mirrored host-side by [`golden_composite_pixel`].
+#[inline]
+pub fn sdf_depth_composite_spirv() -> &'static [u32] {
+    SDF_DEPTH_COMPOSITE_SPV.as_words()
 }
 
 /// Errors from the compute-pipeline flow. `VkError` carries the failing command
@@ -723,6 +749,182 @@ pub fn golden_editlist_pixel(edits: &[SdfEdit], px: u32, py: u32) -> u32 {
             SDF_BASE_COLOR[1] * ndotl + SDF_BASE_COLOR[1] * SDF_AMBIENT,
             SDF_BASE_COLOR[2] * ndotl + SDF_BASE_COLOR[2] * SDF_AMBIENT,
         ]
+    } else {
+        SDF_BACKGROUND
+    };
+    pack_rgba(color)
+}
+
+// ===========================================================================
+// Phase-6 rung-10 SDF + mesh HYBRID COMPOSITE (shared depth) golden + layout —
+// the single source of truth mirroring `shaders/sdf_depth_composite.hlsl`.
+//
+// The §15.1 seam: a REAL GPU-rasterized mesh's depth (written into a D32_SFLOAT
+// attachment, then copied into the shared storage buffer) BOUNDS the SDF
+// sphere-trace march, so the mesh and the SDF occlude each other and composite
+// into one image. The SDF field math + lighting + camera are FROZEN to rung 9
+// (reused verbatim via `sdf_edit_list` / `sdf_edit_list_normal` / `pack_rgba`);
+// only the per-pixel mesh-depth read + the composite are new.
+//
+// The buffer extends the rung-9 packed-header layout with a DEPTH region between
+// the edit array and the pixel output (rung 9's `PIXEL_BASE_WORDS` etc. are
+// UNTOUCHED — these are a SEPARATE `COMPOSITE_*` const set):
+//
+//   word 0                          : u32 edit_count
+//   words [HEADER_BASE_WORDS ..]    : MAX_SDF_EDITS * SdfEdit (the std430 array)
+//   words [COMPOSITE_DEPTH_BASE_WORDS ..] : IMG_W * IMG_H * f32 mesh depth (NEW)
+//   words [COMPOSITE_PIXEL_BASE_WORDS ..] : IMG_W * IMG_H * u32 packed RGBA out
+//
+// The depth region is `(CAM_Z - worldZ) / T_MAX` (the orthographic depth
+// convention) inside the quad footprint and `1.0` (the clear) outside; the host
+// march is bounded by `t_mesh = depth * T_MAX`, exactly as the shader does.
+// ===========================================================================
+
+/// The flat mesh albedo (the rung-10 composite's `MESH_COLOR`) — a green clearly
+/// distinct from both the SDF lit color (warm orange/red) and the background (dark
+/// blue), so the composite regions are unambiguous. Mirrors the shader's
+/// `MESH_COLOR`. (Reading the mesh's real rasterized albedo from a G-buffer is a
+/// deferred S3 refinement; this rung proves DEPTH sharing, so the color is a
+/// constant.)
+pub const MESH_COLOR: [f32; 3] = [0.15, 0.65, 0.25];
+
+/// Word offset of the per-pixel mesh-depth region (immediately after the edit
+/// array — i.e. where rung 9 put its pixel region). Matches the shader's
+/// `DEPTH_BASE`. The depth region is `IMG_W * IMG_H` `f32`s, one per pixel,
+/// written by the GPU image→buffer copy of the rasterized D32_SFLOAT attachment.
+pub const COMPOSITE_DEPTH_BASE_WORDS: usize = HEADER_BASE_WORDS + MAX_SDF_EDITS * SDF_EDIT_WORDS;
+
+/// Word offset of the packed-RGBA pixel region (after the depth region). Matches
+/// the shader's `PIXEL_BASE`.
+pub const COMPOSITE_PIXEL_BASE_WORDS: usize =
+    COMPOSITE_DEPTH_BASE_WORDS + (SDF_IMG_W as usize) * (SDF_IMG_H as usize);
+
+/// Total `u32` word count of the rung-10 composite buffer (header + edit array +
+/// depth region + pixel region). The buffer must be
+/// `COMPOSITE_BUFFER_WORDS * 4` bytes.
+pub const COMPOSITE_BUFFER_WORDS: usize =
+    COMPOSITE_PIXEL_BASE_WORDS + (SDF_IMG_W as usize) * (SDF_IMG_H as usize);
+
+// The shader hardcodes `DEPTH_BASE = 196` and `PIXEL_BASE = 4292`; pin both so a
+// layout change that desyncs the host encoder/reader from the shader is a build
+// error. `COMPOSITE_DEPTH_BASE_WORDS` deliberately equals rung 9's
+// `PIXEL_BASE_WORDS` (the depth region begins right after the edit array).
+const _: () = assert!(
+    COMPOSITE_DEPTH_BASE_WORDS == 196,
+    "COMPOSITE_DEPTH_BASE_WORDS must equal the shader's DEPTH_BASE (196)"
+);
+const _: () = assert!(
+    COMPOSITE_DEPTH_BASE_WORDS == PIXEL_BASE_WORDS,
+    "the depth region must begin right after the edit array (= rung 9's PIXEL_BASE_WORDS)"
+);
+const _: () = assert!(
+    COMPOSITE_PIXEL_BASE_WORDS == 4292,
+    "COMPOSITE_PIXEL_BASE_WORDS must equal the shader's PIXEL_BASE (4292)"
+);
+
+/// The depth value the depth attachment is CLEARED to (the far plane). A stored
+/// depth `>= MESH_DEPTH_CLEAR` means NO mesh fragment covered that pixel. Matches
+/// the shader's `DEPTH_CLEAR` and the rung-10 test's `MESH_DEPTH_CLEAR`.
+pub const MESH_DEPTH_CLEAR: f32 = 1.0;
+
+/// The orthographic camera plane Z (rays start here, looking down -Z). The public
+/// mirror of the private rung-8/9 `SDF_CAM_Z`, exposed so the rung-10 test builds
+/// its orthographic MVP from the SAME single source of truth the golden uses.
+pub const SDF_CAMERA_Z: f32 = SDF_CAM_Z;
+
+/// The orthographic view half-extent in world units. Public mirror of the private
+/// `SDF_HALF_EXTENT` (the rung-10 test maps its quad's world-XY corners with it).
+pub const SDF_VIEW_HALF_EXTENT: f32 = SDF_HALF_EXTENT;
+
+/// The march far-plane distance (= the depth far plane, world `CAM_Z - T_MAX`).
+/// Public mirror of the private `SDF_T_MAX` (the rung-10 test's ortho MVP maps
+/// `worldZ = CAM_Z - T_MAX` to stored depth `1.0`).
+pub const SDF_TRACE_T_MAX: f32 = SDF_T_MAX;
+
+/// The world-space XY a pixel's orthographic ray passes through (the ray origin's
+/// xy), mirroring the camera reconstruction in [`golden_composite_pixel`]. The
+/// rung-10 test uses this to compute, host-side, exactly which pixels a world-XY
+/// quad covers (so the discriminator texels are picked independent of the GPU).
+#[inline]
+pub fn pixel_world_xy(px: u32, py: u32) -> [f32; 2] {
+    let u = (((px as f32) + 0.5) / (SDF_IMG_W as f32)) * 2.0 - 1.0;
+    let v = -((((py as f32) + 0.5) / (SDF_IMG_H as f32)) * 2.0 - 1.0);
+    [u * SDF_HALF_EXTENT, v * SDF_HALF_EXTENT]
+}
+
+/// Inverts the orthographic depth convention: a stored depth `d` corresponds to a
+/// ray parameter `t = d * T_MAX` (the camera-plane distance), mirroring the
+/// shader's `md * T_MAX`. The MVP the rung-10 test pushes is chosen so the
+/// rasterized depth IS `t / T_MAX` for a fronto-parallel surface (orthographic,
+/// no perspective divide → depth linear in `t`).
+#[inline]
+pub fn depth_to_t(d: f32) -> f32 {
+    d * SDF_T_MAX
+}
+
+/// The expected STORED depth of a fronto-parallel mesh surface at world `mesh_z`
+/// under the orthographic convention: `(CAM_Z - mesh_z) / T_MAX`. The rung-10
+/// test asserts the GPU depth region equals this inside the quad footprint (and
+/// [`MESH_DEPTH_CLEAR`] outside), localizing any raster/ortho-matrix bug.
+#[inline]
+pub fn mesh_depth_for_z(mesh_z: f32) -> f32 {
+    (SDF_CAM_Z - mesh_z) / SDF_T_MAX
+}
+
+/// The CPU golden for one composited pixel: sphere-traces the folded edit-list
+/// field BOUNDED by the per-pixel mesh depth `mesh_depth` (the stored D32 value,
+/// or `>= 1.0` when no mesh covered the pixel), then composites exactly as the
+/// shader does:
+///
+/// - an SDF hit at `t_sdf < t_mesh` → the lit SDF surface color (Lambert +
+///   ambient, the same scene constants as rung 8/9);
+/// - else if the mesh covered the pixel (`mesh_depth < 1.0`) → flat [`MESH_COLOR`];
+/// - else → [`SDF_BACKGROUND`].
+///
+/// Returns the packed `0xAABBGGRR` color. This is the single source of truth the
+/// rung-10 test diffs the GPU readback against (within `+/-2/255` per channel) and
+/// that a future CPU physics evaluator can reuse for the same hybrid query.
+pub fn golden_composite_pixel(edits: &[SdfEdit], mesh_depth: f32, px: u32, py: u32) -> u32 {
+    let u = (((px as f32) + 0.5) / (SDF_IMG_W as f32)) * 2.0 - 1.0;
+    let v = -((((py as f32) + 0.5) / (SDF_IMG_H as f32)) * 2.0 - 1.0);
+    let ro = [u * SDF_HALF_EXTENT, v * SDF_HALF_EXTENT, SDF_CAM_Z];
+    let rd = [0.0, 0.0, -1.0];
+
+    let has_mesh = mesh_depth < MESH_DEPTH_CLEAR;
+    // A finite march bound only when the mesh covered the pixel; otherwise a value
+    // larger than any `t` the march reaches (mirrors the shader's `1e30`).
+    let t_mesh = if has_mesh { depth_to_t(mesh_depth) } else { 1.0e30 };
+
+    let mut t = 0.0_f32;
+    let mut hit = false;
+    for _ in 0..SDF_MAX_IT {
+        if t >= t_mesh {
+            break;
+        }
+        let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
+        let d = sdf_edit_list(edits, p);
+        if d < SDF_EPS {
+            hit = true;
+            break;
+        }
+        t += d;
+        if t > SDF_T_MAX {
+            break;
+        }
+    }
+
+    let color = if hit && t < t_mesh {
+        let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
+        let n = sdf_edit_list_normal(edits, p);
+        let l = v_normalize(SDF_LIGHT_DIR);
+        let ndotl = v_dot(n, l).max(0.0);
+        [
+            SDF_BASE_COLOR[0] * ndotl + SDF_BASE_COLOR[0] * SDF_AMBIENT,
+            SDF_BASE_COLOR[1] * ndotl + SDF_BASE_COLOR[1] * SDF_AMBIENT,
+            SDF_BASE_COLOR[2] * ndotl + SDF_BASE_COLOR[2] * SDF_AMBIENT,
+        ]
+    } else if has_mesh {
+        MESH_COLOR
     } else {
         SDF_BACKGROUND
     };
