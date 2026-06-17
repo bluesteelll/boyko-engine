@@ -48,6 +48,12 @@ pub enum BodyType {
     Static,
     /// Moved by external control only; ignores forces but participates in
     /// collision against dynamic bodies.
+    ///
+    /// NOTE (P2 W2): in solver-owned mode (`SoftStepSolver`) a kinematic body's
+    /// externally-set velocity is read by contacts for a correct one-sided
+    /// response, but its position is NOT advanced by the solver (it integrates
+    /// `Dynamic && inv_mass != 0` only, and the pipeline's `physics_integrate` is
+    /// gated off). Kinematic MOTION is an intentional deferral, not built yet.
     Kinematic,
     /// Fully simulated; responds to forces and impulses.
     Dynamic,

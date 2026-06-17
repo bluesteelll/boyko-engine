@@ -67,6 +67,28 @@ impl Default for PhysicsConfig {
     }
 }
 
+/// Whether the pipeline's [`physics_integrate`](crate::systems::physics_integrate)
+/// stage integrates, or the solver owns integration (C2).
+///
+/// Inserted by [`add_physics_systems`](crate::plugin::add_physics_systems) from
+/// the chosen solver's
+/// [`RigidSolver::owns_integration`](crate::solver::RigidSolver::owns_integration):
+/// an owning TGS solver (the [`SoftStepSolver`](crate::solver::SoftStepSolver))
+/// integrates DYNAMIC bodies inside its own substep loop, so the pipeline stage
+/// must early-return to avoid double-integration. See the C2 contract block in
+/// [`crate::systems`].
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum IntegrationMode {
+    /// The pipeline's [`physics_integrate`](crate::systems::physics_integrate)
+    /// stage integrates every body (the foundation default, used by the no-op /
+    /// non-owning solvers).
+    #[default]
+    Foundation,
+    /// The solver owns the substep integration (a TGS solver); the pipeline
+    /// stage early-returns so it does NOT also integrate.
+    SolverOwned,
+}
+
 /// Candidate collision pairs emitted by broadphase (plan D4).
 ///
 /// Each pair is `(BodyIndex, BodyIndex)` keyed by the dense scratch row index
@@ -143,6 +165,12 @@ pub struct BodyState {
     pub friction: f32,
     /// The body's simulation role.
     pub body_type: BodyType,
+    /// The collider shape, projected at gather so broad/narrowphase have the
+    /// body's real geometry (P2 W2). The broadphase reads its bounding radius
+    /// and the sphere-sphere narrowphase reads its sphere radius — neither phase
+    /// may assume a fixed size. Placed last (after the scalar fields) so the
+    /// tightly-packed hot fields lead the struct.
+    pub shape: ColliderShape,
 }
 
 impl BodyState {
@@ -183,6 +211,7 @@ impl BodyState {
             restitution: mass.restitution,
             friction: mass.friction,
             body_type: mass.body_type,
+            shape: collider.shape,
         }
     }
 }
@@ -308,6 +337,12 @@ pub struct SolverScratch {
     pub bodies: Vec<BodyState>,
     /// Per-row touched mask, indexed by [`BodyIndex`] = row.
     pub touched: TouchedMask,
+    /// Per-contact-point relative normal APPROACH velocity captured BEFORE the
+    /// first substep, consumed by the TGS solver's post-loop restitution pass
+    /// (P2 W2). Indexed in the solver's flattened contact-point order (manifold
+    /// order × point order); rebuilt and refilled each solve, capacity reused
+    /// (no per-step alloc). Left empty by the no-op / non-owning solvers.
+    pub vn_initial: Vec<f32>,
 }
 
 impl SolverScratch {
@@ -317,14 +352,20 @@ impl SolverScratch {
         Self {
             bodies: Vec::with_capacity(rows),
             touched: TouchedMask::with_capacity(rows),
+            // One initial normal-velocity slot per body is a cheap first-frame
+            // reserve; the TGS solver grows it to the live contact-point count
+            // and reuses that capacity thereafter.
+            vn_initial: Vec::with_capacity(rows),
         }
     }
 
     /// Clears the snapshot for a fresh gather, reusing capacity. The touched
-    /// mask is reset by the gather once the row count is known.
+    /// mask is reset by the gather once the row count is known; `vn_initial` is
+    /// rebuilt by the solver, so it is cleared here for a fresh solve.
     #[inline]
     pub fn clear(&mut self) {
         self.bodies.clear();
+        self.vn_initial.clear();
     }
 }
 

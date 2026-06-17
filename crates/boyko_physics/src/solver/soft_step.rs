@@ -1,0 +1,600 @@
+//! The in-house TGS-Soft rigid-body solver — sphere-sphere contacts (P2 W2).
+//!
+//! [`SoftStepSolver`] is a real [`RigidSolver`](super::RigidSolver) that resolves
+//! the narrowphase manifolds with the Temporal Gauss-Seidel "Soft Step" scheme
+//! (Box2D-v3 lineage): a velocity-level sequential-impulse solve with a soft
+//! penetration-recovery bias, a 2-DOF coupled Coulomb friction cone, per-substep
+//! integration, relaxation passes, and a single post-loop restitution pass. It
+//! OWNS integration ([`owns_integration`](super::RigidSolver::owns_integration)
+//! returns `true`), so the pipeline's
+//! [`physics_integrate`](crate::systems::physics_integrate) is gated off (C2).
+//!
+//! # What W2 does NOT include
+//!
+//! - **Warm-start** (W3): impulses start at ZERO each frame — there is no
+//!   cross-frame impulse cache yet, so a contact re-converges from scratch every
+//!   step. This is correct (just slower to settle) and is the W3 work.
+//! - **Box / sphere-box contacts** (W4): narrowphase stays sphere-sphere, so the
+//!   manifolds carry a single contact point each; the solver loops the generic
+//!   `0..count` point range regardless, so W4 is purely a narrowphase change.
+//! - **SDF contacts + the C1 sentinel path** (W5): every manifold here keys two
+//!   real dense rows.
+//!
+//! # Determinism (IM-2)
+//!
+//! Single-threaded over the deterministic manifold order (D4), fixed point order
+//! `0..count`, normal-before-friction, fixed `substeps` / `relax_iterations`,
+//! fixed float op order (no reduction reorder, no atomics, no rayon). All scratch
+//! buffers are capacity-reused — zero per-step allocation in steady state. No
+//! `fast-math` / `float_algebraic` on this crate.
+
+use boyko_macros::Resource as ResourceDerive;
+
+use super::contact::{BodyEffective, effective_mass, tangent_basis};
+use super::RigidSolver;
+use crate::components::BodyType;
+use crate::manifold::Manifold;
+use crate::math::{Mat3, Vec3};
+use crate::resources::{BodyState, PhysicsConfig, SolverScratch};
+
+/// Maximum penetration-recovery bias speed (world units/s) the soft normal solve
+/// will inject, clamping the otherwise-unbounded `biasRate · separation` push so
+/// a deep initial overlap cannot launch a body (Box2D's `maxBiasVelocity`).
+const MAX_BIAS_VELOCITY: f32 = 4.0;
+
+/// Minimum approach speed (world units/s) a contact must carry at gather time for
+/// the post-loop restitution pass to bounce it (Box2D-v3's `b2_velocityThreshold`).
+///
+/// A body in SUSTAINED contact under gravity carries a small residual closing
+/// velocity in the gather snapshot every frame (gravity re-adds `g·h·substeps`;
+/// the soft solve leaves a residual), so without a threshold `v_target =
+/// -e·vn_initial > 0` would inject energy every frame and a resting stack with
+/// `restitution > 0` would jitter/creep upward. Contacts approaching slower than
+/// this threshold are treated as resting (effectively `e = 0`); only a genuine
+/// impact above it bounces. `1.0 m/s` is Box2D's meter-scale default — comfortably
+/// above the per-frame gravity-residual closing speed (`|gravity|·dt`), well below
+/// a real collision.
+const RESTITUTION_THRESHOLD: f32 = 1.0;
+
+/// Per-contact-point constraint scratch built once per solve and re-read each
+/// substep (P2 W2).
+///
+/// Holds the precomputed geometry (anchors relative to each body's center of
+/// mass, the friction tangent basis) and the accumulated impulses (which, absent
+/// warm-start in W2, start at zero each frame). One [`PointConstraint`] per live
+/// manifold point, in the flattened manifold-order × point-order sequence — the
+/// same order [`SolverScratch::vn_initial`](crate::resources::SolverScratch) is
+/// indexed in.
+#[derive(Clone, Copy, Debug, Default)]
+struct PointConstraint {
+    /// Anchor offset on body A from its center of mass (world frame).
+    ra: Vec3,
+    /// Anchor offset on body B from its center of mass (world frame).
+    rb: Vec3,
+    /// Signed separation at gather time (negative = penetrating); the soft bias
+    /// drives this toward zero.
+    separation: f32,
+    /// Accumulated normal impulse `λn ≥ 0` (zero-seeded in W2 — no warm-start).
+    normal_impulse: f32,
+    /// Accumulated tangent impulse along `t1`.
+    tangent_impulse1: f32,
+    /// Accumulated tangent impulse along `t2`.
+    tangent_impulse2: f32,
+}
+
+/// One manifold's solver state — the body-row indices, the contact frame, and
+/// the span of its points in the flattened [`SoftStepSolver::points`] buffer
+/// (P2 W2).
+#[derive(Clone, Copy, Debug, Default)]
+struct ManifoldConstraint {
+    /// Dense row index of body A.
+    ia: usize,
+    /// Dense row index of body B.
+    ib: usize,
+    /// Unit contact normal (points from A toward B).
+    normal: Vec3,
+    /// First friction tangent (unit, `⟂ normal`).
+    tangent1: Vec3,
+    /// Second friction tangent (unit, `normal × tangent1`).
+    tangent2: Vec3,
+    /// Index of this manifold's first point in [`SoftStepSolver::points`].
+    point_start: usize,
+    /// Number of live points (`points[point_start .. point_start + count]`).
+    count: usize,
+}
+
+/// The in-house TGS-Soft rigid-body solver (P2 W2).
+///
+/// A `Resource` carrying only the reused, capacity-preserving per-solve scratch
+/// (the warm-start tables live in [`SolverScratch`] in later waves; W2 has no
+/// warm-start). [`is_noop`](RigidSolver::is_noop) is `false` and
+/// [`owns_integration`](RigidSolver::owns_integration) is `true`, so the pipeline
+/// gates off its own integrate stage (C2) and this solver integrates DYNAMIC
+/// bodies inside its substep loop.
+#[derive(ResourceDerive, Default)]
+pub struct SoftStepSolver {
+    /// Per-body solver view, parallel to `scratch.bodies` — refreshed each
+    /// substep so the world inverse inertia tracks the advancing orientation.
+    bodies: Vec<BodyEffective>,
+    /// Per-manifold constraint state, in deterministic manifold order.
+    manifolds: Vec<ManifoldConstraint>,
+    /// Flattened per-point constraint state, indexed by `manifold.point_start +
+    /// p` (the same order `scratch.vn_initial` uses).
+    points: Vec<PointConstraint>,
+}
+
+impl SoftStepSolver {
+    /// Builds a solver with the scratch buffers pre-sized for up to `bodies`
+    /// rows and `contacts` contact points (no later realloc in steady state).
+    pub fn with_capacity(bodies: usize, contacts: usize) -> Self {
+        Self {
+            bodies: Vec::with_capacity(bodies),
+            manifolds: Vec::with_capacity(contacts),
+            points: Vec::with_capacity(contacts),
+        }
+    }
+
+    /// Rebuilds the per-body solver views from the gather snapshot.
+    ///
+    /// `inv_inertia` starts as the gather's world tensor; the substep loop
+    /// refreshes it from `inv_inertia_local` + the advancing orientation.
+    fn build_bodies(&mut self, bodies: &[BodyState]) {
+        self.bodies.clear();
+        for b in bodies {
+            self.bodies.push(BodyEffective {
+                inv_mass: b.inv_mass,
+                inv_inertia: b.inv_inertia,
+                linear_velocity: b.linear_velocity,
+                angular_velocity: b.angular_velocity,
+            });
+        }
+    }
+
+    /// Builds the per-manifold + per-point constraint scratch and captures the
+    /// initial relative normal approach velocity into `vn_initial` (for the
+    /// post-loop restitution pass).
+    ///
+    /// Anchors are taken relative to each body's CURRENT center of mass (the
+    /// gather position); the soft solve re-uses them across substeps (it does not
+    /// re-run narrowphase). Tangent bases are degeneracy-safe (`tangent_basis`).
+    fn build_constraints(
+        &mut self,
+        manifolds: &[Manifold],
+        bodies: &[BodyState],
+        vn_initial: &mut Vec<f32>,
+    ) {
+        self.manifolds.clear();
+        self.points.clear();
+        vn_initial.clear();
+
+        for m in manifolds {
+            let count = m.count as usize;
+            if count == 0 {
+                continue;
+            }
+            let ia = m.body_a.0 as usize;
+            let ib = m.body_b.0 as usize;
+            let normal = m.normal;
+            let (tangent1, tangent2) = tangent_basis(normal);
+            let point_start = self.points.len();
+
+            let ba = &self.bodies[ia];
+            let bb = &self.bodies[ib];
+            let pa = bodies[ia].position;
+            let pb = bodies[ib].position;
+
+            for p in 0..count {
+                let cp = &m.points[p];
+                let ra = cp.anchor_a - pa;
+                let rb = cp.anchor_b - pb;
+                // Relative normal velocity of the contact point, B relative to A,
+                // projected on the normal. Negative = approaching (the bodies
+                // are closing) — the value restitution bounces back.
+                let dv = bb.point_velocity(rb) - ba.point_velocity(ra);
+                vn_initial.push(dv.dot(normal));
+                self.points.push(PointConstraint {
+                    ra,
+                    rb,
+                    separation: cp.separation,
+                    normal_impulse: 0.0,
+                    tangent_impulse1: 0.0,
+                    tangent_impulse2: 0.0,
+                });
+            }
+
+            self.manifolds.push(ManifoldConstraint {
+                ia,
+                ib,
+                normal,
+                tangent1,
+                tangent2,
+                point_start,
+                count,
+            });
+        }
+    }
+
+    /// Refreshes each dynamic body's world inverse inertia from its local tensor
+    /// and current orientation (`R · I⁻¹_local · Rᵀ`) for the next substep's
+    /// effective mass. Static bodies keep `Mat3::ZERO`.
+    fn refresh_inertia(bodies_eff: &mut [BodyEffective], snapshot: &[BodyState]) {
+        for (eff, snap) in bodies_eff.iter_mut().zip(snapshot.iter()) {
+            if eff.inv_mass != 0.0 {
+                let r = Mat3::from_quat(snap.rotation);
+                eff.inv_inertia = r * snap.inv_inertia_local * r.transpose();
+            }
+        }
+    }
+
+    /// Solves the normal + coupled-friction impulses for every contact point
+    /// once (one Gauss-Seidel sweep), using the supplied soft coefficients.
+    ///
+    /// `bias_active` selects the recovery bias: `true` during the main substep
+    /// (the soft penetration push) and `false` during relaxation (bias-free,
+    /// energy-removing). The friction cone clamps the ACCUMULATED 2-vector
+    /// tangent impulse magnitude to `μ · λn` (a cone, not two box clamps).
+    //
+    // `clippy::needless_range_loop`: the index `p` is the flattened contact-point
+    // key into `points`, and the loop body also indexes `bodies_eff[mc.ia]` /
+    // `bodies_eff[mc.ib]` (disjoint buffers) — a single `iter_mut` cannot express
+    // the three-buffer Gauss-Seidel read/apply, so the explicit index is correct.
+    #[allow(clippy::needless_range_loop)]
+    fn solve_velocities(
+        manifolds: &[ManifoldConstraint],
+        points: &mut [PointConstraint],
+        bodies_eff: &mut [BodyEffective],
+        snapshot: &[BodyState],
+        soft: SoftCoefficients,
+        bias_active: bool,
+    ) {
+        for mc in manifolds {
+            let normal = mc.normal;
+            let (t1, t2) = (mc.tangent1, mc.tangent2);
+            // Combined friction coefficient. The foundation stores friction per
+            // body; W2 combines by `max` (a simple, symmetric, deterministic rule
+            // — a sliding pair is as sticky as its stickiest surface). A
+            // geometric-mean (`sqrt(µA·µB)`) combine is W4 polish.
+            let friction = snapshot[mc.ia].friction.max(snapshot[mc.ib].friction);
+
+            for p in mc.point_start..(mc.point_start + mc.count) {
+                let pc = points[p];
+                let (ra, rb) = (pc.ra, pc.rb);
+
+                // ── Normal solve ────────────────────────────────────────────
+                let m_eff = {
+                    let ba = bodies_eff[mc.ia];
+                    let bb = bodies_eff[mc.ib];
+                    effective_mass(normal, ra, rb, &ba, &bb)
+                };
+                let vn = {
+                    let ba = &bodies_eff[mc.ia];
+                    let bb = &bodies_eff[mc.ib];
+                    (bb.point_velocity(rb) - ba.point_velocity(ra)).dot(normal)
+                };
+                // Soft bias drives the penetration toward zero; clamp the push so
+                // a deep overlap cannot launch the body.
+                let bias = if bias_active {
+                    (soft.bias_rate * pc.separation).max(-MAX_BIAS_VELOCITY)
+                } else {
+                    0.0
+                };
+                // dλ = -massCoeff · mEff · (vn + bias) − impulseCoeff · λ
+                let d_lambda = if bias_active {
+                    -soft.mass_coeff * m_eff * (vn + bias) - soft.impulse_coeff * pc.normal_impulse
+                } else {
+                    // Relaxation: rigid (no soft mass/impulse scaling, no bias).
+                    -m_eff * vn
+                };
+                let new_lambda = (pc.normal_impulse + d_lambda).max(0.0);
+                let applied_n = new_lambda - pc.normal_impulse;
+                points[p].normal_impulse = new_lambda;
+                {
+                    let impulse = normal * applied_n;
+                    bodies_eff[mc.ia].apply_impulse(ra, impulse * -1.0);
+                    bodies_eff[mc.ib].apply_impulse(rb, impulse);
+                }
+
+                // ── Friction solve (2-DOF coupled cone) ─────────────────────
+                let max_friction = friction * points[p].normal_impulse;
+                let m_eff_t1 = {
+                    let ba = bodies_eff[mc.ia];
+                    let bb = bodies_eff[mc.ib];
+                    effective_mass(t1, ra, rb, &ba, &bb)
+                };
+                let m_eff_t2 = {
+                    let ba = bodies_eff[mc.ia];
+                    let bb = bodies_eff[mc.ib];
+                    effective_mass(t2, ra, rb, &ba, &bb)
+                };
+                let (vt1, vt2) = {
+                    let ba = &bodies_eff[mc.ia];
+                    let bb = &bodies_eff[mc.ib];
+                    let dv = bb.point_velocity(rb) - ba.point_velocity(ra);
+                    (dv.dot(t1), dv.dot(t2))
+                };
+                // Tentative new accumulated tangent impulse, then clamp the 2D
+                // magnitude to the cone `|λt| ≤ μ·λn` (NOT two box clamps).
+                let mut new_t1 = points[p].tangent_impulse1 - m_eff_t1 * vt1;
+                let mut new_t2 = points[p].tangent_impulse2 - m_eff_t2 * vt2;
+                let len_sq = new_t1 * new_t1 + new_t2 * new_t2;
+                if len_sq > max_friction * max_friction && len_sq > 0.0 {
+                    let scale = max_friction / len_sq.sqrt();
+                    new_t1 *= scale;
+                    new_t2 *= scale;
+                }
+                let applied_t1 = new_t1 - points[p].tangent_impulse1;
+                let applied_t2 = new_t2 - points[p].tangent_impulse2;
+                points[p].tangent_impulse1 = new_t1;
+                points[p].tangent_impulse2 = new_t2;
+                {
+                    let impulse = t1 * applied_t1 + t2 * applied_t2;
+                    bodies_eff[mc.ia].apply_impulse(ra, impulse * -1.0);
+                    bodies_eff[mc.ib].apply_impulse(rb, impulse);
+                }
+            }
+        }
+    }
+
+    /// The post-loop restitution pass (P2 W2) — velocity-only, bias-free, run
+    /// ONCE after the substeps.
+    ///
+    /// For each contact point whose gather-time approach speed exceeds
+    /// [`RESTITUTION_THRESHOLD`] (`vn_initial < -RESTITUTION_THRESHOLD`) it drives
+    /// the current relative normal velocity up to the target
+    /// `v_target = -e · vn_initial`, keeping the total normal impulse `λn ≥ 0`.
+    /// Separating or slowly-approaching (resting) contacts are skipped, so a stack
+    /// settled under gravity does not re-bounce every frame (C1). No position is
+    /// written. Zero-normal contacts (none in W2 sphere-sphere) are skipped by the
+    /// manifold build.
+    ///
+    /// W3 forward risk: this single bias-free sweep is EXACT for single-point
+    /// manifolds (W2 sphere-sphere is always one point), because there is no
+    /// cross-point coupling to converge. A 4-point box manifold (W4) couples the
+    /// points through the shared body, so a single sweep under-resolves the corner
+    /// velocities — W4 must revisit this with a small iteration loop.
+    //
+    // `clippy::needless_range_loop`: `p` indexes both `points[p]` and the
+    // parallel `vn_initial[p]`, plus the loop applies to `bodies_eff[mc.ia/ib]`;
+    // the explicit flattened index is the constraint-point key, not a position.
+    #[allow(clippy::needless_range_loop)]
+    fn apply_restitution(
+        manifolds: &[ManifoldConstraint],
+        points: &mut [PointConstraint],
+        bodies_eff: &mut [BodyEffective],
+        snapshot: &[BodyState],
+        vn_initial: &[f32],
+    ) {
+        for mc in manifolds {
+            let normal = mc.normal;
+            let restitution = snapshot[mc.ia].restitution.max(snapshot[mc.ib].restitution);
+            if restitution <= 0.0 {
+                continue;
+            }
+            for p in mc.point_start..(mc.point_start + mc.count) {
+                let vn0 = vn_initial[p];
+                // Only a contact APPROACHING above the velocity threshold bounces.
+                // Separating (`vn0 >= 0`) and resting / slowly-closing contacts
+                // (`vn0 > -RESTITUTION_THRESHOLD`) are skipped — the latter guards a
+                // gravity-loaded stack from re-bouncing every frame (C1).
+                if vn0 > -RESTITUTION_THRESHOLD {
+                    continue;
+                }
+                let pc = points[p];
+                let (ra, rb) = (pc.ra, pc.rb);
+                let m_eff = {
+                    let ba = bodies_eff[mc.ia];
+                    let bb = bodies_eff[mc.ib];
+                    effective_mass(normal, ra, rb, &ba, &bb)
+                };
+                let vn = {
+                    let ba = &bodies_eff[mc.ia];
+                    let bb = &bodies_eff[mc.ib];
+                    (bb.point_velocity(rb) - ba.point_velocity(ra)).dot(normal)
+                };
+                // Target separating velocity = -e · approach speed.
+                let v_target = -restitution * vn0;
+                let d_lambda = m_eff * (v_target - vn);
+                let new_lambda = (pc.normal_impulse + d_lambda).max(0.0);
+                let applied = new_lambda - pc.normal_impulse;
+                points[p].normal_impulse = new_lambda;
+                let impulse = normal * applied;
+                bodies_eff[mc.ia].apply_impulse(ra, impulse * -1.0);
+                bodies_eff[mc.ib].apply_impulse(rb, impulse);
+            }
+        }
+    }
+
+    /// Writes the solved velocities back into the gather snapshot and flags every
+    /// DYNAMIC body the solver integrated as touched (so
+    /// [`physics_apply`](crate::systems::physics_apply) writes those rows back).
+    ///
+    /// In solver-owned mode (C2) this solver is the SOLE integrator, so EVERY
+    /// dynamic body — contacting or free-falling — must be written back and
+    /// touched: a free body's new gravity-applied velocity lives in `self.bodies`
+    /// and its new position was integrated in place into `scratch.bodies`, but
+    /// `physics_apply` only writes rows whose touched bit is set. Without touching
+    /// the free body it would be integrated in scratch yet never written to the
+    /// `RigidBody` column — appearing frozen. Static / `inv_mass == 0` rows are
+    /// left UNtouched (so they are not written back and cannot drift; the
+    /// `static_body_unmoved` C2 guard depends on this), matching the integrate gate.
+    fn write_back(&self, scratch: &mut SolverScratch) {
+        for row in 0..self.bodies.len() {
+            // Touch exactly the rows the substep loop integrated (the same
+            // `Dynamic && inv_mass != 0` gate), so a free body's integrated state
+            // is written back and a static/kinematic row stays bit-identical.
+            if scratch.bodies[row].body_type == BodyType::Dynamic
+                && self.bodies[row].inv_mass != 0.0
+            {
+                Self::write_body(scratch, row, &self.bodies[row]);
+            }
+        }
+    }
+
+    /// Copies one solved body view's velocity (position/orientation were
+    /// integrated into the snapshot in place) back and marks the row touched.
+    fn write_body(scratch: &mut SolverScratch, row: usize, eff: &BodyEffective) {
+        scratch.bodies[row].linear_velocity = eff.linear_velocity;
+        scratch.bodies[row].angular_velocity = eff.angular_velocity;
+        scratch.touched.set(row);
+    }
+}
+
+/// The TGS-Soft constraint coefficients derived from `contact_hertz`,
+/// `contact_damping` (ζ), and the substep `h` (P2 W2, Box2D-v3 "Soft Step").
+///
+/// `omega = 2π·hertz; a1 = 2·ζ + omega·h; a2 = h·omega·a1; a3 = 1/(1+a2);`
+/// `biasRate = omega/a1; massCoeff = a2·a3; impulseCoeff = a3`.
+#[derive(Clone, Copy, Debug)]
+struct SoftCoefficients {
+    /// Penetration-recovery bias rate (`omega / a1`): the per-unit-separation
+    /// recovery speed.
+    bias_rate: f32,
+    /// Soft mass scale (`a2 · a3`) applied to the rigid `mEff · (vn + bias)`.
+    mass_coeff: f32,
+    /// Accumulated-impulse decay (`a3`) — the soft term that pulls the impulse
+    /// toward the spring's steady state.
+    impulse_coeff: f32,
+}
+
+impl SoftCoefficients {
+    /// Derives the coefficients for hertz `hertz`, damping ratio `zeta`, and
+    /// substep `h`.
+    #[inline]
+    fn new(hertz: f32, zeta: f32, h: f32) -> Self {
+        let omega = 2.0 * core::f32::consts::PI * hertz;
+        let a1 = 2.0 * zeta + omega * h;
+        let a2 = h * omega * a1;
+        let a3 = 1.0 / (1.0 + a2);
+        Self {
+            bias_rate: omega / a1,
+            mass_coeff: a2 * a3,
+            impulse_coeff: a3,
+        }
+    }
+}
+
+impl RigidSolver for SoftStepSolver {
+    /// Resolves all sphere-sphere contacts for one step with the TGS-Soft scheme,
+    /// integrating DYNAMIC bodies inside its substep loop (C2) and flagging every
+    /// integrated DYNAMIC row touched (contacting or free-falling), so a body with
+    /// no current contact still falls under gravity and is written back.
+    fn solve(
+        &mut self,
+        config: &PhysicsConfig,
+        manifolds: &[Manifold],
+        scratch: &mut SolverScratch,
+    ) {
+        let substeps = config.substeps.max(1);
+        let h = config.dt / substeps as f32;
+
+        // Build the per-body views and per-contact constraints over the gather
+        // snapshot; `vn_initial` captures the pre-substep approach velocity for
+        // the restitution pass.
+        self.build_bodies(&scratch.bodies);
+        // Split the scratch borrow: the snapshot positions feed the constraint
+        // build while `vn_initial` is filled.
+        {
+            let SolverScratch {
+                bodies, vn_initial, ..
+            } = scratch;
+            self.build_constraints(manifolds, bodies, vn_initial);
+        }
+        // No `manifolds.is_empty()` early-return: in solver-owned mode (C2) this
+        // solver is the SOLE integrator, so the substep loop must run its gravity
+        // (step 1) + position (step 5) integration for every dynamic body EVERY
+        // step, even with zero contacts — a free body must keep falling. With no
+        // manifolds the contact-solve / friction / relax / restitution sweeps
+        // iterate an empty manifold list and naturally do nothing. The only valid
+        // skip is a world with no dynamic body to integrate at all (then there is
+        // nothing to integrate and nothing to write back).
+        let has_dynamic = scratch
+            .bodies
+            .iter()
+            .any(|b| b.body_type == BodyType::Dynamic && b.inv_mass != 0.0);
+        if !has_dynamic {
+            return;
+        }
+
+        let soft = SoftCoefficients::new(config.contact_hertz, config.contact_damping, h);
+        let gravity = config.gravity;
+
+        for _ in 0..substeps {
+            // (1) Gravity integrate DYNAMIC bodies only (C2 gate (2)).
+            for (eff, snap) in self.bodies.iter_mut().zip(scratch.bodies.iter()) {
+                if snap.body_type == BodyType::Dynamic && eff.inv_mass != 0.0 {
+                    eff.linear_velocity = eff.linear_velocity + gravity * h;
+                }
+            }
+
+            // (2) Warm-start: INTENTIONALLY ABSENT in W2 — impulses accumulate
+            // from zero each frame (the W3 warm-start cache lands later).
+
+            // (3)+(4) Soft normal solve + coupled-friction cone (one sweep).
+            Self::solve_velocities(
+                &self.manifolds,
+                &mut self.points,
+                &mut self.bodies,
+                &scratch.bodies,
+                soft,
+                true,
+            );
+
+            // (5) Position integrate DYNAMIC bodies only, then re-rotate the
+            // world inertia for the next substep's effective mass.
+            //
+            // KINEMATIC bodies: their externally-set velocity is READ by contacts
+            // (a correct one-sided response — inv_mass==0 makes them immovable to
+            // impulses), but their position is NOT advanced here (this gate, and the
+            // gravity gate above, admit `Dynamic && inv_mass != 0` only). So in
+            // solver-owned mode a kinematic body's externally-driven MOTION does not
+            // progress within a step — a known, intentional W2 deferral (kinematic
+            // integration is not built yet).
+            for (eff, snap) in self.bodies.iter_mut().zip(scratch.bodies.iter_mut()) {
+                if snap.body_type == BodyType::Dynamic && eff.inv_mass != 0.0 {
+                    snap.position = snap.position + eff.linear_velocity * h;
+                    snap.rotation = snap.rotation.integrate(eff.angular_velocity, h);
+                }
+            }
+            Self::refresh_inertia(&mut self.bodies, &scratch.bodies);
+
+            // (6) Relax passes: re-solve bias-free to remove soft-bias energy.
+            for _ in 0..config.relax_iterations {
+                Self::solve_velocities(
+                    &self.manifolds,
+                    &mut self.points,
+                    &mut self.bodies,
+                    &scratch.bodies,
+                    soft,
+                    false,
+                );
+            }
+        }
+
+        // Post-loop restitution: ONCE, velocity-only, bias-free.
+        Self::apply_restitution(
+            &self.manifolds,
+            &mut self.points,
+            &mut self.bodies,
+            &scratch.bodies,
+            &scratch.vn_initial,
+        );
+
+        // Write the solved velocities back (positions/orientations were
+        // integrated in place into the snapshot) and flag every integrated
+        // DYNAMIC row — including free bodies that just fell with no contact.
+        self.write_back(scratch);
+    }
+
+    /// Always `false` — this solver does real work.
+    #[inline]
+    fn is_noop(&self) -> bool {
+        false
+    }
+
+    /// Always `true` — the TGS solver integrates DYNAMIC bodies inside its
+    /// substep loop, so the pipeline's `physics_integrate` must be gated off (C2).
+    #[inline]
+    fn owns_integration(&self) -> bool {
+        true
+    }
+}

@@ -13,7 +13,7 @@
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::schedule::ScheduleBuilder;
 
-use crate::resources::{ContactPairs, Manifolds, PhysicsConfig, SolverScratch};
+use crate::resources::{ContactPairs, IntegrationMode, Manifolds, PhysicsConfig, SolverScratch};
 use crate::solver::RigidSolver;
 use crate::systems::{
     physics_apply, physics_broadphase, physics_gather, physics_integrate, physics_narrowphase,
@@ -68,8 +68,11 @@ const INITIAL_BODY_CAPACITY: usize = 1024;
 /// on `builder`, returning the stage handles (plan D3 / MINOR-1).
 ///
 /// Resources inserted: [`PhysicsConfig`], [`ContactPairs`], [`Manifolds`],
-/// [`SolverScratch`] (all reused, capacity-preserving), and the chosen solver
-/// `S::default()` (the `ResMut<S>` the generic step system dispatches on, D2).
+/// [`SolverScratch`] (all reused, capacity-preserving), the chosen solver
+/// `S::default()` (the `ResMut<S>` the generic step system dispatches on, D2),
+/// and the [`IntegrationMode`] derived from `S::default().owns_integration()`
+/// (C2 — gates [`physics_integrate`](crate::systems::physics_integrate) off for
+/// an owning TGS solver so it does not double-integrate).
 ///
 /// Stages registered in deterministic order via `.after(...)`:
 /// `integrate → gather → broadphase → narrowphase → solve_step::<S> → apply`
@@ -88,6 +91,17 @@ pub fn add_physics_systems<S: RigidSolver + Default>(
     world.insert_resource(ContactPairs::with_capacity(INITIAL_BODY_CAPACITY));
     world.insert_resource(Manifolds::with_capacity(INITIAL_BODY_CAPACITY));
     world.insert_resource(SolverScratch::with_capacity(INITIAL_BODY_CAPACITY));
+
+    // C2: stamp the integration mode from the chosen solver BEFORE inserting the
+    // solver (a fresh `S::default()` is cheap and the only `&self` source for
+    // `owns_integration` at wire-up time). `physics_integrate` reads this mode and
+    // gates itself off for an owning TGS solver.
+    let integration_mode = if S::default().owns_integration() {
+        IntegrationMode::SolverOwned
+    } else {
+        IntegrationMode::Foundation
+    };
+    world.insert_resource(integration_mode);
     world.insert_resource(S::default());
 
     // Block head: integrate runs first, unordered relative to the caller's

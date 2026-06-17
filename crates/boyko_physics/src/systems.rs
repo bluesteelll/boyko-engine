@@ -33,6 +33,26 @@
 //! `Commands` workers). The foundation's single-threaded tests satisfy this; a
 //! content-defined ordering key independent of id/row is the Phase-10+ path if
 //! parallel-spawn determinism is ever required.
+//!
+//! # Integration-ownership contract (C2 — authoritative)
+//!
+//! When the chosen solver returns `true` from
+//! [`RigidSolver::owns_integration`](crate::solver::RigidSolver::owns_integration)
+//! (the TGS [`SoftStepSolver`](crate::solver::SoftStepSolver)), the plugin
+//! inserts [`IntegrationMode::SolverOwned`](crate::resources::IntegrationMode) and:
+//!
+//! 1. [`physics_integrate`] is gated OFF, so broad/narrowphase consume the
+//!    **pre-integration (end-of-previous-frame) snapshot** — this is correct and
+//!    intentional for TGS (it supersedes the foundation docstrings' "integrate
+//!    then gather" ordering for the owning-solver mode; the solver re-projects and
+//!    integrates internally).
+//! 2. The solver integrates **DYNAMIC bodies only** (`body_type == Dynamic` /
+//!    `inv_mass != 0`) inside its substep loop — mandatory: it applies a
+//!    per-substep gravity bias, so a static floor would drift if it were
+//!    integrated.
+//! 3. **DO NOT un-gate** [`physics_integrate`] for an owning solver: running both
+//!    would DOUBLE-INTEGRATE (the pipeline AND the solver each advance position +
+//!    orientation in the same step), corrupting the simulation.
 
 use boyko_ecs::ecs::core::iters::query::data::Mut;
 use boyko_ecs::ecs::core::iters::query::query::Query;
@@ -42,16 +62,28 @@ use boyko_ecs::ecs::core::time::FixedTime;
 use crate::components::{Collider, ColliderShape, RigidBody, RigidBodyMass};
 use crate::manifold::{BodyIndex, ContactPoint, Manifold};
 use crate::math::Vec3;
-use crate::resources::{BodyState, ContactPairs, Manifolds, PhysicsConfig, SolverScratch};
+use crate::resources::{
+    BodyState, ContactPairs, IntegrationMode, Manifolds, PhysicsConfig, SolverScratch,
+};
 use crate::solver::RigidSolver;
 
-/// Integrates every body's hot state for one step (plan D3 stage 1).
+/// Integrates every body's hot state for one step (plan D3 stage 1), UNLESS the
+/// solver owns integration (C2).
 ///
 /// A sound `par_iter_mut` over disjoint rows: each body reads/writes only its
 /// own [`RigidBody`]. Applies gravity to linear velocity, advances position by
 /// the fixed `dt`, then advances orientation by integrating the quaternion
-/// against the angular velocity. Not gated by the solver — the integrate loop
-/// always runs (the foundation's only real work).
+/// against the angular velocity.
+///
+/// # C2 integration-ownership gate
+///
+/// When [`IntegrationMode::SolverOwned`] is set (an owning TGS solver such as the
+/// [`SoftStepSolver`](crate::solver::SoftStepSolver)), this stage EARLY-RETURNS:
+/// the solver integrates DYNAMIC bodies inside its own substep loop, so running
+/// this stage too would DOUBLE-INTEGRATE (see the C2 contract block in the module
+/// docs). The stage stays monomorphic (it is NOT generic over the solver) — the
+/// mode rides as a plain resource the plugin stamps from
+/// `S::default().owns_integration()`.
 //
 // `clippy::needless_pass_by_value`: `Res<_>` is a by-value `SystemParam` by
 // protocol (the param system delivers an owned guard; `&Res<_>` is not a valid
@@ -63,7 +95,13 @@ pub fn physics_integrate(
     mut query: Query<&mut RigidBody>,
     cfg: Res<PhysicsConfig>,
     dt: Res<FixedTime>,
+    mode: Res<IntegrationMode>,
 ) {
+    // C2 gate: an owning solver integrates inside its substep loop. DO NOT
+    // un-gate this — running both the pipeline and the solver double-integrates.
+    if *mode == IntegrationMode::SolverOwned {
+        return;
+    }
     let dt = dt.delta_secs();
     let gravity = cfg.gravity;
     query.par_iter_mut().for_each(move |body: &mut RigidBody| {
@@ -291,36 +329,44 @@ pub fn physics_apply(mut query: Query<Mut<RigidBody>>, scratch: Res<SolverScratc
     );
 }
 
-/// Broad-phase bounding radius of a body (the foundation's cheap proxy).
+/// Broad-phase bounding radius of a body, computed from its real shape (P2 W2).
 ///
-/// Uses a unit default for a body without shape information in the snapshot
-/// (the snapshot carries no collider yet — the Phase-10 gather will project the
-/// real shape extent). Kept separate from [`collider_radius`] so the broadphase
-/// proxy and the narrowphase shape can diverge later without churning callers.
+/// The smallest sphere enclosing the collider: a [`Sphere`](ColliderShape::Sphere)
+/// contributes its radius directly; an [`Aabb`](ColliderShape::Aabb) contributes
+/// the length of its half-extents diagonal (`half_extents.length()`), so a box
+/// body is still a correct broadphase CANDIDATE even though box↔box narrowphase
+/// is W4. Kept separate from [`collider_radius`] so the broadphase proxy and the
+/// narrowphase shape can diverge later without churning callers.
 #[inline]
-fn body_bounding_radius(_body: &BodyState) -> f32 {
-    DEFAULT_BODY_RADIUS
-}
-
-/// Narrow-phase bounding-sphere radius of a body (the foundation's
-/// sphere-sphere test).
-///
-/// A sphere contributes its radius directly; a box contributes the length of
-/// its half-extents diagonal (`half_extents.length()`), the smallest sphere
-/// enclosing the box.
-#[inline]
-fn collider_radius(_body: &BodyState) -> f32 {
-    match DEFAULT_SHAPE {
+fn body_bounding_radius(body: &BodyState) -> f32 {
+    match body.shape {
         ColliderShape::Sphere { radius } => radius,
         ColliderShape::Aabb { half_extents } => half_extents.length(),
     }
 }
 
-/// Default body radius used by the foundation broad/narrow phases until the
-/// gather projects real collider extents (Phase 10).
-const DEFAULT_BODY_RADIUS: f32 = 0.5;
+/// Narrow-phase sphere radius of a body for the foundation's sphere-sphere test
+/// (P2 W2).
+///
+/// A [`Sphere`](ColliderShape::Sphere) contributes its real radius. An
+/// [`Aabb`](ColliderShape::Aabb) has no sphere-sphere contact — box↔box uses an
+/// SAT clipper (W4) — so this returns a NEGATIVE sentinel: with a non-positive
+/// narrowphase radius the `separation = dist − (rA + rB)` test in
+/// [`physics_narrowphase`] cannot drop below zero for a box pair, so the W2
+/// narrowphase skips it (the broadphase still treats the box as a candidate via
+/// its real [`body_bounding_radius`]). Spheres keep generating genuine contacts.
+#[inline]
+fn collider_radius(body: &BodyState) -> f32 {
+    match body.shape {
+        ColliderShape::Sphere { radius } => radius,
+        // No sphere-sphere contact for a box (W4 owns box contacts); the
+        // sentinel forces `separation >= 0` so the narrowphase skips this pair.
+        ColliderShape::Aabb { .. } => NO_SPHERE_CONTACT_RADIUS,
+    }
+}
 
-/// Default collider shape used by the foundation narrowphase.
-const DEFAULT_SHAPE: ColliderShape = ColliderShape::Sphere {
-    radius: DEFAULT_BODY_RADIUS,
-};
+/// Sentinel narrowphase radius for a non-sphere shape (P2 W2): a large negative
+/// value so `separation = dist − (rA + rB)` cannot go below zero for any pair
+/// involving a box, making the sphere-sphere narrowphase skip it. Box contacts
+/// land in W4 (SAT).
+const NO_SPHERE_CONTACT_RADIUS: f32 = f32::MIN;
