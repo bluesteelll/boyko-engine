@@ -121,6 +121,27 @@ pub trait RhiCommandEncoder<A: RhiApi> {
         // Phase-6 S0 default seam: overridden by the Vulkan backend.
     }
 
+    /// Records a buffer→image copy of `regions` from `src` to `dst` (which must be
+    /// in `dst_layout`, typically [`ImageLayout::TransferDstOptimal`]). The rung-11
+    /// upload of the compute composite's packed-RGBA pixel region into a SAMPLED
+    /// texture, so a fullscreen-sample pass can present it (the symmetric
+    /// counterpart of [`Self::copy_image_to_buffer`]). Seam: Phase 6 S1 rung 11.
+    ///
+    /// The default body is a no-op marked `#[cold] #[inline(never)]`; the Vulkan
+    /// backend overrides it (`vkCmdCopyBufferToImage`, reusing the same
+    /// `BufferImageCopy` region type as [`Self::copy_image_to_buffer`]).
+    #[cold]
+    #[inline(never)]
+    fn copy_buffer_to_image(
+        &mut self,
+        _src: &A::Buffer,
+        _dst: &A::Texture,
+        _dst_layout: ImageLayout,
+        _regions: &[BufferImageCopy],
+    ) {
+        // Phase-6 S1 default seam: overridden by the Vulkan backend.
+    }
+
     /// Binds a graphics pipeline for subsequent [`Self::draw`] calls (Phase-6 S0
     /// rung 2). Must be called inside a [`Self::begin_rendering`] scope whose color
     /// attachment formats match the pipeline's declared `color_format`.

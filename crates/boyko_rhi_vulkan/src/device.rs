@@ -211,6 +211,10 @@ pub struct DeviceFns {
     pub get_image_memory_requirements: PfnVkGetImageMemoryRequirements,
     pub bind_image_memory: PfnVkBindImageMemory,
     pub cmd_copy_image_to_buffer: PfnVkCmdCopyImageToBuffer,
+    /// `vkCmdCopyBufferToImage` — the rung-11 composite-buffer → SAMPLED-texture
+    /// upload (the symmetric counterpart of `cmd_copy_image_to_buffer`; Vulkan 1.0
+    /// core, always present).
+    pub cmd_copy_buffer_to_image: PfnVkCmdCopyBufferToImage,
     // --- Phase-6 S0 rung-2 graphics-pipeline + draw commands, Vulkan 1.0 core,
     //     always loaded. ---
     pub create_graphics_pipelines: PfnVkCreateGraphicsPipelines,
@@ -1159,6 +1163,11 @@ fn load_device_fns(
                 gdpa,
                 device,
                 c"vkCmdCopyImageToBuffer",
+            )?,
+            cmd_copy_buffer_to_image: load_device_command(
+                gdpa,
+                device,
+                c"vkCmdCopyBufferToImage",
             )?,
             // Phase-6 S0 rung-2 graphics-pipeline + draw commands (Vulkan 1.0 core).
             create_graphics_pipelines: load_device_command(

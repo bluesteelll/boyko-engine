@@ -2317,6 +2317,55 @@ impl RhiCommandEncoder<Vulkan> for VulkanCommandEncoder {
         }
         self.copy_image_to_buffer_many(src.image, src_layout.as_i32(), dst.buffer, regions);
     }
+
+    fn copy_buffer_to_image(
+        &mut self,
+        src: &BoundBuffer,
+        dst: &VulkanTexture,
+        dst_layout: ImageLayout,
+        regions: &[BufferImageCopy],
+    ) {
+        debug_assert!(
+            !regions.is_empty(),
+            "invariant: copy_buffer_to_image needs >= 1 region"
+        );
+        // The rung-11 composite upload uses a single full-image region; the inline
+        // cap avoids any heap allocation on that path. A larger batch (never hit by
+        // S1) falls into the cold heap helper, mirroring `copy_image_to_buffer`.
+        if regions.len() <= MAX_IMAGE_COPY_REGIONS {
+            // Invariant (mirrors `copy_image_to_buffer`): inside this branch the count
+            // is provably `<= MAX_IMAGE_COPY_REGIONS`, so the `inline_regions[..len]`
+            // fill is in-bounds and the `len as u32` count handed to Vulkan is `<=
+            // CAP`. The `> CAP` case is routed to the cold heap helper below — this
+            // assert traps any future refactor that loosens the branch condition.
+            debug_assert!(regions.len() <= MAX_IMAGE_COPY_REGIONS);
+            let mut inline_regions = [DEFAULT_BUFFER_IMAGE_COPY; MAX_IMAGE_COPY_REGIONS];
+            for (slot, region) in inline_regions.iter_mut().zip(regions.iter()) {
+                *slot = vk_buffer_image_copy(region);
+            }
+            // SAFETY: recording is open; `src.buffer` is a live buffer carrying
+            // TRANSFER_SRC usage (the host-coherent composite buffer); `dst.image` is
+            // a live image currently in `dst_layout` (the caller transitioned it to
+            // TRANSFER_DST_OPTIMAL via `image_barrier`);
+            // `inline_regions[..regions.len()]` are fully-initialized
+            // `VkBufferImageCopy`s (alive for the call) describing in-bounds sub-rects.
+            // `self.fns` points into the context's boxed fn-table (alive per the type
+            // contract).
+            let fns = unsafe { &*self.fns };
+            unsafe {
+                (fns.cmd_copy_buffer_to_image)(
+                    self.command_buffer,
+                    src.buffer,
+                    dst.image,
+                    dst_layout.as_i32(),
+                    regions.len() as u32,
+                    inline_regions.as_ptr(),
+                );
+            }
+            return;
+        }
+        self.copy_buffer_to_image_many(src.buffer, dst.image, dst_layout.as_i32(), regions);
+    }
 }
 
 impl VulkanCommandEncoder {
@@ -2398,6 +2447,42 @@ impl VulkanCommandEncoder {
                 src_image,
                 src_layout,
                 dst_buffer,
+                heap_regions.len() as u32,
+                heap_regions.as_ptr(),
+            );
+        }
+    }
+
+    /// The cold multi-region fallback for [`RhiCommandEncoder::copy_buffer_to_image`]:
+    /// builds a heap `Vec<VkBufferImageCopy>` and records the copy. The rung-11
+    /// composite upload uses a single region, so this path (and its only allocation)
+    /// is kept off the common path's I-cache via `#[cold] #[inline(never)]`
+    /// (mirrors [`Self::copy_image_to_buffer_many`]).
+    #[cold]
+    #[inline(never)]
+    fn copy_buffer_to_image_many(
+        &mut self,
+        src_buffer: VkBuffer,
+        dst_image: VkImage,
+        dst_layout: i32,
+        regions: &[BufferImageCopy],
+    ) {
+        let mut heap_regions: Vec<VkBufferImageCopy> = Vec::with_capacity(regions.len());
+        for r in regions {
+            heap_regions.push(vk_buffer_image_copy(r));
+        }
+        // SAFETY: recording is open; `src_buffer` is a live TRANSFER_SRC buffer;
+        // `dst_image` is a live image in `dst_layout` (TRANSFER_DST_OPTIMAL);
+        // `heap_regions` holds `regions.len()` fully-initialized `VkBufferImageCopy`s
+        // alive for the call. `self.fns` points into the context's boxed fn-table
+        // (alive per the type contract).
+        let fns = unsafe { &*self.fns };
+        unsafe {
+            (fns.cmd_copy_buffer_to_image)(
+                self.command_buffer,
+                src_buffer,
+                dst_image,
+                dst_layout,
                 heap_regions.len() as u32,
                 heap_regions.as_ptr(),
             );

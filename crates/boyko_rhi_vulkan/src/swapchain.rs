@@ -39,7 +39,7 @@ use boyko_rhi::{Format, ImageUsage, RhiDevice, TextureDesc, TextureDimension};
 use crate::device::{DeviceFns, SurfaceInstanceFns, SwapchainDeviceFns, VulkanContext};
 use crate::ffi::*;
 use crate::memory::BoundBuffer;
-use crate::rhi_impl::VulkanGraphicsPipeline;
+use crate::rhi_impl::{VulkanBindGroup, VulkanGraphicsPipeline, VulkanSampler};
 use crate::texture::VulkanTexture;
 
 /// The number of frames the [`Renderer`] keeps in flight (double-buffered CPU↔GPU
@@ -1454,6 +1454,500 @@ impl<'ctx> Renderer<'ctx> {
         Ok(())
     }
 
+    /// Presents the rung-11 SDF/mesh HYBRID COMPOSITE to the swapchain — the FIRST
+    /// HYBRID FRAME ON SCREEN. The compute composite has already been uploaded into
+    /// `composite.texture` (a SAMPLED `R8G8B8A8_UNORM` image left in
+    /// `SHADER_READ_ONLY_OPTIMAL` by the caller's pre-loop one-time submit); this call
+    /// only SAMPLES that resident texture in a fullscreen-sample graphics pass writing
+    /// into the acquired swapchain image, so the GPU converts RGBA → the swapchain's
+    /// format on the attachment write and the on-screen colors are correct on any
+    /// swapchain format. There is no per-frame upload or per-frame transition of the
+    /// composite texture — it is a pure read.
+    ///
+    /// The composite is presented at its NATIVE size
+    /// ([`SampledComposite::texture_extent`]) in the TOP-LEFT of the swapchain image —
+    /// the present pass's viewport/scissor are clamped to
+    /// `min(swapchain_extent, texture_extent)`, so the composite maps 1:1 and is never
+    /// stretched to a (possibly WSI-clamped) wider swapchain extent; the rest of the
+    /// swapchain image stays `clear`. A scale-to-fill mode is a future addition.
+    ///
+    /// Because the composite texture is uploaded once and only ever read here, ALL
+    /// frames-in-flight may sample it concurrently with no write-after-read hazard and
+    /// no cross-frame fence/barrier on the texture (the per-frame sync below covers
+    /// only the per-frame swapchain image + command buffer, exactly as the other
+    /// present paths).
+    ///
+    /// Synchronization / recreate semantics are IDENTICAL to
+    /// [`render_scene_frame`](Self::render_scene_frame): `Ok(true)` presented,
+    /// `Ok(false)` swapchain (re)created this call (frame skipped), `Err` terminal.
+    ///
+    /// If `readback` is `Some`, on THIS frame — after the fullscreen draw, before
+    /// present — the presented swapchain image is `vkCmdCopyImageToBuffer`'d into the
+    /// supplied host-visible staging buffer (the rung-11 golden path, proving the
+    /// hybrid composite reached the swapchain image); the steady path passes `None`.
+    ///
+    /// # Safety
+    ///
+    /// Every resource borrowed by `composite` (texture / sampler / bind group /
+    /// fullscreen pipeline) was created on the same device as this renderer and
+    /// outlives the call; `composite.texture` is a SAMPLED image the caller has
+    /// already uploaded the composite into and transitioned to
+    /// `SHADER_READ_ONLY_OPTIMAL` (and never writes again); `composite.pipeline`'s
+    /// `color_formats[0]` equals the swapchain surface format (W2-b) and its layout
+    /// declares `composite.bind_group`'s set-0 layout; a `Some(readback)` buffer is
+    /// host-visible and at least `extent.width * extent.height * 4` bytes (the
+    /// swapchain image's size).
+    #[allow(clippy::too_many_arguments)]
+    pub unsafe fn present_sampled(
+        &mut self,
+        surface: &Surface<'_>,
+        swapchain: &mut Swapchain<'ctx>,
+        composite: &SampledComposite<'_>,
+        width: u32,
+        height: u32,
+        clear: [f32; 4],
+        readback: Option<&BoundBuffer>,
+    ) -> Result<bool, SwapchainError> {
+        let frame = &self.frames[self.frame_index];
+
+        // --- Wait + (later) reset this frame slot's in-flight fence. ---
+        // SAFETY: `device` is live; `&frame.in_flight` names this slot's fence; an
+        // infinite wait blocks until this slot's previous submit completed, so its
+        // command buffer + acquire semaphore (and the composite texture it sampled)
+        // are free to reuse.
+        let raw = unsafe {
+            (self.fns.wait_for_fences)(self.device, 1, &frame.in_flight, VK_TRUE, VK_TIMEOUT_INFINITE)
+        };
+        let result = VkResult::from_raw(raw);
+        if !result.is_success() {
+            return Err(SwapchainError::VkError("vkWaitForFences", result));
+        }
+
+        // --- Acquire the next image (signals this frame's acquire semaphore). ---
+        let mut image_index: u32 = 0;
+        // SAFETY: `device` + `swapchain` are live; an infinite timeout + this slot's
+        // acquire semaphore (null fence) is the standard acquire; `&mut image_index`
+        // is a valid out-pointer.
+        let raw = unsafe {
+            (self.swap_fns.acquire_next_image)(
+                self.device,
+                swapchain.swapchain,
+                VK_TIMEOUT_INFINITE,
+                frame.acquire,
+                VkFence::NULL,
+                &mut image_index,
+            )
+        };
+        let acquire_result = VkResult::from_raw(raw);
+        if acquire_result == VkResult::ERROR_OUT_OF_DATE_KHR {
+            self.recreate(surface, swapchain, width, height)?;
+            return Ok(false);
+        }
+        if !acquire_result.is_success() && acquire_result != VkResult::SUBOPTIMAL_KHR {
+            return Err(SwapchainError::VkError("vkAcquireNextImageKHR", acquire_result));
+        }
+
+        // Only reset the fence once we are committing to a submit (mirrors the
+        // `render_scene_frame` out-of-date discipline so an early return never leaves
+        // the fence unsignalled).
+        // SAFETY: `device` is live; `&frame.in_flight` names this slot's
+        // already-waited fence; resetting it is valid.
+        let raw = unsafe { (self.fns.reset_fences)(self.device, 1, &frame.in_flight) };
+        let result = VkResult::from_raw(raw);
+        if !result.is_success() {
+            return Err(SwapchainError::VkError("vkResetFences", result));
+        }
+
+        let cmd = self.command_buffers[self.frame_index];
+        let image = swapchain_image_for(swapchain, image_index as usize);
+        let view = swapchain.image_views[image_index as usize];
+        let render_finished = self.render_finished[image_index as usize];
+
+        // SAFETY: this slot's fence was just waited so `cmd` is recordable; the
+        // image/view belong to `swapchain`; `composite`'s resources were created on
+        // this device (caller contract) and its texture is already resident in
+        // SHADER_READ_ONLY_OPTIMAL; the recorded path only samples that texture into
+        // the swapchain (UNDEFINED → COLOR → PRESENT, or → TRANSFER_SRC → readback →
+        // PRESENT) — no composite-texture write.
+        unsafe {
+            self.record_present_sampled(
+                cmd,
+                image,
+                view,
+                swapchain.extent,
+                clear,
+                composite,
+                readback,
+            )?
+        };
+
+        // --- Submit: wait acquire @ COLOR_ATTACHMENT_OUTPUT, signal render-finished + fence. ---
+        let wait_stage: VkFlags = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        let submit = VkSubmitInfo {
+            s_type: VkStructureType::SubmitInfo,
+            p_next: ptr::null(),
+            wait_semaphore_count: 1,
+            p_wait_semaphores: (&frame.acquire as *const VkSemaphore).cast(),
+            p_wait_dst_stage_mask: &wait_stage,
+            command_buffer_count: 1,
+            p_command_buffers: &cmd,
+            signal_semaphore_count: 1,
+            p_signal_semaphores: (&render_finished as *const VkSemaphore).cast(),
+        };
+        // SAFETY: `queue` is the live present/graphics queue; one submit naming the
+        // recorded `cmd`, waiting this frame's acquire semaphore at
+        // COLOR_ATTACHMENT_OUTPUT, signalling this image's render-finished semaphore
+        // + this frame's in-flight fence; all referenced locals outlive the call.
+        let raw = unsafe { (self.fns.queue_submit)(self.queue, 1, &submit, frame.in_flight) };
+        let result = VkResult::from_raw(raw);
+        if !result.is_success() {
+            return Err(SwapchainError::VkError("vkQueueSubmit", result));
+        }
+
+        // --- Present: wait render-finished. ---
+        let present = VkPresentInfoKhr {
+            s_type: VkStructureType::PresentInfoKhr,
+            p_next: ptr::null(),
+            wait_semaphore_count: 1,
+            p_wait_semaphores: &render_finished,
+            swapchain_count: 1,
+            p_swapchains: &swapchain.swapchain,
+            p_image_indices: &image_index,
+            p_results: ptr::null_mut(),
+        };
+        // SAFETY: `queue` supports present (confirmed in `Surface::new`); the
+        // present-info names the live swapchain + acquired `image_index`, waiting
+        // this image's render-finished semaphore; all locals outlive the call.
+        let raw = unsafe { (self.swap_fns.queue_present)(self.queue, &present) };
+        let present_result = VkResult::from_raw(raw);
+
+        self.frame_index = (self.frame_index + 1) % FRAMES_IN_FLIGHT;
+
+        if present_result == VkResult::ERROR_OUT_OF_DATE_KHR
+            || present_result == VkResult::SUBOPTIMAL_KHR
+        {
+            self.recreate(surface, swapchain, width, height)?;
+            return Ok(false);
+        }
+        if !present_result.is_success() {
+            return Err(SwapchainError::VkError("vkQueuePresentKHR", present_result));
+        }
+        Ok(true)
+    }
+
+    /// Records the rung-11 fullscreen-sample present into `cmd`: barrier the swapchain
+    /// image (UNDEFINED → COLOR), `vkCmdBeginRendering` (color CLEAR), bind the
+    /// fullscreen pipeline + the composite-texture bind group + dynamic
+    /// viewport/scissor, `vkCmdDraw(3, 1, 0, 0)`, `vkCmdEndRendering`, then either
+    /// color COLOR → PRESENT (steady) or color COLOR → TRANSFER_SRC, copy-to-buffer,
+    /// TRANSFER_SRC → PRESENT (the test readback path).
+    ///
+    /// The composite texture is NOT touched as a write target here: the caller
+    /// uploaded it once before the present loop and left it in
+    /// `SHADER_READ_ONLY_OPTIMAL`, so this records only a `FRAGMENT_SHADER` sample of
+    /// it (no upload copy, no composite-texture barrier). That is what keeps the
+    /// multi-frame-in-flight present loop free of any write-after-read hazard on the
+    /// shared composite texture.
+    ///
+    /// # Safety
+    ///
+    /// `cmd` must be recordable (waited free); `image`/`view` must belong to the
+    /// swapchain image presented this frame; every `composite` resource is live on
+    /// this device and `composite.texture` is already resident in
+    /// `SHADER_READ_ONLY_OPTIMAL` (uploaded once by the caller, never written again);
+    /// the pipeline's declared color format equals the swapchain image's (W2-b); a
+    /// `Some(readback)` buffer is host-visible and ≥ the swapchain image's byte size.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn record_present_sampled(
+        &self,
+        cmd: VkCommandBuffer,
+        image: VkImage,
+        view: VkImageView,
+        extent: VkExtent2D,
+        clear: [f32; 4],
+        composite: &SampledComposite<'_>,
+        readback: Option<&BoundBuffer>,
+    ) -> Result<(), SwapchainError> {
+        let begin = VkCommandBufferBeginInfo {
+            s_type: VkStructureType::CommandBufferBeginInfo,
+            p_next: ptr::null(),
+            flags: VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+            p_inheritance_info: ptr::null(),
+        };
+        // SAFETY: `cmd` is recordable per this fn's contract; `begin` is a
+        // fully-initialized one-time-submit begin-info.
+        let raw = unsafe { (self.fns.begin_command_buffer)(cmd, &begin) };
+        let result = VkResult::from_raw(raw);
+        if !result.is_success() {
+            return Err(SwapchainError::VkError("vkBeginCommandBuffer", result));
+        }
+
+        // The composite texture is already resident in SHADER_READ_ONLY_OPTIMAL (the
+        // caller's pre-loop one-time upload). This path only SAMPLES it, so it records
+        // no barrier on the composite texture — a read-only image shared across
+        // frames-in-flight needs none, and re-uploading/re-transitioning it per frame
+        // would be the cross-frame write-after-read hazard this restructure removes.
+
+        // --- Barrier (swapchain color): UNDEFINED → COLOR_ATTACHMENT_OPTIMAL. ---
+        let to_color = VkImageMemoryBarrier {
+            s_type: VkStructureType::ImageMemoryBarrier,
+            p_next: ptr::null(),
+            src_access_mask: 0,
+            dst_access_mask: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+            old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+            new_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+            dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+            image,
+            subresource_range: COLOR_SUBRESOURCE_RANGE,
+        };
+        // SAFETY: recording is open; one image barrier on the live swapchain `image`;
+        // TOP_OF_PIPE→COLOR_ATTACHMENT_OUTPUT with UNDEFINED→COLOR is the
+        // superset-correct acquire→render transition; `&to_color` outlives the call.
+        unsafe {
+            (self.fns.cmd_pipeline_barrier)(
+                cmd,
+                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                0,
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                1,
+                (&to_color as *const VkImageMemoryBarrier).cast(),
+            );
+        }
+
+        // Dynamic rendering: one color attachment (the swapchain image, CLEAR/STORE),
+        // no depth (the fullscreen triangle is depth-less). The pipeline's declared
+        // color format equals the swapchain format (W2-b, upheld by the caller).
+        let color_attachment = VkRenderingAttachmentInfo {
+            s_type: VkStructureType::RenderingAttachmentInfo,
+            p_next: ptr::null(),
+            image_view: view,
+            image_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            resolve_mode: 0,
+            resolve_image_view: VkImageView::NULL,
+            resolve_image_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+            load_op: VK_ATTACHMENT_LOAD_OP_CLEAR,
+            store_op: VK_ATTACHMENT_STORE_OP_STORE,
+            clear_value: VkClearValue {
+                color: VkClearColorValue { float32: clear },
+            },
+        };
+        let rendering = VkRenderingInfo {
+            s_type: VkStructureType::RenderingInfo,
+            p_next: ptr::null(),
+            flags: 0,
+            render_area: VkRect2D {
+                offset: VkOffset2D { x: 0, y: 0 },
+                extent,
+            },
+            layer_count: 1,
+            view_mask: 0,
+            color_attachment_count: 1,
+            p_color_attachments: &color_attachment,
+            p_depth_attachment: ptr::null(),
+            p_stencil_attachment: ptr::null(),
+        };
+        // Present the composite at its NATIVE size in the TOP-LEFT of the swapchain
+        // image, NOT stretched to the full swapchain extent. The viewport/scissor are
+        // clamped to `min(swapchain_extent, texture_extent)` at origin (0, 0): the
+        // fullscreen triangle then writes exactly the composite's pixels 1:1, and the
+        // rest of a wider WSI-clamped swapchain image keeps the clear color (the
+        // begin-rendering `render_area` above stays the full swapchain extent so the
+        // CLEAR covers it). A 1:1 top-left mapping makes a per-texel golden exact
+        // regardless of any `current_extent` clamp.
+        let present_extent = VkExtent2D {
+            width: extent.width.min(composite.texture_extent.width),
+            height: extent.height.min(composite.texture_extent.height),
+        };
+        let viewport = VkViewport {
+            x: 0.0,
+            y: 0.0,
+            width: present_extent.width as f32,
+            height: present_extent.height as f32,
+            min_depth: 0.0,
+            max_depth: 1.0,
+        };
+        let scissor = VkRect2D {
+            offset: VkOffset2D { x: 0, y: 0 },
+            extent: present_extent,
+        };
+        // SAFETY: recording is open; `rendering` is fully initialized — its color
+        // attachment names the live swapchain `view` (now COLOR_ATTACHMENT_OPTIMAL);
+        // dynamic rendering is enabled on this device. The pipeline + its bind-group
+        // layout belong to this device (caller contract) and the pipeline's declared
+        // color format equals the swapchain image's (W2-b). The bind group binds the
+        // composite texture (now SHADER_READ_ONLY_OPTIMAL) + sampler at set 0 of the
+        // pipeline's layout; `viewport`/`scissor` locals outlive the bracketed calls;
+        // `draw(3, 1, 0, 0)` is the `SV_VertexID` fullscreen triangle (no vertex
+        // buffer). Begin/End bracket the pass exactly.
+        unsafe {
+            (self.fns.cmd_begin_rendering)(cmd, &rendering);
+            (self.fns.cmd_bind_pipeline)(
+                cmd,
+                VK_PIPELINE_BIND_POINT_GRAPHICS,
+                composite.pipeline.pipeline,
+            );
+            (self.fns.cmd_bind_descriptor_sets)(
+                cmd,
+                VK_PIPELINE_BIND_POINT_GRAPHICS,
+                composite.pipeline.layout,
+                0,
+                1,
+                &composite.bind_group.descriptor_set,
+                0,
+                ptr::null(),
+            );
+            (self.fns.cmd_set_viewport)(cmd, 0, 1, &viewport);
+            (self.fns.cmd_set_scissor)(cmd, 0, 1, &scissor);
+            (self.fns.cmd_draw)(cmd, 3, 1, 0, 0);
+            (self.fns.cmd_end_rendering)(cmd);
+        }
+
+        // The post-draw color transition depends on whether a readback is requested
+        // (identical to `record_scene`'s branch).
+        match readback {
+            // Steady present path: COLOR_ATTACHMENT_OPTIMAL → PRESENT_SRC_KHR.
+            None => {
+                let to_present = VkImageMemoryBarrier {
+                    s_type: VkStructureType::ImageMemoryBarrier,
+                    p_next: ptr::null(),
+                    src_access_mask: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                    dst_access_mask: 0,
+                    old_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                    new_layout: VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                    src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                    dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                    image,
+                    subresource_range: COLOR_SUBRESOURCE_RANGE,
+                };
+                // SAFETY: recording is open; COLOR_ATTACHMENT_OUTPUT→BOTTOM_OF_PIPE
+                // with COLOR→PRESENT makes the draw's writes visible to the present
+                // engine; `&to_present` outlives the call.
+                unsafe {
+                    (self.fns.cmd_pipeline_barrier)(
+                        cmd,
+                        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                        0,
+                        0,
+                        ptr::null(),
+                        0,
+                        ptr::null(),
+                        1,
+                        (&to_present as *const VkImageMemoryBarrier).cast(),
+                    );
+                }
+            }
+            // Test readback path: COLOR → TRANSFER_SRC, copy image → buffer, then
+            // TRANSFER_SRC → PRESENT (the image is still presented after the copy).
+            Some(staging) => {
+                let to_transfer = VkImageMemoryBarrier {
+                    s_type: VkStructureType::ImageMemoryBarrier,
+                    p_next: ptr::null(),
+                    src_access_mask: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                    dst_access_mask: VK_ACCESS_TRANSFER_READ_BIT,
+                    old_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                    new_layout: VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                    dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                    image,
+                    subresource_range: COLOR_SUBRESOURCE_RANGE,
+                };
+                // SAFETY: recording is open; COLOR_ATTACHMENT_OUTPUT→TRANSFER with
+                // COLOR→TRANSFER_SRC makes the draw's writes available to the copy;
+                // `&to_transfer` outlives the call.
+                unsafe {
+                    (self.fns.cmd_pipeline_barrier)(
+                        cmd,
+                        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        0,
+                        0,
+                        ptr::null(),
+                        0,
+                        ptr::null(),
+                        1,
+                        (&to_transfer as *const VkImageMemoryBarrier).cast(),
+                    );
+                }
+
+                let region = VkBufferImageCopy {
+                    buffer_offset: 0,
+                    buffer_row_length: 0,
+                    buffer_image_height: 0,
+                    image_subresource: VkImageSubresourceLayers {
+                        aspect_mask: VK_IMAGE_ASPECT_COLOR_BIT,
+                        mip_level: 0,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    },
+                    image_offset: VkOffset3D { x: 0, y: 0, z: 0 },
+                    image_extent: VkExtent3D {
+                        width: extent.width,
+                        height: extent.height,
+                        depth: 1,
+                    },
+                };
+                // SAFETY: recording is open; the image is TRANSFER_SRC_OPTIMAL per the
+                // barrier above; one full-image tightly-packed color region copies
+                // into the live host-visible `staging.buffer` (≥ the image's byte size
+                // per this fn's contract); `&region` outlives the call.
+                unsafe {
+                    (self.fns.cmd_copy_image_to_buffer)(
+                        cmd,
+                        image,
+                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                        staging.buffer,
+                        1,
+                        &region,
+                    );
+                }
+
+                let to_present = VkImageMemoryBarrier {
+                    s_type: VkStructureType::ImageMemoryBarrier,
+                    p_next: ptr::null(),
+                    src_access_mask: VK_ACCESS_TRANSFER_READ_BIT,
+                    dst_access_mask: 0,
+                    old_layout: VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    new_layout: VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                    src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                    dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                    image,
+                    subresource_range: COLOR_SUBRESOURCE_RANGE,
+                };
+                // SAFETY: recording is open; TRANSFER→BOTTOM_OF_PIPE with
+                // TRANSFER_SRC→PRESENT releases the image to the present engine after
+                // the readback copy; `&to_present` outlives the call.
+                unsafe {
+                    (self.fns.cmd_pipeline_barrier)(
+                        cmd,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                        0,
+                        0,
+                        ptr::null(),
+                        0,
+                        ptr::null(),
+                        1,
+                        (&to_present as *const VkImageMemoryBarrier).cast(),
+                    );
+                }
+            }
+        }
+
+        // SAFETY: recording is open; ending it matches the `begin` above.
+        let raw = unsafe { (self.fns.end_command_buffer)(cmd) };
+        let result = VkResult::from_raw(raw);
+        if !result.is_success() {
+            return Err(SwapchainError::VkError("vkEndCommandBuffer", result));
+        }
+        Ok(())
+    }
+
     /// Waits the device idle, recreates the swapchain to `width`×`height`, and
     /// rebuilds the per-image render-finished semaphores (the image count may
     /// change). A `ZeroExtent` (minimized) is swallowed — the caller retries.
@@ -1642,6 +2136,73 @@ impl Scene {
             RhiDevice::destroy_graphics_pipeline(ctx, self.pipeline);
         }
     }
+}
+
+/// The rung-11 on-screen hybrid-composite present inputs: the ALREADY-UPLOADED,
+/// already-resident SAMPLED texture the compute composite lives in, the sampler +
+/// bind group binding it, and the fullscreen-sample graphics pipeline that samples
+/// it into the swapchain image.
+///
+/// # The texture is resident + read-only BEFORE this bundle is built
+///
+/// The composite is STATIC across the whole present loop (it never changes between
+/// frames), so the caller uploads the compute composite into `texture` and
+/// transitions it to `SHADER_READ_ONLY_OPTIMAL` EXACTLY ONCE — in its own fenced
+/// submit (or folded into the composite-producing submit) — BEFORE the present loop.
+/// From then on the texture stays in `SHADER_READ_ONLY_OPTIMAL` permanently and
+/// [`Renderer::present_sampled`] only ever READS it (a `FRAGMENT_SHADER` sample).
+/// Multiple frames-in-flight concurrently reading a read-only texture is sound — no
+/// write-after-read hazard, no per-frame upload, no per-frame barrier, and no
+/// cross-frame fence on the texture. This is what makes the present loop sound across
+/// `FRAMES_IN_FLIGHT` (the bundle carries no source buffer / copy extent precisely
+/// because the present path performs no copy).
+///
+/// Unlike [`Scene`] (which OWNS its resources and is destroyed by value), this is a
+/// lightweight BORROW bundle: the caller creates the resources through the
+/// [`RhiDevice`](boyko_rhi::RhiDevice) trait, owns them, and tears them down (the
+/// `'a` lifetime ties the bundle to those borrows for the present call). It exists
+/// only to keep [`Renderer::present_sampled`]'s signature compact.
+///
+/// The pipeline's declared `color_formats[0]` MUST equal the swapchain's color
+/// format (the W2-b format-matching contract) and its layout MUST declare
+/// `bind_group`'s set-0 layout (one COMBINED_IMAGE_SAMPLER), or the validation layer
+/// faults at draw time.
+///
+/// # Native-size, top-left present
+///
+/// The composite is presented at its NATIVE size ([`texture_extent`](Self::texture_extent))
+/// in the top-left of the swapchain image — never stretched to the (possibly
+/// WSI-clamped) swapchain extent. See [`texture_extent`](Self::texture_extent).
+pub struct SampledComposite<'a> {
+    /// The SAMPLED texture the compute composite has ALREADY been uploaded into and
+    /// transitioned to `SHADER_READ_ONLY_OPTIMAL` (caller's pre-loop one-time
+    /// submit). The present path only samples it.
+    pub texture: &'a VulkanTexture,
+    /// The sampler bound alongside `texture` in `bind_group`. Not read by the present
+    /// path directly; the bind group already references it. Kept here as a lifetime
+    /// tie so the sampler outlives the bind group's use.
+    pub sampler: &'a VulkanSampler,
+    /// The bind group (one COMBINED_IMAGE_SAMPLER at set 0) binding `texture` +
+    /// `sampler` for the fullscreen-sample draw.
+    pub bind_group: &'a VulkanBindGroup,
+    /// The fullscreen-sample graphics pipeline (no vertex buffer, no depth; its
+    /// `color_formats[0]` equals the swapchain format, W2-b).
+    pub pipeline: &'a VulkanGraphicsPipeline,
+    /// The `texture`'s OWN dimensions (the composite's native size), NOT the
+    /// swapchain extent.
+    ///
+    /// [`Renderer::present_sampled`] presents the composite at its native size in
+    /// the TOP-LEFT of the swapchain image: it sets the present pass's
+    /// viewport/scissor to `min(swapchain_extent, texture_extent)`, so the
+    /// fullscreen-sample triangle writes exactly the composite's pixels 1:1 and the
+    /// rest of the (possibly wider, WSI-clamped) swapchain image stays the clear
+    /// color. A 1:1 top-left mapping makes a per-texel golden exact regardless of
+    /// any WSI `current_extent` clamp (e.g. a driver-minimum swapchain width wider
+    /// than the texture).
+    ///
+    /// This denotes the TEXTURE, never the swapchain — passing the swapchain extent
+    /// here would re-introduce the stretch this field exists to remove.
+    pub texture_extent: VkExtent2D,
 }
 
 impl Drop for Renderer<'_> {

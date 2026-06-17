@@ -2719,6 +2719,20 @@ pub type PfnVkCmdCopyImageToBuffer = unsafe extern "system" fn(
     p_regions: *const VkBufferImageCopy,
 );
 
+/// `PFN_vkCmdCopyBufferToImage` — the rung-11 buffer → SAMPLED-image upload (the
+/// symmetric counterpart of [`PfnVkCmdCopyImageToBuffer`]): copies the compute
+/// composite's packed-RGBA pixel region into an `R8G8B8A8_UNORM` texture so a
+/// fullscreen-sample pass can present it to the swapchain.
+pub type PfnVkCmdCopyBufferToImage = unsafe extern "system" fn(
+    command_buffer: VkCommandBuffer,
+    src_buffer: VkBuffer,
+    dst_image: VkImage,
+    // `dst_image_layout`: `VkImageLayout` the destination image is in (`TRANSFER_DST_OPTIMAL`).
+    dst_image_layout: i32,
+    region_count: u32,
+    p_regions: *const VkBufferImageCopy,
+);
+
 /// `PFN_vkGetPhysicalDeviceFeatures2` — the S0 fail-fast `dynamicRendering`
 /// support query (Vulkan 1.1 core; the `2` suffix, no `KHR`).
 pub type PfnVkGetPhysicalDeviceFeatures2 = unsafe extern "system" fn(
