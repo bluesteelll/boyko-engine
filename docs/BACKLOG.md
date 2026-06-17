@@ -8,6 +8,10 @@
 >
 > Status legend: ❓ open question · 🔬 needs measurement · 💡 idea · ⏸ deferred.
 
+## Related
+
+- [PERF-DIRECTIONS.md](PERF-DIRECTIONS.md) - forward-looking performance directions/levers (HW-RT optional backend + RT-lighting confirmed-future, plus GPU-execution / CPU-ECS-SIMD / memory-bandwidth / codegen-PGO axes), each tagged HAVE/PARTIAL/FUTURE. BL-1 below is cross-referenced there.
+
 ## Memory / physical placement
 
 ### ❓🔬 BL-1 — Physical-memory placement & TLB hardening (huge pages, page-locking)
