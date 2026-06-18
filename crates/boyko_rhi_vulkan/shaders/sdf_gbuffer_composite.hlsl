@@ -46,6 +46,17 @@
 //               push and the layout-incompat (review fix P1a-O1, option b). The camera
 //               params feed ray-gen with plain IEEE ops (no fast math) — determinism
 //               preserved.
+//   binding 6 : StructuredBuffer<TileBound> (READ-ONLY) — the Render P4b per-tile
+//               coarse-cull bound, written by `sdf_tile_cull.hlsl`. Read ONLY when the
+//               `coarse_enabled` push constant is non-zero; the OFF path never touches
+//               it (byte-identical to the pre-P4b marcher — the 0%-gate).
+//
+// # The `coarse_enabled` push constant (Render P4b — pushed against THIS pipeline's
+//   OWN dedicated layout via `push_compute_constants`, NOT the shared `push_constants`)
+//
+// A 4-byte `[[vk::push_constant]] uint coarse_enabled` gates the coarse cull. `0`
+// (cull-off) keeps the marcher byte-identical to today; `!= 0` reads binding 6 and
+// either early-outs an EMPTY tile (mesh/background composite) or seeds `t = near_t`.
 //
 // # The `[[vk::image_format("rgba8")]]` qualifier (REQUIRED)
 //
@@ -119,6 +130,26 @@ cbuffer Camera : register(b5) {
     float4 cam_right;
     float4 cam_up;
 };
+
+// Render P4b: the per-tile coarse-cull bound, READ-ONLY here (the coarse pass writes
+// it). Byte-identical to the host `#[repr(C)] TileBound` (16 B std430). binding 6.
+struct TileBound {
+    float near_t;
+    float far_t;
+    uint  flags;
+    uint  _pad;
+};
+StructuredBuffer<TileBound> Tiles : register(t6);
+
+// Render P4b: a 4-byte push constant on the fine pipeline (the ONLY push — the camera
+// is the UBO @ b5). `coarse_enabled == 0` keeps the OFF path BYTE-IDENTICAL to today's
+// marcher (the 0%-gate anchor); `!= 0` reads the tile's `TileBound` and culls.
+[[vk::push_constant]] struct PushConstants { uint coarse_enabled; } pc;
+
+// P4b: the EMPTY flag bit (mirrors the host `TILE_FLAG_EMPTY` + sdf_tile_cull.hlsl).
+static const uint TILE_FLAG_EMPTY = 1u;
+// The coarse tile edge in fine pixels (mirrors the host `TILE_SIZE`).
+static const uint TILE_SIZE_FINE = 8u;
 
 // Resolves the runtime extent, falling back to the legacy 64x64 fixture when a field
 // is zero (so an all-zero UBO tail reproduces the golden — the 0%-gate).
@@ -204,9 +235,36 @@ void main(uint3 tid : SV_DispatchThreadID) {
     bool has_mesh = (md < DEPTH_CLEAR);          // strictly less than the far-plane clear
     float t_mesh = has_mesh ? (md * T_MAX) : 1.0e30; // a finite bound only when covered
 
+    // --- Render P4b: the GATED coarse-cull prefix (Algorithm B). `coarse_enabled == 0`
+    // leaves `t_seed = 0.0` and never touches `Tiles` — the OFF path is BYTE-IDENTICAL
+    // to today's marcher (the 0%-gate). When enabled, read this pixel's tile bound:
+    //   * EMPTY tile -> no SDF surface in the cone in front of the deepest mesh, but the
+    //     pixel can still be MESH-covered -> composite mesh/background + return (D6); a
+    //     blind background would erase the mesh -> golden regression.
+    //   * else SEED the march at `near_t` (the proven-empty prefix, a conservative lower
+    //     bound on every in-tile pixel's first hit -> never skips this pixel's surface).
+    // The march loop + field eval below stay BYTE-UNTOUCHED. ---
+    float t_seed = 0.0;
+    if (pc.coarse_enabled != 0u) {
+        uint tiles_w = (w + TILE_SIZE_FINE - 1u) / TILE_SIZE_FINE;
+        uint tx = px / TILE_SIZE_FINE;
+        uint ty = py / TILE_SIZE_FINE;
+        TileBound tb = Tiles[ty * tiles_w + tx];
+        if ((tb.flags & TILE_FLAG_EMPTY) != 0u) {
+            // EMPTY fast-path: the marcher's else-if(has_mesh)/else arms with hit = false.
+            float3 empty_color = has_mesh ? MESH_COLOR : BACKGROUND;
+            gAlbedo[uint2(px, py)] = float4(clamp(empty_color, 0.0, 1.0), 1.0);
+            gNormal[uint2(px, py)] = float4(0.5, 0.5, 0.5, 1.0); // neutral world normal
+            gMaterial[uint2(px, py)] = MATERIAL_CONST;
+            return;
+        }
+        t_seed = tb.near_t;
+    }
+
     // Sphere-trace, BOUNDED by the mesh depth: as soon as the march parameter reaches
-    // t_mesh the mesh is in front from here on, so the SDF cannot win.
-    float t = 0.0;
+    // t_mesh the mesh is in front from here on, so the SDF cannot win. P4b seeds the
+    // start at `t_seed` (0.0 when cull-off — byte-identical; else the tile's near_t).
+    float t = t_seed;
     bool hit = false;
     [loop]
     for (uint it = 0u; it < MAX_IT; ++it) {

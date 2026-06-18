@@ -273,6 +273,30 @@ pub trait RhiCommandEncoder<A: RhiApi> {
         // Phase-6 S0 default seam: overridden by the Vulkan backend.
     }
 
+    /// Records a push-constant update against a **compute** pipeline's OWN layout
+    /// (Render P4b — the marcher's `coarse_enabled` gate). The COMPUTE counterpart of
+    /// [`Self::push_graphics_constants`]: it reads the layout from the passed compute
+    /// `pipeline`, so a VOCABULARY-compute pipeline (created with
+    /// [`crate::descriptor::ComputePipelineDesc::bind_group_layout`] `== Some`) can push
+    /// against its DEDICATED layout — the one its bind group is bound against — instead
+    /// of the device-shared layout [`Self::push_constants`] targets (which is NOT
+    /// push-/set-compatible with a vocabulary pipeline → a validation error). The fixed
+    /// (`None`-layout) packed-buffer path keeps using [`Self::push_constants`].
+    ///
+    /// The default body is a no-op marked `#[cold] #[inline(never)]`; the Vulkan
+    /// backend overrides it (`vkCmdPushConstants` against the pipeline's own layout).
+    #[cold]
+    #[inline(never)]
+    fn push_compute_constants(
+        &mut self,
+        _pipeline: &A::ComputePipeline,
+        _stage: ShaderStage,
+        _offset: u32,
+        _bytes: &[u8],
+    ) {
+        // Render P4b default seam: overridden by the Vulkan backend.
+    }
+
     /// Records a non-indexed draw of `vertex_count` vertices in `instance_count`
     /// instances, starting at `first_vertex` / `first_instance` (Phase-6 S0 rung
     /// 2). Rung 2 issues `draw(3, 1, 0, 0)` — one triangle, vertex positions

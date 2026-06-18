@@ -35,6 +35,7 @@
 use core::ptr::NonNull;
 use core::slice;
 
+use boyko_rhi::descriptor::{BarrierDesc, BufferBarrier};
 use boyko_rhi::enums::{BarrierAccess, BarrierStage};
 use boyko_rhi::{
     BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BindGroupLayoutEntry, BufferDesc,
@@ -47,9 +48,11 @@ use boyko_rhi::{
 use boyko_rhi_vulkan::compute::{
     COMPOSITE_PUSH_CONSTANT_BYTES, CompositeCamera, CompositePushConstants, LOCAL_SIZE_X,
     MESH_COLOR, MESH_DEPTH_CLEAR, SDF_CAMERA_Z, SDF_IMG_H, SDF_IMG_W, SDF_TRACE_T_MAX,
-    SDF_VIEW_HALF_EXTENT, SdfEdit, EDITLIST_BUFFER_WORDS, editlist_pixel_hits, encode_edit_list,
-    golden_composite_pixel_ex, mesh_depth_for_z, pixel_world_xy, sdf_gbuffer_composite_spirv,
-    sdf_op,
+    SDF_VIEW_HALF_EXTENT, SdfEdit, TILE_BOUND_BYTES, TILE_FLAG_EMPTY, TILE_SIZE, TileBound,
+    EDITLIST_BUFFER_WORDS, editlist_pixel_hits, encode_edit_list,
+    golden_composite_pixel_culled, golden_composite_pixel_ex, golden_tile_bound, mesh_depth_for_z,
+    pack_rgba, pixel_world_xy, sdf_gbuffer_composite_spirv, sdf_op, sdf_tile_cull_spirv,
+    tile_grid_extent,
 };
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
 
@@ -158,9 +161,26 @@ fn assert_validation_clean(ctx: &VulkanContext) {
     );
 }
 
-/// `ceil(PIXELS / LOCAL_SIZE_X)` — the 1D compute dispatch group count.
+/// `ceil(PIXELS / LOCAL_SIZE_X)` — the 1D compute dispatch group count (fine pass).
 fn group_count_x() -> u32 {
     PIXELS.div_ceil(LOCAL_SIZE_X)
+}
+
+/// The coarse tile-grid extent (`tiles_w`, `tiles_h`) for the golden 64×64 image.
+fn tile_extent() -> (u32, u32) {
+    tile_grid_extent(SDF_IMG_W, SDF_IMG_H)
+}
+
+/// Total coarse tiles (the `RWStructuredBuffer<TileBound>` element count + the
+/// coarse-pass dispatch element count).
+fn tile_count() -> u32 {
+    let (tw, th) = tile_extent();
+    tw * th
+}
+
+/// `ceil(tile_count / LOCAL_SIZE_X)` — the 1D coarse-pass dispatch group count.
+fn coarse_group_count_x() -> u32 {
+    tile_count().div_ceil(LOCAL_SIZE_X)
 }
 
 /// The orthographic MVP for the rung-3 vertex shader, uploaded COLUMN-MAJOR (the
@@ -261,7 +281,31 @@ fn texel_close(got: [i32; 3], want_packed: u32) -> bool {
 /// the single depth `DEPTH_ATTACHMENT_OPTIMAL → SHADER_READ_ONLY_OPTIMAL` barrier
 /// replaces the old copy + its two barriers. The vocabulary set is written ONCE at
 /// `create_bind_group` — there is no per-frame `vkUpdateDescriptorSets`.
-fn run_gbuffer_hybrid(ctx: &VulkanContext, edits: &[SdfEdit]) -> Vec<u8> {
+fn run_gbuffer_hybrid(ctx: &VulkanContext, edits: &[SdfEdit], coarse_enabled: bool) -> Vec<u8> {
+    // Delegate to the `_ex` variant, discarding the tiles-buffer readback. Keeps the
+    // existing callers (`p1b_gbuffer_hybrid_matches_golden`) byte-for-byte unchanged.
+    run_gbuffer_hybrid_ex(ctx, edits, coarse_enabled, false).0
+}
+
+/// Render P4b — the extended harness: the same OFFSCREEN G-buffer hybrid composite as
+/// [`run_gbuffer_hybrid`], but ALSO reads back the per-tile [`TileBound`] cull buffer
+/// (binding 6) when `read_tiles == true`, returning `(albedo, Some(tiles_bytes))`.
+///
+/// The tiles-buffer readback is the TESTER's host/GPU agreement oracle: the returned
+/// `Vec<u8>` is `tile_count() * TILE_BOUND_BYTES` bytes of the std430 `RWStructuredBuffer
+/// <TileBound>` the coarse pass wrote (parse each 16-byte element as near_t f32@0, far_t
+/// f32@4, flags u32@8, _pad u32@12). With `read_tiles == false` the second element is
+/// `None` and no extra copy / barrier is recorded (the byte-identity 0%-gate path).
+///
+/// `read_tiles` requires `coarse_enabled` — the coarse pass only runs (and only writes
+/// binding 6) when culling is on; reading it back otherwise yields the buffer's
+/// undefined create-time contents. The caller is responsible for pairing them.
+fn run_gbuffer_hybrid_ex(
+    ctx: &VulkanContext,
+    edits: &[SdfEdit],
+    coarse_enabled: bool,
+    read_tiles: bool,
+) -> (Vec<u8>, Option<Vec<u8>>) {
     let device: &VulkanContext = ctx;
     let queue = ctx.rhi_queue();
 
@@ -313,6 +357,19 @@ fn run_gbuffer_hybrid(ctx: &VulkanContext, edits: &[SdfEdit]) -> Vec<u8> {
             core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len());
         }
     }
+
+    // --- Render P4b: the per-tile coarse-cull StorageBuffer (binding 6). The coarse
+    // pass WRITES one `TileBound` (16 B) per 8×8 tile; the fine marcher READS it (gated
+    // by the `coarse_enabled` push). Device-local would do, but a host-coherent buffer
+    // lets the GPU-half tester read the bounds back and diff them against
+    // `golden_tile_bound`. Sized to the full tile grid. ---
+    let tiles_buffer = device
+        .create_buffer(&BufferDesc {
+            size: (tile_count() as u64) * (TILE_BOUND_BYTES as u64),
+            usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_SRC,
+            location: MemoryLocation::HostVisibleCoherent,
+        })
+        .expect("P4b coarse-cull tile-bound storage buffer");
 
     // --- The depth IMAGE (D32_SFLOAT): DEPTH_STENCIL_ATTACHMENT (rasterize into it) |
     // SAMPLED (the marcher samples it directly — NO copy). A DEPTH_STENCIL_ATTACHMENT
@@ -424,6 +481,10 @@ fn run_gbuffer_hybrid(ctx: &VulkanContext, edits: &[SdfEdit]) -> Vec<u8> {
     let cs = device
         .create_shader_module(sdf_gbuffer_composite_spirv())
         .expect("P1b G-buffer marcher compute shader module");
+    // Render P4b: the coarse-cull / tile pre-trace compute module.
+    let coarse_cs = device
+        .create_shader_module(sdf_tile_cull_spirv())
+        .expect("P4b coarse-cull compute shader module");
 
     // The depth-testing graphics pipeline (rung-3 vertex layout + 64-byte VERTEX MVP
     // push + a declared depth_format).
@@ -449,8 +510,11 @@ fn run_gbuffer_hybrid(ctx: &VulkanContext, edits: &[SdfEdit]) -> Vec<u8> {
         })
         .expect("depth-testing graphics pipeline");
 
-    // --- The P1b vocabulary set: { SSBO edit-list @0, SAMPLED depth @1, STORAGE
-    // albedo @2, STORAGE normal @3, STORAGE material @4, UNIFORM camera @5 }. ---
+    // --- The P1b vocabulary set, EXTENDED for P4b: { SSBO edit-list @0, SAMPLED depth
+    // @1, STORAGE albedo @2, STORAGE normal @3, STORAGE material @4, UNIFORM camera @5,
+    // STORAGE tile-bounds @6 }. ONE set-0 layout shared by BOTH the coarse pass (reads
+    // 0/1/5, writes 6) and the fine marcher (reads 0/1/5/6, writes 2/3/4) — each shader
+    // uses a subset (valid). ---
     let layout_entries = [
         BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::SampledImage, stage: ShaderStage::COMPUTE },
@@ -458,23 +522,35 @@ fn run_gbuffer_hybrid(ctx: &VulkanContext, edits: &[SdfEdit]) -> Vec<u8> {
         BindGroupLayoutEntry { binding: 3, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 4, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 5, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 6, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
     ];
     let bind_layout = device
         .create_bind_group_layout(&BindGroupLayoutDesc { entries: &layout_entries })
-        .expect("P1b vocabulary bind-group layout");
+        .expect("P4b vocabulary bind-group layout");
     let compute = device
         .create_compute_pipeline(&ComputePipelineDesc {
             module: &cs,
             entry: c"main",
             // The dedicated vocabulary layout declares the shared compute push range; the
-            // marcher takes NO push (the camera is the UBO @ binding 5), so nothing is
-            // pushed against it. `COMPOSITE_PUSH_CONSTANT_BYTES` keeps the create-time
-            // "non-empty multiple of 4 within the shared range" contract.
+            // P4b marcher pushes a 4-byte `coarse_enabled` gate against THIS pipeline's
+            // own layout (via `push_compute_constants`). `COMPOSITE_PUSH_CONSTANT_BYTES`
+            // keeps the create-time "non-empty multiple of 4 within the shared range"
+            // contract (the 4-byte push fits inside the declared 80-byte range).
             push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
             bind_group_layout: Some(&bind_layout),
         })
         .expect("P1b G-buffer marcher compute pipeline");
-    // The vocabulary bind group, written ONCE at create (NO per-frame update).
+    // Render P4b: the coarse-cull pipeline, against the SAME vocabulary layout.
+    let coarse_compute = device
+        .create_compute_pipeline(&ComputePipelineDesc {
+            module: &coarse_cs,
+            entry: c"main",
+            push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
+            bind_group_layout: Some(&bind_layout),
+        })
+        .expect("P4b coarse-cull compute pipeline");
+    // The vocabulary bind group, written ONCE at create (NO per-frame update). Both
+    // passes bind this same set; the coarse pass writes binding 6, the fine reads it.
     let bind_group = device
         .create_bind_group(&BindGroupDesc {
             layout: &bind_layout,
@@ -485,9 +561,10 @@ fn run_gbuffer_hybrid(ctx: &VulkanContext, edits: &[SdfEdit]) -> Vec<u8> {
                 BindGroupEntry::StorageImage { texture: &normal },
                 BindGroupEntry::StorageImage { texture: &material },
                 BindGroupEntry::UniformBuffer { buffer: &camera_uniform },
+                BindGroupEntry::StorageBuffer { buffer: &tiles_buffer },
             ],
         })
-        .expect("P1b vocabulary bind group");
+        .expect("P4b vocabulary bind group");
 
     let fence = device.create_fence(false).expect("fence");
     let mut encoder = device.create_command_encoder().expect("command encoder");
@@ -582,12 +659,39 @@ fn run_gbuffer_hybrid(ctx: &VulkanContext, edits: &[SdfEdit]) -> Vec<u8> {
         });
     }
 
+    // --- Render P4b: the COARSE-CULL pass (runs only when culling is enabled; the
+    // depth image is already SHADER_READ_ONLY from the dual-use barrier above, which it
+    // also samples). One invocation per 8×8 tile writes a `TileBound` into binding 6.
+    // The vocabulary set is bound against the coarse pipeline's OWN layout. ---
+    if coarse_enabled {
+        encoder.bind_compute_pipeline(&coarse_compute);
+        encoder.bind_descriptor_set_compute(&bind_group, &coarse_compute);
+        encoder.dispatch(coarse_group_count_x(), 1, 1);
+
+        // The inter-dispatch barrier: the coarse pass's `TileBound` WRITES (binding 6,
+        // COMPUTE_SHADER/SHADER_WRITE) must be available + visible to the fine marcher's
+        // READS (COMPUTE_SHADER/SHADER_READ) before the fine dispatch reads them.
+        let tiles_barrier = [BufferBarrier {
+            buffer: &tiles_buffer,
+            src_access: BarrierAccess::SHADER_WRITE,
+            dst_access: BarrierAccess::SHADER_READ,
+        }];
+        encoder.pipeline_barrier(&BarrierDesc {
+            src_stage: BarrierStage::COMPUTE_SHADER,
+            dst_stage: BarrierStage::COMPUTE_SHADER,
+            buffers: &tiles_barrier,
+        });
+    }
+
     // --- SDF marcher compute pass: SAMPLE the depth image, STORE the G-buffer. The
     // vocabulary set is bound against the pipeline's OWN dedicated layout via
     // `bind_descriptor_set_compute`; no `bind_storage_buffer`, so the encoder's fixed
-    // single-set rebind is skipped and no push is recorded (the camera is the UBO). ---
+    // single-set rebind is skipped. P4b pushes the 4-byte `coarse_enabled` gate against
+    // the marcher's OWN layout (via `push_compute_constants`). ---
     encoder.bind_compute_pipeline(&compute);
     encoder.bind_descriptor_set_compute(&bind_group, &compute);
+    let coarse_flag: u32 = u32::from(coarse_enabled);
+    encoder.push_compute_constants(&compute, ShaderStage::COMPUTE, 0, &coarse_flag.to_le_bytes());
     encoder.dispatch(group_count_x(), 1, 1);
 
     // --- ALBEDO: GENERAL → TRANSFER_SRC_OPTIMAL for the readback copy. ---
@@ -636,6 +740,28 @@ fn run_gbuffer_hybrid(ctx: &VulkanContext, edits: &[SdfEdit]) -> Vec<u8> {
         core::ptr::copy_nonoverlapping(dst_ptr.as_ptr(), out.as_mut_ptr(), READBACK_BYTES as usize);
     }
 
+    // Render P4b: optionally read back the per-tile cull buffer (binding 6). It is a
+    // HostVisibleCoherent buffer, so no transfer copy is required — the coarse pass's
+    // disjoint per-tile writes completed before the fence signalled above, and
+    // host-coherent memory makes them visible to this read without a flush/invalidate.
+    let tiles_out = if read_tiles {
+        let tiles_bytes = (tile_count() as usize) * TILE_BOUND_BYTES;
+        let tiles_ptr = device
+            .buffer_mapped_ptr(&tiles_buffer)
+            .expect("host-visible tiles buffer is mapped");
+        let mut tb = vec![0u8; tiles_bytes];
+        // SAFETY: `tiles_ptr` points to `tile_count() * TILE_BOUND_BYTES` mapped
+        // host-coherent bytes (the buffer was sized so above); the fence wait preceded
+        // this read, so the coarse pass's writes are complete + coherent; reading
+        // `tiles_bytes` is in-bounds; `tb` is a distinct allocation.
+        unsafe {
+            core::ptr::copy_nonoverlapping(tiles_ptr.as_ptr(), tb.as_mut_ptr(), tiles_bytes);
+        }
+        Some(tb)
+    } else {
+        None
+    };
+
     assert_validation_clean(ctx);
 
     // SAFETY: every resource was created on `device`; the last submission completed
@@ -644,9 +770,11 @@ fn run_gbuffer_hybrid(ctx: &VulkanContext, edits: &[SdfEdit]) -> Vec<u8> {
         device.destroy_command_encoder(encoder);
         device.destroy_fence(fence);
         device.destroy_bind_group(bind_group);
+        device.destroy_compute_pipeline(coarse_compute);
         device.destroy_compute_pipeline(compute);
         device.destroy_bind_group_layout(bind_layout);
         device.destroy_graphics_pipeline(gfx);
+        device.destroy_shader_module(coarse_cs);
         device.destroy_shader_module(cs);
         device.destroy_shader_module(fs);
         device.destroy_shader_module(vs);
@@ -658,11 +786,12 @@ fn run_gbuffer_hybrid(ctx: &VulkanContext, edits: &[SdfEdit]) -> Vec<u8> {
         device.destroy_texture(albedo);
         device.destroy_texture(color);
         device.destroy_texture(depth);
+        device.destroy_buffer(tiles_buffer);
         device.destroy_buffer(camera_uniform);
         device.destroy_buffer(buffer);
     }
 
-    out
+    (out, tiles_out)
 }
 
 /// The rung-9/10 "crater" CSG scene (base sphere minus a smaller sphere).
@@ -735,7 +864,10 @@ fn p1b_gbuffer_hybrid_matches_golden() {
         let c = find_texel(&edits, |hit, covered| !hit && covered);
         let d = find_texel(&edits, |hit, covered| !hit && !covered);
 
-        let albedo = run_gbuffer_hybrid(&ctx, &edits);
+        // Cull-OFF: the fine marcher is byte-identical to the pre-P4b path (the
+        // 0%-gate anchor). The cull-ON conservative golden (±2/255 vs this) + the
+        // `Tiles`-buffer-vs-`golden_tile_bound` agreement are the TESTER's GPU gates.
+        let albedo = run_gbuffer_hybrid(&ctx, &edits, false);
         assert_eq!(albedo.len(), READBACK_BYTES as usize);
 
         let texel = |px: u32, py: u32| -> &[u8] {
@@ -795,4 +927,399 @@ fn p1b_gbuffer_hybrid_matches_golden() {
         }
         let _ = (b, c); // B/C are exercised by the whole-image scan above.
     }
+}
+
+// ===========================================================================================
+// Render P4b — conservative coarse-cull (1/8-res tile pre-trace) GPU gates (TESTER).
+//
+// The dev + code-review are complete (verdict APPROVE → GPU tester). These tests RUN the
+// `coarse_enabled = true` path on the RTX 3060 (validation ON) and assert the cull's three
+// contracts: (i) image ±2/255 vs the un-culled marcher (a hole = a >tol texel), (ii) the GPU
+// `Tiles` buffer agrees with the host mirror `golden_tile_bound` (ORTHO → tight), (iii)
+// cull-OFF is BYTE-IDENTICAL to the pre-P4b path (the 0%-gate). Plus a negative tripwire (a
+// too-aggressive fake TileBound MUST fail the ±2/255 golden, and a MESH-covered EMPTY tile
+// MUST show MESH_COLOR — D6) and the spirv-val / committed-.spv-freshness audit.
+// ===========================================================================================
+
+/// Splits an R8G8B8A8 readback into `[r, g, b]` for the texel at `(px, py)` (the low 3 bytes).
+fn albedo_rgb(albedo: &[u8], px: u32, py: u32) -> [i32; 3] {
+    let base = ((py * SDF_IMG_W + px) as usize) * 4;
+    unpack_texel_rgb(&albedo[base..base + 4])
+}
+
+/// Parses the `tiles_buffer` readback (`tile_count() * 16` bytes, std430 scalar) into the
+/// per-tile [`TileBound`]s, in coarse-dispatch order (`ty * tiles_w + tx`). near_t f32@0,
+/// far_t f32@4, flags u32@8, _pad u32@12 — the layout the host const-asserts.
+fn parse_tile_bounds(bytes: &[u8]) -> Vec<TileBound> {
+    let n = tile_count() as usize;
+    assert_eq!(bytes.len(), n * TILE_BOUND_BYTES, "tiles readback size mismatch");
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let o = i * TILE_BOUND_BYTES;
+        let f = |k: usize| f32::from_le_bytes(bytes[o + k..o + k + 4].try_into().unwrap());
+        let u = |k: usize| u32::from_le_bytes(bytes[o + k..o + k + 4].try_into().unwrap());
+        out.push(TileBound { near_t: f(0), far_t: f(4), flags: u(8), _pad: u(12) });
+    }
+    out
+}
+
+/// The 8×8 block of per-pixel mesh depths covering tile `(tx, ty)` — the SAME
+/// [`expected_mesh_depth`] values the GPU rasterizes — fed to [`golden_tile_bound`] so the
+/// host mirror sees the exact depth field the coarse shader sampled (D5: out-of-image texels
+/// stay the clear value, which `golden_tile_bound` decodes to `T_MAX`).
+fn tile_depths(tx: u32, ty: u32) -> Vec<f32> {
+    let mut depths = Vec::with_capacity((TILE_SIZE * TILE_SIZE) as usize);
+    for ly in 0..TILE_SIZE {
+        for lx in 0..TILE_SIZE {
+            let px = tx * TILE_SIZE + lx;
+            let py = ty * TILE_SIZE + ly;
+            // Out-of-image fine pixels decode to the clear (no-mesh) depth — the partial-edge
+            // contract the shader's out-of-range `.Load` mirrors (D5).
+            let d = if px < SDF_IMG_W && py < SDF_IMG_H {
+                expected_mesh_depth(px, py)
+            } else {
+                MESH_DEPTH_CLEAR
+            };
+            depths.push(d);
+        }
+    }
+    depths
+}
+
+/// Boots a validation context, prints the device + caps, or returns `None` (SKIP). Shared by
+/// every P4b GPU gate so each prints the RTX-3060 device name and asserts the G-buffer caps.
+fn boot_render_or_skip(test: &str) -> Option<VulkanContext> {
+    let ctx = boot_or_skip(test)?;
+    println!("[{test}] Vulkan device (validation on): {}", ctx.device_name());
+    assert!(ctx.validation_enabled(), "validation must be active");
+    assert!(
+        ctx.device_caps().gbuffer_storage_format_ok,
+        "a booted context must support STORAGE_IMAGE on the G-buffer format"
+    );
+    Some(ctx)
+}
+
+/// The three ORTHO fixtures, reused by every gate.
+fn p4b_scenes() -> [(&'static str, Vec<SdfEdit>); 3] {
+    [("crater_csg", crater()), ("box_csg", box_csg()), ("smooth_union", smooth_union())]
+}
+
+/// **P4b GATE 1 — conservative golden (the headline).** For each scene, run cull-OFF
+/// (baseline) and cull-ON; EVERY cull-ON albedo texel must be within ±2/255 (`CHANNEL_TOL`)
+/// of the cull-OFF texel. A texel exceeding tol = a CULL HOLE (the coarse pass skipped a
+/// surface the un-culled marcher hit) → FAIL with `(px,py)` + got + want + delta. The
+/// max per-channel delta per scene is reported (the cull's fp drift budget).
+#[test]
+fn p4b_cull_on_conservative_within_tol_of_cull_off() {
+    let Some(ctx) = boot_render_or_skip("p4b_cull_on_conservative_within_tol_of_cull_off") else {
+        return;
+    };
+
+    for (name, edits) in p4b_scenes() {
+        let off = run_gbuffer_hybrid(&ctx, &edits, false);
+        let on = run_gbuffer_hybrid(&ctx, &edits, true);
+        assert_eq!(off.len(), READBACK_BYTES as usize, "[{name}] cull-OFF readback size");
+        assert_eq!(on.len(), READBACK_BYTES as usize, "[{name}] cull-ON readback size");
+
+        // Prove the device actually executed: the cull-OFF baseline must contain BOTH a
+        // mesh/SDF lit texel AND a background texel (not a silent all-zero buffer).
+        let nonzero = off.chunks_exact(4).filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+        assert!(
+            nonzero > 0,
+            "[{name}] cull-OFF albedo is all-zero — the device did not render (silent skip?)"
+        );
+
+        let mut max_delta = 0i32;
+        let mut worst = (0u32, 0u32, [0i32; 3], [0i32; 3]);
+        for py in 0..SDF_IMG_H {
+            for px in 0..SDF_IMG_W {
+                let g_on = albedo_rgb(&on, px, py);
+                let g_off = albedo_rgb(&off, px, py);
+                for ch in 0..3 {
+                    let dd = (g_on[ch] - g_off[ch]).abs();
+                    if dd > max_delta {
+                        max_delta = dd;
+                        worst = (px, py, g_on, g_off);
+                    }
+                }
+                assert!(
+                    (0..3).all(|ch| (g_on[ch] - g_off[ch]).abs() <= CHANNEL_TOL),
+                    "[{name}] CULL HOLE at ({px},{py}): cull-ON {g_on:?} vs cull-OFF {g_off:?} \
+                     exceeds ±{CHANNEL_TOL}/255 (delta {:?})",
+                    [
+                        (g_on[0] - g_off[0]).abs(),
+                        (g_on[1] - g_off[1]).abs(),
+                        (g_on[2] - g_off[2]).abs()
+                    ]
+                );
+            }
+        }
+        println!(
+            "[{name}] GATE1 cull-ON vs cull-OFF: max per-channel delta = {max_delta}/255 \
+             (tol {CHANNEL_TOL}); worst texel ({},{}) on={:?} off={:?}; {nonzero} non-bg texels",
+            worst.0, worst.1, worst.2, worst.3
+        );
+    }
+}
+
+/// **P4b GATE 2 — Tiles-buffer agreement.** Read back the `tiles_buffer` after a cull-ON run
+/// and diff every tile vs the host mirror [`golden_tile_bound`] (fed the SAME per-tile mesh
+/// depths the GPU rasterizes). These fixtures are ORTHO (no tan/acos transcendental in the
+/// cone math → no fp divergence), so near_t / far_t must agree TIGHTLY and the EMPTY flag
+/// EXACTLY. A real per-tile divergence is surfaced (the worst tile + both bounds) — not
+/// papered over.
+#[test]
+fn p4b_tiles_buffer_agrees_with_host_golden() {
+    let Some(ctx) = boot_render_or_skip("p4b_tiles_buffer_agrees_with_host_golden") else {
+        return;
+    };
+    let (tw, _th) = tile_extent();
+
+    // ORTHO has no transcendental in the cone trace; the host + GPU run the SAME op
+    // sequence (D1/D2). A handful of ULPs can still appear from the GPU's `mad`-contraction
+    // vs the host's separate mul/add in `field_distance`, so allow a tiny absolute epsilon
+    // (≈ a few ULP of a t ~ O(1) value); flags must be EXACT (a flag flip = a wrong-EMPTY
+    // hole, which GATE 1 would also catch as a pixel hole).
+    const T_EPS: f32 = 1.0e-4;
+
+    for (name, edits) in p4b_scenes() {
+        let (_albedo, tiles) = run_gbuffer_hybrid_ex(&ctx, &edits, true, true);
+        let tiles = tiles.expect("read_tiles = true returns the tiles readback");
+        let gpu = parse_tile_bounds(&tiles);
+        assert_eq!(gpu.len(), tile_count() as usize, "[{name}] tile count");
+
+        let mut empties = 0usize;
+        let mut max_near = 0f32;
+        let mut max_far = 0f32;
+        let mut worst_tile = (0u32, 0u32);
+        for (i, g) in gpu.iter().enumerate() {
+            let tx = (i as u32) % tw;
+            let ty = (i as u32) / tw;
+            let host = golden_tile_bound(
+                &edits,
+                &tile_depths(tx, ty),
+                tx,
+                ty,
+                SDF_IMG_W,
+                SDF_IMG_H,
+                CompositeCamera::Ortho,
+            );
+            // Flags EXACT — a wrong EMPTY is a hole.
+            assert_eq!(
+                g.flags, host.flags,
+                "[{name}] tile ({tx},{ty}) flags GPU={} host={} (EMPTY={TILE_FLAG_EMPTY})",
+                g.flags, host.flags
+            );
+            let dn = (g.near_t - host.near_t).abs();
+            let df = (g.far_t - host.far_t).abs();
+            if dn > max_near {
+                max_near = dn;
+                worst_tile = (tx, ty);
+            }
+            if df > max_far {
+                max_far = df;
+            }
+            assert!(
+                dn <= T_EPS,
+                "[{name}] tile ({tx},{ty}) near_t diverged: GPU={} host={} |d|={dn} > {T_EPS}",
+                g.near_t, host.near_t
+            );
+            assert!(
+                df <= T_EPS,
+                "[{name}] tile ({tx},{ty}) far_t diverged: GPU={} host={} |d|={df} > {T_EPS}",
+                g.far_t, host.far_t
+            );
+            if g.flags & TILE_FLAG_EMPTY != 0 {
+                empties += 1;
+            }
+        }
+        // Prove the coarse pass actually ran a non-trivial trace: at least one tile must be
+        // non-EMPTY (has the surface) AND at least one EMPTY (sparse scene) — a uniform
+        // buffer would mean the coarse dispatch silently no-op'd.
+        let non_empty = gpu.len() - empties;
+        assert!(non_empty > 0, "[{name}] every tile EMPTY — coarse pass found no surface");
+        assert!(empties > 0, "[{name}] no EMPTY tile — coarse pass culled nothing (suspicious)");
+        println!(
+            "[{name}] GATE2 Tiles agree: {}/{} tiles, {empties} EMPTY / {non_empty} surface; \
+             max |Δnear_t|={max_near} max |Δfar_t|={max_far} (eps {T_EPS}); worst near tile {:?}",
+            gpu.len(),
+            tile_count(),
+            worst_tile
+        );
+    }
+}
+
+/// **P4b GATE 3a — the conservative golden tripwire MUST trip.** Constructs a deliberately
+/// TOO-AGGRESSIVE cull (a fake [`TileBound`] with `near_t` pushed past the true first hit)
+/// and asserts the host culled marcher [`golden_composite_pixel_culled`] then DIFFERS from
+/// the un-culled golden by more than `CHANNEL_TOL` at a known SDF-hit pixel. This proves
+/// GATE 1's ±2/255 comparison can actually CATCH a hole (a tripwire that never trips is no
+/// gate). Host-only (no GPU) — it exercises the contract the GPU gate relies on.
+#[test]
+fn p4b_too_aggressive_near_t_seed_trips_the_conservative_golden() {
+    let edits = crater();
+    // Find a pixel the SDF hits AND is NOT mesh-covered: the un-culled golden shows the lit
+    // SDF surface there, so skipping past the hit reveals BACKGROUND (a visible hole). A
+    // mesh-covered hit pixel would mask the hole behind MESH_COLOR (the mesh occludes the
+    // SDF either way), so the tripwire must use an SDF-only pixel.
+    let (px, py) = find_texel(&edits, |hit, covered| hit && !covered)
+        .expect("crater has an SDF-hit pixel outside the mesh quad");
+    let md = expected_mesh_depth(px, py);
+    assert_eq!(md, MESH_DEPTH_CLEAR, "the chosen pixel must be mesh-uncovered (no occlusion)");
+
+    let want = golden_composite_pixel_ex(&edits, md, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
+
+    // A too-aggressive bound: near_t = 5.0 seeded WAY past the true first hit (the crater
+    // sphere front is at t ≈ CAM_Z − R = 1.5). far_t large so the seeded march has room to
+    // (wrongly) walk empty space to T_MAX → background instead of the lit SDF. flags = 0
+    // (non-EMPTY, so the marcher seeds t = near_t rather than fast-pathing).
+    let bad = TileBound { near_t: 5.0, far_t: SDF_TRACE_T_MAX, flags: 0, _pad: 0 };
+    let got = golden_composite_pixel_culled(
+        &edits,
+        md,
+        px,
+        py,
+        SDF_IMG_W,
+        SDF_IMG_H,
+        CompositeCamera::Ortho,
+        true,
+        bad,
+    );
+
+    let w = unpack_packed_rgb(want);
+    let g = unpack_packed_rgb(got);
+    let delta: [i32; 3] = [(g[0] - w[0]).abs(), (g[1] - w[1]).abs(), (g[2] - w[2]).abs()];
+    assert!(
+        delta.iter().any(|&d| d > CHANNEL_TOL),
+        "TRIPWIRE FAILED: a too-aggressive near_t=5.0 seed at SDF-hit pixel ({px},{py}) did NOT \
+         change the color beyond ±{CHANNEL_TOL}/255 (got {g:?} want {w:?}) — the conservative \
+         golden cannot detect a hole, so GATE 1 is blind"
+    );
+    println!(
+        "[crater_csg] GATE3a tripwire OK: too-aggressive near_t=5.0 at hit pixel ({px},{py}) \
+         shifts color by {delta:?}/255 (> tol {CHANNEL_TOL}) → a hole IS detectable"
+    );
+}
+
+/// **P4b GATE 3b — D6: a MESH-covered EMPTY tile shows MESH_COLOR, not background.** The
+/// EMPTY fast-path must run the mesh/background composite (D6) — an EMPTY tile can still be
+/// MESH-occluded. Asserts the host culled marcher returns MESH_COLOR for a MESH-covered
+/// pixel under an EMPTY tile (and background for an uncovered one), proving the EMPTY arm is
+/// NOT a blind background fill (which would erase the mesh → a golden regression). The GPU
+/// half is covered by GATE 1 (an EMPTY mesh tile that went background would exceed ±2/255).
+#[test]
+fn p4b_empty_tile_composites_mesh_not_background_d6() {
+    let edits = crater();
+    let empty = TileBound { near_t: 0.0, far_t: SDF_TRACE_T_MAX, flags: TILE_FLAG_EMPTY, _pad: 0 };
+
+    // A MESH-covered pixel under an EMPTY tile → MESH_COLOR (the mesh, not erased).
+    let (cx, cy) =
+        find_texel(&edits, |_hit, covered| covered).expect("the quad covers part of the view");
+    let covered_md = expected_mesh_depth(cx, cy);
+    assert!(covered_md < MESH_DEPTH_CLEAR, "the chosen pixel must be mesh-covered");
+    let got_mesh = golden_composite_pixel_culled(
+        &edits, covered_md, cx, cy, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, true, empty,
+    );
+    assert_eq!(
+        got_mesh,
+        pack_rgba(MESH_COLOR),
+        "[crater_csg] GATE3b D6: a MESH-covered EMPTY tile pixel ({cx},{cy}) must show \
+         MESH_COLOR, got {:?} (the EMPTY fast-path blind-filled background → mesh erased)",
+        unpack_packed_rgb(got_mesh)
+    );
+
+    // An UNCOVERED pixel under an EMPTY tile → background (not mesh) — the other D6 arm.
+    let (ux, uy) = find_texel(&edits, |hit, covered| !hit && !covered)
+        .expect("crater has an uncovered, non-hit pixel");
+    let uncovered_md = expected_mesh_depth(ux, uy);
+    assert_eq!(uncovered_md, MESH_DEPTH_CLEAR, "the chosen pixel must be uncovered");
+    let got_bg = golden_composite_pixel_culled(
+        &edits, uncovered_md, ux, uy, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, true, empty,
+    );
+    assert_ne!(
+        got_bg,
+        pack_rgba(MESH_COLOR),
+        "[crater_csg] GATE3b D6: an UNCOVERED EMPTY tile pixel ({ux},{uy}) must NOT be MESH_COLOR"
+    );
+    println!(
+        "[crater_csg] GATE3b D6 OK: EMPTY-covered ({cx},{cy})=MESH_COLOR, \
+         EMPTY-uncovered ({ux},{uy})=background"
+    );
+}
+
+/// **P4b GATE 4 — cull-OFF byte-identical (the 0%-gate).** `run_gbuffer_hybrid(false)` (the
+/// fine marcher with `coarse_enabled = 0`) must produce the EXACT bytes the pre-P4b path
+/// did, i.e. the host golden `golden_composite_pixel_ex` within the rung-10 ±2/255 (the
+/// pre-P4b contract) — AND, the stronger P4b claim, RUN-TO-RUN byte-stable. This pins the
+/// no-coarse path so a P4b change that perturbs cull-OFF is caught here, not only by the
+/// existing `p1b_gbuffer_hybrid_matches_golden`. Each scene's two cull-OFF runs are compared
+/// byte-for-byte (the GPU is deterministic for the same recorded stream).
+#[test]
+fn p4b_cull_off_is_byte_identical_to_pre_p4b_path() {
+    let Some(ctx) = boot_render_or_skip("p4b_cull_off_is_byte_identical_to_pre_p4b_path") else {
+        return;
+    };
+
+    for (name, edits) in p4b_scenes() {
+        // Two independent cull-OFF runs → byte-for-byte identical (the marcher is
+        // deterministic; the coarse pass is not even dispatched).
+        let a = run_gbuffer_hybrid(&ctx, &edits, false);
+        let b = run_gbuffer_hybrid(&ctx, &edits, false);
+        assert_eq!(a, b, "[{name}] two cull-OFF runs diverged — the no-coarse path is non-deterministic");
+
+        // And each cull-OFF texel matches the host golden within the pre-P4b ±2/255 (the
+        // 0%-gate anchor: cull-OFF == today's marcher). This re-pins the contract
+        // `p1b_gbuffer_hybrid_matches_golden` asserts, scoped to the coarse_enabled = 0 push.
+        let mut max_delta = 0i32;
+        for py in 0..SDF_IMG_H {
+            for px in 0..SDF_IMG_W {
+                let got = albedo_rgb(&a, px, py);
+                let md = expected_mesh_depth(px, py);
+                let want = golden_composite_pixel_ex(
+                    &edits, md, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho,
+                );
+                let w = unpack_packed_rgb(want);
+                for ch in 0..3 {
+                    let dd = (got[ch] - w[ch]).abs();
+                    if dd > max_delta {
+                        max_delta = dd;
+                    }
+                    assert!(
+                        dd <= CHANNEL_TOL,
+                        "[{name}] cull-OFF texel ({px},{py}) ch{ch} got {got:?} want {w:?} \
+                         exceeds the 0%-gate ±{CHANNEL_TOL}/255"
+                    );
+                }
+            }
+        }
+        println!("[{name}] GATE4 cull-OFF byte-stable + matches host golden (max delta {max_delta}/255)");
+    }
+}
+
+/// **P4b GATE 5 — sync-validation under cull-ON.** A cull-ON run that returns proves
+/// `assert_validation_clean` passed (it is asserted inside `run_gbuffer_hybrid_ex` before
+/// return): the coarse-write → fine-read buffer barrier (Tiles SHADER_WRITE → SHADER_READ)
+/// raised no WAR/RAW hazard and the coarse dispatch + the inter-dispatch barrier are
+/// validation-clean. (The committed-.spv freshness + spirv-val audit is a separate
+/// host-side script run by the tester — see the report; the validator is not invoked from
+/// the Rust test to avoid a hard SDK dependency at `cargo test` time.)
+#[test]
+fn p4b_cull_on_is_validation_clean() {
+    let Some(ctx) = boot_render_or_skip("p4b_cull_on_is_validation_clean") else {
+        return;
+    };
+    // crater is the densest fixture (a CSG carve), so it exercises both the coarse trace and
+    // the fine seeded march hardest. A clean return = validation-clean (asserted inside).
+    let (albedo, tiles) = run_gbuffer_hybrid_ex(&ctx, &crater(), true, true);
+    assert_eq!(albedo.len(), READBACK_BYTES as usize);
+    let tiles = tiles.expect("read_tiles");
+    let bounds = parse_tile_bounds(&tiles);
+    let surface = bounds.iter().filter(|b| b.flags & TILE_FLAG_EMPTY == 0).count();
+    assert!(surface > 0, "the coarse pass must have marked at least one surface tile");
+    println!(
+        "[crater_csg] GATE5 cull-ON validation-clean: {} tiles ({} surface) + the coarse→fine \
+         buffer barrier raised no hazard",
+        bounds.len(),
+        surface
+    );
 }

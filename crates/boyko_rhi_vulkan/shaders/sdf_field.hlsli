@@ -161,3 +161,36 @@ float3 sdf_normal(float3 p) {
 // calls. Today a plain alias of the analytic `sdf`; when a backend swap lands
 // (P9/P10/P12) ONLY this body changes — consumers stay byte-untouched.
 float field_distance(float3 p) { return sdf(p); }
+
+// --- P4b: the conservative-lower-bound invariant + the smin Lipschitz constant -
+//
+// # FIELD LOWER-BOUND INVARIANT (D7; the sphere-tracing precondition — INVIOLABLE)
+//
+// Every op composing `field_distance` MUST return a value that is <= the true
+// Euclidean distance from `p` to the field's surface (the Hart sphere-tracing
+// precondition). A LOWER bound is safe: a sphere-trace / cone-trace step of that
+// length can never overshoot the surface, so the cull (P4b) never carves a hole
+// and over-relaxation (B1) / cone shadows (A1) / AO (A2) stay sound. An op that
+// OVER-estimates the distance (steps too far) VOIDS P4/B1/A1/A2 — it would skip a
+// surface contact. Audit of the current ops:
+//   * sd_sphere / sd_box      — EXACT Euclidean distance (the bound is tight).
+//   * min / max (hard CSG)    — EXACT for the boolean combination.
+//   * smin / smax (k > 0)     — UNDER-report inside the blend band (the IQ poly
+//                               carves the join inward), so the lower bound HOLDS.
+// Any FUTURE op added here MUST preserve this invariant; the host property test
+// `field_lipschitz_bound_holds` (compute.rs) is the numeric tripwire.
+//
+// # FIELD_LIPSCHITZ_L — the cone step's distance divisor (D7)
+//
+// `FIELD_LIPSCHITZ_L` is the k-INDEPENDENT worst-case spatial gradient magnitude
+// of `field_distance`. The analytic primitives are unit-gradient (|grad| == 1);
+// the IQ polynomial smin's steepest blend mixes two unit-gradient fields meeting
+// at 90 degrees, whose combined gradient peaks at sqrt(2) (k sets the band WIDTH,
+// not the peak slope). A cone-trace consumer divides the reported distance by L so
+// the advance respects the TRUE (possibly steeper-than-1) clearance — `d / L` is a
+// conservative lower bound on the Euclidean clearance even where smin is super-
+// Lipschitz. Mirrored host-side as `FIELD_LIPSCHITZ_L` (compute.rs). OWNER CALL:
+// sqrt(2) is the safe default; a hard-CSG-only (k == 0) scene could set L = 1 for
+// tighter steps, but any future smooth edit re-introduces the super-Lipschitz peak
+// (the host property test then fails loudly).
+static const float FIELD_LIPSCHITZ_L = 1.41421356; // sqrt(2)

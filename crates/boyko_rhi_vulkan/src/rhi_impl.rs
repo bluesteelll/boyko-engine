@@ -2640,6 +2640,49 @@ impl RhiCommandEncoder<Vulkan> for VulkanCommandEncoder {
         }
     }
 
+    fn push_compute_constants(
+        &mut self,
+        pipeline: &ComputePipeline,
+        stage: ShaderStage,
+        offset: u32,
+        bytes: &[u8],
+    ) {
+        // Render P4b: the COMPUTE counterpart of `push_graphics_constants`. Pushes
+        // against the passed pipeline's OWN layout — for a vocabulary pipeline
+        // (`ComputePipelineDesc::bind_group_layout == Some`) that is the DEDICATED
+        // layout its bind group was bound against (`bind_descriptor_set_compute`),
+        // which declares a `COMPUTE_PUSH_CONSTANT_RANGE_BYTES` COMPUTE range at offset 0
+        // (see `create_compute_pipeline`). The fine marcher pushes a 4-byte
+        // `coarse_enabled` gate here.
+        let stage_flags: VkFlags = stage.bits();
+        debug_assert!(
+            stage_flags == crate::ffi::VK_SHADER_STAGE_COMPUTE_BIT,
+            "invariant: compute push stage"
+        );
+        debug_assert!(
+            offset as u64 + bytes.len() as u64 <= COMPUTE_PUSH_CONSTANT_RANGE_BYTES as u64,
+            "invariant: push range within the pipeline's COMPUTE push range"
+        );
+        // SAFETY: recording is open with `pipeline` bound (caller contract);
+        // `pipeline.layout` is that compute pipeline's own layout, which declares a
+        // `COMPUTE_PUSH_CONSTANT_RANGE_BYTES`-byte COMPUTE push range at offset 0
+        // (created in `create_compute_pipeline`); `offset`/`bytes.len()` are within that
+        // range (asserted above) at the COMPUTE stage; `bytes.as_ptr()` points to
+        // `bytes.len()` bytes alive for the call. `self.fns` borrows the live device
+        // fn-table.
+        let fns = unsafe { &*self.fns };
+        unsafe {
+            (fns.cmd_push_constants)(
+                self.command_buffer,
+                pipeline.layout,
+                stage_flags,
+                offset,
+                bytes.len() as u32,
+                bytes.as_ptr().cast::<c_void>(),
+            );
+        }
+    }
+
     fn draw(
         &mut self,
         vertex_count: u32,
