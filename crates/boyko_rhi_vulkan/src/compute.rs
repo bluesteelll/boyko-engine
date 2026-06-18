@@ -43,8 +43,25 @@
 
 use core::slice;
 
+// The SDF field math + std430 data model now live in the `boyko_sdf_math` leaf
+// (the W4 leaf-cut): a `no_std`, graphics-free crate that is the SINGLE source of
+// truth shared with `boyko_physics`. The items used internally by the golden /
+// encoder / layout below are imported here; the ones the rung-8/9/10/11 tests
+// import via `boyko_rhi_vulkan::compute::{..}` are RE-EXPORTED below so those
+// pre-leaf-cut paths keep compiling.
+use boyko_sdf_math::{
+    HEADER_BASE_WORDS, MAX_SDF_EDITS, SDF_EDIT_WORDS, SDF_GRAD_H, sdf_edit_list,
+    sdf_edit_list_normal, v_dot, v_len, v_normalize, v_sub,
+};
+
 use crate::ffi::VkResult;
 use crate::memory::MemoryError;
+
+/// Re-exports of the leaf items whose canonical import path the rung-8/9/10/11
+/// tests (and any external caller) use as `boyko_rhi_vulkan::compute::{..}`.
+/// Preserved verbatim across the W4 leaf-cut so those paths keep resolving:
+/// [`SdfEdit`], [`sdf_kind`], [`sdf_op`], [`SDF_IMG_W`], [`SDF_IMG_H`].
+pub use boyko_sdf_math::{SDF_IMG_H, SDF_IMG_W, SdfEdit, sdf_kind, sdf_op};
 
 /// The committed SPIR-V for step 0c (`buffer[i] = i*2 + 1`).
 ///
@@ -220,10 +237,11 @@ pub fn golden_chained(i: u32) -> u32 {
 // it still proves the sphere-trace ran a sphere, not a constant fill).
 // ---------------------------------------------------------------------------
 
-/// SDF image width (pixels) — matches the shader's `IMG_W`.
-pub const SDF_IMG_W: u32 = 64;
-/// SDF image height (pixels) — matches the shader's `IMG_H`.
-pub const SDF_IMG_H: u32 = 64;
+// `SDF_IMG_W` / `SDF_IMG_H` / `SDF_GRAD_H` and the `v_*` vector helpers now live
+// in the `boyko_sdf_math` leaf and are imported / re-exported at the top of this
+// module (the W4 leaf-cut). The camera / lighting scene constants below stay here
+// because only the rung-8/9/10 golden + marching functions (which also stay) use
+// them — they are NOT part of the shared analytic field the physics crate reuses.
 
 const SDF_CAM_Z: f32 = 2.0;
 const SDF_HALF_EXTENT: f32 = 1.0;
@@ -237,28 +255,6 @@ const SDF_BACKGROUND: [f32; 3] = [0.05, 0.05, 0.1];
 const SDF_EPS: f32 = 0.001;
 const SDF_T_MAX: f32 = 10.0;
 const SDF_MAX_IT: u32 = 128;
-const SDF_GRAD_H: f32 = 0.0005;
-
-#[inline]
-fn v_sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
-#[inline]
-fn v_len(a: [f32; 3]) -> f32 {
-    (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt()
-}
-
-#[inline]
-fn v_dot(a: [f32; 3], b: [f32; 3]) -> f32 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
-#[inline]
-fn v_normalize(a: [f32; 3]) -> [f32; 3] {
-    let len = v_len(a);
-    [a[0] / len, a[1] / len, a[2] / len]
-}
 
 /// `sdf(p) = length(p - center) - radius` — the analytic field, mirroring the
 /// shader's `sdf_sphere`. Exposed so a later CPU physics evaluator can be
@@ -389,134 +385,13 @@ pub fn sdf_pixel_hits(px: u32, py: u32) -> bool {
 // same +/-2/255 per-channel tolerance as rung 8.
 // ===========================================================================
 
-/// SDF primitive kind discriminant. Matches the shader's `KIND_*` constants.
-pub mod sdf_kind {
-    /// A sphere primitive — `params.x` is the radius.
-    pub const SPHERE: u32 = 0;
-    /// An axis-aligned box primitive — `params.xyz` are the half-extents.
-    pub const BOX: u32 = 1;
-}
-
-/// SDF boolean-op discriminant. Matches the shader's `OP_*` constants.
-pub mod sdf_op {
-    /// Union — `min(acc, d)` (or smooth-min when `smoothness > 0`).
-    pub const UNION: u32 = 0;
-    /// Subtraction — `max(acc, -d)` (or smooth-max when `smoothness > 0`).
-    pub const SUBTRACT: u32 = 1;
-    /// Intersection — `max(acc, d)` (or smooth-max when `smoothness > 0`).
-    pub const INTERSECT: u32 = 2;
-}
-
-/// Fixed capacity of the edit-list (the §S2 ceiling, scaled for the basic slice).
-/// Matches the shader's `MAX_SDF_EDITS`.
-pub const MAX_SDF_EDITS: usize = 16;
-
-/// One SDF edit: a primitive + a uniform transform (center) + size (params) + a
-/// boolean op + an optional smoothness factor.
-///
-/// `#[repr(C, align(16))]` so the Rust layout is byte-identical to the std430
-/// structured-buffer element `shaders/sdf_editlist.hlsl` reads (an
-/// [`abi_guard`](crate::abi_guard)-style const-assert on offsets/size/align pins
-/// the contract below). `center`/`params` are `[f32; 4]` (the std430 `float4`)
-/// rather than `[f32; 3]` so the following `float4` starts at offset 16 without
-/// std430 inserting padding the Rust side would have to mirror — the two layouts
-/// are then trivially identical.
-///
-/// Layout (mirrored in the shader):
-/// - offset  0: `center` `[f32; 4]` — xyz = center/position, w unused
-/// - offset 16: `params` `[f32; 4]` — xyz = radius / half-extents, w unused
-/// - offset 32: `kind` `u32` — [`sdf_kind`]
-/// - offset 36: `op` `u32` — [`sdf_op`]
-/// - offset 40: `smoothness` `f32` — 0 = hard op; > 0 = smooth-min/-max blend k
-/// - offset 44: `_pad` `u32` — keeps the size a 16-byte multiple
-#[repr(C, align(16))]
-#[derive(Clone, Copy, Debug)]
-pub struct SdfEdit {
-    /// xyz = primitive center/position; w unused.
-    pub center: [f32; 4],
-    /// xyz = radius (sphere) / half-extents (box); w unused.
-    pub params: [f32; 4],
-    /// Primitive kind ([`sdf_kind`]).
-    pub kind: u32,
-    /// Boolean op ([`sdf_op`]).
-    pub op: u32,
-    /// Smooth-blend radius (0 = hard op).
-    pub smoothness: f32,
-    /// Padding to a 16-byte multiple (mirrors the shader's `_pad` word).
-    pub _pad: u32,
-}
-
-impl SdfEdit {
-    /// A sphere edit at `center` with `radius`, combined by `op` with `smoothness`.
-    #[inline]
-    pub fn sphere(center: [f32; 3], radius: f32, op: u32, smoothness: f32) -> Self {
-        Self {
-            center: [center[0], center[1], center[2], 0.0],
-            params: [radius, 0.0, 0.0, 0.0],
-            kind: sdf_kind::SPHERE,
-            op,
-            smoothness,
-            _pad: 0,
-        }
-    }
-
-    /// A box edit at `center` with `half_extents`, combined by `op` with `smoothness`.
-    #[inline]
-    pub fn box_shape(center: [f32; 3], half_extents: [f32; 3], op: u32, smoothness: f32) -> Self {
-        Self {
-            center: [center[0], center[1], center[2], 0.0],
-            params: [half_extents[0], half_extents[1], half_extents[2], 0.0],
-            kind: sdf_kind::BOX,
-            op,
-            smoothness,
-            _pad: 0,
-        }
-    }
-}
-
-// ---- std430 / repr(C) layout contract (the §3.8 compile-time fingerprint) ----
-//
-// A mismatch between this Rust struct and the std430 element the shader reads is
-// silent GPU corruption that NEITHER the validation layer NOR a golden diff would
-// localize (the buffer is the right size; the bytes are read at a shifted offset).
-// These const-asserts make any drift a BUILD ERROR. They mirror the shader's
-// documented offsets exactly.
-const _: () = assert!(
-    core::mem::size_of::<SdfEdit>() == 48,
-    "SdfEdit must be 48 bytes (std430 element the shader reads)"
-);
-const _: () = assert!(
-    core::mem::align_of::<SdfEdit>() == 16,
-    "SdfEdit must be 16-byte aligned (std430 struct alignment)"
-);
-const _: () = assert!(
-    core::mem::offset_of!(SdfEdit, center) == 0,
-    "SdfEdit::center must be at offset 0"
-);
-const _: () = assert!(
-    core::mem::offset_of!(SdfEdit, params) == 16,
-    "SdfEdit::params must be at offset 16"
-);
-const _: () = assert!(
-    core::mem::offset_of!(SdfEdit, kind) == 32,
-    "SdfEdit::kind must be at offset 32"
-);
-const _: () = assert!(
-    core::mem::offset_of!(SdfEdit, op) == 36,
-    "SdfEdit::op must be at offset 36"
-);
-const _: () = assert!(
-    core::mem::offset_of!(SdfEdit, smoothness) == 40,
-    "SdfEdit::smoothness must be at offset 40"
-);
-
-/// `size_of::<SdfEdit>() / 4` — the number of `u32` words one packed edit
-/// occupies. Matches the shader's `SDF_EDIT_WORDS`.
-pub const SDF_EDIT_WORDS: usize = core::mem::size_of::<SdfEdit>() / 4;
-
-/// Word offset of the edit array (word 0 is `edit_count`, padded to 16 bytes so
-/// the array starts 16-byte aligned). Matches the shader's `HEADER_BASE`.
-pub const HEADER_BASE_WORDS: usize = 4;
+// The SDF data model — `sdf_kind` / `sdf_op` / `MAX_SDF_EDITS` / `SdfEdit` (+ its
+// ctors + the §3.8 std430 fingerprint const-asserts + the `SDF_EDIT_WORDS == 12`
+// pin) / `SDF_EDIT_WORDS` / `HEADER_BASE_WORDS` — now lives in the
+// `boyko_sdf_math` leaf and is imported / re-exported at the top of this module
+// (the W4 leaf-cut). The buffer-LAYOUT consts below (`PIXEL_BASE_WORDS` etc.)
+// stay here: they are GPU-buffer-specific and combine the leaf's layout consts
+// with this crate's image dimensions.
 
 /// Word offset of the packed-RGBA pixel region (after the count + the full
 /// edit array). Matches the shader's `PIXEL_BASE`.
@@ -569,125 +444,14 @@ pub fn encode_edit_list(buf: &mut [u32], edits: &[SdfEdit]) {
     }
 }
 
-// ---- The edit-list field math (single source of truth, mirrors the shader) ----
-
-const SDF_FAR: f32 = 1.0e9;
-
-#[inline]
-fn v_abs(a: [f32; 3]) -> [f32; 3] {
-    [a[0].abs(), a[1].abs(), a[2].abs()]
-}
-
-#[inline]
-fn v_max0(a: [f32; 3]) -> [f32; 3] {
-    [a[0].max(0.0), a[1].max(0.0), a[2].max(0.0)]
-}
-
-/// `length(p - c) - r` — the analytic sphere distance (mirrors `sd_sphere`).
-#[inline]
-fn sd_sphere(p: [f32; 3], c: [f32; 3], r: f32) -> f32 {
-    v_len(v_sub(p, c)) - r
-}
-
-/// The exact IQ box distance for an AABB centered at `c` with half-extents `h`
-/// (mirrors the shader's `sd_box`).
-#[inline]
-fn sd_box(p: [f32; 3], c: [f32; 3], h: [f32; 3]) -> f32 {
-    let q = v_sub(v_abs(v_sub(p, c)), h);
-    let outside = v_len(v_max0(q));
-    let inside = q[0].max(q[1].max(q[2])).min(0.0);
-    outside + inside
-}
-
-/// One edit's primitive distance at `p` (mirrors the shader's `edit_distance`).
-#[inline]
-fn edit_distance(e: &SdfEdit, p: [f32; 3]) -> f32 {
-    let center = [e.center[0], e.center[1], e.center[2]];
-    if e.kind == sdf_kind::BOX {
-        sd_box(p, center, [e.params[0], e.params[1], e.params[2]])
-    } else {
-        sd_sphere(p, center, e.params[0])
-    }
-}
-
-/// Polynomial smooth-min (IQ `smin`), mirroring the shader's `smin`.
-#[inline]
-fn smin(a: f32, b: f32, k: f32) -> f32 {
-    let hh = (0.5 + 0.5 * (b - a) / k).clamp(0.0, 1.0);
-    // lerp(b, a, hh) = b + (a - b) * hh
-    (b + (a - b) * hh) - k * hh * (1.0 - hh)
-}
-
-/// Polynomial smooth-max (the De Morgan dual of [`smin`]), mirroring `smax`.
-#[inline]
-fn smax(a: f32, b: f32, k: f32) -> f32 {
-    -smin(-a, -b, k)
-}
-
-/// Combines the accumulated distance `acc` with one edit's distance `d` under
-/// `op` (hard when `k <= 0`, smooth when `k > 0`), mirroring the shader's
-/// `combine`.
-#[inline]
-fn combine(acc: f32, d: f32, op: u32, k: f32) -> f32 {
-    match op {
-        x if x == sdf_op::SUBTRACT => {
-            if k > 0.0 {
-                smax(acc, -d, k)
-            } else {
-                acc.max(-d)
-            }
-        }
-        x if x == sdf_op::INTERSECT => {
-            if k > 0.0 {
-                smax(acc, d, k)
-            } else {
-                acc.max(d)
-            }
-        }
-        // UNION (and any unknown discriminant falls back to union, matching the
-        // shader's `else` branch).
-        _ => {
-            if k > 0.0 {
-                smin(acc, d, k)
-            } else {
-                acc.min(d)
-            }
-        }
-    }
-}
-
-/// Evaluates the ordered edit-list field at `p` (the CSG result), folding the
-/// edits in order exactly as the shader's `sdf` does. The first edit seeds the
-/// accumulator hard; each later edit combines under its own op.
-///
-/// This is the single source of truth a future CPU physics evaluator reuses;
-/// `edits.len()` is clamped to [`MAX_SDF_EDITS`] to match the shader's `min`.
-pub fn sdf_edit_list(edits: &[SdfEdit], p: [f32; 3]) -> f32 {
-    let n = edits.len().min(MAX_SDF_EDITS);
-    let mut acc = SDF_FAR;
-    for (i, e) in edits.iter().take(n).enumerate() {
-        let d = edit_distance(e, p);
-        if i == 0 {
-            acc = d;
-        } else {
-            acc = combine(acc, d, e.op, e.smoothness);
-        }
-    }
-    acc
-}
-
-/// Surface normal via central differences of [`sdf_edit_list`] (the gradient of
-/// the WHOLE edit-list field), mirroring the shader's `sdf_normal`.
-#[inline]
-fn sdf_edit_list_normal(edits: &[SdfEdit], p: [f32; 3]) -> [f32; 3] {
-    let h = SDF_GRAD_H;
-    let n = [
-        sdf_edit_list(edits, [p[0] + h, p[1], p[2]]) - sdf_edit_list(edits, [p[0] - h, p[1], p[2]]),
-        sdf_edit_list(edits, [p[0], p[1] + h, p[2]]) - sdf_edit_list(edits, [p[0], p[1] - h, p[2]]),
-        sdf_edit_list(edits, [p[0], p[1], p[2] + h]) - sdf_edit_list(edits, [p[0], p[1], p[2] - h]),
-    ];
-    v_normalize(n)
-}
+// The edit-list field math (the single source of truth, mirroring the shader):
+// `sd_sphere`, `sd_box`, `edit_distance`, `smin`, `smax`, `combine`,
+// `sdf_edit_list`, `sdf_edit_list_normal` (+ the `v_*` helpers + `SDF_FAR`) now
+// live in the `boyko_sdf_math` leaf and are imported at the top of this module
+// (the W4 leaf-cut, a VERBATIM cut — no float-op reorder). The marching / golden
+// / camera functions below STAY here and call the leaf's `sdf_edit_list` /
+// `sdf_edit_list_normal` directly, so they remain the GPU golden the rung-9/10/11
+// tests diff against.
 
 /// Whether the orthographic ray for pixel `(px, py)` HITS the edit-list field.
 /// The rung-9 test uses this to pick discriminating texels host-side (e.g. a

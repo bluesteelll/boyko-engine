@@ -1,0 +1,26 @@
+[package]
+name = "boyko_sdf_math"
+version = "0.1.0"
+edition = "2024"
+description = "no_std leaf crate holding the analytic SDF edit-list field math + std430 data model, the single source of truth shared by the Vulkan golden mirror and the CPU physics collision queries. ZERO dependencies (only `core`)."
+
+# INVIOLABLE: this is a TRUE LEAF — ZERO third-party deps, depends on NOTHING in
+# the workspace. It holds the pure SDF field math + the `SdfEdit` std430 data
+# model so `boyko_physics` (W5) can reuse the exact same analytic field as the
+# `boyko_rhi_vulkan` GPU golden WITHOUT pulling the Vulkan backend (acyclic;
+# single source of truth; zero readback). Adding any dependency here would break
+# that leaf invariant.
+[dependencies]
+
+[features]
+# `sqrt` is the ONLY float op the field math needs that is NOT in stable `core`
+# (`abs`/`max`/`min`/`clamp` are inherent `core` methods; `sqrt` lives in `std`
+# or behind the nightly `core_intrinsics` feature). The default build therefore
+# links `std` SOLELY for `f32::sqrt` (the crate is otherwise `core`-only). The
+# opt-in `nightly` feature makes the crate strictly `#![no_std]` by using the
+# `core::intrinsics::sqrtf32` intrinsic instead — which lowers to the SAME
+# hardware `sqrtss` as `std`'s `f32::sqrt`, so the result is bit-identical in
+# either mode (the rung-8/9/10/11 GPU goldens are unaffected). No third-party dep
+# is added in either mode. See the `sqrt` shim in `lib.rs`.
+default = []
+nightly = []

@@ -12,3 +12,9 @@ description = "Raw hand-FFI Vulkan backend for boyko-engine (Slice 0 foundation:
 # it adds no third-party dependency.
 [dependencies]
 boyko_rhi = { path = "../boyko_rhi" }
+# The analytic SDF field math + std430 data model (the W4 leaf-cut). A `no_std`,
+# graphics-free leaf with ZERO third-party deps — does not breach the "no
+# ash/vulkano/windows-sys/libc" constraint above. It is the SINGLE source of truth
+# the rung-8/9/10/11 golden mirror in `compute.rs` folds and that `boyko_physics`
+# (W5) reuses for CPU SDF-collision queries WITHOUT depending on this crate.
+boyko_sdf_math = { path = "../boyko_sdf_math" }
