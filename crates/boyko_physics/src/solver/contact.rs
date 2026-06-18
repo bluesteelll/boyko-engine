@@ -11,6 +11,34 @@
 
 use crate::math::{Mat3, Vec3};
 
+/// The ONE dynamic-body predicate, shared verbatim by the O4 graph coloring and
+/// the colored solve's `*_movable` write guard.
+///
+/// A body row is DYNAMIC (movable — an impulse may displace it) iff its gathered
+/// inverse mass is non-zero; a static / kinematic body has `inv_mass == 0`.
+///
+/// # MT soundness (LOAD-BEARING — do not let this drift)
+///
+/// The parallel colored solve's cross-worker disjoint-write argument
+/// ([`solve_color_parallel`](super::colored)) requires the coloring's "is this
+/// row dynamic?" decision and the solve's "may I write this row?" guard to be the
+/// IDENTICAL predicate over the same `inv_mass` snapshot: the coloring grants a
+/// color exclusive ownership only of the rows it marks DYNAMIC, so any row the
+/// solve's guard permits writing MUST be exactly that set. If the two ever
+/// disagreed — one calling `inv_mass != 0.0`, the other a different test — a
+/// worker could write a row the coloring believed shared, a cross-worker data
+/// race the {1, N}-worker bit-identity test cannot detect (it runs the SAME
+/// predicate on both sides). Routing BOTH sites through this one function makes
+/// the drift impossible by construction.
+///
+/// [`physics_build_graph`](crate::systems::physics_build_graph) is the coloring
+/// site; the `*_movable` guard in
+/// [`solve_color`](super::colored::ColoredSoftStepSolver) is the solve site.
+#[inline]
+pub(crate) fn is_dynamic_row(inv_mass: f32) -> bool {
+    inv_mass != 0.0
+}
+
 /// Builds an orthonormal tangent basis `(t1, t2)` for the unit contact normal
 /// `n` (P2 W2 — the friction plane).
 ///

@@ -102,6 +102,28 @@ pub struct PhysicsConfig {
     /// is registered ONLY by
     /// [`add_physics_colored`](crate::plugin::add_physics_colored).
     pub colored: bool,
+    /// Opt into the O6 PARALLEL per-color solve (default `false`).
+    ///
+    /// Effective only on the colored-solve path (the
+    /// [`ColoredSoftStepSolver`](crate::solver::ColoredSoftStepSolver) driven by
+    /// the [`physics_solve_colored`](crate::systems::physics_solve_colored) stage);
+    /// it is a no-op for the shipped
+    /// [`SoftStepSolver`](crate::solver::SoftStepSolver). When `true`, each color's
+    /// manifold-groups are dispatched across the ambient
+    /// [`ThreadPool`](boyko_threadpool::ThreadPool)'s workers via `pool.scope`,
+    /// with a barrier (the scope-Drop join) between colors (the Gauss-Seidel sweep
+    /// across colors stays sequential). Within a color the groups touch
+    /// pairwise-disjoint dynamic bodies (the O4 coloring invariant), so parallel
+    /// workers never write the same body — no atomics, no locks.
+    ///
+    /// **Bit-identity is the gate:** the parallel result is BIT-FOR-BIT identical to
+    /// the single-threaded colored solve for ANY worker count (the disjoint-body
+    /// partition makes each body's accumulation independent of which worker runs
+    /// which group, and the canonical IM-2b warm store is worker-count-independent).
+    /// When `false` — or when no pool is attached to the running thread — the
+    /// colored solve runs the O5 single-threaded path, BYTE-IDENTICAL to O5 (the
+    /// O6 0%-gate). Toggling it changes performance, never the result.
+    pub parallel_solve: bool,
 }
 
 impl Default for PhysicsConfig {
@@ -128,6 +150,10 @@ impl Default for PhysicsConfig {
             // (the campaign 0%-gate); O4 only PRODUCES the partition — the solve is
             // byte-identical whether on or off.
             colored: false,
+            // Default OFF so the colored solve runs the O5 single-threaded path,
+            // BYTE-IDENTICAL to O5 (the O6 0%-gate); the parallel dispatch is a pure
+            // opt-in speed path with a bit-identical result.
+            parallel_solve: false,
         }
     }
 }

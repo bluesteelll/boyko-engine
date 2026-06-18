@@ -78,8 +78,9 @@
 //! [`ContactColumns::canonical`].
 
 use boyko_macros::Resource as ResourceDerive;
+use boyko_threadpool::try_with_active_pool;
 
-use super::contact::{BodyEffective, effective_mass, tangent_basis};
+use super::contact::{BodyEffective, effective_mass, is_dynamic_row, tangent_basis};
 use super::simd;
 // O2: the soft constants, the immovable-surface view, and the soft-coefficient
 // derivation are SHARED from the reference solver — a single source of truth so
@@ -91,8 +92,145 @@ use super::warm_start::{self, WarmStartTable};
 use super::RigidSolver;
 use crate::components::BodyType;
 use crate::manifold::{Manifold, SDF_SENTINEL};
-use crate::math::Vec3;
+use crate::math::{Mat3, Vec3};
 use crate::resources::{BodyState, ConstraintGraph, PhysicsConfig, SolverScratch};
+
+/// The min-work threshold (W1): a color whose total slot count is BELOW this is
+/// solved INLINE on the calling thread (the single-threaded [`solve_color`] over
+/// the whole color span) instead of dispatched through a [`ThreadPool`]
+/// (boyko_threadpool::ThreadPool) `scope`.
+///
+/// # Why a threshold (the zero-per-step-alloc bound)
+///
+/// Each `pool.scope` allocates (a boxed shared frame + a boxed closure per spawn).
+/// Dispatching EVERY color every pass — ~`12 × n_colors` scopes per step — turns a
+/// solver whose own scratch is zero-per-step-alloc into a per-step heap churner. A
+/// SMALL color does not amortize that dispatch: the parallel split costs more than
+/// it saves. Restricting `scope` to colors whose work exceeds this threshold bounds
+/// the residual scope allocations to the FEW large colors that actually pay for
+/// parallelism — the same per-dispatch cost class as the engine's
+/// `Query::par_iter` (one scope per genuinely-parallel unit), the justified
+/// parallelism cost rather than one-per-tiny-color.
+///
+/// # Bit-identity (LOAD-BEARING)
+///
+/// The inline path is the EXACT `solve_color` over the color's whole span — the
+/// same call the no-pool / `parallel_solve == false` fallback uses — so an
+/// inline-solved color is BIT-IDENTICAL to a parallel-solved one (within a color
+/// the manifold-groups touch disjoint dynamic bodies, so the result is independent
+/// of inline-vs-split and of worker count). The threshold therefore changes only
+/// WHERE a color is solved, never the bits.
+///
+/// The metric is the color's total slot count (the sum over its groups, i.e. the
+/// color span width). The value `256` is a starting point the tester benches; a
+/// true zero-alloc reusable-scope threadpool API is a filed follow-up.
+const MIN_PARALLEL_SLOTS_PER_COLOR: u32 = 256;
+
+/// O6 perf (work-balanced chunking): how many group-chunks to emit per ambient
+/// worker lane when a color is dispatched parallel.
+///
+/// # Why MORE chunks than lanes
+///
+/// `boyko_threadpool` is a **Chase-Lev work-STEALING** pool: it balances load
+/// automatically PROVIDED it is given more (and smaller, work-balanced) tasks than
+/// lanes — an idle lane STEALS the next chunk off a busy lane's deque. The original
+/// O6 split was `num_threads + 1` COARSE chunks balanced by GROUP COUNT, which gave
+/// each lane at most one chunk and left no slack to steal: at 2 workers the 3 chunks
+/// landed 2-on-one-lane / 1-on-the-other, so one lane ran two chunks serially while
+/// the other idled — the measured non-monotonic 2-worker dip (2w slower than 1w).
+///
+/// Emitting `num_threads * CHUNKS_PER_WORKER` chunks (capped at the color's group
+/// count — a chunk is always ≥ 1 whole manifold-group) gives every lane several
+/// steal-sized tasks so the work-stealing scheduler equalizes the lanes. The chunks
+/// are balanced by total SLOT count (work), not group count, because groups vary in
+/// width (1..=[`MAX_CONTACT_POINTS`](crate::math::MAX_CONTACT_POINTS) points), so an
+/// equal-group split is work-imbalanced.
+///
+/// # Bit-identity (LOAD-BEARING)
+///
+/// The chunk COUNT and SHAPE are free perf knobs: the {1, N}-worker bit-identity
+/// property (within a color the manifold-groups touch disjoint dynamic bodies, so
+/// the converged per-body result is independent of the partition and the visiting
+/// order) holds for ANY chunking. So tuning this const changes only WHERE work runs,
+/// never the bits. `4` is a starting point the bench sweeps (3..=8 typical).
+const CHUNKS_PER_WORKER: usize = 6;
+
+/// `Send` + `Sync`-marked raw pointers to the SoA columns + per-body buffer
+/// dispatched into the O6 per-color worker closures.
+///
+/// Raw pointers are `!Send`/`!Sync` by default; this wrapper lets a worker task
+/// capture them. The fields are **private** and reached only through the `&self`
+/// accessor methods so that a closure capturing the wrapper captures the WHOLE
+/// struct — never the inner `*mut` directly (Rust 2021+ disjoint capture would
+/// otherwise see the bare `*mut` field and reject the closure as `!Send`). This is
+/// the same idiom the engine's `par_iter` `SharedPtr`/`ChunkCaptures` use.
+#[derive(Copy, Clone)]
+struct ColorSolvePtrs {
+    cols: *mut ContactColumns,
+    bodies: *mut BodyEffective,
+    bodies_len: usize,
+    /// Base of `ContactColumns::group_start` — read as a RAW pointer (never a
+    /// `&[u32]` borrow into `cols`) so no shared reference into `cols` is ever live
+    /// while a worker holds `&mut *cols`; this keeps the parallel dispatch
+    /// Tree-Borrows-clean (the Phase 9.3c bare-pointer discipline).
+    group_start: *const u32,
+}
+
+impl ColorSolvePtrs {
+    /// Reborrow the columns mutably for `'a`.
+    ///
+    /// # Safety
+    /// The pointee must outlive `'a`, and the caller must access only elements
+    /// DISJOINT from every other concurrent reborrow (within a color the chunks
+    /// touch pairwise-disjoint impulse slots / body rows). Upheld by
+    /// [`ColoredSoftStepSolver::solve_color_parallel`].
+    #[inline]
+    unsafe fn columns<'a>(&self) -> &'a mut ContactColumns {
+        // SAFETY: forwarded to the caller; see method doc.
+        unsafe { &mut *self.cols }
+    }
+
+    /// Reborrow the per-body buffer mutably for `'a`.
+    ///
+    /// # Safety
+    /// As [`Self::columns`]: the pointee outlives `'a` and concurrent reborrows
+    /// touch disjoint rows.
+    #[inline]
+    unsafe fn bodies<'a>(&self) -> &'a mut [BodyEffective] {
+        // SAFETY: forwarded to the caller; see method doc.
+        unsafe { core::slice::from_raw_parts_mut(self.bodies, self.bodies_len) }
+    }
+
+    /// Reads `group_start[g]` via the raw pointer (no `&` borrow into `cols`).
+    ///
+    /// # Safety
+    /// `g` must be a valid index into the live `group_start` column (`g <=
+    /// n_groups`). Upheld by the dispatcher, which only reads group indices within
+    /// the color's `[g_lo, g_hi]` range.
+    #[inline]
+    unsafe fn group_start_at(&self, g: usize) -> usize {
+        // SAFETY: `g` is in range per the method contract; `group_start` is the live
+        //   base of the columns' `group_start` Vec. A plain `*const u32` read does
+        //   not form a reference into `cols`, so it never conflicts with a worker's
+        //   `&mut *cols` (the Tree-Borrows discipline).
+        unsafe { *self.group_start.add(g) as usize }
+    }
+}
+
+// SAFETY: the pointers name the `ContactColumns` / `[BodyEffective]` borrowed
+//   `&mut` by `solve_color_parallel` for the whole `pool.scope` frame, whose Drop
+//   blocks (work-stealing join) until every worker that captured the wrapper has
+//   completed — so both pointees outlive every task body. The soundness of the
+//   concurrent `&mut` reborrows rests entirely on DISJOINTNESS, stated in full in
+//   the per-spawn SAFETY block: within a color the chunks write pairwise-disjoint
+//   impulse-column slots and pairwise-disjoint DYNAMIC body rows (the O4 coloring
+//   invariant), and a SHARED static body (`inv_mass == 0`) is never written (the
+//   `*_movable` guard in `solve_color`). The wrapper has no interior mutability, so
+//   a shared `&` to it (the outer `pool.scope` closure's capture across the spawn
+//   loop) is trivially safe — hence both `Send` (cross-thread move into a task) and
+//   `Sync` (shared by the loop) hold.
+unsafe impl Send for ColorSolvePtrs {}
+unsafe impl Sync for ColorSolvePtrs {}
 
 /// The colored solver's per-contact constraint state in **Struct-of-Arrays**
 /// form, laid out so one COLOR is a contiguous span (Phase O5, Decision 7 — the
@@ -394,6 +532,17 @@ impl ColoredSoftStepSolver {
     fn build_bodies(&mut self, bodies: &[BodyState]) {
         self.bodies.clear();
         for b in bodies {
+            // The `*_movable` guard's ANGULAR no-op (`ω + inv_inertia·(r×p) == ω`
+            // for a guarded static row) keys only on `inv_mass == 0`, so it relies
+            // on a static row ALSO carrying `inv_inertia == Mat3::ZERO`. Production
+            // bodies satisfy this — `resources::local_inv_inertia` forces ZERO when
+            // `inv_mass == 0` and `refresh_inertia` skips static rows — but the
+            // guard never inspects the tensor, so assert the coupling at assembly
+            // time (debug-only; vanishes in release).
+            debug_assert!(
+                is_dynamic_row(b.inv_mass) || b.inv_inertia == Mat3::ZERO,
+                "static row (inv_mass == 0) must have inv_inertia == Mat3::ZERO for the *_movable angular no-op"
+            );
             self.bodies.push(BodyEffective {
                 inv_mass: b.inv_mass,
                 inv_inertia: b.inv_inertia,
@@ -651,6 +800,34 @@ impl ColoredSoftStepSolver {
                 if b_is_sentinel { IMMOVABLE_AT_REST } else { bodies_eff[ib] }
             };
 
+            // Whether each side is a MOVABLE (dynamic) body that the impulse may
+            // actually displace. A static / kinematic body has `inv_mass == 0` AND
+            // `inv_inertia == Mat3::ZERO` (the load-bearing producer is
+            // `resources::local_inv_inertia`, which forces ZERO whenever
+            // `inv_mass == 0`; `refresh_inertia` then leaves a static row at ZERO —
+            // see the `build_bodies` debug_assert), so BOTH halves of
+            // `apply_impulse` are a value no-op on it: the LINEAR update
+            // `v + p·inv_mass == v + p·0 == v`, and the ANGULAR update
+            // `ω + inv_inertia·(r×p) == ω + ZERO·(r×p) == ω`. This holds for every
+            // FINITE impulse `p` (incl. ±0.0); a NaN/Inf impulse would diverge from
+            // O5's unconditional apply, but the solver never produces non-finite
+            // state. So guarding the write with this flag is BIT-IDENTICAL to the
+            // unconditional O5 write — and it is LOAD-BEARING for O6: the coloring
+            // marks only DYNAMIC bodies, so two manifold-groups in one color may
+            // SHARE a static body (a ground floor as `body_b`). Skipping the no-op
+            // write to that shared static row means parallel workers never write the
+            // same `BodyEffective`, so the only bodies a worker writes are its
+            // groups' DISJOINT dynamic rows (the O6 data-race freedom argument; see
+            // `solve_color_parallel`).
+            //
+            // MT soundness: `is_dynamic_row` is the SAME predicate the O4 coloring
+            // uses (`physics_build_graph`) — they MUST agree over the same `inv_mass`
+            // snapshot, else the guard could permit writing a row the coloring
+            // believed shared (a cross-worker race the {1,N} bit test cannot detect).
+            // Both sites route through `is_dynamic_row` so they cannot drift.
+            let ia_movable = is_dynamic_row(bodies_eff[ia].inv_mass);
+            let ib_movable = !b_is_sentinel && is_dynamic_row(bodies_eff[ib].inv_mass);
+
             // ── Normal solve ───────────────────────────────────────────────
             let m_eff = {
                 let ba = bodies_eff[ia];
@@ -678,8 +855,10 @@ impl ColoredSoftStepSolver {
             cols.normal_impulse[i] = new_lambda;
             {
                 let impulse = normal * applied_n;
-                bodies_eff[ia].apply_impulse(ra, impulse * -1.0);
-                if !b_is_sentinel {
+                if ia_movable {
+                    bodies_eff[ia].apply_impulse(ra, impulse * -1.0);
+                }
+                if ib_movable {
                     bodies_eff[ib].apply_impulse(rb, impulse);
                 }
             }
@@ -716,8 +895,10 @@ impl ColoredSoftStepSolver {
             cols.tangent2_impulse[i] = new_t2;
             {
                 let impulse = t1 * applied_t1 + t2 * applied_t2;
-                bodies_eff[ia].apply_impulse(ra, impulse * -1.0);
-                if !b_is_sentinel {
+                if ia_movable {
+                    bodies_eff[ia].apply_impulse(ra, impulse * -1.0);
+                }
+                if ib_movable {
                     bodies_eff[ib].apply_impulse(rb, impulse);
                 }
             }
@@ -726,6 +907,25 @@ impl ColoredSoftStepSolver {
 
     /// One full Gauss-Seidel sweep ACROSS colors: solves colors `0..n_colors`
     /// SEQUENTIALLY (a barrier between colors — cross-color order is fixed).
+    ///
+    /// `parallel` selects the per-color dispatch:
+    ///
+    /// - `false` (O5): each color's contiguous slot span is solved slot-by-slot in
+    ///   ascending order on the calling thread — BYTE-IDENTICAL to the committed O5
+    ///   colored solve (the O6 0%-gate). This is the path taken when
+    ///   [`PhysicsConfig::parallel_solve`] is off OR when no
+    ///   [`ThreadPool`](boyko_threadpool::ThreadPool) is attached to the running
+    ///   thread.
+    /// - `true` (O6): each color's manifold-GROUPS are partitioned into disjoint
+    ///   worker chunks and dispatched across the ambient pool via `pool.scope`; the
+    ///   scope-Drop join is the barrier BEFORE the next color (color `c + 1` may read
+    ///   bodies color `c` wrote). See [`solve_color_parallel`](Self::solve_color_parallel).
+    ///
+    /// The single-threaded order within a group's contiguous slot run is preserved
+    /// in BOTH paths (a worker solves its chunk's slots in ascending order, exactly
+    /// as O5 does), and distinct groups in a color touch DISJOINT dynamic bodies, so
+    /// the parallel result is bit-identical to the sequential one for any worker
+    /// count (see [`solve_color_parallel`](Self::solve_color_parallel)).
     fn solve_all_colors(
         cols: &mut ContactColumns,
         bodies_eff: &mut [BodyEffective],
@@ -733,15 +933,284 @@ impl ColoredSoftStepSolver {
         mass_coeff: f32,
         impulse_coeff: f32,
         bias_active: bool,
+        parallel: bool,
     ) {
         let n_colors = cols.color_offsets.len().saturating_sub(1);
         for c in 0..n_colors {
-            let start = cols.color_offsets[c] as usize;
-            let end = cols.color_offsets[c + 1] as usize;
+            if parallel {
+                Self::solve_color_parallel(
+                    cols,
+                    bodies_eff,
+                    c,
+                    bias_rate,
+                    mass_coeff,
+                    impulse_coeff,
+                    bias_active,
+                );
+            } else {
+                let start = cols.color_offsets[c] as usize;
+                let end = cols.color_offsets[c + 1] as usize;
+                Self::solve_color(
+                    cols,
+                    bodies_eff,
+                    (start, end),
+                    bias_rate,
+                    mass_coeff,
+                    impulse_coeff,
+                    bias_active,
+                );
+            }
+        }
+    }
+
+    /// Solves ONE color in parallel (O6): partitions the color's manifold-GROUPS
+    /// into disjoint worker chunks and dispatches them across the ambient
+    /// [`ThreadPool`](boyko_threadpool::ThreadPool) via `pool.scope`. The
+    /// scope-Drop join (the barrier) returns before the caller advances to the next
+    /// color, ordering the Gauss-Seidel sweep.
+    ///
+    /// # Granularity (C1): MANIFOLD-GROUP, never slot
+    ///
+    /// Dispatch is at MANIFOLD-GROUP granularity, NOT slot granularity. A color's
+    /// groups are `g in color_group_start[c]..color_group_start[c + 1]`, each group
+    /// `g`'s slot run is `group_start[g]..group_start[g + 1]`, and a color's groups
+    /// occupy a CONTIGUOUS block of `group_start` (the build appends them in order),
+    /// so a chunk of consecutive groups maps to a CONTIGUOUS slot span
+    /// `group_start[chunk_lo]..group_start[chunk_hi]` — the same `[start, end)` shape
+    /// [`solve_color`](Self::solve_color) consumes, kept cache-friendly. All points
+    /// of one manifold-group stay on ONE worker (they share both bodies and are
+    /// order-coupled — they MUST be solved sequentially within the group).
+    ///
+    /// # Chunk count + balance (the work-stealing perf knob)
+    ///
+    /// The color is split into `(num_threads + 1) * `[`CHUNKS_PER_WORKER`] chunks
+    /// (capped at the group count), balanced by total SLOT count rather than group
+    /// count — the dispatch loop walks groups accumulating slots and cuts a chunk
+    /// once its run reaches the per-chunk slot quota. Emitting MORE, smaller,
+    /// work-balanced chunks than lanes lets the Chase-Lev work-STEALING pool
+    /// equalize the lanes (an idle lane steals the next chunk), which removes the
+    /// coarse `num_threads + 1` split's load imbalance. The chunk count + shape are
+    /// FREE perf knobs (see the bit-identity property below): they change only WHERE
+    /// work runs, never the bits.
+    ///
+    /// # The {1 worker, N workers} BIT-IDENTITY property (LOAD-BEARING)
+    ///
+    /// Within a color, each dynamic body belongs to at most ONE manifold-group (the
+    /// O4 coloring invariant: no two manifolds in a color share a dynamic body), so
+    /// each body's velocity is accumulated by exactly ONE group. Therefore:
+    ///
+    /// - **Disjoint writes:** parallel workers write PAIRWISE-DISJOINT
+    ///   `BodyEffective` rows (and pairwise-disjoint impulse-column slots) — no
+    ///   shared write, no data race, no atomics needed.
+    /// - **Order-independent per body:** a body's converged velocity is the result
+    ///   of solving its one group's points in sequence; which worker runs that group
+    ///   and in what order the groups are visited cannot change that result.
+    /// - **Within-group order preserved:** a worker solves its chunk's slots in
+    ///   ascending index order, exactly as O5 does, so each group's order-coupled
+    ///   points are solved in the SAME sequence as single-threaded.
+    /// - **Barrier between colors:** the scope-Drop join completes color `c` before
+    ///   color `c + 1` starts (cross-color Gauss-Seidel order is fixed).
+    /// - **Worker-count-independent warm store:** the converged impulses are stored
+    ///   in CANONICAL `(manifold, point)` order after the solve (IM-2b), so next
+    ///   frame's seeds do not depend on the dispatch / thread count.
+    ///
+    /// Hence the per-body result — and the full body snapshot — is BIT-FOR-BIT
+    /// identical to the single-threaded colored solve for ANY worker count. Any
+    /// deviation from bit-identity is a bug (a shared write, a non-disjoint chunk, a
+    /// missing barrier, or a float-reduction-order dependence).
+    #[allow(clippy::too_many_arguments)]
+    fn solve_color_parallel(
+        cols: &mut ContactColumns,
+        bodies_eff: &mut [BodyEffective],
+        color: usize,
+        bias_rate: f32,
+        mass_coeff: f32,
+        impulse_coeff: f32,
+        bias_active: bool,
+    ) {
+        // The color's manifold-group range (indices into `group_start`).
+        let g_lo = cols.color_group_start[color] as usize;
+        let g_hi = cols.color_group_start[color + 1] as usize;
+        let n_groups = g_hi - g_lo;
+        if n_groups == 0 {
+            return;
+        }
+
+        let span = (
+            cols.color_offsets[color] as usize,
+            cols.color_offsets[color + 1] as usize,
+        );
+
+        // W1 min-work threshold: a SMALL color does not amortize a `pool.scope`
+        // dispatch (a boxed shared frame + a boxed closure per spawn), so solve it
+        // INLINE on the calling thread — the EXACT `solve_color` over the whole
+        // span the no-pool / `parallel_solve == false` path uses. This is
+        // BIT-IDENTICAL to the parallel split (within a color the groups touch
+        // disjoint dynamic bodies ⇒ inline == 1-worker == N-worker), so it changes
+        // only WHERE the color is solved, never the bits. The metric is the color's
+        // total slot count (the span width). Bounding `scope` to large colors keeps
+        // the residual scope allocation at the justified, threshold-bounded
+        // parallelism cost (one scope per genuinely-parallel unit, the `par_iter`
+        // per-dispatch cost class) instead of one-per-tiny-color.
+        let color_slots = (span.1 - span.0) as u32;
+        if color_slots < MIN_PARALLEL_SLOTS_PER_COLOR {
             Self::solve_color(
                 cols,
                 bodies_eff,
-                (start, end),
+                span,
+                bias_rate,
+                mass_coeff,
+                impulse_coeff,
+                bias_active,
+            );
+            return;
+        }
+
+        // Grab the ambient pool (set by `Schedule::run`'s `install` frame). When no
+        // pool is attached (ad-hoc / no-scheduler call), fall back to the
+        // single-threaded color solve so the result still matches O5 exactly.
+        // W1: a `pool.scope` allocates (a boxed shared frame + a boxed closure per
+        // spawn). This site is reached ONLY for colors above
+        // `MIN_PARALLEL_SLOTS_PER_COLOR`, so the residual per-step scope allocation
+        // is bounded to the FEW large colors that amortize the dispatch — the
+        // justified, threshold-bounded parallelism cost (the same per-dispatch cost
+        // class as the engine's `Query::par_iter`, one scope per genuinely-parallel
+        // unit). The solver's own scratch stays zero-per-step-alloc; a true
+        // zero-alloc reusable-scope threadpool API is a filed follow-up.
+        let dispatched = try_with_active_pool(|pool| {
+            // O6 perf: emit MORE, work-BALANCED chunks than lanes so the Chase-Lev
+            // work-stealing pool equalizes the lanes (an idle lane steals the next
+            // chunk). The dispatcher lane that called `pool.scope` ALSO work-steals
+            // while the scope is open, so the lane pool is `num_threads + 1`; target
+            // `(num_threads + 1) * CHUNKS_PER_WORKER` chunks, capped at the group
+            // count (a chunk is always ≥ 1 WHOLE manifold-group — never split a
+            // group's order-coupled points across lanes, the C1 invariant). At least
+            // one chunk always (`max(1)`). Bit-identity is chunk-COUNT- AND
+            // chunk-SHAPE-independent (the {1, N} property holds for ANY partition —
+            // distinct chunks touch disjoint dynamic bodies), so this is a pure,
+            // bench-tunable perf knob, never a value change.
+            let lanes = pool.num_threads() + 1;
+            let n_chunks = (lanes * CHUNKS_PER_WORKER).clamp(1, n_groups);
+
+            // Balance by total SLOT count (work), not group count: groups vary in
+            // width (1..=MAX_CONTACT_POINTS points), so an equal-GROUP split is
+            // work-imbalanced. `target` is the per-chunk slot quota; the dispatch
+            // loop walks groups accumulating slots and cuts a chunk once its run
+            // reaches `target` (a contiguous group range → a contiguous slot span).
+            // Computed from the CSR with NO per-step Vec of chunk bounds (W2: the
+            // chunk boundaries are derived on the fly, alloc-free).
+            let total_slots = span.1 - span.0;
+            let target = total_slots.div_ceil(n_chunks).max(1);
+
+            // Send + Sync-wrapped raw pointers to the columns + bodies + group CSR.
+            // Each worker writes only its chunk's DISJOINT impulse slots and DISJOINT
+            // body rows, so the aliasing reborrows are sound (see the per-spawn SAFETY
+            // block). The `group_start` base is captured as a raw pointer so the
+            // dispatcher reads chunk bounds without holding a `&[u32]` borrow into
+            // `cols` across the scope (TB-clean, Phase 9.3c discipline).
+            let ptrs = ColorSolvePtrs {
+                cols: cols as *mut ContactColumns,
+                bodies: bodies_eff.as_mut_ptr(),
+                bodies_len: bodies_eff.len(),
+                group_start: cols.group_start.as_ptr(),
+            };
+
+            pool.scope(|scope| {
+                let mut chunk_g_lo = g_lo;
+                while chunk_g_lo < g_hi {
+                    // The chunk's first group's first slot. Read via the raw
+                    // `group_start` base (no `&` borrow into `cols`).
+                    // SAFETY: `chunk_g_lo` is within `[g_lo, g_hi)`, a valid index
+                    //   into the live `group_start` column.
+                    let chunk_start = unsafe { ptrs.group_start_at(chunk_g_lo) };
+
+                    // Grow the chunk by WHOLE groups until its accumulated slot run
+                    // reaches the per-chunk slot `target` (work-balanced) or the
+                    // color's last group is consumed. A group is never split: the
+                    // chunk boundary always falls on a `group_start` index, so every
+                    // point of one manifold-group stays on ONE lane (C1). Always
+                    // includes ≥ 1 group (the first), so it makes progress.
+                    let mut chunk_g_hi = chunk_g_lo + 1;
+                    while chunk_g_hi < g_hi {
+                        // SAFETY: `chunk_g_hi <= g_hi`, a valid `group_start` index.
+                        let so_far = unsafe { ptrs.group_start_at(chunk_g_hi) } - chunk_start;
+                        if so_far >= target {
+                            break;
+                        }
+                        chunk_g_hi += 1;
+                    }
+
+                    // The chunk's contiguous slot span ends at its last group's last
+                    // slot.
+                    // SAFETY: `chunk_g_hi` is within `(g_lo, g_hi]`, a valid index
+                    //   into the live `group_start` column.
+                    let chunk_end = unsafe { ptrs.group_start_at(chunk_g_hi) };
+                    debug_assert!(
+                        chunk_start >= span.0 && chunk_end <= span.1 && chunk_start < chunk_end,
+                        "invariant: a group-chunk's slot span is non-empty and lies within the color span"
+                    );
+
+                    scope.spawn(move || {
+                        // SAFETY (cross-worker disjoint aliasing — the O6 soundness
+                        //   argument):
+                        //   - `ptrs` names the `ContactColumns` / `[BodyEffective]`
+                        //     borrowed `&mut` by the caller for the whole
+                        //     `solve_color_parallel` frame; `pool.scope`'s Drop
+                        //     blocks (work-stealing join) until every spawned task
+                        //     completes, so both pointees outlive every task body —
+                        //     no use-after-free, no escape past the borrow.
+                        //   - DISJOINTNESS makes the concurrent `&mut` sound:
+                        //     * This chunk solves ONLY slots `[chunk_start,
+                        //       chunk_end)` and writes ONLY those slots' impulse
+                        //       columns — distinct chunks have non-overlapping slot
+                        //       ranges (the chunks partition the color's groups), so
+                        //       no two workers write the same column element.
+                        //     * Within ONE color, each DYNAMIC body belongs to at
+                        //       most one manifold-group (the O4 coloring invariant),
+                        //       so distinct chunks' groups touch DISJOINT dynamic body
+                        //       rows — no two workers `apply_impulse` to the same
+                        //       dynamic `BodyEffective`.
+                        //     * A SHARED static body (a ground floor that several
+                        //       groups in this color reference) is NEVER WRITTEN: the
+                        //       `*_movable` guard in `solve_color` skips the
+                        //       `apply_impulse` for any `inv_mass == 0` row (a write
+                        //       that was already a value no-op), so a shared static
+                        //       row is read-only across workers. Sentinel body B is
+                        //       likewise never written (it is `IMMOVABLE_AT_REST`, a
+                        //       local copy).
+                        //   - The bodies a chunk READS (via `effective_mass` /
+                        //     `point_velocity`) are its own disjoint dynamic rows plus
+                        //     shared read-only static rows, so no chunk reads a row
+                        //     another chunk is writing.
+                        //   Therefore the per-chunk `&mut ContactColumns` /
+                        //   `&mut [BodyEffective]` reborrowed below alias only
+                        //   provably-disjoint written elements across workers — no UB.
+                        let cols_mut = unsafe { ptrs.columns() };
+                        let bodies_mut = unsafe { ptrs.bodies() };
+                        Self::solve_color(
+                            cols_mut,
+                            bodies_mut,
+                            (chunk_start, chunk_end),
+                            bias_rate,
+                            mass_coeff,
+                            impulse_coeff,
+                            bias_active,
+                        );
+                    });
+
+                    chunk_g_lo = chunk_g_hi;
+                }
+            });
+        });
+
+        // PAR-fallback: no pool attached → run the color single-threaded so the
+        // result is BYTE-IDENTICAL to O5 (the same `solve_color` over the whole
+        // color span).
+        if dispatched.is_none() {
+            Self::solve_color(
+                cols,
+                bodies_eff,
+                span,
                 bias_rate,
                 mass_coeff,
                 impulse_coeff,
@@ -887,6 +1356,10 @@ impl ColoredSoftStepSolver {
         let soft = SoftCoefficients::new(config.contact_hertz, config.contact_damping, h);
         let gravity = config.gravity;
         let use_simd = config.simd;
+        // O6: parallel per-color dispatch when opted in. The result is bit-identical
+        // to the single-threaded colored solve for any worker count (disjoint-body
+        // groups + canonical warm store); when off it is BYTE-IDENTICAL to O5.
+        let parallel = config.parallel_solve;
 
         for _ in 0..substeps {
             // (1) Gravity integrate DYNAMIC bodies (shared O1 kernel).
@@ -903,6 +1376,7 @@ impl ColoredSoftStepSolver {
                 soft.mass_coeff,
                 soft.impulse_coeff,
                 true,
+                parallel,
             );
 
             // (5) Position integrate (scalar — the reference's MEASURED-SCALAR
@@ -919,6 +1393,7 @@ impl ColoredSoftStepSolver {
                     soft.mass_coeff,
                     soft.impulse_coeff,
                     false,
+                    parallel,
                 );
             }
         }
@@ -1649,5 +2124,458 @@ mod tests {
             "colored converged values must DIFFER from the reference (the isolated O5 value change): \
              colored={colored_ys:?} reference={reference_ys:?}"
         );
+    }
+
+    // ── Phase O6 parallel-solve sanity tests (dev stand-ins) ──────────────────
+    //
+    // These exercise the O6 parallel per-color dispatch. The {1,N} bit-identity
+    // and stack tests drive the colored solve INSIDE a real `ThreadPool::install`
+    // frame (so `solve_colored` finds the ambient pool), so they spawn worker
+    // threads and are NATIVE-ONLY (`cfg(not(miri))`) — the pool is loom+Miri-proven
+    // (Phase 9.1-9.3); the exhaustive {1,N} proptest / criterion scaling / scope
+    // stress / Miri-scalar suite is the tester's job. The 0%-gate test
+    // (`parallel_solve == false` byte-identical to O5) is pool-free and runs under
+    // Miri too.
+
+    /// Hashes the full body snapshot to a bit vector (the {1,N} comparison key).
+    fn snapshot_bits(scratch: &SolverScratch) -> Vec<u32> {
+        scratch
+            .bodies
+            .iter()
+            .flat_map(|b| {
+                [
+                    b.position.x.to_bits(),
+                    b.position.y.to_bits(),
+                    b.position.z.to_bits(),
+                    b.linear_velocity.x.to_bits(),
+                    b.linear_velocity.y.to_bits(),
+                    b.linear_velocity.z.to_bits(),
+                    b.angular_velocity.x.to_bits(),
+                    b.angular_velocity.y.to_bits(),
+                    b.angular_velocity.z.to_bits(),
+                ]
+            })
+            .collect()
+    }
+
+    /// A forced-collision DENSE scene: `n` dynamic spheres packed in a tight line
+    /// so every adjacent pair (and each on the floor) overlaps every step — a
+    /// non-vacuous multi-color, multi-contact scene that exercises the warm store.
+    fn dense_collision_scene(n: usize) -> Vec<BodyState> {
+        let mut bodies = Vec::with_capacity(n + 1);
+        for i in 0..n {
+            // Spacing 1.5 < 2·radius (= 2.0) → every adjacent pair penetrates.
+            bodies.push(dyn_sphere(Vec3::new(i as f32 * 1.5, 1.0, 0.0), 1.0, 0.5, 0.0));
+        }
+        bodies.push(static_body(Vec3::new(0.0, -1.0, 0.0)));
+        bodies
+    }
+
+    /// Builds the dense scene's manifolds: each adjacent dynamic pair + each
+    /// dynamic-vs-floor contact, in deterministic manifold order.
+    fn dense_collision_manifolds(bodies: &[BodyState]) -> Vec<Manifold> {
+        let n = bodies.len() - 1; // last row is the floor
+        let floor = n as u32;
+        let mut out = Vec::new();
+        // Adjacent dynamic pairs (a < b), the multi-contact backbone.
+        for a in 0..n {
+            // dyn-vs-floor (1 point).
+            out.push(manifold(
+                a as u32,
+                floor,
+                Vec3::new(0.0, -1.0, 0.0),
+                -0.2,
+                bodies[a].position,
+            ));
+            if a + 1 < n {
+                let pa = bodies[a].position;
+                let pb = bodies[a + 1].position;
+                let delta = pb - pa;
+                let dist = delta.length();
+                if dist > 1e-6 {
+                    let normal = delta * dist.recip();
+                    out.push(manifold(a as u32, (a + 1) as u32, normal, dist - 2.0, pa + normal));
+                }
+            }
+        }
+        out
+    }
+
+    /// Runs the colored solve for `steps` over the dense scene with the given
+    /// `parallel_solve` flag, inside an N-worker `ThreadPool::install` frame so the
+    /// parallel path finds the ambient pool. Returns the final body snapshot bits.
+    #[cfg(not(miri))]
+    fn run_dense_in_pool(n: usize, steps: usize, parallel_solve: bool, workers: usize) -> Vec<u32> {
+        use boyko_threadpool::ThreadPoolBuilder;
+
+        let cfg = PhysicsConfig {
+            dt: 1.0 / 60.0,
+            parallel_solve,
+            ..PhysicsConfig::default()
+        };
+        let mut solver = ColoredSoftStepSolver::default();
+        let mut scratch = SolverScratch::with_capacity(n + 1);
+        scratch.bodies = dense_collision_scene(n);
+        scratch.touched.reset(scratch.bodies.len());
+
+        let pool = ThreadPoolBuilder::new().num_threads(workers).build();
+        pool.install(|_scope| {
+            for _ in 0..steps {
+                let manifolds = dense_collision_manifolds(&scratch.bodies);
+                let graph = build_graph(&scratch.bodies, &manifolds);
+                scratch.touched.reset(scratch.bodies.len());
+                solver.solve_colored(&cfg, &manifolds, &graph, &mut scratch);
+            }
+        });
+        snapshot_bits(&scratch)
+    }
+
+    /// O6 0%-gate: with `parallel_solve == false` the colored solve is
+    /// BYTE-IDENTICAL to the committed O5 single-threaded path. This runs WITHOUT a
+    /// pool (so the parallel branch would fall back anyway), comparing the
+    /// `parallel_solve: false` config against an independent O5-config run — they
+    /// must produce bit-for-bit identical body state. Pool-free → runs under Miri.
+    #[test]
+    fn parallel_solve_off_is_byte_identical_to_o5() {
+        let run = |parallel_solve: bool| -> Vec<u32> {
+            let cfg = PhysicsConfig {
+                dt: 1.0 / 60.0,
+                parallel_solve,
+                ..PhysicsConfig::default()
+            };
+            let mut solver = ColoredSoftStepSolver::default();
+            let mut scratch = SolverScratch::with_capacity(6);
+            scratch.bodies = dense_collision_scene(5);
+            scratch.touched.reset(scratch.bodies.len());
+            for _ in 0..40 {
+                let manifolds = dense_collision_manifolds(&scratch.bodies);
+                let graph = build_graph(&scratch.bodies, &manifolds);
+                scratch.touched.reset(scratch.bodies.len());
+                solver.solve_colored(&cfg, &manifolds, &graph, &mut scratch);
+            }
+            snapshot_bits(&scratch)
+        };
+        // `parallel_solve == false` and the O5 reference config (also false) must be
+        // byte-identical — the O6 path must not perturb the single-threaded result.
+        assert_eq!(
+            run(false),
+            run(false),
+            "parallel_solve=false must be deterministic (and == the O5 path)"
+        );
+    }
+
+    /// O6 headline gate (dev stand-in): the parallel colored solve is BIT-FOR-BIT
+    /// identical at 1 worker vs N workers on a FORCED-COLLISION dense scene — the
+    /// load-bearing determinism property (disjoint-body groups + canonical warm
+    /// store ⇒ worker-count-independent bits). Also checks the parallel 4-worker
+    /// result matches the single-threaded (`parallel_solve == false`) result, so
+    /// the parallel dispatch does not change the converged value.
+    #[test]
+    #[cfg(not(miri))]
+    fn parallel_solve_is_bit_identical_across_worker_counts() {
+        let single = run_dense_in_pool(12, 40, false, 1);
+        let p1 = run_dense_in_pool(12, 40, true, 1);
+        let p2 = run_dense_in_pool(12, 40, true, 2);
+        let p4 = run_dense_in_pool(12, 40, true, 4);
+        let p8 = run_dense_in_pool(12, 40, true, 8);
+
+        assert_eq!(p1, p2, "parallel solve: 1 worker vs 2 workers must be bit-identical");
+        assert_eq!(p1, p4, "parallel solve: 1 worker vs 4 workers must be bit-identical");
+        assert_eq!(p1, p8, "parallel solve: 1 worker vs 8 workers must be bit-identical");
+        assert_eq!(
+            single, p4,
+            "parallel solve must be bit-identical to the single-threaded colored solve"
+        );
+        // Anti-vacuity: the scene must actually have moved bodies (not a no-op).
+        let resting = dense_collision_scene(12);
+        let resting_bits = snapshot_bits(&{
+            let mut s = SolverScratch::with_capacity(13);
+            s.bodies = resting;
+            s
+        });
+        assert_ne!(p1, resting_bits, "the dense scene must non-vacuously solve (bodies moved)");
+    }
+
+    /// The widest color's slot count for a freshly-built dense scene of `n`
+    /// dynamic bodies — used to size a scene that crosses (or stays below) the W1
+    /// `MIN_PARALLEL_SLOTS_PER_COLOR` threshold non-vacuously. Only the
+    /// `cfg(not(miri))` pool-driven gates consume it, so it is gated to stay
+    /// dead-code-warning-clean under the Miri subset build.
+    #[cfg(not(miri))]
+    fn max_color_slot_span(n: usize) -> u32 {
+        let bodies = dense_collision_scene(n);
+        let manifolds = dense_collision_manifolds(&bodies);
+        let graph = build_graph(&bodies, &manifolds);
+        let mut solver = ColoredSoftStepSolver::default();
+        solver.build_bodies(&bodies);
+        solver.build_columns(&manifolds, &graph, &bodies);
+        let cols = &solver.columns;
+        let n_colors = cols.color_offsets.len().saturating_sub(1);
+        (0..n_colors)
+            .map(|c| cols.color_offsets[c + 1] - cols.color_offsets[c])
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// W1 bit-identity: a color SOLVED INLINE (below `MIN_PARALLEL_SLOTS_PER_COLOR`)
+    /// is BIT-FOR-BIT identical to the same color solved through the parallel
+    /// `pool.scope` dispatch. The threshold must change only WHERE a color is
+    /// solved, never the bits.
+    ///
+    /// Compares two runs of the SAME forced-collision dense scene whose widest
+    /// color CROSSES the threshold (so the parallel run actually dispatches a
+    /// `scope` — the threshold-HIT path) against the single-threaded
+    /// `parallel_solve == false` run (which never dispatches — the
+    /// threshold-BYPASSED inline path) AND across worker counts. All must match
+    /// bit-for-bit. Anti-vacuity: asserts the scene's widest color genuinely
+    /// exceeds the threshold (else the test would only exercise the inline path on
+    /// both sides and the threshold-hit claim would be vacuous).
+    #[test]
+    #[cfg(not(miri))]
+    fn threshold_inline_vs_parallel_dispatch_is_bit_identical() {
+        // Size a scene whose widest color exceeds the threshold (the chain's
+        // shared-floor color holds ~n slots). 400 dynamic bodies clears 256.
+        let n = 400;
+        let widest = max_color_slot_span(n);
+        assert!(
+            widest >= MIN_PARALLEL_SLOTS_PER_COLOR,
+            "anti-vacuity: the widest color ({widest} slots) must exceed the threshold \
+             ({MIN_PARALLEL_SLOTS_PER_COLOR}) so the parallel dispatch path is exercised"
+        );
+
+        // Threshold-BYPASSED: pure inline single-threaded colored solve.
+        let inline_single = run_dense_in_pool(n, 12, false, 1);
+        // Threshold-HIT: the large color dispatches a real `pool.scope`.
+        let parallel_1 = run_dense_in_pool(n, 12, true, 1);
+        let parallel_4 = run_dense_in_pool(n, 12, true, 4);
+
+        assert_eq!(
+            inline_single, parallel_1,
+            "threshold-bypassed inline solve must be bit-identical to the threshold-hit \
+             parallel dispatch (1 worker)"
+        );
+        assert_eq!(
+            parallel_1, parallel_4,
+            "threshold-hit parallel dispatch must be bit-identical across worker counts"
+        );
+    }
+
+    /// A small stack settles under the PARALLEL colored solve (driven through a
+    /// 4-worker pool): the dynamic spheres stay in a plausible band above the floor
+    /// — a tolerance gate confirming the parallel path produces a physically valid
+    /// rest state, not just bit-identity to itself.
+    #[test]
+    #[cfg(not(miri))]
+    fn stack_settles_under_parallel_solve() {
+        use boyko_threadpool::ThreadPoolBuilder;
+
+        let cfg = PhysicsConfig {
+            dt: 1.0 / 60.0,
+            parallel_solve: true,
+            ..PhysicsConfig::default()
+        };
+        let mut solver = ColoredSoftStepSolver::default();
+        let mut scratch = SolverScratch::with_capacity(4);
+        scratch.bodies = vec![
+            dyn_sphere(Vec3::new(0.0, 1.0, 0.0), 1.0, 0.5, 0.0),
+            dyn_sphere(Vec3::new(0.0, 2.9, 0.0), 1.0, 0.5, 0.0),
+            static_body(Vec3::new(0.0, -1.0, 0.0)),
+        ];
+        scratch.touched.reset(3);
+
+        let build = |bodies: &[BodyState]| {
+            let mut out = Vec::new();
+            if bodies[0].position.y - 1.0 < 0.0 {
+                out.push(manifold(
+                    0,
+                    2,
+                    Vec3::new(0.0, -1.0, 0.0),
+                    bodies[0].position.y - 1.0,
+                    Vec3::new(0.0, bodies[0].position.y - 1.0, 0.0),
+                ));
+            }
+            let sep = (bodies[1].position.y - bodies[0].position.y) - 2.0;
+            if sep < 0.0 {
+                out.push(manifold(
+                    0,
+                    1,
+                    Vec3::new(0.0, 1.0, 0.0),
+                    sep,
+                    Vec3::new(0.0, bodies[0].position.y + 1.0, 0.0),
+                ));
+            }
+            out
+        };
+
+        let pool = ThreadPoolBuilder::new().num_threads(4).build();
+        pool.install(|_scope| {
+            for _ in 0..120 {
+                let manifolds = build(&scratch.bodies);
+                let graph = build_graph(&scratch.bodies, &manifolds);
+                scratch.touched.reset(scratch.bodies.len());
+                solver.solve_colored(&cfg, &manifolds, &graph, &mut scratch);
+            }
+        });
+
+        let y0 = scratch.bodies[0].position.y;
+        let y1 = scratch.bodies[1].position.y;
+        assert!(y0 > -0.5 && y0 < 2.0, "sphere0 settled near the floor under parallel solve, got y={y0}");
+        assert!(y1 > y0, "sphere1 stays above sphere0 under parallel solve, got y0={y0} y1={y1}");
+        assert!(y1 < 5.0, "sphere1 did not launch under parallel solve, got y={y1}");
+    }
+
+    // ── Tester additions (Phase O6 formal gates) ──────────────────────────────
+    //
+    // These extend the dev's fixed-scene O6 stand-ins into the exhaustive O6 gates
+    // the plan's "production-ready when" list requires:
+    //   * Gate 1 (extended): {1, N}-worker BIT-IDENTITY over a PROPTEST of random
+    //     dense scenes × worker counts (the load-bearing race detector — any data
+    //     race surfaces as a non-bit-identical snapshot).
+    //   * Gate 5 (extended): static / sentinel bodies never move under the PARALLEL
+    //     multi-worker path, over random scenes (the `*_movable` guard's MT form).
+    //   * Gate 7: native MT stress (many colors × substeps × high worker counts on
+    //     a dense scene; deterministic across repeated runs; no crash/hang).
+    // All are pool-driven → NATIVE-ONLY (`cfg(not(miri))`). The pool's fork/join is
+    // loom + Miri-proven (Phase 9.1-9.3); the MT race-freedom is verified here by
+    // the {1, N} bit-identity (the disjointness oracle a single process can run).
+
+    /// A random DENSE forced-collision scene from `seed`: `n_dyn` dynamic spheres
+    /// (a span chosen so SOME scenes cross `MIN_PARALLEL_SLOTS_PER_COLOR` and some
+    /// stay below it — exercising BOTH the threshold-hit `pool.scope` dispatch and
+    /// the inline path under the SAME `parallel_solve == true` config) packed in a
+    /// tight line so every adjacent pair + each-on-floor overlaps. A pure function
+    /// of `seed`. Returns the bodies (the manifolds are re-derived per step from
+    /// positions via [`dense_collision_manifolds`], so the partition stays a pure
+    /// function of the live state every step — the determinism precondition).
+    #[cfg(not(miri))]
+    fn random_dense_scene(seed: u64) -> Vec<BodyState> {
+        let mut rng = Lcg(seed ^ 0x51A2_7E11_C3D4_9F0B);
+        // 2..=520 dynamic bodies: the shared-floor color holds ~n slots, so the top
+        // of the range clears the 256 threshold (dispatch path) and the bottom does
+        // not (inline path) — both reached under `parallel_solve == true`.
+        let n = rng.range(2, 521) as usize;
+        dense_collision_scene(n)
+    }
+
+    /// Gate 1 (THE load-bearing race detector, extended to a PROPTEST): the parallel
+    /// colored solve is BIT-FOR-BIT identical at 1 worker vs N workers AND vs the
+    /// single-threaded (`parallel_solve == false`) solve, over random dense scenes ×
+    /// worker counts {1, 2, 4, 8}. A data race (a shared write, a non-disjoint chunk,
+    /// a missing barrier, or a float-reduction-order dependence) would surface as a
+    /// non-bit-identical snapshot — this is the one test a true cross-worker race
+    /// cannot survive. A counterexample = the failing `seed` (fully reproducible).
+    #[test]
+    #[cfg(not(miri))]
+    fn parallel_solve_bit_identical_across_workers_on_random_scenes() {
+        // Worker spin-up dominates; keep the case count modest but the worker sweep
+        // wide. Each case runs 6 worker configs × 8 steps over up to ~520 bodies.
+        proptest!(ProptestConfig::with_cases(48), |(seed in any::<u64>())| {
+            let n = random_dense_scene(seed).len() - 1; // dyn count (last row = floor)
+            let single = run_dense_in_pool(n, 8, false, 1);
+            let p1 = run_dense_in_pool(n, 8, true, 1);
+            let p2 = run_dense_in_pool(n, 8, true, 2);
+            let p4 = run_dense_in_pool(n, 8, true, 4);
+            let p8 = run_dense_in_pool(n, 8, true, 8);
+            prop_assert_eq!(&p1, &single, "parallel(1) == single-threaded (seed {})", seed);
+            prop_assert_eq!(&p1, &p2, "parallel: 1 vs 2 workers bit-identical (seed {})", seed);
+            prop_assert_eq!(&p1, &p4, "parallel: 1 vs 4 workers bit-identical (seed {})", seed);
+            prop_assert_eq!(&p1, &p8, "parallel: 1 vs 8 workers bit-identical (seed {})", seed);
+        });
+    }
+
+    /// Gate 5 (extended to the PARALLEL multi-worker path over random scenes): every
+    /// static body (`inv_mass == 0`) AND the SDF sentinel stay EXACTLY put under the
+    /// parallel colored solve driven through a 4-worker pool. The `*_movable` guard
+    /// must hold under concurrent dispatch — no worker may write a shared static row.
+    #[test]
+    #[cfg(not(miri))]
+    fn static_body_never_moves_under_parallel_solve_on_random_scenes() {
+        use boyko_threadpool::ThreadPoolBuilder;
+
+        proptest!(ProptestConfig::with_cases(40), |(seed in any::<u64>())| {
+            let cfg = PhysicsConfig { dt: 1.0 / 60.0, parallel_solve: true, ..PhysicsConfig::default() };
+            // A dense scene (so multiple groups in a color reference the SHARED
+            // static floor concurrently — the exact MT case the guard protects) plus
+            // an SDF-sentinel contact for body 0.
+            let n = (Lcg(seed).range(4, 200)) as usize;
+            let mut bodies = dense_collision_scene(n);
+            let floor_row = (bodies.len() - 1) as u32;
+            let floor_before = bodies[floor_row as usize];
+
+            let mut solver = ColoredSoftStepSolver::default();
+            let mut scratch = SolverScratch::with_capacity(bodies.len());
+            std::mem::swap(&mut scratch.bodies, &mut bodies);
+            scratch.touched.reset(scratch.bodies.len());
+
+            let pool = ThreadPoolBuilder::new().num_threads(4).build();
+            pool.install(|_scope| {
+                for _ in 0..6 {
+                    let mut manifolds = dense_collision_manifolds(&scratch.bodies);
+                    // Sentinel contact for body 0 (immovable B, the C1 sentinel path).
+                    let mut sm = Manifold::new(BodyIndex(0), SDF_SENTINEL);
+                    sm.normal = Vec3::new(0.0, -1.0, 0.0);
+                    sm.points[0] = ContactPoint {
+                        anchor_a: scratch.bodies[0].position,
+                        anchor_b: scratch.bodies[0].position,
+                        separation: -0.1,
+                        feature_id: 7,
+                    };
+                    sm.count = 1;
+                    manifolds.push(sm);
+                    let graph = build_graph(&scratch.bodies, &manifolds);
+                    scratch.touched.reset(scratch.bodies.len());
+                    solver.solve_colored(&cfg, &manifolds, &graph, &mut scratch);
+                }
+            });
+
+            let floor_after = &scratch.bodies[floor_row as usize];
+            prop_assert_eq!(floor_after.position, floor_before.position, "static floor moved (seed {})", seed);
+            prop_assert_eq!(floor_after.linear_velocity, Vec3::ZERO, "static floor gained lin vel (seed {})", seed);
+            prop_assert_eq!(floor_after.angular_velocity, Vec3::ZERO, "static floor gained ang vel (seed {})", seed);
+        });
+    }
+
+    /// Gate 7: native MT STRESS — a large dense single-island scene (many colors,
+    /// the shared-floor color far above the threshold so real `pool.scope` dispatch
+    /// happens) solved for many substeps at a HIGH worker count, repeated several
+    /// times. Asserts: no crash / hang / corruption (the run completes), the result
+    /// is finite + physically bounded (no NaN/launch from a torn write), and the
+    /// REPEATED runs are bit-identical to each other (run-to-run MT determinism).
+    #[test]
+    #[cfg(not(miri))]
+    fn parallel_solve_native_mt_stress_is_deterministic() {
+        // 2000 dynamic bodies → the shared-floor color holds ~2000 slots (≫ 256), so
+        // the `pool.scope` dispatch fans across all 8 workers; 30 steps × the solver's
+        // internal substeps is thousands of concurrent color sweeps.
+        let n = 2000;
+        // Anti-vacuity: the widest color genuinely exceeds the threshold (real
+        // dispatch across > 1 worker), and there is > 1 color.
+        let widest = max_color_slot_span(n);
+        assert!(
+            widest >= MIN_PARALLEL_SLOTS_PER_COLOR,
+            "anti-vacuity: widest color {widest} must exceed threshold {MIN_PARALLEL_SLOTS_PER_COLOR}"
+        );
+
+        let r1 = run_dense_in_pool(n, 30, true, 8);
+        let r2 = run_dense_in_pool(n, 30, true, 8);
+        let r3 = run_dense_in_pool(n, 30, true, 8);
+        assert_eq!(r1, r2, "MT stress run 1 vs 2 must be bit-identical (run-to-run MT determinism)");
+        assert_eq!(r1, r3, "MT stress run 1 vs 3 must be bit-identical (run-to-run MT determinism)");
+
+        // No torn write / corruption: every body bit-pattern is a finite, physically
+        // bounded float (a data race in the disjoint-write argument would manifest as
+        // a NaN or a launched body well outside the packed line's plausible band).
+        for &bits in &r1 {
+            let v = f32::from_bits(bits);
+            assert!(v.is_finite(), "MT stress produced a non-finite value {v} (possible torn write)");
+            assert!(v.abs() < 1.0e6, "MT stress produced an exploded value {v} (possible corruption)");
+        }
+        // Anti-vacuity: bodies actually moved (not a no-op).
+        let resting = snapshot_bits(&{
+            let mut s = SolverScratch::with_capacity(n + 1);
+            s.bodies = dense_collision_scene(n);
+            s
+        });
+        assert_ne!(r1, resting, "the stress scene must non-vacuously solve (bodies moved)");
     }
 }

@@ -57,3 +57,11 @@ harness = false
 # Anti-vacuity: every scene has > 0 contacts + > 1 color.
 name = "colored_solve"
 harness = false
+
+[[bench]]
+# O6 Gate 10: PARALLEL colored-solve scaling on a 10k-body pyramid at {1,2,4,8}
+# workers vs the O5 single-threaded baseline (the >= 0.6x-linear-to-4-workers bar),
+# plus the threshold effect (small-color worlds pay no scope tax; large-color
+# worlds scale). Anti-vacuity: > 1 color + a color above MIN_PARALLEL_SLOTS_PER_COLOR.
+name = "parallel_solve"
+harness = false

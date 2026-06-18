@@ -71,6 +71,7 @@ use crate::resources::{
 };
 use crate::sdf_query::{SdfField, sample_sdf};
 use crate::solver::colored::ColoredSoftStepSolver;
+use crate::solver::contact::is_dynamic_row;
 use crate::solver::RigidSolver;
 
 /// Minimum SDF gradient length for a usable contact normal (P2 W5, O3).
@@ -691,9 +692,14 @@ pub fn physics_build_graph(
     let n_dynamic = bodies.len();
     // A row is dynamic iff it has a non-zero inverse mass (static/kinematic = 0).
     // The sentinel `u32::MAX` (and any out-of-range row) is non-dynamic — ground.
+    //
+    // MT soundness: this MUST be the SAME predicate the colored solve's `*_movable`
+    // write guard uses — the coloring grants exclusive per-color ownership only to
+    // the rows it marks dynamic here, so the solve may write ONLY those rows. Both
+    // sites route through `is_dynamic_row` so they cannot drift (see its docs).
     let is_dynamic = |row: u32| {
         let i = row as usize;
-        i < bodies.len() && bodies[i].inv_mass != 0.0
+        i < bodies.len() && is_dynamic_row(bodies[i].inv_mass)
     };
     graph.build(&manifolds.manifolds, n_dynamic, is_dynamic);
 }
