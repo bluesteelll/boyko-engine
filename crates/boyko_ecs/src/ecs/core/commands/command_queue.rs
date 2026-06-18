@@ -6,7 +6,7 @@
 //! `Packed<T>` wrapper, no `&` / `&mut` reference creation into the byte
 //! slots (invariant **CQ-PACK1**).
 //!
-//! The apply machinery uses a raw-pointer twin [`RawCommandQueue`] minted
+//! The apply machinery uses a raw-pointer twin `RawCommandQueue` minted
 //! via `&raw mut` from `&mut CommandQueue` (invariant **C3** — no
 //! intermediate reference creation; Tree Borrows compatible).
 

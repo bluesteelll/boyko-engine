@@ -4,7 +4,7 @@
 //!
 //! # Why a token (Option C)
 //!
-//! A hand-written out-of-crate [`System`] (the `boyko_render` `GpuSystem`) must
+//! A hand-written out-of-crate `System` (the `boyko_render` `GpuSystem`) must
 //! reach a concrete `!Send` resource (its RHI context) WITHOUT routing through
 //! the `NonSendResMut` `SystemParam` — the param's `init_access` side effect
 //! (`mark_universal`) would promote the system to `SystemKind::CpuExclusive`,
@@ -114,13 +114,12 @@ impl<'w> DispatcherToken<'w> {
     /// (Option C — the apply-window single-thread-touch invariant.)
     ///
     /// * The token is mintable ONLY by the dispatcher at `running == 0` (see
-    ///   [`new`](Self::new)), so no worker holds an aliasing cell — the `!Send`
+    ///   `new`), so no worker holds an aliasing cell — the `!Send`
     ///   payload `R` is touched single-threaded on its owning thread, the
     ///   external-synchronisation contract `!Send` types need.
     /// * `&mut self` guarantees the returned `&mut R` is the UNIQUE live
     ///   projection through this token (M1).
     ///
-    /// [`new`]: Self::new
     pub fn nonsend_resource_mut<R: NonSendResource>(&mut self) -> Option<&mut R> {
         #[cfg(debug_assertions)]
         debug_assert_eq!(

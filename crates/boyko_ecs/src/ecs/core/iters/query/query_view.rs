@@ -73,7 +73,7 @@ use crate::ecs::identifiers::primitives::ArchetypeId;
 /// # Layout (§10.2, amended by Phase 22 D4)
 ///
 /// `UnsafeEcsCell<'w>` (8 B) + `NonNull<UnsafeCell<...>>` (8 B) + inline
-/// [`TagTerms`] (stack-only, `MAX_DYN_TAG_TERMS` slots) + ZST `PhantomData`.
+/// `TagTerms` (stack-only, `MAX_DYN_TAG_TERMS` slots) + ZST `PhantomData`.
 /// Hot pointer fields plus an inline 72-B term block; no heap indirection.
 /// Field order is left to rustc (no `#[repr(C)]`); the no-terms fast path
 /// reads only the terms' `len == 0` byte once per archetype transition.

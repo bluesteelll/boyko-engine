@@ -1,7 +1,7 @@
 //! The unified per-backend [`VulkanError`] (plan D4).
 //!
-//! The compute path's three rich error enums ([`BootError`](crate::device::BootError),
-//! [`MemoryError`](crate::memory::MemoryError), [`ComputeError`](crate::compute::ComputeError))
+//! The compute path's three rich error enums ([`BootError`],
+//! [`MemoryError`], [`ComputeError`])
 //! fold into ONE `VulkanError` used as the associated `Error` for every
 //! operational trait ([`RhiDevice`](boyko_rhi::RhiDevice) /
 //! [`RhiQueue`](boyko_rhi::RhiQueue) /

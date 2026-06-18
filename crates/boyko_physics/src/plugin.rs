@@ -71,7 +71,7 @@ const INITIAL_BODY_CAPACITY: usize = 1024;
 /// [`SolverScratch`] (all reused, capacity-preserving), the chosen solver
 /// `S::default()` (the `ResMut<S>` the generic step system dispatches on, D2),
 /// and the [`IntegrationMode`] derived from `S::default().owns_integration()`
-/// (C2 — gates [`physics_integrate`](crate::systems::physics_integrate) off for
+/// (C2 — gates [`physics_integrate`] off for
 /// an owning TGS solver so it does not double-integrate).
 ///
 /// Stages registered in deterministic order via `.after(...)`:

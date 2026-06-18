@@ -52,7 +52,7 @@ pub const MAX_WORKERS: usize = 64;
 /// it is heap-allocated so that the deque entries remain word-sized.
 ///
 /// The `Send` bound on `body` is sufficient at the type level; the pool
-/// upholds the 'static erasure via [`Scope::Drop`]'s blocking contract
+/// upholds the 'static erasure via [`Scope`]'s `Drop` blocking contract
 /// (plan §4.5.6).
 pub struct TaskHandle {
     pub(crate) body: Box<dyn FnOnce() + Send + 'static>,
@@ -169,7 +169,7 @@ impl PoolInner {
 
     /// Backing implementation of [`ThreadPool::install`]. Runs on the
     /// calling thread; sets the ambient-pool + worker-id TLS for the
-    /// duration (restored on return *and* on unwind via [`InstallGuard`]).
+    /// duration (restored on return *and* on unwind via `InstallGuard`).
     pub fn install<'scope, F, R>(&'scope self, f: F) -> R
     where
         F: FnOnce(&Scope<'scope>) -> R + Send,

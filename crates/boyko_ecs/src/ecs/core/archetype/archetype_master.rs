@@ -319,7 +319,7 @@ impl ArchetypeMaster {
     
     /// Finds all archetypes that contain the specified components.
     ///
-    /// Thin wrapper around [`find_archetypes_with_components_into`] for backward compatibility.
+    /// Thin wrapper around `find_archetypes_with_components_into` for backward compatibility.
     #[inline]
     pub fn find_archetypes_with_components(&self, component_ids: &[ComponentId]) -> Vec<ArchetypeId> {
         self.registry.find_archetypes_with_components(component_ids)
@@ -342,7 +342,7 @@ impl ArchetypeMaster {
 
     /// Finds all archetypes containing all components in the specified mask.
     ///
-    /// Thin wrapper around [`find_matching_archetypes_into`] for backward compatibility.
+    /// Thin wrapper around `find_matching_archetypes_into` for backward compatibility.
     #[inline]
     pub fn find_matching_archetypes(&self, mask: &ComponentMask) -> Vec<ArchetypeId> {
         self.registry.find_matching_archetypes(mask)
@@ -361,7 +361,7 @@ impl ArchetypeMaster {
 
     /// Find archetypes with complex filtering criteria (include, exclude, optional components).
     ///
-    /// Thin wrapper around [`find_archetypes_with_filter_into`] for backward compatibility.
+    /// Thin wrapper around `find_archetypes_with_filter_into` for backward compatibility.
     #[inline]
     pub fn find_archetypes_with_filter(
         &self,
@@ -392,7 +392,7 @@ impl ArchetypeMaster {
 
     /// Find archetypes with components that can be included, excluded, or optional.
     ///
-    /// Thin wrapper around [`find_archetypes_with_component_filter_into`] for backward compatibility.
+    /// Thin wrapper around `find_archetypes_with_component_filter_into` for backward compatibility.
     #[inline]
     pub fn find_archetypes_with_component_filter(
         &self,

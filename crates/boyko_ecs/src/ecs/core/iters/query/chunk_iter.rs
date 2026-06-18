@@ -12,8 +12,8 @@
 //! terms, or the per-epoch memoised term-filtered slice):
 //!
 //! 1. Mint a `*mut Archetype` (`mutable == true`) or reborrow `*const`
-//!    as `*mut` (`mutable == false`) via [`UnsafeEcsCell::archetype_ptr_mut`]
-//!    / [`UnsafeEcsCell::archetype_ptr`]. Stale ids (Q5) are skipped via
+//!    as `*mut` (`mutable == false`) via `UnsafeEcsCell::archetype_ptr_mut`
+//!    / `UnsafeEcsCell::archetype_ptr`. Stale ids (Q5) are skipped via
 //!    `continue` — same semantics as `iter.rs:216-220`.
 //! 2. Probe `entity_count`; skip archetypes whose row count is zero.
 //! 3. Refresh the per-archetype `ChunkFetch` via
@@ -41,8 +41,6 @@
 //! [`ChunkedQueryData::set_chunk_readonly`]: super::chunked_data::ChunkedQueryData::set_chunk_readonly
 //! [`ArchetypalQueryFilter`]: super::filter::ArchetypalQueryFilter
 //! [`QueryData::Item`]: super::data::QueryData::Item
-//! [`UnsafeEcsCell::archetype_ptr`]: crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell::archetype_ptr
-//! [`UnsafeEcsCell::archetype_ptr_mut`]: crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell::archetype_ptr_mut
 //! [fetch]: super::chunked_data::ChunkedQueryData::fetch_chunk
 
 use crate::ecs::core::archetype::archetype::Archetype;

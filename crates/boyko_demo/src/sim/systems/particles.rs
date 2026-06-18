@@ -30,7 +30,7 @@ const FREEZE_STRIDE: usize = 64;
 /// The query filter is [`Disabled<Frozen>`]: a particle whose [`Frozen`]
 /// enable-bit is SET is skipped by the integrator and holds its position, while
 /// the rest of the cloud flows. The per-row bit is toggled O(1) by
-/// [`freeze_pulse`](crate::sim::systems::particles::freeze_pulse) with no
+/// [`freeze_pulse`] with no
 /// archetype migration — the enable-bit tag backend's headline property. The
 /// per-row `filter_fetch` gate composes with `par_iter_mut` (the parallel path
 /// applies the same per-row enable test the sequential walk does), and with the

@@ -24,8 +24,8 @@ pub(crate) const DEFAULT_FIXED_TIMESTEP: Duration = Duration::from_nanos(15_625_
 /// (plan D2).
 ///
 /// Driven exclusively by [`fixed_advance`](super::fixed_advance) (the
-/// `pub(crate)` [`accumulate`](FixedTime::accumulate) /
-/// [`expend`](FixedTime::expend) pair); systems read it, and may reconfigure
+/// `pub(crate)` `accumulate` /
+/// `expend` pair); systems read it, and may reconfigure
 /// the timestep via `ResMut<FixedTime>` ([`set_timestep`](FixedTime::set_timestep)
 /// takes effect on the NEXT fixed loop — the running loop keeps its
 /// entry-time snapshot, plan ★M3).

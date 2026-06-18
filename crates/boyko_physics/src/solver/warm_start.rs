@@ -32,7 +32,7 @@
 //!
 //! # Keying (the dense-row assumption, OQ-2)
 //!
-//! W3 keys on the dense [`BodyIndex`](crate::manifold::BodyIndex) row indices,
+//! W3 keys on the dense [`BodyIndex`] row indices,
 //! which are stable frame-to-frame for a stable scene (no spawn/despawn between
 //! frames — the stacking case). A structural change reshuffles the dense rows,
 //! so the matched keys differ for one frame: that is a warm-start MISS (a
@@ -224,7 +224,7 @@ impl WarmStartTable {
     /// Inserts (or overwrites) a contact's converged impulses under `key`, in the
     /// caller's deterministic manifold order (P2 W3 — C3).
     ///
-    /// Linear-probes from [`home`](Self::home) to the first empty slot (or an
+    /// Linear-probes from the `home` slot to the first empty slot (or an
     /// existing entry for the same key, which it overwrites). Because the table
     /// is freshly zeroed each frame and the caller inserts each live key exactly
     /// once in a fixed order, the resulting occupancy is a pure function of the
@@ -262,7 +262,7 @@ impl WarmStartTable {
     /// Looks up the converged impulses stored under `key`, or `None` on a miss
     /// (P2 W3 — C3 seed lookup).
     ///
-    /// Linear-probes from [`home`](Self::home); the first [`EMPTY`] slot ends the
+    /// Linear-probes from the `home` slot; the first `EMPTY` slot ends the
     /// chain (no tombstones, so a miss is unambiguous). A miss means the contact
     /// was not present last frame (a new or just-reformed contact) and the caller
     /// seeds it with zero impulses — a one-frame convergence cost, no error.

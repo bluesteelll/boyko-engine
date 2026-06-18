@@ -71,7 +71,7 @@ const _: () = assert!(MAX_TYPED_WRITE_ARITY <= MAX_BUNDLE_ARITY);
 /// One resolved destination column for the typed batch-write path (Decision 4).
 ///
 /// Built **once per batch** by
-/// [`ComponentPoolBundle::resolve_column_ptrs`](crate::ecs::core::component::component_pool_bundle::ComponentPoolBundle::resolve_column_ptrs)
+/// `ComponentPoolBundle::resolve_column_ptrs`
 /// under a single `&mut` borrow of the pool bundle that is then dropped before
 /// the row loop begins (W2 single-provenance). The row loop holds only the raw
 /// `base` pointer and the const-known `stride`; it never re-borrows the
@@ -143,7 +143,7 @@ impl ColumnPtr {
 /// batch-write path (Decision 4).
 ///
 /// Built once per batch by
-/// [`ComponentPoolBundle::resolve_column_ptrs`](crate::ecs::core::component::component_pool_bundle::ComponentPoolBundle::resolve_column_ptrs);
+/// `ComponentPoolBundle::resolve_column_ptrs`;
 /// lives entirely within `SpawnBatchCommand::apply`'s frame and is consumed
 /// without any intervening `&mut EcsMaster` / `&mut Archetype` reborrow (M3 TB
 /// contract). The derive-emitted [`Bundle::write_row_typed`] reads it per row.
@@ -174,7 +174,7 @@ impl BundleColumnPtrs {
     pub const PERM_SKIP: u8 = u8::MAX;
 
     /// Creates an empty, zeroed scratch suitable for repeated
-    /// [`ComponentPoolBundle::resolve_column_ptrs`](crate::ecs::core::component::component_pool_bundle::ComponentPoolBundle::resolve_column_ptrs)
+    /// `ComponentPoolBundle::resolve_column_ptrs`
     /// fills. `base`s are null and `data_len == 0` until a resolve runs.
     #[inline]
     pub fn new() -> Self {
@@ -570,7 +570,7 @@ pub trait Bundle: sealed::BundleSealed + Send + Sync + Unpin + 'static {
     /// The caller must guarantee:
     ///
     /// 1. **Provenance / aliasing (W2, M3):** `dst` was built by
-    ///    [`ComponentPoolBundle::resolve_column_ptrs`](crate::ecs::core::component::component_pool_bundle::ComponentPoolBundle::resolve_column_ptrs)
+    ///    `ComponentPoolBundle::resolve_column_ptrs`
     ///    under a single `&mut` borrow of the pool bundle that has **ended**
     ///    before this call. Each `dst.column_base(..)` carries write-capable
     ///    provenance for the column's data sub-region and is **not** aliased by

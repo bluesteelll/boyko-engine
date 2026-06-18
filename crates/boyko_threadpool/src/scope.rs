@@ -164,7 +164,7 @@ impl SharedPtr {
 //   so concurrent access through the pointer is sound.
 unsafe impl Send for SharedPtr {}
 
-/// Fork/join scope over a [`ThreadPool`].
+/// Fork/join scope over a [`ThreadPool`](crate::ThreadPool).
 ///
 /// Constructed by [`ThreadPool::install`] or [`ThreadPool::scope`].
 /// Spawn child tasks via [`Scope::spawn`]; the scope blocks at drop time

@@ -52,7 +52,7 @@ pub struct Transition<S: States> {
 /// `pub` for the same L1-fallback reason as [`Transition<S>`] (it is the
 /// `Res<…>` param type in the public condition bounds); an opaque POD whose
 /// fields are private and whose only public method is the read-only
-/// [`current`](StateTransitionRecord::current).
+/// `current`.
 ///
 /// [`Resource`]: crate::ecs::core::resources::resource::Resource
 #[derive(Clone)]

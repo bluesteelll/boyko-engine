@@ -20,7 +20,7 @@
 //!   the schedule is unusable. The wasm runner instead drives the SAME per-mode
 //!   system functions sequentially through the `EcsMaster` direct API
 //!   (`run_system`), replicating the transition pass + `on_enter`/`on_exit`/
-//!   `in_state` gating inline (see [`run_sim_step_sequential`]). `par_iter_mut`
+//!   `in_state` gating inline (see `run_sim_step_sequential`). `par_iter_mut`
 //!   inside an unchanged system body falls back to a sequential walk when no pool
 //!   is attached (PAR7), so the bodies need no `#[cfg]`.
 //!

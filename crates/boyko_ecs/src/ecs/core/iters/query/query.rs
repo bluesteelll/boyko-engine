@@ -277,7 +277,7 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
     /// * The type system — [`Self::iter`] is gated by
     ///   `D: ReadOnlyQueryData`; if the user calls `iter()` on a `D`
     ///   containing `&mut T`, the bound fails to resolve.
-    /// * Phase 8a's existing [`UnsafeEcsCell::archetype_ptr_mut`] carries a
+    /// * Phase 8a's existing `UnsafeEcsCell::archetype_ptr_mut` carries a
     ///   `debug_assert!(self.allows_mutable_access)` inside the cell. Any
     ///   path that calls `archetype_ptr_mut` on a read-only cell trips
     ///   that debug-assert at the cell level.

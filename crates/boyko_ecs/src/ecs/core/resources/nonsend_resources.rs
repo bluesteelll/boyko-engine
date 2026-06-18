@@ -110,7 +110,7 @@ impl NonSendResources {
     /// Constructs an empty non-send resource slab.
     ///
     /// The slab is heap-allocated via `Box::<[T; N]>::new_uninit()` — never on
-    /// the stack — mirroring [`Resources::new`].
+    /// the stack — mirroring `Resources::new`.
     #[cold]
     pub fn new() -> Self {
         // SAFETY (N1 / slab init): `Box::<[NonSendSlotStorage; N]>::new_uninit()`

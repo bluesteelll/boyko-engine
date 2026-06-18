@@ -17,7 +17,7 @@
 //!    the [`rhi_impl`] trait surface).
 //! 4. **0d** — a SECOND compute pass transforms the same buffer, chained through
 //!    a `vkCmdPipelineBarrier`, submitted once → diff vs a CPU golden (the
-//!    [`rhi_impl::VulkanCommandEncoder::pipeline_barrier`] lowering).
+//!    [`rhi_impl::VulkanCommandEncoder`]'s `pipeline_barrier` lowering).
 //!
 //! The single readback in 0c/0d is the TEST ORACLE, not a per-frame path; the
 //! validation messenger asserted to zero messages is the soundness oracle that

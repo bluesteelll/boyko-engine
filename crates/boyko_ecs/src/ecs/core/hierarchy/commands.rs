@@ -1,14 +1,14 @@
 //! Hierarchy lifecycle hooks + the deferred commands that maintain
-//! [`Children`](super::Children) (Phase 19, CORE).
+//! [`Children`] (Phase 19, CORE).
 //!
 //! # Two halves
 //!
-//! * **Hooks** ([`child_of_on_insert`] / [`child_of_on_replace`] /
-//!   [`children_on_replace`]) fire synchronously at structural-op sites with the
+//! * **Hooks** (`child_of_on_insert` / `child_of_on_replace` /
+//!   `children_on_replace`) fire synchronously at structural-op sites with the
 //!   read-only [`DeferredEcsMaster`] view. They copy scalars out and enqueue
 //!   deferred commands — they never mutate storage directly.
-//! * **Command applies** ([`LinkChildCommand`] / [`UnlinkChildCommand`] /
-//!   [`ClearChildrenCommand`]) run later under `&mut EcsMaster` at the apply
+//! * **Command applies** (`LinkChildCommand` / `UnlinkChildCommand` /
+//!   `ClearChildrenCommand`) run later under `&mut EcsMaster` at the apply
 //!   window and perform the actual `Children` mutation / `ChildOf` removal.
 //!
 //! # OBS-FIRE-LOOP / F2 discipline (Tree-Borrows soundness)

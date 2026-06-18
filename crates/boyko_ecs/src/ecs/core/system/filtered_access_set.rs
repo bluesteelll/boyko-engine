@@ -117,7 +117,7 @@ pub struct AccessConflict {
 ///
 /// `bit_owners` lives on the heap (`Box<[...; 1536]>`) so the stack
 /// footprint of the per-system init frame stays bounded (200 B), and the
-/// 24 KB allocation is freed by [`finalize`] after init completes.
+/// 24 KB allocation is freed by `finalize` after init completes.
 #[repr(C)]
 pub struct FilteredAccessSet {
     /// Running aggregate of all params declared so far in this system.
@@ -138,7 +138,7 @@ impl FilteredAccessSet {
     /// Constructs an empty accumulator.
     ///
     /// Allocates the 24 KB `bit_owners` slab on the heap; the slab is
-    /// freed by [`finalize`] once init completes.
+    /// freed by `finalize` once init completes.
     #[cold]
     pub fn new() -> Self {
         Self {

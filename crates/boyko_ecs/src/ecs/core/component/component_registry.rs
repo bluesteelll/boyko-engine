@@ -2,7 +2,7 @@
 //!
 //! # Component ID assignment
 //!
-//! Each distinct type `T` implementing [`Component`](crate::ecs::core::component::component::Component)
+//! Each distinct type `T` implementing [`Component`]
 //! is assigned a unique [`ComponentId`] the first time `T::component_id()` is
 //! called in the current process. The assignment is lazy, lock-free on the
 //! cached read path, and stable for the lifetime of the process — but **not**
@@ -153,13 +153,13 @@ impl ComponentLayout {
     /// Phase 22 (D3): layout for a runtime-minted **dynamic tag**.
     ///
     /// Size 0, alignment 1, no drop glue; `type_id` is the private
-    /// [`DynamicTagMarker`] sentinel, shared by EVERY dynamic tag. Because the
+    /// `DynamicTagMarker` sentinel, shared by EVERY dynamic tag. Because the
     /// sentinel is uninhabited and private it can never collide with a user
     /// type, and the typed-pool `debug_assert(component_type_id ==
     /// TypeId::of::<T>())` correctly rejects typed access to dynamic-tag ids.
     ///
     /// `name` is the interned tag name (leaked once per unique tag by the
-    /// [`TAG_NAMES`] mint path) — it doubles as `type_name` for diagnostics.
+    /// `TAG_NAMES` mint path) — it doubles as `type_name` for diagnostics.
     pub fn new_dynamic_tag(name: &'static str) -> Self {
         Self {
             size: 0,
@@ -203,7 +203,7 @@ enum DynamicTagMarker {}
 /// dynamic tag needs downstream ([`register_hooks_by_id`],
 /// `EcsMaster::add_observer`) take [`ComponentId`]. The reverse direction has
 /// NO constructor: a `TagId` is a proof that the id was minted as a size-0
-/// dynamic tag, and only the [`TAG_NAMES`] mint path can issue one.
+/// dynamic tag, and only the `TAG_NAMES` mint path can issue one.
 ///
 /// # Identity stability
 ///
@@ -238,8 +238,8 @@ impl From<TagId> for ComponentId {
 /// An enable tag uses the **bitset** storage backend ([`StorageKind::Bitset`]):
 /// its id is filtered out of every archetype signature and toggled with a
 /// single per-row bit instead of triggering a migration. It is minted via
-/// [`try_register_enable_tag_by_name`], which sets the id's
-/// [`STORAGE_KIND`] to [`StorageKind::Bitset`].
+/// `try_register_enable_tag_by_name`, which sets the id's
+/// `STORAGE_KIND` to [`StorageKind::Bitset`].
 ///
 /// # One-way bridge
 ///
@@ -333,7 +333,7 @@ pub fn get_hooks(component_id: usize) -> Option<&'static ComponentHooks> {
 /// (const-gated, Change 1 of the Wave-5 soundness fix). A plain
 /// `#[derive(Component)]` therefore leaves the slot UNSET, which reads as "no
 /// hooks" everywhere downstream — and, crucially, leaves the slot free for the
-/// runtime [`ComponentHooksBuilder`] to commit via `OnceLock::set`. Derive and
+/// runtime `ComponentHooksBuilder` to commit via `OnceLock::set`. Derive and
 /// the runtime builder are mutually exclusive per type (the XOR contract).
 #[inline]
 pub fn install_hooks<C: Component>(component_id: usize) {
@@ -385,12 +385,12 @@ pub(crate) fn try_set_hooks(component_id: usize, hooks: ComponentHooks) -> bool 
 /// The default for every id is [`Table`](StorageKind::Table) — the standard
 /// signature-fragmenting, per-archetype `ComponentPool` storage. An id minted
 /// as an **enable tag** (`#[component(storage = "bitset")]` or
-/// [`try_register_enable_tag_by_name`]) is [`Bitset`](StorageKind::Bitset):
+/// `try_register_enable_tag_by_name`) is [`Bitset`](StorageKind::Bitset):
 /// filtered out of every archetype signature, no `ComponentPool`, toggled with
 /// a single per-row bit.
 ///
 /// `#[repr(u8)]` with explicit discriminants so the value round-trips losslessly
-/// through the parallel cold [`STORAGE_KIND`] `AtomicU8` table. The discriminant
+/// through the parallel cold `STORAGE_KIND` `AtomicU8` table. The discriminant
 /// space is intentionally extensible (D7: a future relationship kind = 2).
 #[repr(u8)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -423,7 +423,7 @@ static STORAGE_KIND: [AtomicU8; MAX_COMPONENTS] =
 
 /// Returns the storage backend registered for `component_id` (EnableTag plan,
 /// D5). Defaults to [`StorageKind::Table`] for any id never classified via
-/// [`set_storage_kind`].
+/// `set_storage_kind`.
 ///
 /// Cold: read at archetype construction (signature-membership decision), never
 /// on the per-frame hot path. One `Relaxed` load + branch.
@@ -511,8 +511,8 @@ pub(crate) fn set_storage_kind(component_id: usize, kind: StorageKind) {
 /// `CpuPinned` is a residency conflict and is rejected loudly at archetype mint.
 ///
 /// `#[repr(u8)]` with explicit discriminants so the value round-trips losslessly
-/// through the parallel cold [`RESIDENCY_CLASS`] `AtomicU8` table — exactly as
-/// [`StorageKind`] rides [`STORAGE_KIND`].
+/// through the parallel cold `RESIDENCY_CLASS` `AtomicU8` table — exactly as
+/// [`StorageKind`] rides `STORAGE_KIND`.
 #[repr(u8)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ResidencyKind {
@@ -607,7 +607,7 @@ pub(crate) fn gpu_component_set_word(word_index: usize) -> u64 {
 
 /// Returns the residency class registered for `component_id` (Phase 4 Seam 1,
 /// D1). Defaults to [`ResidencyKind::Cpu`] for any id never classified via
-/// [`set_residency_class`].
+/// `set_residency_class`.
 ///
 /// Cold: read at archetype construction (the `GPU_RESIDENT` stamp + conflict
 /// scan), never on the per-frame hot path. One `Relaxed` load + branch.
@@ -696,7 +696,7 @@ pub(crate) fn set_residency_class(component_id: usize, kind: ResidencyKind) {
 ///
 /// This is the derive-emitted counterpart of the public runtime
 /// [`classify_component_residency`]: `#[derive(Component)]` expands into
-/// downstream crates where the `pub(crate)` [`set_residency_class`] is
+/// downstream crates where the `pub(crate)` `set_residency_class` is
 /// unreachable, so the derive's `component_id()` install path calls this `pub`
 /// wrapper instead — exactly mirroring how it calls [`install_clone_fn`].
 ///
@@ -708,7 +708,7 @@ pub(crate) fn set_residency_class(component_id: usize, kind: ResidencyKind) {
 /// # Panics
 ///
 /// In debug, if `component_id` is reclassified to a different class (see
-/// [`set_residency_class`]). Unreachable for derived types (a single
+/// `set_residency_class`). Unreachable for derived types (a single
 /// `RESIDENCY` const per type).
 #[inline]
 pub fn install_residency_class<C: Component>(component_id: usize) {
@@ -731,7 +731,7 @@ pub fn install_residency_class<C: Component>(component_id: usize) {
 /// The public counterpart to the derive-only [`install_residency_class`]: it
 /// lets `boyko_render` (or any non-derive caller) classify a foreign component
 /// id whose type it does not own the `Component` impl for. Same write-once /
-/// reclassify-panic discipline as [`set_residency_class`].
+/// reclassify-panic discipline as `set_residency_class`.
 ///
 /// Must be called at registration time, before the id can enter any archetype
 /// (the same ordering the `RESIDENCY_CLASS` table relies on).
@@ -739,7 +739,7 @@ pub fn install_residency_class<C: Component>(component_id: usize) {
 /// # Panics (debug only)
 ///
 /// If `component_id` is reclassified to a different class (see
-/// [`set_residency_class`]).
+/// `set_residency_class`).
 #[inline]
 pub fn classify_component_residency(component_id: usize, kind: ResidencyKind) {
     set_residency_class(component_id, kind);
@@ -750,7 +750,7 @@ pub fn classify_component_residency(component_id: usize, kind: ResidencyKind) {
 /// const (EnableTag plan, D5 — the `#[component(storage = "bitset")]` derive arm,
 /// Wave 5 Step 10).
 ///
-/// This is the **public** counterpart of the `pub(crate)` [`set_storage_kind`]:
+/// This is the **public** counterpart of the `pub(crate)` `set_storage_kind`:
 /// `#[derive(Component)]` expands into downstream crates, where the `pub(crate)`
 /// writer is unreachable, so the derive's `component_id()` install path calls
 /// this `pub` wrapper instead — exactly mirroring how it calls [`install_hooks`]
@@ -759,14 +759,14 @@ pub fn classify_component_residency(component_id: usize, kind: ResidencyKind) {
 /// `#[derive(Component)]` const-folds it away and the id stays at the
 /// [`StorageKind::Table`] default — zero cost for non-tag components.
 ///
-/// Write-once and idempotent through [`set_storage_kind`]: it runs once per
+/// Write-once and idempotent through `set_storage_kind`: it runs once per
 /// type per process (behind the `component_id()` `OnceLock`), atomically with id
 /// assignment and therefore before the id can enter any archetype.
 ///
 /// # Panics
 ///
 /// In debug, if `component_id` is reclassified to a different kind (see
-/// [`set_storage_kind`]). The XOR-by-construction discipline (a single
+/// `set_storage_kind`). The XOR-by-construction discipline (a single
 /// `STORAGE_IS_BITSET` const per type) makes this unreachable for derived types.
 #[inline]
 pub fn install_storage_kind<C: Component>(component_id: usize) {
@@ -955,11 +955,11 @@ pub type RequiredCtor = unsafe fn(dst: *mut u8);
 /// `component_id()` (BUG-REQ-CYCLE-1): a cycle would otherwise re-enter the
 /// requiring type's own `component_id()` `OnceLock::get_or_init` on the same
 /// thread and deadlock. The derive emits `B::component_id` (a fn item, no
-/// parentheses); the id is resolved LAZILY in [`build_required_plan`], which
+/// parentheses); the id is resolved LAZILY in `build_required_plan`, which
 /// runs at archetype-expansion time — OUTSIDE any `component_id` init.
 pub type RequiredIdFn = fn() -> ComponentId;
 
-/// One DIRECT `#[require]` edge as stored in [`REQUIRES_DIRECT`] (D2). 16 B POD:
+/// One DIRECT `#[require]` edge as stored in `REQUIRES_DIRECT` (D2). 16 B POD:
 /// an 8 B [`RequiredIdFn`] resolver + an 8 B [`RequiredCtor`]. Distinct from
 /// [`RequiredEntry`] (which carries a RESOLVED [`ComponentId`]): the direct
 /// table holds the id as an UNCALLED resolver to break the registration-time
@@ -977,7 +977,7 @@ pub struct RequiredDirectEntry {
 /// One transitively-resolved required component (D2). 16 B POD: an 8 B
 /// [`ComponentId`] + an 8 B function pointer. `#[repr(C)]` pins the field
 /// order; the type is `Copy` so the closure/slice plumbing never invokes drop
-/// glue. Produced by [`build_required_plan`] after resolving each
+/// glue. Produced by `build_required_plan` after resolving each
 /// [`RequiredDirectEntry::id_fn`].
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
@@ -1002,7 +1002,7 @@ const _: () = assert!(std::mem::size_of::<RequiredEntry>() == 16);
 const _: () = assert!(std::mem::size_of::<RequiredDirectEntry>() == 16);
 
 /// The full transitive closure of a component's required components (D3),
-/// computed once and memoized in [`REQUIRES_ALL`]. The `entries` slice is
+/// computed once and memoized in `REQUIRES_ALL`. The `entries` slice is
 /// DFS-ordered (deps-before-dependent) and deduped by `component_id` (the W1
 /// conflict rule resolves which ctor each id carries).
 pub struct RequiredPlan {
@@ -1018,7 +1018,7 @@ pub struct RequiredPlan {
 #[derive(Debug)]
 pub enum RequiredError {
     /// A `#[require]` cycle was detected (`A → … → A`). Memoization alone does
-    /// NOT break it (the [`REQUIRES_ALL`] slot is `None` during recursion), so
+    /// NOT break it (the `REQUIRES_ALL` slot is `None` during recursion), so
     /// the "currently-building" stack catches the re-entry.
     Cycle {
         /// The id re-entered while already on the building stack.
@@ -1397,7 +1397,7 @@ pub enum Cloneability {
 }
 
 /// Cold per-component clone metadata (D1). 16 B POD (niche-packed `Option<fn-ptr>`
-/// 8 B + `Cloneability` 1 B + pad). Lives in the parallel [`CLONE`] table, NOT in
+/// 8 B + `Cloneability` 1 B + pad). Lives in the parallel `CLONE` table, NOT in
 /// `ComponentLayout` (keeps TRIPWIRE 2's 56 B). `Copy + Send + Sync` (fn-ptr +
 /// enum only), like `ComponentHooks`.
 #[derive(Clone, Copy, Debug)]
@@ -1761,7 +1761,7 @@ pub enum Serializability {
 }
 
 /// Cold per-component serialization metadata (plan §3.7). Lives in the parallel
-/// [`SERIALIZE`] table, NOT in `ComponentLayout` (keeps TRIPWIRE 2's 56 B).
+/// `SERIALIZE` table, NOT in `ComponentLayout` (keeps TRIPWIRE 2's 56 B).
 /// `Copy + Send + Sync` (fn-ptrs + POD + `&'static str`), like [`CloneInfo`].
 ///
 /// Per plan O1, the exact size is NOT load-bearing (this is a cold record), so —
@@ -1795,7 +1795,7 @@ pub struct SerializeInfo {
     /// type name, overridable via `#[component(stable_name = "...")]`. The on-disk
     /// type key — `ComponentId` is process-unstable, the name is the stable option.
     pub stable_name: &'static str,
-    /// The 64-bit hash of [`Self::stable_name`], the [`STABLE_NAME_INDEX`] key.
+    /// The 64-bit hash of [`Self::stable_name`], the `STABLE_NAME_INDEX` key.
     pub stable_name_hash: u64,
 }
 
@@ -1882,7 +1882,7 @@ pub fn install_serialize_fn<C: Component>(component_id: usize) {
     let _ = SERIALIZE[component_id].set(info);
 }
 
-/// 64-bit FNV-1a hash of a byte string (the [`STABLE_NAME_INDEX`] keying, C1).
+/// 64-bit FNV-1a hash of a byte string (the `STABLE_NAME_INDEX` keying, C1).
 ///
 /// A `const fn` so the derive could fold it at compile time and so it is reusable
 /// by the future `boyko_serialize` file-key path. FNV-1a is chosen over a
@@ -1929,7 +1929,7 @@ fn stable_name_index() -> &'static Mutex<HashMap<u64, Vec<usize>>> {
     STABLE_NAME_INDEX.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Registers `C`'s stable name in the [`STABLE_NAME_INDEX`] (C1). Called from the
+/// Registers `C`'s stable name in the `STABLE_NAME_INDEX` (C1). Called from the
 /// derive's `component_id()` closure UNGATED (like [`install_clone_fn`]), once per
 /// component per process. COLD — never a frame path.
 ///
@@ -2213,7 +2213,7 @@ impl<C: Copy + 'static, Fields: SerPodTuple> SerPobArm for &&SerializeProbe<C, F
 /// §3.7). Carries NO `Wire` bound (so it compiles for ANY plain struct, including
 /// one with non-`Wire` fields, and — crucially — one that implements `Drop`) — the
 /// `Wire` requirement lives on the generic [`serialize_via_wire`] /
-/// [`deserialize_via_wire`] glue's `WireRefTuple` / [`WireTuple`] bounds, which the
+/// [`deserialize_via_wire`] glue's `WireRefTuple` / `WireTuple` bounds, which the
 /// encode-fn autoref arm checks and defers on.
 ///
 /// The derive maps a component `struct C { f0: F0, f1: F1, … }` to:
@@ -2247,7 +2247,7 @@ pub trait WireBridge: Sized {
 }
 
 /// Owning / bit-restricted serialize glue (plan §3.1 / §3.7): read `&C`, borrow its
-/// fields into the ref tuple, and write each through [`WireRefTuple`]. The single
+/// fields into the ref tuple, and write each through `WireRefTuple`. The single
 /// monomorphized free fn the derive installs as the [`SerializeFn`] for a
 /// [`Serializability::SerializeViaFn`] component — no vtable, no `Box<dyn>`, no
 /// clone (mirrors [`clone_via_clone`]'s reach-no-world-state boundary).
@@ -2280,7 +2280,7 @@ pub unsafe fn serialize_via_wire<C>(
 }
 
 /// Owning / bit-restricted deserialize glue (plan §3.1 / §3.7): read each field
-/// through [`WireTuple`] in declaration order, then `ptr::write` the reconstructed
+/// through `WireTuple` in declaration order, then `ptr::write` the reconstructed
 /// `C` into the UNINITIALIZED `dst`. The single monomorphized free fn the derive
 /// installs as the [`DeserializeFn`] for a [`Serializability::SerializeViaFn`]
 /// component.
@@ -2714,7 +2714,7 @@ pub fn get_component_memory_layout(component_id: usize) -> Option<Layout> {
 /// Caller guarantees that `component_id < MAX_COMPONENTS` and that one of
 /// the following has already completed for the corresponding type `T`:
 /// - [`register_new::<T>()`] (production path, via `T::component_id()`), or
-/// - [`register_layout::<T>(component_id)`] (test-only escape hatch).
+/// - `register_layout::<T>(component_id)` (test-only escape hatch).
 ///   Violating either yields UB.
 #[inline]
 pub unsafe fn get_component_size_unchecked(component_id: usize) -> usize {
@@ -2734,7 +2734,7 @@ pub unsafe fn get_component_size_unchecked(component_id: usize) -> usize {
 /// Caller guarantees that `component_id < MAX_COMPONENTS` and that one of
 /// the following has already completed for the corresponding type `T`:
 /// - [`register_new::<T>()`] (production path, via `T::component_id()`), or
-/// - [`register_layout::<T>(component_id)`] (test-only escape hatch).
+/// - `register_layout::<T>(component_id)` (test-only escape hatch).
 ///   Violating either yields UB.
 #[inline]
 pub unsafe fn get_component_alignment_unchecked(component_id: usize) -> usize {
@@ -2754,7 +2754,7 @@ pub unsafe fn get_component_alignment_unchecked(component_id: usize) -> usize {
 /// Caller guarantees that `component_id < MAX_COMPONENTS` and that one of
 /// the following has already completed for the corresponding type `T`:
 /// - [`register_new::<T>()`] (production path, via `T::component_id()`), or
-/// - [`register_layout::<T>(component_id)`] (test-only escape hatch).
+/// - `register_layout::<T>(component_id)` (test-only escape hatch).
 ///   Violating either yields UB.
 #[inline]
 pub unsafe fn get_layout_unchecked(component_id: usize) -> &'static ComponentLayout {
@@ -2774,7 +2774,7 @@ pub unsafe fn get_layout_unchecked(component_id: usize) -> &'static ComponentLay
 /// Caller guarantees that `component_id < MAX_COMPONENTS` and that one of
 /// the following has already completed for the corresponding type `T`:
 /// - [`register_new::<T>()`] (production path, via `T::component_id()`), or
-/// - [`register_layout::<T>(component_id)`] (test-only escape hatch).
+/// - `register_layout::<T>(component_id)` (test-only escape hatch).
 ///   Violating either yields UB.
 #[inline]
 pub unsafe fn get_component_memory_layout_unchecked(component_id: usize) -> Layout {
@@ -2790,7 +2790,7 @@ pub unsafe fn get_component_memory_layout_unchecked(component_id: usize) -> Layo
 /// Caller guarantees that `component_id < MAX_COMPONENTS` and that one of
 /// the following has already completed for the corresponding type `T`:
 /// - [`register_new::<T>()`] (production path, via `T::component_id()`), or
-/// - [`register_layout::<T>(component_id)`] (test-only escape hatch).
+/// - `register_layout::<T>(component_id)` (test-only escape hatch).
 ///   Violating either yields UB.
 #[inline]
 pub unsafe fn get_component_type_id_unchecked(component_id: usize) -> TypeId {

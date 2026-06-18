@@ -1,7 +1,7 @@
 //! Phase 10 change detection foundations: [`Tick`] type, wraparound
-//! constants, and the [`run_check_ticks_scan`] clamp scan.
+//! constants, and the `run_check_ticks_scan` clamp scan.
 //!
-//! See [`docs/PHASE-10-CHANGE-DETECTION-PLAN.md`] for the full design.
+//! See `docs/PHASE-10-CHANGE-DETECTION-PLAN.md` for the full design.
 //!
 //! # Wave layout
 //!
@@ -10,7 +10,7 @@
 //!   threading.
 //! * Wave C (Steps 7-10) — `Added` / `Changed` filters and `Ref` / `Mut`
 //!   `QueryData` impls.
-//! * Wave D (Steps 12-14) — [`run_check_ticks_scan`] cold path, scheduler
+//! * Wave D (Steps 12-14) — `run_check_ticks_scan` cold path, scheduler
 //!   tick bump, per-system `set_change_ticks` dispatch, and
 //!   `FunctionSystem` / `ExclusiveFunctionSystem` constructor refit.
 

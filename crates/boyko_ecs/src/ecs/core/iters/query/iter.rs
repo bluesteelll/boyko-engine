@@ -4,14 +4,14 @@
 //!
 //! * [`QueryIter`] — read-only cursor. Iterator impl is gated on
 //!   `D: ReadOnlyQueryData`. Mints archetype pointers via
-//!   [`UnsafeEcsCell::archetype_ptr`] (read-only) and dispatches every
+//!   `UnsafeEcsCell::archetype_ptr` (read-only) and dispatches every
 //!   per-archetype refresh through [`QueryData::set_table_readonly`] /
 //!   [`QueryFilter::set_table_readonly`]. No `*const → *mut` cast occurs on
 //!   this path.
 //!
 //! * [`QueryIterMut`] — mutable cursor. Iterator impl accepts any
 //!   `D: QueryData`. Mints archetype pointers via
-//!   [`UnsafeEcsCell::archetype_ptr_mut`] (write-capable) and dispatches every
+//!   `UnsafeEcsCell::archetype_ptr_mut` (write-capable) and dispatches every
 //!   per-archetype refresh through [`QueryData::set_table_mut`] /
 //!   [`QueryFilter::set_table_mut`].
 //!
@@ -47,8 +47,6 @@
 //! [`QueryData::set_table_mut`]: crate::ecs::core::iters::query::data::QueryData::set_table_mut
 //! [`QueryFilter::set_table_readonly`]: crate::ecs::core::iters::query::filter::QueryFilter::set_table_readonly
 //! [`QueryFilter::set_table_mut`]: crate::ecs::core::iters::query::filter::QueryFilter::set_table_mut
-//! [`UnsafeEcsCell::archetype_ptr`]: crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell::archetype_ptr
-//! [`UnsafeEcsCell::archetype_ptr_mut`]: crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell::archetype_ptr_mut
 
 // Step 7 lands the cursors as `pub(crate)` so the in-file unit tests can
 // consume `QueryIter::new` / `QueryIterMut::new`. Step 8 introduces
@@ -73,7 +71,7 @@ use crate::ecs::identifiers::primitives::ArchetypeId;
 
 /// Read-only cursor over a `Query<D, F>` — yields `D::Item<'q>` per row.
 ///
-/// Constructed via [`QueryIter::new`]; the iterator impl is gated on
+/// Constructed via `QueryIter::new`; the iterator impl is gated on
 /// `D: ReadOnlyQueryData` so the type system prevents instantiation with a
 /// `D` containing `&mut T`.
 ///
@@ -356,7 +354,7 @@ where
 
 /// Mutable cursor over a `Query<D, F>` — yields `D::Item<'q>` per row.
 ///
-/// Constructed via [`QueryIterMut::new`]; the iterator impl is unconditional
+/// Constructed via `QueryIterMut::new`; the iterator impl is unconditional
 /// (any `D: QueryData` works, including `&mut T`).
 ///
 /// Field shape mirrors [`QueryIter`]; the only difference is that

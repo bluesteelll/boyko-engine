@@ -725,7 +725,7 @@ pub struct RefState<T: Component> {
 /// Caches:
 /// * `value_base` — the component column for `T` (cast from `column.ptr`).
 /// * `added_base` / `changed_base` — the tick column bases returned by
-///   [`Archetype::tick_column_base`].
+///   `Archetype::tick_column_base`.
 /// * `last_run` / `this_run` — the system's tick snapshot captured at
 ///   `set_table_*` time so the per-row hot loop pays no indirection.
 ///

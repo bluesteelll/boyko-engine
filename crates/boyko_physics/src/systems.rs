@@ -37,7 +37,7 @@
 //! # Integration-ownership contract (C2 — authoritative)
 //!
 //! When the chosen solver returns `true` from
-//! [`RigidSolver::owns_integration`](crate::solver::RigidSolver::owns_integration)
+//! [`RigidSolver::owns_integration`]
 //! (the TGS [`SoftStepSolver`](crate::solver::SoftStepSolver)), the plugin
 //! inserts [`IntegrationMode::SolverOwned`](crate::resources::IntegrationMode) and:
 //!

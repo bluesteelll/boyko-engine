@@ -3,10 +3,10 @@
 //! Phase 8d Step 6 (foundation) + Phase 11 (per-entity chaining +
 //! despawn + migration). The Phase 11 changeset:
 //!
-//! * Renamed Phase 8.5's `SpawnCommand<B>` to [`SpawnAtCommand<B>`]
-//!   (plan Q9). The new shape carries a pre-allocated [`Entity`] so
+//! * Renamed Phase 8.5's `SpawnCommand<B>` to `SpawnAtCommand<B>`
+//!   (plan Q9). The new shape carries a pre-allocated `Entity` so
 //!   `Commands::spawn(bundle).id()` can return synchronously.
-//! * Added [`DespawnCommand`], [`InsertCommand<B>`], [`RemoveCommand<C>`]
+//! * Added [`DespawnCommand`], `InsertCommand<B>`, `RemoveCommand<C>`
 //!   covering the per-entity command surface (plan §6).
 //! * Added the [`migration_helpers`] module — shared archetype-migration
 //!   scaffolding for `InsertCommand` / `RemoveCommand`.

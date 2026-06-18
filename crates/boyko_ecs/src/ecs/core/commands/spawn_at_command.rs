@@ -3,7 +3,7 @@
 //!
 //! Phase 11 §6.1 (plan Q9). Replaces the Phase 8.5 `SpawnCommand<B>`. The
 //! deferred path now carries a pre-allocated `Entity` minted by
-//! [`EntityCounter::reserve_entity`](crate::ecs::core::system::params::entity_counter::EntityCounter::reserve_entity)
+//! `EntityCounter::reserve_entity`
 //! at the `Commands::spawn` callsite, so the user can call
 //! `.id()` synchronously before apply (EC2 + EC13). Apply delegates to
 //! [`EcsMaster::create_entity_at`](crate::ecs::core::ecs_master::ecs_master::EcsMaster::create_entity_at)

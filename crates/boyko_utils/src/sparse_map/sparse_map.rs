@@ -174,7 +174,7 @@ impl<U: Clone> SparseMap<U> {
 
     /// Returns an iterator over the values in dense order.
     ///
-    /// Cost: O(active_count) total, no allocation. Pairs with [`active_indices`]
+    /// Cost: O(active_count) total, no allocation. Pairs with [`Self::active_indices`]
     /// if the caller needs both the external index and the value.
     #[inline]
     pub fn iter_dense(&self) -> std::slice::Iter<'_, U> {

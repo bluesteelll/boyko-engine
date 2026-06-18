@@ -103,7 +103,7 @@ pub enum EventUpdatePolicy {
 /// `App` is `!Send + !Sync`. NOT because of the world — [`EcsMaster`] has been
 /// `Send + Sync` since Phase 9 (the old wording here was stale; Phase 21 audit) —
 /// but because of the type-erased one-shot closures the `App` stages:
-/// [`StartupSystem`] (`Box<dyn FnOnce(&mut EcsMaster)>` without `+ Send`) and
+/// `StartupSystem` (`Box<dyn FnOnce(&mut EcsMaster)>` without `+ Send`) and
 /// the schedules' `StateEntry::insert` closures of the same shape. Pinned at
 /// compile time by `assert_not_impl_any!(App: Send, Sync)` in
 /// `tests/multi_world.rs`. Practically: an `App` is built and run on a single

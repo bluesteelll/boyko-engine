@@ -2,9 +2,9 @@
 //! detach (Phase 22 D9).
 //!
 //! Constructed by
-//! [`EntityCommands::add_tag`](crate::ecs::core::system::params::entity_commands::EntityCommands::add_tag)
+//! `EntityCommands::add_tag`
 //! /
-//! [`EntityCommands::remove_tag`](crate::ecs::core::system::params::entity_commands::EntityCommands::remove_tag);
+//! `EntityCommands::remove_tag`;
 //! flushed by `CommandQueue::apply` under exclusive `&mut EcsMaster`.
 //!
 //! Both are POD payloads (an id pair — no type erasure, no bundle bytes) and

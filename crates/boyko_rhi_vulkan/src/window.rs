@@ -12,7 +12,7 @@
 //! A `WNDPROC` is a plain `extern "system" fn` and cannot capture state. Rather
 //! than juggle a raw pointer through `GWLP_USERDATA`, the close signal flows
 //! through the message queue itself: the OS routes `WM_CLOSE` → `DefWindowProcW`
-//! → `WM_DESTROY`, the [`window_proc`] handles `WM_DESTROY` by calling
+//! → `WM_DESTROY`, the `window_proc` handles `WM_DESTROY` by calling
 //! `PostQuitMessage(0)`, and [`Window::pump_events`] reports "should close" the
 //! moment `PeekMessageW` yields a `WM_QUIT`. This needs no shared mutable state
 //! in the callback (the spec-mandated source of `WM_QUIT`).
@@ -72,7 +72,7 @@ pub struct Window {
 impl Window {
     /// Opens a window of `width` × `height` client pixels with the given title.
     ///
-    /// Registers a window class with [`window_proc`], creates an overlapped
+    /// Registers a window class with `window_proc`, creates an overlapped
     /// (titled, resizable) window sized so its *client area* matches the request,
     /// and shows it. Returns a [`WindowError`] (never panics) on any OS failure.
     pub fn open(title: &str, width: u32, height: u32) -> Result<Self, WindowError> {
@@ -218,7 +218,7 @@ impl Window {
     ///
     /// Returns `true` while the window is still open, and `false` once it has
     /// been asked to close (a `WM_QUIT` surfaced — produced by `PostQuitMessage`
-    /// in [`window_proc`] on `WM_DESTROY`). Call once per frame before rendering.
+    /// in `window_proc` on `WM_DESTROY`). Call once per frame before rendering.
     pub fn pump_events(&self) -> bool {
         use crate::ffi::os;
         let mut msg = os::MSG {

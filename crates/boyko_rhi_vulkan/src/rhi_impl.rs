@@ -32,7 +32,7 @@
 //! `Swapchain<'ctx>` / `Renderer<'ctx>` are lifetime-parameterized (not
 //! `'static`) and stay used directly this phase (scope decision), so the seam
 //! types bind to the cheapest sensible placeholder: `()` for the type-less ones
-//! and the `'static` [`VkSemaphore`](crate::ffi::VkSemaphore) for `Semaphore`.
+//! and the `'static` [`VkSemaphore`] for `Semaphore`.
 
 use core::ffi::c_void;
 use core::ptr::{self, NonNull};
@@ -295,7 +295,7 @@ pub struct VulkanShaderModule {
 ///
 /// Holds only the `VkPipeline`; its shader module is a separate owned
 /// [`VulkanShaderModule`] (the trait splits module + pipeline creation), and the
-/// pipeline layout is the device's shared [`ComputeLayouts::pipeline_layout`].
+/// pipeline layout is the device's shared [`ComputeLayouts`]`::pipeline_layout`.
 ///
 /// # Safety
 ///
@@ -311,7 +311,7 @@ pub struct ComputePipeline {
 /// An owned graphics pipeline ([`RhiApi::GraphicsPipeline`], Phase-6 S0 rung 2).
 ///
 /// Holds the `VkPipeline` **and** its own `VkPipelineLayout`. Unlike a compute
-/// pipeline (which shares the device's [`ComputeLayouts::pipeline_layout`]), a
+/// pipeline (which shares the device's [`ComputeLayouts`]`::pipeline_layout`), a
 /// graphics pipeline uses a dedicated layout with no descriptor sets and either no
 /// push range (rung 2) or one `VERTEX`-stage push range (rung 3's MVP `float4x4`),
 /// created at `create_graphics_pipeline` and torn down with the pipeline (reverse
@@ -354,7 +354,7 @@ pub struct VulkanSampler {
 ///
 /// Holds the `VkDescriptorSetLayout` with one COMBINED_IMAGE_SAMPLER binding at
 /// `(set 0, binding 0)`. Distinct from the device's shared compute
-/// [`ComputeLayouts::set_layout`] (a runtime-mutable graphics layout, NOT the
+/// [`ComputeLayouts`]`::set_layout` (a runtime-mutable graphics layout, NOT the
 /// fixed compute one). Read at `create_bind_group` (set allocation) +
 /// `create_graphics_pipeline` (pipeline layout). Destroyed by value through
 /// `destroy_bind_group_layout`.

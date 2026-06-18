@@ -127,14 +127,14 @@ impl PoolBacking {
 /// and must never be read or dropped; rows `[committed_rows, reserve_rows)`
 /// are reserved address space only (`PROT_NONE` on the syscall arms — a
 /// stray touch faults loudly). The row pointer is recomputed on demand via
-/// [`ComponentPool::row_ptr`] rather than cached per-row (Phase X.B).
+/// `ComponentPool::row_ptr` rather than cached per-row (Phase X.B).
 ///
 /// # Phase X.I — one `VmReservation` per pool, in-place row growth
 ///
 /// Each pool owns ONE virtual-address reservation laid out
 /// `[data | added_ticks | changed_ticks]` with granule-aligned, fixed
 /// sub-region offsets computed once at construction
-/// (`constants::pool_byte_layout`). Growth ([`ComponentPool::grow_rows`])
+/// (`constants::pool_byte_layout`). Growth (`ComponentPool::grow_rows`)
 /// only commits fresh pages at the frontier of the SAME reservation — the
 /// three base pointers are write-once, so every previously returned pointer
 /// (incl. `Archetype::columns[c].ptr` and the query fetches' tick bases)
@@ -232,7 +232,7 @@ impl ComponentPool {
     /// Construction performs ONE address-space reservation (no commit
     /// charge, zero resident bytes) and computes the three write-once base
     /// pointers; the first `add`/`reserve_capacity` takes the cold
-    /// [`grow_rows`](Self::grow_rows) path (Phase X.I D3).
+    /// `grow_rows` path (Phase X.I D3).
     ///
     /// # Panics
     ///
@@ -1129,7 +1129,7 @@ impl ComponentPool {
     /// The returned pointer is guaranteed to be aligned to at least
     /// `max(align_of::<T>(), SIMD_BUFFER_ALIGN)`. For all component types
     /// `T` with `align_of::<T>() <= SIMD_BUFFER_ALIGN`, this is
-    /// [`SIMD_BUFFER_ALIGN`](crate::ecs::constants::SIMD_BUFFER_ALIGN)
+    /// [`SIMD_BUFFER_ALIGN`]
     /// = 32 bytes — sufficient for AVX2 aligned 256-bit loads from the
     /// column start.
     ///

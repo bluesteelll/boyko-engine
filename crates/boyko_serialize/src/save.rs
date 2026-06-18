@@ -12,7 +12,7 @@
 //!
 //! `world` is borrowed `&EcsMaster` for the WHOLE function — both passes. The
 //! Pass-1 column walk captures each live POB column's base pointer
-//! ([`ComponentPool::buffer_ptr`], a write-once VM-stable base, Phase X.I) and
+//! (`ComponentPool::buffer_ptr`, a write-once VM-stable base, Phase X.I) and
 //! reuses it in Pass 2. No structural op runs between the passes, so the captured
 //! base stays valid; the saver never mutates the world.
 //!

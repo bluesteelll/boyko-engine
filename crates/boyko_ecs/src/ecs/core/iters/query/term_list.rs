@@ -2,8 +2,8 @@
 //! lock-free CAS publication and mint-point reclamation.
 //!
 //! This module is the SOUNDNESS-CRITICAL core of the tag-term prefilter. A
-//! [`TermList`] is an immutable, heap-published, epoch-stamped archetype-id
-//! list; a [`TermScratch`] is the two-`AtomicPtr` cold tail of every
+//! `TermList` is an immutable, heap-published, epoch-stamped archetype-id
+//! list; a `TermScratch` is the two-`AtomicPtr` cold tail of every
 //! `QueryDataState<D, F>` that memoises the most recent published list and
 //! holds at most one retired list pending reclamation. The no-terms path
 //! never touches the scratch.
@@ -42,7 +42,7 @@
 //! One publish per epoch (P1) ⇒ one retire per epoch; every epoch change
 //! passes through a mint funnel (a new owner value is required to observe it,
 //! and both funnels are exclusive: `&mut state` in `Query::get_param`,
-//! `&mut self` in `EcsMaster::query`), and [`TermScratch::reclaim_retired`]
+//! `&mut self` in `EcsMaster::query`), and `TermScratch::reclaim_retired`
 //! runs there first ⇒ the retired slot is empty when the next retire arrives.
 //! The reclaim point cannot overlap an in-flight resolve on the same slot (a
 //! system is never dispatched concurrently with itself; a live `QueryView`
@@ -63,7 +63,7 @@
 //!
 //! ## P3 — publication completeness
 //!
-//! [`TermList::build`] returns a complete `Box<TermList>`; the CAS site only
+//! `TermList::build` returns a complete `Box<TermList>`; the CAS site only
 //! ever sees a finished `Box` (type-structural — you cannot publish what the
 //! constructor has not returned). `Release` on CAS success pairs with
 //! `Acquire` on every load ⇒ readers see fully-initialised contents. A panic
@@ -72,7 +72,7 @@
 //!
 //! ## P4 — slice lifetime
 //!
-//! [`TermScratch::resolve_term_filtered`] returns `&'q [ArchetypeId]`: valid
+//! `TermScratch::resolve_term_filtered` returns `&'q [ArchetypeId]`: valid
 //! because (i) within an epoch the published pointer never changes after the
 //! single publish (P1), and (ii) freeing requires retire (epoch change —
 //! impossible while the owner is borrowed) followed by reclaim (mint-point
@@ -441,8 +441,8 @@ impl Drop for TermScratch {
 /// The loom models (`tests/loom_term_list.rs`, `#![cfg(loom)]`) and the
 /// multi-threaded Miri-TB harness (`tests/miri_phase22_1.rs`) are EXTERNAL
 /// integration crates that cannot reach the crate-internal (`pub(crate)`)
-/// [`TermScratch`] / [`resolve_term_filtered`](TermScratch::resolve_term_filtered)
-/// / [`reclaim_retired`](TermScratch::reclaim_retired). A `pub use` of a
+/// `TermScratch` / `resolve_term_filtered`
+/// / `reclaim_retired`. A `pub use` of a
 /// `pub(crate)` item is rejected (E0364/E0365). To honor the Phase-9.1 C1
 /// lesson — the gates MUST drive the *real* production protocol, not a copy —
 /// this module exposes thin `pub` shims that forward, one call each, to the
@@ -463,7 +463,7 @@ pub mod test_exports {
     use crate::ecs::core::iters::query_state::QueryState;
     use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId};
 
-    /// Opaque `pub` handle wrapping the real `pub(crate)` [`TermScratch`], so
+    /// Opaque `pub` handle wrapping the real `pub(crate)` `TermScratch`, so
     /// the external loom / Miri harness can construct, share, and drive it
     /// without the `pub(crate)` type appearing in a `pub` signature (mirrors
     /// `boyko_threadpool::loom_exports::LoomScopeShared`). Auto `Send + Sync`
@@ -505,12 +505,12 @@ pub mod test_exports {
         }
     }
 
-    /// Opaque `pub` handle wrapping the real `pub(crate)` [`TagTerms`] epoch
+    /// Opaque `pub` handle wrapping the real `pub(crate)` `TagTerms` epoch
     /// fingerprint.
     #[derive(Clone, Copy)]
     pub struct TestTerms(TagTerms);
 
-    /// Builds a real [`TagTerms`] carrying ONE `with` term over `tag` (the
+    /// Builds a real `TagTerms` carrying ONE `with` term over `tag` (the
     /// non-empty, term-bearing path `resolve_term_filtered` debug-asserts).
     #[inline]
     pub fn one_with_term(tag: TagId) -> TestTerms {

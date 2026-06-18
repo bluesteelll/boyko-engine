@@ -15,7 +15,7 @@
 //! # Re-entrancy
 //!
 //! A trigger fired from inside a trigger runner re-enters `EcsMaster::trigger`.
-//! [`PropagateGuard`] snapshots the current value on construction and restores
+//! `PropagateGuard` snapshots the current value on construction and restores
 //! it on drop, so the inner walk's propagation requests do not leak into the
 //! outer walk.
 //!

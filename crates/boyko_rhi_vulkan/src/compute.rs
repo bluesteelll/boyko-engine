@@ -643,7 +643,7 @@ pub fn mesh_depth_for_z(mesh_z: f32) -> f32 {
 /// - an SDF hit at `t_sdf < t_mesh` → the lit SDF surface color (Lambert +
 ///   ambient, the same scene constants as rung 8/9);
 /// - else if the mesh covered the pixel (`mesh_depth < 1.0`) → flat [`MESH_COLOR`];
-/// - else → [`SDF_BACKGROUND`].
+/// - else → `SDF_BACKGROUND`.
 ///
 /// Returns the packed `0xAABBGGRR` color. This is the single source of truth the
 /// rung-10 test diffs the GPU readback against (within `+/-2/255` per channel) and

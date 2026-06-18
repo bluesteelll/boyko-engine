@@ -1,21 +1,21 @@
 //! EnableTag Step 9 — runtime **per-row** dynamic enable-bit query terms.
 //!
-//! [`EnableTerms`] is the per-view term list populated by
+//! `EnableTerms` is the per-view term list populated by
 //! `Query::with_enabled` / `Query::without_enabled` (and the `QueryView`
 //! mirrors). It is the dynamic twin of the typed
 //! [`Enabled<T>`](super::filter_enable::Enabled) /
 //! [`Disabled<T>`](super::filter_enable::Disabled) filters: each term is a
 //! **per-row enable-bit test** at `(archetype, row)`, NOT an archetype-level
-//! signature test like the Phase-22 [`TagTerms`](super::tag_terms::TagTerms).
+//! signature test like the Phase-22 `TagTerms`.
 //!
 //! # Cost contract (the 0%-gate — Decision D2 / Step 9)
 //!
 //! A query with no dynamic enable term gates the per-row scan behind a single
-//! [`EnableTerms::is_empty`] (`len == 0`) branch — when no term is set, the
+//! `EnableTerms::is_empty` (`len == 0`) branch — when no term is set, the
 //! cursors never load the resolved-column scratch and never run the bit loop.
 //!
 //! This is NOT a free const-gate. Unlike the Phase-22.1
-//! [`TagTerms`](super::tag_terms::TagTerms) gate (archetype-level — it leaves
+//! `TagTerms` gate (archetype-level — it leaves
 //! ZERO term code in the row loop) and unlike the Wave-3 `filter_fetch`
 //! `if !const { F::IS_ARCHETYPAL }` guard (const-folded away entirely), an
 //! enable term is a genuine per-row predicate, so the `is_empty()` guard stays
@@ -30,9 +30,9 @@
 //! Unlike `TagTerms` (archetype-level, resolved once at the driver entry into
 //! a `&[ArchetypeId]` slice), an enable term is a per-row predicate, so the
 //! driver caches one `*const EnableColumn` per term **per archetype
-//! transition** ([`EnableTermCols`]) — exactly like the typed
+//! transition** (`EnableTermCols`) — exactly like the typed
 //! [`EnableFetch`](super::filter_enable) `set_table_*` cold path. The per-row
-//! [`EnableTermCols::passes`] then tests the bit (a NULL column reads as
+//! `EnableTermCols::passes` then tests the bit (a NULL column reads as
 //! disabled, so a `without_enabled` term keeps it — mirroring
 //! [`Disabled<T>`](super::filter_enable::Disabled)).
 

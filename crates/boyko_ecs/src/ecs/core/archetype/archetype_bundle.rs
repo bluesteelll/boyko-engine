@@ -95,7 +95,7 @@ impl std::error::Error for BundleFullError {}
 ///   `UnsafeCell<Tick>`-slot discipline in the tick sub-regions of
 ///   `component_pool.rs` (Phase X.I vm-reservation form).
 /// - **F4 mint discipline (load-bearing):** the SOLE entry points that mint a
-///   slot pointer are [`Self::slot_ptr_mut`] / [`Self::slot_ptr`]. No method
+///   slot pointer are `Self::slot_ptr_mut` / `Self::slot_ptr`. No method
 ///   ever calls `self.slots.as_mut_ptr()` — that would form a transient
 ///   `&mut [UnsafeCell<…>; N]` array-level retag whose children re-introduce
 ///   the sibling relationship one level up, defeating the fix. The `&self`
@@ -342,7 +342,7 @@ impl ArchetypeBundle {
     ///
     /// Phase 7 C4 / U11 + U1 — pointer minting recipe with write-capable
     /// provenance, now F4-rooted. The pointer is minted through
-    /// [`Self::slot_ptr_mut`] (`UnsafeCell::raw_get`); no
+    /// `Self::slot_ptr_mut` (`UnsafeCell::raw_get`); no
     /// `&mut MaybeUninit<Archetype>` reborrow is created along the way. Post-F4
     /// the read-only [`Self::get_archetype_ptr`] mints the SAME `SharedReadWrite`
     /// provenance, so the read/write distinction between the two methods is a
@@ -378,7 +378,7 @@ impl ArchetypeBundle {
     /// `archetype_id`, or `None` if no slot is registered for that id.
     ///
     /// Phase 7 C4 / U11 — pointer minting recipe, now F4-rooted. The pointer is
-    /// minted through [`Self::slot_ptr`] (`UnsafeCell::raw_get`, narrowed to
+    /// minted through `Self::slot_ptr` (`UnsafeCell::raw_get`, narrowed to
     /// `*const`); no `&MaybeUninit<Archetype>` / `&UnsafeCell<…>` reborrow is
     /// ever materialised — the raw-arithmetic + `raw_get` recipe never produces
     /// a reference to the slot.
@@ -578,7 +578,7 @@ impl ArchetypeBundle {
     ///
     /// **Legacy path** — prefer [`Self::add_archetype_from_components`] for the
     /// in-place construction recipe (W6). This method is the migration glue
-    /// for [`ArchetypeMaster::add_existing_archetype`]; it performs a single
+    /// for `ArchetypeMaster::add_existing_archetype`; it performs a single
     /// `ptr::write` move from the caller-owned `Archetype` into the slab
     /// slot. The caller pays the 8.4 KB stack frame on this path; this is
     /// acceptable because the call site is not on the hot path.

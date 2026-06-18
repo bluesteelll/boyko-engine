@@ -578,8 +578,8 @@ impl Archetype {
     ///
     /// This is the archetype-level funnel `boyko_render` (Wave B) calls to mint a
     /// device column. It performs two steps in order:
-    ///   (a) flip the pool via [`ComponentPool::make_device_backed`] + record the
-    ///       opaque handle via [`ComponentPool::set_device_handle`]; THEN
+    ///   (a) flip the pool via `ComponentPool::make_device_backed` + record the
+    ///       opaque handle via `ComponentPool::set_device_handle`; THEN
     ///   (b) `self.columns[cid.0] = Column::null()` **DIRECTLY** — NOT
     ///       `refresh_column`.
     ///
@@ -614,7 +614,7 @@ impl Archetype {
     ///
     /// # Panics
     ///
-    /// Release-panics (via [`ComponentPool::make_device_backed`]'s O1 guard) if
+    /// Release-panics (via `ComponentPool::make_device_backed`'s O1 guard) if
     /// the pool is non-empty (`len != 0`) — a populated pool must never flip to
     /// device backing (data-loss guard).
     ///
@@ -688,7 +688,7 @@ impl Archetype {
     ///
     /// `boyko_render`'s `GpuColumnManager::grow_column` calls this after it
     /// reallocs the device column and mints a NEW handle: it updates ONLY the
-    /// boxed [`DeviceColumn`]'s handle (via [`ComponentPool::set_device_handle`]) —
+    /// boxed `DeviceColumn`'s handle (via `ComponentPool::set_device_handle`) —
     /// it does NOT re-flip the backing (no `Box` churn, no lost device counters)
     /// and does NOT touch the already-null column cache. DISTINCT from the
     /// write-once `buffer`/`added_base`/`changed_base`, so it violates no
@@ -804,7 +804,7 @@ impl Archetype {
     /// The world's current change-detection tick is threaded through the
     /// call so the newly-pushed row receives `added = changed = current_tick`
     /// in every component pool. The canonical caller is
-    /// [`crate::ecs::core::ecs_master::EcsMaster::create_entity`], which
+    /// `crate::ecs::core::ecs_master::EcsMaster::create_entity`, which
     /// reads `self.change_tick.load(Relaxed)` and forwards it here (plan
     /// §2.4 INIT3 / Round 2 W4 — single source of truth for the world tick).
     ///

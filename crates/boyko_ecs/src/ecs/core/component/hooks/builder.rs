@@ -21,7 +21,7 @@
 //! `#[derive(Component)]` (`HAS_HOOKS == false`) the slot stays unset, so the
 //! builder seeds its accumulator from [`ComponentHooks::default`] and commits
 //! the result via
-//! [`try_set_hooks`](crate::ecs::core::component::component_registry::try_set_hooks)
+//! `try_set_hooks`
 //! (`OnceLock::set`). There is nothing to merge — a derive-hooked type never
 //! reaches the builder's commit in correct programs.
 

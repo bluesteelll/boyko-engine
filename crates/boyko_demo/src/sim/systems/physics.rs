@@ -34,7 +34,7 @@
 //!
 //! ## Why the write-back is what makes `Changed<Velocity>` precise
 //!
-//! Only [`Mut<T>::deref_mut`] bumps a row's `changed` tick — a plain `&mut T`
+//! Only `Mut<T>::deref_mut` bumps a row's `changed` tick — a plain `&mut T`
 //! query item writes the value WITHOUT touching the tick, and a `for_each_chunk`
 //! `&mut [Velocity]` cannot touch ticks at all. So the velocity write-back
 //! ([`apply_ball_motion`]) takes a [`Mut<Velocity>`] guard and deref-writes it

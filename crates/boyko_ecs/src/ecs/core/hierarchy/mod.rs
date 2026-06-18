@@ -16,7 +16,7 @@
 //! registers `on_insert` (link) + `on_replace` (unlink); `Children` registers
 //! `on_replace` (the recursive-despawn cascade). The whole relationship is
 //! driven by `ChildOf` insertion / removal via the [`Commands`] /
-//! [`EntityCommands`] ergonomics
+//! `EntityCommands` ergonomics
 //! (`commands.entity(parent).add_child(child)` etc.).
 //!
 //! # Consistency window
@@ -33,7 +33,6 @@
 //! no hierarchy bit and the hot iteration path pays nothing.
 //!
 //! [`Commands`]: crate::ecs::core::system::params::commands::Commands
-//! [`EntityCommands`]: crate::ecs::core::system::params::entity_commands::EntityCommands
 
 use std::sync::OnceLock;
 
@@ -70,7 +69,7 @@ pub(crate) const CASCADE_FANOUT_INLINE: usize = 32;
 ///   into the new one (`on_replace` then `on_insert`, applied in FIFO order).
 /// * Removing `ChildOf` unlinks the child (`on_replace`).
 ///
-/// Prefer the [`EntityCommands`] ergonomics
+/// Prefer the `EntityCommands` ergonomics
 /// (`commands.entity(parent).add_child(child)` /
 /// `commands.entity(child).set_parent(parent)`) over writing `ChildOf` by hand;
 /// they all funnel through `ChildOf` insertion / removal.
@@ -82,7 +81,6 @@ pub(crate) const CASCADE_FANOUT_INLINE: usize = 32;
 /// `ChildOf` and the parent's collection is never touched. Deeper cycles are a
 /// documented footgun (only self-reference is guarded — research §1 pitfall 5).
 ///
-/// [`EntityCommands`]: crate::ecs::core::system::params::entity_commands::EntityCommands
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChildOf(pub Entity);

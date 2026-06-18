@@ -26,13 +26,13 @@
 //!   handles re-entry from inside a worker via its work-stealing
 //!   `Scope::Drop` (plan §4.5.5).
 //! - **PAR7**: when no active pool is attached to the calling thread,
-//!   `for_each` falls back to a sequential walk via [`Query::iter`] /
-//!   [`Query::iter_mut`]. This matches Bevy's "host-thread fallback" — the
+//!   `for_each` falls back to a sequential walk via `Query::iter` /
+//!   `Query::iter_mut`. This matches Bevy's "host-thread fallback" — the
 //!   caller is responsible for setting up an `install` frame if parallelism
 //!   is required.
 //! - **PAR8**: `par_iter` requires `D: ReadOnlyQueryData`; `par_iter_mut`
-//!   accepts any `D: QueryData`. The bound replicates the [`Query::iter`] /
-//!   [`Query::iter_mut`] split.
+//!   accepts any `D: QueryData`. The bound replicates the `Query::iter` /
+//!   `Query::iter_mut` split.
 //! - **PAR9**: archetypes with fewer than [`MIN_ARCHETYPE_FOR_PARALLEL`]
 //!   rows run inline on the calling thread.
 //!

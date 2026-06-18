@@ -6,7 +6,7 @@
 //! `boyko-macros` is a **dev-dependency** of `boyko-ecs` (Cargo.toml), so its
 //! derive macros are unavailable to library `src/` code. Downstream components
 //! get `impl Bundle for Self` from `#[derive(Component)]` automatically; engine
-//! components defined here use [`impl_self_bundle!`] — the in-crate, hand-written
+//! components defined here use `impl_self_bundle!` — the in-crate, hand-written
 //! mirror of that exact emission (see `bundle/self_bundle.rs` for the macro and
 //! its SAFETY accounting).
 //!

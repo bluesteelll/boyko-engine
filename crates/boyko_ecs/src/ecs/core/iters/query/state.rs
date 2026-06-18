@@ -25,7 +25,7 @@ use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId};
 ///   (include/exclude/optional mask plus the `matched_ids` / dedup bitset
 ///   pair) populated by `update_archetypes`.
 /// * `data_state` — `D::State`: per-`QueryData` cached metadata (resolved
-///   [`ComponentId`](crate::ecs::identifiers::primitives::ComponentId)s).
+///   [`ComponentId`]s).
 /// * `filter_state` — `F::State`: per-`QueryFilter` cached metadata.
 ///
 /// # INVARIANT (Phase 8b POST_FILTER) — M1
@@ -38,11 +38,11 @@ use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId};
 /// Mutation paths that preserve the invariant:
 /// * [`QueryState::update_archetypes`] — adds via `push_matched`, which sets
 ///   the bit before pushing the id.
-/// * [`QueryState::remove_matched_at`] — `swap_remove`s the id and clears
+/// * `QueryState::remove_matched_at` — `swap_remove`s the id and clears
 ///   the corresponding bit in the bitset.
 ///
-/// [`Self::assert_dual_invariant`] is invoked at the tail of
-/// [`Self::post_filter_matched`] in debug builds to surface any future
+/// `Self::assert_dual_invariant` is invoked at the tail of
+/// `Self::post_filter_matched` in debug builds to surface any future
 /// regression in either mutator.
 pub struct QueryDataState<D: QueryData, F: QueryFilter> {
     pub(crate) archetype_state: QueryState,
@@ -194,7 +194,7 @@ impl<D: QueryData, F: QueryFilter> QueryDataState<D, F> {
     ///    and `Or<F>` is enforced exclusively by the post-filter pass.
     /// 3. Construct the inner [`QueryState`] and sync it against the live
     ///    archetype set via `update_archetypes`.
-    /// 4. Apply [`Self::post_filter_matched`] to drop any archetype that the
+    /// 4. Apply `Self::post_filter_matched` to drop any archetype that the
     ///    mask aggregation accepted but `D` / `F`'s `matches_component_set`
     ///    rejects (the `Or<F>` case).
     ///

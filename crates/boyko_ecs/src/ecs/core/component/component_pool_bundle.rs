@@ -127,7 +127,7 @@ impl ComponentPoolBundle {
     ///   `ComponentPool::add`, so "full" means the pool's `reserve_rows`
     ///   is exhausted, not that a fixed buffer ran out.
     ///
-    /// This must be called before [`push_entity_components`] to implement the
+    /// This must be called before `push_entity_components` to implement the
     /// two-phase commit pattern that prevents partial-pool desync on failure.
     pub fn can_push_entity_components(&self, components: &[(ComponentId, &[u8])]) -> bool {
         for (component_id, bytes) in components {
@@ -150,7 +150,7 @@ impl ComponentPoolBundle {
 
     /// Pushes all component bytes into their respective pools (C-009).
     ///
-    /// Precondition: [`can_push_entity_components`] must have returned `true`
+    /// Precondition: `can_push_entity_components` must have returned `true`
     /// for the same `components` slice immediately before this call and without
     /// any intervening mutation. If the precondition is violated, individual
     /// pools may reject the push (`add` returns `None`), leaving the bundle in

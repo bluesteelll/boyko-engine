@@ -55,7 +55,7 @@ use syn::{
 /// before the component can appear in any archetype (the staleness-immunity
 /// property, plan §6.1 / Q-A5).
 ///
-/// Derive hooks and the runtime [`register_component_hooks`] builder are
+/// Derive hooks and the runtime `register_component_hooks` builder are
 /// **mutually exclusive** per type: a type carrying `#[component(...)]` keeps
 /// its slot installed by `component_id()`, so calling the runtime builder for
 /// it panics. A plain `#[derive(Component)]` (no keys ⇒ `HAS_HOOKS = false`)
@@ -2407,7 +2407,7 @@ fn build_participants_impl(
 ///   `Commands::spawn_empty()` for zero-component spawns (Phase 22 D5/D7).
 /// * Generic struct (`struct Foo<T> { ... }`) — `compile_error!("Bundle derive does not support generics (Phase 8.5 scope)")`.
 /// * Enum / union — `compile_error!("Bundle can only be derived for structs")`.
-/// * More than [`MAX_BUNDLE_ARITY`] (16) fields — the runtime apply paths use
+/// * More than `MAX_BUNDLE_ARITY` (16) fields — the runtime apply paths use
 ///   fixed-size stack collectors sized to this ceiling (Phase 22: 8 → 16).
 ///
 /// # Generated impl summary (named-struct example)

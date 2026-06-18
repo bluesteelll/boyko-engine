@@ -11,7 +11,7 @@ use crate::ecs::identifiers::primitives::ResourceId;
 ///
 /// Set `AppExit(true)` from a system (via `ResMut<AppExit>`) to make
 /// [`App::run`](crate::ecs::core::app::app::App::run) exit after the current
-/// frame completes. [`App::run`] inserts an `AppExit(false)` before the loop, so
+/// frame completes. `App::run` inserts an `AppExit(false)` before the loop, so
 /// the per-frame read never panics on a missing resource. The bounded runner
 /// [`App::run_n`](crate::ecs::core::app::app::App::run_n) and the single-frame
 /// [`App::update`](crate::ecs::core::app::app::App::update) do NOT read it (no

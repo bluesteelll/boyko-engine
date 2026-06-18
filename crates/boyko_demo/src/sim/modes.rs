@@ -222,7 +222,7 @@ pub fn despawn_boids(world: &mut EcsMaster) {
 /// EXCLUSIVE `fn(&mut EcsMaster)` gated `.run_if(on_enter(Mode::Physics))`.
 /// Scatter-spawns [`BALL_COUNT`] balls with random position, velocity, and radius
 /// directly via `create_entity` (C1 — no `Commands` per-call cap). A dedicated
-/// loop (not [`scatter_spawn`]) because a ball carries a fifth component
+/// loop (not `scatter_spawn`) because a ball carries a fifth component
 /// ([`Radius`]) beyond the shared `(pos, vel, gpu, tag)` set. Stops early if the
 /// pool reports full mid-spawn (capacity), so the population is whatever fit.
 pub fn spawn_balls(world: &mut EcsMaster) {

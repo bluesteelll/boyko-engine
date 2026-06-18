@@ -1,11 +1,11 @@
 //! Phase 22 (D4) / 22.1 (Area A) — runtime archetype-level dynamic-tag query
 //! terms.
 //!
-//! [`TagTerms`] is the per-view term list populated by
+//! `TagTerms` is the per-view term list populated by
 //! `Query::with_tag` / `Query::without_tag` (and the `QueryView` mirrors).
 //! It is **stack-only, `Copy`, allocation-free** and serves as the *epoch
 //! fingerprint* (stamp key) for the per-state-slot
-//! [`TermList`](super::term_list::TermList) memo.
+//! `TermList` memo.
 //!
 //! # Cost contract (Phase 22.1)
 //!
@@ -14,11 +14,11 @@
 //! plain `&[ArchetypeId]` (either the shared pre-terms slice, or the memoised
 //! term-filtered slice) and contain **zero** term code — the no-terms hot
 //! path is byte-identical to the pre-Phase-22 code (asm-gated). The single
-//! reusable [`archetype_passes_tag_terms`] test below backs three remaining
-//! consumers: [`TermList::build`](super::term_list::TermList)'s per-id pass,
+//! reusable `archetype_passes_tag_terms` test below backs three remaining
+//! consumers: `TermList::build`'s per-id pass,
 //! `QueryView::get` / `get_mut` (per-lookup random access — a prefilter
 //! cannot help a single in-hand archetype), and
-//! [`count_term_matched`] / [`any_term_matched`] (read-only count/any).
+//! `count_term_matched` / `any_term_matched` (read-only count/any).
 //!
 //! # QS1 invariant
 //!

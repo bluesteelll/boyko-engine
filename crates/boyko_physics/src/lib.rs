@@ -1,26 +1,26 @@
 //! # boyko_physics — the physics foundation (seam only).
 //!
 //! This crate ships the physics seam AND the in-house solver: the universal
-//! contact currency ([`Manifold`](manifold::Manifold)), a swappable, zero-`dyn`-
-//! on-the-hot-path [`RigidSolver`](solver::RigidSolver) trait, a no-op default
+//! contact currency ([`Manifold`]), a swappable, zero-`dyn`-
+//! on-the-hot-path [`RigidSolver`] trait, a no-op default
 //! solver that proves the seam compiles + integrates
-//! ([`NoopSolver`](solver::NoopSolver)), the real TGS-Soft
-//! [`SoftStepSolver`](solver::SoftStepSolver) (P2 — sphere/box convex contacts
+//! ([`NoopSolver`]), the real TGS-Soft
+//! [`SoftStepSolver`] (P2 — sphere/box convex contacts
 //! with soft normal recovery, a 2-DOF Coulomb friction cone, and restitution),
 //! the physics components
-//! ([`RigidBody`](components::RigidBody) / [`Collider`](components::Collider) /
-//! [`Contact`](components::Contact)) as ordinary `#[derive(Component)]` columns
+//! ([`RigidBody`] / [`Collider`] /
+//! [`Contact`]) as ordinary `#[derive(Component)]` columns
 //! with a Phase-10-ready hot/cold split, the convex narrowphase contact
 //! generators ([`narrowphase`] — sphere-sphere / sphere-box / box-box), and the
 //! fixed step pipeline a user adds to their schedule via
-//! [`add_physics_systems`](plugin::add_physics_systems).
+//! [`add_physics_systems`].
 //!
-//! **Scope (through W4):** the [`SoftStepSolver`](solver::SoftStepSolver) resolves
+//! **Scope (through W4):** the [`SoftStepSolver`] resolves
 //! sphere-sphere, sphere-box, and box-box (OBB) contacts with cross-frame
 //! warm-starting (W3) and feature-id-stable box manifolds (W4). SDF-native
 //! collision (W5) is a later wave; an external (Rapier/Jolt) backend
 //! stays out of scope — but the seam is designed so each slots in by implementing
-//! [`RigidSolver`](solver::RigidSolver) on its own `Resource`, with no edit to
+//! [`RigidSolver`] on its own `Resource`, with no edit to
 //! this crate.
 //!
 //! ADD-ONLY: a new `boyko_ecs`-dependent crate, zero core edit.

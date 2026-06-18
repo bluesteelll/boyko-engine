@@ -81,7 +81,7 @@ pub enum EcsError {
     /// Phase 12.5 Opt-A2 (SBO4) / Phase X.I: an archetype's pool reserve
     /// ceiling (rows) was insufficient to accept `requested` more rows.
     ///
-    /// Returned by [`Archetype::reserve_capacity`] when at least one owned
+    /// Returned by `Archetype::reserve_capacity` when at least one owned
     /// pool's `count + requested` exceeds its reserve ceiling
     /// (`reserve_rows`). Committed capacity BELOW the ceiling grows on
     /// demand (Phase X.I `grow_rows`) and never produces this error — it

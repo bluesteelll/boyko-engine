@@ -2,7 +2,7 @@
 //!
 //! See Phase 8a plan §13 for the design (C2 + C4 + M4 resolution). This
 //! module hosts only the trait definition; concrete impls live in
-//! [`params`](super::params) and the later step files (`Res`/`ResMut` in
+//! `params` and the later step files (`Res`/`ResMut` in
 //! Step 7, query params in Phase 8b).
 //!
 //! # Why `unsafe trait`
@@ -36,9 +36,9 @@ use crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell;
 ///
 /// A `SystemParam` describes how to fetch a borrowed view of `EcsMaster`
 /// state once per system invocation. Concrete impls cover global
-/// resources ([`Res`]/[`ResMut`], Step 7), entity queries (Phase 8b
+/// resources (`Res`/`ResMut`, Step 7), entity queries (Phase 8b
 /// `Query`), deferred mutations (Phase 8d `Commands`), per-system locals
-/// (`Local<T>`), and tuples thereof (see [`super::params::tuple_impl`]).
+/// (`Local<T>`), and tuples thereof (see `super::params::tuple_impl`).
 ///
 /// # Trait shape (C2 RESOLUTION)
 ///
@@ -75,8 +75,6 @@ use crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell;
 /// 3. **SP4** — [`init_state`](Self::init_state) performs no structural
 ///    mutation of the world.
 ///
-/// [`Res`]: super::params
-/// [`ResMut`]: super::params
 pub unsafe trait SystemParam: Sized {
     /// Long-lived state owned by the containing system.
     ///

@@ -113,7 +113,7 @@ pub unsafe trait System: Send + Sync + 'static {
     /// Called instead of [`run_unsafe`](Self::run_unsafe) on the dispatcher-solo
     /// path (the scheduler's `running == 0` window and
     /// [`EcsMaster::run_system_once`]). The default forwards to `run_unsafe`
-    /// through [`DispatcherToken::into_cell`], so every existing system is
+    /// through `DispatcherToken::into_cell`, so every existing system is
     /// byte-identical — only a system needing `!Send` access (the
     /// `boyko_render` `GpuSystem`) overrides it to project through the
     /// [`DispatcherToken`] instead of the [`UnsafeEcsCell`].
@@ -123,12 +123,10 @@ pub unsafe trait System: Send + Sync + 'static {
     /// **S1'** — The caller MUST guarantee `running == 0` on the dispatcher for
     /// the duration of this call (no worker live, no other `run_unsafe` /
     /// `run_dispatcher` in flight on the same world). The [`DispatcherToken`] is
-    /// mintable ONLY in that context (see [`DispatcherToken::new`]), so passing
+    /// mintable ONLY in that context (see `DispatcherToken::new`), so passing
     /// one IS the witness that S1' holds.
     ///
     /// [`DispatcherToken`]: super::dispatcher_token::DispatcherToken
-    /// [`DispatcherToken::new`]: super::dispatcher_token::DispatcherToken::new
-    /// [`DispatcherToken::into_cell`]: super::dispatcher_token::DispatcherToken::into_cell
     /// [`EcsMaster::run_system_once`]: crate::ecs::core::ecs_master::ecs_master::EcsMaster::run_system_once
     #[inline]
     unsafe fn run_dispatcher(&mut self, token: DispatcherToken<'_>) -> Self::Out {
@@ -219,7 +217,7 @@ pub unsafe trait System: Send + Sync + 'static {
     ///
     /// Clamps both `last_run` and `this_run` to be no older than
     /// [`MAX_CHANGE_AGE`] ticks behind `current` (via [`Tick::check_tick`]).
-    /// Called by [`Schedule::check_change_ticks`] on the cold
+    /// Called by `Schedule::check_change_ticks` on the cold
     /// `CHECK_TICK_THRESHOLD` path, right after the per-row pool scan, so that
     /// a `last_run` left un-refreshed across a long dormant span (Phase 16.1
     /// advances ticks only when a system actually runs) can never silently
@@ -240,7 +238,6 @@ pub unsafe trait System: Send + Sync + 'static {
     /// [`MAX_CHANGE_AGE`]: crate::ecs::core::change_detection::MAX_CHANGE_AGE
     /// [`Tick::check_tick`]: crate::ecs::core::change_detection::Tick::check_tick
     /// [`Tick::is_newer_than`]: crate::ecs::core::change_detection::Tick::is_newer_than
-    /// [`Schedule::check_change_ticks`]: crate::ecs::core::schedule::schedule::Schedule::check_change_ticks
     fn check_change_tick(&mut self, current: Tick);
 }
 

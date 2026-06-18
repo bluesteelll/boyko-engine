@@ -1,5 +1,5 @@
 //! Phase-6 S0 — the device-local image (`VkImage` + `VkImageView` + a dedicated
-//! `VkDeviceMemory` allocation) backing [`RhiDevice::create_texture`].
+//! `VkDeviceMemory` allocation) backing [`RhiDevice::create_texture`](boyko_rhi::RhiDevice::create_texture).
 //!
 //! A texture is a 2D (rung 1) or 3D (deferred) `OPTIMAL`-tiling color image — or a
 //! 2D depth image (rung 4, `DEPTH_STENCIL_ATTACHMENT` usage → DEPTH-aspect view) —
@@ -16,7 +16,7 @@
 //! [`VulkanTexture`] is **not** `Copy`/`Clone`: destruction is by-value
 //! ([`VulkanContext::destroy_texture`](crate::device::VulkanContext)) so the move
 //! encodes "destroyed exactly once". Teardown is reverse creation order: view →
-//! image → memory. The originating [`VulkanContext`] must still be alive when the
+//! image → memory. The originating [`VulkanContext`](crate::device::VulkanContext) must still be alive when the
 //! texture is destroyed (the destroy goes through the context's device fn-table).
 
 use core::ptr;

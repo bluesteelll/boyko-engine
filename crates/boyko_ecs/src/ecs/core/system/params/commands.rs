@@ -69,11 +69,11 @@ use crate::ecs::identifiers::primitives::EntityId;
 /// # Enqueue API
 ///
 /// * [`spawn`](Self::spawn) — pre-allocate an [`Entity`] via the atomic
-///   counter and enqueue a [`SpawnAtCommand<B>`]. Returns
-///   [`EntityCommands<'_, 's>`] for `.insert(...).insert(...).id()`
+///   counter and enqueue a `SpawnAtCommand<B>`. Returns
+///   `EntityCommands<'_, 's>` for `.insert(...).insert(...).id()`
 ///   chaining. The destination archetype id is resolved lazily on apply
 ///   via `B::cached_archetype_id` (Phase 8.5 SBC4).
-/// * [`entity`](Self::entity) — return a [`EntityCommands<'_, 's>`] handle
+/// * [`entity`](Self::entity) — return a `EntityCommands<'_, 's>` handle
 ///   for an existing entity (per-entity chaining over an already-live id).
 /// * [`despawn`](Self::despawn) — enqueue a [`DespawnCommand`] for an
 ///   existing entity (convenience wrapper for `entity(id).despawn()`).
@@ -92,7 +92,7 @@ use crate::ecs::identifiers::primitives::EntityId;
 ///
 /// `Commands<'s>` carries `&'s mut CommandQueue`, which is `!Sync` for the
 /// lifetime `'s` (CQ-SEND2). The owning [`CommandQueue`] itself is `Send`
-/// (CQ-SEND1). The contained [`EntityCounter<'s>`] is `Send + Sync` on its
+/// (CQ-SEND1). The contained `EntityCounter<'s>` is `Send + Sync` on its
 /// own — but `Commands<'s>` inherits the `!Sync` from the queue field.
 pub struct Commands<'s> {
     /// Exclusive borrow of the system's per-call queue. The system's
@@ -127,8 +127,8 @@ impl<'s> Commands<'s> {
     }
 
     /// Pre-allocates an [`Entity`] via the world's atomic counter and
-    /// enqueues a [`SpawnAtCommand<B>`] (Phase 11 §5.6 / plan Q9). Returns
-    /// an [`EntityCommands<'_, 's>`] handle for chaining.
+    /// enqueues a `SpawnAtCommand<B>` (Phase 11 §5.6 / plan Q9). Returns
+    /// an `EntityCommands<'_, 's>` handle for chaining.
     ///
     /// The destination [`ArchetypeId`] is resolved on the apply path via
     /// [`Bundle::cached_archetype_id`] — there is no per-callsite
@@ -168,13 +168,13 @@ impl<'s> Commands<'s> {
     }
 
     /// Pre-allocates an [`Entity`] and enqueues a spawn with **zero
-    /// components** (Phase 22 D5). Returns an [`EntityCommands<'_, 's>`]
+    /// components** (Phase 22 D5). Returns an `EntityCommands<'_, 's>`
     /// handle for chaining (`.insert(...)`, `.id()`, ...).
     ///
     /// The entity lands in the empty archetype
     /// (`get_or_create_archetype(&[])`), created lazily on the first empty
     /// spawn per world. Resolution goes through the ordinary static bundle
-    /// cache ([`EmptyBundle`] owns its own `BundleTypeId`), so the warm path
+    /// cache (`EmptyBundle` owns its own `BundleTypeId`), so the warm path
     /// costs the same sub-ns cached lookup as any bundle spawn (SBC4).
     ///
     /// Tag-only and component-less entities are first-class: the result is
@@ -186,9 +186,9 @@ impl<'s> Commands<'s> {
     }
 
     /// Deferred clone-and-spawn (Feature 3, §8): pre-allocates a destination
-    /// [`Entity`] via the atomic counter and enqueues a [`CloneSpawnCommand`] that
+    /// [`Entity`] via the atomic counter and enqueues a `CloneSpawnCommand` that
     /// clones `source` (opt-out, shallow, fires hooks — Bevy `clone_and_spawn`
-    /// parity) at the apply window. Returns an [`EntityCommands<'_, 's>`] handle for
+    /// parity) at the apply window. Returns an `EntityCommands<'_, 's>` handle for
     /// chaining (`.insert(...).id()`).
     ///
     /// The returned id is valid synchronously (the counter mints it now); the actual
@@ -202,7 +202,7 @@ impl<'s> Commands<'s> {
     /// Deferred clone-and-spawn with an explicit [`EntityCloner`] config (filter,
     /// shallow/deep, fire-hooks, strict, preserve-ticks). The `cloner` is `Copy`, so
     /// it is moved into the queued command by value. Returns an
-    /// [`EntityCommands<'_, 's>`] handle for the (root) clone.
+    /// `EntityCommands<'_, 's>` handle for the (root) clone.
     #[inline]
     pub fn clone_and_spawn_with(
         &mut self,
@@ -218,7 +218,7 @@ impl<'s> Commands<'s> {
         EntityCommands::new(entity, self)
     }
 
-    /// Returns an [`EntityCommands<'_, 's>`] handle for an existing entity
+    /// Returns an `EntityCommands<'_, 's>` handle for an existing entity
     /// (Phase 11 §5.4).
     ///
     /// No validation at the call site — `entity` may be stale (debug_assert
@@ -235,7 +235,7 @@ impl<'s> Commands<'s> {
     /// Use this when you need an Entity ID to thread through user code
     /// before deciding what to spawn (e.g. constructing a relation between
     /// two not-yet-spawned entities). The caller is responsible for
-    /// eventually enqueueing a [`SpawnAtCommand`] for this id — if the
+    /// eventually enqueueing a `SpawnAtCommand` for this id — if the
     /// queue drops without an apply for this id, the id leaks (one ID per
     /// missed apply; counter marches forward monotonically per EM4).
     #[inline]
@@ -266,7 +266,7 @@ impl<'s> Commands<'s> {
         });
     }
 
-    /// Phase 12.5 Opt-A2 (§5.2): enqueues a [`SpawnBatchCommand<B, I>`]
+    /// Phase 12.5 Opt-A2 (§5.2): enqueues a `SpawnBatchCommand<B, I>`
     /// covering `iter.len()` entities sharing bundle type `B`.
     ///
     /// Returns a [`SpawnBatchIter<'_, 's, B>`] yielding the reserved
@@ -333,7 +333,7 @@ impl<'s> Commands<'s> {
         Ok(SpawnBatchIter::new(range))
     }
 
-    /// Enqueues a [`SendEventCommand<E>`] that forwards `event` to
+    /// Enqueues a `SendEventCommand<E>` that forwards `event` to
     /// [`EventDispatcher::send_event`] at apply time (Phase 9 EVT2).
     ///
     /// Because the apply path always runs on the dispatcher thread under
@@ -343,7 +343,7 @@ impl<'s> Commands<'s> {
     /// [`EcsMaster::events`]`.send_event::<E>(event)` from inside the
     /// system body; the TLS routing then targets the worker's own lane.
     ///
-    /// Cost: `~18 ns` — one [`CommandQueue::push`] (two `write_unaligned`
+    /// Cost: `~18 ns` — one `CommandQueue::push` (two `write_unaligned`
     /// calls + amortised arena growth). The actual `EventDispatcher::send`
     /// runs on the apply path.
     ///
@@ -358,7 +358,6 @@ impl<'s> Commands<'s> {
     ///
     /// [`EventDispatcher::send_event`]: crate::ecs::core::events::event_dispatcher::EventDispatcher::send_event
     /// [`EcsMaster::events`]: crate::ecs::core::ecs_master::ecs_master::EcsMaster::events
-    /// [`CommandQueue::push`]: crate::ecs::core::commands::command_queue::CommandQueue::push
     #[inline]
     pub fn send_event<E: Event>(&mut self, event: E) {
         self.queue.push(SendEventCommand { event });
@@ -425,7 +424,7 @@ unsafe impl SystemParam for Commands<'_> {
     /// Flushes the queued commands against `world` (APP3).
     ///
     /// Called by the System's outer `apply` driver after the body returns.
-    /// Panic recovery is handled inside [`CommandQueue::apply`] (C5 + W3'
+    /// Panic recovery is handled inside `CommandQueue::apply` (C5 + W3'
     /// semantics — the panicker is skipped, survivors re-absorbed for the
     /// next apply).
     #[inline]

@@ -44,7 +44,7 @@ use crate::ecs::identifiers::primitives::ArchetypeId;
 
 /// Copy-on-call interior-mutability handle on an `EcsMaster`.
 ///
-/// Constructed via [`new_mutable`] (write-capable) or [`new_readonly`]
+/// Constructed via `new_mutable` (write-capable) or `new_readonly`
 /// (read-only). All accessor methods take `self` **by value** — see the
 /// module docs for the Tree Borrows rationale.
 ///
@@ -54,8 +54,6 @@ use crate::ecs::identifiers::primitives::ArchetypeId;
 /// [`FilteredAccessSet`] at `init_access` time
 /// and the Phase 9 scheduler at run time — never by the cell itself.
 ///
-/// [`new_mutable`]: UnsafeEcsCell::new_mutable
-/// [`new_readonly`]: UnsafeEcsCell::new_readonly
 /// [`FilteredAccessSet`]: super::FilteredAccessSet
 #[derive(Clone, Copy)]
 // `Copy` + by-value receivers are the C1 fix; this is the canonical Bevy
@@ -72,8 +70,8 @@ pub struct UnsafeEcsCell<'w> {
     /// Carries `&'w EcsMaster` (variance) + `&'w UnsafeCell<EcsMaster>`
     /// (interior-mutability marker). Same shape as Bevy's `UnsafeWorldCell`.
     _marker: PhantomData<(&'w EcsMaster, &'w core::cell::UnsafeCell<EcsMaster>)>,
-    /// Debug-only sentinel: `true` for cells minted via [`new_mutable`],
-    /// `false` for cells minted via [`new_readonly`]. `world_mut`,
+    /// Debug-only sentinel: `true` for cells minted via `new_mutable`,
+    /// `false` for cells minted via `new_readonly`. `world_mut`,
     /// `resources_mut`, and `archetype_ptr_mut` `debug_assert!` on this.
     ///
     /// [`new_mutable`]: UnsafeEcsCell::new_mutable
@@ -151,7 +149,7 @@ impl<'w> UnsafeEcsCell<'w> {
     ///   declared a write that does not conflict with sibling params or
     ///   other systems; no other access through any cell copy aliases this
     ///   borrow for the returned reference's scope.
-    /// * The cell was minted via [`new_mutable`] (debug-asserted).
+    /// * The cell was minted via `new_mutable` (debug-asserted).
     /// * The by-value receiver consumes a `Copy` of the cell — no `&self`
     ///   retag occurs.
     ///
@@ -197,7 +195,7 @@ impl<'w> UnsafeEcsCell<'w> {
     /// * The caller asserts that the active `SystemParam::init_access`
     ///   declared a write to the archetype's columns; no other reference
     ///   aliases.
-    /// * The cell was minted via [`new_mutable`] (debug-asserted).
+    /// * The cell was minted via `new_mutable` (debug-asserted).
     /// * The by-value receiver keeps the raw pointer's write-capable
     ///   provenance intact — the C1 fix for Round 1's `&self` retag bug.
     ///
@@ -297,7 +295,7 @@ impl<'w> UnsafeEcsCell<'w> {
     ///   declared a resource write that does not conflict with sibling
     ///   params or other systems; no other access through any cell copy
     ///   aliases this borrow for the returned reference's scope.
-    /// * The cell was minted via [`new_mutable`] (debug-asserted).
+    /// * The cell was minted via `new_mutable` (debug-asserted).
     /// * The by-value receiver consumes a `Copy` of the cell — no `&self`
     ///   retag occurs.
     ///
@@ -358,7 +356,7 @@ impl<'w> UnsafeEcsCell<'w> {
     /// * Same single-thread-touch invariant as [`nonsend_resources`]: the
     ///   NonSend system is `CpuExclusive`, so this runs on the dispatcher when
     ///   `running == 0` — no worker aliases the `&mut`.
-    /// * The cell was minted via [`new_mutable`] (debug-asserted).
+    /// * The cell was minted via `new_mutable` (debug-asserted).
     /// * By-value receiver — no `&self` retag.
     ///
     /// [`nonsend_resources`]: UnsafeEcsCell::nonsend_resources

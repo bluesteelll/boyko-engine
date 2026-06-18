@@ -163,7 +163,7 @@ impl SystemMeta {
     /// pre-first-run sentinel) and overwritten by the dispatcher's first
     /// call to [`System::set_change_ticks`] (plan §2.6 SCT4 / §9.4 PHASE9.4).
     ///
-    /// Both generation fields start at [`ArchetypeGeneration::FIRST`] —
+    /// Both generation fields start at `ArchetypeGeneration::FIRST` —
     /// the canonical "never observed" sentinel that compares less than
     /// any post-bump value the master can produce. Phase 8b `Query`
     /// overwrites these on its first archetype-refresh pass.
@@ -237,7 +237,7 @@ impl SystemMeta {
     /// Writes both change-detection tick snapshots in place (Phase 5 MF-5
     /// enabling).
     ///
-    /// The public setter that a HAND-WRITTEN out-of-crate [`System`] impl (the
+    /// The public setter that a HAND-WRITTEN out-of-crate `System` impl (the
     /// `boyko_render` `GpuSystem`) forwards from its
     /// [`System::set_change_ticks`](super::system::System::set_change_ticks) so
     /// the dispatcher's tick-snapshot contract holds without exposing the
@@ -250,12 +250,12 @@ impl SystemMeta {
     }
 
     /// Clamps both tick snapshots to be no older than
-    /// [`MAX_CHANGE_AGE`](crate::ecs::core::change_detection::MAX_CHANGE_AGE)
+    /// [`MAX_CHANGE_AGE`]
     /// ticks behind `current` (Phase 5 MF-5 enabling).
     ///
     /// The public counterpart of the in-crate
     /// [`Tick::check_tick`](crate::ecs::core::change_detection::Tick::check_tick)
-    /// clamp, forwarded by an out-of-crate [`System`]'s
+    /// clamp, forwarded by an out-of-crate `System`'s
     /// [`System::check_change_tick`](super::system::System::check_change_tick).
     #[inline]
     pub fn clamp_change_ticks(&mut self, current: Tick) {

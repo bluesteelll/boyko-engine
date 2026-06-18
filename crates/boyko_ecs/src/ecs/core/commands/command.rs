@@ -2,7 +2,7 @@
 //!
 //! Phase 8d Step 6 / plan §11. The trait is intentionally minimal: a
 //! `Command` is a value-typed payload that, when flushed by
-//! [`super::CommandQueue::apply`], consumes itself (`self` by value) and
+//! `super::CommandQueue::apply`, consumes itself (`self` by value) and
 //! mutates the world via exclusive `&mut EcsMaster`.
 //!
 //! # `Send + 'static`
@@ -32,13 +32,13 @@ use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 ///
 /// Commands are enqueued via `Commands::spawn(...)` / `Commands::despawn(...)`
 /// / `Commands::add(cmd)` (Step 7) and flushed by
-/// [`super::CommandQueue::apply`] after the system body returns.
+/// `super::CommandQueue::apply` after the system body returns.
 ///
 /// # Contract — invariants CQ4, CQ7
 ///
 /// * **CQ4** — `apply` is invoked at most once per command instance. The
 ///   queue's apply loop calls it from inside
-///   [`super::CommandQueue::apply`]; the panic-recovery path SKIPS the
+///   `super::CommandQueue::apply`; the panic-recovery path SKIPS the
 ///   panicker on redrive (W3' RESOLUTION).
 /// * **CQ7** — `apply` receives exclusive `&mut EcsMaster`. APP4 forbids
 ///   re-entry into `EcsMaster::run_system_once` / `run_closure_once` from
@@ -47,7 +47,7 @@ use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 /// # Drop safety
 ///
 /// If `apply` is never called (the queue is dropped with un-flushed
-/// commands), the per-type drop glue ([`consume_and_drop_glue`]) is
+/// commands), the per-type drop glue (`consume_and_drop_glue`) is
 /// invoked with `world = None` so the command's [`Drop`] impl runs once
 /// and only once.
 pub trait Command: Send + 'static {

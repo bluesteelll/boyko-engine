@@ -3,7 +3,7 @@
 //! Spec: `docs/SERIALIZATION-PLAN.md` §3.1 / §3.7 (the owning / bit-restricted
 //! decode path). This module defines the in-house [`Wire`] trait — a leaf value
 //! encoder/decoder over the cursors in this module's parent
-//! ([`SaveCursor`](super::SaveCursor) / [`LoadCursor`](super::LoadCursor)) — plus
+//! ([`SaveCursor`] / [`LoadCursor`]) — plus
 //! the [`WireTuple`] field-aggregate the derive routes a component's fields through.
 //!
 //! # Why an in-house trait (no serde / no third-party)

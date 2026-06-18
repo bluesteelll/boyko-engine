@@ -7,7 +7,7 @@
 //! only owns the handle and the device-side row counters.
 //!
 //! Phase 4 mints NO device pool (the residency table is empty until a GPU
-//! component registers), so [`DeviceColumn`] is a forward seam: it constructs
+//! component registers), so `DeviceColumn` is a forward seam: it constructs
 //! (the stub) and is `Send + Sync`, and `ComponentPool`'s `PoolBacking::Device`
 //! arm holds a `Box<DeviceColumn>`. Phase 5 fills the RHI allocate/grow/release.
 //!
@@ -17,7 +17,7 @@
 ///
 /// `#[repr(transparent)]` over a bare `u64` so it is Miri-safe (a plain integer,
 /// no provenance) and stays compiled in on every target — UNLIKE
-/// [`DeviceColumn`], which is `#[cfg(not(miri))]`. A future `boyko_render`'s
+/// `DeviceColumn`, which is `#[cfg(not(miri))]`. A future `boyko_render`'s
 /// `slot <-> u64` bridge packs a device-column registry index (and any
 /// generation/tag bits it needs) into this; `boyko_ecs` treats it as an opaque
 /// token it neither interprets nor dereferences.

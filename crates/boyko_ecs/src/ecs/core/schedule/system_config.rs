@@ -4,7 +4,7 @@
 //! See Phase 9 plan §5.6. Wave 4 Step 9 ships the minimum surface the
 //! topological-sort + cycle-detection tests in `schedule_builder` exercise:
 //! `.before(other)`, `.after(other)`, `.chain(other)` register ordering
-//! edges against pre-existing systems by their [`SystemKey`]; `.in_set`
+//! edges against pre-existing systems by their `SystemKey`; `.in_set`
 //! records set membership for the (Wave 5 Step 14) expansion pass.
 //!
 //! # Why `SystemKey` rather than `IntoSystem<...>`
@@ -31,7 +31,7 @@ use crate::ecs::core::system::system::System;
 /// Fluent chaining handle returned by
 /// [`ScheduleBuilder::add_system`].
 ///
-/// Each chained call appends an [`OrderingEdge`] (or a set-membership
+/// Each chained call appends an `OrderingEdge` (or a set-membership
 /// hint) to the descriptor referenced by `key` inside `builder`. The
 /// handle is single-use per `add_system` invocation — `self` is consumed
 /// and returned so the user pattern stays
@@ -48,7 +48,7 @@ pub struct SystemConfig<'a> {
 }
 
 impl<'a> SystemConfig<'a> {
-    /// Returns the [`SystemKey`] of the system this chain operates on.
+    /// Returns the `SystemKey` of the system this chain operates on.
     /// Used by tests + by user code that needs to forward the handle
     /// into a sibling `.before(...)` / `.after(...)` call.
     #[inline]
@@ -57,7 +57,7 @@ impl<'a> SystemConfig<'a> {
     }
 
     /// Records "this system must run before `other`". Encoded as an
-    /// [`OrderingEdge::Before`] on the receiver-side descriptor.
+    /// `OrderingEdge::Before` on the receiver-side descriptor.
     ///
     /// Equivalent to `other_config.after(self.key())` — the edge ends up
     /// on whichever descriptor carries it; `build` deduplicates by
@@ -72,7 +72,7 @@ impl<'a> SystemConfig<'a> {
     }
 
     /// Records "this system must run after `other`". Encoded as
-    /// [`OrderingEdge::After`].
+    /// `OrderingEdge::After`.
     #[inline]
     pub fn after(self, other: SystemKey) -> Self {
         let edge = OrderingEdge::After(self.key, other);
@@ -84,7 +84,7 @@ impl<'a> SystemConfig<'a> {
 
     /// Records a strict serial order between this system and `other`
     /// (this → other). Same DAG edge as `before` but a distinct
-    /// [`OrderingEdge`] variant for diagnostics.
+    /// `OrderingEdge` variant for diagnostics.
     #[inline]
     pub fn chain(self, other: SystemKey) -> Self {
         let edge = OrderingEdge::ChainConsecutive(self.key, other);
@@ -97,7 +97,7 @@ impl<'a> SystemConfig<'a> {
     /// Records membership in `set`. The set is interned (or looked up) by
     /// its `(TypeId, discriminant)` key, so subsequent `.in_set(SameSet)`
     /// calls — and `configure_set(SameSet)` / `before_set(SameSet)` —
-    /// resolve to the **same** [`SystemSetId`] (Phase 15 §13-P1).
+    /// resolve to the **same** `SystemSetId` (Phase 15 §13-P1).
     ///
     /// Membership alone contributes no ordering edge; the set's expanded
     /// edges arise from set-level ordering (`before_set` / `configure_set`)
@@ -117,7 +117,7 @@ impl<'a> SystemConfig<'a> {
     }
 
     /// Records "this system runs before every (current + nested) member of
-    /// `set`". Recorded as a builder-level [`SetOrderEdge`]; expanded into
+    /// `set`". Recorded as a builder-level `SetOrderEdge`; expanded into
     /// `X → member` edges at `build` over the transitive membership.
     #[inline]
     pub fn before_set<S: SystemSet>(self, set: S) -> Self {
@@ -129,7 +129,7 @@ impl<'a> SystemConfig<'a> {
     }
 
     /// Records "this system runs after every member of `set`". Recorded as
-    /// a builder-level [`SetOrderEdge`]; expanded into `member → X` edges at
+    /// a builder-level `SetOrderEdge`; expanded into `member → X` edges at
     /// `build`.
     #[inline]
     pub fn after_set<S: SystemSet>(self, set: S) -> Self {
@@ -195,7 +195,7 @@ impl<'a> SystemConfig<'a> {
     ///
     /// Sets the descriptor's `is_gpu` flag, which the build-time `SystemKind`
     /// resolution ([`ScheduleBuilder::build`]) reads to classify the system as
-    /// [`SystemKind::GpuCompute`](crate::ecs::core::system::system_kind::SystemKind::GpuCompute)
+    /// `SystemKind::GpuCompute`
     /// — a marker carve-out that is NOT derived from access. A `GpuCompute`
     /// system runs dispatcher-solo at the apply-window barrier (`running == 0`),
     /// the sound site for recording/submitting through the `!Send` RHI.

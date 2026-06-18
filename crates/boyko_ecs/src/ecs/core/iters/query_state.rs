@@ -95,7 +95,7 @@ impl QueryState {
     /// any `QueryState` naming it is constructed. Typed queries satisfy this by
     /// construction (`init_state` resolves `component_id()`, which installs the
     /// residency class and sets the bit, before any scan). The raw-mask paths
-    /// [`Query::with_mask`](crate::ecs::core::iters::query::legacy_query) /
+    /// `Query::with_mask` /
     /// `Query::with_filters` copy a caller-built mask WITHOUT resolving ids, so a
     /// `Gpu` component classified AFTER such a `QueryState` is built would be
     /// missed — raw-mask callers must honor the same registration-before-query

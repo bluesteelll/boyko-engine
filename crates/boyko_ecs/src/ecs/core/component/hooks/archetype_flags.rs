@@ -68,7 +68,7 @@ impl ArchetypeFlags {
     /// archetype (the acceptable cost — observed archetypes are rare).
     pub const HAS_ENTITY_OBSERVER: u16 = 1 << 10;
 
-    /// Set iff ≥1 component in the archetype is [`ResidencyKind::Gpu`]
+    /// Set iff ≥1 component in the archetype is `ResidencyKind::Gpu`
     /// (Phase 4 Seam 1, D1). OR-computed once at mint from the cold
     /// `RESIDENCY_CLASS` table, then read as a single `test`/`jz` on the
     /// already-loaded `flags` `u16` — the same 0%-when-unused mechanism as the

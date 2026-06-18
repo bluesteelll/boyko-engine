@@ -1,14 +1,14 @@
 //! `RemoveCommand<C>` — deferred "remove single component `C` from entity".
 //!
 //! Phase 11 §6.4 / EC10. Constructed by
-//! [`EntityCommands::remove`](crate::ecs::core::system::params::entity_commands::EntityCommands::remove).
+//! `EntityCommands::remove`.
 //! Apply path:
 //!
 //! 1. Resolve source archetype from the entity's fast inland.
 //! 2. Compute target = source \\ {C} via
-//!    [`without_component_archetype_id`](crate::ecs::core::commands::migration_helpers::without_component_archetype_id).
+//!    `without_component_archetype_id`.
 //!    Absent C ⇒ silent no-op (W1 — Bevy Issue #10166).
-//! 3. Migrate via [`migrate_entity_remove`](crate::ecs::core::commands::migration_helpers::migrate_entity_remove).
+//! 3. Migrate via `migrate_entity_remove`.
 //!
 //! Bundle-typed remove is deferred to Phase 12 (OQ8).
 

@@ -1,12 +1,12 @@
 //! `CloneSpawnCommand` — deferred "clone `source` into a pre-reserved entity"
 //! command (Feature 3, plan §8).
 //!
-//! Mirrors [`SpawnAtCommand`](crate::ecs::core::commands::spawn_at_command::SpawnAtCommand):
+//! Mirrors `SpawnAtCommand`:
 //! `Commands::clone_and_spawn` reserves an [`Entity`] at the callsite (atomic
 //! counter) so the user can `.id()` synchronously, then enqueues this command. The
 //! actual clone runs at the apply window under `&mut EcsMaster` (structural ops are
 //! single-threaded per Phase 9). Apply delegates to
-//! [`materialize_clone_at`](crate::ecs::core::clone::materialize::materialize_clone_at),
+//! `materialize_clone_at`,
 //! which writes into the pre-reserved slot (W5: the entity→inland mapping is the
 //! LAST step, so a panic mid-clone leaves `entity_master` untouched).
 

@@ -7,7 +7,7 @@
 //!
 //! # Scope (Phases S1 / S1.5 / S2)
 //!
-//! - [`format`] — the `#[repr(C)]` on-disk types ([`SaveHeader`],
+//! - [`format`](mod@format) — the `#[repr(C)]` on-disk types ([`SaveHeader`],
 //!   [`TypeTableEntry`], [`ArchetypeBlock`], [`ColumnRegion`], [`VarRef`]), with
 //!   const-asserted layouts (the bytes ARE the wire contract).
 //! - [`save_world`] / [`save_world_to_file`] — the two-pass save (Pass 1 sizes
@@ -26,7 +26,7 @@
 //! (`boyko_ecs::ecs::core::serialize::load_writer`) because the pool/archetype/
 //! entity-master write primitives are crate-private; `load.rs` here is the
 //! file-format parser that resolves the file into per-archetype
-//! [`LoadColumn`](boyko_ecs::ecs::core::serialize::LoadColumn) instructions and
+//! [`LoadColumn`] instructions and
 //! hands one archetype at a time to that driver.
 //!
 //! The cursors driven by the per-component fn-ptrs ([`SaveCursor`] /

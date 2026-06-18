@@ -1,7 +1,7 @@
 //! `InsertCommand<B>` — deferred "insert bundle `B` into existing entity".
 //!
 //! Phase 11 §6.3 / EC9. Constructed by
-//! [`EntityCommands::insert`](crate::ecs::core::system::params::entity_commands::EntityCommands::insert).
+//! `EntityCommands::insert`.
 //! Apply chooses one of two paths based on the canonicalization invariant
 //! (plan §7.4 / W-N1):
 //!

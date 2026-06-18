@@ -3,11 +3,11 @@
 //!
 //! Two flavours of archetype change:
 //!
-//! * [`migrate_entity_insert`] — source ∪ bundle. If `merged_archetype_id ==
+//! * `migrate_entity_insert` — source ∪ bundle. If `merged_archetype_id ==
 //!   source_archetype_id` (canonicalization invariant cited from
 //!   `archetype_master.rs:99-133, 462-473`), the in-place replace fast path
-//!   [`apply_replace_in_place`] is taken — `bundle ⊆ source`.
-//! * [`migrate_entity_remove`] — source \\ `{C}`. Single-component remove;
+//!   `apply_replace_in_place` is taken — `bundle ⊆ source`.
+//! * `migrate_entity_remove` — source \\ `{C}`. Single-component remove;
 //!   absent-C is a silent no-op (W1 — Bevy Issue #10166).
 //!
 //! Both paths use the existing dense byte-buffer `ComponentPool`

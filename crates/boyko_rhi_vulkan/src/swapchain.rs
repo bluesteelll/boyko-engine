@@ -941,7 +941,7 @@ impl<'ctx> Renderer<'ctx> {
     /// Unlike [`render_frame`](Self::render_frame) (which only clears), this binds
     /// `scene`'s graphics pipeline + vertex buffer + MVP push constant and draws a
     /// depth-tested mesh into the swapchain image against `scene`'s depth attachment
-    /// (recreated to match the swapchain extent on resize, see [`Scene::sync_depth`]).
+    /// (recreated to match the swapchain extent on resize, see [`Scene`]`::sync_depth`).
     ///
     /// `clear` is the background color the draw composites over.
     ///
@@ -960,7 +960,7 @@ impl<'ctx> Renderer<'ctx> {
     ///
     /// `scene`'s pipeline / vertex buffer were created on the same device as this
     /// renderer and outlive the call; `scene.depth` has been synced to `swapchain`'s
-    /// current extent (the call does this via [`Scene::sync_depth`] when needed). A
+    /// current extent (the call does this via [`Scene`]`::sync_depth` when needed). A
     /// `Some(readback)` buffer must be a host-visible buffer of at least
     /// `extent.width * extent.height * 4` bytes (R8G8B8A8/B8G8R8A8 is 4 B/texel).
     #[allow(clippy::too_many_arguments)]
@@ -2007,7 +2007,7 @@ struct DepthImage {
 /// image — everything [`Renderer::render_scene_frame`] needs beyond the swapchain.
 ///
 /// The pipeline + vertex buffer are created by the caller through the
-/// [`RhiDevice`](boyko_rhi::RhiDevice) trait (so the proven S0 pipeline-creation
+/// [`RhiDevice`] trait (so the proven S0 pipeline-creation
 /// path is reused, not duplicated) and moved into the `Scene`; the depth image is
 /// created + resized internally via the same device's `create_texture` path. The
 /// `Scene` is **not** `Copy`/`Clone`: it is torn down by value through
@@ -2159,7 +2159,7 @@ impl Scene {
 ///
 /// Unlike [`Scene`] (which OWNS its resources and is destroyed by value), this is a
 /// lightweight BORROW bundle: the caller creates the resources through the
-/// [`RhiDevice`](boyko_rhi::RhiDevice) trait, owns them, and tears them down (the
+/// [`RhiDevice`] trait, owns them, and tears them down (the
 /// `'a` lifetime ties the bundle to those borrows for the present call). It exists
 /// only to keep [`Renderer::present_sampled`]'s signature compact.
 ///

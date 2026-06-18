@@ -1283,7 +1283,7 @@ impl Schedule {
     ///
     /// Walks the conflict graph's directed `successors` edges and yields one
     /// [`GpuBarrierEdge`] per `producer → consumer` edge whose CONSUMER is a
-    /// [`SystemKind::GpuCompute`] system. Each edge carries the producer's and
+    /// `SystemKind::GpuCompute` system. Each edge carries the producer's and
     /// consumer's [`GpuAccessIntent`] (a CPU producer with no declared intent
     /// yields an empty `Compute`-stage intent — it touches no device column).
     /// `boyko_render`'s `lower_barriers` consumes this iterator to emit precise
@@ -1359,7 +1359,7 @@ pub struct GpuBarrierEdge {
     /// projection — see the O2 note).
     pub producer: u32,
     /// Transient build-time index of the consumer system. The consumer is always
-    /// a [`SystemKind::GpuCompute`] system (the filter predicate).
+    /// a `SystemKind::GpuCompute` system (the filter predicate).
     pub consumer: u32,
     /// The producer's declared GPU access intent (an empty `Compute`-stage intent
     /// when the producer is a CPU system touching no device column).

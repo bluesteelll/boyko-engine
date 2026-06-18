@@ -2,7 +2,7 @@
 //!
 //! # Event ID assignment
 //!
-//! Each distinct type `E` implementing [`Event`](crate::ecs::core::events::event::Event)
+//! Each distinct type `E` implementing [`Event`]
 //! is assigned a unique [`EventId`] the first time `E::event_id()` is called
 //! in the current process. The assignment is lazy, lock-free on the cached
 //! read path, and stable for the lifetime of the process — but **not** stable
@@ -323,7 +323,7 @@ pub fn validate_event_types<E: Event>(event_id: EventId) -> bool {
 /// Caller guarantees that `event_id < MAX_EVENTS` (as `usize`) and that one
 /// of the following has already completed for the corresponding type `E`:
 /// - [`register_event_new::<E>()`] (production path, via `E::event_id()`), or
-/// - [`register_event::<E>(event_id)`] (test-only escape hatch).
+/// - `register_event::<E>(event_id)` (test-only escape hatch).
 ///   Violating either yields UB.
 #[inline]
 pub unsafe fn get_event_info_unchecked(event_id: EventId) -> &'static EventInfo {
@@ -344,7 +344,7 @@ pub unsafe fn get_event_info_unchecked(event_id: EventId) -> &'static EventInfo 
 /// Caller guarantees that `event_id < MAX_EVENTS` (as `usize`) and that one
 /// of the following has already completed for the corresponding type `E`:
 /// - [`register_event_new::<E>()`] (production path, via `E::event_id()`), or
-/// - [`register_event::<E>(event_id)`] (test-only escape hatch).
+/// - `register_event::<E>(event_id)` (test-only escape hatch).
 ///   Violating either yields UB.
 #[inline]
 pub unsafe fn get_participants_layout_unchecked(event_id: EventId) -> Layout {
@@ -358,7 +358,7 @@ pub unsafe fn get_participants_layout_unchecked(event_id: EventId) -> Layout {
 /// Caller guarantees that `event_id < MAX_EVENTS` (as `usize`) and that one
 /// of the following has already completed for the corresponding type `E`:
 /// - [`register_event_new::<E>()`] (production path, via `E::event_id()`), or
-/// - [`register_event::<E>(event_id)`] (test-only escape hatch).
+/// - `register_event::<E>(event_id)` (test-only escape hatch).
 ///   Violating either yields UB.
 #[inline]
 pub unsafe fn get_parameters_layout_unchecked(event_id: EventId) -> Layout {

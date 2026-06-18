@@ -2,7 +2,7 @@
 //! actually fire component lifecycle hooks (Phase 14a, plan §4.1 / §8 O2).
 //!
 //! Each of the four hook kinds gets one `#[cold] #[inline(never)]` fn, emitted
-//! by the [`define_trigger!`] macro (the Phase 10 `set_table_*` macro-collapse
+//! by the `define_trigger!` macro (the Phase 10 `set_table_*` macro-collapse
 //! technique). The cheap per-archetype `ArchetypeFlags` bit-test is the
 //! *caller's* gate (the no-hook hot path never reaches here — it is a single
 //! `u16` load + `test`/`jz`); a `trigger_on_*` fn is entered ONLY when the

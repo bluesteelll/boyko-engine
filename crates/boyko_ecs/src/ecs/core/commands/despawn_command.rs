@@ -1,7 +1,7 @@
 //! `DespawnCommand` — deferred per-entity teardown.
 //!
 //! Phase 11 §6.5 / EC11. Constructed by
-//! [`EntityCommands::despawn`](crate::ecs::core::system::params::entity_commands::EntityCommands::despawn)
+//! `EntityCommands::despawn`
 //! and [`Commands::despawn`](crate::ecs::core::system::params::commands::Commands::despawn);
 //! flushed by `CommandQueue::apply` under exclusive `&mut EcsMaster`. Apply
 //! delegates to the existing

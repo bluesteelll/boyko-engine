@@ -70,7 +70,7 @@ use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId};
 /// 2. **QF2** — `init_access` declares every component read performed in
 ///    `filter_fetch`. Archetypal-only filters declare nothing.
 /// 3. **QF3** — `Fetch<'w>` lifetime is scoped to the `*const/*mut Archetype`
-///    minted by [`super::super::super::ecs_master::unsafe_ecs_cell::UnsafeEcsCell`]
+///    minted by `super::super::super::ecs_master::unsafe_ecs_cell::UnsafeEcsCell`
 ///    for `'w`. Phase 8b filters do not cache pointers; the lifetime is vacuous.
 pub unsafe trait QueryFilter: Sized {
     /// Long-lived per-system state (resolved IDs, cached masks).
@@ -589,7 +589,7 @@ unsafe impl<C: Component> QueryFilter for Without<C> {
 ///   falls in the window.
 /// * In `Or<F>`, e.g. `Or<(With<A>, Added<B>)>`: the archetype set walks
 ///   every archetype matched by `With<A>` OR by the presence of `B`. On
-///   archetypes lacking `B`, the [`AddedFetch::tick_base`] pointer is NULL
+///   archetypes lacking `B`, the `AddedFetch::tick_base` pointer is NULL
 ///   and `filter_fetch` short-circuits to `false` (plan §5.4-bis — Round 2 C4
 ///   null-base branch).
 ///
@@ -2014,7 +2014,7 @@ impl_or_composable_tuple!(F0, F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11);
 
 /// Marker for [`QueryFilter`] impls whose decision is **archetype-level only**
 /// — they cannot reject individual rows. Required as a bound on
-/// [`Query::for_each_chunk`] / [`Query::par_for_each_chunk`] because the
+/// `Query::for_each_chunk` / `Query::par_for_each_chunk` because the
 /// chunk API yields one contiguous slice per archetype with no per-row gate.
 ///
 /// # Membership

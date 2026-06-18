@@ -754,9 +754,9 @@ impl EcsMaster {
     /// archetype, registering an **already-reserved** `Entity` handle in
     /// the Phase 7 fast store.
     ///
-    /// Used by [`SpawnAtCommand::apply`](crate::ecs::core::commands::spawn_at_command::SpawnAtCommand)
+    /// Used by `SpawnAtCommand::apply`
     /// after the deferred-spawn path has minted an `Entity` via
-    /// [`EntityCounter::reserve_entity`](crate::ecs::core::system::params::entity_counter::EntityCounter::reserve_entity).
+    /// `EntityCounter::reserve_entity`.
     /// Unlike [`create_entity`](Self::create_entity), this function does
     /// NOT mint a fresh `Entity` — it expects the caller to pass the
     /// pre-allocated handle.
@@ -958,7 +958,7 @@ impl EcsMaster {
         Ok(entity)
     }
 
-    /// Type-safe wrapper around [`create_entity`] for a single component (Phase 2e — Q-024 follow-up).
+    /// Type-safe wrapper around `create_entity` for a single component (Phase 2e — Q-024 follow-up).
     ///
     /// The caller supplies the value by move; this function reads its bytes via
     /// `std::slice::from_raw_parts` and forwards to `create_entity`. No heap
@@ -1009,13 +1009,13 @@ impl EcsMaster {
         result
     }
 
-    /// Type-safe two-component spawn — see [`spawn_one`] for rationale.
+    /// Type-safe two-component spawn — see `spawn_one` for rationale.
     ///
     /// Mirrors `LegacyQuery::iter_two` (Phase 2d) on the spawn side. Bounded 2-arity.
     ///
     /// # Drop discipline
     ///
-    /// Same as [`spawn_one`]: on Ok, both `a` and `b` are byte-copied into
+    /// Same as `spawn_one`: on Ok, both `a` and `b` are byte-copied into
     /// their respective pools and `mem::forget`'d locally so their pool
     /// `drop_fn`s become the new owners. On Err, NEITHER value was copied
     /// (either the archetype guard fired before any copy, or the pool's
@@ -1475,7 +1475,7 @@ impl EcsMaster {
     /// `component_bytes.len()` must equal the pool's stride; mismatched
     /// sizes produce undefined behavior in release. Callers should obtain
     /// the slice from a properly-sized `&T` for the target component type
-    /// (see [`get_component_mut`] typed wrappers).
+    /// (see `get_component_mut` typed wrappers).
     #[inline]
     pub fn set_component_raw(
         &mut self,
@@ -1763,7 +1763,7 @@ impl EcsMaster {
 
     /// Gets mutable raw pointers to multiple components for an entity.
     ///
-    /// Mutable counterpart of [`get_components_raw`]; the inland is copied
+    /// Mutable counterpart of `get_components_raw`; the inland is copied
     /// by value (16 B) to release the `entity_master` borrow before the
     /// `archetype_ptr` is reborrowed as `&mut Archetype` (W4 / U14).
     pub fn get_components_raw_mut(
@@ -1910,7 +1910,7 @@ impl EcsMaster {
     ///   1. [`System::initialize`] — idempotent two-phase init (state then
     ///      access surface); subsequent calls short-circuit so cross-call
     ///      `&mut S` reuse is supported.
-    ///   2. [`DispatcherToken::new`] — mints the dispatcher-solo capability
+    ///   2. `DispatcherToken::new` — mints the dispatcher-solo capability
     ///      bound to the `&mut self` borrow scope.
     ///   3. [`System::run_dispatcher`] — invokes the system body. The default
     ///      forwards to [`System::run_unsafe`] via the token's cell, so a CPU
@@ -1927,7 +1927,6 @@ impl EcsMaster {
     /// [`System::initialize`]: crate::ecs::core::system::system::System::initialize
     /// [`System::run_unsafe`]: crate::ecs::core::system::system::System::run_unsafe
     /// [`System::run_dispatcher`]: crate::ecs::core::system::system::System::run_dispatcher
-    /// [`DispatcherToken::new`]: crate::ecs::core::system::dispatcher_token::DispatcherToken::new
     pub fn run_system_once<S: System>(&mut self, system: &mut S) -> S::Out {
         system.initialize(self);
         // SAFETY (Option C / S1'): `&mut self` is exclusive for the entire call
@@ -2013,7 +2012,7 @@ impl EcsMaster {
     /// Sequence (plan §17 / §9.5):
     ///   1. [`System::initialize`] — idempotent (FS1). Re-running the same
     ///      cached system pays the init cost only on the first call.
-    ///   2. [`UnsafeEcsCell::new_mutable`] — mints the write-capable cell
+    ///   2. `UnsafeEcsCell::new_mutable` — mints the write-capable cell
     ///      bound to the `&mut self` borrow scope.
     ///   3. [`System::run_unsafe`] — body execution under invariant S1.
     ///   4. [`System::apply`] — flushes per-`SystemParam` deferred buffers
@@ -2028,7 +2027,6 @@ impl EcsMaster {
     /// [`System::initialize`]: crate::ecs::core::system::system::System::initialize
     /// [`System::run_unsafe`]: crate::ecs::core::system::system::System::run_unsafe
     /// [`System::apply`]: crate::ecs::core::system::system::System::apply
-    /// [`UnsafeEcsCell::new_mutable`]: crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell::new_mutable
     /// [`CommandQueue`]: crate::ecs::core::commands::command_queue::CommandQueue
     /// [`Access`]: crate::ecs::core::system::access::Access
     pub fn run_cached_system<S>(&mut self, system: &mut S) -> S::Out
@@ -2069,7 +2067,7 @@ impl EcsMaster {
     ///
     /// 1. [`System::initialize`] — idempotent (FS1); already ran at build,
     ///    so this is a no-op every frame.
-    /// 2. [`UnsafeEcsCell::new_mutable`] — write-capable cell bound to the
+    /// 2. `UnsafeEcsCell::new_mutable` — write-capable cell bound to the
     ///    `&mut self` borrow scope.
     /// 3. [`System::run_unsafe`] — the predicate body; returns the `bool`.
     ///
@@ -2872,7 +2870,7 @@ impl EcsMaster {
     ///    stable address (~1 ns).
     /// 3. If `Some(arch)`: return.
     /// 4. If `None`: fall into the cold path —
-    ///    [`Self::cold_register_bundle_archetype`] resolves via
+    ///    `Self::cold_register_bundle_archetype` resolves via
     ///    [`Self::get_or_create_archetype`] and `OnceLock::set`s the slot
     ///    (~1 µs).
     ///
@@ -2966,7 +2964,7 @@ impl EcsMaster {
 
     /// Returns the world's current change-detection tick.
     ///
-    /// Reads [`Self::change_tick`] with `Ordering::Relaxed` — sufficient
+    /// Reads `Self::change_tick` with `Ordering::Relaxed` — sufficient
     /// per plan §8.1: the per-row tick writes that consume this value are
     /// synchronised via the Phase 9 conflict graph (SCH3), not via the
     /// atomic. The fetch returns a single `u32` (no compound state).
@@ -3148,7 +3146,7 @@ impl EcsMaster {
     /// on this path. The Phase 12.5 SBO17 strong-form check (Relaxed
     /// pre-load + capacity comparison) backed a fixed pre-sized
     /// fast-store; the lazy-growth replacement
-    /// ([`EntityMaster::ensure_capacity`](crate::ecs::core::entity::entity_master::EntityMaster::ensure_capacity))
+    /// (`EntityMaster::ensure_capacity`)
     /// expands the fast-store on demand under `&mut self`, so the
     /// capacity guard inside `SpawnBatchCommand::apply` grows instead of
     /// panicking. Memory exhaustion will surface as an OOM from
@@ -3372,8 +3370,8 @@ impl EcsMaster {
 
     /// Clears all entities and archetypes from the system.
     ///
-    /// Also resets the per-world bundle caches ([`Self::bundle_archetype_cache`]
-    /// and [`Self::bundle_column_cache`]): both hold `ArchetypeId`s /
+    /// Also resets the per-world bundle caches (`Self::bundle_archetype_cache`
+    /// and `Self::bundle_column_cache`): both hold `ArchetypeId`s /
     /// `InlandPoolId`s resolved against the pre-clear archetype registry, which
     /// `archetype_master.clear()` discards (`next_archetype_id` rolls back to
     /// `ArchetypeId(1)`). Without the reset, respawning a bundle type that was

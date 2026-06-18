@@ -154,7 +154,7 @@ impl<S: System> IntoSystem<(), <S as System>::Out, S> for S {
 pub struct ExclusiveSystemMarker;
 
 /// Exclusive-system blanket: any `F: FnMut(&mut EcsMaster) + Send + Sync
-/// + 'static` is convertible into an [`ExclusiveFunctionSystem<F>`].
+/// + 'static` is convertible into an ``ExclusiveFunctionSystem<F>``.
 ///
 /// The marker tuple `(ExclusiveSystemMarker, fn(&mut EcsMaster))`
 /// mirrors the Phase 8c marker shape — a ZST disambiguator paired with

@@ -1,8 +1,8 @@
 //! `EnableTagCommand` — deferred EnableTag toggle (Decision D3 / Step 9).
 //!
 //! Constructed by
-//! [`EntityCommands::enable`](crate::ecs::core::system::params::entity_commands::EntityCommands::enable)
-//! / [`EntityCommands::disable`](crate::ecs::core::system::params::entity_commands::EntityCommands::disable)
+//! `EntityCommands::enable`
+//! / `EntityCommands::disable`
 //! (and their dynamic `_id` variants); flushed by `CommandQueue::apply` under
 //! exclusive `&mut EcsMaster`.
 //!

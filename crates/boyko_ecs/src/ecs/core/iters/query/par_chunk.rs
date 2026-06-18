@@ -10,7 +10,7 @@
 //!
 //! The closure is invoked **once per archetype sub-range, not once per
 //! archetype** — see plan §2.4 / §1.2 for the worked example. The sequential
-//! [`chunk_iter::for_each_chunk_impl`] driver yields exactly one invocation per
+//! `chunk_iter::for_each_chunk_impl` driver yields exactly one invocation per
 //! non-empty matched archetype with a full row slice; the parallel driver
 //! yields `worker_count × batches_per_thread` (medium-large regime) or
 //! `entity_count / MIN_ARCHETYPE_FOR_PARALLEL` (small-archetype floor regime)
@@ -29,7 +29,7 @@
 //! - **PAR6**: re-entrant via [`ThreadPool::scope`] (work-stealing Drop, plan
 //!   §4.5.5); nested `par_for_each_chunk` from inside a worker is safe.
 //! - **PAR7**: when no pool is attached to the calling thread, dispatch falls
-//!   back to the sequential [`super::chunk_iter::for_each_chunk_impl`] driver,
+//!   back to the sequential `super::chunk_iter::for_each_chunk_impl` driver,
 //!   wrapping the user `Fn` in a `FnMut` adapter.
 //! - **PAR9**: archetypes with fewer than [`MIN_ARCHETYPE_FOR_PARALLEL`] rows
 //!   run inline on the calling thread (no `scope.spawn` round-trip).
@@ -39,7 +39,7 @@
 //! [`ChunkedQueryData`] excludes `Ref<T>` / `Mut<T>` (CD-trait gate);
 //! [`ArchetypalQueryFilter`] excludes `Added<C>` / `Changed<C>`. Therefore
 //! `NEEDS_CHANGE_DETECTION` const-folds to `false` at this monomorphisation —
-//! the meta-bearing branch from [`super::par_iter::for_each_impl`] does not
+//! the meta-bearing branch from `super::par_iter::for_each_impl` does not
 //! appear here, and the NCD6 dispatcher split (per `par_iter.rs:577-641`) is
 //! absent. The driver path is strictly leaner than its per-row sibling.
 //!

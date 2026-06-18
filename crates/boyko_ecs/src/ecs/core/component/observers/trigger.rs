@@ -46,10 +46,9 @@ const _: () = assert!(
 );
 
 /// Dense, process-stable id for a custom-trigger type, minted by
-/// [`trigger_id_of`]. Packed into a [`DispatchKey`] for entity-targeted custom
+/// `trigger_id_of`. Packed into a `DispatchKey` for entity-targeted custom
 /// observers.
 ///
-/// [`DispatchKey`]: crate::ecs::core::component::observers::dispatch_key::DispatchKey
 pub type TriggerId = u32;
 
 /// Per-trigger-type slot record (just the `TypeId`, for collision detection).

@@ -67,7 +67,7 @@ pub struct GpuTouch {
 
 /// Abstract per-system GPU access descriptor (D7).
 ///
-/// Declared by a GPU-compute system; carried on [`SystemMeta`] as
+/// Declared by a GPU-compute system; carried on `SystemMeta` as
 /// `Option<Box<GpuAccessIntent>>` (`None` for every CPU system → 0%). The
 /// conflict graph still owns ordering; this only records the stage + the
 /// per-column accesses a future `boyko_render` needs to emit a precise

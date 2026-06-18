@@ -8,7 +8,7 @@
 //! 2. Validates that the ordering DAG is acyclic via Tarjan SCC;
 //! 3. Linearises systems via Kahn's topological sort;
 //! 4. Hands the topologically-ordered descriptors to
-//!    [`ConflictGraph::build`] (Wave 4 Step 10) for the per-system
+//!    `ConflictGraph::build` (Wave 4 Step 10) for the per-system
 //!    conflict bitsets + predecessor counts;
 //! 5. Constructs a [`Schedule`] that the (Wave 5) executor can run.
 //!
@@ -22,7 +22,6 @@
 //! Step 14 path without an extra clone.
 //!
 //! [`ScheduleBuilder::build`]: ScheduleBuilder::build
-//! [`ConflictGraph::build`]: super::conflict_graph::ConflictGraph::build
 
 use std::any::TypeId;
 use std::collections::HashMap;
@@ -218,7 +217,7 @@ impl ScheduleBuilder {
     /// `StateTransitionRecord<S>`) are inserted into the world at
     /// [`build`](Self::build)/[`try_build`](Self::try_build) (the builder holds
     /// no `&mut EcsMaster` until then), which also adds the schedule-side
-    /// [`StateEntry`] that fires the initial `OnEnter` and drains transitions
+    /// `StateEntry` that fires the initial `OnEnter` and drains transitions
     /// each frame.
     ///
     /// # Idempotency

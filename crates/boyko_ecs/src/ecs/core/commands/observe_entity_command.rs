@@ -2,7 +2,7 @@
 //! observer" (Feature 2, Step 6).
 //!
 //! Constructed by
-//! [`EntityCommands::observe`](crate::ecs::core::system::params::entity_commands::EntityCommands::observe).
+//! `EntityCommands::observe`.
 //! On apply it calls
 //! [`EcsMaster::observe_entity_event`](crate::ecs::core::ecs_master::ecs_master::EcsMaster::observe_entity_event),
 //! which registers the observer and raises the entity's sticky archetype bit —

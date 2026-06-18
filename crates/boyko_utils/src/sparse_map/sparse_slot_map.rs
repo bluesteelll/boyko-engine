@@ -238,7 +238,7 @@ impl<U> SparseSlotMap<U> {
         Some(&self.dense[stored.index()])
     }
 
-    /// Mutable variant of [`get`].
+    /// Mutable variant of [`Self::get`].
     #[inline]
     pub fn get_mut(&mut self, slot: Slot) -> Option<&mut U> {
         let idx = slot.index();

@@ -3,7 +3,7 @@
 //! Produces a brand-new entity carrying clones of a source's components:
 //! filtered id set → require-closure (C2) → target archetype → row push →
 //! single-pass per-component clone (batch vs fn-ptr) → missing-required
-//! reconstruct (C2) → gated fire. The [`CloneRowGuard`] (W5) gives strong
+//! reconstruct (C2) → gated fire. The `CloneRowGuard` (W5) gives strong
 //! exception safety WITHOUT `catch_unwind`.
 //!
 //! # Soundness anchors

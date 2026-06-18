@@ -6,7 +6,7 @@
 //! the signature-storage filters (`With` / `Without` / `Added` / `Changed`),
 //! an EnableTag is NOT part of an archetype's signature mask and has no
 //! `ComponentPool`; its bit lives in the archetype's
-//! [`EnableStore`](crate::ecs::core::component::enable::enable_store::EnableStore)
+//! `EnableStore`
 //! at `(archetype, row)`. The per-row predicate tests that bit.
 //!
 //! # Shape (Decision D2)
@@ -30,7 +30,7 @@
 //! # `Or` rejection (M1)
 //!
 //! Neither filter implements the sealed
-//! [`OrComposable`](super::filter::OrComposable) marker, so
+//! `OrComposable` marker, so
 //! `Or<(Enabled<A>, ..)>` is a compile error: `Or` folds a non-archetypal
 //! per-row test against an archetypal element's unconditional `true`, which
 //! would leak disabled rows.
@@ -75,7 +75,7 @@ pub struct DisabledState<T> {
 // ── Per-archetype fetch ──────────────────────────────────────────────────────
 
 /// Per-archetype `Fetch` scratch shared by both enable filters: a borrowed
-/// pointer to the active archetype's [`EnableColumn`] for the tag, or NULL.
+/// pointer to the active archetype's `EnableColumn` for the tag, or NULL.
 ///
 /// NULL means the archetype has no allocated column for the tag — every row is
 /// disabled. `Enabled::filter_fetch` reads NULL as `false`; `Disabled` inverts
@@ -83,7 +83,7 @@ pub struct DisabledState<T> {
 ///
 /// `set_table_*` refreshes the pointer per archetype (mirrors the `Added`/
 /// `Changed` `tick_base` discipline). The per-page deref happens inside
-/// [`EnableColumn::test`]; the cursor hoists the loop-invariant word load.
+/// `EnableColumn::test`; the cursor hoists the loop-invariant word load.
 pub struct EnableFetch<'w> {
     /// Base pointer to the active archetype's column for the tag. NULL when the
     /// archetype has no column (all rows disabled).
@@ -126,7 +126,7 @@ unsafe fn cache_column(col: &mut *const EnableColumn, id: ComponentId, archetype
 
 /// Per-row filter: matches rows whose EnableTag `T` bit is **set**
 /// (Decision D2). Non-archetypal — the per-row `filter_fetch` tests the bit at
-/// `(archetype, row)` via the archetype's [`EnableStore`].
+/// `(archetype, row)` via the archetype's `EnableStore`.
 ///
 /// `Enabled<T>` requires a positive archetypal term to bound iteration, OR is a
 /// sole single term (candidate-seeded — amendment A3) — enforced at the

@@ -110,7 +110,7 @@ impl EcsMaster {
     /// Semantics (plan D8/D9):
     ///
     /// * **Absent tag** — archetype migration `source → source ∪ {tag}`
-    ///   through [`migrate_entity_attach_ids`]; `on_add` + `on_insert` hooks
+    ///   through `migrate_entity_attach_ids`; `on_add` + `on_insert` hooks
     ///   and observers fire for the tag. Attaching to an empty entity routes
     ///   it out of the EMPTY archetype (zero-retained shape, O3).
     /// * **Present tag** — in-place replace semantics: `on_replace` +
@@ -185,7 +185,7 @@ impl EcsMaster {
     /// Semantics (plan D9):
     ///
     /// * **Present tag** — archetype migration `source → source \ {tag}`
-    ///   through [`migrate_entity_detach_ids`]; `on_replace` + `on_remove`
+    ///   through `migrate_entity_detach_ids`; `on_replace` + `on_remove`
     ///   hooks and observers fire for the tag against the dying source row.
     ///   Removing the last component routes the entity INTO the EMPTY
     ///   archetype (O3) — the entity stays alive with zero components.

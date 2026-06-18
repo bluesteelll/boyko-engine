@@ -33,7 +33,7 @@ pub const SIMD_BUFFER_ALIGN: usize = 32;
 /// D2): each pool owns one `VmReservation` laid out
 /// `[data | added_ticks | changed_ticks]`, and the default row ceiling is
 /// `clamp(POOL_TARGET_DATA_BYTES / stride, POOL_MIN_ROWS, POOL_MAX_ROWS)`
-/// (see [`pool_reserve_rows`]). 1 GiB on the 64-bit OS-syscall arms —
+/// (see `pool_reserve_rows`). 1 GiB on the 64-bit OS-syscall arms —
 /// virtual address space only (no commit charge until `grow_rows` commits
 /// at the frontier), aligned with the Phase X.G 67 M-entity inland ceiling.
 ///
@@ -93,7 +93,7 @@ pub const POOL_MIN_SLAB: usize = 64 * 1024;
 /// commit-charge overshoot by one slab (the X.F overshoot-honesty bound);
 /// one max-step costs ≤ ~50 µs (the Phase X.F B4 envelope). A larger
 /// REQUEST is not clamped (the request-dominant `max` in
-/// [`pool_commit_step`] always covers it).
+/// `pool_commit_step` always covers it).
 pub const POOL_MAX_SLAB: usize = 64 * 1024 * 1024;
 
 // ── Phase X.I pure sizing / layout math (D1 + D2 + D4) ─────────────────────

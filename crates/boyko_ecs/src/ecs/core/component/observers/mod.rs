@@ -26,14 +26,14 @@
 //!
 //! # Feature 2 additions
 //!
-//! [`entity_store`] holds per-entity observers (a `SparseMap<u32>` handle + a
+//! `entity_store` holds per-entity observers (a `SparseMap<u32>` handle + a
 //! side arena), [`trigger`] holds custom-trigger types + the global trigger
-//! registry, [`traversal`] / [`propagate`] back propagation, and [`dispatch_key`]
+//! registry, [`traversal`] / [`propagate`] back propagation, and `dispatch_key`
 //! unifies lifecycle-kind and custom-trigger keys.
 //!
 //! Waves 1-3 ship the data structures, the per-archetype flag bits, and the
 //! `ArchetypeMaster` integration (seed + dynamic walk). The cold
-//! `fire_*_observers` dispatch fns live in the [`dispatch`] sub-module and are
+//! `fire_*_observers` dispatch fns live in the `dispatch` sub-module and are
 //! wired at the six structural-op fire sites by `EcsMaster` (Wave 5).
 
 pub(crate) mod dispatch;
@@ -64,7 +64,7 @@ pub struct ObserverId(pub(crate) u64);
 /// no `Despawn` kind" is reversed): an entity despawn now fires per-component
 /// `Despawn` observers FIRST (whole-entity cleanup), then the per-component
 /// `Replace` + `Remove` observers — all pre-drop. The discriminants are the
-/// dense `[kind]` index into [`ObserverLists::by_kind_component`].
+/// dense `[kind]` index into `ObserverLists::by_kind_component`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ObserverKind {

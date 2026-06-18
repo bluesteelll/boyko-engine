@@ -27,7 +27,7 @@
 //!
 //! # Keying (the dense-row assumption, shared with warm-start)
 //!
-//! Keyed by `pack(body_a, body_b)` on the dense [`BodyIndex`](crate::manifold::BodyIndex)
+//! Keyed by `pack(body_a, body_b)` on the dense [`BodyIndex`]
 //! row indices, which are stable frame-to-frame for a stable scene (no
 //! spawn/despawn between frames — the stacking case). A structural change
 //! reshuffles the dense rows, so the matched keys differ for one frame: a
@@ -150,7 +150,7 @@ impl BoxAxisCache {
     /// pair was not present last frame (a cold contact — the SAT then picks the
     /// global min axis with no hysteresis bias).
     ///
-    /// Linear-probes from [`home`](Self::home); the first [`EMPTY`] slot ends the
+    /// Linear-probes from the `home` slot; the first `EMPTY` slot ends the
     /// chain (no tombstones, so a miss is unambiguous).
     #[inline]
     pub fn get(&self, a: BodyIndex, b: BodyIndex) -> Option<usize> {
@@ -178,7 +178,7 @@ impl BoxAxisCache {
     /// Stores the SAT-axis index `axis` chosen this frame for body pair `(a, b)`,
     /// overwriting any prior entry for the same pair.
     ///
-    /// Linear-probes from [`home`](Self::home) to the pair's slot (or the first
+    /// Linear-probes from the `home` slot to the pair's slot (or the first
     /// empty one). Each pair is set at most once per frame (narrowphase visits a
     /// pair once), so the table never holds two live entries for one pair.
     ///

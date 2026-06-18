@@ -6,7 +6,7 @@
 //! reserved_row_ptr, commit_units, fill_ticks, construct_at_uninitialized,
 //! drop_at, pop_entity_no_drop}`, `EntityMaster::{reserve_batch, ensure_capacity,
 //! register_batch}`) that the file-format parser in the `boyko_serialize` crate
-//! cannot reach (they are crate-private). The parser ([`boyko_serialize::load`])
+//! cannot reach (they are crate-private). The parser (`boyko_serialize::load`)
 //! resolves the file into a per-archetype set of [`LoadColumn`] instructions and
 //! calls [`load_archetype`]; this module performs the
 //! create → reserve → write → commit → fill → register sequence the clone
@@ -41,7 +41,7 @@
 //! * **Incremental commit + rollback (mirrors `materialize.rs` `CloneRowGuard`)**:
 //!   columns are committed as they complete (a blit/construct column in one
 //!   `commit_units(0, n)`; a decode column row-by-row). On the FIRST decode `Err`
-//!   the [`ArchetypeLoadGuard`] drops every committed row of every committed pool
+//!   the `ArchetypeLoadGuard` drops every committed row of every committed pool
 //!   via `drop_at` + `pop_entity_no_drop` and leaves the fresh archetype empty
 //!   (`current_index == 0`, `entity_ids` empty) — the entity batch is never
 //!   registered, so `entity_master` is untouched on the rollback path.

@@ -118,7 +118,7 @@ impl ArchetypeRegistry {
     
     /// Finds archetypes containing all components in the query mask.
     ///
-    /// Thin wrapper around [`find_matching_archetypes_into`] for backward compatibility.
+    /// Thin wrapper around `find_matching_archetypes_into` for backward compatibility.
     #[inline]
     pub fn find_matching_archetypes(&self, mask: &ComponentMask) -> Vec<ArchetypeId> {
         let mut out = Vec::new();
@@ -154,7 +154,7 @@ impl ArchetypeRegistry {
     
     /// Finds archetypes that match the exact component mask.
     ///
-    /// Thin wrapper around [`find_exact_match_into`] for backward compatibility.
+    /// Thin wrapper around `find_exact_match_into` for backward compatibility.
     #[inline]
     pub fn find_exact_match(&self, mask: &ComponentMask) -> Vec<ArchetypeId> {
         let mut out = Vec::new();
@@ -185,7 +185,7 @@ impl ArchetypeRegistry {
     
     /// Finds archetypes containing all specified components.
     ///
-    /// Thin wrapper around [`find_archetypes_with_components_into`] for backward compatibility.
+    /// Thin wrapper around `find_archetypes_with_components_into` for backward compatibility.
     #[inline]
     pub fn find_archetypes_with_components(&self, components: &[ComponentId]) -> Vec<ArchetypeId> {
         let mut out = Vec::new();
@@ -317,7 +317,7 @@ impl ArchetypeRegistry {
     
     /// Find archetypes with complex filtering criteria (include, exclude, optional components).
     ///
-    /// Thin wrapper around [`find_with_filter_into`] for backward compatibility.
+    /// Thin wrapper around `find_with_filter_into` for backward compatibility.
     #[inline]
     pub fn find_with_filter(
         &self,
@@ -396,7 +396,7 @@ impl ArchetypeRegistry {
     /// Find archetypes with components that can be included, excluded, or optional.
     ///
     /// Component-centric alternative to mask-based filtering. Thin wrapper around
-    /// [`find_with_component_filter_into`] for backward compatibility.
+    /// `find_with_component_filter_into` for backward compatibility.
     #[inline]
     pub fn find_with_component_filter(
         &self,

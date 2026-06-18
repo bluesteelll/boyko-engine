@@ -4,7 +4,7 @@
 //! Every `Vec` here is sized once and refilled each step (cleared, capacity
 //! reused): the foundation does no per-step / per-manifold heap allocation
 //! (principle 5). [`SolverScratch`] is the dense, row-indexed snapshot the
-//! gather→solve→apply pipeline addresses by [`BodyIndex`](crate::manifold::BodyIndex)
+//! gather→solve→apply pipeline addresses by [`BodyIndex`]
 //! — see [`crate::systems`].
 
 use boyko_macros::Resource;

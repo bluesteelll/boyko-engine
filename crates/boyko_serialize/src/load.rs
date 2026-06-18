@@ -4,9 +4,9 @@
 //! is the file-format PARSER half of the loader: it validates the header, resolves
 //! the file's type table to running `ComponentId`s once, parses each archetype
 //! block, classifies each column into a
-//! [`LoadColumn`](boyko_ecs::ecs::core::serialize::LoadColumn) instruction, and
+//! [`LoadColumn`] instruction, and
 //! hands one archetype at a time to
-//! [`load_archetype`](boyko_ecs::ecs::core::serialize::load_archetype) — the
+//! [`load_archetype`] — the
 //! `boyko_ecs`-side WRITER that owns the crate-private row-write primitives.
 //!
 //! # Scope (Phase S2 + S2.5)
@@ -14,9 +14,9 @@
 //! S2 ships the headline `CopyIntoWorld` round-trip; S2.5 adds the ENTITY-REMAP
 //! pass so saved `Entity` references survive a round-trip. Each archetype is loaded
 //! with its Entity fields holding their RAW saved ids and the
-//! [`LoadEntityMap`](boyko_ecs::ecs::core::serialize::LoadEntityMap) records the
+//! [`LoadEntityMap`] records the
 //! saved→fresh mapping; then a SEPARATE whole-world pass
-//! ([`remap_loaded_entities`](boyko_ecs::ecs::core::serialize::remap_loaded_entities),
+//! ([`remap_loaded_entities`],
 //! invoked here after the archetype loop) rewrites every remappable component
 //! (`ChildOf` / an `#[entities]`-annotated field) to its freshly-allocated
 //! `Entity`. A plain `Entity` field WITHOUT `#[entities]` stays the raw saved id

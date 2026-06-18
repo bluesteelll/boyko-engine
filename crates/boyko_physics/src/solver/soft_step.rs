@@ -1,7 +1,7 @@
 //! The in-house TGS-Soft rigid-body solver — sphere and box contacts with
 //! cross-frame, per-contact-point warm-starting (P2 W2 + W3 + W4).
 //!
-//! [`SoftStepSolver`] is a real [`RigidSolver`](super::RigidSolver) that resolves
+//! [`SoftStepSolver`] is a real [`RigidSolver`] that resolves
 //! the narrowphase manifolds with the Temporal Gauss-Seidel "Soft Step" scheme
 //! (Box2D-v3 lineage): a velocity-level sequential-impulse solve with a soft
 //! penetration-recovery bias, a 2-DOF coupled Coulomb friction cone, per-substep
@@ -15,7 +15,7 @@
 //! Sequential-impulse convergence is slow from a zero seed, so a stack jitters
 //! apart under the per-step substep budget. The solver persists each contact
 //! POINT's converged accumulated impulses (normal + 2 tangent) across frames via
-//! the double-buffered [`WarmStartTable`](super::warm_start::WarmStartTable):
+//! the double-buffered [`WarmStartTable`]:
 //!
 //! 1. **Seed** (start of [`solve`](SoftStepSolver::solve)): each contact point's
 //!    accumulated impulse is read from last frame's `read` table, keyed by THIS
@@ -188,7 +188,7 @@ impl SoftStepSolver {
 
     /// Builds a solver with warm-starting toggled `enabled` (P2 W3, test hook).
     ///
-    /// Production code uses the warm-starting-ON [`Default`] / [`with_capacity`];
+    /// Production code uses the warm-starting-ON [`Default`] / [`Self::with_capacity`];
     /// passing `false` zero-seeds every contact each frame (the W2 behavior),
     /// which the `warm_start_improves_convergence` A/B test runs against to show
     /// the payoff. Pre-sizes nothing (the steady-state capacity grows on the
