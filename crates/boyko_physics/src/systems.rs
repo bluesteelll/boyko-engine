@@ -66,8 +66,8 @@ use crate::narrowphase::box_box::box_box_contact;
 use crate::narrowphase::feature_vertex_face;
 use crate::narrowphase::sphere_box::sphere_box_contact;
 use crate::resources::{
-    BodyState, BroadphaseGrid, BroadphaseKind, ContactPairs, IntegrationMode, Manifolds,
-    PhysicsConfig, SolverScratch,
+    BodyState, BroadphaseGrid, BroadphaseKind, ConstraintGraph, ContactPairs, IntegrationMode,
+    Manifolds, PhysicsConfig, SolverScratch,
 };
 use crate::sdf_query::{SdfField, sample_sdf};
 use crate::solver::RigidSolver;
@@ -657,6 +657,44 @@ fn insert_deepest(
     if *kept_len < cap {
         *kept_len += 1;
     }
+}
+
+/// Builds the [`ConstraintGraph`] from this step's manifolds — constraint islands
+/// + greedy graph coloring (plan O4, Decision 2 / Decision 7).
+///
+/// Registered ONLY by [`add_physics_colored`](crate::plugin::add_physics_colored)
+/// (gated on [`PhysicsConfig::colored`]), AFTER narrowphase and BEFORE the solve,
+/// so the partition reflects the same manifold set the solver consumes. **O4
+/// produces the partition only — it does NOT change the solve**: the shipped
+/// [`SoftStepSolver`](crate::solver::SoftStepSolver) still solves in manifold
+/// order, so the simulation output is byte-identical whether this stage runs or
+/// not (the 0%-gate; a future O5 stage consumes the graph).
+///
+/// A body row is DYNAMIC iff its gathered `inv_mass != 0.0` (a static / kinematic
+/// body has `inv_mass == 0`); the [`SDF_SENTINEL`](crate::manifold::SDF_SENTINEL)
+/// `body_b` (`u32::MAX`) is out of range, so the bounds-checked predicate returns
+/// `false` for it — the sentinel is treated as ground (Box2D's rule), never an
+/// island node. The build is a pure deterministic function of the manifolds (in
+/// manifold order) and the dynamic-body set, reusing the graph's buffers (no
+/// per-step alloc in steady state).
+//
+// `clippy::needless_pass_by_value`: `Res<_>` is a by-value `SystemParam`; the body
+// reads it via a `&*` reborrow.
+#[allow(clippy::needless_pass_by_value)]
+pub fn physics_build_graph(
+    scratch: Res<SolverScratch>,
+    manifolds: Res<Manifolds>,
+    mut graph: ResMut<ConstraintGraph>,
+) {
+    let bodies = &scratch.bodies;
+    let n_dynamic = bodies.len();
+    // A row is dynamic iff it has a non-zero inverse mass (static/kinematic = 0).
+    // The sentinel `u32::MAX` (and any out-of-range row) is non-dynamic — ground.
+    let is_dynamic = |row: u32| {
+        let i = row as usize;
+        i < bodies.len() && bodies[i].inv_mass != 0.0
+    };
+    graph.build(&manifolds.manifolds, n_dynamic, is_dynamic);
 }
 
 /// Runs the swappable solver for one step, or early-outs for a no-op solver

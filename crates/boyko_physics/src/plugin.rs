@@ -14,13 +14,14 @@ use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::schedule::ScheduleBuilder;
 
 use crate::resources::{
-    BroadphaseGrid, ContactPairs, IntegrationMode, Manifolds, PhysicsConfig, SolverScratch,
+    BroadphaseGrid, ConstraintGraph, ContactPairs, IntegrationMode, Manifolds, PhysicsConfig,
+    SolverScratch,
 };
 use crate::sdf_query::SdfField;
 use crate::solver::RigidSolver;
 use crate::systems::{
-    physics_apply, physics_broadphase, physics_gather, physics_integrate, physics_narrowphase,
-    physics_narrowphase_sdf, physics_solve_step,
+    physics_apply, physics_broadphase, physics_build_graph, physics_gather, physics_integrate,
+    physics_narrowphase, physics_narrowphase_sdf, physics_solve_step,
 };
 
 /// The pre-build stage handles of the physics pipeline (plan MINOR-1 / OQ3).
@@ -63,6 +64,15 @@ pub struct PhysicsStageKeys {
     /// `narrowphase` and BEFORE `solve` so the solver sees both body-body and
     /// body-vs-SDF contacts.
     pub narrowphase_sdf: Option<usize>,
+    /// Descriptor index of the [`physics_build_graph`] constraint-graph stage, or
+    /// `None` for the non-colored paths (plan O4 / Decision 7).
+    ///
+    /// Present only when the pipeline was wired by
+    /// [`add_physics_colored`](crate::plugin::add_physics_colored); it runs AFTER
+    /// the narrowphase stage(s) and BEFORE `solve`, building (but in O4 NOT
+    /// consuming) the islands + coloring. The solve stays byte-identical (the
+    /// 0%-gate).
+    pub build_graph: Option<usize>,
     /// Descriptor index of the [`physics_solve_step`] stage.
     pub solve: usize,
     /// Descriptor index of the [`physics_apply`] stage.
@@ -97,8 +107,33 @@ pub fn add_physics_systems<S: RigidSolver + Default>(
     builder: &mut ScheduleBuilder,
     world: &mut EcsMaster,
 ) -> PhysicsStageKeys {
-    // `with_sdf = false`: body-only pipeline (no `SdfField`, no SDF stage).
-    add_physics_pipeline::<S>(builder, world, false)
+    // `with_sdf = false`, `colored = false`: body-only pipeline (no `SdfField`, no
+    // SDF stage, no constraint-graph stage) — byte-identical to the shipped path.
+    add_physics_pipeline::<S>(builder, world, false, false)
+}
+
+/// Inserts the physics resources INCLUDING the [`ConstraintGraph`] and registers
+/// the physics pipeline WITH the [`physics_build_graph`] stage (plan O4 /
+/// Decision 7) — the islands + greedy-coloring partition.
+///
+/// Identical to [`add_physics_systems`] but additionally:
+/// - sets [`PhysicsConfig::colored`] = `true`;
+/// - registers [`physics_build_graph`](crate::systems::physics_build_graph) AFTER
+///   `narrowphase` and BEFORE `solve_step`, building the islands + coloring from
+///   this step's manifolds.
+///
+/// **O4 produces the partition only — it does NOT change the solve.** The shipped
+/// [`SoftStepSolver`](crate::solver::SoftStepSolver) still solves in manifold order
+/// over the unchanged manifold buffer, so the simulation output is byte-identical
+/// to [`add_physics_systems`] (the campaign 0%-gate; a future O5 stage consumes the
+/// graph). The opt-in is the entire gate: a world that never calls this never
+/// builds the graph. The returned [`PhysicsStageKeys::build_graph`] carries the
+/// stage's descriptor index.
+pub fn add_physics_colored<S: RigidSolver + Default>(
+    builder: &mut ScheduleBuilder,
+    world: &mut EcsMaster,
+) -> PhysicsStageKeys {
+    add_physics_pipeline::<S>(builder, world, false, true)
 }
 
 /// Inserts the physics resources INCLUDING an (empty) [`SdfField`] and registers
@@ -119,20 +154,27 @@ pub fn add_physics_sdf<S: RigidSolver + Default>(
     builder: &mut ScheduleBuilder,
     world: &mut EcsMaster,
 ) -> PhysicsStageKeys {
-    add_physics_pipeline::<S>(builder, world, true)
+    add_physics_pipeline::<S>(builder, world, true, false)
 }
 
-/// Shared wiring for [`add_physics_systems`] (`with_sdf = false`) and
-/// [`add_physics_sdf`] (`with_sdf = true`): inserts the resources and registers the
-/// pipeline, optionally splicing the SDF-collision stage between narrowphase and
-/// solve.
+/// Shared wiring for [`add_physics_systems`] (`with_sdf = false`,
+/// `colored = false`), [`add_physics_sdf`] (`with_sdf = true`), and
+/// [`add_physics_colored`] (`colored = true`): inserts the resources and registers
+/// the pipeline, optionally splicing the SDF-collision stage and/or the
+/// constraint-graph stage between narrowphase and solve.
 fn add_physics_pipeline<S: RigidSolver + Default>(
     builder: &mut ScheduleBuilder,
     world: &mut EcsMaster,
     with_sdf: bool,
+    colored: bool,
 ) -> PhysicsStageKeys {
     // Reused, capacity-preserving step buffers (principle 5 — no per-step alloc).
-    world.insert_resource(PhysicsConfig::default());
+    // The `colored` flag rides the config so `physics_build_graph` (registered only
+    // when `colored`) and any future graph consumer share one switch.
+    world.insert_resource(PhysicsConfig {
+        colored,
+        ..PhysicsConfig::default()
+    });
     world.insert_resource(ContactPairs::with_capacity(INITIAL_BODY_CAPACITY));
     world.insert_resource(Manifolds::with_capacity(INITIAL_BODY_CAPACITY));
     world.insert_resource(SolverScratch::with_capacity(INITIAL_BODY_CAPACITY));
@@ -140,6 +182,13 @@ fn add_physics_pipeline<S: RigidSolver + Default>(
     // so `physics_broadphase`'s `ResMut<BroadphaseGrid>` param always resolves; it
     // stays untouched while `PhysicsConfig::broadphase` is the default `AllPairs`.
     world.insert_resource(BroadphaseGrid::with_capacity(INITIAL_BODY_CAPACITY));
+    if colored {
+        // O4: the islands + coloring scratch (capacity-reused). Inserted only on
+        // the colored path so `physics_build_graph`'s `ResMut<ConstraintGraph>`
+        // param resolves; the non-colored paths never register the stage, so the
+        // resource is unnecessary there (the 0%-gate).
+        world.insert_resource(ConstraintGraph::with_capacity(INITIAL_BODY_CAPACITY));
+    }
     if with_sdf {
         // The CPU-authoritative SDF scene (empty by default; the caller fills it
         // with the same edit list the GPU renders).
@@ -187,20 +236,40 @@ fn add_physics_pipeline<S: RigidSolver + Default>(
         None
     };
 
-    let solve = if let Some(sdf) = narrowphase_sdf_key {
+    // O4: the constraint-graph stage runs AFTER all manifold producers (body-body
+    // narrowphase + the optional SDF stage) and BEFORE the solve, so it partitions
+    // the exact manifold set the solver consumes. `physics_build_graph` reads
+    // `Res<Manifolds>` (shared) while the SDF stage holds `ResMut<Manifolds>`, so an
+    // explicit edge after the SDF stage is load-bearing (the shared read alone would
+    // not pin the order). Registered only when `colored` (the 0%-gate: a non-colored
+    // schedule never registers this stage, and the solve is byte-identical because
+    // O4 does not consume the graph). Extract the `SystemKey` immediately (drop the
+    // handle) before re-borrowing `builder`.
+    let build_graph_key = if colored {
+        let cfg = builder.add_system(physics_build_graph).after(narrowphase);
+        let cfg = if let Some(sdf) = narrowphase_sdf_key {
+            cfg.after(sdf)
+        } else {
+            cfg
+        };
+        Some(cfg.key())
+    } else {
+        None
+    };
+
+    let mut solve_cfg = builder.add_system(physics_solve_step::<S>).after(narrowphase);
+    if let Some(sdf) = narrowphase_sdf_key {
         // Pin the SDF stage before the solve (it must finish appending its
         // manifolds before the solver reads the buffer).
-        builder
-            .add_system(physics_solve_step::<S>)
-            .after(narrowphase)
-            .after(sdf)
-            .key()
-    } else {
-        builder
-            .add_system(physics_solve_step::<S>)
-            .after(narrowphase)
-            .key()
-    };
+        solve_cfg = solve_cfg.after(sdf);
+    }
+    if let Some(graph) = build_graph_key {
+        // Pin the graph build before the solve so the partition is complete when a
+        // future consumer reads it; in O4 it is order-neutral for the result (the
+        // solve does not read the graph), but the edge documents the dependency.
+        solve_cfg = solve_cfg.after(graph);
+    }
+    let solve = solve_cfg.key();
     let apply = builder.add_system(physics_apply).after(solve).key();
 
     PhysicsStageKeys {
@@ -209,6 +278,7 @@ fn add_physics_pipeline<S: RigidSolver + Default>(
         broadphase: broadphase.0,
         narrowphase: narrowphase.0,
         narrowphase_sdf: narrowphase_sdf_key.map(|k| k.0),
+        build_graph: build_graph_key.map(|k| k.0),
         solve: solve.0,
         apply: apply.0,
     }

@@ -87,6 +87,21 @@ pub struct PhysicsConfig {
     /// the byte-identical scalar kernels. Toggling it changes performance, never
     /// the result.
     pub simd: bool,
+    /// Opt into building the [`ConstraintGraph`] after narrowphase — constraint
+    /// islands + greedy graph coloring (plan O4, Decision 2 / Decision 7).
+    ///
+    /// When `true`, the [`physics_build_graph`](crate::systems::physics_build_graph)
+    /// stage partitions each step's manifolds into islands (connected components
+    /// over DYNAMIC bodies, Box2D's ground rule) and greedy-colors them so no color
+    /// shares a dynamic body — the enabler for the future colored/SIMD/parallel
+    /// solve (O5+). **In O4 the partition is built and validated but NOT consumed:
+    /// the shipped [`SoftStepSolver`](crate::solver::SoftStepSolver) still solves
+    /// in manifold order**, so the simulation output is byte-identical whether this
+    /// flag is on or off (it is a pure pre-compute). The DEFAULT is `false`, so an
+    /// un-opted world never runs the stage (the campaign 0%-gate). The colored path
+    /// is registered ONLY by
+    /// [`add_physics_colored`](crate::plugin::add_physics_colored).
+    pub colored: bool,
 }
 
 impl Default for PhysicsConfig {
@@ -109,6 +124,10 @@ impl Default for PhysicsConfig {
             // Default OFF so an un-opted world runs the scalar bit-oracle kernels
             // (the campaign 0%-gate); the SIMD path is a pure opt-in speed path.
             simd: false,
+            // Default OFF so an un-opted world never builds the constraint graph
+            // (the campaign 0%-gate); O4 only PRODUCES the partition — the solve is
+            // byte-identical whether on or off.
+            colored: false,
         }
     }
 }
@@ -698,6 +717,486 @@ impl Manifolds {
     }
 }
 
+/// Bit width of one `color_occ` word (a `u64` per-color body bitset cell).
+const OCC_WORD_BITS: u32 = 64;
+
+/// Constraint islands + greedy graph coloring of one step's manifolds (plan O4,
+/// Decision 2 / Decision 7).
+///
+/// After narrowphase, [`build`](ConstraintGraph::build) partitions the manifolds
+/// into:
+///
+/// - **Islands** — connected components of the contact graph over DYNAMIC bodies.
+///   A static / kinematic / sentinel body is "ground" that does NOT connect
+///   islands (Box2D's rule): two bodies are union'd ONLY when BOTH are dynamic, so
+///   a `(dyn, static)` contact attaches the dynamic body's island to nothing.
+/// - **Colors** — a greedy first-fit (in manifold order) such that **no color
+///   contains two manifolds sharing a dynamic body**. The static/sentinel side of
+///   a manifold imposes no occupancy constraint (ground is shared freely).
+///
+/// # Layout (CSR-flattened, capacity-reused — W2: NO `Vec<Vec>`, no per-step alloc)
+///
+/// Every data-dependent dimension is a flat `Vec` + offsets, mirroring the
+/// [`BroadphaseGrid`] CSR pattern. All buffers are `clear()`-ed and refilled each
+/// build — capacity is reused, never `Vec::new` per step (principle 5). Buffers
+/// grow only when a frame's island/color/body count exceeds the warmed capacity;
+/// in steady state the build does zero heap work.
+///
+/// - `island_of[row]` is the island id of dynamic body `row` (static/sentinel
+///   bodies have no island and are never indexed here).
+/// - `island_manifold_start[i]..island_manifold_start[i + 1]` indexes
+///   `island_manifolds` — manifold indices grouped by island.
+/// - `color_start[c]..color_start[c + 1]` (`len == n_colors + 1`) indexes
+///   `color_contacts` — manifold indices grouped by color, **in ascending manifold
+///   order within each color** (D4 — stable, deterministic).
+/// - `color_occ` is a flat per-color body bitset matrix addressed
+///   `color_occ[color * words_per_color + (body >> 6)]`, bit `body & 63`. It is the
+///   coloring occupancy scratch (reused across frames — cleared, not realloc'd).
+///
+/// # Determinism (plan §determinism gates)
+///
+/// The partition is a pure deterministic function of (manifolds in manifold order,
+/// dynamic-body count). Union-find unions in manifold order; coloring is first-fit
+/// in manifold order; CSR groups preserve ascending manifold index. No `HashMap`,
+/// no iteration-order-dependent containers, no atomics. Same input → identical
+/// `island_of` / `color_start` / `color_contacts` every run.
+#[derive(Resource, Default)]
+pub struct ConstraintGraph {
+    /// Union-find parent links over dynamic body rows, reused across builds. Sized
+    /// to the dynamic-body count each build; a static/sentinel row is never a node.
+    uf_parent: Vec<u32>,
+    /// Union-find subtree sizes (union-by-size), reused across builds.
+    uf_size: Vec<u32>,
+    /// `island_of[row]` = compacted island id of dynamic body `row` (flat). A
+    /// static/sentinel row holds [`NO_ISLAND`](ConstraintGraph::NO_ISLAND).
+    island_of: Vec<u32>,
+    /// CSR offsets: `island_manifold_start[i]..[i + 1]` indexes `island_manifolds`
+    /// (`len == n_islands + 1`). NO `Vec<Vec>`.
+    island_manifold_start: Vec<u32>,
+    /// CSR values: manifold indices grouped by island (flat).
+    island_manifolds: Vec<u32>,
+    /// CSR offsets: `color_start[c]..[c + 1]` indexes `color_contacts`
+    /// (`len == n_colors + 1`). NO `Vec<Vec>`.
+    color_start: Vec<u32>,
+    /// CSR values: manifold indices grouped by color, ascending within a color
+    /// (manifold order — D4).
+    color_contacts: Vec<u32>,
+    /// Flat per-color body bitset matrix, addressed
+    /// `color_occ[color * words_per_color + (body >> 6)]`; bit `body & 63` is set
+    /// when `body` is occupied in `color`. Reused (clear, never realloc) — the
+    /// coloring occupancy scratch.
+    color_occ: Vec<u64>,
+    /// `u64` words per color row in `color_occ` (`= n_dynamic.div_ceil(64)`).
+    words_per_color: u32,
+    /// Number of colors produced this build (`color_start.len() == n_colors + 1`).
+    n_colors: u32,
+    /// Number of islands produced this build.
+    n_islands: u32,
+}
+
+impl ConstraintGraph {
+    /// Island id stored in `island_of` for a body that is not a dynamic node
+    /// (static / kinematic / sentinel — never part of any island).
+    pub const NO_ISLAND: u32 = u32::MAX;
+
+    /// Builds an empty graph pre-sized for `capacity` bodies (no later realloc in
+    /// steady state). The CSR buffers grow on the first builds to the live counts
+    /// and reuse that capacity thereafter.
+    pub fn with_capacity(capacity: usize) -> Self {
+        let words = capacity.div_ceil(OCC_WORD_BITS as usize);
+        Self {
+            uf_parent: Vec::with_capacity(capacity),
+            uf_size: Vec::with_capacity(capacity),
+            island_of: Vec::with_capacity(capacity),
+            island_manifold_start: Vec::with_capacity(capacity + 1),
+            island_manifolds: Vec::with_capacity(capacity),
+            color_start: Vec::with_capacity(capacity + 1),
+            color_contacts: Vec::with_capacity(capacity),
+            // One color row worth of words is a cheap first reserve; it grows to the
+            // live color count × words-per-color and reuses that capacity.
+            color_occ: Vec::with_capacity(words),
+            words_per_color: 0,
+            n_colors: 0,
+            n_islands: 0,
+        }
+    }
+
+    /// Number of colors in the current partition (`color_start.len() - 1`).
+    #[inline]
+    pub fn n_colors(&self) -> u32 {
+        self.n_colors
+    }
+
+    /// Number of islands in the current partition.
+    #[inline]
+    pub fn n_islands(&self) -> u32 {
+        self.n_islands
+    }
+
+    /// Manifold indices of color `color`, in ascending manifold order (D4). Returns
+    /// an empty slice for `color >= n_colors`.
+    #[inline]
+    pub fn color(&self, color: u32) -> &[u32] {
+        let c = color as usize;
+        if c + 1 >= self.color_start.len() {
+            return &[];
+        }
+        let start = self.color_start[c] as usize;
+        let end = self.color_start[c + 1] as usize;
+        &self.color_contacts[start..end]
+    }
+
+    /// Manifold indices of island `island`. Returns an empty slice for
+    /// `island >= n_islands`.
+    #[inline]
+    pub fn island(&self, island: u32) -> &[u32] {
+        let i = island as usize;
+        if i + 1 >= self.island_manifold_start.len() {
+            return &[];
+        }
+        let start = self.island_manifold_start[i] as usize;
+        let end = self.island_manifold_start[i + 1] as usize;
+        &self.island_manifolds[start..end]
+    }
+
+    /// Compacted island id of dynamic body `row`, or [`NO_ISLAND`](Self::NO_ISLAND)
+    /// for a static/sentinel row (or one out of range).
+    #[inline]
+    pub fn island_of(&self, row: u32) -> u32 {
+        self.island_of.get(row as usize).copied().unwrap_or(Self::NO_ISLAND)
+    }
+
+    /// Partitions `manifolds` (in manifold order) into islands + colors over the
+    /// `n_dynamic` dynamic body rows, identifying static/sentinel bodies via the
+    /// `is_dynamic` predicate (plan O4 — the independently callable pure builder).
+    ///
+    /// `is_dynamic(row)` returns `true` iff body `row` is a real dynamic node (a
+    /// finite `inv_mass != 0`); a static / kinematic / sentinel body returns
+    /// `false`. The [`SDF_SENTINEL`](crate::manifold::SDF_SENTINEL) `body_b`
+    /// (`u32::MAX`) is treated as static here — it is never a row, so the caller's
+    /// predicate must return `false` for it (the stage's predicate bounds-checks the
+    /// row, so any out-of-range row including the sentinel is non-dynamic).
+    ///
+    /// # Invariants (debug-checked)
+    ///
+    /// - **Coloring**: no color contains two manifolds sharing a dynamic body.
+    /// - **CSR monotonicity**: `color_start` / `island_manifold_start` are
+    ///   non-decreasing and their last entry equals the values length.
+    /// - **Island id range**: every dynamic body's `island_of` is `< n_islands`;
+    ///   every static/sentinel body's is [`NO_ISLAND`](Self::NO_ISLAND).
+    ///
+    /// Determinism: pure function of `(manifolds, n_dynamic, is_dynamic)`. No alloc
+    /// in steady state (all buffers cleared + reused).
+    pub fn build(
+        &mut self,
+        manifolds: &[Manifold],
+        n_dynamic: usize,
+        is_dynamic: impl Fn(u32) -> bool,
+    ) {
+        self.reset_islands(n_dynamic);
+        self.build_islands(manifolds, &is_dynamic);
+        self.flatten_islands(manifolds, n_dynamic, &is_dynamic);
+        self.color_manifolds(manifolds, n_dynamic, &is_dynamic);
+    }
+
+    /// Resets the union-find forest to `n_dynamic` singleton sets and clears
+    /// `island_of` to [`NO_ISLAND`](Self::NO_ISLAND) (capacity reused).
+    #[inline]
+    fn reset_islands(&mut self, n_dynamic: usize) {
+        self.uf_parent.clear();
+        self.uf_size.clear();
+        self.uf_parent.reserve(n_dynamic);
+        self.uf_size.reserve(n_dynamic);
+        for row in 0..n_dynamic as u32 {
+            self.uf_parent.push(row);
+            self.uf_size.push(1);
+        }
+        self.island_of.clear();
+        self.island_of.resize(n_dynamic, Self::NO_ISLAND);
+    }
+
+    /// Iterative union-find `find` with full path compression (no recursion — the
+    /// stack depth is unbounded for adversarial inputs).
+    #[inline]
+    fn uf_find(&mut self, mut x: u32) -> u32 {
+        // Walk to the root.
+        let mut root = x;
+        while self.uf_parent[root as usize] != root {
+            root = self.uf_parent[root as usize];
+        }
+        // Path-compress: point every node on the path straight at the root.
+        while self.uf_parent[x as usize] != root {
+            let next = self.uf_parent[x as usize];
+            self.uf_parent[x as usize] = root;
+            x = next;
+        }
+        root
+    }
+
+    /// Union two dynamic body rows by subtree size (the smaller tree is grafted
+    /// under the larger — keeps `find` near-flat).
+    #[inline]
+    fn uf_union(&mut self, a: u32, b: u32) {
+        let ra = self.uf_find(a);
+        let rb = self.uf_find(b);
+        if ra == rb {
+            return;
+        }
+        let (small, big) = if self.uf_size[ra as usize] < self.uf_size[rb as usize] {
+            (ra, rb)
+        } else {
+            (rb, ra)
+        };
+        self.uf_parent[small as usize] = big;
+        self.uf_size[big as usize] += self.uf_size[small as usize];
+    }
+
+    /// Unions the two bodies of every manifold IFF BOTH are dynamic (Box2D's
+    /// ground rule — a static/sentinel body never merges two islands).
+    fn build_islands(&mut self, manifolds: &[Manifold], is_dynamic: &impl Fn(u32) -> bool) {
+        for m in manifolds {
+            let a = m.body_a.0;
+            let b = m.body_b.0;
+            // Only a dyn-dyn edge connects islands; a dyn-static edge attaches the
+            // dynamic body to nothing (ground is not an island node).
+            if is_dynamic(a) && is_dynamic(b) {
+                self.uf_union(a, b);
+            }
+        }
+    }
+
+    /// Compacts the union-find roots into dense island ids, fills `island_of`, and
+    /// builds the CSR `island_manifold_start` / `island_manifolds` grouping. A
+    /// manifold with at least one dynamic body is filed under that body's island;
+    /// a manifold with NO dynamic body (both static — degenerate) is filed under no
+    /// island (skipped).
+    fn flatten_islands(
+        &mut self,
+        manifolds: &[Manifold],
+        n_dynamic: usize,
+        is_dynamic: &impl Fn(u32) -> bool,
+    ) {
+        // Assign dense island ids to roots in ascending root order (deterministic).
+        // `island_of` doubles as the root→dense-id map: a root maps itself, a child
+        // is resolved through its compacted root.
+        let mut next_id = 0u32;
+        for row in 0..n_dynamic as u32 {
+            if !is_dynamic(row) {
+                continue;
+            }
+            let root = self.uf_find(row);
+            if root == row {
+                // This row is a root — claim the next dense island id for it.
+                self.island_of[row as usize] = next_id;
+                next_id += 1;
+            }
+        }
+        // Resolve every dynamic child to its root's dense id.
+        for row in 0..n_dynamic as u32 {
+            if !is_dynamic(row) {
+                continue;
+            }
+            let root = self.uf_find(row);
+            self.island_of[row as usize] = self.island_of[root as usize];
+        }
+        self.n_islands = next_id;
+
+        // CSR group manifolds by island via a counting sort (deterministic, stable
+        // by manifold index). counts → exclusive prefix sum → scatter.
+        let n_islands = self.n_islands as usize;
+        self.island_manifold_start.clear();
+        self.island_manifold_start.resize(n_islands + 1, 0);
+        // Per manifold, resolve its island (the dynamic side's island).
+        for m in manifolds {
+            if let Some(isl) = self.manifold_island(m, is_dynamic) {
+                self.island_manifold_start[isl as usize + 1] += 1;
+            }
+        }
+        for i in 0..n_islands {
+            self.island_manifold_start[i + 1] += self.island_manifold_start[i];
+        }
+        let total = self.island_manifold_start[n_islands] as usize;
+        self.island_manifolds.clear();
+        self.island_manifolds.resize(total, 0);
+        // Scatter with a running cursor (a working copy of the starts). Reuse
+        // `uf_size` as the cursor scratch to avoid a fresh alloc. Split-borrow the
+        // fields (`island_of` read, `uf_size`/`island_manifolds` written) so the
+        // resolution does not re-borrow `self` through `manifold_island`.
+        let cursor = &mut self.uf_size;
+        cursor.clear();
+        cursor.extend_from_slice(&self.island_manifold_start[..n_islands]);
+        let island_of = &self.island_of;
+        let out = &mut self.island_manifolds;
+        for (mi, m) in manifolds.iter().enumerate() {
+            let a = m.body_a.0;
+            let b = m.body_b.0;
+            // The manifold's island = the dense island of its dynamic side (a if
+            // dynamic, else b); skip a static-static degenerate contact.
+            let isl = if is_dynamic(a) {
+                island_of[a as usize]
+            } else if is_dynamic(b) {
+                island_of[b as usize]
+            } else {
+                continue;
+            };
+            let slot = cursor[isl as usize];
+            out[slot as usize] = mi as u32;
+            cursor[isl as usize] = slot + 1;
+        }
+    }
+
+    /// The island a manifold belongs to: the dense island of its dynamic side
+    /// (body_a if dynamic, else body_b if dynamic), or `None` if neither body is
+    /// dynamic (a static-static degenerate contact — filed under no island).
+    #[inline]
+    fn manifold_island(&self, m: &Manifold, is_dynamic: &impl Fn(u32) -> bool) -> Option<u32> {
+        let a = m.body_a.0;
+        let b = m.body_b.0;
+        if is_dynamic(a) {
+            Some(self.island_of[a as usize])
+        } else if is_dynamic(b) {
+            Some(self.island_of[b as usize])
+        } else {
+            None
+        }
+    }
+
+    /// Greedy first-fit coloring in manifold order (D4): for each manifold, assign
+    /// the lowest color whose per-color body bitset has NEITHER of its DYNAMIC
+    /// bodies set, then mark them. A static/sentinel side imposes no occupancy
+    /// (ground is shared freely). Grows `n_colors` as needed. Produces the CSR
+    /// `color_start` / `color_contacts`.
+    ///
+    /// Invariant guaranteed by construction: a color is chosen only when both
+    /// dynamic bodies are FREE in that color's bitset, and they are then MARKED, so
+    /// no later manifold sharing either body can reuse the color — hence no color
+    /// holds two manifolds sharing a dynamic body.
+    fn color_manifolds(
+        &mut self,
+        manifolds: &[Manifold],
+        n_dynamic: usize,
+        is_dynamic: &impl Fn(u32) -> bool,
+    ) {
+        let words = n_dynamic.div_ceil(OCC_WORD_BITS as usize);
+        self.words_per_color = words as u32;
+        self.color_occ.clear();
+        self.n_colors = 0;
+
+        // Per-manifold chosen color, then a counting sort into CSR (so the values
+        // stay in ascending manifold order within each color — D4). Reuse
+        // `uf_parent` as the per-manifold color scratch.
+        let chosen = &mut self.uf_parent;
+        chosen.clear();
+        chosen.reserve(manifolds.len());
+
+        for m in manifolds {
+            let a = m.body_a.0;
+            let b = m.body_b.0;
+            let a_dyn = is_dynamic(a);
+            let b_dyn = is_dynamic(b);
+            // Find the lowest color where every dynamic side is free.
+            let mut color = 0u32;
+            loop {
+                if color >= self.n_colors {
+                    // Need a new color row: append `words` zeroed occupancy words.
+                    self.color_occ.resize(self.color_occ.len() + words, 0);
+                    self.n_colors += 1;
+                }
+                let base = color as usize * words;
+                let free = (!a_dyn || !occ_get(&self.color_occ, base, a))
+                    && (!b_dyn || !occ_get(&self.color_occ, base, b));
+                if free {
+                    if a_dyn {
+                        occ_set(&mut self.color_occ, base, a);
+                    }
+                    if b_dyn {
+                        occ_set(&mut self.color_occ, base, b);
+                    }
+                    chosen.push(color);
+                    break;
+                }
+                color += 1;
+            }
+        }
+
+        // CSR group manifolds by chosen color (counting sort; stable by manifold
+        // index → ascending manifold order within a color).
+        let n_colors = self.n_colors as usize;
+        self.color_start.clear();
+        self.color_start.resize(n_colors + 1, 0);
+        for &c in chosen.iter() {
+            self.color_start[c as usize + 1] += 1;
+        }
+        for c in 0..n_colors {
+            self.color_start[c + 1] += self.color_start[c];
+        }
+        let total = self.color_start[n_colors] as usize;
+        debug_assert_eq!(total, manifolds.len(), "invariant: every manifold colored");
+        self.color_contacts.clear();
+        self.color_contacts.resize(total, 0);
+        // Scatter with a running cursor (working copy of the starts). Reuse
+        // `uf_size` as the cursor scratch.
+        let cursor = &mut self.uf_size;
+        cursor.clear();
+        cursor.extend_from_slice(&self.color_start[..n_colors]);
+        for (mi, &c) in self.uf_parent.iter().enumerate() {
+            let slot = cursor[c as usize];
+            self.color_contacts[slot as usize] = mi as u32;
+            cursor[c as usize] = slot + 1;
+        }
+
+        self.debug_assert_coloring(manifolds, n_dynamic, is_dynamic);
+    }
+
+    /// Debug-only re-scan of the coloring invariant: within every color, no two
+    /// manifolds share a dynamic body (plan O4 gate, the in-debug guard). Compiles
+    /// to nothing in release.
+    #[inline]
+    fn debug_assert_coloring(
+        &self,
+        manifolds: &[Manifold],
+        n_dynamic: usize,
+        is_dynamic: &impl Fn(u32) -> bool,
+    ) {
+        if cfg!(debug_assertions) {
+            let words = n_dynamic.div_ceil(OCC_WORD_BITS as usize);
+            let mut seen = vec![0u64; words];
+            for c in 0..self.n_colors {
+                seen.iter_mut().for_each(|w| *w = 0);
+                for &mi in self.color(c) {
+                    let m = &manifolds[mi as usize];
+                    for &row in &[m.body_a.0, m.body_b.0] {
+                        if is_dynamic(row) {
+                            let w = row as usize >> 6;
+                            let bit = 1u64 << (row & 63);
+                            debug_assert_eq!(
+                                seen[w] & bit,
+                                0,
+                                "coloring invariant: color {c} reuses dynamic body {row}"
+                            );
+                            seen[w] |= bit;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Reads bit `body & 63` of word `body >> 6` in the color row starting at `base`.
+#[inline]
+fn occ_get(occ: &[u64], base: usize, body: u32) -> bool {
+    let word = base + (body as usize >> 6);
+    (occ[word] >> (body & 63)) & 1 != 0
+}
+
+/// Sets bit `body & 63` of word `body >> 6` in the color row starting at `base`.
+#[inline]
+fn occ_set(occ: &mut [u64], base: usize, body: u32) {
+    let word = base + (body as usize >> 6);
+    occ[word] |= 1u64 << (body & 63);
+}
+
 /// Dense, row-indexed snapshot of one body's state for the solve (plan IM-1).
 ///
 /// `BodyState` carries the HOT integrator fields the solve mutates plus the
@@ -1105,5 +1604,139 @@ mod tests {
         assert_eq!(cfg.contact_hertz, 30.0);
         assert_eq!(cfg.contact_damping, 10.0);
         assert_eq!(cfg.dt, 0.0, "dt is a placeholder until gather stamps it");
+        assert!(!cfg.colored, "O4: colored is OFF by default (the 0%-gate)");
+    }
+
+    // ── O4: ConstraintGraph islands + coloring sanity tests ──
+    //
+    // Tiny hand-built graphs (these are SANITY checks; the exhaustive coloring-
+    // invariant / island-BFS / determinism proptests are the tester's).
+
+    /// Builds an empty manifold between two dense body rows (the only fields the
+    /// partition reads are `body_a` / `body_b`).
+    fn edge(a: u32, b: u32) -> Manifold {
+        Manifold::new(BodyIndex(a), BodyIndex(b))
+    }
+
+    /// Re-scans the produced coloring and asserts no color shares a dynamic body
+    /// (the O4 invariant), returns the number of colors.
+    fn assert_coloring_invariant(
+        g: &ConstraintGraph,
+        manifolds: &[Manifold],
+        is_dynamic: &impl Fn(u32) -> bool,
+    ) -> u32 {
+        use std::collections::HashSet;
+        let mut total = 0usize;
+        for c in 0..g.n_colors() {
+            let mut seen: HashSet<u32> = HashSet::new();
+            for &mi in g.color(c) {
+                let m = &manifolds[mi as usize];
+                for &row in &[m.body_a.0, m.body_b.0] {
+                    if is_dynamic(row) {
+                        assert!(
+                            seen.insert(row),
+                            "color {c} reuses dynamic body {row} (coloring invariant)"
+                        );
+                    }
+                }
+            }
+            total += g.color(c).len();
+        }
+        assert_eq!(total, manifolds.len(), "every manifold appears in exactly one color");
+        g.n_colors()
+    }
+
+    /// A triangle of three dynamic bodies (every pair touching) is one island and
+    /// needs 3 colors (each pair of edges shares a vertex), with the invariant held.
+    #[test]
+    fn graph_triangle_one_island_three_colors() {
+        let manifolds = [edge(0, 1), edge(1, 2), edge(0, 2)];
+        let dyn3 = |row: u32| row < 3; // all three dynamic
+        let mut g = ConstraintGraph::default();
+        g.build(&manifolds, 3, dyn3);
+
+        assert_eq!(g.n_islands(), 1, "a connected triangle is one island");
+        assert_eq!(g.island_of(0), 0);
+        assert_eq!(g.island_of(1), 0);
+        assert_eq!(g.island_of(2), 0);
+        assert_eq!(g.island(0).len(), 3, "all three edges file under the island");
+
+        let n_colors = assert_coloring_invariant(&g, &manifolds, &dyn3);
+        // A triangle's edges pairwise share a vertex → each needs its own color.
+        assert_eq!(n_colors, 3, "triangle edges need 3 colors");
+    }
+
+    /// Two disjoint dynamic pairs `(0-1)` and `(2-3)` form two islands; both edges
+    /// are body-disjoint so a single color suffices.
+    #[test]
+    fn graph_two_disjoint_pairs_two_islands_one_color() {
+        let manifolds = [edge(0, 1), edge(2, 3)];
+        let dyn4 = |row: u32| row < 4;
+        let mut g = ConstraintGraph::default();
+        g.build(&manifolds, 4, dyn4);
+
+        assert_eq!(g.n_islands(), 2, "two disjoint pairs are two islands");
+        // The two edges share no body → both fit in color 0.
+        assert_eq!(g.n_colors(), 1, "body-disjoint edges share one color");
+        assert_coloring_invariant(&g, &manifolds, &dyn4);
+        // The two islands carry one manifold each.
+        assert_eq!(g.island(g.island_of(0)).len(), 1);
+        assert_eq!(g.island(g.island_of(2)).len(), 1);
+        assert_ne!(g.island_of(0), g.island_of(2), "bodies 0 and 2 are in different islands");
+    }
+
+    /// A static body (`inv_mass == 0`, row 0) is GROUND: it does NOT connect the
+    /// islands of the two dynamic bodies it touches (Box2D's rule), is never an
+    /// island node (`NO_ISLAND`), and imposes no coloring occupancy (both
+    /// dyn-vs-ground edges share one color despite sharing the static body).
+    #[test]
+    fn graph_static_is_ground_does_not_merge_or_constrain() {
+        // Row 0 = static ground; rows 1 and 2 are dynamic, each touching ground.
+        let manifolds = [edge(0, 1), edge(0, 2)];
+        let dyn_pred = |row: u32| row == 1 || row == 2; // row 0 static
+        let mut g = ConstraintGraph::default();
+        g.build(&manifolds, 3, dyn_pred);
+
+        // Ground does not merge: bodies 1 and 2 are SEPARATE islands.
+        assert_eq!(g.n_islands(), 2, "ground does not merge two dynamic islands");
+        assert_eq!(g.island_of(0), ConstraintGraph::NO_ISLAND, "static = NO_ISLAND");
+        assert_ne!(g.island_of(1), g.island_of(2), "1 and 2 stay in distinct islands");
+
+        // Ground imposes no occupancy → both edges fit in one color even though
+        // they share the static body 0.
+        assert_eq!(g.n_colors(), 1, "shared ground does not split colors");
+        assert_coloring_invariant(&g, &manifolds, &dyn_pred);
+    }
+
+    /// The partition is a pure deterministic function of its input: building the
+    /// same chain twice (and reusing a warmed graph) yields identical CSR output.
+    #[test]
+    fn graph_build_is_deterministic_and_reusable() {
+        // A 5-body chain 0-1-2-3-4 (one island; a path needs only 2 colors).
+        let manifolds = [edge(0, 1), edge(1, 2), edge(2, 3), edge(3, 4)];
+        let dyn5 = |row: u32| row < 5;
+
+        let mut a = ConstraintGraph::default();
+        a.build(&manifolds, 5, dyn5);
+        let colors_a: Vec<Vec<u32>> = (0..a.n_colors()).map(|c| a.color(c).to_vec()).collect();
+        let island_of_a: Vec<u32> = (0..5).map(|r| a.island_of(r)).collect();
+
+        // Reuse the SAME warmed graph for a second build — capacity reused, output
+        // must be identical (no stale state leaks across builds).
+        a.build(&manifolds, 5, dyn5);
+        let colors_a2: Vec<Vec<u32>> = (0..a.n_colors()).map(|c| a.color(c).to_vec()).collect();
+        assert_eq!(colors_a, colors_a2, "rebuild on a warmed graph is identical");
+
+        // A fresh graph must match too (no dependence on prior state).
+        let mut b = ConstraintGraph::default();
+        b.build(&manifolds, 5, dyn5);
+        let colors_b: Vec<Vec<u32>> = (0..b.n_colors()).map(|c| b.color(c).to_vec()).collect();
+        let island_of_b: Vec<u32> = (0..5).map(|r| b.island_of(r)).collect();
+        assert_eq!(colors_a, colors_b, "fresh vs warmed graph: identical coloring");
+        assert_eq!(island_of_a, island_of_b, "fresh vs warmed graph: identical islands");
+
+        assert_eq!(a.n_islands(), 1, "the chain is one connected island");
+        assert_eq!(a.n_colors(), 2, "a path graph is 2-colorable");
+        assert_coloring_invariant(&a, &manifolds, &dyn5);
     }
 }

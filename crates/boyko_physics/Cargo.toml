@@ -42,3 +42,10 @@ harness = false
 # RUSTFLAGS="-C target-feature=+avx2"). The SIMD path is bit-identical to scalar.
 name = "simd_o1"
 harness = false
+
+[[bench]]
+# O4: the pure `ConstraintGraph::build` partition (union-find islands + greedy
+# coloring) at 1k / 10k / 100k bodies with realistic contact density — reports the
+# (~linear) build cost. Anti-vacuity: every scene has > 0 manifolds + > 1 color.
+name = "constraint_graph"
+harness = false
