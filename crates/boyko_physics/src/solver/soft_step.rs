@@ -71,7 +71,10 @@ use crate::resources::{BodyState, PhysicsConfig, SolverScratch};
 /// Maximum penetration-recovery bias speed (world units/s) the soft normal solve
 /// will inject, clamping the otherwise-unbounded `biasRate · separation` push so
 /// a deep initial overlap cannot launch a body (Box2D's `maxBiasVelocity`).
-const MAX_BIAS_VELOCITY: f32 = 4.0;
+///
+/// `pub(crate)` so the colored solver ([`super::colored`]) reads the SAME source
+/// (O2 — no copy-duplicated soft constant can drift); the value is unchanged.
+pub(crate) const MAX_BIAS_VELOCITY: f32 = 4.0;
 
 /// Minimum approach speed (world units/s) a contact must carry at gather time for
 /// the post-loop restitution pass to bounce it (Box2D-v3's `b2_velocityThreshold`).
@@ -85,7 +88,9 @@ const MAX_BIAS_VELOCITY: f32 = 4.0;
 /// impact above it bounces. `1.0 m/s` is Box2D's meter-scale default — comfortably
 /// above the per-frame gravity-residual closing speed (`|gravity|·dt`), well below
 /// a real collision.
-const RESTITUTION_THRESHOLD: f32 = 1.0;
+///
+/// `pub(crate)` so the colored solver reads the SAME source (O2); value unchanged.
+pub(crate) const RESTITUTION_THRESHOLD: f32 = 1.0;
 
 /// Per-contact-point constraint scratch built once per solve and re-read each
 /// substep (P2 W2 + W3).
@@ -129,7 +134,10 @@ struct PointConstraint {
 /// surface acts as an immovable wall with NO new branch class in the impulse math.
 /// The solver substitutes this for body B whenever a manifold's `body_b` is the
 /// [`SDF_SENTINEL`], so it NEVER indexes `bodies[u32::MAX]`.
-const IMMOVABLE_AT_REST: BodyEffective = BodyEffective {
+///
+/// `pub(crate)` so the colored solver reads the SAME immovable surface view (O2);
+/// the layout and field values are unchanged.
+pub(crate) const IMMOVABLE_AT_REST: BodyEffective = BodyEffective {
     inv_mass: 0.0,
     inv_inertia: Mat3::ZERO,
     linear_velocity: Vec3::ZERO,
@@ -725,23 +733,27 @@ impl SoftStepSolver {
 ///
 /// `omega = 2π·hertz; a1 = 2·ζ + omega·h; a2 = h·omega·a1; a3 = 1/(1+a2);`
 /// `biasRate = omega/a1; massCoeff = a2·a3; impulseCoeff = a3`.
+///
+/// `pub(crate)` (type + fields + `new`) so the colored solver derives its soft
+/// terms from the SAME source — O2: the colored kernel cannot drift from this
+/// reference derivation. Values and layout are unchanged.
 #[derive(Clone, Copy, Debug)]
-struct SoftCoefficients {
+pub(crate) struct SoftCoefficients {
     /// Penetration-recovery bias rate (`omega / a1`): the per-unit-separation
     /// recovery speed.
-    bias_rate: f32,
+    pub(crate) bias_rate: f32,
     /// Soft mass scale (`a2 · a3`) applied to the rigid `mEff · (vn + bias)`.
-    mass_coeff: f32,
+    pub(crate) mass_coeff: f32,
     /// Accumulated-impulse decay (`a3`) — the soft term that pulls the impulse
     /// toward the spring's steady state.
-    impulse_coeff: f32,
+    pub(crate) impulse_coeff: f32,
 }
 
 impl SoftCoefficients {
     /// Derives the coefficients for hertz `hertz`, damping ratio `zeta`, and
     /// substep `h`.
     #[inline]
-    fn new(hertz: f32, zeta: f32, h: f32) -> Self {
+    pub(crate) fn new(hertz: f32, zeta: f32, h: f32) -> Self {
         let omega = 2.0 * core::f32::consts::PI * hertz;
         let a1 = 2.0 * zeta + omega * h;
         let a2 = h * omega * a1;

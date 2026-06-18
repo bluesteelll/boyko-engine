@@ -49,3 +49,11 @@ harness = false
 # (~linear) build cost. Anti-vacuity: every scene has > 0 manifolds + > 1 color.
 name = "constraint_graph"
 harness = false
+
+[[bench]]
+# O5 A/B: the colored color-order solve vs the reference manifold-order solve at
+# ~1k / 10k contacts on a warmed resting pile — confirms single-threaded colored
+# is roughly comparable (no pathological regression; the wins land in O6/O7).
+# Anti-vacuity: every scene has > 0 contacts + > 1 color.
+name = "colored_solve"
+harness = false

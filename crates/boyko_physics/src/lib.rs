@@ -41,14 +41,18 @@ pub use components::{
 };
 pub use manifold::{BodyIndex, ContactPoint, Manifold, SDF_SENTINEL};
 pub use math::{MAX_CONTACT_POINTS, Mat3, Quat, Vec3};
-pub use plugin::{PhysicsStageKeys, add_physics_colored, add_physics_sdf, add_physics_systems};
+pub use plugin::{
+    PhysicsStageKeys, add_physics_colored, add_physics_colored_solve, add_physics_sdf,
+    add_physics_systems,
+};
 pub use resources::{
     BodyState, BroadphaseGrid, BroadphaseKind, ConstraintGraph, ContactPairs, IntegrationMode,
     Manifolds, PhysicsConfig, SolverScratch, TouchedMask,
 };
 pub use sdf_query::{SdfField, sample_sdf};
-pub use solver::{NoopSolver, RigidSolver, SoftStepSolver};
+pub use solver::{ColoredSoftStepSolver, NoopSolver, RigidSolver, SoftStepSolver};
 pub use systems::{
     body_bounding_radius, physics_apply, physics_broadphase, physics_build_graph, physics_gather,
-    physics_integrate, physics_narrowphase, physics_narrowphase_sdf, physics_solve_step,
+    physics_integrate, physics_narrowphase, physics_narrowphase_sdf, physics_solve_colored,
+    physics_solve_step,
 };

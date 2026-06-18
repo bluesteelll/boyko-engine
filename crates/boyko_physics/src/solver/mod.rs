@@ -28,6 +28,7 @@
 //! early-returns and does NOT double-integrate. See the C2 contract block in
 //! [`crate::systems`].
 
+pub mod colored;
 pub mod contact;
 pub mod simd;
 pub mod soft_step;
@@ -39,6 +40,7 @@ use boyko_macros::Resource as ResourceDerive;
 use crate::manifold::Manifold;
 use crate::resources::{PhysicsConfig, SolverScratch};
 
+pub use colored::ColoredSoftStepSolver;
 pub use soft_step::SoftStepSolver;
 
 /// The swappable rigid-body solver seam (plan D2).

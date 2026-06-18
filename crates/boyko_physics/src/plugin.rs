@@ -18,10 +18,11 @@ use crate::resources::{
     SolverScratch,
 };
 use crate::sdf_query::SdfField;
+use crate::solver::colored::ColoredSoftStepSolver;
 use crate::solver::RigidSolver;
 use crate::systems::{
     physics_apply, physics_broadphase, physics_build_graph, physics_gather, physics_integrate,
-    physics_narrowphase, physics_narrowphase_sdf, physics_solve_step,
+    physics_narrowphase, physics_narrowphase_sdf, physics_solve_colored, physics_solve_step,
 };
 
 /// The pre-build stage handles of the physics pipeline (plan MINOR-1 / OQ3).
@@ -109,7 +110,7 @@ pub fn add_physics_systems<S: RigidSolver + Default>(
 ) -> PhysicsStageKeys {
     // `with_sdf = false`, `colored = false`: body-only pipeline (no `SdfField`, no
     // SDF stage, no constraint-graph stage) — byte-identical to the shipped path.
-    add_physics_pipeline::<S>(builder, world, false, false)
+    add_physics_pipeline::<S>(builder, world, false, false, false)
 }
 
 /// Inserts the physics resources INCLUDING the [`ConstraintGraph`] and registers
@@ -133,7 +134,43 @@ pub fn add_physics_colored<S: RigidSolver + Default>(
     builder: &mut ScheduleBuilder,
     world: &mut EcsMaster,
 ) -> PhysicsStageKeys {
-    add_physics_pipeline::<S>(builder, world, false, true)
+    add_physics_pipeline::<S>(builder, world, false, true, false)
+}
+
+/// Inserts the physics resources and registers the COLORED-SOLVE pipeline (Phase
+/// O5, Decision 7) — `physics_build_graph` (O4) followed by the single-threaded
+/// [`physics_solve_colored`](crate::systems::physics_solve_colored) stage, which
+/// REPLACES the default [`physics_solve_step`](crate::systems::physics_solve_step).
+///
+/// Unlike [`add_physics_colored`] (which builds the graph but leaves the shipped
+/// [`SoftStepSolver`](crate::solver::SoftStepSolver) solving in manifold order —
+/// the O4 byte-identical, partition-only path), this wires the
+/// [`ColoredSoftStepSolver`](crate::solver::ColoredSoftStepSolver): the solve
+/// runs in graph-COLOR order over the solver's SoA `ContactColumns` (a
+/// Gauss-Seidel sweep across colors), with the converged impulses stored in
+/// canonical order (IM-2b). The shipped `SoftStepSolver` is byte-untouched and
+/// its solve stage is NOT registered on this path — the two solvers never both
+/// run (Decision 7).
+///
+/// # The value change (Phase O5)
+///
+/// The colored sweep order differs from the reference manifold-order sweep, so
+/// the converged float values DIFFER (but are equally valid) — validated against
+/// tolerance acceptance gates, not a bit-baseline against `SoftStepSolver`. The
+/// colored solve is run-to-run bit-identical and never moves a static body. This
+/// path takes NO solver type parameter: the colored solver is fixed
+/// ([`ColoredSoftStepSolver`](crate::solver::ColoredSoftStepSolver)), since the
+/// colored solve consumes the graph through its own entry point, not the generic
+/// [`RigidSolver`] seam.
+///
+/// Opt-in: a world that does not call this is byte-for-byte unaffected (the
+/// colored stage is never registered — the campaign 0%-gate). The returned
+/// [`PhysicsStageKeys`] carries both the `build_graph` and `solve` stage indices.
+pub fn add_physics_colored_solve(
+    builder: &mut ScheduleBuilder,
+    world: &mut EcsMaster,
+) -> PhysicsStageKeys {
+    add_physics_pipeline::<ColoredSoftStepSolver>(builder, world, false, true, true)
 }
 
 /// Inserts the physics resources INCLUDING an (empty) [`SdfField`] and registers
@@ -154,20 +191,30 @@ pub fn add_physics_sdf<S: RigidSolver + Default>(
     builder: &mut ScheduleBuilder,
     world: &mut EcsMaster,
 ) -> PhysicsStageKeys {
-    add_physics_pipeline::<S>(builder, world, true, false)
+    add_physics_pipeline::<S>(builder, world, true, false, false)
 }
 
 /// Shared wiring for [`add_physics_systems`] (`with_sdf = false`,
-/// `colored = false`), [`add_physics_sdf`] (`with_sdf = true`), and
-/// [`add_physics_colored`] (`colored = true`): inserts the resources and registers
-/// the pipeline, optionally splicing the SDF-collision stage and/or the
-/// constraint-graph stage between narrowphase and solve.
+/// `colored = false`), [`add_physics_sdf`] (`with_sdf = true`),
+/// [`add_physics_colored`] (`colored = true`, graph-only — the default solve
+/// runs), and [`add_physics_colored_solve`] (`colored = true` + `colored_solve =
+/// true` — the Phase-O5 colored solve REPLACES the default solve): inserts the
+/// resources and registers the pipeline, optionally splicing the SDF-collision
+/// stage and/or the constraint-graph stage between narrowphase and solve, and
+/// selecting the default or the colored solve stage.
 fn add_physics_pipeline<S: RigidSolver + Default>(
     builder: &mut ScheduleBuilder,
     world: &mut EcsMaster,
     with_sdf: bool,
     colored: bool,
+    colored_solve: bool,
 ) -> PhysicsStageKeys {
+    // The colored solve requires the constraint graph; the type system cannot
+    // express it, so guard the invariant the callers uphold.
+    debug_assert!(
+        !colored_solve || colored,
+        "invariant: the colored solve stage requires the constraint graph (colored == true)"
+    );
     // Reused, capacity-preserving step buffers (principle 5 — no per-step alloc).
     // The `colored` flag rides the config so `physics_build_graph` (registered only
     // when `colored`) and any future graph consumer share one switch.
@@ -257,16 +304,27 @@ fn add_physics_pipeline<S: RigidSolver + Default>(
         None
     };
 
-    let mut solve_cfg = builder.add_system(physics_solve_step::<S>).after(narrowphase);
+    // O5: the colored-solve path registers `physics_solve_colored` (which CONSUMES
+    // the constraint graph) in place of the default generic `physics_solve_step::<S>`
+    // — the two solvers never both run (Decision 7). The default path keeps the
+    // shipped solve stage, byte-untouched. The `physics_solve_colored` stage's
+    // `Res<ConstraintGraph>` makes the `.after(build_graph)` edge load-bearing (not
+    // merely documentary as on the O4 graph-only path).
+    let mut solve_cfg = if colored_solve {
+        builder.add_system(physics_solve_colored).after(narrowphase)
+    } else {
+        builder.add_system(physics_solve_step::<S>).after(narrowphase)
+    };
     if let Some(sdf) = narrowphase_sdf_key {
         // Pin the SDF stage before the solve (it must finish appending its
         // manifolds before the solver reads the buffer).
         solve_cfg = solve_cfg.after(sdf);
     }
     if let Some(graph) = build_graph_key {
-        // Pin the graph build before the solve so the partition is complete when a
-        // future consumer reads it; in O4 it is order-neutral for the result (the
-        // solve does not read the graph), but the edge documents the dependency.
+        // Pin the graph build before the solve. On the O5 colored-solve path this is
+        // load-bearing (the solve reads the graph); on the O4 graph-only path it is
+        // order-neutral for the result (the solve does not read the graph) but the
+        // edge documents the dependency.
         solve_cfg = solve_cfg.after(graph);
     }
     let solve = solve_cfg.key();

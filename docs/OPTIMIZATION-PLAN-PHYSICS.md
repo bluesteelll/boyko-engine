@@ -52,12 +52,12 @@ The determinism gate is **stricter than Box2D** (which guarantees thread-count-i
 
 **What:** After narrowphase, partition contacts into **islands** (connected components of the contact graph over dynamic bodies; a static/sentinel body is "ground" that does NOT connect islands — Box2D's rule) via union-find over `BodyIndex`. **Greedy-color** constraints so no color contains two constraints sharing a dynamic body (first-fit over a per-color body bitset). Islands gate sleeping (Decision 5) and bound parallel work; colors enable race-free batching.
 
-**Why:** The shipped `solve_velocities` is sequential Gauss-Seidel — a pair `(a,b)` writes BOTH body rows (soft_step.rs:539-543, 593-596), so naive parallel pair-solve RACES. Coloring is THE enabler: within one color every constraint touches disjoint bodies → solve all in parallel AND/OR pack 8 into an AVX2 lane with no cross-lane conflict. This is the Box2D-v3 architecture (RESEARCH-FAST-MATH §5).
+**Why:** The shipped `solve_velocities` is sequential Gauss-Seidel — a pair `(a,b)` writes BOTH body rows (soft_step.rs:539-543, 593-596), so naive parallel pair-solve RACES. Coloring is THE enabler: within one color every MANIFOLD touches dynamic bodies no other manifold in the color touches → dispatch the color's manifold-GROUPS in parallel AND/OR pack disjoint groups into an AVX2 lane with no cross-lane conflict. **The invariant is manifold-group granular, NOT point granular:** a face-face manifold has up to `MAX_CONTACT_POINTS=4` points that all share the SAME body pair and are contiguous in one color span, so the ≥2 points of one manifold are body-coupled and MUST stay together (one thread / one lane) — only different manifold-groups are body-disjoint. This is the Box2D-v3 architecture (RESEARCH-FAST-MATH §5).
 
 **Determinism (STRICTER than Box2D), pinned exactly:**
 1. **Color assignment order** = manifold order (D4) → identical color partition every run.
 2. **Intra-color constraint order** = ascending manifold index (stable within color).
-3. **Color solve order** = `0..n_colors` sequentially (colors are a Gauss-Seidel sweep across colors). Within a color the bodies are disjoint, so reorder-within-color cannot change the *velocity* result — **but this order-independence applies ONLY to the velocity accumulators, NOT to the warm-start store** (C2): the store is forced into canonical order by IM-2b.
+3. **Color solve order** = `0..n_colors` sequentially (colors are a Gauss-Seidel sweep across colors). Within a color the manifold-GROUPS touch disjoint bodies, so reorder-of-GROUPS within a color cannot change the *velocity* result — **but the ≥2 points of a single manifold-group share both bodies and are order-coupled, so they must be solved together (one thread / lane), and this order-independence applies ONLY to the velocity accumulators across GROUPS, NOT to the warm-start store** (C2): the store is forced into canonical order by IM-2b. O6/O7 dispatch / pack per manifold-GROUP (the `group_start` + `color_group_start` CSR delimits each group's slot run), never per point.
 4. **Lane-reduction order** pinned in the SIMD kernel (Decision 4).
 
 The colored solve REORDERS the contact sweep vs the shipped manifold-order sweep → different (but valid) converged float values. This is the one VALUE-bearing change; it is isolated to O5 and validated against the tolerance-based acceptance gates (W1 — there is no stored bit baseline in `solver_is_deterministic` to "reset"; the static-row bit-identity gate `static_body_unmoved_under_tgs` must stay GREEN, since coloring must not move a static body).
@@ -204,8 +204,12 @@ pub fn physics_solve_colored(/* graph, scratch, manifolds, cfg, &ThreadPool (sta
 // The colored solver is a SEPARATE RigidSolver impl; SoftStepSolver is untouched.
 pub struct ColoredSoftStepSolver { /* owns ContactColumns + warm tables */ }
 impl ColoredSoftStepSolver {
-    /// Pool-agnostic, order-independent within a color (the kernel the stage calls
-    /// per color, optionally 8-wide under O7). Reads/writes only disjoint bodies.
+    /// Pool-agnostic, order-independent ACROSS the manifold-GROUPS of a color (the
+    /// kernel the stage calls per color, optionally lane-wide under O7). Each
+    /// manifold-group touches bodies no other group in the color touches; the ≥2
+    /// points of one group share both bodies and are solved together. O6/O7 must
+    /// dispatch / pack per manifold-GROUP (the `group_start` + `color_group_start`
+    /// CSR delimits each group's slot run), never per point.
     pub fn solve_color(&self, color_contacts: &[u32], /* bodies_eff, soft, ... */);
 }
 
@@ -246,12 +250,12 @@ Cache: 2/4 streaming; 5 sequential per cell. SIMD: the AABB/cell + sphere-bound 
 ## Multithreading model
 
 - **Shared (read-only during a parallel region):** `scratch.bodies` positions/masses (grid build, graph build); manifolds; the graph partition.
-- **Shared (written, disjoint by construction):** within a color, body velocities — each worker/lane writes bodies no other touches (coloring invariant) → no synchronization, no atomics.
+- **Shared (written, disjoint by construction):** within a color, body velocities — each worker/lane processes a whole manifold-GROUP and writes bodies no OTHER group in the color touches (the manifold-group-granular coloring invariant) → no synchronization, no atomics. The ≥2 points of a single manifold share both bodies, so a group is the indivisible unit of dispatch / lane-packing (never split a manifold's points across workers/lanes).
 - **Thread-local:** per-worker grid histograms + pair buffers (merged in fixed worker order = deterministic combine). Per-worker SIMD scratch.
 - **Synchronization points:** (1) grid build → emit (prefix-sum barrier); (2) between colors (scope Drop join — required, Gauss-Seidel cross-color dependency); (3) between substeps. These are `pool.scope` joins (work-stealing wait, no parking deadlock — Phase 9.1-9.3 proven). NO Mutex/RwLock on the hot path.
 - **Atomics:** NONE in the solve. The only atomics are the threadpool's own scope-pending counter (loom+Miri-proven). The grid build uses per-worker locals + ordered merge, NOT shared atomic counters.
-- **Data-race freedom proof:** coloring guarantees ∀ color, ∀ two constraints in it, their ≤4 body rows are pairwise disjoint → concurrent `apply_impulse` writes target disjoint `BodyEffective` slots. The `pool.scope` Drop join is the happens-before edge between colors (Acquire/Release on the pending counter, loom-verified). The warm-start store runs AFTER the join, single-threaded, in canonical order (IM-2b) → no concurrent table writes. Send/Sync: `BodyEffective`/`ContactColumns` columns are `Copy` POD `Send+Sync`; per-chunk closures capture raw slices bounded by the scope. Arena stays !Send/!Sync — the solve touches only `Vec` scratch.
-- **Determinism vs thread count:** within-color velocity order is irrelevant (disjoint bodies); cross-color order is fixed; the warm store order is canonical → the float accumulation sequence per body AND the table occupancy are identical regardless of worker count → bit-identical {1,N} threads. **The {1,N} gate uses a scene with forced home-slot collisions** (dense contact count near the table load-factor bound) so the IM-2b store-order guarantee is tested non-vacuously (C2).
+- **Data-race freedom proof:** coloring guarantees ∀ color, ∀ two MANIFOLD-GROUPS in it, their body rows are pairwise disjoint → concurrent `apply_impulse` writes from DIFFERENT groups target disjoint `BodyEffective` slots. (The ≥2 points of a single manifold-group share both bodies, so a group is dispatched/packed as one unit — never split — and its intra-group point writes are sequential on the owning thread/lane.) The `pool.scope` Drop join is the happens-before edge between colors (Acquire/Release on the pending counter, loom-verified). The warm-start store runs AFTER the join, single-threaded, in canonical order (IM-2b) → no concurrent table writes. Send/Sync: `BodyEffective`/`ContactColumns` columns are `Copy` POD `Send+Sync`; per-chunk closures capture raw slices bounded by the scope. Arena stays !Send/!Sync — the solve touches only `Vec` scratch.
+- **Determinism vs thread count:** within-color the ORDER of manifold-groups is irrelevant (disjoint bodies across groups; points within a group always solved together in fixed point order on one thread/lane); cross-color order is fixed; the warm store order is canonical → the float accumulation sequence per body AND the table occupancy are identical regardless of worker count → bit-identical {1,N} threads. **The {1,N} gate uses a scene with forced home-slot collisions** (dense contact count near the table load-factor bound) so the IM-2b store-order guarantee is tested non-vacuously (C2).
 
 ---
 

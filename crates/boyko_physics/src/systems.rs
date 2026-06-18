@@ -70,6 +70,7 @@ use crate::resources::{
     Manifolds, PhysicsConfig, SolverScratch,
 };
 use crate::sdf_query::{SdfField, sample_sdf};
+use crate::solver::colored::ColoredSoftStepSolver;
 use crate::solver::RigidSolver;
 
 /// Minimum SDF gradient length for a usable contact normal (P2 W5, O3).
@@ -695,6 +696,41 @@ pub fn physics_build_graph(
         i < bodies.len() && bodies[i].inv_mass != 0.0
     };
     graph.build(&manifolds.manifolds, n_dynamic, is_dynamic);
+}
+
+/// Runs the colored TGS-Soft solver for one step over the prebuilt
+/// [`ConstraintGraph`] (Phase O5, Decision 7) — the SINGLE-THREADED colored
+/// solve that REPLACES the default [`physics_solve_step`] under
+/// [`add_physics_colored`](crate::plugin::add_physics_colored).
+///
+/// Calls [`ColoredSoftStepSolver::solve_colored`](crate::solver::ColoredSoftStepSolver::solve_colored)
+/// directly (not through [`RigidSolver::solve`], whose signature carries no
+/// graph): the solver builds its SoA `ContactColumns` in color order, runs the
+/// substep loop solving colors `0..n_colors` sequentially (a Gauss-Seidel sweep
+/// across colors), then stores the converged impulses in canonical order
+/// (IM-2b). Registered ONLY on the colored path, where it stands in for
+/// `physics_solve_step` — the default solver's stage is NOT registered, so the
+/// two never both run. A non-colored world never reaches this stage (the
+/// 0%-gate; the shipped [`SoftStepSolver`](crate::solver::SoftStepSolver) is
+/// byte-untouched).
+///
+/// The colored solve reorders the contact sweep vs the reference manifold-order
+/// sweep → DIFFERENT (but valid) converged values, validated against tolerance
+/// gates (the Phase O5 value change). It is run-to-run bit-identical and never
+/// moves a static body.
+//
+// `clippy::needless_pass_by_value`: `ResMut<_>` / `Res<_>` are by-value
+// `SystemParam`s used through reborrows — the same false-positive as the other
+// physics stages.
+#[allow(clippy::needless_pass_by_value)]
+pub fn physics_solve_colored(
+    mut solver: ResMut<ColoredSoftStepSolver>,
+    cfg: Res<PhysicsConfig>,
+    manifolds: Res<Manifolds>,
+    graph: Res<ConstraintGraph>,
+    mut scratch: ResMut<SolverScratch>,
+) {
+    solver.solve_colored(&cfg, &manifolds.manifolds, &graph, &mut scratch);
 }
 
 /// Runs the swappable solver for one step, or early-outs for a no-op solver
