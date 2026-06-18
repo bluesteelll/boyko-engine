@@ -1,4 +1,5 @@
-//! The in-house TGS-Soft rigid-body solver — sphere-sphere contacts (P2 W2).
+//! The in-house TGS-Soft rigid-body solver — sphere-sphere contacts with
+//! cross-frame warm-starting (P2 W2 + W3).
 //!
 //! [`SoftStepSolver`] is a real [`RigidSolver`](super::RigidSolver) that resolves
 //! the narrowphase manifolds with the Temporal Gauss-Seidel "Soft Step" scheme
@@ -9,14 +10,29 @@
 //! returns `true`), so the pipeline's
 //! [`physics_integrate`](crate::systems::physics_integrate) is gated off (C2).
 //!
-//! # What W2 does NOT include
+//! # Warm-starting (W3)
 //!
-//! - **Warm-start** (W3): impulses start at ZERO each frame — there is no
-//!   cross-frame impulse cache yet, so a contact re-converges from scratch every
-//!   step. This is correct (just slower to settle) and is the W3 work.
+//! Sequential-impulse convergence is slow from a zero seed, so a sphere stack
+//! jitters apart under the per-step substep budget. W3 persists each contact's
+//! converged accumulated impulses (normal + 2 tangent) across frames via the
+//! double-buffered [`WarmStartTable`](super::warm_start::WarmStartTable):
+//!
+//! 1. **Seed** (start of [`solve`](SoftStepSolver::solve)): each contact's
+//!    accumulated impulse is read from last frame's `read` table (zero on a miss).
+//! 2. **Apply** (per substep, after gravity, before the soft sweep, matching
+//!    Box2D-v3 `b2WarmStartContactsTask`): the seeded impulse is applied to the
+//!    bodies' velocities so the solve starts from the warm state. It re-applies
+//!    each substep because each substep re-integrates gravity.
+//! 3. **Store + swap** (end of `solve`): the converged impulses are inserted into
+//!    a freshly-zeroed `write` table in manifold order, then `read` ↔ `write`
+//!    swap (C3 — rebuilt each frame, deterministic, no per-step alloc).
+//!
+//! # What W3 does NOT include
+//!
 //! - **Box / sphere-box contacts** (W4): narrowphase stays sphere-sphere, so the
-//!   manifolds carry a single contact point each; the solver loops the generic
-//!   `0..count` point range regardless, so W4 is purely a narrowphase change.
+//!   manifolds carry a single contact point each (`feature_id == 0`); the solver
+//!   loops the generic `0..count` point range regardless, so W4 is purely a
+//!   narrowphase change.
 //! - **SDF contacts + the C1 sentinel path** (W5): every manifold here keys two
 //!   real dense rows.
 //!
@@ -24,13 +40,15 @@
 //!
 //! Single-threaded over the deterministic manifold order (D4), fixed point order
 //! `0..count`, normal-before-friction, fixed `substeps` / `relax_iterations`,
-//! fixed float op order (no reduction reorder, no atomics, no rayon). All scratch
-//! buffers are capacity-reused — zero per-step allocation in steady state. No
-//! `fast-math` / `float_algebraic` on this crate.
+//! fixed float op order (no reduction reorder, no atomics, no rayon), warm-start
+//! probe = pure function of key + a write table rebuilt each frame (C3). All
+//! scratch buffers are capacity-reused — zero per-step allocation in steady
+//! state. No `fast-math` / `float_algebraic` on this crate.
 
 use boyko_macros::Resource as ResourceDerive;
 
 use super::contact::{BodyEffective, effective_mass, tangent_basis};
+use super::warm_start::{self, WarmStartTable};
 use super::RigidSolver;
 use crate::components::BodyType;
 use crate::manifold::Manifold;
@@ -57,14 +75,14 @@ const MAX_BIAS_VELOCITY: f32 = 4.0;
 const RESTITUTION_THRESHOLD: f32 = 1.0;
 
 /// Per-contact-point constraint scratch built once per solve and re-read each
-/// substep (P2 W2).
+/// substep (P2 W2 + W3).
 ///
 /// Holds the precomputed geometry (anchors relative to each body's center of
-/// mass, the friction tangent basis) and the accumulated impulses (which, absent
-/// warm-start in W2, start at zero each frame). One [`PointConstraint`] per live
-/// manifold point, in the flattened manifold-order × point-order sequence — the
-/// same order [`SolverScratch::vn_initial`](crate::resources::SolverScratch) is
-/// indexed in.
+/// mass, the friction tangent basis) and the accumulated impulses (warm-SEEDED
+/// from last frame's converged value in W3, zero on a cache miss). One
+/// [`PointConstraint`] per live manifold point, in the flattened
+/// manifold-order × point-order sequence — the same order
+/// [`SolverScratch::vn_initial`](crate::resources::SolverScratch) is indexed in.
 #[derive(Clone, Copy, Debug, Default)]
 struct PointConstraint {
     /// Anchor offset on body A from its center of mass (world frame).
@@ -74,11 +92,11 @@ struct PointConstraint {
     /// Signed separation at gather time (negative = penetrating); the soft bias
     /// drives this toward zero.
     separation: f32,
-    /// Accumulated normal impulse `λn ≥ 0` (zero-seeded in W2 — no warm-start).
+    /// Accumulated normal impulse `λn ≥ 0` (W3 warm-seeds it from last frame).
     normal_impulse: f32,
-    /// Accumulated tangent impulse along `t1`.
+    /// Accumulated tangent impulse along `t1` (W3 warm-seeds it from last frame).
     tangent_impulse1: f32,
-    /// Accumulated tangent impulse along `t2`.
+    /// Accumulated tangent impulse along `t2` (W3 warm-seeds it from last frame).
     tangent_impulse2: f32,
 }
 
@@ -101,17 +119,22 @@ struct ManifoldConstraint {
     point_start: usize,
     /// Number of live points (`points[point_start .. point_start + count]`).
     count: usize,
+    /// Warm-start key for this manifold's single contact (W3): `pack(body_a,
+    /// body_b, feature_id)`. For W3 sphere-sphere the manifold has one point with
+    /// `feature_id == 0`, so this one key covers the whole manifold; W4 box
+    /// manifolds (multiple points with distinct feature ids) will key per point.
+    warm_key: u64,
 }
 
-/// The in-house TGS-Soft rigid-body solver (P2 W2).
+/// The in-house TGS-Soft rigid-body solver (P2 W2 + W3 warm-starting).
 ///
-/// A `Resource` carrying only the reused, capacity-preserving per-solve scratch
-/// (the warm-start tables live in [`SolverScratch`] in later waves; W2 has no
-/// warm-start). [`is_noop`](RigidSolver::is_noop) is `false` and
+/// A `Resource` carrying the reused, capacity-preserving per-solve scratch plus
+/// the double-buffered W3 warm-start cache (the `read`/`write`
+/// [`WarmStartTable`]s). [`is_noop`](RigidSolver::is_noop) is `false` and
 /// [`owns_integration`](RigidSolver::owns_integration) is `true`, so the pipeline
 /// gates off its own integrate stage (C2) and this solver integrates DYNAMIC
 /// bodies inside its substep loop.
-#[derive(ResourceDerive, Default)]
+#[derive(ResourceDerive)]
 pub struct SoftStepSolver {
     /// Per-body solver view, parallel to `scratch.bodies` — refreshed each
     /// substep so the world inverse inertia tracks the advancing orientation.
@@ -121,16 +144,53 @@ pub struct SoftStepSolver {
     /// Flattened per-point constraint state, indexed by `manifold.point_start +
     /// p` (the same order `scratch.vn_initial` uses).
     points: Vec<PointConstraint>,
+    /// Last frame's converged impulses (W3) — probed to seed this frame's
+    /// contacts at the start of [`solve`](Self::solve).
+    warm_read: WarmStartTable,
+    /// This frame's converged impulses (W3) — freshly zeroed each frame, filled
+    /// in manifold order after the solve, then swapped into `warm_read`.
+    warm_write: WarmStartTable,
+    /// Whether warm-starting is active (W3). Production default is `true`; the
+    /// `false` mode (see [`with_warm_start`](Self::with_warm_start)) zero-seeds
+    /// every contact each frame, used by the A/B convergence test to demonstrate
+    /// the warm-start payoff.
+    warm_start_enabled: bool,
+}
+
+impl Default for SoftStepSolver {
+    /// The production default — empty scratch, warm-starting ON.
+    #[inline]
+    fn default() -> Self {
+        Self::with_capacity(0, 0)
+    }
 }
 
 impl SoftStepSolver {
     /// Builds a solver with the scratch buffers pre-sized for up to `bodies`
-    /// rows and `contacts` contact points (no later realloc in steady state).
+    /// rows and `contacts` contact points (no later realloc in steady state),
+    /// warm-starting ON.
     pub fn with_capacity(bodies: usize, contacts: usize) -> Self {
         Self {
             bodies: Vec::with_capacity(bodies),
             manifolds: Vec::with_capacity(contacts),
             points: Vec::with_capacity(contacts),
+            warm_read: WarmStartTable::with_capacity(contacts),
+            warm_write: WarmStartTable::with_capacity(contacts),
+            warm_start_enabled: true,
+        }
+    }
+
+    /// Builds a solver with warm-starting toggled `enabled` (P2 W3, test hook).
+    ///
+    /// Production code uses the warm-starting-ON [`Default`] / [`with_capacity`];
+    /// passing `false` zero-seeds every contact each frame (the W2 behavior),
+    /// which the `warm_start_improves_convergence` A/B test runs against to show
+    /// the payoff. Pre-sizes nothing (the steady-state capacity grows on the
+    /// first solve).
+    pub fn with_warm_start(enabled: bool) -> Self {
+        Self {
+            warm_start_enabled: enabled,
+            ..Self::with_capacity(0, 0)
         }
     }
 
@@ -150,13 +210,21 @@ impl SoftStepSolver {
         }
     }
 
-    /// Builds the per-manifold + per-point constraint scratch and captures the
-    /// initial relative normal approach velocity into `vn_initial` (for the
-    /// post-loop restitution pass).
+    /// Builds the per-manifold + per-point constraint scratch, SEEDS each
+    /// contact's accumulated impulse from the warm-start `read` table (W3), and
+    /// captures the initial relative normal approach velocity into `vn_initial`
+    /// (for the post-loop restitution pass).
     ///
     /// Anchors are taken relative to each body's CURRENT center of mass (the
     /// gather position); the soft solve re-uses them across substeps (it does not
     /// re-run narrowphase). Tangent bases are degeneracy-safe (`tangent_basis`).
+    ///
+    /// The warm seed: each manifold's contact key is `pack(body_a, body_b,
+    /// feature_id)`; a `read`-table hit seeds the accumulated normal + tangent
+    /// impulses with last frame's converged value, and a miss (a new or
+    /// just-reformed contact) seeds zero — a one-frame convergence cost, no error.
+    /// When `warm_start_enabled` is `false` (the A/B test hook) the seed is always
+    /// zero (the W2 behavior).
     fn build_constraints(
         &mut self,
         manifolds: &[Manifold],
@@ -178,8 +246,16 @@ impl SoftStepSolver {
             let (tangent1, tangent2) = tangent_basis(normal);
             let point_start = self.points.len();
 
-            let ba = &self.bodies[ia];
-            let bb = &self.bodies[ib];
+            // W3 warm-start key: one key per W3 sphere-sphere manifold (single
+            // point, `feature_id == 0`). The `read` table holds last frame's
+            // converged impulses; a miss seeds zero.
+            let warm_key = warm_start::pack(m.body_a, m.body_b, m.points[0].feature_id);
+            let seed = if self.warm_start_enabled {
+                self.warm_read.get(warm_key)
+            } else {
+                None
+            };
+
             let pa = bodies[ia].position;
             let pb = bodies[ib].position;
 
@@ -190,15 +266,26 @@ impl SoftStepSolver {
                 // Relative normal velocity of the contact point, B relative to A,
                 // projected on the normal. Negative = approaching (the bodies
                 // are closing) — the value restitution bounces back.
-                let dv = bb.point_velocity(rb) - ba.point_velocity(ra);
+                let dv = {
+                    let ba = &self.bodies[ia];
+                    let bb = &self.bodies[ib];
+                    bb.point_velocity(rb) - ba.point_velocity(ra)
+                };
                 vn_initial.push(dv.dot(normal));
+                // Warm-seed the accumulated impulses (zero on miss / disabled).
+                // W3: a manifold has one point, so the single key seeds point 0;
+                // any future extra points (W4) start zero until per-point keys land.
+                let (normal_impulse, tangent_impulse1, tangent_impulse2) = match seed {
+                    Some(e) if p == 0 => (e.normal_impulse, e.tangent_impulse[0], e.tangent_impulse[1]),
+                    _ => (0.0, 0.0, 0.0),
+                };
                 self.points.push(PointConstraint {
                     ra,
                     rb,
                     separation: cp.separation,
-                    normal_impulse: 0.0,
-                    tangent_impulse1: 0.0,
-                    tangent_impulse2: 0.0,
+                    normal_impulse,
+                    tangent_impulse1,
+                    tangent_impulse2,
                 });
             }
 
@@ -210,8 +297,74 @@ impl SoftStepSolver {
                 tangent2,
                 point_start,
                 count,
+                warm_key,
             });
         }
+    }
+
+    /// Applies the seeded accumulated impulse of every contact point to both
+    /// bodies' velocities (the W3 warm-start apply, Algorithm step 2).
+    ///
+    /// For each point the total impulse is `P = λn·n + λt1·t1 + λt2·t2`; it is
+    /// applied as `v ∓= invMass·P`, `ω ∓= I⁻¹·(r×P)` (A gets `-P`, B gets `+P`,
+    /// matching the solve's sign convention). Run once per substep BEFORE the
+    /// soft sweep (after the per-substep gravity integrate) — matching Box2D-v3's
+    /// `b2WarmStartContactsTask`. The accumulated impulse persists across
+    /// substeps in `points[]`; re-applying each substep restores the warm
+    /// velocity after each substep re-integrates gravity, so the soft sweep
+    /// always refines from the warm state rather than from the cold post-gravity
+    /// velocity. A zero-seeded (missed / disabled) contact applies a zero impulse
+    /// — a branchless no-op.
+    //
+    // `clippy::needless_range_loop`: `p` is the flattened contact-point key into
+    // `points`; the body also indexes the disjoint `bodies_eff[mc.ia/ib]`, which a
+    // single `iter_mut` cannot express (the same three-buffer pattern as
+    // `solve_velocities`).
+    #[allow(clippy::needless_range_loop)]
+    fn warm_start_apply(
+        manifolds: &[ManifoldConstraint],
+        points: &[PointConstraint],
+        bodies_eff: &mut [BodyEffective],
+    ) {
+        for mc in manifolds {
+            let normal = mc.normal;
+            let (t1, t2) = (mc.tangent1, mc.tangent2);
+            for p in mc.point_start..(mc.point_start + mc.count) {
+                let pc = points[p];
+                let impulse =
+                    normal * pc.normal_impulse + t1 * pc.tangent_impulse1 + t2 * pc.tangent_impulse2;
+                bodies_eff[mc.ia].apply_impulse(pc.ra, impulse * -1.0);
+                bodies_eff[mc.ib].apply_impulse(pc.rb, impulse);
+            }
+        }
+    }
+
+    /// Stores every contact's converged accumulated impulses into the freshly
+    /// rebuilt `write` table, then swaps `read` ↔ `write` (the W3 store, C3).
+    ///
+    /// [`rebuild`](WarmStartTable::rebuild) zeroes the `write` table sized for the
+    /// live contact-point count, then each manifold's converged impulse is
+    /// inserted under its `warm_key` in deterministic manifold order. The
+    /// resulting occupancy is a pure function of this frame's key set
+    /// (order-independent, no carried history), so the swapped-in `read` table is
+    /// bit-deterministic next frame. When warm-starting is disabled the store is
+    /// skipped (the `read` table stays empty, so every seed misses).
+    fn store_and_swap(&mut self) {
+        if !self.warm_start_enabled {
+            return;
+        }
+        let point_count = self.points.len();
+        self.warm_write.rebuild(point_count);
+        for mc in &self.manifolds {
+            // W3: one point per manifold, so point 0 carries the converged impulse.
+            let pc = &self.points[mc.point_start];
+            self.warm_write.insert(
+                mc.warm_key,
+                pc.normal_impulse,
+                [pc.tangent_impulse1, pc.tangent_impulse2],
+            );
+        }
+        core::mem::swap(&mut self.warm_read, &mut self.warm_write);
     }
 
     /// Refreshes each dynamic body's world inverse inertia from its local tensor
@@ -526,8 +679,11 @@ impl RigidSolver for SoftStepSolver {
                 }
             }
 
-            // (2) Warm-start: INTENTIONALLY ABSENT in W2 — impulses accumulate
-            // from zero each frame (the W3 warm-start cache lands later).
+            // (2) Warm-start apply (W3): re-apply the seeded accumulated impulse
+            // to the post-gravity velocities so the soft sweep refines from the
+            // warm state (matching Box2D-v3's per-substep `b2WarmStartContactsTask`).
+            // A zero seed (missed / disabled) applies nothing.
+            Self::warm_start_apply(&self.manifolds, &self.points, &mut self.bodies);
 
             // (3)+(4) Soft normal solve + coupled-friction cone (one sweep).
             Self::solve_velocities(
@@ -578,6 +734,11 @@ impl RigidSolver for SoftStepSolver {
             &scratch.bodies,
             &scratch.vn_initial,
         );
+
+        // (W3) Store the converged accumulated impulses into the freshly-zeroed
+        // write table (in manifold order) and swap read ↔ write so next frame
+        // seeds from this frame's solution.
+        self.store_and_swap();
 
         // Write the solved velocities back (positions/orientations were
         // integrated in place into the snapshot) and flag every integrated

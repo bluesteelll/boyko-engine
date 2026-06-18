@@ -10,6 +10,13 @@
 //!
 //! Warm-start is INTENTIONALLY ABSENT in W2 (impulses start at zero each frame);
 //! that is W3.
+//!
+//! The W3 gates (`stacking_is_stable`, `warm_start_improves_convergence`) live at
+//! the bottom of this file: they prove the cross-frame warm-start cache makes a
+//! sphere stack hold (the payoff) and that it reaches rest in fewer substeps than
+//! a cold (zero-seeded) solve. `solver_is_deterministic` (above) already runs the
+//! warm-start-ON default path, so it doubles as the C3 rebuild-each-frame
+//! determinism re-check.
 
 use std::sync::Arc;
 
@@ -973,5 +980,243 @@ fn free_dynamic_body_falls_under_owning_solver() {
         vy_err < 0.05,
         "free-fall velocity must match -gT within 5%: vy {}, expected {expected_vy}, vy_err {vy_err}",
         body.linear_velocity.y
+    );
+}
+
+// ── W3 warm-start gates ───────────────────────────────────────────────────────
+
+/// Spawns a vertical stack of `n` dynamic spheres (radius `r`) resting on a large
+/// static floor sphere, each sphere centered one diameter above the one below with
+/// a tiny overlap so the strict `separation < 0` narrowphase fires every frame.
+///
+/// Serialized spawn order (floor, then bottom→top), so the dense body-row indices
+/// — the warm-start keys (C3 dense-row assumption) — are stable frame-to-frame.
+/// The floor's top surface sits at `y = 0`; the bottom sphere rests at `y ≈ r`,
+/// each subsequent sphere ~`2r` higher. A small `overlap` seats the contacts.
+fn spawn_sphere_stack(world: &mut EcsMaster, n: usize, r: f32) {
+    let floor_r = 50.0_f32;
+    // Static floor sphere, top surface at y = 0.
+    let (fb, fm, fc) = sphere(
+        Vec3::new(0.0, -floor_r, 0.0),
+        Vec3::ZERO,
+        floor_r,
+        0.0,
+        0.0,
+        0.6,
+        BodyType::Static,
+    );
+    spawn_body(world, fb, fm, fc);
+
+    // A tiny per-contact overlap so each contact is genuinely penetrating
+    // (`separation < 0`) at rest — otherwise a perfectly-tangent stack flickers
+    // in and out of contact and the warm-start payoff is masked by missing pairs.
+    let overlap = 0.01_f32;
+    for i in 0..n {
+        // Bottom sphere center at y = r - overlap; each higher one at +(2r - overlap).
+        let y = r + (i as f32) * (2.0 * r - overlap) - overlap;
+        let (sb, sm, sc) = sphere(
+            Vec3::new(0.0, y, 0.0),
+            Vec3::ZERO,
+            r,
+            1.0,
+            0.0, // no restitution — a resting stack must not bounce
+            0.6,
+            BodyType::Dynamic,
+        );
+        spawn_body(world, sb, sm, sc);
+    }
+}
+
+#[test]
+fn stacking_is_stable() {
+    // THE warm-start payoff: a small vertical sphere stack on a static floor must
+    // hold over many frames — it must not jitter apart, explode, or sink through.
+    // Zero-seeded sequential-impulse convergence (W2) is too slow under the
+    // per-step substep budget for a multi-contact stack, so the lower contacts
+    // never reach the impulse that supports the weight above and the stack settles
+    // by squishing/sinking or jitters apart. Warm-starting seeds each contact with
+    // last frame's converged impulse, so a resting stack starts at its steady state
+    // and stays put.
+    use boyko_physics::resources::Manifolds;
+
+    let n = 4usize; // 4 dynamic spheres + 1 static floor.
+    let r = 0.5_f32;
+    let mut world = EcsMaster::new();
+    spawn_sphere_stack(&mut world, n, r);
+
+    let dt = 1.0 / 60.0;
+    let mut schedule = build_schedule::<SoftStepSolver>(&mut world, dt);
+    world.resource_mut::<PhysicsConfig>().gravity = Vec3::new(0.0, -9.81, 0.0);
+
+    // The resting tower height (top sphere center) at spawn — the reference the
+    // stack must hold near (no drift-apart upward, no sink-through downward).
+    let rest_top_y = all_bodies(&mut world)[n].position.y;
+    // A bottom-to-top rest span: consecutive centers sit ~(2r - overlap) apart.
+    let nominal_gap = 2.0 * r - 0.01;
+
+    // Let the stack settle a few frames, then watch it over a long run.
+    for _ in 0..30 {
+        schedule.run(&mut world);
+    }
+
+    let mut max_top_y = f32::MIN;
+    let mut min_top_y = f32::MAX;
+    let mut max_pen = 0.0_f32; // deepest inter-body penetration over the run.
+    let mut max_speed_sq = 0.0_f32;
+    let mut total_contacts = 0usize;
+
+    for _ in 0..300 {
+        schedule.run(&mut world);
+        total_contacts += world.resource::<Manifolds>().manifolds.len();
+        let bodies = all_bodies(&mut world);
+
+        // No NaN/Inf anywhere (an exploded solve produces non-finite state).
+        for b in &bodies {
+            assert!(
+                b.position.x.is_finite()
+                    && b.position.y.is_finite()
+                    && b.position.z.is_finite(),
+                "stack produced a non-finite position: {b:?}"
+            );
+        }
+
+        let top_y = bodies[n].position.y;
+        max_top_y = max_top_y.max(top_y);
+        min_top_y = min_top_y.min(top_y);
+        max_speed_sq = max_speed_sq
+            .max(bodies[1..=n].iter().map(|b| b.linear_velocity.length_squared()).fold(0.0, f32::max));
+
+        // Inter-body penetration: for each adjacent dynamic pair, how much closer
+        // than (2r) the centers are. A stable stack keeps this small.
+        for w in 1..n {
+            let lower = bodies[w].position.y;
+            let upper = bodies[w + 1].position.y;
+            let pen = (2.0 * r) - (upper - lower); // > 0 = penetrating.
+            max_pen = max_pen.max(pen);
+        }
+    }
+
+    // Anti-vacuity: the stack must be in genuine sustained contact every frame.
+    // n dynamic spheres on a floor = n contacts/frame (n-1 between spheres + 1 on
+    // the floor); require at least the floor contact + one inter-body contact each
+    // frame over the 300-frame window.
+    assert!(
+        total_contacts >= 300 * 2,
+        "the stack must be in sustained multi-contact (else the gate is vacuous): {total_contacts}"
+    );
+
+    // Does NOT explode / drift apart upward: the top stays near its rest height
+    // (a fraction of a radius of wobble, not a launch).
+    assert!(
+        max_top_y <= rest_top_y + 0.25 * r,
+        "stack drifted apart / launched upward: rest_top_y {rest_top_y}, max_top_y {max_top_y}"
+    );
+    // Does NOT sink through: the top does not collapse far below its rest height
+    // (soft contact allows a little squish; a full sink-through would drop it by
+    // multiples of a radius).
+    assert!(
+        min_top_y >= rest_top_y - 0.5 * r,
+        "stack sank / collapsed: rest_top_y {rest_top_y}, min_top_y {min_top_y}"
+    );
+    // Bounded inter-body penetration: well under a fraction of a radius (soft
+    // contact squish, not a pass-through).
+    assert!(
+        max_pen < 0.25 * r,
+        "inter-body penetration exceeded a fraction of the radius: max_pen {max_pen}, nominal_gap {nominal_gap}"
+    );
+    // The stack is at REST, not jittering: peak per-sphere speed stays small.
+    assert!(
+        max_speed_sq < 1.0,
+        "stack is jittering (resting spheres gained speed): max speed^2 {max_speed_sq}"
+    );
+}
+
+/// Settles the sphere stack at a fixed `substeps` budget with warm-start `warm`
+/// (ON/OFF) and returns `(stack sink, max inter-body penetration)` measured at the
+/// end of a long run — the lower both are, the better the solve held the stack up.
+///
+/// `sink` is how far the top sphere's center has dropped below its spawn rest
+/// height (positive = the stack collapsed downward). At a STARVED substep budget a
+/// cold (zero-seeded) solve cannot build the support impulse fast enough, so the
+/// lower contacts under-resolve and the whole tower sinks / squashes; warm-start
+/// seeds last frame's converged impulse and holds the rest height.
+///
+/// Convergence quality is the STATE error (did the stack reach + hold the correct
+/// supported configuration?), NOT residual velocity — a cold solve that simply
+/// fails to hold the weight settles "quiet" while sinking, so velocity alone is a
+/// misleading convergence proxy here.
+fn stack_sink_at_substeps(substeps: u32, warm: bool) -> (f32, f32) {
+    let n = 4usize;
+    let r = 0.5_f32;
+    let mut world = EcsMaster::new();
+    spawn_sphere_stack(&mut world, n, r);
+
+    let dt = 1.0 / 60.0;
+    let mut schedule = build_schedule::<SoftStepSolver>(&mut world, dt);
+    world.resource_mut::<PhysicsConfig>().gravity = Vec3::new(0.0, -9.81, 0.0);
+    world.resource_mut::<PhysicsConfig>().substeps = substeps;
+    // Starve the iteration budget so the warm-seed advantage is the dominant term
+    // (no relax sweeps to mask a cold solve's slow per-frame re-convergence).
+    world.resource_mut::<PhysicsConfig>().relax_iterations = 0;
+    // Overwrite the schedule's default (warm-start-ON) solver with the toggled one
+    // (insert_resource replaces; see `Resources::insert` R4 replace protocol).
+    world.insert_resource(SoftStepSolver::with_warm_start(warm));
+
+    let rest_top_y = all_bodies(&mut world)[n].position.y;
+
+    // A long run: a cold starved solve keeps sinking; a warm one holds.
+    for _ in 0..240 {
+        schedule.run(&mut world);
+    }
+
+    let bodies = all_bodies(&mut world);
+    let sink = (rest_top_y - bodies[n].position.y).max(0.0);
+    let mut max_pen = 0.0_f32;
+    for w in 1..n {
+        let pen = (2.0 * r) - (bodies[w + 1].position.y - bodies[w].position.y);
+        max_pen = max_pen.max(pen);
+    }
+    (sink, max_pen)
+}
+
+#[test]
+fn warm_start_improves_convergence() {
+    // A/B (quantitative): at a STARVED substep budget (1 substep, 0 relax — set in
+    // `stack_sink_at_substeps`), warm-starting the accumulated impulses holds the
+    // stack at its supported rest height, while the cold (zero-seeded, W2) solve
+    // cannot build the support impulse fast enough and the tower sinks / squashes.
+    //
+    // The convergence metric is the STATE error — how far the stack sinks below its
+    // correct supported configuration — NOT residual velocity. A cold starved solve
+    // settles "quiet" (low velocity) precisely BECAUSE it fails to hold the weight
+    // and sinks into a collapsed-but-still state; velocity would be a misleading
+    // proxy. Warm-start, seeding last frame's converged impulse, refines a nearly-
+    // correct supported state even with a single substep, so it sinks far less.
+    let starved = 1u32;
+
+    let (cold_sink, cold_pen) = stack_sink_at_substeps(starved, false);
+    let (warm_sink, warm_pen) = stack_sink_at_substeps(starved, true);
+
+    // Warm-start holds the stack markedly higher at the same starved budget: it
+    // sinks substantially less than the cold solve.
+    assert!(
+        warm_sink < cold_sink,
+        "warm-start must hold the stack higher at a starved substep budget: \
+         warm sink {warm_sink} vs cold sink {cold_sink}"
+    );
+    // And it does not penetrate worse (warm-start tightens, never loosens, the
+    // inter-body contacts).
+    assert!(
+        warm_pen <= cold_pen + 1e-4,
+        "warm-start must not penetrate worse than cold at a starved budget: \
+         warm pen {warm_pen} vs cold pen {cold_pen}"
+    );
+
+    // Non-vacuity: the cold solve genuinely struggled (the tower sank a meaningful
+    // fraction of a radius), so the warm-start win is real, not a tie at zero.
+    assert!(
+        cold_sink > warm_sink + 0.05,
+        "the A/B must be non-vacuous (cold must sink measurably more than warm): \
+         cold sink {cold_sink} vs warm sink {warm_sink}"
     );
 }

@@ -30,6 +30,7 @@
 
 pub mod contact;
 pub mod soft_step;
+pub mod warm_start;
 
 use boyko_ecs::ecs::core::resources::resource::Resource;
 use boyko_macros::Resource as ResourceDerive;
