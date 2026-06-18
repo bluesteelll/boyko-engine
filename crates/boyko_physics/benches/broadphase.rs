@@ -14,6 +14,7 @@ use boyko_physics::manifold::BodyIndex;
 use boyko_physics::math::Vec3;
 use boyko_physics::resources::{BodyState, BroadphaseGrid};
 use boyko_physics::systems::body_bounding_radius;
+use boyko_threadpool::ThreadPoolBuilder;
 
 /// Builds a `BodyState` carrying only the broadphase-relevant fields.
 fn sphere(position: Vec3, radius: f32) -> BodyState {
@@ -185,5 +186,81 @@ fn bench_disparity(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_broadphase, bench_disparity);
+/// O3 Gate 7: PARALLEL candidate-emit scaling. `BroadphaseGrid::build_parallel`
+/// dispatched through a real `boyko_threadpool` at workers ∈ {1, 2, 4} on a DENSE
+/// scene (n_cells ≈ n → a genuine multi-cell candidate set), at n ∈ {1k, 10k,
+/// 100k}.
+///
+/// The headline gate is the speedup @100k: 4 workers vs 1 worker should reach a
+/// ratio of at least 2.8x (the plan's Amdahl estimate is f ~ 0.04-0.10, i.e. a
+/// ~3.08x ceiling at the serial CSR + final-sort fraction). Criterion reports each
+/// lane's median; the 4-vs-1 ratio at 100k is read from the medians. The
+/// `build_parallel` workers=1 median is ALSO the W=1-vs-O2-serial regression probe
+/// (vs the `grid` arm in `bench_broadphase`): the one-lane shaped path adds only the
+/// Pass A count + prefix-sum + per-chunk sort over the serial `build` (a few %).
+///
+/// Below MIN_PARALLEL_BODIES (= 4096) `build_parallel` takes the no-pool serial
+/// shaped path regardless of the pool — so n=1k is a single-lane reference; the
+/// scaling claim is read at 10k and (the gate) 100k where the dispatched branch
+/// is live. The bench is DENSE + the parallel path is gated — both stated so a
+/// degenerate scene can never read as a win (every scene asserts pairs > 0).
+fn bench_parallel(c: &mut Criterion) {
+    let mut group = c.benchmark_group("broadphase_parallel");
+    // The parallel-emit dispatch + final sort dominate the per-iter cost at scale;
+    // a modest sample count keeps the 100k × 3-worker matrix wall-clock reasonable
+    // while criterion still reports a stable median.
+    group.sample_size(20);
+
+    for &n in &[1_000usize, 10_000, 100_000] {
+        let bodies = scene(n);
+
+        // Anti-vacuity: confirm the scene yields real pairs before benching, and
+        // report whether it is at/above the parallel-dispatch threshold (4096) so
+        // the reader knows which n's actually exercise the dispatched branch.
+        let mut probe = BroadphaseGrid::with_capacity(n);
+        let mut probe_out = Vec::new();
+        probe.build(&bodies, &mut probe_out);
+        assert!(
+            !probe_out.is_empty(),
+            "parallel bench scene (n={n}) must produce pairs (anti-vacuity)"
+        );
+
+        // The O2 serial `build` baseline at this n — the W=1-vs-O2 regression
+        // reference (the parallel w1 lane vs this pure-serial median).
+        group.bench_with_input(BenchmarkId::new("serial_o2", n), &bodies, |b, bodies| {
+            let mut grid = BroadphaseGrid::with_capacity(bodies.len());
+            let mut out = Vec::new();
+            grid.build(bodies, &mut out);
+            b.iter(|| {
+                grid.build(black_box(bodies), &mut out);
+                black_box(out.len());
+            });
+        });
+
+        for &workers in &[1usize, 2, 4] {
+            let id = BenchmarkId::new(format!("w{workers}"), n);
+            group.bench_with_input(id, &bodies, |b, bodies| {
+                let pool = ThreadPoolBuilder::new().num_threads(workers).build();
+                // Warm + time INSIDE one install frame so `try_with_active_pool`
+                // finds the ambient pool every iteration (the dispatched branch);
+                // warm-up grows every scratch Vec so the timed builds are the
+                // steady-state, capacity-reused (bounded-alloc) path.
+                pool.install(|_scope| {
+                    let mut grid = BroadphaseGrid::with_capacity(bodies.len());
+                    let mut out = Vec::new();
+                    for _ in 0..3 {
+                        grid.build_parallel(bodies, &mut out);
+                    }
+                    b.iter(|| {
+                        grid.build_parallel(black_box(bodies), &mut out);
+                        black_box(out.len());
+                    });
+                });
+            });
+        }
+    }
+    group.finish();
+}
+
+criterion_group!(benches, bench_broadphase, bench_disparity, bench_parallel);
 criterion_main!(benches);

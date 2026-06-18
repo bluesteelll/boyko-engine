@@ -224,11 +224,19 @@ pub fn physics_broadphase(
                 }
             }
         }
-        // O2: the uniform-grid broadphase. `build` clears and refills `pairs` with
-        // the feasibility-filtered, (min, max)-sorted candidate set — bit-identical
-        // to the all-pairs arm above.
+        // O2/O3: the uniform-grid broadphase. `build` (and the O3
+        // `build_parallel`) clear and refill `pairs` with the feasibility-filtered,
+        // (min, max)-sorted candidate set — bit-identical to the all-pairs arm
+        // above. `parallel_broadphase` selects the O3 parallel candidate-emit path
+        // (the CSR build + oversized emit stay serial and byte-identical to O2; only
+        // the per-cell emit is fanned across the ambient pool), whose pair MULTISET
+        // matches the serial `build` for any worker count.
         BroadphaseKind::Grid => {
-            grid.build(bodies, pairs);
+            if cfg.parallel_broadphase {
+                grid.build_parallel(bodies, pairs);
+            } else {
+                grid.build(bodies, pairs);
+            }
         }
     }
 

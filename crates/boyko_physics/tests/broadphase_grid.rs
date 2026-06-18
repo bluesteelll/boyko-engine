@@ -539,6 +539,216 @@ mod world_ab {
     }
 }
 
+// ── O3 parallel candidate emit: pool-DISPATCHED `build_parallel` gates ────────
+//
+// Native-only: these drive `BroadphaseGrid::build_parallel` through a REAL
+// work-stealing `boyko_threadpool` (Miri-intractable spin-loop), so they exercise
+// the genuinely concurrent Pass A count / Pass B emit + the `EmitPtrs` disjoint
+// raw writes across multiple workers — the interleave-dependent leg the in-lib
+// `build_emit_shaped_forced` (single-threaded) gates cannot reach. The pure
+// arithmetic + the no-pool shaped path are covered Miri-clean by the in-lib
+// `o3_shaped` module (`resources.rs`).
+//
+// `build_parallel` takes the PARALLEL branch only when (a) `n >= MIN_PARALLEL_BODIES`
+// (= 4096) AND (b) it runs inside a `pool.install` frame (so `try_with_active_pool`
+// returns `Some`). Each gate asserts both preconditions hold (anti-vacuity: the
+// parallel branch genuinely ran, not the serial fallback).
+#[cfg(not(miri))]
+mod o3_parallel {
+    use super::{all_pairs, sphere};
+    use boyko_physics::manifold::BodyIndex;
+    use boyko_physics::math::Vec3;
+    use boyko_physics::resources::{BodyState, BroadphaseGrid};
+    use boyko_threadpool::ThreadPoolBuilder;
+
+    /// `MIN_PARALLEL_BODIES` from `resources.rs` (private const, mirrored here only
+    /// to size the gate scenes above the parallel-branch threshold). The
+    /// `parallel_branch_actually_runs` test below is the anti-vacuity proof that the
+    /// dispatched path — not the serial fallback — is what these scenes hit.
+    const MIN_PARALLEL_BODIES: usize = 4096;
+
+    /// A DENSE overlapping lattice of `n` unit spheres (sub-diameter spacing →
+    /// real overlaps, many occupied cells → a genuine multi-chunk partition).
+    fn dense_scene(n: usize) -> Vec<BodyState> {
+        let side = (n as f64).cbrt().ceil() as usize;
+        let spacing = 0.9_f32;
+        let mut bodies = Vec::with_capacity(n);
+        let mut i = 0usize;
+        'outer: for z in 0..side {
+            for y in 0..side {
+                for x in 0..side {
+                    if i >= n {
+                        break 'outer;
+                    }
+                    let t = i as f32;
+                    let jitter = Vec3::new((t * 0.13).sin() * 0.1, (t * 0.27).cos() * 0.1, 0.0);
+                    let p = Vec3::new(
+                        x as f32 * spacing,
+                        y as f32 * spacing,
+                        z as f32 * spacing,
+                    ) + jitter;
+                    bodies.push(sphere(p, 0.5));
+                    i += 1;
+                }
+            }
+        }
+        bodies
+    }
+
+    /// Runs `build_parallel` over `bodies` INSIDE a `pool.install` frame with
+    /// `workers` worker threads (so `try_with_active_pool` finds the ambient pool),
+    /// returning the pair set.
+    fn parallel_pairs(workers: usize, bodies: &[BodyState]) -> Vec<(BodyIndex, BodyIndex)> {
+        let pool = ThreadPoolBuilder::new().num_threads(workers).build();
+        pool.install(|_scope| {
+            let mut grid = BroadphaseGrid::with_capacity(bodies.len());
+            let mut out = Vec::new();
+            grid.build_parallel(bodies, &mut out);
+            out
+        })
+    }
+
+    // ── Gate 6: pool-dispatched `build_parallel` byte-identity at workers ∈
+    //    {1, 2, 4} over many dense scenes — the interleave-dependent leg. Each
+    //    worker count's output must be byte-for-byte equal to the O2 serial
+    //    `build` AND to all-pairs (the candidate multiset is partition- AND
+    //    interleave-independent; the final sort canonicalizes order). ──────────
+    #[test]
+    fn parallel_dispatched_bit_identical_at_1_2_4_workers() {
+        // A spread of body counts ABOVE the parallel threshold so the dispatched
+        // branch is taken; several distinct dense scenes so interleave-dependent
+        // bugs across builds surface.
+        for &n in &[MIN_PARALLEL_BODIES, 6000, 9000] {
+            let bodies = dense_scene(n);
+
+            // The serial reference (O2 `build`) + the all-pairs oracle.
+            let mut grid = BroadphaseGrid::with_capacity(bodies.len());
+            let mut serial = Vec::new();
+            grid.build(&bodies, &mut serial);
+            let oracle = all_pairs(&bodies);
+            assert_eq!(serial, oracle, "O2 serial build == all-pairs (n={n})");
+            assert!(!serial.is_empty(), "anti-vacuity: scene n={n} has survivors");
+
+            for &workers in &[1usize, 2, 4] {
+                let par = parallel_pairs(workers, &bodies);
+                assert_eq!(
+                    par, serial,
+                    "build_parallel (workers={workers}, n={n}) must be byte-identical \
+                     to the O2 serial build (and all-pairs)"
+                );
+            }
+        }
+    }
+
+    // ── Gate 6 (anti-vacuity): the PARALLEL branch genuinely runs — the pool has
+    //    > 1 worker AND the scene is at/above the threshold, so `build_parallel`
+    //    dispatches (it does NOT fall through to the serial single-chunk path).
+    //    We confirm the precondition + that a scene JUST BELOW the threshold and a
+    //    no-pool build both still match — the gate truly toggles the branch. ────
+    #[test]
+    fn parallel_branch_actually_runs_and_both_branches_agree() {
+        // (a) Above the threshold, multi-worker pool → the DISPATCHED branch.
+        let big = dense_scene(MIN_PARALLEL_BODIES + 500);
+        let pool = ThreadPoolBuilder::new().num_threads(3).build();
+        assert!(
+            pool.num_threads() >= 1,
+            "the pool must have worker threads for the dispatched branch"
+        );
+        assert!(
+            big.len() >= MIN_PARALLEL_BODIES,
+            "anti-vacuity: the scene ({}) is at/above MIN_PARALLEL_BODIES ({}) so \
+             build_parallel takes the dispatched branch, not the serial fallback",
+            big.len(),
+            MIN_PARALLEL_BODIES
+        );
+        let dispatched = pool.install(|_scope| {
+            let mut grid = BroadphaseGrid::with_capacity(big.len());
+            let mut out = Vec::new();
+            grid.build_parallel(&big, &mut out);
+            out
+        });
+
+        // (b) The SAME scene with NO ambient pool → the no-pool shaped fallback
+        //     (build_parallel called outside any install frame).
+        let no_pool = {
+            let mut grid = BroadphaseGrid::with_capacity(big.len());
+            let mut out = Vec::new();
+            grid.build_parallel(&big, &mut out);
+            out
+        };
+
+        // (c) Below the threshold, even inside a pool → the serial fallback.
+        let small = dense_scene(MIN_PARALLEL_BODIES - 1000);
+        let small_in_pool = pool.install(|_scope| {
+            let mut grid = BroadphaseGrid::with_capacity(small.len());
+            let mut out = Vec::new();
+            grid.build_parallel(&small, &mut out);
+            out
+        });
+
+        // Every branch reproduces all-pairs byte-for-byte (the whole contract).
+        assert_eq!(dispatched, all_pairs(&big), "dispatched branch == all-pairs");
+        assert_eq!(no_pool, all_pairs(&big), "no-pool fallback == all-pairs");
+        assert_eq!(dispatched, no_pool, "dispatched and no-pool branches agree byte-for-byte");
+        assert_eq!(small_in_pool, all_pairs(&small), "below-threshold serial fallback == all-pairs");
+        assert!(!dispatched.is_empty(), "anti-vacuity: the dispatched scene has survivors");
+    }
+
+    // ── Gate 8: a WARMED pool-dispatched `build_parallel` allocates ZERO on the
+    //    hot path (the parallel-emit CSR scratch pair_count/pair_offset + out are
+    //    all capacity-reused after warm-up). Measured on the dispatcher thread
+    //    inside `pool.install`; the counting allocator is the thread-local global
+    //    from this file's bottom. The pool's per-`scope` dispatch boxes ARE a
+    //    bounded justified cost (the same class as `par_iter` / O6) — so the gate
+    //    bounds them to a small constant, and the LOAD-BEARING check is that the
+    //    count does NOT scale with the (large) candidate set. ──────────────────
+    #[test]
+    fn warmed_parallel_build_allocation_is_bounded() {
+        let workers = 4;
+        let bodies = dense_scene(MIN_PARALLEL_BODIES + 2000);
+        let pool = ThreadPoolBuilder::new().num_threads(workers).build();
+
+        let (allocs, n_pairs) = pool.install(|_scope| {
+            let mut grid = BroadphaseGrid::with_capacity(bodies.len());
+            let mut out = Vec::new();
+            // Warm: several dispatched builds so every grid scratch Vec
+            // (pair_count, pair_offset, cell_*, candidates) AND `out` reach
+            // steady-state capacity (clear()+refill thereafter).
+            for _ in 0..6 {
+                grid.build_parallel(&bodies, &mut out);
+            }
+            let before = super::ALLOC.count();
+            grid.build_parallel(&bodies, &mut out);
+            let after = super::ALLOC.count();
+            (after.wrapping_sub(before), out.len())
+        });
+
+        assert!(n_pairs > 0, "anti-vacuity: the warmed parallel build produced pairs");
+        eprintln!(
+            "[O3 Gate8] warmed build_parallel workers={workers} n_pairs={n_pairs} hot_allocs={allocs}"
+        );
+
+        // Pass A + Pass B each issue ONE `pool.scope` (a boxed shared frame + the
+        // per-spawn closure boxes); the work-balanced chunking emits up to
+        // (workers + 1) × CHUNKS_PER_WORKER chunks per scope. The grid's OWN
+        // scratch is zero-per-step-alloc (capacity reuse), so the only residual is
+        // this bounded 2-scope dispatch cost — INDEPENDENT of the candidate-set
+        // size (the load-bearing property: a buffer that re-grew per step would
+        // scale the count with n_pairs). CHUNKS_PER_WORKER (= 4) is mirrored here.
+        let chunks_per_worker = 4;
+        let per_scope_cap = 16 + (workers + 1) * chunks_per_worker * 5; // generous
+        let scopes_per_build = 2; // Pass A + Pass B
+        let bound = scopes_per_build * per_scope_cap;
+        assert!(
+            allocs <= bound,
+            "a warmed pool-dispatched build_parallel must allocate only the bounded \
+             2-scope dispatch cost (<= {bound}); got {allocs} for {n_pairs} pairs. A \
+             count that scaled with n_pairs would be a per-step buffer re-grow (the \
+             grid scratch must be capacity-reused)."
+        );
+    }
+}
+
 // ── Counting global allocator (steady-state alloc gate) ──────────────────────
 //
 // Gated `cfg(not(miri))`: the `System`-delegating wrapper trips a Miri

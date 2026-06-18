@@ -8,6 +8,7 @@
 //! — see [`crate::systems`].
 
 use boyko_macros::Resource;
+use boyko_threadpool::try_with_active_pool;
 use boyko_utils::bit_mask::bit_set_256::BitSet256;
 
 use crate::components::{BodyType, Collider, ColliderShape, RigidBody, RigidBodyMass};
@@ -107,6 +108,31 @@ pub struct PhysicsConfig {
     /// OFF so an un-opted world is byte-identical to the O6 colored solve; enabling
     /// the O7 solve needs `simd_solve == true` (it does NOT follow [`simd`](Self::simd)).
     pub simd_solve: bool,
+    /// Opt into the O3 PARALLEL candidate EMIT in the
+    /// [`BroadphaseGrid`](BroadphaseGrid) (default `false`).
+    ///
+    /// Effective only on the grid broadphase path
+    /// ([`BroadphaseKind::Grid`](BroadphaseKind::Grid)); it is a no-op for the
+    /// shipped all-pairs loop. When `true`,
+    /// [`physics_broadphase`](crate::systems::physics_broadphase) routes the grid
+    /// to [`BroadphaseGrid::build_parallel`](BroadphaseGrid::build_parallel), which
+    /// keeps the CSR build (count + prefix-sum + scatter) and the oversized emit
+    /// SERIAL and byte-identical to O2 but fans the per-cell candidate EMIT (the
+    /// survivor count + emit passes) across the ambient
+    /// [`ThreadPool`](boyko_threadpool::ThreadPool)'s workers via `pool.scope`.
+    /// Distinct workers own DISJOINT cell ranges, so they write disjoint per-cell
+    /// counts (Pass A) and disjoint output sub-ranges (Pass B) — no atomics, no
+    /// locks.
+    ///
+    /// **Bit-identity is the gate:** the parallel emit produces the SAME candidate
+    /// pair MULTISET as O2's serial [`build`](BroadphaseGrid::build) (same pairs,
+    /// same multiplicity) for ANY worker count and ANY cell-range partition — the
+    /// final `(min, max)` sort canonicalizes ORDER, not multiplicity. When `false`
+    /// — or when no pool is attached to the running thread, or the body count is
+    /// below the parallel threshold — the grid runs the O2 serial
+    /// [`build`](BroadphaseGrid::build), byte-identical to O2 (the campaign
+    /// 0%-gate). Toggling it changes performance, never the result.
+    pub parallel_broadphase: bool,
     /// Opt into building the [`ConstraintGraph`] after narrowphase — constraint
     /// islands + greedy graph coloring (plan O4, Decision 2 / Decision 7).
     ///
@@ -232,6 +258,10 @@ impl Default for PhysicsConfig {
             // cohort-batched solve is a pure opt-in speed path with a bit-identical
             // result. Enabling it requires `simd_solve == true` explicitly.
             simd_solve: false,
+            // Default OFF so an un-opted grid world runs the O2 serial `build`,
+            // byte-identical to O2 (the campaign 0%-gate); the parallel emit is a
+            // pure opt-in speed path with a bit-identical pair multiset.
+            parallel_broadphase: false,
             // Default OFF so an un-opted world never builds the constraint graph
             // (the campaign 0%-gate); O4 only PRODUCES the partition — the solve is
             // byte-identical whether on or off.
@@ -310,6 +340,26 @@ pub const MAX_GRID_CELLS: u32 = 1 << 21;
 /// flat-on-one-axis world still has a valid `1 × … ×` grid).
 const MIN_GRID_DIM: u32 = 1;
 
+/// O3 perf knob: how many cell-range chunks to emit per ambient worker lane on the
+/// parallel candidate-emit passes (Pass A count / Pass B emit).
+///
+/// `boyko_threadpool` is a Chase-Lev work-STEALING pool — emitting MORE (and
+/// smaller) chunks than lanes gives every lane several steal-sized tasks so the
+/// scheduler equalizes them (an idle lane steals the next chunk). The chunk COUNT
+/// and SHAPE are pure perf knobs: the candidate pair MULTISET is partition-
+/// independent (distinct chunks own disjoint cell ranges, and a multi-cell pair is
+/// emitted only at its minimum shared cell — a pure function of the two AABBs), so
+/// tuning this changes only WHERE work runs, never the bits.
+const CHUNKS_PER_WORKER: usize = 4;
+
+/// O3 min-work threshold: below this body count the parallel emit's `pool.scope`
+/// dispatch (a boxed shared frame + a boxed closure per spawn) costs more than it
+/// saves, so [`BroadphaseGrid::build_parallel`] runs the emit-SHAPED path at one
+/// chunk (no pool) — bit-identical to the parallel split (the multiset is partition-
+/// independent), changing only WHERE the emit runs. A starting point the tester
+/// benches.
+const MIN_PARALLEL_BODIES: usize = 4096;
+
 /// Uniform spatial grid broadphase, CSR counting-sort (plan O2, Decision 1).
 ///
 /// Replaces the O(n²) all-pairs ITERATION (NOT the feasibility predicate): the
@@ -369,8 +419,19 @@ pub struct BroadphaseGrid {
     /// O2 W1). `select_nth_unstable` reorders this in place — that is why it is a
     /// throwaway scratch buffer, not read after the median is taken.
     scratch_radii: Vec<f32>,
-    /// Pre-filter candidate pairs (before the sphere-bound test), reused.
+    /// Pre-filter candidate pairs (before the sphere-bound test), reused. Used
+    /// only by the serial [`build`](Self::build); the parallel
+    /// [`build_parallel`](Self::build_parallel) emits feasibility-filtered
+    /// survivors straight into `out`.
     candidates: Vec<(BodyIndex, BodyIndex)>,
+    /// O3 parallel emit (Pass A): per-cell SURVIVING-pair count (the count of
+    /// within-cell pairs `(i, j)` with `min_shared_cell == c && feasible`),
+    /// `len == n_cells`. Reused (clear + resize each parallel build).
+    pair_count: Vec<u32>,
+    /// O3 parallel emit: exclusive prefix-sum of `pair_count`, `len == n_cells + 1`
+    /// — so `pair_offset[c]..pair_offset[c + 1]` is cell `c`'s contiguous out
+    /// sub-range and `pair_offset[n_cells]` is the total survivor count. Reused.
+    pair_offset: Vec<u32>,
     /// World-space origin of cell `(0, 0, 0)` (the AABB min corner).
     origin: Vec3,
     /// Reciprocal of the cell edge length, so a coordinate maps to a cell index by
@@ -393,6 +454,11 @@ impl BroadphaseGrid {
             oversized: Vec::with_capacity(capacity),
             scratch_radii: Vec::with_capacity(capacity),
             candidates: Vec::with_capacity(capacity),
+            // The parallel-emit CSR scratch grows on the first parallel build to the
+            // live cell count and reuses that capacity thereafter (like every other
+            // cell-indexed buffer here); a fresh `Vec` is the cheap first reserve.
+            pair_count: Vec::new(),
+            pair_offset: Vec::new(),
             origin: Vec3::ZERO,
             inv_cell: 1.0,
             dims: [1, 1, 1],
@@ -598,13 +664,48 @@ impl BroadphaseGrid {
     /// capacity-reused — no per-step heap allocation once warmed.
     pub fn build(&mut self, bodies: &[BodyState], out: &mut Vec<(BodyIndex, BodyIndex)>) {
         out.clear();
-        self.oversized.clear();
         self.candidates.clear();
 
         let n = bodies.len();
         if n == 0 {
+            self.oversized.clear();
             return;
         }
+
+        // (1–4) AABB + cell-size proxy, count, prefix-sum, scatter (the CSR build).
+        self.build_csr(bodies);
+
+        // (5) Candidate emit: per cell, all-pairs within its (small) body slice,
+        // deduped so a pair sharing ≥ 2 cells emits only at its MINIMUM shared
+        // cell; then each oversized body vs every body.
+        self.emit_cell_candidates(bodies);
+        self.emit_oversized_candidates(bodies, n);
+
+        // (6) Feasibility filter (the SAME sphere-bound predicate as all-pairs) +
+        // sort by (min, max). Bit-identical to the all-pairs output set.
+        for &(a, b) in &self.candidates {
+            let ia = a.0 as usize;
+            let ib = b.0 as usize;
+            if Self::feasible(&bodies[ia], &bodies[ib]) {
+                out.push((a, b));
+            }
+        }
+        out.sort_unstable();
+    }
+
+    /// The serial CSR build shared by [`build`](Self::build) and
+    /// [`build_parallel`](Self::build_parallel) (plan O2 steps 1–4): recompute the
+    /// grid geometry, count bodies per cell (routing oversized bodies to the escape
+    /// hatch), exclusive-prefix-sum the counts into `cell_start`, then scatter rows
+    /// into `cell_bodies` in dense-row order.
+    ///
+    /// Extracted VERBATIM from the original [`build`](Self::build) so the two paths'
+    /// CSR (and thus `cell_bodies`) is byte-identical by construction — the O3 scope
+    /// decision rests on this. Clears `oversized` first; the caller clears `out` /
+    /// any candidate buffer. `bodies` must be non-empty (the caller early-returns on
+    /// an empty world).
+    fn build_csr(&mut self, bodies: &[BodyState]) {
+        self.oversized.clear();
 
         // (1) AABB + closed-form cell-size proxy.
         self.recompute_geometry(bodies);
@@ -667,23 +768,6 @@ impl BroadphaseGrid {
                 }
             }
         }
-
-        // (5) Candidate emit: per cell, all-pairs within its (small) body slice,
-        // deduped so a pair sharing ≥ 2 cells emits only at its MINIMUM shared
-        // cell; then each oversized body vs every body.
-        self.emit_cell_candidates(bodies);
-        self.emit_oversized_candidates(bodies, n);
-
-        // (6) Feasibility filter (the SAME sphere-bound predicate as all-pairs) +
-        // sort by (min, max). Bit-identical to the all-pairs output set.
-        for &(a, b) in &self.candidates {
-            let ia = a.0 as usize;
-            let ib = b.0 as usize;
-            if Self::feasible(&bodies[ia], &bodies[ib]) {
-                out.push((a, b));
-            }
-        }
-        out.sort_unstable();
     }
 
     /// `true` when an AABB cell range spans more than [`MAX_CELL_SPAN`] cells on
@@ -791,6 +875,429 @@ impl BroadphaseGrid {
         self.cell_index([ox_lo, oy_lo, oz_lo])
     }
 
+    /// Counts the SURVIVING within-cell candidate pairs of cell `cell` (plan O3
+    /// Pass A): the within-cell all-pairs `(i, j)` (`i < j` in the row-sorted slice)
+    /// that the cell-emit dedup keys to THIS cell AND that pass the sphere-bound
+    /// feasibility predicate.
+    ///
+    /// Walks cell `cell`'s `cell_bodies[cell_start[c]..cell_start[c + 1]]` slice in
+    /// the SAME `for p { for q in p+1.. }` nesting as the serial
+    /// [`emit_cell_candidates`](Self::emit_cell_candidates), applying the LITERAL
+    /// [`min_shared_cell`](Self::min_shared_cell)`== cell` dedup AND the LITERAL
+    /// [`feasible`](Self::feasible) filter (the feasibility filter is FOLDED into the
+    /// count, so the count equals the number of survivors
+    /// [`emit_cell_pairs`](Self::emit_cell_pairs) writes — the C2 coupling). The two
+    /// helpers MUST stay in lock-step: same predicates, same order, so the parallel
+    /// emit's multiset matches O2's serial `build` bit-for-bit (float
+    /// non-associativity makes re-deriving the predicate inline unsound — they call
+    /// the one literal source).
+    fn count_cell_pairs(&self, cell: u32, bodies: &[BodyState]) -> u32 {
+        let c = cell as usize;
+        let start = self.cell_start[c] as usize;
+        let end = self.cell_start[c + 1] as usize;
+        let slice = &self.cell_bodies[start..end];
+        let mut count = 0u32;
+        for p in 0..slice.len() {
+            let i = slice[p];
+            for &j in &slice[p + 1..] {
+                let a = &bodies[i as usize];
+                let b = &bodies[j as usize];
+                if self.min_shared_cell(a, b) == cell && Self::feasible(a, b) {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
+    /// Emits the SURVIVING within-cell candidate pairs of cell `cell` into
+    /// `out_slice`, returning the number written (plan O3 Pass B).
+    ///
+    /// The counterpart of [`count_cell_pairs`](Self::count_cell_pairs): it walks the
+    /// SAME slice in the SAME order, applies the SAME literal
+    /// [`min_shared_cell`](Self::min_shared_cell) dedup and
+    /// [`feasible`](Self::feasible) filter, and writes each survivor `(min, max)`
+    /// pair into `out_slice[0..]` in slice order. Because the predicates and order
+    /// match `count_cell_pairs` exactly, the returned count equals this cell's
+    /// pre-counted survivor total — the caller debug-asserts it fills its whole sub-
+    /// range (the C2 coupling). `out_slice` must be at least that long.
+    fn emit_cell_pairs(
+        &self,
+        cell: u32,
+        bodies: &[BodyState],
+        out_slice: &mut [(BodyIndex, BodyIndex)],
+    ) -> usize {
+        let c = cell as usize;
+        let start = self.cell_start[c] as usize;
+        let end = self.cell_start[c + 1] as usize;
+        let slice = &self.cell_bodies[start..end];
+        let mut w = 0usize;
+        for p in 0..slice.len() {
+            let i = slice[p];
+            for &j in &slice[p + 1..] {
+                let a = &bodies[i as usize];
+                let b = &bodies[j as usize];
+                if self.min_shared_cell(a, b) == cell && Self::feasible(a, b) {
+                    out_slice[w] = (BodyIndex(i), BodyIndex(j));
+                    w += 1;
+                }
+            }
+        }
+        w
+    }
+
+    /// The PARALLEL candidate-emit grid build (plan O3, scope b): the CSR build
+    /// (count + prefix-sum + scatter) and the oversized emit stay SERIAL and
+    /// byte-identical to O2's [`build`](Self::build), but the per-cell candidate
+    /// EMIT (Pass A count + Pass B emit) is fanned across the ambient
+    /// [`ThreadPool`](boyko_threadpool::ThreadPool)'s workers over DISJOINT cell-
+    /// range chunks via `pool.scope`.
+    ///
+    /// The output candidate pair MULTISET is bit-identical to O2's serial `build`
+    /// (same pairs, same multiplicity) for ANY worker count and ANY cell-range
+    /// partition: distinct workers own disjoint cell ranges, the cell-emit dedup
+    /// keys each multi-cell pair to its minimum shared cell (a pure function of the
+    /// two AABBs, independent of which worker visits it), and the final
+    /// `out.sort_unstable()` canonicalizes ORDER.
+    ///
+    /// **Production shortcut.** When there is no ambient pool, OR the pool offers a
+    /// single effective lane (`num_threads() + 1 == 1`, i.e. zero worker threads),
+    /// OR the body count is below [`MIN_PARALLEL_BODIES`], this delegates straight
+    /// to the O2 serial [`build`](Self::build) and returns — a single effective lane
+    /// is pure serial work, so the emit-shaped multi-pass dispatch would only add
+    /// overhead (the W=1 regression). The parallel-shaped path is dispatched ONLY
+    /// when there are `>= 2` lanes, `n >= MIN_PARALLEL_BODIES`, and a pool is
+    /// present. Either way the result is byte-identical to `build`.
+    pub fn build_parallel(&mut self, bodies: &[BodyState], out: &mut Vec<(BodyIndex, BodyIndex)>) {
+        let n = bodies.len();
+
+        // Shortcut: below the parallel threshold (or an empty world) → the O2 serial
+        // path. `build` clears `out`/`oversized` and runs the verbatim O2 emit.
+        if n < MIN_PARALLEL_BODIES {
+            self.build(bodies, out);
+            return;
+        }
+
+        // Dispatch the parallel-shaped path ONLY when a pool offers >= 2 effective
+        // lanes; a single lane (no worker threads) is pure serial work, so route to
+        // the O2 serial `build` (no shaped-path overhead — eliminates the W=1
+        // regression). When no pool is attached, `try_with_active_pool` returns
+        // `None` and we fall through to the serial `build`.
+        let dispatched = try_with_active_pool(|pool| {
+            let lanes = pool.num_threads() + 1;
+            if lanes < 2 {
+                return false;
+            }
+            // CSR build first (serial, byte-identical to O2), then fan the emit.
+            out.clear();
+            self.build_csr(bodies);
+            self.emit_passes(bodies, out, lanes * CHUNKS_PER_WORKER, Some(pool));
+            true
+        });
+        if dispatched != Some(true) {
+            self.build(bodies, out);
+        }
+    }
+
+    /// Runs the O3 multi-pass shaped emit (Pass A count → prefix-sum → Pass B emit
+    /// → serial oversized → single final serial sort) over `n_chunks`
+    /// cell-range chunks. When `pool` is `Some`, the count and emit passes are
+    /// dispatched across its workers via `pool.scope`; when `None`, the same passes
+    /// run as a single-threaded loop over the chunks.
+    ///
+    /// The chunk count and shape are perf knobs only — the candidate multiset is
+    /// partition-independent (see [`build_parallel`](Self::build_parallel)), so any
+    /// `n_chunks ∈ [1, n_cells]` and either dispatch mode yields the identical pair
+    /// set after the final sort.
+    fn emit_passes(
+        &mut self,
+        bodies: &[BodyState],
+        out: &mut Vec<(BodyIndex, BodyIndex)>,
+        n_chunks: usize,
+        pool: Option<&boyko_threadpool::PoolInner>,
+    ) {
+        let n_cells = self.n_cells();
+        let n_chunks = n_chunks.clamp(1, n_cells.max(1));
+
+        // Pass A: per-cell surviving-pair COUNT into `pair_count` (disjoint slots).
+        self.pair_count.clear();
+        self.pair_count.resize(n_cells, 0);
+        // Read-only grid + bodies + the write base, captured as raw pointers so a
+        // worker never holds an outer `&self`/`&mut self` borrow across the scope
+        // (the Phase 9.3c bare-pointer discipline). The chunk cell ranges are
+        // disjoint, so the `pair_count` slots written are pairwise disjoint.
+        let pass_a_ptrs = EmitPtrs {
+            grid: self as *const BroadphaseGrid,
+            bodies: bodies.as_ptr(),
+            bodies_len: bodies.len(),
+            pair_count: self.pair_count.as_mut_ptr(),
+            pair_offset: core::ptr::null(),
+            out_base: core::ptr::null_mut(),
+        };
+        Self::run_cell_chunks(n_cells, n_chunks, pool, |c_lo, c_hi| {
+            // SAFETY: `[c_lo, c_hi)` is one chunk's disjoint cell range; the worker
+            //   reads only the read-only grid (`&*grid`, reborrowed fresh — no outer
+            //   protector) + `bodies`, and writes only `pair_count[c]` for c in this
+            //   chunk's range. Distinct chunks own disjoint cell ranges, so no two
+            //   workers write the same `pair_count` slot, and the read-only data is
+            //   shared. The pointees outlive the scope (the `pool.scope` Drop joins
+            //   every task before this method returns).
+            let grid = unsafe { &*pass_a_ptrs.grid };
+            let body_slice = unsafe { pass_a_ptrs.bodies_slice() };
+            for c in c_lo..c_hi {
+                let cnt = grid.count_cell_pairs(c as u32, body_slice);
+                // SAFETY: `c < n_cells` (chunk ranges partition `[0, n_cells)`), so
+                //   `pair_count + c` is in bounds; this chunk uniquely owns slot `c`.
+                unsafe { *pass_a_ptrs.pair_count.add(c) = cnt };
+            }
+        });
+
+        // Serial exclusive prefix-sum pair_count → pair_offset (len n_cells + 1);
+        // m = pair_offset[n_cells] is the total surviving within-cell pair count.
+        self.pair_offset.clear();
+        self.pair_offset.reserve(n_cells + 1);
+        let mut acc = 0u32;
+        self.pair_offset.push(0);
+        for &c in &self.pair_count {
+            acc += c;
+            self.pair_offset.push(acc);
+        }
+        let m = acc as usize;
+
+        // Serial oversized emit (reuse the verbatim O2 emitter) into `candidates`,
+        // then feasibility-filter it — counted now so `out` can be sized once.
+        self.candidates.clear();
+        self.emit_oversized_candidates(bodies, bodies.len());
+        let oversized_reserve = self.candidates.len();
+
+        // Size `out` once for the m survivors + the (≤ oversized_reserve) feasible
+        // oversized pairs. The survivor region is filled by Pass B; the oversized
+        // region is appended serially after.
+        out.clear();
+        out.resize(m + oversized_reserve, (BodyIndex(0), BodyIndex(0)));
+
+        // Pass B: emit each cell's survivors into its `out[pair_offset[c]..]` sub-
+        // range (disjoint per chunk), UNSORTED (cell-major). The single final serial
+        // `out.sort_unstable()` below canonicalizes the order — no per-chunk block-
+        // sort (it would be pure redundant work given the final full sort). Chunk
+        // boundaries are cut on EQUAL counted-pair runs (work-balanced via
+        // `pair_offset`).
+        let pass_b_ptrs = EmitPtrs {
+            grid: self as *const BroadphaseGrid,
+            bodies: bodies.as_ptr(),
+            bodies_len: bodies.len(),
+            pair_count: core::ptr::null_mut(),
+            pair_offset: self.pair_offset.as_ptr(),
+            out_base: out.as_mut_ptr(),
+        };
+        Self::run_balanced_cell_chunks(n_cells, n_chunks, pass_b_ptrs, pool, |c_lo, c_hi| {
+            // SAFETY: `[c_lo, c_hi)` is one chunk's disjoint cell range. The worker
+            //   reads only the read-only grid (`&*grid`, fresh reborrow) + `bodies`
+            //   + `pair_offset` (read), and writes only `out[pair_offset[c_lo]..
+            //   pair_offset[c_hi])`. Distinct chunks own disjoint, contiguous out
+            //   sub-ranges (`pair_offset` is monotone, the chunks partition the
+            //   cells), so no two workers write the same `out` element; the read-
+            //   only data is shared. The pointees outlive the scope (`pool.scope`
+            //   Drop joins every task before this method returns).
+            let grid = unsafe { &*pass_b_ptrs.grid };
+            let body_slice = unsafe { pass_b_ptrs.bodies_slice() };
+            for c in c_lo..c_hi {
+                // SAFETY: `c < n_cells`, so `c` and `c + 1` are valid `pair_offset`
+                //   indices; `[lo, hi)` lies within this chunk's owned out sub-range.
+                let lo = unsafe { pass_b_ptrs.pair_offset_at(c) };
+                let hi = unsafe { pass_b_ptrs.pair_offset_at(c + 1) };
+                if lo == hi {
+                    continue;
+                }
+                // SAFETY: `[lo, hi)` is this cell's disjoint, in-bounds out slot
+                //   range (within the chunk's sub-range, within `[0, m)`); the cell
+                //   uniquely owns it. The pointee region is live for the scope.
+                let cell_out = unsafe { pass_b_ptrs.out_subslice(lo, hi) };
+                let written = grid.emit_cell_pairs(c as u32, body_slice, cell_out);
+                debug_assert_eq!(
+                    written,
+                    hi - lo,
+                    "invariant (C2): cell {c} emitted exactly its pre-counted survivor total"
+                );
+            }
+        });
+
+        // Serial oversized emit appended after the m survivors (W3, feasibility-
+        // filtered with the SAME predicate). `candidates` already holds this build's
+        // oversized pairs (the verbatim O2 emitter above); filter into out[m..].
+        let mut w = m;
+        for &(a, b) in &self.candidates {
+            let ia = a.0 as usize;
+            let ib = b.0 as usize;
+            if Self::feasible(&bodies[ia], &bodies[ib]) {
+                out[w] = (a, b);
+                w += 1;
+            }
+        }
+        // Truncate any oversized slots that the feasibility filter dropped (the
+        // reserve was an upper bound).
+        out.truncate(w);
+
+        // Single final serial sort over the whole `out` buffer (cell survivors +
+        // oversized tail) — byte-identical to O2's / the pre-merge O3's final
+        // `out.sort_unstable()`. All survivor keys are UNIQUE (the `min_shared_cell`
+        // dedup) and disjoint from the distinct oversized pairs, so the sorted
+        // permutation is unique: the result is the same multiset in the same
+        // canonical (min, max) order as the serial `build`.
+        out.sort_unstable();
+
+        debug_assert!(
+            out.windows(2).all(|p| p[0] <= p[1]),
+            "invariant (O3): the sorted output is non-decreasing (== O2's sort)"
+        );
+        debug_assert_eq!(
+            out.len(),
+            w,
+            "invariant (O3): output length == m survivors + feasible oversized"
+        );
+    }
+
+    /// Runs `body` over `n_chunks` CONTIGUOUS, EQUAL-CELL-count chunks of
+    /// `[0, n_cells)` (plan O3 Pass A chunking). When `pool` is `Some`, each chunk
+    /// is a `pool.scope` task; when `None`, they run serially on the calling thread.
+    ///
+    /// `body(c_lo, c_hi)` is invoked once per chunk with that chunk's half-open cell
+    /// range. The closure must be `Send + Sync` (it is dispatched by reference into
+    /// every task) and own only `Copy`/`Send` captures (the parallel-emit raw-
+    /// pointer wrappers).
+    fn run_cell_chunks<F>(
+        n_cells: usize,
+        n_chunks: usize,
+        pool: Option<&boyko_threadpool::PoolInner>,
+        body: F,
+    ) where
+        F: Fn(usize, usize) + Sync + Send,
+    {
+        let per = n_cells.div_ceil(n_chunks).max(1);
+        match pool {
+            Some(pool) => {
+                pool.scope(|scope| {
+                    let mut c_lo = 0usize;
+                    while c_lo < n_cells {
+                        let c_hi = (c_lo + per).min(n_cells);
+                        let body = &body;
+                        scope.spawn(move || body(c_lo, c_hi));
+                        c_lo = c_hi;
+                    }
+                });
+            }
+            None => {
+                let mut c_lo = 0usize;
+                while c_lo < n_cells {
+                    let c_hi = (c_lo + per).min(n_cells);
+                    body(c_lo, c_hi);
+                    c_lo = c_hi;
+                }
+            }
+        }
+    }
+
+    /// Runs `body` over `n_chunks` CONTIGUOUS chunks of `[0, n_cells)` cut on EQUAL
+    /// COUNTED-PAIR runs — work-balanced via the `pair_offset` prefix-sum (plan O3
+    /// Pass B chunking). When `pool` is `Some`, each chunk is a `pool.scope` task;
+    /// when `None`, they run serially.
+    ///
+    /// The chunk boundaries are derived by reading `pair_offset` through `ptrs`' raw
+    /// base (`EmitPtrs::pair_offset_at`) — the SAME source the workers read — so no
+    /// `&[u32]` borrow into the grid is held across the `pool.scope` frame (the Phase
+    /// 9.3c TB-clean discipline, matching `solve_color_parallel` / `group_start_at`).
+    ///
+    /// `target` is the per-chunk survivor quota (`m / n_chunks`, rounded up); the
+    /// dispatch loop grows a chunk by whole cells until its accumulated survivor run
+    /// reaches `target` or the last cell is consumed — a contiguous cell range maps
+    /// to a contiguous out sub-range. Every chunk includes ≥ 1 cell (progress).
+    fn run_balanced_cell_chunks<F>(
+        n_cells: usize,
+        n_chunks: usize,
+        ptrs: EmitPtrs,
+        pool: Option<&boyko_threadpool::PoolInner>,
+        body: F,
+    ) where
+        F: Fn(usize, usize) + Sync + Send,
+    {
+        // Read chunk boundaries through the SAME raw `pair_offset` base the workers
+        // use (`EmitPtrs::pair_offset_at`), so no `&[u32]` borrow into the grid is
+        // held across the `pool.scope` frame — the Phase 9.3c TB-clean discipline,
+        // matching `ColoredSoftStepSolver::solve_color_parallel` / `group_start_at`.
+        //
+        // SAFETY: `pair_offset` was resized to `n_cells + 1` valid entries by the
+        //   serial prefix-sum BEFORE this call, so every index in `[0, n_cells]` is
+        //   in bounds; the buffer is read-only for the whole Pass B scope (written
+        //   only by that serial prefix-sum, which has already completed) and the base
+        //   is non-null (the Pass B wrapper). A plain `*const u32` read forms no
+        //   reference into the grid.
+        let m = unsafe { ptrs.pair_offset_at(n_cells) };
+        let target = m.div_ceil(n_chunks).max(1);
+        // Closure that advances a chunk: from `c_lo`, grow by whole cells until the
+        // accumulated survivor run reaches `target` or `n_cells` is reached.
+        let next_hi = |c_lo: usize| -> usize {
+            // SAFETY: `c_lo < n_cells` (loop guard below), so `c_lo` and each `c_hi`
+            //   visited (`<= n_cells`) are valid `pair_offset` indices; same read-only
+            //   base + lifetime invariant as the `m` read above.
+            let base = unsafe { ptrs.pair_offset_at(c_lo) };
+            let mut c_hi = c_lo + 1;
+            while c_hi < n_cells && (unsafe { ptrs.pair_offset_at(c_hi) } - base) < target {
+                c_hi += 1;
+            }
+            c_hi
+        };
+        match pool {
+            Some(pool) => {
+                pool.scope(|scope| {
+                    let mut c_lo = 0usize;
+                    while c_lo < n_cells {
+                        let c_hi = next_hi(c_lo);
+                        let body = &body;
+                        scope.spawn(move || body(c_lo, c_hi));
+                        c_lo = c_hi;
+                    }
+                });
+            }
+            None => {
+                let mut c_lo = 0usize;
+                while c_lo < n_cells {
+                    let c_hi = next_hi(c_lo);
+                    body(c_lo, c_hi);
+                    c_lo = c_hi;
+                }
+            }
+        }
+    }
+
+    /// Test-only entry that runs the FULL multi-pass shaped emit path at a caller-
+    /// forced `n_chunks`, single-threaded (NO pool) so Miri / proptests can exercise
+    /// the restructured Pass A / prefix-sum / Pass B `pair_offset` arithmetic at
+    /// `W ∈ {1, 2, 4, …}` without an attached thread pool (plan O3 W2 anti-vacuity).
+    ///
+    /// It deliberately runs the SHAPED path (serial CSR + Pass A + prefix + Pass B +
+    /// oversized + single final serial sort) — it must NOT delegate to
+    /// [`build`](Self::build), so the gate genuinely covers the parallel-emit code.
+    /// The forced chunk count is clamped to `[1, n_cells]` like the live dispatch.
+    // `dead_code`: this is the W2 anti-vacuity entry the tester's not-yet-written
+    // `{1, 2, 4}`-chunk gate tests call; it is intentionally unreferenced until then.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn build_emit_shaped_forced(
+        &mut self,
+        bodies: &[BodyState],
+        out: &mut Vec<(BodyIndex, BodyIndex)>,
+        n_chunks: usize,
+    ) {
+        out.clear();
+        let n = bodies.len();
+        if n == 0 {
+            self.oversized.clear();
+            return;
+        }
+        self.build_csr(bodies);
+        self.emit_passes(bodies, out, n_chunks, None);
+    }
+
     /// The number of bodies classified oversized in the most recent
     /// [`build`](Self::build) — a diagnostic accessor over the private `oversized`
     /// escape-hatch list.
@@ -803,6 +1310,102 @@ impl BroadphaseGrid {
         self.oversized.len()
     }
 }
+
+/// `Send` + `Sync`-marked raw pointers to the O3 parallel-emit working set,
+/// dispatched into the per-cell-chunk count / emit closures.
+///
+/// Raw pointers are `!Send`/`!Sync` by default; this wrapper lets a worker task
+/// capture them. The fields are **private** and reached only through the `&self`
+/// accessor methods so a closure capturing the wrapper captures the WHOLE struct —
+/// never a bare `*mut`/`*const` field directly (Rust 2021+ disjoint capture would
+/// otherwise see the bare pointer and reject the closure as `!Send`). This mirrors
+/// `ColorSolvePtrs` in the colored solver (the Phase 9.3c TB-clean idiom).
+///
+/// The read-only `grid` is reborrowed `&*grid` FRESH inside each worker (no outer
+/// `&self`/`&mut self` borrow is held across the `pool.scope` frame), so the
+/// shared reads never conflict with the disjoint raw-pointer writes through
+/// `pair_count` (Pass A) / `out_base` (Pass B).
+#[derive(Clone, Copy)]
+struct EmitPtrs {
+    /// Read-only base of the live [`BroadphaseGrid`] (its CSR + geometry), reborrowed
+    /// `&*grid` fresh in each worker for the `&self` survivor-helper calls.
+    grid: *const BroadphaseGrid,
+    /// Read-only base of the `bodies` snapshot slice.
+    bodies: *const BodyState,
+    /// Length of the `bodies` slice.
+    bodies_len: usize,
+    /// Pass A write base of `pair_count` (one disjoint slot per owned cell); null on
+    /// the Pass B wrapper.
+    pair_count: *mut u32,
+    /// Read-only base of `pair_offset` (the survivor prefix-sum) for the Pass B out
+    /// sub-range bounds; null on the Pass A wrapper.
+    pair_offset: *const u32,
+    /// Pass B write base of `out` (one disjoint contiguous sub-range per owned cell
+    /// chunk); null on the Pass A wrapper.
+    out_base: *mut (BodyIndex, BodyIndex),
+}
+
+impl EmitPtrs {
+    /// Reborrows the read-only `bodies` snapshot as a shared slice.
+    ///
+    /// # Safety
+    /// `bodies`/`bodies_len` must name a live `[BodyState]` that outlives the
+    /// reborrow. Upheld by [`BroadphaseGrid::emit_passes`]: the pointer names the
+    /// caller's `bodies` argument, live for the whole `pool.scope` frame.
+    #[inline]
+    unsafe fn bodies_slice<'a>(&self) -> &'a [BodyState] {
+        // SAFETY: forwarded to the caller; see method doc.
+        unsafe { core::slice::from_raw_parts(self.bodies, self.bodies_len) }
+    }
+
+    /// Reads `pair_offset[c]` via the raw pointer (no `&[u32]` borrow into the grid).
+    ///
+    /// # Safety
+    /// `c` must be a valid index into the live `pair_offset` column (`c <= n_cells`)
+    /// and `pair_offset` must be non-null (the Pass B wrapper). Upheld by the Pass B
+    /// dispatch, which reads only cell indices within `[0, n_cells]`.
+    #[inline]
+    unsafe fn pair_offset_at(&self, c: usize) -> usize {
+        // SAFETY: `c` is in range and `pair_offset` is the live base per the method
+        //   contract; a plain `*const u32` read forms no reference into the grid.
+        unsafe { *self.pair_offset.add(c) as usize }
+    }
+
+    /// Reborrows `out[lo..hi]` as a mutable slice for `'a`.
+    ///
+    /// # Safety
+    /// `out_base` must be non-null (the Pass B wrapper) and `[lo, hi)` must be an in-
+    /// bounds sub-range of the live `out` buffer that NO concurrent worker also
+    /// reborrows. Upheld by [`BroadphaseGrid::emit_passes`]: distinct chunks own
+    /// disjoint, contiguous out sub-ranges and each cell owns a disjoint slot range
+    /// within its chunk.
+    #[inline]
+    unsafe fn out_subslice<'a>(&self, lo: usize, hi: usize) -> &'a mut [(BodyIndex, BodyIndex)] {
+        // SAFETY: forwarded to the caller; see method doc. `lo <= hi` and the range
+        //   is in bounds + disjoint across workers, so the reborrow is unique.
+        unsafe { core::slice::from_raw_parts_mut(self.out_base.add(lo), hi - lo) }
+    }
+}
+
+// SAFETY: the pointers name the read-only `BroadphaseGrid` + `bodies` snapshot and
+//   the `pair_count` / `out` buffers borrowed by `emit_passes` for the whole
+//   `pool.scope` frame, whose Drop blocks (work-stealing join) until every worker
+//   that captured the wrapper has completed — so every pointee outlives every task
+//   body (no use-after-free). The soundness of the concurrent accesses rests on
+//   DISJOINTNESS, stated in full at each spawn site:
+//     * Pass A: distinct chunks own DISJOINT cell ranges, so the `pair_count` slots
+//       they write are pairwise disjoint; the grid + bodies are read-only (shared
+//       `&*grid` reborrowed fresh per worker — no outer protector).
+//     * Pass B: distinct chunks own DISJOINT cell ranges, hence DISJOINT contiguous
+//       out sub-ranges `[pair_offset[c_lo]..pair_offset[c_hi])` (`pair_offset` is
+//       monotone), so no two workers write the same `out` element; `pair_offset` /
+//       grid / bodies are read-only.
+//   No two tasks touch the same byte mutably, and the wrapper has no interior
+//   mutability, so a shared `&` to it (the scope closure's capture) is trivially
+//   safe — hence both `Send` (cross-thread move into a task) and `Sync` (shared by
+//   the spawn loop) hold.
+unsafe impl Send for EmitPtrs {}
+unsafe impl Sync for EmitPtrs {}
 
 /// Dense manifold buffer produced by narrowphase, consumed by the solver
 /// (plan D1/D4).
@@ -2204,5 +2807,412 @@ mod tests {
         assert_eq!(a.n_islands(), 1, "the chain is one connected island");
         assert_eq!(a.n_colors(), 2, "a path graph is 2-colorable");
         assert_coloring_invariant(&a, &manifolds, &dyn5);
+    }
+
+    // ── O3 parallel candidate emit — shaped-path gates (in-lib) ───────────────
+    //
+    // These cover the multi-pass SHAPED emit (`build_emit_shaped_forced`) at
+    // forced `n_chunks ∈ {1, 2, 4, 8}`, single-threaded (NO pool), so they:
+    //   * exercise the restructured Pass A count / serial prefix-sum / Pass B
+    //     `pair_offset` arithmetic + the `EmitPtrs` disjoint raw writes,
+    //   * run under `cargo +nightly miri test` (the pool spin is Miri-intractable;
+    //     the shaped path needs no pool — `pool = None`),
+    //   * prove byte-identity to the O2 serial `build` AND non-vacuity (the W2
+    //     anti-vacuity bar: it ran the shaped passes, not a `build` delegate).
+    // The pool-driven `build_parallel` native MT gate + the dense criterion live
+    // in `tests/broadphase_grid.rs` / `benches/broadphase.rs` (separate crates —
+    // `build_emit_shaped_forced` is `#[cfg(test)] pub(crate)`, reachable ONLY here).
+    mod o3_shaped {
+        use super::*;
+        use crate::components::ColliderShape;
+
+        /// The forced chunk counts the shaped-path gates sweep (W ∈ {1, 2, 4, 8}).
+        const FORCED_CHUNKS: [usize; 4] = [1, 2, 4, 8];
+
+        /// A `BodyState` carrying only the broadphase-relevant fields.
+        fn sphere(position: Vec3, radius: f32) -> BodyState {
+            BodyState {
+                position,
+                shape: ColliderShape::Sphere { radius },
+                ..Default::default()
+            }
+        }
+
+        fn boxx(position: Vec3, half: Vec3) -> BodyState {
+            BodyState {
+                position,
+                shape: ColliderShape::Box { half_extents: half },
+                ..Default::default()
+            }
+        }
+
+        /// The reference all-pairs broadphase — the LITERAL production predicate
+        /// (same operand order, same `(min, max)` emission, already sorted).
+        fn all_pairs(bodies: &[BodyState]) -> Vec<(BodyIndex, BodyIndex)> {
+            let mut pairs = Vec::new();
+            let n = bodies.len();
+            for i in 0..n {
+                for j in (i + 1)..n {
+                    let bound =
+                        body_bounding_radius(&bodies[i]) + body_bounding_radius(&bodies[j]);
+                    let delta = bodies[j].position - bodies[i].position;
+                    if delta.length_squared() <= bound * bound {
+                        pairs.push((BodyIndex(i as u32), BodyIndex(j as u32)));
+                    }
+                }
+            }
+            pairs
+        }
+
+        /// The O2 serial `build` output for `bodies` (the bit-identity reference).
+        fn serial_build(bodies: &[BodyState]) -> Vec<(BodyIndex, BodyIndex)> {
+            let mut grid = BroadphaseGrid::with_capacity(bodies.len());
+            let mut out = Vec::new();
+            grid.build(bodies, &mut out);
+            out
+        }
+
+        /// The shaped-path output at a forced `n_chunks` (single-threaded, no pool).
+        fn shaped_build(bodies: &[BodyState], n_chunks: usize) -> Vec<(BodyIndex, BodyIndex)> {
+            let mut grid = BroadphaseGrid::with_capacity(bodies.len());
+            let mut out = Vec::new();
+            grid.build_emit_shaped_forced(bodies, &mut out, n_chunks);
+            out
+        }
+
+        /// Asserts the shaped path at EVERY forced chunk count is byte-for-byte
+        /// equal to the O2 serial `build` AND to all-pairs (same multiset AND
+        /// order — the headline C1/W4 partition-independence gate).
+        fn assert_shaped_eq_serial_and_all_pairs(bodies: &[BodyState]) {
+            let serial = serial_build(bodies);
+            let reference = all_pairs(bodies);
+            assert_eq!(
+                serial, reference,
+                "O2 serial build must equal all-pairs (sanity of the reference)"
+            );
+            for w in FORCED_CHUNKS {
+                let shaped = shaped_build(bodies, w);
+                assert_eq!(
+                    shaped, serial,
+                    "shaped emit at n_chunks={w} must be byte-identical to O2 serial build"
+                );
+            }
+        }
+
+        // ── A tiny xorshift PRNG: a self-contained seeded scene generator so the
+        //    in-lib gate needs no proptest harness (proptest's strategy runner is
+        //    heavier here than a deterministic 1000-scene sweep). ──────────────
+        struct Rng(u64);
+        impl Rng {
+            fn new(seed: u64) -> Self {
+                // Avoid the zero fixed-point of xorshift.
+                Rng(seed | 1)
+            }
+            fn next_u64(&mut self) -> u64 {
+                let mut x = self.0;
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                self.0 = x;
+                x
+            }
+            /// A uniform `f32` in `[lo, hi)`.
+            fn range(&mut self, lo: f32, hi: f32) -> f32 {
+                let u = (self.next_u64() >> 40) as f32 / (1u64 << 24) as f32; // [0, 1)
+                lo + u * (hi - lo)
+            }
+            fn below(&mut self, n: usize) -> usize {
+                (self.next_u64() % n as u64) as usize
+            }
+        }
+
+        /// A seeded DENSE random scene: 1..=40 mixed sphere/box bodies in a
+        /// bounded box so clusters AND gaps occur (the same domain as the O2
+        /// `grid_equals_all_pairs` proptest, deterministically seeded).
+        fn random_scene(seed: u64) -> Vec<BodyState> {
+            let mut rng = Rng::new(seed);
+            let n = 1 + rng.below(40);
+            (0..n)
+                .map(|_| {
+                    let p = Vec3::new(
+                        rng.range(-20.0, 20.0),
+                        rng.range(-20.0, 20.0),
+                        rng.range(-20.0, 20.0),
+                    );
+                    if rng.next_u64() & 3 < 2 {
+                        sphere(p, rng.range(0.1, 3.0))
+                    } else {
+                        boxx(
+                            p,
+                            Vec3::new(
+                                rng.range(0.1, 3.0),
+                                rng.range(0.1, 3.0),
+                                rng.range(0.1, 3.0),
+                            ),
+                        )
+                    }
+                })
+                .collect()
+        }
+
+        // ── Gate 1 (shaped slice): {1, 2, 4, 8}-chunk multiset+order bit-identity
+        //    over 1000 seeded dense scenes. The shaped path is partition-
+        //    independent, so EVERY chunk count must reproduce the serial `build`
+        //    and all-pairs output byte-for-byte. (The pool-DISPATCHED leg of
+        //    Gate 1 lives in `tests/broadphase_grid.rs`'s native MT gate.) ──────
+        #[test]
+        fn shaped_emit_bit_identical_to_serial_over_1000_scenes() {
+            for seed in 0..1000u64 {
+                let bodies = random_scene(seed);
+                assert_shaped_eq_serial_and_all_pairs(&bodies);
+            }
+        }
+
+        // ── Gate 2: W=1-shaped == serial AND non-vacuous AND genuinely the shaped
+        //    multi-pass path (not a `build` delegate). ─────────────────────────
+        #[test]
+        fn shaped_w1_equals_serial_and_is_non_vacuous() {
+            // A dense overlapping lattice → a real, multi-cell candidate set.
+            let bodies: Vec<BodyState> = (0..200)
+                .map(|i| {
+                    let t = i as f32;
+                    sphere(
+                        Vec3::new(
+                            (t * 0.21).sin() * 8.0,
+                            (t * 0.13).cos() * 8.0,
+                            (t * 0.37).sin() * 8.0,
+                        ),
+                        0.5,
+                    )
+                })
+                .collect();
+            let serial = serial_build(&bodies);
+            let shaped1 = shaped_build(&bodies, 1);
+            assert_eq!(shaped1, serial, "shaped n_chunks=1 == O2 serial build");
+            assert!(
+                !shaped1.is_empty(),
+                "anti-vacuity: the shaped path emitted pairs (the passes ran, not a no-op)"
+            );
+        }
+
+        // ── Gate 2 (cont.): the shaped path is genuinely MULTI-pass — at
+        //    n_chunks ∈ {2, 4, 8} the work is split across DISTINCT cell-range
+        //    chunks (the `pair_offset` arithmetic), yet the output is unchanged.
+        //    A scene with many cells AND many survivors guarantees the chunk cut
+        //    actually partitions work (anti-vacuity for the parallel-emit code:
+        //    a `build` delegate could not honor `n_chunks`). ────────────────────
+        #[test]
+        fn shaped_multichunk_partitions_work_yet_output_is_invariant() {
+            // A 12³ overlapping lattice: many occupied cells AND many survivors,
+            // so a chunk cut at n_chunks=8 splits the cell range into real,
+            // non-trivial blocks (each emits into its own out sub-range).
+            let mut bodies = Vec::new();
+            for z in 0..12 {
+                for y in 0..12 {
+                    for x in 0..12 {
+                        bodies.push(sphere(
+                            Vec3::new(x as f32 * 0.9, y as f32 * 0.9, z as f32 * 0.9),
+                            0.5,
+                        ));
+                    }
+                }
+            }
+            let serial = serial_build(&bodies);
+            assert!(
+                serial.len() > 100,
+                "anti-vacuity: the lattice yields many survivors ({})",
+                serial.len()
+            );
+            // Every chunk count reproduces the identical output despite different
+            // Pass-A counts / prefix-sum cuts / Pass-B sub-range partitions.
+            for w in [2usize, 4, 8] {
+                let shaped = shaped_build(&bodies, w);
+                assert_eq!(
+                    shaped, serial,
+                    "n_chunks={w} reproduces the serial output (partition-independent)"
+                );
+            }
+        }
+
+        // ── Gate 3: oversized-heavy scene — the SERIAL oversized append leg. ──
+        #[test]
+        fn shaped_oversized_heavy_matches_serial() {
+            // Pack many small bodies (fine cells) + a handful of giants that span
+            // >= MAX_CELL_SPAN cells → the oversized hatch. 16³ = 4096 smalls so
+            // cbrt(n) is large and the median floor keeps cells fine.
+            let mut bodies = Vec::new();
+            let side = 16;
+            for z in 0..side {
+                for y in 0..side {
+                    for x in 0..side {
+                        bodies.push(sphere(
+                            Vec3::new(x as f32 * 0.9, y as f32 * 0.9, z as f32 * 0.9),
+                            0.5,
+                        ));
+                    }
+                }
+            }
+            for k in 0..4 {
+                let f = k as f32;
+                bodies.push(sphere(Vec3::new(f * 2.0 + 1.0, f * 2.0 + 1.0, f * 2.0), 25.0));
+            }
+
+            // Non-vacuity: >= 2 giants land in the hatch (oversized–oversized
+            // dedup AND oversized–normal emit are both exercised).
+            let mut grid = BroadphaseGrid::with_capacity(bodies.len());
+            let mut out = Vec::new();
+            grid.build_emit_shaped_forced(&bodies, &mut out, 4);
+            assert!(
+                grid.oversized_len() >= 2,
+                "size disparity must classify >= 2 bodies oversized (got {})",
+                grid.oversized_len()
+            );
+            // The shaped path's oversized append at every chunk count == serial.
+            assert_shaped_eq_serial_and_all_pairs(&bodies);
+        }
+
+        // ── Gate 4: edge cases via the shaped path at every chunk count. ──────
+        #[test]
+        fn shaped_empty_world() {
+            for w in FORCED_CHUNKS {
+                assert!(
+                    shaped_build(&[], w).is_empty(),
+                    "empty world emits no pairs (n_chunks={w})"
+                );
+            }
+        }
+
+        #[test]
+        fn shaped_single_body() {
+            let bodies = [sphere(Vec3::new(1.0, 2.0, 3.0), 0.5)];
+            assert_shaped_eq_serial_and_all_pairs(&bodies);
+        }
+
+        #[test]
+        fn shaped_all_coincident_c_n_2_no_dupes() {
+            let bodies: Vec<BodyState> = (0..12).map(|_| sphere(Vec3::ZERO, 0.5)).collect();
+            assert_shaped_eq_serial_and_all_pairs(&bodies);
+            for w in FORCED_CHUNKS {
+                let shaped = shaped_build(&bodies, w);
+                assert_eq!(
+                    shaped.len(),
+                    12 * 11 / 2,
+                    "all-coincident → C(n,2) pairs, no dupes (n_chunks={w})"
+                );
+            }
+        }
+
+        #[test]
+        fn shaped_far_apart_no_pairs() {
+            let bodies: Vec<BodyState> = (0..16)
+                .map(|i| sphere(Vec3::new(i as f32 * 1000.0, 0.0, 0.0), 0.5))
+                .collect();
+            assert_shaped_eq_serial_and_all_pairs(&bodies);
+            for w in FORCED_CHUNKS {
+                assert!(
+                    shaped_build(&bodies, w).is_empty(),
+                    "far-apart bodies pair with none (n_chunks={w})"
+                );
+            }
+        }
+
+        #[test]
+        fn shaped_cell_boundary_and_mixed_shapes() {
+            let bodies = [
+                sphere(Vec3::new(0.0, 0.0, 0.0), 0.6),
+                boxx(Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.4, 0.4, 0.4)),
+                sphere(Vec3::new(2.0, 0.0, 0.0), 0.5),
+                boxx(Vec3::new(1.0, 1.0, 0.0), Vec3::new(0.7, 0.3, 0.5)),
+                sphere(Vec3::new(0.0, 1.0, 1.0), 0.5),
+                boxx(Vec3::new(2.0, 2.0, 2.0), Vec3::new(0.2, 0.2, 0.2)),
+            ];
+            assert_shaped_eq_serial_and_all_pairs(&bodies);
+        }
+
+        // ── Gate 4 (cont.): a reused grid (capacity-reused pair_count/pair_offset)
+        //    matches a fresh grid — no stale Pass-A/prefix state across builds. ─
+        #[test]
+        fn shaped_reused_grid_no_stale_pair_offset_state() {
+            let scene_a: Vec<BodyState> = (0..50)
+                .map(|i| sphere(Vec3::new(i as f32 * 0.7, (i % 5) as f32, 0.0), 0.5))
+                .collect();
+            let scene_b: Vec<BodyState> = (0..30)
+                .map(|i| sphere(Vec3::new((i as f32).sin() * 5.0, 0.0, i as f32 * 0.4), 0.6))
+                .collect();
+
+            let mut reused = BroadphaseGrid::with_capacity(64);
+            let mut out = Vec::new();
+            // Warm on scene A at a DIFFERENT chunk count, then rebuild scene B.
+            reused.build_emit_shaped_forced(&scene_a, &mut out, 8);
+            reused.build_emit_shaped_forced(&scene_b, &mut out, 4);
+            let reused_b = out.clone();
+
+            let fresh_b = shaped_build(&scene_b, 4);
+            assert_eq!(
+                reused_b, fresh_b,
+                "a reused grid matches a fresh shaped build (no stale pair_count/pair_offset)"
+            );
+            assert_eq!(reused_b, all_pairs(&scene_b), "and equals all-pairs");
+        }
+
+        // ── Gate 5 (Miri): the curated small-scene shaped sweep at every chunk
+        //    count. `cargo +nightly miri test` runs THIS (no pool needed — the
+        //    shaped path runs `pool = None`); it checks the restructured offset
+        //    arithmetic + the `EmitPtrs` disjoint raw writes for TB/aliasing UB.
+        //    Kept small (≈ 64 bodies) so the interpreter stays tractable. ───────
+        #[test]
+        fn shaped_miri_small_dense_all_chunk_counts() {
+            // A 4³ overlapping lattice (64 bodies) — enough occupied cells that
+            // n_chunks ∈ {2, 4, 8} cut real disjoint blocks, small enough for Miri.
+            let mut bodies = Vec::new();
+            for z in 0..4 {
+                for y in 0..4 {
+                    for x in 0..4 {
+                        bodies.push(sphere(
+                            Vec3::new(x as f32 * 0.9, y as f32 * 0.9, z as f32 * 0.9),
+                            0.5,
+                        ));
+                    }
+                }
+            }
+            let serial = serial_build(&bodies);
+            assert!(!serial.is_empty(), "anti-vacuity: the Miri lattice has survivors");
+            for w in FORCED_CHUNKS {
+                let shaped = shaped_build(&bodies, w);
+                assert_eq!(shaped, serial, "Miri shaped n_chunks={w} == serial");
+            }
+        }
+
+        // ── Gate 5 (Miri, no-pool route): `build_parallel` called OUTSIDE any
+        //    `install` frame. `try_with_active_pool` returns None under Miri (no
+        //    pool — the work-stealing spin is Miri-intractable, Phase 9.1-9.3), so
+        //    `build_parallel` routes through the no-pool shaped path
+        //    (`emit_passes(.., 1, None)`). This pins that the production entry's
+        //    Miri-reachable branch is exactly the (TB-clean) shaped path and still
+        //    equals the serial build. The pool-DISPATCHED branch is covered by the
+        //    native MT gate in `tests/broadphase_grid.rs` (Miri can't spin the
+        //    pool — the same gating the colored-solver O6 parallel tests use). ───
+        #[test]
+        fn shaped_miri_build_parallel_no_pool_route_equals_serial() {
+            let mut bodies = Vec::new();
+            for z in 0..4 {
+                for y in 0..4 {
+                    for x in 0..4 {
+                        bodies.push(sphere(
+                            Vec3::new(x as f32 * 0.9, y as f32 * 0.9, z as f32 * 0.9),
+                            0.5,
+                        ));
+                    }
+                }
+            }
+            let serial = serial_build(&bodies);
+            let mut grid = BroadphaseGrid::with_capacity(bodies.len());
+            let mut out = Vec::new();
+            grid.build_parallel(&bodies, &mut out);
+            assert_eq!(
+                out, serial,
+                "build_parallel's no-pool route (the Miri-reachable branch) == serial build"
+            );
+        }
     }
 }
