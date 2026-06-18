@@ -238,9 +238,38 @@ pub fn v_dot(a: [f32; 3], b: [f32; 3]) -> f32 {
 /// `a / length(a)` — the unit vector (mirrors the shader's `normalize`). Exposed
 /// because the golden lighting + gradient normalization in
 /// `boyko_rhi_vulkan::compute` reuse it.
+///
+/// # Degenerate (zero-length / non-finite) input
+///
+/// When `length(a)` is exactly zero — or non-finite — this returns
+/// `[0.0, 0.0, 0.0]` instead of the `0.0 / 0.0 == NaN` the raw division would
+/// produce, mirroring [`boyko_physics::math::Vec3::normalize`]'s zero-guard. The
+/// only such input the field math feeds here is a central-difference gradient
+/// ([`sdf_edit_list_normal`]) at a FIELD CRITICAL POINT (e.g. a query point
+/// coincident with a primitive center under deep penetration, or a
+/// subtract/smooth-blend interior saddle): the difference is `[0, 0, 0]`, so a
+/// degenerate gradient now arrives at the physics narrowphase as `Vec3::ZERO`
+/// — a usable sentinel its seam-skip test recognizes — rather than as a `NaN`
+/// normal that would poison the solver.
+///
+/// # Golden-neutrality
+///
+/// The guard intercepts ONLY the exactly-zero / non-finite-length path; for every
+/// non-degenerate input the arithmetic is byte-identical to the raw
+/// `[a0/len, a1/len, a2/len]`. The committed rung-8/9/10/11 GPU goldens evaluate
+/// this normal only at SURFACE hit points where `|grad| ≈ 1` (never at a
+/// zero-gradient critical point), and the GPU shader's HLSL `normalize(0)` is
+/// undefined there anyway — so the goldens never sample the guarded path and this
+/// change is golden-neutral.
 #[inline]
 pub fn v_normalize(a: [f32; 3]) -> [f32; 3] {
     let len = v_len(a);
+    // Degenerate gradient (a field critical point): a zero or non-finite length
+    // would make the division `NaN`; return ZERO so the physics seam-skip fires.
+    // Non-degenerate inputs take the byte-identical division (golden-neutral).
+    if len <= f32::MIN_POSITIVE || !len.is_finite() {
+        return [0.0, 0.0, 0.0];
+    }
     [a[0] / len, a[1] / len, a[2] / len]
 }
 
@@ -358,4 +387,64 @@ pub fn sdf_edit_list_normal(edits: &[SdfEdit], p: [f32; 3]) -> [f32; 3] {
         sdf_edit_list(edits, [p[0], p[1], p[2] + h]) - sdf_edit_list(edits, [p[0], p[1], p[2] - h]),
     ];
     v_normalize(n)
+}
+
+// The unit tests link `std` for the test harness; they run under the default
+// (non-`nightly`) profile, where `std` is already linked for `f32::sqrt`.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The load-bearing C1 guard: a zero-length gradient (a field critical point)
+    /// must normalize to ZERO, NOT to `[NaN, NaN, NaN]` — otherwise the physics
+    /// seam-skip (`length_squared() < eps²`, which is `false` for NaN) never fires.
+    #[test]
+    fn v_normalize_zero_is_zero_not_nan() {
+        let r = v_normalize([0.0, 0.0, 0.0]);
+        assert_eq!(r, [0.0, 0.0, 0.0]);
+        assert!(r.iter().all(|c| c.is_finite()));
+    }
+
+    /// A non-finite-length input (defensive) also collapses to ZERO rather than
+    /// propagating NaN/Inf.
+    #[test]
+    fn v_normalize_non_finite_is_zero() {
+        assert_eq!(v_normalize([f32::INFINITY, 0.0, 0.0]), [0.0, 0.0, 0.0]);
+        assert_eq!(v_normalize([f32::NAN, 0.0, 0.0]), [0.0, 0.0, 0.0]);
+    }
+
+    /// Golden-neutrality: for a NON-degenerate input the guarded `v_normalize`
+    /// must return BIT-IDENTICAL bytes to the raw `[a0/len, a1/len, a2/len]` the
+    /// committed GPU goldens were produced with (the guard must not perturb the
+    /// arithmetic of the surface-hit path).
+    #[test]
+    fn v_normalize_nonzero_byte_identical_to_raw() {
+        for a in [
+            [1.0_f32, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [3.0, -4.0, 12.0],
+            [0.0005, -0.0005, 0.0005],
+            [-1.25, 2.5, -3.75],
+        ] {
+            let len = v_len(a);
+            let raw = [a[0] / len, a[1] / len, a[2] / len];
+            let guarded = v_normalize(a);
+            // Compare raw bits: the guard must change nothing on this path.
+            assert_eq!(guarded[0].to_bits(), raw[0].to_bits());
+            assert_eq!(guarded[1].to_bits(), raw[1].to_bits());
+            assert_eq!(guarded[2].to_bits(), raw[2].to_bits());
+        }
+    }
+
+    /// At a field critical point — a query point coincident with a primitive
+    /// center under deep penetration — the central-difference gradient is
+    /// symmetric and folds to `[0, 0, 0]`, so the normal arrives as ZERO (the
+    /// sentinel the physics seam-skip recognizes), never as NaN.
+    #[test]
+    fn sdf_edit_list_normal_at_sphere_center_is_zero() {
+        let edits = [SdfEdit::sphere([0.0, 0.0, 0.0], 1.0, sdf_op::UNION, 0.0)];
+        let n = sdf_edit_list_normal(&edits, [0.0, 0.0, 0.0]);
+        assert_eq!(n, [0.0, 0.0, 0.0]);
+        assert!(n.iter().all(|c| c.is_finite()));
+    }
 }

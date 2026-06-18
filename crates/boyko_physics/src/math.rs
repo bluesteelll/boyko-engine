@@ -81,6 +81,16 @@ impl Vec3 {
         self.length_squared().sqrt()
     }
 
+    /// `true` when every component is finite (no `NaN`, no `±Inf`).
+    ///
+    /// Used by the SDF narrowphase to reject a degenerate/non-finite field
+    /// gradient (defense-in-depth alongside the zero-length seam-skip) before it
+    /// can emit a `NaN`-normal contact that would poison the solver.
+    #[inline]
+    pub fn is_finite(self) -> bool {
+        self.x.is_finite() && self.y.is_finite() && self.z.is_finite()
+    }
+
     /// Returns `self` scaled to unit length, or [`Vec3::ZERO`] when `self` is
     /// (near) zero-length.
     ///

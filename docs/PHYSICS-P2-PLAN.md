@@ -148,6 +148,10 @@ Rename `ColliderShape::Aabb` → `Box` (OBB; the only readers are `systems.rs:~2
 | **W4** | NEW `boyko_sdf_math` (verbatim cut), `compute.rs` re-import, `narrowphase/{box_box,sphere_box}.rs`, `components.rs` (`Aabb`→`Box`), shape dispatch | rung 8/9/10/11 SDF goldens bit-exact on RTX 3060; `stacking_is_stable` (box stack); `box_box_friction_3d` (box on incline). |
 | **W5** | `solver/soft_step.rs` (C1 sentinel path, C2 IntegrationMode gate+contract, C3 table rebuild, post-loop restitution), `sdf_query.rs`, `SdfField`, `physics_narrowphase_sdf`, plugin wiring | `box_sdf_resting`, `sphere_vs_sdf_box_manifold`, `cpu_gpu_sdf_agreement` (3-way conformance), static-body bit-identical under TGS step, final `solver_is_deterministic`, Miri-green. |
 
+## W5 — accepted limitations (basic SDF slice)
+- **box-vs-SDF uses the deepest-corner normal for the whole manifold.** `box_sdf_manifold` samples a per-corner gradient but the `Manifold` carries a single header `normal` (the deepest corner's `−gradient`, the Box2D one-normal design). Per-point SDF normals would need a different manifold shape — deferred. **Correct for a near-planar SDF (a box on an SDF floor/incline — the W5 gates); approximate on a non-planar field (a box straddling a CSG seam).**
+- **A sphere/box whose center (or corner) sits exactly at a field critical point emits no contact that frame.** A zero-length gradient (a primitive center under deep penetration, a subtract/smooth-blend interior saddle) is normalized to ZERO by the `boyko_sdf_math::v_normalize` C1 guard, so the narrowphase seam-skip fires and no contact is produced — a NaN normal is NEVER emitted (which would poison the solver and break determinism). The body is simply not pushed out THAT frame; the common case (a sphere/box resting on an SDF floor) never reaches a critical point.
+
 ## Reserved (NOT built in P2, per plan §3.4)
 Collision-mesh-from-SDF hand-off (GPU-authoritative brick-atlas scale); island-parallel solve; sleeping;
 continuous collision; SIMD across contact points; capsule/convex-hull colliders; GJK/EPA.

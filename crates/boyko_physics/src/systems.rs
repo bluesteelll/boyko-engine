@@ -60,14 +60,26 @@ use boyko_ecs::ecs::core::system::{Res, ResMut};
 use boyko_ecs::ecs::core::time::FixedTime;
 
 use crate::components::{Collider, ColliderShape, RigidBody, RigidBodyMass};
-use crate::manifold::{BodyIndex, ContactPoint, Manifold};
+use crate::manifold::{BodyIndex, ContactPoint, Manifold, SDF_SENTINEL};
 use crate::math::Vec3;
 use crate::narrowphase::box_box::box_box_contact;
+use crate::narrowphase::feature_vertex_face;
 use crate::narrowphase::sphere_box::sphere_box_contact;
 use crate::resources::{
     BodyState, ContactPairs, IntegrationMode, Manifolds, PhysicsConfig, SolverScratch,
 };
+use crate::sdf_query::{SdfField, sample_sdf};
 use crate::solver::RigidSolver;
+
+/// Minimum SDF gradient length for a usable contact normal (P2 W5, O3).
+///
+/// The analytic field gradient collapses toward zero on a CSG seam (where two
+/// surfaces meet and the smooth-min/-max blend cancels) — a contact there has no
+/// usable normal direction. The SDF narrowphase SKIPS a sample whose central-
+/// difference gradient is shorter than this (the leaf normalizes such a gradient to
+/// [`Vec3::ZERO`](crate::math::Vec3::ZERO)), so a degenerate-normal contact is never
+/// emitted. Far above FP noise, far below a real surface gradient (≈ 1).
+const SDF_NORMAL_EPS: f32 = 1.0e-4;
 
 /// Integrates every body's hot state for one step (plan D3 stage 1), UNLESS the
 /// solver owns integration (C2).
@@ -351,6 +363,275 @@ fn flip_manifold(mut m: Manifold) -> Manifold {
         core::mem::swap(&mut p.anchor_a, &mut p.anchor_b);
     }
     m
+}
+
+/// Generates body-vs-SDF contacts against the analytic field and APPENDS them to
+/// the same [`Manifolds`] buffer the body-body narrowphase fills (plan D3 SDF
+/// stage; P2 W5 / C1).
+///
+/// For each DYNAMIC body (in dense row order, so the emission is deterministic) it
+/// samples [`SdfField`] via [`sample_sdf`] and, where the body penetrates the
+/// field, emits a [`Manifold`] keyed `body_a = `the body's dense row,
+/// `body_b = `[`SDF_SENTINEL`] (the C1 sentinel — the solver treats body B as an
+/// immovable wall, never indexing `bodies[u32::MAX]`).
+///
+/// # Normal convention
+///
+/// The field GRADIENT points outward (surface → body A). The manifold `normal`,
+/// however, follows the solver's uniform `A → B` convention (body A = the real
+/// body, body B = the immovable surface), so it is the gradient NEGATED (`A →
+/// surface`). With that convention the solver's one-sided impulse — which pushes A
+/// along `-normal` — pushes A AWAY from the surface (out of penetration), with NO
+/// special-casing of the impulse sign (the C1 "rides the existing one-sided path"
+/// requirement). `separation` stays `d − radius` / `d` (negative = penetrating),
+/// independent of the normal-direction sign.
+///
+/// - **Sphere** `{ radius }`: samples the center. If `d − radius < 0` (the sphere
+///   overlaps the field) it emits ONE contact with `separation = d − radius`,
+///   `normal = −gradient` (A → surface), anchor `= center + normal·radius` (the
+///   sphere's surface point nearest the field), `feature_id = 0`.
+/// - **Box** `{ half_extents }`: samples the 8 world-OBB corners; every penetrating
+///   corner (`d < 0`) is a candidate contact with `separation = d`,
+///   `normal = −gradient`, anchor = the corner, and a stable per-corner
+///   `feature_id`. The deepest ≤4 corners are kept (ties by lowest corner index)
+///   so a box manifold never exceeds [`MAX_CONTACT_POINTS`](crate::math::MAX_CONTACT_POINTS).
+///
+/// A sample whose gradient is shorter than [`SDF_NORMAL_EPS`] (the CSG-seam
+/// degeneracy, O3 — the leaf normalizes it to `Vec3::ZERO`) is SKIPPED: a
+/// zero normal has no usable direction, so no contact is emitted.
+///
+/// Registered AFTER [`physics_narrowphase`] (body-body) and BEFORE
+/// [`physics_solve_step`] (see [`add_physics_sdf`](crate::plugin::add_physics_sdf)),
+/// so the solver sees both contact kinds. This stage does NOT clear `Manifolds`
+/// (the body-body stage already cleared it this step); it only appends.
+//
+// `clippy::needless_pass_by_value`: see `physics_gather`.
+#[allow(clippy::needless_pass_by_value)]
+pub fn physics_narrowphase_sdf(
+    scratch: Res<SolverScratch>,
+    field: Res<SdfField>,
+    mut manifolds: ResMut<Manifolds>,
+) {
+    // Nothing to collide against an empty field (samples to +far everywhere).
+    if field.is_empty() {
+        return;
+    }
+    let bodies = &scratch.bodies;
+    let out = &mut manifolds.manifolds;
+
+    for (row, body) in bodies.iter().enumerate() {
+        // Only DYNAMIC bodies collide against the SDF (a static/kinematic body's
+        // contact with an immovable field would be two immovable sides — no
+        // response; it also keeps the sentinel one-sided path exercised by a real
+        // moving body, matching the body-vs-static-floor convention).
+        if body.body_type != crate::components::BodyType::Dynamic || body.inv_mass == 0.0 {
+            continue;
+        }
+        let a = BodyIndex(row as u32);
+        match body.shape {
+            ColliderShape::Sphere { radius } => {
+                if let Some(m) = sphere_sdf_manifold(a, body, radius, &field) {
+                    out.push(m);
+                }
+            }
+            ColliderShape::Box { half_extents } => {
+                if let Some(m) = box_sdf_manifold(a, body, half_extents, &field) {
+                    out.push(m);
+                }
+            }
+        }
+    }
+}
+
+/// Builds the single-point sphere-vs-SDF manifold for the dense row `a`, or `None`
+/// when the sphere does not penetrate the field / the contact normal is degenerate
+/// (P2 W5).
+///
+/// Samples the field at the sphere center: the sphere penetrates when the center's
+/// signed distance minus the radius is negative. The manifold normal is the field
+/// gradient NEGATED (the solver's `A → surface` convention, so the one-sided push
+/// ejects A from the surface), the anchor is the sphere's surface point nearest the
+/// field (`center − gradient·radius == center + normal·radius`), and the lone
+/// point's `feature_id` is `0`.
+///
+/// # Edge case (W5): center exactly at a field critical point
+///
+/// A sphere whose center sits exactly at a field critical point (a primitive center
+/// under deep penetration, a subtract/smooth-blend interior saddle) has a
+/// zero-length gradient: the C1 seam-skip fires and NO contact is emitted that
+/// frame, so such a sphere is not pushed out THAT frame (consistent with the skip
+/// — a zero normal has no usable direction). The common case (a sphere resting on
+/// an SDF floor) never reaches a critical point. Read the skip as "no usable
+/// direction this frame", not "always resolvable".
+#[inline]
+fn sphere_sdf_manifold(
+    a: BodyIndex,
+    body: &BodyState,
+    radius: f32,
+    field: &SdfField,
+) -> Option<Manifold> {
+    let center = body.position;
+    let (d, gradient) = sample_sdf(field, center);
+    let separation = d - radius;
+    if separation >= 0.0 {
+        // The sphere's surface clears the field — no contact.
+        return None;
+    }
+    // O3: a degenerate (zero-length) gradient — the leaf normalizes a CSG-seam
+    // gradient to ZERO — has no usable normal direction; skip it. The
+    // `!is_finite()` arm is defense-in-depth: even if a non-finite gradient
+    // reached here from any source, `NaN < eps²` is `false`, so without it the
+    // skip would not fire and a NaN normal would poison the solver.
+    if gradient.length_squared() < SDF_NORMAL_EPS * SDF_NORMAL_EPS || !gradient.is_finite() {
+        return None;
+    }
+    // A → B normal (B = the surface): the gradient (surface → A) negated, so the
+    // solver's `-P` on A pushes it out along the gradient (away from the surface).
+    let normal = gradient * -1.0;
+    // The sphere surface point nearest the field = center along the gradient by the
+    // radius = `center + normal·radius` (normal == −gradient).
+    let anchor = center + normal * radius;
+    let mut m = Manifold::new(a, SDF_SENTINEL);
+    m.normal = normal;
+    m.points[0] = ContactPoint {
+        anchor_a: anchor,
+        // body B is the immovable SDF surface; its anchor mirrors A's (role
+        // symmetric, the solver derives A's lever arm from `anchor − position`).
+        anchor_b: anchor,
+        separation,
+        feature_id: 0,
+    };
+    m.count = 1;
+    Some(m)
+}
+
+/// Builds the box-vs-SDF manifold for the dense row `a` by sampling the 8 world-OBB
+/// corners, keeping the deepest ≤4 penetrating corners (P2 W5).
+///
+/// Each corner is the body position plus the rotated local half-extent sign vector;
+/// a corner penetrates when its signed distance is negative. Penetrating corners
+/// with a usable (non-degenerate) gradient become contacts (`separation = d`,
+/// `normal = −gradient` — A → surface, matching the sphere path + the code so the
+/// one-sided push ejects A, anchor = the corner, a per-corner `feature_id`). The
+/// deepest ≤4 are kept — selected by an insertion that breaks ties by the lowest
+/// corner index, so the reduction is deterministic — keeping the manifold within
+/// [`MAX_CONTACT_POINTS`](crate::math::MAX_CONTACT_POINTS).
+///
+/// Returns `None` when no corner penetrates (with a usable normal).
+///
+/// # Accepted limitation (W5): single header normal on a non-planar SDF
+///
+/// The [`Manifold`](crate::resources::Manifold) carries ONE header `normal` for
+/// all ≤4 points (the deepest corner's `−gradient`, the Box2D one-normal design),
+/// while each corner samples its OWN per-corner gradient. On a near-planar SDF (a
+/// box resting on an SDF floor/incline — the W5 gates) every corner shares one
+/// direction, so this is exact. On a NON-planar SDF (a box straddling a CSG seam)
+/// the shallower corners inherit the deepest corner's direction, which is only
+/// approximate. Per-point SDF normals would need a different manifold shape and are
+/// DEFERRED (see `docs/PHYSICS-P2-PLAN.md`, W5 / Reserved).
+#[inline]
+fn box_sdf_manifold(
+    a: BodyIndex,
+    body: &BodyState,
+    half_extents: Vec3,
+    field: &SdfField,
+) -> Option<Manifold> {
+    let max_points = crate::math::MAX_CONTACT_POINTS;
+    // The kept contacts, deepest-first (most negative separation). Fixed capacity,
+    // no allocation: at most `MAX_CONTACT_POINTS` are retained.
+    let mut kept: [(ContactPoint, Vec3); crate::math::MAX_CONTACT_POINTS] =
+        [(ContactPoint::default(), Vec3::ZERO); crate::math::MAX_CONTACT_POINTS];
+    let mut kept_len = 0usize;
+
+    // The 8 corners in a FIXED order (corner index = the 3-bit sign pattern), so
+    // both the feature ids and the tie-breaking are deterministic.
+    for corner in 0u32..8 {
+        let sx = if corner & 1 != 0 { 1.0 } else { -1.0 };
+        let sy = if corner & 2 != 0 { 1.0 } else { -1.0 };
+        let sz = if corner & 4 != 0 { 1.0 } else { -1.0 };
+        let local = half_extents.componentwise_mul(Vec3::new(sx, sy, sz));
+        let world = body.position + body.rotation.rotate(local);
+
+        let (d, gradient) = sample_sdf(field, world);
+        if d >= 0.0 {
+            continue;
+        }
+        // O3: skip a degenerate (zero-length) seam gradient — no usable normal.
+        // The `!is_finite()` arm is defense-in-depth (mirrors the sphere path):
+        // `NaN < eps²` is `false`, so without it a non-finite gradient would slip
+        // through and emit a NaN-normal contact.
+        if gradient.length_squared() < SDF_NORMAL_EPS * SDF_NORMAL_EPS || !gradient.is_finite() {
+            continue;
+        }
+        // A → B normal (B = the surface): the gradient (surface → A) negated.
+        let normal = gradient * -1.0;
+        let point = ContactPoint {
+            anchor_a: world,
+            anchor_b: world,
+            separation: d,
+            // A vertex-vs-field contact — tag it as the vertex-face class keyed by
+            // the corner index, so each corner warm-starts independently and a
+            // corner id never aliases a body-body box face/edge id.
+            feature_id: feature_vertex_face(corner),
+        };
+        insert_deepest(&mut kept, &mut kept_len, max_points, point, normal);
+    }
+
+    if kept_len == 0 {
+        return None;
+    }
+    // The manifold normal is the deepest corner's gradient (the dominant contact
+    // direction); each point still carries its own anchor + separation. (W5 box-SDF
+    // resting is a vertex-on-surface case; per-point normals are a future refinement
+    // — the shared header normal matches the existing `Manifold` shape.)
+    let mut m = Manifold::new(a, SDF_SENTINEL);
+    m.normal = kept[0].1;
+    for (i, (point, _)) in kept[..kept_len].iter().enumerate() {
+        m.points[i] = *point;
+    }
+    m.count = kept_len as u8;
+    Some(m)
+}
+
+/// Inserts `point` (with its gradient `normal`) into the deepest-first `kept`
+/// buffer, keeping at most `cap` entries ordered by most-negative `separation`,
+/// ties broken by the lower corner `feature_id` (P2 W5 — deterministic reduction).
+///
+/// A new point displaces the shallowest kept entry only when it is strictly deeper;
+/// an equally-deep point with a lower `feature_id` wins the tie (the corners are
+/// inserted in index order, so the first-inserted — lowest index — already holds
+/// the slot, making the reduction order-stable without an explicit tie compare on
+/// the displaced side).
+#[inline]
+fn insert_deepest(
+    kept: &mut [(ContactPoint, Vec3)],
+    kept_len: &mut usize,
+    cap: usize,
+    point: ContactPoint,
+    normal: Vec3,
+) {
+    // Find the sorted insertion position (deepest = most-negative separation first).
+    // Corners arrive in ascending index order, so a `<` (strict) compare keeps the
+    // earlier (lower-index) corner ahead on a tie — the deterministic tie-break.
+    let mut pos = *kept_len;
+    while pos > 0 && point.separation < kept[pos - 1].0.separation {
+        pos -= 1;
+    }
+    if pos >= cap {
+        // Shallower than every kept entry and the buffer is full — drop it.
+        return;
+    }
+    let end = (*kept_len).min(cap - 1);
+    // Shift the entries at [pos, end) right by one to open the slot at `pos`.
+    let mut i = end;
+    while i > pos {
+        kept[i] = kept[i - 1];
+        i -= 1;
+    }
+    kept[pos] = (point, normal);
+    if *kept_len < cap {
+        *kept_len += 1;
+    }
 }
 
 /// Runs the swappable solver for one step, or early-outs for a no-op solver

@@ -32,6 +32,25 @@ use crate::math::{MAX_CONTACT_POINTS, Vec3};
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BodyIndex(pub u32);
 
+/// The sentinel `body_b` of an SDF-collision manifold (plan C1).
+///
+/// A body-vs-SDF contact is an ordinary [`Manifold`] whose `body_b` is this
+/// value rather than a real dense [`SolverScratch.bodies`](crate::resources::SolverScratch)
+/// row. `u32::MAX` is deliberately NOT a valid row index — a single step never
+/// holds `u32::MAX` bodies — so the solver can branch on it WITHOUT ever indexing
+/// `bodies[u32::MAX]` (out of bounds). The solver instead substitutes an
+/// IMMOVABLE-at-rest body B (`inv_mass = 0`, `inv_inertia = Mat3::ZERO`,
+/// velocity = angular = 0), riding the existing one-sided `inv_mass == 0` impulse
+/// path (the same path a static rigid floor exercises) — so an SDF surface acts as
+/// an immovable wall with NO new branch class in the impulse math, and `body_b`'s
+/// `touched` bit is NEVER set (`u32::MAX` is not a row, so no anchor row is
+/// appended and the `physics_apply` desync `debug_assert!` stays exact).
+///
+/// The SDF narrowphase emits the manifold `normal` pointing from the SDF surface
+/// toward body A (the [`sample_sdf`](crate::sdf_query::sample_sdf) gradient), so
+/// the one-sided push separates A from the surface.
+pub const SDF_SENTINEL: BodyIndex = BodyIndex(u32::MAX);
+
 /// A single contact point within a [`Manifold`] (plan D1).
 ///
 /// `anchor_a` / `anchor_b` are the contact anchors on each body; `separation`

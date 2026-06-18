@@ -14,10 +14,11 @@ use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::schedule::ScheduleBuilder;
 
 use crate::resources::{ContactPairs, IntegrationMode, Manifolds, PhysicsConfig, SolverScratch};
+use crate::sdf_query::SdfField;
 use crate::solver::RigidSolver;
 use crate::systems::{
     physics_apply, physics_broadphase, physics_gather, physics_integrate, physics_narrowphase,
-    physics_solve_step,
+    physics_narrowphase_sdf, physics_solve_step,
 };
 
 /// The pre-build stage handles of the physics pipeline (plan MINOR-1 / OQ3).
@@ -52,6 +53,14 @@ pub struct PhysicsStageKeys {
     pub broadphase: usize,
     /// Descriptor index of the [`physics_narrowphase`] stage.
     pub narrowphase: usize,
+    /// Descriptor index of the [`physics_narrowphase_sdf`] SDF-collision stage, or
+    /// `None` for the body-only [`add_physics_systems`] path (P2 W5).
+    ///
+    /// Present only when the pipeline was wired by
+    /// [`add_physics_sdf`](crate::plugin::add_physics_sdf); it runs AFTER
+    /// `narrowphase` and BEFORE `solve` so the solver sees both body-body and
+    /// body-vs-SDF contacts.
+    pub narrowphase_sdf: Option<usize>,
     /// Descriptor index of the [`physics_solve_step`] stage.
     pub solve: usize,
     /// Descriptor index of the [`physics_apply`] stage.
@@ -86,11 +95,50 @@ pub fn add_physics_systems<S: RigidSolver + Default>(
     builder: &mut ScheduleBuilder,
     world: &mut EcsMaster,
 ) -> PhysicsStageKeys {
+    // `with_sdf = false`: body-only pipeline (no `SdfField`, no SDF stage).
+    add_physics_pipeline::<S>(builder, world, false)
+}
+
+/// Inserts the physics resources INCLUDING an (empty) [`SdfField`] and registers
+/// the physics pipeline WITH the body-vs-SDF narrowphase stage (plan W5).
+///
+/// Identical to [`add_physics_systems`] but additionally:
+/// - inserts a default (empty) [`SdfField`] resource the caller fills with the
+///   CPU-authoritative SDF edit list (the same scene the GPU renders);
+/// - registers [`physics_narrowphase_sdf`](crate::systems::physics_narrowphase_sdf)
+///   AFTER `narrowphase` and BEFORE `solve_step`, so the solver sees both body-body
+///   and body-vs-SDF contacts (the latter keyed by the C1
+///   [`SDF_SENTINEL`](crate::manifold::SDF_SENTINEL)).
+///
+/// Opt-in: a body-only scene uses [`add_physics_systems`] and is byte-for-byte
+/// unaffected (the SDF stage is never registered — the 0%-gate). The returned
+/// [`PhysicsStageKeys::narrowphase_sdf`] carries the SDF stage's descriptor index.
+pub fn add_physics_sdf<S: RigidSolver + Default>(
+    builder: &mut ScheduleBuilder,
+    world: &mut EcsMaster,
+) -> PhysicsStageKeys {
+    add_physics_pipeline::<S>(builder, world, true)
+}
+
+/// Shared wiring for [`add_physics_systems`] (`with_sdf = false`) and
+/// [`add_physics_sdf`] (`with_sdf = true`): inserts the resources and registers the
+/// pipeline, optionally splicing the SDF-collision stage between narrowphase and
+/// solve.
+fn add_physics_pipeline<S: RigidSolver + Default>(
+    builder: &mut ScheduleBuilder,
+    world: &mut EcsMaster,
+    with_sdf: bool,
+) -> PhysicsStageKeys {
     // Reused, capacity-preserving step buffers (principle 5 — no per-step alloc).
     world.insert_resource(PhysicsConfig::default());
     world.insert_resource(ContactPairs::with_capacity(INITIAL_BODY_CAPACITY));
     world.insert_resource(Manifolds::with_capacity(INITIAL_BODY_CAPACITY));
     world.insert_resource(SolverScratch::with_capacity(INITIAL_BODY_CAPACITY));
+    if with_sdf {
+        // The CPU-authoritative SDF scene (empty by default; the caller fills it
+        // with the same edit list the GPU renders).
+        world.insert_resource(SdfField::default());
+    }
 
     // C2: stamp the integration mode from the chosen solver BEFORE inserting the
     // solver (a fresh `S::default()` is cheap and the only `&self` source for
@@ -114,10 +162,39 @@ pub fn add_physics_systems<S: RigidSolver + Default>(
         .add_system(physics_narrowphase)
         .after(broadphase)
         .key();
-    let solve = builder
-        .add_system(physics_solve_step::<S>)
-        .after(narrowphase)
-        .key();
+
+    // W5: the body-vs-SDF stage runs AFTER body-body narrowphase (both append to
+    // `Manifolds`) and is forced BEFORE the solve via an explicit ordering edge — a
+    // `ResMut`/`Res` conflict on `Manifolds` alone would serialize them but not pin
+    // the order, so the edge is load-bearing. Registered only when `with_sdf` (the
+    // 0%-gate: a body-only schedule never registers this stage). The `SystemConfig`
+    // borrows `builder` mutably, so extract the `SystemKey` immediately (drop the
+    // handle) before re-borrowing `builder` for the next stage.
+    let narrowphase_sdf_key = if with_sdf {
+        Some(
+            builder
+                .add_system(physics_narrowphase_sdf)
+                .after(narrowphase)
+                .key(),
+        )
+    } else {
+        None
+    };
+
+    let solve = if let Some(sdf) = narrowphase_sdf_key {
+        // Pin the SDF stage before the solve (it must finish appending its
+        // manifolds before the solver reads the buffer).
+        builder
+            .add_system(physics_solve_step::<S>)
+            .after(narrowphase)
+            .after(sdf)
+            .key()
+    } else {
+        builder
+            .add_system(physics_solve_step::<S>)
+            .after(narrowphase)
+            .key()
+    };
     let apply = builder.add_system(physics_apply).after(solve).key();
 
     PhysicsStageKeys {
@@ -125,6 +202,7 @@ pub fn add_physics_systems<S: RigidSolver + Default>(
         gather: gather.0,
         broadphase: broadphase.0,
         narrowphase: narrowphase.0,
+        narrowphase_sdf: narrowphase_sdf_key.map(|k| k.0),
         solve: solve.0,
         apply: apply.0,
     }

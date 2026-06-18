@@ -48,7 +48,7 @@
 //! clears and (only if needed) grows the backing `Vec`, never allocating in the
 //! steady state (principle 5).
 
-use crate::manifold::BodyIndex;
+use crate::manifold::{BodyIndex, SDF_SENTINEL};
 
 /// The empty-slot sentinel key. A real packed key can never equal it: [`pack`]
 /// lays out `body_a:24 | body_b:24 | feature_id:16`, so `u64::MAX` would require
@@ -137,6 +137,37 @@ pub fn pack(body_a: BodyIndex, body_b: BodyIndex, feature_id: u32) -> u64 {
     let b = (body_b.0 as u64 & BODY_MASK) << FEATURE_BITS;
     let f = feature_id as u64 & FEATURE_MASK;
     a | b | f
+}
+
+/// Packs an SDF-collision contact POINT's identity into a warm-start key (plan C1
+/// — the sentinel `body_b` guard).
+///
+/// An SDF contact's `body_b` is [`SDF_SENTINEL`] (`u32::MAX`), which does NOT fit
+/// the 24-bit `body_b` field — feeding it through [`pack`] would trip the field's
+/// debug-assert and (in release) truncate `u32::MAX` to the all-ones 24-bit value,
+/// which is also the value [`EMPTY`] needs in *both* body fields. This dedicated
+/// path instead places the sentinel in `body_b` as the reserved all-ones 24-bit
+/// tag `BODY_MASK` (`0xFFFFFF`):
+///
+/// - **No aliasing with a real pair:** a real body-body key's `body_b` is a dense
+///   row index (a small body count, far below `0xFFFFFF`), so no real pair ever
+///   produces `body_b == 0xFFFFFF`. SDF keys therefore occupy a disjoint slice of
+///   the key space, keyed by `(body_a, feature_id)`.
+/// - **Never [`EMPTY`]:** `EMPTY` (`u64::MAX`) requires BOTH 24-bit body fields
+///   all-ones, but `body_a` here is a real dense row (`< 0xFFFFFF`), so the key
+///   can never be all-ones.
+/// - **Deterministic + injective:** distinct `(body_a, feature_id)` produce
+///   distinct keys (non-overlapping fields), so a body's SDF contacts warm-start
+///   independently and the table stays bit-deterministic (C3).
+#[inline]
+pub fn pack_sdf(body_a: BodyIndex, feature_id: u32) -> u64 {
+    debug_assert_eq!(
+        SDF_SENTINEL.0, u32::MAX,
+        "invariant: the SDF sentinel is u32::MAX, the reserved out-of-range body_b"
+    );
+    // `body_b` field = the reserved all-ones 24-bit tag (a real dense row never
+    // reaches it), so SDF keys never alias a body-body pair and never equal EMPTY.
+    pack(body_a, BodyIndex(BODY_MASK as u32), feature_id)
 }
 
 /// The rounded-up power of two `≥ n`, with a floor of 1 (so an empty contact set
@@ -331,6 +362,45 @@ mod tests {
                         "pack collision for (a={a}, b={b}, f={f:#x}) → {key:#x}"
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn pack_sdf_never_aliases_a_body_body_pair_or_empty() {
+        // C1: an SDF contact key (`pack_sdf`, sentinel body_b) must never collide
+        // with a real body-body key (`pack` over realistic dense rows) nor equal
+        // the EMPTY sentinel. The SDF key reserves the all-ones 24-bit body_b tag,
+        // which a real dense row never reaches.
+        let bodies = [0u32, 1, 7, 100, 65_536, 1_000_000, 16_777_213];
+        let features = [0u32, 1, 0x8000, 0xC007, 0xFFFF];
+        let mut body_body = std::collections::HashSet::new();
+        for &a in &bodies {
+            for &b in &bodies {
+                for &f in &features {
+                    // A real pair always keys body_b < BODY_MASK (a dense row never
+                    // reaches the reserved all-ones tag), so skip the (unreal) case
+                    // b == BODY_MASK; every realistic b here is far below it.
+                    body_body.insert(pack(BodyIndex(a), BodyIndex(b), f));
+                }
+            }
+        }
+        let mut sdf_seen = std::collections::HashSet::new();
+        for &a in &bodies {
+            for &f in &features {
+                let key = pack_sdf(BodyIndex(a), f);
+                // Never the EMPTY sentinel (a real body_a is not all-ones).
+                assert_ne!(key, EMPTY, "pack_sdf must not equal EMPTY (a={a}, f={f:#x})");
+                // Never aliases a realistic body-body key.
+                assert!(
+                    !body_body.contains(&key),
+                    "pack_sdf aliases a body-body key (a={a}, f={f:#x}) → {key:#x}"
+                );
+                // Distinct (body_a, feature_id) → distinct SDF keys (injective).
+                assert!(
+                    sdf_seen.insert(key),
+                    "pack_sdf collision for (a={a}, f={f:#x}) → {key:#x}"
+                );
             }
         }
     }

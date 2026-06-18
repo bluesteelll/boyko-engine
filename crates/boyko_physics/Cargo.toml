@@ -13,12 +13,16 @@ path = "src/lib.rs"
 # derives, Query<D, F>, Res / ResMut / Mut, Schedule / ScheduleBuilder, EcsMaster,
 # FixedTime). `boyko_threadpool` supplies the work-stealing pool that
 # `Schedule::run` fans `par_iter_mut` across; `boyko_utils` supplies the
-# `BitSet256` chunk the touched-row mask is built from. NO graphics deps — this
-# crate is solver/seam only (the real solver lands in Phase 10).
+# `BitSet256` chunk the touched-row mask is built from. `boyko_sdf_math` is the
+# graphics-free `no_std` leaf (W4-pt1) holding the analytic SDF edit-list field —
+# its CPU evaluator is the single source of truth the W5 SDF-collision narrowphase
+# shares with the GPU golden, with ZERO readback and (critically) NO Vulkan/graphics
+# dep pulled in (the whole point of the leaf extraction). NO other graphics deps.
 boyko-ecs = { path = "../boyko_ecs" }
 boyko-macros = { path = "../boyko_macros" }
 boyko-utils = { path = "../boyko_utils" }
 boyko-threadpool = { path = "../boyko_threadpool" }
+boyko_sdf_math = { path = "../boyko_sdf_math" }
 
 [dev-dependencies]
 proptest = "1"

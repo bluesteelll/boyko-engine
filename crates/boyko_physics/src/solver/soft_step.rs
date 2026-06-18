@@ -36,10 +36,17 @@
 //! per-point key equals the old per-manifold key — the sphere warm-start path is
 //! byte-identical.
 //!
-//! # What this solver does NOT include
+//! # SDF contacts (W5 — the C1 sentinel path)
 //!
-//! - **SDF contacts + the C1 sentinel path** (W5): every manifold here keys two
-//!   real dense rows.
+//! An SDF-collision manifold keys `body_b == `[`SDF_SENTINEL`] (`u32::MAX`), NOT a
+//! real dense row. The solver substitutes [`IMMOVABLE_AT_REST`] (`inv_mass = 0`,
+//! `inv_inertia = ZERO`, velocity = 0) for body B and SKIPS every body-B impulse
+//! apply — so it NEVER indexes `bodies[u32::MAX]` and never touches a non-existent
+//! row. This rides the SAME one-sided `inv_mass == 0` impulse path a static rigid
+//! floor exercises (no new branch class in the impulse math, only the body-fetch
+//! picks the immovable surface), and the SDF warm-start key uses the dedicated
+//! [`pack_sdf`](warm_start::pack_sdf) path so the sentinel `body_b` cannot corrupt
+//! or alias a real body-body key.
 //!
 //! # Determinism (IM-2)
 //!
@@ -56,7 +63,7 @@ use super::contact::{BodyEffective, effective_mass, tangent_basis};
 use super::warm_start::{self, WarmStartTable};
 use super::RigidSolver;
 use crate::components::BodyType;
-use crate::manifold::Manifold;
+use crate::manifold::{Manifold, SDF_SENTINEL};
 use crate::math::{Mat3, Vec3};
 use crate::resources::{BodyState, PhysicsConfig, SolverScratch};
 
@@ -111,6 +118,23 @@ struct PointConstraint {
     warm_key: u64,
 }
 
+/// An immovable, at-rest body view (P2 W5 / C1) — the body B every SDF-collision
+/// manifold solves against.
+///
+/// `inv_mass == 0` + `inv_inertia == Mat3::ZERO` + zero velocity make every
+/// [`apply_impulse`](BodyEffective::apply_impulse) on it a no-op and its
+/// [`point_velocity`](BodyEffective::point_velocity) zero, so it rides the SAME
+/// one-sided `inv_mass == 0` impulse path a static rigid floor exercises — the SDF
+/// surface acts as an immovable wall with NO new branch class in the impulse math.
+/// The solver substitutes this for body B whenever a manifold's `body_b` is the
+/// [`SDF_SENTINEL`], so it NEVER indexes `bodies[u32::MAX]`.
+const IMMOVABLE_AT_REST: BodyEffective = BodyEffective {
+    inv_mass: 0.0,
+    inv_inertia: Mat3::ZERO,
+    linear_velocity: Vec3::ZERO,
+    angular_velocity: Vec3::ZERO,
+};
+
 /// One manifold's solver state — the body-row indices, the contact frame, and
 /// the span of its points in the flattened [`SoftStepSolver::points`] buffer
 /// (P2 W2).
@@ -118,8 +142,15 @@ struct PointConstraint {
 struct ManifoldConstraint {
     /// Dense row index of body A.
     ia: usize,
-    /// Dense row index of body B.
+    /// Dense row index of body B, OR — when [`b_is_sentinel`](Self::b_is_sentinel)
+    /// is set — an UNUSED placeholder (the [`SDF_SENTINEL`] row `u32::MAX` is never
+    /// indexed; body B is [`IMMOVABLE_AT_REST`] instead).
     ib: usize,
+    /// `true` when this is an SDF-collision manifold (`body_b == SDF_SENTINEL`):
+    /// body B is [`IMMOVABLE_AT_REST`], not `bodies[ib]` — the C1 sentinel guard
+    /// keeps the solver from indexing `bodies[u32::MAX]` (out of bounds) and from
+    /// ever touching a non-existent row.
+    b_is_sentinel: bool,
     /// Unit contact normal (points from A toward B).
     normal: Vec3,
     /// First friction tangent (unit, `⟂ normal`).
@@ -252,31 +283,61 @@ impl SoftStepSolver {
                 continue;
             }
             let ia = m.body_a.0 as usize;
-            let ib = m.body_b.0 as usize;
+            // C1: an SDF-collision manifold keys `body_b == SDF_SENTINEL`
+            // (`u32::MAX`) — NOT a real row. Body B is `IMMOVABLE_AT_REST`, so we
+            // must never index `bodies[u32::MAX]`; `ib` is left at `ia` purely as a
+            // harmless in-range placeholder (never read for the sentinel side).
+            let b_is_sentinel = m.body_b == SDF_SENTINEL;
+            let ib = if b_is_sentinel { ia } else { m.body_b.0 as usize };
             let normal = m.normal;
             let (tangent1, tangent2) = tangent_basis(normal);
             let point_start = self.points.len();
 
             let pa = bodies[ia].position;
-            let pb = bodies[ib].position;
+            // The sentinel surface has no position; anchors are expressed relative
+            // to it directly (anchor_b is the surface contact point itself, so
+            // `rb == 0` — an immovable B with a zero lever arm, the correct
+            // one-sided contact frame).
+            let pb = if b_is_sentinel {
+                Vec3::ZERO
+            } else {
+                bodies[ib].position
+            };
 
             for p in 0..count {
                 let cp = &m.points[p];
                 let ra = cp.anchor_a - pa;
-                let rb = cp.anchor_b - pb;
+                let rb = if b_is_sentinel {
+                    // Immovable surface: a zero lever arm (it never moves or spins).
+                    Vec3::ZERO
+                } else {
+                    cp.anchor_b - pb
+                };
                 // Relative normal velocity of the contact point, B relative to A,
                 // projected on the normal. Negative = approaching (the bodies
-                // are closing) — the value restitution bounces back.
+                // are closing) — the value restitution bounces back. The sentinel
+                // B is at rest (`IMMOVABLE_AT_REST`), contributing zero.
                 let dv = {
                     let ba = &self.bodies[ia];
-                    let bb = &self.bodies[ib];
+                    let bb = if b_is_sentinel {
+                        &IMMOVABLE_AT_REST
+                    } else {
+                        &self.bodies[ib]
+                    };
                     bb.point_velocity(rb) - ba.point_velocity(ra)
                 };
                 vn_initial.push(dv.dot(normal));
                 // W4 per-point warm key: this point's OWN feature id. Each point
                 // probes the `read` table independently, so a box manifold's 4
-                // points each seed from their own last-frame converged impulse.
-                let warm_key = warm_start::pack(m.body_a, m.body_b, cp.feature_id);
+                // points each seed from their own last-frame converged impulse. C1:
+                // an SDF contact uses the dedicated `pack_sdf` key path so the
+                // `u32::MAX` sentinel `body_b` never trips the 24-bit field / aliases
+                // a real pair (it maps to the reserved all-ones body_b tag).
+                let warm_key = if b_is_sentinel {
+                    warm_start::pack_sdf(m.body_a, cp.feature_id)
+                } else {
+                    warm_start::pack(m.body_a, m.body_b, cp.feature_id)
+                };
                 let seed = if self.warm_start_enabled {
                     self.warm_read.get(warm_key)
                 } else {
@@ -301,6 +362,7 @@ impl SoftStepSolver {
             self.manifolds.push(ManifoldConstraint {
                 ia,
                 ib,
+                b_is_sentinel,
                 normal,
                 tangent1,
                 tangent2,
@@ -342,7 +404,12 @@ impl SoftStepSolver {
                 let impulse =
                     normal * pc.normal_impulse + t1 * pc.tangent_impulse1 + t2 * pc.tangent_impulse2;
                 bodies_eff[mc.ia].apply_impulse(pc.ra, impulse * -1.0);
-                bodies_eff[mc.ib].apply_impulse(pc.rb, impulse);
+                // C1: for an SDF contact body B is `IMMOVABLE_AT_REST` (the impulse
+                // is a no-op on it); crucially `mc.ib` is the A-row placeholder for
+                // the sentinel, so applying to it would DOUBLE-apply to A — guard it.
+                if !mc.b_is_sentinel {
+                    bodies_eff[mc.ib].apply_impulse(pc.rb, impulse);
+                }
             }
         }
     }
@@ -419,7 +486,10 @@ impl SoftStepSolver {
             // Combined friction coefficient. The foundation stores friction per
             // body; W2 combines by `max` (a simple, symmetric, deterministic rule
             // — a sliding pair is as sticky as its stickiest surface). A
-            // geometric-mean (`sqrt(µA·µB)`) combine is W4 polish.
+            // geometric-mean (`sqrt(µA·µB)`) combine is W4 polish. C1: an SDF
+            // surface has no friction material — `mc.ib` is the A-row placeholder
+            // for the sentinel, so this resolves to A's own friction (the field is
+            // treated as carrying the body's friction, a deterministic convention).
             let friction = snapshot[mc.ia].friction.max(snapshot[mc.ib].friction);
 
             for p in mc.point_start..(mc.point_start + mc.count) {
@@ -429,12 +499,22 @@ impl SoftStepSolver {
                 // ── Normal solve ────────────────────────────────────────────
                 let m_eff = {
                     let ba = bodies_eff[mc.ia];
-                    let bb = bodies_eff[mc.ib];
+                    // C1: body B is `IMMOVABLE_AT_REST` for an SDF contact (never
+                    // `bodies_eff[u32::MAX]`); it contributes 0 to the effective mass.
+                    let bb = if mc.b_is_sentinel {
+                        IMMOVABLE_AT_REST
+                    } else {
+                        bodies_eff[mc.ib]
+                    };
                     effective_mass(normal, ra, rb, &ba, &bb)
                 };
                 let vn = {
                     let ba = &bodies_eff[mc.ia];
-                    let bb = &bodies_eff[mc.ib];
+                    let bb = if mc.b_is_sentinel {
+                        IMMOVABLE_AT_REST
+                    } else {
+                        bodies_eff[mc.ib]
+                    };
                     (bb.point_velocity(rb) - ba.point_velocity(ra)).dot(normal)
                 };
                 // Soft bias drives the penetration toward zero; clamp the push so
@@ -457,24 +537,40 @@ impl SoftStepSolver {
                 {
                     let impulse = normal * applied_n;
                     bodies_eff[mc.ia].apply_impulse(ra, impulse * -1.0);
-                    bodies_eff[mc.ib].apply_impulse(rb, impulse);
+                    // C1: skip the immovable sentinel B (also avoids double-applying
+                    // to A, since `mc.ib` is the A-row placeholder for the sentinel).
+                    if !mc.b_is_sentinel {
+                        bodies_eff[mc.ib].apply_impulse(rb, impulse);
+                    }
                 }
 
                 // ── Friction solve (2-DOF coupled cone) ─────────────────────
                 let max_friction = friction * points[p].normal_impulse;
                 let m_eff_t1 = {
                     let ba = bodies_eff[mc.ia];
-                    let bb = bodies_eff[mc.ib];
+                    let bb = if mc.b_is_sentinel {
+                        IMMOVABLE_AT_REST
+                    } else {
+                        bodies_eff[mc.ib]
+                    };
                     effective_mass(t1, ra, rb, &ba, &bb)
                 };
                 let m_eff_t2 = {
                     let ba = bodies_eff[mc.ia];
-                    let bb = bodies_eff[mc.ib];
+                    let bb = if mc.b_is_sentinel {
+                        IMMOVABLE_AT_REST
+                    } else {
+                        bodies_eff[mc.ib]
+                    };
                     effective_mass(t2, ra, rb, &ba, &bb)
                 };
                 let (vt1, vt2) = {
                     let ba = &bodies_eff[mc.ia];
-                    let bb = &bodies_eff[mc.ib];
+                    let bb = if mc.b_is_sentinel {
+                        IMMOVABLE_AT_REST
+                    } else {
+                        bodies_eff[mc.ib]
+                    };
                     let dv = bb.point_velocity(rb) - ba.point_velocity(ra);
                     (dv.dot(t1), dv.dot(t2))
                 };
@@ -495,7 +591,10 @@ impl SoftStepSolver {
                 {
                     let impulse = t1 * applied_t1 + t2 * applied_t2;
                     bodies_eff[mc.ia].apply_impulse(ra, impulse * -1.0);
-                    bodies_eff[mc.ib].apply_impulse(rb, impulse);
+                    // C1: skip the immovable sentinel B (and the A-row placeholder).
+                    if !mc.b_is_sentinel {
+                        bodies_eff[mc.ib].apply_impulse(rb, impulse);
+                    }
                 }
             }
         }
@@ -532,6 +631,8 @@ impl SoftStepSolver {
     ) {
         for mc in manifolds {
             let normal = mc.normal;
+            // C1: an SDF surface has no restitution material — `mc.ib` is the A-row
+            // placeholder for the sentinel, so this resolves to A's own restitution.
             let restitution = snapshot[mc.ia].restitution.max(snapshot[mc.ib].restitution);
             if restitution <= 0.0 {
                 continue;
@@ -549,12 +650,21 @@ impl SoftStepSolver {
                 let (ra, rb) = (pc.ra, pc.rb);
                 let m_eff = {
                     let ba = bodies_eff[mc.ia];
-                    let bb = bodies_eff[mc.ib];
+                    // C1: immovable sentinel B (never `bodies_eff[u32::MAX]`).
+                    let bb = if mc.b_is_sentinel {
+                        IMMOVABLE_AT_REST
+                    } else {
+                        bodies_eff[mc.ib]
+                    };
                     effective_mass(normal, ra, rb, &ba, &bb)
                 };
                 let vn = {
                     let ba = &bodies_eff[mc.ia];
-                    let bb = &bodies_eff[mc.ib];
+                    let bb = if mc.b_is_sentinel {
+                        IMMOVABLE_AT_REST
+                    } else {
+                        bodies_eff[mc.ib]
+                    };
                     (bb.point_velocity(rb) - ba.point_velocity(ra)).dot(normal)
                 };
                 // Target separating velocity = -e · approach speed.
@@ -565,7 +675,10 @@ impl SoftStepSolver {
                 points[p].normal_impulse = new_lambda;
                 let impulse = normal * applied;
                 bodies_eff[mc.ia].apply_impulse(ra, impulse * -1.0);
-                bodies_eff[mc.ib].apply_impulse(rb, impulse);
+                // C1: skip the immovable sentinel B (and the A-row placeholder).
+                if !mc.b_is_sentinel {
+                    bodies_eff[mc.ib].apply_impulse(rb, impulse);
+                }
             }
         }
     }
