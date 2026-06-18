@@ -34,12 +34,17 @@
 
 use core::ptr;
 
-use boyko_rhi::{Format, ImageUsage, RhiDevice, TextureDesc, TextureDimension};
+use boyko_rhi::{
+    BindGroupDesc, BindGroupEntry, Format, ImageUsage, RhiDevice, TextureDesc, TextureDimension,
+};
 
 use crate::device::{DeviceFns, SurfaceInstanceFns, SwapchainDeviceFns, VulkanContext};
 use crate::ffi::*;
 use crate::memory::BoundBuffer;
-use crate::rhi_impl::{VulkanBindGroup, VulkanGraphicsPipeline, VulkanSampler};
+use crate::rhi_impl::{
+    ComputePipeline, Vulkan, VulkanBindGroup, VulkanBindGroupLayout, VulkanGraphicsPipeline,
+    VulkanSampler,
+};
 use crate::texture::VulkanTexture;
 
 /// The number of frames the [`Renderer`] keeps in flight (double-buffered CPU↔GPU
@@ -1948,6 +1953,841 @@ impl<'ctx> Renderer<'ctx> {
         Ok(())
     }
 
+    /// Renders + presents ONE on-screen Render-P1c **image-based** G-buffer frame: the
+    /// P1b shared-depth marcher (the depth IMAGE source + the MRT G-buffer sink) driven
+    /// ON SCREEN, killing the packed path's per-frame depth→buffer copy. Recreates the
+    /// swapchain on resize / out-of-date / suboptimal (identical return semantics to
+    /// [`render_scene_frame`](Self::render_scene_frame)).
+    ///
+    /// # The 3-pass on-screen frame (one command buffer, fence-only submit, §1b model)
+    ///
+    /// (A) raster the mesh quad → D32 depth IMAGE, (B) the SDF compute marcher samples
+    /// that depth image + writes the FINAL composite into the ALBEDO storage image
+    /// (byte-untouched from P1b), (C) present-blit: fullscreen-sample the ALBEDO into
+    /// the acquired swapchain image, present. The deferred-lighting split (the marcher
+    /// writing UNLIT attributes + a separate lighting pass) is DEFERRED to P7
+    /// (multi-light/clustered) — P1b's marcher already writes the lit composite, so a
+    /// P1c lighting pass would be a no-op passthrough that breaks the golden.
+    ///
+    /// There is NO `copy_image_to_buffer(depth)` and NO per-frame
+    /// `vkUpdateDescriptorSets`: the marcher SAMPLES the depth image, and both
+    /// descriptor sets are written ONCE per composite extent by
+    /// [`GBufferTargets::sync_gbuffer`]. The G-buffer targets + the marcher's
+    /// raster/dispatch are sized to `present_extent` (the composite), NOT the swapchain
+    /// extent: a P0a/rung-11 WSI-clamped (wider) swapchain image never resizes the
+    /// G-buffer — the present-blit maps the composite 1:1 into the swapchain's top-left.
+    ///
+    /// If `readback` is `Some`, on THIS frame the presented swapchain image is
+    /// `vkCmdCopyImageToBuffer`'d into the supplied host-visible staging buffer (the
+    /// on-screen golden readback path — proving the image-based composite reached the
+    /// swapchain); the steady present path passes `None`.
+    ///
+    /// `present_extent` is the composite's native size for the top-left 1:1 present
+    /// (`min(swapchain_extent, present_extent)` clamps the present viewport/scissor, so
+    /// the per-texel golden is exact regardless of the WSI extent clamp — the same
+    /// 1:1-top-left contract [`SampledComposite`] uses). Pass the extent the marcher
+    /// dispatched at (the clamped swapchain extent the caller sized `frame`'s targets
+    /// + `scene.camera_uniform` + `scene.dispatch_group_count_x` to).
+    ///
+    /// # Safety
+    ///
+    /// Every `scene` resource was created on the same device as this renderer and
+    /// outlives the call; `scene.edit_list` / `scene.camera_uniform` were host-seeded
+    /// once before the present loop and are NEVER written again (the marcher only reads
+    /// them — frames-in-flight dispatch against them with no host write-after-read);
+    /// `frame`'s targets were synced to the swapchain extent (the call does this via
+    /// [`GBufferTargets::sync_gbuffer`] when needed), and both
+    /// `scene.dispatch_group_count_x` and `scene.camera_uniform`'s `count` were sized to
+    /// that extent. Any readback buffer is host-visible and at least
+    /// `swapchain.extent` * 4 bytes (4 B/texel).
+    #[allow(clippy::too_many_arguments)]
+    pub unsafe fn render_gbuffer_frame(
+        &mut self,
+        ctx: &VulkanContext,
+        surface: &Surface<'_>,
+        swapchain: &mut Swapchain<'ctx>,
+        scene: &GBufferScene<'_>,
+        frame: &mut GBufferFrame,
+        width: u32,
+        height: u32,
+        clear: [f32; 4],
+        present_extent: VkExtent2D,
+        readback: Option<&BoundBuffer>,
+    ) -> Result<bool, SwapchainError> {
+        let slot = &self.frames[self.frame_index];
+
+        // --- Wait this frame slot's in-flight fence (free its cmd buffer + targets). ---
+        // SAFETY: `device` is live; `&slot.in_flight` names this slot's fence; an
+        // infinite wait blocks until this slot's previous submit completed, so its
+        // command buffer + acquire semaphore (and the G-buffer targets it used) are free.
+        let raw = unsafe {
+            (self.fns.wait_for_fences)(self.device, 1, &slot.in_flight, VK_TRUE, VK_TIMEOUT_INFINITE)
+        };
+        let result = VkResult::from_raw(raw);
+        if !result.is_success() {
+            return Err(SwapchainError::VkError("vkWaitForFences", result));
+        }
+
+        // Ensure the G-buffer targets (+ descriptor sets) match the COMPOSITE
+        // (`present_extent`) — NOT the swapchain extent. The marcher dispatches +
+        // rasterizes at `present_extent` (the golden composite size); the present-blit
+        // maps that 1:1 into the swapchain's top-left, so a WSI-clamped (wider) swapchain
+        // never resizes the G-buffer. The fence wait above frees THIS slot; a REPLACE
+        // additionally waits idle for sibling slots. (The first call creates them.) The
+        // descriptor sets are written ONCE per composite extent.
+        GBufferTargets::sync_gbuffer(&mut frame.targets, ctx, scene, present_extent)?;
+
+        // --- Acquire the next image (signals this frame's acquire semaphore). ---
+        let mut image_index: u32 = 0;
+        // SAFETY: `device` + `swapchain` are live; an infinite timeout + this slot's
+        // acquire semaphore (null fence) is the standard acquire; `&mut image_index`
+        // is a valid out-pointer.
+        let raw = unsafe {
+            (self.swap_fns.acquire_next_image)(
+                self.device,
+                swapchain.swapchain,
+                VK_TIMEOUT_INFINITE,
+                self.frames[self.frame_index].acquire,
+                VkFence::NULL,
+                &mut image_index,
+            )
+        };
+        let acquire_result = VkResult::from_raw(raw);
+        if acquire_result == VkResult::ERROR_OUT_OF_DATE_KHR {
+            self.recreate(surface, swapchain, width, height)?;
+            return Ok(false);
+        }
+        if !acquire_result.is_success() && acquire_result != VkResult::SUBOPTIMAL_KHR {
+            return Err(SwapchainError::VkError("vkAcquireNextImageKHR", acquire_result));
+        }
+
+        // Only reset the fence once we are committing to a submit (mirrors the
+        // `render_scene_frame` out-of-date discipline so an early return never leaves
+        // the fence unsignalled).
+        // SAFETY: `device` is live; `&...in_flight` names this slot's already-waited
+        // fence; resetting it is valid.
+        let in_flight = self.frames[self.frame_index].in_flight;
+        let raw = unsafe { (self.fns.reset_fences)(self.device, 1, &in_flight) };
+        let result = VkResult::from_raw(raw);
+        if !result.is_success() {
+            return Err(SwapchainError::VkError("vkResetFences", result));
+        }
+
+        let cmd = self.command_buffers[self.frame_index];
+        let image = swapchain_image_for(swapchain, image_index as usize);
+        let view = swapchain.image_views[image_index as usize];
+        let render_finished = self.render_finished[image_index as usize];
+        let acquire = self.frames[self.frame_index].acquire;
+        let targets = frame
+            .targets
+            .as_ref()
+            .expect("invariant: sync_gbuffer made the targets present before record");
+
+        // SAFETY: this slot's fence was just waited so `cmd` is recordable; the
+        // image/view belong to `swapchain`; `scene`'s resources + `targets` were created
+        // on this device and `targets` is synced to `swapchain.extent`; the recorded
+        // path is the raster→depth-sample→march→present-blit (or →readback) 3-pass.
+        unsafe {
+            self.record_gbuffer(
+                cmd,
+                image,
+                view,
+                swapchain.extent,
+                present_extent,
+                clear,
+                scene,
+                targets,
+                readback,
+            )?
+        };
+
+        // --- Submit: wait acquire @ COLOR_ATTACHMENT_OUTPUT, signal render-finished + fence. ---
+        let wait_stage: VkFlags = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        let submit = VkSubmitInfo {
+            s_type: VkStructureType::SubmitInfo,
+            p_next: ptr::null(),
+            wait_semaphore_count: 1,
+            p_wait_semaphores: (&acquire as *const VkSemaphore).cast(),
+            p_wait_dst_stage_mask: &wait_stage,
+            command_buffer_count: 1,
+            p_command_buffers: &cmd,
+            signal_semaphore_count: 1,
+            p_signal_semaphores: (&render_finished as *const VkSemaphore).cast(),
+        };
+        // SAFETY: `queue` is the live present/graphics queue; one submit naming the
+        // recorded `cmd`, waiting this frame's acquire semaphore at
+        // COLOR_ATTACHMENT_OUTPUT, signalling this image's render-finished semaphore
+        // + this frame's in-flight fence; all referenced locals outlive the call.
+        let raw = unsafe { (self.fns.queue_submit)(self.queue, 1, &submit, in_flight) };
+        let result = VkResult::from_raw(raw);
+        if !result.is_success() {
+            return Err(SwapchainError::VkError("vkQueueSubmit", result));
+        }
+
+        // --- Present: wait render-finished. ---
+        let present = VkPresentInfoKhr {
+            s_type: VkStructureType::PresentInfoKhr,
+            p_next: ptr::null(),
+            wait_semaphore_count: 1,
+            p_wait_semaphores: &render_finished,
+            swapchain_count: 1,
+            p_swapchains: &swapchain.swapchain,
+            p_image_indices: &image_index,
+            p_results: ptr::null_mut(),
+        };
+        // SAFETY: `queue` supports present (confirmed in `Surface::new`); the
+        // present-info names the live swapchain + acquired `image_index`, waiting
+        // this image's render-finished semaphore; all locals outlive the call.
+        let raw = unsafe { (self.swap_fns.queue_present)(self.queue, &present) };
+        let present_result = VkResult::from_raw(raw);
+
+        self.frame_index = (self.frame_index + 1) % FRAMES_IN_FLIGHT;
+
+        if present_result == VkResult::ERROR_OUT_OF_DATE_KHR
+            || present_result == VkResult::SUBOPTIMAL_KHR
+        {
+            self.recreate(surface, swapchain, width, height)?;
+            return Ok(false);
+        }
+        if !present_result.is_success() {
+            return Err(SwapchainError::VkError("vkQueuePresentKHR", present_result));
+        }
+        Ok(true)
+    }
+
+    /// Records the Render-P1c on-screen 3-pass G-buffer frame into `cmd`. The barrier
+    /// sequence (one hand-FFI barrier per transition — correct-but-unbatched; P3a
+    /// batches later):
+    ///
+    /// 0. throwaway raster color `UNDEFINED → COLOR_ATTACHMENT_OPTIMAL` (the raster
+    ///    pipeline declares one color format, so the prepass binds a format-compatible
+    ///    throwaway color attachment whose result is discarded — only the depth matters)
+    /// 1. depth `UNDEFINED → DEPTH_ATTACHMENT_OPTIMAL` (TOP_OF_PIPE → (EARLY|LATE)_FRAGMENT_TESTS)
+    /// 2. **(pass A)** `vkCmdBeginRendering` (throwaway color CLEAR/STORE + depth CLEAR
+    ///    to the far plane / STORE), draw the mesh quad — the depth prepass (the
+    ///    swapchain image becomes a color attachment only at pass C)
+    /// 3. depth `DEPTH_ATTACHMENT_OPTIMAL → SHADER_READ_ONLY_OPTIMAL` (DEPTH aspect,
+    ///    (EARLY|LATE)_FRAGMENT_TESTS → COMPUTE_SHADER) — the single dual-use depth
+    ///    barrier (REPLACES the packed path's depth copy + its two transfer barriers)
+    /// 4. the 3 G-buffer images `UNDEFINED → GENERAL` (TOP_OF_PIPE → COMPUTE_SHADER)
+    /// 5. **(pass B)** bind the marcher + the vocabulary set, dispatch (the marcher
+    ///    SAMPLES the depth image, STORES the final composite into ALBEDO)
+    /// 6. ALBEDO `GENERAL → SHADER_READ_ONLY_OPTIMAL` (COMPUTE_SHADER → FRAGMENT_SHADER)
+    /// 7. swapchain `UNDEFINED → COLOR_ATTACHMENT_OPTIMAL` (TOP_OF_PIPE → COLOR_ATTACHMENT_OUTPUT)
+    /// 8. **(pass C)** `vkCmdBeginRendering` (swapchain color CLEAR), fullscreen-sample
+    ///    the ALBEDO 1:1 in the top-left, end
+    /// 9. swapchain `COLOR_ATTACHMENT_OPTIMAL → PRESENT_SRC_KHR` (steady) or
+    ///    `→ TRANSFER_SRC`, copy-to-buffer, `→ PRESENT` (the readback path)
+    ///
+    /// NO `copy_image_to_buffer(depth)` (step 3 replaces it) and NO
+    /// `vkUpdateDescriptorSets` (both sets were written once at `sync_gbuffer`).
+    ///
+    /// Extents: passes A (prepass raster/depth) and B (the marcher dispatch → composite)
+    /// run at `present_extent` (the composite size the G-buffer/depth images, the dispatch
+    /// grid, and the camera UBO `count` were all sized to in `sync_gbuffer`). `extent` is
+    /// the swapchain extent and governs ONLY pass C's clear render-area (step 8) and the
+    /// readback region (step 9); the present-blit viewport is `min(extent, present_extent)`
+    /// at the origin for the exact 1:1 top-left composite present.
+    ///
+    /// # Safety
+    ///
+    /// `cmd` must be recordable (waited free); `image`/`view` must belong to the
+    /// swapchain image presented this frame; `scene`'s pipelines / buffers / samplers
+    /// are live on this device; `targets` was synced to `present_extent` (the composite
+    /// size — its descriptor sets bind `scene`'s SSBO/UBO + its own images, and its
+    /// G-buffer/depth images are allocated at `present_extent`); `scene.dispatch_group_count_x`
+    /// (and `scene.camera_uniform`'s `count`) cover `present_extent`'s pixel count.
+    /// `extent` is the swapchain extent and governs ONLY pass C's clear render-area and the
+    /// readback region; a `Some(readback)` buffer is host-visible and ≥ the swapchain
+    /// image's (`extent`-sized) byte size.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn record_gbuffer(
+        &self,
+        cmd: VkCommandBuffer,
+        image: VkImage,
+        view: VkImageView,
+        extent: VkExtent2D,
+        present_extent: VkExtent2D,
+        clear: [f32; 4],
+        scene: &GBufferScene<'_>,
+        targets: &GBufferTargets,
+        readback: Option<&BoundBuffer>,
+    ) -> Result<(), SwapchainError> {
+        let begin = VkCommandBufferBeginInfo {
+            s_type: VkStructureType::CommandBufferBeginInfo,
+            p_next: ptr::null(),
+            flags: VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+            p_inheritance_info: ptr::null(),
+        };
+        // SAFETY: `cmd` is recordable per this fn's contract; `begin` is a
+        // fully-initialized one-time-submit begin-info.
+        let raw = unsafe { (self.fns.begin_command_buffer)(cmd, &begin) };
+        let result = VkResult::from_raw(raw);
+        if !result.is_success() {
+            return Err(SwapchainError::VkError("vkBeginCommandBuffer", result));
+        }
+
+        // === Pass A: rasterize the mesh quad's depth into the D32 depth IMAGE. ===
+
+        // (0) Barrier (throwaway raster color): UNDEFINED → COLOR_ATTACHMENT_OPTIMAL.
+        let raster_color_barrier = VkImageMemoryBarrier {
+            s_type: VkStructureType::ImageMemoryBarrier,
+            p_next: ptr::null(),
+            src_access_mask: 0,
+            dst_access_mask: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+            old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+            new_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+            dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+            image: targets.raster_color.image,
+            subresource_range: COLOR_SUBRESOURCE_RANGE,
+        };
+        // SAFETY: recording is open; one image barrier on the live throwaway color
+        // image; TOP_OF_PIPE→COLOR_ATTACHMENT_OUTPUT with UNDEFINED→COLOR is the
+        // superset-correct first transition; `&raster_color_barrier` outlives the call.
+        unsafe {
+            (self.fns.cmd_pipeline_barrier)(
+                cmd,
+                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                0,
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                1,
+                (&raster_color_barrier as *const VkImageMemoryBarrier).cast(),
+            );
+        }
+
+        // (1) Barrier (depth): UNDEFINED → DEPTH_ATTACHMENT_OPTIMAL at the
+        // early/late-fragment-test stage (the depth-write access, DEPTH aspect).
+        let to_depth = VkImageMemoryBarrier {
+            s_type: VkStructureType::ImageMemoryBarrier,
+            p_next: ptr::null(),
+            src_access_mask: 0,
+            dst_access_mask: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+            old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+            new_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+            src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+            dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+            image: targets.depth.image,
+            subresource_range: DEPTH_SUBRESOURCE_RANGE,
+        };
+        // SAFETY: recording is open; one image barrier on the live depth image;
+        // TOP_OF_PIPE→(EARLY|LATE)_FRAGMENT_TESTS with UNDEFINED→DEPTH is the
+        // superset-correct first depth transition; `&to_depth` outlives the call.
+        unsafe {
+            (self.fns.cmd_pipeline_barrier)(
+                cmd,
+                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
+                    | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                0,
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                1,
+                (&to_depth as *const VkImageMemoryBarrier).cast(),
+            );
+        }
+
+        // (2) Dynamic rendering at the marcher's extent: a throwaway color attachment
+        // (CLEAR/STORE, format-compatible with the raster pipeline's declared color
+        // format, never read) + the depth attachment (CLEAR to the far plane / STORE).
+        // The render area is the marcher's extent so the rasterized depth covers exactly
+        // the dispatched pixels; the swapchain may be WSI-clamped wider (the present-blit
+        // handles that).
+        let raster_color_attachment = VkRenderingAttachmentInfo {
+            s_type: VkStructureType::RenderingAttachmentInfo,
+            p_next: ptr::null(),
+            image_view: targets.raster_color.view,
+            image_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            resolve_mode: 0,
+            resolve_image_view: VkImageView::NULL,
+            resolve_image_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+            load_op: VK_ATTACHMENT_LOAD_OP_CLEAR,
+            store_op: VK_ATTACHMENT_STORE_OP_STORE,
+            clear_value: VkClearValue {
+                color: VkClearColorValue {
+                    float32: [0.0, 0.0, 0.0, 1.0],
+                },
+            },
+        };
+        let depth_attachment = VkRenderingAttachmentInfo {
+            s_type: VkStructureType::RenderingAttachmentInfo,
+            p_next: ptr::null(),
+            image_view: targets.depth.view,
+            image_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+            resolve_mode: 0,
+            resolve_image_view: VkImageView::NULL,
+            resolve_image_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+            load_op: VK_ATTACHMENT_LOAD_OP_CLEAR,
+            store_op: VK_ATTACHMENT_STORE_OP_STORE,
+            clear_value: VkClearValue {
+                depth_stencil: VkClearDepthStencilValue {
+                    depth: 1.0,
+                    stencil: 0,
+                },
+            },
+        };
+        let raster_area = VkRect2D {
+            offset: VkOffset2D { x: 0, y: 0 },
+            extent: present_extent,
+        };
+        let raster_rendering = VkRenderingInfo {
+            s_type: VkStructureType::RenderingInfo,
+            p_next: ptr::null(),
+            flags: 0,
+            render_area: raster_area,
+            layer_count: 1,
+            view_mask: 0,
+            color_attachment_count: 1,
+            p_color_attachments: &raster_color_attachment,
+            p_depth_attachment: (&depth_attachment as *const VkRenderingAttachmentInfo).cast(),
+            p_stencil_attachment: ptr::null(),
+        };
+        let raster_viewport = VkViewport {
+            x: 0.0,
+            y: 0.0,
+            width: present_extent.width as f32,
+            height: present_extent.height as f32,
+            min_depth: 0.0,
+            max_depth: 1.0,
+        };
+        let vertex_offset: VkDeviceSize = 0;
+        // SAFETY: recording is open; `raster_rendering` is fully initialized — its color
+        // attachment names the live throwaway color view (now COLOR_ATTACHMENT_OPTIMAL)
+        // and its depth attachment the live depth view (now DEPTH_ATTACHMENT_OPTIMAL);
+        // dynamic rendering is enabled on this device. The raster pipeline + its VERTEX
+        // push range + the vertex buffer all belong to this device (caller contract) and
+        // the pipeline's declared color/depth formats equal the bound attachments' (W2-b).
+        // The MVP push is `GBUFFER_MVP_BYTES` at offset 0 into the VERTEX range;
+        // `vertex_offset`/`raster_viewport`/`raster_area` locals outlive the bracketed
+        // calls; `draw(vertex_count, 1, 0, 0)` reads the bound vertices. Begin/End
+        // bracket pass A exactly.
+        unsafe {
+            (self.fns.cmd_begin_rendering)(cmd, &raster_rendering);
+            (self.fns.cmd_bind_pipeline)(
+                cmd,
+                VK_PIPELINE_BIND_POINT_GRAPHICS,
+                scene.raster_pipeline.pipeline,
+            );
+            (self.fns.cmd_push_constants)(
+                cmd,
+                scene.raster_pipeline.layout,
+                VK_SHADER_STAGE_VERTEX_BIT,
+                0,
+                scene.mvp.len() as u32,
+                scene.mvp.as_ptr().cast(),
+            );
+            (self.fns.cmd_bind_vertex_buffers)(
+                cmd,
+                0,
+                1,
+                &scene.vertex_buffer.buffer,
+                &vertex_offset,
+            );
+            (self.fns.cmd_set_viewport)(cmd, 0, 1, &raster_viewport);
+            (self.fns.cmd_set_scissor)(cmd, 0, 1, &raster_area);
+            (self.fns.cmd_draw)(cmd, scene.vertex_count, 1, 0, 0);
+            (self.fns.cmd_end_rendering)(cmd);
+        }
+
+        // (3) THE single depth dual-use barrier: DEPTH_ATTACHMENT_OPTIMAL →
+        // SHADER_READ_ONLY_OPTIMAL. Depth WRITES happen at LATE_FRAGMENT_TESTS; the
+        // marcher SAMPLES at COMPUTE_SHADER. This one barrier (DEPTH aspect) makes the
+        // write available + visible to the shader-read and transitions the layout for
+        // sampling. It REPLACES the packed path's depth→buffer copy + its two transfer
+        // barriers — there is NO copy_image_to_buffer(depth) here.
+        let depth_to_sampled = VkImageMemoryBarrier {
+            s_type: VkStructureType::ImageMemoryBarrier,
+            p_next: ptr::null(),
+            src_access_mask: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+            dst_access_mask: VK_ACCESS_SHADER_READ_BIT,
+            old_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+            new_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+            dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+            image: targets.depth.image,
+            subresource_range: DEPTH_SUBRESOURCE_RANGE,
+        };
+        // SAFETY: recording is open; (EARLY|LATE)_FRAGMENT_TESTS→COMPUTE_SHADER with
+        // DEPTH_WRITE→SHADER_READ and DEPTH→SHADER_READ_ONLY makes the rasterized depth
+        // available + visible to the marcher's sample; `&depth_to_sampled` outlives the
+        // call.
+        unsafe {
+            (self.fns.cmd_pipeline_barrier)(
+                cmd,
+                VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
+                    | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                0,
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                1,
+                (&depth_to_sampled as *const VkImageMemoryBarrier).cast(),
+            );
+        }
+
+        // (4) The 3 G-buffer storage images: UNDEFINED → GENERAL (a compute store).
+        for tex in [&targets.albedo, &targets.normal, &targets.material] {
+            let to_general = VkImageMemoryBarrier {
+                s_type: VkStructureType::ImageMemoryBarrier,
+                p_next: ptr::null(),
+                src_access_mask: 0,
+                dst_access_mask: VK_ACCESS_SHADER_WRITE_BIT,
+                old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+                new_layout: VK_IMAGE_LAYOUT_GENERAL,
+                src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                image: tex.image,
+                subresource_range: COLOR_SUBRESOURCE_RANGE,
+            };
+            // SAFETY: recording is open; one image barrier on the live G-buffer image;
+            // TOP_OF_PIPE→COMPUTE_SHADER with UNDEFINED→GENERAL is the superset-correct
+            // first storage-image transition; `&to_general` outlives the iteration.
+            unsafe {
+                (self.fns.cmd_pipeline_barrier)(
+                    cmd,
+                    VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    0,
+                    0,
+                    ptr::null(),
+                    0,
+                    ptr::null(),
+                    1,
+                    (&to_general as *const VkImageMemoryBarrier).cast(),
+                );
+            }
+        }
+
+        // === Pass B: the marcher SAMPLES the depth image, STORES the G-buffer. ===
+        // (5) Bind the marcher + the vocabulary set (written ONCE at sync_gbuffer; NO
+        // per-frame update) against the marcher's OWN dedicated layout, dispatch.
+        // SAFETY: recording is open; the marcher pipeline + its layout (declaring
+        // `vocab_layout` at set 0) are live on this device (caller contract); the
+        // vocabulary set binds the SSBO/UBO + the now-transitioned depth (SHADER_READ)
+        // + G-buffer (GENERAL) images; `dispatch_group_count_x` covers `present_extent`'s
+        // pixel count (the G-buffer images + dispatch grid + camera UBO `count` are all
+        // sized to `present_extent`, the composite — NOT the swapchain `extent`; caller
+        // contract); `&...descriptor_set` is a single-element local alive
+        // for the call (first_set 0, count 1, zero dynamic offsets).
+        unsafe {
+            (self.fns.cmd_bind_pipeline)(
+                cmd,
+                VK_PIPELINE_BIND_POINT_COMPUTE,
+                scene.marcher.pipeline,
+            );
+            (self.fns.cmd_bind_descriptor_sets)(
+                cmd,
+                VK_PIPELINE_BIND_POINT_COMPUTE,
+                scene.marcher.layout,
+                0,
+                1,
+                &targets.vocab_set.descriptor_set,
+                0,
+                ptr::null(),
+            );
+            (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
+        }
+
+        // (6) ALBEDO: GENERAL → SHADER_READ_ONLY_OPTIMAL for the present-blit sample.
+        let albedo_to_sampled = VkImageMemoryBarrier {
+            s_type: VkStructureType::ImageMemoryBarrier,
+            p_next: ptr::null(),
+            src_access_mask: VK_ACCESS_SHADER_WRITE_BIT,
+            dst_access_mask: VK_ACCESS_SHADER_READ_BIT,
+            old_layout: VK_IMAGE_LAYOUT_GENERAL,
+            new_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+            dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+            image: targets.albedo.image,
+            subresource_range: COLOR_SUBRESOURCE_RANGE,
+        };
+        // SAFETY: recording is open; COMPUTE_SHADER→FRAGMENT_SHADER with
+        // SHADER_WRITE→SHADER_READ and GENERAL→SHADER_READ_ONLY makes the marcher's
+        // composite store available + visible to the present-blit's sample;
+        // `&albedo_to_sampled` outlives the call.
+        unsafe {
+            (self.fns.cmd_pipeline_barrier)(
+                cmd,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                0,
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                1,
+                (&albedo_to_sampled as *const VkImageMemoryBarrier).cast(),
+            );
+        }
+
+        // === Pass C: present-blit the ALBEDO (final composite) into the swapchain. ===
+
+        // (7) Barrier (swapchain color): UNDEFINED → COLOR_ATTACHMENT_OPTIMAL.
+        let to_color = VkImageMemoryBarrier {
+            s_type: VkStructureType::ImageMemoryBarrier,
+            p_next: ptr::null(),
+            src_access_mask: 0,
+            dst_access_mask: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+            old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+            new_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+            dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+            image,
+            subresource_range: COLOR_SUBRESOURCE_RANGE,
+        };
+        // SAFETY: recording is open; one image barrier on the live swapchain `image`;
+        // TOP_OF_PIPE→COLOR_ATTACHMENT_OUTPUT with UNDEFINED→COLOR is the
+        // superset-correct acquire→render transition; `&to_color` outlives the call.
+        unsafe {
+            (self.fns.cmd_pipeline_barrier)(
+                cmd,
+                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                0,
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                1,
+                (&to_color as *const VkImageMemoryBarrier).cast(),
+            );
+        }
+
+        // (8) Dynamic rendering: the swapchain image (CLEAR/STORE), no depth. The
+        // present pipeline's declared color format equals the swapchain format (W2-b).
+        let color_attachment = VkRenderingAttachmentInfo {
+            s_type: VkStructureType::RenderingAttachmentInfo,
+            p_next: ptr::null(),
+            image_view: view,
+            image_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            resolve_mode: 0,
+            resolve_image_view: VkImageView::NULL,
+            resolve_image_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+            load_op: VK_ATTACHMENT_LOAD_OP_CLEAR,
+            store_op: VK_ATTACHMENT_STORE_OP_STORE,
+            clear_value: VkClearValue {
+                color: VkClearColorValue { float32: clear },
+            },
+        };
+        let present_rendering = VkRenderingInfo {
+            s_type: VkStructureType::RenderingInfo,
+            p_next: ptr::null(),
+            flags: 0,
+            render_area: VkRect2D {
+                offset: VkOffset2D { x: 0, y: 0 },
+                extent,
+            },
+            layer_count: 1,
+            view_mask: 0,
+            color_attachment_count: 1,
+            p_color_attachments: &color_attachment,
+            p_depth_attachment: ptr::null(),
+            p_stencil_attachment: ptr::null(),
+        };
+        // Present the composite at its NATIVE size in the swapchain image's TOP-LEFT,
+        // NOT stretched to the (possibly WSI-clamped wider) swapchain extent. The
+        // viewport/scissor are clamped to `min(swapchain_extent, present_extent)` at
+        // origin: the fullscreen triangle writes exactly the composite's pixels 1:1, and
+        // a wider swapchain image's remainder keeps the clear color. A 1:1 top-left
+        // mapping makes a per-texel golden exact regardless of any WSI clamp.
+        let blit_extent = VkExtent2D {
+            width: extent.width.min(present_extent.width),
+            height: extent.height.min(present_extent.height),
+        };
+        let blit_viewport = VkViewport {
+            x: 0.0,
+            y: 0.0,
+            width: blit_extent.width as f32,
+            height: blit_extent.height as f32,
+            min_depth: 0.0,
+            max_depth: 1.0,
+        };
+        let blit_scissor = VkRect2D {
+            offset: VkOffset2D { x: 0, y: 0 },
+            extent: blit_extent,
+        };
+        // SAFETY: recording is open; `present_rendering` is fully initialized — its color
+        // attachment names the live swapchain `view` (now COLOR_ATTACHMENT_OPTIMAL);
+        // dynamic rendering is enabled. The present pipeline + its bind-group layout
+        // belong to this device (caller contract) and its declared color format equals
+        // the swapchain's (W2-b). The present set binds the ALBEDO image (now
+        // SHADER_READ_ONLY_OPTIMAL) + sampler at set 0 of the pipeline's layout;
+        // `blit_viewport`/`blit_scissor` outlive the bracketed calls; `draw(3, 1, 0, 0)`
+        // is the `SV_VertexID` fullscreen triangle (no vertex buffer). Begin/End bracket
+        // pass C exactly.
+        unsafe {
+            (self.fns.cmd_begin_rendering)(cmd, &present_rendering);
+            (self.fns.cmd_bind_pipeline)(
+                cmd,
+                VK_PIPELINE_BIND_POINT_GRAPHICS,
+                scene.present_pipeline.pipeline,
+            );
+            (self.fns.cmd_bind_descriptor_sets)(
+                cmd,
+                VK_PIPELINE_BIND_POINT_GRAPHICS,
+                scene.present_pipeline.layout,
+                0,
+                1,
+                &targets.present_set.descriptor_set,
+                0,
+                ptr::null(),
+            );
+            (self.fns.cmd_set_viewport)(cmd, 0, 1, &blit_viewport);
+            (self.fns.cmd_set_scissor)(cmd, 0, 1, &blit_scissor);
+            (self.fns.cmd_draw)(cmd, 3, 1, 0, 0);
+            (self.fns.cmd_end_rendering)(cmd);
+        }
+
+        // (9) The post-draw swapchain transition: steady → PRESENT, or the readback
+        // path → TRANSFER_SRC, copy-to-buffer, → PRESENT (identical to
+        // `record_present_sampled`'s branch — the swapchain still presents after the
+        // copy).
+        match readback {
+            None => {
+                let to_present = VkImageMemoryBarrier {
+                    s_type: VkStructureType::ImageMemoryBarrier,
+                    p_next: ptr::null(),
+                    src_access_mask: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                    dst_access_mask: 0,
+                    old_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                    new_layout: VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                    src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                    dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                    image,
+                    subresource_range: COLOR_SUBRESOURCE_RANGE,
+                };
+                // SAFETY: recording is open; COLOR_ATTACHMENT_OUTPUT→BOTTOM_OF_PIPE with
+                // COLOR→PRESENT makes the blit's writes visible to the present engine;
+                // `&to_present` outlives the call.
+                unsafe {
+                    (self.fns.cmd_pipeline_barrier)(
+                        cmd,
+                        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                        0,
+                        0,
+                        ptr::null(),
+                        0,
+                        ptr::null(),
+                        1,
+                        (&to_present as *const VkImageMemoryBarrier).cast(),
+                    );
+                }
+            }
+            Some(staging) => {
+                let to_transfer = VkImageMemoryBarrier {
+                    s_type: VkStructureType::ImageMemoryBarrier,
+                    p_next: ptr::null(),
+                    src_access_mask: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                    dst_access_mask: VK_ACCESS_TRANSFER_READ_BIT,
+                    old_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                    new_layout: VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                    dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                    image,
+                    subresource_range: COLOR_SUBRESOURCE_RANGE,
+                };
+                // SAFETY: recording is open; COLOR_ATTACHMENT_OUTPUT→TRANSFER with
+                // COLOR→TRANSFER_SRC makes the blit's writes available to the copy;
+                // `&to_transfer` outlives the call.
+                unsafe {
+                    (self.fns.cmd_pipeline_barrier)(
+                        cmd,
+                        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        0,
+                        0,
+                        ptr::null(),
+                        0,
+                        ptr::null(),
+                        1,
+                        (&to_transfer as *const VkImageMemoryBarrier).cast(),
+                    );
+                }
+
+                let region = VkBufferImageCopy {
+                    buffer_offset: 0,
+                    buffer_row_length: 0,
+                    buffer_image_height: 0,
+                    image_subresource: VkImageSubresourceLayers {
+                        aspect_mask: VK_IMAGE_ASPECT_COLOR_BIT,
+                        mip_level: 0,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    },
+                    image_offset: VkOffset3D { x: 0, y: 0, z: 0 },
+                    image_extent: VkExtent3D {
+                        width: extent.width,
+                        height: extent.height,
+                        depth: 1,
+                    },
+                };
+                // SAFETY: recording is open; the swapchain image is TRANSFER_SRC_OPTIMAL
+                // per the barrier above; one full-image tightly-packed color region
+                // copies into the live host-visible `staging.buffer` (≥ the image's byte
+                // size per this fn's contract); `&region` outlives the call. This copies
+                // the SWAPCHAIN image (the on-screen golden) — NOT the depth (the depth
+                // copy is the deletion target this path proves absent).
+                unsafe {
+                    (self.fns.cmd_copy_image_to_buffer)(
+                        cmd,
+                        image,
+                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                        staging.buffer,
+                        1,
+                        &region,
+                    );
+                }
+
+                let to_present = VkImageMemoryBarrier {
+                    s_type: VkStructureType::ImageMemoryBarrier,
+                    p_next: ptr::null(),
+                    src_access_mask: VK_ACCESS_TRANSFER_READ_BIT,
+                    dst_access_mask: 0,
+                    old_layout: VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    new_layout: VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                    src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                    dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                    image,
+                    subresource_range: COLOR_SUBRESOURCE_RANGE,
+                };
+                // SAFETY: recording is open; TRANSFER→BOTTOM_OF_PIPE with
+                // TRANSFER_SRC→PRESENT releases the image to the present engine after the
+                // readback copy; `&to_present` outlives the call.
+                unsafe {
+                    (self.fns.cmd_pipeline_barrier)(
+                        cmd,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                        0,
+                        0,
+                        ptr::null(),
+                        0,
+                        ptr::null(),
+                        1,
+                        (&to_present as *const VkImageMemoryBarrier).cast(),
+                    );
+                }
+            }
+        }
+
+        // SAFETY: recording is open; ending it matches the `begin` above.
+        let raw = unsafe { (self.fns.end_command_buffer)(cmd) };
+        let result = VkResult::from_raw(raw);
+        if !result.is_success() {
+            return Err(SwapchainError::VkError("vkEndCommandBuffer", result));
+        }
+        Ok(())
+    }
+
     /// Waits the device idle, recreates the swapchain to `width`×`height`, and
     /// rebuilds the per-image render-finished semaphores (the image count may
     /// change). A `ZeroExtent` (minimized) is swallowed — the caller retries.
@@ -2203,6 +3043,465 @@ pub struct SampledComposite<'a> {
     /// This denotes the TEXTURE, never the swapchain — passing the swapchain extent
     /// here would re-introduce the stretch this field exists to remove.
     pub texture_extent: VkExtent2D,
+}
+
+/// The byte size of the marcher's MVP push constant (a `float4x4`), pushed to the
+/// mesh-raster pipeline's `VERTEX` range each on-screen G-buffer frame (Render P1c).
+pub const GBUFFER_MVP_BYTES: usize = 64;
+
+/// The on-screen Render-P1c G-buffer frame's STATIC inputs: the resources the
+/// [`Renderer::render_gbuffer_frame`] 3-pass needs that do NOT depend on the
+/// (WSI-clamped) swapchain extent. The EXTENT-dependent targets (depth + the MRT
+/// G-buffer images + the descriptor sets bound against them) are owned by
+/// [`GBufferTargets`] and (re)allocated by [`GBufferTargets::sync_gbuffer`].
+///
+/// This is the P1c on-screen counterpart of the P1b OFFSCREEN driver
+/// (`tests/sdf_gbuffer_hybrid.rs::run_gbuffer_hybrid`): it mirrors the SAME
+/// vocabulary (SSBO edit-list, sampled depth, albedo/normal/material storage, camera
+/// UBO) and the SAME marcher compute pipeline, but routes the marcher's ALBEDO
+/// (final composite) onto the swapchain image via a present-blit (pass C) instead of a
+/// `copy_image_to_buffer` readback.
+///
+/// # Borrow bundle (like [`SampledComposite`])
+///
+/// The caller creates each resource through the [`RhiDevice`] trait, OWNS it, and
+/// tears it down; the `'a` lifetime ties the bundle to those borrows for the frame
+/// call. The bundle keeps [`Renderer::render_gbuffer_frame`]'s signature compact and
+/// keeps the recorder out of the resource-creation business (the P1b marcher +
+/// G-buffer + present-blit are REUSED verbatim).
+///
+/// # Static inputs only — the camera UBO + SSBO are seeded ONCE
+///
+/// The camera/extent UBO (`camera_uniform`) and the edit-list SSBO (`edit_list`) are
+/// host-seeded by the caller BEFORE the present loop and are READ-ONLY for the
+/// marcher across every frame — so multiple frames-in-flight may dispatch against
+/// them with no host write-after-read hazard (the SAME read-only-resident contract
+/// [`SampledComposite`] relies on for its texture). The vocabulary descriptor set
+/// that binds them is written ONCE per extent in [`GBufferTargets::sync_gbuffer`],
+/// NEVER per frame.
+///
+/// # W2-b format contracts
+///
+/// `raster_pipeline`'s declared depth format MUST be [`Format::D32Sfloat`] (the
+/// depth image the recorder rasterizes into) and its single color format the
+/// throwaway-raster format; `marcher`'s layout MUST declare `vocab_layout` at `set
+/// 0`; `present_pipeline`'s `color_formats[0]` MUST equal the swapchain format and
+/// its layout MUST declare `present_layout` (one COMBINED_IMAGE_SAMPLER) — or the
+/// validation layer faults at record/draw time.
+pub struct GBufferScene<'a> {
+    /// The depth-testing mesh-raster graphics pipeline (rung-3 vertex+fragment): the
+    /// fronto-parallel quad drawn into the D32 depth image (pass A).
+    pub raster_pipeline: &'a VulkanGraphicsPipeline,
+    /// The mesh quad's host-visible vertex buffer (position + color).
+    pub vertex_buffer: &'a BoundBuffer,
+    /// The number of vertices to `draw` (the mesh quad's vertex count, e.g. 6).
+    pub vertex_count: u32,
+    /// The 64-byte `float4x4` MVP pushed to `raster_pipeline`'s `VERTEX` range.
+    pub mvp: [u8; GBUFFER_MVP_BYTES],
+    /// The P1b SDF G-buffer marcher compute pipeline (its layout declares
+    /// `vocab_layout` at `set 0`). Byte-untouched from P1b (pass B).
+    pub marcher: &'a ComputePipeline,
+    /// The vocabulary bind-group LAYOUT { SSBO @0, sampled depth @1, storage albedo
+    /// @2, storage normal @3, storage material @4, UNIFORM camera @5 }. The renderer
+    /// allocates + writes a SET against it once per extent (pointing at the
+    /// per-extent G-buffer images + the bundle's `edit_list` / `camera_uniform` /
+    /// `depth_sampler`).
+    pub vocab_layout: &'a VulkanBindGroupLayout,
+    /// The edit-list StorageBuffer (binding 0), host-seeded ONCE before the loop.
+    pub edit_list: &'a BoundBuffer,
+    /// The camera/extent UNIFORM buffer (binding 5), host-seeded ONCE before the loop
+    /// (at the WSI-clamped extent the recorder dispatches).
+    pub camera_uniform: &'a BoundBuffer,
+    /// The sampler bound alongside the depth image at binding 1 (ignored by the
+    /// marcher's unfiltered `.Load`, but the SAMPLED_IMAGE descriptor requires one).
+    pub depth_sampler: &'a VulkanSampler,
+    /// The fullscreen-sample present pipeline (pass C): samples the ALBEDO image into
+    /// the swapchain (`color_formats[0]` == the swapchain format).
+    pub present_pipeline: &'a VulkanGraphicsPipeline,
+    /// The present-sample bind-group LAYOUT (one COMBINED_IMAGE_SAMPLER @ set 0). The
+    /// renderer allocates + writes a SET against it once per extent (pointing at the
+    /// per-extent ALBEDO image + `present_sampler`).
+    pub present_layout: &'a VulkanBindGroupLayout,
+    /// The sampler the present-blit samples the ALBEDO image with (nearest/clamp for
+    /// a 1:1 sample).
+    pub present_sampler: &'a VulkanSampler,
+    /// The marcher's 1D dispatch group count (`ceil(pixels / LOCAL_SIZE_X)` at the
+    /// WSI-clamped extent the recorder dispatches).
+    pub dispatch_group_count_x: u32,
+}
+
+/// The per-extent on-screen G-buffer targets for [`Renderer::render_gbuffer_frame`]:
+/// the D32 depth image (rasterize into + sample), the MRT storage G-buffer (albedo /
+/// normal / material), and the two descriptor sets bound against them (the marcher
+/// vocabulary set + the present-sample set). (Re)allocated ONLY on an extent change
+/// by [`GBufferTargets::sync_gbuffer`] — NEVER per frame.
+///
+/// This is the renderer-owned counterpart of the [`Scene`]'s [`DepthImage`] (the
+/// per-extent depth), generalized to the full image-based G-buffer + its descriptor
+/// sets. Owned by value; torn down through [`GBufferTargets::destroy`].
+///
+/// # The descriptor sets are written ONCE per extent (NO per-frame update)
+///
+/// `vocab_set` binds {SSBO, sampled depth, albedo/normal/material storage, camera
+/// UBO} and `present_set` binds {ALBEDO combined-image-sampler}; both are written at
+/// `create_bind_group` time inside `sync_gbuffer` and reused unchanged across every
+/// frame at that extent. The recorder records NO `vkUpdateDescriptorSets` — only the
+/// per-frame barriers + bind + dispatch + draw. On an extent change `sync_gbuffer`
+/// waits the device idle, destroys the old targets, and rebuilds them (the same
+/// belt-and-braces [`Scene::sync_depth`] uses).
+pub struct GBufferTargets {
+    /// The D32_SFLOAT depth image: DEPTH_STENCIL_ATTACHMENT (rasterize into) |
+    /// SAMPLED (the marcher's `.Load`). Re-`UNDEFINED`'d every frame by the recorder.
+    depth: VulkanTexture,
+    /// A throwaway COLOR_ATTACHMENT image for the depth-prepass (pass A). The raster
+    /// pipeline declares a single color format (W2-b), so the dynamic-rendering pass
+    /// MUST bind one format-compatible color attachment; its result is never read (only
+    /// the depth is consumed) — mirrors the P1b offscreen driver's throwaway `color`.
+    raster_color: VulkanTexture,
+    /// The ALBEDO storage image (R8G8B8A8): the marcher's FINAL composite sink; also
+    /// sampled by the present-blit (pass C).
+    albedo: VulkanTexture,
+    /// The NORMAL storage image (R8G8B8A8): a marcher G-buffer attribute (unused by
+    /// the P1c present, written for the deferred-shading-split P7 future).
+    normal: VulkanTexture,
+    /// The MATERIAL storage image (R8G8B8A8): a marcher G-buffer attribute (unused by
+    /// the P1c present, written for the deferred-shading-split P7 future).
+    material: VulkanTexture,
+    /// The marcher vocabulary descriptor set, written ONCE against
+    /// [`GBufferScene::vocab_layout`] (pointing at `depth`/`albedo`/`normal`/`material`
+    /// + the scene's SSBO/UBO/sampler). NO per-frame update.
+    vocab_set: VulkanBindGroup,
+    /// The present-blit descriptor set, written ONCE against
+    /// [`GBufferScene::present_layout`] (one COMBINED_IMAGE_SAMPLER pointing at
+    /// `albedo` + the scene's present sampler). NO per-frame update.
+    present_set: VulkanBindGroup,
+    /// The extent the images were created at (so [`GBufferTargets::sync_gbuffer`] can
+    /// detect a resize and reallocate).
+    extent: VkExtent2D,
+}
+
+/// The G-buffer color format (albedo / normal / material): `R8G8B8A8_UNORM`, the
+/// STORAGE-image store target the marcher writes (matches the P1b offscreen driver's
+/// `GBUFFER_FORMAT`). The ALBEDO image is also `SAMPLED` (the present-blit) — never
+/// stretched; presented 1:1 in the swapchain's top-left like [`SampledComposite`].
+const GBUFFER_FORMAT: Format = Format::R8G8B8A8Unorm;
+
+/// The throwaway color-attachment format for the depth-prepass (pass A). The raster
+/// pipeline declares a single color format (W2-b); the prepass binds a format-matching
+/// throwaway color image whose result is discarded (only the depth is consumed). MUST
+/// equal the `color_formats[0]` the caller declares on [`GBufferScene::raster_pipeline`]
+/// (the P1b offscreen driver uses `R8G8B8A8_UNORM`).
+const GBUFFER_RASTER_COLOR_FORMAT: Format = Format::R8G8B8A8Unorm;
+
+impl GBufferTargets {
+    /// Creates a 2D `R8G8B8A8_UNORM` storage image at `extent` with `usage`. A small
+    /// helper shared by the albedo/normal/material allocations in [`Self::create`].
+    fn create_gbuffer_image(
+        ctx: &VulkanContext,
+        extent: VkExtent2D,
+        usage: ImageUsage,
+    ) -> Result<VulkanTexture, SwapchainError> {
+        let desc = TextureDesc {
+            width: extent.width,
+            height: extent.height,
+            depth: 1,
+            format: GBUFFER_FORMAT,
+            dimension: TextureDimension::D2,
+            usage,
+        };
+        RhiDevice::create_texture(ctx, &desc).map_err(SwapchainError::DepthImage)
+    }
+
+    /// Allocates the depth + MRT G-buffer images at `extent` and writes the marcher
+    /// vocabulary set + the present-sample set against them (ONCE). The caller
+    /// ([`GBufferTargets::sync_gbuffer`]) destroys any prior targets + waits idle
+    /// first; this only builds the new ones.
+    ///
+    /// On any partial failure every object created so far in this call is torn down
+    /// in reverse order before the error returns (no leak on the error path), exactly
+    /// like [`Scene::sync_depth`]'s build-before-teardown discipline.
+    fn create(
+        ctx: &VulkanContext,
+        scene: &GBufferScene<'_>,
+        extent: VkExtent2D,
+    ) -> Result<Self, SwapchainError> {
+        // Depth: DEPTH_STENCIL_ATTACHMENT (rasterize into) | SAMPLED (marcher .Load).
+        let depth = {
+            let desc = TextureDesc {
+                width: extent.width,
+                height: extent.height,
+                depth: 1,
+                format: Format::D32Sfloat,
+                dimension: TextureDimension::D2,
+                usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT | ImageUsage::SAMPLED,
+            };
+            RhiDevice::create_texture(ctx, &desc).map_err(SwapchainError::DepthImage)?
+        };
+
+        // Throwaway COLOR_ATTACHMENT for the depth prepass (never read; the raster
+        // pipeline declares one color format so the pass must bind one).
+        let raster_color = {
+            let desc = TextureDesc {
+                width: extent.width,
+                height: extent.height,
+                depth: 1,
+                format: GBUFFER_RASTER_COLOR_FORMAT,
+                dimension: TextureDimension::D2,
+                usage: ImageUsage::COLOR_ATTACHMENT,
+            };
+            match RhiDevice::create_texture(ctx, &desc) {
+                Ok(t) => t,
+                Err(e) => {
+                    // SAFETY: `depth` was created on `ctx` just above; referenced by no
+                    // submission; destroyed exactly once on this error path.
+                    unsafe { RhiDevice::destroy_texture(ctx, depth) };
+                    return Err(SwapchainError::DepthImage(e));
+                }
+            }
+        };
+
+        // ALBEDO: STORAGE (marcher store) | SAMPLED (the present-blit, pass C).
+        let albedo = match Self::create_gbuffer_image(
+            ctx,
+            extent,
+            ImageUsage::STORAGE | ImageUsage::SAMPLED,
+        ) {
+            Ok(t) => t,
+            Err(e) => {
+                // SAFETY: `raster_color`/`depth` were created on `ctx` above; referenced
+                // by no submission; each destroyed exactly once on this error path.
+                unsafe {
+                    RhiDevice::destroy_texture(ctx, raster_color);
+                    RhiDevice::destroy_texture(ctx, depth);
+                }
+                return Err(e);
+            }
+        };
+        // NORMAL / MATERIAL: STORAGE only (written, never sampled by P1c).
+        let normal = match Self::create_gbuffer_image(ctx, extent, ImageUsage::STORAGE) {
+            Ok(t) => t,
+            Err(e) => {
+                // SAFETY: the three textures above were created on `ctx`; referenced by
+                // no submission; each destroyed exactly once on this error path.
+                unsafe {
+                    RhiDevice::destroy_texture(ctx, albedo);
+                    RhiDevice::destroy_texture(ctx, raster_color);
+                    RhiDevice::destroy_texture(ctx, depth);
+                }
+                return Err(e);
+            }
+        };
+        let material = match Self::create_gbuffer_image(ctx, extent, ImageUsage::STORAGE) {
+            Ok(t) => t,
+            Err(e) => {
+                // SAFETY: the four textures above were created on `ctx`; referenced by
+                // no submission; each destroyed exactly once on this error path.
+                unsafe {
+                    RhiDevice::destroy_texture(ctx, normal);
+                    RhiDevice::destroy_texture(ctx, albedo);
+                    RhiDevice::destroy_texture(ctx, raster_color);
+                    RhiDevice::destroy_texture(ctx, depth);
+                }
+                return Err(e);
+            }
+        };
+
+        // The marcher vocabulary set, written ONCE here (NO per-frame update). The
+        // entry order matches the layout: SSBO @0, sampled depth @1, storage albedo @2,
+        // storage normal @3, storage material @4, UNIFORM camera @5.
+        let vocab_set = {
+            let entries = [
+                BindGroupEntry::StorageBuffer { buffer: scene.edit_list },
+                BindGroupEntry::SampledImage {
+                    texture: &depth,
+                    sampler: scene.depth_sampler,
+                },
+                BindGroupEntry::StorageImage { texture: &albedo },
+                BindGroupEntry::StorageImage { texture: &normal },
+                BindGroupEntry::StorageImage { texture: &material },
+                BindGroupEntry::UniformBuffer { buffer: scene.camera_uniform },
+            ];
+            let desc = BindGroupDesc::<Vulkan> {
+                layout: scene.vocab_layout,
+                entries: &entries,
+            };
+            match RhiDevice::create_bind_group(ctx, &desc) {
+                Ok(g) => g,
+                Err(e) => {
+                    // SAFETY: the five textures above were created on `ctx`; referenced
+                    // by no submission; each destroyed exactly once on this error path.
+                    unsafe {
+                        RhiDevice::destroy_texture(ctx, material);
+                        RhiDevice::destroy_texture(ctx, normal);
+                        RhiDevice::destroy_texture(ctx, albedo);
+                        RhiDevice::destroy_texture(ctx, raster_color);
+                        RhiDevice::destroy_texture(ctx, depth);
+                    }
+                    return Err(SwapchainError::DepthImage(e));
+                }
+            }
+        };
+
+        // The present-blit set, written ONCE here: one COMBINED_IMAGE_SAMPLER pointing
+        // at the ALBEDO image + the scene's present sampler.
+        let present_set = {
+            let entries = [BindGroupEntry::CombinedImage {
+                texture: &albedo,
+                sampler: scene.present_sampler,
+            }];
+            let desc = BindGroupDesc::<Vulkan> {
+                layout: scene.present_layout,
+                entries: &entries,
+            };
+            match RhiDevice::create_bind_group(ctx, &desc) {
+                Ok(g) => g,
+                Err(e) => {
+                    // SAFETY: the five textures + the vocabulary set above were created
+                    // on `ctx`; referenced by no submission; each destroyed exactly once
+                    // on this error path.
+                    unsafe {
+                        RhiDevice::destroy_bind_group(ctx, vocab_set);
+                        RhiDevice::destroy_texture(ctx, material);
+                        RhiDevice::destroy_texture(ctx, normal);
+                        RhiDevice::destroy_texture(ctx, albedo);
+                        RhiDevice::destroy_texture(ctx, raster_color);
+                        RhiDevice::destroy_texture(ctx, depth);
+                    }
+                    return Err(SwapchainError::DepthImage(e));
+                }
+            }
+        };
+
+        Ok(Self {
+            depth,
+            raster_color,
+            albedo,
+            normal,
+            material,
+            vocab_set,
+            present_set,
+            extent,
+        })
+    }
+
+    /// Ensures the G-buffer images + descriptor sets exist and match `extent`,
+    /// (re)building them through `ctx` when absent (first frame) or stale (resize).
+    /// The vocabulary + present descriptor sets are re-written here — and ONLY here —
+    /// so the per-frame recorder records no `vkUpdateDescriptorSets`.
+    ///
+    /// The caller ([`Renderer::render_gbuffer_frame`]) calls this only after
+    /// fence-waiting the frame slot, so no in-flight frame still references the old
+    /// targets; on a REPLACE this additionally waits the device idle (a sibling
+    /// frame-in-flight slot may still reference the old images — the same
+    /// belt-and-braces [`Scene::sync_depth`] uses) before destroying them.
+    fn sync_gbuffer(
+        targets: &mut Option<Self>,
+        ctx: &VulkanContext,
+        scene: &GBufferScene<'_>,
+        extent: VkExtent2D,
+    ) -> Result<(), SwapchainError> {
+        if let Some(t) = targets.as_ref()
+            && t.extent.width == extent.width
+            && t.extent.height == extent.height
+        {
+            return Ok(());
+        }
+
+        // A (re)create is rare (first frame + resize). When REPLACING, wait idle first:
+        // a sibling frame-in-flight slot may still reference the old targets, and the
+        // caller only fence-waited THIS slot. The first-ever create needs no idle.
+        if targets.is_some() {
+            // SAFETY: `ctx` is live; waiting idle guarantees every prior submission —
+            // including a sibling-slot frame still referencing the old targets — has
+            // completed before they are destroyed below.
+            unsafe { (ctx.device_fns().device_wait_idle)(ctx.device()) };
+        }
+
+        // Build the new targets BEFORE tearing down the old ones, so an allocation
+        // failure leaves the previous (still-valid) targets in place.
+        let fresh = Self::create(ctx, scene, extent)?;
+
+        if let Some(old) = targets.take() {
+            // SAFETY: the new targets were built above; the device was waited idle (a
+            // replace), so no submission references the old targets; `destroy` consumes
+            // them exactly once on the live `ctx` they were created on.
+            unsafe { old.destroy(ctx) };
+        }
+
+        *targets = Some(fresh);
+        Ok(())
+    }
+
+    /// Tears down the G-buffer targets (descriptor sets first, then the images),
+    /// consuming `self`. The caller MUST have made the device idle (the renderer's
+    /// `Drop` waits idle, or `sync_gbuffer` waits idle on a replace) so no submission
+    /// still references them.
+    ///
+    /// # Safety
+    ///
+    /// `ctx` is the live context the targets were created on; no GPU work referencing
+    /// them is in flight; each is destroyed exactly once (the by-value `self`).
+    unsafe fn destroy(self, ctx: &VulkanContext) {
+        // SAFETY: per the contract `ctx` is live and nothing references these
+        // resources; each was created on `ctx` and is destroyed exactly once, in
+        // reverse acquisition order (sets → images).
+        unsafe {
+            RhiDevice::destroy_bind_group(ctx, self.present_set);
+            RhiDevice::destroy_bind_group(ctx, self.vocab_set);
+            RhiDevice::destroy_texture(ctx, self.material);
+            RhiDevice::destroy_texture(ctx, self.normal);
+            RhiDevice::destroy_texture(ctx, self.albedo);
+            RhiDevice::destroy_texture(ctx, self.raster_color);
+            RhiDevice::destroy_texture(ctx, self.depth);
+        }
+    }
+}
+
+/// The renderer-side state for the on-screen Render-P1c G-buffer frame: the
+/// per-extent [`GBufferTargets`], created lazily on the first
+/// [`Renderer::render_gbuffer_frame`] and reallocated on resize. A caller drives one
+/// across the present loop (analogous to a [`Scene`], but image-based).
+///
+/// Held by value; torn down through [`GBufferFrame::destroy`] AFTER the renderer is
+/// dropped (the renderer's `Drop` waits the device idle).
+pub struct GBufferFrame {
+    /// The per-extent depth + MRT G-buffer + descriptor sets, `None` until the first
+    /// frame syncs them.
+    targets: Option<GBufferTargets>,
+}
+
+impl Default for GBufferFrame {
+    #[inline]
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl GBufferFrame {
+    /// Creates the on-screen G-buffer frame state with no targets yet (the first
+    /// [`Renderer::render_gbuffer_frame`] allocates them sized to the swapchain
+    /// extent).
+    #[inline]
+    pub fn new() -> Self {
+        Self { targets: None }
+    }
+
+    /// Tears down the per-extent G-buffer targets through `ctx`, consuming `self`. The
+    /// caller MUST have made the device idle (dropped the [`Renderer`], whose `Drop`
+    /// waits idle) so no submission still references them.
+    ///
+    /// # Safety
+    ///
+    /// `ctx` is the live context the targets were created on; no GPU work referencing
+    /// them is in flight (the caller `wait_idle`'d / dropped the renderer); they are
+    /// destroyed exactly once (the by-value `self`).
+    pub unsafe fn destroy(self, ctx: &VulkanContext) {
+        if let Some(targets) = self.targets {
+            // SAFETY: per this fn's contract `ctx` is live and nothing references the
+            // targets; they are destroyed exactly once (moved out of `self`).
+            unsafe { targets.destroy(ctx) };
+        }
+    }
 }
 
 impl Drop for Renderer<'_> {
