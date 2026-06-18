@@ -35,3 +35,10 @@ criterion = { version = "0.5", features = ["html_reports"] }
 # O(100s)", not a number).
 name = "broadphase"
 harness = false
+
+[[bench]]
+# O1 A/B: scalar vs AVX2 in-solver `refresh_inertia` + integrate on a 10k-body
+# substep — reports the width-only speed-up (build the AVX2 arm with
+# RUSTFLAGS="-C target-feature=+avx2"). The SIMD path is bit-identical to scalar.
+name = "simd_o1"
+harness = false

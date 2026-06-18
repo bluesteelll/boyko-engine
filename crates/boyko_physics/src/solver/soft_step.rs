@@ -60,6 +60,7 @@
 use boyko_macros::Resource as ResourceDerive;
 
 use super::contact::{BodyEffective, effective_mass, tangent_basis};
+use super::simd;
 use super::warm_start::{self, WarmStartTable};
 use super::RigidSolver;
 use crate::components::BodyType;
@@ -450,13 +451,14 @@ impl SoftStepSolver {
     /// Refreshes each dynamic body's world inverse inertia from its local tensor
     /// and current orientation (`R · I⁻¹_local · Rᵀ`) for the next substep's
     /// effective mass. Static bodies keep `Mat3::ZERO`.
-    fn refresh_inertia(bodies_eff: &mut [BodyEffective], snapshot: &[BodyState]) {
-        for (eff, snap) in bodies_eff.iter_mut().zip(snapshot.iter()) {
-            if eff.inv_mass != 0.0 {
-                let r = Mat3::from_quat(snap.rotation);
-                eff.inv_inertia = r * snap.inv_inertia_local * r.transpose();
-            }
-        }
+    ///
+    /// Delegates to [`simd::refresh_inertia`], which runs the O1 AVX2 width-only
+    /// kernel when `simd` is set on an AVX2 build (bit-identical to the scalar
+    /// path) and the scalar oracle otherwise — the scalar path stays the default
+    /// + the bit-oracle (the 0%-gate).
+    #[inline]
+    fn refresh_inertia(bodies_eff: &mut [BodyEffective], snapshot: &[BodyState], simd: bool) {
+        simd::refresh_inertia(bodies_eff, snapshot, simd);
     }
 
     /// Solves the normal + coupled-friction impulses for every contact point
@@ -797,13 +799,12 @@ impl RigidSolver for SoftStepSolver {
         let soft = SoftCoefficients::new(config.contact_hertz, config.contact_damping, h);
         let gravity = config.gravity;
 
+        let use_simd = config.simd;
+
         for _ in 0..substeps {
-            // (1) Gravity integrate DYNAMIC bodies only (C2 gate (2)).
-            for (eff, snap) in self.bodies.iter_mut().zip(scratch.bodies.iter()) {
-                if snap.body_type == BodyType::Dynamic && eff.inv_mass != 0.0 {
-                    eff.linear_velocity = eff.linear_velocity + gravity * h;
-                }
-            }
+            // (1) Gravity integrate DYNAMIC bodies only (C2 gate (2)). O1: the AVX2
+            // SoA kernel when `simd` is on (bit-identical to the scalar oracle).
+            simd::apply_gravity(&mut self.bodies, &scratch.bodies, gravity, h, use_simd);
 
             // (2) Warm-start apply (W3): re-apply the seeded accumulated impulse
             // to the post-gravity velocities so the soft sweep refines from the
@@ -831,13 +832,18 @@ impl RigidSolver for SoftStepSolver {
             // solver-owned mode a kinematic body's externally-driven MOTION does not
             // progress within a step — a known, intentional W2 deferral (kinematic
             // integration is not built yet).
-            for (eff, snap) in self.bodies.iter_mut().zip(scratch.bodies.iter_mut()) {
-                if snap.body_type == BodyType::Dynamic && eff.inv_mass != 0.0 {
-                    snap.position = snap.position + eff.linear_velocity * h;
-                    snap.rotation = snap.rotation.integrate(eff.angular_velocity, h);
-                }
-            }
-            Self::refresh_inertia(&mut self.bodies, &scratch.bodies);
+            //
+            // O1: position + quaternion integrate. MEASURED-SCALAR: the SoA AVX2
+            // `position_integrate` kernel REGRESSES (~1.6× slower) on this AoS
+            // `BodyState` layout — the per-body gather/scatter of 14 scattered
+            // fields overwhelms the light integrate arithmetic, while the scalar
+            // loop auto-vectorizes well. So the solver keeps this sub-pass scalar
+            // (passing `false`) regardless of the flag; the bit-identical
+            // `simd::position_integrate` kernel still ships + is differential-tested
+            // (it pays off only on a future SoA `BodyState`). The HOT kernel is the
+            // inertia refresh below (~1.46× under AVX2, run substeps×(1+relax) times).
+            simd::position_integrate(&self.bodies, &mut scratch.bodies, h, false);
+            Self::refresh_inertia(&mut self.bodies, &scratch.bodies, use_simd);
 
             // (6) Relax passes: re-solve bias-free to remove soft-bias energy.
             for _ in 0..config.relax_iterations {

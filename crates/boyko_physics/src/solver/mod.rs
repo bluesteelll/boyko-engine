@@ -29,6 +29,7 @@
 //! [`crate::systems`].
 
 pub mod contact;
+pub mod simd;
 pub mod soft_step;
 pub mod warm_start;
 

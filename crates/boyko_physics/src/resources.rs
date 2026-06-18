@@ -76,6 +76,17 @@ pub struct PhysicsConfig {
     /// all-pairs (the 0%-gate flag — a single runtime branch in
     /// [`physics_broadphase`](crate::systems::physics_broadphase)).
     pub broadphase: BroadphaseKind,
+    /// Opt into the O1 AVX2 width-only SoA kernels for the hot per-substep
+    /// `refresh_inertia` (`R · I⁻¹_local · Rᵀ`) and the gravity/position/quaternion
+    /// integrate loop (default `false`). These are a PURE speed path: each AVX2
+    /// lane mirrors the scalar op sequence exactly — exact `mul`/`add`/`sub`/`div`/
+    /// `sqrt`, NO FMA contraction, NO `rsqrt`/`rcp` — so the SIMD output is
+    /// BIT-IDENTICAL to the scalar path (the `simd_o1` differential proptest is the
+    /// gate). The scalar path stays the default and the bit-oracle (the campaign
+    /// 0%-gate); when this flag is `false`, or on a non-AVX2 build, the solver runs
+    /// the byte-identical scalar kernels. Toggling it changes performance, never
+    /// the result.
+    pub simd: bool,
 }
 
 impl Default for PhysicsConfig {
@@ -95,6 +106,9 @@ impl Default for PhysicsConfig {
             // Default to the shipped O(n²) loop so an un-opted world is
             // byte-identical to today (the campaign 0%-gate).
             broadphase: BroadphaseKind::AllPairs,
+            // Default OFF so an un-opted world runs the scalar bit-oracle kernels
+            // (the campaign 0%-gate); the SIMD path is a pure opt-in speed path.
+            simd: false,
         }
     }
 }
