@@ -13,7 +13,9 @@
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::schedule::ScheduleBuilder;
 
-use crate::resources::{ContactPairs, IntegrationMode, Manifolds, PhysicsConfig, SolverScratch};
+use crate::resources::{
+    BroadphaseGrid, ContactPairs, IntegrationMode, Manifolds, PhysicsConfig, SolverScratch,
+};
 use crate::sdf_query::SdfField;
 use crate::solver::RigidSolver;
 use crate::systems::{
@@ -134,6 +136,10 @@ fn add_physics_pipeline<S: RigidSolver + Default>(
     world.insert_resource(ContactPairs::with_capacity(INITIAL_BODY_CAPACITY));
     world.insert_resource(Manifolds::with_capacity(INITIAL_BODY_CAPACITY));
     world.insert_resource(SolverScratch::with_capacity(INITIAL_BODY_CAPACITY));
+    // O2: the grid broadphase scratch (capacity-reused). Inserted unconditionally
+    // so `physics_broadphase`'s `ResMut<BroadphaseGrid>` param always resolves; it
+    // stays untouched while `PhysicsConfig::broadphase` is the default `AllPairs`.
+    world.insert_resource(BroadphaseGrid::with_capacity(INITIAL_BODY_CAPACITY));
     if with_sdf {
         // The CPU-authoritative SDF scene (empty by default; the caller fills it
         // with the same edit list the GPU renders).

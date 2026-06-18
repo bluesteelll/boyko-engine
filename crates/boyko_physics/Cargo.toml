@@ -26,3 +26,12 @@ boyko_sdf_math = { path = "../boyko_sdf_math" }
 
 [dev-dependencies]
 proptest = "1"
+# Workspace-pinned criterion 0.5 (same major as every other crate's bench).
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+# O2 A/B: the grid broadphase vs the shipped all-pairs loop at {100, 1k, 10k}
+# bodies — reports the measured crossover (the plan promises only "expect
+# O(100s)", not a number).
+name = "broadphase"
+harness = false

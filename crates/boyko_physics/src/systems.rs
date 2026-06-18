@@ -66,7 +66,8 @@ use crate::narrowphase::box_box::box_box_contact;
 use crate::narrowphase::feature_vertex_face;
 use crate::narrowphase::sphere_box::sphere_box_contact;
 use crate::resources::{
-    BodyState, ContactPairs, IntegrationMode, Manifolds, PhysicsConfig, SolverScratch,
+    BodyState, BroadphaseGrid, BroadphaseKind, ContactPairs, IntegrationMode, Manifolds,
+    PhysicsConfig, SolverScratch,
 };
 use crate::sdf_query::{SdfField, sample_sdf};
 use crate::solver::RigidSolver;
@@ -175,33 +176,57 @@ pub fn physics_gather(
 }
 
 /// Fills [`ContactPairs`] with candidate `(BodyIndex, BodyIndex)` pairs in
-/// deterministic `(min, max)` order (plan D3 stage 2 / D4 / OQ1).
+/// deterministic `(min, max)` order (plan D3 stage 2 / D4 / OQ1; O2 grid path).
 ///
-/// The foundation runs a real, broad-phase-feasible all-pairs over the gathered
-/// snapshot: a pair is a candidate when the bodies' bounding circles overlap.
-/// Emitting `(min, max)` keeps the order content-defined and reproducible
-/// (float add is non-associative → contact iteration order must be
-/// deterministic, D4). A real BVH/grid broadphase is Phase 10.
+/// A pair is a candidate when the bodies' bounding spheres overlap
+/// (`delta.length_squared() <= (rA + rB)²`). Emitting `(min, max)` keeps the
+/// order content-defined and reproducible (float add is non-associative →
+/// contact iteration order must be deterministic, D4).
+///
+/// Two interchangeable paths, selected by [`PhysicsConfig::broadphase`] (a single
+/// runtime branch — the one-branch floor):
+///
+/// - [`BroadphaseKind::AllPairs`] (DEFAULT): the shipped O(n²) double loop,
+///   byte-identical to before O2 (the campaign 0%-gate).
+/// - [`BroadphaseKind::Grid`] (opt-in, O2): a uniform-grid CSR counting-sort
+///   ([`BroadphaseGrid::build`]) that emits candidates then applies the SAME
+///   sphere-bound predicate and sorts by `(min, max)`. Its pair set is
+///   bit-identical to all-pairs.
 //
 // `clippy::needless_pass_by_value`: see `physics_gather`.
 #[allow(clippy::needless_pass_by_value)]
-pub fn physics_broadphase(scratch: Res<SolverScratch>, mut pairs: ResMut<ContactPairs>) {
+pub fn physics_broadphase(
+    scratch: Res<SolverScratch>,
+    cfg: Res<PhysicsConfig>,
+    mut grid: ResMut<BroadphaseGrid>,
+    mut pairs: ResMut<ContactPairs>,
+) {
     let bodies = &scratch.bodies;
     let pairs = &mut pairs.pairs;
-    pairs.clear();
 
-    let n = bodies.len();
-    for i in 0..n {
-        for j in (i + 1)..n {
-            // Broad-phase overlap test on the bounding radii (the foundation's
-            // cheap proxy; a real broadphase uses a spatial structure).
-            let bound = body_bounding_radius(&bodies[i]) + body_bounding_radius(&bodies[j]);
-            let delta = bodies[j].position - bodies[i].position;
-            if delta.length_squared() <= bound * bound {
-                // `i < j` already, so `(i, j)` is `(min, max)` — emit in the
-                // deterministic order D4 requires.
-                pairs.push((BodyIndex(i as u32), BodyIndex(j as u32)));
+    match cfg.broadphase {
+        // The shipped all-pairs loop, kept VERBATIM so the default path's asm is
+        // byte-identical to before O2 (the 0%-gate). DO NOT refactor this arm.
+        BroadphaseKind::AllPairs => {
+            pairs.clear();
+            let n = bodies.len();
+            for i in 0..n {
+                for j in (i + 1)..n {
+                    // Broad-phase overlap test on the bounding radii.
+                    let bound = body_bounding_radius(&bodies[i]) + body_bounding_radius(&bodies[j]);
+                    let delta = bodies[j].position - bodies[i].position;
+                    if delta.length_squared() <= bound * bound {
+                        // `i < j` already, so `(i, j)` is `(min, max)`.
+                        pairs.push((BodyIndex(i as u32), BodyIndex(j as u32)));
+                    }
+                }
             }
+        }
+        // O2: the uniform-grid broadphase. `build` clears and refills `pairs` with
+        // the feasibility-filtered, (min, max)-sorted candidate set — bit-identical
+        // to the all-pairs arm above.
+        BroadphaseKind::Grid => {
+            grid.build(bodies, pairs);
         }
     }
 
@@ -719,7 +744,7 @@ pub fn physics_apply(mut query: Query<Mut<RigidBody>>, scratch: Res<SolverScratc
 /// shape-agnostic here; the precise per-pair narrowphase lives in
 /// [`physics_narrowphase`]'s shape dispatch (P2 W4).
 #[inline]
-fn body_bounding_radius(body: &BodyState) -> f32 {
+pub fn body_bounding_radius(body: &BodyState) -> f32 {
     match body.shape {
         ColliderShape::Sphere { radius } => radius,
         ColliderShape::Box { half_extents } => half_extents.length(),
