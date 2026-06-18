@@ -89,6 +89,37 @@ const _: () = assert!(
     "graphics-pipeline MRT cap must not exceed the begin_rendering attachment cap"
 );
 
+/// Byte size of the single COMPUTE push-constant range the device-shared
+/// [`ComputeLayouts`]`::pipeline_layout` declares.
+///
+/// `ComputeLayouts` is **one shared layout** reused by every compute pipeline
+/// (the `sdf_editlist` 4-byte path and the `sdf_depth_composite` marcher's
+/// [`crate::compute::COMPOSITE_PUSH_CONSTANT_BYTES`]-byte path alike). A pipeline
+/// layout may declare MORE push bytes than a given shader uses — that is valid
+/// Vulkan; only declaring FEWER than a shader reads is the bug. So the shared
+/// range is sized to the LARGEST consumer (the marcher) and every smaller-push
+/// pipeline binds against it unchanged. Derived from the consumer constant, never
+/// a magic literal, so a future widening of the marcher block re-sizes the range
+/// automatically. The value stays within the Vulkan-guaranteed 128-byte floor for
+/// `maxPushConstantsSize` (asserted below), so no device-limit query is required.
+const COMPUTE_PUSH_CONSTANT_RANGE_BYTES: u32 = crate::compute::COMPOSITE_PUSH_CONSTANT_BYTES;
+
+/// The Vulkan-guaranteed minimum `maxPushConstantsSize` (Vulkan 1.3 spec,
+/// "Required Limits"). The shared compute push range must fit within it so the
+/// layout is valid on every conformant device without probing the real limit.
+const VULKAN_MIN_MAX_PUSH_CONSTANTS_SIZE: u32 = 128;
+
+// The shared compute push range must be a non-empty multiple of 4 (Vulkan requires
+// `size` be a multiple of 4 and `> 0`) and fit the guaranteed device floor. Pinned
+// at build time so a future marcher-block edit cannot silently produce an invalid
+// range or one that overflows the portable limit.
+const _: () = assert!(
+    COMPUTE_PUSH_CONSTANT_RANGE_BYTES > 0
+        && COMPUTE_PUSH_CONSTANT_RANGE_BYTES.is_multiple_of(4)
+        && COMPUTE_PUSH_CONSTANT_RANGE_BYTES <= VULKAN_MIN_MAX_PUSH_CONSTANTS_SIZE,
+    "shared compute push range must be a non-empty multiple of 4 within the 128-byte floor"
+);
+
 /// A zeroed [`VkBufferImageCopy`] the inline-region array's unused tail slots
 /// hold (never read: only the first `regions.len()` are passed to the driver).
 const DEFAULT_BUFFER_IMAGE_COPY: VkBufferImageCopy = VkBufferImageCopy {
@@ -177,7 +208,8 @@ impl RhiApi for Vulkan {
 
 /// The fixed Slice-0 compute layouts shared by every compute pipeline + command
 /// encoder: one STORAGE_BUFFER @ set0/binding0 (COMPUTE) descriptor-set layout +
-/// a pipeline layout with that set + a 4-byte COMPUTE push-constant range.
+/// a pipeline layout with that set + a single COMPUTE push-constant range sized to
+/// the largest consumer ([`COMPUTE_PUSH_CONSTANT_RANGE_BYTES`]).
 ///
 /// Cached on [`VulkanContext`] (plan Q1/W2): created once on first
 /// `create_compute_pipeline` / `create_command_encoder`, destroyed in the
@@ -186,7 +218,8 @@ impl RhiApi for Vulkan {
 pub struct ComputeLayouts {
     /// One STORAGE_BUFFER @ binding 0, COMPUTE stage.
     pub(crate) set_layout: VkDescriptorSetLayout,
-    /// The set layout + a 4-byte COMPUTE push range.
+    /// The set layout + a single COMPUTE push range of
+    /// [`COMPUTE_PUSH_CONSTANT_RANGE_BYTES`] bytes (sized to the largest consumer).
     pub(crate) pipeline_layout: VkPipelineLayout,
 }
 
@@ -226,8 +259,10 @@ impl ComputeLayouts {
         let push_range = VkPushConstantRange {
             stage_flags: VK_SHADER_STAGE_COMPUTE_BIT,
             offset: 0,
-            // The shaders' push constant is a single `uint count` (4 bytes).
-            size: 4,
+            // Sized to the LARGEST compute consumer (the 80-byte `sdf_depth_composite`
+            // marcher); the 4-byte `sdf_editlist` path binds against this wider range
+            // unchanged — over-declaring push bytes is valid Vulkan.
+            size: COMPUTE_PUSH_CONSTANT_RANGE_BYTES,
         };
         let pl_info = VkPipelineLayoutCreateInfo {
             s_type: VkStructureType::PipelineLayoutCreateInfo,
@@ -899,12 +934,20 @@ impl RhiDevice<Vulkan> for VulkanContext {
         &self,
         desc: &ComputePipelineDesc<Vulkan>,
     ) -> Result<ComputePipeline, VulkanError> {
-        // Plan B3 (ABI-2): the fixed Slice-0 pipeline layout has exactly a 4-byte
-        // push range. `desc.push_constant_bytes` is otherwise a dead knob — surface
-        // a mismatch as `Unsupported` rather than silently building a pipeline whose
-        // declared push size disagrees with the shared layout.
-        if desc.push_constant_bytes != 4 {
-            return Err(VulkanError::Unsupported("push_constant_bytes != 4"));
+        // The device-shared compute pipeline layout declares one COMPUTE push range
+        // of `COMPUTE_PUSH_CONSTANT_RANGE_BYTES` (sized to the largest consumer). A
+        // pipeline may USE fewer bytes than the layout declares (valid Vulkan), so any
+        // request that is a non-empty multiple of 4 (Vulkan's push-range granularity)
+        // and fits the shared range is accepted; a larger request would read past the
+        // declared range, so it is rejected as `Unsupported`. This covers both the
+        // 4-byte `sdf_editlist` path and the 80-byte `sdf_depth_composite` marcher.
+        if desc.push_constant_bytes == 0
+            || !desc.push_constant_bytes.is_multiple_of(4)
+            || desc.push_constant_bytes > COMPUTE_PUSH_CONSTANT_RANGE_BYTES
+        {
+            return Err(VulkanError::Unsupported(
+                "push_constant_bytes must be a multiple of 4 within the shared compute push range",
+            ));
         }
         // The shared pipeline layout is needed at pipeline-create time (plan Q1).
         let layouts = self.compute_layouts()?;

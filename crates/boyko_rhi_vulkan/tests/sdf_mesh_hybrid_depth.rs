@@ -59,10 +59,11 @@ use boyko_rhi::{
     TextureDesc, TextureDimension, VertexAttribute, VertexBufferLayout, VertexFormat, Viewport,
 };
 use boyko_rhi_vulkan::compute::{
-    COMPOSITE_BUFFER_WORDS, COMPOSITE_DEPTH_BASE_WORDS, COMPOSITE_PIXEL_BASE_WORDS, LOCAL_SIZE_X,
-    MESH_COLOR, MESH_DEPTH_CLEAR, SDF_CAMERA_Z, SDF_IMG_H, SDF_IMG_W, SDF_TRACE_T_MAX,
-    SDF_VIEW_HALF_EXTENT, SdfEdit, editlist_pixel_hits, encode_edit_list, golden_composite_pixel,
-    mesh_depth_for_z, pixel_world_xy, sdf_depth_composite_spirv, sdf_op,
+    COMPOSITE_BUFFER_WORDS, COMPOSITE_DEPTH_BASE_WORDS, COMPOSITE_PIXEL_BASE_WORDS,
+    COMPOSITE_PUSH_CONSTANT_BYTES, CompositePushConstants, LOCAL_SIZE_X, MESH_COLOR,
+    MESH_DEPTH_CLEAR, SDF_CAMERA_Z, SDF_IMG_H, SDF_IMG_W, SDF_TRACE_T_MAX, SDF_VIEW_HALF_EXTENT,
+    SdfEdit, editlist_pixel_hits, encode_edit_list, golden_composite_pixel, mesh_depth_for_z,
+    pixel_world_xy, sdf_depth_composite_spirv, sdf_op,
 };
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
 
@@ -510,7 +511,9 @@ fn run_hybrid(ctx: &VulkanContext, edits: &[SdfEdit]) -> (Vec<u32>, Vec<f32>) {
         .create_compute_pipeline(&ComputePipelineDesc {
             module: &cs,
             entry: c"main",
-            push_constant_bytes: 4,
+            // P0a: the marcher's push block is now the extent/camera struct (80 B).
+            // The golden invocation pushes extent (64,64) + ORTHO → bit-exact rays.
+            push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
         })
         .expect("composite compute pipeline");
 
@@ -629,9 +632,13 @@ fn run_hybrid(ctx: &VulkanContext, edits: &[SdfEdit]) -> (Vec<u32>, Vec<f32>) {
     });
 
     // --- SDF composite compute pass: march bounded by the shared mesh depth. ---
+    // P0a: push the full extent/camera block at the golden 64×64 ORTHO extent (same
+    // extent → same rays → bit-exact pixels). `count` stays at offset 0 == PIXELS.
+    let pc = CompositePushConstants::ortho(SDF_IMG_W, SDF_IMG_H);
+    debug_assert_eq!(pc.count, PIXELS);
     encoder.bind_compute_pipeline(&compute);
     encoder.bind_storage_buffer(&buffer, 0, 0);
-    encoder.push_constants(ShaderStage::COMPUTE, 0, &PIXELS.to_ne_bytes());
+    encoder.push_constants(ShaderStage::COMPUTE, 0, pc.as_bytes());
     encoder.dispatch(group_count_x(), 1, 1);
 
     encoder.end().expect("end");

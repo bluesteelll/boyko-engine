@@ -99,7 +99,7 @@ static SDF_EDITLIST_SPV: SpirvBlob<24368> = SpirvBlob(*include_bytes!(concat!(
 /// shared depth buffer — `shaders/sdf_depth_composite.hlsl`). It reuses the rung-9
 /// edit-list fold + lighting + camera verbatim and adds the per-pixel mesh-depth
 /// read that BOUNDS the march so the mesh and the SDF occlude each other.
-static SDF_DEPTH_COMPOSITE_SPV: SpirvBlob<24936> = SpirvBlob(*include_bytes!(concat!(
+static SDF_DEPTH_COMPOSITE_SPV: SpirvBlob<26576> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/sdf_depth_composite.comp.spv"
 )));
@@ -635,24 +635,270 @@ pub fn mesh_depth_for_z(mesh_z: f32) -> f32 {
     (SDF_CAM_Z - mesh_z) / SDF_T_MAX
 }
 
-/// The CPU golden for one composited pixel: sphere-traces the folded edit-list
-/// field BOUNDED by the per-pixel mesh depth `mesh_depth` (the stored D32 value,
-/// or `>= 1.0` when no mesh covered the pixel), then composites exactly as the
-/// shader does:
+// ===========================================================================
+// P0a — the camera / extent push-constant layout + host const-asserts, mirroring
+// `shaders/sdf_depth_composite.hlsl`'s `PushConstants` block.
+//
+// The shader extent + camera mode are no longer compile-time constants: they arrive
+// via this push-constant block. `count` stays at offset 0 (the legacy 4-byte field);
+// extent + camera-mode follow; the four `float4` camera basis vectors are
+// PERSPECTIVE-only (the ORTHO path ignores them). At extent (64,64) + ORTHO the
+// shader reproduces the golden fixture BIT-EXACT (the rung-8..11 gate). The offsets
+// below are const-asserted against the `#[repr(C)]` POD so a host/shader desync is a
+// build error (the same discipline as `COMPOSITE_*_BASE_WORDS`).
+// ===========================================================================
+
+/// Camera mode selector mirroring the shader's `CAM_ORTHO` / `CAM_PERSPECTIVE`.
+/// ORTHO (0) is the golden-frozen path; PERSPECTIVE (1) is the P0a additive ray-gen.
+pub const CAM_MODE_ORTHO: u32 = 0;
+/// PERSPECTIVE camera mode (P0a additive ray-gen). See [`CAM_MODE_ORTHO`].
+pub const CAM_MODE_PERSPECTIVE: u32 = 1;
+
+/// The `sdf_depth_composite` push-constant block (P0a). `#[repr(C)]` so the field
+/// layout is byte-identical to the shader's `[[vk::push_constant]] PushConstants`
+/// (std430 scalar/`float4` rules); the host uploads `as_bytes()` of this struct.
 ///
-/// - an SDF hit at `t_sdf < t_mesh` → the lit SDF surface color (Lambert +
-///   ambient, the same scene constants as rung 8/9);
-/// - else if the mesh covered the pixel (`mesh_depth < 1.0`) → flat [`MESH_COLOR`];
-/// - else → `SDF_BACKGROUND`.
+/// `count` is the total PIXEL count (`img_w * img_h`); `img_w`/`img_h == 0` make the
+/// shader fall back to the legacy 64×64 fixture. The `cam_*` `[f32; 4]` vectors are
+/// PERSPECTIVE-only (`cam_forward[3] = tan(fovY/2)`, `cam_right[3] = aspect = W/H`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CompositePushConstants {
+    /// Total PIXEL count = `img_w * img_h` (the shader bounds `idx < count`).
+    pub count: u32,
+    /// Runtime extent width (0 ⇒ the legacy 64 default).
+    pub img_w: u32,
+    /// Runtime extent height (0 ⇒ the legacy 64 default).
+    pub img_h: u32,
+    /// [`CAM_MODE_ORTHO`] or [`CAM_MODE_PERSPECTIVE`].
+    pub camera_mode: u32,
+    /// PERSPECTIVE eye world position (xyz; w unused).
+    pub cam_eye: [f32; 4],
+    /// PERSPECTIVE forward basis (xyz) + `tan(fovY/2)` in w.
+    pub cam_forward: [f32; 4],
+    /// PERSPECTIVE right basis (xyz) + aspect (W/H) in w.
+    pub cam_right: [f32; 4],
+    /// PERSPECTIVE up basis (xyz; w unused).
+    pub cam_up: [f32; 4],
+}
+
+/// Byte size of [`CompositePushConstants`] — the `push_constant_bytes` a
+/// `sdf_depth_composite` compute pipeline must declare (80 bytes).
+pub const COMPOSITE_PUSH_CONSTANT_BYTES: u32 = core::mem::size_of::<CompositePushConstants>() as u32;
+
+// Pin the field offsets to the shader's documented layout (a desync is a build error).
+const _: () = assert!(
+    core::mem::offset_of!(CompositePushConstants, count) == 0,
+    "count must stay at offset 0 (the legacy 4-byte field)"
+);
+const _: () = assert!(core::mem::offset_of!(CompositePushConstants, img_w) == 4);
+const _: () = assert!(core::mem::offset_of!(CompositePushConstants, img_h) == 8);
+const _: () = assert!(core::mem::offset_of!(CompositePushConstants, camera_mode) == 12);
+const _: () = assert!(core::mem::offset_of!(CompositePushConstants, cam_eye) == 16);
+const _: () = assert!(core::mem::offset_of!(CompositePushConstants, cam_forward) == 32);
+const _: () = assert!(core::mem::offset_of!(CompositePushConstants, cam_right) == 48);
+const _: () = assert!(core::mem::offset_of!(CompositePushConstants, cam_up) == 64);
+const _: () = assert!(
+    COMPOSITE_PUSH_CONSTANT_BYTES == 80,
+    "the push-constant block must be 80 bytes (matches the shader's PushConstants)"
+);
+
+impl CompositePushConstants {
+    /// Builds the ORTHO golden-fixture push constants for a `w × h` extent. At
+    /// `(64, 64)` this drives the bit-exact rung-8..11 golden invocation. The camera
+    /// basis is left zeroed (the ORTHO path ignores it).
+    ///
+    /// # Precondition
+    ///
+    /// `w * h` must fit in `u32` (the dispatch element count); a `debug_assert!`
+    /// catches an overflowing extent in debug builds.
+    #[inline]
+    pub const fn ortho(w: u32, h: u32) -> Self {
+        debug_assert!(w.checked_mul(h).is_some(), "extent w*h overflows u32");
+        Self {
+            count: w * h,
+            img_w: w,
+            img_h: h,
+            camera_mode: CAM_MODE_ORTHO,
+            cam_eye: [0.0; 4],
+            cam_forward: [0.0; 4],
+            cam_right: [0.0; 4],
+            cam_up: [0.0; 4],
+        }
+    }
+
+    /// Builds PERSPECTIVE push constants from a camera (eye + orthonormal basis +
+    /// vertical FOV) and a `w × h` extent. `fov_y_radians` is the full vertical FOV;
+    /// the aspect is `w / h`. The basis vectors should be orthonormal and
+    /// right-handed (`right × up = -forward` toward the scene); the shader normalizes
+    /// the assembled direction. The field eval downstream is unchanged (plain IEEE).
+    ///
+    /// # Precondition
+    ///
+    /// `w * h` must fit in `u32` (the dispatch element count); a `debug_assert!`
+    /// catches an overflowing extent in debug builds.
+    #[inline]
+    pub fn perspective(
+        eye: [f32; 3],
+        forward: [f32; 3],
+        right: [f32; 3],
+        up: [f32; 3],
+        fov_y_radians: f32,
+        w: u32,
+        h: u32,
+    ) -> Self {
+        debug_assert!(w.checked_mul(h).is_some(), "extent w*h overflows u32");
+        let tan_half_fov = (fov_y_radians * 0.5).tan();
+        let aspect = (w as f32) / (h as f32);
+        Self {
+            count: w * h,
+            img_w: w,
+            img_h: h,
+            camera_mode: CAM_MODE_PERSPECTIVE,
+            cam_eye: [eye[0], eye[1], eye[2], 0.0],
+            cam_forward: [forward[0], forward[1], forward[2], tan_half_fov],
+            cam_right: [right[0], right[1], right[2], aspect],
+            cam_up: [up[0], up[1], up[2], 0.0],
+        }
+    }
+
+    /// Re-views the push constants as their raw byte slice for `push_constants`.
+    #[inline]
+    pub fn as_bytes(&self) -> &[u8] {
+        // SAFETY: `Self` is `#[repr(C)]` with only `u32` / `[f32; 4]` fields (all
+        // `Copy`, no padding between them — the const-asserts above pin every offset
+        // and the 80-byte total), so its `size_of` bytes are a fully-initialized,
+        // alignment-valid POD bit pattern. The `&self` borrow keeps the struct alive
+        // for the slice's lifetime; the slice is read-only (no aliasing write).
+        unsafe {
+            slice::from_raw_parts(
+                (self as *const Self).cast::<u8>(),
+                core::mem::size_of::<Self>(),
+            )
+        }
+    }
+}
+
+/// The CPU golden for one composited pixel at the GOLDEN 64×64 ORTHO extent: a thin
+/// wrapper over [`golden_composite_pixel_ex`] with `(SDF_IMG_W, SDF_IMG_H)` + ORTHO.
+/// Bit-identical to the pre-P0a definition (same extent, same arithmetic), so the
+/// rung-10 / window-present goldens are unchanged. See [`golden_composite_pixel_ex`]
+/// for the per-pixel composite rules.
 ///
 /// Returns the packed `0xAABBGGRR` color. This is the single source of truth the
 /// rung-10 test diffs the GPU readback against (within `+/-2/255` per channel) and
 /// that a future CPU physics evaluator can reuse for the same hybrid query.
+#[inline]
 pub fn golden_composite_pixel(edits: &[SdfEdit], mesh_depth: f32, px: u32, py: u32) -> u32 {
-    let u = (((px as f32) + 0.5) / (SDF_IMG_W as f32)) * 2.0 - 1.0;
-    let v = -((((py as f32) + 0.5) / (SDF_IMG_H as f32)) * 2.0 - 1.0);
-    let ro = [u * SDF_HALF_EXTENT, v * SDF_HALF_EXTENT, SDF_CAM_Z];
-    let rd = [0.0, 0.0, -1.0];
+    golden_composite_pixel_ex(
+        edits,
+        mesh_depth,
+        px,
+        py,
+        SDF_IMG_W,
+        SDF_IMG_H,
+        CompositeCamera::Ortho,
+    )
+}
+
+/// The camera the extent-aware golden ([`golden_composite_pixel_ex`]) reconstructs a
+/// ray from. ORTHO is the golden-frozen path; PERSPECTIVE mirrors the shader's
+/// additive ray-gen (eye + orthonormal basis + half-FOV tangent + aspect).
+#[derive(Clone, Copy, Debug)]
+pub enum CompositeCamera {
+    /// The golden-frozen orthographic camera (looking down -Z, [`SDF_HALF_EXTENT`]).
+    Ortho,
+    /// The P0a perspective camera, mirroring the shader's perspective branch.
+    Perspective {
+        /// Eye world position (the ray origin).
+        eye: [f32; 3],
+        /// Forward basis vector.
+        forward: [f32; 3],
+        /// Right basis vector.
+        right: [f32; 3],
+        /// Up basis vector.
+        up: [f32; 3],
+        /// `tan(fovY / 2)`.
+        tan_half_fov: f32,
+        /// Aspect ratio (W / H).
+        aspect: f32,
+    },
+}
+
+/// Reconstructs the `(ray_origin, ray_dir)` for pixel `(px, py)` at extent
+/// `(img_w, img_h)` under `camera`, mirroring the shader's ray-gen EXACTLY.
+///
+/// The ORTHO arm is the golden-frozen arithmetic (`u`/`v` → `ro`/`rd`); at extent
+/// `(64, 64)` it is byte-for-byte the pre-P0a computation. The PERSPECTIVE arm mirrors
+/// the shader's perspective branch (NDC → basis-combined direction → `normalize`),
+/// using only plain IEEE ops so a perspective scene is reproducible (no fast math).
+#[inline]
+fn composite_ray(
+    px: u32,
+    py: u32,
+    img_w: u32,
+    img_h: u32,
+    camera: CompositeCamera,
+) -> ([f32; 3], [f32; 3]) {
+    match camera {
+        CompositeCamera::Ortho => {
+            let u = (((px as f32) + 0.5) / (img_w as f32)) * 2.0 - 1.0;
+            let v = -((((py as f32) + 0.5) / (img_h as f32)) * 2.0 - 1.0);
+            let ro = [u * SDF_HALF_EXTENT, v * SDF_HALF_EXTENT, SDF_CAM_Z];
+            let rd = [0.0, 0.0, -1.0];
+            (ro, rd)
+        }
+        CompositeCamera::Perspective {
+            eye,
+            forward,
+            right,
+            up,
+            tan_half_fov,
+            aspect,
+        } => {
+            let ndc_x = (((px as f32) + 0.5) / (img_w as f32)) * 2.0 - 1.0;
+            let ndc_y = -((((py as f32) + 0.5) / (img_h as f32)) * 2.0 - 1.0);
+            let sx = ndc_x * aspect * tan_half_fov;
+            let sy = ndc_y * tan_half_fov;
+            let dir = [
+                forward[0] + right[0] * sx + up[0] * sy,
+                forward[1] + right[1] * sx + up[1] * sy,
+                forward[2] + right[2] * sx + up[2] * sy,
+            ];
+            // Mirror HLSL `normalize` exactly: raw `sqrt` then component divide, NO
+            // zero-guard (unlike `v_normalize`), so this host reference predicts the
+            // GPU bit-for-bit on valid cameras. A degenerate (zero) `dir` yields a
+            // non-finite ray on BOTH host and shader; a valid camera never produces one.
+            let len = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
+            let rd = [dir[0] / len, dir[1] / len, dir[2] / len];
+            (eye, rd)
+        }
+    }
+}
+
+/// The extent- and camera-aware CPU golden for one composited pixel (P0a). At
+/// `(SDF_IMG_W, SDF_IMG_H)` + [`CompositeCamera::Ortho`] this is BIT-IDENTICAL to the
+/// pre-P0a `golden_composite_pixel` (same `u`/`v`/`ro`/`rd` arithmetic), preserving
+/// the rung-8..11 contract; with a runtime extent / [`CompositeCamera::Perspective`]
+/// it mirrors the shader's P0a ray-gen so the host-vs-GPU agreement stays valid at
+/// any resolution. Composites exactly as the shader:
+///
+/// - an SDF hit at `t_sdf < t_mesh` → the lit SDF surface color (Lambert + ambient);
+/// - else if the mesh covered the pixel (`mesh_depth < 1.0`) → flat [`MESH_COLOR`];
+/// - else → `SDF_BACKGROUND`.
+///
+/// The field eval (`sdf_edit_list` / `_normal`) is byte-identical to the ortho path;
+/// only ray generation + the extent source change (the determinism boundary).
+pub fn golden_composite_pixel_ex(
+    edits: &[SdfEdit],
+    mesh_depth: f32,
+    px: u32,
+    py: u32,
+    img_w: u32,
+    img_h: u32,
+    camera: CompositeCamera,
+) -> u32 {
+    let (ro, rd) = composite_ray(px, py, img_w, img_h, camera);
 
     let has_mesh = mesh_depth < MESH_DEPTH_CLEAR;
     // A finite march bound only when the mesh covered the pixel; otherwise a value
@@ -693,4 +939,126 @@ pub fn golden_composite_pixel(edits: &[SdfEdit], mesh_depth: f32, px: u32, py: u
         SDF_BACKGROUND
     };
     pack_rgba(color)
+}
+
+#[cfg(test)]
+mod p0a_tests {
+    //! Host-side (GPU-free) verification of the P0a substrate: the extent/camera
+    //! push-constant layout and the extent-aware golden mirror. The GPU half (the
+    //! shader actually rendering ortho 64×64 bit-exact / a 1080p perspective frame)
+    //! is the tester's RTX-3060 oracle; these assert the CPU contract those goldens
+    //! rely on (the host const-assert mirror + the bit-exact ortho fall-through).
+
+    use super::{
+        CAM_MODE_ORTHO, CAM_MODE_PERSPECTIVE, COMPOSITE_PUSH_CONSTANT_BYTES, CompositeCamera,
+        CompositePushConstants, MESH_DEPTH_CLEAR, SDF_IMG_H, SDF_IMG_W, SdfEdit,
+        golden_composite_pixel, golden_composite_pixel_ex, sdf_op,
+    };
+
+    /// The rung-9/10 "crater" CSG scene, reused so the golden parity check runs over
+    /// a non-trivial field (a base sphere with a smaller sphere subtracted).
+    fn crater() -> Vec<SdfEdit> {
+        vec![
+            SdfEdit::sphere([0.0, 0.0, 0.0], 0.5, sdf_op::UNION, 0.0),
+            SdfEdit::sphere([0.3, 0.0, 0.0], 0.35, sdf_op::SUBTRACT, 0.0),
+        ]
+    }
+
+    /// The extent-aware golden at `(SDF_IMG_W, SDF_IMG_H)` + ORTHO must be BIT-EXACT
+    /// to the legacy `golden_composite_pixel` over the whole 64×64 image (the
+    /// rung-8..11 contract — same extent → same rays → same pixels).
+    #[test]
+    fn ortho_64x64_is_bit_identical_to_legacy_golden() {
+        let edits = crater();
+        // A mix of covered (finite depth) and uncovered (clear) pixels.
+        let depths = [0.5_f32, MESH_DEPTH_CLEAR, 0.2, 0.8];
+        for py in 0..SDF_IMG_H {
+            for px in 0..SDF_IMG_W {
+                let md = depths[((px + py) as usize) % depths.len()];
+                let legacy = golden_composite_pixel(&edits, md, px, py);
+                let ex = golden_composite_pixel_ex(
+                    &edits,
+                    md,
+                    px,
+                    py,
+                    SDF_IMG_W,
+                    SDF_IMG_H,
+                    CompositeCamera::Ortho,
+                );
+                assert_eq!(legacy, ex, "ortho mirror diverged at ({px},{py}) depth {md}");
+            }
+        }
+    }
+
+    /// `CompositePushConstants::ortho` keeps `count == w*h`, ORTHO mode, zeroed
+    /// camera basis, and the 80-byte size the pipeline must declare.
+    #[test]
+    fn ortho_push_constants_shape() {
+        let pc = CompositePushConstants::ortho(SDF_IMG_W, SDF_IMG_H);
+        assert_eq!(pc.count, SDF_IMG_W * SDF_IMG_H);
+        assert_eq!(pc.img_w, SDF_IMG_W);
+        assert_eq!(pc.img_h, SDF_IMG_H);
+        assert_eq!(pc.camera_mode, CAM_MODE_ORTHO);
+        assert_eq!(pc.cam_eye, [0.0; 4]);
+        assert_eq!(pc.as_bytes().len(), COMPOSITE_PUSH_CONSTANT_BYTES as usize);
+        assert_eq!(COMPOSITE_PUSH_CONSTANT_BYTES, 80);
+    }
+
+    /// `CompositePushConstants::perspective` derives `tan(fovY/2)` + aspect and packs
+    /// the basis into the documented `float4` slots; the byte view is 80 bytes.
+    #[test]
+    fn perspective_push_constants_layout() {
+        let fov_y = core::f32::consts::FRAC_PI_2; // 90°
+        let pc = CompositePushConstants::perspective(
+            [0.0, 0.0, 3.0],   // eye
+            [0.0, 0.0, -1.0],  // forward
+            [1.0, 0.0, 0.0],   // right
+            [0.0, 1.0, 0.0],   // up
+            fov_y,
+            1920,
+            1080,
+        );
+        assert_eq!(pc.camera_mode, CAM_MODE_PERSPECTIVE);
+        assert_eq!(pc.count, 1920 * 1080);
+        assert_eq!(pc.cam_eye, [0.0, 0.0, 3.0, 0.0]);
+        // forward.w = tan(45°) = 1, right.w = aspect = 1920/1080.
+        assert!((pc.cam_forward[3] - 1.0).abs() < 1e-5);
+        assert!((pc.cam_right[3] - (1920.0_f32 / 1080.0)).abs() < 1e-6);
+        assert_eq!(pc.as_bytes().len(), 80);
+    }
+
+    /// Perspective ray-gen sanity: the CENTER pixel of a forward-looking camera must
+    /// shoot a ray ≈ the forward axis from the eye (the field eval downstream is the
+    /// same deterministic mirror, so this isolates the additive ray-gen).
+    #[test]
+    fn perspective_center_ray_is_forward() {
+        let edits = crater();
+        // A small extent; we only need the geometric ray, not a full render.
+        let (w, h) = (64u32, 64u32);
+        let eye = [0.0_f32, 0.0, 3.0];
+        let camera = CompositeCamera::Perspective {
+            eye,
+            forward: [0.0, 0.0, -1.0],
+            right: [1.0, 0.0, 0.0],
+            up: [0.0, 1.0, 0.0],
+            tan_half_fov: (core::f32::consts::FRAC_PI_2 * 0.5).tan(), // 45°
+            aspect: 1.0,
+        };
+        // The center pixel (px=py=32) → ndc ≈ 0 → dir ≈ forward → hits the sphere at
+        // the origin from the +Z eye (no mesh: clear depth). A miss would be the dark
+        // background; a hit is the warm lit color — distinguish by the red channel.
+        let center = golden_composite_pixel_ex(&edits, MESH_DEPTH_CLEAR, w / 2, h / 2, w, h, camera);
+        let red = center & 0xFF;
+        assert!(
+            red > 60,
+            "center perspective ray must hit the lit sphere (warm red), got 0x{center:08X}"
+        );
+        // A corner pixel shoots wide and should MISS → background (low red).
+        let corner = golden_composite_pixel_ex(&edits, MESH_DEPTH_CLEAR, 0, 0, w, h, camera);
+        let corner_red = corner & 0xFF;
+        assert!(
+            corner_red < red,
+            "corner perspective ray should miss (darker) vs center: corner 0x{corner:08X} center 0x{center:08X}"
+        );
+    }
 }

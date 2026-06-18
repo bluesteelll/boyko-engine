@@ -44,19 +44,39 @@
 //   C:\VulkanSDK\1.4.350.0\Bin\dxc.exe -spirv -T cs_6_0 -E main \
 //       -fspv-target-env=vulkan1.3 sdf_depth_composite.hlsl -Fo sdf_depth_composite.comp.spv
 //
+// # P0a — resolution-as-dispatch-dim + an additive perspective camera mode
+//
+// The image extent (`img_w`/`img_h`) and the camera mode are no longer compile-time
+// constants: they arrive via the push-constant block. With `img_w == img_h == 64` and
+// `camera_mode == CAM_ORTHO` the marcher reproduces the golden 64×64 ORTHOGRAPHIC
+// fixture BIT-EXACT (same extent → same `u`/`v` → same ray → same pixels → the
+// rung-8..11 goldens are unchanged). `img_w == 0` (or `img_h == 0`) falls back to the
+// legacy 64 default so an all-zero push tail is safe (the 0%-gate).
+//
+// The ORTHOGRAPHIC ray-gen arithmetic is the golden-frozen path: the PERSPECTIVE
+// branch lives ENTIRELY inside `if (camera_mode == CAM_PERSPECTIVE) { ... }` and never
+// touches the ortho `u`/`v`/`ro`/`rd` computation. The SDF field eval (`sdf`/`smin`/
+// `combine`/normal) is BYTE-IDENTICAL — only ray GENERATION + the extent source change;
+// perspective ray-gen feeds points into the SAME deterministic field eval (plain IEEE
+// ops, no fast math / rsqrt / reordered FMA) so a perspective scene is reproducible.
+//
 // # The deterministic camera / depth convention (the single source of truth)
 //
 // The camera + light are mirrored EXACTLY by the host-side golden in `compute.rs`
 // (`golden_composite_pixel`). The SDF math here is the same single source of truth
 // rung 9 froze (a future CPU physics evaluator reuses the SAME field math).
 //
-//   Image:   IMG_W x IMG_H pixels, pixel index = py * IMG_W + px.
-//   Camera:  ORTHOGRAPHIC, looking down -Z at the origin (no perspective divide).
+//   Image:   img_w x img_h pixels (runtime extent, P0a), pixel index = py*img_w + px.
+//   Camera (ORTHO, golden-frozen): looking down -Z at the origin (no perspective divide).
 //            For pixel (px,py):
-//              u =  ((px + 0.5) / IMG_W) * 2 - 1     // [-1, +1), +x right
-//              v = -(((py + 0.5) / IMG_H) * 2 - 1)   // [-1, +1), +y up (flipped)
+//              u =  ((px + 0.5) / img_w) * 2 - 1     // [-1, +1), +x right
+//              v = -(((py + 0.5) / img_h) * 2 - 1)   // [-1, +1), +y up (flipped)
 //            ray origin = (u * HALF_EXTENT, v * HALF_EXTENT, CAM_Z)
 //            ray dir    = (0, 0, -1)                 // straight down -Z
+//   Camera (PERSPECTIVE, P0a additive): eye = cam_eye.xyz; per-pixel NDC in [-1,+1]
+//            maps to a ray dir = normalize(forward + right*ndc_x*aspect*tan(fovY/2)
+//            + up*ndc_y*tan(fovY/2)). Selected by camera_mode == 1; the ortho path is
+//            untouched.
 //   Depth:   the mesh is rasterized with an ORTHOGRAPHIC projection chosen so the
 //            STORED depth equals the NORMALIZED ray parameter `t / T_MAX`, where
 //            `t = CAM_Z - worldZ` (the distance from the camera plane). Near plane
@@ -77,14 +97,51 @@
 
 RWStructuredBuffer<uint> Buf : register(u0);
 
+// Camera modes selected by `pc.camera_mode`. ORTHO is the golden-frozen path; the
+// PERSPECTIVE branch is strictly additive (P0a part 2). Mirrored host-side in
+// compute.rs as `CAM_MODE_ORTHO` / `CAM_MODE_PERSPECTIVE`.
+static const uint CAM_ORTHO       = 0u;
+static const uint CAM_PERSPECTIVE = 1u;
+
+// The legacy fixture extent the golden invocation reproduces. Used as the fallback
+// when `img_w`/`img_h` are zero (an all-zero push tail), and as the host const-assert
+// anchor (`SDF_IMG_W`/`SDF_IMG_H` in compute.rs both equal this).
+static const uint IMG_W_DEFAULT = 64u;
+static const uint IMG_H_DEFAULT = 64u;
+
+// The P0a push-constant block. Field offsets are pinned host-side by const-asserts
+// (`COMPOSITE_PC_*_OFFSET` in compute.rs) so a host/shader desync is a build error.
+// `count` stays at offset 0 (the legacy 4-byte field). Vector camera params use
+// `float4` (16-byte slots) to avoid HLSL push-constant `float3` packing surprises;
+// the ORTHO path ignores every camera field.
+//
+//   offset  0 : uint   count        total PIXEL count = img_w * img_h
+//   offset  4 : uint   img_w        runtime extent width  (0 => IMG_W_DEFAULT)
+//   offset  8 : uint   img_h        runtime extent height (0 => IMG_H_DEFAULT)
+//   offset 12 : uint   camera_mode  CAM_ORTHO | CAM_PERSPECTIVE
+//   offset 16 : float4 cam_eye      xyz = eye world pos          (PERSPECTIVE)
+//   offset 32 : float4 cam_forward  xyz = forward basis, w = tan(fovY/2) (PERSPECTIVE)
+//   offset 48 : float4 cam_right    xyz = right basis,  w = aspect (W/H)  (PERSPECTIVE)
+//   offset 64 : float4 cam_up       xyz = up basis                (PERSPECTIVE)
+//   total: 80 bytes, 16-byte aligned.
 struct PushConstants {
-    uint count; // total PIXEL count = IMG_W * IMG_H (NOT the buffer word count)
+    uint   count;
+    uint   img_w;
+    uint   img_h;
+    uint   camera_mode;
+    float4 cam_eye;
+    float4 cam_forward;
+    float4 cam_right;
+    float4 cam_up;
 };
 [[vk::push_constant]] PushConstants pc;
 
+// Resolves the runtime extent, falling back to the legacy 64×64 fixture when a field
+// is zero (so an all-zero push tail reproduces the golden — the 0%-gate).
+uint img_w() { return (pc.img_w != 0u) ? pc.img_w : IMG_W_DEFAULT; }
+uint img_h() { return (pc.img_h != 0u) ? pc.img_h : IMG_H_DEFAULT; }
+
 // --- Deterministic scene constants (mirrored host-side in compute.rs) ---------
-static const uint  IMG_W = 64u;
-static const uint  IMG_H = 64u;
 
 static const float CAM_Z       = 2.0;   // camera plane Z (rays start here)
 static const float HALF_EXTENT = 1.0;   // orthographic view half-extent in world units
@@ -118,7 +175,10 @@ static const uint MAX_SDF_EDITS  = 16u;
 static const uint SDF_EDIT_WORDS = 12u;       // size_of::<SdfEdit>() / 4
 static const uint HEADER_BASE    = 4u;        // edit array word offset (count padded to 16 B)
 static const uint DEPTH_BASE     = HEADER_BASE + MAX_SDF_EDITS * SDF_EDIT_WORDS; // 4 + 192 = 196
-static const uint PIXEL_BASE     = DEPTH_BASE + IMG_W * IMG_H;                    // 196 + 4096 = 4292
+// PIXEL_BASE now scales with the runtime extent: the depth region is `img_w*img_h`
+// f32s, then the pixel region. At the golden 64×64 extent this is 196 + 4096 = 4292
+// (unchanged). The host computes the matching offsets from the same extent.
+uint pixel_base() { return DEPTH_BASE + img_w() * img_h(); }
 
 // Primitive kinds.
 static const uint KIND_SPHERE = 0u;
@@ -244,14 +304,38 @@ void main(uint3 tid : SV_DispatchThreadID) {
         return;
     }
 
-    uint px = idx % IMG_W;
-    uint py = idx / IMG_W;
+    // Resolve the runtime extent (P0a part 1). At the golden invocation these equal
+    // 64, so every downstream arithmetic reproduces the frozen ORTHO fixture.
+    uint w = img_w();
+    uint h = img_h();
 
-    // Reconstruct the orthographic ray for this pixel (deterministic).
-    float u =  (((float)px + 0.5) / (float)IMG_W) * 2.0 - 1.0;
-    float v = -((((float)py + 0.5) / (float)IMG_H) * 2.0 - 1.0);
-    float3 ro = float3(u * HALF_EXTENT, v * HALF_EXTENT, CAM_Z);
-    float3 rd = float3(0.0, 0.0, -1.0);
+    uint px = idx % w;
+    uint py = idx / w;
+
+    float3 ro;
+    float3 rd;
+    if (pc.camera_mode == CAM_PERSPECTIVE) {
+        // P0a part 2: ADDITIVE perspective ray-gen, strictly inside this branch — the
+        // ORTHO arithmetic below is byte-untouched. NDC in [-1,+1] (+x right, +y up,
+        // y flipped to match the ortho convention); the ray direction is the camera
+        // basis combined with the NDC scaled by the half-FOV tangent and aspect. Plain
+        // IEEE ops (no rsqrt/rcp/fast-math) so a perspective scene is reproducible.
+        float ndc_x =  (((float)px + 0.5) / (float)w) * 2.0 - 1.0;
+        float ndc_y = -((((float)py + 0.5) / (float)h) * 2.0 - 1.0);
+        float tan_half_fov = pc.cam_forward.w; // tan(fovY / 2)
+        float aspect       = pc.cam_right.w;   // W / H
+        float3 dir = pc.cam_forward.xyz
+                   + pc.cam_right.xyz * (ndc_x * aspect * tan_half_fov)
+                   + pc.cam_up.xyz    * (ndc_y * tan_half_fov);
+        ro = pc.cam_eye.xyz;
+        rd = normalize(dir);
+    } else {
+        // Reconstruct the orthographic ray for this pixel (deterministic, golden-frozen).
+        float u =  (((float)px + 0.5) / (float)w) * 2.0 - 1.0;
+        float v = -((((float)py + 0.5) / (float)h) * 2.0 - 1.0);
+        ro = float3(u * HALF_EXTENT, v * HALF_EXTENT, CAM_Z);
+        rd = float3(0.0, 0.0, -1.0);
+    }
 
     // The shared mesh depth for this pixel (written by the GPU image->buffer copy
     // of the rasterized D32_SFLOAT attachment). depth == clear (1.0) => no mesh.
@@ -297,5 +381,5 @@ void main(uint3 tid : SV_DispatchThreadID) {
         color = BACKGROUND;
     }
 
-    Buf[PIXEL_BASE + idx] = pack_rgba(color);
+    Buf[pixel_base() + idx] = pack_rgba(color);
 }
