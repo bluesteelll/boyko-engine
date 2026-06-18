@@ -1,0 +1,163 @@
+// Render P4a: the SHARED SDF field-eval gateway (`sdf_field.hlsli`).
+//
+// This header is the SINGLE field gateway for the whole engine (the P4 invariant).
+// It is a VERBATIM cut of the determinism-frozen field-eval region of the rung-10 /
+// P1b marcher (`sdf_gbuffer_composite.hlsl` / `sdf_depth_composite.hlsl`): the
+// field-layout consts, the kind/op enums, the `Edit` struct + `load_edit`, the
+// primitive distances (`sd_sphere`/`sd_box`/`edit_distance`), the boolean ops +
+// polynomial smooth-min/-max (`smin`/`smax`/`combine`), the edit-list field `sdf`,
+// and the central-difference gradient `sdf_normal`. Nothing here was reordered or
+// edited — the source is character-identical to the region it was cut from so DXC
+// emits byte-identical field-eval SPIR-V ops and the host golden stays byte-exact.
+//
+// # INCLUDE CONTRACT (precondition)
+//
+// `StructuredBuffer<uint> Buf : register(t0)` MUST be declared and in scope BEFORE
+// this header is `#include`d — the field eval reads the packed edit-list header
+// out of `Buf` (`Buf[0]` = edit_count, then `MAX_SDF_EDITS` packed edits at
+// `HEADER_BASE`). The including TU owns the binding; this header references it.
+//
+// # DETERMINISM CONTRACT (INVIOLABLE — the P4 invariant)
+//
+// The scalar field eval below is byte-shared across the entire engine:
+//   * the GPU marcher (`sdf_gbuffer_composite.hlsl` / `sdf_depth_composite.hlsl`),
+//   * the host golden mirror `golden_composite_pixel_ex` (compute.rs),
+//   * the CPU physics evaluator `boyko_sdf_math::sdf_edit_list`,
+//   * every future FIELD-CONSUMER (the P4b coarse cone-trace cull, B1 over-relaxation,
+//     A1 cone-trace shadows, A2 ambient occlusion, P9 brick backend).
+// Therefore: NO fast-math, NO reordered/contracted FMA, NO `rsqrt`/`rcp`, NO FP16.
+// Plain IEEE ops only. Any divergence here breaks the golden-image gate AND the
+// render<->physics geometric agreement.
+//
+// # The stable gateway
+//
+// `field_distance(p)` is the named gateway every consumer calls; today it is a
+// plain alias of `sdf(p)`. When P9/P10/P12 swap the field BACKEND (brick fetch),
+// ONLY `field_distance` (and the future `tile_bound`) change here — the consumers
+// stay byte-untouched. The analytic `sdf`/`smin`/`smax`/`combine`/normal remain the
+// FROZEN reference and the physics source of truth (physics never reads bricks).
+
+// --- Field-eval tuning constants (frozen; parameterize the field functions) -----
+static const float FAR    = 1.0e9;  // the "empty field" sentinel before the first edit
+static const float GRAD_H = 0.0005; // central-difference half-step for the normal
+
+// --- The edit-list packed-header contract (mirrored host-side) -----------------
+// IDENTICAL to rung 9/10 up to the edit array. Unlike rung 10 there is NO depth
+// region and NO pixel region in the buffer (depth is the sampled image, color is the
+// storage image), so only the count + edit array are read here.
+static const uint MAX_SDF_EDITS  = 16u;
+static const uint SDF_EDIT_WORDS = 12u;       // size_of::<SdfEdit>() / 4
+static const uint HEADER_BASE    = 4u;        // edit array word offset (count padded to 16 B)
+
+// Primitive kinds.
+static const uint KIND_SPHERE = 0u;
+static const uint KIND_BOX    = 1u;
+
+// Boolean ops.
+static const uint OP_UNION     = 0u;
+static const uint OP_SUBTRACT  = 1u;
+static const uint OP_INTERSECT = 2u;
+
+// One decoded edit (the in-register form of the packed std430 element).
+struct Edit {
+    float3 center;
+    float3 params;     // radius (sphere) or half-extents (box)
+    uint   kind;
+    uint   op;
+    float  smoothness;
+};
+
+// Reads `asfloat`/`asuint` of the i-th packed edit out of the header region.
+Edit load_edit(uint i) {
+    uint base = HEADER_BASE + i * SDF_EDIT_WORDS;
+    Edit e;
+    e.center     = float3(asfloat(Buf[base + 0u]), asfloat(Buf[base + 1u]), asfloat(Buf[base + 2u]));
+    // word base+3 = center.w (unused)
+    e.params     = float3(asfloat(Buf[base + 4u]), asfloat(Buf[base + 5u]), asfloat(Buf[base + 6u]));
+    // word base+7 = params.w (unused)
+    e.kind       = Buf[base + 8u];
+    e.op         = Buf[base + 9u];
+    e.smoothness = asfloat(Buf[base + 10u]);
+    // word base+11 = _pad (unused)
+    return e;
+}
+
+// --- Primitive distance functions (IQ; the frozen rung-9 primitive set) -------
+
+// Sphere: distance to a sphere centered at `c` with radius `r`.
+float sd_sphere(float3 p, float3 c, float r) {
+    return length(p - c) - r;
+}
+
+// Box: distance to an axis-aligned box centered at `c` with half-extents `h`
+// (the standard IQ exact box SDF).
+float sd_box(float3 p, float3 c, float3 h) {
+    float3 q = abs(p - c) - h;
+    return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0);
+}
+
+// One edit's primitive distance at `p`.
+float edit_distance(Edit e, float3 p) {
+    if (e.kind == KIND_BOX) {
+        return sd_box(p, e.center, e.params);
+    }
+    return sd_sphere(p, e.center, e.params.x);
+}
+
+// --- Boolean ops + polynomial smooth-min/-max (IQ) ----------------------------
+
+// Polynomial smooth-min (IQ `smin`): a soft union with blend radius `k`.
+float smin(float a, float b, float k) {
+    float hh = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+    return lerp(b, a, hh) - k * hh * (1.0 - hh);
+}
+
+// Polynomial smooth-max: the De Morgan dual of `smin`.
+float smax(float a, float b, float k) {
+    return -smin(-a, -b, k);
+}
+
+// Combine the accumulated field distance `acc` with one edit's distance `d` under
+// the edit's boolean op, hard (`k <= 0`) or smooth (`k > 0`).
+float combine(float acc, float d, uint op, float k) {
+    if (op == OP_SUBTRACT) {
+        return (k > 0.0) ? smax(acc, -d, k) : max(acc, -d);
+    } else if (op == OP_INTERSECT) {
+        return (k > 0.0) ? smax(acc, d, k) : max(acc, d);
+    }
+    return (k > 0.0) ? smin(acc, d, k) : min(acc, d);
+}
+
+// --- The edit-list field (the single source of truth, identical to rung 9/10) -
+float sdf(float3 p) {
+    uint n = min(Buf[0], MAX_SDF_EDITS); // word 0 = edit_count (clamped to capacity)
+    float acc = FAR;
+    [loop]
+    for (uint i = 0u; i < n; ++i) {
+        Edit e = load_edit(i);
+        float d = edit_distance(e, p);
+        if (i == 0u) {
+            acc = d;
+        } else {
+            acc = combine(acc, d, e.op, e.smoothness);
+        }
+    }
+    return acc;
+}
+
+// Surface normal via central differences of `sdf` (the gradient of the WHOLE
+// edit-list field).
+float3 sdf_normal(float3 p) {
+    float2 e = float2(GRAD_H, 0.0);
+    float3 n = float3(
+        sdf(p + e.xyy) - sdf(p - e.xyy),
+        sdf(p + e.yxy) - sdf(p - e.yxy),
+        sdf(p + e.yyx) - sdf(p - e.yyx));
+    return normalize(n);
+}
+
+// --- The stable field gateway (the P4 invariant) ------------------------------
+// The named entry point every FIELD-CONSUMER (the P4b coarse cull, B1, A1, A2, P9)
+// calls. Today a plain alias of the analytic `sdf`; when a backend swap lands
+// (P9/P10/P12) ONLY this body changes — consumers stay byte-untouched.
+float field_distance(float3 p) { return sdf(p); }
