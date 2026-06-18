@@ -1,447 +1,937 @@
-# Render Optimization Plan — boyko-engine
+# Render Optimization Plan
 
-> Status: implementation-ready, sequenced. From the shipped deferred + SDF-hybrid base (rungs 1–11) to a production-scale renderer. Optimization-focused. Companion to `docs/RESEARCH-GRAPHICS-OPT.md` (priority/sequence) and `docs/PERF-DIRECTIONS.md` (RT-*/GPU-D* IDs). Destination: `docs/OPTIMIZATION-PLAN-RENDER.md`.
+> Status: implementation-ready, sequenced (v2 — full track expansion). From the shipped deferred + SDF-hybrid base into a production-scale renderer that exploits the SDF field we already evaluate. Companion to `docs/RESEARCH-GRAPHICS-OPT.md` (priority/sequence), `docs/PERF-DIRECTIONS.md` (RT-*/GPU-D* IDs), `docs/RESEARCH-FAST-MATH.md` (the determinism boundary the physics path reuses).
 >
-> **Changelog vs the reviewed draft** (every critic point resolved):
-> - **C1** — P3 split into P3a (on-screen hand-FFI `swapchain.rs` barrier batching, the real per-frame win) + P3b (`boyko_rhi::enums` constants + `boyko_render::barrier.rs` narrowing, serving the compute-column path of P8/P11). Citations corrected: on-screen barriers are 11 hand-FFI `cmd_pipeline_barrier` sites in `swapchain.rs`, NOT `lower_barriers`.
-> - **C2** — Added **P0**: instantiates the production scene substrate (resolution as a dispatch dimension, perspective camera, edit-list source) the spine optimizes. Every spine win is now re-stated as structural-until-P0-measured, with explicit target regimes.
-> - **C3** — P5/P6/P9 are now **forked passes**; the golden-frozen `sdf_depth_composite` marcher + its host mirror `golden_composite_pixel` + the scalar field eval (`sdf`/`smin`/`combine`/normal) stay byte-identical, preserving the physics-reuse contract. Tolerance relaxation promoted from an Open Question to a per-phase owner-approval gate.
-> - **W1** — P1 win reframed as structural; the fabricated "8 MB/frame at 1080p" removed (the fixture copies 16 KB).
-> - **W2** — P2 merged into P1 as its first sub-step (descriptor vocabulary precedes the MRT wiring it requires). Critical-path list corrected.
-> - **W3** — P8 scoped to render-local indirect (Hi-Z visible-tile count); the per-archetype `device_len`/GPU-D6 residency capstone is explicitly excluded.
-> - **W4** — Added a windowed-present synchronization model section + the semaphore-present seam decision (lands with P6's first cross-frame state).
-> - **W5** — Effort re-estimated: P1 (now incl. P2 + the shader rewrite) = XL; P3a = M.
-> - **O1** — Phases split into "spine" vs "parallel-after-P1" tracks structurally.
-> - **O2** — P9 brick format = R16 default (R8 only on a measured visual bar).
-> - **O3** — Octahedral normal noted as a golden-baseline reset, not a free swap.
+> **v2 mandate.** v1 (P0→P15) graduated the golden fixture into a real deferred + SDF-hybrid renderer and stopped at HW-RT lighting. The owner verdict: that selection is too meagre — it under-weights the **SDF-native** wins (cone-trace the field we already evaluate for shadows/AO/GI; the brick atlas as a universal acceleration structure for surfaces, fog, particles, and secondary rays) and the **marcher-acceleration** wins (over-relaxation, Lipschitz pruning, mesh-depth seeding) that directly cheapen the field. v2 adds nine tracks (A SDF-native lighting + A-GI, B marcher acceleration, C reconstruction/AA/VRS, D GPU-driven geometry, E volumetrics/post/OIT/particles, F render-graph/RHI substrate, S classic shadow/AO complement, G frontier GI/neural/PT) plus three cross-cutting infra phases (F-GRAPH render-graph, X-SPD shared mip primitive, X-REF stochastic acceptance oracle) that the critique proved are load-bearing.
+>
+> **Changelog vs the reviewed v2 draft** (every critique point resolved):
+> - **C1** — **F-GRAPH promoted to a near-spine phase** (lands after P1/P3a, before any Track E/S/G pass opens) and **defined in full here** (§F-GRAPH). Its barrier representation reserves the (src-queue, dst-queue) dimension from day one (resolves M7). Every Track E/S/G phase now declares "lowered by F-GRAPH" instead of hand-rolling barriers. Critical-path diagram and priority table updated.
+> - **C2** — Added **D-FWD** (transparent/blended material substrate) and made the mesh-material-G-buffer question an explicit owner decision (Open-Q11). Every false "needs P1" restated as "needs P1 + <the specific blend/raster/light-list capability>". E-WBOIT/MBOIT/LLOIT/E-PART/S-CSM now depend on D-FWD and/or P7 explicitly.
+> - **C3** — **E-DENS split** into E-DENS-A (independent render-authored density channel — clean RENDER) and E-DENS-B (density derived from the already-evaluated `field_distance` scalar — the field probe stays frozen, only the extinction remap relaxes). The blanket "fast-math OK" is removed.
+> - **C4** — Added **X-REF** (the statistical acceptance oracle): an in-house offline path-traced reference generator + a fixed convergence budget + a named metric/threshold per stochastic phase + an owner statistical-bar sign-off. Every Track-G stochastic phase now lists X-REF as a hard prerequisite (resolves Open-Q9's hand-wave).
+> - **M1** — **Priority inverted.** Track B (marcher acceleration) + Track A1/A2/A-SDFSHADOW (SDF-native surface shadows/AO) are sequenced **immediately after the spine, before all of Track E post and Track G neural.** The generic post chain (E-BLOOM..E-LUT) is explicitly demoted to **polish-tier**. E-SDFVOL no longer hard-requires the full froxel-fog pipeline — A1/A2 give a direct surface-shading SDF soft-shadow/AO path.
+> - **M2/M5** — E-SDFVOL and E-PART SDF-collision cost is **bounded** and declared **P9-required above the ≤16-edit fixture**; "free"/"a few cone steps" replaced with an O(consumers × edits/brick-fetch) cost statement.
+> - **M3** — The **P6-S semaphore-present seam** is named as an explicit prerequisite every cross-frame phase lists directly (not transitively through "needs P6").
+> - **M4** — **X-SPD** promoted to a single parametric mip-reduce primitive (reduction-op + format interface); P11/S-HIZ/S-GTAO/E-BLOOM/G-REBLUR **consume** it. The odd-dimension boundary fix ships once.
+> - **M6** — Added the **render↔physics geometric-divergence contract** (Open-Q12): the R16 brick field's world-space error bound vs the analytic physics field, owner-signed.
+> - **m1** — E-GOD route (b) screen-space radial blur demoted to optional-only.
+> - **m2** — E-MBOIT moment-inversion mitigation made concrete (stable Cholesky + documented epsilon bias regardless of fast-math).
+> - **m3** — `VK_NV_cooperative_vector` explicitly classified as an acceptable raw extension (not a forbidden vendor SDK), with the KHR/subgroup fallback mandatory.
+> - **m4** — The "~80% free via P6" framing is corrected: each denoiser's core (à-trous / reservoir / edge-stopping) is counted as real per-phase effort; shared infra is the motion-vector/history/reprojection seam only.
+> - **Completeness gaps** — Added **§VRAM Budget** (sums brick atlas + clipmap + VSM pages + reservoir SSBOs + froxel/fog 3D textures + G-buffer against 6 GB), **§PSO/Permutation discipline**, and **§G-buffer Bandwidth** accounting (the D-VIS visibility-buffer tension quantified).
+
+---
 
 ## 0. Shipped reality this plan attaches to (verified in-repo)
 
 | Subsystem | State | Cite |
 |---|---|---|
-| On-screen frame | Compute composite → packed `RWStructuredBuffer<uint>` → `present_sampled` fullscreen blit | `swapchain.rs:1661` `record_present_sampled`; `sdf_depth_composite.hlsl:78` |
-| SDF marcher | **Golden fixture**: hardcoded `IMG_W=IMG_H=64u` (4096 px), `MAX_SDF_EDITS=16u`, `MAX_IT=128u`, ORTHOGRAPHIC, one binding, CPU-written edits; folds full edit-list from `t=0`, bounded only by shared mesh depth | `sdf_depth_composite.hlsl:86-87,104,117,204,247-252` |
+| On-screen frame | Compute composite → packed `RWStructuredBuffer<uint>` → `present_sampled` fullscreen blit | `swapchain.rs:1661`; `sdf_depth_composite.hlsl:78` |
+| SDF marcher | **Golden fixture**: `IMG_W=IMG_H=64u`, `MAX_SDF_EDITS=16u`, `MAX_IT=128u`, ORTHOGRAPHIC, one binding, CPU-written edits; folds the full edit-list from `t=0`, bounded only by shared mesh depth | `sdf_depth_composite.hlsl:86-87,104,117,204,247-252` |
 | Field math = golden source of truth | `sdf`/`smin`/`combine`/normal mirrored EXACTLY host-side (`golden_composite_pixel`); **a future CPU physics evaluator reuses the SAME field math** | `sdf_depth_composite.hlsl:8-12,47-51` |
-| MRT G-buffer | Offscreen golden-tested rungs only (`gbuffer.fs`/`deferred_light.fs`, `color_formats: &[Format]` MRT). NOT the on-screen path | `rhi_impl.rs`; `gbuffer.fs.hlsl`; `deferred_light.fs.hlsl` |
+| MRT G-buffer | Offscreen golden-tested rungs only (`gbuffer.fs`/`deferred_light.fs`, `color_formats: &[Format]` MRT). NOT the on-screen path. **Mesh albedo is flat-color** — "reading the mesh's real rasterized albedo from a G-buffer is a deferred refinement" (`sdf_depth_composite.hlsl:92-95`) | `rhi_impl.rs`; `gbuffer.fs.hlsl`; `deferred_light.fs.hlsl` |
 | Shared depth | Real D32 prepass → `copy_image_to_buffer` into a DEPTH region (64×64 = 16 KB/frame) | `swapchain.rs:2071` `sync_depth` |
-| Queue | ONE graphics+compute family, `queue_count:1`, **fence-only `submit`, NO semaphores** (`submit_windowed` is an unbuilt seam) | `device.rs:1634` `find_queue_family`, `:1750`; `queue.rs:3-5,22,31` |
-| On-screen barriers | **Hand-FFI** `(self.fns.cmd_pipeline_barrier)`, one image barrier per call, **11 sites** in `record_scene`/`sync_depth`/`record_present_sampled` | `swapchain.rs:844,914,1169,1201,1337,1370,1432,1708,1831,1864,1926` |
-| ECS-edge barriers (distinct path) | `lower_barriers` lowers conflict-graph edges into `PlannedBarrier` POD keyed by `(ArchetypeId, ComponentId)`, replayed by `GpuSystem` — the **compute-column** path, does NOT touch the on-screen frame | `boyko_render/barrier.rs:1-15,58-76,196-233` |
-| Barrier constants | `boyko_rhi::enums` lacks `DRAW_INDIRECT`/`INDIRECT_COMMAND_READ`/`ALL_COMMANDS`/`MEMORY_*`; widen is `COMPUTE_SHADER\|TRANSFER` only; `GpuStage::Indirect` widens (barrier.rs:121-124) | `enums.rs:101`; `barrier.rs:36,121-124` |
-| Bind groups | `create_bind_group`/`_layout` are **COMBINED_IMAGE_SAMPLER-only**; compute path binds exactly one storage buffer | `rhi_impl.rs:717`; `encoder.rs:38` `bind_storage_buffer` |
+| Queue | ONE graphics+compute family, `queue_count:1`, **fence-only `submit`, NO semaphores** (`submit_windowed` is an unbuilt seam) | `device.rs:1634,1750`; `queue.rs:3-5,22,31` |
+| On-screen barriers | **Hand-FFI** `(self.fns.cmd_pipeline_barrier)`, one image barrier per call, **11 sites** | `swapchain.rs:844,914,1169,1201,1337,1370,1432,1708,1831,1864,1926` |
+| ECS-edge barriers (distinct path) | `lower_barriers` lowers conflict-graph edges into `PlannedBarrier` POD keyed by `(ArchetypeId, ComponentId)`, replayed by `GpuSystem` — the **compute-column** path, never touches the on-screen frame | `boyko_render/barrier.rs:1-15,58-76,196-233` |
+| Barrier constants | `enums.rs` lacks `DRAW_INDIRECT`/`INDIRECT_COMMAND_READ`/`ALL_COMMANDS`/`MEMORY_*`; widen is `COMPUTE_SHADER\|TRANSFER` only | `enums.rs:101`; `barrier.rs:36,121-124` |
+| Bind groups | `create_bind_group`/`_layout` **COMBINED_IMAGE_SAMPLER-only**; compute path binds exactly one storage buffer; no blend-state raster pipeline beyond the prototype | `rhi_impl.rs:717`; `encoder.rs:38` |
 | Indirect | `dispatch_indirect` `#[cold]` no-op stub; `BufferUsage::INDIRECT` exists | `encoder.rs:269`; `enums.rs:37` |
 | HW-RT | No `AccelerationStructure`/`RayTracingPipeline` associated type | `api.rs:46-67` |
+| Sub-allocator | Free-list sub-allocator (F-MEM/F-ALIAS extend it) | `suballocator.rs` |
+| Threadpool | Chase-Lev work-stealing pool (F-PSO uses it for parallel PSO warm) | `boyko_threadpool/` |
 
-**Inviolable gates carried into every phase:** 0%-gate (a world not using `boyko_render` pays nothing; named CPU hot loops byte-identical); in-house only (raw-FFI Vulkan 1.3, no ash/wgpu); native (not web); golden-image-equal + GPU-timestamp + validation/sync-validation clean on RTX 3060 as the GPU oracle; every `unsafe` carries `// SAFETY:`; **the deterministic scalar field eval (`sdf`/`smin`/`combine`/normal) and `golden_composite_pixel` stay byte-identical — no fast math, no reordered FMA — because physics collision reuses them (RESEARCH-FAST-MATH determinism boundary).**
+**GPU oracle = RTX 3060 Laptop (6 GB).** Every phase gated by golden-image-equality + Vulkan validation + sync-validation + GPU-timestamps on this device.
+
+**Inviolable gates carried into every phase:** 0%-gate (a world not using `boyko_render` pays nothing; named CPU hot loops `row_ptr`/`for_each_chunk`/query-iter/`find_ready` byte-identical); in-house only (raw-FFI Vulkan 1.3, no ash/wgpu/any external GPU lib — every open-source reference FSR2/XeGTAO/NRD/VkNRC/FidelityFX-SPD/meshoptimizer is **reimplemented**, never linked); native (not web); golden-image-equal + GPU-timestamp + validation/sync-validation clean; every `unsafe` carries `// SAFETY:`; **the deterministic scalar field eval (`sdf`/`smin`/`smax`/`combine`/normal) + `golden_composite_pixel` stay byte-identical — no fast-math, no reordered FMA, no rsqrt/rcp, no FP16 — because physics collision reuses them through the single gateway `sdf_field.hlsli` (the P4 invariant).**
 
 ---
 
-## 1. Critical path (dependency-ordered, two tracks)
+## 0a. The determinism contract (THE load-bearing constraint)
+
+Three sources fix this (`RESEARCH-FAST-MATH.md:7-19`, `sdf_depth_composite.hlsl:8-12,47-51`):
+
+1. **Float reassociation** (algebraic intrinsics, FMA contraction, autovec of float reductions) reorders adds → non-deterministic even within one run.
+2. **`rsqrtps`/`rcpps` are implementation-defined and differ Intel-vs-AMD** — wrong-by-vendor, not merely non-portable. `sqrtss`/`sqrtps`/`divps` ARE IEEE-754-exact and bit-identical everywhere.
+3. The CPU physics SDF-collision narrowphase evaluates the **same** `sdf`/`smin`/`combine` math the GPU marcher does; a render-side reordering would silently desync physics from visuals.
+
+**Per-phase determinism class (the firewall):**
+
+- **FROZEN** — IS the field eval. `sdf`/`smin`/`smax`/`combine`/normal in `sdf_field.hlsli` + the host mirror `golden_composite_pixel`. Byte-identical across the ENTIRE plan. No exceptions.
+- **FIELD-CONSUMER** — CALLS the frozen field at offset points (shadow/AO/visibility/secondary rays, particle collision, in-brick solve). The field *probe* goes through `sdf_field.hlsli` with NO fast-math; the *accumulation around it* (min-tracking penumbra, cone weights, reservoir math) is consumer-side and MAY relax.
+- **RENDER** — never touches the field. Post, OIT, reconstruction, classic shadows/AO, neural. Fully relaxable. Temporal/stochastic non-determinism here is OUTSIDE the physics gate by design.
+- **FORKED-BACKEND** — P9/P10/P12: the field *backend* (brick fetch) is forked behind `field_distance` for render; the analytic path remains the FROZEN reference + the physics source of truth (physics never reads bricks). Carries a documented render↔physics geometric-divergence bound (Open-Q12).
+
+**The single field gateway is `sdf_field.hlsli`** (the P4 invariant). Every field touch in the whole engine — render and physics — goes through it. Two traps the critique surfaced:
+- **B9's cheaper 4-tap tetrahedron normal is FROZEN-adjacent** — keep the 6-tap central-difference normal as the frozen physics-shared normal; fork a render-only 4-tap behind a separate function (Open-Q2).
+- **E-DENS-B's "fast-math OK"** applies ONLY to the extinction remap of an *already-evaluated* scalar `d = field_distance(p)`; the `field_distance` call itself is frozen (C3).
+
+---
+
+## 1. Critical path (dependency-ordered)
 
 ```
-─── SPINE (graduate the fixture into a real renderer) ───────────────────────────
-P0  Production scene substrate: resolution-as-dispatch-dim, perspective cam,      [L]  ← MUST precede every "ray-budget" win
-    edit-list source from ECS; defines the target regimes the spine measures
-P1  MRT G-buffer (incl. P2 descriptor vocabulary as sub-step 1) + shared-depth    [XL] ← foundation; subsumes ex-P2
-    image + kill the depth→buffer copy + the marcher single→multi-binding rewrite
-P3a On-screen barrier batching (hand-FFI swapchain.rs)                            [M]  ← co-req of P1's 4-pass frame
-P4  Hierarchical tile-cull / coarse pre-trace (behind field_distance/tile_bound)  [M]  ← needs P0+P1
-P5  Half-res trace + depth-aware upscale  (FORKED path; golden marcher frozen)    [M]  ← needs P0+P4
-P6  Motion vectors + history + TAA  (FORKED path; semaphore-present seam lands)   [L]  ← needs P0+P1+P5; RT denoiser base
-─── PARALLEL-AFTER-P1 (independent of the SDF spine) ─────────────────────────────
-P3b boyko_rhi::enums constants + boyko_render::barrier.rs narrowing               [S]  ← serves P8/P11 compute-column path
-P7  Clustered/tiled deferred light culling (froxel + bitfield + subgroup)         [L]  ← needs P1 only
-P8  GPU-driven indirect dispatch (render-local count buffer; NOT device_len)      [M]  ← needs P3b; prereq for P11
-─── THRESHOLD- / CAPABILITY- / PROFILE-GATED (build only when measured needed) ──
-P9  SDF brick atlas (field backend swap behind P4 invariant)            [XL] threshold ← needs P4 invariant
-P10 Clipmap LOD over bricks                                              [L]  threshold ← needs P9
-P11 Hi-Z two-pass mesh occlusion culling                                [L]  threshold ← needs P8 + P1
-P12 BVH dirty-region regen + JFA                                         [XL] threshold ← needs P9
-P13 Async compute (multi-queue + cross-queue semaphores)                [XL] profile   ← needs P3a/P3b + P6's seam
-P14 AS/RT seam + HW-RT SDF-as-AABB-BLAS backend                         [XL] capability← needs P9 (bricks=BLAS)
-P15 RT lighting (shadows/AO/GI/reflections) + SVGF                      [XL] confirmed ← needs P6 (denoiser) + P14
+─── SPINE (graduate the fixture into a real renderer) ────────────────────────────
+P0   Production scene substrate (res-as-dispatch, perspective cam, ECS edit feed)  [L]   first
+P1   MRT G-buffer (+P2 descriptor vocab) + shared-depth image + kill depth-copy    [XL]  ← P0
+P3a  On-screen barrier batching (hand-FFI swapchain.rs)                            [M]   ← co-req P1
+F-GRAPH  Render-graph: auto-derive barriers + resource lifetimes for BOTH          [L]   ← P1+P3a  ★ gates the pass explosion
+         codepaths from pass declarations; reserves the queue-ownership dimension
+P4   Hierarchical tile-cull / coarse pre-trace (behind sdf_field.hlsli)            [M]   ← P0+P1
+P5   Half-res trace + depth-aware upscale  (FORKED; golden marcher frozen)         [M]   ← P0+P4
+P6   Motion vectors + history + TAA  (FORKED; lands the P6-S semaphore seam)       [L]   ← P0+P1+P5
+─── SDF-NATIVE FAST-TRACK (the owner-named wins — land right after the spine) ─────
+B1   Over-relaxation sphere-tracing (ω-gated)                                      [S]   ← P4    FIELD-CONSUMER
+B5   Mesh-depth + previous-frame march seeding                                     [S]   ← P1+P6 FIELD-CONSUMER
+B7   Lipschitz / bound pruning of the edit-list fold (analytic, distance-exact)    [M]   ← P4    FROZEN-preserving
+A1   SDF cone-trace soft shadows (Quilez penumbra)                                 [M]   ← P4    FIELD-CONSUMER
+A2   SDF 5-tap ambient occlusion                                                   [S]   ← P4    FIELD-CONSUMER
+C-AA Analytic edge AA from the distance field                                      [S]   ← P4    FIELD-CONSUMER
+─── PARALLEL-AFTER-P1 (independent of the SDF spine) ──────────────────────────────
+P3b  enums constants + boyko_render::barrier.rs narrowing                          [S]   ← P1   serves P8/P11
+P7   Clustered/froxel deferred light culling (bitfield + subgroup)                 [L]   ← P1
+P8   GPU-driven indirect dispatch (render-local count)                            [M]   ← P3b  prereq P11
+D-FWD Transparent/blended material substrate (blend-state raster + sorted pass)   [M]   ← P1+P7  prereq all OIT + S-CSM + E-PART render
+X-SPD Parametric SPD mip-reduce primitive (one build, many consumers)             [S]   ← P1   prereq P11/S-HIZ/S-GTAO/E-BLOOM/G-REBLUR
+─── RECONSTRUCTION / VRS / CLASSIC SHADOW-AO (after P6) ───────────────────────────
+C-TSR  Full FSR2/TSR temporal super-resolution (supersedes simple P5/P6)          [L]   ← P5+P6
+C-CTSS/C-VRS/C-CBR  Checkerboard / VRS / coarse shading                           [M/M/M] capability
+S-HIZ  Hi-Z shared accelerator (canonical X-SPD consumer)                          [M]   ← P1+X-SPD  feeds S-GTAO/S-CONTACT/A1/P11
+S-GTAO / S-CONTACT / S-CSM / S-VSM  Classic shadow/AO complement (mesh side)      [L/M/L/XL]
+─── VOLUMETRICS / POST / OIT / PARTICLES (after P6+P7; post = polish-tier) ────────
+E-FOG  Froxel volumetric fog/lighting                                             [L]   ← P1+P6-S+P7
+E-SDFVOL  SDF-native analytic volumetric self-shadow & AO (P9-required at scale)  [M]   ← P4(+P9)  FIELD-CONSUMER
+E-DENS-A/B  Brick-atlas participating-medium density                              [L]   ← P9+E-FOG threshold
+E-CLOUD  Volumetric clouds                                                        [XL]  ← E-FOG+P5+P6-S threshold
+E-GOD  God rays (route a = free from E-SDFVOL; route b optional)                  [S]   ← E-FOG
+E-WBOIT / E-MBOIT / E-LLOIT  OIT ladder                                           [S/L/L] ← D-FWD
+E-PART  GPU particle system (+ free SDF collision, P9-required at scale)          [L]   ← P1+P8+D-FWD  RENDER+FIELD-CONSUMER
+── POLISH-TIER POST (low priority; any-engine commodity) ──────────────────────────
+E-BLOOM / E-DOF / E-MBLUR / E-EXP / E-TONE / E-LUT                                [M..S] ← P1(+P6-S)
+─── A-GI: SDF-NATIVE GLOBAL ILLUMINATION (software-first, no HW-RT) ────────────────
+A8   Radiance Cascades 2D (noiseless, no bricks)                                  [L]   ← P1+P6    RENDER
+A13  SSGI bitmask                                                                 [M]   ← P1+P6+S-HIZ RENDER
+A7/A10/A12  VCT / DDGI / Brixelizer-class GI (over bricks)                        [L/L/XL] ← P9  FIELD-CONSUMER
+─── THRESHOLD/CAPABILITY/PROFILE-GATED SDF-ACCEL + GPU-DRIVEN ──────────────────────
+P9   SDF brick atlas (field backend swap behind P4 invariant)            [XL] threshold ← P4 invariant; re-eval vs B7 first
+P10  Clipmap LOD over bricks                                             [L]  threshold ← P9
+G-BRICKRT  Software brick-RT (hierarchical-DDA) — RT-CORE-FREE KEYSTONE  [L]  ← P9      FIELD-CONSUMER
+P11  Hi-Z two-pass mesh occlusion culling                               [L]  threshold ← P8+S-HIZ
+P12  BVH dirty-region regen + JFA (+ SDF motion vectors for mutating)   [XL] threshold ← P9
+D-VIS / D-SWRAST / D-MESH / D-CULL / D-COMPACT  GPU-driven geometry      [L..XL] threshold/capability
+P13  Async compute (multi-queue + cross-queue semaphores)               [XL] profile   ← P3a/P3b + P6-S seam
+─── HW-RT (optional accelerator over the software path — NOT the GI prerequisite) ──
+P14  AS/RT seam + HW-RT SDF-as-AABB-BLAS backend                        [XL] capability← P9; fallback G-BRICKRT
+P15  RT lighting (shadows/AO/GI/reflections) + SVGF                     [XL] confirmed ← P6+P14+G-SVGF
+─── TRACK G: FRONTIER GI / NEURAL / PATH-TRACING ──────────────────────────────────
+X-REF  Stochastic acceptance oracle (offline PT reference + metric/bar) [M]  ★ prereq for ALL stochastic Track-G
+G-SVGF / G-REBLUR / G-FIRE  Denoisers (consume P6 + X-SPD)              [L/L/S] ← P6-S
+G-RDI / G-RGI / G-REGIR / G-PT  ReSTIR DI/GI/world-grid/PT             [L/L/M/XL] ← P6-S+P7+X-REF+(G-BRICKRT|P14)
+G-SHARC  Spatial-hash radiance cache (non-neural NRC twin)             [M]   ← G-RGI/PT  RENDER+FIELD-CONSUMER
+G-SOIT  Stochastic OIT (absorbed by TAA)                               [M]   ← P6-S+denoiser
+G-NRC / G-NDENOISE / G-NUP / G-NMAT  Neural (coopmat-gated)            [XL..L] capability; non-neural twin = mandatory fallback
+─── RENDER-GRAPH / RHI SUBSTRATE EXTENSIONS (cross-cut, land as needed) ────────────
+F-SYNC2 / F-BIND / F-FP16 / F-PUSH / F-MEM / F-ALIAS / F-PSO          [S..M] capability/threshold
 ```
 
-**The spine is P0→P1→P3a→P4→P5→P6.** P0 instantiates the cost; P1 graduates the buffer-packed fixture into a real attribute-image deferred renderer (and is the only place the marcher's single-binding shader is rewritten); P3a cuts the per-frame barrier tax on the new 4-pass frame; P4→P5→P6 amortize the march. P6 is the RT-lighting denoiser foundation. P3b/P7/P8 parallelize after P1. P9–P15 are gated.
+**The spine is P0→P1→P3a→F-GRAPH→P4→P5→P6.** F-GRAPH is inside the spine boundary (the critique's C1): it lands once the 4-pass frame (P1) and batched barriers (P3a) exist, and it MUST precede the Track-E/S/G pass explosion or every later phase hand-rolls barriers across two codepaths — an O(passes²) hazard-tracking liability.
 
-Why this order, concretely:
-- **P0 absolutely first.** The shipped marcher is a 64×64/≤16-edit golden fixture (verified `IMG_W=IMG_H=64u`, `MAX_SDF_EDITS=16u`); it is not march-step-bound at any measurable scale and reads a CPU array, not the ECS world. Every "tile-cull removes empty space / half-res quarters it / TAA multiplies the budget" claim is **unmeasurable until P0 instantiates a resolution, a perspective camera, and an edit feed.** Building P4/P5/P6 before P0 designs amortization layers for a cost that does not exist (foundations-before-APIs).
-- **P1 second** because the packed `u32` buffer conflates depth+attributes+output into one binding and forces a per-frame depth image→buffer copy; every downstream opt (tile far-bound, motion vectors, clustered lighting, RT) needs real attribute images. P1 also necessarily rewrites the single-binding `RWStructuredBuffer<uint>` marcher to write STORAGE images (the descriptor vocabulary, ex-P2, is its first sub-step).
-- **Tile-cull (P4) before half-res (P5) before TAA (P6)**: tile-cull removes the dominant empty-space march, half-res quarters what remains, TAA amortizes across frames. TAA-first would temporally-stabilize an un-culled, full-res, full-cost march.
-- **Indirect (P8) before Hi-Z (P11)**: Hi-Z writes device-side visible-tile counts the CPU must not read back.
-- **Bricks (P9) before HW-RT (P14)**: the non-empty-brick AABB list *is* the BLAS source; building the AS seam before bricks gives it no consumer.
-
----
-
-## 1b. Windowed-present synchronization model (resolves W4)
-
-The spine introduces a multi-pass on-screen frame and cross-frame state, but `submit` takes **no semaphores** (`queue.rs:22,31`; `submit_windowed` is an unbuilt seam). Two distinct synchronization scopes:
-
-- **Intra-frame (one command buffer):** the 4 passes (MRT raster → SDF compute → deferred lighting → present blit) synchronize via **pipeline barriers within a single recorded command buffer** — exactly the existing `record_scene` model. No semaphore needed. P1/P3a operate entirely here. **This is sufficient for P0–P5.**
-- **Cross-frame (acquire→render→present chain + history):** P6's history buffer and P11's "last frame's visible set" introduce a dependency on the *previous frame's* output. A correct swapchain present needs the acquire-image / render-finished **semaphore chain** that `submit` cannot express today. **Decision: the `submit_windowed` semaphore-present seam lands as P6's first sub-step** (P6 is the first phase that needs cross-frame state). Until then, P0–P5 use the fence-only single-command-buffer model (correct, just serializes frames — acceptable pre-P6). P13 (async) extends this seam to cross-queue semaphores; it does not invent it.
-
-This is **not async** — it is basic windowed-present correctness, and the seam's absence is now an explicit P6 precondition rather than a silent gap.
+**Why this order, concretely:**
+- **P0 first** — the shipped marcher is a 64×64/≤16-edit fixture, not march-step-bound; every ray-budget claim is unmeasurable until P0 instantiates a resolution, perspective camera, and ECS edit feed.
+- **P1 second** — the packed `u32` buffer conflates depth+attributes+output and forces a per-frame depth-image→buffer copy; every downstream opt needs real attribute images.
+- **F-GRAPH inside the spine** — 60+ later passes against two hand-maintained barrier paths do not scale; auto-derived barriers from pass declarations are the single highest-leverage infra item (C1).
+- **SDF-native fast-track right after the spine** — Track B (cheapens the field we already evaluate) + A1/A2/C-AA (the owner-named SDF-native lighting) are the highest-ROI work and land before any commodity post or neural filler (M1).
+- **Software/SDF-native GI is primary, HW-RT is an accelerator** — G-BRICKRT makes the brick atlas itself the acceleration structure, so all of ReSTIR/PT/cache run with NO RT cores; P14/P15 become an optional accelerator for incoherent rays, not the GI prerequisite (Open-Q6).
+- **Post chain is polish-tier** — E-BLOOM..E-LUT are any-engine commodity; they never compete for sequencing attention with the differentiators (M1).
 
 ---
 
-## PHASE P0 — Production scene substrate (resolve C2) — SPINE
+## 1b. Windowed-present synchronization model (the P6-S seam)
 
-**What.** Turn the golden fixture into a renderer that has a resolution, a camera, and a scene feed:
-1. **Resolution as a dispatch dimension.** Replace `IMG_W=IMG_H=64u` static consts with dispatch-dimension/uniform-driven width/height; the marcher reads its extent, not a compile-time constant. The 64×64 golden fixture remains as a frozen test (a fixed-extent invocation), but the production path is resolution-parametric.
-2. **Perspective camera.** Add a perspective ray-generation path alongside the golden-frozen orthographic one. The ortho convention is golden-frozen (rung-8..11) — perspective is a **new, additive** ray-gen mode selected by a camera-mode uniform, never a modification of the ortho path.
-3. **Edit-list source from ECS.** Define how SDF edits reach the marcher: the CPU collects `SdfEdit` components from the ECS world into the edit buffer at frame setup (the current CPU-push path, generalized from a hardcoded array to an ECS query). The GPU-resident-column feed (MEM-D2) is explicitly **out of scope** here (it is the GPU-D6 residency pillar, W3).
+`submit` takes no semaphores today (`queue.rs:22,31`). Two scopes:
+- **Intra-frame (one command buffer):** the multi-pass frame synchronizes via pipeline barriers in a single recorded command buffer (the existing `record_scene` model). Sufficient for P0–P5.
+- **Cross-frame (acquire→render→present + history):** P6's history and P11's "last frame visible set" depend on the previous frame's output. This needs the acquire-image / render-finished **semaphore chain** `submit` cannot express. **The `submit_windowed` semaphore-present seam — named P6-S — lands as P6's first sub-step.** P13 extends it to cross-queue; it does not invent it.
 
-**Why our path needs it.** Without a resolution/camera/scene, the spine's ray-budget wins are unmeasurable (the critic's C2 blocker): a 64×64/≤16-edit fixture is not march-step-bound, so no gate of the form "GPU-timestamp shows fine-march step reduction on a sparse scene" can be evaluated. P0 instantiates the cost the spine amortizes.
-
-**Target regimes the spine measures against** (stated so every later gate is falsifiable):
-- **Resolution:** 1920×1080 production target; 1280×720 as the fast-iteration profile.
-- **Edit-count regime:** "scene" = 256–4096 active `SdfEdit`s (the threshold band where the analytic `O(edits)` fold starts to hurt and P9 bricks become a candidate). The ≤16-edit fixture is the "tech-demo / bricks-lose" floor.
-- **Empty-screen fraction:** measured per scene; the tile-cull (P4) win scales with it. Two canonical scenes: **sparse** (geometry clustered, ~70% empty screen — the P4/P5 best case) and **dense** (geometry fills the frame — the honest worst case showing ~no P4 win).
-
-**How.** Marcher extent + camera-mode + edit-count become push-constants/uniforms (the single-binding packed buffer already carries `count`; P1 graduates this to a proper uniform). The perspective ray-gen is a forked `[branch]` on camera-mode, leaving the ortho path's instruction sequence untouched so the rung-8..11 goldens stay bit-exact.
-
-**Expected win.** None directly — P0 is the cost-instantiation prerequisite. It makes P1's "removes the per-frame depth copy" measurable at a real resolution and P4/P5/P6's ray-budget gates evaluable.
-
-**Dependency/order.** First on the spine. Everything else's "expected win" lines are unsubstantiated until P0 lands.
-
-**Gate.** The rung-8..11 goldens (ortho, 64×64) stay **bit-exact** (the parametric extent + the additive perspective branch must not perturb the frozen ortho path); a 1080p perspective dispatch produces a validation-clean frame; an ECS-fed scene of N edits renders (correctness vs a host reference at small N); GPU-timestamp baselines recorded for sparse + dense scenes at 720p/1080p (the numbers every later phase measures against).
-
-**Effort.** L. **Conflicts.** None — additive ray-gen mode + parametric extent; the golden-frozen ortho path is byte-untouched (0%-gate + determinism honored). **Principle note:** perspective ray-gen must not introduce fast-math into the field eval — only ray *generation* changes; `sdf`/`smin`/`combine` are byte-identical.
+**P6-S is a named prerequisite (resolves M3).** Every cross-frame phase — E-EXP, E-CLOUD, E-MBLUR, all of Track G (reservoir ping-pong, G-SHARC temporal accumulation), C-TSR, S-VSM (page caching) — lists **needs P6-S** directly, not transitively through "needs P6". P6 ships the FULL cross-frame semaphore chain, not merely intra-frame TAA, before Track G opens.
 
 ---
 
-## PHASE P1 — MRT G-buffer + descriptor vocabulary + shared-depth image + kill the depth→buffer copy + marcher single→multi-binding rewrite (subsumes ex-P2) — SPINE
+## 1c. Per-phase block legend
 
-**What.** (Sub-step 1, ex-P2) Generalize the descriptor seam from "fixed single compute storage buffer" + "COMBINED_IMAGE_SAMPLER-only" (`rhi_impl.rs:717`) to a small typed multi-resource bind-group vocabulary: `{StorageImage, SampledImage, CombinedImageSampler, StorageBuffer, UniformBuffer}` in arbitrary per-set combination, bindless-ready (descriptor-indexing reserved behind a `DeviceCaps` query) but not bindless yet. Add a compute-pipeline descriptor-set bind point (today the compute path binds exactly one storage buffer, `encoder.rs:38`).
-(Sub-step 2) Replace the packed-`u32`-buffer composite with a real G-buffer of images: `depth (D32_SFLOAT)`, `normal (R8G8B8A8_UNORM` — see O3/Open-Q3 for octahedral`)`, `albedo (R8G8B8A8_UNORM)`, `material (R8G8B8A8_UNORM: roughness/metalness/flags)`. **Rewrite the marcher from `RWStructuredBuffer<uint>`-only to write STORAGE images** and read the SHARED depth image directly (not via a copied buffer region). Mesh raster writes COLOR attachments + DEPTH; the deferred-lighting pass (`deferred_light.fs`) consumes the G-buffer.
-
-**Why our path needs it.** The packed buffer is a single-binding test-harness shortcut that conflates depth+attributes+output and forces a `copy_image_to_buffer` of the D32 attachment into a buffer region **every frame** (`sync_depth`, swapchain.rs:2071) — because the marcher physically *cannot sample an image* (it has only `RWStructuredBuffer<uint> Buf`). The MRT G-buffer is the committed OQ-B destination; treating the packed buffer as final blocks hardware depth-test, motion vectors, clustered lighting, and the entire RT-lighting foundation. The descriptor vocabulary (sub-step 1) is a **hard prerequisite** of the MRT wiring (sub-step 2 needs a set with 3 storage images + 1 sampled depth + 1 uniform), which is why ex-P2 is now P1's first sub-step (resolves W2).
-
-**How (optimal for raw Vulkan 1.3 + our RHI).**
-- *Descriptor (sub-step 1):* `BindGroupLayoutDesc` → `&[BindGroupLayoutEntry { binding, kind, stage, count }]`; map each `kind` to its `VkDescriptorType` at the cold create boundary. `BindGroupDesc` → `&[BindGroupEntry]` (image-view + optional sampler, or buffer + offset + range), written once with `vkUpdateDescriptorSets` at create (no per-frame rewrite). Add a `BindPoint`/compute sibling to `bind_descriptor_set` (today GRAPHICS-only, `encoder.rs:168`). Seam-with-default-`#[cold]`-body pattern (the `copy_buffer`/`image_barrier` template) keeps Mock + ABI stable.
-- *Passes (sub-step 2):* (1) geometry MRT raster (`gbuffer.vs/fs`, `color_formats=[normal,albedo,material]`, depth) → G-buffer + depth; (2) SDF compute marcher bound to G-buffer STORAGE images + the depth as a sampled image, writing surface attributes where it wins the §15.1 depth seam — now via the depth IMAGE; (3) deferred-lighting fullscreen pass (`deferred_light.fs`) → lit image; (4) present blit (`present_sampled`).
-- *Images:* G-buffer `COLOR_ATTACHMENT | STORAGE | SAMPLED`; depth `DEPTH_STENCIL_ATTACHMENT | SAMPLED`.
-- *Sync:* intra-frame pipeline barriers in one command buffer (§1b); batched by P3a.
-
-**Expected win (structural, not a fabricated number — resolves W1).** Removes the per-frame depth image→buffer copy + its transfer→compute barrier (**16 KB/frame at the current fixture, scaling with resolution** — NOT the previously-quoted 8 MB, which assumed a 1080p path that does not yet exist pre-P0). Graduates the renderer off the single-binding packed buffer so depth is an image (zero-copy occlusion) and attributes are column-granular (MEM-D2, GPU-image side). Unblocks P4/P6/P7/P14. No marcher-speed change yet (that is P4/P5).
-
-**Dependency/order.** Foundation; needs P0 (resolution-parametric marcher to graduate). Prereq for P3a (the 4-pass frame it batches), P4, P6, P7.
-
-**Gate.** Golden-image-equal (±2/255, rung-10 tolerance) between the new G-buffer composite and the packed-buffer composite on crater_csg/box_csg/smooth_union + mesh-occludes-SDF; the depth→buffer copy is **GONE** from the per-frame command stream (recording inspection); a compute pipeline bound to a 3-storage-image + 1-sampled-depth + 1-uniform set produces the golden (descriptor-type/layout mismatches are a validation fault — the oracle catches them); no per-frame `vkUpdateDescriptorSets` in the steady stream; validation + sync-validation clean on RTX 3060.
-
-**Effort.** **XL** (resolves W5: subsumes ex-P2's descriptor vocabulary M + the full marcher single-binding→STORAGE-image shader rewrite, which is a rewrite not a wiring change). **Conflicts.** None — additive, on-screen path only under the `boyko_render` schedule (0%-gate). The packed buffer + the 64×64 golden marcher stay as the offscreen golden harness (the determinism reference). **Determinism:** the marcher's field eval (`sdf`/`smin`/`combine`/normal) is **copied verbatim** into the image-writing variant — byte-identical, preserving the physics-reuse contract; only the output target (buffer word → storage image) and the depth source (buffer region → sampled image) change.
+Every phase carries: **What / Why our path needs it / How (raw-Vulkan-optimal) / Expected win (GPU-timestamp; never a quoted speedup) / Dependency-order / Gate / Effort / Conflicts / Determinism class.** All HW-dependent phases carry a `DeviceCaps` query at device-create + a named in-house fallback. All barriers + resource lifetimes are **lowered by F-GRAPH** once it lands (phases before F-GRAPH use the hand-FFI/`lower_barriers` paths it later subsumes).
 
 ---
 
-## PHASE P3a — On-screen barrier batching (hand-FFI `swapchain.rs`) (resolves C1) — SPINE co-requisite
+# SPINE (P0–P6) — preserved verbatim from v1
 
-**What.** Batch the **hand-FFI** per-frame barriers in `swapchain.rs`. Today every transition is its own `(self.fns.cmd_pipeline_barrier)` call — **11 sites** across `record_scene` (844, 914, 1169, 1201, 1337, 1370, 1432), `record_present_sampled` (1708, 1831, 1864, 1926), one image barrier each. Where a sync point transitions N images at once (e.g. the color+depth UNDEFINED→OPTIMAL transitions in `record_scene`, or the multi-image transitions P1's 4-pass frame adds), lower them into **one `vkCmdPipelineBarrier` with N `VkImageMemoryBarrier`s** instead of N calls.
+> P0–P6 are unchanged in intent from v1; the full bodies live in v1 §P0–§P6 and are summarized here for the unified track scheme. The one structural change: **F-GRAPH is inserted after P3a** (see its phase below). The spine exit criteria (§3) are unchanged.
 
-**Why our path needs it (corrected attribution — C1).** The reviewed draft mislocated this win in `boyko_render/src/barrier.rs` (`lower_barriers`). That file is a **different codepath**: it lowers the ECS conflict-graph's abstract edges into `PlannedBarrier` POD keyed by `(ArchetypeId, ComponentId)`, replayed by `GpuSystem` on the compute-column path — it never touches the on-screen frame (verified: barrier.rs:1-15,196-233). The per-frame barrier tax the spine pays is the **11 hand-FFI calls in `swapchain.rs`**, and batching is achievable **only** there. "Barriers can drain the GPU of work" — merging N transitions into one call lets the driver compute one merged dependency. P1's 4-pass frame adds new sync points; doing them with a batched primitive in hand keeps the call count flat.
-
-**How.** Refactor the `swapchain.rs` barrier sites to accumulate a `&[VkImageMemoryBarrier]` (+ any `VkBufferMemoryBarrier`) per sync point and issue a single `cmd_pipeline_barrier`. The UNDEFINED→OPTIMAL color+depth pair in `record_scene` merges into one; P1's raster→compute→lighting transitions each become one batched call. Each merged barrier keeps the existing (sound) stage/access masks — this phase only batches, it does not narrow (narrowing is P3b, on the other codepath).
-
-**Expected win.** Fewer `cmd_pipeline_barrier` calls/frame (driver merges one dependency vs several); measured by command-stream inspection (call count) + GPU-timestamp (neutral-or-better — batching never regresses correctness, the masks are unchanged).
-
-**Dependency/order.** Co-requisite of P1 (batch P1's new 4-pass transitions as they land). On the spine.
-
-**Gate.** Golden-image-equal (the batched barriers must preserve the exact dependencies — a dropped/weakened barrier is sync-validation UB); barrier-call count per frame measurably lower (command-stream inspection — this is the gate the mis-attributed draft could not meet, now meetable because it targets the correct codepath); validation + sync-validation clean on RTX 3060; GPU-timestamp neutral-or-better.
-
-**Effort.** **M** (resolves W5: was understated as "S" — it is a hand-FFI refactor across 11 sites + P1's new transitions, with sync-validation as the FAIL oracle, not a one-function change). **Conflicts.** Batching fights soundness only if a merge drops a dependency — mitigated by keeping each merged barrier's masks identical to the pre-merge set and by sync-validation as a test-failing oracle. 0%-gate neutral (record-time only).
+- **P0 — Production scene substrate.** Resolution-as-dispatch-dim, additive perspective ray-gen (ortho golden-frozen), ECS `SdfEdit` feed. Target regimes: 1080p/720p; 256–4096-edit "scene" band; sparse (~70% empty) + dense canonical scenes. Gate: rung-8..11 ortho goldens bit-exact; sparse/dense GPU-timestamp baselines recorded. **L. RENDER (ray-gen only; field FROZEN).**
+- **P1 — MRT G-buffer + descriptor vocabulary + shared-depth image + kill depth-copy + marcher single→multi-binding rewrite.** Descriptor vocab `{StorageImage, SampledImage, CombinedImageSampler, StorageBuffer, UniformBuffer}`; G-buffer `depth(D32) / normal(R8G8B8A8, octahedral later per Open-Q3) / albedo(R8G8B8A8) / material(R8G8B8A8)`; marcher rewritten to write STORAGE images + sample the depth image. Field eval copied **verbatim** (FROZEN). Gate: golden-equal ±2/255 vs packed-buffer; depth-copy GONE. **XL.**
+- **P3a — On-screen barrier batching (hand-FFI swapchain.rs, 11 sites).** Batch N transitions into one `cmd_pipeline_barrier`. Masks unchanged (batch, don't narrow). Gate: barrier-call count down; sync-validation clean. **M. RENDER.**
+- **P4 — Hierarchical tile-cull / coarse pre-trace.** 1/8-res coarse cone-trace → per-tile `near_t`/`empty`; fine marcher starts from `near_t`. **Establishes the `sdf_field.hlsli` invariant** (`field_distance(p)` + `tile_bound(tile)`) — the verbatim cut of the FROZEN field math shared with `golden_composite_pixel` and the physics evaluator. Gate: conservative golden (a wrongly-empty tile is a hole). **M. FIELD-CONSUMER.**
+- **P5 — Half-res trace + depth-aware upscale (FORKED).** New half-res compute pass *calls* `sdf_field.hlsli` (unchanged) at jittered origins; joint-bilateral upscale via full-res depth/normal. Field eval byte-identical (diff-verified). Gate: relaxed tolerance (owner-approval); ±4/255 smooth + edge no-bleed. **M. RENDER (consumer; field FROZEN).**
+- **P6 — Motion vectors + history + TAA (FORKED). Lands the P6-S semaphore seam (sub-step 0).** `R16G16_SFLOAT` motion vectors; double-buffered history; YCoCg neighborhood-clamp resolve. Static analytic field + jittered camera → deterministic camera reprojection (per-hit velocity for a mutating field is deferred to P12, Open-Q7). Gate: static converges to P5 reference; pan no-ghost; disocclusion no-smear; field eval byte-identical; P6-S sync-validation clean. **L. RENDER (consumer; field FROZEN).**
 
 ---
 
-## PHASE P3b — `boyko_rhi::enums` constants + `boyko_render::barrier.rs` narrowing (resolves C1) — PARALLEL-AFTER-P1, serves P8/P11
+# F-GRAPH — Render-graph (resolve C1) — NEAR-SPINE INFRA ★
 
-**What.** (a) Add the missing `boyko_rhi::enums` stage/access constants the foundation lacks (verified absent, barrier.rs:36): `BarrierStage::{DRAW_INDIRECT (0x0000_0002), ALL_COMMANDS (0x0001_0000), ALL_GRAPHICS}`; `BarrierAccess::{INDIRECT_COMMAND_READ (0x0000_0001), MEMORY_READ, MEMORY_WRITE, SHADER_STORAGE_READ, SHADER_STORAGE_WRITE}` — identity-cast `u32`, each documented with its `VK_*` source. (b) Narrow the superset-widen in `boyko_render/src/barrier.rs` (`stage_of`/`access_of`/`wide_*`) only where producer/consumer (stage, access) is provably unambiguous — notably `GpuStage::Indirect` stops widening to `COMPUTE_SHADER|TRANSFER` (barrier.rs:121-124) and maps to `DRAW_INDIRECT` / `INDIRECT_COMMAND_READ`. Keep the widen helpers as the documented fallback.
+**What.** A declarative render-graph that auto-derives **barriers + resource state-transitions + transient-resource lifetimes/aliasing** from per-pass resource declarations, for **BOTH** existing barrier codepaths (the hand-FFI `swapchain.rs` on-screen frame AND the `boyko_render::barrier.rs` ECS-edge compute-column path). A pass declares its reads/writes (image/buffer + the access + the stage); the graph topologically orders passes, inserts the minimal barrier set, transitions layouts, and computes transient-resource aliasing windows. Until F-GRAPH lands, P0–P5 use the hand-FFI path (batched by P3a) and the compute-column uses `lower_barriers` (narrowed by P3b); F-GRAPH **subsumes both** behind one pass-declaration API.
 
-**Why our path needs it (corrected scope — C1).** This is the **compute-column codepath** (the ECS-edge `lower_barriers`), distinct from P3a's on-screen frame. Its constants + narrowing serve **P8 (indirect dispatch)** and **P11 (Hi-Z device-written counts)**: today `GpuStage::Indirect` over-widens because no `DRAW_INDIRECT` constant exists, blocking a tight count-buffer barrier. The narrowing reduces false serialization between compute and transfer on the GPU-resident-ECS path (qualitative — AMD/NVIDIA guidance, measured per-pass with GPU-timestamps).
+**Why our path needs it (C1).** v2 adds ~60 passes (Track E ~14, Track S 6, Track G ~15, Track A/C/D the rest). Each needs barrier lowering, resource lifetime, and aliasing. Today there are **two distinct hand-maintained barrier codepaths** (verified: `swapchain.rs` 11 hand-FFI sites + `boyko_render/barrier.rs::lower_barriers`). Adding 60 passes against two hand-maintained paths is an **O(passes²) hazard-tracking liability** and a sync-validation nightmare; the spine's 0%-gate and the sync-validation oracle do not scale to 60 hand-rolled passes. F-GRAPH is the single highest-leverage infra item and MUST land before the pass explosion. It generalizes `barrier.rs`'s existing edge→barrier algorithm (which already lowers conflict-graph edges into `PlannedBarrier` POD, `barrier.rs:196-233`) from `(ArchetypeId, ComponentId)` keys to image/buffer resources.
 
-**How.** Extend the `enums.rs` bitflag families (identity-cast, `#[inline] bits()`, `VK_*`-documented). In `barrier.rs`: where the producer intent has exactly one touch on the consumer's key with a known stage/access, emit the precise mask; otherwise widen. `stage_of(Indirect)` returns `BarrierStage::DRAW_INDIRECT`. Keep `wide_stage`/`wide_access` as the fallback.
+**How (raw-Vulkan-optimal, in-house).**
+- A pass-declaration POD: `PassDesc { reads: &[ResourceUse], writes: &[ResourceUse], stage, queue }` where `ResourceUse { handle, access, layout }`. No `dyn` — passes are monomorphized records, the graph walks POD slices (the `lower_barriers` POD discipline extended).
+- A build step (setup-time, NOT per-frame hot): topological sort over the read/write dependency DAG; for each edge emit the minimal `(srcStage, dstStage, srcAccess, dstAccess, oldLayout, newLayout)` — reusing P3b's narrowed `enums.rs` constants and P3a's batching (N barriers per sync point in one call). The build is cached and replayed; only resource handles rebind per frame (no per-frame graph rebuild — the rung-10 const-assert discipline applies to the cached barrier table).
+- **Reserves the (src-queue, dst-queue) dimension from day one (resolves M7).** Every `ResourceUse` carries a queue field; until P13 it is always the single queue, but the barrier representation can express a queue-family-ownership transfer without a rewrite. P13 (async) populates the second queue; F-GRAPH's data model already holds it.
+- Transient-resource aliasing: passes whose lifetimes do not overlap share backing memory via the `suballocator.rs` free-list (feeds F-ALIAS).
+- The seam-with-default-`#[cold]`-body pattern keeps Mock + ABI stable; static dispatch, no `dyn` in the record path.
 
-**Expected win.** Tighter masks reduce false serialization on the compute-column path; unblocks P8/P11's count-buffer barrier. Structural for P8/P11.
+**Expected win.** Eliminates hand-written barriers for all 60+ later passes (correctness + maintainability — the real win); fewer redundant barriers than hand-rolling (the graph computes the minimal set); transient aliasing cuts peak VRAM (feeds §VRAM Budget). Measured by sync-validation cleanliness across the full pass set + barrier-count + peak-VRAM vs a hand-rolled baseline.
 
-**Dependency/order.** Parallel-after-P1 (independent of the SDF spine and of P3a — different codepath). Prereq for P8/P11.
+**Dependency/order.** Needs P1 (the multi-pass frame to model) + P3a (the batched-barrier primitive it emits into) + P3b's constants (the narrowed masks it uses). **Inside the spine boundary; precedes every Track E/S/G phase.** Every later phase declares "lowered by F-GRAPH".
 
-**Gate.** `sync_validation.rs` Test A (lowered barrier validation-clean AND correct) + Test B (a deliberately-missing barrier trips sync-validation) both green with the narrowed masks; the `Indirect→DRAW_INDIRECT` narrowing keeps both green; validation/sync-validation clean.
+**Gate.** Every spine pass (P1's 4-pass frame) reproduces its golden when barriers are F-GRAPH-derived instead of hand-written (byte-identical image); a deliberately-omitted declaration trips sync-validation (the negative test — the graph's correctness IS the sync-validation oracle); barrier count ≤ the hand-rolled baseline; the queue dimension round-trips (a single-queue build is identical to today; a synthetic two-queue build emits a valid ownership transfer); validation + sync-validation clean on RTX 3060.
 
-**Effort.** **S** (constants + the narrowing; the narrowing is the only soundness-sensitive part — sync-validation is the oracle, narrow conservatively). **Conflicts.** Narrowing fights soundness; mitigated by the widen fallback + sync-validation as a FAIL oracle. 0%-gate neutral (build-time lowering only).
-
----
-
-## PHASE P4 — Hierarchical tile-cull / coarse pre-trace of the SDF march (RT-4) — SPINE
-
-**What.** A 1/8-res coarse pass: each coarse "pixel" represents an 8×8 fine-pixel tile and cone-traces the field once → a conservative per-tile `near_t` + an `empty` flag. The fine marcher starts from `near_t` instead of `t=0` and early-outs empty tiles. The per-tile far bound is the G-buffer mesh depth (now an image, P1).
-
-**Why our path needs it.** After P0 instantiates a real resolution and edit count, the marcher folds the FULL edit-list at every step from `t=0` for every pixel (`MAX_IT=128`), most steps crossing empty space — `O(pixels)·O(steps)·O(edits)`. This is the dominant cost before any acceleration structure, and tile-cull needs none (purely additive to the field eval). The coarse pass costs 1/64 the ray count; it removes the empty-space prefix from all 64 fine rays per tile. Claybook's 1/8-res coarse cone-trace + Lumen's two-level DF target exactly this — highest impact-vs-effort.
-
-**How (optimal).**
-- *Pass 0 (coarse):* a compute dispatch of `ceil(W/8)·ceil(H/8)` invocations; cone-trace the tile-center ray with a tile-radius cone (conservative widening), write `TileBound { near_t, far_t, flags }` to a tile SSBO (P1's vocabulary). `far_t` clamped by the tile's max mesh depth (min/max over the tile from the depth image).
-- *Pass 1 (fine):* the existing marcher, modified: `t = TileBound[tile].near_t; if (flags & EMPTY) { write background/mesh; return; }`. The field eval is **byte-identical**.
-- *The invariant (the load-bearing decision):* both passes call the SAME `field_distance(p)` (the `sdf()` fold) + a NEW `tile_bound(tile)`, in one shared HLSL include `sdf_field.hlsli`. When the backend swaps to bricks (P9) / clipmap (P10), only `field_distance`/`tile_bound` change — tile-cull, the shared-depth seam, half-res, TAA, lighting are byte-untouched. **`sdf_field.hlsli` is the verbatim cut of the determinism-frozen `sdf`/`smin`/`combine`/normal — it is shared with the host `golden_composite_pixel` and the future physics evaluator, so it carries the no-fast-math contract.**
-- *Buffer layout:* the tile SSBO is a standalone buffer (post-P1's vocabulary), host-mirrored with a const-assert like rung-10's `COMPOSITE_*_BASE_WORDS` so a desync is a build error.
-
-**Expected win.** Removes the empty-space march prefix; the coarse pass is ~1.5% of fine ray count. Measured by GPU-timestamp on the **P0 sparse scene** vs the **P0 dense scene** (the latter is the honest ~no-win worst case).
-
-**Dependency/order.** Needs P0 (a resolution + scene where the prefix is measurable) + P1 (depth as an image for the far bound); benefits from P3a (batched coarse→fine barrier). Prereq for P5.
-
-**Gate.** Golden-image-equal (±2/255) vs the P1 composite on all SDF scenes — the cull must be **conservative** (a wrongly-empty tile is a visible hole, the golden catches it); a deliberately-too-aggressive cull trips the golden (Test-B negative); GPU-timestamp shows fine-march step reduction on the P0 sparse scene; validation clean.
-
-**Effort.** M. **Conflicts.** None; additive, gated behind `boyko_render`. The conservative-bound requirement is the soundness surface — the golden is the oracle. **Determinism:** `field_distance` is the frozen field eval; the coarse cone-trace uses it unchanged.
+**Effort.** L. **Conflicts.** It unifies the two barrier codepaths C1 keeps distinct — the unification is the goal, but P3a/P3b ship first (the graph emits into their primitives), so the distinction holds until F-GRAPH lands and then collapses. 0%-gate neutral (setup-time build, cached replay). **Class: RENDER / CPU-sync (no field).**
 
 ---
 
-## PHASE P5 — Half-res trace + depth-aware upscale (RT-6 first half) — FORKED PATH (resolves C3) — SPINE
+# X-SPD — Parametric SPD mip-reduce primitive (resolve M4) — SHARED INFRA
 
-**What.** A **separate, forked marcher path** that runs the fine SDF march at half resolution (1/4 rays), then upscales with a depth-aware (bilateral) filter using the full-res G-buffer depth/normal to avoid edge bleeding. Jitter the half-res grid per-frame (sets up P6).
+**What.** ONE single-dispatch FidelityFX-SPD-style mip-pyramid builder, **parametric over the reduction op + source/dest format**: `min`, `max`, `min/max` (paired), `average` (bloom), `weighted-bilateral` (ReBLUR). One implementation, one **odd-dimension boundary fix**, consumed by every phase that needs a pyramid.
 
-**Why our path needs it.** After P4 removes empty space, the remaining cost is the per-ray field fold at hit-adjacent depths; halving resolution quarters it. The depth-aware upscale keeps edges crisp via the full-res depth (P1).
+**Why our path needs it (M4).** Five phases independently claim to "share an SPD mip pattern" (P11 Hi-Z, S-HIZ, S-GTAO prefilter, E-BLOOM, G-REBLUR) but need *different* reductions and formats. "Share the pattern" without a defined interface means each reimplements SPD with its own bugs — and the draft itself flags the odd-dimension boundary as a known pitfall that would otherwise ship **5 times**. A single parametric primitive with an explicit `reduction-op + format` interface makes the others *consume* it, not re-derive it.
 
-**How — the fork is mandatory (C3).**
-- **The golden-frozen `sdf_depth_composite` marcher + its host mirror `golden_composite_pixel` + the scalar field eval (`sdf`/`smin`/`combine`/normal) are byte-identical** — P5 does NOT modify them. The half-res path is a **new compute pass** that *calls* the shared `sdf_field.hlsli` field eval (unchanged) at jittered/half-res ray origins. Jittering the camera/ray-origin changes the *points p* at which the (deterministic) `sdf(p)` is sampled — it does not change `sdf` itself. The rung-8..11 goldens (fixed ortho ray per pixel) are pinned to the frozen path and survive untouched.
-- The half-res marcher writes a half-res surface buffer (distance/normal/albedo); a full-res upscale compute pass reads it + the full-res G-buffer depth/normal and does a 4-tap joint-bilateral upscale (weights from depth/normal similarity) into the full-res G-buffer SDF region.
-- Half-res grid jittered by a per-frame Halton offset (the seed P6 reprojects). A tile straddling a depth discontinuity (P4's per-tile "complex" flag) falls back to full-res for those pixels (`[branch]`).
+**How.** A single-dispatch mip-build (atomic counter for the last-tile reduction; optional subgroup for the in-tile reduction with a **scalar fallback**, capability-gated, differential-golden'd per the CPU-D3 house template). The reduction op is a monomorphized generic parameter (no `dyn`, no branch in the inner loop — specialized per consumer at compile/SPIR-V-permutation time). The odd-dimension boundary fix is written and tested **once**.
 
-**Expected win.** ~4× fewer fine rays on SDF-surface pixels; net frame win by GPU-timestamp on the P0 sparse scene.
+**Expected win.** One amortized pyramid build per consumer; the boundary bug fixed once. Measured by GPU-timestamp per consumer + the count of distinct SPD implementations (target: 1).
 
-**Dependency/order.** Needs P0 + P4 (tile structure + conservative bounds) + P1 (full-res depth for the bilateral weights). Pairs into P6.
+**Dependency/order.** Needs P1 (storage images + compute). Prereq for S-HIZ, P11, S-GTAO, E-BLOOM, G-REBLUR. Parallel-after-P1.
 
-**Gate (tolerance is an owner-approval gate — C3).** Golden within a **RELAXED tolerance** (half-res + upscale is not bit-exact) — the new SSIM/PSNR bar (e.g. ±4/255 on smooth regions + an explicit edge-pixel no-bleed check at the mesh↔SDF seam) is a **per-phase owner-approval item** (RESEARCH-FAST-MATH lists "accept a one-time determinism-baseline reset" as an explicit architect→owner question, not critic-discretion). **Mandatory additional exit criterion:** the deterministic `sdf`/`smin`/`combine`/normal field functions and `golden_composite_pixel` are **byte-identical** (verified by diff) — the physics-reuse contract is unaffected. GPU-timestamp shows the ray reduction; validation clean.
+**Gate.** Each reduction op matches a CPU reference pyramid bit-for-bit (min/max are order-independent → exact; average/bilateral within the consumer's documented tolerance); the odd-dimension case is golden-tested at non-power-of-two extents; the subgroup in-tile path matches the scalar fallback bit-for-bit (differential); validation clean.
 
-**Effort.** M. **Conflicts.** The relaxed tolerance is the first deliberate departure from bit-exact — confined to the *consumer* (ray generation/resolution/blend), never the field eval. The forked path leaves the golden harness as the reference. **Owner sign-off on the relaxed bar is a hard gate.**
+**Effort.** S. **Conflicts.** None — it removes duplication. **Class: RENDER (no field).**
 
 ---
 
-## PHASE P6 — Motion vectors + history + TAA / temporal reprojection (RT-6 second half) — FORKED PATH (resolves C3, W4) — SPINE
+# X-REF — Stochastic acceptance oracle (resolve C4) — TRACK-G PREREQUISITE ★
 
-**What.** A motion-vector G-buffer attachment, a history color buffer, and a TAA resolve pass (reproject prev frame via motion vectors, blend under neighborhood-clamp rejection, accumulate). Motion vectors derive from the Phase-20.1 prev/cur interpolation (the GPU already has `prev_pos`). **Lands the `submit_windowed` semaphore-present seam (W4) as its first sub-step** — P6 is the first phase with cross-frame state.
+**What.** The concrete statistical acceptance protocol every stochastic phase is gated by — without it none of Track G can be golden-gated (which would violate the inviolable GPU-oracle rule). Four artifacts:
+1. **An in-house offline path-traced reference generator** — a separate host/compute tool (NOT in the frame hot path) that renders a scene to N-thousand spp converged ground truth, casting rays against the SAME `sdf_field.hlsli` field (so the reference is field-consistent). It may run G-PT to convergence or a dedicated CPU/compute reference path.
+2. **A fixed convergence frame budget** — each stochastic phase declares "converges within K frames at a fixed seed under fixed camera"; the test accumulates K frames then compares.
+3. **A named metric + threshold per phase** — relative-MSE, FLIP, and SSIM are the three metrics; each phase declares its bar (e.g. ReSTIR DI: relative-MSE ≤ X vs the reference at K frames; a denoiser: SSIM ≥ Y).
+4. **An owner statistical-bar sign-off** — because thread scheduling on atomics + cross-workgroup fp accumulation order make even fixed-seed output **not bit-reproducible run-to-run**, each stochastic phase is accepted under a documented "inherently non-deterministic, accepted under statistical bar X" owner approval (Open-Q9 — the neural tier needs its own bar even with seed control).
 
-**Why our path needs it.** TAA multiplies the effective ray budget (jittered samples accumulate temporally), converging the half-res march (P5) cheaply. **It is the hard prerequisite for confirmed-future RT-lighting (P15):** few-sample RT is pure noise without temporal accumulation — SVGF (the RT denoiser) IS the TAA infrastructure (motion vectors + history + reprojection + variance-guided blend). Building TAA now means the RT denoiser is ~80% built when RT lands.
+**Why our path needs it (C4).** "Relaxed-converged-reference at a relaxed tolerance" is a wish, not a test. The project's measurement oracle is golden-buffer diff + validation; ~15 stochastic phases (G-RDI/RGI/PT, G-REGIR, G-SOIT, G-NRC/NDENOISE, A14) have no defined "how many frames, what metric, what threshold, against what reference". X-REF defines them ONCE as a shared deliverable Track G depends on, instead of per-phase hand-waving.
 
-**How.**
-- *Semaphore-present seam (sub-step 0, W4):* build `submit_windowed` (acquire-image / render-finished semaphores) — `submit` is fence-only today and cannot express the cross-frame present chain P6's history needs. P13 later extends this to cross-queue; it does not invent it.
-- *Motion-vector attachment:* an `R16G16_SFLOAT` G-buffer target. Mesh raster writes `clip_cur − clip_prev` (prev MVP + `prev_pos`). For the **static analytic field + moving camera**, the SDF hit's motion vector is the camera reprojection of the hit world position (deterministic per frame given the camera — see Open-Q2; a GPU-mutating field, P12, needs per-hit velocity, deferred until then).
-- *History buffer:* a double-buffered full-res color image (ping-pong, the MEM-D5 seam) — bounded memory, justified only for the resolved output, NOT blanket-doubling every G-buffer column.
-- *TAA resolve:* a compute/fullscreen pass — sample current, reproject history via motion vector, clamp history to the current 3×3 neighborhood AABB (YCoCg variance clamp), blend `lerp(history, current, α≈0.1)`, write the new history + the present source.
-- *Rejection:* disocclusion (depth mismatch), out-of-bounds reprojection, and rapidly-edited-SDF regions (a dirty flag) fall back to current-frame-only.
-- *Jitter:* the P5 half-res Halton jitter becomes the TAA sub-pixel jitter; the projection is jittered per frame and un-jittered in the resolve.
-- **The field eval (`sdf`/`smin`/`combine`/normal) + `golden_composite_pixel` stay byte-identical (C3)** — P6 is a forked consumer; TAA is temporally non-deterministic *by design* (that is what TAA is), but render history non-determinism is OUTSIDE the physics gate, and the SDF-field reuse coupling is already severed by P5's fork.
+**How.** The reference generator is host-side Rust + a compute path tracer (G-PT run headless to convergence is the natural implementation, so X-REF and G-PT share the ray core — X-REF can ship a CPU reference first, then upgrade to GPU-PT once G-PT exists). The metric library (rMSE/FLIP/SSIM) is in-house Rust over the readback buffer. The fixed-seed harness reuses the existing golden-test infra with a K-frame accumulation loop.
 
-**Expected win.** Stable converged image at the half-res cost; effective-sample multiplier; RT denoiser foundation.
+**Expected win.** Makes every Track-G phase falsifiable. No GPU-timestamp win — it is a correctness-oracle prerequisite. Without it, no Track-G phase can be declared done.
 
-**Dependency/order.** Needs P0 + P1 (image G-buffer + depth + motion-vector attachment) + P5 (the jittered half-res input). Doubles as the P15 denoiser base. **Lands the semaphore-present seam P13 extends.**
+**Dependency/order.** Needs the field gateway `sdf_field.hlsli` + a ray primitive (G-BRICKRT or P14) for the GPU reference (or a CPU reference to bootstrap). **Hard prerequisite for ALL stochastic Track-G phases.**
 
-**Gate.** Golden on a STATIC camera + static field converges to the P5 reference (temporal accumulation of identical frames = identity); a CAMERA-PAN golden shows no ghosting beyond a documented bar (clamp working); a disocclusion test (object reveal) shows no smearing (rejection working); **the field eval + `golden_composite_pixel` are byte-identical (diff-verified)**; replay-determinism note: render history non-determinism does NOT enter the physics/solver determinism gate (render is outside that gate; the field reuse is already forked); the semaphore-present chain is sync-validation clean; GPU-timestamp for the added attachment + resolve; validation clean.
+**Gate.** The reference generator reproduces a known analytic case (e.g. a Cornell-box-equivalent with a single SDF emitter) within the literature's converged values; the metric library matches a reference rMSE/SSIM implementation on a known image pair; the K-frame harness is deterministic in its *comparison* (same seed + same K → same metric value within the documented fp-accumulation tolerance).
 
-**Effort.** L (+ the semaphore-present seam sub-step). **Conflicts.** TAA introduces temporal-lag/ghosting (documented; clamp + rejection bound them). The history double-buffer is bounded (MEM-D5). **Owner-approval gate for any new relaxed tolerance** (same as P5). **Determinism: render history may be non-deterministic; the physics-reused field eval may NOT — and is not touched.**
+**Effort.** M. **Conflicts.** The reference itself is in-house code that must exist before Track G — a real sequencing cost, surfaced honestly. **Class: RENDER / tooling (no field in the hot path; the reference probes the frozen field through `sdf_field.hlsli`).**
 
 ---
 
-## PHASE P7 — Clustered / tiled deferred light culling (froxel + bitfield + subgroup) — PARALLEL-AFTER-P1
+# TRACK B — MARCHER ACCELERATION (cheapen the field we already evaluate) — SDF-NATIVE FAST-TRACK
 
-**What.** Partition the view frustum into froxels (screen-tile XY × depth-slice Z); a compute pass culls the light list against each cluster and writes a per-cluster **bitfield** light list (`u32[ceil(N_lights/32)]` per cluster, bounded, Granite-style). The deferred-lighting pass (P1's `deferred_light` generalized) reads its cluster's bitfield and iterates only set bits, with subgroup scalarization (`WaveReadLaneFirst` when a wave shares a light) for occupancy.
+> The highest-ROI track (M1): every win reduces the cost of the FROZEN field eval directly, with zero new Vulkan features and no HW-RT. B1/B5 are FIELD-CONSUMER (they change *where/how often* the frozen field is sampled, never the field). B7 is FROZEN-preserving (it prunes the analytic fold without altering its result). Land immediately after the spine.
 
-**Why our path needs it.** `deferred_light.fs` applies ONE hardcoded directional light today. A production scene has many; without clustering, deferred lighting is `O(pixels·lights)`. Froxel culling makes it `O(pixels·lights_per_cluster)`. The bitfield is bounded (no per-cluster Vec); subgroup scalarization cuts per-lane light fetches by wave width.
+### PHASE B1 — Over-relaxation sphere-tracing (ω-gated) — needs P4
 
-**How.**
-- *Cluster build:* a compute pass writes per-cluster bounds (or computes them from the froxel grid). Light SSBO (P1's vocabulary) holds position/radius/color.
-- *Cull pass:* one invocation per cluster (or per light, scatter); test light sphere vs cluster AABB; set the light's bit.
-- *Lighting pass:* `deferred_light` reads the pixel's cluster, walks the bitfield (`firstbitlow`), accumulates. Scalarization: when `WaveActiveAllEqual(cluster)`, load each light once per wave into SGPRs.
-- *Subgroup exposure (GPU-D2):* expose `VK_SUBGROUP_FEATURE_{BASIC,BALLOT,ARITHMETIC}` via the device-create caps query (none today); shaders query `SubgroupSize`, never hard-code; capability-gate the ballot/arithmetic path with a **scalar fallback**.
+**What.** Accelerate the sphere-trace by stepping `ω·d` (ω ∈ (1,2)) instead of `d`, with a conservative fall-back step when an over-relaxed step overshoots (the returned distance at the new point is smaller than the previous step minus the radius). Keiser/Bálint over-relaxation: fewer iterations to converge on smooth fields.
 
-**Expected win.** Many-light scaling; lower lighting bandwidth/divergence. Measured by GPU-timestamp on a 256-light scene vs the single-light baseline.
+**Why our path needs it.** The marcher does `MAX_IT=128` conservative `d`-steps; over-relaxation cuts iteration count on the empty-space prefix and along grazing rays — directly fewer FROZEN field evals per pixel, the cheapest possible marcher win. Pure step-logic around an unchanged `field_distance`.
 
-**Dependency/order.** Needs P1 (G-buffer + depth for Z-slices + light/cluster SSBO bind group + subgroup exposure). **Independent of P0/P4/P5/P6** — parallel-after-P1.
+**How.** Step-loop logic in the marcher; the field probe is `field_distance(p)` through `sdf_field.hlsli`, byte-identical. ω is a uniform (Open-Q for the default). The overshoot-detect is a comparison, not a field change.
 
-**Gate.** Golden on a known multi-light scene (host-computed reference) within ±2/255; a light fully outside a cluster contributes zero (cull correctness); the bitfield path matches a brute-force-all-lights path bit-for-bit (differential test, CPU-D3 house template applied to GPU); the subgroup path matches the scalar fallback bit-for-bit (differential, capability-gated); validation clean; GPU-timestamp shows sub-linear scaling in light count.
+**Expected win.** Fewer iterations → fewer field evals; GPU-timestamp on the P0 sparse scene. ω=1 reproduces the frozen path exactly (the regression anchor).
 
-**Effort.** L. **Conflicts.** None; additive. Subgroup ops live in SPIR-V (0%-gate-neutral on CPU). The capability gate + scalar fallback are mandatory (wave width is HW-variable).
+**Dependency/order.** Needs P4 (the `sdf_field.hlsli` invariant). First on the fast-track.
 
----
+**Gate.** Golden-image-equal (±2/255) at ω=1 (must be the frozen path); at ω>1 within the relaxed marcher tolerance (the *hit point* converges to the same surface — the field is unchanged, only the step schedule); the overshoot fallback is conservative (no missed-surface holes — the golden catches them); GPU-timestamp shows iteration reduction; validation clean.
 
-## PHASE P8 — GPU-driven indirect dispatch (render-local count buffer; NOT `device_len`) (resolves W3) — PARALLEL-AFTER-P1
-
-**What.** Fill the `dispatch_indirect(buffer, offset)` stub (`encoder.rs:269`) with a real `vkCmdDispatchIndirect`. A prior compute pass writes `VkDispatchIndirectCommand {x,y,z}` into a small **render-owned** device-local INDIRECT buffer (e.g. the P11 Hi-Z visible-tile count); the cull/compaction passes self-size from it.
-
-**Why our path needs it (scoped — W3).** For GPU-driven culling (P11 Hi-Z writes a device-side visible-tile count) the CPU must not read the count back. **Explicitly excluded:** the per-archetype/per-pass `device_len` counter and the `GpuSystem` residency machinery — that is the **GPU-D6 residency capstone** (CPU-orchestrate/GPU-execute ECS, ~3M-entity break-even, opt-in, NOT default), a separate pillar with its own break-even gate. P8 imports only `vkCmdDispatchIndirect` + a render-local count buffer; it cites `gpu_system.rs` only to note the stub, not to adopt its counter model.
-
-**How.**
-- Vulkan backend: `cmd_dispatch_indirect(cmd, buffer, offset)`.
-- A RAW barrier so the count buffer is visible as `INDIRECT_COMMAND_READ` (P3b's constant) at the `DRAW_INDIRECT` stage — replacing the current full-widen for `GpuStage::Indirect`.
-- Count buffers created with `BufferUsage::INDIRECT` (exists, `enums.rs:37`).
-- Keep the synchronous CPU-count path untouched (the stub is `#[cold] #[inline(never)]`, no foundation code calls it — 0%-gate honored).
-
-**Expected win.** Structural decoupling (dispatch count from CPU knowledge); prereq for P11. NOT a per-dispatch speedup.
-
-**Dependency/order.** Needs P3b (`INDIRECT_COMMAND_READ`/`DRAW_INDIRECT` constants). Prereq for P11. Parallel-after-P1; independent of the SDF-accel and lighting tracks.
-
-**Gate.** A compute pass that writes a count → indirect dispatch consuming it produces the same golden as a CPU-count dispatch of the same size; the `INDIRECT_COMMAND_READ` barrier is validation/sync-validation clean; the zero-count case is handled (no dispatch when the count buffer is 0); validation clean.
-
-**Effort.** M. **Conflicts.** None; the seam is `#[cold]`, no hot path touched. Costs an extra RAW barrier (P3b's narrow constant keeps it tight). **W3 boundary honored: no `device_len`/GPU-D6 residency work under this render banner.**
+**Effort.** S. **Conflicts.** Overshoot mis-detection is the soundness surface (golden is the oracle). **Class: FIELD-CONSUMER (steps around the frozen `field_distance`; never alters it).**
 
 ---
 
-## PHASE P9 — SDF brick atlas (field backend swap behind the P4 invariant) — THRESHOLD-GATED
+### PHASE B5 — Mesh-depth + previous-frame march seeding — needs P1+P6
 
-**What.** Replace the analytic edit-list fold with a sparse brick representation: a brick-map (dense grid of indices to 8³ bricks) + a brick atlas (a 3D texture pool, sized by `maxImageDimension3D`, NOT hardcoded) storing distances near the isosurface. `field_distance(p)` becomes a trilinear brick fetch; `tile_bound(tile)` becomes a per-brick AABB test. Empty space = "no brick", skipped free.
+**What.** Seed the fine march's start `t` from (a) the G-buffer mesh depth (the SDF need not march past an opaque mesh — P4 already clamps the far bound; this tightens the *near* start using last frame's converged hit) and (b) the previous frame's per-pixel hit distance reprojected via P6 motion vectors. A reprojected hit gives a near-exact start `t` for a coherent next frame.
 
-**Why / threshold.** The analytic fold is `O(edits)` per eval; correct to ~dozens of edits. **The threshold:** when per-pixel `O(edits)` is the wall — i.e. when edit-count × march-steps dominates the frame even after P4 + P5, at the **P0 256–4096-edit regime**. Below that (≤16-edit fixture) the analytic path is faster and bricks are pure overhead. AMD Brixelizer (2024) validates the architecture (64³ cascade → sparse 8³ bricks → per-cascade AABB tree).
+**Why our path needs it.** Temporal coherence is free convergence: a pixel that hit at `t=5.2` last frame starts there this frame instead of `t=near`. Combined with P4's empty-skip and B1's over-relaxation, the steady-state march is a handful of iterations. Reuses P1's depth image + P6's motion vectors — no new resources.
 
-**How — the invariant is the whole point.**
-- P4's tile-cull + the shared-depth seam ask ONLY `field_distance(p)` + `tile_bound(tile)` (the `sdf_field.hlsli` include). P9 swaps the *implementation* of those two from analytic to brick-fetch. **The marcher, tile-cull, half-res, TAA, clustered lighting, and shared-depth composite are byte-untouched.** One interface, hot-swappable backend.
-- **Determinism boundary (C3):** the brick *fetch* (trilinear sample) replaces the analytic *eval* behind `field_distance`. This is a **forked field backend** selected by a residency/scene flag; the analytic `sdf`/`smin`/`combine` path **remains byte-identical and stays the determinism reference + the physics-reuse source of truth** (physics evaluates the analytic field on the CPU, not the brick atlas). Bricks are a render-side acceleration; the physics evaluator is unaffected.
-- Brick atlas: a `TextureDimension::D3` STORAGE/SAMPLED image (the enum reserves D3). Brick-map: an SSBO of brick indices. Regen (CPU authoring → upload, or GPU JFA in P12) rebuilds dirty regions; the AABB list of non-empty bricks is the natural BLAS source for P14 (do NOT pick a brick layout that can't emit AABBs — NVIDIA JCGT 2022).
-- **Brick format = R16 default** (resolves O2: MEM-D3 commits R16; R8 only on a measured visual bar).
+**How.** Read the reprojected previous hit-`t` (a history channel, bounded, ping-pong like P6 color); clamp to P4's `[near_t, far_t]`; fall back to `near_t` on disocclusion/rejection (P6's existing rejection mask). Field probe unchanged.
 
-**Expected win.** `O(1)` trilinear fetch replaces `O(edits)` fold; empty-brick skip. Measured on the P0 256–4096-edit scene vs the analytic path (the ≤16-edit fixture shows bricks LOSING — the honest threshold proof).
+**Expected win.** Near-converged start `t` on coherent pixels → minimal iterations in steady state; GPU-timestamp on a panning P0 sparse scene (the coherent case) vs a teleport (the disocclusion worst case).
 
-**Dependency/order.** Needs P4's invariant (so the swap is local). Prereq for P10/P12/P14. Threshold-gated on the P0 edit regime.
+**Dependency/order.** Needs P1 (depth) + P6 (motion vectors + history + P6-S) + P4 (the `[near_t, far_t]` clamp). On the fast-track after B1.
 
-**Gate.** Golden-image-equal (within a **documented brick-quantization tolerance** — R16 distance is lossy by design; an owner-approval item per C3) vs the analytic field on a shared scene; **the analytic path stays as the reference oracle AND the byte-identical physics-reuse source**; empty bricks produce no march steps (timestamp); `maxImageDimension3D`-sized atlas (no hardcode); validation clean.
+**Gate.** Golden-image-equal within the marcher tolerance (a correct seed converges to the same surface — the field is unchanged); a disocclusion test shows correct fallback (no stale-seed holes); GPU-timestamp shows steady-state iteration reduction; the seed-history channel is bounded; validation clean.
 
-**Effort.** XL. **Conflicts.** Brick quantization leaves bit-exact on the *render* side (documented, golden-tolerance-gated, owner-approved); the analytic determinism reference is preserved. Native/in-house (own brick format, own JFA). 0%-gate: the field backend is forked behind the scene flag; the analytic path remains for low-complexity scenes + physics.
+**Effort.** S. **Conflicts.** A stale seed past a disocclusion is the surface (P6's rejection mask + clamp guard it). **Class: FIELD-CONSUMER (seeds the march around the frozen field).**
 
 ---
 
-## PHASE P10 — Geometry clipmap LOD over bricks — THRESHOLD-GATED
+### PHASE B7 — Lipschitz / bound pruning of the edit-list fold (analytic, distance-exact) — needs P4
 
-**What.** Nested player-centered brick cascades, each level 2× the extent, so on-screen brick size stays ~constant and far regions evaluate far less often. `field_distance(p)` selects the finest cascade covering `p` (still behind the invariant — marcher untouched).
+**What.** Prune the `O(edits)` fold: maintain a coarse spatial bound (a low-res grid or a per-edit AABB+Lipschitz bound) so a given `field_distance(p)` evaluates only edits whose bound can possibly be the minimum at `p`, skipping edits provably farther than the current running minimum. Because SDFs are 1-Lipschitz, a conservative bound is exact — the pruned fold returns the **identical** distance, not an approximation.
 
-**Why / threshold.** Needed ONLY for vast worlds where one brick resolution can't cover the draw distance (~2.5 km ≈ 200 trillion dense cells vs ~20 million with clipmaps). Below world-scale, clipmaps are overhead.
+**Why our path needs it.** The analytic fold is `O(edits)` per eval at the P0 256–4096-edit regime — the dominant cost B1/B5 cannot touch (they cut *eval count*, B7 cuts *cost per eval*). Critically, **B7 attacks the same `O(edits)` wall as the P9 brick atlas but stays distance-EXACT** (no R16 quantization, no render↔physics divergence) and keeps the analytic path as the physics source. B7 may push the P9 threshold much higher (Open-Q3 / the v1 P9 note) — evaluate B7 before committing to P9.
 
-**How.** Cascade selection in `field_distance`/`tile_bound`; per-cascade brick-map + a shared atlas pool; far cascades regenerated less frequently.
+**How.** A conservative spatial acceleration over the edit list (a coarse grid the CPU builds at edit-feed time, or per-edit bounds) consulted inside `field_distance` to skip edits whose lower-bound distance exceeds the running min. The skip is provably exact (1-Lipschitz) → the returned distance is byte-identical to the full fold. **This is FROZEN-preserving: the field eval's RESULT is unchanged, only the unevaluated-edit early-out changes the instruction count — but the contract is about the *value*, and the value is bit-identical.** (Verify: the running-min comparison order must be pinned so the fold's float accumulation is unchanged — a pruned edit contributes nothing to the min, so the surviving fold order is a subsequence of the original; pin it.)
 
-**Dependency/order.** Needs P9. Threshold-gated on world size.
+**Expected win.** Sub-`O(edits)` fold on spatially-distributed edits; GPU-timestamp on the P0 256–4096-edit scene. Distance-exact (the golden is bit-exact, not relaxed — the standout property vs P9).
 
-**Gate.** Golden across a cascade boundary (no seam artifact at the LOD transition); a far-region scene shows the bounded brick-eval count (timestamp); validation clean.
+**Dependency/order.** Needs P4 (the `sdf_field.hlsli` fold to prune). On the fast-track; **re-evaluate the P9 threshold after B7 ships** (Open-Q3).
 
-**Effort.** L. **Conflicts.** Cascade-transition seams are the artifact risk (golden across the boundary is the oracle).
+**Gate.** Golden-image-equal **bit-exact** vs the un-pruned analytic fold (the pruning is provably exact — any diff is a bound bug; this is the gate that distinguishes B7 from lossy P9); the running-min fold order is pinned (diff-verified the float accumulation is unchanged → the physics-reused field stays byte-identical); GPU-timestamp shows fold-cost reduction scaling with edit spatial distribution; validation clean.
 
----
-
-## PHASE P11 — Hi-Z two-pass mesh occlusion culling — THRESHOLD-GATED, needs P8
-
-**What.** Build a mip-mapped max-depth pyramid (Hi-Z) from the G-buffer depth (P1). Two-pass GPU-driven cull: pass 1 draws last frame's visible set + culls candidates against Hi-Z via indirect dispatch (P8); pass 2 re-tests anything pass-1 may have wrongly culled, so nothing is incorrectly dropped (fixes the single-pass false-cull).
-
-**Why our path needs it.** Removes occluded mesh draws AND (for the hybrid) reduces tiles the SDF must march behind opaque meshes. Production-proven (Frostbite, Killzone 3). **Threshold:** only when the mesh side is non-trivial (many occluded draws).
-
-**How.**
-- Hi-Z build: a single-dispatch mip-pyramid (FidelityFX-SPD-style) from the depth image; handle the odd-dimension boundary correctness pitfall (each texel = max of its mip-1 children + the boundary fix).
-- Two-pass cull: device-written visible-instance counts → indirect dispatch (P8). The pyramid bounds both the raster candidate list and the P4 tile far-bound.
-
-**Dependency/order.** Needs P8 (indirect, for device-written counts) + P1 (depth). Threshold-gated on mesh complexity.
-
-**Gate.** No false culls (the two-pass property — a known-visible-but-temporarily-occluded object must reappear; a single-pass-only variant fails this, the negative test); golden on an occlusion scene; GPU-timestamp shows draw/tile reduction; validation clean.
-
-**Effort.** L. **Conflicts.** Single-pass false-cull is the trap (the two-pass form + the negative test guard it). Use the two-pass form, not reprojected-previous-depth (staleness).
+**Effort.** M. **Conflicts.** The fold-order pinning is the determinism surface — a re-ordered min breaks the physics contract; pin it and diff-verify. **Class: FROZEN-preserving (the field VALUE is byte-identical; only unevaluated-edit early-out changes — physics-safe).**
 
 ---
 
-## PHASE P12 — BVH dirty-region regen + JFA — THRESHOLD-GATED
+# TRACK A — SDF-NATIVE LIGHTING (cone-trace the field we already evaluate)
 
-**What.** A per-cascade AABB BVH over non-empty bricks, regenerated only for dirty (edited) regions; brick distances refreshed via jump-flooding (JFA) over dirty bricks. The BVH is both the software-traversal accelerator and the HW-RT BLAS source (P14).
+> The owner-named differentiator (M1). A1/A2/C-AA land on the fast-track (the "SDF-native lighting MVP", §3). A-GI capstones (A7/A8/A10/A12/A13) land later as the software-first GI path (Open-Q6). All are FIELD-CONSUMER except the screen-space A8/A13 (RENDER): they call the FROZEN field at offset points; the accumulation is consumer-side.
 
-**Why / threshold.** Needed ONLY when the field is GPU-authoritative AND large AND actively mutating (so analytic/CPU regen can't keep up). Incremental regen is "not strictly correct in all cases" (author caveat) — gate on a measured need. **A GPU-mutating field is also where SDF motion vectors need per-hit velocity (Open-Q2) — that work lands here, not in P6.**
+### PHASE A1 — SDF cone-trace soft shadows (Quilez penumbra) — needs P4
 
-**How.** Dirty-region tracking (an edit touches a bounded brick set); JFA over those bricks; BVH refit for modest motion, rebuild for large deformation (the P14 build-flag discipline). The cure for a high regen cost is fewer JFA passes + tighter dirty scoping (ALU/sample-bound), not more bandwidth.
+**What.** For each light, march a shadow ray from the surface toward the light through `field_distance`; the closest-pass ratio `k·d/t` gives a free analytic penumbra (Quilez soft shadows) — no shadow map, no extra geometry. Layered into the per-light shadow factor.
 
-**Dependency/order.** Needs P9 (bricks). Feeds P14 (BVH=BLAS). Threshold-gated on GPU-authoritative mutating large worlds.
+**Why our path needs it.** The canonical SDF-native win: triangle engines build separate shadow maps / DF generators; **we already evaluate the field, so a shadow ray is just more `field_distance` calls along a direction** — contact-hardening soft shadows for free on the SDF half. The shared shadow-march include other phases (S-CONTACT combine, E-SDFVOL) reuse.
 
-**Gate.** Golden after a dirty-region edit matches a full-regen reference (within JFA tolerance, owner-approved); regen timestamp scales with dirty size not world size; validation clean.
+**How.** A shadow-march loop in the deferred-lighting pass calling `field_distance` through `sdf_field.hlsli` (unchanged); the penumbra accumulation (min-tracking `k·d/t`) is consumer-side math. Far-bound by S-HIZ when it lands. P9 makes each step O(1).
 
-**Effort.** XL. **Conflicts.** "Not strictly correct in all cases" — bound by the dirty-scope golden. Highest correctness surface after the solver. **Determinism: a GPU-mutating brick field is render-side; the CPU physics evaluator stays on the analytic field (C3 boundary preserved).**
+**Expected win.** Contact-hardening soft shadows on the SDF; GPU-timestamp (cost = shadow-march steps × lights). On the analytic path the cost is O(lights × steps × edits) — **bounded by P4's empty-skip + B7's pruning; P9 makes it O(1)/step** (M2 cost discipline applies, but A1 is per-surface-pixel not per-froxel, so it is feasible on the analytic field at the P0 regime with B7, unlike E-SDFVOL's per-froxel cost).
 
----
+**Dependency/order.** Needs P4 (the `sdf_field.hlsli` shadow march); pairs with A2/C-AA on the fast-track; benefits from B7/P9 (cheaper steps) + S-HIZ (far-bound). Part of the SDF-native MVP.
 
-## PHASE P13 — Async compute (multi-queue + cross-queue semaphores) — PROFILE-GATED
+**Gate. CRITICAL boundary:** the shadow march CALLS the FROZEN field through `sdf_field.hlsli` (no fast-math inside `field_distance` — physics reuses it); the penumbra accumulation (min-tracking, `k`, `d/t`) is consumer-side and MAY relax; golden within owner tolerance on a known light/scene; the un-shadowed→shadowed flag is additive (the no-shadow path stays the rung golden); validation clean; GPU-timestamp.
 
-**What.** Query queue families at device-create (graphics+compute+dedicated transfer/DMA — today `find_queue_family` picks ONE family, `queue_count:1`). Expose a second compute queue + a transfer queue. **Extend the P6 `submit_windowed` semaphore seam to cross-queue wait/signal semaphores** (P6 built intra-frame/cross-frame present; P13 adds cross-queue). Overlap independent passes: SDF regen / brick JFA on async-compute while raster runs on graphics; staging on the DMA queue.
-
-**Why / gate.** Async helps ONLY when the GPU is not already saturated (NVIDIA: only with unused warp slots; the Vulkan-sample win is ~5%, not order-of-magnitude). The classic anti-pattern (FRAGMENT→COMPUTE forcing COMPUTE→FRAGMENT back) can net-stall. **STRICTLY profile-gated:** do NOT build until a GPU profile shows under-occupancy on a real frame. Same lift unblocks RT-8 (AS-build overlap, P14).
-
-**How.** Multi-queue device create; queue-family-ownership transfers for cross-queue resources; cross-queue semaphores extending `submit_windowed`. Perturbs the P3a/P3b barrier model (which assumes one timeline) — the barrier pass gains a queue-ownership dimension. Purely additive RHI (new queue handles behind the trait).
-
-**Dependency/order.** Needs P3a/P3b + **P6's semaphore-present seam** (which it extends — it does not invent semaphores). Profile-gated; only if measured.
-
-**Gate.** A profile FIRST showing under-occupancy; then golden-equal with async on/off (async must not change the image); GPU-timestamp shows real overlap (not net-stall); sync-validation clean across queues (cross-queue hazards are the hard part — sync-validation is the oracle).
-
-**Effort.** XL. **Conflicts.** Heaviest lift; most in tension with the single-timeline foundation. Cross-queue ownership transfers are a real cost the single-queue path never paid. Never speculative — profile is the gate.
+**Effort.** M. **Conflicts.** None. **Class: FIELD-CONSUMER (frozen field probe; consumer-side penumbra).**
 
 ---
 
-## PHASE P14 — AS/RT seam + HW-RT SDF-as-AABB-BLAS backend — CAPABILITY-GATED
+### PHASE A2 — SDF 5-tap ambient occlusion — needs P4
 
-**What.** Add the `AccelerationStructure` + `RayTracingPipeline`/`ray_query` RHI seam (absent today, `api.rs:46-67`), raw `VK_KHR_acceleration_structure` + `VK_KHR_ray_tracing_pipeline`/`VK_KHR_ray_query` FFI. Pack each non-empty SDF brick (P9/P12) as a `VK_GEOMETRY_TYPE_AABBS_KHR` BLAS; RT cores traverse the BVH and skip empty space free; the intersection shader runs a trilinear/analytic solve or short march only inside the hit brick. Capability-gate at device-init; the software sphere-tracer (P4/P5) stays the universal fallback (Lumen's HW-or-software split).
+**What.** Sample `field_distance` at a few steps along the surface normal; the deficit between expected and actual distance gives cheap analytic AO (the classic 5-tap SDF AO), darkening crevices.
 
-**Why / what to decide NOW (do NOT build the AS yet).** RT cores run autonomously parallel to the SMs; for sparse SDF worlds the hardware BVH gives empty-space skipping the software march pays for in ALU (NVIDIA JCGT 2022). **Foundation choices made earlier so RT lands cleanly:** (1) deferred G-buffer as shading substrate (P1) — forward would force reworking shading; (2) motion-vector + history slot (P6) — RT's SVGF denoiser IS the TAA infra; (3) the SDF brick AABB list (P9/P12) as the natural BLAS source; (4) the software sphere-tracer (P4/P5) as the universal fallback. **Defer the AS/RT seam itself** until bricks (P9) exist to feed it (a large raw-`VK_KHR_*` FFI with no consumer before then). The shared-depth composite (P1) already gives correct mesh↔SDF occlusion, so TLAS unification (RT-2) is not urgent.
+**Why our path needs it.** Same SDF-native logic as A1 for ambient: free crevice AO from the field we already evaluate, no GTAO depth-sweep needed for the SDF half (S-GTAO complements for the *mesh* half / SDF↔mesh screen-space, A2 is the SDF-intrinsic AO).
 
-**How.** New RHI associated types + create/build/destroy verbs; build-flag discipline (`PREFER_FAST_TRACE` static, `PREFER_FAST_BUILD+ALLOW_UPDATE` dynamic, `ALLOW_COMPACTION` static); region routing (HW-RT for static + secondary rays, software trace for the actively-edited near field — AS rebuild is the mutating-SDF worst case); mark geometry `OPAQUE` to avoid expensive any-hit. AS-build overlap wants async (P13).
+**How.** A 5-tap loop along the normal calling `field_distance` (unchanged); the AO accumulation is consumer-side. Cheapest A-track phase.
 
-**Dependency/order.** Needs P9 (bricks=BLAS). Capability-gated (device must advertise the extensions; fallback to software). Feeds P15.
+**Expected win.** Crevice AO on the SDF; GPU-timestamp (5 field evals/pixel, bounded by B7/P9 on the analytic path).
 
-**Gate.** Golden-equal between HW-RT primary visibility and the software tracer (the fallback is the oracle) on a capable device; capability-gate verified (a non-RT device cleanly takes the software path); validation clean; GPU-timestamp vs software march (the honest "order-of-magnitude, not a quoted 5–10×" measure).
+**Dependency/order.** Needs P4; pairs with A1/C-AA. Part of the SDF-native MVP.
 
-**Effort.** XL. **Conflicts.** Must stay opt-in capability-gated with the software tracer as fallback (non-negotiable). AS rebuild is the mutating-SDF worst case (region routing mitigates). In-house: the AS is built via raw `VK_KHR_*` FFI (no ash), consistent with the no-third-party graphics rule.
+**Gate.** Frozen field probe via `sdf_field.hlsli`; consumer-side AO accumulation relaxable; golden within owner tolerance; additive (no-AO path = rung golden); validation clean; GPU-timestamp.
 
----
-
-## PHASE P15 — RT lighting (shadows / AO / GI / reflections) + SVGF — CONFIRMED FUTURE
-
-**What.** HW-RT for secondary/incoherent lighting rays against the unified mesh+SDF TLAS: ray-traced shadows (`RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH` for opaque shadow/AO), AO, diffuse GI, reflections. Owner-confirmed. Pair with an SVGF-class spatiotemporal denoiser (= the P6 TAA infra, extended with variance guidance).
-
-**Why.** Secondary/incoherent rays are exactly where HW-RT wins most and software marching hurts most (no screen-space coherence) — the strongest single justification for HW-RT.
-
-**How.** Few rays/pixel → SVGF (temporal accumulation via P6 motion vectors/history + spatial à-trous variance-guided filtering). Cost moves from traversal (cheap on HW) to secondary-ray SHADING divergence — simplify secondary shaders, drop GI/rough-specular to vertex-level shading, bias mips.
-
-**Dependency/order.** Needs P6 (denoiser base) + P14 (AS/RT). Last.
-
-**Gate.** Golden on a known-lighting scene vs a path-traced reference (within a denoised tolerance, owner-approved); temporal stability (P6 gates carried forward); GPU-timestamp; validation clean.
-
-**Effort.** XL. **Conflicts.** Few-sample noise REQUIRES the denoiser (couples to P6); ghosting/temporal-lag failure modes. The honest measure is golden-buffer diffs + timestamps, never a quoted speedup.
+**Effort.** S. **Conflicts.** None. **Class: FIELD-CONSUMER.**
 
 ---
 
-## 2. Cross-cutting principles applied
+### PHASE A-GI capstones — Software-first SDF global illumination (Open-Q6)
 
-- **0%-gate.** Every render pass runs only under a `boyko_render` schedule; a world not using it pays nothing; the named CPU hot loops (`row_ptr`, `for_each_chunk`, query iter, `find_ready`) stay byte-identical (no phase touches them). GPU-side type-keyed routing stays behind const/flag gates per CG-D5.
-- **Determinism boundary (the load-bearing constraint).** The deterministic scalar field eval (`sdf`/`smin`/`combine`/normal) + the host mirror `golden_composite_pixel` are **byte-identical across the entire plan** — they are the CPU/GPU golden source of truth a future physics SDF-collision evaluator reuses. No fast math, no reordered FMA, no rsqrt. P5/P6 fork the *consumer* (ray generation, resolution, accumulation), never the field eval; P9 forks the field *backend* (brick fetch) behind `field_distance` while the analytic path remains the reference + physics source. Render-history non-determinism (TAA) is OUTSIDE the physics determinism gate.
-- **Measurement oracle.** The GPU half cannot be Miri'd: golden-buffer diffs (bit-exact where possible, **owner-approved documented tolerance where not — P5/P6/P9/P12 each carry a per-phase tolerance gate, NOT critic-discretion**) + Vulkan validation + sync-validation wired to FAIL tests, on a real RTX 3060. CPU-side lowering/build code stays criterion + Miri where unsafe.
-- **In-house / native / raw-Vulkan.** No ash/wgpu; all new verbs are raw-FFI behind the RHI trait (static dispatch, monomorphized, no `dyn` in the hot record path). The seam-with-default-`#[cold]`-body pattern (already used for `copy_buffer`/`image_barrier`/`dispatch_indirect`) is the template for every new encoder verb — Mock + ABI stay stable.
-- **Differential SIMD/subgroup discipline (P7).** Subgroup paths ship with a scalar reference + a differential golden (the CPU-D3 house template applied to GPU), capability-gated, never hard-coding wave width.
-- **Two barrier codepaths are distinct (C1).** The on-screen frame uses hand-FFI `swapchain.rs` barriers (P3a batches them); the ECS conflict-graph uses `boyko_render::barrier.rs` `lower_barriers` (P3b narrows + adds constants for P8/P11). They are never conflated.
+> The core v2 verdict: software/SDF-native GI is the PRIMARY path; HW-RT (P14/P15) is an optional accelerator, not the GI prerequisite. Ships A8/A13 on P1+P6 (no bricks) and A7/A10/A12 over bricks (no HW-RT).
+
+- **A8 — Radiance Cascades 2D (noiseless, no bricks).** Hierarchical radiance probes with angular/spatial cascade trade-off; noiseless penumbra-correct GI in 2D/2.5D over the P1 G-buffer + P6 reprojection. **L. RENDER** (screen-space; no field probe). Needs P1+P6.
+- **A13 — SSGI bitmask.** Bitmask horizon-based screen-space GI over the depth/normal G-buffer, reusing S-HIZ for long-range sampling. **M. RENDER.** Needs P1+P6+S-HIZ.
+- **A7 — Voxel cone tracing over bricks.** Cone-trace the P9 brick atlas for one-bounce diffuse GI. **L. FIELD-CONSUMER** (brick fetch via the forked backend). Needs P9.
+- **A10 — DDGI (irradiance probe volume) over the field.** A probe grid sampling `field_distance`/`field_radiance` via G-BRICKRT/cone-trace; temporal probe update. **L. FIELD-CONSUMER.** Needs P9 (+G-BRICKRT for probe rays).
+- **A12 — Brixelizer-class SDF GI cascades.** AMD-Brixelizer-style cascaded SDF GI over the P9/P10 brick clipmap. **XL. FIELD-CONSUMER.** Needs P9+P10.
+
+**Determinism (all A-GI).** Screen-space (A8/A13) = RENDER. Brick/field-probing (A7/A10/A12) = FIELD-CONSUMER: the field/brick probe goes through `sdf_field.hlsli`/the forked backend; the irradiance/cone accumulation is consumer-side and relaxable. None enter `boyko_sdf_math`. Stochastic variants (if any) gated by X-REF.
+
+---
+
+# TRACK C — RECONSTRUCTION / AA / VRS
+
+> C-AA lands on the SDF-native fast-track (analytic edge AA from the distance field — FIELD-CONSUMER). C-TSR supersedes the simple P5/P6 upscale/TAA (Open-Q4). C-CTSS/C-VRS/C-CBR are capability-gated shading-rate reductions (RENDER).
+
+### PHASE C-AA — Analytic edge AA from the distance field — needs P4
+
+**What.** Use the distance field's gradient at the silhouette to compute analytic coverage (the pixel's signed distance to the edge → a smooth coverage term), antialiasing SDF edges with no MSAA and no temporal cost — a free byproduct of the field we evaluate.
+
+**Why our path needs it.** SDF edges are analytically defined; the field already gives the distance-to-surface, so edge coverage is a near-free consumer of `field_distance` — crisper edges than MSAA on the SDF half, no extra samples. Part of the SDF-native MVP.
+
+**How.** Compute coverage from `field_distance` and the screen-space gradient (`fwidth`-style) in the marcher/composite; the coverage blend is consumer-side. Field probe unchanged.
+
+**Expected win.** Smooth SDF edges at ~zero cost; GPU-timestamp negligible.
+
+**Dependency/order.** Needs P4. Part of the SDF-native MVP (A1/A2/C-AA + B1/B5).
+
+**Gate.** Frozen field probe; consumer-side coverage relaxable; golden within owner tolerance (edge pixels change by design — an owner-approved AA bar); validation clean.
+
+**Effort.** S. **Conflicts.** None. **Class: FIELD-CONSUMER.**
+
+---
+
+### PHASE C-TSR — Full FSR2/TSR temporal super-resolution (supersedes simple P5/P6) — needs P5+P6
+
+**What.** The full FSR2/TSR recipe (reactive mask, depth/normal/luma history clamping, lock/disocclusion handling, robust contrast-adaptive sharpening) replacing P5's simple bilateral upscale + P6's basic TAA resolve. The quality upgrade once the simple forked proof (P5/P6) ships.
+
+**Why our path needs it.** P5/P6 ship first as the minimal forked proof (§3); C-TSR is the production-quality reconstruction (Open-Q4 confirms the two-stage approach). Reuses the P5 half-res input + P1 G-buffer + P6 motion vectors/history/P6-S — the simple path is the fallback and the differential reference.
+
+**How.** Raw-Vulkan compute, reimplemented (FSR2 algorithm ported, never linked). Consumes the P6-S seam. The simple P5/P6 path remains as the relaxed-tolerance reference.
+
+**Expected win.** Higher reconstruction quality at the half-res cost; GPU-timestamp + SSIM vs the P5/P6 simple path and a native-res reference.
+
+**Dependency/order.** Needs P5 + P6 + P6-S. Supersedes (does not delete) the simple path.
+
+**Gate.** Render-side; relaxable but reproducible (deterministic given inputs + jitter sequence); temporal by design (outside the physics gate); owner-approved relaxed SSIM/PSNR bar (the P5/P6 precedent extends); a DLSS-class quality reference (the native-res ground truth at matched frames) is the upper bar; validation clean; GPU-timestamp.
+
+**Effort.** L. **Conflicts.** None (the simple path is the fallback). **Class: RENDER (no field).**
+
+### PHASE C-CTSS / C-VRS / C-CBR — Checkerboard / variable-rate / coarse shading — CAPABILITY-GATED
+
+Checkerboard rendering (C-CBR), hardware VRS (C-VRS, `VK_KHR_fragment_shading_rate` + a compute-raster fallback), and coarse-tile shading (C-CTSS) reduce shaded samples. **M each. RENDER.** Capability-gated (VRS) with a full-rate fallback. Needs P1+P6.
+
+---
+
+# TRACK D — GPU-DRIVEN GEOMETRY + TRANSPARENT SUBSTRATE
+
+> D-FWD is the transparent/blended-material substrate the critique (C2) proved all OIT + S-CSM + E-PART rendering need but the spine does not build. D-VIS is the 64-bit visibility-buffer alternative to the P1 depth-copy seam (Open-Q5). D-MESH/D-CULL/D-SWRAST/D-COMPACT are the GPU-driven mesh pipeline.
+
+### PHASE D-FWD — Transparent / blended material substrate (resolve C2) — needs P1+P7
+
+**What.** The missing forward/transparent material path: a blend-state raster pipeline (the RHI has only the COMBINED_IMAGE_SAMPLER prototype, no blend-state pipeline beyond it), a sorted transparent pass, and float-RT additive-blend capability — the substrate E-WBOIT/MBOIT/LLOIT, S-CSM's transparent casters, and E-PART's blended particles all require. **Resolves the C2 false-prerequisite:** P1 graduates the SDF *compute marcher* into MRT storage images; it does NOT build a blend-capable transparent raster pass.
+
+**Why our path needs it (C2).** Three OIT phases + E-PART + S-CSM say "needs P1" but P1 delivers no blend-state pipeline, no transparent material path, no float-RT additive blend. Without D-FWD a reader schedules E-WBOIT "after P1" and discovers a hidden XL dependency. D-FWD makes the substrate explicit and shared.
+
+**How.** Extend the RHI pipeline-create with blend-state descriptors (additive/over, src/dst factors); a transparent-pass slot in the frame (lowered by F-GRAPH); float-format color attachments. The forward path reads P7's light list (so transparent surfaces are lit). Mesh-material-G-buffer scope is an owner decision (Open-Q11 — whether the mesh gets a real material G-buffer or stays flat-color gates S-CSM/S-GTAO mesh occlusion/E-PART albedo).
+
+**Expected win.** Enables transparency at all (a capability, not a speedup). GPU-timestamp of the transparent pass.
+
+**Dependency/order.** Needs P1 (G-buffer + depth) + P7 (light list for lit transparency) + F-GRAPH (barrier lowering). **Prereq for E-WBOIT/MBOIT/LLOIT, E-PART rendering, S-CSM transparent casters.**
+
+**Gate.** A blended transparent quad over the deferred opaque produces the host-reference composite; additive blend is commutative (order-independent for the OIT consumers); validation/sync-validation clean (the new pipeline state + transparent-pass barriers are F-GRAPH-derived); golden within ±2/255 on an opaque+transparent scene.
+
+**Effort.** M. **Conflicts.** None; additive pass under `boyko_render`. **Class: RENDER (no field).**
+
+### PHASE D-VIS / D-SWRAST / D-MESH / D-CULL / D-COMPACT — GPU-driven mesh pipeline
+
+- **D-VIS — 64-bit visibility buffer.** Mesh + SDF write `(depth<<32)|id` via core `shaderBufferInt64Atomics` `atomicMin`; correct mesh↔SDF occlusion with no MRT bandwidth — the alternative to P1's depth-copy seam (Open-Q5: P1 MRT first; D-VIS when Track-D lands, resolving the depth-seam overlap then). **L. RENDER.** Capability: `shaderBufferInt64Atomics` (core 1.2, guaranteed on RTX 3060) + fallback.
+- **D-SWRAST — compute software raster** for tiny triangles (Nanite-style). **L. RENDER.** Capability-gated (int64-atomic) + HW-raster fallback.
+- **D-MESH — mesh/task shaders.** **M. RENDER.** Capability `VK_EXT_mesh_shader` + compute-cull fallback.
+- **D-CULL — GPU frustum/cluster cull** (indirect, P8). **M. RENDER.**
+- **D-COMPACT — persistent-thread stream compaction** (shared with G-BRICKRT traversal). **M. RENDER.**
+
+All D-* lowered by F-GRAPH; capability-gated with named in-house fallbacks; RENDER class (no field).
+
+---
+
+# TRACK E — VOLUMETRICS / POST / OIT / PARTICLES
+
+> Largely a v1 gap. E-FOG is the unifying volumetric primitive; E-SDFVOL/E-DENS are the SDF-native participating-medium wins. **The post stack (E-BLOOM/DOF/MBLUR/TONE/EXP/LUT) is explicitly POLISH-TIER (M1)** — commodity any engine has, sequenced last, never competing with the differentiators. OIT spans a cost/quality ladder. All RENDER except E-SDFVOL/E-DENS-B/E-PART-collision (FIELD-CONSUMER). All passes lowered by F-GRAPH.
+
+### PHASE E-FOG — Froxel volumetric fog/lighting — needs P1+P6-S+P7
+
+**What.** A frustum-aligned 3D texture (160×90×64) filled by a compute scatter pass (per-froxel in-scattered RGB + extinction, reusing P7's clustered light list — **the froxel XY×Z IS the cluster grid, so fog and opaque lighting share one cull; this requires the fog grid dimensions to match P7's froxel grid, an explicit constraint**) then a front-to-back integrate pass; the final pass reconstructs froxel-Z from G-buffer depth. Exponential depth slicing + P6 temporal reprojection.
+
+**Why our path needs it.** Pure compute over storage-3D images (P1's vocabulary); reads P6 depth/history (needs **P6-S** for the cross-frame reprojection, M3); consumes P7's per-cluster bitfield directly. The unifying primitive E-SDFVOL/E-DENS/E-CLOUD/E-GOD build on.
+
+**How.** 3D STORAGE/SAMPLED images + two compute dispatches + trilinear sampler + HG phase. Lowered by F-GRAPH. Subgroup optional for the scatter reduction (X-SPD-style, scalar fallback).
+
+**Expected win.** Volumetric atmosphere/local fog; GPU-timestamp.
+
+**Dependency/order.** Needs P1 + **P6-S** (cross-frame reproject) + P7 (light list; froxel grid must match). Prereq for E-SDFVOL/E-DENS/E-CLOUD/E-GOD.
+
+**Gate.** Consumer-side; never touches the field; HG/exp-transmittance/jitter relaxable; temporal reproject non-deterministic by design (outside the physics gate); golden under an owner-approved relaxed PSNR/SSIM bar; the fog-grid==froxel-grid constraint verified; validation clean; GPU-timestamp.
+
+**Effort.** L. **Conflicts.** None. **Class: RENDER (no field).**
+
+---
+
+### PHASE E-SDFVOL — SDF-native analytic volumetric self-shadow & AO — needs P4 (P9-REQUIRED at scale, resolve M2)
+
+**What.** Reuse `field_distance` for volumetric soft shadows + AO: a shadow ray's closest-pass gives free penumbra (Quilez), cone steps along the normal give hemispheric AO; applied to surface shading AND the E-FOG scatter pass (self-shadowed fog). **M1 fix: the surface-shading half is A1/A2 (no fog pipeline needed); E-SDFVOL adds the froxel/fog application on top of A1's shared shadow-march include — the differentiator is NOT gated behind the commodity E-FOG for surface shading.**
+
+**Why our path needs it.** The SDF-native win triangle engines cannot match: **the froxel scatter pass calls `field_distance` toward each light for volumetric shadows on fog** — impossible cheaply in a triangle pipeline. Shares A1's shadow-march include.
+
+**How.** Added shader math in the marcher / the E-FOG scatter pass; zero new resources. Field probe via `sdf_field.hlsli`.
+
+**Expected win.** Self-shadowed fog + god rays (with E-GOD route a); GPU-timestamp.
+
+**Cost discipline (M2 — "free"/"a few cone steps" replaced).** The froxel grid is 160×90×64 ≈ 920K froxels; `field_distance` toward each light × cone-steps × O(edits) on the analytic path is potentially **billions of FROZEN evals/frame** (no rsqrt/FMA → full IEEE cost). **E-SDFVOL's fog application is therefore P9-REQUIRED above the ≤16-edit fixture** (O(1) brick fetch with empty-brick skip). On the analytic path it is restricted to the low-edit regime; above it, P9 is a hard prerequisite, not "ideally P9". The surface-shading half (A1/A2, per-pixel not per-froxel) is feasible analytically with B7.
+
+**Dependency/order.** Surface half: A1/A2 (P4). Fog half: E-FOG + **P9 (required at the P0 256–4096-edit regime)**.
+
+**Gate. CRITICAL boundary:** the shadow/AO cone-trace CALLS the FROZEN field through `sdf_field.hlsli` (no fast-math inside `field_distance` — physics reuses it); the penumbra/AO accumulation is consumer-side and may relax; golden within owner tolerance; the per-froxel cost is bounded by P9's empty-brick skip (timestamp proves it); validation clean; GPU-timestamp.
+
+**Effort.** M. **Conflicts.** Analytic-path cost (P9-gated at scale). **Class: FIELD-CONSUMER (frozen field probe; consumer-side accumulation).**
+
+---
+
+### PHASE E-DENS-A — Independent render-authored density channel (resolve C3) — THRESHOLD-GATED
+
+**What.** A density channel for fog/clouds authored as **independent render data** (a separate 3D image or a second R16 brick-atlas channel) with **no coupling to the field eval** — local fog volumes as `SdfEdit`-like ECS components, sampled by E-FOG. Brick-accelerated empty-space skip.
+
+**Why our path needs it.** The brick-map's empty-space skipping accelerates fog marching too — one acceleration structure, two consumers. As an *independent* channel it is cleanly RENDER (the C3 split: this half never touches `field_distance`).
+
+**How.** A density channel in the 3D brick texture (or a separate D3 image); raw-Vulkan 3D sampling; no field coupling. Lowered by F-GRAPH.
+
+**Expected win.** Brick-accelerated participating media; GPU-timestamp.
+
+**Dependency/order.** Needs P9 (the brick structure) + E-FOG (the consumer) + P4 (empty-brick skip).
+
+**Gate.** Render-side only; density is independent render data (NO field-eval contact — the clean half of the C3 split); brick R16 quantization is an owner-approved P9-class tolerance; validation clean; GPU-timestamp.
+
+**Effort.** L (shared with E-DENS-B). **Conflicts.** None. **Class: RENDER (no field).**
+
+---
+
+### PHASE E-DENS-B — Field-derived density (the field probe stays FROZEN) (resolve C3) — THRESHOLD-GATED
+
+**What.** Density derived from the SDF: near-surface distance maps to extinction, so volumetric density is authored by the field itself. **The C3 split: the `field_distance(p)` call is FROZEN (through `sdf_field.hlsli`, no fast-math); the distance→extinction remap is a pure consumer transform on the already-evaluated scalar `d` (fast-math OK on the remap, NEVER inside the probe).**
+
+**Why our path needs it.** Field-derived fog density is a true SDF-native differentiator (no triangle engine has it), but it must not leak fast-math into the field. The remap `extinction = remap(d)` operates on the scalar output, never re-entering or re-implementing the field eval.
+
+**How.** `let d = field_distance(p);` (FROZEN) then `extinction = remap(d)` (consumer transform). If a density channel is *baked* from the field at bake time, the bake uses the FROZEN field (no fast-math) and the bricks are golden-compared on the render side only — the analytic field stays the physics source.
+
+**Expected win.** Field-native participating media; GPU-timestamp.
+
+**Dependency/order.** Needs P9/E-FOG/P4 (as E-DENS-A) + the FROZEN field probe.
+
+**Gate.** The `field_distance` probe is byte-identical FROZEN (diff-verified, physics-safe — the explicit C3 fix replacing the blanket "fast-math OK"); the extinction remap of the already-evaluated scalar may relax; if baked, the bake path uses the FROZEN field; render-side golden at owner tolerance; validation clean; GPU-timestamp.
+
+**Effort.** L (shared with E-DENS-A). **Conflicts.** The remap-vs-probe boundary is the determinism surface (the C3 trap) — enforced by keeping the probe a frozen `sdf_field.hlsli` call. **Class: FIELD-CONSUMER (frozen probe; consumer-side remap).**
+
+---
+
+### PHASE E-CLOUD — Volumetric clouds (Perlin-Worley raymarch) — THRESHOLD-GATED
+
+**What.** Raymarch a cloud layer (low-freq Perlin-Worley base eroded by high-freq detail, weather map + height gradients; Beer-Lambert + HG + powder; adaptive step + cone light steps). Temporal upscaling/reprojection makes it affordable.
+
+**Why our path needs it.** A forked compute marcher analogous to our SDF marcher; reuses P5 half-res + P6 jitter/TAA (clouds are THE canonical temporal-upscaling use). 3D noise textures generated once at startup by an in-house compute pass (own noise gen satisfies the in-house constraint).
+
+**How.** In-house compute-generated 3D noise + one raymarch compute pass + blue-noise jitter. No RT/mesh-shader. The most ALU-heavy E technique. Lowered by F-GRAPH.
+
+**Expected win.** Volumetric clouds; GPU-timestamp.
+
+**Dependency/order.** Needs E-FOG (shared scatter/HG) + P5 (half-res) + **P6-S** (TAA reprojection — required to be affordable) + P7 (in-scatter).
+
+**Gate.** Fully consumer-side; no field coupling; HG/Beer/noise/reproject relaxable; non-deterministic via temporal upscaling (outside the physics gate); golden under a relaxed temporal bar; validation clean; GPU-timestamp.
+
+**Effort.** XL. **Conflicts.** ALU-heavy. **Class: RENDER (no field).**
+
+---
+
+### PHASE E-GOD — God rays / light shafts — needs E-FOG (route a)
+
+**What.** **Route (a) — the SDF-native win:** FREE as a byproduct of E-SDFVOL once the sun is shadow-sampled per froxel (physically-correct god rays from fog self-shadowing). **Route (b) — DEMOTED to optional-only (m1):** a screen-space bright-pass + radial blur, a low-end fallback exploiting nothing SDF-native — built only if a no-volumetrics path is needed, not a default phase slot.
+
+**Why our path needs it.** Route (a) needs zero new code beyond E-SDFVOL's per-froxel sun-shadow sampling — the differentiator. Route (b) is commodity filler (m1).
+
+**How.** Route (a): part of the fog dispatch. Route (b): two fullscreen compute passes (optional).
+
+**Expected win.** Light shafts; GPU-timestamp negligible (route a).
+
+**Dependency/order.** Route (a): E-FOG + E-SDFVOL. Route (b, optional): P1 composite.
+
+**Gate.** Pure render-side; route (a) inherits the fog tolerance; validation clean.
+
+**Effort.** S. **Conflicts.** None. **Class: RENDER (no field).**
+
+---
+
+### POLISH-TIER POST — E-BLOOM / E-DOF / E-MBLUR / E-EXP / E-TONE / E-LUT (M1: low-priority commodity)
+
+> Any-engine post commodity, sequenced last, never competing with the differentiators. All RENDER (no field), all lowered by F-GRAPH, all deterministic frame-to-frame except the intentionally-varying grain (E-LUT) and frame-dependent adaptation (E-EXP).
+
+- **E-BLOOM — progressive dual-filter mip chain** (13-tap Karis down + 9-tap tent up, ~6 mips). **Consumes X-SPD** (the average reduction — M4). **M.** Needs P1+X-SPD. Pairs with E-TONE.
+- **E-DOF — separable disk / scatter-as-gather** (CoC from depth, complex-phasor separable). **M.** Needs P1.
+- **E-MBLUR — tile-based motion blur** (TileMax→NeighborMax→reconstruct, **consuming P6's R16G16 motion vectors** — nearly free once P6 exists; TileMax/NeighborMax via X-SPD). **M.** Needs P6.
+- **E-EXP — auto-exposure histogram** (256-bin log-luma shared-memory atomics → reduce → eye-adapt). Cross-frame exposure read needs **P6-S** (M3). **M.** Needs P1+P6-S. Feeds E-TONE.
+- **E-TONE — ACES/AgX tonemap.** **S.** Needs E-EXP+E-BLOOM+P1 composite.
+- **E-LUT — 3D-LUT grade + grain/CA/vignette.** **S.** Needs E-TONE. Grain intentionally per-frame (non-deterministic by design); LUT/vignette/CA deterministic.
+
+---
+
+### PHASE E-WBOIT — Weighted-blended OIT (single-pass, deterministic) — needs D-FWD
+
+**What.** OIT in ONE additive pass: `sum(color·alpha·w)` + `sum(alpha·w)` into one RT + `product(1-alpha)` revealage into another; resolve by dividing. No sorting, no per-pixel lists.
+
+**Why our path needs it.** Cheapest OIT, the first transparency path. Two small float RTs + additive blend — **within D-FWD's blend capability (C2: not "needs P1" — needs D-FWD's blend-state pipeline + float-RT additive blend)**. No atomics, no unbounded memory, deterministic.
+
+**How.** Dual-RT additive blending in one pass over D-FWD's substrate. Lowered by F-GRAPH.
+
+**Expected win.** Approximate transparency; GPU-timestamp.
+
+**Dependency/order.** Needs **D-FWD** (MRT float blend + transparent-material path) — the C2 restated prerequisite.
+
+**Gate.** Consumer-side + DETERMINISTIC (additive blend is order-independent); weight math relaxable; no field; tight golden tolerance; validation clean.
+
+**Effort.** S. **Conflicts.** None. **Class: RENDER (deterministic; no field).**
+
+---
+
+### PHASE E-MBOIT — Moment-Based OIT (filterable, bounded memory) — needs D-FWD
+
+**What.** Approximate per-pixel transmittance with 4–8 power moments (or up to 4 trigonometric) of log-transmittance vs depth; reconstruct + composite. Bounded memory (~10–18 B/px), no sorting, filterable.
+
+**Why our path needs it.** Best quality/memory balance for heavy transparency without unbounded buffers — fits our bounded-memory principle far better than linked lists. Filterability pairs with P5 half-res.
+
+**How.** Additive float-RT blending (D-FWD) + a reconstruction pass. Trigonometric (3 moments) beat 8 power moments. Lowered by F-GRAPH.
+
+**Expected win.** High-quality bounded OIT; GPU-timestamp.
+
+**Dependency/order.** Needs **D-FWD** (multi-RT float + additive blend). Benefits from P5.
+
+**Gate.** Consumer-side; additive moment accumulation is order-independent (deterministic); **moment reconstruction uses a numerically-stable Cholesky with a documented epsilon bias regardless of fast-math — moment OIT is famously ill-conditioned at low moment counts, so the epsilon bias + stable formulation is mandatory, not "watch fast-math" (m2)**; no field; validation clean; GPU-timestamp.
+
+**Effort.** L. **Conflicts.** Moment-inversion conditioning (mitigated by the mandated stable formulation + epsilon). **Class: RENDER (deterministic; no field).**
+
+---
+
+### PHASE E-LLOIT — Per-pixel linked-list / A-buffer OIT (exact) — needs D-FWD (atomics)
+
+**What.** Exact OIT: a fragment pass atomically allocates a node in a big **preallocated** storage buffer (`{color, depth, next}`), atomic-exchanges the per-pixel head; a resolve walks each list, sorts the front N (≤16), blends in order, tail-blends the rest.
+
+**Why our path needs it.** The high-quality option; exact for moderate overlap. Needs `fragmentStoresAndAtomics` (our compute path uses atomics) + a **preallocated fixed-size node pool** (fits "preallocate at setup", no hot-path alloc).
+
+**How.** Fragment atomics + storage buffer (D-FWD substrate). **Preallocate + clamp to avoid buffer-overflow UB.** Lowered by F-GRAPH.
+
+**Expected win.** Exact transparency; GPU-timestamp.
+
+**Dependency/order.** Needs **D-FWD** (storage head + node pool + fragment atomics).
+
+**Gate.** Consumer-side; allocation ORDER nondeterministic (atomic races) BUT the resolve SORTS by depth before blending → the final image is deterministic given a stable fragment set; the overflow tail-blend is the only approximation; **buffer-overflow UB guarded by preallocate + clamp** (validation/the clamp is the oracle); no field; golden-stable after sort; validation clean.
+
+**Effort.** L. **Conflicts.** Unbounded memory (preallocated pool + clamp). **Class: RENDER (deterministic after sort; no field).**
+
+---
+
+### PHASE E-PART — GPU particle system (+ free SDF collision) — needs P1+P8+D-FWD (P9-REQUIRED collision at scale, resolve M5)
+
+**What.** Fully GPU-resident particles: a compute pass spawns/updates/integrates in a persistent **preallocated** buffer, maintains an alive-list (dead-list freelist) via atomics, writes a `DispatchIndirect`/`DrawIndirect` arg from the alive count, renders only live particles (transparent particles use an OIT path). **SDF-field collision is a `field_distance` test.**
+
+**Why our path needs it.** Reuses the GPU-column compute-dispatch path (GpuSystem) + the P8 indirect seam + D-FWD for blended-particle rendering; **the SDF field gives analytic particle collision (`field_distance < 0` → collide) — an SDF-native win**; particles inject density into E-FOG. Buffers preallocated at setup.
+
+**How.** Compute sim + storage buffers + atomics + `vkCmdDrawIndirect` (P8 seam) + D-FWD blended render. Lowered by F-GRAPH.
+
+**Cost discipline (M5 — "free" dropped).** N particles × O(edits) FROZEN evals/sim-step: at 1M particles × 256 edits ≈ 256M frozen evals/frame for collision alone (no rsqrt/FMA → full IEEE cost). **"Free" is wrong on the analytic path — particle-SDF collision at scale is P9-REQUIRED (O(1) brick fetch); on the analytic path, cap particle count or collision frequency.**
+
+**Expected win.** GPU-resident particles + SDF collision + fog injection; GPU-timestamp.
+
+**Dependency/order.** Needs P1 (storage + compute) + P8 (indirect alive-count) + **D-FWD** (blended render). Collision uses P4's `field_distance` (**P9 at scale**). Density injection pairs E-FOG.
+
+**Gate.** Sim consumer-side; **if collision calls `field_distance` it uses the FROZEN path (no fast-math inside the field eval)**; integration/forces relaxable; atomic alive-list ordering nondeterministic (acceptable — particles visual-only, outside the physics gate); transparent particles need an OIT path; the collision cost is bounded by P9 at scale (timestamp); validation clean; GPU-timestamp.
+
+**Effort.** L. **Conflicts.** Analytic collision cost (P9-gated at scale). **Class: RENDER (sim) + FIELD-CONSUMER (collision via the frozen `field_distance`).**
+
+---
+
+# TRACK S — CLASSIC SHADOW / AO (mesh-side complement + shared accelerator)
+
+> Not redundant with Track A: contact shadows recover fine mesh↔SDF detail the far cone-trace misses; GTAO sees screen-space neighbors/meshes the analytic SDF-AO (A2) cannot; CSM/VSM are the correct directional path for MESHES (which are NOT in the SDF). S-HIZ is the shared accelerator (canonical X-SPD consumer). All RENDER (no field), all lowered by F-GRAPH.
+
+### PHASE S-HIZ — Hi-Z / depth-MIP shared accelerator (canonical X-SPD consumer) — needs P1+X-SPD
+
+**What.** A min/max depth pyramid (built via **X-SPD** — the parametric primitive, NOT a re-derivation; M4) used to (a) accelerate S-GTAO/S-SSILVB long-range horizon sampling, (b) early-skip empty space in S-CONTACT marches, (c) bound the SDF cone-shadow (A1) far-march, (d) the P11 occlusion test.
+
+**Why our path needs it (M4).** v1's P11 builds a Hi-Z for culling, but its role as a SHARED accelerator for AO/contact-shadow/cone-shadow range queries is under-weighted. **GTAO's prefilter MIP and P11's Hi-Z are the same structure — built ONCE via X-SPD, consumed in S-GTAO, S-CONTACT, A1's far-bound, P11.** The cross-cutting infra that makes the classic complement cheap.
+
+**How.** Consume X-SPD with the `min/max` reduction on the depth image. No new SPD code (M4). Lowered by F-GRAPH.
+
+**Expected win.** One pyramid amortized across ≥4 consumers; GPU-timestamp.
+
+**Dependency/order.** Needs P1 + **X-SPD**. Consumed by S-GTAO, S-CONTACT, A1, P11. (Factors P11's Hi-Z build out as the shared primitive.)
+
+**Gate.** Pure depth derivative; no field; min/max reduction order-independent (stable, X-SPD-gated); validation clean; GPU-timestamp.
+
+**Effort.** M. **Conflicts.** Overlaps P11's Hi-Z (factored here as the shared primitive via X-SPD). **Class: RENDER (no field).**
+
+### PHASE S-GTAO / S-CONTACT / S-CSM / S-VSM
+
+- **S-GTAO — ground-truth AO** (XeGTAO-style, horizon-based, multi-slice, bent-normal feeds A6). The **prefilter MIP is X-SPD/S-HIZ** (M4). NO subgroup required (XeGTAO-confirmed). **L. RENDER.** Needs P1+S-HIZ; benefits from P6.
+- **S-CONTACT — screen-space contact shadows** (depth-buffer ray-march, 8–16 steps; layers ON TOP of every shadow source by min — recovers mesh-on-mesh / mesh-on-SDF / SDF-on-mesh fine occlusion A1/S-CSM miss). Uses P6 IGN jitter + S-HIZ empty-skip. **M. RENDER.** Needs P1(+P6+S-HIZ).
+- **S-CSM — cascaded shadow maps** (the correct directional path for the MESH half — meshes are NOT in the SDF, so cone-tracing them is impossible; CSM casts mesh shadows onto meshes AND the SDF surface; SDF casts onto meshes via A1; combine by min). PCF + receiver-plane bias + texel-snap; front-face-cull. **Needs D-FWD for transparent casters / Open-Q11 for mesh-material scope. L. RENDER.** Needs P1 mesh raster.
+- **S-VSM — virtual shadow maps** (16k² sparse paged, clipmap, static/dynamic caching). Page table via core `shaderBufferInt64Atomics` (RTX 3060 guaranteed) + indirect (P8) + P11 page marking; **shares the clipmap concept with P10/A12**; page caching needs **P6-S** (M3). **XL. RENDER.** Capability `shaderBufferInt64Atomics` + CSM fallback. THRESHOLD/CAPABILITY-gated.
+
+---
+
+# THRESHOLD/CAPABILITY/PROFILE-GATED SDF-ACCEL + GPU-DRIVEN + HW-RT
+
+> P9–P15 preserved from v1 (content verbatim where unchanged); v2 adds G-BRICKRT (the no-RT keystone), the FORKED-BACKEND determinism class + the render↔physics divergence contract (M6), and re-sequences HW-RT as an accelerator (Open-Q6).
+
+### PHASE P9 — SDF brick atlas (field backend swap behind the P4 invariant) — THRESHOLD-GATED (re-eval vs B7 first)
+
+**What / Why / How / Gate** — as v1 §P9 (sparse brick-map + `maxImageDimension3D`-sized atlas; `field_distance`→trilinear fetch, `tile_bound`→per-brick AABB; **R16 default**, O2). The marcher/tile-cull/half-res/TAA/clustered-lighting/shared-depth/all-Track-A-lighting/G-BRICKRT are byte-untouched (the P4 invariant). **Determinism (C3/M6):** the brick fetch replaces the analytic eval behind `field_distance` as a **FORKED-BACKEND** selected by a scene flag; the analytic `sdf`/`smin`/`combine` path **remains byte-identical, the FROZEN reference + the physics source** (physics evaluates the analytic field on the CPU, not bricks). The non-empty-brick AABB list is the BLAS source for P14 + the HDDA target for G-BRICKRT (do NOT pick a layout that can't emit AABBs).
+
+**M6 — render↔physics geometric-divergence contract (Open-Q12).** Render visibility/lighting/particle-collision use the BRICK field; physics collision uses the ANALYTIC field. R16 quantization makes them disagree by a bounded world-space error. **A character's feet may visibly float/sink relative to where physics says the ground is.** The contract: document the max world-space geometric divergence (R16 distance quantization × brick extent → an error bound) and get owner sign-off that this visual/physics mismatch is acceptable. **B7 (distance-exact, analytic) has ZERO such divergence — evaluate B7 first (Open-Q3); treat P9 as the world-scale/discrete-field tier B7 cannot reach.**
+
+**Effort.** XL. **Conflicts.** Brick quantization leaves bit-exact on the render side (documented, owner-approved, M6 divergence bound); the analytic reference + physics source preserved. **Class: FORKED-BACKEND (render fetch forked; analytic FROZEN eval preserved as the physics source).**
+
+### PHASE P10 — Geometry clipmap LOD over bricks — THRESHOLD-GATED
+
+As v1 §P10. Cascade selection in `field_distance`/`tile_bound` (behind the invariant). The cascade structure aligns with A12 (Brixelizer cascades), A10 (DDGI volumes), S-VSM (shadow clipmap) — a shared cascade concept. **L. Class: FORKED-BACKEND.** Needs P9.
+
+### PHASE G-BRICKRT — Software brick-RT (hierarchical-DDA over the brick atlas) — RT-CORE-FREE KEYSTONE — needs P9
+
+**What.** Traverse the P9 sparse brick atlas with a hierarchical DDA (leapfrog empty bricks via bitmask/coarse levels; fine-march or analytic-solve only inside occupied bricks) to cast arbitrary secondary/incoherent rays in compute — a software substitute for HW-RT BLAS traversal that runs on ANY GPU.
+
+**Why our path needs it (the keystone — Open-Q6).** **It makes ALL the resampling/PT/cache techniques run WITHOUT RT cores:** ReSTIR shadow/GI rays (G-RDI/RGI), NRC/SHaRC bounces (G-NRC/SHARC), RT-AO all need a secondary-ray primitive, and v1 only provided it at P14 (HW-RT). Software brick-RT makes the brick atlas itself the acceleration structure — the brick AABB list P14 would feed a BLAS is traversed directly in compute. The universal incoherent-ray fallback v1 names but never builds. **This is the architectural inversion: Track G no longer depends on P14.**
+
+**How.** Pure compute; HDDA is well-documented (Laine-Karras ESVO, brickmap, VoxelRT) — reimplemented, no extensions, NO RT cores. Synergistic with D-COMPACT's persistent-thread traversal. Lowered by F-GRAPH.
+
+**Expected win.** Arbitrary secondary rays on any GPU; GPU-timestamp vs HW-RT (P14) on a capable device.
+
+**Dependency/order.** Needs P9 (brick atlas + brick-map) + P4 + `sdf_field.hlsli`. Prereq for the no-RT path of Track G + A-GI brick probing.
+
+**Gate.** The DDA traversal is integer/address logic (deterministic); the in-brick solve calls the FROZEN `sdf`/`smin`/`combine` via `sdf_field.hlsli` unchanged; brick R16 quantization is the only relaxation (owner-approved P9 tolerance + the M6 divergence bound); the analytic CPU field stays the physics source; validation clean; GPU-timestamp.
+
+**Effort.** L. **Conflicts.** None (its purpose is RT-core independence). **Class: FIELD-CONSUMER (in-brick solve via the frozen field; DDA is integer logic; physics field untouched).**
+
+### PHASE P11 — Hi-Z two-pass mesh occlusion culling — THRESHOLD-GATED, needs P8+S-HIZ
+
+As v1 §P11, with the Hi-Z build factored to **S-HIZ/X-SPD** (M4 — P11 consumes the shared pyramid, does not rebuild it). Two-pass (no false culls — the negative test). **L. RENDER.** Needs P8 + **S-HIZ** + P1.
+
+### PHASE P12 — BVH dirty-region regen + JFA (+ SDF motion vectors for the mutating field) — THRESHOLD-GATED
+
+As v1 §P12. Per-cascade AABB BVH over non-empty bricks, dirty-region JFA; BVH = software-traversal accelerator (G-BRICKRT) + HW-RT BLAS (P14). **A GPU-mutating field is where SDF motion vectors need per-hit velocity (Open-Q7) — that work lands here, not P6.** **Determinism: a GPU-mutating brick field is render-side (FORKED-BACKEND); the CPU physics evaluator stays on the analytic field (C3/M6 boundary preserved).** **XL. Class: FORKED-BACKEND.** Needs P9.
+
+### PHASE P13 — Async compute (multi-queue + cross-queue semaphores) — PROFILE-GATED
+
+As v1 §P13. Extends the **P6-S** seam to cross-queue semaphores. **F-GRAPH already reserves the (src-queue, dst-queue) dimension (M7) — P13 populates the second queue without rewriting the graph.** STRICTLY profile-gated (build only when a GPU profile shows under-occupancy). **XL. Class: CPU/sync (no field).** Needs P3a/P3b + P6-S + F-GRAPH's queue dimension.
+
+### PHASE P14 — AS/RT seam + HW-RT SDF-as-AABB-BLAS backend — CAPABILITY-GATED (accelerator, not GI prereq)
+
+As v1 §P14, re-scoped (Open-Q6): **with G-BRICKRT, HW-RT is now strictly an accelerator over an existing software secondary-ray path — Track G no longer depends on P14.** Pack non-empty bricks as `VK_GEOMETRY_TYPE_AABBS_KHR` BLAS; the intersection shader solves the FROZEN field inside the hit brick. **Capability: `VK_KHR_acceleration_structure` + `VK_KHR_ray_query`/`ray_tracing_pipeline` — in-house fallback: G-BRICKRT (software HDDA) / the P4/P5 sphere-tracer.** Golden-equal vs G-BRICKRT/the software tracer (the fallback is the oracle). **XL. Class: FIELD-CONSUMER (intersection-shader solve via the frozen field; physics untouched).** Needs P9.
+
+### PHASE P15 — RT lighting (shadows/AO/GI/reflections) + SVGF — CONFIRMED FUTURE (accelerated variant)
+
+As v1 §P15, re-scoped (Open-Q6): **v2 ships software equivalents of ALL these earlier (A1 shadows, A2/A13 AO, A7/A8/A10/A12 GI, A4 reflections) on the marcher/bricks; P15 is the HW-RT-accelerated variant for incoherent rays, NOT the first appearance of these effects.** Pair with **G-SVGF** (the built-out SVGF). **XL. Class: FIELD-CONSUMER (RT rays solve the frozen field; denoiser is render-side).** Needs P6-S + P14 + G-SVGF.
+
+---
+
+# TRACK G — FRONTIER GI / NEURAL / PATH-TRACING
+
+> The capstone layer over G-BRICKRT (or P14). Pillars: RESAMPLING (G-RDI/RGI/PT/REGIR — pure compute reservoir streaming, RT-agnostic, served by G-BRICKRT/P4/P14), DENOISERS (G-SVGF/REBLUR/FIRE — built on P6-S + X-SPD), NEURAL (G-NRC/NDENOISE/NUP/NMAT — coopmat-gated, subgroup/non-neural fallback, float-nondeterministic, firewalled from physics), and the non-neural twin G-SHARC. **Every stochastic phase lists X-REF (the acceptance oracle, C4) as a hard prerequisite.** Visibility rays are FIELD-CONSUMER via `sdf_field.hlsli`; none enter `boyko_sdf_math`.
+
+### PHASE G-SVGF — SVGF / A-SVGF / ReLAX denoiser — needs P1+P6-S+X-SPD
+
+**What.** Temporal accumulation (EMA + luma moments via motion-vector reprojection) → per-pixel variance → 5 à-trous wavelet iterations with depth/normal/luma edge-stopping. A-SVGF adds temporal-gradient adaptive alpha; ReLAX adds fast-history clamping. Albedo demodulated before / remodulated after.
+
+**Why our path needs it.** **This IS the P15 'SVGF' line, built out** — a real subsystem, not one bullet. **The shared infra is the P6-S motion-vector/history/reprojection seam; the à-trous + edge-stopping + variance core is the real per-phase work (m4 — NOT "80% free").** The natural denoiser for G-RDI/RGI/PT AND the cheaper A1 cone-shadow + A13 SSGI noise.
+
+**How.** In-house raw-Vulkan compute (Q2VKPT/vkdt reference, reimplemented). No extensions/RT/neural HW. Edge-stopping is scalar ALU.
+
+**Expected win.** Converged image from few-sample signals; GPU-timestamp + SSIM vs the **X-REF** reference.
+
+**Dependency/order.** Needs P1 + **P6-S** + a noisy signal (A1/A13/G-RDI/P15) + **X-REF** (acceptance).
+
+**Gate.** Render-consumer filter; never touches the field; may relax math; temporally non-deterministic by design (outside the physics gate); golden at the **X-REF** relaxed SSIM/PSNR bar on a converged reference (NOT bit-equality); validation clean; GPU-timestamp.
+
+**Effort.** L. **Conflicts.** None. **Class: RENDER (no field).**
+
+### PHASE G-REBLUR — ReBLUR-style recurrent-blur denoiser — needs P1+P6-S+X-SPD
+
+Cross-bilateral recurrent blur over a mip-hierarchy (**consumes X-SPD's bilateral reduction**, M4) + temporal accumulation; specular virtual-position tracking. The specular/AO companion to G-SVGF (A4 reflections, A3 AO, P15 specular). **L. RENDER.** Needs P1+P6-S+X-SPD+X-REF+a specular/AO signal.
+
+### PHASE G-FIRE — Firefly suppression + antilag — needs P6-S+a denoiser
+
+Spike rejection + neighborhood YCoCg variance clamp (the TAA clamp generalized) + antilag, hardening few-sample signals. Reuses the P6-S clamp. **S. RENDER.** Needs P6-S+a denoiser+X-REF.
+
+### PHASE G-RDI — ReSTIR DI — needs P1+P6-S+P7+X-REF+a visibility ray
+
+**What.** Per-pixel streaming RIS (1-sample reservoir, temporal reuse from P6-reprojected previous frame + spatial neighbor reuse, MIS-weighted). 10–100× effective light samples at ~1 spp, thousands of lights.
+
+**Why our path needs it.** Compute over the P1 G-buffer; temporal reuse reuses the **P6-S** motion-vector/history seam; **visibility/shadow rays via the software sphere-tracer (P4) / G-BRICKRT (bricks) / HW-RT (P14) — RT-core-agnostic**; reservoir SSBOs in P1's vocabulary.
+
+**How.** Raw-Vulkan compute — no extension beyond P1. Subgroup ops (P7's caps) optionally accelerate neighbor reuse (scalar fallback). Lowered by F-GRAPH.
+
+**Expected win.** Near-converged many-light direct lighting at ~1 spp; GPU-timestamp + variance vs **X-REF**.
+
+**Dependency/order.** Needs P1 + **P6-S** + P7 (candidates) + a visibility ray (P4/G-BRICKRT/P14) + **X-REF**.
+
+**Gate.** Render-consumer reservoir math; does NOT touch the frozen eval; stochastic by design (per-frame RNG-seeded) → render output non-deterministic like TAA (acceptable, outside the physics gate); **shadow/visibility rays MUST call the field through `sdf_field.hlsli`** (no fast-math in the probe); MIS/reservoir math relaxable; golden uses the **X-REF fixed-seed + relaxed-converged-reference protocol** (relative-MSE ≤ phase bar at K frames, NOT bit-equality); validation clean; GPU-timestamp.
+
+**Effort.** L. **Conflicts.** Stochastic determinism surface (X-REF). **Class: RENDER (reservoir) + FIELD-CONSUMER (visibility rays via the frozen field).**
+
+### PHASE G-RGI — ReSTIR GI — needs G-RDI + 1-bounce ray
+
+One-bounce indirect reservoir reuse (sample = secondary hit + incoming radiance) from one bounce of the software trace / G-BRICKRT / HW-RT; radiance into reservoir SSBOs reprojected by P6-S. **L.** Needs G-RDI + a 1-bounce ray + P6-S + **X-REF**. **Class: RENDER + FIELD-CONSUMER (secondary rays via `sdf_field.hlsli`).**
+
+### PHASE G-REGIR — ReGIR world-space grid light reservoirs — needs P7+G-RDI
+
+A world-space grid pre-sampling reservoirs over local lights (decouples cost from light count), feeding G-RDI's initial sampling. Complements P7's screen-space froxel cull (P7 per-froxel for deferred; ReGIR per-world-cell for ReSTIR candidates). Grid SSBO addressed by hashed world position. **M. RENDER** (no field probe). Needs P7+G-RDI+X-REF.
+
+### PHASE G-PT — GRIS / ReSTIR PT (full path reuse, shift maps) — needs G-RDI+(G-BRICKRT|P14)+P6-S
+
+Generalized RIS reusing multi-bounce paths via shift mappings (reconnection/random-replay/hybrid). Reconnection vertices in an SSBO column; ray casts via **G-BRICKRT software HDDA (RT cores sufficient-not-necessary)** or P14. Heaviest single technique. **XL.** Needs G-RDI + a multi-bounce ray + P6-S + **X-REF** (+ doubles as the X-REF reference generator at high spp). **Class: RENDER + FIELD-CONSUMER (path-vertex probes via `sdf_field.hlsli`).**
+
+### PHASE G-SHARC — Spatial-Hash Radiance Cache (non-neural NRC twin) — needs G-RGI/G-PT
+
+**What.** A world-space radiance cache WITHOUT neural networks: hash the world position (LOD-scaled voxel) into a hash-grid SSBO, accumulate incoming radiance per cell with temporal feedback, query to terminate/short-circuit paths.
+
+**Why our path needs it.** **The recommended FIRST radiance-cache rung before G-NRC** (Open-Q9): same path-shortening benefit, pure compute + hashing — no tensor cores, no training. World-position hashing matches our world-space SSBO patterns + the brick atlas's world parameterization. **Ship the cache architecture + prove the path-termination win, then optionally swap the backend to NRC behind the same query interface (the P9 forked-backend discipline).**
+
+**How.** In-house raw-Vulkan compute — a spatial hash + atomic accumulation into an SSBO + a ray primitive (G-BRICKRT). No RT cores / neural HW / extensions. Broadest HW support of any cache option. Lowered by F-GRAPH.
+
+**Expected win.** Path-termination cache without neural HW; GPU-timestamp.
+
+**Dependency/order.** Needs G-RGI/G-PT (or P15) + a world-space hash-grid SSBO + a visibility ray + **P6-S** + **X-REF**.
+
+**Gate.** Render-side; temporal accumulation → non-deterministic frame-to-frame (acceptable, outside the physics gate); far MORE determinism-amenable than NRC (no fp16 tensor math, no online weights); cache-population field probes via `sdf_field.hlsli`; not a physics source; golden at the X-REF bar; validation clean; GPU-timestamp.
+
+**Effort.** M. **Conflicts.** None. **Class: RENDER (cache) + FIELD-CONSUMER (visibility rays).**
+
+### PHASE G-SOIT — Stochastic / hashed-alpha OIT — needs P6-S + a denoiser
+
+Single-pass sort-free transparency (stochastic sub-pixel coverage ∝ alpha, or hashed threshold). **Our pipeline is already stochastic (ReSTIR + TAA + denoiser), so the noise is absorbed by the existing temporal accumulation** — exactly its best regime, and the OIT-sort cost vanishes. Fixed memory, no lists, no sort. **M. RENDER** (coverage decision, no field). Needs P6-S + a denoiser + **X-REF** (the hashed-alpha hash is a pure reproducible function; the stochastic dither is RNG-seeded, resolved by TAA).
+
+### PHASE G-NRC — Neural Radiance Cache (online-trained MLP) — CAPABILITY-GATED
+
+**What.** A small MLP (6×64 ReLU, frequency/one-blob encoding) caching outgoing radiance over (position, direction, normal, roughness, albedo); trained ONLINE each frame from self-generated path traces; most paths terminate early into the cache. Position queries are SDF world points — **the field gives a cheap exact spatial parameterization (distance + normal) ideal as MLP input features.**
+
+**Why our path needs it.** Path-termination for G-PT/P15 GI. The single most frontier "no one ships it in-house" capstone — **and the only family that cannot satisfy a bit/tolerance golden even with seed control (Open-Q9: it needs its own statistical bar via X-REF).**
+
+**How.** Raw Vulkan WITHOUT CUDA/vendor SDK: a fully-fused trainable MLP via `VK_KHR_cooperative_matrix` (RTX 3060 Ampere supports it from compute; VkNRC proves it, reimplemented). **MANDATORY fallback: a subgroup-shared-memory GEMM (slower but correct), or G-SHARC (the non-neural twin) behind the same query interface.** HW dependency = coopmat, NOT RT cores.
+
+**Expected win.** Shorter paths via a learned cache; GPU-timestamp + variance vs X-REF.
+
+**Dependency/order.** Needs G-PT/P15 + `VK_KHR_cooperative_matrix` (a new DeviceCaps query + raw-FFI enable) + a compute train+inference pipeline + **X-REF** (statistical bar). **G-SHARC ships first as the proof rung behind the same interface.**
+
+**Gate. STRICTLY render-consumer-side, FIREWALLED from `boyko_sdf_math`.** MLP train/inference is fp16/fp32 tensor math with FMA-contraction + nondeterministic online weights — categorically incompatible with the FROZEN field eval; it may NEVER be the field's source of truth (physics keeps the analytic CPU field). Its INPUTS (position/normal) come via `sdf_field.hlsli` unchanged; its OUTPUT (cached radiance) is render-only. Golden = the **X-REF** statistical bar (bit-equality impossible, not required); capability-gate verified (a non-coopmat device takes the subgroup-GEMM fallback or G-SHARC); validation clean; GPU-timestamp.
+
+**Effort.** XL. **Capability:** `VK_KHR_cooperative_matrix` — **fallback: subgroup-GEMM / G-SHARC.** **Conflicts.** Float-nondeterministic (firewalled). **Class: RENDER (firewalled) + FIELD-CONSUMER (inputs only).**
+
+### PHASE G-NDENOISE — Neural denoiser (kernel-predicting CNN) — CAPABILITY-GATED
+
+A small CNN over noisy radiance + G-buffer outputting the denoised image (or per-pixel kernels), unifying denoise + temporal stabilize. **A higher-quality replacement for G-SVGF/REBLUR behind the same denoiser interface, with G-SVGF as the mandatory fallback (Open-Q9).** Trained offline on our own path-traced references (X-REF — we own the renderer, we generate ground truth). **XL. Capability: `VK_KHR_cooperative_matrix` — fallback: G-SVGF.** fp16 conv, nondeterministic, firewalled from the field; X-REF statistical bar. **Class: RENDER (firewalled; no field).** Needs G-SVGF baseline + coopmat infra + X-REF.
+
+### PHASE G-NUP — Neural super-resolution — CAPABILITY-GATED
+
+A temporal CNN upscaler (radiance demodulation, FuseSR) generalizing C-TSR/P5. **The shader-only FSR-class variant IS C-TSR (already shipping, deterministic-friendly, the low-risk first step + mandatory fallback); the CNN is the optional coopmat upgrade.** **L. Capability: `VK_KHR_cooperative_matrix` (CNN) — fallback: C-TSR.** **Class: RENDER (no field).** Needs P5+P1+P6-S(+X-REF for the CNN variant).
+
+### PHASE G-NMAT — Neural material / BTF compression — CAPABILITY-GATED
+
+A per-material MLP decoder over BC6 latent feature textures (BC6 = fixed-function HW decode; the MLP via coopmat). Feeds the P1 material G-buffer; SDF surfaces gain rich appearance without per-edit texture blowup. **L. Capability: `VK_KHR_cooperative_matrix` / `VK_NV_cooperative_vector` — m3: `VK_NV_cooperative_vector` is acceptable as a RAW Vulkan extension (raw-FFI, NOT a forbidden vendor SDK like DLSS/OptiX), with the KHR/subgroup/scalar fallback mandatory.** fp16 inference, firewalled (materials are appearance, never geometry — never enter `sdf`/`smin`/`combine`); X-REF bar. **Class: RENDER (firewalled; no field).** Needs P1 + coopmat/coop-vector infra + BC texture support.
+
+---
+
+# TRACK F — RENDER-GRAPH / RHI SUBSTRATE EXTENSIONS
+
+> F-GRAPH (the render-graph) and X-SPD/X-REF are defined above as near-spine/shared infra. The remaining F-* are RHI substrate extensions landing as needed; all capability/threshold-gated, all with in-house fallbacks.
+
+- **F-SYNC2 — `VK_KHR_synchronization2`** upgrade of the barrier emission (F-GRAPH emits sync2 when available). **S. Capability** (core 1.3, RTX 3060 guaranteed) + sync1 fallback.
+- **F-BIND — descriptor-indexing / bindless** (F-GRAPH-aware). **M. Capability** (core 1.2) + bound-sets fallback.
+- **F-FP16 — `shaderFloat16` G-buffer/intermediate** packing (octahedral normal pairs, Open-Q3). **S. Capability** + FP32 fallback. **RENDER (never the field — FP16 is forbidden in the FROZEN eval).**
+- **F-PUSH — push-descriptor / push-constant** fast bind. **S. Capability** + descriptor-set fallback.
+- **F-MEM / F-ALIAS — sub-allocator + transient aliasing** (extends `suballocator.rs`; F-GRAPH computes the aliasing windows). **M/M. Threshold.** Feeds §VRAM Budget.
+- **F-PSO — parallel PSO warm** via the Chase-Lev threadpool (`boyko_threadpool/`); bounds the §PSO permutation compile cost. **S.**
+
+All F-* are RENDER/CPU-substrate (no field). F-GRAPH is their organizing center.
+
+---
+
+## 2. Cross-cutting principles applied (extended for v2)
+
+- **0%-gate.** Every render pass runs only under the `boyko_render` schedule; a world not using it pays nothing; the named CPU hot loops (`row_ptr`, `for_each_chunk`, query iter, `find_ready`) stay byte-identical. GPU type-keyed routing stays behind const/flag gates (CG-D5).
+- **Determinism boundary (§0a, the load-bearing constraint).** `sdf`/`smin`/`smax`/`combine`/normal + `golden_composite_pixel` are **byte-identical across the entire plan** — the CPU/GPU golden source of truth physics reuses. No fast-math, no reordered FMA, no rsqrt/rcp, no FP16. The single gateway is `sdf_field.hlsli` (the P4 invariant). Classes: B is mostly FIELD-CONSUMER except B7 (FROZEN-preserving — distance-exact); A is FIELD-CONSUMER (offset probes) except screen-space A8/A13 (RENDER); C/D/E/S/G are RENDER (or FIELD-CONSUMER for visibility/in-brick solves); P9/P10/P12 are FORKED-BACKEND (render fetch forked; analytic FROZEN preserved as physics). Render-history non-determinism (TAA/temporal) is OUTSIDE the physics gate. **Traps: B9's 4-tap normal is FROZEN-adjacent (keep 6-tap frozen, fork a render 4-tap — Open-Q2); E-DENS-B's fast-math applies ONLY to the extinction remap of the already-evaluated scalar, never the probe (C3).**
+- **Measurement oracle.** The GPU half cannot be Miri'd: golden-buffer diffs (bit-exact where possible; **owner-approved documented tolerance where not — every relaxing phase carries a per-phase tolerance gate, NOT critic-discretion**) + Vulkan validation + sync-validation wired to FAIL tests, on RTX 3060. **Stochastic phases (G-RDI/RGI/PT, G-REGIR, G-SOIT, G-NRC/NDENOISE, A14) use the X-REF protocol: a fixed-seed + relaxed-converged-reference + a named metric/threshold + an owner statistical-bar sign-off — never bit-equality (C4).** CPU-side lowering/build/octree (F-GRAPH build, B7 bound build) stays criterion + Miri where unsafe.
+- **In-house / native / raw-Vulkan.** No ash/wgpu; all new verbs raw-FFI behind the RHI trait (static dispatch, monomorphized, no `dyn` in the hot record path). The seam-with-default-`#[cold]`-body pattern is the template. Every open-source reference (FSR2, XeGTAO, NRD, VkNRC, FidelityFX-SPD, meshoptimizer) is **REIMPLEMENTED**, never linked. **`VK_NV_cooperative_vector` is an acceptable RAW extension (raw-FFI), not a forbidden vendor SDK (m3).**
+- **Render-graph as the barrier authority (C1).** Once F-GRAPH lands, every Track-E/S/G/A-GI/D pass declares its resource uses and is lowered by F-GRAPH (barriers + layouts + transient aliasing + the reserved queue dimension). The two pre-F-GRAPH codepaths (hand-FFI `swapchain.rs` batched by P3a; ECS-edge `lower_barriers` narrowed by P3b) are subsumed.
+- **Shared SPD primitive (M4).** X-SPD is the single parametric mip-reduce; P11/S-HIZ/S-GTAO/E-BLOOM/E-MBLUR/G-REBLUR consume it. The odd-dimension boundary fix ships once.
+- **Capability gating discipline.** Every HW-dependent phase (C-VRS, D-MESH/SWRAST/VIS, S-VSM, F-BIND/FP16/PUSH/SYNC2, P14, G-NRC/NDENOISE/NUP/NMAT) carries a `DeviceCaps` query at device-create + a named in-house fallback (full-rate / compute-raster / int64-atomic / CSM / FP32 / G-BRICKRT / G-SHARC / subgroup-GEMM / C-TSR / scalar). `shaderBufferInt64Atomics` (D-VIS/SWRAST/S-VSM) + descriptor-indexing/sync2 (F-BIND/SYNC2) are core 1.2/1.3 → guaranteed on the RTX 3060 oracle, still gated for portability.
+- **Differential SIMD/subgroup discipline (P7/X-SPD/D-CULL).** Subgroup paths ship with a scalar reference + a differential golden (the CPU-D3 house template applied to GPU), capability-gated, never hard-coding wave width.
+
+## 2a. VRAM budget accounting (RTX 3060 Laptop, 6 GB) — completeness gap (d)
+
+Large allocations must sum against 6 GB. The plan tracks a running budget; F-MEM/F-ALIAS transient aliasing (computed by F-GRAPH) reclaims non-overlapping lifetimes.
+
+| Consumer | Approx footprint @1080p | Notes |
+|---|---|---|
+| G-buffer (depth+normal+albedo+material+motion) | ~40 MB | R8 normal now; F-FP16 octahedral halves normal/material |
+| History (P6 color + B5 hit-`t` + reservoir ping-pong) | ~50–120 MB | double-buffered; bounded, NOT blanket-doubled |
+| Froxel/fog 3D textures (E-FOG 160×90×64 ×RGBA16 ×2) | ~30 MB | + E-CLOUD noise (one-time startup) |
+| Brick atlas (P9, R16, `maxImageDimension3D`-sized) | **budgeted, NOT hardcoded** | the largest single consumer; capped by the atlas pool size; R16 (O2) |
+| Clipmap cascades (P10) | shares the atlas pool | cascades share one atlas pool, not N copies |
+| VSM pages (S-VSM 16k² sparse) | sparse — only touched pages | the whole point of S-VSM is sparsity |
+| Reservoir SSBOs (G-RDI/RGI/PT) | ~30–80 MB | bounded, configurable cells×reservoirs |
+| OIT node pool (E-LLOIT) | preallocated fixed pool | clamped (no overflow UB) |
+| BVH (P12) | per-cascade, dirty-region | refit not rebuild |
+
+**Discipline:** the brick atlas + reservoirs + history are the three pressure points; each is **configurable + budgeted at setup** (no hot-path growth — the "preallocate at setup" principle). F-ALIAS aliases transient passes (e.g. bloom mips, TileMax) into shared backing. **A budget-overflow at setup is a hard error (a documented cap), never a silent OOM.** The owner sets the per-consumer caps (Open-Q13).
+
+## 2b. PSO / shader-permutation discipline — completeness gap (c)
+
+60+ passes × feature/material variants is a PSO-compile-time + I-cache liability. Discipline:
+- **Permutation budget per pass** — each pass declares its variant axes (e.g. subgroup-vs-scalar, camera-mode, light-count tier); the product is bounded and documented. Specialization constants (not `#ifdef` explosion) where the driver supports them.
+- **F-PSO parallel warm** — compile permutations on the Chase-Lev threadpool at load (preallocate at setup, never in the frame loop).
+- **I-cache (principle 3)** — hot marcher/lighting loops stay compact; `#[cold]`/`#[inline(never)]`-equivalent (rare-branch hoisting) for error/fallback paths; no blind always-inline. The branchy fallbacks (capability-off paths) are out-of-line.
+- **Variant collapse** — capability fallbacks (scalar/FP32/full-rate) are separate pipelines, not branches in the hot variant, so the common path stays branch-lean.
+
+## 2c. G-buffer bandwidth accounting — completeness gap (d) / Open-Q5 tension
+
+~30 consumers read the P1 G-buffer (depth/normal/albedo/material/motion) at 1080p×60. Read-bandwidth across the deferred-lighting + Track-S AO/shadow + Track-E fog/post + Track-G denoiser/reservoir consumers is the deferred renderer's classic wall.
+- **Mitigations:** F-FP16 octahedral normal + packed material (halves two channels, Open-Q3); the **D-VIS 64-bit visibility buffer** (Open-Q5) eliminates the MRT attribute fetch entirely for visibility (mesh+SDF `atomicMin` → no albedo/material/normal MRT bandwidth for the occlusion pass) — quantify D-VIS vs MRT once the cluster pipeline lands; tile-local G-buffer caching (consumers in the same tile share one fetch via shared memory).
+- **The tension (Open-Q5):** P1 MRT first (it unblocks every track immediately); D-VIS when Track-D lands (it overlaps P1's depth seam — resolve the scope overlap then). The bandwidth sum is the deciding metric: if the ~30-consumer read-bandwidth measured post-P7 exceeds budget, D-VIS is promoted from optional to required.
+
+---
 
 ## 3. "Production-ready when" — spine exit criteria
 
-The renderer is production-scale (the spine complete) when ALL hold:
-1. **P0**: the marcher renders at 1080p with a perspective camera, fed by an ECS `SdfEdit` query; the rung-8..11 ortho goldens stay bit-exact; sparse/dense GPU-timestamp baselines recorded.
-2. **P1**: the on-screen frame is a real MRT-image deferred renderer (depth/normal/albedo/material images, multi-resource descriptors); the per-frame depth→buffer copy is gone; golden-equal to the packed-buffer reference.
-3. **P3a**: per-frame `cmd_pipeline_barrier` call count measurably reduced (command-stream inspection); sync-validation clean.
-4. **P4**: tile-cull shows a measured fine-march step reduction on the P0 sparse scene; conservative (golden-equal, no holes).
-5. **P5**: half-res + depth-aware upscale at an owner-approved relaxed tolerance; the field eval + `golden_composite_pixel` byte-identical (physics contract intact); ~4× ray reduction on SDF-surface pixels measured.
-6. **P6**: TAA-stable on static + camera-pan + disocclusion goldens; the semaphore-present seam (`submit_windowed`) is built and sync-validation clean; the field eval byte-identical.
-7. **Throughout**: validation + sync-validation clean on RTX 3060; 0%-gate honored (CPU hot loops byte-identical); every `unsafe` carries `// SAFETY:`.
+The renderer is production-scale (the spine complete) when ALL hold: **P0** (1080p perspective, ECS-fed, ortho goldens bit-exact, sparse/dense baselines), **P1** (real MRT-image deferred renderer, depth-copy gone, golden-equal), **P3a** (per-frame barrier call count reduced, sync-validation clean), **F-GRAPH** (the 4-pass frame's barriers are graph-derived, sync-validation clean, the queue dimension reserved), **P4** (measured fine-march step reduction on the sparse scene, conservative), **P5** (half-res+upscale at an owner-approved relaxed tolerance, field eval byte-identical, ~4× ray reduction), **P6** (TAA-stable on static+pan+disocclusion, the P6-S semaphore-present seam built + sync-validation clean, field eval byte-identical), and throughout (validation+sync-validation clean, 0%-gate, every `unsafe` carries `// SAFETY:`).
 
-P7/P8/P3b may land in parallel after P1 (not spine-blocking). P9–P15 are gated and NOT part of the production-ready spine bar — they activate only when their threshold/capability/profile gate fires.
+**v2 addition — "SDF-native lighting MVP when":** **B1** (over-relaxation, ω-gated) + **B5** (mesh-depth + previous-frame seeding) + **B7** (Lipschitz pruning, distance-exact) + **A1** (cone-trace soft shadows) + **A2** (5-tap SDF AO) + **C-AA** (analytic edge AA) all ship on the software marcher behind `sdf_field.hlsli`, golden-tested (additive flags; ortho goldens bit-exact; field eval byte-identical) — delivering contact-hardening soft shadows + crevice AO + smooth edges + materially faster marching on the **analytic** field, **with zero new Vulkan features and no HW-RT**. This is the owner-demanded SDF-native bar, reachable immediately after the spine and BEFORE any commodity post or neural work.
 
-## 4. Open questions for the owner (decisions, not critic-discretion)
+P3b/P7/P8/D-FWD/X-SPD may land in parallel after P1. The SDF-native fast-track (B + A1/A2/C-AA) lands right after the spine. Track-C reconstruction/Track-E post/Track-S classic shadows land after P6. Everything else (P9–P15, A-GI capstones, Track D, Track G, the F-* substrate extensions) is threshold/capability/profile-gated and NOT part of the production-ready spine bar.
 
-1. **Per-phase relaxed-tolerance / baseline-reset approval (C3).** P5 (half-res+upscale), P6 (TAA), P9 (brick R16 quantization), P12 (JFA) each leave bit-exact on the *render* side. RESEARCH-FAST-MATH lists "accept a one-time determinism-baseline reset" as an explicit architect→owner question. **Requesting owner sign-off on each per-phase tolerance bar** (the field eval + physics-reuse source stay bit-exact regardless — only the render consumer relaxes). Default proposal: ±4/255 SSIM/PSNR bar for P5/P6, documented per-format quantization bar for P9/P12.
-2. **SDF motion vectors for a GPU-mutating field (now scoped to P12, not P6).** For the static analytic field + jittered camera (P6), the SDF hit's motion vector is the deterministic camera reprojection of the hit world position — sufficient. A GPU-mutating field (P12) needs per-hit velocity; that work is folded into P12. **Confirm this split is acceptable** (P6 ships static-field motion vectors; per-hit velocity waits for the mutating-field threshold).
-3. **G-buffer normal format (O3): R8G8B8A8 now, R16G16 octahedral later.** Octahedral is better precision/bandwidth but is itself a **golden-baseline reset** (changes the deferred-light golden's bit pattern — same class as Q1, not a free swap). **Proposal:** start R8 (matches the existing prototype golden), switch to octahedral once P6's TAA exposes normal-precision banding, under a one-time owner-approved baseline reset.
-4. **Tile/half-res buffer placement (P4/P5).** Standalone SSBOs (clean, uses P1's vocabulary) vs new regions in the composite buffer (matches the rung-10 const-assert pattern). **Proposal:** standalone SSBOs post-P1 — the packed-buffer pattern was the single-binding workaround P1 retires.
+---
+
+## 4. Priority table
+
+| Tier | Phases | Gate | Class |
+|---|---|---|---|
+| **Spine** | P0, P1, P3a, **F-GRAPH**, P4, P5, P6 | none (must ship) | RENDER + FIELD-CONSUMER (P4) |
+| **SDF-native fast-track** | B1, B5, B7, A1, A2, C-AA | none (the owner-named MVP) | FIELD-CONSUMER / FROZEN-preserving (B7) |
+| **Parallel-after-P1** | P3b, P7, P8, D-FWD, X-SPD | none | RENDER |
+| **Reconstruction / classic shadow-AO** | C-TSR, C-CTSS/VRS/CBR, S-HIZ, S-GTAO, S-CONTACT, S-CSM | none / capability (VRS) | RENDER |
+| **Volumetrics / OIT / particles** | E-FOG, E-SDFVOL, E-DENS-A/B, E-GOD(a), E-WBOIT/MBOIT/LLOIT, E-PART | threshold (E-DENS/SDFVOL/PART at scale) | RENDER + FIELD-CONSUMER |
+| **Polish-tier post** | E-BLOOM, E-DOF, E-MBLUR, E-EXP, E-TONE, E-LUT, E-GOD(b) | none (low priority) | RENDER |
+| **SDF-native GI** | A8, A13, A7, A10, A12 | threshold (brick ones) | RENDER / FIELD-CONSUMER |
+| **SDF-accel capstones** | P9 (re-eval vs B7), P10, G-BRICKRT, P11, P12 | threshold | FORKED-BACKEND / FIELD-CONSUMER |
+| **GPU-driven geometry** | D-VIS, D-SWRAST, D-MESH, D-CULL, D-COMPACT, S-VSM | threshold / capability | RENDER |
+| **Frontier GI / neural** | X-REF, G-SVGF/REBLUR/FIRE, G-RDI/RGI/REGIR/PT, G-SHARC, G-SOIT, G-NRC/NDENOISE/NUP/NMAT | X-REF statistical bar / capability | RENDER (firewalled) + FIELD-CONSUMER |
+| **HW-RT (accelerator)** | P14, P15 | capability / confirmed | FIELD-CONSUMER |
+| **Profile-gated** | P13 | profile (under-occupancy) | CPU/sync |
+| **RHI substrate** | F-SYNC2/BIND/FP16/PUSH/MEM/ALIAS/PSO | capability / threshold | RENDER / CPU |
+
+---
+
+## 5. Open questions for the owner (decisions, not critic-discretion)
+
+1. **Per-phase relaxed-tolerance / baseline-reset approval (C3, extended).** P5/P6/P9/P12 (v1) + C-TSR/C-AA/C-CTSS/C-VRS/C-CBR + all of Track-E post/fog/OIT + S-GTAO/contact + E-SDFVOL/E-DENS-B (consumer accumulation only) + the stochastic Track-G phases each leave bit-exact on the *render* side. **Owner sign-off on each per-phase tolerance bar.** Default: ±4/255 SSIM/PSNR for reconstruction/post; documented per-format quantization for P9/P12/F-FP16; the **X-REF** fixed-seed + relaxed-converged-reference (NOT bit-equality) for all stochastic phases.
+2. **B9 render-only normal fork.** The 4-tap tetrahedron normal halves normal cost but changes the bit pattern → FROZEN-adjacent. **Proposal:** keep the 6-tap central-difference normal as the frozen physics-shared normal (byte-identical), fork a render-only 4-tap behind a separate function, under a one-time owner-approved render baseline reset. **Confirm.**
+3. **B7 vs P9 ordering.** B7 (distance-EXACT, analytic, ZERO render↔physics divergence) attacks the same `O(edits)` wall as P9 (lossy R16). **Proposal:** build B7 before committing to P9; treat P9 as the world-scale/discrete-field tier B7 cannot reach. **Confirm the priority.**
+4. **C-TSR supersedes simple P5/P6.** **Proposal:** ship P5/P6 simple as the forked proof; upgrade to C-TSR (full FSR2/TSR). **Confirm the two-stage approach** vs jumping straight to C-TSR. (What proves C-TSR "good enough"? — the native-res ground truth at matched frames is the upper bar.)
+5. **D-VIS supersedes the P1 depth-copy + the §15.1 seam.** A 64-bit visibility buffer gives correct mesh↔SDF occlusion + no MRT bandwidth. **Proposal:** P1 MRT first (it unblocks every track immediately); D-VIS when Track-D lands (resolve the depth-seam overlap then — promoted to required if the §2c bandwidth sum exceeds budget). **Decision needed.**
+6. **Software-first GI vs HW-RT (the core v2 verdict).** **Proposal:** the software/SDF-native GI path (Track A-GI + Track G over G-BRICKRT) is the PRIMARY GI; HW-RT (P14/P15) is the optional accelerator for incoherent rays on capable devices, NOT the GI prerequisite. **Confirm this inversion of the v1 priority.**
+7. **SDF motion vectors for a GPU-mutating field (scoped to P12).** Static analytic field + jittered camera (P6) → deterministic camera reprojection, sufficient. A GPU-mutating field (P12) needs per-hit velocity, folded into P12. **Confirm the split.**
+8. **G-buffer normal format (O3).** R8G8B8A8 now, R16G16 octahedral later (a golden-baseline reset, pairs with F-FP16). **Proposal:** start R8; switch to octahedral once P6/C-TSR exposes normal-precision banding, under a one-time owner-approved baseline reset.
+9. **Coopmat neural tier.** G-NRC/NDENOISE/NMAT need `VK_KHR_cooperative_matrix` (RTX 3060 supports) + are float-nondeterministic (firewalled). **Proposal:** ship the non-neural twins first (G-SHARC for NRC, G-SVGF for NDENOISE, C-TSR for NUP) behind a shared query interface; the neural backends are an opt-in capability-gated upgrade with the non-neural path mandatory. **Confirm the neural tier is in-scope at all** (it is the only family that cannot satisfy a bit/tolerance golden even with seed control — it needs its own statistical bar via X-REF).
+10. **Mesh material G-buffer scope (C2 / Open-Q11).** The mesh side is currently flat-color ("reading the mesh's real rasterized albedo is a deferred refinement", `sdf_depth_composite.hlsl:92-95`). **Does the mesh ever get a real material G-buffer, or stay flat-color?** This gates S-CSM, S-GTAO mesh occlusion, E-PART rendering, and D-FWD's transparent-material substrate. **Decision needed.**
+11. **VRAM caps (§2a / Open-Q13).** The brick atlas + reservoir SSBOs + history are the three 6 GB pressure points. **Owner sets the per-consumer caps** (a setup-time hard error on overflow, never silent OOM).
+12. **Render↔physics geometric-divergence bound (M6).** The P9 brick render-field (R16) and the analytic physics-field disagree by a bounded world-space error; a character's feet may visibly float/sink vs where physics says the ground is. **Document the max world-space divergence (R16 quantization × brick extent) and sign off that the visual/physics mismatch is acceptable** (B7 has zero such divergence — another reason to evaluate B7 first, Open-Q3).
 
 ---
 
 ## Files this plan is grounded in (absolute paths)
 
-- `D:\claude\BoykoEngine\docs\RESEARCH-GRAPHICS-OPT.md` — priority/sequence source
+- `D:\claude\BoykoEngine\docs\OPTIMIZATION-PLAN-RENDER.md` — v1 spine (P0–P15) + gates + the two-codepath barrier distinction (this file, extended)
+- `D:\claude\BoykoEngine\docs\RESEARCH-GRAPHICS-OPT.md` — v1 priority/sequence source
 - `D:\claude\BoykoEngine\docs\PERF-DIRECTIONS.md` — RT-*/GPU-D*/MEM-D* catalog + 0%-gate + honesty discipline
-- `D:\claude\BoykoEngine\docs\RESEARCH-FAST-MATH.md` — the SDF-golden determinism boundary (the physics-reuse contract)
+- `D:\claude\BoykoEngine\docs\RESEARCH-FAST-MATH.md` — the SDF-golden determinism boundary (the physics-reuse contract; `:7-19,41-44`)
 - `D:\claude\BoykoEngine\crates\boyko_rhi\src\{api,encoder,enums,queue}.rs` — RHI seam: AS absent (`api.rs:46-67`), `dispatch_indirect` stub (`encoder.rs:269`), `bind_storage_buffer` (`encoder.rs:38`), no-semaphore `submit` (`queue.rs:22,31`), `BufferUsage::INDIRECT` (`enums.rs:37`)
 - `D:\claude\BoykoEngine\crates\boyko_rhi_vulkan\src\{swapchain,device,rhi_impl}.rs` — on-screen hand-FFI barriers (`swapchain.rs:844,914,1169,1201,1337,1370,1432,1708,1831,1864,1926`), `record_scene:1123`/`sync_depth:2071`/`record_present_sampled:1661`, single queue (`device.rs:1634,1750`), COMBINED_IMAGE_SAMPLER-only `create_bind_group` (`rhi_impl.rs:717`)
-- `D:\claude\BoykoEngine\crates\boyko_rhi_vulkan\shaders\{sdf_depth_composite,gbuffer.fs,deferred_light.fs}.hlsl` — the 64×64/16-edit/`MAX_IT=128` fixture marcher (`sdf_depth_composite.hlsl:86-87,104,117`) + the determinism-frozen field math (`:8-12,47-51`) + the MRT/deferred prototypes
-- `D:\claude\BoykoEngine\crates\boyko_render\src\barrier.rs` — the **distinct** ECS-edge `lower_barriers` pass (`:1-15,58-76,196-233`); P3b adds constants + narrows here (NOT the on-screen path)
-
----
-
-All four critic blockers (C1, C2, C3 + the W-series and O-series) are resolved with code-verified grounding; the determinism boundary and the two-codepath barrier distinction are now load-bearing in the plan structure. Ready to save as `docs/OPTIMIZATION-PLAN-RENDER.md` and execute.
+- `D:\claude\BoykoEngine\crates\boyko_rhi_vulkan\src\suballocator.rs` — the free-list sub-allocator F-MEM/F-ALIAS extend
+- `D:\claude\BoykoEngine\crates\boyko_rhi_vulkan\shaders\{sdf_depth_composite,gbuffer.fs,deferred_light.fs}.hlsl` — the 64×64/16-edit/`MAX_IT=128` fixture marcher (`sdf_depth_composite.hlsl:86-87,104,117`) + the determinism-frozen field math (`:8-12,47-51`) — the future `sdf_field.hlsli` source + the MRT/deferred prototypes; **mesh flat-color deferral (`:92-95`, Open-Q10)**
+- `D:\claude\BoykoEngine\crates\boyko_render\src\barrier.rs` — the **distinct** ECS-edge `lower_barriers` pass (`:1-15,58-76,196-233`); P3b adds constants + narrows here; **F-GRAPH generalizes its edge→barrier algorithm to images + reserves the queue dimension**
+- `D:\claude\BoykoEngine\crates\boyko_threadpool\` — the Chase-Lev work-stealing pool F-PSO uses for parallel PSO warm
