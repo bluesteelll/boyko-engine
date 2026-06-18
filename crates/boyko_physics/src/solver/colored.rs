@@ -95,6 +95,98 @@ use crate::manifold::{Manifold, SDF_SENTINEL};
 use crate::math::{Mat3, Vec3};
 use crate::resources::{BodyState, ConstraintGraph, PhysicsConfig, SolverScratch};
 
+/// Loads one SoA `[f32; 8]` column into a `__m256` (the O7 cohort kernel's scalar
+/// vector load helper). Unaligned — any alignment.
+///
+/// # Safety
+///
+/// AVX2-gated (the `cfg` + `target_feature`); the load reads 8 in-bounds `f32`.
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[target_feature(enable = "avx2")]
+fn load1(col: &[f32; 8]) -> core::arch::x86_64::__m256 {
+    use core::arch::x86_64::_mm256_loadu_ps;
+    // SAFETY: `col` is an in-bounds `[f32; 8]`; the unaligned load is valid.
+    unsafe { _mm256_loadu_ps(col.as_ptr()) }
+}
+
+/// Stores a `__m256` into one SoA `[f32; 8]` column (the O7 cohort kernel's scalar
+/// vector store helper, used to stage impulse/velocity for the guarded write-back).
+///
+/// # Safety
+///
+/// AVX2-gated; the store writes 8 in-bounds `f32`.
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[target_feature(enable = "avx2")]
+fn store1(out: &mut [f32; 8], reg: core::arch::x86_64::__m256) {
+    use core::arch::x86_64::_mm256_storeu_ps;
+    // SAFETY: `out` is an in-bounds `[f32; 8]`; the unaligned store is valid.
+    unsafe { _mm256_storeu_ps(out.as_mut_ptr(), reg) }
+}
+
+/// Loads 3 SoA `[f32; 8]` columns into a `[__m256; 3]` register triple (the O7
+/// cohort kernel's vector load helper). Unaligned loads — any alignment.
+///
+/// # Safety
+///
+/// AVX2-gated (the `cfg` + `target_feature`); each load reads 8 in-bounds `f32`.
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[target_feature(enable = "avx2")]
+fn load3(cols: &[[f32; 8]; 3]) -> [core::arch::x86_64::__m256; 3] {
+    use core::arch::x86_64::_mm256_loadu_ps;
+    // SAFETY: each `cols[c]` is an in-bounds `[f32; 8]`; unaligned loads are valid.
+    unsafe {
+        [
+            _mm256_loadu_ps(cols[0].as_ptr()),
+            _mm256_loadu_ps(cols[1].as_ptr()),
+            _mm256_loadu_ps(cols[2].as_ptr()),
+        ]
+    }
+}
+
+/// Loads 9 SoA `[f32; 8]` columns (a row-major `Mat3` per lane) into a
+/// `[__m256; 9]` register array (the O7 cohort kernel's tensor load helper).
+///
+/// # Safety
+///
+/// AVX2-gated; each load reads 8 in-bounds `f32`.
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[target_feature(enable = "avx2")]
+fn load9(cols: &[[f32; 8]; 9]) -> [core::arch::x86_64::__m256; 9] {
+    use core::arch::x86_64::_mm256_loadu_ps;
+    // SAFETY: each `cols[c]` is an in-bounds `[f32; 8]`; unaligned loads are valid.
+    unsafe {
+        [
+            _mm256_loadu_ps(cols[0].as_ptr()),
+            _mm256_loadu_ps(cols[1].as_ptr()),
+            _mm256_loadu_ps(cols[2].as_ptr()),
+            _mm256_loadu_ps(cols[3].as_ptr()),
+            _mm256_loadu_ps(cols[4].as_ptr()),
+            _mm256_loadu_ps(cols[5].as_ptr()),
+            _mm256_loadu_ps(cols[6].as_ptr()),
+            _mm256_loadu_ps(cols[7].as_ptr()),
+            _mm256_loadu_ps(cols[8].as_ptr()),
+        ]
+    }
+}
+
+/// Stores a `[__m256; 3]` register triple into 3 SoA `[f32; 8]` columns (the O7
+/// cohort kernel's vector store helper, used at the scatter-once exit).
+///
+/// # Safety
+///
+/// AVX2-gated; each store writes 8 in-bounds `f32`.
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[target_feature(enable = "avx2")]
+fn store3(regs: &[core::arch::x86_64::__m256; 3], out: &mut [[f32; 8]; 3]) {
+    use core::arch::x86_64::_mm256_storeu_ps;
+    // SAFETY: each `out[c]` is an in-bounds `[f32; 8]`; unaligned stores are valid.
+    unsafe {
+        _mm256_storeu_ps(out[0].as_mut_ptr(), regs[0]);
+        _mm256_storeu_ps(out[1].as_mut_ptr(), regs[1]);
+        _mm256_storeu_ps(out[2].as_mut_ptr(), regs[2]);
+    }
+}
+
 /// The min-work threshold (W1): a color whose total slot count is BELOW this is
 /// solved INLINE on the calling thread (the single-threaded [`solve_color`] over
 /// the whole color span) instead of dispatched through a [`ThreadPool`]
@@ -154,6 +246,16 @@ const MIN_PARALLEL_SLOTS_PER_COLOR: u32 = 256;
 /// order) holds for ANY chunking. So tuning this const changes only WHERE work runs,
 /// never the bits. `4` is a starting point the bench sweeps (3..=8 typical).
 const CHUNKS_PER_WORKER: usize = 6;
+
+/// O7 SIMD cohort width: the number of body-disjoint manifold-GROUPS packed into
+/// one AVX2 batch (one group per lane = 8 lanes per `__m256`).
+///
+/// Under the parallel + SIMD path the chunk boundaries are SNAPPED to multiples of
+/// this (Decision 7) so every dispatched task solves only full-width cohorts (the
+/// last cohort of a COLOR may be partial — the masked kernel handles it). This is a
+/// fixed SIMD-width constant, NOT a perf knob: it MUST equal the AVX2 lane count
+/// the [`solve_color_avx2`](ColoredSoftStepSolver::solve_color_avx2) kernel uses.
+const COHORT: usize = 8;
 
 /// `Send` + `Sync`-marked raw pointers to the SoA columns + per-body buffer
 /// dispatched into the O6 per-color worker closures.
@@ -772,6 +874,79 @@ impl ColoredSoftStepSolver {
     /// this to AVX2 over the same columns).
     ///
     /// [O7]: https://github.com/bluesteelll/boyko-engine
+    ///
+    /// O7 dispatch fork over a contiguous group range — the SINGLE site that
+    /// chooses the scalar oracle vs the AVX2 cohort kernel.
+    ///
+    /// - `simd == false` → [`solve_color`](Self::solve_color) over `span` (the
+    ///   color/chunk's `[start, end)` slot range): BYTE-IDENTICAL to the committed
+    ///   O6 path (the 0%-gate). `g_lo`/`g_hi` are ignored.
+    /// - `simd == true` on an AVX2 build → [`solve_color_avx2`](Self::solve_color_avx2)
+    ///   over the manifold-GROUP range `[g_lo, g_hi)` as 8-group cohorts: the
+    ///   bit-exact WIDTH-ONLY path (Decision 2).
+    /// - `simd == true` on a non-AVX2 build / Miri → falls back to
+    ///   [`solve_color`](Self::solve_color) over `span` (one fallback = the oracle;
+    ///   bit-identical, simpler — the design's "choose the latter").
+    ///
+    /// `span` and `[g_lo, g_hi)` MUST describe the same contiguous slot region
+    /// (`span == (group_start[g_lo], group_start[g_hi])`) so the two paths solve the
+    /// identical work — the caller (a whole color, or a parallel cohort-run chunk)
+    /// upholds this.
+    #[allow(clippy::too_many_arguments)]
+    #[inline]
+    fn solve_color_dispatch(
+        cols: &mut ContactColumns,
+        bodies_eff: &mut [BodyEffective],
+        span: (usize, usize),
+        g_lo: usize,
+        g_hi: usize,
+        bias_rate: f32,
+        mass_coeff: f32,
+        impulse_coeff: f32,
+        bias_active: bool,
+        simd: bool,
+    ) {
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        {
+            if simd {
+                // SAFETY: the `target_feature = "avx2"` compile-time gate guarantees
+                //   the executing CPU supports every AVX2 intrinsic the kernel uses
+                //   (a non-AVX2 host cannot reach this branch — the `cfg` excludes it).
+                //   The kernel documents its per-load bounds + disjoint-write invariants.
+                unsafe {
+                    Self::solve_color_avx2(
+                        cols,
+                        bodies_eff,
+                        span,
+                        g_lo,
+                        g_hi,
+                        bias_rate,
+                        mass_coeff,
+                        impulse_coeff,
+                        bias_active,
+                    );
+                }
+                return;
+            }
+        }
+        // Flag off / non-AVX2 build / Miri: the byte-identical scalar oracle over
+        // the whole span (the 0%-gate AND the SIMD non-AVX2 fallback).
+        #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
+        let _ = (g_lo, g_hi, simd);
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        let _ = (g_lo, g_hi);
+        Self::solve_color(
+            cols,
+            bodies_eff,
+            span,
+            bias_rate,
+            mass_coeff,
+            impulse_coeff,
+            bias_active,
+        );
+    }
+
+    /// [O7]: https://github.com/bluesteelll/boyko-engine
     #[allow(clippy::too_many_arguments)]
     fn solve_color(
         cols: &mut ContactColumns,
@@ -905,6 +1080,512 @@ impl ColoredSoftStepSolver {
         }
     }
 
+    /// AVX2 8-wide colored solve (Phase O7) — lane = one whole manifold-GROUP, a
+    /// batch (cohort) = 8 body-disjoint groups of one color, BIT-IDENTICAL to
+    /// [`solve_color`](Self::solve_color) over the same `[g_lo, g_hi)` groups.
+    ///
+    /// Solves the manifold-GROUP range `[g_lo, g_hi)` (groups indexing
+    /// `cols.group_start`) as cohorts of up to 8 groups. Per cohort: GATHER-ONCE
+    /// the 8 groups' two body pairs (inv_mass, inv_inertia, velocity) into stack
+    /// SoA; a RANK loop `r = 0..max_width` where each ACTIVE lane (`width > r`)
+    /// solves its group's point-`r` normal→friction with the A/B velocity
+    /// REGISTER-CARRIED across ranks (so point `p` sees `p-1`'s update — the
+    /// intra-group Gauss-Seidel coupling) and the per-rank impulse slots
+    /// read-modify-written; SCATTER-ONCE the 16 body rows at cohort exit.
+    ///
+    /// # Bit-exactness (Decision 2, the PINNED invariant)
+    ///
+    /// Each lane runs its group's EXACT scalar `solve_color` op sequence (the same
+    /// IEEE round-to-nearest `mul`/`add`/`sub`/`div`/`sqrt`, NO FMA, NO
+    /// `rsqrt`/`rcp` — the `simd::*_x8` helpers mirror `contact.rs`/`math.rs`
+    /// op-for-op). The 8 lanes write DISJOINT body rows + DISJOINT impulse slots
+    /// (the O4 coloring invariant: distinct groups of a color touch disjoint
+    /// dynamic bodies), so the parallel 8-lane evaluation equals solving the 8
+    /// groups sequentially, which equals the scalar single-threaded colored solve,
+    /// bit-for-bit. Masked exhausted / partial-cohort / static lanes compute
+    /// garbage that every `blendv` / guarded scalar scatter discards (FP exceptions
+    /// masked ⇒ Inf/NaN are inert DATA, never traps — Decision 3/4).
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee AVX2 is available (the `cfg` + `target_feature`
+    /// gate — a non-AVX2 host cannot link this path). `[g_lo, g_hi)` must be a valid
+    /// contiguous group range (`g_hi <= cols.group_start.len() - 1`) whose groups'
+    /// dynamic bodies are pairwise-disjoint (the O4 coloring invariant — upheld
+    /// because the range is a color's groups, or a cohort-run within one color). All
+    /// gathered body indices are `< bodies_eff.len()` (the build invariant).
+    ///
+    /// `span == [chunk_start, chunk_end)` is the worker's OWN slot span — the union
+    /// of the `[g_lo, g_hi)` groups' contiguous slot runs (`chunk_start ==
+    /// group_start[g_lo]`, `chunk_end == group_start[g_hi]`). C1 (the cross-worker
+    /// READ-race fix): every column slot the kernel READS or WRITES MUST lie within
+    /// `span`. The per-rank gather is therefore clamped to the LANE'S OWN GROUP last
+    /// slot (never the global `cols.len()`), and an ABSENT lane (partial trailing
+    /// cohort) gathers `chunk_start` — both provably in `span`. A foreign slot
+    /// (`>= chunk_end`) belongs to the next concurrently-running worker, which writes
+    /// it every rank, so reading it would be an unsynchronized cross-thread access
+    /// (a data race) even though the value is `blendv`-discarded. Every gathered slot
+    /// staying in `span` removes that race. The per-cohort scatter writes only own
+    /// in-span slots (`g_base + r` for active lanes) and ≤ 16 distinct dynamic body
+    /// rows; statics/sentinels are never written (the movable-blend guard), so a
+    /// SHARED static row across cohorts is read-only.
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    #[target_feature(enable = "avx2")]
+    #[allow(clippy::too_many_arguments)]
+    fn solve_color_avx2(
+        cols: &mut ContactColumns,
+        bodies_eff: &mut [BodyEffective],
+        span: (usize, usize),
+        g_lo: usize,
+        g_hi: usize,
+        bias_rate: f32,
+        mass_coeff: f32,
+        impulse_coeff: f32,
+        bias_active: bool,
+    ) {
+        use core::arch::x86_64::{
+            _mm256_add_ps, _mm256_and_ps, _mm256_blendv_ps, _mm256_cmp_ps, _mm256_div_ps,
+            _mm256_max_ps, _mm256_mul_ps, _mm256_set1_ps, _mm256_sqrt_ps, _mm256_sub_ps,
+            _CMP_GT_OQ, _CMP_NEQ_OQ,
+        };
+        use crate::solver::simd::{apply_impulse_blend_x8, dot8, effective_mass_x8, pointvel_x8};
+
+        const W: usize = 8;
+        if g_lo >= g_hi {
+            return;
+        }
+        debug_assert!(g_hi < cols.group_start.len(), "group range within the CSR");
+        // C1: the worker's OWN slot span `[chunk_start, chunk_end)` — every gathered
+        // slot must lie inside it (no foreign / cross-worker read). It is the union of
+        // the `[g_lo, g_hi)` groups' contiguous slot runs.
+        let (chunk_start, chunk_end) = span;
+        debug_assert!(
+            chunk_start == cols.group_start[g_lo] as usize
+                && chunk_end == cols.group_start[g_hi] as usize
+                && chunk_start < chunk_end,
+            "invariant: span is exactly the [g_lo, g_hi) groups' slot run"
+        );
+
+        // ── Per-cohort stack scratch (zero heap; capacity-retained per call) ────
+        // Per-lane (group) metadata, gathered once at cohort entry.
+        let mut g_base = [0usize; W]; // slot base of each lane's group
+        let mut g_last = [0usize; W]; // last slot the lane may gather (its own group's)
+        let mut g_width = [0u32; W]; // each lane's group width (0 = absent lane)
+        let mut ia = [0usize; W]; // body-A row index
+        let mut ib = [0usize; W]; // body-B row index (== ia for a sentinel)
+        let mut sent = [false; W]; // b_is_sentinel per lane
+        // Per-lane A/B body-state gather (constants within the call): inv_mass,
+        // inv_inertia (9), linear (3), angular (3).
+        let mut a_invm_s = [0.0f32; W];
+        let mut b_invm_s = [0.0f32; W];
+        let mut a_ii_s = [[0.0f32; W]; 9];
+        let mut b_ii_s = [[0.0f32; W]; 9];
+        let mut a_lin_s = [[0.0f32; W]; 3];
+        let mut a_ang_s = [[0.0f32; W]; 3];
+        let mut b_lin_s = [[0.0f32; W]; 3];
+        let mut b_ang_s = [[0.0f32; W]; 3];
+        // a_static[lane] = 1.0 if A is NOT movable (inv_mass == 0). Always-dynamic
+        // by manifold convention, but kept for scalar-exactness (the scalar guards
+        // both sides — Decision 6 / residual-risk 4).
+        let mut a_static_s = [0.0f32; W];
+        // Per-rank geometry + impulse staging (re-gathered each rank, clamped).
+        let mut ra_s = [[0.0f32; W]; 3];
+        let mut rb_s = [[0.0f32; W]; 3];
+        let mut n_s = [[0.0f32; W]; 3];
+        let mut t1_s = [[0.0f32; W]; 3];
+        let mut t2_s = [[0.0f32; W]; 3];
+        let mut sep_s = [0.0f32; W];
+        let mut fric_s = [0.0f32; W];
+        let mut ni_s = [0.0f32; W];
+        let mut ti1_s = [0.0f32; W];
+        let mut ti2_s = [0.0f32; W];
+        let mut active_s = [0.0f32; W];
+        // Velocity scatter staging (written only at cohort exit).
+        let mut out_a_lin = [[0.0f32; W]; 3];
+        let mut out_a_ang = [[0.0f32; W]; 3];
+        let mut out_b_lin = [[0.0f32; W]; 3];
+        let mut out_b_ang = [[0.0f32; W]; 3];
+
+        // Whole-call constants (bias_active hoisted OUTSIDE the loops for I-cache
+        // compactness — it is loop-invariant, exactly as the scalar `if`).
+        // SAFETY (target_feature): every intrinsic below is AVX2; this fn is
+        //   `#[target_feature(enable = "avx2")]`-gated and only reached on an AVX2
+        //   build (the `cfg` gate), so the CPU supports them.
+        let zero = _mm256_set1_ps(0.0);
+        let neg_one = _mm256_set1_ps(-1.0);
+        let bias_rate_v = _mm256_set1_ps(bias_rate);
+        let neg_max_bias = _mm256_set1_ps(-MAX_BIAS_VELOCITY);
+        let mass_coeff_v = _mm256_set1_ps(mass_coeff);
+        let impulse_coeff_v = _mm256_set1_ps(impulse_coeff);
+
+        let mut cohort_lo = g_lo;
+        while cohort_lo < g_hi {
+            let cohort_hi = (cohort_lo + W).min(g_hi);
+            let nlanes = cohort_hi - cohort_lo;
+            debug_assert!((1..=W).contains(&nlanes), "cohort has 1..=8 lanes");
+
+            // ── Gather-ONCE (cohort entry) ──────────────────────────────────────
+            let mut max_width = 0u32;
+            for lane in 0..W {
+                if lane < nlanes {
+                    let g = cohort_lo + lane;
+                    let base = cols.group_start[g] as usize;
+                    let width = cols.group_start[g + 1] as usize - base;
+                    debug_assert!(width >= 1, "every built group has >= 1 point");
+                    let s = base; // first slot of the group (the body pair is shared)
+                    let lane_ia = cols.body_a[s] as usize;
+                    let b_sent = cols.b_is_sentinel[s];
+                    let lane_ib = cols.body_b[s] as usize;
+                    // O3: B is only indexed when it is a real body (a sentinel reads
+                    // IMMOVABLE_AT_REST, never `bodies_eff[lane_ib]`), mirroring the
+                    // scalar oracle's conditional index — so only assert it then.
+                    debug_assert!(lane_ia < bodies_eff.len());
+                    debug_assert!(b_sent || lane_ib < bodies_eff.len());
+
+                    g_base[lane] = base;
+                    // Own-group last slot: the lane re-reads its own (in-span) slot
+                    // once exhausted (rank r >= width), never a foreign worker's.
+                    g_last[lane] = base + width - 1;
+                    g_width[lane] = width as u32;
+                    ia[lane] = lane_ia;
+                    ib[lane] = lane_ib;
+                    sent[lane] = b_sent;
+                    max_width = max_width.max(width as u32);
+
+                    // Body A (always the dynamic side by convention).
+                    let ba = &bodies_eff[lane_ia];
+                    a_invm_s[lane] = ba.inv_mass;
+                    a_static_s[lane] = if is_dynamic_row(ba.inv_mass) { 0.0 } else { 1.0 };
+                    Self::stage_body_state(ba, lane, &mut a_ii_s, &mut a_lin_s, &mut a_ang_s);
+
+                    // Body B: a sentinel gathers IMMOVABLE_AT_REST (inv_mass 0,
+                    // inv_inertia ZERO, velocity ZERO) so its lane is a value no-op
+                    // and is never scattered (the sentinel guard at exit).
+                    let bb = if b_sent { &IMMOVABLE_AT_REST } else { &bodies_eff[lane_ib] };
+                    b_invm_s[lane] = bb.inv_mass;
+                    Self::stage_body_state(bb, lane, &mut b_ii_s, &mut b_lin_s, &mut b_ang_s);
+                } else {
+                    // Absent lane (partial trailing cohort): permanently inactive
+                    // (`width == 0` ⇒ `active = false` at every rank), every write
+                    // discarded. Zero its gathered state so the masked arithmetic is
+                    // harmless (no NaN propagation into a live lane — lanes are
+                    // independent regardless).
+                    //
+                    // C1: an absent lane (no group in this cohort) gathers a
+                    // SELF-OWNED, in-span slot — `chunk_start`, the worker's first
+                    // slot — at every rank (`s = min(chunk_start + r, chunk_start) ==
+                    // chunk_start`), NEVER slot 0 / the global len. Its value is
+                    // discarded (width 0 ⇒ inactive at every rank), but the READ must
+                    // stay inside `[chunk_start, chunk_end)` so it cannot touch a
+                    // concurrently-running worker's slots.
+                    g_base[lane] = chunk_start;
+                    g_last[lane] = chunk_start;
+                    g_width[lane] = 0;
+                    ia[lane] = 0;
+                    ib[lane] = 0;
+                    sent[lane] = true; // never-scatter the absent B lane
+                    a_invm_s[lane] = 0.0;
+                    b_invm_s[lane] = 0.0;
+                    a_static_s[lane] = 1.0;
+                    for c in 0..9 {
+                        a_ii_s[c][lane] = 0.0;
+                        b_ii_s[c][lane] = 0.0;
+                    }
+                    for c in 0..3 {
+                        a_lin_s[c][lane] = 0.0;
+                        a_ang_s[c][lane] = 0.0;
+                        b_lin_s[c][lane] = 0.0;
+                        b_ang_s[c][lane] = 0.0;
+                    }
+                }
+            }
+
+            // Load the gather-once constants into registers (each `load1`/`load3`/
+            // `load9` reads 8 `f32` from an in-bounds `[f32; 8]` stack buffer).
+            let a_invm = load1(&a_invm_s);
+            let b_invm = load1(&b_invm_s);
+            let a_static = load1(&a_static_s);
+            let a_ii = load9(&a_ii_s);
+            let b_ii = load9(&b_ii_s);
+            // not-sentinel mask as 1.0/0.0 → register (1.0 where B is a REAL body).
+            let mut not_sent_f = [0.0f32; W];
+            for lane in 0..W {
+                not_sent_f[lane] = if sent[lane] { 0.0 } else { 1.0 };
+            }
+            let not_sent = _mm256_cmp_ps::<_CMP_NEQ_OQ>(load1(&not_sent_f), zero);
+
+            // A/B velocity: REGISTER-CARRIED from here across the whole rank loop.
+            let mut a_lin = load3(&a_lin_s);
+            let mut a_ang = load3(&a_ang_s);
+            let mut b_lin = load3(&b_lin_s);
+            let mut b_ang = load3(&b_ang_s);
+
+            // movable masks (constant within the cohort): A movable = inv_mass != 0;
+            // B movable = !sentinel AND inv_mass != 0 (Decision 6 guard table).
+            let a_movable = _mm256_cmp_ps::<_CMP_NEQ_OQ>(a_static, _mm256_set1_ps(1.0));
+            let b_neq0 = _mm256_cmp_ps::<_CMP_NEQ_OQ>(b_invm, zero);
+            let b_movable = _mm256_and_ps(not_sent, b_neq0);
+
+            // ── Rank loop (register-carry velocity) ─────────────────────────────
+            for r in 0..max_width as usize {
+                // active = (g_width[lane] > r) as 1.0/0.0 → mask.
+                for lane in 0..W {
+                    active_s[lane] = if (g_width[lane] as usize) > r { 1.0 } else { 0.0 };
+                }
+                let active = _mm256_cmp_ps::<_CMP_NEQ_OQ>(load1(&active_s), zero);
+
+                // Per-rank gather (C1 — own-span bound): slot `s = min(g_base + r,
+                // g_last)` where `g_last` is the LANE'S OWN GROUP last slot (an absent
+                // lane's `g_base == g_last == chunk_start`). An ACTIVE lane (rank r <
+                // width) reads its exact rank-r slot; an EXHAUSTED lane re-reads its
+                // own group's last (in-span) slot; an ABSENT lane reads `chunk_start`.
+                // Every `s` therefore lies in `[chunk_start, chunk_end)` — never a
+                // concurrently-running worker's slot (the cross-worker READ-race fix).
+                for lane in 0..W {
+                    let s = (g_base[lane] + r).min(g_last[lane]);
+                    debug_assert!(
+                        (chunk_start..chunk_end).contains(&s),
+                        "C1: every gathered slot must lie within the worker's own span \
+                         [{chunk_start}, {chunk_end}); got s={s} (lane={lane}, rank={r})"
+                    );
+                    ra_s[0][lane] = cols.ra_x[s];
+                    ra_s[1][lane] = cols.ra_y[s];
+                    ra_s[2][lane] = cols.ra_z[s];
+                    rb_s[0][lane] = cols.rb_x[s];
+                    rb_s[1][lane] = cols.rb_y[s];
+                    rb_s[2][lane] = cols.rb_z[s];
+                    n_s[0][lane] = cols.normal_x[s];
+                    n_s[1][lane] = cols.normal_y[s];
+                    n_s[2][lane] = cols.normal_z[s];
+                    t1_s[0][lane] = cols.tangent1_x[s];
+                    t1_s[1][lane] = cols.tangent1_y[s];
+                    t1_s[2][lane] = cols.tangent1_z[s];
+                    t2_s[0][lane] = cols.tangent2_x[s];
+                    t2_s[1][lane] = cols.tangent2_y[s];
+                    t2_s[2][lane] = cols.tangent2_z[s];
+                    sep_s[lane] = cols.separation[s];
+                    fric_s[lane] = cols.friction[s];
+                    ni_s[lane] = cols.normal_impulse[s];
+                    ti1_s[lane] = cols.tangent1_impulse[s];
+                    ti2_s[lane] = cols.tangent2_impulse[s];
+                }
+                let ra = load3(&ra_s);
+                let rb = load3(&rb_s);
+                let n = load3(&n_s);
+                let t1 = load3(&t1_s);
+                let t2 = load3(&t2_s);
+                let sep = load1(&sep_s);
+                let fric = load1(&fric_s);
+                let mut ni = load1(&ni_s);
+                let mut ti1 = load1(&ti1_s);
+                let mut ti2 = load1(&ti2_s);
+
+                // Velocity-write masks (active AND movable), per Decision 6.
+                let mask_a = _mm256_and_ps(active, a_movable);
+                let mask_b = _mm256_and_ps(active, b_movable);
+
+                // ── NORMAL solve (op-for-op vs the scalar, NO FMA) ──────────────
+                let m_eff = effective_mass_x8(n, ra, rb, a_invm, a_ii, b_invm, b_ii);
+                // vn = (pointvel(B,rb) - pointvel(A,ra)) · n.
+                let pvb = pointvel_x8(b_lin, b_ang, rb);
+                let pva = pointvel_x8(a_lin, a_ang, ra);
+                let dvn = [
+                    _mm256_sub_ps(pvb[0], pva[0]),
+                    _mm256_sub_ps(pvb[1], pva[1]),
+                    _mm256_sub_ps(pvb[2], pva[2]),
+                ];
+                let vn = dot8(dvn[0], dvn[1], dvn[2], n[0], n[1], n[2]);
+                let lambda_n = ni;
+                // bias_active hoisted: the whole d_lambda branch is a Rust `if`, not
+                // a per-lane blend (matches the scalar loop-invariant `if`).
+                let d_lambda = if bias_active {
+                    // bias = max(bias_rate * sep, -MAX_BIAS_VELOCITY).
+                    let bias = _mm256_max_ps(_mm256_mul_ps(bias_rate_v, sep), neg_max_bias);
+                    // -massCoeff*mEff*(vn+bias) - impulseCoeff*lambda_n.
+                    let vnb = _mm256_add_ps(vn, bias);
+                    let neg_mc_meff = _mm256_mul_ps(_mm256_mul_ps(neg_one, mass_coeff_v), m_eff);
+                    _mm256_sub_ps(
+                        _mm256_mul_ps(neg_mc_meff, vnb),
+                        _mm256_mul_ps(impulse_coeff_v, lambda_n),
+                    )
+                } else {
+                    // -mEff * vn.
+                    _mm256_mul_ps(_mm256_mul_ps(neg_one, m_eff), vn)
+                };
+                // new_lambda = max(lambda_n + d_lambda, 0); applied = new - old.
+                let new_lambda = _mm256_max_ps(_mm256_add_ps(lambda_n, d_lambda), zero);
+                let applied_n = _mm256_sub_ps(new_lambda, lambda_n);
+                ni = new_lambda;
+                // impulse = n * applied_n (vec3).
+                let imp_n = [
+                    _mm256_mul_ps(n[0], applied_n),
+                    _mm256_mul_ps(n[1], applied_n),
+                    _mm256_mul_ps(n[2], applied_n),
+                ];
+                // A gets -impulse, B gets +impulse (gated active AND movable).
+                let neg_imp_n = [
+                    _mm256_mul_ps(imp_n[0], neg_one),
+                    _mm256_mul_ps(imp_n[1], neg_one),
+                    _mm256_mul_ps(imp_n[2], neg_one),
+                ];
+                let (na_lin, na_ang) =
+                    apply_impulse_blend_x8(a_lin, a_ang, ra, neg_imp_n, a_invm, a_ii, mask_a);
+                a_lin = na_lin;
+                a_ang = na_ang;
+                let (nb_lin, nb_ang) =
+                    apply_impulse_blend_x8(b_lin, b_ang, rb, imp_n, b_invm, b_ii, mask_b);
+                b_lin = nb_lin;
+                b_ang = nb_ang;
+
+                // ── FRICTION solve (2-DOF coupled cone, Decision 3) ─────────────
+                // max_friction = friction * ni (the JUST-written new normal impulse).
+                let max_fric = _mm256_mul_ps(fric, ni);
+                let m_eff_t1 = effective_mass_x8(t1, ra, rb, a_invm, a_ii, b_invm, b_ii);
+                let m_eff_t2 = effective_mass_x8(t2, ra, rb, a_invm, a_ii, b_invm, b_ii);
+                // RE-READ post-normal velocity (the scalar re-reads after the normal
+                // apply too).
+                let pvb2 = pointvel_x8(b_lin, b_ang, rb);
+                let pva2 = pointvel_x8(a_lin, a_ang, ra);
+                let dvt = [
+                    _mm256_sub_ps(pvb2[0], pva2[0]),
+                    _mm256_sub_ps(pvb2[1], pva2[1]),
+                    _mm256_sub_ps(pvb2[2], pva2[2]),
+                ];
+                let vt1 = dot8(dvt[0], dvt[1], dvt[2], t1[0], t1[1], t1[2]);
+                let vt2 = dot8(dvt[0], dvt[1], dvt[2], t2[0], t2[1], t2[2]);
+                // new_t = ti - m_eff_t * vt (separate mul then sub — matches scalar).
+                let mut new_t1 = _mm256_sub_ps(ti1, _mm256_mul_ps(m_eff_t1, vt1));
+                let mut new_t2 = _mm256_sub_ps(ti2, _mm256_mul_ps(m_eff_t2, vt2));
+                // The cone: len_sq = t1*t1 + t2*t2 (left-to-right); two-predicate mask
+                // (len_sq > mf²) AND (len_sq > 0); UNCONDITIONAL scale = mf/sqrt(len_sq);
+                // blendv-discard on unclamped lanes (Inf/NaN bit-irrelevant there).
+                let len_sq = _mm256_add_ps(
+                    _mm256_mul_ps(new_t1, new_t1),
+                    _mm256_mul_ps(new_t2, new_t2),
+                );
+                let mf2 = _mm256_mul_ps(max_fric, max_fric);
+                let cone = _mm256_and_ps(
+                    _mm256_cmp_ps::<_CMP_GT_OQ>(len_sq, mf2),
+                    _mm256_cmp_ps::<_CMP_GT_OQ>(len_sq, zero),
+                );
+                let scale = _mm256_div_ps(max_fric, _mm256_sqrt_ps(len_sq));
+                new_t1 = _mm256_blendv_ps(new_t1, _mm256_mul_ps(new_t1, scale), cone);
+                new_t2 = _mm256_blendv_ps(new_t2, _mm256_mul_ps(new_t2, scale), cone);
+                let applied_t1 = _mm256_sub_ps(new_t1, ti1);
+                let applied_t2 = _mm256_sub_ps(new_t2, ti2);
+                ti1 = new_t1;
+                ti2 = new_t2;
+                // impulse = t1*applied_t1 + t2*applied_t2 (vec3; per-component
+                // separate mul then add — matches `t1 * a1 + t2 * a2`).
+                let imp_t = [
+                    _mm256_add_ps(
+                        _mm256_mul_ps(t1[0], applied_t1),
+                        _mm256_mul_ps(t2[0], applied_t2),
+                    ),
+                    _mm256_add_ps(
+                        _mm256_mul_ps(t1[1], applied_t1),
+                        _mm256_mul_ps(t2[1], applied_t2),
+                    ),
+                    _mm256_add_ps(
+                        _mm256_mul_ps(t1[2], applied_t1),
+                        _mm256_mul_ps(t2[2], applied_t2),
+                    ),
+                ];
+                let neg_imp_t = [
+                    _mm256_mul_ps(imp_t[0], neg_one),
+                    _mm256_mul_ps(imp_t[1], neg_one),
+                    _mm256_mul_ps(imp_t[2], neg_one),
+                ];
+                let (na_lin2, na_ang2) =
+                    apply_impulse_blend_x8(a_lin, a_ang, ra, neg_imp_t, a_invm, a_ii, mask_a);
+                a_lin = na_lin2;
+                a_ang = na_ang2;
+                let (nb_lin2, nb_ang2) =
+                    apply_impulse_blend_x8(b_lin, b_ang, rb, imp_t, b_invm, b_ii, mask_b);
+                b_lin = nb_lin2;
+                b_ang = nb_ang2;
+
+                // ── Per-rank impulse SCATTER (gated by `active` only — matches the
+                //    scalar UNCONDITIONAL impulse write, the velocity-vs-impulse
+                //    asymmetry of Decision 6: impulse slots written for every LIVE
+                //    point regardless of body movability). Via stack staging + a
+                //    guarded scalar write so an inactive/clamped lane is a true
+                //    NO-OP (no slot collision — Decision 4 resolution). ──────────
+                store1(&mut ni_s, ni);
+                store1(&mut ti1_s, ti1);
+                store1(&mut ti2_s, ti2);
+                for lane in 0..nlanes {
+                    if (g_width[lane] as usize) > r {
+                        let s = g_base[lane] + r; // active ⇒ exact in-range slot
+                        cols.normal_impulse[s] = ni_s[lane];
+                        cols.tangent1_impulse[s] = ti1_s[lane];
+                        cols.tangent2_impulse[s] = ti2_s[lane];
+                    }
+                }
+            }
+
+            // ── Scatter-ONCE (cohort exit): A/B velocity registers → body rows ───
+            // SAFETY: stores write 8 `f32` into in-bounds `[f32; 8]` stack buffers.
+            store3(&a_lin, &mut out_a_lin);
+            store3(&a_ang, &mut out_a_ang);
+            store3(&b_lin, &mut out_b_lin);
+            store3(&b_ang, &mut out_b_ang);
+            // A is written for every lane (always-dynamic by convention; a STATIC-A
+            // lane was masked off in `mask_a`, so its registers held the unchanged
+            // gathered velocity — writing it back is a no-op of the gathered value,
+            // but to be safe against a shared static A across cohorts we skip it).
+            // SOUNDNESS: writing only MOVABLE rows keeps cohorts disjoint (a shared
+            // static row is never written, matching the scalar `*_movable` guard).
+            for lane in 0..nlanes {
+                if a_static_s[lane] == 0.0 {
+                    let b = &mut bodies_eff[ia[lane]];
+                    b.linear_velocity = Vec3::new(out_a_lin[0][lane], out_a_lin[1][lane], out_a_lin[2][lane]);
+                    b.angular_velocity = Vec3::new(out_a_ang[0][lane], out_a_ang[1][lane], out_a_ang[2][lane]);
+                }
+                // B written only when it is a real, movable dynamic body (not a
+                // sentinel, not a static) — the disjoint-write soundness anchor.
+                if !sent[lane] && is_dynamic_row(b_invm_s[lane]) {
+                    let b = &mut bodies_eff[ib[lane]];
+                    b.linear_velocity = Vec3::new(out_b_lin[0][lane], out_b_lin[1][lane], out_b_lin[2][lane]);
+                    b.angular_velocity = Vec3::new(out_b_ang[0][lane], out_b_ang[1][lane], out_b_ang[2][lane]);
+                }
+            }
+
+            cohort_lo = cohort_hi;
+        }
+    }
+
+    /// Stages one body's `inv_inertia` (9 SoA columns), `linear_velocity` (3), and
+    /// `angular_velocity` (3) into the cohort gather buffers at `lane` (the
+    /// scalar-side gather half of [`solve_color_avx2`]). Pure scalar marshaling, no
+    /// intrinsics.
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    #[inline]
+    fn stage_body_state(
+        b: &BodyEffective,
+        lane: usize,
+        ii: &mut [[f32; 8]; 9],
+        lin: &mut [[f32; 8]; 3],
+        ang: &mut [[f32; 8]; 3],
+    ) {
+        let m = &b.inv_inertia.rows;
+        ii[0][lane] = m[0].x;
+        ii[1][lane] = m[0].y;
+        ii[2][lane] = m[0].z;
+        ii[3][lane] = m[1].x;
+        ii[4][lane] = m[1].y;
+        ii[5][lane] = m[1].z;
+        ii[6][lane] = m[2].x;
+        ii[7][lane] = m[2].y;
+        ii[8][lane] = m[2].z;
+        lin[0][lane] = b.linear_velocity.x;
+        lin[1][lane] = b.linear_velocity.y;
+        lin[2][lane] = b.linear_velocity.z;
+        ang[0][lane] = b.angular_velocity.x;
+        ang[1][lane] = b.angular_velocity.y;
+        ang[2][lane] = b.angular_velocity.z;
+    }
+
     /// One full Gauss-Seidel sweep ACROSS colors: solves colors `0..n_colors`
     /// SEQUENTIALLY (a barrier between colors — cross-color order is fixed).
     ///
@@ -926,6 +1607,7 @@ impl ColoredSoftStepSolver {
     /// as O5 does), and distinct groups in a color touch DISJOINT dynamic bodies, so
     /// the parallel result is bit-identical to the sequential one for any worker
     /// count (see [`solve_color_parallel`](Self::solve_color_parallel)).
+    #[allow(clippy::too_many_arguments)]
     fn solve_all_colors(
         cols: &mut ContactColumns,
         bodies_eff: &mut [BodyEffective],
@@ -934,6 +1616,7 @@ impl ColoredSoftStepSolver {
         impulse_coeff: f32,
         bias_active: bool,
         parallel: bool,
+        simd: bool,
     ) {
         let n_colors = cols.color_offsets.len().saturating_sub(1);
         for c in 0..n_colors {
@@ -946,18 +1629,29 @@ impl ColoredSoftStepSolver {
                     mass_coeff,
                     impulse_coeff,
                     bias_active,
+                    simd,
                 );
             } else {
                 let start = cols.color_offsets[c] as usize;
                 let end = cols.color_offsets[c + 1] as usize;
-                Self::solve_color(
+                // O7 dispatch fork (the 0%-gate): `simd == false` runs the byte-
+                // identical scalar oracle `solve_color`; `simd == true` runs the
+                // AVX2 cohort kernel over the color's manifold-GROUP range (the
+                // bit-exact width-only path). The non-parallel SIMD path solves the
+                // WHOLE color's groups as cohorts on the calling thread.
+                let g_lo = cols.color_group_start[c] as usize;
+                let g_hi = cols.color_group_start[c + 1] as usize;
+                Self::solve_color_dispatch(
                     cols,
                     bodies_eff,
                     (start, end),
+                    g_lo,
+                    g_hi,
                     bias_rate,
                     mass_coeff,
                     impulse_coeff,
                     bias_active,
+                    simd,
                 );
             }
         }
@@ -1018,6 +1712,18 @@ impl ColoredSoftStepSolver {
     /// identical to the single-threaded colored solve for ANY worker count. Any
     /// deviation from bit-identity is a bug (a shared write, a non-disjoint chunk, a
     /// missing barrier, or a float-reduction-order dependence).
+    ///
+    /// # O7 cohort-snapping (Decision 7)
+    ///
+    /// When `simd`, the chunk boundaries are SNAPPED to cohort (8-group) boundaries
+    /// so every task solves only full-width-8 cohorts (the last cohort of the COLOR
+    /// may be partial — handled by the masked kernel; the last cohort of a TASK is
+    /// always whole). Each task routes through
+    /// [`solve_color_dispatch`](Self::solve_color_dispatch) with its chunk's group
+    /// range, so a worker runs [`solve_color_avx2`](Self::solve_color_avx2) over its
+    /// cohorts. Cohorts within a color are body-disjoint (each is 8 disjoint groups;
+    /// distinct cohorts are pairwise disjoint), so cross-worker disjointness — and
+    /// thus the {1, N}×{simd} bit-identity — is unchanged from O6.
     #[allow(clippy::too_many_arguments)]
     fn solve_color_parallel(
         cols: &mut ContactColumns,
@@ -1027,6 +1733,7 @@ impl ColoredSoftStepSolver {
         mass_coeff: f32,
         impulse_coeff: f32,
         bias_active: bool,
+        simd: bool,
     ) {
         // The color's manifold-group range (indices into `group_start`).
         let g_lo = cols.color_group_start[color] as usize;
@@ -1054,14 +1761,21 @@ impl ColoredSoftStepSolver {
         // per-dispatch cost class) instead of one-per-tiny-color.
         let color_slots = (span.1 - span.0) as u32;
         if color_slots < MIN_PARALLEL_SLOTS_PER_COLOR {
-            Self::solve_color(
+            // Inline on the calling thread, routed through the O7 dispatch fork:
+            // `simd` runs `solve_color_avx2` over the whole color's groups (as
+            // cohorts), else the scalar oracle over the span — both bit-identical to
+            // the parallel split.
+            Self::solve_color_dispatch(
                 cols,
                 bodies_eff,
                 span,
+                g_lo,
+                g_hi,
                 bias_rate,
                 mass_coeff,
                 impulse_coeff,
                 bias_active,
+                simd,
             );
             return;
         }
@@ -1130,14 +1844,26 @@ impl ColoredSoftStepSolver {
                     // chunk boundary always falls on a `group_start` index, so every
                     // point of one manifold-group stays on ONE lane (C1). Always
                     // includes ≥ 1 group (the first), so it makes progress.
-                    let mut chunk_g_hi = chunk_g_lo + 1;
+                    //
+                    // O7 cohort-snapping (Decision 7): when `simd`, advance in steps
+                    // of `COHORT` (8 groups) and clamp at `g_hi`, so every chunk
+                    // boundary falls on a cohort boundary (a multiple-of-8 group
+                    // offset from `g_lo`) — every task thus solves only full-width-8
+                    // cohorts (plus the color's single possibly-partial trailing
+                    // cohort, on whichever task owns the last group). The step keeps
+                    // the chunk a contiguous group range = a contiguous slot span,
+                    // the shape `solve_color_avx2` consumes. Bit-identity is
+                    // chunk-shape-independent (cohorts are pairwise body-disjoint), so
+                    // snapping is a pure perf knob.
+                    let step = if simd { COHORT } else { 1 };
+                    let mut chunk_g_hi = (chunk_g_lo + step).min(g_hi);
                     while chunk_g_hi < g_hi {
                         // SAFETY: `chunk_g_hi <= g_hi`, a valid `group_start` index.
                         let so_far = unsafe { ptrs.group_start_at(chunk_g_hi) } - chunk_start;
                         if so_far >= target {
                             break;
                         }
-                        chunk_g_hi += 1;
+                        chunk_g_hi = (chunk_g_hi + step).min(g_hi);
                     }
 
                     // The chunk's contiguous slot span ends at its last group's last
@@ -1149,7 +1875,13 @@ impl ColoredSoftStepSolver {
                         chunk_start >= span.0 && chunk_end <= span.1 && chunk_start < chunk_end,
                         "invariant: a group-chunk's slot span is non-empty and lies within the color span"
                     );
+                    debug_assert!(
+                        !simd || (chunk_g_lo - g_lo).is_multiple_of(COHORT),
+                        "invariant: a SIMD chunk's lo boundary is a cohort (8-group) boundary"
+                    );
 
+                    let task_g_lo = chunk_g_lo;
+                    let task_g_hi = chunk_g_hi;
                     scope.spawn(move || {
                         // SAFETY (cross-worker disjoint aliasing — the O6 soundness
                         //   argument):
@@ -1185,16 +1917,27 @@ impl ColoredSoftStepSolver {
                         //   Therefore the per-chunk `&mut ContactColumns` /
                         //   `&mut [BodyEffective]` reborrowed below alias only
                         //   provably-disjoint written elements across workers — no UB.
+                        //   O7: when `simd`, the worker runs `solve_color_avx2` over
+                        //   its cohort range `[task_g_lo, task_g_hi)` — a cohort packs
+                        //   8 disjoint groups, so distinct workers' cohort-runs still
+                        //   touch DISJOINT dynamic rows + DISJOINT impulse slots
+                        //   (union of disjoint groups), and statics/sentinels remain
+                        //   never-written (the kernel's movable-blend guard). The
+                        //   disjointness argument is thus UNCHANGED from the scalar
+                        //   chunk dispatch above.
                         let cols_mut = unsafe { ptrs.columns() };
                         let bodies_mut = unsafe { ptrs.bodies() };
-                        Self::solve_color(
+                        Self::solve_color_dispatch(
                             cols_mut,
                             bodies_mut,
                             (chunk_start, chunk_end),
+                            task_g_lo,
+                            task_g_hi,
                             bias_rate,
                             mass_coeff,
                             impulse_coeff,
                             bias_active,
+                            simd,
                         );
                     });
 
@@ -1203,18 +1946,22 @@ impl ColoredSoftStepSolver {
             });
         });
 
-        // PAR-fallback: no pool attached → run the color single-threaded so the
-        // result is BYTE-IDENTICAL to O5 (the same `solve_color` over the whole
-        // color span).
+        // PAR-fallback: no pool attached → run the color single-threaded, routed
+        // through the O7 dispatch fork so `simd` still widens (over the whole
+        // color's groups as cohorts) and `!simd` is BYTE-IDENTICAL to O5 (the same
+        // `solve_color` over the whole color span).
         if dispatched.is_none() {
-            Self::solve_color(
+            Self::solve_color_dispatch(
                 cols,
                 bodies_eff,
                 span,
+                g_lo,
+                g_hi,
                 bias_rate,
                 mass_coeff,
                 impulse_coeff,
                 bias_active,
+                simd,
             );
         }
     }
@@ -1355,7 +2102,13 @@ impl ColoredSoftStepSolver {
 
         let soft = SoftCoefficients::new(config.contact_hertz, config.contact_damping, h);
         let gravity = config.gravity;
+        // O1: gates the integrate / inertia kernels (gravity, position integrate,
+        // inertia refresh).
         let use_simd = config.simd;
+        // O7: gates the cohort-batched colored CONTACT SOLVE — a SEPARATE flag from
+        // O1's `simd` so the solve widen has independent A/B + rollback. Default OFF
+        // ⇒ the scalar `solve_color` oracle (the O6 0%-gate, byte-identical).
+        let use_simd_solve = config.simd_solve;
         // O6: parallel per-color dispatch when opted in. The result is bit-identical
         // to the single-threaded colored solve for any worker count (disjoint-body
         // groups + canonical warm store); when off it is BYTE-IDENTICAL to O5.
@@ -1377,6 +2130,7 @@ impl ColoredSoftStepSolver {
                 soft.impulse_coeff,
                 true,
                 parallel,
+                use_simd_solve,
             );
 
             // (5) Position integrate (scalar — the reference's MEASURED-SCALAR
@@ -1394,6 +2148,7 @@ impl ColoredSoftStepSolver {
                     soft.impulse_coeff,
                     false,
                     parallel,
+                    use_simd_solve,
                 );
             }
         }
@@ -2577,5 +3332,816 @@ mod tests {
             s
         });
         assert_ne!(r1, resting, "the stress scene must non-vacuously solve (bodies moved)");
+    }
+
+    // ── O7 SIMD-batched colored solve: dev smoke tests ───────────────────────
+    //
+    // The exhaustive 1000-scene differential + proptest + criterion are the
+    // tester's job. These dev tests assert the two INVIOLABLE properties:
+    //   (1) bit-exact `solve_color_avx2 == solve_color` over a colored scene with
+    //       ragged ranks (a multi-point box manifold mixed with width-1 groups
+    //       across the 8-lane boundary), incl. mixed cone activation (+avx2 only);
+    //   (2) width-only: `solve_colored(simd=true) == solve_colored(simd=false)` over
+    //       a full step (on non-AVX2 / Miri both arms ARE the scalar oracle, so the
+    //       check holds trivially; under +avx2 it proves the widened path matches
+    //       the O5/O6 scalar colored result bit-for-bit).
+
+    /// A dynamic body view from a `BodyState` (mirrors `build_bodies`' per-row map),
+    /// for the direct-kernel differential (used only by the +avx2 differential).
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    fn eff_of(b: &BodyState) -> BodyEffective {
+        BodyEffective {
+            inv_mass: b.inv_mass,
+            inv_inertia: b.inv_inertia,
+            linear_velocity: b.linear_velocity,
+            angular_velocity: b.angular_velocity,
+        }
+    }
+
+    /// Builds a colored scene whose columns cross the 8-group cohort boundary with
+    /// RAGGED widths: `n_floor` width-1 spheres on a shared static floor (one color,
+    /// since they share only the static floor → all body-disjoint dynamic rows) plus
+    /// one width-4 box-box manifold (a separate dynamic pair). Returns
+    /// `(bodies, manifolds)`.
+    fn ragged_colored_scene(n_floor: u32) -> (Vec<BodyState>, Vec<Manifold>) {
+        let mut bodies = Vec::new();
+        // Spheres 0..n_floor, each penetrating a shared floor, spread along x so the
+        // narrowphase keeps them distinct dynamic bodies.
+        for i in 0..n_floor {
+            // A non-trivial inertia + a small spin so the angular term + friction
+            // cone are exercised non-vacuously.
+            let mut b = dyn_sphere(Vec3::new(i as f32 * 3.0, 0.6, 0.0), 1.0, 0.7, 0.0);
+            b.inv_inertia = Mat3::from_diagonal(Vec3::new(1.5, 1.5, 1.5));
+            b.linear_velocity = Vec3::new(0.2 * (i as f32 + 1.0), -1.0, 0.1);
+            b.angular_velocity = Vec3::new(0.05, -0.1, 0.2);
+            bodies.push(b);
+        }
+        // Two dynamic boxes for the width-4 manifold.
+        let mut box_a = dyn_sphere(Vec3::new(-5.0, 10.0, 0.0), 1.0, 0.6, 0.0);
+        box_a.inv_inertia = Mat3::from_diagonal(Vec3::new(1.2, 0.9, 1.1));
+        box_a.linear_velocity = Vec3::new(1.0, 0.0, -0.3);
+        box_a.angular_velocity = Vec3::new(0.1, 0.2, -0.15);
+        let mut box_b = dyn_sphere(Vec3::new(-3.0, 10.0, 0.0), 1.0, 0.6, 0.0);
+        box_b.inv_inertia = Mat3::from_diagonal(Vec3::new(0.8, 1.3, 1.0));
+        box_b.linear_velocity = Vec3::new(-1.0, 0.0, 0.3);
+        box_b.angular_velocity = Vec3::new(-0.2, 0.05, 0.1);
+        let box_a_row = bodies.len() as u32;
+        bodies.push(box_a);
+        let box_b_row = bodies.len() as u32;
+        bodies.push(box_b);
+        // The shared static floor (last row).
+        let floor_row = bodies.len() as u32;
+        bodies.push(static_body(Vec3::new(0.0, -1.0, 0.0)));
+
+        let mut manifolds = Vec::new();
+        for i in 0..n_floor {
+            manifolds.push(manifold(
+                i,
+                floor_row,
+                Vec3::new(0.0, -1.0, 0.0),
+                -0.2,
+                Vec3::new(i as f32 * 3.0, 0.0, 0.0),
+            ));
+        }
+        // Width-4 box-box manifold: A → B along +x, deep overlap.
+        manifolds.push(box_manifold(
+            box_a_row,
+            box_b_row,
+            Vec3::new(1.0, 0.0, 0.0),
+            -0.3,
+            Vec3::new(-4.0, 10.0, 0.0),
+            4,
+        ));
+        (bodies, manifolds)
+    }
+
+    /// Captures the full body + impulse-column bit state after solving each color's
+    /// groups with the supplied per-color kernel. Returns `(body_bits,
+    /// impulse_bits)`. Used only by the +avx2 differential.
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    fn body_impulse_bits(bodies: &[BodyEffective], cols: &ContactColumns) -> (Vec<u32>, Vec<u32>) {
+        let body_bits = bodies
+            .iter()
+            .flat_map(|b| {
+                [
+                    b.linear_velocity.x.to_bits(),
+                    b.linear_velocity.y.to_bits(),
+                    b.linear_velocity.z.to_bits(),
+                    b.angular_velocity.x.to_bits(),
+                    b.angular_velocity.y.to_bits(),
+                    b.angular_velocity.z.to_bits(),
+                ]
+            })
+            .collect();
+        let impulse_bits = (0..cols.len())
+            .flat_map(|i| {
+                [
+                    cols.normal_impulse[i].to_bits(),
+                    cols.tangent1_impulse[i].to_bits(),
+                    cols.tangent2_impulse[i].to_bits(),
+                ]
+            })
+            .collect();
+        (body_bits, impulse_bits)
+    }
+
+    /// Test 1 (INVIOLABLE-1): `solve_color_avx2 == solve_color` bit-exact over a
+    /// ragged colored scene (width-1 floor groups crossing the 8-lane boundary + a
+    /// width-4 box manifold ⇒ exhausted lanes at high ranks), for both
+    /// `bias_active ∈ {true, false}`. AVX2-only (the kernel is `cfg`-gated); on a
+    /// non-AVX2 build the dispatch IS the scalar oracle so the property is vacuous —
+    /// the always-compiled width-only test below covers that build.
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    #[test]
+    fn simd_solve_bits_match_scalar() {
+        // 11 floor spheres + 1 box pair ⇒ 12 width-1 groups + 1 width-4 group; the
+        // floor spheres land in one color (≥ 9 groups ⇒ crosses the 8-cohort
+        // boundary with a partial trailing cohort), the box pair in its own
+        // group(s). Ragged widths in one cohort ⇒ exhausted-lane coverage.
+        let (bodies, manifolds) = ragged_colored_scene(11);
+        let graph = build_graph(&bodies, &manifolds);
+
+        let soft = SoftCoefficients::new(
+            PhysicsConfig::default().contact_hertz,
+            PhysicsConfig::default().contact_damping,
+            (1.0 / 60.0) / 4.0,
+        );
+
+        for bias_active in [true, false] {
+            // Build columns once via the solver's own build, then snapshot the
+            // pristine pre-solve state for the two arms.
+            let mut solver = ColoredSoftStepSolver::default();
+            solver.build_bodies(&bodies);
+            solver.build_columns(&manifolds, &graph, &bodies);
+
+            let pristine_cols_ni: Vec<f32> = solver.columns.normal_impulse.clone();
+            let pristine_cols_t1: Vec<f32> = solver.columns.tangent1_impulse.clone();
+            let pristine_cols_t2: Vec<f32> = solver.columns.tangent2_impulse.clone();
+            let pristine_bodies: Vec<BodyEffective> = bodies.iter().map(eff_of).collect();
+
+            let n_colors = solver.columns.color_offsets.len() - 1;
+
+            // ── Scalar arm ──────────────────────────────────────────────────
+            let mut cols_scalar = ContactColumns::default();
+            clone_columns(&solver.columns, &mut cols_scalar);
+            let mut bodies_scalar = pristine_bodies.clone();
+            for c in 0..n_colors {
+                let start = cols_scalar.color_offsets[c] as usize;
+                let end = cols_scalar.color_offsets[c + 1] as usize;
+                ColoredSoftStepSolver::solve_color(
+                    &mut cols_scalar,
+                    &mut bodies_scalar,
+                    (start, end),
+                    soft.bias_rate,
+                    soft.mass_coeff,
+                    soft.impulse_coeff,
+                    bias_active,
+                );
+            }
+
+            // ── SIMD arm (re-seed the impulse columns to the pristine state) ──
+            let mut cols_simd = ContactColumns::default();
+            clone_columns(&solver.columns, &mut cols_simd);
+            cols_simd.normal_impulse.clone_from(&pristine_cols_ni);
+            cols_simd.tangent1_impulse.clone_from(&pristine_cols_t1);
+            cols_simd.tangent2_impulse.clone_from(&pristine_cols_t2);
+            let mut bodies_simd = pristine_bodies.clone();
+            for c in 0..n_colors {
+                let g_lo = cols_simd.color_group_start[c] as usize;
+                let g_hi = cols_simd.color_group_start[c + 1] as usize;
+                let span = (
+                    cols_simd.color_offsets[c] as usize,
+                    cols_simd.color_offsets[c + 1] as usize,
+                );
+                // SAFETY: the test target is gated `target_feature = "avx2"`, so the
+                //   host running these tests supports AVX2; the group range is a
+                //   color's own (body-disjoint) groups, and `span` is exactly that
+                //   range's slot run (the kernel's own-span contract).
+                unsafe {
+                    ColoredSoftStepSolver::solve_color_avx2(
+                        &mut cols_simd,
+                        &mut bodies_simd,
+                        span,
+                        g_lo,
+                        g_hi,
+                        soft.bias_rate,
+                        soft.mass_coeff,
+                        soft.impulse_coeff,
+                        bias_active,
+                    );
+                }
+            }
+
+            let (b_scalar, i_scalar) = body_impulse_bits(&bodies_scalar, &cols_scalar);
+            let (b_simd, i_simd) = body_impulse_bits(&bodies_simd, &cols_simd);
+            assert_eq!(
+                b_scalar, b_simd,
+                "O7 body velocity bits must match scalar (bias_active={bias_active})"
+            );
+            assert_eq!(
+                i_scalar, i_simd,
+                "O7 impulse column bits must match scalar (bias_active={bias_active})"
+            );
+        }
+    }
+
+    /// Clones the columns needed by the per-color kernels into `dst` (a fresh
+    /// `ContactColumns`). Only the columns `solve_color`/`solve_color_avx2` read or
+    /// write are copied; the rest stay empty (unused by the kernels). Used only by
+    /// the +avx2 differential.
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    fn clone_columns(src: &ContactColumns, dst: &mut ContactColumns) {
+        dst.ra_x.clone_from(&src.ra_x);
+        dst.ra_y.clone_from(&src.ra_y);
+        dst.ra_z.clone_from(&src.ra_z);
+        dst.rb_x.clone_from(&src.rb_x);
+        dst.rb_y.clone_from(&src.rb_y);
+        dst.rb_z.clone_from(&src.rb_z);
+        dst.normal_x.clone_from(&src.normal_x);
+        dst.normal_y.clone_from(&src.normal_y);
+        dst.normal_z.clone_from(&src.normal_z);
+        dst.tangent1_x.clone_from(&src.tangent1_x);
+        dst.tangent1_y.clone_from(&src.tangent1_y);
+        dst.tangent1_z.clone_from(&src.tangent1_z);
+        dst.tangent2_x.clone_from(&src.tangent2_x);
+        dst.tangent2_y.clone_from(&src.tangent2_y);
+        dst.tangent2_z.clone_from(&src.tangent2_z);
+        dst.separation.clone_from(&src.separation);
+        dst.friction.clone_from(&src.friction);
+        dst.normal_impulse.clone_from(&src.normal_impulse);
+        dst.tangent1_impulse.clone_from(&src.tangent1_impulse);
+        dst.tangent2_impulse.clone_from(&src.tangent2_impulse);
+        dst.body_a.clone_from(&src.body_a);
+        dst.body_b.clone_from(&src.body_b);
+        dst.b_is_sentinel.clone_from(&src.b_is_sentinel);
+        dst.color_offsets.clone_from(&src.color_offsets);
+        dst.group_start.clone_from(&src.group_start);
+        dst.color_group_start.clone_from(&src.color_group_start);
+    }
+
+    /// Test 2 (width-only / 0%-gate proxy): `solve_colored(simd=true)` produces a
+    /// full-step body snapshot bit-identical to `solve_colored(simd=false)`. On a
+    /// non-AVX2 build both arms run the scalar oracle (so the equality is the
+    /// structural 0%-gate); under +avx2 it proves the widened cohort kernel
+    /// reproduces the O5/O6 scalar colored result bit-for-bit over a multi-substep
+    /// step incl. the multi-point box manifold.
+    #[test]
+    fn simd_solve_width_only_matches_scalar_step() {
+        let (bodies, manifolds) = ragged_colored_scene(11);
+
+        let run_step = |simd_solve: bool| -> Vec<u32> {
+            let cfg = PhysicsConfig {
+                dt: 1.0 / 60.0,
+                simd_solve,
+                ..PhysicsConfig::default()
+            };
+            let mut solver = ColoredSoftStepSolver::default();
+            let mut scratch = SolverScratch::with_capacity(bodies.len());
+            scratch.bodies = bodies.clone();
+            scratch.touched.reset(scratch.bodies.len());
+            let graph = build_graph(&scratch.bodies, &manifolds);
+            solver.solve_colored(&cfg, &manifolds, &graph, &mut scratch);
+            scratch
+                .bodies
+                .iter()
+                .flat_map(|b| {
+                    [
+                        b.position.x.to_bits(),
+                        b.position.y.to_bits(),
+                        b.position.z.to_bits(),
+                        b.linear_velocity.x.to_bits(),
+                        b.linear_velocity.y.to_bits(),
+                        b.linear_velocity.z.to_bits(),
+                        b.angular_velocity.x.to_bits(),
+                        b.angular_velocity.y.to_bits(),
+                        b.angular_velocity.z.to_bits(),
+                    ]
+                })
+                .collect()
+        };
+
+        assert_eq!(
+            run_step(false),
+            run_step(true),
+            "width-only: simd_solve=true must be bit-identical to the scalar colored result"
+        );
+    }
+
+    // ── O1 (regression-pin): cone / degenerate adversarial differential ──────
+    //
+    // Test 1c/1d build a SINGLE one-color, one-cohort `ContactColumns` BY HAND so
+    // every lane's geometry / impulse seed / body state is exact, forcing the
+    // adversarial friction-cone + degenerate paths to fire NON-VACUOUSLY, then
+    // assert `solve_color_avx2 == solve_color` bit-for-bit. The non-vacuity counts
+    // come from `cone_probe`, a single-slot replay of the EXACT scalar op sequence
+    // (the authoritative oracle for "did this lane clamp / was len_sq zero /
+    // denormal"). A splitmix64 proptest then sweeps random cohort shapes.
+
+    /// One built group spec for a hand-rolled single-color cohort: a body pair
+    /// (`ia`, `ib`/sentinel) and its contact points. Each point carries explicit
+    /// geometry, friction, separation, and an impulse seed.
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    #[derive(Clone)]
+    struct GroupSpec {
+        ia: u32,
+        ib: u32,
+        sentinel: bool,
+        /// `(ra, rb, normal, t1, t2, separation, friction, seed_ni, seed_t1, seed_t2)`.
+        points: Vec<PointSpec>,
+    }
+
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    #[derive(Clone, Copy)]
+    struct PointSpec {
+        ra: Vec3,
+        rb: Vec3,
+        normal: Vec3,
+        t1: Vec3,
+        t2: Vec3,
+        separation: f32,
+        friction: f32,
+        seed: (f32, f32, f32),
+    }
+
+    /// Builds a single-COLOR, single-cohort (`groups.len() <= 8`) `ContactColumns`
+    /// from the group specs, appending groups in order with the C1 CSR
+    /// (`group_start` / `color_group_start` / `color_offsets`). Body-disjointness of
+    /// the groups is the CALLER's responsibility (the cohort kernel's precondition).
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    fn build_cohort_columns(groups: &[GroupSpec]) -> ContactColumns {
+        let mut cols = ContactColumns::default();
+        cols.color_offsets.push(0);
+        cols.group_start.push(0);
+        cols.color_group_start.push(0);
+        let mut warm_key = 0u64;
+        for g in groups {
+            for (p, ps) in g.points.iter().enumerate() {
+                cols.push_point(
+                    ps.ra,
+                    ps.rb,
+                    ps.normal,
+                    ps.t1,
+                    ps.t2,
+                    ps.separation,
+                    ps.friction,
+                    0.0, // restitution (the kernels do not read it)
+                    ps.seed,
+                    g.ia,
+                    g.ib,
+                    g.sentinel,
+                    warm_key,
+                    0.0,
+                );
+                cols.canonical.push((cols.len() - 1) as u32);
+                let _ = p;
+                warm_key = warm_key.wrapping_add(1);
+            }
+            cols.group_start.push(cols.len() as u32);
+        }
+        cols.color_offsets.push(cols.len() as u32);
+        cols.color_group_start.push((cols.group_start.len() - 1) as u32);
+        cols
+    }
+
+    /// Replays the EXACT scalar `solve_color` friction-cone evaluation for ONE slot
+    /// against the pristine pre-solve state, reporting `(clamped, zero_cone,
+    /// denorm_len_sq)`. The kernel is bit-identical to `solve_color`, so this is the
+    /// authoritative non-vacuity oracle for that slot. `len_sq == 0` ⇒ `zero_cone`;
+    /// `0 < len_sq < f32::MIN_POSITIVE` ⇒ `denorm_len_sq`; the scalar clamp branch
+    /// (`len_sq > mf² && len_sq > 0`) firing ⇒ `clamped`.
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    fn cone_probe(
+        cols: &ContactColumns,
+        bodies: &[BodyEffective],
+        slot: usize,
+        bias_rate: f32,
+        mass_coeff: f32,
+        impulse_coeff: f32,
+        bias_active: bool,
+    ) -> (bool, bool, bool) {
+        let ra = cols.ra(slot);
+        let rb = cols.rb(slot);
+        let normal = cols.normal(slot);
+        let t1 = cols.tangent1(slot);
+        let t2 = cols.tangent2(slot);
+        let ia = cols.body_a[slot] as usize;
+        let b_sent = cols.b_is_sentinel[slot];
+        let ib = cols.body_b[slot] as usize;
+        let friction = cols.friction[slot];
+        let separation = cols.separation[slot];
+        let bb = if b_sent { IMMOVABLE_AT_REST } else { bodies[ib] };
+        let ba = bodies[ia];
+
+        // Normal solve (to obtain the new normal impulse the cone uses).
+        let m_eff = effective_mass(normal, ra, rb, &ba, &bb);
+        let vn = (bb.point_velocity(rb) - ba.point_velocity(ra)).dot(normal);
+        let bias = if bias_active {
+            (bias_rate * separation).max(-MAX_BIAS_VELOCITY)
+        } else {
+            0.0
+        };
+        let lambda_n = cols.normal_impulse[slot];
+        let d_lambda = if bias_active {
+            -mass_coeff * m_eff * (vn + bias) - impulse_coeff * lambda_n
+        } else {
+            -m_eff * vn
+        };
+        let new_lambda = (lambda_n + d_lambda).max(0.0);
+
+        // Friction solve (no body mutation needed — single-point group, the cone
+        // reads only the post-normal velocity; a single-point group's normal apply
+        // does change velocity, so re-derive from a local copy).
+        let mut ba_m = ba;
+        let mut bb_m = bb;
+        let applied_n = new_lambda - lambda_n;
+        let imp = normal * applied_n;
+        if is_dynamic_row(ba_m.inv_mass) {
+            ba_m.apply_impulse(ra, imp * -1.0);
+        }
+        if !b_sent && is_dynamic_row(bb_m.inv_mass) {
+            bb_m.apply_impulse(rb, imp);
+        }
+        let max_friction = friction * new_lambda;
+        let m_eff_t1 = effective_mass(t1, ra, rb, &ba_m, &bb_m);
+        let m_eff_t2 = effective_mass(t2, ra, rb, &ba_m, &bb_m);
+        let dv = bb_m.point_velocity(rb) - ba_m.point_velocity(ra);
+        let (vt1, vt2) = (dv.dot(t1), dv.dot(t2));
+        let new_t1 = cols.tangent1_impulse[slot] - m_eff_t1 * vt1;
+        let new_t2 = cols.tangent2_impulse[slot] - m_eff_t2 * vt2;
+        let len_sq = new_t1 * new_t1 + new_t2 * new_t2;
+        let clamped = len_sq > max_friction * max_friction && len_sq > 0.0;
+        let zero_cone = len_sq == 0.0;
+        let denorm = len_sq > 0.0 && len_sq < f32::MIN_POSITIVE;
+        (clamped, zero_cone, denorm)
+    }
+
+    /// Solves the single color of `cols` with the scalar oracle and with the AVX2
+    /// cohort kernel (each on a fresh clone seeded to the same pristine state), and
+    /// asserts the body + impulse bits match bit-for-bit. Returns the per-slot
+    /// `(clamped, zero_cone, denorm)` counts from the scalar probe for non-vacuity.
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    fn assert_cohort_differential(
+        cols: &ContactColumns,
+        bodies: &[BodyEffective],
+        bias_active: bool,
+    ) -> (usize, usize, usize) {
+        let soft = SoftCoefficients::new(
+            PhysicsConfig::default().contact_hertz,
+            PhysicsConfig::default().contact_damping,
+            (1.0 / 60.0) / 4.0,
+        );
+
+        // Non-vacuity counts from the pristine state (the probe is read-only).
+        let (mut clamped, mut zero_cone, mut denorm) = (0usize, 0usize, 0usize);
+        for s in 0..cols.len() {
+            let (c, z, d) = cone_probe(
+                cols,
+                bodies,
+                s,
+                soft.bias_rate,
+                soft.mass_coeff,
+                soft.impulse_coeff,
+                bias_active,
+            );
+            clamped += c as usize;
+            zero_cone += z as usize;
+            denorm += d as usize;
+        }
+
+        let g_lo = cols.color_group_start[0] as usize;
+        let g_hi = cols.color_group_start[1] as usize;
+        let span = (cols.color_offsets[0] as usize, cols.color_offsets[1] as usize);
+
+        // Scalar arm.
+        let mut cols_scalar = ContactColumns::default();
+        clone_columns(cols, &mut cols_scalar);
+        let mut bodies_scalar = bodies.to_vec();
+        ColoredSoftStepSolver::solve_color(
+            &mut cols_scalar,
+            &mut bodies_scalar,
+            span,
+            soft.bias_rate,
+            soft.mass_coeff,
+            soft.impulse_coeff,
+            bias_active,
+        );
+
+        // SIMD arm.
+        let mut cols_simd = ContactColumns::default();
+        clone_columns(cols, &mut cols_simd);
+        let mut bodies_simd = bodies.to_vec();
+        // SAFETY: the test target is `target_feature = "avx2"`-gated, so the host
+        //   supports AVX2; `[g_lo, g_hi)` is the single color's body-disjoint groups
+        //   and `span` is exactly that group range's slot run (the own-span contract).
+        unsafe {
+            ColoredSoftStepSolver::solve_color_avx2(
+                &mut cols_simd,
+                &mut bodies_simd,
+                span,
+                g_lo,
+                g_hi,
+                soft.bias_rate,
+                soft.mass_coeff,
+                soft.impulse_coeff,
+                bias_active,
+            );
+        }
+
+        let (b_scalar, i_scalar) = body_impulse_bits(&bodies_scalar, &cols_scalar);
+        let (b_simd, i_simd) = body_impulse_bits(&bodies_simd, &cols_simd);
+        assert_eq!(b_scalar, b_simd, "cohort differential: body bits (bias_active={bias_active})");
+        assert_eq!(i_scalar, i_simd, "cohort differential: impulse bits (bias_active={bias_active})");
+        (clamped, zero_cone, denorm)
+    }
+
+    /// A dynamic `BodyEffective` with a diagonal inertia and the given velocity.
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    fn dyn_eff(inv_mass: f32, inertia_diag: f32, lin: Vec3, ang: Vec3) -> BodyEffective {
+        BodyEffective {
+            inv_mass,
+            inv_inertia: Mat3::from_diagonal(Vec3::new(inertia_diag, inertia_diag, inertia_diag)),
+            linear_velocity: lin,
+            angular_velocity: ang,
+        }
+    }
+
+    /// Test 1c (+avx2 only): a single cohort with a cone-CLAMPED lane, an unclamped
+    /// lane, a `len_sq == 0` zero-tangent lane, and a denormal-`len_sq` lane, all
+    /// body-disjoint. Asserts `solve_color_avx2 == solve_color` bit-for-bit AND that
+    /// the clamp / zero-cone / denormal paths each fire (non-vacuity).
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    #[test]
+    fn cone_adversarial_differential_test_1c() {
+        // Build 5 body-disjoint single-point groups (one cohort), bodies 0..10.
+        let n = Vec3::new(0.0, 1.0, 0.0);
+        let (t1, t2) = tangent_basis(n);
+        let mk = |ia: u32,
+                  ib: u32,
+                  friction: f32,
+                  seed_ni: f32,
+                  seed_t1: f32,
+                  seed_t2: f32,
+                  ra: Vec3|
+         -> GroupSpec {
+            GroupSpec {
+                ia,
+                ib,
+                sentinel: false,
+                points: vec![PointSpec {
+                    ra,
+                    rb: ra,
+                    normal: n,
+                    t1,
+                    t2,
+                    separation: -0.2,
+                    friction,
+                    seed: (seed_ni, seed_t1, seed_t2),
+                }],
+            }
+        };
+
+        // Lane 0 — cone-CLAMPED: large pre-seeded tangent impulse + a small normal
+        // cap (friction·λn small) ⇒ len_sq ≫ mf² ⇒ clamp fires.
+        let g0 = mk(0, 1, 0.1, 0.05, 5.0, 5.0, Vec3::new(0.3, 0.0, 0.1));
+        // Lane 1 — UNCLAMPED: tiny tangent seed, generous friction cap ⇒ inside cone.
+        let g1 = mk(2, 3, 2.0, 2.0, 1e-4, 1e-4, Vec3::new(-0.2, 0.0, 0.2));
+        // Lane 2 — ZERO-tangent (`len_sq == 0`): zero friction AND zero tangent seed
+        // with zero tangential velocity ⇒ new_t1 == new_t2 == 0 ⇒ len_sq == 0.
+        let g2 = mk(4, 5, 0.0, 1.0, 0.0, 0.0, Vec3::ZERO);
+        // Lane 3 — DENORMAL len_sq: a tiny tangent seed (subnormal-squared) with zero
+        // tangential velocity ⇒ new_t stays the seed ⇒ len_sq ≈ seed² is subnormal.
+        let tiny = 1e-22f32; // tiny² ≈ 1e-44 < f32::MIN_POSITIVE (≈ 1.18e-38)
+        let g3 = mk(6, 7, 5.0, 0.0, tiny, 0.0, Vec3::ZERO);
+        // Lane 4 — a second clamped lane on a sentinel body B (static surface).
+        let mut g4 = mk(8, 9, 0.2, 0.1, 4.0, -3.0, Vec3::new(0.1, 0.0, -0.3));
+        g4.sentinel = true;
+        g4.ib = u32::MAX;
+
+        let groups = vec![g0, g1, g2, g3, g4];
+        let cols = build_cohort_columns(&groups);
+        // 10 real bodies; spins so the angular term is non-vacuous. Lane-2 (g2)
+        // bodies are zero-velocity so its tangent stays exactly zero.
+        let bodies: Vec<BodyEffective> = (0..10)
+            .map(|i| {
+                if (4..=5).contains(&i) {
+                    dyn_eff(1.0, 1.5, Vec3::ZERO, Vec3::ZERO)
+                } else if (6..=7).contains(&i) {
+                    // Lane-3 bodies zero-velocity too so its tangent stays the seed.
+                    dyn_eff(1.0, 1.5, Vec3::ZERO, Vec3::ZERO)
+                } else {
+                    dyn_eff(
+                        1.0,
+                        1.5,
+                        Vec3::new(0.2 * (i as f32 + 1.0), -1.0, 0.15),
+                        Vec3::new(0.05, -0.1, 0.2),
+                    )
+                }
+            })
+            .collect();
+
+        let mut total_clamped = 0;
+        let mut total_zero = 0;
+        let mut total_denorm = 0;
+        for bias_active in [true, false] {
+            let (c, z, d) = assert_cohort_differential(&cols, &bodies, bias_active);
+            total_clamped += c;
+            total_zero += z;
+            total_denorm += d;
+        }
+        eprintln!(
+            "test_1c non-vacuity: clamped={total_clamped} zero_cone={total_zero} denorm={total_denorm}"
+        );
+        assert!(
+            total_clamped > 0 && total_zero > 0 && total_denorm > 0,
+            "non-vacuity: cone clamp ({total_clamped}), zero-cone ({total_zero}), and denormal \
+             len_sq ({total_denorm}) lanes must each fire across the two bias modes"
+        );
+    }
+
+    /// Test 1d (+avx2 only): a single cohort mixing a static-A lane (`inv_mass == 0`
+    /// on body A — the `*_movable` guard side), a sentinel-B lane, and a `k <= 0`
+    /// degenerate lane (both bodies static ⇒ `effective_mass == 0`). Asserts
+    /// `solve_color_avx2 == solve_color` bit-for-bit; non-vacuity asserts the cone
+    /// fires on the live lane.
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    #[test]
+    fn degenerate_lane_differential_test_1d() {
+        let n = Vec3::new(0.0, 1.0, 0.0);
+        let (t1, t2) = tangent_basis(n);
+        let pt = |friction: f32, seed: (f32, f32, f32), ra: Vec3| PointSpec {
+            ra,
+            rb: ra,
+            normal: n,
+            t1,
+            t2,
+            separation: -0.25,
+            friction,
+            seed,
+        };
+
+        // Lane 0 — STATIC body A (inv_mass 0): the `ia_movable == false` guard side.
+        let g0 = GroupSpec {
+            ia: 0,
+            ib: 1,
+            sentinel: false,
+            points: vec![pt(0.5, (0.1, 0.2, -0.1), Vec3::new(0.2, 0.0, 0.1))],
+        };
+        // Lane 1 — SENTINEL body B: body B is IMMOVABLE_AT_REST, never indexed; a
+        // live dynamic A with a clamp-forcing tangent seed.
+        let g1 = GroupSpec {
+            ia: 2,
+            ib: u32::MAX,
+            sentinel: true,
+            points: vec![pt(0.05, (0.05, 6.0, 6.0), Vec3::new(-0.1, 0.0, 0.3))],
+        };
+        // Lane 2 — DEGENERATE k<=0: both bodies static (inv_mass 0, inertia ZERO) ⇒
+        // effective_mass returns 0 ⇒ a no-op solve.
+        let g2 = GroupSpec {
+            ia: 3,
+            ib: 4,
+            sentinel: false,
+            points: vec![pt(0.5, (0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 0.2))],
+        };
+
+        let groups = vec![g0, g1, g2];
+        let cols = build_cohort_columns(&groups);
+        // Bodies: 0 static-A, 1 dynamic, 2 dynamic (sentinel lane's A), 3+4 static.
+        let bodies = vec![
+            // 0: static A (inv_mass 0 ⇒ inertia ZERO to match the build invariant).
+            BodyEffective { inv_mass: 0.0, inv_inertia: Mat3::ZERO, linear_velocity: Vec3::new(1.0, -0.5, 0.2), angular_velocity: Vec3::new(0.1, 0.0, -0.1) },
+            // 1: dynamic B.
+            dyn_eff(1.0, 1.2, Vec3::new(-0.3, 0.4, 0.1), Vec3::new(-0.05, 0.1, 0.0)),
+            // 2: dynamic A (sentinel lane) with a fast tangential slide ⇒ cone fires.
+            dyn_eff(1.0, 1.0, Vec3::new(2.0, -1.0, -1.5), Vec3::new(0.2, -0.1, 0.3)),
+            // 3, 4: both static (degenerate k<=0 lane).
+            BodyEffective { inv_mass: 0.0, inv_inertia: Mat3::ZERO, linear_velocity: Vec3::ZERO, angular_velocity: Vec3::ZERO },
+            BodyEffective { inv_mass: 0.0, inv_inertia: Mat3::ZERO, linear_velocity: Vec3::ZERO, angular_velocity: Vec3::ZERO },
+        ];
+
+        let mut total_clamped = 0;
+        for bias_active in [true, false] {
+            let (c, _z, _d) = assert_cohort_differential(&cols, &bodies, bias_active);
+            total_clamped += c;
+        }
+        eprintln!("test_1d non-vacuity: clamped={total_clamped}");
+        assert!(
+            total_clamped > 0,
+            "non-vacuity: the sentinel-B live lane's friction cone must clamp at least once"
+        );
+    }
+
+    /// A splitmix64 PRNG (deterministic, no deps) for the cohort-shape proptest.
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    struct SplitMix64(u64);
+
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    impl SplitMix64 {
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+        fn f01(&mut self) -> f32 {
+            (self.next_u64() >> 40) as f32 / (1u64 << 24) as f32
+        }
+        fn range(&mut self, lo: u32, hi: u32) -> u32 {
+            lo + (self.next_u64() % (hi - lo) as u64) as u32
+        }
+    }
+
+    /// O1 proptest (+avx2 only): random cohort shapes (group count 1..=32, width
+    /// 1..=MAX_CONTACT_POINTS, masses incl. statics + sentinels, denormal-scale
+    /// velocities) must be `solve_color_avx2 == solve_color` bit-for-bit, AND the
+    /// cone clamp + zero-cone paths must fire non-vacuously across the corpus.
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    #[test]
+    fn cohort_shape_proptest_bit_exact_and_non_vacuous() {
+        use crate::math::MAX_CONTACT_POINTS;
+        let n = Vec3::new(0.0, 1.0, 0.0);
+        let (t1, t2) = tangent_basis(n);
+
+        let mut rng = SplitMix64(0x0BAD_F00D_DEAD_BEEF);
+        let mut corpus_clamped = 0usize;
+        let mut corpus_zero = 0usize;
+
+        for _ in 0..200 {
+            let n_groups = rng.range(1, 33) as usize; // 1..=32 ⇒ multi-cohort
+            let mut groups: Vec<GroupSpec> = Vec::with_capacity(n_groups);
+            // Body rows: each group owns 2 disjoint dynamic rows (or 1 + sentinel).
+            let mut bodies: Vec<BodyEffective> = Vec::with_capacity(n_groups * 2);
+            for _gi in 0..n_groups {
+                let ia = bodies.len() as u32;
+                // Body A: mostly dynamic, sometimes static (the *_movable guard).
+                let a_static = rng.f01() < 0.15;
+                bodies.push(if a_static {
+                    BodyEffective { inv_mass: 0.0, inv_inertia: Mat3::ZERO, linear_velocity: rand_vel(&mut rng), angular_velocity: rand_vel(&mut rng) }
+                } else {
+                    dyn_eff(0.5 + rng.f01(), 0.5 + rng.f01() * 2.0, rand_vel(&mut rng), rand_vel(&mut rng))
+                });
+                let sentinel = rng.f01() < 0.25;
+                let ib = if sentinel {
+                    u32::MAX
+                } else {
+                    let row = bodies.len() as u32;
+                    let b_static = rng.f01() < 0.15;
+                    bodies.push(if b_static {
+                        BodyEffective { inv_mass: 0.0, inv_inertia: Mat3::ZERO, linear_velocity: rand_vel(&mut rng), angular_velocity: rand_vel(&mut rng) }
+                    } else {
+                        dyn_eff(0.5 + rng.f01(), 0.5 + rng.f01() * 2.0, rand_vel(&mut rng), rand_vel(&mut rng))
+                    });
+                    row
+                };
+                let width = rng.range(1, MAX_CONTACT_POINTS as u32 + 1) as usize;
+                let mut points = Vec::with_capacity(width);
+                for _ in 0..width {
+                    // Occasionally a denormal-scale tangent seed + zero friction.
+                    let denorm = rng.f01() < 0.1;
+                    let zero_fric = rng.f01() < 0.1;
+                    let seed_scale = if denorm { 1e-22 } else { 4.0 };
+                    points.push(PointSpec {
+                        ra: rand_vel(&mut rng) * 0.3,
+                        rb: rand_vel(&mut rng) * 0.3,
+                        normal: n,
+                        t1,
+                        t2,
+                        separation: -(rng.f01() * 0.5),
+                        friction: if zero_fric { 0.0 } else { rng.f01() * 2.0 },
+                        seed: (
+                            rng.f01() * 0.5,
+                            (rng.f01() - 0.5) * seed_scale,
+                            (rng.f01() - 0.5) * seed_scale,
+                        ),
+                    });
+                }
+                groups.push(GroupSpec { ia, ib, sentinel, points });
+            }
+
+            // build_cohort_columns packs ALL groups into ONE color (multi-cohort
+            // when n_groups > 8); the kernel solves them as 8-group cohorts.
+            let cols = build_cohort_columns(&groups);
+            for bias_active in [true, false] {
+                let (c, z, _d) = assert_cohort_differential(&cols, &bodies, bias_active);
+                corpus_clamped += c;
+                corpus_zero += z;
+            }
+        }
+        eprintln!("proptest non-vacuity: clamped={corpus_clamped} zero_cone={corpus_zero}");
+        assert!(
+            corpus_clamped > 0 && corpus_zero > 0,
+            "non-vacuity over the random corpus: clamp ({corpus_clamped}) and zero-cone \
+             ({corpus_zero}) paths must both fire"
+        );
+    }
+
+    /// A bounded random velocity for the proptest.
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    fn rand_vel(rng: &mut SplitMix64) -> Vec3 {
+        Vec3::new(
+            (rng.f01() - 0.5) * 4.0,
+            (rng.f01() - 0.5) * 4.0,
+            (rng.f01() - 0.5) * 4.0,
+        )
     }
 }

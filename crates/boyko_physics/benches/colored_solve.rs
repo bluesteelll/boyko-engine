@@ -23,6 +23,7 @@ use boyko_physics::manifold::{BodyIndex, ContactPoint, Manifold};
 use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::resources::{BodyState, ConstraintGraph, PhysicsConfig, SolverScratch};
 use boyko_physics::solver::{ColoredSoftStepSolver, RigidSolver, SoftStepSolver};
+use boyko_threadpool::ThreadPoolBuilder;
 
 // boyko_physics does not re-export RigidBody/Collider through a bench-friendly POD
 // builder, so build BodyState via from_columns with the public component structs.
@@ -231,5 +232,91 @@ fn bench_solve(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_solve);
+/// Phase O7 Gate 9 — the SIMD A/B: `{scalar-colored}` (O6, `simd_solve = false`)
+/// vs `{simd_solve}` (O7) on the SAME warmed contact set, BOTH single-threaded and
+/// parallel.
+///
+/// The bar (`PHYSICS-O7-DESIGN.md` Bench B / the plan's O7 production-ready gate) is
+/// `{simd_solve} / {scalar-colored} >= 1.8x` on the solve, AND
+/// `{parallel + simd} >= {parallel scalar}` (no cohort-snapping width-starvation).
+/// On a non-AVX2 build `simd_solve` routes to the scalar oracle ⇒ the two lines
+/// coincide (the A/B is only meaningful under `RUSTFLAGS="-C target-feature=+avx2"`).
+fn bench_simd_ab(c: &mut Criterion) {
+    let mut group = c.benchmark_group("o7_simd_ab");
+    group.sample_size(30);
+
+    // ~10k contacts: a dense pile so a color carries many cohorts (≫ 8 groups).
+    let (bodies, manifolds) = pile_scene(128, 40);
+    let n_contacts = manifolds.len();
+    let graph = build_graph(&bodies, &manifolds);
+    assert!(n_contacts > 0, "scene must have > 0 contacts");
+    assert!(graph.n_colors() > 1, "dense scene must have > 1 color (got {})", graph.n_colors());
+    // Anti-vacuity: a color must be wide enough that the cohort kernel fires (> 8
+    // groups in at least one color, i.e. a full cohort + a partial).
+    let widest = (0..graph.n_colors()).map(|c| graph.color(c).len()).max().unwrap_or(0);
+    assert!(widest > 8, "widest color must exceed one cohort (8 groups), got {widest}");
+
+    group.throughput(Throughput::Elements(n_contacts as u64));
+
+    // `(label, simd_solve, parallel, workers, substeps, relax)`. The default
+    // (substeps=4, relax=2 ⇒ 12 solve sweeps/step) is the production whole-step A/B;
+    // the `solve_dominant` pair (substeps=8, relax=4 ⇒ 40 sweeps/step) amplifies the
+    // WIDENED-solve fraction so the speedup converges toward the kernel's true ratio
+    // (the design's Bench A), isolating it from the un-widened scalar surround
+    // (build_columns / warm_apply / integrate / restitution / store) — the Amdahl
+    // ceiling of the whole-step line.
+    // `(label, simd_solve, simd_o1, parallel, workers, substeps, relax)`. `simd_o1`
+    // widens O1's integrate/inertia surround too, so the `prod` pair isolates the
+    // SOLVE speedup from O1's un-widened scalar surround in the whole-step number.
+    let variants: &[(&str, bool, bool, bool, usize, u32, u32)] = &[
+        ("scalar_colored_single", false, false, false, 0, 4, 2),
+        ("simd_solve_single", true, false, false, 0, 4, 2),
+        ("scalar_colored_parallel_4w", false, false, true, 4, 4, 2),
+        ("simd_solve_parallel_4w", true, false, true, 4, 4, 2),
+        ("scalar_colored_single_solvedom", false, false, false, 0, 8, 4),
+        ("simd_solve_single_solvedom", true, false, false, 0, 8, 4),
+        ("scalar_colored_single_prod", false, true, false, 0, 4, 2),
+        ("simd_solve_single_prod", true, true, false, 0, 4, 2),
+    ];
+
+    for &(label, simd_solve, simd_o1, parallel, workers, substeps, relax_iterations) in variants {
+        let cfg = PhysicsConfig {
+            dt: 1.0 / 60.0,
+            simd: simd_o1,
+            simd_solve,
+            parallel_solve: parallel,
+            substeps,
+            relax_iterations,
+            ..PhysicsConfig::default()
+        };
+        group.bench_with_input(BenchmarkId::new(label, n_contacts), &n_contacts, |b, &_n| {
+            let mut solver = ColoredSoftStepSolver::default();
+            let mut scratch = SolverScratch::with_capacity(bodies.len());
+            scratch.bodies = bodies.clone();
+            scratch.touched.reset(scratch.bodies.len());
+
+            let warm_and_time =
+                |b: &mut criterion::Bencher<'_>, solver: &mut ColoredSoftStepSolver, scratch: &mut SolverScratch| {
+                    for _ in 0..4 {
+                        scratch.touched.reset(scratch.bodies.len());
+                        solver.solve_colored(&cfg, &manifolds, &graph, scratch);
+                    }
+                    b.iter(|| {
+                        scratch.touched.reset(scratch.bodies.len());
+                        solver.solve_colored(black_box(&cfg), black_box(&manifolds), black_box(&graph), scratch);
+                    });
+                };
+
+            if parallel {
+                let pool = ThreadPoolBuilder::new().num_threads(workers).build();
+                pool.install(|_scope| warm_and_time(b, &mut solver, &mut scratch));
+            } else {
+                warm_and_time(b, &mut solver, &mut scratch);
+            }
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(benches, bench_solve, bench_simd_ab);
 criterion_main!(benches);

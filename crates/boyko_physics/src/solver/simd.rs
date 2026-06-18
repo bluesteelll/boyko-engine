@@ -36,6 +36,21 @@
 //! produce the same bits as scalar and do NOT change `solver_is_deterministic`.
 //! This is NOT a value-changing step (that is O5's colored solve).
 //!
+//! # No-FMA invariant — load-bearing for O1 AND O7 (Decision 5)
+//!
+//! Every `x8` helper in this module — the O1 integrate/inertia kernels AND the
+//! O7 colored-solve `x8` math helpers (`cross8` / `dot8` / `mat3mulvec8` /
+//! `pointvel_x8` / `effective_mass_x8` / `apply_impulse_blend_x8`) — is written
+//! `mul_add`-FREE: every `a*b + c` is a SEPARATE `_mm256_mul_ps` then
+//! `_mm256_add_ps`, mirroring the scalar two-rounding sequence, so the SIMD bits
+//! match the scalar oracle on every target. Rust does NOT auto-contract an
+//! explicit `mul`+`add` into a single FMA (contraction needs an explicit
+//! `f32::mul_add`, which this module never calls, or a global fast-math flag,
+//! which Rust stable exposes none of), so a `+fma` build would NOT silently fuse
+//! these — but to make the no-FMA assumption a COMPILE-TIME contract rather than
+//! a runtime hope, the build is rejected outright under `+fma` (the
+//! [`compile_error!`] guard at module scope, below the doc block).
+//!
 //! # Safety
 //!
 //! The AVX2 kernels are gated `cfg(all(target_arch = "x86_64",
@@ -54,6 +69,19 @@
 //! (flag off, or a non-AVX2 build, or under Miri) they run the scalar kernel,
 //! which is byte-identical to the shipped `refresh_inertia` / integrate loop —
 //! the campaign 0%-gate. The scalar kernel is also the differential-test oracle.
+
+// Decision 5 (O7) defense-in-depth: this SIMD module is written `mul_add`-free
+// (O1 integrate/inertia + O7 colored-solve `x8` helpers); reject any `+fma` build
+// so the no-FMA determinism invariant is a compile-time contract, not a runtime
+// hope. See the "No-FMA invariant" module-doc paragraph for why contraction
+// cannot actually occur on our explicit `mul`+`add` even under `+fma`.
+#[cfg(target_feature = "fma")]
+compile_error!(
+    "boyko-physics determinism requires no FMA contraction; this SIMD module is \
+     written mul_add-free and must be built without +fma. (No mul_add is emitted, \
+     so +fma would not actually contract our explicit mul+add, but the build is \
+     rejected to make the no-FMA invariant load-bearing.)"
+);
 
 use crate::components::BodyType;
 use crate::math::{Mat3, Vec3};
@@ -481,6 +509,219 @@ fn mat3_mul_x8(
 fn mat3_transpose_x8(m: [core::arch::x86_64::__m256; 9]) -> [core::arch::x86_64::__m256; 9] {
     // rows[i].col(j) → rows[j].col(i): [00,10,20, 01,11,21, 02,12,22].
     [m[0], m[3], m[6], m[1], m[4], m[7], m[2], m[5], m[8]]
+}
+
+// ── O7 colored-solve `x8` math helpers ───────────────────────────────────────
+//
+// These widen `contact.rs` / `math.rs` op-for-op to 8 lanes for the colored
+// solver's `solve_color_avx2` kernel (Phase O7). Each is a pure-register function
+// (no memory access) `#[target_feature(enable = "avx2")]`-gated like the O1
+// helpers above, and is `pub(super)` so `colored.rs` (which owns `ContactColumns`
+// and the oracle `solve_color`) can call them next to the oracle. Every `a*b + c`
+// is a SEPARATE `_mm256_mul_ps` then `_mm256_add_ps` (NO FMA — the module-doc
+// no-FMA invariant + the `+fma` compile_error guard), and the op ORDER matches the
+// scalar source line-for-line, so the 8-lane result is `f32`-bit-identical to the
+// scalar per-lane result (Decision 2's per-lane op-identity premise).
+
+/// 8-wide `Vec3::cross` (right-handed), bit-identical to the scalar
+/// [`Vec3::cross`](crate::math::Vec3::cross): `x = a.y*b.z - a.z*b.y`,
+/// `y = a.z*b.x - a.x*b.z`, `z = a.x*b.y - a.y*b.x`, each a `mul` then `sub`.
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[target_feature(enable = "avx2")]
+pub(super) fn cross8(
+    ax: core::arch::x86_64::__m256,
+    ay: core::arch::x86_64::__m256,
+    az: core::arch::x86_64::__m256,
+    bx: core::arch::x86_64::__m256,
+    by: core::arch::x86_64::__m256,
+    bz: core::arch::x86_64::__m256,
+) -> [core::arch::x86_64::__m256; 3] {
+    use core::arch::x86_64::{_mm256_mul_ps, _mm256_sub_ps};
+    // Pure register arithmetic — intrinsics are safe inside this
+    // `#[target_feature(enable = "avx2")]` function.
+    let cx = _mm256_sub_ps(_mm256_mul_ps(ay, bz), _mm256_mul_ps(az, by));
+    let cy = _mm256_sub_ps(_mm256_mul_ps(az, bx), _mm256_mul_ps(ax, bz));
+    let cz = _mm256_sub_ps(_mm256_mul_ps(ax, by), _mm256_mul_ps(ay, bx));
+    [cx, cy, cz]
+}
+
+/// 8-wide `Vec3::dot`, bit-identical to the scalar
+/// [`Vec3::dot`](crate::math::Vec3::dot): `(a.x*b.x + a.y*b.y) + a.z*b.z`,
+/// left-to-right (three `mul`, two `add` in that order — NO FMA).
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[target_feature(enable = "avx2")]
+pub(super) fn dot8(
+    ax: core::arch::x86_64::__m256,
+    ay: core::arch::x86_64::__m256,
+    az: core::arch::x86_64::__m256,
+    bx: core::arch::x86_64::__m256,
+    by: core::arch::x86_64::__m256,
+    bz: core::arch::x86_64::__m256,
+) -> core::arch::x86_64::__m256 {
+    use core::arch::x86_64::{_mm256_add_ps, _mm256_mul_ps};
+    // (a.x*b.x + a.y*b.y) + a.z*b.z — the `self.x*o.x + self.y*o.y + self.z*o.z`
+    // left-to-right scalar order.
+    _mm256_add_ps(
+        _mm256_add_ps(_mm256_mul_ps(ax, bx), _mm256_mul_ps(ay, by)),
+        _mm256_mul_ps(az, bz),
+    )
+}
+
+/// 8-wide `Mat3::mul_vec` (`m · v`), bit-identical to the scalar
+/// [`Mat3::mul_vec`](crate::math::Mat3::mul_vec): each output component is a
+/// row · `v` (three [`dot8`] calls over the row-major 9-column tensor).
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[target_feature(enable = "avx2")]
+pub(super) fn mat3mulvec8(
+    m: [core::arch::x86_64::__m256; 9],
+    vx: core::arch::x86_64::__m256,
+    vy: core::arch::x86_64::__m256,
+    vz: core::arch::x86_64::__m256,
+) -> [core::arch::x86_64::__m256; 3] {
+    // `dot8` is AVX2-gated; this fn is too, so the same-feature call is safe (no
+    // `unsafe` needed). No memory access.
+    let rx = dot8(m[0], m[1], m[2], vx, vy, vz);
+    let ry = dot8(m[3], m[4], m[5], vx, vy, vz);
+    let rz = dot8(m[6], m[7], m[8], vx, vy, vz);
+    [rx, ry, rz]
+}
+
+/// 8-wide `BodyEffective::point_velocity` (`v + ω × r`), bit-identical to the
+/// scalar [`point_velocity`](super::contact::BodyEffective::point_velocity):
+/// `lin + cross8(ang, r)`, component-wise `add` after the cross (NO FMA).
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[target_feature(enable = "avx2")]
+pub(super) fn pointvel_x8(
+    lin: [core::arch::x86_64::__m256; 3],
+    ang: [core::arch::x86_64::__m256; 3],
+    r: [core::arch::x86_64::__m256; 3],
+) -> [core::arch::x86_64::__m256; 3] {
+    use core::arch::x86_64::_mm256_add_ps;
+    // `cross8` is AVX2-gated; this fn is too, so the same-feature call is safe.
+    let c = cross8(ang[0], ang[1], ang[2], r[0], r[1], r[2]);
+    [
+        _mm256_add_ps(lin[0], c[0]),
+        _mm256_add_ps(lin[1], c[1]),
+        _mm256_add_ps(lin[2], c[2]),
+    ]
+}
+
+/// 8-wide [`effective_mass`](super::contact::effective_mass), bit-identical to
+/// the scalar oracle op-for-op.
+///
+/// Mirrors the scalar `angular` closure `dir · ((I⁻¹·(r×dir))×r)` and the sum
+/// `k = invMassA + invMassB + angular(iiA, ra) + angular(iiB, rb)`, then the
+/// `if k > 0 { 1/k } else { 0 }` widened as `blendv(0, 1/k, k>0)`. The `1/k` is a
+/// single `_mm256_div_ps(one, k)`, matching the scalar `1.0 / k` (one divide).
+///
+/// The three direction calls (normal, t1, t2) are evaluated independently by the
+/// kernel (no CSE-rounding risk — each is the full `dir·(...)` term), so this is
+/// called three times per rank with the same `ra`/`rb`/body state.
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[target_feature(enable = "avx2")]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn effective_mass_x8(
+    dir: [core::arch::x86_64::__m256; 3],
+    ra: [core::arch::x86_64::__m256; 3],
+    rb: [core::arch::x86_64::__m256; 3],
+    a_invm: core::arch::x86_64::__m256,
+    a_ii: [core::arch::x86_64::__m256; 9],
+    b_invm: core::arch::x86_64::__m256,
+    b_ii: [core::arch::x86_64::__m256; 9],
+) -> core::arch::x86_64::__m256 {
+    use core::arch::x86_64::{
+        _mm256_add_ps, _mm256_cmp_ps, _mm256_blendv_ps, _mm256_div_ps, _mm256_set1_ps, _CMP_GT_OQ,
+    };
+
+    // angular(ii, r) = dir · ((ii · (r × dir)) × r) — op-for-op vs the scalar
+    // `let rd = r.cross(dir); dir.dot(inv_inertia.mul_vec(rd).cross(r))`. All
+    // callees are AVX2-gated; the closure inherits this fn's target feature, so the
+    // same-feature calls are safe (no `unsafe`). No memory access.
+    let angular = |ii: [core::arch::x86_64::__m256; 9],
+                   rx: core::arch::x86_64::__m256,
+                   ry: core::arch::x86_64::__m256,
+                   rz: core::arch::x86_64::__m256|
+     -> core::arch::x86_64::__m256 {
+        let rd = cross8(rx, ry, rz, dir[0], dir[1], dir[2]);
+        let m = mat3mulvec8(ii, rd[0], rd[1], rd[2]);
+        let mxr = cross8(m[0], m[1], m[2], rx, ry, rz);
+        dot8(dir[0], dir[1], dir[2], mxr[0], mxr[1], mxr[2])
+    };
+
+    // k = invMassA + invMassB + angular(iiA, ra) + angular(iiB, rb), left-to-right
+    // matching the scalar `+` chain.
+    let ang_a = angular(a_ii, ra[0], ra[1], ra[2]);
+    let ang_b = angular(b_ii, rb[0], rb[1], rb[2]);
+    let k = _mm256_add_ps(
+        _mm256_add_ps(_mm256_add_ps(a_invm, b_invm), ang_a),
+        ang_b,
+    );
+
+    let zero = _mm256_set1_ps(0.0);
+    let one = _mm256_set1_ps(1.0);
+    // `1.0 / k` (single divide). Where `k <= 0` the lane's divide may yield Inf/0
+    // but is discarded by the blend (the scalar `else 0.0`); FP exceptions are
+    // masked so this never traps (Decision 3/4 trap-free argument).
+    let inv_k = _mm256_div_ps(one, k);
+    let pos = _mm256_cmp_ps::<_CMP_GT_OQ>(k, zero);
+    _mm256_blendv_ps(zero, inv_k, pos)
+}
+
+/// Applies a world impulse `p` at offset `r` to the carried (lin, ang) velocity
+/// registers of 8 lanes, gated per-lane by `mask` (active AND movable) — 8-wide
+/// [`apply_impulse`](super::contact::BodyEffective::apply_impulse) under a blend.
+///
+/// Mirrors the scalar `v += inv_mass·p; ω += I⁻¹·(r×p)`: computes the full update
+/// on all 8 lanes (`mul`/`add`, NO FMA), then `blendv`s so a masked-off lane keeps
+/// its ORIGINAL velocity (bit-identical to the scalar `if *_movable` guard — and a
+/// static/sentinel row is never written, the disjoint-write soundness anchor).
+/// Returns the updated (lin, ang) register pair.
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[target_feature(enable = "avx2")]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn apply_impulse_blend_x8(
+    lin: [core::arch::x86_64::__m256; 3],
+    ang: [core::arch::x86_64::__m256; 3],
+    r: [core::arch::x86_64::__m256; 3],
+    p: [core::arch::x86_64::__m256; 3],
+    inv_mass: core::arch::x86_64::__m256,
+    inv_inertia: [core::arch::x86_64::__m256; 9],
+    mask: core::arch::x86_64::__m256,
+) -> ([core::arch::x86_64::__m256; 3], [core::arch::x86_64::__m256; 3]) {
+    use core::arch::x86_64::{_mm256_add_ps, _mm256_blendv_ps, _mm256_mul_ps};
+
+    // v_new = v + p·inv_mass (separate mul then add — matches `p * self.inv_mass`).
+    let new_lin = [
+        _mm256_add_ps(lin[0], _mm256_mul_ps(p[0], inv_mass)),
+        _mm256_add_ps(lin[1], _mm256_mul_ps(p[1], inv_mass)),
+        _mm256_add_ps(lin[2], _mm256_mul_ps(p[2], inv_mass)),
+    ];
+    // ω_new = ω + I⁻¹·(r × p) — `r.cross(p)` then `inv_inertia.mul_vec(..)` then add.
+    // `cross8` / `mat3mulvec8` are AVX2-gated; this fn is too, so the same-feature
+    // calls are safe (no `unsafe`). No memory access.
+    let torque = {
+        let rxp = cross8(r[0], r[1], r[2], p[0], p[1], p[2]);
+        mat3mulvec8(inv_inertia, rxp[0], rxp[1], rxp[2])
+    };
+    let new_ang = [
+        _mm256_add_ps(ang[0], torque[0]),
+        _mm256_add_ps(ang[1], torque[1]),
+        _mm256_add_ps(ang[2], torque[2]),
+    ];
+
+    // A masked-off lane (inactive OR static/sentinel) keeps its ORIGINAL velocity.
+    (
+        [
+            _mm256_blendv_ps(lin[0], new_lin[0], mask),
+            _mm256_blendv_ps(lin[1], new_lin[1], mask),
+            _mm256_blendv_ps(lin[2], new_lin[2], mask),
+        ],
+        [
+            _mm256_blendv_ps(ang[0], new_ang[0], mask),
+            _mm256_blendv_ps(ang[1], new_ang[1], mask),
+            _mm256_blendv_ps(ang[2], new_ang[2], mask),
+        ],
+    )
 }
 
 /// AVX2 batched gravity sub-pass — 8 bodies per iteration, bit-identical to

@@ -87,6 +87,26 @@ pub struct PhysicsConfig {
     /// the byte-identical scalar kernels. Toggling it changes performance, never
     /// the result.
     pub simd: bool,
+    /// Opt into the O7 AVX2 cohort-batched colored CONTACT SOLVE (default `false`),
+    /// independent of [`simd`](Self::simd) (which gates only the O1 integrate /
+    /// inertia kernels). This is the SEPARATE A/B + rollback knob for the
+    /// 8-lane-per-cohort [`solve_color_avx2`](crate::solver::ColoredSoftStepSolver)
+    /// kernel: when `true`, the colored solve widens its per-color sweep over
+    /// cohorts of 8 body-disjoint manifold-groups; when `false`, it runs the
+    /// byte-identical scalar `solve_color` oracle (the O6 0%-gate).
+    ///
+    /// Like [`simd`](Self::simd) it is a PURE speed path — each AVX2 lane mirrors the
+    /// scalar op sequence exactly (exact `mul`/`add`/`sub`/`div`/`sqrt`, NO FMA, NO
+    /// `rsqrt`/`rcp`), so the widened solve is BIT-IDENTICAL to the scalar colored
+    /// result for any cohort shape and worker count (the differential + the
+    /// `{1, N}×{simd}` parallel tests are the gate). It is effective only on the
+    /// colored-solve path ([`ColoredSoftStepSolver`](crate::solver::ColoredSoftStepSolver)
+    /// driven by [`physics_solve_colored`](crate::systems::physics_solve_colored));
+    /// it is a no-op for the shipped [`SoftStepSolver`](crate::solver::SoftStepSolver)
+    /// and on a non-AVX2 build / Miri (both arms then run the scalar oracle). Default
+    /// OFF so an un-opted world is byte-identical to the O6 colored solve; enabling
+    /// the O7 solve needs `simd_solve == true` (it does NOT follow [`simd`](Self::simd)).
+    pub simd_solve: bool,
     /// Opt into building the [`ConstraintGraph`] after narrowphase — constraint
     /// islands + greedy graph coloring (plan O4, Decision 2 / Decision 7).
     ///
@@ -146,6 +166,11 @@ impl Default for PhysicsConfig {
             // Default OFF so an un-opted world runs the scalar bit-oracle kernels
             // (the campaign 0%-gate); the SIMD path is a pure opt-in speed path.
             simd: false,
+            // Default OFF (independent of `simd`) so the colored solve runs the
+            // byte-identical scalar `solve_color` oracle (the O6 0%-gate); the O7
+            // cohort-batched solve is a pure opt-in speed path with a bit-identical
+            // result. Enabling it requires `simd_solve == true` explicitly.
+            simd_solve: false,
             // Default OFF so an un-opted world never builds the constraint graph
             // (the campaign 0%-gate); O4 only PRODUCES the partition — the solve is
             // byte-identical whether on or off.
