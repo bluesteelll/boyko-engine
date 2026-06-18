@@ -13,6 +13,7 @@ use boyko_utils::bit_mask::bit_set_256::BitSet256;
 use crate::components::{BodyType, Collider, ColliderShape, RigidBody, RigidBodyMass};
 use crate::manifold::{BodyIndex, Manifold};
 use crate::math::{Mat3, Quat, Vec3};
+use crate::narrowphase::axis_cache::BoxAxisCache;
 
 /// Number of bits in one [`BitSet256`] chunk.
 const BITS_PER_CHUNK: usize = 256;
@@ -114,18 +115,28 @@ impl ContactPairs {
 /// (plan D1/D4).
 ///
 /// Sequential over the ordered pairs (matching [`ContactPairs`]), so the solve
-/// iterates a packed array. Cleared and refilled each step, capacity reused.
+/// iterates a packed array. Cleared and refilled each step, capacity reused. Also
+/// carries the box-box reference-axis hysteresis store ([`BoxAxisCache`], P2 W4),
+/// embedded here so the narrowphase stage reaches it via the same `ResMut` it
+/// already holds — no extra resource wiring (the cache is a narrowphase-internal
+/// detail of producing stable feature ids, not a solver input).
 #[derive(Resource, Default)]
 pub struct Manifolds {
     /// Manifolds in the deterministic pair order.
     pub manifolds: Vec<Manifold>,
+    /// Per-body-pair last-frame SAT-axis index (box-box hysteresis, P2 W4).
+    /// Persisted in place across frames; the box-box generator feeds the stored
+    /// axis back to bias against feature-id flicker on a resting stack.
+    pub box_axis_cache: BoxAxisCache,
 }
 
 impl Manifolds {
-    /// Builds an empty manifold buffer pre-sized for `capacity` manifolds.
+    /// Builds an empty manifold buffer pre-sized for `capacity` manifolds (and the
+    /// box-axis hysteresis cache for `capacity` pairs).
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             manifolds: Vec::with_capacity(capacity),
+            box_axis_cache: BoxAxisCache::with_capacity(capacity),
         }
     }
 }
@@ -239,7 +250,7 @@ fn local_inv_inertia(shape: ColliderShape, inv_mass: f32) -> Mat3 {
             let inv = inv_mass * 5.0 / (2.0 * radius * radius);
             Mat3::from_diagonal(Vec3::new(inv, inv, inv))
         }
-        ColliderShape::Aabb { half_extents } => {
+        ColliderShape::Box { half_extents } => {
             // Full extents (w, h, d) = 2·half_extents.
             let w = 2.0 * half_extents.x;
             let h = 2.0 * half_extents.y;
@@ -445,7 +456,7 @@ mod tests {
         //   Izz⁻¹ = 12·3 / (w²+h²) = 36 / (4+16)  = 36/20
         let body = body_with_rotation(Quat::IDENTITY);
         let mass = mass_with_inv_mass(3.0);
-        let collider = collider_shape(ColliderShape::Aabb {
+        let collider = collider_shape(ColliderShape::Box {
             half_extents: Vec3::new(1.0, 2.0, 3.0),
         });
 
@@ -493,7 +504,7 @@ mod tests {
     fn from_columns_world_equals_local_at_identity() {
         let body = body_with_rotation(Quat::IDENTITY);
         let mass = mass_with_inv_mass(1.0);
-        let collider = collider_shape(ColliderShape::Aabb {
+        let collider = collider_shape(ColliderShape::Box {
             half_extents: Vec3::new(1.0, 2.0, 3.0),
         });
 
@@ -512,7 +523,7 @@ mod tests {
         let body = body_with_rotation(Quat::new(0.2, -0.4, 0.5, 0.8).normalize());
         let mass = mass_with_inv_mass(1.0);
         // An anisotropic box so the rotation visibly mixes the axes.
-        let collider = collider_shape(ColliderShape::Aabb {
+        let collider = collider_shape(ColliderShape::Box {
             half_extents: Vec3::new(1.0, 2.0, 3.0),
         });
 

@@ -117,9 +117,16 @@ pub enum ColliderShape {
         /// Radius in world units.
         radius: f32,
     },
-    /// An axis-aligned box given by its half-extents (world units).
-    Aabb {
-        /// Half-extents along each axis.
+    /// An ORIENTED box (OBB) given by its half-extents in the body's LOCAL frame
+    /// (world units). The world box is the body's
+    /// [`RigidBody::rotation`](crate::components::RigidBody::rotation) applied to
+    /// these local half-extents about [`RigidBody::position`].
+    ///
+    /// Renamed from `Aabb` in P2 W4 (OQ-3): the box-box / sphere-box generators
+    /// treat it as an oriented box (the body carries a `Quat`), so "axis-aligned"
+    /// was an active lie. The field name `half_extents` is unchanged.
+    Box {
+        /// Half-extents along each LOCAL axis (before the body rotation).
         half_extents: Vec3,
     },
 }

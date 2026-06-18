@@ -95,6 +95,60 @@ impl Vec3 {
         let inv_len = len_sq.sqrt().recip();
         self * inv_len
     }
+
+    /// Reads the component at axis `axis` (`0 = x`, `1 = y`, `2 = z`).
+    ///
+    /// Used by the box narrowphase (P2 W4) to address the principal axis a SAT
+    /// face axis selects without a per-axis `match`.
+    ///
+    /// # Panics (debug only)
+    ///
+    /// `debug_assert!`s `axis < 3`; an out-of-range axis is a narrowphase bug.
+    #[inline]
+    pub fn axis(self, axis: usize) -> f32 {
+        debug_assert!(axis < 3, "invariant: Vec3 axis index must be 0..3");
+        match axis {
+            0 => self.x,
+            1 => self.y,
+            _ => self.z,
+        }
+    }
+
+    /// Component-wise (Hadamard) product `(self.x·rhs.x, …)`.
+    ///
+    /// Used to scale a box's local half-extents by a per-axis sign vector when
+    /// building OBB corners (P2 W4).
+    #[inline]
+    pub fn componentwise_mul(self, rhs: Self) -> Self {
+        Self {
+            x: self.x * rhs.x,
+            y: self.y * rhs.y,
+            z: self.z * rhs.z,
+        }
+    }
+
+    /// Per-component absolute value `(|x|, |y|, |z|)`.
+    #[inline]
+    pub fn abs(self) -> Self {
+        Self {
+            x: self.x.abs(),
+            y: self.y.abs(),
+            z: self.z.abs(),
+        }
+    }
+
+    /// Per-component clamp into `[-limit.x, limit.x] × …` (a symmetric box).
+    ///
+    /// The sphere-box closest-point uses this to clamp a sphere center expressed
+    /// in a box's local frame to the box's half-extents (P2 W4).
+    #[inline]
+    pub fn clamp_symmetric(self, limit: Self) -> Self {
+        Self {
+            x: self.x.clamp(-limit.x, limit.x),
+            y: self.y.clamp(-limit.y, limit.y),
+            z: self.z.clamp(-limit.z, limit.z),
+        }
+    }
 }
 
 impl Add for Vec3 {
@@ -228,6 +282,29 @@ impl Quat {
         let u = Vec3::new(self.x, self.y, self.z);
         let t = u.cross(v) * 2.0;
         v + t * self.w + u.cross(t)
+    }
+
+    /// The conjugate `(−x, −y, −z, w)` — the INVERSE rotation for a unit
+    /// quaternion (`q⁻¹ = q̄ / |q|²`, and `|q| = 1` for an orientation).
+    #[inline]
+    pub fn conjugate(self) -> Self {
+        Self {
+            x: -self.x,
+            y: -self.y,
+            z: -self.z,
+            w: self.w,
+        }
+    }
+
+    /// Rotates `v` by the INVERSE of this orientation (`v' = q⁻¹ · v · q`).
+    ///
+    /// For a unit `self` this is [`conjugate`](Self::conjugate)`.rotate(v)` — it
+    /// maps a WORLD-frame vector into the body's LOCAL frame, which the box
+    /// narrowphase (P2 W4) uses to express a sphere center / another box in an
+    /// OBB's local axes.
+    #[inline]
+    pub fn inverse_rotate(self, v: Vec3) -> Vec3 {
+        self.conjugate().rotate(v)
     }
 
     /// Advances this orientation by `angular_velocity` (world-frame, rad/s) over

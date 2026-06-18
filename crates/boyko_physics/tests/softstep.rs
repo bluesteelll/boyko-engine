@@ -105,6 +105,47 @@ fn sphere(
     (body, mass, collider)
 }
 
+/// A box (OBB) body at `position` with the given orientation, half-extents,
+/// mass-inverse, friction, and body type (no initial velocity, zero restitution —
+/// the W4 stacking/incline gates want resting contacts, not bounce).
+#[allow(clippy::too_many_arguments)]
+fn box_body(
+    position: Vec3,
+    rotation: Quat,
+    half_extents: Vec3,
+    inv_mass: f32,
+    restitution: f32,
+    friction: f32,
+    body_type: BodyType,
+) -> (RigidBody, RigidBodyMass, Collider) {
+    let body = RigidBody {
+        position,
+        linear_velocity: Vec3::ZERO,
+        rotation,
+        angular_velocity: Vec3::ZERO,
+    };
+    let mass = RigidBodyMass {
+        inv_inertia: Mat3::IDENTITY,
+        inv_mass,
+        restitution,
+        friction,
+        body_type,
+    };
+    let collider = Collider {
+        shape: ColliderShape::Box { half_extents },
+        layer: 1,
+        mask: 1,
+    };
+    (body, mass, collider)
+}
+
+/// A quaternion rotating by `angle` radians about +z (the incline axis used by the
+/// box-on-incline friction gate).
+fn quat_z(angle: f32) -> Quat {
+    let half = 0.5 * angle;
+    Quat::new(0.0, 0.0, half.sin(), half.cos())
+}
+
 /// Builds the physics schedule for solver `S` and stamps the fixed timestep.
 fn build_schedule<S: RigidSolver + Default>(world: &mut EcsMaster, dt: f32) -> Schedule {
     let mut builder = ScheduleBuilder::new(serial_pool());
@@ -1217,6 +1258,451 @@ fn warm_start_improves_convergence() {
     assert!(
         cold_sink > warm_sink + 0.05,
         "the A/B must be non-vacuous (cold must sink measurably more than warm): \
+         cold sink {cold_sink} vs warm sink {warm_sink}"
+    );
+}
+
+// ── W4 box-contact gates (sphere-box, box-box stacking, box-on-incline friction) ─
+
+#[test]
+fn sphere_box_resting() {
+    // A dynamic sphere falls onto a STATIC box floor and rests on its top face —
+    // it must make a genuine contact every frame (sphere-box closest-point) and
+    // not fall through. Proves the sphere-box generator + the shape dispatch are
+    // wired and produce a stable resting contact.
+    use boyko_physics::resources::Manifolds;
+    let mut world = EcsMaster::new();
+    // Static box floor: wide in x/z, thin in y, top surface at y = 0.
+    let floor_half = Vec3::new(10.0, 0.5, 10.0);
+    let (fb, fm, fc) = box_body(
+        Vec3::new(0.0, -floor_half.y, 0.0),
+        Quat::IDENTITY,
+        floor_half,
+        0.0,
+        0.0,
+        0.5,
+        BodyType::Static,
+    );
+    spawn_body(&mut world, fb, fm, fc);
+    // Dynamic sphere spawned above the floor with a gap (rest height ≈ r = 0.5).
+    let r = 0.5_f32;
+    let spawn_y = 1.0_f32;
+    let (sb, sm, sc) = sphere(
+        Vec3::new(0.0, spawn_y, 0.0),
+        Vec3::ZERO,
+        r,
+        1.0,
+        0.0,
+        0.5,
+        BodyType::Dynamic,
+    );
+    spawn_body(&mut world, sb, sm, sc);
+
+    let dt = 1.0 / 60.0;
+    let mut schedule = build_schedule::<SoftStepSolver>(&mut world, dt);
+    world.resource_mut::<PhysicsConfig>().gravity = Vec3::new(0.0, -9.81, 0.0);
+
+    // Let it fall and settle.
+    for _ in 0..120 {
+        schedule.run(&mut world);
+    }
+    let settled_y = all_bodies(&mut world)[1].position.y;
+
+    // Watch it hold over a long run.
+    let mut min_y = settled_y;
+    let mut total_contacts = 0usize;
+    for _ in 0..200 {
+        schedule.run(&mut world);
+        total_contacts += world.resource::<Manifolds>().manifolds.len();
+        let b = all_bodies(&mut world)[1];
+        min_y = min_y.min(b.position.y);
+        assert!(b.position.y.is_finite(), "sphere produced a non-finite y: {b:?}");
+    }
+
+    // Non-vacuous: a sphere-box contact fires every frame.
+    assert!(
+        total_contacts >= 200,
+        "the sphere must contact the box floor every frame (else the gate is vacuous): {total_contacts}"
+    );
+    // Rests near r = 0.5 (its bottom on the box top at y = 0), does not fall through.
+    assert!(
+        (settled_y - r).abs() < 0.1,
+        "sphere should rest at ~r on the box top: settled_y {settled_y}, r {r}"
+    );
+    assert!(
+        min_y >= r - 0.1,
+        "sphere sank into / through the box floor: min_y {min_y}, r {r}"
+    );
+}
+
+/// Spawns a STATIC box floor (top surface at y = 0) plus `n` dynamic unit boxes
+/// (half-extents `h`) stacked flat, each centered one box-height above the one
+/// below with a tiny overlap so the strict `separation < 0` clip keeps points.
+///
+/// Serialized spawn order (floor, then bottom→top) keeps the dense rows — the
+/// warm-start / hysteresis keys — stable frame-to-frame.
+fn spawn_box_stack(world: &mut EcsMaster, n: usize, h: f32) {
+    let floor_half = Vec3::new(20.0, 1.0, 20.0);
+    let (fb, fm, fc) = box_body(
+        Vec3::new(0.0, -floor_half.y, 0.0),
+        Quat::IDENTITY,
+        floor_half,
+        0.0,
+        0.0,
+        0.8,
+        BodyType::Static,
+    );
+    spawn_body(world, fb, fm, fc);
+
+    let overlap = 0.01_f32;
+    for i in 0..n {
+        // Bottom box center at y = h - overlap; each higher one at +(2h - overlap).
+        let y = h + (i as f32) * (2.0 * h - overlap) - overlap;
+        let (bb, bm, bc) = box_body(
+            Vec3::new(0.0, y, 0.0),
+            Quat::IDENTITY,
+            Vec3::new(h, h, h),
+            1.0,
+            0.0, // resting stack must not bounce
+            0.8,
+            BodyType::Dynamic,
+        );
+        spawn_body(world, bb, bm, bc);
+    }
+}
+
+#[test]
+fn stacking_is_stable_boxes() {
+    // THE W4 stacking gate: a small tower of dynamic boxes on a static box floor
+    // must HOLD over many frames — no jitter-apart, no explosion, no sink-through.
+    // Box face-face contacts are multi-point (up to 4), so this exercises the SAT
+    // + clip + reduction path plus the feature-id stability / hysteresis that keep
+    // a resting near-parallel stack from flickering its warm-start.
+    use boyko_physics::resources::Manifolds;
+
+    let n = 3usize; // 3 dynamic boxes + 1 static floor.
+    let h = 0.5_f32; // unit boxes (half-extent 0.5).
+    let mut world = EcsMaster::new();
+    spawn_box_stack(&mut world, n, h);
+
+    let dt = 1.0 / 60.0;
+    let mut schedule = build_schedule::<SoftStepSolver>(&mut world, dt);
+    world.resource_mut::<PhysicsConfig>().gravity = Vec3::new(0.0, -9.81, 0.0);
+
+    let rest_top_y = all_bodies(&mut world)[n].position.y;
+
+    // Settle, then watch over a long run.
+    for _ in 0..30 {
+        schedule.run(&mut world);
+    }
+
+    let mut max_top_y = f32::MIN;
+    let mut min_top_y = f32::MAX;
+    let mut max_pen = 0.0_f32;
+    let mut max_speed_sq = 0.0_f32;
+    let mut total_contacts = 0usize;
+    let mut multi_point_frames = 0usize;
+
+    for _ in 0..300 {
+        schedule.run(&mut world);
+        let manifolds = world.resource::<Manifolds>();
+        total_contacts += manifolds.manifolds.len();
+        // A box face-face contact must produce multi-point manifolds — count frames
+        // where at least one manifold carries >= 2 points (proves the clipper runs).
+        if manifolds.manifolds.iter().any(|m| m.count >= 2) {
+            multi_point_frames += 1;
+        }
+        let bodies = all_bodies(&mut world);
+
+        for b in &bodies {
+            assert!(
+                b.position.x.is_finite() && b.position.y.is_finite() && b.position.z.is_finite(),
+                "box stack produced a non-finite position: {b:?}"
+            );
+        }
+
+        let top_y = bodies[n].position.y;
+        max_top_y = max_top_y.max(top_y);
+        min_top_y = min_top_y.min(top_y);
+        max_speed_sq = max_speed_sq.max(
+            bodies[1..=n]
+                .iter()
+                .map(|b| b.linear_velocity.length_squared())
+                .fold(0.0, f32::max),
+        );
+
+        // Inter-body penetration along y for each adjacent dynamic pair.
+        for w in 1..n {
+            let lower = bodies[w].position.y;
+            let upper = bodies[w + 1].position.y;
+            let pen = (2.0 * h) - (upper - lower);
+            max_pen = max_pen.max(pen);
+        }
+    }
+
+    // Anti-vacuity: the stack is in sustained contact (floor + inter-box) and the
+    // box clipper actually fired multi-point manifolds.
+    assert!(
+        total_contacts >= 300 * 2,
+        "the box stack must be in sustained multi-contact (else vacuous): {total_contacts}"
+    );
+    assert!(
+        multi_point_frames >= 300 - 5,
+        "box face-face contacts must be multi-point nearly every frame (clipper firing): {multi_point_frames}"
+    );
+    // Does not drift apart / launch upward.
+    assert!(
+        max_top_y <= rest_top_y + 0.25 * h,
+        "box stack drifted apart / launched upward: rest_top_y {rest_top_y}, max_top_y {max_top_y}"
+    );
+    // Does not sink / collapse through.
+    assert!(
+        min_top_y >= rest_top_y - 0.5 * h,
+        "box stack sank / collapsed: rest_top_y {rest_top_y}, min_top_y {min_top_y}"
+    );
+    // Bounded inter-body penetration (soft squish, not a pass-through).
+    assert!(
+        max_pen < 0.25 * h,
+        "inter-box penetration exceeded a fraction of the half-extent: max_pen {max_pen}"
+    );
+    // At rest, not jittering.
+    assert!(
+        max_speed_sq < 1.0,
+        "box stack is jittering (resting boxes gained speed): max speed^2 {max_speed_sq}"
+    );
+}
+
+/// Drops a dynamic box onto a STATIC box inclined by `incline` rad about +z, lets
+/// it SETTLE, then runs `frames` more and returns the box's total in-plane (x, y)
+/// displacement magnitude from the settled position — how far it slid along the
+/// incline.
+///
+/// Both boxes are rotated by `incline` so the dynamic box's bottom face is parallel
+/// to the incline surface (a stable face-face contact). The dynamic box spawns just
+/// above the incline surface along the surface normal and falls into contact. With
+/// `tan(incline) < µ` the friction cone holds it; with `tan(incline) > µ` it slides
+/// downhill. The non-vacuity contact assert guards the friction cone being loaded.
+fn box_incline_slide(incline: f32, friction: f32, frames: usize) -> f32 {
+    use boyko_physics::resources::Manifolds;
+    let mut world = EcsMaster::new();
+    let rot = quat_z(incline);
+    // Static inclined floor box (wide, thin).
+    let floor_half = Vec3::new(20.0, 0.5, 20.0);
+    let (fb, fm, fc) = box_body(
+        Vec3::ZERO,
+        rot,
+        floor_half,
+        0.0,
+        0.0,
+        friction,
+        BodyType::Static,
+    );
+    spawn_body(&mut world, fb, fm, fc);
+    // Dynamic box on the incline. Surface normal = R_z(θ)·(0,1,0) = (-sinθ, cosθ, 0).
+    let surface_normal = Vec3::new(-incline.sin(), incline.cos(), 0.0);
+    let box_half = Vec3::new(0.5, 0.5, 0.5);
+    // Spawn a small gap above the surface along the normal so it falls in cleanly.
+    let gap = 0.3_f32;
+    let center = surface_normal * (floor_half.y + box_half.y + gap);
+    let (db, dm, dc) = box_body(center, rot, box_half, 1.0, 0.0, friction, BodyType::Dynamic);
+    spawn_body(&mut world, db, dm, dc);
+
+    let dt = 1.0 / 120.0;
+    let mut schedule = build_schedule::<SoftStepSolver>(&mut world, dt);
+    world.resource_mut::<PhysicsConfig>().gravity = Vec3::new(0.0, -9.81, 0.0);
+
+    // Settle into a resting contact on the incline.
+    for _ in 0..240 {
+        schedule.run(&mut world);
+    }
+    let settled = all_bodies(&mut world)[1].position;
+
+    let mut total_contacts = 0usize;
+    for _ in 0..frames {
+        schedule.run(&mut world);
+        total_contacts += world.resource::<Manifolds>().manifolds.len();
+    }
+    assert!(
+        total_contacts >= 1,
+        "the box on the incline must contact the floor (else friction is vacuous): {total_contacts}"
+    );
+    let p = all_bodies(&mut world)[1].position;
+    let d = p - settled;
+    // In-plane (x, y) displacement magnitude — the incline tilts in the x-y plane.
+    (d.x * d.x + d.y * d.y).sqrt()
+}
+
+#[test]
+fn box_box_friction_3d() {
+    // THE W4 friction gate: a box resting on an INCLINED static box under gravity.
+    // Below the friction-cone limit (tan θ < µ) it stays put; above it (tan θ > µ)
+    // it slides down. Forces the 2-DOF Coulomb cone onto a MULTI-POINT box face
+    // contact (not a single sphere point). Incline = 0.3 rad (tan ≈ 0.309).
+    let incline = 0.3_f32; // tan(0.3) ≈ 0.309.
+
+    // High friction (µ = 1.0 > tan θ): the cone holds — the box barely moves.
+    let held = box_incline_slide(incline, 1.0, 240);
+    // Low friction (µ = 0.05 < tan θ): the cone saturates — the box slides downhill.
+    let slid = box_incline_slide(incline, 0.05, 240);
+
+    // The held box stays essentially put (a little settle creep tolerated).
+    assert!(
+        held < 0.05,
+        "static friction must hold the box below the cone limit (tan θ < µ): slid {held}"
+    );
+    // The low-friction box slides a meaningful distance.
+    assert!(
+        slid > 0.2,
+        "above the cone limit (tan θ > µ) the box must slide downhill: slid {slid}"
+    );
+    // And the contrast is decisive (not a marginal tie).
+    assert!(
+        slid > held * 5.0,
+        "the slide must dominate the hold (non-vacuous cone): slid {slid} vs held {held}"
+    );
+}
+
+#[test]
+fn box_solver_is_deterministic() {
+    // The W4 box-scene determinism gate: a box scene (a small tilted box cluster on
+    // a static box floor) run twice in this process, serialized spawn, ends
+    // BIT-IDENTICAL. Exercises the SAT min-axis selection, the clip, the ≤4-point
+    // reduction, and the hysteresis cache — all must be pure functions of the
+    // geometry (no FP-tie / probe-order nondeterminism).
+    fn run_once() -> Vec<RigidBody> {
+        let mut world = EcsMaster::new();
+        // Static floor box.
+        let (fb, fm, fc) = box_body(
+            Vec3::new(0.0, -1.0, 0.0),
+            Quat::IDENTITY,
+            Vec3::new(10.0, 1.0, 10.0),
+            0.0,
+            0.0,
+            0.6,
+            BodyType::Static,
+        );
+        spawn_body(&mut world, fb, fm, fc);
+        // A few dynamic boxes, slightly tilted/offset so the SAT + clip do real work.
+        let setup = [
+            (Vec3::new(0.0, 0.55, 0.0), quat_z(0.02)),
+            (Vec3::new(0.2, 1.6, 0.1), quat_z(-0.03)),
+            (Vec3::new(-0.15, 2.65, -0.05), quat_z(0.01)),
+        ];
+        for &(pos, rot) in &setup {
+            let (b, m, c) = box_body(
+                pos,
+                rot,
+                Vec3::new(0.5, 0.5, 0.5),
+                1.0,
+                0.0,
+                0.6,
+                BodyType::Dynamic,
+            );
+            spawn_body(&mut world, b, m, c);
+        }
+
+        let dt = 1.0 / 60.0;
+        let mut schedule = build_schedule::<SoftStepSolver>(&mut world, dt);
+        for _ in 0..30 {
+            schedule.run(&mut world);
+        }
+        all_bodies(&mut world)
+    }
+
+    let a = run_once();
+    let b = run_once();
+    assert_eq!(a.len(), b.len());
+    for (i, (ba, bb)) in a.iter().zip(b.iter()).enumerate() {
+        assert_eq!(ba.position.x.to_bits(), bb.position.x.to_bits(), "body {i} pos.x");
+        assert_eq!(ba.position.y.to_bits(), bb.position.y.to_bits(), "body {i} pos.y");
+        assert_eq!(ba.position.z.to_bits(), bb.position.z.to_bits(), "body {i} pos.z");
+        assert_eq!(ba.linear_velocity.x.to_bits(), bb.linear_velocity.x.to_bits(), "body {i} vel.x");
+        assert_eq!(ba.linear_velocity.y.to_bits(), bb.linear_velocity.y.to_bits(), "body {i} vel.y");
+        assert_eq!(ba.linear_velocity.z.to_bits(), bb.linear_velocity.z.to_bits(), "body {i} vel.z");
+        assert_eq!(ba.rotation.x.to_bits(), bb.rotation.x.to_bits(), "body {i} rot.x");
+        assert_eq!(ba.rotation.y.to_bits(), bb.rotation.y.to_bits(), "body {i} rot.y");
+        assert_eq!(ba.rotation.z.to_bits(), bb.rotation.z.to_bits(), "body {i} rot.z");
+        assert_eq!(ba.rotation.w.to_bits(), bb.rotation.w.to_bits(), "body {i} rot.w");
+    }
+}
+
+// ── W4 per-point warm-start A/B (box manifolds) ──────────────────────────────
+
+/// Runs a box stack (`n` dynamic unit boxes on a static box floor) under a STARVED
+/// solver budget (1 substep, 0 relax) with warm-starting `warm`, then returns how
+/// far the top box sank below its supported rest height (positive = collapsed
+/// downward) and the worst inter-box penetration.
+///
+/// The box analogue of `stack_sink_at_substeps`: a box face-face contact is
+/// multi-point (up to 4), so it directly exercises the W4 PER-POINT warm-start. W3
+/// keyed the whole manifold by point 0 and left 3 of the 4 points permanently cold;
+/// per-point keying seeds every contact point from its own converged impulse, so a
+/// starved budget holds the stack markedly higher.
+fn box_stack_sink_at_substeps(substeps: u32, warm: bool) -> (f32, f32) {
+    let n = 4usize; // 4 dynamic boxes + 1 static floor.
+    let h = 0.5_f32; // unit boxes (half-extent 0.5).
+    let mut world = EcsMaster::new();
+    spawn_box_stack(&mut world, n, h);
+
+    let dt = 1.0 / 60.0;
+    let mut schedule = build_schedule::<SoftStepSolver>(&mut world, dt);
+    world.resource_mut::<PhysicsConfig>().gravity = Vec3::new(0.0, -9.81, 0.0);
+    world.resource_mut::<PhysicsConfig>().substeps = substeps;
+    // Starve the iteration budget so the per-point warm-seed is the dominant term.
+    world.resource_mut::<PhysicsConfig>().relax_iterations = 0;
+    // Replace the schedule's default (warm-ON) solver with the toggled one.
+    world.insert_resource(SoftStepSolver::with_warm_start(warm));
+
+    let rest_top_y = all_bodies(&mut world)[n].position.y;
+
+    for _ in 0..240 {
+        schedule.run(&mut world);
+    }
+
+    let bodies = all_bodies(&mut world);
+    let sink = (rest_top_y - bodies[n].position.y).max(0.0);
+    // Worst inter-box penetration along y across adjacent dynamic pairs.
+    let mut max_pen = 0.0_f32;
+    for w in 1..n {
+        let pen = (2.0 * h) - (bodies[w + 1].position.y - bodies[w].position.y);
+        max_pen = max_pen.max(pen);
+    }
+    (sink, max_pen)
+}
+
+#[test]
+fn box_per_point_warm_start_improves_convergence() {
+    // THE W4 per-point warm-start gate: at a STARVED budget (1 substep, 0 relax) a
+    // BOX stack — whose face-face contacts are MULTI-POINT — holds markedly higher
+    // WITH per-point warm-start than WITHOUT (cold, zero-seeded). This is the box
+    // analogue of `warm_start_improves_convergence` (spheres), and it specifically
+    // depends on points 1..count being seeded — W3 keyed the whole manifold by
+    // point 0, leaving 3 of 4 box contact points permanently cold.
+    //
+    // The metric is STATE error (how far the tower sank below its supported config),
+    // not residual velocity: a cold starved solve settles "quiet" while collapsing.
+    let starved = 1u32;
+
+    let (cold_sink, cold_pen) = box_stack_sink_at_substeps(starved, false);
+    let (warm_sink, warm_pen) = box_stack_sink_at_substeps(starved, true);
+
+    // Per-point warm-start holds the box stack higher at the same starved budget.
+    assert!(
+        warm_sink < cold_sink,
+        "per-point warm-start must hold the box stack higher at a starved budget: \
+         warm sink {warm_sink} vs cold sink {cold_sink}"
+    );
+    // It does not penetrate worse (warm-start tightens, never loosens, the contacts).
+    assert!(
+        warm_pen <= cold_pen + 1e-3,
+        "per-point warm-start must not penetrate worse than cold: \
+         warm pen {warm_pen} vs cold pen {cold_pen}"
+    );
+    // Non-vacuity: the cold solve genuinely sank a meaningful amount, so the win is
+    // real (not a tie at zero) and the per-point seeding is the load-bearing term.
+    assert!(
+        cold_sink > warm_sink + 0.05,
+        "the box A/B must be non-vacuous (cold sinks measurably more than warm): \
          cold sink {cold_sink} vs warm sink {warm_sink}"
     );
 }

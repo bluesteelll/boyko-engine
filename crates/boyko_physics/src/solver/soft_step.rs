@@ -1,5 +1,5 @@
-//! The in-house TGS-Soft rigid-body solver — sphere-sphere contacts with
-//! cross-frame warm-starting (P2 W2 + W3).
+//! The in-house TGS-Soft rigid-body solver — sphere and box contacts with
+//! cross-frame, per-contact-point warm-starting (P2 W2 + W3 + W4).
 //!
 //! [`SoftStepSolver`] is a real [`RigidSolver`](super::RigidSolver) that resolves
 //! the narrowphase manifolds with the Temporal Gauss-Seidel "Soft Step" scheme
@@ -10,29 +10,34 @@
 //! returns `true`), so the pipeline's
 //! [`physics_integrate`](crate::systems::physics_integrate) is gated off (C2).
 //!
-//! # Warm-starting (W3)
+//! # Warm-starting (W3 + W4 per-point)
 //!
-//! Sequential-impulse convergence is slow from a zero seed, so a sphere stack
-//! jitters apart under the per-step substep budget. W3 persists each contact's
-//! converged accumulated impulses (normal + 2 tangent) across frames via the
-//! double-buffered [`WarmStartTable`](super::warm_start::WarmStartTable):
+//! Sequential-impulse convergence is slow from a zero seed, so a stack jitters
+//! apart under the per-step substep budget. The solver persists each contact
+//! POINT's converged accumulated impulses (normal + 2 tangent) across frames via
+//! the double-buffered [`WarmStartTable`](super::warm_start::WarmStartTable):
 //!
-//! 1. **Seed** (start of [`solve`](SoftStepSolver::solve)): each contact's
-//!    accumulated impulse is read from last frame's `read` table (zero on a miss).
+//! 1. **Seed** (start of [`solve`](SoftStepSolver::solve)): each contact point's
+//!    accumulated impulse is read from last frame's `read` table, keyed by THIS
+//!    point's `pack(body_a, body_b, feature_id)` (zero on a miss). W4: every point
+//!    of a multi-point box manifold seeds independently by its own feature id —
+//!    the W3 wiring keyed the whole manifold by point 0 and left points 1..count
+//!    permanently cold.
 //! 2. **Apply** (per substep, after gravity, before the soft sweep, matching
 //!    Box2D-v3 `b2WarmStartContactsTask`): the seeded impulse is applied to the
 //!    bodies' velocities so the solve starts from the warm state. It re-applies
 //!    each substep because each substep re-integrates gravity.
-//! 3. **Store + swap** (end of `solve`): the converged impulses are inserted into
-//!    a freshly-zeroed `write` table in manifold order, then `read` ↔ `write`
+//! 3. **Store + swap** (end of `solve`): each point's converged impulse is
+//!    inserted into a freshly-zeroed `write` table under its own key, in the
+//!    flattened `(manifold order, point index)` order, then `read` ↔ `write`
 //!    swap (C3 — rebuilt each frame, deterministic, no per-step alloc).
 //!
-//! # What W3 does NOT include
+//! A W3 sphere-sphere manifold has a single point with `feature_id == 0`, so its
+//! per-point key equals the old per-manifold key — the sphere warm-start path is
+//! byte-identical.
 //!
-//! - **Box / sphere-box contacts** (W4): narrowphase stays sphere-sphere, so the
-//!   manifolds carry a single contact point each (`feature_id == 0`); the solver
-//!   loops the generic `0..count` point range regardless, so W4 is purely a
-//!   narrowphase change.
+//! # What this solver does NOT include
+//!
 //! - **SDF contacts + the C1 sentinel path** (W5): every manifold here keys two
 //!   real dense rows.
 //!
@@ -98,6 +103,12 @@ struct PointConstraint {
     tangent_impulse1: f32,
     /// Accumulated tangent impulse along `t2` (W3 warm-seeds it from last frame).
     tangent_impulse2: f32,
+    /// This point's own warm-start key (W4): `pack(body_a, body_b, feature_id)`
+    /// with THIS point's `feature_id`. Each contact point warm-starts
+    /// independently, so a box manifold's 4 points each carry / persist their own
+    /// converged impulse (W3 sphere-sphere has one point with `feature_id == 0`,
+    /// so its key equals the W3 per-manifold key — byte-identical behavior).
+    warm_key: u64,
 }
 
 /// One manifold's solver state — the body-row indices, the contact frame, and
@@ -119,11 +130,6 @@ struct ManifoldConstraint {
     point_start: usize,
     /// Number of live points (`points[point_start .. point_start + count]`).
     count: usize,
-    /// Warm-start key for this manifold's single contact (W3): `pack(body_a,
-    /// body_b, feature_id)`. For W3 sphere-sphere the manifold has one point with
-    /// `feature_id == 0`, so this one key covers the whole manifold; W4 box
-    /// manifolds (multiple points with distinct feature ids) will key per point.
-    warm_key: u64,
 }
 
 /// The in-house TGS-Soft rigid-body solver (P2 W2 + W3 warm-starting).
@@ -219,12 +225,17 @@ impl SoftStepSolver {
     /// gather position); the soft solve re-uses them across substeps (it does not
     /// re-run narrowphase). Tangent bases are degeneracy-safe (`tangent_basis`).
     ///
-    /// The warm seed: each manifold's contact key is `pack(body_a, body_b,
-    /// feature_id)`; a `read`-table hit seeds the accumulated normal + tangent
-    /// impulses with last frame's converged value, and a miss (a new or
-    /// just-reformed contact) seeds zero — a one-frame convergence cost, no error.
-    /// When `warm_start_enabled` is `false` (the A/B test hook) the seed is always
-    /// zero (the W2 behavior).
+    /// The warm seed (W4 — per-point): each contact POINT is keyed by
+    /// `pack(body_a, body_b, point.feature_id)` — its OWN feature id, not the
+    /// manifold's point-0 id. A `read`-table hit seeds that point's accumulated
+    /// normal + tangent impulses with last frame's converged value; a miss (a new
+    /// or just-reformed point — e.g. a box manifold point whose feature id flipped)
+    /// seeds zero, a one-frame convergence cost, no error. A box manifold's 4
+    /// points therefore warm-start independently (the W3 limitation that left
+    /// points 1..count always cold). When `warm_start_enabled` is `false` (the A/B
+    /// test hook) every seed is zero (the W2 behavior). A W3 sphere-sphere manifold
+    /// has one point with `feature_id == 0`, so its key equals the old per-manifold
+    /// key — the sphere path is byte-identical.
     fn build_constraints(
         &mut self,
         manifolds: &[Manifold],
@@ -246,16 +257,6 @@ impl SoftStepSolver {
             let (tangent1, tangent2) = tangent_basis(normal);
             let point_start = self.points.len();
 
-            // W3 warm-start key: one key per W3 sphere-sphere manifold (single
-            // point, `feature_id == 0`). The `read` table holds last frame's
-            // converged impulses; a miss seeds zero.
-            let warm_key = warm_start::pack(m.body_a, m.body_b, m.points[0].feature_id);
-            let seed = if self.warm_start_enabled {
-                self.warm_read.get(warm_key)
-            } else {
-                None
-            };
-
             let pa = bodies[ia].position;
             let pb = bodies[ib].position;
 
@@ -272,12 +273,19 @@ impl SoftStepSolver {
                     bb.point_velocity(rb) - ba.point_velocity(ra)
                 };
                 vn_initial.push(dv.dot(normal));
+                // W4 per-point warm key: this point's OWN feature id. Each point
+                // probes the `read` table independently, so a box manifold's 4
+                // points each seed from their own last-frame converged impulse.
+                let warm_key = warm_start::pack(m.body_a, m.body_b, cp.feature_id);
+                let seed = if self.warm_start_enabled {
+                    self.warm_read.get(warm_key)
+                } else {
+                    None
+                };
                 // Warm-seed the accumulated impulses (zero on miss / disabled).
-                // W3: a manifold has one point, so the single key seeds point 0;
-                // any future extra points (W4) start zero until per-point keys land.
                 let (normal_impulse, tangent_impulse1, tangent_impulse2) = match seed {
-                    Some(e) if p == 0 => (e.normal_impulse, e.tangent_impulse[0], e.tangent_impulse[1]),
-                    _ => (0.0, 0.0, 0.0),
+                    Some(e) => (e.normal_impulse, e.tangent_impulse[0], e.tangent_impulse[1]),
+                    None => (0.0, 0.0, 0.0),
                 };
                 self.points.push(PointConstraint {
                     ra,
@@ -286,6 +294,7 @@ impl SoftStepSolver {
                     normal_impulse,
                     tangent_impulse1,
                     tangent_impulse2,
+                    warm_key,
                 });
             }
 
@@ -297,7 +306,6 @@ impl SoftStepSolver {
                 tangent2,
                 point_start,
                 count,
-                warm_key,
             });
         }
     }
@@ -339,27 +347,32 @@ impl SoftStepSolver {
         }
     }
 
-    /// Stores every contact's converged accumulated impulses into the freshly
-    /// rebuilt `write` table, then swaps `read` ↔ `write` (the W3 store, C3).
+    /// Stores every contact POINT's converged accumulated impulses into the
+    /// freshly rebuilt `write` table, then swaps `read` ↔ `write` (the W3/W4
+    /// store, C3).
     ///
     /// [`rebuild`](WarmStartTable::rebuild) zeroes the `write` table sized for the
-    /// live contact-point count, then each manifold's converged impulse is
-    /// inserted under its `warm_key` in deterministic manifold order. The
-    /// resulting occupancy is a pure function of this frame's key set
-    /// (order-independent, no carried history), so the swapped-in `read` table is
-    /// bit-deterministic next frame. When warm-starting is disabled the store is
-    /// skipped (the `read` table stays empty, so every seed misses).
+    /// live contact-POINT count, then each point's converged impulse is inserted
+    /// under its OWN `warm_key` (W4 — per point, not per manifold) in the
+    /// deterministic flattened order `points[]` already holds (manifold order,
+    /// then point index `0..count`). The resulting occupancy is a pure function of
+    /// this frame's key set (order-independent, no carried history), so the
+    /// swapped-in `read` table is bit-deterministic next frame. When warm-starting
+    /// is disabled the store is skipped (the `read` table stays empty, so every
+    /// seed misses).
     fn store_and_swap(&mut self) {
         if !self.warm_start_enabled {
             return;
         }
         let point_count = self.points.len();
         self.warm_write.rebuild(point_count);
-        for mc in &self.manifolds {
-            // W3: one point per manifold, so point 0 carries the converged impulse.
-            let pc = &self.points[mc.point_start];
+        // Each point persists independently under its own per-point key, in the
+        // flattened `(manifold order, point index)` order — the deterministic C3
+        // insertion order. A box manifold's 4 points therefore each carry their
+        // converged impulse to next frame.
+        for pc in &self.points {
             self.warm_write.insert(
-                mc.warm_key,
+                pc.warm_key,
                 pc.normal_impulse,
                 [pc.tangent_impulse1, pc.tangent_impulse2],
             );

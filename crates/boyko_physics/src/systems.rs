@@ -62,6 +62,8 @@ use boyko_ecs::ecs::core::time::FixedTime;
 use crate::components::{Collider, ColliderShape, RigidBody, RigidBodyMass};
 use crate::manifold::{BodyIndex, ContactPoint, Manifold};
 use crate::math::Vec3;
+use crate::narrowphase::box_box::box_box_contact;
+use crate::narrowphase::sphere_box::sphere_box_contact;
 use crate::resources::{
     BodyState, ContactPairs, IntegrationMode, Manifolds, PhysicsConfig, SolverScratch,
 };
@@ -198,15 +200,26 @@ pub fn physics_broadphase(scratch: Res<SolverScratch>, mut pairs: ResMut<Contact
 }
 
 /// Produces a [`Manifold`] for each overlapping pair into [`Manifolds`]
-/// (plan D3 stage 3).
+/// (plan D3 stage 3; P2 W4 convex dispatch).
 ///
-/// A real sphere-sphere narrowphase over the candidate pairs: for an
-/// overlapping pair it emits a single contact point (`count = 1`; the capacity
-/// is 4 but spheres need only one) with the separation along the
-/// center-to-center 3D normal (the foundation's end-to-end seam exercise — the
-/// no-op solver still ignores these manifolds). A full box-box 4-point clipper
-/// is Phase-10+ work. Manifolds are BodyIndex-keyed (IM-1). The buffer is
-/// cleared and refilled, capacity reused.
+/// Dispatches each candidate pair by the two bodies' [`ColliderShape`]s
+/// (`BodyState.shape`) to the matching contact generator:
+///
+/// - **sphere-sphere**: inline single-point center-to-center contact (the W2
+///   path).
+/// - **sphere-box** / **box-sphere**: [`sphere_box_contact`] — a single
+///   closest-point contact (the box is an OBB: position + body rotation +
+///   half-extents).
+/// - **box-box**: [`box_box_contact`] — 15-axis SAT + reference-face clip + a
+///   deterministic ≤4-point reduction, biased by the per-pair reference-axis
+///   hysteresis in [`Manifolds::box_axis_cache`] for stable feature ids on a
+///   resting stack (P2 W3/W4).
+///
+/// Every emitted manifold is keyed by the dense `(a, b)` rows in `(min, max)`
+/// order (IM-1 / D4) with its `normal` pointing A→B, regardless of which body was
+/// the sphere or the SAT reference — so the solver's sign handling is uniform.
+/// The buffer is cleared and refilled each step; the hysteresis cache persists in
+/// place across frames (capacity reused).
 //
 // `clippy::needless_pass_by_value`: see `physics_gather`.
 #[allow(clippy::needless_pass_by_value)]
@@ -216,42 +229,128 @@ pub fn physics_narrowphase(
     mut manifolds: ResMut<Manifolds>,
 ) {
     let bodies = &scratch.bodies;
+    let manifolds = &mut *manifolds;
+    manifolds.manifolds.clear();
+    // Ensure the per-pair hysteresis cache can hold this frame's pairs; it is NOT
+    // cleared (a single in-place table — this frame reads last frame's axes).
+    manifolds.box_axis_cache.begin_frame(pairs.pairs.len());
     let out = &mut manifolds.manifolds;
-    out.clear();
+    let axis_cache = &mut manifolds.box_axis_cache;
 
     for &(a, b) in &pairs.pairs {
         let ia = a.0 as usize;
         let ib = b.0 as usize;
-        let (ra, rb) = (collider_radius(&bodies[ia]), collider_radius(&bodies[ib]));
-        let delta = bodies[ib].position - bodies[ia].position;
-        let dist = delta.length();
-        let separation = dist - (ra + rb);
-        if separation >= 0.0 {
-            // Bounding-circle overlap without an actual shape contact — skip.
-            continue;
+        let ba = &bodies[ia];
+        let bb = &bodies[ib];
+
+        let manifold = match (ba.shape, bb.shape) {
+            (ColliderShape::Sphere { radius: ra }, ColliderShape::Sphere { radius: rb }) => {
+                sphere_sphere_manifold(a, b, ba, bb, ra, rb)
+            }
+            (ColliderShape::Sphere { radius }, ColliderShape::Box { half_extents }) => {
+                // A is the sphere, B is the box: the generator already emits
+                // normal A→B with body_a = sphere, body_b = box.
+                sphere_box_contact(
+                    a, b, ba.position, radius, bb.position, bb.rotation, half_extents,
+                )
+            }
+            (ColliderShape::Box { half_extents }, ColliderShape::Sphere { radius }) => {
+                // A is the box, B is the sphere: call the generator with the
+                // sphere as A / box as B (keyed b, a), then remap to (a, b) order
+                // so the dense rows match and the normal runs A(box)→B(sphere).
+                sphere_box_contact(
+                    b, a, bb.position, radius, ba.position, ba.rotation, half_extents,
+                )
+                .map(flip_manifold)
+            }
+            (
+                ColliderShape::Box { half_extents: ha },
+                ColliderShape::Box { half_extents: hb },
+            ) => {
+                let last_axis = axis_cache.get(a, b);
+                box_box_contact(
+                    a, b, ba.position, ba.rotation, ha, bb.position, bb.rotation, hb, last_axis,
+                )
+                .map(|c| {
+                    // Persist this frame's chosen reference axis for next frame's
+                    // hysteresis bias (per body pair, deterministic).
+                    axis_cache.set(a, b, c.reference_axis);
+                    c.manifold
+                })
+            }
+        };
+
+        if let Some(manifold) = manifold {
+            debug_assert!(
+                (manifold.count as usize) <= crate::math::MAX_CONTACT_POINTS,
+                "invariant: manifold.count must not exceed MAX_CONTACT_POINTS"
+            );
+            if manifold.count > 0 {
+                out.push(manifold);
+            }
         }
-        let normal = if dist > f32::MIN_POSITIVE {
-            delta * dist.recip()
-        } else {
-            // Coincident centers: pick a stable arbitrary normal.
-            Vec3::new(1.0, 0.0, 0.0)
-        };
-        let contact = bodies[ia].position + normal * ra;
-        let mut manifold = Manifold::new(a, b);
-        manifold.normal = normal;
-        manifold.points[0] = ContactPoint {
-            anchor_a: contact,
-            anchor_b: contact,
-            separation,
-            feature_id: 0,
-        };
-        manifold.count = 1;
-        debug_assert!(
-            (manifold.count as usize) <= crate::math::MAX_CONTACT_POINTS,
-            "invariant: manifold.count must not exceed MAX_CONTACT_POINTS"
-        );
-        out.push(manifold);
     }
+}
+
+/// Builds the single-point sphere-sphere manifold for the dense pair `(a, b)`, or
+/// `None` when the spheres do not overlap (the W2 path, kept inline).
+///
+/// The normal runs A→B along the center-to-center direction; the lone contact
+/// point sits on A's surface. `feature_id` is `0` (a sphere has no distinguishing
+/// feature — its class is disjoint from the box feature-id classes, which all set
+/// the high bit).
+#[inline]
+fn sphere_sphere_manifold(
+    a: BodyIndex,
+    b: BodyIndex,
+    ba: &BodyState,
+    bb: &BodyState,
+    ra: f32,
+    rb: f32,
+) -> Option<Manifold> {
+    let delta = bb.position - ba.position;
+    let dist = delta.length();
+    let separation = dist - (ra + rb);
+    if separation >= 0.0 {
+        // Bounding-circle overlap without an actual shape contact.
+        return None;
+    }
+    let normal = if dist > f32::MIN_POSITIVE {
+        delta * dist.recip()
+    } else {
+        // Coincident centers: pick a stable arbitrary normal.
+        Vec3::new(1.0, 0.0, 0.0)
+    };
+    let contact = ba.position + normal * ra;
+    let mut manifold = Manifold::new(a, b);
+    manifold.normal = normal;
+    manifold.points[0] = ContactPoint {
+        anchor_a: contact,
+        anchor_b: contact,
+        separation,
+        feature_id: 0,
+    };
+    manifold.count = 1;
+    Some(manifold)
+}
+
+/// Swaps a manifold's A/B roles: exchanges `body_a`/`body_b`, swaps each point's
+/// `anchor_a`/`anchor_b`, and negates the normal so it still runs from the (new)
+/// A toward the (new) B (P2 W4).
+///
+/// Used to remap a box-sphere pair: [`sphere_box_contact`] always keys the sphere
+/// as A and the box as B, but the dense pair order is `(min, max)` by row, so when
+/// the box is the lower row the generated manifold must be flipped back to `(box,
+/// sphere)` = `(a, b)` order. `feature_id` / `separation` / `count` are unchanged
+/// (they are role-symmetric).
+#[inline]
+fn flip_manifold(mut m: Manifold) -> Manifold {
+    core::mem::swap(&mut m.body_a, &mut m.body_b);
+    m.normal = m.normal * -1.0;
+    for p in &mut m.points[..m.count as usize] {
+        core::mem::swap(&mut p.anchor_a, &mut p.anchor_b);
+    }
+    m
 }
 
 /// Runs the swappable solver for one step, or early-outs for a no-op solver
@@ -329,44 +428,20 @@ pub fn physics_apply(mut query: Query<Mut<RigidBody>>, scratch: Res<SolverScratc
     );
 }
 
-/// Broad-phase bounding radius of a body, computed from its real shape (P2 W2).
+/// Broad-phase bounding radius of a body, computed from its real shape (P2 W2/W4).
 ///
 /// The smallest sphere enclosing the collider: a [`Sphere`](ColliderShape::Sphere)
-/// contributes its radius directly; an [`Aabb`](ColliderShape::Aabb) contributes
-/// the length of its half-extents diagonal (`half_extents.length()`), so a box
-/// body is still a correct broadphase CANDIDATE even though box↔box narrowphase
-/// is W4. Kept separate from [`collider_radius`] so the broadphase proxy and the
-/// narrowphase shape can diverge later without churning callers.
+/// contributes its radius directly; a [`Box`](ColliderShape::Box) contributes the
+/// length of its half-extents diagonal (`half_extents.length()`) — the OBB's
+/// circumradius, orientation-invariant — so a box body is a correct broadphase
+/// CANDIDATE regardless of its rotation. The broadphase proxy is intentionally
+/// shape-agnostic here; the precise per-pair narrowphase lives in
+/// [`physics_narrowphase`]'s shape dispatch (P2 W4).
 #[inline]
 fn body_bounding_radius(body: &BodyState) -> f32 {
     match body.shape {
         ColliderShape::Sphere { radius } => radius,
-        ColliderShape::Aabb { half_extents } => half_extents.length(),
+        ColliderShape::Box { half_extents } => half_extents.length(),
     }
 }
 
-/// Narrow-phase sphere radius of a body for the foundation's sphere-sphere test
-/// (P2 W2).
-///
-/// A [`Sphere`](ColliderShape::Sphere) contributes its real radius. An
-/// [`Aabb`](ColliderShape::Aabb) has no sphere-sphere contact — box↔box uses an
-/// SAT clipper (W4) — so this returns a NEGATIVE sentinel: with a non-positive
-/// narrowphase radius the `separation = dist − (rA + rB)` test in
-/// [`physics_narrowphase`] cannot drop below zero for a box pair, so the W2
-/// narrowphase skips it (the broadphase still treats the box as a candidate via
-/// its real [`body_bounding_radius`]). Spheres keep generating genuine contacts.
-#[inline]
-fn collider_radius(body: &BodyState) -> f32 {
-    match body.shape {
-        ColliderShape::Sphere { radius } => radius,
-        // No sphere-sphere contact for a box (W4 owns box contacts); the
-        // sentinel forces `separation >= 0` so the narrowphase skips this pair.
-        ColliderShape::Aabb { .. } => NO_SPHERE_CONTACT_RADIUS,
-    }
-}
-
-/// Sentinel narrowphase radius for a non-sphere shape (P2 W2): a large negative
-/// value so `separation = dist − (rA + rB)` cannot go below zero for any pair
-/// involving a box, making the sphere-sphere narrowphase skip it. Box contacts
-/// land in W4 (SAT).
-const NO_SPHERE_CONTACT_RADIUS: f32 = f32::MIN;

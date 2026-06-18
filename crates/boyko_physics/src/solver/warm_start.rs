@@ -51,10 +51,13 @@
 use crate::manifold::BodyIndex;
 
 /// The empty-slot sentinel key. A real packed key can never equal it: [`pack`]
-/// places the two `u32` body indices in the high/low 32-bit halves, so the only
-/// way to produce `u64::MAX` is `body_a == body_b == u32::MAX` with
-/// `feature_id == 0xFFFF` — and a manifold never pairs a body with itself, nor
-/// keys `BodyIndex(u32::MAX)` (the C1 SDF sentinel is never a warm-start row).
+/// lays out `body_a:24 | body_b:24 | feature_id:16`, so `u64::MAX` would require
+/// `body_a == body_b == 0xFFFFFF` (both 24-bit fields all-ones) and
+/// `feature_id == 0xFFFF`. A manifold always keys `body_a < body_b` (broadphase
+/// emits the pair as `(min, max)`, D4), so the two body fields can never both be
+/// `0xFFFFFF`; the sentinel is therefore structurally unreachable for any real
+/// contact key (and `BodyIndex(u32::MAX)`, the C1 SDF sentinel, is never a
+/// warm-start row anyway).
 pub const EMPTY: u64 = u64::MAX;
 
 /// The 64-bit multiplicative-hash constant (Fibonacci hashing — `2^64 / φ`,
@@ -89,32 +92,51 @@ impl WarmEntry {
     }
 }
 
-/// Packs a contact's identity into a single 64-bit key (P2 W3).
+/// The bit width of each body-index field in the packed key (24 bits = up to
+/// 16M distinct bodies, far beyond any realistic per-step body count).
+const BODY_BITS: u32 = 24;
+
+/// The mask selecting one packed body-index field (low `BODY_BITS`).
+const BODY_MASK: u64 = (1 << BODY_BITS) - 1;
+
+/// The bit width of the feature-id field (16 bits — the full range the
+/// narrowphase feature ids use; see [`feature_face_face`](crate::narrowphase::feature_face_face)).
+const FEATURE_BITS: u32 = 16;
+
+/// The mask selecting the packed feature-id field (low `FEATURE_BITS`).
+const FEATURE_MASK: u64 = (1 << FEATURE_BITS) - 1;
+
+/// Packs a contact POINT's identity into a single 64-bit key (P2 W3/W4).
 ///
-/// The two dense body-row indices occupy the high and low 32-bit halves, with
-/// the 16-bit `feature_id` folded into the low half's spare bits (W3
-/// sphere-sphere contacts always carry `feature_id == 0`; W4 box contacts will
-/// use the clipped-feature identity). The pair is keyed in the manifold's own
-/// `(body_a, body_b)` order — which broadphase already emits as `(min, max)`
-/// (D4) — so the key is stable for a stable scene without a re-sort here.
+/// The layout is **unconditionally injective** over realistic inputs:
+/// `body_a:24 | body_b:24 | feature_id:16` (high → low). Distinct
+/// `(body_a, body_b, feature_id)` triples therefore produce distinct keys for
+/// any body index `< 2^24` (16M — far beyond a single step's body count) and any
+/// `feature_id < 2^16` (the full narrowphase feature-id range; bit 15 is the
+/// highest the class tags use). No field overlaps another, so non-zero W4 box
+/// feature ids can never alias a body index — the per-point warm-start keys
+/// (one key per contact POINT, not per manifold) rely on this.
 ///
-/// **W4 forward-risk (injectivity):** the `feature_id << 16` XOR-fold into the
-/// low word's high half is injective only while `feature_id == 0` (all of W3) OR
-/// `body_b < 2^16`. Once W4 emits non-zero feature ids on bodies with row index
-/// `≥ 65536`, feature-id bits would collide with `body_b`'s high bits — W4 MUST
-/// revisit this pack layout (e.g. widen the key or carve a dedicated feature
-/// field) before relying on per-feature warm-start keys.
+/// The pair is keyed in the manifold's own `(body_a, body_b)` order — which
+/// broadphase already emits as `(min, max)` (D4) — so the key is stable for a
+/// stable scene without a re-sort here.
 ///
-/// A real key never equals [`EMPTY`] (`u64::MAX`): that would require
-/// `body_a == body_b == u32::MAX`, but a manifold never self-pairs and never
-/// keys the `u32::MAX` SDF sentinel row.
+/// A real key never equals [`EMPTY`] (`u64::MAX`): the all-ones key needs both
+/// body fields `== 0xFFFFFF`, but a manifold always keys `body_a < body_b`
+/// (D4), so the two fields can never both be `0xFFFFFF` (and the `u32::MAX` SDF
+/// sentinel row is never warm-started). See [`EMPTY`].
 #[inline]
 pub fn pack(body_a: BodyIndex, body_b: BodyIndex, feature_id: u32) -> u64 {
-    // High 32 bits: body_a. Low 32 bits: body_b XOR (feature_id << 16). The
-    // 16-bit feature id rides the high half of the low word; for sphere-sphere
-    // (feature_id == 0) the key is simply (body_a << 32) | body_b.
-    let lo = (body_b.0) ^ (feature_id << 16);
-    ((body_a.0 as u64) << 32) | (lo as u64)
+    // Non-overlapping fields: body_a in bits [40..64), body_b in [16..40),
+    // feature_id in [0..16). Mask each field so an out-of-range input (a debug
+    // bug) truncates into its own field rather than corrupting a neighbor.
+    debug_assert!(body_a.0 as u64 <= BODY_MASK, "invariant: body_a fits in 24 bits");
+    debug_assert!(body_b.0 as u64 <= BODY_MASK, "invariant: body_b fits in 24 bits");
+    debug_assert!(feature_id as u64 <= FEATURE_MASK, "invariant: feature_id fits in 16 bits");
+    let a = (body_a.0 as u64 & BODY_MASK) << (BODY_BITS + FEATURE_BITS);
+    let b = (body_b.0 as u64 & BODY_MASK) << FEATURE_BITS;
+    let f = feature_id as u64 & FEATURE_MASK;
+    a | b | f
 }
 
 /// The rounded-up power of two `≥ n`, with a floor of 1 (so an empty contact set
@@ -291,11 +313,40 @@ mod tests {
     }
 
     #[test]
+    fn pack_is_injective_with_nonzero_features_across_realistic_range() {
+        // The W4 injectivity property: distinct (body_a, body_b, feature_id)
+        // triples produce distinct keys even with NON-ZERO feature ids and body
+        // indices well past 2^16 — the regime the old XOR-fold aliased. Sample a
+        // grid of body indices spanning the realistic range (including > 65536)
+        // and the full feature-id range (face-face, edge-edge, vertex-face tags).
+        let bodies = [0u32, 1, 7, 100, 65_535, 65_536, 70_000, 1_000_000, 16_777_214];
+        let features = [0u32, 1, 0x2D, 0x8000, 0x8011, 0xC007, 0xFFFF];
+        let mut seen = std::collections::HashSet::new();
+        for &a in &bodies {
+            for &b in &bodies {
+                for &f in &features {
+                    let key = pack(BodyIndex(a), BodyIndex(b), f);
+                    assert!(
+                        seen.insert(key),
+                        "pack collision for (a={a}, b={b}, f={f:#x}) → {key:#x}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn pack_never_equals_empty_sentinel() {
-        // Realistic body indices (never u32::MAX) can never collide with EMPTY.
-        for a in 0..8u32 {
-            for b in 0..8u32 {
-                assert_ne!(pack(BodyIndex(a), BodyIndex(b), 0), EMPTY);
+        // A real key (with body_a < body_b, the broadphase D4 order) can never
+        // collide with EMPTY across the realistic body range and the full
+        // feature-id range — the two 24-bit body fields can never both be all-ones.
+        let bodies = [0u32, 1, 7, 65_536, 1_000_000, 16_777_214];
+        let features = [0u32, 1, 0x8000, 0xC007, 0xFFFF];
+        for &a in &bodies {
+            for &b in &bodies {
+                for &f in &features {
+                    assert_ne!(pack(BodyIndex(a), BodyIndex(b), f), EMPTY);
+                }
             }
         }
     }
