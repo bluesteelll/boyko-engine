@@ -116,6 +116,20 @@ static SDF_EDITLIST_STORAGE_IMAGE_SPV: SpirvBlob<24092> = SpirvBlob(*include_byt
     "/shaders/sdf_editlist_storage_image.comp.spv"
 )));
 
+/// The committed SPIR-V for the Render P1b OFFSCREEN MRT G-buffer marcher
+/// (`shaders/sdf_gbuffer_composite.hlsl`) — the image-based rewrite of the rung-10
+/// packed-buffer composite. The field eval + ray-gen + lighting are a VERBATIM cut of
+/// `sdf_depth_composite.hlsl`; the only two I/O edits are (1) the mesh depth read
+/// becomes a SAMPLED-image fetch (`Texture2D<float>` @ binding 1) and (2) the marcher
+/// color becomes a STORAGE-image store (`RWTexture2D<float4>` albedo @ binding 2, plus
+/// additive normal/material @ bindings 3/4). The extent/camera block moves to a UNIFORM
+/// buffer @ binding 5 (written once). The edit-list stays a `StructuredBuffer` @
+/// binding 0.
+static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<27160> = SpirvBlob(*include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/shaders/sdf_gbuffer_composite.comp.spv"
+)));
+
 /// A 4-byte-aligned wrapper around a committed SPIR-V byte blob so its address is
 /// a valid `*const u32` and it can be re-viewed as a `&[u32]` word stream.
 #[repr(C, align(4))]
@@ -217,6 +231,26 @@ pub fn sdf_depth_composite_spirv() -> &'static [u32] {
 #[inline]
 pub fn sdf_editlist_storage_image_spirv() -> &'static [u32] {
     SDF_EDITLIST_STORAGE_IMAGE_SPV.as_words()
+}
+
+/// The committed Render P1b OFFSCREEN MRT G-buffer marcher SPIR-V as a `u32` word
+/// stream, ready for
+/// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module).
+///
+/// The image-based rewrite of the rung-10 [`sdf_depth_composite_spirv`] marcher: the
+/// field eval + ray-gen + lighting are a VERBATIM cut of `sdf_depth_composite.hlsl`, so
+/// [`golden_composite_pixel_ex`] predicts the ALBEDO output within the same `+/-2/255`
+/// per-channel tolerance. It is bound to the P1b vocabulary set: binding 0 a read-only
+/// `StructuredBuffer<uint>` edit-list, binding 1 a `Texture2D<float>` SAMPLED depth
+/// (the rasterized D32_SFLOAT image, fetched with `.Load`), bindings 2..4 the MRT
+/// `RWTexture2D<float4>` storage images (albedo + the additive normal/material), and
+/// binding 5 a UNIFORM buffer carrying the extent/camera block (written once — NOT a
+/// per-frame push, so it is compatible with the pipeline's dedicated layout). There is
+/// NO packed depth region and NO packed pixel region — the depth is sampled and the
+/// color is stored.
+#[inline]
+pub fn sdf_gbuffer_composite_spirv() -> &'static [u32] {
+    SDF_GBUFFER_COMPOSITE_SPV.as_words()
 }
 
 /// Errors from the compute-pipeline flow. `VkError` carries the failing command

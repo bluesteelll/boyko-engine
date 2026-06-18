@@ -140,7 +140,10 @@ impl From<VulkanError> for RhiError {
                 | BootError::NoPhysicalDevice
                 | BootError::NoSuitableQueueFamily
                 | BootError::ValidationUnavailable
-                | BootError::WindowingUnavailable => RhiError::BackendError("vulkan boot failed"),
+                | BootError::WindowingUnavailable
+                | BootError::GbufferStorageFormatUnsupported => {
+                    RhiError::BackendError("vulkan boot failed")
+                }
                 BootError::VkError(_cmd, result) => match result {
                     VkResult::ERROR_OUT_OF_HOST_MEMORY | VkResult::ERROR_OUT_OF_DEVICE_MEMORY => {
                         RhiError::OutOfMemory

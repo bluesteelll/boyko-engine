@@ -530,6 +530,10 @@ pub enum VkStructureType {
     Win32SurfaceCreateInfoKhr = 1_000_009_000,
     SwapchainCreateInfoKhr = 1_000_001_000,
     PresentInfoKhr = 1_000_001_001,
+    /// `VkPhysicalDeviceVulkan12Features` — chained into features2 to READ the
+    /// Vulkan 1.2 core feature bools (Render P1b `bindless_capable` query).
+    /// vulkan_core.h: `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES = 51`.
+    PhysicalDeviceVulkan12Features = 51,
     /// `VkPhysicalDeviceVulkan13Features` — chained to enable dynamic rendering.
     PhysicalDeviceVulkan13Features = 53,
     RenderingInfo = 1_000_044_000,
@@ -727,6 +731,36 @@ pub const VK_FORMAT_R32G32B32A32_SFLOAT: i32 = 109;
 /// `VkFormat::VK_FORMAT_D32_SFLOAT` — a 32-bit float depth attachment (Phase-6 S0
 /// rung 4). Spec-mandated as a depth attachment on every conformant device.
 pub const VK_FORMAT_D32_SFLOAT: i32 = 126;
+
+/// `VkFormatFeatureFlagBits::VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT` — the OPTIMAL-tiling
+/// capability the Render P1b G-buffer storage images require (a compute store into an
+/// `R8G8B8A8_UNORM` image). Queried via `vkGetPhysicalDeviceFormatProperties` at
+/// device-create for the [`crate::device::DeviceCaps`] fail-fast.
+// vulkan_core.h: `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT = 0x00000002`. (`0x8` is
+// `VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT`, a buffer feature never set in an
+// image's `optimalTilingFeatures` — the prior wrong value fail-fast'd boot on
+// capable GPUs.)
+pub const VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT: VkFlags = 0x0000_0002;
+
+// Value guard for the hand-typed P1b format-feature bit. A struct-size assert can
+// only catch a bad LAYOUT, not a bad flag VALUE — which is exactly how the wrong
+// `0x8` slipped past review. Pin the header value (`0x2`), require a single set bit
+// (a power of two, as a format-feature flag must be), and assert it is DISTINCT from
+// the `UNIFORM_TEXEL_BUFFER` bit (`0x8`) it was previously confused with.
+const _: () = assert!(
+    VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT == 0x2,
+    "VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT must equal the vulkan_core.h value 0x00000002"
+);
+const _: () = assert!(
+    VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT.is_power_of_two(),
+    "a format-feature flag bit must be a single set bit (power of two)"
+);
+const _: () = assert!(
+    // 0x8 = VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT (vulkan_core.h) — the wrong
+    // transcription this guard exists to reject.
+    VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT != 0x8,
+    "STORAGE_IMAGE bit collides with the UNIFORM_TEXEL_BUFFER bit (0x8)"
+);
 
 /// `VkColorSpaceKHR::VK_COLOR_SPACE_SRGB_NONLINEAR_KHR` — the always-present space.
 pub const VK_COLOR_SPACE_SRGB_NONLINEAR_KHR: i32 = 0;
@@ -1996,6 +2030,79 @@ pub struct VkPhysicalDeviceVulkan13Features {
     pub maintenance4: VkBool32,
 }
 
+/// `VkFormatProperties` — written BY the driver through
+/// `vkGetPhysicalDeviceFormatProperties`'s out-pointer. The three feature masks
+/// advertise what a format supports per tiling/buffer; the Render P1b device-caps
+/// query reads only `optimal_tiling_features` for `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT`.
+/// `#[repr(C)]` + a size/align guard below: it is driver-written, so its layout must
+/// match the C ABI or the driver overruns our out-buffer.
+#[repr(C)]
+pub struct VkFormatProperties {
+    pub linear_tiling_features: VkFlags,
+    pub optimal_tiling_features: VkFlags,
+    pub buffer_features: VkFlags,
+}
+
+/// `VkPhysicalDeviceVulkan12Features` — chained into `VkPhysicalDeviceFeatures2` to
+/// READ the Vulkan 1.2 core feature bools (the Render P1b device-caps query reads
+/// `descriptor_indexing` + `runtime_descriptor_array` for the *recorded-only*
+/// `bindless_capable` cap; NOT enabled at device creation in P1b). The struct is
+/// declared field-exact so the driver, walking `p_next`, writes every bool it owns
+/// without reading past our footprint; the size/align guard below pins the ABI. All
+/// fields are `VkBool32`, written BY the driver.
+#[repr(C)]
+pub struct VkPhysicalDeviceVulkan12Features {
+    pub s_type: VkStructureType,
+    pub p_next: *mut c_void,
+    pub sampler_mirror_clamp_to_edge: VkBool32,
+    pub draw_indirect_count: VkBool32,
+    pub storage_buffer_8bit_access: VkBool32,
+    pub uniform_and_storage_buffer_8bit_access: VkBool32,
+    pub storage_push_constant8: VkBool32,
+    pub shader_buffer_int64_atomics: VkBool32,
+    pub shader_shared_int64_atomics: VkBool32,
+    pub shader_float16: VkBool32,
+    pub shader_int8: VkBool32,
+    pub descriptor_indexing: VkBool32,
+    pub shader_input_attachment_array_dynamic_indexing: VkBool32,
+    pub shader_uniform_texel_buffer_array_dynamic_indexing: VkBool32,
+    pub shader_storage_texel_buffer_array_dynamic_indexing: VkBool32,
+    pub shader_uniform_buffer_array_non_uniform_indexing: VkBool32,
+    pub shader_sampled_image_array_non_uniform_indexing: VkBool32,
+    pub shader_storage_buffer_array_non_uniform_indexing: VkBool32,
+    pub shader_storage_image_array_non_uniform_indexing: VkBool32,
+    pub shader_input_attachment_array_non_uniform_indexing: VkBool32,
+    pub shader_uniform_texel_buffer_array_non_uniform_indexing: VkBool32,
+    pub shader_storage_texel_buffer_array_non_uniform_indexing: VkBool32,
+    pub descriptor_binding_uniform_buffer_update_after_bind: VkBool32,
+    pub descriptor_binding_sampled_image_update_after_bind: VkBool32,
+    pub descriptor_binding_storage_image_update_after_bind: VkBool32,
+    pub descriptor_binding_storage_buffer_update_after_bind: VkBool32,
+    pub descriptor_binding_uniform_texel_buffer_update_after_bind: VkBool32,
+    pub descriptor_binding_storage_texel_buffer_update_after_bind: VkBool32,
+    pub descriptor_binding_update_unused_while_pending: VkBool32,
+    pub descriptor_binding_partially_bound: VkBool32,
+    pub descriptor_binding_variable_descriptor_count: VkBool32,
+    pub runtime_descriptor_array: VkBool32,
+    pub sampler_filter_minmax: VkBool32,
+    pub scalar_block_layout: VkBool32,
+    pub imageless_framebuffer: VkBool32,
+    pub uniform_buffer_standard_layout: VkBool32,
+    pub shader_subgroup_extended_types: VkBool32,
+    pub separate_depth_stencil_layouts: VkBool32,
+    pub host_query_reset: VkBool32,
+    pub timeline_semaphore: VkBool32,
+    pub buffer_device_address: VkBool32,
+    pub buffer_device_address_capture_replay: VkBool32,
+    pub buffer_device_address_multi_device: VkBool32,
+    pub vulkan_memory_model: VkBool32,
+    pub vulkan_memory_model_device_scope: VkBool32,
+    pub vulkan_memory_model_availability_visibility_chains: VkBool32,
+    pub shader_output_viewport_index: VkBool32,
+    pub shader_output_layer: VkBool32,
+    pub subgroup_broadcast_dynamic_id: VkBool32,
+}
+
 /// `VkPresentInfoKHR`.
 #[repr(C)]
 pub struct VkPresentInfoKhr {
@@ -2037,6 +2144,15 @@ const _: () = assert!(core::mem::align_of::<VkBufferImageCopy>() == 8);
 // up to the struct's 8-byte alignment = 240.
 const _: () = assert!(core::mem::size_of::<VkPhysicalDeviceFeatures2>() == 240);
 const _: () = assert!(core::mem::align_of::<VkPhysicalDeviceFeatures2>() == 8);
+// Render P1b device-caps query layout guards. `VkFormatProperties` is written BY the
+// driver; `VkPhysicalDeviceVulkan12Features` is written BY the driver through the
+// `p_next` chain — both must match the C ABI exactly. `VkFormatProperties` is three
+// `VkFlags` (12 bytes). `VkPhysicalDeviceVulkan12Features` is the 16-byte head
+// (sType + 4 pad + pNext) + 47 `VkBool32`s (188 bytes) = 204, rounded up to the
+// 8-byte alignment = 208.
+const _: () = assert!(core::mem::size_of::<VkFormatProperties>() == 12);
+const _: () = assert!(core::mem::size_of::<VkPhysicalDeviceVulkan12Features>() == 208);
+const _: () = assert!(core::mem::align_of::<VkPhysicalDeviceVulkan12Features>() == 8);
 
 // FFI layout guards for the new structs. The callback-data struct is written BY
 // the driver and read through the callback, so its size/align must match the C
@@ -2762,4 +2878,13 @@ pub type PfnVkCmdCopyBufferToImage = unsafe extern "system" fn(
 pub type PfnVkGetPhysicalDeviceFeatures2 = unsafe extern "system" fn(
     physical_device: VkPhysicalDevice,
     p_features: *mut VkPhysicalDeviceFeatures2,
+);
+
+/// `PFN_vkGetPhysicalDeviceFormatProperties` — the Render P1b device-caps query for
+/// the G-buffer storage-image format support (Vulkan 1.0 core, always present).
+pub type PfnVkGetPhysicalDeviceFormatProperties = unsafe extern "system" fn(
+    physical_device: VkPhysicalDevice,
+    // `format`: `VkFormat` (an `i32`).
+    format: i32,
+    p_format_properties: *mut VkFormatProperties,
 );

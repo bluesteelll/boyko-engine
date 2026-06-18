@@ -74,6 +74,11 @@ pub enum BootError {
     /// extension or feature is not present on this driver (the test treats it as
     /// "skip gracefully").
     WindowingUnavailable,
+    /// The GPU does not advertise `STORAGE_IMAGE` on the Render P1b G-buffer color
+    /// format (`R8G8B8A8_UNORM`, OPTIMAL tiling) — the marcher cannot store into the
+    /// G-buffer color images. Core-guaranteed on the RTX 3060 / any desktop GPU; a
+    /// CLEAR fail-fast at device-create beats an opaque storage-image store fault.
+    GbufferStorageFormatUnsupported,
 }
 
 /// Bootstrap options for the instance.
@@ -102,6 +107,27 @@ pub struct InstanceConfig {
     pub windowed: bool,
 }
 
+/// Minimal physical-device capabilities queried ONCE at device-create (Render P1b),
+/// alongside the `dynamicRendering` fail-fast.
+///
+/// A small POD recorded on the [`VulkanContext`] and exposed read-only via
+/// [`VulkanContext::device_caps`]. P1b records `bindless_capable` for a FUTURE bindless
+/// path (it is NOT consumed yet — declaring an unused capability is intentional
+/// forward wiring, not dead code); `gbuffer_storage_format_ok` is asserted at boot, so
+/// a context that exists always has it `true` (the fail-fast rejects a GPU without it).
+#[derive(Clone, Copy, Debug)]
+pub struct DeviceCaps {
+    /// Whether the GPU advertises the Vulkan 1.2 `descriptorIndexing` +
+    /// `runtimeDescriptorArray` features (the bindless prerequisite). RECORDED ONLY in
+    /// P1b — a future bindless G-buffer path reads it; nothing consumes it yet.
+    pub bindless_capable: bool,
+    /// Whether `R8G8B8A8_UNORM` supports `STORAGE_IMAGE` under OPTIMAL tiling (the P1b
+    /// G-buffer color images are compute-store targets). Always `true` on a booted
+    /// context — boot fails with [`BootError::GbufferStorageFormatUnsupported`]
+    /// otherwise.
+    pub gbuffer_storage_format_ok: bool,
+}
+
 /// Global-scope Vulkan commands (resolved with a NULL instance).
 struct GlobalFns {
     create_instance: PfnVkCreateInstance,
@@ -119,6 +145,9 @@ struct InstanceFns {
     /// `vkGetPhysicalDeviceFeatures2` (Vulkan 1.1 core) — the S0 fail-fast
     /// `dynamicRendering` support query (Correction #2). Always present at API 1.3.
     get_physical_device_features2: PfnVkGetPhysicalDeviceFeatures2,
+    /// `vkGetPhysicalDeviceFormatProperties` (Vulkan 1.0 core) — the Render P1b
+    /// device-caps query for G-buffer storage-image format support. Always present.
+    get_physical_device_format_properties: PfnVkGetPhysicalDeviceFormatProperties,
     create_device: PfnVkCreateDevice,
     get_device_proc_addr: PfnVkGetDeviceProcAddr,
     /// `VK_EXT_debug_utils` destroyer — `Some` only when validation is enabled
@@ -246,6 +275,10 @@ pub struct VulkanContext {
     memory_properties: VkPhysicalDeviceMemoryProperties,
     /// Human-readable device name (from `VkPhysicalDeviceProperties`).
     device_name: String,
+    /// Minimal physical-device capabilities queried once at boot (Render P1b). A POD
+    /// `Copy` cache; `gbuffer_storage_format_ok` is always `true` here (the boot
+    /// fail-fast rejected a GPU lacking it).
+    device_caps: DeviceCaps,
     /// The validation-message messenger (`NULL` when validation is disabled).
     debug_messenger: VkDebugUtilsMessengerEXT,
     /// Heap-owned callback state pointed-to by the messenger's `p_user_data`.
@@ -433,6 +466,16 @@ impl VulkanContext {
             Err(e) => fail!(e),
         };
 
+        // --- 5b. Query the minimal device caps ONCE (Render P1b), alongside the
+        // `dynamicRendering` fail-fast in `create_device`. `bindless_capable` is
+        // recorded only; `gbuffer_storage_format_ok` is fail-fast here so a context
+        // that exists always has it (a marcher storage-image store can never fault on
+        // an unsupported format). Core-guaranteed on the RTX 3060.
+        let device_caps = query_device_caps(&instance_fns, physical_device);
+        if !device_caps.gbuffer_storage_format_ok {
+            fail!(BootError::GbufferStorageFormatUnsupported);
+        }
+
         // --- 6. Create the logical device + retrieve the queue. ---
         let device = match create_device(
             &instance_fns,
@@ -474,6 +517,7 @@ impl VulkanContext {
             queue_family_index,
             memory_properties,
             device_name,
+            device_caps,
             debug_messenger,
             debug_state,
             instance_fns,
@@ -515,6 +559,15 @@ impl VulkanContext {
     #[inline]
     pub fn device_name(&self) -> &str {
         &self.device_name
+    }
+
+    /// The minimal physical-device capabilities queried at boot (Render P1b). A booted
+    /// context always has `gbuffer_storage_format_ok == true` (the boot fail-fast
+    /// rejects a GPU lacking it); `bindless_capable` is recorded for a future bindless
+    /// path.
+    #[inline]
+    pub fn device_caps(&self) -> DeviceCaps {
+        self.device_caps
     }
 
     /// The resolved device command table.
@@ -958,6 +1011,13 @@ fn load_instance_fns(
                 instance,
                 c"vkGetPhysicalDeviceFeatures2",
             )?,
+            // Vulkan 1.0 core — always present. The Render P1b G-buffer storage-image
+            // format-support query.
+            get_physical_device_format_properties: load_instance_command(
+                gipa,
+                instance,
+                c"vkGetPhysicalDeviceFormatProperties",
+            )?,
             create_device: load_instance_command(gipa, instance, c"vkCreateDevice")?,
             get_device_proc_addr: load_instance_command(gipa, instance, c"vkGetDeviceProcAddr")?,
             destroy_debug_messenger,
@@ -986,6 +1046,7 @@ fn fallback_instance_fns(gipa: PfnVkGetInstanceProcAddr, instance: VkInstance) -
         get_physical_device_memory_properties: noop_get_mem_props,
         get_physical_device_queue_family_properties: noop_get_qf_props,
         get_physical_device_features2: noop_get_features2,
+        get_physical_device_format_properties: noop_get_format_props,
         create_device: noop_create_device,
         get_device_proc_addr: noop_get_device_proc_addr,
         // No messenger is ever created on the fallback path.
@@ -1018,6 +1079,12 @@ unsafe extern "system" fn noop_get_qf_props(
 unsafe extern "system" fn noop_get_features2(
     _: VkPhysicalDevice,
     _: *mut VkPhysicalDeviceFeatures2,
+) {
+}
+unsafe extern "system" fn noop_get_format_props(
+    _: VkPhysicalDevice,
+    _: i32,
+    _: *mut VkFormatProperties,
 ) {
 }
 unsafe extern "system" fn noop_create_device(
@@ -1715,6 +1782,63 @@ fn supports_dynamic_rendering(fns: &InstanceFns, physical_device: VkPhysicalDevi
     // feature bools through the out-pointer + the chained struct.
     unsafe { (fns.get_physical_device_features2)(physical_device, &mut features2) };
     features13.dynamic_rendering == VK_TRUE
+}
+
+/// Queries the minimal Render P1b [`DeviceCaps`]: whether the GPU advertises the
+/// bindless prerequisite (Vulkan 1.2 `descriptorIndexing` + `runtimeDescriptorArray`,
+/// chained into `vkGetPhysicalDeviceFeatures2`) and whether `R8G8B8A8_UNORM` supports
+/// `STORAGE_IMAGE` under OPTIMAL tiling (`vkGetPhysicalDeviceFormatProperties`).
+///
+/// `bindless_capable` is recorded only (a future bindless path reads it); the caller
+/// fail-fasts on `!gbuffer_storage_format_ok` so the marcher's G-buffer store can
+/// never fault on an unsupported format. P1b enables NEITHER feature at device
+/// creation — the shader declares explicit storage-image formats (so
+/// `shaderStorageImageWriteWithoutFormat` is not needed) and bindless is unused.
+fn query_device_caps(fns: &InstanceFns, physical_device: VkPhysicalDevice) -> DeviceCaps {
+    // --- bindless_capable: read the Vulkan 1.2 core feature bools via features2. ---
+    // SAFETY: `VkPhysicalDeviceVulkan12Features` is `#[repr(C)]` with only an `s_type`
+    // enum, a pointer, and `VkBool32`s — all-zero is a valid initial bit pattern (a
+    // null `p_next` + `FALSE` bools); the driver overwrites every bool it owns through
+    // the `p_next` chain below. `s_type`/`p_next` are then set explicitly.
+    let mut features12: VkPhysicalDeviceVulkan12Features = unsafe { mem::zeroed() };
+    features12.s_type = VkStructureType::PhysicalDeviceVulkan12Features;
+    features12.p_next = ptr::null_mut();
+    let mut features2 = VkPhysicalDeviceFeatures2 {
+        s_type: VkStructureType::PhysicalDeviceFeatures2,
+        p_next: (&mut features12 as *mut VkPhysicalDeviceVulkan12Features).cast(),
+        features: [VK_FALSE; 55],
+    };
+    // SAFETY: `physical_device` is a valid enumerated GPU; `features2` is a
+    // fully-initialized `#[repr(C)]` struct whose `p_next` chains the live `features12`
+    // local (both outlive the call). The driver writes the supported feature bools
+    // through the out-pointer + the chained struct.
+    unsafe { (fns.get_physical_device_features2)(physical_device, &mut features2) };
+    let bindless_capable = features12.descriptor_indexing == VK_TRUE
+        && features12.runtime_descriptor_array == VK_TRUE;
+
+    // --- gbuffer_storage_format_ok: STORAGE_IMAGE on R8G8B8A8_UNORM, OPTIMAL tiling. ---
+    let mut format_props = VkFormatProperties {
+        linear_tiling_features: 0,
+        optimal_tiling_features: 0,
+        buffer_features: 0,
+    };
+    // SAFETY: `physical_device` is valid; `R8G8B8A8_UNORM` is a valid `VkFormat`;
+    // `&mut format_props` is a valid out-pointer for the `#[repr(C)]`
+    // `VkFormatProperties` the driver fully overwrites.
+    unsafe {
+        (fns.get_physical_device_format_properties)(
+            physical_device,
+            VK_FORMAT_R8G8B8A8_UNORM,
+            &mut format_props,
+        )
+    };
+    let gbuffer_storage_format_ok =
+        (format_props.optimal_tiling_features & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0;
+
+    DeviceCaps {
+        bindless_capable,
+        gbuffer_storage_format_ok,
+    }
 }
 
 /// Creates a logical device with one queue from `queue_family_index`.
