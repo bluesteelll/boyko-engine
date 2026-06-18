@@ -46,13 +46,14 @@
 
 use core::slice;
 
-use boyko_rhi::enums::{AddressMode, BarrierAccess, BarrierStage, Filter};
+use boyko_rhi::enums::{AddressMode, BarrierAccess, BarrierStage, DescriptorKind, Filter};
 use boyko_rhi::{
-    BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BufferDesc, BufferImageCopy, BufferUsage,
-    Format, GraphicsPipelineDesc, ImageAspect, ImageBarrierDesc, ImageLayout, ImageSubresourceRange,
-    ImageUsage, LoadOp, MemoryLocation, PrimitiveTopology, RenderArea, RenderingAttachment,
-    RenderingDesc, RhiCommandEncoder, RhiDevice, RhiQueue, SamplerDesc, ShaderStage, StoreOp,
-    TextureDesc, TextureDimension, VertexAttribute, VertexBufferLayout, VertexFormat, Viewport,
+    BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BindGroupLayoutEntry, BufferDesc,
+    BufferImageCopy, BufferUsage, Format, GraphicsPipelineDesc, ImageAspect, ImageBarrierDesc,
+    ImageLayout, ImageSubresourceRange, ImageUsage, LoadOp, MemoryLocation, PrimitiveTopology,
+    RenderArea, RenderingAttachment, RenderingDesc, RhiCommandEncoder, RhiDevice, RhiQueue,
+    SamplerDesc, ShaderStage, StoreOp, TextureDesc, TextureDimension, VertexAttribute,
+    VertexBufferLayout, VertexFormat, Viewport,
 };
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
 
@@ -389,8 +390,20 @@ fn render_deferred(device: &VulkanContext) -> Vec<u8> {
         .expect("sampler");
     let light_layout = device
         .create_bind_group_layout(&BindGroupLayoutDesc {
-            stage: ShaderStage::FRAGMENT,
-            binding_count: 2,
+            entries: &[
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    count: 1,
+                    kind: DescriptorKind::CombinedImageSampler,
+                    stage: ShaderStage::FRAGMENT,
+                },
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    count: 1,
+                    kind: DescriptorKind::CombinedImageSampler,
+                    stage: ShaderStage::FRAGMENT,
+                },
+            ],
         })
         .expect("2-binding bind-group layout");
 
@@ -422,11 +435,11 @@ fn render_deferred(device: &VulkanContext) -> Vec<u8> {
         .create_bind_group(&BindGroupDesc {
             layout: &light_layout,
             entries: &[
-                BindGroupEntry {
+                BindGroupEntry::CombinedImage {
                     texture: &albedo_tex,
                     sampler: &sampler,
                 },
-                BindGroupEntry {
+                BindGroupEntry::CombinedImage {
                     texture: &normal_tex,
                     sampler: &sampler,
                 },

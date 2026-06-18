@@ -617,6 +617,18 @@ pub const VK_DESCRIPTOR_TYPE_STORAGE_BUFFER: i32 = 7;
 /// 5: the sampled texture's binding type).
 pub const VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER: i32 = 1;
 
+/// `VkDescriptorType::VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE` (Render P1a: a sampled image
+/// with the sampler bound separately).
+pub const VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE: i32 = 2;
+
+/// `VkDescriptorType::VK_DESCRIPTOR_TYPE_STORAGE_IMAGE` (Render P1a: a compute
+/// read/write image — the marcher's output target).
+pub const VK_DESCRIPTOR_TYPE_STORAGE_IMAGE: i32 = 3;
+
+/// `VkDescriptorType::VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER` (Render P1a: a read-only
+/// constant buffer).
+pub const VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER: i32 = 6;
+
 /// `VkPipelineBindPoint::VK_PIPELINE_BIND_POINT_COMPUTE`.
 pub const VK_PIPELINE_BIND_POINT_COMPUTE: i32 = 1;
 
@@ -1448,7 +1460,11 @@ pub struct VkGraphicsPipelineCreateInfo {
 }
 
 /// `VkDescriptorPoolSize`.
+///
+/// `#[derive(Clone, Copy)]`: a plain POD with no Drop, so the bind-group create path
+/// can build a fixed inline `[VkDescriptorPoolSize; N]` histogram by value-repeat.
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct VkDescriptorPoolSize {
     /// `VkDescriptorType`.
     pub descriptor_type: i32,
@@ -1477,7 +1493,11 @@ pub struct VkDescriptorSetAllocateInfo {
 }
 
 /// `VkDescriptorBufferInfo`.
+///
+/// `#[derive(Clone, Copy)]`: a plain POD with no Drop, so the bind-group create path
+/// can build a fixed inline `[VkDescriptorBufferInfo; N]` by value-repeat.
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct VkDescriptorBufferInfo {
     pub buffer: VkBuffer,
     pub offset: VkDeviceSize,
@@ -1485,8 +1505,12 @@ pub struct VkDescriptorBufferInfo {
 }
 
 /// `VkDescriptorImageInfo` — the `(sampler, image view, layout)` triple written
-/// into a COMBINED_IMAGE_SAMPLER descriptor (Phase-6 S0 rung 5).
+/// into a COMBINED_IMAGE_SAMPLER / SAMPLED_IMAGE / STORAGE_IMAGE descriptor.
+///
+/// `#[derive(Clone, Copy)]`: a plain POD with no Drop, so the bind-group create path
+/// can build a fixed inline `[VkDescriptorImageInfo; N]` by value-repeat.
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct VkDescriptorImageInfo {
     pub sampler: VkSampler,
     pub image_view: VkImageView,

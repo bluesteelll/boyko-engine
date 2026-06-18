@@ -169,6 +169,7 @@ fn sdf_spheretrace_hit_center_miss_corner() {
             module: &module,
             entry: c"main",
             push_constant_bytes: 4,
+            bind_group_layout: None,
         })
         .expect("sdf_spheretrace compute pipeline");
 

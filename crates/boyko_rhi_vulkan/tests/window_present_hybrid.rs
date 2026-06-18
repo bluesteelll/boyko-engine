@@ -54,14 +54,14 @@
 use core::ptr::NonNull;
 use core::slice;
 
-use boyko_rhi::enums::{AddressMode, BarrierAccess, BarrierStage, Filter};
+use boyko_rhi::enums::{AddressMode, BarrierAccess, BarrierStage, DescriptorKind, Filter};
 use boyko_rhi::{
-    BarrierDesc, BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BufferBarrier, BufferDesc,
-    BufferImageCopy, BufferUsage, ComputePipelineDesc, DepthAttachment, Format, GraphicsPipelineDesc,
-    ImageAspect, ImageBarrierDesc, ImageLayout, ImageSubresourceRange, ImageUsage, LoadOp,
-    MemoryLocation, PrimitiveTopology, RenderArea, RenderingAttachment, RenderingDesc,
-    RhiCommandEncoder, RhiDevice, RhiQueue, SamplerDesc, ShaderStage, StoreOp, TextureDesc,
-    TextureDimension, VertexAttribute, VertexBufferLayout, VertexFormat, Viewport,
+    BarrierDesc, BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BindGroupLayoutEntry,
+    BufferBarrier, BufferDesc, BufferImageCopy, BufferUsage, ComputePipelineDesc, DepthAttachment,
+    Format, GraphicsPipelineDesc, ImageAspect, ImageBarrierDesc, ImageLayout, ImageSubresourceRange,
+    ImageUsage, LoadOp, MemoryLocation, PrimitiveTopology, RenderArea, RenderingAttachment,
+    RenderingDesc, RhiCommandEncoder, RhiDevice, RhiQueue, SamplerDesc, ShaderStage, StoreOp,
+    TextureDesc, TextureDimension, VertexAttribute, VertexBufferLayout, VertexFormat, Viewport,
 };
 use boyko_rhi_vulkan::compute::{
     COMPOSITE_BUFFER_WORDS, COMPOSITE_DEPTH_BASE_WORDS, COMPOSITE_PIXEL_BASE_WORDS,
@@ -444,6 +444,7 @@ fn run_composite(device: &VulkanContext, edits: &[SdfEdit], buffer: &boyko_rhi_v
             // P0a: the marcher's push block is now the extent/camera struct (80 B).
             // The golden invocation pushes extent (64,64) + ORTHO → bit-exact rays.
             push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
+            bind_group_layout: None,
         })
         .expect("composite compute pipeline");
 
@@ -830,8 +831,12 @@ fn windowed_hybrid_composite_present_is_validation_clean_and_renders_composite()
     let bind_group_layout = RhiDevice::create_bind_group_layout(
         device,
         &BindGroupLayoutDesc {
-            stage: ShaderStage::FRAGMENT,
-            binding_count: 1,
+            entries: &[BindGroupLayoutEntry {
+                binding: 0,
+                count: 1,
+                kind: DescriptorKind::CombinedImageSampler,
+                stage: ShaderStage::FRAGMENT,
+            }],
         },
     )
     .expect("bind-group layout (one COMBINED_IMAGE_SAMPLER)");
@@ -870,7 +875,7 @@ fn windowed_hybrid_composite_present_is_validation_clean_and_renders_composite()
         device,
         &BindGroupDesc {
             layout: &bind_group_layout,
-            entries: &[BindGroupEntry {
+            entries: &[BindGroupEntry::CombinedImage {
                 texture: &composite_texture,
                 sampler: &sampler,
             }],

@@ -270,6 +270,7 @@ fn run_marcher(
             module: &cs,
             entry: c"main",
             push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
+            bind_group_layout: None,
         })
         .expect("composite compute pipeline (needs an 80-byte compute push range)");
 

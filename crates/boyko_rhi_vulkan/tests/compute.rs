@@ -137,6 +137,7 @@ fn compute_write_pattern_round_trip() {
             module: &module,
             entry: c"main",
             push_constant_bytes: 4,
+            bind_group_layout: None,
         })
         .expect("write_pattern compute pipeline");
 
@@ -212,6 +213,7 @@ fn compute_chained_barrier_golden() {
             module: &write_module,
             entry: c"main",
             push_constant_bytes: 4,
+            bind_group_layout: None,
         })
         .expect("write_pattern pipeline");
 
@@ -223,6 +225,7 @@ fn compute_chained_barrier_golden() {
             module: &add_module,
             entry: c"main",
             push_constant_bytes: 4,
+            bind_group_layout: None,
         })
         .expect("transform_add pipeline");
 
@@ -335,6 +338,7 @@ fn negative_chained_barrier_hazard() {
             module: &write_module,
             entry: c"main",
             push_constant_bytes: 4,
+            bind_group_layout: None,
         })
         .expect("write_pattern pipeline");
     let add_module = device
@@ -345,6 +349,7 @@ fn negative_chained_barrier_hazard() {
             module: &add_module,
             entry: c"main",
             push_constant_bytes: 4,
+            bind_group_layout: None,
         })
         .expect("transform_add pipeline");
     let fence = device.create_fence(false).expect("fence");
@@ -435,6 +440,7 @@ fn compute_multi_bind_distinct_buffers() {
             module: &module,
             entry: c"main",
             push_constant_bytes: 4,
+            bind_group_layout: None,
         })
         .expect("write_pattern compute pipeline");
 
@@ -545,6 +551,7 @@ fn fence_reset_and_resubmit_reuse() {
             module: &module,
             entry: c"main",
             push_constant_bytes: 4,
+            bind_group_layout: None,
         })
         .expect("write_pattern compute pipeline");
     let fence = device.create_fence(false).expect("fence");

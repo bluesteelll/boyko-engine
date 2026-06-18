@@ -48,8 +48,9 @@ pub struct BufferCopy {
 ///
 /// Generic over the backend `A` because it borrows that backend's owned shader
 /// module by reference. The `'a` lifetime ties the descriptor to the borrowed
-/// module + entry name for the duration of the create call (the backend copies
-/// what it needs; nothing is retained past the call).
+/// module + entry name (+ the optional bind-group layout) for the duration of the
+/// create call (the backend copies what it needs; nothing is retained past the
+/// call).
 pub struct ComputePipelineDesc<'a, A: RhiApi> {
     /// The compiled shader module the pipeline's compute stage is built from.
     pub module: &'a A::ShaderModule,
@@ -58,6 +59,24 @@ pub struct ComputePipelineDesc<'a, A: RhiApi> {
     /// Size in bytes of the push-constant range bound at pipeline-layout time
     /// (4, today — the foundation's single u32 push constant).
     pub push_constant_bytes: u32,
+    /// The bind-group layout the pipeline layout includes at `set 0` (Render P1a:
+    /// the multi-resource vocabulary set — e.g. a storage buffer + a storage image),
+    /// or `None` to keep the device-shared **fixed** single-STORAGE_BUFFER compute
+    /// layout (the packed-buffer offscreen path). `Some(layout)` builds a dedicated
+    /// pipeline layout declaring that set + the push range, so a
+    /// [`crate::encoder::RhiCommandEncoder::bind_descriptor_set_compute`] can bind a
+    /// matching group before the dispatch; mirrors the graphics path's optional
+    /// [`GraphicsPipelineDesc::bind_group_layout`].
+    ///
+    /// **Push-constant note (review O1):** a `Some(layout)` (vocabulary) pipeline gets
+    /// a DEDICATED pipeline layout that is NOT push-constant-compatible with the
+    /// device-shared compute layout. The current
+    /// [`crate::encoder::RhiCommandEncoder::push_constants`] records against that
+    /// shared layout, so it is valid only for the `None` (fixed-layout) path — a push
+    /// while a vocabulary pipeline is bound is a Vulkan validation error. A vocabulary
+    /// pipeline must push against its own layout (P1b adds a pipeline-scoped
+    /// `push_constants` variant for the marcher's camera block).
+    pub bind_group_layout: Option<&'a A::BindGroupLayout>,
 }
 
 /// One vertex attribute within a [`VertexBufferLayout`] (Phase-6 S0 rung 3).

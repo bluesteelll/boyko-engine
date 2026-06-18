@@ -512,6 +512,45 @@ impl AddressMode {
     }
 }
 
+/// The kind of resource a single bind-group binding holds (the `VkDescriptorType`
+/// `i32` family, Render P1a).
+///
+/// `#[repr(i32)]` with discriminants equal to the matching `VkDescriptorType`
+/// constants (asserted backend-side in `abi_guard.rs`), so the backend maps a
+/// [`crate::device::BindGroupLayoutEntry::kind`] to a `VkDescriptorType` with a
+/// trivial `as i32` cast — no per-kind translation table. Only the five kinds the
+/// G-buffer foundation needs are defined (a combined image+sampler, a separate
+/// sampled image, a storage image, a uniform buffer, a storage buffer); the family
+/// grows per phase. This generalizes the prior COMBINED_IMAGE_SAMPLER-only
+/// bind-group surface into the multi-resource descriptor vocabulary.
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DescriptorKind {
+    /// `VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER` — a sampled image bundled with
+    /// its sampler in one binding (the existing fragment-shader sampling path).
+    CombinedImageSampler = 1,
+    /// `VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE` — a sampled image with the sampler bound
+    /// separately (reserved; the G-buffer marcher samples via combined today).
+    SampledImage = 2,
+    /// `VK_DESCRIPTOR_TYPE_STORAGE_IMAGE` — a read/write image a compute shader
+    /// stores into (the P1a marcher's output target).
+    StorageImage = 3,
+    /// `VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER` — a read-only constant buffer (reserved
+    /// for the G-buffer's per-frame uniforms).
+    UniformBuffer = 6,
+    /// `VK_DESCRIPTOR_TYPE_STORAGE_BUFFER` — a read/write buffer a shader accesses
+    /// (the P1a marcher's edit-list input).
+    StorageBuffer = 7,
+}
+
+impl DescriptorKind {
+    /// The raw `i32` discriminant — equal to the matching `VkDescriptorType`.
+    #[inline]
+    pub const fn as_i32(self) -> i32 {
+        self as i32
+    }
+}
+
 /// Image-aspect bitflags for an image subresource. Values equal the
 /// `VK_IMAGE_ASPECT_*` bits.
 #[repr(transparent)]

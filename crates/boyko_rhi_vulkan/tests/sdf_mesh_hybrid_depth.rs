@@ -514,6 +514,7 @@ fn run_hybrid(ctx: &VulkanContext, edits: &[SdfEdit]) -> (Vec<u32>, Vec<f32>) {
             // P0a: the marcher's push block is now the extent/camera struct (80 B).
             // The golden invocation pushes extent (64,64) + ORTHO → bit-exact rays.
             push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
+            bind_group_layout: None,
         })
         .expect("composite compute pipeline");
 

@@ -46,13 +46,14 @@ pub use descriptor::{
     RenderingAttachment, RenderingDesc, VertexAttribute, VertexBufferLayout, Viewport,
 };
 pub use device::{
-    BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, RhiDevice, SamplerDesc, TextureDesc,
+    BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BindGroupLayoutEntry,
+    MAX_BIND_GROUP_BINDINGS, RhiDevice, SamplerDesc, TextureDesc,
 };
 pub use encoder::RhiCommandEncoder;
 pub use enums::{
-    AddressMode, BarrierAccess, BarrierStage, BufferUsage, Filter, Format, ImageAspect, ImageLayout,
-    ImageUsage, IndexType, LoadOp, MemoryLocation, PrimitiveTopology, ShaderStage, StoreOp,
-    TextureDimension, VertexFormat,
+    AddressMode, BarrierAccess, BarrierStage, BufferUsage, DescriptorKind, Filter, Format,
+    ImageAspect, ImageLayout, ImageUsage, IndexType, LoadOp, MemoryLocation, PrimitiveTopology,
+    ShaderStage, StoreOp, TextureDimension, VertexFormat,
 };
 pub use error::RhiError;
 pub use handle::{

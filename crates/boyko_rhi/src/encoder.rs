@@ -169,6 +169,42 @@ pub trait RhiCommandEncoder<A: RhiApi> {
         // Phase-6 S0 default seam: overridden by the Vulkan backend.
     }
 
+    /// Binds `group` (a descriptor set) at `set 0` of `compute_pipeline`'s layout for
+    /// the COMPUTE bind point (Render P1a). Must be recorded after
+    /// [`Self::bind_compute_pipeline`] and before a [`Self::dispatch`] that reads the
+    /// bound vocabulary set; `compute_pipeline` supplies the pipeline layout the set
+    /// is bound against (the layout must have been built with the same bind-group
+    /// layout via `ComputePipelineDesc::bind_group_layout`). The COMPUTE counterpart
+    /// of [`Self::bind_descriptor_set`]; it does NOT touch the encoder's fixed
+    /// single-STORAGE_BUFFER set used by [`Self::bind_storage_buffer`] (the two
+    /// coexist — the packed-buffer offscreen path keeps the fixed set).
+    ///
+    /// # Push constants on a vocabulary pipeline (review O1)
+    ///
+    /// [`Self::push_constants`] records against the encoder's cached SHARED compute
+    /// pipeline layout (the fixed/`None`-layout path). A vocabulary-compute pipeline
+    /// (created with [`crate::descriptor::ComputePipelineDesc::bind_group_layout`]
+    /// `== Some`) is bound here against its DEDICATED layout, which is NOT
+    /// push-constant-compatible with the shared layout under Vulkan — calling
+    /// [`Self::push_constants`] while a vocabulary pipeline is bound is a validation
+    /// error. A vocabulary pipeline must push against ITS OWN layout (a dedicated
+    /// `push_constants(&ComputePipeline, …)` variant is added in P1b for the
+    /// marcher's camera block); the current shared-layout [`Self::push_constants`]
+    /// stays valid only for the fixed/`None`-layout path. P1a wires no push on the
+    /// vocabulary path.
+    ///
+    /// The default body is a no-op marked `#[cold] #[inline(never)]`; the Vulkan
+    /// backend overrides it (`vkCmdBindDescriptorSets`, COMPUTE bind point).
+    #[cold]
+    #[inline(never)]
+    fn bind_descriptor_set_compute(
+        &mut self,
+        _group: &A::BindGroup,
+        _compute_pipeline: &A::ComputePipeline,
+    ) {
+        // Render P1a default seam: overridden by the Vulkan backend.
+    }
+
     /// Sets the dynamic viewport (Phase-6 S0 rung 2). The pipeline is created with
     /// dynamic viewport state, so this must be recorded before [`Self::draw`].
     ///

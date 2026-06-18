@@ -38,10 +38,10 @@ use core::ffi::c_void;
 use core::ptr::{self, NonNull};
 
 use boyko_rhi::{
-    BarrierDesc, BindGroupDesc, BindGroupLayoutDesc, BufferBarrier, BufferCopy, BufferDesc,
-    BufferImageCopy, ComputePipelineDesc, GraphicsPipelineDesc, ImageBarrierDesc, ImageLayout,
-    IndexType, MemoryLocation, RenderArea, RenderingDesc, RhiApi, RhiCommandEncoder, RhiDevice,
-    RhiQueue, SamplerDesc, ShaderStage, TextureDesc, Viewport,
+    BarrierDesc, BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BufferBarrier, BufferCopy,
+    BufferDesc, BufferImageCopy, ComputePipelineDesc, DescriptorKind, GraphicsPipelineDesc,
+    ImageBarrierDesc, ImageLayout, IndexType, MemoryLocation, RenderArea, RenderingDesc, RhiApi,
+    RhiCommandEncoder, RhiDevice, RhiQueue, SamplerDesc, ShaderStage, TextureDesc, Viewport,
 };
 
 use crate::compute::ComputeError;
@@ -72,6 +72,52 @@ const MAX_VERTEX_ATTRIBUTES: usize = 8;
 /// deferred-lighting pass's two G-buffer inputs (albedo + normal) with headroom; a
 /// `debug_assert!` traps an over-count at `create_bind_group_layout`/`create_bind_group`.
 const MAX_BIND_GROUP_BINDINGS: usize = 8;
+
+// The bind-group create path keeps its own copy of the cap so a future divergence
+// from the agnostic `boyko_rhi::MAX_BIND_GROUP_BINDINGS` (the desc-side cap) breaks
+// the build rather than silently truncating an over-count.
+const _: () = assert!(
+    MAX_BIND_GROUP_BINDINGS == boyko_rhi::MAX_BIND_GROUP_BINDINGS,
+    "backend bind-group cap must match the agnostic boyko_rhi::MAX_BIND_GROUP_BINDINGS"
+);
+
+/// The five [`DescriptorKind`] slots, in a fixed order, used to bucket a bind
+/// group's descriptors into a per-kind histogram for exact pool sizing (Render P1a).
+/// [`DESCRIPTOR_KIND_VK`] maps each slot to its `VkDescriptorType`; the two arrays
+/// share the slot order.
+const DESCRIPTOR_KIND_VK: [i32; 5] = [
+    VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+    VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+    VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+    VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+    VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+];
+
+/// Maps a [`DescriptorKind`] to its histogram slot in [`DESCRIPTOR_KIND_VK`].
+#[inline]
+fn descriptor_kind_slot(kind: DescriptorKind) -> usize {
+    match kind {
+        DescriptorKind::CombinedImageSampler => 0,
+        DescriptorKind::SampledImage => 1,
+        DescriptorKind::StorageImage => 2,
+        DescriptorKind::UniformBuffer => 3,
+        DescriptorKind::StorageBuffer => 4,
+    }
+}
+
+/// The [`DescriptorKind`] a [`BindGroupEntry`] variant carries (Render P1a). The
+/// per-entry write's `descriptor_type` and the pool histogram both read this, so a
+/// new variant must be handled here (exhaustive match, no wildcard).
+#[inline]
+fn bind_group_entry_kind(entry: &BindGroupEntry<Vulkan>) -> DescriptorKind {
+    match entry {
+        BindGroupEntry::StorageImage { .. } => DescriptorKind::StorageImage,
+        BindGroupEntry::SampledImage { .. } => DescriptorKind::SampledImage,
+        BindGroupEntry::CombinedImage { .. } => DescriptorKind::CombinedImageSampler,
+        BindGroupEntry::StorageBuffer { .. } => DescriptorKind::StorageBuffer,
+        BindGroupEntry::UniformBuffer { .. } => DescriptorKind::UniformBuffer,
+    }
+}
 
 /// The cap on a graphics pipeline's color (MRT) attachment count, shared by the
 /// pipeline's color-blend + dynamic-rendering format arrays (Phase-6 S0 rung 6). The
@@ -328,9 +374,20 @@ pub struct VulkanShaderModule {
 
 /// An owned compute pipeline ([`RhiApi::ComputePipeline`]).
 ///
-/// Holds only the `VkPipeline`; its shader module is a separate owned
-/// [`VulkanShaderModule`] (the trait splits module + pipeline creation), and the
-/// pipeline layout is the device's shared [`ComputeLayouts`]`::pipeline_layout`.
+/// Holds the `VkPipeline` + the `VkPipelineLayout` it was built against. Its shader
+/// module is a separate owned [`VulkanShaderModule`] (the trait splits module +
+/// pipeline creation). The layout is one of two (Render P1a):
+///
+/// * the device's shared [`ComputeLayouts`]`::pipeline_layout` (the fixed
+///   single-STORAGE_BUFFER packed-buffer path) — then `owns_layout == false` and the
+///   shared layout is NOT torn down with the pipeline; or
+/// * a dedicated layout declaring `set 0` = a vocabulary bind-group layout + the
+///   shared push range (`ComputePipelineDesc::bind_group_layout == Some`) — then
+///   `owns_layout == true` and the layout is torn down with the pipeline (reverse
+///   creation order: pipeline → layout) in `destroy_compute_pipeline`.
+///
+/// `layout` is the target a [`RhiCommandEncoder::bind_descriptor_set_compute`] binds
+/// the vocabulary set against.
 ///
 /// # Safety
 ///
@@ -339,8 +396,15 @@ pub struct VulkanShaderModule {
 /// context's device fn-table, and the pipeline references the context's shared
 /// layouts. No compile-time `'ctx` tie this phase (plan F1; deferred to Phase 2-3).
 pub struct ComputePipeline {
-    /// The `VkPipeline` handle; destroyed by `destroy_compute_pipeline`.
+    /// The `VkPipeline` handle; destroyed first by `destroy_compute_pipeline`.
     pub(crate) pipeline: VkPipeline,
+    /// The pipeline layout the pipeline was built against — either the device-shared
+    /// `ComputeLayouts::pipeline_layout` (fixed path) or a dedicated layout (the
+    /// vocabulary path). Read by `bind_descriptor_set_compute`.
+    pub(crate) layout: VkPipelineLayout,
+    /// `true` iff `layout` is a dedicated layout owned by this pipeline (destroyed
+    /// after the pipeline); `false` for the device-shared layout (left alone).
+    pub(crate) owns_layout: bool,
 }
 
 /// An owned graphics pipeline ([`RhiApi::GraphicsPipeline`], Phase-6 S0 rung 2).
@@ -385,14 +449,16 @@ pub struct VulkanSampler {
 }
 
 /// An owned bind-group (descriptor-set) layout ([`RhiApi::BindGroupLayout`],
-/// Phase-6 S0 rung 5).
+/// Render P1a).
 ///
-/// Holds the `VkDescriptorSetLayout` with one COMBINED_IMAGE_SAMPLER binding at
-/// `(set 0, binding 0)`. Distinct from the device's shared compute
-/// [`ComputeLayouts`]`::set_layout` (a runtime-mutable graphics layout, NOT the
-/// fixed compute one). Read at `create_bind_group` (set allocation) +
-/// `create_graphics_pipeline` (pipeline layout). Destroyed by value through
-/// `destroy_bind_group_layout`.
+/// Holds the `VkDescriptorSetLayout` built from a slice of heterogeneous
+/// [`BindGroupLayoutEntry`](boyko_rhi::BindGroupLayoutEntry)s at `set 0` (the
+/// multi-resource descriptor vocabulary — combined-image-sampler, storage image,
+/// storage buffer, and so on). Distinct from the device's shared compute
+/// [`ComputeLayouts`]`::set_layout` (a runtime-mutable graphics + vocabulary-compute
+/// layout, NOT the fixed compute one). Read at `create_bind_group` (set allocation)
+/// and at `create_graphics_pipeline` / `create_compute_pipeline` (pipeline layout),
+/// then destroyed by value through `destroy_bind_group_layout`.
 ///
 /// # Safety
 ///
@@ -400,19 +466,41 @@ pub struct VulkanSampler {
 /// or destroyed: each goes through the context's device fn-table. No compile-time
 /// `'ctx` tie this phase (plan F1; deferred to Phase 2-3).
 pub struct VulkanBindGroupLayout {
-    /// The `VkDescriptorSetLayout` (one COMBINED_IMAGE_SAMPLER @ set0/binding0).
+    /// The `VkDescriptorSetLayout` (heterogeneous vocabulary bindings @ set 0).
     pub(crate) set_layout: VkDescriptorSetLayout,
+    /// A fixed-capacity inline copy of the per-entry `(binding, kind)` pairs the
+    /// layout was declared from (Render P1a, review M1/M2). POD, zero heap. Retained
+    /// so `create_bind_group` can cross-check each [`BindGroupEntry`]'s variant
+    /// against the declared [`DescriptorKind`] (M1) and target each write at the
+    /// binding the layout actually declared rather than the slice index (M2). Only
+    /// the first `entry_count` slots are valid; the tail is a harmless default.
+    pub(crate) entries: [BindGroupLayoutBinding; MAX_BIND_GROUP_BINDINGS],
+    /// The number of valid entries in `entries` (`1..=MAX_BIND_GROUP_BINDINGS`).
+    pub(crate) entry_count: usize,
 }
 
-/// An owned bind group ([`RhiApi::BindGroup`], Phase-6 S0 rung 5).
+/// One layout entry's `(binding, kind)` pair, retained by [`VulkanBindGroupLayout`]
+/// for the `create_bind_group` cross-check (Render P1a, review M1/M2). A trivial POD
+/// (`Copy`, no heap), read only on the create/debug path — never on the per-frame
+/// record path.
+#[derive(Clone, Copy)]
+pub(crate) struct BindGroupLayoutBinding {
+    /// The binding index this entry was declared at (`layout(binding = N)`).
+    pub(crate) binding: u32,
+    /// The descriptor kind declared at this binding; cross-checked against the
+    /// matching [`BindGroupEntry`]'s variant in `create_bind_group`.
+    pub(crate) kind: DescriptorKind,
+}
+
+/// An owned bind group ([`RhiApi::BindGroup`], Render P1a).
 ///
-/// Owns a dedicated `VkDescriptorPool` (sized for one COMBINED_IMAGE_SAMPLER) plus
-/// the single `VkDescriptorSet` allocated + written from it. Unlike the encoder's
-/// compute descriptor pool (one per encoder, fixed STORAGE_BUFFER layout), a bind
-/// group is a standalone, caller-owned resource the sampling draw binds. The set is
-/// freed implicitly by destroying its pool, so teardown is one
-/// `vkDestroyDescriptorPool` in `destroy_bind_group` (the by-value move encodes
-/// "destroyed exactly once").
+/// Owns a dedicated `VkDescriptorPool` (sized per the layout's per-kind descriptor
+/// histogram) plus the single `VkDescriptorSet` allocated + written ONCE from it.
+/// Unlike the encoder's compute descriptor pool (one per encoder, fixed
+/// STORAGE_BUFFER layout), a bind group is a standalone, caller-owned resource a
+/// draw or a compute dispatch binds. The set is freed implicitly by destroying its
+/// pool, so teardown is one `vkDestroyDescriptorPool` in `destroy_bind_group` (the
+/// by-value move encodes "destroyed exactly once").
 ///
 /// # Safety
 ///
@@ -683,28 +771,69 @@ impl RhiDevice<Vulkan> for VulkanContext {
         &self,
         desc: &BindGroupLayoutDesc,
     ) -> Result<VulkanBindGroupLayout, VulkanError> {
-        // `desc.binding_count` consecutive COMBINED_IMAGE_SAMPLER bindings at
-        // set0/binding 0..N at the desc's stage (rung 5: 1 binding; rung 6 lighting: 2
-        // — albedo + normal). The agnostic `ShaderStage` bits equal `VK_SHADER_STAGE_*`
-        // (identity cast, asserted in `abi_guard.rs`). The bindings are a fixed-capacity
-        // inline array — zero heap allocation.
-        let count = desc.binding_count as usize;
+        // Render P1a: a heterogeneous set-0 layout from `desc.entries` — one
+        // `VkDescriptorSetLayoutBinding` per entry, its `descriptor_type` the entry's
+        // `DescriptorKind` cast `as i32` (the discriminants equal the
+        // `VK_DESCRIPTOR_TYPE_*` constants — asserted in `abi_guard.rs`), its
+        // `stage_flags` the entry's `ShaderStage` bits (identity cast, also asserted).
+        // The bindings are a fixed-capacity inline array — zero heap allocation.
+        let count = desc.entries.len();
         debug_assert!(
             (1..=MAX_BIND_GROUP_BINDINGS).contains(&count),
-            "invariant: bind-group-layout binding_count must be in 1..=MAX_BIND_GROUP_BINDINGS"
+            "invariant: bind-group-layout entry count must be in 1..=MAX_BIND_GROUP_BINDINGS"
         );
         // Release-safe: clamp to the inline capacity (and a floor of 1) so the count
         // handed to the driver never exceeds the initialized slots even if a
         // (debug-asserted) out-of-range count slipped through a release build.
         let count = count.clamp(1, MAX_BIND_GROUP_BINDINGS);
-        let stage_flags = desc.stage.bits();
+        // Review M2: every declared binding must fit the inline-array capacity so the
+        // retained `(binding, kind)` pairs (read at `create_bind_group` to target each
+        // write) stay addressable. Debug-only; the contiguous-0..N convention every
+        // call site uses trivially satisfies it.
+        debug_assert!(
+            desc.entries
+                .iter()
+                .take(count)
+                .all(|e| (e.binding as usize) < MAX_BIND_GROUP_BINDINGS),
+            "invariant: bind-group-layout binding must be < MAX_BIND_GROUP_BINDINGS"
+        );
+        // Retain the per-entry `(binding, kind)` pairs (review M1/M2) so
+        // `create_bind_group` can cross-check the entry variant against the declared
+        // kind and target each write at the layout's binding. POD copy, zero heap.
+        let entries: [BindGroupLayoutBinding; MAX_BIND_GROUP_BINDINGS] =
+            core::array::from_fn(|i| {
+                if i < count {
+                    BindGroupLayoutBinding {
+                        binding: desc.entries[i].binding,
+                        kind: desc.entries[i].kind,
+                    }
+                } else {
+                    BindGroupLayoutBinding {
+                        binding: i as u32,
+                        kind: DescriptorKind::StorageBuffer,
+                    }
+                }
+            });
         let bindings: [VkDescriptorSetLayoutBinding; MAX_BIND_GROUP_BINDINGS] =
-            core::array::from_fn(|i| VkDescriptorSetLayoutBinding {
-                binding: i as u32,
-                descriptor_type: VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                descriptor_count: 1,
-                stage_flags,
-                p_immutable_samplers: ptr::null(),
+            core::array::from_fn(|i| {
+                if i < count {
+                    let e = &desc.entries[i];
+                    VkDescriptorSetLayoutBinding {
+                        binding: e.binding,
+                        descriptor_type: e.kind.as_i32(),
+                        descriptor_count: e.count,
+                        stage_flags: e.stage.bits(),
+                        p_immutable_samplers: ptr::null(),
+                    }
+                } else {
+                    VkDescriptorSetLayoutBinding {
+                        binding: i as u32,
+                        descriptor_type: VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                        descriptor_count: 0,
+                        stage_flags: 0,
+                        p_immutable_samplers: ptr::null(),
+                    }
+                }
             });
         let info = VkDescriptorSetLayoutCreateInfo {
             s_type: VkStructureType::DescriptorSetLayoutCreateInfo,
@@ -716,8 +845,10 @@ impl RhiDevice<Vulkan> for VulkanContext {
         let mut set_layout = VkDescriptorSetLayout::NULL;
         // SAFETY: `device` is live; `info` is fully initialized and its `p_bindings`
         // points to the first `count` (<= cap) entries of the live `bindings` inline
-        // array (alive for the call), each a COMBINED_IMAGE_SAMPLER at binding `i`;
-        // `&mut set_layout` is a valid out-pointer; NULL allocator.
+        // array (alive for the call), each a fully-initialized binding whose type +
+        // stage come from `desc.entries[i]`; `&mut set_layout` is a valid out-pointer;
+        // NULL allocator. `binding_count` bounds the driver's read to the initialized
+        // prefix (the unused tail is never read).
         let raw = unsafe {
             (self.device_fns().create_descriptor_set_layout)(
                 self.device(),
@@ -733,7 +864,11 @@ impl RhiDevice<Vulkan> for VulkanContext {
                 result,
             ));
         }
-        Ok(VulkanBindGroupLayout { set_layout })
+        Ok(VulkanBindGroupLayout {
+            set_layout,
+            entries,
+            entry_count: count,
+        })
     }
 
     unsafe fn destroy_bind_group_layout(&self, layout: VulkanBindGroupLayout) {
@@ -756,33 +891,62 @@ impl RhiDevice<Vulkan> for VulkanContext {
         let device = self.device();
         let fns = self.device_fns();
 
-        // One COMBINED_IMAGE_SAMPLER descriptor per `desc.entries` entry, written into
-        // bindings 0..N (rung 5: 1 entry; rung 6 lighting: 2 — albedo + normal). The
-        // count must equal the layout's `binding_count` (caller contract, W2-b).
+        // Render P1a: one descriptor per `desc.entries` entry, written into the
+        // layout's bindings in slice order. The count must equal the layout's entry
+        // count and each entry's variant must match its layout entry's kind (caller
+        // contract). The pool is sized per the per-kind histogram, the set is
+        // allocated once, and `vkUpdateDescriptorSets` writes the whole set ONCE at
+        // create — there is NO per-frame rewrite.
         let count = desc.entries.len();
         debug_assert!(
             (1..=MAX_BIND_GROUP_BINDINGS).contains(&count),
             "invariant: bind-group entry count must be in 1..=MAX_BIND_GROUP_BINDINGS"
         );
+        // Review M1: the group's arity must equal the layout's declared entry count —
+        // one descriptor write per layout binding, no more, no fewer. (The doc on
+        // `BindGroupDesc` promises this check; it is now real because the layout
+        // retains its `entry_count`.) Debug-only; vanishes in release.
+        debug_assert!(
+            count == desc.layout.entry_count,
+            "P1a: BindGroupDesc.entries.len() must equal the layout's entry count"
+        );
         let count = count.clamp(1, MAX_BIND_GROUP_BINDINGS);
 
-        // A dedicated pool sized for `count` COMBINED_IMAGE_SAMPLER descriptors in one set.
-        let pool_size = VkDescriptorPoolSize {
-            descriptor_type: VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            descriptor_count: count as u32,
-        };
+        // --- Per-kind descriptor histogram → pool sizes (one entry per kind that
+        //     actually appears, so the pool is sized exactly). The five kinds map onto
+        //     fixed histogram slots; `pool_sizes` is a fixed inline array (zero heap). ---
+        const KIND_COUNT: usize = 5;
+        let mut hist = [0u32; KIND_COUNT];
+        for entry in desc.entries.iter().take(count) {
+            hist[descriptor_kind_slot(bind_group_entry_kind(entry))] += 1;
+        }
+        let mut pool_sizes = [VkDescriptorPoolSize {
+            descriptor_type: 0,
+            descriptor_count: 0,
+        }; KIND_COUNT];
+        let mut pool_size_count = 0usize;
+        for (slot, &n) in hist.iter().enumerate() {
+            if n > 0 {
+                pool_sizes[pool_size_count] = VkDescriptorPoolSize {
+                    descriptor_type: DESCRIPTOR_KIND_VK[slot],
+                    descriptor_count: n,
+                };
+                pool_size_count += 1;
+            }
+        }
         let dp_info = VkDescriptorPoolCreateInfo {
             s_type: VkStructureType::DescriptorPoolCreateInfo,
             p_next: ptr::null(),
             flags: 0,
             max_sets: 1,
-            pool_size_count: 1,
-            p_pool_sizes: &pool_size,
+            pool_size_count: pool_size_count as u32,
+            p_pool_sizes: pool_sizes.as_ptr(),
         };
         let mut descriptor_pool = VkDescriptorPool::NULL;
         // SAFETY: `device` is live; `dp_info` is fully initialized referencing the
-        // `pool_size` local (alive for the call); `&mut descriptor_pool` is a valid
-        // out-pointer; NULL allocator.
+        // first `pool_size_count` (<= KIND_COUNT) entries of the live `pool_sizes`
+        // inline array (alive for the call); `&mut descriptor_pool` is a valid
+        // out-pointer; NULL allocator. `pool_size_count` bounds the driver's read.
         let raw = unsafe {
             (fns.create_descriptor_pool)(device, &dp_info, ptr::null(), &mut descriptor_pool)
         };
@@ -817,58 +981,126 @@ impl RhiDevice<Vulkan> for VulkanContext {
             ));
         }
 
-        // Write each entry's (sampler, image view, layout) triple into binding `i`. The
-        // textures MUST already be in SHADER_READ_ONLY_OPTIMAL when SAMPLED at draw
-        // time — the caller transitions each via `image_barrier` (the rung-5/6 SAFETY
-        // contract); the layout declared here is what the descriptor records, which
-        // validation cross-checks against each image's actual layout at draw. The
-        // image-info + write arrays are fixed-capacity inline (zero heap allocation);
-        // each `VkWriteDescriptorSet[i].p_image_info` points at `image_infos[i]`, so
-        // both arrays must outlive the `update_descriptor_sets` call (they are stack
-        // locals alive through it).
-        let image_infos: [VkDescriptorImageInfo; MAX_BIND_GROUP_BINDINGS] =
-            core::array::from_fn(|i| {
-                if i < count {
-                    let entry = &desc.entries[i];
-                    VkDescriptorImageInfo {
-                        sampler: entry.sampler.sampler,
-                        image_view: entry.texture.view,
-                        image_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                    }
-                } else {
-                    VkDescriptorImageInfo {
-                        sampler: VkSampler::NULL,
-                        image_view: VkImageView::NULL,
-                        image_layout: VK_IMAGE_LAYOUT_UNDEFINED,
-                    }
-                }
-            });
+        // --- Build the per-entry image-info + buffer-info inline arrays. Each kind
+        //     populates exactly one of them at its slot; the WRITE at slot `i` points
+        //     at whichever the kind reads (`p_image_info` for the three image kinds,
+        //     `p_buffer_info` for the two buffer kinds), the other staying null. Each
+        //     write's `dst_binding` is the LAYOUT entry's binding (caller contract:
+        //     entries are in layout order, so `desc.layout`'s binding `i`). Image kinds
+        //     declare the layout the descriptor records: GENERAL for a storage image,
+        //     SHADER_READ_ONLY_OPTIMAL for a sampled one — the caller transitions each
+        //     via `image_barrier` before access (the P1a SAFETY contract), and
+        //     validation cross-checks the recorded layout at access time. All three
+        //     inline arrays are fixed-capacity (zero heap) and outlive the update call. ---
+        let mut image_infos = [VkDescriptorImageInfo {
+            sampler: VkSampler::NULL,
+            image_view: VkImageView::NULL,
+            image_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+        }; MAX_BIND_GROUP_BINDINGS];
+        let mut buffer_infos = [VkDescriptorBufferInfo {
+            buffer: VkBuffer::NULL,
+            offset: 0,
+            range: 0,
+        }; MAX_BIND_GROUP_BINDINGS];
         let writes: [VkWriteDescriptorSet; MAX_BIND_GROUP_BINDINGS] = core::array::from_fn(|i| {
+            if i >= count {
+                // Unused tail slot — never read (`descriptor_count: 0`, and the update
+                // below passes only `count` writes). A harmless null-pointing write.
+                return VkWriteDescriptorSet {
+                    s_type: VkStructureType::WriteDescriptorSet,
+                    p_next: ptr::null(),
+                    dst_set: descriptor_set,
+                    dst_binding: i as u32,
+                    dst_array_element: 0,
+                    descriptor_count: 0,
+                    descriptor_type: VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    p_image_info: ptr::null(),
+                    p_buffer_info: ptr::null(),
+                    p_texel_buffer_view: ptr::null(),
+                };
+            }
+            let entry = &desc.entries[i];
+            let kind = bind_group_entry_kind(entry);
+            // Review M1: the entry's variant MUST match the kind the layout declared at
+            // this slot (the doc-promised cross-check, now real because the layout
+            // retains its per-entry kinds). The agnostic `BindGroupEntry` carries no
+            // explicit binding; the layout↔group correspondence is positional, so slot
+            // `i` of the group pairs with slot `i` of the layout. Debug-only.
+            debug_assert!(
+                kind == desc.layout.entries[i].kind,
+                "P1a: BindGroupEntry variant must match the layout's DescriptorKind at this slot"
+            );
+            // Review M2: write at the binding the layout actually DECLARED, not the
+            // positional slice index, so the write targets the right binding under any
+            // binding numbering. For the contiguous-0..N convention every call site uses
+            // (`layout.entries[i].binding == i`), this is byte-identical to the prior
+            // positional `i as u32`.
+            let dst_binding = desc.layout.entries[i].binding;
+            let mut p_image_info: *const c_void = ptr::null();
+            let mut p_buffer_info: *const VkDescriptorBufferInfo = ptr::null();
+            match *entry {
+                BindGroupEntry::StorageImage { texture } => {
+                    image_infos[i] = VkDescriptorImageInfo {
+                        sampler: VkSampler::NULL,
+                        image_view: texture.view,
+                        image_layout: VK_IMAGE_LAYOUT_GENERAL,
+                    };
+                    p_image_info = (&image_infos[i] as *const VkDescriptorImageInfo).cast();
+                }
+                BindGroupEntry::SampledImage { texture, sampler } => {
+                    image_infos[i] = VkDescriptorImageInfo {
+                        sampler: sampler.sampler,
+                        image_view: texture.view,
+                        image_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    };
+                    p_image_info = (&image_infos[i] as *const VkDescriptorImageInfo).cast();
+                }
+                BindGroupEntry::CombinedImage { texture, sampler } => {
+                    image_infos[i] = VkDescriptorImageInfo {
+                        sampler: sampler.sampler,
+                        image_view: texture.view,
+                        image_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    };
+                    p_image_info = (&image_infos[i] as *const VkDescriptorImageInfo).cast();
+                }
+                BindGroupEntry::StorageBuffer { buffer }
+                | BindGroupEntry::UniformBuffer { buffer } => {
+                    buffer_infos[i] = VkDescriptorBufferInfo {
+                        buffer: buffer.buffer,
+                        offset: 0,
+                        range: buffer.size,
+                    };
+                    p_buffer_info = &buffer_infos[i];
+                }
+            }
             VkWriteDescriptorSet {
                 s_type: VkStructureType::WriteDescriptorSet,
                 p_next: ptr::null(),
                 dst_set: descriptor_set,
-                dst_binding: i as u32,
+                dst_binding,
                 dst_array_element: 0,
                 descriptor_count: 1,
-                descriptor_type: VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                // A combined-image-sampler write reads `p_image_info`, not the buffer /
-                // texel-view pointers (which stay null). Points at the matching inline
-                // `image_infos[i]` local (alive through the update call below).
-                p_image_info: (&image_infos[i] as *const VkDescriptorImageInfo).cast(),
-                p_buffer_info: ptr::null(),
+                descriptor_type: kind.as_i32(),
+                p_image_info,
+                p_buffer_info,
                 p_texel_buffer_view: ptr::null(),
             }
         });
         // SAFETY: `device` is live; the first `count` (<= cap) `writes` reference the
-        // freshly-allocated `descriptor_set` at distinct bindings 0..count, each
-        // `p_image_info` pointing at the matching `image_infos[i]` local (which names
-        // the caller's live sampler + image view); `p_image_info` is a valid
-        // `VkDescriptorImageInfo*` for the COMBINED_IMAGE_SAMPLER type; zero copies.
-        // The set is not bound to any pending command buffer (it was just allocated),
-        // so writing it is sound. Both inline arrays outlive the call; only the first
-        // `count` entries are passed (the count bounds the driver's read).
-        unsafe { (fns.update_descriptor_sets)(device, count as u32, writes.as_ptr(), 0, ptr::null()) };
+        // freshly-allocated `descriptor_set`, each at its layout entry's binding, with
+        // `descriptor_type` matching that binding's kind. For an image kind
+        // `p_image_info` points at the matching `image_infos[i]` local (which names the
+        // caller's live image view + optional sampler); for a buffer kind
+        // `p_buffer_info` points at `buffer_infos[i]` (which names the caller's live
+        // buffer with its full range). The non-relevant pointer stays null, which the
+        // driver ignores for that descriptor type. Both inline info arrays + the
+        // `writes` array outlive the call; only the first `count` writes are passed
+        // (the count bounds the driver's read). The set is not bound to any pending
+        // command buffer (it was just allocated), so writing it is sound — and it is
+        // written exactly ONCE here, never per-frame.
+        unsafe {
+            (fns.update_descriptor_sets)(device, count as u32, writes.as_ptr(), 0, ptr::null())
+        };
 
         Ok(VulkanBindGroup {
             descriptor_pool,
@@ -952,6 +1184,52 @@ impl RhiDevice<Vulkan> for VulkanContext {
         // The shared pipeline layout is needed at pipeline-create time (plan Q1).
         let layouts = self.compute_layouts()?;
 
+        // Render P1a: pick the pipeline layout. `None` → the device-shared
+        // single-STORAGE_BUFFER fixed layout (the packed-buffer path, byte-identical
+        // to before, NOT owned by the pipeline). `Some(bgl)` → a DEDICATED layout
+        // declaring `set 0` = the vocabulary bind-group layout + the shared COMPUTE
+        // push range, owned by the pipeline and torn down with it. The dedicated
+        // layout is created first; if pipeline creation fails below it is rolled back
+        // before the error returns.
+        let (pipeline_layout, owns_layout) = match desc.bind_group_layout {
+            None => (layouts.pipeline_layout, false),
+            Some(bgl) => {
+                let set_layout = bgl.set_layout;
+                let push_range = VkPushConstantRange {
+                    stage_flags: VK_SHADER_STAGE_COMPUTE_BIT,
+                    offset: 0,
+                    size: COMPUTE_PUSH_CONSTANT_RANGE_BYTES,
+                };
+                let pl_info = VkPipelineLayoutCreateInfo {
+                    s_type: VkStructureType::PipelineLayoutCreateInfo,
+                    p_next: ptr::null(),
+                    flags: 0,
+                    set_layout_count: 1,
+                    p_set_layouts: &set_layout,
+                    push_constant_range_count: 1,
+                    p_push_constant_ranges: &push_range,
+                };
+                let mut layout = VkPipelineLayout::NULL;
+                // SAFETY: `device` is live; `pl_info` is fully initialized referencing
+                // the `set_layout` local (the caller's live vocabulary set-layout, alive
+                // for this whole fn) at `set 0` + the `push_range` local (alive for this
+                // whole fn); `&mut layout` is a valid out-pointer; NULL allocator.
+                let raw = unsafe {
+                    (self.device_fns().create_pipeline_layout)(
+                        self.device(),
+                        &pl_info,
+                        ptr::null(),
+                        &mut layout,
+                    )
+                };
+                let result = VkResult::from_raw(raw);
+                if !result.is_success() {
+                    return Err(VulkanError::Vk("vkCreatePipelineLayout(compute)", result));
+                }
+                (layout, true)
+            }
+        };
+
         let stage = VkPipelineShaderStageCreateInfo {
             s_type: VkStructureType::PipelineShaderStageCreateInfo,
             p_next: ptr::null(),
@@ -966,16 +1244,17 @@ impl RhiDevice<Vulkan> for VulkanContext {
             p_next: ptr::null(),
             flags: 0,
             stage,
-            layout: layouts.pipeline_layout,
+            layout: pipeline_layout,
             base_pipeline_handle: VkPipeline::NULL,
             base_pipeline_index: -1,
         };
         let mut pipeline = VkPipeline::NULL;
         // SAFETY: `device` is live; null pipeline cache (`0`) is valid; one
         // create-info is fully initialized, referencing the live shader module +
-        // the device's shared `pipeline_layout`; `&mut pipeline` is a valid
-        // out-pointer for the single pipeline; NULL allocator. The module is owned
-        // by the caller's `VulkanShaderModule`, alive for this call.
+        // the chosen `pipeline_layout` (the device-shared fixed layout or the
+        // just-created dedicated one); `&mut pipeline` is a valid out-pointer for the
+        // single pipeline; NULL allocator. The module is owned by the caller's
+        // `VulkanShaderModule`, alive for this call.
         let raw = unsafe {
             (self.device_fns().create_compute_pipelines)(
                 self.device(),
@@ -988,20 +1267,45 @@ impl RhiDevice<Vulkan> for VulkanContext {
         };
         let result = VkResult::from_raw(raw);
         if !result.is_success() {
+            if owns_layout {
+                // SAFETY: the dedicated `pipeline_layout` was just created on this
+                // device and is not yet owned by any pipeline (creation failed);
+                // destroy it once on this error path so it never leaks. The shared
+                // layout (`owns_layout == false`) is left alone — it is the device's.
+                unsafe {
+                    (self.device_fns().destroy_pipeline_layout)(
+                        self.device(),
+                        pipeline_layout,
+                        ptr::null(),
+                    )
+                };
+            }
             return Err(VulkanError::from(ComputeError::VkError(
                 "vkCreateComputePipelines",
                 result,
             )));
         }
-        Ok(ComputePipeline { pipeline })
+        Ok(ComputePipeline {
+            pipeline,
+            layout: pipeline_layout,
+            owns_layout,
+        })
     }
 
     unsafe fn destroy_compute_pipeline(&self, pipeline: ComputePipeline) {
         // SAFETY: `pipeline.pipeline` was created on this device, no submission
         // using it is pending (caller contract), and the by-value move destroys it
-        // exactly once.
+        // exactly once. A dedicated layout (`owns_layout`) is torn down AFTER the
+        // pipeline (reverse creation order); the device-shared layout is left alone.
         unsafe {
-            (self.device_fns().destroy_pipeline)(self.device(), pipeline.pipeline, ptr::null())
+            (self.device_fns().destroy_pipeline)(self.device(), pipeline.pipeline, ptr::null());
+            if pipeline.owns_layout {
+                (self.device_fns().destroy_pipeline_layout)(
+                    self.device(),
+                    pipeline.layout,
+                    ptr::null(),
+                );
+            }
         };
     }
 
@@ -1782,12 +2086,16 @@ impl RhiCommandEncoder<Vulkan> for VulkanCommandEncoder {
     }
 
     fn push_constants(&mut self, stage: ShaderStage, offset: u32, bytes: &[u8]) {
-        // Plan B2 (ABI-1/TD-5): the fixed Slice-0 pipeline layout declares a single
-        // 4-byte COMPUTE push range at offset 0. `offset + len` outside `[0, 4]`, or
-        // a non-COMPUTE stage, is a caller error against that fixed layout.
+        // Plan B2 (ABI-1/TD-5): this encoder records exclusively against the shared
+        // COMPUTE pipeline layout, whose push range is declared at offset 0 with
+        // `COMPUTE_PUSH_CONSTANT_RANGE_BYTES` bytes (P0a widened it from 4 to the
+        // 80-byte `sdf_depth_composite` marcher block). `offset + len` outside
+        // `[0, COMPUTE_PUSH_CONSTANT_RANGE_BYTES]`, or a non-COMPUTE stage, is a
+        // caller error against that layout. Bound derived from the same constant the
+        // layout uses, never a magic literal, so a future widening re-sizes both.
         debug_assert!(
-            offset as u64 + bytes.len() as u64 <= 4,
-            "invariant: push range"
+            offset as u64 + bytes.len() as u64 <= COMPUTE_PUSH_CONSTANT_RANGE_BYTES as u64,
+            "invariant: push range within COMPUTE_PUSH_CONSTANT_RANGE_BYTES"
         );
         debug_assert!(
             stage.bits() == crate::ffi::VK_SHADER_STAGE_COMPUTE_BIT,
@@ -1795,10 +2103,11 @@ impl RhiCommandEncoder<Vulkan> for VulkanCommandEncoder {
         );
         // The agnostic `ShaderStage` bits equal `VK_SHADER_STAGE_*` (plan D5).
         let stage_flags: VkFlags = stage.bits();
-        // SAFETY: recording is open; `self.pipeline_layout` declares a 4-byte
-        // COMPUTE push range at offset 0; `bytes.as_ptr()` points to `bytes.len()`
-        // bytes alive for the call; the caller passes offset/size within the
-        // declared range. `self.fns` borrows the live device fn-table.
+        // SAFETY: recording is open; `self.pipeline_layout` declares a
+        // `COMPUTE_PUSH_CONSTANT_RANGE_BYTES`-byte COMPUTE push range at offset 0;
+        // `bytes.as_ptr()` points to `bytes.len()` bytes alive for the call; the
+        // caller passes offset/size within the declared range (asserted above).
+        // `self.fns` borrows the live device fn-table.
         let fns = unsafe { &*self.fns };
         unsafe {
             (fns.cmd_push_constants)(
@@ -1817,26 +2126,40 @@ impl RhiCommandEncoder<Vulkan> for VulkanCommandEncoder {
             gx > 0 && gy > 0 && gz > 0,
             "invariant: dispatch group counts must be non-zero"
         );
-        // SAFETY: recording is open; binding the descriptor set at the cached set
-        // index for the COMPUTE bind point uses the live `pipeline_layout` + the
-        // live `descriptor_set` (pointed at the bound buffer by
-        // `bind_storage_buffer`); zero dynamic offsets (null valid for count 0).
-        // Then the dispatch runs with the bound pipeline + set covering it.
-        // `self.fns` borrows the live device fn-table.
         let fns = unsafe { &*self.fns };
-        unsafe {
-            (fns.cmd_bind_descriptor_sets)(
-                self.command_buffer,
-                VK_PIPELINE_BIND_POINT_COMPUTE,
-                self.pipeline_layout,
-                self.bound_set_index,
-                1,
-                &self.descriptor_set,
-                0,
-                ptr::null(),
-            );
-            (fns.cmd_dispatch)(self.command_buffer, gx, gy, gz);
+        // The packed-buffer path binds its STORAGE_BUFFER via `bind_storage_buffer`
+        // (so `bound_buffer != NULL`) before every dispatch — for it the recorded
+        // command stream is byte-identical to before: bind the fixed set against the
+        // device-shared `pipeline_layout`, then dispatch. The Render P1a
+        // vocabulary-compute path instead binds its set via
+        // `bind_descriptor_set_compute` (against the pipeline's OWN layout) and never
+        // calls `bind_storage_buffer` (`bound_buffer == NULL`), so the fixed-set rebind
+        // is skipped — it would otherwise clobber the vocabulary set 0 and bind against
+        // an incompatible layout. The two paths thus coexist without touching each
+        // other's recorded commands.
+        if self.bound_buffer != VkBuffer::NULL {
+            // SAFETY: recording is open; the fixed STORAGE_BUFFER set was pointed at the
+            // bound buffer by `bind_storage_buffer` and is bound at the cached set index
+            // for the COMPUTE bind point against the live device-shared `pipeline_layout`;
+            // zero dynamic offsets (null valid for count 0). `self.fns` borrows the live
+            // device fn-table.
+            unsafe {
+                (fns.cmd_bind_descriptor_sets)(
+                    self.command_buffer,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    self.pipeline_layout,
+                    self.bound_set_index,
+                    1,
+                    &self.descriptor_set,
+                    0,
+                    ptr::null(),
+                );
+            }
         }
+        // SAFETY: recording is open; the bound compute pipeline + its descriptor set
+        // (the fixed set just bound above for the packed path, or the vocabulary set
+        // bound earlier via `bind_descriptor_set_compute`) cover the dispatch.
+        unsafe { (fns.cmd_dispatch)(self.command_buffer, gx, gy, gz) };
     }
 
     fn pipeline_barrier(&mut self, barrier: &BarrierDesc<Vulkan>) {
@@ -2164,6 +2487,37 @@ impl RhiCommandEncoder<Vulkan> for VulkanCommandEncoder {
                 self.command_buffer,
                 VK_PIPELINE_BIND_POINT_GRAPHICS,
                 pipeline.layout,
+                0,
+                1,
+                &group.descriptor_set,
+                0,
+                ptr::null(),
+            );
+        }
+    }
+
+    fn bind_descriptor_set_compute(
+        &mut self,
+        group: &VulkanBindGroup,
+        compute_pipeline: &ComputePipeline,
+    ) {
+        // SAFETY: recording is open with `compute_pipeline` bound (caller contract);
+        // `compute_pipeline.layout` is that pipeline's own layout, built with the same
+        // vocabulary bind-group set-layout at `set 0`
+        // (`ComputePipelineDesc::bind_group_layout`), so binding `group.descriptor_set`
+        // there for the COMPUTE bind point is type-compatible. `&group.descriptor_set`
+        // is a single-element local (alive for the call), so `first_set = 0`,
+        // `descriptor_set_count = 1` matches it; zero dynamic offsets (null valid for
+        // count 0). This binds the vocabulary set ONLY — it does not touch the
+        // encoder's fixed STORAGE_BUFFER set (`bind_storage_buffer`/`dispatch`), so the
+        // packed-buffer offscreen path is unaffected. `self.fns` points into the
+        // context's boxed fn-table (alive per the type contract).
+        let fns = unsafe { &*self.fns };
+        unsafe {
+            (fns.cmd_bind_descriptor_sets)(
+                self.command_buffer,
+                VK_PIPELINE_BIND_POINT_COMPUTE,
+                compute_pipeline.layout,
                 0,
                 1,
                 &group.descriptor_set,

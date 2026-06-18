@@ -241,6 +241,7 @@ fn registry_register_resolve_take_destroy_all() {
                 module: module_ref,
                 entry: c"main",
                 push_constant_bytes: 4,
+                bind_group_layout: None,
             })
             .expect("compute pipeline")
     };

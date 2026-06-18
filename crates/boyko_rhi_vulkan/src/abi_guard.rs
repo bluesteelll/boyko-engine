@@ -14,9 +14,9 @@
 //! `push_constants`, `pipeline_barrier`) is covered.
 
 use boyko_rhi::enums::{
-    AddressMode, BarrierAccess, BarrierStage, BufferUsage, Filter, Format, ImageAspect, ImageLayout,
-    ImageUsage, IndexType, LoadOp, PrimitiveTopology, ShaderStage, StoreOp, TextureDimension,
-    VertexFormat,
+    AddressMode, BarrierAccess, BarrierStage, BufferUsage, DescriptorKind, Filter, Format,
+    ImageAspect, ImageLayout, ImageUsage, IndexType, LoadOp, PrimitiveTopology, ShaderStage,
+    StoreOp, TextureDimension, VertexFormat,
 };
 
 use crate::ffi::{
@@ -27,7 +27,10 @@ use crate::ffi::{
     VK_BUFFER_USAGE_INDEX_BUFFER_BIT, VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
     VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-    VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_FILTER_LINEAR, VK_FILTER_NEAREST, VK_FORMAT_B8G8R8A8_UNORM,
+    VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+    VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+    VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_FILTER_LINEAR,
+    VK_FILTER_NEAREST, VK_FORMAT_B8G8R8A8_UNORM,
     VK_FORMAT_D32_SFLOAT, VK_FORMAT_R32G32B32A32_SFLOAT, VK_FORMAT_R32G32B32_SFLOAT,
     VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_UNDEFINED, VK_IMAGE_ASPECT_COLOR_BIT,
     VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -377,4 +380,35 @@ const _: () = assert!(
 const _: () = assert!(
     AddressMode::ClampToEdge.as_i32() == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
     "AddressMode::ClampToEdge must equal VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE"
+);
+
+// ===========================================================================
+// Render P1a descriptor-vocabulary contract. `DescriptorKind` `as_i32()` is mapped
+// in `create_bind_group_layout` / `create_bind_group` (the per-entry
+// `VkDescriptorType` of each binding + each `VkWriteDescriptorSet`) by a trivial
+// `as i32` cast — so its discriminants MUST equal the matching `VK_DESCRIPTOR_TYPE_*`
+// constants. These pin that equality; any drift breaks the build instead of writing
+// a descriptor of the wrong type.
+// ===========================================================================
+
+// --- DescriptorKind `as_i32()` (mapped in `create_bind_group_layout`/`create_bind_group`). ---
+const _: () = assert!(
+    DescriptorKind::CombinedImageSampler.as_i32() == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+    "DescriptorKind::CombinedImageSampler must equal VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER"
+);
+const _: () = assert!(
+    DescriptorKind::SampledImage.as_i32() == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+    "DescriptorKind::SampledImage must equal VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE"
+);
+const _: () = assert!(
+    DescriptorKind::StorageImage.as_i32() == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+    "DescriptorKind::StorageImage must equal VK_DESCRIPTOR_TYPE_STORAGE_IMAGE"
+);
+const _: () = assert!(
+    DescriptorKind::UniformBuffer.as_i32() == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+    "DescriptorKind::UniformBuffer must equal VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER"
+);
+const _: () = assert!(
+    DescriptorKind::StorageBuffer.as_i32() == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+    "DescriptorKind::StorageBuffer must equal VK_DESCRIPTOR_TYPE_STORAGE_BUFFER"
 );

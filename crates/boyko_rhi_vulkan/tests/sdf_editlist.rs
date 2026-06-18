@@ -179,6 +179,7 @@ fn run_editlist(ctx: &VulkanContext, edits: &[SdfEdit]) -> Vec<u32> {
             module: &module,
             entry: c"main",
             push_constant_bytes: 4,
+            bind_group_layout: None,
         })
         .expect("sdf_editlist compute pipeline");
 

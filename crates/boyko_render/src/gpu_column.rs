@@ -528,6 +528,7 @@ impl GpuColumnManager {
             module: &module,
             entry: c"main",
             push_constant_bytes: 4,
+            bind_group_layout: None,
         }) {
             Ok(p) => p,
             Err(e) => {

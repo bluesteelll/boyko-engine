@@ -104,6 +104,18 @@ static SDF_DEPTH_COMPOSITE_SPV: SpirvBlob<26576> = SpirvBlob(*include_bytes!(con
     "/shaders/sdf_depth_composite.comp.spv"
 )));
 
+/// The committed SPIR-V for the Render P1a GPU gate (sphere-trace the rung-9 SDF
+/// edit-list and STORE the marcher color into a STORAGE IMAGE through the
+/// multi-resource descriptor *vocabulary* set — `shaders/sdf_editlist_storage_image.hlsl`).
+/// Reuses the rung-9 field eval + ray-gen + lighting VERBATIM; the only differences
+/// are the bind points (binding 0 = a read-only `StructuredBuffer<uint>` edit-list,
+/// binding 1 = a `RWTexture2D<float4>` output) and the output sink (the marcher color
+/// is STORED to texel `(px, py)` instead of packed into the buffer's pixel region).
+static SDF_EDITLIST_STORAGE_IMAGE_SPV: SpirvBlob<24092> = SpirvBlob(*include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/shaders/sdf_editlist_storage_image.comp.spv"
+)));
+
 /// A 4-byte-aligned wrapper around a committed SPIR-V byte blob so its address is
 /// a valid `*const u32` and it can be re-viewed as a `&[u32]` word stream.
 #[repr(C, align(4))]
@@ -186,6 +198,25 @@ pub fn sdf_editlist_spirv() -> &'static [u32] {
 #[inline]
 pub fn sdf_depth_composite_spirv() -> &'static [u32] {
     SDF_DEPTH_COMPOSITE_SPV.as_words()
+}
+
+/// The committed Render P1a edit-list STORAGE-IMAGE marcher SPIR-V as a `u32` word
+/// stream, ready for
+/// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module).
+///
+/// Unlike the rung-9 [`sdf_editlist_spirv`] (one `RWStructuredBuffer<uint>` at
+/// binding 0 that holds both the edit-list header AND the packed pixel output), this
+/// shader is bound to the P1a multi-resource descriptor *vocabulary* set: binding 0
+/// is a read-only `StructuredBuffer<uint>` (the same packed edit-list header format,
+/// [`encode_edit_list`] / [`EDITLIST_BUFFER_WORDS`]) and binding 1 is a
+/// `RWTexture2D<float4>` it STOREs the marcher color into. The field eval + ray-gen +
+/// lighting are reused VERBATIM from rung 9, so [`golden_editlist_pixel`] predicts the
+/// stored texel within the same `+/-2/255` per-channel tolerance (the float→UNORM store
+/// quantization vs [`pack_rgba`]'s rounding is under one LSB). It proves a storage-image
+/// WRITE through the COMPUTE bind point + the vocabulary set works on the GPU.
+#[inline]
+pub fn sdf_editlist_storage_image_spirv() -> &'static [u32] {
+    SDF_EDITLIST_STORAGE_IMAGE_SPV.as_words()
 }
 
 /// Errors from the compute-pipeline flow. `VkError` carries the failing command
