@@ -14,8 +14,8 @@ use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::schedule::ScheduleBuilder;
 
 use crate::resources::{
-    BroadphaseGrid, ConstraintGraph, ContactPairs, IntegrationMode, Manifolds, PhysicsConfig,
-    SolverScratch,
+    BroadphaseGrid, ConstraintGraph, ContactPairs, IntegrationMode, IslandSleep, Manifolds,
+    PhysicsConfig, SolverScratch,
 };
 use crate::sdf_query::SdfField;
 use crate::solver::colored::ColoredSoftStepSolver;
@@ -235,6 +235,15 @@ fn add_physics_pipeline<S: RigidSolver + Default>(
         // param resolves; the non-colored paths never register the stage, so the
         // resource is unnecessary there (the 0%-gate).
         world.insert_resource(ConstraintGraph::with_capacity(INITIAL_BODY_CAPACITY));
+        // O8: the per-island sleeping state (capacity-reused). Inserted on the colored
+        // path so `physics_solve_colored`'s `ResMut<IslandSleep>` param resolves; it
+        // stays untouched while `PhysicsConfig::sleeping` is the default `false` (the
+        // 0%-gate). Pre-sized to the body capacity (one island per body is the worst
+        // case — every body its own singleton island).
+        world.insert_resource(IslandSleep::with_capacity(
+            INITIAL_BODY_CAPACITY,
+            INITIAL_BODY_CAPACITY,
+        ));
     }
     if with_sdf {
         // The CPU-authoritative SDF scene (empty by default; the caller fills it

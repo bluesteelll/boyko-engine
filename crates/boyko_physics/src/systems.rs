@@ -67,7 +67,7 @@ use crate::narrowphase::feature_vertex_face;
 use crate::narrowphase::sphere_box::sphere_box_contact;
 use crate::resources::{
     BodyState, BroadphaseGrid, BroadphaseKind, ConstraintGraph, ContactPairs, IntegrationMode,
-    Manifolds, PhysicsConfig, SolverScratch,
+    IslandSleep, Manifolds, PhysicsConfig, SolverScratch,
 };
 use crate::sdf_query::{SdfField, sample_sdf};
 use crate::solver::colored::ColoredSoftStepSolver;
@@ -724,6 +724,16 @@ pub fn physics_build_graph(
 /// sweep → DIFFERENT (but valid) converged values, validated against tolerance
 /// gates (the Phase O5 value change). It is run-to-run bit-identical and never
 /// moves a static body.
+///
+/// # O8 sleeping (plan O8 / Decision 5)
+///
+/// When [`PhysicsConfig::sleeping`] is on, this stage drives
+/// [`ColoredSoftStepSolver::solve_colored_sleeping`](crate::solver::ColoredSoftStepSolver::solve_colored_sleeping),
+/// threading the [`IslandSleep`] resource so slept islands skip ONLY their SOLVE +
+/// INTEGRATE — `physics_gather` still walks every row (IM-1 intact). When off, it
+/// drives the byte-identical
+/// [`solve_colored`](crate::solver::ColoredSoftStepSolver::solve_colored) (the
+/// `IslandSleep` resource is read but untouched — the 0%-gate).
 //
 // `clippy::needless_pass_by_value`: `ResMut<_>` / `Res<_>` are by-value
 // `SystemParam`s used through reborrows — the same false-positive as the other
@@ -735,8 +745,16 @@ pub fn physics_solve_colored(
     manifolds: Res<Manifolds>,
     graph: Res<ConstraintGraph>,
     mut scratch: ResMut<SolverScratch>,
+    mut sleep: ResMut<IslandSleep>,
 ) {
-    solver.solve_colored(&cfg, &manifolds.manifolds, &graph, &mut scratch);
+    if cfg.sleeping {
+        solver.solve_colored_sleeping(&cfg, &manifolds.manifolds, &graph, &mut scratch, &mut sleep);
+    } else {
+        // Sleeping off: byte-identical to the O6/O7 colored path; `IslandSleep` is
+        // resolved (so the param exists) but never read or written.
+        let _ = &mut sleep;
+        solver.solve_colored(&cfg, &manifolds.manifolds, &graph, &mut scratch);
+    }
 }
 
 /// Runs the swappable solver for one step, or early-outs for a no-op solver

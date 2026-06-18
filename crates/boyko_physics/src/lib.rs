@@ -46,8 +46,9 @@ pub use plugin::{
     add_physics_systems,
 };
 pub use resources::{
-    BodyState, BroadphaseGrid, BroadphaseKind, ConstraintGraph, ContactPairs, IntegrationMode,
-    Manifolds, PhysicsConfig, SolverScratch, TouchedMask,
+    BodyState, BroadphaseGrid, BroadphaseKind, ConstraintGraph, ContactPairs,
+    DEFAULT_SLEEP_FRAMES, DEFAULT_SLEEP_THRESHOLD, IntegrationMode, IslandSleep, Manifolds,
+    PhysicsConfig, SolverScratch, TouchedMask,
 };
 pub use sdf_query::{SdfField, sample_sdf};
 pub use solver::{ColoredSoftStepSolver, NoopSolver, RigidSolver, SoftStepSolver};

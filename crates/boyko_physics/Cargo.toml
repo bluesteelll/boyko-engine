@@ -65,3 +65,11 @@ harness = false
 # worlds scale). Anti-vacuity: > 1 color + a color above MIN_PARALLEL_SLOTS_PER_COLOR.
 name = "parallel_solve"
 harness = false
+
+[[bench]]
+# O8 Gate 9: the SLEEPING headline win + worst-case overhead on a ~10k-contact
+# resting pile — (1) all-awake sleeping-OFF baseline, (2) mostly-settled sleeping-ON
+# (the slept steady state, must be <= ~5% of (1)), (3) fully-awake sleeping-ON (the
+# always-on bookkeeping overhead, must be a small over-(1) cost, no regression).
+name = "sleeping"
+harness = false

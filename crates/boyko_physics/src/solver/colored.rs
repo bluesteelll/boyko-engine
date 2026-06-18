@@ -93,7 +93,7 @@ use super::RigidSolver;
 use crate::components::BodyType;
 use crate::manifold::{Manifold, SDF_SENTINEL};
 use crate::math::{Mat3, Vec3};
-use crate::resources::{BodyState, ConstraintGraph, PhysicsConfig, SolverScratch};
+use crate::resources::{BodyState, ConstraintGraph, IslandSleep, PhysicsConfig, SolverScratch};
 
 /// Loads one SoA `[f32; 8]` column into a `__m256` (the O7 cohort kernel's scalar
 /// vector load helper). Unaligned — any alignment.
@@ -596,6 +596,12 @@ pub struct ColoredSoftStepSolver {
     warm_write: WarmStartTable,
     /// Whether warm-starting is active (production default `true`).
     warm_start_enabled: bool,
+    /// O8 integrate-freeze scratch: the pre-solve `(row, BodyState)` snapshot of each
+    /// slept body, captured before the substep loop and restored after — so a slept
+    /// island's bodies are NOT integrated (their hot state is frozen) without masking
+    /// the per-lane O1 SIMD integrate kernels. Capacity-reused (cleared each step);
+    /// empty when sleeping is off (the byte-identical O6/O7 path).
+    frozen: Vec<(u32, BodyState)>,
 }
 
 impl Default for ColoredSoftStepSolver {
@@ -617,6 +623,7 @@ impl ColoredSoftStepSolver {
             warm_read: WarmStartTable::with_capacity(contacts),
             warm_write: WarmStartTable::with_capacity(contacts),
             warm_start_enabled: true,
+            frozen: Vec::with_capacity(bodies),
         }
     }
 
@@ -675,7 +682,13 @@ impl ColoredSoftStepSolver {
     /// slot, and the canonical `(manifold, point)` order are ALL recorded inside
     /// this single append walk — there is no separate replay pass and no per-step
     /// heap allocation (all scratch is capacity-reused).
-    fn build_columns(&mut self, manifolds: &[Manifold], graph: &ConstraintGraph, bodies: &[BodyState]) {
+    fn build_columns(
+        &mut self,
+        manifolds: &[Manifold],
+        graph: &ConstraintGraph,
+        bodies: &[BodyState],
+        sleep: Option<&IslandSleep>,
+    ) {
         // Disjoint-field borrows: `columns` is written while `bodies` /
         // `warm_read` are read. Destructure `self` so the borrow checker sees the
         // fields are distinct (a re-borrow alias through a method call would not).
@@ -700,6 +713,15 @@ impl ColoredSoftStepSolver {
         for color in 0..graph.n_colors() {
             for &mi in graph.color(color) {
                 let m = &manifolds[mi as usize];
+                // O8 sleep skip (SOLVE half): a manifold whose island is FROZEN this
+                // frame is NOT pushed — it never enters a color span, so it is never
+                // solved. This is the IM-1-safe solve skip (gather stays full; only the
+                // solve is elided). `sleep == None` (sleeping off) takes the
+                // byte-identical O6/O7 path. The island is the manifold's dynamic side
+                // (the same resolution the graph build uses).
+                if sleep.is_some_and(|s| Self::manifold_frozen(m, graph, s)) {
+                    continue;
+                }
                 let base = cols.len() as u32;
                 let count = Self::push_manifold_points(
                     cols,
@@ -819,6 +841,34 @@ impl ColoredSoftStepSolver {
             );
         }
         count as u32
+    }
+
+    /// Whether a manifold belongs to a FROZEN island this frame (plan O8) — the
+    /// SOLVE-skip predicate for [`build_columns`](Self::build_columns).
+    ///
+    /// A manifold's island is its dynamic side's island (`body_a` if dynamic, else
+    /// `body_b`) — the SAME resolution [`ConstraintGraph::build`] uses. A manifold to
+    /// a static / sentinel surface has its island on the dynamic side, so a frozen body
+    /// resting on a floor (the common case) is correctly skipped via that body's
+    /// island. A static-static degenerate contact has [`NO_ISLAND`] on both sides and
+    /// is never frozen (it is also a no-op to solve).
+    ///
+    /// "Frozen this frame" is the per-island decision derived in
+    /// [`IslandSleep::begin_step`](crate::resources::IslandSleep) (every member dynamic
+    /// row latched asleep), NOT a persistent per-island latch — so a slept island that
+    /// merged with an awake/new row this frame is NOT frozen, and its manifolds ARE
+    /// solved (wake-on-merge).
+    ///
+    /// [`NO_ISLAND`]: crate::resources::ConstraintGraph::NO_ISLAND
+    #[inline]
+    fn manifold_frozen(m: &Manifold, graph: &ConstraintGraph, sleep: &IslandSleep) -> bool {
+        let isl_a = graph.island_of(m.body_a.0);
+        let isl = if isl_a != ConstraintGraph::NO_ISLAND {
+            isl_a
+        } else {
+            graph.island_of(m.body_b.0)
+        };
+        isl != ConstraintGraph::NO_ISLAND && sleep.is_island_frozen(isl)
     }
 
     /// Applies every contact point's seeded accumulated impulse to both bodies'
@@ -2056,6 +2106,28 @@ impl ColoredSoftStepSolver {
             }
         }
     }
+
+    /// Write-back variant for O8 sleeping: identical to [`write_back`](Self::write_back)
+    /// but SKIPS slept rows (an `awake_rows` bit that is clear), so a frozen body is
+    /// never flagged `touched` and [`physics_apply`](crate::systems::physics_apply)
+    /// leaves its live component byte-untouched.
+    ///
+    /// IM-1: this changes only WHICH rows are flagged touched (slept rows are not) —
+    /// it does NOT change the row count gather/apply walk, so the desync assert is
+    /// unaffected.
+    fn write_back_awake(&self, scratch: &mut SolverScratch, sleep: &IslandSleep) {
+        for row in 0..self.bodies.len() {
+            if !sleep.is_row_awake(row) {
+                continue;
+            }
+            if scratch.bodies[row].body_type == BodyType::Dynamic && self.bodies[row].inv_mass != 0.0
+            {
+                scratch.bodies[row].linear_velocity = self.bodies[row].linear_velocity;
+                scratch.bodies[row].angular_velocity = self.bodies[row].angular_velocity;
+                scratch.touched.set(row);
+            }
+        }
+    }
 }
 
 impl ColoredSoftStepSolver {
@@ -2081,6 +2153,40 @@ impl ColoredSoftStepSolver {
         graph: &ConstraintGraph,
         scratch: &mut SolverScratch,
     ) {
+        // Sleeping OFF (or no resource): the byte-identical O6/O7 colored path.
+        self.solve_colored_inner(config, manifolds, graph, scratch, None);
+    }
+
+    /// The colored solve with O8 sleeping (plan O8 / Decision 5) — the entry the
+    /// [`physics_solve_colored`](crate::systems::physics_solve_colored) stage calls
+    /// when `PhysicsConfig::sleeping` is on.
+    ///
+    /// Identical to [`solve_colored`](Self::solve_colored) but threads the
+    /// [`IslandSleep`] state: slept islands skip ONLY their SOLVE + INTEGRATE work
+    /// (the gather is untouched — IM-1), and the energy / debounce / sleep transition
+    /// is advanced after the solve for next frame.
+    pub fn solve_colored_sleeping(
+        &mut self,
+        config: &PhysicsConfig,
+        manifolds: &[Manifold],
+        graph: &ConstraintGraph,
+        scratch: &mut SolverScratch,
+        sleep: &mut IslandSleep,
+    ) {
+        self.solve_colored_inner(config, manifolds, graph, scratch, Some(sleep));
+    }
+
+    /// Shared body of the colored solve — `sleep == None` is the byte-identical
+    /// O6/O7 path (the 0%-gate), `sleep == Some(_)` adds the O8 solve+integrate skip
+    /// for slept islands (gather stays full — IM-1).
+    fn solve_colored_inner(
+        &mut self,
+        config: &PhysicsConfig,
+        manifolds: &[Manifold],
+        graph: &ConstraintGraph,
+        scratch: &mut SolverScratch,
+        mut sleep: Option<&mut IslandSleep>,
+    ) {
         let substeps = config.substeps.max(1);
         let h = config.dt / substeps as f32;
 
@@ -2097,8 +2203,42 @@ impl ColoredSoftStepSolver {
             return;
         }
 
+        // O8 phase 1 (BEFORE the solve): apply the wake conditions and build the
+        // body→awake mask from last frame's sleep flags. This decides which islands
+        // skip the solve + integrate THIS frame. A read-only borrow of the resource
+        // for the duration of the build/solve (`asleep` / `awake_rows` are read);
+        // the post-solve `end_step` reborrows mutably.
+        let n_rows = scratch.bodies.len();
+        let sleeping_active = sleep.is_some();
+        if let Some(sleep) = sleep.as_mut() {
+            sleep.begin_step(graph, n_rows);
+        }
+        // An immutable view used by `build_columns` (SOLVE skip) + the integrate
+        // freeze; `None` when sleeping is off so the path is byte-identical.
+        let sleep_view: Option<&IslandSleep> = sleep.as_deref();
+
         self.build_bodies(&scratch.bodies);
-        self.build_columns(manifolds, graph, &scratch.bodies);
+        self.build_columns(manifolds, graph, &scratch.bodies, sleep_view);
+
+        // O8 integrate-freeze (INTEGRATE half): capture the pre-solve hot state of
+        // every slept-island body so the per-substep integrate (which streams the
+        // WHOLE array — the O1 SIMD kernels are NOT per-lane masked) can be UNDONE for
+        // slept rows after the loop. This freezes a slept body's position / rotation /
+        // velocity without touching the audited integrate kernels. `frozen` is
+        // capacity-reused (empty when sleeping is off — the byte-identical path).
+        self.frozen.clear();
+        if let Some(sleep) = sleep_view {
+            for (row, b) in scratch.bodies.iter().enumerate() {
+                if b.inv_mass == 0.0 {
+                    // Static rows are no-ops to the integrate kernels (the
+                    // `inv_mass != 0` guard) — no need to snapshot them.
+                    continue;
+                }
+                if !sleep.is_row_awake(row) {
+                    self.frozen.push((row as u32, *b));
+                }
+            }
+        }
 
         let soft = SoftCoefficients::new(config.contact_hertz, config.contact_damping, h);
         let gravity = config.gravity;
@@ -2159,8 +2299,39 @@ impl ColoredSoftStepSolver {
         // IM-2b: store converged impulses in canonical order, then swap.
         self.store_and_swap();
 
-        // Write the solved velocities back and flag integrated DYNAMIC rows.
-        self.write_back(scratch);
+        // O8 integrate-freeze RESTORE: undo the integrate on slept rows by restoring
+        // their captured pre-solve hot state into `scratch.bodies` (position /
+        // rotation / velocities) — so a slept island advances by exactly nothing. The
+        // matching `BodyEffective` velocity (which `write_back` would copy out) is also
+        // restored so the slept body keeps its frozen velocity. Then `write_back` is
+        // told to SKIP slept rows, so `physics_apply` leaves the live component
+        // untouched (frozen) — and the gather-walked-every-row IM-1 invariant holds.
+        if sleeping_active {
+            for &(row, snap) in &self.frozen {
+                let r = row as usize;
+                scratch.bodies[r] = snap;
+                let eff = &mut self.bodies[r];
+                eff.linear_velocity = snap.linear_velocity;
+                eff.angular_velocity = snap.angular_velocity;
+            }
+        }
+
+        // Write the solved velocities back and flag integrated DYNAMIC rows. With
+        // sleeping on, slept rows are skipped (their `awake_rows` bit is clear), so the
+        // frozen rows are never flagged touched — `physics_apply` leaves them be.
+        if let Some(sleep) = sleep.as_deref() {
+            self.write_back_awake(scratch, sleep);
+        } else {
+            self.write_back(scratch);
+        }
+
+        // O8 phase 2 (AFTER the solve): accumulate this frame's per-island energy from
+        // the (post-restore) body velocities and advance the debounce / sleep
+        // transition for next frame. The mutable reborrow is sound: `sleep_view` (the
+        // immutable view) is dead after the freeze capture.
+        if let Some(sleep) = sleep.as_mut() {
+            sleep.end_step(&scratch.bodies, graph, config.sleep_threshold, config.sleep_frames);
+        }
     }
 }
 
@@ -2477,7 +2648,7 @@ mod tests {
 
         let mut solver = ColoredSoftStepSolver::default();
         solver.build_bodies(&bodies);
-        solver.build_columns(&manifolds, &graph, &bodies);
+        solver.build_columns(&manifolds, &graph, &bodies, None);
         let cols = &solver.columns;
 
         // The total live point count = 1 + 1 + 4 = 6.
@@ -2636,7 +2807,7 @@ mod tests {
             let (bodies, manifolds, graph) = random_scene(seed);
             let mut solver = ColoredSoftStepSolver::default();
             solver.build_bodies(&bodies);
-            solver.build_columns(&manifolds, &graph, &bodies);
+            solver.build_columns(&manifolds, &graph, &bodies, None);
             let cols = &solver.columns;
 
             let n_colors = cols.color_offsets.len().saturating_sub(1);
@@ -3063,7 +3234,7 @@ mod tests {
         let graph = build_graph(&bodies, &manifolds);
         let mut solver = ColoredSoftStepSolver::default();
         solver.build_bodies(&bodies);
-        solver.build_columns(&manifolds, &graph, &bodies);
+        solver.build_columns(&manifolds, &graph, &bodies, None);
         let cols = &solver.columns;
         let n_colors = cols.color_offsets.len().saturating_sub(1);
         (0..n_colors)
@@ -3472,7 +3643,7 @@ mod tests {
             // pristine pre-solve state for the two arms.
             let mut solver = ColoredSoftStepSolver::default();
             solver.build_bodies(&bodies);
-            solver.build_columns(&manifolds, &graph, &bodies);
+            solver.build_columns(&manifolds, &graph, &bodies, None);
 
             let pristine_cols_ni: Vec<f32> = solver.columns.normal_impulse.clone();
             let pristine_cols_t1: Vec<f32> = solver.columns.tangent1_impulse.clone();
@@ -4143,5 +4314,1029 @@ mod tests {
             (rng.f01() - 0.5) * 4.0,
             (rng.f01() - 0.5) * 4.0,
         )
+    }
+
+    // ── O8 sleeping sanity tests ─────────────────────────────────────────────
+    //
+    // These build the bodies + per-step manifolds by hand and drive
+    // `solve_colored_sleeping` directly (NO schedule / threadpool), so they run
+    // native and under Miri. The exhaustive determinism / oscillation / criterion
+    // suite is the tester's job.
+
+    /// Drives the colored solver with O8 sleeping for `steps` fixed steps, returning
+    /// `(final Y positions, the IslandSleep state)`. `cfg_mut` tweaks the config (e.g.
+    /// the sleep threshold / frame count). The manifolds are re-derived from the
+    /// current positions each step (the narrowphase stand-in), so a settled stack
+    /// keeps producing its resting-floor contacts.
+    fn run_sleeping(
+        bodies: Vec<BodyState>,
+        build_manifolds: impl Fn(&[BodyState]) -> Vec<Manifold>,
+        steps: usize,
+        cfg_mut: impl Fn(&mut PhysicsConfig),
+    ) -> (Vec<f32>, IslandSleep) {
+        let mut cfg = PhysicsConfig {
+            dt: 1.0 / 60.0,
+            sleeping: true,
+            ..PhysicsConfig::default()
+        };
+        cfg_mut(&mut cfg);
+        let mut solver = ColoredSoftStepSolver::default();
+        let mut scratch = SolverScratch::with_capacity(bodies.len());
+        scratch.bodies = bodies;
+        scratch.touched.reset(scratch.bodies.len());
+        let mut sleep = IslandSleep::with_capacity(scratch.bodies.len(), scratch.bodies.len());
+
+        for _ in 0..steps {
+            let manifolds = build_manifolds(&scratch.bodies);
+            let graph = build_graph(&scratch.bodies, &manifolds);
+            scratch.touched.reset(scratch.bodies.len());
+            solver.solve_colored_sleeping(&cfg, &manifolds, &graph, &mut scratch, &mut sleep);
+        }
+        let ys = scratch.bodies.iter().map(|b| b.position.y).collect();
+        (ys, sleep)
+    }
+
+    /// A dynamic sphere resting on a static floor settles, then the island sleeps
+    /// after `sleep_frames` consecutive low-energy frames (the headline O8 gate).
+    #[test]
+    fn dropped_body_settles_then_sleeps() {
+        // Sphere just above a static floor; a short debounce so the test is brisk.
+        let bodies = vec![
+            dyn_sphere(Vec3::new(0.0, 1.05, 0.0), 1.0, 0.5, 0.0),
+            static_body(Vec3::new(0.0, 0.0, 0.0)),
+        ];
+        // The narrowphase stand-in: emit a floor contact whenever the sphere dips into
+        // the floor (separation < 0), keyed (sphere, floor).
+        let build = |bs: &[BodyState]| {
+            let y = bs[0].position.y;
+            let sep = y - 1.0; // sphere radius 1, floor surface at y = 1.0.
+            if sep < 0.0 {
+                vec![manifold(0, 1, Vec3::new(0.0, -1.0, 0.0), sep, Vec3::new(0.0, 1.0, 0.0))]
+            } else {
+                vec![]
+            }
+        };
+        // Settle for many frames with a short 8-frame debounce, then keep stepping so
+        // the debounce elapses.
+        let (ys, sleep) = run_sleeping(bodies, build, 200, |c| c.sleep_frames = 8);
+
+        // The sphere rests on the floor (did not sink far through it, did not fly off).
+        assert!(
+            (ys[0] - 1.0).abs() < 0.1,
+            "sphere should rest near the floor surface (y ≈ 1.0), got {}",
+            ys[0]
+        );
+        // The sphere's row is latched asleep (it settled, the debounce elapsed).
+        assert!(
+            sleep.is_row_asleep(0),
+            "the settled body row must be latched asleep after the debounce"
+        );
+    }
+
+    /// A slept island stays frozen across steps — its body neither drifts nor
+    /// accumulates gravity (the integrate-skip gate). The floor contact is dropped
+    /// while asleep, but the body must not fall.
+    #[test]
+    fn slept_body_is_frozen_no_drift() {
+        let bodies = vec![
+            dyn_sphere(Vec3::new(0.0, 1.0, 0.0), 1.0, 0.5, 0.0),
+            static_body(Vec3::new(0.0, 0.0, 0.0)),
+        ];
+        // Resting-floor contact every step (sphere exactly on the surface).
+        let build = |_bs: &[BodyState]| {
+            vec![manifold(0, 1, Vec3::new(0.0, -1.0, 0.0), -0.001, Vec3::new(0.0, 1.0, 0.0))]
+        };
+        let (ys, sleep) = run_sleeping(bodies, build, 100, |c| c.sleep_frames = 4);
+        assert!(sleep.is_row_asleep(0), "the resting body row must be latched asleep");
+        // A frozen body neither drifts down (gravity skipped) nor pops up.
+        assert!(
+            (ys[0] - 1.0).abs() < 1.0e-3,
+            "a slept body must stay frozen at its rest Y, got {}",
+            ys[0]
+        );
+    }
+
+    /// **The real-pipeline wake-on-merge gate (the rewritten C1/C2 test).** A faller
+    /// (a new awake body bringing a NEW contact) wakes a slept pile the SAME frame the
+    /// contact appears — validated through the REAL solve, NOT a stale-graph artifact.
+    ///
+    /// Both arms drive `solve_colored_sleeping` step-by-step, re-deriving the manifolds
+    /// AND the graph from the SAME current positions every frame (so `begin_step` sees
+    /// exactly the graph the solve uses — the bug the old test cheated around). A pile
+    /// of two spheres on a floor settles + latches asleep; then a faller is dropped onto
+    /// it. The asserted behaviour: on the frame the faller's contact first appears, the
+    /// pile's rows are ACTIVE (awake, not frozen) and the contact is resolved — no
+    /// mid-air freeze, no penetration-stick.
+    #[test]
+    fn faller_wakes_slept_pile_same_frame_no_penetration() {
+        // Pile: two stacked dynamic spheres (radius 1) resting on a static floor.
+        // floor top surface at y = 1; sphere 0 centre at y ≈ 1; sphere 1 at y ≈ 3.
+        let make = || {
+            vec![
+                dyn_sphere(Vec3::new(0.0, 1.0, 0.0), 1.0, 0.5, 0.0), // row 0 (bottom)
+                dyn_sphere(Vec3::new(0.0, 3.0, 0.0), 1.0, 0.5, 0.0), // row 1 (top)
+                static_body(Vec3::new(0.0, 0.0, 0.0)),               // row 2 (floor)
+                dyn_sphere(Vec3::new(0.0, 30.0, 0.0), 1.0, 0.5, 0.0), // row 3 (faller, far above)
+            ]
+        };
+        // Narrowphase stand-in: floor↔bottom, bottom↔top, top↔faller — each emitted
+        // only while penetrating (separation < 0). Sphere radius 1 ⇒ centres touch at
+        // distance 2; floor surface at y = 1.
+        let build = |bs: &[BodyState]| {
+            let mut ms = Vec::new();
+            // floor contact for the bottom sphere.
+            let sep_floor = bs[0].position.y - 1.0;
+            if sep_floor < 0.0 {
+                ms.push(manifold(0, 2, Vec3::new(0.0, -1.0, 0.0), sep_floor, bs[0].position));
+            }
+            // bottom↔top sphere-sphere.
+            let d01 = bs[1].position.y - bs[0].position.y;
+            if d01 - 2.0 < 0.0 {
+                ms.push(manifold(0, 1, Vec3::new(0.0, 1.0, 0.0), d01 - 2.0, bs[0].position));
+            }
+            // top↔faller sphere-sphere (the NEW contact that must wake the pile).
+            let d13 = bs[3].position.y - bs[1].position.y;
+            if d13 - 2.0 < 0.0 {
+                ms.push(manifold(1, 3, Vec3::new(0.0, 1.0, 0.0), d13 - 2.0, bs[1].position));
+            }
+            ms
+        };
+
+        let cfg = PhysicsConfig {
+            dt: 1.0 / 60.0,
+            sleeping: true,
+            sleep_frames: 6,
+            ..PhysicsConfig::default()
+        };
+        let mut solver = ColoredSoftStepSolver::default();
+        let mut scratch = SolverScratch::with_capacity(4);
+        scratch.bodies = make();
+        // Park the faller out of the simulation (no gravity reaches it until we drop
+        // it) by zeroing its inv_mass for the settle phase: an inv_mass==0 row is not
+        // an island node, so it cannot perturb the pile's sleep.
+        scratch.bodies[3].inv_mass = 0.0;
+        let mut sleep = IslandSleep::with_capacity(4, 4);
+
+        // Settle phase: step until the pile latches asleep (bottom + top rows).
+        for _ in 0..120 {
+            let manifolds = build(&scratch.bodies);
+            let graph = build_graph(&scratch.bodies, &manifolds);
+            scratch.touched.reset(scratch.bodies.len());
+            solver.solve_colored_sleeping(&cfg, &manifolds, &graph, &mut scratch, &mut sleep);
+        }
+        assert!(
+            sleep.is_row_asleep(0) && sleep.is_row_asleep(1),
+            "the pile rows must latch asleep before the faller arrives"
+        );
+        let pile_top_y_before = scratch.bodies[1].position.y;
+
+        // Drop the faller: give it mass + place it just above the top sphere so its
+        // contact appears within a couple of steps.
+        scratch.bodies[3].inv_mass = 1.0;
+        scratch.bodies[3].position.y = 5.0; // touches the top sphere (centre y≈3) soon.
+
+        // Step until the faller's contact first appears, then assert the pile woke that
+        // SAME frame: its rows are awake (active), the contact was solved, and the pile
+        // is not penetrated through.
+        let mut woke_frame = None;
+        for frame in 0..30 {
+            let manifolds = build(&scratch.bodies);
+            let faller_contact = manifolds.iter().any(|m| {
+                (m.body_a.0 == 1 && m.body_b.0 == 3) || (m.body_a.0 == 3 && m.body_b.0 == 1)
+            });
+            let graph = build_graph(&scratch.bodies, &manifolds);
+            scratch.touched.reset(scratch.bodies.len());
+            solver.solve_colored_sleeping(&cfg, &manifolds, &graph, &mut scratch, &mut sleep);
+
+            if faller_contact {
+                // The frame the new contact appears: the pile's rows MUST be active
+                // (awake) this same frame — wake-on-merge. They share an island with
+                // the awake faller (row 3), so none of {0,1,3} may be frozen.
+                assert!(
+                    sleep.is_row_awake(0) && sleep.is_row_awake(1) && sleep.is_row_awake(3),
+                    "the pile + faller rows must be ACTIVE the frame the new contact appears \
+                     (wake-on-merge), not frozen"
+                );
+                woke_frame = Some(frame);
+                break;
+            }
+        }
+        assert!(
+            woke_frame.is_some(),
+            "the faller must produce a contact with the pile within the step budget"
+        );
+
+        // No penetration-stick: keep stepping; the faller must come to rest ABOVE the
+        // top sphere (it cannot pass through a now-active pile).
+        for _ in 0..60 {
+            let manifolds = build(&scratch.bodies);
+            let graph = build_graph(&scratch.bodies, &manifolds);
+            scratch.touched.reset(scratch.bodies.len());
+            solver.solve_colored_sleeping(&cfg, &manifolds, &graph, &mut scratch, &mut sleep);
+        }
+        assert!(
+            scratch.bodies[3].position.y > scratch.bodies[1].position.y,
+            "the faller must rest ABOVE the top sphere, not sink through it: faller y={}, top y={}",
+            scratch.bodies[3].position.y,
+            scratch.bodies[1].position.y
+        );
+        // The pile did not get shoved through the floor by the impact.
+        assert!(
+            scratch.bodies[1].position.y < pile_top_y_before + 0.5,
+            "the pile must absorb the faller near its rest height, not be launched: \
+             top y={}, was {}",
+            scratch.bodies[1].position.y,
+            pile_top_y_before
+        );
+    }
+
+    /// `wake_all` clears every row's latch on the next `begin_step` (wake condition
+    /// (i)/(iii) — explicit / config-change wake), so no island can be frozen.
+    #[test]
+    fn wake_all_wakes_every_row() {
+        let bodies = vec![
+            dyn_sphere(Vec3::new(0.0, 1.0, 0.0), 1.0, 0.5, 0.0),
+            dyn_sphere(Vec3::new(0.5, 1.0, 0.0), 1.0, 0.5, 0.0),
+        ];
+        let ms = vec![manifold(0, 1, Vec3::new(1.0, 0.0, 0.0), -0.01, Vec3::new(0.25, 1.0, 0.0))];
+        let graph = build_graph(&bodies, &ms);
+        let isl = graph.island_of(0);
+
+        let mut sleep = IslandSleep::with_capacity(bodies.len(), bodies.len());
+        sleep.begin_step(&graph, bodies.len());
+        // Latch both rows of the island asleep, then confirm the island is frozen.
+        sleep.force_sleep_row(0);
+        sleep.force_sleep_row(1);
+        sleep.begin_step(&graph, bodies.len());
+        assert!(
+            sleep.is_island_frozen(isl),
+            "an island whose every row is latched must be frozen"
+        );
+
+        // wake_all clears the latch, so the island is active again next frame.
+        sleep.wake_all();
+        sleep.begin_step(&graph, bodies.len());
+        assert!(
+            !sleep.is_island_frozen(isl) && !sleep.is_row_asleep(0) && !sleep.is_row_asleep(1),
+            "wake_all must wake every row (no island frozen)"
+        );
+    }
+
+    /// Topology change is row-keyed and cannot spuriously freeze a moving island (C3).
+    /// A two-row island latches asleep; then the manifold set splits it into two
+    /// singleton islands AND a brand-new awake row joins one of them. The row latch
+    /// follows the BODY, not the volatile island id, so: the unperturbed singleton
+    /// stays frozen (its row is still latched), and the singleton that gained the new
+    /// awake row is ACTIVE (no spurious freeze of a now-moving partition).
+    #[test]
+    fn topology_split_is_row_keyed_no_spurious_freeze() {
+        let bodies = vec![
+            dyn_sphere(Vec3::new(0.0, 1.0, 0.0), 1.0, 0.5, 0.0), // row 0
+            dyn_sphere(Vec3::new(0.5, 1.0, 0.0), 1.0, 0.5, 0.0), // row 1
+            dyn_sphere(Vec3::new(0.6, 1.0, 0.0), 1.0, 0.5, 0.0), // row 2 (new awake)
+        ];
+        // Frame A: rows 0+1 form one island; row 2 is its own singleton.
+        let ms_a = vec![manifold(0, 1, Vec3::new(1.0, 0.0, 0.0), -0.01, Vec3::new(0.25, 1.0, 0.0))];
+        let graph_a = build_graph(&bodies, &ms_a);
+        let mut sleep = IslandSleep::with_capacity(bodies.len(), bodies.len());
+        sleep.begin_step(&graph_a, bodies.len());
+        // Latch rows 0 and 1 asleep (the resting pair); leave row 2 awake.
+        sleep.force_sleep_row(0);
+        sleep.force_sleep_row(1);
+
+        // Frame B: the manifold set SPLITS — 0 alone, and 1+2 now coupled (a new awake
+        // contact). Island ids are re-derived; the row latch is what carries.
+        let ms_b = vec![manifold(1, 2, Vec3::new(1.0, 0.0, 0.0), -0.01, Vec3::new(0.55, 1.0, 0.0))];
+        let graph_b = build_graph(&bodies, &ms_b);
+        sleep.begin_step(&graph_b, bodies.len());
+
+        let isl0 = graph_b.island_of(0);
+        let isl12 = graph_b.island_of(1);
+        // Row 0 alone: still latched ⇒ its singleton island is frozen.
+        assert!(
+            sleep.is_island_frozen(isl0) && !sleep.is_row_awake(0),
+            "the undisturbed latched row must stay frozen across the split"
+        );
+        // Rows 1+2: row 2 is awake (never latched), so their merged island is ACTIVE —
+        // no spurious freeze of a partition that gained a moving row.
+        assert!(
+            isl0 != isl12,
+            "the split must put row 0 in a different island from rows 1+2"
+        );
+        assert!(
+            !sleep.is_island_frozen(isl12) && sleep.is_row_awake(1) && sleep.is_row_awake(2),
+            "an island that gained an awake row must be ACTIVE (no C3 spurious freeze)"
+        );
+    }
+
+    /// Sleeping with a threshold of `0` (an island can NEVER drop below it) is
+    /// byte-identical to the sleeping-OFF colored solve — nothing ever sleeps, so the
+    /// solve + integrate are never skipped (the 0%-gate at the value level).
+    #[test]
+    fn sleeping_that_never_sleeps_matches_sleeping_off() {
+        let make = || {
+            vec![
+                dyn_sphere(Vec3::new(0.0, 2.0, 0.0), 1.0, 0.5, 0.0),
+                dyn_sphere(Vec3::new(0.0, 4.0, 0.0), 1.0, 0.5, 0.0),
+                static_body(Vec3::new(0.0, 0.0, 0.0)),
+            ]
+        };
+        // A simple stacking narrowphase: floor contact + sphere-sphere contact.
+        let build = |bs: &[BodyState]| {
+            let mut ms = Vec::new();
+            let y0 = bs[0].position.y;
+            if y0 - 1.0 < 0.0 {
+                ms.push(manifold(0, 2, Vec3::new(0.0, -1.0, 0.0), y0 - 1.0, Vec3::new(0.0, 1.0, 0.0)));
+            }
+            let d = bs[1].position.y - bs[0].position.y;
+            if d - 2.0 < 0.0 {
+                ms.push(manifold(0, 1, Vec3::new(0.0, 1.0, 0.0), d - 2.0, bs[0].position));
+            }
+            ms
+        };
+
+        // Sleeping OFF reference.
+        let ys_off = run(make(), build, 30);
+        // Sleeping ON but threshold 0 → nothing ever sleeps.
+        let (ys_on, sleep) = run_sleeping(make(), build, 30, |c| c.sleep_threshold = 0.0);
+
+        assert!(
+            !sleep.is_row_asleep(0) && !sleep.is_row_asleep(1),
+            "with threshold 0 no row may latch asleep"
+        );
+        // Bit-identical (threshold-0 sleeping never skips solve/integrate).
+        assert_eq!(
+            ys_off.len(),
+            ys_on.len(),
+            "the two runs must produce the same body count"
+        );
+        for (off, on) in ys_off.iter().zip(ys_on.iter()) {
+            assert_eq!(
+                off.to_bits(),
+                on.to_bits(),
+                "sleeping-ON-but-never-sleeps must be BIT-identical to sleeping-OFF"
+            );
+        }
+    }
+
+    // ── O8 TESTER GATES (the re-review's deferred formal-gate list) ───────────
+    //
+    // These extend the dev's in-module sanity tests to the FORMAL gates: a larger
+    // settled+slept stack hit by a faller (gate 1), rest==rest to ε (gate 2),
+    // run-to-run bit-determinism on a sleep+WAKE scene (gate 3), the 0%-gate at
+    // SCALE over the O6/O7 random corpus (gate 4), the no-oscillation debounce
+    // proptest (gate 5), and topology-churn no-spurious-freeze (gate 7). They reuse
+    // the in-module helpers (`dyn_sphere`/`static_body`/`manifold`/`build_graph`/
+    // `run`/`run_sleeping`/`random_scene`) and the `#[cfg(test)]` `is_row_asleep`
+    // hook, so they run native AND under Miri (no schedule / threadpool).
+
+    use crate::resources::DEFAULT_SLEEP_THRESHOLD;
+
+    /// A full body snapshot (position + rotation + velocities, bit-exact) of every
+    /// row — the load-bearing comparand for the determinism / rest-to-ε gates.
+    #[derive(Clone, PartialEq)]
+    struct Snap {
+        position: Vec3,
+        rotation: Quat,
+        linear_velocity: Vec3,
+        angular_velocity: Vec3,
+    }
+
+    fn snap(bodies: &[BodyState]) -> Vec<Snap> {
+        bodies
+            .iter()
+            .map(|b| Snap {
+                position: b.position,
+                rotation: b.rotation,
+                linear_velocity: b.linear_velocity,
+                angular_velocity: b.angular_velocity,
+            })
+            .collect()
+    }
+
+    /// Bit-exact equality of two snapshots (every f32 component compared by `to_bits`).
+    fn snaps_bit_equal(a: &[Snap], b: &[Snap]) -> bool {
+        if a.len() != b.len() {
+            return false;
+        }
+        a.iter().zip(b.iter()).all(|(x, y)| {
+            let v = |p: Vec3| [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()];
+            let q = |r: Quat| [r.x.to_bits(), r.y.to_bits(), r.z.to_bits(), r.w.to_bits()];
+            v(x.position) == v(y.position)
+                && q(x.rotation) == q(y.rotation)
+                && v(x.linear_velocity) == v(y.linear_velocity)
+                && v(x.angular_velocity) == v(y.angular_velocity)
+        })
+    }
+
+    /// Drives the colored solver with O8 sleeping, returning the FULL final body
+    /// snapshot (not just Y). `sleeping` toggles the O8 path; `cfg_mut` tweaks the
+    /// rest of the config. Mirrors `run_sleeping` but exposes the whole state so the
+    /// determinism / rest-to-ε gates can compare every field, and lets the caller
+    /// drop the sleeping flag (for the rest==rest reference arm).
+    fn run_snap(
+        bodies: Vec<BodyState>,
+        build_manifolds: impl Fn(&[BodyState]) -> Vec<Manifold>,
+        steps: usize,
+        sleeping: bool,
+        cfg_mut: impl Fn(&mut PhysicsConfig),
+    ) -> Vec<Snap> {
+        let mut cfg = PhysicsConfig {
+            dt: 1.0 / 60.0,
+            sleeping,
+            ..PhysicsConfig::default()
+        };
+        cfg_mut(&mut cfg);
+        let mut solver = ColoredSoftStepSolver::default();
+        let mut scratch = SolverScratch::with_capacity(bodies.len());
+        scratch.bodies = bodies;
+        scratch.touched.reset(scratch.bodies.len());
+        let mut sleep = IslandSleep::with_capacity(scratch.bodies.len(), scratch.bodies.len());
+
+        for _ in 0..steps {
+            let manifolds = build_manifolds(&scratch.bodies);
+            let graph = build_graph(&scratch.bodies, &manifolds);
+            scratch.touched.reset(scratch.bodies.len());
+            if sleeping {
+                solver.solve_colored_sleeping(&cfg, &manifolds, &graph, &mut scratch, &mut sleep);
+            } else {
+                solver.solve_colored(&cfg, &manifolds, &graph, &mut scratch);
+            }
+        }
+        snap(&scratch.bodies)
+    }
+
+    /// A vertical stack of `n` dynamic spheres (radius 1) resting on a static floor:
+    /// centres at y = 1, 3, 5, …; the floor is the last row. Returns the bodies.
+    fn vertical_stack(n: usize) -> Vec<BodyState> {
+        let mut bodies = Vec::with_capacity(n + 1);
+        for i in 0..n {
+            bodies.push(dyn_sphere(Vec3::new(0.0, 1.0 + 2.0 * i as f32, 0.0), 1.0, 0.5, 0.0));
+        }
+        bodies.push(static_body(Vec3::new(0.0, 0.0, 0.0)));
+        bodies
+    }
+
+    /// The per-step narrowphase stand-in for a vertical stack of `n` dynamic spheres
+    /// on a floor (floor is row `n`): floor↔bottom + each adjacent sphere pair, each
+    /// emitted only while penetrating (separation < 0).
+    fn stack_manifolds(bs: &[BodyState], n: usize) -> Vec<Manifold> {
+        let floor = n as u32;
+        let mut ms = Vec::new();
+        let sep_floor = bs[0].position.y - 1.0;
+        if sep_floor < 0.0 {
+            ms.push(manifold(0, floor, Vec3::new(0.0, -1.0, 0.0), sep_floor, bs[0].position));
+        }
+        for i in 0..n.saturating_sub(1) {
+            let d = bs[i + 1].position.y - bs[i].position.y;
+            if d - 2.0 < 0.0 {
+                ms.push(manifold(
+                    i as u32,
+                    (i + 1) as u32,
+                    Vec3::new(0.0, 1.0, 0.0),
+                    d - 2.0,
+                    bs[i].position,
+                ));
+            }
+        }
+        ms
+    }
+
+    /// **Gate 1 — a larger settled+slept stack hit by a faller wakes the SAME frame,
+    /// the faller does not freeze mid-air, and no body penetrates beyond one
+    /// narrowphase margin.** Beyond the dev's 2-sphere test: a 6-sphere stack on a
+    /// floor (rows 0..=5, floor row 6, faller row 7). Built from the SAME per-frame
+    /// manifolds the solve sees (the honest pipeline). The stack settles + latches,
+    /// then a faller is dropped onto the top; the frame its contact appears the whole
+    /// merged island is ACTIVE (no frozen row), and no resting body sinks through.
+    #[test]
+    fn larger_slept_stack_wakes_same_frame_no_penetration() {
+        const N: usize = 6;
+        let faller = (N + 1) as u32;
+        let make = || {
+            let mut b = vertical_stack(N); // rows 0..N dyn, row N floor
+            b.push(dyn_sphere(Vec3::new(0.0, 60.0, 0.0), 1.0, 0.5, 0.0)); // row N+1 faller
+            b
+        };
+        // Narrowphase: the stack contacts (rows 0..N + floor) plus a top↔faller
+        // contact when the faller penetrates the top sphere (row N-1).
+        let build = |bs: &[BodyState]| {
+            let mut ms = stack_manifolds(bs, N);
+            let top = (N - 1) as u32;
+            let d = bs[faller as usize].position.y - bs[top as usize].position.y;
+            if d - 2.0 < 0.0 {
+                ms.push(manifold(top, faller, Vec3::new(0.0, 1.0, 0.0), d - 2.0, bs[top as usize].position));
+            }
+            ms
+        };
+
+        let cfg = PhysicsConfig {
+            dt: 1.0 / 60.0,
+            sleeping: true,
+            sleep_frames: 6,
+            ..PhysicsConfig::default()
+        };
+        let mut solver = ColoredSoftStepSolver::default();
+        let mut scratch = SolverScratch::with_capacity(N + 2);
+        scratch.bodies = make();
+        // Park the faller (inv_mass 0 = not an island node) so it cannot perturb the
+        // pile's settle; un-park it once the pile is asleep.
+        scratch.bodies[faller as usize].inv_mass = 0.0;
+        let mut sleep = IslandSleep::with_capacity(N + 2, N + 2);
+
+        for _ in 0..400 {
+            let manifolds = build(&scratch.bodies);
+            let graph = build_graph(&scratch.bodies, &manifolds);
+            scratch.touched.reset(scratch.bodies.len());
+            solver.solve_colored_sleeping(&cfg, &manifolds, &graph, &mut scratch, &mut sleep);
+        }
+        // The whole stack must be latched asleep before the faller arrives.
+        for r in 0..N {
+            assert!(
+                sleep.is_row_asleep(r),
+                "stack row {r} must latch asleep before the faller (settle failed)"
+            );
+        }
+        // Resting heights of the slept stack — used to bound penetration after impact.
+        let rest_y: Vec<f32> = (0..N).map(|r| scratch.bodies[r].position.y).collect();
+
+        // Drop the faller onto the top sphere.
+        scratch.bodies[faller as usize].inv_mass = 1.0;
+        scratch.bodies[faller as usize].position.y = 5.0; // just above the top sphere (centre ~11)?
+        // Place it a touch above the actual top so the contact appears within a few steps.
+        scratch.bodies[faller as usize].position.y = scratch.bodies[N - 1].position.y + 2.5;
+
+        let mut woke = false;
+        for _ in 0..40 {
+            let manifolds = build(&scratch.bodies);
+            let faller_contact = manifolds.iter().any(|m| {
+                (m.body_a.0 == (N - 1) as u32 && m.body_b.0 == faller)
+                    || (m.body_a.0 == faller && m.body_b.0 == (N - 1) as u32)
+            });
+            let graph = build_graph(&scratch.bodies, &manifolds);
+            scratch.touched.reset(scratch.bodies.len());
+            solver.solve_colored_sleeping(&cfg, &manifolds, &graph, &mut scratch, &mut sleep);
+
+            if faller_contact {
+                // Wake-on-merge: the merged island (stack rows + faller) is ACTIVE the
+                // SAME frame — every member row awake, none frozen.
+                for r in 0..N {
+                    assert!(
+                        sleep.is_row_awake(r),
+                        "stack row {r} must be ACTIVE the frame the faller's contact appears (wake-on-merge)"
+                    );
+                }
+                assert!(
+                    sleep.is_row_awake(faller as usize),
+                    "the faller must be awake (it never slept; it must not freeze mid-air)"
+                );
+                woke = true;
+                break;
+            }
+            // While the faller is still falling (no contact yet) it must NOT be frozen.
+            assert!(
+                sleep.is_row_awake(faller as usize),
+                "the faller must not freeze mid-air before it touches the pile"
+            );
+        }
+        assert!(woke, "the faller must reach the pile within the step budget");
+
+        // Settle the impact and assert no penetration-stick: no resting body sank
+        // more than one narrowphase margin (1.0) below its pre-impact rest height, and
+        // adjacent spheres keep their ~2.0 centre spacing (no inter-penetration > 1).
+        for _ in 0..120 {
+            let manifolds = build(&scratch.bodies);
+            let graph = build_graph(&scratch.bodies, &manifolds);
+            scratch.touched.reset(scratch.bodies.len());
+            solver.solve_colored_sleeping(&cfg, &manifolds, &graph, &mut scratch, &mut sleep);
+        }
+        for (r, &rest) in rest_y.iter().enumerate() {
+            assert!(
+                scratch.bodies[r].position.y > rest - 1.0,
+                "stack row {r} sank through the pile under impact: y={}, rest was {rest}",
+                scratch.bodies[r].position.y,
+            );
+        }
+        for i in 0..N - 1 {
+            let gap = scratch.bodies[i + 1].position.y - scratch.bodies[i].position.y;
+            assert!(
+                gap > 1.0,
+                "adjacent stack spheres {i}/{} penetrated > one margin: gap={gap}",
+                i + 1
+            );
+        }
+        // The faller came to rest ABOVE the top sphere (did not tunnel through).
+        assert!(
+            scratch.bodies[faller as usize].position.y > scratch.bodies[N - 1].position.y,
+            "the faller tunnelled through the pile: faller y={}, top y={}",
+            scratch.bodies[faller as usize].position.y,
+            scratch.bodies[N - 1].position.y
+        );
+    }
+
+    /// **Gate 2 — a settled stack's resting state with sleeping ON == with sleeping
+    /// OFF, to a small ε.** Sleeping must not change the settled configuration, only
+    /// stop integrating it. A 4-sphere stack settles for many frames under both
+    /// configs; the final positions must match within ε (the slept arm freezes the
+    /// converged rest pose; the awake arm keeps micro-integrating it — they agree to ε).
+    #[test]
+    fn rest_state_with_sleeping_equals_without_to_epsilon() {
+        const N: usize = 4;
+        let make = || vertical_stack(N);
+        let build = move |bs: &[BodyState]| stack_manifolds(bs, N);
+        // Use the default debounce-friendly threshold so the slept arm actually sleeps.
+        let off = run_snap(make(), build, 600, false, |c| c.sleep_frames = 30);
+        let on = run_snap(make(), build, 600, true, |c| c.sleep_frames = 30);
+
+        const EPS: f32 = 1.0e-2;
+        for r in 0..N {
+            let dy = (on[r].position.y - off[r].position.y).abs();
+            assert!(
+                dy < EPS,
+                "row {r} rest Y differs sleeping ON vs OFF beyond ε: on={}, off={}, |Δ|={dy}",
+                on[r].position.y,
+                off[r].position.y
+            );
+        }
+    }
+
+    /// **Gate 3 — run-to-run BIT-determinism on a sleep+WAKE scene.** A scene that
+    /// settles → sleeps → is woken by a faller → re-settles, run N independent times,
+    /// must produce bit-identical final body snapshots. The in-module tests do not
+    /// loop runs — this is the load-bearing determinism gate (every f32 by `to_bits`).
+    #[test]
+    fn sleep_then_wake_scene_is_run_to_run_bit_deterministic() {
+        const N: usize = 4;
+        let floor = N as u32;
+        let faller = (N + 1) as u32;
+        let make = || {
+            let mut b = vertical_stack(N);
+            b.push(dyn_sphere(Vec3::new(0.0, 40.0, 0.0), 1.0, 0.5, 0.0)); // faller
+            b
+        };
+        let build = move |bs: &[BodyState]| {
+            let mut ms = stack_manifolds(bs, N);
+            let top = (N - 1) as u32;
+            let d = bs[faller as usize].position.y - bs[top as usize].position.y;
+            if d - 2.0 < 0.0 {
+                ms.push(manifold(top, faller, Vec3::new(0.0, 1.0, 0.0), d - 2.0, bs[top as usize].position));
+            }
+            let _ = floor;
+            ms
+        };
+
+        // One full sleep+wake trajectory: settle (faller parked) → drop faller →
+        // re-settle. Returns the final snapshot.
+        let trajectory = || {
+            let cfg = PhysicsConfig {
+                dt: 1.0 / 60.0,
+                sleeping: true,
+                sleep_frames: 6,
+                ..PhysicsConfig::default()
+            };
+            let mut solver = ColoredSoftStepSolver::default();
+            let mut scratch = SolverScratch::with_capacity(N + 2);
+            scratch.bodies = make();
+            scratch.bodies[faller as usize].inv_mass = 0.0;
+            let mut sleep = IslandSleep::with_capacity(N + 2, N + 2);
+            // settle phase
+            for _ in 0..200 {
+                let manifolds = build(&scratch.bodies);
+                let graph = build_graph(&scratch.bodies, &manifolds);
+                scratch.touched.reset(scratch.bodies.len());
+                solver.solve_colored_sleeping(&cfg, &manifolds, &graph, &mut scratch, &mut sleep);
+            }
+            // wake phase: drop the faller
+            scratch.bodies[faller as usize].inv_mass = 1.0;
+            scratch.bodies[faller as usize].position.y = scratch.bodies[N - 1].position.y + 2.5;
+            for _ in 0..200 {
+                let manifolds = build(&scratch.bodies);
+                let graph = build_graph(&scratch.bodies, &manifolds);
+                scratch.touched.reset(scratch.bodies.len());
+                solver.solve_colored_sleeping(&cfg, &manifolds, &graph, &mut scratch, &mut sleep);
+            }
+            snap(&scratch.bodies)
+        };
+
+        let baseline = trajectory();
+        for run_idx in 1..8 {
+            let again = trajectory();
+            assert!(
+                snaps_bit_equal(&baseline, &again),
+                "sleep+wake scene was NOT run-to-run bit-deterministic on run {run_idx}"
+            );
+        }
+    }
+
+    /// **Gate 4 — the 0%-gate at SCALE.** With sleeping=false the colored solve must
+    /// be BYTE-identical to the pre-O8 colored path (`solve_colored` / `build_columns(None)`)
+    /// across the O6/O7 random-scene corpus, not just a 3-body scene. Here: drive each
+    /// random scene through `solve_colored_inner(.., None)` (the live path) vs the
+    /// explicit `solve_colored` entry; both must produce bit-identical body state. The
+    /// stronger claim — sleeping=ON-but-never-sleeps == sleeping=OFF — is also checked
+    /// per scene (threshold 0 ⇒ no freeze, so the O8 path must be byte-identical).
+    #[test]
+    fn zero_gate_at_scale_sleeping_off_byte_identical_on_random_corpus() {
+        proptest!(ProptestConfig::with_cases(300), |(seed in any::<u64>())| {
+            let (bodies, manifolds, graph) = random_scene(seed);
+            let cfg = PhysicsConfig {
+                dt: 1.0 / 60.0,
+                ..PhysicsConfig::default()
+            };
+
+            // Arm A: the byte-untouched O6/O7 path (sleep == None).
+            let mut solver_a = ColoredSoftStepSolver::default();
+            let mut scratch_a = SolverScratch::with_capacity(bodies.len());
+            scratch_a.bodies = bodies.clone();
+            scratch_a.touched.reset(scratch_a.bodies.len());
+            solver_a.solve_colored(&cfg, &manifolds, &graph, &mut scratch_a);
+            let after_off = snap(&scratch_a.bodies);
+
+            // Arm B: the O8 path with threshold 0 (nothing can sleep ⇒ no freeze) —
+            // must be byte-identical to arm A (sleeping bookkeeping changes nothing).
+            let cfg_on = PhysicsConfig {
+                sleeping: true,
+                sleep_threshold: 0.0,
+                ..cfg
+            };
+            let mut solver_b = ColoredSoftStepSolver::default();
+            let mut scratch_b = SolverScratch::with_capacity(bodies.len());
+            scratch_b.bodies = bodies.clone();
+            scratch_b.touched.reset(scratch_b.bodies.len());
+            let mut sleep = IslandSleep::with_capacity(bodies.len(), bodies.len());
+            solver_b.solve_colored_sleeping(&cfg_on, &manifolds, &graph, &mut scratch_b, &mut sleep);
+            let after_on = snap(&scratch_b.bodies);
+
+            prop_assert!(
+                snaps_bit_equal(&after_off, &after_on),
+                "0%-gate at scale FAILED for seed {}: sleeping-off result != sleeping-on-but-never-sleeps",
+                seed
+            );
+        });
+    }
+
+    /// **Gate 5 — no wake/sleep oscillation.** A body hovering near the threshold must
+    /// not flap asleep/awake every frame; the integer debounce must hold. A proptest
+    /// over near-threshold per-island energies: drive `begin_step`/`end_step` directly
+    /// with a synthetic body velocity sampled around `sleep_threshold` and count latch
+    /// TRANSITIONS over many frames — the count must be bounded (no per-frame flapping).
+    #[test]
+    fn no_sleep_wake_oscillation_near_threshold() {
+        proptest!(ProptestConfig::with_cases(200), |(
+            speed_bits in 0u32..=40u32,    // index into a near-threshold speed table
+            frames_seed in any::<u64>(),
+        )| {
+            // A single dynamic body, no contacts, in its own singleton island so its
+            // island energy is exactly its own |v|².
+            let threshold = DEFAULT_SLEEP_THRESHOLD; // 1e-4
+            let debounce: u16 = 8;
+            // A speed² straddling the threshold: below for `speed_bits` even, above for
+            // odd — deterministically alternating around the boundary to bait flapping.
+            let base = threshold * 0.5; // safely below
+            let above = threshold * 2.0; // safely above
+            let mut rng = Lcg(frames_seed ^ (speed_bits as u64));
+
+            let body = dyn_sphere(Vec3::new(0.0, 5.0, 0.0), 1.0, 0.5, 0.0);
+            // Single-row graph: a manifold to a (added) static floor so the dyn body
+            // forms an island. Use a 2-body world (dyn + static) and one contact.
+            let bodies = vec![body, static_body(Vec3::ZERO)];
+            let ms = vec![manifold(0, 1, Vec3::new(0.0, -1.0, 0.0), -0.01, Vec3::ZERO)];
+            let graph = build_graph(&bodies, &ms);
+            let mut sleep = IslandSleep::with_capacity(2, 2);
+
+            // Manually feed end_step a body whose speed² we control, then begin_step,
+            // and count how many times the row's latch CHANGES state across frames.
+            let mut bs = bodies.clone();
+            let mut transitions = 0usize;
+            let mut prev_asleep = false;
+            for f in 0..200 {
+                sleep.begin_step(&graph, bs.len());
+                // Choose this frame's speed: a low-bias random walk that mostly stays
+                // below threshold but occasionally pops above (the near-threshold case).
+                let pop = rng.f01() < 0.15; // 15% of frames spike above threshold
+                let v2 = if pop { above } else { base * rng.f01().max(0.01) };
+                let speed = v2.sqrt();
+                bs[0].linear_velocity = Vec3::new(speed, 0.0, 0.0);
+                bs[0].angular_velocity = Vec3::ZERO;
+                sleep.end_step(&bs, &graph, threshold, debounce);
+                let now = sleep.is_row_asleep(0);
+                if f > 0 && now != prev_asleep {
+                    transitions += 1;
+                }
+                prev_asleep = now;
+            }
+            // With a debounce of 8 frames a body cannot flap each frame: every
+            // sleep→wake costs 1 frame (an above-threshold spike) and every wake→sleep
+            // costs ≥ debounce frames. Over 200 frames with ~15% spikes the transition
+            // count must be far below the no-debounce worst case (~200). A debounce that
+            // works keeps it bounded by roughly 2× the number of spike clusters.
+            prop_assert!(
+                transitions <= 60,
+                "near-threshold latch oscillated {} times over 200 frames (debounce broken)",
+                transitions
+            );
+        });
+    }
+
+    /// **Gate 5b — a body steadily AT rest (just below threshold every frame) latches
+    /// exactly once and never flaps.** The clean no-oscillation case: 0 transitions
+    /// after the single sleep latch.
+    #[test]
+    fn steady_below_threshold_latches_once_no_flap() {
+        let bodies = vec![dyn_sphere(Vec3::new(0.0, 5.0, 0.0), 1.0, 0.5, 0.0), static_body(Vec3::ZERO)];
+        let ms = vec![manifold(0, 1, Vec3::new(0.0, -1.0, 0.0), -0.01, Vec3::ZERO)];
+        let graph = build_graph(&bodies, &ms);
+        let mut sleep = IslandSleep::with_capacity(2, 2);
+        let threshold = DEFAULT_SLEEP_THRESHOLD;
+        let debounce: u16 = 8;
+
+        let mut bs = bodies.clone();
+        bs[0].linear_velocity = Vec3::ZERO; // exactly at rest, always below threshold
+        let mut transitions = 0usize;
+        let mut prev = false;
+        for f in 0..100 {
+            sleep.begin_step(&graph, bs.len());
+            sleep.end_step(&bs, &graph, threshold, debounce);
+            let now = sleep.is_row_asleep(0);
+            if f > 0 && now != prev {
+                transitions += 1;
+            }
+            prev = now;
+        }
+        assert_eq!(transitions, 1, "a steadily-resting body must latch asleep exactly ONCE (no flap)");
+        assert!(sleep.is_row_asleep(0), "the resting body must end latched asleep");
+    }
+
+    /// **Gate 9 probe — does a dense resting pile actually latch asleep, and after
+    /// how many frames?** This mirrors the criterion `sleeping` bench's `pile_scene`
+    /// (a grid of sphere columns on a floor with vertical + lateral contacts) and
+    /// reports the slept-row fraction over time. If a dense, lateral-contact pile
+    /// does NOT sleep, the bench's `mostly_settled_sleeping_on` arm measures the
+    /// AWAKE path (no skip) and the headline-win claim is vacuous — so this is the
+    /// load-bearing diagnostic behind the criterion result.
+    #[test]
+    fn dense_resting_pile_sleeps_diagnostic() {
+        // A small pile (4 columns × 3 high) — the chromatic shape of the bench scene
+        // at a Miri/native-cheap size.
+        let n_columns = 4u32;
+        let height = 3u32;
+        let n_dyn = (n_columns * height) as usize;
+        let mut bodies: Vec<BodyState> = Vec::with_capacity(n_dyn + 1);
+        for col in 0..n_columns {
+            for h in 0..height {
+                let x = col as f32 * 1.05;
+                let y = 0.5 + h as f32 * 0.99;
+                bodies.push(dyn_sphere(Vec3::new(x, y, 0.0), 1.0, 0.5, 0.0));
+            }
+        }
+        let floor_row = n_dyn as u32;
+        bodies.push(static_body(Vec3::new(0.0, -50.0, 0.0)));
+
+        // The bench's FIXED-anchor manifolds: contacts are re-emitted every step at the
+        // ORIGINAL rest anchors regardless of how the bodies move (the bench reuses one
+        // prebuilt manifold set + graph — it does NOT re-run narrowphase).
+        let row_of = |col: u32, h: u32| col * height + h;
+        let mut fixed = Vec::new();
+        for col in 0..n_columns {
+            for h in 0..height {
+                let r = row_of(col, h);
+                if h == 0 {
+                    fixed.push(manifold(r, floor_row, Vec3::new(0.0, -1.0, 0.0), -0.001, bodies[r as usize].position));
+                } else {
+                    let below = row_of(col, h - 1);
+                    fixed.push(manifold(below, r, Vec3::new(0.0, 1.0, 0.0), -0.001, bodies[r as usize].position));
+                }
+                if col + 1 < n_columns {
+                    let right = row_of(col + 1, h);
+                    fixed.push(manifold(r, right, Vec3::new(1.0, 0.0, 0.0), -0.001, bodies[r as usize].position));
+                }
+            }
+        }
+        let graph = build_graph(&bodies, &fixed);
+
+        let cfg = PhysicsConfig {
+            dt: 1.0 / 60.0,
+            sleeping: true,
+            sleep_frames: 4,
+            ..PhysicsConfig::default()
+        };
+        let mut solver = ColoredSoftStepSolver::default();
+        let mut scratch = SolverScratch::with_capacity(bodies.len());
+        scratch.bodies = bodies;
+        let mut sleep = IslandSleep::with_capacity(scratch.bodies.len(), scratch.bodies.len());
+
+        let mut first_all_asleep = None;
+        for frame in 0..400 {
+            scratch.touched.reset(scratch.bodies.len());
+            solver.solve_colored_sleeping(&cfg, &fixed, &graph, &mut scratch, &mut sleep);
+            let asleep = (0..n_dyn).filter(|&r| sleep.is_row_asleep(r)).count();
+            if asleep == n_dyn && first_all_asleep.is_none() {
+                first_all_asleep = Some(frame);
+            }
+        }
+        let asleep_final = (0..n_dyn).filter(|&r| sleep.is_row_asleep(r)).count();
+        eprintln!(
+            "dense_pile_diagnostic: {asleep_final}/{n_dyn} rows asleep after 400 frames; \
+             first all-asleep frame = {first_all_asleep:?}"
+        );
+        // The diagnostic gate: a dense resting pile MUST eventually sleep, else the
+        // bench measures the awake path. (If this fails, the criterion headline-win
+        // arm is vacuous — report the slept-row count.)
+        assert_eq!(
+            asleep_final, n_dyn,
+            "a dense resting pile did not fully sleep ({asleep_final}/{n_dyn}); the criterion \
+             mostly-settled arm would measure the AWAKE path"
+        );
+    }
+
+    /// **Gate 7 — topology-change no-spurious-freeze (the C3 regression gate, at
+    /// scale).** Random merge/split sequences: a body that should be active is never
+    /// frozen because of a stale latch. The row-keyed latch must survive island
+    /// renumbering. Drives `begin_step` over a sequence of random manifold sets over a
+    /// fixed body set, latching/waking rows, and asserts the freeze decision is ALWAYS
+    /// a pure function of the per-row latch — an island is frozen IFF every member row
+    /// is latched, never otherwise.
+    #[test]
+    fn topology_churn_freeze_is_pure_function_of_row_latch() {
+        proptest!(ProptestConfig::with_cases(300), |(seed in any::<u64>())| {
+            let mut rng = Lcg(seed ^ 0x5DEE_CE66_D1CE_4B27);
+            // A fixed set of dynamic bodies that we re-island with random manifolds.
+            let n_dyn = rng.range(2, 9) as usize; // 2..=8 dynamic bodies
+            let mut bodies: Vec<BodyState> = (0..n_dyn)
+                .map(|i| dyn_sphere(Vec3::new(i as f32 * 0.3, 1.0, 0.0), 1.0, 0.5, 0.0))
+                .collect();
+            bodies.push(static_body(Vec3::ZERO));
+            let n_rows = bodies.len();
+
+            let mut sleep = IslandSleep::with_capacity(n_rows, n_rows);
+
+            // Run several frames; each frame re-derive a random manifold set (random
+            // merges/splits), randomly latch/wake rows via the energy path, then assert
+            // the per-island freeze decision matches the pure predicate over the rows.
+            for _frame in 0..20 {
+                // Random contact set over the dynamic bodies (random merges/splits).
+                let n_contacts = rng.range(0, (n_dyn * 2) as u32) as usize;
+                let mut ms = Vec::with_capacity(n_contacts);
+                for _ in 0..n_contacts {
+                    let a = rng.range(0, n_dyn as u32);
+                    let mut b = rng.range(0, n_dyn as u32);
+                    if b == a {
+                        b = (a + 1) % n_dyn as u32;
+                    }
+                    let (lo, hi) = if a < b { (a, b) } else { (b, a) };
+                    ms.push(manifold(lo, hi, Vec3::new(1.0, 0.0, 0.0), -0.01, bodies[lo as usize].position));
+                }
+                let graph = build_graph(&bodies, &ms);
+                sleep.begin_step(&graph, n_rows);
+
+                // The per-island freeze decision must be EXACTLY: island frozen iff
+                // every member dynamic row is latched asleep (and the island is non-empty).
+                let n_islands = graph.n_islands() as usize;
+                let mut member_count = vec![0usize; n_islands];
+                let mut all_asleep = vec![true; n_islands];
+                for row in 0..n_dyn {
+                    let isl = graph.island_of(row as u32);
+                    if isl == ConstraintGraph::NO_ISLAND {
+                        continue;
+                    }
+                    member_count[isl as usize] += 1;
+                    if !sleep.is_row_asleep(row) {
+                        all_asleep[isl as usize] = false;
+                    }
+                }
+                for isl in 0..n_islands {
+                    let expect_frozen = member_count[isl] > 0 && all_asleep[isl];
+                    // An island with no members is `frozen_islands[isl] == true` by the
+                    // resize default but has no rows, so no row reports awake/frozen via it.
+                    if member_count[isl] > 0 {
+                        prop_assert_eq!(
+                            sleep.is_island_frozen(isl as u32),
+                            expect_frozen,
+                            "spurious/missing freeze for island {} on frame {} (seed {}): \
+                             members={}, all_asleep={}",
+                            isl, _frame, seed, member_count[isl], all_asleep[isl]
+                        );
+                    }
+                    // Every awake row's island must NOT be frozen (C3): no member of an
+                    // active partition is frozen because of a stale latch.
+                    for row in 0..n_dyn {
+                        if graph.island_of(row as u32) == isl as u32 && !sleep.is_row_asleep(row) {
+                            prop_assert!(
+                                sleep.is_row_awake(row),
+                                "C3: awake row {} was frozen by a stale latch (seed {}, frame {})",
+                                row, seed, _frame
+                            );
+                        }
+                    }
+                }
+
+                // Randomly latch / wake some rows for the next frame (drive churn).
+                for row in 0..n_dyn {
+                    if rng.f01() < 0.5 {
+                        sleep.force_sleep_row(row);
+                    }
+                }
+            }
+        });
     }
 }
