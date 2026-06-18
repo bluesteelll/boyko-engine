@@ -55,8 +55,10 @@ pub(crate) fn bitset_intersects(a: &FixedBitSet, b: &FixedBitSet) -> bool {
         // SAFETY: `target_feature = "avx2"` is established by the compile-time
         //   gate, so every AVX2 intrinsic used by `bitset_intersects_avx2` is
         //   present on the executing CPU. The function itself documents its
-        //   per-load invariants.
-        return unsafe { bitset_intersects_avx2(a_slice, b_slice) };
+        //   per-load invariants. The `cfg`-gated block is the function tail under
+        //   `+avx2` (the `not(avx2)` block is excluded), so no `return` is needed
+        //   (clippy::needless_return fires on it only under the `+avx2` gate).
+        unsafe { bitset_intersects_avx2(a_slice, b_slice) }
     }
 
     #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
