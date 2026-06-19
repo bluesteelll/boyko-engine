@@ -2217,6 +2217,24 @@ impl EcsMaster {
         &mut self.archetype_master
     }
 
+    /// Returns a shared reference to the dense storage subsystem (Dense plan
+    /// D3). The query path reads it to resolve a dense term's global
+    /// `DenseStore` (column geometry + `e2s` membership oracle) once at fetch
+    /// construction. Empty for a table-only world (the 0%-gate).
+    #[inline]
+    pub fn dense_registry(&self) -> &crate::ecs::core::component::dense::DenseRegistry {
+        &self.dense_registry
+    }
+
+    /// Returns a mutable reference to the dense storage subsystem (Dense plan
+    /// D3). The structural-op routing already mutates the stores through
+    /// `self.dense_registry` directly; this accessor exposes the same surface
+    /// to external structural callers (e.g. the physics build phase).
+    #[inline]
+    pub fn dense_registry_mut(&mut self) -> &mut crate::ecs::core::component::dense::DenseRegistry {
+        &mut self.dense_registry
+    }
+
     // ── Event dispatch proxy methods (Phase 6) ──────────────────────────────
 
     /// Returns a shared reference to the event dispatcher.
@@ -3672,7 +3690,12 @@ impl EcsMaster {
                 // path is one Relaxed null-load + a predicted-not-taken
                 // branch (off the row loop; 50-systems bench gated).
                 state_mut.term_scratch.reclaim_retired();
-                state_mut.update(self.archetype_master());
+                // Dense plan D3: route a dense-include query through the
+                // dense-seed path (const-folded to the plain `update` for a
+                // no-dense query — the 0%-gate). `dense_registry()` and
+                // `archetype_master()` are both `&self` reborrows; `state_mut`'s
+                // provenance is the raw `cell_ptr`, independent of `self`.
+                state_mut.update_with_world(self.archetype_master(), self.dense_registry());
             }
 
             // SAFETY (QV1, QV7, U_C1):
@@ -3732,7 +3755,9 @@ impl EcsMaster {
                 unsafe {
                     let state_mut: &mut QueryDataState<D, F> =
                         &mut *(*cell_ptr.as_ptr()).get();
-                    state_mut.update(self.archetype_master());
+                    // Dense plan D3: route a dense-include query through the
+                    // dense-seed path (const-folds to plain `update` otherwise).
+                    state_mut.update_with_world(self.archetype_master(), self.dense_registry());
                 }
                 // SAFETY (QV1, U_C1): see `query` cache-hit path.
                 let world = unsafe { UnsafeEcsCell::new_mutable(self) };

@@ -140,6 +140,20 @@ pub unsafe trait QueryFilter: Sized {
     /// Step 7a's `IS_CANDIDATE_SEEDED` classification at the `(D, F)` seam.
     const IS_SOLE_SINGLE_ENABLE: bool = false;
 
+    /// Dense plan D3 — `true` iff this filter contains a dense
+    /// (non-fragmenting) term (`With<C>` / `Without<C>` where
+    /// [`Component::STORAGE_IS_DENSE`]; a tuple OR-folds its members).
+    ///
+    /// Gates the cursor's [`Self::resolve_dense`] call (the global `DenseStore`
+    /// pointer resolution). A dense `With`/`Without` ALSO sets
+    /// `IS_ARCHETYPAL = false`, so the EXISTING per-row `filter_fetch` arm runs
+    /// the `e2s` membership test — no separate cursor arm is needed (unlike the
+    /// data side, which adds `dense_row_passes`). `false` by default, so a
+    /// no-dense filter keeps it and pays nothing (the 0%-gate).
+    ///
+    /// [`Component::STORAGE_IS_DENSE`]: crate::ecs::core::component::component::Component::STORAGE_IS_DENSE
+    const HAS_DENSE: bool = false;
+
     /// EnableTag amendment A2.1 — returns the resolved tag id of a SOLE enable
     /// term.
     ///
@@ -199,6 +213,53 @@ pub unsafe trait QueryFilter: Sized {
         _arch: ArchetypeId,
     ) -> bool {
         true
+    }
+
+    /// Dense plan D3 — resolves this filter's dense term(s) against the world.
+    ///
+    /// Called ONCE per cursor construction under `if const { Self::HAS_DENSE }`
+    /// (the [`UnsafeEcsCell`] is available there), so it is emitted ONLY into a
+    /// dense monomorphisation. The default body is empty — every non-dense
+    /// filter (`()`, table `With`/`Without`, `Added`, `Changed`, …) inherits it
+    /// and the cursor's gated call folds to nothing (the 0%-gate). A dense
+    /// `With<C>` / `Without<C>` overrides it to cache the global `DenseStore`
+    /// pointer into its `Fetch`; the per-row `filter_fetch` then runs the `e2s`
+    /// membership test.
+    ///
+    /// # Safety
+    ///
+    /// * `world` MUST satisfy the read contract declared by the active
+    ///   `SystemParam::init_access`.
+    /// * The resolved `DenseStore` pointer is valid for `'w` (address-stable
+    ///   `DenseRegistry` slot).
+    ///
+    /// [`UnsafeEcsCell`]: crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell
+    #[inline]
+    unsafe fn resolve_dense<'w>(
+        _fetch: &mut Self::Fetch<'w>,
+        _state: &Self::State,
+        _world: crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell<'w>,
+    ) {
+        // Default: non-dense filter resolves nothing (the 0%-gate). Overridden
+        // only by a dense `With<C>` / `Without<C>` leaf.
+    }
+
+    /// Dense plan D3 — `true` iff this filter contributes a dense INCLUDE term
+    /// (`With<C>` where `C::STORAGE_IS_DENSE`; a tuple OR-folds). `Without<C>`
+    /// does NOT (it admits non-members too — no candidate bound). Drives the
+    /// `QueryDataState` dense-seed path. `false` by default (the 0%-gate).
+    const HAS_DENSE_INCLUDE: bool = false;
+
+    /// Dense plan D3 — ORs every dense INCLUDE term's `arch_presence` into
+    /// `out` (the candidate-seed bitset). Called ONLY under
+    /// `if const { Self::HAS_DENSE_INCLUDE }`. Default no-op; overridden by a
+    /// dense `With<C>` to read its store's `arch_presence`.
+    #[inline]
+    fn dense_include_candidates(
+        _state: &Self::State,
+        _registry: &crate::ecs::core::component::dense::DenseRegistry,
+        _out: &mut crate::ecs::core::iters::archetype_bit_set::ArchetypeBitSet,
+    ) {
     }
 
     /// Creates the initial per-archetype `Fetch` slot (typically all-NULL or
@@ -365,6 +426,58 @@ unsafe impl QueryFilter for () {
     }
 }
 
+// ── Dense filter fetch (Dense plan D3) ──────────────────────────────────────
+
+/// Per-archetype `Fetch` scratch for a DENSE [`With<C>`] / [`Without<C>`] term.
+///
+/// A dense component is signature-excluded, so its presence cannot be inspected
+/// at the archetype-mask level (the mask never carries its bit). Instead the
+/// membership is the per-row `e2s` oracle: `with` keeps a row iff the store
+/// contains its entity; `without` keeps a row iff it does NOT. This struct
+/// caches the two pointers the per-row `filter_fetch` needs.
+///
+/// For a TABLE `C` the filter keeps `Fetch = ()` (this struct is never
+/// instantiated), so a non-dense `With`/`Without` is byte-identical (the
+/// 0%-gate).
+#[derive(Clone, Copy)]
+pub struct DenseFilterFetch {
+    /// The global `DenseStore` for `C`, resolved ONCE by
+    /// [`resolve_dense`](QueryFilter::resolve_dense). NULL when the store does
+    /// not exist yet (no entity ever inserted) — then `with` rejects every row
+    /// and `without` keeps every row (no member exists).
+    pub(crate) dense: *const crate::ecs::core::component::dense::DenseStore,
+    /// The current archetype's `entity_ids` column base, cached by
+    /// `set_table_*` (`entity = entity_ids[row]`).
+    pub(crate) entity_ids: *const crate::ecs::identifiers::primitives::EntityId,
+}
+
+impl DenseFilterFetch {
+    /// NULL-init value (pre-`resolve_dense` / pre-`set_table_*`).
+    pub(crate) const NULL: Self = Self {
+        dense: std::ptr::null(),
+        entity_ids: std::ptr::null(),
+    };
+
+    /// Reads the dense membership of `row`'s entity (`true` iff present).
+    ///
+    /// # Safety
+    /// * `dense` was resolved by `resolve_dense` and `entity_ids` cached by
+    ///   `set_table_*` for the current archetype.
+    /// * `row < entity_count` of the cached archetype.
+    #[inline]
+    pub(crate) unsafe fn contains_row(&self, row: usize) -> bool {
+        if self.dense.is_null() {
+            return false;
+        }
+        // SAFETY: `entity_ids` is the current archetype's slice base and `row <
+        //   entity_count` (caller contract); `dense` is the address-stable
+        //   store for `'w`.
+        let entity = unsafe { *self.entity_ids.add(row) };
+        let store = unsafe { &*self.dense };
+        store.contains(entity)
+    }
+}
+
 // ── With<C> ─────────────────────────────────────────────────────────────────
 
 /// Archetype-level inclusion filter: matches archetypes that contain `C`.
@@ -397,18 +510,41 @@ pub struct WithState<C: Component> {
 //   - QF3: `Fetch<'w> = ()` — no pointers cached.
 unsafe impl<C: Component> QueryFilter for With<C> {
     type State = WithState<C>;
-    type Fetch<'w> = ();
-    const IS_ARCHETYPAL: bool = true;
+    type Fetch<'w> = DenseFilterFetch;
+    // Table `With<C>` is archetypal (`true`); a DENSE `With<C>` is NOT — the
+    // dense bit is signature-excluded, so the per-row `e2s` membership test
+    // runs in `filter_fetch` (Dense plan D3, the `IS_ARCHETYPAL=false` arm).
+    const IS_ARCHETYPAL: bool = !C::STORAGE_IS_DENSE;
     // Phase 12.5 Track B NCD2: `With<C>` reads only the archetype mask bit
     // (compile-time on the QueryDataState path); no per-row ticks.
     const NEEDS_CHANGE_DETECTION: bool = false;
-    // EnableTag C2: `With<C>` contributes a positive archetypal include bit
-    // (`aggregate_include` sets `state.id`), so it bounds an enable term.
-    const HAS_POSITIVE_ARCHETYPAL: bool = true;
+    // EnableTag C2: a TABLE `With<C>` contributes a positive archetypal include
+    // bit (bounds an enable term); a DENSE `With<C>` contributes none (the bit
+    // is signature-excluded — see `aggregate_include`).
+    const HAS_POSITIVE_ARCHETYPAL: bool = !C::STORAGE_IS_DENSE;
+    // Dense plan D3.
+    const HAS_DENSE: bool = C::STORAGE_IS_DENSE;
+    // Dense plan D3: a dense `With<C>` is a dense INCLUDE term (seeds candidates).
+    const HAS_DENSE_INCLUDE: bool = C::STORAGE_IS_DENSE;
 
     #[inline]
     fn init_state(_world: &mut EcsMaster) -> Self::State {
         WithState { id: C::component_id(), _marker: PhantomData }
+    }
+
+    #[inline]
+    fn dense_include_candidates(
+        state: &Self::State,
+        registry: &crate::ecs::core::component::dense::DenseRegistry,
+        out: &mut crate::ecs::core::iters::archetype_bit_set::ArchetypeBitSet,
+    ) {
+        // Gated by `const { Self::HAS_DENSE_INCLUDE }`; OR-in the dense store's
+        // `arch_presence` (the conservative candidate seed for a dense `With`).
+        if const { C::STORAGE_IS_DENSE }
+            && let Some(store) = registry.store(state.id)
+        {
+            store.arch_presence().for_each_set_bit(|a| out.insert(a));
+        }
     }
 
     #[inline]
@@ -420,58 +556,110 @@ unsafe impl<C: Component> QueryFilter for With<C> {
 
     #[inline]
     fn matches_component_set(state: &Self::State, mask: &ComponentMask) -> bool {
+        // Dense is signature-excluded: the mask never carries its bit, so a
+        // dense `With` admits every archetype at this level (candidates are
+        // bounded by the `arch_presence` seed; the exact per-row gate is
+        // `filter_fetch`'s `e2s.contains`).
+        if const { C::STORAGE_IS_DENSE } {
+            return true;
+        }
         mask.contains(state.id)
     }
 
     #[inline]
     fn aggregate_include(state: &Self::State, include: &mut ComponentMask) {
+        // Dense `With` contributes NO include bit (signature-excluded);
+        // candidates are seeded from `arch_presence` (D3 seed wiring).
+        if const { C::STORAGE_IS_DENSE } {
+            return;
+        }
         include.set(state.id);
     }
 
     #[inline]
-    fn init_fetch<'w>(_state: &Self::State) -> Self::Fetch<'w> {}
+    fn init_fetch<'w>(_state: &Self::State) -> Self::Fetch<'w> {
+        DenseFilterFetch::NULL
+    }
+
+    #[inline]
+    unsafe fn resolve_dense<'w>(
+        fetch: &mut Self::Fetch<'w>,
+        state: &Self::State,
+        world: crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell<'w>,
+    ) {
+        // Gated by `const { Self::HAS_DENSE }` at the cursor (never emitted for
+        // a table `C` — the 0%-gate). Caches the global `DenseStore` pointer.
+        // SAFETY (resolve_dense contract): `world` upholds the access contract;
+        //   the store lives in the address-stable `DenseRegistry` slot, valid
+        //   for `'w`; the pointer is confined to the `'w`-scoped `Fetch`.
+        let registry = unsafe { world.world().dense_registry() };
+        fetch.dense = match registry.store(state.id) {
+            Some(store) => store as *const _,
+            None => std::ptr::null(),
+        };
+    }
 
     #[inline]
     unsafe fn set_table_readonly<'w>(
-        _fetch: &mut Self::Fetch<'w>,
+        fetch: &mut Self::Fetch<'w>,
         _state: &Self::State,
-        _archetype: *const Archetype,
+        archetype: *const Archetype,
         _meta: &'_ SystemMeta,
     ) {
-        // SAFETY: no-op archetypal filter, no per-archetype state cached.
+        if const { C::STORAGE_IS_DENSE } {
+            // SAFETY (QD3): `archetype` is live for `'w`; reading the immutable
+            //   `entity_ids` slice base needs only shared access.
+            let arch_ref: &Archetype = unsafe { &*archetype };
+            fetch.entity_ids = arch_ref.entity_ids_slice().as_ptr();
+        }
+        // Table `With`: no per-archetype state (archetypal filter).
     }
 
     #[inline]
     unsafe fn set_table_mut<'w>(
-        _fetch: &mut Self::Fetch<'w>,
-        _state: &Self::State,
-        _archetype: *mut Archetype,
-        _meta: &'_ SystemMeta,
+        fetch: &mut Self::Fetch<'w>,
+        state: &Self::State,
+        archetype: *mut Archetype,
+        meta: &'_ SystemMeta,
     ) {
-        // SAFETY: no-op archetypal filter, no per-archetype state cached.
+        // SAFETY (QD3): the dense arm reads only the immutable `entity_ids`
+        //   base; forward to the readonly path (no write provenance consumed).
+        unsafe { Self::set_table_readonly(fetch, state, archetype as *const _, meta) }
     }
 
     #[inline]
     unsafe fn set_table_readonly_no_meta<'w>(
-        _fetch: &mut Self::Fetch<'w>,
+        fetch: &mut Self::Fetch<'w>,
         _state: &Self::State,
-        _archetype: *const Archetype,
+        archetype: *const Archetype,
     ) {
-        // SAFETY: meta-free body for NCD = false — no-op archetypal.
+        if const { C::STORAGE_IS_DENSE } {
+            // SAFETY (QD3): see `set_table_readonly`.
+            let arch_ref: &Archetype = unsafe { &*archetype };
+            fetch.entity_ids = arch_ref.entity_ids_slice().as_ptr();
+        }
     }
 
     #[inline]
     unsafe fn set_table_mut_no_meta<'w>(
-        _fetch: &mut Self::Fetch<'w>,
-        _state: &Self::State,
-        _archetype: *mut Archetype,
+        fetch: &mut Self::Fetch<'w>,
+        state: &Self::State,
+        archetype: *mut Archetype,
     ) {
-        // SAFETY: same as the readonly no-meta variant.
+        // SAFETY (QD3): dense arm reads the immutable `entity_ids` base only.
+        unsafe { Self::set_table_readonly_no_meta(fetch, state, archetype as *const _) }
     }
 
     #[inline]
-    unsafe fn filter_fetch<'w>(_fetch: &Self::Fetch<'w>, _row: usize) -> bool {
-        // SAFETY: archetypal filter (QF1) — returns true unconditionally.
+    unsafe fn filter_fetch<'w>(fetch: &Self::Fetch<'w>, row: usize) -> bool {
+        if const { C::STORAGE_IS_DENSE } {
+            // Dense `With`: keep the row iff its entity is a member.
+            // SAFETY (D3): `fetch` was set up by `resolve_dense` +
+            //   `set_table_*`; `row < entity_count` (cursor guard).
+            return unsafe { fetch.contains_row(row) };
+        }
+        // Table `With`: archetypal filter (QF1, IS_ARCHETYPAL=true) — the
+        // cursor never calls this; returns true unconditionally.
         true
     }
 }
@@ -502,10 +690,15 @@ pub struct WithoutState<C: Component> {
 //   - QF3: `Fetch<'w> = ()` — no pointers cached.
 unsafe impl<C: Component> QueryFilter for Without<C> {
     type State = WithoutState<C>;
-    type Fetch<'w> = ();
-    const IS_ARCHETYPAL: bool = true;
+    type Fetch<'w> = DenseFilterFetch;
+    // Table `Without<C>` is archetypal; a DENSE `Without<C>` is NOT — the dense
+    // bit is signature-excluded (never on the mask), so the per-row `!e2s`
+    // membership test runs in `filter_fetch` (Dense plan D3).
+    const IS_ARCHETYPAL: bool = !C::STORAGE_IS_DENSE;
     // Phase 12.5 Track B NCD2: `Without<C>` inspects bit absence; no ticks.
     const NEEDS_CHANGE_DETECTION: bool = false;
+    // Dense plan D3.
+    const HAS_DENSE: bool = C::STORAGE_IS_DENSE;
 
     #[inline]
     fn init_state(_world: &mut EcsMaster) -> Self::State {
@@ -517,58 +710,104 @@ unsafe impl<C: Component> QueryFilter for Without<C> {
 
     #[inline]
     fn matches_component_set(state: &Self::State, mask: &ComponentMask) -> bool {
+        // Dense is signature-excluded: the mask never carries its bit, so a
+        // dense `Without` admits every archetype at this level (a row passes
+        // iff it is NOT a member — the per-row gate is `filter_fetch`). It
+        // contributes NO exclude bit either (see `aggregate_exclude`).
+        if const { C::STORAGE_IS_DENSE } {
+            return true;
+        }
         !mask.contains(state.id)
     }
 
     #[inline]
     fn aggregate_exclude(state: &Self::State, exclude: &mut ComponentMask) {
+        // Dense `Without` contributes NO exclude bit (the bit is never present
+        // on any archetype, so excluding it would be a no-op anyway). The exact
+        // per-row gate is `filter_fetch`'s `!e2s.contains`.
+        if const { C::STORAGE_IS_DENSE } {
+            return;
+        }
         exclude.set(state.id);
     }
 
     #[inline]
-    fn init_fetch<'w>(_state: &Self::State) -> Self::Fetch<'w> {}
+    fn init_fetch<'w>(_state: &Self::State) -> Self::Fetch<'w> {
+        DenseFilterFetch::NULL
+    }
+
+    #[inline]
+    unsafe fn resolve_dense<'w>(
+        fetch: &mut Self::Fetch<'w>,
+        state: &Self::State,
+        world: crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell<'w>,
+    ) {
+        // SAFETY (resolve_dense contract): see `With::resolve_dense`.
+        let registry = unsafe { world.world().dense_registry() };
+        fetch.dense = match registry.store(state.id) {
+            Some(store) => store as *const _,
+            None => std::ptr::null(),
+        };
+    }
 
     #[inline]
     unsafe fn set_table_readonly<'w>(
-        _fetch: &mut Self::Fetch<'w>,
+        fetch: &mut Self::Fetch<'w>,
         _state: &Self::State,
-        _archetype: *const Archetype,
+        archetype: *const Archetype,
         _meta: &'_ SystemMeta,
     ) {
-        // SAFETY: no-op archetypal filter, no per-archetype state cached.
+        if const { C::STORAGE_IS_DENSE } {
+            // SAFETY (QD3): `archetype` is live; reads the immutable
+            //   `entity_ids` slice base only.
+            let arch_ref: &Archetype = unsafe { &*archetype };
+            fetch.entity_ids = arch_ref.entity_ids_slice().as_ptr();
+        }
     }
 
     #[inline]
     unsafe fn set_table_mut<'w>(
-        _fetch: &mut Self::Fetch<'w>,
-        _state: &Self::State,
-        _archetype: *mut Archetype,
-        _meta: &'_ SystemMeta,
+        fetch: &mut Self::Fetch<'w>,
+        state: &Self::State,
+        archetype: *mut Archetype,
+        meta: &'_ SystemMeta,
     ) {
-        // SAFETY: no-op archetypal filter, no per-archetype state cached.
+        // SAFETY (QD3): dense arm reads the immutable `entity_ids` base only.
+        unsafe { Self::set_table_readonly(fetch, state, archetype as *const _, meta) }
     }
 
     #[inline]
     unsafe fn set_table_readonly_no_meta<'w>(
-        _fetch: &mut Self::Fetch<'w>,
+        fetch: &mut Self::Fetch<'w>,
         _state: &Self::State,
-        _archetype: *const Archetype,
+        archetype: *const Archetype,
     ) {
-        // SAFETY: meta-free body for NCD = false — no-op archetypal.
+        if const { C::STORAGE_IS_DENSE } {
+            // SAFETY (QD3): see `set_table_readonly`.
+            let arch_ref: &Archetype = unsafe { &*archetype };
+            fetch.entity_ids = arch_ref.entity_ids_slice().as_ptr();
+        }
     }
 
     #[inline]
     unsafe fn set_table_mut_no_meta<'w>(
-        _fetch: &mut Self::Fetch<'w>,
-        _state: &Self::State,
-        _archetype: *mut Archetype,
+        fetch: &mut Self::Fetch<'w>,
+        state: &Self::State,
+        archetype: *mut Archetype,
     ) {
-        // SAFETY: same as the readonly no-meta variant.
+        // SAFETY (QD3): dense arm reads the immutable `entity_ids` base only.
+        unsafe { Self::set_table_readonly_no_meta(fetch, state, archetype as *const _) }
     }
 
     #[inline]
-    unsafe fn filter_fetch<'w>(_fetch: &Self::Fetch<'w>, _row: usize) -> bool {
-        // SAFETY: archetypal filter (QF1) — returns true unconditionally.
+    unsafe fn filter_fetch<'w>(fetch: &Self::Fetch<'w>, row: usize) -> bool {
+        if const { C::STORAGE_IS_DENSE } {
+            // Dense `Without`: keep the row iff its entity is NOT a member.
+            // SAFETY (D3): `fetch` set up by `resolve_dense` + `set_table_*`;
+            //   `row < entity_count` (cursor guard).
+            return !unsafe { fetch.contains_row(row) };
+        }
+        // Table `Without`: archetypal filter — never called by the cursor.
         true
     }
 }
@@ -1138,6 +1377,16 @@ macro_rules! impl_query_filter_tuple_and {
                 false $( || $F::CONTAINS_ENABLE_TERM )*;
             const CONTAINS_CHANGE_DETECTION: bool =
                 false $( || $F::CONTAINS_CHANGE_DETECTION )*;
+            // Dense plan D3: OR-fold — a tuple contains a dense term iff ANY
+            // element does. A dense `With`/`Without` element sets
+            // `IS_ARCHETYPAL=false`, so the AND-fold above already flips the
+            // tuple non-archetypal and routes each element's `filter_fetch`
+            // (which runs the dense `e2s` test). `false` for an all-table tuple
+            // (the 0%-gate — `resolve_dense` below const-folds to no-ops).
+            const HAS_DENSE: bool = false $( || $F::HAS_DENSE )*;
+            // Dense plan D3: a tuple has a dense INCLUDE term iff ANY element
+            // does (OR-fold) — drives the candidate seed.
+            const HAS_DENSE_INCLUDE: bool = false $( || $F::HAS_DENSE_INCLUDE )*;
 
             #[inline]
             fn init_state(world: &mut EcsMaster) -> Self::State {
@@ -1145,9 +1394,37 @@ macro_rules! impl_query_filter_tuple_and {
             }
 
             #[inline]
+            fn dense_include_candidates(
+                state: &Self::State,
+                registry: &crate::ecs::core::component::dense::DenseRegistry,
+                out: &mut crate::ecs::core::iters::archetype_bit_set::ArchetypeBitSet,
+            ) {
+                let ( $($s,)* ) = state;
+                // Each element ORs its own dense-include candidates (gated by its
+                // own `HAS_DENSE_INCLUDE`).
+                $( <$F as QueryFilter>::dense_include_candidates($s, registry, out); )*
+            }
+
+            #[inline]
             fn init_access(state: &Self::State, access_set: &mut FilteredAccessSet) {
                 let ( $($s,)* ) = state;
                 $( <$F as QueryFilter>::init_access($s, access_set); )*
+            }
+
+            #[inline]
+            unsafe fn resolve_dense<'w>(
+                fetch: &mut Self::Fetch<'w>,
+                state: &Self::State,
+                world: crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell<'w>,
+            ) {
+                let ( $($f,)* ) = fetch;
+                let ( $($s,)* ) = state;
+                $(
+                    // SAFETY (D3): each element gates its body on its own
+                    //   `const { $F::HAS_DENSE }`; the `world` cell is `Copy`,
+                    //   forwarded by value to preserve provenance.
+                    unsafe { <$F as QueryFilter>::resolve_dense($f, $s, world); }
+                )*
             }
 
             #[inline]

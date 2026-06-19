@@ -173,13 +173,29 @@ where
         meta: &'s SystemMeta,
         enable_terms: EnableTerms,
     ) -> Self {
+        let mut data_fetch = <D as QueryData>::init_fetch(&state.data_state);
+        let mut filter_fetch = <F as QueryFilter>::init_fetch(&state.filter_state);
+        // Dense plan D3 (FORK 1): resolve the global `DenseStore` pointer(s)
+        // ONCE here, where the world cell is available. Const-gated by
+        // `D::HAS_DENSE` / `F::HAS_DENSE`, so a no-dense query emits NOTHING
+        // (the 0%-gate — the resolve loop folds out entirely). The resolved
+        // pointers ride the `'q`-scoped Fetch, never the Send `D::State`.
+        if const { D::HAS_DENSE } {
+            // SAFETY (D3): `world` is the read-only mint scoped to `'q`; the
+            //   resolved store pointer is address-stable for `'q`.
+            unsafe { <D as QueryData>::resolve_dense(&mut data_fetch, &state.data_state, world); }
+        }
+        if const { F::HAS_DENSE } {
+            // SAFETY (D3): see above.
+            unsafe { <F as QueryFilter>::resolve_dense(&mut filter_fetch, &state.filter_state, world); }
+        }
         Self {
             archetype_ids: ids.iter(),
             data_state: &state.data_state,
             filter_state: &state.filter_state,
             world,
-            data_fetch: <D as QueryData>::init_fetch(&state.data_state),
-            filter_fetch: <F as QueryFilter>::init_fetch(&state.filter_state),
+            data_fetch,
+            filter_fetch,
             current_row: 0,
             current_len: 0,
             meta,
@@ -216,6 +232,24 @@ where
                     //   archetype.entity_count()` per the inner-loop guard.
                     let pass = unsafe {
                         <F as QueryFilter>::filter_fetch(&self.filter_fetch, row)
+                    };
+                    if !pass {
+                        continue;
+                    }
+                }
+
+                // Dense plan D3 (FORK 1): per-row mixed-gather skip for a dense
+                // DATA term. Const-folded by `D::HAS_DENSE`: a no-dense query
+                // emits NOTHING here (the 0%-gate — byte-identical to pre-D3).
+                // A dense `&T`/`&mut T` row whose entity is absent from the
+                // store is skipped like a non-match (the ruling's "None ⟹ skip"
+                // semantic); a present row passes and `D::fetch` gathers it.
+                if const { D::HAS_DENSE } {
+                    // SAFETY (D3): `resolve_dense` (in `new`) + `set_table_*`
+                    //   (transition below) populated the dense fetch fields;
+                    //   `row < self.current_len == entity_count()`.
+                    let pass = unsafe {
+                        <D as QueryData>::dense_row_passes(&self.data_fetch, row)
                     };
                     if !pass {
                         continue;
@@ -425,13 +459,29 @@ where
         meta: &'s SystemMeta,
         enable_terms: EnableTerms,
     ) -> Self {
+        let mut data_fetch = <D as QueryData>::init_fetch(&state.data_state);
+        let mut filter_fetch = <F as QueryFilter>::init_fetch(&state.filter_state);
+        // Dense plan D3 (FORK 1): resolve the dense store pointer(s) ONCE here
+        // (the world cell is available). Const-gated — a no-dense query emits
+        // NOTHING (the 0%-gate). The `&mut`-dense data term resolves a write
+        // target via `DenseSolveView::row_ptr`; exclusivity is the query borrow
+        // discipline + the conflict graph (Decision 6, one dense node).
+        if const { D::HAS_DENSE } {
+            // SAFETY (D3): `world` is the write-capable mint scoped to `'q`; the
+            //   resolved store pointer is address-stable for `'q`.
+            unsafe { <D as QueryData>::resolve_dense(&mut data_fetch, &state.data_state, world); }
+        }
+        if const { F::HAS_DENSE } {
+            // SAFETY (D3): see above.
+            unsafe { <F as QueryFilter>::resolve_dense(&mut filter_fetch, &state.filter_state, world); }
+        }
         Self {
             archetype_ids: ids.iter(),
             data_state: &state.data_state,
             filter_state: &state.filter_state,
             world,
-            data_fetch: <D as QueryData>::init_fetch(&state.data_state),
-            filter_fetch: <F as QueryFilter>::init_fetch(&state.filter_state),
+            data_fetch,
+            filter_fetch,
             current_row: 0,
             current_len: 0,
             meta,
@@ -461,6 +511,21 @@ impl<'q, 's, D: QueryData, F: QueryFilter> Iterator for QueryIterMut<'q, 's, D, 
                     //   `row < self.current_len` per the inner-loop guard.
                     let pass = unsafe {
                         <F as QueryFilter>::filter_fetch(&self.filter_fetch, row)
+                    };
+                    if !pass {
+                        continue;
+                    }
+                }
+
+                // Dense plan D3 (FORK 1): per-row mixed-gather skip for a dense
+                // DATA term (see `QueryIter::next` for the 0%-gate rationale).
+                // Const-folded by `D::HAS_DENSE` — a no-dense query emits
+                // NOTHING here.
+                if const { D::HAS_DENSE } {
+                    // SAFETY (D3): dense fetch fields populated by
+                    //   `resolve_dense` + `set_table_mut`; `row < current_len`.
+                    let pass = unsafe {
+                        <D as QueryData>::dense_row_passes(&self.data_fetch, row)
                     };
                     if !pass {
                         continue;

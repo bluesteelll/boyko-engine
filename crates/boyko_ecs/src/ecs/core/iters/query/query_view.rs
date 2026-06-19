@@ -32,6 +32,9 @@ use crate::ecs::core::entity::entity::Entity;
 use crate::ecs::core::iters::query::chunk_iter;
 use crate::ecs::core::iters::query::chunked_data::ChunkedQueryData;
 use crate::ecs::core::iters::query::data::{QueryData, ReadOnlyQueryData};
+use crate::ecs::core::iters::query::dense_iter::{
+    DenseQueryData, DenseQueryIter, DenseQueryIterMut,
+};
 use crate::ecs::core::iters::query::enable_terms::EnableTerms;
 use crate::ecs::core::iters::query::filter::{ArchetypalQueryFilter, QueryFilter};
 use crate::ecs::core::iters::query::filter_enable::query_view_enable_passes;
@@ -421,6 +424,56 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
         let ids = self.driver_ids();
         unsafe {
             QueryIterMut::new(self.state(), ids, self.world, SystemMeta::dummy(), self.enable_terms)
+        }
+    }
+
+    /// Returns a contiguous PURE-DENSE iterator over `(EntityId, &T)` for every
+    /// LIVE slot of the single dense column `D` strides (Dense plan D3, FORK 2).
+    ///
+    /// The opt-in fast path — strides ONE contiguous `DenseStore` column in
+    /// insertion order, skipping tombstones via the `live` oracle. See
+    /// [`Query::dense_iter`](super::query::Query::dense_iter) for the precondition.
+    pub fn dense_iter(&self) -> DenseQueryIter<'_, D>
+    where
+        D: DenseQueryData + ReadOnlyQueryData,
+    {
+        const { assert!(D::HAS_DENSE, "QueryView::dense_iter requires a dense `D` (storage = \"dense\")") };
+        let store = self.resolve_dense_store();
+        // SAFETY (D3): `store` is NULL or the live `DenseStore` for `D`'s
+        //   component, valid for `'w`; read-only cursor ⇒ the `&self` borrow
+        //   forbids a concurrent mutable cursor on this view.
+        unsafe { DenseQueryIter::new(store) }
+    }
+
+    /// Returns a contiguous PURE-DENSE mutable iterator over
+    /// `(EntityId, &mut T)` for every LIVE slot (Dense plan D3, FORK 2). Writes
+    /// land in the column (round-trip). The `&mut self` borrow gates uniqueness.
+    pub fn dense_iter_mut(&mut self) -> DenseQueryIterMut<'_, D>
+    where
+        D: DenseQueryData,
+    {
+        const { assert!(D::HAS_DENSE, "QueryView::dense_iter_mut requires a dense `D` (storage = \"dense\")") };
+        let store = self.resolve_dense_store();
+        // SAFETY (D3): `store` is NULL or the live `DenseStore` for `D`'s
+        //   component; the `&mut self` borrow gates cursor uniqueness; distinct
+        //   slots ⇒ no aliasing across yielded `&mut`.
+        unsafe { DenseQueryIterMut::new(store) }
+    }
+
+    /// Resolves the `DenseStore` pointer for `D`'s sole dense component from the
+    /// world cell (Dense plan D3 pure-dense path). NULL if absent.
+    #[inline]
+    fn resolve_dense_store(&self) -> *const crate::ecs::core::component::dense::DenseStore
+    where
+        D: DenseQueryData,
+    {
+        let id = D::dense_component_id(&self.state().data_state);
+        // SAFETY (U_C2): shared read mint scoped to this statement; the resolved
+        //   store pointer is address-stable for `'w`.
+        let registry = unsafe { self.world.world().dense_registry() };
+        match registry.store(id) {
+            Some(store) => store as *const _,
+            None => std::ptr::null(),
         }
     }
 

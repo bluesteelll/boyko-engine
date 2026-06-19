@@ -22,6 +22,9 @@ use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 use crate::ecs::core::iters::query::chunk_iter;
 use crate::ecs::core::iters::query::chunked_data::ChunkedQueryData;
 use crate::ecs::core::iters::query::data::{QueryData, ReadOnlyQueryData};
+use crate::ecs::core::iters::query::dense_iter::{
+    DenseQueryData, DenseQueryIter, DenseQueryIterMut,
+};
 use crate::ecs::core::iters::query::enable_terms::EnableTerms;
 use crate::ecs::core::iters::query::filter::{ArchetypalQueryFilter, QueryFilter};
 use crate::ecs::core::iters::query::iter::{QueryIter, QueryIterMut};
@@ -291,6 +294,73 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
         //   at `'s` so it does not conflict with the `&mut self` reborrow.
         let ids = self.driver_ids();
         unsafe { QueryIterMut::new(self.state, ids, self.world, self.meta, self.enable_terms) }
+    }
+
+    /// Returns a contiguous PURE-DENSE iterator over `(EntityId, &T)` for every
+    /// LIVE slot of the single dense column `D` strides (Dense plan D3, FORK 2).
+    ///
+    /// This is the opt-in fast path: unlike [`Self::iter`] (which walks
+    /// archetypes + gathers per row for a MIXED dense query), `dense_iter`
+    /// strides ONE contiguous `DenseStore` column directly, skipping tombstones
+    /// via the `live` oracle, in insertion (slot) order. Use it for a pure-dense
+    /// consumer (and the physics solver in Stage P).
+    ///
+    /// # Precondition (FORK 2)
+    ///
+    /// `D` must be a read-only dense leaf (`&T` where `T::STORAGE_IS_DENSE`).
+    /// The `const { D::HAS_DENSE }` assert rejects a TABLE `T` at
+    /// monomorphisation; the `D: DenseQueryData` bound rejects a tuple / filter.
+    pub fn dense_iter(&self) -> DenseQueryIter<'_, D>
+    where
+        D: DenseQueryData + ReadOnlyQueryData,
+    {
+        const { assert!(D::HAS_DENSE, "Query::dense_iter requires a dense `D` (storage = \"dense\")") };
+        let store = self.resolve_dense_store();
+        // SAFETY (D3): `store` is NULL or the live `DenseStore` for `D`'s
+        //   component, valid for the world borrow; read-only cursor ⇒ no
+        //   aliasing writer (the `&self` borrow forbids a concurrent `iter_mut`
+        //   / `dense_iter_mut` on this query).
+        unsafe { DenseQueryIter::new(store) }
+    }
+
+    /// Returns a contiguous PURE-DENSE mutable iterator over
+    /// `(EntityId, &mut T)` for every LIVE slot of the single dense column `D`
+    /// strides (Dense plan D3, FORK 2). Writes land in the column (round-trip).
+    ///
+    /// Same contiguous fast-path + precondition as [`Self::dense_iter`], but for
+    /// `D = &mut T`. The `&mut self` borrow gates cursor uniqueness; each yielded
+    /// `&mut` targets a distinct slot.
+    pub fn dense_iter_mut(&mut self) -> DenseQueryIterMut<'_, D>
+    where
+        D: DenseQueryData,
+    {
+        const { assert!(D::HAS_DENSE, "Query::dense_iter_mut requires a dense `D` (storage = \"dense\")") };
+        let store = self.resolve_dense_store();
+        // SAFETY (D3): `store` is NULL or the live `DenseStore` for `D`'s
+        //   component; the `&mut self` borrow gates cursor uniqueness, so no
+        //   other reference into the column is live; distinct slots ⇒ no aliasing
+        //   across yielded `&mut`.
+        unsafe { DenseQueryIterMut::new(store) }
+    }
+
+    /// Resolves the `DenseStore` pointer for `D`'s sole dense component from the
+    /// world cell (Dense plan D3 pure-dense path). NULL if the store does not
+    /// exist yet (no entity ever inserted) — the cursor then yields nothing.
+    #[inline]
+    fn resolve_dense_store(&self) -> *const crate::ecs::core::component::dense::DenseStore
+    where
+        D: DenseQueryData,
+    {
+        let id = D::dense_component_id(&self.state.data_state);
+        // SAFETY (U_C2): shared read mint scoped to this statement — `world()`
+        //   yields `&EcsMaster`; no `&mut` access occurs through it (same pattern
+        //   as `driver_ids`'s master reborrow). The resolved store pointer is
+        //   address-stable for the world borrow.
+        let registry = unsafe { self.world.world().dense_registry() };
+        match registry.store(id) {
+            Some(store) => store as *const _,
+            None => std::ptr::null(),
+        }
     }
 
     /// Returns a parallel read-only iteration handle.
@@ -582,6 +652,29 @@ where
         //   literal runs. The by-value `world` receiver preserves the raw
         //   pointer's provenance (no `&self` retag on `Copy` cell).
         let master = unsafe { world.world().archetype_master() };
+
+        // Dense plan D3: a dense-include query with no table positive bound
+        // re-seeds from the bounded `arch_presence` instead of `update`'s
+        // full/delta scan. Const-folded: `use_dense_seed()` is gated on
+        // `HAS_DENSE_INCLUDE`, so this whole branch (and the registry mint) is
+        // never emitted for a no-dense query (the 0%-gate).
+        if state.use_dense_seed() {
+            // SAFETY (U_C2): shared read mint of the dense registry, scoped to
+            //   this statement (same `&'w EcsMaster` borrow as `master`).
+            let registry = unsafe { world.world().dense_registry() };
+            state.dense_update(master, registry);
+
+            let meta_s: &'s SystemMeta = unsafe { &*(system_meta as *const SystemMeta) };
+            state.term_scratch.reclaim_retired();
+            return Query {
+                state,
+                world,
+                meta: meta_s,
+                terms: TagTerms::EMPTY,
+                enable_terms: EnableTerms::EMPTY,
+                _marker: PhantomData,
+            };
+        }
 
         // The `system_meta: &SystemMeta` parameter carries an anonymous
         // lifetime that the compiler does NOT unify with `'s` (the trait

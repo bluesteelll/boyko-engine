@@ -104,6 +104,18 @@ pub(crate) unsafe fn for_each_chunk_impl<'q, 's, D, F, Func>(
     F: ArchetypalQueryFilter,
     Func: for<'c> FnMut(D::ChunkItem<'c>),
 {
+    // Dense plan D3: the chunk path takes whole archetype-aligned slices, which
+    // a dense (signature-excluded, single-global-column) term cannot supply.
+    // Compile-reject a dense `D`/`F` here — use `Query::iter` (mixed) or
+    // `Query::dense_iter` (pure dense). Const-folds to nothing for a no-dense
+    // query (the 0%-gate).
+    const {
+        assert!(
+            !D::HAS_DENSE && !F::HAS_DENSE,
+            "a dense (storage = \"dense\") term is not supported on `for_each_chunk` — \
+             use `Query::iter` / `iter_mut` (mixed) or `Query::dense_iter` (pure dense)"
+        )
+    };
     let mut chunk_fetch = <D as ChunkedQueryData>::init_chunk_fetch(&state.data_state);
 
     for &arch_id in ids {

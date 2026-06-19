@@ -22,6 +22,9 @@
 pub mod chunk_iter;
 pub mod chunked_data;
 pub mod data;
+// Dense plan D3 (FORK 2): the opt-in pure-dense fast-path cursors. Kept SEPARATE
+// from `iter` so `Query::iter` stays byte-identical (the 0%-gate).
+pub mod dense_iter;
 // EnableTag Step 9: stack-only dynamic per-row enable terms (the `with_enabled`
 // / `without_enabled` builders). Crate-internal carrier; the term ceiling is
 // `crate::ecs::constants::MAX_ENABLE_TERMS`.
@@ -52,6 +55,7 @@ pub mod term_list;
 
 pub use chunked_data::ChunkedQueryData;
 pub use data::{AnyOf, Mut, QueryData, ReadOnlyQueryData, Ref};
+pub use dense_iter::{DenseQueryData, DenseQueryIter, DenseQueryIterMut};
 pub use filter::{Added, ArchetypalQueryFilter, Changed, Or, QueryFilter, With, Without};
 pub use filter_enable::{Disabled, Enabled};
 pub use iter::{QueryIter, QueryIterMut};

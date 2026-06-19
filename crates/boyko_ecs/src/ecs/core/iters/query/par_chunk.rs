@@ -112,6 +112,16 @@ pub(crate) unsafe fn par_for_each_chunk_impl<'q, 's, D, F, Func>(
     F: ArchetypalQueryFilter + 's,
     Func: for<'c> Fn(D::ChunkItem<'c>) + Send + Sync + 's,
 {
+    // Dense plan D3: same compile-reject as the sequential chunk path — a dense
+    // term has no archetype-aligned chunk. Use `Query::dense_iter` (pure dense)
+    // or `Query::iter` (mixed). Const-folds out for a no-dense query (0%-gate).
+    const {
+        assert!(
+            !D::HAS_DENSE && !F::HAS_DENSE,
+            "a dense (storage = \"dense\") term is not supported on `par_for_each_chunk` — \
+             use `Query::iter` / `iter_mut` (mixed) or `Query::dense_iter` (pure dense)"
+        )
+    };
     // PAR7 fallback: when no pool is attached to the calling thread, walk the
     //   matched archetypes sequentially via the shared seq driver. We adapt
     //   the user's `Fn` to the seq driver's `FnMut` via a shared reference

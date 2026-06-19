@@ -121,6 +121,18 @@ impl<D: QueryData, F: QueryFilter> QueryDataState<D, F> {
         && !F::HAS_POSITIVE_ARCHETYPAL
         && !D::REQUIRES_POST_FILTER_TRIM;
 
+    /// Dense plan D3 — `true` iff `(D, F)` carries a dense INCLUDE term
+    /// (`&Dense` / `&mut Dense` / `With<Dense>`). When set AND the table include
+    /// mask is empty at runtime, `new`/`update` seed the matched set from the
+    /// union of the dense terms' `DenseStore::arch_presence` (bounded), instead
+    /// of the empty-include full archetype scan. The per-row `dense_row_passes`
+    /// / dense `filter_fetch` is the exact membership trim regardless of the
+    /// seed (the seed only bounds the candidate set). Mutually exclusive with
+    /// the enable candidate seed (no query mixes a dense include with an enable
+    /// term in D3). `false` for a no-dense query (the 0%-gate — the seed branch
+    /// const-folds OUT).
+    const HAS_DENSE_INCLUDE: bool = D::HAS_DENSE_INCLUDE || F::HAS_DENSE_INCLUDE;
+
     /// The shape-assert body (amendment A3 / Step 7a). Called from BOTH the
     /// codegen-time trigger (`new`'s inline `const {}` block — fires under
     /// `build` / `test` / any codegen) AND the check-time trigger
@@ -240,6 +252,14 @@ impl<D: QueryData, F: QueryFilter> QueryDataState<D, F> {
             last_observed_enable_generation = world.archetype_master().enable_generation();
             // No `post_filter_matched`: the include mask is empty and the
             // candidate bitset IS the membership predicate (nothing to trim).
+        } else if (const { Self::HAS_DENSE_INCLUDE }) && archetype_state.is_empty_include() {
+            // Dense plan D3 dense-seed path: a dense INCLUDE term with NO table
+            // positive bound (empty include mask) would otherwise full-scan the
+            // world. Seed the candidate archetypes from the union of the dense
+            // terms' `arch_presence` (bounded). The per-row `dense_row_passes`
+            // / dense `filter_fetch` is the exact membership trim; the seed is a
+            // conservative over-approximation (false positives trimmed per-row).
+            Self::dense_seed(&data_state, &filter_state, &mut archetype_state, world);
         } else {
             archetype_state.update_archetypes(world.archetype_master());
             Self::post_filter_matched(
@@ -486,6 +506,82 @@ impl<D: QueryData, F: QueryFilter> QueryDataState<D, F> {
                 .copied()
                 .filter(|&a| F::enable_cull_keeps_archetype(filter_state, master, a)),
         );
+    }
+
+    /// Dense plan D3 — builds the candidate bitset from the union of `(D, F)`'s
+    /// dense INCLUDE terms' `arch_presence` and seeds `archetype_state`.
+    ///
+    /// Called ONLY when `Self::HAS_DENSE_INCLUDE && include.is_empty()` — a
+    /// dense include with no table positive bound. The seed is a CONSERVATIVE
+    /// over-approximation (false positives are trimmed per-row by
+    /// `dense_row_passes` / dense `filter_fetch`); `seed_from_candidates` is
+    /// popcount-bounded and handles a structural rebuild internally.
+    fn dense_seed(
+        data_state: &D::State,
+        filter_state: &F::State,
+        archetype_state: &mut QueryState,
+        world: &mut EcsMaster,
+    ) {
+        let mut candidates =
+            crate::ecs::core::iters::archetype_bit_set::ArchetypeBitSet::new();
+        {
+            let registry = world.dense_registry();
+            <D as QueryData>::dense_include_candidates(data_state, registry, &mut candidates);
+            <F as QueryFilter>::dense_include_candidates(filter_state, registry, &mut candidates);
+        }
+        archetype_state.seed_from_candidates(&candidates, world.archetype_master());
+    }
+
+    /// Dense plan D3 — driver-entry refresh that routes a dense-include query
+    /// through [`Self::dense_update`] and every other shape through
+    /// [`Self::update`]. The single funnel for callers that hold both the
+    /// `ArchetypeMaster` and the `DenseRegistry` (the `QueryView` path and the
+    /// `Query` SystemParam path). Const-folded: a no-dense `(D, F)` skips the
+    /// dense branch entirely and the `registry` argument is unused (the 0%-gate).
+    #[inline]
+    pub(crate) fn update_with_world(
+        &mut self,
+        master: &ArchetypeMaster,
+        registry: &crate::ecs::core::component::dense::DenseRegistry,
+    ) {
+        if self.use_dense_seed() {
+            self.dense_update(master, registry);
+        } else {
+            self.update(master);
+        }
+    }
+
+    /// Dense plan D3 — the driver-entry re-seed for a dense-include query.
+    ///
+    /// Mirrors [`Self::update`] but for the dense-seed shape: it takes the dense
+    /// `registry` (the world cell side) alongside `master` because the dense
+    /// `arch_presence` lives in the `DenseRegistry`, not the `ArchetypeMaster`.
+    /// `seed_from_candidates` dedup-skips already-matched ids (cheap re-seed) and
+    /// does its own structural-mismatch full clear, so a later dense insert into
+    /// a previously-unseeded archetype (which does NOT bump the archetype
+    /// generation) is still picked up — the candidate bitset is rebuilt from the
+    /// live `arch_presence` on every call.
+    pub(crate) fn dense_update(
+        &mut self,
+        master: &ArchetypeMaster,
+        registry: &crate::ecs::core::component::dense::DenseRegistry,
+    ) {
+        let mut candidates =
+            crate::ecs::core::iters::archetype_bit_set::ArchetypeBitSet::new();
+        <D as QueryData>::dense_include_candidates(&self.data_state, registry, &mut candidates);
+        <F as QueryFilter>::dense_include_candidates(&self.filter_state, registry, &mut candidates);
+        self.archetype_state.seed_from_candidates(&candidates, master);
+    }
+
+    /// Dense plan D3 — `true` iff `update` should route through the dense-seed
+    /// path. A `const` so the driver entry can `if const { … }`-gate the call
+    /// (the registry mint folds out for a non-dense query — the 0%-gate). The
+    /// runtime `include.is_empty()` check distinguishes a dense include that has
+    /// a table positive bound (the include mask scan already bounds it) from one
+    /// that does not (the seed bounds it).
+    #[inline]
+    pub(crate) fn use_dense_seed(&self) -> bool {
+        (const { Self::HAS_DENSE_INCLUDE }) && self.archetype_state.is_empty_include()
     }
 
     /// The id slice a positive-term enable query's drivers walk (Decision 3).

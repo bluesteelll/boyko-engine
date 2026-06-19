@@ -284,6 +284,16 @@ impl DenseStore {
         &self.arch_presence
     }
 
+    /// The `slot -> EntityId` table (Dense plan D3). `s2e[slot]` is the owning
+    /// entity of a LIVE slot, or [`TOMBSTONE`] for a freed one. Indexed by slot,
+    /// covering `0..len()`. Consumed by `DenseQueryIter` (the pure-dense fast
+    /// path) to yield the per-slot entity in insertion order alongside the
+    /// `live` skip.
+    #[inline]
+    pub fn s2e(&self) -> &[EntityId] {
+        &self.s2e
+    }
+
     /// Invokes `f(slot, entity)` for every live slot in slot order, skipping
     /// tombstones via the `live` oracle.
     ///

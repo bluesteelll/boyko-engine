@@ -390,6 +390,15 @@ impl QueryState {
         &self.matched_ids
     }
 
+    /// `true` iff the include mask is empty — no table positive bound (Dense
+    /// plan D3). A dense-include query with an empty include mask would
+    /// otherwise full-scan the world, so the dense-seed path bounds it via
+    /// `seed_from_candidates` instead.
+    #[inline]
+    pub(crate) fn is_empty_include(&self) -> bool {
+        self.include.is_empty()
+    }
+
     /// Resets the cache, returning the state to its initial condition.
     ///
     /// After `reset()`, the next `iter()` or `update_archetypes()` will

@@ -199,6 +199,18 @@ unsafe impl<T: Component> ChunkedQueryData for &T {
         //     the column is present (non-null `column.ptr`).
         //   - The column base is `ComponentPool::buffer_ptr()`, guaranteed
         //     `SIMD_BUFFER_ALIGN`-aligned by Phase X.A SIMD-A1 (Wave 1).
+        // O2 (defense-in-depth): a dense `T` has NO archetype column — reading
+        // `columns[id]` would yield a NULL/stale `ptr` and `fetch_chunk` would
+        // build a slice over a NULL base. Sound usage never reaches here (the
+        // `for_each_chunk` call site compile-rejects a dense `D` via
+        // `const { assert!(!D::HAS_DENSE) }` in `chunk_iter.rs`), but make the
+        // reject local to the impl too.
+        debug_assert!(
+            !T::STORAGE_IS_DENSE,
+            "ChunkedQueryData::set_chunk_readonly on a dense T ({}); \
+             dense terms are not supported on for_each_chunk (use Query::iter / dense_iter)",
+            std::any::type_name::<T>(),
+        );
         let column = unsafe { (*archetype).columns.get_unchecked(state.id.0) };
         debug_assert!(!column.ptr.is_null(), "CD1: column was unexpectedly null");
         fetch.base = column.ptr as *const T;
@@ -349,6 +361,17 @@ unsafe impl<T: Component> ChunkedQueryData for &mut T {
         //     the cast to `*mut T` preserves the Unique tag.
         //   - The column base is `SIMD_BUFFER_ALIGN`-aligned per Phase X.A
         //     SIMD-A1 (Wave 1).
+        // O2 (defense-in-depth): same dense reject as the `&T` impl —
+        // `set_chunk_mut` is the canonical chunk-init path for `&mut T`, so the
+        // guard lives here (the `set_chunk_readonly` CD4 backstop above already
+        // panics unconditionally). Sound usage is compile-rejected at the
+        // `for_each_chunk` call site (`chunk_iter.rs`).
+        debug_assert!(
+            !T::STORAGE_IS_DENSE,
+            "ChunkedQueryData::set_chunk_mut on a dense T ({}); \
+             dense terms are not supported on for_each_chunk (use Query::iter / dense_iter)",
+            std::any::type_name::<T>(),
+        );
         let column = unsafe { (*archetype).columns.get_unchecked(state.id.0) };
         debug_assert!(!column.ptr.is_null(), "CD1: column was unexpectedly null");
         fetch.base = column.ptr as *mut T;

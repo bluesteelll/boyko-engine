@@ -297,6 +297,18 @@ fn for_each_impl<D, F, Body>(
     F: QueryFilter,
     Body: Fn(D::Item<'_>) + Send + Sync,
 {
+    // Dense plan D3: the parallel path does not resolve the dense store into
+    // each worker chunk's `Fetch` (the chunk runner has no world cell), so a
+    // dense `D`/`F` is compile-rejected here — use the sequential `Query::iter`
+    // (mixed dense) or `Query::dense_iter` (pure dense) instead. Const-folds to
+    // nothing for a no-dense query (the 0%-gate).
+    const {
+        assert!(
+            !D::HAS_DENSE && !F::HAS_DENSE,
+            "a dense (storage = \"dense\") term is not supported on `par_iter` in D3 — \
+             use `Query::iter` / `iter_mut` (mixed) or `Query::dense_iter` (pure dense)"
+        )
+    };
     // PAR7: fall back to sequential iteration if no pool is attached.
     // `try_with_active_pool` returns `None` for threads that never entered
     // an `install` frame; this is the common case for ad-hoc tests and

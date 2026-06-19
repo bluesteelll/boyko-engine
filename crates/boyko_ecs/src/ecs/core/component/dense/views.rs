@@ -168,6 +168,32 @@ impl<'a> DenseSolveView<'a> {
         self.len
     }
 
+    /// The column data base — the stride origin for `row_ptr` (Dense plan D3
+    /// pure-dense cursor). Address-stable for the view's `'a` borrow.
+    #[inline]
+    pub(crate) fn base_ptr(&self) -> *mut u8 {
+        self.base
+    }
+
+    /// The component stride in bytes (Dense plan D3 pure-dense cursor).
+    #[inline]
+    pub(crate) fn stride(&self) -> usize {
+        self.stride
+    }
+
+    /// The `live` words base — the read-only liveness oracle the pure-dense
+    /// cursor strides (Dense plan D3).
+    #[inline]
+    pub(crate) fn live_words_ptr(&self) -> *const u64 {
+        self.live
+    }
+
+    /// Number of `live` words (bounds the cursor's liveness read).
+    #[inline]
+    pub(crate) fn live_word_count(&self) -> usize {
+        self.live_words
+    }
+
     /// `true` iff the column has no appended slots.
     #[inline]
     pub fn is_empty(&self) -> bool {
