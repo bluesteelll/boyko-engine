@@ -82,3 +82,10 @@ harness = false
 # always-on bookkeeping overhead, must be a small over-(1) cost, no regression).
 name = "sleeping"
 harness = false
+
+[[bench]]
+# O11 SP1: the single-threaded XPBD soft-body step (`physics_soft_step`) over
+# {64, 512} particles — the SP4-parallel baseline. Reports per-step time +
+# throughput; not a pass/fail gate (SP1 is the correctness foundation).
+name = "soft_step"
+harness = false

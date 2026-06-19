@@ -218,6 +218,21 @@ pub struct PhysicsConfig {
     /// [`DEFAULT_SLEEP_FRAMES`]); only meaningful when [`sleeping`](Self::sleeping)
     /// is `true`.
     pub sleep_frames: u16,
+    /// Opt into the SP1 XPBD soft-body position pass (default `false`).
+    ///
+    /// When `true`, the [`physics_soft_step`](crate::soft::physics_soft_step) stage
+    /// — registered only by
+    /// [`add_physics_soft`](crate::plugin::add_physics_soft) — advances every
+    /// [`SoftBody`](crate::soft::SoftBody) component by one XPBD distance-constraint
+    /// step after the rigid solve. It is a STRICTLY DISJOINT integrator: it operates
+    /// entirely on the soft-body columns and never touches the rigid
+    /// [`SolverScratch`] / `physics_apply`, so the rigid simulation is byte-identical
+    /// whether this flag is on or off.
+    ///
+    /// **Default OFF** so an un-opted world runs no soft-body work (the campaign
+    /// 0%-gate); enabling it is the entire opt-in (and a world must also register the
+    /// stage via [`add_physics_soft`](crate::plugin::add_physics_soft)).
+    pub soft_body: bool,
 }
 
 /// Default per-island sleep SPEED² threshold (plan O8 / Decision 5).
@@ -275,6 +290,9 @@ impl Default for PhysicsConfig {
             sleeping: false,
             sleep_threshold: DEFAULT_SLEEP_THRESHOLD,
             sleep_frames: DEFAULT_SLEEP_FRAMES,
+            // Default OFF so an un-opted world runs no soft-body work (the campaign
+            // 0%-gate); the SP1 XPBD pass is a pure opt-in.
+            soft_body: false,
         }
     }
 }
@@ -2674,6 +2692,7 @@ mod tests {
         assert_eq!(cfg.contact_damping, 10.0);
         assert_eq!(cfg.dt, 0.0, "dt is a placeholder until gather stamps it");
         assert!(!cfg.colored, "O4: colored is OFF by default (the 0%-gate)");
+        assert!(!cfg.soft_body, "SP1: soft_body is OFF by default (the 0%-gate)");
     }
 
     // ── O4: ConstraintGraph islands + coloring sanity tests ──

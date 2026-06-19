@@ -18,6 +18,7 @@ use crate::resources::{
     PhysicsConfig, SolverScratch,
 };
 use crate::sdf_query::SdfField;
+use crate::soft::physics_soft_step;
 use crate::solver::colored::ColoredSoftStepSolver;
 use crate::solver::RigidSolver;
 use crate::systems::{
@@ -76,6 +77,14 @@ pub struct PhysicsStageKeys {
     pub build_graph: Option<usize>,
     /// Descriptor index of the [`physics_solve_step`] stage.
     pub solve: usize,
+    /// Descriptor index of the [`physics_soft_step`](crate::soft::physics_soft_step)
+    /// SP1 XPBD soft-body pass, or `None` for the non-soft paths (plan O11 SP1).
+    ///
+    /// Present only when the pipeline was wired by
+    /// [`add_physics_soft`](crate::plugin::add_physics_soft); it runs AFTER `solve`
+    /// and BEFORE `apply` as a separate position pass on the
+    /// [`SoftBody`](crate::soft::SoftBody) columns.
+    pub soft_step: Option<usize>,
     /// Descriptor index of the [`physics_apply`] stage.
     pub apply: usize,
 }
@@ -108,9 +117,10 @@ pub fn add_physics_systems<S: RigidSolver + Default>(
     builder: &mut ScheduleBuilder,
     world: &mut EcsMaster,
 ) -> PhysicsStageKeys {
-    // `with_sdf = false`, `colored = false`: body-only pipeline (no `SdfField`, no
-    // SDF stage, no constraint-graph stage) — byte-identical to the shipped path.
-    add_physics_pipeline::<S>(builder, world, false, false, false)
+    // `with_sdf = false`, `colored = false`, `soft = false`: body-only pipeline (no
+    // `SdfField`, no SDF stage, no constraint-graph stage, no soft pass) —
+    // byte-identical to the shipped path.
+    add_physics_pipeline::<S>(builder, world, false, false, false, false)
 }
 
 /// Inserts the physics resources INCLUDING the [`ConstraintGraph`] and registers
@@ -134,7 +144,7 @@ pub fn add_physics_colored<S: RigidSolver + Default>(
     builder: &mut ScheduleBuilder,
     world: &mut EcsMaster,
 ) -> PhysicsStageKeys {
-    add_physics_pipeline::<S>(builder, world, false, true, false)
+    add_physics_pipeline::<S>(builder, world, false, true, false, false)
 }
 
 /// Inserts the physics resources and registers the COLORED-SOLVE pipeline (Phase
@@ -170,7 +180,7 @@ pub fn add_physics_colored_solve(
     builder: &mut ScheduleBuilder,
     world: &mut EcsMaster,
 ) -> PhysicsStageKeys {
-    add_physics_pipeline::<ColoredSoftStepSolver>(builder, world, false, true, true)
+    add_physics_pipeline::<ColoredSoftStepSolver>(builder, world, false, true, true, false)
 }
 
 /// Inserts the physics resources INCLUDING an (empty) [`SdfField`] and registers
@@ -191,7 +201,34 @@ pub fn add_physics_sdf<S: RigidSolver + Default>(
     builder: &mut ScheduleBuilder,
     world: &mut EcsMaster,
 ) -> PhysicsStageKeys {
-    add_physics_pipeline::<S>(builder, world, true, false, false)
+    add_physics_pipeline::<S>(builder, world, true, false, false, false)
+}
+
+/// Inserts the physics resources and registers the physics pipeline WITH the SP1
+/// XPBD soft-body position pass (plan O11 SP1).
+///
+/// Identical to [`add_physics_systems`] but additionally:
+/// - sets [`PhysicsConfig::soft_body`](crate::resources::PhysicsConfig) = `true`;
+/// - inserts a default (empty) [`SdfField`] resource so the soft pass's
+///   `Res<SdfField>` resolves (the caller fills it with the same edit list the GPU
+///   renders — soft particles collide one-sided against it, sharing the rigid SDF
+///   evaluator);
+/// - registers [`physics_soft_step`](crate::soft::physics_soft_step) AFTER `solve`
+///   and BEFORE `apply`, so it runs as a SEPARATE position pass on the
+///   [`SoftBody`](crate::soft::SoftBody) columns once the rigid solve has finished.
+///
+/// The soft step is a STRICTLY DISJOINT integrator: it never reads or writes the
+/// rigid [`SolverScratch`], never sets a touched bit, and never enters
+/// `physics_apply`, so the rigid simulation is byte-identical whether the soft pass
+/// runs or not. Opt-in: a world that uses [`add_physics_systems`] is byte-for-byte
+/// unaffected (the soft stage is never registered — the campaign 0%-gate). The
+/// returned [`PhysicsStageKeys::soft_step`] carries the soft stage's descriptor
+/// index.
+pub fn add_physics_soft<S: RigidSolver + Default>(
+    builder: &mut ScheduleBuilder,
+    world: &mut EcsMaster,
+) -> PhysicsStageKeys {
+    add_physics_pipeline::<S>(builder, world, false, false, false, true)
 }
 
 /// Shared wiring for [`add_physics_systems`] (`with_sdf = false`,
@@ -208,6 +245,7 @@ fn add_physics_pipeline<S: RigidSolver + Default>(
     with_sdf: bool,
     colored: bool,
     colored_solve: bool,
+    soft: bool,
 ) -> PhysicsStageKeys {
     // The colored solve requires the constraint graph; the type system cannot
     // express it, so guard the invariant the callers uphold.
@@ -220,6 +258,7 @@ fn add_physics_pipeline<S: RigidSolver + Default>(
     // when `colored`) and any future graph consumer share one switch.
     world.insert_resource(PhysicsConfig {
         colored,
+        soft_body: soft,
         ..PhysicsConfig::default()
     });
     world.insert_resource(ContactPairs::with_capacity(INITIAL_BODY_CAPACITY));
@@ -245,9 +284,13 @@ fn add_physics_pipeline<S: RigidSolver + Default>(
             INITIAL_BODY_CAPACITY,
         ));
     }
-    if with_sdf {
+    if with_sdf || soft {
         // The CPU-authoritative SDF scene (empty by default; the caller fills it
-        // with the same edit list the GPU renders).
+        // with the same edit list the GPU renders). Inserted for the SDF
+        // narrowphase path (`with_sdf`) AND the soft pass (`soft`), whose
+        // `physics_soft_step` reads `Res<SdfField>` for one-sided particle
+        // collision. An empty field collides nothing, so a soft-only world that
+        // never fills it is unaffected.
         world.insert_resource(SdfField::default());
     }
 
@@ -339,6 +382,26 @@ fn add_physics_pipeline<S: RigidSolver + Default>(
     let solve = solve_cfg.key();
     let apply = builder.add_system(physics_apply).after(solve).key();
 
+    // SP1: the soft-body XPBD pass runs as a SEPARATE position pass AFTER the rigid
+    // solve and BEFORE apply. It is a strictly disjoint integrator (it touches only
+    // `SoftBody` columns, never the rigid `SolverScratch`), so it could in principle
+    // run unordered relative to the rigid block — but pinning it `.after(solve)`
+    // `.before(apply)` keeps the whole physics step in one deterministic window and
+    // matches the plan's placement. Registered only when `soft` (the 0%-gate: a
+    // non-soft schedule never registers this stage). The `apply` key already exists
+    // (registered above), so the `.before(apply)` edge resolves.
+    let soft_step_key = if soft {
+        Some(
+            builder
+                .add_system(physics_soft_step)
+                .after(solve)
+                .before(apply)
+                .key(),
+        )
+    } else {
+        None
+    };
+
     PhysicsStageKeys {
         integrate: integrate.0,
         gather: gather.0,
@@ -347,6 +410,7 @@ fn add_physics_pipeline<S: RigidSolver + Default>(
         narrowphase_sdf: narrowphase_sdf_key.map(|k| k.0),
         build_graph: build_graph_key.map(|k| k.0),
         solve: solve.0,
+        soft_step: soft_step_key.map(|k| k.0),
         apply: apply.0,
     }
 }

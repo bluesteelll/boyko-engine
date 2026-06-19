@@ -38,6 +38,7 @@ pub mod sdf_query;
 /// arm in [`systems`]); a non-x86_64 / non-AVX2 target never references it.
 #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
 pub(crate) mod sdf_simd;
+pub mod soft;
 pub mod solver;
 pub mod systems;
 
@@ -48,7 +49,7 @@ pub use manifold::{BodyIndex, ContactPoint, Manifold, SDF_SENTINEL};
 pub use math::{MAX_CONTACT_POINTS, Mat3, Quat, Vec3};
 pub use plugin::{
     PhysicsStageKeys, add_physics_colored, add_physics_colored_solve, add_physics_sdf,
-    add_physics_systems,
+    add_physics_soft, add_physics_systems,
 };
 pub use resources::{
     BodyState, BroadphaseGrid, BroadphaseKind, ConstraintGraph, ContactPairs,
@@ -56,6 +57,7 @@ pub use resources::{
     PhysicsConfig, SolverScratch, TouchedMask,
 };
 pub use sdf_query::{SdfField, sample_sdf};
+pub use soft::{SoftBody, SoftBodyError};
 pub use solver::{ColoredSoftStepSolver, NoopSolver, RigidSolver, SoftStepSolver};
 pub use systems::{
     body_bounding_radius, physics_apply, physics_broadphase, physics_build_graph, physics_gather,
