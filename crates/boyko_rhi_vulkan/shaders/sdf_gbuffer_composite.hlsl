@@ -98,6 +98,14 @@ StructuredBuffer<uint> Buf : register(t0); // binding 0: edit-list header (READ-
 // this .hlsl at DXC time.
 #include "sdf_field.hlsli"
 
+// Shared camera ray-generation (PBR MVP-2 Phase 0). The ORTHO + PERSPECTIVE ray-gen
+// was extracted VERBATIM into this header so the marcher and the deferred PBR resolve
+// share ONE ray-gen (the resolve reconstructs the per-pixel view direction from it).
+// Resolved relative to this .hlsl at DXC time; included AFTER `cbuffer Camera` is in
+// scope below would be ideal, but the header takes the camera fields as PARAMETERS
+// (not a global cbuffer read), so include order vs the cbuffer is irrelevant.
+#include "ray_gen.hlsli"
+
 // binding 1: the mesh depth as a SAMPLED IMAGE (DEPTH-aspect view of the D32_SFLOAT
 // rasterized image). `.Load(int3(px,py,0)).r` is an unfiltered fetch (OpImageFetch),
 // so no sampler is consumed — the descriptor is a plain SAMPLED_IMAGE.
@@ -112,9 +120,11 @@ Texture2D<float> gDepth : register(t1);
 
 // Camera modes selected by `cam.camera_mode`. ORTHO is the golden-frozen path; the
 // PERSPECTIVE branch is strictly additive. Mirrored host-side in compute.rs as
-// `CAM_MODE_ORTHO` / `CAM_MODE_PERSPECTIVE`.
-static const uint CAM_ORTHO       = 0u;
-static const uint CAM_PERSPECTIVE = 1u;
+// `CAM_MODE_ORTHO` / `CAM_MODE_PERSPECTIVE`. The ray-gen enum itself lives in
+// `ray_gen.hlsli` (`RAYGEN_CAM_ORTHO` / `RAYGEN_CAM_PERSPECTIVE`); these aliases keep
+// the marcher's existing `camera_mode == CAM_PERSPECTIVE` site readable.
+static const uint CAM_ORTHO       = RAYGEN_CAM_ORTHO;
+static const uint CAM_PERSPECTIVE = RAYGEN_CAM_PERSPECTIVE;
 
 // The legacy fixture extent reproduced when `img_w`/`img_h` are zero (an all-zero UBO
 // tail), and the host const-assert anchor (`SDF_IMG_W`/`SDF_IMG_H` both equal this).
@@ -157,6 +167,32 @@ struct TileBound {
 };
 StructuredBuffer<TileBound> Tiles : register(t6);
 
+// PBR MVP-2: the material table (`MaterialGpu[]`), binding 7 — the last slot under the
+// 8-binding cap. The marcher reads `materials[id].base_color` (the picked edit's RAW
+// LINEAR albedo) to write into gAlbedo; the resolve reads metallic/roughness/etc. The
+// std430 layout MIRRORS `boyko_render::material::MaterialGpu` (48 B / 12 words):
+//
+//   off 0  : float4 base_color   rgb = linear base color, w = alpha/cutoff
+//   off 16 : float4 mrr          [metallic, roughness, reflectance, bitcast(flags)]
+//   off 32 : float4 emissive     rgb = linear emissive, w unused
+//
+// The MATERIAL_GPU_WORDS == 12 pin (below) mirrors SDF_EDIT_WORDS == 12 in
+// sdf_field.hlsli so a host/shader layout desync is a build error host-side.
+struct MaterialGpu {
+    float4 base_color;
+    float4 mrr;
+    float4 emissive;
+};
+StructuredBuffer<MaterialGpu> Materials : register(t7);
+
+// Mirrors `boyko_render::material::MATERIAL_GPU_WORDS` (48 B / 4 = 12). A documentation
+// + intent pin; the StructuredBuffer<MaterialGpu> element stride is the std430 layout.
+static const uint MATERIAL_GPU_WORDS = 12u;
+
+// The fallback material id used when an SDF hit's argmin attribution is ambiguous or the
+// table is unbound (id 0 is the engine's default material). NOT used by the field eval.
+static const uint DEFAULT_MATERIAL_ID = 0u;
+
 // Render P4b: a push constant on the fine pipeline (the ONLY push — the camera is the
 // UBO @ b5). `coarse_enabled == 0` keeps the OFF path BYTE-IDENTICAL to today's marcher
 // (the 0%-gate anchor); `!= 0` reads the tile's `TileBound` and culls.
@@ -198,14 +234,14 @@ uint img_h() { return (img_h_raw != 0u) ? img_h_raw : IMG_H_DEFAULT; }
 
 // --- Deterministic scene constants (mirrored host-side in compute.rs) ---------
 
-static const float CAM_Z       = 2.0;   // camera plane Z (rays start here)
-static const float HALF_EXTENT = 1.0;   // orthographic view half-extent in world units
+// CAM_Z + HALF_EXTENT moved to `ray_gen.hlsli` (RAYGEN_CAM_Z / RAYGEN_HALF_EXTENT)
+// alongside the extracted ortho ray-gen that consumes them.
 
-// BUG-A-NDOTL: the static `LIGHT_DIR` const was removed — the base Lambert term now
-// consumes the runtime `pc.light_dir` (see the shading site). The default push
-// `light_dir == (0,0,1)` reproduces the old static direction bit-for-bit.
-static const float3 BASE_COLOR = float3(0.8, 0.3, 0.2); // the SDF surface albedo
-static const float  AMBIENT    = 0.1;
+// PBR MVP-2: the SDF surface no longer has a hardcoded BASE_COLOR / AMBIENT in the
+// marcher — gAlbedo carries the picked material's RAW LINEAR `base_color` (from the
+// material SSBO) and the resolve runs the full Cook-Torrance BRDF (ambient via
+// EnvBRDFApprox). The static `LIGHT_DIR` was already removed (BUG-A-NDOTL); the A1/A2
+// marches consume the runtime `pc.light_dir`.
 
 static const float3 BACKGROUND = float3(0.05, 0.05, 0.1);  // miss color
 // The flat mesh albedo — a green clearly distinct from both the SDF lit color
@@ -292,6 +328,62 @@ float sdf_ao(float3 p, float3 n) {
     return clamp(1.0 - AO_STRENGTH * occ, 0.0, 1.0);
 }
 
+// --- PBR MVP-2: G-buffer attribute packing + material attribution (CONSUMER-side) ---
+//
+// All three helpers below are strict CONSUMERS of the surface hit; NONE touches the
+// FROZEN field functions (`sdf`/`smin`/`combine`/...). `pick_material_id` re-evaluates
+// the per-edit primitive distance via the FROZEN `load_edit`/`edit_distance` purely to
+// ATTRIBUTE the hit to the nearest edit — a read-only re-evaluation, exactly the
+// hard-union nearest-surface rule (PBR plan Decision 4 / OQ-5). The field is untouched.
+
+// Octahedral-encode a unit normal `n` into [0,1]^2 (Cigolle et al. / Meyer survey). The
+// resolve decodes it via `oct_decode`. ~16-bit angular precision when stored in RG16, but
+// stored here in the RG channels of the RGBA8 gNormal target (MVP-2 keeps the existing
+// RGBA8 G-buffer; the BA channels carry the material id). Plain ops; off the frozen field.
+float2 oct_encode(float3 n) {
+    n /= (abs(n.x) + abs(n.y) + abs(n.z));
+    float2 e = n.xy;
+    if (n.z < 0.0) {
+        e = (1.0 - abs(e.yx)) * float2(e.x >= 0.0 ? 1.0 : -1.0, e.y >= 0.0 ? 1.0 : -1.0);
+    }
+    return e * 0.5 + 0.5; // [-1,1] -> [0,1] for the UNORM store
+}
+
+// Pack a 16-bit material id into the B + A channels of an RGBA8 texel: low byte -> B,
+// high byte -> A, each as a normalized [0,1] UNORM value (byte/255). The resolve
+// reconstructs `id = round(b*255) | (round(a*255) << 8)`. 16 bits = 65 536 materials.
+float2 pack_material_id_ba(uint id) {
+    uint lo = id & 0xFFu;
+    uint hi = (id >> 8) & 0xFFu;
+    return float2((float)lo / 255.0, (float)hi / 255.0);
+}
+
+// ATTRIBUTE an SDF hit point `p` to the nearest edit's material id via an argmin over the
+// edit list, reusing the FROZEN `load_edit` + `edit_distance`. This is the hard-union
+// nearest-surface rule (the material the surface is closest to). The id is carried in the
+// per-edit `center.w` FREE LANE (PBR plan Decision 4): `asuint(Buf[base+3])`, read OUTSIDE
+// the field eval. Gated to SDF (mask==1) hits by the caller. The field is NOT touched.
+uint pick_material_id(float3 p) {
+    uint n = min(Buf[0], MAX_SDF_EDITS);
+    if (n == 0u) {
+        return DEFAULT_MATERIAL_ID;
+    }
+    float best_d = FAR;
+    uint best_id = DEFAULT_MATERIAL_ID;
+    [loop]
+    for (uint i = 0u; i < n; ++i) {
+        Edit e = load_edit(i);                 // FROZEN decode (skips word 3 = center.w)
+        float d = abs(edit_distance(e, p));    // FROZEN per-primitive distance
+        if (d < best_d) {
+            best_d = d;
+            // The material id lives in the edit's center.w free lane (bit-cast u32).
+            uint base = HEADER_BASE + i * SDF_EDIT_WORDS;
+            best_id = asuint(Buf[base + 3u]);
+        }
+    }
+    return best_id;
+}
+
 [numthreads(64, 1, 1)]
 void main(uint3 tid : SV_DispatchThreadID) {
     uint idx = tid.x;
@@ -307,30 +399,13 @@ void main(uint3 tid : SV_DispatchThreadID) {
     uint px = idx % w;
     uint py = idx / w;
 
+    // PBR MVP-2 Phase 0: ray-gen extracted into the shared `generate_ray`
+    // (`ray_gen.hlsli`). The arithmetic is CHARACTER-IDENTICAL to the prior inline
+    // block (both ORTHO + PERSPECTIVE arms), so the hit point feeding the FROZEN field
+    // is bit-unchanged (the GATE-1 tripwire + distance/depth golden prove it).
     float3 ro;
     float3 rd;
-    if (camera_mode == CAM_PERSPECTIVE) {
-        // ADDITIVE perspective ray-gen, strictly inside this branch — the ORTHO
-        // arithmetic below is byte-untouched. NDC in [-1,+1] (+x right, +y up, y
-        // flipped to match the ortho convention); the ray direction is the camera
-        // basis combined with the NDC scaled by the half-FOV tangent and aspect. Plain
-        // IEEE ops (no rsqrt/rcp/fast-math) so a perspective scene is reproducible.
-        float ndc_x =  (((float)px + 0.5) / (float)w) * 2.0 - 1.0;
-        float ndc_y = -((((float)py + 0.5) / (float)h) * 2.0 - 1.0);
-        float tan_half_fov = cam_forward.w; // tan(fovY / 2)
-        float aspect       = cam_right.w;   // W / H
-        float3 dir = cam_forward.xyz
-                   + cam_right.xyz * (ndc_x * aspect * tan_half_fov)
-                   + cam_up.xyz    * (ndc_y * tan_half_fov);
-        ro = cam_eye.xyz;
-        rd = normalize(dir);
-    } else {
-        // Reconstruct the orthographic ray for this pixel (deterministic, golden-frozen).
-        float u =  (((float)px + 0.5) / (float)w) * 2.0 - 1.0;
-        float v = -((((float)py + 0.5) / (float)h) * 2.0 - 1.0);
-        ro = float3(u * HALF_EXTENT, v * HALF_EXTENT, CAM_Z);
-        rd = float3(0.0, 0.0, -1.0);
-    }
+    generate_ray(px, py, w, h, camera_mode, cam_eye.xyz, cam_forward, cam_right, cam_up.xyz, ro, rd);
 
     // I/O EDIT (1): the shared mesh depth for this pixel is now a SAMPLED-IMAGE fetch
     // of the rasterized D32_SFLOAT image (transitioned to SHADER_READ_ONLY) INSTEAD of
@@ -358,14 +433,14 @@ void main(uint3 tid : SV_DispatchThreadID) {
         TileBound tb = Tiles[ty * tiles_w + tx];
         if ((tb.flags & TILE_FLAG_EMPTY) != 0u) {
             // EMPTY fast-path: the marcher's else-if(has_mesh)/else arms with hit = false.
-            // Deferred split (D2 arms 5/6): write ATTRIBUTES, never composite. gAlbedo
-            // carries the base mesh/background color; gMaterial = (vis = 1, g = 0, mask = 0,
-            // a = 1) — vis = 1 (no shadow/AO on these arms) and mask = 0 (NOT SDF-lit) so
-            // the resolve passes the base through byte-identically (the 0%-gate).
+            // PBR MVP-2 (mask == 0 arms): write the base mesh/background color to gAlbedo
+            // and gMaterial = (shadow = 1, ao = 1, mask = 0, 1). mask == 0 makes the resolve
+            // PASS THE BASE THROUGH byte-identically (no PBR, no material fetch) — the
+            // 0%-gate for mesh / background / empty. gNormal is neutral (unread when mask==0).
             float3 empty_color = has_mesh ? MESH_COLOR : BACKGROUND;
             gAlbedo[uint2(px, py)] = float4(clamp(empty_color, 0.0, 1.0), 1.0);
-            gNormal[uint2(px, py)] = float4(0.5, 0.5, 0.5, 1.0); // neutral world normal
-            gMaterial[uint2(px, py)] = float4(1.0, 0.0, 0.0, 1.0); // vis = 1, mask = 0
+            gNormal[uint2(px, py)] = float4(0.5, 0.5, 0.0, 0.0);   // neutral oct, id = 0
+            gMaterial[uint2(px, py)] = float4(1.0, 1.0, 0.0, 1.0); // shadow=1, ao=1, mask=0
             return;
         }
         t_seed = tb.near_t;
@@ -487,72 +562,65 @@ void main(uint3 tid : SV_DispatchThreadID) {
         }
     }
 
-    // --- Deferred-shading SPLIT (increment 1): the marcher WRITES ATTRIBUTES; the
-    // composite (base * shadow * ao) moves to the fullscreen `deferred_pbr.comp` resolve.
-    //   * `base`  — the Lambert + ambient SDF color, OR MESH_COLOR / BACKGROUND. Stored
-    //               in gAlbedo (NOT pre-multiplied by shadow/ao).
-    //   * `vis`   — clamp(shadow * ao, 0, 1), ONE combined visibility factor quantized
-    //               once to R8 in gMaterial.r. 1.0 on the OFF / mesh / background arms.
-    //   * `mask`  — 1 on the two SDF-LIT arms (the resolve multiplies base*vis there),
-    //               0 on mesh / background / empty (the resolve passes base through).
-    //               Stored in gMaterial.b. The strict-if on mask in the resolve makes a
-    //               vis = 0 SDF pass NOT black out a mesh/bg pixel (they have mask = 0).
-    // The BRDF (Lambert+ambient base, the A1 shadow march, the A2 AO march) stays here,
-    // computed in-register from the exact hit p/n against the FROZEN field (unchanged).
-    // `vis` is filled on EVERY arm (defense-in-depth) so gMaterial is never stale.
-    float3 base;
-    float vis = 1.0;                            // default: fully visible (OFF/mesh/bg arms)
-    float mask = 0.0;                           // default: NOT SDF-lit (resolve pass-through)
-    float3 normal_enc = float3(0.5, 0.5, 0.5);  // neutral world normal (UNORM-encoded 0)
+    // --- PBR MVP-2: the marcher WRITES G-BUFFER ATTRIBUTES; the full Cook-Torrance
+    // shade moves to the fullscreen `deferred_pbr.comp` resolve.
+    //   * gAlbedo  = RAW LINEAR base color. SDF hit: `materials[id].base_color.rgb`
+    //                (the picked edit's material, NO Lambert/shadow/ao baked in). Mesh /
+    //                background: the flat MESH_COLOR / BACKGROUND constant (mask == 0).
+    //   * gNormal  = (oct.x, oct.y, matid_lo, matid_hi): the octahedral-encoded world
+    //                normal in RG + the 16-bit picked material id packed into BA. SDF hit
+    //                only; neutral on the mask == 0 arms (unread by the resolve there).
+    //   * gMaterial= (shadow, ao, mask, 1): the A1 soft-shadow visibility (R), the A2 AO
+    //                factor (G), and the SDF-lit selector (B). The resolve modulates the
+    //                DIRECT term by shadow and the AMBIENT term by ao when mask == 1, and
+    //                passes gAlbedo through unchanged when mask == 0 (mesh/bg 0%-gate).
+    //
+    // The shadow + ao marches stay here (in-register from the exact hit p/n against the
+    // FROZEN field, unchanged). The material PICK (`pick_material_id`) and the SSBO
+    // base-color fetch are CONSUMERS that never touch the field. Defaults below cover the
+    // mask == 0 arms so every channel is written (gMaterial is never stale).
+    float3 base = BACKGROUND;                      // gAlbedo default (mask == 0 background)
+    float shadow = 1.0;                            // A1 visibility default (no occlusion)
+    float ao = 1.0;                                // A2 AO default (unoccluded)
+    float mask = 0.0;                             // NOT SDF-lit (resolve passes base through)
+    float2 oct = float2(0.5, 0.5);                // neutral oct-normal (unread when mask==0)
+    float2 id_ba = float2(0.0, 0.0);             // material id 0 (unread when mask==0)
     if (hit && t < t_mesh) {
-        // The SDF surface is in FRONT of the mesh (or there is no mesh): light it.
+        // The SDF surface is in FRONT of the mesh (or there is no mesh): emit PBR attrs.
         float3 p = ro + rd * t;
-        float3 n = sdf_normal(p);
-        // BUG-A-NDOTL: the base Lambert term consumes the PUSHED `pc.light_dir` (full
-        // directional light), matching the shadow/AO marches and the host `host_shade`.
-        // For the default push `light_dir == (0,0,1)`, `normalize((0,0,1))` is bit-identical
-        // to the old static `normalize(LIGHT_DIR)`, so the OFF path and the ON default-light
-        // path stay byte-identical — only a NON-default `light_dir` changes the base.
-        float3 l = normalize(pc.light_dir);
-        float ndotl = max(dot(n, l), 0.0);
-        // The Lambert + ambient base color — the gAlbedo attribute (NOT pre-multiplied).
-        base = BASE_COLOR * ndotl + BASE_COLOR * AMBIENT;
-        // Render A1/A2: gate the shadow/AO marches behind `lighting_flags`. The OFF path
-        // (`lighting_flags == 0`) leaves `vis = 1.0` (a STRUCTURAL `if`, no march), so
-        // gMaterial.r is the exact 1.0 → R8 the resolve treats as a no-op multiply (the
-        // 0%-gate). The ON path folds the A1 soft shadow + A2 AO into ONE `vis = shadow*ao`.
-        //
-        // BUG-PBR-F1: the shadow/AO marches here are byte-identical to HEAD's inline
-        // composite (verified via spirv-dis: the `res = min(res, K*d/t)` min-track in
-        // `sdf_soft_shadow` emits the same opcode stream as HEAD), so `vis` == HEAD's
-        // `shadow * ao`. The crater self-shadow regression was NOT in this marcher — it was
-        // the resolve mis-decoding the `mask` flag (see `deferred_pbr.hlsl`); the marcher
-        // correctly writes `vis = 0` at the shadowed rim.
+        float3 n = sdf_normal(p);                  // FROZEN field gradient (the hit normal)
+
+        // ATTRIBUTE the hit to the nearest edit's material (hard-union nearest-surface),
+        // then fetch its RAW LINEAR base color — gAlbedo carries NO lighting (the resolve
+        // runs the full BRDF). Both are CONSUMERS; the field is untouched.
+        uint mat_id = pick_material_id(p);
+        base = Materials[mat_id].base_color.rgb;
+
+        // Render A1/A2: the soft-shadow + AO marches, gated by `lighting_flags`. OFF
+        // (`lighting_flags == 0`) leaves shadow == ao == 1.0 (a STRUCTURAL `if`, no march)
+        // → R8 1.0, a no-op modulation in the resolve.
         if (pc.lighting_flags != 0u) {
             float3 light = normalize(pc.light_dir);
-            float shadow = 1.0;
             if (pc.lighting_flags & LIGHTING_FLAG_SHADOWS) {
                 shadow = sdf_soft_shadow(p, n, light);
             }
-            float ao = 1.0;
             if (pc.lighting_flags & LIGHTING_FLAG_AO) {
                 ao = sdf_ao(p, n);
             }
-            vis = clamp(shadow * ao, 0.0, 1.0);
         }
-        mask = 1.0;                             // arms 1/2: SDF-LIT (resolve multiplies)
-        normal_enc = n * 0.5 + 0.5;             // world normal encoded into [0,1]
+
+        mask = 1.0;                              // SDF-LIT (the resolve runs Cook-Torrance)
+        oct = oct_encode(n);                       // octahedral normal -> gNormal.RG
+        id_ba = pack_material_id_ba(mat_id);     // 16-bit material id -> gNormal.BA
     } else if (has_mesh) {
-        // No nearer SDF surface, but the mesh covered this pixel — flat mesh color.
-        base = MESH_COLOR;                       // arm 3: mask = 0, vis = 1 (pass-through)
+        base = MESH_COLOR;                         // mesh arm: mask = 0 (resolve pass-through)
     } else {
-        base = BACKGROUND;                       // arm 4: mask = 0, vis = 1 (pass-through)
+        base = BACKGROUND;                         // background arm: mask = 0 (pass-through)
     }
 
-    // D1/D2 WRITES: gAlbedo = base (the unmultiplied color), gMaterial = (vis, 0, mask, 1).
-    // The resolve reads both and computes `lit = mask ? base * vis : base`.
+    // PBR MVP-2 WRITES. The resolve reads gNormal (oct + id), gAlbedo (raw base), and
+    // gMaterial (shadow, ao, mask), fetches `materials[id]`, and runs Cook-Torrance.
     gAlbedo[uint2(px, py)] = float4(clamp(base, 0.0, 1.0), 1.0);
-    // gNormal kept (n*0.5+0.5) — forward-compat, unread this increment.
-    gNormal[uint2(px, py)] = float4(clamp(normal_enc, 0.0, 1.0), 1.0);
-    gMaterial[uint2(px, py)] = float4(vis, 0.0, mask, 1.0);
+    gNormal[uint2(px, py)] = float4(oct.x, oct.y, id_ba.x, id_ba.y);
+    gMaterial[uint2(px, py)] = float4(shadow, ao, mask, 1.0);
 }

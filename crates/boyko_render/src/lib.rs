@@ -55,8 +55,10 @@ pub mod barrier;
 pub mod error;
 pub mod gpu_column;
 pub mod gpu_system;
+pub mod material;
 
 pub use barrier::{PlannedBarrier, lower_barriers};
 pub use error::GpuColumnError;
 pub use gpu_column::{GpuColumnManager, GpuColumnMeta, LOCAL_SIZE_X, ResolvedColumn, RhiContext};
 pub use gpu_system::{GpuSystem, gpu_integrate_spirv};
+pub use material::{MATERIAL_GPU_WORDS, MaterialGpu, MaterialId};

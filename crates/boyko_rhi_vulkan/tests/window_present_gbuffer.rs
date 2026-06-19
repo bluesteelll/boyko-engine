@@ -65,8 +65,11 @@ use boyko_rhi::{
 use boyko_rhi_vulkan::compute::{
     COMPOSITE_PUSH_CONSTANT_BYTES, CompositePushConstants, EDITLIST_BUFFER_WORDS, LOCAL_SIZE_X,
     MESH_COLOR, MESH_DEPTH_CLEAR, SDF_CAMERA_Z, SDF_IMG_H, SDF_IMG_W, SDF_TRACE_T_MAX,
-    SDF_VIEW_HALF_EXTENT, SdfEdit, TILE_BOUND_BYTES, editlist_pixel_hits, encode_edit_list,
-    deferred_pbr_spirv, golden_composite_pixel, mesh_depth_for_z, pack_rgba, pixel_world_xy,
+    SDF_VIEW_HALF_EXTENT, SdfEdit, TILE_BOUND_BYTES, CompositeCamera, editlist_pixel_hits,
+    encode_edit_list, deferred_pbr_spirv, golden_composite_pixel, golden_deferred_resolve,
+    golden_marcher_attributes, composite_pixel_ray, GoldenMaterial, DEFAULT_MARCHER_OMEGA,
+    LIGHTING_FLAG_AO, LIGHTING_FLAG_SHADOWS, DEFAULT_LIGHT_DIR, mesh_depth_for_z, pack_rgba,
+    pixel_world_xy,
     sdf_gbuffer_composite_spirv, sdf_op, tile_grid_extent,
 };
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
@@ -250,6 +253,16 @@ fn write_words(base: NonNull<u8>, words: &[u32]) {
     }
 }
 
+/// PBR MVP-2: the std430 word-packing of a ONE-element material table holding the engine
+/// default material (mid-gray dielectric: base 0.8/0.8/0.8/1, metallic 0, roughness 0.5,
+/// reflectance 0.5, flags 0, emissive 0). 12 words = 48 B (mirrors `MaterialGpu`'s 3 vec4
+/// lanes). The windowed scene's edits carry no material id, so every SDF hit picks id 0.
+const DEFAULT_MATERIAL_TABLE: [u32; 12] = [
+    0x3F4CCCCD, 0x3F4CCCCD, 0x3F4CCCCD, 0x3F800000, // base_color: 0.8, 0.8, 0.8, 1.0
+    0x00000000, 0x3F000000, 0x3F000000, 0x00000000, // mrr: metallic 0, rough 0.5, refl 0.5, flags 0
+    0x00000000, 0x00000000, 0x00000000, 0x00000000, // emissive: 0, 0, 0, 0
+];
+
 /// Splits a packed `0xAABBGGRR` into `[r, g, b]` (the low three bytes).
 fn unpack_rgb(packed: u32) -> [i32; 3] {
     [
@@ -417,9 +430,23 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         .expect("invariant: some pixel must be over neither (background)");
 
     let depth_at = |px, py| expected_mesh_depth(px, py);
+    // The mesh-occludes (a) + background (d) texels are mask == 0 PASS-THROUGH arms — the
+    // resolve emits `base` byte-identically (the 0%-gate), so the old inline composite is
+    // still the truth there. PBR MVP-2 only changed the SDF-LIT arm.
     let a_want = golden_composite_pixel(&sdf, depth_at(ax, ay), ax, ay);
-    let b_want = golden_composite_pixel(&sdf, depth_at(bx, by), bx, by);
     let d_want = golden_composite_pixel(&sdf, depth_at(dx, dy), dx, dy);
+    // The SDF-LIT texel (b) is now FULL Cook-Torrance (the owner-acknowledged behavioral
+    // change, PBR plan call F), NOT the old `base*vis` composite — so its golden comes from
+    // the PBR oracle (`golden_deferred_resolve ∘ golden_marcher_attributes`) with the SAME
+    // marcher params the windowed present uses (lighting ON, default light, DEFAULT omega).
+    let materials = [GoldenMaterial::default()];
+    let b_flags = LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO;
+    let b_attrs = golden_marcher_attributes(
+        &sdf, &materials, depth_at(bx, by), bx, by, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho,
+        DEFAULT_MARCHER_OMEGA, b_flags, DEFAULT_LIGHT_DIR,
+    );
+    let (_, b_rd) = composite_pixel_ray(bx, by, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
+    let b_want = golden_deferred_resolve(b_attrs, b_rd, &materials);
 
     let mesh_packed = pack_rgba(MESH_COLOR);
     assert!(
@@ -502,6 +529,24 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         },
     )
     .expect("P4b coarse-cull tile-bound storage buffer (vocab binding 6)");
+
+    // PBR MVP-2: the material table SSBO (vocab binding 7 + resolve binding 4). The windowed
+    // scene's edits carry no material id (center.w == 0), so every SDF hit picks material 0 —
+    // the default mid-gray dielectric. One 48-B element (12 words; mirrors MaterialGpu).
+    let material_table = RhiDevice::create_buffer(
+        device,
+        &BufferDesc {
+            size: (DEFAULT_MATERIAL_TABLE.len() as u64) * 4,
+            usage: BufferUsage::STORAGE,
+            location: MemoryLocation::HostVisibleCoherent,
+        },
+    )
+    .expect("PBR material table storage buffer (vocab binding 7 / resolve binding 4)");
+    {
+        let mapped = RhiDevice::buffer_mapped_ptr(device, &material_table)
+            .expect("host-visible material table is mapped");
+        write_words(mapped, &DEFAULT_MATERIAL_TABLE);
+    }
 
     // The mesh quad's vertex buffer (host-visible).
     let vertices = quad_vertices();
@@ -588,6 +633,8 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         BindGroupLayoutEntry { binding: 4, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 5, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 6, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        // PBR MVP-2: the material table SSBO @7 (the marcher fetches `base_color`).
+        BindGroupLayoutEntry { binding: 7, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
     ];
     let vocab_layout = RhiDevice::create_bind_group_layout(
         device,
@@ -605,15 +652,18 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
     )
     .expect("P1b G-buffer marcher compute pipeline");
 
-    // The deferred-split RESOLVE (`deferred_pbr.comp`): 3 STORAGE images { gAlbedo @0,
-    // gMaterial @1, lit @2 }. No push constants — the camera UBO is not in this set, the
-    // resolve reads the extent only via the index → (px, py) mapping the marcher used.
+    // The PBR MVP-2 RESOLVE (`deferred_pbr.comp`): 6 bindings (≤ 8) { gAlbedo @0, gNormal
+    // @1, gMaterial @2, lit @3 (STORAGE images), the material SSBO @4, the camera UBO @5 }.
+    // The resolve reads the extent + the per-pixel view direction from the camera UBO.
     let resolve_cs = RhiDevice::create_shader_module(device, deferred_pbr_spirv())
         .expect("deferred resolve compute shader module");
     let resolve_entries = [
         BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 2, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 3, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 4, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 5, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
     ];
     let resolve_layout = RhiDevice::create_bind_group_layout(
         device,
@@ -692,6 +742,7 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         camera_uniform: &camera_uniform,
         tiles_buffer: &tiles_buffer,
         depth_sampler: &depth_sampler,
+        material_table: &material_table,
         resolve_pipeline: &resolve_pipeline,
         resolve_layout: &resolve_layout,
         present_pipeline: &present_pipeline,
@@ -844,6 +895,7 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         RhiDevice::destroy_sampler(device, depth_sampler);
         RhiDevice::destroy_buffer(device, vertex_buffer);
         RhiDevice::destroy_buffer(device, tiles_buffer);
+        RhiDevice::destroy_buffer(device, material_table);
         RhiDevice::destroy_buffer(device, camera_uniform);
         RhiDevice::destroy_buffer(device, edit_list);
     }

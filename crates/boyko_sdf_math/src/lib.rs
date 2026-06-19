@@ -158,6 +158,22 @@ impl SdfEdit {
             _pad: 0,
         }
     }
+
+    /// Packs a 16-bit PBR material id into the `center.w` FREE LANE (Render PBR MVP-2,
+    /// Decision 4 — NO stride change). The field eval provably SKIPS `center.w` (the
+    /// shader's `load_edit` reads only `center.xyz`), so this is determinism-NEUTRAL: the
+    /// distance/depth golden + the `cpu_gpu_sdf_agreement` field stay byte-exact. The
+    /// marcher reads the id back via `asuint(Buf[base + 3])` in a path the field never
+    /// touches, and ATTRIBUTES the nearest-surface edit's material to the hit pixel.
+    ///
+    /// `material_id` is a 16-bit table index (the `R16`-width G-buffer carrier); the bits
+    /// are stored verbatim as `f32::from_bits(id as u32)` (never interpreted as a float
+    /// arithmetically — `center.w` is unread by every distance function).
+    #[inline]
+    pub fn with_material(mut self, material_id: u16) -> Self {
+        self.center[3] = f32::from_bits(material_id as u32);
+        self
+    }
 }
 
 // ---- std430 / repr(C) layout contract (the §3.8 compile-time fingerprint) ----

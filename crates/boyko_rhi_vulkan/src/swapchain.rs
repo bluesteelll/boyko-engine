@@ -2531,11 +2531,12 @@ impl<'ctx> Renderer<'ctx> {
             (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
         }
 
-        // (5a) Deferred split: make the marcher's gAlbedo + gMaterial STORES available +
-        // visible to the resolve's LOADS. A real memory+execution dependency
+        // (5a) PBR MVP-2: make the marcher's gAlbedo + gNormal + gMaterial STORES available
+        // + visible to the resolve's LOADS. A real memory+execution dependency
         // (SHADER_WRITE→SHADER_READ, COMPUTE→COMPUTE), GENERAL→GENERAL (no layout change).
-        // gNormal is NOT read by the resolve → no barrier for it.
-        for tex in [&targets.albedo, &targets.material] {
+        // gNormal is now READ by the resolve (oct-normal decode + 16-bit material id), so it
+        // joins gAlbedo + gMaterial in the barrier (MVP-1 omitted it — gNormal was unread).
+        for tex in [&targets.albedo, &targets.normal, &targets.material] {
             let store_to_load = VkImageMemoryBarrier {
                 s_type: VkStructureType::ImageMemoryBarrier,
                 p_next: ptr::null(),
@@ -3216,9 +3217,10 @@ pub struct GBufferScene<'a> {
     pub marcher: &'a ComputePipeline,
     /// The vocabulary bind-group LAYOUT { SSBO @0, sampled depth @1, storage albedo
     /// @2, storage normal @3, storage material @4, UNIFORM camera @5, STORAGE tiles
-    /// @6 }. The renderer allocates + writes a SET against it once per extent (pointing
-    /// at the per-extent G-buffer images + the bundle's `edit_list` / `camera_uniform`
-    /// / `depth_sampler` / `tiles_buffer`).
+    /// @6, STORAGE material-table @7 }. The renderer allocates + writes a SET against it
+    /// once per extent (pointing at the per-extent G-buffer images + the bundle's
+    /// `edit_list` / `camera_uniform` / `depth_sampler` / `tiles_buffer` / `material_table`).
+    /// PBR MVP-2 added binding 7 (the material SSBO the marcher fetches `base_color` from).
     ///
     /// The caller MUST declare binding 6 = `DescriptorKind::StorageBuffer`
     /// (`ShaderStage::COMPUTE`): the P4b marcher shader unconditionally DECLARES `[Set
@@ -3253,13 +3255,20 @@ pub struct GBufferScene<'a> {
     /// The sampler the present-blit samples the LIT image with (nearest/clamp for
     /// a 1:1 sample).
     pub present_sampler: &'a VulkanSampler,
-    /// The deferred-split RESOLVE compute pipeline (`deferred_pbr.comp`): its layout
-    /// declares `resolve_layout` at `set 0`. Reads the marcher's gAlbedo + gMaterial
-    /// (STORAGE, GENERAL) and stores the final LIT color into the dedicated lit image.
+    /// The PBR MVP-2 material table SSBO (`MaterialGpu[]`), host-seeded ONCE before the
+    /// loop. Bound at the marcher vocab set's binding 7 (the marcher fetches `base_color`)
+    /// AND the resolve set's binding 4 (the resolve fetches metallic/roughness/etc.). The
+    /// scene OWNS it; [`GBufferTargets`] borrows it into both sets.
+    pub material_table: &'a BoundBuffer,
+    /// The deferred PBR RESOLVE compute pipeline (`deferred_pbr.comp`): its layout declares
+    /// `resolve_layout` at `set 0`. Reads the marcher's gAlbedo + gNormal + gMaterial
+    /// (STORAGE, GENERAL) + the material SSBO + the camera UBO, runs Cook-Torrance, and
+    /// stores the final LIT color into the dedicated lit image.
     pub resolve_pipeline: &'a ComputePipeline,
-    /// The resolve bind-group LAYOUT { storage gAlbedo @0, storage gMaterial @1, storage
-    /// lit @2 }. The renderer allocates + writes a SET against it once per extent (pointing
-    /// at the per-extent G-buffer + lit images).
+    /// The PBR MVP-2 resolve bind-group LAYOUT (6 bindings, ≤ 8): { storage gAlbedo @0,
+    /// storage gNormal @1, storage gMaterial @2, storage lit @3, material SSBO @4, camera
+    /// UBO @5 }. The renderer allocates + writes a SET against it once per extent (pointing
+    /// at the per-extent G-buffer + lit images + the scene's material SSBO + camera UBO).
     pub resolve_layout: &'a VulkanBindGroupLayout,
     /// The marcher's 1D dispatch group count (`ceil(pixels / LOCAL_SIZE_X)` at the
     /// WSI-clamped extent the recorder dispatches). The deferred resolve dispatches at the
@@ -3298,11 +3307,12 @@ pub struct GBufferTargets {
     /// The ALBEDO storage image (R8G8B8A8): the marcher's FINAL composite sink; also
     /// sampled by the present-blit (pass C).
     albedo: VulkanTexture,
-    /// The NORMAL storage image (R8G8B8A8): a marcher G-buffer attribute (unused by
-    /// the P1c present, written for the deferred-shading-split P7 future).
+    /// The NORMAL storage image (R8G8B8A8): the PBR MVP-2 marcher's `(oct.x, oct.y,
+    /// matid_lo, matid_hi)` attribute — the octahedral world normal in RG + the 16-bit
+    /// material id in BA. NOW READ by the deferred resolve (STORAGE, GENERAL).
     normal: VulkanTexture,
-    /// The MATERIAL storage image (R8G8B8A8): the marcher's `(r=vis, b=mask)` attribute,
-    /// consumed by the deferred resolve (STORAGE, GENERAL — never sampled).
+    /// The MATERIAL storage image (R8G8B8A8): the PBR MVP-2 marcher's `(shadow, ao, mask)`
+    /// attribute, consumed by the deferred resolve (STORAGE, GENERAL — never sampled).
     material: VulkanTexture,
     /// The LIT storage image (R8G8B8A8): the deferred resolve's OUTPUT (STORAGE store);
     /// also SAMPLED by the present-blit (pass C). The deferred split added it — the
@@ -3312,9 +3322,10 @@ pub struct GBufferTargets {
     /// [`GBufferScene::vocab_layout`] (pointing at `depth`/`albedo`/`normal`/`material`
     /// + the scene's SSBO/UBO/sampler). NO per-frame update.
     vocab_set: VulkanBindGroup,
-    /// The deferred RESOLVE descriptor set, written ONCE against
-    /// [`GBufferScene::resolve_layout`] (3 STORAGE images: `albedo` @0, `material` @1,
-    /// `lit` @2). NO per-frame update.
+    /// The PBR MVP-2 RESOLVE descriptor set, written ONCE against
+    /// [`GBufferScene::resolve_layout`] (6 bindings: `albedo` @0, `normal` @1, `material`
+    /// @2, `lit` @3 STORAGE images, the material SSBO @4, the camera UBO @5). NO per-frame
+    /// update.
     resolve_set: VulkanBindGroup,
     /// The present-blit descriptor set, written ONCE against
     /// [`GBufferScene::present_layout`] (one COMBINED_IMAGE_SAMPLER pointing at
@@ -3490,6 +3501,8 @@ impl GBufferTargets {
                 BindGroupEntry::StorageImage { texture: &material },
                 BindGroupEntry::UniformBuffer { buffer: scene.camera_uniform },
                 BindGroupEntry::StorageBuffer { buffer: scene.tiles_buffer },
+                // PBR MVP-2: the material table SSBO @7 (the marcher fetches `base_color`).
+                BindGroupEntry::StorageBuffer { buffer: scene.material_table },
             ];
             let desc = BindGroupDesc::<Vulkan> {
                 layout: scene.vocab_layout,
@@ -3513,13 +3526,17 @@ impl GBufferTargets {
             }
         };
 
-        // The deferred RESOLVE set, written ONCE here: 3 STORAGE images — gAlbedo @0,
-        // gMaterial @1, lit @2 — matching `deferred_pbr.comp`'s set 0.
+        // The PBR MVP-2 RESOLVE set, written ONCE here (6 bindings, ≤ 8): gAlbedo @0,
+        // gNormal @1, gMaterial @2, lit @3 (STORAGE images), material SSBO @4, camera UBO
+        // @5 — matching `deferred_pbr.comp`'s set 0.
         let resolve_set = {
             let entries = [
                 BindGroupEntry::StorageImage { texture: &albedo },
+                BindGroupEntry::StorageImage { texture: &normal },
                 BindGroupEntry::StorageImage { texture: &material },
                 BindGroupEntry::StorageImage { texture: &lit },
+                BindGroupEntry::StorageBuffer { buffer: scene.material_table },
+                BindGroupEntry::UniformBuffer { buffer: scene.camera_uniform },
             ];
             let desc = BindGroupDesc::<Vulkan> {
                 layout: scene.resolve_layout,

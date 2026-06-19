@@ -50,7 +50,7 @@ use core::slice;
 // import via `boyko_rhi_vulkan::compute::{..}` are RE-EXPORTED below so those
 // pre-leaf-cut paths keep compiling.
 use boyko_sdf_math::{
-    HEADER_BASE_WORDS, MAX_SDF_EDITS, SDF_EDIT_WORDS, SDF_GRAD_H, sdf_edit_list,
+    HEADER_BASE_WORDS, MAX_SDF_EDITS, SDF_EDIT_WORDS, SDF_GRAD_H, edit_distance, sdf_edit_list,
     sdf_edit_list_normal, v_dot, v_len, v_normalize, v_sub,
 };
 
@@ -125,12 +125,15 @@ static SDF_EDITLIST_STORAGE_IMAGE_SPV: SpirvBlob<24092> = SpirvBlob(*include_byt
 /// additive normal/material @ bindings 3/4). The extent/camera block moves to a UNIFORM
 /// buffer @ binding 5 (written once). The edit-list stays a `StructuredBuffer` @
 /// binding 0.
-/// Deferred-shading SPLIT (increment 1): the marcher now WRITES ATTRIBUTES instead of
-/// compositing — gAlbedo carries the unmultiplied base color and gMaterial carries
-/// `(r = vis, g = 0, b = mask, a = 1)` (`vis = clamp(shadow*ao)`, `mask = 1` on the two
-/// SDF-LIT arms). The A1/A2 composite moved to [`deferred_pbr_spirv`]. The byte length
-/// grew (41100 → 41176) with the new attribute-write arms.
-static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<41176> = SpirvBlob(*include_bytes!(concat!(
+/// Render PBR MVP-2: the marcher repacks the G-buffer attributes — gAlbedo = the picked
+/// material's RAW LINEAR `base_color` (from the material SSBO @ binding 7), gNormal =
+/// (octahedral world normal in RG, 16-bit material id in BA), gMaterial = (shadow, ao,
+/// mask). The material PICK is an argmin over the edit list reusing the FROZEN
+/// `load_edit`/`edit_distance` (a read-only attribution; the field is untouched, proven by
+/// the GATE-1 probe tripwire). Phase 0 also extracted ray-gen into the shared
+/// `ray_gen.hlsli`. The full Cook-Torrance shade runs in [`deferred_pbr_spirv`]. The byte
+/// length grew (41176 → 43944) with the material pick + oct-encode + SSBO fetch.
+static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<43944> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/sdf_gbuffer_composite.comp.spv"
 )));
@@ -146,14 +149,16 @@ static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<41176> = SpirvBlob(*include_bytes!(c
 /// increment. The host mirror is [`golden_deferred_resolve`] (fed by
 /// [`golden_marcher_attributes`]).
 ///
-/// BUG-PBR-F1: the SDF-lit `mask` flag is stored in gMaterial.b as the FLOAT `1.0`, which an
-/// R8_UNORM store quantizes to byte `255` (the UAV `.Load` reads it back NORMALIZED as
-/// `1.0`). The prior decode `uint(b * 255 + 0.5)` mapped the flag to `255u`, so the strict
-/// `mask == 1u` test was ALWAYS false → every SDF-lit pixel wrongly passed `base` through
-/// (its `vis` ignored), un-shadowing the crater self-shadow rim. The fix decodes the binary
-/// flag as `b > 0.5` (matching the host `golden_deferred_resolve`'s `attrs.mask == 1`). The
-/// byte length shrank (1704 → 1616) — dropping the `× 255 + 0.5` + int-convert decode.
-static DEFERRED_PBR_SPV: SpirvBlob<1616> = SpirvBlob(*include_bytes!(concat!(
+/// Render PBR MVP-2: the resolve now runs FULL metallic-roughness Cook-Torrance (GGX D +
+/// height-correlated Smith V + Schlick F + Lambert diffuse + analytic EnvBRDFApprox
+/// ambient) instead of `mask ? base*vis : base`. It reads gAlbedo (raw base), gNormal (oct
+/// normal + 16-bit material id), gMaterial (shadow, ao, mask) @ bindings 0..2, fetches the
+/// picked material from the SSBO @ binding 4, and reconstructs the per-pixel view direction
+/// from the camera UBO @ binding 5 + the shared `ray_gen.hlsli`. SDF (mask == 1) pixels get
+/// full PBR (the owner-acknowledged behavioral change, PBR plan call F); mesh / background /
+/// empty (mask == 0) pass `base` through byte-identically (the 0%-gate). The byte length
+/// grew (1616 → 6880) with the BRDF. The host mirror is [`golden_deferred_resolve`].
+static DEFERRED_PBR_SPV: SpirvBlob<6880> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/deferred_pbr.comp.spv"
 )));
@@ -1247,6 +1252,21 @@ fn composite_ray(
     }
 }
 
+/// The `(ray_origin, ray_dir)` for pixel `(px, py)` at extent `(img_w, img_h)` under
+/// `camera`, exposing the shared marcher/resolve ray-gen ([`composite_ray`]) so the PBR
+/// MVP-2 resolve golden ([`golden_deferred_resolve`]) can reconstruct the per-pixel view
+/// direction (`V = -rd`) the GPU resolve uses. Bit-identical to the marcher's ray-gen.
+#[inline]
+pub fn composite_pixel_ray(
+    px: u32,
+    py: u32,
+    img_w: u32,
+    img_h: u32,
+    camera: CompositeCamera,
+) -> ([f32; 3], [f32; 3]) {
+    composite_ray(px, py, img_w, img_h, camera)
+}
+
 /// The extent- and camera-aware CPU golden for one composited pixel (P0a). At
 /// `(SDF_IMG_W, SDF_IMG_H)` + [`CompositeCamera::Ortho`] this is BIT-IDENTICAL to the
 /// pre-P0a `golden_composite_pixel` (same `u`/`v`/`ro`/`rd` arithmetic), preserving
@@ -1450,38 +1470,187 @@ pub fn golden_composite_pixel_ex_omega_lit(
 // the inline-composite comparison.
 // ===========================================================================
 
-/// The per-pixel attributes the deferred-split marcher writes: the R8G8B8 `base` color
-/// (gAlbedo, quantized via [`pack_rgba`] rounding), the R8 combined-visibility byte
-/// (`gMaterial.r = round(255 * clamp(shadow*ao))`), and the SDF-lit `mask` (1 on the two
-/// SDF-LIT arms, 0 on mesh / background / empty). [`golden_deferred_resolve`] consumes
-/// these to model the resolve's `lit`.
+/// A host material-table element mirroring `boyko_render::material::MaterialGpu` (3
+/// std430 `vec4` lanes, 48 B). The vulkan crate cannot depend on `boyko_render` (the
+/// dependency runs the other way), so the golden carries its own POD mirror; the layout
+/// is the SAME the shader's `MaterialGpu` reads. All values are LINEAR.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GoldenMaterial {
+    /// `rgb` = LINEAR base color, `w` = alpha/cutoff (lane 0).
+    pub base_color: [f32; 4],
+    /// `[metallic, roughness, reflectance, bitcast(flags)]` (lane 1).
+    pub mrr: [f32; 4],
+    /// `rgb` = LINEAR emissive, `w` unused (lane 2).
+    pub emissive: [f32; 4],
+}
+
+impl GoldenMaterial {
+    /// A metallic-roughness material from LINEAR parameters (mirrors `MaterialGpu::new`).
+    #[inline]
+    pub fn new(
+        base_color: [f32; 4],
+        metallic: f32,
+        roughness: f32,
+        reflectance: f32,
+        emissive: [f32; 3],
+    ) -> Self {
+        Self {
+            base_color,
+            mrr: [metallic, roughness, reflectance, 0.0],
+            emissive: [emissive[0], emissive[1], emissive[2], 0.0],
+        }
+    }
+}
+
+impl Default for GoldenMaterial {
+    /// The engine default material (table slot 0): a mid-gray dielectric (mirrors
+    /// `MaterialGpu::default`).
+    #[inline]
+    fn default() -> Self {
+        GoldenMaterial::new([0.8, 0.8, 0.8, 1.0], 0.0, 0.5, 0.5, [0.0, 0.0, 0.0])
+    }
+}
+
+// --- PBR MVP-2 lighting constants (mirror deferred_pbr.hlsl EXACTLY) -----------------
+
+/// The resolve's single analytic directional light (`DEFAULT_LIGHT_DIR` = +Z).
+pub const PBR_LIGHT_DIR: [f32; 3] = [0.0, 0.0, 1.0];
+/// The resolve's directional-light color (white).
+pub const PBR_LIGHT_COLOR: [f32; 3] = [1.0, 1.0, 1.0];
+/// The resolve's analytic hemisphere diffuse-ambient sky color.
+pub const PBR_SKY_DIFFUSE: [f32; 3] = [0.10, 0.10, 0.12];
+/// The resolve's analytic specular-IBL sky color (scales EnvBRDFApprox).
+pub const PBR_SKY_SPEC: [f32; 3] = [0.10, 0.10, 0.12];
+/// The "empty field" distance sentinel, mirroring the shader's `FAR` (= 1e9 in
+/// `sdf_field.hlsli`). Used as the argmin seed in [`pick_material_id`] so the host
+/// oracle initializes its nearest-surface search identically to the GPU marcher.
+pub const PBR_FAR: f32 = 1.0e9;
+
+/// Octahedral-encode a unit normal into `[0,1]^2` (mirrors the marcher's `oct_encode`).
+fn oct_encode(n: [f32; 3]) -> [f32; 2] {
+    let inv_l1 = 1.0 / (n[0].abs() + n[1].abs() + n[2].abs());
+    let nx = n[0] * inv_l1;
+    let ny = n[1] * inv_l1;
+    let nz = n[2] * inv_l1;
+    let (mut ex, mut ey) = (nx, ny);
+    if nz < 0.0 {
+        let sx = if nx >= 0.0 { 1.0 } else { -1.0 };
+        let sy = if ny >= 0.0 { 1.0 } else { -1.0 };
+        ex = (1.0 - ny.abs()) * sx;
+        ey = (1.0 - nx.abs()) * sy;
+    }
+    [ex * 0.5 + 0.5, ey * 0.5 + 0.5]
+}
+
+/// Octahedral-decode (mirrors the resolve's `oct_decode`).
+fn oct_decode(e: [f32; 2]) -> [f32; 3] {
+    let ex = e[0] * 2.0 - 1.0;
+    let ey = e[1] * 2.0 - 1.0;
+    let mut n = [ex, ey, 1.0 - ex.abs() - ey.abs()];
+    let t = (-n[2]).clamp(0.0, 1.0);
+    n[0] += if n[0] >= 0.0 { -t } else { t };
+    n[1] += if n[1] >= 0.0 { -t } else { t };
+    v_normalize(n)
+}
+
+/// GGX/Trowbridge-Reitz NDF (mirrors the resolve's `D_GGX`).
+fn d_ggx(noh: f32, a: f32) -> f32 {
+    let a2 = a * a;
+    let d = (noh * a2 - noh) * noh + 1.0;
+    a2 / (core::f32::consts::PI * d * d)
+}
+
+/// Height-correlated Smith visibility (mirrors the resolve's `V_SmithGGXCorrelated`).
+fn v_smith_ggx_correlated(nov: f32, nol: f32, a: f32) -> f32 {
+    let a2 = a * a;
+    let lambda_v = nol * ((nov - a2 * nov) * nov + a2).sqrt();
+    let lambda_l = nov * ((nol - a2 * nol) * nol + a2).sqrt();
+    0.5 / (lambda_v + lambda_l).max(1e-5)
+}
+
+/// Schlick Fresnel (mirrors the resolve's `F_Schlick`).
+fn f_schlick(u: f32, f0: [f32; 3]) -> [f32; 3] {
+    let f = (1.0 - u).powf(5.0);
+    [
+        f0[0] + (1.0 - f0[0]) * f,
+        f0[1] + (1.0 - f0[1]) * f,
+        f0[2] + (1.0 - f0[2]) * f,
+    ]
+}
+
+/// Karis mobile analytic environment BRDF (mirrors the resolve's `env_brdf_approx`).
+fn env_brdf_approx(roughness: f32, nov: f32) -> [f32; 2] {
+    let c0 = [-1.0_f32, -0.0275, -0.572, 0.022];
+    let c1 = [1.0_f32, 0.0425, 1.04, -0.04];
+    let r = [
+        roughness * c0[0] + c1[0],
+        roughness * c0[1] + c1[1],
+        roughness * c0[2] + c1[2],
+        roughness * c0[3] + c1[3],
+    ];
+    let a004 = (r[0] * r[0]).min((-9.28 * nov).exp2()) * r[0] + r[1];
+    [-1.04 * a004 + r[2], 1.04 * a004 + r[3]]
+}
+
+/// The per-pixel G-buffer attributes the PBR MVP-2 marcher writes, modelling the EXACT GPU
+/// UNORM pack so [`golden_deferred_resolve`] can re-decode them and run the host BRDF
+/// within ±2/255 of the GPU. On the mask == 0 arms (mesh / background / empty) `base_rgb`
+/// round-trips byte-identically (the 0%-gate).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MarcherAttributes {
-    /// The gAlbedo R8G8B8 base color (the unmultiplied Lambert+ambient / mesh / bg color),
-    /// quantized exactly as the GPU UNORM store ([`pack_rgba`]'s `(x*255+0.5)` rounding).
+    /// gAlbedo R8G8B8: the RAW LINEAR base color (the picked material's `base_color.rgb`
+    /// on an SDF hit, else MESH_COLOR / BACKGROUND), quantized via [`pack_rgba`] rounding.
     pub base_rgb: [u8; 3],
-    /// The gMaterial.r combined-visibility byte: `round(255 * clamp(shadow*ao, 0, 1))`.
-    /// `255` (full visibility) on the OFF / mesh / background arms.
-    pub vis: u8,
-    /// `gMaterial.b` decoded: 1 on the two SDF-LIT arms, 0 on mesh / background / empty.
+    /// gNormal R8G8: the octahedral-encoded world normal (SDF hit only; neutral otherwise).
+    pub oct_rg: [u8; 2],
+    /// gNormal B8/A8: the 16-bit material id packed low-byte → B, high-byte → A.
+    pub mat_id: u16,
+    /// gMaterial.r R8: the A1 soft-shadow visibility `round(255*clamp(shadow))`.
+    pub shadow: u8,
+    /// gMaterial.g R8: the A2 AO factor `round(255*clamp(ao))`.
+    pub ao: u8,
+    /// gMaterial.b decoded: 1 on the SDF-LIT arm, 0 on mesh / background / empty.
     pub mask: u8,
 }
 
-/// The CPU mirror of the deferred-split marcher's per-pixel ATTRIBUTE output (D1a). Runs
-/// the SAME extent/camera ray-gen + over-relaxation march + arm selection as
-/// [`golden_composite_pixel_ex_omega_lit`], but instead of compositing returns the
-/// `(base_rgb, vis, mask)` the marcher stores. `base` is the unmultiplied color: the
-/// Lambert+ambient surface color on an SDF hit (via [`host_shade`]'s OFF path), otherwise
-/// [`MESH_COLOR`] or [`SDF_BACKGROUND`]. `vis = round(255 * clamp(shadow*ao))` from the
-/// A1/A2 marches, gated by `lighting_flags` (`255` when OFF). `mask = 1` only on the two
-/// SDF-LIT arms.
-///
-/// `base_rgb` is quantized with [`pack_rgba`]'s rounding so it matches the GPU's UNORM
-/// store byte-exactly on the 0-delta arms; `vis` uses the same `(x*255+0.5)` rounding the
-/// GPU applies to the R8 `gMaterial.r` store.
+/// Picks the nearest-surface material id at `p` by an argmin over the edit list, mirroring
+/// the marcher's `pick_material_id` (the FROZEN `edit_distance` per primitive; the id from
+/// the per-edit `center.w` free lane). Returns the default id (0) for an empty list.
+fn pick_material_id(edits: &[SdfEdit], p: [f32; 3]) -> u16 {
+    // The ≤16 scene contract: every committed scene fits the fixed cap, so this only
+    // documents the invariant the marcher relies on (it never reads beyond the cap).
+    debug_assert!(
+        edits.len() <= MAX_SDF_EDITS,
+        "invariant: edit count {} exceeds MAX_SDF_EDITS {MAX_SDF_EDITS}",
+        edits.len()
+    );
+    // FAR (= 1e9), mirroring the shader's `FAR` sentinel exactly — see `PBR_FAR`.
+    let mut best_d = PBR_FAR;
+    let mut best_id = 0u16;
+    // Clamp to the first MAX_SDF_EDITS edits: the GPU marcher iterates only
+    // `min(Buf[0], MAX_SDF_EDITS)` candidates, so the host argmin must see the SAME
+    // candidate set or the picked id (and thus gAlbedo) would diverge for >16 edits.
+    for e in edits.iter().take(MAX_SDF_EDITS) {
+        let d = edit_distance(e, p).abs();
+        if d < best_d {
+            best_d = d;
+            best_id = (e.center[3].to_bits() & 0xFFFF) as u16;
+        }
+    }
+    best_id
+}
+
+/// The CPU mirror of the PBR MVP-2 marcher's per-pixel ATTRIBUTE output. Runs the SAME
+/// extent/camera ray-gen + over-relaxation march + arm selection as
+/// [`golden_composite_pixel_ex_omega_lit`], then writes the repacked G-buffer attributes:
+/// gAlbedo = the picked material's RAW LINEAR base color (via `materials`, indexed by the
+/// argmin id), gNormal = (oct normal, 16-bit id), gMaterial = (shadow, ao, mask). On
+/// mesh / background it emits the flat constant with mask = 0. `materials` is the host
+/// material table; an out-of-range id falls back to the default material.
 #[allow(clippy::too_many_arguments)]
 pub fn golden_marcher_attributes(
     edits: &[SdfEdit],
+    materials: &[GoldenMaterial],
     mesh_depth: f32,
     px: u32,
     py: u32,
@@ -1558,11 +1727,9 @@ pub fn golden_marcher_attributes(
         }
     }
 
-    // Quantize a `[0,1]` scalar to a byte with the GPU UNORM store's `(x*255+0.5)`
-    // rounding (the same rule [`pack_rgba`] uses per channel).
+    // Quantize a `[0,1]` scalar to a byte with the GPU UNORM store's `(x*255+0.5)` rounding.
     let q8 = |x: f32| -> u8 { (x.clamp(0.0, 1.0) * 255.0 + 0.5) as u8 };
-    // Re-derive the R8G8B8 bytes a `pack_rgba` of `c` would store (low 3 bytes of
-    // `0xAABBGGRR`), so the marcher-attribute base matches the GPU albedo byte-exactly.
+    // The R8G8B8 bytes a `pack_rgba` of `c` would store (low 3 bytes of `0xAABBGGRR`).
     let base_bytes = |c: [f32; 3]| -> [u8; 3] {
         let packed = pack_rgba(c);
         [
@@ -1575,14 +1742,19 @@ pub fn golden_marcher_attributes(
     if hit && t < t_mesh {
         let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
         let n = sdf_edit_list_normal(edits, p);
-        // `base` = the OFF-path Lambert+ambient (NO shadow/ao multiply), exactly the
-        // gAlbedo attribute the marcher stores. `host_shade` with `lighting_flags == 0`
-        // returns the bare base regardless of the requested flags.
-        let base = host_shade(SDF_BASE_COLOR, SDF_AMBIENT, p, n, light_dir, 0, &sdf_sphere);
-        // `vis` = clamp(shadow*ao), the SAME consumers `host_shade` folds in, but kept
-        // SEPARATE (the marcher stores it in gMaterial.r). OFF ⇒ vis = 1.0.
-        let vis = if lighting_flags == 0 {
-            1.0_f32
+
+        // ATTRIBUTE the hit to the nearest edit's material, then take its RAW LINEAR base
+        // color — gAlbedo carries NO lighting (the resolve runs the full BRDF).
+        let mat_id = pick_material_id(edits, p);
+        let mat = materials
+            .get(mat_id as usize)
+            .copied()
+            .unwrap_or_default();
+        let base = [mat.base_color[0], mat.base_color[1], mat.base_color[2]];
+
+        // The A1/A2 marches, gated by `lighting_flags` (kept SEPARATE: shadow → R, ao → G).
+        let (shadow, ao) = if lighting_flags == 0 {
+            (1.0_f32, 1.0_f32)
         } else {
             let l = v_normalize(light_dir);
             let field = |q: [f32; 3]| sdf_edit_list(edits, q);
@@ -1594,37 +1766,115 @@ pub fn golden_marcher_attributes(
             if lighting_flags & LIGHTING_FLAG_AO != 0 {
                 ao = host_ao(p, n, &field);
             }
-            (shadow * ao).clamp(0.0, 1.0)
+            (shadow.clamp(0.0, 1.0), ao.clamp(0.0, 1.0))
         };
-        MarcherAttributes { base_rgb: base_bytes(base), vis: q8(vis), mask: 1 }
-    } else if has_mesh {
-        MarcherAttributes { base_rgb: base_bytes(MESH_COLOR), vis: 255, mask: 0 }
+
+        let oct = oct_encode(n);
+        MarcherAttributes {
+            base_rgb: base_bytes(base),
+            oct_rg: [q8(oct[0]), q8(oct[1])],
+            mat_id,
+            shadow: q8(shadow),
+            ao: q8(ao),
+            mask: 1,
+        }
     } else {
-        MarcherAttributes { base_rgb: base_bytes(SDF_BACKGROUND), vis: 255, mask: 0 }
+        let base = if has_mesh { MESH_COLOR } else { SDF_BACKGROUND };
+        // mask == 0: gNormal/id/shadow/ao are unread by the resolve (pass-through); model
+        // the marcher's neutral defaults so the attribute struct round-trips deterministically.
+        MarcherAttributes {
+            base_rgb: base_bytes(base),
+            oct_rg: [q8(0.5), q8(0.5)],
+            mat_id: 0,
+            shadow: 255,
+            ao: 255,
+            mask: 0,
+        }
     }
 }
 
-/// The CPU mirror of the `deferred_pbr` RESOLVE (D1a): given the marcher's
-/// [`MarcherAttributes`], returns the packed `0xAABBGGRR` LIT color the resolve stores.
+/// The CPU mirror of the `deferred_pbr` RESOLVE (PBR MVP-2): given the marcher's
+/// [`MarcherAttributes`], the camera ray for the pixel, and the material table, returns
+/// the packed `0xAABBGGRR` LIT color the resolve stores.
 ///
-/// Models the EXACT GPU double quantization: `base` and `vis` are already R8-quantized in
-/// the attributes; the resolve loads them back as `base8/255` and `vis8/255` (UNORM
-/// decode), computes `lit = (mask == 1) ? base*vis : base`, then the storage store
-/// re-quantizes via [`pack_rgba`]'s `(x*255+0.5)` rounding. On the mesh / background /
-/// SDF-OFF arms (`mask == 0` or `vis == 255`) this round-trips `base` byte-identically —
-/// the 0%-gate.
-pub fn golden_deferred_resolve(attrs: MarcherAttributes) -> u32 {
+/// Models the EXACT GPU double quantization: the attributes are already R8-quantized; the
+/// resolve loads them back (UNORM decode), decodes the oct normal + 16-bit id, fetches
+/// `materials[id]`, and runs the SAME Cook-Torrance the resolve runs (GGX D + height-
+/// correlated Smith V + Schlick F + Lambert + EnvBRDFApprox ambient; shadow modulates the
+/// direct term, ao the ambient), then re-quantizes via [`pack_rgba`]. On the mask == 0
+/// arms it round-trips `base` byte-identically (the 0%-gate). `rd` is the pixel's ray
+/// direction (the view dir is `-rd`); supply the SAME `composite_ray` the marcher used.
+pub fn golden_deferred_resolve(
+    attrs: MarcherAttributes,
+    rd: [f32; 3],
+    materials: &[GoldenMaterial],
+) -> u32 {
     let base = [
         attrs.base_rgb[0] as f32 / 255.0,
         attrs.base_rgb[1] as f32 / 255.0,
         attrs.base_rgb[2] as f32 / 255.0,
     ];
-    if attrs.mask == 1 {
-        let vis = attrs.vis as f32 / 255.0;
-        pack_rgba([base[0] * vis, base[1] * vis, base[2] * vis])
-    } else {
-        pack_rgba(base)
+    if attrs.mask != 1 {
+        // mesh / background / empty: pass the base through byte-identically (the 0%-gate).
+        return pack_rgba(base);
     }
+
+    // Decode the world normal from the oct RG bytes (the SAME UNORM round-trip the GPU did).
+    let n = oct_decode([attrs.oct_rg[0] as f32 / 255.0, attrs.oct_rg[1] as f32 / 255.0]);
+    let mat = materials
+        .get(attrs.mat_id as usize)
+        .copied()
+        .unwrap_or_default();
+
+    let metallic = mat.mrr[0];
+    let roughness = mat.mrr[1].clamp(0.045, 1.0);
+    let reflectance = mat.mrr[2];
+    let a = roughness * roughness;
+
+    // f0: dielectric reflectance lerped toward base by metallic; diffuse killed by metallic.
+    let dielectric_f0 = 0.16 * reflectance * reflectance;
+    let f0 = [
+        dielectric_f0 + (base[0] - dielectric_f0) * metallic,
+        dielectric_f0 + (base[1] - dielectric_f0) * metallic,
+        dielectric_f0 + (base[2] - dielectric_f0) * metallic,
+    ];
+    let diffuse_color = [
+        base[0] * (1.0 - metallic),
+        base[1] * (1.0 - metallic),
+        base[2] * (1.0 - metallic),
+    ];
+
+    let v = [-rd[0], -rd[1], -rd[2]]; // view dir = -ray_dir (the shared ray-gen)
+    let l = v_normalize(PBR_LIGHT_DIR);
+    let hvec = v_normalize([v[0] + l[0], v[1] + l[1], v[2] + l[2]]);
+    let nov = v_dot(n, v).max(1e-4);
+    let nol = v_dot(n, l).max(0.0);
+    let noh = v_dot(n, hvec).clamp(0.0, 1.0);
+    let loh = v_dot(l, hvec).clamp(0.0, 1.0);
+
+    let shadow = attrs.shadow as f32 / 255.0;
+    let ao = attrs.ao as f32 / 255.0;
+
+    // Direct term: (Lambert diffuse + D*V*F specular) * NoL * shadow * light color.
+    let d_term = d_ggx(noh, a);
+    let v_term = v_smith_ggx_correlated(nov, nol, a);
+    let f_term = f_schlick(loh, f0);
+    let pi = core::f32::consts::PI;
+    let mut lit = [0.0_f32; 3];
+    for c in 0..3 {
+        let spec = d_term * v_term * f_term[c];
+        let diff = diffuse_color[c] * (1.0 / pi);
+        let direct = (diff + spec) * (nol * shadow) * PBR_LIGHT_COLOR[c];
+
+        // Ambient: EnvBRDFApprox specular against the sky + hemisphere diffuse, * ao.
+        let dfg = env_brdf_approx(roughness, nov);
+        let spec_ambient = (f0[c] * dfg[0] + dfg[1]) * PBR_SKY_SPEC[c];
+        let diff_ambient = diffuse_color[c] * PBR_SKY_DIFFUSE[c];
+        let ambient = (spec_ambient + diff_ambient) * ao;
+
+        lit[c] = direct + ambient + mat.emissive[c];
+    }
+    pack_rgba(lit)
 }
 
 // ===========================================================================
