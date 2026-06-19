@@ -18,3 +18,11 @@ boyko_rhi = { path = "../boyko_rhi" }
 # the rung-8/9/10/11 golden mirror in `compute.rs` folds and that `boyko_physics`
 # (W5) reuses for CPU SDF-collision queries WITHOUT depending on this crate.
 boyko_sdf_math = { path = "../boyko_sdf_math" }
+
+# Test-only. `proptest` drives the Render B1 over-relaxation soundness oracle
+# (the hit-set-superset no-hole property over randomized SDF scenes — the Candidate-C
+# correctness gate). It is a DEV-dependency only — the shipped backend stays third-party-free
+# (the "no ash/vulkano/windows-sys/libc" constraint above governs `[dependencies]`,
+# not the test harness). proptest pulls only host-side, graphics-free crates.
+[dev-dependencies]
+proptest = "1"

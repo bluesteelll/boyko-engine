@@ -51,12 +51,16 @@
 //               `coarse_enabled` push constant is non-zero; the OFF path never touches
 //               it (byte-identical to the pre-P4b marcher — the 0%-gate).
 //
-// # The `coarse_enabled` push constant (Render P4b — pushed against THIS pipeline's
-//   OWN dedicated layout via `push_compute_constants`, NOT the shared `push_constants`)
+// # The push constant (Render P4b + B1 — pushed against THIS pipeline's OWN dedicated
+//   layout via `push_compute_constants`, NOT the shared `push_constants`)
 //
-// A 4-byte `[[vk::push_constant]] uint coarse_enabled` gates the coarse cull. `0`
-// (cull-off) keeps the marcher byte-identical to today; `!= 0` reads binding 6 and
-// either early-outs an EMPTY tile (mesh/background composite) or seeds `t = near_t`.
+// An 8-byte `[[vk::push_constant]]` block: `uint coarse_enabled` (offset 0) gates the
+// coarse cull and `float omega` (offset 4) carries the Render B1 over-relaxation factor.
+// `coarse_enabled == 0` (cull-off) keeps the marcher byte-identical to today; `!= 0`
+// reads binding 6 and either early-outs an EMPTY tile (mesh/background composite) or
+// seeds `t = near_t`. `omega == 1.0` keeps the sphere-trace TEXTUALLY the frozen plain
+// loop (the 0%-gate); `> 1.0` enables Keinert over-relaxation with an exact-retreat
+// safeguard. 8 bytes fits the declared 80-byte COMPOSITE push range.
 //
 // # The `[[vk::image_format("rgba8")]]` qualifier (REQUIRED)
 //
@@ -141,10 +145,18 @@ struct TileBound {
 };
 StructuredBuffer<TileBound> Tiles : register(t6);
 
-// Render P4b: a 4-byte push constant on the fine pipeline (the ONLY push — the camera
-// is the UBO @ b5). `coarse_enabled == 0` keeps the OFF path BYTE-IDENTICAL to today's
-// marcher (the 0%-gate anchor); `!= 0` reads the tile's `TileBound` and culls.
-[[vk::push_constant]] struct PushConstants { uint coarse_enabled; } pc;
+// Render P4b: a push constant on the fine pipeline (the ONLY push — the camera is the
+// UBO @ b5). `coarse_enabled == 0` keeps the OFF path BYTE-IDENTICAL to today's marcher
+// (the 0%-gate anchor); `!= 0` reads the tile's `TileBound` and culls.
+//
+// Render B1: a second 4-byte field `omega` carries the Keinert over-relaxation factor,
+// host-clamped to [1.0, 1.99]. At `omega == 1.0` the marcher's live path is TEXTUALLY
+// the frozen plain sphere-trace (see the gated loop below — the 0%-gate). 8 bytes fits
+// the declared 80-byte COMPOSITE push range, so pipeline creation is unchanged.
+[[vk::push_constant]] struct PushConstants {
+    uint  coarse_enabled;   // offset 0 (unchanged)
+    float omega;            // offset 4 — Keinert over-relaxation factor, host-clamped [1.0, 1.99]
+} pc;
 
 // P4b: the EMPTY flag bit (mirrors the host `TILE_FLAG_EMPTY` + sdf_tile_cull.hlsl).
 static const uint TILE_FLAG_EMPTY = 1u;
@@ -264,23 +276,116 @@ void main(uint3 tid : SV_DispatchThreadID) {
     // Sphere-trace, BOUNDED by the mesh depth: as soon as the march parameter reaches
     // t_mesh the mesh is in front from here on, so the SDF cannot win. P4b seeds the
     // start at `t_seed` (0.0 when cull-off — byte-identical; else the tile's near_t).
+    //
+    // Render B1: Keinert over-relaxation (omega-gated). The ENTIRE over-relaxation block
+    // is gated behind `if (omega > 1.0)`; the else-arm is the VERBATIM frozen `t += d`,
+    // so at omega == 1.0 the live path is textually the pre-B1 plain sphere-trace (the
+    // 0%-gate). The frozen ordering (top mesh-guard, probe, hit test, step, miss test) is
+    // preserved exactly.
     float t = t_seed;
+    float omega = pc.omega;          // [1.0, 1.99] host-clamped
     bool hit = false;
+    float safe_t = 0.0;              // probe param remembered for an exact retreat
+    float sor_prev = 0.0;           // previous probe's d
+    float sor_step_prev = 0.0;      // previous over-relaxed step length
+    // BUG-B1-HOLE-3 (Candidate C): EXHAUSTION flag. Set only if the fast loop runs
+    // ALL MAX_IT iterations without ANY break — i.e. the ray neither converged
+    // (`hit`), nor clearly left the scene (`t > T_MAX`), nor hit the mesh
+    // (`t >= t_mesh`); it simply ran out of budget mid-field. This is the precise,
+    // minimal re-march trigger (under-detecting it would reopen the hole; the flag is
+    // unambiguous — it is true exactly when the `for` falls off the end). It starts
+    // `true` and is cleared by EVERY in-loop `break`.
+    bool exhausted = true;
     [loop]
     for (uint it = 0u; it < MAX_IT; ++it) {
         if (t >= t_mesh) {
             // The mesh occludes the SDF from this distance onward — stop marching.
+            exhausted = false;       // mesh-occlusion termination — NOT budget exhaustion
             break;
         }
         float3 p = ro + rd * t;
         float d = sdf(p);
         if (d < EPS) {
             hit = true;
+            exhausted = false;       // converged — NOT budget exhaustion
             break;
         }
-        t += d;
+        if (omega > 1.0) {
+            float step_len = d * omega;
+            // sor_fail: the over-step taken last iter overshot the previous unbounding
+            // sphere. Valid only for omega < 2 (host-clamped). Spheres must overlap or we
+            // may have skipped a surface. Lipschitz-aware (BUG-B1-HOLE-1): IQ's smooth-min
+            // is super-Lipschitz, so the guaranteed-empty radius at field value `f` is `f/L`,
+            // not `f`. Two empty balls (radii sor_prev/L, d/L) cover the over-relaxed step
+            // `sor_step_prev` iff `sor_prev + d >= L*sor_step_prev`; the retreat must fire
+            // when that fails. Multiply the threshold by FIELD_LIPSCHITZ_L (defined in
+            // sdf_field.hlsli) to keep the lower-bound invariant sound in blend bands.
+            //
+            // The `it > 0u` guard is LOAD-BEARING (do not remove): a sor-fail can only be
+            // reached after at least one ACCEPTED over-relax step (it >= 1 ⟹ accepted >= 1),
+            // which is what pre-pays the +1 retreat iteration in the budget proof below.
+            if (it > 0u && sor_prev + d < FIELD_LIPSCHITZ_L * sor_step_prev) {
+                // BUG-B1-HOLE-2: do NOT retreat to bare `safe_t` and re-probe. That re-evals
+                // the field at safe_t (costing +2 iters vs a plain march), and on a ray
+                // converging at the MAX_IT cliff the extra probe overflows the budget → a
+                // missed-surface hole. Instead RESUME the plain march ONE certified step past
+                // the safe point: `safe_t` is the exact probe param and `sor_prev` is the
+                // exact field value sampled there, so `safe_t + sor_prev` is precisely where a
+                // plain march lands after probing safe_t — reusing that eval (no re-probe). The
+                // add is one same-sign FMA-free addition (both operands >= 0): no catastrophic
+                // cancellation, unlike a `t - <correction>` subtraction form. Net cost is +1
+                // iteration vs plain, pre-paid by the >= 1 accepted over-step (the it>0 guard).
+                t = safe_t + sor_prev; // plain-resume one certified step past the safe probe
+                omega = 1.0;           // permanent fall-to-plain for the rest of this ray
+                continue;
+            }
+            safe_t = t;              // remember THIS probe point
+            sor_prev = d;
+            sor_step_prev = step_len;
+            t += step_len;
+        } else {
+            t += d;                  // frozen plain arm — TEXTUALLY identical to the frozen loop
+        }
         if (t > T_MAX) {
+            exhausted = false;       // clear-miss termination — NOT budget exhaustion
             break;
+        }
+    }
+
+    // BUG-B1-HOLE-3 (Candidate C): the PROVABLY-hole-free fallback re-march. The fast
+    // over-relaxed pass above can fall BEHIND a plain march on a non-monotone field
+    // (the `steps(omega) <= steps(1)` bound is genuinely violated and unbounded), so it
+    // can exhaust the budget mid-field on a ray the FROZEN plain marcher would have hit.
+    // If that happened (`exhausted` — ran all MAX_IT with no break, so it neither
+    // converged nor left the scene nor hit the mesh), RE-MARCH from the ORIGINAL seed
+    // with a plain omega = 1.0 sphere-trace and use ITS result. This second loop is the
+    // EXACT frozen marcher body (no omega, no sor logic — `t += d`), so any surface the
+    // frozen path hits within MAX_IT it hits here too. Hence B1 reports "no hit" only
+    // where BOTH passes miss — i.e. exactly where the frozen marcher misses: B1's hit-set
+    // is identical to the frozen hit-set with NO dependence on any step-count bound.
+    //
+    // At omega == 1.0 the fast pass IS the frozen plain loop, so on exhaustion this
+    // re-march reproduces the identical frozen (hit = false) result — the omega == 1.0
+    // OUTPUT is byte-unchanged (the 0%-gate). Over-detecting `exhausted` is harmless
+    // (a clear-miss re-march just misses again); under-detecting would reopen a hole.
+    if (exhausted) {
+        t = t_seed;                  // re-seed from the SAME original seed the fast pass used
+        hit = false;
+        [loop]
+        for (uint it2 = 0u; it2 < MAX_IT; ++it2) {
+            if (t >= t_mesh) {
+                break;               // mesh occludes from here on
+            }
+            float3 p = ro + rd * t;
+            float d = sdf(p);
+            if (d < EPS) {
+                hit = true;
+                break;
+            }
+            t += d;                  // frozen plain step
+            if (t > T_MAX) {
+                break;
+            }
         }
     }
 

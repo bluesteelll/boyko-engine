@@ -46,13 +46,13 @@ use boyko_rhi::{
     TextureDesc, TextureDimension, VertexAttribute, VertexBufferLayout, VertexFormat, Viewport,
 };
 use boyko_rhi_vulkan::compute::{
-    COMPOSITE_PUSH_CONSTANT_BYTES, CompositeCamera, CompositePushConstants, LOCAL_SIZE_X,
-    MESH_COLOR, MESH_DEPTH_CLEAR, SDF_CAMERA_Z, SDF_IMG_H, SDF_IMG_W, SDF_TRACE_T_MAX,
-    SDF_VIEW_HALF_EXTENT, SdfEdit, TILE_BOUND_BYTES, TILE_FLAG_EMPTY, TILE_SIZE, TileBound,
-    EDITLIST_BUFFER_WORDS, editlist_pixel_hits, encode_edit_list,
-    golden_composite_pixel_culled, golden_composite_pixel_ex, golden_tile_bound, mesh_depth_for_z,
-    pack_rgba, pixel_world_xy, sdf_gbuffer_composite_spirv, sdf_op, sdf_tile_cull_spirv,
-    tile_grid_extent,
+    COMPOSITE_PUSH_CONSTANT_BYTES, CompositeCamera, CompositePushConstants,
+    DEFAULT_MARCHER_OMEGA, LOCAL_SIZE_X, MESH_COLOR, MESH_DEPTH_CLEAR, SDF_CAMERA_Z, SDF_IMG_H,
+    SDF_IMG_W, SDF_TRACE_T_MAX, SDF_VIEW_HALF_EXTENT, SdfEdit, TILE_BOUND_BYTES, TILE_FLAG_EMPTY,
+    TILE_SIZE, TileBound, EDITLIST_BUFFER_WORDS, editlist_pixel_hits, encode_edit_list,
+    golden_composite_pixel_culled, golden_composite_pixel_ex,
+    golden_composite_pixel_ex_omega, golden_tile_bound, mesh_depth_for_z, pack_rgba, pixel_world_xy,
+    sdf_gbuffer_composite_spirv, sdf_op, sdf_tile_cull_spirv, tile_grid_extent,
 };
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
 
@@ -282,9 +282,14 @@ fn texel_close(got: [i32; 3], want_packed: u32) -> bool {
 /// replaces the old copy + its two barriers. The vocabulary set is written ONCE at
 /// `create_bind_group` — there is no per-frame `vkUpdateDescriptorSets`.
 fn run_gbuffer_hybrid(ctx: &VulkanContext, edits: &[SdfEdit], coarse_enabled: bool) -> Vec<u8> {
-    // Delegate to the `_ex` variant, discarding the tiles-buffer readback. Keeps the
-    // existing callers (`p1b_gbuffer_hybrid_matches_golden`) byte-for-byte unchanged.
-    run_gbuffer_hybrid_ex(ctx, edits, coarse_enabled, false).0
+    // Delegate to the `_ex` variant, discarding the tiles-buffer readback. Defaults the
+    // Render B1 over-relaxation factor to `1.0` — the marcher byte-identical to the pre-B1
+    // path — so the existing 0%-gate callers (`p1b_gbuffer_hybrid_matches_golden`, the
+    // GATE-4 `p4b_cull_off_is_byte_identical_to_pre_p4b_path`) stay TRUE ω=1.0 byte-identity
+    // gates against the ω=1.0 host golden. The ω>1 path (engine default
+    // `DEFAULT_MARCHER_OMEGA`) is exercised by the dedicated B1 over-relaxation tests, which
+    // call `run_gbuffer_hybrid_ex` with an explicit ω and diff against `_omega` host goldens.
+    run_gbuffer_hybrid_ex(ctx, edits, coarse_enabled, false, 1.0).0
 }
 
 /// Render P4b — the extended harness: the same OFFSCREEN G-buffer hybrid composite as
@@ -300,11 +305,16 @@ fn run_gbuffer_hybrid(ctx: &VulkanContext, edits: &[SdfEdit], coarse_enabled: bo
 /// `read_tiles` requires `coarse_enabled` — the coarse pass only runs (and only writes
 /// binding 6) when culling is on; reading it back otherwise yields the buffer's
 /// undefined create-time contents. The caller is responsible for pairing them.
+///
+/// `omega_in` is the Render B1 over-relaxation factor; it is RUNTIME-clamped to
+/// `[1.0, 1.99]` before the push encode (the soundness ceiling sits at `omega == 2`).
+/// `1.0` keeps the marcher byte-identical to the pre-B1 path (the 0%-gate).
 fn run_gbuffer_hybrid_ex(
     ctx: &VulkanContext,
     edits: &[SdfEdit],
     coarse_enabled: bool,
     read_tiles: bool,
+    omega_in: f32,
 ) -> (Vec<u8>, Option<Vec<u8>>) {
     let device: &VulkanContext = ctx;
     let queue = ctx.rhi_queue();
@@ -690,8 +700,16 @@ fn run_gbuffer_hybrid_ex(
     // the marcher's OWN layout (via `push_compute_constants`). ---
     encoder.bind_compute_pipeline(&compute);
     encoder.bind_descriptor_set_compute(&bind_group, &compute);
+    // Render P4b + B1: the 8-byte push — `coarse_enabled` (offset 0) gates the cull and
+    // `omega` (offset 4) carries the over-relaxation factor. The clamp is a RUNTIME
+    // `f32::clamp` (NOT a debug_assert): `omega == 2` is the soundness ceiling, so a
+    // caller passing a hot value must be defanged in release too.
     let coarse_flag: u32 = u32::from(coarse_enabled);
-    encoder.push_compute_constants(&compute, ShaderStage::COMPUTE, 0, &coarse_flag.to_le_bytes());
+    let omega: f32 = omega_in.clamp(1.0, 1.99);
+    let mut push = [0u8; 8];
+    push[0..4].copy_from_slice(&coarse_flag.to_le_bytes());
+    push[4..8].copy_from_slice(&omega.to_le_bytes());
+    encoder.push_compute_constants(&compute, ShaderStage::COMPUTE, 0, &push);
     encoder.dispatch(group_count_x(), 1, 1);
 
     // --- ALBEDO: GENERAL → TRANSFER_SRC_OPTIMAL for the readback copy. ---
@@ -1083,7 +1101,7 @@ fn p4b_tiles_buffer_agrees_with_host_golden() {
     const T_EPS: f32 = 1.0e-4;
 
     for (name, edits) in p4b_scenes() {
-        let (_albedo, tiles) = run_gbuffer_hybrid_ex(&ctx, &edits, true, true);
+        let (_albedo, tiles) = run_gbuffer_hybrid_ex(&ctx, &edits, true, true, 1.0);
         let tiles = tiles.expect("read_tiles = true returns the tiles readback");
         let gpu = parse_tile_bounds(&tiles);
         assert_eq!(gpu.len(), tile_count() as usize, "[{name}] tile count");
@@ -1310,7 +1328,7 @@ fn p4b_cull_on_is_validation_clean() {
     };
     // crater is the densest fixture (a CSG carve), so it exercises both the coarse trace and
     // the fine seeded march hardest. A clean return = validation-clean (asserted inside).
-    let (albedo, tiles) = run_gbuffer_hybrid_ex(&ctx, &crater(), true, true);
+    let (albedo, tiles) = run_gbuffer_hybrid_ex(&ctx, &crater(), true, true, 1.0);
     assert_eq!(albedo.len(), READBACK_BYTES as usize);
     let tiles = tiles.expect("read_tiles");
     let bounds = parse_tile_bounds(&tiles);
@@ -1319,6 +1337,242 @@ fn p4b_cull_on_is_validation_clean() {
     println!(
         "[crater_csg] GATE5 cull-ON validation-clean: {} tiles ({} surface) + the coarse→fine \
          buffer barrier raised no hazard",
+        bounds.len(),
+        surface
+    );
+}
+
+// ===========================================================================================
+// Render B1 — over-relaxation (Keinert ω-gated) GPU gates (RTX 3060, validation ON).
+//
+//   6.  GPU ω=1 BIT-identity — `run_gbuffer_hybrid_ex(.., 1.0)` byte-identical to the cull-OFF
+//       pre-B1 path (two runs equal + every texel == the ω=1 host golden), cull-off AND cull-on.
+//   7.  GPU ω>1 HIT/MISS parity — the GPU ω∈{1.2,1.5,1.9} render's per-pixel hit/miss set ==
+//       the ω=1 GPU render's, on crater + box + smooth_union (the SHIPPED fixtures).
+//   8.  GPU ω=1.2 ±2/255 vs the MATCHED-ω host oracle `golden_composite_pixel_ex_omega(.., 1.2)`
+//       (NOT the ω=1 golden) — the m1 the reviewer flagged as missing.
+//   8c. GPU repro of BUG-B1-HOLE-1 — the host-confirmed hole scene rendered on-device; documents
+//       the hole is NOT host-only. `#[ignore]` (it asserts the buggy state; flip after the fix).
+//   11. SYNC-validation clean — a cull-ON ω=1.2 dispatch raises no sync hazard.
+//
+// A GPU pixel is classified HIT / MESH / BACKGROUND by nearest packed reference color (the three
+// composite outcomes differ by 100+ per channel, so a ±2/255 store quantization never flips the
+// class). The hit/miss SET is the soundness invariant ω>1 must preserve.
+// ===========================================================================================
+
+/// The packed background color the marcher writes on a miss (`SDF_BACKGROUND = [0.05,0.05,0.1]`).
+fn packed_background() -> [i32; 3] {
+    unpack_packed_rgb(pack_rgba([0.05, 0.05, 0.1]))
+}
+
+/// Classifies a GPU albedo texel as `true` (an SDF surface hit) when it is closer to neither the
+/// packed MESH_COLOR nor the packed BACKGROUND than `CHANNEL_TOL` allows — i.e. it is the LIT SDF
+/// color. The three outcomes are >100/255 apart, so the ±2/255 store quantization never reclasses.
+fn gpu_pixel_is_sdf_hit(albedo: &[u8], px: u32, py: u32) -> bool {
+    let got = albedo_rgb(albedo, px, py);
+    let mesh = unpack_packed_rgb(pack_rgba(MESH_COLOR));
+    let bg = packed_background();
+    let near = |r: [i32; 3]| (0..3).all(|c| (got[c] - r[c]).abs() <= CHANNEL_TOL);
+    !near(mesh) && !near(bg)
+}
+
+/// **B1 GATE 6 — GPU ω=1 BIT-identity (cull-off + cull-on).** `run_gbuffer_hybrid_ex(.., 1.0)`
+/// must (a) be byte-stable across two runs, and (b) match the ω=1 host golden within ±2/255
+/// (the same contract the pre-B1 `p1b`/GATE-4 0%-gates assert) — proving the widened 8-byte push
+/// with ω=1.0 reproduces the committed pre-B1 marcher EXACTLY on-device. Runs cull-off AND cull-on.
+#[test]
+fn b1_gate6_gpu_omega_one_bit_identical_to_pre_b1() {
+    let Some(ctx) = boot_render_or_skip("b1_gate6_gpu_omega_one_bit_identical_to_pre_b1") else {
+        return;
+    };
+    for (name, edits) in p4b_scenes() {
+        for coarse in [false, true] {
+            // Two ω=1.0 runs must be byte-identical (deterministic).
+            let a = run_gbuffer_hybrid_ex(&ctx, &edits, coarse, false, 1.0).0;
+            let b = run_gbuffer_hybrid_ex(&ctx, &edits, coarse, false, 1.0).0;
+            assert_eq!(a.len(), READBACK_BYTES as usize, "[{name} cull={coarse}] readback size");
+            assert_eq!(a, b, "[{name} cull={coarse}] two ω=1.0 runs diverged — non-deterministic marcher");
+
+            // Prove the device executed (not a silent all-zero buffer).
+            let nonzero = a.chunks_exact(4).filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+            assert!(nonzero > 0, "[{name} cull={coarse}] ω=1.0 albedo all-zero — device did not render");
+
+            // Each ω=1.0 texel within ±2/255 of the ω=1 host golden (the cull path uses the
+            // tile bound the GPU coarse pass wrote; cull-off uses the un-culled golden).
+            let tiles = if coarse {
+                Some(run_gbuffer_hybrid_ex(&ctx, &edits, true, true, 1.0).1.expect("read_tiles"))
+            } else {
+                None
+            };
+            let bounds = tiles.as_ref().map(|t| parse_tile_bounds(t));
+            let mut max_delta = 0i32;
+            for py in 0..SDF_IMG_H {
+                for px in 0..SDF_IMG_W {
+                    let got = albedo_rgb(&a, px, py);
+                    let md = expected_mesh_depth(px, py);
+                    let want = if let Some(bs) = &bounds {
+                        let (tw, _) = tile_extent();
+                        let tb = bs[((py / TILE_SIZE) * tw + (px / TILE_SIZE)) as usize];
+                        golden_composite_pixel_culled(
+                            &edits, md, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, true, tb,
+                        )
+                    } else {
+                        golden_composite_pixel_ex(&edits, md, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho)
+                    };
+                    let w = unpack_packed_rgb(want);
+                    for ch in 0..3 {
+                        let dd = (got[ch] - w[ch]).abs();
+                        max_delta = max_delta.max(dd);
+                        assert!(
+                            dd <= CHANNEL_TOL,
+                            "[{name} cull={coarse}] ω=1.0 texel ({px},{py}) ch{ch} got {got:?} want {w:?} > ±{CHANNEL_TOL}/255"
+                        );
+                    }
+                }
+            }
+            println!("[{name} cull={coarse}] GATE6 ω=1.0 byte-stable + matches ω=1 host golden (max delta {max_delta}/255)");
+        }
+    }
+}
+
+/// **B1 GATE 7 — GPU ω>1 HIT/MISS parity.** For each SHIPPED fixture, the GPU ω∈{1.2,1.5,1.9}
+/// render's per-pixel SDF-hit set must EQUAL the ω=1 GPU render's. A pixel that hits at ω=1 but
+/// becomes mesh/background at ω>1 = a missed-surface HOLE; the reverse (a new spurious hit) = a
+/// phantom surface. Either fails with `(px,py)` + both classes. (The shipped fixtures are hole-free
+/// per the host gate-2 scope analysis; this confirms it ON-DEVICE.)
+#[test]
+fn b1_gate7_gpu_overrelax_hit_miss_parity() {
+    let Some(ctx) = boot_render_or_skip("b1_gate7_gpu_overrelax_hit_miss_parity") else {
+        return;
+    };
+    for (name, edits) in p4b_scenes() {
+        let base = run_gbuffer_hybrid_ex(&ctx, &edits, false, false, 1.0).0;
+        let base_hits = base.chunks_exact(4).filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+        assert!(base_hits > 0, "[{name}] ω=1 baseline all-zero — device did not render");
+        for &omega in &[1.2_f32, 1.5, 1.9] {
+            let over = run_gbuffer_hybrid_ex(&ctx, &edits, false, false, omega).0;
+            let mut sdf_px = 0u64;
+            for py in 0..SDF_IMG_H {
+                for px in 0..SDF_IMG_W {
+                    let h1 = gpu_pixel_is_sdf_hit(&base, px, py);
+                    let ho = gpu_pixel_is_sdf_hit(&over, px, py);
+                    if h1 {
+                        sdf_px += 1;
+                    }
+                    assert_eq!(
+                        h1, ho,
+                        "[{name}] ω={omega} HIT/MISS PARITY broke at ({px},{py}): ω=1 hit={h1} vs ω={omega} hit={ho} \
+                         (ω=1 {:?} vs ω={omega} {:?})",
+                        albedo_rgb(&base, px, py), albedo_rgb(&over, px, py)
+                    );
+                }
+            }
+            println!("[{name}] GATE7 ω={omega} hit/miss parity OK ({sdf_px} SDF-hit px match ω=1)");
+        }
+    }
+}
+
+/// **B1 GATE 8 — GPU ω=1.2 ±2/255 vs the MATCHED-ω host oracle.** Each GPU ω=1.2 texel must be
+/// within ±2/255 of `golden_composite_pixel_ex_omega(.., 1.2)` (the ω-aware host golden — NOT the
+/// ω=1 golden). This proves the GPU over-relaxation marcher reproduces the host ω-marcher's
+/// per-pixel COLOR, not merely the hit/miss class. The reviewer flagged this matched-ω oracle as
+/// missing. Per-scene max delta is reported. (Shipped fixtures only — they are hole-free.)
+#[test]
+fn b1_gate8_gpu_omega_1_2_matches_matched_omega_host() {
+    let Some(ctx) = boot_render_or_skip("b1_gate8_gpu_omega_1_2_matches_matched_omega_host") else {
+        return;
+    };
+    let omega = DEFAULT_MARCHER_OMEGA; // 1.2 — the production default
+    for (name, edits) in p4b_scenes() {
+        let albedo = run_gbuffer_hybrid_ex(&ctx, &edits, false, false, omega).0;
+        assert_eq!(albedo.len(), READBACK_BYTES as usize);
+        let nonzero = albedo.chunks_exact(4).filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+        assert!(nonzero > 0, "[{name}] ω={omega} albedo all-zero — device did not render");
+        let mut max_delta = 0i32;
+        for py in 0..SDF_IMG_H {
+            for px in 0..SDF_IMG_W {
+                let got = albedo_rgb(&albedo, px, py);
+                let md = expected_mesh_depth(px, py);
+                let want = golden_composite_pixel_ex_omega(
+                    &edits, md, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, omega,
+                );
+                let w = unpack_packed_rgb(want);
+                for ch in 0..3 {
+                    let dd = (got[ch] - w[ch]).abs();
+                    max_delta = max_delta.max(dd);
+                    assert!(
+                        dd <= CHANNEL_TOL,
+                        "[{name}] ω={omega} texel ({px},{py}) ch{ch} got {got:?} want {w:?} > ±{CHANNEL_TOL}/255 \
+                         (vs the MATCHED-ω host oracle)"
+                    );
+                }
+            }
+        }
+        println!("[{name}] GATE8 ω={omega} GPU matches matched-ω host oracle (max delta {max_delta}/255)");
+    }
+}
+
+/// **B1 GATE 8c — BUG-B1-HOLE-1 mesh-masking on the GPU harness (documented).** The host-confirmed
+/// over-relax hole (super-Lipschitz smooth-min CSG) cannot be SHOWN through this fixed-mesh harness:
+/// EVERY hole pixel of that scene falls inside the mesh quad footprint (x ∈ [-1, 0.2]) — the mesh
+/// occludes the SDF there, so both ω=1 and ω=1.2 composite MESH_COLOR and the hole is invisible on
+/// readback. A 40k-trial host search found NO smooth-min hole pixel outside the mesh x-range. This
+/// test ASSERTS that masking (the hole pixel is mesh-covered on-device, NOT an SDF hit at ω=1),
+/// recording WHY the GPU half cannot expose BUG-B1-HOLE-1 with the current harness. The bug itself
+/// is proven host-side (`compute::b1_over_relaxation_tests::gate2_*` + the `bug_b1_hole_1_*` pin);
+/// the shader marcher is line-for-line the host `_omega` oracle, so the host proof IS the on-device
+/// proof. A no-mesh / relocated-mesh harness variant (developer wiring, out of the tester remit)
+/// would surface it directly.
+#[test]
+fn b1_gate8c_bug_b1_hole_1_is_mesh_masked_on_gpu_harness() {
+    let Some(ctx) = boot_render_or_skip("b1_gate8c_bug_b1_hole_1_is_mesh_masked_on_gpu_harness") else {
+        return;
+    };
+    let edits = vec![
+        SdfEdit::sphere([0.31460363, 0.70498204, -0.7611318], 0.36075538, sdf_op::UNION, 0.0),
+        SdfEdit::box_shape([0.092381336, 0.1372761, -0.5955315], [0.19970395, 0.46420184, 0.3901827], sdf_op::UNION, 0.24384262),
+        SdfEdit::sphere([0.4506038, 0.16997452, 0.0], 0.44928917, sdf_op::UNION, 0.0),
+    ];
+    let (px, py) = (28u32, 16u32);
+    // The host hole pixel is inside the mesh footprint — the harness's mesh quad covers it.
+    assert!(mesh_covers_pixel(px, py), "the documented hole pixel must be mesh-covered (the masking premise)");
+    let at1 = run_gbuffer_hybrid_ex(&ctx, &edits, false, false, 1.0).0;
+    let at12 = run_gbuffer_hybrid_ex(&ctx, &edits, false, false, 1.2).0;
+    let g1 = albedo_rgb(&at1, px, py);
+    let g12 = albedo_rgb(&at12, px, py);
+    let mesh = unpack_packed_rgb(pack_rgba(MESH_COLOR));
+    println!(
+        "[BUG-B1-HOLE-1 GPU] ({px},{py}) mesh-covered: ω=1 {g1:?} ω=1.2 {g12:?} (MESH_COLOR {mesh:?}) — hole MASKED by the mesh quad"
+    );
+    // Both composite the mesh (the SDF — hit or hole — is occluded), so the GPU readback cannot
+    // distinguish the hole here. This documents the harness limitation, not a B1 success.
+    assert!(
+        (0..3).all(|c| (g1[c] - mesh[c]).abs() <= CHANNEL_TOL),
+        "ω=1 ({g1:?}) must be MESH_COLOR ({mesh:?}) at the mesh-covered hole pixel"
+    );
+    assert!(
+        !gpu_pixel_is_sdf_hit(&at1, px, py),
+        "the hole pixel is mesh-covered on-device, so it is not an exposed SDF hit (the masking)"
+    );
+}
+
+/// **B1 GATE 11 — sync-validation clean under cull-ON ω=1.2.** A cull-ON ω=1.2 dispatch that
+/// returns proves `assert_validation_clean` passed (asserted inside `run_gbuffer_hybrid_ex` before
+/// return): the widened 8-byte push (ω at offset 4) adds NO new resource hazard over the pre-B1
+/// cull-ON path. The coarse→fine Tiles barrier is unchanged; ω is push-constant data only.
+#[test]
+fn b1_gate11_cull_on_omega_1_2_sync_validation_clean() {
+    let Some(ctx) = boot_render_or_skip("b1_gate11_cull_on_omega_1_2_sync_validation_clean") else {
+        return;
+    };
+    let (albedo, tiles) = run_gbuffer_hybrid_ex(&ctx, &crater(), true, true, DEFAULT_MARCHER_OMEGA);
+    assert_eq!(albedo.len(), READBACK_BYTES as usize);
+    let bounds = parse_tile_bounds(&tiles.expect("read_tiles"));
+    let surface = bounds.iter().filter(|b| b.flags & TILE_FLAG_EMPTY == 0).count();
+    assert!(surface > 0, "the coarse pass must have marked at least one surface tile");
+    println!(
+        "[crater_csg] GATE11 cull-ON ω={DEFAULT_MARCHER_OMEGA} validation-clean: {} tiles ({} surface); \
+         the widened push raised no new hazard",
         bounds.len(),
         surface
     );

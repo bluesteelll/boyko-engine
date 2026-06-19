@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc b83e96c9c346e42e9a42e4c4d53e4653ffee0a269eb5d03189dcfda3dca541b6 # shrinks to edits = [SdfEdit { center: [0.0, 0.0, 0.0, 0.0], params: [0.05, 0.0, 0.0, 0.0], kind: 0, op: 0, smoothness: 0.0, _pad: 0 }]
+cc 9f99e2687cff55fcea0d032c58bb47984076fdeb346f2510c9caa5f6c36f2a7e # shrinks to edits = [SdfEdit { center: [0.31460363, 0.70498204, -0.7611318, 0.0], params: [0.36075538, 0.0, 0.0, 0.0], kind: 0, op: 0, smoothness: 0.0, _pad: 0 }, SdfEdit { center: [0.092381336, 0.1372761, -0.5955315, 0.0], params: [0.19970395, 0.46420184, 0.3901827, 0.0], kind: 1, op: 0, smoothness: 0.24384262, _pad: 0 }, SdfEdit { center: [0.4506038, 0.16997452, 0.0, 0.0], params: [0.44928917, 0.0, 0.0, 0.0], kind: 0, op: 0, smoothness: 0.0, _pad: 0 }]

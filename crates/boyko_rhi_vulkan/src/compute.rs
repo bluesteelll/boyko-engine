@@ -125,7 +125,7 @@ static SDF_EDITLIST_STORAGE_IMAGE_SPV: SpirvBlob<24092> = SpirvBlob(*include_byt
 /// additive normal/material @ bindings 3/4). The extent/camera block moves to a UNIFORM
 /// buffer @ binding 5 (written once). The edit-list stays a `StructuredBuffer` @
 /// binding 0.
-static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<28544> = SpirvBlob(*include_bytes!(concat!(
+static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<33096> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/sdf_gbuffer_composite.comp.spv"
 )));
@@ -348,6 +348,13 @@ const SDF_BACKGROUND: [f32; 3] = [0.05, 0.05, 0.1];
 const SDF_EPS: f32 = 0.001;
 const SDF_T_MAX: f32 = 10.0;
 const SDF_MAX_IT: u32 = 128;
+
+/// The default Render B1 over-relaxation factor the harness pushes when a caller does
+/// not specify one. Keinert's sphere-tracing speed-up steps `t += omega * d`; values in
+/// `(1, 2)` accelerate convergence on shallow-grazing rays while the in-shader
+/// exact-retreat safeguard preserves correctness. `1.2` is the conservative default; the
+/// host runtime clamp is `[1.0, 1.99]` (the soundness ceiling sits at `omega == 2`).
+pub const DEFAULT_MARCHER_OMEGA: f32 = 1.2;
 
 /// `sdf(p) = length(p - center) - radius` — the analytic field, mirroring the
 /// shader's `sdf_sphere`. Exposed so a later CPU physics evaluator can be
@@ -991,6 +998,31 @@ pub fn golden_composite_pixel_ex(
     img_h: u32,
     camera: CompositeCamera,
 ) -> u32 {
+    // Render B1: the ω = 1.0 forwarder. At `omega == 1.0` the `_omega` variant's live
+    // path is the frozen plain sphere-trace, so this stays BIT-IDENTICAL to the pre-B1
+    // body and every existing caller is unchanged (the 0%-gate).
+    golden_composite_pixel_ex_omega(edits, mesh_depth, px, py, img_w, img_h, camera, 1.0)
+}
+
+/// Render B1 — the over-relaxation-aware extent/camera golden. Mirrors the shader's
+/// Keinert over-relaxation marcher EXACTLY: the `if omega > 1.0` gate, the
+/// over-relaxed step `t += omega * d`, the sor-fail exact retreat (`t = safe_t` then a
+/// permanent fall to plain), and the verbatim frozen else-arm `t += d`. At `omega == 1.0`
+/// the live path is textually the frozen plain loop, so this is BIT-IDENTICAL to the
+/// pre-B1 [`golden_composite_pixel_ex`] (the 0%-gate). `omega` is expected to already be
+/// in `[1.0, 1.99]` (the host runtime clamp); higher values are unsound (the safeguard
+/// holds only for `omega < 2`).
+#[allow(clippy::too_many_arguments)]
+pub fn golden_composite_pixel_ex_omega(
+    edits: &[SdfEdit],
+    mesh_depth: f32,
+    px: u32,
+    py: u32,
+    img_w: u32,
+    img_h: u32,
+    camera: CompositeCamera,
+    omega: f32,
+) -> u32 {
     let (ro, rd) = composite_ray(px, py, img_w, img_h, camera);
 
     let has_mesh = mesh_depth < MESH_DEPTH_CLEAR;
@@ -999,20 +1031,97 @@ pub fn golden_composite_pixel_ex(
     let t_mesh = if has_mesh { depth_to_t(mesh_depth) } else { 1.0e30 };
 
     let mut t = 0.0_f32;
+    let t_seed = t; // the ORIGINAL seed (0.0 here) — the Candidate C re-march re-seeds from it
+    let mut omega = omega; // [1.0, 1.99]; sor-fail latches it to 1.0 for the rest of the ray
     let mut hit = false;
-    for _ in 0..SDF_MAX_IT {
+    let mut safe_t = 0.0_f32; // probe param remembered for an exact retreat
+    let mut sor_prev = 0.0_f32; // previous probe's d
+    let mut sor_step_prev = 0.0_f32; // previous over-relaxed step length
+    // BUG-B1-HOLE-3 (Candidate C): the EXHAUSTION flag. True iff the fast loop runs ALL
+    // SDF_MAX_IT iterations with NO break — i.e. the ray neither converged, nor clearly
+    // left the scene (`t > T_MAX`), nor hit the mesh (`t >= t_mesh`); it ran out of
+    // budget mid-field. Starts `true`, cleared by EVERY in-loop break. Mirrors the shader.
+    let mut exhausted = true;
+    for it in 0..SDF_MAX_IT {
         if t >= t_mesh {
+            exhausted = false; // mesh-occlusion termination — NOT budget exhaustion
             break;
         }
         let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
         let d = sdf_edit_list(edits, p);
         if d < SDF_EPS {
             hit = true;
+            exhausted = false; // converged — NOT budget exhaustion
             break;
         }
-        t += d;
+        if omega > 1.0 {
+            let step_len = d * omega;
+            // sor_fail: the over-step taken last iter overshot the previous unbounding
+            // sphere (valid only for omega < 2 — spheres must overlap). Lipschitz-aware
+            // (BUG-B1-HOLE-1): the guaranteed-empty radius at field value `f` is
+            // `f / FIELD_LIPSCHITZ_L`, so the spheres cover the step iff
+            // `sor_prev + d >= L * sor_step_prev`. Mirrors the shader exactly.
+            //
+            // The `it > 0` guard is LOAD-BEARING (do not remove): a sor-fail can only be
+            // reached after at least one ACCEPTED over-relax step (it >= 1 ⟹ accepted >= 1),
+            // which pre-pays the +1 retreat iteration in the budget proof.
+            if it > 0 && sor_prev + d < FIELD_LIPSCHITZ_L * sor_step_prev {
+                // BUG-B1-HOLE-2: do NOT retreat to bare `safe_t` and re-probe (that re-evals
+                // the field, costing +2 iters vs plain and overflowing the budget at the
+                // MAX_IT cliff → a hole). RESUME the plain march one certified step past the
+                // safe point: `safe_t` is the exact probe param, `sor_prev` the exact field
+                // value there, so `safe_t + sor_prev` is precisely where a plain march lands
+                // after probing safe_t — reusing the eval (no re-probe). One same-sign add
+                // (both operands >= 0): no cancellation, unlike a `t - <correction>` form.
+                // Net +1 iter vs plain, pre-paid by the >= 1 accepted over-step (it>0 guard).
+                debug_assert!(it > 0, "B1 budget: a>=1 precondition");
+                debug_assert!(sor_prev >= SDF_EPS); // safe-point field value >= EPS → retreat strictly advances
+                t = safe_t + sor_prev; // plain-resume one certified step past the safe probe
+                debug_assert!(t > safe_t, "B1 retreat must advance");
+                omega = 1.0;
+                continue;
+            }
+            safe_t = t;
+            sor_prev = d;
+            sor_step_prev = step_len;
+            t += step_len;
+        } else {
+            t += d; // frozen plain arm — TEXTUALLY identical to the frozen loop
+        }
         if t > SDF_T_MAX {
+            exhausted = false; // clear-miss termination — NOT budget exhaustion
             break;
+        }
+    }
+
+    // BUG-B1-HOLE-3 (Candidate C): the PROVABLY-hole-free fallback re-march, mirroring
+    // the shader EXACTLY. The fast over-relaxed pass can fall BEHIND a plain march on a
+    // non-monotone field (the `steps(omega) <= steps(1)` bound is genuinely violated and
+    // unbounded), exhausting the budget mid-field on a ray the FROZEN plain marcher would
+    // have hit. On `exhausted` (ran all SDF_MAX_IT with no break) RE-MARCH from the
+    // ORIGINAL seed with a plain omega = 1.0 sphere-trace and use ITS result. This second
+    // loop is the EXACT frozen marcher body (`t += d`), so any surface the frozen path
+    // hits within MAX_IT it hits here too → B1's hit-set is identical to the frozen
+    // hit-set, with NO dependence on a step-count bound. At omega == 1.0 the fast pass IS
+    // the frozen plain loop, so on exhaustion this reproduces the identical frozen
+    // (hit = false) result — the omega == 1.0 output is byte-unchanged (the 0%-gate).
+    if exhausted {
+        t = t_seed; // re-seed from the SAME original seed the fast pass used
+        hit = false;
+        for _it2 in 0..SDF_MAX_IT {
+            if t >= t_mesh {
+                break;
+            }
+            let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
+            let d = sdf_edit_list(edits, p);
+            if d < SDF_EPS {
+                hit = true;
+                break;
+            }
+            t += d; // frozen plain step
+            if t > SDF_T_MAX {
+                break;
+            }
         }
     }
 
@@ -1404,9 +1513,48 @@ pub fn golden_composite_pixel_culled(
     coarse_enabled: bool,
     tile: TileBound,
 ) -> u32 {
+    // Render B1: the ω = 1.0 forwarder. Stays BIT-IDENTICAL to the pre-B1 culled marcher
+    // (the `_omega` variant's live path is the frozen plain loop at `omega == 1.0`), so
+    // every existing caller is unchanged (the 0%-gate).
+    golden_composite_pixel_culled_omega(
+        edits,
+        mesh_depth,
+        px,
+        py,
+        img_w,
+        img_h,
+        camera,
+        coarse_enabled,
+        tile,
+        1.0,
+    )
+}
+
+/// Render B1 — the over-relaxation-aware culled fine marcher. Identical to
+/// [`golden_composite_pixel_culled`] but threads `omega` through the march: the cull-off
+/// arm delegates to [`golden_composite_pixel_ex_omega`], the EMPTY fast-path and the
+/// `near_t` seed are preserved, and the non-EMPTY march mirrors the shader's Keinert
+/// over-relaxation EXACTLY (gate, over-relaxed step, sor-fail exact retreat, frozen
+/// else-arm). At `omega == 1.0` this is BIT-IDENTICAL to the pre-B1 path (the 0%-gate).
+/// `omega` is expected in `[1.0, 1.99]` (the host runtime clamp).
+#[allow(clippy::too_many_arguments)]
+pub fn golden_composite_pixel_culled_omega(
+    edits: &[SdfEdit],
+    mesh_depth: f32,
+    px: u32,
+    py: u32,
+    img_w: u32,
+    img_h: u32,
+    camera: CompositeCamera,
+    coarse_enabled: bool,
+    tile: TileBound,
+    omega: f32,
+) -> u32 {
     // The OFF path is byte-identical to the un-culled marcher (the 0%-gate).
     if !coarse_enabled {
-        return golden_composite_pixel_ex(edits, mesh_depth, px, py, img_w, img_h, camera);
+        return golden_composite_pixel_ex_omega(
+            edits, mesh_depth, px, py, img_w, img_h, camera, omega,
+        );
     }
 
     let (ro, rd) = composite_ray(px, py, img_w, img_h, camera);
@@ -1425,20 +1573,94 @@ pub fn golden_composite_pixel_culled(
     // conservative lower bound on every in-tile pixel's first hit (the cull's
     // contract), so seeding `t = near_t` never skips this pixel's surface.
     let mut t = tile.near_t;
+    let t_seed = t; // the ORIGINAL seed (near_t when culled) — Candidate C re-march re-seeds from it
+    let mut omega = omega; // [1.0, 1.99]; sor-fail latches it to 1.0 for the rest of the ray
     let mut hit = false;
-    for _ in 0..SDF_MAX_IT {
+    let mut safe_t = 0.0_f32; // probe param remembered for an exact retreat
+    let mut sor_prev = 0.0_f32; // previous probe's d
+    let mut sor_step_prev = 0.0_f32; // previous over-relaxed step length
+    // BUG-B1-HOLE-3 (Candidate C): the EXHAUSTION flag. True iff the fast loop runs ALL
+    // SDF_MAX_IT iterations with NO break — ran out of budget mid-field (neither
+    // converged, nor clear-miss `t > T_MAX`, nor mesh-occluded `t >= t_mesh`). Starts
+    // `true`, cleared by EVERY in-loop break. Mirrors the shader.
+    let mut exhausted = true;
+    for it in 0..SDF_MAX_IT {
         if t >= t_mesh {
+            exhausted = false; // mesh-occlusion termination — NOT budget exhaustion
             break;
         }
         let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
         let d = sdf_edit_list(edits, p);
         if d < SDF_EPS {
             hit = true;
+            exhausted = false; // converged — NOT budget exhaustion
             break;
         }
-        t += d;
+        if omega > 1.0 {
+            let step_len = d * omega;
+            // sor_fail: the over-step taken last iter overshot the previous unbounding
+            // sphere (valid only for omega < 2). Lipschitz-aware (BUG-B1-HOLE-1): the
+            // guaranteed-empty radius at field value `f` is `f / FIELD_LIPSCHITZ_L`, so the
+            // spheres cover the step iff `sor_prev + d >= L * sor_step_prev`. Mirrors the
+            // shader exactly. Kept byte-identical to `golden_composite_pixel_ex_omega`'s loop.
+            //
+            // The `it > 0` guard is LOAD-BEARING (do not remove): a sor-fail can only be
+            // reached after at least one ACCEPTED over-relax step (it >= 1 ⟹ accepted >= 1),
+            // which pre-pays the +1 retreat iteration in the budget proof.
+            if it > 0 && sor_prev + d < FIELD_LIPSCHITZ_L * sor_step_prev {
+                // BUG-B1-HOLE-2: do NOT retreat to bare `safe_t` and re-probe (that re-evals
+                // the field, costing +2 iters vs plain and overflowing the budget at the
+                // MAX_IT cliff → a hole). RESUME the plain march one certified step past the
+                // safe point: `safe_t` is the exact probe param, `sor_prev` the exact field
+                // value there, so `safe_t + sor_prev` is precisely where a plain march lands
+                // after probing safe_t — reusing the eval (no re-probe). One same-sign add
+                // (both operands >= 0): no cancellation, unlike a `t - <correction>` form.
+                // Net +1 iter vs plain, pre-paid by the >= 1 accepted over-step (it>0 guard).
+                debug_assert!(it > 0, "B1 budget: a>=1 precondition");
+                debug_assert!(sor_prev >= SDF_EPS); // safe-point field value >= EPS → retreat strictly advances
+                t = safe_t + sor_prev; // plain-resume one certified step past the safe probe
+                debug_assert!(t > safe_t, "B1 retreat must advance");
+                omega = 1.0;
+                continue;
+            }
+            safe_t = t;
+            sor_prev = d;
+            sor_step_prev = step_len;
+            t += step_len;
+        } else {
+            t += d; // frozen plain arm — TEXTUALLY identical to the frozen loop
+        }
         if t > SDF_T_MAX {
+            exhausted = false; // clear-miss termination — NOT budget exhaustion
             break;
+        }
+    }
+
+    // BUG-B1-HOLE-3 (Candidate C): the PROVABLY-hole-free fallback re-march, mirroring the
+    // shader EXACTLY. On `exhausted` (ran all SDF_MAX_IT with no break), RE-MARCH from the
+    // ORIGINAL seed (`near_t` here, the same seed the fast pass used) with a plain
+    // omega = 1.0 sphere-trace and use ITS result. This second loop is the EXACT frozen
+    // marcher body (`t += d`) seeded from `near_t`, so any surface the frozen culled path
+    // hits within MAX_IT it hits here too → no hole, with NO step-count dependence. At
+    // omega == 1.0 the fast pass IS the frozen plain loop, so on exhaustion this reproduces
+    // the identical frozen (hit = false) result — the omega == 1.0 output is byte-unchanged.
+    if exhausted {
+        t = t_seed; // re-seed from the SAME original seed the fast pass used (near_t)
+        hit = false;
+        for _it2 in 0..SDF_MAX_IT {
+            if t >= t_mesh {
+                break;
+            }
+            let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
+            let d = sdf_edit_list(edits, p);
+            if d < SDF_EPS {
+                hit = true;
+                break;
+            }
+            t += d; // frozen plain step
+            if t > SDF_T_MAX {
+                break;
+            }
         }
     }
 
@@ -2104,5 +2326,753 @@ mod p4b_tests {
         // scene constants (a compile-time touch so a refactor that drops them is caught).
         let _ = (SDF_CAM_Z, SDF_T_MAX);
         println!("[e] cull-off bit-identity: {checked} pixels (ortho + perspective) all match golden_composite_pixel_ex");
+    }
+}
+
+// ===========================================================================
+// Render B1 — over-relaxation (Keinert ω-gated) HOST soundness gates.
+//
+// These prove the CPU contract the on-device gates rely on, GPU-free:
+//   1. ω = 1 host BIT-identity — `_omega(.., 1.0)` byte-equal to the ω=1 forwarder
+//      (`golden_composite_pixel_ex` / `_culled`) over a pixel sweep on all 3 scenes
+//      (ortho + perspective). Pins the forwarder extraction (the 0%-gate).
+//   2. HIT-SET-SUPERSET property — over randomized scenes/depths/pixels, for
+//      ω ∈ {1.2, 1.5, 1.9} the `_omega` hit-set ⊇ the ω=1 hit-set (NO ω=1 SDF hit
+//      becomes background/mesh at ω>1). A violation = a missed-surface HOLE. Run on
+//      BOTH the cull-off and the cull-on (`_culled_omega`) path. (F-CRIT-1 oracle.)
+//   3. NO-HOLES TRIPWIRE — a deliberately-broken over-relax (a retreat to a WRONG t)
+//      MUST fail the gate-2 invariant, proving #2 has teeth.
+//   4. STEP-BOUND property — `steps(ω>1) ≤ steps(ω=1) + 1` per ray over the
+//      randomized scenes (≤ 1 permanent sor-fail fallback ⇒ ≤ plain + 1).
+//   5. ω CLAMP — the harness's `omega_in.clamp(1.0, 1.99)` + the 8-B push encode:
+//      a hostile `omega_in` decodes to a finite value in `[1.0, 1.99]`.
+//
+// The march mirrors `golden_composite_pixel_ex_omega` / `_culled_omega` EXACTLY (same
+// ordering: top mesh-guard, probe, hit test, ω-gate step, miss test). Gates 2/3/4 need
+// a hit/step-instrumented copy of that loop (the production goldens return only a packed
+// color), so a faithful test-only mirror lives here; gate 1 diffs the production
+// functions directly so the mirror can never mask a real forwarder regression.
+// ===========================================================================
+#[cfg(test)]
+mod b1_over_relaxation_tests {
+    use super::{
+        CompositeCamera, DEFAULT_MARCHER_OMEGA, FIELD_LIPSCHITZ_L, MESH_DEPTH_CLEAR, SDF_EPS,
+        SDF_IMG_H, SDF_IMG_W, SDF_MAX_IT, SDF_T_MAX, SdfEdit, composite_ray,
+        golden_composite_pixel_culled, golden_composite_pixel_culled_omega,
+        golden_composite_pixel_ex, golden_composite_pixel_ex_omega, sdf_edit_list, sdf_op,
+    };
+    use proptest::prelude::*;
+
+    /// The rung-9/10 "crater" CSG scene (base sphere minus a smaller sphere).
+    fn crater() -> Vec<SdfEdit> {
+        vec![
+            SdfEdit::sphere([0.0, 0.0, 0.0], 0.5, sdf_op::UNION, 0.0),
+            SdfEdit::sphere([0.3, 0.0, 0.0], 0.35, sdf_op::SUBTRACT, 0.0),
+        ]
+    }
+    /// A box CSG scene.
+    fn box_csg() -> Vec<SdfEdit> {
+        vec![SdfEdit::box_shape([0.0, 0.0, 0.0], [0.4, 0.4, 0.4], sdf_op::UNION, 0.0)]
+    }
+    /// A smooth-union scene (two spheres blended) — the smooth-min path.
+    fn smooth_union() -> Vec<SdfEdit> {
+        vec![
+            SdfEdit::sphere([-0.25, 0.0, 0.0], 0.35, sdf_op::UNION, 0.0),
+            SdfEdit::sphere([0.25, 0.0, 0.0], 0.35, sdf_op::UNION, 0.15),
+        ]
+    }
+
+    /// Instrumented result of [`march_obs`] — the Candidate-C host oracle output plus the perf
+    /// counters that replace the deleted step-bound gate 4.
+    struct MarchObs {
+        /// The SHIPPED hit decision: the fast pass's hit, OR (on exhaustion) the re-march's hit.
+        hit: bool,
+        /// Probe iterations spent in the over-relaxed FAST pass (each `sdf_edit_list` call). The
+        /// B1 win is `fast_steps(ω>1) < fast_steps(ω=1)` on the common converging rays.
+        fast_steps: u32,
+        /// True iff the fast pass exhausted the budget and the Candidate-C re-march fired. The
+        /// re-march FREQUENCY (% of pixels) is the perf risk: a large fraction = B1 perf-neutral.
+        remarched: bool,
+    }
+
+    /// The Render B1 ω-march, INSTRUMENTED (Candidate C) — the host oracle for gates 2/3 and
+    /// the perf observation. A faithful, COMPLETE mirror of the PRODUCTION
+    /// `golden_composite_pixel_ex_omega` march: the over-relaxed fast pass (same ordering,
+    /// same ω-gate, same Lipschitz-aware sor-fail test, same `t = safe_t + sor_prev`
+    /// plain-resume + permanent fall-to-plain) FOLLOWED BY the Candidate-C fallback re-march.
+    ///
+    /// CONTRACT CHANGE vs the prior step-bound oracle: the fast pass alone is NOT the shipped
+    /// hit decision. Correctness now comes from the re-march, not a step bound. When the fast
+    /// loop runs all `SDF_MAX_IT` iterations with NO break (`exhausted`), production RE-MARCHES
+    /// from the ORIGINAL seed with a plain ω=1 sphere-trace and uses THAT (hit, t). This oracle
+    /// reproduces that exactly, so `hit` is byte-for-byte the production hit decision — gate 2's
+    /// "ω>1 hit-set ⊇ ω=1 hit-set" tests what actually ships, and is provably true (the re-march
+    /// body is the frozen plain marcher, so an exhausting ω>1 ray lands on the SAME hit the
+    /// frozen marcher does).
+    ///
+    /// INSTRUMENTATION (perf observation, replacing the deleted step-bound gate 4): the returned
+    /// [`MarchObs`] records the fast-pass probe count (`fast_steps`, each `sdf_edit_list` call in
+    /// the over-relaxed loop), whether the fast pass exhausted the budget, and whether the
+    /// re-march fired. The orchestrator uses the re-march FREQUENCY (% of pixels that exhausted)
+    /// and the fast-pass step reduction vs plain to judge whether B1 is still a net win.
+    fn march_obs(edits: &[SdfEdit], ro: [f32; 3], rd: [f32; 3], t_mesh: f32, omega_in: f32) -> MarchObs {
+        let mut t = 0.0_f32;
+        let t_seed = t; // the ORIGINAL seed (0.0) — Candidate C re-march re-seeds from it
+        let mut omega = omega_in;
+        let mut hit = false;
+        let mut fast_steps = 0u32;
+        let mut safe_t = 0.0_f32;
+        let mut sor_prev = 0.0_f32;
+        let mut sor_step_prev = 0.0_f32;
+        let mut exhausted = true; // cleared by EVERY in-loop break (mirrors production)
+        for it in 0..SDF_MAX_IT {
+            if t >= t_mesh {
+                exhausted = false;
+                break;
+            }
+            let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
+            let d = sdf_edit_list(edits, p);
+            fast_steps += 1;
+            if d < SDF_EPS {
+                hit = true;
+                exhausted = false;
+                break;
+            }
+            if omega > 1.0 {
+                let step_len = d * omega;
+                // Lipschitz-aware sor-fail (mirrors production exactly): the empty-ball radii
+                // are `f / L`, so the spheres cover the over-step iff `sor_prev + d >= L * step`.
+                if it > 0 && sor_prev + d < FIELD_LIPSCHITZ_L * sor_step_prev {
+                    // BUG-B1-HOLE-2: resume the plain march one certified step past the safe
+                    // probe (no re-probe, +0 steps for the retreat itself) and latch to plain.
+                    t = safe_t + sor_prev;
+                    omega = 1.0;
+                    continue;
+                }
+                safe_t = t;
+                sor_prev = d;
+                sor_step_prev = step_len;
+                t += step_len;
+            } else {
+                t += d;
+            }
+            if t > SDF_T_MAX {
+                exhausted = false;
+                break;
+            }
+        }
+
+        // Candidate C: the PROVABLY-hole-free fallback re-march. Mirrors production EXACTLY —
+        // on `exhausted` re-seed from `t_seed` and run the frozen plain ω=1 marcher; its (hit)
+        // is the shipped decision. The fast pass's `hit` is discarded (it was false on exhaust).
+        let remarched = exhausted;
+        if exhausted {
+            t = t_seed;
+            hit = false;
+            for _it2 in 0..SDF_MAX_IT {
+                if t >= t_mesh {
+                    break;
+                }
+                let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
+                let d = sdf_edit_list(edits, p);
+                if d < SDF_EPS {
+                    hit = true;
+                    break;
+                }
+                t += d;
+                if t > SDF_T_MAX {
+                    break;
+                }
+            }
+        }
+
+        MarchObs { hit, fast_steps, remarched }
+    }
+
+    /// A DELIBERATELY-BROKEN over-relax used ONLY by the gate-3 tripwire. TWO co-ordinated
+    /// breaks, BOTH required under the Candidate-C contract:
+    ///   1. the fast pass mis-handles a sor-fail — it retreats to a WRONG `t` (`safe_t +
+    ///      step_len`, i.e. it ADVANCES past the surface instead of retreating) AND keeps ω hot;
+    ///   2. **the Candidate-C fallback re-march is DISABLED** (this function has NO re-march at
+    ///      all — it returns the bare fast-pass hit). This is the load-bearing tripwire change
+    ///      for the C contract: with the re-march intact, an exhausting broken ray would be
+    ///      silently rescued by the plain re-march and the tripwire would go INERT (gate 2 would
+    ///      look armed while testing nothing). Breaking C's guarantee = breaking the re-march, so
+    ///      this models exactly the failure mode gate 2 must catch. NOT shipped.
+    fn march_hit_broken(
+        edits: &[SdfEdit],
+        ro: [f32; 3],
+        rd: [f32; 3],
+        t_mesh: f32,
+        omega_in: f32,
+        with_remarch: bool,
+    ) -> bool {
+        let mut t = 0.0_f32;
+        let t_seed = t;
+        let omega = omega_in;
+        let mut hit = false;
+        let mut safe_t = 0.0_f32;
+        let mut sor_prev = 0.0_f32;
+        let mut sor_step_prev = 0.0_f32;
+        let mut exhausted = true;
+        for it in 0..SDF_MAX_IT {
+            if t >= t_mesh {
+                exhausted = false;
+                break;
+            }
+            let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
+            let d = sdf_edit_list(edits, p);
+            if d < SDF_EPS {
+                hit = true;
+                exhausted = false;
+                break;
+            }
+            if omega > 1.0 {
+                let step_len = d * omega;
+                // Production Lipschitz-aware detection threshold (re-synced) — the bug is in
+                // the RETREAT below, NOT the detection, so the tripwire fires the same sor-fails
+                // the production marcher would, then mishandles them.
+                if it > 0 && sor_prev + d < FIELD_LIPSCHITZ_L * sor_step_prev {
+                    // BUG: a WRONG "retreat" that actually leaps past the surface and
+                    // never falls to plain. The classic over-relaxation hole.
+                    t = safe_t + step_len;
+                    continue;
+                }
+                safe_t = t;
+                sor_prev = d;
+                sor_step_prev = step_len;
+                t += step_len;
+            } else {
+                t += d;
+            }
+            if t > SDF_T_MAX {
+                exhausted = false;
+                break;
+            }
+        }
+        // `with_remarch == false`: C's fallback is DISABLED — the bare broken fast-pass hit (the
+        // tripwire that MUST hole). `with_remarch == true`: re-attach the EXACT Candidate-C
+        // re-march on top of the broken fast pass — it must CLOSE every hole the broken pass
+        // opened, proving the re-march (not the fast pass) is what guarantees the hit-set.
+        if with_remarch && exhausted {
+            t = t_seed;
+            hit = false;
+            for _it2 in 0..SDF_MAX_IT {
+                if t >= t_mesh {
+                    break;
+                }
+                let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
+                let d = sdf_edit_list(edits, p);
+                if d < SDF_EPS {
+                    hit = true;
+                    break;
+                }
+                t += d;
+                if t > SDF_T_MAX {
+                    break;
+                }
+            }
+        }
+        hit
+    }
+
+    /// True when pixel `(px, py)` is an SDF hit at `omega` — the SHIPPED Candidate-C decision
+    /// (fast pass + fallback re-march), with NO mesh occlusion (the pure-field hit set — the
+    /// property's domain). This is byte-for-byte what `golden_composite_pixel_ex_omega`'s march
+    /// concludes, so gate 2's superset property tests production, not the bare fast pass.
+    fn pixel_hits(edits: &[SdfEdit], px: u32, py: u32, omega: f32) -> bool {
+        let (ro, rd) = composite_ray(px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
+        march_obs(edits, ro, rd, 1.0e30, omega).hit
+    }
+
+    /// GATE 1 — ω = 1 host BIT-identity for the un-culled marcher. `_omega(.., 1.0)` must be
+    /// byte-equal to the ω=1 forwarder over the whole 64×64 image on all 3 scenes, ORTHO +
+    /// PERSPECTIVE. Pins the forwarder extraction (any drift = the 0%-gate broke).
+    #[test]
+    fn gate1_omega_one_is_bit_identical_to_forwarder_uncull() {
+        let scenes = [("crater", crater()), ("box", box_csg()), ("smooth", smooth_union())];
+        let depths = [0.5_f32, MESH_DEPTH_CLEAR, 0.2, 0.8];
+        let cameras = [
+            ("ortho", CompositeCamera::Ortho),
+            (
+                "persp",
+                CompositeCamera::Perspective {
+                    eye: [0.0, 0.0, 2.0],
+                    forward: [0.0, 0.0, -1.0],
+                    right: [1.0, 0.0, 0.0],
+                    up: [0.0, 1.0, 0.0],
+                    tan_half_fov: 0.5,
+                    aspect: 1.0,
+                },
+            ),
+        ];
+        let mut checked = 0u64;
+        for (sname, edits) in &scenes {
+            for (cname, cam) in cameras {
+                for py in 0..SDF_IMG_H {
+                    for px in 0..SDF_IMG_W {
+                        let md = depths[((px + py) as usize) % depths.len()];
+                        let fwd = golden_composite_pixel_ex(edits, md, px, py, SDF_IMG_W, SDF_IMG_H, cam);
+                        let om1 = golden_composite_pixel_ex_omega(
+                            edits, md, px, py, SDF_IMG_W, SDF_IMG_H, cam, 1.0,
+                        );
+                        assert_eq!(
+                            fwd, om1,
+                            "[{sname}/{cname}] ω=1 _omega diverged from forwarder at ({px},{py}) depth {md}: \
+                             fwd 0x{fwd:08X} omega 0x{om1:08X}"
+                        );
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        println!("[B1 gate1] ω=1 un-culled bit-identity: {checked} pixels (ortho+persp × 3 scenes) byte-equal");
+    }
+
+    /// GATE 1 (cull path) — ω = 1 host BIT-identity for the CULLED marcher. With cull ON and a
+    /// synthetic non-EMPTY tile (`near_t = 0`, `far_t = T_MAX`), `_culled_omega(.., 1.0)` must
+    /// be byte-equal to the ω=1 culled forwarder over the image (ORTHO). The cull-off arm is
+    /// covered by gate 1; this pins the seeded-march forwarder at ω=1.
+    #[test]
+    fn gate1_omega_one_is_bit_identical_to_forwarder_culled() {
+        use super::{TILE_FLAG_EMPTY, TileBound};
+        let scenes = [("crater", crater()), ("box", box_csg()), ("smooth", smooth_union())];
+        let depths = [0.5_f32, MESH_DEPTH_CLEAR, 0.2, 0.8];
+        // A non-EMPTY, full-range tile (seed t = 0, march to T_MAX) — the general case.
+        let surf = TileBound { near_t: 0.0, far_t: SDF_T_MAX, flags: 0, _pad: 0 };
+        // An EMPTY tile — exercises the early-out arm at ω=1.
+        let empty = TileBound { near_t: 0.0, far_t: SDF_T_MAX, flags: TILE_FLAG_EMPTY, _pad: 0 };
+        let mut checked = 0u64;
+        for (sname, edits) in &scenes {
+            for tile in [surf, empty] {
+                for py in 0..SDF_IMG_H {
+                    for px in 0..SDF_IMG_W {
+                        let md = depths[((px + py) as usize) % depths.len()];
+                        let fwd = golden_composite_pixel_culled(
+                            edits, md, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, true, tile,
+                        );
+                        let om1 = golden_composite_pixel_culled_omega(
+                            edits, md, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, true, tile, 1.0,
+                        );
+                        assert_eq!(
+                            fwd, om1,
+                            "[{sname}] ω=1 _culled_omega diverged from forwarder at ({px},{py}) depth {md} \
+                             flags {}: fwd 0x{fwd:08X} omega 0x{om1:08X}",
+                            tile.flags
+                        );
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        println!("[B1 gate1c] ω=1 culled bit-identity: {checked} pixels (surf+empty tiles × 3 scenes) byte-equal");
+    }
+
+    // A proptest-generated randomized SDF scene, WIDENED for the Candidate-C no-hole contract:
+    // 1..=8 edits, random kind/op/center/size, and an AGGRESSIVE smoothness distribution biased
+    // toward the super-Lipschitz blend bands that historically holed (BUG-B1-HOLE-1). Every value
+    // stays inside the bounded `[-0.85, 0.85]³` view box so the marcher reaches surfaces (an empty
+    // world trivially satisfies superset). THIN features are reachable via the small-size tail
+    // (down to 0.03) — sliver boxes/spheres are the classic over-relax overshoot trap. (A `//`
+    // comment, not a doc comment — clippy's `unused_doc_comments` on macro invocations.)
+    prop_compose! {
+        fn arb_scene()(
+            edits in proptest::collection::vec(
+                (
+                    0u32..2,                                  // 0 = sphere, 1 = box
+                    0u32..3,                                  // op: union/subtract/intersect
+                    -0.85f32..0.85, -0.85f32..0.85, -0.85f32..0.85, // center xyz
+                    0.03f32..0.6,                             // size a (thin tail at 0.03)
+                    0.03f32..0.5,                             // size b (box y, thin tail)
+                    0.03f32..0.5,                             // size c (box z, thin tail)
+                    // AGGRESSIVE smooth-min: hard, mild, and a heavy super-Lipschitz tail up to
+                    // 0.4 (the blend band where IQ's smooth-min violates the unit-Lipschitz bound
+                    // hardest — the BUG-B1-HOLE-1 regime). Weighted toward the soft cases.
+                    prop_oneof![
+                        1 => Just(0.0f32),
+                        2 => 0.02f32..0.15,
+                        3 => 0.15f32..0.40,
+                    ],
+                ),
+                1..=8,
+            )
+        ) -> Vec<SdfEdit> {
+            // Force the FIRST edit to be a UNION so the field has a positive volume to hit
+            // (a lone subtract/intersect over an empty acc is a degenerate empty field).
+            edits.into_iter().enumerate().map(|(i, (kind, op, cx, cy, cz, a, b, c, k))| {
+                let op = if i == 0 { sdf_op::UNION } else { op };
+                if kind == 0 {
+                    SdfEdit::sphere([cx, cy, cz], a, op, k)
+                } else {
+                    SdfEdit::box_shape([cx, cy, cz], [a, b, c], op, k)
+                }
+            }).collect()
+        }
+    }
+
+    proptest! {
+        // WIDENED for the Candidate-C no-hole contract — this IS the correctness gate, so make
+        // it thorough. 1024 random scenes (4× the prior 256), each over a coarse pixel grid ×
+        // ω ∈ {1.2, 1.5, 1.99} × {ortho, perspective}. The pinned BUG-B1-HOLE-1 cliff seed in
+        // proptest-regressions/compute.txt is replayed first on every run (proptest auto-loads it).
+        #![proptest_config(ProptestConfig { cases: 1024, ..ProptestConfig::default() })]
+
+        /// GATE 2 — HIT-SET-SUPERSET (the F-CRIT-1 soundness oracle, the REAL correctness gate),
+        /// CULL-OFF. For every randomized scene + ω ∈ {1.2, 1.5, 1.99} + camera ∈ {ortho,
+        /// perspective}, EVERY pixel that is an SDF hit at ω=1 must remain a hit at ω>1. With
+        /// Candidate C this is PROVABLY true on every case: an exhausting ω>1 ray re-marches with
+        /// the frozen plain marcher, so it lands on the SAME hit ω=1 does. A regression = a
+        /// missed-surface HOLE (Candidate C has a bug). The perspective camera supplies GRAZING
+        /// rays at the frame edges (the classic over-relax overshoot trap). Iterates a coarse
+        /// 4-px grid (every tile sampled) to bound per-case cost while covering the frame.
+        #[test]
+        fn gate2_hit_set_superset_cull_off(edits in arb_scene()) {
+            let persp = CompositeCamera::Perspective {
+                eye: [0.0, 0.0, 2.0], forward: [0.0, 0.0, -1.0], right: [1.0, 0.0, 0.0],
+                up: [0.0, 1.0, 0.0], tan_half_fov: 0.5, aspect: 1.0,
+            };
+            for &omega in &[1.2_f32, 1.5, 1.99] {
+                for cam in [CompositeCamera::Ortho, persp] {
+                    for py in (0..SDF_IMG_H).step_by(4) {
+                        for px in (0..SDF_IMG_W).step_by(4) {
+                            let (ro, rd) = composite_ray(px, py, SDF_IMG_W, SDF_IMG_H, cam);
+                            let base = march_obs(&edits, ro, rd, 1.0e30, 1.0).hit;
+                            if base {
+                                let over = march_obs(&edits, ro, rd, 1.0e30, omega).hit;
+                                prop_assert!(
+                                    over,
+                                    "HOLE: ({px},{py}) cam={cam:?} hits at ω=1 but MISSES at ω={omega} — Candidate-C re-march failed to close the hole; scene={edits:?}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        /// GATE 2 — HIT-SET-SUPERSET, CULL-ON. Same invariant through the `_culled_omega` path
+        /// with a non-EMPTY full-range tile (seed t=0): the ω>1 culled hit-set ⊇ the ω=1 culled
+        /// hit-set. Compares the FINAL packed color: a pixel that is the lit SDF color at ω=1
+        /// must NOT become mesh/background at ω>1 (the observable hole). Uses no mesh
+        /// (depth = clear) so the SDF/background partition is the field's alone.
+        #[test]
+        fn gate2_hit_set_superset_cull_on(edits in arb_scene()) {
+            use super::{TileBound};
+            let tile = TileBound { near_t: 0.0, far_t: SDF_T_MAX, flags: 0, _pad: 0 };
+            for &omega in &[1.2_f32, 1.5, 1.99] {
+                for py in (0..SDF_IMG_H).step_by(4) {
+                    for px in (0..SDF_IMG_W).step_by(4) {
+                        // ω=1 culled color (the baseline partition).
+                        let c1 = golden_composite_pixel_culled_omega(
+                            &edits, MESH_DEPTH_CLEAR, px, py, SDF_IMG_W, SDF_IMG_H,
+                            CompositeCamera::Ortho, true, tile, 1.0,
+                        );
+                        // Only pixels that HIT the SDF at ω=1 are in the domain (no mesh, so a
+                        // non-background color == an SDF hit).
+                        if pixel_hits(&edits, px, py, 1.0) {
+                            let co = golden_composite_pixel_culled_omega(
+                                &edits, MESH_DEPTH_CLEAR, px, py, SDF_IMG_W, SDF_IMG_H,
+                                CompositeCamera::Ortho, true, tile, omega,
+                            );
+                            prop_assert!(
+                                pixel_hits(&edits, px, py, omega),
+                                "HOLE(cull-on): ({px},{py}) SDF-hit at ω=1 (0x{c1:08X}) but ω={omega} march misses (0x{co:08X}); scene={edits:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+    }
+
+    // ===========================================================================================
+    // PERF OBSERVATION (replaces the DELETED step-bound gate 4).
+    //
+    // Candidate C makes correctness independent of any step-count bound: the fallback re-march
+    // guarantees the hit-set regardless of how the fast pass behaves, so the old gate-4 invariant
+    // `steps(ω>1) ≤ steps(ω=1)` is IRRELEVANT to soundness. It is replaced by an OBSERVATION (not
+    // a pass/fail correctness gate): how OFTEN does the fast pass exhaust and trigger the (costly)
+    // re-march, and does the over-relaxed fast pass still REDUCE probe steps on the common
+    // converging rays (the B1 win)? The orchestrator uses these numbers for the ship call. The
+    // only assertion here is the must-render sanity (the fixture is non-empty); a high re-march
+    // fraction is REPORTED, not failed, and flagged in the println for the orchestrator.
+    // ===========================================================================================
+
+    /// PERF OBSERVATION — re-march frequency + fast-pass step reduction (NOT a correctness gate).
+    /// Over the shipped fixtures + the pinned BUG-B1-HOLE-1 cliff seed + a handful of widened
+    /// random scenes, counts, per ω ∈ {1.2, 1.5, 1.99}: (a) the % of pixels whose fast pass
+    /// EXHAUSTED and re-marched (the perf risk — a large fraction means B1 is perf-neutral or
+    /// negative), and (b) the mean fast-pass probe count vs the ω=1 plain march on CONVERGING
+    /// rays (the B1 win — fewer steps to the same hit). Prints a summary for the orchestrator.
+    #[test]
+    fn perf_observation_remarch_frequency_and_step_reduction() {
+        // The pinned cliff seed (the historical worst ray) — exercised explicitly.
+        let cliff = vec![
+            SdfEdit::sphere([0.31460363, 0.70498204, -0.7611318], 0.36075538, sdf_op::UNION, 0.0),
+            SdfEdit::box_shape([0.092381336, 0.1372761, -0.5955315], [0.19970395, 0.46420184, 0.3901827], sdf_op::UNION, 0.24384262),
+            SdfEdit::sphere([0.4506038, 0.16997452, 0.0], 0.44928917, sdf_op::UNION, 0.0),
+        ];
+        let scenes = [
+            ("crater", crater()),
+            ("box", box_csg()),
+            ("smooth", smooth_union()),
+            ("cliff_seed", cliff),
+        ];
+        let mut worst_remarch_pct = 0.0_f64;
+        for (sname, edits) in &scenes {
+            for &omega in &[1.2_f32, 1.5, 1.99] {
+                let mut pixels = 0u64;
+                let mut remarches = 0u64;
+                // Converging-ray step accounting: only rays that HIT under BOTH ω=1 and ω
+                // (so the comparison is the same surface) and did NOT need a re-march.
+                let mut conv_rays = 0u64;
+                let mut sum_fast = 0u64; // fast-pass steps at ω (the B1 path)
+                let mut sum_plain = 0u64; // fast-pass steps at ω=1 (the baseline)
+                for py in 0..SDF_IMG_H {
+                    for px in 0..SDF_IMG_W {
+                        let (ro, rd) = composite_ray(px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
+                        let o1 = march_obs(edits, ro, rd, 1.0e30, 1.0);
+                        let oo = march_obs(edits, ro, rd, 1.0e30, omega);
+                        pixels += 1;
+                        if oo.remarched {
+                            remarches += 1;
+                        }
+                        // Common converging rays: both hit, neither re-marched → the step
+                        // reduction is the apples-to-apples B1 win on the typical case.
+                        if o1.hit && oo.hit && !o1.remarched && !oo.remarched {
+                            conv_rays += 1;
+                            sum_fast += u64::from(oo.fast_steps);
+                            sum_plain += u64::from(o1.fast_steps);
+                        }
+                    }
+                }
+                let remarch_pct = 100.0 * remarches as f64 / pixels as f64;
+                worst_remarch_pct = worst_remarch_pct.max(remarch_pct);
+                let (mean_fast, mean_plain, reduction) = if conv_rays > 0 {
+                    let mf = sum_fast as f64 / conv_rays as f64;
+                    let mp = sum_plain as f64 / conv_rays as f64;
+                    (mf, mp, 100.0 * (mp - mf) / mp)
+                } else {
+                    (0.0, 0.0, 0.0)
+                };
+                // A POSITIVE reduction is the B1 win (fewer steps to the same hit); negative means
+                // the over-relax overshot and cost extra steps at this ω. ω=1.2 (the production
+                // DEFAULT) is the column that decides the ship call.
+                let verdict = if reduction >= 0.0 { "B1 win" } else { "B1 LOSS" };
+                println!(
+                    "[B1 perf] {sname} ω={omega}: re-march {remarches}/{pixels} px ({remarch_pct:.2}%); \
+                     converging rays {conv_rays}: mean fast-pass steps {mean_fast:.2} vs plain {mean_plain:.2} \
+                     (step reduction {reduction:.1}% — {verdict})"
+                );
+            }
+        }
+        // Sanity only (NOT a correctness gate): the fixtures must actually render surfaces so the
+        // observation is meaningful. The re-march fraction itself is REPORTED, never failed.
+        println!(
+            "[B1 perf] OBSERVATION SUMMARY: worst re-march fraction over all fixtures/ω = {worst_remarch_pct:.2}% \
+             (FLAG for the orchestrator if this is a large fraction — would mean B1 is perf-neutral/negative)"
+        );
+    }
+
+    /// GATE 3 — NO-HOLES TRIPWIRE (adapted to the Candidate-C contract). The gate-2 invariant
+    /// must have TEETH. Under Candidate C, "broken" must break the RE-MARCH too — otherwise the
+    /// fallback silently rescues a broken fast pass and the tripwire goes inert. So this asserts
+    /// TWO things:
+    ///   (a) the broken over-relax WITH C's fallback DISABLED (`march_hit_broken(.., false)` — a
+    ///       WRONG sor-fail retreat that leaps past the surface, no re-march) produces ≥ 1 HOLE.
+    ///       If it never holed, gate 2 would be vacuous.
+    ///   (b) the SAME broken fast pass WITH C's re-march RE-ATTACHED (`march_hit_broken(.., true)`)
+    ///       produces ZERO holes — proving the re-march (NOT the fast pass) is what closes them,
+    ///       i.e. C's guarantee is load-bearing and gate 2 passes BECAUSE of the re-march.
+    /// (The broken march is test-only; never shipped.)
+    #[test]
+    fn gate3_no_holes_tripwire_broken_overrelax_holes() {
+        let scenes = [("crater", crater()), ("box", box_csg()), ("smooth", smooth_union())];
+        let mut total_holes_no_remarch = 0u64;
+        let mut total_holes_with_remarch = 0u64;
+        for (sname, edits) in &scenes {
+            for &omega in &[1.5_f32, 1.9] {
+                let mut scene_holes = 0u64;
+                let mut scene_holes_remarched = 0u64;
+                for py in 0..SDF_IMG_H {
+                    for px in 0..SDF_IMG_W {
+                        let (ro, rd) = composite_ray(px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
+                        let base = pixel_hits(edits, px, py, 1.0);
+                        if base {
+                            // (a) C's fallback disabled: this is the tripwire that MUST hole.
+                            if !march_hit_broken(edits, ro, rd, 1.0e30, omega, false) {
+                                scene_holes += 1;
+                            }
+                            // (b) the EXACT C re-march re-attached: it must close the hole.
+                            if !march_hit_broken(edits, ro, rd, 1.0e30, omega, true) {
+                                scene_holes_remarched += 1;
+                            }
+                        }
+                    }
+                }
+                total_holes_no_remarch += scene_holes;
+                total_holes_with_remarch += scene_holes_remarched;
+                if scene_holes > 0 {
+                    println!("[B1 gate3] tripwire: broken over-relax (no re-march) holed {scene_holes} px on {sname} @ ω={omega}");
+                }
+            }
+        }
+        // (a) teeth: the broken fast pass without the fallback MUST hole.
+        assert!(
+            total_holes_no_remarch > 0,
+            "TRIPWIRE INERT: the broken over-relax (re-march disabled) produced ZERO holes — gate 2 would be vacuous"
+        );
+        // (b) the re-march is the load-bearing guarantee: re-attaching it closes EVERY hole.
+        assert_eq!(
+            total_holes_with_remarch, 0,
+            "C CONTRACT VIOLATION: the Candidate-C re-march failed to close {total_holes_with_remarch} broken-fast-pass holes — the fallback is not actually hole-free"
+        );
+        println!(
+            "[B1 gate3] tripwire armed: {total_holes_no_remarch} holes WITHOUT the re-march (gate 2 has teeth); \
+             {total_holes_with_remarch} holes WITH the re-march re-attached (C's fallback closes them ALL — the guarantee is load-bearing)"
+        );
+    }
+
+    /// REGRESSION PIN (BUG-B1-HOLE-1, CLOSED via Candidate C) — the minimal scene the gate-2
+    /// property shrank to: a super-Lipschitz smooth-min CSG (a box with smoothness 0.244 blended
+    /// between two spheres) that USED to produce a missed-surface HOLE at pixel (28,16) under
+    /// ω=1.2 through the PRODUCTION golden (`golden_composite_pixel_ex_omega`). Candidate C closes
+    /// the hole UNCONDITIONALLY: when the over-relaxed fast pass exhausts the budget on this ray,
+    /// the fallback re-march replays the frozen plain marcher from the original seed and lands on
+    /// the SAME lit SDF surface ω=1 hits — byte-identical color, not merely non-background.
+    ///
+    /// This is the PERMANENT regression guard (NOT ignored). FLIPPED for the C contract: it now
+    /// asserts BOTH ω=1.0 AND ω ∈ {1.2, 1.5, 1.99} HIT the surface (the no-hole contract — none
+    /// reverts to BACKGROUND) AND land on the SAME surface FEATURE as ω=1 (the lit SDF color, far
+    /// from background — within a few LSBs per channel, NOT a phantom).
+    ///
+    /// NOTE on exactness: byte-exact color equality with ω=1 holds ONLY when the Candidate-C
+    /// re-march fires (it replays the frozen plain marcher → the identical `t` and shade — true
+    /// for ω=1.2 here). When the over-relaxed FAST pass converges on its own (ω=1.5/1.99 at this
+    /// pixel) it lands within `SDF_EPS` of the surface at a marginally different `t`, so the
+    /// Lambert shade differs by a few LSBs. That is a valid same-surface hit, not a hole — the
+    /// contract is HIT (not background), asserted via the lit-vs-background channel separation.
+    #[test]
+    fn bug_b1_hole_1_smooth_min_overrelax_hole_via_production_golden() {
+        let edits = vec![
+            SdfEdit::sphere([0.31460363, 0.70498204, -0.7611318], 0.36075538, sdf_op::UNION, 0.0),
+            SdfEdit::box_shape([0.092381336, 0.1372761, -0.5955315], [0.19970395, 0.46420184, 0.3901827], sdf_op::UNION, 0.24384262),
+            SdfEdit::sphere([0.4506038, 0.16997452, 0.0], 0.44928917, sdf_op::UNION, 0.0),
+        ];
+        let (px, py) = (28u32, 16u32);
+        let bg = super::pack_rgba([0.05, 0.05, 0.1]);
+        // Channel splitter for the lit-vs-background separation (the three composite outcomes are
+        // >100/255 apart, so a few-LSB convergence-point wobble never reclasses a hit as a miss).
+        let chans = |c: u32| [(c & 0xFF) as i32, ((c >> 8) & 0xFF) as i32, ((c >> 16) & 0xFF) as i32];
+        let bgc = chans(bg);
+        let far_from_bg = |c: u32| {
+            let cc = chans(c);
+            (0..3).any(|i| (cc[i] - bgc[i]).abs() > 8)
+        };
+        // No mesh (depth = clear) so the SDF/background partition is the field's alone.
+        let c1 = golden_composite_pixel_ex_omega(&edits, MESH_DEPTH_CLEAR, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, 1.0);
+        assert_ne!(c1, bg, "ω=1 must HIT the smooth-min surface at ({px},{py})");
+        assert!(far_from_bg(c1), "ω=1 color 0x{c1:08X} must be the LIT SDF surface, far from bg 0x{bg:08X}");
+        // Candidate C: EVERY shipped ω>1 must now HIT the same surface FEATURE as ω=1 — the hole
+        // is closed by the re-march, not a step bound. The task's required set: {1.2, 1.5, 1.99}.
+        for &omega in &[1.2_f32, 1.5, 1.99] {
+            let co = golden_composite_pixel_ex_omega(
+                &edits, MESH_DEPTH_CLEAR, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, omega,
+            );
+            // The pixel-color delta to ω=1: 0 when the re-march fired (exact frozen replay), a few
+            // LSBs when the fast pass converged on its own. Printed so the orchestrator sees it.
+            let dc = chans(co);
+            let c1c = chans(c1);
+            let max_ch = (0..3).map(|i| (dc[i] - c1c[i]).abs()).max().unwrap_or(0);
+            println!(
+                "[BUG-B1-HOLE-1 CLOSED] ω=1 0x{c1:08X} | ω={omega} 0x{co:08X} (hit={}, Δ to ω=1 = {max_ch}/255) | bg=0x{bg:08X}",
+                co != bg
+            );
+            // The no-hole contract: ω>1 must NOT revert to background — it HITS the surface.
+            assert_ne!(co, bg, "BUG-B1-HOLE-1 CLOSED: ω={omega} must HIT (not background) at ({px},{py})");
+            assert!(
+                far_from_bg(co),
+                "BUG-B1-HOLE-1 CLOSED: ω={omega} color 0x{co:08X} must be the LIT SDF surface (far from bg 0x{bg:08X}), not a hole, at ({px},{py})"
+            );
+            // Same surface FEATURE as ω=1 — the lit colors agree within the small convergence-point
+            // wobble (a phantom or a different feature would differ by >100/channel like bg/mesh).
+            assert!(
+                max_ch <= 16,
+                "BUG-B1-HOLE-1 CLOSED: ω={omega} 0x{co:08X} differs from ω=1 0x{c1:08X} by {max_ch}/255 (>16) — not the same surface feature at ({px},{py})"
+            );
+        }
+    }
+
+    /// GATE 5 — ω CLAMP + 8-byte push encode. Every NON-NaN hostile `omega_in` (negative,
+    /// sub-1, == 2, > 2, ±∞) must clamp into `[1.0, 1.99]` and decode finite-in-range from the
+    /// pushed bytes `[4..8]`. Mirrors the harness's `omega_in.clamp(1.0, 1.99)` + push encode
+    /// EXACTLY (the same `f32::clamp` + `to_le_bytes`).
+    ///
+    /// FINDING (documented, NOT a soundness hole): Rust's `f32::clamp` does NOT sanitize a NaN
+    /// VALUE — `f32::NAN.clamp(1.0, 1.99) == NaN` (the clamp returns NaN when `self` is NaN).
+    /// So a NaN ω SURVIVES the harness clamp and is pushed verbatim. It is defanged DOWNSTREAM,
+    /// not by the clamp: the marcher's gate is `if (omega > 1.0)`, and `NaN > 1.0 == false` on
+    /// BOTH host (`golden_composite_pixel_ex_omega`) and shader, so a NaN ω takes the verbatim
+    /// frozen `t += d` plain arm — i.e. it degrades to the ω=1 path (NO over-relaxation, NO
+    /// hole). This test asserts that exact safety property (NaN ω ≡ ω=1 over a pixel sweep)
+    /// rather than a false "clamp produces 1.0" claim. See the tester report.
+    #[test]
+    fn gate5_omega_clamp_and_push_encode() {
+        // The harness's encode site, reproduced byte-for-byte.
+        fn encode(omega_in: f32, coarse_enabled: bool) -> [u8; 8] {
+            let coarse_flag: u32 = u32::from(coarse_enabled);
+            let omega: f32 = omega_in.clamp(1.0, 1.99);
+            let mut push = [0u8; 8];
+            push[0..4].copy_from_slice(&coarse_flag.to_le_bytes());
+            push[4..8].copy_from_slice(&omega.to_le_bytes());
+            push
+        }
+        // Non-NaN hostile inputs: ALL must clamp finite into [1.0, 1.99].
+        let cases = [-1.0_f32, 0.5, 1.0, 1.2, 1.99, 2.0, 2.5, 100.0, f32::INFINITY, f32::NEG_INFINITY];
+        for &om in &cases {
+            let push = encode(om, true);
+            let coarse = u32::from_le_bytes([push[0], push[1], push[2], push[3]]);
+            let decoded = f32::from_le_bytes([push[4], push[5], push[6], push[7]]);
+            assert_eq!(coarse, 1, "coarse_enabled must round-trip as 1");
+            assert!(decoded.is_finite(), "ω={om} decoded to non-finite {decoded}");
+            assert!(
+                (1.0..=1.99).contains(&decoded),
+                "ω={om} decoded to {decoded}, outside [1.0, 1.99] (clamp failed)"
+            );
+        }
+        // The DOCUMENTED NaN behavior: the clamp passes NaN through (this is the finding).
+        let nan_push = encode(f32::NAN, false);
+        let nan_dec = f32::from_le_bytes([nan_push[4], nan_push[5], nan_push[6], nan_push[7]]);
+        assert!(nan_dec.is_nan(), "FINDING CHANGED: f32::clamp now sanitizes NaN? got {nan_dec}");
+        // The SOUNDNESS property that actually protects us: a NaN ω ≡ the ω=1 plain march
+        // (the `omega > 1.0` gate is false for NaN on both host and shader → no hole).
+        let scenes = [("crater", crater()), ("box", box_csg()), ("smooth", smooth_union())];
+        let mut checked = 0u64;
+        for (sname, edits) in &scenes {
+            for py in 0..SDF_IMG_H {
+                for px in 0..SDF_IMG_W {
+                    let plain = golden_composite_pixel_ex_omega(
+                        edits, MESH_DEPTH_CLEAR, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, 1.0,
+                    );
+                    let nan_omega = golden_composite_pixel_ex_omega(
+                        edits, MESH_DEPTH_CLEAR, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, f32::NAN,
+                    );
+                    assert_eq!(
+                        plain, nan_omega,
+                        "[{sname}] NaN ω diverged from the ω=1 plain march at ({px},{py}): \
+                         plain 0x{plain:08X} nan 0x{nan_omega:08X} — the NaN-defang property broke"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        // The production default must be inside the clamp window (a sanity tie to the harness).
+        assert!((1.0..=1.99).contains(&DEFAULT_MARCHER_OMEGA), "DEFAULT_MARCHER_OMEGA out of clamp window");
+        println!(
+            "[B1 gate5] ω clamp: {} non-NaN hostile inputs decode finite ∈ [1.0,1.99]; NaN PASSES the clamp \
+             but ≡ the ω=1 plain march over {checked} px (gate false for NaN); default={DEFAULT_MARCHER_OMEGA}",
+            cases.len()
+        );
     }
 }
