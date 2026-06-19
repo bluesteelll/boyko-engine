@@ -3153,3 +3153,215 @@ fn system_set_enum_body(
         }
     })
 }
+
+/// Derive macro for the [`Actionlike`] trait — `boyko_input` I2.
+///
+/// Generates `impl Actionlike for #Name` from a **fieldless enum**, emitting:
+///
+/// * `const COUNT` — the variant count, with a `const` assert that
+///   `COUNT <= 256` (the `BitSet256` action cap, plan V8).
+/// * `index(self)` — the dense `0..COUNT` declaration-order index.
+/// * `from_index(i)` — the inverse (`None` for `i >= COUNT`).
+/// * `kind(self)` — the per-variant [`ActionKind`], selected by the optional
+///   `#[actionlike(Button|Axis1D|Axis2D)]` field attribute (default `Button`).
+/// * `name(self)` — the variant's identifier as a `&'static str`.
+///
+/// The `Actionlike` trait and `ActionKind` enum live in `boyko_input`; the
+/// derive references them by absolute path (`::boyko_input::…`), so
+/// `boyko_macros` needs no dependency on `boyko_input` (the path resolves at the
+/// consumer's expansion site — the same pattern `#[derive(Component)]` uses for
+/// `::boyko_ecs::…`).
+///
+/// # Supported inputs
+///
+/// * `enum PlayerAction { Jump, #[actionlike(Axis2D)] Move, Fire }` — a
+///   non-generic, fieldless enum. Each variant is one action.
+///
+/// # Rejected inputs
+///
+/// * `struct`/`union` — `compile_error!` (actions are a closed enum set).
+/// * Generic enum — `compile_error!` (a generic action set defeats the
+///   fixed `[…; COUNT]` array sizing).
+/// * Data-carrying variant — `compile_error!` (only fieldless variants have a
+///   stable dense index).
+/// * Empty enum — `compile_error!` (`COUNT == 0` has no usable action space).
+/// * Unknown `#[actionlike(...)]` value — `compile_error!`.
+///
+/// # Example
+///
+/// ```ignore
+/// use boyko_macros::Actionlike;
+///
+/// #[derive(Actionlike, Clone, Copy, PartialEq, Eq)]
+/// enum PlayerAction {
+///     Jump,                         // default kind: Button
+///     #[actionlike(Axis2D)] Move,
+///     Fire,
+///     #[actionlike(Axis1D)] Throttle,
+/// }
+/// ```
+///
+/// The example is `ignore`'d because proc-macro crates cannot consume their own
+/// macros and `boyko-macros` cannot depend on `boyko-input` (cycle). Real usage
+/// lives in `boyko-input` integration tests.
+#[proc_macro_derive(Actionlike, attributes(actionlike))]
+pub fn actionlike_macro(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let name = input.ident.clone();
+    let name_span = name.span();
+
+    // Generics defeat the fixed `[…; COUNT]` array sizing (a generic action set
+    // would mint a fresh COUNT per monomorphisation).
+    if !input.generics.params.is_empty() {
+        return syn::Error::new(
+            name_span,
+            "Actionlike derive does not support generics (the action set must be a fixed enum)",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    let data = match &input.data {
+        Data::Enum(e) => e,
+        Data::Struct(_) | Data::Union(_) => {
+            return syn::Error::new(
+                name_span,
+                "Actionlike can only be derived for a fieldless enum",
+            )
+            .to_compile_error()
+            .into();
+        }
+    };
+
+    if data.variants.is_empty() {
+        return syn::Error::new(
+            name_span,
+            "Actionlike enum must declare at least one variant (COUNT == 0 is unusable)",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    let count = data.variants.len();
+
+    let mut index_arms: Vec<TokenStream2> = Vec::with_capacity(count);
+    let mut from_index_arms: Vec<TokenStream2> = Vec::with_capacity(count);
+    let mut kind_arms: Vec<TokenStream2> = Vec::with_capacity(count);
+    let mut name_arms: Vec<TokenStream2> = Vec::with_capacity(count);
+
+    for (index, variant) in data.variants.iter().enumerate() {
+        if !matches!(variant.fields, Fields::Unit) {
+            return syn::Error::new(
+                variant.ident.span(),
+                "Actionlike variants must be fieldless (no stable dense index otherwise)",
+            )
+            .to_compile_error()
+            .into();
+        }
+
+        let variant_ident = &variant.ident;
+        let idx = index;
+        let variant_name = variant_ident.to_string();
+
+        let kind = match actionlike_variant_kind(variant) {
+            Ok(k) => k,
+            Err(err) => return err.to_compile_error().into(),
+        };
+
+        index_arms.push(quote! { #name::#variant_ident => #idx });
+        from_index_arms.push(quote! { #idx => ::core::option::Option::Some(#name::#variant_ident) });
+        kind_arms.push(quote! { #name::#variant_ident => #kind });
+        name_arms.push(quote! { #name::#variant_ident => #variant_name });
+    }
+
+    let expanded = quote! {
+        impl ::boyko_input::action::actionlike::Actionlike for #name {
+            const COUNT: usize = #count;
+
+            #[inline]
+            fn index(self) -> usize {
+                match self {
+                    #(#index_arms),*
+                }
+            }
+
+            #[inline]
+            fn from_index(i: usize) -> ::core::option::Option<Self> {
+                match i {
+                    #(#from_index_arms,)*
+                    _ => ::core::option::Option::None,
+                }
+            }
+
+            #[inline]
+            fn kind(self) -> ::boyko_input::action::actionlike::ActionKind {
+                match self {
+                    #(#kind_arms),*
+                }
+            }
+
+            #[inline]
+            fn name(self) -> &'static str {
+                match self {
+                    #(#name_arms),*
+                }
+            }
+        }
+
+        // V8: the action count must fit a `BitSet256`. A `COUNT > 256` enum is a
+        // cold exotic case (real maps run 10–60); enforce the cap at compile
+        // time so `ActionState`'s bitset addressing is always in bounds.
+        const _: () = ::core::assert!(
+            <#name as ::boyko_input::action::actionlike::Actionlike>::COUNT <= 256,
+            "Actionlike enum exceeds BitSet256 capacity (256 actions max)"
+        );
+    };
+
+    expanded.into()
+}
+
+/// Parses the optional `#[actionlike(Button|Axis1D|Axis2D)]` attribute on a
+/// variant, returning the `ActionKind` token (defaulting to `Button`).
+fn actionlike_variant_kind(
+    variant: &syn::Variant,
+) -> syn::Result<TokenStream2> {
+    let mut kind: Option<TokenStream2> = None;
+
+    for attr in &variant.attrs {
+        if !attr.path().is_ident("actionlike") {
+            continue;
+        }
+        let attr_span = attr
+            .path()
+            .get_ident()
+            .map_or_else(Span::call_site, |i| i.span());
+        if kind.is_some() {
+            return Err(syn::Error::new(
+                attr_span,
+                "duplicate #[actionlike(...)] on a single variant",
+            ));
+        }
+        // The attribute body is a single identifier: Button | Axis1D | Axis2D.
+        let ident: Ident = attr.parse_args().map_err(|_| {
+            syn::Error::new(
+                attr_span,
+                "expected #[actionlike(Button | Axis1D | Axis2D)]",
+            )
+        })?;
+        let resolved = match ident.to_string().as_str() {
+            "Button" => quote! { ::boyko_input::action::actionlike::ActionKind::Button },
+            "Axis1D" => quote! { ::boyko_input::action::actionlike::ActionKind::Axis1D },
+            "Axis2D" => quote! { ::boyko_input::action::actionlike::ActionKind::Axis2D },
+            other => {
+                return Err(syn::Error::new(
+                    ident.span(),
+                    format!("unknown action kind `{other}` (expected Button, Axis1D, or Axis2D)"),
+                ));
+            }
+        };
+        kind = Some(resolved);
+    }
+
+    Ok(kind
+        .unwrap_or_else(|| quote! { ::boyko_input::action::actionlike::ActionKind::Button }))
+}
