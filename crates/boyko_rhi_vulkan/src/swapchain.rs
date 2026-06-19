@@ -38,7 +38,10 @@ use boyko_rhi::{
     BindGroupDesc, BindGroupEntry, Format, ImageUsage, RhiDevice, TextureDesc, TextureDimension,
 };
 
-use crate::compute::DEFAULT_MARCHER_OMEGA;
+use crate::compute::{
+    DEFAULT_LIGHT_DIR, DEFAULT_MARCHER_OMEGA, FineMarcherPush, LIGHTING_FLAG_AO,
+    LIGHTING_FLAG_SHADOWS,
+};
 use crate::device::{DeviceFns, SurfaceInstanceFns, SwapchainDeviceFns, VulkanContext};
 use crate::ffi::*;
 use crate::memory::BoundBuffer;
@@ -2469,34 +2472,36 @@ impl<'ctx> Renderer<'ctx> {
 
         // === Pass B: the marcher SAMPLES the depth image, STORES the G-buffer. ===
         // (5) Bind the marcher + the vocabulary set (written ONCE at sync_gbuffer; NO
-        // per-frame update) against the marcher's OWN dedicated layout, push the 8-byte
+        // per-frame update) against the marcher's OWN dedicated layout, push the 32-byte
         // P4b/B1 constants, dispatch.
         //
-        // The marcher's compute push range is `{ coarse_enabled: u32 @0, omega: f32 @4 }`.
-        // The windowed present path runs WITHOUT the coarse cull pass (no coarse
-        // dispatch writes binding 6), so `coarse_enabled = 0` gates the tile read off —
-        // but the marcher shader still DECLARES binding 6, so the (valid) Tiles
-        // descriptor must be bound (it is, in the vocabulary set). `omega` carries the
-        // B1 over-relaxation factor (`DEFAULT_MARCHER_OMEGA`, the provably hole-free
-        // marcher speedup).
-        let marcher_push = {
-            let mut push = [0u8; GBUFFER_MARCHER_PUSH_BYTES as usize];
-            // coarse_enabled = 0 (windowed path: cull OFF), omega = DEFAULT_MARCHER_OMEGA.
-            push[0..4].copy_from_slice(&0u32.to_le_bytes());
-            push[4..8].copy_from_slice(&DEFAULT_MARCHER_OMEGA.to_le_bytes());
-            push
-        };
+        // The marcher's 32-byte compute push range is `FineMarcherPush`
+        // `{ coarse_enabled: u32 @0, omega: f32 @4, lighting_flags: u32 @8, light_dir: float3 @16 }`.
+        // The windowed present path runs WITHOUT the coarse cull pass (no coarse dispatch
+        // writes binding 6), so `coarse_enabled = false` gates the tile read off — but the
+        // marcher shader still DECLARES binding 6, so the (valid) Tiles descriptor must be
+        // bound (it is, in the vocabulary set). `omega` carries the B1 over-relaxation
+        // factor (`DEFAULT_MARCHER_OMEGA`, the provably hole-free speedup). Render A1/A2:
+        // the on-screen demo turns lighting ON (A1 soft shadows + A2 AO) with the default
+        // directional light.
+        let marcher_push = FineMarcherPush::new(
+            false,
+            DEFAULT_MARCHER_OMEGA,
+            LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO,
+            DEFAULT_LIGHT_DIR,
+        );
         // SAFETY: recording is open; the marcher pipeline + its layout (declaring
-        // `vocab_layout` at set 0 AND the 8-byte COMPUTE push range) are live on this
+        // `vocab_layout` at set 0 AND the 32-byte COMPUTE push range) are live on this
         // device (caller contract); the vocabulary set binds the SSBO/UBO + the
         // now-transitioned depth (SHADER_READ) + G-buffer (GENERAL) images + a valid
         // Tiles SSBO @6; `dispatch_group_count_x` covers `present_extent`'s pixel count
         // (the G-buffer images + dispatch grid + camera UBO `count` are all sized to
         // `present_extent`, the composite — NOT the swapchain `extent`; caller contract);
         // `&...descriptor_set` is a single-element local alive for the call (first_set 0,
-        // count 1, zero dynamic offsets); `marcher_push` is `GBUFFER_MARCHER_PUSH_BYTES`
-        // (8) bytes at offset 0, a subset of the declared 80-byte range and outlives the
-        // call.
+        // count 1, zero dynamic offsets); `marcher_push.as_bytes()` is
+        // `GBUFFER_MARCHER_PUSH_BYTES` (32) bytes at offset 0, a subset of the declared
+        // 80-byte range, and the backing `marcher_push` local outlives the call.
+        let marcher_push_bytes = marcher_push.as_bytes();
         unsafe {
             (self.fns.cmd_bind_pipeline)(
                 cmd,
@@ -2519,7 +2524,7 @@ impl<'ctx> Renderer<'ctx> {
                 VK_SHADER_STAGE_COMPUTE_BIT,
                 0,
                 GBUFFER_MARCHER_PUSH_BYTES,
-                marcher_push.as_ptr().cast(),
+                marcher_push_bytes.as_ptr().cast(),
             );
             (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
         }
@@ -3077,13 +3082,15 @@ pub struct SampledComposite<'a> {
 /// mesh-raster pipeline's `VERTEX` range each on-screen G-buffer frame (Render P1c).
 pub const GBUFFER_MVP_BYTES: usize = 64;
 
-/// The byte size of the marcher's COMPUTE push constant: the P4b/B1 pair
-/// `{ coarse_enabled: u32 @0, omega: f32 @4 }`, pushed to the marcher pipeline's
-/// `COMPUTE` range each on-screen G-buffer frame. The windowed path pushes
-/// `coarse_enabled = 0` (the coarse cull pass is not run on-screen) and `omega =
-/// DEFAULT_MARCHER_OMEGA` (the B1 over-relaxation marcher speedup). It is a subset of
-/// the marcher pipeline's declared 80-byte (`COMPOSITE_PUSH_CONSTANT_BYTES`) range.
-const GBUFFER_MARCHER_PUSH_BYTES: u32 = 8;
+/// The byte size of the marcher's COMPUTE push constant — DERIVED from the
+/// [`FineMarcherPush`](crate::compute::FineMarcherPush) `#[repr(C)]` struct (Render A1/A2
+/// widened it 8 → 32 bytes: it now carries `lighting_flags` @8 + `light_dir` @16 alongside
+/// the P4b `coarse_enabled` @0 + the B1 `omega` @4). The windowed path pushes
+/// `coarse_enabled = 0` (the coarse cull pass is not run on-screen), `omega =
+/// DEFAULT_MARCHER_OMEGA` (the B1 over-relaxation speedup), and lighting ON with the
+/// default directional light (the demo). It is a subset of the marcher pipeline's declared
+/// 80-byte (`COMPOSITE_PUSH_CONSTANT_BYTES`) range.
+const GBUFFER_MARCHER_PUSH_BYTES: u32 = crate::compute::GBUFFER_MARCHER_PUSH_BYTES;
 
 /// The on-screen Render-P1c G-buffer frame's STATIC inputs: the resources the
 /// [`Renderer::render_gbuffer_frame`] 3-pass needs that do NOT depend on the

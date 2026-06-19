@@ -46,12 +46,15 @@ use boyko_rhi::{
     TextureDesc, TextureDimension, VertexAttribute, VertexBufferLayout, VertexFormat, Viewport,
 };
 use boyko_rhi_vulkan::compute::{
-    COMPOSITE_PUSH_CONSTANT_BYTES, CompositeCamera, CompositePushConstants,
-    DEFAULT_MARCHER_OMEGA, LOCAL_SIZE_X, MESH_COLOR, MESH_DEPTH_CLEAR, SDF_CAMERA_Z, SDF_IMG_H,
+    COMPOSITE_PUSH_CONSTANT_BYTES, CompositeCamera, CompositePushConstants, DEFAULT_LIGHT_DIR,
+    DEFAULT_MARCHER_OMEGA, FineMarcherPush, LIGHTING_FLAG_AO, LIGHTING_FLAG_SHADOWS, LOCAL_SIZE_X,
+    MESH_COLOR, MESH_DEPTH_CLEAR,
+    SDF_CAMERA_Z, SDF_IMG_H,
     SDF_IMG_W, SDF_TRACE_T_MAX, SDF_VIEW_HALF_EXTENT, SdfEdit, TILE_BOUND_BYTES, TILE_FLAG_EMPTY,
     TILE_SIZE, TileBound, EDITLIST_BUFFER_WORDS, editlist_pixel_hits, encode_edit_list,
     golden_composite_pixel_culled, golden_composite_pixel_ex,
-    golden_composite_pixel_ex_omega, golden_tile_bound, mesh_depth_for_z, pack_rgba, pixel_world_xy,
+    golden_composite_pixel_ex_omega, golden_composite_pixel_ex_omega_lit, golden_tile_bound,
+    mesh_depth_for_z, pack_rgba, pixel_world_xy,
     sdf_gbuffer_composite_spirv, sdf_op, sdf_tile_cull_spirv, tile_grid_extent,
 };
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
@@ -315,6 +318,30 @@ fn run_gbuffer_hybrid_ex(
     coarse_enabled: bool,
     read_tiles: bool,
     omega_in: f32,
+) -> (Vec<u8>, Option<Vec<u8>>) {
+    // Delegate to the lighting-aware variant with lighting OFF (the historical default):
+    // `lighting_flags == 0` ⇒ the shader's byte-identical Lambert path, so every existing
+    // 0%-gate caller keeps its exact OFF semantics. The A1/A2 ON-path tester gates call
+    // `run_gbuffer_hybrid_lit` directly with an explicit `lighting_flags` + `light_dir`.
+    run_gbuffer_hybrid_lit(ctx, edits, coarse_enabled, read_tiles, omega_in, 0, DEFAULT_LIGHT_DIR)
+}
+
+/// Render A1/A2 — the lighting-aware harness: identical to [`run_gbuffer_hybrid_ex`] but
+/// the marcher push carries an explicit `lighting_flags` (bit 0 = A1 shadows, bit 1 = A2
+/// AO; `0` = the OFF Lambert path) and `light_dir` (the un-normalized directional light).
+/// The GPU ALBEDO readback is then diffed against the host `_lit` golden
+/// (`golden_composite_pixel_ex_omega_lit` / `..._culled_omega_lit`) with the SAME flags +
+/// `light_dir`. Everything else (the §15.1 seam, the vocabulary set, the coarse pass) is
+/// the [`run_gbuffer_hybrid_ex`] flow verbatim — only the push payload changes.
+#[allow(clippy::too_many_arguments)]
+fn run_gbuffer_hybrid_lit(
+    ctx: &VulkanContext,
+    edits: &[SdfEdit],
+    coarse_enabled: bool,
+    read_tiles: bool,
+    omega_in: f32,
+    lighting_flags: u32,
+    light_dir: [f32; 3],
 ) -> (Vec<u8>, Option<Vec<u8>>) {
     let device: &VulkanContext = ctx;
     let queue = ctx.rhi_queue();
@@ -700,16 +727,16 @@ fn run_gbuffer_hybrid_ex(
     // the marcher's OWN layout (via `push_compute_constants`). ---
     encoder.bind_compute_pipeline(&compute);
     encoder.bind_descriptor_set_compute(&bind_group, &compute);
-    // Render P4b + B1: the 8-byte push — `coarse_enabled` (offset 0) gates the cull and
-    // `omega` (offset 4) carries the over-relaxation factor. The clamp is a RUNTIME
-    // `f32::clamp` (NOT a debug_assert): `omega == 2` is the soundness ceiling, so a
-    // caller passing a hot value must be defanged in release too.
-    let coarse_flag: u32 = u32::from(coarse_enabled);
+    // Render P4b + B1 + A1/A2: the 32-byte `FineMarcherPush` — `coarse_enabled` (offset 0)
+    // gates the cull, `omega` (offset 4) carries the over-relaxation factor, and
+    // `lighting_flags` (offset 8) + `light_dir` (offset 16) drive A1/A2. The caller selects
+    // the lighting state (the OFF path `lighting_flags == 0` ⇒ the shader's byte-identical
+    // Lambert path; the ON path folds in the soft shadow + AO). The clamp is a RUNTIME
+    // `f32::clamp` (NOT a debug_assert): `omega == 2` is the soundness ceiling, so a caller
+    // passing a hot value must be defanged in release too.
     let omega: f32 = omega_in.clamp(1.0, 1.99);
-    let mut push = [0u8; 8];
-    push[0..4].copy_from_slice(&coarse_flag.to_le_bytes());
-    push[4..8].copy_from_slice(&omega.to_le_bytes());
-    encoder.push_compute_constants(&compute, ShaderStage::COMPUTE, 0, &push);
+    let push = FineMarcherPush::new(coarse_enabled, omega, lighting_flags, light_dir);
+    encoder.push_compute_constants(&compute, ShaderStage::COMPUTE, 0, push.as_bytes());
     encoder.dispatch(group_count_x(), 1, 1);
 
     // --- ALBEDO: GENERAL → TRANSFER_SRC_OPTIMAL for the readback copy. ---
@@ -1576,4 +1603,450 @@ fn b1_gate11_cull_on_omega_1_2_sync_validation_clean() {
         bounds.len(),
         surface
     );
+}
+
+// ===========================================================================================
+// Render A1 (SDF soft shadows) + A2 (SDF AO) — the ON-path GPU gates (RTX 3060, validation
+// ON, --test-threads=1). The OFF 0%-gate is already pinned by `p1b_gbuffer_hybrid_matches_
+// golden` + `p4b_cull_off_is_byte_identical_to_pre_p4b_path` + `b1_gate6_...` (all run with
+// the 32-byte push, all green). These gates exercise `lighting_flags != 0`.
+//
+//   A-host.   host_soft_shadow / host_ao sanity (CPU, no GPU) — factors in [0,1]; a shadowed
+//             crevice is darker than a lit face; AO darkens concavities.
+//   A1g.      ON GPU vs host `_lit` golden (DEFAULT light (0,0,1)), SHADOWS|AO, ±3/255 — the
+//             host mirror is EXACT for the default light (shader's static LIGHT_DIR == push).
+//   A2g.      Shadows-only and AO-only independence vs the matching host `_lit` golden, ±3/255
+//             (the flag bits gate independently).
+//   A3g.      Non-default light_dir mis-pack catcher (the architect's named std430 oracle):
+//             a GPU-vs-GPU differential — a non-axis light_dir must shift the shadow pattern
+//             vs the default light (proves light_dir reaches the shader at the correct offset).
+//             SEE the BUG-A-NDOTL note: the literal "GPU vs host `_lit` with same non-default
+//             light" form is NOT achievable against the current host mirror (host applies
+//             light_dir to the Lambert base; the shader hardcodes the static LIGHT_DIR there).
+//
+// The ON-path tolerance is ±3/255 (`LIT_CHANNEL_TOL`) — the architect's consumer-side budget
+// (host `powi` vs shader `pow` ULP + the float→UNORM store). The OFF path stays ±2/255.
+// ===========================================================================================
+
+/// The A1/A2 ON-path per-channel tolerance (the architect's consumer-side ±3/255: host
+/// `AO_FALLOFF.powi(i)` vs the shader's `pow(AO_FALLOFF, i)` ULP drift + the shadow
+/// min-track FP order + the float→UNORM store quantization). The OFF path keeps the
+/// stricter `CHANNEL_TOL` (±2/255).
+const LIT_CHANNEL_TOL: i32 = 3;
+
+/// A non-axis, normalized directional light (the architect's mis-pack probe direction). It
+/// is NOT (0,0,1), so a std430 offset slip on `light_dir` (landing it at the wrong push
+/// offset → read as zero / garbage) yields a measurably different shadow pattern than a
+/// correctly-packed value — the differential A3g catches.
+const NONDEFAULT_LIGHT: [f32; 3] = [0.4, 0.5, 0.768];
+
+/// Diffs the whole GPU ALBEDO readback against the host `_lit` golden (cull-OFF, ω=1.0)
+/// with the given `lighting_flags` + `light_dir`, returning the max per-channel delta and
+/// the worst texel. Asserts EVERY texel within `LIT_CHANNEL_TOL` (the caller passes the
+/// scene name for the message). The SDF-hit count is returned so the caller can prove the
+/// device rendered a real lit surface (not an all-background fill).
+fn assert_lit_within_tol(
+    albedo: &[u8],
+    edits: &[SdfEdit],
+    flags: u32,
+    light_dir: [f32; 3],
+    name: &str,
+) -> (i32, u64) {
+    let mut max_delta = 0i32;
+    let mut worst = (0u32, 0u32, [0i32; 3], [0i32; 3]);
+    let mut sdf_hits = 0u64;
+    for py in 0..SDF_IMG_H {
+        for px in 0..SDF_IMG_W {
+            if gpu_pixel_is_sdf_hit(albedo, px, py) {
+                sdf_hits += 1;
+            }
+            let got = albedo_rgb(albedo, px, py);
+            let md = expected_mesh_depth(px, py);
+            let want = golden_composite_pixel_ex_omega_lit(
+                edits, md, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, 1.0, flags,
+                light_dir,
+            );
+            let w = unpack_packed_rgb(want);
+            for ch in 0..3 {
+                let dd = (got[ch] - w[ch]).abs();
+                if dd > max_delta {
+                    max_delta = dd;
+                    worst = (px, py, got, w);
+                }
+            }
+            assert!(
+                (0..3).all(|ch| (got[ch] - w[ch]).abs() <= LIT_CHANNEL_TOL),
+                "[{name}] lit texel ({px},{py}) flags={flags} got {got:?} want {w:?} exceeds \
+                 ±{LIT_CHANNEL_TOL}/255 (worst so far {max_delta} at {:?})",
+                (worst.0, worst.1)
+            );
+        }
+    }
+    (max_delta, sdf_hits)
+}
+
+/// **A-host — host shadow/AO sanity (CPU, no GPU).** A correctness sniff of `host_soft_shadow`
+/// / `host_ao` via the public `_lit` golden: with SHADOWS|AO ON (default light), the ON-path
+/// lit color must (a) stay in-gamut (every channel ≤ 255), (b) be NO BRIGHTER than the OFF
+/// (Lambert-only) golden at the same pixel — shadow ∈ [0,1] and AO ∈ [0,1] can only darken —
+/// and (c) be STRICTLY darker at a shadowed/concave pixel (the carved crater crevice), proving
+/// the terms actually attenuate (not a no-op multiply by 1). The OFF baseline is the same
+/// golden with `lighting_flags == 0`.
+#[test]
+fn a_host_shadow_ao_darken_not_brighten() {
+    let edits = crater();
+    let flags = LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO;
+
+    let mut any_strictly_darker = false;
+    let mut checked_hits = 0u64;
+    for py in 0..SDF_IMG_H {
+        for px in 0..SDF_IMG_W {
+            // Only SDF-hit, mesh-uncovered pixels carry the lit color (a mesh-covered or
+            // background pixel is unaffected by lighting — the OFF==ON identity there).
+            if !editlist_pixel_hits(&edits, px, py) || mesh_covers_pixel(px, py) {
+                continue;
+            }
+            checked_hits += 1;
+            let off = unpack_packed_rgb(golden_composite_pixel_ex_omega_lit(
+                &edits, MESH_DEPTH_CLEAR, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, 1.0,
+                0, DEFAULT_LIGHT_DIR,
+            ));
+            let on = unpack_packed_rgb(golden_composite_pixel_ex_omega_lit(
+                &edits, MESH_DEPTH_CLEAR, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, 1.0,
+                flags, DEFAULT_LIGHT_DIR,
+            ));
+            for ch in 0..3 {
+                assert!(on[ch] <= 255, "[crater] lit channel out of gamut at ({px},{py}): {on:?}");
+                assert!(
+                    on[ch] <= off[ch],
+                    "[crater] SHADOWS|AO BRIGHTENED ({px},{py}) ch{ch}: on {on:?} > off {off:?} \
+                     (shadow/AO factors are in [0,1] — they can only darken)"
+                );
+            }
+            if (0..3).any(|ch| on[ch] < off[ch]) {
+                any_strictly_darker = true;
+            }
+        }
+    }
+    assert!(checked_hits > 0, "the crater fixture must have an SDF-hit, mesh-uncovered pixel");
+    assert!(
+        any_strictly_darker,
+        "SHADOWS|AO never darkened ANY SDF-hit pixel ({checked_hits} checked) — the consumer \
+         terms are a no-op (a multiply by 1 everywhere)"
+    );
+    println!(
+        "[crater] A-host OK: SHADOWS|AO darkens (never brightens) across {checked_hits} SDF-hit \
+         pixels; at least one strictly darker (the terms attenuate)"
+    );
+}
+
+/// **A1g — ON GPU vs host `_lit` golden, DEFAULT light, SHADOWS|AO, ±3/255.** Push
+/// `lighting_flags = SHADOWS|AO`, `light_dir = (0,0,1)`; every GPU ALBEDO texel within
+/// ±3/255 of `golden_composite_pixel_ex_omega_lit(.., flags, (0,0,1))` on crater / box /
+/// smooth. The default light is the case where the host mirror is EXACT (the shader's static
+/// `LIGHT_DIR` equals the pushed direction), so this is the headline ON-path color gate.
+#[test]
+fn a1g_gpu_shadows_ao_matches_host_lit_default_light() {
+    let Some(ctx) = boot_render_or_skip("a1g_gpu_shadows_ao_matches_host_lit_default_light") else {
+        return;
+    };
+    let flags = LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO;
+    for (name, edits) in p4b_scenes() {
+        let albedo = run_gbuffer_hybrid_lit(&ctx, &edits, false, false, 1.0, flags, DEFAULT_LIGHT_DIR).0;
+        assert_eq!(albedo.len(), READBACK_BYTES as usize);
+        let nonzero = albedo.chunks_exact(4).filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+        assert!(nonzero > 0, "[{name}] lit albedo all-zero — device did not render");
+        let (max_delta, sdf_hits) =
+            assert_lit_within_tol(&albedo, &edits, flags, DEFAULT_LIGHT_DIR, name);
+        assert!(sdf_hits > 0, "[{name}] no SDF-hit lit pixel — the marcher hit no surface");
+        println!(
+            "[{name}] A1g SHADOWS|AO default-light: max per-channel delta = {max_delta}/255 \
+             (tol {LIT_CHANNEL_TOL}); {sdf_hits} SDF-hit px"
+        );
+    }
+}
+
+/// **A2g — shadows-only and AO-only independence, ±3/255.** Push `flags = SHADOWS` (AO off)
+/// and `flags = AO` (shadows off) SEPARATELY; each GPU render matches the corresponding host
+/// `_lit` golden (default light) within ±3/255. This proves the flag bits gate INDEPENDENTLY
+/// (a wired-together SHADOWS|AO that ignored a single bit would diverge here). Also asserts
+/// the two single-flag renders DIFFER from each other (each flag has a distinct effect).
+#[test]
+fn a2g_gpu_shadows_only_and_ao_only_gate_independently() {
+    let Some(ctx) = boot_render_or_skip("a2g_gpu_shadows_only_and_ao_only_gate_independently") else {
+        return;
+    };
+    // The per-flag ±3/255-vs-host gates (below) are the rigorous independence proof: each
+    // single-flag GPU render matches ITS OWN distinct host `_lit` golden, so SHADOWS-only
+    // cannot be silently producing the AO-only result (and vice-versa). A separate
+    // SHADOWS-only != AO-only differential is also asserted, but only AGGREGATED across the
+    // set: a convex fixture (box) self-shadows nowhere and AO-darkens negligibly, so its two
+    // single-flag renders legitimately coincide; the carved crater is the scene that MUST
+    // diverge.
+    let mut any_flag_differs = false;
+    for (name, edits) in p4b_scenes() {
+        let mut renders: [Option<Vec<u8>>; 2] = [None, None];
+        for (slot, flags) in [LIGHTING_FLAG_SHADOWS, LIGHTING_FLAG_AO].into_iter().enumerate() {
+            let albedo = run_gbuffer_hybrid_lit(&ctx, &edits, false, false, 1.0, flags, DEFAULT_LIGHT_DIR).0;
+            let nonzero = albedo.chunks_exact(4).filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+            assert!(nonzero > 0, "[{name} flags={flags}] albedo all-zero — device did not render");
+            let (max_delta, sdf_hits) =
+                assert_lit_within_tol(&albedo, &edits, flags, DEFAULT_LIGHT_DIR, name);
+            assert!(sdf_hits > 0, "[{name} flags={flags}] no SDF-hit lit pixel");
+            let which = if flags == LIGHTING_FLAG_SHADOWS { "SHADOWS-only" } else { "AO-only" };
+            println!(
+                "[{name}] A2g {which}: max per-channel delta = {max_delta}/255 (tol {LIT_CHANNEL_TOL}); \
+                 {sdf_hits} SDF-hit px"
+            );
+            renders[slot] = Some(albedo);
+        }
+
+        let shadows = renders[0].as_ref().expect("SHADOWS render");
+        let ao = renders[1].as_ref().expect("AO render");
+        let differs = shadows
+            .chunks_exact(4)
+            .zip(ao.chunks_exact(4))
+            .any(|(s, a)| (0..3).any(|c| (s[c] as i32 - a[c] as i32).abs() > LIT_CHANNEL_TOL));
+        if differs {
+            any_flag_differs = true;
+            println!("[{name}] A2g SHADOWS-only != AO-only (each flag has a distinct effect here)");
+        } else {
+            println!("[{name}] A2g SHADOWS-only ≈ AO-only (convex fixture: no self-shadow, negligible AO)");
+        }
+    }
+    assert!(
+        any_flag_differs,
+        "across ALL fixtures the SHADOWS-only and AO-only renders coincided — the two flags do \
+         not gate independently (one bit is dead). The per-flag-vs-host gates above should have \
+         caught this; if they passed but this failed, a host golden is mis-routed"
+    );
+}
+
+/// **A3g — the non-default light_dir mis-pack catcher (the architect's std430 push-layout
+/// oracle).** A NON-axis `light_dir` ((0.4,0.5,0.768), normalized) is pushed with SHADOWS
+/// enabled and the GPU render is compared, pixel-for-pixel, against the DEFAULT-light GPU
+/// render. The two MUST DIFFER beyond the OFF tolerance on the SDF surface: the shadow march
+/// direction is `pc.light_dir`, so a correctly-packed non-default light shifts the shadow
+/// pattern, whereas a std430 OFFSET MIS-PACK (light_dir landing at the wrong push offset →
+/// read as zero/garbage) would (a) collapse the shadow direction toward the default / a
+/// degenerate value and (b) leave the render ≈ the default-light render → NO difference.
+/// A measurable difference therefore proves `light_dir` reaches the shader at offset 16.
+///
+/// BUG-A-NDOTL (FIXED — see `a3g_nondefault_light_dir_matches_host_lit_literal` for the
+/// literal-form payoff): the shader's Lambert BASE term now consumes the PUSHED `pc.light_dir`
+/// (was the static `LIGHT_DIR=(0,0,1)`), matching `host_shade`, so a non-default light steers
+/// the base too and the GPU/host base no longer diverge. This GPU-vs-GPU differential is
+/// RETAINED as a complementary, host-independent mis-pack oracle: it proves the same packing
+/// property (a non-axis light re-aims the shadow march) without depending on the host golden.
+#[test]
+fn a3g_nondefault_light_dir_shifts_shadows_mispack_catcher() {
+    let Some(ctx) = boot_render_or_skip("a3g_nondefault_light_dir_shifts_shadows_mispack_catcher") else {
+        return;
+    };
+    // SHADOWS only: isolate the term the shader actually steers by `pc.light_dir` (AO marches
+    // the surface NORMAL, not the light, so it is light_dir-invariant and would dilute the
+    // differential). The differential is only geometrically guaranteed where the SCENE has a
+    // self-occluder: the carved CRATER (a CSG subtract that leaves a rim/crevice) self-shadows
+    // and so MUST shift; a single CONVEX box self-shadows nowhere (the lit hemisphere is
+    // unoccluded for any front light), so its shift is legitimately ~0. The mis-pack catcher
+    // therefore REQUIRES a shift on the crater (the load-bearing assertion) and merely reports
+    // the others — a mis-pack (light_dir read off-offset → degenerate / default direction)
+    // would zero the CRATER shift, tripping the gate.
+    let flags = LIGHTING_FLAG_SHADOWS;
+    let mut crater_shifted = 0u64;
+    for (name, edits) in p4b_scenes() {
+        let def = run_gbuffer_hybrid_lit(&ctx, &edits, false, false, 1.0, flags, DEFAULT_LIGHT_DIR).0;
+        let non = run_gbuffer_hybrid_lit(&ctx, &edits, false, false, 1.0, flags, NONDEFAULT_LIGHT).0;
+        assert_eq!(def.len(), READBACK_BYTES as usize);
+        assert_eq!(non.len(), READBACK_BYTES as usize);
+
+        // Count pixels whose shadow term shifted beyond the OFF tolerance. A correctly-packed
+        // non-axis light re-aims the shadow march → self-occluded surface pixels change. A
+        // mis-pack (light_dir read as 0 → the ndotl<=0 early-out, OR read as the default) would
+        // leave def ≈ non → ZERO shifted pixels.
+        let mut shifted = 0u64;
+        let mut max_shift = 0i32;
+        let mut worst = (0u32, 0u32, [0i32; 3], [0i32; 3]);
+        for py in 0..SDF_IMG_H {
+            for px in 0..SDF_IMG_W {
+                let a = albedo_rgb(&def, px, py);
+                let b = albedo_rgb(&non, px, py);
+                let dmax = (0..3).map(|c| (a[c] - b[c]).abs()).max().unwrap();
+                if dmax > CHANNEL_TOL {
+                    shifted += 1;
+                }
+                if dmax > max_shift {
+                    max_shift = dmax;
+                    worst = (px, py, a, b);
+                }
+            }
+        }
+        if name == "crater_csg" {
+            crater_shifted = shifted;
+        }
+        println!(
+            "[{name}] A3g non-axis light shift: {shifted} pixels vs default (max {max_shift}/255 \
+             at ({},{}) def={:?} non={:?})",
+            worst.0, worst.1, worst.2, worst.3
+        );
+    }
+    assert!(
+        crater_shifted > 0,
+        "MIS-PACK SUSPECTED: the non-axis light_dir {NONDEFAULT_LIGHT:?} produced NO shadow shift \
+         on the CRATER (a self-occluding CSG carve) vs the default light — light_dir is NOT \
+         reaching the shader at offset 16 (a std430 push mis-pack), or the shadow term ignores it"
+    );
+    println!(
+        "[crater_csg] A3g mis-pack catcher OK: non-axis light_dir shifts {crater_shifted} crater \
+         pixels — light_dir reaches the shader at offset 16 (correct std430 packing)"
+    );
+}
+
+/// **A3g-literal — the architect's named std430 oracle in its FULL literal form (the
+/// BUG-A-NDOTL payoff).** Push a NON-axis `light_dir` ((0.4,0.5,0.768) normalized) with
+/// `SHADOWS|AO` and assert EVERY GPU ALBEDO texel is within ±3/255 of
+/// `golden_composite_pixel_ex_omega_lit(.., flags, NONDEFAULT_LIGHT)` — the host `_lit` golden
+/// computed with the SAME non-default light — on crater / box / smooth.
+///
+/// Before BUG-A-NDOTL was fixed this gate was UNIMPLEMENTABLE: the shader's Lambert base used
+/// the static `LIGHT_DIR=(0,0,1)` while `host_shade` already applied the pushed direction, so a
+/// non-default light made the host base and GPU base diverge by ~47–125/255 BEFORE any
+/// shadow/AO — far past the ±3/255 budget — independent of packing (the A3g doc above recorded
+/// the divergence as FILED). The fix routed the shader base through `pc.light_dir`, so the host
+/// and GPU now share the SAME base term for ANY light. This gate is the literal proof the
+/// divergence is GONE: a single host-vs-GPU comparison with a non-default light must now pass at
+/// the ON tolerance. It SUBSUMES the mis-pack property the GPU-vs-GPU A3g targets — the host
+/// golden marches the same `light_dir`, so a std430 offset slip (light_dir read off-offset →
+/// degenerate / default direction) makes the GPU shadow pattern diverge from the host golden by
+/// far more than ±3/255 and trips this gate too.
+#[test]
+fn a3g_nondefault_light_dir_matches_host_lit_literal() {
+    let Some(ctx) = boot_render_or_skip("a3g_nondefault_light_dir_matches_host_lit_literal") else {
+        return;
+    };
+    let flags = LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO;
+    for (name, edits) in p4b_scenes() {
+        let albedo = run_gbuffer_hybrid_lit(&ctx, &edits, false, false, 1.0, flags, NONDEFAULT_LIGHT).0;
+        assert_eq!(albedo.len(), READBACK_BYTES as usize);
+        let nonzero = albedo.chunks_exact(4).filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+        assert!(nonzero > 0, "[{name}] non-default-light lit albedo all-zero — device did not render");
+        // The LITERAL host-vs-GPU comparison with the SAME non-default light_dir (the payoff).
+        let (max_delta, sdf_hits) =
+            assert_lit_within_tol(&albedo, &edits, flags, NONDEFAULT_LIGHT, name);
+        assert!(sdf_hits > 0, "[{name}] no SDF-hit lit pixel under the non-default light");
+        println!(
+            "[{name}] A3g-literal SHADOWS|AO non-default light {NONDEFAULT_LIGHT:?}: max \
+             per-channel delta = {max_delta}/255 (tol {LIT_CHANNEL_TOL}) — BUG-A-NDOTL payoff: \
+             host base now steers by pc.light_dir; {sdf_hits} SDF-hit px"
+        );
+    }
+}
+
+/// **A5 — GPU OFF-vs-ON wall-clock A/B (perf OBSERVATION, not a pass/fail gate).** Measures
+/// the fence-to-fence wall time of the FULL marcher submit (raster + marcher + readback) with
+/// lighting OFF vs SHADOWS|AO ON, median of N runs, on the densest fixture (crater). This is a
+/// coarse CPU-side proxy — it includes the constant raster + copy + submit/wait overhead, so
+/// the ON/OFF DELTA (not the absolute) is the signal: the A1/A2 cost is the shadow secondary
+/// march (≤ MAX_IT steps per lit pixel) + the 5 AO taps, bounded by the P4-style empty-skip
+/// and the small 64×64 lit-pixel count. No GPU-timestamp query API exists in the RHI yet
+/// (a developer increment), so a true on-device marcher-only timing is deferred; this wall A/B
+/// is the available proxy. `#[ignore]` by default (a perf observation, run explicitly).
+#[test]
+#[ignore = "perf observation — run explicitly with --ignored"]
+fn a5_gpu_off_vs_on_wall_clock_ab() {
+    let Some(ctx) = boot_render_or_skip("a5_gpu_off_vs_on_wall_clock_ab") else {
+        return;
+    };
+    use std::time::Instant;
+    let edits = crater();
+    const N: usize = 21; // odd → a clean median
+    let bench = |flags: u32| -> f64 {
+        // Warm up (pipeline/cache) before timing.
+        let _ = run_gbuffer_hybrid_lit(&ctx, &edits, false, false, DEFAULT_MARCHER_OMEGA, flags, DEFAULT_LIGHT_DIR).0;
+        let mut samples = Vec::with_capacity(N);
+        for _ in 0..N {
+            let t0 = Instant::now();
+            let out = run_gbuffer_hybrid_lit(&ctx, &edits, false, false, DEFAULT_MARCHER_OMEGA, flags, DEFAULT_LIGHT_DIR).0;
+            let dt = t0.elapsed().as_secs_f64() * 1.0e6; // microseconds
+            std::hint::black_box(&out);
+            samples.push(dt);
+        }
+        samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        samples[N / 2]
+    };
+    let off = bench(0);
+    let on = bench(LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO);
+    println!(
+        "[crater_csg] A5 wall-clock A/B (median of {N}, full submit incl. raster+copy+wait): \
+         OFF = {off:.1} µs, ON(SHADOWS|AO) = {on:.1} µs, Δ = {:+.1} µs ({:+.1}%). \
+         NOTE: coarse CPU-side proxy — includes constant non-marcher overhead; the Δ is the A1/A2 \
+         marcher-side cost signal, not a pass/fail gate.",
+        on - off,
+        (on - off) / off * 100.0
+    );
+}
+
+/// **A4g — sync-validation clean under cull-ON + lighting-ON (the heaviest path).** A cull-ON
+/// SHADOWS|AO ω=1.2 dispatch that RETURNS proves `assert_validation_clean` passed (asserted
+/// inside `run_gbuffer_hybrid_lit` before return): the A1/A2 shadow/AO secondary marches read
+/// the SAME frozen field through the already-bound vocabulary set — they add NO new resource,
+/// NO new binding, and NO new barrier over the pre-A1/A2 cull-ON path, so the coarse→fine
+/// Tiles barrier and the G-buffer image transitions raise no new hazard. The 32-byte push is
+/// pure data. This is the combined gate 9 (sync-val) for the ON path.
+#[test]
+fn a4g_cull_on_lighting_on_sync_validation_clean() {
+    let Some(ctx) = boot_render_or_skip("a4g_cull_on_lighting_on_sync_validation_clean") else {
+        return;
+    };
+    let flags = LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO;
+    let (albedo, tiles) =
+        run_gbuffer_hybrid_lit(&ctx, &crater(), true, true, DEFAULT_MARCHER_OMEGA, flags, DEFAULT_LIGHT_DIR);
+    assert_eq!(albedo.len(), READBACK_BYTES as usize);
+    let bounds = parse_tile_bounds(&tiles.expect("read_tiles"));
+    let surface = bounds.iter().filter(|b| b.flags & TILE_FLAG_EMPTY == 0).count();
+    assert!(surface > 0, "the coarse pass must have marked at least one surface tile");
+    let sdf_hits = albedo
+        .chunks_exact(4)
+        .filter(|t| {
+            let mesh = unpack_packed_rgb(pack_rgba(MESH_COLOR));
+            let bg = packed_background();
+            let g = [t[0] as i32, t[1] as i32, t[2] as i32];
+            let near = |r: [i32; 3]| (0..3).all(|c| (g[c] - r[c]).abs() <= CHANNEL_TOL);
+            !near(mesh) && !near(bg) && (t[0] != 0 || t[1] != 0 || t[2] != 0)
+        })
+        .count();
+    println!(
+        "[crater_csg] A4g cull-ON + SHADOWS|AO ω={DEFAULT_MARCHER_OMEGA} validation+sync-clean: \
+         {} tiles ({surface} surface), {sdf_hits} lit SDF px; the A1/A2 secondary marches raised \
+         no new hazard",
+        bounds.len()
+    );
+}
+
+/// **A3g-host — the non-default light std430 round-trip (host-side push-layout pin).** A
+/// pure host check that `FineMarcherPush::new(.., NONDEFAULT_LIGHT)` re-views the non-default
+/// `light_dir` at byte offset 16 of `as_bytes()` (the std430 offset the shader reads). This
+/// is the deterministic companion to the GPU differential A3g: it pins the host side of the
+/// push contract (the `const _: () = assert!(offset_of!(.., light_dir) == 16)` is a compile
+/// gate; this asserts the RUNTIME bytes too) so a future field-reorder is caught even without
+/// a GPU.
+#[test]
+fn a3g_host_light_dir_round_trips_at_offset_16() {
+    let push = FineMarcherPush::new(
+        false,
+        DEFAULT_MARCHER_OMEGA,
+        LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO,
+        NONDEFAULT_LIGHT,
+    );
+    let bytes = push.as_bytes();
+    assert_eq!(bytes.len(), 32, "FineMarcherPush must serialize to 32 bytes");
+    let read_at = |off: usize| f32::from_le_bytes(bytes[off..off + 4].try_into().unwrap());
+    // lighting_flags is a u32 at offset 8.
+    let flags = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+    assert_eq!(flags, LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO, "lighting_flags must land at offset 8");
+    // light_dir is a float3 at offset 16 (std430), tail-padded by _pad2 @28.
+    assert_eq!(read_at(16), NONDEFAULT_LIGHT[0], "light_dir.x must land at offset 16");
+    assert_eq!(read_at(20), NONDEFAULT_LIGHT[1], "light_dir.y must land at offset 20");
+    assert_eq!(read_at(24), NONDEFAULT_LIGHT[2], "light_dir.z must land at offset 24");
+    println!("[host] A3g-host OK: light_dir {NONDEFAULT_LIGHT:?} round-trips at push offset 16/20/24");
 }

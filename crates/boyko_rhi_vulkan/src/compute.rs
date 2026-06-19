@@ -125,7 +125,7 @@ static SDF_EDITLIST_STORAGE_IMAGE_SPV: SpirvBlob<24092> = SpirvBlob(*include_byt
 /// additive normal/material @ bindings 3/4). The extent/camera block moves to a UNIFORM
 /// buffer @ binding 5 (written once). The edit-list stays a `StructuredBuffer` @
 /// binding 0.
-static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<33096> = SpirvBlob(*include_bytes!(concat!(
+static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<41100> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/sdf_gbuffer_composite.comp.spv"
 )));
@@ -356,6 +356,148 @@ const SDF_MAX_IT: u32 = 128;
 /// host runtime clamp is `[1.0, 1.99]` (the soundness ceiling sits at `omega == 2`).
 pub const DEFAULT_MARCHER_OMEGA: f32 = 1.2;
 
+// ---------------------------------------------------------------------------
+// Render A1 (SDF cone-trace soft shadows) + A2 (SDF 5-tap AO) tuning constants
+// (owner VALUE/SCOPE defaults, owner-retunable). These are CONSUMER-side: the
+// shadow min-track + AO deficit accumulate around calls to the FROZEN field
+// gateway (`field_distance` / `sdf_edit_list`); the field math itself is never
+// touched. Mirrored verbatim in `sdf_gbuffer_composite.hlsl`.
+// ---------------------------------------------------------------------------
+
+/// Bit 0 of `lighting_flags`: enable A1 cone-trace soft shadows.
+pub const LIGHTING_FLAG_SHADOWS: u32 = 1;
+/// Bit 1 of `lighting_flags`: enable A2 ambient occlusion.
+pub const LIGHTING_FLAG_AO: u32 = 2;
+
+/// The default ONE directional light direction (the current Lambert dir, +Z = at
+/// the camera). Owner-retunable; mirrors the shader's `LIGHT_DIR`.
+pub const DEFAULT_LIGHT_DIR: [f32; 3] = [0.0, 0.0, 1.0];
+
+/// A1 penumbra hardness (Quilez soft-shadow `k`): larger ⇒ sharper shadow edges.
+pub const SHADOW_K: f32 = 8.0;
+/// A1 march start offset along the light, in field units (`16 * GRAD_H`). Replaces a
+/// normal-offset bias: marching from a finite `t` off the surface avoids self-shadow
+/// acne without perturbing the hit point.
+pub const SHADOW_MINT: f32 = 16.0 * SDF_GRAD_H;
+/// A1 minimum per-step advance along the light (a floor on `d / L`) so a near-zero
+/// field value cannot stall the shadow march.
+pub const SHADOW_MINT_STEP: f32 = SHADOW_MINT;
+/// A1 occluder-hit threshold: when `field_distance` drops below this the ray is fully
+/// occluded (return `0`). `2 * EPS` (the marcher's hit threshold relaxed one factor).
+pub const SHADOW_HIT_EPS: f32 = 2.0 * SDF_EPS;
+/// A1 grazing/back-face cutoff on signed `n·L`: at or below this the surface faces
+/// away from the light ⇒ fully shadowed (return `0`), which also skips the march.
+pub const SHADOW_NDOTL_EPS: f32 = 0.0;
+
+/// A2 fixed step between the 5 AO taps along the surface normal.
+pub const AO_STEP: f32 = 0.1;
+/// A2 per-tap geometric falloff (`AO_FALLOFF^i` weights the i-th deficit).
+pub const AO_FALLOFF: f32 = 0.95;
+/// A2 overall occlusion strength (scales the accumulated deficit before clamping).
+pub const AO_STRENGTH: f32 = 1.0;
+
+/// The A1 host mirror of `sdf_soft_shadow`: a clamped-step Quilez BASIC cone-trace
+/// (NO `sqrt` — minimal FP-parity surface) from the lit point `p` toward the
+/// normalized light `l`, returning a soft visibility in `[0, 1]` (1 = fully lit,
+/// 0 = fully occluded). Mirrors the shader within ±3/255 (consumer-side relaxable,
+/// NOT bit-exact for the ON path). `field` is the FROZEN field gateway (the
+/// edit-list `sdf_edit_list`); the min-track + Lipschitz-corrected step are
+/// accumulated consumer-side. `n` is the surface normal, `l` the NORMALIZED light.
+fn host_soft_shadow<F: Fn([f32; 3]) -> f32>(
+    p: [f32; 3],
+    n: [f32; 3],
+    l: [f32; 3],
+    field: &F,
+) -> f32 {
+    // Signed n·L: at/below the cutoff the surface faces away from the light — fully
+    // shadowed, and the march would only graze the surface (acne). Replaces a
+    // normal-offset bias on the march origin.
+    if v_dot(n, l) <= SHADOW_NDOTL_EPS {
+        return 0.0;
+    }
+    let mut res = 1.0_f32;
+    let mut t = SHADOW_MINT;
+    for _ in 0..SDF_MAX_IT {
+        let q = [p[0] + l[0] * t, p[1] + l[1] * t, p[2] + l[2] * t];
+        let d = field(q);
+        res = res.min(SHADOW_K * d / t);
+        if d < SHADOW_HIT_EPS {
+            return 0.0;
+        }
+        // The `/L` Lipschitz correction on the STEP: without it the super-Lipschitz
+        // smin leaks light through thin occluders. Floored at SHADOW_MINT_STEP so a
+        // near-zero `d` cannot stall the march.
+        t += (d / FIELD_LIPSCHITZ_L).max(SHADOW_MINT_STEP);
+        if t > SDF_T_MAX {
+            break;
+        }
+    }
+    res.clamp(0.0, 1.0)
+}
+
+/// The A2 host mirror of `sdf_ao`: a 5-tap ambient-occlusion estimate marching the
+/// surface normal `n` from `p`, accumulating the `(h - d)` field-deficit weighted by
+/// `AO_FALLOFF^i`, and returning an occlusion factor in `[0, 1]` (1 = unoccluded).
+/// Mirrors the shader within ±3/255. `field` is the FROZEN field gateway.
+fn host_ao<F: Fn([f32; 3]) -> f32>(p: [f32; 3], n: [f32; 3], field: &F) -> f32 {
+    let mut occ = 0.0_f32;
+    for i in 1..=5u32 {
+        let h = (i as f32) * AO_STEP;
+        let q = [p[0] + n[0] * h, p[1] + n[1] * h, p[2] + n[2] * h];
+        let d = field(q);
+        occ += (h - d) * AO_FALLOFF.powi(i as i32);
+    }
+    (1.0 - AO_STRENGTH * occ).clamp(0.0, 1.0)
+}
+
+/// The single shading helper for every host golden (factored from the four inlined
+/// `ndotl + ambient` Lambert sites). Computes the directional Lambert + ambient base
+/// color, then — ONLY when `lighting_flags != 0` — multiplies in the A1 shadow and/or
+/// A2 AO terms (the SAME gate the shader uses). With `lighting_flags == 0` the result
+/// is the bare Lambert color, BYTE-IDENTICAL to the pre-A1/A2 inline arithmetic (the
+/// 0%-gate): no extra multiply is performed (a structural `if`).
+///
+/// `base_color` is the surface albedo, `ambient` the ambient term, `p` the lit hit
+/// point, `n` the surface normal, `light_dir` the (un-normalized) light direction,
+/// and `field` the FROZEN field gateway the shadow/AO consumers call. The closure is
+/// never invoked on the OFF path, so callers with no edit-list field may pass any
+/// matching closure.
+#[inline]
+fn host_shade<F: Fn([f32; 3]) -> f32>(
+    base_color: [f32; 3],
+    ambient: f32,
+    p: [f32; 3],
+    n: [f32; 3],
+    light_dir: [f32; 3],
+    lighting_flags: u32,
+    field: &F,
+) -> [f32; 3] {
+    let l = v_normalize(light_dir);
+    let ndotl = v_dot(n, l).max(0.0);
+    let base = [
+        base_color[0] * ndotl + base_color[0] * ambient,
+        base_color[1] * ndotl + base_color[1] * ambient,
+        base_color[2] * ndotl + base_color[2] * ambient,
+    ];
+    if lighting_flags == 0 {
+        // OFF path: byte-identical to today (NO extra multiply).
+        return base;
+    }
+    let mut shadow = 1.0_f32;
+    if lighting_flags & LIGHTING_FLAG_SHADOWS != 0 {
+        shadow = host_soft_shadow(p, n, l, field);
+    }
+    let mut ao = 1.0_f32;
+    if lighting_flags & LIGHTING_FLAG_AO != 0 {
+        ao = host_ao(p, n, field);
+    }
+    [
+        base[0] * shadow * ao,
+        base[1] * shadow * ao,
+        base[2] * shadow * ao,
+    ]
+}
+
 /// `sdf(p) = length(p - center) - radius` — the analytic field, mirroring the
 /// shader's `sdf_sphere`. Exposed so a later CPU physics evaluator can be
 /// conformance-checked against this exact source of truth.
@@ -419,13 +561,9 @@ pub fn golden_sdf_pixel(px: u32, py: u32) -> u32 {
     let color = if hit {
         let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
         let n = sdf_normal(p);
-        let l = v_normalize(SDF_LIGHT_DIR);
-        let ndotl = v_dot(n, l).max(0.0);
-        [
-            SDF_BASE_COLOR[0] * ndotl + SDF_BASE_COLOR[0] * SDF_AMBIENT,
-            SDF_BASE_COLOR[1] * ndotl + SDF_BASE_COLOR[1] * SDF_AMBIENT,
-            SDF_BASE_COLOR[2] * ndotl + SDF_BASE_COLOR[2] * SDF_AMBIENT,
-        ]
+        // The rung-8 sphere golden is always the OFF path (`lighting_flags == 0` ⇒ bare
+        // Lambert, byte-identical); the field closure is never invoked.
+        host_shade(SDF_BASE_COLOR, SDF_AMBIENT, p, n, SDF_LIGHT_DIR, 0, &sdf_sphere)
     } else {
         SDF_BACKGROUND
     };
@@ -606,13 +744,11 @@ pub fn golden_editlist_pixel(edits: &[SdfEdit], px: u32, py: u32) -> u32 {
     let color = if hit {
         let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
         let n = sdf_edit_list_normal(edits, p);
-        let l = v_normalize(SDF_LIGHT_DIR);
-        let ndotl = v_dot(n, l).max(0.0);
-        [
-            SDF_BASE_COLOR[0] * ndotl + SDF_BASE_COLOR[0] * SDF_AMBIENT,
-            SDF_BASE_COLOR[1] * ndotl + SDF_BASE_COLOR[1] * SDF_AMBIENT,
-            SDF_BASE_COLOR[2] * ndotl + SDF_BASE_COLOR[2] * SDF_AMBIENT,
-        ]
+        // The rung-9 edit-list golden is always the OFF path (`lighting_flags == 0` ⇒
+        // bare Lambert, byte-identical); the field closure is never invoked.
+        host_shade(SDF_BASE_COLOR, SDF_AMBIENT, p, n, SDF_LIGHT_DIR, 0, &|q| {
+            sdf_edit_list(edits, q)
+        })
     } else {
         SDF_BACKGROUND
     };
@@ -879,6 +1015,97 @@ impl CompositePushConstants {
     }
 }
 
+/// `#[repr(C)]` the fine SDF-marcher's COMPUTE push constant
+/// (`sdf_gbuffer_composite.hlsl`), pushed against the marcher pipeline's OWN dedicated
+/// layout via `push_compute_constants`. Render P4b introduced the first two fields; A1/A2
+/// widened it from 8 → 32 bytes to carry the directional-light state. The byte layout is
+/// HLSL std430-style scalar+`float3` (the const-asserts below pin every offset):
+///
+///   offset  0 : u32   coarse_enabled   P4b coarse-cull gate (0 = cull off)
+///   offset  4 : f32   omega            B1 Keinert over-relaxation factor, [1.0, 1.99]
+///   offset  8 : u32   lighting_flags   bit 0 = A1 shadows, bit 1 = A2 AO; 0 = OFF path
+///   offset 12 : u32   _pad             aligns `light_dir` to offset 16 (a `float3` lands
+///                                      on a 16-byte boundary under std430)
+///   offset 16 : [f32;3] light_dir      the directional-light direction (un-normalized)
+///   offset 28 : f32   _pad2            tail pad to a 32-byte stride
+///   total: 32 bytes — a subset of the declared 80-byte COMPUTE push range, so the
+///   pipeline-layout declaration is unchanged.
+///
+/// `lighting_flags == 0` ⇒ the OFF path: the marcher emits the bare Lambert albedo,
+/// BYTE-IDENTICAL to the pre-A1/A2 shader (the 0%-gate).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FineMarcherPush {
+    /// P4b coarse-cull gate: non-zero reads binding 6 (`TileBound`) and culls / seeds.
+    pub coarse_enabled: u32,
+    /// B1 Keinert over-relaxation factor, host-clamped to `[1.0, 1.99]`.
+    pub omega: f32,
+    /// Lighting gate: bit 0 = A1 shadows, bit 1 = A2 AO; `0` = the OFF (Lambert-only) path.
+    pub lighting_flags: u32,
+    /// std430 padding so `light_dir` lands at offset 16.
+    pub _pad: u32,
+    /// The directional-light direction (un-normalized; the shader normalizes it).
+    pub light_dir: [f32; 3],
+    /// std430 tail padding to a 32-byte stride.
+    pub _pad2: f32,
+}
+
+/// Byte size of [`FineMarcherPush`] — the marcher's COMPUTE push range (32 bytes), a
+/// subset of the declared 80-byte (`COMPOSITE_PUSH_CONSTANT_BYTES`) range.
+pub const GBUFFER_MARCHER_PUSH_BYTES: u32 = core::mem::size_of::<FineMarcherPush>() as u32;
+
+// Pin the std430 field offsets + the 32-byte stride so a host/shader desync is a build
+// error (the same discipline as `CompositePushConstants` / `TileBound`). The `light_dir`
+// @16 pin is the one a non-default-direction GPU test catches if the packing slips.
+const _: () = assert!(core::mem::offset_of!(FineMarcherPush, coarse_enabled) == 0);
+const _: () = assert!(core::mem::offset_of!(FineMarcherPush, omega) == 4);
+const _: () = assert!(core::mem::offset_of!(FineMarcherPush, lighting_flags) == 8);
+const _: () = assert!(core::mem::offset_of!(FineMarcherPush, _pad) == 12);
+const _: () = assert!(core::mem::offset_of!(FineMarcherPush, light_dir) == 16);
+const _: () = assert!(core::mem::offset_of!(FineMarcherPush, _pad2) == 28);
+const _: () = assert!(GBUFFER_MARCHER_PUSH_BYTES == 32, "FineMarcherPush must be 32 bytes");
+const _: () = assert!(
+    GBUFFER_MARCHER_PUSH_BYTES <= COMPOSITE_PUSH_CONSTANT_BYTES,
+    "FineMarcherPush must fit the declared 80-byte COMPUTE push range"
+);
+
+impl FineMarcherPush {
+    /// Builds the marcher push for the windowed / offscreen fine pass: the P4b
+    /// `coarse_enabled` gate, the B1 `omega`, and the A1/A2 `lighting_flags` + the
+    /// directional `light_dir`. `lighting_flags == 0` selects the OFF (byte-identical)
+    /// path; `light_dir` is then a don't-care (the shader never normalizes it).
+    #[inline]
+    pub const fn new(
+        coarse_enabled: bool,
+        omega: f32,
+        lighting_flags: u32,
+        light_dir: [f32; 3],
+    ) -> Self {
+        Self {
+            coarse_enabled: coarse_enabled as u32,
+            omega,
+            lighting_flags,
+            _pad: 0,
+            light_dir,
+            _pad2: 0.0,
+        }
+    }
+
+    /// Re-views the push constants as their raw 32-byte slice for `push_constants`.
+    #[inline]
+    pub fn as_bytes(&self) -> &[u8] {
+        // SAFETY: `Self` is `#[repr(C)]` with only `u32` / `f32` / `[f32; 3]` fields (all
+        // `Copy`, every offset + the 32-byte total pinned by the const-asserts above, no
+        // uninit padding — the two explicit `_pad`/`_pad2` fields cover the std430 holes),
+        // so its `size_of` bytes are a fully-initialized, alignment-valid POD bit pattern.
+        // The `&self` borrow keeps the struct alive for the slice's lifetime; the slice is
+        // read-only (no aliasing write).
+        unsafe {
+            slice::from_raw_parts((self as *const Self).cast::<u8>(), core::mem::size_of::<Self>())
+        }
+    }
+}
+
 /// The CPU golden for one composited pixel at the GOLDEN 64×64 ORTHO extent: a thin
 /// wrapper over [`golden_composite_pixel_ex`] with `(SDF_IMG_W, SDF_IMG_H)` + ORTHO.
 /// Bit-identical to the pre-P0a definition (same extent, same arithmetic), so the
@@ -1023,6 +1250,32 @@ pub fn golden_composite_pixel_ex_omega(
     camera: CompositeCamera,
     omega: f32,
 ) -> u32 {
+    golden_composite_pixel_ex_omega_lit(
+        edits, mesh_depth, px, py, img_w, img_h, camera, omega, 0, DEFAULT_LIGHT_DIR,
+    )
+}
+
+/// Render A1/A2 — the lighting-aware extent/camera/omega golden. Identical to
+/// [`golden_composite_pixel_ex_omega`] but threads the `lighting_flags` + `light_dir`
+/// the marcher push carries: on an SDF hit the lit color goes through [`host_shade`],
+/// which multiplies in the A1 soft-shadow and/or A2 AO terms when the matching flag
+/// bit is set (bit 0 = shadows, bit 1 = AO). With `lighting_flags == 0` this is
+/// BYTE-IDENTICAL to [`golden_composite_pixel_ex_omega`] (the 0%-gate); the ON path
+/// mirrors the shader within ±3/255 (consumer-side relaxable). `light_dir` is the
+/// un-normalized directional-light direction; the field eval / march are untouched.
+#[allow(clippy::too_many_arguments)]
+pub fn golden_composite_pixel_ex_omega_lit(
+    edits: &[SdfEdit],
+    mesh_depth: f32,
+    px: u32,
+    py: u32,
+    img_w: u32,
+    img_h: u32,
+    camera: CompositeCamera,
+    omega: f32,
+    lighting_flags: u32,
+    light_dir: [f32; 3],
+) -> u32 {
     let (ro, rd) = composite_ray(px, py, img_w, img_h, camera);
 
     let has_mesh = mesh_depth < MESH_DEPTH_CLEAR;
@@ -1128,13 +1381,9 @@ pub fn golden_composite_pixel_ex_omega(
     let color = if hit && t < t_mesh {
         let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
         let n = sdf_edit_list_normal(edits, p);
-        let l = v_normalize(SDF_LIGHT_DIR);
-        let ndotl = v_dot(n, l).max(0.0);
-        [
-            SDF_BASE_COLOR[0] * ndotl + SDF_BASE_COLOR[0] * SDF_AMBIENT,
-            SDF_BASE_COLOR[1] * ndotl + SDF_BASE_COLOR[1] * SDF_AMBIENT,
-            SDF_BASE_COLOR[2] * ndotl + SDF_BASE_COLOR[2] * SDF_AMBIENT,
-        ]
+        host_shade(SDF_BASE_COLOR, SDF_AMBIENT, p, n, light_dir, lighting_flags, &|q| {
+            sdf_edit_list(edits, q)
+        })
     } else if has_mesh {
         MESH_COLOR
     } else {
@@ -1550,10 +1799,39 @@ pub fn golden_composite_pixel_culled_omega(
     tile: TileBound,
     omega: f32,
 ) -> u32 {
+    golden_composite_pixel_culled_omega_lit(
+        edits, mesh_depth, px, py, img_w, img_h, camera, coarse_enabled, tile, omega, 0,
+        DEFAULT_LIGHT_DIR,
+    )
+}
+
+/// Render A1/A2 — the lighting-aware culled fine marcher. Identical to
+/// [`golden_composite_pixel_culled_omega`] but threads `lighting_flags` + `light_dir`:
+/// the cull-off arm delegates to [`golden_composite_pixel_ex_omega_lit`], and the
+/// non-EMPTY march lights the SDF hit through [`host_shade`] (A1 shadow / A2 AO gated
+/// by the flag bits). The EMPTY fast-path composites mesh / background ONLY (no SDF
+/// surface ⇒ no shadow/AO), so it is unaffected by lighting. With `lighting_flags == 0`
+/// this is BYTE-IDENTICAL to [`golden_composite_pixel_culled_omega`] (the 0%-gate); the
+/// ON path mirrors the shader within ±3/255.
+#[allow(clippy::too_many_arguments)]
+pub fn golden_composite_pixel_culled_omega_lit(
+    edits: &[SdfEdit],
+    mesh_depth: f32,
+    px: u32,
+    py: u32,
+    img_w: u32,
+    img_h: u32,
+    camera: CompositeCamera,
+    coarse_enabled: bool,
+    tile: TileBound,
+    omega: f32,
+    lighting_flags: u32,
+    light_dir: [f32; 3],
+) -> u32 {
     // The OFF path is byte-identical to the un-culled marcher (the 0%-gate).
     if !coarse_enabled {
-        return golden_composite_pixel_ex_omega(
-            edits, mesh_depth, px, py, img_w, img_h, camera, omega,
+        return golden_composite_pixel_ex_omega_lit(
+            edits, mesh_depth, px, py, img_w, img_h, camera, omega, lighting_flags, light_dir,
         );
     }
 
@@ -1667,13 +1945,9 @@ pub fn golden_composite_pixel_culled_omega(
     let color = if hit && t < t_mesh {
         let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
         let n = sdf_edit_list_normal(edits, p);
-        let l = v_normalize(SDF_LIGHT_DIR);
-        let ndotl = v_dot(n, l).max(0.0);
-        [
-            SDF_BASE_COLOR[0] * ndotl + SDF_BASE_COLOR[0] * SDF_AMBIENT,
-            SDF_BASE_COLOR[1] * ndotl + SDF_BASE_COLOR[1] * SDF_AMBIENT,
-            SDF_BASE_COLOR[2] * ndotl + SDF_BASE_COLOR[2] * SDF_AMBIENT,
-        ]
+        host_shade(SDF_BASE_COLOR, SDF_AMBIENT, p, n, light_dir, lighting_flags, &|q| {
+            sdf_edit_list(edits, q)
+        })
     } else if has_mesh {
         MESH_COLOR
     } else {
@@ -2356,10 +2630,11 @@ mod p4b_tests {
 #[cfg(test)]
 mod b1_over_relaxation_tests {
     use super::{
-        CompositeCamera, DEFAULT_MARCHER_OMEGA, FIELD_LIPSCHITZ_L, MESH_DEPTH_CLEAR, SDF_EPS,
-        SDF_IMG_H, SDF_IMG_W, SDF_MAX_IT, SDF_T_MAX, SdfEdit, composite_ray,
-        golden_composite_pixel_culled, golden_composite_pixel_culled_omega,
-        golden_composite_pixel_ex, golden_composite_pixel_ex_omega, sdf_edit_list, sdf_op,
+        CompositeCamera, DEFAULT_LIGHT_DIR, DEFAULT_MARCHER_OMEGA, FIELD_LIPSCHITZ_L,
+        FineMarcherPush, GBUFFER_MARCHER_PUSH_BYTES, MESH_DEPTH_CLEAR, SDF_EPS, SDF_IMG_H,
+        SDF_IMG_W, SDF_MAX_IT, SDF_T_MAX, SdfEdit, composite_ray, golden_composite_pixel_culled,
+        golden_composite_pixel_culled_omega, golden_composite_pixel_ex,
+        golden_composite_pixel_ex_omega, sdf_edit_list, sdf_op,
     };
     use proptest::prelude::*;
 
@@ -3019,14 +3294,13 @@ mod b1_over_relaxation_tests {
     /// rather than a false "clamp produces 1.0" claim. See the tester report.
     #[test]
     fn gate5_omega_clamp_and_push_encode() {
-        // The harness's encode site, reproduced byte-for-byte.
-        fn encode(omega_in: f32, coarse_enabled: bool) -> [u8; 8] {
-            let coarse_flag: u32 = u32::from(coarse_enabled);
+        // The harness's encode site, reproduced byte-for-byte via the 32-byte
+        // `FineMarcherPush` (A1/A2 widened the push 8 → 32 B; `lighting_flags == 0` keeps
+        // the OFF path). coarse_enabled stays at offset 0, omega at offset 4.
+        fn encode(omega_in: f32, coarse_enabled: bool) -> [u8; GBUFFER_MARCHER_PUSH_BYTES as usize] {
             let omega: f32 = omega_in.clamp(1.0, 1.99);
-            let mut push = [0u8; 8];
-            push[0..4].copy_from_slice(&coarse_flag.to_le_bytes());
-            push[4..8].copy_from_slice(&omega.to_le_bytes());
-            push
+            let push = FineMarcherPush::new(coarse_enabled, omega, 0, DEFAULT_LIGHT_DIR);
+            push.as_bytes().try_into().expect("invariant: FineMarcherPush is GBUFFER_MARCHER_PUSH_BYTES")
         }
         // Non-NaN hostile inputs: ALL must clamp finite into [1.0, 1.99].
         let cases = [-1.0_f32, 0.5, 1.0, 1.2, 1.99, 2.0, 2.5, 100.0, f32::INFINITY, f32::NEG_INFINITY];

@@ -51,16 +51,19 @@
 //               `coarse_enabled` push constant is non-zero; the OFF path never touches
 //               it (byte-identical to the pre-P4b marcher — the 0%-gate).
 //
-// # The push constant (Render P4b + B1 — pushed against THIS pipeline's OWN dedicated
-//   layout via `push_compute_constants`, NOT the shared `push_constants`)
+// # The push constant (Render P4b + B1 + A1/A2 — pushed against THIS pipeline's OWN
+//   dedicated layout via `push_compute_constants`, NOT the shared `push_constants`)
 //
-// An 8-byte `[[vk::push_constant]]` block: `uint coarse_enabled` (offset 0) gates the
-// coarse cull and `float omega` (offset 4) carries the Render B1 over-relaxation factor.
-// `coarse_enabled == 0` (cull-off) keeps the marcher byte-identical to today; `!= 0`
-// reads binding 6 and either early-outs an EMPTY tile (mesh/background composite) or
-// seeds `t = near_t`. `omega == 1.0` keeps the sphere-trace TEXTUALLY the frozen plain
-// loop (the 0%-gate); `> 1.0` enables Keinert over-relaxation with an exact-retreat
-// safeguard. 8 bytes fits the declared 80-byte COMPOSITE push range.
+// A 32-byte `[[vk::push_constant]]` block (`FineMarcherPush`): `uint coarse_enabled`
+// (offset 0) gates the coarse cull, `float omega` (offset 4) carries the Render B1
+// over-relaxation factor, `uint lighting_flags` (offset 8) gates A1/A2, and `float3
+// light_dir` (offset 16) is the directional light. `coarse_enabled == 0` (cull-off) keeps
+// the marcher byte-identical to today; `!= 0` reads binding 6 and either early-outs an
+// EMPTY tile (mesh/background composite) or seeds `t = near_t`. `omega == 1.0` keeps the
+// sphere-trace TEXTUALLY the frozen plain loop (the 0%-gate); `> 1.0` enables Keinert
+// over-relaxation with an exact-retreat safeguard. `lighting_flags == 0` keeps the lit
+// color the bare Lambert term (the 0%-gate); bit 0 folds in A1 soft shadows, bit 1 the A2
+// AO. 32 bytes fits the declared 80-byte COMPOSITE push range.
 //
 // # The `[[vk::image_format("rgba8")]]` qualifier (REQUIRED)
 //
@@ -151,11 +154,27 @@ StructuredBuffer<TileBound> Tiles : register(t6);
 //
 // Render B1: a second 4-byte field `omega` carries the Keinert over-relaxation factor,
 // host-clamped to [1.0, 1.99]. At `omega == 1.0` the marcher's live path is TEXTUALLY
-// the frozen plain sphere-trace (see the gated loop below — the 0%-gate). 8 bytes fits
-// the declared 80-byte COMPOSITE push range, so pipeline creation is unchanged.
+// the frozen plain sphere-trace (see the gated loop below — the 0%-gate).
+//
+// Render A1/A2: widened 8 -> 32 bytes to carry the directional-light state.
+//   offset  0 : uint   coarse_enabled  (unchanged)
+//   offset  4 : float  omega           (unchanged)
+//   offset  8 : uint   lighting_flags  bit 0 = A1 shadows, bit 1 = A2 AO; 0 = OFF path
+//   offset 12 : uint   _pad            aligns light_dir to offset 16 (std430 float3)
+//   offset 16 : float3 light_dir       the directional-light direction (un-normalized)
+//   offset 28 : float  _pad2           tail pad to a 32-byte stride
+// 32 bytes fits the declared 80-byte COMPOSITE push range, so pipeline creation is
+// unchanged. Byte-identical to the host `#[repr(C)] FineMarcherPush` (the host
+// const-asserts pin every offset; a non-default light_dir GPU test catches mis-packing).
+// `lighting_flags == 0` selects the OFF path: the marcher emits the bare Lambert albedo,
+// byte-identical to the pre-A1/A2 shader (the 0%-gate).
 [[vk::push_constant]] struct PushConstants {
-    uint  coarse_enabled;   // offset 0 (unchanged)
-    float omega;            // offset 4 — Keinert over-relaxation factor, host-clamped [1.0, 1.99]
+    uint   coarse_enabled;  // offset 0 (unchanged)
+    float  omega;           // offset 4 — Keinert over-relaxation factor, host-clamped [1.0, 1.99]
+    uint   lighting_flags;  // offset 8 — bit 0 = A1 shadows, bit 1 = A2 AO; 0 = OFF
+    uint   _pad;            // offset 12 — std430 pad so light_dir lands at offset 16
+    float3 light_dir;       // offset 16 — directional-light direction (un-normalized)
+    float  _pad2;           // offset 28 — tail pad to a 32-byte stride
 } pc;
 
 // P4b: the EMPTY flag bit (mirrors the host `TILE_FLAG_EMPTY` + sdf_tile_cull.hlsl).
@@ -173,7 +192,9 @@ uint img_h() { return (img_h_raw != 0u) ? img_h_raw : IMG_H_DEFAULT; }
 static const float CAM_Z       = 2.0;   // camera plane Z (rays start here)
 static const float HALF_EXTENT = 1.0;   // orthographic view half-extent in world units
 
-static const float3 LIGHT_DIR  = float3(0.0, 0.0, 1.0); // points toward +Z (at the camera)
+// BUG-A-NDOTL: the static `LIGHT_DIR` const was removed — the base Lambert term now
+// consumes the runtime `pc.light_dir` (see the shading site). The default push
+// `light_dir == (0,0,1)` reproduces the old static direction bit-for-bit.
 static const float3 BASE_COLOR = float3(0.8, 0.3, 0.2); // the SDF surface albedo
 static const float  AMBIENT    = 0.1;
 
@@ -197,6 +218,73 @@ static const uint  MAX_IT = 128u;   // max march steps per ray (the §S2 ceiling
 // The depth value the depth attachment was CLEARED to (the far plane, 1.0). A pixel
 // whose stored depth is >= this sentinel had NO mesh fragment rasterized.
 static const float DEPTH_CLEAR = 1.0;
+
+// --- Render A1 (SDF cone-trace soft shadows) + A2 (SDF 5-tap AO) ---------------
+//
+// Both are strict FIELD-CONSUMERS: they CALL the FROZEN `field_distance` (the shared
+// gateway in sdf_field.hlsli — no fast-math, no reorder) and accumulate consumer-side
+// (the shadow min-track, the AO deficit). The field math is NEVER touched. Mirrored
+// host-side in compute.rs (`host_soft_shadow` / `host_ao` / `host_shade`) within
+// +/-3/255 (consumer-side relaxable, NOT bit-exact for the ON path; the OFF path stays
+// byte-exact). Tuning consts mirror the host owner-default constants.
+
+// lighting_flags bits (mirror host LIGHTING_FLAG_SHADOWS / LIGHTING_FLAG_AO).
+static const uint LIGHTING_FLAG_SHADOWS = 1u;
+static const uint LIGHTING_FLAG_AO      = 2u;
+
+// A1 tuning (owner defaults, owner-retunable). Mirror the host consts.
+static const float SHADOW_K         = 8.0;          // penumbra hardness
+static const float SHADOW_MINT      = 16.0 * GRAD_H; // march start offset (replaces a normal-offset)
+static const float SHADOW_MINT_STEP = 16.0 * GRAD_H; // minimum per-step advance (floor on d/L)
+static const float SHADOW_HIT_EPS   = 2.0 * EPS;    // occluder-hit threshold
+static const float SHADOW_NDOTL_EPS = 0.0;          // signed n.L grazing/back-face cutoff
+
+// A2 tuning (owner defaults). Mirror the host consts.
+static const float AO_STEP     = 0.1;   // step between the 5 taps along the normal
+static const float AO_FALLOFF  = 0.95;  // per-tap geometric falloff (AO_FALLOFF^i)
+static const float AO_STRENGTH = 1.0;   // overall occlusion strength
+
+// A1: clamped-step Quilez BASIC soft shadow (NO sqrt — minimal FP-parity surface). March
+// `t` from SHADOW_MINT toward the NORMALIZED light `L`, tracking the smallest
+// `SHADOW_K * d / t` (the penumbra estimate). Signed-ndotl early-out skips grazing /
+// back-faces (replaces a normal-offset, prevents acne). The `/L` Lipschitz correction on
+// the STEP (floored at SHADOW_MINT_STEP) keeps the super-Lipschitz smin from leaking light
+// through thin occluders. Returns visibility in [0,1] (1 = fully lit, 0 = occluded).
+float sdf_soft_shadow(float3 p, float3 n, float3 L) {
+    if (dot(n, L) <= SHADOW_NDOTL_EPS) {
+        return 0.0; // surface faces away from the light — fully shadowed (and skips the march)
+    }
+    float res = 1.0;
+    float t = SHADOW_MINT;
+    [loop]
+    for (uint i = 0u; i < MAX_IT; ++i) {
+        float d = field_distance(p + L * t);
+        res = min(res, SHADOW_K * d / t);
+        if (d < SHADOW_HIT_EPS) {
+            return 0.0; // hit an occluder — fully shadowed
+        }
+        t += max(d / FIELD_LIPSCHITZ_L, SHADOW_MINT_STEP);
+        if (t > T_MAX) {
+            break;
+        }
+    }
+    return clamp(res, 0.0, 1.0);
+}
+
+// A2: 5-tap ambient occlusion. March the surface normal `n` from `p`, summing the
+// `(h - d)` field-deficit (how much closer the surface is than the unoccluded clearance
+// would be) weighted by AO_FALLOFF^i. `field_distance` is the FROZEN field. Returns an
+// occlusion factor in [0,1] (1 = unoccluded).
+float sdf_ao(float3 p, float3 n) {
+    float occ = 0.0;
+    [unroll]
+    for (uint i = 1u; i <= 5u; ++i) {
+        float h = (float)i * AO_STEP;
+        float d = field_distance(p + n * h);
+        occ += (h - d) * pow(AO_FALLOFF, (float)i);
+    }
+    return clamp(1.0 - AO_STRENGTH * occ, 0.0, 1.0);
+}
 
 [numthreads(64, 1, 1)]
 void main(uint3 tid : SV_DispatchThreadID) {
@@ -395,9 +483,34 @@ void main(uint3 tid : SV_DispatchThreadID) {
         // The SDF surface is in FRONT of the mesh (or there is no mesh): light it.
         float3 p = ro + rd * t;
         float3 n = sdf_normal(p);
-        float3 l = normalize(LIGHT_DIR);
+        // BUG-A-NDOTL: the base Lambert term now consumes the PUSHED `pc.light_dir`
+        // (full directional light), matching the shadow/AO marches and the host
+        // `host_shade` (which already normalizes the pushed dir for the base). For the
+        // default push `light_dir == (0,0,1)`, `normalize((0,0,1))` is bit-identical to
+        // the old static `normalize(LIGHT_DIR)`, so the OFF path and the ON default-light
+        // path stay byte-identical — only a NON-default `light_dir` changes the base.
+        float3 l = normalize(pc.light_dir);
         float ndotl = max(dot(n, l), 0.0);
-        color = BASE_COLOR * ndotl + BASE_COLOR * AMBIENT;
+        // The lit composite color — byte-identical for the default light (the 0%-gate anchor).
+        float3 base = BASE_COLOR * ndotl + BASE_COLOR * AMBIENT;
+        // Render A1/A2: gate the shadow/AO multiply behind `lighting_flags`. The OFF path
+        // (`lighting_flags == 0`) is a STRUCTURAL `if` — NO extra multiply — so the stored
+        // albedo is byte-identical to today. The ON path normalizes `pc.light_dir`
+        // consumer-side and folds in the soft shadow + AO.
+        if (pc.lighting_flags == 0u) {
+            color = base;
+        } else {
+            float3 light = normalize(pc.light_dir);
+            float shadow = 1.0;
+            if (pc.lighting_flags & LIGHTING_FLAG_SHADOWS) {
+                shadow = sdf_soft_shadow(p, n, light);
+            }
+            float ao = 1.0;
+            if (pc.lighting_flags & LIGHTING_FLAG_AO) {
+                ao = sdf_ao(p, n);
+            }
+            color = base * shadow * ao;
+        }
         normal_enc = n * 0.5 + 0.5; // world normal encoded into [0,1] for the G-buffer
     } else if (has_mesh) {
         // No nearer SDF surface, but the mesh covered this pixel — flat mesh color.
