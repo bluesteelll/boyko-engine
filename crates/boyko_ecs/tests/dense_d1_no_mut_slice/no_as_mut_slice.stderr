@@ -1,0 +1,5 @@
+error[E0599]: no method named `as_mut_bytes` found for struct `DenseSolveView<'a>` in the current scope
+  --> tests/dense_d1_no_mut_slice/no_as_mut_slice.rs:13:34
+   |
+13 |     let _whole: &mut [u8] = view.as_mut_bytes();
+   |                                  ^^^^^^^^^^^^ method not found in `DenseSolveView<'_>`

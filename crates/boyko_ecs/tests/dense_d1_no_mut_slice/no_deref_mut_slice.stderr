@@ -1,0 +1,5 @@
+error[E0614]: type `DenseSolveView<'_>` cannot be dereferenced
+  --> tests/dense_d1_no_mut_slice/no_deref_mut_slice.rs:13:34
+   |
+13 |     let _whole: &mut [u8] = &mut *view;
+   |                                  ^^^^^ can't be dereferenced

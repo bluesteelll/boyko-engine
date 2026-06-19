@@ -4,6 +4,12 @@ pub mod component_mask;
 pub mod component;
 pub mod component_registry;
 pub mod component_pool_bundle;
+// Dense (non-fragmenting) storage (Dense plan, D1). Lands in isolation: the
+// `DenseStore` + views + structural ops are not yet wired into
+// Commands/Query/hooks/serde (D2–D4), so the surface is legitimately unused
+// outside its own tests until those stages land.
+#[allow(dead_code)]
+pub mod dense;
 pub mod hooks;
 pub mod observers;
 // Wave-1 foundation: the paged enable-bit storage + presence oracle land ahead
