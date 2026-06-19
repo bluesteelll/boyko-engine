@@ -58,7 +58,8 @@ fn read_u64(bytes: &[u8], off: usize) -> u64 {
     u64::from_le_bytes(bytes[off..off + 8].try_into().unwrap())
 }
 
-/// Parses the fixed 64-byte header from the saved bytes.
+/// Parses the fixed-size header from the saved bytes (v2: 80 B — the v1 64-byte
+/// image plus the Dense plan D4 dense-region descriptor at offsets 64..80).
 fn parse_header(bytes: &[u8]) -> SaveHeader {
     assert!(bytes.len() >= SaveHeader::SIZE, "file shorter than the header");
     SaveHeader {
@@ -74,6 +75,9 @@ fn parse_header(bytes: &[u8]) -> SaveHeader {
         type_count: read_u32(bytes, 48),
         archetype_count: read_u32(bytes, 52),
         entity_count: read_u64(bytes, 56),
+        dense_table_off: read_u64(bytes, 64),
+        dense_store_count: read_u32(bytes, 72),
+        _pad: 0,
     }
 }
 

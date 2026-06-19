@@ -1499,6 +1499,36 @@ impl ComponentPool {
         unsafe { *(*self.changed_base.as_ptr().add(index)).get() }
     }
 
+    /// Dense plan D4: copies the `(added, changed)` tick pair from row `src` to
+    /// row `dst`, leaving `src`'s ticks unchanged.
+    ///
+    /// Used by [`DenseStore::compact`](crate::ecs::core::component::dense::DenseStore)
+    /// to keep each live slot's change-detection ticks travelling with its data
+    /// when the slot is relocated down to its canonical index — the tick storage
+    /// is slot-indexed (parallel to the data rows), so a data relocation that did
+    /// not also move the ticks would leave the compacted slot reading a stale
+    /// tick (a change-detection correctness bug).
+    ///
+    /// # Safety
+    ///
+    /// * `src < self.committed_rows` and `dst < self.committed_rows`.
+    /// * Caller holds exclusive access via `&mut self`.
+    #[allow(dead_code)]
+    #[inline]
+    pub(crate) unsafe fn move_ticks(&mut self, src: usize, dst: usize) {
+        debug_assert!(src < self.committed_rows);
+        debug_assert!(dst < self.committed_rows);
+        // SAFETY: both indices are `< committed_rows` (debug-asserted), so both
+        //   tick slots lie in the committed prefix of each tick sub-region.
+        //   `&mut self` ⇒ exclusive access; `Tick` is `Copy` (a plain `u32`).
+        unsafe {
+            let added = self.added_base.as_ptr();
+            let changed = self.changed_base.as_ptr();
+            *(*added.add(dst)).get() = *(*added.add(src)).get();
+            *(*changed.add(dst)).get() = *(*changed.add(src)).get();
+        }
+    }
+
     // ── Phase 12.5 Opt-A2 — batch reserve / write accessors (C-N1) ──────────
     //
     // §5.6 of the spawn-optimisations plan. The batch path reserves

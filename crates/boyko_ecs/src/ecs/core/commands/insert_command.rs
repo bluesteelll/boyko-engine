@@ -248,7 +248,8 @@ impl<B: Bundle> InsertCommand<B> {
             // is never taken (the 0%-gate).
             if matches!(component_registry::storage_kind(component_id.0), StorageKind::Dense) {
                 let store = world_ref.dense_registry.store_mut(component_id);
-                let newly_added = store.insert_or_replace(entity_id_for_dense, bytes);
+                let newly_added =
+                    store.insert_or_replace(entity_id_for_dense, bytes, current_tick);
                 store.mark_arch_present(source_archetype_id_for_dense);
                 debug_assert!(dense_fire_n < MAX_BUNDLE_ARITY);
                 dense_fire_buf[dense_fire_n] = (component_id, newly_added);

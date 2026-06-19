@@ -568,7 +568,8 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
             // bundle bookkeeping + pool write entirely.
             if matches!(component_registry::storage_kind(id.0), component_registry::StorageKind::Dense) {
                 let store = dense_reg.store_mut(id);
-                let newly_added = store.insert_or_replace(entity_id_for_dense, bytes);
+                let newly_added =
+                    store.insert_or_replace(entity_id_for_dense, bytes, current_tick);
                 store.mark_arch_present(target_archetype_id);
                 debug_assert!(dense_fire_n < MAX_BUNDLE_ARITY);
                 dense_fire_buf[dense_fire_n] = (id, newly_added);

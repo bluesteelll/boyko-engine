@@ -66,10 +66,17 @@ impl<'a> DenseBuildView<'a> {
     }
 
     /// Inserts `value_bytes` for `entity`, returning the assigned slot
-    /// (forwards to [`DenseStore::insert`]).
+    /// (forwards to [`DenseStore::insert`]). `current_tick` stamps the fresh
+    /// slot's `added` + `changed` ticks (Dense plan D4 — a fresh dense component
+    /// is Added this frame).
     #[inline]
-    pub fn push(&mut self, entity: crate::ecs::identifiers::primitives::EntityId, value_bytes: &[u8]) -> u32 {
-        self.store.insert(entity, value_bytes)
+    pub fn push(
+        &mut self,
+        entity: crate::ecs::identifiers::primitives::EntityId,
+        value_bytes: &[u8],
+        current_tick: crate::ecs::core::change_detection::Tick,
+    ) -> u32 {
+        self.store.insert(entity, value_bytes, current_tick)
     }
 
     /// Tombstones `entity`, returning `true` if it was present (forwards to

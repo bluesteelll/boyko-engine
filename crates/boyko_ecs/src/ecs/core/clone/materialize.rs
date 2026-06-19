@@ -747,9 +747,13 @@ fn materialize_dense_memberships(
     }
 
     // Insert each snapshotted value into the clone's store (no archetype change).
+    // Dense plan D4: a cloned dense membership is Added on the clone this frame —
+    // stamp both ticks at the current world tick (mirrors the table clone, whose
+    // `fill_ticks` stamps the cloned rows).
+    let current_tick = world.current_tick();
     for (cid, bytes) in &cloned {
         let store = world.dense_registry.store_mut(*cid);
-        store.insert(entity.id(), bytes);
+        store.insert(entity.id(), bytes, current_tick);
         store.mark_arch_present(target_archetype_id);
     }
 

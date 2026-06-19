@@ -17,10 +17,16 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use boyko_ecs::ecs::core::change_detection::Tick;
 use boyko_ecs::ecs::core::component::component::Component;
 use boyko_ecs::ecs::core::component::component_registry;
 use boyko_ecs::ecs::core::component::dense::DenseStore;
 use boyko_ecs::ecs::identifiers::primitives::{ComponentId, EntityId};
+
+/// Fixed change-detection tick the D1 mechanics tests stamp on insert (D4 added a
+/// `current_tick` arg to `DenseStore::insert`; D1's tests exercise the structural
+/// ops only, so any nonzero tick is fine).
+const D1_TICK: Tick = Tick::new(1);
 
 // ── component types ─────────────────────────────────────────────────────────
 
@@ -86,7 +92,7 @@ fn e(i: usize) -> EntityId {
 }
 
 fn insert_pos(store: &mut DenseStore, entity: EntityId, p: Pos) -> u32 {
-    store.insert(entity, pos_bytes(&p))
+    store.insert(entity, pos_bytes(&p), D1_TICK)
 }
 
 /// Reads back the `Pos` at a slot through the solve view (read-only).
@@ -322,7 +328,7 @@ fn drop_counter_each_dropped_exactly_once_remove_compact_storedrop() {
                     std::mem::size_of::<DropCounter>(),
                 )
             };
-            store.insert(e(i), bytes);
+            store.insert(e(i), bytes, D1_TICK);
             std::mem::forget(dc);
         }
         assert_eq!(dropped(), 0, "no drops yet (all live)");

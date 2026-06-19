@@ -53,14 +53,15 @@ use std::path::Path;
 use boyko_ecs::ecs::core::component::component_registry::{self, Serializability, StorageKind};
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::serialize::{
-    LoadColumn, LoadEntityMap, load_archetype, remap_loaded_entities, required_ctor_in_set,
+    LoadColumn, LoadEntityMap, load_archetype, load_dense_store, remap_loaded_entities,
+    required_ctor_in_set,
 };
 use boyko_ecs::ecs::identifiers::primitives::{ComponentId, EntityId};
 
 use crate::error::LoadError;
 use crate::format::{
-    ArchetypeBlock, ColumnRegion, ENDIAN_LITTLE, FORMAT_VERSION, MAGIC, SaveHeader,
-    TypeTableEntry, native_endianness,
+    ArchetypeBlock, ColumnRegion, DenseStoreBlock, ENDIAN_LITTLE, FORMAT_VERSION, MAGIC,
+    SaveHeader, TypeTableEntry, native_endianness,
 };
 
 /// Which strategy the loader uses to place saved entities (plan §3.10). v1 ships
@@ -102,6 +103,28 @@ pub struct LoadReport {
     /// default-constructed via a `#[require]` ctor — or, when no ctor exists,
     /// excluded from the loaded archetype.
     pub types_defaulted: u32,
+    /// Dense plan D4 — dense stores restored (one per file `DenseStoreBlock` whose
+    /// type resolved to a registered, still-dense component). `0` for a table-only
+    /// file (the 0%-gate).
+    pub dense_stores_loaded: u32,
+    /// Dense plan D4 — total dense memberships restored across all dense stores
+    /// (the sum of each restored store's member count).
+    pub dense_members_loaded: u64,
+    /// Dense plan D4 (v1.1 follow-up) — dense `DenseStoreBlock`s whose resolved
+    /// type is owning ([`SerializeViaFn`](Serializability::SerializeViaFn)) or
+    /// [`Ignore`](Serializability::Ignore): v1 cannot reconstruct an owning dense
+    /// value (no per-member decode path yet), so the block is SKIPPED. The on-disk
+    /// bytes are preserved by the saver (a ViaFn dense block round-trips its
+    /// per-member encoded data + `s2e` table — see `save.rs`), so v1.1 will decode
+    /// them; until then this counter (+ a debug-only warning) makes the skip
+    /// OBSERVABLE rather than silent data loss. Mirrors `types_skipped` /
+    /// `types_bitset_skipped` on the table side.
+    pub dense_stores_skipped: u32,
+    /// Dense plan D4 (v1.1 follow-up) — total dense memberships dropped by the
+    /// owning/ignore dense skips counted in [`Self::dense_stores_skipped`] (the sum
+    /// of each skipped block's `member_count`). The owning entities stay valid
+    /// without their dense membership/value; this records how many were dropped.
+    pub dense_members_skipped: u64,
 }
 
 /// Resolution of one file-local type to the running build (built once per load).
@@ -207,6 +230,15 @@ pub fn load_world(
     // binary-search (and trips the debug guard if a `get` ever precedes this).
     map.finalize();
 
+    // ── Step 4b: restore the dense stores (Dense plan D4 / Decision 7) ─────────
+    // AFTER the archetype loop + `map.finalize()` (the dense `s2e` entries remap
+    // through the SAME saved→fresh map the archetype loads populated): for each
+    // file `DenseStoreBlock` whose type resolves to a registered, still-dense
+    // component, blit the compacted column into a fresh `DenseStore` with each saved
+    // owning id remapped to its fresh id. A v1 (pre-dense) file carries
+    // `dense_store_count == 0`, so this loop runs zero turns (the 0%-gate).
+    load_dense_region(world, bytes, &header, &resolved, &map, &mut report)?;
+
     // ── Step 5: the entity-remap pass (S2.5 / C4) ──────────────────────────────
     // A SEPARATE whole-world pass AFTER every archetype is loaded: rewrite each
     // saved `Entity` reference inside a remappable component (`ChildOf` / an
@@ -234,8 +266,9 @@ pub fn load_world_from_file(
     load_world(world, &bytes, policy)
 }
 
-/// Reads + validates the 64-byte file header (plan §3.11 step 1). Every check is a
-/// release-level rejection.
+/// Reads + validates the 80-byte file header (plan §3.11 step 1; the v2 header
+/// carries the dense-region descriptor at offsets 64..80, `SaveHeader::SIZE == 80`).
+/// Every check is a release-level rejection.
 fn read_header(bytes: &[u8]) -> Result<SaveHeader, LoadError> {
     if bytes.len() < SaveHeader::SIZE {
         return Err(LoadError::BadMagic);
@@ -271,6 +304,12 @@ fn read_header(bytes: &[u8]) -> Result<SaveHeader, LoadError> {
         type_count: read_u32(bytes, 48)?,
         archetype_count: read_u32(bytes, 52)?,
         entity_count: read_u64(bytes, 56)?,
+        // Dense plan D4 (v2): the dense-region descriptor at offsets 64..80. A v2
+        // file always carries the full 80-byte header (the `SaveHeader::SIZE` check
+        // is implicit in `read_u64`/`read_u32`'s bounds checks below).
+        dense_table_off: read_u64(bytes, 64)?,
+        dense_store_count: read_u32(bytes, 72)?,
+        _pad: 0,
     };
     Ok(header)
 }
@@ -512,6 +551,154 @@ fn load_one_archetype(
         .checked_add(entity_count.checked_mul(8).ok_or(OVF)?)
         .ok_or(OVF)?;
     Ok(next_off)
+}
+
+/// Parses + restores the dense-store region (Dense plan D4 / Decision 7).
+///
+/// Strides the `DenseStoreBlock[dense_store_count]` headers at `dense_table_off`;
+/// for each one whose type resolves to a registered component that is STILL dense
+/// in this build, reads the `s2e` table + the compacted column bytes, validates the
+/// byte length, and hands them to the crate-private
+/// [`load_dense_store`] writer (which remaps each saved owning id and rebuilds the
+/// store). A block whose type is absent / no longer dense is a clean skip, and a
+/// fingerprint-or-version mismatch on a POB blit is a hard error, matching the table
+/// column policy. An OWNING (`SerializeViaFn`) or `Ignore` dense block is an
+/// OBSERVABLE skip — its bytes are preserved on disk for a future v1.1 decode and
+/// the skip is recorded in [`LoadReport::dense_stores_skipped`] /
+/// [`LoadReport::dense_members_skipped`] (plus a debug-only warning), NOT silently
+/// dropped. Runs zero turns for a `dense_store_count == 0` file (the 0%-gate).
+fn load_dense_region(
+    world: &mut EcsMaster,
+    bytes: &[u8],
+    header: &SaveHeader,
+    resolved: &[ResolvedType],
+    map: &LoadEntityMap,
+    report: &mut LoadReport,
+) -> Result<(), LoadError> {
+    if header.dense_store_count == 0 {
+        return Ok(());
+    }
+    let table_off = usize_off(header.dense_table_off, "dense_table_off")?;
+    let count = header.dense_store_count as usize;
+    for i in 0..count {
+        let block_off = table_off
+            .checked_add(i.checked_mul(DenseStoreBlock::SIZE).ok_or(OVF)?)
+            .ok_or(OVF)?;
+        let block = read_dense_store_block(bytes, block_off)?;
+
+        let type_index = block.type_index as usize;
+        if type_index >= resolved.len() {
+            return Err(LoadError::Truncated("dense store type index out of range"));
+        }
+        let rt = &resolved[type_index];
+        let member_count = block.member_count as usize;
+
+        // Resolve the running id. Absent → skip the whole block (lenient, W1).
+        let Some(cid) = rt.component_id else {
+            continue;
+        };
+        // A file dense store whose running type is NOT (or no longer) dense is
+        // skipped — the membership cannot be reconstructed into a non-dense store
+        // (mirrors the table-side bitset skip). The owning entity stays valid.
+        if component_registry::storage_kind(cid.0) != StorageKind::Dense {
+            continue;
+        }
+
+        // Read the `s2e` table (`u64[member_count]`, slot order).
+        let s2e_off = usize_off(block.s2e_off, "dense s2e_off")?;
+        let mut saved_s2e: Vec<u64> = Vec::with_capacity(capacity_hint(member_count, bytes, 8));
+        for r in 0..member_count {
+            let off = s2e_off
+                .checked_add(r.checked_mul(8).ok_or(OVF)?)
+                .ok_or(OVF)?;
+            saved_s2e.push(read_u64(bytes, off)?);
+        }
+
+        // Read the compacted column bytes. v1 dense is POB: validate the byte
+        // length against the running stride + fingerprint/version before the blit.
+        let data_off = usize_off(block.data_off, "dense data_off")?;
+        let data_byte_len = usize_off(block.data_byte_len, "dense data_byte_len")?;
+        match rt.serializability {
+            Serializability::PlainOldBytes => {
+                if !(rt.fingerprint_ok && rt.version_ok) {
+                    // A dense POB store whose shape/version changed: HARD error
+                    // (never a silent garbage blit), version-first like the table
+                    // column path.
+                    if !rt.version_ok {
+                        return Err(LoadError::VersionMismatch {
+                            name: rt.stable_name,
+                            file: rt.file_format_version,
+                            running: rt.running_format_version,
+                        });
+                    }
+                    return Err(LoadError::FingerprintMismatch(rt.stable_name));
+                }
+                let expected = member_count.checked_mul(rt.size).ok_or(OVF)?;
+                if data_byte_len != expected {
+                    return Err(LoadError::Truncated(
+                        "dense store data_byte_len != member_count * stride",
+                    ));
+                }
+                let member_bytes = slice_at(bytes, data_off, data_byte_len, "dense store data")?;
+                let loaded = load_dense_store(world, cid, member_bytes, &saved_s2e, map)?;
+                report.dense_stores_loaded += 1;
+                report.dense_members_loaded += loaded as u64;
+            }
+            Serializability::SerializeViaFn | Serializability::Ignore => {
+                // v1 saves dense components as POB (the physics-body case). A ViaFn
+                // dense decode path is a documented v1.1 follow-up; an `Ignore` dense
+                // block carries memberships but no decodable data. v1 SKIPS the block
+                // (the owning entity stays valid without the dense membership) rather
+                // than reconstruct from undecodable bytes — but the skip is OBSERVABLE:
+                // the saver round-trips the per-member encoded bytes + `s2e` table on
+                // disk (save.rs ViaFn dense path), so the data is forward-decodable in
+                // v1.1; until then the counters below (+ a debug-only warning) make the
+                // skip visible instead of a silent data loss. Mirrors the table-side
+                // `types_skipped` / `types_bitset_skipped` counters.
+                report.dense_stores_skipped += 1;
+                report.dense_members_skipped += member_count as u64;
+                warn_dense_viafn_skipped(rt.stable_name, member_count);
+                continue;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Debug-only tripwire for an OWNING/`Ignore` dense block that v1 cannot decode
+/// (W1): names the component + dropped member count so a ViaFn dense store does not
+/// vanish without a trace during development. No-op in release (the `LoadReport`
+/// counters carry the signal there); no log-crate dependency — a bare `eprintln!`,
+/// matching the project's existing diagnostic pattern (`boyko_rhi`).
+#[cfg(debug_assertions)]
+#[cold]
+#[inline(never)]
+fn warn_dense_viafn_skipped(name: &str, member_count: usize) {
+    eprintln!(
+        "boyko_serialize: dense store for component `{name}` is owning \
+         (SerializeViaFn/Ignore) — v1 cannot decode it; skipped {member_count} \
+         member(s) (bytes preserved on disk for v1.1, recorded in \
+         LoadReport::dense_stores_skipped)"
+    );
+}
+
+/// Release no-op: the `LoadReport::dense_stores_skipped` counter carries the signal.
+#[cfg(not(debug_assertions))]
+#[inline]
+fn warn_dense_viafn_skipped(_name: &str, _member_count: usize) {}
+
+/// Reads one [`DenseStoreBlock`] header from its 40-byte image at `off`.
+fn read_dense_store_block(bytes: &[u8], off: usize) -> Result<DenseStoreBlock, LoadError> {
+    let _ = slice_at(bytes, off, DenseStoreBlock::SIZE, "dense store block")?;
+    Ok(DenseStoreBlock {
+        type_index: read_u32(bytes, off)?,
+        member_count: read_u32(bytes, off + 4)?,
+        serializability: bytes[off + 8],
+        _pad: [0; 7],
+        s2e_off: read_u64(bytes, off + 16)?,
+        data_off: read_u64(bytes, off + 24)?,
+        data_byte_len: read_u64(bytes, off + 32)?,
+    })
 }
 
 /// A column's raw descriptor gathered in pass 1 (resolved id + data region).

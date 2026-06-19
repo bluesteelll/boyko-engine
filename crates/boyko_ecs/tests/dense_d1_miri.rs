@@ -20,10 +20,15 @@
 //!
 //! Component-id allocation: 105 (`Body`) — free band below MAX_COMPONENTS.
 
+use boyko_ecs::ecs::core::change_detection::Tick;
 use boyko_ecs::ecs::core::component::component::Component;
 use boyko_ecs::ecs::core::component::component_registry;
 use boyko_ecs::ecs::core::component::dense::DenseStore;
 use boyko_ecs::ecs::identifiers::primitives::{ComponentId, EntityId};
+
+/// Fixed change-detection tick the D1 Miri ops stamp on insert (D4 `current_tick`
+/// arg — the structural-op tests use any nonzero tick).
+const D1_TICK: Tick = Tick::new(1);
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 #[repr(C)]
@@ -63,7 +68,7 @@ fn miri_structural_ops_ub_clean() {
     let mut store = DenseStore::new(BODY_ID, 128);
 
     for i in 0..32usize {
-        store.insert(e(i), body_bytes(&Body { px: i as f32, py: 0.0, vx: 0.0, vy: 0.0 }));
+        store.insert(e(i), body_bytes(&Body { px: i as f32, py: 0.0, vx: 0.0, vy: 0.0 }), D1_TICK);
     }
     // Scatter removes (tombstone + free-list, drop_at on each).
     for i in (0..32usize).step_by(3) {
@@ -71,7 +76,7 @@ fn miri_structural_ops_ub_clean() {
     }
     // Reuse some freed slots.
     for i in 100..108usize {
-        store.insert(e(i), body_bytes(&Body { px: i as f32, py: 1.0, vx: 0.0, vy: 0.0 }));
+        store.insert(e(i), body_bytes(&Body { px: i as f32, py: 1.0, vx: 0.0, vy: 0.0 }), D1_TICK);
     }
     assert!(store.check_invariant());
 
@@ -99,7 +104,7 @@ fn row_ptr_on_tombstoned_slot_trips_liveness_assert() {
     // before any out-of-contract pointer is produced.
     register();
     let mut store = DenseStore::new(BODY_ID, 16);
-    let s = store.insert(e(7), body_bytes(&Body { px: 0.0, py: 0.0, vx: 0.0, vy: 0.0 }));
+    let s = store.insert(e(7), body_bytes(&Body { px: 0.0, py: 0.0, vx: 0.0, vy: 0.0 }), D1_TICK);
     assert!(store.remove(e(7)), "slot {s} tombstoned");
 
     let view = store.solve_view();
@@ -122,7 +127,7 @@ fn miri_parallel_distinct_slot_writes_tb_clean() {
     // 0..N is live — mirrors the post-compact solver column.
     const N: usize = 64;
     for i in 0..N {
-        store.insert(e(i), body_bytes(&Body { px: 0.0, py: 0.0, vx: 0.0, vy: 0.0 }));
+        store.insert(e(i), body_bytes(&Body { px: 0.0, py: 0.0, vx: 0.0, vy: 0.0 }), D1_TICK);
     }
     assert_eq!(store.live_count(), N);
 

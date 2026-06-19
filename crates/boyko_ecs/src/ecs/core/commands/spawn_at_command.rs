@@ -227,6 +227,9 @@ impl<B: Bundle> Command for SpawnAtCommand<B> {
         // a table-only bundle (the 0%-gate: `dense_mask == 0`).
         let mut dense_fire_buf = [crate::ecs::identifiers::primitives::ComponentId(0); MAX_BUNDLE_ARITY];
         let mut dense_fire_n = 0usize;
+        // Dense plan D4: snapshot the world tick BEFORE the closure captures
+        // `&mut world.dense_registry` (the closure cannot re-borrow `world`).
+        let dense_current_tick = world.current_tick();
         // The dense closure branch reaches `world.dense_registry` through this
         // separate `&mut *world` capture; `archetype` (a raw `&mut *archetype_ptr`
         // reborrow) is a disjoint field, so holding both is sound.
@@ -250,7 +253,7 @@ impl<B: Bundle> Command for SpawnAtCommand<B> {
             // clear and this branch folds out (the 0%-gate).
             if dense_mask & (1u32 << canonical_idx) != 0 {
                 let store = world_ref.dense_registry.store_mut(_id);
-                store.insert(self_entity_id, bytes);
+                store.insert(self_entity_id, bytes, dense_current_tick);
                 store.mark_arch_present(archetype_id);
                 debug_assert!(dense_fire_n < MAX_BUNDLE_ARITY);
                 dense_fire_buf[dense_fire_n] = _id;

@@ -12,8 +12,11 @@
 //! ticks + serde (D4), and the physics consumer (Stage P) land later and do
 //! NOT touch this module's invariant.
 
+use std::cell::UnsafeCell;
+
 use boyko_utils::sparse_map::sparse_map::SparseMap;
 
+use crate::ecs::core::change_detection::Tick;
 use crate::ecs::core::iters::archetype_bit_set::ArchetypeBitSet;
 use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId, EntityId};
 use crate::ecs::memory::component_pool::ComponentPool;
@@ -111,12 +114,18 @@ impl DenseStore {
     /// needed). `value_bytes` must be a valid byte representation of the
     /// store's registered type and exactly `stride` bytes long.
     ///
+    /// Change detection (Dense plan D4 / Decision 5): a fresh dense component is
+    /// `Added` this frame, so BOTH the slot's `added` and `changed` ticks are
+    /// stamped with `current_tick`. Re-stamping on a reused (freed-then-popped)
+    /// slot also clears any stale tick the slot carried from its prior tenant
+    /// (the write-before-read property — a reused slot's history never leaks).
+    ///
     /// # Panics
     /// * `value_bytes.len() != column stride` — debug-asserted in the column.
     /// * the entity is already present — debug-asserted (a re-insert without an
     ///   intervening `remove` is a caller bug).
     /// * the column's reserve ceiling is exhausted on a fresh-slot append.
-    pub fn insert(&mut self, entity: EntityId, value_bytes: &[u8]) -> u32 {
+    pub fn insert(&mut self, entity: EntityId, value_bytes: &[u8], current_tick: Tick) -> u32 {
         debug_assert!(
             !self.e2s.contains(entity.get()),
             "DenseStore::insert: entity {entity} already present (component {})",
@@ -159,6 +168,18 @@ impl DenseStore {
         self.live.set(slot as usize);
         self.e2s.insert(entity.get(), slot);
 
+        // Change detection (D4): stamp both ticks — a fresh dense component is
+        // Added (and trivially Changed) this frame.
+        // SAFETY: `slot < column.count()` (it was just appended or written via a
+        //   reused freed slot below the high-water mark), so the slot lies in the
+        //   committed prefix of both tick sub-regions; `&mut self` ⇒ the column
+        //   has exclusive access; no concurrent reader of this slot's tick exists
+        //   (structural ops are single-threaded under `&mut DenseStore`).
+        unsafe {
+            self.column.write_added_tick(slot as usize, current_tick);
+            self.column.write_changed_tick(slot as usize, current_tick);
+        }
+
         debug_assert!(self.debug_check_slot(slot), "DenseStore::insert invariant");
         slot
     }
@@ -173,7 +194,17 @@ impl DenseStore {
     /// without an intervening `remove` is legal here (unlike [`Self::insert`],
     /// which debug-asserts absence) — it overwrites the slot in place, keeping
     /// the slot VALUE assignment stable (no churn, the determinism contract).
-    pub fn insert_or_replace(&mut self, entity: EntityId, value_bytes: &[u8]) -> bool {
+    ///
+    /// Change detection (Dense plan D4 / Decision 5): a REPLACE stamps ONLY the
+    /// slot's `changed` tick (the component was already present — it is Changed,
+    /// not Added; its `added` tick is preserved). A fresh insert delegates to
+    /// [`Self::insert`], which stamps both ticks.
+    pub fn insert_or_replace(
+        &mut self,
+        entity: EntityId,
+        value_bytes: &[u8],
+        current_tick: Tick,
+    ) -> bool {
         if let Some(slot) = self.e2s.get(entity.get()).copied() {
             // Present: drop the old value, overwrite in place at the SAME slot
             // (no free-list churn — the live slot never moves, C3 determinism).
@@ -183,15 +214,17 @@ impl DenseStore {
             // the registered `drop_fn` exactly once, logically uninitialising the
             // slot; `write_at` then re-initialises it from `value_bytes` (a valid,
             // stride-sized representation per the caller contract). No double-drop:
-            // the old value is dropped exactly here.
+            // the old value is dropped exactly here. `write_changed_tick` bumps the
+            // slot's changed tick (the replace is a mutation); `added` is preserved.
             unsafe {
                 self.column.drop_at(slot as usize);
                 self.column.write_at(slot as usize, value_bytes);
+                self.column.write_changed_tick(slot as usize, current_tick);
             }
             debug_assert!(self.debug_check_slot(slot), "DenseStore::insert_or_replace invariant");
             false
         } else {
-            self.insert(entity, value_bytes);
+            self.insert(entity, value_bytes, current_tick);
             true
         }
     }
@@ -294,6 +327,38 @@ impl DenseStore {
         &self.s2e
     }
 
+    /// The component stride (bytes per slot) — the public save-side accessor
+    /// (Dense plan D4 serialization). Equal to the registered type's
+    /// `size_of` (0 for a ZST dense tag).
+    #[inline]
+    pub fn stride_bytes(&self) -> usize {
+        self.column.component_layout().size()
+    }
+
+    /// Read-only byte view of LIVE slot `slot` (Dense plan D4 serialization —
+    /// the save-side per-member gather). Returns `&self`-borrowed `stride_bytes`
+    /// bytes; the caller blits them into the file's dense column region.
+    ///
+    /// # Panics
+    /// * `slot` is not live (debug-asserted) — the saver only passes slots
+    ///   yielded by [`Self::for_each_live`].
+    #[inline]
+    pub fn row_bytes(&self, slot: u32) -> &[u8] {
+        debug_assert!(
+            self.live.test(slot as usize),
+            "DenseStore::row_bytes: slot {slot} is not live"
+        );
+        let stride = self.column.component_layout().size();
+        // SAFETY: `slot` is live (debug-asserted), so it is `< column.count()` and
+        //   holds a valid `T`; `buffer_ptr().add(slot * stride)` lies inside the
+        //   column's address-stable reservation and is valid for `stride` bytes.
+        //   The `&self` borrow keeps the column alive; the slice is read-only.
+        unsafe {
+            let ptr = self.column.buffer_ptr().add(slot as usize * stride);
+            core::slice::from_raw_parts(ptr, stride)
+        }
+    }
+
     /// Invokes `f(slot, entity)` for every live slot in slot order, skipping
     /// tombstones via the `live` oracle.
     ///
@@ -347,7 +412,10 @@ impl DenseStore {
                 // byte copy overwrites dead bytes without running drop and the
                 // source bytes are moved (not copied-and-dropped). `&mut self`
                 // gives exclusive access; the two slots are distinct so the
-                // ranges do not overlap.
+                // ranges do not overlap. `move_ticks` carries the slot's
+                // change-detection ticks down with the data (D4: ticks are
+                // slot-indexed, so the relocation must move them or the
+                // compacted slot would read a stale tick).
                 unsafe {
                     let base = self.column.buffer_ptr_mut();
                     core::ptr::copy_nonoverlapping(
@@ -355,6 +423,7 @@ impl DenseStore {
                         base.add(write * stride),
                         stride,
                     );
+                    self.column.move_ticks(read, write);
                 }
             }
             // The entity at the moved slot now lives at `write`.
@@ -438,6 +507,44 @@ impl DenseStore {
     #[inline]
     pub(crate) fn is_live(&self, slot: usize) -> bool {
         self.live.test(slot)
+    }
+
+    // ── pub(crate) per-slot tick accessors (Dense plan D4 — change detection) ──
+
+    /// The base pointer of the column's per-slot `added` tick sub-region (Dense
+    /// plan D4). The query fetch (`Added<Dense>` / `Mut<Dense>`) caches this once
+    /// and reads `[slot]` per row; it is address-stable for the store's lifetime
+    /// (write-once vm-reservation base of the column).
+    #[inline]
+    pub(crate) fn added_ticks_ptr(&self) -> *const UnsafeCell<Tick> {
+        self.column.added_ticks_ptr()
+    }
+
+    /// The base pointer of the column's per-slot `changed` tick sub-region (Dense
+    /// plan D4). Same address-stable contract as [`Self::added_ticks_ptr`];
+    /// `Changed<Dense>` reads it and `Mut<Dense>`'s deref guard writes through it.
+    #[inline]
+    pub(crate) fn changed_ticks_ptr(&self) -> *const UnsafeCell<Tick> {
+        self.column.changed_ticks_ptr()
+    }
+
+    /// Stamps both ticks at `slot` to `tick` (Dense plan D4 — the serde load
+    /// path). Used by the dense loader to mark a freshly-restored membership
+    /// Added at the load tick (mirroring the table blit's `fill_ticks`).
+    ///
+    /// # Safety
+    /// * `slot < self.len()` — the slot must be live (a loaded membership).
+    /// * Caller holds exclusive access via `&mut self`.
+    #[inline]
+    pub(crate) unsafe fn stamp_slot_ticks(&mut self, slot: usize, tick: Tick) {
+        debug_assert!(slot < self.column.count(), "stamp_slot_ticks: slot out of range");
+        // SAFETY: `slot < column.count() <= committed_rows` (caller contract),
+        //   so the slot lies in the committed prefix of both tick sub-regions;
+        //   `&mut self` ⇒ exclusive access.
+        unsafe {
+            self.column.write_added_tick(slot, tick);
+            self.column.write_changed_tick(slot, tick);
+        }
     }
 
     /// Debug-only round-trip check for a single live slot. Returns `true` when

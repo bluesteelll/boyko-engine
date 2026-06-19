@@ -21,7 +21,9 @@
 pub mod load_writer;
 pub mod wire;
 
-pub use load_writer::{LoadColumn, LoadWriteError, load_archetype, remap_loaded_entities};
+pub use load_writer::{
+    LoadColumn, LoadWriteError, load_archetype, load_dense_store, remap_loaded_entities,
+};
 pub use wire::{Wire, WireRefTuple, WireTuple};
 
 // Re-export the registry's per-component deserialize fn-ptr alias here so the

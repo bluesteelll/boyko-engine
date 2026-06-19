@@ -614,6 +614,111 @@ fn reserve_contiguous_ids(world: &mut EcsMaster, n: usize) -> usize {
     start
 }
 
+/// Dense plan D4 — loads ONE dense store's compacted snapshot into the world.
+///
+/// The `boyko_serialize` file-format parser resolves a `DenseStoreBlock` into
+/// `(component_id, member_bytes, saved_s2e)` and calls this crate-private driver
+/// (it owns `EcsMaster::dense_registry_mut` + the `DenseStore` write primitives the
+/// downstream crate cannot reach). For each saved member it remaps the saved
+/// owning `EntityId` to its freshly-allocated `EntityId` via `map` (the same
+/// machinery `ChildOf`/`#[entities]` use), then inserts the value into a fresh
+/// `DenseStore` — rebuilding `e2s` / `s2e` / `live` / `free` and stamping the
+/// slot's `added` + `changed` ticks at the load tick (the membership is Added on
+/// load, mirroring the table blit's `fill_ticks`).
+///
+/// `member_bytes` is the compacted live column (`member_count * stride` bytes, slot
+/// order); `saved_s2e` is the per-slot saved `EntityId.0` (same length). A POB store
+/// is a contiguous blit-in-slot-order; the per-member `insert` copies each member's
+/// `stride` bytes, which for a POD dense component (the physics-body case) is a plain
+/// memcpy. COLD — reached only from `boyko_serialize::load_world`.
+///
+/// # Fresh-world-load invariant
+///
+/// MUST be called against a freshly-created world (the loader's W4 contract): the
+/// target `DenseStore` is assumed EMPTY on entry. Merge-load into a populated world
+/// is unsupported — a remapped fresh id could collide with an existing member and
+/// silently corrupt the store. A `debug_assert!(store.is_empty())` trips loudly on a
+/// future merge-load mistake; it is safe today only because every loaded entity
+/// received a brand-new id.
+///
+/// # Errors
+///
+/// [`DecodeError::UnmappedEntity`] if a saved owning id is absent from `map` (a
+/// corrupt / foreign file — never a silent dangling membership).
+///
+/// # Panics
+///
+/// Debug-asserts `member_bytes.len() == member_count * stride` (the parser
+/// validated it) and `store.is_empty()` (the fresh-world-load invariant); a release
+/// mismatch is impossible from the parser's own save into a fresh world.
+pub fn load_dense_store(
+    world: &mut EcsMaster,
+    component_id: ComponentId,
+    member_bytes: &[u8],
+    saved_s2e: &[u64],
+    map: &LoadEntityMap,
+) -> Result<usize, DecodeError> {
+    let member_count = saved_s2e.len();
+    if member_count == 0 {
+        return Ok(0);
+    }
+    let current_tick = world.current_tick();
+    let stride = member_bytes
+        .len()
+        .checked_div(member_count)
+        .filter(|s| s * member_count == member_bytes.len())
+        .unwrap_or(0);
+    debug_assert!(
+        stride * member_count == member_bytes.len(),
+        "load_dense_store: member_bytes.len() ({}) != member_count ({}) * stride ({})",
+        member_bytes.len(),
+        member_count,
+        stride
+    );
+
+    // Resolve every (fresh entity, its archetype) FIRST — `entity_archetype_id`
+    // borrows `&world`, which cannot coexist with the `&mut DenseStore` borrow
+    // below. The fresh entities are already live (the archetype loads ran before
+    // this dense pass), so each resolves; an unmapped saved id is a loud
+    // `DecodeError` (C4 — never a silent dangling membership).
+    let mut resolved: Vec<(Entity, Option<ArchetypeId>)> = Vec::with_capacity(member_count);
+    for &saved_id in saved_s2e {
+        let fresh = map
+            .get(saved_id as usize)
+            .ok_or(DecodeError::UnmappedEntity)?;
+        let arch = world.entity_archetype_id(fresh);
+        resolved.push((fresh, arch));
+    }
+
+    let store = world.dense_registry_mut().store_mut(component_id);
+    // FRESH-WORLD-LOAD invariant: the loader's contract (W4) is to load into a
+    // freshly-created world, so the target dense store MUST be empty here. A future
+    // "merge load" into a populated world would let a remapped fresh id collide with
+    // an existing member's slot/`e2s` entry and silently corrupt the store; this
+    // trips loudly in debug instead. Safe today only because every loaded entity got
+    // a brand-new id, so no remapped id can already be a member of this store.
+    debug_assert!(
+        store.is_empty(),
+        "load_dense_store: target dense store for {component_id:?} is not empty \
+         (fresh-world-load contract violated — merge load is unsupported)"
+    );
+    for (i, &(fresh, arch)) in resolved.iter().enumerate() {
+        let lo = i * stride;
+        let bytes = &member_bytes[lo..lo + stride];
+        // `insert` rebuilds e2s/s2e/live/free for this slot and stamps both ticks
+        // (the membership is Added on load — the load-tick contract).
+        store.insert(fresh.id(), bytes, current_tick);
+        // Seed the candidate-archetype bitset so a pure-dense / mixed query finds
+        // the restored member (matches the structural insert path's
+        // `mark_arch_present`). A fresh entity with no archetype (shouldn't occur —
+        // every loaded entity has one) is simply not seeded.
+        if let Some(arch) = arch {
+            store.mark_arch_present(arch);
+        }
+    }
+    Ok(member_count)
+}
+
 /// S2.5 — the entity-remap pass (plan §3.11 step 5 + §5 C4). Runs AFTER every
 /// archetype has loaded (a separate whole-world pass): rewrites every saved
 /// `Entity` reference inside a remappable component to its freshly-allocated

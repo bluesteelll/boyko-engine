@@ -1619,9 +1619,10 @@ impl EcsMaster {
         component_id: ComponentId,
         bytes: &[u8],
     ) {
+        let current_tick = self.current_tick();
         {
             let store = self.dense_registry.store_mut(component_id);
-            store.insert(entity.id(), bytes);
+            store.insert(entity.id(), bytes, current_tick);
             store.mark_arch_present(archetype_id);
             // <-- the `&mut DenseStore` borrow of `self.dense_registry` ends here,
             // BEFORE `world_ptr` is minted (no `self`-derived `&mut` is live at

@@ -1339,10 +1339,10 @@ impl<'w, T: Component> Mut<'w, T> {
     {
         if *self.value != new_value {
             *self.value = new_value;
-            // The assignment above uses `DerefMut` (`*self.value`) — wait,
-            // it actually goes through the `&mut T` borrow directly. We
-            // must bump the tick manually here because the assignment did
-            // not route through `Mut::deref_mut`.
+            // The assignment above writes THROUGH the inner `&mut T`
+            // (`self.value`) directly — it does NOT route through
+            // `Mut::deref_mut`, so the deref-bump guard never fired. Bump the
+            // changed tick manually here.
             if !self.deref_mut_called {
                 self.deref_mut_called = true;
                 // SAFETY (STORE3, plan §2.5 MUT4): exclusivity of this
@@ -1429,6 +1429,14 @@ pub struct MutFetch<'w, T: Component> {
     pub(crate) changed_base: *const UnsafeCell<Tick>,
     pub(crate) last_run: Tick,
     pub(crate) this_run: Tick,
+    /// Dense plan D4: the global `DenseStore` for a DENSE `T`, resolved once by
+    /// `resolve_dense`. NULL for a TABLE `T` (the field is never read — the dense
+    /// arm const-folds out, the 0%-gate) or when no dense store exists yet.
+    pub(crate) dense: *const crate::ecs::core::component::dense::DenseStore,
+    /// Dense plan D4: the current archetype's `entity_ids` column base, cached by
+    /// `set_table_mut` for the per-row gather (`entity = entity_ids[row]`). NULL
+    /// for a TABLE `T`.
+    pub(crate) entity_ids: *const crate::ecs::identifiers::primitives::EntityId,
     pub(crate) _marker: PhantomData<&'w mut T>,
 }
 
@@ -1460,6 +1468,10 @@ unsafe impl<T: Component> QueryData for Mut<'_, T> {
     const NEEDS_CHANGE_DETECTION: bool = true;
     // EnableTag C2: `Mut<T>` is a real data component (positive include bit).
     const HAS_DATA_COMPONENT: bool = true;
+    // Dense plan D4: dense-ness is a compile-time property of `T`.
+    const HAS_DENSE: bool = T::STORAGE_IS_DENSE;
+    // Dense plan D4: a dense `Mut<T>` is a dense INCLUDE term (seeds candidates).
+    const HAS_DENSE_INCLUDE: bool = T::STORAGE_IS_DENSE;
 
     #[inline]
     fn init_state(_world: &mut EcsMaster) -> Self::State {
@@ -1477,11 +1489,22 @@ unsafe impl<T: Component> QueryData for Mut<'_, T> {
 
     #[inline]
     fn matches_component_set(state: &Self::State, mask: &ComponentMask) -> bool {
+        // Dense is signature-excluded (mirrors `&mut T`): the mask never carries
+        // its bit, so a dense include must NOT gate at the archetype level. Per-row
+        // membership is the `e2s` oracle (D4).
+        if const { T::STORAGE_IS_DENSE } {
+            return true;
+        }
         mask.contains(state.id)
     }
 
     #[inline]
     fn aggregate_include(state: &Self::State, include: &mut ComponentMask) {
+        // Dense contributes NO include bit (signature-excluded); candidates are
+        // seeded from `arch_presence` (D4 seed wiring, via `dense_include_candidates`).
+        if const { T::STORAGE_IS_DENSE } {
+            return;
+        }
         include.set(state.id);
     }
 
@@ -1493,8 +1516,30 @@ unsafe impl<T: Component> QueryData for Mut<'_, T> {
             changed_base: std::ptr::null(),
             last_run: Tick::ZERO,
             this_run: Tick::ZERO,
+            dense: std::ptr::null(),
+            entity_ids: std::ptr::null(),
             _marker: PhantomData,
         }
+    }
+
+    #[inline]
+    unsafe fn resolve_dense<'w>(
+        fetch: &mut Self::Fetch<'w>,
+        state: &Self::State,
+        world: crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell<'w>,
+    ) {
+        // Gated by `const { Self::HAS_DENSE }` at the cursor — never emitted for a
+        // TABLE `T` (the 0%-gate). For a dense `T`, cache the global `DenseStore`
+        // pointer (the write-through target's owner; its tick sub-regions back the
+        // deref guard's changed-tick bump).
+        // SAFETY (resolve_dense contract): `world` upholds the access contract; the
+        //   `DenseStore` lives in the address-stable `DenseRegistry` slot array,
+        //   valid for `'w`; the pointer is confined to the `'w`-scoped `Fetch`.
+        let registry = unsafe { world.world().dense_registry() };
+        fetch.dense = match registry.store(state.id) {
+            Some(store) => store as *const _,
+            None => std::ptr::null(),
+        };
     }
 
     #[inline]
@@ -1522,6 +1567,20 @@ unsafe impl<T: Component> QueryData for Mut<'_, T> {
         archetype: *mut Archetype,
         meta: &'_ SystemMeta,
     ) {
+        if const { T::STORAGE_IS_DENSE } {
+            // Dense `T`: no archetype column / tick column. Cache `entity_ids` for
+            // the per-row gather; the write target + tick sub-regions come from the
+            // resolved `DenseStore` in `fetch` (D4). The deref guard's changed-tick
+            // bump and `is_added`/`is_changed` read the dense column's per-slot
+            // ticks, indexed by SLOT (not row).
+            // SAFETY (QD3): `archetype` is live for `'w`; reading the immutable
+            //   `entity_ids` slice base needs only shared access.
+            let arch_ref: &Archetype = unsafe { &*archetype };
+            fetch.entity_ids = arch_ref.entity_ids_slice().as_ptr();
+            fetch.last_run = meta.last_run();
+            fetch.this_run = meta.this_run();
+            return;
+        }
         // SAFETY (QD1, QD3): `archetype` carries write-capable provenance
         //   (caller minted it via `archetype_ptr_mut`); `columns` at offset
         //   0 per Phase 7 D4; `state.id.0 < MAX_COMPONENTS`.
@@ -1576,7 +1635,73 @@ unsafe impl<T: Component> QueryData for Mut<'_, T> {
     }
 
     #[inline]
+    unsafe fn dense_row_passes<'w>(fetch: &Self::Fetch<'w>, row: usize) -> bool {
+        if const { T::STORAGE_IS_DENSE } {
+            // SAFETY (D4): `entity_ids` cached by `set_table_mut`; `row <
+            //   entity_count`. NULL `dense` ⟹ no member ⟹ skip.
+            if fetch.dense.is_null() {
+                return false;
+            }
+            let entity = unsafe { *fetch.entity_ids.add(row) };
+            let store = unsafe { &*fetch.dense };
+            return store.slot_of(entity).is_some();
+        }
+        true
+    }
+
+    #[inline]
+    fn dense_include_candidates(
+        state: &Self::State,
+        registry: &crate::ecs::core::component::dense::DenseRegistry,
+        out: &mut crate::ecs::core::iters::archetype_bit_set::ArchetypeBitSet,
+    ) {
+        // See `&mut T::dense_include_candidates` — OR-in the dense store's
+        // `arch_presence`. Gated by `const { Self::HAS_DENSE_INCLUDE }`.
+        if const { T::STORAGE_IS_DENSE }
+            && let Some(store) = registry.store(state.id)
+        {
+            store.arch_presence().for_each_set_bit(|a| out.insert(a));
+        }
+    }
+
+    #[inline]
     unsafe fn fetch<'w>(fetch: &Self::Fetch<'w>, row: usize) -> Self::Item<'w> {
+        if const { T::STORAGE_IS_DENSE } {
+            // Dense `Mut`: row → entity → slot → row_ptr + per-slot tick pointers.
+            // `dense_row_passes` proved the slot is live before this call. The
+            // returned `Mut` carries the slot's `changed_tick` pointer (into the
+            // dense column's changed sub-region) so `deref_mut` / `set_if_neq` bump
+            // the dense slot's changed tick exactly like the archetypal path.
+            // SAFETY (D4): `entity_ids`/`dense` cached; `row < entity_count`; the
+            //   entity is a live member, so `slot < column.count()` and
+            //   `row_ptr(slot)` is a live, stride-aligned WRITE-capable pointer into
+            //   the address-stable column. The dense conflict node (Decision 6) +
+            //   the `&mut`-cursor discipline serialise the column, so no other writer
+            //   aliases this slot. `added_ticks_ptr`/`changed_ticks_ptr` are the
+            //   column's address-stable per-slot tick bases; `slot < count <=
+            //   committed_rows`, so `[slot]` is in the committed prefix. `Tick` is
+            //   `Copy`. `'w` ties to the world borrow.
+            unsafe {
+                let entity = *fetch.entity_ids.add(row);
+                let store = &*fetch.dense;
+                let slot = store
+                    .slot_of(entity)
+                    .expect("invariant: dense_row_passes proved the slot is live")
+                    as usize;
+                let ptr = store.solve_view().row_ptr(slot);
+                let value = &mut *(ptr as *mut T);
+                let added = *(*store.added_ticks_ptr().add(slot)).get();
+                let changed_tick = store.changed_ticks_ptr().add(slot);
+                return Mut {
+                    value,
+                    added,
+                    changed_tick,
+                    last_run: fetch.last_run,
+                    this_run: fetch.this_run,
+                    deref_mut_called: false,
+                };
+            }
+        }
         // SAFETY (QD2, QD3, STORE3):
         //   - `set_table_mut` was called before `fetch` (caller contract);
         //     every base pointer is live and non-null.

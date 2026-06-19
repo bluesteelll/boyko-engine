@@ -38,7 +38,7 @@ use boyko_ecs::ecs::identifiers::primitives::{ComponentId, EntityId};
 
 use crate::error::SaveError;
 use crate::format::{
-    ArchetypeBlock, COLUMN_REGION_ALIGN, ColumnRegion, SaveHeader, TypeTableEntry,
+    ArchetypeBlock, COLUMN_REGION_ALIGN, ColumnRegion, DenseStoreBlock, SaveHeader, TypeTableEntry,
 };
 
 /// Options controlling a save (plan §3.10).
@@ -87,6 +87,31 @@ struct ArchetypePlan {
     type_indices_off: usize,
     column_regions_off: usize,
     entity_rows_off: usize,
+}
+
+/// A per-dense-store plan computed in Pass 1 and consumed in Pass 2 (Dense plan
+/// D4 / Decision 7). A dense store's slot→entity map is NOT the archetype entity
+/// list (a dense component is signature-excluded), so the saver gathers a
+/// COMPACTED snapshot — the live members in `for_each_live` (insertion) order —
+/// into owned buffers in Pass 1 (a read-only logical compaction; the live save
+/// runs no structural op, so it cannot call the mutating `compact()`).
+struct DenseStorePlan {
+    /// Index into the file's distinct-type table.
+    type_index: u32,
+    /// The classification (drives blit-vs-fn-ptr; v1 dense is POB).
+    serializability: Serializability,
+    /// The live member count (== `s2e` length == column rows after compaction).
+    member_count: usize,
+    /// The saved owning `EntityId.0` per live slot, in slot order (the `s2e` table).
+    s2e: Vec<u64>,
+    /// The compacted live column bytes (`member_count * stride`), gathered in slot
+    /// order. For a POB store this is the per-member byte image concatenated; for a
+    /// ViaFn store it is the per-element `serialize_fn` run.
+    data: Vec<u8>,
+    /// The file offset of the `s2e` table (computed in Pass 1b).
+    s2e_off: u64,
+    /// The file offset of the column data (computed in Pass 1b).
+    data_off: u64,
 }
 
 /// One distinct serialized type, deduplicated across archetypes.
@@ -243,6 +268,88 @@ pub fn save_world(
         });
     }
 
+    // ── Pass 1a-dense: gather a COMPACTED snapshot of every live dense store ──
+    // (Dense plan D4 / Decision 7). A dense component is signature-excluded, so its
+    // slot→entity association is the store's `s2e`, serialized alongside the data.
+    // The live members are gathered in `for_each_live` (insertion) order — a
+    // read-only logical compaction that skips tombstones, yielding the same
+    // tombstone-free canonical order a `compact()` would, without mutating the
+    // world. Empty for a table-only world (the 0%-gate: `dense_ids()` is empty).
+    let mut dense_plans: Vec<DenseStorePlan> = Vec::new();
+    for &cid in world.dense_registry().dense_ids() {
+        let component_id = cid.0;
+        let info = component_registry::get_serialize_info(component_id);
+        let serializability = info
+            .map(|i| i.serializability)
+            .unwrap_or(Serializability::Ignore);
+        let excluded = opts
+            .include_filter
+            .map(|f| !f(cid))
+            .unwrap_or(false);
+        if serializability == Serializability::Ignore || excluded {
+            continue;
+        }
+        let info = info.expect("a non-Ignore classification implies installed info");
+        let Some(store) = world.dense_registry().store(cid) else {
+            continue;
+        };
+        let member_count = store.live_count();
+        if member_count == 0 {
+            continue; // an empty dense store emits no block (matching the archetypes).
+        }
+        let type_index = intern_type(&mut types, component_id, info)?;
+        let stride = store.stride_bytes();
+
+        // Gather the live members in slot (insertion) order. `for_each_live` yields
+        // `(slot, entity)` skipping tombstones; the compacted snapshot is the live
+        // members concatenated in that order — deterministic for a fixed op order.
+        let mut s2e: Vec<u64> = Vec::with_capacity(member_count);
+        let mut data: Vec<u8> = Vec::with_capacity(member_count.checked_mul(stride).ok_or(SaveError::SizeOverflow)?);
+        match serializability {
+            Serializability::PlainOldBytes => {
+                store.for_each_live(|slot, entity| {
+                    s2e.push(entity.0 as u64);
+                    if stride != 0 {
+                        data.extend_from_slice(store.row_bytes(slot));
+                    }
+                });
+            }
+            Serializability::SerializeViaFn => {
+                // A ViaFn dense component: run the encoder per live member into the
+                // shared `data` cursor. Zero-length when no encoder is installed (the
+                // S1 boundary — same as the table ViaFn path).
+                if let Some(serialize_fn) = info.serialize_fn {
+                    store.for_each_live(|slot, entity| {
+                        s2e.push(entity.0 as u64);
+                        let row = store.row_bytes(slot);
+                        let mut cursor = SaveCursor::new(&mut data);
+                        // SAFETY: `row.as_ptr()` is a live, aligned, initialized `C`
+                        //   value readable for `stride` bytes (the `row_bytes`
+                        //   contract); the cursor is a valid append-only sink (registry
+                        //   `SerializeFn` safety doc).
+                        unsafe { serialize_fn(row.as_ptr(), &mut cursor) };
+                    });
+                } else {
+                    // No encoder yet: record memberships only (zero-length data),
+                    // mirroring the table ViaFn S1 boundary.
+                    store.for_each_live(|_slot, entity| s2e.push(entity.0 as u64));
+                }
+            }
+            Serializability::Ignore => continue,
+        }
+        debug_assert_eq!(s2e.len(), member_count, "dense s2e length must equal live count");
+
+        dense_plans.push(DenseStorePlan {
+            type_index,
+            serializability,
+            member_count,
+            s2e,
+            data,
+            s2e_off: 0,
+            data_off: 0,
+        });
+    }
+
     // ── Pass 1b: lay out every region; compute all file offsets ──
     let type_table_off = SaveHeader::SIZE;
     let type_table_len = types
@@ -315,7 +422,42 @@ pub fn save_world(
     // at the end so the header offsets are valid.
     let entity_table_off = column_data_end;
     let var_data_off = entity_table_off;
-    let added = var_data_off; // file size == appended slice length.
+    let mut cursor = var_data_off;
+
+    // Dense-store region (Dense plan D4): per store `[DenseStoreBlock header | s2e
+    // u64[] | column data]`. The block headers come first (so the loader strides
+    // them contiguously), then each store's body. Empty for a table-only world —
+    // `dense_table_off` then points at the file end and `dense_store_count == 0`,
+    // so no dense bytes are emitted (the 0%-gate).
+    let dense_table_off = cursor;
+    // Block headers (contiguous `DenseStoreBlock[dense_store_count]`).
+    cursor = cursor
+        .checked_add(
+            dense_plans
+                .len()
+                .checked_mul(DenseStoreBlock::SIZE)
+                .ok_or(SaveError::SizeOverflow)?,
+        )
+        .ok_or(SaveError::SizeOverflow)?;
+    // Per-store body: `s2e` table (8 * member_count) then the column data
+    // (COLUMN_REGION_ALIGN-rounded, like a table column, for a future mmap-cast).
+    for plan in &mut dense_plans {
+        plan.s2e_off = cursor as u64;
+        cursor = cursor
+            .checked_add(plan.member_count.checked_mul(8).ok_or(SaveError::SizeOverflow)?)
+            .ok_or(SaveError::SizeOverflow)?;
+        if plan.data.is_empty() {
+            plan.data_off = cursor as u64; // valid offset, no bytes reserved.
+            continue;
+        }
+        let aligned = align_up(cursor, COLUMN_REGION_ALIGN).ok_or(SaveError::SizeOverflow)?;
+        plan.data_off = aligned as u64;
+        cursor = aligned
+            .checked_add(plan.data.len())
+            .ok_or(SaveError::SizeOverflow)?;
+    }
+
+    let added = cursor; // file size == appended slice length.
 
     // Reserve capacity ONCE — capacity only, NO zero-fill (principle 5). Pass 2
     // appends every byte of the body sequentially in file-offset order, so each
@@ -343,6 +485,9 @@ pub fn save_world(
     header.archetype_count =
         u32::try_from(archetype_plans.len()).map_err(|_| SaveError::SizeOverflow)?;
     header.entity_count = world.entity_count() as u64;
+    header.dense_table_off = dense_table_off as u64;
+    header.dense_store_count =
+        u32::try_from(dense_plans.len()).map_err(|_| SaveError::SizeOverflow)?;
     out.extend_from_slice(header.as_bytes());
 
     // Type table (contiguous `TypeTableEntry[]`), then the name pool (the
@@ -492,12 +637,52 @@ pub fn save_world(
         }
     }
 
+    // Dense-store region (Dense plan D4): the block headers first (contiguous),
+    // then each store's body `[s2e u64[] | column data]`. The column data is
+    // COLUMN_REGION_ALIGN-rounded (the only gaps in this region, zeroed explicitly).
+    for plan in &dense_plans {
+        let block = DenseStoreBlock {
+            type_index: plan.type_index,
+            member_count: u32::try_from(plan.member_count).map_err(|_| SaveError::SizeOverflow)?,
+            serializability: plan.serializability as u8,
+            _pad: [0; 7],
+            s2e_off: plan.s2e_off,
+            data_off: plan.data_off,
+            data_byte_len: plan.data.len() as u64,
+        };
+        out.extend_from_slice(dense_store_block_bytes(&block));
+    }
+    for plan in &dense_plans {
+        // `s2e` table: the saved owning `EntityId.0`s in slot order, little-endian.
+        for &eid in &plan.s2e {
+            out.extend_from_slice(&eid.to_le_bytes());
+        }
+        // Column data: zero-fill the alignment-padding gap, then append the bytes.
+        if plan.data.is_empty() {
+            continue;
+        }
+        let cur_off = out.len() - start_len;
+        let pad = (plan.data_off as usize) - cur_off;
+        debug_assert!(
+            pad < COLUMN_REGION_ALIGN,
+            "dense alignment padding must be smaller than the alignment"
+        );
+        out.resize(out.len() + pad, 0);
+        debug_assert_eq!(
+            out.len() - start_len,
+            plan.data_off as usize,
+            "write head must be at the dense column's planned offset after padding"
+        );
+        out.extend_from_slice(&plan.data);
+    }
+
     // Every byte of the `added` region has now been written exactly once: the header
     // image, type table, name pool, and each archetype block/body via
-    // `extend_from_slice`, the column blits via `extend_from_slice`, and each
-    // alignment gap via an explicit zero `resize`. No `set_len` over uninit capacity
-    // was used. This proves no uninitialized byte reaches the file (the info-leak /
-    // non-reproducible-save hazard).
+    // `extend_from_slice`, the column blits via `extend_from_slice`, the dense-store
+    // region (block headers + s2e + column data), and each alignment gap via an
+    // explicit zero `resize`. No `set_len` over uninit capacity was used. This proves
+    // no uninitialized byte reaches the file (the info-leak / non-reproducible-save
+    // hazard).
     debug_assert_eq!(
         out.len(),
         start_len + added,
@@ -595,6 +780,20 @@ fn column_region_bytes(region: &ColumnRegion) -> &[u8] {
         std::slice::from_raw_parts(
             region as *const ColumnRegion as *const u8,
             ColumnRegion::SIZE,
+        )
+    }
+}
+
+/// Reinterprets a [`DenseStoreBlock`] as its `#[repr(C)]` byte image.
+#[inline]
+fn dense_store_block_bytes(block: &DenseStoreBlock) -> &[u8] {
+    // SAFETY: `DenseStoreBlock` is `#[repr(C)]` with an explicit, initialized `_pad`
+    // and all-bits-valid integer fields; all `SIZE` bytes are initialized; the slice
+    // borrows `block`.
+    unsafe {
+        std::slice::from_raw_parts(
+            block as *const DenseStoreBlock as *const u8,
+            DenseStoreBlock::SIZE,
         )
     }
 }

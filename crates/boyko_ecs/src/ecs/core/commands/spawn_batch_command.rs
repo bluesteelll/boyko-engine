@@ -568,6 +568,10 @@ where
             // both: `archetype`'s provenance is the raw slab pointer (not a
             // `&mut world` borrow), and `dense_registry` is reached through the
             // separately-captured `&mut *world`.
+            // Dense plan D4: snapshot the world tick before the `&mut world`
+            // capture (the closure cannot re-borrow `world`); every batched dense
+            // insert is stamped Added at this tick (the bulk-spawn frame's tick).
+            let dense_current_tick = world.current_tick();
             let world_ref: &mut EcsMaster = world;
             for i in 0..n {
                 let row = start_row + i;
@@ -585,7 +589,7 @@ where
                         let entity_id =
                             crate::ecs::identifiers::primitives::EntityId(start_id + i);
                         let store = world_ref.dense_registry.store_mut(component_id);
-                        store.insert(entity_id, bytes);
+                        store.insert(entity_id, bytes, dense_current_tick);
                         store.mark_arch_present(archetype_id);
                         // No `k += 1` — dense is not a table data column.
                         return;

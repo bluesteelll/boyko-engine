@@ -865,13 +865,22 @@ pub struct AddedState<C: Component> {
 /// only inside `Or<F>` composition (plan §5.4-bis Round 2 C4). The
 /// null-base branch in [`Added<C>::filter_fetch`] returns `false`.
 pub struct AddedFetch<'w> {
-    /// Base pointer to the active archetype's `added_ticks` column. NULL
-    /// for `Or<F>`-only archetypes that lack `C` (plan §5.4-bis).
+    /// Base pointer to the active archetype's `added_ticks` column (a TABLE `C`).
+    /// NULL for `Or<F>`-only archetypes that lack `C` (plan §5.4-bis), and unused
+    /// for a DENSE `C` (the dense arm reads the per-slot tick via `dense`).
     pub(crate) tick_base: *const UnsafeCell<Tick>,
     /// Active system's `last_run` snapshot at `set_table_*` time.
     pub(crate) last_run: Tick,
     /// Active system's `this_run` snapshot at `set_table_*` time.
     pub(crate) this_run: Tick,
+    /// Dense plan D4: the global `DenseStore` for a DENSE `C`, resolved once by
+    /// `resolve_dense`. NULL for a TABLE `C` (never read — the dense arm const-folds
+    /// out, the 0%-gate) or when no dense store exists yet.
+    pub(crate) dense: *const crate::ecs::core::component::dense::DenseStore,
+    /// Dense plan D4: the current archetype's `entity_ids` column base, cached by
+    /// `set_table_*` for the per-row gather (`entity = entity_ids[row]`). NULL for
+    /// a TABLE `C`.
+    pub(crate) entity_ids: *const crate::ecs::identifiers::primitives::EntityId,
     /// Type binding tying the fetch lifetime to `'w`.
     pub(crate) _marker: PhantomData<&'w ()>,
 }
@@ -959,6 +968,9 @@ impl<C: Component> Added<C> {
 unsafe impl<C: Component> QueryFilter for Added<C> {
     type State = AddedState<C>;
     type Fetch<'w> = AddedFetch<'w>;
+    // Table `Added<C>` is per-row (already non-archetypal); a DENSE `Added<C>` is
+    // likewise per-row (the dense bit is signature-excluded → per-row `e2s`
+    // gather + slot tick read). Both keep `IS_ARCHETYPAL = false`.
     const IS_ARCHETYPAL: bool = false;
     // Phase 12.5 Track B NCD2: `Added<C>` reads per-row added_ticks; the
     // dispatcher MUST forward `meta` so `set_table_*` captures the
@@ -967,6 +979,13 @@ unsafe impl<C: Component> QueryFilter for Added<C> {
     // EnableTag C3: `Added<C>` is a change-detection term; it cannot be mixed
     // with an enable term in one query (enforced at the (D, F) seam — Step 7a).
     const CONTAINS_CHANGE_DETECTION: bool = true;
+    // Dense plan D4: a dense `Added<C>` rides the dense fetch (resolve_dense +
+    // per-row slot tick read); a table `C` keeps the default `false` (the 0%-gate).
+    const HAS_DENSE: bool = C::STORAGE_IS_DENSE;
+    // Dense plan D4: `Added<C>` REQUIRES `C`, so a dense `Added<C>` is a dense
+    // INCLUDE term — candidate archetypes are seeded from `arch_presence` (like a
+    // dense `With<C>`).
+    const HAS_DENSE_INCLUDE: bool = C::STORAGE_IS_DENSE;
 
     #[inline]
     fn init_state(_world: &mut EcsMaster) -> Self::State {
@@ -992,11 +1011,22 @@ unsafe impl<C: Component> QueryFilter for Added<C> {
 
     #[inline]
     fn matches_component_set(state: &Self::State, mask: &ComponentMask) -> bool {
+        // Dense is signature-excluded (mirrors `With<C>`): the mask never carries
+        // its bit, so a dense `Added` admits every candidate at this level; the
+        // exact per-row gate is `filter_fetch` (membership + slot tick).
+        if const { C::STORAGE_IS_DENSE } {
+            return true;
+        }
         mask.contains(state.id)
     }
 
     #[inline]
     fn aggregate_include(state: &Self::State, include: &mut ComponentMask) {
+        // Dense `Added` contributes NO include bit (signature-excluded); candidates
+        // are seeded from `arch_presence` (D4 `dense_include_candidates`).
+        if const { C::STORAGE_IS_DENSE } {
+            return;
+        }
         // FLT4: contributing the include bit makes `QueryDataState::update_archetypes`
         // select only archetypes that contain `C`. The null-base branch in
         // `filter_fetch` remains the safety net for the `Or<F>` post-filter
@@ -1005,11 +1035,46 @@ unsafe impl<C: Component> QueryFilter for Added<C> {
     }
 
     #[inline]
+    unsafe fn resolve_dense<'w>(
+        fetch: &mut Self::Fetch<'w>,
+        state: &Self::State,
+        world: crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell<'w>,
+    ) {
+        // Gated by `const { Self::HAS_DENSE }` at the cursor (never emitted for a
+        // table `C` — the 0%-gate). Caches the global `DenseStore` pointer; the
+        // per-slot added-tick read happens in `filter_fetch`.
+        // SAFETY (resolve_dense contract): `world` upholds the access contract; the
+        //   store lives in the address-stable `DenseRegistry` slot, valid for `'w`.
+        let registry = unsafe { world.world().dense_registry() };
+        fetch.dense = match registry.store(state.id) {
+            Some(store) => store as *const _,
+            None => std::ptr::null(),
+        };
+    }
+
+    #[inline]
+    fn dense_include_candidates(
+        state: &Self::State,
+        registry: &crate::ecs::core::component::dense::DenseRegistry,
+        out: &mut crate::ecs::core::iters::archetype_bit_set::ArchetypeBitSet,
+    ) {
+        // OR-in the dense store's `arch_presence` (mirrors a dense `With<C>`).
+        // Gated by `const { Self::HAS_DENSE_INCLUDE }`.
+        if const { C::STORAGE_IS_DENSE }
+            && let Some(store) = registry.store(state.id)
+        {
+            store.arch_presence().for_each_set_bit(|a| out.insert(a));
+        }
+    }
+
+    #[inline]
     fn init_fetch<'w>(_state: &Self::State) -> Self::Fetch<'w> {
         AddedFetch {
             tick_base: std::ptr::null(),
             last_run: Tick::ZERO,
             this_run: Tick::ZERO,
+            dense: std::ptr::null(),
+            entity_ids: std::ptr::null(),
             _marker: PhantomData,
         }
     }
@@ -1029,6 +1094,17 @@ unsafe impl<C: Component> QueryFilter for Added<C> {
         //   - `meta` is read-only INPUT (Round 2 W7); ticks are `Copy`-extracted
         //     into the Fetch by value.
         let archetype_ref: &Archetype = unsafe { &*archetype };
+        if const { C::STORAGE_IS_DENSE } {
+            // Dense `Added<C>`: no archetype tick column. Cache `entity_ids` for the
+            // per-row gather; `filter_fetch` reads the per-slot added tick via the
+            // resolved `DenseStore` (D4). The tick window comes from `meta`.
+            // SAFETY (QD3): `archetype` is live; reads the immutable `entity_ids`
+            //   slice base only.
+            fetch.entity_ids = archetype_ref.entity_ids_slice().as_ptr();
+            fetch.last_run = meta.last_run();
+            fetch.this_run = meta.this_run();
+            return;
+        }
         // STORE3: `tick_column_base` returns the write-once added-tick
         // sub-region base of the pool's own `VmReservation`; the pointer is
         // stable for the pool's lifetime (Phase X.I vm-reservation stability).
@@ -1089,6 +1165,27 @@ unsafe impl<C: Component> QueryFilter for Added<C> {
 
     #[inline]
     unsafe fn filter_fetch<'w>(fetch: &Self::Fetch<'w>, row: usize) -> bool {
+        if const { C::STORAGE_IS_DENSE } {
+            // Dense `Added<C>`: row → entity → slot → per-slot added tick. A
+            // non-member (no slot) is NOT Added (it does not have `C` this frame).
+            // NULL `dense` ⟹ no store ⟹ no member.
+            // SAFETY (D4): `dense` resolved by `resolve_dense`, `entity_ids` cached
+            //   by `set_table_*`; `row < entity_count` (cursor guard). A live slot
+            //   is `< column.count() <= committed_rows`, so `added_ticks_ptr()[slot]`
+            //   lies in the committed prefix; the `&self` dense borrow keeps it
+            //   alive; `Tick` is `Copy`.
+            if fetch.dense.is_null() {
+                return false;
+            }
+            let entity = unsafe { *fetch.entity_ids.add(row) };
+            let store = unsafe { &*fetch.dense };
+            let Some(slot) = store.slot_of(entity) else {
+                return false;
+            };
+            let tick: Tick =
+                unsafe { *(*store.added_ticks_ptr().add(slot as usize)).get() };
+            return tick.is_newer_than(fetch.last_run, fetch.this_run);
+        }
         // Round 2 C4 — predicted-not-taken null-base check for archetypes
         // that lack `C` (only possible under `Or<F>` post-filter path).
         // Cold branch under normal queries.
@@ -1152,13 +1249,18 @@ pub struct ChangedState<C: Component> {
 /// `changed_ticks` column rather than `added_ticks`. The null-base
 /// sentinel is interpreted identically (plan §5.4-bis Round 2 C4).
 pub struct ChangedFetch<'w> {
-    /// Base pointer to the active archetype's `changed_ticks` column.
-    /// NULL for `Or<F>`-only archetypes that lack `C`.
+    /// Base pointer to the active archetype's `changed_ticks` column (a TABLE `C`).
+    /// NULL for `Or<F>`-only archetypes that lack `C`; unused for a DENSE `C`.
     pub(crate) tick_base: *const UnsafeCell<Tick>,
     /// Active system's `last_run` snapshot at `set_table_*` time.
     pub(crate) last_run: Tick,
     /// Active system's `this_run` snapshot at `set_table_*` time.
     pub(crate) this_run: Tick,
+    /// Dense plan D4: the global `DenseStore` for a DENSE `C` (see [`AddedFetch`]).
+    pub(crate) dense: *const crate::ecs::core::component::dense::DenseStore,
+    /// Dense plan D4: the current archetype's `entity_ids` base for the per-row
+    /// gather (DENSE `C` only).
+    pub(crate) entity_ids: *const crate::ecs::identifiers::primitives::EntityId,
     /// Type binding tying the fetch lifetime to `'w`.
     pub(crate) _marker: PhantomData<&'w ()>,
 }
@@ -1198,6 +1300,10 @@ unsafe impl<C: Component> QueryFilter for Changed<C> {
     const NEEDS_CHANGE_DETECTION: bool = true;
     // EnableTag C3: `Changed<C>` is a change-detection term — see `Added<C>`.
     const CONTAINS_CHANGE_DETECTION: bool = true;
+    // Dense plan D4: mirrors `Added<C>` — dense `Changed<C>` reads the per-slot
+    // changed tick; a table `C` keeps the defaults (the 0%-gate).
+    const HAS_DENSE: bool = C::STORAGE_IS_DENSE;
+    const HAS_DENSE_INCLUDE: bool = C::STORAGE_IS_DENSE;
 
     #[inline]
     fn init_state(_world: &mut EcsMaster) -> Self::State {
@@ -1219,12 +1325,49 @@ unsafe impl<C: Component> QueryFilter for Changed<C> {
 
     #[inline]
     fn matches_component_set(state: &Self::State, mask: &ComponentMask) -> bool {
+        // Dense is signature-excluded (mirrors `Added<C>`): admit every candidate;
+        // the exact per-row gate is `filter_fetch`.
+        if const { C::STORAGE_IS_DENSE } {
+            return true;
+        }
         mask.contains(state.id)
     }
 
     #[inline]
     fn aggregate_include(state: &Self::State, include: &mut ComponentMask) {
+        // Dense `Changed` contributes NO include bit (signature-excluded); candidates
+        // are seeded from `arch_presence` (`dense_include_candidates`).
+        if const { C::STORAGE_IS_DENSE } {
+            return;
+        }
         include.set(state.id);
+    }
+
+    #[inline]
+    unsafe fn resolve_dense<'w>(
+        fetch: &mut Self::Fetch<'w>,
+        state: &Self::State,
+        world: crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell<'w>,
+    ) {
+        // SAFETY (resolve_dense contract): see `Added::resolve_dense`.
+        let registry = unsafe { world.world().dense_registry() };
+        fetch.dense = match registry.store(state.id) {
+            Some(store) => store as *const _,
+            None => std::ptr::null(),
+        };
+    }
+
+    #[inline]
+    fn dense_include_candidates(
+        state: &Self::State,
+        registry: &crate::ecs::core::component::dense::DenseRegistry,
+        out: &mut crate::ecs::core::iters::archetype_bit_set::ArchetypeBitSet,
+    ) {
+        if const { C::STORAGE_IS_DENSE }
+            && let Some(store) = registry.store(state.id)
+        {
+            store.arch_presence().for_each_set_bit(|a| out.insert(a));
+        }
     }
 
     #[inline]
@@ -1233,6 +1376,8 @@ unsafe impl<C: Component> QueryFilter for Changed<C> {
             tick_base: std::ptr::null(),
             last_run: Tick::ZERO,
             this_run: Tick::ZERO,
+            dense: std::ptr::null(),
+            entity_ids: std::ptr::null(),
             _marker: PhantomData,
         }
     }
@@ -1244,9 +1389,19 @@ unsafe impl<C: Component> QueryFilter for Changed<C> {
         archetype: *const Archetype,
         meta: &'_ SystemMeta,
     ) {
+        let archetype_ref: &Archetype = unsafe { &*archetype };
+        if const { C::STORAGE_IS_DENSE } {
+            // Dense `Changed<C>`: cache `entity_ids`; `filter_fetch` reads the
+            // per-slot changed tick via the resolved store (mirrors `Added<C>`).
+            // SAFETY (QD3): `archetype` is live; reads the immutable `entity_ids`
+            //   slice base only.
+            fetch.entity_ids = archetype_ref.entity_ids_slice().as_ptr();
+            fetch.last_run = meta.last_run();
+            fetch.this_run = meta.this_run();
+            return;
+        }
         // SAFETY (QF3, plan §5.3 Round 2 W7): identical to `Added::set_table_readonly`
         //   except the captured base is the `changed_ticks` column.
-        let archetype_ref: &Archetype = unsafe { &*archetype };
         fetch.tick_base = match archetype_ref.tick_column_base(state.id) {
             Some((_added_base, changed_base)) => changed_base,
             None => std::ptr::null(),
@@ -1298,6 +1453,23 @@ unsafe impl<C: Component> QueryFilter for Changed<C> {
 
     #[inline]
     unsafe fn filter_fetch<'w>(fetch: &Self::Fetch<'w>, row: usize) -> bool {
+        if const { C::STORAGE_IS_DENSE } {
+            // Dense `Changed<C>`: row → entity → slot → per-slot changed tick. A
+            // non-member is NOT Changed (it does not have `C`). See
+            // `Added::filter_fetch`'s dense arm for the SAFETY contract (identical
+            // except the source is the `changed_ticks` sub-region).
+            if fetch.dense.is_null() {
+                return false;
+            }
+            let entity = unsafe { *fetch.entity_ids.add(row) };
+            let store = unsafe { &*fetch.dense };
+            let Some(slot) = store.slot_of(entity) else {
+                return false;
+            };
+            let tick: Tick =
+                unsafe { *(*store.changed_ticks_ptr().add(slot as usize)).get() };
+            return tick.is_newer_than(fetch.last_run, fetch.this_run);
+        }
         // Round 2 C4 — null-base predicted-not-taken check.
         if fetch.tick_base.is_null() {
             return false;
@@ -2951,6 +3123,8 @@ mod tests {
             tick_base: cells.as_ptr(),
             last_run: Tick::new(2),
             this_run: Tick::new(10),
+            dense: std::ptr::null(),
+            entity_ids: std::ptr::null(),
             _marker: PhantomData,
         };
         // SAFETY: tick_base points at the 1-element `cells` array allocated
@@ -2968,6 +3142,8 @@ mod tests {
             tick_base: cells.as_ptr(),
             last_run: Tick::new(2),
             this_run: Tick::new(10),
+            dense: std::ptr::null(),
+            entity_ids: std::ptr::null(),
             _marker: PhantomData,
         };
         // SAFETY: same as above; row 0 in range.
@@ -2984,6 +3160,8 @@ mod tests {
             tick_base: std::ptr::null(),
             last_run: Tick::new(2),
             this_run: Tick::new(10),
+            dense: std::ptr::null(),
+            entity_ids: std::ptr::null(),
             _marker: PhantomData,
         };
         // SAFETY: null-base path executes the early return; the tick read is
@@ -2999,6 +3177,8 @@ mod tests {
             tick_base: cells.as_ptr(),
             last_run: Tick::new(2),
             this_run: Tick::new(10),
+            dense: std::ptr::null(),
+            entity_ids: std::ptr::null(),
             _marker: PhantomData,
         };
         // SAFETY: cells live for the scope; row 0 in range.
@@ -3014,6 +3194,8 @@ mod tests {
             tick_base: cells.as_ptr(),
             last_run: Tick::new(2),
             this_run: Tick::new(10),
+            dense: std::ptr::null(),
+            entity_ids: std::ptr::null(),
             _marker: PhantomData,
         };
         // SAFETY: cells live for the scope; row 0 in range.
@@ -3041,6 +3223,8 @@ mod tests {
             tick_base: cells.as_ptr(),
             last_run,
             this_run,
+            dense: std::ptr::null(),
+            entity_ids: std::ptr::null(),
             _marker: PhantomData,
         };
         // SAFETY: stack-allocated cells live for the scope; row 0 in range.

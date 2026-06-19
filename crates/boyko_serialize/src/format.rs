@@ -24,7 +24,14 @@ pub const MAGIC: [u8; 8] = *b"BOYKOSAV";
 /// The current file format version written into [`SaveHeader::format_version`].
 /// Bumped on any incompatible change to the on-disk layout. (Distinct from a
 /// per-component `format_version`, which versions a single component's bytes.)
-pub const FORMAT_VERSION: u32 = 1;
+///
+/// `2` (Dense plan D4): the header grew the `dense_table_off` / `dense_store_count`
+/// fields and the trailing dense-store region (the compacted live dense columns +
+/// their `s2e` slot→EntityId tables). A v1 file is rejected on load
+/// (`UnsupportedVersion`); a v2 file with no dense store (`dense_store_count == 0`)
+/// is byte-equivalent to the v1 body plus the 16-byte header growth (the 0%-gate
+/// for a table-only world: no dense region bytes are emitted).
+pub const FORMAT_VERSION: u32 = 2;
 
 /// Endianness marker for [`SaveHeader::endianness`]: little-endian (the common
 /// target; the only value v1 produces, plan §2.2 / O2).
@@ -61,7 +68,10 @@ pub const COLUMN_REGION_ALIGN: usize = 32;
 /// Layout (byte offsets, 64-bit target):
 /// `magic@0 format_version@8 endianness@12 ptr_width@13 flags@14
 ///  type_table_off@16 archetype_table_off@24 entity_table_off@32 var_data_off@40
-///  type_count@48 archetype_count@52 entity_count@56` — total 64 B.
+///  type_count@48 archetype_count@52 entity_count@56 dense_table_off@64
+///  dense_store_count@72 _pad@76` — total 80 B (v2: the original 64-byte v1 image
+/// extended by the 16-byte dense-region descriptor; every v1 field keeps its
+/// offset so a v1-aware reader of the leading fields is unaffected).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SaveHeader {
@@ -92,13 +102,25 @@ pub struct SaveHeader {
     pub archetype_count: u32,
     /// Total saved entity count (sum of every archetype's entity count).
     pub entity_count: u64,
+    /// Dense plan D4 — byte offset (from file start) of the dense-store region (a
+    /// sequence of [`DenseStoreBlock`] headers each followed by its body: the
+    /// `s2e` table then the compacted live column bytes). Valid only when
+    /// `dense_store_count != 0`; otherwise points at the file end (no bytes).
+    pub dense_table_off: u64,
+    /// Dense plan D4 — number of [`DenseStoreBlock`] records (live dense stores
+    /// with ≥ 1 member). `0` for a table-only world (the 0%-gate: no dense bytes).
+    pub dense_store_count: u32,
+    /// Padding to keep the 80-byte image padding-free (the `u64`s force
+    /// 8-alignment). Always zeroed.
+    pub _pad: u32,
 }
 
 // Pin the wire size + every field offset (the format IS these bytes). Gated to
 // 64-bit (the engine's supported target — see CLAUDE.md): the layout is
 // width-independent here (no usize/ptr fields), but the const-asserts document the
-// canonical 64-bit image.
-const _: () = assert!(std::mem::size_of::<SaveHeader>() == 64);
+// canonical 64-bit image. v2 grew the image to 80 B; every v1 field offset is
+// unchanged (the dense descriptor is purely appended).
+const _: () = assert!(std::mem::size_of::<SaveHeader>() == 80);
 const _: () = assert!(std::mem::align_of::<SaveHeader>() == 8);
 const _: () = assert!(std::mem::offset_of!(SaveHeader, magic) == 0);
 const _: () = assert!(std::mem::offset_of!(SaveHeader, format_version) == 8);
@@ -112,10 +134,13 @@ const _: () = assert!(std::mem::offset_of!(SaveHeader, var_data_off) == 40);
 const _: () = assert!(std::mem::offset_of!(SaveHeader, type_count) == 48);
 const _: () = assert!(std::mem::offset_of!(SaveHeader, archetype_count) == 52);
 const _: () = assert!(std::mem::offset_of!(SaveHeader, entity_count) == 56);
+const _: () = assert!(std::mem::offset_of!(SaveHeader, dense_table_off) == 64);
+const _: () = assert!(std::mem::offset_of!(SaveHeader, dense_store_count) == 72);
+const _: () = assert!(std::mem::offset_of!(SaveHeader, _pad) == 76);
 
 impl SaveHeader {
     /// The fixed header size in bytes (the body starts here).
-    pub const SIZE: usize = 64;
+    pub const SIZE: usize = 80;
 
     /// Builds a header with the magic / version / endianness / ptr-width filled in
     /// and the `*_off` / `*_count` fields zeroed (backpatched by the saver after
@@ -135,6 +160,9 @@ impl SaveHeader {
             type_count: 0,
             archetype_count: 0,
             entity_count: 0,
+            dense_table_off: 0,
+            dense_store_count: 0,
+            _pad: 0,
         }
     }
 
@@ -306,4 +334,60 @@ const _: () = assert!(std::mem::offset_of!(VarRef, len) == 8);
 impl VarRef {
     /// The wire size in bytes of one var-ref.
     pub const SIZE: usize = 16;
+}
+
+/// The fixed header of one dense-store block (Dense plan D4 / Decision 7). One per
+/// live dense `ComponentId` (≥ 1 member). Followed in the file by the block body:
+/// the `s2e` saved-`EntityId` table (`u64[member_count]`, slot order) then the
+/// compacted live column bytes (`member_count * stride`, a POB blit or a per-element
+/// `serialize_fn` run).
+///
+/// Unlike a TABLE column (whose row→entity association IS the archetype's entity
+/// list), a dense store's slot→entity map is the `s2e` array — so it is serialized
+/// here alongside the data. On load each saved `s2e` entry is remapped to its fresh
+/// id via the [`LoadEntityMap`](boyko_ecs::ecs::core::serialize::LoadEntityMap)
+/// (the same machinery `ChildOf` / `#[entities]` use), then the column is rebuilt.
+///
+/// Layout (byte offsets): `type_index@0 member_count@4 serializability@8
+/// _pad@9..16 s2e_off@16 data_off@24 data_byte_len@32` — total 40 B (the `u64`
+/// offsets force 8-alignment; the explicit `_pad` makes the image padding-free).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DenseStoreBlock {
+    /// Index into the file's [`TypeTableEntry`] array (the dense component's type).
+    pub type_index: u32,
+    /// Number of live members (slots) in this store at save time (== the s2e table
+    /// length == the live column row count after the read-only logical compaction).
+    pub member_count: u32,
+    /// The [`Serializability`](boyko_ecs::ecs::core::component::component_registry::Serializability)
+    /// discriminant as a `u8` (drives the blit-vs-fn-ptr branch — mirrors
+    /// [`TypeTableEntry::serializability`]).
+    pub serializability: u8,
+    /// Explicit padding to the next `u64` (s2e_off). Always zeroed → padding-free
+    /// image.
+    pub _pad: [u8; 7],
+    /// Byte offset (from file start) of this store's `s2e` table
+    /// (`u64[member_count]`, the saved owning `EntityId.0` per live slot in slot
+    /// order).
+    pub s2e_off: u64,
+    /// Byte offset of this store's compacted live column bytes.
+    pub data_off: u64,
+    /// Byte length of the column bytes (`member_count * stride` for a POB store; the
+    /// `serialize_fn` run length for a ViaFn store; 0 for a ZST dense type).
+    pub data_byte_len: u64,
+}
+
+const _: () = assert!(std::mem::size_of::<DenseStoreBlock>() == 40);
+const _: () = assert!(std::mem::align_of::<DenseStoreBlock>() == 8);
+const _: () = assert!(std::mem::offset_of!(DenseStoreBlock, type_index) == 0);
+const _: () = assert!(std::mem::offset_of!(DenseStoreBlock, member_count) == 4);
+const _: () = assert!(std::mem::offset_of!(DenseStoreBlock, serializability) == 8);
+const _: () = assert!(std::mem::offset_of!(DenseStoreBlock, _pad) == 9);
+const _: () = assert!(std::mem::offset_of!(DenseStoreBlock, s2e_off) == 16);
+const _: () = assert!(std::mem::offset_of!(DenseStoreBlock, data_off) == 24);
+const _: () = assert!(std::mem::offset_of!(DenseStoreBlock, data_byte_len) == 32);
+
+impl DenseStoreBlock {
+    /// The wire size in bytes of one dense-store-block header.
+    pub const SIZE: usize = 40;
 }
