@@ -440,14 +440,16 @@ impl ArchetypeBundle {
         // into the slot — avoids an &mut self.signature reborrow after
         // in-place construction.
         //
-        // EnableTag C1 premise (Step 4 / Decision D5): `StorageKind::Bitset`
-        // ids are FILTERED OUT of the signature here, the in-place twin of
-        // `Archetype::create_by_ids`. Paired with the pool skip in
-        // `register_component_inplace` below, a bitset id never enters the
-        // signature and never gains a `ComponentPool` (D1 inv 3).
+        // EnableTag C1 / Dense plan C1 #6 (Step 4 / Decision D5): every
+        // non-signature-storage id (`Bitset` OR `Dense`) is FILTERED OUT of the
+        // signature here, the in-place twin of `Archetype::create_by_ids`. Paired
+        // with the pool skip in `register_component_inplace` below, such an id
+        // never enters the signature and never gains a per-archetype
+        // `ComponentPool` (D1 inv 3). Routed through the single
+        // `is_signature_storage` predicate.
         let mut mask = ComponentMask::new();
         for &cid in component_ids {
-            if component_registry::storage_kind(cid.0) == component_registry::StorageKind::Bitset {
+            if !component_registry::is_signature_storage(component_registry::storage_kind(cid.0)) {
                 continue;
             }
             mask.set(cid);

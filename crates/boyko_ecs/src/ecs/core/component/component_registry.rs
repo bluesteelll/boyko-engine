@@ -391,7 +391,7 @@ pub(crate) fn try_set_hooks(component_id: usize, hooks: ComponentHooks) -> bool 
 ///
 /// `#[repr(u8)]` with explicit discriminants so the value round-trips losslessly
 /// through the parallel cold `STORAGE_KIND` `AtomicU8` table. The discriminant
-/// space is intentionally extensible (D7: a future relationship kind = 2).
+/// space is intentionally extensible (2 = Dense; 3 reserved for relationships).
 #[repr(u8)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum StorageKind {
@@ -401,6 +401,32 @@ pub enum StorageKind {
     /// Enable-bit storage: the id is NOT in any archetype signature and has no
     /// `ComponentPool`; presence is a per-row bit in an `EnableColumn`.
     Bitset = 1,
+    /// Dense (non-fragmenting) storage (Dense plan, D0): the id is NOT in any
+    /// archetype signature and has NO per-archetype `ComponentPool`; instead a
+    /// single global `DenseStore` column (D1) holds every instance across all
+    /// archetypes. Excluded from the signature exactly like [`Bitset`], but —
+    /// unlike a bitset tag — it owns a global backing store rather than no
+    /// storage. Always [`ResidencyKind::Cpu`] (Dense plan W1).
+    ///
+    /// [`Bitset`]: StorageKind::Bitset
+    Dense = 2,
+}
+
+/// Returns `true` iff `kind` is a **signature** storage backend — i.e. an id of
+/// this kind participates in the archetype signature mask and owns a
+/// per-archetype `ComponentPool` (Dense plan C1).
+///
+/// Only [`StorageKind::Table`] is a signature kind. Both [`StorageKind::Bitset`]
+/// (enable tags) and [`StorageKind::Dense`] (global dense columns) are excluded
+/// from every archetype signature and own no per-archetype pool, so they return
+/// `false`. The single shared predicate every signature-exclude / pool-skip site
+/// routes through (`if !is_signature_storage(storage_kind(id))`), so adding a
+/// future non-signature kind only widens this one function.
+///
+/// Cold: read at archetype construction only, never on the per-frame hot path.
+#[inline]
+pub fn is_signature_storage(kind: StorageKind) -> bool {
+    matches!(kind, StorageKind::Table)
 }
 
 /// EnableTag plan (D5) — parallel cold table of per-component storage backends,
@@ -444,6 +470,11 @@ pub fn storage_kind(component_id: usize) -> StorageKind {
     }
     match STORAGE_KIND[component_id].load(Ordering::Relaxed) {
         x if x == StorageKind::Bitset as u8 => StorageKind::Bitset,
+        // Dense plan C1 #0 (the silent-reader-fall-through fix): discriminant 2
+        // MUST read back as `Dense`. Without this explicit arm a dense id falls
+        // into the `_ => Table` default, silently re-enters the archetype
+        // signature, and fragments archetypes with NO compile error.
+        x if x == StorageKind::Dense as u8 => StorageKind::Dense,
         // 0 (the default) and any future-but-unknown discriminant fall back to
         // the safe signature default — `set_storage_kind` is the only writer
         // and only ever stores a valid discriminant.
@@ -781,6 +812,62 @@ pub fn install_storage_kind<C: Component>(component_id: usize) {
     // a hand-`impl Component` calls it with the table default.
     if C::STORAGE_IS_BITSET {
         set_storage_kind(component_id, StorageKind::Bitset);
+    }
+}
+
+/// Installs [`StorageKind::Dense`] for a derived dense component into the cold
+/// `STORAGE_KIND` table from the type's compile-time
+/// [`Component::STORAGE_IS_DENSE`] const (Dense plan D0 — the
+/// `#[component(storage = "dense")]` derive arm).
+///
+/// The dense twin of [`install_storage_kind`]: `#[derive(Component)]` expands
+/// into downstream crates where the `pub(crate)` `set_storage_kind` is
+/// unreachable, so the derive's `component_id()` install path calls this `pub`
+/// wrapper. The derive emits the call ONLY when `C::STORAGE_IS_DENSE` is `true`
+/// (const-gated), so a plain `#[derive(Component)]` const-folds it away and the
+/// id stays at the [`StorageKind::Table`] default — zero cost for non-dense
+/// components.
+///
+/// Write-once and idempotent through `set_storage_kind`: it runs once per type
+/// per process (behind the `component_id()` `OnceLock`), atomically with id
+/// assignment and therefore before the id can enter any archetype.
+///
+/// # Panics
+///
+/// In debug, if `component_id` is reclassified to a different kind (see
+/// `set_storage_kind`), or — Dense plan W1 — if the type's residency is not
+/// [`ResidencyKind::Cpu`]: dense storage is ALWAYS host-resident, so a
+/// `storage = "dense"` component classified `Gpu`/`CpuPinned` is an invariant
+/// violation (the derive rejects the attribute combination at compile time; this
+/// guards a hand-`impl Component`). The XOR-by-construction discipline (a single
+/// `STORAGE_IS_DENSE` const per type) makes reclassification unreachable for
+/// derived types.
+#[inline]
+pub fn install_dense_storage_kind<C: Component>(component_id: usize) {
+    debug_assert!(
+        component_id < MAX_COMPONENTS,
+        "Component ID {} exceeds maximum allowed ({})",
+        component_id,
+        MAX_COMPONENTS
+    );
+    // The derive const-gates this call on `C::STORAGE_IS_DENSE`, so in practice
+    // the branch is always taken; the explicit test keeps the wrapper correct if
+    // a hand-`impl Component` calls it with the table default.
+    if C::STORAGE_IS_DENSE {
+        // Dense plan W1: dense storage is ALWAYS `ResidencyKind::Cpu`. The derive
+        // forces this (it never sets a non-`Cpu` `RESIDENCY` for a dense type and
+        // rejects a `gpu` residency attribute at compile time), so for a derived
+        // type the const is always `Cpu`. The assert catches a hand-`impl
+        // Component` that wrongly pairs `STORAGE_IS_DENSE = true` with a `Gpu` /
+        // `CpuPinned` `RESIDENCY`.
+        debug_assert!(
+            C::RESIDENCY == ResidencyKind::Cpu,
+            "install_dense_storage_kind: dense storage is always Cpu-resident, but \
+             ComponentId {} declares RESIDENCY = {:?} (Dense plan W1)",
+            component_id,
+            C::RESIDENCY
+        );
+        set_storage_kind(component_id, StorageKind::Dense);
     }
 }
 
@@ -3135,6 +3222,97 @@ mod tests {
         set_storage_kind(407, StorageKind::Bitset);
         // Reclassifying to a different kind is an invariant violation.
         set_storage_kind(407, StorageKind::Table);
+    }
+
+    /// Dense plan C1 #0 — THE reader-regression test. A `Dense`-classified id
+    /// MUST read back as `StorageKind::Dense`, not silently fall through to the
+    /// `Table` default. Before the explicit `Dense` arm in `storage_kind`,
+    /// discriminant 2 fell into `_ => Table`, re-entering the signature.
+    #[test]
+    fn set_storage_kind_round_trips_dense() {
+        // Fixed id 352, grep-verified free in [348, 360) in the shared lib-test
+        // process (disjoint from the 404-407 storage-kind block and the 320-347
+        // archetype/master/query fixtures).
+        set_storage_kind(352, StorageKind::Dense);
+        assert_eq!(
+            storage_kind(352),
+            StorageKind::Dense,
+            "set_storage_kind(Dense) must round-trip through storage_kind (C1 #0 \
+             reader-regression: discriminant 2 must NOT fall through to Table)"
+        );
+    }
+
+    /// Dense plan W1 — a dense id's residency defaults to `Cpu` (dense is ALWAYS
+    /// host-resident). Classifying storage as `Dense` does not touch the
+    /// residency table, so the default `Cpu` stands.
+    #[test]
+    fn dense_id_residency_defaults_to_cpu() {
+        set_storage_kind(352, StorageKind::Dense);
+        assert_eq!(
+            residency_class(352),
+            ResidencyKind::Cpu,
+            "a dense id is always ResidencyKind::Cpu (Dense plan W1)"
+        );
+    }
+
+    /// Dense plan C1 — `is_signature_storage` is the single predicate every
+    /// signature-exclude site routes through. Only `Table` is a signature kind;
+    /// both `Bitset` and `Dense` are excluded. (Confirms the 0%-gate: the
+    /// `Table`/`Bitset` answers are identical to the pre-refactor explicit
+    /// `== Bitset` comparison.)
+    #[test]
+    fn is_signature_storage_only_table() {
+        assert!(
+            is_signature_storage(StorageKind::Table),
+            "Table is the only signature-storage kind"
+        );
+        assert!(
+            !is_signature_storage(StorageKind::Bitset),
+            "Bitset is excluded from the signature (unchanged behavior)"
+        );
+        assert!(
+            !is_signature_storage(StorageKind::Dense),
+            "Dense is excluded from the signature (Dense plan C1)"
+        );
+    }
+
+    /// Write-once enforcement extends to `Dense`: reclassifying a `Dense` id to a
+    /// different kind trips the debug assertion (same discipline as bitset).
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "already classified")]
+    fn set_storage_kind_reclassify_dense_to_table_panics_in_debug() {
+        set_storage_kind(353, StorageKind::Dense);
+        set_storage_kind(353, StorageKind::Table);
+    }
+
+    /// Dense plan W1 — `storage = "dense"` combined with a non-`Cpu` residency is
+    /// rejected. The derive forces `Cpu` (it never sets a non-`Cpu` `RESIDENCY`
+    /// for a dense type and rejects a gpu residency attribute at compile time), so
+    /// this guards a hand-`impl Component` that wrongly pairs
+    /// `STORAGE_IS_DENSE = true` with `RESIDENCY = Gpu`. The
+    /// `install_dense_storage_kind` debug assertion fires before classification.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "dense storage is always Cpu-resident")]
+    fn dense_plus_gpu_residency_is_rejected_in_debug() {
+        // A minimal hand-`impl Component` fixture: dense storage + (illegal) GPU
+        // residency. Only `component_id()` is required; the rest defaults.
+        struct DenseGpuFixture;
+        impl Component for DenseGpuFixture {
+            #[inline]
+            fn component_id() -> ComponentId {
+                // Fixed id 354 (grep-verified free in the shared lib-test
+                // process); `install_dense_storage_kind` reads only the passed id
+                // and the consts, so no `register_new` mint is needed.
+                ComponentId(354)
+            }
+            const STORAGE_IS_DENSE: bool = true;
+            const RESIDENCY: ResidencyKind = ResidencyKind::Gpu;
+        }
+        // The W1 assertion in `install_dense_storage_kind` must fire BEFORE the id
+        // is classified.
+        install_dense_storage_kind::<DenseGpuFixture>(354);
     }
 
     #[test]

@@ -263,8 +263,13 @@ pub fn component_macro(input: TokenStream) -> TokenStream {
     // `#[component(no_bundle)]`). EnableTag D6: `storage = "bitset"` ALSO
     // suppresses it — a bitset tag has no `ComponentPool` and must not be
     // spawnable as a one-component bundle (`storage = "bitset"` implies
-    // `no_bundle`).
-    let bundle_items = if hooks.no_bundle || hooks.storage_bitset {
+    // `no_bundle`). Dense plan D0: `storage = "dense"` likewise suppresses it —
+    // at D0 a dense component has NO global `DenseStore` yet (that lands in D1)
+    // and no per-archetype pool, so a naive single-component spawn would have
+    // nowhere to write the data. Suppressing the standalone `Bundle` makes
+    // "spawn a dense component" a clean compile-time absence rather than a silent
+    // data drop; D1/D2 wire the real store + structural-op routing.
+    let bundle_items = if hooks.no_bundle || hooks.storage_bitset || hooks.storage_dense {
         TokenStream2::new()
     } else {
         component_self_bundle_codegen(&name)
@@ -379,6 +384,10 @@ struct ComponentHookPaths {
     no_bundle: bool,
     /// `true` iff `storage = "bitset"` was supplied (EnableTag D5).
     storage_bitset: bool,
+    /// `true` iff `storage = "dense"` was supplied (Dense plan D0). Mutually
+    /// exclusive with `storage_bitset` (the `storage` key may be set at most
+    /// once, enforced in `parse_component_hooks`).
+    storage_dense: bool,
     /// Feature 3: `true` iff the bare `no_clone` flag was supplied — opts the
     /// component out of cloning (`Cloneability::Ignore`, `clone_fn = None`), even if
     /// the type is `Clone` / `Copy`.
@@ -445,37 +454,53 @@ impl ComponentHookPaths {
         }
     }
 
-    /// EnableTag D5: emits `const STORAGE_IS_BITSET = true;` (overriding the
-    /// `Component` trait default of `false`) when `storage = "bitset"` was
-    /// supplied, or an empty token stream (trait default applies) otherwise.
+    /// EnableTag D5 / Dense plan D0: emits `const STORAGE_IS_BITSET = true;` for
+    /// `storage = "bitset"` or `const STORAGE_IS_DENSE = true;` for
+    /// `storage = "dense"` (overriding the `Component` trait default of `false`),
+    /// or an empty token stream (trait defaults apply) otherwise.
     ///
-    /// This const is what makes `Added<T>` / `Changed<T>` on the tag a compile
-    /// error (the D4 per-monomorphization const-asserts read it) and what
-    /// `install_storage_kind::<Self>` const-gates on.
+    /// `STORAGE_IS_BITSET` is what makes `Added<T>` / `Changed<T>` on a bitset
+    /// tag a compile error (the D4 per-monomorphization const-asserts read it).
+    /// Both consts are what the matching `install_*_storage_kind::<Self>`
+    /// const-gates on. The two keys are mutually exclusive (`storage may be set at
+    /// most once`), so at most one branch fires.
     fn storage_codegen(&self) -> TokenStream2 {
-        if !self.storage_bitset {
-            return TokenStream2::new();
-        }
-        quote! {
-            const STORAGE_IS_BITSET: bool = true;
+        if self.storage_bitset {
+            quote! {
+                const STORAGE_IS_BITSET: bool = true;
+            }
+        } else if self.storage_dense {
+            quote! {
+                const STORAGE_IS_DENSE: bool = true;
+            }
+        } else {
+            TokenStream2::new()
         }
     }
 
-    /// EnableTag D5: emits the registration-time call that classifies the minted
-    /// id as `StorageKind::Bitset`, or an empty token stream otherwise.
+    /// EnableTag D5 / Dense plan D0: emits the registration-time call that
+    /// classifies the minted id as `StorageKind::Bitset` (`storage = "bitset"`)
+    /// or `StorageKind::Dense` (`storage = "dense"`), or an empty token stream
+    /// otherwise.
     ///
     /// Emitted into the derive's `component_id()` `OnceLock` init closure,
     /// AFTER `register_new` mints `raw` and (when present) hooks install — the
     /// same atomic-with-id-assignment, before-any-archetype ordering that
-    /// `install_hooks` relies on. Routed through the `pub` wrapper
-    /// `install_storage_kind::<Self>` because the underlying `set_storage_kind`
-    /// is `pub(crate)` and unreachable from a downstream crate's derive output.
+    /// `install_hooks` relies on. Routed through the `pub` wrappers
+    /// `install_storage_kind::<Self>` / `install_dense_storage_kind::<Self>`
+    /// because the underlying `set_storage_kind` is `pub(crate)` and unreachable
+    /// from a downstream crate's derive output.
     fn storage_install_codegen(&self) -> TokenStream2 {
-        if !self.storage_bitset {
-            return TokenStream2::new();
-        }
-        quote! {
-            boyko_ecs::ecs::core::component::component_registry::install_storage_kind::<Self>(raw);
+        if self.storage_bitset {
+            quote! {
+                boyko_ecs::ecs::core::component::component_registry::install_storage_kind::<Self>(raw);
+            }
+        } else if self.storage_dense {
+            quote! {
+                boyko_ecs::ecs::core::component::component_registry::install_dense_storage_kind::<Self>(raw);
+            }
+        } else {
+            TokenStream2::new()
         }
     }
 }
@@ -663,12 +688,13 @@ fn parse_component_hooks(attrs: &[syn::Attribute]) -> Result<ComponentHookPaths,
                 return Ok(());
             }
 
-            // EnableTag D5 (Wave 5 Step 10): `storage = "bitset"` — a NameValue
-            // key whose value is a STRING LITERAL (W1-r6: parsed as a `LitStr`,
-            // NOT a bare-key flag and NOT a path). Any other string is rejected
-            // with a message naming the allowed value.
+            // EnableTag D5 (Wave 5 Step 10) / Dense plan D0: `storage = "bitset"`
+            // or `storage = "dense"` — a NameValue key whose value is a STRING
+            // LITERAL (W1-r6: parsed as a `LitStr`, NOT a bare-key flag and NOT a
+            // path). Any other string is rejected with a message naming the
+            // allowed values.
             if meta.path.is_ident("storage") {
-                if paths.storage_bitset {
+                if paths.storage_bitset || paths.storage_dense {
                     return Err(meta.error(
                         "duplicate #[component(...)] key; storage may be set at most once",
                     ));
@@ -677,12 +703,13 @@ fn parse_component_hooks(attrs: &[syn::Attribute]) -> Result<ComponentHookPaths,
                 let lit: syn::LitStr = value.parse()?;
                 match lit.value().as_str() {
                     "bitset" => paths.storage_bitset = true,
+                    "dense" => paths.storage_dense = true,
                     other => {
                         return Err(syn::Error::new_spanned(
                             &lit,
                             format!(
                                 "unknown component storage {other:?}; \
-                                 the only supported value is \"bitset\""
+                                 the only supported values are \"bitset\" and \"dense\""
                             ),
                         ));
                     }

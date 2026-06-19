@@ -25,9 +25,7 @@ use crate::ecs::core::archetype::archetype::Archetype;
 use crate::ecs::core::clone::cloner::EntityCloner;
 use crate::ecs::core::component::component::Component;
 use crate::ecs::core::component::component_mask::ComponentMask;
-use crate::ecs::core::component::component_registry::{
-    self, Cloneability, MAX_COMPONENTS, StorageKind,
-};
+use crate::ecs::core::component::component_registry::{self, Cloneability, MAX_COMPONENTS};
 use crate::ecs::core::component::hooks::archetype_flags::ArchetypeFlags;
 use crate::ecs::core::component::hooks::dispatch::{trigger_on_add, trigger_on_insert};
 use crate::ecs::core::component::observers::dispatch::{
@@ -225,14 +223,16 @@ fn materialize_clone_into(
             if id == children_id {
                 continue; // always denied (D5)
             }
-            // W1: an EnableTag (bitset-storage) id is RETAINED in
-            // `component_ids()` but has NO `ComponentPool` — it would panic at
-            // `get_pool(id).expect(...)` below. Skip it so it never enters
-            // `target_ids` / `copy_from_source`. v1 does NOT carry the
-            // enable/disable bit through a clone (see `clone/mod.rs` doc); the
-            // clone lands in an archetype without the tag. Preserving the
-            // enable-state is a v1.1 follow-up.
-            if component_registry::storage_kind(id.0) == StorageKind::Bitset {
+            // W1 / Dense plan C1 #11: a non-signature-storage id (`Bitset` OR
+            // `Dense`) is RETAINED in `component_ids()` but has NO per-archetype
+            // `ComponentPool` — it would panic at `get_pool(id).expect(...)`
+            // below. Skip it so it never enters the table row clone
+            // (`target_ids` / `copy_from_source`). A bitset tag's enable-state is
+            // not carried through a clone (a v1.1 follow-up). For a dense id, ONLY
+            // the row-clone EXCLUSION is D0 — materializing dense membership in
+            // the clone target + firing its hooks is D2, deliberately NOT done
+            // here.
+            if !component_registry::is_signature_storage(component_registry::storage_kind(id.0)) {
                 continue;
             }
             if !cloner.filter_allows(id) {

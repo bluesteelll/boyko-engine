@@ -186,7 +186,12 @@ impl ArchetypeMaster {
         // with `register_component_hooks`, so it is filtered out — keeping
         // EVER_ARCHETYPED's meaning exactly "this id entered a real signature".
         for &cid in component_ids {
-            if component_registry::storage_kind(cid.0) == component_registry::StorageKind::Bitset {
+            // Dense plan C1 #7: a non-signature-storage id (`Bitset` OR `Dense`)
+            // never enters a real signature, so — like a bitset tag — it can
+            // never make an archetype's flags stale w.r.t. a hook; exclude it so
+            // EVER_ARCHETYPED keeps meaning exactly "this id entered a real
+            // signature".
+            if !component_registry::is_signature_storage(component_registry::storage_kind(cid.0)) {
                 continue;
             }
             component_registry::mark_ever_archetyped(cid.0);
@@ -508,7 +513,10 @@ impl ArchetypeMaster {
         // filter applies (see `create_archetype`'s H1 loop): a bitset id can
         // never make an archetype's flags stale, so it is excluded.
         for &cid in &component_ids {
-            if component_registry::storage_kind(cid.0) == component_registry::StorageKind::Bitset {
+            // Dense plan C1 #8: same non-signature-storage exclusion as the
+            // primary mint funnel — a `Bitset` or `Dense` id never enters a real
+            // signature, so it can never raise the global staleness bit.
+            if !component_registry::is_signature_storage(component_registry::storage_kind(cid.0)) {
                 continue;
             }
             component_registry::mark_ever_archetyped(cid.0);
@@ -717,17 +725,22 @@ impl ArchetypeMaster {
         source_archetype_id: ArchetypeId, 
         component_id: ComponentId
     ) -> Option<ArchetypeId> {
-        // EnableTag plan C1 premise (Decision D5): the appended id must NOT be a
-        // bitset enable tag — those never enter a signature and route to
-        // `enable`/`disable`, not a structural add. The registry signature is
-        // already bitset-safe (`get_or_create_archetype` filters), so a misrouted
-        // bitset id cannot corrupt the registry; this debug_assert surfaces the
-        // misuse instead of silently producing a structurally-identical archetype.
-        debug_assert_ne!(
-            component_registry::storage_kind(component_id.0),
-            component_registry::StorageKind::Bitset,
-            "add_component_to_archetype: id {} is a bitset enable tag; toggle it \
-             via enable/disable, do not migrate it into a signature",
+        // EnableTag C1 / Dense plan C1 #9 (Decision D5): the appended id must be
+        // a SIGNATURE-storage (`Table`) id — a non-signature id (`Bitset` OR
+        // `Dense`) never enters a signature. A bitset tag routes to
+        // `enable`/`disable`; a dense id lives in its global `DenseStore` and is
+        // inserted/removed without migration (D2). The registry signature is
+        // already filtered (`get_or_create_archetype`), so a misrouted id cannot
+        // corrupt the registry; this debug_assert surfaces the misuse instead of
+        // silently producing a structurally-identical archetype. Widened from the
+        // bitset-only `debug_assert_ne` to the `is_signature_storage` predicate.
+        debug_assert!(
+            component_registry::is_signature_storage(component_registry::storage_kind(
+                component_id.0
+            )),
+            "add_component_to_archetype: id {} is a non-signature-storage id \
+             (bitset enable tag or dense component); toggle/insert it via its own \
+             API, do not migrate it into a signature",
             component_id.0
         );
 

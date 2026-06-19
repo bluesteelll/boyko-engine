@@ -257,7 +257,11 @@ impl Archetype {
     /// `(ptr, stride)` without going through the bundle's sparse map
     /// (Phase 7 D4 / invariant U7).
     /// Builds the archetype-signature mask for `component_ids`, FILTERING OUT
-    /// every `StorageKind::Bitset` id (EnableTag plan C1 premise / Decision D5).
+    /// every non-signature-storage id — i.e. every `StorageKind::Bitset`
+    /// (EnableTag plan C1 / Decision D5) AND every `StorageKind::Dense` (Dense
+    /// plan C1 #1): both are excluded from the signature, routed through the
+    /// single `is_signature_storage` predicate so adding a future non-signature
+    /// kind widens only that one function.
     ///
     /// This is the single signature-filtering implementation. Every archetype
     /// signature — the archetype's own [`Self::create_by_ids`] mask AND the
@@ -265,7 +269,7 @@ impl Archetype {
     /// create/get-or-create funnels — MUST route through here so the registry
     /// signature is byte-identical to the archetype's own filtered signature.
     /// Without it, the registry would index an archetype under a signature that
-    /// includes a bitset bit while the archetype's real signature excludes it,
+    /// includes an excluded bit while the archetype's real signature excludes it,
     /// breaking dedup (`find_exact_match`) and diverging the query-match path.
     ///
     /// `pub(crate)`: the only off-archetype caller is `ArchetypeMaster`; both
@@ -274,7 +278,8 @@ impl Archetype {
     pub(crate) fn filtered_signature_mask(component_ids: &[ComponentId]) -> ComponentMask {
         let mut mask = ComponentMask::new();
         for &comp_id in component_ids {
-            if component_registry::storage_kind(comp_id.0) == StorageKind::Bitset {
+            if !component_registry::is_signature_storage(component_registry::storage_kind(comp_id.0))
+            {
                 continue;
             }
             mask.set(comp_id);
@@ -283,11 +288,12 @@ impl Archetype {
     }
 
     pub fn create_by_ids(id: ArchetypeId, component_ids: &[ComponentId]) -> Self {
-        // Create a mask from the component IDs. EnableTag plan C1 premise:
-        // `StorageKind::Bitset` ids are FILTERED OUT of the signature mask so
-        // they never fragment the archetype space (Decision D5). Routed through
-        // the single shared filter so the registry signature minted at the
-        // `ArchetypeMaster` funnels matches this one bit-for-bit.
+        // Create a mask from the component IDs. EnableTag plan C1 / Dense plan
+        // C1 #1: every non-signature-storage id (`StorageKind::Bitset` OR
+        // `StorageKind::Dense`) is FILTERED OUT of the signature mask so it never
+        // fragments the archetype space (Decision D5). Routed through the single
+        // shared `filtered_signature_mask` filter so the registry signature
+        // minted at the `ArchetypeMaster` funnels matches this one bit-for-bit.
         let mask = Self::filtered_signature_mask(component_ids);
 
         // Initialize archetype with mask and empty component pools
@@ -311,11 +317,13 @@ impl Archetype {
         // component's hook bits into the archetype flags from the cold `HOOKS`
         // table (plan §4.6) — one accumulator, set once after the loop.
         //
-        // EnableTag C1 premise: a `StorageKind::Bitset` id gets NO
-        // `ComponentPool` (and never enters the signature, filtered above) — a
-        // sibling `&mut C` data param on a bitset id is therefore structurally
-        // impossible, which is what makes the Enable filter's no-op
-        // `init_access` sound (Decision D8 / D1 inv 3).
+        // EnableTag C1 / Dense plan C1 #2: a non-signature-storage id (`Bitset`
+        // OR `Dense`) gets NO per-archetype `ComponentPool` (and never enters the
+        // signature, filtered above) — a sibling `&mut C` data param on a bitset
+        // id is therefore structurally impossible, which is what makes the Enable
+        // filter's no-op `init_access` sound (Decision D8 / D1 inv 3). A dense id
+        // is excluded the same way; its data lives only in the global
+        // `DenseStore` (D1), never a per-archetype column.
         //
         // Phase 4 Seam 1/2 (D1/D2, IM-2): this is the single full-slice mint
         // funnel (both `ArchetypeMaster` paths reach it). Fold the residency
@@ -329,10 +337,10 @@ impl Archetype {
         let mut saw_gpu = false;
         let mut saw_non_gpu = false;
         for &comp_id in component_ids {
-            // Residency is scanned for EVERY id in the signature, including a
-            // bitset tag (always `Cpu` — no `ComponentPool` — so it counts as
-            // non-Gpu, which is correct: a bitset EnableTag is never device-
-            // resident).
+            // Residency is scanned for EVERY id, including a non-signature id: a
+            // bitset tag (always `Cpu` — no `ComponentPool`) and a dense id
+            // (always `Cpu` — Dense plan W1) both count as non-Gpu, which is
+            // correct: neither is ever device-resident.
             match component_registry::residency_class(comp_id.0) {
                 ResidencyKind::Gpu => {
                     saw_gpu = true;
@@ -342,8 +350,17 @@ impl Archetype {
                 // signature impure → rejected after the walk.
                 ResidencyKind::CpuPinned | ResidencyKind::Cpu => saw_non_gpu = true,
             }
-            if component_registry::storage_kind(comp_id.0) == StorageKind::Bitset {
-                Self::debug_assert_bitset_premise(&archetype, comp_id);
+            // EnableTag C1 / Dense plan C1 #2: a non-signature-storage id
+            // (`Bitset` OR `Dense`) gets NO per-archetype `ComponentPool` and
+            // never entered the signature (filtered above). A bitset tag has no
+            // storage at all; a dense id has its OWN global `DenseStore.column`
+            // (D1) — at D0 that store does not exist yet, so a dense id simply
+            // has no per-archetype column here, which is exactly the intended end
+            // state (it never gets one).
+            if !component_registry::is_signature_storage(
+                component_registry::storage_kind(comp_id.0),
+            ) {
+                Self::debug_assert_non_signature_premise(&archetype, comp_id);
                 continue;
             }
             archetype.component_pools.add_pool(comp_id);
@@ -366,12 +383,16 @@ impl Archetype {
 
     /// Registers a component type by ID
     pub fn register_component(&mut self, component_id: ComponentId) -> bool {
-        // EnableTag C1 premise: a `StorageKind::Bitset` id is never part of a
-        // signature and never gets a `ComponentPool`. Refuse to register one as
-        // a table component (Decision D5 / D1 inv 3) — toggling is the only way
-        // a bitset tag enters an archetype.
-        if component_registry::storage_kind(component_id.0) == StorageKind::Bitset {
-            Self::debug_assert_bitset_premise(self, component_id);
+        // EnableTag C1 / Dense plan C1 #3: a non-signature-storage id (`Bitset`
+        // OR `Dense`) is never part of a signature and never gets a per-archetype
+        // `ComponentPool`. Refuse to register one as a table component (Decision
+        // D5 / D1 inv 3) — a bitset tag enters an archetype only via toggling; a
+        // dense id lives in its OWN global `DenseStore`, never a signature
+        // column.
+        if !component_registry::is_signature_storage(
+            component_registry::storage_kind(component_id.0),
+        ) {
+            Self::debug_assert_non_signature_premise(self, component_id);
             return false;
         }
 
@@ -407,14 +428,17 @@ impl Archetype {
     /// inline column entry. Intended exclusively for in-place archetype
     /// construction — the bundle resides in the same crate (`pub(crate)`).
     pub(crate) fn register_component_inplace(&mut self, component_id: ComponentId) {
-        // EnableTag C1 premise (Decision D5 / D1 inv 3): a `StorageKind::Bitset`
-        // id gets NO `ComponentPool` and no hook bits. The slab path's caller
+        // EnableTag C1 / Dense plan C1 #4 (Decision D5 / D1 inv 3): a
+        // non-signature-storage id (`Bitset` OR `Dense`) gets NO per-archetype
+        // `ComponentPool` and no hook bits. The slab path's caller
         // (`add_archetype_from_components_fallible`) is responsible for keeping
-        // the bit out of the signature mask too; here we skip the pool so the
-        // bitset id never gains a backing column (the no-`ComponentPool`
-        // structural premise behind D8's no-op `init_access`).
-        if component_registry::storage_kind(component_id.0) == StorageKind::Bitset {
-            Self::debug_assert_bitset_premise(self, component_id);
+        // the bit out of the signature mask too; here we skip the pool so the id
+        // never gains a per-archetype backing column (a bitset tag has none ever;
+        // a dense id lives in its global `DenseStore` instead).
+        if !component_registry::is_signature_storage(
+            component_registry::storage_kind(component_id.0),
+        ) {
+            Self::debug_assert_non_signature_premise(self, component_id);
             return;
         }
         self.component_pools.add_pool(component_id);
@@ -435,24 +459,26 @@ impl Archetype {
         }
     }
 
-    /// Debug-only tripwire for the EnableTag C1 premise (Decision D1 inv 3 /
-    /// D8): a `StorageKind::Bitset` id must NEVER appear in this archetype's
-    /// signature mask AND must NEVER have a `ComponentPool`. A sibling data
-    /// access on a bitset id is then structurally impossible — the soundness
-    /// ground for the Enable filter's no-op `init_access`.
+    /// Debug-only tripwire for the C1 non-signature-storage premise (EnableTag
+    /// Decision D1 inv 3 / D8 + Dense plan C1): a non-signature-storage id
+    /// (`StorageKind::Bitset` OR `StorageKind::Dense`) must NEVER appear in this
+    /// archetype's signature mask AND must NEVER have a per-archetype
+    /// `ComponentPool`. A sibling data access on a bitset id is then structurally
+    /// impossible — the soundness ground for the Enable filter's no-op
+    /// `init_access`; a dense id's data lives only in its global `DenseStore`.
     ///
-    /// Called at every construction/signature site that skips a bitset id.
+    /// Called at every construction/signature site that skips a non-signature id.
     /// Compiles to nothing in release.
     #[inline]
-    fn debug_assert_bitset_premise(this: &Self, component_id: ComponentId) {
+    fn debug_assert_non_signature_premise(this: &Self, component_id: ComponentId) {
         debug_assert!(
             !this.signature.mask().contains(component_id),
-            "C1 premise: bitset id {} must not be in the archetype signature",
+            "C1 premise: non-signature id {} must not be in the archetype signature",
             component_id.0
         );
         debug_assert!(
             !this.component_pools.contains(component_id),
-            "C1 premise: bitset id {} must not have a ComponentPool",
+            "C1 premise: non-signature id {} must not have a ComponentPool",
             component_id.0
         );
     }
@@ -1890,6 +1916,67 @@ mod tests {
         assert!(!added, "register_component must refuse a bitset id");
         assert!(!arch.has_component_id(STEP4_TAG));
         assert!(arch.component_pools().get_pool(STEP4_TAG).is_none());
+    }
+
+    // --- Dense plan D0: dense-storage signature exclusion ---
+    //
+    // Fixed ids 350 (dense) / 351 (table). The [348, 360) block was grep-verified
+    // empty in the shared `src` lib-test process (disjoint from 320-322, 330-334,
+    // 340-347). Classified directly via `set_storage_kind` (no name-registry mint).
+    const DENSE_D0: ComponentId = ComponentId(350);
+    const DENSE_TABLE: ComponentId = ComponentId(351);
+
+    fn register_dense_d0_components() {
+        #[repr(C)]
+        struct DenseD0(u64);
+        #[repr(C)]
+        struct DenseTable(u32);
+        component_registry::register_layout::<DenseD0>(DENSE_D0.0);
+        component_registry::register_layout::<DenseTable>(DENSE_TABLE.0);
+        component_registry::set_storage_kind(DENSE_D0.0, component_registry::StorageKind::Dense);
+    }
+
+    /// Dense plan C1 #2 (the load-bearing exclusion test): a dense id passed to
+    /// `create_by_ids` alongside a table id is FILTERED OUT of the archetype
+    /// signature (only the table id remains) and gets NO per-archetype
+    /// `ComponentPool` (at D0 a dense id has no global store yet — and never a
+    /// per-archetype column).
+    #[test]
+    fn dense_id_never_in_signature_and_never_gets_a_pool() {
+        register_dense_d0_components();
+        let arch = Archetype::create_by_ids(ArchetypeId(7), &[DENSE_D0, DENSE_TABLE]);
+        // The table id IS in the signature; the dense id is NOT.
+        assert!(
+            arch.has_component_id(DENSE_TABLE),
+            "table id must be in the signature"
+        );
+        assert!(
+            !arch.has_component_id(DENSE_D0),
+            "dense id must be filtered OUT of the signature (Dense plan C1 #2)"
+        );
+        // The dense id has no per-archetype pool; the table id does.
+        assert!(
+            arch.component_pools().get_pool(DENSE_D0).is_none(),
+            "dense id must NOT have a per-archetype ComponentPool (Dense plan C1 #2)"
+        );
+        assert!(arch.component_pools().get_pool(DENSE_TABLE).is_some());
+        // The dense id never even enters the inline column table.
+        assert!(
+            arch.columns[DENSE_D0.0].is_null(),
+            "dense id column must be null"
+        );
+    }
+
+    /// Dense plan C1 #3: `register_component` refuses a dense id (it cannot be a
+    /// table/signature component).
+    #[test]
+    fn register_component_refuses_dense_id() {
+        register_dense_d0_components();
+        let mut arch = Archetype::new(ArchetypeId(8));
+        let added = arch.register_component(DENSE_D0);
+        assert!(!added, "register_component must refuse a dense id");
+        assert!(!arch.has_component_id(DENSE_D0));
+        assert!(arch.component_pools().get_pool(DENSE_D0).is_none());
     }
 
     /// `set_enable_bit` reports `newly_allocated == true` only on the first

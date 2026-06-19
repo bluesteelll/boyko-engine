@@ -64,6 +64,20 @@ pub trait Component: 'static + Sized {
     /// widening — purely a compile-time const, zero ABI break, zero runtime cost.
     const STORAGE_IS_BITSET: bool = false;
 
+    /// Dense plan D0 — compile-time storage discriminator for the dense
+    /// (non-fragmenting) storage backend. `false` by default (table/signature
+    /// storage), so every existing `Component` impl keeps the default and pays
+    /// zero — a world that defines no dense type is byte-identical (the 0%-gate).
+    ///
+    /// The `#[component(storage = "dense")]` derive arm overrides it to `true`. A
+    /// dense component is EXCLUDED from every archetype signature (like a bitset
+    /// tag) but, unlike a bitset tag, owns ONE global `DenseStore` column (D1)
+    /// that holds every instance across all archetypes — it never fragments
+    /// archetypes. A dense type is ALWAYS [`ResidencyKind::Cpu`] (W1). A
+    /// backward-compatible widening — purely a compile-time const, zero ABI
+    /// break, zero runtime cost on the hot path.
+    const STORAGE_IS_DENSE: bool = false;
+
     /// Phase 4 Seam 1 (D1) — compile-time residency class.
     /// [`ResidencyKind::Cpu`] by default (host-memory `ComponentPool` storage,
     /// the only backend before Phase 4), so EVERY existing `Component` impl keeps
