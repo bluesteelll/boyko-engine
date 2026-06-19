@@ -1,0 +1,41 @@
+# GUI / HUD System — Plan (ECS-native, code-authorable, LLM-friendly)
+
+> Research + format proposal + phased plan. INVIOLABLE: GUI is ECS-native — widgets = ENTITIES, layout/style/state/binding = COMPONENTS, the tree = the existing `ChildOf`/`Children`, layout = a SYSTEM over the ECS. NO parallel data system (no Taffy/yoga parallel tree, no egui parallel context). In-house only (no serde/winit/egui on the engine path).
+
+## Core findings
+- **Bevy UI is the precedent for the SURFACE** (widgets=entities, style/computed split, `Interaction`/`RelativeCursorPosition` components, a layout system) — adopt the component model. But **Bevy's backend (Taffy) VIOLATES the constraint** (keeps a parallel node tree in a `UiSurface` resource + an entity↔node map). Do NOT adopt Taffy.
+- **morphorm is the ECS-native layout ALGORITHM**: its `Node`/`Cache`/`Store` traits read all properties from an external store and write computed rects to an external cache — zero internal tree, zero per-frame alloc. Maps 1:1 onto "props are ECS components, computed rects are ECS components, the tree is `ChildOf`/`Children`". Reimplement its ~one-pass DFS in-house (purity; it is small).
+- **Immediate-mode (egui/imgui) is DISQUALIFIED as game UI** — it owns a parallel per-frame context (Vec/HashMap widget state + ID stack). Keep egui ONLY as a firewalled dev-tools overlay (reconciles boyko_input I7).
+- **Authoring = one DSL, two faces** (BSN precedent): a Rust `ui!` macro that spawns the entity tree, AND an in-house `.ui` text format that hot-reloads into the SAME entities. `.ui` grammar follows the `.keys` precedent (one-pass hand parser, paren-depth-aware, `version=N` first, recoverable per-line errors, NO serde/toml/ron), designed LLM-first (flat, every widget named, explicit `bind:`/`on:` directives, one canonical form).
+- **Rendering rides the in-house Vulkan path** — UI rects = instanced quads via boyko_rhi graphics pipeline + a `GpuSystem`-shaped consumer in boyko_render. **Text rendering (SDF/MSDF atlas) is the one genuinely missing subsystem — a separate multi-week scoped phase, not a footnote.**
+
+## Component model (all `#[derive(Component)]` in ECS storage)
+- Structure: `ChildOf`/`Children` (Phase 19) — the tree. `UiRoot` tag (Phase 22 ZST) marks screen-space roots.
+- Layout inputs (morphorm `Store` analog): `UiLayout{layout_type: Row|Column|Overlay|Grid, width/height/min/max: Unit, position_type}` where `Unit = Px|Pct|Stretch|Auto`; `UiSpacing{padding/gap/...}`; `UiAlign{main,cross}`.
+- Layout output (morphorm `Cache` analog): `ComputedRect{x,y,w,h}` `#[repr(C)]` — the ONLY geometry the renderer reads; `StackIndex` (z), `ComputedClip`.
+- Style: `UiBackground{color,corner_radius,border}`, `UiImage{texture,uv}`, `UiText{font,size,color,content}`.
+- Interaction (Bevy parity): `Interaction{None|Hovered|Pressed}`, `RelativeCursorPosition(Option<[f32;2]>)`, `Focusable`/`Focused`, `FocusPolicy{Block,Pass}`. High-churn flags (`Visible`/`Hovered`) → EnableTag backend (Phase 22, O(1) toggle).
+- Binding: `OnClick(ActionId)`/`OnHover`/`OnSubmit` (event→boyko_input action); `BindText{source}`/`BindValue{source}` (content←ECS data).
+
+## Authoring format
+- **Code DSL** (`ui!` macro in boyko_macros): declarative nested tree → `Commands::spawn` + `add_child` + component inserts (named structs hit the Phase-8.5 static bundle cache); compile-time key checking; `#name` → `UiName` for hot-reload diffing.
+- **`.ui` text** (in-house one-pass parser per `.keys`): line-based, depth-by-indent, paren-depth-aware comma split, `version=1` first, recoverable errors. LLM-first: flat, named, explicit `bind:`/`on:`. Lowers to the SAME entity tree as the DSL. Hot-reload = file-watch → re-parse → diff-by-`#name` → patch components / add-remove widgets (transient focus/scroll survives).
+- **Binding syntax**: `on_click: action Fire` → `OnClick(action_id)`; `bind_value: comp Health.current / Health.max` / `bind_text: comp Health.current` → `BindValue`/`BindText`. NO `Box<dyn Fn>` callbacks — events lower to typed actions + systems; data binding via a codegen accessor table (NOT reflection, matching the serialization "codegen not reflection" decision).
+
+## Phased plan (new crate `boyko_ui`, depends boyko_ecs+utils+macros; render bridge in boyko_render)
+- **P1 — Layout components + layout system over ECS.** The morphorm-shaped one-pass DFS over `ChildOf`/`Children`, reads inputs, writes `ComputedRect`; `Changed`-gated subtree re-layout (Phase-10 change detection). Gate: row/column/overlay/stretch/auto/%/px correctness; zero per-frame alloc; 0%-overhead when unchanged.
+- **P2 — The code DSL.** `ui!` macro + builder → spawn entity tree via static bundle cache. Gate: DSL ≡ hand-spawn archetypes; compile-time key check.
+- **P3 — `.ui` text format + hot-reload.** In-house parser; lower to same tree; diff-by-name hot-reload. Gate: parse∘serialize round-trip; DSL-tree ≡ .ui-tree; hot-reload preserves transient state; malformed-line recovery; LLM-authorability golden corpus parses clean.
+- **P4 — Action + data binding.** `ui_focus_system` (hit-test ComputedRect vs cursor from `PhysicalInput` → Interaction/RelativeCursorPosition); `ui_dispatch_system` (Interaction transition → write `ActionState` edge / emit UI event — UI is an action SOURCE, symmetric to Win32/egui input adapters); `ui_data_bind_system` (`Changed`-gated, ECS field → widget content via codegen accessors). Gate: click→action fidelity; data-bound bar updates only on Changed; no dyn / no per-frame alloc; I7 reconciled.
+- **P5a — Rendering: UI rects (in-house Vulkan).** Instanced rounded-rect-SDF quads via a `GpuSystem` consumer over the `!Send RhiContext`; preallocated reused command list, z-sorted by StackIndex, batched. Gate: rects match layout; one-draw batching; zero realloc; offscreen image-diff.
+- **P5b — Text rendering (SDF/MSDF) — SEPARATE scoped subsystem [OWNER SCOPE].** Glyph atlas + font metrics/shaping (kerning/wrap/DPI) + glyph-quad emitter + SDF text shader. Multi-week; do NOT bundle into P5a. (Optional minimal bitmap-atlas fallback for v1.)
+- **P6 — HUD widgets + binding presets.** Bar/Label/Button/Panel/Image/Grid on the component substrate; anchoring/safe-area; a demo HUD authored in BOTH the DSL and a `.ui` file, dogfooded in boyko_demo (health bar reading a `Health` component, no editor).
+
+## Reconcile boyko_input I7
+The egui adapter becomes DEV-TOOLS-ONLY (debug overlay feeding `RawInputQueue`); it is NOT the game HUD. The game HUD is `boyko_ui` (ECS-native), feeding actions the opposite direction (UI → ActionState). Both coexist via boyko_input's source-agnostic seam; no core change.
+
+## Owner VALUES/SCOPE calls
+1. Confirm retained ECS-native for game UI; egui kept as dev overlay (not retired). 2. Layout backend: reimplement morphorm in-house (recommended, purity) vs depend on the `morphorm` crate. 3. `.ui` grammar specifics: indentation vs braces; literal-text representation; color literal format; closed builtin widget set (more LLM-predictable) vs arbitrary idents. 4. Text rendering scope (P5b) — in-house SDF/MSDF (multi-week) vs minimal bitmap fallback first. 5. `.ui` hot-reload dev-only vs also the shipping HUD definition.
+
+## Primary sources
+DeepWiki Bevy UI; bevy::ui docs (Interaction/RelativeCursorPosition); vizia/morphorm (Store/Cache/Node, one-pass DFS); DioxusLabs/taffy (the anti-pattern); emilk/egui + users.rust-lang IMGUI thread (parallel-state problem); Leafwing "ECS-backed GUI"; nicbarker/clay (authoring ergonomics + command-list); bevy-ui-dsl / belly (bind!/connect!) / BSN #14437 (one-grammar-two-faces); Chlumsky/msdfgen + Red Blob Games (SDF text); Muratori IMGUI 2005; Acton DOD GDC2014. (Full annotated list in the research transcript.)
