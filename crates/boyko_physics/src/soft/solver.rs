@@ -28,6 +28,7 @@ use crate::sdf_query::SdfField;
 use crate::soft::collide::collide_sdf;
 use crate::soft::component::SoftBody;
 use crate::soft::coupling::{CouplingCtx, SoftRigidReaction, resolve_coupling};
+use crate::soft::self_collision::resolve_self_collision;
 
 /// Minimum constraint length below which a distance constraint is skipped (plan
 /// SP1).
@@ -233,6 +234,12 @@ fn step_body(
             && body.coupling_dv_z.len() == n
             && body.coupling_hit.len() == n
     );
+    // SP3 self-collision CSR scratch: offsets are `table + 1`, items are `n`.
+    debug_assert!(
+        body.sc_cell_start.len() == body.self_table_size() + 1
+            && body.sc_cursor.len() == body.self_table_size() + 1
+            && body.sc_cell_items.len() == n
+    );
     debug_assert!(
         body.particle_radius >= 0.0,
         "invariant: particle_radius must be >= 0"
@@ -247,6 +254,9 @@ fn step_body(
     let visc = 1.0 - cfg.soft_damping;
     let rest_clamp = cfg.soft_rest_clamp;
     let clamp_sq = REST_CLAMP_EPS * REST_CLAMP_EPS;
+    // SP3: number of self-collision GS sweeps per substep. Default `0` ⇒
+    // `resolve_self_collision` early-returns before any hashing (the SP3 0%-gate).
+    let self_collision_iters = cfg.self_collision_iters;
 
     for _ in 0..p.substeps {
         // Predict — fixed particle index order. Pinned (w == 0) particles only
@@ -282,6 +292,12 @@ fn step_body(
         for t in 0..k {
             project_volume(body, t, h);
         }
+
+        // Self-collision (SP3) — AFTER the volume sweep, BEFORE the coupling, so the
+        // corrected positions feed the coupled-velocity computation for free (no
+        // separate velocity fold). `self_collision_iters == 0` early-returns before
+        // any hashing ⇒ an SP1/SP2 world is byte-identical (the SP3 0%-gate).
+        resolve_self_collision(body, self_collision_iters, radius);
 
         // Soft↔rigid coupling (SP2 D6/D7) — between the volume sweep and the SDF
         // collide. Only on the coupling path; a no-op otherwise.

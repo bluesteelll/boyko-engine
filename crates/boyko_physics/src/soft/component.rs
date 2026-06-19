@@ -146,6 +146,29 @@ pub struct SoftBody {
     /// D7 delta over the plain SP1 position diff. Untouched / unread off the
     /// coupling path.
     pub coupling_hit: Vec<u8>,
+    /// SP3 self-collision spatial-hash CSR bucket offsets — scratch.
+    ///
+    /// Length `self_table_size() + 1`, preallocated, written ONLY on the SP3
+    /// self-collision path (`PhysicsConfig::self_collision_iters > 0` and
+    /// `particle_radius > 0`). `sc_cell_start[b]..sc_cell_start[b + 1]` is the slice
+    /// of [`sc_cell_items`](Self::sc_cell_items) holding the particle indices hashed
+    /// to bucket `b` (a counting-sort compressed-sparse-row table rebuilt each
+    /// substep with zero allocation). Untouched / unread off the self-collision path.
+    pub sc_cell_start: Vec<u32>,
+    /// SP3 self-collision spatial-hash CSR particle indices — scratch.
+    ///
+    /// Length `particle_count()`, preallocated. The counting-sort scatter target:
+    /// `sc_cell_items[sc_cell_start[b]..sc_cell_start[b + 1]]` are the particle
+    /// indices in bucket `b`, ascending within a bucket (a stable scatter), so the
+    /// candidate visit order is deterministic. Untouched / unread off the
+    /// self-collision path.
+    pub sc_cell_items: Vec<u32>,
+    /// SP3 self-collision spatial-hash per-bucket scatter cursor — scratch.
+    ///
+    /// Length `self_table_size() + 1`, preallocated. A transient running cursor the
+    /// counting-sort scatter advances per bucket; reset from `sc_cell_start` each
+    /// rebuild. Untouched / unread off the self-collision path.
+    pub sc_cursor: Vec<u32>,
     /// Collision radius of each particle against the SDF (world units; `>= 0`).
     pub particle_radius: f32,
 }
@@ -361,6 +384,18 @@ impl SoftBody {
         self.t0.len()
     }
 
+    /// SP3 self-collision spatial-hash table size `T = next_pow2(2·n)` (a power of
+    /// two so the cell hash masks with `T - 1`).
+    ///
+    /// `0` for an empty body (`n == 0`), so the self-collision pass is a per-body
+    /// no-op. Otherwise `T >= 2` and `T.is_power_of_two()`. The CSR offset columns
+    /// ([`sc_cell_start`](Self::sc_cell_start) / [`sc_cursor`](Self::sc_cursor)) have
+    /// length `T + 1`.
+    #[inline]
+    pub fn self_table_size(&self) -> usize {
+        self_table_size_for(self.particle_count())
+    }
+
     /// The single validating construction path shared by both public constructors.
     ///
     /// Validates everything up front (so the hot path never re-checks), then builds
@@ -415,6 +450,11 @@ impl SoftBody {
 
         // All checks passed — build the SoA columns sized exactly once.
         let m = edges.len();
+        // SP3 self-collision hash table size `next_pow2(2n)` (`0` for an empty body).
+        // Routed through the SAME helper as `self_table_size()` so the build-time
+        // scratch sizing and the runtime `debug_assert` can never desync (O1). The CSR
+        // offset columns are `sc_table + 1`.
+        let sc_table = self_table_size_for(n);
         let mut pos_x = Vec::with_capacity(n);
         let mut pos_y = Vec::with_capacity(n);
         let mut pos_z = Vec::with_capacity(n);
@@ -492,9 +532,33 @@ impl SoftBody {
             coupling_dv_y: vec![0.0; n],
             coupling_dv_z: vec![0.0; n],
             coupling_hit: vec![0; n],
+            // SP3 self-collision spatial-hash scratch, sized once. `table` is
+            // `next_pow2(2n)` (`0` for an empty body); the CSR offset columns are
+            // `table + 1`. Preallocated so the self-collision rebuild is zero
+            // per-step alloc, but never read off the SP3 path (the SP3 0%-gate).
+            sc_cell_start: vec![0; sc_table + 1],
+            sc_cell_items: vec![0; n],
+            sc_cursor: vec![0; sc_table + 1],
             particle_radius: radius,
         })
     }
+}
+
+/// The SP3 self-collision spatial-hash table size for a body of `n` particles:
+/// `next_pow2(2n)` (a power of two so the cell hash masks with `T - 1`), or `0` for
+/// `n == 0` (an empty body — the pass is a per-body no-op).
+///
+/// The SINGLE source of truth shared by [`SoftBody::self_table_size`] (the runtime
+/// query + `debug_assert`) and [`SoftBody::build`] (the scratch sizing), so the two
+/// can never desync. `const fn` — usable in const context and trivially inlinable.
+#[inline]
+const fn self_table_size_for(n: usize) -> usize {
+    if n == 0 {
+        return 0;
+    }
+    // `next_pow2(2n)`. `n <= u32::MAX` (construction invariant), so `2n` and the
+    // rounded-up power of two fit a `usize` on every supported (64-bit) target.
+    (2 * n).next_power_of_two()
 }
 
 /// How constraint compliance is supplied to the shared [`SoftBody::build`] path —

@@ -36,6 +36,7 @@
 pub mod collide;
 pub mod component;
 pub mod coupling;
+pub mod self_collision;
 pub mod solver;
 
 pub use component::{SoftBody, SoftBodyError};

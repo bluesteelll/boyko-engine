@@ -261,6 +261,15 @@ pub struct PhysicsConfig {
     /// read by the coupled step — when the pipeline is wired for coupling but this
     /// flag is `false`, the coupled step behaves exactly like the non-coupling step.
     pub soft_rigid_coupling: bool,
+    /// SP3: number of Gauss-Seidel SELF-COLLISION sweeps per substep (default `0`).
+    ///
+    /// When `> 0`, the soft step runs a SAME-BODY particle-vs-particle self-collision
+    /// pass (a per-body open-addressed spatial hash + push-to-`2·radius` PBD distance
+    /// constraint) for this many GS sweeps AFTER the volume sweep and BEFORE the
+    /// soft↔rigid coupling. Default `0` makes the pass an early-return no-op before
+    /// any hashing, so an SP1/SP2 world is byte-identical (the SP3 0%-gate). Only
+    /// meaningful on the soft path, and only for a body with `particle_radius > 0`.
+    pub self_collision_iters: usize,
 }
 
 /// Default per-island sleep SPEED² threshold (plan O8 / Decision 5).
@@ -329,6 +338,9 @@ impl Default for PhysicsConfig {
             // SP2 D6/D7: default OFF so an un-opted world has no soft↔rigid coupling
             // (the SP2 0%-gate); the coupling is a pure opt-in.
             soft_rigid_coupling: false,
+            // SP3: default `0` ⇒ the self-collision pass early-returns before any
+            // hashing, so an SP1/SP2 world is byte-identical (the SP3 0%-gate).
+            self_collision_iters: 0,
         }
     }
 }
