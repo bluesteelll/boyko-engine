@@ -33,6 +33,11 @@ pub mod narrowphase;
 pub mod plugin;
 pub mod resources;
 pub mod sdf_query;
+/// O9 — width-only AVX2 batched SDF edit-list narrowphase kernel. Compiled ONLY in
+/// an `+avx2` build (the default / Miri build ships the verbatim scalar narrowphase
+/// arm in [`systems`]); a non-x86_64 / non-AVX2 target never references it.
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+pub(crate) mod sdf_simd;
 pub mod solver;
 pub mod systems;
 

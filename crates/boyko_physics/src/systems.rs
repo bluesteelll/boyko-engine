@@ -578,38 +578,62 @@ fn box_sdf_manifold(
         [(ContactPoint::default(), Vec3::ZERO); crate::math::MAX_CONTACT_POINTS];
     let mut kept_len = 0usize;
 
-    // The 8 corners in a FIXED order (corner index = the 3-bit sign pattern), so
-    // both the feature ids and the tie-breaking are deterministic.
-    for corner in 0u32..8 {
-        let sx = if corner & 1 != 0 { 1.0 } else { -1.0 };
-        let sy = if corner & 2 != 0 { 1.0 } else { -1.0 };
-        let sz = if corner & 4 != 0 { 1.0 } else { -1.0 };
-        let local = half_extents.componentwise_mul(Vec3::new(sx, sy, sz));
-        let world = body.position + body.rotation.rotate(local);
+    // ── O9 AVX2 batched arm (a `+avx2` build, never under Miri) ──────────────────
+    // Builds the 8 OBB corners' distances with ONE `sdf_edit_list_x8`, then each
+    // penetrating corner's central-difference gradient with ONE 6-offset
+    // `sdf_edit_list_x8` batch. The x8 kernel is bit-identical lane-for-lane to the
+    // scalar `sdf_edit_list`, the gradient differences are taken in the SAME order
+    // as `sdf_edit_list_normal`, and the FROZEN scalar `v_normalize` is reused — so
+    // this arm is `f32::to_bits`-identical to the scalar arm below.
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2", not(miri)))]
+    {
+        box_sdf_manifold_avx2(
+            body,
+            half_extents,
+            field,
+            &mut kept,
+            &mut kept_len,
+            max_points,
+        );
+    }
 
-        let (d, gradient) = sample_sdf(field, world);
-        if d >= 0.0 {
-            continue;
+    // ── Scalar reference arm (default / non-AVX2 / Miri build) ───────────────────
+    // The VERBATIM frozen narrowphase loop — the bit-oracle the AVX2 arm mirrors.
+    #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2", not(miri))))]
+    {
+        // The 8 corners in a FIXED order (corner index = the 3-bit sign pattern), so
+        // both the feature ids and the tie-breaking are deterministic.
+        for corner in 0u32..8 {
+            let sx = if corner & 1 != 0 { 1.0 } else { -1.0 };
+            let sy = if corner & 2 != 0 { 1.0 } else { -1.0 };
+            let sz = if corner & 4 != 0 { 1.0 } else { -1.0 };
+            let local = half_extents.componentwise_mul(Vec3::new(sx, sy, sz));
+            let world = body.position + body.rotation.rotate(local);
+
+            let (d, gradient) = sample_sdf(field, world);
+            if d >= 0.0 {
+                continue;
+            }
+            // O3: skip a degenerate (zero-length) seam gradient — no usable normal.
+            // The `!is_finite()` arm is defense-in-depth (mirrors the sphere path):
+            // `NaN < eps²` is `false`, so without it a non-finite gradient would slip
+            // through and emit a NaN-normal contact.
+            if gradient.length_squared() < SDF_NORMAL_EPS * SDF_NORMAL_EPS || !gradient.is_finite() {
+                continue;
+            }
+            // A → B normal (B = the surface): the gradient (surface → A) negated.
+            let normal = gradient * -1.0;
+            let point = ContactPoint {
+                anchor_a: world,
+                anchor_b: world,
+                separation: d,
+                // A vertex-vs-field contact — tag it as the vertex-face class keyed by
+                // the corner index, so each corner warm-starts independently and a
+                // corner id never aliases a body-body box face/edge id.
+                feature_id: feature_vertex_face(corner),
+            };
+            insert_deepest(&mut kept, &mut kept_len, max_points, point, normal);
         }
-        // O3: skip a degenerate (zero-length) seam gradient — no usable normal.
-        // The `!is_finite()` arm is defense-in-depth (mirrors the sphere path):
-        // `NaN < eps²` is `false`, so without it a non-finite gradient would slip
-        // through and emit a NaN-normal contact.
-        if gradient.length_squared() < SDF_NORMAL_EPS * SDF_NORMAL_EPS || !gradient.is_finite() {
-            continue;
-        }
-        // A → B normal (B = the surface): the gradient (surface → A) negated.
-        let normal = gradient * -1.0;
-        let point = ContactPoint {
-            anchor_a: world,
-            anchor_b: world,
-            separation: d,
-            // A vertex-vs-field contact — tag it as the vertex-face class keyed by
-            // the corner index, so each corner warm-starts independently and a
-            // corner id never aliases a body-body box face/edge id.
-            feature_id: feature_vertex_face(corner),
-        };
-        insert_deepest(&mut kept, &mut kept_len, max_points, point, normal);
     }
 
     if kept_len == 0 {
@@ -626,6 +650,123 @@ fn box_sdf_manifold(
     }
     m.count = kept_len as u8;
     Some(m)
+}
+
+/// O9 — the AVX2 batched body of [`box_sdf_manifold`]: fills `kept` / `kept_len`
+/// with the penetrating corners' contacts, `f32::to_bits`-identical to the scalar
+/// arm.
+///
+/// Two batched passes share the one [`sdf_edit_list_x8`](crate::sdf_simd::sdf_edit_list_x8)
+/// kernel:
+///
+/// 1. **Distances**: the 8 OBB corners (the SAME fixed sign-pattern order +
+///    `position + rotation·local` world transform as the scalar arm) are evaluated
+///    in ONE 8-wide call — lane `i` == the scalar `sdf_edit_list(edits, corner_i)`.
+/// 2. **Gradient** (per penetrating corner): the 6 central-difference offset points
+///    (`±GRAD_H` on x, y, z) are packed into lanes 0..6 in the order
+///    `sdf_edit_list_normal` reads them (`+x, -x, +y, -y, +z, -z`); lanes 6,7 are
+///    seeded with the corner's own (finite) world point (R5 — keep `(b-a)/k` finite;
+///    those lanes are never read). One 8-wide call yields the 6 samples; the
+///    gradient is `[g(+x)-g(-x), g(+y)-g(-y), g(+z)-g(-z)]` (the EXACT difference
+///    order of `sdf_edit_list_normal`), then the FROZEN scalar `v_normalize` (the
+///    bit-identical zero-length guard is REUSED, not re-emulated).
+///
+/// Everything downstream — the `d >= 0` skip, the `length_squared < eps² ||
+/// !is_finite` seam-skip, the `−gradient` normal, the [`ContactPoint`] /
+/// [`feature_vertex_face`] / [`insert_deepest`] build — is byte-identical to the
+/// scalar arm.
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2", not(miri)))]
+fn box_sdf_manifold_avx2(
+    body: &BodyState,
+    half_extents: Vec3,
+    field: &SdfField,
+    kept: &mut [(ContactPoint, Vec3); crate::math::MAX_CONTACT_POINTS],
+    kept_len: &mut usize,
+    max_points: usize,
+) {
+    use core::arch::x86_64::{_mm256_loadu_ps, _mm256_storeu_ps};
+
+    use boyko_sdf_math::{SDF_GRAD_H, v_normalize};
+
+    use crate::sdf_simd::sdf_edit_list_x8;
+
+    let edits = field.edits();
+
+    // ── Build the 8 corners (same order + transform as the scalar arm) ───────────
+    let mut world: [Vec3; 8] = [Vec3::ZERO; 8];
+    let mut cx = [0.0f32; 8];
+    let mut cy = [0.0f32; 8];
+    let mut cz = [0.0f32; 8];
+    for corner in 0usize..8 {
+        let sx = if corner & 1 != 0 { 1.0 } else { -1.0 };
+        let sy = if corner & 2 != 0 { 1.0 } else { -1.0 };
+        let sz = if corner & 4 != 0 { 1.0 } else { -1.0 };
+        let local = half_extents.componentwise_mul(Vec3::new(sx, sy, sz));
+        let w = body.position + body.rotation.rotate(local);
+        world[corner] = w;
+        cx[corner] = w.x;
+        cy[corner] = w.y;
+        cz[corner] = w.z;
+    }
+
+    // ── Pass 1: the 8 corner distances in ONE 8-wide evaluation ──────────────────
+    let mut dist = [0.0f32; 8];
+    // SAFETY: the AVX2 `cfg` + `target_feature` gate guarantees AVX2 is present on
+    //   the executing CPU (a non-AVX2 host cannot link this arm). `sdf_edit_list_x8`
+    //   is `#[target_feature(enable = "avx2")]`, so it must be called from an `unsafe`
+    //   block on stable. Each load/store touches exactly 8 contiguous `f32` of an
+    //   in-bounds `[f32; 8]` stack buffer (unaligned variants accept any alignment).
+    unsafe {
+        let px = _mm256_loadu_ps(cx.as_ptr());
+        let py = _mm256_loadu_ps(cy.as_ptr());
+        let pz = _mm256_loadu_ps(cz.as_ptr());
+        let d = sdf_edit_list_x8(edits, px, py, pz);
+        _mm256_storeu_ps(dist.as_mut_ptr(), d);
+    }
+
+    // ── Pass 2: per penetrating corner, the central-difference gradient ──────────
+    let h = SDF_GRAD_H;
+    for corner in 0usize..8 {
+        let d = dist[corner];
+        if d >= 0.0 {
+            continue;
+        }
+        let w = world[corner];
+        // Six offset points in `sdf_edit_list_normal`'s read order, lanes 0..6:
+        //   0:+x 1:-x  2:+y 3:-y  4:+z 5:-z. Lanes 6,7 = the corner itself (finite
+        //   seed, R5 — never read).
+        let gx = [w.x + h, w.x - h, w.x, w.x, w.x, w.x, w.x, w.x];
+        let gy = [w.y, w.y, w.y + h, w.y - h, w.y, w.y, w.y, w.y];
+        let gz = [w.z, w.z, w.z, w.z, w.z + h, w.z - h, w.z, w.z];
+        let mut g = [0.0f32; 8];
+        // SAFETY: same AVX2-availability + `target_feature` invariant as pass 1;
+        //   each load/store is 8 contiguous `f32` of an in-bounds `[f32; 8]` stack
+        //   buffer (unaligned variants).
+        unsafe {
+            let px = _mm256_loadu_ps(gx.as_ptr());
+            let py = _mm256_loadu_ps(gy.as_ptr());
+            let pz = _mm256_loadu_ps(gz.as_ptr());
+            let gd = sdf_edit_list_x8(edits, px, py, pz);
+            _mm256_storeu_ps(g.as_mut_ptr(), gd);
+        }
+        // Central differences in the EXACT order of `sdf_edit_list_normal`
+        // (lib.rs:384-388), then the FROZEN scalar `v_normalize` (zero-length guard
+        // reused byte-identically).
+        let n = v_normalize([g[0] - g[1], g[2] - g[3], g[4] - g[5]]);
+        let gradient = Vec3::new(n[0], n[1], n[2]);
+        // O3 seam-skip — byte-identical to the scalar arm.
+        if gradient.length_squared() < SDF_NORMAL_EPS * SDF_NORMAL_EPS || !gradient.is_finite() {
+            continue;
+        }
+        let normal = gradient * -1.0;
+        let point = ContactPoint {
+            anchor_a: w,
+            anchor_b: w,
+            separation: d,
+            feature_id: feature_vertex_face(corner as u32),
+        };
+        insert_deepest(kept, kept_len, max_points, point, normal);
+    }
 }
 
 /// Inserts `point` (with its gradient `normal`) into the deepest-first `kept`
@@ -854,6 +995,339 @@ pub fn body_bounding_radius(body: &BodyState) -> f32 {
     match body.shape {
         ColliderShape::Sphere { radius } => radius,
         ColliderShape::Box { half_extents } => half_extents.length(),
+    }
+}
+
+#[cfg(test)]
+mod o9_manifold_tests {
+    //! O9 full-`Manifold` differential gate for the box-vs-SDF narrowphase.
+    //!
+    //! [`box_sdf_manifold`] is private + cfg-gated: a single build compiles ONLY one
+    //! arm (the AVX2 arm under `+avx2`, the verbatim scalar arm otherwise). This
+    //! module compares [`box_sdf_manifold`] (the COMPILED arm) against an INDEPENDENT
+    //! scalar reference ([`scalar_box_sdf_manifold`]) that folds the field through the
+    //! FROZEN scalar oracle [`sample_sdf`] / [`boyko_sdf_math::sdf_edit_list`] and
+    //! replays the SAME post-processing (corner build, `d >= 0` skip, the seam-skip,
+    //! `−gradient` normal, `feature_vertex_face`, [`insert_deepest`], deepest-first
+    //! order).
+    //!
+    //! - In a `+avx2` build this is a TRUE scalar-oracle-vs-AVX2-arm differential:
+    //!   `box_sdf_manifold` runs [`box_sdf_manifold_avx2`], the reference runs the
+    //!   scalar leaf. Full-`Manifold` `to_bits` equality here PROVES the AVX2 arm is
+    //!   byte-identical to the scalar fold.
+    //! - In a default build both sides fold the same scalar leaf, so it degenerates
+    //!   to a self-consistency check of the reference (still useful: it pins the
+    //!   reference against the shipped scalar arm).
+    //!
+    //! The generator includes scenes where SOME corners penetrate and some do not
+    //! (the review's noted refinement — the AVX2 arm skips gradient work for
+    //! non-penetrating corners; the emitted manifold must still match).
+
+    use boyko_sdf_math::{SdfEdit, sdf_kind, sdf_op, v_normalize, SDF_GRAD_H};
+
+    use super::*;
+    use crate::math::Quat;
+
+    /// Deterministic splitmix64 (matches the kernel-test RNG).
+    struct Rng(u64);
+
+    impl Rng {
+        fn new(seed: u64) -> Self {
+            Self(seed)
+        }
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+        fn below(&mut self, n: u64) -> u64 {
+            self.next_u64() % n
+        }
+        fn f32_in(&mut self, range: f32) -> f32 {
+            let u = (self.next_u64() >> 40) as f32 / (1u64 << 24) as f32;
+            (u * 2.0 - 1.0) * range
+        }
+    }
+
+    /// The INDEPENDENT scalar reference: byte-for-byte the scalar arm of
+    /// [`box_sdf_manifold`], folding the field through the FROZEN scalar leaf
+    /// (`sample_sdf` → `sdf_edit_list` / `sdf_edit_list_normal`). This is the oracle
+    /// the AVX2 arm must match in a `+avx2` build.
+    ///
+    /// It re-derives the gradient via the leaf's exact central-difference order and
+    /// the same `v_normalize` the AVX2 arm reuses, so the only difference vs the
+    /// shipped scalar arm is that this copy is local to the test (cannot drift in a
+    /// `+avx2` build where the shipped scalar arm is cfg'd out).
+    fn scalar_box_sdf_manifold(
+        a: BodyIndex,
+        body: &BodyState,
+        half_extents: Vec3,
+        field: &SdfField,
+    ) -> Option<Manifold> {
+        let max_points = crate::math::MAX_CONTACT_POINTS;
+        let mut kept: [(ContactPoint, Vec3); crate::math::MAX_CONTACT_POINTS] =
+            [(ContactPoint::default(), Vec3::ZERO); crate::math::MAX_CONTACT_POINTS];
+        let mut kept_len = 0usize;
+        let edits = field.edits();
+        let h = SDF_GRAD_H;
+
+        for corner in 0u32..8 {
+            let sx = if corner & 1 != 0 { 1.0 } else { -1.0 };
+            let sy = if corner & 2 != 0 { 1.0 } else { -1.0 };
+            let sz = if corner & 4 != 0 { 1.0 } else { -1.0 };
+            let local = half_extents.componentwise_mul(Vec3::new(sx, sy, sz));
+            let world = body.position + body.rotation.rotate(local);
+            let w = [world.x, world.y, world.z];
+
+            let d = boyko_sdf_math::sdf_edit_list(edits, w);
+            if d >= 0.0 {
+                continue;
+            }
+            // Central difference in the leaf's EXACT read order, then the frozen
+            // `v_normalize` — identical to the AVX2 arm's gradient.
+            let n = v_normalize([
+                boyko_sdf_math::sdf_edit_list(edits, [w[0] + h, w[1], w[2]])
+                    - boyko_sdf_math::sdf_edit_list(edits, [w[0] - h, w[1], w[2]]),
+                boyko_sdf_math::sdf_edit_list(edits, [w[0], w[1] + h, w[2]])
+                    - boyko_sdf_math::sdf_edit_list(edits, [w[0], w[1] - h, w[2]]),
+                boyko_sdf_math::sdf_edit_list(edits, [w[0], w[1], w[2] + h])
+                    - boyko_sdf_math::sdf_edit_list(edits, [w[0], w[1], w[2] - h]),
+            ]);
+            let gradient = Vec3::new(n[0], n[1], n[2]);
+            if gradient.length_squared() < SDF_NORMAL_EPS * SDF_NORMAL_EPS
+                || !gradient.is_finite()
+            {
+                continue;
+            }
+            let normal = gradient * -1.0;
+            let point = ContactPoint {
+                anchor_a: world,
+                anchor_b: world,
+                separation: d,
+                feature_id: feature_vertex_face(corner),
+            };
+            insert_deepest(&mut kept, &mut kept_len, max_points, point, normal);
+        }
+
+        if kept_len == 0 {
+            return None;
+        }
+        let mut m = Manifold::new(a, SDF_SENTINEL);
+        m.normal = kept[0].1;
+        for (i, (point, _)) in kept[..kept_len].iter().enumerate() {
+            m.points[i] = *point;
+        }
+        m.count = kept_len as u8;
+        Some(m)
+    }
+
+    /// Full `to_bits` equality of two manifolds: count, body keys, header normal,
+    /// AND every live point (anchors / separation / feature id) in deepest-first
+    /// order. Reports the first divergence with the scene.
+    fn assert_manifold_bit_eq(
+        got: &Option<Manifold>,
+        want: &Option<Manifold>,
+        scene: &str,
+    ) {
+        match (got, want) {
+            (None, None) => {}
+            (Some(g), Some(w)) => {
+                assert_eq!(g.count, w.count, "manifold count differs ({scene})");
+                assert_eq!(g.body_a, w.body_a, "body_a differs ({scene})");
+                assert_eq!(g.body_b, w.body_b, "body_b differs ({scene})");
+                assert_eq!(
+                    [g.normal.x.to_bits(), g.normal.y.to_bits(), g.normal.z.to_bits()],
+                    [w.normal.x.to_bits(), w.normal.y.to_bits(), w.normal.z.to_bits()],
+                    "header normal bits differ ({scene})"
+                );
+                for i in 0..g.count as usize {
+                    let gp = &g.points[i];
+                    let wp = &w.points[i];
+                    assert_eq!(
+                        [
+                            gp.anchor_a.x.to_bits(), gp.anchor_a.y.to_bits(), gp.anchor_a.z.to_bits(),
+                            gp.anchor_b.x.to_bits(), gp.anchor_b.y.to_bits(), gp.anchor_b.z.to_bits(),
+                            gp.separation.to_bits(), gp.feature_id,
+                        ],
+                        [
+                            wp.anchor_a.x.to_bits(), wp.anchor_a.y.to_bits(), wp.anchor_a.z.to_bits(),
+                            wp.anchor_b.x.to_bits(), wp.anchor_b.y.to_bits(), wp.anchor_b.z.to_bits(),
+                            wp.separation.to_bits(), wp.feature_id,
+                        ],
+                        "contact point {i} bits differ ({scene})"
+                    );
+                }
+            }
+            _ => panic!(
+                "manifold presence differs ({scene}): got.is_some()={} want.is_some()={}",
+                got.is_some(),
+                want.is_some()
+            ),
+        }
+    }
+
+    /// Builds a `BodyState` box with the given pose (the only fields the box-SDF
+    /// narrowphase reads are `position`, `rotation`, `shape`).
+    fn box_state(position: Vec3, rotation: Quat, half: Vec3) -> BodyState {
+        BodyState {
+            inv_inertia: crate::math::Mat3::ZERO,
+            inv_inertia_local: crate::math::Mat3::ZERO,
+            position,
+            linear_velocity: Vec3::ZERO,
+            angular_velocity: Vec3::ZERO,
+            rotation,
+            inv_mass: 1.0,
+            restitution: 0.0,
+            friction: 0.5,
+            body_type: crate::components::BodyType::Dynamic,
+            shape: ColliderShape::Box { half_extents: half },
+        }
+    }
+
+    fn rand_quat(rng: &mut Rng) -> Quat {
+        Quat::new(
+            rng.f32_in(1.0),
+            rng.f32_in(1.0),
+            rng.f32_in(1.0),
+            rng.f32_in(1.0),
+        )
+        .normalize()
+    }
+
+    fn rand_edit(rng: &mut Rng) -> SdfEdit {
+        let center = [rng.f32_in(2.0), rng.f32_in(2.0), rng.f32_in(2.0)];
+        let kind = if rng.below(2) == 0 { sdf_kind::SPHERE } else { sdf_kind::BOX };
+        let op = match rng.below(4) {
+            0 => sdf_op::UNION,
+            1 => sdf_op::SUBTRACT,
+            2 => sdf_op::INTERSECT,
+            _ => sdf_op::UNION,
+        };
+        let smoothness = match rng.below(3) {
+            0 => 0.0,
+            1 => 0.2,
+            _ => 1.5,
+        };
+        if kind == sdf_kind::BOX {
+            SdfEdit::box_shape(
+                center,
+                [0.3 + rng.f32_in(1.0).abs(), 0.3 + rng.f32_in(1.0).abs(), 0.3 + rng.f32_in(1.0).abs()],
+                op,
+                smoothness,
+            )
+        } else {
+            SdfEdit::sphere(center, 0.3 + rng.f32_in(1.5).abs(), op, smoothness)
+        }
+    }
+
+    /// THE full-`Manifold` differential gate. Random (box pose, half-extents, edit
+    /// list) over many scenes — including all-clear, all-penetrate, and the
+    /// MIXED (some corners penetrate, some do not) cases — asserts full `to_bits`
+    /// `Manifold` equality between [`box_sdf_manifold`] (the compiled arm) and the
+    /// scalar oracle reference.
+    #[test]
+    fn box_sdf_manifold_matches_scalar_oracle() {
+        let mut rng = Rng::new(0x0900_3a17_face_0009);
+        let a = BodyIndex(0);
+        let mut scenes = 0usize;
+        let mut produced_some = 0usize;
+        let mut produced_mixed = 0usize;
+
+        for _ in 0..2000 {
+            let count = 1 + (rng.below(6)) as usize; // 1..=6 edits
+            let edits: Vec<SdfEdit> = (0..count).map(|_| rand_edit(&mut rng)).collect();
+            let field = SdfField::from_edits(&edits);
+
+            // Place the box near the field origin so corners straddle surfaces (forces
+            // the MIXED some-penetrate-some-clear case), with random pose + extents.
+            let pos = Vec3::new(rng.f32_in(1.5), rng.f32_in(1.5), rng.f32_in(1.5));
+            let rot = rand_quat(&mut rng);
+            let half = Vec3::new(
+                0.2 + rng.f32_in(1.2).abs(),
+                0.2 + rng.f32_in(1.2).abs(),
+                0.2 + rng.f32_in(1.2).abs(),
+            );
+            let body = box_state(pos, rot, half);
+
+            let got = box_sdf_manifold(a, &body, half, &field);
+            let want = scalar_box_sdf_manifold(a, &body, half, &field);
+
+            let scene = format!("pos={pos:?} half={half:?} edits={edits:?}");
+            assert_manifold_bit_eq(&got, &want, &scene);
+
+            scenes += 1;
+            if let Some(m) = got {
+                produced_some += 1;
+                // A mixed scene = at least one contact kept AND fewer than 8 corners
+                // contributed (some were skipped) — count corners that penetrate.
+                let penetrating = (0u32..8)
+                    .filter(|&corner| {
+                        let sx = if corner & 1 != 0 { 1.0 } else { -1.0 };
+                        let sy = if corner & 2 != 0 { 1.0 } else { -1.0 };
+                        let sz = if corner & 4 != 0 { 1.0 } else { -1.0 };
+                        let local = half.componentwise_mul(Vec3::new(sx, sy, sz));
+                        let w = body.position + body.rotation.rotate(local);
+                        sample_sdf(&field, w).0 < 0.0
+                    })
+                    .count();
+                if penetrating > 0 && penetrating < 8 {
+                    produced_mixed += 1;
+                }
+                let _ = m;
+            }
+        }
+        // Anti-vacuity: the gate must actually EXERCISE the contact-producing path
+        // and the mixed (some-penetrate) path, not just the all-clear `None` case.
+        assert!(scenes >= 1000, "differential must run >= 1000 scenes (ran {scenes})");
+        assert!(
+            produced_some >= 50,
+            "anti-vacuity: too few contact-producing scenes ({produced_some}); the generator \
+             never penetrates the field"
+        );
+        assert!(
+            produced_mixed >= 20,
+            "anti-vacuity: too few MIXED some-penetrate scenes ({produced_mixed}); the \
+             non-penetrating-corner skip path is undertested"
+        );
+    }
+
+    /// An empty field produces NO manifold from either arm (the narrowphase emits
+    /// nothing against a `+far`-everywhere field).
+    #[test]
+    fn box_sdf_manifold_empty_field_is_none() {
+        let field = SdfField::default();
+        let body = box_state(Vec3::ZERO, Quat::IDENTITY, Vec3::new(1.0, 1.0, 1.0));
+        let got = box_sdf_manifold(BodyIndex(0), &body, Vec3::new(1.0, 1.0, 1.0), &field);
+        let want = scalar_box_sdf_manifold(BodyIndex(0), &body, Vec3::new(1.0, 1.0, 1.0), &field);
+        assert_manifold_bit_eq(&got, &want, "empty field");
+        assert!(got.is_none(), "empty field must produce no manifold");
+    }
+
+    /// A box fully submerged in a large SDF box (ALL 8 corners penetrate): the
+    /// deepest ≤4 are kept, deepest-first, byte-identical between the arms.
+    #[test]
+    fn box_sdf_manifold_all_corners_penetrate_matches() {
+        // A huge SDF box centered at origin; a small body box at origin is fully
+        // inside, so every corner has d < 0.
+        let field = SdfField::from_edits(&[SdfEdit::box_shape(
+            [0.0, 0.0, 0.0],
+            [10.0, 10.0, 10.0],
+            sdf_op::UNION,
+            0.0,
+        )]);
+        let half = Vec3::new(1.0, 1.0, 1.0);
+        let body = box_state(Vec3::new(0.1, -0.2, 0.3), Quat::IDENTITY, half);
+        let got = box_sdf_manifold(BodyIndex(0), &body, half, &field);
+        let want = scalar_box_sdf_manifold(BodyIndex(0), &body, half, &field);
+        assert_manifold_bit_eq(&got, &want, "all-corners-penetrate");
+        // It must produce a manifold capped at MAX_CONTACT_POINTS.
+        let m = got.expect("a fully-submerged box must produce a manifold");
+        assert!(
+            m.count as usize <= crate::math::MAX_CONTACT_POINTS,
+            "manifold must be capped at MAX_CONTACT_POINTS"
+        );
     }
 }
 

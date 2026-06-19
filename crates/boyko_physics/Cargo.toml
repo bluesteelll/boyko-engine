@@ -67,6 +67,15 @@ name = "parallel_solve"
 harness = false
 
 [[bench]]
+# O9 A/B: the box-vs-SDF narrowphase (`box_sdf_manifold`) scalar build vs the
+# `+avx2` batched-kernel build, at SDF edit counts {1,2,4,8,16}. Two BUILDS of the
+# same public entry (the kernel is cfg-gated, not runtime-switched); the
+# scalar->avx2 delta is the O9 speed-up. Build the AVX2 arm with
+# RUSTFLAGS="-C target-feature=+avx2".
+name = "sdf_narrowphase_o9"
+harness = false
+
+[[bench]]
 # O8 Gate 9: the SLEEPING headline win + worst-case overhead on a ~10k-contact
 # resting pile — (1) all-awake sleeping-OFF baseline, (2) mostly-settled sleeping-ON
 # (the slept steady state, must be <= ~5% of (1)), (3) fully-awake sleeping-ON (the
