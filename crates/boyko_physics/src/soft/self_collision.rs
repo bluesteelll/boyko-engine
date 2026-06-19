@@ -36,7 +36,8 @@
 
 use crate::math::Vec3;
 use crate::soft::component::SoftBody;
-use crate::soft::solver::LEN_EPS;
+use crate::soft::solver::{LEN_EPS, SoftCols};
+use crate::solver::contact::is_dynamic_row;
 
 /// Teschner et al. spatial-hash prime for the X cell coordinate.
 const HASH_P1: i32 = 73_856_093;
@@ -137,14 +138,24 @@ pub fn resolve_self_collision(body: &mut SoftBody, iters: usize, radius: f32) {
     load_factor_warn(n, table);
 
     for _ in 0..iters {
-        sweep(body, table, inv_cell, cell);
+        // The serial sweep VISITS each accepted pair by projecting it in place — the
+        // SP3 leaf action. `project_self_pair` mutates `body` through the param the
+        // visitor receives (not a capture), so it never conflicts with the `&mut body`
+        // the sweep itself holds.
+        sweep(body, table, inv_cell, |body, i, j| {
+            project_self_pair(body, i, j, cell);
+        });
     }
 }
 
 /// Rebuilds the spatial-hash CSR table into the body's preallocated scratch (zero
 /// allocation): pass-1 count per bucket, exclusive prefix-sum into `sc_cell_start`,
 /// pass-2 stable scatter of particle indices into `sc_cell_items`.
-fn build_hash(body: &mut SoftBody, table: usize, inv_cell: f32) {
+///
+/// `pub(in crate::soft)` (SP4 W3-A): the colored self-collision pass builds the hash
+/// ONCE per substep through this SINGLE definition (C4 — one hash, swept `iters`
+/// times) before emitting/coloring/solving its pairs.
+pub(in crate::soft) fn build_hash(body: &mut SoftBody, table: usize, inv_cell: f32) {
     let n = body.particle_count();
 
     // Pass 1 — count particles per bucket. `sc_cell_start` is reused as the per-
@@ -202,7 +213,22 @@ fn build_hash(body: &mut SoftBody, table: usize, inv_cell: f32) {
 /// and no foreign particle that merely hash-collided into a scanned bucket is ever
 /// paired. The visit order is a pure function of (`i` ascending, fixed offset order,
 /// ascending CSR index) — independent of hash aliasing.
-fn sweep(body: &mut SoftBody, table: usize, inv_cell: f32, cell: f32) {
+///
+/// # Visitor (SP4 W3-A — the SINGLE traversal, two leaf actions)
+///
+/// `visit(body, i, j)` is the leaf action applied to each accepted pair in the
+/// pinned SP3 order. The serial path passes a closure that PROJECTS the pair in
+/// place ([`project_self_pair`]); the colored `soft::colored::step_body_colored`
+/// passes a closure that EMITS `(i, j)` into an ordered pair list (greedy first-fit
+/// is order-dependent, so it consumes pairs in exactly this emission order, C3a).
+/// `body` is delivered as a PARAMETER (not a capture), so a mutating leaf action
+/// never conflicts with the `&mut body` the traversal holds. `pub(in crate::soft)`
+/// so the colored module reuses the SINGLE traversal — never a duplicate (the
+/// C1/W3-A drift-avoidance).
+pub(in crate::soft) fn sweep<F>(body: &mut SoftBody, table: usize, inv_cell: f32, mut visit: F)
+where
+    F: FnMut(&mut SoftBody, usize, usize),
+{
     let n = body.particle_count();
     for i in 0..n {
         // Read `i`'s cell coordinates from its (live) position. NaN/inf would
@@ -224,15 +250,18 @@ fn sweep(body: &mut SoftBody, table: usize, inv_cell: f32, cell: f32) {
                     let cy = iy + dy;
                     let cz = iz + dz;
                     let bucket = cell_hash(cx, cy, cz, table);
-                    resolve_pair_in_cell(body, i, bucket, cell, cx, cy, cz, inv_cell, table);
+                    resolve_pair_in_cell(
+                        body, i, bucket, cx, cy, cz, inv_cell, table, &mut visit,
+                    );
                 }
             }
         }
     }
 }
 
-/// Projects particle `i` against every candidate `j` in CSR `bucket` whose ACTUAL
-/// cell coordinate equals the queried `(cx, cy, cz)`.
+/// Visits particle `i` against every candidate `j` in CSR `bucket` whose ACTUAL
+/// cell coordinate equals the queried `(cx, cy, cz)`, applying the `visit` leaf
+/// action to each accepted pair.
 ///
 /// Two acceptance gates:
 ///  - `j > i` — the unordered-pair de-dup: it tests each unordered pair at most once
@@ -246,20 +275,24 @@ fn sweep(body: &mut SoftBody, table: usize, inv_cell: f32, cell: f32) {
 ///    coordinate queries for a given `i` — no double-apply, fully hash-independent.
 ///
 /// The CSR slice `sc_cell_items[start..end]` is scanned in ascending index order (the
-/// stable scatter), so the accumulation order is deterministic.
+/// stable scatter), so the accumulation order is deterministic. `visit(body, i, j)`
+/// is the leaf action (project in place, or emit into the colored pair list) —
+/// `pub(in crate::soft)` (SP4 W3-A) so the colored module shares this traversal.
 #[inline]
 #[allow(clippy::too_many_arguments)]
-fn resolve_pair_in_cell(
+pub(in crate::soft) fn resolve_pair_in_cell<F>(
     body: &mut SoftBody,
     i: usize,
     bucket: usize,
-    cell: f32,
     cx: i32,
     cy: i32,
     cz: i32,
     inv_cell: f32,
     table: usize,
-) {
+    visit: &mut F,
+) where
+    F: FnMut(&mut SoftBody, usize, usize),
+{
     debug_assert!(bucket == cell_hash(cx, cy, cz, table), "invariant: bucket must hash from (cx,cy,cz)");
     let start = body.sc_cell_start[bucket] as usize;
     let end = body.sc_cell_start[bucket + 1] as usize;
@@ -274,7 +307,7 @@ fn resolve_pair_in_cell(
         let jy = cell_coord(body.pos_y[j], inv_cell);
         let jz = cell_coord(body.pos_z[j], inv_cell);
         if jx == cx && jy == cy && jz == cz {
-            project_self_pair(body, i, j, cell);
+            visit(body, i, j);
         }
     }
 }
@@ -292,20 +325,70 @@ fn resolve_pair_in_cell(
 /// full-strength rigid projection). Deeper or clustered overlaps converge over the
 /// configured [`self_collision_iters`](crate::PhysicsConfig) Gauss-Seidel sweeps — the
 /// `iters` count, NOT a per-constraint cap, is the deep-overlap limiter.
+///
+/// # Per-endpoint write guard (SP4 C1 — LOAD-BEARING)
+///
+/// Each endpoint's write is gated `if is_dynamic_row(w) { add }` through the SAME
+/// [`is_dynamic_row`] predicate the SP4 self-collision coloring uses (the SHARED
+/// kernel for serial + colored). Byte-preserving serially (a pinned endpoint's
+/// skipped write was `+= ±0.0`); in the colored sweep it removes a same-color
+/// pinned-write race. The LOAD-BEARING finiteness invariant is `s.is_finite()` past
+/// the divide (see [`project_distance`](crate::soft::solver)); it MUST NOT be
+/// `w >= 0.0`.
+///
+/// `pub(in crate::soft)` (SP4 W3-A): the SINGLE leaf definition the serial sweep
+/// AND the colored color-by-color solve both call. A thin wrapper extracting
+/// [`SoftCols`] from `body` and forwarding to the raw core [`project_self_pair_raw`]
+/// (the math lives there ONCE; the serial path stays byte-identical to the raw
+/// per-element form — `body.pos_x[i]` and `*pos_x.add(i)` name the same storage).
 #[inline]
-fn project_self_pair(body: &mut SoftBody, i: usize, j: usize, cell: f32) {
-    let wi = body.inv_mass[i];
-    let wj = body.inv_mass[j];
+pub(in crate::soft) fn project_self_pair(body: &mut SoftBody, i: usize, j: usize, cell: f32) {
+    let cols = SoftCols::from_body(body);
+    // SAFETY: `cols` names `body`'s live column bases; `i`/`j` are valid particle
+    //   rows (`< particle_count()`, produced by the sweep over hashed buckets). The
+    //   serial caller holds the unique `&mut SoftBody`, so no aliasing.
+    unsafe { project_self_pair_raw(cols, i, j, cell) };
+}
+
+/// The RAW per-element core of [`project_self_pair`] (SP4 W3-A soundness fix).
+///
+/// Identical one-sided rigid push-apart math, but every column access is a raw
+/// `*base.add(p)` instead of a `Vec` index, so under Tree-Borrows it retags ONLY the
+/// element it touches — never the whole buffer. This is what makes the
+/// colored-parallel self-collision solve race-free: two workers writing the
+/// C2-disjoint dynamic rows of one color form no overlapping element protectors. The
+/// serial wrapper calls it through the unique `&mut SoftBody` (no aliasing); a
+/// colored worker calls it through [`SoftCols`] built from the live body, writing
+/// only its chunk's disjoint dynamic rows.
+///
+/// # Safety
+/// `cols` must name a live `SoftBody`'s column bases; `i`/`j` must be valid particle
+/// rows `< particle_count()`. In the parallel path, the caller must invoke this only
+/// on pairs of ONE color whose DYNAMIC endpoints are pairwise disjoint across
+/// concurrent workers (the C2 lemma); a SHARED PINNED row is read-only (the C1 guard
+/// never writes it). On those conditions the per-element reads/writes touch only
+/// provably-disjoint elements (writes) plus the read-only shared `inv_mass` column —
+/// no UB.
+#[inline]
+pub(in crate::soft) unsafe fn project_self_pair_raw(cols: SoftCols, i: usize, j: usize, cell: f32) {
+    // SAFETY (all the per-element accesses below): `i`/`j` are in range (the fn
+    //   contract); each `*p.add(k)` retags only element `k`. Reads of `inv_mass` are
+    //   read-only shared; the `pos_*` writes are gated to the pair's own dynamic rows
+    //   (disjoint across workers — the contract).
+    let wi = unsafe { *cols.inv_mass.add(i) };
+    let wj = unsafe { *cols.inv_mass.add(j) };
     let wsum = wi + wj;
     if wsum == 0.0 {
         // Both endpoints pinned — skip BEFORE the sqrt.
         return;
     }
-    let d = Vec3::new(
-        body.pos_x[i] - body.pos_x[j],
-        body.pos_y[i] - body.pos_y[j],
-        body.pos_z[i] - body.pos_z[j],
-    );
+    let d = unsafe {
+        Vec3::new(
+            *cols.pos_x.add(i) - *cols.pos_x.add(j),
+            *cols.pos_y.add(i) - *cols.pos_y.add(j),
+            *cols.pos_z.add(i) - *cols.pos_z.add(j),
+        )
+    };
     // EXACT sqrt (the determinism boundary) — never `rsqrt`.
     let len = d.length_squared().sqrt();
     if len >= cell {
@@ -325,15 +408,29 @@ fn project_self_pair(body: &mut SoftBody, i: usize, j: usize, cell: f32) {
     // both-pinned case returned).
     debug_assert!(wsum > 0.0, "invariant: self-collision denom must be > 0");
     let s = -cc / wsum;
+    // SP4 C1: `s` finite is the LOAD-BEARING invariant that makes the pinned-endpoint
+    // skip below bit-equal to `+= nrm*(s*±0.0)`. NOT `w >= 0.0` (see project_distance).
+    debug_assert!(s.is_finite(), "invariant: self-collision Lagrange step must be finite");
     // Split by inverse mass; a pinned endpoint (w == 0) gets no move.
     let di = nrm * (s * wi);
     let dj = nrm * (-s * wj);
-    body.pos_x[i] += di.x;
-    body.pos_y[i] += di.y;
-    body.pos_z[i] += di.z;
-    body.pos_x[j] += dj.x;
-    body.pos_y[j] += dj.y;
-    body.pos_z[j] += dj.z;
+    // SP4 C1 per-endpoint write guard (shared by serial + colored): write only a
+    // DYNAMIC endpoint, removing the value-benign pinned `+= ±0.0`. Byte-preserving
+    // serially.
+    if is_dynamic_row(wi) {
+        unsafe {
+            *cols.pos_x.add(i) += di.x;
+            *cols.pos_y.add(i) += di.y;
+            *cols.pos_z.add(i) += di.z;
+        }
+    }
+    if is_dynamic_row(wj) {
+        unsafe {
+            *cols.pos_x.add(j) += dj.x;
+            *cols.pos_y.add(j) += dj.y;
+            *cols.pos_z.add(j) += dj.z;
+        }
+    }
 }
 
 /// Computes particle `i`'s bucket from its live position.

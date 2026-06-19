@@ -25,6 +25,7 @@ use boyko_ecs::ecs::core::system::{Res, ResMut};
 use crate::math::Vec3;
 use crate::resources::{BroadphaseGrid, PhysicsConfig, SolverScratch};
 use crate::sdf_query::SdfField;
+use crate::solver::contact::is_dynamic_row;
 use crate::soft::collide::collide_sdf;
 use crate::soft::component::SoftBody;
 use crate::soft::coupling::{CouplingCtx, SoftRigidReaction, resolve_coupling};
@@ -170,17 +171,23 @@ pub fn physics_soft_step_coupled(
 }
 
 /// The per-step substep parameters derived once from [`PhysicsConfig`].
+///
+/// `pub(in crate::soft)` (SP4): the colored sibling reuses the SAME derivation so the
+/// substep timestep matches the serial path bit-for-bit.
 #[derive(Clone, Copy)]
-struct StepParams {
-    substeps: u32,
-    h: f32,
-    inv_h: f32,
-    gravity: Vec3,
+pub(in crate::soft) struct StepParams {
+    pub(in crate::soft) substeps: u32,
+    pub(in crate::soft) h: f32,
+    pub(in crate::soft) inv_h: f32,
+    pub(in crate::soft) gravity: Vec3,
 }
 
 /// Derives the substep parameters from the gather-stamped [`PhysicsConfig`].
+///
+/// `pub(in crate::soft)` (SP4): shared by the serial step systems and the colored
+/// sibling.
 #[inline]
-fn step_params(cfg: &PhysicsConfig) -> StepParams {
+pub(in crate::soft) fn step_params(cfg: &PhysicsConfig) -> StepParams {
     // `max(1)` is release-safe (never a div-by-zero on `dt / substeps`); the
     // `debug_assert!` documents the user-facing invariant `substeps >= 1`.
     debug_assert!(
@@ -395,6 +402,108 @@ fn step_body(
     }
 }
 
+/// Runs the SERIAL non-coupling [`step_body`] on one body — the SP4 0%-gate entry
+/// the colored sibling calls when [`PhysicsConfig::soft_body_colored`] is `false`.
+///
+/// A thin `pub(in crate::soft)` forwarder to the LITERALLY-UNTOUCHED [`step_body`]
+/// with `coupling = None` (C4): it produces a result byte-identical to
+/// [`physics_soft_step`], so the colored soft step is the SP4 0%-gate when the flag
+/// is off. `step_body` itself is not edited (its body, op order, and signature are
+/// unchanged) — only this forwarder is added so `soft::colored` reaches it without
+/// duplicating the driver passes for the 0%-gate path.
+#[inline]
+pub(in crate::soft) fn step_body_serial(
+    body: &mut SoftBody,
+    field: &SdfField,
+    p: &StepParams,
+    cfg: &PhysicsConfig,
+) {
+    step_body(body, field, p, cfg, None);
+}
+
+/// RAW column base pointers for the SHARED projection cores (SP4 W3-A soundness fix).
+///
+/// The colored-parallel solve hands each worker this bundle of `*mut`/`*const`
+/// column bases instead of a `&mut SoftBody`. The leaf cores
+/// ([`project_distance_raw`] / [`project_volume_raw`] /
+/// [`project_self_pair_raw`](crate::soft::self_collision::project_self_pair_raw))
+/// access a column ELEMENT through `*base.add(i)`, which under Tree-Borrows retags
+/// ONLY element `i` — NOT the whole allocation. Two workers writing the C2-disjoint
+/// dynamic rows of one color therefore never form overlapping protectors, so the
+/// concurrent solve is data-race-free. Contrast a `&mut SoftBody` + `body.pos_x[a]`:
+/// the `Deref` reborrows the WHOLE `pos_x` buffer per worker, so every worker retags
+/// the entire allocation and the disjoint-element writes collide (the Miri-TB data
+/// race this struct removes).
+///
+/// The SERIAL kernels build this from their own `&mut SoftBody` and call the SAME
+/// cores, so the projection math is never duplicated (the C1/W3-A anti-drift rule)
+/// and the serial path stays byte-identical.
+///
+/// `Copy` so a worker closure captures it by value (the wrapper is shared `&`
+/// across the spawn loop; see the `Send`/`Sync` impls in `soft::colored`). All
+/// fields are the live bases of the body's SoA columns; the cores read/write only
+/// the elements named by the constraint index they are given.
+#[derive(Copy, Clone)]
+pub(in crate::soft) struct SoftCols {
+    /// Current position X base — WRITTEN per element (the only mutated columns).
+    pub(in crate::soft) pos_x: *mut f32,
+    /// Current position Y base — WRITTEN per element.
+    pub(in crate::soft) pos_y: *mut f32,
+    /// Current position Z base — WRITTEN per element.
+    pub(in crate::soft) pos_z: *mut f32,
+    /// Per-particle inverse-mass base — read only.
+    pub(in crate::soft) inv_mass: *const f32,
+    /// Distance-constraint endpoint-A index base — read only.
+    pub(in crate::soft) c_a: *const u32,
+    /// Distance-constraint endpoint-B index base — read only.
+    pub(in crate::soft) c_b: *const u32,
+    /// Per-constraint rest-length base — read only.
+    pub(in crate::soft) c_rest: *const f32,
+    /// Per-constraint compliance base — read only.
+    pub(in crate::soft) c_compliance: *const f32,
+    /// Tet vertex-0 index base — read only.
+    pub(in crate::soft) t0: *const u32,
+    /// Tet vertex-1 index base — read only.
+    pub(in crate::soft) t1: *const u32,
+    /// Tet vertex-2 index base — read only.
+    pub(in crate::soft) t2: *const u32,
+    /// Tet vertex-3 index base — read only.
+    pub(in crate::soft) t3: *const u32,
+    /// Per-tet signed rest-volume base — read only.
+    pub(in crate::soft) t_rest: *const f32,
+    /// Per-tet compliance base — read only.
+    pub(in crate::soft) t_compliance: *const f32,
+}
+
+impl SoftCols {
+    /// Extracts the live column base pointers from `body`.
+    ///
+    /// `&mut SoftBody` → raw bases: the `pos_*` columns are taken `*mut` (the cores
+    /// write them per element); every other column is `*const` (read only). Cheap —
+    /// a handful of `Vec` base reads, done ONCE per dispatch (colored) or once per
+    /// serial wrapper call. After this, the cores never re-`Deref` the `Vec`s, so the
+    /// parallel path forms no whole-buffer reborrow.
+    #[inline]
+    pub(in crate::soft) fn from_body(body: &mut SoftBody) -> Self {
+        SoftCols {
+            pos_x: body.pos_x.as_mut_ptr(),
+            pos_y: body.pos_y.as_mut_ptr(),
+            pos_z: body.pos_z.as_mut_ptr(),
+            inv_mass: body.inv_mass.as_ptr(),
+            c_a: body.c_a.as_ptr(),
+            c_b: body.c_b.as_ptr(),
+            c_rest: body.c_rest.as_ptr(),
+            c_compliance: body.c_compliance.as_ptr(),
+            t0: body.t0.as_ptr(),
+            t1: body.t1.as_ptr(),
+            t2: body.t2.as_ptr(),
+            t3: body.t3.as_ptr(),
+            t_rest: body.t_rest.as_ptr(),
+            t_compliance: body.t_compliance.as_ptr(),
+        }
+    }
+}
+
 /// Projects one distance constraint `c` (EXACT sqrt + divide only).
 ///
 /// XPBD distance projection with per-constraint compliance: computes the current
@@ -407,22 +516,82 @@ fn step_body(
 /// constraints whose length is below [`LEN_EPS`] (an undefined direction). The
 /// direction is `d * (1.0 / len)` — an explicit divide, NOT `rsqrt` and NOT
 /// [`Vec3::normalize`] (which would collapse the direction at `f32::MIN_POSITIVE`).
+///
+/// # Per-endpoint write guard (SP4 C1 — LOAD-BEARING)
+///
+/// Each endpoint's position write is gated `if is_dynamic_row(w) { add }`, routed
+/// through the SAME [`is_dynamic_row`] predicate the SP4 coloring uses. This is the
+/// SHARED kernel for both the serial [`step_body`] and the colored
+/// `step_body_colored`. Serially it is byte-preserving: a pinned endpoint has
+/// `w == ±0.0`, so the skipped write was `pos += nrm*(s*±0.0) == pos + ±0.0 == pos`
+/// exactly (on the finite-position states the kernel operates on). In the colored
+/// sweep it removes a value-benign-but-real concurrent write to a pinned row two
+/// same-color constraints may share (the pinned write race only Miri-TB/loom can
+/// see). The LOAD-BEARING finiteness invariant is `s.is_finite()` past the divide —
+/// a finite `s` is what makes `s*(±0.0)` a signed zero and the skip bit-equal to
+/// the add (mirrors the rigid `apply_impulse` finiteness `debug_assert!`). It MUST
+/// NOT be `w >= 0.0`: a `-0.0` or negative finite `w` is out-of-contract-but-
+/// determinism-safe (the guard and the coloring both route through
+/// `is_dynamic_row(w) = w != 0.0`, which treats `±0.0` identically and a negative
+/// finite mass as dynamic on BOTH paths — no serial/colored divergence).
+///
+/// `pub(in crate::soft)` (SP4 W3-A): the SINGLE definition shared by the serial
+/// [`step_body`] and the colored `soft::colored::step_body_colored` — never
+/// duplicated (duplicating the hardest determinism math is the drift hazard C1
+/// avoids). A thin wrapper extracting [`SoftCols`] from `body` and forwarding to
+/// the raw core [`project_distance_raw`] (the math lives there ONCE; the serial
+/// path stays byte-identical to the raw per-element form — `body.pos_x[a]` and
+/// `*pos_x.add(a)` name the same storage).
 #[inline]
-fn project_distance(body: &mut SoftBody, c: usize, h: f32) {
-    let a = body.c_a[c] as usize;
-    let b = body.c_b[c] as usize;
-    let wa = body.inv_mass[a];
-    let wb = body.inv_mass[b];
+pub(in crate::soft) fn project_distance(body: &mut SoftBody, c: usize, h: f32) {
+    let cols = SoftCols::from_body(body);
+    // SAFETY: `cols` names `body`'s live column bases; `c` is a valid constraint
+    //   index (`c < constraint_count()`, the caller's loop bound) and its endpoints
+    //   `c_a[c]`/`c_b[c]` index valid particle rows (the constructor invariant). The
+    //   serial caller holds the unique `&mut SoftBody`, so no aliasing.
+    unsafe { project_distance_raw(cols, c, h) };
+}
+
+/// The RAW per-element core of [`project_distance`] (SP4 W3-A soundness fix).
+///
+/// Identical XPBD math, but every column access is a raw `*base.add(i)` instead of a
+/// `Vec` index, so under Tree-Borrows it retags ONLY the element it touches — never
+/// the whole buffer. This is what makes the colored-parallel solve race-free: two
+/// workers writing the C2-disjoint dynamic rows of one color form no overlapping
+/// element protectors. The serial wrapper calls it through the unique `&mut SoftBody`
+/// (no aliasing); a colored worker calls it through [`SoftCols`] built from the live
+/// body, writing only its chunk's disjoint dynamic rows.
+///
+/// # Safety
+/// `cols` must name a live `SoftBody`'s column bases; `c < constraint_count()`; the
+/// endpoints `c_a[c]`/`c_b[c]` must be valid particle rows `< particle_count()`. In
+/// the parallel path, the caller must invoke this only on constraints of ONE color
+/// whose DYNAMIC endpoints are pairwise disjoint across concurrent workers (the C2
+/// lemma); a SHARED PINNED row is read-only (the C1 guard never writes it). On those
+/// conditions the per-element reads/writes touch only provably-disjoint elements
+/// (writes) plus read-only shared columns (`inv_mass`/topology) — no UB.
+#[inline]
+pub(in crate::soft) unsafe fn project_distance_raw(cols: SoftCols, c: usize, h: f32) {
+    // SAFETY (all the per-element accesses below): `c` and the endpoint rows are in
+    //   range (the fn contract); each `*p.add(i)` retags only element `i`. Reads of
+    //   `inv_mass`/`c_*` are read-only shared; the `pos_*` writes are gated to the
+    //   constraint's own dynamic rows (disjoint across workers — the contract).
+    let a = unsafe { *cols.c_a.add(c) } as usize;
+    let b = unsafe { *cols.c_b.add(c) } as usize;
+    let wa = unsafe { *cols.inv_mass.add(a) };
+    let wb = unsafe { *cols.inv_mass.add(b) };
     let wsum = wa + wb;
     if wsum == 0.0 {
         // Both endpoints pinned — skip BEFORE the sqrt.
         return;
     }
-    let d = Vec3::new(
-        body.pos_x[a] - body.pos_x[b],
-        body.pos_y[a] - body.pos_y[b],
-        body.pos_z[a] - body.pos_z[b],
-    );
+    let d = unsafe {
+        Vec3::new(
+            *cols.pos_x.add(a) - *cols.pos_x.add(b),
+            *cols.pos_y.add(a) - *cols.pos_y.add(b),
+            *cols.pos_z.add(a) - *cols.pos_z.add(b),
+        )
+    };
     // EXACT sqrt (the determinism boundary) — never `rsqrt`.
     let len = d.length_squared().sqrt();
     if len < LEN_EPS {
@@ -431,8 +600,8 @@ fn project_distance(body: &mut SoftBody, c: usize, h: f32) {
     }
     // DIVIDE then mul (explicit; NOT `rsqrt`, NOT `Vec3::normalize`).
     let nrm = d * (1.0 / len);
-    let cc = len - body.c_rest[c];
-    let alpha_tilde = body.c_compliance[c] / (h * h);
+    let cc = len - unsafe { *cols.c_rest.add(c) };
+    let alpha_tilde = unsafe { *cols.c_compliance.add(c) } / (h * h);
     let denom = wsum + alpha_tilde;
     // `wsum > 0` here (the both-pinned case returned) and `alpha_tilde >= 0`.
     debug_assert!(
@@ -440,15 +609,31 @@ fn project_distance(body: &mut SoftBody, c: usize, h: f32) {
         "invariant: distance-constraint denom must be > 0"
     );
     let s = -cc / denom;
+    // SP4 C1: `s` finite is the LOAD-BEARING invariant that makes the pinned-endpoint
+    // skip below bit-equal to the unconditional `+= nrm*(s*±0.0)` (a finite `s` times
+    // a signed zero is a signed zero, and `x + ±0.0 == x`). NOT `w >= 0.0` (a `-0.0`
+    // / negative finite mass is out-of-contract-but-determinism-safe; see the doc).
+    debug_assert!(s.is_finite(), "invariant: distance-constraint Lagrange step must be finite");
     // Split the correction by inverse mass; a pinned endpoint (w == 0) gets no move.
     let da = nrm * (s * wa);
     let db = nrm * (-s * wb);
-    body.pos_x[a] += da.x;
-    body.pos_y[a] += da.y;
-    body.pos_z[a] += da.z;
-    body.pos_x[b] += db.x;
-    body.pos_y[b] += db.y;
-    body.pos_z[b] += db.z;
+    // SP4 C1 per-endpoint write guard (shared by serial + colored): write only a
+    // DYNAMIC endpoint, removing the value-benign pinned `+= ±0.0` (a same-color
+    // pinned-write race in the colored sweep). Byte-preserving serially.
+    if is_dynamic_row(wa) {
+        unsafe {
+            *cols.pos_x.add(a) += da.x;
+            *cols.pos_y.add(a) += da.y;
+            *cols.pos_z.add(a) += da.z;
+        }
+    }
+    if is_dynamic_row(wb) {
+        unsafe {
+            *cols.pos_x.add(b) += db.x;
+            *cols.pos_y.add(b) += db.y;
+            *cols.pos_z.add(b) += db.z;
+        }
+    }
 }
 
 /// Projects one volume constraint `t` — the XPBD signed-volume constraint over a
@@ -467,35 +652,85 @@ fn project_distance(body: &mut SoftBody, c: usize, h: f32) {
 /// runtime `V` matches the construction-time `V0` op sequence (`C == 0` at rest).
 /// Skips a collapsed tet whose `denom < DENOM_EPS` (mirrors the distance sweep's
 /// `len < LEN_EPS`) before the divide.
+///
+/// # Per-vertex write guard (SP4 C1 — LOAD-BEARING)
+///
+/// Each of the FOUR vertex writes is gated `if is_dynamic_row(w) { add }` through
+/// the SAME [`is_dynamic_row`] predicate the coloring uses (the SHARED kernel for
+/// serial + colored). Byte-preserving serially (a pinned vertex's skipped write was
+/// `+= gᵢ*(s*±0.0) == +±0.0`); in the colored sweep it removes a same-color
+/// pinned-vertex write race. The LOAD-BEARING finiteness invariant is
+/// `s.is_finite()` past the divide (see [`project_distance`]); it MUST NOT be
+/// `w >= 0.0`.
+///
+/// `pub(in crate::soft)` (SP4 W3-A): the SINGLE definition shared by the serial
+/// [`step_body`] and the colored `soft::colored::step_body_colored`. A thin wrapper
+/// extracting [`SoftCols`] from `body` and forwarding to the raw core
+/// [`project_volume_raw`] (the math lives there ONCE; the serial path stays
+/// byte-identical to the raw per-element form — `body.pos_x[i0]` and
+/// `*pos_x.add(i0)` name the same storage).
 #[inline]
-fn project_volume(body: &mut SoftBody, t: usize, h: f32) {
-    let i0 = body.t0[t] as usize;
-    let i1 = body.t1[t] as usize;
-    let i2 = body.t2[t] as usize;
-    let i3 = body.t3[t] as usize;
-    let p0 = Vec3::new(body.pos_x[i0], body.pos_y[i0], body.pos_z[i0]);
-    let p1 = Vec3::new(body.pos_x[i1], body.pos_y[i1], body.pos_z[i1]);
-    let p2 = Vec3::new(body.pos_x[i2], body.pos_y[i2], body.pos_z[i2]);
-    let p3 = Vec3::new(body.pos_x[i3], body.pos_y[i3], body.pos_z[i3]);
+pub(in crate::soft) fn project_volume(body: &mut SoftBody, t: usize, h: f32) {
+    let cols = SoftCols::from_body(body);
+    // SAFETY: `cols` names `body`'s live column bases; `t` is a valid tet index
+    //   (`t < tet_count()`, the caller's loop bound) and its vertices `t0..t3[t]`
+    //   index valid particle rows (the constructor's DegenerateTet invariant). The
+    //   serial caller holds the unique `&mut SoftBody`, so no aliasing.
+    unsafe { project_volume_raw(cols, t, h) };
+}
+
+/// The RAW per-element core of [`project_volume`] (SP4 W3-A soundness fix).
+///
+/// Identical XPBD signed-volume math, but every column access is a raw
+/// `*base.add(i)` instead of a `Vec` index, so under Tree-Borrows it retags ONLY the
+/// element it touches — never the whole buffer. This is what makes the
+/// colored-parallel volume solve race-free: two workers writing the C2-disjoint
+/// dynamic rows of one color form no overlapping element protectors. The serial
+/// wrapper calls it through the unique `&mut SoftBody` (no aliasing); a colored
+/// worker calls it through [`SoftCols`] built from the live body, writing only its
+/// chunk's disjoint dynamic rows.
+///
+/// # Safety
+/// `cols` must name a live `SoftBody`'s column bases; `t < tet_count()`; the
+/// vertices `t0..t3[t]` must be valid particle rows `< particle_count()`. In the
+/// parallel path, the caller must invoke this only on tets of ONE color whose
+/// DYNAMIC vertices are pairwise disjoint across concurrent workers (the C2 lemma);
+/// a SHARED PINNED row is read-only (the C1 guard never writes it). On those
+/// conditions the per-element reads/writes touch only provably-disjoint elements
+/// (writes) plus read-only shared columns (`inv_mass`/topology) — no UB.
+#[inline]
+pub(in crate::soft) unsafe fn project_volume_raw(cols: SoftCols, t: usize, h: f32) {
+    // SAFETY (all the per-element accesses below): `t` and the vertex rows are in
+    //   range (the fn contract); each `*p.add(i)` retags only element `i`. Reads of
+    //   `inv_mass`/`t_*` are read-only shared; the `pos_*` writes are gated to the
+    //   tet's own dynamic vertices (disjoint across workers — the contract).
+    let i0 = unsafe { *cols.t0.add(t) } as usize;
+    let i1 = unsafe { *cols.t1.add(t) } as usize;
+    let i2 = unsafe { *cols.t2.add(t) } as usize;
+    let i3 = unsafe { *cols.t3.add(t) } as usize;
+    let p0 = unsafe { Vec3::new(*cols.pos_x.add(i0), *cols.pos_y.add(i0), *cols.pos_z.add(i0)) };
+    let p1 = unsafe { Vec3::new(*cols.pos_x.add(i1), *cols.pos_y.add(i1), *cols.pos_z.add(i1)) };
+    let p2 = unsafe { Vec3::new(*cols.pos_x.add(i2), *cols.pos_y.add(i2), *cols.pos_z.add(i2)) };
+    let p3 = unsafe { Vec3::new(*cols.pos_x.add(i3), *cols.pos_y.add(i3), *cols.pos_z.add(i3)) };
     // Edge-anchored at p0 (FP conditioning). Pinned cross operand order; dot
     // left-to-right.
     let e1 = p1 - p0;
     let e2 = p2 - p0;
     let e3 = p3 - p0;
     let vol = (1.0 / 6.0) * e1.cross(e2).dot(e3);
-    let cc = vol - body.t_rest[t];
+    let cc = vol - unsafe { *cols.t_rest.add(t) };
     let g1 = e2.cross(e3) * (1.0 / 6.0);
     let g2 = e3.cross(e1) * (1.0 / 6.0);
     let g3 = e1.cross(e2) * (1.0 / 6.0);
     // Pinned add order ⇒ Σg == 0 exactly (g0 + g1 + g2 + g3 == 0).
     let g0 = (g1 + g2 + g3) * -1.0;
-    let w0 = body.inv_mass[i0];
-    let w1 = body.inv_mass[i1];
-    let w2 = body.inv_mass[i2];
-    let w3 = body.inv_mass[i3];
+    let w0 = unsafe { *cols.inv_mass.add(i0) };
+    let w1 = unsafe { *cols.inv_mass.add(i1) };
+    let w2 = unsafe { *cols.inv_mass.add(i2) };
+    let w3 = unsafe { *cols.inv_mass.add(i3) };
     // Summed in fixed vertex order 0,1,2,3.
     let wsum = w0 * g0.dot(g0) + w1 * g1.dot(g1) + w2 * g2.dot(g2) + w3 * g3.dot(g3);
-    let alpha_tilde = body.t_compliance[t] / (h * h);
+    let alpha_tilde = unsafe { *cols.t_compliance.add(t) } / (h * h);
     let denom = wsum + alpha_tilde;
     if denom < DENOM_EPS {
         // Collapsed tet — all gradients vanish (mirrors the distance sweep's
@@ -507,21 +742,43 @@ fn project_volume(body: &mut SoftBody, t: usize, h: f32) {
         "invariant: volume-constraint denom must be >= DENOM_EPS past the skip"
     );
     let s = -cc / denom;
+    // SP4 C1: `s` finite is the LOAD-BEARING invariant that makes the pinned-vertex
+    // skip below bit-equal to `+= gᵢ*(s*±0.0)`. NOT `w >= 0.0` (see project_distance).
+    debug_assert!(s.is_finite(), "invariant: volume-constraint Lagrange step must be finite");
     // Fixed vertex order; a pinned vertex (w == 0) gets no move.
     let d0 = g0 * (s * w0);
     let d1 = g1 * (s * w1);
     let d2 = g2 * (s * w2);
     let d3 = g3 * (s * w3);
-    body.pos_x[i0] += d0.x;
-    body.pos_y[i0] += d0.y;
-    body.pos_z[i0] += d0.z;
-    body.pos_x[i1] += d1.x;
-    body.pos_y[i1] += d1.y;
-    body.pos_z[i1] += d1.z;
-    body.pos_x[i2] += d2.x;
-    body.pos_y[i2] += d2.y;
-    body.pos_z[i2] += d2.z;
-    body.pos_x[i3] += d3.x;
-    body.pos_y[i3] += d3.y;
-    body.pos_z[i3] += d3.z;
+    // SP4 C1 per-vertex write guard (shared by serial + colored): write only the
+    // DYNAMIC vertices, removing the value-benign pinned `+= ±0.0`. Byte-preserving
+    // serially.
+    if is_dynamic_row(w0) {
+        unsafe {
+            *cols.pos_x.add(i0) += d0.x;
+            *cols.pos_y.add(i0) += d0.y;
+            *cols.pos_z.add(i0) += d0.z;
+        }
+    }
+    if is_dynamic_row(w1) {
+        unsafe {
+            *cols.pos_x.add(i1) += d1.x;
+            *cols.pos_y.add(i1) += d1.y;
+            *cols.pos_z.add(i1) += d1.z;
+        }
+    }
+    if is_dynamic_row(w2) {
+        unsafe {
+            *cols.pos_x.add(i2) += d2.x;
+            *cols.pos_y.add(i2) += d2.y;
+            *cols.pos_z.add(i2) += d2.z;
+        }
+    }
+    if is_dynamic_row(w3) {
+        unsafe {
+            *cols.pos_x.add(i3) += d3.x;
+            *cols.pos_y.add(i3) += d3.y;
+            *cols.pos_z.add(i3) += d3.z;
+        }
+    }
 }

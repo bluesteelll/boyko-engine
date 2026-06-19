@@ -97,3 +97,11 @@ harness = false
 # `physics_soft_rigid_apply`). Reports per-step time; not a pass/fail gate.
 name = "soft_step_sp2"
 harness = false
+
+[[bench]]
+# O11 SP4 (observation, W2 A/B): SERIAL vs COLORED-PARALLEL soft step on a hanging
+# cloth at n ∈ {1k, 10k, 50k} — serial / colored-inline (no-pool, must ≈ serial) /
+# colored-{2,4,8}-worker (the wall-clock win at the larger sizes). Reports per-step
+# time; not a pass/fail gate.
+name = "soft_colored_sp4"
+harness = false

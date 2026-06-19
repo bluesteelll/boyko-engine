@@ -49,7 +49,7 @@ pub use manifold::{BodyIndex, ContactPoint, Manifold, SDF_SENTINEL};
 pub use math::{MAX_CONTACT_POINTS, Mat3, Quat, Vec3};
 pub use plugin::{
     PhysicsStageKeys, add_physics_colored, add_physics_colored_solve, add_physics_sdf,
-    add_physics_soft, add_physics_systems,
+    add_physics_soft, add_physics_soft_colored, add_physics_systems,
 };
 pub use resources::{
     BodyState, BroadphaseGrid, BroadphaseKind, ConstraintGraph, ContactPairs,
@@ -57,7 +57,10 @@ pub use resources::{
     PhysicsConfig, SolverScratch, TouchedMask,
 };
 pub use sdf_query::{SdfField, sample_sdf};
-pub use soft::{SoftBody, SoftBodyError, SoftRigidReaction};
+pub use soft::{
+    ParticleColorGraph, SoftBody, SoftBodyError, SoftColorScratch, SoftRigidReaction,
+    physics_soft_step_colored,
+};
 pub use solver::{ColoredSoftStepSolver, NoopSolver, RigidSolver, SoftStepSolver};
 pub use systems::{
     body_bounding_radius, physics_apply, physics_broadphase, physics_build_graph, physics_gather,

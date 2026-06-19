@@ -19,7 +19,8 @@ use crate::resources::{
 };
 use crate::sdf_query::SdfField;
 use crate::soft::{
-    SoftRigidReaction, physics_soft_rigid_apply, physics_soft_step, physics_soft_step_coupled,
+    SoftColorScratch, SoftRigidReaction, physics_soft_rigid_apply, physics_soft_step,
+    physics_soft_step_colored, physics_soft_step_coupled,
 };
 use crate::solver::colored::ColoredSoftStepSolver;
 use crate::solver::RigidSolver;
@@ -122,7 +123,7 @@ pub fn add_physics_systems<S: RigidSolver + Default>(
     // `with_sdf = false`, `colored = false`, `soft = false`: body-only pipeline (no
     // `SdfField`, no SDF stage, no constraint-graph stage, no soft pass) —
     // byte-identical to the shipped path.
-    add_physics_pipeline::<S>(builder, world, false, false, false, false, false)
+    add_physics_pipeline::<S>(builder, world, false, false, false, false, false, false)
 }
 
 /// Inserts the physics resources INCLUDING the [`ConstraintGraph`] and registers
@@ -146,7 +147,7 @@ pub fn add_physics_colored<S: RigidSolver + Default>(
     builder: &mut ScheduleBuilder,
     world: &mut EcsMaster,
 ) -> PhysicsStageKeys {
-    add_physics_pipeline::<S>(builder, world, false, true, false, false, false)
+    add_physics_pipeline::<S>(builder, world, false, true, false, false, false, false)
 }
 
 /// Inserts the physics resources and registers the COLORED-SOLVE pipeline (Phase
@@ -182,7 +183,9 @@ pub fn add_physics_colored_solve(
     builder: &mut ScheduleBuilder,
     world: &mut EcsMaster,
 ) -> PhysicsStageKeys {
-    add_physics_pipeline::<ColoredSoftStepSolver>(builder, world, false, true, true, false, false)
+    add_physics_pipeline::<ColoredSoftStepSolver>(
+        builder, world, false, true, true, false, false, false,
+    )
 }
 
 /// Inserts the physics resources INCLUDING an (empty) [`SdfField`] and registers
@@ -203,7 +206,7 @@ pub fn add_physics_sdf<S: RigidSolver + Default>(
     builder: &mut ScheduleBuilder,
     world: &mut EcsMaster,
 ) -> PhysicsStageKeys {
-    add_physics_pipeline::<S>(builder, world, true, false, false, false, false)
+    add_physics_pipeline::<S>(builder, world, true, false, false, false, false, false)
 }
 
 /// Inserts the physics resources and registers the physics pipeline WITH the SP1
@@ -249,7 +252,43 @@ pub fn add_physics_soft<S: RigidSolver + Default>(
     world: &mut EcsMaster,
     coupling: bool,
 ) -> PhysicsStageKeys {
-    add_physics_pipeline::<S>(builder, world, false, false, false, true, coupling)
+    add_physics_pipeline::<S>(builder, world, false, false, false, true, coupling, false)
+}
+
+/// Inserts the physics resources INCLUDING the SP4 [`SoftColorScratch`] and registers
+/// the physics pipeline with the COLORED-PARALLEL soft step
+/// ([`physics_soft_step_colored`](crate::soft::physics_soft_step_colored)) in place of
+/// the uncoupled [`physics_soft_step`](crate::soft::physics_soft_step) (the two never
+/// both run), in the SAME `.after(solve)` `.before(apply)` slot — mirroring how
+/// [`add_physics_colored_solve`] stands in for the default solve (plan O11 SP4).
+///
+/// Identical to [`add_physics_soft`] (non-coupling) but additionally:
+/// - inserts a [`SoftColorScratch`] resource (the per-constraint-type coloring
+///   scratch);
+/// - registers the colored soft step, which parallelizes the distance + volume (+
+///   optional self-collision) projection sweeps across the engine threadpool via
+///   per-type graph colorings.
+///
+/// # The SP4 0%-gate (opt-in twice)
+///
+/// The colored step is a strict SIBLING: when
+/// [`PhysicsConfig::soft_body_colored`](crate::resources::PhysicsConfig) is the
+/// default `false` it runs the SERIAL `step_body` per body — byte-identical to
+/// [`physics_soft_step`]. The colored projection turns on only when the caller sets
+/// `soft_body_colored = true` (and, for the highest-risk self-collision surface,
+/// `soft_self_collision_colored = true`). The colored result is run-to-run
+/// bit-deterministic and `{1, N}`-worker bit-identical, but its value DIFFERS from the
+/// serial sweep (the colored visit order differs from the SP1 authoring order). This
+/// is the NON-COUPLING path (the soft↔rigid coupling boundary stays serial, IM-1).
+///
+/// Opt-in: a world that does not call this is byte-for-byte unaffected (the colored
+/// soft stage + scratch are never registered — the campaign 0%-gate). The returned
+/// [`PhysicsStageKeys::soft_step`] carries the colored soft stage's descriptor index.
+pub fn add_physics_soft_colored<S: RigidSolver + Default>(
+    builder: &mut ScheduleBuilder,
+    world: &mut EcsMaster,
+) -> PhysicsStageKeys {
+    add_physics_pipeline::<S>(builder, world, false, false, false, true, false, true)
 }
 
 /// Shared wiring for [`add_physics_systems`] (`with_sdf = false`,
@@ -269,6 +308,7 @@ fn add_physics_pipeline<S: RigidSolver + Default>(
     colored_solve: bool,
     soft: bool,
     coupling: bool,
+    soft_colored: bool,
 ) -> PhysicsStageKeys {
     // The colored solve requires the constraint graph; the type system cannot
     // express it, so guard the invariant the callers uphold.
@@ -279,6 +319,14 @@ fn add_physics_pipeline<S: RigidSolver + Default>(
     debug_assert!(
         !coupling || soft,
         "invariant: soft↔rigid coupling requires the soft pass (soft == true)"
+    );
+    debug_assert!(
+        !soft_colored || soft,
+        "invariant: the colored soft step requires the soft pass (soft == true)"
+    );
+    debug_assert!(
+        !(soft_colored && coupling),
+        "invariant: the colored soft step is the non-coupling path (SP4 IM-1 boundary)"
     );
     // Reused, capacity-preserving step buffers (principle 5 — no per-step alloc).
     // The `colored` flag rides the config so `physics_build_graph` (registered only
@@ -347,6 +395,14 @@ fn add_physics_pipeline<S: RigidSolver + Default>(
         // register either stage, so the resource is unnecessary there (the 0%-gate
         // on the schedule SHAPE).
         world.insert_resource(SoftRigidReaction::with_capacity(INITIAL_BODY_CAPACITY));
+    }
+    if soft_colored {
+        // SP4: the colored-solve coloring scratch (capacity-reused; steady-state
+        // zero-alloc). Inserted ONLY on the colored soft path so
+        // `physics_soft_step_colored`'s `ResMut<SoftColorScratch>` param resolves; it
+        // stays untouched while `PhysicsConfig::soft_body_colored` is the default
+        // `false` (the SP4 0%-gate: the colored step then runs the serial `step_body`).
+        world.insert_resource(SoftColorScratch::default());
     }
 
     // C2: stamp the integration mode from the chosen solver BEFORE inserting the
@@ -451,10 +507,20 @@ fn add_physics_pipeline<S: RigidSolver + Default>(
     // the two never both run. When `coupling == false` the schedule shape is
     // byte-identical to SP1 (the uncoupled step, no apply-side reaction stage), so
     // the schedule-shape 0%-gate holds.
+    //
+    // SP4: on the colored soft path the COLORED step (`physics_soft_step_colored`) is
+    // registered IN PLACE of the uncoupled step (the non-coupling path; the two never
+    // both run). When `soft_body_colored` is the default `false` the colored step runs
+    // the SERIAL `step_body` (the SP4 0%-gate), so the schedule output is unchanged.
     let soft_step_key = if soft {
         let cfg = if coupling {
             builder
                 .add_system(physics_soft_step_coupled)
+                .after(solve)
+                .before(apply)
+        } else if soft_colored {
+            builder
+                .add_system(physics_soft_step_colored)
                 .after(solve)
                 .before(apply)
         } else {

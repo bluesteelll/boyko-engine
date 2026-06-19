@@ -34,11 +34,13 @@
 //! in behind their own opt-in flags without touching this kernel.
 
 pub mod collide;
+pub mod colored;
 pub mod component;
 pub mod coupling;
 pub mod self_collision;
 pub mod solver;
 
+pub use colored::{ParticleColorGraph, SoftColorScratch, physics_soft_step_colored};
 pub use component::{SoftBody, SoftBodyError};
 pub use coupling::{SoftRigidReaction, physics_soft_rigid_apply};
 pub use solver::{physics_soft_step, physics_soft_step_coupled};

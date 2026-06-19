@@ -270,6 +270,32 @@ pub struct PhysicsConfig {
     /// any hashing, so an SP1/SP2 world is byte-identical (the SP3 0%-gate). Only
     /// meaningful on the soft path, and only for a body with `particle_radius > 0`.
     pub self_collision_iters: usize,
+    /// SP4: COLORED-PARALLEL soft-body distance + volume projection (default
+    /// `false`).
+    ///
+    /// When `true` (AND the pipeline was wired with the colored soft step via
+    /// [`add_physics_soft_colored`](crate::plugin::add_physics_soft_colored)), the
+    /// distance and volume projection sweeps are parallelized across the engine
+    /// threadpool using per-constraint-type graph colorings — within one color every
+    /// dynamic endpoint is write-disjoint, so the colors solve lane-parallel. The
+    /// colored result is run-to-run bit-deterministic and `{1, N}`-worker
+    /// bit-identical, but its value DIFFERS from the serial sweep (the colored
+    /// inter-constraint visit order differs from the SP1 authoring order). Default
+    /// OFF; the colored soft step behaves exactly like
+    /// [`physics_soft_step`](crate::soft::physics_soft_step) when this is `false`.
+    /// Only meaningful on the colored soft path.
+    pub soft_body_colored: bool,
+    /// SP4: COLORED-PARALLEL soft-body SELF-COLLISION (default `false`, the
+    /// highest-risk parallel surface — opt-in).
+    ///
+    /// When `true` (AND `self_collision_iters > 0` and the colored soft step is
+    /// wired), the per-substep self-collision pass emits its pair set against the
+    /// single per-substep spatial hash, colors it (recolored every substep — the
+    /// pair set is position-dependent), and solves it color-by-color in parallel.
+    /// Default OFF so the colored soft path runs the SERIAL self-collision pass even
+    /// when [`soft_body_colored`](Self::soft_body_colored) is on. Only meaningful on
+    /// the colored soft path with self-collision enabled.
+    pub soft_self_collision_colored: bool,
 }
 
 /// Default per-island sleep SPEED² threshold (plan O8 / Decision 5).
@@ -341,6 +367,13 @@ impl Default for PhysicsConfig {
             // SP3: default `0` ⇒ the self-collision pass early-returns before any
             // hashing, so an SP1/SP2 world is byte-identical (the SP3 0%-gate).
             self_collision_iters: 0,
+            // SP4: default OFF ⇒ the colored soft step (when wired) behaves exactly
+            // like the serial `physics_soft_step` (the SP4 0%-gate); the colored
+            // distance/volume projection is a pure opt-in.
+            soft_body_colored: false,
+            // SP4: default OFF ⇒ the colored soft path runs the SERIAL self-collision
+            // pass; the colored self-collision is the highest-risk surface, opt-in.
+            soft_self_collision_colored: false,
         }
     }
 }
