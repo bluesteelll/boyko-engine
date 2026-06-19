@@ -15,12 +15,14 @@
 //!   aggregation ([`process_actions`](action::process::process_actions)).
 //!
 //! # Scope
-//! This crate now covers the windowing-independent core (I1–I3) **and** ECS
+//! This crate now covers the windowing-independent core (I1–I3), ECS
 //! integration (I4): [`InputPlugin`](plugin::InputPlugin), the
 //! [`update_action_state`](action::process::update_action_state) ingest system,
-//! per-`A` generic-resource id minting, and the fixed-step determinism snapshot.
-//! `.keys` persistence, runtime rebinding, and the Win32 / egui adapters are
-//! added in later rounds (I5–I7); the seams are documented at each module.
+//! per-`A` generic-resource id minting, and the fixed-step determinism snapshot —
+//! **and** persistence + rebind (I5): the in-house [`persist`] `.keys` text
+//! format ([`persist::load_keys`] / [`persist::save_keys`]) and the runtime
+//! [`action::rebind::RebindSession`]. The Win32 / egui adapters are added in
+//! later rounds (I6–I7); the seams are documented at each module.
 
 // Resolve the crate's own name so the `#[derive(Actionlike)]` macro — which
 // emits absolute `::boyko_input::…` paths — works from this crate's own unit
@@ -29,6 +31,7 @@ extern crate self as boyko_input;
 
 pub mod action;
 pub mod constants;
+pub mod persist;
 pub mod plugin;
 pub mod prelude;
 pub mod raw;
@@ -38,7 +41,9 @@ pub use action::map::{
     AxisMode, BindSpec, ClashStrategy, InputMap, InputMapBuilder, InputRef,
 };
 pub use action::process::{process_actions, update_action_state};
+pub use action::rebind::{RebindOutcome, RebindSession};
 pub use action::state::ActionState;
+pub use persist::{keys_to_string, load_keys, save_keys, ParseReport};
 pub use plugin::{GameplaySet, InputPlugin};
 pub use raw::event::RawInputEvent;
 pub use raw::keycode::{ButtonState, KeyCode, MouseButton, ScrollDelta};

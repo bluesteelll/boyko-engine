@@ -204,6 +204,54 @@ impl<A: Actionlike> InputMap<A> {
             _pd: PhantomData,
         }
     }
+
+    /// Replaces the binding at `(action, slot)` with `spec` (cold path).
+    ///
+    /// `slot` is a 0-based index into the action's binding list. If `slot`
+    /// addresses an existing binding it is overwritten in place; if `slot` is the
+    /// next free index (== the action's current binding count) the binding list
+    /// grows by one — used by [`RebindSession`](crate::action::rebind::RebindSession)
+    /// to capture a key into a fresh slot. A `slot` beyond that is rejected
+    /// (returns `false`) rather than leaving a gap.
+    ///
+    /// Returns `true` on success. Growing reallocates the flat arena and shifts
+    /// every later action's range by one — acceptable on the cold rebind path
+    /// (a rebind is a UI action, never per-frame).
+    pub fn set_binding(&mut self, action: A, slot: usize, spec: BindSpec) -> bool {
+        let action_idx = action.index();
+        let (start, len) = self.ranges[action_idx];
+        let len = len as usize;
+        if slot < len {
+            // Overwrite in place — no reallocation, no range shift.
+            self.bindings[start as usize + slot] = spec;
+            return true;
+        }
+        if slot != len {
+            // A slot past the next free index would leave a gap; reject it.
+            return false;
+        }
+        // Append a new slot: rebuild the arena with one extra binding inserted at
+        // the end of this action's range, and shift later ranges by one.
+        self.insert_binding_at(action_idx, start as usize + len, spec);
+        true
+    }
+
+    /// Rebuilds the flat arena inserting `spec` at flat index `at`, growing
+    /// `action_idx`'s range and shifting every later range right by one (cold).
+    fn insert_binding_at(&mut self, action_idx: usize, at: usize, spec: BindSpec) {
+        let mut next: Vec<BindSpec> = Vec::with_capacity(self.bindings.len() + 1);
+        next.extend_from_slice(&self.bindings[..at]);
+        next.push(spec);
+        next.extend_from_slice(&self.bindings[at..]);
+        self.bindings = next.into_boxed_slice();
+
+        // The owning action gains one binding; later actions slide right by one.
+        let (start, len) = self.ranges[action_idx];
+        self.ranges[action_idx] = (start, len + 1);
+        for r in self.ranges.iter_mut().skip(action_idx + 1) {
+            r.0 += 1;
+        }
+    }
 }
 
 // NOT `#[derive(Resource)]`: the generic-body `static` would collapse every `A`
@@ -267,6 +315,48 @@ impl<A: Actionlike> InputMapBuilder<A> {
     pub fn clash(mut self, s: ClashStrategy) -> Self {
         self.clash = s;
         self
+    }
+
+    /// Seeds a builder from an existing [`InputMap`], copying every action's
+    /// bindings and the clash strategy (cold path).
+    ///
+    /// This is the entry point for `.keys` override-delta loading (plan §9.3): a
+    /// builder seeded from the code-default map keeps the defaults for actions the
+    /// file omits, while [`load_keys`](crate::persist::load_keys) replaces the
+    /// slots of actions the file *does* mention.
+    pub fn from_map(map: &InputMap<A>) -> Self {
+        let mut per_action: Vec<Vec<BindSpec>> = Vec::with_capacity(map.action_count());
+        for i in 0..map.action_count() {
+            per_action.push(map.bindings_at(i).to_vec());
+        }
+        Self {
+            per_action,
+            clash: map.clash(),
+            _pd: PhantomData,
+        }
+    }
+
+    /// Clears every binding for `action` — used by the override-delta loader on
+    /// the first line that mentions an action, so a file line fully replaces the
+    /// action's default slots (plan §9.3). In-place mutator (cold path).
+    #[inline]
+    pub fn clear_action(&mut self, action: A) {
+        self.per_action[action.index()].clear();
+    }
+
+    /// Appends a binding for `action` in place (the `&mut self` form of
+    /// [`bind`](Self::bind), used by the loader which holds the builder by
+    /// reference). [`BindSpec::None`] is appended as an explicit-unbind marker.
+    #[inline]
+    pub fn bind_in_place(&mut self, action: A, spec: BindSpec) {
+        self.per_action[action.index()].push(spec);
+    }
+
+    /// Sets the clash strategy in place (the `&mut self` form of
+    /// [`clash`](Self::clash), used by the loader).
+    #[inline]
+    pub fn set_clash(&mut self, s: ClashStrategy) {
+        self.clash = s;
     }
 
     /// Flattens into the final [`InputMap`] (one arena alloc + one ranges

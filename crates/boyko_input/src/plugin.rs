@@ -18,10 +18,11 @@ use boyko_ecs::ecs::core::app::{App, CoreSchedule, Plugin};
 use boyko_ecs::ecs::core::schedule::system_set::SystemSet;
 
 use crate::action::actionlike::Actionlike;
-use crate::action::map::InputMap;
+use crate::action::map::{InputMap, InputMapBuilder};
 use crate::action::process::{clear_consumed_fixed_edges, update_action_state};
 use crate::action::state::ActionState;
 use crate::constants::RAW_QUEUE_CAP;
+use crate::persist::load_keys;
 use crate::raw::queue::{PhysicalInput, RawInputQueue};
 
 /// The default schedule set that gameplay systems join so the input ingest can
@@ -44,14 +45,17 @@ impl SystemSet for GameplaySet {}
 /// inserts a copy into the world at [`build`](Plugin::build), so one template can
 /// seed several worlds.
 ///
-/// # I5 seam
-/// `keys_path` reserves the `.keys` override location: in I5 a present override
-/// file is loaded as a delta over the default map at build. For I4 it is stored
-/// but unused — the default map is inserted verbatim.
+/// # `.keys` override (I5)
+/// If [`with_keys_path`](Self::with_keys_path) set an override path and the file
+/// is present and readable, it is loaded as an **override-delta** over the
+/// default map at build (plan §9.3): actions the file omits keep their defaults;
+/// actions it mentions are fully overridden. A missing/unreadable file falls back
+/// to the default map (a fresh install has no override yet), and per-line parse
+/// errors are recoverable — a hand-edited config never bricks the game.
 pub struct InputPlugin<A: Actionlike> {
     /// The template map copied into the world at build.
     default_map: InputMap<A>,
-    /// Reserved `.keys` override path (loaded in I5; ignored in I4).
+    /// Optional `.keys` override path; loaded as a delta at build (I5).
     keys_path: Option<&'static str>,
 }
 
@@ -65,18 +69,40 @@ impl<A: Actionlike> InputPlugin<A> {
         }
     }
 
-    /// Sets a `.keys` override path. Reserved for I5 (`.keys` persistence); in I4
-    /// the path is stored but the default map is inserted unchanged.
+    /// Sets a `.keys` override path. At [`build`](Plugin::build), if the file is
+    /// present and readable, its bindings are loaded as an override-delta over the
+    /// default map (plan §9.3); otherwise the default map is used unchanged.
     #[inline]
     pub fn with_keys_path(mut self, path: &'static str) -> Self {
         self.keys_path = Some(path);
         self
     }
 
-    /// The configured `.keys` override path, if any (I5 seam).
+    /// The configured `.keys` override path, if any.
     #[inline]
     pub fn keys_path(&self) -> Option<&'static str> {
         self.keys_path
+    }
+
+    /// Resolves the map to insert: the default map, or — if a `keys_path` is set
+    /// and the file is present and readable — the default map with the `.keys`
+    /// override-delta applied (plan §9.3).
+    ///
+    /// A missing/unreadable file silently falls back to the default map (a fresh
+    /// install has no override). Per-line parse errors are recoverable and folded
+    /// into the loaded map; they do not abort the build. This is the cold build
+    /// path, so the file read + parse allocations are off the per-frame path.
+    fn resolve_map(&self) -> InputMap<A> {
+        let Some(path) = self.keys_path else {
+            return self.default_map.clone_arena();
+        };
+        let Ok(src) = std::fs::read_to_string(path) else {
+            // No override file yet (or unreadable) — use the default map.
+            return self.default_map.clone_arena();
+        };
+        let mut builder = InputMapBuilder::<A>::from_map(&self.default_map);
+        let _report = load_keys(&src, &mut builder);
+        builder.build()
     }
 }
 
@@ -86,9 +112,9 @@ impl<A: Actionlike> Plugin for InputPlugin<A> {
         app.insert_resource(RawInputQueue::with_capacity(RAW_QUEUE_CAP));
         app.insert_resource(PhysicalInput::default());
         app.insert_resource(ActionState::<A>::with_count(A::COUNT));
-        // I5 seam: a present `keys_path` override would be loaded here as a delta
-        // over `default_map`; for I4 the default map is inserted verbatim.
-        app.insert_resource(self.default_map.clone_arena());
+        // Load the `.keys` override-delta if a path is set and the file reads;
+        // otherwise insert the default map verbatim (plan §9.3 / §7.4).
+        app.insert_resource(self.resolve_map());
 
         // Register the ingest on the Main (variable) step, before the gameplay
         // set — NOT the fixed step (C3, plan §7.3). `before_set` is the
