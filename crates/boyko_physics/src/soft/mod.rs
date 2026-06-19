@@ -35,7 +35,9 @@
 
 pub mod collide;
 pub mod component;
+pub mod coupling;
 pub mod solver;
 
 pub use component::{SoftBody, SoftBodyError};
-pub use solver::physics_soft_step;
+pub use coupling::{SoftRigidReaction, physics_soft_rigid_apply};
+pub use solver::{physics_soft_step, physics_soft_step_coupled};

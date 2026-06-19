@@ -89,3 +89,11 @@ harness = false
 # throughput; not a pass/fail gate (SP1 is the correctness foundation).
 name = "soft_step"
 harness = false
+
+[[bench]]
+# O11 SP2 (observation): the volume-constraint step cost (a tet-meshed cube via
+# `physics_soft_step` — `project_volume` per substep) and the soft↔rigid coupled
+# step cost (`physics_soft_step_coupled` + the deepest-contact broadphase query +
+# `physics_soft_rigid_apply`). Reports per-step time; not a pass/fail gate.
+name = "soft_step_sp2"
+harness = false

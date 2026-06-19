@@ -57,7 +57,7 @@ pub use resources::{
     PhysicsConfig, SolverScratch, TouchedMask,
 };
 pub use sdf_query::{SdfField, sample_sdf};
-pub use soft::{SoftBody, SoftBodyError};
+pub use soft::{SoftBody, SoftBodyError, SoftRigidReaction};
 pub use solver::{ColoredSoftStepSolver, NoopSolver, RigidSolver, SoftStepSolver};
 pub use systems::{
     body_bounding_radius, physics_apply, physics_broadphase, physics_build_graph, physics_gather,

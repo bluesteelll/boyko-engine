@@ -11,6 +11,9 @@
 
 use boyko_macros::Component;
 
+use crate::math::Vec3;
+use crate::soft::solver::DENOM_EPS;
+
 /// Construction-time validation failure for a [`SoftBody`] (plan SP1).
 ///
 /// All variants are caught at construction by [`SoftBody::from_mesh`] /
@@ -31,6 +34,11 @@ pub enum SoftBodyError {
     TooManyParticles,
     /// An edge connects a particle to itself (`a == b`) — a degenerate constraint.
     SelfEdge,
+    /// A tetrahedron is degenerate at rest (SP2 D1): its four vertices are not
+    /// distinct, or they are coplanar (`|V0| < DENOM_EPS`), so the signed-volume
+    /// constraint has no usable gradient. Rejected at construction so the volume
+    /// sweep never divides by a vanishing denominator on the hot path.
+    DegenerateTet,
 }
 
 /// One XPBD soft body — a particle cloud tied by distance constraints (plan SP1,
@@ -82,6 +90,62 @@ pub struct SoftBody {
     /// Per-constraint XPBD compliance α (inverse stiffness; `0.0` = perfectly
     /// stiff).
     pub c_compliance: Vec<f32>,
+    /// Tetrahedron vertex 0 (particle index `< particle_count()`) — SP2 D1.
+    ///
+    /// `t0`/`t1`/`t2`/`t3` are the four corners of each volume-constraint
+    /// tetrahedron, all length [`tet_count()`](Self::tet_count). SP1-only bodies
+    /// have empty tet columns, so the volume sweep `0..tet_count()` is a per-body
+    /// no-op (the per-body 0%-gate).
+    pub t0: Vec<u32>,
+    /// Tetrahedron vertex 1 (SP2 D1).
+    pub t1: Vec<u32>,
+    /// Tetrahedron vertex 2 (SP2 D1).
+    pub t2: Vec<u32>,
+    /// Tetrahedron vertex 3 (SP2 D1).
+    pub t3: Vec<u32>,
+    /// Per-tet SIGNED rest volume `V0` (SP2 D1) — the target of the volume
+    /// constraint `C = V - V0`. Computed at construction with the IDENTICAL op
+    /// sequence as the solve so `C` is exactly `0` at rest.
+    pub t_rest: Vec<f32>,
+    /// Per-tet XPBD compliance α (inverse stiffness; `0.0` = perfectly stiff) —
+    /// SP2 D1.
+    pub t_compliance: Vec<f32>,
+    /// Per-particle coupling velocity-baseline position X (SP2 D6/D4, W1) —
+    /// scratch.
+    ///
+    /// Length `particle_count()`, preallocated, written ONLY on the soft↔rigid
+    /// coupling path. It records each coupled particle's position BEFORE the coupling
+    /// push so the velocity update can exclude that push (the momentum exchange is
+    /// carried by the rigid reaction, not the position diff); the post-coupling
+    /// SDF-collide displacement is then folded in (SP2 W1), so the baseline excludes
+    /// ONLY the coupling push and the SDF push still reaches the coupled velocity.
+    /// Untouched (and unread) on the SP1 / non-coupling path.
+    pub coupling_prev_x: Vec<f32>,
+    /// Per-particle pre-coupling-push position Y (SP2 D6/D4) — scratch.
+    pub coupling_prev_y: Vec<f32>,
+    /// Per-particle pre-coupling-push position Z (SP2 D6/D4) — scratch.
+    pub coupling_prev_z: Vec<f32>,
+    /// Per-particle accumulated coupling velocity delta X (SP2 D7) — scratch.
+    ///
+    /// Length `particle_count()`, preallocated, written ONLY on the coupling path.
+    /// Holds the D7 particle impulse `p_imp · w_particle` for a particle the
+    /// coupling pushed this substep, so the velocity update can apply the D4
+    /// baseline `(coupling_prev − prev)·inv_h` AND add the D7 momentum exchange on
+    /// top (the position diff alone excludes the push). Untouched / unread off the
+    /// coupling path.
+    pub coupling_dv_x: Vec<f32>,
+    /// Per-particle accumulated coupling velocity delta Y (SP2 D7) — scratch.
+    pub coupling_dv_y: Vec<f32>,
+    /// Per-particle accumulated coupling velocity delta Z (SP2 D7) — scratch.
+    pub coupling_dv_z: Vec<f32>,
+    /// Per-particle "was pushed by coupling this substep" flag (SP2 D6) — scratch.
+    ///
+    /// Length `particle_count()`, preallocated, `1` iff the coupling pushed the
+    /// particle this substep (reset to `0` each substep before the coupling pass).
+    /// The velocity update reads it to choose the D4 `coupling_prev` baseline +
+    /// D7 delta over the plain SP1 position diff. Untouched / unread off the
+    /// coupling path.
+    pub coupling_hit: Vec<u8>,
     /// Collision radius of each particle against the SDF (world units; `>= 0`).
     pub particle_radius: f32,
 }
@@ -159,6 +223,125 @@ impl SoftBody {
         )
     }
 
+    /// Builds a soft body with distance constraints AND volume-constraint
+    /// tetrahedra (SP2 D1/D2).
+    ///
+    /// The particle / edge build is identical to [`from_mesh`](Self::from_mesh)
+    /// (one `edge_compliance` broadcast to every edge; `rest_len` optionally
+    /// supplies per-edge rest lengths, else the initial distance). `tets` are the
+    /// volume constraints as `(v0, v1, v2, v3)` particle-index quads;
+    /// `tet_compliance` is broadcast to every tet. `rest_vol` optionally supplies a
+    /// per-tet signed rest volume `V0`; when `None`, each `V0` is computed from the
+    /// initial positions with the IDENTICAL op sequence as the solve, so the
+    /// constraint `C = V - V0` is exactly `0` at rest.
+    ///
+    /// # Errors
+    ///
+    /// As [`from_mesh`](Self::from_mesh), plus:
+    /// - [`SoftBodyError::LengthMismatch`] if `rest_vol` is `Some` with
+    ///   `rest_vol.len() != tets.len()`.
+    /// - [`SoftBodyError::IndexOutOfRange`] if a tet vertex is `>= positions.len()`.
+    /// - [`SoftBodyError::NonFinite`] if `tet_compliance` or a supplied `rest_vol`
+    ///   is not finite.
+    /// - [`SoftBodyError::DegenerateTet`] if a tet's four vertices are not distinct,
+    ///   or are coplanar at rest (`|V0| < DENOM_EPS` — no usable gradient).
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_tet_mesh(
+        positions: &[[f32; 3]],
+        inv_masses: &[f32],
+        edges: &[(u32, u32)],
+        tets: &[(u32, u32, u32, u32)],
+        rest_len: Option<&[f32]>,
+        rest_vol: Option<&[f32]>,
+        edge_compliance: f32,
+        tet_compliance: f32,
+        radius: f32,
+    ) -> Result<Self, SoftBodyError> {
+        if !tet_compliance.is_finite() {
+            return Err(SoftBodyError::NonFinite);
+        }
+        if let Some(rv) = rest_vol
+            && rv.len() != tets.len()
+        {
+            return Err(SoftBodyError::LengthMismatch);
+        }
+        if let Some(rv) = rest_vol
+            && rv.iter().any(|v| !v.is_finite())
+        {
+            return Err(SoftBodyError::NonFinite);
+        }
+
+        // Reuse the SP1 validating build for particles + edges (byte-identical to
+        // `from_mesh`); then validate + append the tet columns.
+        let mut body = Self::build(
+            positions,
+            inv_masses,
+            edges,
+            rest_len,
+            Compliance::Uniform(edge_compliance),
+            radius,
+        )?;
+
+        let n_u32 = body.particle_count() as u32;
+        let k = tets.len();
+        let mut t0 = Vec::with_capacity(k);
+        let mut t1 = Vec::with_capacity(k);
+        let mut t2 = Vec::with_capacity(k);
+        let mut t3 = Vec::with_capacity(k);
+        let mut t_rest = Vec::with_capacity(k);
+        for (ti, &(a, b, c, d)) in tets.iter().enumerate() {
+            if a >= n_u32 || b >= n_u32 || c >= n_u32 || d >= n_u32 {
+                return Err(SoftBodyError::IndexOutOfRange);
+            }
+            if a == b || a == c || a == d || b == c || b == d || c == d {
+                return Err(SoftBodyError::DegenerateTet);
+            }
+            // Compute the signed rest volume with the IDENTICAL op sequence as the
+            // solve's `project_volume` (edge-anchored at p0, pinned cross operand
+            // order, dot left-to-right, the `1/6` factor kept) so the runtime
+            // `C = V - V0` is exactly `0` at rest when `rest_vol` is `None`.
+            let p0 = Self::particle_pos(&body, a as usize);
+            let p1 = Self::particle_pos(&body, b as usize);
+            let p2 = Self::particle_pos(&body, c as usize);
+            let p3 = Self::particle_pos(&body, d as usize);
+            let e1 = p1 - p0;
+            let e2 = p2 - p0;
+            let e3 = p3 - p0;
+            let v0_computed = (1.0 / 6.0) * e1.cross(e2).dot(e3);
+            let v0 = match rest_vol {
+                Some(rv) => rv[ti],
+                None => v0_computed,
+            };
+            // Reject a coplanar/degenerate tet (no usable signed-volume gradient).
+            // The check is on the GEOMETRY (`v0_computed`), not the supplied target,
+            // so a finite-but-tiny authored `rest_vol` cannot smuggle a collapsed
+            // tet past the guard.
+            if v0_computed.abs() < DENOM_EPS {
+                return Err(SoftBodyError::DegenerateTet);
+            }
+            t0.push(a);
+            t1.push(b);
+            t2.push(c);
+            t3.push(d);
+            t_rest.push(v0);
+        }
+
+        body.t0 = t0;
+        body.t1 = t1;
+        body.t2 = t2;
+        body.t3 = t3;
+        body.t_rest = t_rest;
+        body.t_compliance = vec![tet_compliance; k];
+        Ok(body)
+    }
+
+    /// Reads particle `i`'s current position as a [`Vec3`] (construction helper for
+    /// the rest-volume computation).
+    #[inline]
+    fn particle_pos(body: &Self, i: usize) -> Vec3 {
+        Vec3::new(body.pos_x[i], body.pos_y[i], body.pos_z[i])
+    }
+
     /// Number of particles (the length of every particle column).
     #[inline]
     pub fn particle_count(&self) -> usize {
@@ -169,6 +352,13 @@ impl SoftBody {
     #[inline]
     pub fn constraint_count(&self) -> usize {
         self.c_a.len()
+    }
+
+    /// Number of volume-constraint tetrahedra (the length of every tet column) —
+    /// SP2 D1. `0` for an SP1-only body, so the volume sweep is a per-body no-op.
+    #[inline]
+    pub fn tet_count(&self) -> usize {
+        self.t0.len()
     }
 
     /// The single validating construction path shared by both public constructors.
@@ -285,6 +475,23 @@ impl SoftBody {
             c_b,
             c_rest,
             c_compliance,
+            // SP1-only body: empty tet columns ⇒ the volume sweep `0..0` is a
+            // per-body no-op (the SP2 0%-gate). The coupling scratch is
+            // preallocated to `n` (so the coupling path is zero per-step alloc)
+            // but never read on the SP1 / non-coupling path.
+            t0: Vec::new(),
+            t1: Vec::new(),
+            t2: Vec::new(),
+            t3: Vec::new(),
+            t_rest: Vec::new(),
+            t_compliance: Vec::new(),
+            coupling_prev_x: vec![0.0; n],
+            coupling_prev_y: vec![0.0; n],
+            coupling_prev_z: vec![0.0; n],
+            coupling_dv_x: vec![0.0; n],
+            coupling_dv_y: vec![0.0; n],
+            coupling_dv_z: vec![0.0; n],
+            coupling_hit: vec![0; n],
             particle_radius: radius,
         })
     }

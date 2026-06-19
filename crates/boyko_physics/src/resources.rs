@@ -233,6 +233,34 @@ pub struct PhysicsConfig {
     /// 0%-gate); enabling it is the entire opt-in (and a world must also register the
     /// stage via [`add_physics_soft`](crate::plugin::add_physics_soft)).
     pub soft_body: bool,
+    /// SP2 D5(a): per-substep VISCOUS velocity damping for soft-body particles
+    /// (default `0.0`).
+    ///
+    /// After each substep's velocity update the velocity is scaled by
+    /// `(1.0 - soft_damping)`. The default `0.0` makes this an EXACT `* 1.0`
+    /// identity, so an SP1-only world is byte-identical (the SP2 0%-gate). Only
+    /// meaningful on the soft path.
+    pub soft_damping: f32,
+    /// SP2 D5(b): hard rest-velocity FLOOR for soft-body particles (default
+    /// `false`).
+    ///
+    /// When `true`, a particle whose post-damping speed² is below
+    /// [`REST_CLAMP_EPS²`](crate::soft::solver::REST_CLAMP_EPS) has its velocity
+    /// zeroed (a squared compare, no `sqrt`), killing residual creep at rest.
+    /// Default OFF so an un-opted world never floors (the SP2 0%-gate). Only
+    /// meaningful on the soft path.
+    pub soft_rest_clamp: bool,
+    /// SP2 D6/D7: two-way soft↔rigid COUPLING (default `false`).
+    ///
+    /// When `true` (AND the pipeline was wired with coupling via
+    /// [`add_physics_soft`](crate::plugin::add_physics_soft) `coupling == true`), the
+    /// coupled soft step resolves per-particle soft-vs-rigid collisions against the
+    /// rigid frame-N snapshot and applies the equal-and-opposite reaction to the
+    /// rigid bodies AFTER `physics_apply`. Default OFF so an un-opted world is
+    /// byte-identical (the SP2 0%-gate); the coupling is a pure opt-in. The flag is
+    /// read by the coupled step — when the pipeline is wired for coupling but this
+    /// flag is `false`, the coupled step behaves exactly like the non-coupling step.
+    pub soft_rigid_coupling: bool,
 }
 
 /// Default per-island sleep SPEED² threshold (plan O8 / Decision 5).
@@ -293,6 +321,14 @@ impl Default for PhysicsConfig {
             // Default OFF so an un-opted world runs no soft-body work (the campaign
             // 0%-gate); the SP1 XPBD pass is a pure opt-in.
             soft_body: false,
+            // SP2 D5(a): default `0.0` ⇒ the viscous scale is an exact `* 1.0`
+            // identity, so an SP1-only world is byte-identical (the SP2 0%-gate).
+            soft_damping: 0.0,
+            // SP2 D5(b): default OFF so an un-opted world never floors velocity.
+            soft_rest_clamp: false,
+            // SP2 D6/D7: default OFF so an un-opted world has no soft↔rigid coupling
+            // (the SP2 0%-gate); the coupling is a pure opt-in.
+            soft_rigid_coupling: false,
         }
     }
 }
@@ -487,6 +523,66 @@ impl BroadphaseGrid {
     #[inline]
     fn n_cells(&self) -> usize {
         self.dims[0] as usize * self.dims[1] as usize * self.dims[2] as usize
+    }
+
+    /// The linear cell index a world position falls into (SP2 D6 coupling
+    /// accessor) — wraps the private [`cell_coord`](Self::cell_coord) +
+    /// [`cell_index`](Self::cell_index). Always in `[0, n_cells)` (the coordinate
+    /// is clamped per axis).
+    #[inline]
+    pub fn cell_of(&self, p: Vec3) -> u32 {
+        self.cell_index(self.cell_coord(p))
+    }
+
+    /// The grid resolution along each axis (`dims.x · dims.y · dims.z ==
+    /// n_cells`) — SP2 D6 coupling accessor for the 27-cell neighbourhood walk.
+    #[inline]
+    pub fn dims(&self) -> [u32; 3] {
+        self.dims
+    }
+
+    /// `true` once a [`build`](Self::build) / [`build_parallel`](Self::build_parallel)
+    /// has populated the CSR (`cell_start` is `n_cells + 1` long); `false` for a
+    /// freshly [`with_capacity`](Self::with_capacity)-constructed grid that has not
+    /// been built (`cell_start` empty).
+    ///
+    /// SP2 M1 coupling precondition probe: the coupled soft step
+    /// ([`physics_soft_step_coupled`](crate::soft::physics_soft_step_coupled))
+    /// `debug_assert!`s this when coupling is on and bodies exist, since its
+    /// `deepest_contact` reads the CSR slices — an unbuilt grid would be a silent
+    /// no-op (see `add_physics_pipeline`, which forces
+    /// [`BroadphaseKind::Grid`](BroadphaseKind) on the coupling path).
+    #[inline]
+    pub fn is_built(&self) -> bool {
+        !self.cell_start.is_empty()
+    }
+
+    /// The bodies bucketed into cell `cell`, in ascending dense-row order (SP2 D6
+    /// coupling accessor) — the CSR slice `cell_bodies[cell_start[cell]..cell_start
+    /// [cell + 1]]`.
+    ///
+    /// Returns an empty slice when the grid has not been built yet
+    /// (`cell_start.is_empty()` — an empty world) or `cell` is out of range, so the
+    /// caller can iterate any candidate cell index without a separate guard.
+    #[inline]
+    pub fn cell_body_slice(&self, cell: u32) -> &[u32] {
+        let c = cell as usize;
+        // `cell_start` is `n_cells + 1` long after a build; empty before the first
+        // build. Guard both so an out-of-range / pre-build cell yields `&[]`.
+        if c + 1 >= self.cell_start.len() {
+            return &[];
+        }
+        let start = self.cell_start[c] as usize;
+        let end = self.cell_start[c + 1] as usize;
+        &self.cell_bodies[start..end]
+    }
+
+    /// The oversized bodies — those spanning more than [`MAX_CELL_SPAN`] cells on
+    /// some axis, never bucketed into a cell (SP2 D6 coupling accessor). The
+    /// coupling walks these as a separate pass alongside the 27-cell neighbourhood.
+    #[inline]
+    pub fn oversized_slice(&self) -> &[u32] {
+        &self.oversized
     }
 
     /// Maps a world position to its integer cell coordinate, clamped into

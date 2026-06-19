@@ -14,11 +14,13 @@ use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::schedule::ScheduleBuilder;
 
 use crate::resources::{
-    BroadphaseGrid, ConstraintGraph, ContactPairs, IntegrationMode, IslandSleep, Manifolds,
-    PhysicsConfig, SolverScratch,
+    BroadphaseGrid, BroadphaseKind, ConstraintGraph, ContactPairs, IntegrationMode, IslandSleep,
+    Manifolds, PhysicsConfig, SolverScratch,
 };
 use crate::sdf_query::SdfField;
-use crate::soft::physics_soft_step;
+use crate::soft::{
+    SoftRigidReaction, physics_soft_rigid_apply, physics_soft_step, physics_soft_step_coupled,
+};
 use crate::solver::colored::ColoredSoftStepSolver;
 use crate::solver::RigidSolver;
 use crate::systems::{
@@ -120,7 +122,7 @@ pub fn add_physics_systems<S: RigidSolver + Default>(
     // `with_sdf = false`, `colored = false`, `soft = false`: body-only pipeline (no
     // `SdfField`, no SDF stage, no constraint-graph stage, no soft pass) —
     // byte-identical to the shipped path.
-    add_physics_pipeline::<S>(builder, world, false, false, false, false)
+    add_physics_pipeline::<S>(builder, world, false, false, false, false, false)
 }
 
 /// Inserts the physics resources INCLUDING the [`ConstraintGraph`] and registers
@@ -144,7 +146,7 @@ pub fn add_physics_colored<S: RigidSolver + Default>(
     builder: &mut ScheduleBuilder,
     world: &mut EcsMaster,
 ) -> PhysicsStageKeys {
-    add_physics_pipeline::<S>(builder, world, false, true, false, false)
+    add_physics_pipeline::<S>(builder, world, false, true, false, false, false)
 }
 
 /// Inserts the physics resources and registers the COLORED-SOLVE pipeline (Phase
@@ -180,7 +182,7 @@ pub fn add_physics_colored_solve(
     builder: &mut ScheduleBuilder,
     world: &mut EcsMaster,
 ) -> PhysicsStageKeys {
-    add_physics_pipeline::<ColoredSoftStepSolver>(builder, world, false, true, true, false)
+    add_physics_pipeline::<ColoredSoftStepSolver>(builder, world, false, true, true, false, false)
 }
 
 /// Inserts the physics resources INCLUDING an (empty) [`SdfField`] and registers
@@ -201,7 +203,7 @@ pub fn add_physics_sdf<S: RigidSolver + Default>(
     builder: &mut ScheduleBuilder,
     world: &mut EcsMaster,
 ) -> PhysicsStageKeys {
-    add_physics_pipeline::<S>(builder, world, true, false, false, false)
+    add_physics_pipeline::<S>(builder, world, true, false, false, false, false)
 }
 
 /// Inserts the physics resources and registers the physics pipeline WITH the SP1
@@ -217,18 +219,37 @@ pub fn add_physics_sdf<S: RigidSolver + Default>(
 ///   and BEFORE `apply`, so it runs as a SEPARATE position pass on the
 ///   [`SoftBody`](crate::soft::SoftBody) columns once the rigid solve has finished.
 ///
-/// The soft step is a STRICTLY DISJOINT integrator: it never reads or writes the
-/// rigid [`SolverScratch`], never sets a touched bit, and never enters
-/// `physics_apply`, so the rigid simulation is byte-identical whether the soft pass
-/// runs or not. Opt-in: a world that uses [`add_physics_systems`] is byte-for-byte
-/// unaffected (the soft stage is never registered — the campaign 0%-gate). The
-/// returned [`PhysicsStageKeys::soft_step`] carries the soft stage's descriptor
-/// index.
+/// The soft step is a STRICTLY DISJOINT integrator: it never WRITES the rigid
+/// [`SolverScratch`], never sets a touched bit, and never enters `physics_apply`,
+/// so the rigid simulation is byte-identical whether the soft pass runs or not.
+/// Opt-in: a world that uses [`add_physics_systems`] is byte-for-byte unaffected
+/// (the soft stage is never registered — the campaign 0%-gate). The returned
+/// [`PhysicsStageKeys::soft_step`] carries the soft stage's descriptor index.
+///
+/// # Soft↔rigid coupling (`coupling`, SP2 D6/D7)
+///
+/// When `coupling == false` the WHOLE schedule shape is byte-identical to SP1: the
+/// uncoupled [`physics_soft_step`](crate::soft::physics_soft_step) is registered
+/// (no extra params, no extra resources) and no apply-side reaction stage exists.
+///
+/// When `coupling == true` the coupled
+/// [`physics_soft_step_coupled`](crate::soft::physics_soft_step_coupled) is
+/// registered in its place (it additionally READS the rigid frame-N snapshot +
+/// broadphase grid and accumulates the rigid reaction), a
+/// [`SoftRigidReaction`](crate::soft::SoftRigidReaction) resource is inserted, and
+/// [`physics_soft_rigid_apply`](crate::soft::physics_soft_rigid_apply) is registered
+/// `.after(apply)` to land the reaction on the
+/// [`RigidBody`](crate::components::RigidBody) component (like an external force).
+/// The coupling still never mutates the rigid scratch (IM-1 safety); the actual
+/// per-particle coupling work is additionally gated by
+/// [`PhysicsConfig::soft_rigid_coupling`](crate::resources::PhysicsConfig) (set
+/// `true` here when `coupling == true`).
 pub fn add_physics_soft<S: RigidSolver + Default>(
     builder: &mut ScheduleBuilder,
     world: &mut EcsMaster,
+    coupling: bool,
 ) -> PhysicsStageKeys {
-    add_physics_pipeline::<S>(builder, world, false, false, false, true)
+    add_physics_pipeline::<S>(builder, world, false, false, false, true, coupling)
 }
 
 /// Shared wiring for [`add_physics_systems`] (`with_sdf = false`,
@@ -239,6 +260,7 @@ pub fn add_physics_soft<S: RigidSolver + Default>(
 /// resources and registers the pipeline, optionally splicing the SDF-collision
 /// stage and/or the constraint-graph stage between narrowphase and solve, and
 /// selecting the default or the colored solve stage.
+#[allow(clippy::too_many_arguments)]
 fn add_physics_pipeline<S: RigidSolver + Default>(
     builder: &mut ScheduleBuilder,
     world: &mut EcsMaster,
@@ -246,6 +268,7 @@ fn add_physics_pipeline<S: RigidSolver + Default>(
     colored: bool,
     colored_solve: bool,
     soft: bool,
+    coupling: bool,
 ) -> PhysicsStageKeys {
     // The colored solve requires the constraint graph; the type system cannot
     // express it, so guard the invariant the callers uphold.
@@ -253,12 +276,35 @@ fn add_physics_pipeline<S: RigidSolver + Default>(
         !colored_solve || colored,
         "invariant: the colored solve stage requires the constraint graph (colored == true)"
     );
+    debug_assert!(
+        !coupling || soft,
+        "invariant: soft↔rigid coupling requires the soft pass (soft == true)"
+    );
     // Reused, capacity-preserving step buffers (principle 5 — no per-step alloc).
     // The `colored` flag rides the config so `physics_build_graph` (registered only
     // when `colored`) and any future graph consumer share one switch.
     world.insert_resource(PhysicsConfig {
         colored,
         soft_body: soft,
+        // SP2 D6/D7: the runtime coupling gate rides the config so the coupled step
+        // (registered only when `coupling`) reads one switch.
+        soft_rigid_coupling: coupling,
+        // SP2 M1: the coupled soft step's `deepest_contact` walks the
+        // `BroadphaseGrid`'s CSR cell slices + oversized list, which are populated
+        // ONLY when `physics_broadphase` takes the `BroadphaseKind::Grid` arm
+        // (`grid.build`). The default `AllPairs` arm never touches the grid, so
+        // coupling would read empty slices ⇒ zero contacts ⇒ a silent no-op. The
+        // grid is a HARD PREREQUISITE for coupling, so force it on the coupling path
+        // (it is O2's proven path, bit-identical to all-pairs post-filter — safe to
+        // mandate). `broadphase` runs `.after(gather)` and the coupled step
+        // `.after(solve)` (itself after broadphase), so the grid is built before the
+        // coupled step reads it. Off the coupling path the default `AllPairs` is
+        // preserved (the 0%-gate).
+        broadphase: if coupling {
+            BroadphaseKind::Grid
+        } else {
+            PhysicsConfig::default().broadphase
+        },
         ..PhysicsConfig::default()
     });
     world.insert_resource(ContactPairs::with_capacity(INITIAL_BODY_CAPACITY));
@@ -292,6 +338,15 @@ fn add_physics_pipeline<S: RigidSolver + Default>(
         // collision. An empty field collides nothing, so a soft-only world that
         // never fills it is unaffected.
         world.insert_resource(SdfField::default());
+    }
+    if coupling {
+        // SP2 D6/D7: the per-body soft→rigid reaction accumulator (capacity-reused,
+        // cleared per frame — zero per-step alloc). Inserted ONLY on the coupling
+        // path so the coupled step's `ResMut<SoftRigidReaction>` and
+        // `physics_soft_rigid_apply`'s param resolve; the non-coupling paths never
+        // register either stage, so the resource is unnecessary there (the 0%-gate
+        // on the schedule SHAPE).
+        world.insert_resource(SoftRigidReaction::with_capacity(INITIAL_BODY_CAPACITY));
     }
 
     // C2: stamp the integration mode from the chosen solver BEFORE inserting the
@@ -390,17 +445,37 @@ fn add_physics_pipeline<S: RigidSolver + Default>(
     // matches the plan's placement. Registered only when `soft` (the 0%-gate: a
     // non-soft schedule never registers this stage). The `apply` key already exists
     // (registered above), so the `.before(apply)` edge resolves.
+    //
+    // SP2 D6/D7: on the coupling path the coupled step
+    // (`physics_soft_step_coupled`) is registered IN PLACE of the uncoupled step —
+    // the two never both run. When `coupling == false` the schedule shape is
+    // byte-identical to SP1 (the uncoupled step, no apply-side reaction stage), so
+    // the schedule-shape 0%-gate holds.
     let soft_step_key = if soft {
-        Some(
+        let cfg = if coupling {
+            builder
+                .add_system(physics_soft_step_coupled)
+                .after(solve)
+                .before(apply)
+        } else {
             builder
                 .add_system(physics_soft_step)
                 .after(solve)
                 .before(apply)
-                .key(),
-        )
+        };
+        Some(cfg.key())
     } else {
         None
     };
+
+    // SP2 D7 apply path: the reaction lands on the `RigidBody` component AFTER
+    // `physics_apply` (like an external force), so it is registered `.after(apply)`
+    // ONLY on the coupling path. The `apply` key already exists (registered above),
+    // so the `.after(apply)` edge resolves. Off the coupling path this stage does
+    // not exist — the schedule-shape 0%-gate.
+    if coupling {
+        builder.add_system(physics_soft_rigid_apply).after(apply);
+    }
 
     PhysicsStageKeys {
         integrate: integrate.0,
