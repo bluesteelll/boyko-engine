@@ -1,21 +1,40 @@
-//! Slice-1 — a raw Win32 window (no winit / no windows-sys), the on-screen seam.
+//! Slice-1 — a raw Win32 window (no winit), the on-screen seam.
 //!
 //! Per `docs/RENDER-PHYSICS-GPU-PLAN.md` D8 ("окно наше" — our window), the
 //! foundation's first on-screen path uses a hand-rolled Win32 window via raw FFI
 //! to `user32` / `kernel32` (mirroring the `boyko_ecs::ecs::memory::vm.rs`
 //! `LoadLibrary`/`extern "system"` discipline). The Vulkan surface
 //! ([`crate::swapchain::Surface`]) is created from this window's `HWND` +
-//! `HINSTANCE`.
+//! `HINSTANCE`. The INPUT FFI it uses (`SetWindowLongPtrW` / `GetRawInputData` /
+//! the `RAWINPUT*` structs and `WM_*` / `GWLP_USERDATA` constants) comes from the
+//! official MS-maintained `windows-sys` bindings, re-exported through
+//! [`crate::ffi::os`]; the window-creation / message-pump FFI stays hand-rolled
+//! (its `HWND`/`HINSTANCE` are `*mut c_void`, identical to the windows-sys aliases,
+//! so no cast is needed at the input call sites).
 //!
 //! # The window-procedure / close contract
 //!
-//! A `WNDPROC` is a plain `extern "system" fn` and cannot capture state. Rather
-//! than juggle a raw pointer through `GWLP_USERDATA`, the close signal flows
-//! through the message queue itself: the OS routes `WM_CLOSE` → `DefWindowProcW`
-//! → `WM_DESTROY`, the `window_proc` handles `WM_DESTROY` by calling
-//! `PostQuitMessage(0)`, and [`Window::pump_events`] reports "should close" the
-//! moment `PeekMessageW` yields a `WM_QUIT`. This needs no shared mutable state
-//! in the callback (the spec-mandated source of `WM_QUIT`).
+//! A `WNDPROC` is a plain `extern "system" fn` and cannot capture state. The
+//! close signal flows through the message queue itself: the OS routes `WM_CLOSE`
+//! → `DefWindowProcW` → `WM_DESTROY`, the `window_proc` handles `WM_DESTROY` by
+//! calling `PostQuitMessage(0)`, and [`Window::pump_events`] reports "should
+//! close" the moment `PeekMessageW` yields a `WM_QUIT`.
+//!
+//! # Input capture (I6 / I6b)
+//!
+//! Keyboard / mouse messages DO need shared state — a ring the stateless
+//! `window_proc` writes into and [`Window::drain_input`] reads. That ring is
+//! reached via the one per-window pointer slot `SetWindowLongPtrW(GWLP_USERDATA)`
+//! provides: [`Window::open`] boxes an [`InputRing`], stores its raw pointer in
+//! the slot, and `window_proc` retrieves it. The pointer is cleared and the box
+//! reclaimed on `WM_DESTROY` so it never outlives the window. The proc captures
+//! raw `(msg, wparam, lparam)` triples ([`CapturedMsg`]) — it does NOT translate
+//! them, keeping `boyko_input` (which owns `translate`) a leaf with no edge from
+//! this crate. The one exception is `WM_INPUT` (I6b): its `lParam` is a transient
+//! `HRAWINPUT` handle only valid inside the message, so the proc parses the
+//! `RAWINPUT` blob immediately (FFI) and stores the resulting relative delta as a
+//! [`CapturedMsg::RawMouse`] variant the edge maps via
+//! `boyko_input::win32::translate_raw_mouse`.
 //!
 //! # Lifetime / teardown
 //!
@@ -33,6 +52,12 @@
 #[cfg(windows)]
 use core::ffi::c_void;
 
+/// Capacity of the per-window captured-input ring (I6/I6b). A power of two for a
+/// branchless wrap; 1024 comfortably absorbs a single frame's input burst (it
+/// matches `boyko_input::constants::RAW_QUEUE_CAP`). Overflow is drop-oldest.
+#[cfg(windows)]
+const INPUT_RING_CAP: usize = 1024;
+
 /// Errors from window creation / the OS windowing layer.
 #[derive(Debug)]
 pub enum WindowError {
@@ -45,6 +70,113 @@ pub enum WindowError {
     /// Windowing is not implemented for this OS (non-Windows; the XCB arm is
     /// added when Linux on-screen is first targeted).
     UnsupportedPlatform,
+}
+
+/// One captured input message, as drained by [`Window::drain_input`] (I6/I6b).
+///
+/// The variants carry exactly the data the source-agnostic translation layer
+/// needs, with NO `boyko_input` dependency (the renderer crate stays free of the
+/// input crate — the edge owns the translation):
+///
+/// - [`CapturedMsg::Raw`] — a verbatim Win32 `(msg, wparam, lparam)` triple
+///   (keyboard / mouse-button / move / wheel). The edge feeds it to
+///   `boyko_input::win32::translate(msg, wparam, lparam)`.
+/// - [`CapturedMsg::RawMouse`] — a pre-parsed relative-mouse delta from a
+///   `WM_INPUT` message (I6b), whose transient `HRAWINPUT` handle cannot be
+///   deferred to drain time. The edge feeds it to
+///   `boyko_input::win32::translate_raw_mouse(dx, dy)`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CapturedMsg {
+    /// A verbatim Win32 message triple awaiting `win32::translate`.
+    Raw {
+        /// The `uMsg` (e.g. `WM_KEYDOWN`).
+        msg: u32,
+        /// The `wParam`.
+        wparam: usize,
+        /// The `lParam`.
+        lparam: isize,
+    },
+    /// A parsed relative-mouse delta from `WM_INPUT` (I6b) awaiting
+    /// `win32::translate_raw_mouse`.
+    RawMouse {
+        /// Signed relative X motion (`RAWMOUSE::lLastX`).
+        dx: i32,
+        /// Signed relative Y motion (`RAWMOUSE::lLastY`).
+        dy: i32,
+    },
+}
+
+/// A fixed-capacity drop-oldest ring of [`CapturedMsg`], owned by a [`Window`]
+/// and written by the stateless `window_proc` through a `GWLP_USERDATA` pointer.
+///
+/// Drop-oldest (mirroring `boyko_input::RawInputQueue`'s policy): on a slow
+/// frame the newest input — the player's latest intent — survives; the oldest
+/// stale events are evicted. The ring is drained fully by
+/// [`Window::drain_input`] each frame, so overflow only occurs within a single
+/// frame's burst. `head`/`tail` use a power-of-two mask for a branchless wrap.
+#[cfg(windows)]
+struct InputRing {
+    buf: Box<[CapturedMsg]>,
+    /// Index of the oldest element (read cursor).
+    head: usize,
+    /// Index one past the newest element (write cursor).
+    tail: usize,
+    /// `tail - head`, kept explicit so a full ring is distinguishable from empty
+    /// without sacrificing a slot.
+    len: usize,
+    /// Count of drop-oldest evictions since the last drain (debug observability).
+    dropped: usize,
+}
+
+#[cfg(windows)]
+impl InputRing {
+    /// A placeholder used to fill the freshly-allocated ring; never observed by a
+    /// reader (only `head..head+len` slots are live).
+    const FILL: CapturedMsg = CapturedMsg::RawMouse { dx: 0, dy: 0 };
+
+    /// Allocates a ring of `cap` slots (rounded up to a power of two, min 1) once.
+    fn with_capacity(cap: usize) -> Self {
+        let cap = cap.max(1).next_power_of_two();
+        Self {
+            buf: vec![Self::FILL; cap].into_boxed_slice(),
+            head: 0,
+            tail: 0,
+            len: 0,
+            dropped: 0,
+        }
+    }
+
+    /// Power-of-two index mask for the branchless wrap.
+    #[inline]
+    fn mask(&self) -> usize {
+        self.buf.len() - 1
+    }
+
+    /// Pushes one captured message, evicting the oldest if the ring is full.
+    fn push(&mut self, ev: CapturedMsg) {
+        let mask = self.mask();
+        if self.len == self.buf.len() {
+            // Full: drop the oldest by advancing head before overwriting at tail.
+            self.head = (self.head + 1) & mask;
+            self.dropped += 1;
+        } else {
+            self.len += 1;
+        }
+        self.buf[self.tail] = ev;
+        self.tail = (self.tail + 1) & mask;
+    }
+
+    /// Pops the oldest captured message, or `None` if empty.
+    #[inline]
+    fn pop(&mut self) -> Option<CapturedMsg> {
+        if self.len == 0 {
+            return None;
+        }
+        let ev = self.buf[self.head];
+        self.head = (self.head + 1) & self.mask();
+        self.len -= 1;
+        Some(ev)
+    }
 }
 
 /// A raw Win32 window owning its `HWND` + registered class atom.
@@ -66,6 +198,15 @@ pub struct Window {
     /// Cached client-area dimensions (updated by [`Self::refresh_size`]).
     width: u32,
     height: u32,
+    /// Owning raw pointer to the captured-input ring (I6/I6b). The ring is
+    /// heap-allocated in [`Self::open`] (so its address is stable) and the SAME
+    /// pointer is installed into `GWLP_USERDATA` for the stateless `window_proc`
+    /// to reach. [`Window`] is the SOLE owner: `Drop` calls `DestroyWindow`
+    /// (which synchronously dispatches `WM_DESTROY`, where the proc clears the
+    /// `GWLP_USERDATA` slot so no later message can dereference it) and then
+    /// reclaims the box via `Box::from_raw`. The pointer is never null after a
+    /// successful `open`.
+    input_ring: *mut InputRing,
 }
 
 #[cfg(windows)]
@@ -163,6 +304,43 @@ impl Window {
             os::UpdateWindow(hwnd);
         }
 
+        // I6: allocate the captured-input ring on the heap (stable address) and
+        // install its pointer into the window's `GWLP_USERDATA` slot so the
+        // stateless `window_proc` can reach it. `Box::into_raw` transfers
+        // ownership to the raw pointer; `Window` reclaims it in `Drop`.
+        let input_ring = Box::into_raw(Box::new(InputRing::with_capacity(INPUT_RING_CAP)));
+        // SAFETY: `hwnd` is the live window just created; `SetWindowLongPtrW` with
+        // `GWLP_USERDATA` writes the application's per-window `LONG_PTR` slot. The
+        // stored value is the ring's heap address (reinterpreted as `isize`),
+        // which stays valid until `Drop` clears the slot and frees the box. The
+        // previous slot value is 0 (a fresh window) and is discarded.
+        unsafe {
+            os::SetWindowLongPtrW(hwnd, os::GWLP_USERDATA, input_ring as isize);
+        }
+
+        // I6b: register the system mouse for raw input routed to this window, so
+        // `WM_INPUT` delivers un-accelerated relative deltas. A failure here is
+        // non-fatal: the I6 `WM_MOUSEMOVE`-derived path still functions, so the
+        // window opens regardless (the camera just falls back to accelerated
+        // motion). `dwFlags = 0` means "receive while the window has focus".
+        let rid = os::RAWINPUTDEVICE {
+            usUsagePage: os::HID_USAGE_PAGE_GENERIC,
+            usUsage: os::HID_USAGE_GENERIC_MOUSE,
+            dwFlags: 0,
+            hwndTarget: hwnd,
+        };
+        // SAFETY: `&rid` points to one fully-initialized `#[repr(C)]`
+        // `RAWINPUTDEVICE` (the MS-maintained windows-sys layout); the count is 1
+        // and the size is its own `size_of`, matching the Win64 ABI. The return is
+        // ignored on purpose (see the non-fatal rationale above).
+        unsafe {
+            os::RegisterRawInputDevices(
+                &rid,
+                1,
+                core::mem::size_of::<os::RAWINPUTDEVICE>() as u32,
+            );
+        }
+
         let mut window = Self {
             hwnd,
             hinstance,
@@ -170,6 +348,7 @@ impl Window {
             class_name,
             width,
             height,
+            input_ring,
         };
         window.refresh_size();
         Ok(window)
@@ -253,6 +432,38 @@ impl Window {
             }
         }
     }
+
+    /// Drains every input message captured since the last call, invoking `sink`
+    /// for each in FIFO order (I6/I6b).
+    ///
+    /// Call once per frame AFTER [`pump_events`](Self::pump_events) (the pump
+    /// dispatches the OS messages that `window_proc` captures into the ring). The
+    /// edge maps each [`CapturedMsg`] into a `boyko_input::RawInputEvent` via
+    /// `boyko_input::win32::translate` / `translate_raw_mouse` and pushes it onto
+    /// the `RawInputQueue` — that translation lives at the edge so this crate
+    /// stays free of any `boyko_input` dependency.
+    ///
+    /// Returns the number of drop-oldest evictions the ring suffered since the
+    /// last drain (0 in the common case; a non-zero value means the burst
+    /// exceeded `INPUT_RING_CAP` within one frame).
+    pub fn drain_input(&mut self, mut sink: impl FnMut(CapturedMsg)) -> usize {
+        // SAFETY: `self.input_ring` is the box installed in `open` and not yet
+        // freed (only `Drop` frees it). `&mut self` guarantees no other reference
+        // to the ring is live on this thread, and `window_proc` runs only inside
+        // a `DispatchMessageW` call (within `pump_events`), never concurrently
+        // with `drain_input`. The pointer is non-null after a successful `open`.
+        let ring = unsafe { &mut *self.input_ring };
+        let dropped = ring.dropped;
+        while let Some(ev) = ring.pop() {
+            sink(ev);
+        }
+        ring.dropped = 0;
+        debug_assert!(
+            dropped == 0,
+            "Window input ring overflow — raise INPUT_RING_CAP"
+        );
+        dropped
+    }
 }
 
 #[cfg(windows)]
@@ -264,22 +475,37 @@ impl Drop for Window {
         // owned `class_name`) is unregistered exactly once, in reverse order. The
         // Vulkan surface that borrowed this `hwnd` is destroyed by the caller
         // BEFORE the window is dropped (teardown order is the caller's contract).
+        // `DestroyWindow` synchronously dispatches `WM_DESTROY` to `window_proc`,
+        // which clears the `GWLP_USERDATA` slot, so no later message can
+        // dereference the ring pointer once `DestroyWindow` returns.
         unsafe {
             os::DestroyWindow(self.hwnd);
             os::UnregisterClassW(self.class_name.as_ptr(), self.hinstance);
+        }
+        // SAFETY: `self.input_ring` was produced by `Box::into_raw` in `open` and
+        // is owned solely by this `Window`; it has not been freed (only this
+        // `Drop` frees it). After `DestroyWindow` above, the OS has finished
+        // dispatching messages to `window_proc`, so no callback holds an aliasing
+        // `&mut` to the ring. Reclaiming the box here drops it exactly once.
+        unsafe {
+            drop(Box::from_raw(self.input_ring));
         }
         let _ = self.class_atom;
     }
 }
 
-/// The window procedure. Handles `WM_DESTROY` by posting a quit message (so the
-/// pump's `WM_QUIT` check reports close), `WM_CLOSE` by destroying the window,
-/// and forwards everything else to `DefWindowProcW`.
+/// The window procedure. Handles `WM_CLOSE`/`WM_DESTROY` for the close contract,
+/// captures keyboard / mouse / wheel / raw-input messages into the per-window
+/// ring (I6/I6b), and forwards everything to `DefWindowProcW` for default
+/// handling.
 ///
 /// # Safety
 ///
 /// This is an FFI callback the OS invokes with a valid `hwnd` and message
-/// parameters; it dereferences nothing and only calls back into `user32`.
+/// parameters. It reads the per-window ring pointer from `GWLP_USERDATA` (set in
+/// [`Window::open`], cleared on `WM_DESTROY`), so a dereference happens only
+/// while that pointer is a live, exclusively-owned [`InputRing`]; see the inline
+/// SAFETY comments.
 #[cfg(windows)]
 unsafe extern "system" fn window_proc(
     hwnd: *mut c_void,
@@ -296,14 +522,115 @@ unsafe extern "system" fn window_proc(
             0
         }
         os::WM_DESTROY => {
-            // SAFETY: a parameterless OS call that enqueues `WM_QUIT`.
-            unsafe { os::PostQuitMessage(0) };
+            // Clear the ring pointer BEFORE the window dies so no late-dispatched
+            // message can dereference it (the box is freed by `Window::drop`,
+            // which runs after `DestroyWindow` returns).
+            // SAFETY: `hwnd` is the OS-supplied live window; writing 0 to its
+            // `GWLP_USERDATA` slot is the documented way to invalidate the
+            // application pointer. `PostQuitMessage` is a parameterless OS call.
+            unsafe {
+                os::SetWindowLongPtrW(hwnd, os::GWLP_USERDATA, 0);
+                os::PostQuitMessage(0);
+            }
             0
+        }
+        os::WM_KEYDOWN | os::WM_KEYUP | os::WM_SYSKEYDOWN | os::WM_SYSKEYUP
+        | os::WM_MOUSEMOVE | os::WM_LBUTTONDOWN | os::WM_LBUTTONUP | os::WM_RBUTTONDOWN
+        | os::WM_RBUTTONUP | os::WM_MBUTTONDOWN | os::WM_MBUTTONUP | os::WM_XBUTTONDOWN
+        | os::WM_XBUTTONUP | os::WM_MOUSEWHEEL | os::WM_MOUSEHWHEEL => {
+            capture(hwnd, CapturedMsg::Raw { msg, wparam, lparam });
+            // SAFETY: also forward to the default proc so the OS performs its
+            // default handling (focus, system-key beeps, etc.) with the
+            // OS-supplied parameters.
+            unsafe { os::DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
+        os::WM_INPUT => {
+            // I6b: the `lParam` is a transient `HRAWINPUT` valid only inside this
+            // message, so parse it now and capture the relative delta.
+            // SAFETY: `lparam` is the OS-supplied `HRAWINPUT` for this `WM_INPUT`;
+            // `read_raw_mouse_delta` reads it through `GetRawInputData` with a
+            // correctly-sized stack buffer (see its own SAFETY comments).
+            if let Some((dx, dy)) = unsafe { read_raw_mouse_delta(lparam as *mut c_void) } {
+                capture(hwnd, CapturedMsg::RawMouse { dx, dy });
+            }
+            // SAFETY: `WM_INPUT` must still be passed to the default proc for raw
+            // input cleanup, with the OS-supplied parameters.
+            unsafe { os::DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
         // SAFETY: forwarding unhandled messages to the default proc with the
         // OS-supplied parameters is the documented default-handling contract.
         _ => unsafe { os::DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
+}
+
+/// Pushes one captured message into the window's ring, looked up via the
+/// `GWLP_USERDATA` pointer. A no-op if the slot is null (the ring was never
+/// installed or was already cleared on `WM_DESTROY`).
+#[cfg(windows)]
+fn capture(hwnd: *mut c_void, ev: CapturedMsg) {
+    use crate::ffi::os;
+    // SAFETY: `hwnd` is the OS-supplied live window; `GetWindowLongPtrW` reads its
+    // application pointer slot. The value is either 0 (no ring, handled below) or
+    // the exact `*mut InputRing` `open` installed, which stays valid until
+    // `WM_DESTROY` zeroes the slot — strictly before `Window::drop` frees the box.
+    let ptr = unsafe { os::GetWindowLongPtrW(hwnd, os::GWLP_USERDATA) } as *mut InputRing;
+    if ptr.is_null() {
+        return;
+    }
+    // SAFETY: `ptr` is non-null (checked) and is the live, heap-owned ring. The
+    // `window_proc` runs only on the message-pump thread inside a
+    // `DispatchMessageW` call; `Window::drain_input` (the only other mutator) runs
+    // on the same thread and never overlaps a dispatch, so this `&mut` does not
+    // alias. The borrow ends before this function returns.
+    let ring = unsafe { &mut *ptr };
+    ring.push(ev);
+}
+
+/// Reads the relative mouse delta from a `WM_INPUT` `HRAWINPUT` (I6b), or `None`
+/// if the event is not a relative-mouse motion.
+///
+/// # Safety
+///
+/// `hrawinput` must be the `lParam` of a live `WM_INPUT` message (a valid
+/// `HRAWINPUT` that `GetRawInputData` accepts). The OS writes at most
+/// `size_of::<RAWINPUT>()` bytes into the stack buffer, which is exactly its
+/// size, so there is no overflow (the ABI-guarded `RAWINPUT` size matches the
+/// driver's mouse-case write).
+#[cfg(windows)]
+unsafe fn read_raw_mouse_delta(hrawinput: *mut c_void) -> Option<(i32, i32)> {
+    use crate::ffi::os;
+    let mut raw = core::mem::MaybeUninit::<os::RAWINPUT>::uninit();
+    let mut size = core::mem::size_of::<os::RAWINPUT>() as u32;
+    // SAFETY: `hrawinput` is a live `HRAWINPUT` (caller invariant). `RID_INPUT`
+    // requests the data; `raw.as_mut_ptr()` is a valid out-buffer of `size` bytes
+    // (`size_of::<RAWINPUT>()`); `&mut size` is the in/out size pointer; the last
+    // arg is the header size. The call returns the bytes written, or `u32::MAX`
+    // on error.
+    let n = unsafe {
+        os::GetRawInputData(
+            hrawinput,
+            os::RID_INPUT,
+            raw.as_mut_ptr() as *mut c_void,
+            &mut size,
+            core::mem::size_of::<os::RAWINPUTHEADER>() as u32,
+        )
+    };
+    if n == u32::MAX || n == 0 {
+        return None;
+    }
+    // SAFETY: `GetRawInputData` returned a non-error byte count, so it fully
+    // initialized the `RAWINPUTHEADER` + the device-specific arm. We read the
+    // header (always present) and, for a mouse, its relative-motion fields.
+    let raw = unsafe { raw.assume_init() };
+    if raw.header.dwType != os::RIM_TYPEMOUSE {
+        return None;
+    }
+    // SAFETY: `RAWINPUT::data` is a C union (windows-sys `RAWINPUT_0`); the mouse
+    // arm is the active member because `dwType == RIM_TYPEMOUSE` was just checked.
+    // `GetRawInputData` initialized that arm, so reading `lLastX`/`lLastY` is a
+    // read of valid, initialized bytes of the correct union variant.
+    let mouse = unsafe { raw.data.mouse };
+    Some((mouse.lLastX, mouse.lLastY))
 }
 
 /// Encodes a `&str` as a NUL-terminated UTF-16 vector for the wide Win32 APIs.

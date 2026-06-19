@@ -19,10 +19,28 @@ boyko_rhi = { path = "../boyko_rhi" }
 # (W5) reuses for CPU SDF-collision queries WITHOUT depending on this crate.
 boyko_sdf_math = { path = "../boyko_sdf_math" }
 
+# Win32 INPUT FFI (I6 / I6b) — the OFFICIAL Microsoft-maintained raw bindings,
+# explicitly approved for the OS layer. SCOPE: the windowing + Raw-Input FFI ONLY
+# (SetWindowLongPtrW / GetWindowLongPtrW / RegisterRawInputDevices /
+# GetRawInputData + the RAWINPUT* structs + the WM_* / GWLP_USERDATA / RID_* /
+# HID_* constants). `windows-sys` (NOT `windows`) is the raw, zero-overhead,
+# transitive-dep-free binding layer that matches this crate's hand-FFI idiom. The
+# Vulkan FFI stays 100% in-house (the INVIOLABLE no-ash/no-vulkano rule is
+# untouched: this dep covers OS windowing/input, never `vk*`). Target-gated to
+# `cfg(windows)` so non-Windows / wasm builds pull nothing.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_UI_Input",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Devices_HumanInterfaceDevice",
+] }
+
 # Test-only. `proptest` drives the Render B1 over-relaxation soundness oracle
 # (the hit-set-superset no-hole property over randomized SDF scenes — the Candidate-C
 # correctness gate). It is a DEV-dependency only — the shipped backend stays third-party-free
-# (the "no ash/vulkano/windows-sys/libc" constraint above governs `[dependencies]`,
-# not the test harness). proptest pulls only host-side, graphics-free crates.
+# for the Vulkan path (the "no ash/vulkano" constraint above governs the GPU FFI,
+# not the host test harness). proptest pulls only host-side, graphics-free crates.
 [dev-dependencies]
 proptest = "1"

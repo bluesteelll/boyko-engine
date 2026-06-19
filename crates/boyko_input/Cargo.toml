@@ -13,3 +13,16 @@ description = "Source-agnostic, rebindable action-mapping for boyko-engine. Turn
 boyko-ecs = { path = "../boyko_ecs" }
 boyko-utils = { path = "../boyko_utils" }
 boyko-macros = { path = "../boyko_macros" }
+
+# Win32 message / bit constants for the pure `win32::translate` (I6 / I6b). The
+# OFFICIAL MS-maintained `windows-sys` bindings, explicitly approved for the OS
+# layer. These are pure `u32`/`u16`/`i32` constant VALUES (WM_*, XBUTTON1/2,
+# WHEEL_DELTA, KF_EXTENDED, KF_REPEAT) — `translate` makes NO FFI call, so this
+# dependency adds no linkage and no runtime cost; it only sources the documented
+# message-id / bit values from MS instead of hand-transcribing them. TARGET-GATED
+# to `cfg(windows)` so the INVIOLABLE leaf boundary holds: wasm / non-Windows
+# builds pull NOTHING and `win32.rs` itself is `#[cfg(windows)]`-only (see lib.rs).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_UI_WindowsAndMessaging",
+] }

@@ -37,6 +37,31 @@ use core::ffi::{c_char, c_void};
 pub mod os {
     use core::ffi::{c_char, c_void};
 
+    // --- I6 / I6b: Win32 INPUT FFI from the OFFICIAL windows-sys bindings. ---
+    //
+    // The window-handle accessors (`SetWindowLongPtrW`/`GetWindowLongPtrW`), the
+    // Raw-Input calls (`RegisterRawInputDevices`/`GetRawInputData`), the
+    // `RAWINPUT*` structs, and the WM_* / GWLP_USERDATA / RID_* / HID_* / mouse
+    // input constants are re-exported here from `windows-sys` so the window's
+    // call sites keep their `os::…` prefix. These are MS-maintained bindings: the
+    // hand-rolled `#[repr(C)]` structs + ABI-guard const-asserts they replace are
+    // deleted (the layouts are now guaranteed by the official crate). The Vulkan
+    // FFI below stays 100% in-house. `windows-sys` is target-gated to
+    // `cfg(windows)`, so non-Windows builds pull nothing.
+    pub use windows_sys::Win32::Devices::HumanInterfaceDevice::{
+        HID_USAGE_GENERIC_MOUSE, HID_USAGE_PAGE_GENERIC,
+    };
+    pub use windows_sys::Win32::UI::Input::{
+        GetRawInputData, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER, RAWMOUSE, RID_INPUT,
+        RIM_TYPEMOUSE, RegisterRawInputDevices,
+    };
+    pub use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GWLP_USERDATA, GetWindowLongPtrW, SetWindowLongPtrW, WM_INPUT, WM_KEYDOWN, WM_KEYUP,
+        WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
+        WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN,
+        WM_XBUTTONUP,
+    };
+
     // SAFETY: signatures match the Win64 kernel32 ABI exactly. `LoadLibraryA`
     // takes an ANSI C string (LPCSTR -> *const c_char) and returns an HMODULE
     // (an opaque handle, modelled as *mut c_void; NULL on failure).
