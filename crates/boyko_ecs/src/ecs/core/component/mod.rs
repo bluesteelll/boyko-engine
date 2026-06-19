@@ -12,6 +12,12 @@ pub mod component_pool_bundle;
 pub mod dense;
 pub mod hooks;
 pub mod observers;
+// Transient Copy-only scratch storage (audit Stage-0 enabler). Lands in
+// isolation: the `ScratchColumn` + views are not yet consumed by the physics
+// solver (Stage P1), so the surface is legitimately unused outside its own
+// tests until that stage lands.
+#[allow(dead_code)]
+pub mod scratch;
 // Wave-1 foundation: the paged enable-bit storage + presence oracle land ahead
 // of their consumers (archetype wiring in Wave 2, toggle API + migration in
 // Wave 3). Until those waves wire the call sites, the storage surface is

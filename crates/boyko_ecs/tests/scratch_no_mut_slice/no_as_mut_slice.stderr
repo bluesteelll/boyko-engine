@@ -1,0 +1,5 @@
+error[E0599]: no method named `as_mut_slice` found for struct `ScratchSolveView<'a, T>` in the current scope
+  --> tests/scratch_no_mut_slice/no_as_mut_slice.rs:12:35
+   |
+12 |     let _whole: &mut [f32] = view.as_mut_slice();
+   |                                   ^^^^^^^^^^^^ method not found in `ScratchSolveView<'_, f32>`

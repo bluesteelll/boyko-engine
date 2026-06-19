@@ -1,0 +1,5 @@
+error[E0614]: type `ScratchSolveView<'_, f32>` cannot be dereferenced
+  --> tests/scratch_no_mut_slice/no_deref_mut_slice.rs:13:35
+   |
+13 |     let _whole: &mut [f32] = &mut *view;
+   |                                   ^^^^^ can't be dereferenced
