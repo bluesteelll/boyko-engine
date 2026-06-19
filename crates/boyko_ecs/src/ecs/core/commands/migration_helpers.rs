@@ -202,7 +202,18 @@ pub(crate) fn merged_archetype_id<B: Bundle>(
 
     // Seed with the source ids (already canonical-sorted per
     // `Archetype::create_by_ids` / `Bundle::component_ids` contract).
+    //
+    // Dense plan D2: the source archetype's `component_ids` RETAINS non-signature
+    // ids (dense / bitset, since D0). A dense id must NOT enter the merged set —
+    // otherwise the target archetype would carry a phantom dense column and the
+    // retained-copy `get_pool(dense)` below would panic (no per-archetype pool).
+    // The entity keeps its dense membership across the table migration (the
+    // `DenseStore` is global, keyed by `EntityId`, untouched by archetype change).
+    // For a table-only source no id is skipped (the 0%-gate).
     for &cid in source_ids.iter() {
+        if !component_registry::is_signature_id(cid) {
+            continue;
+        }
         debug_assert!(
             len < MAX_MIGRATION_COLUMNS,
             "migration union exceeds MAX_COMPONENTS"
@@ -213,7 +224,21 @@ pub(crate) fn merged_archetype_id<B: Bundle>(
 
     // Union: insert bundle ids if absent. O(B × S) is fine — typical
     // bundles have ≤ 8 components, archetypes have ≤ 32.
+    //
+    // Dense plan D2: a `StorageKind::Dense` bundle id is NOT part of any
+    // archetype signature (it owns a global `DenseStore`, never a per-archetype
+    // pool), so it MUST be excluded from the merged archetype set — otherwise the
+    // target archetype would gain a phantom column and `migrate_entity_insert`'s
+    // `get_pool_mut(dense)` would fail. The dense subset is routed to the store
+    // by the apply path, no migration. For a table-only bundle no id is skipped
+    // (the 0%-gate: the union is byte-identical to the pre-dense path).
     for &cid in bundle_ids {
+        if matches!(
+            component_registry::storage_kind(cid.0),
+            component_registry::StorageKind::Dense
+        ) {
+            continue;
+        }
         if !combined[..len].contains(&cid) {
             debug_assert!(
                 len < MAX_MIGRATION_COLUMNS,
@@ -270,10 +295,16 @@ pub(crate) fn without_component_archetype_id<C: Component>(
         return None; // W1: silent no-op for absent component
     }
 
+    // Dense plan D2: filter the removed id AND any non-signature (dense / bitset)
+    // id out of `kept` — the source's `component_ids` retains dense (D0), but the
+    // target archetype must not carry a phantom dense column (the remove migration
+    // copies only TABLE columns; the entity keeps its global dense membership
+    // across the table migration). For a table-only source only `removed_id` is
+    // dropped (the 0%-gate).
     let kept: Vec<ComponentId> = source
         .component_ids()
         .iter()
-        .filter(|&&cid| cid != removed_id)
+        .filter(|&&cid| cid != removed_id && component_registry::is_signature_id(cid))
         .copied()
         .collect();
 
@@ -368,6 +399,40 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
     // bookkeeping fired after the block, when no `&mut Archetype` is live).
     let mut enable_scratch: SmallList4<(ComponentId, bool)> = SmallList4::new();
     let mut enable_newly_allocated: SmallList4<ComponentId> = SmallList4::new();
+
+    // Dense plan D2 / decision 3 — the bundle's dense subset is routed to the
+    // global `DenseStore`s (no migration); `merged_archetype_id` already excluded
+    // dense ids from the target signature, so the migration below moves only the
+    // TABLE subset. `has_dense` gates the dense PRE-on_replace probe, the closure
+    // dense branch, and the Phase-2 dense on_add/on_insert. For a table-only
+    // bundle every dense branch folds out (the 0%-gate).
+    let has_dense = component_registry::any_dense(B::component_ids());
+    // PRE-overwrite on_replace for each PRESENT dense bundle id (value still old),
+    // fired BEFORE the Phase-1 block opens any `&mut Archetype`. An absent dense
+    // id fires on_add (Phase 2) instead. NOT gated by archetype flags (dense ids
+    // are not in the signature); `trigger`/`fire` self-gate.
+    if has_dense {
+        let world_ptr = NonNull::from(&mut *world);
+        for &cid in B::component_ids() {
+            if !matches!(component_registry::storage_kind(cid.0), component_registry::StorageKind::Dense) {
+                continue;
+            }
+            let present = world
+                .dense_registry
+                .store(cid)
+                .is_some_and(|s| s.contains(entity.id()));
+            if present {
+                trigger_on_replace(world_ptr, cid, entity);
+                fire_on_replace_observers(world_ptr, cid, entity);
+            }
+        }
+    }
+    // Dense plan D2 — dense fire scratch: `(cid, newly_added)` recorded inside the
+    // Phase-1 closure (the store op runs there, where `bytes` is live), read in
+    // Phase 2. Empty for a table-only bundle.
+    let mut dense_fire_buf = [(ComponentId(0), false); MAX_BUNDLE_ARITY];
+    let mut dense_fire_n = 0usize;
+    let entity_id_for_dense = entity.id();
 
     // Phase 14a §3.4 (C2): the entire `source` / `target` `&mut` lifetime is
     // confined to this Phase-1 block. The Step-6 `EntityInland` repoint is
@@ -489,7 +554,28 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
         // overwrite via `write_at`; a bundle-only (newly-added) pool has not yet
         // reached `row`, so we `write_at_unchecked_initialized` + `commit_units`
         // to extend it.
+        // Dense plan D2 — the dense subset is routed here, in the SAME single
+        // bundle consumption as the table write (the bytes are live only during
+        // `for_each_component_bytes`). `dense_reg` is a DISJOINT field borrow of
+        // `world.dense_registry`; Step 5/6 below touch only `world.entity_master`
+        // (a different field), so the two coexist. For a table-only bundle the
+        // dense branch in the closure is never taken (the 0%-gate).
+        let dense_reg = &mut world.dense_registry;
         bundle.for_each_component_bytes(|id, bytes| {
+            // Dense plan D2 / decision 3: a dense bundle id has NO target pool —
+            // route it to its `DenseStore` (insert-or-replace, no migration),
+            // record `(id, newly_added)` for the Phase-2 fire, and skip the table
+            // bundle bookkeeping + pool write entirely.
+            if matches!(component_registry::storage_kind(id.0), component_registry::StorageKind::Dense) {
+                let store = dense_reg.store_mut(id);
+                let newly_added = store.insert_or_replace(entity_id_for_dense, bytes);
+                store.mark_arch_present(target_archetype_id);
+                debug_assert!(dense_fire_n < MAX_BUNDLE_ARITY);
+                dense_fire_buf[dense_fire_n] = (id, newly_added);
+                dense_fire_n += 1;
+                return;
+            }
+
             // Phase 14a P3: record the bundle id + whether it is newly-added
             // (NOT already in source). This read is against the pre-migration
             // `source` row (Step 5 `move_out_entity` has not run yet).
@@ -807,6 +893,27 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
     // DESTINATION archetype BEFORE the `flags` read above (so the entity-targeted
     // fires for THIS migration are not skipped), superseding the prior late
     // re-raise that sat here.
+
+    // Dense plan D2 — POST dense fires (decision 3): on_add for every NEWLY-added
+    // dense id, then on_insert for ALL inserted dense ids. A replaced dense id
+    // already fired on_replace PRE (before the Phase-1 block). NOT gated by
+    // archetype flags (dense ids are not in the signature); the `trigger`/`fire`
+    // self-gate. 0%-gated by `dense_fire_n` (empty for a table-only bundle).
+    if dense_fire_n != 0 {
+        // MINT: both `&mut Archetype` are dead (Phase-1 block closed) and the
+        // `dense_reg` field borrow ended at the block close (SAFETY-1).
+        let world_ptr = NonNull::from(&mut *world);
+        for &(cid, newly_added) in &dense_fire_buf[..dense_fire_n] {
+            if newly_added {
+                trigger_on_add(world_ptr, cid, entity);
+                fire_on_add_observers(world_ptr, cid, entity);
+            }
+        }
+        for &(cid, _) in &dense_fire_buf[..dense_fire_n] {
+            trigger_on_insert(world_ptr, cid, entity);
+            fire_on_insert_observers(world_ptr, cid, entity);
+        }
+    }
     // NO drain (Q-A1): runs at depth >= 1 inside the per-system apply; the
     // outermost schedule drive drains.
 }

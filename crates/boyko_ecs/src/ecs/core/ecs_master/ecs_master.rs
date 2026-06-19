@@ -99,6 +99,23 @@ const MAX_ENTITIES_HINT: usize = 64_000;
 /// SEND5 preserved).
 pub(crate) use crate::ecs::core::system::params::entity_counter::MAX_BATCH_HINT;
 
+/// One `(ComponentId, &[u8])` component-data entry, as accepted by the direct
+/// `create_entity` / `create_entity_at` API and partitioned into table / dense
+/// subsets by [`EcsMaster::partition_dense_components`] (Dense plan D2). Aliased
+/// to keep the partition signature readable (clippy::type_complexity).
+type ComponentEntry<'a> = (ComponentId, &'a [u8]);
+
+/// Dense plan D2 — `true` iff `cid` is a signature-storage (table) id. The
+/// structural-op fire loops iterate an archetype's RETAINED `component_ids`
+/// (which keeps non-signature ids since D0), so they skip a dense (or bitset) id
+/// via this predicate — dense is fired by the dedicated D2 routing, never the
+/// table `component_ids` machinery. For a table-only world this is always `true`
+/// (cold load + branch on an already-cold path; the 0%-gate).
+#[inline]
+fn is_signature_cid(cid: ComponentId) -> bool {
+    component_registry::is_signature_id(cid)
+}
+
 /// Main ECS manager that coordinates entities, archetypes, memory, and events.
 ///
 /// # Field order (drop order — Phase 8a C5 RESOLUTION)
@@ -188,6 +205,27 @@ pub struct EcsMaster {
 
     /// Archetype management system.
     archetype_master: ArchetypeMaster,
+
+    /// Dense (non-fragmenting) storage subsystem (Dense plan D2). Owns one
+    /// [`DenseStore`](crate::ecs::core::component::dense::DenseStore) per dense
+    /// `ComponentId`, created lazily on first insert. A `DenseStore` owns a
+    /// `ComponentPool` (a raw VM reservation) and is therefore `!Send`, so it
+    /// cannot live in the `Send` `Resource` slab — it lives here, single-threaded
+    /// behind `&mut EcsMaster` on the structural path exactly like
+    /// `archetype_master`.
+    ///
+    /// **0%-gate**: a world that defines no dense component never creates a store
+    /// — the registry is alloc-free until the first dense insert, and the
+    /// despawn-path membership walk over its (empty) id list runs zero turns.
+    ///
+    /// **Drop-order**: declared after `archetype_master`. A `DenseStore` owns its
+    /// rows outright (its own `Drop` runs each live component's `drop_fn`) and
+    /// holds no pointer into the archetype slab, so its drop position relative to
+    /// the archetype subsystem is not a correctness hazard.
+    ///
+    /// `pub(crate)` so the structural-op routing (spawn / insert / remove /
+    /// despawn / clone) can mutate the stores directly.
+    pub(crate) dense_registry: crate::ecs::core::component::dense::DenseRegistry,
 
     /// Per-bundle-type `ArchetypeId` cache (Phase 8.5 SBC5). Indexed by
     /// `BundleTypeId.0`.
@@ -454,6 +492,8 @@ impl EcsMaster {
             events,
             entity_master: EntityMaster::new(),
             archetype_master,
+            // Dense plan D2 — alloc-free until the first dense insert (0%-gate).
+            dense_registry: crate::ecs::core::component::dense::DenseRegistry::new(),
             bundle_archetype_cache: OnceLock::new(),
             bundle_column_cache: OnceLock::new(),
             change_tick: AtomicU32::new(0),
@@ -493,6 +533,8 @@ impl EcsMaster {
             events,
             entity_master: EntityMaster::with_capacity(entity_capacity),
             archetype_master,
+            // Dense plan D2 — alloc-free until the first dense insert (0%-gate).
+            dense_registry: crate::ecs::core::component::dense::DenseRegistry::new(),
             bundle_archetype_cache: OnceLock::new(),
             bundle_column_cache: OnceLock::new(),
             change_tick: AtomicU32::new(0),
@@ -608,6 +650,55 @@ impl EcsMaster {
     /// 5. On success, register the entity in the Phase 7 fast store
     ///    (read path of `get_component_raw`, `has_entity`, and friends).
     ///
+    /// Dense plan D2 — partitions a `(ComponentId, &[u8])` input list into a
+    /// TABLE subset (signature-storage ids, fed to `Archetype::create_entity`)
+    /// and a DENSE subset (`StorageKind::Dense` ids, routed to `DenseStore`).
+    ///
+    /// 0%-gate: when the input has NO dense id, the returned table slice is the
+    /// ORIGINAL `components` (no copy) and the dense slice is empty — the
+    /// pre-dense codegen path is preserved byte-for-byte. The filtered table copy
+    /// into `table_buf` only happens when at least one dense id is present.
+    ///
+    /// `table_buf` / `dense_buf` are caller-provided stack scratch sized to
+    /// `MAX_COMPONENTS`; the returned slices borrow from them (or from
+    /// `components` for the no-dense table case).
+    #[inline]
+    fn partition_dense_components<'a>(
+        components: &'a [ComponentEntry<'a>],
+        table_buf: &'a mut [ComponentEntry<'a>],
+        dense_buf: &'a mut [ComponentEntry<'a>],
+    ) -> (&'a [ComponentEntry<'a>], &'a [ComponentEntry<'a>]) {
+        // Cheap pre-scan: detect any dense id. Cold registration-table read per
+        // component, but only at structural-op time (never the per-frame path).
+        let has_dense = components.iter().any(|&(cid, _)| {
+            matches!(
+                component_registry::storage_kind(cid.0),
+                component_registry::StorageKind::Dense
+            )
+        });
+        if !has_dense {
+            // 0%-gate: hand back the original slice (no copy) + an empty dense set.
+            return (components, &[]);
+        }
+        let mut t = 0usize;
+        let mut d = 0usize;
+        for &(cid, bytes) in components {
+            if matches!(
+                component_registry::storage_kind(cid.0),
+                component_registry::StorageKind::Dense
+            ) {
+                debug_assert!(d < dense_buf.len());
+                dense_buf[d] = (cid, bytes);
+                d += 1;
+            } else {
+                debug_assert!(t < table_buf.len());
+                table_buf[t] = (cid, bytes);
+                t += 1;
+            }
+        }
+        (&table_buf[..t], &dense_buf[..d])
+    }
+
     /// Audit: C-010 — switched from Vec to &[...].
     pub fn create_entity(
         &mut self,
@@ -643,6 +734,17 @@ impl EcsMaster {
         // (single source of truth).
         let current_tick = self.current_tick();
 
+        // Dense plan D2 — partition the input into a TABLE subset (written into
+        // the archetype) and a DENSE subset (routed to `DenseStore`, no
+        // migration). `Archetype::create_entity` rejects any id with no
+        // per-archetype pool, so a dense id MUST NOT reach it. 0%-gate: when no
+        // dense id is present, `table_components == components` (the same slice,
+        // not a copy) and the dense vec is empty — the path is unchanged.
+        let mut table_buf = [(ComponentId(0), &[][..]); MAX_COMPONENTS];
+        let mut dense_buf = [(ComponentId(0), &[][..]); MAX_COMPONENTS];
+        let (table_components, dense_components) =
+            Self::partition_dense_components(components, &mut table_buf, &mut dense_buf);
+
         // Step 2 of W7: allocate the entity id (fresh or recycled).
         let entity = self.entity_master.allocate_entity();
 
@@ -662,7 +764,12 @@ impl EcsMaster {
             //     returns, the &mut Archetype is dropped before any further
             //     self.entity_master calls.
             let archetype: &mut Archetype = unsafe { &mut *archetype_ptr };
-            archetype.create_entity(entity.id(), &mut new_unit_index, components, current_tick)
+            archetype.create_entity(
+                entity.id(),
+                &mut new_unit_index,
+                table_components,
+                current_tick,
+            )
         };
 
         if !pushed {
@@ -715,11 +822,17 @@ impl EcsMaster {
                 let ids = unsafe { (*archetype_ptr).component_ids.as_slice() };
                 if flags.contains(ArchetypeFlags::ON_ADD_HOOK) {
                     for &cid in ids {
+                        if !is_signature_cid(cid) {
+                            continue;
+                        }
                         trigger_on_add(world_ptr, cid, entity);
                     }
                 }
                 if flags.contains(ArchetypeFlags::ON_ADD_OBSERVER) {
                     for &cid in ids {
+                        if !is_signature_cid(cid) {
+                            continue;
+                        }
                         fire_on_add_observers(world_ptr, cid, entity);
                     }
                 }
@@ -729,15 +842,30 @@ impl EcsMaster {
                 let ids = unsafe { (*archetype_ptr).component_ids.as_slice() };
                 if flags.contains(ArchetypeFlags::ON_INSERT_HOOK) {
                     for &cid in ids {
+                        if !is_signature_cid(cid) {
+                            continue;
+                        }
                         trigger_on_insert(world_ptr, cid, entity);
                     }
                 }
                 if flags.contains(ArchetypeFlags::ON_INSERT_OBSERVER) {
                     for &cid in ids {
+                        if !is_signature_cid(cid) {
+                            continue;
+                        }
                         fire_on_insert_observers(world_ptr, cid, entity);
                     }
                 }
             }
+        }
+
+        // Dense plan D2 — route the dense subset AFTER the entity is registered
+        // (so a fired handler can read it) and AFTER the table fires (consistent
+        // spawn-time ordering). Each dense insert + on_add/on_insert fire is
+        // handled by the shared `dense_insert_and_fire`. 0%-gate: `dense_components`
+        // is empty for a table-only input, so this loop runs zero times.
+        for &(cid, bytes) in dense_components {
+            self.dense_insert_and_fire(entity, archetype_id, cid, bytes);
         }
 
         // Direct API: drop the bracket (depth back to 0) then drain on the
@@ -813,6 +941,14 @@ impl EcsMaster {
 
         let current_tick = self.current_tick();
 
+        // Dense plan D2 — partition into TABLE + DENSE subsets (mirrors
+        // `create_entity`). 0%-gate: no dense id ⇒ `table_components == components`
+        // (no copy), `dense_components` empty.
+        let mut table_buf = [(ComponentId(0), &[][..]); MAX_COMPONENTS];
+        let mut dense_buf = [(ComponentId(0), &[][..]); MAX_COMPONENTS];
+        let (table_components, dense_components) =
+            Self::partition_dense_components(components, &mut table_buf, &mut dense_buf);
+
         // Phase 12.6 — lazy growth path; Phase X.G — `InlandStore::ensure`
         // extends it on demand under `&mut self` (no worker race per
         // SEND5/SBO16) with zero copies and zero fills.
@@ -827,7 +963,12 @@ impl EcsMaster {
             //   * Bundle slab address is stable; no other live borrow.
             //   * The reborrow is scoped to this block.
             let archetype: &mut Archetype = unsafe { &mut *archetype_ptr };
-            archetype.create_entity(entity.id(), &mut new_unit_index, components, current_tick)
+            archetype.create_entity(
+                entity.id(),
+                &mut new_unit_index,
+                table_components,
+                current_tick,
+            )
         };
 
         if !pushed {
@@ -859,11 +1000,17 @@ impl EcsMaster {
                 let ids = unsafe { (*archetype_ptr).component_ids.as_slice() };
                 if flags.contains(ArchetypeFlags::ON_ADD_HOOK) {
                     for &cid in ids {
+                        if !is_signature_cid(cid) {
+                            continue;
+                        }
                         trigger_on_add(world_ptr, cid, entity);
                     }
                 }
                 if flags.contains(ArchetypeFlags::ON_ADD_OBSERVER) {
                     for &cid in ids {
+                        if !is_signature_cid(cid) {
+                            continue;
+                        }
                         fire_on_add_observers(world_ptr, cid, entity);
                     }
                 }
@@ -873,15 +1020,27 @@ impl EcsMaster {
                 let ids = unsafe { (*archetype_ptr).component_ids.as_slice() };
                 if flags.contains(ArchetypeFlags::ON_INSERT_HOOK) {
                     for &cid in ids {
+                        if !is_signature_cid(cid) {
+                            continue;
+                        }
                         trigger_on_insert(world_ptr, cid, entity);
                     }
                 }
                 if flags.contains(ArchetypeFlags::ON_INSERT_OBSERVER) {
                     for &cid in ids {
+                        if !is_signature_cid(cid) {
+                            continue;
+                        }
                         fire_on_insert_observers(world_ptr, cid, entity);
                     }
                 }
             }
+        }
+
+        // Dense plan D2 — route the dense subset (mirrors `create_entity`).
+        // 0%-gate: empty for a table-only input.
+        for &(cid, bytes) in dense_components {
+            self.dense_insert_and_fire(entity, archetype_id, cid, bytes);
         }
 
         drop(scope);
@@ -1115,9 +1274,20 @@ impl EcsMaster {
             //   pointer is interior-mutable (`SharedReadWrite`, F4-rooted), so a
             //   prior sibling structural write did not invalidate it.
             let arche = unsafe { &*archetype_ptr };
-            let ids = arche.component_ids();
-            id_buf[..ids.len()].copy_from_slice(ids);
-            ids.len()
+            // Dense plan D2: copy ONLY signature (table) ids into the fire buffer.
+            // The archetype's `component_ids` RETAINS non-signature ids (dense /
+            // bitset, since D0), but dense despawn fires are owned by the dedicated
+            // `dense_despawn_fire_and_tombstone` routing — so the table despawn
+            // loops below must skip them. For a table-only archetype this filter is
+            // a verbatim copy (every id is `Table`) — the 0%-gate.
+            let mut count = 0usize;
+            for &cid in arche.component_ids() {
+                if is_signature_cid(cid) {
+                    id_buf[count] = cid;
+                    count += 1;
+                }
+            }
+            count
             // <-- `&Archetype` drops here.
         };
         // MINT: the shared borrow is dead; no `world`-derived `&mut` is live.
@@ -1323,6 +1493,18 @@ impl EcsMaster {
             self.fire_despawn_hooks(entity, inland.archetype_ptr());
         }
 
+        // Dense plan D2 — fire dense on_despawn / on_replace / on_remove for every
+        // dense membership of the dying entity, then tombstone each membership in
+        // its `DenseStore`. Runs PRE-`remove_entity` (same window as the table
+        // despawn fire above), reading the dying dense state. 0%-gated: a
+        // table-only world (`dense_registry.is_empty()`) skips this entirely.
+        // Rides `delete_entity_core`, so the hierarchy despawn-cascade (each
+        // cascaded child despawn flows through this same core) tombstones + fires
+        // for cascaded entities too.
+        if !self.dense_registry.is_empty() {
+            self.dense_despawn_fire_and_tombstone(entity);
+        }
+
         // Feature 2 — reclaim this entity's entity-targeted observer slot AFTER
         // its on_despawn observers fired, so a recycled `EntityId` never inherits
         // a dead observer (the recycle guard). Idempotent + lazy: a no-op (one
@@ -1364,6 +1546,198 @@ impl EcsMaster {
         // outermost owner.
         drop(scope);
         result
+    }
+
+    // ── Dense (non-fragmenting) storage routing (Dense plan D2) ──────────────
+    //
+    // The SINGLE implementation every structural site routes a dense component
+    // through (Commands spawn/insert/remove + the direct create_entity* API +
+    // clone-materialize + despawn). A dense component is NOT in any archetype
+    // signature, so the per-archetype `ArchetypeFlags` gate does NOT cover it —
+    // these helpers fire by reading the per-component hook table / observer
+    // registry directly. Both `trigger_on_*` and `fire_*_observers` SELF-GATE
+    // (no-op when the component has no hook / no observer registered), so calling
+    // them unconditionally per dense id is correct and costs one cold table read
+    // when nothing is installed.
+    //
+    // 0%-gate: a table-only world never has a dense id reach here (the callers all
+    // branch on `storage_kind == Dense`, and the despawn walk is gated by
+    // `dense_registry.is_empty()`), so this whole cluster is dead on the
+    // table-only path.
+
+    /// Returns `true` iff `entity` is a member of the `component_id` dense store
+    /// (Dense plan D2 read accessor). `false` if the component is not dense, no
+    /// store exists yet, or the entity is not a member. A read-only membership
+    /// oracle (D3 will build the typed query path on top of the same `e2s`).
+    #[inline]
+    pub fn dense_contains(&self, entity: Entity, component_id: ComponentId) -> bool {
+        self.dense_registry
+            .store(component_id)
+            .is_some_and(|s| s.contains(entity.id()))
+    }
+
+    /// Returns the slot `entity` occupies in the `component_id` dense store, or
+    /// `None` if it is not a member (Dense plan D2 read accessor).
+    #[inline]
+    pub fn dense_slot_of(&self, entity: Entity, component_id: ComponentId) -> Option<u32> {
+        self.dense_registry
+            .store(component_id)
+            .and_then(|s| s.slot_of(entity.id()))
+    }
+
+    /// Reads `entity`'s `component_id` dense value as raw bytes, or `None` if it
+    /// is not a member (Dense plan D2 read accessor). The pointer is valid for the
+    /// component's stride; the caller casts it to the registered type.
+    ///
+    /// # Safety
+    /// The returned pointer borrows the dense column for `&self`; it must not be
+    /// read across a structural mutation of the same store. The cast type must
+    /// match the store's registered component type.
+    #[inline]
+    pub fn dense_get_raw(&self, entity: Entity, component_id: ComponentId) -> Option<*const u8> {
+        let store = self.dense_registry.store(component_id)?;
+        let slot = store.slot_of(entity.id())?;
+        let view = store.solve_view();
+        // SAFETY: `slot` came from `slot_of`, so it is a LIVE slot (`< len`,
+        //   live-bit set) — `row_ptr`'s contract holds. The pointer is valid for
+        //   the store's stride; the `&self` borrow keeps the column alive.
+        Some(unsafe { view.row_ptr(slot as usize) as *const u8 })
+    }
+
+    /// Inserts `bytes` for `entity` into the `component_id` dense store (creating
+    /// the store lazily), marks `archetype_id` present in the store's
+    /// `arch_presence` seed, then fires dense `on_add` + `on_insert` (hooks first,
+    /// then observers) for the component.
+    ///
+    /// `archetype_id` is the entity's CURRENT archetype (the dense insert does NOT
+    /// migrate it). Used by the spawn paths (`SpawnAtCommand` / `create_entity*`)
+    /// and the dense subset of `InsertCommand`.
+    pub(crate) fn dense_insert_and_fire(
+        &mut self,
+        entity: Entity,
+        archetype_id: ArchetypeId,
+        component_id: ComponentId,
+        bytes: &[u8],
+    ) {
+        {
+            let store = self.dense_registry.store_mut(component_id);
+            store.insert(entity.id(), bytes);
+            store.mark_arch_present(archetype_id);
+            // <-- the `&mut DenseStore` borrow of `self.dense_registry` ends here,
+            // BEFORE `world_ptr` is minted (no `self`-derived `&mut` is live at
+            // the fire, mirroring the archetypal SAFETY-1 discipline).
+        }
+        // MINT: no `self`-derived `&mut` into storage is live (the store borrow
+        // above dropped at the block close).
+        let world_ptr = NonNull::from(&mut *self);
+        // on_add THEN on_insert (Bevy add-before-insert ordering). Hooks first,
+        // then observers, per component (both self-gate to a no-op when nothing
+        // is registered).
+        trigger_on_add(world_ptr, component_id, entity);
+        fire_on_add_observers(world_ptr, component_id, entity);
+        trigger_on_insert(world_ptr, component_id, entity);
+        fire_on_insert_observers(world_ptr, component_id, entity);
+    }
+
+    /// Removes `entity`'s `component_id` dense membership (tombstone), firing
+    /// dense `on_replace` + `on_remove` (hooks first, then observers) PRE-tombstone
+    /// so the handler reads the dying value. Returns `true` iff the entity was
+    /// present in the store. No archetype migration (the dense payoff).
+    ///
+    /// A no-op (returns `false`) if no store exists for `component_id` yet or the
+    /// entity is not a member — matching the table remove's absent-component
+    /// silent no-op (W1 / Bevy #10166).
+    pub(crate) fn dense_remove_and_fire(
+        &mut self,
+        entity: Entity,
+        component_id: ComponentId,
+    ) -> bool {
+        // Presence probe without creating a store (remove of an untouched dense id
+        // is a no-op, never a lazy store creation).
+        let present = self
+            .dense_registry
+            .store(component_id)
+            .is_some_and(|s| s.contains(entity.id()));
+        if !present {
+            return false;
+        }
+        // PRE-tombstone fire (Q7 ordering): on_replace then on_remove, reading the
+        // still-live dying value. No `self`-derived `&mut` into storage is live.
+        let world_ptr = NonNull::from(&mut *self);
+        trigger_on_replace(world_ptr, component_id, entity);
+        fire_on_replace_observers(world_ptr, component_id, entity);
+        trigger_on_remove(world_ptr, component_id, entity);
+        fire_on_remove_observers(world_ptr, component_id, entity);
+        // Tombstone AFTER the fire (the value was live for the handlers).
+        let removed = self
+            .dense_registry
+            .store_existing_mut(component_id)
+            .expect("invariant: store existed at the presence probe above")
+            .remove(entity.id());
+        debug_assert!(removed, "dense_remove_and_fire: presence probe / remove disagree");
+        removed
+    }
+
+    /// Despawn-path dense fire + tombstone (Dense plan D2): for EVERY dense
+    /// membership of the dying `entity`, fires `on_despawn` first (all
+    /// memberships, Despawn-first ordering — mirrors `fire_despawn_hooks`), then
+    /// `on_replace` + `on_remove`, then tombstones each membership.
+    ///
+    /// Caller gates on `!dense_registry.is_empty()` (the 0%-gate). Reads the
+    /// dying dense state (runs PRE-`remove_entity`). Rides `delete_entity_core`,
+    /// so the hierarchy despawn-cascade covers cascaded entities too.
+    #[cold]
+    #[inline(never)]
+    fn dense_despawn_fire_and_tombstone(&mut self, entity: Entity) {
+        // Snapshot the membership set into a stack buffer so no `dense_registry`
+        // borrow is live across the `world_ptr` mint / fire (the OBS-FIRE-LOOP /
+        // SAFETY-1 discipline). `dense_ids` is push-only and small; the membership
+        // subset is ≤ MAX_COMPONENTS but typically a handful.
+        let mut member_buf = [ComponentId(0); MAX_COMPONENTS];
+        let mut n = 0usize;
+        for &cid in self.dense_registry.dense_ids() {
+            if self
+                .dense_registry
+                .store(cid)
+                .is_some_and(|s| s.contains(entity.id()))
+            {
+                debug_assert!(n < MAX_COMPONENTS);
+                member_buf[n] = cid;
+                n += 1;
+            }
+        }
+        if n == 0 {
+            return;
+        }
+        let members = &member_buf[..n];
+
+        // MINT: the membership probe's `&dense_registry` borrows above all ended
+        // (the snapshot owns plain `ComponentId`s). No `self`-derived `&mut` into
+        // storage is live.
+        let world_ptr = NonNull::from(&mut *self);
+        // Despawn-first (Feature 2): all dense on_despawn, reading the intact row.
+        for &cid in members {
+            trigger_on_despawn(world_ptr, cid, entity);
+            fire_on_despawn_observers(world_ptr, cid, entity);
+        }
+        // Then on_replace + on_remove for every membership (still pre-tombstone).
+        for &cid in members {
+            trigger_on_replace(world_ptr, cid, entity);
+            fire_on_replace_observers(world_ptr, cid, entity);
+        }
+        for &cid in members {
+            trigger_on_remove(world_ptr, cid, entity);
+            fire_on_remove_observers(world_ptr, cid, entity);
+        }
+        // Tombstone every membership now that the fires read the dying values.
+        for &cid in members {
+            let removed = self
+                .dense_registry
+                .store_existing_mut(cid)
+                .expect("invariant: membership snapshot implies a live store")
+                .remove(entity.id());
+            debug_assert!(removed, "dense despawn: membership snapshot / remove disagree");
+        }
     }
 
     /// Fast random access read: 3-4 cache lines, ~12-16 ns target.
@@ -1635,6 +2009,22 @@ impl EcsMaster {
     #[inline]
     pub fn get_entity(&self, entity_id: EntityId) -> Option<Entity> {
         self.entity_master.get_entity(entity_id)
+    }
+
+    /// Returns `entity`'s current archetype id, or `None` for a stale /
+    /// never-registered handle. The stable identity used to assert the Dense
+    /// plan D2 "no-migration" contract (a dense insert/remove leaves this id
+    /// unchanged).
+    #[inline]
+    pub fn entity_archetype_id(&self, entity: Entity) -> Option<ArchetypeId> {
+        let inland = self.entity_master.entities_inland.get(entity.id().0)?;
+        if inland.is_null() || inland.generation() != entity.generation() {
+            return None;
+        }
+        // SAFETY (U1, U2, U11, F1): `archetype_ptr` is stable, interior-mutable
+        //   (`SharedReadWrite`, F4-rooted) slab provenance; reading `id` is one
+        //   load through a shared deref.
+        Some(unsafe { (*inland.archetype_ptr()).id() })
     }
 
     /// Checks if an entity has a specific component.

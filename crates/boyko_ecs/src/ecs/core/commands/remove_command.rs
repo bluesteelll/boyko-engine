@@ -21,6 +21,7 @@ use crate::ecs::core::commands::migration_helpers::{
     migrate_entity_remove, without_component_archetype_id,
 };
 use crate::ecs::core::component::component::Component;
+use crate::ecs::core::component::component_registry::{self, StorageKind};
 use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 use crate::ecs::core::entity::entity::Entity;
 
@@ -74,6 +75,20 @@ impl<C: Component> Command for RemoveCommand<C> {
             debug_assert!(false, "RemoveCommand::apply: stale entity {:?}", entity);
             return;
         }
+
+        // Dense plan D2 / decision 3: a dense `C` is NOT in any archetype
+        // signature, so `without_component_archetype_id::<C>` would (wrongly)
+        // return `None` (silent no-op) — branch FIRST. Dense remove tombstones the
+        // membership in `C`'s `DenseStore` + fires on_replace/on_remove, with NO
+        // archetype migration (the table component set is untouched). A no-op if
+        // the entity is not a member (matching the table absent-component no-op).
+        // For a table `C` this branch folds out (the 0%-gate: the const-true
+        // `matches!` is a cold registration-table read, then the existing path).
+        if matches!(component_registry::storage_kind(C::component_id().0), StorageKind::Dense) {
+            world.dense_remove_and_fire(entity, C::component_id());
+            return;
+        }
+
         // SAFETY (U1, U2, U11, F1): `archetype_ptr` is stable, interior-mutable
         //   (`SharedReadWrite`, F4-rooted) slab provenance — it survives sibling
         //   structural writes (e.g. a later spawn's `current_index += 1` through

@@ -94,7 +94,7 @@ use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId, InlandPoolId
 /// +24 : required_missing: &'static [RequiredEntry] (16 B fat pointer)
 /// +40 : required_pool_ids: &'static [InlandPoolId]  (16 B fat pointer)
 /// +56 : pools_len_at_install: u32               (4 B)
-/// +60 : _pad: u32                               (4 B)
+/// +60 : dense_mask: u32                          (4 B — Dense plan D2)
 /// ```
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -130,10 +130,29 @@ pub struct BundleColumnRecord {
     /// archetype-destruction path.
     pub pools_len_at_install: u32,
 
-    /// Padding to round the struct up to 64 B. Reserved for future use
-    /// (e.g. an explicit `flags` field).
-    pub _pad: u32,
+    /// Dense plan D2 — per-canonical-slot DENSE marker. Bit `i` is set iff
+    /// `B::component_ids()[i]` is a `StorageKind::Dense` component (its
+    /// [`pool_ids`](Self::pool_ids)`[i]` is the [`DENSE_POOL_SENTINEL`] — NOT a
+    /// resolved archetype column, because a dense id has no per-archetype pool).
+    ///
+    /// The apply path (`SpawnAtCommand` / `SpawnBatchCommand`) branches per
+    /// canonical slot: a clear bit takes the existing
+    /// `pool_at_unchecked_mut(pool_ids[i]).write_at` path; a set bit routes to
+    /// `EcsMaster::dense_*`. **Empty (`0`) for a table-only bundle** — the
+    /// apply-time 0%-gate: the per-slot `dense_mask & (1 << i)` test reads `0`
+    /// for every slot, so the dense branch folds out and the apply codegen +
+    /// behaviour are byte-identical to the pre-dense path. `u32` is wide enough
+    /// for the `MAX_BUNDLE_ARITY = 16` canonical-slot ceiling.
+    pub dense_mask: u32,
 }
+
+/// Dense plan D2 — the [`InlandPoolId`] sentinel stored at a dense canonical
+/// slot in [`BundleColumnRecord::pool_ids`]. A dense component has NO
+/// per-archetype pool, so its slot cannot hold a real `InlandPoolId`; the apply
+/// path NEVER indexes a pool with this value (the
+/// [`BundleColumnRecord::dense_mask`] bit gates it onto the dense route first).
+/// `usize::MAX` can never be a valid pool index.
+pub const DENSE_POOL_SENTINEL: InlandPoolId = InlandPoolId(usize::MAX);
 
 // SAFETY (SBC2 / SBO5):
 //   - `ArchetypeId` is `#[repr(transparent)]` over `usize`; integers are
@@ -261,15 +280,39 @@ impl BundleColumnCache {
         // Resolve every ComponentId to its InlandPoolId via the bundle's
         // SparseMap. Canonical order is preserved because B1 guarantees
         // `B::component_ids()` is already sorted by `ComponentId.0`.
+        //
+        // Dense plan D2: a `StorageKind::Dense` component has NO per-archetype
+        // pool, so calling `pool_id_for(dense)` would return `None` and the
+        // `.expect` would PANIC (the prior-attempt blocker). SKIP the resolve for
+        // a dense id — store the `DENSE_POOL_SENTINEL` at its slot and record the
+        // slot in `dense_mask`. The apply path gates the sentinel onto the dense
+        // route (it never indexes a pool with it). For a table-only bundle no bit
+        // is set, every slot resolves through `pool_id_for` exactly as before, and
+        // the record is byte-identical aside from `dense_mask == 0` (the
+        // apply-time 0%-gate).
         let mut pool_ids_owned: Vec<InlandPoolId> = Vec::with_capacity(component_ids.len());
-        for &cid in component_ids {
+        let mut dense_mask: u32 = 0;
+        for (i, &cid) in component_ids.iter().enumerate() {
+            if matches!(
+                component_registry::storage_kind(cid.0),
+                component_registry::StorageKind::Dense
+            ) {
+                debug_assert!(
+                    i < 32,
+                    "Dense plan D2: canonical slot {i} exceeds the dense_mask u32 width \
+                     (MAX_BUNDLE_ARITY ceiling is 16)"
+                );
+                dense_mask |= 1u32 << i;
+                pool_ids_owned.push(DENSE_POOL_SENTINEL);
+                continue;
+            }
             let inland = archetype
                 .component_pools()
                 .pool_id_for(cid)
                 .expect(
                     "invariant: B::cached_archetype_id returned an archetype that hosts \
-                     every component in B::component_ids() (Bundle / ArchetypeMaster \
-                     registration contract)",
+                     every TABLE component in B::component_ids() (Bundle / ArchetypeMaster \
+                     registration contract; dense ids are skipped above)",
                 );
             pool_ids_owned.push(inland);
         }
@@ -305,7 +348,7 @@ impl BundleColumnCache {
             required_missing,
             required_pool_ids,
             pools_len_at_install,
-            _pad: 0,
+            dense_mask,
         };
 
         // Install. In v1, no racer exists — the `set` always succeeds

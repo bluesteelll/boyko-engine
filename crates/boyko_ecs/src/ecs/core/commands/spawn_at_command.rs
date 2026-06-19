@@ -30,6 +30,7 @@ use crate::ecs::core::archetype::archetype::Archetype;
 use crate::ecs::core::bundle::Bundle;
 use crate::ecs::core::commands::command::Command;
 use crate::ecs::core::component::hooks::archetype_flags::ArchetypeFlags;
+use crate::ecs::core::component::component_registry;
 use crate::ecs::core::component::hooks::dispatch::{trigger_on_add, trigger_on_insert};
 use crate::ecs::core::component::observers::dispatch::{
     fire_on_add_observers, fire_on_insert_observers,
@@ -144,10 +145,11 @@ impl<B: Bundle> Command for SpawnAtCommand<B> {
         // `required_missing` + `required_pool_ids` — empty `&'static []` for a
         // require-free bundle (the apply-time 0%-gate). Captured here so Step 5b
         // (the constructor pass) does not re-touch the cache.
-        let (pool_ids, required_missing, required_pool_ids): (
+        let (pool_ids, required_missing, required_pool_ids, dense_mask): (
             &'static [InlandPoolId],
             &'static [crate::ecs::core::component::component_registry::RequiredEntry],
             &'static [InlandPoolId],
+            u32,
         ) = {
             let cache = world.bundle_column_cache();
             let record = if let Some(r) = cache.get_resolved::<B>() {
@@ -165,6 +167,9 @@ impl<B: Bundle> Command for SpawnAtCommand<B> {
                 record.pool_ids,
                 record.required_missing,
                 record.required_pool_ids,
+                // Dense plan D2 — per-canonical-slot dense marker; `0` for a
+                // table-only bundle (the apply-time 0%-gate).
+                record.dense_mask,
             )
         };
 
@@ -215,6 +220,21 @@ impl<B: Bundle> Command for SpawnAtCommand<B> {
             pool_ids.len(),
         );
 
+        // Dense plan D2 — record the dense components inserted in this spawn so
+        // Step 8b can fire their on_add/on_insert AFTER all `&mut Archetype`
+        // reborrows drop (the bytes are consumed inside the closure where they
+        // are live; the fire is deferred to the safe world_ptr window). Empty for
+        // a table-only bundle (the 0%-gate: `dense_mask == 0`).
+        let mut dense_fire_buf = [crate::ecs::identifiers::primitives::ComponentId(0); MAX_BUNDLE_ARITY];
+        let mut dense_fire_n = 0usize;
+        // The dense closure branch reaches `world.dense_registry` through this
+        // separate `&mut *world` capture; `archetype` (a raw `&mut *archetype_ptr`
+        // reborrow) is a disjoint field, so holding both is sound.
+        let world_ref: &mut EcsMaster = world;
+        // Captured `EntityId` for the dense insert (the closure consumes
+        // `self.bundle`, so it cannot re-read `self.entity`).
+        let self_entity_id = entity.id();
+
         self.bundle.for_each_component_bytes(|_id, bytes| {
             debug_assert!(canonical_idx < pool_ids.len());
             debug_assert!(
@@ -222,6 +242,22 @@ impl<B: Bundle> Command for SpawnAtCommand<B> {
                 "B2/SBO-B2 violation: bundle emit order mismatch at idx {}",
                 canonical_idx,
             );
+
+            // Dense plan D2: a dense canonical slot routes to `DenseStore`
+            // (STORED + arch-presence seeded) and records the id for the
+            // deferred fire; it has NO archetype pool (`pool_ids[canonical_idx]`
+            // is the sentinel, never indexed). For a table-only bundle the bit is
+            // clear and this branch folds out (the 0%-gate).
+            if dense_mask & (1u32 << canonical_idx) != 0 {
+                let store = world_ref.dense_registry.store_mut(_id);
+                store.insert(self_entity_id, bytes);
+                store.mark_arch_present(archetype_id);
+                debug_assert!(dense_fire_n < MAX_BUNDLE_ARITY);
+                dense_fire_buf[dense_fire_n] = _id;
+                dense_fire_n += 1;
+                canonical_idx += 1;
+                return;
+            }
 
             let pool_idx = pool_ids[canonical_idx];
             // SAFETY (SBO13 + SBO-N + SBO-B2):
@@ -321,11 +357,17 @@ impl<B: Bundle> Command for SpawnAtCommand<B> {
                 let ids = unsafe { (*archetype_ptr).component_ids.as_slice() };
                 if flags.contains(ArchetypeFlags::ON_ADD_HOOK) {
                     for &cid in ids {
+                        if !component_registry::is_signature_id(cid) {
+                            continue;
+                        }
                         trigger_on_add(world_ptr, cid, entity);
                     }
                 }
                 if flags.contains(ArchetypeFlags::ON_ADD_OBSERVER) {
                     for &cid in ids {
+                        if !component_registry::is_signature_id(cid) {
+                            continue;
+                        }
                         fire_on_add_observers(world_ptr, cid, entity);
                     }
                 }
@@ -335,14 +377,50 @@ impl<B: Bundle> Command for SpawnAtCommand<B> {
                 let ids = unsafe { (*archetype_ptr).component_ids.as_slice() };
                 if flags.contains(ArchetypeFlags::ON_INSERT_HOOK) {
                     for &cid in ids {
+                        if !component_registry::is_signature_id(cid) {
+                            continue;
+                        }
                         trigger_on_insert(world_ptr, cid, entity);
                     }
                 }
                 if flags.contains(ArchetypeFlags::ON_INSERT_OBSERVER) {
                     for &cid in ids {
+                        if !component_registry::is_signature_id(cid) {
+                            continue;
+                        }
                         fire_on_insert_observers(world_ptr, cid, entity);
                     }
                 }
+            }
+        }
+
+        // Dense plan D2 — the Step-8 loops above iterate the archetype's RETAINED
+        // `component_ids` (which keeps the dense id since D0) and SKIP it via
+        // `is_signature_id`, so dense is NOT double-fired there; Step 8b below is
+        // the SOLE dense fire path for this spawn.
+        // ── Step 8b (Dense plan D2): fire dense on_add / on_insert ──────────
+        // A dense component is NOT in the archetype signature, so the
+        // `flags`-gated block above does NOT cover it. Fire here per recorded
+        // dense id (`trigger_on_*` / `fire_*_observers` self-gate to a no-op when
+        // nothing is registered). on_add THEN on_insert (Bevy ordering). Runs
+        // AFTER the table fires for consistent ordering, with no `world`-derived
+        // `&mut` live (the closure's `world_ref` borrow ended at the loop close,
+        // and Step 6/7 took only field `&mut`s that are dead here). For a
+        // table-only bundle `dense_fire_n == 0` and this block runs zero turns
+        // (the 0%-gate).
+        if dense_fire_n != 0 {
+            // SAFETY: no `world`-derived `&mut Archetype` / `&mut`-into-storage is
+            //   live at this mint — the per-component closure (and its `world_ref`
+            //   capture) returned, and the dense store inserts happened inside it;
+            //   only Copy locals (`archetype_ptr`, `entity`) survive (SAFETY-1).
+            let world_ptr = NonNull::from(&mut *world);
+            for &cid in &dense_fire_buf[..dense_fire_n] {
+                trigger_on_add(world_ptr, cid, entity);
+                fire_on_add_observers(world_ptr, cid, entity);
+            }
+            for &cid in &dense_fire_buf[..dense_fire_n] {
+                trigger_on_insert(world_ptr, cid, entity);
+                fire_on_insert_observers(world_ptr, cid, entity);
             }
         }
         // NO drain here (Q-A1 / C1): this command runs at depth >= 1 (the

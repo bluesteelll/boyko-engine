@@ -1,22 +1,28 @@
-//! Dense plan D0 — out-of-crate spawn-rejection + signature-exclusion suite.
+//! Dense plan D0/D2 — out-of-crate signature-exclusion + spawn-routing suite.
 //!
 //! D0 adds `StorageKind::Dense` as a NON-signature storage kind: a dense id is
 //! registrable, classified `Dense`, excluded from every archetype signature, and
-//! owns NO per-archetype `ComponentPool` (its global `DenseStore` lands in D1).
-//! At D0 there is therefore nowhere to write a dense component's bytes during a
-//! structural spawn, so the load-bearing soundness property is:
+//! owns NO per-archetype `ComponentPool` (its global `DenseStore` is owned by the
+//! per-world `DenseRegistry`).
 //!
-//!   A spawn whose component list contains a dense id must be a CLEAN REJECTION
-//!   (`Err`, no panic, no partial write, no EntityId leak) — NOT a silent
-//!   success that drops the dense data.
+//! D2 ROUTES the structural ops: a `create_entity` list that contains a dense id
+//! is PARTITIONED — the table subset is written into the archetype and the dense
+//! subset is routed to its global `DenseStore` (no migration). The D0-era
+//! "dense byte in a spawn list ⇒ clean `Err` rejection" contract is therefore
+//! SUPERSEDED by D2: the dense bytes are now ACCEPTED and stored, not rejected.
+//! The load-bearing soundness property at D2 is:
+//!
+//!   A spawn whose component list contains a dense id SUCCEEDS — the table subset
+//!   lands in the archetype, the dense subset lands in its `DenseStore`, no
+//!   archetype fragmentation, no partial write, no EntityId leak.
 //!
 //! This file lives OUT-OF-CRATE so every assertion proves the property through
-//! the public surface (`EcsMaster::{new,create_archetype,create_entity}`, the
-//! `pub install_dense_storage_kind` derive-install wrapper, and the public
-//! `storage_kind` / `is_signature_storage` readers). The dense id is classified
-//! through the SAME public path the `#[component(storage = "dense")]` derive
-//! emits (`install_dense_storage_kind::<C>(raw)`), so the test exercises the real
-//! registration ordering, not a crate-private shortcut.
+//! the public surface (`EcsMaster::{new,create_archetype,create_entity,
+//! dense_contains}`, the `pub install_dense_storage_kind` derive-install wrapper,
+//! and the public `storage_kind` / `is_signature_storage` readers). The dense id
+//! is classified through the SAME public path the `#[component(storage =
+//! "dense")]` derive emits (`install_dense_storage_kind::<C>(raw)`), so the test
+//! exercises the real registration ordering, not a crate-private shortcut.
 //!
 //! # Fixture id allocation
 //!
@@ -31,7 +37,7 @@ use boyko_ecs::ecs::core::component::component_registry::{
     self, ResidencyKind, StorageKind,
 };
 use boyko_ecs::ecs::identifiers::primitives::ComponentId;
-use boyko_ecs::prelude::{EcsError, EcsMaster};
+use boyko_ecs::prelude::EcsMaster;
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -107,16 +113,16 @@ fn dense_id_classifies_dense_and_excluded_from_signature() {
     );
 }
 
-// ── 2. THE spawn-rejection property: clean Err, no corruption ─────────────────
+// ── 2. THE D2 spawn-routing property: dense subset routed, no corruption ───────
 
-/// A multi-component spawn whose list contains a dense id is REJECTED cleanly:
-/// the archetype resolved from `[Table, Dense]` excludes the dense id (so it has
-/// no pool for it), and `create_entity` with the dense byte-slice present fails
-/// the two-phase `can_push_entity_components` guard BEFORE any pool is mutated.
-/// The result is `Err(ArchetypeRejectedEntity)` with NO panic and NO partial
-/// write — and a subsequent NORMAL spawn into the same archetype still works.
+/// A multi-component spawn whose list contains a dense id SUCCEEDS at D2: the
+/// archetype resolved from `[Table, Dense]` excludes the dense id (so it has no
+/// pool for it), and `create_entity` PARTITIONS the input — the table subset is
+/// written into the archetype, the dense subset is routed to its global
+/// `DenseStore` (no migration). NO panic, NO partial write, NO EntityId leak —
+/// and the table data + dense membership are both observable afterwards.
 #[test]
-fn dense_bearing_spawn_is_cleanly_rejected_and_state_survives() {
+fn dense_bearing_spawn_routes_and_state_survives() {
     prime_fixtures();
     let mut ecs = EcsMaster::new();
 
@@ -125,84 +131,76 @@ fn dense_bearing_spawn_is_cleanly_rejected_and_state_survives() {
     // {TablePos} and it owns ONLY a TablePos pool.
     let arch = ecs.create_archetype(&[TABLE_POS_ID, DENSE_HEALTH_ID]);
 
-    // Baseline: a normal table-only push into this archetype succeeds. This is
-    // the "subsequent normal spawn still works" anchor — captured BEFORE the
-    // rejected attempt so we also prove no PRE-corruption.
+    // Baseline: a normal table-only push into this archetype succeeds. Captured
+    // BEFORE the dense spawn so we also prove no PRE-corruption.
     let pos0 = TablePos { x: 11 };
     let before = ecs
         .create_entity(arch, &[(TABLE_POS_ID, &pos0.x.to_ne_bytes())])
         .expect("table-only spawn must succeed into the table archetype");
 
-    // The rejected attempt: spawn with BOTH a table byte-slice and a dense
-    // byte-slice. The dense id has no pool in `arch`, so the push must be
-    // rejected without writing anything.
+    // The D2 routed spawn: BOTH a table byte-slice and a dense byte-slice. The
+    // dense id has no pool in `arch`; D2 routes it to its `DenseStore` (the
+    // table subset still writes the pool). The whole spawn SUCCEEDS.
     let pos1 = TablePos { x: 22 };
     let hp1 = DenseHealth { hp: 99 };
-    let rejected = ecs.create_entity(
-        arch,
-        &[
-            (TABLE_POS_ID, &pos1.x.to_ne_bytes()),
-            (DENSE_HEALTH_ID, &hp1.hp.to_ne_bytes()),
-        ],
+    let routed = ecs
+        .create_entity(
+            arch,
+            &[
+                (TABLE_POS_ID, &pos1.x.to_ne_bytes()),
+                (DENSE_HEALTH_ID, &hp1.hp.to_ne_bytes()),
+            ],
+        )
+        .expect("a D2 spawn whose list contains a dense id must SUCCEED (routed, not rejected)");
+
+    // (a) The dense subset landed in the global DenseStore (membership recorded).
+    assert!(
+        ecs.dense_contains(routed, DENSE_HEALTH_ID),
+        "the dense subset is routed to its DenseStore (D2), not dropped"
     );
 
-    // (a) It is an Err — a CLEAN rejection, not silent success-with-dropped-data.
-    assert!(
-        rejected.is_err(),
-        "a spawn whose list contains a dense id must be rejected (no silent drop)"
-    );
+    // (b) The table subset landed in the archetype pool (the routed entity keeps
+    // its table component, unmigrated).
     assert_eq!(
-        rejected.unwrap_err(),
-        EcsError::ArchetypeRejectedEntity {
-            archetype_id: arch
-        },
-        "the rejection is the two-phase can_push guard (ArchetypeRejectedEntity)"
+        ecs.get_component::<TablePos>(routed)
+            .expect("routed entity has TablePos")
+            .x,
+        22,
+        "the table subset of a dense-bearing spawn is written to the pool"
     );
 
-    // (b) No partial write: the archetype still holds exactly ONE entity (the
-    // baseline). The rejected push touched no pool (two-phase commit) and leaked
-    // no EntityId.
-    assert!(
-        ecs.has_entity(before),
-        "the pre-existing entity survives the rejected spawn"
-    );
-
-    // (c) A subsequent NORMAL spawn still works — proves no state corruption /
-    // no leaked id / no desynced pool from the rejected attempt.
+    // (c) No partial write / no leaked id: the baseline entity still lives and a
+    // subsequent NORMAL spawn still works with a distinct id.
+    assert!(ecs.has_entity(before), "the pre-existing entity survives");
     let pos2 = TablePos { x: 33 };
     let after = ecs
         .create_entity(arch, &[(TABLE_POS_ID, &pos2.x.to_ne_bytes())])
-        .expect("a normal spawn must still succeed after a rejected dense spawn");
-    assert!(ecs.has_entity(after), "the post-rejection entity is live");
-    assert_ne!(
-        before.id(),
-        after.id(),
-        "the rejected attempt did not leak/recycle an id into the live set"
-    );
+        .expect("a normal spawn must still succeed after a routed dense spawn");
+    assert!(ecs.has_entity(after), "the post-routing entity is live");
+    assert_ne!(before.id(), after.id(), "no leaked/recycled id");
+    assert_ne!(before.id(), routed.id(), "the routed dense spawn took a fresh id");
 
-    // (d) The surviving rows carry the correct table data — the rejected dense
-    // bytes were never written anywhere observable.
-    let v_before = ecs
-        .get_component::<TablePos>(before)
-        .expect("before entity has TablePos")
-        .x;
-    let v_after = ecs
-        .get_component::<TablePos>(after)
-        .expect("after entity has TablePos")
-        .x;
-    assert_eq!(v_before, 11, "pre-existing row data intact");
-    assert_eq!(v_after, 33, "post-rejection row data correct");
+    // (d) The surviving rows carry the correct table data.
+    assert_eq!(
+        ecs.get_component::<TablePos>(before).expect("before TablePos").x,
+        11,
+        "pre-existing row data intact"
+    );
+    assert_eq!(
+        ecs.get_component::<TablePos>(after).expect("after TablePos").x,
+        33,
+        "post-routing row data correct"
+    );
 }
 
-// ── 3. Single dense component → empty signature, push rejected ────────────────
+// ── 3. Single dense component → empty signature, dense bytes routed ────────────
 
 /// An archetype resolved from a list of ONLY a dense id has an EMPTY signature
-/// (the dense bit is filtered out) and owns no pools. A spawn that tries to push
-/// the dense byte-slice into it is rejected; a zero-component push into the same
-/// (empty) archetype succeeds — proving the archetype itself is well-formed, it
-/// is specifically the dense byte-slice that is unaccepted.
+/// (the dense bit is filtered out) and owns no pools. At D2 a spawn that supplies
+/// the dense byte-slice into it SUCCEEDS — the empty-signature archetype hosts the
+/// entity row and the dense subset is routed to its global `DenseStore`.
 #[test]
-fn lone_dense_archetype_is_empty_and_rejects_dense_bytes() {
+fn lone_dense_archetype_is_empty_and_routes_dense_bytes() {
     prime_fixtures();
     let mut ecs = EcsMaster::new();
 
@@ -216,18 +214,21 @@ fn lone_dense_archetype_is_empty_and_rejects_dense_bytes() {
         .expect("a zero-component push into the empty archetype must succeed");
     assert!(ecs.has_entity(empty_entity));
 
-    // Pushing the dense byte-slice is rejected (no pool for the dense id).
+    // D2: supplying the dense byte-slice SUCCEEDS — the table subset is empty
+    // (empty-signature archetype) and the dense subset is routed to the store.
     let hp = DenseHealth { hp: 7 };
-    let rejected = ecs.create_entity(arch, &[(DENSE_HEALTH_ID, &hp.hp.to_ne_bytes())]);
+    let routed = ecs
+        .create_entity(arch, &[(DENSE_HEALTH_ID, &hp.hp.to_ne_bytes())])
+        .expect("a lone-dense spawn into the empty archetype must SUCCEED (D2 routed)");
     assert!(
-        rejected.is_err(),
-        "pushing dense bytes into the (empty) lone-dense archetype must be rejected"
+        ecs.dense_contains(routed, DENSE_HEALTH_ID),
+        "the lone dense subset is routed to its DenseStore (D2)"
     );
 
-    // The empty entity still lives after the rejected push.
+    // The empty entity still lives.
     assert!(
         ecs.has_entity(empty_entity),
-        "the empty-archetype entity survives the rejected dense push"
+        "the empty-archetype entity survives the routed dense spawn"
     );
 }
 

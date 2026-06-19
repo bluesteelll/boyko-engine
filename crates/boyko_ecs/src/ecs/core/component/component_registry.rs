@@ -1346,6 +1346,31 @@ pub(crate) fn any_requires(base_ids: &[ComponentId]) -> bool {
         .any(|cid| !get_required_plan(cid.0).entries.is_empty())
 }
 
+/// Dense plan D2: `true` iff ANY id in `ids` is `StorageKind::Dense`. The cheap
+/// one-shot gate the structural-op routing (`InsertCommand` / migration helpers)
+/// uses to fold out the entire dense branch for a table-only bundle (the
+/// 0%-gate). Cold — read only at structural-op resolution, never the per-frame
+/// path. One `Relaxed` `STORAGE_KIND` load + branch per id.
+#[inline]
+pub(crate) fn any_dense(ids: &[ComponentId]) -> bool {
+    ids.iter()
+        .any(|cid| matches!(storage_kind(cid.0), StorageKind::Dense))
+}
+
+/// Dense plan D2: `true` iff `cid` is a signature-storage id (i.e.
+/// `StorageKind::Table`). The per-id companion of [`is_signature_storage`] that
+/// also does the registry read, used by the structural-op fire / per-pool loops
+/// that iterate an archetype's RETAINED `component_ids` (which keeps
+/// non-signature ids) to SKIP a dense (or bitset) id — dense is fired/stored by
+/// the dedicated D2 routing, never the table `component_ids` machinery. For a
+/// table-only world every id is `Table`, so the skip is never taken (a cold
+/// `Relaxed` load + branch on an already-cold path; the per-frame hot loops are
+/// untouched — the 0%-gate).
+#[inline]
+pub(crate) fn is_signature_id(cid: ComponentId) -> bool {
+    is_signature_storage(storage_kind(cid.0))
+}
+
 /// Required components (D4): invokes `push` once for every transitively-required
 /// component id reachable from `base_ids` that is NOT already present in
 /// `base_ids` and not already pushed (deduped against an internal `seen` set

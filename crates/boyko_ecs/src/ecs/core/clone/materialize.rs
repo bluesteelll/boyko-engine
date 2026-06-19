@@ -531,6 +531,22 @@ fn materialize_clone_into(
         .entity_master
         .register_entity_with_ptr(entity, target_ptr, new_row as u32);
 
+    // ── Dense plan D2 — materialize the source's DENSE memberships ──────────
+    // The TABLE row clone above EXCLUDED dense ids (D0, materialize.rs ~:235).
+    // Here we copy each dense membership of `source` that passes the cloner
+    // filter into the clone's `DenseStore` (no archetype migration) and, when
+    // `cloner.fire_hooks`, fire dense on_add/on_insert for it. 0%-gated: a
+    // table-only world (`dense_registry.is_empty()`) skips the whole walk.
+    if !world.dense_registry.is_empty() {
+        materialize_dense_memberships(
+            world,
+            source,
+            entity,
+            target_archetype_id,
+            cloner,
+        );
+    }
+
     // ── Step 7: gated fire (S6 / F2) ───────────────────────────────────────
     // The entity is fully materialized + mapped; no `&mut Archetype` reborrow is
     // live. Mint `world_ptr` only here.
@@ -550,15 +566,27 @@ fn materialize_clone_into(
             // SAFETY: `target_ptr` is a valid `*const Archetype`; the shared id
             //   slice is transient and not aliased by any live `&mut` (hooks receive
             //   `world_ptr`, not the slice).
+            // Dense plan D2: the clone's archetype RETAINS non-signature ids in
+            // `component_ids` (it dedups to the source's archetype, which kept the
+            // dense id since D0), so these table-fire loops SKIP dense via
+            // `is_signature_id` — dense is fired by `materialize_dense_memberships`,
+            // never here (no double-fire). For a dense-free clone the skip is never
+            // taken (the 0%-gate).
             if flags.contains(ArchetypeFlags::ON_ADD_ANY) {
                 let ids = unsafe { (*target_ptr).component_ids.as_slice() };
                 if flags.contains(ArchetypeFlags::ON_ADD_HOOK) {
                     for &cid in ids {
+                        if !component_registry::is_signature_id(cid) {
+                            continue;
+                        }
                         trigger_on_add(world_ptr, cid, entity);
                     }
                 }
                 if flags.contains(ArchetypeFlags::ON_ADD_OBSERVER) {
                     for &cid in ids {
+                        if !component_registry::is_signature_id(cid) {
+                            continue;
+                        }
                         fire_on_add_observers(world_ptr, cid, entity);
                     }
                 }
@@ -568,11 +596,17 @@ fn materialize_clone_into(
                 let ids = unsafe { (*target_ptr).component_ids.as_slice() };
                 if flags.contains(ArchetypeFlags::ON_INSERT_HOOK) {
                     for &cid in ids {
+                        if !component_registry::is_signature_id(cid) {
+                            continue;
+                        }
                         trigger_on_insert(world_ptr, cid, entity);
                     }
                 }
                 if flags.contains(ArchetypeFlags::ON_INSERT_OBSERVER) {
                     for &cid in ids {
+                        if !component_registry::is_signature_id(cid) {
+                            continue;
+                        }
                         fire_on_insert_observers(world_ptr, cid, entity);
                     }
                 }
@@ -581,9 +615,15 @@ fn materialize_clone_into(
                 // SAFETY: same as the on_add slice read above.
                 let ids = unsafe { (*target_ptr).component_ids.as_slice() };
                 for &cid in ids {
+                    if !component_registry::is_signature_id(cid) {
+                        continue;
+                    }
                     fire_entity_observers(world_ptr, ObserverKind::Add, cid, entity);
                 }
                 for &cid in ids {
+                    if !component_registry::is_signature_id(cid) {
+                        continue;
+                    }
                     fire_entity_observers(world_ptr, ObserverKind::Insert, cid, entity);
                 }
             }
@@ -632,6 +672,103 @@ unsafe fn clone_row_ptr(
 fn debug_clone_required_override(_id: ComponentId) {
     // Intentionally a no-op marker (no panic, no log dependency). A filter-denied
     // required component is reconstructed by design (C2); breakpoint here to observe.
+}
+
+/// Dense plan D2 — materializes `source`'s dense memberships into the clone
+/// `entity` and (when `cloner.fire_hooks`) fires dense on_add/on_insert.
+///
+/// The TABLE row clone excludes dense ids (D0); this is the dense companion. For
+/// each dense store the SOURCE belongs to and the cloner filter allows, copies the
+/// source value's bytes into the clone's store (a fresh slot, no migration). A
+/// non-cloneable (`Cloneability::Ignore`) dense component is skipped (panics in
+/// `strict` mode, mirroring the table path). The source bytes are copied into an
+/// owned buffer BEFORE the clone insert, because both touch the SAME store
+/// (`&store` to read + `&mut store` to insert cannot coexist).
+///
+/// Cold (clone is not a per-frame path). Caller gates on
+/// `!world.dense_registry.is_empty()` (the 0%-gate).
+#[cold]
+#[inline(never)]
+fn materialize_dense_memberships(
+    world: &mut EcsMaster,
+    source: Entity,
+    entity: Entity,
+    target_archetype_id: crate::ecs::identifiers::primitives::ArchetypeId,
+    cloner: &EntityCloner,
+) {
+    // Snapshot the dense ids the SOURCE belongs to + their bytes into owned
+    // buffers, so the subsequent `&mut store` inserts don't alias the `&store`
+    // reads. `dense_ids` is small; only memberships are copied.
+    let source_id = source.id();
+    let mut cloned: Vec<(ComponentId, Vec<u8>)> = Vec::new();
+    for &cid in world.dense_registry.dense_ids() {
+        // Filter / cloneability gate (mirrors the table path).
+        if !cloner.filter_allows(cid) {
+            continue;
+        }
+        let info = component_registry::get_clone_info(cid.0);
+        let cloneable = matches!(
+            info.map(|i| i.cloneability),
+            Some(Cloneability::TriviallyCopyable) | Some(Cloneability::CloneViaFn)
+        );
+        let Some(store) = world.dense_registry.store(cid) else {
+            continue;
+        };
+        let Some(slot) = store.slot_of(source_id) else {
+            continue; // source is not a member of this dense store
+        };
+        if !cloneable {
+            if cloner.strict {
+                strict_ignore_panic(cid);
+            }
+            // Non-strict: skip a non-cloneable dense membership (the clone simply
+            // lacks it), mirroring the table clone's non-cloneable skip.
+            continue;
+        }
+        let stride = store.stride();
+        let view = store.solve_view();
+        // SAFETY: `slot` came from `slot_of(source_id)`, so it is a LIVE slot
+        //   (`< len`, live-bit set), satisfying `row_ptr`'s contract. The pointer
+        //   is valid for `stride` bytes of the source value.
+        let src_bytes: &[u8] = unsafe {
+            let ptr = view.row_ptr(slot as usize);
+            core::slice::from_raw_parts(ptr, stride)
+        };
+        // For a `TriviallyCopyable` dense component a byte copy reproduces the
+        // value exactly. `CloneViaFn` dense components fall back to the byte copy
+        // here too (D2 scope: the physics-body dense use case is POD; a deep
+        // owning dense `Clone` is a documented v1.1 follow-up — the value is still
+        // bit-copied, sound for `Copy`-with-`Entity` shapes that own no heap).
+        cloned.push((cid, src_bytes.to_vec()));
+    }
+
+    if cloned.is_empty() {
+        return;
+    }
+
+    // Insert each snapshotted value into the clone's store (no archetype change).
+    for (cid, bytes) in &cloned {
+        let store = world.dense_registry.store_mut(*cid);
+        store.insert(entity.id(), bytes);
+        store.mark_arch_present(target_archetype_id);
+    }
+
+    // Fire dense on_add/on_insert for the materialized memberships (gated by
+    // `cloner.fire_hooks`, mirroring the table clone fire). NOT gated by archetype
+    // flags (dense ids are not in the signature); the `trigger`/`fire` self-gate.
+    if cloner.fire_hooks {
+        // MINT: no `world`-derived `&mut` into storage is live (the store inserts
+        // above returned; only the owned `cloned` buffer survives).
+        let world_ptr = NonNull::from(&mut *world);
+        for (cid, _) in &cloned {
+            trigger_on_add(world_ptr, *cid, entity);
+            fire_on_add_observers(world_ptr, *cid, entity);
+        }
+        for (cid, _) in &cloned {
+            trigger_on_insert(world_ptr, *cid, entity);
+            fire_on_insert_observers(world_ptr, *cid, entity);
+        }
+    }
 }
 
 /// Cold fail-loud panic for `strict(true)` over an `Ignore` source component.

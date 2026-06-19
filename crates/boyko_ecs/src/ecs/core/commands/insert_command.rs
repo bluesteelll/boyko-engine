@@ -20,16 +20,24 @@ use crate::ecs::core::archetype::archetype::Archetype;
 use crate::ecs::core::bundle::Bundle;
 use crate::ecs::core::commands::command::Command;
 use crate::ecs::core::commands::migration_helpers::{merged_archetype_id, migrate_entity_insert};
+use crate::ecs::core::component::component_registry::{self, StorageKind};
 use crate::ecs::core::component::hooks::archetype_flags::ArchetypeFlags;
-use crate::ecs::core::component::hooks::dispatch::{trigger_on_insert, trigger_on_replace};
+use crate::ecs::core::component::hooks::dispatch::{
+    trigger_on_add, trigger_on_insert, trigger_on_replace,
+};
 use crate::ecs::core::component::observers::dispatch::{
-    fire_on_insert_observers, fire_on_replace_observers,
+    fire_on_add_observers, fire_on_insert_observers, fire_on_replace_observers,
 };
 use crate::ecs::core::component::observers::ObserverKind;
 use crate::ecs::core::component::observers::entity_store::fire_entity_observers;
 use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 use crate::ecs::core::entity::entity::Entity;
 use crate::ecs::identifiers::primitives::ComponentId;
+
+/// Stack capacity for the dense-fire scratch (Dense plan D2). Mirrors the
+/// derive macro's per-bundle arity ceiling and the sibling `MAX_BUNDLE_ARITY`
+/// constants in `spawn_at_command.rs` / `migration_helpers.rs`.
+const MAX_BUNDLE_ARITY: usize = 16;
 
 /// Deferred "insert bundle `B` into existing entity" command.
 ///
@@ -113,6 +121,17 @@ impl<B: Bundle> InsertCommand<B> {
         let archetype_ptr = inland.archetype_ptr();
         let row = inland.unit_index() as usize;
 
+        // Dense plan D2 / decision 3 — `is_dense(cid)` filters dense bundle ids
+        // out of the TABLE replace path (a dense id has no archetype pool, so its
+        // table-flag-gated fire + `get_pool_mut` are wrong/absent). `has_dense`
+        // gates the dense PRE-on_replace probe + the closure dense branch + the
+        // POST dense on_add/on_insert. For a table-only bundle `has_dense` is
+        // false and every dense branch folds out (the 0%-gate).
+        let is_dense = |cid: ComponentId| {
+            matches!(component_registry::storage_kind(cid.0), StorageKind::Dense)
+        };
+        let has_dense = B::component_ids().iter().copied().any(is_dense);
+
         // Phase 14a §3.3 / O3 / Q7: read the archetype flags once. The
         // overwrite loop below confines its per-invocation `&mut *archetype_ptr`
         // to each closure call, so no `world`-derived `&mut Archetype` is live
@@ -124,28 +143,68 @@ impl<B: Bundle> InsertCommand<B> {
         //   `UnsafeCell`-wrapped). Reading `flags` is one `u16` load (no `&mut`).
         let flags = unsafe { (*archetype_ptr).flags };
 
-        // PRE-overwrite (Q7): fire `on_replace` for each bundle component while
-        // the row still holds the OLD value — the read-only view reads the
+        // Dense plan D2 — the entity's current archetype id, seeded into each
+        // dense store's `arch_presence` on the closure's dense route. Read once
+        // here (a `usize` load through the raw deref; no `&mut` taken).
+        // SAFETY (F1): `archetype_ptr` is interior-mutable, stable slab provenance.
+        let source_archetype_id_for_dense = unsafe { (*archetype_ptr).id() };
+
+        // Dense plan D2 — PRE-overwrite on_replace for each PRESENT dense bundle
+        // id (the dense value is still old). NOT gated by the archetype's
+        // `ON_REPLACE_ANY` flag (dense ids are not in the signature); the
+        // `trigger`/`fire` self-gate. An absent dense id fires on_add later (POST)
+        // instead, never on_replace. 0%-gated by `has_dense`.
+        if has_dense {
+            let world_ptr = NonNull::from(&mut *world);
+            for &cid in B::component_ids() {
+                if !is_dense(cid) {
+                    continue;
+                }
+                let present = world
+                    .dense_registry
+                    .store(cid)
+                    .is_some_and(|s| s.contains(entity.id()));
+                if present {
+                    trigger_on_replace(world_ptr, cid, entity);
+                    fire_on_replace_observers(world_ptr, cid, entity);
+                }
+            }
+        }
+
+        // PRE-overwrite (Q7): fire `on_replace` for each TABLE bundle component
+        // while the row still holds the OLD value — the read-only view reads the
         // dying bytes. `EntityInland` still points at this row. No `&mut
-        // Archetype` is live here (only `archetype_ptr`, raw).
+        // Archetype` is live here (only `archetype_ptr`, raw). Dense ids are
+        // skipped (handled above).
         if flags.contains(ArchetypeFlags::ON_REPLACE_ANY) {
             let world_ptr = NonNull::from(&mut *world);
             if flags.contains(ArchetypeFlags::ON_REPLACE_HOOK) {
                 for &cid in B::component_ids() {
+                    if is_dense(cid) {
+                        continue;
+                    }
                     trigger_on_replace(world_ptr, cid, entity);
                 }
             }
             if flags.contains(ArchetypeFlags::ON_REPLACE_OBSERVER) {
                 for &cid in B::component_ids() {
+                    if is_dense(cid) {
+                        continue;
+                    }
                     fire_on_replace_observers(world_ptr, cid, entity);
                 }
             }
         }
         // Feature 2 — entity-targeted on_replace observers (in-place overwrite),
-        // gated by the archetype's sticky HAS_ENTITY_OBSERVER bit.
+        // gated by the archetype's sticky HAS_ENTITY_OBSERVER bit. Dense ids are
+        // skipped (their entity-targeted fires are out of D2 scope; D2 routes
+        // dense component-level hooks/observers only).
         if flags.contains(ArchetypeFlags::HAS_ENTITY_OBSERVER) {
             let world_ptr = NonNull::from(&mut *world);
             for &cid in B::component_ids() {
+                if is_dense(cid) {
+                    continue;
+                }
                 fire_entity_observers(world_ptr, ObserverKind::Replace, cid, entity);
             }
         }
@@ -170,7 +229,33 @@ impl<B: Bundle> InsertCommand<B> {
         // so successive callbacks each get a fresh `&mut Archetype`
         // without any cross-call borrow overlap.
 
+        // Dense plan D2 — record dense bundle ids inserted in this replace, with
+        // whether each was newly added (absent before), so the POST window fires
+        // on_add (newly) + on_insert (all). The dense store op happens INSIDE the
+        // closure where `bytes` is live; the fire is deferred to the POST window.
+        // Reach `world.dense_registry` from the closure via this separate
+        // `&mut *world` capture (`archetype_ptr` is a disjoint raw reborrow).
+        let world_ref: &mut EcsMaster = world;
+        let mut dense_fire_buf = [(ComponentId(0), false); MAX_BUNDLE_ARITY];
+        let mut dense_fire_n = 0usize;
+        let entity_id_for_dense = entity.id();
+
         self.bundle.for_each_component_bytes(|component_id, bytes| {
+            // Dense plan D2 / decision 3: a dense bundle id has NO archetype pool
+            // — route it to its `DenseStore` (insert-or-replace at a stable slot,
+            // no migration), record the id + newly-added flag for the POST fire,
+            // and skip the pool path entirely. For a table-only bundle this branch
+            // is never taken (the 0%-gate).
+            if matches!(component_registry::storage_kind(component_id.0), StorageKind::Dense) {
+                let store = world_ref.dense_registry.store_mut(component_id);
+                let newly_added = store.insert_or_replace(entity_id_for_dense, bytes);
+                store.mark_arch_present(source_archetype_id_for_dense);
+                debug_assert!(dense_fire_n < MAX_BUNDLE_ARITY);
+                dense_fire_buf[dense_fire_n] = (component_id, newly_added);
+                dense_fire_n += 1;
+                return;
+            }
+
             // SAFETY (U1, U2, U14, SCH7, F1):
             //   * archetype_ptr is write-capable, stable, interior-mutable
             //     (`SharedReadWrite`, F4-rooted) slab provenance — it survives
@@ -212,31 +297,60 @@ impl<B: Bundle> InsertCommand<B> {
             }
         });
 
-        // POST-overwrite (Q7): fire `on_insert` for each bundle component now
-        // that the row holds the NEW value — the read-only view reads the fresh
-        // bytes. The closure's per-invocation `&mut *archetype_ptr` has dropped;
-        // only `archetype_ptr` (raw) survives, so minting `world_ptr` aliases no
-        // reborrow (SAFETY-1). `on_add` does NOT fire — the component was already
-        // present (in-place replace, Q7).
+        // POST-overwrite (Q7): fire `on_insert` for each TABLE bundle component
+        // now that the row holds the NEW value. The closure's per-invocation
+        // `&mut *archetype_ptr` has dropped (and the `world_ref` dense capture
+        // ended at the closure return), so minting `world_ptr` aliases no reborrow
+        // (SAFETY-1). `on_add` does NOT fire for table — the component was already
+        // present (in-place replace, Q7). Dense ids are skipped (handled below).
         if flags.contains(ArchetypeFlags::ON_INSERT_ANY) {
             let world_ptr = NonNull::from(&mut *world);
             if flags.contains(ArchetypeFlags::ON_INSERT_HOOK) {
                 for &cid in B::component_ids() {
+                    if is_dense(cid) {
+                        continue;
+                    }
                     trigger_on_insert(world_ptr, cid, entity);
                 }
             }
             if flags.contains(ArchetypeFlags::ON_INSERT_OBSERVER) {
                 for &cid in B::component_ids() {
+                    if is_dense(cid) {
+                        continue;
+                    }
                     fire_on_insert_observers(world_ptr, cid, entity);
                 }
             }
         }
         // Feature 2 — entity-targeted on_insert observers (in-place overwrite),
-        // gated by the archetype's sticky HAS_ENTITY_OBSERVER bit.
+        // gated by the archetype's sticky HAS_ENTITY_OBSERVER bit. Dense skipped.
         if flags.contains(ArchetypeFlags::HAS_ENTITY_OBSERVER) {
             let world_ptr = NonNull::from(&mut *world);
             for &cid in B::component_ids() {
+                if is_dense(cid) {
+                    continue;
+                }
                 fire_entity_observers(world_ptr, ObserverKind::Insert, cid, entity);
+            }
+        }
+
+        // Dense plan D2 — POST dense fires: on_add for every NEWLY-added dense id
+        // (absent before this insert), then on_insert for ALL inserted dense ids
+        // (newly-added OR replaced). Mirrors the table on_add/on_insert ordering;
+        // a replaced dense id already fired on_replace PRE-overwrite above. NOT
+        // gated by archetype flags (dense ids are not in the signature); the
+        // `trigger`/`fire` self-gate. 0%-gated by `dense_fire_n`.
+        if dense_fire_n != 0 {
+            let world_ptr = NonNull::from(&mut *world);
+            for &(cid, newly_added) in &dense_fire_buf[..dense_fire_n] {
+                if newly_added {
+                    trigger_on_add(world_ptr, cid, entity);
+                    fire_on_add_observers(world_ptr, cid, entity);
+                }
+            }
+            for &(cid, _) in &dense_fire_buf[..dense_fire_n] {
+                trigger_on_insert(world_ptr, cid, entity);
+                fire_on_insert_observers(world_ptr, cid, entity);
             }
         }
 

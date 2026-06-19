@@ -293,6 +293,11 @@ where
         // apply-time 0%-gate (the constructor pass below is skipped entirely).
         let required_missing = cache_record.required_missing;
         let required_pool_ids = cache_record.required_pool_ids;
+        // Dense plan D2 — per-canonical-slot dense marker. `0` for a table-only
+        // bundle (the apply-time 0%-gate: every dense branch below folds out and
+        // the typed-write fast path stays eligible).
+        let dense_mask = cache_record.dense_mask;
+        let has_dense = dense_mask != 0;
 
         // ── Step 2.5 (W4): once-per-batch SBO-B2 + SBO-N debug invariants
         // SAFETY (SBO-N + SBO-B2 + B2):
@@ -313,10 +318,19 @@ where
                 cache_record.pools_len_at_install as usize <= pools_len,
                 "SBO-N violation: pools Vec shrunk after cache install"
             );
-            debug_assert!(
-                pool_ids.is_sorted_by_key(|p| p.0),
-                "SBO-B2 violation: pool_ids must be in canonical-sorted order"
-            );
+            // Dense plan D2: a dense slot holds `DENSE_POOL_SENTINEL`
+            // (`usize::MAX`), which is NOT canonical-sorted against the real table
+            // pool ids — so the SBO-B2 sortedness check is meaningful only on a
+            // table-only bundle (`dense_mask == 0`). The table-only path is
+            // unchanged (the assert still runs); the canonical ORDER guarantee
+            // for the dense path rides `B::component_ids()` (asserted by the
+            // per-row emit-order check below), not `pool_ids`.
+            if dense_mask == 0 {
+                debug_assert!(
+                    pool_ids.is_sorted_by_key(|p| p.0),
+                    "SBO-B2 violation: pool_ids must be in canonical-sorted order"
+                );
+            }
             debug_assert_eq!(pool_ids.len(), B::component_ids().len());
         }
 
@@ -360,11 +374,20 @@ where
             let archetype_shared: &Archetype = unsafe { &*archetype_ptr };
             let pools = archetype_shared.component_pools();
             for (canonical_idx, &cid) in component_ids_static.iter().enumerate() {
+                // Dense plan D2: a dense slot has NO per-archetype pool — skip it
+                // from the TABLE data-column build (its `pool_ids[canonical_idx]`
+                // is the `DENSE_POOL_SENTINEL`, never indexed). The dense bytes are
+                // routed to `DenseStore` by the row loop's dense branch. For a
+                // table-only bundle this test is always false (the 0%-gate).
+                if dense_mask & (1u32 << canonical_idx) != 0 {
+                    continue;
+                }
                 let layout_size = pools
                     .get_pool(cid)
                     .expect(
-                        "invariant: cached archetype hosts every component in \
-                         B::component_ids() (Bundle / ArchetypeMaster contract)",
+                        "invariant: cached archetype hosts every TABLE component in \
+                         B::component_ids() (Bundle / ArchetypeMaster contract; dense \
+                         ids skipped above)",
                     )
                     .component_layout()
                     .size();
@@ -388,7 +411,15 @@ where
         // `write_row_perm`'s `unreachable!` default is never reached.
         let mut perm: [u8; MAX_BUNDLE_ARITY] =
             [crate::ecs::core::bundle::BundleColumnPtrs::PERM_SKIP; MAX_BUNDLE_ARITY];
-        if const { B::HAS_TYPED_WRITE } {
+        // Dense plan D2: `write_row_perm` maps EVERY declaration field (incl. a
+        // dense one) onto `data_component_ids`, but a dense field is NOT a
+        // data-column id (it has no archetype pool, excluded from
+        // `data_component_ids` above), so the perm build would not find it and
+        // panic. The dense-bearing batch uses the byte path (gated by `!has_dense`
+        // at the row loop), so the perm is dead for it — skip the build. For a
+        // table-only typed-write bundle (`!has_dense`) the build runs exactly as
+        // before (the 0%-gate).
+        if const { B::HAS_TYPED_WRITE } && !has_dense {
             B::write_row_perm(data_component_ids, &mut perm);
         }
 
@@ -439,7 +470,14 @@ where
         // pre-22.1 walk: same indexed load from a small stack array, same
         // deref chain, same memcpy.
         let mut iter = self.iter;
-        if const { B::HAS_TYPED_WRITE } {
+        // Dense plan D2 — the Decision-4 typed-write fast path writes EVERY field
+        // (incl. a dense one) through `perm`-indexed `col_ptrs`, but a dense field
+        // has NO archetype column, so it is ineligible when the bundle carries a
+        // dense component. Fall back to the byte path for a dense-bearing batch
+        // (the dense bytes are routed to `DenseStore` per row there). The const is
+        // ANDed with the runtime `!has_dense`, so a table-only typed-write bundle
+        // keeps the exact pre-dense fast path (the 0%-gate: `has_dense == false`).
+        if const { B::HAS_TYPED_WRITE } && !has_dense {
             // ── Decision 4 typed path ──────────────────────────────────────
             // W2 single-provenance: resolve every data column's write base
             // ONCE, under a single `&mut` borrow of the pool bundle that is
@@ -475,8 +513,10 @@ where
                     bundle.write_row_typed(&col_ptrs, row);
                 }
             }
-        } else {
+        } else if !has_dense {
             // ── RETAINED byte path (verbatim; HAS_TYPED_WRITE == false) ─────
+            // Dense plan D2: kept BYTE-IDENTICAL behind `!has_dense` so a
+            // table-only hand-written-Bundle batch is unchanged (the 0%-gate).
             for i in 0..n {
                 let row = start_row + i;
                 let bundle = iter.next().expect(
@@ -511,6 +551,65 @@ where
                 });
                 // D-E alignment pin: the bundle's data walk emitted exactly the
                 // non-ZST columns the per-batch filter counted.
+                debug_assert_eq!(k, data_pool_ids.len());
+            }
+        } else {
+            // ── Dense plan D2 — dense-bearing byte path (decision 4) ────────
+            // The batch carries ≥1 dense component. Per emitted data component:
+            //   * a DENSE component routes its bytes to `DenseStore::insert`
+            //     (STORED, op-order-deterministic) — NO per-row hooks/observers
+            //     fire (the documented bulk-no-hooks policy, identical to the
+            //     table-in-batch policy: a user wanting per-spawn dense hooks uses
+            //     `Commands::spawn`, not `spawn_batch` — no table/dense asymmetry);
+            //   * a TABLE component takes the same `pool_at_unchecked_mut` write
+            //     as the verbatim path, advancing `k`.
+            // `archetype` (a `&mut *archetype_ptr` raw reborrow) and
+            // `world.dense_registry` are DISJOINT fields, so the closure may hold
+            // both: `archetype`'s provenance is the raw slab pointer (not a
+            // `&mut world` borrow), and `dense_registry` is reached through the
+            // separately-captured `&mut *world`.
+            let world_ref: &mut EcsMaster = world;
+            for i in 0..n {
+                let row = start_row + i;
+                let bundle = iter.next().expect(
+                    "ExactSizeIterator contract: len() reported n, iter yielded < n",
+                );
+                let mut k = 0usize;
+                bundle.for_each_data_component_bytes(|component_id, bytes| {
+                    if matches!(
+                        crate::ecs::core::component::component_registry::storage_kind(component_id.0),
+                        crate::ecs::core::component::component_registry::StorageKind::Dense
+                    ) {
+                        // Route to the global dense column. `start_id + i` is this
+                        // row's entity id (the batch reserved `[start_id, end_id)`).
+                        let entity_id =
+                            crate::ecs::identifiers::primitives::EntityId(start_id + i);
+                        let store = world_ref.dense_registry.store_mut(component_id);
+                        store.insert(entity_id, bytes);
+                        store.mark_arch_present(archetype_id);
+                        // No `k += 1` — dense is not a table data column.
+                        return;
+                    }
+                    debug_assert!(k < data_pool_ids.len());
+                    debug_assert_eq!(
+                        data_component_ids[k], component_id,
+                        "B2/SBO-B2 violation: bundle data-emit order mismatch"
+                    );
+                    let pool_idx = data_pool_ids[k];
+                    // SAFETY (SBO13): identical to the verbatim byte path —
+                    //   `row < committed_rows` after `reserve_capacity`, `pool_idx`
+                    //   is a filtered table-column slot, exclusive `&mut archetype`,
+                    //   `bytes.len()` matches the registry layout.
+                    unsafe {
+                        archetype
+                            .component_pools_mut()
+                            .pool_at_unchecked_mut(pool_idx)
+                            .write_at_unchecked_initialized(row, bytes);
+                    }
+                    k += 1;
+                });
+                // The dense-emitted components are NOT in `data_pool_ids`, so `k`
+                // counts only the table data columns.
                 debug_assert_eq!(k, data_pool_ids.len());
             }
         }

@@ -14,7 +14,8 @@
 
 use boyko_utils::sparse_map::sparse_map::SparseMap;
 
-use crate::ecs::identifiers::primitives::{ComponentId, EntityId};
+use crate::ecs::core::iters::archetype_bit_set::ArchetypeBitSet;
+use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId, EntityId};
 use crate::ecs::memory::component_pool::ComponentPool;
 
 use super::live_bitmap::LiveBitmap;
@@ -64,6 +65,20 @@ pub struct DenseStore {
     /// slot is reused before the column grows (Dense plan Decision 3).
     free: Vec<u32>,
 
+    /// Archetype-presence seed (Dense plan Data structures / D1-deferred → D2):
+    /// a 1024-bit set marking every archetype that has at least once hosted an
+    /// entity inserted into this store. D3's `seed_from_candidates` strides this
+    /// to enumerate candidate archetypes for a mixed dense query without a full
+    /// archetype sweep.
+    ///
+    /// CONSERVATIVE: a bit is SET on insert and never cleared on a single
+    /// `remove` (an archetype may still host other dense members, and tracking
+    /// per-archetype live counts would cost a SparseMap per store). D3's per-row
+    /// membership filter (`e2s.contains(entity)`) is the exact oracle; this set
+    /// only over-approximates the candidate archetypes (false positives are
+    /// filtered per-row, never false negatives).
+    arch_presence: ArchetypeBitSet,
+
     /// The component id this store serves (debug guards + diagnostics).
     id: ComponentId,
 }
@@ -84,6 +99,7 @@ impl DenseStore {
             s2e: Vec::with_capacity(reserve_rows),
             live: LiveBitmap::with_capacity(reserve_rows),
             free: Vec::with_capacity(reserve_rows),
+            arch_presence: ArchetypeBitSet::new(),
             id: component_id,
         }
     }
@@ -145,6 +161,39 @@ impl DenseStore {
 
         debug_assert!(self.debug_check_slot(slot), "DenseStore::insert invariant");
         slot
+    }
+
+    /// Inserts `value_bytes` for `entity` if absent, or REPLACES the existing
+    /// value in place if present (dropping the old value via the column's
+    /// `drop_fn` first). Returns `true` iff the entity was newly added (absent
+    /// before).
+    ///
+    /// The insert-onto-an-existing-entity path the table `InsertCommand` replace
+    /// semantics map onto for a dense component (Dense plan D2): a re-insert
+    /// without an intervening `remove` is legal here (unlike [`Self::insert`],
+    /// which debug-asserts absence) — it overwrites the slot in place, keeping
+    /// the slot VALUE assignment stable (no churn, the determinism contract).
+    pub fn insert_or_replace(&mut self, entity: EntityId, value_bytes: &[u8]) -> bool {
+        if let Some(slot) = self.e2s.get(entity.get()).copied() {
+            // Present: drop the old value, overwrite in place at the SAME slot
+            // (no free-list churn — the live slot never moves, C3 determinism).
+            // SAFETY: `slot < column.count()` (`e2s` only maps to appended slots
+            // below the high-water mark) and the slot holds a valid `T` written by
+            // a prior insert; `&mut self` gives exclusive access. `drop_at` runs
+            // the registered `drop_fn` exactly once, logically uninitialising the
+            // slot; `write_at` then re-initialises it from `value_bytes` (a valid,
+            // stride-sized representation per the caller contract). No double-drop:
+            // the old value is dropped exactly here.
+            unsafe {
+                self.column.drop_at(slot as usize);
+                self.column.write_at(slot as usize, value_bytes);
+            }
+            debug_assert!(self.debug_check_slot(slot), "DenseStore::insert_or_replace invariant");
+            false
+        } else {
+            self.insert(entity, value_bytes);
+            true
+        }
     }
 
     /// Removes `entity`, dropping its component bytes via the column's
@@ -215,6 +264,24 @@ impl DenseStore {
     #[inline]
     pub fn component_id(&self) -> ComponentId {
         self.id
+    }
+
+    /// Marks `archetype_id` present in the [`arch_presence`](Self::arch_presence)
+    /// seed (Dense plan D2). Called by the routing layer on every dense insert
+    /// with the entity's current archetype, so D3 can enumerate candidate
+    /// archetypes without a full sweep.
+    ///
+    /// Idempotent: a set bit stays set. Conservative — never cleared on a single
+    /// remove (see the field doc).
+    #[inline]
+    pub fn mark_arch_present(&mut self, archetype_id: ArchetypeId) {
+        self.arch_presence.insert(archetype_id.get());
+    }
+
+    /// Read-only access to the archetype-presence seed (Dense plan D2 → D3).
+    #[inline]
+    pub fn arch_presence(&self) -> &ArchetypeBitSet {
+        &self.arch_presence
     }
 
     /// Invokes `f(slot, entity)` for every live slot in slot order, skipping
