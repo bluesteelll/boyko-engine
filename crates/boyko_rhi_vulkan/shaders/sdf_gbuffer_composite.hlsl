@@ -21,10 +21,19 @@
 //       golden's `pack_rgba` uses `(x*255+0.5)` rounding — the <=1-LSB difference is
 //       absorbed by the +/-2/255 per-channel tolerance (same as rungs 8..11).
 //
-// Additively (unconsumed in P1b, the MRT G-buffer foundation):
-//   * binding 3 — `gNormal[px,py] = float4(sdf_normal(p)*0.5+0.5, 1)` on an SDF hit,
-//     else a neutral 0.5 (the world normal encoded to UNORM).
-//   * binding 4 — `gMaterial[px,py]` a constant material id/params slot.
+// # Deferred-shading SPLIT (increment 1)
+//
+// The A1 shadow + A2 AO COMPOSITE moves OUT of this marcher into a fullscreen
+// `deferred_pbr.comp` resolve. The marcher computes base/shadow/ao exactly as before
+// (in-register, exact p/n, frozen field) but WRITES ATTRIBUTES rather than compositing:
+//   * binding 2 (gAlbedo) — the UNMULTIPLIED base color (Lambert+ambient on an SDF hit,
+//     else MESH_COLOR / BACKGROUND). NO `base * shadow * ao`.
+//   * binding 4 (gMaterial) — `(r = vis, g = 0, b = mask, a = 1)` where
+//     `vis = clamp(shadow*ao, 0, 1)` (ONE combined visibility factor, quantized once to
+//     R8) and `mask = 1` on the two SDF-LIT arms, `0` on mesh / background / empty. The
+//     resolve computes `lit = (mask == 1) ? base * vis : base` (a strict if on mask).
+//   * binding 3 (gNormal) — `sdf_normal(p)*0.5+0.5` on an SDF hit, else neutral 0.5 (the
+//     world normal encoded to UNORM). UNCHANGED + UNREAD this increment (forward-compat).
 //
 // # The vocabulary set (set 0, written ONCE — no per-frame vkUpdateDescriptorSets)
 //
@@ -35,9 +44,9 @@
 //               is the storage image.
 //   binding 1 : Texture2D<float> (SAMPLED) — the mesh depth (DEPTH-aspect view of the
 //               D32_SFLOAT image), fetched with `.Load` (OpImageFetch, no sampler).
-//   binding 2 : RWTexture2D<float4> (STORAGE, rgba8) — albedo (the marcher color).
-//   binding 3 : RWTexture2D<float4> (STORAGE, rgba8) — world normal (additive).
-//   binding 4 : RWTexture2D<float4> (STORAGE, rgba8) — material (additive constant).
+//   binding 2 : RWTexture2D<float4> (STORAGE, rgba8) — albedo (the UNMULTIPLIED base).
+//   binding 3 : RWTexture2D<float4> (STORAGE, rgba8) — world normal (unread this incr.).
+//   binding 4 : RWTexture2D<float4> (STORAGE, rgba8) — material (r=vis, b=mask, a=1).
 //   binding 5 : cbuffer Camera (UNIFORM) — the 80-byte extent/camera block, written
 //               ONCE at setup (NOT per-frame). This replaces the rung-10 push
 //               constant: the vocabulary pipeline uses a DEDICATED layout, so the
@@ -203,9 +212,6 @@ static const float3 BACKGROUND = float3(0.05, 0.05, 0.1);  // miss color
 // (warm orange/red) and the background (dark blue). Mirrored host-side.
 static const float3 MESH_COLOR = float3(0.15, 0.65, 0.25);
 
-// The constant material slot written into gMaterial (additive, unconsumed in P1b).
-static const float4 MATERIAL_CONST = float4(0.0, 0.0, 0.0, 1.0);
-
 // Sphere-trace tuning (the §S2 march budget; identical to rung 9/10).
 static const float EPS    = 0.001;  // hit threshold on |sdf|
 static const float T_MAX  = 10.0;   // miss distance bound (= depth-1.0 far plane)
@@ -352,10 +358,14 @@ void main(uint3 tid : SV_DispatchThreadID) {
         TileBound tb = Tiles[ty * tiles_w + tx];
         if ((tb.flags & TILE_FLAG_EMPTY) != 0u) {
             // EMPTY fast-path: the marcher's else-if(has_mesh)/else arms with hit = false.
+            // Deferred split (D2 arms 5/6): write ATTRIBUTES, never composite. gAlbedo
+            // carries the base mesh/background color; gMaterial = (vis = 1, g = 0, mask = 0,
+            // a = 1) — vis = 1 (no shadow/AO on these arms) and mask = 0 (NOT SDF-lit) so
+            // the resolve passes the base through byte-identically (the 0%-gate).
             float3 empty_color = has_mesh ? MESH_COLOR : BACKGROUND;
             gAlbedo[uint2(px, py)] = float4(clamp(empty_color, 0.0, 1.0), 1.0);
             gNormal[uint2(px, py)] = float4(0.5, 0.5, 0.5, 1.0); // neutral world normal
-            gMaterial[uint2(px, py)] = MATERIAL_CONST;
+            gMaterial[uint2(px, py)] = float4(1.0, 0.0, 0.0, 1.0); // vis = 1, mask = 0
             return;
         }
         t_seed = tb.near_t;
@@ -477,29 +487,48 @@ void main(uint3 tid : SV_DispatchThreadID) {
         }
     }
 
-    float3 color;
-    float3 normal_enc = float3(0.5, 0.5, 0.5); // neutral world normal (UNORM-encoded 0)
+    // --- Deferred-shading SPLIT (increment 1): the marcher WRITES ATTRIBUTES; the
+    // composite (base * shadow * ao) moves to the fullscreen `deferred_pbr.comp` resolve.
+    //   * `base`  — the Lambert + ambient SDF color, OR MESH_COLOR / BACKGROUND. Stored
+    //               in gAlbedo (NOT pre-multiplied by shadow/ao).
+    //   * `vis`   — clamp(shadow * ao, 0, 1), ONE combined visibility factor quantized
+    //               once to R8 in gMaterial.r. 1.0 on the OFF / mesh / background arms.
+    //   * `mask`  — 1 on the two SDF-LIT arms (the resolve multiplies base*vis there),
+    //               0 on mesh / background / empty (the resolve passes base through).
+    //               Stored in gMaterial.b. The strict-if on mask in the resolve makes a
+    //               vis = 0 SDF pass NOT black out a mesh/bg pixel (they have mask = 0).
+    // The BRDF (Lambert+ambient base, the A1 shadow march, the A2 AO march) stays here,
+    // computed in-register from the exact hit p/n against the FROZEN field (unchanged).
+    // `vis` is filled on EVERY arm (defense-in-depth) so gMaterial is never stale.
+    float3 base;
+    float vis = 1.0;                            // default: fully visible (OFF/mesh/bg arms)
+    float mask = 0.0;                           // default: NOT SDF-lit (resolve pass-through)
+    float3 normal_enc = float3(0.5, 0.5, 0.5);  // neutral world normal (UNORM-encoded 0)
     if (hit && t < t_mesh) {
         // The SDF surface is in FRONT of the mesh (or there is no mesh): light it.
         float3 p = ro + rd * t;
         float3 n = sdf_normal(p);
-        // BUG-A-NDOTL: the base Lambert term now consumes the PUSHED `pc.light_dir`
-        // (full directional light), matching the shadow/AO marches and the host
-        // `host_shade` (which already normalizes the pushed dir for the base). For the
-        // default push `light_dir == (0,0,1)`, `normalize((0,0,1))` is bit-identical to
-        // the old static `normalize(LIGHT_DIR)`, so the OFF path and the ON default-light
+        // BUG-A-NDOTL: the base Lambert term consumes the PUSHED `pc.light_dir` (full
+        // directional light), matching the shadow/AO marches and the host `host_shade`.
+        // For the default push `light_dir == (0,0,1)`, `normalize((0,0,1))` is bit-identical
+        // to the old static `normalize(LIGHT_DIR)`, so the OFF path and the ON default-light
         // path stay byte-identical — only a NON-default `light_dir` changes the base.
         float3 l = normalize(pc.light_dir);
         float ndotl = max(dot(n, l), 0.0);
-        // The lit composite color — byte-identical for the default light (the 0%-gate anchor).
-        float3 base = BASE_COLOR * ndotl + BASE_COLOR * AMBIENT;
-        // Render A1/A2: gate the shadow/AO multiply behind `lighting_flags`. The OFF path
-        // (`lighting_flags == 0`) is a STRUCTURAL `if` — NO extra multiply — so the stored
-        // albedo is byte-identical to today. The ON path normalizes `pc.light_dir`
-        // consumer-side and folds in the soft shadow + AO.
-        if (pc.lighting_flags == 0u) {
-            color = base;
-        } else {
+        // The Lambert + ambient base color — the gAlbedo attribute (NOT pre-multiplied).
+        base = BASE_COLOR * ndotl + BASE_COLOR * AMBIENT;
+        // Render A1/A2: gate the shadow/AO marches behind `lighting_flags`. The OFF path
+        // (`lighting_flags == 0`) leaves `vis = 1.0` (a STRUCTURAL `if`, no march), so
+        // gMaterial.r is the exact 1.0 → R8 the resolve treats as a no-op multiply (the
+        // 0%-gate). The ON path folds the A1 soft shadow + A2 AO into ONE `vis = shadow*ao`.
+        //
+        // BUG-PBR-F1: the shadow/AO marches here are byte-identical to HEAD's inline
+        // composite (verified via spirv-dis: the `res = min(res, K*d/t)` min-track in
+        // `sdf_soft_shadow` emits the same opcode stream as HEAD), so `vis` == HEAD's
+        // `shadow * ao`. The crater self-shadow regression was NOT in this marcher — it was
+        // the resolve mis-decoding the `mask` flag (see `deferred_pbr.hlsl`); the marcher
+        // correctly writes `vis = 0` at the shadowed rim.
+        if (pc.lighting_flags != 0u) {
             float3 light = normalize(pc.light_dir);
             float shadow = 1.0;
             if (pc.lighting_flags & LIGHTING_FLAG_SHADOWS) {
@@ -509,21 +538,21 @@ void main(uint3 tid : SV_DispatchThreadID) {
             if (pc.lighting_flags & LIGHTING_FLAG_AO) {
                 ao = sdf_ao(p, n);
             }
-            color = base * shadow * ao;
+            vis = clamp(shadow * ao, 0.0, 1.0);
         }
-        normal_enc = n * 0.5 + 0.5; // world normal encoded into [0,1] for the G-buffer
+        mask = 1.0;                             // arms 1/2: SDF-LIT (resolve multiplies)
+        normal_enc = n * 0.5 + 0.5;             // world normal encoded into [0,1]
     } else if (has_mesh) {
         // No nearer SDF surface, but the mesh covered this pixel — flat mesh color.
-        color = MESH_COLOR;
+        base = MESH_COLOR;                       // arm 3: mask = 0, vis = 1 (pass-through)
     } else {
-        color = BACKGROUND;
+        base = BACKGROUND;                       // arm 4: mask = 0, vis = 1 (pass-through)
     }
 
-    // I/O EDIT (2): STORE the marcher color into the ALBEDO storage image (the host
-    // golden `golden_composite_pixel_ex` predicts this within +/-2/255) INSTEAD of the
-    // packed `Buf[pixel_base() + idx] = pack_rgba(color)`.
-    gAlbedo[uint2(px, py)] = float4(clamp(color, 0.0, 1.0), 1.0);
-    // Additive MRT targets (unconsumed in P1b).
+    // D1/D2 WRITES: gAlbedo = base (the unmultiplied color), gMaterial = (vis, 0, mask, 1).
+    // The resolve reads both and computes `lit = mask ? base * vis : base`.
+    gAlbedo[uint2(px, py)] = float4(clamp(base, 0.0, 1.0), 1.0);
+    // gNormal kept (n*0.5+0.5) — forward-compat, unread this increment.
     gNormal[uint2(px, py)] = float4(clamp(normal_enc, 0.0, 1.0), 1.0);
-    gMaterial[uint2(px, py)] = MATERIAL_CONST;
+    gMaterial[uint2(px, py)] = float4(vis, 0.0, mask, 1.0);
 }

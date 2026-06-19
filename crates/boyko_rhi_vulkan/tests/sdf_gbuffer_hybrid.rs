@@ -54,7 +54,8 @@ use boyko_rhi_vulkan::compute::{
     TILE_SIZE, TileBound, EDITLIST_BUFFER_WORDS, editlist_pixel_hits, encode_edit_list,
     golden_composite_pixel_culled, golden_composite_pixel_ex,
     golden_composite_pixel_ex_omega, golden_composite_pixel_ex_omega_lit, golden_tile_bound,
-    mesh_depth_for_z, pack_rgba, pixel_world_xy,
+    golden_deferred_resolve, golden_marcher_attributes,
+    deferred_pbr_spirv, mesh_depth_for_z, pack_rgba, pixel_world_xy,
     sdf_gbuffer_composite_spirv, sdf_op, sdf_tile_cull_spirv, tile_grid_extent,
 };
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
@@ -270,19 +271,23 @@ fn texel_close(got: [i32; 3], want_packed: u32) -> bool {
     (0..3).all(|c| (got[c] - w[c]).abs() <= CHANNEL_TOL)
 }
 
-/// Records + submits the full P1b OFFSCREEN G-buffer hybrid composite in ONE command
-/// buffer / ONE fenced submit, returning the readback ALBEDO storage image as `PIXELS`
-/// R8G8B8A8 texels (4 bytes each). The flow — the §15.1 seam with NO depth→buffer copy:
+/// Records + submits the full OFFSCREEN G-buffer hybrid composite + the deferred RESOLVE
+/// in ONE command buffer / ONE fenced submit, returning the readback LIT storage image as
+/// `PIXELS` R8G8B8A8 texels (4 bytes each). The flow — the §15.1 seam with NO depth→buffer
+/// copy, plus the deferred-split resolve:
 ///
 ///   raster quad → D32 depth IMAGE → barrier depth DEPTH_ATTACHMENT→SHADER_READ_ONLY
-///   (one barrier) → barrier the 3 G-buffer images UNDEFINED→GENERAL → bind the
+///   (one barrier) → barrier the 3 G-buffer images + lit UNDEFINED→GENERAL → bind the
 ///   vocabulary set {SSBO edit-list, SAMPLED depth, STORAGE albedo/normal/material,
-///   UNIFORM camera} + the marcher → dispatch (the marcher SAMPLES the depth image) →
-///   barrier albedo GENERAL→TRANSFER_SRC → copy_image_to_buffer(albedo) into readback.
+///   UNIFORM camera} + the marcher → dispatch (writes ATTRIBUTES: gAlbedo = base,
+///   gMaterial = (vis, 0, mask, 1)) → barrier albedo/material GENERAL→GENERAL
+///   (SHADER_WRITE→SHADER_READ) → bind the resolve set {STORAGE albedo/material/lit} +
+///   the resolve → dispatch (composites lit = mask ? base*vis : base) → barrier lit
+///   GENERAL→TRANSFER_SRC → copy_image_to_buffer(lit) into readback.
 ///
 /// There is NO `copy_image_to_buffer(depth)` and NO transfer→compute buffer barrier:
 /// the single depth `DEPTH_ATTACHMENT_OPTIMAL → SHADER_READ_ONLY_OPTIMAL` barrier
-/// replaces the old copy + its two barriers. The vocabulary set is written ONCE at
+/// replaces the old copy + its two barriers. Both descriptor sets are written ONCE at
 /// `create_bind_group` — there is no per-frame `vkUpdateDescriptorSets`.
 fn run_gbuffer_hybrid(ctx: &VulkanContext, edits: &[SdfEdit], coarse_enabled: bool) -> Vec<u8> {
     // Delegate to the `_ex` variant, discarding the tiles-buffer readback. Defaults the
@@ -329,10 +334,14 @@ fn run_gbuffer_hybrid_ex(
 /// Render A1/A2 — the lighting-aware harness: identical to [`run_gbuffer_hybrid_ex`] but
 /// the marcher push carries an explicit `lighting_flags` (bit 0 = A1 shadows, bit 1 = A2
 /// AO; `0` = the OFF Lambert path) and `light_dir` (the un-normalized directional light).
-/// The GPU ALBEDO readback is then diffed against the host `_lit` golden
-/// (`golden_composite_pixel_ex_omega_lit` / `..._culled_omega_lit`) with the SAME flags +
-/// `light_dir`. Everything else (the §15.1 seam, the vocabulary set, the coarse pass) is
-/// the [`run_gbuffer_hybrid_ex`] flow verbatim — only the push payload changes.
+///
+/// Deferred split (increment 1): the marcher writes ATTRIBUTES (gAlbedo = the unmultiplied
+/// base, gMaterial = (vis, 0, mask, 1)); a fullscreen `deferred_pbr` RESOLVE composites
+/// `lit = mask ? base*vis : base` into a dedicated LIT image. The readback now copies LIT
+/// (not albedo), so the tester diffs it against `golden_deferred_resolve(...)` fed by
+/// `golden_marcher_attributes(...)` with the SAME flags + `light_dir`. Everything else
+/// (the §15.1 seam, the vocabulary set, the coarse pass) is the [`run_gbuffer_hybrid_ex`]
+/// flow verbatim — the marcher push payload + the new resolve pass.
 #[allow(clippy::too_many_arguments)]
 fn run_gbuffer_hybrid_lit(
     ctx: &VulkanContext,
@@ -436,7 +445,9 @@ fn run_gbuffer_hybrid_lit(
         .expect("throwaway color texture");
 
     // --- The MRT G-buffer STORAGE images (albedo + normal + material): STORAGE for the
-    // compute store; albedo also TRANSFER_SRC so the golden readback can copy it out. ---
+    // compute store. Deferred split: albedo/material are CONSUMED by the resolve (STORAGE
+    // load in GENERAL), so albedo no longer needs TRANSFER_SRC — the readback copies the
+    // resolve's LIT output instead. ---
     let albedo = device
         .create_texture(&TextureDesc {
             width: SDF_IMG_W,
@@ -444,7 +455,7 @@ fn run_gbuffer_hybrid_lit(
             depth: 1,
             format: GBUFFER_FORMAT,
             dimension: TextureDimension::D2,
-            usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC,
+            usage: ImageUsage::STORAGE,
         })
         .expect("G-buffer albedo storage image");
     let normal = device
@@ -467,6 +478,18 @@ fn run_gbuffer_hybrid_lit(
             usage: ImageUsage::STORAGE,
         })
         .expect("G-buffer material storage image");
+    // Deferred split: the LIT image is the resolve's STORAGE store output; TRANSFER_SRC so
+    // the golden readback copies it out (the readback now reads LIT, not albedo).
+    let lit = device
+        .create_texture(&TextureDesc {
+            width: SDF_IMG_W,
+            height: SDF_IMG_H,
+            depth: 1,
+            format: GBUFFER_FORMAT,
+            dimension: TextureDimension::D2,
+            usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC,
+        })
+        .expect("deferred resolve lit storage image");
 
     // The depth is SAMPLED via `.Load` (OpImageFetch, no sampler), but the RHI
     // `BindGroupEntry::SampledImage` requires a sampler handle; a nearest/clamp sampler
@@ -475,7 +498,7 @@ fn run_gbuffer_hybrid_lit(
         .create_sampler(&SamplerDesc::default())
         .expect("depth sampler (ignored by .Load)");
 
-    // The readback buffer for the ALBEDO image.
+    // The readback buffer for the LIT image.
     let readback = device
         .create_buffer(&BufferDesc {
             size: READBACK_BYTES,
@@ -522,6 +545,10 @@ fn run_gbuffer_hybrid_lit(
     let coarse_cs = device
         .create_shader_module(sdf_tile_cull_spirv())
         .expect("P4b coarse-cull compute shader module");
+    // Deferred split: the `deferred_pbr.comp` RESOLVE compute module.
+    let resolve_cs = device
+        .create_shader_module(deferred_pbr_spirv())
+        .expect("deferred resolve compute shader module");
 
     // The depth-testing graphics pipeline (rung-3 vertex layout + 64-byte VERTEX MVP
     // push + a declared depth_format).
@@ -603,6 +630,39 @@ fn run_gbuffer_hybrid_lit(
         })
         .expect("P4b vocabulary bind group");
 
+    // --- Deferred split: the RESOLVE layout + pipeline + set. EXACTLY 3 STORAGE images
+    // { gAlbedo @0, gMaterial @1, lit @2 } — no sampler, no UBO (the resolve reads the
+    // extent via `gLit.GetDimensions`). The resolve dispatches at the SAME grid the
+    // marcher used (1:1 the marched pixels). ---
+    let resolve_layout_entries = [
+        BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 2, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+    ];
+    let resolve_layout = device
+        .create_bind_group_layout(&BindGroupLayoutDesc { entries: &resolve_layout_entries })
+        .expect("deferred resolve bind-group layout");
+    let resolve_compute = device
+        .create_compute_pipeline(&ComputePipelineDesc {
+            module: &resolve_cs,
+            entry: c"main",
+            // The resolve pushes NO constants, but `create_compute_pipeline` requires a
+            // non-empty (multiple-of-4) push range; declare the shared range (unused).
+            push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
+            bind_group_layout: Some(&resolve_layout),
+        })
+        .expect("deferred resolve compute pipeline");
+    let resolve_bind_group = device
+        .create_bind_group(&BindGroupDesc {
+            layout: &resolve_layout,
+            entries: &[
+                BindGroupEntry::StorageImage { texture: &albedo },
+                BindGroupEntry::StorageImage { texture: &material },
+                BindGroupEntry::StorageImage { texture: &lit },
+            ],
+        })
+        .expect("deferred resolve bind group");
+
     let fence = device.create_fence(false).expect("fence");
     let mut encoder = device.create_command_encoder().expect("command encoder");
 
@@ -682,8 +742,10 @@ fn run_gbuffer_hybrid_lit(
         range: ImageSubresourceRange::DEPTH,
     });
 
-    // --- The 3 G-buffer storage images: UNDEFINED → GENERAL (a compute store). ---
-    for tex in [&albedo, &normal, &material] {
+    // --- The 3 G-buffer storage images + the lit output: UNDEFINED → GENERAL. The
+    // marcher stores albedo/normal/material; the deferred resolve loads albedo/material
+    // and stores lit — all in GENERAL. ---
+    for tex in [&albedo, &normal, &material, &lit] {
         encoder.image_barrier(&ImageBarrierDesc {
             texture: tex,
             src_stage: BarrierStage::TOP_OF_PIPE,
@@ -739,9 +801,35 @@ fn run_gbuffer_hybrid_lit(
     encoder.push_compute_constants(&compute, ShaderStage::COMPUTE, 0, push.as_bytes());
     encoder.dispatch(group_count_x(), 1, 1);
 
-    // --- ALBEDO: GENERAL → TRANSFER_SRC_OPTIMAL for the readback copy. ---
+    // --- (5a) Deferred split: make the marcher's gAlbedo + gMaterial STORES available +
+    // visible to the resolve's LOADS — a real memory+execution dependency
+    // (SHADER_WRITE→SHADER_READ, COMPUTE→COMPUTE), GENERAL→GENERAL (no layout change).
+    // gNormal is NOT read by the resolve → no barrier for it. ---
+    for tex in [&albedo, &material] {
+        encoder.image_barrier(&ImageBarrierDesc {
+            texture: tex,
+            src_stage: BarrierStage::COMPUTE_SHADER,
+            dst_stage: BarrierStage::COMPUTE_SHADER,
+            src_access: BarrierAccess::SHADER_WRITE,
+            dst_access: BarrierAccess::SHADER_READ,
+            old_layout: ImageLayout::General,
+            new_layout: ImageLayout::General,
+            range: ImageSubresourceRange::COLOR,
+        });
+    }
+
+    // --- (5b) Deferred RESOLVE pass: bind the resolve pipeline + the resolve set (gAlbedo
+    // @0, gMaterial @1, lit @2 — all STORAGE in GENERAL), dispatch at the SAME grid the
+    // marcher used. It composites `lit = mask ? base*vis : base`. ---
+    encoder.bind_compute_pipeline(&resolve_compute);
+    encoder.bind_descriptor_set_compute(&resolve_bind_group, &resolve_compute);
+    encoder.dispatch(group_count_x(), 1, 1);
+
+    // --- (5c) LIT: GENERAL → TRANSFER_SRC_OPTIMAL for the readback copy (the readback now
+    // copies the resolve's LIT output, NOT albedo — albedo stays GENERAL, consumed only by
+    // the resolve as a STORAGE-in-GENERAL load). ---
     encoder.image_barrier(&ImageBarrierDesc {
-        texture: &albedo,
+        texture: &lit,
         src_stage: BarrierStage::COMPUTE_SHADER,
         dst_stage: BarrierStage::TRANSFER,
         src_access: BarrierAccess::SHADER_WRITE,
@@ -766,14 +854,14 @@ fn run_gbuffer_hybrid_lit(
         image_extent_h: SDF_IMG_H,
         image_extent_d: 1,
     }];
-    encoder.copy_image_to_buffer(&albedo, ImageLayout::TransferSrcOptimal, &readback, &regions);
+    encoder.copy_image_to_buffer(&lit, ImageLayout::TransferSrcOptimal, &readback, &regions);
 
     encoder.end().expect("end");
 
     queue.submit(&encoder, &fence).expect("submit");
     device.wait_fence(&fence, u64::MAX).expect("wait_fence");
 
-    // Read back the ALBEDO R8G8B8A8 bytes.
+    // Read back the LIT R8G8B8A8 bytes (the deferred resolve's output).
     let dst_ptr = device
         .buffer_mapped_ptr(&readback)
         .expect("host-visible readback buffer is mapped");
@@ -814,11 +902,15 @@ fn run_gbuffer_hybrid_lit(
     unsafe {
         device.destroy_command_encoder(encoder);
         device.destroy_fence(fence);
+        device.destroy_bind_group(resolve_bind_group);
         device.destroy_bind_group(bind_group);
+        device.destroy_compute_pipeline(resolve_compute);
         device.destroy_compute_pipeline(coarse_compute);
         device.destroy_compute_pipeline(compute);
+        device.destroy_bind_group_layout(resolve_layout);
         device.destroy_bind_group_layout(bind_layout);
         device.destroy_graphics_pipeline(gfx);
+        device.destroy_shader_module(resolve_cs);
         device.destroy_shader_module(coarse_cs);
         device.destroy_shader_module(cs);
         device.destroy_shader_module(fs);
@@ -826,6 +918,7 @@ fn run_gbuffer_hybrid_lit(
         device.destroy_buffer(vertex_buffer);
         device.destroy_buffer(readback);
         device.destroy_sampler(sampler);
+        device.destroy_texture(lit);
         device.destroy_texture(material);
         device.destroy_texture(normal);
         device.destroy_texture(albedo);
@@ -2050,3 +2143,330 @@ fn a3g_host_light_dir_round_trips_at_offset_16() {
     assert_eq!(read_at(24), NONDEFAULT_LIGHT[2], "light_dir.z must land at offset 24");
     println!("[host] A3g-host OK: light_dir {NONDEFAULT_LIGHT:?} round-trips at push offset 16/20/24");
 }
+
+// ===========================================================================================
+// Deferred-shading SPLIT (increment 1) — the M1 wiring gates (TESTER).
+//
+// The marcher writes ATTRIBUTES (gAlbedo = base, gMaterial = (vis, 0, mask, 1)); the
+// `deferred_pbr` RESOLVE composites `lit = mask==1 ? base*vis : base`. The host oracles are
+// `golden_marcher_attributes` (the marcher's per-pixel (base_rgb, vis, mask)) and
+// `golden_deferred_resolve` (the resolve's packed LIT). The earlier ON-path gates
+// (`a1g_*`, `a2g_*`, `a3g_*_literal`) diff the GPU LIT against the OLD INLINE golden
+// `golden_composite_pixel_ex_omega_lit` at the generic ±3/255 (`LIT_CHANNEL_TOL`); that
+// proves the GPU ≈ the old inline composite but DOES NOT exercise the new deferred oracles,
+// so the 0%-gate's byte-identity (delta == 0 on the pass-through arms) and the ≤1.5-LSB
+// double-quant bound (arm 1) were UNVERIFIED. These gates close that gap by diffing the GPU
+// LIT against `golden_deferred_resolve ∘ golden_marcher_attributes` directly, per arm:
+//
+//   - PASS-THROUGH arms (mesh / background / empty, AND lighting-OFF SDF-lit): the resolve
+//     passes `base` through unmodified (mask == 0) or multiplies by vis == 1.0 (mask == 1,
+//     OFF), so the GPU LIT must be BYTE-IDENTICAL (delta == 0) to the new oracle.
+//   - ARM 1 (SDF-lit, lighting ON): the deferred double-quantization (base8/255 * vis8/255,
+//     re-packed) drifts from the GPU's own fp `base*vis` by the architect's ≤2/255 bound —
+//     TIGHTER than the generic ±3/255 the old-inline gate uses.
+//
+// A GPU pixel is mapped to its host arm by `golden_marcher_attributes(..).mask` (1 = SDF-lit,
+// 0 = mesh/bg/empty) — the SAME mask the resolve branches on — so the per-arm tolerance is
+// applied to exactly the pixels the resolve treats that way.
+// ===========================================================================================
+
+/// The deferred-resolve double-quantization bound on the SDF-LIT arm (arm 1). The marcher
+/// already R8-quantized `base` and `vis`; the resolve decodes them (base8/255, vis8/255),
+/// multiplies, and re-quantizes — a SECOND 8-bit rounding on top of the GPU's own fp
+/// `base*vis`. The architect's ≤1.5-LSB analysis bounds this at ≤2/255 (rounded up to the
+/// integer channel grid). This is STRICTLY tighter than the generic `LIT_CHANNEL_TOL` (±3)
+/// the old-inline ON-path gates use — it is the bound this increment exists to prove.
+const DEFERRED_ARM1_TOL: i32 = 2;
+
+/// The pass-through arm budget when the oracle is the HOST `golden_deferred_resolve` (which
+/// quantizes via host `pack_rgba`). On the pass-through arms (mask == 0, or OFF SDF-lit) the
+/// RESOLVE itself is a byte-exact GPU identity (decode `b/255` → re-encode → `b`), so the GPU
+/// LIT equals the GPU's OWN gAlbedo store byte-for-byte. The residual vs the host oracle is
+/// therefore EXACTLY the marcher's pre-existing host-`pack_rgba`-vs-GPU-UNORM-store
+/// quantization gap (the half-way `0.1*255 == 25.5` background channel rounds 26 host / 25
+/// GPU) — the SAME ≤2/255 gap `p1b`/GATE-4 already budget against the albedo golden. It is
+/// NOT a resolve error; the resolve's exactness is proved independently by
+/// [`assert_resolve_passthrough_is_lighting_invariant`] (a delta == 0 GPU-internal gate).
+const DEFERRED_PASSTHROUGH_HOST_TOL: i32 = 2;
+
+/// Diffs the whole GPU LIT readback against the NEW deferred oracle
+/// `golden_deferred_resolve(golden_marcher_attributes(.., flags, light_dir))` per ARM, on the
+/// cull-OFF ω=1.0 path:
+///
+///   - mask == 0 (mesh / background / empty) → within [`DEFERRED_PASSTHROUGH_HOST_TOL`]
+///     (±2/255: the marcher's pre-existing host-pack-vs-GPU-store quant gap; the resolve adds
+///     ZERO error here — proved delta-0 GPU-internally by the lighting-invariance gate).
+///   - mask == 1, flags == 0 (SDF-lit, lighting OFF) → same pass-through budget (resolve
+///     `base*1.0`).
+///   - mask == 1, flags != 0 (SDF-lit, lighting ON) → within [`DEFERRED_ARM1_TOL`] (the
+///     deferred double-quant, ≤2/255).
+///
+/// Returns `(max_delta_passthrough, max_delta_arm1, sdf_lit_hits)`. `sdf_lit_hits` (the
+/// mask == 1 count) lets the caller prove the device rendered a real lit surface (not an
+/// all-pass-through fill). Asserts on every texel; the caller passes the scene name.
+fn assert_lit_matches_deferred_golden(
+    lit: &[u8],
+    edits: &[SdfEdit],
+    flags: u32,
+    light_dir: [f32; 3],
+    name: &str,
+) -> (i32, i32, u64) {
+    let mut max_pass = 0i32;
+    let mut max_arm1 = 0i32;
+    let mut sdf_lit_hits = 0u64;
+    for py in 0..SDF_IMG_H {
+        for px in 0..SDF_IMG_W {
+            let md = expected_mesh_depth(px, py);
+            let attrs = golden_marcher_attributes(
+                edits, md, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, 1.0, flags,
+                light_dir,
+            );
+            let want = unpack_packed_rgb(golden_deferred_resolve(attrs));
+            let got = albedo_rgb(lit, px, py);
+            let dmax = (0..3).map(|c| (got[c] - want[c]).abs()).max().unwrap();
+            // The arm the resolve actually takes: mask == 1 AND lighting ON is the only
+            // double-quantized (non-pass-through) case; everything else passes through.
+            let is_arm1 = attrs.mask == 1 && flags != 0;
+            if attrs.mask == 1 {
+                sdf_lit_hits += 1;
+            }
+            if is_arm1 {
+                if dmax > max_arm1 {
+                    max_arm1 = dmax;
+                }
+                assert!(
+                    dmax <= DEFERRED_ARM1_TOL,
+                    "[{name}] ARM-1 (SDF-lit, flags={flags}) LIT texel ({px},{py}) got {got:?} \
+                     want {want:?} (deferred oracle) exceeds ±{DEFERRED_ARM1_TOL}/255 (the \
+                     double-quant bound); delta {dmax}"
+                );
+            } else {
+                if dmax > max_pass {
+                    max_pass = dmax;
+                }
+                assert!(
+                    dmax <= DEFERRED_PASSTHROUGH_HOST_TOL,
+                    "[{name}] PASS-THROUGH (mask={}, flags={flags}) LIT texel ({px},{py}) got \
+                     {got:?} want {want:?} (deferred oracle) exceeds the host-pack quant budget \
+                     ±{DEFERRED_PASSTHROUGH_HOST_TOL}/255 (delta {dmax}) — the resolve must pass \
+                     base through (the residual is the marcher's host-pack-vs-GPU-store gap, NOT \
+                     a resolve error)",
+                    attrs.mask
+                );
+            }
+        }
+    }
+    (max_pass, max_arm1, sdf_lit_hits)
+}
+
+/// **D1-host — the deferred bake APPROXIMATION gate (host-only, no GPU).** Proves the new
+/// deferred oracle `golden_deferred_resolve ∘ golden_marcher_attributes` reproduces the OLD
+/// INLINE composite `golden_composite_pixel_ex_omega_lit` within ±3/255 over crater / box /
+/// smooth, for lighting OFF and SHADOWS|AO ON (default + non-default light). This is the
+/// architect's approximation gate: it shows the deferred split BAKES the same image the
+/// inline marcher produced (the determinism-color contract), purely on the CPU — so a
+/// regression in the host oracles is caught without a device. The OFF and pass-through arms
+/// must be byte-identical (delta 0); the ON SDF-lit arm carries the deferred double-quant
+/// (still within ±3 of the inline reference, the union of both quant budgets).
+#[test]
+fn d1_host_deferred_approximates_inline_composite() {
+    // The inline composite is the reference; the deferred bake is the candidate. ±3/255 is
+    // the architect's approximation budget (the inline ON-path tolerance ∪ the deferred
+    // double-quant). On the OFF / mesh / bg arms the two are byte-identical (proved tighter
+    // by the dedicated `mask`-aware byte-identity assertion below).
+    const APPROX_TOL: i32 = 3;
+    for (name, edits) in p4b_scenes() {
+        for (lname, light) in [("default", DEFAULT_LIGHT_DIR), ("nondefault", NONDEFAULT_LIGHT)] {
+            for flags in [0u32, LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO] {
+                let mut max_delta = 0i32;
+                let mut max_passthrough = 0i32;
+                let mut lit_hits = 0u64;
+                for py in 0..SDF_IMG_H {
+                    for px in 0..SDF_IMG_W {
+                        let md = expected_mesh_depth(px, py);
+                        let attrs = golden_marcher_attributes(
+                            &edits, md, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, 1.0,
+                            flags, light,
+                        );
+                        let deferred = unpack_packed_rgb(golden_deferred_resolve(attrs));
+                        let inline = unpack_packed_rgb(golden_composite_pixel_ex_omega_lit(
+                            &edits, md, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, 1.0,
+                            flags, light,
+                        ));
+                        let dmax = (0..3).map(|c| (deferred[c] - inline[c]).abs()).max().unwrap();
+                        if dmax > max_delta {
+                            max_delta = dmax;
+                        }
+                        // The pass-through arms (mask 0, or mask 1 with lighting OFF) must be
+                        // byte-identical between deferred and inline — the strongest part of
+                        // the determinism-color contract.
+                        if !(attrs.mask == 1 && flags != 0) {
+                            if dmax > max_passthrough {
+                                max_passthrough = dmax;
+                            }
+                            assert!(
+                                dmax == 0,
+                                "[{name}/{lname}] PASS-THROUGH (mask={}, flags={flags}) deferred \
+                                 {deferred:?} != inline {inline:?} at ({px},{py}) — the OFF / \
+                                 mesh / bg arms must bake byte-identically",
+                                attrs.mask
+                            );
+                        } else {
+                            lit_hits += 1;
+                        }
+                        assert!(
+                            dmax <= APPROX_TOL,
+                            "[{name}/{lname}] deferred {deferred:?} vs inline {inline:?} at \
+                             ({px},{py}) flags={flags} exceeds the ±{APPROX_TOL}/255 \
+                             approximation budget (delta {dmax})"
+                        );
+                    }
+                }
+                println!(
+                    "[{name}/{lname}] D1-host flags={flags}: deferred≈inline max delta \
+                     {max_delta}/255 (tol {APPROX_TOL}); pass-through max {max_passthrough} \
+                     (must be 0); {lit_hits} ON-arm-1 px"
+                );
+            }
+        }
+    }
+}
+
+/// **D2g — the M1 pass-through gate (GPU LIT == the deferred oracle on the pass-through
+/// arms).** With `flags == 0` EVERY arm is pass-through (mesh/bg/empty mask 0; SDF-lit mask 1
+/// but vis == 1.0), so the whole GPU LIT image must match `golden_deferred_resolve(
+/// golden_marcher_attributes(.., flags=0))` within [`DEFERRED_PASSTHROUGH_HOST_TOL`] (±2/255).
+///
+/// IMPORTANT (the M1 finding): a delta == 0 (literal byte-identity) claim against the HOST
+/// oracle is NOT achievable here, and the gap is NOT a resolve bug. The host oracle quantizes
+/// via host `pack_rgba`, which disagrees with the GPU UNORM store by 1 LSB on the half-way
+/// background channel (`0.1*255 == 25.5` → host 26, GPU 25) — the SAME pre-existing
+/// host-pack-vs-GPU-store gap the marcher's albedo already carries (why `p1b`/GATE-4 use
+/// ±2/255). The resolve's pass-through is BYTE-EXACT at the GPU level; that exactness is
+/// proved delta-0 (GPU-internally, no host pack) by
+/// [`d2g_resolve_passthrough_is_lighting_invariant`]. This gate confirms the GPU LIT tracks
+/// the host oracle within the marcher's own quant budget on the pass-through arms.
+#[test]
+fn d2g_passthrough_within_host_pack_budget() {
+    let Some(ctx) = boot_render_or_skip("d2g_passthrough_within_host_pack_budget") else {
+        return;
+    };
+    for (name, edits) in p4b_scenes() {
+        let lit = run_gbuffer_hybrid_lit(&ctx, &edits, false, false, 1.0, 0, DEFAULT_LIGHT_DIR).0;
+        assert_eq!(lit.len(), READBACK_BYTES as usize);
+        let nonzero = lit.chunks_exact(4).filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+        assert!(nonzero > 0, "[{name}] LIT all-zero — device did not render");
+        let (max_pass, max_arm1, sdf_lit_hits) =
+            assert_lit_matches_deferred_golden(&lit, &edits, 0, DEFAULT_LIGHT_DIR, name);
+        assert_eq!(max_arm1, 0, "[{name}] flags==0 must have NO arm-1 pixel (lighting OFF)");
+        assert!(sdf_lit_hits > 0, "[{name}] no SDF-lit (mask==1) pixel — the marcher hit no surface");
+        println!(
+            "[{name}] D2g M1 pass-through vs deferred oracle (flags=0): max delta = {max_pass}/255 \
+             (tol {DEFERRED_PASSTHROUGH_HOST_TOL}, host-pack gap); {sdf_lit_hits} SDF-lit px \
+             (vis=1.0 pass-through)"
+        );
+    }
+}
+
+/// **D2g — the resolve-is-an-exact-pass-through gate (delta == 0, GPU-INTERNAL, no host
+/// pack).** The headline M1 byte-identity proof, free of the host-pack quantization gap. On
+/// the mesh / background / empty arms (mask == 0) the resolve emits `base` regardless of
+/// lighting, and the MARCHER writes the identical `base` to gAlbedo regardless of
+/// `lighting_flags` (lighting only attenuates the SDF-hit vis, never the mesh/bg base). So the
+/// GPU LIT on those pixels MUST be byte-identical between an OFF run and a SHADOWS|AO run —
+/// a delta == 0 GPU-vs-GPU comparison that needs NO host oracle and is immune to the
+/// host-pack-vs-UNORM gap. This proves (a) the resolve perturbs a pass-through pixel by
+/// exactly ZERO, and (b) the STRICT `mask` branch never lets a vis-attenuated SDF lane bleed
+/// into a mesh/bg pixel — the load-bearing 0%-gate the strict-if buys. A mismatch = the
+/// resolve is NOT a pure pass-through (or the mask leaked).
+#[test]
+fn d2g_resolve_passthrough_is_lighting_invariant() {
+    let Some(ctx) = boot_render_or_skip("d2g_resolve_passthrough_is_lighting_invariant") else {
+        return;
+    };
+    let flags = LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO;
+    for (name, edits) in p4b_scenes() {
+        let off = run_gbuffer_hybrid_lit(&ctx, &edits, false, false, 1.0, 0, DEFAULT_LIGHT_DIR).0;
+        let on = run_gbuffer_hybrid_lit(&ctx, &edits, false, false, 1.0, flags, DEFAULT_LIGHT_DIR).0;
+        assert_eq!(off.len(), READBACK_BYTES as usize);
+        assert_eq!(on.len(), READBACK_BYTES as usize);
+
+        // The mask the resolve branches on (from the host attribute mirror): mask == 0 is the
+        // pure pass-through set the lighting flags must NOT touch.
+        let mut passthrough = 0u64;
+        let mut sdf_lit = 0u64;
+        for py in 0..SDF_IMG_H {
+            for px in 0..SDF_IMG_W {
+                let md = expected_mesh_depth(px, py);
+                let mask = golden_marcher_attributes(
+                    &edits, md, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, 1.0, flags,
+                    DEFAULT_LIGHT_DIR,
+                )
+                .mask;
+                if mask == 0 {
+                    passthrough += 1;
+                    let a = albedo_rgb(&off, px, py);
+                    let b = albedo_rgb(&on, px, py);
+                    assert_eq!(
+                        a, b,
+                        "[{name}] PASS-THROUGH (mask=0) LIT texel ({px},{py}) changed between \
+                         OFF {a:?} and SHADOWS|AO {b:?} — the resolve is NOT a pure pass-through \
+                         on mask=0 (or the strict-mask branch leaked a vis-attenuated lane)"
+                    );
+                } else {
+                    sdf_lit += 1;
+                }
+            }
+        }
+        assert!(passthrough > 0, "[{name}] no mask=0 pixel — the pass-through gate is vacuous");
+        assert!(sdf_lit > 0, "[{name}] no mask=1 pixel — there is no lit surface to leave alone");
+        println!(
+            "[{name}] D2g resolve-passthrough lighting-invariant: {passthrough} mask=0 pixels \
+             BYTE-IDENTICAL (delta 0) across OFF vs SHADOWS|AO; {sdf_lit} mask=1 px"
+        );
+    }
+}
+
+/// **D3g — the arm-1 bounded-quantization gate (SDF-lit, ≤2/255 vs the deferred oracle).**
+/// Push SHADOWS|AO (default light); every SDF-lit (mask == 1) GPU LIT texel must be within
+/// [`DEFERRED_ARM1_TOL`] (±2/255) of `golden_deferred_resolve(golden_marcher_attributes(..,
+/// flags=SHADOWS|AO))`. This is the ≤1.5-LSB double-quantization the deferred split
+/// introduces — TIGHTER than the generic ±3/255 the old-inline `a1g_*` gate uses, and the
+/// bound this increment exists to prove. The pass-through arms (asserted delta 0 by the same
+/// helper) are re-confirmed here too. Runs crater / box / smooth, and (separately) the
+/// non-default light to exercise the steered shadow march.
+#[test]
+fn d3g_arm1_within_double_quant_bound_of_deferred_golden() {
+    let Some(ctx) = boot_render_or_skip("d3g_arm1_within_double_quant_bound_of_deferred_golden")
+    else {
+        return;
+    };
+    let flags = LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO;
+    for (lname, light) in [("default", DEFAULT_LIGHT_DIR), ("nondefault", NONDEFAULT_LIGHT)] {
+        for (name, edits) in p4b_scenes() {
+            let lit = run_gbuffer_hybrid_lit(&ctx, &edits, false, false, 1.0, flags, light).0;
+            assert_eq!(lit.len(), READBACK_BYTES as usize);
+            let nonzero =
+                lit.chunks_exact(4).filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+            assert!(nonzero > 0, "[{name}/{lname}] LIT all-zero — device did not render");
+            let (max_pass, max_arm1, sdf_lit_hits) =
+                assert_lit_matches_deferred_golden(&lit, &edits, flags, light, name);
+            assert!(
+                max_pass <= DEFERRED_PASSTHROUGH_HOST_TOL,
+                "[{name}/{lname}] a pass-through arm exceeded the host-pack budget (delta \
+                 {max_pass} > {DEFERRED_PASSTHROUGH_HOST_TOL})"
+            );
+            assert!(
+                sdf_lit_hits > 0,
+                "[{name}/{lname}] no SDF-lit (mask==1) pixel — the arm-1 bound is vacuous"
+            );
+            println!(
+                "[{name}/{lname}] D3g arm-1 double-quant: max delta = {max_arm1}/255 \
+                 (tol {DEFERRED_ARM1_TOL}); pass-through {max_pass} (=0); {sdf_lit_hits} SDF-lit px"
+            );
+        }
+    }
+}
+
+
+

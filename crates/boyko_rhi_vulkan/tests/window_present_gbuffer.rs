@@ -66,7 +66,7 @@ use boyko_rhi_vulkan::compute::{
     COMPOSITE_PUSH_CONSTANT_BYTES, CompositePushConstants, EDITLIST_BUFFER_WORDS, LOCAL_SIZE_X,
     MESH_COLOR, MESH_DEPTH_CLEAR, SDF_CAMERA_Z, SDF_IMG_H, SDF_IMG_W, SDF_TRACE_T_MAX,
     SDF_VIEW_HALF_EXTENT, SdfEdit, TILE_BOUND_BYTES, editlist_pixel_hits, encode_edit_list,
-    golden_composite_pixel, mesh_depth_for_z, pack_rgba, pixel_world_xy,
+    deferred_pbr_spirv, golden_composite_pixel, mesh_depth_for_z, pack_rgba, pixel_world_xy,
     sdf_gbuffer_composite_spirv, sdf_op, tile_grid_extent,
 };
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
@@ -605,6 +605,34 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
     )
     .expect("P1b G-buffer marcher compute pipeline");
 
+    // The deferred-split RESOLVE (`deferred_pbr.comp`): 3 STORAGE images { gAlbedo @0,
+    // gMaterial @1, lit @2 }. No push constants — the camera UBO is not in this set, the
+    // resolve reads the extent only via the index → (px, py) mapping the marcher used.
+    let resolve_cs = RhiDevice::create_shader_module(device, deferred_pbr_spirv())
+        .expect("deferred resolve compute shader module");
+    let resolve_entries = [
+        BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 2, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+    ];
+    let resolve_layout = RhiDevice::create_bind_group_layout(
+        device,
+        &BindGroupLayoutDesc { entries: &resolve_entries },
+    )
+    .expect("deferred resolve bind-group layout");
+    let resolve_pipeline = RhiDevice::create_compute_pipeline(
+        device,
+        &ComputePipelineDesc {
+            module: &resolve_cs,
+            entry: c"main",
+            // The resolve shader pushes NO constants, but `create_compute_pipeline` requires
+            // a non-empty (multiple-of-4) push range; declare the shared range (unused).
+            push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
+            bind_group_layout: Some(&resolve_layout),
+        },
+    )
+    .expect("deferred resolve compute pipeline");
+
     // The present-blit: one COMBINED_IMAGE_SAMPLER layout + the fullscreen-sample pipeline.
     let present_layout = RhiDevice::create_bind_group_layout(
         device,
@@ -646,6 +674,7 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
     unsafe {
         RhiDevice::destroy_shader_module(device, sample_fs);
         RhiDevice::destroy_shader_module(device, sample_vs);
+        RhiDevice::destroy_shader_module(device, resolve_cs);
         RhiDevice::destroy_shader_module(device, cs);
         RhiDevice::destroy_shader_module(device, fs);
         RhiDevice::destroy_shader_module(device, vs);
@@ -663,6 +692,8 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         camera_uniform: &camera_uniform,
         tiles_buffer: &tiles_buffer,
         depth_sampler: &depth_sampler,
+        resolve_pipeline: &resolve_pipeline,
+        resolve_layout: &resolve_layout,
         present_pipeline: &present_pipeline,
         present_layout: &present_layout,
         present_sampler: &present_sampler,
@@ -804,6 +835,8 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         RhiDevice::destroy_buffer(device, staging);
         RhiDevice::destroy_graphics_pipeline(device, present_pipeline);
         RhiDevice::destroy_bind_group_layout(device, present_layout);
+        RhiDevice::destroy_compute_pipeline(device, resolve_pipeline);
+        RhiDevice::destroy_bind_group_layout(device, resolve_layout);
         RhiDevice::destroy_compute_pipeline(device, marcher);
         RhiDevice::destroy_bind_group_layout(device, vocab_layout);
         RhiDevice::destroy_graphics_pipeline(device, raster_pipeline);

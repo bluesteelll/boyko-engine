@@ -125,9 +125,37 @@ static SDF_EDITLIST_STORAGE_IMAGE_SPV: SpirvBlob<24092> = SpirvBlob(*include_byt
 /// additive normal/material @ bindings 3/4). The extent/camera block moves to a UNIFORM
 /// buffer @ binding 5 (written once). The edit-list stays a `StructuredBuffer` @
 /// binding 0.
-static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<41100> = SpirvBlob(*include_bytes!(concat!(
+/// Deferred-shading SPLIT (increment 1): the marcher now WRITES ATTRIBUTES instead of
+/// compositing — gAlbedo carries the unmultiplied base color and gMaterial carries
+/// `(r = vis, g = 0, b = mask, a = 1)` (`vis = clamp(shadow*ao)`, `mask = 1` on the two
+/// SDF-LIT arms). The A1/A2 composite moved to [`deferred_pbr_spirv`]. The byte length
+/// grew (41100 → 41176) with the new attribute-write arms.
+static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<41176> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/sdf_gbuffer_composite.comp.spv"
+)));
+
+/// The committed deferred-shading SPLIT (increment 1) RESOLVE SPIR-V
+/// (`shaders/deferred_pbr.hlsl`). A fullscreen compute pass that reads the marcher's
+/// G-buffer attributes back — gAlbedo (the unmultiplied base) @ binding 0 + gMaterial
+/// `(r = vis, b = mask)` @ binding 1, both STORAGE images in GENERAL — and stores the
+/// final LIT color `mask ? base*vis : base` to a STORAGE image @ binding 2. EXACTLY 3
+/// STORAGE bindings, no sampler, no UBO: the extent comes from `gLit.GetDimensions` (the
+/// lit image is 1:1 the marched pixels), so the 1D dispatch index maps to (px, py) the
+/// same way the marcher does. The COMPOSITE moved here; the BRDF stays in the marcher this
+/// increment. The host mirror is [`golden_deferred_resolve`] (fed by
+/// [`golden_marcher_attributes`]).
+///
+/// BUG-PBR-F1: the SDF-lit `mask` flag is stored in gMaterial.b as the FLOAT `1.0`, which an
+/// R8_UNORM store quantizes to byte `255` (the UAV `.Load` reads it back NORMALIZED as
+/// `1.0`). The prior decode `uint(b * 255 + 0.5)` mapped the flag to `255u`, so the strict
+/// `mask == 1u` test was ALWAYS false → every SDF-lit pixel wrongly passed `base` through
+/// (its `vis` ignored), un-shadowing the crater self-shadow rim. The fix decodes the binary
+/// flag as `b > 0.5` (matching the host `golden_deferred_resolve`'s `attrs.mask == 1`). The
+/// byte length shrank (1704 → 1616) — dropping the `× 255 + 0.5` + int-convert decode.
+static DEFERRED_PBR_SPV: SpirvBlob<1616> = SpirvBlob(*include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/shaders/deferred_pbr.comp.spv"
 )));
 
 /// The committed Render P4b coarse-cull / tile pre-trace SPIR-V
@@ -262,6 +290,22 @@ pub fn sdf_editlist_storage_image_spirv() -> &'static [u32] {
 #[inline]
 pub fn sdf_gbuffer_composite_spirv() -> &'static [u32] {
     SDF_GBUFFER_COMPOSITE_SPV.as_words()
+}
+
+/// The committed deferred-shading SPLIT (increment 1) RESOLVE SPIR-V as a `u32` word
+/// stream, ready for
+/// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module).
+///
+/// The fullscreen `deferred_pbr` resolve consumes the marcher's G-buffer attributes —
+/// gAlbedo (the unmultiplied base color) @ binding 0 and gMaterial `(r = vis, b = mask)`
+/// @ binding 1, both STORAGE images in GENERAL (no sampler) — and STOREs the final lit
+/// color `lit = (mask == 1) ? base * vis : base` to a STORAGE image @ binding 2. It is
+/// dispatched 1D over the SAME pixel count as the marcher (the camera UBO @ binding 5
+/// supplies the extent for the 1:1 index → (px, py) mapping). The host mirror is
+/// [`golden_deferred_resolve`], fed by [`golden_marcher_attributes`].
+#[inline]
+pub fn deferred_pbr_spirv() -> &'static [u32] {
+    DEFERRED_PBR_SPV.as_words()
 }
 
 /// The committed Render P4b coarse-cull / tile pre-trace SPIR-V as a `u32` word
@@ -1390,6 +1434,197 @@ pub fn golden_composite_pixel_ex_omega_lit(
         SDF_BACKGROUND
     };
     pack_rgba(color)
+}
+
+// ===========================================================================
+// Deferred-shading SPLIT (increment 1) — the host goldens for the marcher's
+// ATTRIBUTE writes + the `deferred_pbr` RESOLVE.
+//
+// The marcher (`sdf_gbuffer_composite.hlsl`) no longer composites `base*shadow*ao`; it
+// writes ATTRIBUTES (gAlbedo = the unmultiplied base, gMaterial = (vis, 0, mask, 1)).
+// The fullscreen `deferred_pbr.comp` RESOLVE then computes `lit = mask ? base*vis : base`.
+// [`golden_marcher_attributes`] mirrors the marcher's per-pixel attribute output and
+// [`golden_deferred_resolve`] mirrors the resolve, modelling the EXACT GPU double
+// quantization (base RGB8 + vis R8, then a second pack of base8/255 * vis8/255). The
+// approximation-gate reference [`golden_composite_pixel_ex_omega_lit`] above is kept for
+// the inline-composite comparison.
+// ===========================================================================
+
+/// The per-pixel attributes the deferred-split marcher writes: the R8G8B8 `base` color
+/// (gAlbedo, quantized via [`pack_rgba`] rounding), the R8 combined-visibility byte
+/// (`gMaterial.r = round(255 * clamp(shadow*ao))`), and the SDF-lit `mask` (1 on the two
+/// SDF-LIT arms, 0 on mesh / background / empty). [`golden_deferred_resolve`] consumes
+/// these to model the resolve's `lit`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MarcherAttributes {
+    /// The gAlbedo R8G8B8 base color (the unmultiplied Lambert+ambient / mesh / bg color),
+    /// quantized exactly as the GPU UNORM store ([`pack_rgba`]'s `(x*255+0.5)` rounding).
+    pub base_rgb: [u8; 3],
+    /// The gMaterial.r combined-visibility byte: `round(255 * clamp(shadow*ao, 0, 1))`.
+    /// `255` (full visibility) on the OFF / mesh / background arms.
+    pub vis: u8,
+    /// `gMaterial.b` decoded: 1 on the two SDF-LIT arms, 0 on mesh / background / empty.
+    pub mask: u8,
+}
+
+/// The CPU mirror of the deferred-split marcher's per-pixel ATTRIBUTE output (D1a). Runs
+/// the SAME extent/camera ray-gen + over-relaxation march + arm selection as
+/// [`golden_composite_pixel_ex_omega_lit`], but instead of compositing returns the
+/// `(base_rgb, vis, mask)` the marcher stores. `base` is the unmultiplied color: the
+/// Lambert+ambient surface color on an SDF hit (via [`host_shade`]'s OFF path), otherwise
+/// [`MESH_COLOR`] or [`SDF_BACKGROUND`]. `vis = round(255 * clamp(shadow*ao))` from the
+/// A1/A2 marches, gated by `lighting_flags` (`255` when OFF). `mask = 1` only on the two
+/// SDF-LIT arms.
+///
+/// `base_rgb` is quantized with [`pack_rgba`]'s rounding so it matches the GPU's UNORM
+/// store byte-exactly on the 0-delta arms; `vis` uses the same `(x*255+0.5)` rounding the
+/// GPU applies to the R8 `gMaterial.r` store.
+#[allow(clippy::too_many_arguments)]
+pub fn golden_marcher_attributes(
+    edits: &[SdfEdit],
+    mesh_depth: f32,
+    px: u32,
+    py: u32,
+    img_w: u32,
+    img_h: u32,
+    camera: CompositeCamera,
+    omega: f32,
+    lighting_flags: u32,
+    light_dir: [f32; 3],
+) -> MarcherAttributes {
+    let (ro, rd) = composite_ray(px, py, img_w, img_h, camera);
+
+    let has_mesh = mesh_depth < MESH_DEPTH_CLEAR;
+    let t_mesh = if has_mesh { depth_to_t(mesh_depth) } else { 1.0e30 };
+
+    // The over-relaxation march + the Candidate-C re-march, mirroring
+    // `golden_composite_pixel_ex_omega_lit` EXACTLY (the field/march is untouched).
+    let mut t = 0.0_f32;
+    let t_seed = t;
+    let mut omega = omega;
+    let mut hit = false;
+    let mut safe_t = 0.0_f32;
+    let mut sor_prev = 0.0_f32;
+    let mut sor_step_prev = 0.0_f32;
+    let mut exhausted = true;
+    for it in 0..SDF_MAX_IT {
+        if t >= t_mesh {
+            exhausted = false;
+            break;
+        }
+        let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
+        let d = sdf_edit_list(edits, p);
+        if d < SDF_EPS {
+            hit = true;
+            exhausted = false;
+            break;
+        }
+        if omega > 1.0 {
+            let step_len = d * omega;
+            if it > 0 && sor_prev + d < FIELD_LIPSCHITZ_L * sor_step_prev {
+                t = safe_t + sor_prev;
+                omega = 1.0;
+                continue;
+            }
+            safe_t = t;
+            sor_prev = d;
+            sor_step_prev = step_len;
+            t += step_len;
+        } else {
+            t += d;
+        }
+        if t > SDF_T_MAX {
+            exhausted = false;
+            break;
+        }
+    }
+    if exhausted {
+        t = t_seed;
+        hit = false;
+        for _it2 in 0..SDF_MAX_IT {
+            if t >= t_mesh {
+                break;
+            }
+            let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
+            let d = sdf_edit_list(edits, p);
+            if d < SDF_EPS {
+                hit = true;
+                break;
+            }
+            t += d;
+            if t > SDF_T_MAX {
+                break;
+            }
+        }
+    }
+
+    // Quantize a `[0,1]` scalar to a byte with the GPU UNORM store's `(x*255+0.5)`
+    // rounding (the same rule [`pack_rgba`] uses per channel).
+    let q8 = |x: f32| -> u8 { (x.clamp(0.0, 1.0) * 255.0 + 0.5) as u8 };
+    // Re-derive the R8G8B8 bytes a `pack_rgba` of `c` would store (low 3 bytes of
+    // `0xAABBGGRR`), so the marcher-attribute base matches the GPU albedo byte-exactly.
+    let base_bytes = |c: [f32; 3]| -> [u8; 3] {
+        let packed = pack_rgba(c);
+        [
+            (packed & 0xFF) as u8,
+            ((packed >> 8) & 0xFF) as u8,
+            ((packed >> 16) & 0xFF) as u8,
+        ]
+    };
+
+    if hit && t < t_mesh {
+        let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
+        let n = sdf_edit_list_normal(edits, p);
+        // `base` = the OFF-path Lambert+ambient (NO shadow/ao multiply), exactly the
+        // gAlbedo attribute the marcher stores. `host_shade` with `lighting_flags == 0`
+        // returns the bare base regardless of the requested flags.
+        let base = host_shade(SDF_BASE_COLOR, SDF_AMBIENT, p, n, light_dir, 0, &sdf_sphere);
+        // `vis` = clamp(shadow*ao), the SAME consumers `host_shade` folds in, but kept
+        // SEPARATE (the marcher stores it in gMaterial.r). OFF ⇒ vis = 1.0.
+        let vis = if lighting_flags == 0 {
+            1.0_f32
+        } else {
+            let l = v_normalize(light_dir);
+            let field = |q: [f32; 3]| sdf_edit_list(edits, q);
+            let mut shadow = 1.0_f32;
+            if lighting_flags & LIGHTING_FLAG_SHADOWS != 0 {
+                shadow = host_soft_shadow(p, n, l, &field);
+            }
+            let mut ao = 1.0_f32;
+            if lighting_flags & LIGHTING_FLAG_AO != 0 {
+                ao = host_ao(p, n, &field);
+            }
+            (shadow * ao).clamp(0.0, 1.0)
+        };
+        MarcherAttributes { base_rgb: base_bytes(base), vis: q8(vis), mask: 1 }
+    } else if has_mesh {
+        MarcherAttributes { base_rgb: base_bytes(MESH_COLOR), vis: 255, mask: 0 }
+    } else {
+        MarcherAttributes { base_rgb: base_bytes(SDF_BACKGROUND), vis: 255, mask: 0 }
+    }
+}
+
+/// The CPU mirror of the `deferred_pbr` RESOLVE (D1a): given the marcher's
+/// [`MarcherAttributes`], returns the packed `0xAABBGGRR` LIT color the resolve stores.
+///
+/// Models the EXACT GPU double quantization: `base` and `vis` are already R8-quantized in
+/// the attributes; the resolve loads them back as `base8/255` and `vis8/255` (UNORM
+/// decode), computes `lit = (mask == 1) ? base*vis : base`, then the storage store
+/// re-quantizes via [`pack_rgba`]'s `(x*255+0.5)` rounding. On the mesh / background /
+/// SDF-OFF arms (`mask == 0` or `vis == 255`) this round-trips `base` byte-identically —
+/// the 0%-gate.
+pub fn golden_deferred_resolve(attrs: MarcherAttributes) -> u32 {
+    let base = [
+        attrs.base_rgb[0] as f32 / 255.0,
+        attrs.base_rgb[1] as f32 / 255.0,
+        attrs.base_rgb[2] as f32 / 255.0,
+    ];
+    if attrs.mask == 1 {
+        let vis = attrs.vis as f32 / 255.0;
+        pack_rgba([base[0] * vis, base[1] * vis, base[2] * vis])
+    } else {
+        pack_rgba(base)
+    }
 }
 
 // ===========================================================================

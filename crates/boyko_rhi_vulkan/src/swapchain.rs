@@ -2437,8 +2437,10 @@ impl<'ctx> Renderer<'ctx> {
             );
         }
 
-        // (4) The 3 G-buffer storage images: UNDEFINED → GENERAL (a compute store).
-        for tex in [&targets.albedo, &targets.normal, &targets.material] {
+        // (4) The 3 G-buffer storage images + the lit output: UNDEFINED → GENERAL. The
+        // marcher stores into albedo/normal/material (a compute store); the deferred
+        // resolve loads albedo/material and stores into lit — all in GENERAL.
+        for tex in [&targets.albedo, &targets.normal, &targets.material, &targets.lit] {
             let to_general = VkImageMemoryBarrier {
                 s_type: VkStructureType::ImageMemoryBarrier,
                 p_next: ptr::null(),
@@ -2529,8 +2531,76 @@ impl<'ctx> Renderer<'ctx> {
             (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
         }
 
-        // (6) ALBEDO: GENERAL → SHADER_READ_ONLY_OPTIMAL for the present-blit sample.
-        let albedo_to_sampled = VkImageMemoryBarrier {
+        // (5a) Deferred split: make the marcher's gAlbedo + gMaterial STORES available +
+        // visible to the resolve's LOADS. A real memory+execution dependency
+        // (SHADER_WRITE→SHADER_READ, COMPUTE→COMPUTE), GENERAL→GENERAL (no layout change).
+        // gNormal is NOT read by the resolve → no barrier for it.
+        for tex in [&targets.albedo, &targets.material] {
+            let store_to_load = VkImageMemoryBarrier {
+                s_type: VkStructureType::ImageMemoryBarrier,
+                p_next: ptr::null(),
+                src_access_mask: VK_ACCESS_SHADER_WRITE_BIT,
+                dst_access_mask: VK_ACCESS_SHADER_READ_BIT,
+                old_layout: VK_IMAGE_LAYOUT_GENERAL,
+                new_layout: VK_IMAGE_LAYOUT_GENERAL,
+                src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                image: tex.image,
+                subresource_range: COLOR_SUBRESOURCE_RANGE,
+            };
+            // SAFETY: recording is open; one image barrier on a live G-buffer image;
+            // COMPUTE_SHADER→COMPUTE_SHADER with SHADER_WRITE→SHADER_READ + GENERAL→GENERAL
+            // makes the marcher's attribute store available + visible to the resolve's
+            // load; `&store_to_load` outlives the iteration.
+            unsafe {
+                (self.fns.cmd_pipeline_barrier)(
+                    cmd,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    0,
+                    0,
+                    ptr::null(),
+                    0,
+                    ptr::null(),
+                    1,
+                    (&store_to_load as *const VkImageMemoryBarrier).cast(),
+                );
+            }
+        }
+
+        // (5b) Deferred RESOLVE pass: bind the resolve pipeline + the resolve set (gAlbedo
+        // @0, gMaterial @1, lit @2 — all STORAGE in GENERAL), dispatch at the SAME grid the
+        // marcher used (1:1 the marched pixels). It composites `lit = mask ? base*vis : base`.
+        // SAFETY: recording is open; the resolve pipeline + its layout (declaring
+        // `resolve_layout` at set 0) are live on this device (caller contract); the resolve
+        // set binds the now-stored (GENERAL) albedo/material + the lit (GENERAL) images;
+        // `dispatch_group_count_x` covers `present_extent`'s pixel count (the same grid the
+        // marcher dispatched); `&...descriptor_set` is a single-element local alive for the
+        // call (first_set 0, count 1, zero dynamic offsets). The resolve pushes NO constants.
+        unsafe {
+            (self.fns.cmd_bind_pipeline)(
+                cmd,
+                VK_PIPELINE_BIND_POINT_COMPUTE,
+                scene.resolve_pipeline.pipeline,
+            );
+            (self.fns.cmd_bind_descriptor_sets)(
+                cmd,
+                VK_PIPELINE_BIND_POINT_COMPUTE,
+                scene.resolve_pipeline.layout,
+                0,
+                1,
+                &targets.resolve_set.descriptor_set,
+                0,
+                ptr::null(),
+            );
+            (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
+        }
+
+        // (5c) LIT: GENERAL → SHADER_READ_ONLY_OPTIMAL for the present-blit sample. The
+        // present now samples LIT (the resolve's output), NOT albedo (the deletion target
+        // of the old step-6 albedo→SHADER_READ_ONLY barrier — albedo stays GENERAL,
+        // consumed only by the resolve as a STORAGE-in-GENERAL load).
+        let lit_to_sampled = VkImageMemoryBarrier {
             s_type: VkStructureType::ImageMemoryBarrier,
             p_next: ptr::null(),
             src_access_mask: VK_ACCESS_SHADER_WRITE_BIT,
@@ -2539,13 +2609,13 @@ impl<'ctx> Renderer<'ctx> {
             new_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
             dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
-            image: targets.albedo.image,
+            image: targets.lit.image,
             subresource_range: COLOR_SUBRESOURCE_RANGE,
         };
         // SAFETY: recording is open; COMPUTE_SHADER→FRAGMENT_SHADER with
-        // SHADER_WRITE→SHADER_READ and GENERAL→SHADER_READ_ONLY makes the marcher's
-        // composite store available + visible to the present-blit's sample;
-        // `&albedo_to_sampled` outlives the call.
+        // SHADER_WRITE→SHADER_READ and GENERAL→SHADER_READ_ONLY makes the resolve's lit
+        // store available + visible to the present-blit's sample; `&lit_to_sampled`
+        // outlives the call.
         unsafe {
             (self.fns.cmd_pipeline_barrier)(
                 cmd,
@@ -2557,11 +2627,11 @@ impl<'ctx> Renderer<'ctx> {
                 0,
                 ptr::null(),
                 1,
-                (&albedo_to_sampled as *const VkImageMemoryBarrier).cast(),
+                (&lit_to_sampled as *const VkImageMemoryBarrier).cast(),
             );
         }
 
-        // === Pass C: present-blit the ALBEDO (final composite) into the swapchain. ===
+        // === Pass C: present-blit the LIT image (the resolve's output) into the swapchain. ===
 
         // (7) Barrier (swapchain color): UNDEFINED → COLOR_ATTACHMENT_OPTIMAL.
         let to_color = VkImageMemoryBarrier {
@@ -2651,7 +2721,7 @@ impl<'ctx> Renderer<'ctx> {
         // attachment names the live swapchain `view` (now COLOR_ATTACHMENT_OPTIMAL);
         // dynamic rendering is enabled. The present pipeline + its bind-group layout
         // belong to this device (caller contract) and its declared color format equals
-        // the swapchain's (W2-b). The present set binds the ALBEDO image (now
+        // the swapchain's (W2-b). The present set binds the LIT image (now
         // SHADER_READ_ONLY_OPTIMAL) + sampler at set 0 of the pipeline's layout;
         // `blit_viewport`/`blit_scissor` outlive the bracketed calls; `draw(3, 1, 0, 0)`
         // is the `SV_VertexID` fullscreen triangle (no vertex buffer). Begin/End bracket
@@ -3172,18 +3242,28 @@ pub struct GBufferScene<'a> {
     /// The sampler bound alongside the depth image at binding 1 (ignored by the
     /// marcher's unfiltered `.Load`, but the SAMPLED_IMAGE descriptor requires one).
     pub depth_sampler: &'a VulkanSampler,
-    /// The fullscreen-sample present pipeline (pass C): samples the ALBEDO image into
-    /// the swapchain (`color_formats[0]` == the swapchain format).
+    /// The fullscreen-sample present pipeline (pass C): samples the LIT image (the
+    /// deferred resolve's output) into the swapchain (`color_formats[0]` == the swapchain
+    /// format). The deferred split rewired this from ALBEDO → LIT (the only present change).
     pub present_pipeline: &'a VulkanGraphicsPipeline,
     /// The present-sample bind-group LAYOUT (one COMBINED_IMAGE_SAMPLER @ set 0). The
     /// renderer allocates + writes a SET against it once per extent (pointing at the
-    /// per-extent ALBEDO image + `present_sampler`).
+    /// per-extent LIT image + `present_sampler`).
     pub present_layout: &'a VulkanBindGroupLayout,
-    /// The sampler the present-blit samples the ALBEDO image with (nearest/clamp for
+    /// The sampler the present-blit samples the LIT image with (nearest/clamp for
     /// a 1:1 sample).
     pub present_sampler: &'a VulkanSampler,
+    /// The deferred-split RESOLVE compute pipeline (`deferred_pbr.comp`): its layout
+    /// declares `resolve_layout` at `set 0`. Reads the marcher's gAlbedo + gMaterial
+    /// (STORAGE, GENERAL) and stores the final LIT color into the dedicated lit image.
+    pub resolve_pipeline: &'a ComputePipeline,
+    /// The resolve bind-group LAYOUT { storage gAlbedo @0, storage gMaterial @1, storage
+    /// lit @2 }. The renderer allocates + writes a SET against it once per extent (pointing
+    /// at the per-extent G-buffer + lit images).
+    pub resolve_layout: &'a VulkanBindGroupLayout,
     /// The marcher's 1D dispatch group count (`ceil(pixels / LOCAL_SIZE_X)` at the
-    /// WSI-clamped extent the recorder dispatches).
+    /// WSI-clamped extent the recorder dispatches). The deferred resolve dispatches at the
+    /// SAME grid (1:1 the marched pixels).
     pub dispatch_group_count_x: u32,
 }
 
@@ -3221,16 +3301,24 @@ pub struct GBufferTargets {
     /// The NORMAL storage image (R8G8B8A8): a marcher G-buffer attribute (unused by
     /// the P1c present, written for the deferred-shading-split P7 future).
     normal: VulkanTexture,
-    /// The MATERIAL storage image (R8G8B8A8): a marcher G-buffer attribute (unused by
-    /// the P1c present, written for the deferred-shading-split P7 future).
+    /// The MATERIAL storage image (R8G8B8A8): the marcher's `(r=vis, b=mask)` attribute,
+    /// consumed by the deferred resolve (STORAGE, GENERAL — never sampled).
     material: VulkanTexture,
+    /// The LIT storage image (R8G8B8A8): the deferred resolve's OUTPUT (STORAGE store);
+    /// also SAMPLED by the present-blit (pass C). The deferred split added it — the
+    /// present now samples THIS (not albedo).
+    lit: VulkanTexture,
     /// The marcher vocabulary descriptor set, written ONCE against
     /// [`GBufferScene::vocab_layout`] (pointing at `depth`/`albedo`/`normal`/`material`
     /// + the scene's SSBO/UBO/sampler). NO per-frame update.
     vocab_set: VulkanBindGroup,
+    /// The deferred RESOLVE descriptor set, written ONCE against
+    /// [`GBufferScene::resolve_layout`] (3 STORAGE images: `albedo` @0, `material` @1,
+    /// `lit` @2). NO per-frame update.
+    resolve_set: VulkanBindGroup,
     /// The present-blit descriptor set, written ONCE against
     /// [`GBufferScene::present_layout`] (one COMBINED_IMAGE_SAMPLER pointing at
-    /// `albedo` + the scene's present sampler). NO per-frame update.
+    /// `lit` + the scene's present sampler). NO per-frame update.
     present_set: VulkanBindGroup,
     /// The extent the images were created at (so [`GBufferTargets::sync_gbuffer`] can
     /// detect a resize and reallocate).
@@ -3362,6 +3450,27 @@ impl GBufferTargets {
                 return Err(e);
             }
         };
+        // LIT: the deferred resolve's STORAGE store output; also SAMPLED by the
+        // present-blit (pass C) and TRANSFER_SRC so an offscreen golden could read it back.
+        let lit = match Self::create_gbuffer_image(
+            ctx,
+            extent,
+            ImageUsage::STORAGE | ImageUsage::SAMPLED | ImageUsage::TRANSFER_SRC,
+        ) {
+            Ok(t) => t,
+            Err(e) => {
+                // SAFETY: the five textures above were created on `ctx`; referenced by
+                // no submission; each destroyed exactly once on this error path.
+                unsafe {
+                    RhiDevice::destroy_texture(ctx, material);
+                    RhiDevice::destroy_texture(ctx, normal);
+                    RhiDevice::destroy_texture(ctx, albedo);
+                    RhiDevice::destroy_texture(ctx, raster_color);
+                    RhiDevice::destroy_texture(ctx, depth);
+                }
+                return Err(e);
+            }
+        };
 
         // The marcher vocabulary set, written ONCE here (NO per-frame update). The
         // entry order matches the layout: SSBO @0, sampled depth @1, storage albedo @2,
@@ -3389,9 +3498,42 @@ impl GBufferTargets {
             match RhiDevice::create_bind_group(ctx, &desc) {
                 Ok(g) => g,
                 Err(e) => {
-                    // SAFETY: the five textures above were created on `ctx`; referenced
+                    // SAFETY: the six textures above were created on `ctx`; referenced
                     // by no submission; each destroyed exactly once on this error path.
                     unsafe {
+                        RhiDevice::destroy_texture(ctx, lit);
+                        RhiDevice::destroy_texture(ctx, material);
+                        RhiDevice::destroy_texture(ctx, normal);
+                        RhiDevice::destroy_texture(ctx, albedo);
+                        RhiDevice::destroy_texture(ctx, raster_color);
+                        RhiDevice::destroy_texture(ctx, depth);
+                    }
+                    return Err(SwapchainError::DepthImage(e));
+                }
+            }
+        };
+
+        // The deferred RESOLVE set, written ONCE here: 3 STORAGE images — gAlbedo @0,
+        // gMaterial @1, lit @2 — matching `deferred_pbr.comp`'s set 0.
+        let resolve_set = {
+            let entries = [
+                BindGroupEntry::StorageImage { texture: &albedo },
+                BindGroupEntry::StorageImage { texture: &material },
+                BindGroupEntry::StorageImage { texture: &lit },
+            ];
+            let desc = BindGroupDesc::<Vulkan> {
+                layout: scene.resolve_layout,
+                entries: &entries,
+            };
+            match RhiDevice::create_bind_group(ctx, &desc) {
+                Ok(g) => g,
+                Err(e) => {
+                    // SAFETY: the six textures + the vocabulary set above were created on
+                    // `ctx`; referenced by no submission; each destroyed exactly once on
+                    // this error path (reverse acquisition order: set → images).
+                    unsafe {
+                        RhiDevice::destroy_bind_group(ctx, vocab_set);
+                        RhiDevice::destroy_texture(ctx, lit);
                         RhiDevice::destroy_texture(ctx, material);
                         RhiDevice::destroy_texture(ctx, normal);
                         RhiDevice::destroy_texture(ctx, albedo);
@@ -3404,10 +3546,10 @@ impl GBufferTargets {
         };
 
         // The present-blit set, written ONCE here: one COMBINED_IMAGE_SAMPLER pointing
-        // at the ALBEDO image + the scene's present sampler.
+        // at the LIT image (the resolve's output) + the scene's present sampler.
         let present_set = {
             let entries = [BindGroupEntry::CombinedImage {
-                texture: &albedo,
+                texture: &lit,
                 sampler: scene.present_sampler,
             }];
             let desc = BindGroupDesc::<Vulkan> {
@@ -3417,11 +3559,13 @@ impl GBufferTargets {
             match RhiDevice::create_bind_group(ctx, &desc) {
                 Ok(g) => g,
                 Err(e) => {
-                    // SAFETY: the five textures + the vocabulary set above were created
-                    // on `ctx`; referenced by no submission; each destroyed exactly once
-                    // on this error path.
+                    // SAFETY: the six textures + the vocabulary & resolve sets above were
+                    // created on `ctx`; referenced by no submission; each destroyed exactly
+                    // once on this error path (reverse acquisition order: sets → images).
                     unsafe {
+                        RhiDevice::destroy_bind_group(ctx, resolve_set);
                         RhiDevice::destroy_bind_group(ctx, vocab_set);
+                        RhiDevice::destroy_texture(ctx, lit);
                         RhiDevice::destroy_texture(ctx, material);
                         RhiDevice::destroy_texture(ctx, normal);
                         RhiDevice::destroy_texture(ctx, albedo);
@@ -3439,7 +3583,9 @@ impl GBufferTargets {
             albedo,
             normal,
             material,
+            lit,
             vocab_set,
+            resolve_set,
             present_set,
             extent,
         })
@@ -3508,7 +3654,9 @@ impl GBufferTargets {
         // reverse acquisition order (sets → images).
         unsafe {
             RhiDevice::destroy_bind_group(ctx, self.present_set);
+            RhiDevice::destroy_bind_group(ctx, self.resolve_set);
             RhiDevice::destroy_bind_group(ctx, self.vocab_set);
+            RhiDevice::destroy_texture(ctx, self.lit);
             RhiDevice::destroy_texture(ctx, self.material);
             RhiDevice::destroy_texture(ctx, self.normal);
             RhiDevice::destroy_texture(ctx, self.albedo);
