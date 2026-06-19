@@ -38,6 +38,7 @@ use boyko_rhi::{
     BindGroupDesc, BindGroupEntry, Format, ImageUsage, RhiDevice, TextureDesc, TextureDimension,
 };
 
+use crate::compute::DEFAULT_MARCHER_OMEGA;
 use crate::device::{DeviceFns, SurfaceInstanceFns, SwapchainDeviceFns, VulkanContext};
 use crate::ffi::*;
 use crate::memory::BoundBuffer;
@@ -2468,15 +2469,34 @@ impl<'ctx> Renderer<'ctx> {
 
         // === Pass B: the marcher SAMPLES the depth image, STORES the G-buffer. ===
         // (5) Bind the marcher + the vocabulary set (written ONCE at sync_gbuffer; NO
-        // per-frame update) against the marcher's OWN dedicated layout, dispatch.
+        // per-frame update) against the marcher's OWN dedicated layout, push the 8-byte
+        // P4b/B1 constants, dispatch.
+        //
+        // The marcher's compute push range is `{ coarse_enabled: u32 @0, omega: f32 @4 }`.
+        // The windowed present path runs WITHOUT the coarse cull pass (no coarse
+        // dispatch writes binding 6), so `coarse_enabled = 0` gates the tile read off —
+        // but the marcher shader still DECLARES binding 6, so the (valid) Tiles
+        // descriptor must be bound (it is, in the vocabulary set). `omega` carries the
+        // B1 over-relaxation factor (`DEFAULT_MARCHER_OMEGA`, the provably hole-free
+        // marcher speedup).
+        let marcher_push = {
+            let mut push = [0u8; GBUFFER_MARCHER_PUSH_BYTES as usize];
+            // coarse_enabled = 0 (windowed path: cull OFF), omega = DEFAULT_MARCHER_OMEGA.
+            push[0..4].copy_from_slice(&0u32.to_le_bytes());
+            push[4..8].copy_from_slice(&DEFAULT_MARCHER_OMEGA.to_le_bytes());
+            push
+        };
         // SAFETY: recording is open; the marcher pipeline + its layout (declaring
-        // `vocab_layout` at set 0) are live on this device (caller contract); the
-        // vocabulary set binds the SSBO/UBO + the now-transitioned depth (SHADER_READ)
-        // + G-buffer (GENERAL) images; `dispatch_group_count_x` covers `present_extent`'s
-        // pixel count (the G-buffer images + dispatch grid + camera UBO `count` are all
-        // sized to `present_extent`, the composite — NOT the swapchain `extent`; caller
-        // contract); `&...descriptor_set` is a single-element local alive
-        // for the call (first_set 0, count 1, zero dynamic offsets).
+        // `vocab_layout` at set 0 AND the 8-byte COMPUTE push range) are live on this
+        // device (caller contract); the vocabulary set binds the SSBO/UBO + the
+        // now-transitioned depth (SHADER_READ) + G-buffer (GENERAL) images + a valid
+        // Tiles SSBO @6; `dispatch_group_count_x` covers `present_extent`'s pixel count
+        // (the G-buffer images + dispatch grid + camera UBO `count` are all sized to
+        // `present_extent`, the composite — NOT the swapchain `extent`; caller contract);
+        // `&...descriptor_set` is a single-element local alive for the call (first_set 0,
+        // count 1, zero dynamic offsets); `marcher_push` is `GBUFFER_MARCHER_PUSH_BYTES`
+        // (8) bytes at offset 0, a subset of the declared 80-byte range and outlives the
+        // call.
         unsafe {
             (self.fns.cmd_bind_pipeline)(
                 cmd,
@@ -2492,6 +2512,14 @@ impl<'ctx> Renderer<'ctx> {
                 &targets.vocab_set.descriptor_set,
                 0,
                 ptr::null(),
+            );
+            (self.fns.cmd_push_constants)(
+                cmd,
+                scene.marcher.layout,
+                VK_SHADER_STAGE_COMPUTE_BIT,
+                0,
+                GBUFFER_MARCHER_PUSH_BYTES,
+                marcher_push.as_ptr().cast(),
             );
             (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
         }
@@ -3049,6 +3077,14 @@ pub struct SampledComposite<'a> {
 /// mesh-raster pipeline's `VERTEX` range each on-screen G-buffer frame (Render P1c).
 pub const GBUFFER_MVP_BYTES: usize = 64;
 
+/// The byte size of the marcher's COMPUTE push constant: the P4b/B1 pair
+/// `{ coarse_enabled: u32 @0, omega: f32 @4 }`, pushed to the marcher pipeline's
+/// `COMPUTE` range each on-screen G-buffer frame. The windowed path pushes
+/// `coarse_enabled = 0` (the coarse cull pass is not run on-screen) and `omega =
+/// DEFAULT_MARCHER_OMEGA` (the B1 over-relaxation marcher speedup). It is a subset of
+/// the marcher pipeline's declared 80-byte (`COMPOSITE_PUSH_CONSTANT_BYTES`) range.
+const GBUFFER_MARCHER_PUSH_BYTES: u32 = 8;
+
 /// The on-screen Render-P1c G-buffer frame's STATIC inputs: the resources the
 /// [`Renderer::render_gbuffer_frame`] 3-pass needs that do NOT depend on the
 /// (WSI-clamped) swapchain extent. The EXTENT-dependent targets (depth + the MRT
@@ -3102,16 +3138,30 @@ pub struct GBufferScene<'a> {
     /// `vocab_layout` at `set 0`). Byte-untouched from P1b (pass B).
     pub marcher: &'a ComputePipeline,
     /// The vocabulary bind-group LAYOUT { SSBO @0, sampled depth @1, storage albedo
-    /// @2, storage normal @3, storage material @4, UNIFORM camera @5 }. The renderer
-    /// allocates + writes a SET against it once per extent (pointing at the
-    /// per-extent G-buffer images + the bundle's `edit_list` / `camera_uniform` /
-    /// `depth_sampler`).
+    /// @2, storage normal @3, storage material @4, UNIFORM camera @5, STORAGE tiles
+    /// @6 }. The renderer allocates + writes a SET against it once per extent (pointing
+    /// at the per-extent G-buffer images + the bundle's `edit_list` / `camera_uniform`
+    /// / `depth_sampler` / `tiles_buffer`).
+    ///
+    /// The caller MUST declare binding 6 = `DescriptorKind::StorageBuffer`
+    /// (`ShaderStage::COMPUTE`): the P4b marcher shader unconditionally DECLARES `[Set
+    /// 0, Binding 6, "Tiles"]`, so the layout + the bound set must carry a VALID
+    /// descriptor there even when the coarse cull is gated OFF (`coarse_enabled == 0`).
     pub vocab_layout: &'a VulkanBindGroupLayout,
     /// The edit-list StorageBuffer (binding 0), host-seeded ONCE before the loop.
     pub edit_list: &'a BoundBuffer,
     /// The camera/extent UNIFORM buffer (binding 5), host-seeded ONCE before the loop
     /// (at the WSI-clamped extent the recorder dispatches).
     pub camera_uniform: &'a BoundBuffer,
+    /// The P4b per-tile coarse-cull StorageBuffer (binding 6), sized to the full tile
+    /// grid (`tile_grid_extent(w, h)` → `tw * th * TILE_BOUND_BYTES`, STORAGE usage).
+    ///
+    /// The windowed present path runs the marcher with the coarse cull GATED OFF
+    /// (`coarse_enabled == 0`), so the marcher never reads this buffer's contents — but
+    /// the marcher shader unconditionally DECLARES binding 6, so Vulkan requires a
+    /// VALID StorageBuffer descriptor bound there regardless. The scene OWNS this
+    /// buffer; [`GBufferTargets`] only borrows it into the vocabulary set.
+    pub tiles_buffer: &'a BoundBuffer,
     /// The sampler bound alongside the depth image at binding 1 (ignored by the
     /// marcher's unfiltered `.Load`, but the SAMPLED_IMAGE descriptor requires one).
     pub depth_sampler: &'a VulkanSampler,
@@ -3143,7 +3193,7 @@ pub struct GBufferScene<'a> {
 /// # The descriptor sets are written ONCE per extent (NO per-frame update)
 ///
 /// `vocab_set` binds {SSBO, sampled depth, albedo/normal/material storage, camera
-/// UBO} and `present_set` binds {ALBEDO combined-image-sampler}; both are written at
+/// UBO, P4b tiles SSBO} and `present_set` binds {ALBEDO combined-image-sampler}; both are written at
 /// `create_bind_group` time inside `sync_gbuffer` and reused unchanged across every
 /// frame at that extent. The recorder records NO `vkUpdateDescriptorSets` — only the
 /// per-frame barriers + bind + dispatch + draw. On an extent change `sync_gbuffer`
@@ -3308,7 +3358,10 @@ impl GBufferTargets {
 
         // The marcher vocabulary set, written ONCE here (NO per-frame update). The
         // entry order matches the layout: SSBO @0, sampled depth @1, storage albedo @2,
-        // storage normal @3, storage material @4, UNIFORM camera @5.
+        // storage normal @3, storage material @4, UNIFORM camera @5, STORAGE tiles @6.
+        // Binding 6 is the P4b coarse-cull tile buffer: the marcher shader declares it
+        // unconditionally, so a VALID descriptor is bound here even though the windowed
+        // path gates the coarse read OFF (`coarse_enabled == 0`).
         let vocab_set = {
             let entries = [
                 BindGroupEntry::StorageBuffer { buffer: scene.edit_list },
@@ -3320,6 +3373,7 @@ impl GBufferTargets {
                 BindGroupEntry::StorageImage { texture: &normal },
                 BindGroupEntry::StorageImage { texture: &material },
                 BindGroupEntry::UniformBuffer { buffer: scene.camera_uniform },
+                BindGroupEntry::StorageBuffer { buffer: scene.tiles_buffer },
             ];
             let desc = BindGroupDesc::<Vulkan> {
                 layout: scene.vocab_layout,

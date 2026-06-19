@@ -65,8 +65,9 @@ use boyko_rhi::{
 use boyko_rhi_vulkan::compute::{
     COMPOSITE_PUSH_CONSTANT_BYTES, CompositePushConstants, EDITLIST_BUFFER_WORDS, LOCAL_SIZE_X,
     MESH_COLOR, MESH_DEPTH_CLEAR, SDF_CAMERA_Z, SDF_IMG_H, SDF_IMG_W, SDF_TRACE_T_MAX,
-    SDF_VIEW_HALF_EXTENT, SdfEdit, editlist_pixel_hits, encode_edit_list, golden_composite_pixel,
-    mesh_depth_for_z, pack_rgba, pixel_world_xy, sdf_gbuffer_composite_spirv, sdf_op,
+    SDF_VIEW_HALF_EXTENT, SdfEdit, TILE_BOUND_BYTES, editlist_pixel_hits, encode_edit_list,
+    golden_composite_pixel, mesh_depth_for_z, pack_rgba, pixel_world_xy,
+    sdf_gbuffer_composite_spirv, sdf_op, tile_grid_extent,
 };
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
 use boyko_rhi_vulkan::ffi::{
@@ -485,6 +486,23 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         }
     }
 
+    // P4b: the coarse-cull tile StorageBuffer (vocab binding 6), sized to the full tile
+    // grid at the COMPOSITE extent (NOT the swapchain extent — the marcher dispatches +
+    // the camera UBO `count` are sized to the 64×64 composite). The windowed path runs
+    // the marcher with the coarse cull gated OFF (coarse_enabled=0), so its contents are
+    // never read — but the marcher shader DECLARES binding 6, so a VALID descriptor must
+    // be bound. Allocated once; bound (borrowed) into the vocabulary set; never written.
+    let (tw, th) = tile_grid_extent(SDF_IMG_W, SDF_IMG_H);
+    let tiles_buffer = RhiDevice::create_buffer(
+        device,
+        &BufferDesc {
+            size: (tw as u64) * (th as u64) * (TILE_BOUND_BYTES as u64),
+            usage: BufferUsage::STORAGE,
+            location: MemoryLocation::HostVisibleCoherent,
+        },
+    )
+    .expect("P4b coarse-cull tile-bound storage buffer (vocab binding 6)");
+
     // The mesh quad's vertex buffer (host-visible).
     let vertices = quad_vertices();
     let vertex_bytes = core::mem::size_of_val(&vertices) as u64;
@@ -559,6 +577,9 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
     // The P1b marcher: the vocabulary bind-group layout + the compute pipeline.
     let cs = RhiDevice::create_shader_module(device, sdf_gbuffer_composite_spirv())
         .expect("P1b G-buffer marcher compute shader module");
+    // P4b: binding 6 = the coarse-cull tile StorageBuffer. The marcher shader DECLARES
+    // it unconditionally, so the layout must carry it (and a valid buffer must be bound)
+    // even though the windowed path runs with the coarse cull gated OFF (coarse_enabled=0).
     let vocab_entries = [
         BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::SampledImage, stage: ShaderStage::COMPUTE },
@@ -566,6 +587,7 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         BindGroupLayoutEntry { binding: 3, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 4, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 5, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 6, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
     ];
     let vocab_layout = RhiDevice::create_bind_group_layout(
         device,
@@ -639,6 +661,7 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         vocab_layout: &vocab_layout,
         edit_list: &edit_list,
         camera_uniform: &camera_uniform,
+        tiles_buffer: &tiles_buffer,
         depth_sampler: &depth_sampler,
         present_pipeline: &present_pipeline,
         present_layout: &present_layout,
@@ -787,6 +810,7 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         RhiDevice::destroy_sampler(device, present_sampler);
         RhiDevice::destroy_sampler(device, depth_sampler);
         RhiDevice::destroy_buffer(device, vertex_buffer);
+        RhiDevice::destroy_buffer(device, tiles_buffer);
         RhiDevice::destroy_buffer(device, camera_uniform);
         RhiDevice::destroy_buffer(device, edit_list);
     }
