@@ -7,14 +7,21 @@
 //! iteration during [`process_actions`](super::process::process_actions), with
 //! zero per-action allocation.
 //!
-//! # I4 seam
-//! The `Resource` impl (via the TypeId registry, plan C1) and the contexts /
-//! priority-stack model (plan §6 V3) are added in I4. This module ships the
-//! single-context flat arena + the builder.
+//! # I4 (this round)
+//! `InputMap<A>` hand-implements `Resource` via the `TypeId` registry (plan
+//! §7.1, C1) and gains [`InputMap::clone_arena`] so [`InputPlugin`] can insert a
+//! copy of its default map. The contexts / priority-stack model (plan §6 V3)
+//! lands in I5+. This module ships the single-context flat arena + the builder.
+//!
+//! [`InputPlugin`]: crate::plugin::InputPlugin
 
 use core::marker::PhantomData;
 
+use boyko_ecs::ecs::core::resources::resource::Resource;
+use boyko_ecs::ecs::identifiers::primitives::ResourceId;
+
 use crate::action::actionlike::Actionlike;
+use crate::action::resource_id::id_for;
 use crate::constants::MAX_CHORD_KEYS;
 use crate::raw::keycode::{KeyCode, MouseButton};
 
@@ -129,7 +136,10 @@ pub struct InputMap<A: Actionlike> {
     ranges: Box<[(u32, u32)]>,
     /// Clash-resolution strategy for this map.
     clash: ClashStrategy,
-    _pd: PhantomData<A>,
+    // `fn() -> A`, not `A`: the marker owns no `A`, so `InputMap<A>` is
+    // unconditionally `Send + Sync` (required by `Resource`) regardless of
+    // whether `A: Send + Sync`.
+    _pd: PhantomData<fn() -> A>,
 }
 
 impl<A: Actionlike> InputMap<A> {
@@ -178,6 +188,30 @@ impl<A: Actionlike> InputMap<A> {
     #[inline]
     pub fn all_bindings(&self) -> &[BindSpec] {
         &self.bindings
+    }
+
+    /// Deep-copies the map's flat arena + ranges into a new owned `InputMap`
+    /// (cold path). Used by [`InputPlugin::build`] to insert a copy of its
+    /// default map without consuming the plugin's own template. `BindSpec` is
+    /// `Copy`, so the copy is a flat `memcpy` of two boxed slices.
+    ///
+    /// [`InputPlugin::build`]: crate::plugin::InputPlugin
+    pub fn clone_arena(&self) -> Self {
+        Self {
+            bindings: self.bindings.clone(),
+            ranges: self.ranges.clone(),
+            clash: self.clash,
+            _pd: PhantomData,
+        }
+    }
+}
+
+// NOT `#[derive(Resource)]`: the generic-body `static` would collapse every `A`
+// onto one id (rust#22991). Mint through the `TypeId`-keyed registry (plan §7.1).
+impl<A: Actionlike> Resource for InputMap<A> {
+    #[inline]
+    fn resource_id() -> ResourceId {
+        id_for::<Self>()
     }
 }
 

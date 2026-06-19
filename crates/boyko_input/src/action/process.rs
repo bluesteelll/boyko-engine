@@ -12,12 +12,101 @@
 //! the fixed-size `ActionState` arrays, and a stack-resident clash candidate
 //! set. No `Vec`, no `Box`, no `HashMap`, no `dyn`.
 
+use boyko_ecs::ecs::core::system::{Res, ResMut};
+use boyko_ecs::ecs::core::time::fixed_time::FixedTime;
+
 use crate::action::actionlike::{ActionKind, Actionlike};
 use crate::action::clash::{resolve_prioritize_longest, CandidateSet};
 use crate::action::map::{AxisMode, BindSpec, ClashStrategy, InputMap, InputRef};
 use crate::action::state::{clamp_scalar, ActionState};
 use crate::raw::keycode::KeyCode;
-use crate::raw::queue::PhysicalInput;
+use crate::raw::queue::{PhysicalInput, RawInputQueue};
+
+/// The per-frame ingest system (plan §7.2 + §7.3, the I4 entry point).
+///
+/// Runs **once per frame** on [`CoreSchedule::Main`], ordered `.before_set` the
+/// gameplay set by [`InputPlugin`] — NOT on the fixed schedule (input is sampled
+/// on the variable step; the fixed step reads the frame-stable snapshot, C3).
+///
+/// It drains [`RawInputQueue`] into the [`PhysicalInput`] snapshot
+/// (event-stream edges, W4), aggregates that into [`ActionState`] via
+/// [`process_actions`], then freezes the fixed snapshot the next frame's fixed
+/// loop reads ([`ActionState::freeze_fixed_snapshot`], C3) — overwriting the
+/// frozen levels and **OR-accumulating** the frozen edges. It is ordered
+/// `.after` [`clear_consumed_fixed_edges`], which clears the accumulated edges
+/// once a fixed batch has consumed them, so the freeze here always builds on a
+/// correctly-pruned edge set (sticky-until-consumed, BUG-I4-C3). Zero per-frame
+/// heap allocation: every buffer is preallocated at plugin build.
+///
+/// # Access / scheduling
+///
+/// The `ResMut`/`Res` params declare the resource access bits automatically (via
+/// each param's `init_access`), so the parallel conflict graph colors this system
+/// as a writer of `ActionState`/`PhysicalInput`/`RawInputQueue` and a reader of
+/// `InputMap`. It therefore never co-runs with any system reading `ActionState`
+/// — correct by the existing graph, no new synchronization.
+///
+/// [`CoreSchedule::Main`]: boyko_ecs::ecs::core::app::CoreSchedule
+/// [`InputPlugin`]: crate::plugin::InputPlugin
+pub fn update_action_state<A: Actionlike>(
+    mut queue: ResMut<RawInputQueue>,
+    mut physical: ResMut<PhysicalInput>,
+    mut state: ResMut<ActionState<A>>,
+    map: Res<InputMap<A>>,
+) {
+    // 1. Reset the per-frame edge/accumulator state. `PhysicalInput::begin_frame`
+    //    clears edges + summed accumulators but keeps held levels + cursor pos.
+    queue.begin_frame();
+    physical.begin_frame();
+
+    // 2. Drain the ring into the physical snapshot, accumulating edges from the
+    //    event stream (W4 — a same-frame down+up tap survives).
+    while let Some(ev) = queue.pop() {
+        physical.apply(&ev);
+    }
+
+    // 3. Aggregate the physical snapshot into action state (clears + re-derives
+    //    edges/levels/values, runs the clash pass).
+    process_actions(&physical, &map, &mut state);
+
+    // 4. Freeze the frame-stable snapshot the next frame's fixed loop reads (C3).
+    //    Edges are OR-accumulated onto the (post-consume) frozen set, so a press
+    //    survives a 0-substep frame; `clear_consumed_fixed_edges` clears them
+    //    once a fixed batch has consumed them.
+    state.freeze_fixed_snapshot();
+}
+
+/// The clear-on-consume half of the sticky-edge fixed model (C3, plan §7.3).
+///
+/// Runs on [`CoreSchedule::Main`], ordered **before**
+/// [`update_action_state`] (which OR-accumulates the next batch), so it sees the
+/// `FixedTime::steps_this_frame` written by the **current** frame's fixed loop
+/// (the frame order is fixed-loop-first, then Main —
+/// [`App::update_with_delta`](boyko_ecs::ecs::core::app::App::update_with_delta)).
+///
+/// It clears the accumulated frozen edges
+/// ([`ActionState::clear_fixed_edges`](crate::action::state::ActionState::clear_fixed_edges))
+/// **iff** the fixed loop ran ≥ 1 substep this frame (`steps_this_frame > 0`):
+///
+/// - **≥ 1 substep** — the batch just consumed the frozen edges; clear them so
+///   the next batch does not re-observe the same press (no-double-count).
+/// - **0 substeps** — no substep consumed them; skip the clear so the edge
+///   persists to the next frame and reaches the first batch that does run
+///   (no-miss across a 0-substep render frame).
+///
+/// The gate is a pure function of the frame (`steps_this_frame`), so the result
+/// is bit-deterministic on a run-twice. Allocation-free: the clear is two
+/// `BitSet256` overwrites.
+///
+/// [`CoreSchedule::Main`]: boyko_ecs::ecs::core::app::CoreSchedule
+pub fn clear_consumed_fixed_edges<A: Actionlike>(
+    fixed: Res<FixedTime>,
+    mut state: ResMut<ActionState<A>>,
+) {
+    if fixed.steps_this_frame() > 0 {
+        state.clear_fixed_edges();
+    }
+}
 
 /// Aggregates `physical` into `state` according to `map` (the per-frame hot
 /// path). Clears the previous frame's action state first, then re-derives.

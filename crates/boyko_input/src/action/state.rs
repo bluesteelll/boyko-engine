@@ -7,18 +7,29 @@
 //! split). The value arrays are allocated **once** at build (`with_count`),
 //! never per frame.
 //!
-//! # I4 seam (fixed-step determinism, plan §7.3)
-//! The C3 frame-stable *fixed snapshot* (`fixed_*` mirrors read by the Fixed
-//! schedule) and the `Resource` impl via the TypeId registry are added in I4.
-//! This module ships only the windowing-independent core: the live sets, the
-//! value arrays, the consumption accessors, and the per-frame `begin_frame`
-//! reset that [`process_actions`](super::process::process_actions) writes into.
+//! # Fixed-step determinism (plan §7.3, C3)
+//! Alongside the live (Main-facing) sets, `ActionState` holds a **frame-stable
+//! fixed snapshot** (`fixed_*`) that the Fixed schedule reads. Each Main frame
+//! [`freeze_fixed_snapshot`](ActionState::freeze_fixed_snapshot) **overwrites**
+//! the frozen levels (a level is sampled) and **OR-accumulates** the frozen
+//! edges (sticky until consumed). Because the frame order is fixed-loop-first
+//! then Main, an edge frozen on frame N is carried forward across any 0-substep
+//! frame N+1 and is consumed by the first fixed batch that runs after it;
+//! [`clear_fixed_edges`](ActionState::clear_fixed_edges) — driven at the start
+//! of the next Main, gated on `FixedTime::steps_this_frame > 0` — clears it once
+//! that batch has run. The snapshot is otherwise identical for every substep of
+//! one fixed batch (no per-substep mutation, no substep index needed), so a
+//! 0-substep frame never misses a press (sticky edge) and an N-substep batch
+//! never double-counts it (cleared after the consuming batch).
 
 use core::marker::PhantomData;
 
+use boyko_ecs::ecs::core::resources::resource::Resource;
+use boyko_ecs::ecs::identifiers::primitives::ResourceId;
 use boyko_utils::bit_mask::bit_set_256::BitSet256;
 
 use crate::action::actionlike::{ActionKind, Actionlike};
+use crate::action::resource_id::id_for;
 use crate::constants::MAX_ACTIONS;
 
 /// The processed state of every action, queried by gameplay systems.
@@ -38,12 +49,26 @@ pub struct ActionState<A: Actionlike> {
     just_released: BitSet256,
     /// Bit `i` = action `i` clash-suppressed or user-`consume`d this frame.
     consumed: BitSet256,
+    // --- frame-stable snapshot the FIXED loop reads (C3, plan §7.3) ---
+    /// Level, frozen for the whole of the next frame's fixed loop.
+    fixed_pressed: BitSet256,
+    /// Rising edge, frame-stable; single-consume owned by ingest (C3).
+    fixed_just_pressed: BitSet256,
+    /// Falling edge, frame-stable.
+    fixed_just_released: BitSet256,
     // --- cold values: allocated ONCE at build, never per frame ---
     /// Analog value for Button (`0..1`) / Axis1D (`-1..1`); `len == COUNT`.
     button_value: Box<[f32]>,
     /// Deadzoned + clamped 2D value for Axis2D; `len == COUNT`.
     axis2: Box<[[f32; 2]]>,
-    _pd: PhantomData<A>,
+    /// Frame-stable mirror of `button_value` for the fixed loop; `len == COUNT`.
+    fixed_value: Box<[f32]>,
+    /// Frame-stable mirror of `axis2` for the fixed loop; `len == COUNT`.
+    fixed_axis2: Box<[[f32; 2]]>,
+    // `fn() -> A`, not `A`: the marker owns no `A`, so `ActionState<A>` is
+    // unconditionally `Send + Sync` (required by `Resource`) regardless of
+    // whether `A: Send + Sync` — `Actionlike` does not demand those bounds.
+    _pd: PhantomData<fn() -> A>,
 }
 
 impl<A: Actionlike> ActionState<A> {
@@ -61,8 +86,13 @@ impl<A: Actionlike> ActionState<A> {
             just_pressed: BitSet256::new(),
             just_released: BitSet256::new(),
             consumed: BitSet256::new(),
+            fixed_pressed: BitSet256::new(),
+            fixed_just_pressed: BitSet256::new(),
+            fixed_just_released: BitSet256::new(),
             button_value: vec![0.0f32; count].into_boxed_slice(),
             axis2: vec![[0.0f32; 2]; count].into_boxed_slice(),
+            fixed_value: vec![0.0f32; count].into_boxed_slice(),
+            fixed_axis2: vec![[0.0f32; 2]; count].into_boxed_slice(),
             _pd: PhantomData,
         }
     }
@@ -139,15 +169,156 @@ impl<A: Actionlike> ActionState<A> {
         self.axis2[i]
     }
 
-    /// Marks `a` handled this frame: clears its edges and sets its `consumed`
-    /// bit so later queries see it as inactive (plan §7.3 O3 semantics; the
-    /// fixed-snapshot interaction is wired in I4).
+    /// Marks `a` handled this frame: clears its edges (in BOTH the Main-facing
+    /// sets and the frozen fixed snapshot) and sets its `consumed` bit so later
+    /// queries see it as inactive (plan §7.3 O3 semantics).
+    ///
+    /// Clearing the fixed snapshot's edge bit too keeps the fixed view
+    /// self-consistent: a `consume` from a Main system is observed identically by
+    /// every substep of the next frame's fixed loop; a `consume` from a Fixed
+    /// system masks the action for the remaining substeps of the current frame
+    /// (documented, rarely used). Clearing the *live* `just_pressed`/
+    /// `just_released` bit also stops the action being re-frozen by the next
+    /// [`freeze_fixed_snapshot`](ActionState::freeze_fixed_snapshot) (the frozen
+    /// edges are now OR-accumulated, sticky-until-consumed — see that method), so
+    /// a consumed press never leaks into a later fixed batch.
     #[inline]
     pub fn consume(&mut self, a: A) {
         let i = a.index();
         self.just_pressed.clear(i);
         self.just_released.clear(i);
+        self.fixed_just_pressed.clear(i);
+        self.fixed_just_released.clear(i);
         self.consumed.set(i);
+    }
+
+    // --- frame-stable fixed snapshot (C3, plan §7.3) ---
+
+    /// Freezes the current Main-facing state into the fixed snapshot the Fixed
+    /// schedule reads. Called once per frame at the end of
+    /// [`update_action_state`](super::process::update_action_state).
+    ///
+    /// # Sticky-until-consumed edges (C3, plan §7.3)
+    ///
+    /// Levels (`fixed_pressed`, `fixed_value`, `fixed_axis2`) are **overwritten**
+    /// with the current frame's value — a level is sampled, not latched. Edges
+    /// (`fixed_just_pressed`, `fixed_just_released`) are **OR-accumulated** onto
+    /// the existing frozen bits, NOT overwritten:
+    ///
+    /// ```text
+    /// fixed_just_pressed  |= just_pressed
+    /// fixed_just_released |= just_released
+    /// ```
+    ///
+    /// The frame order is Fixed-loop-first, then Main (`App::update_with_delta`).
+    /// A press observed on frame N's Main is frozen here; if frame N+1's fixed
+    /// loop runs **0 substeps** (a sub-timestep render frame, common above 64 Hz)
+    /// no substep consumes it. Overwriting would then destroy the edge before any
+    /// substep saw it (the original BUG-I4-C3 no-miss failure). OR-accumulating
+    /// carries the edge forward across 0-substep frames; it is cleared only after
+    /// a fixed batch consumes it, by
+    /// [`clear_fixed_edges`](ActionState::clear_fixed_edges) at the start of the
+    /// next Main (gated on `steps_this_frame > 0`). The result: a press is
+    /// `fixed_just_pressed` for exactly the one fixed batch that first runs after
+    /// it — never lost across 0-substep frames (no-miss), never counted in two
+    /// batches (no-double-count).
+    ///
+    /// Allocation-free: the OR-accumulate drains a 32-byte stack copy of each
+    /// edge set (the same pattern as the `consumed` suppression below), so the
+    /// cost is O(actions-edged-this-frame), typically 0–2.
+    #[inline]
+    pub fn freeze_fixed_snapshot(&mut self) {
+        // Levels: overwrite (a level is sampled each frame, not latched).
+        self.fixed_pressed = self.pressed;
+        self.fixed_value.copy_from_slice(&self.button_value);
+        self.fixed_axis2.copy_from_slice(&self.axis2);
+
+        // Edges: OR-accumulate (sticky until a fixed batch consumes them). The
+        // pop-drain ORs each newly-edged bit in without a `union_with` method on
+        // the public `BitSet256` surface; on the common no-input frame both
+        // scratch copies are empty and neither loop iterates.
+        let mut rising = self.just_pressed;
+        while let Some(bit) = rising.pop_lowest_set_bit() {
+            self.fixed_just_pressed.set(bit as usize);
+        }
+        let mut falling = self.just_released;
+        while let Some(bit) = falling.pop_lowest_set_bit() {
+            self.fixed_just_released.set(bit as usize);
+        }
+
+        // Suppress consumed actions in the frozen view up front, so the fixed
+        // accessors are a single bit test (no per-read `consumed` mask). On the
+        // common path `consumed` is empty, so this loop iterates zero times.
+        // `pop_lowest_set_bit` drains a scratch copy, so `self.consumed` is
+        // untouched (the Main-facing accessors still mask through it this frame).
+        let mut consumed = self.consumed;
+        while let Some(bit) = consumed.pop_lowest_set_bit() {
+            let i = bit as usize;
+            self.fixed_pressed.clear(i);
+            self.fixed_just_pressed.clear(i);
+            self.fixed_just_released.clear(i);
+            self.fixed_value[i] = 0.0;
+            self.fixed_axis2[i] = [0.0; 2];
+        }
+    }
+
+    /// Clears the accumulated frozen edge bits (`fixed_just_pressed`,
+    /// `fixed_just_released`) — the clear-on-consume half of the sticky-edge
+    /// model (C3, plan §7.3).
+    ///
+    /// Called by [`clear_consumed_fixed_edges`](super::process::clear_consumed_fixed_edges)
+    /// at the start of `CoreSchedule::Main`, AFTER the frame's fixed loop has
+    /// run and BEFORE [`update_action_state`](super::process::update_action_state)
+    /// OR-accumulates the next batch — but ONLY when the fixed loop ran ≥ 1
+    /// substep this frame (`FixedTime::steps_this_frame > 0`). A 0-substep frame
+    /// skips the clear, so the frozen edge persists to the next frame and the
+    /// press is never lost (no-miss). Once a batch has consumed it, clearing here
+    /// guarantees the next batch does not re-observe it (no-double-count).
+    ///
+    /// The frozen levels (`fixed_pressed`/value/axis2) are NOT touched: a level
+    /// is re-sampled wholesale by every [`freeze_fixed_snapshot`], so it carries
+    /// no stale state.
+    #[inline]
+    pub fn clear_fixed_edges(&mut self) {
+        self.fixed_just_pressed = BitSet256::new();
+        self.fixed_just_released = BitSet256::new();
+    }
+
+    /// Fixed-loop view: is `a` held? (frame-stable level, plan §7.3).
+    ///
+    /// A Fixed system reads this to "fire once per substep while held".
+    #[inline]
+    pub fn fixed_pressed(&self, a: A) -> bool {
+        self.fixed_pressed.get(a.index())
+    }
+
+    /// Fixed-loop view: did `a` have a rising edge this frame? (frame-stable).
+    ///
+    /// Guaranteed `true` on every substep of exactly one frame per physical
+    /// press, then `false`. A Fixed system wanting "fire once per press" reads
+    /// this and acts idempotently per frame (the standard fixed-step input
+    /// contract, plan §7.3 step 3).
+    #[inline]
+    pub fn fixed_just_pressed(&self, a: A) -> bool {
+        self.fixed_just_pressed.get(a.index())
+    }
+
+    /// Fixed-loop view: did `a` have a falling edge this frame? (frame-stable).
+    #[inline]
+    pub fn fixed_just_released(&self, a: A) -> bool {
+        self.fixed_just_released.get(a.index())
+    }
+
+    /// Fixed-loop view of the analog value (Button `0..1` / Axis1D `-1..1`).
+    #[inline]
+    pub fn fixed_value(&self, a: A) -> f32 {
+        self.fixed_value[a.index()]
+    }
+
+    /// Fixed-loop view of the deadzoned + clamped 2D value (Axis2D).
+    #[inline]
+    pub fn fixed_axis2(&self, a: A) -> [f32; 2] {
+        self.fixed_axis2[a.index()]
     }
 
     // --- writer surface used by `process_actions` (crate-internal) ---
@@ -202,6 +373,16 @@ impl<A: Actionlike> Default for ActionState<A> {
     #[inline]
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// NOT `#[derive(Resource)]`: the derive caches the id in a `static` inside the
+// generic `resource_id()` body, which collapses every `A` onto one id
+// (rust#22991). Mint through the `TypeId`-keyed registry instead (plan §7.1, C1).
+impl<A: Actionlike> Resource for ActionState<A> {
+    #[inline]
+    fn resource_id() -> ResourceId {
+        id_for::<Self>()
     }
 }
 
