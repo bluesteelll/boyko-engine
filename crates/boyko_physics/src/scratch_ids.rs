@@ -42,6 +42,36 @@ use boyko_ecs::ecs::identifiers::primitives::ComponentId;
 use crate::resources::BodyState;
 use crate::solver::contact::BodyEffective;
 
+/// Top of the rigid colored solver's contact-column band (audit Stage P — P2).
+///
+/// The colored solver's SoA contact working set (`ContactColumns`) moved off 31
+/// parallel `std::Vec`s onto 31 kernel-native [`ScratchColumn`]s, killing the
+/// whole-struct `&mut *self.cols` reborrow each parallel worker performed (the
+/// rigid Tree-Borrows race). The band is a CONTIGUOUS descending run starting one
+/// id BELOW the three body-mirror ids ([`SCRATCH_ID_BODY_EFF_SERIAL`] == 509), so
+/// the rigid columns occupy `508 ..= 478` (31 ids) with no overlap.
+///
+/// [`ScratchColumn`]: boyko_ecs::ecs::core::component::scratch::ScratchColumn
+pub(crate) const SCRATCH_ID_CONTACT_BAND_TOP: usize = MAX_COMPONENTS - 4;
+
+/// Number of `ScratchColumn`s backing the colored solver's `ContactColumns`.
+pub(crate) const CONTACT_COLUMN_COUNT: usize = 31;
+
+/// Bottom of the contact-column band (inclusive): `508 - (31 - 1) == 478`.
+/// Headroom below this id remains free for future physics scratch columns.
+pub(crate) const SCRATCH_ID_CONTACT_BAND_BOTTOM: usize =
+    SCRATCH_ID_CONTACT_BAND_TOP - (CONTACT_COLUMN_COUNT - 1);
+
+/// The [`ComponentId`] for contact column `k` (`0`-based, in `ContactColumns`
+/// field order), descending from [`SCRATCH_ID_CONTACT_BAND_TOP`].
+///
+/// `k == 0` -> id `508`, ascending `k` -> descending id, `k == 30` -> id `478`.
+#[inline]
+pub(crate) fn contact_column_id(k: usize) -> ComponentId {
+    debug_assert!(k < CONTACT_COLUMN_COUNT, "contact column index out of band");
+    ComponentId::new(SCRATCH_ID_CONTACT_BAND_TOP - k)
+}
+
 /// Reserve-row ceiling for a scratch column of element size `stride`, mirroring
 /// the engine's own `ComponentPool` sizing
 /// (`clamp(POOL_TARGET_DATA_BYTES / stride, POOL_MIN_ROWS, POOL_MAX_ROWS)`).
@@ -98,6 +128,61 @@ pub(crate) fn register_scratch_layouts() {
     register_layout::<BodyState>(SCRATCH_ID_BODY_STATE);
     register_layout::<BodyEffective>(SCRATCH_ID_BODY_EFF_COLORED);
     register_layout::<BodyEffective>(SCRATCH_ID_BODY_EFF_SERIAL);
+    register_contact_column_layouts();
+}
+
+/// Registers the [`Layout`](std::alloc::Layout) of every contact column's element
+/// type under its band id (audit Stage P — P2), in `ContactColumns` field order.
+///
+/// The 31 columns and their element types (field order, descending from
+/// [`SCRATCH_ID_CONTACT_BAND_TOP`]):
+/// * `ra_{x,y,z}`, `rb_{x,y,z}`, `normal_{x,y,z}`, `tangent1_{x,y,z}`,
+///   `tangent2_{x,y,z}` — 15 × `f32`;
+/// * `separation`, `friction`, `restitution`, `normal_impulse`,
+///   `tangent1_impulse`, `tangent2_impulse` — 6 × `f32`;
+/// * `body_a`, `body_b` — 2 × `u32`;
+/// * `b_is_sentinel` — `bool`;
+/// * `warm_key` — `u64`;
+/// * `vn_initial` — `f32`;
+/// * `color_offsets`, `canonical`, `group_start`, `color_group_start` — 4 × `u32`;
+/// * `manifold_base` — `(u32, u32)`.
+///
+/// Idempotent + process-global (each `register_layout` is write-once): re-entry
+/// from another world / solver costs one branch per id after the first.
+#[inline]
+fn register_contact_column_layouts() {
+    // Field order MUST match `ContactColumns` so `contact_column_id(k)` lines up
+    // with the `k`-th declared column.
+    let mut k = SCRATCH_ID_CONTACT_BAND_TOP;
+    // ra/rb/normal/tangent1/tangent2 (15) + separation/friction/restitution +
+    // the three impulses (6) = 21 f32 columns.
+    for _ in 0..21 {
+        register_layout::<f32>(k);
+        k -= 1;
+    }
+    register_layout::<u32>(k); // body_a
+    k -= 1;
+    register_layout::<u32>(k); // body_b
+    k -= 1;
+    register_layout::<bool>(k); // b_is_sentinel
+    k -= 1;
+    register_layout::<u64>(k); // warm_key
+    k -= 1;
+    register_layout::<f32>(k); // vn_initial
+    k -= 1;
+    register_layout::<u32>(k); // color_offsets
+    k -= 1;
+    register_layout::<u32>(k); // canonical
+    k -= 1;
+    register_layout::<u32>(k); // group_start
+    k -= 1;
+    register_layout::<u32>(k); // color_group_start
+    k -= 1;
+    register_layout::<(u32, u32)>(k); // manifold_base
+    debug_assert_eq!(
+        k, SCRATCH_ID_CONTACT_BAND_BOTTOM,
+        "contact column band must end exactly at the reserved bottom id"
+    );
 }
 
 /// The [`ComponentId`] wrapper for [`SCRATCH_ID_BODY_STATE`].

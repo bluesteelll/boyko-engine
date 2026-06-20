@@ -77,7 +77,9 @@
 //! key. The canonical order is materialized once (per build) in
 //! [`ContactColumns::canonical`].
 
-use boyko_ecs::ecs::core::component::scratch::{ScratchColumn, ScratchSolveView};
+use std::marker::PhantomData;
+
+use boyko_ecs::ecs::core::component::scratch::{ScratchBuildView, ScratchColumn, ScratchSolveView};
 use boyko_macros::Resource as ResourceDerive;
 use boyko_threadpool::try_with_active_pool;
 
@@ -95,7 +97,9 @@ use crate::components::BodyType;
 use crate::manifold::{Manifold, SDF_SENTINEL};
 use crate::math::{Mat3, Vec3};
 use crate::resources::{BodyState, ConstraintGraph, IslandSleep, PhysicsConfig, SolverScratch};
-use crate::scratch_ids::{body_eff_colored_id, register_scratch_layouts, scratch_reserve_rows};
+use crate::scratch_ids::{
+    body_eff_colored_id, contact_column_id, register_scratch_layouts, scratch_reserve_rows,
+};
 
 /// Loads one SoA `[f32; 8]` column into a `__m256` (the O7 cohort kernel's scalar
 /// vector load helper). Unaligned — any alignment.
@@ -270,69 +274,40 @@ const COHORT: usize = 8;
 /// the same idiom the engine's `par_iter` `SharedPtr`/`ChunkCaptures` use.
 #[derive(Copy, Clone)]
 struct ColorSolvePtrs<'a> {
-    cols: *mut ContactColumns,
     /// Per-element bodies access via the committed [`ScratchSolveView`] — Copy,
     /// Send+Sync, row-ptr-ONLY. There is NO whole-buffer `&mut [BodyEffective]`
     /// reborrow path (the SP4 structural fix): a worker reaches a body row only
     /// through [`ScratchSolveView::row_ptr`], which yields one typed `*mut
-    /// BodyEffective` per DISTINCT index its color owns. The prior `*mut
-    /// BodyEffective` + `bodies_len` + `bodies()` `from_raw_parts_mut` whole-slice
-    /// reborrow is DELETED — that reborrow was the rigid SP4 race surface.
+    /// BodyEffective` per DISTINCT index its color owns.
     bodies: ScratchSolveView<'a, BodyEffective>,
-    /// Base of `ContactColumns::group_start` — read as a RAW pointer (never a
-    /// `&[u32]` borrow into `cols`) so no shared reference into `cols` is ever live
-    /// while a worker holds `&mut *cols`; this keeps the parallel dispatch
-    /// Tree-Borrows-clean (the Phase 9.3c bare-pointer discipline).
-    group_start: *const u32,
+    /// The worker-facing contact-column solve view (P2): `Copy + Send + Sync`,
+    /// per-element raw base + index ONLY. This REPLACES the deleted `cols: *mut
+    /// ContactColumns` + `columns()` (`&mut *self.cols`) whole-struct reborrow —
+    /// the rigid Tree-Borrows race surface. A worker reaches a contact column
+    /// element solely through `view.<accessor>(i)` (`base.add(i)`), so no `&mut`
+    /// ever spans more than one row and the whole-buffer reborrow is un-typeable
+    /// on the worker path.
+    view: ContactSolveView<'a>,
 }
 
-impl ColorSolvePtrs<'_> {
-    /// Reborrow the columns mutably for `'a`.
-    ///
-    /// # Safety
-    /// The pointee must outlive `'a`, and the caller must access only elements
-    /// DISJOINT from every other concurrent reborrow (within a color the chunks
-    /// touch pairwise-disjoint impulse slots / body rows). Upheld by
-    /// [`ColoredSoftStepSolver::solve_color_parallel`].
-    #[inline]
-    unsafe fn columns<'b>(&self) -> &'b mut ContactColumns {
-        // SAFETY: forwarded to the caller; see method doc.
-        unsafe { &mut *self.cols }
-    }
-
-    /// Reads `group_start[g]` via the raw pointer (no `&` borrow into `cols`).
-    ///
-    /// # Safety
-    /// `g` must be a valid index into the live `group_start` column (`g <=
-    /// n_groups`). Upheld by the dispatcher, which only reads group indices within
-    /// the color's `[g_lo, g_hi]` range.
-    #[inline]
-    unsafe fn group_start_at(&self, g: usize) -> usize {
-        // SAFETY: `g` is in range per the method contract; `group_start` is the live
-        //   base of the columns' `group_start` Vec. A plain `*const u32` read does
-        //   not form a reference into `cols`, so it never conflicts with a worker's
-        //   `&mut *cols` (the Tree-Borrows discipline).
-        unsafe { *self.group_start.add(g) as usize }
-    }
-}
-
-// SAFETY: `cols` names the `ContactColumns` borrowed `&mut` by
-//   `solve_color_parallel` for the whole `pool.scope` frame, whose Drop blocks
-//   (work-stealing join) until every worker that captured the wrapper has completed
-//   — so the pointee outlives every task body. The `bodies` field is a
-//   `ScratchSolveView`, which is ALREADY `Send + Sync` (its own proof: an
-//   address-stable column base + per-element `row_ptr` only, no whole-buffer
-//   reborrow) — so the rigid whole-slice reborrow that caused the SP4 race is GONE
-//   and un-typeable from this wrapper. The soundness of the concurrent `cols`
-//   reborrows + the per-element body writes rests entirely on DISJOINTNESS, stated
-//   in full in the per-spawn SAFETY block: within a color the chunks write
-//   pairwise-disjoint impulse-column slots and pairwise-disjoint DYNAMIC body rows
-//   (the O4 coloring invariant), and a SHARED static body (`inv_mass == 0`) is never
-//   written (the `*_movable` guard in `solve_color`). The wrapper has no interior
-//   mutability, so a shared `&` to it (the outer `pool.scope` closure's capture
-//   across the spawn loop) is trivially safe — hence both `Send` (cross-thread move
-//   into a task) and `Sync` (shared by the loop) hold. `cols`/`group_start` are bare
-//   pointers (not auto-`Send`); the `unsafe impl` re-asserts the safety above.
+// SAFETY: `ColorSolvePtrs` is `Send + Sync` because its only shared-mutable state
+//   is reached PER ELEMENT through `view: ContactSolveView` and `bodies:
+//   ScratchSolveView`, both of which expose mutation only as a single-row
+//   `base + index` write (never a whole-buffer `&mut [_]` reborrow — the P2/P1
+//   structural fix). The C2 coloring invariant guarantees two workers in one
+//   parallel step never share a contact row (distinct colors => distinct rows =>
+//   distinct body pairs), so concurrent impulse writes target disjoint addresses
+//   and concurrent reads never alias a concurrent write; a SHARED static body
+//   (`inv_mass == 0`) is never written (the `*_movable` guard in `solve_color`),
+//   so it is read-only across workers. No `&mut` ever spans more than one element,
+//   so no overlapping unique TB protector is ever created. The bases are
+//   address-stable (the backing `ComponentPool` reservations never realloc-move)
+//   and finalized BEFORE any view is built (the B4 re-create-before-view-live
+//   discipline in `solve_colored_inner`), so they cannot dangle while a view is
+//   live. The wrapper has no interior mutability, so a shared `&` to it (the outer
+//   `pool.scope` closure's capture across the spawn loop) is trivially safe —
+//   hence both `Send` (cross-thread move into a task) and `Sync` (shared by the
+//   loop) hold.
 unsafe impl Send for ColorSolvePtrs<'_> {}
 unsafe impl Sync for ColorSolvePtrs<'_> {}
 
@@ -392,6 +367,386 @@ fn body_mut<'a>(view: ScratchSolveView<'a, BodyEffective>, i: usize) -> &'a mut 
     unsafe { &mut *view.row_ptr(i) }
 }
 
+/// Worker-facing, color-disjoint contact solve view (audit Stage P — P2).
+///
+/// `Copy + Send + Sync`: the scheduler hands a COPY to each parallel worker. It
+/// exposes the contact columns the colored kernels touch on the worker path as
+/// per-element raw `base + index` accessors ONLY — there is NO whole-buffer
+/// `&mut [_]` / slice path, so the `&mut *self.cols` whole-struct reborrow that
+/// caused the rigid Tree-Borrows race is un-typeable from this view (the P2
+/// structural fix, mirroring the body [`ScratchSolveView`] from P1).
+///
+/// # SAFETY / soundness (`Send + Sync`)
+///
+/// Soundness rests on the C2 coloring disjointness invariant: any two contact
+/// rows touched concurrently by distinct workers belong to distinct color bands
+/// and therefore distinct rows. All mutation goes through `set_*_impulse*` which
+/// writes a SINGLE row via `base + index` (no `&mut` ever spans more than one
+/// element), so two workers never materialize overlapping `&mut`. Read accessors
+/// form a value read from a single element only. The 24 read-only bases (geometry,
+/// body indices, the friction coefficient, the per-group `group_start` CSR) are
+/// never written by any worker, so concurrent reads are sound.
+///
+/// PROVENANCE: every base — the three worker-mutable impulse bases AND the
+/// read-only ones — is a raw write-capable base derived from
+/// [`ScratchColumn::solve_base`] (i.e. `ComponentPool::buffer_ptr().cast_mut()`,
+/// provenance-preserving, NO `&[_]` interposed). The impulse `*mut f32` bases
+/// therefore carry WRITE provenance, so the per-row `*base.add(i) = v` writes are
+/// Tree-Borrows-clean (the C1 fix; the prior `as_read_slice().as_ptr().cast_mut()`
+/// branded them Frozen / SharedReadOnly — UB to write through). The read-only
+/// bases are `*const _` reborrows of the same write-capable raw base, which is
+/// sound to read through. The bases are address-stable (backed by `ComponentPool`
+/// reservations that never realloc-move) and captured AFTER the last build-time
+/// grow (the B4 re-create-before-view-live discipline), so they cannot dangle
+/// while a view is live.
+#[derive(Clone, Copy)]
+struct ContactSolveView<'a> {
+    // ── read-only geometry bases (per contact-point slot) ──
+    ra_x: *const f32,
+    ra_y: *const f32,
+    ra_z: *const f32,
+    rb_x: *const f32,
+    rb_y: *const f32,
+    rb_z: *const f32,
+    normal_x: *const f32,
+    normal_y: *const f32,
+    normal_z: *const f32,
+    tangent1_x: *const f32,
+    tangent1_y: *const f32,
+    tangent1_z: *const f32,
+    tangent2_x: *const f32,
+    tangent2_y: *const f32,
+    tangent2_z: *const f32,
+    separation: *const f32,
+    friction: *const f32,
+    // ── read-only body indices / sentinel flag ──
+    body_a: *const u32,
+    body_b: *const u32,
+    b_is_sentinel: *const bool,
+    // ── worker-mutable impulse bases ──
+    normal_impulse: *mut f32,
+    tangent1_impulse: *mut f32,
+    tangent2_impulse: *mut f32,
+    // ── read-only per-group CSR base (worker AVX2 kernel navigates groups) ──
+    group_start: *const u32,
+    /// Slot count (the exclusive index ceiling for the per-slot accessors).
+    len: usize,
+    /// Binds the view to the column borrow so it cannot outlive a refill / regrow.
+    _marker: PhantomData<&'a ()>,
+}
+
+// SAFETY: see the struct-level soundness note — the C2 coloring disjointness
+//   invariant + per-element-only mutation + address-stable bases. No `&mut` ever
+//   spans more than one element, so concurrent worker access never aliases.
+unsafe impl Send for ContactSolveView<'_> {}
+// SAFETY: see the `Send` impl above — shared access yields per-element reads /
+//   single-row writes only (no whole-buffer slice), and disjoint color bands mean
+//   concurrent accessors target disjoint memory.
+unsafe impl Sync for ContactSolveView<'_> {}
+
+impl<'a> ContactSolveView<'a> {
+    /// The contact-point slot count.
+    #[inline]
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Reads `group_start[g]` (the per-group CSR boundary). Used by the AVX2 worker
+    /// kernel to navigate the manifold-group ranges and by the dispatcher to cut
+    /// work-balanced chunks.
+    ///
+    /// # Safety
+    /// `g` must index the live `group_start` column (`g <= n_groups`); upheld by
+    /// the dispatcher / kernel, which read only group indices within the color's
+    /// `[g_lo, g_hi]` range.
+    #[inline]
+    unsafe fn group_start_at(&self, g: usize) -> u32 {
+        // SAFETY: `g` is in range per the method contract; `group_start` is the live
+        //   base of the `group_start` ScratchColumn. A plain `*const u32` read forms
+        //   no reference spanning the column, so it never conflicts with a worker's
+        //   per-element impulse write (the Tree-Borrows discipline).
+        unsafe { *self.group_start.add(g) }
+    }
+
+    // ── scalar per-element reads (single-row `*base.add(i)` provenance) ──
+
+    /// Reads slot `i`'s body-A anchor as a [`Vec3`].
+    #[inline]
+    fn ra(&self, i: usize) -> Vec3 {
+        // SAFETY: `i < len` (the kernel iterates `[start, end) ⊆ [0, len)`); the
+        //   three bases point at the live `i`-th element on address-stable columns.
+        unsafe { Vec3::new(*self.ra_x.add(i), *self.ra_y.add(i), *self.ra_z.add(i)) }
+    }
+
+    /// Reads slot `i`'s body-B anchor as a [`Vec3`].
+    #[inline]
+    fn rb(&self, i: usize) -> Vec3 {
+        // SAFETY: `i < len`; address-stable bases, live `i`-th element.
+        unsafe { Vec3::new(*self.rb_x.add(i), *self.rb_y.add(i), *self.rb_z.add(i)) }
+    }
+
+    /// Reads slot `i`'s contact normal as a [`Vec3`].
+    #[inline]
+    fn normal(&self, i: usize) -> Vec3 {
+        // SAFETY: `i < len`; address-stable bases, live `i`-th element.
+        unsafe { Vec3::new(*self.normal_x.add(i), *self.normal_y.add(i), *self.normal_z.add(i)) }
+    }
+
+    /// Reads slot `i`'s first friction tangent as a [`Vec3`].
+    #[inline]
+    fn tangent1(&self, i: usize) -> Vec3 {
+        // SAFETY: `i < len`; address-stable bases, live `i`-th element.
+        unsafe {
+            Vec3::new(*self.tangent1_x.add(i), *self.tangent1_y.add(i), *self.tangent1_z.add(i))
+        }
+    }
+
+    /// Reads slot `i`'s second friction tangent as a [`Vec3`].
+    #[inline]
+    fn tangent2(&self, i: usize) -> Vec3 {
+        // SAFETY: `i < len`; address-stable bases, live `i`-th element.
+        unsafe {
+            Vec3::new(*self.tangent2_x.add(i), *self.tangent2_y.add(i), *self.tangent2_z.add(i))
+        }
+    }
+
+    // ── single-column scalar reads (the AVX2 SoA gather marshals these per lane;
+    //    only the avx2-gated `solve_color_avx2` consumes them, so they are
+    //    dead-code-allowed on a non-AVX2 build) ──
+
+    /// Reads slot `i`'s `ra_x` component.
+    #[cfg_attr(not(target_feature = "avx2"), allow(dead_code))]
+    #[inline]
+    fn ra_x(&self, i: usize) -> f32 {
+        // SAFETY: `i < len`; address-stable base, live `i`-th element.
+        unsafe { *self.ra_x.add(i) }
+    }
+    /// Reads slot `i`'s `ra_y` component.
+    #[cfg_attr(not(target_feature = "avx2"), allow(dead_code))]
+    #[inline]
+    fn ra_y(&self, i: usize) -> f32 {
+        // SAFETY: `i < len`; address-stable base, live `i`-th element.
+        unsafe { *self.ra_y.add(i) }
+    }
+    /// Reads slot `i`'s `ra_z` component.
+    #[cfg_attr(not(target_feature = "avx2"), allow(dead_code))]
+    #[inline]
+    fn ra_z(&self, i: usize) -> f32 {
+        // SAFETY: `i < len`; address-stable base, live `i`-th element.
+        unsafe { *self.ra_z.add(i) }
+    }
+    /// Reads slot `i`'s `rb_x` component.
+    #[cfg_attr(not(target_feature = "avx2"), allow(dead_code))]
+    #[inline]
+    fn rb_x(&self, i: usize) -> f32 {
+        // SAFETY: `i < len`; address-stable base, live `i`-th element.
+        unsafe { *self.rb_x.add(i) }
+    }
+    /// Reads slot `i`'s `rb_y` component.
+    #[cfg_attr(not(target_feature = "avx2"), allow(dead_code))]
+    #[inline]
+    fn rb_y(&self, i: usize) -> f32 {
+        // SAFETY: `i < len`; address-stable base, live `i`-th element.
+        unsafe { *self.rb_y.add(i) }
+    }
+    /// Reads slot `i`'s `rb_z` component.
+    #[cfg_attr(not(target_feature = "avx2"), allow(dead_code))]
+    #[inline]
+    fn rb_z(&self, i: usize) -> f32 {
+        // SAFETY: `i < len`; address-stable base, live `i`-th element.
+        unsafe { *self.rb_z.add(i) }
+    }
+    /// Reads slot `i`'s `normal_x` component.
+    #[cfg_attr(not(target_feature = "avx2"), allow(dead_code))]
+    #[inline]
+    fn normal_x(&self, i: usize) -> f32 {
+        // SAFETY: `i < len`; address-stable base, live `i`-th element.
+        unsafe { *self.normal_x.add(i) }
+    }
+    /// Reads slot `i`'s `normal_y` component.
+    #[cfg_attr(not(target_feature = "avx2"), allow(dead_code))]
+    #[inline]
+    fn normal_y(&self, i: usize) -> f32 {
+        // SAFETY: `i < len`; address-stable base, live `i`-th element.
+        unsafe { *self.normal_y.add(i) }
+    }
+    /// Reads slot `i`'s `normal_z` component.
+    #[cfg_attr(not(target_feature = "avx2"), allow(dead_code))]
+    #[inline]
+    fn normal_z(&self, i: usize) -> f32 {
+        // SAFETY: `i < len`; address-stable base, live `i`-th element.
+        unsafe { *self.normal_z.add(i) }
+    }
+    /// Reads slot `i`'s `tangent1_x` component.
+    #[cfg_attr(not(target_feature = "avx2"), allow(dead_code))]
+    #[inline]
+    fn tangent1_x(&self, i: usize) -> f32 {
+        // SAFETY: `i < len`; address-stable base, live `i`-th element.
+        unsafe { *self.tangent1_x.add(i) }
+    }
+    /// Reads slot `i`'s `tangent1_y` component.
+    #[cfg_attr(not(target_feature = "avx2"), allow(dead_code))]
+    #[inline]
+    fn tangent1_y(&self, i: usize) -> f32 {
+        // SAFETY: `i < len`; address-stable base, live `i`-th element.
+        unsafe { *self.tangent1_y.add(i) }
+    }
+    /// Reads slot `i`'s `tangent1_z` component.
+    #[cfg_attr(not(target_feature = "avx2"), allow(dead_code))]
+    #[inline]
+    fn tangent1_z(&self, i: usize) -> f32 {
+        // SAFETY: `i < len`; address-stable base, live `i`-th element.
+        unsafe { *self.tangent1_z.add(i) }
+    }
+    /// Reads slot `i`'s `tangent2_x` component.
+    #[cfg_attr(not(target_feature = "avx2"), allow(dead_code))]
+    #[inline]
+    fn tangent2_x(&self, i: usize) -> f32 {
+        // SAFETY: `i < len`; address-stable base, live `i`-th element.
+        unsafe { *self.tangent2_x.add(i) }
+    }
+    /// Reads slot `i`'s `tangent2_y` component.
+    #[cfg_attr(not(target_feature = "avx2"), allow(dead_code))]
+    #[inline]
+    fn tangent2_y(&self, i: usize) -> f32 {
+        // SAFETY: `i < len`; address-stable base, live `i`-th element.
+        unsafe { *self.tangent2_y.add(i) }
+    }
+    /// Reads slot `i`'s `tangent2_z` component.
+    #[cfg_attr(not(target_feature = "avx2"), allow(dead_code))]
+    #[inline]
+    fn tangent2_z(&self, i: usize) -> f32 {
+        // SAFETY: `i < len`; address-stable base, live `i`-th element.
+        unsafe { *self.tangent2_z.add(i) }
+    }
+
+    /// Reads slot `i`'s signed separation.
+    #[inline]
+    fn separation(&self, i: usize) -> f32 {
+        // SAFETY: `i < len`; address-stable base, live `i`-th element.
+        unsafe { *self.separation.add(i) }
+    }
+
+    /// Reads slot `i`'s combined friction coefficient.
+    #[inline]
+    fn friction(&self, i: usize) -> f32 {
+        // SAFETY: `i < len`; address-stable base, live `i`-th element.
+        unsafe { *self.friction.add(i) }
+    }
+
+    /// Reads slot `i`'s dense body-A row index.
+    #[inline]
+    fn body_a(&self, i: usize) -> u32 {
+        // SAFETY: `i < len`; address-stable base, live `i`-th element.
+        unsafe { *self.body_a.add(i) }
+    }
+
+    /// Reads slot `i`'s dense body-B row index.
+    #[inline]
+    fn body_b(&self, i: usize) -> u32 {
+        // SAFETY: `i < len`; address-stable base, live `i`-th element.
+        unsafe { *self.body_b.add(i) }
+    }
+
+    /// Reads slot `i`'s sentinel flag (`true` = SDF contact, B is immovable).
+    #[inline]
+    fn b_is_sentinel(&self, i: usize) -> bool {
+        // SAFETY: `i < len`; address-stable base, live `i`-th element.
+        unsafe { *self.b_is_sentinel.add(i) }
+    }
+
+    // ── impulse reads (single-row) ──
+
+    /// Reads slot `i`'s accumulated normal impulse.
+    #[inline]
+    fn normal_impulse(&self, i: usize) -> f32 {
+        // SAFETY: `i < len`; address-stable base, live `i`-th element. A concurrent
+        //   write by another worker targets a DISTINCT row (the C2 invariant).
+        unsafe { *self.normal_impulse.add(i) }
+    }
+
+    /// Reads slot `i`'s accumulated first tangent impulse.
+    #[inline]
+    fn tangent1_impulse(&self, i: usize) -> f32 {
+        // SAFETY: as `normal_impulse` — `i < len`, distinct-row concurrency.
+        unsafe { *self.tangent1_impulse.add(i) }
+    }
+
+    /// Reads slot `i`'s accumulated second tangent impulse.
+    #[inline]
+    fn tangent2_impulse(&self, i: usize) -> f32 {
+        // SAFETY: as `normal_impulse` — `i < len`, distinct-row concurrency.
+        unsafe { *self.tangent2_impulse.add(i) }
+    }
+
+    // ── impulse writes (single-row, `base + index`, never spanning rows) ──
+
+    /// Writes slot `i`'s accumulated normal impulse.
+    #[inline]
+    fn set_normal_impulse(&self, i: usize, v: f32) {
+        // SAFETY: `i < len`; the C2 coloring invariant grants row `i` to AT MOST ONE
+        //   worker, so this single-element write never aliases another worker's. The
+        //   base is address-stable and carries WRITE provenance — it is the raw
+        //   `ScratchColumn::solve_base` (`ComponentPool::buffer_ptr().cast_mut()`),
+        //   never an `&[f32]`-Frozen reborrow — so `*base.add(i) = v` is TB-clean.
+        unsafe { *self.normal_impulse.add(i) = v }
+    }
+
+    /// Writes slot `i`'s accumulated first tangent impulse.
+    #[inline]
+    fn set_tangent1_impulse(&self, i: usize, v: f32) {
+        // SAFETY: as `set_normal_impulse` — `i < len`, single-owner row, write-capable
+        //   `solve_base`-derived `*mut f32` (not a Frozen `&[f32]` reborrow).
+        unsafe { *self.tangent1_impulse.add(i) = v }
+    }
+
+    /// Writes slot `i`'s accumulated second tangent impulse.
+    #[inline]
+    fn set_tangent2_impulse(&self, i: usize, v: f32) {
+        // SAFETY: as `set_normal_impulse` — `i < len`, single-owner row, write-capable
+        //   `solve_base`-derived `*mut f32` (not a Frozen `&[f32]` reborrow).
+        unsafe { *self.tangent2_impulse.add(i) = v }
+    }
+}
+
+/// Single-thread build / refill view over all 31 contact [`ScratchColumn`]s
+/// (audit Stage P — P2).
+///
+/// `!Send` (`PhantomData<*mut ()>`): the build/push phase runs on ONE thread, so
+/// holding `&mut` build views over whole columns is sound — no other thread is
+/// live during build. This is the ONLY surface that pushes / fills the columns;
+/// the worker-facing [`ContactSolveView`] deliberately lacks every whole-buffer
+/// path (the structural SP4 fix).
+struct ContactBuildView<'a> {
+    ra_x: ScratchBuildView<'a, f32>,
+    ra_y: ScratchBuildView<'a, f32>,
+    ra_z: ScratchBuildView<'a, f32>,
+    rb_x: ScratchBuildView<'a, f32>,
+    rb_y: ScratchBuildView<'a, f32>,
+    rb_z: ScratchBuildView<'a, f32>,
+    normal_x: ScratchBuildView<'a, f32>,
+    normal_y: ScratchBuildView<'a, f32>,
+    normal_z: ScratchBuildView<'a, f32>,
+    tangent1_x: ScratchBuildView<'a, f32>,
+    tangent1_y: ScratchBuildView<'a, f32>,
+    tangent1_z: ScratchBuildView<'a, f32>,
+    tangent2_x: ScratchBuildView<'a, f32>,
+    tangent2_y: ScratchBuildView<'a, f32>,
+    tangent2_z: ScratchBuildView<'a, f32>,
+    separation: ScratchBuildView<'a, f32>,
+    friction: ScratchBuildView<'a, f32>,
+    restitution: ScratchBuildView<'a, f32>,
+    normal_impulse: ScratchBuildView<'a, f32>,
+    tangent1_impulse: ScratchBuildView<'a, f32>,
+    tangent2_impulse: ScratchBuildView<'a, f32>,
+    body_a: ScratchBuildView<'a, u32>,
+    body_b: ScratchBuildView<'a, u32>,
+    b_is_sentinel: ScratchBuildView<'a, bool>,
+    warm_key: ScratchBuildView<'a, u64>,
+    vn_initial: ScratchBuildView<'a, f32>,
+    _not_send: PhantomData<*mut ()>,
+}
+
 /// The colored solver's per-contact constraint state in **Struct-of-Arrays**
 /// form, laid out so one COLOR is a contiguous span (Phase O5, Decision 7 — the
 /// `ContactColumns` sketch).
@@ -437,114 +792,143 @@ fn body_mut<'a>(view: ScratchSolveView<'a, BodyEffective>, i: usize) -> &'a mut 
 /// and reads each group's slot range from `group_start[g] .. group_start[g + 1]`,
 /// keeping every point of one manifold on ONE thread / lane.
 ///
-/// All buffers are `clear()`-ed and refilled each build — capacity is reused, no
-/// per-step alloc in steady state (W2; the columns are flat `Vec`s, never
-/// `Vec<Vec>`).
-#[derive(Default)]
+/// All columns are `clear()`-ed and refilled each build — capacity is reused, no
+/// per-step alloc in steady state (W2). The columns are kernel-native
+/// [`ScratchColumn`]s (audit Stage P — P2) instead of `std::Vec` side-stores: a
+/// `ScratchColumn`'s data base is ADDRESS-STABLE across an in-place grow, which is
+/// the property a `std::Vec` lacks (a realloc moves the base — the SP4/rigid race
+/// root cause). The worker-facing [`ContactSolveView`] hands out per-element
+/// `base + index` accessors ONLY, so the parallel solve never reborrows the whole
+/// buffer.
 struct ContactColumns {
     /// Body-A anchor offset (world frame), split into three SoA columns.
-    ra_x: Vec<f32>,
-    ra_y: Vec<f32>,
-    ra_z: Vec<f32>,
+    ra_x: ScratchColumn<f32>,
+    ra_y: ScratchColumn<f32>,
+    ra_z: ScratchColumn<f32>,
     /// Body-B anchor offset (world frame), split into three SoA columns.
-    rb_x: Vec<f32>,
-    rb_y: Vec<f32>,
-    rb_z: Vec<f32>,
+    rb_x: ScratchColumn<f32>,
+    rb_y: ScratchColumn<f32>,
+    rb_z: ScratchColumn<f32>,
     /// Contact normal (A → B), split into three SoA columns.
-    normal_x: Vec<f32>,
-    normal_y: Vec<f32>,
-    normal_z: Vec<f32>,
+    normal_x: ScratchColumn<f32>,
+    normal_y: ScratchColumn<f32>,
+    normal_z: ScratchColumn<f32>,
     /// First friction tangent, split into three SoA columns.
-    tangent1_x: Vec<f32>,
-    tangent1_y: Vec<f32>,
-    tangent1_z: Vec<f32>,
+    tangent1_x: ScratchColumn<f32>,
+    tangent1_y: ScratchColumn<f32>,
+    tangent1_z: ScratchColumn<f32>,
     /// Second friction tangent, split into three SoA columns.
-    tangent2_x: Vec<f32>,
-    tangent2_y: Vec<f32>,
-    tangent2_z: Vec<f32>,
+    tangent2_x: ScratchColumn<f32>,
+    tangent2_y: ScratchColumn<f32>,
+    tangent2_z: ScratchColumn<f32>,
     /// Signed separation at gather time (negative = penetrating).
-    separation: Vec<f32>,
+    separation: ScratchColumn<f32>,
     /// Combined friction coefficient (`max(µa, µb)`, the reference rule).
-    friction: Vec<f32>,
+    friction: ScratchColumn<f32>,
     /// Combined restitution coefficient (`max(ea, eb)`, the reference rule).
-    restitution: Vec<f32>,
+    restitution: ScratchColumn<f32>,
     /// Accumulated normal impulse `λn ≥ 0` (warm-seeded).
-    normal_impulse: Vec<f32>,
+    normal_impulse: ScratchColumn<f32>,
     /// Accumulated tangent impulse along `t1` (warm-seeded).
-    tangent1_impulse: Vec<f32>,
+    tangent1_impulse: ScratchColumn<f32>,
     /// Accumulated tangent impulse along `t2` (warm-seeded).
-    tangent2_impulse: Vec<f32>,
+    tangent2_impulse: ScratchColumn<f32>,
     /// Dense body-A row index.
-    body_a: Vec<u32>,
+    body_a: ScratchColumn<u32>,
     /// Dense body-B row index (an A-row placeholder when `b_is_sentinel`).
-    body_b: Vec<u32>,
+    body_b: ScratchColumn<u32>,
     /// `true` for an SDF contact (`body_b == SDF_SENTINEL`): body B is
     /// [`IMMOVABLE_AT_REST`], never `bodies[body_b]`.
-    b_is_sentinel: Vec<bool>,
+    b_is_sentinel: ScratchColumn<bool>,
     /// Per-point warm-start key (`pack`/`pack_sdf` with this point's feature id).
-    warm_key: Vec<u64>,
+    warm_key: ScratchColumn<u64>,
     /// Gather-time relative normal APPROACH velocity (B−A on the normal),
     /// captured before the first substep for the restitution pass.
-    vn_initial: Vec<f32>,
+    vn_initial: ScratchColumn<f32>,
     /// CSR color offsets: `color_offsets[c] .. color_offsets[c + 1]` is color
     /// `c`'s contiguous slot span (`len == n_colors + 1`).
-    color_offsets: Vec<u32>,
+    color_offsets: ScratchColumn<u32>,
     /// Slot indices in canonical `(manifold, point)` order (IM-2b warm store).
-    canonical: Vec<u32>,
+    canonical: ScratchColumn<u32>,
     /// CSR manifold-group boundaries in solve (slot) order (C1): group `g`'s slot
     /// run is `group_start[g] .. group_start[g + 1]` (`len == n_groups + 1`). One
     /// group per appended manifold with ≥1 live point.
-    group_start: Vec<u32>,
+    group_start: ScratchColumn<u32>,
     /// Per-color CSR into `group_start` (C1): color `c`'s manifold-groups are
     /// `color_group_start[c] .. color_group_start[c + 1]` (`len == n_colors + 1`),
     /// each value indexing `group_start`. Lets O6/O7 enumerate, per color, the
     /// groups and (via `group_start`) each group's slot range.
-    color_group_start: Vec<u32>,
+    color_group_start: ScratchColumn<u32>,
     /// Reused scratch: per-manifold-index base slot + live-point count, written as
     /// each manifold is appended in the build walk so the canonical order is
     /// recovered WITHOUT a second replay walk (W1/O1/O3 fold). `(u32::MAX, 0)` for
     /// a manifold absent from every color or with no live point. Capacity-reused
-    /// (`clear()` + per-build resize), never `vec!` per step.
-    manifold_base: Vec<(u32, u32)>,
+    /// (`clear()` + per-build `manifold_fill` refill), never `vec!` per step.
+    manifold_base: ScratchColumn<(u32, u32)>,
 }
 
 impl ContactColumns {
-    /// Builds columns pre-sized for `contacts` contact points (no later realloc
-    /// in steady state).
+    /// Builds the 31 contact columns, each on its own band id, reserving
+    /// `contacts` rows (clamped up to the kernel's adaptive per-element budget so
+    /// a freshly-built solver never regrows in steady state).
+    ///
+    /// The contact-column layouts are registered idempotently before any
+    /// `ScratchColumn::new` reads them (see [`register_scratch_layouts`]).
     fn with_capacity(contacts: usize) -> Self {
-        let mut c = Self::default();
-        c.reserve(contacts);
-        c
-    }
+        // Self-register the contact-column band BEFORE any `ScratchColumn::new` reads a
+        // synthetic id's layout — idempotent (write-once `OnceLock`), so calling it here
+        // AND in the solver constructor costs one branch each after the first. Makes this
+        // constructor safe for ANY caller (tests build `ContactColumns` directly).
+        register_scratch_layouts();
+        // Reserve at least the contact count, but never below the kernel's adaptive
+        // per-element budget (a pure-address-space reservation, demand-committed —
+        // a generous ceiling costs nothing and removes the per-step grow-cap hazard).
+        let f32_rows = contacts.max(scratch_reserve_rows(size_of::<f32>()));
+        let u32_rows = contacts.max(scratch_reserve_rows(size_of::<u32>()));
+        let bool_rows = contacts.max(scratch_reserve_rows(size_of::<bool>()));
+        let u64_rows = contacts.max(scratch_reserve_rows(size_of::<u64>()));
+        let pair_rows = contacts.max(scratch_reserve_rows(size_of::<(u32, u32)>()));
 
-    /// Reserves capacity in every column for `contacts` contact points.
-    fn reserve(&mut self, contacts: usize) {
-        macro_rules! reserve_all {
-            ($($field:ident),* $(,)?) => {{ $( self.$field.reserve(contacts); )* }};
+        // `k` walks the band in struct field order (see `register_contact_column_layouts`).
+        let mut k = 0usize;
+        let mut f32_col = || {
+            let c = ScratchColumn::<f32>::new(contact_column_id(k), f32_rows);
+            k += 1;
+            c
+        };
+        Self {
+            ra_x: f32_col(),
+            ra_y: f32_col(),
+            ra_z: f32_col(),
+            rb_x: f32_col(),
+            rb_y: f32_col(),
+            rb_z: f32_col(),
+            normal_x: f32_col(),
+            normal_y: f32_col(),
+            normal_z: f32_col(),
+            tangent1_x: f32_col(),
+            tangent1_y: f32_col(),
+            tangent1_z: f32_col(),
+            tangent2_x: f32_col(),
+            tangent2_y: f32_col(),
+            tangent2_z: f32_col(),
+            separation: f32_col(),
+            friction: f32_col(),
+            restitution: f32_col(),
+            normal_impulse: f32_col(),
+            tangent1_impulse: f32_col(),
+            tangent2_impulse: f32_col(),
+            body_a: ScratchColumn::<u32>::new(contact_column_id(21), u32_rows),
+            body_b: ScratchColumn::<u32>::new(contact_column_id(22), u32_rows),
+            b_is_sentinel: ScratchColumn::<bool>::new(contact_column_id(23), bool_rows),
+            warm_key: ScratchColumn::<u64>::new(contact_column_id(24), u64_rows),
+            vn_initial: ScratchColumn::<f32>::new(contact_column_id(25), f32_rows),
+            color_offsets: ScratchColumn::<u32>::new(contact_column_id(26), u32_rows),
+            canonical: ScratchColumn::<u32>::new(contact_column_id(27), u32_rows),
+            group_start: ScratchColumn::<u32>::new(contact_column_id(28), u32_rows),
+            color_group_start: ScratchColumn::<u32>::new(contact_column_id(29), u32_rows),
+            manifold_base: ScratchColumn::<(u32, u32)>::new(contact_column_id(30), pair_rows),
         }
-        reserve_all!(
-            ra_x, ra_y, ra_z, rb_x, rb_y, rb_z, normal_x, normal_y, normal_z, tangent1_x,
-            tangent1_y, tangent1_z, tangent2_x, tangent2_y, tangent2_z, separation, friction,
-            restitution, normal_impulse, tangent1_impulse, tangent2_impulse, body_a, body_b,
-            b_is_sentinel, warm_key, vn_initial, canonical, group_start, color_group_start,
-            manifold_base,
-        );
-    }
-
-    /// Clears every column for a fresh build (capacity reused).
-    fn clear(&mut self) {
-        macro_rules! clear_all {
-            ($($field:ident),* $(,)?) => {{ $( self.$field.clear(); )* }};
-        }
-        clear_all!(
-            ra_x, ra_y, ra_z, rb_x, rb_y, rb_z, normal_x, normal_y, normal_z, tangent1_x,
-            tangent1_y, tangent1_z, tangent2_x, tangent2_y, tangent2_z, separation, friction,
-            restitution, normal_impulse, tangent1_impulse, tangent2_impulse, body_a, body_b,
-            b_is_sentinel, warm_key, vn_initial, color_offsets, canonical, group_start,
-            color_group_start,
-        );
-        // `manifold_base` is `resize`-overwritten per build (not appended), so it is
-        // not cleared here — the build resizes it to `manifolds.len()`.
     }
 
     /// Number of contact-point slots currently built.
@@ -553,38 +937,336 @@ impl ContactColumns {
         self.separation.len()
     }
 
-    /// Reads slot `i`'s body-A anchor as a [`Vec3`].
+    /// Borrows the 25 push-filled columns as single-thread build views (the
+    /// `manifold_base` / CSR columns are filled via their own helpers, not the
+    /// per-row `push_row`). The borrows are DISJOINT-field, so the borrow checker
+    /// permits 25 simultaneous `&mut` into one `&mut ContactColumns`.
+    fn build_view(&mut self) -> ContactBuildView<'_> {
+        ContactBuildView {
+            ra_x: self.ra_x.build_view(),
+            ra_y: self.ra_y.build_view(),
+            ra_z: self.ra_z.build_view(),
+            rb_x: self.rb_x.build_view(),
+            rb_y: self.rb_y.build_view(),
+            rb_z: self.rb_z.build_view(),
+            normal_x: self.normal_x.build_view(),
+            normal_y: self.normal_y.build_view(),
+            normal_z: self.normal_z.build_view(),
+            tangent1_x: self.tangent1_x.build_view(),
+            tangent1_y: self.tangent1_y.build_view(),
+            tangent1_z: self.tangent1_z.build_view(),
+            tangent2_x: self.tangent2_x.build_view(),
+            tangent2_y: self.tangent2_y.build_view(),
+            tangent2_z: self.tangent2_z.build_view(),
+            separation: self.separation.build_view(),
+            friction: self.friction.build_view(),
+            restitution: self.restitution.build_view(),
+            normal_impulse: self.normal_impulse.build_view(),
+            tangent1_impulse: self.tangent1_impulse.build_view(),
+            tangent2_impulse: self.tangent2_impulse.build_view(),
+            body_a: self.body_a.build_view(),
+            body_b: self.body_b.build_view(),
+            b_is_sentinel: self.b_is_sentinel.build_view(),
+            warm_key: self.warm_key.build_view(),
+            vn_initial: self.vn_initial.build_view(),
+            _not_send: PhantomData,
+        }
+    }
+
+    /// Freezes the built columns into the worker-facing [`ContactSolveView`] (B4
+    /// re-create-before-view-live: called AFTER the last build-time grow, so the
+    /// captured raw bases are stable for every worker's lifetime).
+    ///
+    /// Every base is derived from the kernel's write-capable raw base accessor
+    /// [`ScratchColumn::solve_base`] — a provenance-preserving `*mut T` taken from
+    /// `ComponentPool::buffer_ptr` with NO `&[T]` interposed. The three impulse
+    /// columns (worker-mutable) therefore carry WRITE provenance: the previous
+    /// `as_read_slice().as_ptr().cast_mut()` branded them Frozen / SharedReadOnly,
+    /// which is Tree-Borrows-UB to write through (`set_*_impulse`). The read-only
+    /// bases are stored as `*const _` reborrows of the same write-capable raw base
+    /// — reading through a `*const` derived from a write-capable base is sound, and
+    /// deriving every base from one accessor sidesteps any future Frozen-tag trap.
+    /// Concurrent `*mut` writes are non-aliasing by the C2 coloring invariant (two
+    /// workers never own the same slot).
+    fn solve_view(&self) -> ContactSolveView<'_> {
+        ContactSolveView {
+            ra_x: self.ra_x.solve_base().cast_const(),
+            ra_y: self.ra_y.solve_base().cast_const(),
+            ra_z: self.ra_z.solve_base().cast_const(),
+            rb_x: self.rb_x.solve_base().cast_const(),
+            rb_y: self.rb_y.solve_base().cast_const(),
+            rb_z: self.rb_z.solve_base().cast_const(),
+            normal_x: self.normal_x.solve_base().cast_const(),
+            normal_y: self.normal_y.solve_base().cast_const(),
+            normal_z: self.normal_z.solve_base().cast_const(),
+            tangent1_x: self.tangent1_x.solve_base().cast_const(),
+            tangent1_y: self.tangent1_y.solve_base().cast_const(),
+            tangent1_z: self.tangent1_z.solve_base().cast_const(),
+            tangent2_x: self.tangent2_x.solve_base().cast_const(),
+            tangent2_y: self.tangent2_y.solve_base().cast_const(),
+            tangent2_z: self.tangent2_z.solve_base().cast_const(),
+            separation: self.separation.solve_base().cast_const(),
+            friction: self.friction.solve_base().cast_const(),
+            body_a: self.body_a.solve_base().cast_const(),
+            body_b: self.body_b.solve_base().cast_const(),
+            b_is_sentinel: self.b_is_sentinel.solve_base().cast_const(),
+            // Worker-mutable: write-capable provenance (NOT Frozen).
+            normal_impulse: self.normal_impulse.solve_base(),
+            tangent1_impulse: self.tangent1_impulse.solve_base(),
+            tangent2_impulse: self.tangent2_impulse.solve_base(),
+            group_start: self.group_start.solve_base().cast_const(),
+            len: self.len(),
+            _marker: PhantomData,
+        }
+    }
+
+    /// Reads slot `i`'s body-A anchor as a [`Vec3`] (single-thread passes only —
+    /// `apply_restitution` / `warm_start_apply`).
     #[inline]
     fn ra(&self, i: usize) -> Vec3 {
-        Vec3::new(self.ra_x[i], self.ra_y[i], self.ra_z[i])
+        let s = self.ra_x.as_read_slice();
+        Vec3::new(s[i], self.ra_y.as_read_slice()[i], self.ra_z.as_read_slice()[i])
     }
 
-    /// Reads slot `i`'s body-B anchor as a [`Vec3`].
+    /// Reads slot `i`'s body-B anchor as a [`Vec3`] (single-thread passes only).
     #[inline]
     fn rb(&self, i: usize) -> Vec3 {
-        Vec3::new(self.rb_x[i], self.rb_y[i], self.rb_z[i])
+        Vec3::new(
+            self.rb_x.as_read_slice()[i],
+            self.rb_y.as_read_slice()[i],
+            self.rb_z.as_read_slice()[i],
+        )
     }
 
-    /// Reads slot `i`'s contact normal as a [`Vec3`].
+    /// Reads slot `i`'s contact normal as a [`Vec3`] (single-thread passes only).
     #[inline]
     fn normal(&self, i: usize) -> Vec3 {
-        Vec3::new(self.normal_x[i], self.normal_y[i], self.normal_z[i])
+        Vec3::new(
+            self.normal_x.as_read_slice()[i],
+            self.normal_y.as_read_slice()[i],
+            self.normal_z.as_read_slice()[i],
+        )
     }
 
-    /// Reads slot `i`'s first friction tangent as a [`Vec3`].
+    /// Reads slot `i`'s first friction tangent as a [`Vec3`] — used ONLY by the
+    /// +avx2 `cone_probe` differential oracle, so it is gated to that exact build.
+    #[cfg(all(test, target_arch = "x86_64", target_feature = "avx2"))]
     #[inline]
     fn tangent1(&self, i: usize) -> Vec3 {
-        Vec3::new(self.tangent1_x[i], self.tangent1_y[i], self.tangent1_z[i])
+        Vec3::new(
+            self.tangent1_x.as_read_slice()[i],
+            self.tangent1_y.as_read_slice()[i],
+            self.tangent1_z.as_read_slice()[i],
+        )
     }
 
-    /// Reads slot `i`'s second friction tangent as a [`Vec3`].
+    /// Reads slot `i`'s second friction tangent as a [`Vec3`] — used ONLY by the
+    /// +avx2 `cone_probe` differential oracle, so it is gated to that exact build.
+    #[cfg(all(test, target_arch = "x86_64", target_feature = "avx2"))]
     #[inline]
     fn tangent2(&self, i: usize) -> Vec3 {
-        Vec3::new(self.tangent2_x[i], self.tangent2_y[i], self.tangent2_z[i])
+        Vec3::new(
+            self.tangent2_x.as_read_slice()[i],
+            self.tangent2_y.as_read_slice()[i],
+            self.tangent2_z.as_read_slice()[i],
+        )
     }
 
-    /// Appends one contact-point slot, returning nothing (the caller tracks the
-    /// next index via [`len`](Self::len)).
+    /// Reads slot `i`'s combined restitution coefficient (single-thread only —
+    /// `apply_restitution`).
+    #[inline]
+    fn restitution(&self, i: usize) -> f32 {
+        self.restitution.as_read_slice()[i]
+    }
+
+    /// Reads slot `i`'s gather-time approach velocity (single-thread only —
+    /// `apply_restitution`).
+    #[inline]
+    fn vn_initial(&self, i: usize) -> f32 {
+        self.vn_initial.as_read_slice()[i]
+    }
+
+    /// Reads slot `i`'s body-A row index (single-thread passes only).
+    #[inline]
+    fn body_a(&self, i: usize) -> u32 {
+        self.body_a.as_read_slice()[i]
+    }
+
+    /// Reads slot `i`'s body-B row index (single-thread passes only).
+    #[inline]
+    fn body_b(&self, i: usize) -> u32 {
+        self.body_b.as_read_slice()[i]
+    }
+
+    /// Reads slot `i`'s sentinel flag (single-thread passes only).
+    #[inline]
+    fn b_is_sentinel(&self, i: usize) -> bool {
+        self.b_is_sentinel.as_read_slice()[i]
+    }
+
+    /// Reads slot `i`'s accumulated normal impulse (single-thread passes only).
+    #[inline]
+    fn normal_impulse(&self, i: usize) -> f32 {
+        self.normal_impulse.as_read_slice()[i]
+    }
+
+    /// Reads slot `i`'s first tangent impulse (single-thread passes only).
+    #[inline]
+    fn tangent1_impulse(&self, i: usize) -> f32 {
+        self.tangent1_impulse.as_read_slice()[i]
+    }
+
+    /// Reads slot `i`'s second tangent impulse (single-thread passes only).
+    #[inline]
+    fn tangent2_impulse(&self, i: usize) -> f32 {
+        self.tangent2_impulse.as_read_slice()[i]
+    }
+
+    /// Reads slot `i`'s warm-start key (single-thread passes only — `store_and_swap`).
+    #[inline]
+    fn warm_key(&self, i: usize) -> u64 {
+        self.warm_key.as_read_slice()[i]
+    }
+
+    /// Writes slot `i`'s normal impulse (single-thread passes only —
+    /// `apply_restitution` runs after the parallel solve has joined).
+    #[inline]
+    fn set_normal_impulse(&mut self, i: usize, v: f32) {
+        self.normal_impulse.build_view().as_mut_slice()[i] = v;
+    }
+
+    /// The CSR color-offsets column as a read slice.
+    #[inline]
+    fn color_offsets(&self) -> &[u32] {
+        self.color_offsets.as_read_slice()
+    }
+
+    /// The per-group CSR (`group_start`) as a read slice.
+    #[inline]
+    fn group_start(&self) -> &[u32] {
+        self.group_start.as_read_slice()
+    }
+
+    /// The per-color CSR into `group_start` as a read slice.
+    #[inline]
+    fn color_group_start(&self) -> &[u32] {
+        self.color_group_start.as_read_slice()
+    }
+
+    /// The canonical-order slot list as a read slice.
+    #[inline]
+    fn canonical(&self) -> &[u32] {
+        self.canonical.as_read_slice()
+    }
+
+    /// Resets the push-filled point columns AND the CSR columns for a fresh build,
+    /// seeding the three CSRs with their leading `0`.
+    fn begin_build(&mut self) {
+        self.build_view().clear();
+        self.color_offsets.build_view().clear();
+        self.group_start.build_view().clear();
+        self.color_group_start.build_view().clear();
+        self.canonical.build_view().clear();
+        self.color_offsets.build_view().push(0);
+        self.group_start.build_view().push(0);
+        self.color_group_start.build_view().push(0);
+    }
+
+    /// Appends a `color_offsets` CSR boundary.
+    #[inline]
+    fn push_color_offset(&mut self, v: u32) {
+        self.color_offsets.build_view().push(v);
+    }
+
+    /// Appends a `group_start` CSR boundary.
+    #[inline]
+    fn push_group_start(&mut self, v: u32) {
+        self.group_start.build_view().push(v);
+    }
+
+    /// Appends a `color_group_start` CSR boundary.
+    #[inline]
+    fn push_color_group_start(&mut self, v: u32) {
+        self.color_group_start.build_view().push(v);
+    }
+
+    /// Appends a canonical-order slot index.
+    #[inline]
+    fn push_canonical(&mut self, v: u32) {
+        self.canonical.build_view().push(v);
+    }
+
+    /// Reproduces the prior `manifold_base.resize(n, (u32::MAX, 0))` then runs the
+    /// sparse manifold-start write (audit Stage P — P2, critic note O1).
+    ///
+    /// `manifold_fill` is a TRANSIENT refill stager reproducing the resize-sentinel
+    /// pattern on the `manifold_base` [`ScratchColumn`] — NOT durable per-entity
+    /// data. The column is `clear`-ed then refilled to exactly `n` rows of the
+    /// sentinel `(u32::MAX, 0)`; the committed pages are capacity-reused (no free,
+    /// no per-frame alloc in steady state). The caller (`build_columns`) then
+    /// sparse-overwrites the manifold-start rows with `(base, count)`.
+    fn manifold_fill(&mut self, n: usize) {
+        let mut view = self.manifold_base.build_view();
+        view.clear();
+        // Refill the first `n` rows with the resize sentinel (the same value
+        // `Vec::resize(n, (u32::MAX, 0))` produced) — a straight broadcast of the
+        // sentinel pair, in-place on the address-stable column (grows the committed
+        // frontier the first time, capacity-reused thereafter — zero steady-state
+        // alloc).
+        for _ in 0..n {
+            view.push((u32::MAX, 0));
+        }
+    }
+
+    /// Sparse-overwrites `manifold_base[mi]` with `(base, count)` (the manifold-start
+    /// write run after [`manifold_fill`](Self::manifold_fill)).
+    #[inline]
+    fn set_manifold_base(&mut self, mi: usize, base: u32, count: u32) {
+        self.manifold_base.build_view().as_mut_slice()[mi] = (base, count);
+    }
+
+    /// The `manifold_base` column as a read slice (the canonical-order emit reads it).
+    #[inline]
+    fn manifold_base(&self) -> &[(u32, u32)] {
+        self.manifold_base.as_read_slice()
+    }
+}
+
+impl ContactBuildView<'_> {
+    /// Clears every push-filled column for a fresh build (capacity reused — the
+    /// committed pages stay resident; `clear` is `len = 0` with no free).
+    fn clear(&mut self) {
+        self.ra_x.clear();
+        self.ra_y.clear();
+        self.ra_z.clear();
+        self.rb_x.clear();
+        self.rb_y.clear();
+        self.rb_z.clear();
+        self.normal_x.clear();
+        self.normal_y.clear();
+        self.normal_z.clear();
+        self.tangent1_x.clear();
+        self.tangent1_y.clear();
+        self.tangent1_z.clear();
+        self.tangent2_x.clear();
+        self.tangent2_y.clear();
+        self.tangent2_z.clear();
+        self.separation.clear();
+        self.friction.clear();
+        self.restitution.clear();
+        self.normal_impulse.clear();
+        self.tangent1_impulse.clear();
+        self.tangent2_impulse.clear();
+        self.body_a.clear();
+        self.body_b.clear();
+        self.b_is_sentinel.clear();
+        self.warm_key.clear();
+        self.vn_initial.clear();
+    }
+
+    /// Appends one contact-point slot in lockstep across the 26 push-filled
+    /// columns. Order is identical to the prior `Vec::push` order, so the byte
+    /// layout is bit-for-bit identical.
     #[allow(clippy::too_many_arguments)]
     fn push_point(
         &mut self,
@@ -766,16 +1448,17 @@ impl ColoredSoftStepSolver {
             warm_start_enabled,
             ..
         } = self;
-        cols.clear();
-        cols.color_offsets.push(0);
-        cols.group_start.push(0);
-        cols.color_group_start.push(0);
+        // Reset the push-filled point columns + the three CSR columns, seeding each
+        // CSR's leading `0` (B4: all grow / refill happens here, single-threaded,
+        // BEFORE any `solve_view()` captures a base — so no worker can see a moving
+        // base).
+        cols.begin_build();
 
         // Reused per-manifold base map (no `vec!` per step): base slot + live count
         // recorded as each manifold is first appended, consumed below to emit the
-        // canonical order in manifold index ascending order (D4).
-        cols.manifold_base.clear();
-        cols.manifold_base.resize(manifolds.len(), (u32::MAX, 0));
+        // canonical order in manifold index ascending order (D4). `manifold_fill`
+        // reproduces `resize(n, (u32::MAX, 0))` on the address-stable column (O1).
+        cols.manifold_fill(manifolds.len());
 
         // The BodyEffective rows read by the per-point build are a SINGLE-THREADED
         // read here (the build runs before any parallel dispatch); take one read
@@ -806,35 +1489,39 @@ impl ColoredSoftStepSolver {
                 if count != 0 {
                     // One manifold-group per appended manifold with ≥1 live point;
                     // its contiguous slot run is `[base, base + count)` (C1).
-                    cols.manifold_base[mi as usize] = (base, count);
-                    cols.group_start.push(base + count);
+                    cols.set_manifold_base(mi as usize, base, count);
+                    cols.push_group_start(base + count);
                 }
             }
-            cols.color_offsets.push(cols.len() as u32);
+            cols.push_color_offset(cols.len() as u32);
             // Color `c`'s manifold-groups end at the current `group_start` length
             // (the per-color CSR indexes into `group_start`).
-            cols.color_group_start.push((cols.group_start.len() - 1) as u32);
+            cols.push_color_group_start((cols.group_start().len() - 1) as u32);
         }
 
         // Canonical `(manifold, point)` order for the IM-2b warm store — emitted
         // from the base map recorded above, in ascending manifold index, WITHOUT a
-        // second color→manifold→point replay walk (W1/O1/O3 fold).
-        for &(base, count) in &cols.manifold_base {
+        // second color→manifold→point replay walk (W1/O1/O3 fold). The base map is
+        // read into a fixed-capacity stack-free pass; pull each `(base, count)` by
+        // value so no `&[_]` borrow into `cols` is held across the `push_canonical`.
+        let n_manifolds = cols.manifold_base().len();
+        for mi in 0..n_manifolds {
+            let (base, count) = cols.manifold_base()[mi];
             if base == u32::MAX {
                 continue;
             }
             for p in 0..count {
-                cols.canonical.push(base + p);
+                cols.push_canonical(base + p);
             }
         }
         debug_assert_eq!(
-            cols.canonical.len(),
+            cols.canonical().len(),
             cols.len(),
             "invariant: canonical order must cover every built contact-point slot exactly once"
         );
         debug_assert_eq!(
-            cols.group_start.len() as u32,
-            *cols.color_group_start.last().unwrap_or(&0) + 1,
+            cols.group_start().len() as u32,
+            *cols.color_group_start().last().unwrap_or(&0) + 1,
             "invariant: the per-color group CSR must tile every manifold-group exactly once"
         );
     }
@@ -871,6 +1558,10 @@ impl ColoredSoftStepSolver {
         let pa = bodies[ia].position;
         let pb = if b_is_sentinel { Vec3::ZERO } else { bodies[ib].position };
 
+        // One single-thread build view over the 26 push-filled columns for the
+        // whole manifold's points (the CSR / `manifold_base` columns are filled by
+        // the caller, not here).
+        let mut view = cols.build_view();
         for p in 0..count {
             let cp = &m.points[p];
             let ra = cp.anchor_a - pa;
@@ -895,7 +1586,7 @@ impl ColoredSoftStepSolver {
                 (0.0, 0.0, 0.0)
             };
 
-            cols.push_point(
+            view.push_point(
                 ra,
                 rb,
                 normal,
@@ -951,18 +1642,18 @@ impl ColoredSoftStepSolver {
     /// accumulation onto velocities and, within a color, the bodies are
     /// disjoint; across colors the seed is independent of order. (O5 is
     /// single-threaded; the slot-order walk is fine.)
-    fn warm_start_apply(cols: &ContactColumns, bodies_eff: ScratchSolveView<'_, BodyEffective>) {
-        for i in 0..cols.len() {
-            let normal = cols.normal(i);
-            let t1 = cols.tangent1(i);
-            let t2 = cols.tangent2(i);
-            let impulse = normal * cols.normal_impulse[i]
-                + t1 * cols.tangent1_impulse[i]
-                + t2 * cols.tangent2_impulse[i];
-            let ia = cols.body_a[i] as usize;
-            body_mut(bodies_eff, ia).apply_impulse(cols.ra(i), impulse * -1.0);
-            if !cols.b_is_sentinel[i] {
-                body_mut(bodies_eff, cols.body_b[i] as usize).apply_impulse(cols.rb(i), impulse);
+    fn warm_start_apply(view: ContactSolveView<'_>, bodies_eff: ScratchSolveView<'_, BodyEffective>) {
+        for i in 0..view.len() {
+            let normal = view.normal(i);
+            let t1 = view.tangent1(i);
+            let t2 = view.tangent2(i);
+            let impulse = normal * view.normal_impulse(i)
+                + t1 * view.tangent1_impulse(i)
+                + t2 * view.tangent2_impulse(i);
+            let ia = view.body_a(i) as usize;
+            body_mut(bodies_eff, ia).apply_impulse(view.ra(i), impulse * -1.0);
+            if !view.b_is_sentinel(i) {
+                body_mut(bodies_eff, view.body_b(i) as usize).apply_impulse(view.rb(i), impulse);
             }
         }
     }
@@ -1017,7 +1708,7 @@ impl ColoredSoftStepSolver {
     #[allow(clippy::too_many_arguments)]
     #[inline]
     fn solve_color_dispatch(
-        cols: &mut ContactColumns,
+        view: ContactSolveView<'_>,
         bodies_eff: ScratchSolveView<'_, BodyEffective>,
         span: (usize, usize),
         g_lo: usize,
@@ -1037,7 +1728,7 @@ impl ColoredSoftStepSolver {
                 //   The kernel documents its per-load bounds + disjoint-write invariants.
                 unsafe {
                     Self::solve_color_avx2(
-                        cols,
+                        view,
                         bodies_eff,
                         span,
                         g_lo,
@@ -1058,7 +1749,7 @@ impl ColoredSoftStepSolver {
         #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
         let _ = (g_lo, g_hi);
         Self::solve_color(
-            cols,
+            view,
             bodies_eff,
             span,
             bias_rate,
@@ -1071,7 +1762,7 @@ impl ColoredSoftStepSolver {
     /// [O7]: https://github.com/bluesteelll/boyko-engine
     #[allow(clippy::too_many_arguments)]
     fn solve_color(
-        cols: &mut ContactColumns,
+        view: ContactSolveView<'_>,
         bodies_eff: ScratchSolveView<'_, BodyEffective>,
         span: (usize, usize),
         bias_rate: f32,
@@ -1081,16 +1772,16 @@ impl ColoredSoftStepSolver {
     ) {
         let (start, end) = span;
         for i in start..end {
-            let ra = cols.ra(i);
-            let rb = cols.rb(i);
-            let normal = cols.normal(i);
-            let t1 = cols.tangent1(i);
-            let t2 = cols.tangent2(i);
-            let ia = cols.body_a[i] as usize;
-            let b_is_sentinel = cols.b_is_sentinel[i];
-            let ib = cols.body_b[i] as usize;
-            let friction = cols.friction[i];
-            let separation = cols.separation[i];
+            let ra = view.ra(i);
+            let rb = view.rb(i);
+            let normal = view.normal(i);
+            let t1 = view.tangent1(i);
+            let t2 = view.tangent2(i);
+            let ia = view.body_a(i) as usize;
+            let b_is_sentinel = view.b_is_sentinel(i);
+            let ib = view.body_b(i) as usize;
+            let friction = view.friction(i);
+            let separation = view.separation(i);
 
             // Snapshot body B (the immovable surface for an SDF contact).
             let bb_view = || -> BodyEffective {
@@ -1141,7 +1832,7 @@ impl ColoredSoftStepSolver {
             } else {
                 0.0
             };
-            let lambda_n = cols.normal_impulse[i];
+            let lambda_n = view.normal_impulse(i);
             let d_lambda = if bias_active {
                 -mass_coeff * m_eff * (vn + bias) - impulse_coeff * lambda_n
             } else {
@@ -1149,7 +1840,7 @@ impl ColoredSoftStepSolver {
             };
             let new_lambda = (lambda_n + d_lambda).max(0.0);
             let applied_n = new_lambda - lambda_n;
-            cols.normal_impulse[i] = new_lambda;
+            view.set_normal_impulse(i, new_lambda);
             {
                 let impulse = normal * applied_n;
                 if ia_movable {
@@ -1161,7 +1852,10 @@ impl ColoredSoftStepSolver {
             }
 
             // ── Friction solve (2-DOF coupled cone) ────────────────────────
-            let max_friction = friction * cols.normal_impulse[i];
+            // `new_lambda` IS the value just stored at slot `i`'s normal impulse, so
+            // `friction * new_lambda` is bit-identical to re-reading the column and
+            // removes a redundant load.
+            let max_friction = friction * new_lambda;
             let m_eff_t1 = {
                 let ba = body_copy(bodies_eff, ia);
                 let bb = bb_view();
@@ -1178,18 +1872,22 @@ impl ColoredSoftStepSolver {
                 let dv = bb.point_velocity(rb) - ba.point_velocity(ra);
                 (dv.dot(t1), dv.dot(t2))
             };
-            let mut new_t1 = cols.tangent1_impulse[i] - m_eff_t1 * vt1;
-            let mut new_t2 = cols.tangent2_impulse[i] - m_eff_t2 * vt2;
+            // Read each tangent impulse ONCE (both uses read the same pre-write value);
+            // bit-identical to the prior double-read, no reload between the two uses.
+            let lambda_t1 = view.tangent1_impulse(i);
+            let lambda_t2 = view.tangent2_impulse(i);
+            let mut new_t1 = lambda_t1 - m_eff_t1 * vt1;
+            let mut new_t2 = lambda_t2 - m_eff_t2 * vt2;
             let len_sq = new_t1 * new_t1 + new_t2 * new_t2;
             if len_sq > max_friction * max_friction && len_sq > 0.0 {
                 let scale = max_friction / len_sq.sqrt();
                 new_t1 *= scale;
                 new_t2 *= scale;
             }
-            let applied_t1 = new_t1 - cols.tangent1_impulse[i];
-            let applied_t2 = new_t2 - cols.tangent2_impulse[i];
-            cols.tangent1_impulse[i] = new_t1;
-            cols.tangent2_impulse[i] = new_t2;
+            let applied_t1 = new_t1 - lambda_t1;
+            let applied_t2 = new_t2 - lambda_t2;
+            view.set_tangent1_impulse(i, new_t1);
+            view.set_tangent2_impulse(i, new_t2);
             {
                 let impulse = t1 * applied_t1 + t2 * applied_t2;
                 if ia_movable {
@@ -1255,7 +1953,7 @@ impl ColoredSoftStepSolver {
     #[target_feature(enable = "avx2")]
     #[allow(clippy::too_many_arguments)]
     fn solve_color_avx2(
-        cols: &mut ContactColumns,
+        view: ContactSolveView<'_>,
         bodies_eff: ScratchSolveView<'_, BodyEffective>,
         span: (usize, usize),
         g_lo: usize,
@@ -1276,14 +1974,15 @@ impl ColoredSoftStepSolver {
         if g_lo >= g_hi {
             return;
         }
-        debug_assert!(g_hi < cols.group_start.len(), "group range within the CSR");
         // C1: the worker's OWN slot span `[chunk_start, chunk_end)` — every gathered
         // slot must lie inside it (no foreign / cross-worker read). It is the union of
         // the `[g_lo, g_hi)` groups' contiguous slot runs.
         let (chunk_start, chunk_end) = span;
+        // SAFETY: `g_lo`/`g_hi` are within the color's group range `[g_lo, g_hi] <=
+        //   n_groups` (the caller's contract), each a valid `group_start` index.
         debug_assert!(
-            chunk_start == cols.group_start[g_lo] as usize
-                && chunk_end == cols.group_start[g_hi] as usize
+            chunk_start == unsafe { view.group_start_at(g_lo) } as usize
+                && chunk_end == unsafe { view.group_start_at(g_hi) } as usize
                 && chunk_start < chunk_end,
             "invariant: span is exactly the [g_lo, g_hi) groups' slot run"
         );
@@ -1351,13 +2050,16 @@ impl ColoredSoftStepSolver {
             for lane in 0..W {
                 if lane < nlanes {
                     let g = cohort_lo + lane;
-                    let base = cols.group_start[g] as usize;
-                    let width = cols.group_start[g + 1] as usize - base;
+                    // SAFETY: `g`/`g + 1` index the live `group_start` CSR — `g` is in
+                    //   `[cohort_lo, cohort_hi) ⊆ [g_lo, g_hi)` and `g + 1 <= g_hi <=
+                    //   n_groups`, both valid CSR indices (the caller's contract).
+                    let base = unsafe { view.group_start_at(g) } as usize;
+                    let width = unsafe { view.group_start_at(g + 1) } as usize - base;
                     debug_assert!(width >= 1, "every built group has >= 1 point");
                     let s = base; // first slot of the group (the body pair is shared)
-                    let lane_ia = cols.body_a[s] as usize;
-                    let b_sent = cols.b_is_sentinel[s];
-                    let lane_ib = cols.body_b[s] as usize;
+                    let lane_ia = view.body_a(s) as usize;
+                    let b_sent = view.b_is_sentinel(s);
+                    let lane_ib = view.body_b(s) as usize;
                     // O3: B is only indexed when it is a real body (a sentinel reads
                     // IMMOVABLE_AT_REST, never `bodies_eff[lane_ib]`), mirroring the
                     // scalar oracle's conditional index — so only assert it then.
@@ -1470,26 +2172,26 @@ impl ColoredSoftStepSolver {
                         "C1: every gathered slot must lie within the worker's own span \
                          [{chunk_start}, {chunk_end}); got s={s} (lane={lane}, rank={r})"
                     );
-                    ra_s[0][lane] = cols.ra_x[s];
-                    ra_s[1][lane] = cols.ra_y[s];
-                    ra_s[2][lane] = cols.ra_z[s];
-                    rb_s[0][lane] = cols.rb_x[s];
-                    rb_s[1][lane] = cols.rb_y[s];
-                    rb_s[2][lane] = cols.rb_z[s];
-                    n_s[0][lane] = cols.normal_x[s];
-                    n_s[1][lane] = cols.normal_y[s];
-                    n_s[2][lane] = cols.normal_z[s];
-                    t1_s[0][lane] = cols.tangent1_x[s];
-                    t1_s[1][lane] = cols.tangent1_y[s];
-                    t1_s[2][lane] = cols.tangent1_z[s];
-                    t2_s[0][lane] = cols.tangent2_x[s];
-                    t2_s[1][lane] = cols.tangent2_y[s];
-                    t2_s[2][lane] = cols.tangent2_z[s];
-                    sep_s[lane] = cols.separation[s];
-                    fric_s[lane] = cols.friction[s];
-                    ni_s[lane] = cols.normal_impulse[s];
-                    ti1_s[lane] = cols.tangent1_impulse[s];
-                    ti2_s[lane] = cols.tangent2_impulse[s];
+                    ra_s[0][lane] = view.ra_x(s);
+                    ra_s[1][lane] = view.ra_y(s);
+                    ra_s[2][lane] = view.ra_z(s);
+                    rb_s[0][lane] = view.rb_x(s);
+                    rb_s[1][lane] = view.rb_y(s);
+                    rb_s[2][lane] = view.rb_z(s);
+                    n_s[0][lane] = view.normal_x(s);
+                    n_s[1][lane] = view.normal_y(s);
+                    n_s[2][lane] = view.normal_z(s);
+                    t1_s[0][lane] = view.tangent1_x(s);
+                    t1_s[1][lane] = view.tangent1_y(s);
+                    t1_s[2][lane] = view.tangent1_z(s);
+                    t2_s[0][lane] = view.tangent2_x(s);
+                    t2_s[1][lane] = view.tangent2_y(s);
+                    t2_s[2][lane] = view.tangent2_z(s);
+                    sep_s[lane] = view.separation(s);
+                    fric_s[lane] = view.friction(s);
+                    ni_s[lane] = view.normal_impulse(s);
+                    ti1_s[lane] = view.tangent1_impulse(s);
+                    ti2_s[lane] = view.tangent2_impulse(s);
                 }
                 let ra = load3(&ra_s);
                 let rb = load3(&rb_s);
@@ -1639,9 +2341,9 @@ impl ColoredSoftStepSolver {
                 for lane in 0..nlanes {
                     if (g_width[lane] as usize) > r {
                         let s = g_base[lane] + r; // active ⇒ exact in-range slot
-                        cols.normal_impulse[s] = ni_s[lane];
-                        cols.tangent1_impulse[s] = ti1_s[lane];
-                        cols.tangent2_impulse[s] = ti2_s[lane];
+                        view.set_normal_impulse(s, ni_s[lane]);
+                        view.set_tangent1_impulse(s, ti1_s[lane]);
+                        view.set_tangent2_impulse(s, ti2_s[lane]);
                     }
                 }
             }
@@ -1731,7 +2433,7 @@ impl ColoredSoftStepSolver {
     /// count (see [`solve_color_parallel`](Self::solve_color_parallel)).
     #[allow(clippy::too_many_arguments)]
     fn solve_all_colors(
-        cols: &mut ContactColumns,
+        cols: &ContactColumns,
         bodies_eff: ScratchSolveView<'_, BodyEffective>,
         bias_rate: f32,
         mass_coeff: f32,
@@ -1740,11 +2442,19 @@ impl ColoredSoftStepSolver {
         parallel: bool,
         simd: bool,
     ) {
-        let n_colors = cols.color_offsets.len().saturating_sub(1);
+        // B4 re-create-before-view-live: the columns are FROZEN by now (the last
+        // build-time grow happened in `build_columns`, before the substep loop), so
+        // the worker-facing `ContactSolveView` captures stable raw bases that cannot
+        // dangle while a view is live. The view is `Copy` — each worker gets a copy.
+        let view = cols.solve_view();
+        let color_offsets = cols.color_offsets();
+        let color_group_start = cols.color_group_start();
+        let n_colors = color_offsets.len().saturating_sub(1);
         for c in 0..n_colors {
             if parallel {
                 Self::solve_color_parallel(
                     cols,
+                    view,
                     bodies_eff,
                     c,
                     bias_rate,
@@ -1754,17 +2464,17 @@ impl ColoredSoftStepSolver {
                     simd,
                 );
             } else {
-                let start = cols.color_offsets[c] as usize;
-                let end = cols.color_offsets[c + 1] as usize;
+                let start = color_offsets[c] as usize;
+                let end = color_offsets[c + 1] as usize;
                 // O7 dispatch fork (the 0%-gate): `simd == false` runs the byte-
                 // identical scalar oracle `solve_color`; `simd == true` runs the
                 // AVX2 cohort kernel over the color's manifold-GROUP range (the
                 // bit-exact width-only path). The non-parallel SIMD path solves the
                 // WHOLE color's groups as cohorts on the calling thread.
-                let g_lo = cols.color_group_start[c] as usize;
-                let g_hi = cols.color_group_start[c + 1] as usize;
+                let g_lo = color_group_start[c] as usize;
+                let g_hi = color_group_start[c + 1] as usize;
                 Self::solve_color_dispatch(
-                    cols,
+                    view,
                     bodies_eff,
                     (start, end),
                     g_lo,
@@ -1848,7 +2558,8 @@ impl ColoredSoftStepSolver {
     /// thus the {1, N}×{simd} bit-identity — is unchanged from O6.
     #[allow(clippy::too_many_arguments)]
     fn solve_color_parallel(
-        cols: &mut ContactColumns,
+        cols: &ContactColumns,
+        view: ContactSolveView<'_>,
         bodies_eff: ScratchSolveView<'_, BodyEffective>,
         color: usize,
         bias_rate: f32,
@@ -1858,17 +2569,16 @@ impl ColoredSoftStepSolver {
         simd: bool,
     ) {
         // The color's manifold-group range (indices into `group_start`).
-        let g_lo = cols.color_group_start[color] as usize;
-        let g_hi = cols.color_group_start[color + 1] as usize;
+        let color_group_start = cols.color_group_start();
+        let color_offsets = cols.color_offsets();
+        let g_lo = color_group_start[color] as usize;
+        let g_hi = color_group_start[color + 1] as usize;
         let n_groups = g_hi - g_lo;
         if n_groups == 0 {
             return;
         }
 
-        let span = (
-            cols.color_offsets[color] as usize,
-            cols.color_offsets[color + 1] as usize,
-        );
+        let span = (color_offsets[color] as usize, color_offsets[color + 1] as usize);
 
         // W1 min-work threshold: a SMALL color does not amortize a `pool.scope`
         // dispatch (a boxed shared frame + a boxed closure per spawn), so solve it
@@ -1888,7 +2598,7 @@ impl ColoredSoftStepSolver {
             // cohorts), else the scalar oracle over the span — both bit-identical to
             // the parallel split.
             Self::solve_color_dispatch(
-                cols,
+                view,
                 bodies_eff,
                 span,
                 g_lo,
@@ -1938,28 +2648,29 @@ impl ColoredSoftStepSolver {
             let total_slots = span.1 - span.0;
             let target = total_slots.div_ceil(n_chunks).max(1);
 
-            // Send + Sync wrapper: a raw `cols` pointer + the bodies SOLVE VIEW
-            // (Copy, row-ptr-only) + the group CSR base. Each worker writes only its
-            // chunk's DISJOINT impulse slots and DISJOINT body rows; the bodies are
-            // reached PER-ELEMENT via `bodies.row_ptr` (no whole-buffer reborrow — the
-            // SP4 fix; the prior `as_mut_ptr` + `bodies_len` slice reconstruction is
-            // gone). The `group_start` base is captured as a raw pointer so the
-            // dispatcher reads chunk bounds without holding a `&[u32]` borrow into
-            // `cols` across the scope (TB-clean, Phase 9.3c discipline).
+            // Send + Sync wrapper: the contact-column SOLVE VIEW (Copy, per-element
+            // base+index only) + the bodies SOLVE VIEW (Copy, row-ptr-only). Each
+            // worker writes only its chunk's DISJOINT impulse slots and DISJOINT body
+            // rows, reaching every contact column element via `view.<accessor>(i)` and
+            // every body row via `bodies.row_ptr(i)` — NO whole-buffer reborrow on any
+            // path (the P2 + P1 structural fix; the prior `cols: *mut ContactColumns`
+            // + `columns()` `&mut *self.cols` whole-struct reborrow that caused the
+            // rigid Tree-Borrows race is DELETED). The `group_start` CSR base now rides
+            // inside `view`, read via `view.group_start_at` — no `&[u32]` borrow into
+            // `cols` is ever held across the scope (TB-clean, Phase 9.3c discipline).
             let ptrs = ColorSolvePtrs {
-                cols: cols as *mut ContactColumns,
                 bodies: bodies_eff,
-                group_start: cols.group_start.as_ptr(),
+                view,
             };
 
             pool.scope(|scope| {
                 let mut chunk_g_lo = g_lo;
                 while chunk_g_lo < g_hi {
-                    // The chunk's first group's first slot. Read via the raw
+                    // The chunk's first group's first slot. Read via the view's raw
                     // `group_start` base (no `&` borrow into `cols`).
                     // SAFETY: `chunk_g_lo` is within `[g_lo, g_hi)`, a valid index
                     //   into the live `group_start` column.
-                    let chunk_start = unsafe { ptrs.group_start_at(chunk_g_lo) };
+                    let chunk_start = unsafe { ptrs.view.group_start_at(chunk_g_lo) } as usize;
 
                     // Grow the chunk by WHOLE groups until its accumulated slot run
                     // reaches the per-chunk slot `target` (work-balanced) or the
@@ -1982,7 +2693,8 @@ impl ColoredSoftStepSolver {
                     let mut chunk_g_hi = (chunk_g_lo + step).min(g_hi);
                     while chunk_g_hi < g_hi {
                         // SAFETY: `chunk_g_hi <= g_hi`, a valid `group_start` index.
-                        let so_far = unsafe { ptrs.group_start_at(chunk_g_hi) } - chunk_start;
+                        let so_far =
+                            unsafe { ptrs.view.group_start_at(chunk_g_hi) } as usize - chunk_start;
                         if so_far >= target {
                             break;
                         }
@@ -1993,7 +2705,7 @@ impl ColoredSoftStepSolver {
                     // slot.
                     // SAFETY: `chunk_g_hi` is within `(g_lo, g_hi]`, a valid index
                     //   into the live `group_start` column.
-                    let chunk_end = unsafe { ptrs.group_start_at(chunk_g_hi) };
+                    let chunk_end = unsafe { ptrs.view.group_start_at(chunk_g_hi) } as usize;
                     debug_assert!(
                         chunk_start >= span.0 && chunk_end <= span.1 && chunk_start < chunk_end,
                         "invariant: a group-chunk's slot span is non-empty and lies within the color span"
@@ -2006,60 +2718,50 @@ impl ColoredSoftStepSolver {
                     let task_g_lo = chunk_g_lo;
                     let task_g_hi = chunk_g_hi;
                     scope.spawn(move || {
-                        // SAFETY (cross-worker disjoint aliasing — the O6 soundness
-                        //   argument):
-                        //   - `ptrs` names the `ContactColumns` / `[BodyEffective]`
-                        //     borrowed `&mut` by the caller for the whole
-                        //     `solve_color_parallel` frame; `pool.scope`'s Drop
-                        //     blocks (work-stealing join) until every spawned task
-                        //     completes, so both pointees outlive every task body —
-                        //     no use-after-free, no escape past the borrow.
-                        //   - DISJOINTNESS makes the concurrent `&mut` sound:
-                        //     * This chunk solves ONLY slots `[chunk_start,
-                        //       chunk_end)` and writes ONLY those slots' impulse
-                        //       columns — distinct chunks have non-overlapping slot
-                        //       ranges (the chunks partition the color's groups), so
-                        //       no two workers write the same column element.
-                        //     * Within ONE color, each DYNAMIC body belongs to at
-                        //       most one manifold-group (the O4 coloring invariant),
-                        //       so distinct chunks' groups touch DISJOINT dynamic body
-                        //       rows — no two workers `apply_impulse` to the same
-                        //       dynamic `BodyEffective`.
-                        //     * A SHARED static body (a ground floor that several
-                        //       groups in this color reference) is NEVER WRITTEN: the
-                        //       `*_movable` guard in `solve_color` skips the
-                        //       `apply_impulse` for any `inv_mass == 0` row (a write
-                        //       that was already a value no-op), so a shared static
-                        //       row is read-only across workers. Sentinel body B is
-                        //       likewise never written (it is `IMMOVABLE_AT_REST`, a
-                        //       local copy).
-                        //   - The bodies a chunk READS (via `effective_mass` /
-                        //     `point_velocity`) are its own disjoint dynamic rows plus
-                        //     shared read-only static rows, so no chunk reads a row
+                        // DISJOINTNESS (the O6 + P2 soundness argument — why the
+                        // concurrent per-element accesses are race- and TB-clean):
+                        //   - `ptrs` carries only `Copy` solve views (`ContactSolveView`
+                        //     + body `ScratchSolveView`) whose raw bases name columns
+                        //     borrowed for the whole `solve_color_parallel` frame;
+                        //     `pool.scope`'s Drop blocks (work-stealing join) until every
+                        //     spawned task completes, so every base outlives every task —
+                        //     no use-after-free, no escape past the borrow, and (B4) no
+                        //     regrow moves a base while a view is live.
+                        //   - This chunk solves ONLY slots `[chunk_start, chunk_end)` and
+                        //     writes ONLY those slots' impulse columns via
+                        //     `view.set_*_impulse*(s, _)` (a single-row `base + s` write).
+                        //     Distinct chunks have non-overlapping slot ranges (they
+                        //     partition the color's groups), so no two workers write the
+                        //     same column element and no `&mut`/store ever spans more than
+                        //     one row.
+                        //   - Within ONE color, each DYNAMIC body belongs to at most one
+                        //     manifold-group (the O4 coloring invariant), so distinct
+                        //     chunks' groups touch DISJOINT dynamic body rows — no two
+                        //     workers `apply_impulse` to the same dynamic `BodyEffective`
+                        //     (each reached per-element via `bodies.row_ptr`, never a
+                        //     whole-buffer reborrow).
+                        //   - A SHARED static body (a ground floor several groups in this
+                        //     color reference) is NEVER WRITTEN: the `*_movable` guard in
+                        //     `solve_color` skips the `apply_impulse` for any
+                        //     `inv_mass == 0` row (already a value no-op), so a shared
+                        //     static row is read-only across workers. Sentinel body B is
+                        //     likewise never written (`IMMOVABLE_AT_REST`, a local copy).
+                        //   - The contact columns + bodies a chunk READS are its own
+                        //     disjoint slots/rows plus shared read-only static rows + the
+                        //     read-only `group_start` CSR, so no chunk reads an element
                         //     another chunk is writing.
-                        //   Therefore the per-chunk `&mut ContactColumns` reborrowed
-                        //   below, and the per-element `&mut BodyEffective` the kernel
-                        //   derives from the `ScratchSolveView` via `row_ptr` (NOT a
-                        //   whole-buffer reborrow — see below), alias only
-                        //   provably-disjoint written elements across workers — no UB.
-                        //   O7: when `simd`, the worker runs `solve_color_avx2` over
-                        //   its cohort range `[task_g_lo, task_g_hi)` — a cohort packs
-                        //   8 disjoint groups, so distinct workers' cohort-runs still
-                        //   touch DISJOINT dynamic rows + DISJOINT impulse slots
-                        //   (union of disjoint groups), and statics/sentinels remain
-                        //   never-written (the kernel's movable-blend guard). The
-                        //   disjointness argument is thus UNCHANGED from the scalar
-                        //   chunk dispatch above.
-                        let cols_mut = unsafe { ptrs.columns() };
-                        // The bodies SOLVE VIEW (Copy) — the worker reaches each row
-                        // via `row_ptr` per element (no whole-buffer reborrow). It
-                        // writes ONLY the DISTINCT dynamic rows its color owns (the
-                        // O4 disjointness above), so the per-element `&mut` derived in
-                        // the kernel never aliases another worker's.
-                        let bodies_view = ptrs.bodies;
+                        //   The DELETED `cols: *mut ContactColumns` + `columns()`
+                        //   (`&mut *self.cols`) whole-struct reborrow — the rigid TB race
+                        //   surface — is gone and un-typeable from `ptrs`. O7: when
+                        //   `simd`, the worker runs `solve_color_avx2` over its cohort
+                        //   range `[task_g_lo, task_g_hi)` — a cohort packs 8 disjoint
+                        //   groups, so distinct workers' cohort-runs still touch DISJOINT
+                        //   dynamic rows + DISJOINT impulse slots, statics/sentinels
+                        //   never-written; the disjointness argument is UNCHANGED from
+                        //   the scalar chunk dispatch above.
                         Self::solve_color_dispatch(
-                            cols_mut,
-                            bodies_view,
+                            ptrs.view,
+                            ptrs.bodies,
                             (chunk_start, chunk_end),
                             task_g_lo,
                             task_g_hi,
@@ -2082,7 +2784,7 @@ impl ColoredSoftStepSolver {
         // `solve_color` over the whole color span).
         if dispatched.is_none() {
             Self::solve_color_dispatch(
-                cols,
+                view,
                 bodies_eff,
                 span,
                 g_lo,
@@ -2104,20 +2806,23 @@ impl ColoredSoftStepSolver {
     /// Walks in color order (the bodies within a color are disjoint; cross-color
     /// the result is order-fixed). A zero-restitution contact is skipped.
     fn apply_restitution(cols: &mut ContactColumns, bodies_eff: ScratchSolveView<'_, BodyEffective>) {
+        // Single-threaded (run after the parallel solve has joined), so direct
+        // `&mut ContactColumns` per-element access is sound — `restitution` /
+        // `vn_initial` are ST-only columns absent from the worker-facing view.
         for i in 0..cols.len() {
-            if cols.restitution[i] <= 0.0 {
+            if cols.restitution(i) <= 0.0 {
                 continue;
             }
-            let vn0 = cols.vn_initial[i];
+            let vn0 = cols.vn_initial(i);
             if vn0 > -RESTITUTION_THRESHOLD {
                 continue;
             }
             let ra = cols.ra(i);
             let rb = cols.rb(i);
             let normal = cols.normal(i);
-            let ia = cols.body_a[i] as usize;
-            let b_is_sentinel = cols.b_is_sentinel[i];
-            let ib = cols.body_b[i] as usize;
+            let ia = cols.body_a(i) as usize;
+            let b_is_sentinel = cols.b_is_sentinel(i);
+            let ib = cols.body_b(i) as usize;
             let bb_view = || -> BodyEffective {
                 if b_is_sentinel { IMMOVABLE_AT_REST } else { body_copy(bodies_eff, ib) }
             };
@@ -2131,12 +2836,12 @@ impl ColoredSoftStepSolver {
                 let bb = bb_view();
                 (bb.point_velocity(rb) - ba.point_velocity(ra)).dot(normal)
             };
-            let v_target = -cols.restitution[i] * vn0;
+            let v_target = -cols.restitution(i) * vn0;
             let d_lambda = m_eff * (v_target - vn);
-            let lambda_n = cols.normal_impulse[i];
+            let lambda_n = cols.normal_impulse(i);
             let new_lambda = (lambda_n + d_lambda).max(0.0);
             let applied = new_lambda - lambda_n;
-            cols.normal_impulse[i] = new_lambda;
+            cols.set_normal_impulse(i, new_lambda);
             let impulse = normal * applied;
             body_mut(bodies_eff, ia).apply_impulse(ra, impulse * -1.0);
             if !b_is_sentinel {
@@ -2163,12 +2868,12 @@ impl ColoredSoftStepSolver {
         }
         let cols = &self.columns;
         self.warm_write.rebuild(cols.len());
-        for &slot in &cols.canonical {
-            let i = slot as usize;
+        for k in 0..cols.canonical().len() {
+            let i = cols.canonical()[k] as usize;
             self.warm_write.insert(
-                cols.warm_key[i],
-                cols.normal_impulse[i],
-                [cols.tangent1_impulse[i], cols.tangent2_impulse[i]],
+                cols.warm_key(i),
+                cols.normal_impulse(i),
+                [cols.tangent1_impulse(i), cols.tangent2_impulse(i)],
             );
         }
         core::mem::swap(&mut self.warm_read, &mut self.warm_write);
@@ -2349,15 +3054,16 @@ impl ColoredSoftStepSolver {
                 simd::apply_gravity(view.as_mut_slice(), scratch.bodies(), gravity, h, use_simd);
             }
 
-            // (2) Warm-start apply. The colored sweeps reach bodies through the
-            // SOLVE VIEW (row-ptr per element) — single-threaded here, parallel in
-            // `solve_all_colors`; the view is the SAME surface either way (the SP4
-            // structural fix: no whole-buffer reborrow on any body path).
-            Self::warm_start_apply(&self.columns, self.bodies.solve_view());
+            // (2) Warm-start apply. The colored sweeps reach bodies through the body
+            // SOLVE VIEW and the contacts through the contact SOLVE VIEW (per-element
+            // base+index) — single-threaded here, parallel in `solve_all_colors`; the
+            // views are the SAME surface either way (the P1/P2 structural fix: no
+            // whole-buffer reborrow on any contact / body path).
+            Self::warm_start_apply(self.columns.solve_view(), self.bodies.solve_view());
 
             // (3)+(4) Soft normal + friction sweep ACROSS colors (Gauss-Seidel).
             Self::solve_all_colors(
-                &mut self.columns,
+                &self.columns,
                 self.bodies.solve_view(),
                 soft.bias_rate,
                 soft.mass_coeff,
@@ -2388,7 +3094,7 @@ impl ColoredSoftStepSolver {
             // (6) Relax: re-solve bias-free to remove soft-bias energy.
             for _ in 0..config.relax_iterations {
                 Self::solve_all_colors(
-                    &mut self.columns,
+                    &self.columns,
                     self.bodies.solve_view(),
                     soft.bias_rate,
                     soft.mass_coeff,
@@ -2765,12 +3471,12 @@ mod tests {
         // The total live point count = 1 + 1 + 4 = 6.
         assert_eq!(cols.len(), 6, "all live points are slotted");
         // Three manifolds each with ≥1 live point => exactly three groups.
-        assert_eq!(cols.group_start.len(), 4, "group_start has n_groups + 1 entries");
-        assert_eq!(cols.group_start[0], 0, "group CSR starts at slot 0");
+        assert_eq!(cols.group_start().len(), 4, "group_start has n_groups + 1 entries");
+        assert_eq!(cols.group_start()[0], 0, "group CSR starts at slot 0");
 
-        let n_colors = cols.color_offsets.len() - 1;
+        let n_colors = cols.color_offsets().len() - 1;
         assert_eq!(
-            cols.color_group_start.len(),
+            cols.color_group_start().len(),
             n_colors + 1,
             "per-color group CSR has n_colors + 1 entries"
         );
@@ -2780,17 +3486,17 @@ mod tests {
         // and each group's slot run must be contiguous and non-empty.
         let mut groups_seen = 0usize;
         for c in 0..n_colors {
-            let span_start = cols.color_offsets[c];
-            let span_end = cols.color_offsets[c + 1];
-            let g_lo = cols.color_group_start[c] as usize;
-            let g_hi = cols.color_group_start[c + 1] as usize;
+            let span_start = cols.color_offsets()[c];
+            let span_end = cols.color_offsets()[c + 1];
+            let g_lo = cols.color_group_start()[c] as usize;
+            let g_hi = cols.color_group_start()[c + 1] as usize;
             assert!(g_lo <= g_hi, "color group range is well-ordered");
 
             // The first group of the color begins at the color span start.
             let mut cursor = span_start;
             for g in g_lo..g_hi {
-                let gs = cols.group_start[g];
-                let ge = cols.group_start[g + 1];
+                let gs = cols.group_start()[g];
+                let ge = cols.group_start()[g + 1];
                 assert!(ge > gs, "every manifold-group has ≥1 point (no empty group)");
                 assert_eq!(gs, cursor, "groups tile the color span with no gap/overlap");
                 cursor = ge;
@@ -2798,19 +3504,19 @@ mod tests {
             }
             assert_eq!(cursor, span_end, "the color's groups exactly fill its slot span");
         }
-        assert_eq!(groups_seen, cols.group_start.len() - 1, "every group belongs to exactly one color");
+        assert_eq!(groups_seen, cols.group_start().len() - 1, "every group belongs to exactly one color");
 
         // The 4-point box manifold (rows 2,3) must appear as ONE contiguous group
         // of 4 slots — never split. Locate it by its body pair in the columns.
         let mut box_group_len = None;
-        for g in 0..(cols.group_start.len() - 1) {
-            let gs = cols.group_start[g] as usize;
-            let ge = cols.group_start[g + 1] as usize;
-            if cols.body_a[gs] == 2 && cols.body_b[gs] == 3 {
+        for g in 0..(cols.group_start().len() - 1) {
+            let gs = cols.group_start()[g] as usize;
+            let ge = cols.group_start()[g + 1] as usize;
+            if cols.body_a(gs) == 2 && cols.body_b(gs) == 3 {
                 // Every slot of the run shares the SAME body pair (the C1 contract).
                 for s in gs..ge {
-                    assert_eq!(cols.body_a[s], 2, "box group body A is shared across its points");
-                    assert_eq!(cols.body_b[s], 3, "box group body B is shared across its points");
+                    assert_eq!(cols.body_a(s), 2, "box group body A is shared across its points");
+                    assert_eq!(cols.body_b(s), 3, "box group body B is shared across its points");
                 }
                 box_group_len = Some(ge - gs);
             }
@@ -2818,7 +3524,7 @@ mod tests {
         assert_eq!(box_group_len, Some(4), "the 4-point box manifold forms ONE 4-slot group");
 
         // Canonical order still covers every slot exactly once.
-        assert_eq!(cols.canonical.len(), cols.len(), "canonical covers every slot");
+        assert_eq!(cols.canonical().len(), cols.len(), "canonical covers every slot");
     }
 
     // ── Tester additions (Phase O5 formal gates) ─────────────────────────────
@@ -2921,36 +3627,36 @@ mod tests {
             solver.build_columns(&manifolds, &graph, &bodies, None);
             let cols = &solver.columns;
 
-            let n_colors = cols.color_offsets.len().saturating_sub(1);
+            let n_colors = cols.color_offsets().len().saturating_sub(1);
             prop_assert_eq!(
-                cols.color_group_start.len(),
+                cols.color_group_start().len(),
                 n_colors + 1,
                 "per-color group CSR must have n_colors + 1 entries"
             );
-            prop_assert_eq!(cols.group_start.first().copied(), Some(0u32), "group CSR starts at 0");
+            prop_assert_eq!(cols.group_start().first().copied(), Some(0u32), "group CSR starts at 0");
 
             // Build the expected slot->body-pair from each appended group, and
             // verify the tiling per color.
             let mut groups_seen = 0usize;
             let mut covered = vec![false; cols.len()];
             for c in 0..n_colors {
-                let span_start = cols.color_offsets[c];
-                let span_end = cols.color_offsets[c + 1];
-                let g_lo = cols.color_group_start[c] as usize;
-                let g_hi = cols.color_group_start[c + 1] as usize;
+                let span_start = cols.color_offsets()[c];
+                let span_end = cols.color_offsets()[c + 1];
+                let g_lo = cols.color_group_start()[c] as usize;
+                let g_hi = cols.color_group_start()[c + 1] as usize;
                 prop_assert!(g_lo <= g_hi, "color {} group range well-ordered", c);
                 let mut cursor = span_start;
                 for g in g_lo..g_hi {
-                    let gs = cols.group_start[g];
-                    let ge = cols.group_start[g + 1];
+                    let gs = cols.group_start()[g];
+                    let ge = cols.group_start()[g + 1];
                     prop_assert!(ge > gs, "group {} must be non-empty", g);
                     prop_assert_eq!(gs, cursor, "group {} tiles color {} span with no gap/overlap", g, c);
                     // Every slot of the group shares the SAME body pair (the C1
                     // contract: a manifold's ≥2 points are never split).
-                    let (ba, bb) = (cols.body_a[gs as usize], cols.body_b[gs as usize]);
+                    let (ba, bb) = (cols.body_a(gs as usize), cols.body_b(gs as usize));
                     for s in gs..ge {
-                        prop_assert_eq!(cols.body_a[s as usize], ba, "group {} body A shared", g);
-                        prop_assert_eq!(cols.body_b[s as usize], bb, "group {} body B shared", g);
+                        prop_assert_eq!(cols.body_a(s as usize), ba, "group {} body A shared", g);
+                        prop_assert_eq!(cols.body_b(s as usize), bb, "group {} body B shared", g);
                         prop_assert!(!covered[s as usize], "slot {} covered by >1 group", s);
                         covered[s as usize] = true;
                     }
@@ -2959,14 +3665,15 @@ mod tests {
                 }
                 prop_assert_eq!(cursor, span_end, "color {} groups exactly fill its slot span", c);
             }
-            prop_assert_eq!(groups_seen, cols.group_start.len() - 1, "every group in exactly one color");
+            prop_assert_eq!(groups_seen, cols.group_start().len() - 1, "every group in exactly one color");
             // Every slot is covered by exactly one group.
             prop_assert!(covered.iter().all(|&c| c), "every slot belongs to a group");
 
             // Canonical order covers every slot EXACTLY once (a permutation of 0..len).
-            prop_assert_eq!(cols.canonical.len(), cols.len(), "canonical covers every slot");
+            prop_assert_eq!(cols.canonical().len(), cols.len(), "canonical covers every slot");
             let mut canon_seen = vec![false; cols.len()];
-            for &s in &cols.canonical {
+            for k in 0..cols.canonical().len() {
+                let s = cols.canonical()[k];
                 prop_assert!(!canon_seen[s as usize], "canonical visits slot {} twice", s);
                 canon_seen[s as usize] = true;
             }
@@ -2981,10 +3688,10 @@ mod tests {
                     // Locate the group whose first slot matches this body pair AND
                     // whose length equals the manifold's live point count.
                     let mut found = false;
-                    for g in 0..(cols.group_start.len() - 1) {
-                        let gs = cols.group_start[g] as usize;
-                        let ge = cols.group_start[g + 1] as usize;
-                        if cols.body_a[gs] == ia && cols.body_b[gs] == ib && (ge - gs) == m.count as usize {
+                    for g in 0..(cols.group_start().len() - 1) {
+                        let gs = cols.group_start()[g] as usize;
+                        let ge = cols.group_start()[g + 1] as usize;
+                        if cols.body_a(gs) == ia && cols.body_b(gs) == ib && (ge - gs) == m.count as usize {
                             found = true;
                             break;
                         }
@@ -3195,6 +3902,54 @@ mod tests {
             .collect()
     }
 
+    /// Byte-identical snapshot of ALL 31 `ContactColumns` (audit Stage P — P2,
+    /// Gate 1). Emits each column's raw bits in `ContactColumns` field order, so two
+    /// builds (e.g. the `ScratchColumn` backend vs a reference) over the same scene
+    /// must produce a BIT-FOR-BIT equal vector.
+    ///
+    /// Covers every column — the 26 push-filled point/CSR-seed columns AND the 5
+    /// CSR / `manifold_base` columns (`color_offsets`, `canonical`, `group_start`,
+    /// `color_group_start`, `manifold_base`, the last including its retained
+    /// `(u32::MAX, 0)` sentinels) — closing the prior 26-of-31 coverage gap.
+    #[allow(dead_code)]
+    fn columns_snapshot(cols: &ContactColumns) -> Vec<u32> {
+        let mut out = Vec::new();
+        let mut push_f32 = |s: &[f32]| out.extend(s.iter().map(|v| v.to_bits()));
+        push_f32(cols.ra_x.as_read_slice());
+        push_f32(cols.ra_y.as_read_slice());
+        push_f32(cols.ra_z.as_read_slice());
+        push_f32(cols.rb_x.as_read_slice());
+        push_f32(cols.rb_y.as_read_slice());
+        push_f32(cols.rb_z.as_read_slice());
+        push_f32(cols.normal_x.as_read_slice());
+        push_f32(cols.normal_y.as_read_slice());
+        push_f32(cols.normal_z.as_read_slice());
+        push_f32(cols.tangent1_x.as_read_slice());
+        push_f32(cols.tangent1_y.as_read_slice());
+        push_f32(cols.tangent1_z.as_read_slice());
+        push_f32(cols.tangent2_x.as_read_slice());
+        push_f32(cols.tangent2_y.as_read_slice());
+        push_f32(cols.tangent2_z.as_read_slice());
+        push_f32(cols.separation.as_read_slice());
+        push_f32(cols.friction.as_read_slice());
+        push_f32(cols.restitution.as_read_slice());
+        push_f32(cols.normal_impulse.as_read_slice());
+        push_f32(cols.tangent1_impulse.as_read_slice());
+        push_f32(cols.tangent2_impulse.as_read_slice());
+        push_f32(cols.vn_initial.as_read_slice());
+        // Integer / flag / key / CSR / pair columns.
+        out.extend(cols.body_a.as_read_slice().iter().copied());
+        out.extend(cols.body_b.as_read_slice().iter().copied());
+        out.extend(cols.b_is_sentinel.as_read_slice().iter().map(|&b| b as u32));
+        out.extend(cols.warm_key.as_read_slice().iter().flat_map(|&k| [k as u32, (k >> 32) as u32]));
+        out.extend(cols.color_offsets().iter().copied());
+        out.extend(cols.canonical().iter().copied());
+        out.extend(cols.group_start().iter().copied());
+        out.extend(cols.color_group_start().iter().copied());
+        out.extend(cols.manifold_base().iter().flat_map(|&(a, b)| [a, b]));
+        out
+    }
+
     /// A forced-collision DENSE scene: `n` dynamic spheres packed in a tight line
     /// so every adjacent pair (and each on the floor) overlaps every step — a
     /// non-vacuous multi-color, multi-contact scene that exercises the warm store.
@@ -3265,6 +4020,146 @@ mod tests {
             }
         });
         snapshot_bits(&scratch)
+    }
+
+    /// Like [`run_dense_in_pool`] but returns the FULL 31-column
+    /// [`columns_snapshot`] of the solver's `ContactColumns` after the final step
+    /// (audit Stage P — P2, Gate 1). The columns are clear+refilled each
+    /// `solve_colored`, so after the last step they hold that step's complete
+    /// gathered SoA working set (all 26 point/CSR-seed columns + the 5
+    /// CSR/`manifold_base` columns). This is the load-bearing "pure backing swap"
+    /// probe: it reads the actual `ScratchColumn` bytes the parallel workers wrote,
+    /// not just the body state derived from them.
+    #[cfg(not(miri))]
+    fn run_dense_columns_in_pool(n: usize, steps: usize, parallel_solve: bool, workers: usize) -> Vec<u32> {
+        use boyko_threadpool::ThreadPoolBuilder;
+
+        let cfg = PhysicsConfig {
+            dt: 1.0 / 60.0,
+            parallel_solve,
+            ..PhysicsConfig::default()
+        };
+        let mut solver = ColoredSoftStepSolver::default();
+        let mut scratch = SolverScratch::with_capacity(n + 1);
+        scratch.set_bodies(&dense_collision_scene(n));
+        scratch.touched.reset(scratch.bodies().len());
+
+        let pool = ThreadPoolBuilder::new().num_threads(workers).build();
+        pool.install(|_scope| {
+            for _ in 0..steps {
+                let manifolds = dense_collision_manifolds(scratch.bodies());
+                let graph = build_graph(scratch.bodies(), &manifolds);
+                scratch.touched.reset(scratch.bodies().len());
+                solver.solve_colored(&cfg, &manifolds, &graph, &mut scratch);
+            }
+        });
+        columns_snapshot(&solver.columns)
+    }
+
+    /// Gate 1 (audit Stage P — P2, the load-bearing "pure backing swap" proof):
+    /// the FULL 31-column `ContactColumns` SoA — now backed by 31 kernel
+    /// `ScratchColumn`s instead of 31 `std::Vec`s — is BIT-FOR-BIT identical
+    /// across (a) run-to-run repeats (determinism) and (b) {1,2,4,8}-worker
+    /// parallel runs versus the single-threaded (`parallel_solve == false`)
+    /// solve.
+    ///
+    /// This reads the actual bytes the workers wrote into the 31 `ScratchColumn`s
+    /// (`columns_snapshot` covers all 31: the 21 worker/build f32 columns incl. the
+    /// three worker-MUTABLE impulse columns, the integer/flag/key columns, and the
+    /// five CSR/`manifold_base` columns). The body-state snapshot
+    /// (`parallel_solve_is_bit_identical_across_worker_counts`) only checks the 9
+    /// derived float fields per body; this checks the storage the backing swap
+    /// actually touched — so a parallel write going to the wrong column / a stale
+    /// base / a torn impulse accumulation would be caught here even if it happened
+    /// to cancel out in the body integration.
+    ///
+    /// Scene `n == 400` is sized so the widest color exceeds
+    /// `MIN_PARALLEL_SLOTS_PER_COLOR` (asserted), so the parallel `pool.scope`
+    /// dispatch genuinely fires (the rigid parallel solve path the P2 reborrow
+    /// removal protects) — a sub-threshold scene would only exercise the inline
+    /// path and the {1,N} claim would be vacuous.
+    #[test]
+    #[cfg(not(miri))]
+    fn colored_columns_snapshot_is_byte_identical_across_workers_and_runs() {
+        let n = 400;
+        let widest = max_color_slot_span(n);
+        assert!(
+            widest >= MIN_PARALLEL_SLOTS_PER_COLOR,
+            "anti-vacuity: the widest color ({widest} slots) must exceed the threshold \
+             ({MIN_PARALLEL_SLOTS_PER_COLOR}) so the parallel dispatch path is exercised, \
+             else the {{1,N}} column-byte-identity claim is vacuous"
+        );
+
+        // (a) Determinism: the single-threaded path, run twice, must produce a
+        // bit-identical 31-column snapshot (the colored partition + sweep + canonical
+        // warm store are deterministic; the ScratchColumn refill is order-stable).
+        let single_a = run_dense_columns_in_pool(n, 12, false, 1);
+        let single_b = run_dense_columns_in_pool(n, 12, false, 1);
+        assert_eq!(
+            single_a, single_b,
+            "Gate 1 (determinism): the full 31-column ContactColumns snapshot must be \
+             bit-identical run-to-run on the single-threaded path"
+        );
+
+        // Anti-vacuity: the snapshot must be non-empty (a real built column set).
+        assert!(
+            !single_a.is_empty(),
+            "Gate 1 anti-vacuity: the 31-column snapshot must be non-empty (columns were built)"
+        );
+
+        // (b) Parallel == serial, byte-for-byte, across {1,2,4,8} workers. This is
+        // the core "pure backing swap" assertion: every worker writes the SAME bytes
+        // into the SAME columns regardless of worker count, and identical to the
+        // single-threaded reference.
+        let p1 = run_dense_columns_in_pool(n, 12, true, 1);
+        let p2 = run_dense_columns_in_pool(n, 12, true, 2);
+        let p4 = run_dense_columns_in_pool(n, 12, true, 4);
+        let p8 = run_dense_columns_in_pool(n, 12, true, 8);
+
+        assert_eq!(
+            single_a, p1,
+            "Gate 1: 1-worker parallel 31-column snapshot must be byte-identical to the \
+             single-threaded solve (the parallel path must not perturb any column byte)"
+        );
+        assert_eq!(p1, p2, "Gate 1: 31-column snapshot must be byte-identical at 1 vs 2 workers");
+        assert_eq!(p1, p4, "Gate 1: 31-column snapshot must be byte-identical at 1 vs 4 workers");
+        assert_eq!(p1, p8, "Gate 1: 31-column snapshot must be byte-identical at 1 vs 8 workers");
+
+        // Run-to-run determinism of the parallel path itself (worker-count-independent
+        // bits AND repeat-stable bits).
+        let p4_again = run_dense_columns_in_pool(n, 12, true, 4);
+        assert_eq!(
+            p4, p4_again,
+            "Gate 1: the parallel 31-column snapshot must be run-to-run bit-identical"
+        );
+    }
+
+    /// Gate 1 A/B (the STRONGEST pure-backing-swap proof): the post-P2
+    /// `ScratchColumn`-backed 31-column snapshot is BYTE-IDENTICAL to a pre-P2
+    /// `std::Vec`-backed baseline captured (by the tester) from the SAME scene /
+    /// step count / worker count, BEFORE the backing swap. Reads the baseline file
+    /// the tester wrote while the P2 diff was git-stashed. If the baseline file is
+    /// absent the test is a no-op (the run-to-run + {1,N} byte gate above stands).
+    #[test]
+    #[cfg(not(miri))]
+    fn colored_columns_snapshot_matches_pre_p2_vec_baseline() {
+        let path = "D:/tmp/p2_baseline_columns.txt";
+        let baseline = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(_) => return, // no captured baseline in this environment — skip.
+        };
+        let expected: Vec<u32> = baseline
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| l.parse::<u32>().expect("baseline line is a u32"))
+            .collect();
+        // Same scene / steps / workers as the baseline capture (n=400, 12 steps, 4 workers).
+        let post = run_dense_columns_in_pool(400, 12, true, 4);
+        assert_eq!(
+            post, expected,
+            "Gate 1 A/B: post-P2 ScratchColumn 31-column snapshot must be BYTE-IDENTICAL \
+             to the pre-P2 std::Vec baseline (pure backing swap — no value drift)"
+        );
     }
 
     /// O6 0%-gate: with `parallel_solve == false` the colored solve is
@@ -3347,9 +4242,9 @@ mod tests {
         solver.build_bodies(&bodies);
         solver.build_columns(&manifolds, &graph, &bodies, None);
         let cols = &solver.columns;
-        let n_colors = cols.color_offsets.len().saturating_sub(1);
+        let n_colors = cols.color_offsets().len().saturating_sub(1);
         (0..n_colors)
-            .map(|c| cols.color_offsets[c + 1] - cols.color_offsets[c])
+            .map(|c| cols.color_offsets()[c + 1] - cols.color_offsets()[c])
             .max()
             .unwrap_or(0)
     }
@@ -3718,9 +4613,9 @@ mod tests {
         let impulse_bits = (0..cols.len())
             .flat_map(|i| {
                 [
-                    cols.normal_impulse[i].to_bits(),
-                    cols.tangent1_impulse[i].to_bits(),
-                    cols.tangent2_impulse[i].to_bits(),
+                    cols.normal_impulse(i).to_bits(),
+                    cols.tangent1_impulse(i).to_bits(),
+                    cols.tangent2_impulse(i).to_bits(),
                 ]
             })
             .collect();
@@ -3750,62 +4645,30 @@ mod tests {
         );
 
         for bias_active in [true, false] {
-            // Build columns once via the solver's own build, then snapshot the
-            // pristine pre-solve state for the two arms.
-            let mut solver = ColoredSoftStepSolver::default();
-            solver.build_bodies(&bodies);
-            solver.build_columns(&manifolds, &graph, &bodies, None);
-
-            let pristine_cols_ni: Vec<f32> = solver.columns.normal_impulse.clone();
-            let pristine_cols_t1: Vec<f32> = solver.columns.tangent1_impulse.clone();
-            let pristine_cols_t2: Vec<f32> = solver.columns.tangent2_impulse.clone();
+            // The pristine pre-solve body state shared by both arms.
             let pristine_bodies: Vec<BodyEffective> = bodies.iter().map(eff_of).collect();
 
-            let n_colors = solver.columns.color_offsets.len() - 1;
+            // Each arm builds its OWN columns from a fresh solver (an empty
+            // warm-start table ⇒ identical zero-seeded pristine columns) and its OWN
+            // body ScratchColumn, then solves through the per-element solve views.
 
             // ── Scalar arm ──────────────────────────────────────────────────
-            let mut cols_scalar = ContactColumns::default();
-            clone_columns(&solver.columns, &mut cols_scalar);
-            let mut bodies_scalar = pristine_bodies.clone();
-            for c in 0..n_colors {
-                let start = cols_scalar.color_offsets[c] as usize;
-                let end = cols_scalar.color_offsets[c + 1] as usize;
-                ColoredSoftStepSolver::solve_color(
-                    &mut cols_scalar,
-                    &mut bodies_scalar,
-                    (start, end),
-                    soft.bias_rate,
-                    soft.mass_coeff,
-                    soft.impulse_coeff,
-                    bias_active,
-                );
-            }
-
-            // ── SIMD arm (re-seed the impulse columns to the pristine state) ──
-            let mut cols_simd = ContactColumns::default();
-            clone_columns(&solver.columns, &mut cols_simd);
-            cols_simd.normal_impulse.clone_from(&pristine_cols_ni);
-            cols_simd.tangent1_impulse.clone_from(&pristine_cols_t1);
-            cols_simd.tangent2_impulse.clone_from(&pristine_cols_t2);
-            let mut bodies_simd = pristine_bodies.clone();
-            for c in 0..n_colors {
-                let g_lo = cols_simd.color_group_start[c] as usize;
-                let g_hi = cols_simd.color_group_start[c + 1] as usize;
-                let span = (
-                    cols_simd.color_offsets[c] as usize,
-                    cols_simd.color_offsets[c + 1] as usize,
-                );
-                // SAFETY: the test target is gated `target_feature = "avx2"`, so the
-                //   host running these tests supports AVX2; the group range is a
-                //   color's own (body-disjoint) groups, and `span` is exactly that
-                //   range's slot run (the kernel's own-span contract).
-                unsafe {
-                    ColoredSoftStepSolver::solve_color_avx2(
-                        &mut cols_simd,
-                        &mut bodies_simd,
-                        span,
-                        g_lo,
-                        g_hi,
+            let mut solver_scalar = ColoredSoftStepSolver::default();
+            solver_scalar.build_bodies(&bodies);
+            solver_scalar.build_columns(&manifolds, &graph, &bodies, None);
+            let cols_scalar = &solver_scalar.columns;
+            let n_colors = cols_scalar.color_offsets().len() - 1;
+            let bodies_scalar = body_scratch_from(&pristine_bodies);
+            {
+                let view = cols_scalar.solve_view();
+                let body_view = bodies_scalar.solve_view();
+                for c in 0..n_colors {
+                    let start = cols_scalar.color_offsets()[c] as usize;
+                    let end = cols_scalar.color_offsets()[c + 1] as usize;
+                    ColoredSoftStepSolver::solve_color(
+                        view,
+                        body_view,
+                        (start, end),
                         soft.bias_rate,
                         soft.mass_coeff,
                         soft.impulse_coeff,
@@ -3814,8 +4677,46 @@ mod tests {
                 }
             }
 
-            let (b_scalar, i_scalar) = body_impulse_bits(&bodies_scalar, &cols_scalar);
-            let (b_simd, i_simd) = body_impulse_bits(&bodies_simd, &cols_simd);
+            // ── SIMD arm ─────────────────────────────────────────────────────
+            let mut solver_simd = ColoredSoftStepSolver::default();
+            solver_simd.build_bodies(&bodies);
+            solver_simd.build_columns(&manifolds, &graph, &bodies, None);
+            let cols_simd = &solver_simd.columns;
+            let bodies_simd = body_scratch_from(&pristine_bodies);
+            {
+                let view = cols_simd.solve_view();
+                let body_view = bodies_simd.solve_view();
+                for c in 0..n_colors {
+                    let g_lo = cols_simd.color_group_start()[c] as usize;
+                    let g_hi = cols_simd.color_group_start()[c + 1] as usize;
+                    let span = (
+                        cols_simd.color_offsets()[c] as usize,
+                        cols_simd.color_offsets()[c + 1] as usize,
+                    );
+                    // SAFETY: the test target is gated `target_feature = "avx2"`, so
+                    //   the host running these tests supports AVX2; the group range is a
+                    //   color's own (body-disjoint) groups, and `span` is exactly that
+                    //   range's slot run (the kernel's own-span contract).
+                    unsafe {
+                        ColoredSoftStepSolver::solve_color_avx2(
+                            view,
+                            body_view,
+                            span,
+                            g_lo,
+                            g_hi,
+                            soft.bias_rate,
+                            soft.mass_coeff,
+                            soft.impulse_coeff,
+                            bias_active,
+                        );
+                    }
+                }
+            }
+
+            let (b_scalar, i_scalar) =
+                body_impulse_bits(bodies_scalar.as_read_slice(), &solver_scalar.columns);
+            let (b_simd, i_simd) =
+                body_impulse_bits(bodies_simd.as_read_slice(), &solver_simd.columns);
             assert_eq!(
                 b_scalar, b_simd,
                 "O7 body velocity bits must match scalar (bias_active={bias_active})"
@@ -3827,38 +4728,71 @@ mod tests {
         }
     }
 
-    /// Clones the columns needed by the per-color kernels into `dst` (a fresh
-    /// `ContactColumns`). Only the columns `solve_color`/`solve_color_avx2` read or
-    /// write are copied; the rest stay empty (unused by the kernels). Used only by
-    /// the +avx2 differential.
+    /// Builds a fresh `BodyEffective` [`ScratchColumn`] seeded from `bodies` (the
+    /// +avx2 differential's per-arm body buffer — each arm needs its own buffer so
+    /// the two kernels do not share mutable body rows). The synthetic
+    /// `SCRATCH_ID_BODY_EFF_COLORED` id backs it (the same id the colored solver
+    /// owns; the columns are independent pools keyed by id).
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-    fn clone_columns(src: &ContactColumns, dst: &mut ContactColumns) {
-        dst.ra_x.clone_from(&src.ra_x);
-        dst.ra_y.clone_from(&src.ra_y);
-        dst.ra_z.clone_from(&src.ra_z);
-        dst.rb_x.clone_from(&src.rb_x);
-        dst.rb_y.clone_from(&src.rb_y);
-        dst.rb_z.clone_from(&src.rb_z);
-        dst.normal_x.clone_from(&src.normal_x);
-        dst.normal_y.clone_from(&src.normal_y);
-        dst.normal_z.clone_from(&src.normal_z);
-        dst.tangent1_x.clone_from(&src.tangent1_x);
-        dst.tangent1_y.clone_from(&src.tangent1_y);
-        dst.tangent1_z.clone_from(&src.tangent1_z);
-        dst.tangent2_x.clone_from(&src.tangent2_x);
-        dst.tangent2_y.clone_from(&src.tangent2_y);
-        dst.tangent2_z.clone_from(&src.tangent2_z);
-        dst.separation.clone_from(&src.separation);
-        dst.friction.clone_from(&src.friction);
-        dst.normal_impulse.clone_from(&src.normal_impulse);
-        dst.tangent1_impulse.clone_from(&src.tangent1_impulse);
-        dst.tangent2_impulse.clone_from(&src.tangent2_impulse);
-        dst.body_a.clone_from(&src.body_a);
-        dst.body_b.clone_from(&src.body_b);
-        dst.b_is_sentinel.clone_from(&src.b_is_sentinel);
-        dst.color_offsets.clone_from(&src.color_offsets);
-        dst.group_start.clone_from(&src.group_start);
-        dst.color_group_start.clone_from(&src.color_group_start);
+    fn body_scratch_from(bodies: &[BodyEffective]) -> ScratchColumn<BodyEffective> {
+        register_scratch_layouts();
+        let mut col = ScratchColumn::<BodyEffective>::new(
+            body_eff_colored_id(),
+            bodies.len().max(scratch_reserve_rows(size_of::<BodyEffective>())),
+        );
+        {
+            let mut view = col.build_view();
+            view.clear();
+            view.extend_from_slice(bodies);
+        }
+        col
+    }
+
+    /// Deep-copies `src` into a fresh `ContactColumns` (each column refilled from the
+    /// source's read slice). Used by the +avx2 differential so the two kernel arms
+    /// solve over independent column buffers. Copies the columns the kernels read /
+    /// write plus the CSR columns they navigate.
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    fn clone_columns(src: &ContactColumns) -> ContactColumns {
+        let mut dst = ContactColumns::with_capacity(src.len());
+        {
+            let mut v = dst.build_view();
+            v.clear();
+            v.ra_x.extend_from_slice(src.ra_x.as_read_slice());
+            v.ra_y.extend_from_slice(src.ra_y.as_read_slice());
+            v.ra_z.extend_from_slice(src.ra_z.as_read_slice());
+            v.rb_x.extend_from_slice(src.rb_x.as_read_slice());
+            v.rb_y.extend_from_slice(src.rb_y.as_read_slice());
+            v.rb_z.extend_from_slice(src.rb_z.as_read_slice());
+            v.normal_x.extend_from_slice(src.normal_x.as_read_slice());
+            v.normal_y.extend_from_slice(src.normal_y.as_read_slice());
+            v.normal_z.extend_from_slice(src.normal_z.as_read_slice());
+            v.tangent1_x.extend_from_slice(src.tangent1_x.as_read_slice());
+            v.tangent1_y.extend_from_slice(src.tangent1_y.as_read_slice());
+            v.tangent1_z.extend_from_slice(src.tangent1_z.as_read_slice());
+            v.tangent2_x.extend_from_slice(src.tangent2_x.as_read_slice());
+            v.tangent2_y.extend_from_slice(src.tangent2_y.as_read_slice());
+            v.tangent2_z.extend_from_slice(src.tangent2_z.as_read_slice());
+            v.separation.extend_from_slice(src.separation.as_read_slice());
+            v.friction.extend_from_slice(src.friction.as_read_slice());
+            v.restitution.extend_from_slice(src.restitution.as_read_slice());
+            v.normal_impulse.extend_from_slice(src.normal_impulse.as_read_slice());
+            v.tangent1_impulse.extend_from_slice(src.tangent1_impulse.as_read_slice());
+            v.tangent2_impulse.extend_from_slice(src.tangent2_impulse.as_read_slice());
+            v.body_a.extend_from_slice(src.body_a.as_read_slice());
+            v.body_b.extend_from_slice(src.body_b.as_read_slice());
+            v.b_is_sentinel.extend_from_slice(src.b_is_sentinel.as_read_slice());
+            v.warm_key.extend_from_slice(src.warm_key.as_read_slice());
+            v.vn_initial.extend_from_slice(src.vn_initial.as_read_slice());
+        }
+        // The CSR columns the kernels navigate (group_start) + the dispatcher CSRs.
+        dst.color_offsets.build_view().extend_from_slice(src.color_offsets());
+        dst.group_start.build_view().extend_from_slice(src.group_start());
+        dst.color_group_start
+            .build_view()
+            .extend_from_slice(src.color_group_start());
+        dst.canonical.build_view().extend_from_slice(src.canonical());
+        dst
     }
 
     /// Test 2 (width-only / 0%-gate proxy): `solve_colored(simd=true)` produces a
@@ -3951,37 +4885,42 @@ mod tests {
     /// the groups is the CALLER's responsibility (the cohort kernel's precondition).
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
     fn build_cohort_columns(groups: &[GroupSpec]) -> ContactColumns {
-        let mut cols = ContactColumns::default();
-        cols.color_offsets.push(0);
-        cols.group_start.push(0);
-        cols.color_group_start.push(0);
+        let mut cols = ContactColumns::with_capacity(0);
+        cols.begin_build();
         let mut warm_key = 0u64;
         for g in groups {
-            for (p, ps) in g.points.iter().enumerate() {
-                cols.push_point(
-                    ps.ra,
-                    ps.rb,
-                    ps.normal,
-                    ps.t1,
-                    ps.t2,
-                    ps.separation,
-                    ps.friction,
-                    0.0, // restitution (the kernels do not read it)
-                    ps.seed,
-                    g.ia,
-                    g.ib,
-                    g.sentinel,
-                    warm_key,
-                    0.0,
-                );
-                cols.canonical.push((cols.len() - 1) as u32);
-                let _ = p;
-                warm_key = warm_key.wrapping_add(1);
+            {
+                let mut view = cols.build_view();
+                for ps in g.points.iter() {
+                    view.push_point(
+                        ps.ra,
+                        ps.rb,
+                        ps.normal,
+                        ps.t1,
+                        ps.t2,
+                        ps.separation,
+                        ps.friction,
+                        0.0, // restitution (the kernels do not read it)
+                        ps.seed,
+                        g.ia,
+                        g.ib,
+                        g.sentinel,
+                        warm_key,
+                        0.0,
+                    );
+                    warm_key = warm_key.wrapping_add(1);
+                }
             }
-            cols.group_start.push(cols.len() as u32);
+            // `canonical` covers the slots appended for this group, in order.
+            let len = cols.len() as u32;
+            for s in (len - g.points.len() as u32)..len {
+                cols.push_canonical(s);
+            }
+            cols.push_group_start(len);
         }
-        cols.color_offsets.push(cols.len() as u32);
-        cols.color_group_start.push((cols.group_start.len() - 1) as u32);
+        let len = cols.len() as u32;
+        cols.push_color_offset(len);
+        cols.push_color_group_start((cols.group_start().len() - 1) as u32);
         cols
     }
 
@@ -4006,11 +4945,11 @@ mod tests {
         let normal = cols.normal(slot);
         let t1 = cols.tangent1(slot);
         let t2 = cols.tangent2(slot);
-        let ia = cols.body_a[slot] as usize;
-        let b_sent = cols.b_is_sentinel[slot];
-        let ib = cols.body_b[slot] as usize;
-        let friction = cols.friction[slot];
-        let separation = cols.separation[slot];
+        let ia = cols.body_a(slot) as usize;
+        let b_sent = cols.b_is_sentinel(slot);
+        let ib = cols.body_b(slot) as usize;
+        let friction = cols.friction.as_read_slice()[slot];
+        let separation = cols.separation.as_read_slice()[slot];
         let bb = if b_sent { IMMOVABLE_AT_REST } else { bodies[ib] };
         let ba = bodies[ia];
 
@@ -4022,7 +4961,7 @@ mod tests {
         } else {
             0.0
         };
-        let lambda_n = cols.normal_impulse[slot];
+        let lambda_n = cols.normal_impulse(slot);
         let d_lambda = if bias_active {
             -mass_coeff * m_eff * (vn + bias) - impulse_coeff * lambda_n
         } else {
@@ -4048,8 +4987,8 @@ mod tests {
         let m_eff_t2 = effective_mass(t2, ra, rb, &ba_m, &bb_m);
         let dv = bb_m.point_velocity(rb) - ba_m.point_velocity(ra);
         let (vt1, vt2) = (dv.dot(t1), dv.dot(t2));
-        let new_t1 = cols.tangent1_impulse[slot] - m_eff_t1 * vt1;
-        let new_t2 = cols.tangent2_impulse[slot] - m_eff_t2 * vt2;
+        let new_t1 = cols.tangent1_impulse(slot) - m_eff_t1 * vt1;
+        let new_t2 = cols.tangent2_impulse(slot) - m_eff_t2 * vt2;
         let len_sq = new_t1 * new_t1 + new_t2 * new_t2;
         let clamped = len_sq > max_friction * max_friction && len_sq > 0.0;
         let zero_cone = len_sq == 0.0;
@@ -4090,17 +5029,16 @@ mod tests {
             denorm += d as usize;
         }
 
-        let g_lo = cols.color_group_start[0] as usize;
-        let g_hi = cols.color_group_start[1] as usize;
-        let span = (cols.color_offsets[0] as usize, cols.color_offsets[1] as usize);
+        let g_lo = cols.color_group_start()[0] as usize;
+        let g_hi = cols.color_group_start()[1] as usize;
+        let span = (cols.color_offsets()[0] as usize, cols.color_offsets()[1] as usize);
 
-        // Scalar arm.
-        let mut cols_scalar = ContactColumns::default();
-        clone_columns(cols, &mut cols_scalar);
-        let mut bodies_scalar = bodies.to_vec();
+        // Scalar arm — a fresh deep copy of `cols` + its own body buffer.
+        let cols_scalar = clone_columns(cols);
+        let bodies_scalar = body_scratch_from(bodies);
         ColoredSoftStepSolver::solve_color(
-            &mut cols_scalar,
-            &mut bodies_scalar,
+            cols_scalar.solve_view(),
+            bodies_scalar.solve_view(),
             span,
             soft.bias_rate,
             soft.mass_coeff,
@@ -4108,17 +5046,16 @@ mod tests {
             bias_active,
         );
 
-        // SIMD arm.
-        let mut cols_simd = ContactColumns::default();
-        clone_columns(cols, &mut cols_simd);
-        let mut bodies_simd = bodies.to_vec();
+        // SIMD arm — an independent deep copy + body buffer.
+        let cols_simd = clone_columns(cols);
+        let bodies_simd = body_scratch_from(bodies);
         // SAFETY: the test target is `target_feature = "avx2"`-gated, so the host
         //   supports AVX2; `[g_lo, g_hi)` is the single color's body-disjoint groups
         //   and `span` is exactly that group range's slot run (the own-span contract).
         unsafe {
             ColoredSoftStepSolver::solve_color_avx2(
-                &mut cols_simd,
-                &mut bodies_simd,
+                cols_simd.solve_view(),
+                bodies_simd.solve_view(),
                 span,
                 g_lo,
                 g_hi,
@@ -4129,8 +5066,9 @@ mod tests {
             );
         }
 
-        let (b_scalar, i_scalar) = body_impulse_bits(&bodies_scalar, &cols_scalar);
-        let (b_simd, i_simd) = body_impulse_bits(&bodies_simd, &cols_simd);
+        let (b_scalar, i_scalar) =
+            body_impulse_bits(bodies_scalar.as_read_slice(), &cols_scalar);
+        let (b_simd, i_simd) = body_impulse_bits(bodies_simd.as_read_slice(), &cols_simd);
         assert_eq!(b_scalar, b_simd, "cohort differential: body bits (bias_active={bias_active})");
         assert_eq!(i_scalar, i_simd, "cohort differential: impulse bits (bias_active={bias_active})");
         (clamped, zero_cone, denorm)

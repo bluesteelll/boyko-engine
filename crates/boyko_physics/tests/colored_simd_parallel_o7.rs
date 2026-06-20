@@ -177,7 +177,7 @@ fn build_graph(bodies: &[BodyState], manifolds: &[Manifold]) -> ConstraintGraph 
 
 fn snapshot_bits(scratch: &SolverScratch) -> Vec<u32> {
     scratch
-        .bodies
+        .bodies()
         .iter()
         .flat_map(|b| {
             [

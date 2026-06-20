@@ -1,14 +1,18 @@
 //! Audit Stage P — the rigid colored solve's Miri-TB soundness oracle after the
-//! `std::Vec` body gather-mirror was migrated onto the engine's own
+//! `std::Vec` gather-mirrors (P1: the body gather-mirror; P2: the contact
+//! `ContactColumns` SoA) were migrated onto the engine's own
 //! [`ScratchColumn`](boyko_ecs::ecs::core::component::scratch::ScratchColumn).
 //!
-//! The migration's load-bearing claim is STRUCTURAL: the rigid colored worker no
-//! longer forms a whole-buffer `&mut [BodyEffective]` reborrow
-//! (`ColorSolvePtrs::bodies()` `from_raw_parts_mut` is DELETED). A worker now
-//! reaches each body row ONLY through a `ScratchSolveView`'s per-element `row_ptr`,
-//! so the SP4-class whole-slice reborrow is un-typeable on the worker path. That
-//! claim is VALUE-BENIGN (the per-element writes target the same rows as before),
-//! so only a borrow-model checker can witness it — a snapshot/bit test cannot.
+//! The migration's load-bearing claim is STRUCTURAL on BOTH paths: the rigid
+//! colored worker no longer forms a whole-buffer reborrow of either the bodies
+//! (`ColorSolvePtrs::bodies()` `from_raw_parts_mut`, P1) OR the contact columns
+//! (`ColorSolvePtrs::columns()` `&mut *self.cols` whole-struct reborrow, P2 —
+//! DELETED). A worker now reaches each body row through a `ScratchSolveView`'s
+//! per-element `row_ptr` and each contact column element through a
+//! `ContactSolveView`'s per-element `base + index` accessor, so the SP4/rigid-class
+//! whole-buffer reborrow is un-typeable on the worker path. That claim is
+//! VALUE-BENIGN (the per-element writes target the same rows as before), so only a
+//! borrow-model checker can witness it — a snapshot/bit test cannot.
 //!
 //! This file drives a scene whose SINGLE color crosses
 //! `MIN_PARALLEL_SLOTS_PER_COLOR (256)`, so `solve_color_parallel` takes the
