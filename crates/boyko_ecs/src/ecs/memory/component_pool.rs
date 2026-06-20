@@ -4,8 +4,8 @@ use std::cell::UnsafeCell;
 use std::ptr::NonNull;
 
 use crate::ecs::constants::{
-    SIMD_BUFFER_ALIGN, pool_align_up_granule, pool_byte_layout, pool_commit_step,
-    pool_reserve_rows,
+    SIMD_BUFFER_ALIGN, pool_align_up_granule, pool_base_stagger, pool_byte_layout,
+    pool_commit_step, pool_reserve_rows,
 };
 use crate::ecs::core::change_detection::Tick;
 use crate::ecs::core::component::component::Component;
@@ -147,10 +147,13 @@ impl PoolBacking {
 pub struct ComponentPool {
     /// Data sub-region base; WRITE-ONCE (invariant U6 twin).
     ///
-    /// `stride > 0`: `== vm.base()`. Phase 22 D1 (`stride == 0`, tag pools):
-    /// a dangling, provenance-free pointer at address
-    /// `SIMD_BUFFER_ALIGN.max(align)` — non-null, SIMD-A1-aligned, valid
-    /// ONLY for zero-size access (the data sub-region is vacuous).
+    /// `stride > 0`: `== vm.base() + pool_base_stagger(component_id)` — the
+    /// P2-CACHE-FIX leading pad shifts the data sub-region off the bare
+    /// reservation base so different columns land in different cache sets.
+    /// Phase 22 D1 (`stride == 0`, tag pools): a dangling, provenance-free
+    /// pointer at address `SIMD_BUFFER_ALIGN.max(align)` — non-null,
+    /// SIMD-A1-aligned, valid ONLY for zero-size access (the data sub-region is
+    /// vacuous).
     buffer: NonNull<u8>,
 
     /// Live row count; rows `[0, len)` are initialized and densely packed.
@@ -175,7 +178,8 @@ pub struct ComponentPool {
     /// Committed bytes of EACH tick sub-region; granule-aligned, monotonic.
     ticks_committed: usize,
 
-    /// `added` tick sub-region base (`vm.base() + data_len`); WRITE-ONCE.
+    /// `added` tick sub-region base (`vm.base() + stagger + data_len`);
+    /// WRITE-ONCE.
     ///
     /// `UnsafeCell<Tick>` is `repr(transparent)` over a 4-byte `u32` whose
     /// every bit pattern is valid, so demand-zero pages read as
@@ -189,8 +193,9 @@ pub struct ComponentPool {
     /// (Round 2 C3).
     added_base: NonNull<UnsafeCell<Tick>>,
 
-    /// `changed` tick sub-region base (`vm.base() + data_len + tick_len`);
-    /// WRITE-ONCE. Same shape and discipline as [`Self::added_base`].
+    /// `changed` tick sub-region base
+    /// (`vm.base() + stagger + data_len + tick_len`); WRITE-ONCE. Same shape
+    /// and discipline as [`Self::added_base`].
     /// Updated by `Mut<T>::deref_mut` and `EcsMaster::set_component_raw`.
     changed_base: NonNull<UnsafeCell<Tick>>,
 
@@ -284,10 +289,20 @@ impl ComponentPool {
              4096-byte reservation-base guarantee"
         );
 
-        // D1 layout: [data | added_ticks | changed_ticks], all sub-regions
-        // granule-aligned; checked arithmetic panics loudly on overflow.
+        // P2-CACHE-FIX: stagger this pool's in-reservation base by a
+        // component_id-derived, cache-line-multiple leading offset so different
+        // columns' element-`i` rows land in different L1/L2 cache sets. Without
+        // it every pool's 64 KiB-aligned reservation base puts element `i` of
+        // every column in the SAME cache set, so a SoA hot loop sweeping ~24
+        // columns (the rigid solver) fights for one 8-way set — a conflict-miss
+        // storm that cost the ~40% rigid-solver regression at P2.
+        let stagger = pool_base_stagger(component_id);
+
+        // D1 layout: [pad | data | added_ticks | changed_ticks], every
+        // sub-region granule-aligned, shifted right by the per-pool stagger;
+        // checked arithmetic panics loudly on overflow.
         let stride = component_layout.size();
-        let layout = pool_byte_layout(reserve_rows, stride);
+        let layout = pool_byte_layout(reserve_rows, stride, stagger);
 
         // D3: eager reserve, ZERO initial commit. `reserve` (zeroed
         // contract — NOT `reserve_unzeroed`): the tick sub-regions rely on
@@ -301,36 +316,46 @@ impl ComponentPool {
         // it would be UB at the first `fill_ticks`.
         let base = vm.base();
 
-        // Phase X.A SIMD-A1 invariant (plan §6.4): the data base MUST be
+        // Phase X.A SIMD-A1 invariant (plan §6.4): the DATA base MUST be
         // SIMD_BUFFER_ALIGN-aligned so callers (`buffer_ptr`,
         // `Query::for_each_chunk` inner loops) can rely on it without
-        // re-checking. Asserted against `base` (the reservation base — its
-        // >= 4096 alignment guarantee is what this actually verifies; holds
-        // trivially post-X.I, see the D10 note above).
+        // re-checking. Post-P2-CACHE-FIX the data base is `reservation_base +
+        // stagger` (not the bare reservation base): the >= 4096-aligned base
+        // plus a `CACHE_LINE_SIZE`-multiple (hence SIMD_BUFFER_ALIGN-multiple,
+        // const-asserted on `POOL_STAGGER_LINES`) stagger stays SIMD-aligned.
+        // SAFETY: `layout.data_off == stagger < os_len`, in-bounds of the
+        // single reservation, so the `add` stays inside one allocated object.
+        let data_base = unsafe { base.add(layout.data_off) };
         debug_assert!(
-            (base.as_ptr() as usize).is_multiple_of(SIMD_BUFFER_ALIGN),
-            "SIMD-A1: ComponentPool reservation base {:p} is not SIMD_BUFFER_ALIGN={}-aligned",
-            base.as_ptr(),
+            (data_base.as_ptr() as usize).is_multiple_of(SIMD_BUFFER_ALIGN),
+            "SIMD-A1: ComponentPool data base {:p} (reservation base + stagger {}) is not \
+             SIMD_BUFFER_ALIGN={}-aligned",
+            data_base.as_ptr(),
+            stagger,
             SIMD_BUFFER_ALIGN
         );
 
         // SAFETY (S-TICKBASE): both offsets are in-bounds of the single
-        // reservation (`added_off < changed_off < os_len` by the D1 layout
-        // math, all checked; `os_len <= isize::MAX` asserted by `reserve`),
-        // so each `add` stays inside the one allocated object — ★R1-8: the
-        // data region and BOTH tick regions are ONE allocated object, the
-        // pool's own reservation. Phase 22 ZST arm: for `stride == 0` the
-        // data sub-region is empty (`added_off == 0`, `changed_off ==
-        // tick_len`); `buffer` (set below) is a dangling aligned pointer
-        // valid only for zero-size access per the Rust reference — both
-        // tick bases derive from `base` (the single LIVE reservation, O1),
-        // and tick-tick disjointness is unchanged. Alignment:
-        // granule(64 KiB)-aligned offsets from a >= 4096-aligned base yield
-        // alignment >= 4096 >= 4 = align_of::<UnsafeCell<Tick>>
-        // (const-asserted at the top of this file). The bases are derived
-        // once and never reassigned (write-once); the reservation ADDRESS
-        // is stable for the pool's lifetime, so they remain valid after
-        // `vm` moves into the struct below.
+        // reservation (`stagger <= added_off < changed_off < os_len` by the D1
+        // layout math, all checked; `os_len <= isize::MAX` asserted by
+        // `reserve`), so each `add` stays inside the one allocated object —
+        // ★R1-8: the data region and BOTH tick regions are ONE allocated
+        // object, the pool's own reservation. P2-CACHE-FIX: every offset
+        // (`added_off`/`changed_off`) already includes the leading `stagger`
+        // pad (`pool_byte_layout` shifts all three sub-regions right by it),
+        // so the tick bases derive correctly from the bare reservation `base`.
+        // Phase 22 ZST arm: for `stride == 0` the data sub-region is empty
+        // (`added_off == stagger`, `changed_off == stagger + tick_len`);
+        // `buffer` (set below) is a dangling aligned pointer valid only for
+        // zero-size access per the Rust reference — both tick bases derive from
+        // `base` (the single LIVE reservation, O1), and tick-tick disjointness
+        // is unchanged. Alignment: granule(64 KiB)-aligned tick offsets plus a
+        // `CACHE_LINE_SIZE`-multiple stagger, from a >= 4096-aligned base,
+        // yield alignment >= CACHE_LINE_SIZE = 64 >= 4 =
+        // align_of::<UnsafeCell<Tick>> (const-asserted at the top of this
+        // file). The bases are derived once and never reassigned (write-once);
+        // the reservation ADDRESS is stable for the pool's lifetime, so they
+        // remain valid after `vm` moves into the struct below.
         let (added_base, changed_base) = unsafe {
             (
                 base.add(layout.added_off).cast::<UnsafeCell<Tick>>(),
@@ -339,9 +364,11 @@ impl ComponentPool {
         };
 
         // O1: `buffer` per-arm, LAST — after every live-reservation-derived
-        // pointer is already bound.
+        // pointer is already bound. P2-CACHE-FIX: the stride > 0 data base is
+        // `data_base == base + stagger` (computed above for the SIMD-A1 check),
+        // NOT the bare reservation base.
         let buffer = if stride > 0 {
-            base
+            data_base
         } else {
             // Phase 22 D1/D6: a ZST pool stores no data bytes. The buffer
             // is a dangling, provenance-free pointer at address
@@ -405,6 +432,40 @@ impl ComponentPool {
         Self::new(component_id, pool_reserve_rows(component_size))
     }
 
+    /// P2-CACHE-FIX commit helper: commits a sub-region byte frontier that
+    /// begins at a NON-granule leading offset.
+    ///
+    /// `base_off` is the sub-region's start within the reservation — for the
+    /// staggered layout it is `data_off` / `added_off` / `changed_off`, each
+    /// `≡ stagger (mod COMMIT_GRANULE)` with `stagger < COMMIT_GRANULE`. `old`
+    /// and `new` are the OLD/NEW sub-region-relative, granule-aligned commit
+    /// frontiers (`new > old`). `VmReservation::commit` requires granule-aligned
+    /// absolute ranges, so this commits the granule-aligned superset
+    /// `[align_down(base_off + old, G), align_up(base_off + new, G))` (the
+    /// boundary granule shared with the previous-region tail is re-committed
+    /// idempotently — `commit` preserves already-written contents, so J-XI
+    /// never-written-reads-zero is unaffected).
+    ///
+    /// IM-3: grow is Host-only in Phase 4 — the caller funnels through
+    /// `host_vm_mut`, which `unreachable!`s on a Device pool (never minted).
+    #[cold]
+    #[inline(never)]
+    fn commit_subregion(&mut self, base_off: usize, old: usize, new: usize) {
+        debug_assert!(new > old, "commit_subregion: empty or backwards range");
+        const G: usize = crate::ecs::constants::COMMIT_GRANULE;
+        // `align_down` of `base_off + old`: when `old == 0` this floors the
+        // sub-region's leading pad onto granule 0 (the pad must be committed
+        // with the data/tick prefix); otherwise it lands on the granule
+        // boundary at or below the previously committed frontier.
+        let abs_old = (base_off + old) & !(G - 1);
+        let abs_new = pool_align_up_granule(base_off + new);
+        debug_assert!(
+            abs_new > abs_old,
+            "commit_subregion: granule-rounded range is empty"
+        );
+        self.backing.host_vm_mut().commit(abs_old, abs_new);
+    }
+
     /// Phase X.I D4 — the single cold growth funnel: ensures rows `[0, n)`
     /// are committed read/write (data + both tick sub-regions in lockstep,
     /// by rows).
@@ -449,8 +510,15 @@ impl ComponentPool {
 
         let stride = self.component_layout.size();
         // The sub-region geometry is a pure function of immutable fields —
-        // recomputed on this cold path instead of stored (D1).
-        let layout = pool_byte_layout(self.reserve_rows, stride);
+        // recomputed on this cold path instead of stored (D1). P2-CACHE-FIX:
+        // the SAME stagger `new` used MUST be recomputed here (from the stored
+        // `component_id`) so every commit offset matches the construction-time
+        // layout — `pool_byte_layout` is the single source of truth for both.
+        let layout = pool_byte_layout(
+            self.reserve_rows,
+            stride,
+            pool_base_stagger(self.component_id),
+        );
 
         // GROW1-XI proof 1: n <= reserve_rows => n*stride <=
         // reserve_rows*stride <= data_len, and data_len is a granule
@@ -477,9 +545,11 @@ impl ComponentPool {
         // new_d > data_committed strictly (the vm.rs `new > old`
         // debug_assert is unreachable from this caller — GROW1-XI 0b).
         let new_d = (self.data_committed + step).min(layout.data_len);
-        // IM-3: grow is Host-only in Phase 4 (`host_vm_mut` unreachable!s on a
-        // Device pool, which is never minted). Panics only on genuine OS OOM.
-        self.backing.host_vm_mut().commit(self.data_committed, new_d);
+        // P2-CACHE-FIX: the data sub-region begins at the non-granule
+        // `layout.data_off` (the per-pool stagger pad), so the commit is the
+        // granule-aligned superset of `[data_off + data_committed, data_off +
+        // new_d)`. `commit_subregion` panics only on genuine OS OOM.
+        self.commit_subregion(layout.data_off, self.data_committed, new_d);
 
         // GROW1-XI proofs 3 + 4: new_d >= needed >= n*stride =>
         // floor(new_d/stride) >= n; the min(reserve_rows) is LOAD-BEARING —
@@ -499,16 +569,12 @@ impl ComponentPool {
             "GROW1-XI step 5: tick commit overruns the tick sub-region"
         );
         if t_new > self.ticks_committed {
-            // IM-3: Host-only grow (see the data commit above).
-            let vm = self.backing.host_vm_mut();
-            vm.commit(
-                layout.added_off + self.ticks_committed,
-                layout.added_off + t_new,
-            );
-            vm.commit(
-                layout.changed_off + self.ticks_committed,
-                layout.changed_off + t_new,
-            );
+            // P2-CACHE-FIX: both tick sub-regions begin at non-granule offsets
+            // (`added_off`/`changed_off` ≡ stagger mod G), so each commits the
+            // granule-aligned superset of its `[*_off + ticks_committed, *_off
+            // + t_new)` range via `commit_subregion`.
+            self.commit_subregion(layout.added_off, self.ticks_committed, t_new);
+            self.commit_subregion(layout.changed_off, self.ticks_committed, t_new);
             // ★Q6: the frontier field is written only AFTER the commits it
             // describes succeed (panic-coherent on a mid-grow OS OOM).
             self.ticks_committed = t_new;
@@ -576,10 +642,15 @@ impl ComponentPool {
         );
 
         // Pure function of immutable fields — recomputed on this cold path
-        // instead of stored (D1), mirroring the stride > 0 body.
-        let layout = pool_byte_layout(self.reserve_rows, 0);
+        // instead of stored (D1), mirroring the stride > 0 body. P2-CACHE-FIX:
+        // the SAME stagger `new` used (from the stored `component_id`).
+        let stagger = pool_base_stagger(self.component_id);
+        let layout = pool_byte_layout(self.reserve_rows, 0, stagger);
         debug_assert_eq!(layout.data_len, 0, "Z1: vacuous data region");
-        debug_assert_eq!(layout.added_off, 0, "Z1: added ticks start at the base");
+        debug_assert_eq!(
+            layout.added_off, stagger,
+            "Z1: added ticks start at the stagger pad (vacuous data region)"
+        );
 
         // Z2: the tick byte frontier drives the policy. The mul cannot
         // overflow: `reserve_rows * 4` was overflow-checked by
@@ -601,20 +672,14 @@ impl ComponentPool {
             "Z4: the tick frontier must grow strictly (vm `new > old` precondition)"
         );
 
-        // Z3 + Z4: both ranges are granule-aligned (granule-multiple offsets
-        // plus granule-multiple frontiers), strictly growing, and in-bounds
-        // of the reservation (`changed_off + tick_len == os_len`). Panics
+        // Z3 + Z4: both tick frontiers are strictly growing and in-bounds of
+        // the reservation (`align_up(changed_off + tick_len, G) == os_len`).
+        // P2-CACHE-FIX: the tick sub-regions begin at non-granule offsets
+        // (`added_off`/`changed_off` ≡ stagger mod G), so each commits the
+        // granule-aligned superset of its range via `commit_subregion`. Panics
         // only on genuine OS OOM (same contract as the stride > 0 path).
-        // IM-3: Host-only grow (a ZST device pool is never minted in Phase 4).
-        let vm = self.backing.host_vm_mut();
-        vm.commit(
-            layout.added_off + self.ticks_committed,
-            layout.added_off + t_new,
-        );
-        vm.commit(
-            layout.changed_off + self.ticks_committed,
-            layout.changed_off + t_new,
-        );
+        self.commit_subregion(layout.added_off, self.ticks_committed, t_new);
+        self.commit_subregion(layout.changed_off, self.ticks_committed, t_new);
 
         // Z5: the min(reserve_rows) is LOAD-BEARING — granule padding can
         // make tick_len / 4 exceed reserve_rows.
@@ -753,6 +818,79 @@ impl ComponentPool {
         self.len += 1;
 
         Some(buffer_index)
+    }
+
+    /// Inlined typed append for a Copy/POD element (the [`ScratchColumn`] fast
+    /// path).
+    ///
+    /// Mirrors [`add_typed`](Self::add_typed) but bounds `T: Copy` (no
+    /// `Component`), and is `#[inline]` so it lowers into the caller's hot build
+    /// loop as a typed store — unlike the type-erased, non-inlined byte
+    /// [`add`](Self::add). The single warm compare + cold grow is byte-identical
+    /// to `add` / `add_typed`.
+    ///
+    /// # Returns
+    /// - `Some(slot_index)` on success.
+    /// - `None` when the reserve ceiling (`reserve_rows`) is exhausted — the
+    ///   pool is not modified.
+    ///
+    /// # Panics (debug only)
+    /// `debug_assert!` if `TypeId::of::<T>()` does not match the pool's
+    /// registered type.
+    ///
+    /// [`ScratchColumn`]: crate::ecs::core::component::scratch::ScratchColumn
+    #[inline]
+    pub(crate) fn push_copy<T: Copy + 'static>(&mut self, value: T) -> Option<usize> {
+        debug_assert_eq!(
+            self.component_type_id,
+            TypeId::of::<T>(),
+            "ComponentPool::push_copy: T = {} does not match pool's registered type",
+            std::any::type_name::<T>()
+        );
+
+        // ★R1-2 binding single-compare shape — see `add` for the rationale.
+        if self.len >= self.committed_rows && !self.grow_rows(self.len + 1) {
+            return None;
+        }
+
+        let buffer_index = self.len;
+
+        // SAFETY:
+        // - buffer_index < committed_rows (grown above if needed), so `row_ptr`
+        //   yields a pointer to a committed (read/write) slot inside the pool's
+        //   reservation.
+        // - The slot is aligned to align_of::<T>(): the buffer base is aligned
+        //   to component_layout.align() (>= align_of::<T>(), debug-asserted by
+        //   `ScratchColumn::new`), and stride is a multiple of that alignment.
+        // - The slot is exclusively owned (&mut self); no aliasing.
+        // - ptr::write consumes `value` by move (a bitwise copy for `T: Copy`);
+        //   `self.len += 1` below marks the slot live. The written bytes equal
+        //   the `copy_nonoverlapping` of `value`'s bytes that `add` performs.
+        unsafe { core::ptr::write(self.row_ptr(buffer_index).cast::<T>(), value) };
+
+        self.len += 1;
+
+        Some(buffer_index)
+    }
+
+    /// O(1) logical clear for a drop-free (Copy/POD) pool: resets `len` to 0
+    /// without per-element work. The committed pages stay resident (the reuse
+    /// contract — the next refill writes over them).
+    ///
+    /// Only sound when the element needs no drop: leaving `[0, old_len)`
+    /// un-dropped would leak or double-free a non-`Copy` `T`. The
+    /// `debug_assert!(self.drop_fn.is_none())` enforces that — the
+    /// [`ScratchColumn`] contract is `T: Copy` ⇒ `!needs_drop` ⇒
+    /// `drop_fn == None`.
+    ///
+    /// [`ScratchColumn`]: crate::ecs::core::component::scratch::ScratchColumn
+    #[inline]
+    pub(crate) fn clear_no_drop(&mut self) {
+        debug_assert!(
+            self.drop_fn.is_none(),
+            "clear_no_drop on a pool with a drop_fn (would leak undropped rows)"
+        );
+        self.len = 0;
     }
 
     /// Removes the last component from the pool, invoking drop glue if needed.

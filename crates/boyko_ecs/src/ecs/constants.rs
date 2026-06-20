@@ -140,46 +140,119 @@ pub(crate) const fn pool_reserve_rows(stride: usize) -> usize {
     }
 }
 
-/// Byte layout of a pool's single reservation (Phase X.I D1):
-/// `[data | added_ticks | changed_ticks]`, every sub-region granule-aligned.
+/// Number of distinct cache-line offsets the per-pool base stagger spreads
+/// across (P2-CACHE-FIX): 64 lines × 64 B = one 4 KiB page. A modern L1d is
+/// 8-way × 64 sets × 64 B = 32 KiB, so stepping the leading offset by one
+/// cache line per `component_id` (mod 64) lands consecutive pools' element-`i`
+/// rows in 64 *different* L1 sets (and, since the stride is a cache line,
+/// 64 different L2 sets too).
+const POOL_STAGGER_LINES: usize = 64;
+
+// The stagger granule must preserve the SIMD data-base alignment guarantee:
+// each step is a whole `CACHE_LINE_SIZE` (64 B) and the data sub-region starts
+// at `stagger`, so the data base is `reservation_base + stagger`. A 64 KiB-
+// aligned reservation base plus a 64 B-multiple stagger stays
+// SIMD_BUFFER_ALIGN-aligned iff 64 is a multiple of SIMD_BUFFER_ALIGN.
+const _: () = assert!(
+    CACHE_LINE_SIZE.is_multiple_of(SIMD_BUFFER_ALIGN),
+    "POOL_STAGGER_LINES step (CACHE_LINE_SIZE) must preserve SIMD_BUFFER_ALIGN"
+);
+
+/// Per-pool leading byte offset that spreads each pool's data (and tick)
+/// sub-regions across distinct cache sets (P2-CACHE-FIX).
+///
+/// Every `ComponentPool` reservation comes from `VirtualAlloc`/`mmap` at the
+/// 64 KiB OS reservation granularity, so EVERY pool's base has its low 16 bits
+/// zero. A SoA hot loop that sweeps many columns at index `i` (the rigid solver
+/// touches ~24 contact columns per contact) then maps element `i` of every
+/// column to the SAME L1 set (32 KiB) and L2 set (512 KiB), turning an 8-way
+/// set into a conflict-miss storm. Staggering each pool's in-reservation base
+/// by `(component_id % 64) × CACHE_LINE_SIZE` returns the heap-`Vec` behavior
+/// (scattered offsets ⇒ spread across sets) measured to recover the ~40%
+/// rigid-solver regression from the P2 ScratchColumn migration.
+///
+/// The result is always a multiple of [`CACHE_LINE_SIZE`] (64 B), hence a
+/// multiple of [`SIMD_BUFFER_ALIGN`] (the const assert above pins this), so the
+/// staggered data base preserves the AVX2 alignment contract. It is strictly
+/// less than one page (`< 64 × 64 = 4096`), so it costs at most one extra
+/// lazily-committed page per pool.
+pub(crate) const fn pool_base_stagger(component_id: usize) -> usize {
+    (component_id % POOL_STAGGER_LINES) * CACHE_LINE_SIZE
+}
+
+/// Byte layout of a pool's single reservation (Phase X.I D1, P2-CACHE-FIX
+/// stagger): `[pad | data | added_ticks | changed_ticks]`, every *sub-region*
+/// (data and both ticks) granule-aligned, shifted right by a per-pool leading
+/// `stagger` pad.
 ///
 /// ```text
-/// data_off    = 0
+/// stagger     = pool_base_stagger(component_id)   (0 ≤ stagger < 4096)
+/// data_off    = stagger                            (leading pad, SIMD-aligned)
 /// data_len    = align_up(reserve_rows × stride, G)
-/// added_off   = data_len;            tick_len = align_up(reserve_rows × 4, G)
-/// changed_off = data_len + tick_len
-/// os_len      = data_len + 2 × tick_len
+/// added_off   = stagger + data_len;   tick_len = align_up(reserve_rows × 4, G)
+/// changed_off = stagger + data_len + tick_len
+/// os_len      = align_up(stagger + data_len + 2 × tick_len, G)
 /// ```
 ///
 /// The `4` is `size_of::<UnsafeCell<Tick>>()` — pinned by a const assert in
 /// `component_pool.rs` and the U-P6 transmute test.
 ///
+/// P2-CACHE-FIX: `stagger` (a per-pool, [`pool_base_stagger`]-derived,
+/// `CACHE_LINE_SIZE`-multiple leading pad) shifts ALL three sub-regions right
+/// so different columns' element-`i` rows land in different cache sets. It is a
+/// multiple of [`SIMD_BUFFER_ALIGN`] (the const assert on `POOL_STAGGER_LINES`
+/// pins this), and a granule base plus a 64 B-multiple stagger keeps the data
+/// base SIMD-aligned. `os_len` is re-rounded UP to a granule so the frontier
+/// commit can never overrun the kernel's page-rounded mapping (the pad pushes
+/// the tail off the granule boundary it had at `stagger == 0`).
+///
 /// Phase 22 D6 (ZST/tag pools): for `stride == 0` the data sub-region is
-/// vacuous (`[0, 0)`) — `data_bytes = 0`, `data_len = align_up(0) = 0`,
-/// `added_off = 0`, `changed_off = tick_len`, `os_len = 2 × tick_len`. The
-/// two tick regions remain disjoint (`[0, tick_len)` / `[tick_len,
-/// 2·tick_len)`): the ★R1-8 disjointness proof becomes vacuous for
-/// data-vs-tick and is unchanged for tick-vs-tick.
+/// vacuous (`[stagger, stagger)`) — `data_bytes = 0`, `data_len = align_up(0)
+/// = 0`, `added_off = stagger`, `changed_off = stagger + tick_len`, `os_len =
+/// align_up(stagger + 2 × tick_len, G)`. The two tick regions remain disjoint
+/// (`[stagger, stagger+tick_len)` / `[stagger+tick_len, stagger+2·tick_len)`):
+/// the ★R1-8 disjointness proof becomes vacuous for data-vs-tick and is
+/// unchanged for tick-vs-tick.
 pub(crate) struct PoolByteLayout {
-    /// Granule-aligned data sub-region length (also `added_off`).
+    /// Per-pool leading pad (also `data_off`); `CACHE_LINE_SIZE`-multiple,
+    /// `< 4096` (P2-CACHE-FIX). The data sub-region starts here, not at 0.
+    pub(crate) data_off: usize,
+    /// Granule-aligned data sub-region length.
     pub(crate) data_len: usize,
     /// Granule-aligned length of EACH tick sub-region.
     pub(crate) tick_len: usize,
-    /// Offset of the `added` tick sub-region (== `data_len`).
+    /// Offset of the `added` tick sub-region (== `data_off + data_len`).
     pub(crate) added_off: usize,
-    /// Offset of the `changed` tick sub-region (== `data_len + tick_len`).
+    /// Offset of the `changed` tick sub-region
+    /// (== `data_off + data_len + tick_len`).
     pub(crate) changed_off: usize,
-    /// Total reservation length (`data_len + 2 × tick_len`).
+    /// Total reservation length
+    /// (`align_up(data_off + data_len + 2 × tick_len, G)`).
     pub(crate) os_len: usize,
 }
 
-/// Computes the D1 layout with checked arithmetic (overflow panics loudly).
-pub(crate) const fn pool_byte_layout(reserve_rows: usize, stride: usize) -> PoolByteLayout {
+/// Computes the D1 layout with the P2-CACHE-FIX leading stagger and checked
+/// arithmetic (overflow panics loudly). `stagger` is the single source of
+/// truth used by BOTH `ComponentPool::new` and `ComponentPool::grow_rows`
+/// (callers pass `pool_base_stagger(component_id)`), so their commit offsets
+/// can never drift.
+pub(crate) const fn pool_byte_layout(
+    reserve_rows: usize,
+    stride: usize,
+    stagger: usize,
+) -> PoolByteLayout {
     // Belt assert — `ComponentPool::new` fires the loud constructor-naming
     // asserts (★R1-5) before reaching this math. `stride == 0` is a VALID
     // input (Phase 22 D6): the math degrades to the vacuous-data-region
     // layout documented on `PoolByteLayout` with no further branching.
     assert!(reserve_rows > 0, "pool_byte_layout: reserve_rows must be non-zero");
+    // P2-CACHE-FIX: the stagger is a SIMD-aligned leading pad strictly below
+    // one page; a value above it would defeat the per-page cost bound and
+    // signal a caller computing it outside `pool_base_stagger`.
+    assert!(
+        stagger < 4096 && stagger.is_multiple_of(SIMD_BUFFER_ALIGN),
+        "pool_byte_layout: stagger must be SIMD-aligned and < one page"
+    );
 
     let data_bytes = match reserve_rows.checked_mul(stride) {
         Some(v) => v,
@@ -194,17 +267,30 @@ pub(crate) const fn pool_byte_layout(reserve_rows: usize, stride: usize) -> Pool
     };
     let tick_len = pool_align_up_granule(tick_bytes);
 
-    let added_off = data_len;
-    let changed_off = match data_len.checked_add(tick_len) {
+    // The data sub-region starts AFTER the leading stagger pad; every tick
+    // offset shifts by `stagger` accordingly.
+    let data_off = stagger;
+    let added_off = match data_off.checked_add(data_len) {
         Some(v) => v,
-        None => panic!("pool_byte_layout: data_len + tick_len overflows usize"),
+        None => panic!("pool_byte_layout: data_off + data_len overflows usize"),
     };
-    let os_len = match changed_off.checked_add(tick_len) {
+    let changed_off = match added_off.checked_add(tick_len) {
         Some(v) => v,
-        None => panic!("pool_byte_layout: os_len overflows usize"),
+        None => panic!("pool_byte_layout: added_off + tick_len overflows usize"),
     };
+    let tail = match changed_off.checked_add(tick_len) {
+        Some(v) => v,
+        None => panic!("pool_byte_layout: changed_off + tick_len overflows usize"),
+    };
+    // The stagger pushes the tail off the granule boundary it had at
+    // `stagger == 0`, so re-round UP to a granule (twin of the COMMIT_GRANULE
+    // contract: every reservation length is granule-rounded so a frontier
+    // commit never overruns the kernel mapping). `pool_align_up_granule`
+    // panics loudly on overflow.
+    let os_len = pool_align_up_granule(tail);
 
     PoolByteLayout {
+        data_off,
         data_len,
         tick_len,
         added_off,
@@ -354,12 +440,14 @@ mod tests {
         assert_eq!(pool_reserve_rows(32 * KIB), POOL_MIN_ROWS, "32 KiB: MIN floor binds");
     }
 
-    /// U-P1 — D1 layout math: every sub-region granule-aligned, offsets
-    /// disjoint and in order, `os_len = data_len + 2 × tick_len`.
+    /// U-P1 — D1 layout math at `stagger == 0` (the pre-P2-CACHE-FIX
+    /// geometry): every sub-region granule-aligned, offsets disjoint and in
+    /// order, `os_len = data_len + 2 × tick_len`.
     #[test]
     fn pool_byte_layout_granule_aligned_and_disjoint() {
         // Single-granule pool (the D2-mapped test geometry: 256 × 16 B).
-        let l = pool_byte_layout(256, 16);
+        let l = pool_byte_layout(256, 16, 0);
+        assert_eq!(l.data_off, 0, "stagger == 0 ⇒ data starts at the base");
         assert_eq!(l.data_len, G, "4096 B of data rounds up to one granule");
         assert_eq!(l.tick_len, G, "1024 B of ticks rounds up to one granule");
         assert_eq!(l.added_off, G);
@@ -368,7 +456,8 @@ mod tests {
 
         // Multi-granule pool: 65,536 × 192 B = 12 MiB data (already a
         // granule multiple), 256 KiB ticks.
-        let l2 = pool_byte_layout(65_536, 192);
+        let l2 = pool_byte_layout(65_536, 192, 0);
+        assert_eq!(l2.data_off, 0);
         assert_eq!(l2.data_len, 12 * MIB);
         assert_eq!(l2.tick_len, 256 * KIB);
         assert_eq!(l2.added_off, l2.data_len);
@@ -377,10 +466,48 @@ mod tests {
         assert!(l2.data_len.is_multiple_of(G) && l2.tick_len.is_multiple_of(G));
 
         // Non-multiple byte counts round UP (never down).
-        let l3 = pool_byte_layout(100, 12);
+        let l3 = pool_byte_layout(100, 12, 0);
         assert_eq!(l3.data_len, G, "1200 B rounds up to one granule");
         assert_eq!(l3.tick_len, G, "400 B rounds up to one granule");
         assert!(l3.data_len >= 100 * 12 && l3.tick_len >= 100 * 4);
+    }
+
+    /// P2-CACHE-FIX — D1 layout math with a non-zero per-pool stagger: every
+    /// offset shifts right by exactly `stagger`, the data base stays
+    /// SIMD-aligned, the sub-regions stay disjoint and in-bounds, and `os_len`
+    /// is re-rounded UP to a granule (the pad pushes the tail off the boundary
+    /// it had at `stagger == 0`).
+    #[test]
+    fn pool_byte_layout_stagger_shifts_all_subregions() {
+        // A representative stagger: component_id 3 ⇒ 3 × 64 = 192 B.
+        let stagger = pool_base_stagger(3);
+        assert_eq!(stagger, 192, "component_id 3 ⇒ 3 cache lines");
+        assert!(stagger.is_multiple_of(SIMD_BUFFER_ALIGN), "stagger SIMD-aligned");
+
+        // Single-granule pool (256 × 16 B) at this stagger.
+        let l = pool_byte_layout(256, 16, stagger);
+        assert_eq!(l.data_off, stagger, "data starts at the stagger pad");
+        assert_eq!(l.data_len, G, "data length is stagger-independent");
+        assert_eq!(l.tick_len, G, "tick length is stagger-independent");
+        assert_eq!(l.added_off, stagger + G, "added ticks shift by stagger");
+        assert_eq!(l.changed_off, stagger + 2 * G, "changed ticks shift by stagger");
+        // os_len re-rounds UP: stagger + 3 G is NOT a granule multiple.
+        assert_eq!(l.os_len, 4 * G, "os_len rounds the staggered tail up to a granule");
+        assert!(l.os_len.is_multiple_of(G), "os_len stays granule-aligned");
+
+        // Disjointness + in-bounds: data ⊂ [stagger, added_off),
+        // added ⊂ [added_off, changed_off), changed ⊂ [changed_off, os_len).
+        assert!(l.data_off + l.data_len <= l.added_off, "data before added ticks");
+        assert!(l.added_off + l.tick_len <= l.changed_off, "added before changed");
+        assert!(l.changed_off + l.tick_len <= l.os_len, "changed within reservation");
+
+        // The maximal stagger (component_id 63 ⇒ 63 × 64 = 4032 B) is still
+        // strictly below one page and SIMD-aligned.
+        let max_stagger = pool_base_stagger(63);
+        assert_eq!(max_stagger, 4032);
+        assert!(max_stagger < 4096 && max_stagger.is_multiple_of(SIMD_BUFFER_ALIGN));
+        // component_id 64 wraps back to 0 (mod 64).
+        assert_eq!(pool_base_stagger(64), 0, "stagger wraps mod 64");
     }
 
     /// Phase 22 D6 — `stride == 0` (ZST/tag pool) layout math: the data
@@ -396,8 +523,10 @@ mod tests {
             "align_up(0) must be 0 (vacuous data region keystone)"
         );
 
-        // Small geometry: 256 rows of 4 B ticks round up to one granule each.
-        let l = pool_byte_layout(256, 0);
+        // Small geometry at stagger == 0: 256 rows of 4 B ticks round up to
+        // one granule each.
+        let l = pool_byte_layout(256, 0, 0);
+        assert_eq!(l.data_off, 0, "stagger == 0 ⇒ data starts at the base");
         assert_eq!(l.data_len, 0, "ZST pool has no data bytes");
         assert_eq!(l.added_off, 0, "added ticks start at the reservation base");
         assert_eq!(l.tick_len, G, "256 × 4 B rounds up to one granule");
@@ -406,13 +535,27 @@ mod tests {
 
         // Ceiling geometry: the D6 VA-budget shape (2 × tick_len at
         // POOL_MAX_ROWS — 128 MiB on the syscall arms, 2 MiB on the fallback).
-        let l2 = pool_byte_layout(POOL_MAX_ROWS, 0);
+        let l2 = pool_byte_layout(POOL_MAX_ROWS, 0, 0);
         assert_eq!(l2.data_len, 0, "vacuous data region at the row ceiling");
         assert_eq!(l2.added_off, 0);
         assert_eq!(l2.tick_len, pool_align_up_granule(POOL_MAX_ROWS * 4));
         assert_eq!(l2.changed_off, l2.tick_len);
         assert_eq!(l2.os_len, 2 * l2.tick_len, "span == 2 × tick_len at the ceiling");
         assert!(l2.tick_len.is_multiple_of(G), "tick region stays granule-aligned");
+
+        // P2-CACHE-FIX: a staggered ZST pool shifts BOTH tick regions right
+        // by `stagger` and re-rounds the tail up to a granule. The two tick
+        // regions stay disjoint (data-vs-tick is vacuous, tick-vs-tick holds).
+        let stagger = pool_base_stagger(5); // 5 × 64 = 320 B
+        let l3 = pool_byte_layout(256, 0, stagger);
+        assert_eq!(l3.data_off, stagger);
+        assert_eq!(l3.data_len, 0, "ZST pool still has no data bytes");
+        assert_eq!(l3.added_off, stagger, "added ticks start at the stagger pad");
+        assert_eq!(l3.changed_off, stagger + l3.tick_len, "changed follows added");
+        assert_eq!(l3.os_len, 3 * G, "stagger + 2 G rounds up to one extra granule");
+        assert!(l3.os_len.is_multiple_of(G));
+        assert!(l3.added_off + l3.tick_len <= l3.changed_off, "tick-tick disjoint");
+        assert!(l3.changed_off + l3.tick_len <= l3.os_len, "changed in-bounds");
     }
 
     /// Phase 22 D6 — the `pool_reserve_rows` ZST arm routes to

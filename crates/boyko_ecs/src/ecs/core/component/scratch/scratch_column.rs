@@ -111,6 +111,39 @@ impl<T: Copy> ScratchColumn<T> {
         ScratchBuildView::new(self)
     }
 
+    /// The column's address-stable, **write-capable** raw base, typed `*mut T`.
+    ///
+    /// This is the single derivation of the solve-time base: it is exactly what
+    /// [`Self::solve_view`] caches, and the SoA-decomposed callers that build a
+    /// bespoke multi-column solve view (e.g. the physics contact columns, which
+    /// pack many `ScratchColumn`s into one worker-facing view) use it to obtain a
+    /// per-column write-capable base WITHOUT interposing a `&[T]` / `&mut [T]`
+    /// reborrow. Going through `ComponentPool::buffer_ptr` (provenance-preserving,
+    /// see component_pool.rs:1164-1170) and `cast_mut` from the SAME raw base
+    /// yields a pointer that carries write provenance — unlike
+    /// `as_read_slice().as_ptr().cast_mut()`, whose tag is Frozen / shared-read
+    /// and is therefore Tree-Borrows-UB to write through.
+    ///
+    /// The base is address-stable across `grow_rows` (the backing
+    /// `ComponentPool`'s VM reservation commits pages in place; the base is
+    /// write-once in `ComponentPool::new`), so a copy captured here stays valid
+    /// for as long as the `&self` borrow keeps the column alive.
+    ///
+    /// # Safety / provenance contract
+    /// The returned pointer is a write-capable base; writing through `base + i`
+    /// is sound only if the caller upholds disjointness — no two concurrent
+    /// writers (and no concurrent reader-via-`&[T]`) touch the same element `i`.
+    /// This is the coloring distinct-index invariant the colored solver relies
+    /// on. The pointer is valid for `[0, len())` elements and aligned to at
+    /// least `align_of::<T>()`.
+    #[inline]
+    pub fn solve_base(&self) -> *mut T {
+        // Provenance-preserving write-capable base (NOT via `as_read_slice`,
+        // whose `&[T]` reborrow would brand the pointer Frozen / SharedReadOnly
+        // and make writes through it Tree-Borrows UB).
+        self.column.buffer_ptr().cast_mut().cast::<T>()
+    }
+
     /// Borrows the column as a `Copy + Send + Sync` solve view. The
     /// [`ScratchSolveView`] exposes per-element `row_ptr(i) -> *mut T` ONLY — no
     /// whole-buffer `&mut [T]` path exists, so the SP4 reborrow is un-typeable.
@@ -119,7 +152,7 @@ impl<T: Copy> ScratchColumn<T> {
     /// outlive any refill of the column (enforced by `'a` borrowing `&self`).
     #[inline]
     pub fn solve_view(&self) -> ScratchSolveView<'_, T> {
-        ScratchSolveView::new(self.column.buffer_ptr().cast_mut().cast::<T>(), self.column.count())
+        ScratchSolveView::new(self.solve_base(), self.column.count())
     }
 
     /// The whole-buffer READ-ONLY slice over `[0, len)`, borrowed through `&self`.
@@ -172,17 +205,14 @@ impl<T: Copy> ScratchColumn<T> {
     /// reservation — the committed pages stay resident for the next refill.
     ///
     /// Sound because `T: Copy` ⇒ `!needs_drop` (asserted in [`Self::new`]): the
-    /// pool's `drop_fn` is `None`, so `pop_entity_no_drop` (which never runs
+    /// pool's `drop_fn` is `None`, so the O(1) `clear_no_drop` (which never runs
     /// drop glue) correctly empties the column without leaking or double-freeing.
+    #[inline]
     pub(crate) fn clear(&mut self) {
-        // Walk the high-water mark down to 0 without dropping. The backing
-        // pool exposes no `set_len`, but `pop_entity_no_drop` is exactly the
-        // per-element no-drop decrement, and for a `!needs_drop` `T` the loop is
-        // semantically `len = 0`. The compiler lowers it to a tight counter
-        // decrement (no per-element drop glue is emitted).
-        while self.column.count() != 0 {
-            self.column.pop_entity_no_drop();
-        }
+        // O(1) `len = 0`: the build path refills every column from scratch each
+        // step, so the per-element no-drop pop loop was pure overhead
+        // (~316k decrements/step on the rigid colored-solve hot path).
+        self.column.clear_no_drop();
     }
 
     /// Appends `value` at the frontier, growing the backing column in place if
@@ -190,12 +220,17 @@ impl<T: Copy> ScratchColumn<T> {
     ///
     /// # Panics
     /// * the backing column's reserve ceiling is exhausted.
-    pub(crate) fn push(&mut self, value: T) -> u32 {
-        // `value` is `Copy`, so reading its bytes does not move it and the local
-        // drops trivially (no-op for a Copy type).
-        let bytes = value_bytes(&value);
+    #[inline]
+    pub(crate) fn push(&mut self, value: T) -> u32
+    where
+        T: 'static,
+    {
+        // Inlined typed Copy store (`push_copy`), NOT the type-erased,
+        // non-inlined byte `add` — the latter built a `&[u8]` span, made a
+        // cross-crate non-inlined call, and did a `copy_nonoverlapping` memcpy
+        // per push, all of which dominated the per-step build of 31 columns.
         self.column
-            .add(bytes)
+            .push_copy(value)
             .expect("invariant: ScratchColumn reserve ceiling exhausted") as u32
     }
 
@@ -204,25 +239,14 @@ impl<T: Copy> ScratchColumn<T> {
     ///
     /// # Panics
     /// * the backing column's reserve ceiling is exhausted.
-    pub(crate) fn extend_from_slice(&mut self, values: &[T]) {
-        for v in values {
-            let bytes = value_bytes(v);
+    pub(crate) fn extend_from_slice(&mut self, values: &[T])
+    where
+        T: 'static,
+    {
+        for &v in values {
             self.column
-                .add(bytes)
+                .push_copy(v)
                 .expect("invariant: ScratchColumn reserve ceiling exhausted");
         }
     }
-}
-
-/// Views one `T: Copy` as its own byte span for the `ComponentPool::add` raw
-/// API. Sound for any `Copy` `T`: reading its bytes is a non-moving read of an
-/// initialised value, and the bytes ARE a valid representation of the registered
-/// type (the layout match is debug-asserted in [`ScratchColumn::new`]).
-#[inline]
-fn value_bytes<T: Copy>(value: &T) -> &[u8] {
-    // SAFETY: `value` is an initialised `T` (a live reference); `T: Copy` so its
-    // bytes are a plain-old-data representation with no interior pointers/padding
-    // invariants to violate. The span is exactly `size_of::<T>()` bytes within
-    // the single `T` object, read-only, tied to `value`'s borrow.
-    unsafe { core::slice::from_raw_parts((value as *const T).cast::<u8>(), core::mem::size_of::<T>()) }
 }

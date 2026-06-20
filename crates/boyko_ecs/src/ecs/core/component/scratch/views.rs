@@ -77,7 +77,10 @@ impl<'a, T: Copy> ScratchBuildView<'a, T> {
     /// # Panics
     /// * the backing column's reserve ceiling is exhausted.
     #[inline]
-    pub fn push(&mut self, value: T) -> u32 {
+    pub fn push(&mut self, value: T) -> u32
+    where
+        T: 'static,
+    {
         self.column.push(value)
     }
 
@@ -87,7 +90,10 @@ impl<'a, T: Copy> ScratchBuildView<'a, T> {
     /// # Panics
     /// * the backing column's reserve ceiling is exhausted.
     #[inline]
-    pub fn extend_from_slice(&mut self, values: &[T]) {
+    pub fn extend_from_slice(&mut self, values: &[T])
+    where
+        T: 'static,
+    {
         self.column.extend_from_slice(values);
     }
 
