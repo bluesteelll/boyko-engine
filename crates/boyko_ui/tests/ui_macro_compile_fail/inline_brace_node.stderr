@@ -1,0 +1,13 @@
+error: a child node must appear inside a `children: [ ... ]` clause
+ --> tests/ui_macro_compile_fail/inline_brace_node.rs:9:9
+  |
+9 |         { UiLayout::default() }
+  |         ^
+
+warning: unused import: `boyko_ui::components::UiLayout`
+ --> tests/ui_macro_compile_fail/inline_brace_node.rs:3:5
+  |
+3 | use boyko_ui::components::UiLayout;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

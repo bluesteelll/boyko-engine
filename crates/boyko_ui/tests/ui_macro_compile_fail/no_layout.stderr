@@ -1,0 +1,13 @@
+error: a ui node requires a `UiLayout` component (the last path segment must be `UiLayout`, e.g. `UiLayout { .. }` or a qualified spelling ending in `::UiLayout`)
+ --> tests/ui_macro_compile_fail/no_layout.rs:8:9
+  |
+8 |         ContentSize { width: 10.0, height: 10.0 }
+  |         ^^^^^^^^^^^
+
+warning: unused import: `boyko_ui::components::ContentSize`
+ --> tests/ui_macro_compile_fail/no_layout.rs:3:5
+  |
+3 | use boyko_ui::components::ContentSize;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

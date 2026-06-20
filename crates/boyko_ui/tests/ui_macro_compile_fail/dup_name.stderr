@@ -1,0 +1,13 @@
+error: duplicate ui name `foo`; names must be unique within a `ui!` invocation
+  --> tests/ui_macro_compile_fail/dup_name.rs:11:18
+   |
+11 |                 #foo { UiLayout::default() }
+   |                  ^^^
+
+warning: unused import: `boyko_ui::components::UiLayout`
+ --> tests/ui_macro_compile_fail/dup_name.rs:3:5
+  |
+3 | use boyko_ui::components::UiLayout;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

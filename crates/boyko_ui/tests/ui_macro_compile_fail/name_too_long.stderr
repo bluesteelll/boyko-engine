@@ -1,0 +1,13 @@
+error: ui name `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa` exceeds 60 bytes
+ --> tests/ui_macro_compile_fail/name_too_long.rs:9:10
+  |
+9 |         #aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa {
+  |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `boyko_ui::components::UiLayout`
+ --> tests/ui_macro_compile_fail/name_too_long.rs:3:5
+  |
+3 | use boyko_ui::components::UiLayout;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

@@ -1,0 +1,13 @@
+error: ui name `cmds` collides with the commands binding; choose another name
+ --> tests/ui_macro_compile_fail/name_collides_commands.rs:8:10
+  |
+8 |         #cmds { UiLayout::default() }
+  |          ^^^^
+
+warning: unused import: `boyko_ui::components::UiLayout`
+ --> tests/ui_macro_compile_fail/name_collides_commands.rs:3:5
+  |
+3 | use boyko_ui::components::UiLayout;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

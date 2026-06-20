@@ -1,0 +1,5 @@
+error: a ui node needs at least one component (a `UiLayout`)
+ --> tests/ui_macro_compile_fail/empty_node.rs:7:16
+  |
+7 |         #empty { }
+  |                ^^^

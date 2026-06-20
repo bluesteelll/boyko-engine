@@ -20,12 +20,14 @@ use std::sync::{Arc, Mutex};
 
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::entity::entity::Entity;
+use boyko_ecs::ecs::core::hierarchy::{ChildOf, Children};
 use boyko_ecs::ecs::core::schedule::{Schedule, ScheduleBuilder};
 use boyko_ecs::ecs::core::system::Commands;
 use boyko_threadpool::ThreadPoolBuilder;
 
+use boyko_ui::bundles::UiNodeBundle;
 use boyko_ui::components::{
-    ComputedRect, ContentSize, UiAbsolute, UiAlign, UiLayout, UiRoot, UiSpacing,
+    ComputedRect, ContentSize, UiAbsolute, UiAlign, UiLayout, UiName, UiRoot, UiSpacing,
 };
 use boyko_ui::layout::{ui_layout_apply, ui_layout_discovery};
 use boyko_ui::resources::{LayoutScratch, UiViewport};
@@ -40,6 +42,10 @@ pub struct NodeSpec {
     pub absolute: Option<UiAbsolute>,
     pub content: Option<ContentSize>,
     pub root: bool,
+    /// Hand-side `UiName` — inserted in the SAME relative position the `ui!`
+    /// macro emits it (after the base + injected rect, before linking), so a
+    /// `#named` DSL node and its position-matched hand node share an archetype.
+    pub name: Option<&'static str>,
 }
 
 impl NodeSpec {
@@ -63,6 +69,10 @@ impl NodeSpec {
     }
     pub fn with_content(mut self, c: ContentSize) -> Self {
         self.content = Some(c);
+        self
+    }
+    pub fn with_name(mut self, n: &'static str) -> Self {
+        self.name = Some(n);
         self
     }
 }
@@ -123,6 +133,55 @@ impl Ui {
             if spec.root {
                 ec.insert(UiRoot);
             }
+            // `UiName` last among components — the `ui!` macro emits it after the
+            // base + injected rect + author inserts (so the same component set
+            // and archetype result regardless of insert order).
+            if let Some(n) = spec.name {
+                ec.insert(UiName::new(n));
+            }
+            if let Some(p) = parent {
+                ec.set_parent(p);
+            }
+            *probe.lock().expect("probe") = Some(ec.id());
+        });
+        let e = sink.lock().expect("probe").expect("spawned handle");
+        assert!(self.world.has_entity(e), "spawned UI node is live after apply");
+        e
+    }
+
+    /// Bundle-path baseline (Test #0): hand-writes `cmds.spawn(UiNodeBundle {
+    /// layout, rect })` — the SAME single-spawn shape the `ui!` macro emits when
+    /// a node's component set contains both `UiLayout` and `ComputedRect`. Used
+    /// to assert three-way archetype identity (DSL / insert-baseline /
+    /// bundle-baseline) and that the canonical bundle fast path is hit.
+    ///
+    /// The optional components are inserted in the same relative order the macro
+    /// emits them (after the base, before linking), so the final archetype
+    /// matches the insert-path baseline and the DSL.
+    pub fn spawn_via_bundle(&mut self, spec: NodeSpec, parent: Option<Entity>) -> Entity {
+        let sink: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
+        let probe = Arc::clone(&sink);
+        self.world.run_system(move |mut cmds: Commands| {
+            let mut ec =
+                cmds.spawn(UiNodeBundle { layout: spec.layout, rect: ComputedRect::default() });
+            if let Some(s) = spec.spacing {
+                ec.insert(s);
+            }
+            if let Some(a) = spec.align {
+                ec.insert(a);
+            }
+            if let Some(a) = spec.absolute {
+                ec.insert(a);
+            }
+            if let Some(c) = spec.content {
+                ec.insert(c);
+            }
+            if spec.root {
+                ec.insert(UiRoot);
+            }
+            if let Some(n) = spec.name {
+                ec.insert(UiName::new(n));
+            }
             if let Some(p) = parent {
                 ec.set_parent(p);
             }
@@ -143,9 +202,43 @@ impl Ui {
         self.spawn(NodeSpec::new(layout), Some(parent))
     }
 
+    /// Runs an arbitrary authoring closure against a `Commands` queue, driving
+    /// exactly one apply window. The `ui!` macro emits code against a `cmds`
+    /// binding, so a test body is written as `ui.author(|mut cmds| { let r =
+    /// ui!{..}; *probe = r; })`. Returns nothing; harvest entity handles through
+    /// an `Arc<Mutex<…>>` probe captured by the closure (the established
+    /// Phase-11/19 pattern — deferred spawns are live only after this returns).
+    pub fn author<F>(&mut self, mut f: F)
+    where
+        F: FnMut(Commands) + Send + Sync + 'static,
+    {
+        self.world.run_system(move |cmds: Commands| f(cmds));
+    }
+
     /// Runs one frame of `discovery -> apply`.
     pub fn run(&mut self) {
         self.schedule.run(&mut self.world);
+    }
+
+    /// Reads a node's parent (`ChildOf` FK), if any.
+    pub fn parent_of(&self, child: Entity) -> Option<Entity> {
+        self.world.get_component::<ChildOf>(child).map(|c| c.0)
+    }
+
+    /// Reads a node's children as a `Vec` (order unspecified per the hierarchy
+    /// contract), or `None` if the node has no `Children` component at all.
+    pub fn children_of(&self, parent: Entity) -> Option<Vec<Entity>> {
+        self.world.get_component::<Children>(parent).map(|c| c.as_slice().to_vec())
+    }
+
+    /// Reads a node's `UiName`, if present.
+    pub fn name_of(&self, e: Entity) -> Option<UiName> {
+        self.world.get_component::<UiName>(e).copied()
+    }
+
+    /// `entity`'s current archetype id (post-link).
+    pub fn archetype_of(&self, e: Entity) -> Option<boyko_ecs::ecs::identifiers::primitives::ArchetypeId> {
+        self.world.entity_archetype_id(e)
     }
 
     /// Reads a node's computed rect (panics if absent — every spawned node carries

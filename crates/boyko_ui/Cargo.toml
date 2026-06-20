@@ -21,3 +21,5 @@ boyko-utils  = { path = "../boyko_utils" }
 # needed for #[derive(Component)] on test-local probe components.
 boyko-threadpool = { path = "../boyko_threadpool" }
 boyko-macros     = { path = "../boyko_macros" }
+# P2 `ui!` macro compile-fail acceptance tests (snapshot-based).
+trybuild         = "1"

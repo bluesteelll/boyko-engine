@@ -206,3 +206,78 @@ pub struct ComputedClip {
 /// viewport.
 #[derive(Component, Clone, Copy, Debug, Default)]
 pub struct UiRoot;
+
+/// Stable author-assigned name for a node. COLD, OPT-IN: present only on
+/// `#named` nodes authored through the [`ui!`](boyko_macros::ui) macro (P2).
+///
+/// It is the diff key for the P3 `.ui` hot-reload pass: two `UiName` columns are
+/// compared with a fixed-size `memcmp` (`Copy`/`Eq`), with no interner and no
+/// global string table — Principle 1/5. The name is stored inline (no heap), so
+/// it is POD `Copy`/`Send`/`Sync` like every other layout component and stores
+/// in a contiguous SoA column with no indirection.
+///
+/// The buffer is 60 bytes; the `ui!` macro rejects longer names at compile time
+/// with a span on the offending `#name`. The struct is one cache line (64 B,
+/// `align(64)`) for a clean column stride.
+#[repr(C, align(64))]
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UiName {
+    /// UTF-8 bytes of the name; only the first `len` are meaningful, the rest
+    /// are zero.
+    bytes: [u8; Self::CAP],
+    /// Valid byte count in `bytes` (`<= CAP`).
+    len: u8,
+    /// Pad to one full cache line (64 B).
+    _pad: [u8; 3],
+}
+
+impl UiName {
+    /// Maximum name length in bytes (UTF-8). 60 B keeps the struct at exactly
+    /// one cache line; the `ui!` macro enforces this at compile time.
+    pub const CAP: usize = 60;
+
+    /// Copies `s` into the inline buffer.
+    ///
+    /// `s.len()` MUST be `<= CAP`; the `ui!` macro enforces this at compile time
+    /// on the string literal, so the runtime path only `debug_assert!`s it (the
+    /// P3 text path is the other caller and is responsible for its own bound
+    /// check before calling). `const` so the `ui!` literal path is const-foldable.
+    pub const fn new(s: &str) -> Self {
+        debug_assert!(s.len() <= Self::CAP, "invariant: ui name exceeds CAP");
+        let src = s.as_bytes();
+        let mut bytes = [0u8; Self::CAP];
+        // `const fn` cannot use `copy_from_slice`/iterators with `?`; a manual
+        // index loop is the const-compatible byte copy. `n` is clamped to CAP so
+        // an over-length name (which the macro already rejects) cannot overrun.
+        let n = if src.len() < Self::CAP { src.len() } else { Self::CAP };
+        let mut i = 0;
+        while i < n {
+            bytes[i] = src[i];
+            i += 1;
+        }
+        Self { bytes, len: n as u8, _pad: [0; 3] }
+    }
+
+    /// The name as a string slice. COLD (debug / diff display only).
+    #[inline]
+    pub fn as_str(&self) -> &str {
+        debug_assert!(self.len as usize <= Self::CAP, "invariant: UiName len exceeds CAP");
+        // SAFETY: `new` only ever writes valid UTF-8 bytes copied verbatim from a
+        // `&str` into `bytes[..len]`, and `len <= CAP` (debug-asserted above and
+        // clamped in `new`). The slice `bytes[..len]` is therefore the exact
+        // valid-UTF-8 prefix that was stored, so `from_utf8_unchecked` is sound.
+        unsafe { core::str::from_utf8_unchecked(&self.bytes[..self.len as usize]) }
+    }
+
+    /// The name length in bytes.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.len as usize
+    }
+
+    /// Whether the name is empty.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}

@@ -20,18 +20,26 @@
 //! Schedule them in that order, after all structural/prop-mutation systems (the
 //! `Children`/`ChildOf` consistency window).
 
+pub mod bundles;
 pub mod components;
 pub mod layout;
 pub mod resources;
 pub mod units;
 
+/// The `ui!` authoring macro (P2): write a UI entity tree as a literal nested
+/// block. See [`boyko_macros::ui`] for the grammar and expansion contract.
+pub use boyko_macros::ui;
+
 /// Crate-local convenience re-exports (no engine-wide prelude).
 pub mod prelude {
+    pub use crate::bundles::UiNodeBundle;
     pub use crate::components::{
-        ComputedClip, ComputedRect, ContentSize, StackIndex, UiAbsolute, UiAlign, UiLayout, UiRoot,
-        UiSpacing,
+        ComputedClip, ComputedRect, ContentSize, StackIndex, UiAbsolute, UiAlign, UiLayout, UiName,
+        UiRoot, UiSpacing,
     };
     pub use crate::layout::{ui_layout_apply, ui_layout_discovery};
     pub use crate::resources::{LayoutScratch, UiViewport};
     pub use crate::units::{AlignCross, AlignMain, LayoutType, PositionType, Unit};
+
+    pub use boyko_macros::ui;
 }
