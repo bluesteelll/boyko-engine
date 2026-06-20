@@ -97,4 +97,70 @@ float2 unpack_cones(float packed) {
     return float2(cos_inner, cos_outer);
 }
 
+// === L1 cluster grid (Decision 6) — the shared cull-write / resolve-read source of truth ==
+//
+// The cluster grid is a `StructuredBuffer<uint2>` ClusterCell[CLUSTER_COUNT] ({offset,count}
+// into the flat light-index list) + a `StructuredBuffer<uint>` LightIndexList. The header's
+// `cluster_params` lane (LightBuf words 12..16) carries the exp-Z lookup factors:
+//   word 12 : asfloat -> z_scale  (slice = ln(view_z) * z_scale + z_bias)
+//   word 13 : asfloat -> z_bias
+//   word 14 : asuint  -> packed_dims = dim_x | dim_y<<8 | dim_z<<16
+//   word 15 : asuint  -> clusters_enabled (0 => L1 OFF, resolve loops the flat table)
+// Host mirror: boyko_render::light::{ClusterConfig, LightHeaderGpu::new_clustered}.
+
+// Decoded L1 cluster lookup params (read once per pixel in the resolve, per froxel in cull).
+struct ClusterParams {
+    float z_scale;        // exp-Z affine slice scale
+    float z_bias;         // exp-Z affine slice bias
+    uint  dim_x;          // froxel grid X
+    uint  dim_y;          // froxel grid Y
+    uint  dim_z;          // froxel grid Z (exp-Z slices)
+    uint  clusters_enabled; // 0 => loop the flat table (L1 0%-gate == L0b)
+};
+
+// Decodes the L1 cluster params from the header's `cluster_params` lane.
+ClusterParams load_cluster_params(StructuredBuffer<uint> LightBuf) {
+    ClusterParams p;
+    p.z_scale          = asfloat(LightBuf[12]);
+    p.z_bias           = asfloat(LightBuf[13]);
+    uint packed        = LightBuf[14];
+    p.dim_x            = packed & 0xFFu;
+    p.dim_y            = (packed >> 8) & 0xFFu;
+    p.dim_z            = (packed >> 16) & 0xFFu;
+    p.clusters_enabled = LightBuf[15];
+    return p;
+}
+
+// Linearizes froxel (x,y,z) to its flat ClusterCell index. THE one source of truth: the
+// cull-WRITE and the resolve-READ both call this, so they can never disagree (a mismatch
+// silently maps a pixel to the wrong cluster). Mirrors host `light::cluster_index`:
+// `(y * dim_x + x) * dim_z + z` (Z innermost so a depth walk is contiguous).
+uint cluster_linear_index(uint x, uint y, uint z, uint dim_x, uint dim_z) {
+    return (y * dim_x + x) * dim_z + z;
+}
+
+// Maps a view-space depth `view_z` to its exp-Z froxel slice, clamped to [0, dim_z-1]. The
+// affine `ln(view_z) * z_scale + z_bias` inverts `view_z = near * (far/near)^(slice/dim_z)`.
+// A `view_z <= 0` (behind the near plane / sentinel) clamps to slice 0.
+uint cluster_z_slice(float view_z, ClusterParams p) {
+    if (view_z <= 0.0) {
+        return 0u;
+    }
+    float slice = log(view_z) * p.z_scale + p.z_bias;
+    int si = (int)floor(slice);
+    if (si < 0) { si = 0; }
+    if (si > (int)p.dim_z - 1) { si = (int)p.dim_z - 1; }
+    return (uint)si;
+}
+
+// Maps a pixel (px,py) at extent (w,h) to its froxel (x,y) tile, clamped to the grid. The
+// tile is `px * dim_x / w` (integer, evenly spreads pixels across froxel columns).
+uint2 cluster_xy_tile(uint px, uint py, uint w, uint h, ClusterParams p) {
+    uint tx = (px * p.dim_x) / max(w, 1u);
+    uint ty = (py * p.dim_y) / max(h, 1u);
+    if (tx > p.dim_x - 1u) { tx = p.dim_x - 1u; }
+    if (ty > p.dim_y - 1u) { ty = p.dim_y - 1u; }
+    return uint2(tx, ty);
+}
+
 #endif // LIGHT_TABLE_HLSLI

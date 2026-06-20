@@ -64,10 +64,11 @@ pub use error::GpuColumnError;
 pub use gpu_column::{GpuColumnManager, GpuColumnMeta, LOCAL_SIZE_X, ResolvedColumn, RhiContext};
 pub use gpu_system::{GpuSystem, gpu_integrate_spirv};
 pub use light::{
-    CLUSTER_COUNT, CLUSTER_DIM_X, CLUSTER_DIM_Y, CLUSTER_DIM_Z, ClusterCell, DirectionalLight,
-    GPU_LIGHT_WORDS, GpuLight, LIGHT_HEADER_BASE_WORDS, LIGHT_HEADER_WORDS, LIGHT_KIND_DIRECTIONAL,
+    CLUSTER_COUNT, CLUSTER_DIM_X, CLUSTER_DIM_Y, CLUSTER_DIM_Z, CLUSTER_FAR_DEFAULT,
+    CLUSTER_NEAR_DEFAULT, ClusterCell, ClusterConfig, DirectionalLight, GPU_LIGHT_WORDS, GpuLight,
+    INDEX_LIST_CAP, LIGHT_HEADER_BASE_WORDS, LIGHT_HEADER_WORDS, LIGHT_KIND_DIRECTIONAL,
     LIGHT_KIND_POINT, LIGHT_KIND_SKY, LIGHT_KIND_SPOT, LightHeaderGpu, LightingConfig, MAX_LIGHTS,
-    MAX_LIGHTS_PER_CLUSTER, PointLight, SPOT_COS_OUTER_MAX, SkyLight, SpotLight,
+    MAX_LIGHTS_PER_CLUSTER, PointLight, SPOT_COS_OUTER_MAX, SkyLight, SpotLight, cluster_index,
 };
 pub use light_system::{
     GPU_LIGHT_BYTES, LIGHT_HEADER_BYTES, LightChanged, LightTableStaging, collect_lights,

@@ -2637,6 +2637,125 @@ impl<'ctx> Renderer<'ctx> {
             }
         }
 
+        // === Lighting L1: the clustered froxel light-cull pass (Decision 6). Recorded ONLY
+        // when the scene wires the cull pipeline + cull set; otherwise skipped entirely (the
+        // resolve's `clusters_enabled` header gate then loops the flat table — the L1 OFF /
+        // 0%-gate, byte-identical command stream). The cull reads the camera UBO + light table
+        // (the L0-r0 copy above already ordered the table for COMPUTE reads) and writes the
+        // ClusterGrid + LightIndexList; the resolve reads them, so a COMPUTE→COMPUTE buffer
+        // barrier orders the cull WRITE before the resolve READ. The cull does NOT depend on
+        // gViewT (it is geometric), so it can run after the marcher without further sync. ===
+        if let (Some(cull_pipeline), Some(cull_set), Some(grid), Some(index), Some(alloc)) = (
+            scene.cluster_cull,
+            targets.cull_set.as_ref(),
+            scene.cluster_grid,
+            scene.light_index,
+            scene.light_index_alloc,
+        ) {
+            // (L1-0) Reset the global slice-allocation counter to 0 (a transfer fill), then
+            // order the fill before the cull's atomic reads/writes (TRANSFER→COMPUTE).
+            let alloc_reset_barrier = VkBufferMemoryBarrier {
+                s_type: VkStructureType::BufferMemoryBarrier,
+                p_next: ptr::null(),
+                src_access_mask: VK_ACCESS_TRANSFER_WRITE_BIT,
+                dst_access_mask: VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                buffer: alloc.buffer,
+                offset: 0,
+                size: VK_WHOLE_SIZE,
+            };
+            // SAFETY: recording is open; `alloc` is a live device-local STORAGE buffer (≥ 4 B,
+            // the single u32 counter); `cmd_fill_buffer` zero-fills it (Vulkan 1.0 core), and
+            // the barrier orders that TRANSFER write before the cull's COMPUTE atomics on the
+            // GPU timeline; `&alloc_reset_barrier` outlives the call.
+            unsafe {
+                (self.fns.cmd_fill_buffer)(cmd, alloc.buffer, 0, VK_WHOLE_SIZE, 0);
+                (self.fns.cmd_pipeline_barrier)(
+                    cmd,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    0,
+                    0,
+                    ptr::null(),
+                    1,
+                    (&alloc_reset_barrier as *const VkBufferMemoryBarrier).cast(),
+                    0,
+                    ptr::null(),
+                );
+            }
+
+            // (L1-1) Bind the cull pipeline + the cull set (written ONCE at sync_gbuffer),
+            // push the 16-byte ClusterCullPush, dispatch over CLUSTER_COUNT froxels.
+            let cull_groups = scene.cluster_count.div_ceil(LIGHT_CULL_LOCAL_SIZE_X);
+            // SAFETY: recording is open; the cull pipeline + its layout (declaring `cull_layout`
+            // at set 0 + the 16-byte COMPUTE push range) are live on this device (caller
+            // contract); the cull set binds the camera UBO + light table + the cluster buffers;
+            // `cull_groups` covers `cluster_count` froxels at the 64-wide group; the push bytes
+            // are exactly `CLUSTER_CULL_PUSH_BYTES` (16) at offset 0; `&cull_set.descriptor_set`
+            // is a single-element local alive for the call (first_set 0, count 1).
+            unsafe {
+                (self.fns.cmd_bind_pipeline)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    cull_pipeline.pipeline,
+                );
+                (self.fns.cmd_bind_descriptor_sets)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    cull_pipeline.layout,
+                    0,
+                    1,
+                    &cull_set.descriptor_set,
+                    0,
+                    ptr::null(),
+                );
+                (self.fns.cmd_push_constants)(
+                    cmd,
+                    cull_pipeline.layout,
+                    VK_SHADER_STAGE_COMPUTE_BIT,
+                    0,
+                    CLUSTER_CULL_PUSH_BYTES,
+                    scene.cluster_cull_push.as_ptr().cast(),
+                );
+                (self.fns.cmd_dispatch)(cmd, cull_groups, 1, 1);
+            }
+
+            // (L1-2) Make the cull's ClusterGrid + LightIndexList writes available + visible to
+            // the resolve's reads (COMPUTE→COMPUTE, SHADER_WRITE→SHADER_READ) on both buffers.
+            for buf in [grid, index] {
+                let cull_to_resolve = VkBufferMemoryBarrier {
+                    s_type: VkStructureType::BufferMemoryBarrier,
+                    p_next: ptr::null(),
+                    src_access_mask: VK_ACCESS_SHADER_WRITE_BIT,
+                    dst_access_mask: VK_ACCESS_SHADER_READ_BIT,
+                    src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                    dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                    buffer: buf.buffer,
+                    offset: 0,
+                    size: VK_WHOLE_SIZE,
+                };
+                // SAFETY: recording is open; one buffer barrier on a live cluster SSBO;
+                // COMPUTE_SHADER→COMPUTE_SHADER with SHADER_WRITE→SHADER_READ makes the cull's
+                // grid/index store available + visible to the resolve's load on the GPU
+                // timeline; `&cull_to_resolve` outlives the iteration.
+                unsafe {
+                    (self.fns.cmd_pipeline_barrier)(
+                        cmd,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        0,
+                        0,
+                        ptr::null(),
+                        1,
+                        (&cull_to_resolve as *const VkBufferMemoryBarrier).cast(),
+                        0,
+                        ptr::null(),
+                    );
+                }
+            }
+        }
+
         // (5b) Deferred RESOLVE pass: bind the resolve pipeline + the resolve set (gAlbedo
         // @0, gMaterial @1, lit @2 — all STORAGE in GENERAL), dispatch at the SAME grid the
         // marcher used (1:1 the marched pixels). It composites `lit = mask ? base*vis : base`.
@@ -3231,6 +3350,15 @@ pub const GBUFFER_MVP_BYTES: usize = 64;
 /// 80-byte (`COMPOSITE_PUSH_CONSTANT_BYTES`) range.
 const GBUFFER_MARCHER_PUSH_BYTES: u32 = crate::compute::GBUFFER_MARCHER_PUSH_BYTES;
 
+/// The Lighting-L1 cull pipeline's COMPUTE push range size (16 B
+/// [`crate::compute::ClusterCullPush`]). Re-exported so [`GBufferScene::cluster_cull_push`]
+/// can size its inline byte array without depending on `compute` at the field-decl site.
+const CLUSTER_CULL_PUSH_BYTES: u32 = crate::compute::CLUSTER_CULL_PUSH_BYTES;
+
+/// The Lighting-L1 cull shader's `[numthreads(64,1,1)]` group width. The cull's 1D dispatch
+/// group count is `ceil(cluster_count / LIGHT_CULL_LOCAL_SIZE_X)`.
+const LIGHT_CULL_LOCAL_SIZE_X: u32 = 64;
+
 /// The on-screen Render-P1c G-buffer frame's STATIC inputs: the resources the
 /// [`Renderer::render_gbuffer_frame`] 3-pass needs that do NOT depend on the
 /// (WSI-clamped) swapchain extent. The EXTENT-dependent targets (depth + the MRT
@@ -3348,6 +3476,41 @@ pub struct GBufferScene<'a> {
     /// staging→`light_table` copy + barrier; `false` records NOTHING (idle frame → zero
     /// cost, byte-identical command stream — the rung L0-r0 0%-gate).
     pub light_dirty: bool,
+    /// The Lighting-L1 clustered froxel light-cull compute pipeline (`cluster_cull.comp`):
+    /// its layout declares the cull bind-group LAYOUT at `set 0` + a 16-byte
+    /// [`crate::compute::ClusterCullPush`] COMPUTE push range. `None` ⇒ L1 is not wired (the
+    /// L0b-only build) and the cull pass + its barriers are skipped entirely (the resolve's
+    /// `clusters_enabled` header gate then loops the flat table — the L1 OFF path). When
+    /// `Some`, the recorder dispatches it (over [`Self::cluster_count`] froxels) BEFORE the
+    /// resolve, with a COMPUTE→COMPUTE buffer barrier so the resolve reads see the cull writes.
+    pub cluster_cull: Option<&'a ComputePipeline>,
+    /// The cull bind-group LAYOUT { camera UBO @0, light table SSBO @1, `ClusterGrid` SSBO
+    /// @2, `LightIndexList` SSBO @3, `LightIndexAlloc` SSBO @4 } — matching `cluster_cull.hlsl`'s
+    /// set 0. The renderer writes a `cull_set` against it once per extent (pointing at the
+    /// scene's camera UBO + light table + cluster buffers). `None` when [`Self::cluster_cull`]
+    /// is `None`.
+    pub cull_layout: Option<&'a VulkanBindGroupLayout>,
+    /// The L1 per-froxel `ClusterCell`/`{offset,count}` grid SSBO (`DEVICE_LOCAL`, STORAGE),
+    /// sized `cluster_count * 8 B`. Written by the cull pass, read by the resolve set's
+    /// binding 8. The scene OWNS it; [`GBufferTargets`] borrows it into both the cull set and
+    /// the resolve set. `None` when L1 is off (the resolve set then binds the light table at
+    /// @8/@9 as a harmless valid placeholder — see [`GBufferTargets::create`]).
+    pub cluster_grid: Option<&'a BoundBuffer>,
+    /// The L1 flat light-index list SSBO (`DEVICE_LOCAL`, STORAGE), sized `index_list_cap *
+    /// 4 B`. The cull atomic-appends survivor indices; the resolve reads the pixel's froxel
+    /// slice from it (resolve binding 9). `None` when L1 is off.
+    pub light_index: Option<&'a BoundBuffer>,
+    /// The L1 global slice-allocation counter SSBO (one `u32`, `DEVICE_LOCAL`, STORAGE). The
+    /// cull `InterlockedAdd`s element 0 to claim disjoint `light_index` slices. It is RESET to
+    /// 0 (a `cmd_fill_buffer`) before each cull dispatch (the per-frame rebuild). `None` when
+    /// L1 is off.
+    pub light_index_alloc: Option<&'a BoundBuffer>,
+    /// The 16-byte [`crate::compute::ClusterCullPush`] bytes (exp-Z near/far + the caps) the
+    /// cull pass pushes. Ignored when [`Self::cluster_cull`] is `None`.
+    pub cluster_cull_push: [u8; CLUSTER_CULL_PUSH_BYTES as usize],
+    /// The L1 froxel count (`dim_x * dim_y * dim_z`, default 3456) — the cull's 1D dispatch
+    /// thread count (`ceil(cluster_count / LOCAL_SIZE_X)` groups). Ignored when L1 is off.
+    pub cluster_count: u32,
     /// The deferred PBR RESOLVE compute pipeline (`deferred_pbr.comp`): its layout declares
     /// `resolve_layout` at `set 0`. Reads the marcher's gAlbedo + gNormal + gMaterial
     /// (STORAGE, GENERAL) + the material SSBO + the camera UBO, runs Cook-Torrance, and
@@ -3420,10 +3583,18 @@ pub struct GBufferTargets {
     /// + the scene's SSBO/UBO/sampler). NO per-frame update.
     vocab_set: VulkanBindGroup,
     /// The PBR MVP-2 RESOLVE descriptor set, written ONCE against
-    /// [`GBufferScene::resolve_layout`] (8 bindings: `albedo` @0, `normal` @1, `material`
+    /// [`GBufferScene::resolve_layout`] (10 bindings: `albedo` @0, `normal` @1, `material`
     /// @2, `lit` @3 STORAGE images, the material SSBO @4, the camera UBO @5, the L0a light
-    /// table SSBO @6, the L0b `gViewT` STORAGE image @7). NO per-frame update.
+    /// table SSBO @6, the L0b `gViewT` STORAGE image @7, the L1 `ClusterGrid` SSBO @8, the L1
+    /// `LightIndexList` SSBO @9). When L1 is off the scene's `cluster_grid`/`light_index` are
+    /// `None`, so @8/@9 bind the light table as a harmless valid placeholder (the resolve's
+    /// `clusters_enabled` header gate never reads them on the OFF path). NO per-frame update.
     resolve_set: VulkanBindGroup,
+    /// The Lighting-L1 CULL descriptor set, written ONCE against
+    /// [`GBufferScene::cull_layout`] (camera UBO @0, light table SSBO @1, `ClusterGrid` SSBO
+    /// @2, `LightIndexList` SSBO @3, `LightIndexAlloc` SSBO @4) — `None` when L1 is off
+    /// ([`GBufferScene::cluster_cull`] is `None`). NO per-frame update.
+    cull_set: Option<VulkanBindGroup>,
     /// The present-blit descriptor set, written ONCE against
     /// [`GBufferScene::present_layout`] (one COMBINED_IMAGE_SAMPLER pointing at
     /// `lit` + the scene's present sampler). NO per-frame update.
@@ -3672,10 +3843,15 @@ impl GBufferTargets {
             }
         };
 
-        // The deferred RESOLVE set, written ONCE here (8 bindings, ≤ 12): gAlbedo @0,
+        // The deferred RESOLVE set, written ONCE here (10 bindings, ≤ 12): gAlbedo @0,
         // gNormal @1, gMaterial @2, lit @3 (STORAGE images), material SSBO @4, camera UBO
-        // @5, light table SSBO @6 (Lighting L0a), gViewT @7 (Lighting L0b) — matching
-        // `deferred_pbr.comp`'s set 0.
+        // @5, light table SSBO @6 (Lighting L0a), gViewT @7 (Lighting L0b), ClusterGrid @8 +
+        // LightIndexList @9 (Lighting L1) — matching `deferred_pbr.comp`'s set 0. When L1 is
+        // off the scene's cluster buffers are `None`, so @8/@9 bind the light table as a
+        // harmless VALID placeholder (the resolve's `clusters_enabled` header gate never reads
+        // them on the OFF path — the layout requires a valid descriptor regardless).
+        let cluster_grid_buf = scene.cluster_grid.unwrap_or(scene.light_table);
+        let light_index_buf = scene.light_index.unwrap_or(scene.light_table);
         let resolve_set = {
             let entries = [
                 BindGroupEntry::StorageImage { texture: &albedo },
@@ -3687,6 +3863,10 @@ impl GBufferTargets {
                 BindGroupEntry::StorageBuffer { buffer: scene.light_table },
                 // Lighting L0b: the gViewT lane @7 (the resolve READS it under `mask == 1`).
                 BindGroupEntry::StorageImage { texture: &viewt },
+                // Lighting L1: the ClusterGrid @8 + LightIndexList @9 (resolve READS the
+                // pixel's froxel slice when `clusters_enabled`).
+                BindGroupEntry::StorageBuffer { buffer: cluster_grid_buf },
+                BindGroupEntry::StorageBuffer { buffer: light_index_buf },
             ];
             let desc = BindGroupDesc::<Vulkan> {
                 layout: scene.resolve_layout,
@@ -3713,6 +3893,44 @@ impl GBufferTargets {
             }
         };
 
+        // The Lighting-L1 CULL set, written ONCE here when L1 is wired (camera UBO @0, light
+        // table SSBO @1, ClusterGrid @2, LightIndexList @3, LightIndexAlloc @4) — matching
+        // `cluster_cull.comp`'s set 0. `None` when the scene does not supply the cull layout
+        // (the L0b-only build); the recorder then skips the cull pass entirely.
+        let cull_set = match (scene.cull_layout, scene.cluster_grid, scene.light_index, scene.light_index_alloc) {
+            (Some(cull_layout), Some(grid), Some(index), Some(alloc)) => {
+                let entries = [
+                    BindGroupEntry::UniformBuffer { buffer: scene.camera_uniform },
+                    BindGroupEntry::StorageBuffer { buffer: scene.light_table },
+                    BindGroupEntry::StorageBuffer { buffer: grid },
+                    BindGroupEntry::StorageBuffer { buffer: index },
+                    BindGroupEntry::StorageBuffer { buffer: alloc },
+                ];
+                let desc = BindGroupDesc::<Vulkan> { layout: cull_layout, entries: &entries };
+                match RhiDevice::create_bind_group(ctx, &desc) {
+                    Ok(g) => Some(g),
+                    Err(e) => {
+                        // SAFETY: the resolve + vocabulary sets + the seven textures above
+                        // were created on `ctx`; referenced by no submission; each destroyed
+                        // exactly once on this error path (reverse acquisition order).
+                        unsafe {
+                            RhiDevice::destroy_bind_group(ctx, resolve_set);
+                            RhiDevice::destroy_bind_group(ctx, vocab_set);
+                            RhiDevice::destroy_texture(ctx, viewt);
+                            RhiDevice::destroy_texture(ctx, lit);
+                            RhiDevice::destroy_texture(ctx, material);
+                            RhiDevice::destroy_texture(ctx, normal);
+                            RhiDevice::destroy_texture(ctx, albedo);
+                            RhiDevice::destroy_texture(ctx, raster_color);
+                            RhiDevice::destroy_texture(ctx, depth);
+                        }
+                        return Err(SwapchainError::DepthImage(e));
+                    }
+                }
+            }
+            _ => None,
+        };
+
         // The present-blit set, written ONCE here: one COMBINED_IMAGE_SAMPLER pointing
         // at the LIT image (the resolve's output) + the scene's present sampler.
         let present_set = {
@@ -3727,10 +3945,14 @@ impl GBufferTargets {
             match RhiDevice::create_bind_group(ctx, &desc) {
                 Ok(g) => g,
                 Err(e) => {
-                    // SAFETY: the seven textures + the vocabulary & resolve sets above were
-                    // created on `ctx`; referenced by no submission; each destroyed exactly
-                    // once on this error path (reverse acquisition order: sets → images).
+                    // SAFETY: the seven textures + the vocabulary, resolve & (optional) cull
+                    // sets above were created on `ctx`; referenced by no submission; each
+                    // destroyed exactly once on this error path (reverse acquisition order:
+                    // sets → images). The cull set is `Option`-guarded (only when L1 wired).
                     unsafe {
+                        if let Some(cs) = cull_set {
+                            RhiDevice::destroy_bind_group(ctx, cs);
+                        }
                         RhiDevice::destroy_bind_group(ctx, resolve_set);
                         RhiDevice::destroy_bind_group(ctx, vocab_set);
                         RhiDevice::destroy_texture(ctx, viewt);
@@ -3756,6 +3978,7 @@ impl GBufferTargets {
             viewt,
             vocab_set,
             resolve_set,
+            cull_set,
             present_set,
             extent,
         })
@@ -3821,9 +4044,13 @@ impl GBufferTargets {
     unsafe fn destroy(self, ctx: &VulkanContext) {
         // SAFETY: per the contract `ctx` is live and nothing references these
         // resources; each was created on `ctx` and is destroyed exactly once, in
-        // reverse acquisition order (sets → images).
+        // reverse acquisition order (sets → images). The cull set is `Option`-guarded
+        // (present only when L1 was wired).
         unsafe {
             RhiDevice::destroy_bind_group(ctx, self.present_set);
+            if let Some(cs) = self.cull_set {
+                RhiDevice::destroy_bind_group(ctx, cs);
+            }
             RhiDevice::destroy_bind_group(ctx, self.resolve_set);
             RhiDevice::destroy_bind_group(ctx, self.vocab_set);
             RhiDevice::destroy_texture(ctx, self.viewt);

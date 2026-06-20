@@ -738,6 +738,10 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         BindGroupLayoutEntry { binding: 6, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
         // Lighting L0b: the gViewT STORAGE image @7 (the resolve reads it under `mask == 1`).
         BindGroupLayoutEntry { binding: 7, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        // Lighting L1: the ClusterGrid @8 + LightIndexList @9 SSBOs (read on the cluster path;
+        // L1 is OFF here, so they bind the light table as a harmless valid placeholder).
+        BindGroupLayoutEntry { binding: 8, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 9, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
     ];
     let resolve_layout = RhiDevice::create_bind_group_layout(
         device,
@@ -824,6 +828,18 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         // on-change re-upload this run, so the recorder records NO copy/barrier (the
         // command stream is byte-identical to before L0-r0).
         light_dirty: false,
+        // Lighting L1 is OFF for the on-screen demo (no cluster cull wired): the cull
+        // pipeline + cluster SSBOs are absent, so the recorder skips the cull pass entirely
+        // and the resolve's `clusters_enabled` header gate (0) loops the flat table — the L1
+        // OFF / 0%-gate. The resolve set's @8/@9 bind the light table as a harmless valid
+        // placeholder (never read on the OFF path; see GBufferTargets::create).
+        cluster_cull: None,
+        cull_layout: None,
+        cluster_grid: None,
+        light_index: None,
+        light_index_alloc: None,
+        cluster_cull_push: [0u8; 16],
+        cluster_count: 0,
         resolve_pipeline: &resolve_pipeline,
         resolve_layout: &resolve_layout,
         present_pipeline: &present_pipeline,

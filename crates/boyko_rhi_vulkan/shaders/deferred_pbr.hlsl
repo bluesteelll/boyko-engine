@@ -30,7 +30,12 @@
 //               marcher's surface ray param `t`), read under `mask == 1` to reconstruct
 //               `P = ro + rd * t` for point/spot attenuation.
 //
-// 8 STORAGE/uniform bindings — within the 12-binding cap (4 free; the cap was raised
+//   binding 8 : StructuredBuffer<uint2> (READ-ONLY)  — the Lighting-L1 ClusterGrid
+//               ({offset,count} per froxel; read on the cluster path).
+//   binding 9 : StructuredBuffer<uint> (READ-ONLY)   — the Lighting-L1 LightIndexList
+//               (the per-froxel light-index slices; the resolve loops the pixel's slice).
+//
+// 10 STORAGE/uniform bindings — within the 12-binding cap (2 free; the cap was raised
 // 8 → 12 in the Lighting L0 plan). All five images are consumed in GENERAL (the marcher's
 // STORAGE views, kept in GENERAL after a memory-only COMPUTE→COMPUTE barrier) and `gLit`
 // is a storage store. `[[vk::image_format("rgba8")]]` pins each `OpTypeImage` to `Rgba8`
@@ -98,6 +103,16 @@ StructuredBuffer<uint> LightBuf : register(t6);
 // binding 7 — both ≤ the 12-binding cap.)
 [[vk::image_format("r32f")]] RWTexture2D<float> gViewT : register(u7);
 
+// binding 8 / 9: the Lighting-L1 cluster grid + flat light-index list (read-only here; the
+// `cluster_cull.hlsl` pass writes them). When `clusters_enabled` (header `cluster_params.w`),
+// the resolve maps the pixel to its froxel, reads `ClusterGrid[cluster].{offset,count}`, and
+// loops ONLY `LightIndexList[offset .. offset+count)` for the point/spot block — instead of
+// the brute-force `[l0a_count .. light_count)` flat loop (the L0b path, kept as the L1 OFF /
+// 0%-gate). The cluster index linearization + the exp-Z slice math are the shared
+// `light_table.hlsli` helpers, byte-identical to the cull write. Both ≤ the 12-binding cap.
+StructuredBuffer<uint2> ClusterGrid : register(t8);
+StructuredBuffer<uint> LightIndexList : register(t9);
+
 // Shared camera ray-gen (the SAME header the marcher includes — ONE ray-gen, no drift).
 #include "ray_gen.hlsli"
 // Shared light-table std430 decode (ONE source of truth, included by the resolve + cull).
@@ -151,6 +166,28 @@ float V_SmithGGXCorrelated(float NoV, float NoL, float a) {
 float3 F_Schlick(float u, float3 f0) {
     float f = pow(1.0 - u, 5.0);
     return f0 + (1.0 - f0) * f;
+}
+
+// Zero-/non-finite-guarded normalize — the FAITHFUL mirror of the host oracle's
+// `boyko_sdf_math::v_normalize` (compute.rs reuses it for every golden lighting
+// normalize). HLSL's intrinsic `normalize(0)` is `0/0 == NaN`, whereas the host
+// returns `float3(0,0,0)`; that divergence is the L1 black-pixel bug. At a surface
+// whose normal faces AWAY from a still-in-range point/spot light the half-vector
+// `v + l` can be ~zero (the light direction `l` is ~opposite the view dir `v`):
+// the host's `v_normalize(v+l)` yields `[0,0,0]` -> NoH = LoH = 0 -> a FINITE spec
+// term that the `NoL == 0` factor then zeroes, while the GPU's `normalize(v+l)`
+// yields NaN -> NaN spec -> `NaN * 0 == NaN` -> `pack_unorm(NaN) == 0` -> a pure
+// BLACK pixel. Using this guard for every per-light `normalize` restores bit-parity
+// with the host (the guard is byte-identical to `normalize` on all non-degenerate
+// inputs, so the L0a/L0b/L1-off paths that already match are unchanged).
+float3 safe_normalize(float3 a) {
+    float len = sqrt(dot(a, a));
+    // FLT_MIN floor + isfinite guard, matching v_normalize's
+    // `len <= f32::MIN_POSITIVE || !len.is_finite()` degenerate branch.
+    if (len <= 1.17549435e-38 || !isfinite(len)) {
+        return float3(0.0, 0.0, 0.0);
+    }
+    return a / len;
 }
 
 // Karis "mobile" analytic environment BRDF approximation (no DFG LUT). Returns the
@@ -261,7 +298,45 @@ void main(uint3 tid : SV_DispatchThreadID) {
         // the exact marched surface point (the same `t` the marcher stored on the SDF arm).
         float view_t = gViewT.Load(coord);
         float3 P = ro + rd * view_t;
-        for (uint j = H.l0a_count; j < H.light_count; ++j) {
+
+        // L1 cluster lookup (Decision 6): when `clusters_enabled`, map this pixel to its
+        // froxel and loop ONLY the cluster's point/spot indices; else loop the flat
+        // `[l0a_count .. light_count)` block (the L0b path — the L1 0%-gate). The froxel z
+        // slice uses the SAME view-z the cull used: `view_z = dot(rd, cam_forward.xyz) *
+        // view_t` (PERSP; cam_forward.xyz is contractually NORMALIZED, O1) or `view_t`
+        // (ORTHO). The linearization (`cluster_linear_index`) + the slice/tile maps are the
+        // shared `light_table.hlsli` helpers — byte-identical to the cull WRITE (a mismatch
+        // would silently map to the wrong cluster).
+        ClusterParams cp = load_cluster_params(LightBuf);
+        bool use_clusters = cp.clusters_enabled != 0u;
+        uint ps_count;       // number of point/spot lights to walk
+        uint ps_offset;      // base into LightIndexList (clusters) or the flat block
+        if (use_clusters) {
+            float view_z = (camera_mode == RAYGEN_CAM_PERSPECTIVE)
+                         ? (dot(rd, cam_forward.xyz) * view_t)
+                         : view_t;
+            uint2 tile = cluster_xy_tile(px, py, w, h, cp);
+            uint zsl = cluster_z_slice(view_z, cp);
+            uint cluster = cluster_linear_index(tile.x, tile.y, zsl, cp.dim_x, cp.dim_z);
+            uint2 cell = ClusterGrid[cluster];
+            ps_offset = cell.x;  // offset into LightIndexList
+            ps_count = cell.y;   // count of indices in this froxel's slice
+        } else {
+            ps_offset = H.l0a_count;                  // flat block base
+            ps_count = H.light_count - H.l0a_count;   // flat block length
+        }
+        for (uint jj = 0u; jj < ps_count; ++jj) {
+            // The light table index: the cluster's index-list entry (L1) or the flat block
+            // index (L0b). The BRDF body below is UNCHANGED from L0b.
+            uint j = use_clusters ? LightIndexList[ps_offset + jj] : (ps_offset + jj);
+            // No index-range guard: the cull pass (`golden_cluster_cull`, untouched) only
+            // ever pushes POINT/SPOT indices in `[l0a_count, light_count)` into
+            // LightIndexList, exactly like the host's `grid[cluster]` Vec, so `j` is always a
+            // valid point/spot slot. The prior `if (j < l0a_count || j >= light_count)`
+            // guard was WRONG (it never fired for the offending light — the residual NaN
+            // comes from an IN-RANGE valid light's `normalize(v+l)` at a back-facing surface,
+            // fixed by `safe_normalize`) and it perturbed DXC's dead-code elimination of
+            // bindings 8/9, breaking the non-clustered resolve's binding interface.
             LightElem L = load_light(LightBuf, j);
             // toL = light position - surface; d2 = squared distance for the range cull +
             // the smooth windowed inverse-square attenuation (Decision 2 / Algorithm C).
@@ -284,15 +359,18 @@ void main(uint3 tid : SV_DispatchThreadID) {
                 // (i.e. light->surface = -l) and the spot axis, smoothstepped between the
                 // outer and inner cone cosines, squared for a soft edge.
                 float2 cones = unpack_cones(L.cone_pack); // (cos_inner, cos_outer)
-                float3 spot_dir = normalize(L.dir);       // world spot axis (to-light dir)
+                float3 spot_dir = safe_normalize(L.dir);  // world spot axis (to-light dir)
                 float cosA = dot(-l, spot_dir);
                 float denom = max(cones.x - cones.y, 1e-4);
                 float tt = saturate((cosA - cones.y) / denom);
                 atten *= tt * tt;
             }
             // The SAME Cook-Torrance direct term as the directional path, scaled by the
-            // distance/cone attenuation and the light's canonical (baked-I) color.
-            float3 hvec = normalize(v + l);
+            // distance/cone attenuation and the light's canonical (baked-I) color. The
+            // half-vector uses `safe_normalize` (host `v_normalize` parity): at a back-facing
+            // surface `v + l` can be ~zero, and the intrinsic `normalize(0) == NaN` would
+            // poison `spec` and (since `NaN * (NoL == 0) == NaN`) blacken the pixel.
+            float3 hvec = safe_normalize(v + l);
             float NoL = max(dot(n, l), 0.0);
             float NoH = saturate(dot(n, hvec));
             float LoH = saturate(dot(l, hvec));

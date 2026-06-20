@@ -231,6 +231,9 @@ pub struct DeviceFns {
     /// `vkCmdCopyBuffer` — the Phase-5 staging upload + readback transfer
     /// (Vulkan 1.0 core, always present).
     pub cmd_copy_buffer: PfnVkCmdCopyBuffer,
+    /// `vkCmdFillBuffer` — the Lighting-L1 cull's per-frame reset of the `LightIndexAlloc`
+    /// counter to 0 before the cull dispatch (Vulkan 1.0 core, always present).
+    pub cmd_fill_buffer: PfnVkCmdFillBuffer,
     pub create_fence: PfnVkCreateFence,
     pub destroy_fence: PfnVkDestroyFence,
     pub wait_for_fences: PfnVkWaitForFences,
@@ -1219,6 +1222,7 @@ fn load_device_fns(
             cmd_dispatch: load_device_command(gdpa, device, c"vkCmdDispatch")?,
             cmd_pipeline_barrier: load_device_command(gdpa, device, c"vkCmdPipelineBarrier")?,
             cmd_copy_buffer: load_device_command(gdpa, device, c"vkCmdCopyBuffer")?,
+            cmd_fill_buffer: load_device_command(gdpa, device, c"vkCmdFillBuffer")?,
             create_fence: load_device_command(gdpa, device, c"vkCreateFence")?,
             destroy_fence: load_device_command(gdpa, device, c"vkDestroyFence")?,
             wait_for_fences: load_device_command(gdpa, device, c"vkWaitForFences")?,

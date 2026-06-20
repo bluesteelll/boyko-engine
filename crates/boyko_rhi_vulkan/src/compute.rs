@@ -160,10 +160,34 @@ static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<44216> = SpirvBlob(*include_bytes!(c
 /// empty (mask == 0) pass `base` through byte-identically (the 0%-gate). The byte length
 /// grew (1616 → 6880) with the BRDF, then 6880 → 8824 with the Lighting L0a header+table
 /// directional/sky loop, then 8824 → 12548 with the L0b `gViewT` `P`-reconstruction +
-/// point/spot loop. The host mirror is [`golden_deferred_resolve_table`].
-static DEFERRED_PBR_SPV: SpirvBlob<12548> = SpirvBlob(*include_bytes!(concat!(
+/// point/spot loop, then 12548 → 14536 with the L1 cluster lookup (the froxel-mapped index
+/// loop + the `ClusterGrid`/`LightIndexList` bindings @8/@9), then 14536 → 15252: the WRONG
+/// L1 index-range guard was REMOVED (it never fired for the offending light) and the
+/// per-light `normalize(v+l)` / `normalize(L.dir)` were replaced by `safe_normalize` — the
+/// faithful mirror of the host oracle's `v_normalize` zero-guard — so a back-facing surface's
+/// `~0` half-vector yields `[0,0,0]` (NoH = LoH = 0, finite spec) instead of the intrinsic
+/// `normalize(0) == NaN` that blackened the pixel (`NaN * (NoL == 0) == NaN` →
+/// `pack_unorm(NaN) == 0`). Bindings 8/9 are now STATICALLY referenced on every path (DXC no
+/// longer dead-strips them when clusters are off), so every resolve pipeline layout declares +
+/// binds 0..9 (placeholder buffers @8/@9 on the non-clustered paths). The host mirror is
+/// [`golden_deferred_resolve_table`] (clustered via [`golden_cluster_cull`] +
+/// [`golden_deferred_resolve_clustered`]).
+static DEFERRED_PBR_SPV: SpirvBlob<15252> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/deferred_pbr.comp.spv"
+)));
+
+/// The committed Lighting-L1 clustered froxel light-cull SPIR-V (`shaders/cluster_cull.hlsl`).
+/// One invocation per froxel (`CLUSTER_COUNT`): builds the froxel's world-space AABB from the
+/// shared ray-gen + the exp-Z slice view-z, culls each point/spot light's bounding sphere
+/// (`sqDistPointAABB <= r²`), and atomic-appends survivors into the flat `LightIndexList` +
+/// writes the per-froxel `{offset, count}` `ClusterGrid` cell. Bound to the cull set { camera
+/// UBO @0, light table SSBO @1, ClusterGrid @2, LightIndexList @3, LightIndexAlloc @4 } + a
+/// `ClusterCullPush` (near/far + caps). Directional/sky are GLOBAL (not culled). The host
+/// mirror is [`golden_cluster_cull`].
+static CLUSTER_CULL_SPV: SpirvBlob<12356> = SpirvBlob(*include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/shaders/cluster_cull.comp.spv"
 )));
 
 /// The committed Render P4b coarse-cull / tile pre-trace SPIR-V
@@ -314,6 +338,22 @@ pub fn sdf_gbuffer_composite_spirv() -> &'static [u32] {
 #[inline]
 pub fn deferred_pbr_spirv() -> &'static [u32] {
     DEFERRED_PBR_SPV.as_words()
+}
+
+/// The committed Lighting-L1 clustered froxel light-cull SPIR-V as a `u32` word stream,
+/// ready for [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module).
+///
+/// One invocation per froxel (`CLUSTER_COUNT`); bound to the cull set { camera UBO @0, light
+/// table SSBO @1, `RWStructuredBuffer<uint2>` ClusterGrid @2, `RWStructuredBuffer<uint>`
+/// LightIndexList @3, `RWStructuredBuffer<uint>` LightIndexAlloc @4 } + a `ClusterCullPush`
+/// (exp-Z near/far + the per-froxel / flat-list caps). It builds each froxel's world AABB,
+/// culls the point/spot block (`sqDistPointAABB <= r²`), and atomic-appends survivors into
+/// the index list + writes the `{offset, count}` cell. Dispatched 1D over `CLUSTER_COUNT`
+/// BEFORE the resolve (with a COMPUTE→COMPUTE buffer barrier so the resolve's reads see the
+/// writes). The host mirror is [`golden_cluster_cull`].
+#[inline]
+pub fn cluster_cull_spirv() -> &'static [u32] {
+    CLUSTER_CULL_SPV.as_words()
 }
 
 /// The committed Render P4b coarse-cull / tile pre-trace SPIR-V as a `u32` word
@@ -1158,6 +1198,57 @@ impl FineMarcherPush {
     }
 }
 
+/// The Lighting-L1 cull push constants (mirrors `cluster_cull.hlsl`'s `ClusterCullPush`): the
+/// exp-Z near/far the froxel-AABB build samples its slice view-z from, plus the per-froxel /
+/// flat-list caps the cull clamp-and-drops at (O2). `#[repr(C)]`, 16 B (`f32, f32, u32, u32`),
+/// the offsets pinned by the const-asserts below so a host/shader desync is a build error.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ClusterCullPush {
+    /// Exp-Z near plane (slice 0 view-z).
+    pub z_near: f32,
+    /// Exp-Z far plane (slice `dim_z` view-z).
+    pub z_far: f32,
+    /// Per-froxel light-index cap (O2 clamp-and-drop).
+    pub max_lights_per_cluster: u32,
+    /// Flat light-index-list capacity in `u32`s (O2 global clamp-and-drop).
+    pub index_list_cap: u32,
+}
+
+/// Byte size of [`ClusterCullPush`] — the cull pipeline's declared COMPUTE push range (16 B).
+pub const CLUSTER_CULL_PUSH_BYTES: u32 = core::mem::size_of::<ClusterCullPush>() as u32;
+
+const _: () = assert!(core::mem::offset_of!(ClusterCullPush, z_near) == 0);
+const _: () = assert!(core::mem::offset_of!(ClusterCullPush, z_far) == 4);
+const _: () = assert!(core::mem::offset_of!(ClusterCullPush, max_lights_per_cluster) == 8);
+const _: () = assert!(core::mem::offset_of!(ClusterCullPush, index_list_cap) == 12);
+const _: () = assert!(CLUSTER_CULL_PUSH_BYTES == 16, "ClusterCullPush must be 16 bytes");
+
+impl ClusterCullPush {
+    /// Builds the cull push from the exp-Z near/far + the caps.
+    #[inline]
+    pub const fn new(
+        z_near: f32,
+        z_far: f32,
+        max_lights_per_cluster: u32,
+        index_list_cap: u32,
+    ) -> Self {
+        Self { z_near, z_far, max_lights_per_cluster, index_list_cap }
+    }
+
+    /// Re-views the push constants as their raw 16-byte slice for `push_constants`.
+    #[inline]
+    pub fn as_bytes(&self) -> &[u8] {
+        // SAFETY: `Self` is `#[repr(C)]` with only `f32` / `u32` fields (all `Copy`, every
+        // offset + the 16-byte total pinned by the const-asserts above, no uninit padding),
+        // so its `size_of` bytes are a fully-initialized, alignment-valid POD bit pattern.
+        // The `&self` borrow keeps the struct alive for the slice's lifetime; read-only.
+        unsafe {
+            slice::from_raw_parts((self as *const Self).cast::<u8>(), core::mem::size_of::<Self>())
+        }
+    }
+}
+
 /// The CPU golden for one composited pixel at the GOLDEN 64×64 ORTHO extent: a thin
 /// wrapper over [`golden_composite_pixel_ex`] with `(SDF_IMG_W, SDF_IMG_H)` + ORTHO.
 /// Bit-identical to the pre-P0a definition (same extent, same arithmetic), so the
@@ -1769,6 +1860,34 @@ impl GoldenLightHeader {
     pub fn exposure(&self) -> f32 {
         self.counts_exposure[1]
     }
+
+    /// Builds the L1 CLUSTERED header (mirrors `LightHeaderGpu::new_clustered`): the
+    /// `cluster_params` lane carries `[z_scale, z_bias, bitcast(packed_dims),
+    /// bitcast(clusters_enabled=1)]`. The packed dims are `dim_x | dim_y<<8 | dim_z<<16`.
+    #[inline]
+    pub fn new_clustered(
+        l0a_count: u32,
+        point_spot_count: u32,
+        exposure: f32,
+        cfg: &GoldenClusterConfig,
+    ) -> Self {
+        let mut h = Self::new(l0a_count, point_spot_count, exposure);
+        let packed = cfg.dim_x | (cfg.dim_y << 8) | (cfg.dim_z << 16);
+        h.cluster_params = [
+            cfg.z_scale(),
+            cfg.z_bias(),
+            f32::from_bits(packed),
+            f32::from_bits(1),
+        ];
+        h
+    }
+
+    /// Whether the L1 cluster path is enabled (`cluster_params.w` bit-cast `!= 0`). Mirrors
+    /// `LightHeaderGpu::clusters_enabled`.
+    #[inline]
+    pub fn clusters_enabled(&self) -> bool {
+        self.cluster_params[3].to_bits() != 0
+    }
 }
 
 // --- PBR MVP-2 lighting constants (mirror deferred_pbr.hlsl EXACTLY) -----------------
@@ -2303,6 +2422,349 @@ pub fn golden_deferred_resolve_table(
         }
         // The SAME Cook-Torrance direct term as the directional path, scaled by the
         // distance/cone attenuation and the light's baked color.
+        let hvec = v_normalize([v[0] + l[0], v[1] + l[1], v[2] + l[2]]);
+        let nol = v_dot(n, l).max(0.0);
+        let noh = v_dot(n, hvec).clamp(0.0, 1.0);
+        let loh = v_dot(l, hvec).clamp(0.0, 1.0);
+        let d_term = d_ggx(noh, a);
+        let v_term = v_smith_ggx_correlated(nov, nol, a);
+        let f_term = f_schlick(loh, f0);
+        for c in 0..3 {
+            let spec = d_term * v_term * f_term[c];
+            let diff = diffuse_color[c] * (1.0 / pi);
+            lit_direct[c] += (diff + spec) * (nol * shadow) * atten * li.color_cone[c];
+        }
+    }
+
+    let exposure = header.exposure();
+    let mut lit = [0.0_f32; 3];
+    for c in 0..3 {
+        lit[c] = (lit_direct[c] + ambient[c] + mat.emissive[c]) * exposure;
+    }
+    pack_rgba(lit)
+}
+
+// ===========================================================================
+// Lighting L1 — clustered froxel light cull (host mirror of cluster_cull.hlsl +
+// the deferred_pbr.hlsl cluster lookup).
+//
+// The host cull builds each froxel's WORLD-space AABB from the SAME ray-gen the GPU uses
+// (`composite_ray`) at the exp-Z slice's near/far view-z, tests each point/spot light's
+// bounding sphere (sqDistPointAABB <= r²), and records the surviving index SET per froxel.
+// The clustered resolve then maps a pixel to its froxel and shades only that froxel's
+// point/spot lights — which, when the cull is exact (no false drop under the cap), is
+// BIT-IDENTICAL to the brute-force `golden_deferred_resolve_table` (the load-bearing L1
+// golden). The linearization + the exp-Z slice/tile maps mirror `light_table.hlsli`.
+// ===========================================================================
+
+/// The host cluster-cull config (mirrors `boyko_render::light::ClusterConfig`). The vulkan
+/// crate cannot depend on `boyko_render`, so the golden carries its own POD mirror; the
+/// dims + exp-Z near/far + the caps are the SAME the GPU cull uses.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GoldenClusterConfig {
+    /// Froxel grid X dimension.
+    pub dim_x: u32,
+    /// Froxel grid Y dimension.
+    pub dim_y: u32,
+    /// Froxel grid Z (exp-Z slice) dimension.
+    pub dim_z: u32,
+    /// Per-froxel light-index cap (O2 clamp-and-drop).
+    pub max_lights_per_cluster: u32,
+    /// Exp-Z near plane (slice 0 view-z).
+    pub z_near: f32,
+    /// Exp-Z far plane (slice `dim_z` view-z).
+    pub z_far: f32,
+}
+
+impl GoldenClusterConfig {
+    /// The total froxel count (`dim_x * dim_y * dim_z`).
+    #[inline]
+    pub const fn cluster_count(&self) -> u32 {
+        self.dim_x * self.dim_y * self.dim_z
+    }
+
+    /// The exp-Z slice scale `dim_z / ln(far/near)` (mirrors `ClusterConfig::z_scale`).
+    #[inline]
+    pub fn z_scale(&self) -> f32 {
+        (self.dim_z as f32) / (self.z_far / self.z_near).ln()
+    }
+
+    /// The exp-Z slice bias `-ln(near) * z_scale` (mirrors `ClusterConfig::z_bias`).
+    #[inline]
+    pub fn z_bias(&self) -> f32 {
+        -self.z_near.ln() * self.z_scale()
+    }
+}
+
+/// Linearizes froxel `(x, y, z)` → flat index `(y * dim_x + x) * dim_z + z` — the host mirror
+/// of `light::cluster_index` and the shader's `cluster_linear_index` (Z innermost). THE one
+/// linearization the host + both shaders share.
+#[inline]
+pub fn golden_cluster_index(x: u32, y: u32, z: u32, dim_x: u32, dim_z: u32) -> u32 {
+    (y * dim_x + x) * dim_z + z
+}
+
+/// Maps a view-space depth `view_z` to its exp-Z froxel slice, clamped to `[0, dim_z-1]`
+/// (mirrors the shader's `cluster_z_slice`). A `view_z <= 0` clamps to slice 0.
+#[inline]
+pub fn golden_cluster_z_slice(view_z: f32, cfg: &GoldenClusterConfig) -> u32 {
+    if view_z <= 0.0 {
+        return 0;
+    }
+    let slice = view_z.ln() * cfg.z_scale() + cfg.z_bias();
+    let si = slice.floor() as i32;
+    si.clamp(0, cfg.dim_z as i32 - 1) as u32
+}
+
+/// Maps pixel `(px, py)` at extent `(w, h)` to its froxel `(x, y)` tile, clamped to the grid
+/// (mirrors the shader's `cluster_xy_tile`).
+#[inline]
+pub fn golden_cluster_xy_tile(
+    px: u32,
+    py: u32,
+    w: u32,
+    h: u32,
+    cfg: &GoldenClusterConfig,
+) -> (u32, u32) {
+    let tx = ((px * cfg.dim_x) / w.max(1)).min(cfg.dim_x - 1);
+    let ty = ((py * cfg.dim_y) / h.max(1)).min(cfg.dim_y - 1);
+    (tx, ty)
+}
+
+/// Converts a slice view-z to the world ray parameter `t` for `(ro, rd)` (mirrors the cull's
+/// `view_z_to_t`): PERSP `view_z / dot(rd, fwd)`, ORTHO `view_z` (rd = (0,0,-1)). `fwd` is the
+/// camera forward axis (O1: NORMALIZED); for ORTHO it is ignored.
+#[inline]
+fn golden_view_z_to_t(view_z: f32, rd: [f32; 3], camera: CompositeCamera) -> f32 {
+    match camera {
+        CompositeCamera::Perspective { forward, .. } => {
+            let cos_axis = v_dot(rd, forward).max(1e-4);
+            view_z / cos_axis
+        }
+        CompositeCamera::Ortho => view_z,
+    }
+}
+
+/// The exp-Z view-z at slice boundary `k` (mirrors the cull's `slice_view_z`).
+#[inline]
+fn golden_slice_view_z(k: u32, cfg: &GoldenClusterConfig) -> f32 {
+    cfg.z_near * (cfg.z_far / cfg.z_near).powf(k as f32 / cfg.dim_z as f32)
+}
+
+/// Squared distance from a point to an AABB (0 inside) — mirrors the shader's
+/// `sq_dist_point_aabb` (the canonical clustered-cull sphere-vs-AABB test).
+#[inline]
+fn golden_sq_dist_point_aabb(c: [f32; 3], aabb_min: [f32; 3], aabb_max: [f32; 3]) -> f32 {
+    let mut s = 0.0_f32;
+    for i in 0..3 {
+        let d = (aabb_min[i] - c[i]).max(c[i] - aabb_max[i]).max(0.0);
+        s += d * d;
+    }
+    s
+}
+
+/// The host clustered froxel light cull (mirrors `cluster_cull.hlsl`). For each froxel it
+/// builds the WORLD-space AABB from the screen-tile corners at the slice's near/far view-z
+/// (the SAME `composite_ray` the resolve uses) and records the surviving POINT/SPOT light
+/// indices (`sqDistPointAABB <= r²`) in table order, clamped to `max_lights_per_cluster`
+/// (O2). Returns a `Vec` of per-froxel index `Vec`s, flat-indexed by
+/// [`golden_cluster_index`]. Directional/sky are GLOBAL (never in the per-froxel sets).
+///
+/// The cull is geometric + deterministic; the resolve's per-froxel sum is order-stable
+/// (table order), so a froxel whose set contains every in-range light reproduces the
+/// brute-force resolve bit-for-bit.
+pub fn golden_cluster_cull(
+    img_w: u32,
+    img_h: u32,
+    camera: CompositeCamera,
+    cfg: &GoldenClusterConfig,
+    header: &GoldenLightHeader,
+    lights: &[GoldenLight],
+) -> Vec<Vec<u32>> {
+    let count = cfg.cluster_count() as usize;
+    let mut grid: Vec<Vec<u32>> = vec![Vec::new(); count];
+    let l0a = header.l0a_count();
+    let total = header.light_count();
+    for y in 0..cfg.dim_y {
+        for x in 0..cfg.dim_x {
+            // The tile's inclusive corner pixels (mirror the cull's px0/py0/px1/py1).
+            let px0 = (x * img_w) / cfg.dim_x;
+            let py0 = (y * img_h) / cfg.dim_y;
+            let px1 = (((x + 1) * img_w) / cfg.dim_x).saturating_sub(1).max(px0);
+            let py1 = (((y + 1) * img_h) / cfg.dim_y).saturating_sub(1).max(py0);
+            let corners = [(px0, py0), (px1, py0), (px0, py1), (px1, py1)];
+            for z in 0..cfg.dim_z {
+                let vz_near = golden_slice_view_z(z, cfg);
+                let vz_far = golden_slice_view_z(z + 1, cfg);
+                let mut aabb_min = [1.0e30_f32; 3];
+                let mut aabb_max = [-1.0e30_f32; 3];
+                for &(cx, cy) in &corners {
+                    let (ro, rd) = composite_ray(cx, cy, img_w, img_h, camera);
+                    for &vz in &[vz_near, vz_far] {
+                        let t = golden_view_z_to_t(vz, rd, camera);
+                        let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
+                        for i in 0..3 {
+                            aabb_min[i] = aabb_min[i].min(p[i]);
+                            aabb_max[i] = aabb_max[i].max(p[i]);
+                        }
+                    }
+                }
+                let cell = &mut grid[golden_cluster_index(x, y, z, cfg.dim_x, cfg.dim_z) as usize];
+                for i in l0a..total {
+                    let li = &lights[i as usize];
+                    let kind = li.kind();
+                    if kind != GOLDEN_LIGHT_KIND_POINT && kind != GOLDEN_LIGHT_KIND_SPOT {
+                        continue;
+                    }
+                    let pos = [li.pos_range[0], li.pos_range[1], li.pos_range[2]];
+                    let r = li.pos_range[3];
+                    if golden_sq_dist_point_aabb(pos, aabb_min, aabb_max) <= r * r
+                        && (cell.len() as u32) < cfg.max_lights_per_cluster
+                    {
+                        cell.push(i);
+                    }
+                }
+            }
+        }
+    }
+    grid
+}
+
+/// The CPU mirror of the L1 CLUSTERED `deferred_pbr` resolve. Identical to
+/// [`golden_deferred_resolve_table`] except the point/spot block is driven by the pixel's
+/// froxel index SET (from [`golden_cluster_cull`]) instead of the flat `[l0a..light_count)`
+/// range. When `header.clusters_enabled()` is false this DELEGATES to the brute-force table
+/// resolve (the L1 0%-gate == L0b). The per-light shading expression is byte-identical to the
+/// table resolve, so a cluster set that contains every in-range light reproduces it exactly.
+#[allow(clippy::too_many_arguments)]
+pub fn golden_deferred_resolve_clustered(
+    attrs: MarcherAttributes,
+    px: u32,
+    py: u32,
+    img_w: u32,
+    img_h: u32,
+    camera: CompositeCamera,
+    materials: &[GoldenMaterial],
+    header: &GoldenLightHeader,
+    lights: &[GoldenLight],
+    cfg: &GoldenClusterConfig,
+    grid: &[Vec<u32>],
+) -> u32 {
+    let (ro, rd) = composite_ray(px, py, img_w, img_h, camera);
+    // L1 OFF (or a non-lit pixel): the flat brute-force path (the 0%-gate).
+    if !header.clusters_enabled() || attrs.mask != 1 {
+        return golden_deferred_resolve_table(attrs, ro, rd, materials, header, lights);
+    }
+
+    let base = [
+        attrs.base_rgb[0] as f32 / 255.0,
+        attrs.base_rgb[1] as f32 / 255.0,
+        attrs.base_rgb[2] as f32 / 255.0,
+    ];
+    let n = oct_decode([attrs.oct_rg[0] as f32 / 255.0, attrs.oct_rg[1] as f32 / 255.0]);
+    let mat = materials
+        .get(attrs.mat_id as usize)
+        .copied()
+        .unwrap_or_default();
+
+    let metallic = mat.mrr[0];
+    let roughness = mat.mrr[1].clamp(0.045, 1.0);
+    let reflectance = mat.mrr[2];
+    let a = roughness * roughness;
+    let dielectric_f0 = 0.16 * reflectance * reflectance;
+    let f0 = [
+        dielectric_f0 + (base[0] - dielectric_f0) * metallic,
+        dielectric_f0 + (base[1] - dielectric_f0) * metallic,
+        dielectric_f0 + (base[2] - dielectric_f0) * metallic,
+    ];
+    let diffuse_color = [
+        base[0] * (1.0 - metallic),
+        base[1] * (1.0 - metallic),
+        base[2] * (1.0 - metallic),
+    ];
+
+    let v = [-rd[0], -rd[1], -rd[2]];
+    let nov = v_dot(n, v).max(1e-4);
+    let shadow = attrs.shadow as f32 / 255.0;
+    let ao = attrs.ao as f32 / 255.0;
+    let pi = core::f32::consts::PI;
+    const UP: [f32; 3] = [0.0, 1.0, 0.0];
+    let hemi = v_dot(n, UP) * 0.5 + 0.5;
+
+    // The no-`P` front block (directionals + sky) is GLOBAL — identical to the table resolve.
+    let mut lit_direct = [0.0_f32; 3];
+    let mut ambient = [0.0_f32; 3];
+    let l0a = header.l0a_count() as usize;
+    for li in lights.iter().take(l0a) {
+        match li.kind() {
+            GOLDEN_LIGHT_KIND_DIRECTIONAL => {
+                let l = v_normalize([li.dir_kind[0], li.dir_kind[1], li.dir_kind[2]]);
+                let hvec = v_normalize([v[0] + l[0], v[1] + l[1], v[2] + l[2]]);
+                let nol = v_dot(n, l).max(0.0);
+                let noh = v_dot(n, hvec).clamp(0.0, 1.0);
+                let loh = v_dot(l, hvec).clamp(0.0, 1.0);
+                let d_term = d_ggx(noh, a);
+                let v_term = v_smith_ggx_correlated(nov, nol, a);
+                let f_term = f_schlick(loh, f0);
+                for c in 0..3 {
+                    let spec = d_term * v_term * f_term[c];
+                    let diff = diffuse_color[c] * (1.0 / pi);
+                    lit_direct[c] += (diff + spec) * (nol * shadow) * li.color_cone[c];
+                }
+            }
+            GOLDEN_LIGHT_KIND_SKY => {
+                let sky = [li.color_cone[0], li.color_cone[1], li.color_cone[2]];
+                let ground = [li.pos_range[0], li.pos_range[1], li.pos_range[2]];
+                let dfg = env_brdf_approx(roughness, nov);
+                for c in 0..3 {
+                    let hemi_c = ground[c] + (sky[c] - ground[c]) * hemi;
+                    let spec_ambient = (f0[c] * dfg[0] + dfg[1]) * sky[c];
+                    let diff_ambient = diffuse_color[c] * hemi_c;
+                    ambient[c] += (spec_ambient + diff_ambient) * ao;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // L1: map the pixel to its froxel and loop ONLY that cluster's point/spot indices. The
+    // froxel z-slice uses the SAME view-z the cull used.
+    let p = [
+        ro[0] + rd[0] * attrs.view_t,
+        ro[1] + rd[1] * attrs.view_t,
+        ro[2] + rd[2] * attrs.view_t,
+    ];
+    let view_z = match camera {
+        CompositeCamera::Perspective { forward, .. } => v_dot(rd, forward) * attrs.view_t,
+        CompositeCamera::Ortho => attrs.view_t,
+    };
+    let (tx, ty) = golden_cluster_xy_tile(px, py, img_w, img_h, cfg);
+    let zsl = golden_cluster_z_slice(view_z, cfg);
+    let cluster = golden_cluster_index(tx, ty, zsl, cfg.dim_x, cfg.dim_z) as usize;
+    let slice = grid.get(cluster).map(Vec::as_slice).unwrap_or(&[]);
+    for &j in slice {
+        let li = &lights[j as usize];
+        let kind = li.kind();
+        let pos = [li.pos_range[0], li.pos_range[1], li.pos_range[2]];
+        let range = li.pos_range[3];
+        let to_l = [pos[0] - p[0], pos[1] - p[1], pos[2] - p[2]];
+        let d2 = v_dot(to_l, to_l);
+        let range2 = range * range;
+        if d2 > range2 {
+            continue;
+        }
+        let inv_d = 1.0 / d2.max(1e-8).sqrt();
+        let l = [to_l[0] * inv_d, to_l[1] * inv_d, to_l[2] * inv_d];
+        let win = (1.0 - (d2 * d2) / (range2 * range2)).clamp(0.0, 1.0);
+        let mut atten = (1.0 / d2.max(1e-4)) * win * win;
+        if kind == GOLDEN_LIGHT_KIND_SPOT {
+            let (cos_inner, cos_outer) = golden_unpack_cones(li.color_cone[3]);
+            let spot_dir = v_normalize([li.dir_kind[0], li.dir_kind[1], li.dir_kind[2]]);
+            let cos_a = v_dot([-l[0], -l[1], -l[2]], spot_dir);
+            let denom = (cos_inner - cos_outer).max(1e-4);
+            let tt = ((cos_a - cos_outer) / denom).clamp(0.0, 1.0);
+            atten *= tt * tt;
+        }
         let hvec = v_normalize([v[0] + l[0], v[1] + l[1], v[2] + l[2]]);
         let nol = v_dot(n, l).max(0.0);
         let noh = v_dot(n, hvec).clamp(0.0, 1.0);

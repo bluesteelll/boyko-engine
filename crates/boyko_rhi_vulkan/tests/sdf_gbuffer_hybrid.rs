@@ -56,6 +56,9 @@ use boyko_rhi_vulkan::compute::{
     GoldenLight, GoldenLightHeader, GoldenMaterial, GOLDEN_LIGHT_HEADER_BASE_WORDS,
     composite_pixel_ray, deferred_pbr_spirv, mesh_depth_for_z, pack_rgba, pixel_world_xy,
     sdf_gbuffer_composite_spirv, sdf_op, sdf_tile_cull_spirv, tile_grid_extent,
+    cluster_cull_spirv, golden_cluster_cull, golden_cluster_index,
+    golden_deferred_resolve_clustered, ClusterCullPush, GoldenClusterConfig,
+    CLUSTER_CULL_PUSH_BYTES,
 };
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
 
@@ -780,6 +783,14 @@ fn run_gbuffer_hybrid_lit_table(
         BindGroupLayoutEntry { binding: 6, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
         // Lighting L0b: the gViewT STORAGE image @7 (the resolve reads it under `mask == 1`).
         BindGroupLayoutEntry { binding: 7, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        // Lighting L1: ClusterGrid @8 + LightIndexList @9. The recompiled `deferred_pbr.comp`
+        // STATICALLY references @8/@9 on EVERY path (DXC no longer dead-strips them when the
+        // cluster branch is off), so the layout MUST declare them or the pipeline create trips
+        // VUID-VkComputePipelineCreateInfo-layout-07988. This non-clustered path binds the
+        // light table as a harmless valid placeholder (the resolve's `clusters_enabled` gate
+        // never reads them) — the same pattern the production swapchain resolve uses.
+        BindGroupLayoutEntry { binding: 8, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 9, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
     ];
     let resolve_layout = device
         .create_bind_group_layout(&BindGroupLayoutDesc { entries: &resolve_layout_entries })
@@ -807,6 +818,11 @@ fn run_gbuffer_hybrid_lit_table(
                 BindGroupEntry::StorageBuffer { buffer: &light_table },
                 // Lighting L0b: the gViewT lane @7 (the resolve READS it under `mask == 1`).
                 BindGroupEntry::StorageImage { texture: &viewt },
+                // Lighting L1 @8/@9: placeholder = the light table (L1 OFF on this path, so the
+                // resolve's `clusters_enabled` gate never reads them; they exist only to satisfy
+                // the recompiled shader's static @8/@9 reference).
+                BindGroupEntry::StorageBuffer { buffer: &light_table },
+                BindGroupEntry::StorageBuffer { buffer: &light_table },
             ],
         })
         .expect("deferred resolve bind group");
@@ -2769,6 +2785,1038 @@ fn l0b_point_and_spot_match_the_table_oracle() {
              {max_delta}/255 (tol {DEFERRED_ARM1_TOL}); {sdf_lit_hits} SDF-lit px"
         );
     }
+}
+
+// ============================================================================
+// Lighting L1 GPU goldens (the FULL clustered froxel-cull path on hardware).
+//
+// These run on the 3060 (the GPU-tester); they `boot_render_or_skip` when no device is
+// present. They drive the production cull pass + the clustered resolve and compare to the
+// HOST oracle (`golden_cluster_cull` + `golden_deferred_resolve_clustered`, the bit-exact
+// source of truth — the CPU companion is `tests/lighting_l1_host_oracle.rs`).
+//
+//   1. `l1_clustered_resolve_matches_the_brute_force_image` — the load-bearing test: it
+//      dispatches the GPU `cluster_cull` pass to populate the real `ClusterGrid` +
+//      `LightIndexList` from the light table, then runs the deferred resolve with
+//      `clusters_enabled == 1` reading those cluster buffers, and asserts the LIT image
+//      matches the host clustered oracle (which == brute force) within ±2/255 over all 3
+//      SDF scenes. This is the test that previously caught the NaN→black at crater(38,18);
+//      the `safe_normalize` fix in `deferred_pbr.hlsl` makes it match.
+//   2. `l1_known_light_lands_in_the_expected_clusters` — runs the GPU `cluster_cull` pass
+//      for a known light, reads back the `ClusterGrid` occupancy ({offset, count} per
+//      froxel), and asserts it matches the host `golden_cluster_cull` occupancy
+//      froxel-for-froxel.
+//
+// The cull shader reads the froxel dims (`dim_x`/`dim_y`/`dim_z`) from the light table
+// header's `cluster_params` lane (via `load_cluster_params`), so the table MUST carry a
+// CLUSTERED header (`GoldenLightHeader::new_clustered`) for BOTH the cull and the resolve.
+// The camera UBO is the same ORTHO 64×64 block the resolve/marcher use, so the GPU cull
+// builds froxel AABBs from the identical ray-gen the host oracle does.
+// ============================================================================
+
+/// The L1 cull config the GPU + host share (mirrors the host-oracle fixture in
+/// `tests/lighting_l1_host_oracle.rs`): a 16×9×24 froxel grid (each dim ≤ 255 so the header's
+/// 8-bit-packed `dim` lane round-trips), per-froxel cap 256, exp-Z `near`/`far` spanning the
+/// ortho scene's view-z band (surfaces sit near world z = 0, camera at z = 2, so the ray
+/// parameter `t ≈ 2`). The SAME config drives the clustered header, the cull push, and the
+/// host oracles.
+fn l1_cluster_config() -> GoldenClusterConfig {
+    GoldenClusterConfig {
+        dim_x: 16,
+        dim_y: 9,
+        dim_z: 24,
+        max_lights_per_cluster: 256,
+        z_near: 0.25,
+        z_far: 4.0,
+    }
+}
+
+/// A generous flat light-index-list capacity for the L1 test scenes (`cluster_count * 8`):
+/// the multi-light fixtures keep a handful of lights per froxel, well under this bound, so
+/// the cull never hits the O2 global clamp — the GPU occupancy then equals the host oracle's
+/// exactly (no dropped tail to reconcile).
+fn l1_index_list_cap(cfg: &GoldenClusterConfig) -> u32 {
+    cfg.cluster_count() * 8
+}
+
+/// Records + submits the FULL Lighting-L1 clustered path in ONE fenced submit and returns
+/// `(lit_bytes, cluster_grid_bytes)`: identical to [`run_gbuffer_hybrid_lit_table`] up to the
+/// resolve, but it ALSO
+///
+///   - creates the L1 cluster SSBOs — `ClusterGrid` (`cluster_count * 8 B`, `uint2`
+///     {offset, count} per froxel), `LightIndexList` (`index_list_cap * 4 B`), and the
+///     `LightIndexAlloc` counter (one `u32`, host-zeroed before submit so the cull's
+///     `InterlockedAdd` starts at 0 — the host-write equivalent of the production
+///     `cmd_fill_buffer` reset);
+///   - records the cull compute pass (the cull set { camera UBO @0, light table @1,
+///     `ClusterGrid` @2, `LightIndexList` @3, `LightIndexAlloc` @4 } + the 16-byte
+///     `ClusterCullPush`) over `cluster_count` froxels BEFORE the resolve, with a
+///     COMPUTE→COMPUTE buffer barrier (`SHADER_WRITE→SHADER_READ`) on `ClusterGrid` +
+///     `LightIndexList` so the resolve's reads see the cull's writes (mirroring the
+///     production `render_gbuffer_frame` cull recording in `swapchain.rs`);
+///   - binds `ClusterGrid` @8 + `LightIndexList` @9 on the resolve set (the v2 binding fix —
+///     the recompiled `deferred_pbr.comp` statically references @8/@9 on every path) so the
+///     resolve's `clusters_enabled` gate (carried in the clustered header) loops the per-froxel
+///     index slice instead of the flat table.
+///
+/// `light_table_words` MUST carry a CLUSTERED header (`new_clustered`): the cull reads the
+/// froxel dims from `cluster_params`, and the resolve reads `clusters_enabled` from it. The
+/// returned `cluster_grid_bytes` is `cluster_count * 8` host-coherent bytes (the readback of
+/// the `ClusterGrid` SSBO — each froxel is `{u32 offset, u32 count}`); the returned
+/// `light_index_bytes` is `index_list_cap * 4` host-coherent bytes (the readback of the flat
+/// `LightIndexList` SSBO — the per-froxel index slices the cull scattered). The light-index
+/// readback is what the strengthened cull probe needs to assert the per-froxel index SET +
+/// the slice disjointness (the occupancy `count` alone is the documented blind spot).
+#[allow(clippy::too_many_arguments)]
+fn run_gbuffer_hybrid_lit_clustered(
+    ctx: &VulkanContext,
+    edits: &[SdfEdit],
+    lighting_flags: u32,
+    light_dir: [f32; 3],
+    light_table_words: &[u32],
+    cfg: &GoldenClusterConfig,
+) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    let device: &VulkanContext = ctx;
+    let queue = ctx.rhi_queue();
+
+    let cluster_count = cfg.cluster_count();
+    let index_list_cap = l1_index_list_cap(cfg);
+    // ClusterGrid: `uint2` {offset, count} per froxel (8 B each).
+    let cluster_grid_bytes = (cluster_count as u64) * 8;
+
+    // --- The edit-list StorageBuffer (binding 0), seeded with the packed header (the same
+    // over-allocation to `EDITLIST_BUFFER_WORDS` the table driver uses). ---
+    let buffer = device
+        .create_buffer(&BufferDesc {
+            size: (EDITLIST_BUFFER_WORDS as u64) * 4,
+            usage: BufferUsage::STORAGE,
+            location: MemoryLocation::HostVisibleCoherent,
+        })
+        .expect("edit-list storage buffer");
+    {
+        let mut header = vec![0u32; EDITLIST_BUFFER_WORDS];
+        encode_edit_list(&mut header, edits);
+        let mapped = device
+            .buffer_mapped_ptr(&buffer)
+            .expect("host-visible buffer is mapped");
+        write_words(mapped, &header);
+    }
+
+    // --- The camera/extent UNIFORM buffer (binding 5 of the vocab + resolve sets, binding 0
+    // of the cull set). The ORTHO 64×64 block drives the SAME bit-exact rays the host oracle
+    // uses (the cull's froxel-AABB ray-gen + the resolve's per-pixel ray). ---
+    let camera_uniform = device
+        .create_buffer(&BufferDesc {
+            size: COMPOSITE_PUSH_CONSTANT_BYTES as u64,
+            usage: BufferUsage::UNIFORM,
+            location: MemoryLocation::HostVisibleCoherent,
+        })
+        .expect("camera uniform buffer");
+    {
+        let pc = CompositePushConstants::ortho(SDF_IMG_W, SDF_IMG_H);
+        debug_assert_eq!(pc.count, PIXELS);
+        let mapped = device
+            .buffer_mapped_ptr(&camera_uniform)
+            .expect("host-visible uniform buffer is mapped");
+        let bytes = pc.as_bytes();
+        // SAFETY: `mapped` points to `COMPOSITE_PUSH_CONSTANT_BYTES` mapped host-coherent
+        // bytes; `bytes` is exactly that many bytes; no GPU work is in flight yet (submit
+        // follows), so the write is unsynchronized-safe.
+        unsafe {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len());
+        }
+    }
+
+    // --- The material table SSBO (vocab @7 + resolve @4): the single default material. ---
+    let material_table = device
+        .create_buffer(&BufferDesc {
+            size: (DEFAULT_MATERIAL_TABLE.len() as u64) * 4,
+            usage: BufferUsage::STORAGE,
+            location: MemoryLocation::HostVisibleCoherent,
+        })
+        .expect("PBR material table storage buffer");
+    {
+        let mapped = device
+            .buffer_mapped_ptr(&material_table)
+            .expect("host-visible material table is mapped");
+        write_words(mapped, &DEFAULT_MATERIAL_TABLE);
+    }
+
+    // --- The CLUSTERED light table SSBO (cull @1 + resolve @6), seeded with the caller's
+    // `light_table_words` (a `new_clustered` header + the GpuLight[] block). ---
+    let light_table = device
+        .create_buffer(&BufferDesc {
+            size: (light_table_words.len() as u64) * 4,
+            usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_DST,
+            location: MemoryLocation::HostVisibleCoherent,
+        })
+        .expect("Lighting-L1 clustered light table storage buffer");
+    {
+        let mapped = device
+            .buffer_mapped_ptr(&light_table)
+            .expect("host-visible light table is mapped");
+        write_words(mapped, light_table_words);
+    }
+
+    // --- The L1 cluster SSBOs. Host-visible so the GPU-tester can read the `ClusterGrid`
+    // occupancy back (the production path mints them DEVICE_LOCAL; for the golden a
+    // host-coherent buffer lets the readback diff against the host oracle). ---
+    let cluster_grid = device
+        .create_buffer(&BufferDesc {
+            size: cluster_grid_bytes,
+            usage: BufferUsage::STORAGE,
+            location: MemoryLocation::HostVisibleCoherent,
+        })
+        .expect("L1 ClusterGrid storage buffer");
+    let light_index = device
+        .create_buffer(&BufferDesc {
+            size: (index_list_cap as u64) * 4,
+            usage: BufferUsage::STORAGE,
+            location: MemoryLocation::HostVisibleCoherent,
+        })
+        .expect("L1 LightIndexList storage buffer");
+    // The global slice-allocation counter (one u32). Host-zeroed below before the submit —
+    // the cull's `InterlockedAdd(LightIndexAlloc[0], ...)` then starts at 0, the host-write
+    // equivalent of the production `cmd_fill_buffer(alloc, 0)` reset (which the abstract RHI
+    // encoder does not expose). No TRANSFER→COMPUTE barrier is needed: the host write
+    // completes before the submit, and a host-coherent write is visible to the GPU.
+    let light_index_alloc = device
+        .create_buffer(&BufferDesc {
+            size: 4,
+            usage: BufferUsage::STORAGE,
+            location: MemoryLocation::HostVisibleCoherent,
+        })
+        .expect("L1 LightIndexAlloc counter buffer");
+    {
+        let mapped = device
+            .buffer_mapped_ptr(&light_index_alloc)
+            .expect("host-visible alloc counter is mapped");
+        write_words(mapped, &[0u32]);
+    }
+
+    // --- The P4b tiles buffer (vocab @6) — unused here (no coarse pass) but the shared
+    // vocabulary layout declares binding 6, so it must be bound. ---
+    let tiles_buffer = device
+        .create_buffer(&BufferDesc {
+            size: (tile_count() as u64) * (TILE_BOUND_BYTES as u64),
+            usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_SRC,
+            location: MemoryLocation::HostVisibleCoherent,
+        })
+        .expect("P4b coarse-cull tile-bound storage buffer");
+
+    // --- The depth IMAGE (D32_SFLOAT) + the throwaway color attachment. ---
+    let depth = device
+        .create_texture(&TextureDesc {
+            width: SDF_IMG_W,
+            height: SDF_IMG_H,
+            depth: 1,
+            format: Format::D32Sfloat,
+            dimension: TextureDimension::D2,
+            usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT | ImageUsage::SAMPLED,
+        })
+        .expect("offscreen depth texture (sampled)");
+    let color = device
+        .create_texture(&TextureDesc {
+            width: SDF_IMG_W,
+            height: SDF_IMG_H,
+            depth: 1,
+            format: COLOR_FORMAT,
+            dimension: TextureDimension::D2,
+            usage: ImageUsage::COLOR_ATTACHMENT,
+        })
+        .expect("throwaway color texture");
+
+    // --- The MRT G-buffer STORAGE images + the LIT output + the gViewT lane. ---
+    let albedo = device
+        .create_texture(&TextureDesc {
+            width: SDF_IMG_W,
+            height: SDF_IMG_H,
+            depth: 1,
+            format: GBUFFER_FORMAT,
+            dimension: TextureDimension::D2,
+            usage: ImageUsage::STORAGE,
+        })
+        .expect("G-buffer albedo storage image");
+    let normal = device
+        .create_texture(&TextureDesc {
+            width: SDF_IMG_W,
+            height: SDF_IMG_H,
+            depth: 1,
+            format: GBUFFER_FORMAT,
+            dimension: TextureDimension::D2,
+            usage: ImageUsage::STORAGE,
+        })
+        .expect("G-buffer normal storage image");
+    let material = device
+        .create_texture(&TextureDesc {
+            width: SDF_IMG_W,
+            height: SDF_IMG_H,
+            depth: 1,
+            format: GBUFFER_FORMAT,
+            dimension: TextureDimension::D2,
+            usage: ImageUsage::STORAGE,
+        })
+        .expect("G-buffer material storage image");
+    let lit = device
+        .create_texture(&TextureDesc {
+            width: SDF_IMG_W,
+            height: SDF_IMG_H,
+            depth: 1,
+            format: GBUFFER_FORMAT,
+            dimension: TextureDimension::D2,
+            usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC,
+        })
+        .expect("deferred resolve lit storage image");
+    let viewt = device
+        .create_texture(&TextureDesc {
+            width: SDF_IMG_W,
+            height: SDF_IMG_H,
+            depth: 1,
+            format: Format::R32Sfloat,
+            dimension: TextureDimension::D2,
+            usage: ImageUsage::STORAGE,
+        })
+        .expect("Lighting L0b gViewT storage image");
+
+    let sampler = device
+        .create_sampler(&SamplerDesc::default())
+        .expect("depth sampler (ignored by .Load)");
+
+    let readback = device
+        .create_buffer(&BufferDesc {
+            size: READBACK_BYTES,
+            usage: BufferUsage::TRANSFER_DST,
+            location: MemoryLocation::HostVisibleCoherent,
+        })
+        .expect("host-visible readback buffer");
+
+    // --- The quad vertex buffer. ---
+    let vertices = quad_vertices();
+    let vertex_bytes = core::mem::size_of_val(&vertices) as u64;
+    let vertex_buffer = device
+        .create_buffer(&BufferDesc {
+            size: vertex_bytes,
+            usage: BufferUsage::VERTEX,
+            location: MemoryLocation::HostVisibleCoherent,
+        })
+        .expect("host-visible vertex buffer");
+    let vb_ptr = device
+        .buffer_mapped_ptr(&vertex_buffer)
+        .expect("host-visible vertex buffer is mapped");
+    // SAFETY: `vb_ptr` points to `vertex_bytes` mapped host-coherent bytes; `vertices` is a
+    // distinct stack array of `vertex_bytes` bytes; the write completes before any submit
+    // references the buffer (host-coherent: no flush).
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            vertices.as_ptr().cast::<u8>(),
+            vb_ptr.as_ptr(),
+            vertex_bytes as usize,
+        );
+    }
+
+    // --- Modules: the mesh-raster pair + the marcher + the cull + the resolve. ---
+    let vs = device
+        .create_shader_module(MVP_VS_SPV.as_words())
+        .expect("vertex shader module");
+    let fs = device
+        .create_shader_module(MVP_FS_SPV.as_words())
+        .expect("fragment shader module");
+    let cs = device
+        .create_shader_module(sdf_gbuffer_composite_spirv())
+        .expect("P1b G-buffer marcher compute shader module");
+    let cull_cs = device
+        .create_shader_module(cluster_cull_spirv())
+        .expect("L1 cluster-cull compute shader module");
+    let resolve_cs = device
+        .create_shader_module(deferred_pbr_spirv())
+        .expect("deferred resolve compute shader module");
+
+    // --- The depth-testing graphics pipeline. ---
+    let attributes = [
+        VertexAttribute { location: 0, offset: 0, format: VertexFormat::Float32x3 },
+        VertexAttribute { location: 1, offset: 12, format: VertexFormat::Float32x4 },
+    ];
+    let gfx = device
+        .create_graphics_pipeline(&GraphicsPipelineDesc {
+            vertex_module: &vs,
+            vertex_entry: c"main",
+            fragment_module: &fs,
+            fragment_entry: c"main",
+            color_formats: &[COLOR_FORMAT],
+            depth_format: Some(Format::D32Sfloat),
+            topology: PrimitiveTopology::TriangleList,
+            vertex_layout: Some(VertexBufferLayout {
+                stride: VERTEX_STRIDE,
+                attributes: &attributes,
+            }),
+            push_constant_bytes: MVP_BYTES,
+            bind_group_layout: None,
+        })
+        .expect("depth-testing graphics pipeline");
+
+    // --- The vocabulary set (marcher), identical to the table driver: { edit-list @0,
+    // sampled depth @1, albedo @2, normal @3, material @4, camera UBO @5, tiles @6, material
+    // table @7, gViewT @8 }. ---
+    let layout_entries = [
+        BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::SampledImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 2, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 3, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 4, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 5, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 6, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 7, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 8, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+    ];
+    let bind_layout = device
+        .create_bind_group_layout(&BindGroupLayoutDesc { entries: &layout_entries })
+        .expect("vocabulary bind-group layout");
+    let compute = device
+        .create_compute_pipeline(&ComputePipelineDesc {
+            module: &cs,
+            entry: c"main",
+            push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
+            bind_group_layout: Some(&bind_layout),
+        })
+        .expect("P1b G-buffer marcher compute pipeline");
+    let bind_group = device
+        .create_bind_group(&BindGroupDesc {
+            layout: &bind_layout,
+            entries: &[
+                BindGroupEntry::StorageBuffer { buffer: &buffer },
+                BindGroupEntry::SampledImage { texture: &depth, sampler: &sampler },
+                BindGroupEntry::StorageImage { texture: &albedo },
+                BindGroupEntry::StorageImage { texture: &normal },
+                BindGroupEntry::StorageImage { texture: &material },
+                BindGroupEntry::UniformBuffer { buffer: &camera_uniform },
+                BindGroupEntry::StorageBuffer { buffer: &tiles_buffer },
+                BindGroupEntry::StorageBuffer { buffer: &material_table },
+                BindGroupEntry::StorageImage { texture: &viewt },
+            ],
+        })
+        .expect("vocabulary bind group");
+
+    // --- The L1 CULL set + pipeline (mirrors `cluster_cull.hlsl`'s register map + the
+    // production `cull_layout`): { camera UBO @0, light table SSBO @1, ClusterGrid SSBO @2,
+    // LightIndexList SSBO @3, LightIndexAlloc SSBO @4 } + a 16-byte ClusterCullPush. ---
+    let cull_layout_entries = [
+        BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 2, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 3, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 4, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+    ];
+    let cull_layout = device
+        .create_bind_group_layout(&BindGroupLayoutDesc { entries: &cull_layout_entries })
+        .expect("L1 cull bind-group layout");
+    let cull_compute = device
+        .create_compute_pipeline(&ComputePipelineDesc {
+            module: &cull_cs,
+            entry: c"main",
+            push_constant_bytes: CLUSTER_CULL_PUSH_BYTES,
+            bind_group_layout: Some(&cull_layout),
+        })
+        .expect("L1 cluster-cull compute pipeline");
+    let cull_bind_group = device
+        .create_bind_group(&BindGroupDesc {
+            layout: &cull_layout,
+            entries: &[
+                BindGroupEntry::UniformBuffer { buffer: &camera_uniform },
+                BindGroupEntry::StorageBuffer { buffer: &light_table },
+                BindGroupEntry::StorageBuffer { buffer: &cluster_grid },
+                BindGroupEntry::StorageBuffer { buffer: &light_index },
+                BindGroupEntry::StorageBuffer { buffer: &light_index_alloc },
+            ],
+        })
+        .expect("L1 cull bind group");
+
+    // --- The RESOLVE layout + pipeline + set. The L1 difference vs the table driver: bindings
+    // 8/9 carry the REAL ClusterGrid + LightIndexList (not the light-table placeholder), so the
+    // resolve's `clusters_enabled` gate loops the per-froxel index slice. ---
+    let resolve_layout_entries = [
+        BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 2, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 3, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 4, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 5, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 6, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 7, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 8, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 9, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+    ];
+    let resolve_layout = device
+        .create_bind_group_layout(&BindGroupLayoutDesc { entries: &resolve_layout_entries })
+        .expect("deferred resolve bind-group layout");
+    let resolve_compute = device
+        .create_compute_pipeline(&ComputePipelineDesc {
+            module: &resolve_cs,
+            entry: c"main",
+            push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
+            bind_group_layout: Some(&resolve_layout),
+        })
+        .expect("deferred resolve compute pipeline");
+    let resolve_bind_group = device
+        .create_bind_group(&BindGroupDesc {
+            layout: &resolve_layout,
+            entries: &[
+                BindGroupEntry::StorageImage { texture: &albedo },
+                BindGroupEntry::StorageImage { texture: &normal },
+                BindGroupEntry::StorageImage { texture: &material },
+                BindGroupEntry::StorageImage { texture: &lit },
+                BindGroupEntry::StorageBuffer { buffer: &material_table },
+                BindGroupEntry::UniformBuffer { buffer: &camera_uniform },
+                BindGroupEntry::StorageBuffer { buffer: &light_table },
+                BindGroupEntry::StorageImage { texture: &viewt },
+                // Lighting L1 @8/@9: the REAL cluster buffers the cull pass populated.
+                BindGroupEntry::StorageBuffer { buffer: &cluster_grid },
+                BindGroupEntry::StorageBuffer { buffer: &light_index },
+            ],
+        })
+        .expect("deferred resolve bind group");
+
+    let fence = device.create_fence(false).expect("fence");
+    let mut encoder = device.create_command_encoder().expect("command encoder");
+
+    encoder.begin().expect("begin");
+
+    // --- Mesh raster pass: clear depth to the far plane, rasterize the quad. ---
+    encoder.image_barrier(&ImageBarrierDesc {
+        texture: &color,
+        src_stage: BarrierStage::TOP_OF_PIPE,
+        dst_stage: BarrierStage::COLOR_ATTACHMENT_OUTPUT,
+        src_access: BarrierAccess::NONE,
+        dst_access: BarrierAccess::COLOR_ATTACHMENT_WRITE,
+        old_layout: ImageLayout::Undefined,
+        new_layout: ImageLayout::ColorAttachmentOptimal,
+        range: ImageSubresourceRange::COLOR,
+    });
+    encoder.image_barrier(&ImageBarrierDesc {
+        texture: &depth,
+        src_stage: BarrierStage::TOP_OF_PIPE,
+        dst_stage: BarrierStage::EARLY_FRAGMENT_TESTS | BarrierStage::LATE_FRAGMENT_TESTS,
+        src_access: BarrierAccess::NONE,
+        dst_access: BarrierAccess::DEPTH_STENCIL_ATTACHMENT_WRITE,
+        old_layout: ImageLayout::Undefined,
+        new_layout: ImageLayout::DepthAttachmentOptimal,
+        range: ImageSubresourceRange::DEPTH,
+    });
+
+    let full = RenderArea { x: 0, y: 0, width: SDF_IMG_W, height: SDF_IMG_H };
+    let color_attachment = [RenderingAttachment {
+        texture: &color,
+        layout: ImageLayout::ColorAttachmentOptimal,
+        load_op: LoadOp::Clear,
+        store_op: StoreOp::Store,
+        clear_color: [0.0, 0.0, 0.0, 1.0],
+    }];
+    encoder.begin_rendering(&RenderingDesc {
+        render_area: full,
+        colors: &color_attachment,
+        depth: Some(DepthAttachment {
+            texture: &depth,
+            layout: ImageLayout::DepthAttachmentOptimal,
+            load_op: LoadOp::Clear,
+            store_op: StoreOp::Store,
+            clear_depth: DEPTH_CLEAR,
+        }),
+    });
+    encoder.bind_graphics_pipeline(&gfx);
+    encoder.push_graphics_constants(&gfx, ShaderStage::VERTEX, 0, &ortho_mvp_bytes());
+    encoder.bind_vertex_buffer(&vertex_buffer, 0, 0);
+    encoder.set_viewport(&Viewport {
+        x: 0.0,
+        y: 0.0,
+        width: SDF_IMG_W as f32,
+        height: SDF_IMG_H as f32,
+        min_depth: 0.0,
+        max_depth: 1.0,
+    });
+    encoder.set_scissor(&full);
+    encoder.draw(6, 1, 0, 0);
+    encoder.end_rendering();
+
+    // --- The single depth dual-use barrier: DEPTH_ATTACHMENT_OPTIMAL → SHADER_READ_ONLY. ---
+    encoder.image_barrier(&ImageBarrierDesc {
+        texture: &depth,
+        src_stage: BarrierStage::EARLY_FRAGMENT_TESTS | BarrierStage::LATE_FRAGMENT_TESTS,
+        dst_stage: BarrierStage::COMPUTE_SHADER,
+        src_access: BarrierAccess::DEPTH_STENCIL_ATTACHMENT_WRITE,
+        dst_access: BarrierAccess::SHADER_READ,
+        old_layout: ImageLayout::DepthAttachmentOptimal,
+        new_layout: ImageLayout::ShaderReadOnlyOptimal,
+        range: ImageSubresourceRange::DEPTH,
+    });
+
+    // --- The G-buffer + lit + gViewT images: UNDEFINED → GENERAL. ---
+    for tex in [&albedo, &normal, &material, &lit, &viewt] {
+        encoder.image_barrier(&ImageBarrierDesc {
+            texture: tex,
+            src_stage: BarrierStage::TOP_OF_PIPE,
+            dst_stage: BarrierStage::COMPUTE_SHADER,
+            src_access: BarrierAccess::NONE,
+            dst_access: BarrierAccess::SHADER_WRITE,
+            old_layout: ImageLayout::Undefined,
+            new_layout: ImageLayout::General,
+            range: ImageSubresourceRange::COLOR,
+        });
+    }
+
+    // --- SDF marcher compute pass: SAMPLE the depth image, STORE the G-buffer + gViewT. ---
+    encoder.bind_compute_pipeline(&compute);
+    encoder.bind_descriptor_set_compute(&bind_group, &compute);
+    let push = FineMarcherPush::new(false, 1.0, lighting_flags, light_dir);
+    encoder.push_compute_constants(&compute, ShaderStage::COMPUTE, 0, push.as_bytes());
+    encoder.dispatch(group_count_x(), 1, 1);
+
+    // --- Make the marcher's gAlbedo + gNormal + gMaterial + gViewT stores available + visible
+    // to the resolve's loads (COMPUTE→COMPUTE, SHADER_WRITE→SHADER_READ, GENERAL→GENERAL). ---
+    for tex in [&albedo, &normal, &material, &viewt] {
+        encoder.image_barrier(&ImageBarrierDesc {
+            texture: tex,
+            src_stage: BarrierStage::COMPUTE_SHADER,
+            dst_stage: BarrierStage::COMPUTE_SHADER,
+            src_access: BarrierAccess::SHADER_WRITE,
+            dst_access: BarrierAccess::SHADER_READ,
+            old_layout: ImageLayout::General,
+            new_layout: ImageLayout::General,
+            range: ImageSubresourceRange::COLOR,
+        });
+    }
+
+    // --- Lighting L1: the CLUSTER-CULL pass (mirrors `swapchain.rs`'s `render_gbuffer_frame`
+    // cull recording). The `LightIndexAlloc` counter was host-zeroed before the submit (the
+    // production `cmd_fill_buffer` reset equivalent), so no TRANSFER→COMPUTE alloc barrier is
+    // needed. Bind the cull pipeline + the cull set, push the 16-byte ClusterCullPush, and
+    // dispatch over `cluster_count` froxels at the 64-wide group. The cull is geometric (it
+    // does NOT read gViewT), so it can run after the marcher without further sync. ---
+    let cull_push = ClusterCullPush::new(cfg.z_near, cfg.z_far, cfg.max_lights_per_cluster, index_list_cap);
+    let cull_groups = cluster_count.div_ceil(64);
+    encoder.bind_compute_pipeline(&cull_compute);
+    encoder.bind_descriptor_set_compute(&cull_bind_group, &cull_compute);
+    encoder.push_compute_constants(&cull_compute, ShaderStage::COMPUTE, 0, cull_push.as_bytes());
+    encoder.dispatch(cull_groups, 1, 1);
+
+    // --- (L1) Make the cull's ClusterGrid + LightIndexList writes available + visible to the
+    // resolve's reads (COMPUTE→COMPUTE, SHADER_WRITE→SHADER_READ) on both buffers. ---
+    let cull_to_resolve = [
+        BufferBarrier {
+            buffer: &cluster_grid,
+            src_access: BarrierAccess::SHADER_WRITE,
+            dst_access: BarrierAccess::SHADER_READ,
+        },
+        BufferBarrier {
+            buffer: &light_index,
+            src_access: BarrierAccess::SHADER_WRITE,
+            dst_access: BarrierAccess::SHADER_READ,
+        },
+    ];
+    encoder.pipeline_barrier(&BarrierDesc {
+        src_stage: BarrierStage::COMPUTE_SHADER,
+        dst_stage: BarrierStage::COMPUTE_SHADER,
+        buffers: &cull_to_resolve,
+    });
+
+    // --- RESOLVE pass: bind the resolve pipeline + the resolve set (now with the real cluster
+    // buffers @8/@9), dispatch at the SAME grid the marcher used. The `clusters_enabled` header
+    // gate makes it loop the per-froxel index slice for the point/spot block. ---
+    encoder.bind_compute_pipeline(&resolve_compute);
+    encoder.bind_descriptor_set_compute(&resolve_bind_group, &resolve_compute);
+    encoder.dispatch(group_count_x(), 1, 1);
+
+    // --- LIT: GENERAL → TRANSFER_SRC_OPTIMAL for the readback copy. ---
+    encoder.image_barrier(&ImageBarrierDesc {
+        texture: &lit,
+        src_stage: BarrierStage::COMPUTE_SHADER,
+        dst_stage: BarrierStage::TRANSFER,
+        src_access: BarrierAccess::SHADER_WRITE,
+        dst_access: BarrierAccess::TRANSFER_READ,
+        old_layout: ImageLayout::General,
+        new_layout: ImageLayout::TransferSrcOptimal,
+        range: ImageSubresourceRange::COLOR,
+    });
+
+    let regions = [BufferImageCopy {
+        buffer_offset: 0,
+        buffer_row_length: 0,
+        buffer_image_height: 0,
+        aspect: ImageAspect::COLOR,
+        mip_level: 0,
+        base_array_layer: 0,
+        layer_count: 1,
+        image_offset_x: 0,
+        image_offset_y: 0,
+        image_offset_z: 0,
+        image_extent_w: SDF_IMG_W,
+        image_extent_h: SDF_IMG_H,
+        image_extent_d: 1,
+    }];
+    encoder.copy_image_to_buffer(&lit, ImageLayout::TransferSrcOptimal, &readback, &regions);
+
+    encoder.end().expect("end");
+
+    queue.submit(&encoder, &fence).expect("submit");
+    device.wait_fence(&fence, u64::MAX).expect("wait_fence");
+
+    // Read back the LIT R8G8B8A8 bytes.
+    let dst_ptr = device
+        .buffer_mapped_ptr(&readback)
+        .expect("host-visible readback buffer is mapped");
+    let mut out = vec![0u8; READBACK_BYTES as usize];
+    // SAFETY: `dst_ptr` points to `READBACK_BYTES` mapped host-coherent bytes; a fence wait
+    // preceded this read, so the GPU store + copy are complete + coherent; reading
+    // `READBACK_BYTES` bytes is in-bounds; `out` is a distinct allocation.
+    unsafe {
+        core::ptr::copy_nonoverlapping(dst_ptr.as_ptr(), out.as_mut_ptr(), READBACK_BYTES as usize);
+    }
+
+    // Read back the ClusterGrid occupancy ({offset, count} per froxel). It is a
+    // HostVisibleCoherent STORAGE buffer, so no transfer copy is required — the cull's writes
+    // completed before the fence signalled, and host-coherent memory makes them visible here.
+    let grid_ptr = device
+        .buffer_mapped_ptr(&cluster_grid)
+        .expect("host-visible ClusterGrid buffer is mapped");
+    let mut grid_out = vec![0u8; cluster_grid_bytes as usize];
+    // SAFETY: `grid_ptr` points to `cluster_grid_bytes` mapped host-coherent bytes (the buffer
+    // was sized so above); the fence wait preceded this read, so the cull's writes are complete
+    // + coherent; reading `cluster_grid_bytes` is in-bounds; `grid_out` is a distinct alloc.
+    unsafe {
+        core::ptr::copy_nonoverlapping(grid_ptr.as_ptr(), grid_out.as_mut_ptr(), cluster_grid_bytes as usize);
+    }
+
+    // Read back the flat LightIndexList (the per-froxel index slices the cull scattered). Like
+    // the ClusterGrid it is HostVisibleCoherent, so the cull's writes are visible after the
+    // fence wait. The buffer is NOT zero-initialized before the cull, so only the slots the cull
+    // claimed via InterlockedAdd carry valid indices — the probe reads each froxel's claimed
+    // slice `[offset .. offset+count)` ONLY, never the uninitialized tail.
+    let light_index_bytes_len = (l1_index_list_cap(cfg) as u64) * 4;
+    let index_ptr = device
+        .buffer_mapped_ptr(&light_index)
+        .expect("host-visible LightIndexList buffer is mapped");
+    let mut index_out = vec![0u8; light_index_bytes_len as usize];
+    // SAFETY: `index_ptr` points to `light_index_bytes_len` mapped host-coherent bytes (the
+    // buffer was sized `index_list_cap * 4` above); the fence wait preceded this read, so the
+    // cull's writes are complete + coherent; reading `light_index_bytes_len` is in-bounds;
+    // `index_out` is a distinct alloc.
+    unsafe {
+        core::ptr::copy_nonoverlapping(index_ptr.as_ptr(), index_out.as_mut_ptr(), light_index_bytes_len as usize);
+    }
+
+    assert_validation_clean(ctx);
+
+    // SAFETY: every resource was created on `device`; the last submission completed
+    // (fence-waited above), so none is in use; each is destroyed exactly once.
+    unsafe {
+        device.destroy_command_encoder(encoder);
+        device.destroy_fence(fence);
+        device.destroy_bind_group(resolve_bind_group);
+        device.destroy_bind_group(cull_bind_group);
+        device.destroy_bind_group(bind_group);
+        device.destroy_compute_pipeline(resolve_compute);
+        device.destroy_compute_pipeline(cull_compute);
+        device.destroy_compute_pipeline(compute);
+        device.destroy_bind_group_layout(resolve_layout);
+        device.destroy_bind_group_layout(cull_layout);
+        device.destroy_bind_group_layout(bind_layout);
+        device.destroy_graphics_pipeline(gfx);
+        device.destroy_shader_module(resolve_cs);
+        device.destroy_shader_module(cull_cs);
+        device.destroy_shader_module(cs);
+        device.destroy_shader_module(fs);
+        device.destroy_shader_module(vs);
+        device.destroy_buffer(vertex_buffer);
+        device.destroy_buffer(readback);
+        device.destroy_sampler(sampler);
+        device.destroy_texture(viewt);
+        device.destroy_texture(lit);
+        device.destroy_texture(material);
+        device.destroy_texture(normal);
+        device.destroy_texture(albedo);
+        device.destroy_texture(color);
+        device.destroy_texture(depth);
+        device.destroy_buffer(tiles_buffer);
+        device.destroy_buffer(light_index_alloc);
+        device.destroy_buffer(light_index);
+        device.destroy_buffer(cluster_grid);
+        device.destroy_buffer(light_table);
+        device.destroy_buffer(material_table);
+        device.destroy_buffer(camera_uniform);
+        device.destroy_buffer(buffer);
+    }
+
+    (out, grid_out, index_out)
+}
+
+/// Diffs the whole GPU LIT readback (run through the FULL clustered path) against the host
+/// `golden_deferred_resolve_clustered` per texel, within ±2/255. The host oracle is fed the
+/// host cull `grid` (`golden_cluster_cull`, which is bit-exact to what the GPU cull writes for
+/// these no-overflow scenes) + the SAME `golden_marcher_attributes` (its `view_t` is the gViewT
+/// the GPU marcher stored, so the host's froxel z-slice mapping matches the GPU's). Returns the
+/// max delta + the SDF-lit (mask == 1) pixel count so the caller can prove a real lit surface.
+#[allow(clippy::too_many_arguments)]
+fn assert_lit_matches_clustered_golden(
+    lit: &[u8],
+    edits: &[SdfEdit],
+    flags: u32,
+    light_dir: [f32; 3],
+    header: &GoldenLightHeader,
+    lights: &[GoldenLight],
+    cfg: &GoldenClusterConfig,
+    grid: &[Vec<u32>],
+    name: &str,
+) -> (i32, u64) {
+    let mut max_delta = 0i32;
+    let mut sdf_lit_hits = 0u64;
+    let materials = host_material_table();
+    for py in 0..SDF_IMG_H {
+        for px in 0..SDF_IMG_W {
+            let md = expected_mesh_depth(px, py);
+            let attrs = golden_marcher_attributes(
+                edits, &materials, md, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, 1.0,
+                flags, light_dir,
+            );
+            let want = unpack_packed_rgb(golden_deferred_resolve_clustered(
+                attrs, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, &materials, header,
+                lights, cfg, grid,
+            ));
+            let got = albedo_rgb(lit, px, py);
+            let dmax = (0..3).map(|c| (got[c] - want[c]).abs()).max().unwrap();
+            if attrs.mask == 1 {
+                sdf_lit_hits += 1;
+            }
+            if dmax > max_delta {
+                max_delta = dmax;
+            }
+            assert!(
+                dmax <= DEFERRED_ARM1_TOL,
+                "[{name}] L1 clustered LIT texel ({px},{py}) got {got:?} want {want:?} (clustered \
+                 oracle) exceeds ±{DEFERRED_ARM1_TOL}/255 (delta {dmax}) — the GPU cluster path \
+                 diverged from the host brute-force-equal oracle"
+            );
+        }
+    }
+    (max_delta, sdf_lit_hits)
+}
+
+/// **The load-bearing L1 golden.** Builds a multi-light scene (1 directional + 3 point + 1
+/// spot, `new_clustered(l0a=1, point_spot=4)`), runs the FULL GPU clustered path — the
+/// `cluster_cull` compute pass populates the real `ClusterGrid` + `LightIndexList` from the
+/// table, then the deferred resolve reads them with `clusters_enabled == 1` — and asserts the
+/// GPU LIT image matches the host `golden_deferred_resolve_clustered` oracle (which == brute
+/// force, proven by `lighting_l1_host_oracle.rs`) within ±2/255 over all 3 SDF scenes. This is
+/// the test that previously caught the NaN→black at crater(38,18); the `safe_normalize` fix in
+/// `deferred_pbr.hlsl` makes it match.
+#[test]
+fn l1_clustered_resolve_matches_the_brute_force_image() {
+    let Some(ctx) = boot_render_or_skip("l1_clustered_resolve_matches_the_brute_force_image") else {
+        return;
+    };
+    println!("Vulkan device (validation on): {}", ctx.device_name());
+
+    let flags = LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO;
+    let cfg = l1_cluster_config();
+    // l0a_count = 1 (the directional front block); point_spot_count = 4 (3 point + 1 spot).
+    // The surface band sits near world z = 0 (the ORTHO fixture marches +Z→origin), so the
+    // lights live in front of it with a generous range so a swath of pixels is lit.
+    let header = GoldenLightHeader::new_clustered(1, 4, 1.0, &cfg);
+    let lights = vec![
+        GoldenLight::directional([0.0, 0.0, 1.0], [1.0, 1.0, 1.0], 1.0),
+        GoldenLight::point([-0.5, 0.3, 0.2], [1.0, 0.3, 0.3], 3000.0, 2.0),
+        GoldenLight::point([0.5, -0.3, 0.2], [0.3, 1.0, 0.3], 3000.0, 2.0),
+        GoldenLight::point([0.0, 0.0, 0.4], [0.3, 0.3, 1.0], 3000.0, 2.5),
+        GoldenLight::spot([0.2, 0.2, 0.6], [0.0, 0.0, 1.0], [1.0, 1.0, 0.6], 5000.0, 3.0, 20.0, 35.0),
+    ];
+    let table = pack_light_table(&header, &lights);
+
+    // The host cull grid — the bit-exact reference for the GPU cull (no overflow on this scene,
+    // so GPU occupancy == host occupancy and the resolve sees the same per-froxel light set).
+    let grid = golden_cluster_cull(SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, &cfg, &header, &lights);
+
+    for (name, edits) in p4b_scenes() {
+        let (lit, _grid_bytes, _index_bytes) =
+            run_gbuffer_hybrid_lit_clustered(&ctx, &edits, flags, DEFAULT_LIGHT_DIR, &table, &cfg);
+        assert_eq!(lit.len(), READBACK_BYTES as usize);
+        let nonzero = lit.chunks_exact(4).filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+        assert!(nonzero > 0, "[{name}] L1 clustered LIT all-zero — device did not render");
+
+        let (max_delta, sdf_lit_hits) =
+            assert_lit_matches_clustered_golden(&lit, &edits, flags, DEFAULT_LIGHT_DIR, &header, &lights, &cfg, &grid, name);
+        assert!(
+            sdf_lit_hits > 0,
+            "[{name}] L1 clustered: no SDF-lit pixel — the gate is vacuous"
+        );
+        println!(
+            "[{name}] L1 clustered resolve (GPU cull → froxel-mapped resolve == brute-force \
+             oracle): max delta {max_delta}/255 (tol {DEFERRED_ARM1_TOL}); {sdf_lit_hits} \
+             SDF-lit px"
+        );
+    }
+}
+
+/// Reads a `ClusterGrid` readback (`cluster_count` × `{u32 offset, u32 count}`) at flat froxel
+/// index `fi`, returning `(offset, count)`.
+fn cluster_cell(grid_bytes: &[u8], fi: usize) -> (u32, u32) {
+    let base = fi * 8;
+    let offset = u32::from_le_bytes([grid_bytes[base], grid_bytes[base + 1], grid_bytes[base + 2], grid_bytes[base + 3]]);
+    let count = u32::from_le_bytes([grid_bytes[base + 4], grid_bytes[base + 5], grid_bytes[base + 6], grid_bytes[base + 7]]);
+    (offset, count)
+}
+
+/// **L1 cull occupancy golden.** Runs the GPU `cluster_cull` pass for a known multi-light
+/// scene, reads back the `ClusterGrid`, and asserts its per-froxel occupancy `count` matches
+/// the host `golden_cluster_cull` froxel-for-froxel. The cull is geometric + exact under the
+/// (un-hit) cap, so the GPU `count` per froxel equals the host set length for every froxel (the
+/// lost test passed 2108 == 2108 total occupancy). Non-vacuous: the scene MUST land at least
+/// one light in at least one froxel.
+#[test]
+fn l1_known_light_lands_in_the_expected_clusters() {
+    let Some(ctx) = boot_render_or_skip("l1_known_light_lands_in_the_expected_clusters") else {
+        return;
+    };
+    println!("Vulkan device (validation on): {}", ctx.device_name());
+
+    let cfg = l1_cluster_config();
+    // A known multi-light scene: 1 directional (GLOBAL, never in a froxel) + 3 point + 1 spot
+    // spread across the view at the surface band, each with a generous range so several froxels
+    // keep them. Identical light geometry to the resolve golden so the two tests cross-check.
+    let header = GoldenLightHeader::new_clustered(1, 4, 1.0, &cfg);
+    let lights = vec![
+        GoldenLight::directional([0.0, 0.0, 1.0], [1.0, 1.0, 1.0], 1.0),
+        GoldenLight::point([-0.5, 0.3, 0.2], [1.0, 0.3, 0.3], 3000.0, 2.0),
+        GoldenLight::point([0.5, -0.3, 0.2], [0.3, 1.0, 0.3], 3000.0, 2.0),
+        GoldenLight::point([0.0, 0.0, 0.4], [0.3, 0.3, 1.0], 3000.0, 2.5),
+        GoldenLight::spot([0.2, 0.2, 0.6], [0.0, 0.0, 1.0], [1.0, 1.0, 0.6], 5000.0, 3.0, 20.0, 35.0),
+    ];
+    let table = pack_light_table(&header, &lights);
+
+    // The host cull occupancy — the bit-exact reference. The SDF scene does not affect the cull
+    // (it is purely geometric on the light table + camera), so any scene drives the cull pass;
+    // use the crater fixture.
+    let host_grid = golden_cluster_cull(SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, &cfg, &header, &lights);
+    let cluster_count = cfg.cluster_count() as usize;
+    assert_eq!(host_grid.len(), cluster_count);
+
+    let (_lit, grid_bytes, index_bytes) =
+        run_gbuffer_hybrid_lit_clustered(&ctx, &crater(), LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO, DEFAULT_LIGHT_DIR, &table, &cfg);
+    assert_eq!(grid_bytes.len(), cluster_count * 8);
+    let index_list_cap = l1_index_list_cap(&cfg);
+    assert_eq!(index_bytes.len(), index_list_cap as usize * 4);
+
+    // Compare the GPU `count` per froxel to the host occupancy froxel-for-froxel. The flat
+    // froxel index is `golden_cluster_index(x, y, z, ...)` (Z innermost) — the SAME
+    // linearization the cull-write + resolve-read share, so the GPU `ClusterGrid[fi]` aligns
+    // with `host_grid[fi]`.
+    let mut gpu_total = 0u64;
+    let mut host_total = 0u64;
+    // Track every claimed light-index slice `[offset, offset+count)` so the probe can assert
+    // they are PAIRWISE DISJOINT (the InterlockedAdd hands out non-overlapping bases) and that
+    // their union covers exactly `sum(count)` distinct slots — a mis-based / overlapping slice
+    // would let the resolve read another froxel's (or uninitialized) indices while the per-froxel
+    // `count` still matched the host, which is the documented occupancy-only blind spot.
+    let mut claimed_slices: Vec<(u32, u32)> = Vec::new();
+    for z in 0..cfg.dim_z {
+        for y in 0..cfg.dim_y {
+            for x in 0..cfg.dim_x {
+                let fi = golden_cluster_index(x, y, z, cfg.dim_x, cfg.dim_z) as usize;
+                let (gpu_offset, gpu_count) = cluster_cell(&grid_bytes, fi);
+                let host_set = &host_grid[fi];
+                let host_count = host_set.len() as u32;
+                assert_eq!(
+                    gpu_count, host_count,
+                    "L1 cull occupancy mismatch at froxel ({x},{y},{z}) [fi={fi}]: GPU {gpu_count} \
+                     vs host {host_count} — the GPU cull dropped or kept a light the host oracle did not"
+                );
+
+                // The STRONG probe (Step 1): for a non-empty froxel, read the GPU's claimed slice
+                // `LightIndexList[offset .. offset+count)` and assert its index SET equals the host
+                // `golden_cluster_cull` set for the same froxel (sorted — order is table-order in
+                // both, but compare as sets to be robust). A correct `count` with WRONG index
+                // VALUES (a mis-based slice, or all-lights, or uninitialized tail) — exactly the
+                // over-accumulation symptom — is caught here, NOT by the count-only gate.
+                if gpu_count > 0 {
+                    assert!(
+                        (gpu_offset as u64) + (gpu_count as u64) <= index_list_cap as u64,
+                        "L1 cull slice out of bounds at froxel ({x},{y},{z}) [fi={fi}]: offset \
+                         {gpu_offset} + count {gpu_count} > index_list_cap {index_list_cap}"
+                    );
+                    let mut gpu_set: Vec<u32> = (0..gpu_count)
+                        .map(|k| light_index_entry(&index_bytes, gpu_offset + k))
+                        .collect();
+                    let mut host_sorted: Vec<u32> = host_set.clone();
+                    gpu_set.sort_unstable();
+                    host_sorted.sort_unstable();
+                    assert_eq!(
+                        gpu_set, host_sorted,
+                        "L1 cull INDEX-SET mismatch at froxel ({x},{y},{z}) [fi={fi}] (offset \
+                         {gpu_offset}): GPU LightIndexList slice {gpu_set:?} vs host \
+                         golden_cluster_cull {host_sorted:?} — the cull wrote correct COUNT but \
+                         WRONG index values (the over-accumulation blind spot)"
+                    );
+                    // Every index must be a valid point/spot slot `[l0a_count, light_count)` (the
+                    // cull must never scatter a directional/sky or an out-of-range index).
+                    let l0a = header.l0a_count();
+                    let total = header.light_count();
+                    for &j in &gpu_set {
+                        assert!(
+                            j >= l0a && j < total,
+                            "L1 cull wrote a non-point/spot index {j} into froxel ({x},{y},{z}) \
+                             [fi={fi}] (valid range [{l0a},{total}))"
+                        );
+                    }
+                    claimed_slices.push((gpu_offset, gpu_count));
+                }
+
+                gpu_total += gpu_count as u64;
+                host_total += host_count as u64;
+            }
+        }
+    }
+    assert_eq!(gpu_total, host_total, "L1 cull total occupancy GPU {gpu_total} != host {host_total}");
+    assert!(
+        host_total > 0,
+        "L1 cull occupancy gate is vacuous — the known scene landed NO point/spot light in ANY froxel"
+    );
+
+    // Assert the claimed slices are PAIRWISE DISJOINT and their counts sum to the total occupancy
+    // (no two froxels share a base — an overlap would make the resolve read a neighbour's indices
+    // for a correct-count froxel). Sort by offset, then verify each slice starts at or after the
+    // previous slice's end.
+    claimed_slices.sort_unstable_by_key(|&(off, _)| off);
+    let mut prev_end = 0u32;
+    let mut covered = 0u64;
+    for &(off, cnt) in &claimed_slices {
+        assert!(
+            off >= prev_end,
+            "L1 cull slices OVERLAP: a slice at offset {off} starts before the previous slice's \
+             end {prev_end} — the InterlockedAdd claims must be disjoint"
+        );
+        prev_end = off + cnt;
+        covered += cnt as u64;
+    }
+    assert_eq!(
+        covered, gpu_total,
+        "L1 cull disjoint-slice coverage {covered} != total occupancy {gpu_total}"
+    );
+
+    println!(
+        "[l1_cull] GPU ClusterGrid occupancy + LightIndexList index-SET == host \
+         golden_cluster_cull froxel-for-froxel; {} disjoint slices cover {gpu_total} index slots \
+         across {cluster_count} froxels",
+        claimed_slices.len()
+    );
+}
+
+/// Reads a `LightIndexList` readback (`index_list_cap` × `u32`) at flat slot `i`, returning the
+/// stored light-table index. Only slots inside a froxel's claimed slice `[offset, offset+count)`
+/// carry a valid index (the buffer is not zero-initialized before the cull).
+fn light_index_entry(index_bytes: &[u8], i: u32) -> u32 {
+    let base = (i as usize) * 4;
+    u32::from_le_bytes([
+        index_bytes[base],
+        index_bytes[base + 1],
+        index_bytes[base + 2],
+        index_bytes[base + 3],
+    ])
 }
 
 

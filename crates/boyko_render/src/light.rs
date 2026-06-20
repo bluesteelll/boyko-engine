@@ -49,6 +49,30 @@ pub const CLUSTER_COUNT: u32 = CLUSTER_DIM_X * CLUSTER_DIM_Y * CLUSTER_DIM_Z;
 pub const MAX_LIGHTS: u32 = 1024;
 /// L1 per-froxel light-index cap (clamp-and-drop above this — Decision 6 / Algorithm D).
 pub const MAX_LIGHTS_PER_CLUSTER: u32 = 256;
+/// L1 flat light-index-list capacity (the `light_index` SSBO length, in `u32`s). The cull
+/// pass `InterlockedAdd`-claims disjoint slices out of this flat list; a claim past the cap
+/// drops the light (clamp-and-drop, Decision 6 / Algorithm D — the global tail bound that
+/// backstops the per-froxel cap). 16384 `u32` = 64 KiB, sized once at setup; grown only on a
+/// capacity cross (setup-class). At `CLUSTER_COUNT` (3456) froxels this averages ~4.7
+/// indices/froxel before the global bound bites — ample for a sparse scene, and any
+/// over-budget froxel simply drops extras (no UB, no overflow).
+pub const INDEX_LIST_CAP: u32 = 16384;
+
+// ---- L1 cluster linearization (mirror cluster_cull.hlsl + deferred_pbr.hlsl) ----------
+
+/// Linearizes a froxel `(x, y, z)` to its flat [`ClusterCell`] index. **This is the ONE
+/// source of truth for the host; the cull-write and resolve-read shaders MUST use the
+/// byte-identical `(y * dimX + x) * dimZ + z`** — a mismatch silently maps a pixel to the
+/// wrong cluster (Decision 6 / the task's linearization FIX). The Z (froxel-depth) slice is
+/// the innermost (fastest-varying) index so a pixel's `z` walk is contiguous; debug builds
+/// assert each coordinate is within its grid dimension.
+#[inline]
+pub const fn cluster_index(x: u32, y: u32, z: u32) -> u32 {
+    debug_assert!(x < CLUSTER_DIM_X, "invariant: cluster x within CLUSTER_DIM_X");
+    debug_assert!(y < CLUSTER_DIM_Y, "invariant: cluster y within CLUSTER_DIM_Y");
+    debug_assert!(z < CLUSTER_DIM_Z, "invariant: cluster z within CLUSTER_DIM_Z");
+    (y * CLUSTER_DIM_X + x) * CLUSTER_DIM_Z + z
+}
 
 // ---- GpuLight (std430 POD, 48 B — mirrors MaterialGpu) -------------------------------
 
@@ -281,6 +305,105 @@ impl Default for LightingConfig {
             sky_spec: [0.10, 0.10, 0.12],
             clusters_enabled: false,
         }
+    }
+}
+
+// ---- L1 cluster config (Decision 6) — a World-singleton resource ---------------------
+
+/// The default exp-Z near plane (view-space depth at froxel slice 0). The exp-Z slices run
+/// `near * (far/near)^(k/dimZ)`; `near` is the cluster grid's front clamp, NOT the camera
+/// near (the marcher is ortho/perspective with `t` in `[0, T_MAX]`). 0.1 is a safe small
+/// front bound for the golden ortho/perspective scenes.
+pub const CLUSTER_NEAR_DEFAULT: f32 = 0.1;
+/// The default exp-Z far plane (view-space depth at froxel slice `dimZ`). Beyond it a pixel
+/// clamps to the last slice. 50.0 spans the golden scenes' depth range (T_MAX = 10 plus
+/// perspective headroom) with the froxel slices concentrated near the camera (the exp-Z
+/// point).
+pub const CLUSTER_FAR_DEFAULT: f32 = 50.0;
+
+/// The L1 cluster cull config (Decision 6) — a `World`-singleton resource. Carries the
+/// froxel grid dimensions, the per-froxel / flat-list capacities, and the exp-Z near/far
+/// the slice math derives its scale/bias from. The defaults reproduce the
+/// [`CLUSTER_DIM_*`] / [`MAX_LIGHTS_PER_CLUSTER`] / [`INDEX_LIST_CAP`] constants; a world
+/// that never inserts a custom config uses them.
+#[derive(Resource, Clone, Copy, Debug, PartialEq)]
+pub struct ClusterConfig {
+    /// Froxel grid X dimension (default [`CLUSTER_DIM_X`] = 16).
+    pub dim_x: u32,
+    /// Froxel grid Y dimension (default [`CLUSTER_DIM_Y`] = 9).
+    pub dim_y: u32,
+    /// Froxel grid Z (exp-Z slice) dimension (default [`CLUSTER_DIM_Z`] = 24).
+    pub dim_z: u32,
+    /// Per-froxel light-index cap (default [`MAX_LIGHTS_PER_CLUSTER`] = 256).
+    pub max_lights_per_cluster: u32,
+    /// Flat light-index-list capacity in `u32`s (default [`INDEX_LIST_CAP`] = 16384).
+    pub index_list_cap: u32,
+    /// Exp-Z near plane (view-space depth at slice 0; default [`CLUSTER_NEAR_DEFAULT`]).
+    pub z_near: f32,
+    /// Exp-Z far plane (view-space depth at slice `dim_z`; default [`CLUSTER_FAR_DEFAULT`]).
+    pub z_far: f32,
+}
+
+impl Default for ClusterConfig {
+    #[inline]
+    fn default() -> Self {
+        Self {
+            dim_x: CLUSTER_DIM_X,
+            dim_y: CLUSTER_DIM_Y,
+            dim_z: CLUSTER_DIM_Z,
+            max_lights_per_cluster: MAX_LIGHTS_PER_CLUSTER,
+            index_list_cap: INDEX_LIST_CAP,
+            z_near: CLUSTER_NEAR_DEFAULT,
+            z_far: CLUSTER_FAR_DEFAULT,
+        }
+    }
+}
+
+impl ClusterConfig {
+    /// The total froxel count (`dim_x * dim_y * dim_z`). At the defaults this equals
+    /// [`CLUSTER_COUNT`] (3456).
+    #[inline]
+    pub const fn cluster_count(&self) -> u32 {
+        self.dim_x * self.dim_y * self.dim_z
+    }
+
+    /// The exp-Z slice scale: `dim_z / ln(far / near)`. The resolve maps a view-space depth
+    /// `view_z` to its froxel slice via `slice = ln(view_z / near) * z_scale` (Decision 6) —
+    /// the inverse of `view_z = near * (far/near)^(slice/dim_z)`. The cull pass builds froxel
+    /// AABBs from the same `near`/`far`/`scale` so the build and the lookup agree. Returns 0
+    /// for a degenerate `far <= near` (clusters are then meaningless; the caller gates L1 off).
+    #[inline]
+    pub fn z_scale(&self) -> f32 {
+        let ratio = self.z_far / self.z_near;
+        debug_assert!(
+            self.z_far > self.z_near && self.z_near > 0.0,
+            "invariant: cluster z_far > z_near > 0"
+        );
+        if ratio > 1.0 {
+            (self.dim_z as f32) / ratio.ln()
+        } else {
+            0.0
+        }
+    }
+
+    /// The exp-Z slice bias: `-ln(near) * z_scale`. With [`Self::z_scale`] this gives the
+    /// affine `slice = ln(view_z) * z_scale + z_bias` the resolve uses (a single `mad` after
+    /// the `log`), equivalent to `ln(view_z / near) * z_scale` but pre-folding the `ln(near)`.
+    #[inline]
+    pub fn z_bias(&self) -> f32 {
+        -self.z_near.ln() * self.z_scale()
+    }
+
+    /// Packs the three small grid dims into one `u32` (`dim_x | dim_y<<8 | dim_z<<16`) for
+    /// the header's `cluster_params` lane. The dims are ≤ 255 each (debug-asserted), so the
+    /// pack is lossless and the shader unpacks with the inverse mask/shift.
+    #[inline]
+    pub fn packed_dims(&self) -> u32 {
+        debug_assert!(
+            self.dim_x <= 0xFF && self.dim_y <= 0xFF && self.dim_z <= 0xFF,
+            "invariant: cluster dims must each fit in 8 bits for the header pack"
+        );
+        self.dim_x | (self.dim_y << 8) | (self.dim_z << 16)
     }
 }
 
@@ -521,6 +644,35 @@ impl LightHeaderGpu {
         }
     }
 
+    /// Builds the L1 header: identical to [`Self::new`] but the `cluster_params` lane carries
+    /// the exp-Z froxel-lookup factors instead of zeros. Lane 3 is
+    /// `[z_scale, z_bias, bitcast(packed_dims), bitcast(clusters_enabled)]` (Decision 6):
+    /// - `z_scale` / `z_bias` — the affine exp-Z slice map `slice = ln(view_z) * z_scale +
+    ///   z_bias` the resolve applies (the cull builds froxel AABBs from the same near/far);
+    /// - `packed_dims` — `dim_x | dim_y<<8 | dim_z<<16` (the resolve unpacks to map a pixel
+    ///   to its `(x, y)` tile + clamp the slice);
+    /// - `clusters_enabled` — `1` gates the resolve onto the cluster path, `0` ⇒ the flat
+    ///   L0b loop (the L1 0%-gate). When `cfg.clusters_enabled` is `false` the lane stays all
+    ///   zero (byte-identical to [`Self::new`]'s L0 header — the 0%-gate anchor).
+    #[inline]
+    pub fn new_clustered(
+        l0a_count: u32,
+        point_spot_count: u32,
+        cfg: &LightingConfig,
+        cluster: &ClusterConfig,
+    ) -> Self {
+        let mut header = Self::new(l0a_count, point_spot_count, cfg);
+        if cfg.clusters_enabled {
+            header.cluster_params = [
+                cluster.z_scale(),
+                cluster.z_bias(),
+                f32::from_bits(cluster.packed_dims()),
+                f32::from_bits(1),
+            ];
+        }
+        header
+    }
+
     /// The `light_count` field (bit-cast back from `counts_exposure.x`).
     #[inline]
     pub fn light_count(&self) -> u32 {
@@ -538,6 +690,34 @@ impl LightHeaderGpu {
     #[inline]
     pub fn point_spot_count(&self) -> u32 {
         self.counts_exposure[3].to_bits()
+    }
+
+    /// Whether the L1 cluster path is enabled (`cluster_params.w` bit-cast `!= 0`). `false`
+    /// ⇒ the resolve loops the flat table (the L1 0%-gate == L0b).
+    #[inline]
+    pub fn clusters_enabled(&self) -> bool {
+        self.cluster_params[3].to_bits() != 0
+    }
+
+    /// The L1 exp-Z slice scale (`cluster_params.x`). Meaningful only when
+    /// [`Self::clusters_enabled`]; zero otherwise.
+    #[inline]
+    pub fn cluster_z_scale(&self) -> f32 {
+        self.cluster_params[0]
+    }
+
+    /// The L1 exp-Z slice bias (`cluster_params.y`). Meaningful only when
+    /// [`Self::clusters_enabled`]; zero otherwise.
+    #[inline]
+    pub fn cluster_z_bias(&self) -> f32 {
+        self.cluster_params[1]
+    }
+
+    /// The L1 packed froxel dims `dim_x | dim_y<<8 | dim_z<<16` (`cluster_params.z` bit-cast).
+    /// Zero when clusters are disabled.
+    #[inline]
+    pub fn cluster_packed_dims(&self) -> u32 {
+        self.cluster_params[2].to_bits()
     }
 }
 
@@ -677,6 +857,95 @@ mod tests {
         assert_eq!(h.sky_diffuse[0], cfg.sky_diffuse[0]);
         // L0: cluster dims are zero.
         assert_eq!(h.cluster_params[0], 0.0);
+    }
+
+    #[test]
+    fn cluster_index_linearizes_z_innermost_and_round_trips() {
+        // (y * dimX + x) * dimZ + z — Z is the fastest-varying (innermost) index, so a
+        // contiguous z-walk inside one (x,y) tile produces consecutive indices.
+        assert_eq!(cluster_index(0, 0, 0), 0);
+        assert_eq!(cluster_index(0, 0, 1), 1);
+        assert_eq!(cluster_index(0, 0, CLUSTER_DIM_Z - 1), CLUSTER_DIM_Z - 1);
+        // x increments by dimZ (one full slice column); y by dimX*dimZ.
+        assert_eq!(cluster_index(1, 0, 0), CLUSTER_DIM_Z);
+        assert_eq!(cluster_index(0, 1, 0), CLUSTER_DIM_X * CLUSTER_DIM_Z);
+        // The last froxel maps to CLUSTER_COUNT - 1 and every index is unique + in range.
+        assert_eq!(
+            cluster_index(CLUSTER_DIM_X - 1, CLUSTER_DIM_Y - 1, CLUSTER_DIM_Z - 1),
+            CLUSTER_COUNT - 1
+        );
+        let mut seen = vec![false; CLUSTER_COUNT as usize];
+        for y in 0..CLUSTER_DIM_Y {
+            for x in 0..CLUSTER_DIM_X {
+                for z in 0..CLUSTER_DIM_Z {
+                    let idx = cluster_index(x, y, z) as usize;
+                    assert!(!seen[idx], "cluster_index collision at ({x},{y},{z})");
+                    seen[idx] = true;
+                }
+            }
+        }
+        assert!(seen.iter().all(|&s| s), "cluster_index is not a bijection onto [0, COUNT)");
+    }
+
+    #[test]
+    fn exp_z_factors_invert_the_slice_distribution() {
+        // The affine map `slice = ln(view_z) * z_scale + z_bias` must invert the exp-Z slice
+        // distribution `view_z(k) = near * (far/near)^(k/dimZ)` to the SAME k (round-trip).
+        let cfg = ClusterConfig::default();
+        let scale = cfg.z_scale();
+        let bias = cfg.z_bias();
+        for k in 0..=cfg.dim_z {
+            let view_z = cfg.z_near * (cfg.z_far / cfg.z_near).powf(k as f32 / cfg.dim_z as f32);
+            let slice = view_z.ln() * scale + bias;
+            assert!(
+                (slice - k as f32).abs() < 1e-3,
+                "exp-Z slice {k}: view_z={view_z} mapped back to slice {slice}"
+            );
+        }
+        // The boundaries: view_z == near maps to slice 0, view_z == far maps to slice dimZ.
+        assert!((cfg.z_near.ln() * scale + bias).abs() < 1e-4);
+        assert!((cfg.z_far.ln() * scale + bias - cfg.dim_z as f32).abs() < 1e-3);
+    }
+
+    #[test]
+    fn cluster_config_default_matches_the_constants() {
+        let c = ClusterConfig::default();
+        assert_eq!(c.dim_x, CLUSTER_DIM_X);
+        assert_eq!(c.dim_y, CLUSTER_DIM_Y);
+        assert_eq!(c.dim_z, CLUSTER_DIM_Z);
+        assert_eq!(c.cluster_count(), CLUSTER_COUNT);
+        assert_eq!(c.max_lights_per_cluster, MAX_LIGHTS_PER_CLUSTER);
+        assert_eq!(c.index_list_cap, INDEX_LIST_CAP);
+        assert_eq!(c.packed_dims(), CLUSTER_DIM_X | (CLUSTER_DIM_Y << 8) | (CLUSTER_DIM_Z << 16));
+    }
+
+    #[test]
+    fn clustered_header_off_is_byte_identical_to_l0_header() {
+        // clusters_enabled == false ⇒ new_clustered's cluster_params stays all-zero, so the
+        // header is byte-identical to the plain L0 header (the L1 0%-gate anchor).
+        let cfg = LightingConfig::default(); // clusters_enabled == false
+        let cluster = ClusterConfig::default();
+        let l0 = LightHeaderGpu::new(2, 1, &cfg);
+        let l1 = LightHeaderGpu::new_clustered(2, 1, &cfg, &cluster);
+        assert_eq!(l0, l1);
+        assert!(!l1.clusters_enabled());
+        assert_eq!(l1.cluster_params, [0.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn clustered_header_on_carries_factors_and_dims() {
+        let cfg = LightingConfig { clusters_enabled: true, ..Default::default() };
+        let cluster = ClusterConfig::default();
+        let h = LightHeaderGpu::new_clustered(1, 0, &cfg, &cluster);
+        assert!(h.clusters_enabled());
+        assert_eq!(h.cluster_z_scale(), cluster.z_scale());
+        assert_eq!(h.cluster_z_bias(), cluster.z_bias());
+        assert_eq!(h.cluster_packed_dims(), cluster.packed_dims());
+        // Unpack the dims back out of the packed word.
+        let d = h.cluster_packed_dims();
+        assert_eq!(d & 0xFF, CLUSTER_DIM_X);
+        assert_eq!((d >> 8) & 0xFF, CLUSTER_DIM_Y);
+        assert_eq!((d >> 16) & 0xFF, CLUSTER_DIM_Z);
     }
 
     #[test]

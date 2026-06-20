@@ -2681,6 +2681,17 @@ pub type PfnVkCmdCopyBuffer = unsafe extern "system" fn(
     p_regions: *const VkBufferCopy,
 );
 
+/// `PFN_vkCmdFillBuffer` — fills `size` bytes of `dst_buffer` from `dst_offset` with the
+/// 4-byte `data` pattern (Vulkan 1.0 core, always present). The Lighting-L1 cull resets its
+/// `LightIndexAlloc` counter to 0 with this before each frame's cull dispatch.
+pub type PfnVkCmdFillBuffer = unsafe extern "system" fn(
+    command_buffer: VkCommandBuffer,
+    dst_buffer: VkBuffer,
+    dst_offset: VkDeviceSize,
+    size: VkDeviceSize,
+    data: u32,
+);
+
 /// `PFN_vkCreateFence`.
 pub type PfnVkCreateFence = unsafe extern "system" fn(
     device: VkDevice,
