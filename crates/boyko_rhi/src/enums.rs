@@ -235,6 +235,10 @@ pub enum Format {
     B8G8R8A8Unorm = 44,
     /// `VK_FORMAT_R16_SFLOAT` — a compact single-channel float (deferred SDF use).
     R16Sfloat = 76,
+    /// `VK_FORMAT_R32_SFLOAT` — a single 32-bit float (Lighting L0b: the `gViewT`
+    /// G-buffer lane storing the marcher's surface ray parameter `t` for world-position
+    /// reconstruction in the deferred resolve).
+    R32Sfloat = 100,
     /// `VK_FORMAT_R32G32B32_SFLOAT` — three 32-bit floats (deferred position use).
     R32G32B32Sfloat = 106,
     /// `VK_FORMAT_D32_SFLOAT` — a 32-bit float depth attachment (deferred S1 use).

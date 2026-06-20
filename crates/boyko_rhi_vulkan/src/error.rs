@@ -141,7 +141,8 @@ impl From<VulkanError> for RhiError {
                 | BootError::NoSuitableQueueFamily
                 | BootError::ValidationUnavailable
                 | BootError::WindowingUnavailable
-                | BootError::GbufferStorageFormatUnsupported => {
+                | BootError::GbufferStorageFormatUnsupported
+                | BootError::ViewtStorageFormatUnsupported => {
                     RhiError::BackendError("vulkan boot failed")
                 }
                 BootError::VkError(_cmd, result) => match result {

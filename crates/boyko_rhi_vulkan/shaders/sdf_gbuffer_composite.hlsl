@@ -59,6 +59,11 @@
 //               coarse-cull bound, written by `sdf_tile_cull.hlsl`. Read ONLY when the
 //               `coarse_enabled` push constant is non-zero; the OFF path never touches
 //               it (byte-identical to the pre-P4b marcher — the 0%-gate).
+//   binding 7 : StructuredBuffer<MaterialGpu> (READ-ONLY) — the PBR MVP-2 material table
+//               (the marcher fetches the picked edit's RAW LINEAR `base_color`).
+//   binding 8 : RWTexture2D<float> (STORAGE, r32f) — the Lighting L0b `gViewT` lane (the
+//               surface ray param `t` for the resolve's `P = ro + rd * t`). The 9th vocab
+//               entry, within the raised 12-binding cap (C1).
 //
 // # The push constant (Render P4b + B1 + A1/A2 — pushed against THIS pipeline's OWN
 //   dedicated layout via `push_compute_constants`, NOT the shared `push_constants`)
@@ -167,8 +172,8 @@ struct TileBound {
 };
 StructuredBuffer<TileBound> Tiles : register(t6);
 
-// PBR MVP-2: the material table (`MaterialGpu[]`), binding 7 — the last slot under the
-// 8-binding cap. The marcher reads `materials[id].base_color` (the picked edit's RAW
+// PBR MVP-2: the material table (`MaterialGpu[]`), binding 7. The marcher reads
+// `materials[id].base_color` (the picked edit's RAW
 // LINEAR albedo) to write into gAlbedo; the resolve reads metallic/roughness/etc. The
 // std430 layout MIRRORS `boyko_render::material::MaterialGpu` (48 B / 12 words):
 //
@@ -184,6 +189,20 @@ struct MaterialGpu {
     float4 emissive;
 };
 StructuredBuffer<MaterialGpu> Materials : register(t7);
+
+// Lighting L0b: the `gViewT` G-buffer lane (binding 8, the 9th vocab entry — within the
+// raised 12-binding cap, C1). An R32_SFLOAT STORAGE image carrying the marcher's surface
+// ray parameter `t` (the SDF-hit `p = ro + rd * t`), which the deferred resolve reads to
+// reconstruct the world position `P = ro + rd * t` for point/spot attenuation. The full
+// fp32 lane avoids the precision banding an 8-bit gMaterial.a would cause.
+// `[[vk::image_format("r32f")]]` pins the `OpTypeImage` to `R32f` (matching the view;
+// `shaderStorageImageWriteWithoutFormat` is OFF). WRITTEN AT ALL THREE TERMINAL EXITS,
+// exactly once per REAL pixel per frame (C2): the real marched `t` on the SDF-lit arm, a
+// `1.0e30` sentinel on the EMPTY/mesh/background arms (never read on a non-lit pixel — the
+// resolve gates the read inside `mask == 1`). The kernel-entry over-hang guard
+// (`if (idx >= count) return;`) is a legitimate NON-writing exit: those threads own no
+// pixel, so gViewT is deliberately NOT written there.
+[[vk::image_format("r32f")]] RWTexture2D<float> gViewT : register(u8);
 
 // Mirrors `boyko_render::material::MATERIAL_GPU_WORDS` (48 B / 4 = 12). A documentation
 // + intent pin; the StructuredBuffer<MaterialGpu> element stride is the std430 layout.
@@ -441,6 +460,12 @@ void main(uint3 tid : SV_DispatchThreadID) {
             gAlbedo[uint2(px, py)] = float4(clamp(empty_color, 0.0, 1.0), 1.0);
             gNormal[uint2(px, py)] = float4(0.5, 0.5, 0.0, 0.0);   // neutral oct, id = 0
             gMaterial[uint2(px, py)] = float4(1.0, 1.0, 0.0, 1.0); // shadow=1, ao=1, mask=0
+            // Lighting L0b (C2): this EMPTY-tile early-return is a SEPARATE terminal exit
+            // BEFORE the final block, so gViewT must be written here too — the `1.0e30`
+            // sentinel (mask == 0, never read on a non-lit pixel). Omitting it would leave
+            // an EMPTY pixel's gViewT lane unwritten this frame (the prior single-site plan's
+            // bug). EXACTLY-ONCE: this thread returns immediately after.
+            gViewT[uint2(px, py)] = 1.0e30;
             return;
         }
         t_seed = tb.near_t;
@@ -623,4 +648,11 @@ void main(uint3 tid : SV_DispatchThreadID) {
     gAlbedo[uint2(px, py)] = float4(clamp(base, 0.0, 1.0), 1.0);
     gNormal[uint2(px, py)] = float4(oct.x, oct.y, id_ba.x, id_ba.y);
     gMaterial[uint2(px, py)] = float4(shadow, ao, mask, 1.0);
+    // Lighting L0b (C2): the third + last terminal write site. The mesh + background arms
+    // (mask == 0) and the SDF-lit arm (mask == 1) all fall through here. On the lit arm
+    // store the REAL marched ray param `t` (the same `t` the SDF-hit arm's `p = ro + rd * t`
+    // used, in scope here); on the mesh/background arm store the `1.0e30` sentinel (never
+    // read on a non-lit pixel). `t` is the true world distance (rd is unit), so the resolve
+    // reconstructs `P = ro + rd * t` exactly.
+    gViewT[uint2(px, py)] = (mask == 1.0) ? t : 1.0e30;
 }

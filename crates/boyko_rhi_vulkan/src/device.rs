@@ -79,6 +79,13 @@ pub enum BootError {
     /// G-buffer color images. Core-guaranteed on the RTX 3060 / any desktop GPU; a
     /// CLEAR fail-fast at device-create beats an opaque storage-image store fault.
     GbufferStorageFormatUnsupported,
+    /// The GPU does not advertise `STORAGE_IMAGE` on the Lighting L0b `gViewT` lane
+    /// format (`R32_SFLOAT`, OPTIMAL tiling) — the marcher cannot store the surface ray
+    /// parameter `t` the deferred resolve reconstructs `P` from. Core-guaranteed on the
+    /// RTX 3060 / any desktop GPU; the fail-fast mirrors
+    /// [`Self::GbufferStorageFormatUnsupported`] so the new lane can never fault on an
+    /// unsupported format.
+    ViewtStorageFormatUnsupported,
 }
 
 /// Bootstrap options for the instance.
@@ -126,6 +133,10 @@ pub struct DeviceCaps {
     /// context — boot fails with [`BootError::GbufferStorageFormatUnsupported`]
     /// otherwise.
     pub gbuffer_storage_format_ok: bool,
+    /// Whether `R32_SFLOAT` supports `STORAGE_IMAGE` under OPTIMAL tiling (the Lighting
+    /// L0b `gViewT` lane is a compute-store target). Always `true` on a booted context —
+    /// boot fails with [`BootError::ViewtStorageFormatUnsupported`] otherwise (W2).
+    pub viewt_storage_format_ok: bool,
 }
 
 /// Global-scope Vulkan commands (resolved with a NULL instance).
@@ -474,6 +485,12 @@ impl VulkanContext {
         let device_caps = query_device_caps(&instance_fns, physical_device);
         if !device_caps.gbuffer_storage_format_ok {
             fail!(BootError::GbufferStorageFormatUnsupported);
+        }
+        // W2 (Lighting L0b): the `gViewT` R32_SFLOAT lane is a compute-store target —
+        // fail-fast here (mirroring the G-buffer check) so the new lane can never fault on
+        // an unsupported format. Core-guaranteed on the RTX 3060.
+        if !device_caps.viewt_storage_format_ok {
+            fail!(BootError::ViewtStorageFormatUnsupported);
         }
 
         // --- 6. Create the logical device + retrieve the queue. ---
@@ -1786,12 +1803,15 @@ fn supports_dynamic_rendering(fns: &InstanceFns, physical_device: VkPhysicalDevi
 
 /// Queries the minimal Render P1b [`DeviceCaps`]: whether the GPU advertises the
 /// bindless prerequisite (Vulkan 1.2 `descriptorIndexing` + `runtimeDescriptorArray`,
-/// chained into `vkGetPhysicalDeviceFeatures2`) and whether `R8G8B8A8_UNORM` supports
-/// `STORAGE_IMAGE` under OPTIMAL tiling (`vkGetPhysicalDeviceFormatProperties`).
+/// chained into `vkGetPhysicalDeviceFeatures2`), whether `R8G8B8A8_UNORM` supports
+/// `STORAGE_IMAGE` under OPTIMAL tiling (`vkGetPhysicalDeviceFormatProperties`), and
+/// (Lighting L0b / W2) whether `R32_SFLOAT` supports `STORAGE_IMAGE` for the `gViewT`
+/// lane.
 ///
 /// `bindless_capable` is recorded only (a future bindless path reads it); the caller
-/// fail-fasts on `!gbuffer_storage_format_ok` so the marcher's G-buffer store can
-/// never fault on an unsupported format. P1b enables NEITHER feature at device
+/// fail-fasts on `!gbuffer_storage_format_ok` and `!viewt_storage_format_ok` so the
+/// marcher's G-buffer / `gViewT` stores can never fault on an unsupported format. P1b
+/// enables NEITHER feature at device
 /// creation — the shader declares explicit storage-image formats (so
 /// `shaderStorageImageWriteWithoutFormat` is not needed) and bindless is unused.
 fn query_device_caps(fns: &InstanceFns, physical_device: VkPhysicalDevice) -> DeviceCaps {
@@ -1835,9 +1855,32 @@ fn query_device_caps(fns: &InstanceFns, physical_device: VkPhysicalDevice) -> De
     let gbuffer_storage_format_ok =
         (format_props.optimal_tiling_features & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0;
 
+    // --- viewt_storage_format_ok (W2): STORAGE_IMAGE on R32_SFLOAT, OPTIMAL tiling. ---
+    // The Lighting L0b `gViewT` lane stores the marcher's surface ray param `t` as a
+    // compute store; mirror the `gbuffer_storage_format_ok` check exactly for the new
+    // format so the caller can fail-fast before the `gViewT` image is created.
+    let mut viewt_props = VkFormatProperties {
+        linear_tiling_features: 0,
+        optimal_tiling_features: 0,
+        buffer_features: 0,
+    };
+    // SAFETY: `physical_device` is valid; `R32_SFLOAT` is a valid `VkFormat`;
+    // `&mut viewt_props` is a valid out-pointer for the `#[repr(C)]`
+    // `VkFormatProperties` the driver fully overwrites.
+    unsafe {
+        (fns.get_physical_device_format_properties)(
+            physical_device,
+            VK_FORMAT_R32_SFLOAT,
+            &mut viewt_props,
+        )
+    };
+    let viewt_storage_format_ok =
+        (viewt_props.optimal_tiling_features & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0;
+
     DeviceCaps {
         bindless_capable,
         gbuffer_storage_format_ok,
+        viewt_storage_format_ok,
     }
 }
 

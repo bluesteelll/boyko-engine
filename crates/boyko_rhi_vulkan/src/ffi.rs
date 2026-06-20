@@ -747,6 +747,9 @@ pub const VK_FORMAT_R8G8B8A8_UNORM: i32 = 37;
 pub const VK_FORMAT_R8G8B8A8_SRGB: i32 = 43;
 /// `VkFormat::VK_FORMAT_UNDEFINED`.
 pub const VK_FORMAT_UNDEFINED: i32 = 0;
+/// `VkFormat::VK_FORMAT_R32_SFLOAT` — a single 32-bit float (Lighting L0b: the
+/// `gViewT` G-buffer storage-image lane carrying the marcher's surface ray param `t`).
+pub const VK_FORMAT_R32_SFLOAT: i32 = 100;
 /// `VkFormat::VK_FORMAT_R32G32B32_SFLOAT` — three 32-bit floats (a vec3 vertex
 /// position, Phase-6 S0 rung 3).
 pub const VK_FORMAT_R32G32B32_SFLOAT: i32 = 106;

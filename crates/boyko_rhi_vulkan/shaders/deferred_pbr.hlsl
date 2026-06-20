@@ -26,9 +26,12 @@
 //               (the per-pixel view direction is reconstructed from the SHARED ray-gen).
 //   binding 6 : StructuredBuffer<uint> (READ-ONLY)   — the Lighting-L0 light table
 //               (`[LightHeaderGpu || GpuLight[]]`, word-indexed; see `light_table.hlsli`).
+//   binding 7 : RWTexture2D<float> (STORAGE, r32f)   — the Lighting-L0b `gViewT` lane (the
+//               marcher's surface ray param `t`), read under `mask == 1` to reconstruct
+//               `P = ro + rd * t` for point/spot attenuation.
 //
-// 7 STORAGE/uniform bindings — within the 12-binding cap (5 free; the cap was raised
-// 8 → 12 in the Lighting L0 plan). All four images are consumed in GENERAL (the marcher's
+// 8 STORAGE/uniform bindings — within the 12-binding cap (4 free; the cap was raised
+// 8 → 12 in the Lighting L0 plan). All five images are consumed in GENERAL (the marcher's
 // STORAGE views, kept in GENERAL after a memory-only COMPUTE→COMPUTE barrier) and `gLit`
 // is a storage store. `[[vk::image_format("rgba8")]]` pins each `OpTypeImage` to `Rgba8`
 // (shaderStorageImageWriteWithoutFormat is OFF).
@@ -85,6 +88,15 @@ cbuffer Camera : register(b5) {
 // std430 layout decoded by `light_table.hlsli`, mirrored by boyko_render::light + the
 // host oracle). Replaces the compiled-in LIGHT_DIR/LIGHT_COLOR/SKY_* constants below.
 StructuredBuffer<uint> LightBuf : register(t6);
+
+// binding 7: the Lighting-L0b `gViewT` G-buffer lane (R32_SFLOAT STORAGE image in GENERAL,
+// the marcher's surface ray param `t`). READ ONLY inside the `is_sdf_lit` / `mask == 1`
+// branch (C2 read-under-mask gate) to reconstruct the world position `P = ro + rd * t` for
+// point/spot attenuation — a `1.0e30` sentinel on a non-lit pixel is therefore never
+// consumed. `[[vk::image_format("r32f")]]` pins the `OpTypeImage` to `R32f` (matching the
+// marcher's store view). (The L0a light_table occupies binding 6, so `gViewT` lands at
+// binding 7 — both ≤ the 12-binding cap.)
+[[vk::image_format("r32f")]] RWTexture2D<float> gViewT : register(u7);
 
 // Shared camera ray-gen (the SAME header the marcher includes — ONE ray-gen, no drift).
 #include "ray_gen.hlsli"
@@ -239,6 +251,57 @@ void main(uint3 tid : SV_DispatchThreadID) {
                 ambient += (spec_ambient + diff_ambient) * ao;
             }
             // Point/spot (kinds 1/2) are the L0b block — not in the L0a front block.
+        }
+
+        // L0b: reconstruct the surface world position from the new gViewT lane and loop the
+        // point/spot block `[l0a_count .. light_count)`. The gViewT.Load executes STRICTLY
+        // here, inside the `is_sdf_lit` / `mask == 1` branch (C2 read-under-mask gate) — a
+        // non-lit pixel carries the `1.0e30` sentinel that is NEVER consumed. `rd` is unit
+        // (the shared ray-gen), so `t` is the true world distance and `P = ro + rd * t` is
+        // the exact marched surface point (the same `t` the marcher stored on the SDF arm).
+        float view_t = gViewT.Load(coord);
+        float3 P = ro + rd * view_t;
+        for (uint j = H.l0a_count; j < H.light_count; ++j) {
+            LightElem L = load_light(LightBuf, j);
+            // toL = light position - surface; d2 = squared distance for the range cull +
+            // the smooth windowed inverse-square attenuation (Decision 2 / Algorithm C).
+            float3 toL = L.pos - P;
+            float d2 = dot(toL, toL);
+            float range2 = L.range * L.range;
+            if (d2 > range2) {
+                continue;                            // outside the cull sphere (range)
+            }
+            float inv_d = rsqrt(max(d2, 1e-8));
+            float3 l = toL * inv_d;
+            // Smooth windowed inverse-square: 1/max(d2,eps) * window(d2/range2), where the
+            // window `(1 - (d2/range2)^2)^2` (clamped) drives the contribution smoothly to
+            // 0 at the cull radius so the range cutoff is bandless (the canonical UE4/
+            // Frostbite falloff). eps avoids the singularity at the light.
+            float win = saturate(1.0 - (d2 * d2) / (range2 * range2));
+            float atten = (1.0 / max(d2, 1e-4)) * win * win;
+            if (L.kind == LIGHT_KIND_SPOT) {
+                // O2 cone falloff: cos of the angle between the surface->light dir reversed
+                // (i.e. light->surface = -l) and the spot axis, smoothstepped between the
+                // outer and inner cone cosines, squared for a soft edge.
+                float2 cones = unpack_cones(L.cone_pack); // (cos_inner, cos_outer)
+                float3 spot_dir = normalize(L.dir);       // world spot axis (to-light dir)
+                float cosA = dot(-l, spot_dir);
+                float denom = max(cones.x - cones.y, 1e-4);
+                float tt = saturate((cosA - cones.y) / denom);
+                atten *= tt * tt;
+            }
+            // The SAME Cook-Torrance direct term as the directional path, scaled by the
+            // distance/cone attenuation and the light's canonical (baked-I) color.
+            float3 hvec = normalize(v + l);
+            float NoL = max(dot(n, l), 0.0);
+            float NoH = saturate(dot(n, hvec));
+            float LoH = saturate(dot(l, hvec));
+            float  D = D_GGX(NoH, a);
+            float  V = V_SmithGGXCorrelated(NoV, NoL, a);
+            float3 F = F_Schlick(LoH, f0);
+            float3 spec = (D * V) * F;
+            float3 diff = diffuse_color * (1.0 / PI);
+            lit_direct += (diff + spec) * (NoL * shadow) * atten * L.color;
         }
 
         // O3: exposure is the FINAL multiply on the accumulated LINEAR radiance.

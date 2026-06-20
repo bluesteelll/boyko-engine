@@ -52,8 +52,9 @@ use boyko_rhi_vulkan::compute::{
     TILE_SIZE, TileBound, EDITLIST_BUFFER_WORDS, editlist_pixel_hits, encode_edit_list,
     golden_composite_pixel_culled, golden_composite_pixel_ex,
     golden_composite_pixel_ex_omega_lit, golden_tile_bound,
-    golden_deferred_resolve, golden_marcher_attributes, GoldenMaterial, composite_pixel_ray,
-    deferred_pbr_spirv, mesh_depth_for_z, pack_rgba, pixel_world_xy,
+    golden_deferred_resolve, golden_deferred_resolve_table, golden_marcher_attributes,
+    GoldenLight, GoldenLightHeader, GoldenMaterial, GOLDEN_LIGHT_HEADER_BASE_WORDS,
+    composite_pixel_ray, deferred_pbr_spirv, mesh_depth_for_z, pack_rgba, pixel_world_xy,
     sdf_gbuffer_composite_spirv, sdf_op, sdf_tile_cull_spirv, tile_grid_extent,
 };
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
@@ -398,6 +399,37 @@ fn run_gbuffer_hybrid_lit(
     lighting_flags: u32,
     light_dir: [f32; 3],
 ) -> (Vec<u8>, Option<Vec<u8>>) {
+    // Default to the L0a degenerate table (the historical light table every existing caller
+    // expects). The L0b GPU goldens call `run_gbuffer_hybrid_lit_table` with a custom table.
+    run_gbuffer_hybrid_lit_table(
+        ctx,
+        edits,
+        coarse_enabled,
+        read_tiles,
+        omega_in,
+        lighting_flags,
+        light_dir,
+        &DEGENERATE_LIGHT_TABLE,
+    )
+}
+
+/// Lighting L0b — the table-parameterized lighting harness: identical to
+/// [`run_gbuffer_hybrid_lit`] but the resolve's light-table SSBO (binding 6) is seeded with
+/// the caller's `light_table_words` (`[LightHeaderGpu || GpuLight[]]`, std430 word-packed)
+/// instead of the fixed [`DEGENERATE_LIGHT_TABLE`]. The L0b `gViewT` lane (the marcher's
+/// surface `t`) feeds the resolve's `P = ro + rd * t` reconstruction for point/spot lights.
+/// The host comparison oracle is [`golden_deferred_resolve_table`].
+#[allow(clippy::too_many_arguments)]
+fn run_gbuffer_hybrid_lit_table(
+    ctx: &VulkanContext,
+    edits: &[SdfEdit],
+    coarse_enabled: bool,
+    read_tiles: bool,
+    omega_in: f32,
+    lighting_flags: u32,
+    light_dir: [f32; 3],
+    light_table_words: &[u32],
+) -> (Vec<u8>, Option<Vec<u8>>) {
     let device: &VulkanContext = ctx;
     let queue = ctx.rhi_queue();
 
@@ -468,12 +500,13 @@ fn run_gbuffer_hybrid_lit(
         write_words(mapped, &DEFAULT_MATERIAL_TABLE);
     }
 
-    // --- Lighting L0a: the light table SSBO (resolve binding 6), seeded with the
-    // DEGENERATE table so the table-driven resolve reproduces the old constant-path image
-    // (the 0%-gate). Host-visible here for the test; production mints it device-local. ---
+    // --- Lighting L0a/L0b: the light table SSBO (resolve binding 6), seeded with the
+    // caller's `light_table_words` (the DEGENERATE table on the L0a 0%-gate path, a custom
+    // point/spot table on the L0b goldens). Host-visible here for the test; production mints
+    // it device-local. ---
     let light_table = device
         .create_buffer(&BufferDesc {
-            size: (DEGENERATE_LIGHT_TABLE.len() as u64) * 4,
+            size: (light_table_words.len() as u64) * 4,
             usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_DST,
             location: MemoryLocation::HostVisibleCoherent,
         })
@@ -482,7 +515,7 @@ fn run_gbuffer_hybrid_lit(
         let mapped = device
             .buffer_mapped_ptr(&light_table)
             .expect("host-visible light table is mapped");
-        write_words(mapped, &DEGENERATE_LIGHT_TABLE);
+        write_words(mapped, light_table_words);
     }
 
     // --- Render P4b: the per-tile coarse-cull StorageBuffer (binding 6). The coarse
@@ -571,6 +604,18 @@ fn run_gbuffer_hybrid_lit(
             usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC,
         })
         .expect("deferred resolve lit storage image");
+    // Lighting L0b: the gViewT lane — an R32_SFLOAT STORAGE image the marcher stores the
+    // surface ray param `t` into and the resolve reads to reconstruct `P = ro + rd * t`.
+    let viewt = device
+        .create_texture(&TextureDesc {
+            width: SDF_IMG_W,
+            height: SDF_IMG_H,
+            depth: 1,
+            format: Format::R32Sfloat,
+            dimension: TextureDimension::D2,
+            usage: ImageUsage::STORAGE,
+        })
+        .expect("Lighting L0b gViewT storage image");
 
     // The depth is SAMPLED via `.Load` (OpImageFetch, no sampler), but the RHI
     // `BindGroupEntry::SampledImage` requires a sampler handle; a nearest/clamp sampler
@@ -670,6 +715,9 @@ fn run_gbuffer_hybrid_lit(
         BindGroupLayoutEntry { binding: 6, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
         // PBR MVP-2: the material table SSBO @7 (the marcher fetches `base_color`).
         BindGroupLayoutEntry { binding: 7, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        // Lighting L0b: the gViewT STORAGE image @8 (the marcher stores the surface `t`;
+        // the coarse-cull shader, which shares this layout, declares only a subset — valid).
+        BindGroupLayoutEntry { binding: 8, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
     ];
     let bind_layout = device
         .create_bind_group_layout(&BindGroupLayoutDesc { entries: &layout_entries })
@@ -710,6 +758,8 @@ fn run_gbuffer_hybrid_lit(
                 BindGroupEntry::UniformBuffer { buffer: &camera_uniform },
                 BindGroupEntry::StorageBuffer { buffer: &tiles_buffer },
                 BindGroupEntry::StorageBuffer { buffer: &material_table },
+                // Lighting L0b: the gViewT lane @8 (the marcher STORES the surface `t`).
+                BindGroupEntry::StorageImage { texture: &viewt },
             ],
         })
         .expect("P4b vocabulary bind group");
@@ -728,6 +778,8 @@ fn run_gbuffer_hybrid_lit(
         // Lighting L0a: the light table SSBO @6 (the degenerate 0%-gate table — the
         // resolve loops it instead of the old compiled-in LIGHT_DIR / SKY_* constants).
         BindGroupLayoutEntry { binding: 6, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        // Lighting L0b: the gViewT STORAGE image @7 (the resolve reads it under `mask == 1`).
+        BindGroupLayoutEntry { binding: 7, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
     ];
     let resolve_layout = device
         .create_bind_group_layout(&BindGroupLayoutDesc { entries: &resolve_layout_entries })
@@ -753,6 +805,8 @@ fn run_gbuffer_hybrid_lit(
                 BindGroupEntry::StorageBuffer { buffer: &material_table },
                 BindGroupEntry::UniformBuffer { buffer: &camera_uniform },
                 BindGroupEntry::StorageBuffer { buffer: &light_table },
+                // Lighting L0b: the gViewT lane @7 (the resolve READS it under `mask == 1`).
+                BindGroupEntry::StorageImage { texture: &viewt },
             ],
         })
         .expect("deferred resolve bind group");
@@ -836,10 +890,10 @@ fn run_gbuffer_hybrid_lit(
         range: ImageSubresourceRange::DEPTH,
     });
 
-    // --- The 3 G-buffer storage images + the lit output: UNDEFINED → GENERAL. The
-    // marcher stores albedo/normal/material; the deferred resolve loads albedo/material
-    // and stores lit — all in GENERAL. ---
-    for tex in [&albedo, &normal, &material, &lit] {
+    // --- The 3 G-buffer storage images + the lit output + the Lighting-L0b gViewT lane:
+    // UNDEFINED → GENERAL. The marcher stores albedo/normal/material + gViewT; the deferred
+    // resolve loads albedo/material/gViewT and stores lit — all in GENERAL. ---
+    for tex in [&albedo, &normal, &material, &lit, &viewt] {
         encoder.image_barrier(&ImageBarrierDesc {
             texture: tex,
             src_stage: BarrierStage::TOP_OF_PIPE,
@@ -898,8 +952,9 @@ fn run_gbuffer_hybrid_lit(
     // --- (5a) PBR MVP-2: make the marcher's gAlbedo + gNormal + gMaterial STORES available
     // + visible to the resolve's LOADS — a real memory+execution dependency
     // (SHADER_WRITE→SHADER_READ, COMPUTE→COMPUTE), GENERAL→GENERAL (no layout change).
-    // gNormal is now READ by the resolve (oct-normal decode + 16-bit material id). ---
-    for tex in [&albedo, &normal, &material] {
+    // gNormal is now READ by the resolve (oct-normal decode + 16-bit material id). Lighting
+    // L0b: the gViewT lane is marcher-STORED + resolve-READ, so it joins too. ---
+    for tex in [&albedo, &normal, &material, &viewt] {
         encoder.image_barrier(&ImageBarrierDesc {
             texture: tex,
             src_stage: BarrierStage::COMPUTE_SHADER,
@@ -1013,6 +1068,7 @@ fn run_gbuffer_hybrid_lit(
         device.destroy_buffer(vertex_buffer);
         device.destroy_buffer(readback);
         device.destroy_sampler(sampler);
+        device.destroy_texture(viewt);
         device.destroy_texture(lit);
         device.destroy_texture(material);
         device.destroy_texture(normal);
@@ -2545,6 +2601,172 @@ fn l0a_degenerate_light_table_reproduces_constant_path_image() {
             "[{name}] L0a 0%-gate (degenerate table == constant path): lit-arm max delta \
              {max_arm1}/255 (tol {DEFERRED_ARM1_TOL}); pass-through {max_pass} (=0); \
              {sdf_lit_hits} SDF-lit px"
+        );
+    }
+}
+
+// ============================================================================
+// Lighting L0b GPU goldens (point/spot resolve via the gViewT lane).
+//
+// These run on the 3060 (the GPU-tester); they `boot_render_or_skip` when no device is
+// present. The CPU companion is `tests/lighting_l0b_host_oracle.rs`. The L0b resolve adds
+// the point/spot path: the marcher stores the surface `t` into the new gViewT lane and the
+// resolve reconstructs `P = ro + rd * t` to attenuate point/spot lights — compared per
+// texel against the host `golden_deferred_resolve_table` (the bit-exact source of truth).
+// ============================================================================
+
+/// Serializes a host `(GoldenLightHeader, &[GoldenLight])` into the std430 word-packed
+/// `[LightHeaderGpu (16w) || GpuLight[] (12w each)]` the resolve's binding-6 SSBO expects
+/// (mirrors `boyko_render::light`'s collection layout + `light_table.hlsli`'s decode).
+fn pack_light_table(header: &GoldenLightHeader, lights: &[GoldenLight]) -> Vec<u32> {
+    let mut words = vec![0u32; GOLDEN_LIGHT_HEADER_BASE_WORDS + lights.len() * 12];
+    // Header: 4 vec4 lanes (counts_exposure, sky_diffuse, sky_spec, cluster_params).
+    let lanes = [
+        header.counts_exposure,
+        header.sky_diffuse,
+        header.sky_spec,
+        header.cluster_params,
+    ];
+    for (li, lane) in lanes.iter().enumerate() {
+        for (c, &v) in lane.iter().enumerate() {
+            words[li * 4 + c] = v.to_bits();
+        }
+    }
+    // Elements: 3 vec4 lanes each (dir_kind, pos_range, color_cone).
+    for (i, l) in lights.iter().enumerate() {
+        let base = GOLDEN_LIGHT_HEADER_BASE_WORDS + i * 12;
+        for (c, &v) in l.dir_kind.iter().enumerate() {
+            words[base + c] = v.to_bits();
+        }
+        for (c, &v) in l.pos_range.iter().enumerate() {
+            words[base + 4 + c] = v.to_bits();
+        }
+        for (c, &v) in l.color_cone.iter().enumerate() {
+            words[base + 8 + c] = v.to_bits();
+        }
+    }
+    words
+}
+
+/// Diffs the whole GPU LIT readback (run with a CUSTOM L0b light table) against the host
+/// `golden_deferred_resolve_table` per texel, within ±2/255 (the deferred double-quant
+/// budget). `header`/`lights` are the host mirror of the GPU table. Returns the max delta +
+/// the SDF-lit pixel count (so the caller can prove a real lit surface was rendered).
+fn assert_lit_matches_table_golden(
+    lit: &[u8],
+    edits: &[SdfEdit],
+    flags: u32,
+    light_dir: [f32; 3],
+    header: &GoldenLightHeader,
+    lights: &[GoldenLight],
+    name: &str,
+) -> (i32, u64) {
+    let mut max_delta = 0i32;
+    let mut sdf_lit_hits = 0u64;
+    let materials = host_material_table();
+    for py in 0..SDF_IMG_H {
+        for px in 0..SDF_IMG_W {
+            let md = expected_mesh_depth(px, py);
+            let attrs = golden_marcher_attributes(
+                edits, &materials, md, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, 1.0,
+                flags, light_dir,
+            );
+            let (ro, rd) =
+                composite_pixel_ray(px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
+            let want =
+                unpack_packed_rgb(golden_deferred_resolve_table(attrs, ro, rd, &materials, header, lights));
+            let got = albedo_rgb(lit, px, py);
+            let dmax = (0..3).map(|c| (got[c] - want[c]).abs()).max().unwrap();
+            if attrs.mask == 1 {
+                sdf_lit_hits += 1;
+            }
+            if dmax > max_delta {
+                max_delta = dmax;
+            }
+            assert!(
+                dmax <= DEFERRED_ARM1_TOL,
+                "[{name}] L0b LIT texel ({px},{py}) got {got:?} want {want:?} (table oracle) \
+                 exceeds ±{DEFERRED_ARM1_TOL}/255 (delta {dmax})"
+            );
+        }
+    }
+    (max_delta, sdf_lit_hits)
+}
+
+/// L0b 0%-gate: adding the `gViewT` lane + an all-directional/sky table (zero point/spot)
+/// must reproduce the L0a image — the point/spot loop body never runs, and the gViewT lane
+/// is purely additive (no existing G-buffer byte changes). The GPU output with the
+/// degenerate table must equal the constant-path oracle within the existing ±2/255 budget.
+#[test]
+fn l0b_zero_point_spot_table_reproduces_l0a_image() {
+    let Some(ctx) = boot_render_or_skip("l0b_zero_point_spot_table_reproduces_l0a_image") else {
+        return;
+    };
+    println!("Vulkan device (validation on): {}", ctx.device_name());
+
+    let flags = LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO;
+    for (name, edits) in p4b_scenes() {
+        // The degenerate table (1 directional + 1 sky, 0 point/spot) on the L0b shader.
+        let lit =
+            run_gbuffer_hybrid_lit_table(&ctx, &edits, false, false, 1.0, flags, DEFAULT_LIGHT_DIR, &DEGENERATE_LIGHT_TABLE)
+                .0;
+        assert_eq!(lit.len(), READBACK_BYTES as usize);
+        let nonzero = lit.chunks_exact(4).filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+        assert!(nonzero > 0, "[{name}] L0b LIT all-zero — device did not render");
+
+        // Same diff as the L0a 0%-gate: the gViewT addition must NOT perturb the image.
+        let (max_pass, max_arm1, sdf_lit_hits) =
+            assert_lit_matches_deferred_golden(&lit, &edits, flags, DEFAULT_LIGHT_DIR, name);
+        assert!(
+            sdf_lit_hits > 0,
+            "[{name}] L0b 0%-gate: no SDF-lit pixel — the lit-arm gate is vacuous"
+        );
+        println!(
+            "[{name}] L0b 0%-gate (gViewT added, zero point/spot == L0a): lit-arm max delta \
+             {max_arm1}/255, pass-through {max_pass} (tol {DEFERRED_ARM1_TOL}); {sdf_lit_hits} \
+             SDF-lit px"
+        );
+    }
+}
+
+/// L0b point + spot golden: a table with a directional + a point light + a spot light at
+/// known world positions, resolved via the gViewT `P` reconstruction, must match the host
+/// `golden_deferred_resolve_table` within ±2/255 on every texel.
+#[test]
+fn l0b_point_and_spot_match_the_table_oracle() {
+    let Some(ctx) = boot_render_or_skip("l0b_point_and_spot_match_the_table_oracle") else {
+        return;
+    };
+    println!("Vulkan device (validation on): {}", ctx.device_name());
+
+    let flags = LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO;
+    // l0a_count = 1 (the directional front block); point_spot_count = 2 (point + spot). The
+    // surface lives near the origin plane (the ORTHO fixture marches +Z→origin), so the
+    // lights sit in front of it (z > 0) with a generous range so a swath of pixels is lit.
+    let header = GoldenLightHeader::new(1, 2, 1.0);
+    let lights = vec![
+        GoldenLight::directional([0.0, 0.0, 1.0], [1.0, 1.0, 1.0], 1.0),
+        GoldenLight::point([0.0, 0.0, 1.5], [1.0, 0.9, 0.8], 4000.0, 6.0),
+        GoldenLight::spot([0.4, 0.4, 1.5], [0.0, 0.0, 1.0], [0.8, 0.9, 1.0], 6000.0, 6.0, 20.0, 35.0),
+    ];
+    let table = pack_light_table(&header, &lights);
+
+    for (name, edits) in p4b_scenes() {
+        let lit =
+            run_gbuffer_hybrid_lit_table(&ctx, &edits, false, false, 1.0, flags, DEFAULT_LIGHT_DIR, &table).0;
+        assert_eq!(lit.len(), READBACK_BYTES as usize);
+        let nonzero = lit.chunks_exact(4).filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+        assert!(nonzero > 0, "[{name}] L0b point/spot LIT all-zero — device did not render");
+
+        let (max_delta, sdf_lit_hits) =
+            assert_lit_matches_table_golden(&lit, &edits, flags, DEFAULT_LIGHT_DIR, &header, &lights, name);
+        assert!(
+            sdf_lit_hits > 0,
+            "[{name}] L0b point/spot: no SDF-lit pixel — the gate is vacuous"
+        );
+        println!(
+            "[{name}] L0b point/spot (gViewT P-reconstruction == table oracle): max delta \
+             {max_delta}/255 (tol {DEFERRED_ARM1_TOL}); {sdf_lit_hits} SDF-lit px"
         );
     }
 }

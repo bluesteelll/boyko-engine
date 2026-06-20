@@ -17,6 +17,10 @@ use boyko_rhi_vulkan::compute::{
     GoldenMaterial, MarcherAttributes, PBR_SKY_DIFFUSE,
 };
 
+/// The ray origin passed on the L0a-only path: point/spot lights are absent, so the
+/// table oracle never reconstructs `P` from `ro` — any value is fine.
+const RO_ZERO: [f32; 3] = [0.0, 0.0, 0.0];
+
 /// Builds the degenerate 2-entry table (the 0%-gate anchor): a directional matching the
 /// old `LIGHT_DIR` / `LIGHT_COLOR`, and a sky with `sky == ground == PBR_SKY_DIFFUSE`.
 fn degenerate_table(exposure: f32) -> (GoldenLightHeader, Vec<GoldenLight>) {
@@ -43,6 +47,9 @@ fn sweep_attrs() -> Vec<MarcherAttributes> {
                         shadow,
                         ao,
                         mask,
+                        // L0a sweep: no point/spot lights, so view_t is never consumed
+                        // (the sentinel; the read-under-mask gate would ignore it anyway).
+                        view_t: 1.0e30,
                     });
                 }
             }
@@ -81,7 +88,8 @@ fn degenerate_table_is_byte_identical_to_the_constant_path() {
                 let mut a = attrs;
                 a.mat_id = mid as u16;
                 let want = golden_deferred_resolve(a, rd, &mats);
-                let got = golden_deferred_resolve_table(a, rd, &mats, &header, &lights);
+                // L0a path: no point/spot lights, so `ro` is unused by the loop body.
+                let got = golden_deferred_resolve_table(a, RO_ZERO, rd, &mats, &header, &lights);
                 assert_eq!(
                     got, want,
                     "L0a 0%-gate: table path 0x{got:08X} != constant path 0x{want:08X} \
@@ -107,9 +115,10 @@ fn exposure_is_identity_at_one() {
         shadow: 255,
         ao: 255,
         mask: 1,
+        view_t: 1.0e30,
     };
     let rd = [0.1, 0.05, -0.99];
-    let lit = golden_deferred_resolve_table(attrs, rd, &mats, &h1, &l1);
+    let lit = golden_deferred_resolve_table(attrs, RO_ZERO, rd, &mats, &h1, &l1);
     // Same as the constant path (already covered above) — re-asserted as the identity pin.
     assert_eq!(lit, golden_deferred_resolve(attrs, rd, &mats));
 }
@@ -125,12 +134,13 @@ fn exposure_above_one_brightens_a_lit_pixel() {
         shadow: 255,
         ao: 255,
         mask: 1,
+        view_t: 1.0e30,
     };
     let rd = [0.0, 0.0, -1.0];
     let (h1, l1) = degenerate_table(1.0);
     let (h2, l2) = degenerate_table(4.0);
-    let base = golden_deferred_resolve_table(attrs, rd, &mats, &h1, &l1);
-    let bright = golden_deferred_resolve_table(attrs, rd, &mats, &h2, &l2);
+    let base = golden_deferred_resolve_table(attrs, RO_ZERO, rd, &mats, &h1, &l1);
+    let bright = golden_deferred_resolve_table(attrs, RO_ZERO, rd, &mats, &h2, &l2);
     // A lit pixel below saturation gets brighter under exposure 4× (or clamps to white).
     assert!(bright != base || base == 0x00FF_FFFF, "exposure must affect the lit pixel");
 }
@@ -147,8 +157,9 @@ fn mask_zero_passes_base_through_under_any_table() {
         shadow: 0,
         ao: 0,
         mask: 0,
+        view_t: 1.0e30,
     };
     let rd = [0.0, 0.0, -1.0];
-    let got = golden_deferred_resolve_table(attrs, rd, &mats, &header, &lights);
+    let got = golden_deferred_resolve_table(attrs, RO_ZERO, rd, &mats, &header, &lights);
     assert_eq!(got, golden_deferred_resolve(attrs, rd, &mats));
 }

@@ -2437,10 +2437,17 @@ impl<'ctx> Renderer<'ctx> {
             );
         }
 
-        // (4) The 3 G-buffer storage images + the lit output: UNDEFINED → GENERAL. The
-        // marcher stores into albedo/normal/material (a compute store); the deferred
-        // resolve loads albedo/material and stores into lit — all in GENERAL.
-        for tex in [&targets.albedo, &targets.normal, &targets.material, &targets.lit] {
+        // (4) The 3 G-buffer storage images + the lit output + the Lighting-L0b gViewT
+        // lane: UNDEFINED → GENERAL. The marcher stores into albedo/normal/material + gViewT
+        // (a compute store); the deferred resolve loads albedo/material/gViewT and stores
+        // into lit — all in GENERAL.
+        for tex in [
+            &targets.albedo,
+            &targets.normal,
+            &targets.material,
+            &targets.lit,
+            &targets.viewt,
+        ] {
             let to_general = VkImageMemoryBarrier {
                 s_type: VkStructureType::ImageMemoryBarrier,
                 p_next: ptr::null(),
@@ -2591,7 +2598,13 @@ impl<'ctx> Renderer<'ctx> {
         // (SHADER_WRITE→SHADER_READ, COMPUTE→COMPUTE), GENERAL→GENERAL (no layout change).
         // gNormal is now READ by the resolve (oct-normal decode + 16-bit material id), so it
         // joins gAlbedo + gMaterial in the barrier (MVP-1 omitted it — gNormal was unread).
-        for tex in [&targets.albedo, &targets.normal, &targets.material] {
+        // Lighting L0b: the gViewT lane is marcher-STORED + resolve-READ, so it joins too.
+        for tex in [
+            &targets.albedo,
+            &targets.normal,
+            &targets.material,
+            &targets.viewt,
+        ] {
             let store_to_load = VkImageMemoryBarrier {
                 s_type: VkStructureType::ImageMemoryBarrier,
                 p_next: ptr::null(),
@@ -3272,10 +3285,12 @@ pub struct GBufferScene<'a> {
     pub marcher: &'a ComputePipeline,
     /// The vocabulary bind-group LAYOUT { SSBO @0, sampled depth @1, storage albedo
     /// @2, storage normal @3, storage material @4, UNIFORM camera @5, STORAGE tiles
-    /// @6, STORAGE material-table @7 }. The renderer allocates + writes a SET against it
-    /// once per extent (pointing at the per-extent G-buffer images + the bundle's
-    /// `edit_list` / `camera_uniform` / `depth_sampler` / `tiles_buffer` / `material_table`).
-    /// PBR MVP-2 added binding 7 (the material SSBO the marcher fetches `base_color` from).
+    /// @6, STORAGE material-table @7, STORAGE `gViewT` @8 }. The renderer allocates + writes
+    /// a SET against it once per extent (pointing at the per-extent G-buffer + `gViewT`
+    /// images + the bundle's `edit_list` / `camera_uniform` / `depth_sampler` /
+    /// `tiles_buffer` / `material_table`). PBR MVP-2 added binding 7 (the material SSBO the
+    /// marcher fetches `base_color` from); Lighting L0b added binding 8 (the `gViewT` lane
+    /// the marcher stores the surface `t` into).
     ///
     /// The caller MUST declare binding 6 = `DescriptorKind::StorageBuffer`
     /// (`ShaderStage::COMPUTE`): the P4b marcher shader unconditionally DECLARES `[Set
@@ -3338,12 +3353,13 @@ pub struct GBufferScene<'a> {
     /// (STORAGE, GENERAL) + the material SSBO + the camera UBO, runs Cook-Torrance, and
     /// stores the final LIT color into the dedicated lit image.
     pub resolve_pipeline: &'a ComputePipeline,
-    /// The deferred resolve bind-group LAYOUT (7 bindings, ≤ 12): { storage gAlbedo @0,
+    /// The deferred resolve bind-group LAYOUT (8 bindings, ≤ 12): { storage gAlbedo @0,
     /// storage gNormal @1, storage gMaterial @2, storage lit @3, material SSBO @4, camera
-    /// UBO @5, light table SSBO @6 }. The renderer allocates + writes a SET against it once
-    /// per extent (pointing at the per-extent G-buffer + lit images + the scene's material
-    /// SSBO + camera UBO + light table). Binding 6 (Lighting L0a) replaces the compiled-in
-    /// `LIGHT_DIR`/`SKY_*` constants with the header+table read.
+    /// UBO @5, light table SSBO @6, storage `gViewT` @7 }. The renderer allocates + writes a
+    /// SET against it once per extent (pointing at the per-extent G-buffer + lit + `gViewT`
+    /// images + the scene's material SSBO + camera UBO + light table). Binding 6 (Lighting
+    /// L0a) replaces the compiled-in `LIGHT_DIR`/`SKY_*` constants with the header+table
+    /// read; binding 7 (Lighting L0b) is the `gViewT` lane the resolve reconstructs `P` from.
     pub resolve_layout: &'a VulkanBindGroupLayout,
     /// The marcher's 1D dispatch group count (`ceil(pixels / LOCAL_SIZE_X)` at the
     /// WSI-clamped extent the recorder dispatches). The deferred resolve dispatches at the
@@ -3393,14 +3409,20 @@ pub struct GBufferTargets {
     /// also SAMPLED by the present-blit (pass C). The deferred split added it — the
     /// present now samples THIS (not albedo).
     lit: VulkanTexture,
+    /// The Lighting-L0b `gViewT` lane (R32_SFLOAT STORAGE): the marcher stores the surface
+    /// ray param `t`, the deferred resolve reads it (under `mask == 1`) to reconstruct
+    /// `P = ro + rd * t`. Bound as an OUTPUT on the vocab set (binding 8) and an INPUT on
+    /// the resolve set (binding 7). Transitioned UNDEFINED→GENERAL with the other G-buffer
+    /// images and joins the marcher store → resolve load barrier.
+    viewt: VulkanTexture,
     /// The marcher vocabulary descriptor set, written ONCE against
     /// [`GBufferScene::vocab_layout`] (pointing at `depth`/`albedo`/`normal`/`material`
     /// + the scene's SSBO/UBO/sampler). NO per-frame update.
     vocab_set: VulkanBindGroup,
     /// The PBR MVP-2 RESOLVE descriptor set, written ONCE against
-    /// [`GBufferScene::resolve_layout`] (6 bindings: `albedo` @0, `normal` @1, `material`
-    /// @2, `lit` @3 STORAGE images, the material SSBO @4, the camera UBO @5). NO per-frame
-    /// update.
+    /// [`GBufferScene::resolve_layout`] (8 bindings: `albedo` @0, `normal` @1, `material`
+    /// @2, `lit` @3 STORAGE images, the material SSBO @4, the camera UBO @5, the L0a light
+    /// table SSBO @6, the L0b `gViewT` STORAGE image @7). NO per-frame update.
     resolve_set: VulkanBindGroup,
     /// The present-blit descriptor set, written ONCE against
     /// [`GBufferScene::present_layout`] (one COMBINED_IMAGE_SAMPLER pointing at
@@ -3416,6 +3438,13 @@ pub struct GBufferTargets {
 /// `GBUFFER_FORMAT`). The ALBEDO image is also `SAMPLED` (the present-blit) — never
 /// stretched; presented 1:1 in the swapchain's top-left like [`SampledComposite`].
 const GBUFFER_FORMAT: Format = Format::R8G8B8A8Unorm;
+
+/// The Lighting-L0b `gViewT` lane format: `R32_SFLOAT`, a STORAGE image the marcher
+/// stores the full-fp32 surface ray param `t` into and the resolve reads to reconstruct
+/// the world position `P = ro + rd * t`. fp32 (not a packed 8-bit lane) avoids the
+/// attenuation/cone banding a low-precision `t` would cause. W2: `STORAGE_IMAGE` support
+/// on this format is fail-fast-checked at device boot.
+const GVIEWT_FORMAT: Format = Format::R32Sfloat;
 
 /// The throwaway color-attachment format for the depth-prepass (pass A). The raster
 /// pipeline declares a single color format (W2-b); the prepass binds a format-matching
@@ -3439,6 +3468,27 @@ impl GBufferTargets {
             format: GBUFFER_FORMAT,
             dimension: TextureDimension::D2,
             usage,
+        };
+        RhiDevice::create_texture(ctx, &desc).map_err(SwapchainError::DepthImage)
+    }
+
+    /// Creates the Lighting-L0b `gViewT` lane: a 2D `R32_SFLOAT` STORAGE image at `extent`
+    /// (the marcher's surface ray param `t`). A separate helper from
+    /// [`Self::create_gbuffer_image`] because the lane is `R32_SFLOAT`, not the RGBA8
+    /// [`GBUFFER_FORMAT`]. W2: `R32_SFLOAT`/`STORAGE_IMAGE` support is fail-fast-checked
+    /// at device boot ([`crate::device::DeviceCaps::viewt_storage_format_ok`]), so this
+    /// create can never fault on an unsupported format.
+    fn create_viewt_image(
+        ctx: &VulkanContext,
+        extent: VkExtent2D,
+    ) -> Result<VulkanTexture, SwapchainError> {
+        let desc = TextureDesc {
+            width: extent.width,
+            height: extent.height,
+            depth: 1,
+            format: GVIEWT_FORMAT,
+            dimension: TextureDimension::D2,
+            usage: ImageUsage::STORAGE,
         };
         RhiDevice::create_texture(ctx, &desc).map_err(SwapchainError::DepthImage)
     }
@@ -3557,13 +3607,31 @@ impl GBufferTargets {
                 return Err(e);
             }
         };
+        // Lighting L0b: the R32_SFLOAT `gViewT` lane (the marcher's surface `t`).
+        let viewt = match Self::create_viewt_image(ctx, extent) {
+            Ok(t) => t,
+            Err(e) => {
+                // SAFETY: the six textures above were created on `ctx`; referenced by
+                // no submission; each destroyed exactly once on this error path.
+                unsafe {
+                    RhiDevice::destroy_texture(ctx, lit);
+                    RhiDevice::destroy_texture(ctx, material);
+                    RhiDevice::destroy_texture(ctx, normal);
+                    RhiDevice::destroy_texture(ctx, albedo);
+                    RhiDevice::destroy_texture(ctx, raster_color);
+                    RhiDevice::destroy_texture(ctx, depth);
+                }
+                return Err(e);
+            }
+        };
 
         // The marcher vocabulary set, written ONCE here (NO per-frame update). The
         // entry order matches the layout: SSBO @0, sampled depth @1, storage albedo @2,
-        // storage normal @3, storage material @4, UNIFORM camera @5, STORAGE tiles @6.
-        // Binding 6 is the P4b coarse-cull tile buffer: the marcher shader declares it
-        // unconditionally, so a VALID descriptor is bound here even though the windowed
-        // path gates the coarse read OFF (`coarse_enabled == 0`).
+        // storage normal @3, storage material @4, UNIFORM camera @5, STORAGE tiles @6,
+        // STORAGE material-table @7, STORAGE gViewT @8 (Lighting L0b). Binding 6 is the P4b
+        // coarse-cull tile buffer: the marcher shader declares it unconditionally, so a
+        // VALID descriptor is bound here even though the windowed path gates the coarse read
+        // OFF (`coarse_enabled == 0`).
         let vocab_set = {
             let entries = [
                 BindGroupEntry::StorageBuffer { buffer: scene.edit_list },
@@ -3578,6 +3646,8 @@ impl GBufferTargets {
                 BindGroupEntry::StorageBuffer { buffer: scene.tiles_buffer },
                 // PBR MVP-2: the material table SSBO @7 (the marcher fetches `base_color`).
                 BindGroupEntry::StorageBuffer { buffer: scene.material_table },
+                // Lighting L0b: the gViewT lane @8 (the marcher STORES the surface `t`).
+                BindGroupEntry::StorageImage { texture: &viewt },
             ];
             let desc = BindGroupDesc::<Vulkan> {
                 layout: scene.vocab_layout,
@@ -3586,9 +3656,10 @@ impl GBufferTargets {
             match RhiDevice::create_bind_group(ctx, &desc) {
                 Ok(g) => g,
                 Err(e) => {
-                    // SAFETY: the six textures above were created on `ctx`; referenced
+                    // SAFETY: the seven textures above were created on `ctx`; referenced
                     // by no submission; each destroyed exactly once on this error path.
                     unsafe {
+                        RhiDevice::destroy_texture(ctx, viewt);
                         RhiDevice::destroy_texture(ctx, lit);
                         RhiDevice::destroy_texture(ctx, material);
                         RhiDevice::destroy_texture(ctx, normal);
@@ -3601,9 +3672,10 @@ impl GBufferTargets {
             }
         };
 
-        // The deferred RESOLVE set, written ONCE here (7 bindings, ≤ 12): gAlbedo @0,
+        // The deferred RESOLVE set, written ONCE here (8 bindings, ≤ 12): gAlbedo @0,
         // gNormal @1, gMaterial @2, lit @3 (STORAGE images), material SSBO @4, camera UBO
-        // @5, light table SSBO @6 (Lighting L0a) — matching `deferred_pbr.comp`'s set 0.
+        // @5, light table SSBO @6 (Lighting L0a), gViewT @7 (Lighting L0b) — matching
+        // `deferred_pbr.comp`'s set 0.
         let resolve_set = {
             let entries = [
                 BindGroupEntry::StorageImage { texture: &albedo },
@@ -3613,6 +3685,8 @@ impl GBufferTargets {
                 BindGroupEntry::StorageBuffer { buffer: scene.material_table },
                 BindGroupEntry::UniformBuffer { buffer: scene.camera_uniform },
                 BindGroupEntry::StorageBuffer { buffer: scene.light_table },
+                // Lighting L0b: the gViewT lane @7 (the resolve READS it under `mask == 1`).
+                BindGroupEntry::StorageImage { texture: &viewt },
             ];
             let desc = BindGroupDesc::<Vulkan> {
                 layout: scene.resolve_layout,
@@ -3621,11 +3695,12 @@ impl GBufferTargets {
             match RhiDevice::create_bind_group(ctx, &desc) {
                 Ok(g) => g,
                 Err(e) => {
-                    // SAFETY: the six textures + the vocabulary set above were created on
+                    // SAFETY: the seven textures + the vocabulary set above were created on
                     // `ctx`; referenced by no submission; each destroyed exactly once on
                     // this error path (reverse acquisition order: set → images).
                     unsafe {
                         RhiDevice::destroy_bind_group(ctx, vocab_set);
+                        RhiDevice::destroy_texture(ctx, viewt);
                         RhiDevice::destroy_texture(ctx, lit);
                         RhiDevice::destroy_texture(ctx, material);
                         RhiDevice::destroy_texture(ctx, normal);
@@ -3652,12 +3727,13 @@ impl GBufferTargets {
             match RhiDevice::create_bind_group(ctx, &desc) {
                 Ok(g) => g,
                 Err(e) => {
-                    // SAFETY: the six textures + the vocabulary & resolve sets above were
+                    // SAFETY: the seven textures + the vocabulary & resolve sets above were
                     // created on `ctx`; referenced by no submission; each destroyed exactly
                     // once on this error path (reverse acquisition order: sets → images).
                     unsafe {
                         RhiDevice::destroy_bind_group(ctx, resolve_set);
                         RhiDevice::destroy_bind_group(ctx, vocab_set);
+                        RhiDevice::destroy_texture(ctx, viewt);
                         RhiDevice::destroy_texture(ctx, lit);
                         RhiDevice::destroy_texture(ctx, material);
                         RhiDevice::destroy_texture(ctx, normal);
@@ -3677,6 +3753,7 @@ impl GBufferTargets {
             normal,
             material,
             lit,
+            viewt,
             vocab_set,
             resolve_set,
             present_set,
@@ -3749,6 +3826,7 @@ impl GBufferTargets {
             RhiDevice::destroy_bind_group(ctx, self.present_set);
             RhiDevice::destroy_bind_group(ctx, self.resolve_set);
             RhiDevice::destroy_bind_group(ctx, self.vocab_set);
+            RhiDevice::destroy_texture(ctx, self.viewt);
             RhiDevice::destroy_texture(ctx, self.lit);
             RhiDevice::destroy_texture(ctx, self.material);
             RhiDevice::destroy_texture(ctx, self.normal);

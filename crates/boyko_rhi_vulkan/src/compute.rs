@@ -132,8 +132,9 @@ static SDF_EDITLIST_STORAGE_IMAGE_SPV: SpirvBlob<24092> = SpirvBlob(*include_byt
 /// `load_edit`/`edit_distance` (a read-only attribution; the field is untouched, proven by
 /// the GATE-1 probe tripwire). Phase 0 also extracted ray-gen into the shared
 /// `ray_gen.hlsli`. The full Cook-Torrance shade runs in [`deferred_pbr_spirv`]. The byte
-/// length grew (41176 → 43944) with the material pick + oct-encode + SSBO fetch.
-static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<43944> = SpirvBlob(*include_bytes!(concat!(
+/// length grew (41176 → 43944) with the material pick + oct-encode + SSBO fetch; Lighting
+/// L0b added the `gViewT` storage-image lane + its 3 terminal writes (43944 → 44216).
+static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<44216> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/sdf_gbuffer_composite.comp.spv"
 )));
@@ -157,8 +158,10 @@ static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<43944> = SpirvBlob(*include_bytes!(c
 /// from the camera UBO @ binding 5 + the shared `ray_gen.hlsli`. SDF (mask == 1) pixels get
 /// full PBR (the owner-acknowledged behavioral change, PBR plan call F); mesh / background /
 /// empty (mask == 0) pass `base` through byte-identically (the 0%-gate). The byte length
-/// grew (1616 → 6880) with the BRDF. The host mirror is [`golden_deferred_resolve`].
-static DEFERRED_PBR_SPV: SpirvBlob<8824> = SpirvBlob(*include_bytes!(concat!(
+/// grew (1616 → 6880) with the BRDF, then 6880 → 8824 with the Lighting L0a header+table
+/// directional/sky loop, then 8824 → 12548 with the L0b `gViewT` `P`-reconstruction +
+/// point/spot loop. The host mirror is [`golden_deferred_resolve_table`].
+static DEFERRED_PBR_SPV: SpirvBlob<12548> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/deferred_pbr.comp.spv"
 )));
@@ -1564,11 +1567,149 @@ impl GoldenLight {
         }
     }
 
+    /// A point light (mirrors `GpuLight::from_point`, Lighting L0b): position + range in
+    /// `pos_range`, the baked intensity `I = Φ / (4π)` premultiplied into the color lane.
+    /// `power` is the luminous power `Φ`. The L0b resolve oracle consumes `pos_range` (the
+    /// world position + the cull radius) + the baked color.
+    #[inline]
+    pub fn point(position: [f32; 3], color: [f32; 3], power: f32, range: f32) -> Self {
+        let i = power / (4.0 * core::f32::consts::PI);
+        Self {
+            dir_kind: [0.0, 0.0, 0.0, f32::from_bits(GOLDEN_LIGHT_KIND_POINT)],
+            pos_range: [position[0], position[1], position[2], range],
+            color_cone: [color[0] * i, color[1] * i, color[2] * i, 0.0],
+        }
+    }
+
+    /// A spot light (mirrors `GpuLight::from_spot`, Lighting L0b): the spot axis in
+    /// `dir_kind.xyz`, position + range in `pos_range`, the baked reflector intensity
+    /// `I = Φ / (2π(1 − cos(outer)))` premultiplied into the color lane, and the cone
+    /// cosines packed (two f16) into `color_cone.w`. `inner_deg`/`outer_deg` are cone
+    /// half-angles in degrees; `cos(outer)` is clamped to `SPOT_COS_OUTER_MAX` (0.9999) so
+    /// the intensity stays bounded — mirroring the host constructor's release safety net.
+    #[inline]
+    pub fn spot(
+        position: [f32; 3],
+        direction: [f32; 3],
+        color: [f32; 3],
+        power: f32,
+        range: f32,
+        inner_deg: f32,
+        outer_deg: f32,
+    ) -> Self {
+        let cos_inner = inner_deg.to_radians().cos();
+        let cos_outer = outer_deg.to_radians().cos().min(GOLDEN_SPOT_COS_OUTER_MAX);
+        let denom = 2.0 * core::f32::consts::PI * (1.0 - cos_outer);
+        let i = power / denom;
+        let d = v_normalize(direction);
+        Self {
+            dir_kind: [d[0], d[1], d[2], f32::from_bits(GOLDEN_LIGHT_KIND_SPOT)],
+            pos_range: [position[0], position[1], position[2], range],
+            color_cone: [
+                color[0] * i,
+                color[1] * i,
+                color[2] * i,
+                golden_pack_cones(cos_inner, cos_outer),
+            ],
+        }
+    }
+
     /// The bit-cast kind tag from `dir_kind.w`.
     #[inline]
     pub fn kind(&self) -> u32 {
         self.dir_kind[3].to_bits()
     }
+}
+
+/// The maximum `cos(outer)` the spot bake clamps to (mirrors
+/// `boyko_render::light::SPOT_COS_OUTER_MAX`): bounds `I = Φ/(2π(1−cos))` as the cone
+/// narrows to a pencil beam.
+pub const GOLDEN_SPOT_COS_OUTER_MAX: f32 = 0.9999;
+
+/// Packs two cosines into the `f16 | f16` bit pattern carried in
+/// [`GoldenLight::color_cone`]`.w` (`cos_inner` low half, `cos_outer` high half) — the
+/// host mirror of `boyko_render::light::pack_cones`; the resolve oracle's
+/// [`golden_unpack_cones`] is the inverse (matching the shader's `f16tof32`).
+fn golden_pack_cones(cos_inner: f32, cos_outer: f32) -> f32 {
+    let lo = golden_f16_from_f32(cos_inner) as u32;
+    let hi = golden_f16_from_f32(cos_outer) as u32;
+    f32::from_bits(lo | (hi << 16))
+}
+
+/// Unpacks two f16 cone cosines from a `color_cone.w` bit pattern — the host mirror of the
+/// shader's `unpack_cones` (`f16tof32`). Returns `(cos_inner, cos_outer)`.
+fn golden_unpack_cones(packed: f32) -> (f32, f32) {
+    let bits = packed.to_bits();
+    let lo = golden_f16_to_f32((bits & 0xFFFF) as u16);
+    let hi = golden_f16_to_f32(((bits >> 16) & 0xFFFF) as u16);
+    (lo, hi)
+}
+
+/// IEEE-754 binary32 → binary16 (round-to-nearest-even) — the host mirror of
+/// `boyko_render::light::f16_from_f32`. The cone cosines live in `[-1, 1]`, inside the f16
+/// normal range, so only the standard rounding is needed (no overflow special case beyond
+/// the defensive inf/NaN guard).
+fn golden_f16_from_f32(x: f32) -> u16 {
+    let bits = x.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let exp = ((bits >> 23) & 0xff) as i32;
+    let mant = bits & 0x007f_ffff;
+    if exp == 0xff {
+        let m = if mant != 0 { 0x0200 } else { 0 };
+        return sign | 0x7c00 | m;
+    }
+    let new_exp = exp - 127 + 15;
+    if new_exp >= 0x1f {
+        return sign | 0x7c00; // overflow → inf
+    }
+    if new_exp <= 0 {
+        if new_exp < -10 {
+            return sign; // underflow → signed zero
+        }
+        let full_mant = mant | 0x0080_0000;
+        let shift = (14 - new_exp) as u32;
+        let m = (full_mant >> shift) as u16;
+        let round_bit = ((full_mant >> (shift - 1)) & 1) as u16;
+        return sign | (m + round_bit);
+    }
+    let half = sign | ((new_exp as u16) << 10) | ((mant >> 13) as u16);
+    let round = (mant >> 12) & 1;
+    let sticky = mant & 0x0fff;
+    if round == 1 && (sticky != 0 || (half & 1) == 1) {
+        half + 1
+    } else {
+        half
+    }
+}
+
+/// IEEE-754 binary16 → binary32 — the host mirror of the shader's `f16tof32`.
+fn golden_f16_to_f32(h: u16) -> f32 {
+    let sign = ((h >> 15) & 1) as u32;
+    let exp = ((h >> 10) & 0x1f) as u32;
+    let mant = (h & 0x3ff) as u32;
+    let out = if exp == 0 {
+        if mant == 0 {
+            sign << 31
+        } else {
+            let mut e = -1i32;
+            let mut m = mant;
+            loop {
+                e += 1;
+                m <<= 1;
+                if m & 0x400 != 0 {
+                    break;
+                }
+            }
+            let new_exp = (127 - 15 - e) as u32;
+            (sign << 31) | (new_exp << 23) | ((m & 0x3ff) << 13)
+        }
+    } else if exp == 0x1f {
+        (sign << 31) | 0x7f80_0000 | (mant << 13)
+    } else {
+        let new_exp = exp + (127 - 15);
+        (sign << 31) | (new_exp << 23) | (mant << 13)
+    };
+    f32::from_bits(out)
 }
 
 /// A host light-table header mirroring `boyko_render::light::LightHeaderGpu` (4 std430
@@ -1605,10 +1746,22 @@ impl GoldenLightHeader {
         }
     }
 
+    /// The total `light_count` field (bit-cast back from `counts_exposure.x`).
+    #[inline]
+    pub fn light_count(&self) -> u32 {
+        self.counts_exposure[0].to_bits()
+    }
+
     /// The `l0a_count` field (bit-cast back from `counts_exposure.z`).
     #[inline]
     pub fn l0a_count(&self) -> u32 {
         self.counts_exposure[2].to_bits()
+    }
+
+    /// The `point_spot_count` field — the L0b block (bit-cast back from `counts_exposure.w`).
+    #[inline]
+    pub fn point_spot_count(&self) -> u32 {
+        self.counts_exposure[3].to_bits()
     }
 
     /// The exposure field (`counts_exposure.y`).
@@ -1703,7 +1856,7 @@ fn env_brdf_approx(roughness: f32, nov: f32) -> [f32; 2] {
 /// UNORM pack so [`golden_deferred_resolve`] can re-decode them and run the host BRDF
 /// within ±2/255 of the GPU. On the mask == 0 arms (mesh / background / empty) `base_rgb`
 /// round-trips byte-identically (the 0%-gate).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MarcherAttributes {
     /// gAlbedo R8G8B8: the RAW LINEAR base color (the picked material's `base_color.rgb`
     /// on an SDF hit, else MESH_COLOR / BACKGROUND), quantized via [`pack_rgba`] rounding.
@@ -1718,6 +1871,12 @@ pub struct MarcherAttributes {
     pub ao: u8,
     /// gMaterial.b decoded: 1 on the SDF-LIT arm, 0 on mesh / background / empty.
     pub mask: u8,
+    /// Lighting L0b: the `gViewT` lane — the marcher's surface ray param `t` (the REAL
+    /// marched `t` on the SDF-lit arm, the `1.0e30` sentinel on mesh / background / empty,
+    /// mirroring the GPU's three terminal write sites, C2). The resolve oracle reconstructs
+    /// `P = ro + rd * view_t` under `mask == 1` (the read-under-mask gate — the sentinel is
+    /// never consumed on a non-lit pixel).
+    pub view_t: f32,
 }
 
 /// Picks the nearest-surface material id at `p` by an argmin over the edit list, mirroring
@@ -1884,6 +2043,9 @@ pub fn golden_marcher_attributes(
             shadow: q8(shadow),
             ao: q8(ao),
             mask: 1,
+            // Lighting L0b: the SDF-lit arm stores the REAL marched `t` (the same `t` the
+            // hit point `p = ro + rd * t` above used) — the resolve reconstructs `P` from it.
+            view_t: t,
         }
     } else {
         let base = if has_mesh { MESH_COLOR } else { SDF_BACKGROUND };
@@ -1896,6 +2058,9 @@ pub fn golden_marcher_attributes(
             shadow: 255,
             ao: 255,
             mask: 0,
+            // Lighting L0b: the mesh / background / empty arms store the `1.0e30` sentinel
+            // (the GPU's mask == 0 write); never read on a non-lit pixel (read-under-mask).
+            view_t: 1.0e30,
         }
     }
 }
@@ -1984,12 +2149,19 @@ pub fn golden_deferred_resolve(
     pack_rgba(lit)
 }
 
-/// The CPU mirror of the `deferred_pbr` RESOLVE driven by the L0a light TABLE (Lighting
-/// L0a). Identical to [`golden_deferred_resolve`] except the single compiled-in
-/// directional + the `SKY_*` ambient constants are replaced by a loop over the no-`P`
-/// front block of `lights` (`[0..header.l0a_count()]`): `kind == Directional` contributes
-/// the Cook-Torrance direct term, `kind == Sky` contributes the hemisphere ambient. The
-/// accumulated LINEAR radiance is multiplied by `header.exposure()` as the FINAL op (O3).
+/// The CPU mirror of the `deferred_pbr` RESOLVE driven by the L0a + L0b light TABLE
+/// (Lighting L0a/L0b). Identical to [`golden_deferred_resolve`] except the single
+/// compiled-in directional + the `SKY_*` ambient constants are replaced by:
+/// - the no-`P` front block (`[0..header.l0a_count()]`): `kind == Directional` contributes
+///   the Cook-Torrance direct term, `kind == Sky` the hemisphere ambient; and
+/// - (L0b) the point/spot block (`[l0a_count..light_count)`): the surface world position
+///   `P = ro + rd * attrs.view_t` (the `gViewT` lane, read under `mask == 1`) drives a
+///   range cull + smooth windowed inverse-square attenuation + (spot) the O2 cone falloff,
+///   each scaled into the SAME Cook-Torrance direct term. `ro`/`rd` are the pixel's shared
+///   ray-gen origin/dir (rd unit, so `view_t` is true world distance).
+///
+/// The accumulated LINEAR radiance is multiplied by `header.exposure()` as the FINAL op
+/// (O3).
 ///
 /// # W1 byte-identity op-order (HARD requirement)
 /// The per-light direct expression is `(diff + spec) * (nol * shadow) * color` with the
@@ -2000,8 +2172,10 @@ pub fn golden_deferred_resolve(
 /// [`PBR_SKY_DIFFUSE`]) with exposure 1.0 — reproduces [`golden_deferred_resolve`]
 /// BYTE-FOR-BYTE (the directional matches `LIGHT_DIR`/`LIGHT_COLOR`; the sky `lerp` folds
 /// since sky == ground). No reassociation is permitted.
+#[allow(clippy::too_many_arguments)]
 pub fn golden_deferred_resolve_table(
     attrs: MarcherAttributes,
+    ro: [f32; 3],
     rd: [f32; 3],
     materials: &[GoldenMaterial],
     header: &GoldenLightHeader,
@@ -2081,8 +2255,65 @@ pub fn golden_deferred_resolve_table(
                     ambient[c] += (spec_ambient + diff_ambient) * ao;
                 }
             }
-            // Point/spot (kinds 1/2) are the L0b block (not in the L0a front block).
+            // Point/spot (kinds 1/2) are the L0b block (handled after this loop).
             _ => {}
+        }
+    }
+
+    // L0b: reconstruct the surface world position from the `gViewT` lane (under `mask == 1`
+    // only — `attrs.view_t` carries the sentinel on a non-lit pixel, but this whole function
+    // already early-returned on `mask != 1`, so the read is gated). Then loop the point/spot
+    // block `[l0a_count .. light_count)`, mirroring the shader's `deferred_pbr.hlsl` math
+    // bit-for-bit (range cull → windowed inverse-square → O2 spot cone → Cook-Torrance).
+    let p = [
+        ro[0] + rd[0] * attrs.view_t,
+        ro[1] + rd[1] * attrs.view_t,
+        ro[2] + rd[2] * attrs.view_t,
+    ];
+    let l0a = header.l0a_count() as usize;
+    let total = header.light_count() as usize;
+    for li in lights.iter().take(total).skip(l0a) {
+        let kind = li.kind();
+        if kind != GOLDEN_LIGHT_KIND_POINT && kind != GOLDEN_LIGHT_KIND_SPOT {
+            continue;
+        }
+        let pos = [li.pos_range[0], li.pos_range[1], li.pos_range[2]];
+        let range = li.pos_range[3];
+        let to_l = [pos[0] - p[0], pos[1] - p[1], pos[2] - p[2]];
+        let d2 = v_dot(to_l, to_l);
+        let range2 = range * range;
+        if d2 > range2 {
+            continue; // outside the cull sphere
+        }
+        // l = unit surface->light; mirrors the shader's `rsqrt(max(d2, 1e-8))`.
+        let inv_d = 1.0 / d2.max(1e-8).sqrt();
+        let l = [to_l[0] * inv_d, to_l[1] * inv_d, to_l[2] * inv_d];
+        // Smooth windowed inverse-square (the shader's `(1 - (d2/range2)^2)^2` window).
+        let win = (1.0 - (d2 * d2) / (range2 * range2)).clamp(0.0, 1.0);
+        let mut atten = (1.0 / d2.max(1e-4)) * win * win;
+        if kind == GOLDEN_LIGHT_KIND_SPOT {
+            // O2 cone falloff (mirrors the shader): cos between -l and the spot axis,
+            // smoothstepped between the outer and inner cone cosines, squared.
+            let (cos_inner, cos_outer) = golden_unpack_cones(li.color_cone[3]);
+            let spot_dir = v_normalize([li.dir_kind[0], li.dir_kind[1], li.dir_kind[2]]);
+            let cos_a = v_dot([-l[0], -l[1], -l[2]], spot_dir);
+            let denom = (cos_inner - cos_outer).max(1e-4);
+            let tt = ((cos_a - cos_outer) / denom).clamp(0.0, 1.0);
+            atten *= tt * tt;
+        }
+        // The SAME Cook-Torrance direct term as the directional path, scaled by the
+        // distance/cone attenuation and the light's baked color.
+        let hvec = v_normalize([v[0] + l[0], v[1] + l[1], v[2] + l[2]]);
+        let nol = v_dot(n, l).max(0.0);
+        let noh = v_dot(n, hvec).clamp(0.0, 1.0);
+        let loh = v_dot(l, hvec).clamp(0.0, 1.0);
+        let d_term = d_ggx(noh, a);
+        let v_term = v_smith_ggx_correlated(nov, nol, a);
+        let f_term = f_schlick(loh, f0);
+        for c in 0..3 {
+            let spec = d_term * v_term * f_term[c];
+            let diff = diffuse_color[c] * (1.0 / pi);
+            lit_direct[c] += (diff + spec) * (nol * shadow) * atten * li.color_cone[c];
         }
     }
 

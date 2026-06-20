@@ -702,6 +702,8 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         BindGroupLayoutEntry { binding: 6, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
         // PBR MVP-2: the material table SSBO @7 (the marcher fetches `base_color`).
         BindGroupLayoutEntry { binding: 7, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        // Lighting L0b: the gViewT STORAGE image @8 (the marcher stores the surface `t`).
+        BindGroupLayoutEntry { binding: 8, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
     ];
     let vocab_layout = RhiDevice::create_bind_group_layout(
         device,
@@ -719,10 +721,11 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
     )
     .expect("P1b G-buffer marcher compute pipeline");
 
-    // The deferred RESOLVE (`deferred_pbr.comp`): 7 bindings (≤ 12) { gAlbedo @0, gNormal
+    // The deferred RESOLVE (`deferred_pbr.comp`): 8 bindings (≤ 12) { gAlbedo @0, gNormal
     // @1, gMaterial @2, lit @3 (STORAGE images), the material SSBO @4, the camera UBO @5,
-    // the Lighting-L0 light table SSBO @6 }. The resolve reads the extent + the per-pixel
-    // view direction from the camera UBO and the lights from the table (L0a).
+    // the Lighting-L0 light table SSBO @6, the Lighting-L0b gViewT STORAGE image @7 }. The
+    // resolve reads the extent + the per-pixel view direction from the camera UBO, the
+    // lights from the table (L0a), and (L0b) `gViewT` to reconstruct `P` for point/spot.
     let resolve_cs = RhiDevice::create_shader_module(device, deferred_pbr_spirv())
         .expect("deferred resolve compute shader module");
     let resolve_entries = [
@@ -733,6 +736,8 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         BindGroupLayoutEntry { binding: 4, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 5, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 6, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        // Lighting L0b: the gViewT STORAGE image @7 (the resolve reads it under `mask == 1`).
+        BindGroupLayoutEntry { binding: 7, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
     ];
     let resolve_layout = RhiDevice::create_bind_group_layout(
         device,
