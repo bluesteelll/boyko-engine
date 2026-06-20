@@ -64,16 +64,19 @@ const SDF_FAR: f32 = 1.0e9;
 /// Clamps each lane of `v` to `[0, 1]` — the SIMD counterpart of the scalar
 /// `f32::clamp(t, 0.0, 1.0)` used inside [`boyko_sdf_math::smin`] (lib.rs:316).
 ///
-/// # CORRECTNESS (R4)
+/// # CORRECTNESS (R4) — sign-of-zero operand order
 ///
-/// `f32::clamp` is an if-else and DIVERGES from `min(max(.))` on NaN and on a `-0.0`
-/// input. This helper is `_mm256_min_ps(_mm256_max_ps(v, 0), 1)` — bit-identical to
-/// `f32::clamp(v, 0, 1)` ONLY for a finite, non-`-0.0` `v`. The sole caller feeds
-/// `t = 0.5 + 0.5*(b-a)/k`: a `-0.0` result would need `0.5 + (-0.5)`, which IEEE
-/// gives `+0.0` (never `-0.0`), so `t` is provably never `-0.0` for finite input;
-/// and the inert-lane seeding (R5) keeps `(b-a)/k` finite on every lane, so `t` is
-/// always finite. Under those two guarantees `clamp01_x8(t)` is bit-identical to the
-/// scalar `f32::clamp(t, 0, 1)`.
+/// `f32::max` / `f32::min` (and `f32::clamp`, an if-else built on the same `<` / `>`
+/// tie rule) return the FIRST operand's sign on a `±0.0` tie, whereas the hardware
+/// `MAXPS` / `MINPS` (`_mm256_{max,min}_ps`) return the SECOND. The two are EXACT
+/// opposites on a zero tie, so the bit-faithful SIMD mirror SWAPS the operands:
+/// `clamp(v, 0, 1)` = `v.max(0.0).min(1.0)` becomes
+/// `_mm256_min_ps(one, _mm256_max_ps(zero, v))` — `MAXPS(zero, v)` mirrors `v.max(0)`
+/// and `MINPS(one, .)` mirrors `.min(1)`. This is `to_bits`-identical to the scalar
+/// `f32::clamp(v, 0, 1)` for every finite input INCLUDING `v == -0.0` (verified
+/// exhaustively over the `±0.0` tie palette). The kernel's domain is NaN-free (R5
+/// keeps every live lane finite), so the `MAXPS`/`f32::max` NaN-propagation
+/// difference is out of domain.
 ///
 /// # Safety
 ///
@@ -85,7 +88,9 @@ fn clamp01_x8(v: __m256) -> __m256 {
     use core::arch::x86_64::{_mm256_max_ps, _mm256_min_ps, _mm256_set1_ps};
     let zero = _mm256_set1_ps(0.0);
     let one = _mm256_set1_ps(1.0);
-    _mm256_min_ps(_mm256_max_ps(v, zero), one)
+    // Operands SWAPPED vs the scalar's `v.max(0).min(1)`: `MAXPS`/`MINPS` keep the
+    // SECOND operand on a `±0` tie, so swapping reproduces `f32`'s first-operand rule.
+    _mm256_min_ps(one, _mm256_max_ps(zero, v))
 }
 
 /// Per-lane unary negate — the SIMD counterpart of the scalar `-x`.
@@ -243,9 +248,11 @@ fn sd_box_x8(
     let q2 = _mm256_sub_ps(abs_x8(_mm256_sub_ps(pz, cz)), hz);
 
     // outside = length(max(q, 0)): mxi = qi.max(0.0)        // mirrors lib.rs:282/297
-    let mx0 = _mm256_max_ps(q0, zero);
-    let mx1 = _mm256_max_ps(q1, zero);
-    let mx2 = _mm256_max_ps(q2, zero);
+    // Operands SWAPPED (`MAXPS(zero, qi)` mirrors `qi.max(0.0)`): `MAXPS` keeps the
+    // 2nd operand on a `±0` tie, the opposite of `f32::max`'s 1st-operand rule.
+    let mx0 = _mm256_max_ps(zero, q0);
+    let mx1 = _mm256_max_ps(zero, q1);
+    let mx2 = _mm256_max_ps(zero, q2);
     // (mx0² + mx1²) + mx2²  left-assoc                      // mirrors lib.rs:228
     let sum = _mm256_add_ps(
         _mm256_add_ps(_mm256_mul_ps(mx0, mx0), _mm256_mul_ps(mx1, mx1)),
@@ -255,7 +262,10 @@ fn sd_box_x8(
 
     // inside = q0.max(q1.max(q2)).min(0.0) — KEEP the nesting (NOT max(max(q0,q1),q2))
     //                                                      // mirrors lib.rs:298
-    let inside = _mm256_min_ps(_mm256_max_ps(q0, _mm256_max_ps(q1, q2)), zero);
+    // Operands SWAPPED at each min/max (`MAXPS(q2,q1)` = `q1.max(q2)`, etc.) so the
+    // `±0` tie sign matches `f32::max`/`f32::min` (1st-operand rule), not `MAXPS`/
+    // `MINPS` (2nd-operand). The nesting (association) is preserved.
+    let inside = _mm256_min_ps(zero, _mm256_max_ps(_mm256_max_ps(q2, q1), q0));
 
     // outside + inside  (outside first)                    // mirrors lib.rs:299
     _mm256_add_ps(outside, inside)
@@ -309,20 +319,24 @@ fn combine_x8(acc: __m256, d: __m256, op: u32, k: f32) -> __m256 {
     use core::arch::x86_64::{_mm256_max_ps, _mm256_min_ps, _mm256_set1_ps};
     let kv = _mm256_set1_ps(k);
     let smooth = k > 0.0; // scalar-uniform (lib.rs:334/341/350)
+    // Hard-op operands are SWAPPED vs the scalar (`MAXPS(b,a)` = `a.max(b)`): `MAXPS`/
+    // `MINPS` keep the 2nd operand on a `±0` tie, the opposite of `f32::max`/`f32::min`'s
+    // 1st-operand rule — swapping makes the hard-op sign-of-zero `to_bits`-identical to
+    // the scalar `acc.max(.)` / `acc.min(.)`.
     if op == sdf_op::SUBTRACT {
         // smax(acc, -d, k) / acc.max(-d)                   // mirrors lib.rs:335/337
         let neg_d = neg_x8(d);
         if smooth {
             smax_x8(acc, neg_d, kv)
         } else {
-            _mm256_max_ps(acc, neg_d)
+            _mm256_max_ps(neg_d, acc)
         }
     } else if op == sdf_op::INTERSECT {
         // smax(acc, d, k) / acc.max(d)                     // mirrors lib.rs:342/344
         if smooth {
             smax_x8(acc, d, kv)
         } else {
-            _mm256_max_ps(acc, d)
+            _mm256_max_ps(d, acc)
         }
     } else {
         // UNION (and any unknown discriminant) — smin(acc, d, k) / acc.min(d)
@@ -330,7 +344,7 @@ fn combine_x8(acc: __m256, d: __m256, op: u32, k: f32) -> __m256 {
         if smooth {
             smin_x8(acc, d, kv)
         } else {
-            _mm256_min_ps(acc, d)
+            _mm256_min_ps(d, acc)
         }
     }
 }
