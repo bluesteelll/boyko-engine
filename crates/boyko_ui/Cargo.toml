@@ -1,0 +1,23 @@
+[package]
+name = "boyko-ui"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "boyko_ui"
+path = "src/lib.rs"
+
+[dependencies]
+boyko-ecs    = { path = "../boyko_ecs" }
+boyko-macros = { path = "../boyko_macros" }
+boyko-utils  = { path = "../boyko_utils" }
+# NOTE: boyko-threadpool is NOT a dependency in P1 — the apply pass is exclusive;
+# the host already owns the pool to build the schedule.
+
+[dev-dependencies]
+# Integration tests build a hand-rolled Schedule (mirroring the demo's
+# schedule-build + run pattern), which requires an Arc<ThreadPool>. macros is
+# needed for #[derive(Component)] on test-local probe components.
+boyko-threadpool = { path = "../boyko_threadpool" }
+boyko-macros     = { path = "../boyko_macros" }
