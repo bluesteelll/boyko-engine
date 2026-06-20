@@ -136,7 +136,7 @@ pub fn physics_soft_step_coupled(
     // Reset the reaction accumulator for this frame (CLEARED, never resized — the
     // dense per-body rows are reserved to body capacity at wire-up; zero per-step
     // alloc). Sized to the current snapshot row count.
-    reaction.reset(scratch.bodies.len());
+    reaction.reset(scratch.bodies().len());
 
     let p = step_params(&cfg);
     let couple = cfg.soft_rigid_coupling;
@@ -149,7 +149,7 @@ pub fn physics_soft_step_coupled(
     // resolves zero contacts. The `is_empty()` arm keeps an empty world valid (the
     // grid is not built when there is nothing to bucket).
     debug_assert!(
-        !couple || scratch.bodies.is_empty() || grid.is_built(),
+        !couple || scratch.bodies().is_empty() || grid.is_built(),
         "invariant: soft↔rigid coupling requires the broadphase grid to be built \
          (set PhysicsConfig::broadphase = BroadphaseKind::Grid — add_physics_pipeline \
          does this on the coupling path)"
@@ -157,7 +157,7 @@ pub fn physics_soft_step_coupled(
     for body in query.iter_mut() {
         let ctx = if couple {
             Some(CouplingCtx {
-                bodies: &scratch.bodies,
+                bodies: scratch.bodies(),
                 grid,
                 reaction,
             })

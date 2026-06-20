@@ -229,7 +229,7 @@ fn setup_coupled(side: usize) -> EcsMaster {
     let mut out = Vec::new();
     grid.build(&bodies, &mut out);
     let mut scratch = SolverScratch::with_capacity(bodies.len().max(1));
-    scratch.bodies = bodies.clone();
+    scratch.set_bodies(&bodies);
     world.insert_resource(scratch);
     world.insert_resource(grid);
     world.insert_resource(SoftRigidReaction::with_capacity(bodies.len().max(1)));

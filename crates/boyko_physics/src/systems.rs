@@ -165,16 +165,19 @@ pub fn physics_gather(
     cfg.dt = fixed_time.delta_secs();
 
     let scratch = &mut *scratch;
-    scratch.clear();
+    scratch.vn_initial.clear();
+    // Refill the gather column through its single-threaded build view: clear (no
+    // free — the committed pages stay resident) then push one BodyState per row.
     // Read-only `iter()` walks the rows in archetype-row order — the same order
     // `physics_apply`'s mutable walk re-visits, so row `i` is the same body in
     // both passes (the IM-1 gather/apply addressing invariant).
+    let mut bodies = scratch.bodies_build();
+    bodies.clear();
     for (body, mass, collider) in query.iter() {
-        scratch
-            .bodies
-            .push(BodyState::from_columns(body, mass, collider));
+        bodies.push(BodyState::from_columns(body, mass, collider));
     }
-    scratch.touched.reset(scratch.bodies.len());
+    let n = bodies.len();
+    scratch.touched.reset(n);
 }
 
 /// Fills [`ContactPairs`] with candidate `(BodyIndex, BodyIndex)` pairs in
@@ -203,7 +206,7 @@ pub fn physics_broadphase(
     mut grid: ResMut<BroadphaseGrid>,
     mut pairs: ResMut<ContactPairs>,
 ) {
-    let bodies = &scratch.bodies;
+    let bodies = scratch.bodies();
     let pairs = &mut pairs.pairs;
 
     match cfg.broadphase {
@@ -275,7 +278,7 @@ pub fn physics_narrowphase(
     pairs: Res<ContactPairs>,
     mut manifolds: ResMut<Manifolds>,
 ) {
-    let bodies = &scratch.bodies;
+    let bodies = scratch.bodies();
     let manifolds = &mut *manifolds;
     manifolds.manifolds.clear();
     // Ensure the per-pair hysteresis cache can hold this frame's pairs; it is NOT
@@ -451,7 +454,7 @@ pub fn physics_narrowphase_sdf(
     if field.is_empty() {
         return;
     }
-    let bodies = &scratch.bodies;
+    let bodies = scratch.bodies();
     let out = &mut manifolds.manifolds;
 
     for (row, body) in bodies.iter().enumerate() {
@@ -837,7 +840,7 @@ pub fn physics_build_graph(
     manifolds: Res<Manifolds>,
     mut graph: ResMut<ConstraintGraph>,
 ) {
-    let bodies = &scratch.bodies;
+    let bodies = scratch.bodies();
     let n_dynamic = bodies.len();
     // A row is dynamic iff it has a non-zero inverse mass (static/kinematic = 0).
     // The sentinel `u32::MAX` (and any out-of-range row) is non-dynamic — ground.
@@ -950,6 +953,7 @@ pub fn physics_solve_step<S: RigidSolver>(
 #[allow(clippy::needless_pass_by_value)]
 pub fn physics_apply(mut query: Query<Mut<RigidBody>>, scratch: Res<SolverScratch>) {
     let scratch = &*scratch;
+    let bodies = scratch.bodies();
     let mut row = 0usize;
     for mut body in query.iter_mut() {
         // Guard the index (never break) so `row` counts EVERY live row to the
@@ -957,8 +961,8 @@ pub fn physics_apply(mut query: Query<Mut<RigidBody>>, scratch: Res<SolverScratc
         // directions — a despawn (live rows < snapshot) ends with `row < len`,
         // a spawn (live rows > snapshot) ends with `row > len`. Breaking on
         // overflow would mask the spawn case (`row` would stop exactly at `len`).
-        if row < scratch.bodies.len() && scratch.touched.get(row) {
-            let state = &scratch.bodies[row];
+        if row < bodies.len() && scratch.touched.get(row) {
+            let state = &bodies[row];
             // Deref-write through the `Mut` guard bumps the row's `changed`
             // tick exactly for solved bodies (precise change detection).
             *body = RigidBody {
@@ -974,10 +978,10 @@ pub fn physics_apply(mut query: Query<Mut<RigidBody>>, scratch: Res<SolverScratc
         row += 1;
     }
     debug_assert!(
-        row == scratch.bodies.len(),
+        row == bodies.len(),
         "invariant: no structural change between gather and apply (live row count {} != snapshot len {})",
         row,
-        scratch.bodies.len()
+        bodies.len()
     );
 }
 

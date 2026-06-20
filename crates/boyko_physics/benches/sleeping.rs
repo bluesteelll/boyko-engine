@@ -160,13 +160,13 @@ fn bench_sleeping(c: &mut Criterion) {
                 };
                 let mut solver = ColoredSoftStepSolver::default();
                 let mut scratch = SolverScratch::with_capacity(bodies.len());
-                scratch.bodies = bodies.clone();
+                scratch.set_bodies(&bodies);
                 for _ in 0..4 {
-                    scratch.touched.reset(scratch.bodies.len());
+                    scratch.touched.reset(scratch.bodies().len());
                     solver.solve_colored(&cfg, &manifolds, &graph, &mut scratch);
                 }
                 b.iter(|| {
-                    scratch.touched.reset(scratch.bodies.len());
+                    scratch.touched.reset(scratch.bodies().len());
                     solver.solve_colored(black_box(&cfg), black_box(&manifolds), black_box(&graph), &mut scratch);
                 });
             },
@@ -188,15 +188,15 @@ fn bench_sleeping(c: &mut Criterion) {
                 };
                 let mut solver = ColoredSoftStepSolver::default();
                 let mut scratch = SolverScratch::with_capacity(bodies.len());
-                scratch.bodies = bodies.clone();
+                scratch.set_bodies(&bodies);
                 let mut sleep = IslandSleep::with_capacity(bodies.len(), bodies.len());
                 // Warm: settle + latch the whole pile asleep (and grow the buffers).
                 for _ in 0..16 {
-                    scratch.touched.reset(scratch.bodies.len());
+                    scratch.touched.reset(scratch.bodies().len());
                     solver.solve_colored_sleeping(&cfg, &manifolds, &graph, &mut scratch, &mut sleep);
                 }
                 b.iter(|| {
-                    scratch.touched.reset(scratch.bodies.len());
+                    scratch.touched.reset(scratch.bodies().len());
                     solver.solve_colored_sleeping(
                         black_box(&cfg),
                         black_box(&manifolds),
@@ -223,14 +223,14 @@ fn bench_sleeping(c: &mut Criterion) {
                 };
                 let mut solver = ColoredSoftStepSolver::default();
                 let mut scratch = SolverScratch::with_capacity(bodies.len());
-                scratch.bodies = bodies.clone();
+                scratch.set_bodies(&bodies);
                 let mut sleep = IslandSleep::with_capacity(bodies.len(), bodies.len());
                 for _ in 0..4 {
-                    scratch.touched.reset(scratch.bodies.len());
+                    scratch.touched.reset(scratch.bodies().len());
                     solver.solve_colored_sleeping(&cfg, &manifolds, &graph, &mut scratch, &mut sleep);
                 }
                 b.iter(|| {
-                    scratch.touched.reset(scratch.bodies.len());
+                    scratch.touched.reset(scratch.bodies().len());
                     solver.solve_colored_sleeping(
                         black_box(&cfg),
                         black_box(&manifolds),

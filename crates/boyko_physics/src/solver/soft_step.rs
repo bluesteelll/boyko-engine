@@ -57,6 +57,7 @@
 //! scratch buffers are capacity-reused — zero per-step allocation in steady
 //! state. No `fast-math` / `float_algebraic` on this crate.
 
+use boyko_ecs::ecs::core::component::scratch::ScratchColumn;
 use boyko_macros::Resource as ResourceDerive;
 
 use super::contact::{BodyEffective, effective_mass, tangent_basis};
@@ -67,6 +68,7 @@ use crate::components::BodyType;
 use crate::manifold::{Manifold, SDF_SENTINEL};
 use crate::math::{Mat3, Vec3};
 use crate::resources::{BodyState, PhysicsConfig, SolverScratch};
+use crate::scratch_ids::{body_eff_serial_id, register_scratch_layouts, scratch_reserve_rows};
 
 /// Maximum penetration-recovery bias speed (world units/s) the soft normal solve
 /// will inject, clamping the otherwise-unbounded `biasRate · separation` push so
@@ -184,7 +186,10 @@ struct ManifoldConstraint {
 pub struct SoftStepSolver {
     /// Per-body solver view, parallel to `scratch.bodies` — refreshed each
     /// substep so the world inverse inertia tracks the advancing orientation.
-    bodies: Vec<BodyEffective>,
+    /// Backed by a [`ScratchColumn`] (engine-owned, address-stable) instead of a
+    /// `std::Vec` parallel-data-system (audit Stage P). This is the SERIAL path —
+    /// every access is single-threaded through the build view's `as_mut_slice`.
+    bodies: ScratchColumn<BodyEffective>,
     /// Per-manifold constraint state, in deterministic manifold order.
     manifolds: Vec<ManifoldConstraint>,
     /// Flattened per-point constraint state, indexed by `manifold.point_start +
@@ -216,8 +221,10 @@ impl SoftStepSolver {
     /// rows and `contacts` contact points (no later realloc in steady state),
     /// warm-starting ON.
     pub fn with_capacity(bodies: usize, contacts: usize) -> Self {
+        register_scratch_layouts();
+        let reserve = bodies.max(scratch_reserve_rows(size_of::<BodyEffective>()));
         Self {
-            bodies: Vec::with_capacity(bodies),
+            bodies: ScratchColumn::new(body_eff_serial_id(), reserve),
             manifolds: Vec::with_capacity(contacts),
             points: Vec::with_capacity(contacts),
             warm_read: WarmStartTable::with_capacity(contacts),
@@ -245,9 +252,10 @@ impl SoftStepSolver {
     /// `inv_inertia` starts as the gather's world tensor; the substep loop
     /// refreshes it from `inv_inertia_local` + the advancing orientation.
     fn build_bodies(&mut self, bodies: &[BodyState]) {
-        self.bodies.clear();
+        let mut view = self.bodies.build_view();
+        view.clear();
         for b in bodies {
-            self.bodies.push(BodyEffective {
+            view.push(BodyEffective {
                 inv_mass: b.inv_mass,
                 inv_inertia: b.inv_inertia,
                 linear_velocity: b.linear_velocity,
@@ -282,8 +290,20 @@ impl SoftStepSolver {
         bodies: &[BodyState],
         vn_initial: &mut Vec<f32>,
     ) {
-        self.manifolds.clear();
-        self.points.clear();
+        // Disjoint-field borrows: the BodyEffective read slice (built by
+        // `build_bodies` just above) is read while `self.manifolds` / `self.points`
+        // are written. `bodies_eff` is the read view of the solver's body column.
+        let Self {
+            bodies: body_col,
+            manifolds: out_manifolds,
+            points: out_points,
+            warm_read,
+            warm_start_enabled,
+            ..
+        } = self;
+        let bodies_eff = body_col.as_read_slice();
+        out_manifolds.clear();
+        out_points.clear();
         vn_initial.clear();
 
         for m in manifolds {
@@ -300,7 +320,7 @@ impl SoftStepSolver {
             let ib = if b_is_sentinel { ia } else { m.body_b.0 as usize };
             let normal = m.normal;
             let (tangent1, tangent2) = tangent_basis(normal);
-            let point_start = self.points.len();
+            let point_start = out_points.len();
 
             let pa = bodies[ia].position;
             // The sentinel surface has no position; anchors are expressed relative
@@ -327,11 +347,11 @@ impl SoftStepSolver {
                 // are closing) — the value restitution bounces back. The sentinel
                 // B is at rest (`IMMOVABLE_AT_REST`), contributing zero.
                 let dv = {
-                    let ba = &self.bodies[ia];
+                    let ba = &bodies_eff[ia];
                     let bb = if b_is_sentinel {
                         &IMMOVABLE_AT_REST
                     } else {
-                        &self.bodies[ib]
+                        &bodies_eff[ib]
                     };
                     bb.point_velocity(rb) - ba.point_velocity(ra)
                 };
@@ -347,8 +367,8 @@ impl SoftStepSolver {
                 } else {
                     warm_start::pack(m.body_a, m.body_b, cp.feature_id)
                 };
-                let seed = if self.warm_start_enabled {
-                    self.warm_read.get(warm_key)
+                let seed = if *warm_start_enabled {
+                    warm_read.get(warm_key)
                 } else {
                     None
                 };
@@ -357,7 +377,7 @@ impl SoftStepSolver {
                     Some(e) => (e.normal_impulse, e.tangent_impulse[0], e.tangent_impulse[1]),
                     None => (0.0, 0.0, 0.0),
                 };
-                self.points.push(PointConstraint {
+                out_points.push(PointConstraint {
                     ra,
                     rb,
                     separation: cp.separation,
@@ -368,7 +388,7 @@ impl SoftStepSolver {
                 });
             }
 
-            self.manifolds.push(ManifoldConstraint {
+            out_manifolds.push(ManifoldConstraint {
                 ia,
                 ib,
                 b_is_sentinel,
@@ -706,15 +726,23 @@ impl SoftStepSolver {
     /// `RigidBody` column — appearing frozen. Static / `inv_mass == 0` rows are
     /// left UNtouched (so they are not written back and cannot drift; the
     /// `static_body_unmoved` C2 guard depends on this), matching the integrate gate.
+    //
+    // `clippy::needless_range_loop`: `row` indexes the disjoint `eff` (read) AND the
+    // `scratch` snapshot via `write_body` — a single `iter` cannot express the two-
+    // buffer pattern (the same idiom the build/solve loops use).
+    #[allow(clippy::needless_range_loop)]
     fn write_back(&self, scratch: &mut SolverScratch) {
-        for row in 0..self.bodies.len() {
+        let eff = self.bodies.as_read_slice();
+        let n = eff.len();
+        for row in 0..n {
             // Touch exactly the rows the substep loop integrated (the same
             // `Dynamic && inv_mass != 0` gate), so a free body's integrated state
             // is written back and a static/kinematic row stays bit-identical.
-            if scratch.bodies[row].body_type == BodyType::Dynamic
-                && self.bodies[row].inv_mass != 0.0
-            {
-                Self::write_body(scratch, row, &self.bodies[row]);
+            // The snapshot read + write borrows are disjoint from `eff` (distinct
+            // ScratchColumns), bridged through the per-row helper.
+            let is_dynamic = scratch.bodies()[row].body_type == BodyType::Dynamic;
+            if is_dynamic && eff[row].inv_mass != 0.0 {
+                Self::write_body(scratch, row, &eff[row]);
             }
         }
     }
@@ -722,8 +750,12 @@ impl SoftStepSolver {
     /// Copies one solved body view's velocity (position/orientation were
     /// integrated into the snapshot in place) back and marks the row touched.
     fn write_body(scratch: &mut SolverScratch, row: usize, eff: &BodyEffective) {
-        scratch.bodies[row].linear_velocity = eff.linear_velocity;
-        scratch.bodies[row].angular_velocity = eff.angular_velocity;
+        {
+            let mut view = scratch.bodies.build_view();
+            let snapshot = view.as_mut_slice();
+            snapshot[row].linear_velocity = eff.linear_velocity;
+            snapshot[row].angular_velocity = eff.angular_velocity;
+        }
         scratch.touched.set(row);
     }
 }
@@ -783,14 +815,20 @@ impl RigidSolver for SoftStepSolver {
         // Build the per-body views and per-contact constraints over the gather
         // snapshot; `vn_initial` captures the pre-substep approach velocity for
         // the restitution pass.
-        self.build_bodies(&scratch.bodies);
+        self.build_bodies(scratch.bodies());
         // Split the scratch borrow: the snapshot positions feed the constraint
-        // build while `vn_initial` is filled.
+        // build while `vn_initial` is filled. Both columns are addressed by
+        // distinct ScratchColumns, so the body-read slice and `vn_initial` are
+        // disjoint borrows.
         {
+            // Disjoint field borrows of `scratch`: the BodyState snapshot read
+            // slice feeds the constraint build while `vn_initial` is filled.
             let SolverScratch {
-                bodies, vn_initial, ..
-            } = scratch;
-            self.build_constraints(manifolds, bodies, vn_initial);
+                bodies: body_col,
+                vn_initial,
+                ..
+            } = &mut *scratch;
+            self.build_constraints(manifolds, body_col.as_read_slice(), vn_initial);
         }
         // No `manifolds.is_empty()` early-return: in solver-owned mode (C2) this
         // solver is the SOLE integrator, so the substep loop must run its gravity
@@ -801,7 +839,7 @@ impl RigidSolver for SoftStepSolver {
         // skip is a world with no dynamic body to integrate at all (then there is
         // nothing to integrate and nothing to write back).
         let has_dynamic = scratch
-            .bodies
+            .bodies()
             .iter()
             .any(|b| b.body_type == BodyType::Dynamic && b.inv_mass != 0.0);
         if !has_dynamic {
@@ -813,26 +851,32 @@ impl RigidSolver for SoftStepSolver {
 
         let use_simd = config.simd;
 
+        // Disjoint-field borrows for the serial substep loop: `bodies_eff` is the
+        // single-threaded mutable slice over the solver's BodyEffective column (no
+        // parallel access — this is the SERIAL solver), while `manifolds` / `points`
+        // / the warm tables stay borrowable through the destructured fields.
+        let Self {
+            bodies,
+            manifolds: mc,
+            points,
+            ..
+        } = self;
+        let mut bodies_view = bodies.build_view();
+        let bodies_eff = bodies_view.as_mut_slice();
+
         for _ in 0..substeps {
             // (1) Gravity integrate DYNAMIC bodies only (C2 gate (2)). O1: the AVX2
             // SoA kernel when `simd` is on (bit-identical to the scalar oracle).
-            simd::apply_gravity(&mut self.bodies, &scratch.bodies, gravity, h, use_simd);
+            simd::apply_gravity(bodies_eff, scratch.bodies(), gravity, h, use_simd);
 
             // (2) Warm-start apply (W3): re-apply the seeded accumulated impulse
             // to the post-gravity velocities so the soft sweep refines from the
             // warm state (matching Box2D-v3's per-substep `b2WarmStartContactsTask`).
             // A zero seed (missed / disabled) applies nothing.
-            Self::warm_start_apply(&self.manifolds, &self.points, &mut self.bodies);
+            Self::warm_start_apply(mc, points, bodies_eff);
 
             // (3)+(4) Soft normal solve + coupled-friction cone (one sweep).
-            Self::solve_velocities(
-                &self.manifolds,
-                &mut self.points,
-                &mut self.bodies,
-                &scratch.bodies,
-                soft,
-                true,
-            );
+            Self::solve_velocities(mc, points, bodies_eff, scratch.bodies(), soft, true);
 
             // (5) Position integrate DYNAMIC bodies only, then re-rotate the
             // world inertia for the next substep's effective mass.
@@ -854,30 +898,24 @@ impl RigidSolver for SoftStepSolver {
             // `simd::position_integrate` kernel still ships + is differential-tested
             // (it pays off only on a future SoA `BodyState`). The HOT kernel is the
             // inertia refresh below (~1.46× under AVX2, run substeps×(1+relax) times).
-            simd::position_integrate(&self.bodies, &mut scratch.bodies, h, false);
-            Self::refresh_inertia(&mut self.bodies, &scratch.bodies, use_simd);
+            {
+                let mut view = scratch.bodies.build_view();
+                let snapshot = view.as_mut_slice();
+                simd::position_integrate(bodies_eff, snapshot, h, false);
+            }
+            Self::refresh_inertia(bodies_eff, scratch.bodies(), use_simd);
 
             // (6) Relax passes: re-solve bias-free to remove soft-bias energy.
             for _ in 0..config.relax_iterations {
-                Self::solve_velocities(
-                    &self.manifolds,
-                    &mut self.points,
-                    &mut self.bodies,
-                    &scratch.bodies,
-                    soft,
-                    false,
-                );
+                Self::solve_velocities(mc, points, bodies_eff, scratch.bodies(), soft, false);
             }
         }
 
-        // Post-loop restitution: ONCE, velocity-only, bias-free.
-        Self::apply_restitution(
-            &self.manifolds,
-            &mut self.points,
-            &mut self.bodies,
-            &scratch.bodies,
-            &scratch.vn_initial,
-        );
+        // Post-loop restitution: ONCE, velocity-only, bias-free. Read `vn_initial`
+        // into a local borrow disjoint from the bodies read slice.
+        let vn_initial = core::mem::take(&mut scratch.vn_initial);
+        Self::apply_restitution(mc, points, bodies_eff, scratch.bodies(), &vn_initial);
+        scratch.vn_initial = vn_initial;
 
         // (W3) Store the converged accumulated impulses into the freshly-zeroed
         // write table (in manifold order) and swap read ↔ write so next frame

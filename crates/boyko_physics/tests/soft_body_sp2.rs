@@ -300,7 +300,7 @@ fn install_coupling_resources(world: &mut EcsMaster, bodies: Vec<BodyState>) {
         "test setup: the broadphase grid must be built for the coupling kernel"
     );
     let mut scratch = SolverScratch::with_capacity(n.max(1));
-    scratch.bodies = bodies;
+    scratch.set_bodies(&bodies);
     world.insert_resource(scratch);
     world.insert_resource(grid);
     world.insert_resource(SoftRigidReaction::with_capacity(n.max(1)));
@@ -1148,7 +1148,7 @@ fn volume_projection_inflates_compressed_tet() {
 #[test]
 fn coupling_empty_world_safe() {
     // A coupled step with NO rigid bodies (empty scratch + unbuilt grid) must be a
-    // safe no-op: the debug_assert's `scratch.bodies.is_empty()` arm keeps an empty
+    // safe no-op: the debug_assert's `scratch.bodies().is_empty()` arm keeps an empty
     // world valid (the grid is not built when there is nothing to bucket).
     let positions = vec![[0.0_f32, 1.0, 0.0]];
     let inv_masses = vec![1.0_f32];

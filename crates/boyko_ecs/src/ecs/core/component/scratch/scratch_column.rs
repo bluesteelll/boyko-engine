@@ -122,6 +122,23 @@ impl<T: Copy> ScratchColumn<T> {
         ScratchSolveView::new(self.column.buffer_ptr().cast_mut().cast::<T>(), self.column.count())
     }
 
+    /// The whole-buffer READ-ONLY slice over `[0, len)`, borrowed through `&self`.
+    ///
+    /// This is the SHARED read surface for consumers that hold the column behind a
+    /// shared borrow (e.g. a `Res<_>`-resolved resource) and need a `&[T]` with the
+    /// same address arithmetic as a `&Vec<T>` deref-to-slice. It is read-only — the
+    /// SP4-unsound whole-buffer MUTABLE reborrow stays un-typeable (only the
+    /// single-threaded [`ScratchBuildView::as_mut_slice`](super::views::ScratchBuildView::as_mut_slice)
+    /// hands out `&mut [T]`).
+    ///
+    /// `[0, len)` is contiguous and tombstone-free (a `clear` + refill column never
+    /// leaves holes), so the returned slice is exactly the live elements in push
+    /// order.
+    #[inline]
+    pub fn as_read_slice(&self) -> &[T] {
+        self.as_slice()
+    }
+
     // ── pub(crate) refill surface (driven by ScratchBuildView) ──────────────
 
     /// The whole-buffer read-only slice over `[0, len)`.

@@ -7,6 +7,7 @@
 //! gather→solve→apply pipeline addresses by [`BodyIndex`]
 //! — see [`crate::systems`].
 
+use boyko_ecs::ecs::core::component::scratch::{ScratchBuildView, ScratchColumn};
 use boyko_macros::Resource;
 use boyko_threadpool::try_with_active_pool;
 use boyko_utils::bit_mask::bit_set_256::BitSet256;
@@ -15,6 +16,7 @@ use crate::components::{BodyType, Collider, ColliderShape, RigidBody, RigidBodyM
 use crate::manifold::{BodyIndex, Manifold};
 use crate::math::{Mat3, Quat, Vec3};
 use crate::narrowphase::axis_cache::BoxAxisCache;
+use crate::scratch_ids::{body_state_id, register_scratch_layouts, scratch_reserve_rows};
 use crate::systems::body_bounding_radius;
 
 /// Number of bits in one [`BitSet256`] chunk.
@@ -2626,10 +2628,28 @@ impl TouchedMask {
 /// always-empty buffer whose "parallel to `bodies`" invariant is false from day
 /// one is a footgun (review M2). Phase 10 adds it back together with the `Contact`
 /// producer once `Entity`-as-`QueryData` lands.
-#[derive(Resource, Default)]
+/// # `bodies` is a [`ScratchColumn`], not a `std::Vec` (audit Stage P)
+///
+/// The gather snapshot lives in the engine's OWN storage — one address-stable
+/// [`ComponentPool`](boyko_ecs::ecs::memory::component_pool::ComponentPool) column
+/// — rather than a `std::Vec` parallel-data-system. Access is through the typed
+/// accessors: [`bodies`](Self::bodies) for the contiguous read slice (the
+/// `[0, len)` live span — cleared + refilled each step, tombstone-free), and
+/// [`bodies_build`](Self::bodies_build) for the single-threaded gather refill.
+/// The broadphase / narrowphase / apply consumers read [`bodies`](Self::bodies);
+/// the colored solver takes a `ScratchSolveView` per worker (no whole-buffer
+/// reborrow — the SP4 structural fix).
+#[derive(Resource)]
 pub struct SolverScratch {
-    /// Dense snapshot, one row per body in archetype-row order.
-    pub bodies: Vec<BodyState>,
+    /// Dense snapshot, one row per body in archetype-row order. Backed by a
+    /// `ComponentPool` (address-stable base, in-place growth), refilled each
+    /// gather via [`bodies_build`](Self::bodies_build).
+    ///
+    /// `pub(crate)` so the in-crate solver modules can destructure `SolverScratch`
+    /// for disjoint field borrows (e.g. the BodyState read slice + `vn_initial`
+    /// together). External consumers use the public accessors
+    /// ([`bodies`](Self::bodies) / [`set_bodies`](Self::set_bodies)).
+    pub(crate) bodies: ScratchColumn<BodyState>,
     /// Per-row touched mask, indexed by [`BodyIndex`] = row.
     pub touched: TouchedMask,
     /// Per-contact-point relative normal APPROACH velocity captured BEFORE the
@@ -2640,12 +2660,22 @@ pub struct SolverScratch {
     pub vn_initial: Vec<f32>,
 }
 
+impl Default for SolverScratch {
+    #[inline]
+    fn default() -> Self {
+        Self::with_capacity(0)
+    }
+}
+
 impl SolverScratch {
     /// Builds scratch buffers pre-sized for up to `rows` bodies (no later
-    /// reallocation in steady state).
+    /// reallocation in steady state). Registers the scratch layouts (idempotent)
+    /// before creating the backing column.
     pub fn with_capacity(rows: usize) -> Self {
+        register_scratch_layouts();
+        let reserve = rows.max(scratch_reserve_rows(size_of::<BodyState>()));
         Self {
-            bodies: Vec::with_capacity(rows),
+            bodies: ScratchColumn::new(body_state_id(), reserve),
             touched: TouchedMask::with_capacity(rows),
             // One initial normal-velocity slot per body is a cheap first-frame
             // reserve; the TGS solver grows it to the live contact-point count
@@ -2654,12 +2684,59 @@ impl SolverScratch {
         }
     }
 
+    /// The contiguous read slice over the gathered bodies (`[0, len)` live span).
+    ///
+    /// The column is cleared + refilled each step, so the slice is tombstone-free
+    /// and in archetype-row order — the same `&[BodyState]` the broadphase /
+    /// narrowphase / build-graph / apply consumers used when `bodies` was a `Vec`.
+    #[inline]
+    pub fn bodies(&self) -> &[BodyState] {
+        self.bodies.as_read_slice()
+    }
+
+    /// The number of gathered body rows.
+    #[inline]
+    pub fn bodies_len(&self) -> usize {
+        self.bodies.len()
+    }
+
+    /// The single-threaded gather refill view (clear + push). The ONLY surface
+    /// that mutates the gather column — used by
+    /// [`physics_gather`](crate::systems::physics_gather).
+    #[inline]
+    pub fn bodies_build(&mut self) -> ScratchBuildView<'_, BodyState> {
+        self.bodies.build_view()
+    }
+
+    /// The single-threaded mutable slice over the gathered bodies (`[0, len)`).
+    ///
+    /// For ad-hoc drivers / tests that previously mutated `scratch.bodies[i]` in
+    /// place. Single-threaded ONLY (the parallel solve never reaches it). The
+    /// returned [`ScratchBuildView`] keeps the borrow alive across the slice's use.
+    #[inline]
+    pub fn bodies_mut(&mut self) -> ScratchBuildView<'_, BodyState> {
+        self.bodies.build_view()
+    }
+
+    /// Replaces the gather column's contents with `rows` (clear + extend).
+    ///
+    /// A convenience for tests / ad-hoc drivers that previously assigned
+    /// `scratch.bodies = some_vec`; production code refills via
+    /// [`bodies_build`](Self::bodies_build) inside the gather. Resets the touched
+    /// mask to the new row count.
+    pub fn set_bodies(&mut self, rows: &[BodyState]) {
+        let mut view = self.bodies.build_view();
+        view.clear();
+        view.extend_from_slice(rows);
+        self.touched.reset(rows.len());
+    }
+
     /// Clears the snapshot for a fresh gather, reusing capacity. The touched
     /// mask is reset by the gather once the row count is known; `vn_initial` is
     /// rebuilt by the solver, so it is cleared here for a fresh solve.
     #[inline]
     pub fn clear(&mut self) {
-        self.bodies.clear();
+        self.bodies.build_view().clear();
         self.vn_initial.clear();
     }
 }

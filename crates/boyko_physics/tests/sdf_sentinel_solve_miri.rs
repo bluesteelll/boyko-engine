@@ -57,13 +57,10 @@ fn one_body_scratch(position: Vec3, velocity: Vec3, radius: f32) -> SolverScratc
     };
 
     let mut scratch = SolverScratch::with_capacity(1);
-    scratch.clear();
-    scratch
-        .bodies
-        .push(BodyState::from_columns(&body, &mass, &collider));
+    scratch.set_bodies(&[BodyState::from_columns(&body, &mass, &collider)]);
     // The solver's `write_back` calls `touched.set(row)`; the mask must be sized
     // to the row count first (the gather stage does this in the full pipeline).
-    scratch.touched.reset(scratch.bodies.len());
+    scratch.touched.reset(scratch.bodies().len());
     scratch
 }
 
@@ -108,7 +105,7 @@ fn sentinel_solve_ejects_a_without_oob_or_double_apply() {
 
     solver.solve(&cfg, &manifolds, &mut scratch);
 
-    let b = &scratch.bodies[0];
+    let b = scratch.bodies()[0];
     // The contact resolves a closing velocity: after the solve the body's normal
     // velocity must no longer be driving INTO the surface (the soft normal push +
     // relaxation removes the approach). With normal −y the approach is −vy, so a
@@ -150,7 +147,7 @@ fn sentinel_solve_repeated_warm_start_is_sound() {
     // Several frames exercise the warm-start store_and_swap with the pack_sdf key.
     for _ in 0..8 {
         solver.solve(&cfg, &manifolds, &mut scratch);
-        let b = &scratch.bodies[0];
+        let b = scratch.bodies()[0];
         assert!(
             b.linear_velocity.y.is_finite() && b.position.y.is_finite(),
             "sustained sentinel contact stays finite across frames: v.y {} pos.y {}",
@@ -175,7 +172,7 @@ fn sentinel_solve_handles_empty_manifold_list_soundly() {
 
     solver.solve(&cfg, &manifolds, &mut scratch);
 
-    let b = &scratch.bodies[0];
+    let b = scratch.bodies()[0];
     assert!(
         b.position.y.is_finite() && b.linear_velocity.y.is_finite(),
         "free body under empty manifold list stays finite: pos.y {} v.y {}",

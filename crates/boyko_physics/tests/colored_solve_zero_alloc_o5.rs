@@ -163,13 +163,13 @@ fn colored_solve_does_no_per_step_alloc_in_steady_state() {
     let cfg = PhysicsConfig { dt: 1.0 / 60.0, ..PhysicsConfig::default() };
     let mut solver = ColoredSoftStepSolver::default();
     let mut scratch = SolverScratch::with_capacity(bodies.len());
-    scratch.bodies = bodies;
+    scratch.set_bodies(&bodies);
 
     // Warm: several full steps so every solver/graph/scratch buffer reaches its
     // steady-state capacity (clear()+refill reuses it thereafter).
     for _ in 0..8 {
-        graph.build(&manifolds, scratch.bodies.len(), &is_dynamic);
-        scratch.touched.reset(scratch.bodies.len());
+        graph.build(&manifolds, scratch.bodies().len(), &is_dynamic);
+        scratch.touched.reset(scratch.bodies().len());
         solver.solve_colored(&cfg, &manifolds, &graph, &mut scratch);
     }
 
@@ -181,9 +181,9 @@ fn colored_solve_does_no_per_step_alloc_in_steady_state() {
     // debug-assert scratch alloc in debug; the colored solver's own build+solve is
     // zero-alloc in both. Measure the colored solve step IN ISOLATION (graph
     // already built + warmed) so the gate is the COLORED solver's per-step alloc.
-    graph.build(&manifolds, scratch.bodies.len(), &is_dynamic); // outside the window
+    graph.build(&manifolds, scratch.bodies().len(), &is_dynamic); // outside the window
     let before = ALLOC.count();
-    scratch.touched.reset(scratch.bodies.len());
+    scratch.touched.reset(scratch.bodies().len());
     solver.solve_colored(&cfg, &manifolds, &graph, &mut scratch);
     let after = ALLOC.count();
     let allocs = after.wrapping_sub(before);

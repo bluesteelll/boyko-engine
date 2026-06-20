@@ -168,15 +168,15 @@ fn bench_solve(c: &mut Criterion) {
             |b, &_n| {
                 let mut solver = SoftStepSolver::default();
                 let mut scratch = SolverScratch::with_capacity(bodies.len());
-                scratch.bodies = bodies.clone();
-                scratch.touched.reset(scratch.bodies.len());
+                scratch.set_bodies(&bodies);
+                scratch.touched.reset(scratch.bodies().len());
                 // Warm so the warm-start cache is at steady state.
                 for _ in 0..4 {
-                    scratch.touched.reset(scratch.bodies.len());
+                    scratch.touched.reset(scratch.bodies().len());
                     solver.solve(&cfg, &manifolds, &mut scratch);
                 }
                 b.iter(|| {
-                    scratch.touched.reset(scratch.bodies.len());
+                    scratch.touched.reset(scratch.bodies().len());
                     solver.solve(black_box(&cfg), black_box(&manifolds), &mut scratch);
                 });
             },
@@ -191,14 +191,14 @@ fn bench_solve(c: &mut Criterion) {
                 let graph = build_graph(&bodies, &manifolds);
                 let mut solver = ColoredSoftStepSolver::default();
                 let mut scratch = SolverScratch::with_capacity(bodies.len());
-                scratch.bodies = bodies.clone();
-                scratch.touched.reset(scratch.bodies.len());
+                scratch.set_bodies(&bodies);
+                scratch.touched.reset(scratch.bodies().len());
                 for _ in 0..4 {
-                    scratch.touched.reset(scratch.bodies.len());
+                    scratch.touched.reset(scratch.bodies().len());
                     solver.solve_colored(&cfg, &manifolds, &graph, &mut scratch);
                 }
                 b.iter(|| {
-                    scratch.touched.reset(scratch.bodies.len());
+                    scratch.touched.reset(scratch.bodies().len());
                     solver.solve_colored(black_box(&cfg), black_box(&manifolds), black_box(&graph), &mut scratch);
                 });
             },
@@ -215,15 +215,15 @@ fn bench_solve(c: &mut Criterion) {
                 let mut graph = ConstraintGraph::with_capacity(bodies.len());
                 let mut solver = ColoredSoftStepSolver::default();
                 let mut scratch = SolverScratch::with_capacity(bodies.len());
-                scratch.bodies = bodies.clone();
+                scratch.set_bodies(&bodies);
                 for _ in 0..4 {
-                    graph.build(&manifolds, scratch.bodies.len(), &is_dynamic);
-                    scratch.touched.reset(scratch.bodies.len());
+                    graph.build(&manifolds, scratch.bodies().len(), &is_dynamic);
+                    scratch.touched.reset(scratch.bodies().len());
                     solver.solve_colored(&cfg, &manifolds, &graph, &mut scratch);
                 }
                 b.iter(|| {
-                    graph.build(black_box(&manifolds), scratch.bodies.len(), &is_dynamic);
-                    scratch.touched.reset(scratch.bodies.len());
+                    graph.build(black_box(&manifolds), scratch.bodies().len(), &is_dynamic);
+                    scratch.touched.reset(scratch.bodies().len());
                     solver.solve_colored(black_box(&cfg), black_box(&manifolds), &graph, &mut scratch);
                 });
             },
@@ -292,17 +292,17 @@ fn bench_simd_ab(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new(label, n_contacts), &n_contacts, |b, &_n| {
             let mut solver = ColoredSoftStepSolver::default();
             let mut scratch = SolverScratch::with_capacity(bodies.len());
-            scratch.bodies = bodies.clone();
-            scratch.touched.reset(scratch.bodies.len());
+            scratch.set_bodies(&bodies);
+            scratch.touched.reset(scratch.bodies().len());
 
             let warm_and_time =
                 |b: &mut criterion::Bencher<'_>, solver: &mut ColoredSoftStepSolver, scratch: &mut SolverScratch| {
                     for _ in 0..4 {
-                        scratch.touched.reset(scratch.bodies.len());
+                        scratch.touched.reset(scratch.bodies().len());
                         solver.solve_colored(&cfg, &manifolds, &graph, scratch);
                     }
                     b.iter(|| {
-                        scratch.touched.reset(scratch.bodies.len());
+                        scratch.touched.reset(scratch.bodies().len());
                         solver.solve_colored(black_box(&cfg), black_box(&manifolds), black_box(&graph), scratch);
                     });
                 };

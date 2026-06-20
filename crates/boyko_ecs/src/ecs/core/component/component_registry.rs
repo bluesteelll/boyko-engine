@@ -2683,11 +2683,19 @@ fn dynamic_slot_occupied_panic(component_id: usize) -> ! {
     );
 }
 
-/// Test-only escape hatch: registers `T` under an explicit `component_id`.
+/// Registers `T` under an explicit `component_id`, bypassing the ascending
+/// `NEXT_ID` minting in [`register_new`].
 ///
-/// Production code must not call this — use `T::component_id()` (which goes
-/// through [`register_new`]). Tests use this to install components under
-/// known, fixed IDs without depending on `NEXT_ID`'s value.
+/// Ordinary `#[derive(Component)]` types must not call this — they use
+/// `T::component_id()` (which goes through [`register_new`]). Two sanctioned
+/// callers reach for the explicit form: (1) tests, to install components under
+/// known, fixed IDs without depending on `NEXT_ID`'s value; (2) **synthetic
+/// scratch columns** that need a registered [`Layout`](std::alloc::Layout) for a
+/// non-`Component` element type (e.g. the rigid solver's transient
+/// `ScratchColumn` mirrors), pinned to a reserved band at the TOP of
+/// `[0, MAX_COMPONENTS)` so they never collide with the upward production
+/// counter. The same-type-idempotent / different-type-panic contract below makes
+/// both uses fail-fast rather than silently alias.
 ///
 /// # Panics
 /// - If `component_id >= MAX_COMPONENTS`.

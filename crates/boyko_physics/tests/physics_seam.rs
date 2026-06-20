@@ -221,9 +221,12 @@ impl RigidSolver for DummySolver {
         scratch: &mut SolverScratch,
     ) {
         // Zero velocities + mark every row touched so `physics_apply` writes back.
-        let n = scratch.bodies.len();
+        let n = scratch.bodies().len();
         for i in 0..n {
-            scratch.bodies[i].linear_velocity = Vec3::ZERO;
+            {
+                let mut __bv = scratch.bodies_mut();
+                __bv.as_mut_slice()[i].linear_velocity = Vec3::ZERO;
+            }
             scratch.touched.set(i);
         }
     }

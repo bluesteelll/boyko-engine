@@ -138,8 +138,8 @@ fn warmed_parallel_step_allocs(n: usize, workers: usize) -> (usize, usize) {
     let cfg = PhysicsConfig { dt: 1.0 / 60.0, parallel_solve: true, ..PhysicsConfig::default() };
     let mut solver = ColoredSoftStepSolver::default();
     let mut scratch = SolverScratch::with_capacity(n + 1);
-    scratch.bodies = dense_scene(n);
-    scratch.touched.reset(scratch.bodies.len());
+    scratch.set_bodies(&dense_scene(n));
+    scratch.touched.reset(scratch.bodies().len());
 
     let pool = ThreadPoolBuilder::new().num_threads(workers).build();
     let mut n_colors = 0usize;
@@ -147,17 +147,17 @@ fn warmed_parallel_step_allocs(n: usize, workers: usize) -> (usize, usize) {
         // Warm: several steps so every solver/graph/scratch buffer reaches steady
         // capacity (clear()+refill thereafter).
         for _ in 0..8 {
-            let manifolds = dense_manifolds(&scratch.bodies);
-            let graph = build_graph(&scratch.bodies, &manifolds);
-            scratch.touched.reset(scratch.bodies.len());
+            let manifolds = dense_manifolds(scratch.bodies());
+            let graph = build_graph(scratch.bodies(), &manifolds);
+            scratch.touched.reset(scratch.bodies().len());
             solver.solve_colored(&cfg, &manifolds, &graph, &mut scratch);
         }
         // Rebuild the manifolds + graph OUTSIDE the measurement window (they are the
         // narrowphase/partition work, not the colored solver's per-step alloc).
-        let manifolds = dense_manifolds(&scratch.bodies);
-        let graph = build_graph(&scratch.bodies, &manifolds);
+        let manifolds = dense_manifolds(scratch.bodies());
+        let graph = build_graph(scratch.bodies(), &manifolds);
         n_colors = graph.n_colors() as usize;
-        scratch.touched.reset(scratch.bodies.len());
+        scratch.touched.reset(scratch.bodies().len());
 
         let before = ALLOC.count();
         solver.solve_colored(&cfg, &manifolds, &graph, &mut scratch);

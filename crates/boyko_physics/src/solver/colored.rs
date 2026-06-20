@@ -77,6 +77,7 @@
 //! key. The canonical order is materialized once (per build) in
 //! [`ContactColumns::canonical`].
 
+use boyko_ecs::ecs::core::component::scratch::{ScratchColumn, ScratchSolveView};
 use boyko_macros::Resource as ResourceDerive;
 use boyko_threadpool::try_with_active_pool;
 
@@ -94,6 +95,7 @@ use crate::components::BodyType;
 use crate::manifold::{Manifold, SDF_SENTINEL};
 use crate::math::{Mat3, Vec3};
 use crate::resources::{BodyState, ConstraintGraph, IslandSleep, PhysicsConfig, SolverScratch};
+use crate::scratch_ids::{body_eff_colored_id, register_scratch_layouts, scratch_reserve_rows};
 
 /// Loads one SoA `[f32; 8]` column into a `__m256` (the O7 cohort kernel's scalar
 /// vector load helper). Unaligned — any alignment.
@@ -267,10 +269,16 @@ const COHORT: usize = 8;
 /// otherwise see the bare `*mut` field and reject the closure as `!Send`). This is
 /// the same idiom the engine's `par_iter` `SharedPtr`/`ChunkCaptures` use.
 #[derive(Copy, Clone)]
-struct ColorSolvePtrs {
+struct ColorSolvePtrs<'a> {
     cols: *mut ContactColumns,
-    bodies: *mut BodyEffective,
-    bodies_len: usize,
+    /// Per-element bodies access via the committed [`ScratchSolveView`] — Copy,
+    /// Send+Sync, row-ptr-ONLY. There is NO whole-buffer `&mut [BodyEffective]`
+    /// reborrow path (the SP4 structural fix): a worker reaches a body row only
+    /// through [`ScratchSolveView::row_ptr`], which yields one typed `*mut
+    /// BodyEffective` per DISTINCT index its color owns. The prior `*mut
+    /// BodyEffective` + `bodies_len` + `bodies()` `from_raw_parts_mut` whole-slice
+    /// reborrow is DELETED — that reborrow was the rigid SP4 race surface.
+    bodies: ScratchSolveView<'a, BodyEffective>,
     /// Base of `ContactColumns::group_start` — read as a RAW pointer (never a
     /// `&[u32]` borrow into `cols`) so no shared reference into `cols` is ever live
     /// while a worker holds `&mut *cols`; this keeps the parallel dispatch
@@ -278,7 +286,7 @@ struct ColorSolvePtrs {
     group_start: *const u32,
 }
 
-impl ColorSolvePtrs {
+impl ColorSolvePtrs<'_> {
     /// Reborrow the columns mutably for `'a`.
     ///
     /// # Safety
@@ -287,20 +295,9 @@ impl ColorSolvePtrs {
     /// touch pairwise-disjoint impulse slots / body rows). Upheld by
     /// [`ColoredSoftStepSolver::solve_color_parallel`].
     #[inline]
-    unsafe fn columns<'a>(&self) -> &'a mut ContactColumns {
+    unsafe fn columns<'b>(&self) -> &'b mut ContactColumns {
         // SAFETY: forwarded to the caller; see method doc.
         unsafe { &mut *self.cols }
-    }
-
-    /// Reborrow the per-body buffer mutably for `'a`.
-    ///
-    /// # Safety
-    /// As [`Self::columns`]: the pointee outlives `'a` and concurrent reborrows
-    /// touch disjoint rows.
-    #[inline]
-    unsafe fn bodies<'a>(&self) -> &'a mut [BodyEffective] {
-        // SAFETY: forwarded to the caller; see method doc.
-        unsafe { core::slice::from_raw_parts_mut(self.bodies, self.bodies_len) }
     }
 
     /// Reads `group_start[g]` via the raw pointer (no `&` borrow into `cols`).
@@ -319,20 +316,81 @@ impl ColorSolvePtrs {
     }
 }
 
-// SAFETY: the pointers name the `ContactColumns` / `[BodyEffective]` borrowed
-//   `&mut` by `solve_color_parallel` for the whole `pool.scope` frame, whose Drop
-//   blocks (work-stealing join) until every worker that captured the wrapper has
-//   completed — so both pointees outlive every task body. The soundness of the
-//   concurrent `&mut` reborrows rests entirely on DISJOINTNESS, stated in full in
-//   the per-spawn SAFETY block: within a color the chunks write pairwise-disjoint
-//   impulse-column slots and pairwise-disjoint DYNAMIC body rows (the O4 coloring
-//   invariant), and a SHARED static body (`inv_mass == 0`) is never written (the
-//   `*_movable` guard in `solve_color`). The wrapper has no interior mutability, so
-//   a shared `&` to it (the outer `pool.scope` closure's capture across the spawn
-//   loop) is trivially safe — hence both `Send` (cross-thread move into a task) and
-//   `Sync` (shared by the loop) hold.
-unsafe impl Send for ColorSolvePtrs {}
-unsafe impl Sync for ColorSolvePtrs {}
+// SAFETY: `cols` names the `ContactColumns` borrowed `&mut` by
+//   `solve_color_parallel` for the whole `pool.scope` frame, whose Drop blocks
+//   (work-stealing join) until every worker that captured the wrapper has completed
+//   — so the pointee outlives every task body. The `bodies` field is a
+//   `ScratchSolveView`, which is ALREADY `Send + Sync` (its own proof: an
+//   address-stable column base + per-element `row_ptr` only, no whole-buffer
+//   reborrow) — so the rigid whole-slice reborrow that caused the SP4 race is GONE
+//   and un-typeable from this wrapper. The soundness of the concurrent `cols`
+//   reborrows + the per-element body writes rests entirely on DISJOINTNESS, stated
+//   in full in the per-spawn SAFETY block: within a color the chunks write
+//   pairwise-disjoint impulse-column slots and pairwise-disjoint DYNAMIC body rows
+//   (the O4 coloring invariant), and a SHARED static body (`inv_mass == 0`) is never
+//   written (the `*_movable` guard in `solve_color`). The wrapper has no interior
+//   mutability, so a shared `&` to it (the outer `pool.scope` closure's capture
+//   across the spawn loop) is trivially safe — hence both `Send` (cross-thread move
+//   into a task) and `Sync` (shared by the loop) hold. `cols`/`group_start` are bare
+//   pointers (not auto-`Send`); the `unsafe impl` re-asserts the safety above.
+unsafe impl Send for ColorSolvePtrs<'_> {}
+unsafe impl Sync for ColorSolvePtrs<'_> {}
+
+// ── BodyEffective row access through the ScratchSolveView (mirror 1) ─────────────
+//
+// These three helpers are the ONLY way the colored kernels reach a body row now
+// that `bodies` is a `ScratchColumn` (no whole-buffer `&mut [BodyEffective]`). Each
+// is one `view.row_ptr(i)` = `base + i*stride` (a typed `*mut BodyEffective`, no
+// cast, no bounds compare) followed by a deref — asm-identical to the prior
+// `bodies_eff[i]` slice index minus the slice's bounds-check branch (the index `i`
+// comes from `cols.body_a/body_b`, so the slice form could not elide its panic
+// branch). The SHARED invariant (stated once here, relied on by every call):
+//
+//   * `i < view.len()` — every `i` is a gathered body row (`body_a[s]`/`body_b[s]`),
+//     which `build_columns` validated against the gathered body count, so it indexes
+//     a live `[0, len)` element (debug-asserted inside `row_ptr`).
+//   * In the PARALLEL path the caller writes only the DISTINCT rows its color owns
+//     (the O4 coloring invariant); two workers never derive `&mut` to the same row,
+//     so no aliasing across threads. In the SERIAL path there is one thread.
+//   * `BodyEffective: Copy` ⇒ no drop glue on the raw bytes.
+
+/// Shared reference to body row `i` via the solve view.
+///
+/// # Safety contract (caller): see the module-level helper invariant above — `i <
+/// len` and no concurrent writer of row `i`.
+#[inline]
+fn body_ref<'a>(view: ScratchSolveView<'a, BodyEffective>, i: usize) -> &'a BodyEffective {
+    // SAFETY: `i < view.len()` (a gathered body row — the build invariant), so
+    //   `row_ptr(i)` is the live `i`-th element on the column's address-stable base.
+    //   This shared read never coincides with a write of row `i` (serial: one
+    //   thread; parallel: the coloring grants row `i` to one worker only).
+    unsafe { &*view.row_ptr(i) }
+}
+
+/// Copy of body row `i` via the solve view (a non-aliasing value read of a `Copy`).
+///
+/// # Safety contract (caller): see the module-level helper invariant above.
+#[inline]
+fn body_copy(view: ScratchSolveView<'_, BodyEffective>, i: usize) -> BodyEffective {
+    // SAFETY: as `body_ref` — `i < len`, address-stable base; `BodyEffective: Copy`
+    //   so the read is a non-moving byte copy with no drop/aliasing hazard.
+    unsafe { *view.row_ptr(i) }
+}
+
+/// Exclusive reference to body row `i` via the solve view (the per-element write
+/// surface — replaces the deleted whole-buffer `&mut [BodyEffective]`).
+///
+/// # Safety contract (caller): see the module-level helper invariant above —
+/// crucially, NO other worker writes row `i` concurrently (the coloring
+/// distinct-index invariant), so the derived `&mut` never aliases another `&mut`.
+#[inline]
+fn body_mut<'a>(view: ScratchSolveView<'a, BodyEffective>, i: usize) -> &'a mut BodyEffective {
+    // SAFETY: `i < view.len()` (a gathered body row); `row_ptr(i)` is the live `i`-th
+    //   element on the address-stable base. The caller guarantees row `i` is written
+    //   by at most ONE worker (the O4 coloring distinct-index invariant — serial: one
+    //   thread), so this `&mut` is unique. `BodyEffective: Copy` ⇒ no drop glue.
+    unsafe { &mut *view.row_ptr(i) }
+}
 
 /// The colored solver's per-contact constraint state in **Struct-of-Arrays**
 /// form, laid out so one COLOR is a contiguous span (Phase O5, Decision 7 — the
@@ -586,7 +644,13 @@ impl ContactColumns {
 pub struct ColoredSoftStepSolver {
     /// Per-body solver view, parallel to `scratch.bodies` — refreshed each
     /// substep so the world inverse inertia tracks the advancing orientation.
-    bodies: Vec<BodyEffective>,
+    /// Backed by a [`ScratchColumn`] (engine-owned, ADDRESS-STABLE base) instead
+    /// of a `std::Vec` parallel-data-system (audit Stage P, the race-fix column):
+    /// the colored workers reach each body row through a `ScratchSolveView`'s
+    /// per-element `row_ptr` (no whole-buffer reborrow), and the base never
+    /// realloc-moves across a refill-grow — the property `std::Vec` lacked that
+    /// caused the SP4 colored-solve data race.
+    bodies: ScratchColumn<BodyEffective>,
     /// The SoA contact columns, grouped by color (rebuilt each solve, reused).
     columns: ContactColumns,
     /// Last frame's converged impulses — probed to seed this frame's contacts.
@@ -617,8 +681,10 @@ impl ColoredSoftStepSolver {
     /// `contacts` contact points (no later realloc in steady state),
     /// warm-starting ON.
     pub fn with_capacity(bodies: usize, contacts: usize) -> Self {
+        register_scratch_layouts();
+        let reserve = bodies.max(scratch_reserve_rows(size_of::<BodyEffective>()));
         Self {
-            bodies: Vec::with_capacity(bodies),
+            bodies: ScratchColumn::new(body_eff_colored_id(), reserve),
             columns: ContactColumns::with_capacity(contacts),
             warm_read: WarmStartTable::with_capacity(contacts),
             warm_write: WarmStartTable::with_capacity(contacts),
@@ -639,7 +705,8 @@ impl ColoredSoftStepSolver {
     /// Rebuilds the per-body solver views from the gather snapshot (mirrors the
     /// reference `build_bodies`).
     fn build_bodies(&mut self, bodies: &[BodyState]) {
-        self.bodies.clear();
+        let mut view = self.bodies.build_view();
+        view.clear();
         for b in bodies {
             // The `*_movable` guard's ANGULAR no-op (`ω + inv_inertia·(r×p) == ω`
             // for a guarded static row) keys only on `inv_mass == 0`, so it relies
@@ -652,7 +719,7 @@ impl ColoredSoftStepSolver {
                 is_dynamic_row(b.inv_mass) || b.inv_inertia == Mat3::ZERO,
                 "static row (inv_mass == 0) must have inv_inertia == Mat3::ZERO for the *_movable angular no-op"
             );
-            self.bodies.push(BodyEffective {
+            view.push(BodyEffective {
                 inv_mass: b.inv_mass,
                 inv_inertia: b.inv_inertia,
                 linear_velocity: b.linear_velocity,
@@ -709,6 +776,11 @@ impl ColoredSoftStepSolver {
         // canonical order in manifold index ascending order (D4).
         cols.manifold_base.clear();
         cols.manifold_base.resize(manifolds.len(), (u32::MAX, 0));
+
+        // The BodyEffective rows read by the per-point build are a SINGLE-THREADED
+        // read here (the build runs before any parallel dispatch); take one read
+        // slice of the solver's body column. Disjoint from `cols` (distinct field).
+        let bodies_eff = bodies_eff.as_read_slice();
 
         for color in 0..graph.n_colors() {
             for &mi in graph.color(color) {
@@ -879,7 +951,7 @@ impl ColoredSoftStepSolver {
     /// accumulation onto velocities and, within a color, the bodies are
     /// disjoint; across colors the seed is independent of order. (O5 is
     /// single-threaded; the slot-order walk is fine.)
-    fn warm_start_apply(cols: &ContactColumns, bodies_eff: &mut [BodyEffective]) {
+    fn warm_start_apply(cols: &ContactColumns, bodies_eff: ScratchSolveView<'_, BodyEffective>) {
         for i in 0..cols.len() {
             let normal = cols.normal(i);
             let t1 = cols.tangent1(i);
@@ -888,9 +960,9 @@ impl ColoredSoftStepSolver {
                 + t1 * cols.tangent1_impulse[i]
                 + t2 * cols.tangent2_impulse[i];
             let ia = cols.body_a[i] as usize;
-            bodies_eff[ia].apply_impulse(cols.ra(i), impulse * -1.0);
+            body_mut(bodies_eff, ia).apply_impulse(cols.ra(i), impulse * -1.0);
             if !cols.b_is_sentinel[i] {
-                bodies_eff[cols.body_b[i] as usize].apply_impulse(cols.rb(i), impulse);
+                body_mut(bodies_eff, cols.body_b[i] as usize).apply_impulse(cols.rb(i), impulse);
             }
         }
     }
@@ -946,7 +1018,7 @@ impl ColoredSoftStepSolver {
     #[inline]
     fn solve_color_dispatch(
         cols: &mut ContactColumns,
-        bodies_eff: &mut [BodyEffective],
+        bodies_eff: ScratchSolveView<'_, BodyEffective>,
         span: (usize, usize),
         g_lo: usize,
         g_hi: usize,
@@ -1000,7 +1072,7 @@ impl ColoredSoftStepSolver {
     #[allow(clippy::too_many_arguments)]
     fn solve_color(
         cols: &mut ContactColumns,
-        bodies_eff: &mut [BodyEffective],
+        bodies_eff: ScratchSolveView<'_, BodyEffective>,
         span: (usize, usize),
         bias_rate: f32,
         mass_coeff: f32,
@@ -1021,8 +1093,8 @@ impl ColoredSoftStepSolver {
             let separation = cols.separation[i];
 
             // Snapshot body B (the immovable surface for an SDF contact).
-            let bb_view = |bodies_eff: &[BodyEffective]| -> BodyEffective {
-                if b_is_sentinel { IMMOVABLE_AT_REST } else { bodies_eff[ib] }
+            let bb_view = || -> BodyEffective {
+                if b_is_sentinel { IMMOVABLE_AT_REST } else { body_copy(bodies_eff, ib) }
             };
 
             // Whether each side is a MOVABLE (dynamic) body that the impulse may
@@ -1050,18 +1122,18 @@ impl ColoredSoftStepSolver {
             // snapshot, else the guard could permit writing a row the coloring
             // believed shared (a cross-worker race the {1,N} bit test cannot detect).
             // Both sites route through `is_dynamic_row` so they cannot drift.
-            let ia_movable = is_dynamic_row(bodies_eff[ia].inv_mass);
-            let ib_movable = !b_is_sentinel && is_dynamic_row(bodies_eff[ib].inv_mass);
+            let ia_movable = is_dynamic_row(body_ref(bodies_eff, ia).inv_mass);
+            let ib_movable = !b_is_sentinel && is_dynamic_row(body_ref(bodies_eff, ib).inv_mass);
 
             // ── Normal solve ───────────────────────────────────────────────
             let m_eff = {
-                let ba = bodies_eff[ia];
-                let bb = bb_view(bodies_eff);
+                let ba = body_copy(bodies_eff, ia);
+                let bb = bb_view();
                 effective_mass(normal, ra, rb, &ba, &bb)
             };
             let vn = {
-                let ba = &bodies_eff[ia];
-                let bb = bb_view(bodies_eff);
+                let ba = body_ref(bodies_eff, ia);
+                let bb = bb_view();
                 (bb.point_velocity(rb) - ba.point_velocity(ra)).dot(normal)
             };
             let bias = if bias_active {
@@ -1081,28 +1153,28 @@ impl ColoredSoftStepSolver {
             {
                 let impulse = normal * applied_n;
                 if ia_movable {
-                    bodies_eff[ia].apply_impulse(ra, impulse * -1.0);
+                    body_mut(bodies_eff, ia).apply_impulse(ra, impulse * -1.0);
                 }
                 if ib_movable {
-                    bodies_eff[ib].apply_impulse(rb, impulse);
+                    body_mut(bodies_eff, ib).apply_impulse(rb, impulse);
                 }
             }
 
             // ── Friction solve (2-DOF coupled cone) ────────────────────────
             let max_friction = friction * cols.normal_impulse[i];
             let m_eff_t1 = {
-                let ba = bodies_eff[ia];
-                let bb = bb_view(bodies_eff);
+                let ba = body_copy(bodies_eff, ia);
+                let bb = bb_view();
                 effective_mass(t1, ra, rb, &ba, &bb)
             };
             let m_eff_t2 = {
-                let ba = bodies_eff[ia];
-                let bb = bb_view(bodies_eff);
+                let ba = body_copy(bodies_eff, ia);
+                let bb = bb_view();
                 effective_mass(t2, ra, rb, &ba, &bb)
             };
             let (vt1, vt2) = {
-                let ba = &bodies_eff[ia];
-                let bb = bb_view(bodies_eff);
+                let ba = body_ref(bodies_eff, ia);
+                let bb = bb_view();
                 let dv = bb.point_velocity(rb) - ba.point_velocity(ra);
                 (dv.dot(t1), dv.dot(t2))
             };
@@ -1121,10 +1193,10 @@ impl ColoredSoftStepSolver {
             {
                 let impulse = t1 * applied_t1 + t2 * applied_t2;
                 if ia_movable {
-                    bodies_eff[ia].apply_impulse(ra, impulse * -1.0);
+                    body_mut(bodies_eff, ia).apply_impulse(ra, impulse * -1.0);
                 }
                 if ib_movable {
-                    bodies_eff[ib].apply_impulse(rb, impulse);
+                    body_mut(bodies_eff, ib).apply_impulse(rb, impulse);
                 }
             }
         }
@@ -1184,7 +1256,7 @@ impl ColoredSoftStepSolver {
     #[allow(clippy::too_many_arguments)]
     fn solve_color_avx2(
         cols: &mut ContactColumns,
-        bodies_eff: &mut [BodyEffective],
+        bodies_eff: ScratchSolveView<'_, BodyEffective>,
         span: (usize, usize),
         g_lo: usize,
         g_hi: usize,
@@ -1303,7 +1375,7 @@ impl ColoredSoftStepSolver {
                     max_width = max_width.max(width as u32);
 
                     // Body A (always the dynamic side by convention).
-                    let ba = &bodies_eff[lane_ia];
+                    let ba = body_ref(bodies_eff, lane_ia);
                     a_invm_s[lane] = ba.inv_mass;
                     a_static_s[lane] = if is_dynamic_row(ba.inv_mass) { 0.0 } else { 1.0 };
                     Self::stage_body_state(ba, lane, &mut a_ii_s, &mut a_lin_s, &mut a_ang_s);
@@ -1311,7 +1383,7 @@ impl ColoredSoftStepSolver {
                     // Body B: a sentinel gathers IMMOVABLE_AT_REST (inv_mass 0,
                     // inv_inertia ZERO, velocity ZERO) so its lane is a value no-op
                     // and is never scattered (the sentinel guard at exit).
-                    let bb = if b_sent { &IMMOVABLE_AT_REST } else { &bodies_eff[lane_ib] };
+                    let bb = if b_sent { &IMMOVABLE_AT_REST } else { body_ref(bodies_eff, lane_ib) };
                     b_invm_s[lane] = bb.inv_mass;
                     Self::stage_body_state(bb, lane, &mut b_ii_s, &mut b_lin_s, &mut b_ang_s);
                 } else {
@@ -1588,14 +1660,14 @@ impl ColoredSoftStepSolver {
             // static row is never written, matching the scalar `*_movable` guard).
             for lane in 0..nlanes {
                 if a_static_s[lane] == 0.0 {
-                    let b = &mut bodies_eff[ia[lane]];
+                    let b = body_mut(bodies_eff, ia[lane]);
                     b.linear_velocity = Vec3::new(out_a_lin[0][lane], out_a_lin[1][lane], out_a_lin[2][lane]);
                     b.angular_velocity = Vec3::new(out_a_ang[0][lane], out_a_ang[1][lane], out_a_ang[2][lane]);
                 }
                 // B written only when it is a real, movable dynamic body (not a
                 // sentinel, not a static) — the disjoint-write soundness anchor.
                 if !sent[lane] && is_dynamic_row(b_invm_s[lane]) {
-                    let b = &mut bodies_eff[ib[lane]];
+                    let b = body_mut(bodies_eff, ib[lane]);
                     b.linear_velocity = Vec3::new(out_b_lin[0][lane], out_b_lin[1][lane], out_b_lin[2][lane]);
                     b.angular_velocity = Vec3::new(out_b_ang[0][lane], out_b_ang[1][lane], out_b_ang[2][lane]);
                 }
@@ -1660,7 +1732,7 @@ impl ColoredSoftStepSolver {
     #[allow(clippy::too_many_arguments)]
     fn solve_all_colors(
         cols: &mut ContactColumns,
-        bodies_eff: &mut [BodyEffective],
+        bodies_eff: ScratchSolveView<'_, BodyEffective>,
         bias_rate: f32,
         mass_coeff: f32,
         impulse_coeff: f32,
@@ -1777,7 +1849,7 @@ impl ColoredSoftStepSolver {
     #[allow(clippy::too_many_arguments)]
     fn solve_color_parallel(
         cols: &mut ContactColumns,
-        bodies_eff: &mut [BodyEffective],
+        bodies_eff: ScratchSolveView<'_, BodyEffective>,
         color: usize,
         bias_rate: f32,
         mass_coeff: f32,
@@ -1866,16 +1938,17 @@ impl ColoredSoftStepSolver {
             let total_slots = span.1 - span.0;
             let target = total_slots.div_ceil(n_chunks).max(1);
 
-            // Send + Sync-wrapped raw pointers to the columns + bodies + group CSR.
-            // Each worker writes only its chunk's DISJOINT impulse slots and DISJOINT
-            // body rows, so the aliasing reborrows are sound (see the per-spawn SAFETY
-            // block). The `group_start` base is captured as a raw pointer so the
+            // Send + Sync wrapper: a raw `cols` pointer + the bodies SOLVE VIEW
+            // (Copy, row-ptr-only) + the group CSR base. Each worker writes only its
+            // chunk's DISJOINT impulse slots and DISJOINT body rows; the bodies are
+            // reached PER-ELEMENT via `bodies.row_ptr` (no whole-buffer reborrow — the
+            // SP4 fix; the prior `as_mut_ptr` + `bodies_len` slice reconstruction is
+            // gone). The `group_start` base is captured as a raw pointer so the
             // dispatcher reads chunk bounds without holding a `&[u32]` borrow into
             // `cols` across the scope (TB-clean, Phase 9.3c discipline).
             let ptrs = ColorSolvePtrs {
                 cols: cols as *mut ContactColumns,
-                bodies: bodies_eff.as_mut_ptr(),
-                bodies_len: bodies_eff.len(),
+                bodies: bodies_eff,
                 group_start: cols.group_start.as_ptr(),
             };
 
@@ -1964,8 +2037,10 @@ impl ColoredSoftStepSolver {
                         //     `point_velocity`) are its own disjoint dynamic rows plus
                         //     shared read-only static rows, so no chunk reads a row
                         //     another chunk is writing.
-                        //   Therefore the per-chunk `&mut ContactColumns` /
-                        //   `&mut [BodyEffective]` reborrowed below alias only
+                        //   Therefore the per-chunk `&mut ContactColumns` reborrowed
+                        //   below, and the per-element `&mut BodyEffective` the kernel
+                        //   derives from the `ScratchSolveView` via `row_ptr` (NOT a
+                        //   whole-buffer reborrow — see below), alias only
                         //   provably-disjoint written elements across workers — no UB.
                         //   O7: when `simd`, the worker runs `solve_color_avx2` over
                         //   its cohort range `[task_g_lo, task_g_hi)` — a cohort packs
@@ -1976,10 +2051,15 @@ impl ColoredSoftStepSolver {
                         //   disjointness argument is thus UNCHANGED from the scalar
                         //   chunk dispatch above.
                         let cols_mut = unsafe { ptrs.columns() };
-                        let bodies_mut = unsafe { ptrs.bodies() };
+                        // The bodies SOLVE VIEW (Copy) — the worker reaches each row
+                        // via `row_ptr` per element (no whole-buffer reborrow). It
+                        // writes ONLY the DISTINCT dynamic rows its color owns (the
+                        // O4 disjointness above), so the per-element `&mut` derived in
+                        // the kernel never aliases another worker's.
+                        let bodies_view = ptrs.bodies;
                         Self::solve_color_dispatch(
                             cols_mut,
-                            bodies_mut,
+                            bodies_view,
                             (chunk_start, chunk_end),
                             task_g_lo,
                             task_g_hi,
@@ -2023,7 +2103,7 @@ impl ColoredSoftStepSolver {
     /// current relative normal velocity to `-e·vn_initial`, keeping `λn ≥ 0`.
     /// Walks in color order (the bodies within a color are disjoint; cross-color
     /// the result is order-fixed). A zero-restitution contact is skipped.
-    fn apply_restitution(cols: &mut ContactColumns, bodies_eff: &mut [BodyEffective]) {
+    fn apply_restitution(cols: &mut ContactColumns, bodies_eff: ScratchSolveView<'_, BodyEffective>) {
         for i in 0..cols.len() {
             if cols.restitution[i] <= 0.0 {
                 continue;
@@ -2038,17 +2118,17 @@ impl ColoredSoftStepSolver {
             let ia = cols.body_a[i] as usize;
             let b_is_sentinel = cols.b_is_sentinel[i];
             let ib = cols.body_b[i] as usize;
-            let bb_view = |bodies_eff: &[BodyEffective]| -> BodyEffective {
-                if b_is_sentinel { IMMOVABLE_AT_REST } else { bodies_eff[ib] }
+            let bb_view = || -> BodyEffective {
+                if b_is_sentinel { IMMOVABLE_AT_REST } else { body_copy(bodies_eff, ib) }
             };
             let m_eff = {
-                let ba = bodies_eff[ia];
-                let bb = bb_view(bodies_eff);
+                let ba = body_copy(bodies_eff, ia);
+                let bb = bb_view();
                 effective_mass(normal, ra, rb, &ba, &bb)
             };
             let vn = {
-                let ba = &bodies_eff[ia];
-                let bb = bb_view(bodies_eff);
+                let ba = body_ref(bodies_eff, ia);
+                let bb = bb_view();
                 (bb.point_velocity(rb) - ba.point_velocity(ra)).dot(normal)
             };
             let v_target = -cols.restitution[i] * vn0;
@@ -2058,9 +2138,9 @@ impl ColoredSoftStepSolver {
             let applied = new_lambda - lambda_n;
             cols.normal_impulse[i] = new_lambda;
             let impulse = normal * applied;
-            bodies_eff[ia].apply_impulse(ra, impulse * -1.0);
+            body_mut(bodies_eff, ia).apply_impulse(ra, impulse * -1.0);
             if !b_is_sentinel {
-                bodies_eff[ib].apply_impulse(rb, impulse);
+                body_mut(bodies_eff, ib).apply_impulse(rb, impulse);
             }
         }
     }
@@ -2097,11 +2177,14 @@ impl ColoredSoftStepSolver {
     /// Writes the solved velocities back into the gather snapshot and flags every
     /// integrated DYNAMIC row touched (mirrors the reference `write_back`).
     fn write_back(&self, scratch: &mut SolverScratch) {
-        for row in 0..self.bodies.len() {
-            if scratch.bodies[row].body_type == BodyType::Dynamic && self.bodies[row].inv_mass != 0.0
-            {
-                scratch.bodies[row].linear_velocity = self.bodies[row].linear_velocity;
-                scratch.bodies[row].angular_velocity = self.bodies[row].angular_velocity;
+        let eff = self.bodies.as_read_slice();
+        let n = eff.len();
+        let mut snap_view = scratch.bodies.build_view();
+        let snapshot = snap_view.as_mut_slice();
+        for row in 0..n {
+            if snapshot[row].body_type == BodyType::Dynamic && eff[row].inv_mass != 0.0 {
+                snapshot[row].linear_velocity = eff[row].linear_velocity;
+                snapshot[row].angular_velocity = eff[row].angular_velocity;
                 scratch.touched.set(row);
             }
         }
@@ -2116,14 +2199,17 @@ impl ColoredSoftStepSolver {
     /// it does NOT change the row count gather/apply walk, so the desync assert is
     /// unaffected.
     fn write_back_awake(&self, scratch: &mut SolverScratch, sleep: &IslandSleep) {
-        for row in 0..self.bodies.len() {
+        let eff = self.bodies.as_read_slice();
+        let n = eff.len();
+        let mut snap_view = scratch.bodies.build_view();
+        let snapshot = snap_view.as_mut_slice();
+        for row in 0..n {
             if !sleep.is_row_awake(row) {
                 continue;
             }
-            if scratch.bodies[row].body_type == BodyType::Dynamic && self.bodies[row].inv_mass != 0.0
-            {
-                scratch.bodies[row].linear_velocity = self.bodies[row].linear_velocity;
-                scratch.bodies[row].angular_velocity = self.bodies[row].angular_velocity;
+            if snapshot[row].body_type == BodyType::Dynamic && eff[row].inv_mass != 0.0 {
+                snapshot[row].linear_velocity = eff[row].linear_velocity;
+                snapshot[row].angular_velocity = eff[row].angular_velocity;
                 scratch.touched.set(row);
             }
         }
@@ -2196,7 +2282,7 @@ impl ColoredSoftStepSolver {
         // integrate, build, or write back. Hoisting it above `build_bodies` /
         // `build_columns` makes an idle / all-static world do zero build work.
         let has_dynamic = scratch
-            .bodies
+            .bodies()
             .iter()
             .any(|b| b.body_type == BodyType::Dynamic && b.inv_mass != 0.0);
         if !has_dynamic {
@@ -2208,7 +2294,7 @@ impl ColoredSoftStepSolver {
         // skip the solve + integrate THIS frame. A read-only borrow of the resource
         // for the duration of the build/solve (`asleep` / `awake_rows` are read);
         // the post-solve `end_step` reborrows mutably.
-        let n_rows = scratch.bodies.len();
+        let n_rows = scratch.bodies_len();
         let sleeping_active = sleep.is_some();
         if let Some(sleep) = sleep.as_mut() {
             sleep.begin_step(graph, n_rows);
@@ -2217,8 +2303,8 @@ impl ColoredSoftStepSolver {
         // freeze; `None` when sleeping is off so the path is byte-identical.
         let sleep_view: Option<&IslandSleep> = sleep.as_deref();
 
-        self.build_bodies(&scratch.bodies);
-        self.build_columns(manifolds, graph, &scratch.bodies, sleep_view);
+        self.build_bodies(scratch.bodies());
+        self.build_columns(manifolds, graph, scratch.bodies(), sleep_view);
 
         // O8 integrate-freeze (INTEGRATE half): capture the pre-solve hot state of
         // every slept-island body so the per-substep integrate (which streams the
@@ -2228,7 +2314,7 @@ impl ColoredSoftStepSolver {
         // capacity-reused (empty when sleeping is off — the byte-identical path).
         self.frozen.clear();
         if let Some(sleep) = sleep_view {
-            for (row, b) in scratch.bodies.iter().enumerate() {
+            for (row, b) in scratch.bodies().iter().enumerate() {
                 if b.inv_mass == 0.0 {
                     // Static rows are no-ops to the integrate kernels (the
                     // `inv_mass != 0` guard) — no need to snapshot them.
@@ -2255,16 +2341,24 @@ impl ColoredSoftStepSolver {
         let parallel = config.parallel_solve;
 
         for _ in 0..substeps {
-            // (1) Gravity integrate DYNAMIC bodies (shared O1 kernel).
-            simd::apply_gravity(&mut self.bodies, &scratch.bodies, gravity, h, use_simd);
+            // (1) Gravity integrate DYNAMIC bodies (shared O1 kernel). Single-
+            // threaded — the BodyEffective build view's mut slice (no parallel
+            // access in the integrate kernels).
+            {
+                let mut view = self.bodies.build_view();
+                simd::apply_gravity(view.as_mut_slice(), scratch.bodies(), gravity, h, use_simd);
+            }
 
-            // (2) Warm-start apply.
-            Self::warm_start_apply(&self.columns, &mut self.bodies);
+            // (2) Warm-start apply. The colored sweeps reach bodies through the
+            // SOLVE VIEW (row-ptr per element) — single-threaded here, parallel in
+            // `solve_all_colors`; the view is the SAME surface either way (the SP4
+            // structural fix: no whole-buffer reborrow on any body path).
+            Self::warm_start_apply(&self.columns, self.bodies.solve_view());
 
             // (3)+(4) Soft normal + friction sweep ACROSS colors (Gauss-Seidel).
             Self::solve_all_colors(
                 &mut self.columns,
-                &mut self.bodies,
+                self.bodies.solve_view(),
                 soft.bias_rate,
                 soft.mass_coeff,
                 soft.impulse_coeff,
@@ -2274,15 +2368,28 @@ impl ColoredSoftStepSolver {
             );
 
             // (5) Position integrate (scalar — the reference's MEASURED-SCALAR
-            // choice for the AoS `BodyState`) then refresh the world inertia.
-            simd::position_integrate(&self.bodies, &mut scratch.bodies, h, false);
-            simd::refresh_inertia(&mut self.bodies, &scratch.bodies, use_simd);
+            // choice for the AoS `BodyState`) then refresh the world inertia. The
+            // BodyEffective read slice + the BodyState mut slice are distinct
+            // ScratchColumns (no borrow conflict).
+            {
+                let mut snap_view = scratch.bodies.build_view();
+                simd::position_integrate(
+                    self.bodies.as_read_slice(),
+                    snap_view.as_mut_slice(),
+                    h,
+                    false,
+                );
+            }
+            {
+                let mut view = self.bodies.build_view();
+                simd::refresh_inertia(view.as_mut_slice(), scratch.bodies(), use_simd);
+            }
 
             // (6) Relax: re-solve bias-free to remove soft-bias energy.
             for _ in 0..config.relax_iterations {
                 Self::solve_all_colors(
                     &mut self.columns,
-                    &mut self.bodies,
+                    self.bodies.solve_view(),
                     soft.bias_rate,
                     soft.mass_coeff,
                     soft.impulse_coeff,
@@ -2294,7 +2401,7 @@ impl ColoredSoftStepSolver {
         }
 
         // Post-loop restitution (ONCE, velocity-only, bias-free).
-        Self::apply_restitution(&mut self.columns, &mut self.bodies);
+        Self::apply_restitution(&mut self.columns, self.bodies.solve_view());
 
         // IM-2b: store converged impulses in canonical order, then swap.
         self.store_and_swap();
@@ -2307,10 +2414,14 @@ impl ColoredSoftStepSolver {
         // told to SKIP slept rows, so `physics_apply` leaves the live component
         // untouched (frozen) — and the gather-walked-every-row IM-1 invariant holds.
         if sleeping_active {
+            let mut snap_view = scratch.bodies.build_view();
+            let snapshot = snap_view.as_mut_slice();
+            let mut eff_view = self.bodies.build_view();
+            let eff_rows = eff_view.as_mut_slice();
             for &(row, snap) in &self.frozen {
                 let r = row as usize;
-                scratch.bodies[r] = snap;
-                let eff = &mut self.bodies[r];
+                snapshot[r] = snap;
+                let eff = &mut eff_rows[r];
                 eff.linear_velocity = snap.linear_velocity;
                 eff.angular_velocity = snap.angular_velocity;
             }
@@ -2330,7 +2441,7 @@ impl ColoredSoftStepSolver {
         // transition for next frame. The mutable reborrow is sound: `sleep_view` (the
         // immutable view) is dead after the freeze capture.
         if let Some(sleep) = sleep.as_mut() {
-            sleep.end_step(&scratch.bodies, graph, config.sleep_threshold, config.sleep_frames);
+            sleep.end_step(scratch.bodies(), graph, config.sleep_threshold, config.sleep_frames);
         }
     }
 }
@@ -2473,18 +2584,18 @@ mod tests {
         };
         let mut solver = ColoredSoftStepSolver::default();
         let mut scratch = SolverScratch::with_capacity(bodies.len());
-        scratch.bodies = bodies;
-        scratch.touched.reset(scratch.bodies.len());
+        scratch.set_bodies(&bodies);
+        scratch.touched.reset(scratch.bodies().len());
 
         for _ in 0..steps {
             // Re-derive the manifolds from the current positions each step (the
             // narrowphase stand-in), rebuild the graph, then solve.
-            let manifolds = build_manifolds(&scratch.bodies);
-            let graph = build_graph(&scratch.bodies, &manifolds);
-            scratch.touched.reset(scratch.bodies.len());
+            let manifolds = build_manifolds(scratch.bodies());
+            let graph = build_graph(scratch.bodies(), &manifolds);
+            scratch.touched.reset(scratch.bodies().len());
             solver.solve_colored(&cfg, &manifolds, &graph, &mut scratch);
         }
-        scratch.bodies.iter().map(|b| b.position.y).collect()
+        scratch.bodies().iter().map(|b| b.position.y).collect()
     }
 
     #[test]
@@ -2498,16 +2609,16 @@ mod tests {
         };
         let mut solver = ColoredSoftStepSolver::default();
         let mut scratch = SolverScratch::with_capacity(2);
-        scratch.bodies = bodies;
+        scratch.set_bodies(&bodies);
         scratch.touched.reset(2);
 
         // Floor normal A → B points downward (sphere above floor); deep overlap.
         let m = manifold(0, 1, Vec3::new(0.0, -1.0, 0.0), -0.5, Vec3::new(0.0, 0.5, 0.0));
         let manifolds = vec![m];
-        let graph = build_graph(&scratch.bodies, &manifolds);
+        let graph = build_graph(scratch.bodies(), &manifolds);
         solver.solve_colored(&cfg, &manifolds, &graph, &mut scratch);
 
-        let floor = &scratch.bodies[1];
+        let floor = scratch.bodies()[1];
         assert_eq!(floor.linear_velocity, Vec3::ZERO, "static floor linear velocity must stay zero");
         assert_eq!(floor.angular_velocity, Vec3::ZERO, "static floor angular velocity must stay zero");
         assert_eq!(floor.position, Vec3::ZERO, "static floor position must stay exactly put");
@@ -2594,17 +2705,17 @@ mod tests {
             };
             let mut solver = ColoredSoftStepSolver::default();
             let mut scratch = SolverScratch::with_capacity(4);
-            scratch.bodies = make();
+            scratch.set_bodies(&make());
             scratch.touched.reset(4);
             for _ in 0..30 {
-                let manifolds = build(&scratch.bodies);
-                let graph = build_graph(&scratch.bodies, &manifolds);
-                scratch.touched.reset(scratch.bodies.len());
+                let manifolds = build(scratch.bodies());
+                let graph = build_graph(scratch.bodies(), &manifolds);
+                scratch.touched.reset(scratch.bodies().len());
                 solver.solve_colored(&cfg, &manifolds, &graph, &mut scratch);
             }
             // Hash the whole snapshot to bits.
             scratch
-                .bodies
+                .bodies()
                 .iter()
                 .flat_map(|b| {
                     [
@@ -2900,17 +3011,17 @@ mod tests {
                 let (bodies, _, _) = random_scene(seed);
                 let mut solver = ColoredSoftStepSolver::default();
                 let mut scratch = SolverScratch::with_capacity(bodies.len());
-                scratch.bodies = bodies;
-                scratch.touched.reset(scratch.bodies.len());
+                scratch.set_bodies(&bodies);
+                scratch.touched.reset(scratch.bodies().len());
                 for _ in 0..20 {
                     // Re-derive a fixed manifold set from the SAME seed each step
                     // (the partition + contacts are a pure function of the seed).
                     let (_, manifolds, graph) = random_scene(seed);
-                    scratch.touched.reset(scratch.bodies.len());
+                    scratch.touched.reset(scratch.bodies().len());
                     solver.solve_colored(&cfg, &manifolds, &graph, &mut scratch);
                 }
                 scratch
-                    .bodies
+                    .bodies()
                     .iter()
                     .flat_map(|b| {
                         [
@@ -2932,7 +3043,7 @@ mod tests {
     fn static_and_sentinel_bodies_never_move_on_random_scenes() {
         proptest!(ProptestConfig::with_cases(200), |(seed in any::<u64>())| {
             let cfg = PhysicsConfig { dt: 1.0 / 60.0, ..PhysicsConfig::default() };
-            let (mut bodies, mut manifolds, _) = random_scene(seed);
+            let (bodies, mut manifolds, _) = random_scene(seed);
             let floor_row = (bodies.len() - 1) as u32;
             // Add a sentinel contact for body 0 (an SDF surface) so the immovable
             // sentinel path is exercised alongside the static floor.
@@ -2952,13 +3063,13 @@ mod tests {
             let graph = build_graph(&bodies, &manifolds);
             let mut solver = ColoredSoftStepSolver::default();
             let mut scratch = SolverScratch::with_capacity(bodies.len());
-            std::mem::swap(&mut scratch.bodies, &mut bodies);
-            scratch.touched.reset(scratch.bodies.len());
+            scratch.set_bodies(&bodies);
+            scratch.touched.reset(scratch.bodies().len());
             for _ in 0..5 {
-                scratch.touched.reset(scratch.bodies.len());
+                scratch.touched.reset(scratch.bodies().len());
                 solver.solve_colored(&cfg, &manifolds, &graph, &mut scratch);
             }
-            let floor_after = &scratch.bodies[floor_row as usize];
+            let floor_after = scratch.bodies()[floor_row as usize];
             prop_assert_eq!(floor_after.position, floor_before.position, "static floor position unchanged");
             prop_assert_eq!(floor_after.linear_velocity, Vec3::ZERO, "static floor lin vel zero");
             prop_assert_eq!(floor_after.angular_velocity, Vec3::ZERO, "static floor ang vel zero");
@@ -3006,29 +3117,29 @@ mod tests {
         let colored_ys = {
             let mut solver = ColoredSoftStepSolver::default();
             let mut scratch = SolverScratch::with_capacity(4);
-            scratch.bodies = make();
+            scratch.set_bodies(&make());
             scratch.touched.reset(4);
             for _ in 0..40 {
-                let manifolds = build(&scratch.bodies);
-                let graph = build_graph(&scratch.bodies, &manifolds);
-                scratch.touched.reset(scratch.bodies.len());
+                let manifolds = build(scratch.bodies());
+                let graph = build_graph(scratch.bodies(), &manifolds);
+                scratch.touched.reset(scratch.bodies().len());
                 solver.solve_colored(&cfg, &manifolds, &graph, &mut scratch);
             }
-            scratch.bodies.iter().map(|b| b.position.y).collect::<Vec<_>>()
+            scratch.bodies().iter().map(|b| b.position.y).collect::<Vec<_>>()
         };
 
         // Reference path (the byte-untouched SoftStepSolver, manifold-order sweep).
         let reference_ys = {
             let mut solver = super::super::SoftStepSolver::default();
             let mut scratch = SolverScratch::with_capacity(4);
-            scratch.bodies = make();
+            scratch.set_bodies(&make());
             scratch.touched.reset(4);
             for _ in 0..40 {
-                let manifolds = build(&scratch.bodies);
-                scratch.touched.reset(scratch.bodies.len());
+                let manifolds = build(scratch.bodies());
+                scratch.touched.reset(scratch.bodies().len());
                 solver.solve(&cfg, &manifolds, &mut scratch);
             }
-            scratch.bodies.iter().map(|b| b.position.y).collect::<Vec<_>>()
+            scratch.bodies().iter().map(|b| b.position.y).collect::<Vec<_>>()
         };
 
         // Both physically valid: finite, no launch (top body well-bounded).
@@ -3066,7 +3177,7 @@ mod tests {
     /// Hashes the full body snapshot to a bit vector (the {1,N} comparison key).
     fn snapshot_bits(scratch: &SolverScratch) -> Vec<u32> {
         scratch
-            .bodies
+            .bodies()
             .iter()
             .flat_map(|b| {
                 [
@@ -3141,15 +3252,15 @@ mod tests {
         };
         let mut solver = ColoredSoftStepSolver::default();
         let mut scratch = SolverScratch::with_capacity(n + 1);
-        scratch.bodies = dense_collision_scene(n);
-        scratch.touched.reset(scratch.bodies.len());
+        scratch.set_bodies(&dense_collision_scene(n));
+        scratch.touched.reset(scratch.bodies().len());
 
         let pool = ThreadPoolBuilder::new().num_threads(workers).build();
         pool.install(|_scope| {
             for _ in 0..steps {
-                let manifolds = dense_collision_manifolds(&scratch.bodies);
-                let graph = build_graph(&scratch.bodies, &manifolds);
-                scratch.touched.reset(scratch.bodies.len());
+                let manifolds = dense_collision_manifolds(scratch.bodies());
+                let graph = build_graph(scratch.bodies(), &manifolds);
+                scratch.touched.reset(scratch.bodies().len());
                 solver.solve_colored(&cfg, &manifolds, &graph, &mut scratch);
             }
         });
@@ -3171,12 +3282,12 @@ mod tests {
             };
             let mut solver = ColoredSoftStepSolver::default();
             let mut scratch = SolverScratch::with_capacity(6);
-            scratch.bodies = dense_collision_scene(5);
-            scratch.touched.reset(scratch.bodies.len());
+            scratch.set_bodies(&dense_collision_scene(5));
+            scratch.touched.reset(scratch.bodies().len());
             for _ in 0..40 {
-                let manifolds = dense_collision_manifolds(&scratch.bodies);
-                let graph = build_graph(&scratch.bodies, &manifolds);
-                scratch.touched.reset(scratch.bodies.len());
+                let manifolds = dense_collision_manifolds(scratch.bodies());
+                let graph = build_graph(scratch.bodies(), &manifolds);
+                scratch.touched.reset(scratch.bodies().len());
                 solver.solve_colored(&cfg, &manifolds, &graph, &mut scratch);
             }
             snapshot_bits(&scratch)
@@ -3216,7 +3327,7 @@ mod tests {
         let resting = dense_collision_scene(12);
         let resting_bits = snapshot_bits(&{
             let mut s = SolverScratch::with_capacity(13);
-            s.bodies = resting;
+            s.set_bodies(&resting);
             s
         });
         assert_ne!(p1, resting_bits, "the dense scene must non-vacuously solve (bodies moved)");
@@ -3302,11 +3413,11 @@ mod tests {
         };
         let mut solver = ColoredSoftStepSolver::default();
         let mut scratch = SolverScratch::with_capacity(4);
-        scratch.bodies = vec![
+        scratch.set_bodies(&[
             dyn_sphere(Vec3::new(0.0, 1.0, 0.0), 1.0, 0.5, 0.0),
             dyn_sphere(Vec3::new(0.0, 2.9, 0.0), 1.0, 0.5, 0.0),
             static_body(Vec3::new(0.0, -1.0, 0.0)),
-        ];
+        ]);
         scratch.touched.reset(3);
 
         let build = |bodies: &[BodyState]| {
@@ -3336,15 +3447,15 @@ mod tests {
         let pool = ThreadPoolBuilder::new().num_threads(4).build();
         pool.install(|_scope| {
             for _ in 0..120 {
-                let manifolds = build(&scratch.bodies);
-                let graph = build_graph(&scratch.bodies, &manifolds);
-                scratch.touched.reset(scratch.bodies.len());
+                let manifolds = build(scratch.bodies());
+                let graph = build_graph(scratch.bodies(), &manifolds);
+                scratch.touched.reset(scratch.bodies().len());
                 solver.solve_colored(&cfg, &manifolds, &graph, &mut scratch);
             }
         });
 
-        let y0 = scratch.bodies[0].position.y;
-        let y1 = scratch.bodies[1].position.y;
+        let y0 = scratch.bodies()[0].position.y;
+        let y1 = scratch.bodies()[1].position.y;
         assert!(y0 > -0.5 && y0 < 2.0, "sphere0 settled near the floor under parallel solve, got y={y0}");
         assert!(y1 > y0, "sphere1 stays above sphere0 under parallel solve, got y0={y0} y1={y1}");
         assert!(y1 < 5.0, "sphere1 did not launch under parallel solve, got y={y1}");
@@ -3424,37 +3535,37 @@ mod tests {
             // static floor concurrently — the exact MT case the guard protects) plus
             // an SDF-sentinel contact for body 0.
             let n = (Lcg(seed).range(4, 200)) as usize;
-            let mut bodies = dense_collision_scene(n);
+            let bodies = dense_collision_scene(n);
             let floor_row = (bodies.len() - 1) as u32;
             let floor_before = bodies[floor_row as usize];
 
             let mut solver = ColoredSoftStepSolver::default();
             let mut scratch = SolverScratch::with_capacity(bodies.len());
-            std::mem::swap(&mut scratch.bodies, &mut bodies);
-            scratch.touched.reset(scratch.bodies.len());
+            scratch.set_bodies(&bodies);
+            scratch.touched.reset(scratch.bodies().len());
 
             let pool = ThreadPoolBuilder::new().num_threads(4).build();
             pool.install(|_scope| {
                 for _ in 0..6 {
-                    let mut manifolds = dense_collision_manifolds(&scratch.bodies);
+                    let mut manifolds = dense_collision_manifolds(scratch.bodies());
                     // Sentinel contact for body 0 (immovable B, the C1 sentinel path).
                     let mut sm = Manifold::new(BodyIndex(0), SDF_SENTINEL);
                     sm.normal = Vec3::new(0.0, -1.0, 0.0);
                     sm.points[0] = ContactPoint {
-                        anchor_a: scratch.bodies[0].position,
-                        anchor_b: scratch.bodies[0].position,
+                        anchor_a: scratch.bodies()[0].position,
+                        anchor_b: scratch.bodies()[0].position,
                         separation: -0.1,
                         feature_id: 7,
                     };
                     sm.count = 1;
                     manifolds.push(sm);
-                    let graph = build_graph(&scratch.bodies, &manifolds);
-                    scratch.touched.reset(scratch.bodies.len());
+                    let graph = build_graph(scratch.bodies(), &manifolds);
+                    scratch.touched.reset(scratch.bodies().len());
                     solver.solve_colored(&cfg, &manifolds, &graph, &mut scratch);
                 }
             });
 
-            let floor_after = &scratch.bodies[floor_row as usize];
+            let floor_after = scratch.bodies()[floor_row as usize];
             prop_assert_eq!(floor_after.position, floor_before.position, "static floor moved (seed {})", seed);
             prop_assert_eq!(floor_after.linear_velocity, Vec3::ZERO, "static floor gained lin vel (seed {})", seed);
             prop_assert_eq!(floor_after.angular_velocity, Vec3::ZERO, "static floor gained ang vel (seed {})", seed);
@@ -3499,7 +3610,7 @@ mod tests {
         // Anti-vacuity: bodies actually moved (not a no-op).
         let resting = snapshot_bits(&{
             let mut s = SolverScratch::with_capacity(n + 1);
-            s.bodies = dense_collision_scene(n);
+            s.set_bodies(&dense_collision_scene(n));
             s
         });
         assert_ne!(r1, resting, "the stress scene must non-vacuously solve (bodies moved)");
@@ -3768,12 +3879,12 @@ mod tests {
             };
             let mut solver = ColoredSoftStepSolver::default();
             let mut scratch = SolverScratch::with_capacity(bodies.len());
-            scratch.bodies = bodies.clone();
-            scratch.touched.reset(scratch.bodies.len());
-            let graph = build_graph(&scratch.bodies, &manifolds);
+            scratch.set_bodies(&bodies);
+            scratch.touched.reset(scratch.bodies().len());
+            let graph = build_graph(scratch.bodies(), &manifolds);
             solver.solve_colored(&cfg, &manifolds, &graph, &mut scratch);
             scratch
-                .bodies
+                .bodies()
                 .iter()
                 .flat_map(|b| {
                     [
@@ -4342,17 +4453,17 @@ mod tests {
         cfg_mut(&mut cfg);
         let mut solver = ColoredSoftStepSolver::default();
         let mut scratch = SolverScratch::with_capacity(bodies.len());
-        scratch.bodies = bodies;
-        scratch.touched.reset(scratch.bodies.len());
-        let mut sleep = IslandSleep::with_capacity(scratch.bodies.len(), scratch.bodies.len());
+        scratch.set_bodies(&bodies);
+        scratch.touched.reset(scratch.bodies().len());
+        let mut sleep = IslandSleep::with_capacity(scratch.bodies().len(), scratch.bodies().len());
 
         for _ in 0..steps {
-            let manifolds = build_manifolds(&scratch.bodies);
-            let graph = build_graph(&scratch.bodies, &manifolds);
-            scratch.touched.reset(scratch.bodies.len());
+            let manifolds = build_manifolds(scratch.bodies());
+            let graph = build_graph(scratch.bodies(), &manifolds);
+            scratch.touched.reset(scratch.bodies().len());
             solver.solve_colored_sleeping(&cfg, &manifolds, &graph, &mut scratch, &mut sleep);
         }
-        let ys = scratch.bodies.iter().map(|b| b.position.y).collect();
+        let ys = scratch.bodies().iter().map(|b| b.position.y).collect();
         (ys, sleep)
     }
 
@@ -4470,42 +4581,51 @@ mod tests {
         };
         let mut solver = ColoredSoftStepSolver::default();
         let mut scratch = SolverScratch::with_capacity(4);
-        scratch.bodies = make();
+        scratch.set_bodies(&make());
         // Park the faller out of the simulation (no gravity reaches it until we drop
         // it) by zeroing its inv_mass for the settle phase: an inv_mass==0 row is not
         // an island node, so it cannot perturb the pile's sleep.
-        scratch.bodies[3].inv_mass = 0.0;
+        {
+            let mut __bv = scratch.bodies_mut();
+            __bv.as_mut_slice()[3].inv_mass = 0.0;
+        }
         let mut sleep = IslandSleep::with_capacity(4, 4);
 
         // Settle phase: step until the pile latches asleep (bottom + top rows).
         for _ in 0..120 {
-            let manifolds = build(&scratch.bodies);
-            let graph = build_graph(&scratch.bodies, &manifolds);
-            scratch.touched.reset(scratch.bodies.len());
+            let manifolds = build(scratch.bodies());
+            let graph = build_graph(scratch.bodies(), &manifolds);
+            scratch.touched.reset(scratch.bodies().len());
             solver.solve_colored_sleeping(&cfg, &manifolds, &graph, &mut scratch, &mut sleep);
         }
         assert!(
             sleep.is_row_asleep(0) && sleep.is_row_asleep(1),
             "the pile rows must latch asleep before the faller arrives"
         );
-        let pile_top_y_before = scratch.bodies[1].position.y;
+        let pile_top_y_before = scratch.bodies()[1].position.y;
 
         // Drop the faller: give it mass + place it just above the top sphere so its
         // contact appears within a couple of steps.
-        scratch.bodies[3].inv_mass = 1.0;
-        scratch.bodies[3].position.y = 5.0; // touches the top sphere (centre y≈3) soon.
+        {
+            let mut __bv = scratch.bodies_mut();
+            __bv.as_mut_slice()[3].inv_mass = 1.0;
+        }
+        {
+            let mut __bv = scratch.bodies_mut();
+            __bv.as_mut_slice()[3].position.y = 5.0;
+        } // touches the top sphere (centre y≈3) soon.
 
         // Step until the faller's contact first appears, then assert the pile woke that
         // SAME frame: its rows are awake (active), the contact was solved, and the pile
         // is not penetrated through.
         let mut woke_frame = None;
         for frame in 0..30 {
-            let manifolds = build(&scratch.bodies);
+            let manifolds = build(scratch.bodies());
             let faller_contact = manifolds.iter().any(|m| {
                 (m.body_a.0 == 1 && m.body_b.0 == 3) || (m.body_a.0 == 3 && m.body_b.0 == 1)
             });
-            let graph = build_graph(&scratch.bodies, &manifolds);
-            scratch.touched.reset(scratch.bodies.len());
+            let graph = build_graph(scratch.bodies(), &manifolds);
+            scratch.touched.reset(scratch.bodies().len());
             solver.solve_colored_sleeping(&cfg, &manifolds, &graph, &mut scratch, &mut sleep);
 
             if faller_contact {
@@ -4529,23 +4649,23 @@ mod tests {
         // No penetration-stick: keep stepping; the faller must come to rest ABOVE the
         // top sphere (it cannot pass through a now-active pile).
         for _ in 0..60 {
-            let manifolds = build(&scratch.bodies);
-            let graph = build_graph(&scratch.bodies, &manifolds);
-            scratch.touched.reset(scratch.bodies.len());
+            let manifolds = build(scratch.bodies());
+            let graph = build_graph(scratch.bodies(), &manifolds);
+            scratch.touched.reset(scratch.bodies().len());
             solver.solve_colored_sleeping(&cfg, &manifolds, &graph, &mut scratch, &mut sleep);
         }
         assert!(
-            scratch.bodies[3].position.y > scratch.bodies[1].position.y,
+            scratch.bodies()[3].position.y > scratch.bodies()[1].position.y,
             "the faller must rest ABOVE the top sphere, not sink through it: faller y={}, top y={}",
-            scratch.bodies[3].position.y,
-            scratch.bodies[1].position.y
+            scratch.bodies()[3].position.y,
+            scratch.bodies()[1].position.y
         );
         // The pile did not get shoved through the floor by the impact.
         assert!(
-            scratch.bodies[1].position.y < pile_top_y_before + 0.5,
+            scratch.bodies()[1].position.y < pile_top_y_before + 0.5,
             "the pile must absorb the faller near its rest height, not be launched: \
              top y={}, was {}",
-            scratch.bodies[1].position.y,
+            scratch.bodies()[1].position.y,
             pile_top_y_before
         );
     }
@@ -4749,21 +4869,21 @@ mod tests {
         cfg_mut(&mut cfg);
         let mut solver = ColoredSoftStepSolver::default();
         let mut scratch = SolverScratch::with_capacity(bodies.len());
-        scratch.bodies = bodies;
-        scratch.touched.reset(scratch.bodies.len());
-        let mut sleep = IslandSleep::with_capacity(scratch.bodies.len(), scratch.bodies.len());
+        scratch.set_bodies(&bodies);
+        scratch.touched.reset(scratch.bodies().len());
+        let mut sleep = IslandSleep::with_capacity(scratch.bodies().len(), scratch.bodies().len());
 
         for _ in 0..steps {
-            let manifolds = build_manifolds(&scratch.bodies);
-            let graph = build_graph(&scratch.bodies, &manifolds);
-            scratch.touched.reset(scratch.bodies.len());
+            let manifolds = build_manifolds(scratch.bodies());
+            let graph = build_graph(scratch.bodies(), &manifolds);
+            scratch.touched.reset(scratch.bodies().len());
             if sleeping {
                 solver.solve_colored_sleeping(&cfg, &manifolds, &graph, &mut scratch, &mut sleep);
             } else {
                 solver.solve_colored(&cfg, &manifolds, &graph, &mut scratch);
             }
         }
-        snap(&scratch.bodies)
+        snap(scratch.bodies())
     }
 
     /// A vertical stack of `n` dynamic spheres (radius 1) resting on a static floor:
@@ -4838,16 +4958,19 @@ mod tests {
         };
         let mut solver = ColoredSoftStepSolver::default();
         let mut scratch = SolverScratch::with_capacity(N + 2);
-        scratch.bodies = make();
+        scratch.set_bodies(&make());
         // Park the faller (inv_mass 0 = not an island node) so it cannot perturb the
         // pile's settle; un-park it once the pile is asleep.
-        scratch.bodies[faller as usize].inv_mass = 0.0;
+        {
+            let mut __bv = scratch.bodies_mut();
+            __bv.as_mut_slice()[faller as usize].inv_mass = 0.0;
+        }
         let mut sleep = IslandSleep::with_capacity(N + 2, N + 2);
 
         for _ in 0..400 {
-            let manifolds = build(&scratch.bodies);
-            let graph = build_graph(&scratch.bodies, &manifolds);
-            scratch.touched.reset(scratch.bodies.len());
+            let manifolds = build(scratch.bodies());
+            let graph = build_graph(scratch.bodies(), &manifolds);
+            scratch.touched.reset(scratch.bodies().len());
             solver.solve_colored_sleeping(&cfg, &manifolds, &graph, &mut scratch, &mut sleep);
         }
         // The whole stack must be latched asleep before the faller arrives.
@@ -4858,23 +4981,32 @@ mod tests {
             );
         }
         // Resting heights of the slept stack — used to bound penetration after impact.
-        let rest_y: Vec<f32> = (0..N).map(|r| scratch.bodies[r].position.y).collect();
+        let rest_y: Vec<f32> = (0..N).map(|r| scratch.bodies()[r].position.y).collect();
 
         // Drop the faller onto the top sphere.
-        scratch.bodies[faller as usize].inv_mass = 1.0;
-        scratch.bodies[faller as usize].position.y = 5.0; // just above the top sphere (centre ~11)?
+        {
+            let mut __bv = scratch.bodies_mut();
+            __bv.as_mut_slice()[faller as usize].inv_mass = 1.0;
+        }
+        {
+            let mut __bv = scratch.bodies_mut();
+            __bv.as_mut_slice()[faller as usize].position.y = 5.0;
+        } // just above the top sphere (centre ~11)?
         // Place it a touch above the actual top so the contact appears within a few steps.
-        scratch.bodies[faller as usize].position.y = scratch.bodies[N - 1].position.y + 2.5;
+        {
+            let top_y = scratch.bodies()[N - 1].position.y + 2.5;
+            scratch.bodies_mut().as_mut_slice()[faller as usize].position.y = top_y;
+        }
 
         let mut woke = false;
         for _ in 0..40 {
-            let manifolds = build(&scratch.bodies);
+            let manifolds = build(scratch.bodies());
             let faller_contact = manifolds.iter().any(|m| {
                 (m.body_a.0 == (N - 1) as u32 && m.body_b.0 == faller)
                     || (m.body_a.0 == faller && m.body_b.0 == (N - 1) as u32)
             });
-            let graph = build_graph(&scratch.bodies, &manifolds);
-            scratch.touched.reset(scratch.bodies.len());
+            let graph = build_graph(scratch.bodies(), &manifolds);
+            scratch.touched.reset(scratch.bodies().len());
             solver.solve_colored_sleeping(&cfg, &manifolds, &graph, &mut scratch, &mut sleep);
 
             if faller_contact {
@@ -4905,20 +5037,20 @@ mod tests {
         // more than one narrowphase margin (1.0) below its pre-impact rest height, and
         // adjacent spheres keep their ~2.0 centre spacing (no inter-penetration > 1).
         for _ in 0..120 {
-            let manifolds = build(&scratch.bodies);
-            let graph = build_graph(&scratch.bodies, &manifolds);
-            scratch.touched.reset(scratch.bodies.len());
+            let manifolds = build(scratch.bodies());
+            let graph = build_graph(scratch.bodies(), &manifolds);
+            scratch.touched.reset(scratch.bodies().len());
             solver.solve_colored_sleeping(&cfg, &manifolds, &graph, &mut scratch, &mut sleep);
         }
         for (r, &rest) in rest_y.iter().enumerate() {
             assert!(
-                scratch.bodies[r].position.y > rest - 1.0,
+                scratch.bodies()[r].position.y > rest - 1.0,
                 "stack row {r} sank through the pile under impact: y={}, rest was {rest}",
-                scratch.bodies[r].position.y,
+                scratch.bodies()[r].position.y,
             );
         }
         for i in 0..N - 1 {
-            let gap = scratch.bodies[i + 1].position.y - scratch.bodies[i].position.y;
+            let gap = scratch.bodies()[i + 1].position.y - scratch.bodies()[i].position.y;
             assert!(
                 gap > 1.0,
                 "adjacent stack spheres {i}/{} penetrated > one margin: gap={gap}",
@@ -4927,10 +5059,10 @@ mod tests {
         }
         // The faller came to rest ABOVE the top sphere (did not tunnel through).
         assert!(
-            scratch.bodies[faller as usize].position.y > scratch.bodies[N - 1].position.y,
+            scratch.bodies()[faller as usize].position.y > scratch.bodies()[N - 1].position.y,
             "the faller tunnelled through the pile: faller y={}, top y={}",
-            scratch.bodies[faller as usize].position.y,
-            scratch.bodies[N - 1].position.y
+            scratch.bodies()[faller as usize].position.y,
+            scratch.bodies()[N - 1].position.y
         );
     }
 
@@ -4996,26 +5128,35 @@ mod tests {
             };
             let mut solver = ColoredSoftStepSolver::default();
             let mut scratch = SolverScratch::with_capacity(N + 2);
-            scratch.bodies = make();
-            scratch.bodies[faller as usize].inv_mass = 0.0;
+            scratch.set_bodies(&make());
+            {
+                let mut __bv = scratch.bodies_mut();
+                __bv.as_mut_slice()[faller as usize].inv_mass = 0.0;
+            }
             let mut sleep = IslandSleep::with_capacity(N + 2, N + 2);
             // settle phase
             for _ in 0..200 {
-                let manifolds = build(&scratch.bodies);
-                let graph = build_graph(&scratch.bodies, &manifolds);
-                scratch.touched.reset(scratch.bodies.len());
+                let manifolds = build(scratch.bodies());
+                let graph = build_graph(scratch.bodies(), &manifolds);
+                scratch.touched.reset(scratch.bodies().len());
                 solver.solve_colored_sleeping(&cfg, &manifolds, &graph, &mut scratch, &mut sleep);
             }
             // wake phase: drop the faller
-            scratch.bodies[faller as usize].inv_mass = 1.0;
-            scratch.bodies[faller as usize].position.y = scratch.bodies[N - 1].position.y + 2.5;
+            {
+                let mut __bv = scratch.bodies_mut();
+                __bv.as_mut_slice()[faller as usize].inv_mass = 1.0;
+            }
+            {
+            let top_y = scratch.bodies()[N - 1].position.y + 2.5;
+            scratch.bodies_mut().as_mut_slice()[faller as usize].position.y = top_y;
+        }
             for _ in 0..200 {
-                let manifolds = build(&scratch.bodies);
-                let graph = build_graph(&scratch.bodies, &manifolds);
-                scratch.touched.reset(scratch.bodies.len());
+                let manifolds = build(scratch.bodies());
+                let graph = build_graph(scratch.bodies(), &manifolds);
+                scratch.touched.reset(scratch.bodies().len());
                 solver.solve_colored_sleeping(&cfg, &manifolds, &graph, &mut scratch, &mut sleep);
             }
-            snap(&scratch.bodies)
+            snap(scratch.bodies())
         };
 
         let baseline = trajectory();
@@ -5047,10 +5188,10 @@ mod tests {
             // Arm A: the byte-untouched O6/O7 path (sleep == None).
             let mut solver_a = ColoredSoftStepSolver::default();
             let mut scratch_a = SolverScratch::with_capacity(bodies.len());
-            scratch_a.bodies = bodies.clone();
-            scratch_a.touched.reset(scratch_a.bodies.len());
+            scratch_a.set_bodies(&bodies);
+            scratch_a.touched.reset(scratch_a.bodies().len());
             solver_a.solve_colored(&cfg, &manifolds, &graph, &mut scratch_a);
-            let after_off = snap(&scratch_a.bodies);
+            let after_off = snap(scratch_a.bodies());
 
             // Arm B: the O8 path with threshold 0 (nothing can sleep ⇒ no freeze) —
             // must be byte-identical to arm A (sleeping bookkeeping changes nothing).
@@ -5061,11 +5202,11 @@ mod tests {
             };
             let mut solver_b = ColoredSoftStepSolver::default();
             let mut scratch_b = SolverScratch::with_capacity(bodies.len());
-            scratch_b.bodies = bodies.clone();
-            scratch_b.touched.reset(scratch_b.bodies.len());
+            scratch_b.set_bodies(&bodies);
+            scratch_b.touched.reset(scratch_b.bodies().len());
             let mut sleep = IslandSleep::with_capacity(bodies.len(), bodies.len());
             solver_b.solve_colored_sleeping(&cfg_on, &manifolds, &graph, &mut scratch_b, &mut sleep);
-            let after_on = snap(&scratch_b.bodies);
+            let after_on = snap(scratch_b.bodies());
 
             prop_assert!(
                 snaps_bit_equal(&after_off, &after_on),
@@ -5222,12 +5363,12 @@ mod tests {
         };
         let mut solver = ColoredSoftStepSolver::default();
         let mut scratch = SolverScratch::with_capacity(bodies.len());
-        scratch.bodies = bodies;
-        let mut sleep = IslandSleep::with_capacity(scratch.bodies.len(), scratch.bodies.len());
+        scratch.set_bodies(&bodies);
+        let mut sleep = IslandSleep::with_capacity(scratch.bodies().len(), scratch.bodies().len());
 
         let mut first_all_asleep = None;
         for frame in 0..400 {
-            scratch.touched.reset(scratch.bodies.len());
+            scratch.touched.reset(scratch.bodies().len());
             solver.solve_colored_sleeping(&cfg, &fixed, &graph, &mut scratch, &mut sleep);
             let asleep = (0..n_dyn).filter(|&r| sleep.is_row_asleep(r)).count();
             if asleep == n_dyn && first_all_asleep.is_none() {

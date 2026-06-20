@@ -217,15 +217,15 @@ fn run_in_pool(
     let mut solver = ColoredSoftStepSolver::default();
     let bodies = ragged_multicohort_scene(n_floor, n_box);
     let mut scratch = SolverScratch::with_capacity(bodies.len());
-    scratch.bodies = bodies;
-    scratch.touched.reset(scratch.bodies.len());
+    scratch.set_bodies(&bodies);
+    scratch.touched.reset(scratch.bodies().len());
 
     let pool = ThreadPoolBuilder::new().num_threads(workers).build();
     pool.install(|_scope| {
         for _ in 0..steps {
-            let manifolds = ragged_multicohort_manifolds(&scratch.bodies, n_floor, n_box);
-            let graph = build_graph(&scratch.bodies, &manifolds);
-            scratch.touched.reset(scratch.bodies.len());
+            let manifolds = ragged_multicohort_manifolds(scratch.bodies(), n_floor, n_box);
+            let graph = build_graph(scratch.bodies(), &manifolds);
+            scratch.touched.reset(scratch.bodies().len());
             solver.solve_colored(&cfg, &manifolds, &graph, &mut scratch);
         }
     });
@@ -265,7 +265,7 @@ fn simd_parallel_multiworker_is_bit_identical_and_in_span() {
     // Anti-vacuity: the scene must actually have solved (bodies moved off rest).
     let rest = {
         let mut s = SolverScratch::with_capacity((n_floor + 2 * n_box + 1) as usize);
-        s.bodies = ragged_multicohort_scene(n_floor, n_box);
+        s.set_bodies(&ragged_multicohort_scene(n_floor, n_box));
         snapshot_bits(&s)
     };
     assert_ne!(scalar, rest, "the ragged multi-cohort scene must non-vacuously solve");

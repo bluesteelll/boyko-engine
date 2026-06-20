@@ -32,6 +32,11 @@ pub mod math;
 pub mod narrowphase;
 pub mod plugin;
 pub mod resources;
+/// Synthetic `ComponentId` band + layout registration for the rigid solver's
+/// transient [`ScratchColumn`](boyko_ecs::ecs::core::component::scratch::ScratchColumn)
+/// gather mirrors (audit Stage P). Internal — the ids are an implementation
+/// detail of the scratch-column owners.
+pub(crate) mod scratch_ids;
 pub mod sdf_query;
 /// O9 — width-only AVX2 batched SDF edit-list narrowphase kernel. Compiled ONLY in
 /// an `+avx2` build (the default / Miri build ships the verbatim scalar narrowphase

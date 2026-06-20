@@ -191,28 +191,28 @@ fn bench_one(
         let graph = build_graph(bodies, manifolds);
         let mut solver = ColoredSoftStepSolver::default();
         let mut scratch = SolverScratch::with_capacity(bodies.len());
-        scratch.bodies = bodies.to_vec();
-        scratch.touched.reset(scratch.bodies.len());
+        scratch.set_bodies(bodies);
+        scratch.touched.reset(scratch.bodies().len());
 
         if parallel {
             let pool = ThreadPoolBuilder::new().num_threads(workers).build();
             pool.install(|_scope| {
                 for _ in 0..4 {
-                    scratch.touched.reset(scratch.bodies.len());
+                    scratch.touched.reset(scratch.bodies().len());
                     solver.solve_colored(&cfg, manifolds, &graph, &mut scratch);
                 }
                 b.iter(|| {
-                    scratch.touched.reset(scratch.bodies.len());
+                    scratch.touched.reset(scratch.bodies().len());
                     solver.solve_colored(black_box(&cfg), black_box(manifolds), black_box(&graph), &mut scratch);
                 });
             });
         } else {
             for _ in 0..4 {
-                scratch.touched.reset(scratch.bodies.len());
+                scratch.touched.reset(scratch.bodies().len());
                 solver.solve_colored(&cfg, manifolds, &graph, &mut scratch);
             }
             b.iter(|| {
-                scratch.touched.reset(scratch.bodies.len());
+                scratch.touched.reset(scratch.bodies().len());
                 solver.solve_colored(black_box(&cfg), black_box(manifolds), black_box(&graph), &mut scratch);
             });
         }
