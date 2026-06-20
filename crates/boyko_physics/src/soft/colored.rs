@@ -960,13 +960,16 @@ fn dispatch_color<F>(
         let n_chunks = (lanes * CHUNKS_PER_WORKER).clamp(1, total);
         let target = total.div_ceil(n_chunks).max(1);
 
-        // DEBUG anti-vacuity (W1 (i)): this color crossed the threshold AND will
-        // dispatch through the parallel scope. Counted only under debug; in release the
-        // counter stays 0 (the `{1, N}` oracle runs in debug/Miri).
-        #[cfg(debug_assertions)]
-        {
-            *parallel_count += 1;
-        }
+        // Anti-vacuity (W1 (i)): this color crossed the threshold AND will dispatch
+        // through the parallel scope. Counted UNCONDITIONALLY — one increment per
+        // parallel-dispatched color per step (NOT per constraint, so off the hot
+        // inner loop and perf-negligible; it touches only a scratch field, never the
+        // solve result, so the 0%-gate holds). The count must be real in RELEASE so
+        // the `{1, N}` bit-identity oracle is non-vacuous there: were it debug-only,
+        // a `cargo test --release` run of the oracle could pass even if BOTH worker
+        // counts silently fell back to the inline path — hiding an SP4 regression in
+        // the exact (optimized, multi-worker) profile where the data race bites.
+        *parallel_count += 1;
 
         // Send + Sync per-column raw bases of the live body + the CSR base. Each worker
         // writes only its chunk's DISJOINT dynamic rows per element (the C2 lemma), so
