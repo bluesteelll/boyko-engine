@@ -837,6 +837,10 @@ mod tests {
         assert!(g.color_cone[0] <= i_max * (1.0 + EPS), "I must be bounded by the clamp");
     }
 
+    // Gated to debug: the contract under test is a `debug_assert!`, which is compiled out under
+    // `--release`, so `#[should_panic]` would (correctly) not fire there. The release safety net
+    // (the bake clamp) is covered by `spot_constructor_clamps_pencil_beam_intensity` above.
+    #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "cos(outer)")]
     fn spot_constructor_debug_asserts_a_pencil_beam() {
