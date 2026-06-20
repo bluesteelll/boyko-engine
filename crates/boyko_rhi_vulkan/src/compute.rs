@@ -158,7 +158,7 @@ static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<43944> = SpirvBlob(*include_bytes!(c
 /// full PBR (the owner-acknowledged behavioral change, PBR plan call F); mesh / background /
 /// empty (mask == 0) pass `base` through byte-identically (the 0%-gate). The byte length
 /// grew (1616 → 6880) with the BRDF. The host mirror is [`golden_deferred_resolve`].
-static DEFERRED_PBR_SPV: SpirvBlob<6880> = SpirvBlob(*include_bytes!(concat!(
+static DEFERRED_PBR_SPV: SpirvBlob<8824> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/deferred_pbr.comp.spv"
 )));
@@ -1511,6 +1511,113 @@ impl Default for GoldenMaterial {
     }
 }
 
+// --- Lighting L0 host mirror (mirrors boyko_render::light + light_table.hlsli) -------
+
+/// Light kind tags — mirror `boyko_render::light::LIGHT_KIND_*` and the shader's
+/// `light_table.hlsli` `LIGHT_KIND_*`.
+pub const GOLDEN_LIGHT_KIND_DIRECTIONAL: u32 = 0;
+/// Point light kind (L0b resolve path).
+pub const GOLDEN_LIGHT_KIND_POINT: u32 = 1;
+/// Spot light kind (L0b resolve path).
+pub const GOLDEN_LIGHT_KIND_SPOT: u32 = 2;
+/// Sky/ambient light kind (L0a hemisphere ambient).
+pub const GOLDEN_LIGHT_KIND_SKY: u32 = 3;
+
+/// The word offset at which the `GpuLight[]` array begins in the light SSBO (mirrors
+/// `boyko_render::light::LIGHT_HEADER_BASE_WORDS == 16` and the shader's `HEADER_BASE`).
+pub const GOLDEN_LIGHT_HEADER_BASE_WORDS: usize = 16;
+
+/// A host light-table element mirroring `boyko_render::light::GpuLight` (3 std430 `vec4`
+/// lanes, 48 B). The vulkan crate cannot depend on `boyko_render`, so the golden carries
+/// its own POD mirror; the layout is the SAME the shader's `GpuLight` reads. LINEAR.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GoldenLight {
+    /// `xyz` = direction TO the light (directional/spot), `w` = bit-cast kind tag.
+    pub dir_kind: [f32; 4],
+    /// `xyz` = position (point/spot) or ground color (sky), `w` = cull radius.
+    pub pos_range: [f32; 4],
+    /// `rgb` = LINEAR color × baked intensity (or sky color), `w` = packed spot cones.
+    pub color_cone: [f32; 4],
+}
+
+impl GoldenLight {
+    /// A directional light (mirrors `GpuLight::from_directional`): `color × illuminance`
+    /// premultiplied into the color lane.
+    #[inline]
+    pub fn directional(direction: [f32; 3], color: [f32; 3], illuminance: f32) -> Self {
+        let d = v_normalize(direction);
+        Self {
+            dir_kind: [d[0], d[1], d[2], f32::from_bits(GOLDEN_LIGHT_KIND_DIRECTIONAL)],
+            pos_range: [0.0, 0.0, 0.0, f32::INFINITY],
+            color_cone: [color[0] * illuminance, color[1] * illuminance, color[2] * illuminance, 0.0],
+        }
+    }
+
+    /// A sky/ambient light (mirrors `GpuLight::from_sky`): sky color in the color lane,
+    /// ground color in the position lane.
+    #[inline]
+    pub fn sky(sky_color: [f32; 3], ground_color: [f32; 3]) -> Self {
+        Self {
+            dir_kind: [0.0, 0.0, 0.0, f32::from_bits(GOLDEN_LIGHT_KIND_SKY)],
+            pos_range: [ground_color[0], ground_color[1], ground_color[2], 0.0],
+            color_cone: [sky_color[0], sky_color[1], sky_color[2], 0.0],
+        }
+    }
+
+    /// The bit-cast kind tag from `dir_kind.w`.
+    #[inline]
+    pub fn kind(&self) -> u32 {
+        self.dir_kind[3].to_bits()
+    }
+}
+
+/// A host light-table header mirroring `boyko_render::light::LightHeaderGpu` (4 std430
+/// `vec4` lanes, 64 B). Carries the split counts + exposure (Decision 3 / O3).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GoldenLightHeader {
+    /// `[bitcast(light_count), exposure, bitcast(l0a_count), bitcast(point_spot_count)]`.
+    pub counts_exposure: [f32; 4],
+    /// Ambient hemisphere diffuse `rgb`, `w` unused (carried; the L0a resolve drives
+    /// ambient from the sky light entities, not these — see `golden_deferred_resolve_table`).
+    pub sky_diffuse: [f32; 4],
+    /// Ambient specular `rgb`, `w` unused (carried; see above).
+    pub sky_spec: [f32; 4],
+    /// L1 cluster params (zero in L0).
+    pub cluster_params: [f32; 4],
+}
+
+impl GoldenLightHeader {
+    /// Builds the header (mirrors `LightHeaderGpu::new`). `l0a_count` = directionals +
+    /// sky; `point_spot_count` = the L0b block; exposure default 1.0.
+    #[inline]
+    pub fn new(l0a_count: u32, point_spot_count: u32, exposure: f32) -> Self {
+        let light_count = l0a_count + point_spot_count;
+        Self {
+            counts_exposure: [
+                f32::from_bits(light_count),
+                exposure,
+                f32::from_bits(l0a_count),
+                f32::from_bits(point_spot_count),
+            ],
+            sky_diffuse: [PBR_SKY_DIFFUSE[0], PBR_SKY_DIFFUSE[1], PBR_SKY_DIFFUSE[2], 0.0],
+            sky_spec: [PBR_SKY_SPEC[0], PBR_SKY_SPEC[1], PBR_SKY_SPEC[2], 0.0],
+            cluster_params: [0.0, 0.0, 0.0, 0.0],
+        }
+    }
+
+    /// The `l0a_count` field (bit-cast back from `counts_exposure.z`).
+    #[inline]
+    pub fn l0a_count(&self) -> u32 {
+        self.counts_exposure[2].to_bits()
+    }
+
+    /// The exposure field (`counts_exposure.y`).
+    #[inline]
+    pub fn exposure(&self) -> f32 {
+        self.counts_exposure[1]
+    }
+}
+
 // --- PBR MVP-2 lighting constants (mirror deferred_pbr.hlsl EXACTLY) -----------------
 
 /// The resolve's single analytic directional light (`DEFAULT_LIGHT_DIR` = +Z).
@@ -1873,6 +1980,116 @@ pub fn golden_deferred_resolve(
         let ambient = (spec_ambient + diff_ambient) * ao;
 
         lit[c] = direct + ambient + mat.emissive[c];
+    }
+    pack_rgba(lit)
+}
+
+/// The CPU mirror of the `deferred_pbr` RESOLVE driven by the L0a light TABLE (Lighting
+/// L0a). Identical to [`golden_deferred_resolve`] except the single compiled-in
+/// directional + the `SKY_*` ambient constants are replaced by a loop over the no-`P`
+/// front block of `lights` (`[0..header.l0a_count()]`): `kind == Directional` contributes
+/// the Cook-Torrance direct term, `kind == Sky` contributes the hemisphere ambient. The
+/// accumulated LINEAR radiance is multiplied by `header.exposure()` as the FINAL op (O3).
+///
+/// # W1 byte-identity op-order (HARD requirement)
+/// The per-light direct expression is `(diff + spec) * (nol * shadow) * color` with the
+/// accumulator initialized to `0.0`; the sky ambient is `(spec_ambient + diff_ambient) *
+/// ao` accumulated from `0.0`; the FINAL `* exposure` is literally last. Because
+/// `0.0 + x == x` and `x * 1.0 == x` are exact, a degenerate table — one directional
+/// (dir = +Z, color = white, illuminance = 1.0) + one sky (`sky == ground ==`
+/// [`PBR_SKY_DIFFUSE`]) with exposure 1.0 — reproduces [`golden_deferred_resolve`]
+/// BYTE-FOR-BYTE (the directional matches `LIGHT_DIR`/`LIGHT_COLOR`; the sky `lerp` folds
+/// since sky == ground). No reassociation is permitted.
+pub fn golden_deferred_resolve_table(
+    attrs: MarcherAttributes,
+    rd: [f32; 3],
+    materials: &[GoldenMaterial],
+    header: &GoldenLightHeader,
+    lights: &[GoldenLight],
+) -> u32 {
+    let base = [
+        attrs.base_rgb[0] as f32 / 255.0,
+        attrs.base_rgb[1] as f32 / 255.0,
+        attrs.base_rgb[2] as f32 / 255.0,
+    ];
+    if attrs.mask != 1 {
+        // mesh / background / empty: pass the base through byte-identically (the 0%-gate).
+        return pack_rgba(base);
+    }
+
+    let n = oct_decode([attrs.oct_rg[0] as f32 / 255.0, attrs.oct_rg[1] as f32 / 255.0]);
+    let mat = materials
+        .get(attrs.mat_id as usize)
+        .copied()
+        .unwrap_or_default();
+
+    let metallic = mat.mrr[0];
+    let roughness = mat.mrr[1].clamp(0.045, 1.0);
+    let reflectance = mat.mrr[2];
+    let a = roughness * roughness;
+
+    let dielectric_f0 = 0.16 * reflectance * reflectance;
+    let f0 = [
+        dielectric_f0 + (base[0] - dielectric_f0) * metallic,
+        dielectric_f0 + (base[1] - dielectric_f0) * metallic,
+        dielectric_f0 + (base[2] - dielectric_f0) * metallic,
+    ];
+    let diffuse_color = [
+        base[0] * (1.0 - metallic),
+        base[1] * (1.0 - metallic),
+        base[2] * (1.0 - metallic),
+    ];
+
+    let v = [-rd[0], -rd[1], -rd[2]];
+    let nov = v_dot(n, v).max(1e-4);
+    let shadow = attrs.shadow as f32 / 255.0;
+    let ao = attrs.ao as f32 / 255.0;
+    let pi = core::f32::consts::PI;
+    // The hemisphere "up" the sky lerp interpolates against (world up).
+    const UP: [f32; 3] = [0.0, 1.0, 0.0];
+    let hemi = v_dot(n, UP) * 0.5 + 0.5;
+
+    let mut lit_direct = [0.0_f32; 3];
+    let mut ambient = [0.0_f32; 3];
+    let count = header.l0a_count() as usize;
+    for li in lights.iter().take(count) {
+        match li.kind() {
+            GOLDEN_LIGHT_KIND_DIRECTIONAL => {
+                let l = v_normalize([li.dir_kind[0], li.dir_kind[1], li.dir_kind[2]]);
+                let hvec = v_normalize([v[0] + l[0], v[1] + l[1], v[2] + l[2]]);
+                let nol = v_dot(n, l).max(0.0);
+                let noh = v_dot(n, hvec).clamp(0.0, 1.0);
+                let loh = v_dot(l, hvec).clamp(0.0, 1.0);
+                let d_term = d_ggx(noh, a);
+                let v_term = v_smith_ggx_correlated(nov, nol, a);
+                let f_term = f_schlick(loh, f0);
+                for c in 0..3 {
+                    let spec = d_term * v_term * f_term[c];
+                    let diff = diffuse_color[c] * (1.0 / pi);
+                    lit_direct[c] += (diff + spec) * (nol * shadow) * li.color_cone[c];
+                }
+            }
+            GOLDEN_LIGHT_KIND_SKY => {
+                let sky = [li.color_cone[0], li.color_cone[1], li.color_cone[2]];
+                let ground = [li.pos_range[0], li.pos_range[1], li.pos_range[2]];
+                let dfg = env_brdf_approx(roughness, nov);
+                for c in 0..3 {
+                    // hemisphere diffuse = lerp(ground, sky, hemi); spec = EnvBRDFApprox.
+                    let hemi_c = ground[c] + (sky[c] - ground[c]) * hemi;
+                    let spec_ambient = (f0[c] * dfg[0] + dfg[1]) * sky[c];
+                    let diff_ambient = diffuse_color[c] * hemi_c;
+                    ambient[c] += (spec_ambient + diff_ambient) * ao;
+                }
+            }
+            // Point/spot (kinds 1/2) are the L0b block (not in the L0a front block).
+            _ => {}
+        }
+    }
+
+    let exposure = header.exposure();
+    let mut lit = [0.0_f32; 3];
+    for c in 0..3 {
+        lit[c] = (lit_direct[c] + ambient[c] + mat.emissive[c]) * exposure;
     }
     pack_rgba(lit)
 }

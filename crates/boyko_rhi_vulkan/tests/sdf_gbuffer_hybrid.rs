@@ -123,6 +123,30 @@ const DEFAULT_MATERIAL_TABLE: [u32; 12] = [
     0x00000000, 0x00000000, 0x00000000, 0x00000000, // 0, 0, 0, 0
 ];
 
+/// Lighting L0a: the std430 word-packing of the DEGENERATE light table — the 0%-gate
+/// anchor that makes the NEW table-driven `deferred_pbr` resolve reproduce the old
+/// compiled-in `LIGHT_DIR`/`LIGHT_COLOR`/`SKY_*` image byte-for-byte (so every existing
+/// GPU golden in this file, which compares against the constant-path `golden_deferred_
+/// resolve`, still passes within ±2/255). `[LightHeaderGpu (16w) || GpuLight[2] (24w)]`:
+/// element 0 = DIRECTIONAL dir (0,0,1) white illuminance 1.0; element 1 = SKY with
+/// sky == ground == (0.10,0.10,0.12); exposure 1.0. Mirrors `boyko_render::light` +
+/// `light_table.hlsli` (host fingerprints const-assert the layout).
+const DEGENERATE_LIGHT_TABLE: [u32; 40] = [
+    // --- LightHeaderGpu (16 words) ---
+    0x00000002, 0x3F800000, 0x00000002, 0x00000000, // count 2, exposure 1.0, l0a 2, ps 0
+    0x3DCCCCCD, 0x3DCCCCCD, 0x3DF5C28F, 0x00000000, // sky_diffuse 0.10,0.10,0.12, pad
+    0x3DCCCCCD, 0x3DCCCCCD, 0x3DF5C28F, 0x00000000, // sky_spec    0.10,0.10,0.12, pad
+    0x00000000, 0x00000000, 0x00000000, 0x00000000, // cluster_params (zero in L0)
+    // --- GpuLight[0] DIRECTIONAL (12 words) ---
+    0x00000000, 0x00000000, 0x3F800000, 0x00000000, // dir_kind: (0,0,1), kind 0
+    0x00000000, 0x00000000, 0x00000000, 0x7F800000, // pos_range: (0,0,0), range +inf
+    0x3F800000, 0x3F800000, 0x3F800000, 0x00000000, // color_cone: (1,1,1), cone 0
+    // --- GpuLight[1] SKY (12 words) ---
+    0x00000000, 0x00000000, 0x00000000, 0x00000003, // dir_kind: (0,0,0), kind 3 (SKY)
+    0x3DCCCCCD, 0x3DCCCCCD, 0x3DF5C28F, 0x00000000, // pos_range: ground 0.10,0.10,0.12, r 0
+    0x3DCCCCCD, 0x3DCCCCCD, 0x3DF5C28F, 0x00000000, // color_cone: sky 0.10,0.10,0.12, cone 0
+];
+
 /// The HOST mirror of [`DEFAULT_MATERIAL_TABLE`] for the `golden_*` oracles (the same
 /// single default material at id 0).
 fn host_material_table() -> [GoldenMaterial; 1] {
@@ -444,6 +468,23 @@ fn run_gbuffer_hybrid_lit(
         write_words(mapped, &DEFAULT_MATERIAL_TABLE);
     }
 
+    // --- Lighting L0a: the light table SSBO (resolve binding 6), seeded with the
+    // DEGENERATE table so the table-driven resolve reproduces the old constant-path image
+    // (the 0%-gate). Host-visible here for the test; production mints it device-local. ---
+    let light_table = device
+        .create_buffer(&BufferDesc {
+            size: (DEGENERATE_LIGHT_TABLE.len() as u64) * 4,
+            usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_DST,
+            location: MemoryLocation::HostVisibleCoherent,
+        })
+        .expect("Lighting-L0 light table storage buffer");
+    {
+        let mapped = device
+            .buffer_mapped_ptr(&light_table)
+            .expect("host-visible light table is mapped");
+        write_words(mapped, &DEGENERATE_LIGHT_TABLE);
+    }
+
     // --- Render P4b: the per-tile coarse-cull StorageBuffer (binding 6). The coarse
     // pass WRITES one `TileBound` (16 B) per 8×8 tile; the fine marcher READS it (gated
     // by the `coarse_enabled` push). Device-local would do, but a host-coherent buffer
@@ -684,6 +725,9 @@ fn run_gbuffer_hybrid_lit(
         BindGroupLayoutEntry { binding: 3, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 4, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 5, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+        // Lighting L0a: the light table SSBO @6 (the degenerate 0%-gate table — the
+        // resolve loops it instead of the old compiled-in LIGHT_DIR / SKY_* constants).
+        BindGroupLayoutEntry { binding: 6, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
     ];
     let resolve_layout = device
         .create_bind_group_layout(&BindGroupLayoutDesc { entries: &resolve_layout_entries })
@@ -708,6 +752,7 @@ fn run_gbuffer_hybrid_lit(
                 BindGroupEntry::StorageImage { texture: &lit },
                 BindGroupEntry::StorageBuffer { buffer: &material_table },
                 BindGroupEntry::UniformBuffer { buffer: &camera_uniform },
+                BindGroupEntry::StorageBuffer { buffer: &light_table },
             ],
         })
         .expect("deferred resolve bind group");
@@ -975,6 +1020,7 @@ fn run_gbuffer_hybrid_lit(
         device.destroy_texture(color);
         device.destroy_texture(depth);
         device.destroy_buffer(tiles_buffer);
+        device.destroy_buffer(light_table);
         device.destroy_buffer(material_table);
         device.destroy_buffer(camera_uniform);
         device.destroy_buffer(buffer);
@@ -2445,6 +2491,61 @@ fn d3g_arm1_within_double_quant_bound_of_deferred_golden() {
                  (tol {DEFERRED_ARM1_TOL}); pass-through {max_pass} (=0); {sdf_lit_hits} SDF-lit px"
             );
         }
+    }
+}
+
+/// Lighting L0a GPU 0%-gate: the table-driven `deferred_pbr` resolve, fed the DEGENERATE
+/// light table (1 directional dir = +Z / white / illuminance 1.0 + 1 sky with
+/// `sky == ground == (0.10,0.10,0.12)`, exposure 1.0; seeded into the resolve's binding-6
+/// SSBO by [`DEGENERATE_LIGHT_TABLE`]), must reproduce today's reference image — the
+/// constant-path `golden_deferred_resolve` — within the existing ±2/255 pass-through +
+/// double-quant budgets, on every arm.
+///
+/// This is THE L0a 0%-gate the GPU-tester runs on the 3060: the degenerate table folds to
+/// the old compiled-in `LIGHT_DIR` / `LIGHT_COLOR` / `SKY_*` (the directional matches +Z
+/// white; the sky `lerp` folds since `sky == ground`), so the table-driven shader's output
+/// is byte-equivalent to the constant path within tolerance. A drift in the table layout,
+/// the header decode, the loop op-order, or the exposure multiply fails this test.
+///
+/// (NON-GPU note for the developer gate: this is GPU-only — it `boot_render_or_skip`s when
+/// no device is present. The CPU companion, `tests/lighting_l0_host_oracle.rs`, proves the
+/// SAME degenerate fold is BIT-exact in the host oracle without a GPU.)
+#[test]
+fn l0a_degenerate_light_table_reproduces_constant_path_image() {
+    let Some(ctx) =
+        boot_render_or_skip("l0a_degenerate_light_table_reproduces_constant_path_image")
+    else {
+        return;
+    };
+    println!("Vulkan device (validation on): {}", ctx.device_name());
+
+    // Lighting ON (A1 shadows + A2 AO) with the default directional — the arm the L0a
+    // table actually drives (mask == 1). The degenerate table at binding 6 must reproduce
+    // the constant-path oracle (`DEFAULT_LIGHT_DIR` / SKY_*) within tolerance.
+    let flags = LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO;
+    for (name, edits) in p4b_scenes() {
+        let lit = run_gbuffer_hybrid_lit(&ctx, &edits, false, false, 1.0, flags, DEFAULT_LIGHT_DIR).0;
+        assert_eq!(lit.len(), READBACK_BYTES as usize);
+        let nonzero = lit.chunks_exact(4).filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+        assert!(nonzero > 0, "[{name}] LIT all-zero — device did not render");
+
+        // The whole-image diff vs the CONSTANT-path oracle = the L0a 0%-gate.
+        let (max_pass, max_arm1, sdf_lit_hits) =
+            assert_lit_matches_deferred_golden(&lit, &edits, flags, DEFAULT_LIGHT_DIR, name);
+        assert!(
+            max_pass <= DEFERRED_PASSTHROUGH_HOST_TOL,
+            "[{name}] L0a 0%-gate: a pass-through arm drifted from the constant-path image \
+             (delta {max_pass} > {DEFERRED_PASSTHROUGH_HOST_TOL})"
+        );
+        assert!(
+            sdf_lit_hits > 0,
+            "[{name}] L0a 0%-gate: no SDF-lit (mask==1) pixel — the lit-arm gate is vacuous"
+        );
+        println!(
+            "[{name}] L0a 0%-gate (degenerate table == constant path): lit-arm max delta \
+             {max_arm1}/255 (tol {DEFERRED_ARM1_TOL}); pass-through {max_pass} (=0); \
+             {sdf_lit_hits} SDF-lit px"
+        );
     }
 }
 

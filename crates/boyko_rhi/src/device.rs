@@ -16,10 +16,16 @@ use crate::error::RhiError;
 
 /// The maximum number of bindings a single bind group / its layout declares
 /// (Render P1a). The backend mirrors this as its fixed-capacity inline-array size,
-/// so the descriptor create path never heap-allocates. Sized for the deferred
-/// G-buffer's inputs (e.g. albedo + normal + a uniform) with headroom; a
-/// `debug_assert!` traps an over-count.
-pub const MAX_BIND_GROUP_BINDINGS: usize = 8;
+/// so the descriptor create path never heap-allocates.
+///
+/// Sized for the lighting L0/L1 inputs on a SINGLE descriptor set with headroom:
+/// the deferred resolve grows 6 → 7 (L0a `+light_table`) → 8 (L0b `+gViewT`) → 10
+/// (L1 `+cluster_grid` `+light_index`), and the marcher vocab set grows 8 → 9 (L0b
+/// `+gViewT`). 12 leaves 2 free for a future shadow/probe lane. This is a
+/// self-imposed engine inline-array size, NOT a hardware limit (NVIDIA Ampere /
+/// RTX 3060 `maxPerStageDescriptorStorageImages` / `maxPerStageResources` are both
+/// 1048576, so 12 is safe). A `debug_assert!` traps an over-count.
+pub const MAX_BIND_GROUP_BINDINGS: usize = 12;
 
 /// Parameters for [`RhiDevice::create_texture`] (Phase-6 S0 graphics surface).
 ///

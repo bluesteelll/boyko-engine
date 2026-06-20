@@ -2472,6 +2472,61 @@ impl<'ctx> Renderer<'ctx> {
             }
         }
 
+        // === Lighting L0-r0: ASYNC light-table re-upload (C3), recorded only on a dirty
+        // frame, BEFORE the marcher/resolve reads. A staging→device `cmd_copy_buffer` +
+        // a TRANSFER_WRITE→SHADER_READ buffer barrier (TRANSFER→COMPUTE_SHADER) into the
+        // SAME `cmd` — fence-free, no readback (mirroring the store-to-load image barrier
+        // below). An idle (non-dirty) frame records NOTHING — byte-identical command
+        // stream to before (the rung L0-r0 0%-gate). The collection system wrote the new
+        // table into `light_staging`'s mapped bytes and set `light_dirty`. ===
+        if scene.light_dirty && scene.light_upload_bytes > 0 {
+            let region = VkBufferCopy {
+                src_offset: 0,
+                dst_offset: 0,
+                size: scene.light_upload_bytes,
+            };
+            let to_shader_read = VkBufferMemoryBarrier {
+                s_type: VkStructureType::BufferMemoryBarrier,
+                p_next: ptr::null(),
+                src_access_mask: VK_ACCESS_TRANSFER_WRITE_BIT,
+                dst_access_mask: VK_ACCESS_SHADER_READ_BIT,
+                src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                buffer: scene.light_table.buffer,
+                offset: 0,
+                size: scene.light_upload_bytes,
+            };
+            // SAFETY: recording is open; `light_staging` (host-coherent, the collection
+            // wrote `light_upload_bytes` into its mapped bytes this frame) and
+            // `light_table` (device-local, TRANSFER_DST | STORAGE) are live buffers on
+            // this device; the copy region + barrier span `[0, light_upload_bytes)` ≤ both
+            // buffer sizes (caller contract — the table is sized for MAX_LIGHTS); the
+            // barrier orders the TRANSFER write before the COMPUTE_SHADER reads (the
+            // marcher/resolve) on the GPU timeline, fence-free; `&region`/`&to_shader_read`
+            // outlive the calls.
+            unsafe {
+                (self.fns.cmd_copy_buffer)(
+                    cmd,
+                    scene.light_staging.buffer,
+                    scene.light_table.buffer,
+                    1,
+                    &region,
+                );
+                (self.fns.cmd_pipeline_barrier)(
+                    cmd,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    0,
+                    0,
+                    ptr::null(),
+                    1,
+                    (&to_shader_read as *const VkBufferMemoryBarrier).cast(),
+                    0,
+                    ptr::null(),
+                );
+            }
+        }
+
         // === Pass B: the marcher SAMPLES the depth image, STORES the G-buffer. ===
         // (5) Bind the marcher + the vocabulary set (written ONCE at sync_gbuffer; NO
         // per-frame update) against the marcher's OWN dedicated layout, push the 32-byte
@@ -3260,15 +3315,35 @@ pub struct GBufferScene<'a> {
     /// AND the resolve set's binding 4 (the resolve fetches metallic/roughness/etc.). The
     /// scene OWNS it; [`GBufferTargets`] borrows it into both sets.
     pub material_table: &'a BoundBuffer,
+    /// The Lighting-L0 light table SSBO (`[LightHeaderGpu || GpuLight[]]`, word-indexed;
+    /// `light_table.hlsli`). A DEVICE-LOCAL buffer minted with `TRANSFER_DST | STORAGE`
+    /// usage, bound to the resolve set's binding 6. Seeded ONCE via the fence-waited
+    /// `upload_initial`; re-uploaded on-change via the async recorded copy below (C3 /
+    /// rung L0-r0). The scene OWNS it; [`GBufferTargets`] borrows it into the resolve set.
+    pub light_table: &'a BoundBuffer,
+    /// The host-coherent STAGING source for the light table (rung L0-r0). On a dirty
+    /// frame the recorder copies `light_upload_bytes` from this into `light_table` +
+    /// records a TRANSFER_WRITE→SHADER_READ barrier, fence-free, BEFORE the marcher
+    /// dispatch. The collection system writes the new table into this buffer's mapped
+    /// bytes and sets `light_dirty`.
+    pub light_staging: &'a BoundBuffer,
+    /// The number of bytes to copy on a dirty frame (`[header || GpuLight[]]` length).
+    pub light_upload_bytes: u64,
+    /// `true` on a frame where the light table changed: the recorder records the async
+    /// staging→`light_table` copy + barrier; `false` records NOTHING (idle frame → zero
+    /// cost, byte-identical command stream — the rung L0-r0 0%-gate).
+    pub light_dirty: bool,
     /// The deferred PBR RESOLVE compute pipeline (`deferred_pbr.comp`): its layout declares
     /// `resolve_layout` at `set 0`. Reads the marcher's gAlbedo + gNormal + gMaterial
     /// (STORAGE, GENERAL) + the material SSBO + the camera UBO, runs Cook-Torrance, and
     /// stores the final LIT color into the dedicated lit image.
     pub resolve_pipeline: &'a ComputePipeline,
-    /// The PBR MVP-2 resolve bind-group LAYOUT (6 bindings, ≤ 8): { storage gAlbedo @0,
+    /// The deferred resolve bind-group LAYOUT (7 bindings, ≤ 12): { storage gAlbedo @0,
     /// storage gNormal @1, storage gMaterial @2, storage lit @3, material SSBO @4, camera
-    /// UBO @5 }. The renderer allocates + writes a SET against it once per extent (pointing
-    /// at the per-extent G-buffer + lit images + the scene's material SSBO + camera UBO).
+    /// UBO @5, light table SSBO @6 }. The renderer allocates + writes a SET against it once
+    /// per extent (pointing at the per-extent G-buffer + lit images + the scene's material
+    /// SSBO + camera UBO + light table). Binding 6 (Lighting L0a) replaces the compiled-in
+    /// `LIGHT_DIR`/`SKY_*` constants with the header+table read.
     pub resolve_layout: &'a VulkanBindGroupLayout,
     /// The marcher's 1D dispatch group count (`ceil(pixels / LOCAL_SIZE_X)` at the
     /// WSI-clamped extent the recorder dispatches). The deferred resolve dispatches at the
@@ -3526,9 +3601,9 @@ impl GBufferTargets {
             }
         };
 
-        // The PBR MVP-2 RESOLVE set, written ONCE here (6 bindings, ≤ 8): gAlbedo @0,
+        // The deferred RESOLVE set, written ONCE here (7 bindings, ≤ 12): gAlbedo @0,
         // gNormal @1, gMaterial @2, lit @3 (STORAGE images), material SSBO @4, camera UBO
-        // @5 — matching `deferred_pbr.comp`'s set 0.
+        // @5, light table SSBO @6 (Lighting L0a) — matching `deferred_pbr.comp`'s set 0.
         let resolve_set = {
             let entries = [
                 BindGroupEntry::StorageImage { texture: &albedo },
@@ -3537,6 +3612,7 @@ impl GBufferTargets {
                 BindGroupEntry::StorageImage { texture: &lit },
                 BindGroupEntry::StorageBuffer { buffer: scene.material_table },
                 BindGroupEntry::UniformBuffer { buffer: scene.camera_uniform },
+                BindGroupEntry::StorageBuffer { buffer: scene.light_table },
             ];
             let desc = BindGroupDesc::<Vulkan> {
                 layout: scene.resolve_layout,

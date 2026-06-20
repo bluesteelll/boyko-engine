@@ -67,11 +67,12 @@ const MAX_IMAGE_COPY_REGIONS: usize = 4;
 /// `debug_assert!` traps an over-count at `create_graphics_pipeline`.
 const MAX_VERTEX_ATTRIBUTES: usize = 8;
 
-/// The maximum number of COMBINED_IMAGE_SAMPLER bindings a single bind group / its
-/// layout declares inline without heap allocation (Phase-6 S0 rung 6). Sized for the
-/// deferred-lighting pass's two G-buffer inputs (albedo + normal) with headroom; a
+/// The maximum number of bindings a single bind group / its layout declares inline
+/// without heap allocation (Phase-6 S0 rung 6). Sized for the lighting L0/L1 inputs
+/// on a SINGLE resolve set with headroom (resolve grows to 10; the marcher vocab set
+/// to 9 — see the agnostic `boyko_rhi::MAX_BIND_GROUP_BINDINGS` docstring). A
 /// `debug_assert!` traps an over-count at `create_bind_group_layout`/`create_bind_group`.
-const MAX_BIND_GROUP_BINDINGS: usize = 8;
+const MAX_BIND_GROUP_BINDINGS: usize = 12;
 
 // The bind-group create path keeps its own copy of the cap so a future divergence
 // from the agnostic `boyko_rhi::MAX_BIND_GROUP_BINDINGS` (the desc-side cap) breaks

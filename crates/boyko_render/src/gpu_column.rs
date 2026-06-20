@@ -38,7 +38,6 @@ use boyko_rhi::{
     ComputePipelineDesc, ComputePipelineHandle, MemoryLocation, ResourceRegistry,
     RhiCommandEncoder, RhiDevice, RhiQueue, ShaderHandle, ShaderStage, slot_to_u64, u64_to_slot,
 };
-#[cfg(any(test, feature = "test-readback"))]
 use boyko_rhi::enums::{BarrierAccess, BarrierStage};
 use boyko_rhi_vulkan::device::VulkanContext;
 use boyko_rhi_vulkan::rhi_impl::Vulkan;
@@ -876,6 +875,67 @@ impl GpuColumnManager {
                 "upload_initial: uploaded rows exceed device_cap"
             );
         }
+        Ok(())
+    }
+
+    /// ASYNC on-change upload (rung L0-r0): writes `bytes` into the manager's host-
+    /// coherent staging buffer and records a staging→`dst` `copy_buffer` + a
+    /// TRANSFER_WRITE→SHADER_READ buffer barrier (`TRANSFER`→`COMPUTE_SHADER`) into the
+    /// caller-supplied `encoder` — **NO fence, NO submit, NO readback**.
+    ///
+    /// This is the fence-free counterpart of [`Self::upload_initial`] (which is
+    /// setup-only and fence-waits): the caller records the copy into the SAME per-frame
+    /// command stream as the consuming dispatch, so the barrier orders the copy before
+    /// the marcher/resolve reads on the GPU timeline (Decision 4 / C3). The caller is
+    /// responsible for `begin`/`end`/`submit` on the encoder and for gating the call on
+    /// a dirty frame (idle frames record nothing → zero cost).
+    ///
+    /// `dst` is the scene-global light-table device buffer (a `BoundBuffer`); the bytes
+    /// are `[LightHeaderGpu || GpuLight[]]`.
+    ///
+    /// # Errors
+    /// [`GpuColumnError`] on a missing staging mapping or a staging (re)alloc failure.
+    pub fn record_upload<E: RhiCommandEncoder<Vulkan>>(
+        &mut self,
+        device: &VulkanContext,
+        encoder: &mut E,
+        dst: &boyko_rhi_vulkan::memory::BoundBuffer,
+        bytes: &[u8],
+    ) -> Result<(), GpuColumnError> {
+        let size = bytes.len() as u64;
+        self.ensure_staging(device, size)?;
+        let staging = self.staging.expect("invariant: ensure_staging set staging");
+
+        // Stage the bytes (host-coherent → no flush). A plain memcpy — no GPU sync.
+        let staging_buf = self
+            .registry
+            .resolve_buffer(staging)
+            .ok_or(GpuColumnError::StaleHandle)?;
+        let dst_ptr = device
+            .buffer_mapped_ptr(staging_buf)
+            .ok_or(GpuColumnError::StagingNotMapped)?;
+        // SAFETY: `dst_ptr` is the persistently-mapped first byte of a host-visible +
+        // host-coherent staging buffer whose capacity is `>= size` (just ensured). The
+        // `bytes` slice is a distinct allocation, so the regions never overlap; the
+        // manager is `&mut self`, so no other live alias touches this staging region.
+        unsafe {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), dst_ptr.as_ptr(), bytes.len());
+        }
+
+        // Record the fence-free copy + the TRANSFER_WRITE→SHADER_READ barrier so the
+        // staged bytes are visible to the subsequent compute reads on the GPU timeline.
+        let regions = [BufferCopy { src_offset: 0, dst_offset: 0, size }];
+        encoder.copy_buffer(staging_buf, dst, &regions);
+        let buffers = [BufferBarrier {
+            buffer: dst,
+            src_access: BarrierAccess::TRANSFER_WRITE,
+            dst_access: BarrierAccess::SHADER_READ,
+        }];
+        encoder.pipeline_barrier(&BarrierDesc {
+            src_stage: BarrierStage::TRANSFER,
+            dst_stage: BarrierStage::COMPUTE_SHADER,
+            buffers: &buffers,
+        });
         Ok(())
     }
 

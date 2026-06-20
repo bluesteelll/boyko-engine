@@ -263,6 +263,34 @@ const DEFAULT_MATERIAL_TABLE: [u32; 12] = [
     0x00000000, 0x00000000, 0x00000000, 0x00000000, // emissive: 0, 0, 0, 0
 ];
 
+/// Lighting L0a: the std430 word-packing of the DEGENERATE light table — the 0%-gate
+/// anchor that reproduces the resolve's old compiled-in `LIGHT_DIR`/`LIGHT_COLOR`/`SKY_*`
+/// constants byte-for-byte. Layout `[LightHeaderGpu (16 words) || GpuLight[2] (24 words)]`
+/// = 40 words = 160 B (mirrors `boyko_render::light` + `light_table.hlsli`):
+///
+/// - header: light_count 2, exposure 1.0, l0a_count 2 (1 dir + 1 sky), point_spot 0,
+///   sky_diffuse/sky_spec = (0.10,0.10,0.12) (carried; the L0a resolve drives ambient
+///   from the sky entity, these are unused by the resolve), cluster params 0.
+/// - element 0 (DIRECTIONAL, kind 0): dir (0,0,1), range +inf, color (1,1,1) — matches
+///   the old `LIGHT_DIR` / `LIGHT_COLOR` (illuminance 1.0).
+/// - element 1 (SKY, kind 3): ground (0.10,0.10,0.12) in the pos lane, sky (0.10,0.10,0.12)
+///   in the color lane — `sky == ground` ⇒ the hemisphere `lerp` folds to the old `SKY_*`.
+const DEGENERATE_LIGHT_TABLE: [u32; 40] = [
+    // --- LightHeaderGpu (16 words) ---
+    0x00000002, 0x3F800000, 0x00000002, 0x00000000, // count 2, exposure 1.0, l0a 2, ps 0
+    0x3DCCCCCD, 0x3DCCCCCD, 0x3DF5C28F, 0x00000000, // sky_diffuse 0.10,0.10,0.12, pad
+    0x3DCCCCCD, 0x3DCCCCCD, 0x3DF5C28F, 0x00000000, // sky_spec    0.10,0.10,0.12, pad
+    0x00000000, 0x00000000, 0x00000000, 0x00000000, // cluster_params (zero in L0)
+    // --- GpuLight[0] DIRECTIONAL (12 words) ---
+    0x00000000, 0x00000000, 0x3F800000, 0x00000000, // dir_kind: (0,0,1), kind 0
+    0x00000000, 0x00000000, 0x00000000, 0x7F800000, // pos_range: (0,0,0), range +inf
+    0x3F800000, 0x3F800000, 0x3F800000, 0x00000000, // color_cone: (1,1,1), cone 0
+    // --- GpuLight[1] SKY (12 words) ---
+    0x00000000, 0x00000000, 0x00000000, 0x00000003, // dir_kind: (0,0,0), kind 3 (SKY)
+    0x3DCCCCCD, 0x3DCCCCCD, 0x3DF5C28F, 0x00000000, // pos_range: ground 0.10,0.10,0.12, r 0
+    0x3DCCCCCD, 0x3DCCCCCD, 0x3DF5C28F, 0x00000000, // color_cone: sky 0.10,0.10,0.12, cone 0
+];
+
 /// Splits a packed `0xAABBGGRR` into `[r, g, b]` (the low three bytes).
 fn unpack_rgb(packed: u32) -> [i32; 3] {
     [
@@ -548,6 +576,45 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         write_words(mapped, &DEFAULT_MATERIAL_TABLE);
     }
 
+    // Lighting L0a: the light table SSBO (resolve binding 6). For this test the table is
+    // seeded host-visible with the DEGENERATE table (the 0%-gate anchor); a production
+    // path would mint it DEVICE-LOCAL (TRANSFER_DST | STORAGE) and seed via
+    // `upload_initial`, then re-upload on-change via the async recorder (rung L0-r0). The
+    // resolve reads the header (count + exposure) + the table.
+    let light_table_bytes = (DEGENERATE_LIGHT_TABLE.len() as u64) * 4;
+    let light_table = RhiDevice::create_buffer(
+        device,
+        &BufferDesc {
+            size: light_table_bytes,
+            usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_DST,
+            location: MemoryLocation::HostVisibleCoherent,
+        },
+    )
+    .expect("Lighting-L0 light table storage buffer (resolve binding 6)");
+    {
+        let mapped = RhiDevice::buffer_mapped_ptr(device, &light_table)
+            .expect("host-visible light table is mapped");
+        write_words(mapped, &DEGENERATE_LIGHT_TABLE);
+    }
+    // The host-coherent STAGING source for the async re-upload (rung L0-r0). Seeded with
+    // the SAME degenerate table; the windowed present path runs with `light_dirty == false`
+    // (the static-scene 0%-gate: the recorder records NO copy), so this is the dormant
+    // source kept valid for the dirty-frame path.
+    let light_staging = RhiDevice::create_buffer(
+        device,
+        &BufferDesc {
+            size: light_table_bytes,
+            usage: BufferUsage::TRANSFER_SRC,
+            location: MemoryLocation::HostVisibleCoherent,
+        },
+    )
+    .expect("Lighting-L0 light table staging buffer (rung L0-r0)");
+    {
+        let mapped = RhiDevice::buffer_mapped_ptr(device, &light_staging)
+            .expect("host-visible light staging is mapped");
+        write_words(mapped, &DEGENERATE_LIGHT_TABLE);
+    }
+
     // The mesh quad's vertex buffer (host-visible).
     let vertices = quad_vertices();
     let vertex_bytes = core::mem::size_of_val(&vertices) as u64;
@@ -652,9 +719,10 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
     )
     .expect("P1b G-buffer marcher compute pipeline");
 
-    // The PBR MVP-2 RESOLVE (`deferred_pbr.comp`): 6 bindings (≤ 8) { gAlbedo @0, gNormal
-    // @1, gMaterial @2, lit @3 (STORAGE images), the material SSBO @4, the camera UBO @5 }.
-    // The resolve reads the extent + the per-pixel view direction from the camera UBO.
+    // The deferred RESOLVE (`deferred_pbr.comp`): 7 bindings (≤ 12) { gAlbedo @0, gNormal
+    // @1, gMaterial @2, lit @3 (STORAGE images), the material SSBO @4, the camera UBO @5,
+    // the Lighting-L0 light table SSBO @6 }. The resolve reads the extent + the per-pixel
+    // view direction from the camera UBO and the lights from the table (L0a).
     let resolve_cs = RhiDevice::create_shader_module(device, deferred_pbr_spirv())
         .expect("deferred resolve compute shader module");
     let resolve_entries = [
@@ -664,6 +732,7 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         BindGroupLayoutEntry { binding: 3, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 4, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 5, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 6, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
     ];
     let resolve_layout = RhiDevice::create_bind_group_layout(
         device,
@@ -743,6 +812,13 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         tiles_buffer: &tiles_buffer,
         depth_sampler: &depth_sampler,
         material_table: &material_table,
+        light_table: &light_table,
+        light_staging: &light_staging,
+        light_upload_bytes: light_table_bytes,
+        // Static-scene 0%-gate: the table is seeded once (host-visible above); no
+        // on-change re-upload this run, so the recorder records NO copy/barrier (the
+        // command stream is byte-identical to before L0-r0).
+        light_dirty: false,
         resolve_pipeline: &resolve_pipeline,
         resolve_layout: &resolve_layout,
         present_pipeline: &present_pipeline,
@@ -895,6 +971,8 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         RhiDevice::destroy_sampler(device, depth_sampler);
         RhiDevice::destroy_buffer(device, vertex_buffer);
         RhiDevice::destroy_buffer(device, tiles_buffer);
+        RhiDevice::destroy_buffer(device, light_staging);
+        RhiDevice::destroy_buffer(device, light_table);
         RhiDevice::destroy_buffer(device, material_table);
         RhiDevice::destroy_buffer(device, camera_uniform);
         RhiDevice::destroy_buffer(device, edit_list);

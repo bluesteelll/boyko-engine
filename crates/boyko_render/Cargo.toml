@@ -22,6 +22,7 @@ test-readback = []
 
 [dependencies]
 boyko-ecs = { path = "../boyko_ecs" }
+boyko-macros = { path = "../boyko_macros" }
 boyko_rhi = { path = "../boyko_rhi" }
 boyko_rhi_vulkan = { path = "../boyko_rhi_vulkan" }
 boyko-utils = { path = "../boyko_utils" }

@@ -24,11 +24,14 @@
 //   binding 4 : StructuredBuffer<MaterialGpu>        — the material table (read by id).
 //   binding 5 : cbuffer Camera (UNIFORM)             — the 80-byte extent/camera block
 //               (the per-pixel view direction is reconstructed from the SHARED ray-gen).
+//   binding 6 : StructuredBuffer<uint> (READ-ONLY)   — the Lighting-L0 light table
+//               (`[LightHeaderGpu || GpuLight[]]`, word-indexed; see `light_table.hlsli`).
 //
-// 6 STORAGE/uniform bindings — within the 8-binding cap (2 free). All four images are
-// consumed in GENERAL (the marcher's STORAGE views, kept in GENERAL after a memory-only
-// COMPUTE→COMPUTE barrier) and `gLit` is a storage store. `[[vk::image_format("rgba8")]]`
-// pins each `OpTypeImage` to `Rgba8` (shaderStorageImageWriteWithoutFormat is OFF).
+// 7 STORAGE/uniform bindings — within the 12-binding cap (5 free; the cap was raised
+// 8 → 12 in the Lighting L0 plan). All four images are consumed in GENERAL (the marcher's
+// STORAGE views, kept in GENERAL after a memory-only COMPUTE→COMPUTE barrier) and `gLit`
+// is a storage store. `[[vk::image_format("rgba8")]]` pins each `OpTypeImage` to `Rgba8`
+// (shaderStorageImageWriteWithoutFormat is OFF).
 //
 // # BRDF (the Filament/Karis real-time convergence — single scatter)
 //
@@ -78,8 +81,15 @@ cbuffer Camera : register(b5) {
     float4 cam_up;
 };
 
+// binding 6: the Lighting-L0 light table (word-indexed `[LightHeaderGpu || GpuLight[]]`;
+// std430 layout decoded by `light_table.hlsli`, mirrored by boyko_render::light + the
+// host oracle). Replaces the compiled-in LIGHT_DIR/LIGHT_COLOR/SKY_* constants below.
+StructuredBuffer<uint> LightBuf : register(t6);
+
 // Shared camera ray-gen (the SAME header the marcher includes — ONE ray-gen, no drift).
 #include "ray_gen.hlsli"
+// Shared light-table std430 decode (ONE source of truth, included by the resolve + cull).
+#include "light_table.hlsli"
 
 // The legacy 64x64 fixture extent when the UBO extent is zero (mirrors the marcher).
 static const uint IMG_W_DEFAULT = 64u;
@@ -87,17 +97,16 @@ static const uint IMG_H_DEFAULT = 64u;
 uint img_w() { return (img_w_raw != 0u) ? img_w_raw : IMG_W_DEFAULT; }
 uint img_h() { return (img_h_raw != 0u) ? img_h_raw : IMG_H_DEFAULT; }
 
-// --- Lighting scene constants (mirror compute.rs; MVP-2 analytic sky + one light) -----
-
-// The single analytic directional light direction (DEFAULT_LIGHT_DIR = +Z, at the camera).
-// MVP-2 uses the default light in the resolve; the host oracle uses the same constant.
-static const float3 LIGHT_DIR    = float3(0.0, 0.0, 1.0);
-static const float3 LIGHT_COLOR  = float3(1.0, 1.0, 1.0); // white directional light
-
-// Analytic ambient sky (MVP-2: uniform hemisphere, no IBL texture). `sky_diffuse` lights
-// the Lambert ambient; `sky_spec` scales the EnvBRDFApprox specular IBL.
-static const float3 SKY_DIFFUSE = float3(0.10, 0.10, 0.12);
-static const float3 SKY_SPEC    = float3(0.10, 0.10, 0.12);
+// --- Lighting (Lighting L0a) -----------------------------------------------------------
+//
+// The compiled-in MVP-2 LIGHT_DIR / LIGHT_COLOR / SKY_DIFFUSE / SKY_SPEC constants are
+// REPLACED by the L0a light table: the resolve loops the header's no-`P` front block
+// (`[0..l0a_count)`) handling `kind == Directional` (the Cook-Torrance direct path) and
+// `kind == Sky` (the hemisphere ambient). The 0%-gate degenerate table — one directional
+// (dir = +Z, white, illuminance 1.0) + one sky (`sky == ground == (0.10,0.10,0.12)`),
+// exposure 1.0 — reproduces the old constants byte-for-byte. The world up the sky lerp
+// interpolates against.
+static const float3 LIGHT_UP = float3(0.0, 1.0, 0.0);
 
 // --- Octahedral decode (the inverse of the marcher's oct_encode) ----------------------
 float3 oct_decode(float2 e) {
@@ -189,30 +198,51 @@ void main(uint3 tid : SV_DispatchThreadID) {
         float3 ro, rd;
         generate_ray(px, py, w, h, camera_mode, cam_eye.xyz, cam_forward, cam_right, cam_up.xyz, ro, rd);
         float3 v = -rd;
-
-        float3 l = normalize(LIGHT_DIR);
-        float3 hvec = normalize(v + l);
         float NoV = max(dot(n, v), 1e-4);
-        float NoL = max(dot(n, l), 0.0);
-        float NoH = saturate(dot(n, hvec));
-        float LoH = saturate(dot(l, hvec));
 
-        // Direct: D*V*F specular + Lambert diffuse, * NoL, * the analytic light, * shadow.
-        float  D = D_GGX(NoH, a);
-        float  V = V_SmithGGXCorrelated(NoV, NoL, a);
-        float3 F = F_Schlick(LoH, f0);
-        float3 spec = (D * V) * F;                       // V already folds 1/(4 NoL NoV)
-        float3 diff = diffuse_color * (1.0 / PI);
-        float3 direct = (diff + spec) * (NoL * shadow) * LIGHT_COLOR;
+        // The hemisphere factor the sky lerp interpolates against (world up).
+        float hemi = dot(n, LIGHT_UP) * 0.5 + 0.5;
 
-        // Ambient/IBL (analytic): EnvBRDFApprox specular against the sky + hemisphere
-        // diffuse ambient, both modulated by the A2 AO.
-        float2 dfg = env_brdf_approx(roughness, NoV);
-        float3 spec_ambient = (f0 * dfg.x + dfg.y) * SKY_SPEC;
-        float3 diff_ambient = diffuse_color * SKY_DIFFUSE;
-        float3 ambient = (spec_ambient + diff_ambient) * ao;
+        // L0a: loop the no-`P` front block of the table (directionals + sky). The W1
+        // op-order is PINNED to the host oracle (`golden_deferred_resolve_table`):
+        //   direct  += (diff + spec) * (NoL * shadow) * L.color   (accumulator from 0)
+        //   ambient += (spec_ambient + diff_ambient) * ao          (accumulator from 0)
+        //   lit      = (direct + ambient + emissive) * exposure     (* exposure LAST)
+        // No reassociation — a degenerate 1-directional + 1-sky table at exposure 1.0 is
+        // bit-identical to the old LIGHT_DIR/LIGHT_COLOR/SKY_* path.
+        LightHeader H = load_light_header(LightBuf);
 
-        lit = direct + ambient + m.emissive.rgb;
+        float3 lit_direct = float3(0.0, 0.0, 0.0);
+        float3 ambient = float3(0.0, 0.0, 0.0);
+        for (uint i = 0u; i < H.l0a_count; ++i) {
+            LightElem L = load_light(LightBuf, i);
+            if (L.kind == LIGHT_KIND_DIRECTIONAL) {
+                float3 l = normalize(L.dir);
+                float3 hvec = normalize(v + l);
+                float NoL = max(dot(n, l), 0.0);
+                float NoH = saturate(dot(n, hvec));
+                float LoH = saturate(dot(l, hvec));
+                float  D = D_GGX(NoH, a);
+                float  V = V_SmithGGXCorrelated(NoV, NoL, a); // folds 1/(4 NoL NoV)
+                float3 F = F_Schlick(LoH, f0);
+                float3 spec = (D * V) * F;
+                float3 diff = diffuse_color * (1.0 / PI);
+                lit_direct += (diff + spec) * (NoL * shadow) * L.color;
+            } else if (L.kind == LIGHT_KIND_SKY) {
+                // Hemisphere ambient: lerp(ground, sky, hemi) diffuse + EnvBRDFApprox spec.
+                float3 sky_color = L.color;       // upper hemisphere
+                float3 ground_color = L.pos;      // lower hemisphere (packed in pos lane)
+                float2 dfg = env_brdf_approx(roughness, NoV);
+                float3 hemi_color = lerp(ground_color, sky_color, hemi);
+                float3 spec_ambient = (f0 * dfg.x + dfg.y) * sky_color;
+                float3 diff_ambient = diffuse_color * hemi_color;
+                ambient += (spec_ambient + diff_ambient) * ao;
+            }
+            // Point/spot (kinds 1/2) are the L0b block — not in the L0a front block.
+        }
+
+        // O3: exposure is the FINAL multiply on the accumulated LINEAR radiance.
+        lit = (lit_direct + ambient + m.emissive.rgb) * H.exposure;
     } else {
         // mesh / background / empty (mask == 0): PASS THE BASE THROUGH byte-identically
         // (the 0%-gate). No PBR, no material fetch, no normal/id decode.

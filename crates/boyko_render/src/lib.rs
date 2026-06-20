@@ -55,10 +55,22 @@ pub mod barrier;
 pub mod error;
 pub mod gpu_column;
 pub mod gpu_system;
+pub mod light;
+pub mod light_system;
 pub mod material;
 
 pub use barrier::{PlannedBarrier, lower_barriers};
 pub use error::GpuColumnError;
 pub use gpu_column::{GpuColumnManager, GpuColumnMeta, LOCAL_SIZE_X, ResolvedColumn, RhiContext};
 pub use gpu_system::{GpuSystem, gpu_integrate_spirv};
+pub use light::{
+    CLUSTER_COUNT, CLUSTER_DIM_X, CLUSTER_DIM_Y, CLUSTER_DIM_Z, ClusterCell, DirectionalLight,
+    GPU_LIGHT_WORDS, GpuLight, LIGHT_HEADER_BASE_WORDS, LIGHT_HEADER_WORDS, LIGHT_KIND_DIRECTIONAL,
+    LIGHT_KIND_POINT, LIGHT_KIND_SKY, LIGHT_KIND_SPOT, LightHeaderGpu, LightingConfig, MAX_LIGHTS,
+    MAX_LIGHTS_PER_CLUSTER, PointLight, SPOT_COS_OUTER_MAX, SkyLight, SpotLight,
+};
+pub use light_system::{
+    GPU_LIGHT_BYTES, LIGHT_HEADER_BYTES, LightChanged, LightTableStaging, collect_lights,
+    fold_light_table, write_light_table,
+};
 pub use material::{MATERIAL_GPU_WORDS, MaterialGpu, MaterialId};
