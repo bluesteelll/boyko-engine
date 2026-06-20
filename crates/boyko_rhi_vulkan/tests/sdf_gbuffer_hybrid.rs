@@ -2839,6 +2839,11 @@ fn l1_index_list_cap(cfg: &GoldenClusterConfig) -> u32 {
     cfg.cluster_count() * 8
 }
 
+/// The L1 clustered driver's readbacks: `(lit_rgba8, cluster_grid, light_index, gViewT_per_px,
+/// gNormal_oct_rg_per_px)`. The last two isolate the resolve under test — the golden feeds the
+/// GPU's REAL surface depth + normal into the host oracle instead of an independent CPU march.
+type ClusteredDriverReadbacks = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<f32>, Vec<[u8; 2]>);
+
 /// Records + submits the FULL Lighting-L1 clustered path in ONE fenced submit and returns
 /// `(lit_bytes, cluster_grid_bytes)`: identical to [`run_gbuffer_hybrid_lit_table`] up to the
 /// resolve, but it ALSO
@@ -2867,6 +2872,14 @@ fn l1_index_list_cap(cfg: &GoldenClusterConfig) -> u32 {
 /// `LightIndexList` SSBO — the per-froxel index slices the cull scattered). The light-index
 /// readback is what the strengthened cull probe needs to assert the per-froxel index SET +
 /// the slice disjointness (the occupancy `count` alone is the documented blind spot).
+///
+/// Also returns, per pixel (row-major, `py * SDF_IMG_W + px`): the `gViewT` (R32_SFLOAT) from the
+/// marcher's surface-depth lane, and the `gNormal` oct-encoded normal bytes (`R8G8`). The L1
+/// resolve golden feeds these GPU values into the host oracle (overriding the oracle's
+/// independently-marched `attrs.view_t` and `attrs.oct_rg`) so the resolve — the unit under test
+/// — shades the GPU's EXACT surface point `P = ro + rd * gViewT_gpu` with the GPU's EXACT normal,
+/// isolating the resolve from the marcher's GPU-vs-CPU FP gap (validated separately by the
+/// marcher goldens).
 #[allow(clippy::too_many_arguments)]
 fn run_gbuffer_hybrid_lit_clustered(
     ctx: &VulkanContext,
@@ -2875,7 +2888,7 @@ fn run_gbuffer_hybrid_lit_clustered(
     light_dir: [f32; 3],
     light_table_words: &[u32],
     cfg: &GoldenClusterConfig,
-) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+) -> ClusteredDriverReadbacks {
     let device: &VulkanContext = ctx;
     let queue = ctx.rhi_queue();
 
@@ -3044,7 +3057,11 @@ fn run_gbuffer_hybrid_lit_clustered(
             depth: 1,
             format: GBUFFER_FORMAT,
             dimension: TextureDimension::D2,
-            usage: ImageUsage::STORAGE,
+            // TRANSFER_SRC so the oct-encoded gNormal lane can be read back: the L1 resolve golden
+            // also overrides the oracle's `attrs.oct_rg` with the GPU's REAL stored normal bytes
+            // (the residual FP gap is in the marcher's normal, amplified by 1/d² lights), so the
+            // oracle's UNORM decode is bit-identical to the GPU resolve's gNormal load.
+            usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC,
         })
         .expect("G-buffer normal storage image");
     let material = device
@@ -3074,7 +3091,10 @@ fn run_gbuffer_hybrid_lit_clustered(
             depth: 1,
             format: Format::R32Sfloat,
             dimension: TextureDimension::D2,
-            usage: ImageUsage::STORAGE,
+            // TRANSFER_SRC so the gViewT lane can be read back: the L1 resolve golden feeds the
+            // GPU's ACTUAL surface depth into the host oracle (isolating the RESOLVE under test
+            // from the marcher's independent CPU re-derivation), so both sides shade the SAME P.
+            usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC,
         })
         .expect("Lighting L0b gViewT storage image");
 
@@ -3089,6 +3109,26 @@ fn run_gbuffer_hybrid_lit_clustered(
             location: MemoryLocation::HostVisibleCoherent,
         })
         .expect("host-visible readback buffer");
+    // The gViewT (R32_SFLOAT) readback: one f32 per pixel = the same `PIXELS * 4` bytes as the
+    // RGBA8 lit readback. The L1 resolve golden overrides the host oracle's `attrs.view_t` with
+    // these GPU values so the resolve (the unit under test) is fed the GPU's REAL surface point.
+    let viewt_readback = device
+        .create_buffer(&BufferDesc {
+            size: READBACK_BYTES,
+            usage: BufferUsage::TRANSFER_DST,
+            location: MemoryLocation::HostVisibleCoherent,
+        })
+        .expect("host-visible gViewT readback buffer");
+    // The gNormal (RGBA8) readback: R8G8 = the oct-encoded normal, B8/A8 = the 16-bit id. The L1
+    // resolve golden overrides the oracle's `attrs.oct_rg` with the GPU's R8G8 so the oracle's
+    // oct decode is bit-identical to the GPU resolve's — the residual FP gap is the normal.
+    let normal_readback = device
+        .create_buffer(&BufferDesc {
+            size: READBACK_BYTES,
+            usage: BufferUsage::TRANSFER_DST,
+            location: MemoryLocation::HostVisibleCoherent,
+        })
+        .expect("host-visible gNormal readback buffer");
 
     // --- The quad vertex buffer. ---
     let vertices = quad_vertices();
@@ -3453,6 +3493,35 @@ fn run_gbuffer_hybrid_lit_clustered(
     }];
     encoder.copy_image_to_buffer(&lit, ImageLayout::TransferSrcOptimal, &readback, &regions);
 
+    // --- gViewT: GENERAL → TRANSFER_SRC_OPTIMAL for the readback copy. The marcher is the
+    // producer (SHADER_WRITE); the resolve only READ it, so the transfer reads the marcher's
+    // store directly. The copy regions are identical (same extent, R32_SFLOAT == 4 B/texel). ---
+    encoder.image_barrier(&ImageBarrierDesc {
+        texture: &viewt,
+        src_stage: BarrierStage::COMPUTE_SHADER,
+        dst_stage: BarrierStage::TRANSFER,
+        src_access: BarrierAccess::SHADER_WRITE,
+        dst_access: BarrierAccess::TRANSFER_READ,
+        old_layout: ImageLayout::General,
+        new_layout: ImageLayout::TransferSrcOptimal,
+        range: ImageSubresourceRange::COLOR,
+    });
+    encoder.copy_image_to_buffer(&viewt, ImageLayout::TransferSrcOptimal, &viewt_readback, &regions);
+
+    // --- gNormal: GENERAL → TRANSFER_SRC_OPTIMAL for the readback copy. Same producer (the
+    // marcher's SHADER_WRITE store) and identical regions (RGBA8 == 4 B/texel). ---
+    encoder.image_barrier(&ImageBarrierDesc {
+        texture: &normal,
+        src_stage: BarrierStage::COMPUTE_SHADER,
+        dst_stage: BarrierStage::TRANSFER,
+        src_access: BarrierAccess::SHADER_WRITE,
+        dst_access: BarrierAccess::TRANSFER_READ,
+        old_layout: ImageLayout::General,
+        new_layout: ImageLayout::TransferSrcOptimal,
+        range: ImageSubresourceRange::COLOR,
+    });
+    encoder.copy_image_to_buffer(&normal, ImageLayout::TransferSrcOptimal, &normal_readback, &regions);
+
     encoder.end().expect("end");
 
     queue.submit(&encoder, &fence).expect("submit");
@@ -3469,6 +3538,42 @@ fn run_gbuffer_hybrid_lit_clustered(
     unsafe {
         core::ptr::copy_nonoverlapping(dst_ptr.as_ptr(), out.as_mut_ptr(), READBACK_BYTES as usize);
     }
+
+    // Read back the gViewT (R32_SFLOAT) lane as one f32 per pixel (row-major, the SAME
+    // `py * SDF_IMG_W + px` order `albedo_rgb` uses). The L1 resolve golden overrides the host
+    // oracle's `attrs.view_t` with this so the resolve shades the GPU's EXACT surface point.
+    let viewt_ptr = device
+        .buffer_mapped_ptr(&viewt_readback)
+        .expect("host-visible gViewT readback buffer is mapped");
+    let mut viewt_bytes = vec![0u8; READBACK_BYTES as usize];
+    // SAFETY: `viewt_ptr` points to `READBACK_BYTES` mapped host-coherent bytes (the buffer was
+    // sized `READBACK_BYTES` above); the fence wait preceded this read, so the GPU store + copy
+    // are complete + coherent; reading `READBACK_BYTES` is in-bounds; `viewt_bytes` is distinct.
+    unsafe {
+        core::ptr::copy_nonoverlapping(viewt_ptr.as_ptr(), viewt_bytes.as_mut_ptr(), READBACK_BYTES as usize);
+    }
+    let viewt_px: Vec<f32> = viewt_bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+
+    // Read back the gNormal (RGBA8) lane: the per-pixel R8G8 oct-encoded normal bytes (row-major,
+    // same order). The L1 resolve golden overrides the oracle's `attrs.oct_rg` with these so the
+    // oct decode is bit-identical to the GPU resolve's gNormal load.
+    let normal_ptr = device
+        .buffer_mapped_ptr(&normal_readback)
+        .expect("host-visible gNormal readback buffer is mapped");
+    let mut normal_bytes = vec![0u8; READBACK_BYTES as usize];
+    // SAFETY: `normal_ptr` points to `READBACK_BYTES` mapped host-coherent bytes (the buffer was
+    // sized `READBACK_BYTES` above); the fence wait preceded this read, so the GPU store + copy
+    // are complete + coherent; reading `READBACK_BYTES` is in-bounds; `normal_bytes` is distinct.
+    unsafe {
+        core::ptr::copy_nonoverlapping(normal_ptr.as_ptr(), normal_bytes.as_mut_ptr(), READBACK_BYTES as usize);
+    }
+    let normal_oct: Vec<[u8; 2]> = normal_bytes
+        .chunks_exact(4)
+        .map(|c| [c[0], c[1]])
+        .collect();
 
     // Read back the ClusterGrid occupancy ({offset, count} per froxel). It is a
     // HostVisibleCoherent STORAGE buffer, so no transfer copy is required — the cull's writes
@@ -3525,6 +3630,8 @@ fn run_gbuffer_hybrid_lit_clustered(
         device.destroy_shader_module(fs);
         device.destroy_shader_module(vs);
         device.destroy_buffer(vertex_buffer);
+        device.destroy_buffer(normal_readback);
+        device.destroy_buffer(viewt_readback);
         device.destroy_buffer(readback);
         device.destroy_sampler(sampler);
         device.destroy_texture(viewt);
@@ -3544,15 +3651,24 @@ fn run_gbuffer_hybrid_lit_clustered(
         device.destroy_buffer(buffer);
     }
 
-    (out, grid_out, index_out)
+    (out, grid_out, index_out, viewt_px, normal_oct)
 }
 
 /// Diffs the whole GPU LIT readback (run through the FULL clustered path) against the host
 /// `golden_deferred_resolve_clustered` per texel, within ±2/255. The host oracle is fed the
 /// host cull `grid` (`golden_cluster_cull`, which is bit-exact to what the GPU cull writes for
-/// these no-overflow scenes) + the SAME `golden_marcher_attributes` (its `view_t` is the gViewT
-/// the GPU marcher stored, so the host's froxel z-slice mapping matches the GPU's). Returns the
-/// max delta + the SDF-lit (mask == 1) pixel count so the caller can prove a real lit surface.
+/// these no-overflow scenes).
+///
+/// **Resolve isolation.** The host `golden_marcher_attributes` re-derives the surface depth +
+/// normal via an INDEPENDENT CPU march; that marcher's GPU-vs-CPU FP gap (~0.002 in `view_t`,
+/// plus the matching `gNormal` gap) is amplified to white by this scene's pathologically
+/// close+intense lights (atten ≈ 1/d²). The marcher is validated separately (the rung-8..11
+/// goldens), so to isolate the RESOLVE under test we OVERRIDE both `attrs.view_t` (with the GPU's
+/// `gViewT` lane, `viewt_px`) and `attrs.oct_rg` (with the GPU's stored `gNormal` R8G8 bytes,
+/// `normal_oct`) before calling the oracle. Both sides then reconstruct the SAME
+/// `P = ro + rd * gViewT_gpu` (and the SAME froxel z-slice) and decode the SAME normal, leaving
+/// only the resolve's own arithmetic under test. Returns the max delta + the SDF-lit
+/// (mask == 1) pixel count so the caller can prove a real lit surface.
 #[allow(clippy::too_many_arguments)]
 fn assert_lit_matches_clustered_golden(
     lit: &[u8],
@@ -3563,6 +3679,8 @@ fn assert_lit_matches_clustered_golden(
     lights: &[GoldenLight],
     cfg: &GoldenClusterConfig,
     grid: &[Vec<u32>],
+    viewt_px: &[f32],
+    normal_oct: &[[u8; 2]],
     name: &str,
 ) -> (i32, u64) {
     let mut max_delta = 0i32;
@@ -3571,10 +3689,19 @@ fn assert_lit_matches_clustered_golden(
     for py in 0..SDF_IMG_H {
         for px in 0..SDF_IMG_W {
             let md = expected_mesh_depth(px, py);
-            let attrs = golden_marcher_attributes(
+            let mut attrs = golden_marcher_attributes(
                 edits, &materials, md, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, 1.0,
                 flags, light_dir,
             );
+            // Isolate the resolve: feed the GPU's REAL surface depth + normal so the oracle
+            // reconstructs the identical P/view_z and decodes the identical normal. Only
+            // meaningful on the SDF-lit arm (mask == 1); the oracle reads neither `view_t` nor
+            // `oct_rg` on a non-lit pixel, so the override is harmless there.
+            if attrs.mask == 1 {
+                let i = (py * SDF_IMG_W + px) as usize;
+                attrs.view_t = viewt_px[i];
+                attrs.oct_rg = normal_oct[i];
+            }
             let want = unpack_packed_rgb(golden_deferred_resolve_clustered(
                 attrs, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, &materials, header,
                 lights, cfg, grid,
@@ -3633,14 +3760,14 @@ fn l1_clustered_resolve_matches_the_brute_force_image() {
     let grid = golden_cluster_cull(SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, &cfg, &header, &lights);
 
     for (name, edits) in p4b_scenes() {
-        let (lit, _grid_bytes, _index_bytes) =
+        let (lit, _grid_bytes, _index_bytes, viewt_px, normal_oct) =
             run_gbuffer_hybrid_lit_clustered(&ctx, &edits, flags, DEFAULT_LIGHT_DIR, &table, &cfg);
         assert_eq!(lit.len(), READBACK_BYTES as usize);
         let nonzero = lit.chunks_exact(4).filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
         assert!(nonzero > 0, "[{name}] L1 clustered LIT all-zero — device did not render");
 
         let (max_delta, sdf_lit_hits) =
-            assert_lit_matches_clustered_golden(&lit, &edits, flags, DEFAULT_LIGHT_DIR, &header, &lights, &cfg, &grid, name);
+            assert_lit_matches_clustered_golden(&lit, &edits, flags, DEFAULT_LIGHT_DIR, &header, &lights, &cfg, &grid, &viewt_px, &normal_oct, name);
         assert!(
             sdf_lit_hits > 0,
             "[{name}] L1 clustered: no SDF-lit pixel — the gate is vacuous"
@@ -3696,7 +3823,7 @@ fn l1_known_light_lands_in_the_expected_clusters() {
     let cluster_count = cfg.cluster_count() as usize;
     assert_eq!(host_grid.len(), cluster_count);
 
-    let (_lit, grid_bytes, index_bytes) =
+    let (_lit, grid_bytes, index_bytes, _viewt_px, _normal_oct) =
         run_gbuffer_hybrid_lit_clustered(&ctx, &crater(), LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO, DEFAULT_LIGHT_DIR, &table, &cfg);
     assert_eq!(grid_bytes.len(), cluster_count * 8);
     let index_list_cap = l1_index_list_cap(&cfg);
