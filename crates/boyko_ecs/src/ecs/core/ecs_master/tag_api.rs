@@ -94,13 +94,18 @@ impl EcsMaster {
         if inland.is_null() || inland.generation() != entity.generation() {
             return false;
         }
+        // BUG-MIGRATE-TB-1: reborrow ONLY the `signature` field (a sub-range
+        // reference), not the whole `Archetype` — a `(*ptr).has_component_id(..)`
+        // method call auto-refs `&Archetype` over the full struct, a foreign read
+        // that freezes a concurrently sibling-written `current_index`.
         // SAFETY (U1, U2, F1): `archetype_ptr` is stable, interior-mutable
         //   (`SharedReadWrite`, F4-rooted) slab provenance minted at
         //   registration time — it survives sibling structural writes under
         //   TB/SB because the whole slab element is `UnsafeCell`-wrapped.
         //   Non-null + generation-matched above ⇒ the slot is live. The read
-        //   is a shared signature-word load (no `&mut` taken).
-        unsafe { (*inland.archetype_ptr()).has_component_id(tag.component_id()) }
+        //   borrows only the `signature` field (no `&mut`, no whole-struct ref).
+        let signature = unsafe { &*core::ptr::addr_of!((*inland.archetype_ptr()).signature) };
+        signature.mask().contains(tag.component_id())
     }
 
     /// Attaches the dynamic tag `tag` to `entity` (Phase 22 D9). Direct,

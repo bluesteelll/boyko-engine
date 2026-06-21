@@ -16,7 +16,6 @@
 use std::mem::{self, MaybeUninit};
 use std::ptr::NonNull;
 
-use crate::ecs::core::archetype::archetype::Archetype;
 use crate::ecs::core::bundle::Bundle;
 use crate::ecs::core::commands::command::Command;
 use crate::ecs::core::commands::migration_helpers::{merged_archetype_id, migrate_entity_insert};
@@ -70,11 +69,16 @@ impl<B: Bundle> Command for InsertCommand<B> {
             debug_assert!(false, "InsertCommand::apply: stale entity {:?}", entity);
             return;
         }
+        // BUG-MIGRATE-TB-1: read the `id` field through a raw projection. A
+        // `(*ptr).id()` method call auto-refs `&Archetype` over the WHOLE struct,
+        // a foreign read that freezes a concurrently sibling-written
+        // `current_index`/`entity_ids` and makes the bundle-`Box` dealloc UB.
         // SAFETY (U1, U2, U11, F1): `archetype_ptr` is stable, interior-mutable
         //   (`SharedReadWrite`, F4-rooted) slab provenance — it survives sibling
         //   structural writes under TB/SB (the whole slab element is
         //   `UnsafeCell`-wrapped). Non-null + generation-matched above, so live.
-        let source_archetype_id = unsafe { (*inland.archetype_ptr()).id() };
+        let source_archetype_id =
+            unsafe { core::ptr::addr_of!((*inland.archetype_ptr()).id).read() };
 
         // Compute the merged archetype id (canonical sort + dedup).
         let target_archetype_id = merged_archetype_id::<B>(world, source_archetype_id);
@@ -145,9 +149,12 @@ impl<B: Bundle> InsertCommand<B> {
 
         // Dense plan D2 — the entity's current archetype id, seeded into each
         // dense store's `arch_presence` on the closure's dense route. Read once
-        // here (a `usize` load through the raw deref; no `&mut` taken).
+        // here via a raw projection (BUG-MIGRATE-TB-1: a `.id()` method call
+        // would auto-ref `&Archetype` and freeze a concurrently sibling-written
+        // `current_index`).
         // SAFETY (F1): `archetype_ptr` is interior-mutable, stable slab provenance.
-        let source_archetype_id_for_dense = unsafe { (*archetype_ptr).id() };
+        let source_archetype_id_for_dense =
+            unsafe { core::ptr::addr_of!((*archetype_ptr).id).read() };
 
         // Dense plan D2 — PRE-overwrite on_replace for each PRESENT dense bundle
         // id (the dense value is still old). NOT gated by the archetype's
@@ -257,25 +264,33 @@ impl<B: Bundle> InsertCommand<B> {
                 return;
             }
 
-            // SAFETY (U1, U2, U14, SCH7, F1):
+            // BUG-MIGRATE-TB-1: do NOT bind a persistent `&mut Archetype`. A
+            // long-lived `&mut Archetype` is a foreign read/retag that freezes
+            // the interior-mutable slab cell after a sibling structural write
+            // (`move_out_entity`) narrowed it — making the bundle-`Box` dealloc on
+            // world drop UB. Each access takes a SINGLE-STATEMENT reborrow whose
+            // TB protector ends with the statement.
+            //
+            // SAFETY (U1, U2, U14, SCH7, F1) — shared by both reborrows below:
             //   * archetype_ptr is write-capable, stable, interior-mutable
             //     (`SharedReadWrite`, F4-rooted) slab provenance — it survives
             //     sibling structural writes under TB/SB (whole slab element is
             //     `UnsafeCell`-wrapped).
             //   * &mut EcsMaster (held by caller) ⇒ no sibling reader.
-            //   * The &mut Archetype reborrow is scoped to this closure
-            //     invocation only — it does NOT survive across calls.
-            let archetype: &mut Archetype = unsafe { &mut *archetype_ptr };
-
+            //   * Each reborrow is scoped to one statement — it does NOT survive
+            //     across calls.
             debug_assert!(
-                archetype.component_pools().has_pool(component_id),
+                unsafe { &*core::ptr::addr_of!((*archetype_ptr).component_pools) }
+                    .has_pool(component_id),
                 "W-N1: bundle component {:?} absent from source archetype despite \
                  canonicalization invariant — get_or_create_archetype regression?",
                 component_id
             );
 
-            let pool = archetype
-                .component_pools_mut()
+            // Reborrow ONLY the `component_pools` field (a sub-range mutable
+            // reference), never the whole `Archetype` — a struct-wide `&mut`
+            // would freeze a sibling-written `current_index`/`entity_ids`.
+            let pool = unsafe { &mut *core::ptr::addr_of_mut!((*archetype_ptr).component_pools) }
                 .get_pool_mut(component_id)
                 .expect(
                     "invariant: target == source ⇒ bundle ⊆ source (canonicalization, plan §7.4)",

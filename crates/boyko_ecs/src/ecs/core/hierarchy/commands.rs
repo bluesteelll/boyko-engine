@@ -125,7 +125,10 @@ impl Command for LinkChildCommand {
                 //   TB/SB (the whole slab element is `UnsafeCell`-wrapped).
                 //   Non-null + generation-matched by the preceding `has_entity`,
                 //   so the slot is live.
-                let src = unsafe { (*inland.archetype_ptr()).id() };
+                // BUG-MIGRATE-TB-1: raw projection of `id` — a `.id()` method call
+                // auto-refs `&Archetype` (a foreign read that freezes a sibling
+                // structural write to `current_index`/`entity_ids`).
+                let src = unsafe { core::ptr::addr_of!((*inland.archetype_ptr()).id).read() };
                 let tgt = merged_archetype_id::<Children>(world, src);
                 migrate_entity_insert::<Children>(
                     world,

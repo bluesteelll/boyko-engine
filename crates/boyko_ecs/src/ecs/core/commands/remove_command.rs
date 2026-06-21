@@ -89,13 +89,17 @@ impl<C: Component> Command for RemoveCommand<C> {
             return;
         }
 
+        // BUG-MIGRATE-TB-1: read `id` via a raw projection — a `.id()` method
+        // call auto-refs `&Archetype` (a foreign read freezing a concurrently
+        // sibling-written `current_index`/`entity_ids`).
         // SAFETY (U1, U2, U11, F1): `archetype_ptr` is stable, interior-mutable
         //   (`SharedReadWrite`, F4-rooted) slab provenance — it survives sibling
         //   structural writes (e.g. a later spawn's `current_index += 1` through
         //   a same-cell-derived pointer) under TB/SB because the whole slab
         //   element is `UnsafeCell`-wrapped. The pointer is non-null and matches
         //   the entity generation (checked above), so the slot is live.
-        let source_archetype_id = unsafe { (*inland.archetype_ptr()).id() };
+        let source_archetype_id =
+            unsafe { core::ptr::addr_of!((*inland.archetype_ptr()).id).read() };
 
         // W1: absent C ⇒ silent no-op (NO debug_assert).
         let Some(target_archetype_id) =

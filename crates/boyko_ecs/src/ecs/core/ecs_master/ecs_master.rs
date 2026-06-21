@@ -3,7 +3,7 @@ use std::ptr::NonNull;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use crate::ecs::core::archetype::archetype::{Archetype, RemoveOutcome};
+use crate::ecs::core::archetype::archetype::{Archetype, Column, RemoveOutcome};
 use crate::ecs::core::archetype::archetype_master::ArchetypeMaster;
 use crate::ecs::core::bundle::bundle::Bundle;
 use crate::ecs::core::bundle::bundle_column_cache::BundleColumnCache;
@@ -1477,6 +1477,45 @@ impl EcsMaster {
         };
         let removed_unit_index = InlandPoolId(inland.unit_index() as usize);
 
+        // Re-derive the dying entity's slab pointer FRESHLY under the live
+        // `&mut self` protector, then drive every slab access (flags read,
+        // hook fire, `remove_entity` write) through it.
+        //
+        // TB rationale (BUG-P3-TB-1): the cached `inland.archetype_ptr()` was
+        // minted via `archetype_ptr_for` during a now-DEAD registration borrow,
+        // so it is NOT a descendant of the live, EcsMaster-lifetime,
+        // interior-mutable slab protector. In a move-then-query window an
+        // earlier sibling migration has narrowed that protector to `Unique`
+        // (`migration_helpers.rs`'s `&mut Archetype` reborrow); a subsequent
+        // access through the stale-rooted cached pointer is then a FOREIGN
+        // read/write to the protector — the `&*archetype_ptr` hook read freezes
+        // it and the `current_index`/`entity_ids` structural write disables it,
+        // after which the next `&self` slab read (`query_entities`) reborrows a
+        // child of the dead tag and traps. Re-minting via `archetype_ptr_for`
+        // under the current `&mut self.archetype_master` makes every access a
+        // CHILD of the live protector, so none is foreign. Same discipline as
+        // the Phase 9.3 / BUG-P19-TB-1 / BUG-MIGRATE-TB-1 fixes (mutate/read
+        // through the protected chain, not a separately-rooted cached pointer).
+        //
+        // SAFETY (U1, U2, U11, F1, BUG-MIGRATE-TB-1): the `id` is read via a raw
+        //   `addr_of!` projection + `.read()` — NO intermediate `&Archetype` is
+        //   formed, so this read does not freeze a sibling-narrowed protector
+        //   (a `.id()` method call would auto-ref `&Archetype` and freeze). The
+        //   cached pointer is stable, interior-mutable (`SharedReadWrite`,
+        //   F4-rooted) slab provenance; the slot is live (`is_null`/generation
+        //   checked above), so the `Archetype` is initialised and `id` is valid.
+        let archetype_id =
+            unsafe { core::ptr::addr_of!((*inland.archetype_ptr()).id).read() };
+
+        // SAFETY (U1, U2, U11, U14, F1): `archetype_ptr_for` mints write-capable
+        //   provenance under the current `&mut self.archetype_master` borrow —
+        //   a CHILD of the live slab protector. The id was just read from the
+        //   live slot, so the archetype is registered (the lookup cannot miss).
+        let archetype_ptr = self
+            .archetype_master
+            .archetype_ptr_for(archetype_id)
+            .expect("invariant: archetype of a live entity is registered; single-threaded");
+
         // Phase 14a §3.6 / W1: PRE-`remove_entity` fire of `on_replace` +
         // `on_remove` for ALL components, reading the dying row. The flags read
         // is one `u16` load (the cheap gate that stays inline here); the
@@ -1484,13 +1523,13 @@ impl EcsMaster {
         // live in the cold `fire_despawn_hooks` helper, so this hot fn's
         // prologue never reserves that stack slot (§8 P4).
         //
-        // SAFETY (F1): `inland.archetype_ptr()` is write-capable, stable,
-        //   interior-mutable (`SharedReadWrite`, F4-rooted) slab provenance — it
-        //   survives sibling structural writes under TB/SB (whole slab element
-        //   is `UnsafeCell`-wrapped). Reading `flags` is one `u16` load.
-        let flags = unsafe { (*inland.archetype_ptr()).flags };
+        // SAFETY (F1, BUG-P3-TB-1): `archetype_ptr` is the freshly re-minted,
+        //   protector-rooted, interior-mutable slab pointer. Reading `flags` via
+        //   `addr_of!` (no `&Archetype` reborrow) is a child read of the live
+        //   protector and never freezes/disables it.
+        let flags = unsafe { core::ptr::addr_of!((*archetype_ptr).flags).read() };
         if !flags.is_empty() {
-            self.fire_despawn_hooks(entity, inland.archetype_ptr());
+            self.fire_despawn_hooks(entity, archetype_ptr);
         }
 
         // Dense plan D2 — fire dense on_despawn / on_replace / on_remove for every
@@ -1511,16 +1550,21 @@ impl EcsMaster {
         // `Option::is_none()`) for a world that has no entity observers.
         self.entity_observers.retire(entity);
 
-        // Re-resolve the `&mut Archetype` and proceed with the removal.
-        // SAFETY (U1, U2, U11, U14, F1): archetype_ptr was minted via
-        //   archetype_ptr_for under &mut self at registration time; the
-        //   bundle slab is heap-stable for the EcsMaster's lifetime and the
-        //   pointer is interior-mutable (`SharedReadWrite`, F4-rooted), so it
-        //   survives sibling structural writes under TB/SB. Single-threaded
-        //   &mut self gives exclusive access and no other live borrow into
-        //   this slot exists. Re-resolved AFTER the hooks returned (no live
-        //   reborrow during the fire).
-        let archetype: &mut Archetype = unsafe { &mut *inland.archetype_ptr() };
+        // Drive the structural removal through the SAME freshly-minted,
+        // protector-rooted `archetype_ptr` (re-derived above under
+        // `&mut self.archetype_master`). The `&mut Archetype` reborrow here
+        // narrows the interior-mutable cell to `Unique` for the duration of
+        // `remove_entity`, but because the pointer is a CHILD of the live
+        // protector the `current_index -= 1` / `entity_ids.swap_remove` writes
+        // are child writes (not foreign) and never disable it.
+        //
+        // SAFETY (U1, U2, U11, U14, F1, BUG-P3-TB-1): `archetype_ptr` is
+        //   write-capable, protector-rooted, interior-mutable slab provenance
+        //   re-minted under the current `&mut self`. Single-threaded `&mut self`
+        //   gives exclusive access; no other live borrow into this slot exists.
+        //   Re-resolved AFTER the hooks returned (no live reborrow during the
+        //   fire).
+        let archetype: &mut Archetype = unsafe { &mut *archetype_ptr };
         let outcome = archetype.remove_entity(removed_unit_index);
 
         let result = match outcome {
@@ -1771,18 +1815,34 @@ impl EcsMaster {
         if inland.generation() != entity.generation() {
             return None;
         }
-        // SAFETY (U1, U2, U11, F1): archetype_ptr was minted via the bundle's
-        //   `UnsafeCell::raw_get` helper (Step 4 + F4); the slab heap address
-        //   is stable for the EcsMaster's lifetime, and the pointer is
-        //   interior-mutable (`SharedReadWrite`, F4-rooted) so it survives
-        //   sibling structural writes (e.g. a later spawn's `current_index +=
-        //   1`) under TB/SB — the whole slab element is `UnsafeCell`-wrapped.
-        //   &self gives shared access to the slab.
-        let archetype = unsafe { &*inland.archetype_ptr() };
-
+        let archetype_ptr = inland.archetype_ptr();
         debug_assert!(component_id.0 < MAX_COMPONENTS);
-        // SAFETY (U4): columns is [Column; MAX_COMPONENTS]; bound checked above.
-        let column = unsafe { archetype.columns.get_unchecked(component_id.0) };
+
+        // BUG-MIGRATE-TB-1 (Tree Borrows): do NOT form `&*archetype_ptr` here.
+        // A `&Archetype` covers the WHOLE struct (incl. `current_index`); a
+        // sibling structural migration writes `current_index` through a
+        // same-cell-derived pointer, transitioning the interior-mutable slab
+        // cell to Active. This shared (foreign) read would then FREEZE that
+        // cell — and the `Box`-of-slab deallocation on `EcsMaster` drop is
+        // forbidden through a `Frozen` tag (alloc/boxed.rs). The F4 read
+        // discipline is: read the single `Column` we need through a raw-pointer
+        // PROJECTION (`addr_of!((*p).columns)`), never a struct-wide reference.
+        // `Column` is `Copy`, so we read it by value.
+        //
+        // SAFETY (U1, U2, U4, U11, F1): `archetype_ptr` was minted via the
+        //   bundle's `UnsafeCell::raw_get` helper (Step 4 + F4); the slab heap
+        //   address is stable for the EcsMaster's lifetime, and the pointer is
+        //   interior-mutable (`SharedReadWrite`, F4-rooted) so it survives
+        //   sibling structural writes (e.g. a later spawn's / migration's
+        //   `current_index` bump) under TB/SB — the whole slab element is
+        //   `UnsafeCell`-wrapped, and projecting `columns` (offset 0) reads only
+        //   the live lookup table, never freezing the cell. `&self` gives
+        //   shared access to the slab; `component_id.0 < MAX_COMPONENTS` (asserted)
+        //   keeps the `[Column; MAX_COMPONENTS]` index in bounds (U4).
+        let column = unsafe {
+            let columns_ptr = core::ptr::addr_of!((*archetype_ptr).columns).cast::<Column>();
+            *columns_ptr.add(component_id.0)
+        };
         if column.ptr.is_null() {
             return None;
         }
@@ -1819,18 +1879,30 @@ impl EcsMaster {
         }
         debug_assert!(component_id.0 < MAX_COMPONENTS);
 
-        // SAFETY (U1, U2, U11, U14, F1):
+        let archetype_ptr = inland.archetype_ptr();
+
+        // BUG-MIGRATE-TB-1 (Tree Borrows): do NOT form `&mut *archetype_ptr`
+        // here — a struct-wide `&mut Archetype` covers `current_index` and would
+        // narrow the interior-mutable slab cell to `Unique`, which a later
+        // sibling read can freeze (see `get_component_raw`). Read the single
+        // `Column` we need through a raw-pointer PROJECTION of `columns`
+        // (offset 0); `Column` is `Copy`.
+        //
+        // SAFETY (U1, U2, U4, U11, U14, F1):
         //   - U14: archetype_ptr is write-capable provenance (minted via the
         //     bundle's `UnsafeCell::raw_get` helper during create_entity);
         //     single-threaded &mut self gives exclusive access; no other
         //     live borrow into the slot exists.
         //   - F1: interior-mutable (`SharedReadWrite`, F4-rooted) — survives
         //     sibling structural writes under TB/SB (whole slab element is
-        //     `UnsafeCell`-wrapped).
-        let archetype = unsafe { &mut *inland.archetype_ptr() };
-
-        // SAFETY (U4): same as get_component_raw.
-        let column = unsafe { archetype.columns.get_unchecked(component_id.0) };
+        //     `UnsafeCell`-wrapped); projecting `columns` reads only the lookup
+        //     table, never narrowing/freezing the cell.
+        //   - U4: `component_id.0 < MAX_COMPONENTS` (asserted) keeps the
+        //     `[Column; MAX_COMPONENTS]` index in bounds.
+        let column = unsafe {
+            let columns_ptr = core::ptr::addr_of!((*archetype_ptr).columns).cast::<Column>();
+            *columns_ptr.add(component_id.0)
+        };
         if column.ptr.is_null() {
             return None;
         }
@@ -1948,22 +2020,36 @@ impl EcsMaster {
         let idx = inland.unit_index() as usize;
         let this_run = self.current_tick();
 
+        // BUG-MIGRATE-TB-1: project the individual fields (`columns`,
+        // `component_pools`) through the raw slab pointer; do NOT form a
+        // struct-wide `&mut Archetype` (a foreign read/retag that freezes a
+        // sibling-written `current_index`/`entity_ids`).
         // SAFETY (OBS-MUT1): `inland.archetype_ptr()` is write-capable, stable,
         //   interior-mutable (`SharedReadWrite`, F4-rooted) slab provenance
         //   (U1/U14/F1); it survives sibling structural writes under TB/SB.
         //   `&mut self` ⇒ exclusive access — no other thread or borrow can read
         //   or write any slot in this archetype for the `Mut`'s lifetime.
-        let archetype: &mut Archetype = unsafe { &mut *inland.archetype_ptr() };
+        let archetype_ptr = inland.archetype_ptr();
         // SAFETY (U4): `cid.0 < MAX_COMPONENTS` (debug-asserted above; the column
-        //   table is `[Column; MAX_COMPONENTS]`).
-        let column = unsafe { archetype.columns.get_unchecked(cid.0) };
+        //   table is `[Column; MAX_COMPONENTS]`). `Column` is `Copy`.
+        let column = unsafe {
+            let columns_ptr = core::ptr::addr_of!((*archetype_ptr).columns).cast::<Column>();
+            *columns_ptr.add(cid.0)
+        };
         if column.ptr.is_null() {
             return None;
         }
 
         // Per-row tick slots come from the COLUMN BASE + idx (NOT the column base
-        // alone). `tick_column_base` returns `(added_base, changed_base)`.
-        let (added_base, changed_base) = archetype.tick_column_base(cid)?;
+        // alone). `tick_column_base` reads only `self.component_pools`; reborrow
+        // ONLY that field (sub-range), never the whole struct.
+        // SAFETY: same provenance note as above; `tick_column_base` takes `&self`
+        //   over the `component_pools` field only.
+        let (added_base, changed_base) = unsafe {
+            (*core::ptr::addr_of!((*archetype_ptr).component_pools))
+                .get_pool(cid)
+                .map(|pool| (pool.added_ticks_ptr(), pool.changed_ticks_ptr()))
+        }?;
 
         // SAFETY (OBS-MUT2): the row is live (`inland` non-null + generation
         //   match), so `idx < pool.count() <= committed_rows`; both tick bases
@@ -2022,10 +2108,12 @@ impl EcsMaster {
         if inland.is_null() || inland.generation() != entity.generation() {
             return None;
         }
+        // BUG-MIGRATE-TB-1: raw projection of `id` (no `&Archetype` foreign read
+        // that would freeze a concurrently sibling-written `current_index`).
         // SAFETY (U1, U2, U11, F1): `archetype_ptr` is stable, interior-mutable
         //   (`SharedReadWrite`, F4-rooted) slab provenance; reading `id` is one
-        //   load through a shared deref.
-        Some(unsafe { (*inland.archetype_ptr()).id() })
+        //   load through a raw projection.
+        Some(unsafe { core::ptr::addr_of!((*inland.archetype_ptr()).id).read() })
     }
 
     /// Checks if an entity has a specific component.
@@ -2040,16 +2128,24 @@ impl EcsMaster {
         if inland.is_null() || inland.generation() != entity.generation() {
             return false;
         }
-        // SAFETY (U1, U2, U11, F1): archetype_ptr is stable, interior-mutable
-        //   (`SharedReadWrite`, F4-rooted) slab provenance — survives sibling
-        //   structural writes under TB/SB (whole slab element is
-        //   `UnsafeCell`-wrapped).
-        let archetype = unsafe { &*inland.archetype_ptr() };
         if component_id.0 >= MAX_COMPONENTS {
             return false;
         }
-        // SAFETY (U4): bounded by check above.
-        !unsafe { archetype.columns.get_unchecked(component_id.0) }.ptr.is_null()
+        // BUG-MIGRATE-TB-1: project `columns` (offset 0) through the raw slab
+        // pointer instead of forming `&Archetype` — a foreign `&Archetype` read
+        // would freeze a concurrently sibling-written `current_index`, making the
+        // bundle-`Box` dealloc on world drop UB.
+        // SAFETY (U1, U2, U4, U11, F1): archetype_ptr is stable, interior-mutable
+        //   (`SharedReadWrite`, F4-rooted) slab provenance — survives sibling
+        //   structural writes under TB/SB (whole slab element is
+        //   `UnsafeCell`-wrapped); `component_id.0 < MAX_COMPONENTS` (checked)
+        //   keeps the index in bounds. `Column` is `Copy`.
+        let column = unsafe {
+            let columns_ptr =
+                core::ptr::addr_of!((*inland.archetype_ptr()).columns).cast::<Column>();
+            *columns_ptr.add(component_id.0)
+        };
+        !column.ptr.is_null()
     }
 
     /// Gets the archetype ID containing the specified entity.
@@ -2062,10 +2158,13 @@ impl EcsMaster {
         if inland.is_null() || inland.generation() != entity.generation() {
             return None;
         }
+        // BUG-MIGRATE-TB-1: read `id` through a raw projection (no `&Archetype`)
+        // so a concurrent sibling `current_index` write is not frozen by this
+        // foreign read. `id` is `Copy`.
         // SAFETY (U1, U2, U11, F1): same as get_component_raw — stable,
         //   interior-mutable (`SharedReadWrite`, F4-rooted) slab provenance.
-        let archetype = unsafe { &*inland.archetype_ptr() };
-        Some(archetype.id())
+        let id = unsafe { core::ptr::addr_of!((*inland.archetype_ptr()).id).read() };
+        Some(id)
     }
 
     /// Gets the total number of active entities in the system
@@ -2130,18 +2229,22 @@ impl EcsMaster {
         if inland.is_null() || inland.generation() != entity.generation() {
             return result;
         }
+        // BUG-MIGRATE-TB-1: project `columns` (offset 0) through the raw slab
+        // pointer; do NOT form `&Archetype` (which would freeze a concurrently
+        // sibling-written `current_index`).
         // SAFETY (U1, U2, U11, F1): archetype_ptr is stable, interior-mutable
         //   (`SharedReadWrite`, F4-rooted) slab provenance — survives sibling
         //   structural writes under TB/SB (whole slab element is
         //   `UnsafeCell`-wrapped).
-        let archetype = unsafe { &*inland.archetype_ptr() };
+        let columns_ptr =
+            unsafe { core::ptr::addr_of!((*inland.archetype_ptr()).columns).cast::<Column>() };
         let unit_index = inland.unit_index() as usize;
         for &component_id in component_ids {
             if component_id.0 >= MAX_COMPONENTS {
                 continue;
             }
-            // SAFETY (U4): bounded by check above.
-            let column = unsafe { archetype.columns.get_unchecked(component_id.0) };
+            // SAFETY (U4): bounded by check above; `Column` is `Copy`.
+            let column = unsafe { *columns_ptr.add(component_id.0) };
             if column.ptr.is_null() {
                 continue;
             }
@@ -2172,18 +2275,22 @@ impl EcsMaster {
         if inland.is_null() || inland.generation() != entity.generation() {
             return result;
         }
+        // BUG-MIGRATE-TB-1: project `columns` (offset 0) through the raw slab
+        // pointer; do NOT form `&mut Archetype` (which would narrow / freeze a
+        // concurrently sibling-written `current_index`).
         // SAFETY (U1, U2, U11, U14, F1): write-capable, interior-mutable
         //   (`SharedReadWrite`, F4-rooted) slab provenance under &mut self —
         //   survives sibling structural writes under TB/SB (whole slab element
         //   is `UnsafeCell`-wrapped); no other live borrow into this slot.
-        let archetype = unsafe { &mut *inland.archetype_ptr() };
+        let columns_ptr =
+            unsafe { core::ptr::addr_of!((*inland.archetype_ptr()).columns).cast::<Column>() };
         let unit_index = inland.unit_index() as usize;
         for &component_id in component_ids {
             if component_id.0 >= MAX_COMPONENTS {
                 continue;
             }
-            // SAFETY (U4): bounded by check above.
-            let column = unsafe { archetype.columns.get_unchecked(component_id.0) };
+            // SAFETY (U4): bounded by check above; `Column` is `Copy`.
+            let column = unsafe { *columns_ptr.add(component_id.0) };
             if column.ptr.is_null() {
                 continue;
             }

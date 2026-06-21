@@ -440,26 +440,60 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
     // after the block the entity is fully in `target` and BOTH `&mut Archetype`
     // are dead — Phase 2 can mint `world_ptr` with no live reborrow (SAFETY-1).
     {
-        // SAFETY (U1, U2, U14, SCH7, F1):
+        // BUG-MIGRATE-TB-1 fix (Tree Borrows): do NOT bind a persistent
+        // `let source/target: &mut Archetype`. A long-lived `&mut Archetype`
+        // (TB `Unique`) narrows the slab cell's tag from interior-mutable
+        // (`Reserved`/`SharedReadWrite`) to `Unique` on its first field write
+        // (`target.current_index = …`); that `Unique` tag then PERSISTS for the
+        // whole block and is later FROZEN by the interior-mutable read reborrow
+        // `&*inland.archetype_ptr()` in `EcsMaster::get_component_raw`, so the
+        // `EcsMaster`-drop deallocation of the archetype-bundle `Box` goes
+        // through a `Frozen` tag → UB (`alloc/boxed.rs` dealloc).
+        //
+        // The F4 discipline (the read paths already obey it) is: never
+        // materialise a long-lived reference to a slab slot — operate through
+        // the raw `SharedReadWrite` pointer. We therefore take only
+        // SINGLE-STATEMENT reborrows via the `src!()` / `tgt!()` macros below.
+        // Each reborrow's TB protector ends with the statement, so the cell
+        // returns to its interior-mutable parent state and no `Unique` tag
+        // survives to be frozen. A field write goes through `(*ptr).field`
+        // (raw-pointer projection), which writes through `SharedReadWrite` and
+        // never narrows the cell to a persistent `Unique`.
+        //
+        // SAFETY (U1, U2, U14, SCH7, F1) — shared by every `src!()`/`tgt!()`
+        // reborrow and every `(*…_ptr)` projection in this block:
         //   * `source_ptr` / `target_ptr` carry write-capable, interior-mutable
         //     (`SharedReadWrite`, F4-rooted) provenance minted under `&mut self`
         //     via the bundle's `UnsafeCell::raw_get` helper — each survives
         //     sibling structural writes (incl. the OTHER archetype's
         //     `current_index` bump) under TB/SB because every slab element is a
         //     distinct `UnsafeCell`.
-        //   * `source != target` (debug-asserted), so the two `&mut Archetype`
-        //     reborrows alias disjoint slots.
+        //   * `source != target` (debug-asserted), so the two reborrows alias
+        //     disjoint slots.
         //   * `&mut EcsMaster` exclusivity prevents any sibling reader (SCH7).
-        //   * The reborrows are confined to this block (Phase 1).
-        let source: &mut Archetype = unsafe { &mut *source_ptr };
-        let target: &mut Archetype = unsafe { &mut *target_ptr };
+        //   * The reborrows are confined to this block (Phase 1) and each is a
+        //     single-statement borrow that does not outlive its use.
+        macro_rules! src {
+            () => {
+                // SAFETY: see the block-level SAFETY note above (single-statement
+                // reborrow of the interior-mutable source slab slot).
+                unsafe { &mut *source_ptr }
+            };
+        }
+        macro_rules! tgt {
+            () => {
+                // SAFETY: see the block-level SAFETY note above (single-statement
+                // reborrow of the interior-mutable target slab slot).
+                unsafe { &mut *target_ptr }
+            };
+        }
 
         // EnableTag Step 6 PHASE 1 (C4 READ-before-swap): snapshot the migrating
         // entity's enable bits at `source_row` into the borrow-free scratch
         // BEFORE the source `move_out_entity` (Step 5) relocates the source's
         // OTHER rows' bits. The 0%-gate `is_empty()` fast path skips this for an
         // enable-free source.
-        read_source_enable_bits(source, source_row, &mut enable_scratch);
+        read_source_enable_bits(src!(), source_row, &mut enable_scratch);
 
         // NEW-1 (use-after-free fix): the prior shape collected the bundle's
         // `&[u8]` slices into a stack array inside `for_each_component_bytes`'s
@@ -479,27 +513,29 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
         // index stays in lockstep: every `target` pool ends with one extra
         // committed row at `row` (retained pools committed in the loop below,
         // bundle-only pools committed in the closure).
-        target
+        tgt!()
             .reserve_capacity(1)
             .expect(
                 "insert-migration: target pool reserve ceiling (rows) exhausted — \
                  committed capacity grows on demand (Phase X.I), so this fires only \
                  when the target archetype outgrows a pool's reserve_rows",
             );
-        let new_row: u32 = target.current_index as u32;
-        let row = target.current_index;
+        // Field READS through a raw-pointer projection (no `&mut`, no narrowing).
+        // SAFETY: see the block-level SAFETY note above.
+        let new_row: u32 = unsafe { (*target_ptr).current_index as u32 };
+        let row = unsafe { (*target_ptr).current_index };
 
         // Step 1: write retained components (present in BOTH source and target)
         // into the reserved target row, copying directly from the live source
         // pool. The source `&[u8]` is valid throughout this loop (it borrows the
         // live `source` pool), so the memcpy completes before any aliasing
         // mutation of `source`.
-        let target_cids: Vec<ComponentId> = target.component_ids().to_vec();
+        let target_cids: Vec<ComponentId> = tgt!().component_ids().to_vec();
         for target_cid in target_cids.iter().copied() {
-            if !source.component_ids().contains(&target_cid) {
+            if !src!().component_ids().contains(&target_cid) {
                 continue;
             }
-            let src_pool = source
+            let src_pool = src!()
                 .component_pools()
                 .get_pool(target_cid)
                 .expect("invariant: retained component must exist in source");
@@ -521,7 +557,7 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
             let added = unsafe { src_pool.read_added_tick(source_row) };
             let changed = unsafe { src_pool.read_changed_tick(source_row) };
 
-            let dst_pool = target
+            let dst_pool = tgt!()
                 .component_pools_mut()
                 .get_pool_mut(target_cid)
                 .expect("invariant: retained component must exist in target");
@@ -582,10 +618,10 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
             // `source` row (Step 5 `move_out_entity` has not run yet).
             debug_assert!(bundle_id_count < MAX_BUNDLE_ARITY);
             bundle_ids[bundle_id_count] = id;
-            bundle_added[bundle_id_count] = !source.component_ids().contains(&id);
+            bundle_added[bundle_id_count] = !src!().component_ids().contains(&id);
             bundle_id_count += 1;
 
-            let dst_pool = target
+            let dst_pool = tgt!()
                 .component_pools_mut()
                 .get_pool_mut(id)
                 .expect("invariant: bundle component must exist in target (T = S ∪ I)");
@@ -677,7 +713,7 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
                 // its existing value (no overwrite, no construct, no re-fire —
                 // C1's "present does not fire" path). A required id supplied by
                 // the bundle was already written by the closure above.
-                if source.component_ids().contains(&req_id) || bundle_id_set.contains(&req_id) {
+                if src!().component_ids().contains(&req_id) || bundle_id_set.contains(&req_id) {
                     return;
                 }
                 // Resolve the ctor for `req_id` from the bundle's transitive
@@ -686,7 +722,7 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
                     "invariant: req_id came from the bundle's required closure, so a ctor \
                      exists for it",
                 );
-                let dst_pool = target
+                let dst_pool = tgt!()
                     .component_pools_mut()
                     .get_pool_mut(req_id)
                     .expect("invariant: target hosts every required id (expanded archetype)");
@@ -722,8 +758,24 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
         // above + the required ctor pass), so the entity-id list and
         // `current_index` advance in lockstep — replicating
         // `create_entity_with_ticks`'s tail.
-        target.entity_ids.push(entity.id());
-        target.current_index = row + 1;
+        //
+        // BUG-MIGRATE-TB-1: `entity_ids.push` needs `&mut Vec`, so it goes
+        // through a single-statement `tgt!()` reborrow (protector ends with the
+        // statement). `current_index` is a plain field — written through the raw
+        // pointer projection (`SharedReadWrite`, NO `&mut` narrowing). This is
+        // the exact write that previously transitioned the slab cell to a
+        // PERSISTENT `Unique`.
+        tgt!().entity_ids.push(entity.id());
+        // SAFETY: see the block-level SAFETY note above. `addr_of_mut!` forms a
+        // raw `*mut usize` to the field WITHOUT creating an intermediate
+        // `&mut Archetype` (which a plain `(*ptr).field = …` place-assign would,
+        // narrowing the interior-mutable slab cell to a persistent `Unique` that
+        // a later sibling read freezes). The raw `.write()` keeps the cell in its
+        // interior-mutable (`Reserved`/`SharedReadWrite`) state, so the
+        // `EcsMaster`-drop deallocation of the bundle `Box` is legal.
+        unsafe {
+            core::ptr::addr_of_mut!((*target_ptr).current_index).write(row + 1);
+        }
 
         // EnableTag Step 6 PHASE 2: restore the snapshotted enable bits into the
         // target's new row (`new_row`). Must precede the source `move_out_entity`
@@ -731,7 +783,7 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
         // so ordering vs the source swap is immaterial; placed here (before
         // Step 5) so the whole copy completes while `target` is `&mut`-live.
         write_target_enable_bits(
-            target,
+            tgt!(),
             new_row as usize,
             &enable_scratch,
             &mut enable_newly_allocated,
@@ -750,7 +802,7 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
         // So the only live drops are: the overlap old value (dropped above,
         // once) and every target value (dropped once when target is removed or
         // on archetype teardown).
-        match source.move_out_entity(InlandPoolId(source_row)) {
+        match src!().move_out_entity(InlandPoolId(source_row)) {
             RemoveOutcome::Last => {}
             RemoveOutcome::Swapped { moved_entity } => {
                 // The entity at source's last_row took source_row's slot.
