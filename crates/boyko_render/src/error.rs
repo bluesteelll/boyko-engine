@@ -6,6 +6,7 @@
 //! GpuColumnError>` — never `anyhow`.
 
 use boyko_rhi_vulkan::error::VulkanError;
+use boyko_rhi_vulkan::swapchain::SwapchainError;
 
 /// Errors raised by [`GpuColumnManager`](crate::GpuColumnManager) operations.
 ///
@@ -23,6 +24,17 @@ pub enum GpuColumnError {
     /// cannot stage/read its bytes. A staging buffer is always host-visible, so
     /// this signals a backend invariant break, not a caller error.
     StagingNotMapped,
+    /// A swapchain/present-path call failed (the per-frame in-flight fence wait the
+    /// UI host driver issues before an upload — GUI P5a). Surfaced so the host driver
+    /// can return ONE error type across the fence wait + the ring upload.
+    Swapchain(SwapchainError),
+}
+
+impl From<SwapchainError> for GpuColumnError {
+    #[inline]
+    fn from(e: SwapchainError) -> Self {
+        GpuColumnError::Swapchain(e)
+    }
 }
 
 impl From<VulkanError> for GpuColumnError {
@@ -42,6 +54,7 @@ impl core::fmt::Display for GpuColumnError {
             GpuColumnError::StagingNotMapped => {
                 write!(f, "host-visible staging buffer has no mapped pointer")
             }
+            GpuColumnError::Swapchain(e) => write!(f, "swapchain/present error: {e:?}"),
         }
     }
 }

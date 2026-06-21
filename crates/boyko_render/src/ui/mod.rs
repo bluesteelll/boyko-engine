@@ -68,6 +68,8 @@ pub mod draw;
 pub mod instance;
 pub mod pack;
 pub mod plan;
+pub(crate) mod resources;
+pub mod upload;
 
 pub use draw::record_ui_rects;
 pub use instance::{
@@ -75,9 +77,69 @@ pub use instance::{
 };
 pub use pack::{pack_ui_instance, PackInput, UiRenderGeneration, UiRenderScratch};
 pub use plan::UiFramePlan;
+pub use upload::{UiNode, UiUploadSystem};
 
 /// Frames-in-flight for the UI render ring — one host-mapped STORAGE ring slot + one
 /// bind-group per slot (Decision 7). MUST equal the swapchain `Renderer`'s
 /// `FRAMES_IN_FLIGHT` so the UI ring slot a frame writes/binds matches the
 /// swapchain's in-flight fence for that `frame_index`.
 pub const FRAMES_IN_FLIGHT: usize = 2;
+
+/// A 4-byte-aligned wrapper around a committed SPIR-V byte blob so its address is a
+/// valid `*const u32` and it re-views as the `&[u32]` word stream
+/// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module)
+/// requires. Mirrors the `gpu_system::SpirvBlob` trick (a bare `include_bytes!` is
+/// only `align(1)`; SPIR-V needs 4-byte alignment).
+#[repr(C, align(4))]
+struct SpirvBlob<const N: usize>([u8; N]);
+
+impl<const N: usize> SpirvBlob<N> {
+    /// Re-views the blob as its SPIR-V `u32` word stream after a magic-number check.
+    fn as_words(&self) -> &[u32] {
+        const { assert!(N.is_multiple_of(4), "SPIR-V byte length must be a multiple of 4") };
+        const { assert!(N >= 4, "SPIR-V blob must hold at least the magic word") };
+        // Release-present magic check: a misplaced / non-SPIR-V file fails loud here
+        // (`0x07230203`, little-endian bytes `03 02 23 07`) rather than handing a
+        // corrupt word stream to `vkCreateShaderModule`. Validated once at setup.
+        assert_eq!(
+            [self.0[0], self.0[1], self.0[2], self.0[3]],
+            [0x03, 0x02, 0x23, 0x07],
+            "SPIR-V blob does not start with the magic number 0x07230203 \
+             (corrupt, wrong-endian, or not a .spv file)"
+        );
+        // SAFETY: the `align(4)` wrapper makes `self.0`'s address a valid `*const
+        // u32`; `N` is a 4-byte multiple (const-asserted), so the blob is exactly
+        // `N / 4` whole `u32` words; the `&self` borrow keeps the `'static` blob
+        // alive for the slice's lifetime; any byte pattern is a valid `u32`.
+        unsafe { core::slice::from_raw_parts(self.0.as_ptr().cast::<u32>(), N / 4) }
+    }
+}
+
+/// The committed `ui_rect.vs.spv` (vertexless quad, a VERTEX-stage SSBO transform
+/// read, and the ortho push constant). The `const N` byte length must match the file
+/// on disk (a mismatch is a compile error).
+static UI_RECT_VS_SPV: SpirvBlob<2292> = SpirvBlob(*include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/shaders/ui_rect.vs.spv"
+)));
+
+/// The committed `ui_rect.fs.spv` (`sdRoundedBox` + `fwidth` AA + uniform border +
+/// flag-gated clip, premultiplied out; FRAGMENT-stage SSBO read).
+static UI_RECT_FS_SPV: SpirvBlob<4724> = SpirvBlob(*include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/shaders/ui_rect.fs.spv"
+)));
+
+/// The committed UI vertex SPIR-V as a `u32` word stream, ready for
+/// [`RhiContext::ui_setup`](crate::RhiContext::ui_setup).
+#[inline]
+pub fn ui_rect_vs_spirv() -> &'static [u32] {
+    UI_RECT_VS_SPV.as_words()
+}
+
+/// The committed UI fragment SPIR-V as a `u32` word stream, ready for
+/// [`RhiContext::ui_setup`](crate::RhiContext::ui_setup).
+#[inline]
+pub fn ui_rect_fs_spirv() -> &'static [u32] {
+    UI_RECT_FS_SPV.as_words()
+}

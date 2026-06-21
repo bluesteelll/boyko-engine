@@ -951,6 +951,7 @@ fn windowed_hybrid_composite_present_is_validation_clean_and_renders_composite()
                 window.height(),
                 clear,
                 rb,
+                None,
             )
         }
         .unwrap_or_else(|e| panic!("hybrid present frame {i} failed: {e:?}"));

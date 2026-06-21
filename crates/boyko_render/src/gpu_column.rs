@@ -44,6 +44,9 @@ use boyko_rhi_vulkan::rhi_impl::Vulkan;
 
 use crate::barrier::PlannedBarrier;
 use crate::error::GpuColumnError;
+use crate::ui::instance::{UiInstance, UiOrtho};
+use crate::ui::plan::UiFramePlan;
+use crate::ui::resources::UiRenderResources;
 
 /// The `local_size_x` of the `gpu_integrate` compute shader (`[numthreads(64,1,1)]`).
 ///
@@ -107,6 +110,12 @@ pub struct RhiContext {
     context: VulkanContext,
     /// The device-column manager (registry + meta + staging).
     manager: GpuColumnManager,
+    /// The owned UI render capability (GUI P5a Decision 8): the UI pipeline +
+    /// bind-group layout + per-FIF host-mapped rings + bind-groups. `None` until
+    /// [`ui_setup`](Self::ui_setup) builds it; torn down (and re-`None`d) by
+    /// [`destroy_all`](Self::destroy_all) + [`Drop`], so it is idempotent and never
+    /// leaks past `RhiContext::Drop` (a NAMED owner, not a side store — Principle 0).
+    ui: Option<UiRenderResources>,
 }
 
 impl RhiContext {
@@ -116,6 +125,7 @@ impl RhiContext {
         Self {
             context,
             manager: GpuColumnManager::new(),
+            ui: None,
         }
     }
 
@@ -160,6 +170,127 @@ impl RhiContext {
         spirv: &[u32],
     ) -> Result<ComputePipelineHandle, GpuColumnError> {
         self.manager.create_compute_pipeline(&self.context, spirv)
+    }
+
+    /// SETUP-only (GUI P5a Rung 3, Decision 8): builds the owned UI render
+    /// capability — the UI graphics pipeline (for `color_format`, blend =
+    /// premultiplied), the SSBO bind-group layout (VERTEX|FRAGMENT), and the per-FIF
+    /// host-mapped grow-only STORAGE rings + bind-groups — once. Forwards every
+    /// device verb through `split_mut().0` (the `&VulkanContext` device), mirroring
+    /// [`create_compute_pipeline`](Self::create_compute_pipeline).
+    ///
+    /// `color_format` is the format of the image the UI pass renders into (the
+    /// swapchain surface format for the on-screen path, `R8G8B8A8Unorm` for the
+    /// offscreen golden — Decision 9). `spirv_vs`/`spirv_fs` are the committed
+    /// `ui_rect.{vs,fs}.spv` word streams; `initial_rows` each ring's starting
+    /// `UiInstance` capacity (grows pow2 on overflow).
+    ///
+    /// Calling it twice tears down the prior resources first (idempotent setup), so
+    /// a swapchain recreate that re-runs setup never leaks.
+    ///
+    /// # Errors
+    /// [`GpuColumnError`] on any shader / pipeline / layout / buffer / bind-group
+    /// create failure (every partially-created resource is torn down before return).
+    pub fn ui_setup(
+        &mut self,
+        color_format: boyko_rhi::Format,
+        spirv_vs: &[u32],
+        spirv_fs: &[u32],
+        initial_rows: u32,
+    ) -> Result<(), GpuColumnError> {
+        // Idempotent re-setup: drop the prior capability (its own `destroy` drains
+        // the device + frees every resource) before building anew.
+        if let Some(old) = self.ui.take() {
+            old.destroy(&self.context);
+        }
+        let (device, _manager) = self.split_mut();
+        let resources =
+            UiRenderResources::create(device, color_format, spirv_vs, spirv_fs, initial_rows)?;
+        self.ui = Some(resources);
+        Ok(())
+    }
+
+    /// Frame path (GUI P5a Rung 3 / A1 steps 4-6): ensures slot `frame_index`'s
+    /// capacity (grow pow2 + rebuild that slot's bind-group on overflow), memcpys the
+    /// packed `instances` into the mapped current-FIF ring, and returns the by-value
+    /// [`UiFramePlan`] (no borrow escapes — Decision 9).
+    ///
+    /// `instances` is the packed, z-sorted scratch; its byte image is uploaded via
+    /// the no-bytemuck POD view. `ortho` is the pixel→NDC transform for the swapchain
+    /// extent the UI pass renders into. The returned plan borrows NO RHI handle, so
+    /// it is sound to stash across the dispatcher token drop; the swapchain recorder
+    /// re-resolves the pipeline + bind-group by `frame_index` via
+    /// [`ui_handles`](Self::ui_handles) (MF-7).
+    ///
+    /// # Errors
+    /// [`GpuColumnError`] on a grow failure, a missing ring mapping, or if
+    /// [`ui_setup`](Self::ui_setup) was never called.
+    pub fn ui_upload(
+        &mut self,
+        instances: &[UiInstance],
+        ortho: UiOrtho,
+        frame_index: usize,
+    ) -> Result<UiFramePlan, GpuColumnError> {
+        let instance_count = instances.len() as u32;
+        let packed = UiInstance::slice_as_bytes(instances);
+        // Disjoint-field split: borrow the device (`context`) immutably while
+        // mutating the UI sub-owner (`ui`). A single struct destructure lets the
+        // borrow checker see the two fields are disjoint (the same shape as
+        // `split_mut`, which the manager paths use).
+        let Self { context, ui, .. } = self;
+        let ui = ui.as_mut().ok_or(GpuColumnError::StagingNotMapped)?;
+        ui.upload(context, packed, instance_count, frame_index)?;
+        Ok(UiFramePlan {
+            instance_count,
+            ortho,
+            frame_index,
+        })
+    }
+
+    /// Re-resolves the current-FIF UI pipeline + bind-group by `frame_index` (MF-7)
+    /// — used by the swapchain recorder in the SAME dispatcher window. Never a cached
+    /// raw handle, so a grow that rebuilt slot `frame_index`'s bind-group between
+    /// [`ui_upload`](Self::ui_upload) and the draw is transparent.
+    ///
+    /// Returns `None` if [`ui_setup`](Self::ui_setup) was never called.
+    #[inline]
+    pub fn ui_handles(
+        &self,
+        frame_index: usize,
+    ) -> Option<(
+        &boyko_rhi_vulkan::rhi_impl::VulkanGraphicsPipeline,
+        &boyko_rhi_vulkan::rhi_impl::VulkanBindGroup,
+    )> {
+        self.ui.as_ref().map(|ui| ui.handles(frame_index))
+    }
+
+    /// Builds the concrete swapchain [`UiPass`](boyko_rhi_vulkan::swapchain::UiPass)
+    /// the on-screen recorder records — the host-path linchpin that ties the stashed
+    /// POD [`UiFramePlan`] back to live, current-frame-re-resolved (MF-7) RHI handles.
+    ///
+    /// The render host, after stashing `plan` from [`ui_upload`](Self::ui_upload),
+    /// calls this in the SAME dispatcher window and passes the result to
+    /// [`Renderer::present_sampled`](boyko_rhi_vulkan::swapchain::Renderer::present_sampled)
+    /// as `Some(&pass)`. The pipeline + bind-group are re-resolved by
+    /// `plan.frame_index` (never a cached raw handle), so a grow that rebuilt that
+    /// slot's bind-group between upload and draw is transparent; the ortho byte view
+    /// borrows `plan`, so the returned `UiPass` borrows BOTH `self` and `plan` and is
+    /// dropped before either (the recorder uses it within the same frame).
+    ///
+    /// Returns `None` if [`ui_setup`](Self::ui_setup) was never called (no UI pass to
+    /// record this frame).
+    #[inline]
+    pub fn ui_pass<'a>(
+        &'a self,
+        plan: &'a UiFramePlan,
+    ) -> Option<boyko_rhi_vulkan::swapchain::UiPass<'a>> {
+        let (pipeline, bind_group) = self.ui_handles(plan.frame_index)?;
+        Some(boyko_rhi_vulkan::swapchain::UiPass {
+            pipeline,
+            bind_group,
+            instance_count: plan.instance_count,
+            ortho_bytes: plan.ortho.as_bytes(),
+        })
     }
 
     /// Records + submits the `gpu_integrate` compute dispatch on the column
@@ -238,6 +369,13 @@ impl RhiContext {
     /// [`Drop`] impl guarantees teardown in production — but tests still call it to
     /// assert the drained state before drop.
     pub fn destroy_all(&mut self) {
+        // Tear down the UI capability FIRST (it owns its own pipeline/rings outside
+        // the manager's registry — Decision 8 leak fix). `take()` makes it idempotent:
+        // a second `destroy_all`/`Drop` finds `None` and does nothing. Its `destroy`
+        // drains the device + frees every UI resource before `self.context` drops.
+        if let Some(ui) = self.ui.take() {
+            ui.destroy(&self.context);
+        }
         self.manager.destroy_all(&self.context);
     }
 }
@@ -252,9 +390,14 @@ impl Drop for RhiContext {
     ///
     /// `Drop::drop` runs BEFORE the struct's fields drop, so `self.context` is
     /// still alive here (the registry's `destroy_all` lifetime contract is
-    /// satisfied). `manager.destroy_all` is idempotent, so a prior explicit
-    /// `destroy_all()` call does not double-free.
+    /// satisfied). Both the UI capability teardown (`take()` ⇒ idempotent) and
+    /// `manager.destroy_all` are idempotent, so a prior explicit `destroy_all()`
+    /// call does not double-free (GUI P5a Decision 8: the UI rings/pipeline are
+    /// owned OUTSIDE the manager, so without this they would leak past Drop).
     fn drop(&mut self) {
+        if let Some(ui) = self.ui.take() {
+            ui.destroy(&self.context);
+        }
         self.manager.destroy_all(&self.context);
     }
 }

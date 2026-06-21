@@ -659,6 +659,57 @@ impl<'ctx> Renderer<'ctx> {
         })
     }
 
+    /// The frame-in-flight slot index the NEXT [`present_sampled`](Self::present_sampled)
+    /// / [`render_frame`](Self::render_frame) call will use (round-robin in
+    /// `0..FRAMES_IN_FLIGHT`).
+    ///
+    /// The render host reads this to select WHICH per-frame UI ring slot + bind-group
+    /// to upload into and re-resolve for the [`UiPass`] (GUI P5a MF-7): the host must
+    /// pass this exact index to `RhiContext::ui_upload` / `ui_handles` so the slot it
+    /// writes + binds matches the swapchain's in-flight fence this present waits on.
+    #[inline]
+    pub fn frame_index(&self) -> usize {
+        self.frame_index
+    }
+
+    /// Blocks until the CURRENT [`frame_index`](Self::frame_index) slot's in-flight
+    /// fence is signalled — i.e. the GPU has finished the submit two frames back that
+    /// last used this slot's command buffer + per-frame resources.
+    ///
+    /// # The UI-ring write-after-read hazard this closes (GUI P5a)
+    ///
+    /// `present_sampled` ALSO waits this fence, but only at its START — AFTER the host
+    /// has already memcpy'd this frame's instances into the per-frame UI ring slot.
+    /// With `FRAMES_IN_FLIGHT == 2` that ring slot was last READ by the GPU in the
+    /// submit two presents ago, whose fence is exactly this slot's in-flight fence; a
+    /// host upload before that fence signals is a write-after-read race on a
+    /// persistently-mapped, host-coherent buffer the GPU may still be reading.
+    ///
+    /// The host therefore calls this IMMEDIATELY BEFORE `RhiContext::ui_upload` for the
+    /// SAME `frame_index`, so the prior GPU read of that ring slot is complete before
+    /// the memcpy. The fence is left SIGNALLED (not reset) — `present_sampled` resets
+    /// it itself once it commits to a submit, so this extra wait is a pure no-op for
+    /// `present_sampled`'s own discipline (an already-signalled fence wait returns
+    /// immediately).
+    ///
+    /// # Errors
+    /// [`SwapchainError::VkError`] if `vkWaitForFences` fails.
+    pub fn wait_frame_in_flight(&self) -> Result<(), SwapchainError> {
+        let fence = self.frames[self.frame_index].in_flight;
+        // SAFETY: `device` is live for `'ctx`; `&fence` names the current frame slot's
+        // in-flight fence (created signalled in `new`, kept signalled between presents);
+        // an infinite wait blocks until the last submit on this slot completed. The
+        // fence is NOT reset here — `present_sampled` owns the reset on its commit path.
+        let raw = unsafe {
+            (self.fns.wait_for_fences)(self.device, 1, &fence, VK_TRUE, VK_TIMEOUT_INFINITE)
+        };
+        let result = VkResult::from_raw(raw);
+        if !result.is_success() {
+            return Err(SwapchainError::VkError("vkWaitForFences", result));
+        }
+        Ok(())
+    }
+
     /// Renders + presents ONE cleared frame in `clear` (RGBA, 0..=1) to
     /// `swapchain`, recreating it on resize / out-of-date / suboptimal.
     ///
@@ -1516,6 +1567,7 @@ impl<'ctx> Renderer<'ctx> {
         height: u32,
         clear: [f32; 4],
         readback: Option<&BoundBuffer>,
+        ui: Option<&UiPass<'_>>,
     ) -> Result<bool, SwapchainError> {
         let frame = &self.frames[self.frame_index];
 
@@ -1587,6 +1639,7 @@ impl<'ctx> Renderer<'ctx> {
                 clear,
                 composite,
                 readback,
+                ui,
             )?
         };
 
@@ -1676,6 +1729,7 @@ impl<'ctx> Renderer<'ctx> {
         clear: [f32; 4],
         composite: &SampledComposite<'_>,
         readback: Option<&BoundBuffer>,
+        ui: Option<&UiPass<'_>>,
     ) -> Result<(), SwapchainError> {
         let begin = VkCommandBufferBeginInfo {
             s_type: VkStructureType::CommandBufferBeginInfo,
@@ -1814,6 +1868,113 @@ impl<'ctx> Renderer<'ctx> {
             (self.fns.cmd_set_scissor)(cmd, 0, 1, &scissor);
             (self.fns.cmd_draw)(cmd, 3, 1, 0, 0);
             (self.fns.cmd_end_rendering)(cmd);
+        }
+
+        // --- GUI P5a Rung 5 / Decision 9: the UI rect sub-pass. After the composite
+        //     scope ENDED above, open a FRESH `begin_rendering(LoadOp::Load)` at the
+        //     FULL swapchain extent (preserve the composite, do NOT re-clear) and
+        //     record ONE instanced draw of the current frame's UI rects. The image is
+        //     still COLOR_ATTACHMENT_OPTIMAL (set by the to_color barrier above; the
+        //     composite scope only ended the render pass, not the layout), so no
+        //     barrier is needed between the two color passes — both are
+        //     COLOR_ATTACHMENT_OUTPUT writes to the same image, ordered by the render-
+        //     pass boundary. The COLOR→PRESENT/TRANSFER transition below then covers
+        //     BOTH passes' writes. A pass with `instance_count == 0` records nothing. ---
+        if let Some(ui) = ui
+            && ui.instance_count > 0
+        {
+            let ui_color = VkRenderingAttachmentInfo {
+                s_type: VkStructureType::RenderingAttachmentInfo,
+                p_next: ptr::null(),
+                image_view: view,
+                image_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                resolve_mode: 0,
+                resolve_image_view: VkImageView::NULL,
+                resolve_image_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+                // LOAD preserves the composited scene; STORE keeps the UI result.
+                load_op: VK_ATTACHMENT_LOAD_OP_LOAD,
+                store_op: VK_ATTACHMENT_STORE_OP_STORE,
+                clear_value: VkClearValue {
+                    color: VkClearColorValue { float32: [0.0; 4] },
+                },
+            };
+            // The UI pass covers the FULL swapchain extent (NOT `present_extent`): the
+            // ortho denominator the host computed is the swapchain extent, so a rect at
+            // the bottom-right corner must reach the bottom-right swapchain texel.
+            let ui_rendering = VkRenderingInfo {
+                s_type: VkStructureType::RenderingInfo,
+                p_next: ptr::null(),
+                flags: 0,
+                render_area: VkRect2D {
+                    offset: VkOffset2D { x: 0, y: 0 },
+                    extent,
+                },
+                layer_count: 1,
+                view_mask: 0,
+                color_attachment_count: 1,
+                p_color_attachments: &ui_color,
+                p_depth_attachment: ptr::null(),
+                p_stencil_attachment: ptr::null(),
+            };
+            let ui_viewport = VkViewport {
+                x: 0.0,
+                y: 0.0,
+                width: extent.width as f32,
+                height: extent.height as f32,
+                min_depth: 0.0,
+                max_depth: 1.0,
+            };
+            let ui_scissor = VkRect2D {
+                offset: VkOffset2D { x: 0, y: 0 },
+                extent,
+            };
+            debug_assert_eq!(
+                ui.ortho_bytes.len(),
+                16,
+                "invariant: the UI ortho push block is 16 bytes (UiOrtho)"
+            );
+            // SAFETY: recording is open; `ui_rendering` is fully initialized — its color
+            // attachment names the live swapchain `view` (still COLOR_ATTACHMENT_OPTIMAL
+            // from the to_color barrier) with LoadOp::LOAD (preserving the composite).
+            // `ui.pipeline`/`ui.bind_group` are the caller's live, current-frame-
+            // re-resolved (MF-7) UI handles (their `RhiContext` outlives this submit per
+            // the caller contract); the pipeline's `color_formats[0]` equals the
+            // swapchain format (W2-b). The ortho is pushed to the pipeline's VERTEX range
+            // (16 B, asserted); the bind-group's STORAGE ring holds `instance_count`
+            // valid records uploaded for this frame index. `ui_viewport`/`ui_scissor`
+            // span the full swapchain extent and outlive the bracketed calls; the
+            // vertexless `draw(6, N, 0, 0)` reads the SSBO by `SV_InstanceID`. Begin/End
+            // bracket the pass exactly.
+            unsafe {
+                (self.fns.cmd_begin_rendering)(cmd, &ui_rendering);
+                (self.fns.cmd_bind_pipeline)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    ui.pipeline.pipeline,
+                );
+                (self.fns.cmd_bind_descriptor_sets)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    ui.pipeline.layout,
+                    0,
+                    1,
+                    &ui.bind_group.descriptor_set,
+                    0,
+                    ptr::null(),
+                );
+                (self.fns.cmd_push_constants)(
+                    cmd,
+                    ui.pipeline.layout,
+                    VK_SHADER_STAGE_VERTEX_BIT,
+                    0,
+                    ui.ortho_bytes.len() as u32,
+                    ui.ortho_bytes.as_ptr().cast(),
+                );
+                (self.fns.cmd_set_viewport)(cmd, 0, 1, &ui_viewport);
+                (self.fns.cmd_set_scissor)(cmd, 0, 1, &ui_scissor);
+                (self.fns.cmd_draw)(cmd, 6, ui.instance_count, 0, 0);
+                (self.fns.cmd_end_rendering)(cmd);
+            }
         }
 
         // The post-draw color transition depends on whether a readback is requested
@@ -3334,6 +3495,37 @@ pub struct SampledComposite<'a> {
     /// This denotes the TEXTURE, never the swapchain — passing the swapchain extent
     /// here would re-introduce the stretch this field exists to remove.
     pub texture_extent: VkExtent2D,
+}
+
+/// The on-screen UI rect sub-pass inputs (GUI P5a Rung 5 / Decision 9), recorded by
+/// [`Renderer::present_sampled`] into the SAME swapchain `cmd` AFTER the composite
+/// scope ends and BEFORE the COLOR→PRESENT barrier.
+///
+/// All fields are CONCRETE `boyko_rhi_vulkan` handles + POD — `boyko_rhi_vulkan` does
+/// not (and must not) depend on `boyko_render`, so the caller (the render host, which
+/// owns the `RhiContext`) RE-RESOLVES the current-frame UI pipeline + bind-group by
+/// `frame_index` (`RhiContext::ui_handles`, MF-7) and passes them here by reference,
+/// together with the instance count + the 16-byte ortho push block. The pass opens
+/// its OWN `begin_rendering(LoadOp::Load)` at the FULL swapchain extent (preserving
+/// the composited scene), so a rect at the bottom-right corner lands at the
+/// bottom-right swapchain texel (the ortho denominator = the swapchain extent).
+///
+/// A pass with `instance_count == 0` records NOTHING (no empty draw, no UI scope).
+pub struct UiPass<'a> {
+    /// The UI graphics pipeline (vertexless quad, blend = premultiplied, its
+    /// `color_formats[0]` equals the swapchain format — W2-b). Re-resolved by the
+    /// caller from the current `frame_index`.
+    pub pipeline: &'a VulkanGraphicsPipeline,
+    /// The current-FIF ring's bind-group (one STORAGE buffer @ set0/binding0). The
+    /// backing ring holds `instance_count` valid `UiInstance` records uploaded for
+    /// THIS frame index before this draw. Re-resolved by the caller.
+    pub bind_group: &'a VulkanBindGroup,
+    /// The number of UI instances to draw (`draw(6, instance_count, 0, 0)`); `0`
+    /// records nothing.
+    pub instance_count: u32,
+    /// The 16-byte pixel→NDC ortho push block (`UiOrtho` byte image), pushed to the
+    /// pipeline's VERTEX range. Borrowed for the record call only.
+    pub ortho_bytes: &'a [u8],
 }
 
 /// The byte size of the marcher's MVP push constant (a `float4x4`), pushed to the
