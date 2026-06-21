@@ -53,16 +53,26 @@
 
 pub mod barrier;
 pub mod error;
+pub mod gpu3d_instance;
+pub mod gpu3d_system;
 pub mod gpu_column;
 pub mod gpu_system;
 pub mod light;
+pub mod light_plugin;
+pub mod light_reconcile;
 pub mod light_system;
 pub mod material;
+pub mod render3d_plugin;
 pub mod ui;
 pub mod view;
 
 pub use barrier::{PlannedBarrier, lower_barriers};
 pub use error::GpuColumnError;
+pub use gpu3d_instance::{GPU3D_INSTANCE_SIZE, Gpu3dInstance};
+pub use gpu3d_system::sync_gpu_3d_instances;
+pub use light_plugin::LightingPlugin;
+pub use light_reconcile::light_reconcile;
+pub use render3d_plugin::Render3dPlugin;
 pub use gpu_column::{GpuColumnManager, GpuColumnMeta, LOCAL_SIZE_X, ResolvedColumn, RhiContext};
 pub use gpu_system::{GpuSystem, gpu_integrate_spirv};
 pub use light::{

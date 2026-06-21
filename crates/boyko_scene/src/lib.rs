@@ -43,6 +43,7 @@ pub mod camera;
 pub mod camera_plugin;
 pub mod plugin;
 pub mod propagation;
+pub mod render_caps;
 pub mod transform;
 
 pub use camera::{
@@ -51,6 +52,7 @@ pub use camera::{
 pub use camera_plugin::CameraPlugin;
 pub use plugin::TransformPlugin;
 pub use propagation::{TransformPropagationScratch, compute_global_transform, propagate_transforms};
+pub use render_caps::{MaterialHandle, MeshHandle, RenderEnabled, Visibility};
 pub use transform::{GlobalTransform, Transform};
 
 /// Common `boyko_scene` imports.
@@ -66,5 +68,6 @@ pub mod prelude {
     pub use crate::camera_plugin::CameraPlugin;
     pub use crate::plugin::TransformPlugin;
     pub use crate::propagation::{compute_global_transform, propagate_transforms};
+    pub use crate::render_caps::{MaterialHandle, MeshHandle, RenderEnabled, Visibility};
     pub use crate::transform::{GlobalTransform, Transform};
 }
