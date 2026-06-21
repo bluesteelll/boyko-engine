@@ -58,7 +58,7 @@ pub use data::{AnyOf, Mut, QueryData, ReadOnlyQueryData, Ref};
 pub use dense_iter::{DenseQueryData, DenseQueryIter, DenseQueryIterMut};
 pub use filter::{Added, ArchetypalQueryFilter, Changed, Or, QueryFilter, With, Without};
 pub use filter_enable::{Disabled, Enabled};
-pub use iter::{QueryIter, QueryIterMut};
+pub use iter::{QueryIter, QueryIterEntities, QueryIterEntitiesMut, QueryIterMut};
 pub use par_iter::{BatchingStrategy, MIN_ARCHETYPE_FOR_PARALLEL, ParQuery, ParQueryMut};
 pub use query::Query;
 pub use query_type_registry::{MAX_QUERY_TYPES, QueryTypeId, QueryTypeKey};

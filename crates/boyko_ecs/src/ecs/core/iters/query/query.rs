@@ -27,7 +27,9 @@ use crate::ecs::core::iters::query::dense_iter::{
 };
 use crate::ecs::core::iters::query::enable_terms::EnableTerms;
 use crate::ecs::core::iters::query::filter::{ArchetypalQueryFilter, QueryFilter};
-use crate::ecs::core::iters::query::iter::{QueryIter, QueryIterMut};
+use crate::ecs::core::iters::query::iter::{
+    QueryIter, QueryIterEntities, QueryIterEntitiesMut, QueryIterMut,
+};
 use crate::ecs::core::iters::query::par_chunk;
 use crate::ecs::core::iters::query::par_iter::{BatchingStrategy, ParQuery, ParQueryMut};
 use crate::ecs::core::iters::query::state::QueryDataState;
@@ -36,7 +38,7 @@ use crate::ecs::core::system::filtered_access_set::FilteredAccessSet;
 use crate::ecs::core::system::system_meta::SystemMeta;
 use crate::ecs::core::system::system_param::SystemParam;
 use crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell;
-use crate::ecs::identifiers::primitives::ArchetypeId;
+use crate::ecs::identifiers::primitives::{ArchetypeId, EntityId};
 
 /// Typed component query — the canonical Phase 8b iteration handle.
 ///
@@ -294,6 +296,88 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
         //   at `'s` so it does not conflict with the `&mut self` reborrow.
         let ids = self.driver_ids();
         unsafe { QueryIterMut::new(self.state, ids, self.world, self.meta, self.enable_terms) }
+    }
+
+    /// Returns a read-only iterator yielding `(EntityId, D::Item<'_>)` for every
+    /// entity in every matched archetype (S0).
+    ///
+    /// The per-row entity is read from the matched archetype's already-cached
+    /// `entity_ids` column — the same base the component fetch computes — so the
+    /// hot inner loop is identical to [`Self::iter`] plus one entity-id load per
+    /// row and one base capture per archetype (no extra archetype walk). The
+    /// per-row `Changed` / `Added` filter is honoured exactly as in [`Self::iter`].
+    ///
+    /// `D` must be **read-only** at the type level — see
+    /// [`QueryData::IS_READ_ONLY`]. For mutable iteration use
+    /// [`Self::iter_entities_mut`].
+    pub fn iter_entities(&self) -> QueryIterEntities<'_, 's, D, F>
+    where
+        D: ReadOnlyQueryData,
+    {
+        // SAFETY (Q1, QD4): identical contract to `Self::iter` — `D:
+        //   ReadOnlyQueryData` ⇒ no `&mut T`; `QueryIterEntities::new` mints
+        //   read-only archetype pointers and dispatches only
+        //   `set_table_readonly`. The added per-row entity-id read targets the
+        //   archetype's entity-id column (distinct from every component column).
+        //   Phase 22.1 Area A: the id slice is resolved once here.
+        let ids = self.driver_ids();
+        unsafe {
+            QueryIterEntities::new(self.state, ids, self.world, self.meta, self.enable_terms)
+        }
+    }
+
+    /// Returns a mutable iterator yielding `(EntityId, D::Item<'_>)` for every
+    /// entity in every matched archetype (S0).
+    ///
+    /// Mutable twin of [`Self::iter_entities`]: same per-archetype entity-base
+    /// threading and per-row tick-filter semantics as [`Self::iter_mut`], plus
+    /// one entity-id load per row. The `&mut self` borrow guarantees cursor
+    /// uniqueness (Q3).
+    pub fn iter_entities_mut(&mut self) -> QueryIterEntitiesMut<'_, 's, D, F> {
+        // SAFETY (Q1, Q3, QD4): identical contract to `Self::iter_mut` — `&mut
+        //   self` enforces cursor uniqueness; `QueryIterEntitiesMut::new` mints
+        //   write-capable archetype pointers and dispatches `set_table_mut`. The
+        //   per-row entity-id read targets the entity-id column (a distinct
+        //   allocation from every `&mut`-accessed component column), so it never
+        //   aliases the mutable fetch.
+        let ids = self.driver_ids();
+        unsafe {
+            QueryIterEntitiesMut::new(self.state, ids, self.world, self.meta, self.enable_terms)
+        }
+    }
+
+    /// Invoke `f` once per matched archetype, passing the archetype's
+    /// `entity_ids` slice alongside the component chunk (S0).
+    ///
+    /// Entity-yielding twin of [`Self::for_each_chunk`]: `f` receives a
+    /// `&[EntityId]` parallel to `D::ChunkItem` over the same row range, so a
+    /// `for i in 0..len { let e = ents[i]; … }` body is SoA-sequential on both
+    /// arrays. The entity-id slice base is the archetype's already-cached
+    /// `entity_ids` column (captured once per archetype — no extra walk).
+    ///
+    /// `D` must satisfy [`ChunkedQueryData`]; `F` must satisfy
+    /// [`ArchetypalQueryFilter`] (both compile-time, as in [`Self::for_each_chunk`]).
+    ///
+    /// [`ChunkedQueryData`]: super::chunked_data::ChunkedQueryData
+    /// [`ArchetypalQueryFilter`]: super::filter::ArchetypalQueryFilter
+    #[inline]
+    pub fn for_each_chunk_entities<Func>(&mut self, f: Func)
+    where
+        D: ChunkedQueryData,
+        F: ArchetypalQueryFilter,
+        Func: for<'c> FnMut(&'c [EntityId], D::ChunkItem<'c>),
+    {
+        // SAFETY (Q1, Q3, CD1-CD4): identical contract to `Self::for_each_chunk`
+        //   — `&mut self` enforces cursor uniqueness; `D::IS_READ_ONLY` selects
+        //   the readonly / mut chunk-dispatch arm; the cell is passed by value to
+        //   preserve provenance. The added per-archetype entity-id slice borrows
+        //   the entity-id column (distinct from every component column).
+        //   Phase 22.1 Area A: the id slice is resolved once before dispatch.
+        let ids = self.driver_ids();
+        let mutable = !D::IS_READ_ONLY;
+        unsafe {
+            chunk_iter::for_each_chunk_entities_impl(self.state, ids, self.world, mutable, f);
+        }
     }
 
     /// Returns a contiguous PURE-DENSE iterator over `(EntityId, &T)` for every

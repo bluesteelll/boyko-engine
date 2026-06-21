@@ -48,7 +48,7 @@ use crate::ecs::core::iters::query::chunked_data::ChunkedQueryData;
 use crate::ecs::core::iters::query::filter::ArchetypalQueryFilter;
 use crate::ecs::core::iters::query::state::QueryDataState;
 use crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell;
-use crate::ecs::identifiers::primitives::ArchetypeId;
+use crate::ecs::identifiers::primitives::{ArchetypeId, EntityId};
 
 /// Sequential chunked-iter driver. Shared between
 /// [`Query::for_each_chunk`] and [`QueryView::for_each_chunk`].
@@ -195,6 +195,111 @@ pub(crate) unsafe fn for_each_chunk_impl<'q, 's, D, F, Func>(
     }
 }
 
+/// Sequential entity-yielding chunked-iter driver (S0).
+///
+/// Byte-identical to [`for_each_chunk_impl`] except the closure additionally
+/// receives the archetype's `entity_ids` slice (`&'c [EntityId]`), parallel to
+/// the component chunk over the same `[0, entity_count)` row range. The entity
+/// slice base is `arch.entity_ids_slice()` — captured once per archetype (the
+/// same column the fetch already reads), so there is **no extra archetype
+/// walk**: the cost over `for_each_chunk_impl` is one slice materialisation per
+/// archetype.
+///
+/// # Inline policy
+///
+/// Same rationale as [`for_each_chunk_impl`] — not marked `#[inline]`; LLVM
+/// inlines it into the single-call-site caller.
+///
+/// # Safety
+///
+/// Same caller contracts as [`for_each_chunk_impl`] (read/write provenance of
+/// `D`, state-sync). The added `entity_ids` slice is a shared borrow of the
+/// archetype's entity-id column — a DISTINCT allocation from every component
+/// column, so it never aliases the (possibly `&mut`) component chunk; distinct
+/// rows map to distinct ids.
+pub(crate) unsafe fn for_each_chunk_entities_impl<'q, 's, D, F, Func>(
+    state: &'s QueryDataState<D, F>,
+    ids: &[ArchetypeId],
+    world: UnsafeEcsCell<'q>,
+    mutable: bool,
+    mut f: Func,
+) where
+    D: ChunkedQueryData,
+    F: ArchetypalQueryFilter,
+    Func: for<'c> FnMut(&'c [EntityId], D::ChunkItem<'c>),
+{
+    // Dense plan D3: same compile-reject as `for_each_chunk_impl` — a dense term
+    // cannot supply whole-archetype slices. Const-folds away for a no-dense
+    // query (the 0%-gate).
+    const {
+        assert!(
+            !D::HAS_DENSE && !F::HAS_DENSE,
+            "a dense (storage = \"dense\") term is not supported on `for_each_chunk_entities` — \
+             use `Query::iter_entities` (mixed) instead"
+        )
+    };
+    let mut chunk_fetch = <D as ChunkedQueryData>::init_chunk_fetch(&state.data_state);
+
+    for &arch_id in ids {
+        // SAFETY (U_C2 / U_C3, Q5): mirrors `for_each_chunk_impl` — read-only /
+        //   write-capable mint split by `mutable`; stale ids skip via `continue`
+        //   (Q5). When `mutable == false` the `*const → *mut` cast is never
+        //   dereferenced as write-capable (only `set_chunk_readonly` runs).
+        let arch_ptr: *mut Archetype = unsafe {
+            if mutable {
+                match world.archetype_ptr_mut(arch_id) {
+                    Some(p) => p,
+                    None => continue,
+                }
+            } else {
+                match world.archetype_ptr(arch_id) {
+                    Some(p) => p as *mut Archetype,
+                    None => continue,
+                }
+            }
+        };
+
+        // SAFETY (U1 / U2): `arch_ptr` is slab-stable for `'q`; the `&Archetype`
+        //   reborrow is bounded to these two reads. No `&mut Archetype` is
+        //   produced. The entity-id slice borrows the archetype's entity-id
+        //   column (distinct from every component column).
+        let arch_ref: &Archetype = unsafe { &*arch_ptr };
+        let entity_count = arch_ref.entity_count();
+        if entity_count == 0 {
+            continue;
+        }
+        let entity_slice: &[EntityId] = arch_ref.entity_ids_slice();
+
+        // SAFETY (CD1, CD4): identical dispatch to `for_each_chunk_impl` —
+        //   write-capable / read-only chunk set chosen by `mutable`; no `meta`
+        //   needed (`NEEDS_CHANGE_DETECTION = false` at this monomorphisation).
+        unsafe {
+            if mutable {
+                <D as ChunkedQueryData>::set_chunk_mut(
+                    &mut chunk_fetch,
+                    &state.data_state,
+                    arch_ptr,
+                );
+            } else {
+                <D as ChunkedQueryData>::set_chunk_readonly(
+                    &mut chunk_fetch,
+                    &state.data_state,
+                    arch_ptr as *const _,
+                );
+            }
+        }
+
+        // SAFETY (CD2): `set_chunk_*` initialised `chunk_fetch` for this
+        //   archetype; `start = 0`, `len = entity_count` covers the live row
+        //   range `[0, entity_count)`. CD3 disjointness is vacuous on the
+        //   sequential path — exactly one `fetch_chunk` per archetype.
+        let item = unsafe {
+            <D as ChunkedQueryData>::fetch_chunk(&chunk_fetch, 0, entity_count)
+        };
+        f(entity_slice, item);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,7 +307,7 @@ mod tests {
     use crate::ecs::core::component::component_registry;
     use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
     use crate::ecs::core::system::system_meta::SystemMeta;
-    use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId};
+    use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId, EntityId};
 
     // Component ids reserved for the Phase X.A Wave 4 chunk_iter tests. The
     // free range below was verified at write time against the existing
@@ -256,6 +361,26 @@ mod tests {
         };
         ecs.create_entity(arch_id, &[(COMP_A, bytes)])
             .expect("spawn_a: create_entity must succeed");
+    }
+
+    /// Spawns a `CompA(value)` entity into `arch_id` and returns its `EntityId`.
+    ///
+    /// Threads the freshly-minted `EntityId` back so the S0
+    /// `for_each_chunk_entities` tests can correlate the per-archetype entity-id
+    /// slice against spawn order.
+    fn spawn_a_id(ecs: &mut EcsMaster, arch_id: ArchetypeId, value: u32) -> EntityId {
+        let comp = CompA(value);
+        // SAFETY: `CompA` is `#[repr(C)]` POD; reading its bytes produces a
+        //   valid byte slice for the duration of this call.
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                &comp as *const CompA as *const u8,
+                std::mem::size_of::<CompA>(),
+            )
+        };
+        ecs.create_entity(arch_id, &[(COMP_A, bytes)])
+            .expect("spawn_a_id: create_entity must succeed")
+            .id()
     }
 
     /// Spawns a `(CompA(a), CompB(b))` entity into `arch_id`.
@@ -783,5 +908,239 @@ mod tests {
             invocations, 2,
             "exactly one closure invocation per matched non-empty archetype",
         );
+    }
+
+    // ── S0: for_each_chunk_entities_impl driver tests ───────────────────────
+    //
+    // These exercise the NEW entity-yielding chunk driver directly. The closure
+    // receives the archetype's `entity_ids` slice parallel to the component
+    // chunk over the same `[0, entity_count)` range. Gates covered:
+    //   * unit — the entity slice equals the live entities of the archetype in
+    //     slot order, and has the same length as the component chunk;
+    //   * property — the per-archetype `(EntityId, payload)` pairs, joined over
+    //     all archetypes, equal the spawned set;
+    //   * Miri-TB — `entities_chunk_write_keyed_by_id` writes through the `&mut`
+    //     chunk while reading the entity-id slice on the same rows (run under
+    //     `-Zmiri-tree-borrows`).
+
+    /// Single archetype: the closure fires once with an entity slice and a
+    /// component slice of equal length; the ids equal the spawned set in order.
+    #[test]
+    fn entities_single_archetype_slice_pair() {
+        register_test_components();
+        let mut ecs = EcsMaster::new();
+        let arch = ecs.create_archetype(&[COMP_A]);
+        let mut spawned: Vec<EntityId> = Vec::with_capacity(8);
+        for i in 0..8u32 {
+            spawned.push(spawn_a_id(&mut ecs, arch, i + 100));
+        }
+
+        let state = QueryDataState::<&CompA, ()>::new(&mut ecs);
+        // SAFETY (U_C1): cell consumed within this scope.
+        let cell = unsafe { UnsafeEcsCell::new_mutable(&mut ecs) };
+
+        let mut invocations = 0usize;
+        let mut observed: Vec<(EntityId, u32)> = Vec::new();
+        // SAFETY (Q1, CD1-CD4): direct driver test; `D = &CompA` read-only ⇒
+        //   `mutable = false`; `F = ()` archetypal; no aliasing live.
+        unsafe {
+            let ids = state.archetype_state.matched_ids_pre_terms();
+            for_each_chunk_entities_impl::<&CompA, (), _>(
+                &state,
+                ids,
+                cell,
+                false,
+                |ents: &[EntityId], comps: &[CompA]| {
+                    invocations += 1;
+                    assert_eq!(
+                        ents.len(),
+                        comps.len(),
+                        "entity slice and component chunk must share a length",
+                    );
+                    for (e, c) in ents.iter().zip(comps.iter()) {
+                        observed.push((*e, c.0));
+                    }
+                },
+            );
+        }
+
+        assert_eq!(invocations, 1, "single archetype ⇒ one closure invocation");
+        let observed_ids: Vec<EntityId> = observed.iter().map(|(e, _)| *e).collect();
+        assert_eq!(
+            observed_ids, spawned,
+            "entity slice must equal the live entities in slot order",
+        );
+        for (i, (_, v)) in observed.iter().enumerate() {
+            assert_eq!(*v, i as u32 + 100, "payload must match the spawned value");
+        }
+    }
+
+    /// Two matched archetypes: the joined `(EntityId, payload)` set across both
+    /// closure invocations equals the spawned set; each slice pair is internally
+    /// length-matched.
+    #[test]
+    fn entities_multi_archetype_join_equals_spawned() {
+        register_test_components();
+        let mut ecs = EcsMaster::new();
+        let arch_a = ecs.create_archetype(&[COMP_A]);
+        let arch_ab = ecs.create_archetype(&[COMP_A, COMP_B]);
+        let mut spawned: Vec<(EntityId, u32)> = Vec::new();
+        for i in 0..3u32 {
+            let e = spawn_a_id(&mut ecs, arch_a, i + 200);
+            spawned.push((e, i + 200));
+        }
+        // arch_ab carries both columns; capture each id via the returned Entity.
+        for i in 0..5u32 {
+            let ca = CompA(i + 300);
+            let cb = CompB(0);
+            // SAFETY: both `#[repr(C)]` POD; slices valid for the call.
+            let a_bytes = unsafe {
+                std::slice::from_raw_parts(
+                    &ca as *const CompA as *const u8,
+                    std::mem::size_of::<CompA>(),
+                )
+            };
+            let b_bytes = unsafe {
+                std::slice::from_raw_parts(
+                    &cb as *const CompB as *const u8,
+                    std::mem::size_of::<CompB>(),
+                )
+            };
+            let e = ecs
+                .create_entity(arch_ab, &[(COMP_A, a_bytes), (COMP_B, b_bytes)])
+                .expect("create_entity must succeed for arch_ab");
+            spawned.push((e.id(), i + 300));
+        }
+
+        let state = QueryDataState::<&CompA, ()>::new(&mut ecs);
+        // SAFETY (U_C1): cell consumed within this scope.
+        let cell = unsafe { UnsafeEcsCell::new_mutable(&mut ecs) };
+
+        let mut joined: Vec<(EntityId, u32)> = Vec::new();
+        // SAFETY (Q1, CD1-CD4): read-only driver test; archetypal filter.
+        unsafe {
+            let ids = state.archetype_state.matched_ids_pre_terms();
+            for_each_chunk_entities_impl::<&CompA, (), _>(
+                &state,
+                ids,
+                cell,
+                false,
+                |ents: &[EntityId], comps: &[CompA]| {
+                    assert_eq!(ents.len(), comps.len(), "slice pair must be length-matched");
+                    for (e, c) in ents.iter().zip(comps.iter()) {
+                        joined.push((*e, c.0));
+                    }
+                },
+            );
+        }
+
+        let mut j = joined.clone();
+        let mut s = spawned.clone();
+        j.sort_unstable_by_key(|(e, v)| (e.0, *v));
+        s.sort_unstable_by_key(|(e, v)| (e.0, *v));
+        assert_eq!(
+            j, s,
+            "the joined (EntityId, payload) set must equal the spawned set",
+        );
+    }
+
+    /// Empty archetype: the `entity_count == 0` guard fires before the entity
+    /// slice is materialised — the closure must NOT run for that archetype.
+    #[test]
+    fn entities_empty_archetype_skipped() {
+        register_test_components();
+        let mut ecs = EcsMaster::new();
+        let arch_empty = ecs.create_archetype(&[COMP_A]);
+        let _ = arch_empty;
+
+        let state = QueryDataState::<&CompA, ()>::new(&mut ecs);
+        // SAFETY (U_C1): cell consumed within this scope.
+        let cell = unsafe { UnsafeEcsCell::new_mutable(&mut ecs) };
+
+        let mut invocations = 0usize;
+        // SAFETY (Q1, CD1-CD4): read-only driver test; archetypal filter.
+        unsafe {
+            let ids = state.archetype_state.matched_ids_pre_terms();
+            for_each_chunk_entities_impl::<&CompA, (), _>(
+                &state,
+                ids,
+                cell,
+                false,
+                |_ents: &[EntityId], _comps: &[CompA]| {
+                    invocations += 1;
+                },
+            );
+        }
+
+        assert_eq!(
+            invocations, 0,
+            "empty archetype must hit the entity_count == 0 skip — closure must NOT fire",
+        );
+    }
+
+    /// Miri-TB + mutable-correctness gate: write each row's CompA to its own
+    /// `EntityId.0` (read from the entity slice on the same row) through the
+    /// `&mut` chunk, then re-read read-only and confirm each entity carries its
+    /// own id. Run under `-Zmiri-tree-borrows` to prove the shared entity-slice
+    /// read does not alias the `&mut` component chunk.
+    #[test]
+    fn entities_chunk_write_keyed_by_id() {
+        register_test_components();
+        let mut ecs = EcsMaster::new();
+        let arch = ecs.create_archetype(&[COMP_A]);
+        let mut spawned: Vec<EntityId> = Vec::new();
+        for i in 0..20u32 {
+            spawned.push(spawn_a_id(&mut ecs, arch, i));
+        }
+
+        // Phase 1 — write `id.0 as u32` into each CompA via the mut entity chunk.
+        {
+            let state = QueryDataState::<&mut CompA, ()>::new(&mut ecs);
+            // SAFETY (U_C1): cell consumed in this block.
+            let cell = unsafe { UnsafeEcsCell::new_mutable(&mut ecs) };
+            // SAFETY (Q1, CD1-CD4): mut driver test; `mutable = true`; the
+            //   entity slice borrows the entity-id column (distinct allocation
+            //   from the `&mut` CompA column) — no alias.
+            unsafe {
+                let ids = state.archetype_state.matched_ids_pre_terms();
+                for_each_chunk_entities_impl::<&mut CompA, (), _>(
+                    &state,
+                    ids,
+                    cell,
+                    true,
+                    |ents: &[EntityId], comps: &mut [CompA]| {
+                        for (e, c) in ents.iter().zip(comps.iter_mut()) {
+                            c.0 = e.0 as u32;
+                        }
+                    },
+                );
+            }
+        }
+
+        // Phase 2 — read-only re-iteration; each entity's CompA must equal its id.
+        let state = QueryDataState::<&CompA, ()>::new(&mut ecs);
+        // SAFETY (U_C1): cell consumed in this block.
+        let cell = unsafe { UnsafeEcsCell::new_mutable(&mut ecs) };
+        let mut seen = 0usize;
+        // SAFETY (Q1, CD1-CD4): read-only re-iteration; no aliasing live.
+        unsafe {
+            let ids = state.archetype_state.matched_ids_pre_terms();
+            for_each_chunk_entities_impl::<&CompA, (), _>(
+                &state,
+                ids,
+                cell,
+                false,
+                |ents: &[EntityId], comps: &[CompA]| {
+                    for (e, c) in ents.iter().zip(comps.iter()) {
+                        assert_eq!(
+                            c.0, e.0 as u32,
+                            "each entity's CompA must equal its own id written via the chunk",
+                        );
+                        seen += 1;
+                    }
+                },
+            );
+        }
+        assert_eq!(seen, spawned.len(), "every spawned entity must reappear");
     }
 }

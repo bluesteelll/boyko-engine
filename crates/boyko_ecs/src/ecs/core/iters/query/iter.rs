@@ -65,7 +65,7 @@ use crate::ecs::core::iters::query::filter::QueryFilter;
 use crate::ecs::core::iters::query::state::QueryDataState;
 use crate::ecs::core::system::system_meta::SystemMeta;
 use crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell;
-use crate::ecs::identifiers::primitives::ArchetypeId;
+use crate::ecs::identifiers::primitives::{ArchetypeId, EntityId};
 
 // ── QueryIter (read-only cursor) ───────────────────────────────────────────
 
@@ -644,6 +644,436 @@ impl<'q, 's, D: QueryData, F: QueryFilter> Iterator for QueryIterMut<'q, 's, D, 
     }
 }
 
+// ── QueryIterEntities (read-only entity-yielding cursor) ───────────────────
+
+/// Read-only cursor yielding `(EntityId, D::Item<'q>)` per row (S0).
+///
+/// Field shape and `next()` body are byte-identical to [`QueryIter`] except
+/// for one added field — the per-archetype `entity_ids` column base — and one
+/// added load per row (`*entity_ids.add(row)`). The base is captured once per
+/// archetype transition from `arch_ref.entity_ids_slice().as_ptr()` (the same
+/// pointer the fetch path already computes for the dense gather), so there is
+/// **no extra archetype walk**: the cost is one base capture per archetype plus
+/// one `EntityId` load per row.
+///
+/// This is a SEPARATE type from [`QueryIter`] so the non-entity [`QueryIter`]
+/// stays byte-identical (the S0 0%-gate); the existing cursor does not route
+/// through this one.
+pub struct QueryIterEntities<'q, 's, D: QueryData, F: QueryFilter> {
+    archetype_ids: std::slice::Iter<'q, ArchetypeId>,
+    data_state: &'s D::State,
+    filter_state: &'s F::State,
+    world: UnsafeEcsCell<'q>,
+    data_fetch: D::Fetch<'q>,
+    filter_fetch: F::Fetch<'q>,
+    current_row: usize,
+    current_len: usize,
+    /// Per-archetype `entity_ids` column base, refreshed at every archetype
+    /// transition. Aliases the same archetype's entity-id column read by the
+    /// component fetch (a DISTINCT allocation from any component column); NULL
+    /// before the first transition. Read shared per row to yield the entity.
+    entity_ids: *const EntityId,
+    /// See [`QueryIter::meta`].
+    meta: &'s SystemMeta,
+    /// See [`QueryIter::enable_terms`].
+    enable_terms: EnableTerms,
+    /// See [`QueryIter::enable_cols`].
+    enable_cols: EnableTermCols,
+    _marker: PhantomData<&'s ()>,
+}
+
+impl<'q, 's, D: QueryData, F: QueryFilter> QueryIterEntities<'q, 's, D, F>
+where
+    's: 'q,
+{
+    /// Builds a fresh read-only entity-yielding cursor over `ids`.
+    ///
+    /// Same contract as [`QueryIter::new`]; the only addition is the per-row
+    /// `(EntityId, _)` yield threaded from the per-archetype entity-id base.
+    ///
+    /// # Safety
+    ///
+    /// Identical to [`QueryIter::new`] (Q1, QD4, U_C2). The added per-row
+    /// `entity_ids` read is a shared read of the archetype's entity-id column,
+    /// a distinct allocation from every component column (see the struct doc).
+    #[inline]
+    pub(crate) unsafe fn new(
+        state: &'s QueryDataState<D, F>,
+        ids: &'q [ArchetypeId],
+        world: UnsafeEcsCell<'q>,
+        meta: &'s SystemMeta,
+        enable_terms: EnableTerms,
+    ) -> Self {
+        let mut data_fetch = <D as QueryData>::init_fetch(&state.data_state);
+        let mut filter_fetch = <F as QueryFilter>::init_fetch(&state.filter_state);
+        // Dense plan D3 (FORK 1): mirror `QueryIter::new` — resolve the global
+        // dense store pointer(s) ONCE here, const-gated by `D::HAS_DENSE` /
+        // `F::HAS_DENSE` (a no-dense query emits NOTHING — the 0%-gate).
+        if const { D::HAS_DENSE } {
+            // SAFETY (D3): `world` is the read-only mint scoped to `'q`; the
+            //   resolved store pointer is address-stable for `'q`.
+            unsafe { <D as QueryData>::resolve_dense(&mut data_fetch, &state.data_state, world); }
+        }
+        if const { F::HAS_DENSE } {
+            // SAFETY (D3): see above.
+            unsafe { <F as QueryFilter>::resolve_dense(&mut filter_fetch, &state.filter_state, world); }
+        }
+        Self {
+            archetype_ids: ids.iter(),
+            data_state: &state.data_state,
+            filter_state: &state.filter_state,
+            world,
+            data_fetch,
+            filter_fetch,
+            current_row: 0,
+            current_len: 0,
+            entity_ids: std::ptr::null(),
+            meta,
+            enable_terms,
+            enable_cols: EnableTermCols::EMPTY,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<'q, 's, D: QueryData, F: QueryFilter> Iterator for QueryIterEntities<'q, 's, D, F>
+where
+    D: ReadOnlyQueryData,
+{
+    type Item = (EntityId, D::Item<'q>);
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            while self.current_row < self.current_len {
+                let row = self.current_row;
+                self.current_row += 1;
+
+                // Const-folded archetypal-filter skip — see `QueryIter::next`.
+                if !const { F::IS_ARCHETYPAL } {
+                    // SAFETY (QF1): `set_table_readonly` ran for this archetype
+                    //   before the inner loop; `row < self.current_len`.
+                    let pass = unsafe {
+                        <F as QueryFilter>::filter_fetch(&self.filter_fetch, row)
+                    };
+                    if !pass {
+                        continue;
+                    }
+                }
+
+                // Dense per-row mixed-gather skip — see `QueryIter::next`.
+                if const { D::HAS_DENSE } {
+                    // SAFETY (D3): dense fetch fields populated by `resolve_dense`
+                    //   + `set_table_*`; `row < self.current_len`.
+                    let pass = unsafe {
+                        <D as QueryData>::dense_row_passes(&self.data_fetch, row)
+                    };
+                    if !pass {
+                        continue;
+                    }
+                }
+
+                // Dynamic per-row enable terms — see `QueryIter::next`.
+                if !self.enable_terms.is_empty() {
+                    // SAFETY (ENBL-9): `enable_cols` resolved for this archetype at
+                    //   the transition below; `row < self.current_len`; column
+                    //   pointers valid for `'q`.
+                    let pass = unsafe { self.enable_cols.passes(row) };
+                    if !pass {
+                        continue;
+                    }
+                }
+
+                // SAFETY (S0): `self.entity_ids` is the current archetype's
+                //   entity-id column base, captured at the transition below from
+                //   `entity_ids_slice().as_ptr()`. `row < self.current_len ==
+                //   entity_count()`, so `entity_ids.add(row)` is in bounds and
+                //   initialised. The entity-id column is a DISTINCT allocation
+                //   from every component column, so this shared read never aliases
+                //   the component fetch; distinct rows yield distinct ids.
+                let entity = unsafe { *self.entity_ids.add(row) };
+
+                // SAFETY (QD2, QD3): `set_table_readonly` ran for this archetype;
+                //   `data_fetch` carries valid column pointers; `row <
+                //   self.current_len`.
+                let item = unsafe { <D as QueryData>::fetch(&self.data_fetch, row) };
+                return Some((entity, item));
+            }
+
+            let arch_id = *self.archetype_ids.next()?;
+
+            // SAFETY (U_C2, Q5): read-only mint scoped to `'q`; stale ids skip via
+            //   `continue` (same as `QueryIter::next`).
+            let Some(archetype_ptr) = (unsafe { self.world.archetype_ptr(arch_id) })
+            else {
+                continue;
+            };
+
+            // SAFETY (QD3, QD4, QF3): identical dispatch to `QueryIter::next`'s
+            //   transition — `set_table_readonly[_no_meta]` accepts a
+            //   `*const Archetype` directly; `D: ReadOnlyQueryData` forbids
+            //   `&mut T`; the NCD const-fold routes the meta-free path when no
+            //   change-detection term is present.
+            unsafe {
+                if const { D::NEEDS_CHANGE_DETECTION || F::NEEDS_CHANGE_DETECTION } {
+                    <D as QueryData>::set_table_readonly(
+                        &mut self.data_fetch,
+                        self.data_state,
+                        archetype_ptr,
+                        self.meta,
+                    );
+                    <F as QueryFilter>::set_table_readonly(
+                        &mut self.filter_fetch,
+                        self.filter_state,
+                        archetype_ptr,
+                        self.meta,
+                    );
+                } else {
+                    <D as QueryData>::set_table_readonly_no_meta(
+                        &mut self.data_fetch,
+                        self.data_state,
+                        archetype_ptr,
+                    );
+                    <F as QueryFilter>::set_table_readonly_no_meta(
+                        &mut self.filter_fetch,
+                        self.filter_state,
+                        archetype_ptr,
+                    );
+                }
+            }
+
+            // SAFETY (U1, U2): `archetype_ptr` is slab-stable for `'q`; the
+            //   `&Archetype` reborrow is scoped to this block; no aliasing
+            //   `&mut Archetype` exists on the read-only path.
+            let arch_ref: &Archetype = unsafe { &*archetype_ptr };
+            self.current_row = 0;
+            self.current_len = arch_ref.entity_count();
+            // S0: capture this archetype's entity-id column base — the same
+            // pointer the dense fetch caches; one capture per archetype, NOT per
+            // row.
+            self.entity_ids = arch_ref.entity_ids_slice().as_ptr();
+            if !self.enable_terms.is_empty() {
+                self.enable_cols = self.enable_terms.resolve(arch_ref);
+            }
+        }
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        // See `QueryIter::size_hint` rationale.
+        (0, None)
+    }
+}
+
+// ── QueryIterEntitiesMut (mutable entity-yielding cursor) ──────────────────
+
+/// Mutable cursor yielding `(EntityId, D::Item<'q>)` per row (S0).
+///
+/// Mutable twin of [`QueryIterEntities`]: the `next()` body is byte-identical
+/// to [`QueryIterMut`] plus one per-archetype entity-id base capture and one
+/// `EntityId` load per row. Accepts any `D: QueryData` (including `&mut T`); the
+/// `&mut self` borrow on the driver gates cursor uniqueness.
+pub struct QueryIterEntitiesMut<'q, 's, D: QueryData, F: QueryFilter> {
+    archetype_ids: std::slice::Iter<'q, ArchetypeId>,
+    data_state: &'s D::State,
+    filter_state: &'s F::State,
+    world: UnsafeEcsCell<'q>,
+    data_fetch: D::Fetch<'q>,
+    filter_fetch: F::Fetch<'q>,
+    current_row: usize,
+    current_len: usize,
+    /// Per-archetype `entity_ids` column base. Same shape and aliasing argument
+    /// as [`QueryIterEntities::entity_ids`]: the entity-id column is a distinct
+    /// allocation from every component column, so reading it shared alongside a
+    /// `&mut` component fetch never aliases the mutable access.
+    entity_ids: *const EntityId,
+    /// See [`QueryIterMut::meta`].
+    meta: &'s SystemMeta,
+    /// See [`QueryIterMut::enable_terms`].
+    enable_terms: EnableTerms,
+    /// See [`QueryIterMut::enable_cols`].
+    enable_cols: EnableTermCols,
+    _marker: PhantomData<&'s ()>,
+}
+
+impl<'q, 's, D: QueryData, F: QueryFilter> QueryIterEntitiesMut<'q, 's, D, F>
+where
+    's: 'q,
+{
+    /// Builds a fresh mutable entity-yielding cursor over `ids`.
+    ///
+    /// Same contract as [`QueryIterMut::new`] plus the per-row `(EntityId, _)`
+    /// yield.
+    ///
+    /// # Safety
+    ///
+    /// Identical to [`QueryIterMut::new`] (Q1, Q3, QD4, U_C3). The added per-row
+    /// `entity_ids` read targets the archetype's entity-id column — a distinct
+    /// allocation from every `&mut`-accessed component column.
+    #[inline]
+    pub(crate) unsafe fn new(
+        state: &'s QueryDataState<D, F>,
+        ids: &'q [ArchetypeId],
+        world: UnsafeEcsCell<'q>,
+        meta: &'s SystemMeta,
+        enable_terms: EnableTerms,
+    ) -> Self {
+        let mut data_fetch = <D as QueryData>::init_fetch(&state.data_state);
+        let mut filter_fetch = <F as QueryFilter>::init_fetch(&state.filter_state);
+        // Dense plan D3 (FORK 1): mirror `QueryIterMut::new`.
+        if const { D::HAS_DENSE } {
+            // SAFETY (D3): `world` is the write-capable mint scoped to `'q`; the
+            //   resolved store pointer is address-stable for `'q`.
+            unsafe { <D as QueryData>::resolve_dense(&mut data_fetch, &state.data_state, world); }
+        }
+        if const { F::HAS_DENSE } {
+            // SAFETY (D3): see above.
+            unsafe { <F as QueryFilter>::resolve_dense(&mut filter_fetch, &state.filter_state, world); }
+        }
+        Self {
+            archetype_ids: ids.iter(),
+            data_state: &state.data_state,
+            filter_state: &state.filter_state,
+            world,
+            data_fetch,
+            filter_fetch,
+            current_row: 0,
+            current_len: 0,
+            entity_ids: std::ptr::null(),
+            meta,
+            enable_terms,
+            enable_cols: EnableTermCols::EMPTY,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<'q, 's, D: QueryData, F: QueryFilter> Iterator for QueryIterEntitiesMut<'q, 's, D, F> {
+    type Item = (EntityId, D::Item<'q>);
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            while self.current_row < self.current_len {
+                let row = self.current_row;
+                self.current_row += 1;
+
+                // See `QueryIterMut::next` for the const-fold rationale.
+                if !const { F::IS_ARCHETYPAL } {
+                    // SAFETY (QF1): `set_table_mut` ran for this archetype before
+                    //   the inner loop; `row < self.current_len`.
+                    let pass = unsafe {
+                        <F as QueryFilter>::filter_fetch(&self.filter_fetch, row)
+                    };
+                    if !pass {
+                        continue;
+                    }
+                }
+
+                // Dense per-row mixed-gather skip — see `QueryIterMut::next`.
+                if const { D::HAS_DENSE } {
+                    // SAFETY (D3): dense fetch fields populated by `resolve_dense`
+                    //   + `set_table_mut`; `row < self.current_len`.
+                    let pass = unsafe {
+                        <D as QueryData>::dense_row_passes(&self.data_fetch, row)
+                    };
+                    if !pass {
+                        continue;
+                    }
+                }
+
+                // Dynamic per-row enable terms — see `QueryIterMut::next`. The
+                // enable bit is read shared regardless of cursor mutability.
+                if !self.enable_terms.is_empty() {
+                    // SAFETY (ENBL-9): `enable_cols` resolved for this archetype at
+                    //   the transition below; `row < self.current_len`; column
+                    //   pointers valid for `'q`.
+                    let pass = unsafe { self.enable_cols.passes(row) };
+                    if !pass {
+                        continue;
+                    }
+                }
+
+                // SAFETY (S0): `self.entity_ids` is the current archetype's
+                //   entity-id column base (captured at the transition below).
+                //   `row < self.current_len == entity_count()`, so the read is in
+                //   bounds and initialised. The entity-id column is a DISTINCT
+                //   allocation from every component column, so reading it shared
+                //   alongside the `&mut` component fetch is NOT an alias; distinct
+                //   rows yield distinct ids.
+                let entity = unsafe { *self.entity_ids.add(row) };
+
+                // SAFETY (QD2, QD3): `set_table_mut` ran for this archetype;
+                //   `data_fetch` carries valid write-capable column pointers;
+                //   `row < self.current_len`.
+                let item = unsafe { <D as QueryData>::fetch(&self.data_fetch, row) };
+                return Some((entity, item));
+            }
+
+            let arch_id = *self.archetype_ids.next()?;
+
+            // SAFETY (U_C3, Q1, Q5): write-capable mint (caller contract); stale
+            //   ids skip via `continue` (same as `QueryIterMut::next`).
+            let Some(archetype_ptr) = (unsafe { self.world.archetype_ptr_mut(arch_id) })
+            else {
+                continue;
+            };
+
+            // SAFETY (QD3, QD4, QF3): identical dispatch to `QueryIterMut::next`'s
+            //   transition — `set_table_mut[_no_meta]` accepts a `*mut Archetype`
+            //   directly; the NCD const-fold routes the meta-free path when no
+            //   change-detection term is present.
+            unsafe {
+                if const { D::NEEDS_CHANGE_DETECTION || F::NEEDS_CHANGE_DETECTION } {
+                    <D as QueryData>::set_table_mut(
+                        &mut self.data_fetch,
+                        self.data_state,
+                        archetype_ptr,
+                        self.meta,
+                    );
+                    <F as QueryFilter>::set_table_mut(
+                        &mut self.filter_fetch,
+                        self.filter_state,
+                        archetype_ptr,
+                        self.meta,
+                    );
+                } else {
+                    <D as QueryData>::set_table_mut_no_meta(
+                        &mut self.data_fetch,
+                        self.data_state,
+                        archetype_ptr,
+                    );
+                    <F as QueryFilter>::set_table_mut_no_meta(
+                        &mut self.filter_fetch,
+                        self.filter_state,
+                        archetype_ptr,
+                    );
+                }
+            }
+
+            // SAFETY (U1, U2): `archetype_ptr` is slab-stable for `'q`; the
+            //   `&Archetype` reborrow is scoped to this block; no aliasing
+            //   `&mut Archetype` reborrow exists in this scope.
+            let arch_ref: &Archetype = unsafe { &*archetype_ptr };
+            self.current_row = 0;
+            self.current_len = arch_ref.entity_count();
+            // S0: capture this archetype's entity-id column base (one per
+            // archetype, not per row). Read shared; the `&mut` component access
+            // targets a distinct allocation.
+            self.entity_ids = arch_ref.entity_ids_slice().as_ptr();
+            if !self.enable_terms.is_empty() {
+                self.enable_cols = self.enable_terms.resolve(arch_ref);
+            }
+        }
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        // See `QueryIter::size_hint` rationale.
+        (0, None)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -716,6 +1146,30 @@ mod tests {
         };
         ecs.create_entity(arch_id, &[(COMP_A, bytes)])
             .expect("spawn_a: create_entity must succeed");
+    }
+
+    /// Spawns a `CompA(value)` entity into `arch_id` and returns its `EntityId`.
+    ///
+    /// Identical to [`spawn_a`] but threads the freshly-minted `EntityId` back
+    /// to the caller so the S0 entity-iteration tests can correlate the
+    /// yielded `(EntityId, _)` pairs against the spawn order.
+    fn spawn_a_id(
+        ecs: &mut EcsMaster,
+        arch_id: crate::ecs::identifiers::primitives::ArchetypeId,
+        value: u32,
+    ) -> EntityId {
+        let comp = CompA(value);
+        // SAFETY: `CompA` is `#[repr(C)]` POD; reading its bytes produces a
+        //   valid byte slice for the duration of this call.
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                &comp as *const CompA as *const u8,
+                std::mem::size_of::<CompA>(),
+            )
+        };
+        ecs.create_entity(arch_id, &[(COMP_A, bytes)])
+            .expect("spawn_a_id: create_entity must succeed")
+            .id()
     }
 
     /// Spawns a `(CompA(a), CompB(b))` entity into `arch_id`.
@@ -981,5 +1435,340 @@ mod tests {
         // mis-dispatches. The golden expand snapshot in Step 14 nails it
         // down at the source-expansion level.
         let _: Vec<&CompA> = iter.collect();
+    }
+
+    // ── S0: QueryIterEntities / QueryIterEntitiesMut cursor tests ───────────
+    //
+    // These exercise the NEW entity-yielding `next()` bodies directly (the
+    // benches `bench_iter_entities_*` drive the unrelated DENSE iterator). The
+    // three plan-mandated gates are covered:
+    //   * unit — ids == live entities in slot order; yielded `D::Item` equals
+    //     the non-entity `QueryIter` for the same row;
+    //   * property — the `(EntityId, ptr_of(item))` set equals `QueryIter`
+    //     joined with `entity_ids_slice()`;
+    //   * Miri-TB — `iter_entities_mut_writes_persist_per_entity` reads the
+    //     per-archetype entity-id base raw while a `&mut` component fetch is
+    //     live (run under `-Zmiri-tree-borrows`).
+
+    /// `EnableTerms::EMPTY` shorthand for the cursor constructors.
+    use crate::ecs::core::iters::query::enable_terms::EnableTerms;
+
+    /// Unit gate, single archetype: the entity cursor must yield exactly the
+    /// spawned ids in slot (insertion) order, each paired with the matching
+    /// `CompA` payload.
+    #[test]
+    fn entities_single_archetype_ids_in_slot_order() {
+        register_test_components();
+        let mut ecs = EcsMaster::new();
+        let arch = ecs.create_archetype(&[COMP_A]);
+        let mut spawned: Vec<EntityId> = Vec::with_capacity(4);
+        for i in 0..4u32 {
+            spawned.push(spawn_a_id(&mut ecs, arch, i + 500));
+        }
+
+        let state = QueryDataState::<&CompA, ()>::new(&mut ecs);
+        let meta = SystemMeta::for_testing("test");
+        // SAFETY (U_C1): cell consumed within this function.
+        let cell = unsafe { UnsafeEcsCell::new_mutable(&mut ecs) };
+        let ids = state.archetype_state.matched_ids_pre_terms();
+        // SAFETY (Q1, QD4, U_C2): direct cursor test; no aliasing accessor live.
+        let iter = unsafe {
+            QueryIterEntities::<&CompA, ()>::new(&state, ids, cell, &meta, EnableTerms::EMPTY)
+        };
+
+        let yielded: Vec<(EntityId, u32)> =
+            iter.map(|(e, a): (EntityId, &CompA)| (e, a.0)).collect();
+
+        let yielded_ids: Vec<EntityId> = yielded.iter().map(|(e, _)| *e).collect();
+        assert_eq!(
+            yielded_ids, spawned,
+            "yielded ids must equal the live entities in slot order",
+        );
+        // The payload for each id must be the value spawned alongside it.
+        for (i, (_, v)) in yielded.iter().enumerate() {
+            assert_eq!(*v, i as u32 + 500, "payload must match the spawned value");
+        }
+    }
+
+    /// Property gate: the `(EntityId, payload)` multiset the cursor yields must
+    /// equal the non-entity [`QueryIter`] payloads zipped with
+    /// `entity_ids_slice()` over the same archetypes/rows — across an
+    /// archetype transition.
+    #[test]
+    fn entities_match_queryiter_joined_with_id_slice() {
+        register_test_components();
+        let mut ecs = EcsMaster::new();
+        let arch_a = ecs.create_archetype(&[COMP_A]);
+        let arch_ab = ecs.create_archetype(&[COMP_A, COMP_B]);
+        for i in 0..3u32 {
+            spawn_a_id(&mut ecs, arch_a, i + 600);
+        }
+        for i in 0..5u32 {
+            spawn_ab(&mut ecs, arch_ab, i + 700, 0);
+        }
+
+        let state = QueryDataState::<&CompA, ()>::new(&mut ecs);
+        let meta = SystemMeta::for_testing("test");
+
+        // Reference id stream: the per-archetype `entity_ids_slice()` concatenated
+        // in the SAME matched-id order the cursors walk (empty archetypes skip,
+        // matching the cursor's `entity_count == 0` advance). This is the
+        // "right" half of the join.
+        let ids = state.archetype_state.matched_ids_pre_terms();
+        let mut ref_ids: Vec<EntityId> = Vec::new();
+        {
+            // SAFETY (U_C1): scoped probe cell, consumed in this block.
+            let probe = unsafe { UnsafeEcsCell::new_mutable(&mut ecs) };
+            for &arch_id in ids {
+                // SAFETY (U_C2): read-only probe of a live archetype id.
+                let Some(p) = (unsafe { probe.archetype_ptr(arch_id) }) else {
+                    continue;
+                };
+                // SAFETY (U1/U2): slab-stable for the cell scope; read-only view.
+                let arch: &Archetype = unsafe { &*p };
+                ref_ids.extend_from_slice(arch.entity_ids_slice());
+            }
+        }
+
+        // Reference payload stream: the non-entity `QueryIter` over the SAME
+        // state — walks archetypes/rows in identical order — is the "left" half
+        // of the join. Zipping the two reproduces the expected `(id, payload)`.
+        let ref_payloads: Vec<u32> = {
+            // SAFETY (U_C1): scoped read-only cursor cell, consumed here.
+            let probe = unsafe { UnsafeEcsCell::new_mutable(&mut ecs) };
+            let pids = state.archetype_state.matched_ids_pre_terms();
+            // SAFETY (Q1, QD4, U_C2): direct cursor test; no aliasing live.
+            let it = unsafe {
+                QueryIter::<&CompA, ()>::new(&state, pids, probe, &meta, EnableTerms::EMPTY)
+            };
+            it.map(|a: &CompA| a.0).collect()
+        };
+        assert_eq!(
+            ref_ids.len(),
+            ref_payloads.len(),
+            "the id slice join must align row-for-row with QueryIter",
+        );
+        let reference: Vec<(EntityId, u32)> =
+            ref_ids.iter().copied().zip(ref_payloads.iter().copied()).collect();
+
+        // SAFETY (U_C1): cell consumed within this function.
+        let cell = unsafe { UnsafeEcsCell::new_mutable(&mut ecs) };
+        let ids2 = state.archetype_state.matched_ids_pre_terms();
+        // SAFETY (Q1, QD4, U_C2): direct cursor test; no aliasing live.
+        let iter = unsafe {
+            QueryIterEntities::<&CompA, ()>::new(&state, ids2, cell, &meta, EnableTerms::EMPTY)
+        };
+        let yielded: Vec<(EntityId, u32)> =
+            iter.map(|(e, a): (EntityId, &CompA)| (e, a.0)).collect();
+
+        assert_eq!(
+            yielded.len(),
+            reference.len(),
+            "cursor row count must equal the joined reference",
+        );
+        // Multiset equality (order-independent) of the (id, payload) pairs.
+        let mut y = yielded.clone();
+        let mut r = reference.clone();
+        y.sort_unstable_by_key(|(e, v)| (e.0, *v));
+        r.sort_unstable_by_key(|(e, v)| (e.0, *v));
+        assert_eq!(
+            y, r,
+            "the (EntityId, payload) set must equal QueryIter joined with the id slice",
+        );
+        // Each id is distinct (the entity-id column maps distinct rows to
+        // distinct ids).
+        let mut just_ids: Vec<EntityId> = yielded.iter().map(|(e, _)| *e).collect();
+        just_ids.sort_unstable();
+        let before = just_ids.len();
+        just_ids.dedup();
+        assert_eq!(before, just_ids.len(), "every yielded id must be distinct");
+    }
+
+    /// Empty matched archetype must be skipped on the entity cursor too — the
+    /// entity-id base is only captured for archetypes the inner loop enters.
+    #[test]
+    fn entities_empty_archetype_skipped() {
+        register_test_components();
+        let mut ecs = EcsMaster::new();
+        let arch_empty = ecs.create_archetype(&[COMP_A]);
+        let arch_full = ecs.create_archetype(&[COMP_A, COMP_B]);
+        let _ = arch_empty;
+        spawn_ab(&mut ecs, arch_full, 800, 0);
+
+        let state = QueryDataState::<&CompA, ()>::new(&mut ecs);
+        let meta = SystemMeta::for_testing("test");
+        // SAFETY (U_C1): cell consumed below.
+        let cell = unsafe { UnsafeEcsCell::new_mutable(&mut ecs) };
+        let ids = state.archetype_state.matched_ids_pre_terms();
+        // SAFETY (Q1, QD4, U_C2): direct cursor test.
+        let iter = unsafe {
+            QueryIterEntities::<&CompA, ()>::new(&state, ids, cell, &meta, EnableTerms::EMPTY)
+        };
+
+        let yielded: Vec<u32> = iter.map(|(_, a): (EntityId, &CompA)| a.0).collect();
+        assert_eq!(
+            yielded,
+            vec![800],
+            "the empty archetype must be skipped; only arch_full's row yields",
+        );
+    }
+
+    /// Q5 on the entity cursor: a synthetic stale `ArchetypeId` is skipped via
+    /// the `archetype_ptr` `None` arm without touching the entity-id base.
+    #[test]
+    fn entities_stale_id_skipped() {
+        register_test_components();
+        let mut ecs = EcsMaster::new();
+        let arch = ecs.create_archetype(&[COMP_A]);
+        let real = spawn_a_id(&mut ecs, arch, 900);
+
+        let mut state = QueryDataState::<&CompA, ()>::new(&mut ecs);
+        state
+            .archetype_state
+            .matched_ids_pre_terms_mut()
+            .push(crate::ecs::identifiers::primitives::ArchetypeId(999));
+
+        let meta = SystemMeta::for_testing("test");
+        // SAFETY (U_C1): cell consumed below.
+        let cell = unsafe { UnsafeEcsCell::new_mutable(&mut ecs) };
+        let ids = state.archetype_state.matched_ids_pre_terms();
+        // SAFETY (Q1, QD4, U_C2, Q5): stale id is exactly the `continue` case.
+        let iter = unsafe {
+            QueryIterEntities::<&CompA, ()>::new(&state, ids, cell, &meta, EnableTerms::EMPTY)
+        };
+
+        let yielded: Vec<(EntityId, u32)> =
+            iter.map(|(e, a): (EntityId, &CompA)| (e, a.0)).collect();
+        assert_eq!(
+            yielded,
+            vec![(real, 900u32)],
+            "cursor must skip the stale id and yield only the real entity",
+        );
+    }
+
+    /// Without-filter on the entity cursor: an archetype containing `CompB` is
+    /// dropped at the match-cache level, so its ids never appear.
+    #[test]
+    fn entities_without_filter_excludes_archetype() {
+        register_test_components();
+        let mut ecs = EcsMaster::new();
+        let arch_a_only = ecs.create_archetype(&[COMP_A]);
+        let arch_ab = ecs.create_archetype(&[COMP_A, COMP_B]);
+        let kept = spawn_a_id(&mut ecs, arch_a_only, 1000);
+        spawn_ab(&mut ecs, arch_ab, 1001, 0);
+
+        let state = QueryDataState::<&CompA, Without<CompB>>::new(&mut ecs);
+        let meta = SystemMeta::for_testing("test");
+        // SAFETY (U_C1): cell consumed below.
+        let cell = unsafe { UnsafeEcsCell::new_mutable(&mut ecs) };
+        let ids = state.archetype_state.matched_ids_pre_terms();
+        // SAFETY (Q1, QD4, U_C2): direct cursor test.
+        let iter = unsafe {
+            QueryIterEntities::<&CompA, Without<CompB>>::new(
+                &state,
+                ids,
+                cell,
+                &meta,
+                EnableTerms::EMPTY,
+            )
+        };
+
+        let yielded: Vec<(EntityId, u32)> =
+            iter.map(|(e, a): (EntityId, &CompA)| (e, a.0)).collect();
+        assert_eq!(
+            yielded,
+            vec![(kept, 1000u32)],
+            "Without<CompB> must yield only the arch_a_only entity",
+        );
+    }
+
+    /// Miri-TB + mutable-correctness gate: `QueryIterEntitiesMut` writes a
+    /// per-entity-derived value through the `&mut CompA` fetch WHILE reading the
+    /// entity-id base raw on the same row. A fresh read-only entity cursor then
+    /// confirms each entity carries exactly its own derived value — proving the
+    /// per-row id/payload pairing is correct and the raw id-base read does not
+    /// alias the mutable component column (run under `-Zmiri-tree-borrows`).
+    #[test]
+    fn entities_mut_writes_persist_per_entity() {
+        register_test_components();
+        let mut ecs = EcsMaster::new();
+        // Two CompA-only archetypes so `Query<&mut CompA>` matches both, forcing
+        // the cursor through an archetype transition (re-captures the entity-id
+        // base) — the case the Miri-TB gate must exercise.
+        let arch_a = ecs.create_archetype(&[COMP_A]);
+        let arch_a2 = ecs.create_archetype(&[COMP_A, COMP_B]);
+        let mut spawned: Vec<EntityId> = Vec::new();
+        for i in 0..3u32 {
+            spawned.push(spawn_a_id(&mut ecs, arch_a, i));
+        }
+        for i in 0..4u32 {
+            // arch_a2 is an (A, B) archetype — supply both columns.
+            let ca = CompA(i + 100);
+            let cb = CompB(0);
+            // SAFETY: both are `#[repr(C)]` POD; the byte slices are valid for
+            //   this call's duration.
+            let a_bytes = unsafe {
+                std::slice::from_raw_parts(
+                    &ca as *const CompA as *const u8,
+                    std::mem::size_of::<CompA>(),
+                )
+            };
+            let b_bytes = unsafe {
+                std::slice::from_raw_parts(
+                    &cb as *const CompB as *const u8,
+                    std::mem::size_of::<CompB>(),
+                )
+            };
+            let e = ecs
+                .create_entity(arch_a2, &[(COMP_A, a_bytes), (COMP_B, b_bytes)])
+                .expect("create_entity must succeed for arch_a2");
+            spawned.push(e.id());
+        }
+
+        // Phase 1: write `id.0 as u32` into each entity's CompA via the mutable
+        // entity cursor (the write is derived from the id read on the same row).
+        {
+            let state = QueryDataState::<&mut CompA, ()>::new(&mut ecs);
+            let meta = SystemMeta::for_testing("test");
+            // SAFETY (U_C1): cell consumed in this block.
+            let cell = unsafe { UnsafeEcsCell::new_mutable(&mut ecs) };
+            let ids = state.archetype_state.matched_ids_pre_terms();
+            // SAFETY (Q1, Q3, QD4, U_C3): direct mut-cursor test; the per-row
+            //   entity-id read targets the entity-id column, a distinct
+            //   allocation from the `&mut`-accessed CompA column — no alias.
+            let iter = unsafe {
+                QueryIterEntitiesMut::<&mut CompA, ()>::new(
+                    &state,
+                    ids,
+                    cell,
+                    &meta,
+                    EnableTerms::EMPTY,
+                )
+            };
+            for (e, a) in iter {
+                a.0 = e.0 as u32;
+            }
+        }
+
+        // Phase 2: re-read with a read-only entity cursor; each entity's CompA
+        // must equal its own id (mod u32).
+        let state = QueryDataState::<&CompA, ()>::new(&mut ecs);
+        let meta = SystemMeta::for_testing("test");
+        // SAFETY (U_C1): cell consumed below.
+        let cell = unsafe { UnsafeEcsCell::new_mutable(&mut ecs) };
+        let ids = state.archetype_state.matched_ids_pre_terms();
+        // SAFETY (Q1, QD4, U_C2): read-only re-iteration; no aliasing live.
+        let iter = unsafe {
+            QueryIterEntities::<&CompA, ()>::new(&state, ids, cell, &meta, EnableTerms::EMPTY)
+        };
+        let mut seen = 0usize;
+        for (e, a) in iter {
+            assert_eq!(
+                a.0, e.0 as u32,
+                "each entity's CompA must equal its own id written through the mut cursor",
+            );
+            seen += 1;
+        }
+        assert_eq!(seen, spawned.len(), "every spawned entity must reappear");
     }
 }
