@@ -37,6 +37,11 @@ pub mod resources;
 /// gather mirrors (audit Stage P). Internal — the ids are an implementation
 /// detail of the scratch-column owners.
 pub(crate) mod scratch_ids;
+/// Physics ⇄ `Transform` pose sync + the parented-dynamic guard (std-lib S5).
+/// The `BodyType`-selected, one-directional copies that keep the world pose in
+/// ONE datum (Principle 0 — no parallel pose store), wrapped around the physics
+/// pipeline so the solve stays bit-identical.
+pub mod scene_sync;
 pub mod sdf_query;
 /// O9 — width-only AVX2 batched SDF edit-list narrowphase kernel. Compiled ONLY in
 /// an `+avx2` build (the default / Miri build ships the verbatim scalar narrowphase
@@ -48,13 +53,17 @@ pub mod solver;
 pub mod systems;
 
 pub use components::{
-    BodyType, Collider, ColliderShape, Contact, RigidBody, RigidBodyBundle, RigidBodyMass,
+    BodyType, Collider, ColliderShape, Contact, RigidBody, RigidBodyBundle, RigidBodyMass, Sensor,
 };
 pub use manifold::{BodyIndex, ContactPoint, Manifold, SDF_SENTINEL};
 pub use math::{MAX_CONTACT_POINTS, Mat3, Quat, Vec3};
 pub use plugin::{
-    PhysicsStageKeys, add_physics_colored, add_physics_colored_solve, add_physics_sdf,
-    add_physics_soft, add_physics_soft_colored, add_physics_systems,
+    PhysicsStageKeys, SceneSyncKeys, add_physics_colored, add_physics_colored_solve,
+    add_physics_sdf, add_physics_soft, add_physics_soft_colored, add_physics_systems,
+    add_physics_systems_with_scene_sync,
+};
+pub use scene_sync::{
+    debug_assert_dynamic_bodies_are_roots, sync_body_to_transform, sync_transform_to_body,
 };
 pub use resources::{
     BodyState, BroadphaseGrid, BroadphaseKind, ConstraintGraph, ContactPairs,

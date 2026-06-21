@@ -47,6 +47,7 @@ fn dyn_sphere(position: Vec3, lin: Vec3, ang: Vec3) -> BodyState {
         restitution: 0.0,
         friction: 0.7,
         body_type: BodyType::Dynamic,
+        is_sensor: false,
         shape: ColliderShape::Sphere { radius: 1.0 },
     }
 }
@@ -63,6 +64,7 @@ fn static_body(position: Vec3) -> BodyState {
         restitution: 0.0,
         friction: 0.5,
         body_type: BodyType::Static,
+        is_sensor: false,
         shape: ColliderShape::Sphere { radius: 1.0 },
     }
 }

@@ -86,7 +86,7 @@ fn sphere_state(position: Vec3, inv_mass: f32, body_type: BodyType) -> BodyState
         layer: 1,
         mask: 1,
     };
-    BodyState::from_columns(&body, &mass, &collider)
+    BodyState::from_columns(&body, &mass, &collider, false)
 }
 
 fn sphere_components(position: Vec3, radius: f32, inv_mass: f32, body_type: BodyType) -> (RigidBody, RigidBodyMass, Collider) {

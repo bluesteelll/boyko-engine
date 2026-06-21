@@ -57,7 +57,7 @@ fn one_body_scratch(position: Vec3, velocity: Vec3, radius: f32) -> SolverScratc
     };
 
     let mut scratch = SolverScratch::with_capacity(1);
-    scratch.set_bodies(&[BodyState::from_columns(&body, &mass, &collider)]);
+    scratch.set_bodies(&[BodyState::from_columns(&body, &mass, &collider, false)]);
     // The solver's `write_back` calls `touched.set(row)`; the mask must be sized
     // to the row count first (the gather stage does this in the full pipeline).
     scratch.touched.reset(scratch.bodies().len());

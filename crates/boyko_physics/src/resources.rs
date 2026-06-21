@@ -1579,8 +1579,22 @@ unsafe impl Sync for EmitPtrs {}
 /// detail of producing stable feature ids, not a solver input).
 #[derive(Resource, Default)]
 pub struct Manifolds {
-    /// Manifolds in the deterministic pair order.
+    /// Manifolds the SOLVER consumes, in the deterministic pair order. A pair
+    /// involving a [`Sensor`](crate::components::Sensor) body never enters this
+    /// buffer (it is routed to [`sensor_overlaps`](Self::sensor_overlaps)
+    /// instead), so the solved contact set — and thus the bit-deterministic
+    /// solve — is identical whether or not any `Sensor` exists (std-lib S5).
     pub manifolds: Vec<Manifold>,
+    /// Sensor / trigger OVERLAPS detected this step (std-lib S5): a manifold for
+    /// each overlapping pair where EITHER body carries
+    /// [`Sensor`](crate::components::Sensor). The narrowphase generates it with
+    /// the SAME geometry as a normal contact, then diverts it here instead of
+    /// into [`manifolds`](Self::manifolds), so the overlap is reported (gameplay
+    /// reads this buffer) but the solver never resolves it — no impulse, no
+    /// velocity change. Cleared and refilled each step alongside `manifolds`
+    /// (capacity reused, no per-step alloc). Empty in any world that never minted
+    /// a `Sensor` id (the 0%-gate).
+    pub sensor_overlaps: Vec<Manifold>,
     /// Per-body-pair last-frame SAT-axis index (box-box hysteresis, P2 W4).
     /// Persisted in place across frames; the box-box generator feeds the stored
     /// axis back to bias against feature-id flicker on a resting stack.
@@ -1593,6 +1607,7 @@ impl Manifolds {
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             manifolds: Vec::with_capacity(capacity),
+            sensor_overlaps: Vec::new(),
             box_axis_cache: BoxAxisCache::with_capacity(capacity),
         }
     }
@@ -2462,6 +2477,17 @@ pub struct BodyState {
     pub friction: f32,
     /// The body's simulation role.
     pub body_type: BodyType,
+    /// `true` when this body carries the [`Sensor`](crate::components::Sensor)
+    /// marker (std-lib S5). Projected at gather from the entity's `Sensor`
+    /// archetype membership. The narrowphase routes any pair where EITHER body
+    /// has `is_sensor` into
+    /// [`Manifolds::sensor_overlaps`](crate::resources::Manifolds::sensor_overlaps)
+    /// (the overlap signal) instead of the solver's manifold buffer, so a sensor
+    /// reports overlaps without ever applying an impulse. Defaults to `false`
+    /// (a plain collider), so a world that never minted `Sensor` is byte-identical
+    /// to today (the 0%-gate). Placed with the trailing scalars (it does not
+    /// disturb the leading hot fields).
+    pub is_sensor: bool,
     /// The collider shape, projected at gather so broad/narrowphase have the
     /// body's real geometry (P2 W2). The broadphase reads its bounding radius
     /// and the sphere-sphere narrowphase reads its sphere radius — neither phase
@@ -2490,8 +2516,18 @@ impl BodyState {
     /// auto-overriding any value authored on
     /// [`RigidBodyMass::inv_inertia`](crate::components::RigidBodyMass::inv_inertia)
     /// (which is retained for custom authoring but recomputed here).
+    ///
+    /// `is_sensor` (std-lib S5) is the gathered
+    /// [`Sensor`](crate::components::Sensor) archetype-membership bit; it is a
+    /// passthrough the gather supplies from the per-row `Option<&Sensor>` fetch
+    /// (the projection, not a column on `Collider`).
     #[inline]
-    pub fn from_columns(body: &RigidBody, mass: &RigidBodyMass, collider: &Collider) -> Self {
+    pub fn from_columns(
+        body: &RigidBody,
+        mass: &RigidBodyMass,
+        collider: &Collider,
+        is_sensor: bool,
+    ) -> Self {
         let inv_inertia_local = local_inv_inertia(collider.shape, mass.inv_mass);
         // World tensor = R₀ · I⁻¹_local · R₀ᵀ (rotates the principal-axis
         // diagonal into the body's spawn orientation).
@@ -2508,6 +2544,7 @@ impl BodyState {
             restitution: mass.restitution,
             friction: mass.friction,
             body_type: mass.body_type,
+            is_sensor,
             shape: collider.shape,
         }
     }
@@ -2795,7 +2832,7 @@ mod tests {
         let mass = mass_with_inv_mass(2.0);
         let collider = collider_shape(ColliderShape::Sphere { radius: 0.5 });
 
-        let state = BodyState::from_columns(&body, &mass, &collider);
+        let state = BodyState::from_columns(&body, &mass, &collider, false);
         let i = state.inv_inertia_local;
         let expected = 20.0_f32;
         assert!((i.rows[0].x - expected).abs() < 1e-4, "Ixx⁻¹: {}", i.rows[0].x);
@@ -2821,7 +2858,7 @@ mod tests {
             half_extents: Vec3::new(1.0, 2.0, 3.0),
         });
 
-        let state = BodyState::from_columns(&body, &mass, &collider);
+        let state = BodyState::from_columns(&body, &mass, &collider, false);
         let i = state.inv_inertia_local;
         assert!((i.rows[0].x - 36.0 / 52.0).abs() < 1e-5, "Ixx⁻¹: {}", i.rows[0].x);
         assert!((i.rows[1].y - 36.0 / 40.0).abs() < 1e-5, "Iyy⁻¹: {}", i.rows[1].y);
@@ -2836,7 +2873,7 @@ mod tests {
         let mass = mass_with_inv_mass(0.0);
         let collider = collider_shape(ColliderShape::Sphere { radius: 0.5 });
 
-        let state = BodyState::from_columns(&body, &mass, &collider);
+        let state = BodyState::from_columns(&body, &mass, &collider, false);
         assert_eq!(state.inv_inertia_local, Mat3::ZERO, "static local tensor is ZERO");
         // World tensor R·ZERO·Rᵀ is also ZERO regardless of orientation.
         assert_eq!(state.inv_inertia, Mat3::ZERO, "static world tensor is ZERO");
@@ -2851,7 +2888,7 @@ mod tests {
         let mass = mass_with_inv_mass(1.0);
         let collider = collider_shape(ColliderShape::Sphere { radius: 0.0 });
 
-        let state = BodyState::from_columns(&body, &mass, &collider);
+        let state = BodyState::from_columns(&body, &mass, &collider, false);
         assert_eq!(
             state.inv_inertia_local,
             Mat3::ZERO,
@@ -2869,7 +2906,7 @@ mod tests {
             half_extents: Vec3::new(1.0, 2.0, 3.0),
         });
 
-        let state = BodyState::from_columns(&body, &mass, &collider);
+        let state = BodyState::from_columns(&body, &mass, &collider, false);
         assert_eq!(
             state.inv_inertia, state.inv_inertia_local,
             "world tensor equals local tensor when R₀ == IDENTITY"
@@ -2888,7 +2925,7 @@ mod tests {
             half_extents: Vec3::new(1.0, 2.0, 3.0),
         });
 
-        let state = BodyState::from_columns(&body, &mass, &collider);
+        let state = BodyState::from_columns(&body, &mass, &collider, false);
         let w = state.inv_inertia;
         assert!((w.rows[0].y - w.rows[1].x).abs() < 1e-5, "M[0][1]==M[1][0]");
         assert!((w.rows[0].z - w.rows[2].x).abs() < 1e-5, "M[0][2]==M[2][0]");

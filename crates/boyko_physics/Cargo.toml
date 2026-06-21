@@ -28,6 +28,13 @@ boyko_sdf_math = { path = "../boyko_sdf_math" }
 # exact sqrt, no FMA), and `boyko_physics::math` now re-exports them so the
 # public API and every `crate::math::{..}` call site stay UNCHANGED.
 boyko-math = { path = "../boyko_math" }
+# S5: the spatial vocabulary. The physics ⇄ Transform pose-sync systems
+# (`sync_transform_to_body` / `sync_body_to_transform`) read/write the engine's
+# canonical `Transform` component, so the world pose lives in ONE datum
+# (Principle 0 — no parallel pose store). The edge is acyclic: `boyko_scene`
+# depends only on `boyko_ecs` + `boyko_math` + `boyko_macros` + `boyko_utils` —
+# never on `boyko_physics` — so `boyko_physics -> boyko_scene` adds no cycle.
+boyko-scene = { path = "../boyko_scene" }
 
 [dev-dependencies]
 proptest = "1"

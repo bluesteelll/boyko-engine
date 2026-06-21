@@ -59,7 +59,7 @@ use boyko_ecs::ecs::core::iters::query::query::Query;
 use boyko_ecs::ecs::core::system::{Res, ResMut};
 use boyko_ecs::ecs::core::time::FixedTime;
 
-use crate::components::{Collider, ColliderShape, RigidBody, RigidBodyMass};
+use crate::components::{BodyType, Collider, ColliderShape, RigidBody, RigidBodyMass, Sensor};
 use crate::manifold::{BodyIndex, ContactPoint, Manifold, SDF_SENTINEL};
 use crate::math::Vec3;
 use crate::narrowphase::box_box::box_box_contact;
@@ -84,13 +84,30 @@ use crate::solver::RigidSolver;
 /// emitted. Far above FP noise, far below a real surface gradient (≈ 1).
 const SDF_NORMAL_EPS: f32 = 1.0e-4;
 
-/// Integrates every body's hot state for one step (plan D3 stage 1), UNLESS the
-/// solver owns integration (C2).
+/// Integrates the DYNAMIC bodies' hot state for one step (plan D3 stage 1),
+/// UNLESS the solver owns integration (C2).
 ///
 /// A sound `par_iter_mut` over disjoint rows: each body reads/writes only its
-/// own [`RigidBody`]. Applies gravity to linear velocity, advances position by
-/// the fixed `dt`, then advances orientation by integrating the quaternion
-/// against the angular velocity.
+/// own [`RigidBody`]. For a DYNAMIC body (`body_type == Dynamic && inv_mass !=
+/// 0`) it applies gravity to linear velocity, advances position by the fixed
+/// `dt`, then advances orientation by integrating the quaternion against the
+/// angular velocity. Static / Kinematic bodies are SKIPPED (their pose is
+/// gameplay-owned — see the body-type gate below).
+///
+/// # Body-type gate (single-source-of-truth with scene sync, std-lib S5)
+///
+/// This stage keys per-body integration on `BodyType` exactly as the
+/// solver-owned integrator does (`body_type == Dynamic && inv_mass != 0`, the
+/// mass test routed through [`is_dynamic_row`](crate::solver::contact) so the two
+/// sites cannot drift). Integrating a Static / Kinematic body here would advance
+/// it under gravity, which — once
+/// [`sync_transform_to_body`](crate::scene_sync::sync_transform_to_body) makes a
+/// Static / Kinematic `RigidBody.position` load-bearing (it copies the authored
+/// `Transform` IN before this stage) — would drift the gameplay-authored pose
+/// within one fixed window, then be snapshotted by the gather. Gating to Dynamic
+/// keeps the Foundation-mode integrate's per-body set identical to the
+/// solver-owned mode's, so the scene-sync pose contract holds for ANY solver
+/// (owning or not — including a Foundation-mode `NoopSolver`).
 ///
 /// # C2 integration-ownership gate
 ///
@@ -109,7 +126,7 @@ const SDF_NORMAL_EPS: f32 = 1.0e-4;
 // `integrate_balls`.
 #[allow(clippy::needless_pass_by_value)]
 pub fn physics_integrate(
-    mut query: Query<&mut RigidBody>,
+    mut query: Query<(&mut RigidBody, &RigidBodyMass)>,
     cfg: Res<PhysicsConfig>,
     dt: Res<FixedTime>,
     mode: Res<IntegrationMode>,
@@ -121,11 +138,22 @@ pub fn physics_integrate(
     }
     let dt = dt.delta_secs();
     let gravity = cfg.gravity;
-    query.par_iter_mut().for_each(move |body: &mut RigidBody| {
-        body.linear_velocity = body.linear_velocity + gravity * dt;
-        body.position = body.position + body.linear_velocity * dt;
-        body.rotation = body.rotation.integrate(body.angular_velocity, dt);
-    });
+    query
+        .par_iter_mut()
+        .for_each(move |(body, mass): (&mut RigidBody, &RigidBodyMass)| {
+            // S5 / C2 parity: integrate ONLY the dynamic bodies, exactly the set
+            // the solver-owned integrator advances. A Static / Kinematic body's
+            // pose is gameplay-authored (copied IN by `sync_transform_to_body`)
+            // and must not drift under gravity. `is_dynamic_row` is the SAME
+            // inv-mass predicate the coloring / solve write guards route through,
+            // so the integrate set cannot drift from the solve set.
+            if mass.body_type != BodyType::Dynamic || !is_dynamic_row(mass.inv_mass) {
+                return;
+            }
+            body.linear_velocity = body.linear_velocity + gravity * dt;
+            body.position = body.position + body.linear_velocity * dt;
+            body.rotation = body.rotation.integrate(body.angular_velocity, dt);
+        });
 }
 
 /// Snapshots every body into the dense, row-indexed solver scratch and stamps
@@ -154,7 +182,7 @@ pub fn physics_integrate(
 // demo's `ResMut` systems.
 #[allow(clippy::needless_pass_by_value)]
 pub fn physics_gather(
-    query: Query<(&RigidBody, &RigidBodyMass, &Collider)>,
+    query: Query<(&RigidBody, &RigidBodyMass, &Collider, Option<&Sensor>)>,
     mut scratch: ResMut<SolverScratch>,
     mut cfg: ResMut<PhysicsConfig>,
     fixed_time: Res<FixedTime>,
@@ -171,10 +199,16 @@ pub fn physics_gather(
     // Read-only `iter()` walks the rows in archetype-row order — the same order
     // `physics_apply`'s mutable walk re-visits, so row `i` is the same body in
     // both passes (the IM-1 gather/apply addressing invariant).
+    //
+    // S5: `Option<&Sensor>` is a NON-filtering query datum — it yields `Some` for
+    // a sensor body and `None` otherwise, so the gathered row count and order are
+    // identical to a world with no `Sensor` id (the 0%-gate; `is_sensor` is just
+    // `false` everywhere there). The bit rides into `BodyState` for the
+    // narrowphase to read.
     let mut bodies = scratch.bodies_build();
     bodies.clear();
-    for (body, mass, collider) in query.iter() {
-        bodies.push(BodyState::from_columns(body, mass, collider));
+    for (body, mass, collider, sensor) in query.iter() {
+        bodies.push(BodyState::from_columns(body, mass, collider, sensor.is_some()));
     }
     let n = bodies.len();
     scratch.touched.reset(n);
@@ -281,10 +315,14 @@ pub fn physics_narrowphase(
     let bodies = scratch.bodies();
     let manifolds = &mut *manifolds;
     manifolds.manifolds.clear();
+    // S5: the sensor-overlap signal is rebuilt every step alongside the solver
+    // buffer (capacity reused). Empty in any world with no `Sensor` id.
+    manifolds.sensor_overlaps.clear();
     // Ensure the per-pair hysteresis cache can hold this frame's pairs; it is NOT
     // cleared (a single in-place table — this frame reads last frame's axes).
     manifolds.box_axis_cache.begin_frame(pairs.pairs.len());
     let out = &mut manifolds.manifolds;
+    let sensor_out = &mut manifolds.sensor_overlaps;
     let axis_cache = &mut manifolds.box_axis_cache;
 
     for &(a, b) in &pairs.pairs {
@@ -292,6 +330,13 @@ pub fn physics_narrowphase(
         let ib = b.0 as usize;
         let ba = &bodies[ia];
         let bb = &bodies[ib];
+        // S5: a pair where EITHER body is a sensor is an OVERLAP, not a contact —
+        // the manifold is generated identically (same geometry) but diverted to
+        // `sensor_overlaps` below so the solver never resolves it. Computed once
+        // per pair; `false` for every pair in a sensor-free world (the 0%-gate:
+        // the routing branch then always takes the `out` arm, byte-identical to
+        // the pre-S5 push).
+        let is_overlap = ba.is_sensor || bb.is_sensor;
 
         let manifold = match (ba.shape, bb.shape) {
             (ColliderShape::Sphere { radius: ra }, ColliderShape::Sphere { radius: rb }) => {
@@ -336,7 +381,15 @@ pub fn physics_narrowphase(
                 "invariant: manifold.count must not exceed MAX_CONTACT_POINTS"
             );
             if manifold.count > 0 {
-                out.push(manifold);
+                // S5: divert a sensor-pair overlap to the report buffer so the
+                // solver never sees it; a normal pair takes the unchanged `out`
+                // push (the 0%-gate — `is_overlap` is always `false` with no
+                // `Sensor` id).
+                if is_overlap {
+                    sensor_out.push(manifold);
+                } else {
+                    out.push(manifold);
+                }
             }
         }
     }
@@ -455,7 +508,9 @@ pub fn physics_narrowphase_sdf(
         return;
     }
     let bodies = scratch.bodies();
+    let manifolds = &mut *manifolds;
     let out = &mut manifolds.manifolds;
+    let sensor_out = &mut manifolds.sensor_overlaps;
 
     for (row, body) in bodies.iter().enumerate() {
         // Only DYNAMIC bodies collide against the SDF (a static/kinematic body's
@@ -466,15 +521,20 @@ pub fn physics_narrowphase_sdf(
             continue;
         }
         let a = BodyIndex(row as u32);
+        // S5: a sensor body's SDF overlap is reported, not resolved — divert it to
+        // the overlap buffer so the solver's one-sided wall push never fires on it
+        // (the 0%-gate: `is_sensor` is `false` for every body in a sensor-free
+        // world, so this always takes the `out` arm — byte-identical to pre-S5).
+        let dst: &mut Vec<Manifold> = if body.is_sensor { sensor_out } else { out };
         match body.shape {
             ColliderShape::Sphere { radius } => {
                 if let Some(m) = sphere_sdf_manifold(a, body, radius, &field) {
-                    out.push(m);
+                    dst.push(m);
                 }
             }
             ColliderShape::Box { half_extents } => {
                 if let Some(m) = box_sdf_manifold(a, body, half_extents, &field) {
-                    out.push(m);
+                    dst.push(m);
                 }
             }
         }
@@ -1186,6 +1246,7 @@ mod o9_manifold_tests {
             restitution: 0.0,
             friction: 0.5,
             body_type: crate::components::BodyType::Dynamic,
+            is_sensor: false,
             shape: ColliderShape::Box { half_extents: half },
         }
     }

@@ -71,6 +71,7 @@ fn scene(n: usize) -> (Vec<BodyEffective>, Vec<BodyState>) {
             restitution: 0.0,
             friction: 0.5,
             body_type: BodyType::Dynamic,
+            is_sensor: false,
             shape: ColliderShape::Sphere { radius },
         });
         eff.push(BodyEffective {

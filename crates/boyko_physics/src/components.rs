@@ -154,6 +154,29 @@ pub struct Collider {
     pub mask: u32,
 }
 
+/// Marks a [`Collider`] as a SENSOR / trigger (std-lib S5).
+///
+/// A sensor collider still participates in broadphase and narrowphase — the
+/// engine detects the overlap and records it — but the solver SKIPS contact
+/// resolution for any pair where either body carries `Sensor`: no impulse is
+/// applied, so neither body's velocity changes. This is the "trigger volume"
+/// primitive (a region that reports who is inside it without physically blocking
+/// them).
+///
+/// A `Sensor`-marked overlap is reported through
+/// [`Manifolds::sensor_overlaps`](crate::resources::Manifolds::sensor_overlaps),
+/// the per-step overlap signal, instead of the
+/// [`Manifolds::manifolds`](crate::resources::Manifolds::manifolds) buffer the
+/// solver consumes — so the resolved (non-sensor) contact set is byte-identical
+/// to a world that never minted a `Sensor` id (the 0%-gate), and the solver's
+/// bit-deterministic output is untouched.
+///
+/// A zero-sized marker (`#[derive(Component)]` over a unit struct), so attaching
+/// it is a pure archetype membership bit — no per-body storage, no hot-loop
+/// branch beyond the gathered `is_sensor` flag.
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Sensor;
+
 /// Gameplay-facing contact snapshot (plan D5 / IM-1).
 ///
 /// An OPTIONAL queryable component carrying a [`Manifold`] snapshot plus the

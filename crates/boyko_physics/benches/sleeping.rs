@@ -52,7 +52,7 @@ fn dyn_sphere(position: Vec3) -> BodyState {
         layer: 1,
         mask: 1,
     };
-    BodyState::from_columns(&body, &mass, &collider)
+    BodyState::from_columns(&body, &mass, &collider, false)
 }
 
 /// A static floor sphere.
@@ -75,7 +75,7 @@ fn static_floor() -> BodyState {
         layer: 1,
         mask: 1,
     };
-    BodyState::from_columns(&body, &mass, &collider)
+    BodyState::from_columns(&body, &mass, &collider, false)
 }
 
 /// A single-point resting manifold between rows `a` and `b`.

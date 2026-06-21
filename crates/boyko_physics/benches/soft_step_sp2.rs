@@ -145,6 +145,7 @@ fn sphere_state(position: Vec3, radius: f32, inv_mass: f32) -> BodyState {
         restitution: 0.0,
         friction: 0.0,
         body_type: BodyType::Dynamic,
+        is_sensor: false,
         shape: ColliderShape::Sphere { radius },
     }
 }

@@ -283,6 +283,7 @@ fn sphere_state(position: Vec3, velocity: Vec3, radius: f32, inv_mass: f32) -> B
         } else {
             BodyType::Static
         },
+        is_sensor: false,
         shape: ColliderShape::Sphere { radius },
     }
 }

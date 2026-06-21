@@ -1119,6 +1119,7 @@ mod tests {
             restitution: 0.0,
             friction: 0.5,
             body_type,
+            is_sensor: false,
             shape: ColliderShape::Sphere { radius },
         };
         let eff = BodyEffective {
@@ -1273,6 +1274,7 @@ mod tests {
                 restitution: 0.0,
                 friction: 0.5,
                 body_type: BodyType::Dynamic,
+                is_sensor: false,
                 shape: ColliderShape::Sphere { radius: 1.0 },
             });
             eff.push(BodyEffective {
@@ -1307,6 +1309,7 @@ mod tests {
             restitution: 0.0,
             friction: 0.5,
             body_type: BodyType::Dynamic,
+            is_sensor: false,
             shape: ColliderShape::Sphere { radius: 0.5 },
         };
         let eff = BodyEffective {
@@ -1339,6 +1342,7 @@ mod tests {
             restitution: 0.0,
             friction: 0.5,
             body_type: BodyType::Dynamic,
+            is_sensor: false,
             shape: ColliderShape::Sphere { radius: 0.5 },
         };
         let eff = BodyEffective {

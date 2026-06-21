@@ -17,6 +17,9 @@ use crate::resources::{
     BroadphaseGrid, BroadphaseKind, ConstraintGraph, ContactPairs, IntegrationMode, IslandSleep,
     Manifolds, PhysicsConfig, SolverScratch,
 };
+use crate::scene_sync::{
+    debug_assert_dynamic_bodies_are_roots, sync_body_to_transform, sync_transform_to_body,
+};
 use crate::sdf_query::SdfField;
 use crate::soft::{
     SoftColorScratch, SoftRigidReaction, physics_soft_rigid_apply, physics_soft_step,
@@ -90,6 +93,43 @@ pub struct PhysicsStageKeys {
     pub soft_step: Option<usize>,
     /// Descriptor index of the [`physics_apply`] stage.
     pub apply: usize,
+    /// The scene-sync stage descriptor indices (std-lib S5), or `None` for a
+    /// pipeline wired WITHOUT pose sync ([`add_physics_systems`] and friends).
+    ///
+    /// Present only when the pipeline was wired by
+    /// [`add_physics_systems_with_scene_sync`]: it registers
+    /// [`sync_transform_to_body`](crate::scene_sync::sync_transform_to_body)
+    /// `.before(integrate)` and
+    /// [`sync_body_to_transform`](crate::scene_sync::sync_body_to_transform) +
+    /// [`debug_assert_dynamic_bodies_are_roots`](crate::scene_sync::debug_assert_dynamic_bodies_are_roots)
+    /// `.after(apply)`, all inside the fixed schedule.
+    pub scene_sync: Option<SceneSyncKeys>,
+}
+
+/// Descriptor indices of the std-lib S5 scene-sync stages, captured when the
+/// pipeline is wired with pose sync ([`add_physics_systems_with_scene_sync`]).
+///
+/// Like [`PhysicsStageKeys`], each field is the stage system's public
+/// `SystemKey` inner index (`SystemConfig::key().0`). The cross-edges to the
+/// physics block (`sync_transform_to_body.before(integrate)`,
+/// `sync_body_to_transform.after(apply)`) are wired internally where the
+/// physics stages' real `SystemKey`s are in scope (the kernel keeps `SystemKey`
+/// crate-private, so an external caller cannot wire those edges itself — the
+/// reason the sync is wired by the pipeline rather than a standalone function).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SceneSyncKeys {
+    /// Descriptor index of
+    /// [`sync_transform_to_body`](crate::scene_sync::sync_transform_to_body) —
+    /// runs `.before(integrate)` (Static / Kinematic `Transform` → `RigidBody`).
+    pub transform_to_body: usize,
+    /// Descriptor index of
+    /// [`sync_body_to_transform`](crate::scene_sync::sync_body_to_transform) —
+    /// runs `.after(apply)` (Dynamic root `RigidBody` → `Transform`).
+    pub body_to_transform: usize,
+    /// Descriptor index of
+    /// [`debug_assert_dynamic_bodies_are_roots`](crate::scene_sync::debug_assert_dynamic_bodies_are_roots)
+    /// — the cold parented-dynamic tripwire, also `.after(apply)`.
+    pub parented_dynamic_guard: usize,
 }
 
 /// Initial reserve for the reused step buffers.
@@ -120,10 +160,61 @@ pub fn add_physics_systems<S: RigidSolver + Default>(
     builder: &mut ScheduleBuilder,
     world: &mut EcsMaster,
 ) -> PhysicsStageKeys {
-    // `with_sdf = false`, `colored = false`, `soft = false`: body-only pipeline (no
-    // `SdfField`, no SDF stage, no constraint-graph stage, no soft pass) —
-    // byte-identical to the shipped path.
-    add_physics_pipeline::<S>(builder, world, false, false, false, false, false, false)
+    // `with_sdf = false`, `colored = false`, `soft = false`, `scene_sync = false`:
+    // body-only pipeline (no `SdfField`, no SDF stage, no constraint-graph stage,
+    // no soft pass, no pose sync) — byte-identical to the shipped path.
+    add_physics_pipeline::<S>(builder, world, false, false, false, false, false, false, false)
+}
+
+/// Registers the physics pipeline WITH the std-lib S5 `Transform` ⇄ `RigidBody`
+/// pose sync wrapped around it (the canonical single-source-of-truth pose
+/// bridge).
+///
+/// Identical to [`add_physics_systems`] but additionally registers, in the SAME
+/// (fixed) schedule:
+///
+/// - [`sync_transform_to_body`](crate::scene_sync::sync_transform_to_body)
+///   `.before(integrate)` — the block head. Static / Kinematic bodies copy their
+///   gameplay-authored `Transform` INTO `RigidBody` before the gather snapshots
+///   it.
+/// - [`sync_body_to_transform`](crate::scene_sync::sync_body_to_transform)
+///   `.after(apply)` — Dynamic ROOT bodies copy the integrated `RigidBody` pose
+///   back OUT to `Transform` once the solve has written it.
+/// - [`debug_assert_dynamic_bodies_are_roots`](crate::scene_sync::debug_assert_dynamic_bodies_are_roots)
+///   `.after(apply)` — the cold parented-dynamic tripwire (a no-op in release).
+///
+/// # Why the sync is wired HERE (not a standalone function)
+///
+/// The cross-edges `sync_transform_to_body.before(integrate)` and
+/// `sync_body_to_transform.after(apply)` need the physics stages' real
+/// `SystemKey`s. The kernel keeps `SystemKey` in a `pub(crate)` module (this
+/// crate makes ZERO core edits — see [`PhysicsStageKeys`]), so an external caller
+/// CANNOT construct one to wire those edges. Registering the sync inside the
+/// pipeline — where `integrate` / `apply` are real keys in scope — is the only
+/// way to pin the ordering without a kernel edit.
+///
+/// # Schedule-placement contract (the no-desync proof)
+///
+/// The fixed schedule advances fully each frame as
+/// `sync_transform_to_body → integrate → gather → … → solve → apply →
+/// sync_body_to_transform`, then the per-frame `propagate_transforms`
+/// (`boyko_scene`, the SOLE `GlobalTransform` writer) composes the result. Every
+/// pose datum has exactly one writer per window: `RigidBody` is written by
+/// `sync_transform_to_body` (Static / Kinematic) or the solver (Dynamic);
+/// `Transform` is written by `sync_body_to_transform` (Dynamic roots) or gameplay
+/// (Static / Kinematic); `GlobalTransform` by `propagate_transforms`.
+///
+/// # Bit-determinism
+///
+/// The sync systems wrap AROUND the solve and never touch it — the copies are
+/// plain field assignments (exact, no FMA, no re-normalize). The physics solve is
+/// byte-identical whether or not the sync is wired (the determinism suite, which
+/// uses [`add_physics_systems`], is unaffected).
+pub fn add_physics_systems_with_scene_sync<S: RigidSolver + Default>(
+    builder: &mut ScheduleBuilder,
+    world: &mut EcsMaster,
+) -> PhysicsStageKeys {
+    add_physics_pipeline::<S>(builder, world, false, false, false, false, false, false, true)
 }
 
 /// Inserts the physics resources INCLUDING the [`ConstraintGraph`] and registers
@@ -147,7 +238,7 @@ pub fn add_physics_colored<S: RigidSolver + Default>(
     builder: &mut ScheduleBuilder,
     world: &mut EcsMaster,
 ) -> PhysicsStageKeys {
-    add_physics_pipeline::<S>(builder, world, false, true, false, false, false, false)
+    add_physics_pipeline::<S>(builder, world, false, true, false, false, false, false, false)
 }
 
 /// Inserts the physics resources and registers the COLORED-SOLVE pipeline (Phase
@@ -184,7 +275,7 @@ pub fn add_physics_colored_solve(
     world: &mut EcsMaster,
 ) -> PhysicsStageKeys {
     add_physics_pipeline::<ColoredSoftStepSolver>(
-        builder, world, false, true, true, false, false, false,
+        builder, world, false, true, true, false, false, false, false,
     )
 }
 
@@ -206,7 +297,7 @@ pub fn add_physics_sdf<S: RigidSolver + Default>(
     builder: &mut ScheduleBuilder,
     world: &mut EcsMaster,
 ) -> PhysicsStageKeys {
-    add_physics_pipeline::<S>(builder, world, true, false, false, false, false, false)
+    add_physics_pipeline::<S>(builder, world, true, false, false, false, false, false, false)
 }
 
 /// Inserts the physics resources and registers the physics pipeline WITH the SP1
@@ -252,7 +343,7 @@ pub fn add_physics_soft<S: RigidSolver + Default>(
     world: &mut EcsMaster,
     coupling: bool,
 ) -> PhysicsStageKeys {
-    add_physics_pipeline::<S>(builder, world, false, false, false, true, coupling, false)
+    add_physics_pipeline::<S>(builder, world, false, false, false, true, coupling, false, false)
 }
 
 /// Inserts the physics resources INCLUDING the SP4 [`SoftColorScratch`] and registers
@@ -288,7 +379,7 @@ pub fn add_physics_soft_colored<S: RigidSolver + Default>(
     builder: &mut ScheduleBuilder,
     world: &mut EcsMaster,
 ) -> PhysicsStageKeys {
-    add_physics_pipeline::<S>(builder, world, false, false, false, true, false, true)
+    add_physics_pipeline::<S>(builder, world, false, false, false, true, false, true, false)
 }
 
 /// Shared wiring for [`add_physics_systems`] (`with_sdf = false`,
@@ -309,6 +400,7 @@ fn add_physics_pipeline<S: RigidSolver + Default>(
     soft: bool,
     coupling: bool,
     soft_colored: bool,
+    scene_sync: bool,
 ) -> PhysicsStageKeys {
     // The colored solve requires the constraint graph; the type system cannot
     // express it, so guard the invariant the callers uphold.
@@ -417,10 +509,32 @@ fn add_physics_pipeline<S: RigidSolver + Default>(
     world.insert_resource(integration_mode);
     world.insert_resource(S::default());
 
-    // Block head: integrate runs first, unordered relative to the caller's
-    // pre-physics systems. `.key().0` is the public descriptor index of the
-    // engine's `SystemKey` (see `PhysicsStageKeys`).
-    let integrate = builder.add_system(physics_integrate).key();
+    // S5 head: when pose sync is wired, `sync_transform_to_body` is the TRUE
+    // block head — Static / Kinematic bodies copy `Transform` INTO `RigidBody`
+    // before the gather snapshots it. Registered first so its real `SystemKey` is
+    // in scope to pin `integrate.after(..)` below (the kernel keeps `SystemKey`
+    // crate-private, so this ordering can only be wired here — see
+    // `add_physics_systems_with_scene_sync`). `iter_mut` is the sync's only access,
+    // so it conflicts on `RigidBody` with `physics_integrate` / `physics_gather`
+    // and is serialized before them anyway; the explicit edge makes the order
+    // deterministic, not merely conflict-derived.
+    let transform_to_body_key = if scene_sync {
+        Some(builder.add_system(sync_transform_to_body).key())
+    } else {
+        None
+    };
+
+    // Block head (physics): `physics_integrate` runs first within the physics
+    // block. With pose sync it runs `.after(sync_transform_to_body)` so the gather
+    // sees the synced Static / Kinematic poses; without it, it carries no `.after`
+    // and is unordered relative to the caller's pre-physics systems. `.key().0` is
+    // the public descriptor index of the engine's `SystemKey` (see
+    // `PhysicsStageKeys`).
+    let integrate = if let Some(head) = transform_to_body_key {
+        builder.add_system(physics_integrate).after(head).key()
+    } else {
+        builder.add_system(physics_integrate).key()
+    };
     let gather = builder.add_system(physics_gather).after(integrate).key();
     let broadphase = builder.add_system(physics_broadphase).after(gather).key();
     let narrowphase = builder
@@ -543,6 +657,32 @@ fn add_physics_pipeline<S: RigidSolver + Default>(
         builder.add_system(physics_soft_rigid_apply).after(apply);
     }
 
+    // S5 tail: Dynamic ROOT bodies copy the integrated `RigidBody` pose back OUT
+    // to `Transform`, `.after(apply)` so the solve has finished writing it. The
+    // parented-dynamic tripwire also runs here (a no-op in release). `apply` is a
+    // real `SystemKey` in scope, so these edges are wired here (the only place
+    // they can be — see `add_physics_systems_with_scene_sync`). The whole tail is
+    // registered only when `scene_sync` (the 0%-gate: a non-sync schedule never
+    // registers these stages, and the physics block is byte-identical).
+    let scene_sync_keys = if scene_sync {
+        let body_to_transform = builder.add_system(sync_body_to_transform).after(apply).key();
+        let parented_dynamic_guard = builder
+            .add_system(debug_assert_dynamic_bodies_are_roots)
+            .after(apply)
+            .key();
+        Some(SceneSyncKeys {
+            // `transform_to_body_key` is `Some` whenever `scene_sync` (registered
+            // as the block head above), so the `expect` cannot fire by construction.
+            transform_to_body: transform_to_body_key
+                .expect("invariant: scene_sync registers the transform_to_body head")
+                .0,
+            body_to_transform: body_to_transform.0,
+            parented_dynamic_guard: parented_dynamic_guard.0,
+        })
+    } else {
+        None
+    };
+
     PhysicsStageKeys {
         integrate: integrate.0,
         gather: gather.0,
@@ -553,5 +693,6 @@ fn add_physics_pipeline<S: RigidSolver + Default>(
         solve: solve.0,
         soft_step: soft_step_key.map(|k| k.0),
         apply: apply.0,
+        scene_sync: scene_sync_keys,
     }
 }
