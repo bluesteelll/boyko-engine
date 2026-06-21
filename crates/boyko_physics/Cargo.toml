@@ -23,6 +23,11 @@ boyko-macros = { path = "../boyko_macros" }
 boyko-utils = { path = "../boyko_utils" }
 boyko-threadpool = { path = "../boyko_threadpool" }
 boyko_sdf_math = { path = "../boyko_sdf_math" }
+# S1: the shared SIMD-aligned POD math vocabulary. Vec3/Quat/Mat3 are lifted
+# VERBATIM from this crate's former `math.rs` into `boyko_math` (bit-identical,
+# exact sqrt, no FMA), and `boyko_physics::math` now re-exports them so the
+# public API and every `crate::math::{..}` call site stay UNCHANGED.
+boyko-math = { path = "../boyko_math" }
 
 [dev-dependencies]
 proptest = "1"
