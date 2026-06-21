@@ -8,6 +8,8 @@
 //! The `boyko` `Component` derive is a pure marker: it adds no fields and only
 //! assigns a lazily-allocated `ComponentId`, so it coexists with `#[repr(C)]`.
 
+use core::cmp::Ordering;
+
 use boyko_macros::Component;
 
 use crate::units::{AlignCross, AlignMain, LayoutType, PositionType, Unit};
@@ -281,3 +283,50 @@ impl UiName {
         self.len == 0
     }
 }
+
+// A documented total order over the meaningful UTF-8 prefix, tie-broken on
+// length (P3 Decision 9). This is the diff key for the `.ui` hot-reload
+// reconcile: a per-parent index is a `sorted Vec<(UiName, Entity)>` + binary
+// search, which is not expressible without `Ord`.
+//
+// The order is consistent with the derived `Eq`: two `UiName`s are `Eq` iff
+// `len` is equal and `bytes[..len]` are equal, and `cmp` returns `Equal`
+// EXACTLY then — the trailing `bytes[len..]` are always zero (written by
+// `new`) and `_pad` is always `[0; 3]`, so they never perturb the prefix
+// comparison. A blanket `#[derive(Ord)]` would instead order by the full fixed
+// buffer (including `_pad`), so the comparison is written by hand to compare
+// only the live prefix. memcmp over a POD column slice — reflection-free
+// (Principle 1/5).
+impl Ord for UiName {
+    #[inline]
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.bytes[..self.len as usize]
+            .cmp(&other.bytes[..other.len as usize])
+            .then(self.len.cmp(&other.len))
+    }
+}
+
+impl PartialOrd for UiName {
+    #[inline]
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Stable per-sibling positional key for the `.ui` hot-reload reconcile of
+/// ANONYMOUS (unnamed) nodes (P3 Decision 11).
+///
+/// `Children` sibling order is explicitly unspecified and order-perturbing on
+/// removal (`Vec::swap_remove`), so an anonymous node can NOT be matched against
+/// the live `Children` slice by position. Instead every node (named and
+/// anonymous) is stamped at spawn with its **declaration ordinal among its
+/// siblings** in the parse tree (0-based, per-parent); the reconcile matches an
+/// anonymous node to the live child carrying the same `UiSourceOrder`. Named
+/// nodes match by the stronger [`UiName`] key; this ordinal is the fallback.
+///
+/// Private to the crate: it is a P3-reload-only bookkeeping key the author never
+/// writes and the `ui!` macro never stamps, so it is excluded from the
+/// `.ui`-vs-`ui!` equivalence comparison (Decision 12).
+#[repr(transparent)]
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct UiSourceOrder(pub u32);

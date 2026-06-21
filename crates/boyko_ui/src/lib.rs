@@ -23,12 +23,21 @@
 pub mod bundles;
 pub mod components;
 pub mod layout;
+pub mod plugin;
+pub mod reload;
 pub mod resources;
+pub mod text;
 pub mod units;
 
 /// The `ui!` authoring macro (P2): write a UI entity tree as a literal nested
 /// block. See [`boyko_macros::ui`] for the grammar and expansion contract.
 pub use boyko_macros::ui;
+
+/// The `.ui` text format (P3): [`parse_ui`](text::parse_ui),
+/// [`spawn_ui_tree`](text::spawn_ui_tree), [`serialize_ui`](text::serialize_ui),
+/// and the runtime hot-reload [`UiPlugin`](plugin::UiPlugin).
+pub use plugin::UiPlugin;
+pub use text::{parse_ui, serialize_ui, spawn_ui_tree, UI_FORMAT_VERSION};
 
 /// Crate-local convenience re-exports (no engine-wide prelude).
 pub mod prelude {
@@ -38,7 +47,9 @@ pub mod prelude {
         UiRoot, UiSpacing,
     };
     pub use crate::layout::{ui_layout_apply, ui_layout_discovery};
+    pub use crate::plugin::UiPlugin;
     pub use crate::resources::{LayoutScratch, UiViewport};
+    pub use crate::text::{parse_ui, serialize_ui, spawn_ui_tree, UI_FORMAT_VERSION};
     pub use crate::units::{AlignCross, AlignMain, LayoutType, PositionType, Unit};
 
     pub use boyko_macros::ui;
