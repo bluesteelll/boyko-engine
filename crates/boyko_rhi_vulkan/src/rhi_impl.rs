@@ -1519,17 +1519,37 @@ impl RhiDevice<Vulkan> for VulkanContext {
         // inline slots even if a (debug-asserted) over-count slipped through a release
         // build — it is clamped to the cap, matching the arrays' length.
         let color_attachment_count = desc.color_formats.len().min(MAX_COLOR_ATTACHMENTS);
+        // GUI P5a Decision 3: lower the optional `BlendState`. `None` keeps the
+        // pre-P5a opaque (blend-disabled) write byte-identical (every existing
+        // pipeline). `Some(bs)` enables blending with `bs`'s factors/op on ALL color
+        // attachments (P5a UI is single-target; a future MRT-per-target widening
+        // turns `Option<BlendState>` into a slice). The agnostic `BlendFactor`/
+        // `BlendOp` discriminants equal the `VkBlendFactor`/`VkBlendOp` constants
+        // (asserted in `abi_guard.rs`), so each lowering is an `as_i32()` no-op.
+        let (blend_enable, src_color, dst_color, color_op, src_alpha, dst_alpha, alpha_op) =
+            match desc.blend {
+                None => (VK_FALSE, 0, 0, 0, 0, 0, 0),
+                Some(bs) => (
+                    VK_TRUE,
+                    bs.src_color.as_i32(),
+                    bs.dst_color.as_i32(),
+                    bs.color_op.as_i32(),
+                    bs.src_alpha.as_i32(),
+                    bs.dst_alpha.as_i32(),
+                    bs.alpha_op.as_i32(),
+                ),
+            };
         // `from_fn` (not `[x; N]`) avoids requiring `Copy` on the FFI struct; every
-        // slot is the identical opaque, all-channel-write state.
+        // slot is the identical (opaque or blended) all-channel-write state.
         let blend_attachments: [VkPipelineColorBlendAttachmentState; MAX_COLOR_ATTACHMENTS] =
             core::array::from_fn(|_| VkPipelineColorBlendAttachmentState {
-                blend_enable: VK_FALSE,
-                src_color_blend_factor: 0,
-                dst_color_blend_factor: 0,
-                color_blend_op: 0,
-                src_alpha_blend_factor: 0,
-                dst_alpha_blend_factor: 0,
-                alpha_blend_op: 0,
+                blend_enable,
+                src_color_blend_factor: src_color,
+                dst_color_blend_factor: dst_color,
+                color_blend_op: color_op,
+                src_alpha_blend_factor: src_alpha,
+                dst_alpha_blend_factor: dst_alpha,
+                alpha_blend_op: alpha_op,
                 color_write_mask: VK_COLOR_COMPONENT_R_BIT
                     | VK_COLOR_COMPONENT_G_BIT
                     | VK_COLOR_COMPONENT_B_BIT

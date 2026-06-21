@@ -555,6 +555,113 @@ impl DescriptorKind {
     }
 }
 
+/// A color-blend factor (the `VkBlendFactor` `i32` family, GUI P5a Decision 3).
+///
+/// `#[repr(i32)]` with discriminants equal to the matching `VkBlendFactor`
+/// constants (asserted backend-side in `abi_guard.rs`), so the backend lowers a
+/// [`BlendState`] factor with a trivial `as i32` cast — no per-factor translation
+/// table. Only the factors the premultiplied/straight-alpha UI blend needs are
+/// defined; the family grows per phase.
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BlendFactor {
+    /// `VK_BLEND_FACTOR_ZERO`.
+    Zero = 0,
+    /// `VK_BLEND_FACTOR_ONE`.
+    One = 1,
+    /// `VK_BLEND_FACTOR_SRC_ALPHA`.
+    SrcAlpha = 6,
+    /// `VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA`.
+    OneMinusSrcAlpha = 7,
+}
+
+impl BlendFactor {
+    /// The raw `i32` discriminant — equal to the matching `VkBlendFactor` constant.
+    #[inline]
+    pub const fn as_i32(self) -> i32 {
+        self as i32
+    }
+}
+
+/// A color-blend operation (the `VkBlendOp` `i32` family, GUI P5a Decision 3).
+///
+/// `#[repr(i32)]`; discriminants equal the matching `VkBlendOp` constants (asserted
+/// backend-side). Only [`Self::Add`] (the only op premultiplied/straight alpha
+/// needs) is defined; the family grows per phase.
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BlendOp {
+    /// `VK_BLEND_OP_ADD` — `src * srcFactor (op) dst * dstFactor`.
+    Add = 0,
+}
+
+impl BlendOp {
+    /// The raw `i32` discriminant — equal to the matching `VkBlendOp` constant.
+    #[inline]
+    pub const fn as_i32(self) -> i32 {
+        self as i32
+    }
+}
+
+/// A single color attachment's blend state (GUI P5a Decision 3).
+///
+/// `#[repr(C)]` POD with an explicit field order so a backend reads it without
+/// depending on Rust's default field reordering — it lowers onto a
+/// `VkPipelineColorBlendAttachmentState`'s `(srcColor, dstColor, colorOp, srcAlpha,
+/// dstAlpha, alphaOp)`. Carried as `Option<BlendState>` on
+/// [`crate::descriptor::GraphicsPipelineDesc`]: `None` keeps the engine's default
+/// opaque (blend-disabled) write for every existing pipeline; `Some(bs)` enables
+/// blending with these factors/ops on the (single) color attachment.
+///
+/// The UI pipeline passes [`Self::PREMULTIPLIED_ALPHA`] (RmlUi/WebRender default):
+/// AA edges over a transparent backdrop compose correctly under nested clips and
+/// future world-space layering, where straight alpha would fringe/double-darken.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BlendState {
+    /// The factor the source color is multiplied by.
+    pub src_color: BlendFactor,
+    /// The factor the destination color is multiplied by.
+    pub dst_color: BlendFactor,
+    /// How the weighted source + destination colors combine.
+    pub color_op: BlendOp,
+    /// The factor the source alpha is multiplied by.
+    pub src_alpha: BlendFactor,
+    /// The factor the destination alpha is multiplied by.
+    pub dst_alpha: BlendFactor,
+    /// How the weighted source + destination alphas combine.
+    pub alpha_op: BlendOp,
+}
+
+impl BlendState {
+    /// Premultiplied-alpha over: `src + dst * (1 - src_a)` for both color and alpha
+    /// (`srcColor=ONE, dstColor=ONE_MINUS_SRC_ALPHA, srcAlpha=ONE,
+    /// dstAlpha=ONE_MINUS_SRC_ALPHA, op=ADD`). The engine UI default — the fragment
+    /// shader emits `(rgb*a*cov, a*cov)` so coverage-multiplied output composes
+    /// correctly. Requires the source color to already be premultiplied.
+    pub const PREMULTIPLIED_ALPHA: BlendState = BlendState {
+        src_color: BlendFactor::One,
+        dst_color: BlendFactor::OneMinusSrcAlpha,
+        color_op: BlendOp::Add,
+        src_alpha: BlendFactor::One,
+        dst_alpha: BlendFactor::OneMinusSrcAlpha,
+        alpha_op: BlendOp::Add,
+    };
+
+    /// Straight (non-premultiplied) alpha over: `src*src_a + dst*(1 - src_a)`
+    /// color, `src_a + dst*(1 - src_a)` alpha. Defined for callers that author
+    /// straight-alpha source colors; the UI path uses
+    /// [`Self::PREMULTIPLIED_ALPHA`].
+    pub const STRAIGHT_ALPHA: BlendState = BlendState {
+        src_color: BlendFactor::SrcAlpha,
+        dst_color: BlendFactor::OneMinusSrcAlpha,
+        color_op: BlendOp::Add,
+        src_alpha: BlendFactor::One,
+        dst_alpha: BlendFactor::OneMinusSrcAlpha,
+        alpha_op: BlendOp::Add,
+    };
+}
+
 /// Image-aspect bitflags for an image subresource. Values equal the
 /// `VK_IMAGE_ASPECT_*` bits.
 #[repr(transparent)]

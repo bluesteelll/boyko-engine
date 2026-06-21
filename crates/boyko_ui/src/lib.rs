@@ -55,8 +55,8 @@ pub mod prelude {
     };
     pub use crate::bundles::UiNodeBundle;
     pub use crate::components::{
-        ComputedClip, ComputedRect, ContentSize, StackIndex, UiAbsolute, UiAlign, UiLayout, UiName,
-        UiRoot, UiSpacing,
+        ComputedClip, ComputedRect, ContentSize, StackIndex, UiAbsolute, UiAlign, UiBackground,
+        UiLayout, UiName, UiRoot, UiSpacing,
     };
     pub use crate::interaction::{
         register_bindable, ui_dispatch_system, ui_focus_system, ui_refreeze_fixed_snapshot,

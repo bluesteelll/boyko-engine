@@ -51,9 +51,9 @@ pub use device::{
 };
 pub use encoder::RhiCommandEncoder;
 pub use enums::{
-    AddressMode, BarrierAccess, BarrierStage, BufferUsage, DescriptorKind, Filter, Format,
-    ImageAspect, ImageLayout, ImageUsage, IndexType, LoadOp, MemoryLocation, PrimitiveTopology,
-    ShaderStage, StoreOp, TextureDimension, VertexFormat,
+    AddressMode, BarrierAccess, BarrierStage, BlendFactor, BlendOp, BlendState, BufferUsage,
+    DescriptorKind, Filter, Format, ImageAspect, ImageLayout, ImageUsage, IndexType, LoadOp,
+    MemoryLocation, PrimitiveTopology, ShaderStage, StoreOp, TextureDimension, VertexFormat,
 };
 pub use error::RhiError;
 pub use handle::{

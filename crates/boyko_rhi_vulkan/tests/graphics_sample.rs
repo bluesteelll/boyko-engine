@@ -226,6 +226,7 @@ fn render_sampled(device: &VulkanContext) -> Vec<u8> {
             vertex_layout: None,
             push_constant_bytes: 0,
             bind_group_layout: None,
+            blend: None,
         })
         .expect("pass-1 source pipeline");
 
@@ -271,6 +272,7 @@ fn render_sampled(device: &VulkanContext) -> Vec<u8> {
             vertex_layout: None,
             push_constant_bytes: 0,
             bind_group_layout: Some(&bind_group_layout),
+            blend: None,
         })
         .expect("pass-2 sample pipeline");
 

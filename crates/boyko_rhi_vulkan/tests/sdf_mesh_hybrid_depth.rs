@@ -504,6 +504,7 @@ fn run_hybrid(ctx: &VulkanContext, edits: &[SdfEdit]) -> (Vec<u32>, Vec<f32>) {
             }),
             push_constant_bytes: MVP_BYTES,
             bind_group_layout: None,
+            blend: None,
         })
         .expect("depth-testing graphics pipeline");
 

@@ -682,6 +682,7 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
             }),
             push_constant_bytes: MVP_BYTES,
             bind_group_layout: None,
+            blend: None,
         },
     )
     .expect("depth-prepass graphics pipeline");
@@ -791,6 +792,7 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
             vertex_layout: None,
             push_constant_bytes: 0,
             bind_group_layout: Some(&present_layout),
+            blend: None,
         },
     )
     .expect("present-blit fullscreen-sample pipeline (swapchain color format)");

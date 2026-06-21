@@ -200,6 +200,54 @@ pub struct ComputedClip {
     pub h: f32,
 }
 
+/// Visual fill + border style for a node (GUI P5a). AUTHOR-OWNED, OPT-IN: a node
+/// WITHOUT this component is layout-only / invisible; a node with the [`Default`]
+/// (transparent, no border) is likewise invisible — authors OPT IN to a visible
+/// fill/border. Read by the P5a pack system together with [`ComputedRect`].
+///
+/// `#[repr(C)]`, 44 B align 4 (`u32×2 + f32×4 + f32×4 + u32`, no tail pad — const-
+/// asserted). POD `Copy`; its own SoA column; the change gate covers its writers.
+///
+/// Colors are authored STRAIGHT RGBA8 (`byte0=R .. byte3=A`); the pack system
+/// premultiplies them into the GPU record. `corner_radius` is `tl, tr, br, bl`
+/// (the `sdRoundedBox` per-corner select order). `border_width` is per-side `l, t,
+/// r, b` for forward-compat, but **P5a renders a UNIFORM border only**: the pack
+/// uses `border_width[0]` and `debug_assert!`s the four sides are equal (asymmetric
+/// per-side borders are a deferred phase with the correct per-side inner-SDF).
+#[repr(C)]
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
+pub struct UiBackground {
+    /// Fill color, STRAIGHT RGBA8 (`byte0=R .. byte3=A`); premultiplied at pack.
+    pub color: u32,
+    /// Border color, STRAIGHT RGBA8; premultiplied at pack.
+    pub border_color: u32,
+    /// Per-corner radius `tl, tr, br, bl`, logical px.
+    pub corner_radius: [f32; 4],
+    /// Per-side border width `l, t, r, b`, logical px (0 = no border that side).
+    /// P5a uses a UNIFORM width (`border_width[0]`); per-side is deferred.
+    pub border_width: [f32; 4],
+    /// Reserved flags (P5a derives the GPU `UiInstance.flags` at pack time).
+    pub flags: u32,
+}
+
+const _: () = assert!(size_of::<UiBackground>() == 44);
+const _: () = assert!(align_of::<UiBackground>() == 4);
+
+impl Default for UiBackground {
+    /// Transparent fill, no border, zero radius — an invisible node (authors opt in
+    /// to a visible fill/border).
+    #[inline]
+    fn default() -> Self {
+        UiBackground {
+            color: 0,
+            border_color: 0,
+            corner_radius: [0.0; 4],
+            border_width: [0.0; 4],
+            flags: 0,
+        }
+    }
+}
+
 /// Marks a screen-space root: the layout entry points.
 ///
 /// A NORMAL marker component (NOT a bitset tag) so it is ENUMERABLE via

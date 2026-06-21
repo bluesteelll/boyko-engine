@@ -6,7 +6,7 @@
 
 use crate::api::RhiApi;
 use crate::enums::{
-    BarrierAccess, BarrierStage, BufferUsage, Format, ImageAspect, ImageLayout, LoadOp,
+    BarrierAccess, BarrierStage, BlendState, BufferUsage, Format, ImageAspect, ImageLayout, LoadOp,
     MemoryLocation, PrimitiveTopology, StoreOp, VertexFormat,
 };
 
@@ -175,6 +175,14 @@ pub struct GraphicsPipelineDesc<'a, A: RhiApi> {
     /// can bind a matching bind group before the sampling draw; `None` keeps the
     /// rungs-1..4 no-descriptor path valid (empty / push-only pipeline layout).
     pub bind_group_layout: Option<&'a A::BindGroupLayout>,
+    /// The color-blend state for the color attachment(s) (GUI P5a Decision 3), or
+    /// `None` for the engine's default opaque (blend-disabled) write. `None` is
+    /// byte-identical to the pre-P5a behavior, so every existing pipeline passes
+    /// `None`; the UI pipeline passes `Some(BlendState::PREMULTIPLIED_ALPHA)`. A
+    /// `Some(bs)` is lowered onto the same blend factors/op for ALL color
+    /// attachments (P5a UI is single-target; per-target MRT blend is a future
+    /// widening of `Option<BlendState>` → a per-target slice).
+    pub blend: Option<BlendState>,
 }
 
 /// A single buffer's access transition inside a [`BarrierDesc`].

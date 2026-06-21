@@ -685,6 +685,15 @@ pub const VK_COLOR_COMPONENT_G_BIT: VkFlags = 0x0000_0002;
 pub const VK_COLOR_COMPONENT_B_BIT: VkFlags = 0x0000_0004;
 pub const VK_COLOR_COMPONENT_A_BIT: VkFlags = 0x0000_0008;
 
+/// `VkBlendFactor` constants (GUI P5a Decision 3 — the agnostic `BlendFactor`
+/// discriminants equal these, asserted in `abi_guard.rs`).
+pub const VK_BLEND_FACTOR_ZERO: i32 = 0;
+pub const VK_BLEND_FACTOR_ONE: i32 = 1;
+pub const VK_BLEND_FACTOR_SRC_ALPHA: i32 = 6;
+pub const VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA: i32 = 7;
+/// `VkBlendOp::VK_BLEND_OP_ADD`.
+pub const VK_BLEND_OP_ADD: i32 = 0;
+
 // --- Phase-6 S0 rung-3 vertex-input + index + buffer-usage constants. ---
 
 /// `VkVertexInputRate::VK_VERTEX_INPUT_RATE_VERTEX` — one attribute set per vertex.

@@ -376,6 +376,7 @@ fn render_deferred(device: &VulkanContext) -> Vec<u8> {
             }),
             push_constant_bytes: MVP_BYTES,
             bind_group_layout: None,
+            blend: None,
         })
         .expect("geometry MRT pipeline");
 
@@ -425,6 +426,7 @@ fn render_deferred(device: &VulkanContext) -> Vec<u8> {
             vertex_layout: None,
             push_constant_bytes: 0,
             bind_group_layout: Some(&light_layout),
+            blend: None,
         })
         .expect("deferred lighting pipeline");
 

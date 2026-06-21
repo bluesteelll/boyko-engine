@@ -187,6 +187,7 @@ fn triangle_draw_golden_round_trip() {
             push_constant_bytes: 0,
             // Rung 2 binds no descriptor sets (the rung-5 bind-group-layout seam).
             bind_group_layout: None,
+            blend: None,
         })
         .expect("graphics pipeline");
 

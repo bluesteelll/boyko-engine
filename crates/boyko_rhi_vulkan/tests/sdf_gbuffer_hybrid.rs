@@ -700,6 +700,7 @@ fn run_gbuffer_hybrid_lit_table(
             }),
             push_constant_bytes: MVP_BYTES,
             bind_group_layout: None,
+            blend: None,
         })
         .expect("depth-testing graphics pipeline");
 
@@ -3191,6 +3192,7 @@ fn run_gbuffer_hybrid_lit_clustered(
             }),
             push_constant_bytes: MVP_BYTES,
             bind_group_layout: None,
+            blend: None,
         })
         .expect("depth-testing graphics pipeline");
 

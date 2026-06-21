@@ -14,9 +14,9 @@
 //! `push_constants`, `pipeline_barrier`) is covered.
 
 use boyko_rhi::enums::{
-    AddressMode, BarrierAccess, BarrierStage, BufferUsage, DescriptorKind, Filter, Format,
-    ImageAspect, ImageLayout, ImageUsage, IndexType, LoadOp, PrimitiveTopology, ShaderStage,
-    StoreOp, TextureDimension, VertexFormat,
+    AddressMode, BarrierAccess, BarrierStage, BlendFactor, BlendOp, BufferUsage, DescriptorKind,
+    Filter, Format, ImageAspect, ImageLayout, ImageUsage, IndexType, LoadOp, PrimitiveTopology,
+    ShaderStage, StoreOp, TextureDimension, VertexFormat,
 };
 
 use crate::ffi::{
@@ -24,7 +24,9 @@ use crate::ffi::{
     VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
     VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
     VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE,
-    VK_BUFFER_USAGE_INDEX_BUFFER_BIT, VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
+    VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA, VK_BLEND_FACTOR_SRC_ALPHA,
+    VK_BLEND_FACTOR_ZERO, VK_BLEND_OP_ADD, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+    VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
     VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
     VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
@@ -255,6 +257,29 @@ const _: () = assert!(
 const _: () = assert!(
     PrimitiveTopology::TriangleList.as_i32() == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
     "PrimitiveTopology::TriangleList must equal VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST"
+);
+
+// --- BlendFactor / BlendOp `as_i32()` (mapped in `create_graphics_pipeline`'s
+//     color-blend lowering, GUI P5a Decision 3). ---
+const _: () = assert!(
+    BlendFactor::Zero.as_i32() == VK_BLEND_FACTOR_ZERO,
+    "BlendFactor::Zero must equal VK_BLEND_FACTOR_ZERO"
+);
+const _: () = assert!(
+    BlendFactor::One.as_i32() == VK_BLEND_FACTOR_ONE,
+    "BlendFactor::One must equal VK_BLEND_FACTOR_ONE"
+);
+const _: () = assert!(
+    BlendFactor::SrcAlpha.as_i32() == VK_BLEND_FACTOR_SRC_ALPHA,
+    "BlendFactor::SrcAlpha must equal VK_BLEND_FACTOR_SRC_ALPHA"
+);
+const _: () = assert!(
+    BlendFactor::OneMinusSrcAlpha.as_i32() == VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+    "BlendFactor::OneMinusSrcAlpha must equal VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA"
+);
+const _: () = assert!(
+    BlendOp::Add.as_i32() == VK_BLEND_OP_ADD,
+    "BlendOp::Add must equal VK_BLEND_OP_ADD"
 );
 
 // ===========================================================================

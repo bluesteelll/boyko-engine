@@ -434,6 +434,7 @@ fn run_composite(device: &VulkanContext, edits: &[SdfEdit], buffer: &boyko_rhi_v
             }),
             push_constant_bytes: MVP_BYTES,
             bind_group_layout: None,
+            blend: None,
         })
         .expect("depth-testing graphics pipeline");
 
@@ -858,6 +859,7 @@ fn windowed_hybrid_composite_present_is_validation_clean_and_renders_composite()
             vertex_layout: None,
             push_constant_bytes: 0,
             bind_group_layout: Some(&bind_group_layout),
+            blend: None,
         },
     )
     .expect("fullscreen-sample pipeline (swapchain color format)");

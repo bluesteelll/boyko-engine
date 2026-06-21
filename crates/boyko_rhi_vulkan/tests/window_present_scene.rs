@@ -283,6 +283,7 @@ fn windowed_scene_present_is_validation_clean_and_renders_geometry() {
             }),
             push_constant_bytes: SCENE_MVP_BYTES as u32,
             bind_group_layout: None,
+            blend: None,
         },
     )
     .expect("depth-testing graphics pipeline (swapchain color format)");
