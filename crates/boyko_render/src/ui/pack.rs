@@ -10,7 +10,9 @@
 
 use boyko_macros::Resource;
 
-use crate::ui::instance::{premultiply_rgba8, FLAG_BORDER_ANY, FLAG_CLIP_PRESENT, UiInstance};
+use crate::ui::instance::{
+    premultiply_rgba8, FLAG_BORDER_ANY, FLAG_CLIP_PRESENT, FLAG_TEXT, UiInstance,
+};
 
 /// One source node's pack inputs (logical-px component values + the node's z key),
 /// the testable boundary of [`pack_ui_instance`] (no Arena/world dependency, so the
@@ -30,6 +32,14 @@ pub struct PackInput {
     pub border_width: [f32; 4],
     /// `ComputedClip` (logical px) if the node carries one: x, y, w, h.
     pub clip: Option<[f32; 4]>,
+    /// GUI P5b text lane (Decision T4-G): when `Some`, this node is a GLYPH quad, not
+    /// a rect. The value is the glyph's NORMALIZED atlas UV rect `(left, top, right,
+    /// bottom)` in `[0, 1]`, written verbatim (NOT scale-folded) into the
+    /// `corner_radius` alias with `FLAG_TEXT` set; `rect` is then the glyph quad
+    /// (already physical-or-logical px, scale-folded like a rect), `color` the
+    /// premultiplied-at-pack foreground, and `border_*` are ignored. `None` ⇒ the
+    /// rect path (P5a, unchanged).
+    pub text_uv: Option<[f32; 4]>,
 }
 
 /// Folds one node's logical-px inputs into a physical-px, premultiplied
@@ -46,6 +56,49 @@ pub fn pack_ui_instance(input: &PackInput, scale_factor: f32) -> UiInstance {
         input.rect.iter().all(|v| v.is_finite()),
         "invariant: ComputedRect is finite before pack"
     );
+
+    let s = scale_factor;
+    let min_px = [input.rect[0] * s, input.rect[1] * s];
+    let size_px = [input.rect[2] * s, input.rect[3] * s];
+
+    // Clip is shared by rects AND glyphs (text clips too). Physical-px AABB.
+    let mut flags = 0u32;
+    let clip = match input.clip {
+        Some(c) => {
+            debug_assert!(
+                c.iter().all(|v| v.is_finite()),
+                "invariant: ComputedClip is finite when CLIP_PRESENT"
+            );
+            flags |= FLAG_CLIP_PRESENT;
+            [c[0] * s, c[1] * s, (c[0] + c[2]) * s, (c[1] + c[3]) * s]
+        }
+        // Unclipped: leave clip zero, flag clear — the shader never reads it (no
+        // sentinel arithmetic to ill-condition).
+        None => [0.0; 4],
+    };
+
+    // GUI P5b text branch (Decision T4-G): a glyph quad. The UV rect aliases
+    // `corner_radius` (written verbatim, NOT scale-folded — it is already normalized);
+    // `FLAG_TEXT` selects the MSDF branch in the FS. Border is N/A for a glyph.
+    if let Some(uv) = input.text_uv {
+        debug_assert!(
+            uv.iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v)),
+            "invariant: FLAG_TEXT glyph UV is finite and within [0, 1]"
+        );
+        flags |= FLAG_TEXT;
+        return UiInstance {
+            min_px,
+            size_px,
+            clip,
+            corner_radius: uv,
+            color: premultiply_rgba8(input.color),
+            border_color: 0,
+            border_width: 0.0,
+            flags,
+        };
+    }
+
+    // P5a rect branch (unchanged).
     debug_assert!(
         input.corner_radius.iter().all(|v| v.is_finite()),
         "invariant: corner_radius is finite before pack"
@@ -57,9 +110,6 @@ pub fn pack_ui_instance(input: &PackInput, scale_factor: f32) -> UiInstance {
         "invariant: P5a renders a UNIFORM border — the four border_width sides must be equal"
     );
 
-    let s = scale_factor;
-    let min_px = [input.rect[0] * s, input.rect[1] * s];
-    let size_px = [input.rect[2] * s, input.rect[3] * s];
     let corner_radius = [
         input.corner_radius[0] * s,
         input.corner_radius[1] * s,
@@ -67,25 +117,9 @@ pub fn pack_ui_instance(input: &PackInput, scale_factor: f32) -> UiInstance {
         input.corner_radius[3] * s,
     ];
     let border_width = bw * s;
-
-    let mut flags = 0u32;
     if border_width > 0.0 {
         flags |= FLAG_BORDER_ANY;
     }
-    let clip = match input.clip {
-        Some(c) => {
-            debug_assert!(
-                c.iter().all(|v| v.is_finite()),
-                "invariant: ComputedClip is finite when CLIP_PRESENT"
-            );
-            flags |= FLAG_CLIP_PRESENT;
-            // Store the clip as a physical-px AABB (min.xy, max.xy).
-            [c[0] * s, c[1] * s, (c[0] + c[2]) * s, (c[1] + c[3]) * s]
-        }
-        // Unclipped: leave clip zero, flag clear — the shader never reads it (no
-        // sentinel arithmetic to ill-condition).
-        None => [0.0; 4],
-    };
 
     UiInstance {
         min_px,

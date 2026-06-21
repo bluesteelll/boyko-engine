@@ -59,8 +59,8 @@ use core::slice;
 use boyko_rhi::enums::{AddressMode, DescriptorKind, Filter};
 use boyko_rhi::{
     BindGroupLayoutDesc, BindGroupLayoutEntry, BufferDesc, BufferUsage, ComputePipelineDesc,
-    Format, GraphicsPipelineDesc, MemoryLocation, PrimitiveTopology, RhiDevice, SamplerDesc,
-    ShaderStage, VertexAttribute, VertexBufferLayout, VertexFormat,
+    Format, GraphicsPipelineDesc, MemoryLocation, MipMode, PrimitiveTopology, RhiDevice,
+    SamplerDesc, ShaderStage, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 use boyko_rhi_vulkan::compute::{
     COMPOSITE_PUSH_CONSTANT_BYTES, CompositePushConstants, EDITLIST_BUFFER_WORDS, LOCAL_SIZE_X,
@@ -652,6 +652,7 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
             mag_filter: Filter::Nearest,
             min_filter: Filter::Nearest,
             address_mode: AddressMode::ClampToEdge,
+            mip: MipMode::None,
         },
     )
     .expect("present nearest/clamp sampler");

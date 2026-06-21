@@ -17,6 +17,14 @@ boyko-utils  = { path = "../boyko_utils" }
 # on boyko-ui. The OS focus/cursor-inside flags on `PhysicalInput` are also read
 # here for the blur/leave short-circuit (Decision 12).
 boyko-input  = { path = "../boyko_input" }
+# GUI P5b: the glyph metrics table + atlas metadata are ECS-resident (the FontTable
+# Resource) and loaded once from a checked-in `.bfont`. boyko-ui depends on the bake
+# crate ONLY for the POD metric/meta types + the thin `read_bfont` reader (load-time,
+# off every hot path) — NOT for the generator. Acyclic: boyko-fontbake depends on the
+# threadpool, never on boyko-ui or boyko-render. The render-side atlas upload lives in
+# boyko-render; the emitter here produces render-agnostic glyph-quad descriptors the
+# host folds into the P5a instance stream (so boyko-ui takes NO render dependency).
+boyko-fontbake = { path = "../boyko_fontbake" }
 # NOTE: boyko-threadpool is NOT a dependency in P1 — the apply pass is exclusive;
 # the host already owns the pool to build the schedule.
 

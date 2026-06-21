@@ -50,9 +50,9 @@ use boyko_rhi::enums::{AddressMode, BarrierAccess, BarrierStage, DescriptorKind,
 use boyko_rhi::{
     BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BindGroupLayoutEntry, BufferDesc,
     BufferImageCopy, BufferUsage, Format, GraphicsPipelineDesc, ImageAspect, ImageBarrierDesc,
-    ImageLayout, ImageSubresourceRange, ImageUsage, LoadOp, MemoryLocation, PrimitiveTopology,
-    RenderArea, RenderingAttachment, RenderingDesc, RhiCommandEncoder, RhiDevice, RhiQueue,
-    SamplerDesc, ShaderStage, StoreOp, TextureDesc, TextureDimension, VertexAttribute,
+    ImageLayout, ImageSubresourceRange, ImageUsage, LoadOp, MemoryLocation, MipMode,
+    PrimitiveTopology, RenderArea, RenderingAttachment, RenderingDesc, RhiCommandEncoder, RhiDevice,
+    RhiQueue, SamplerDesc, ShaderStage, StoreOp, TextureDesc, TextureDimension, VertexAttribute,
     VertexBufferLayout, VertexFormat, Viewport,
 };
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
@@ -387,6 +387,7 @@ fn render_deferred(device: &VulkanContext) -> Vec<u8> {
             mag_filter: Filter::Nearest,
             min_filter: Filter::Nearest,
             address_mode: AddressMode::ClampToEdge,
+            mip: MipMode::None,
         })
         .expect("sampler");
     let light_layout = device

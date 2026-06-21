@@ -40,8 +40,8 @@ use core::ptr::{self, NonNull};
 use boyko_rhi::{
     BarrierDesc, BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BufferBarrier, BufferCopy,
     BufferDesc, BufferImageCopy, ComputePipelineDesc, DescriptorKind, GraphicsPipelineDesc,
-    ImageBarrierDesc, ImageLayout, IndexType, MemoryLocation, RenderArea, RenderingDesc, RhiApi,
-    RhiCommandEncoder, RhiDevice, RhiQueue, SamplerDesc, ShaderStage, TextureDesc, Viewport,
+    ImageBarrierDesc, ImageLayout, IndexType, MemoryLocation, MipMode, RenderArea, RenderingDesc,
+    RhiApi, RhiCommandEncoder, RhiDevice, RhiQueue, SamplerDesc, ShaderStage, TextureDesc, Viewport,
 };
 
 use crate::compute::ComputeError;
@@ -718,20 +718,28 @@ impl RhiDevice<Vulkan> for VulkanContext {
     }
 
     fn create_sampler(&self, desc: &SamplerDesc) -> Result<VulkanSampler, VulkanError> {
-        // Rung 5: a deterministic 1:1 sampler. The agnostic `Filter`/`AddressMode`
-        // discriminants equal the `VkFilter`/`VkSamplerAddressMode` constants
-        // (`as_i32()` no-op lowering, asserted in `abi_guard.rs`); the single
-        // address mode applies to all three axes. With NEAREST + CLAMP_TO_EDGE,
-        // anisotropy / mip-bias / compare are all disabled (no `samplerAnisotropy`
-        // feature is requested at device creation, so anisotropy MUST be FALSE).
+        // Rung 5 / GUI P5b: a deterministic sampler. The agnostic `Filter`/
+        // `AddressMode` discriminants equal the `VkFilter`/`VkSamplerAddressMode`
+        // constants (`as_i32()` no-op lowering, asserted in `abi_guard.rs`); the
+        // single address mode applies to all three axes. Anisotropy / mip-bias /
+        // compare are disabled (no `samplerAnisotropy` feature is requested at
+        // device creation, so anisotropy MUST be FALSE).
         let address = desc.address_mode.as_i32();
+        // GUI P5b Decision T4-D: map the agnostic `MipMode` to the Vulkan mip state.
+        // `None` pins NEAREST mip mode + `minLod == maxLod == 0.0` (no mipmapping),
+        // so a sampled read always reads the base level — the MSDF-atlas requirement
+        // (a mipped read corrupts the per-channel median). It is the only variant in
+        // P5b; the `match` makes the no-mip guarantee DECLARED, not accidental.
+        let (mipmap_mode, min_lod, max_lod) = match desc.mip {
+            MipMode::None => (VK_SAMPLER_MIPMAP_MODE_NEAREST, 0.0, 0.0),
+        };
         let info = VkSamplerCreateInfo {
             s_type: VkStructureType::SamplerCreateInfo,
             p_next: ptr::null(),
             flags: 0,
             mag_filter: desc.mag_filter.as_i32(),
             min_filter: desc.min_filter.as_i32(),
-            mipmap_mode: VK_SAMPLER_MIPMAP_MODE_NEAREST,
+            mipmap_mode,
             address_mode_u: address,
             address_mode_v: address,
             address_mode_w: address,
@@ -740,8 +748,8 @@ impl RhiDevice<Vulkan> for VulkanContext {
             max_anisotropy: 1.0,
             compare_enable: VK_FALSE,
             compare_op: VK_COMPARE_OP_NEVER,
-            min_lod: 0.0,
-            max_lod: 0.0,
+            min_lod,
+            max_lod,
             border_color: VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK,
             unnormalized_coordinates: VK_FALSE,
         };

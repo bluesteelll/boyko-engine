@@ -48,6 +48,8 @@ struct VsOut {
     float4 position  : SV_Position;
     float2 pos_px    : TEXCOORD0;   // physical px, for the FS clip test
     float2 local_px  : TEXCOORD1;   // rect-centred px, for the SDF
+    float2 local_uv  : TEXCOORD2;   // GUI P5b (Decision T4-B): the 0..1 quad corner;
+                                    // the FS text branch lerps the glyph UV with it
     nointerpolation uint inst_index : INSTANCE;
 };
 
@@ -60,6 +62,7 @@ VsOut main(uint vid : SV_VertexID, uint iid : SV_InstanceID) {
     o.position   = float4(pos_px * g_ortho.scale + g_ortho.translate, 0.0, 1.0);
     o.pos_px     = pos_px;
     o.local_px   = pos_px - (inst.min_px + 0.5 * inst.size_px); // rect-centred
+    o.local_uv   = corner;          // 0..1 within the quad (rect branch ignores it)
     o.inst_index = iid;
     return o;
 }

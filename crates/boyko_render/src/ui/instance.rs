@@ -37,9 +37,23 @@ pub struct UiInstance {
     pub min_px: [f32; 2],
     /// Width + height, physical px.
     pub size_px: [f32; 2],
-    /// Clip AABB `min.xy, max.xy`, physical px (valid iff `CLIP_PRESENT`).
+    /// Clip AABB `min.xy, max.xy`, physical px (valid iff `CLIP_PRESENT`). Shared by
+    /// rect AND text nodes (text clips too).
     pub clip: [f32; 4],
     /// Per-corner radius `tl, tr, br, bl`, physical px.
+    ///
+    /// # Text-lane alias (GUI P5b Decision T4-G)
+    ///
+    /// When [`FLAG_TEXT`] is set, the fragment shader REINTERPRETS this field as the
+    /// glyph's atlas UV rect `(left, top, right, bottom)`, NORMALIZED to `[0, 1]` over
+    /// the atlas size. A text node never sets `corner_radius`/`border`, and a rect node
+    /// never sets a UV, so the two are mutually exclusive by `FLAG_TEXT` — aliasing the
+    /// field keeps `UiInstance` at 64 B, one pipeline, one z-sort, one draw. The
+    /// reinterpret is VALUE-ONLY in the shader (no Rust transmute): Rust-side this stays
+    /// a plain `[f32; 4]`, so the `offset_of!` oracle and the Miri-TB byte view are
+    /// unchanged. A future textured/nine-slice rect (needing BOTH a radius and a UV on
+    /// one instance) retires this alias and widens `UiInstance` to 80 B — the recorded
+    /// deliberate-revisit trigger.
     pub corner_radius: [f32; 4],
     /// PREMULTIPLIED RGBA8 fill (`byte0=R .. byte3=A`).
     pub color: u32,
@@ -61,6 +75,13 @@ pub const FLAG_BORDER_ANY: u32 = 1 << 0;
 /// pack from a present `ComputedClip`; gates the fragment shader's clip branch (a
 /// sentinel-free uniform branch — unclipped rects never evaluate `clip_coverage`).
 pub const FLAG_CLIP_PRESENT: u32 = 1 << 1;
+/// `UiInstance.flags` bit2 — the instance is a GLYPH quad, not a rounded rect (GUI
+/// P5b Decision T4-G). When set, the fragment shader REINTERPRETS `corner_radius` as
+/// the glyph's normalized atlas UV rect `(left, top, right, bottom)` and samples the
+/// MSDF atlas (`median` + `screenPxRange` AA, premultiplied out) instead of
+/// evaluating the rounded-box SDF. A uniform-per-instance branch, so the rect
+/// majority is unregressed.
+pub const FLAG_TEXT: u32 = 1 << 2;
 
 // --- std430 layout oracle (compile-time). The size/align pin the array stride;
 //     the per-field `offset_of!` asserts pin every field's byte offset against the

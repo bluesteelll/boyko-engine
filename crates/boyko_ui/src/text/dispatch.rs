@@ -28,6 +28,7 @@ use crate::components::{
 };
 use crate::interaction::action::{OnClick, OnHover, OnSubmit};
 use crate::text::ast::{CompKind, ParsedComponent};
+use crate::text::components::{FontId, TextAlign, UiText};
 use crate::text::report::UiParseReport;
 use crate::text::split::split_top_level;
 use crate::units::{AlignCross, AlignMain, LayoutType, PositionType, Unit};
@@ -71,6 +72,12 @@ pub(crate) fn parse_and_insert(
         "ContentSize" => {
             expect_struct(name, kind, line_no, body_col, rep)?;
             cmds.entity(entity).insert(parse_content_size(body, body_col, rep));
+        }
+        "UiText" => {
+            // GUI P5b: the text STYLE component (content is the separate
+            // `UiTextBuffer`, set via `#name`-bound data or a direct insert).
+            expect_struct(name, kind, line_no, body_col, rep)?;
+            cmds.entity(entity).insert(parse_ui_text(body, body_col, rep));
         }
         "ComputedRect" => {
             expect_struct(name, kind, line_no, body_col, rep)?;
@@ -351,6 +358,20 @@ fn parse_content_size(body: &str, body_col: u16, rep: &mut UiParseReport) -> Con
     out
 }
 
+/// Parses a `UiText` body (GUI P5b): `color` (RGBA8 `u32`), `size_px` (`f32`), `font`
+/// (a dense `u16` index), `align` (`Left`/`Center`/`Right`). Default-then-overwrite.
+fn parse_ui_text(body: &str, body_col: u16, rep: &mut UiParseReport) -> UiText {
+    let mut out = UiText::default();
+    for_each_field(body, body_col, line_of(rep), rep, |key, value, col, rep| match key {
+        "color" => set(&mut out.color, parse_u32(value), col, key, rep),
+        "size_px" => set(&mut out.size_px, parse_f32(value), col, key, rep),
+        "font" => set(&mut out.font, parse_font_id(value), col, key, rep),
+        "align" => set(&mut out.align, parse_text_align(value), col, key, rep),
+        other => unknown_field("UiText", other, col, rep),
+    });
+    out
+}
+
 fn parse_computed_rect(body: &str, body_col: u16, rep: &mut UiParseReport) -> ComputedRect {
     let mut out = ComputedRect::default();
     for_each_field(body, body_col, line_of(rep), rep, |key, value, col, rep| match key {
@@ -518,6 +539,26 @@ fn parse_f32(value: &str) -> Option<f32> {
 #[inline]
 fn parse_u32(value: &str) -> Option<u32> {
     value.trim().parse::<u32>().ok()
+}
+
+/// Parses a dense [`FontId`] (the `FontId` field arm, GUI P5b): a bare `u16` index, or
+/// the tuple form `FontId(0)`.
+#[inline]
+fn parse_font_id(value: &str) -> Option<FontId> {
+    let v = value.trim();
+    let inner = strip_call(v, "FontId").unwrap_or(v).trim();
+    inner.parse::<u16>().ok().map(FontId)
+}
+
+/// Parses a [`TextAlign`] (bare or `TextAlign::`-qualified — GUI P5b).
+#[inline]
+fn parse_text_align(value: &str) -> Option<TextAlign> {
+    match strip_qualifier(value.trim(), "TextAlign") {
+        "Left" => Some(TextAlign::Left),
+        "Center" => Some(TextAlign::Center),
+        "Right" => Some(TextAlign::Right),
+        _ => None,
+    }
 }
 
 /// Parses a dense `u16` action index for an `OnClick`/`OnHover`/`OnSubmit` tuple

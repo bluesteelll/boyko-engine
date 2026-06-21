@@ -29,6 +29,7 @@ fn plain_rect(x: f32, y: f32, w: f32, h: f32, color: u32) -> PackInput {
         corner_radius: [0.0; 4],
         border_width: [0.0; 4],
         clip: None,
+        text_uv: None,
     }
 }
 

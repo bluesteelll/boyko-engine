@@ -51,14 +51,33 @@ pub struct TextureDesc {
     pub usage: ImageUsage,
 }
 
+/// The mip/LOD sampling mode (GUI P5b Decision T4-D).
+///
+/// `#[repr(i32)]` so the backend reads it as a small POD discriminant. P5b uses
+/// [`Self::None`] exclusively: the MSDF atlas is upload-once at a single rasterized
+/// `pixels_per_em` and the `screenPxRange` AA derivation assumes the base level is
+/// sampled (a mipped read would corrupt the per-channel `median()`). Making the
+/// no-mip intent a DECLARED, gate-backed field (rather than a backend-default
+/// accident) is the Decision-T4-D fix; the variant set grows when a future texture
+/// path needs mipmaps.
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MipMode {
+    /// No mipmapping: the backend pins `mipmapMode = NEAREST`, `minLod = maxLod =
+    /// 0.0`, so every sample reads the base level. The P5b MSDF-atlas requirement.
+    None = 0,
+}
+
 /// Parameters for [`RhiDevice::create_sampler`] (Phase-6 S0 rung 5).
 ///
 /// `#[repr(C)]` POD with an explicit field order (the two `i32` `VkFilter` seam
-/// fields, then the `i32` `VkSamplerAddressMode`) so a backend reads it without
-/// depending on Rust's default field reordering. Rung 5 picks
-/// [`Filter::Nearest`] + [`AddressMode::ClampToEdge`] — the simplest deterministic
-/// 1:1 sample (one source texel per sampled texel, an out-of-range UV clamps to
-/// the edge). The same address mode is applied to all three coordinate axes.
+/// fields, then the `i32` `VkSamplerAddressMode`, then the `i32` [`MipMode`]) so a
+/// backend reads it without depending on Rust's default field reordering. Rung 5
+/// picks [`Filter::Nearest`] + [`AddressMode::ClampToEdge`] — the simplest
+/// deterministic 1:1 sample (one source texel per sampled texel, an out-of-range UV
+/// clamps to the edge). The same address mode is applied to all three coordinate
+/// axes. The MSDF atlas (GUI P5b) overrides the filters to [`Filter::Linear`] while
+/// keeping [`MipMode::None`] (bilinear, no mips — Decision T4-D).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SamplerDesc {
@@ -68,16 +87,20 @@ pub struct SamplerDesc {
     pub min_filter: Filter,
     /// The address mode applied to every texture-coordinate axis.
     pub address_mode: AddressMode,
+    /// The mip/LOD mode (GUI P5b Decision T4-D). P5b uses [`MipMode::None`].
+    pub mip: MipMode,
 }
 
 impl Default for SamplerDesc {
-    /// The deterministic 1:1 rung-5 default: nearest mag/min + clamp-to-edge.
+    /// The deterministic 1:1 rung-5 default: nearest mag/min + clamp-to-edge + no
+    /// mips (the existing behavior, now an explicit [`MipMode::None`]).
     #[inline]
     fn default() -> Self {
         SamplerDesc {
             mag_filter: Filter::Nearest,
             min_filter: Filter::Nearest,
             address_mode: AddressMode::ClampToEdge,
+            mip: MipMode::None,
         }
     }
 }

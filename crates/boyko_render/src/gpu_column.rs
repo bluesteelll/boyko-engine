@@ -183,7 +183,9 @@ impl RhiContext {
     /// swapchain surface format for the on-screen path, `R8G8B8A8Unorm` for the
     /// offscreen golden — Decision 9). `spirv_vs`/`spirv_fs` are the committed
     /// `ui_rect.{vs,fs}.spv` word streams; `initial_rows` each ring's starting
-    /// `UiInstance` capacity (grows pow2 on overflow).
+    /// `UiInstance` capacity (grows pow2 on overflow). `font` is the loaded `.bfont`
+    /// (GUI P5b): its MTSDF atlas is uploaded ONCE here as a sampled image + the
+    /// per-atlas UBO, then sampled by every glyph (`FLAG_TEXT`) on the shared draw.
     ///
     /// Calling it twice tears down the prior resources first (idempotent setup), so
     /// a swapchain recreate that re-runs setup never leaks.
@@ -197,6 +199,7 @@ impl RhiContext {
         spirv_vs: &[u32],
         spirv_fs: &[u32],
         initial_rows: u32,
+        font: &boyko_fontbake::atlas::BakedFont,
     ) -> Result<(), GpuColumnError> {
         // Idempotent re-setup: drop the prior capability (its own `destroy` drains
         // the device + frees every resource) before building anew.
@@ -204,8 +207,14 @@ impl RhiContext {
             old.destroy(&self.context);
         }
         let (device, _manager) = self.split_mut();
-        let resources =
-            UiRenderResources::create(device, color_format, spirv_vs, spirv_fs, initial_rows)?;
+        let resources = UiRenderResources::create(
+            device,
+            color_format,
+            spirv_vs,
+            spirv_fs,
+            initial_rows,
+            font,
+        )?;
         self.ui = Some(resources);
         Ok(())
     }

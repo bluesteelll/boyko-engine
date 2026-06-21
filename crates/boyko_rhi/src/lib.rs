@@ -47,7 +47,7 @@ pub use descriptor::{
 };
 pub use device::{
     BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BindGroupLayoutEntry,
-    MAX_BIND_GROUP_BINDINGS, RhiDevice, SamplerDesc, TextureDesc,
+    MAX_BIND_GROUP_BINDINGS, MipMode, RhiDevice, SamplerDesc, TextureDesc,
 };
 pub use encoder::RhiCommandEncoder;
 pub use enums::{

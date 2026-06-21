@@ -73,7 +73,8 @@ pub mod upload;
 
 pub use draw::record_ui_rects;
 pub use instance::{
-    premultiply_rgba8, UiInstance, UiOrtho, FLAG_BORDER_ANY, FLAG_CLIP_PRESENT, UI_INSTANCE_SIZE,
+    premultiply_rgba8, UiInstance, UiOrtho, FLAG_BORDER_ANY, FLAG_CLIP_PRESENT, FLAG_TEXT,
+    UI_INSTANCE_SIZE,
 };
 pub use pack::{pack_ui_instance, PackInput, UiRenderGeneration, UiRenderScratch};
 pub use plan::UiFramePlan;
@@ -118,14 +119,14 @@ impl<const N: usize> SpirvBlob<N> {
 /// The committed `ui_rect.vs.spv` (vertexless quad, a VERTEX-stage SSBO transform
 /// read, and the ortho push constant). The `const N` byte length must match the file
 /// on disk (a mismatch is a compile error).
-static UI_RECT_VS_SPV: SpirvBlob<2292> = SpirvBlob(*include_bytes!(concat!(
+static UI_RECT_VS_SPV: SpirvBlob<2368> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/ui_rect.vs.spv"
 )));
 
 /// The committed `ui_rect.fs.spv` (`sdRoundedBox` + `fwidth` AA + uniform border +
 /// flag-gated clip, premultiplied out; FRAGMENT-stage SSBO read).
-static UI_RECT_FS_SPV: SpirvBlob<4724> = SpirvBlob(*include_bytes!(concat!(
+static UI_RECT_FS_SPV: SpirvBlob<7060> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/ui_rect.fs.spv"
 )));

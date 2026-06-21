@@ -195,6 +195,7 @@ fn rect(x: f32, y: f32, w: f32, h: f32, color: u32, clip: Option<[f32; 4]>) -> U
             corner_radius: [0.0; 4],
             border_width: [0.0; 4],
             clip,
+            text_uv: None,
         },
         1.0,
     )
@@ -393,6 +394,7 @@ fn ui_rects_render_through_the_swapchain_present_hook_golden() {
             mag_filter: Filter::Nearest,
             min_filter: Filter::Nearest,
             address_mode: AddressMode::ClampToEdge,
+            mip: boyko_rhi::MipMode::None,
         },
     )
     .expect("nearest/clamp sampler");
@@ -463,11 +465,38 @@ fn ui_rects_render_through_the_swapchain_present_hook_golden() {
     // initial_rows >= the instance count below, so the rings NEVER grow across the
     // present loop (Decision 7: no steady-state realloc; grow_slot is never reached).
     const UI_ROWS: u32 = 8;
+    // A minimal 1×1 MTSDF font so `ui_setup` can build its 3-binding bind-group (the
+    // atlas binding is always present — GUI P5b Decision T4-C). This rect-only golden
+    // emits no glyphs, so the atlas content is irrelevant; it just must exist.
+    let font = {
+        use boyko_fontbake::atlas::{AtlasImage, AtlasKind, AtlasMeta, BakedFont};
+        BakedFont {
+            meta: AtlasMeta {
+                distance_range_texels: 6.0,
+                pixels_per_em: 48.0,
+                atlas_w: 1,
+                atlas_h: 1,
+                ascender_em: 0.8,
+                descender_em: -0.2,
+                line_gap_em: 0.0,
+                kind: AtlasKind::Mtsdf,
+            },
+            glyphs: Vec::new(),
+            cmap: Vec::new(),
+            kern: Vec::new(),
+            atlas: AtlasImage {
+                width: 1,
+                height: 1,
+                pixels: vec![0u8; 4],
+            },
+        }
+    };
     rhi.ui_setup(
         swap_format,
         boyko_render::ui_rect_vs_spirv(),
         boyko_render::ui_rect_fs_spirv(),
         UI_ROWS,
+        &font,
     )
     .expect("ui_setup (UI pipeline + per-FIF rings, swapchain format)");
 

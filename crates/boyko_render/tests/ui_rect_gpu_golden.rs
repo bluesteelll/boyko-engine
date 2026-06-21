@@ -95,15 +95,44 @@ fn opaque_rect(x: f32, y: f32, w: f32, h: f32, color: u32) -> UiInstance {
             corner_radius: [0.0; 4],
             border_width: [0.0; 4],
             clip: None,
+            text_uv: None,
         },
         1.0,
     )
+}
+
+/// A minimal 1×1 MTSDF `BakedFont` so `ui_setup` can build its 3-binding bind-group
+/// (the atlas binding is always present — GUI P5b Decision T4-C). This rect-only
+/// golden emits no glyphs, so the atlas content is irrelevant; it just must exist.
+fn tiny_font() -> boyko_fontbake::atlas::BakedFont {
+    use boyko_fontbake::atlas::{AtlasImage, AtlasKind, AtlasMeta, BakedFont};
+    BakedFont {
+        meta: AtlasMeta {
+            distance_range_texels: 6.0,
+            pixels_per_em: 48.0,
+            atlas_w: 1,
+            atlas_h: 1,
+            ascender_em: 0.8,
+            descender_em: -0.2,
+            line_gap_em: 0.0,
+            kind: AtlasKind::Mtsdf,
+        },
+        glyphs: Vec::new(),
+        cmap: Vec::new(),
+        kern: Vec::new(),
+        atlas: AtlasImage {
+            width: 1,
+            height: 1,
+            pixels: vec![0u8; 4],
+        },
+    }
 }
 
 /// Renders the two-instance UI scene through the real `RhiContext` UI capability +
 /// the `record_ui_rects` recorder, into an offscreen target, and returns the readback.
 fn render_ui_golden(rhi: &mut RhiContext) -> Vec<u8> {
     // --- 1. SETUP: build the owned UI pipeline + per-FIF rings for R8G8B8A8. ---
+    let font = tiny_font();
     rhi.ui_setup(
         Format::R8G8B8A8Unorm,
         boyko_render::ui_rect_vs_spirv(),
@@ -111,6 +140,7 @@ fn render_ui_golden(rhi: &mut RhiContext) -> Vec<u8> {
         // A tiny initial ring (2 rows) so this golden also crosses the grow path
         // (3 instances > 2) on a second frame if extended; here 2 instances fit.
         2,
+        &font,
     )
     .expect("ui_setup (UI pipeline + bind-group layout + per-FIF rings)");
 

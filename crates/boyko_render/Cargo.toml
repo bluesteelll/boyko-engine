@@ -34,3 +34,9 @@ boyko-utils = { path = "../boyko_utils" }
 # `boyko_rhi_vulkan` backend must not depend upward on the scene crate).
 boyko-scene = { path = "../boyko_scene" }
 boyko-math = { path = "../boyko_math" }
+# GUI P5b: the MSDF font atlas is BAKED offline (boyko-fontbake, a load-time tool)
+# and shipped as a checked-in `.bfont`. boyko_render reads it with the thin POD
+# reader (`read_bfont`) at UI setup — no bake-time dependency at runtime; the reader
+# is the only surface used here (the generator/threadpool paths are not linked on the
+# render hot path). The metrics tables themselves become ECS-resident (boyko_ui).
+boyko-fontbake = { path = "../boyko_fontbake" }

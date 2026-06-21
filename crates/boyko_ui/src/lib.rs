@@ -19,6 +19,16 @@
 //!
 //! Schedule them in that order, after all structural/prop-mutation systems (the
 //! `Children`/`ChildOf` consistency window).
+//!
+//! # GUI P5b text (host-driven scheduling — Decision T5-B)
+//!
+//! [`ui_text_measure_system`](text::ui_text_measure_system) MUST be registered
+//! `.before(ui_layout_discovery)` so the same-frame relayout sees the new
+//! [`ContentSize`](components::ContentSize) (the layout lists `Changed<ContentSize>` as
+//! a relayout trigger and reads it as the leaf intrinsic size). Like the layout pair,
+//! the ORDER is the host's responsibility (P5b ships the system, not an App schedule);
+//! the CPU-boundary correctness of the seam is unit-proven (`measure_one` matches a
+//! shaped run; an `Auto` leaf hugs the measured size).
 
 pub mod binding;
 pub mod bundles;
@@ -47,6 +57,16 @@ pub use boyko_macros::Bindable;
 pub use plugin::UiPlugin;
 pub use text::{parse_ui, serialize_ui, spawn_ui_tree, UI_FORMAT_VERSION};
 
+/// GUI P5b text rendering: the [`UiText`](text::UiText) style component +
+/// [`FontTable`](text::FontTable) resource, the glyph emitter, the measure system, and
+/// the `.bfont` loader. Text RIDES the P5a instanced-quad path (one pipeline, one
+/// draw, premultiplied blend).
+pub use text::{
+    emit_glyphs, measure_one, read_bfont, ui_text_measure_system, BakedFont, FontEntry, FontId,
+    FontTable, GlyphInstance, ShapedExtent, ShapedGlyph, TextAlign, TextEmitScratch, TextNode,
+    UiText,
+};
+
 /// Crate-local convenience re-exports (no engine-wide prelude).
 pub mod prelude {
     pub use crate::binding::{
@@ -67,7 +87,11 @@ pub mod prelude {
     pub use crate::layout::{ui_layout_apply, ui_layout_discovery};
     pub use crate::plugin::UiPlugin;
     pub use crate::resources::{LayoutScratch, UiViewport};
-    pub use crate::text::{parse_ui, serialize_ui, spawn_ui_tree, UI_FORMAT_VERSION};
+    pub use crate::text::{
+        emit_glyphs, measure_one, parse_ui, read_bfont, serialize_ui, spawn_ui_tree,
+        ui_text_measure_system, BakedFont, FontId, FontTable, GlyphInstance, TextAlign,
+        TextEmitScratch, TextNode, UiText, UI_FORMAT_VERSION,
+    };
     pub use crate::units::{AlignCross, AlignMain, LayoutType, PositionType, Unit};
 
     pub use boyko_macros::{ui, Bindable};

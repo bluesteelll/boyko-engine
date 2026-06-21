@@ -25,15 +25,32 @@ struct UiInstance {
 
 [[vk::binding(0, 0)]] StructuredBuffer<UiInstance> g_instances : register(t0);
 
+// GUI P5b (Decision T4-G/T4-A): the MSDF glyph atlas (binding 1, a combined
+// image+sampler, FRAGMENT-visible) + the per-atlas uniform (binding 2): the baked
+// distance range in TEXELS and the atlas size in texels. The atlas is upload-once,
+// all-FIF sample concurrently (SampledComposite); the UBO is written once at upload
+// and is immutable (one atlas → one constant pxRange/size). Both bindings are present
+// for EVERY draw but only sampled in the FLAG_TEXT branch, so the rect path is free.
+[[vk::binding(1, 0)]] Texture2D    g_atlas         : register(t1);
+[[vk::binding(1, 0)]] SamplerState g_atlas_sampler : register(s1);
+struct AtlasUniform {
+    float px_range;     // = AtlasMeta.distance_range_texels (the screenPxRange divisor)
+    float _pad0;
+    float2 atlas_size;  // (atlas_w, atlas_h) in texels
+};
+[[vk::binding(2, 0)]] ConstantBuffer<AtlasUniform> g_atlas_ubo : register(b2);
+
 struct VsOut {
     float4 position  : SV_Position;
     float2 pos_px    : TEXCOORD0;
     float2 local_px  : TEXCOORD1;
+    float2 local_uv  : TEXCOORD2;   // GUI P5b: the 0..1 quad corner (Decision T4-B)
     nointerpolation uint inst_index : INSTANCE;
 };
 
 static const uint FLAG_BORDER_ANY   = 1u << 0;
 static const uint FLAG_CLIP_PRESENT = 1u << 1;
+static const uint FLAG_TEXT         = 1u << 2;
 
 // Unpack a premultiplied RGBA8 (byte0=R..byte3=A) to a float4 in [0,1].
 float4 unpack_rgba8(uint c) {
@@ -65,8 +82,42 @@ float clip_coverage(float2 pos, float4 clip, float fw) {
     return cov.x * cov.y;
 }
 
+// GUI P5b MSDF reconstruction (canonical Chlumsky, adapted to the engine HLSL).
+// The per-channel median recovers the sharp signed distance; corners are preserved
+// because the three channels disagree only across a true edge.
+float median3(float r, float g, float b) {
+    return max(min(r, g), min(max(r, g), b));
+}
+
+// Converts the baked TEXEL distance range into a SCREEN-px range at this fragment,
+// so the AA band is ~1 device px regardless of glyph scale. `fwidth(uv) == 0` on a
+// flat run gives `screenTexSz == Inf`; `max(..., 1.0)` floors it (the NaN/Inf guard).
+float screen_px_range(float2 uv) {
+    float2 unit_range   = g_atlas_ubo.px_range / g_atlas_ubo.atlas_size;
+    float2 screen_tex_sz = 1.0 / fwidth(uv);
+    return max(0.5 * dot(unit_range, screen_tex_sz), 1.0);
+}
+
 float4 main(VsOut input) : SV_Target0 {
     UiInstance inst = g_instances[input.inst_index];     // SSBO read in the FRAGMENT stage
+
+    // GUI P5b text branch (Decision T4-G): a uniform-per-instance branch (every
+    // fragment of one glyph takes the same side), so the rect majority is unregressed.
+    // `corner_radius` is reinterpreted as the glyph's normalized atlas UV rect.
+    if ((inst.flags & FLAG_TEXT) != 0u) {
+        float2 uv  = lerp(inst.corner_radius.xy, inst.corner_radius.zw, input.local_uv);
+        float4 msd = g_atlas.Sample(g_atlas_sampler, uv);   // RGBA8 MTSDF (rgb = MSDF)
+        float  sd  = median3(msd.r, msd.g, msd.b);
+        float  cov = clamp(screen_px_range(uv) * (sd - 0.5) + 0.5, 0.0, 1.0);
+
+        float4 result = unpack_rgba8(inst.color) * cov;     // PREMULTIPLIED fg, weighted
+        if ((inst.flags & FLAG_CLIP_PRESENT) != 0u) {
+            float fw = max(fwidth(input.pos_px.x), 1e-5);   // a device-px AA clip band
+            result *= clip_coverage(input.pos_px, inst.clip, fw);
+        }
+        return result;                                      // PREMULTIPLIED (src=ONE)
+    }
+
     float2 half_size = 0.5 * inst.size_px;
 
     float d  = sd_rounded_box(input.local_px, half_size, inst.corner_radius);

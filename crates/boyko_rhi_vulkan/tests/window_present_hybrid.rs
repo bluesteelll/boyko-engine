@@ -59,7 +59,7 @@ use boyko_rhi::{
     BarrierDesc, BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BindGroupLayoutEntry,
     BufferBarrier, BufferDesc, BufferImageCopy, BufferUsage, ComputePipelineDesc, DepthAttachment,
     Format, GraphicsPipelineDesc, ImageAspect, ImageBarrierDesc, ImageLayout, ImageSubresourceRange,
-    ImageUsage, LoadOp, MemoryLocation, PrimitiveTopology, RenderArea, RenderingAttachment,
+    ImageUsage, LoadOp, MemoryLocation, MipMode, PrimitiveTopology, RenderArea, RenderingAttachment,
     RenderingDesc, RhiCommandEncoder, RhiDevice, RhiQueue, SamplerDesc, ShaderStage, StoreOp,
     TextureDesc, TextureDimension, VertexAttribute, VertexBufferLayout, VertexFormat, Viewport,
 };
@@ -825,6 +825,7 @@ fn windowed_hybrid_composite_present_is_validation_clean_and_renders_composite()
             mag_filter: Filter::Nearest,
             min_filter: Filter::Nearest,
             address_mode: AddressMode::ClampToEdge,
+            mip: MipMode::None,
         },
     )
     .expect("nearest/clamp sampler");
