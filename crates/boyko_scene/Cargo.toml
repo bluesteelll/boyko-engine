@@ -1,0 +1,37 @@
+[package]
+name = "boyko-scene"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "boyko_scene"
+path = "src/lib.rs"
+
+[dependencies]
+# The scene crate sits one layer above the kernel: it owns the spatial
+# vocabulary (`Transform` / `GlobalTransform`) and the world-from-local
+# propagation system, expressed as ECS components + an exclusive system on the
+# kernel's own storage (Principle 0 — no parallel pose data system).
+#   * `boyko_ecs`   — Component / Resource / EcsMaster / ChildOf / Children, the
+#                     S0 entity-yielding iteration substrate, and the by-entity
+#                     raw-pointer pool access the hierarchy descent walks.
+#   * `boyko_math`  — the SIMD-aligned POD math vocabulary (Vec3 / Quat / Affine3A);
+#                     `GlobalTransform` is a packed `Affine3A`.
+#   * `boyko_macros`— the `#[derive(Component)]` / `#[derive(Resource)]` macros
+#                     (a normal dep here, matching `boyko_physics`).
+#   * `boyko_utils` — reusable collections (declared per the S2 scope; kept even
+#                     though v1 uses only the kernel scratch, so the dep graph is
+#                     fixed for later phases that lean on `BitSet` for dirty sets).
+boyko-ecs = { path = "../boyko_ecs" }
+boyko-math = { path = "../boyko_math" }
+boyko-macros = { path = "../boyko_macros" }
+boyko-utils = { path = "../boyko_utils" }
+
+[dev-dependencies]
+# Test-only: the S2 propagation gates drive `propagate_transforms` through a
+# hand-built `Schedule` (mirroring the `boyko_ui` / `boyko_demo` schedule-build
+# pattern), which needs a `ThreadPool` to bind the schedule to. Production code
+# never touches the pool directly — it is reached only via the `App`/`Schedule`
+# API in the integration tests.
+boyko-threadpool = { path = "../boyko_threadpool" }
