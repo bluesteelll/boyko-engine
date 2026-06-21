@@ -40,4 +40,16 @@ pub enum RawInputEvent {
     CursorMoved { x: f64, y: f64 },
     /// A scroll-wheel delta. Summed into the `wheel` accumulator each frame.
     Wheel(ScrollDelta),
+    /// The cursor entered the window surface (GUI P4 Decision 12). Sets the
+    /// `cursor_inside` level so the UI hit-test runs; routed from the OS
+    /// `CursorEntered`/`CursorLeft` events.
+    CursorEntered,
+    /// The cursor left the window surface (GUI P4 Decision 12). Clears
+    /// `cursor_inside` so the UI focus system forces every interactive node to
+    /// `None` (the stuck-hover-on-blur defence).
+    CursorLeft,
+    /// The window gained (`true`) or lost (`false`) keyboard focus (GUI P4
+    /// Decision 12). On loss the UI focus system clears all interaction +
+    /// keyboard focus.
+    WindowFocus(bool),
 }

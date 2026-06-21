@@ -181,6 +181,17 @@ pub struct PhysicalInput {
     /// Summed wheel delta this frame (`[x, y]`), pixels (lines folded in via
     /// `LINE_TO_PIXEL`).
     pub wheel: [f64; 2],
+    /// Level: whether the cursor is currently inside the window surface (GUI P4
+    /// Decision 12). Set/cleared from the OS `CursorEntered`/`CursorLeft` events
+    /// and PERSISTS across `begin_frame` (a level, not an edge). Defaults `true`
+    /// so a host that never routes cursor-enter/leave (e.g. a synthetic test
+    /// stream) sees the cursor as inside and the UI hit-test runs.
+    pub cursor_inside: bool,
+    /// Level: whether the window currently holds keyboard/input focus (GUI P4
+    /// Decision 12). Set/cleared from the OS `WindowFocus` event and PERSISTS
+    /// across `begin_frame`. Defaults `true` for the same reason as
+    /// `cursor_inside`.
+    pub window_focused: bool,
 }
 
 impl PhysicalInput {
@@ -197,6 +208,10 @@ impl PhysicalInput {
             mouse_delta: [0.0; 2],
             cursor_pos: [0.0; 2],
             wheel: [0.0; 2],
+            // Levels default "inside / focused" so a host that never routes the
+            // cursor-enter/window-focus events still hit-tests (GUI P4 D12).
+            cursor_inside: true,
+            window_focused: true,
         }
     }
 
@@ -277,6 +292,17 @@ impl PhysicalInput {
             // Text is for text fields only — never gameplay; the physical
             // snapshot ignores it.
             RawInputEvent::Text(_) => {}
+            // Window-surface level state (GUI P4 D12) — drives the UI blur/leave
+            // short-circuit. Persisted across `begin_frame` like other levels.
+            RawInputEvent::CursorEntered => {
+                self.cursor_inside = true;
+            }
+            RawInputEvent::CursorLeft => {
+                self.cursor_inside = false;
+            }
+            RawInputEvent::WindowFocus(focused) => {
+                self.window_focused = focused;
+            }
         }
     }
 

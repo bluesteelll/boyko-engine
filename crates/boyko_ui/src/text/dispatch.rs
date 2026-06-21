@@ -26,6 +26,7 @@ use crate::components::{
     ComputedClip, ComputedRect, ContentSize, StackIndex, UiAbsolute, UiAlign, UiLayout, UiRoot,
     UiSpacing,
 };
+use crate::interaction::action::{OnClick, OnHover, OnSubmit};
 use crate::text::ast::{CompKind, ParsedComponent};
 use crate::text::report::UiParseReport;
 use crate::text::split::split_top_level;
@@ -95,6 +96,57 @@ pub(crate) fn parse_and_insert(
                 return Err(());
             }
             cmds.entity(entity).insert(UiRoot);
+        }
+        // P4 action-emitting tuple newtypes carrying a dense `u16` action index
+        // (Decision 3). The integer-index form `OnClick(3)` is reflection-free and
+        // fully resolvable here. The action-NAME form `OnClick(Jump)` needs a
+        // name→index table from the registered action enum, which is not threaded
+        // into `parse_and_insert`; that form is a documented P4 deferral.
+        "OnClick" => {
+            if kind != CompKind::Tuple {
+                rep.error(line_no, body_col, "OnClick must use the tuple form `OnClick(index)`");
+                return Err(());
+            }
+            cmds.entity(entity).insert(OnClick(parse_action_index(body, body_col, "OnClick", rep)));
+        }
+        "OnHover" => {
+            if kind != CompKind::Tuple {
+                rep.error(line_no, body_col, "OnHover must use the tuple form `OnHover(index)`");
+                return Err(());
+            }
+            cmds.entity(entity).insert(OnHover(parse_action_index(body, body_col, "OnHover", rep)));
+        }
+        "OnSubmit" => {
+            if kind != CompKind::Tuple {
+                rep.error(line_no, body_col, "OnSubmit must use the tuple form `OnSubmit(index)`");
+                return Err(());
+            }
+            cmds.entity(entity)
+                .insert(OnSubmit(parse_action_index(body, body_col, "OnSubmit", rep)));
+        }
+        // P4 data-bind components. RECOGNIZED here (so a well-formed `bind_text:`/
+        // `bind_value:` is not misreported as an unknown component), but the `.ui`
+        // form is a deferred P4 feature: it needs a name→Entity index for the
+        // `source` widget AND a component-name→ComponentId + field-name→id resolver
+        // (the `Bindable::field_id` table keyed by the source component's name),
+        // neither of which is threaded into the spawn-time parser. The `ui!`
+        // monomorphized path (which has the concrete source type in scope) and the
+        // direct `BindText`/`BindValue` component inserts are the supported routes.
+        // The architectural gap (threading name resolution into the `.ui` parser)
+        // is escalated, not invented here. Mirrors the `OnClick(Jump)` action-name
+        // deferral above.
+        "BindText" | "BindValue" => {
+            rep.error(
+                line_no,
+                body_col,
+                format!(
+                    "{name} is a deferred `.ui` feature: it requires source name \
+                     resolution (a UiName→Entity index + a component/field-name \
+                     resolver) not yet threaded into the spawn-time parser; use the \
+                     `ui!` macro or insert {name} directly"
+                ),
+            );
+            return Err(());
         }
         // `UiName` is NOT dispatched here — it comes from the `#name` sigil only
         // (mirrors the macro, which inserts `UiName` from the binding name).
@@ -466,4 +518,26 @@ fn parse_f32(value: &str) -> Option<f32> {
 #[inline]
 fn parse_u32(value: &str) -> Option<u32> {
     value.trim().parse::<u32>().ok()
+}
+
+/// Parses a dense `u16` action index for an `OnClick`/`OnHover`/`OnSubmit` tuple
+/// (P4 Decision 3). On a parse failure (e.g. an action-NAME form, which is a
+/// deferred P4 feature) it records a per-component error and returns
+/// [`NO_ACTION`](crate::interaction::action::NO_ACTION) so the component inserts
+/// with a no-op action rather than dropping the whole node.
+fn parse_action_index(body: &str, body_col: u16, comp: &str, rep: &mut UiParseReport) -> u16 {
+    match body.trim().parse::<u16>() {
+        Ok(v) => v,
+        Err(_) => {
+            rep.error(
+                line_of(rep),
+                body_col,
+                format!(
+                    "{comp} expects a numeric action index `{comp}(n)`; \
+                     the action-name form is a deferred P4 feature"
+                ),
+            );
+            crate::interaction::action::NO_ACTION
+        }
+    }
 }

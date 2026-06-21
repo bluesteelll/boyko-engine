@@ -20,8 +20,10 @@
 //! Schedule them in that order, after all structural/prop-mutation systems (the
 //! `Children`/`ChildOf` consistency window).
 
+pub mod binding;
 pub mod bundles;
 pub mod components;
+pub mod interaction;
 pub mod layout;
 pub mod plugin;
 pub mod reload;
@@ -33,6 +35,12 @@ pub mod units;
 /// block. See [`boyko_macros::ui`] for the grammar and expansion contract.
 pub use boyko_macros::ui;
 
+/// The `#[derive(Bindable)]` macro (P4): generate the reflection-free per-field
+/// accessor + the type-erased `BindAccessor` registration. Re-exported next to
+/// the [`Bindable`](binding::Bindable) trait (the `ui!`/`Component` derive
+/// re-export pattern).
+pub use boyko_macros::Bindable;
+
 /// The `.ui` text format (P3): [`parse_ui`](text::parse_ui),
 /// [`spawn_ui_tree`](text::spawn_ui_tree), [`serialize_ui`](text::serialize_ui),
 /// and the runtime hot-reload [`UiPlugin`](plugin::UiPlugin).
@@ -41,10 +49,20 @@ pub use text::{parse_ui, serialize_ui, spawn_ui_tree, UI_FORMAT_VERSION};
 
 /// Crate-local convenience re-exports (no engine-wide prelude).
 pub mod prelude {
+    pub use crate::binding::{
+        ui_bind_apply, ui_bind_discovery, BindText, BindValue, Bindable, TemplateId, UiBindScratch,
+        UiTextBuffer, UiValue, NO_FIELD,
+    };
     pub use crate::bundles::UiNodeBundle;
     pub use crate::components::{
         ComputedClip, ComputedRect, ContentSize, StackIndex, UiAbsolute, UiAlign, UiLayout, UiName,
         UiRoot, UiSpacing,
+    };
+    pub use crate::interaction::{
+        register_bindable, ui_dispatch_system, ui_focus_system, ui_refreeze_fixed_snapshot,
+        FocusPolicy, Focusable, Interaction, OnClick, OnHover, OnSubmit, RelativeCursorPosition,
+        UiBindingPlugin, UiInputFocus, UiInteractionConfig, UiInteractionPlugin,
+        UiInteractionScratch, UiPointerState, NO_ACTION,
     };
     pub use crate::layout::{ui_layout_apply, ui_layout_discovery};
     pub use crate::plugin::UiPlugin;
@@ -52,5 +70,5 @@ pub mod prelude {
     pub use crate::text::{parse_ui, serialize_ui, spawn_ui_tree, UI_FORMAT_VERSION};
     pub use crate::units::{AlignCross, AlignMain, LayoutType, PositionType, Unit};
 
-    pub use boyko_macros::ui;
+    pub use boyko_macros::{ui, Bindable};
 }

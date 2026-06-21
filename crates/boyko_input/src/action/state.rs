@@ -367,6 +367,59 @@ impl<A: Actionlike> ActionState<A> {
     pub(crate) fn raw_pressed(&self, index: usize) -> bool {
         self.pressed.get(index)
     }
+
+    // --- UI as an action SOURCE (GUI P4 Decision 9) ---------------------------
+
+    /// UI-source rising edge for action `index`: ORs the **live** rising edge and
+    /// sets the **level** bit (so a held UI button reads `pressed`), value `1.0`.
+    ///
+    /// This is the sanctioned UI→action path — symmetric to the device-side
+    /// [`RawInputQueue::push_raw`](crate::raw::queue::RawInputQueue::push_raw) but
+    /// on the *processed* side (UI is a post-processing action source, opposite
+    /// direction from device adapters). It writes ONLY the live edge + level; it
+    /// does NOT touch the fixed snapshot directly — the schedule ordering (GUI P4
+    /// Decision 10) runs the UI dispatch before
+    /// [`freeze_fixed_snapshot`](Self::freeze_fixed_snapshot), so the existing
+    /// OR-accumulate carries the UI edge into the fixed loop with no second
+    /// writer.
+    ///
+    /// `index < A::COUNT` is the caller's contract (the `OnClick`/`OnHover`/
+    /// `OnSubmit` dense action index); a debug build asserts it.
+    #[inline]
+    pub fn ui_press(&mut self, index: usize) {
+        debug_assert!(
+            index < self.button_value.len(),
+            "ui_press index {index} out of range (A::COUNT = {})",
+            self.button_value.len()
+        );
+        if index >= self.button_value.len() {
+            return;
+        }
+        self.just_pressed.set(index);
+        self.pressed.set(index);
+        self.button_value[index] = 1.0;
+    }
+
+    /// UI-source analog value for a Button/Axis1D action `index` (sliders, drag
+    /// handles). Sets the level bit when `value != 0.0` and writes the analog
+    /// magnitude into the live `button_value`. No edge is implied (a slider drag
+    /// is a level, not a press). Same fixed-snapshot composition as
+    /// [`ui_press`](Self::ui_press).
+    #[inline]
+    pub fn ui_set_value(&mut self, index: usize, value: f32) {
+        debug_assert!(
+            index < self.button_value.len(),
+            "ui_set_value index {index} out of range (A::COUNT = {})",
+            self.button_value.len()
+        );
+        if index >= self.button_value.len() {
+            return;
+        }
+        if value != 0.0 {
+            self.pressed.set(index);
+        }
+        self.button_value[index] = value;
+    }
 }
 
 impl<A: Actionlike> Default for ActionState<A> {

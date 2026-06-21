@@ -12,6 +12,11 @@ path = "src/lib.rs"
 boyko-ecs    = { path = "../boyko_ecs" }
 boyko-macros = { path = "../boyko_macros" }
 boyko-utils  = { path = "../boyko_utils" }
+# P4: UI is a symmetric ACTION SOURCE (`ActionState::ui_press`) — `ui_dispatch`
+# lowers an Interaction edge into an action. Acyclic: boyko-input does NOT depend
+# on boyko-ui. The OS focus/cursor-inside flags on `PhysicalInput` are also read
+# here for the blur/leave short-circuit (Decision 12).
+boyko-input  = { path = "../boyko_input" }
 # NOTE: boyko-threadpool is NOT a dependency in P1 — the apply pass is exclusive;
 # the host already owns the pool to build the schedule.
 

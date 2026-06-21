@@ -1994,6 +1994,83 @@ pub fn install_serialize_fn<C: Component>(component_id: usize) {
     let _ = SERIALIZE[component_id].set(info);
 }
 
+/// Type-erased per-component data-binding accessor (GUI P4 Decision 7).
+///
+/// Installed once per `#[derive(Bindable)]` type into the parallel
+/// [`BIND_ACCESSORS`] table and read ONLY off the change-gated UI bind path
+/// (`boyko_ui::binding::ui_bind_apply`) — never on a still frame, never on the
+/// per-frame hot path. Mirrors [`SerializeInfo`]'s "cold parallel table"
+/// discipline.
+///
+/// Both function pointers take a `*const u8` obtained by the caller from
+/// `EcsMaster::get_component_raw(source, component_id)`, which returns `Some`
+/// only when `source` is alive AND its archetype hosts that exact
+/// `ComponentId`. Because a `ComponentId` *is* the type's identity, the bytes at
+/// the pointer are a live, aligned instance of the registered type — the
+/// trampolines' `// SAFETY:` precondition (no `TypeId` / `Any` check needed).
+///
+/// `Copy + Send + Sync` (two `fn` pointers), so the `[OnceLock<BindAccessor>;
+/// MAX_COMPONENTS]` table is `Send + Sync` exactly like [`SERIALIZE`].
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+pub struct BindAccessor {
+    /// Formats `field` of the component at `*const u8` into the sink. The caller
+    /// guarantees the pointer is a live, aligned row of the registered type.
+    pub fmt: fn(*const u8, u8, &mut dyn core::fmt::Write) -> core::fmt::Result,
+    /// Returns `field` of the component at `*const u8` as an `f32`. The caller
+    /// guarantees the pointer is a live, aligned row of the registered type.
+    pub value: fn(*const u8, u8) -> f32,
+}
+
+/// GUI P4 — parallel cold table of per-component data-binding accessors
+/// (Decision 7). Touched ONLY at registration time (write-once
+/// [`install_bind_accessor`]) and from the change-gated `boyko_ui` bind-apply
+/// path — never on spawn/iter/schedule or a still frame. Mirrors the
+/// [`SERIALIZE`] declaration exactly.
+static BIND_ACCESSORS: [OnceLock<BindAccessor>; MAX_COMPONENTS] =
+    [const { OnceLock::new() }; MAX_COMPONENTS];
+
+/// Returns the registered [`BindAccessor`] for `component_id`, or `None` when no
+/// accessor was installed (a component without `#[derive(Bindable)]`).
+///
+/// Cold: read ONLY from the change-gated `boyko_ui` bind-apply path — never on a
+/// still frame or the per-frame hot path. One acquire-load + branch, mirroring
+/// [`get_serialize_info`].
+#[inline]
+pub fn get_bind_accessor(component_id: usize) -> Option<&'static BindAccessor> {
+    debug_assert!(
+        component_id < MAX_COMPONENTS,
+        "Component ID {} is out of bounds",
+        component_id
+    );
+    if component_id >= MAX_COMPONENTS {
+        return None;
+    }
+    BIND_ACCESSORS[component_id].get()
+}
+
+/// Installs `acc` into `BIND_ACCESSORS[component_id]` (GUI P4 Decision 7).
+///
+/// **PUBLIC** so the `#[derive(Bindable)]` expansion (which lives in downstream
+/// crates where `pub(crate)` is unreachable) can call it — the same rationale as
+/// [`install_serialize_fn`]. Write-once via `OnceLock::set`; a same-id
+/// re-install is a silent no-op (first writer wins), so calling it ungated from
+/// the derive's registration closure is safe and 0%-gate-preserving (one cold
+/// `OnceLock::set` per type per process).
+#[inline]
+pub fn install_bind_accessor(component_id: usize, acc: BindAccessor) {
+    debug_assert!(
+        component_id < MAX_COMPONENTS,
+        "Component ID {} exceeds maximum allowed ({})",
+        component_id,
+        MAX_COMPONENTS
+    );
+    if component_id >= MAX_COMPONENTS {
+        return;
+    }
+    let _ = BIND_ACCESSORS[component_id].set(acc);
+}
+
 /// 64-bit FNV-1a hash of a byte string (the `STABLE_NAME_INDEX` keying, C1).
 ///
 /// A `const fn` so the derive could fold it at compile time and so it is reusable

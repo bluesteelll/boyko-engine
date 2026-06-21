@@ -1915,6 +1915,109 @@ impl EcsMaster {
         })
     }
 
+    /// Returns the stored `changed_tick` of `entity`'s `component_id` column row,
+    /// or `None` if the entity is dead/stale or its archetype does not host the
+    /// component (GUI P4 Decision 5).
+    ///
+    /// **Read-only**: unlike [`get_component_mut`](Self::get_component_mut)'s
+    /// `Mut<T>` (whose `DerefMut` bumps the row's `changed_tick`), this never
+    /// mutates any change-detection state. It is the entity-keyed read-with-tick
+    /// primitive the change-gated UI data-bind path uses to compare a source
+    /// field's `changed_tick` against the bind system's `last_run` via
+    /// [`Tick::is_newer_than`] — reading it must NOT mark the source dirty, or it
+    /// would corrupt the very `Changed<Source>` signal the bind discovery reads.
+    ///
+    /// Reuses the [`get_component_raw`](Self::get_component_raw) prologue (null +
+    /// generation check) and the same-crate `ComponentPool::read_changed_tick`.
+    #[inline]
+    pub fn get_component_changed_tick(
+        &self,
+        entity: Entity,
+        component_id: ComponentId,
+    ) -> Option<Tick> {
+        // Same prologue as `get_component_raw`: resolve + null/generation check.
+        let inland = self.entity_master.entities_inland.get(entity.id().0)?;
+        if inland.is_null() {
+            return None;
+        }
+        if inland.generation() != entity.generation() {
+            return None;
+        }
+        debug_assert!(component_id.0 < MAX_COMPONENTS);
+        let archetype_ptr = inland.archetype_ptr();
+        // BUG-MIGRATE-TB-1 (Tree Borrows): do NOT form `&*archetype_ptr` here. A
+        // struct-wide `&Archetype` covers `current_index`; a sibling structural
+        // migration writes `current_index` through a same-cell-derived pointer
+        // (transitioning the interior-mutable slab cell to Active), and a prior
+        // shared read over the WHOLE cell would freeze it — then the `Box`-of-slab
+        // dealloc on `EcsMaster` drop is forbidden through a `Frozen` tag. Project
+        // the cold `component_pools` field (a sub-region that excludes
+        // `current_index`) through a raw pointer instead, mirroring
+        // `get_component_raw`'s `columns` projection — the uniform F4 read
+        // discipline.
+        //
+        // SAFETY (U1, U2, U4, F1): `archetype_ptr` is stable, interior-mutable
+        //   (`SharedReadWrite`, F4-rooted) slab provenance — non-null +
+        //   generation-matched above ⇒ the slot is live; `&self` gives shared
+        //   access. `addr_of!((*p).component_pools)` reads only the cold pool table
+        //   (never `current_index`), so the shared `&ComponentPoolBundle` narrows
+        //   nothing the sibling migration writes — no freeze of the slab cell.
+        let pools = unsafe { &*core::ptr::addr_of!((*archetype_ptr).component_pools) };
+        let pool = pools.get_pool(component_id)?;
+        let row = inland.unit_index() as usize;
+        if row >= pool.count() {
+            return None;
+        }
+        // SAFETY: `row < pool.count() <= committed_rows` (checked above), so the
+        //   tick slot lies in the committed prefix of the pool's `changed` tick
+        //   sub-region; `&self` ⇒ at least shared access, no concurrent writer in
+        //   the single-threaded direct-API context (Phase 9 SCH3).
+        Some(unsafe { pool.read_changed_tick(row) })
+    }
+
+    /// Returns `true` iff ANY archetype hosting one of `ids` has a row whose
+    /// `changed_tick` falls in the window `(last_run, this_run]` (GUI P4
+    /// Decision 6 — the `.ui`-dynamic outer 0%-gate probe).
+    ///
+    /// **Read-only**: takes `&self`, mutates nothing. Bounded to the archetypes
+    /// that actually host a bound id (typically 1–few), short-circuits on the
+    /// first changed row, and on a still frame finds no changed column and
+    /// returns `false` after scanning only the hosting archetypes' live rows.
+    /// Reflection-free — keyed purely by `ComponentId`.
+    //
+    // BUG-MIGRATE-TB-1 note: this forms `&Archetype` via the existing
+    // `iter_archetypes()` read API and reaches only the cold `component_pools`
+    // field. The freeze hazard the per-entity `get_component_raw` projection
+    // guards against (a shared whole-cell read freezing the interior-mutable slab
+    // cell, then a sibling `current_index` write / slab `Box` dealloc tripping the
+    // `Frozen` tag) DOES NOT APPLY here: this is a `&self` read invoked ONLY from
+    // `ui_bind_discovery`, an EXCLUSIVE system holding `&mut EcsMaster`, so no
+    // sibling structural migration and no slab dealloc can interleave with the
+    // read — the `&Archetype` and its derived `&ComponentPoolBundle` are dropped
+    // before control returns to the scheduler. `iter_archetypes()` is the same
+    // sanctioned `&Archetype` read API Phase 10's check-ticks scan uses.
+    pub fn any_changed_since(&self, ids: &[ComponentId], last_run: Tick, this_run: Tick) -> bool {
+        for archetype in self.archetype_master().iter_archetypes() {
+            for &id in ids {
+                let Some(pool) = archetype.component_pools().get_pool(id) else {
+                    continue;
+                };
+                let live = pool.count();
+                for row in 0..live {
+                    // SAFETY: `row < pool.count() <= committed_rows`, so the tick
+                    //   slot is in the committed prefix of the `changed` tick
+                    //   sub-region; `&self` ⇒ at least shared access (Phase 9
+                    //   SCH3, single-threaded probe context).
+                    let tick = unsafe { pool.read_changed_tick(row) };
+                    if tick.is_newer_than(last_run, this_run) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     /// Fast component write: `~15-18 ns` target. Returns `false`
     /// for stale entities, missing components, or never-registered entities.
     /// On success, byte-copies the provided slice into the component slot.
@@ -2193,23 +2296,51 @@ impl EcsMaster {
 
     /// Queries entities that have all specified components
     pub fn query_entities(&self, component_ids: &[ComponentId]) -> Vec<Entity> {
-        let archetype_ids = self.archetype_master.find_archetypes_with_components(component_ids);
         let mut result = Vec::new();
-        
-        for archetype_id in archetype_ids {
+        self.query_entities_into(component_ids, &mut result);
+        result
+    }
+
+    /// Writes every entity hosting all of `component_ids` into `out`, reusing
+    /// `arch_scratch` for the matching-archetype id list.
+    ///
+    /// # API contract
+    /// BOTH `out` and `arch_scratch` are **cleared at function entry**; their
+    /// existing contents are discarded and only their capacity is reused. This is
+    /// the fully allocation-free query primitive: the per-frame UI
+    /// interaction/bind walks drive it through two retained scratch buffers so the
+    /// steady-state path allocates NOTHING (Principle 1/5, the plan's "0
+    /// allocations/frame" mandate).
+    pub fn query_entities_buf(
+        &self,
+        component_ids: &[ComponentId],
+        out: &mut Vec<Entity>,
+        arch_scratch: &mut Vec<ArchetypeId>,
+    ) {
+        out.clear();
+        self.archetype_master
+            .find_archetypes_with_components_into(component_ids, arch_scratch);
+        for &archetype_id in arch_scratch.iter() {
             if let Some(archetype) = self.archetype_master.get_archetype(archetype_id) {
-                // Get all entity IDs from this archetype
                 for unit_index in 0..archetype.entity_count() {
                     if let Some(entity_id) = archetype.get_entity_id_at(InlandPoolId(unit_index))
                         && let Some(entity) = self.entity_master.get_entity(entity_id)
                     {
-                        result.push(entity);
+                        out.push(entity);
                     }
                 }
             }
         }
-        
-        result
+    }
+
+    /// Writes every entity hosting all of `component_ids` into `out` (clears `out`
+    /// first). Convenience wrapper over [`query_entities_buf`](Self::query_entities_buf)
+    /// with a transient archetype-id buffer; for the allocation-free per-frame
+    /// path use `query_entities_buf` with a retained scratch.
+    #[inline]
+    pub fn query_entities_into(&self, component_ids: &[ComponentId], out: &mut Vec<Entity>) {
+        let mut arch_scratch = Vec::new();
+        self.query_entities_buf(component_ids, out, &mut arch_scratch);
     }
 
     /// Gets raw pointers to multiple components for an entity.
