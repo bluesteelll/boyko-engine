@@ -59,6 +59,7 @@ pub mod light;
 pub mod light_system;
 pub mod material;
 pub mod ui;
+pub mod view;
 
 pub use barrier::{PlannedBarrier, lower_barriers};
 pub use error::GpuColumnError;
@@ -76,6 +77,10 @@ pub use light_system::{
     fold_light_table, write_light_table,
 };
 pub use material::{MATERIAL_GPU_WORDS, MaterialGpu, MaterialId};
+pub use view::{
+    composite_from_view, composite_perspective_from_view, demo_view_proj_from_view,
+    view_proj_columns,
+};
 pub use ui::{
     pack_ui_instance, premultiply_rgba8, record_ui_rects, ui_rect_fs_spirv, ui_rect_vs_spirv,
     FLAG_BORDER_ANY, FLAG_CLIP_PRESENT, FRAMES_IN_FLIGHT as UI_FRAMES_IN_FLIGHT, PackInput, UiFramePlan,

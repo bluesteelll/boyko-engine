@@ -39,10 +39,16 @@
 //! [`propagate_transforms`]: crate::propagation::propagate_transforms
 //! [`TransformPropagationScratch`]: crate::propagation::TransformPropagationScratch
 
+pub mod camera;
+pub mod camera_plugin;
 pub mod plugin;
 pub mod propagation;
 pub mod transform;
 
+pub use camera::{
+    ActiveCamera, Camera, Projection, ViewUniform, Viewport, resolve_active_camera,
+};
+pub use camera_plugin::CameraPlugin;
 pub use plugin::TransformPlugin;
 pub use propagation::{TransformPropagationScratch, compute_global_transform, propagate_transforms};
 pub use transform::{GlobalTransform, Transform};
@@ -54,6 +60,10 @@ pub use transform::{GlobalTransform, Transform};
 /// re-exported (same boundary as `boyko_ecs::prelude`); import them from
 /// `boyko_macros` directly.
 pub mod prelude {
+    pub use crate::camera::{
+        ActiveCamera, Camera, Projection, ViewUniform, Viewport, resolve_active_camera,
+    };
+    pub use crate::camera_plugin::CameraPlugin;
     pub use crate::plugin::TransformPlugin;
     pub use crate::propagation::{compute_global_transform, propagate_transforms};
     pub use crate::transform::{GlobalTransform, Transform};

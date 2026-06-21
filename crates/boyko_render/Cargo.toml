@@ -26,3 +26,11 @@ boyko-macros = { path = "../boyko_macros" }
 boyko_rhi = { path = "../boyko_rhi" }
 boyko_rhi_vulkan = { path = "../boyko_rhi_vulkan" }
 boyko-utils = { path = "../boyko_utils" }
+# S3: the renderer consumes the engine-derived `ViewUniform` (boyko_scene) and
+# its column-major `Mat4` (boyko_math) as the SINGLE view source — replacing the
+# prior hardcoded per-backend view. boyko_render is the only crate that may name
+# both the scene vocabulary and the marcher push-constant struct, so the
+# `ViewUniform -> CompositePushConstants` bridge lives here (the low-level
+# `boyko_rhi_vulkan` backend must not depend upward on the scene crate).
+boyko-scene = { path = "../boyko_scene" }
+boyko-math = { path = "../boyko_math" }
