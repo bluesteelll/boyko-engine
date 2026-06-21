@@ -44,3 +44,14 @@ boyko-fontbake = { path = "../boyko_fontbake" }
 # column uploads zero-copy via `cast_slice` (same discipline as the demo's 2D
 # `GpuInstance`). The `derive` feature gives the `Pod` / `Zeroable` derives.
 bytemuck = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+# std-lib S6 cross-crate INTEGRATION gate ONLY: the `DynamicBody`-falls +
+# `Gpu3dInstance`-packs test names `boyko_physics` (DynamicBody / RigidBody / the
+# fixed-step pipeline) alongside this crate's `Gpu3dInstance` / `sync_gpu_3d_instances`.
+# This edge is acyclic and TEST-ONLY: `boyko_render` (dev) -> `boyko_physics` ->
+# `boyko_scene`; `boyko_physics` never depends on `boyko_render`, so no production
+# cycle is introduced. `boyko_threadpool` supplies the `ScheduleBuilder` pool the
+# physics pipeline fans across.
+boyko-physics = { path = "../boyko_physics" }
+boyko-threadpool = { path = "../boyko_threadpool" }

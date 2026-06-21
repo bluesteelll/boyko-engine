@@ -52,6 +52,11 @@
 //! synchronisation between a prior GPU write and this dispatch's read/write.
 
 pub mod barrier;
+/// Light-object bundle presets ([`DirectionalLightObject`] / [`PointLightObject`]
+/// / [`SpotLightObject`]) — named `#[derive(Bundle)]` mixes of scene spatial
+/// components with this crate's light components (std-lib S6). Cycle-free: render
+/// depends on scene.
+pub mod bundles;
 pub mod error;
 pub mod gpu3d_instance;
 pub mod gpu3d_system;
@@ -67,6 +72,7 @@ pub mod ui;
 pub mod view;
 
 pub use barrier::{PlannedBarrier, lower_barriers};
+pub use bundles::{DirectionalLightObject, PointLightObject, SpotLightObject};
 pub use error::GpuColumnError;
 pub use gpu3d_instance::{GPU3D_INSTANCE_SIZE, Gpu3dInstance};
 pub use gpu3d_system::sync_gpu_3d_instances;

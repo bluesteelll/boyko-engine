@@ -39,17 +39,21 @@
 //! [`propagate_transforms`]: crate::propagation::propagate_transforms
 //! [`TransformPropagationScratch`]: crate::propagation::TransformPropagationScratch
 
+pub mod bundles;
 pub mod camera;
 pub mod camera_plugin;
+pub mod identity;
 pub mod plugin;
 pub mod propagation;
 pub mod render_caps;
 pub mod transform;
 
+pub use bundles::{CameraRig, SpatialBundle, StaticProp};
 pub use camera::{
     ActiveCamera, Camera, Projection, ViewUniform, Viewport, resolve_active_camera,
 };
 pub use camera_plugin::CameraPlugin;
+pub use identity::{Name, NameId, intern, resolve};
 pub use plugin::TransformPlugin;
 pub use propagation::{TransformPropagationScratch, compute_global_transform, propagate_transforms};
 pub use render_caps::{MaterialHandle, MeshHandle, RenderEnabled, Visibility};
@@ -62,10 +66,12 @@ pub use transform::{GlobalTransform, Transform};
 /// re-exported (same boundary as `boyko_ecs::prelude`); import them from
 /// `boyko_macros` directly.
 pub mod prelude {
+    pub use crate::bundles::{CameraRig, SpatialBundle, StaticProp};
     pub use crate::camera::{
         ActiveCamera, Camera, Projection, ViewUniform, Viewport, resolve_active_camera,
     };
     pub use crate::camera_plugin::CameraPlugin;
+    pub use crate::identity::{Name, NameId, intern, resolve};
     pub use crate::plugin::TransformPlugin;
     pub use crate::propagation::{compute_global_transform, propagate_transforms};
     pub use crate::render_caps::{MaterialHandle, MeshHandle, RenderEnabled, Visibility};

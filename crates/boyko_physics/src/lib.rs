@@ -26,6 +26,10 @@
 //!
 //! ADD-ONLY: a new `boyko_ecs`-dependent crate, zero core edit.
 
+/// Object-category physics bundle presets ([`DynamicBody`], [`Trigger`]) — named
+/// `#[derive(Bundle)]` mixes of scene spatial/render components with this crate's
+/// physics columns (std-lib S6). Cycle-free: physics depends on scene.
+pub mod bundles;
 pub mod components;
 pub mod manifold;
 pub mod math;
@@ -52,6 +56,7 @@ pub mod soft;
 pub mod solver;
 pub mod systems;
 
+pub use bundles::{DynamicBody, Trigger};
 pub use components::{
     BodyType, Collider, ColliderShape, Contact, RigidBody, RigidBodyBundle, RigidBodyMass, Sensor,
 };
