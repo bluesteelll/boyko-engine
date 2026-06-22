@@ -22,6 +22,10 @@
 pub mod chunk_iter;
 pub mod chunked_data;
 pub mod data;
+// `IsEnabled<T>`: non-filtering, order-preserving per-row read of an EnableTag
+// bit (the `bool`-valued twin of `Option<&T>`). Lets a system read an enable
+// bit per row WITHOUT dropping/reordering a row (unlike the `Enabled<T>` filter).
+pub mod data_is_enabled;
 // Dense plan D3 (FORK 2): the opt-in pure-dense fast-path cursors. Kept SEPARATE
 // from `iter` so `Query::iter` stays byte-identical (the 0%-gate).
 pub mod dense_iter;
@@ -55,6 +59,7 @@ pub mod term_list;
 
 pub use chunked_data::ChunkedQueryData;
 pub use data::{AnyOf, Mut, QueryData, ReadOnlyQueryData, Ref};
+pub use data_is_enabled::IsEnabled;
 pub use dense_iter::{DenseQueryData, DenseQueryIter, DenseQueryIterMut};
 pub use filter::{Added, ArchetypalQueryFilter, Changed, Or, QueryFilter, With, Without};
 pub use filter_enable::{Disabled, Enabled};
