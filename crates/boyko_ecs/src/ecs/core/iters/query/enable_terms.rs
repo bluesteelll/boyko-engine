@@ -327,7 +327,29 @@ impl EnableTermCols {
                     // contribute matches); skip — never touch a NULL column.
                 }
                 if !permit {
-                    next_row = (word_base + 64).min(range_end);
+                    // Whole-page skip (perf): the per-word permit just failed. If
+                    // the AND of every `with` term's page summary is 0, NO word in
+                    // this 4096-row page can match (the page-level hoist of the
+                    // per-word permit) — skip the whole page in one step instead
+                    // of 64 per-word probes. Otherwise advance one 64-row word.
+                    // `without` terms never gate (a clear bit contributes a match);
+                    // a NULL `with` term cannot reach here (the caller returned).
+                    let mut page_and = u64::MAX;
+                    for i in 0..len {
+                        if (self.polarity >> i) & 1 != 0 {
+                            // SAFETY: non-null resolved `with` column per the
+                            //   contract (same deref as the permit loop above).
+                            page_and &= unsafe { (*self.cols[i]).summary_word(p) };
+                            if page_and == 0 {
+                                break;
+                            }
+                        }
+                    }
+                    next_row = if page_and == 0 {
+                        ((p + 1) << log2).min(range_end)
+                    } else {
+                        (word_base + 64).min(range_end)
+                    };
                     continue;
                 }
 

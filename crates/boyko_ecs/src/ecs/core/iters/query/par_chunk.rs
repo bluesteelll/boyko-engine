@@ -227,13 +227,20 @@ pub(crate) unsafe fn par_for_each_chunk_impl<'q, 's, D, F, Func>(
 
                 // Resolve the enable columns for THIS archetype ONCE on the
                 // calling thread (Decision 6) — `EnableTermCols` is `Copy` and
-                // holds `*const EnableColumn`s, copied into each worker's
-                // capture. EMPTY when no enable term (the 0%-gate: workers take
-                // the full-batch `fetch_chunk`).
+                // holds `*const EnableColumn`s, copied into each worker's capture.
+                // The 0%-gate (`has_enable == false`) skips the resolve scan and
+                // stays `EMPTY`: `run_chunk_owned` then takes the full-batch
+                // `fetch_chunk` and never reads `enable_cols`, so the no-enable
+                // parallel path carries no resolve (matching the PAR9 inline path
+                // and the sequential drivers).
+                let has_enable = !enable_terms.is_empty();
                 // SAFETY (U1/U2): `arch_ptr` is slab-stable for `'q`; the
                 //   `&Archetype` reborrow is bounded to the `resolve` scan.
-                let cols = unsafe { enable_terms.resolve(&*arch_ptr) };
-                let has_enable = !enable_terms.is_empty();
+                let cols = if has_enable {
+                    unsafe { enable_terms.resolve(&*arch_ptr) }
+                } else {
+                    EnableTermCols::EMPTY
+                };
 
                 let chunk_size = batching.chunk_size(entity_count, worker_count);
 

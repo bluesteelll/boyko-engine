@@ -433,3 +433,199 @@ fn byte_identity_par_without_enabled_absent_page_no_double_cover() {
     assert_eq!(par.len(), all.len(), "absent-page par: row count mismatch (skip or double-cover)");
     assert_eq!(par, all, "absent-page par must cover [0,n) exactly once");
 }
+
+// ── 8. Multi-term composite (>= 2 enable terms) — for_each_run_composite ──────
+//
+// Every test in sections 1-7 uses a SINGLE enable term, so `for_each_run` takes
+// the `len == 1` `enabled_runs` fast path. The multi-term composite walk
+// (`EnableTermCols::for_each_run_composite`, including the whole-page skip) is
+// reached ONLY with >= 2 enable terms — these tests close that coverage gap. A
+// row matches `with_enabled(a).with_enabled(b)` iff (onA && onB), and
+// `with_enabled(a).without_enabled(b)` iff (onA && !onB).
+
+fn build_two_tag(
+    ecs: &mut EcsMaster,
+    name_a: &str,
+    name_b: &str,
+    pa: &[bool],
+    pb: &[bool],
+) -> (EnableTagId, EnableTagId) {
+    let n = pa.len() as u32;
+    assert_eq!(pb.len(), n as usize, "build_two_tag: pattern length mismatch");
+    let ta = ecs.register_enable_tag(name_a);
+    let tb = ecs.register_enable_tag(name_b);
+    let a = arch(ecs);
+    let ents = spawn_rows(ecs, a, n);
+    for i in 0..n as usize {
+        if pa[i] {
+            ecs.enable_id(ents[i], ta);
+        }
+        if pb[i] {
+            ecs.enable_id(ents[i], tb);
+        }
+    }
+    (ta, tb)
+}
+
+/// `with_enabled(a).with_enabled(b)`: run-aware `for_each_chunk` == scalar `iter`
+/// == the (onA && onB) boolean oracle.
+fn assert_with_with(name_a: &str, name_b: &str, pa: &[bool], pb: &[bool]) {
+    let n = pa.len() as u32;
+    let mut ecs = EcsMaster::new();
+    let (ta, tb) = build_two_tag(&mut ecs, name_a, name_b, pa, pb);
+
+    let scalar = ecs.run_closure_once(move |q: Query<&CbiPayload>| {
+        let mut out = Vec::new();
+        for p in q.with_enabled(ta).with_enabled(tb).iter() {
+            out.push(p.v);
+        }
+        out
+    });
+    let chunk = ecs.run_closure_once(move |q: Query<&CbiPayload>| {
+        let mut out = Vec::new();
+        let mut q = q.with_enabled(ta).with_enabled(tb);
+        q.for_each_chunk(|slice: &[CbiPayload]| {
+            for p in slice {
+                assert!(out.len() < COLLECT_CAP, "chunk composite emitted > cap rows");
+                out.push(p.v);
+            }
+        });
+        out
+    });
+    let expected: Vec<u32> = (0..n)
+        .filter(|&i| pa[i as usize] && pb[i as usize])
+        .collect();
+    assert_eq!(scalar, expected, "{name_a}+{name_b}: scalar with+with != oracle");
+    assert_eq!(chunk, scalar, "{name_a}+{name_b}: chunk with+with != scalar");
+}
+
+/// `with_enabled(a).without_enabled(b)`: chunk == scalar == (onA && !onB) oracle.
+fn assert_with_without(name_a: &str, name_b: &str, pa: &[bool], pb: &[bool]) {
+    let n = pa.len() as u32;
+    let mut ecs = EcsMaster::new();
+    let (ta, tb) = build_two_tag(&mut ecs, name_a, name_b, pa, pb);
+
+    let scalar = ecs.run_closure_once(move |q: Query<&CbiPayload>| {
+        let mut out = Vec::new();
+        for p in q.with_enabled(ta).without_enabled(tb).iter() {
+            out.push(p.v);
+        }
+        out
+    });
+    let chunk = ecs.run_closure_once(move |q: Query<&CbiPayload>| {
+        let mut out = Vec::new();
+        let mut q = q.with_enabled(ta).without_enabled(tb);
+        q.for_each_chunk(|slice: &[CbiPayload]| {
+            for p in slice {
+                assert!(out.len() < COLLECT_CAP, "chunk composite emitted > cap rows");
+                out.push(p.v);
+            }
+        });
+        out
+    });
+    let expected: Vec<u32> = (0..n)
+        .filter(|&i| pa[i as usize] && !pb[i as usize])
+        .collect();
+    assert_eq!(scalar, expected, "{name_a}+{name_b}: scalar with+without != oracle");
+    assert_eq!(chunk, scalar, "{name_a}+{name_b}: chunk with+without != scalar");
+}
+
+#[test]
+fn byte_identity_multi_with_with_small() {
+    // Single page (n < 4096), 2 terms: fast under Miri, exercises the composite
+    // match-word + Phase-1 permit / Phase-2 extend unsafe derefs.
+    let n = 200u32;
+    let pa = pattern_random(n, 50, 0xDEAD_BEEF_0000_1111);
+    let pb = pattern_random(n, 50, 0x1111_0000_BEEF_DEAD);
+    assert_with_with("cbi_multi_small_a", "cbi_multi_small_b", &pa, &pb);
+}
+
+#[test]
+fn byte_identity_multi_with_with_page_skip() {
+    // 3 pages. The middle page (rows 4096..8192) has tag A set on NO row, so A's
+    // per-page summary is 0 -> the composite WHOLE-PAGE skip (page_and == 0)
+    // fires. The result must stay byte-identical (zero matches in the middle
+    // page), and pages 0 and 2 carry real (A && B) matches -- proving the skip
+    // drops no later page. Direct validator for the for_each_run_composite
+    // page-skip.
+    let n = 12_288u32; // 3 full pages
+    let pa: Vec<bool> = (0..n)
+        .map(|i| !(4096..8192).contains(&i) && i % 3 == 0)
+        .collect();
+    let pb: Vec<bool> = (0..n).map(|i| i % 2 == 0).collect();
+    assert_with_with("cbi_multi_pageskip_a", "cbi_multi_pageskip_b", &pa, &pb);
+}
+
+#[test]
+fn byte_identity_multi_with_with_random() {
+    let n = 10_000u32; // multi-page sparse composite
+    let pa = pattern_random(n, 30, 0xA1A1_B2B2_C3C3_D4D4);
+    let pb = pattern_random(n, 40, 0x0F0F_1E1E_2D2D_3C3C);
+    assert_with_with("cbi_multi_rand_a", "cbi_multi_rand_b", &pa, &pb);
+}
+
+#[test]
+fn byte_identity_multi_with_without_random() {
+    let n = 10_000u32;
+    let pa = pattern_random(n, 50, 0x1111_2222_3333_4444);
+    let pb = pattern_random(n, 35, 0x5555_6666_7777_8888);
+    assert_with_without("cbi_multi_ww_a", "cbi_multi_ww_b", &pa, &pb);
+}
+
+/// `par_for_each_chunk` over a 2-term composite split into many small batches —
+/// validates the composite run walk under the parallel batch-clamping path
+/// (`run_chunk_owned` -> `for_each_run` -> composite), which the single-term par
+/// tests never reach.
+fn collect_par_with_with(
+    ecs: &mut EcsMaster,
+    ta: EnableTagId,
+    tb: EnableTagId,
+    batch: usize,
+) -> Vec<u32> {
+    use std::sync::Mutex;
+    let sink = Mutex::new(Vec::<u32>::new());
+    let pool = boyko_threadpool::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build();
+    pool.install(|_scope| {
+        let mut view = ecs
+            .query::<&CbiPayload, ()>()
+            .with_enabled(ta)
+            .with_enabled(tb);
+        view.par_for_each_chunk(
+            |slice: &[CbiPayload]| {
+                let mut local: Vec<u32> = slice.iter().map(|p| p.v).collect();
+                let mut guard = sink.lock().expect("sink lock");
+                assert!(
+                    guard.len() < COLLECT_CAP,
+                    "par composite emitted > cap rows -- overlapping batch runs"
+                );
+                guard.append(&mut local);
+            },
+            small_batches(batch),
+        );
+    });
+    let mut v = sink.into_inner().expect("sink into_inner");
+    v.sort_unstable();
+    v
+}
+
+#[test]
+fn byte_identity_par_multi_with_with() {
+    let mut ecs = EcsMaster::new();
+    let n = 10_000u32;
+    let pa = pattern_random(n, 35, 0x1234_5678_9ABC_DEF0);
+    let pb = pattern_random(n, 55, 0x0FED_CBA9_8765_4321);
+    let (ta, tb) = build_two_tag(&mut ecs, "cbi_par_multi_a", "cbi_par_multi_b", &pa, &pb);
+
+    let mut expected: Vec<u32> = (0..n)
+        .filter(|&i| pa[i as usize] && pb[i as usize])
+        .collect();
+    expected.sort_unstable();
+
+    let par = collect_par_with_with(&mut ecs, ta, tb, 256);
+    let mut dedup = par.clone();
+    dedup.dedup();
+    assert_eq!(dedup.len(), par.len(), "par composite: a row was double-covered");
+    assert_eq!(par, expected, "par composite: multiset != oracle (skip or double-cover)");
+}
