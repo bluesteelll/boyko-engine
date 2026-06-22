@@ -42,6 +42,7 @@ pub mod resources;
 pub mod text;
 pub mod units;
 pub mod widgets;
+pub mod world;
 
 /// The `ui!` authoring macro (P2): write a UI entity tree as a literal nested
 /// block. See [`boyko_macros::ui`] for the grammar and expansion contract.
@@ -102,6 +103,11 @@ pub mod prelude {
         TextEmitScratch, TextNode, UiText, UI_FORMAT_VERSION,
     };
     pub use crate::units::{AlignCross, AlignMain, LayoutType, PositionType, Unit};
+    pub use crate::world::{
+        project_world_to_screen, ui_world_project_system, ui_world_visibility_system,
+        HoveredWorldEntity, ProjectedPoint, UiWorldAnchor, UiWorldCulled, UiWorldHidden,
+        UiWorldProjection, WorldScaleMode, WorldTarget,
+    };
 
     pub use boyko_macros::{ui, Bindable};
 }

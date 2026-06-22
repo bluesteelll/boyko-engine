@@ -25,6 +25,14 @@ boyko-input  = { path = "../boyko_input" }
 # boyko-render; the emitter here produces render-agnostic glyph-quad descriptors the
 # host folds into the P5a instance stream (so boyko-ui takes NO render dependency).
 boyko-fontbake = { path = "../boyko_fontbake" }
+# GUI P7a: world-space / diegetic UI. The world-anchor projection reads the S3
+# camera `ViewUniform` (`view_proj` + `camera_pos`) and entity `GlobalTransform`s
+# to place a UI subtree at a 3D world point. ACYCLIC: boyko-scene depends on
+# {boyko-ecs, boyko-math, boyko-macros, boyko-utils} and does NOT depend on
+# boyko-ui (nor does boyko-input, the other boyko-ui dep, reach boyko-scene). The
+# `world` module is the only place boyko-ui touches the scene crate.
+boyko-scene  = { path = "../boyko_scene" }
+boyko-math   = { path = "../boyko_math" }
 # NOTE: boyko-threadpool is NOT a dependency in P1 — the apply pass is exclusive;
 # the host already owns the pool to build the schedule.
 

@@ -63,6 +63,7 @@ use crate::resources::{
     StretchItem, StretchTarget, UiSafeArea, UiViewport,
 };
 use crate::units::{AlignCross, AlignMain, LayoutType, PositionType, Unit};
+use crate::world::components::{UiWorldAnchor, UiWorldCulled, UiWorldHidden, UiWorldProjection};
 
 // ───────────────────────── discovery ──────────────────────────────────────
 
@@ -96,6 +97,12 @@ pub fn ui_layout_discovery(
             // it does NOT trip `root_set_changed` — the cached `roots` list stays
             // valid; only a relayout is needed.
             Changed<UiAnchor>,
+            // GUI P7a: a re-projection moves a world-anchored root's origin /
+            // scale / visibility, so it must trigger a relayout — exactly like a
+            // `UiAnchor` change. It is a property change (the project system
+            // writes `UiWorldProjection` per frame, not a root-set change), so it
+            // does NOT trip `root_set_changed`.
+            Changed<UiWorldProjection>,
         )>,
     >,
     // Root-set-change signal: an `Added<UiRoot>` (a new root) or any structural
@@ -267,7 +274,38 @@ fn layout_root(
     if root_m.skip {
         return;
     }
-    let (w, h) = fold_size(root_m.lt, root_m.size.main, root_m.size.cross);
+    let (mut w, mut h) = fold_size(root_m.lt, root_m.size.main, root_m.size.cross);
+
+    // GUI P7a: a WORLD-anchored root is positioned by `ui_world_project_system`
+    // (which writes `UiWorldProjection`), NOT by a screen-edge `UiAnchor` (the two
+    // are mutually exclusive). Resolved HERE so the layout pass stays the SINGLE
+    // `ComputedRect` writer (same seam as P6a). A culled (frustum), hidden (hover),
+    // or not-yet-projected (`!visible`) world root is skipped, like a `skip` node.
+    if world.get_component::<UiWorldAnchor>(root).is_some() {
+        let proj = world
+            .get_component::<UiWorldProjection>(root)
+            .copied()
+            .unwrap_or_default();
+        let culled = world.is_enabled::<UiWorldCulled>(root);
+        let hidden = world.is_enabled::<UiWorldHidden>(root);
+        if !proj.visible || culled || hidden {
+            return;
+        }
+        // Uniform subtree scale (1.0 for ScreenSpace; ref/dist for WorldScaled).
+        // Applied to the root extent; `position_node` carries the scaled origin so
+        // the whole subtree shifts with the projected point. Per-child extent
+        // scaling beyond the root box is a P7b/render concern (the CPU core
+        // billboards a fixed-pixel or uniformly-scaled box).
+        w *= proj.scale;
+        h *= proj.scale;
+        let origin = Origin {
+            x: proj.screen_x,
+            y: proj.screen_y,
+        };
+        write_rect(world, root, ComputedRect { x: origin.x, y: origin.y, w, h });
+        position_node(world, scratch, root_idx, origin);
+        return;
+    }
 
     // Screen origin: the root anchors at the viewport top-left by default. GUI
     // P6a: an optional `UiAnchor` re-pins it to a screen edge/corner. The anchor
