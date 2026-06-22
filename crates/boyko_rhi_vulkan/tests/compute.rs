@@ -36,6 +36,7 @@
 //! makes `VulkanContext::boot` return `Err`; both tests skip gracefully.
 
 use core::ptr::NonNull;
+use std::sync::Mutex;
 
 use boyko_rhi::{
     BarrierAccess, BarrierDesc, BufferBarrier, BufferDesc, BufferUsage, ComputePipelineDesc,
@@ -54,9 +55,21 @@ use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
 /// flag an OOB descriptor access).
 const N: u32 = 4096 + 17;
 
+/// Serializes Vulkan device boot across the test threads in this binary.
+///
+/// Concurrent `VkInstance` / `VkDevice` creation races on the loader / NVIDIA
+/// driver, which made some GPU tests spuriously fail to boot and then silently
+/// SKIP — unreliable coverage (chip task_10cc8e0b). Holding this lock only for
+/// the boot call serializes creation; the tests still run concurrently
+/// afterwards. Poison-tolerant so a single panicking boot does not cascade-skip
+/// the remaining tests.
+static BOOT_LOCK: Mutex<()> = Mutex::new(());
+
 /// Boots a validation-enabled context, or returns `None` (with a SKIP log) when
 /// no GPU / loader / validation layer is available.
 fn boot_or_skip(test: &str) -> Option<VulkanContext> {
+    // Serialize the boot (see `BOOT_LOCK`); the guard releases at function return.
+    let _boot_guard = BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     match VulkanContext::boot(InstanceConfig {
         enable_validation: true,
         ..InstanceConfig::default()
