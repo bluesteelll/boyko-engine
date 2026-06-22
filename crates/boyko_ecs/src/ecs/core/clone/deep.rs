@@ -178,7 +178,10 @@ fn clone_subtree_inner(
 /// Remaps `clone`'s `ChildOf` in place (if it has one) via the installed
 /// `map_entities_fn`, returning the (possibly-remapped) parent the clone now points
 /// at, or `None` if the clone has no `ChildOf`.
-fn remap_clone_child_of(
+///
+/// `pub(crate)` so the S7 prefab `instantiate` path reuses it VERBATIM (the map is
+/// populated source-parent-Entity → instance parent; `remap_fn` is unchanged).
+pub(crate) fn remap_clone_child_of(
     world: &mut EcsMaster,
     clone: Entity,
     child_of_id: crate::ecs::identifiers::primitives::ComponentId,
@@ -205,7 +208,10 @@ fn remap_clone_child_of(
 /// hierarchy machinery (mirrors `LinkChildCommand::apply`): an in-place push if the
 /// parent already has `Children`, else a `Children` insert via the audited insert
 /// path. Runs directly under `&mut EcsMaster` (the deep clone is a direct-API op).
-fn link_child(
+///
+/// `pub(crate)` so the S7 prefab `instantiate` path rebuilds each instance parent's
+/// `Children` through the IDENTICAL audited machinery (no byte-stored `Children`).
+pub(crate) fn link_child(
     world: &mut EcsMaster,
     parent: Entity,
     child: Entity,

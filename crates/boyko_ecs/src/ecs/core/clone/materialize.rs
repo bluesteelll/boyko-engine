@@ -22,6 +22,7 @@
 use std::ptr::NonNull;
 
 use crate::ecs::core::archetype::archetype::Archetype;
+use crate::ecs::core::change_detection::tick::Tick;
 use crate::ecs::core::clone::cloner::EntityCloner;
 use crate::ecs::core::component::component::Component;
 use crate::ecs::core::component::component_mask::ComponentMask;
@@ -40,7 +41,139 @@ use crate::ecs::identifiers::primitives::ComponentId;
 /// Stack capacity for the filtered / target id arrays. Matches
 /// `MAX_MIGRATION_COLUMNS` (= `MAX_COMPONENTS`): any archetype the engine supports
 /// fits on the stack without spilling to the heap.
-const MAX_CLONE_COLUMNS: usize = MAX_COMPONENTS;
+pub(crate) const MAX_CLONE_COLUMNS: usize = MAX_COMPONENTS;
+
+/// Result of [`select_clone_ids`] — the canonical-sorted target id set for one
+/// cloned node plus the copy-vs-reconstruct classification (S7 Decision 2).
+///
+/// Extracted from `materialize_clone_into` so the **identical** id-selection logic
+/// (filter → require-closure → canonical sort) is shared by the live-clone
+/// materialization AND the prefab capture path — the load-bearing logic that
+/// decides *which* components an instance gets must match byte-for-byte or a
+/// prefab instance would diverge from `clone_subtree`.
+pub(crate) struct SelectedCloneIds {
+    /// The canonical-sorted target ids (`[..len]` is live). Each id is either a
+    /// `copy_from_source` id (real source bytes) or a require-closure
+    /// reconstruct id (no source value — built via its registered ctor).
+    pub(crate) ids: [ComponentId; MAX_CLONE_COLUMNS],
+    /// How many entries of `ids` are live.
+    pub(crate) len: usize,
+    /// Ids that come from the source AND copy REAL bytes (vs the reconstructed
+    /// required set). A clear bit ⇒ reconstruct via `required_ctor_for`.
+    pub(crate) copy_from_source: ComponentMask,
+    /// The copy-from-source ids (the "cloned set") in source-iteration order,
+    /// `[..cloned_len]` live. This is exactly the slice `required_ctor_for` needs
+    /// to resolve a reconstruct id's ctor (the closure source set, NOT the
+    /// require-augmented target set). Kept separate because after the canonical
+    /// sort the cloned ids are no longer a contiguous prefix of `ids`.
+    pub(crate) cloned_set: [ComponentId; MAX_CLONE_COLUMNS],
+    /// How many entries of `cloned_set` are live.
+    pub(crate) cloned_len: usize,
+}
+
+/// Builds the canonical-sorted target id set for cloning `source` per `cloner`
+/// (S7 Decision 2 — extracted verbatim from `materialize_clone_into`, lines that
+/// previously inlined the filter → require-closure → sort, so behavior is
+/// byte-identical; the `clone_entity.rs` / `miri_phase19.rs` suites are the
+/// regression gate).
+///
+/// `source_ptr` must be live, stable slab provenance for `source`'s archetype
+/// (caller resolved it from the live inland). The function only READS the source
+/// archetype's signature (a shared deref scoped to this call), never mutates.
+///
+/// `extra_excluded` is an additional id to drop from the source set (S7 uses it to
+/// exclude `ChildOf` from the prefab ROOT node so the instance root is detached —
+/// Decision 5); pass `None` for the standard live-clone path.
+pub(crate) fn select_clone_ids(
+    source_ptr: *mut Archetype,
+    cloner: &EntityCloner,
+    children_id: ComponentId,
+    extra_excluded: Option<ComponentId>,
+) -> SelectedCloneIds {
+    let mut target_ids: [ComponentId; MAX_CLONE_COLUMNS] = [ComponentId(0); MAX_CLONE_COLUMNS];
+    let mut target_len = 0usize;
+    let mut copy_from_source = ComponentMask::new();
+
+    {
+        // SAFETY: `source_ptr` is stable slab provenance (caller guarantees the
+        // source is live); the shared `&Archetype` view is scoped to this block.
+        let source_arch: &Archetype = unsafe { &*source_ptr };
+        for &id in source_arch.component_ids() {
+            if id == children_id {
+                continue; // always denied (D5)
+            }
+            if Some(id) == extra_excluded {
+                continue; // S7 Decision 5: ChildOf excluded from the prefab root
+            }
+            // W1 / Dense: a non-signature-storage id (Bitset OR Dense) is RETAINED
+            // in `component_ids()` but has NO per-archetype pool — skip it so it
+            // never enters the table row clone (parity with `materialize_clone`).
+            if !component_registry::is_signature_storage(component_registry::storage_kind(id.0)) {
+                continue;
+            }
+            if !cloner.filter_allows(id) {
+                continue; // denied by allow/deny filter
+            }
+            let info = component_registry::get_clone_info(id.0);
+            let cloneable = matches!(
+                info.map(|i| i.cloneability),
+                Some(Cloneability::TriviallyCopyable) | Some(Cloneability::CloneViaFn)
+            );
+            if !cloneable {
+                if cloner.strict {
+                    strict_ignore_panic(id);
+                }
+                debug_assert!(
+                    false,
+                    "clone: skipping non-cloneable component {} (Cloneability::Ignore) \
+                     in non-strict mode — the clone lands in a smaller archetype",
+                    id.0
+                );
+                continue;
+            }
+            debug_assert!(target_len < MAX_CLONE_COLUMNS, "clone id set overflow");
+            target_ids[target_len] = id;
+            target_len += 1;
+            copy_from_source.set(id);
+        }
+    }
+
+    // Snapshot the cloned (copy-from-source) set BEFORE the require-closure adds
+    // reconstruct ids — this is the slice `required_ctor_for` resolves against.
+    let cloned_set_snapshot: [ComponentId; MAX_CLONE_COLUMNS] = target_ids;
+    let cloned_len = target_len;
+
+    // C2 require-CLOSURE: union the transitive `#[require]` closure of the
+    // CLONED-component set into the target set (parity with the live path).
+    component_registry::for_each_required_id_excluding(
+        &cloned_set_snapshot[..cloned_len],
+        |req_id| {
+            if target_ids[..target_len].contains(&req_id) {
+                return; // already in the target set (present⇒skip)
+            }
+            #[cfg(debug_assertions)]
+            if !cloner.filter_allows(req_id) {
+                debug_clone_required_override(req_id);
+            }
+            debug_assert!(target_len < MAX_CLONE_COLUMNS, "clone require-closure overflow");
+            target_ids[target_len] = req_id;
+            target_len += 1;
+            // NOT added to `copy_from_source`: reconstructed, not copied.
+        },
+    );
+
+    // Canonical-sort so `get_or_create_archetype` collapses equivalent sets to the
+    // same `ArchetypeId` regardless of insertion order.
+    target_ids[..target_len].sort_unstable_by_key(|c| c.0);
+
+    SelectedCloneIds {
+        ids: target_ids,
+        len: target_len,
+        copy_from_source,
+        cloned_set: cloned_set_snapshot,
+        cloned_len,
+    }
+}
 
 /// RAII rollback guard for a partially-materialized clone row (W5 / S5).
 ///
@@ -51,7 +184,7 @@ const MAX_CLONE_COLUMNS: usize = MAX_COMPONENTS;
 /// before the clone began. It NEVER touches `entity_master` and NEVER caches a
 /// world pointer — the entity→inland mapping is committed by the caller only after
 /// the guard is disarmed (so on the panic path the entity was never mapped).
-struct CloneRowGuard {
+pub(crate) struct CloneRowGuard {
     /// Raw, write-capable, interior-mutable slab provenance for the target
     /// archetype. Stable across the materialization (no archetype move occurs while
     /// the guard is live). `None` once disarmed.
@@ -69,7 +202,7 @@ struct CloneRowGuard {
 
 impl CloneRowGuard {
     #[inline]
-    fn new(target_archetype_ptr: *mut Archetype, new_row: usize) -> Self {
+    pub(crate) fn new(target_archetype_ptr: *mut Archetype, new_row: usize) -> Self {
         Self {
             target_archetype_ptr,
             new_row,
@@ -82,7 +215,7 @@ impl CloneRowGuard {
     /// Records that `id`'s pool row at `new_row` is now committed (so a later panic
     /// rolls it back).
     #[inline]
-    fn note_committed(&mut self, id: ComponentId) {
+    pub(crate) fn note_committed(&mut self, id: ComponentId) {
         debug_assert!(
             self.committed_count < MAX_CLONE_COLUMNS,
             "CloneRowGuard: committed overflow (> MAX_CLONE_COLUMNS)"
@@ -95,7 +228,7 @@ impl CloneRowGuard {
     /// bookkeeping (`entity_ids` / `current_index`) advanced. After this, `Drop` is
     /// a no-op.
     #[inline]
-    fn disarm(&mut self) {
+    pub(crate) fn disarm(&mut self) {
         self.armed = false;
     }
 }
@@ -203,102 +336,14 @@ fn materialize_clone_into(
     let source_archetype_id = unsafe { (*source_ptr).id() };
 
     // ── Step 2 + C2: build the FILTERED id set, then the require-CLOSURE ────
-    // `filtered`: source ids that pass the filter, minus `Children` (always
-    // cloner-denied — a derived reverse index, never directly cloned), minus (in
-    // non-strict mode) ids with no clone fn (skipped). In strict mode an
-    // `Ignore` source component panics.
-    let mut target_ids: [ComponentId; MAX_CLONE_COLUMNS] =
-        [ComponentId(0); MAX_CLONE_COLUMNS];
-    let mut target_len = 0usize;
-    // Mask of ids that come from the source AND will copy REAL bytes (vs the
-    // reconstructed-required set). Used in the materialization loop to decide
-    // copy-vs-construct, and (C2) to keep a present required component's real value.
-    let mut copy_from_source = ComponentMask::new();
-
-    {
-        // SAFETY: `source_ptr` is stable slab provenance; the shared `&Archetype`
-        // view is scoped to this block and dropped before the target reborrow.
-        let source_arch: &Archetype = unsafe { &*source_ptr };
-        for &id in source_arch.component_ids() {
-            if id == children_id {
-                continue; // always denied (D5)
-            }
-            // W1 / Dense plan C1 #11: a non-signature-storage id (`Bitset` OR
-            // `Dense`) is RETAINED in `component_ids()` but has NO per-archetype
-            // `ComponentPool` — it would panic at `get_pool(id).expect(...)`
-            // below. Skip it so it never enters the table row clone
-            // (`target_ids` / `copy_from_source`). A bitset tag's enable-state is
-            // not carried through a clone (a v1.1 follow-up). For a dense id, ONLY
-            // the row-clone EXCLUSION is D0 — materializing dense membership in
-            // the clone target + firing its hooks is D2, deliberately NOT done
-            // here.
-            if !component_registry::is_signature_storage(component_registry::storage_kind(id.0)) {
-                continue;
-            }
-            if !cloner.filter_allows(id) {
-                continue; // denied by allow/deny filter
-            }
-            let info = component_registry::get_clone_info(id.0);
-            let cloneable = matches!(
-                info.map(|i| i.cloneability),
-                Some(Cloneability::TriviallyCopyable) | Some(Cloneability::CloneViaFn)
-            );
-            if !cloneable {
-                if cloner.strict {
-                    strict_ignore_panic(id);
-                }
-                // opt-out / non-strict: skip + diagnose (the "missing component"
-                // surprise is debug-loggable, not silent).
-                debug_assert!(
-                    false,
-                    "clone: skipping non-cloneable component {} (Cloneability::Ignore) \
-                     in non-strict mode — the clone lands in a smaller archetype",
-                    id.0
-                );
-                continue;
-            }
-            debug_assert!(target_len < MAX_CLONE_COLUMNS, "clone id set overflow");
-            target_ids[target_len] = id;
-            target_len += 1;
-            copy_from_source.set(id);
-        }
-    }
-
-    // C2 require-CLOSURE: union the transitive `#[require]` closure of the
-    // CLONED-component set into the target set. A required id ALREADY present
-    // (copy_from_source) keeps its real bytes (Decision 7 preserved — no
-    // re-default). A required id ABSENT (source lacked it, or the filter denied it
-    // but a cloned component requires it) is added here and will be RECONSTRUCTED
-    // via its ctor below — preserving the require-invariant an on_add observer may
-    // rely on. A filter-DENIED required is overridden (re-added) + debug-logged
-    // (Bevy 0.17 "allowed components also allow their required").
-    let cloned_set_snapshot: [ComponentId; MAX_CLONE_COLUMNS] = target_ids;
-    let cloned_set = &cloned_set_snapshot[..target_len];
-    component_registry::for_each_required_id_excluding(cloned_set, |req_id| {
-        if target_ids[..target_len].contains(&req_id) {
-            return; // already in the target set (present⇒skip)
-        }
-        // A required id absent from the target set. If the FILTER denied it, the
-        // require-closure OVERRIDES the deny (the invariant wins): a cloned
-        // component's required dependency is always present, so a denied required is
-        // reconstructed anyway (Bevy 0.17 "allowed components also allow their
-        // required"). Emit a debug-only diagnostic so the override is diagnosable.
-        #[cfg(debug_assertions)]
-        if !cloner.filter_allows(req_id) {
-            // A denied required is being reconstructed to preserve the
-            // require-invariant (Feature 1 cross-feature C2). Not an error — a
-            // documented override; surfaced here for diagnosability.
-            debug_clone_required_override(req_id);
-        }
-        debug_assert!(target_len < MAX_CLONE_COLUMNS, "clone require-closure overflow");
-        target_ids[target_len] = req_id;
-        target_len += 1;
-        // NOT added to `copy_from_source`: this id is reconstructed, not copied.
-    });
-
-    // Canonical-sort so `get_or_create_archetype` collapses equivalent sets to the
-    // same `ArchetypeId` regardless of insertion order.
-    target_ids[..target_len].sort_unstable_by_key(|c| c.0);
+    // S7 Decision 2: the filter → require-closure → canonical-sort logic is now the
+    // shared `select_clone_ids` extraction (reused verbatim by the prefab capture
+    // path). The live-clone path passes `extra_excluded = None` (no root detach).
+    let selected = select_clone_ids(source_ptr, cloner, children_id, None);
+    let target_ids = selected.ids;
+    let target_len = selected.len;
+    let copy_from_source = selected.copy_from_source;
+    let cloned_set = &selected.cloned_set[..selected.cloned_len];
     let target_archetype_id = world.get_or_create_archetype(&target_ids[..target_len]);
 
     // ── Step 4: obtain the new entity id (NOT yet mapped — W5) ──────────────
@@ -399,88 +444,36 @@ fn materialize_clone_into(
                     (src_pool.unit_ptr(source_row), stride, src_added, src_changed)
                 };
 
-                match info.cloneability {
-                    Cloneability::TriviallyCopyable => {
-                        // O2 batch-by-column: a plain byte copy driven by the pool
-                        // layout (the fn-ptr is `None`). The `&mut Archetype` reborrow
-                        // is confined to this scope — `write_at` cannot panic, so no
-                        // guard-Drop point spans it.
-                        // SAFETY (S1 / W7):
-                        //   * `src_ptr` is a live, aligned, initialized row readable
-                        //     for `stride` bytes; `new_row < committed_rows` post
-                        //     `reserve_capacity(1)`; `write_at_unchecked_initialized`
-                        //     memcpys into the reserved-uninit slot without dropping.
-                        //   * `src` and `dst` are disjoint; the byte copy reaches no
-                        //     world state. `&mut target` confined to this block.
-                        let bytes = unsafe { core::slice::from_raw_parts(src_ptr, stride) };
-                        unsafe {
-                            let target: &mut Archetype = &mut *target_ptr;
-                            let dst_pool = target
-                                .component_pools_mut()
-                                .get_pool_mut(id)
-                                .expect("invariant: copy_from_source id exists in target");
-                            dst_pool.write_at_unchecked_initialized(new_row, bytes);
-                        }
-                    }
-                    Cloneability::CloneViaFn => {
-                        let clone_fn = info.clone_fn.expect(
-                            "invariant: CloneViaFn installs Some(clone_via_clone::<C>)",
-                        );
-                        // Derive the dst `*mut u8` in a TIGHT scope, then drop the
-                        // `&mut Archetype` BEFORE calling the (panic-prone) user
-                        // `clone_fn`. At the `clone_fn` call NO `&mut Archetype` is
-                        // live — only `dst_ptr: *mut u8` (no TB protector across the
-                        // call) — so the guard's Drop is the sole `&mut Archetype`
-                        // accessor on unwind (the F2 / W5 anchor).
-                        // SAFETY: `new_row < committed_rows`; the slot is reserved-
-                        //   uninit; the returned `*mut u8` carries the pool's
-                        //   reservation provenance, aligned for this component's type.
-                        let dst_ptr = unsafe {
-                            let target: &mut Archetype = &mut *target_ptr;
-                            let dst_pool = target
-                                .component_pools_mut()
-                                .get_pool_mut(id)
-                                .expect("invariant: copy_from_source id exists in target");
-                            clone_row_ptr(dst_pool, new_row, stride)
-                        };
-                        // SAFETY (S1/S2/S3/W7):
-                        //   * `src_ptr` is a live, aligned, initialized `C`; `dst_ptr`
-                        //     is the reserved-uninit `new_row` slot aligned for the
-                        //     same `C`; they are disjoint (distinct pools, or distinct
-                        //     rows of one pool).
-                        //   * `clone_fn` (= `clone_via_clone::<C>`) forms `&C`, calls
-                        //     `Clone::clone`, and `ptr::write`s the result without
-                        //     dropping the uninit dst. It receives ONLY raw pointers —
-                        //     user `Clone` code cannot reach world state (W7). NO
-                        //     `&mut Archetype` is live across this call (dropped above).
-                        //   * On a panic INSIDE `clone_fn`, `dst` is left uninit and
-                        //     this iteration's `commit` below does NOT run, so the
-                        //     guard does NOT record this id (no double-drop).
-                        unsafe { clone_fn(src_ptr, dst_ptr) };
-                    }
-                    Cloneability::Ignore => unreachable!(
-                        "copy_from_source only holds cloneable ids"
-                    ),
-                }
-                // Commit the row + stamp ticks (reset to current, or preserve). A
-                // fresh, confined `&mut Archetype` reborrow.
+                // S7 Decision 4: the per-id write+commit is the shared
+                // `write_clone_column` (the verbatim confined-reborrow discipline,
+                // now also driving the prefab instantiate path). The aliasing
+                // anchor is unchanged: NO `&mut Archetype` is live across the user
+                // `clone_fn` (the helper drops it before the call), so the guard's
+                // Drop is the sole `&mut Archetype` accessor on unwind.
                 let (added, changed) = if cloner.preserve_ticks {
                     (src_added, src_changed)
                 } else {
                     (current_tick, current_tick)
                 };
-                // SAFETY: `new_row < committed_rows`; `commit_units` makes the slot
-                //   live; `write_*_tick` then stamps the committed slot. `&mut target`
-                //   confined to this block; `commit`/`write_tick` cannot panic.
+                let src = match info.cloneability {
+                    Cloneability::TriviallyCopyable => CloneColumnSrc::CopyBytes(src_ptr),
+                    Cloneability::CloneViaFn => CloneColumnSrc::CloneFn {
+                        clone_fn: info.clone_fn.expect(
+                            "invariant: CloneViaFn installs Some(clone_via_clone::<C>)",
+                        ),
+                        src_ptr,
+                    },
+                    Cloneability::Ignore => {
+                        unreachable!("copy_from_source only holds cloneable ids")
+                    }
+                };
+                // SAFETY: forwarded — `target_ptr` is live write-capable slab
+                //   provenance; `new_row < committed_rows` (reserved above); `id` is a
+                //   table id hosted by the target; `src_ptr` is the live source row
+                //   readable for `stride` bytes, disjoint from the target row (distinct
+                //   pools, or distinct rows of one pool); `stride == target pool size`.
                 unsafe {
-                    let target: &mut Archetype = &mut *target_ptr;
-                    let dst_pool = target
-                        .component_pools_mut()
-                        .get_pool_mut(id)
-                        .expect("invariant: copy_from_source id exists in target");
-                    dst_pool.commit_units(new_row, 1);
-                    dst_pool.write_added_tick(new_row, added);
-                    dst_pool.write_changed_tick(new_row, changed);
+                    write_clone_column(target_ptr, new_row, id, stride, src, added, changed);
                 }
                 guard.note_committed(id);
             } else {
@@ -490,21 +483,23 @@ fn materialize_clone_into(
                     "invariant: a reconstructed id came from the cloned set's required \
                      closure, so a ctor exists for it",
                 );
-                // A capture-free ctor (Feature 1's derive-generated free fn) does not
-                // panic by design; still, the `&mut Archetype` reborrow is confined.
-                // SAFETY (mirrors SpawnAtCommand's required ctor pass):
-                //   * `new_row < committed_rows`; the slot is reserved-uninit. `ctor`
-                //     writes one value of this pool's registered type (registry-paired)
-                //     without dropping the uninit dst. `&mut target` confined here.
+                // The reconstruct path stamps both ticks at `current_tick` (a
+                // reconstructed required is "added now"); `write_clone_column`'s
+                // `Reconstruct` arm uses `fill_ticks(.., added)`.
+                // SAFETY: `target_ptr` live; `new_row < committed_rows`; `id` is a
+                //   table id hosted by the target; `ctor` is `id`'s registered
+                //   capture-free required ctor. The stride argument is unused by the
+                //   Reconstruct arm.
                 unsafe {
-                    let target: &mut Archetype = &mut *target_ptr;
-                    let dst_pool = target
-                        .component_pools_mut()
-                        .get_pool_mut(id)
-                        .expect("invariant: reconstructed id exists in target archetype");
-                    dst_pool.construct_at_uninitialized(new_row, ctor);
-                    dst_pool.commit_units(new_row, 1);
-                    dst_pool.fill_ticks(new_row, 1, current_tick);
+                    write_clone_column(
+                        target_ptr,
+                        new_row,
+                        id,
+                        0,
+                        CloneColumnSrc::Reconstruct(ctor),
+                        current_tick,
+                        current_tick,
+                    );
                 }
                 guard.note_committed(id);
             }
@@ -643,7 +638,7 @@ fn materialize_clone_into(
 /// `Archetype::reserve_capacity`); the slot is reserved-uninit and exclusively
 /// owned via `&mut pool`.
 #[inline]
-unsafe fn clone_row_ptr(
+pub(crate) unsafe fn clone_row_ptr(
     pool: &mut crate::ecs::memory::component_pool::ComponentPool,
     new_row: usize,
     stride: usize,
@@ -659,6 +654,142 @@ unsafe fn clone_row_ptr(
     // SAFETY: forwarded to `reserved_row_ptr`; the caller upholds its contract
     //   (`new_row < committed_rows`, reserved-uninit, exclusive `&mut pool`).
     unsafe { pool.reserved_row_ptr(new_row) }
+}
+
+/// Shared three-branch column writer (S7 Decision 4 / MINOR-3 extraction).
+///
+/// Writes ONE component value into the reserved-uninit `new_row` of `target_ptr`'s
+/// `id` pool, then commits + stamps ticks. `src` selects the value source:
+/// * [`CloneColumnSrc::CopyBytes`] — `src_ptr` is a live, readable `stride`-byte
+///   value (a source pool row OR an owned prefab blob slot); byte-copied via
+///   `write_at_unchecked_initialized`.
+/// * [`CloneColumnSrc::CloneFn`] — runs `clone_fn(src_ptr, dst)` (user `Clone`);
+///   the `&mut Archetype` is dropped BEFORE the call (the F2 / W5 aliasing anchor).
+/// * [`CloneColumnSrc::Reconstruct`] — builds a value via the capture-free `ctor`.
+///
+/// This is the verbatim per-id write+commit the live clone (`materialize_clone_into`)
+/// and the prefab `instantiate` both perform; sharing it eliminates duplicated
+/// unsafe (Principle 0). The caller must `guard.note_committed(id)` after this
+/// returns (so a later panic rolls the row back).
+///
+/// # Safety
+/// * `target_ptr` is write-capable, stable, interior-mutable slab provenance for
+///   the live target archetype, exclusively reachable (`&mut EcsMaster`).
+/// * `new_row < target.<id pool>.committed_rows` (caller pre-reserved via
+///   `reserve_capacity(1)`); the slot is reserved-uninit; `id` is hosted by the
+///   target archetype (a table-signature id).
+/// * For `CopyBytes` / `CloneFn`: `src_ptr` is a live, aligned, initialized value
+///   of `id`'s type, readable for `stride` bytes, DISJOINT from the target row.
+///   `stride == target pool component size`.
+/// * For `CloneFn`: `clone_fn` is `id`'s registered `clone_via_clone::<C>` (forms
+///   `&C` from `src_ptr`, `ptr::write`s the clone into the uninit `dst` without
+///   dropping it). On a panic inside `clone_fn` the dst is left uninit and this
+///   function returns via unwind BEFORE the commit, so the caller MUST NOT have
+///   recorded `id` as committed (no double-drop — `note_committed` follows).
+/// * For `Reconstruct`: `ctor` is `id`'s registered required ctor (writes one value
+///   of the pool's type without dropping the uninit dst).
+pub(crate) unsafe fn write_clone_column(
+    target_ptr: *mut Archetype,
+    new_row: usize,
+    id: ComponentId,
+    stride: usize,
+    src: CloneColumnSrc,
+    added: Tick,
+    changed: Tick,
+) {
+    match src {
+        CloneColumnSrc::CopyBytes(src_ptr) => {
+            // SAFETY (S1 / W7): `src_ptr` is a live, aligned, initialized row
+            //   readable for `stride` bytes; `new_row < committed_rows` post the
+            //   caller's `reserve_capacity(1)`; `write_at_unchecked_initialized`
+            //   memcpys into the reserved-uninit slot without dropping. `src` and
+            //   the target row are disjoint (caller-guaranteed). The `&mut target`
+            //   reborrow is confined to this block (`write_at` cannot panic).
+            let bytes = unsafe { core::slice::from_raw_parts(src_ptr, stride) };
+            unsafe {
+                let target: &mut Archetype = &mut *target_ptr;
+                let dst_pool = target
+                    .component_pools_mut()
+                    .get_pool_mut(id)
+                    .expect("invariant: clone column id exists in target");
+                dst_pool.write_at_unchecked_initialized(new_row, bytes);
+            }
+        }
+        CloneColumnSrc::CloneFn { clone_fn, src_ptr } => {
+            // Derive the dst `*mut u8` in a TIGHT scope, then DROP the
+            // `&mut Archetype` BEFORE calling the (panic-prone) user `clone_fn`. At
+            // the `clone_fn` call NO `&mut Archetype` is live — only `dst_ptr:
+            // *mut u8` (no TB protector across the call) — so on unwind the caller's
+            // `CloneRowGuard::Drop` is the SOLE `&mut Archetype` accessor (F2 / W5).
+            // SAFETY: `new_row < committed_rows`; the slot is reserved-uninit; the
+            //   returned `*mut u8` carries the pool's reservation provenance, aligned
+            //   for this component's type.
+            let dst_ptr = unsafe {
+                let target: &mut Archetype = &mut *target_ptr;
+                let dst_pool = target
+                    .component_pools_mut()
+                    .get_pool_mut(id)
+                    .expect("invariant: clone column id exists in target");
+                clone_row_ptr(dst_pool, new_row, stride)
+            };
+            // SAFETY (S1/S2/S3/W7): `src_ptr` is a live, aligned, initialized `C`;
+            //   `dst_ptr` is the reserved-uninit `new_row` slot aligned for the same
+            //   `C`; disjoint. `clone_fn` (= `clone_via_clone::<C>`) forms `&C`,
+            //   calls `Clone::clone`, and `ptr::write`s the result without dropping
+            //   the uninit dst; it receives ONLY raw pointers (W7). NO `&mut
+            //   Archetype` is live across the call. On panic the dst is left uninit
+            //   and the commit below does NOT run, so the caller does NOT record this
+            //   id (no double-drop).
+            unsafe { clone_fn(src_ptr, dst_ptr) };
+        }
+        CloneColumnSrc::Reconstruct(ctor) => {
+            // SAFETY (mirrors SpawnAtCommand's required ctor pass): `new_row <
+            //   committed_rows`; the slot is reserved-uninit. `ctor` writes one value
+            //   of this pool's registered type (registry-paired) without dropping the
+            //   uninit dst. `&mut target` confined here; the ctor + commit + ticks
+            //   cannot panic, so no guard-Drop point spans an inconsistent slot.
+            unsafe {
+                let target: &mut Archetype = &mut *target_ptr;
+                let dst_pool = target
+                    .component_pools_mut()
+                    .get_pool_mut(id)
+                    .expect("invariant: reconstructed id exists in target archetype");
+                dst_pool.construct_at_uninitialized(new_row, ctor);
+                dst_pool.commit_units(new_row, 1);
+                dst_pool.fill_ticks(new_row, 1, added);
+            }
+            return;
+        }
+    }
+    // Commit the row + stamp ticks (CopyBytes / CloneFn paths). A fresh, confined
+    // `&mut Archetype` reborrow; `commit`/`write_tick` cannot panic.
+    // SAFETY: `new_row < committed_rows`; `commit_units` makes the slot live;
+    //   `write_*_tick` then stamps the committed slot. `&mut target` confined.
+    unsafe {
+        let target: &mut Archetype = &mut *target_ptr;
+        let dst_pool = target
+            .component_pools_mut()
+            .get_pool_mut(id)
+            .expect("invariant: clone column id exists in target");
+        dst_pool.commit_units(new_row, 1);
+        dst_pool.write_added_tick(new_row, added);
+        dst_pool.write_changed_tick(new_row, changed);
+    }
+}
+
+/// Value-source selector for [`write_clone_column`] (S7).
+pub(crate) enum CloneColumnSrc {
+    /// `TriviallyCopyable` — byte-copy `stride` bytes from `*const u8`.
+    CopyBytes(*const u8),
+    /// `CloneViaFn` — run `clone_fn(src_ptr, dst)`.
+    CloneFn {
+        clone_fn: component_registry::CloneFn,
+        src_ptr: *const u8,
+    },
+    /// Require-closure reconstruct — build via the capture-free ctor (no source
+    /// bytes). For this variant `write_clone_column` stamps BOTH ticks with the
+    /// `added` argument (the reconstruct path uses `fill_ticks(.., added)`).
+    Reconstruct(component_registry::RequiredCtor),
 }
 
 /// Cold debug-only diagnostic: a filter-denied required component is being

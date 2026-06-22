@@ -1453,6 +1453,75 @@ impl EcsMaster {
         self.clone_and_spawn_with(source, &cloner)
     }
 
+    /// Captures `source` and its `ChildOf` subtree into a frozen, source-independent
+    /// [`Prefab`](crate::ecs::core::clone::Prefab) using the default opt-out cloner
+    /// (all cloneable components, Bevy parity).
+    ///
+    /// The returned prefab OWNS its component bytes — built once on the audited clone
+    /// machinery (`clone_fn` per component, so non-`SerPod` components like
+    /// `Transform` round-trip) — and **survives `source` (and its subtree) being
+    /// despawned**. Instantiate it any number of times via
+    /// [`instantiate`](Self::instantiate).
+    ///
+    /// # Panics
+    ///
+    /// If `source` is not alive (stale / never-registered handle).
+    #[inline]
+    pub fn capture_prefab(&mut self, source: Entity) -> crate::ecs::core::clone::Prefab {
+        let cloner = crate::ecs::core::clone::EntityCloner::default_built();
+        self.capture_prefab_with(source, &cloner)
+    }
+
+    /// Captures `source` and its `ChildOf` subtree into a frozen
+    /// [`Prefab`](crate::ecs::core::clone::Prefab) using `cloner`'s configuration
+    /// (filter / strict / fire-hooks). The subtree is always captured deeply (a
+    /// prefab is a subtree); `cloner.linked` is therefore ignored, and
+    /// `cloner.preserve_ticks` is ignored by the prefab path (instances are "Added"
+    /// at instantiate time — see [`instantiate`](Self::instantiate)).
+    ///
+    /// # Panics
+    ///
+    /// If `source` is not alive.
+    pub fn capture_prefab_with(
+        &mut self,
+        source: Entity,
+        cloner: &crate::ecs::core::clone::EntityCloner,
+    ) -> crate::ecs::core::clone::Prefab {
+        assert!(
+            self.has_entity(source),
+            "capture_prefab: source entity {:?} is not alive",
+            source
+        );
+        crate::ecs::core::clone::prefab::capture(self, source, cloner)
+    }
+
+    /// Instantiates `prefab` into this world, returning the **detached** instance
+    /// root (no `ChildOf` — the caller parents it as it wishes).
+    ///
+    /// Each call yields an independent deep copy (re-runs each component's `clone_fn`
+    /// from the template, so instances never share bytes). Internal `ChildOf` is
+    /// remapped to the fresh instance parents and `Children` is rebuilt; non-`ChildOf`
+    /// entity refs are kept verbatim (the v1 clone boundary).
+    ///
+    /// Instances are **Added at instantiate time**: their change-detection ticks are
+    /// reset to the current tick, so `Added` / `Changed` fire the frame they are
+    /// instantiated. `cloner.preserve_ticks` is ignored by the prefab path (a frozen
+    /// template's capture-time ticks are stale by instantiate). `on_add` / `on_insert`
+    /// fire per the cloner captured into the prefab.
+    ///
+    /// Drains the deferred-hook queue at the outermost depth, like the other
+    /// structural direct APIs.
+    pub fn instantiate(&mut self, prefab: &crate::ecs::core::clone::Prefab) -> Entity {
+        // Depth bracket + outermost drain (mirrors `clone_and_spawn_with`): nested
+        // fires from on_add/on_insert enqueue commands; only the outermost owner
+        // drains.
+        let scope = DeferredScopeGuard::enter();
+        let entity = crate::ecs::core::clone::prefab::instantiate(self, prefab);
+        drop(scope);
+        self.drain_deferred_hook_queue();
+        entity
+    }
+
     /// Removal core shared by [`delete_entity`](Self::delete_entity) and
     /// [`despawn_without_children`](Self::despawn_without_children): fires the
     /// pre-remove hooks and releases the row, but does NOT drain the deferred

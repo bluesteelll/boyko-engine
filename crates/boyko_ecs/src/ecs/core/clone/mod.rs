@@ -34,9 +34,11 @@ pub mod cloner;
 pub mod deep;
 pub mod map;
 pub mod materialize;
+pub mod prefab;
 
 pub use cloner::{EntityCloner, EntityClonerBuilder, OptIn, OptOut};
 pub use map::EntityCloneMap;
+pub use prefab::Prefab;
 
 /// Hard cap on the number of nodes a single deep-subtree clone visits — a cycle
 /// tripwire (only `ChildOf` self-reference is guarded elsewhere; a deeper cycle
