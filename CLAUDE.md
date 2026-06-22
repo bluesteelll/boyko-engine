@@ -4,14 +4,14 @@ A Rust ECS engine for games, built for **ultimate performance, cache locality, a
 
 ## Layout (branch `ecs`)
 
-> ⚠️ You are on branch `ecs` — the latest active development branch. **It does not currently compile** — there are unresolved errors (`299a6b6 Blanket trait impl error fixed` was an incomplete attempt). Restoring the build is the top priority.
+`ecs` is the active development branch — the full engine, builds green. A Cargo workspace:
 
-A workspace of crates:
+- **Core:** [`boyko_ecs`](crates/boyko_ecs/) (ECS kernel: memory, components, archetypes, queries, events, scheduler, change-detection, hooks/observers, commands, serialize seam) · [`boyko_macros`](crates/boyko_macros/) (`#[derive(Component/Bundle)]`, `#[event]`) · [`boyko_utils`](crates/boyko_utils/) (`BitSet`/`BitMask`/`SparseMap`/`Slot`) · [`boyko_threadpool`](crates/boyko_threadpool/) (Chase-Lev work-stealing)
+- **Std-lib / sim:** [`boyko_math`](crates/boyko_math/) · [`boyko_scene`](crates/boyko_scene/) (Transform/Camera) · [`boyko_physics`](crates/boyko_physics/) (in-house 3D TGS-Soft) · [`boyko_sdf_math`](crates/boyko_sdf_math/) · [`boyko_input`](crates/boyko_input/) · [`boyko_serialize`](crates/boyko_serialize/)
+- **Render / UI:** [`boyko_rhi`](crates/boyko_rhi/) + [`boyko_rhi_vulkan`](crates/boyko_rhi_vulkan/) (in-house RHI, raw-FFI Vulkan) · [`boyko_render`](crates/boyko_render/) (GPU columns, lighting, SDF) · [`boyko_ui`](crates/boyko_ui/) (ECS-native UI) · [`boyko_fontbake`](crates/boyko_fontbake/) (MSDF atlas)
+- **Apps / bench:** [`boyko_demo`](crates/boyko_demo/) · [`bench_bevy_vs_boyko`](crates/bench_bevy_vs_boyko/) · [`src/main.rs`](src/main.rs) (library-shaped)
 
-- [`crates/boyko_ecs/`](crates/boyko_ecs/) — ECS core: memory, components, entities, **archetypes, queries, events**
-- [`crates/boyko_macros/`](crates/boyko_macros/) — proc-macros: `#[derive(Component)]` and `#[event]`
-- [`crates/boyko_utils/`](crates/boyko_utils/) — reusable collections: `BitSet`, `BitMask`, `BitSet512`, `SparseMap`, `SparseSlotMap`, `Slot`
-- [`src/main.rs`](src/main.rs) — executable wrapper (currently empty; the project is library-shaped)
+Full subsystem map → [docs/FEATURE_MAP.md](docs/FEATURE_MAP.md) (first point of contact), [docs/SYSTEMS.md](docs/SYSTEMS.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Principles (INVIOLABLE)
 
@@ -44,54 +44,14 @@ cargo +nightly miri test                           # UB detector (if nightly is 
 - SIMD: AVX2 baseline; AVX-512 optionally via `cfg(target_feature)`
 - Edition: Rust 2024
 
-## Current branch state
+## `master` vs `ecs` (history)
 
-| Branch | Contents | Build |
-|--------|----------|-------|
-| `master` | Only the memory subsystem: `Arena`, `ComponentPool<T>` (generic), `Chunk<T>` (generic), `MemFreeBlockMaster`, the basic `Entity` / `Component` types | ✅ builds |
-| **`ecs`** (you are here) | Full architecture: `EcsMaster`, `ArchetypeMaster`, `Archetype`, `Query`, `Event`, `EventRegistry`, `ComponentRegistry`, type-erased `ComponentPool` + `Chunk`, `EntityMaster` with recycling, `boyko_utils` (`BitSet` / `SparseMap`) | ❌ **does not build** |
-
-### Key architectural differences vs `master`
-
-- **Type-erased `ComponentPool` and `Chunk`** — no longer generic over `T`. They use the `ComponentRegistry` to store the `Layout` (size + align) of each `ComponentId`. This is required for heterogeneous component storage within an archetype.
-- **`Unit { ptr: *mut u8, buffer_index: usize }`** replaces the two-level `UnitId { chunk, inland }` addressing from `master`. A **direct pointer** to the component is now stored.
-- **`identifiers/primitives`** — all IDs are unified as `usize`: `EntityId`, `ArchetypeId`, `ChunkId`, `ComponentId`, `Generation`, `InlandPoolId`, etc.
-- **`EntityMaster`** — a real entity manager with reuse via a free list and `SparseMap<EntityInland>` for O(1) lookup.
-- **`EcsMaster`** — top-level facade, returns `anyhow::Result` (questionable for a library — revisit at stabilization).
-- **Global registries** (`ComponentRegistry`, `EventRegistry`) — store metadata in `static` storage. Registration happens on first access through `#[derive]`-generated code.
-
-### Where to dig for details
-
-- [docs/SYSTEMS.md](docs/SYSTEMS.md) — full subsystem catalog with file:line references
-- [docs/FEATURE_MAP.md](docs/FEATURE_MAP.md) — "I want X → look at Y" map
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — layers, dependency graph, data flow
+`master` = memory subsystem only (generic `ComponentPool<T>`/`Chunk<T>`, two-level `UnitId` addressing). `ecs` (here) = the full architecture: type-erased `ComponentPool`/`Chunk` (Layout via `ComponentRegistry`), direct-pointer `Unit`, `usize` ids, `EntityMaster` recycling, global metadata registries, `EcsMaster` facade. Full detail → [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Documentation — two layers
 
-### Internal (for agents, not for publication)
-
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — overview of the architecture and dependencies between crates
-- [docs/SYSTEMS.md](docs/SYSTEMS.md) — catalog of every subsystem with file pointers and key types
-- [docs/FEATURE_MAP.md](docs/FEATURE_MAP.md) — quick lookup: "where is X implemented?"
-
-**Every agent** must consult these files before starting work. `FEATURE_MAP.md` is the first point of contact.
-
-### Public (mdBook + cargo doc, deployed to GitHub Pages)
-
-- [book.toml](book.toml) — mdBook config
-- [book/src/](book/src/) — sources of the public book
-- [book/src/SUMMARY.md](book/src/SUMMARY.md) — table of contents (every new page is registered here)
-- [.github/workflows/docs.yml](.github/workflows/docs.yml) — CI deploy to GitHub Pages
-
-Deployment URL: `https://bluesteelll.github.io/boyko-engine/` (book) + `/api/` (rustdoc).
-
-Local preview:
-```powershell
-cargo install mdbook mdbook-mermaid    # one-time
-mdbook serve --open
-```
-
-The public documentation is written by the `doc-writer` agent — other agents do not edit it.
+- **Internal (for agents):** [docs/FEATURE_MAP.md](docs/FEATURE_MAP.md) (**first point of contact** — "where is X?"), [docs/SYSTEMS.md](docs/SYSTEMS.md) (subsystem catalog + file:line), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (layers/deps/data-flow). Consult before starting work.
+- **Public (mdBook + cargo doc → GitHub Pages):** [book.toml](book.toml) / [book/src/](book/src/) (register new pages in [book/src/SUMMARY.md](book/src/SUMMARY.md)); CI [.github/workflows/docs.yml](.github/workflows/docs.yml) deploys to `https://bluesteelll.github.io/boyko-engine/` (+ `/api/` rustdoc). Written ONLY by the `doc-writer` agent (others do not edit it). Local preview: `mdbook serve --open`.
 
 ## Agents
 
