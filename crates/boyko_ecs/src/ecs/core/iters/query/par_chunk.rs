@@ -54,6 +54,7 @@ use std::marker::PhantomData;
 use crate::ecs::core::archetype::archetype::Archetype;
 use crate::ecs::core::iters::query::chunk_iter;
 use crate::ecs::core::iters::query::chunked_data::ChunkedQueryData;
+use crate::ecs::core::iters::query::enable_terms::{EnableTermCols, EnableTerms};
 use crate::ecs::core::iters::query::filter::ArchetypalQueryFilter;
 use crate::ecs::core::iters::query::par_iter::{BatchingStrategy, MIN_ARCHETYPE_FOR_PARALLEL};
 use crate::ecs::core::iters::query::state::QueryDataState;
@@ -105,6 +106,7 @@ pub(crate) unsafe fn par_for_each_chunk_impl<'q, 's, D, F, Func>(
     ids: &[ArchetypeId],
     world: UnsafeEcsCell<'q>,
     mutable: bool,
+    enable_terms: EnableTerms,
     batching: BatchingStrategy,
     f: Func,
 ) where
@@ -178,10 +180,9 @@ pub(crate) unsafe fn par_for_each_chunk_impl<'q, 's, D, F, Func>(
                 if entity_count < MIN_ARCHETYPE_FOR_PARALLEL {
                     // SAFETY (CD1, CD2, CD4, PAR9): inline path; the calling
                     //   thread is the sole accessor. `mutable` selects the
-                    //   correct `set_chunk_*` dispatch (CD4); `fetch_chunk(0,
-                    //   entity_count)` covers the full live row range
-                    //   `[0, entity_count)` exactly once (CD2; CD3 is vacuous
-                    //   on the inline single-call path).
+                    //   correct `set_chunk_*` dispatch (CD4); `fetch_chunk`
+                    //   covers the live row range exactly once per run (CD2; CD3
+                    //   is vacuous on the inline single-thread path).
                     let mut chunk_fetch =
                         <D as ChunkedQueryData>::init_chunk_fetch(&state.data_state);
                     unsafe {
@@ -198,21 +199,48 @@ pub(crate) unsafe fn par_for_each_chunk_impl<'q, 's, D, F, Func>(
                                 arch_ptr as *const _,
                             );
                         }
-                        let item = <D as ChunkedQueryData>::fetch_chunk(
-                            &chunk_fetch,
-                            0,
-                            entity_count,
-                        );
-                        f_ref(item);
+                        if enable_terms.is_empty() {
+                            let item = <D as ChunkedQueryData>::fetch_chunk(
+                                &chunk_fetch,
+                                0,
+                                entity_count,
+                            );
+                            f_ref(item);
+                        } else {
+                            // SAFETY (ENBL-RUN): `cols` resolved for THIS
+                            //   archetype on the calling thread; no live toggler
+                            //   (D8); runs ⊆ [0, entity_count) (INV-RANGE),
+                            //   disjoint ⇒ `&mut` sub-slices never alias.
+                            let cols = enable_terms.resolve(&*arch_ptr);
+                            cols.for_each_run(0, entity_count, |rs, rl| {
+                                let item = <D as ChunkedQueryData>::fetch_chunk(
+                                    &chunk_fetch,
+                                    rs,
+                                    rl,
+                                );
+                                f_ref(item);
+                            });
+                        }
                     }
                     continue;
                 }
 
+                // Resolve the enable columns for THIS archetype ONCE on the
+                // calling thread (Decision 6) — `EnableTermCols` is `Copy` and
+                // holds `*const EnableColumn`s, copied into each worker's
+                // capture. EMPTY when no enable term (the 0%-gate: workers take
+                // the full-batch `fetch_chunk`).
+                // SAFETY (U1/U2): `arch_ptr` is slab-stable for `'q`; the
+                //   `&Archetype` reborrow is bounded to the `resolve` scan.
+                let cols = unsafe { enable_terms.resolve(&*arch_ptr) };
+                let has_enable = !enable_terms.is_empty();
+
                 let chunk_size = batching.chunk_size(entity_count, worker_count);
 
-                // Spawn per-subrange tasks. Each `(start, end)` is monotonic
+                // Spawn per-subrange tasks. Each `[start, end)` is monotonic
                 // non-overlapping by construction; CD3 disjointness for
-                // `&mut [T]` slices is therefore satisfied structurally.
+                // `&mut [T]` slices is therefore satisfied structurally. The run
+                // walk nests INSIDE each batch with `range_end = end` (C5).
                 let mut start = 0usize;
                 while start < entity_count {
                     let end = (start + chunk_size).min(entity_count);
@@ -223,6 +251,8 @@ pub(crate) unsafe fn par_for_each_chunk_impl<'q, 's, D, F, Func>(
                         start,
                         len: end - start,
                         mutable,
+                        enable_cols: cols,
+                        has_enable,
                         f: f_ref as *const Func,
                         _state_borrow: PhantomData,
                         _data_filter_invariance: PhantomData,
@@ -270,7 +300,9 @@ pub(crate) unsafe fn par_for_each_chunk_impl<'q, 's, D, F, Func>(
         //   pre-resolved `ids` slice is forwarded (no re-resolve) — the
         //   sequential driver walks it identically.
         unsafe {
-            chunk_iter::for_each_chunk_impl(state, ids, world, mutable, |item| f(item));
+            chunk_iter::for_each_chunk_impl(state, ids, world, mutable, enable_terms, |item| {
+                f(item)
+            });
         }
     }
 }
@@ -297,6 +329,14 @@ struct ChunkChunkCaptures<'s, D: ChunkedQueryData, F: ArchetypalQueryFilter, Fun
     start: usize,
     len: usize,
     mutable: bool,
+    /// Enable columns resolved for `archetype` on the calling thread (Decision
+    /// 6). `Copy`, holds `*const EnableColumn`s read-only in the dispatch window
+    /// (no live toggler — D8). `EnableTermCols::EMPTY` when `has_enable` is
+    /// false; the worker then never reads it.
+    enable_cols: EnableTermCols,
+    /// `true` iff at least one enable term is present; gates the run walk inside
+    /// the worker (the 0%-gate: a no-enable batch takes the full `fetch_chunk`).
+    has_enable: bool,
     /// Raw reborrow of `&Func` from the enclosing scope. Stored as `*const`
     /// (not `&'s Func`) to make `ChunkChunkCaptures` `Send` despite the
     /// pointer pointing into the dispatcher's stack-borrowed closure.
@@ -348,6 +388,12 @@ impl<D: ChunkedQueryData, F: ArchetypalQueryFilter, Func> Copy
 //     stack frame. `Func: Sync` (public-API bound) so the worker can read it
 //     concurrently with sibling chunks; the surrounding scope outlives every
 //     worker.
+//   - `enable_cols` (`EnableTermCols`, Decision 6) holds `*const EnableColumn`
+//     pointers resolved on the calling thread for this archetype. They are read
+//     ONLY (`Relaxed` summary/word loads) in the dispatch window where the
+//     conflict graph (SCH3) guarantees no concurrent toggler (toggles require
+//     `&mut EcsMaster`, D8) — same `*const EnableColumn` Send precedent as
+//     `par_iter.rs:666`. The archetype slab is stable for the scope.
 //
 // `Sync` is unnecessary — the bundle is captured by value into the `move`
 // closure, never shared by reference.
@@ -413,12 +459,30 @@ where
                 captured.archetype as *const _,
             );
         }
-        let item = <D as ChunkedQueryData>::fetch_chunk(
-            &chunk_fetch,
-            captured.start,
-            captured.len,
-        );
-        (*captured.f)(item);
+        if !captured.has_enable {
+            let item = <D as ChunkedQueryData>::fetch_chunk(
+                &chunk_fetch,
+                captured.start,
+                captured.len,
+            );
+            (*captured.f)(item);
+        } else {
+            // EnableTag run walk nested inside this worker's batch. C5: the
+            // run's upper bound is `range_end = start + len` (the BATCH end),
+            // NOT entity_count — this clips the all-`u64::MAX` span of an
+            // absent-page `without_enabled` archetype so per-batch runs stay
+            // disjoint (no double-cover across workers).
+            // SAFETY (ENBL-RUN / C5): `enable_cols` was resolved for this
+            //   archetype on the dispatching thread and is read-only here (no
+            //   live toggler — SCH3/D8). Every run is ⊆ [start, start+len)
+            //   (INV-RANGE), disjoint from sibling workers' batches by the
+            //   monotonic dispatch walk (CD3).
+            let batch_end = captured.start + captured.len;
+            captured.enable_cols.for_each_run(captured.start, batch_end, |rs, rl| {
+                let item = <D as ChunkedQueryData>::fetch_chunk(&chunk_fetch, rs, rl);
+                (*captured.f)(item);
+            });
+        }
     }
 }
 
@@ -518,6 +582,7 @@ mod tests {
                 ids,
                 cell,
                 false,
+                EnableTerms::EMPTY,
                 BatchingStrategy::default(),
                 |slice: &[CompA]| {
                     invocations.fetch_add(1, Ordering::Relaxed);
@@ -582,6 +647,7 @@ mod tests {
                     ids,
                     cell,
                     false,
+                    EnableTerms::EMPTY,
                     BatchingStrategy::default(),
                     |slice: &[CompA]| {
                         invocations.fetch_add(1, Ordering::Relaxed);
@@ -767,6 +833,7 @@ mod tests {
                     ids,
                     cell,
                     false,
+                    EnableTerms::EMPTY,
                     BatchingStrategy::default(),
                     |slice: &[CompW7a]| {
                         invocations.fetch_add(1, Ordering::Relaxed);
@@ -899,6 +966,7 @@ mod tests {
                     ids,
                     cell,
                     false,
+                    EnableTerms::EMPTY,
                     BatchingStrategy::default(),
                     |slice: &[CompA]| {
                         total.fetch_add(slice.len(), Ordering::Relaxed);
@@ -951,6 +1019,7 @@ mod tests {
                         ids,
                         cell,
                         true,
+                        EnableTerms::EMPTY,
                         BatchingStrategy::default(),
                         |slice: &mut [CompW7Pos]| {
                             for p in slice.iter_mut() {
@@ -978,6 +1047,7 @@ mod tests {
                 ids,
                 cell,
                 false,
+                EnableTerms::EMPTY,
                 |slice: &[CompW7Pos]| {
                     for p in slice {
                         collected.push(p.0);

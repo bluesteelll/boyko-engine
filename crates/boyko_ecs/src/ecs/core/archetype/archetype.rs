@@ -220,12 +220,17 @@ const _: () = assert!(std::mem::offset_of!(Archetype, columns) == 0);
 // layout drift; if a future change reorders fields or alters `signature`'s
 // alignment, this trips before a perf regression can ship.
 //
-// The struct embeds `Vec`s and `usize` fields, so the 8576 B figure encodes
+// EnableTag chunk-aware filter (rev. 3) adds a `summary: Box<[AtomicU64]>` fat
+// pointer (16 B) to each `EnableColumn` (Decision 3). `EnableStore` inlines 4
+// columns in `SmallList4`, so the struct grows +64 B → 8640 B measured. This is
+// metadata only; the hot read path is unchanged.
+//
+// The struct embeds `Vec`s and `usize` fields, so the 8640 B figure encodes
 // the 64-bit ABI; gated to 64-bit (the engine's supported platform) — see
 // CLAUDE.md target platform. `offset_of(columns) == 0` above is
 // width-independent (first `#[repr(C)]` field) and stays unconditional.
 #[cfg(target_pointer_width = "64")]
-const _: () = assert!(std::mem::size_of::<Archetype>() == 8576);
+const _: () = assert!(std::mem::size_of::<Archetype>() == 8640);
 
 impl Archetype {
     /// Creates a new archetype with the given ID.
@@ -2076,7 +2081,7 @@ mod tests {
     fn archetype_size_pin_holds() {
         assert_eq!(
             std::mem::size_of::<Archetype>(),
-            8576,
+            8640,
             "Archetype size pin must match the const-assert tripwire"
         );
         assert_eq!(std::mem::offset_of!(Archetype, columns), 0, "columns must stay at offset 0");

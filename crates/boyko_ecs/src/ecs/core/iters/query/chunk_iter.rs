@@ -45,6 +45,7 @@
 
 use crate::ecs::core::archetype::archetype::Archetype;
 use crate::ecs::core::iters::query::chunked_data::ChunkedQueryData;
+use crate::ecs::core::iters::query::enable_terms::EnableTerms;
 use crate::ecs::core::iters::query::filter::ArchetypalQueryFilter;
 use crate::ecs::core::iters::query::state::QueryDataState;
 use crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell;
@@ -98,6 +99,7 @@ pub(crate) unsafe fn for_each_chunk_impl<'q, 's, D, F, Func>(
     ids: &[ArchetypeId],
     world: UnsafeEcsCell<'q>,
     mutable: bool,
+    enable_terms: EnableTerms,
     mut f: Func,
 ) where
     D: ChunkedQueryData,
@@ -183,15 +185,36 @@ pub(crate) unsafe fn for_each_chunk_impl<'q, 's, D, F, Func>(
             }
         }
 
-        // SAFETY (CD2): `set_chunk_*` above initialised `chunk_fetch`
-        //   for the current archetype; `start = 0`, `len = entity_count`
-        //   covers exactly the live row range `[0, entity_count)`. CD3
-        //   disjointness is vacuous on the sequential path — exactly one
-        //   `fetch_chunk` invocation per archetype.
-        let item = unsafe {
-            <D as ChunkedQueryData>::fetch_chunk(&chunk_fetch, 0, entity_count)
-        };
-        f(item);
+        // EnableTag chunk-aware run dispatch. The `is_empty()` gate is
+        // loop-invariant (`enable_terms` is never written during iteration), so
+        // LLVM hoists it above the archetype loop — the no-enable per-archetype
+        // body is byte-identical to a single `fetch_chunk(0, entity_count)`
+        // (the 0%-gate), the run branch is predicted-not-taken and dead.
+        if enable_terms.is_empty() {
+            // SAFETY (CD2): `set_chunk_*` above initialised `chunk_fetch` for the
+            //   current archetype; `start = 0`, `len = entity_count` covers the
+            //   live row range `[0, entity_count)`. CD3 is vacuous (one fetch).
+            let item = unsafe {
+                <D as ChunkedQueryData>::fetch_chunk(&chunk_fetch, 0, entity_count)
+            };
+            f(item);
+        } else {
+            // SAFETY (U1/U2): `arch_ptr` is slab-stable for `'q`; the `&Archetype`
+            //   reborrow is bounded to the `resolve` scan (no `&mut` produced).
+            let cols = unsafe { enable_terms.resolve(&*arch_ptr) };
+            // SAFETY (ENBL-RUN): `cols` holds the columns resolved for THIS
+            //   archetype, valid for the iteration (no live toggler — D8);
+            //   `range_end = entity_count`. Each yielded run is ⊆
+            //   `[0, entity_count)` (INV-RANGE), so `fetch_chunk(rs, rl)` is in
+            //   range; runs are disjoint, so the `&mut` sub-slices never alias.
+            unsafe {
+                cols.for_each_run(0, entity_count, |rs, rl| {
+                    let item =
+                        <D as ChunkedQueryData>::fetch_chunk(&chunk_fetch, rs, rl);
+                    f(item);
+                });
+            }
+        }
     }
 }
 
@@ -222,6 +245,7 @@ pub(crate) unsafe fn for_each_chunk_entities_impl<'q, 's, D, F, Func>(
     ids: &[ArchetypeId],
     world: UnsafeEcsCell<'q>,
     mutable: bool,
+    enable_terms: EnableTerms,
     mut f: Func,
 ) where
     D: ChunkedQueryData,
@@ -289,14 +313,38 @@ pub(crate) unsafe fn for_each_chunk_entities_impl<'q, 's, D, F, Func>(
             }
         }
 
-        // SAFETY (CD2): `set_chunk_*` initialised `chunk_fetch` for this
-        //   archetype; `start = 0`, `len = entity_count` covers the live row
-        //   range `[0, entity_count)`. CD3 disjointness is vacuous on the
-        //   sequential path — exactly one `fetch_chunk` per archetype.
-        let item = unsafe {
-            <D as ChunkedQueryData>::fetch_chunk(&chunk_fetch, 0, entity_count)
-        };
-        f(entity_slice, item);
+        // EnableTag chunk-aware run dispatch (C1). The `is_empty()` gate is
+        // loop-invariant — hoisted; the no-enable body is byte-identical to a
+        // single full-slice pairing (the 0%-gate).
+        if enable_terms.is_empty() {
+            // SAFETY (CD2): `set_chunk_*` initialised `chunk_fetch`; `start = 0`,
+            //   `len = entity_count` covers `[0, entity_count)`. CD3 vacuous.
+            let item = unsafe {
+                <D as ChunkedQueryData>::fetch_chunk(&chunk_fetch, 0, entity_count)
+            };
+            f(entity_slice, item);
+        } else {
+            let cols = enable_terms.resolve(arch_ref);
+            // SAFETY (ENBL-RUN / C1): `cols` resolved for THIS archetype, valid
+            //   for the iteration (no live toggler — D8); `range_end =
+            //   entity_count`. INV-RANGE guarantees `rs + rl <= entity_count`, so
+            //   BOTH `entity_slice[rs..rs+rl]` and `fetch_chunk(rs, rl)` are in
+            //   range and ROW-ALIGNED (paired by the SAME `(rs, rl)`), preserving
+            //   the `ids[k] ↔ slice[k]` contract. Runs are disjoint, so the
+            //   `&mut` component sub-slices never alias.
+            unsafe {
+                cols.for_each_run(0, entity_count, |rs, rl| {
+                    debug_assert!(
+                        rs + rl <= entity_count,
+                        "for_each_chunk_entities run [{rs}, {}) exceeds entity_count {entity_count}",
+                        rs + rl
+                    );
+                    let item =
+                        <D as ChunkedQueryData>::fetch_chunk(&chunk_fetch, rs, rl);
+                    f(&entity_slice[rs..rs + rl], item);
+                });
+            }
+        }
     }
 }
 
@@ -429,7 +477,7 @@ mod tests {
         //   `mutable = false`. `F = ()` ⇒ archetypal.
         unsafe {
             let ids = state.archetype_state.matched_ids_pre_terms();
-            for_each_chunk_impl::<&CompA, (), _>(&state, ids, cell, false, |slice: &[CompA]| {
+            for_each_chunk_impl::<&CompA, (), _>(&state, ids, cell, false, EnableTerms::EMPTY, |slice: &[CompA]| {
                 invocations += 1;
                 for c in slice {
                     collected.push(c.0);
@@ -482,7 +530,7 @@ mod tests {
         //   `F = ()` archetypal. No aliasing live.
         unsafe {
             let ids = state.archetype_state.matched_ids_pre_terms();
-            for_each_chunk_impl::<&CompA, (), _>(&state, ids, cell, false, |slice: &[CompA]| {
+            for_each_chunk_impl::<&CompA, (), _>(&state, ids, cell, false, EnableTerms::EMPTY, |slice: &[CompA]| {
                 slice_lens.push(slice.len());
                 total += slice.len();
             });
@@ -523,7 +571,7 @@ mod tests {
         //   filter; no aliasing live.
         unsafe {
             let ids = state.archetype_state.matched_ids_pre_terms();
-            for_each_chunk_impl::<&CompA, (), _>(&state, ids, cell, false, |_slice: &[CompA]| {
+            for_each_chunk_impl::<&CompA, (), _>(&state, ids, cell, false, EnableTerms::EMPTY, |_slice: &[CompA]| {
                 invocations += 1;
             });
         }
@@ -684,7 +732,7 @@ mod tests {
         //   skips without touching the user closure.
         unsafe {
             let ids = state.archetype_state.matched_ids_pre_terms();
-            for_each_chunk_impl::<&CompA, (), _>(&state, ids, cell, false, |slice: &[CompA]| {
+            for_each_chunk_impl::<&CompA, (), _>(&state, ids, cell, false, EnableTerms::EMPTY, |slice: &[CompA]| {
                 invocations += 1;
                 total += slice.len();
             });
@@ -727,6 +775,7 @@ mod tests {
                     ids,
                     cell,
                     true,
+                    EnableTerms::EMPTY,
                     |slice: &mut [CompA]| {
                         for c in slice.iter_mut() {
                             c.0 = c.0.wrapping_mul(2);
@@ -746,7 +795,7 @@ mod tests {
         // SAFETY (Q1, CD1-CD4): read-only re-iteration; no aliasing live.
         unsafe {
             let ids = state.archetype_state.matched_ids_pre_terms();
-            for_each_chunk_impl::<&CompA, (), _>(&state, ids, cell, false, |slice: &[CompA]| {
+            for_each_chunk_impl::<&CompA, (), _>(&state, ids, cell, false, EnableTerms::EMPTY, |slice: &[CompA]| {
                 for c in slice {
                     collected.push(c.0);
                 }
@@ -795,6 +844,7 @@ mod tests {
                 ids,
                 cell,
                 true,
+                EnableTerms::EMPTY,
                 |(a, b, c): (&[CompA], &mut [CompB], &[CompD])| {
                     invocations += 1;
                     observed_lens.push((a.len(), b.len(), c.len()));
@@ -898,6 +948,7 @@ mod tests {
                 ids,
                 cell,
                 false,
+                EnableTerms::EMPTY,
                 |_: ()| {
                     invocations += 1;
                 },
@@ -950,6 +1001,7 @@ mod tests {
                 ids,
                 cell,
                 false,
+                EnableTerms::EMPTY,
                 |ents: &[EntityId], comps: &[CompA]| {
                     invocations += 1;
                     assert_eq!(
@@ -1025,6 +1077,7 @@ mod tests {
                 ids,
                 cell,
                 false,
+                EnableTerms::EMPTY,
                 |ents: &[EntityId], comps: &[CompA]| {
                     assert_eq!(ents.len(), comps.len(), "slice pair must be length-matched");
                     for (e, c) in ents.iter().zip(comps.iter()) {
@@ -1066,6 +1119,7 @@ mod tests {
                 ids,
                 cell,
                 false,
+                EnableTerms::EMPTY,
                 |_ents: &[EntityId], _comps: &[CompA]| {
                     invocations += 1;
                 },
@@ -1108,6 +1162,7 @@ mod tests {
                     ids,
                     cell,
                     true,
+                    EnableTerms::EMPTY,
                     |ents: &[EntityId], comps: &mut [CompA]| {
                         for (e, c) in ents.iter().zip(comps.iter_mut()) {
                             c.0 = e.0 as u32;
@@ -1130,6 +1185,7 @@ mod tests {
                 ids,
                 cell,
                 false,
+                EnableTerms::EMPTY,
                 |ents: &[EntityId], comps: &[CompA]| {
                     for (e, c) in ents.iter().zip(comps.iter()) {
                         assert_eq!(

@@ -376,7 +376,14 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
         let ids = self.driver_ids();
         let mutable = !D::IS_READ_ONLY;
         unsafe {
-            chunk_iter::for_each_chunk_entities_impl(self.state, ids, self.world, mutable, f);
+            chunk_iter::for_each_chunk_entities_impl(
+                self.state,
+                ids,
+                self.world,
+                mutable,
+                self.enable_terms,
+                f,
+            );
         }
     }
 
@@ -550,7 +557,14 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
         let ids = self.driver_ids();
         let mutable = !D::IS_READ_ONLY;
         unsafe {
-            chunk_iter::for_each_chunk_impl(self.state, ids, self.world, mutable, f);
+            chunk_iter::for_each_chunk_impl(
+                self.state,
+                ids,
+                self.world,
+                mutable,
+                self.enable_terms,
+                f,
+            );
         }
     }
 
@@ -624,6 +638,7 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
                 ids,
                 self.world,
                 mutable,
+                self.enable_terms,
                 batching,
                 f,
             );

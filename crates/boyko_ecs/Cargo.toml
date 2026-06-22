@@ -175,6 +175,14 @@ harness = false
 name = "enable_tags"
 harness = false
 
+# Chunk-aware EnableTag filter (rev. 3) — the PERF gate: A/B of the scalar
+# per-row `with_enabled().iter()` path vs the run-aware
+# `with_enabled().for_each_chunk()` path across {99,50,1}% density, plus the
+# 0%-gate no-filter / absent-column references. See benches/enable_chunk_filter.rs.
+[[bench]]
+name = "enable_chunk_filter"
+harness = false
+
 # Task #5 — EnableTag positive-term archetype-cull DIAGNOSTIC (profile-first; the
 # cull is NOT implemented). Measures whether visiting no-column archetypes in a
 # `Query<&EtPos, Enabled<EtFlag>>` is measurable against same-binary scenarios

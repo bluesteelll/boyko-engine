@@ -99,6 +99,49 @@ impl EnablePage {
             self.0[word].fetch_and(!mask, Ordering::Relaxed);
         }
     }
+
+    /// Sets `local_row` to `value`, returning the touched word index plus the
+    /// word's post-write occupancy so the owning [`EnableColumn`] can keep its
+    /// `summary` slot in lockstep (Decision 2 / C3).
+    ///
+    /// The post-occupancy is derived from the atomic RMW return value — there is
+    /// no extra `load`, even on the clear path: `fetch_or` returns the old word
+    /// (OR `mask` reconstructs the new), `fetch_and` likewise (AND `!mask`).
+    #[inline]
+    fn set_local_reporting(&self, local_row: usize, value: bool) -> (usize, WordState) {
+        debug_assert!(local_row < ROWS_PER_PAGE, "local row out of page range");
+        let word = (local_row >> 6) & (WORDS_PER_PAGE - 1);
+        let mask = 1u64 << (local_row & 63);
+        // Relaxed: &mut-exclusive apply window in v1 (D8). The RMW return is the
+        // PRE-write word; reconstruct the post-write word without a second load.
+        let post = if value {
+            self.0[word].fetch_or(mask, Ordering::Relaxed) | mask
+        } else {
+            self.0[word].fetch_and(!mask, Ordering::Relaxed) & !mask
+        };
+        (word, if post == 0 { WordState::Empty } else { WordState::NonEmpty })
+    }
+
+    /// Loads the raw data word `word` (`0..WORDS_PER_PAGE`) for the run walk.
+    /// Used by [`EnabledRuns`] / `EnableTermCols::for_each_run` to build the
+    /// match-bitmap of a 64-row block.
+    #[inline]
+    fn data_word(&self, word: usize) -> u64 {
+        debug_assert!(word < WORDS_PER_PAGE, "data word out of page range");
+        // Relaxed: no concurrent toggler in v1 (D8); load is a plain `mov`.
+        self.0[word].load(Ordering::Relaxed)
+    }
+}
+
+/// Post-write occupancy of a touched 64-bit data word, reported by
+/// [`EnablePage::set_local_reporting`] so the column can maintain its summary
+/// (Decision 2). Storage-less; lowered to a single bool comparison.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WordState {
+    /// The word is all-zero after the write (no live bit in this 64-row block).
+    Empty,
+    /// The word has ≥ 1 set bit after the write.
+    NonEmpty,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -118,7 +161,16 @@ pub(crate) struct EnableColumn {
     /// Page directory: `pages[row >> 12]` is the page for that row (or `None` if
     /// no row in its range has been toggled yet).
     pages: Box<[Option<Box<EnablePage>>]>,
-    // v1.1 seam: `summary: Box<[AtomicU64]>` (one bit per page) for block-skip.
+    /// Word-occupancy summary (Decision 1/3): one [`AtomicU64`] per directory
+    /// slot. `summary[p]` bit `w` (`0..WORDS_PER_PAGE`) is set iff data word `w`
+    /// of page `p` has ≥ 1 set bit; an absent page contributes a 0 word.
+    ///
+    /// INVARIANT: `summary.len() == pages.len()` ALWAYS — the two grow in
+    /// lockstep (`new` / `ensure_directory`), so `summary[p]` is a valid in-range
+    /// slot for every directory slot, including `None` pages (correctly 0). The
+    /// run walk reads it to skip fully-non-matching 64-row words / 4096-row pages
+    /// without touching page data.
+    summary: Box<[AtomicU64]>,
 }
 
 /// Number of 4096-row pages needed to cover `rows` rows (≥ 1, so a fresh column
@@ -138,8 +190,13 @@ impl EnableColumn {
         let len = pages_for_rows(reserve_rows);
         let mut dir: Vec<Option<Box<EnablePage>>> = Vec::with_capacity(len);
         dir.resize_with(len, || None);
+        // Summary grows in lockstep with the directory; a fresh slot is all-zero
+        // (no page ⇒ no live bit), matching "never allocate to store a 0".
+        let mut summary: Vec<AtomicU64> = Vec::with_capacity(len);
+        summary.resize_with(len, || AtomicU64::new(0));
         EnableColumn {
             pages: dir.into_boxed_slice(),
+            summary: summary.into_boxed_slice(),
         }
     }
 
@@ -168,6 +225,17 @@ impl EnableColumn {
         let mut dir: Vec<Option<Box<EnablePage>>> = old.into_vec();
         dir.resize_with(new_len, || None);
         self.pages = dir.into_boxed_slice();
+        // Lockstep regrow (Decision 3): keep `summary.len() == pages.len()`. New
+        // tail slots are 0 (their pages are absent ⇒ no live bit).
+        let old_summary = std::mem::take(&mut self.summary);
+        let mut summary: Vec<AtomicU64> = old_summary.into_vec();
+        summary.resize_with(new_len, || AtomicU64::new(0));
+        self.summary = summary.into_boxed_slice();
+        debug_assert_eq!(
+            self.summary.len(),
+            self.pages.len(),
+            "summary/pages length divergence after ensure_directory (Decision 3 INV)"
+        );
     }
 
     /// Returns the page for `page_idx`, allocating a zeroed 512 B page on first
@@ -194,7 +262,19 @@ impl EnableColumn {
         );
         let page_idx = row >> ROWS_PER_PAGE_LOG2;
         let page = self.get_or_alloc_page(page_idx);
-        page.set_local(row & (ROWS_PER_PAGE - 1), value);
+        let (word, post) = page.set_local_reporting(row & (ROWS_PER_PAGE - 1), value);
+        // Summary maintenance (Decision 2 / C3). `get_or_alloc_page` ensured the
+        // directory (and thus `summary[page_idx]`) is in range — `set` always
+        // allocates the page, even for a clear.
+        let bit = 1u64 << word;
+        if value {
+            // C3(b): a set is UNCONDITIONAL — `fetch_or(mask)|mask != 0` always
+            // (mask != 0), so the word is non-empty; no predicted branch.
+            self.summary[page_idx].fetch_or(bit, Ordering::Relaxed);
+        } else if let WordState::Empty = post {
+            // A clear empties the summary bit only when the whole word emptied.
+            self.summary[page_idx].fetch_and(!bit, Ordering::Relaxed);
+        }
     }
 
     /// True if no page has been allocated yet (the column holds no live bits).
@@ -241,9 +321,269 @@ impl EnableColumn {
     #[inline]
     fn clear_if_present(&mut self, row: usize) {
         let page_idx = row >> ROWS_PER_PAGE_LOG2;
+        // C3(a): the summary update fires ONLY inside the `Some(Some(page))`
+        // branch. A clear into an absent page touches no bit, and that page's
+        // summary slot is already 0 (lockstep) — nothing to do.
         if let Some(Some(page)) = self.pages.get(page_idx) {
-            page.set_local(row & (ROWS_PER_PAGE - 1), false);
+            let (word, post) = page.set_local_reporting(row & (ROWS_PER_PAGE - 1), false);
+            if let WordState::Empty = post {
+                // The page existed ⇒ `summary[page_idx]` is a valid in-range slot
+                // (index lockstep). Clear the word bit iff the word emptied.
+                self.summary[page_idx].fetch_and(!(1u64 << word), Ordering::Relaxed);
+            }
         }
+    }
+
+    /// Recomputes `summary[p]` from page `p`'s live bits and asserts it equals
+    /// the stored summary, for every directory slot (C2 oracle).
+    ///
+    /// An absent page must have a 0 summary slot; a present page's summary bit
+    /// `w` must equal `data_word(w) != 0`. Called after a structural mutation
+    /// completes (e.g. the whole `swap_remove_bit`) to catch a desync on either
+    /// touched page of a cross-page swap. Compiled out in release.
+    #[cfg(debug_assertions)]
+    pub(crate) fn debug_assert_column_summary_consistent(&self) {
+        debug_assert_eq!(
+            self.summary.len(),
+            self.pages.len(),
+            "summary/pages length divergence (Decision 3 INV)"
+        );
+        for (p, slot) in self.pages.iter().enumerate() {
+            let stored = self.summary[p].load(Ordering::Relaxed);
+            let expected = match slot {
+                Some(page) => {
+                    let mut bits = 0u64;
+                    for w in 0..WORDS_PER_PAGE {
+                        if page.data_word(w) != 0 {
+                            bits |= 1u64 << w;
+                        }
+                    }
+                    bits
+                }
+                None => 0,
+            };
+            debug_assert_eq!(
+                stored, expected,
+                "summary desync at page {p}: stored {stored:#x} != recomputed {expected:#x}"
+            );
+        }
+    }
+
+    /// Returns an enabled-RUN iterator over MATCHING rows in
+    /// `[range_start, range_end)` (Decision 4 / W1 / C4).
+    ///
+    /// `invert == false` (Enabled / `with_enabled`): a row matches iff its bit is
+    /// SET. `invert == true` (Disabled / `without_enabled`): a row matches iff its
+    /// bit is CLEAR — an ABSENT page is then one continuous matching span.
+    ///
+    /// Every yielded `(start, len)` run is ⊆ `[range_start, range_end)`
+    /// (INV-RANGE) and maximal (INV-COALESCE: a run terminates only at the first
+    /// non-matching row or at `range_end`, crossing word and page boundaries
+    /// without flushing). A fully-matching multi-page range over `[0, n)` yields
+    /// exactly one run `(0, n)`, byte-identical to a no-filter single chunk.
+    #[inline]
+    pub(crate) fn enabled_runs(
+        &self,
+        range_start: usize,
+        range_end: usize,
+        invert: bool,
+    ) -> EnabledRuns<'_> {
+        debug_assert!(range_start <= range_end, "enabled_runs: range_start > range_end");
+        EnabledRuns {
+            col: self,
+            next_row: range_start,
+            range_start,
+            range_end,
+            invert,
+        }
+    }
+
+    /// The match-bitmap of 64-row block `(p, w)` for the run walk.
+    ///
+    /// `invert == false`: the raw data word (set bit = matching). `invert ==
+    /// true`: the complement (clear bit = matching), so an absent page yields
+    /// `u64::MAX` (all-matching). NEVER allocates; an absent page reads 0 data.
+    #[inline]
+    pub(crate) fn match_word(&self, page_idx: usize, word: usize, invert: bool) -> u64 {
+        let data = match self.pages.get(page_idx) {
+            Some(Some(page)) => page.data_word(word),
+            _ => 0,
+        };
+        if invert { !data } else { data }
+    }
+
+    /// The summary word for directory slot `page_idx` (bit `w` set ⇒ data word
+    /// `w` non-empty). An out-of-range / absent slot reads 0. Only meaningful for
+    /// the `invert == false` coarse skip (set-bit occupancy).
+    #[inline]
+    pub(crate) fn summary_word(&self, page_idx: usize) -> u64 {
+        match self.summary.get(page_idx) {
+            Some(s) => s.load(Ordering::Relaxed),
+            None => 0,
+        }
+    }
+}
+
+/// Words per [`EnablePage`] — re-exported `pub(crate)` so the multi-term
+/// composite run walk (`EnableTermCols::for_each_run`) shares the page geometry.
+pub(crate) const fn words_per_page() -> usize {
+    WORDS_PER_PAGE
+}
+
+/// `log2(ROWS_PER_PAGE)` — `pub(crate)` for the composite run walk's page math.
+pub(crate) const fn rows_per_page_log2() -> u32 {
+    ROWS_PER_PAGE_LOG2
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EnabledRuns — enabled-run iterator (Decision 4 / W1 / C4)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Iterator over maximal contiguous MATCHING runs of one [`EnableColumn`] in
+/// `[range_start, range_end)` (Decision 4). Yields `(start, len)`.
+///
+/// A single monotonic cursor (`next_row`) scans a match-bitmap stream and does
+/// NOT restart per word or per page: a run is extended across word AND page
+/// boundaries without flushing, terminating only at the first non-matching row
+/// or at `range_end` (INV-COALESCE). Every yielded run is ⊆
+/// `[range_start, range_end)` (INV-RANGE). The `summary` is consulted ONLY to
+/// fast-forward over fully-non-matching words / pages while SEARCHING for a run
+/// start (`invert == false`); it is never used to terminate an in-progress run.
+pub(crate) struct EnabledRuns<'a> {
+    col: &'a EnableColumn,
+    /// Next row to consider; monotonic, crosses words/pages freely.
+    next_row: usize,
+    /// Lower bound carried for the INV-RANGE debug assert.
+    range_start: usize,
+    /// Exclusive upper bound — the SOLE hard terminator (C4/C5).
+    range_end: usize,
+    /// `true` = Disabled / `without_enabled` (matching = clear bit).
+    invert: bool,
+}
+
+impl EnabledRuns<'_> {
+    /// First/last partial-word range mask for word `(p, w)`: bits below the run's
+    /// `range_start` (when this is the start word) and bits at/above `range_end`
+    /// (when this is the end word) are cleared. Whole interior words pass through
+    /// `u64::MAX` (no masking). C4: applied BEFORE any `trailing_*`.
+    #[inline]
+    fn range_mask(&self, word_base: usize) -> u64 {
+        let mut mask = u64::MAX;
+        // Clear low bits before `range_start` (only affects the first word).
+        if self.range_start > word_base {
+            let lo = self.range_start - word_base;
+            // lo is in 1..=63 here (>=64 would mean word_base+64 <= range_start,
+            // i.e. this word is entirely before the range — never scanned).
+            debug_assert!(lo < 64, "range_mask low shift out of range");
+            mask &= u64::MAX << lo;
+        }
+        // Clear high bits at/above `range_end` (only affects the last word).
+        if self.range_end < word_base + 64 {
+            let hi = self.range_end.saturating_sub(word_base);
+            // hi in 0..=63: keep bits [0, hi).
+            if hi == 0 {
+                return 0;
+            }
+            debug_assert!(hi < 64, "range_mask high shift out of range");
+            mask &= u64::MAX >> (64 - hi);
+        }
+        mask
+    }
+}
+
+impl Iterator for EnabledRuns<'_> {
+    type Item = (usize, usize);
+
+    // Left un-annotated (W1 minor): a single call site per driver; LLVM decides.
+    fn next(&mut self) -> Option<(usize, usize)> {
+        // ── Phase 1: find a run start (skip non-matching rows). ──────────────
+        let run_start = loop {
+            if self.next_row >= self.range_end {
+                return None;
+            }
+            let p = self.next_row >> ROWS_PER_PAGE_LOG2;
+            let w = (self.next_row >> 6) & (WORDS_PER_PAGE - 1);
+            let word_base = (self.next_row >> 6) << 6;
+
+            // Coarse fast-forward over fully-non-matching set-content (invert ==
+            // false only — an absent/all-zero page is all-MATCHING when inverted,
+            // handled by the per-word scan below, never skipped here).
+            if !self.invert {
+                let summary = self.col.summary_word(p);
+                if summary == 0 {
+                    // Whole page empty ⇒ no set bit anywhere in it.
+                    self.next_row = ((p + 1) << ROWS_PER_PAGE_LOG2).min(self.range_end);
+                    continue;
+                }
+                if (summary >> w) & 1 == 0 {
+                    // This 64-row word has no set bit.
+                    self.next_row = (word_base + 64).min(self.range_end);
+                    continue;
+                }
+            }
+
+            // Mask off bits BELOW the cursor's in-word position so that
+            // `trailing_zeros()` cannot return an already-consumed bit in this
+            // same word (BUG-1: a stale low bit rewinds the cursor → infinite
+            // loop). The range mask alone encodes `range_start`/`range_end`, not
+            // the cursor, which can stop mid-word past an earlier matching bit.
+            let bit_in_word = self.next_row - word_base;
+            let cursor_low_mask = if bit_in_word == 0 {
+                u64::MAX
+            } else {
+                u64::MAX << bit_in_word
+            };
+            let m =
+                self.col.match_word(p, w, self.invert) & self.range_mask(word_base) & cursor_low_mask;
+            if m == 0 {
+                // No match in this (range-masked) word at/after the cursor —
+                // advance to the next word.
+                self.next_row = (word_base + 64).min(self.range_end);
+                continue;
+            }
+            // First matching bit at/after the cursor within this word.
+            break word_base + m.trailing_zeros() as usize;
+        };
+
+        // ── Phase 2: extend the run maximally, clamped to range_end (C4). ────
+        let mut cursor = run_start;
+        let run_end = loop {
+            let p = cursor >> ROWS_PER_PAGE_LOG2;
+            let w = (cursor >> 6) & (WORDS_PER_PAGE - 1);
+            let word_base = (cursor >> 6) << 6;
+            let bit_in_word = cursor - word_base;
+
+            let m = self.col.match_word(p, w, self.invert) & self.range_mask(word_base);
+            // Matching bits at/above the cursor bit, packed to bit 0.
+            let above = m >> bit_in_word;
+            // Length of the contiguous matching block starting at `cursor`.
+            let ones = above.trailing_ones() as usize;
+            let block_end = cursor + ones;
+
+            // The run stops inside this word unless it consumed every bit up to
+            // the word's top (bit 63) AND the word's top row is < range_end.
+            let word_top_row = word_base + 63;
+            let reached_word_top = block_end > word_top_row;
+            if !reached_word_top || block_end >= self.range_end {
+                break block_end.min(self.range_end);
+            }
+            // Continue into the next word (word w+1, or word 0 of page p+1).
+            cursor = word_base + 64;
+            if cursor >= self.range_end {
+                break self.range_end;
+            }
+        };
+
+        debug_assert!(
+            self.range_start <= run_start && run_end <= self.range_end,
+            "EnabledRuns INV-RANGE violated: run [{run_start}, {run_end}) \
+             not in [{}, {})",
+            self.range_start,
+            self.range_end
+        );
+        debug_assert!(run_end > run_start, "EnabledRuns yielded an empty run");
+        self.next_row = run_end;
+        Some((run_start, run_end - run_start))
     }
 }
 
@@ -340,6 +680,11 @@ impl EnableStore {
                     !col.test(last),
                     "swap_remove_row: last row's bit not cleared"
                 );
+                // C2 oracle: the whole `swap_remove_bit` (set + up to two clears,
+                // possibly across two pages) has completed; the summary must now
+                // match the live bits on EVERY page (both touched pages of a
+                // cross-page swap are covered by the full-column walk).
+                col.debug_assert_column_summary_consistent();
             }
         }
     }
@@ -828,6 +1173,99 @@ mod tests {
         list.clear();
         assert!(list.is_empty());
         assert!(matches!(list, SmallList4::Inline { .. }), "clear resets to inline");
+    }
+
+    // ── EnabledRuns run-extraction (Decision 4) ──────────────────────────────
+
+    /// Oracle: collect MATCHING rows via per-row `test`, expand the runs, assert
+    /// they equal the bit-by-bit truth AND every run is bounded by range_end.
+    fn runs_oracle(col: &EnableColumn, range_start: usize, range_end: usize, invert: bool) -> Vec<usize> {
+        let mut rows = Vec::new();
+        // Cap the run count so an EnabledRuns non-advancing (infinite-loop) bug is
+        // reported as a clear assertion rather than an OOM crash. A correct run
+        // walk yields at most `range_end - range_start` runs (1-row runs worst
+        // case), so this cap never trips on correct code.
+        let cap = (range_end - range_start) + 2;
+        let mut prev_end = range_start;
+        for (n, (s, l)) in col.enabled_runs(range_start, range_end, invert).enumerate() {
+            assert!(n < cap, "EnabledRuns yielded > {cap} runs — non-advancing cursor (infinite loop)");
+            assert!(s >= range_start && s + l <= range_end, "run [{s},{}) out of [{range_start},{range_end})", s + l);
+            assert!(l > 0 && l <= range_end - range_start, "run len {l} absurd (range {range_start}..{range_end})");
+            assert!(s >= prev_end, "runs not monotonic: run starts at {s} but previous ended at {prev_end}");
+            prev_end = s + l;
+            for r in s..s + l {
+                rows.push(r);
+            }
+        }
+        rows
+    }
+
+    fn expected_rows(col: &EnableColumn, range_start: usize, range_end: usize, invert: bool) -> Vec<usize> {
+        (range_start..range_end).filter(|&r| col.test(r) != invert).collect()
+    }
+
+    #[test]
+    fn enabled_runs_sparse_one_percent_bounded() {
+        let n = 13_000usize;
+        let mut col = EnableColumn::new(n);
+        // splitmix64-ish deterministic 1% pattern.
+        let mut x = 0xDEAD_BEEFu64;
+        for r in 0..n {
+            x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = x;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^= z >> 31;
+            if z.is_multiple_of(100) {
+                col.set(r, true, n);
+            }
+        }
+        let got = runs_oracle(&col, 0, n, false);
+        let want = expected_rows(&col, 0, n, false);
+        assert_eq!(got, want, "with_enabled sparse runs must equal bit truth");
+    }
+
+    #[test]
+    fn enabled_runs_alternating_multipage_bounded() {
+        let n = 8_192usize;
+        let mut col = EnableColumn::new(n);
+        for r in (0..n).step_by(2) {
+            col.set(r, true, n);
+        }
+        let got = runs_oracle(&col, 0, n, false);
+        let want = expected_rows(&col, 0, n, false);
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn enabled_runs_invert_sparse_bounded() {
+        let n = 13_000usize;
+        let mut col = EnableColumn::new(n);
+        // 99% set so the invert (without) complement is ~1% sparse.
+        let mut x = 0x1234_5678u64;
+        for r in 0..n {
+            x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = x;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z ^= z >> 31;
+            if !z.is_multiple_of(100) {
+                col.set(r, true, n);
+            }
+        }
+        let got = runs_oracle(&col, 0, n, true);
+        let want = expected_rows(&col, 0, n, true);
+        assert_eq!(got, want, "without_enabled runs must equal cleared-bit truth");
+    }
+
+    #[test]
+    fn enabled_runs_not_multiple_of_64_last_word_clamped() {
+        // n = 13000 = 203*64 + 8: the last word is partial (rows 12992..13000).
+        let n = 13_000usize;
+        let mut col = EnableColumn::new(n);
+        col.set(12_995, true, n); // in the partial last word, < range_end
+        col.set(12_999, true, n); // the very last live row
+        let got = runs_oracle(&col, 0, n, false);
+        assert_eq!(got, vec![12_995, 12_999]);
     }
 
     #[test]

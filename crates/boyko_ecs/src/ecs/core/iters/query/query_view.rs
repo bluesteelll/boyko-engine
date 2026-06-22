@@ -818,7 +818,14 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
         let ids = self.driver_ids();
         let mutable = !D::IS_READ_ONLY;
         unsafe {
-            chunk_iter::for_each_chunk_impl(self.state(), ids, self.world, mutable, f);
+            chunk_iter::for_each_chunk_impl(
+                self.state(),
+                ids,
+                self.world,
+                mutable,
+                self.enable_terms,
+                f,
+            );
         }
     }
 
@@ -883,6 +890,7 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
                 ids,
                 self.world,
                 mutable,
+                self.enable_terms,
                 batching,
                 f,
             );
