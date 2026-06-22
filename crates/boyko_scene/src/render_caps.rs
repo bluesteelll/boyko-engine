@@ -19,10 +19,15 @@
 //!   The instance-pack query filters on `Enabled<RenderEnabled>`, so a row whose
 //!   bit is clear is skipped branch-free at iteration.
 //!
-//! The recommended bridge is: `Visibility::Hidden` ⇒ `disable::<RenderEnabled>()`;
-//! `Visible` / `Inherited` ⇒ `enable::<RenderEnabled>()`. A `visibility_sync`
-//! system that drives the bit from the byte is deferred (v1 documents the manual
-//! toggle path); `InheritedVisibility` / `ViewVisibility` are not part of v1.
+//! The bridge is: `Visibility::Hidden` ⇒ `disable::<RenderEnabled>()`;
+//! `Visible` / `Inherited` ⇒ `enable::<RenderEnabled>()`. The
+//! [`visibility_sync`](crate::visibility_sync::visibility_sync) system drives the
+//! bit from the byte automatically (a `Changed<Visibility>`-gated, deferred-command
+//! bridge), so setting `Visibility::Hidden` alone now hides the row; high-churn
+//! show/hide can still ride the manual `enable`/`disable` path directly.
+//! `Inherited` is treated as visible at the entity level — true parent-effective
+//! `InheritedVisibility` / `ViewVisibility` propagation down the `ChildOf` tree is
+//! a separate, larger feature (deferred; see `visibility_sync`'s module docs).
 
 use boyko_macros::Component;
 
