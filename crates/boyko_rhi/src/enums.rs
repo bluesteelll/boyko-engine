@@ -231,8 +231,16 @@ pub enum Format {
     Undefined = 0,
     /// `VK_FORMAT_R8G8B8A8_UNORM` — the rung-1 offscreen golden-readback format.
     R8G8B8A8Unorm = 37,
+    /// `VK_FORMAT_R8G8B8A8_SRGB` — sRGB-encoded 8-bit RGBA. Representable so a surface
+    /// whose preferred swapchain format is sRGB can be named for the dynamic-rendering
+    /// pipeline's color-attachment format match (the renderer otherwise skipped sRGB
+    /// surfaces). The hardware applies linear→sRGB encoding on write to such an image.
+    R8G8B8A8Srgb = 43,
     /// `VK_FORMAT_B8G8R8A8_UNORM` — the common swapchain format.
     B8G8R8A8Unorm = 44,
+    /// `VK_FORMAT_B8G8R8A8_SRGB` — sRGB-encoded 8-bit BGRA (a common sRGB swapchain
+    /// format). See [`Self::R8G8B8A8Srgb`].
+    B8G8R8A8Srgb = 50,
     /// `VK_FORMAT_R16_SFLOAT` — a compact single-channel float (deferred SDF use).
     R16Sfloat = 76,
     /// `VK_FORMAT_R32_SFLOAT` — a single 32-bit float (Lighting L0b: the `gViewT`

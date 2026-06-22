@@ -42,7 +42,10 @@ use boyko_rhi::{
     RhiDevice, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
-use boyko_rhi_vulkan::ffi::{VK_FORMAT_B8G8R8A8_SRGB, VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM};
+use boyko_rhi_vulkan::ffi::{
+    VK_FORMAT_B8G8R8A8_SRGB, VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_SRGB,
+    VK_FORMAT_R8G8B8A8_UNORM,
+};
 use boyko_rhi_vulkan::swapchain::{Renderer, Scene, Surface, Swapchain, SCENE_MVP_BYTES};
 use boyko_rhi_vulkan::window::Window;
 
@@ -142,14 +145,17 @@ static MVP_FS_SPV: SpirvBlob<368> = SpirvBlob(*include_bytes!(concat!(
 /// one returns `None` so the test SKIPs rather than faulting validation.
 fn swapchain_format_to_rhi(vk_format: i32) -> Option<Format> {
     match vk_format {
-        // `B8G8R8A8_UNORM`/`_SRGB` share `B8G8R8A8Unorm`'s discriminant family for the
-        // pipeline's purposes only insofar as the channel count/size match; we declare
-        // the EXACT format so it equals the swapchain image. Only `B8G8R8A8_UNORM` and
-        // `R8G8B8A8_UNORM` have a matching `boyko_rhi::Format` variant — an `_SRGB`
-        // swapchain has no UNORM-equivalent variant and is skipped (the basic slice's
-        // `Format` family is intentionally small).
+        // Declare the EXACT format so the pipeline's color format equals the swapchain
+        // image (the W2-b contract). All four common surface formats `pick_surface_format`
+        // selects now have a matching `boyko_rhi::Format` variant — the `_SRGB` variants
+        // were added so an sRGB-preferring surface is no longer skipped here. NOTE: on an
+        // sRGB swapchain the hardware applies linear→sRGB encoding on write; if a windowed
+        // golden on such a surface shows shifted colors, the present shader must emit
+        // linear values (a separate fix validated by that golden, not by this mapping).
         f if f == VK_FORMAT_B8G8R8A8_UNORM => Some(Format::B8G8R8A8Unorm),
         f if f == VK_FORMAT_R8G8B8A8_UNORM => Some(Format::R8G8B8A8Unorm),
+        f if f == VK_FORMAT_B8G8R8A8_SRGB => Some(Format::B8G8R8A8Srgb),
+        f if f == VK_FORMAT_R8G8B8A8_SRGB => Some(Format::R8G8B8A8Srgb),
         _ => None,
     }
 }
