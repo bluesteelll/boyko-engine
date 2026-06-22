@@ -26,12 +26,26 @@
 
 use boyko_macros::Component;
 
+use crate::transform::{GlobalTransform, Transform};
+
 /// A mesh asset handle — an index into the renderer's mesh table.
 ///
 /// `#[repr(transparent)]` so it is byte-identical to its `u32` (a future GPU
 /// draw-indirect path can read the column as a raw `u32` array).
+///
+/// # Required components (S8)
+///
+/// `#[require(Transform, GlobalTransform)]` enforces the invariant *a renderable
+/// can never exist without a pose*: inserting a `MeshHandle` on an entity that
+/// lacks a [`Transform`] / [`GlobalTransform`] auto-inserts the missing ones
+/// (each via its `Default`), so the renderer's `GlobalTransform`-driven pack
+/// always has a pose to read — even without the [`StaticProp`](crate::bundles::StaticProp)
+/// bundle. Supplying either component explicitly suppresses its auto-insert (no
+/// double-insert). [`MaterialHandle`] / [`Visibility`] ride alongside `MeshHandle`
+/// and carry no require of their own.
 #[repr(transparent)]
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[require(Transform, GlobalTransform)]
 pub struct MeshHandle(pub u32);
 
 /// A material asset handle — an index into the renderer's material table.

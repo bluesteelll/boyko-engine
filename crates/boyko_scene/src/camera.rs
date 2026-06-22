@@ -36,7 +36,7 @@ use boyko_macros::{Component, Resource};
 
 use boyko_math::{Affine3A, Mat3, Mat4, Vec3, Vec4};
 
-use crate::transform::GlobalTransform;
+use crate::transform::{GlobalTransform, Transform};
 
 /// A sub-rectangle of the render target a camera draws into, in **physical
 /// pixels** with the origin at the target's top-left.
@@ -63,8 +63,36 @@ pub struct Viewport {
 /// implicit "first wins"): an [`ActiveCamera`] override takes precedence; absent
 /// an override, the highest-[`order`](Self::order) camera with
 /// [`is_active`](Self::is_active) set is chosen (see [`resolve_active_camera`]).
+///
+/// # Required components (S8)
+///
+/// `#[require(Transform, GlobalTransform, Projection = ...)]` enforces the
+/// invariant *a camera is never spawned without a pose AND a projection*:
+/// inserting a `Camera` alone auto-inserts a [`Transform`] / [`GlobalTransform`]
+/// (each via its `Default`) and a [`Projection`]. `Projection` has no `Default`
+/// ([`CameraRig`](crate::bundles::CameraRig) makes the caller fill it), so the
+/// require supplies a capture-free perspective preset (60° vertical FOV, 16:9,
+/// near 0.1, far 1000.0) as the placeholder — a usable view before the designer
+/// sets the real projection. A component supplied explicitly suppresses its
+/// auto-insert (no double-insert), so a `Camera` spawned together with a custom
+/// `Projection` keeps that projection.
 #[repr(C)]
 #[derive(Component, Clone, Copy, Debug, PartialEq)]
+// The `Projection` preset names `Projection::Perspective`'s private fields, so this
+// `#[require(...)]` must stay co-located with the `Projection` enum (same module) —
+// splitting `Projection` out would break this expr with a privacy error. The
+// placeholder is a 3D-biased default; a 2D caller supplies an explicit
+// `Projection::Orthographic` (honored — the require only fills when absent).
+#[require(
+    Transform,
+    GlobalTransform,
+    Projection = Projection::Perspective {
+        fov_y: core::f32::consts::FRAC_PI_3,
+        aspect: 16.0 / 9.0,
+        near: 0.1,
+        far: 1000.0,
+    }
+)]
 pub struct Camera {
     /// Render order / priority. The active-by-policy camera is the one with the
     /// **highest** `order` among the `is_active` cameras (ties resolve to the

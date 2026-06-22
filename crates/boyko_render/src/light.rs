@@ -23,6 +23,7 @@
 use core::f32::consts::PI;
 
 use boyko_macros::{Component, Resource};
+use boyko_scene::{GlobalTransform, Transform};
 
 // ---- light kinds (mirror the shader's LIGHT_KIND_* and the host oracle) --------------
 
@@ -208,8 +209,19 @@ const _: () =
 
 /// A directional light (the sun): an infinitely-distant parallel beam. `#[repr(C)]` for
 /// a predictable layout. Resolved in L0a (no `P` dependency).
+///
+/// # Required components (S8)
+///
+/// `#[require(Transform, GlobalTransform)]` (the `boyko_scene` pose pair) enforces
+/// the invariant *a positioned/oriented light always has a pose*: inserting a
+/// `DirectionalLight` alone auto-inserts a [`Transform`] / [`GlobalTransform`]
+/// (each via its `Default`), so `light_reconcile` always finds a `GlobalTransform`
+/// to derive the world direction from. Supplying either explicitly suppresses its
+/// auto-insert. [`SkyLight`] carries NO such require — it is an environment term
+/// with no position or direction.
 #[derive(Component, Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
+#[require(Transform, GlobalTransform)]
 pub struct DirectionalLight {
     /// World direction TO the light (normalized host-side in the constructor).
     pub direction: [f32; 3],
@@ -221,8 +233,15 @@ pub struct DirectionalLight {
 
 /// A point light: an omnidirectional source at a world position. `#[repr(C)]`. Its
 /// resolve path (inverse-square attenuation) is L0b; the component is defined now.
+///
+/// # Required components (S8)
+///
+/// `#[require(Transform, GlobalTransform)]` — see [`DirectionalLight`] for the
+/// pose invariant. `light_reconcile` derives `position` from the
+/// [`GlobalTransform`] translation when one is present.
 #[derive(Component, Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
+#[require(Transform, GlobalTransform)]
 pub struct PointLight {
     /// World position.
     pub position: [f32; 3],
@@ -236,8 +255,15 @@ pub struct PointLight {
 
 /// A spot light: a point source restricted to a cone. `#[repr(C)]`. Its resolve path
 /// (inverse-square × cone falloff) is L0b; the component is defined now.
+///
+/// # Required components (S8)
+///
+/// `#[require(Transform, GlobalTransform)]` — see [`DirectionalLight`] for the
+/// pose invariant. `light_reconcile` derives both `position` and `direction` from
+/// the [`GlobalTransform`] when one is present.
 #[derive(Component, Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
+#[require(Transform, GlobalTransform)]
 pub struct SpotLight {
     /// World position.
     pub position: [f32; 3],
