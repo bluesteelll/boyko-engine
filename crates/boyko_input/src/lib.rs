@@ -46,6 +46,7 @@ pub use action::actionlike::{ActionKind, Actionlike};
 pub use action::map::{
     AxisMode, BindSpec, ClashStrategy, InputMap, InputMapBuilder, InputRef,
 };
+pub use action::names::{register_action_names, resolve_action_name};
 pub use action::process::{process_actions, update_action_state};
 pub use action::rebind::{RebindOutcome, RebindSession};
 pub use action::state::ActionState;

@@ -19,6 +19,7 @@ use boyko_ecs::ecs::core::schedule::system_set::SystemSet;
 
 use crate::action::actionlike::Actionlike;
 use crate::action::map::{InputMap, InputMapBuilder};
+use crate::action::names::register_action_names;
 use crate::action::process::{clear_consumed_fixed_edges, update_action_state};
 use crate::action::state::ActionState;
 use crate::constants::RAW_QUEUE_CAP;
@@ -108,6 +109,12 @@ impl<A: Actionlike> InputPlugin<A> {
 
 impl<A: Actionlike> Plugin for InputPlugin<A> {
     fn build(&self, app: &mut App) {
+        // GUI #27: register `A`'s action names for the type-erased `.ui` parser
+        // so `OnClick(Jump)` resolves to the dense index. Write-once; the first
+        // registered `A` wins (the single-`A` v1 contract, see `names`). Plugin
+        // build happens-before any startup `.ui` load reads the table.
+        register_action_names::<A>();
+
         // Cold path: allocate every fixed buffer ONCE.
         app.insert_resource(RawInputQueue::with_capacity(RAW_QUEUE_CAP));
         app.insert_resource(PhysicalInput::default());

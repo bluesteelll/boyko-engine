@@ -18,6 +18,7 @@
 
 pub mod actionlike;
 pub mod map;
+pub mod names;
 pub mod process;
 pub mod rebind;
 pub mod resource_id;

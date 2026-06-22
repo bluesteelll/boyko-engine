@@ -423,33 +423,49 @@ version=1
 }
 
 #[test]
-fn dot_ui_bindtext_is_documented_deferral_recoverable_error() {
-    // The `.ui` BindText/BindValue form is a DOCUMENTED P4 deferral: it must be
-    // RECOGNIZED (a recoverable per-line error), not silently accepted nor
-    // misreported as an unknown component. The deferral error is emitted by
-    // `parse_and_insert` at SPAWN time (not by `parse_ui`), so drive the spawn.
+fn dot_ui_bindtext_numeric_source_authors_clean_deferral_lifted() {
+    // GUI #27 LIFTED the P4 `.ui` BindText/BindValue deferral: the parser now
+    // LOWERS these. A numeric `source` resolves at parse time (pass 1) and the
+    // component inserts clean — no "deferred feature" error any more. (The NAMED
+    // `#name` source form + the equivalence/forward-ref/recovery gates live in
+    // `dot_ui_named_forms.rs`.) This test pins the regression direction: the old
+    // hard-deferral arm is GONE.
+    use boyko_ui::binding::components::{BindText, TemplateId, NO_FIELD};
     use boyko_ui::text::{parse_ui, spawn_ui_tree, UiParseReport};
 
     let src = "\
 version=1
 #hud  UiLayout { layout_type: Column }
-    BindText { source: 0, comp: 0, field: 0 }
+    BindText { source: 5, comp: 7, field: 0, field2: NO_FIELD, template: Value }
 ";
     let tree = parse_ui(src);
     let mut world = EcsMaster::new();
+    let ent_cell: Arc<Mutex<Vec<Entity>>> = Arc::new(Mutex::new(Vec::new()));
     let rep_cell: Arc<Mutex<UiParseReport>> = Arc::new(Mutex::new(UiParseReport::default()));
+    let ep = Arc::clone(&ent_cell);
     let rp = Arc::clone(&rep_cell);
     let owned = tree.clone();
     world.run_system(move |mut cmds: Commands| {
         let mut report = owned.report.clone();
-        let _ = spawn_ui_tree(&owned, &mut cmds, &mut report);
+        let roots = spawn_ui_tree(&owned, &mut cmds, &mut report);
+        let mut v = ep.lock().unwrap();
+        for r in roots.iter() {
+            v.push(r);
+        }
+        drop(v);
         *rp.lock().unwrap() = report;
     });
     let rep = rep_cell.lock().unwrap().clone();
-    assert!(!rep.is_clean(), ".ui BindText is rejected (deferred feature)");
+    assert!(rep.is_clean(), ".ui BindText now authors clean (deferral lifted): {:?}", rep.errors);
     assert!(
-        rep.errors.iter().any(|(_, _, m)| m.contains("deferred") && m.contains("BindText")),
-        "the error names BindText as a deferred .ui feature (not 'unknown component'): {:?}",
+        !rep.errors.iter().any(|(_, _, m)| m.contains("deferred")),
+        "no 'deferred' error is emitted any more: {:?}",
         rep.errors
     );
+    let e = ent_cell.lock().unwrap().first().copied().expect("hud spawned");
+    let bind = world.get_component::<BindText>(e).expect(".ui BindText now inserts");
+    assert_eq!(bind.source.id().0, 5, "numeric source id lowered");
+    assert_eq!(bind.comp.0, 7, "comp numeric id lowered");
+    assert_eq!(bind.field2, NO_FIELD);
+    assert_eq!(bind.template, TemplateId::Value);
 }

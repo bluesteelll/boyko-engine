@@ -21,10 +21,13 @@
 
 use boyko_ecs::ecs::core::entity::entity::Entity;
 use boyko_ecs::ecs::core::system::Commands;
+use boyko_ecs::ecs::identifiers::primitives::{ComponentId, EntityId};
+use boyko_input::resolve_action_name;
 
+use crate::binding::components::{BindText, BindValue, TemplateId, NO_FIELD};
 use crate::components::{
-    AnchorEdge, Bar, BarFill, Button, ComputedClip, ComputedRect, ContentSize, StackIndex,
-    UiAbsolute, UiAlign, UiAnchor, UiGrid, UiImage, UiLayout, UiRoot, UiSpacing,
+    AnchorEdge, Bar, BarFill, Button, ComputedClip, ComputedRect, ContentSize, StackIndex, UiAbsolute,
+    UiAlign, UiAnchor, UiGrid, UiImage, UiLayout, UiName, UiRoot, UiSpacing,
 };
 use crate::interaction::action::{OnClick, OnHover, OnSubmit};
 use crate::text::ast::{CompKind, ParsedComponent};
@@ -32,6 +35,30 @@ use crate::text::components::{FontId, TextAlign, UiText};
 use crate::text::report::UiParseReport;
 use crate::text::split::split_top_level;
 use crate::units::{AlignCross, AlignMain, LayoutType, PositionType, Unit};
+
+/// The parsed-but-not-yet-sourced result of a `.ui` `BindText` / `BindValue`
+/// whose `source` was authored as a `#name` forward/back reference (GUI #27).
+///
+/// Carries the fully-parsed component (its `source` field a placeholder the
+/// resolver overwrites) plus the `#name` to resolve in pass 2. A NUMERIC
+/// `source: N` does NOT produce one of these — it resolves at parse time and is
+/// inserted in pass 1.
+pub(crate) enum BindParse<C> {
+    /// `source` was numeric — the component is final and inserts in pass 1.
+    Resolved(C),
+    /// `source` was `#name` — defer the whole insert to pass 2 (Decision: no
+    /// sentinel; an unknown name simply never inserts and records an error).
+    Deferred {
+        /// The parsed component with every field but `source` final.
+        comp: C,
+        /// The `#name` to resolve to the source entity in pass 2.
+        name: UiName,
+        /// 1-based line of the bind component (for the unknown-name error).
+        line_no: usize,
+        /// 0-based body column (for the unknown-name error).
+        body_col: u16,
+    },
+}
 
 /// Dispatches a parsed component literal onto `ec`, parsing its body to the
 /// typed component via the closed `match` (Decision 3) and inserting it.
@@ -139,24 +166,29 @@ pub(crate) fn parse_and_insert(
             expect_struct(name, kind, line_no, body_col, rep)?;
             cmds.entity(entity).insert(parse_ui_anchor(body, body_col, rep));
         }
-        // P4 action-emitting tuple newtypes carrying a dense `u16` action index
-        // (Decision 3). The integer-index form `OnClick(3)` is reflection-free and
-        // fully resolvable here. The action-NAME form `OnClick(Jump)` needs a
-        // name→index table from the registered action enum, which is not threaded
-        // into `parse_and_insert`; that form is a documented P4 deferral.
+        // Action-emitting tuple newtypes carrying a dense `u16` action index
+        // (P4 Decision 3). BOTH forms resolve here (GUI #27): the integer-index
+        // form `OnClick(3)` is reflection-free, and the action-NAME form
+        // `OnClick(Jump)` resolves via the process-wide action-name table
+        // (`boyko_input::resolve_action_name`, filled by `InputPlugin::build`).
+        // A name with no registered enum / an unknown name records a recoverable
+        // error and inserts `NO_ACTION` (the component still inserts; dispatch
+        // fires nothing).
         "OnClick" => {
             if kind != CompKind::Tuple {
                 rep.error(line_no, body_col, "OnClick must use the tuple form `OnClick(index)`");
                 return Err(());
             }
-            cmds.entity(entity).insert(OnClick(parse_action_index(body, body_col, "OnClick", rep)));
+            cmds.entity(entity)
+                .insert(OnClick(parse_action_index(body, body_col, line_no, "OnClick", rep)));
         }
         "OnHover" => {
             if kind != CompKind::Tuple {
                 rep.error(line_no, body_col, "OnHover must use the tuple form `OnHover(index)`");
                 return Err(());
             }
-            cmds.entity(entity).insert(OnHover(parse_action_index(body, body_col, "OnHover", rep)));
+            cmds.entity(entity)
+                .insert(OnHover(parse_action_index(body, body_col, line_no, "OnHover", rep)));
         }
         "OnSubmit" => {
             if kind != CompKind::Tuple {
@@ -164,30 +196,23 @@ pub(crate) fn parse_and_insert(
                 return Err(());
             }
             cmds.entity(entity)
-                .insert(OnSubmit(parse_action_index(body, body_col, "OnSubmit", rep)));
+                .insert(OnSubmit(parse_action_index(body, body_col, line_no, "OnSubmit", rep)));
         }
-        // P4 data-bind components. RECOGNIZED here (so a well-formed `bind_text:`/
-        // `bind_value:` is not misreported as an unknown component), but the `.ui`
-        // form is a deferred P4 feature: it needs a name→Entity index for the
-        // `source` widget AND a component-name→ComponentId + field-name→id resolver
-        // (the `Bindable::field_id` table keyed by the source component's name),
-        // neither of which is threaded into the spawn-time parser. The `ui!`
-        // monomorphized path (which has the concrete source type in scope) and the
-        // direct `BindText`/`BindValue` component inserts are the supported routes.
-        // The architectural gap (threading name resolution into the `.ui` parser)
-        // is escalated, not invented here. Mirrors the `OnClick(Jump)` action-name
-        // deferral above.
+        // Data-bind components (P4 / GUI #27). These are NOT inserted here: their
+        // `source` may be a `#name` forward-reference needing the two-pass resolve
+        // (`lower_node` owns the fixup list + the name index). `lower_node` strips
+        // `BindText` / `BindValue` from the generic insert loop and routes them
+        // through `parse_bind_text` / `parse_bind_value`; reaching this arm means a
+        // caller did not, which is an internal contract bug — record + drop, never
+        // misreport as an unknown component.
+        //
+        // The `source` is the NAMED `#name` form (the GUI #27 LLM-authoring win)
+        // or a numeric entity id; `comp` / `field` stay NUMERIC. The component-NAME
+        // `comp: Health` / field-NAME `field: current` forms are a documented
+        // followup (they need a type-erased `field_id` accessor in `boyko_macros`
+        // + a universal name→ComponentId registry — both out of #27 scope).
         "BindText" | "BindValue" => {
-            rep.error(
-                line_no,
-                body_col,
-                format!(
-                    "{name} is a deferred `.ui` feature: it requires source name \
-                     resolution (a UiName→Entity index + a component/field-name \
-                     resolver) not yet threaded into the spawn-time parser; use the \
-                     `ui!` macro or insert {name} directly"
-                ),
-            );
+            rep.error(line_no, body_col, format!("internal: {name} must be lowered via the bind fixup path"));
             return Err(());
         }
         // `UiName` is NOT dispatched here — it comes from the `#name` sigil only
@@ -684,23 +709,167 @@ fn parse_text_align(value: &str) -> Option<TextAlign> {
 }
 
 /// Parses a dense `u16` action index for an `OnClick`/`OnHover`/`OnSubmit` tuple
-/// (P4 Decision 3). On a parse failure (e.g. an action-NAME form, which is a
-/// deferred P4 feature) it records a per-component error and returns
-/// [`NO_ACTION`](crate::interaction::action::NO_ACTION) so the component inserts
-/// with a no-op action rather than dropping the whole node.
-fn parse_action_index(body: &str, body_col: u16, comp: &str, rep: &mut UiParseReport) -> u16 {
-    match body.trim().parse::<u16>() {
-        Ok(v) => v,
-        Err(_) => {
+/// (P4 Decision 3 + GUI #27). Numeric-first: `OnClick(3)` parses the literal.
+/// Otherwise the body is treated as an action NAME and resolved via the
+/// process-wide action-name table ([`resolve_action_name`], filled by
+/// `InputPlugin::build`); `OnClick(Jump)` lowers to the SAME index as the numeric
+/// / `ui!` form (the equivalence gate).
+///
+/// On an unknown name (or no registered enum) it records a recoverable per-line
+/// error and returns [`NO_ACTION`](crate::interaction::action::NO_ACTION) so the
+/// component inserts with a no-op action rather than dropping the whole node.
+fn parse_action_index(
+    body: &str,
+    body_col: u16,
+    line_no: usize,
+    comp: &str,
+    rep: &mut UiParseReport,
+) -> u16 {
+    let token = body.trim();
+    if let Ok(v) = token.parse::<u16>() {
+        return v;
+    }
+    match resolve_action_name(token) {
+        Some(idx) => idx,
+        None => {
             rep.error(
-                line_of(rep),
+                line_no,
                 body_col,
-                format!(
-                    "{comp} expects a numeric action index `{comp}(n)`; \
-                     the action-name form is a deferred P4 feature"
-                ),
+                format!("{comp}: unknown action name {token:?} (not a registered action or a numeric index)"),
             );
             crate::interaction::action::NO_ACTION
         }
+    }
+}
+
+// ── GUI #27: data-bind parsers (named `#name` source + numeric comp/field) ────
+
+/// The placeholder source for a `BindParse::Deferred` component before pass-2
+/// resolution. Never inserted: a deferred component is inserted ONLY after its
+/// `#name` resolves (Decision: defer the whole insert, no sentinel reaches the
+/// world). Entity id 0 is fine here since the field is overwritten before insert.
+#[inline]
+fn placeholder_source() -> Entity {
+    Entity::with_id(EntityId(0))
+}
+
+/// Parses a `BindText` body (GUI #27): `source` (a `#name` ref OR a numeric entity
+/// id), `comp` (numeric `ComponentId`), `field`/`field2` (`u8`, `NO_FIELD`/`255`
+/// for an unused `field2`), `template` (`Value`/`Ratio`). Default-then-overwrite.
+///
+/// A `#name` `source` returns [`BindParse::Deferred`] (the whole insert is
+/// deferred to the caller's pass-2 resolve); a numeric `source` returns
+/// [`BindParse::Resolved`] and inserts in pass 1.
+pub(crate) fn parse_bind_text(
+    body: &str,
+    body_col: u16,
+    line_no: usize,
+    rep: &mut UiParseReport,
+) -> BindParse<BindText> {
+    let mut out = BindText {
+        source: placeholder_source(),
+        comp: ComponentId(0),
+        field: 0,
+        field2: NO_FIELD,
+        template: TemplateId::default(),
+    };
+    let mut deferred_name: Option<UiName> = None;
+    for_each_field(body, body_col, line_no, rep, |key, value, col, rep| match key {
+        "source" => set_source(value, col, &mut out.source, &mut deferred_name, rep),
+        "comp" => set(&mut out.comp, parse_component_id(value), col, key, rep),
+        "field" => set(&mut out.field, parse_u8(value), col, key, rep),
+        "field2" => set(&mut out.field2, parse_field_opt(value), col, key, rep),
+        "template" => set(&mut out.template, parse_template_id(value), col, key, rep),
+        other => unknown_field("BindText", other, col, rep),
+    });
+    match deferred_name {
+        Some(name) => BindParse::Deferred { comp: out, name, line_no, body_col },
+        None => BindParse::Resolved(out),
+    }
+}
+
+/// Parses a `BindValue` body (GUI #27): `source` (a `#name` ref OR a numeric
+/// entity id), `comp` (numeric `ComponentId`), `num_field` (`u8`), `den_field`
+/// (`u8`, `NO_FIELD`/`255` for a raw value). Default-then-overwrite.
+pub(crate) fn parse_bind_value(
+    body: &str,
+    body_col: u16,
+    line_no: usize,
+    rep: &mut UiParseReport,
+) -> BindParse<BindValue> {
+    let mut out = BindValue {
+        source: placeholder_source(),
+        comp: ComponentId(0),
+        num_field: 0,
+        den_field: NO_FIELD,
+    };
+    let mut deferred_name: Option<UiName> = None;
+    for_each_field(body, body_col, line_no, rep, |key, value, col, rep| match key {
+        "source" => set_source(value, col, &mut out.source, &mut deferred_name, rep),
+        "comp" => set(&mut out.comp, parse_component_id(value), col, key, rep),
+        "num_field" => set(&mut out.num_field, parse_u8(value), col, key, rep),
+        "den_field" => set(&mut out.den_field, parse_field_opt(value), col, key, rep),
+        other => unknown_field("BindValue", other, col, rep),
+    });
+    match deferred_name {
+        Some(name) => BindParse::Deferred { comp: out, name, line_no, body_col },
+        None => BindParse::Resolved(out),
+    }
+}
+
+/// Parses the `source` field: a `#name` reference (deferred to pass 2) or a
+/// numeric entity id (resolved in place). A `#name` records the [`UiName`] into
+/// `deferred_name`; a numeric id writes `dst`. A malformed value records a
+/// per-field error and leaves the placeholder (the caller treats a still-deferred
+/// `None` + placeholder as a normal numeric default).
+fn set_source(
+    value: &str,
+    col: u16,
+    dst: &mut Entity,
+    deferred_name: &mut Option<UiName>,
+    rep: &mut UiParseReport,
+) {
+    let v = value.trim();
+    if let Some(name) = v.strip_prefix('#') {
+        let name = name.trim();
+        if name.is_empty() || name.len() > UiName::CAP {
+            rep.error(line_of(rep), col, "invalid `#name` source (empty or too long)");
+            return;
+        }
+        *deferred_name = Some(UiName::new(name));
+        return;
+    }
+    match v.parse::<usize>() {
+        Ok(id) => *dst = Entity::with_id(EntityId(id)),
+        Err(_) => rep.error(line_of(rep), col, "invalid `source` (expected `#name` or a numeric entity id)"),
+    }
+}
+
+/// Parses a numeric [`ComponentId`] (the `comp` field arm). `ComponentId` is a
+/// `usize` newtype, so the value parses as `usize` and wraps.
+#[inline]
+fn parse_component_id(value: &str) -> Option<ComponentId> {
+    value.trim().parse::<usize>().ok().map(ComponentId)
+}
+
+/// Parses an optional field id (`field2` / `den_field`): a `u8`, or the bareword
+/// `NO_FIELD` — both map to [`NO_FIELD`]. A bare `255` also yields `NO_FIELD`.
+#[inline]
+fn parse_field_opt(value: &str) -> Option<u8> {
+    let v = value.trim();
+    if v == "NO_FIELD" {
+        return Some(NO_FIELD);
+    }
+    v.parse::<u8>().ok()
+}
+
+/// Parses a [`TemplateId`] (bare or `TemplateId::`-qualified — GUI P4 / #27):
+/// `Value` (`"{0}"`) or `Ratio` (`"{0}/{1}"`).
+#[inline]
+fn parse_template_id(value: &str) -> Option<TemplateId> {
+    match strip_qualifier(value.trim(), "TemplateId") {
+        "Value" => Some(TemplateId::Value),
+        "Ratio" => Some(TemplateId::Ratio),
+        _ => None,
     }
 }

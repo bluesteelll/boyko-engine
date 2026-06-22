@@ -6,6 +6,7 @@ pub use crate::action::actionlike::{ActionKind, Actionlike};
 pub use crate::action::map::{
     AxisMode, BindSpec, ClashStrategy, InputMap, InputMapBuilder, InputRef,
 };
+pub use crate::action::names::{register_action_names, resolve_action_name};
 pub use crate::action::process::{process_actions, update_action_state};
 pub use crate::action::rebind::{RebindOutcome, RebindSession};
 pub use crate::action::state::ActionState;

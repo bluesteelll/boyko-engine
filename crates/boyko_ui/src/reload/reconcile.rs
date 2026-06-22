@@ -60,9 +60,9 @@ use crate::components::{
 };
 use crate::reload::state::UiHotReload;
 use crate::reload::tree_view::{LiveNode, UiTreeView};
-use crate::text::ast::{ParsedNode, ParsedTree};
-use crate::text::dispatch::parse_ui_layout_public;
-use crate::text::lower::lower_node;
+use crate::text::ast::{CompKind, ParsedNode, ParsedTree};
+use crate::text::dispatch::{parse_bind_text, parse_bind_value, parse_ui_layout_public, BindParse};
+use crate::text::lower::{lower_node, BindCtx};
 use crate::text::report::UiParseReport;
 
 /// The doomed (vanished) parents to despawn in phase 2, after the drain barrier
@@ -131,6 +131,12 @@ pub fn reconcile_ui(
     let mut claimed: Vec<Entity> = Vec::new();
     let mut doomed_candidates: Vec<Entity> = Vec::new();
 
+    // GUI #27: a two-pass bind context seeded with the live survivors' names, so a
+    // `#name` source on a NEW or PATCHED node resolves against both live survivors
+    // and newly-spawned nodes (forward references included). Resolved after the
+    // full recursion records every name.
+    let mut bind_ctx = BindCtx::with_seed(&global_named);
+
     let mut new_roots = Vec::new();
     reconcile_children(
         parsed,
@@ -144,7 +150,12 @@ pub fn reconcile_ui(
         &mut new_roots,
         &mut claimed,
         &mut doomed_candidates,
+        &mut bind_ctx,
     );
+
+    // Pass 2: resolve every deferred `#name`-source bind (new-key spawns + survivor
+    // re-patches) now that all names are recorded.
+    bind_ctx.resolve(cmds, report);
 
     // Finalise the despawn plan: a candidate is doomed ONLY if it was not claimed
     // (as a moved survivor) by some other parent's pass. This is what makes a
@@ -228,6 +239,7 @@ fn reconcile_children(
     out_ids: &mut Vec<Entity>,
     claimed: &mut Vec<Entity>,
     doomed_candidates: &mut Vec<Entity>,
+    bind_ctx: &mut BindCtx,
 ) {
     // Build the per-parent diff indices over the scoped live children
     // (Decision 9 / 11). Named: a sorted Vec<(UiName, Entity)> + binary search.
@@ -302,8 +314,9 @@ fn reconcile_children(
                     claimed.push(entity);
                 }
                 matched.push(entity);
-                // Patch text-owned components set-if-changed (Decision 14).
-                patch_node(new, entity, live, cmds, report);
+                // Patch text-owned components set-if-changed (Decision 14), incl.
+                // re-resolving any `#name`-source data-bind (GUI #27).
+                patch_node(new, entity, live, cmds, report, bind_ctx);
                 // Re-key the anonymous ordinal if it shifted (Decision 11).
                 set_source_order_if_changed(new.sibling_ordinal, entity, live, cmds);
                 // Relink if the node moved to a different parent (the reparent's
@@ -331,13 +344,15 @@ fn reconcile_children(
                     &mut child_ids,
                     claimed,
                     doomed_candidates,
+                    bind_ctx,
                 );
             }
             None => {
                 // A new key: spawn its full subtree via the §B lowering (it
-                // stamps UiSourceOrder + UiName + the chained inserts). Link it
-                // under the live parent if there is one.
-                if let Some(new_id) = lower_node(parsed, new_idx, cmds, report) {
+                // stamps UiSourceOrder + UiName + the chained inserts, and records
+                // its `#name`s + defers any `#name`-source bind into `bind_ctx`,
+                // GUI #27). Link it under the live parent if there is one.
+                if let Some(new_id) = lower_node(parsed, new_idx, cmds, report, bind_ctx) {
                     if let Some(parent) = live_parent {
                         cmds.entity(parent).add_child(new_id);
                     }
@@ -421,6 +436,7 @@ fn patch_node(
     live: &UiTreeView,
     cmds: &mut Commands,
     report: &mut UiParseReport,
+    bind_ctx: &mut BindCtx,
 ) {
     let Some(node) = live.get(entity) else { return };
     report.set_current_line(new.line_no);
@@ -434,6 +450,76 @@ fn patch_node(
     patch_stack_index(new, node.stack_index, entity, cmds, report);
     patch_ui_root(new, node, entity, cmds);
     patch_ui_name(new, node, entity, cmds);
+    // GUI #27: re-patch the data-bind components on a survivor. The bind columns
+    // are NOT in the live snapshot (transient/render-facing), so this is an
+    // unconditional re-insert from the authored text (last-write-wins) rather than
+    // a set-if-changed — the cost is a cold re-parse + one insert on a reloaded
+    // survivor, and it closes the stale-`#name`-source gap (a survivor whose named
+    // target was respawned re-resolves to the new entity). A numeric source
+    // re-inserts in place; a `#name` source defers to pass 2.
+    patch_bind_text(new, entity, cmds, report, bind_ctx);
+    patch_bind_value(new, entity, cmds, report, bind_ctx);
+}
+
+/// Re-patches a survivor's `BindText` from the authored text (GUI #27). Present →
+/// re-insert (numeric) or defer (`#name`).
+///
+/// A `BindText` DELETED from the file is NOT removed: the bind columns are not in
+/// the live snapshot (render-facing/transient), so presence cannot be read here,
+/// and the reconcile's policy for non-snapshotted components is preserve-by-
+/// omission. Removing a deleted-from-file bind on reload is a documented #27
+/// limitation (the `ui!` and full-reload paths are the route for that).
+fn patch_bind_text(
+    new: &ParsedNode,
+    entity: Entity,
+    cmds: &mut Commands,
+    report: &mut UiParseReport,
+    bind_ctx: &mut BindCtx,
+) {
+    let Some(comp) = new.components.iter().find(|c| c.name == "BindText") else {
+        return;
+    };
+    if comp.kind != CompKind::Struct {
+        report.error(comp.line_no, comp.body_col, "BindText must use the struct form `BindText { .. }`");
+        return;
+    }
+    report.set_current_line(comp.line_no);
+    match parse_bind_text(&comp.body, comp.body_col, comp.line_no, report) {
+        BindParse::Resolved(bind) => {
+            cmds.entity(entity).insert(bind);
+        }
+        BindParse::Deferred { comp: bind, name, line_no, body_col } => {
+            bind_ctx.defer_text(entity, bind, name, line_no, body_col);
+        }
+    }
+}
+
+/// Re-patches a survivor's `BindValue` from the authored text (GUI #27). Same
+/// policy as [`patch_bind_text`] (present → re-insert/defer; deleted → preserved
+/// by omission, the documented #27 limitation).
+fn patch_bind_value(
+    new: &ParsedNode,
+    entity: Entity,
+    cmds: &mut Commands,
+    report: &mut UiParseReport,
+    bind_ctx: &mut BindCtx,
+) {
+    let Some(comp) = new.components.iter().find(|c| c.name == "BindValue") else {
+        return;
+    };
+    if comp.kind != CompKind::Struct {
+        report.error(comp.line_no, comp.body_col, "BindValue must use the struct form `BindValue { .. }`");
+        return;
+    }
+    report.set_current_line(comp.line_no);
+    match parse_bind_value(&comp.body, comp.body_col, comp.line_no, report) {
+        BindParse::Resolved(bind) => {
+            cmds.entity(entity).insert(bind);
+        }
+        BindParse::Deferred { comp: bind, name, line_no, body_col } => {
+            bind_ctx.defer_value(entity, bind, name, line_no, body_col);
+        }
+    }
 }
 
 /// `UiLayout` is always present on a survivor (a node requires it). Re-parse the
