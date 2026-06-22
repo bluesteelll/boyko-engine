@@ -23,8 +23,8 @@ use boyko_ecs::ecs::core::entity::entity::Entity;
 use boyko_ecs::ecs::core::system::Commands;
 
 use crate::components::{
-    ComputedClip, ComputedRect, ContentSize, StackIndex, UiAbsolute, UiAlign, UiLayout, UiRoot,
-    UiSpacing,
+    AnchorEdge, Bar, BarFill, Button, ComputedClip, ComputedRect, ContentSize, StackIndex,
+    UiAbsolute, UiAlign, UiAnchor, UiGrid, UiImage, UiLayout, UiRoot, UiSpacing,
 };
 use crate::interaction::action::{OnClick, OnHover, OnSubmit};
 use crate::text::ast::{CompKind, ParsedComponent};
@@ -103,6 +103,41 @@ pub(crate) fn parse_and_insert(
                 return Err(());
             }
             cmds.entity(entity).insert(UiRoot);
+        }
+        // GUI P6a widget markers — ZSTs, the `UiRoot` Bare precedent.
+        "Button" => {
+            if kind != CompKind::Bare {
+                rep.error(line_no, body_col, "Button is a marker and takes no fields");
+                return Err(());
+            }
+            cmds.entity(entity).insert(Button);
+        }
+        "Bar" => {
+            if kind != CompKind::Bare {
+                rep.error(line_no, body_col, "Bar is a marker and takes no fields");
+                return Err(());
+            }
+            cmds.entity(entity).insert(Bar);
+        }
+        "BarFill" => {
+            if kind != CompKind::Bare {
+                rep.error(line_no, body_col, "BarFill is a marker and takes no fields");
+                return Err(());
+            }
+            cmds.entity(entity).insert(BarFill);
+        }
+        // GUI P6a struct-form widget config/style components.
+        "UiImage" => {
+            expect_struct(name, kind, line_no, body_col, rep)?;
+            cmds.entity(entity).insert(parse_ui_image(body, body_col, rep));
+        }
+        "UiGrid" => {
+            expect_struct(name, kind, line_no, body_col, rep)?;
+            cmds.entity(entity).insert(parse_ui_grid(body, body_col, rep));
+        }
+        "UiAnchor" => {
+            expect_struct(name, kind, line_no, body_col, rep)?;
+            cmds.entity(entity).insert(parse_ui_anchor(body, body_col, rep));
         }
         // P4 action-emitting tuple newtypes carrying a dense `u16` action index
         // (Decision 3). The integer-index form `OnClick(3)` is reflection-free and
@@ -372,6 +407,47 @@ fn parse_ui_text(body: &str, body_col: u16, rep: &mut UiParseReport) -> UiText {
     out
 }
 
+/// Parses a `UiImage` body (GUI P6a): `texture` (dense `u32` handle), `uv_min`/
+/// `uv_max` (`[f32; 2]` as `[u, v]`), `tint` (RGBA8 `u32`). Default-then-overwrite.
+fn parse_ui_image(body: &str, body_col: u16, rep: &mut UiParseReport) -> UiImage {
+    let mut out = UiImage::default();
+    for_each_field(body, body_col, line_of(rep), rep, |key, value, col, rep| match key {
+        "texture" => set(&mut out.texture, parse_u32(value), col, key, rep),
+        "uv_min" => set(&mut out.uv_min, parse_f32_pair(value), col, key, rep),
+        "uv_max" => set(&mut out.uv_max, parse_f32_pair(value), col, key, rep),
+        "tint" => set(&mut out.tint, parse_u32(value), col, key, rep),
+        other => unknown_field("UiImage", other, col, rep),
+    });
+    out
+}
+
+/// Parses a `UiGrid` body (GUI P6a): `columns`/`rows` (`u8` track counts).
+/// Default-then-overwrite.
+fn parse_ui_grid(body: &str, body_col: u16, rep: &mut UiParseReport) -> UiGrid {
+    let mut out = UiGrid::default();
+    for_each_field(body, body_col, line_of(rep), rep, |key, value, col, rep| match key {
+        "columns" => set(&mut out.columns, parse_u8(value), col, key, rep),
+        "rows" => set(&mut out.rows, parse_u8(value), col, key, rep),
+        other => unknown_field("UiGrid", other, col, rep),
+    });
+    out
+}
+
+/// Parses a `UiAnchor` body (GUI P6a): `edge` ([`AnchorEdge`]), `offset_x`/
+/// `offset_y` (`f32`), `use_safe_area` (`bool`). The private `_pad` is not
+/// authorable. Default-then-overwrite.
+fn parse_ui_anchor(body: &str, body_col: u16, rep: &mut UiParseReport) -> UiAnchor {
+    let mut out = UiAnchor::default();
+    for_each_field(body, body_col, line_of(rep), rep, |key, value, col, rep| match key {
+        "edge" => set(&mut out.edge, parse_anchor_edge(value), col, key, rep),
+        "offset_x" => set(&mut out.offset_x, parse_f32(value), col, key, rep),
+        "offset_y" => set(&mut out.offset_y, parse_f32(value), col, key, rep),
+        "use_safe_area" => set(&mut out.use_safe_area, parse_bool(value), col, key, rep),
+        other => unknown_field("UiAnchor", other, col, rep),
+    });
+    out
+}
+
 fn parse_computed_rect(body: &str, body_col: u16, rep: &mut UiParseReport) -> ComputedRect {
     let mut out = ComputedRect::default();
     for_each_field(body, body_col, line_of(rep), rep, |key, value, col, rep| match key {
@@ -539,6 +615,52 @@ fn parse_f32(value: &str) -> Option<f32> {
 #[inline]
 fn parse_u32(value: &str) -> Option<u32> {
     value.trim().parse::<u32>().ok()
+}
+
+/// Parses a `u8` (the `u8` field arm — GUI P6a `UiGrid` track counts).
+#[inline]
+fn parse_u8(value: &str) -> Option<u8> {
+    value.trim().parse::<u8>().ok()
+}
+
+/// Parses a `bool` (the `bool` field arm — GUI P6a `UiAnchor::use_safe_area`).
+#[inline]
+fn parse_bool(value: &str) -> Option<bool> {
+    match value.trim() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
+/// Parses a `[f32; 2]` (the `[f32; 2]` field arm — GUI P6a `UiImage` UVs). Accepts
+/// the bracketed form `[u, v]`; the two comma-separated parts each parse as `f32`.
+fn parse_f32_pair(value: &str) -> Option<[f32; 2]> {
+    let v = value.trim();
+    let inner = v.strip_prefix('[')?.strip_suffix(']')?;
+    let mut it = inner.split(',');
+    let a = parse_f32(it.next()?)?;
+    let b = parse_f32(it.next()?)?;
+    if it.next().is_some() {
+        return None; // more than two components
+    }
+    Some([a, b])
+}
+
+/// Parses an [`AnchorEdge`] (bare or `AnchorEdge::`-qualified — GUI P6a).
+fn parse_anchor_edge(value: &str) -> Option<AnchorEdge> {
+    match strip_qualifier(value.trim(), "AnchorEdge") {
+        "TopLeft" => Some(AnchorEdge::TopLeft),
+        "TopCenter" => Some(AnchorEdge::TopCenter),
+        "TopRight" => Some(AnchorEdge::TopRight),
+        "CenterLeft" => Some(AnchorEdge::CenterLeft),
+        "Center" => Some(AnchorEdge::Center),
+        "CenterRight" => Some(AnchorEdge::CenterRight),
+        "BottomLeft" => Some(AnchorEdge::BottomLeft),
+        "BottomCenter" => Some(AnchorEdge::BottomCenter),
+        "BottomRight" => Some(AnchorEdge::BottomRight),
+        _ => None,
+    }
 }
 
 /// Parses a dense [`FontId`] (the `FontId` field arm, GUI P5b): a bare `u16` index, or

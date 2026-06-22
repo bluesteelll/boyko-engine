@@ -361,6 +361,184 @@ impl PartialOrd for UiName {
     }
 }
 
+// ───────────────────────── GUI P6a widget components ──────────────────────
+//
+// The 6 HUD widgets are realized ECS-natively (Principle 0): a widget is NOT a
+// `Box<dyn>` object or a runtime `Widget` enum but a deterministic SET of
+// components composed on the P1–P5b substrate. Where a widget needs an identity
+// beyond its component set, it carries a ZST marker (the `UiRoot` precedent) so
+// it is enumerable (`query_entities(&[Button::component_id()])`) and filterable
+// (`Added<Button>`); where it needs config, it carries a small POD struct.
+//
+// The CANONICAL authorable form is this component set — identical across
+// `ui!` (which lowers each literal as an `.insert`), `.ui` (the closed-match
+// dispatch, extended for these type-names), and a hand-spawn. The preset bundles
+// in `bundles.rs` are a Rust-only ergonomic convenience that expands to the SAME
+// component set; they are NOT `ui!`/`.ui` type-names (the `ui!` macro requires a
+// `UiLayout` literal per node, which a bundle name is not — C1).
+
+/// Marks a node as a Button: an interactive styled panel
+/// (`UiLayout` + `UiBackground` + `Interaction` + `Focusable` + `OnClick`).
+///
+/// A ZST marker (the [`UiRoot`] precedent) so a Button is ENUMERABLE /
+/// `Added<Button>`-filterable distinctly from a plain interactive panel, and is a
+/// stable `.ui` type-name. Carries no fields.
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Button;
+
+/// Marks a node as a Bar TRACK: a progress/health bar whose single
+/// [`BarFill`]-marked child's main-axis size tracks a `0..1` value.
+///
+/// The track hosts the value in [`UiValue`](crate::binding::UiValue) (the P4
+/// `BindValue` sink, reused verbatim). A ZST marker so the bar driver can
+/// enumerate tracks; carries no fields.
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Bar;
+
+/// Marks the fill child of a [`Bar`]: the node whose main-axis `Unit::Pct` is
+/// driven by `bar_fill_system` from the track's `UiValue`.
+///
+/// A ZST marker so the driver finds the fill child among the track's children;
+/// carries no fields.
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BarFill;
+
+/// Image fill for a node (GUI P6a). AUTHOR-OWNED, OPT-IN. `#[repr(C)]`, POD.
+///
+/// `texture` is a DENSE `u32` handle into the (future) UI texture table — NOT a
+/// string / `HashMap` key (the [`FontId`](crate::text::FontId) dense-handle
+/// discipline, Principle 1). `tint` is STRAIGHT RGBA8 (premultiplied at pack,
+/// the [`UiBackground`] convention).
+///
+/// # Render seam (P6a vs P5a)
+///
+/// P6a creates this component so an Image node is layout-complete and authorable
+/// in `ui!`/`.ui`; the P5a pack path does NOT yet consume it, so an Image renders
+/// nothing until a P5a follow-up learns `UiImage`. The [`Default`] is texture 0
+/// with a FULLY TRANSPARENT tint (alpha 0) — an authored-but-untextured Image is
+/// invisible (it never flashes a white box when P5a lands), mirroring
+/// `UiBackground`'s transparent default (m1).
+#[repr(C)]
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
+pub struct UiImage {
+    /// Dense handle into the (future) UI texture table (`0` = no texture).
+    pub texture: u32,
+    /// Atlas sub-rect min (`u, v`).
+    pub uv_min: [f32; 2],
+    /// Atlas sub-rect max (`u, v`).
+    pub uv_max: [f32; 2],
+    /// Tint, STRAIGHT RGBA8 (`byte0=R .. byte3=A`); premultiplied at pack.
+    pub tint: u32,
+}
+
+const _: () = assert!(size_of::<UiImage>() == 24);
+const _: () = assert!(align_of::<UiImage>() == 4);
+
+impl Default for UiImage {
+    /// Texture 0, full UV (`0..1`), FULLY TRANSPARENT tint (alpha 0) — an
+    /// invisible node until both a texture and an opaque tint are authored (m1:
+    /// never a white flash once P5a packs it).
+    #[inline]
+    fn default() -> Self {
+        UiImage {
+            texture: 0,
+            uv_min: [0.0, 0.0],
+            uv_max: [1.0, 1.0],
+            tint: 0,
+        }
+    }
+}
+
+/// Uniform grid track config (GUI P6a). Pairs with
+/// [`UiLayout`]`{ layout_type: Grid }`. AUTHOR-OWNED, OPT-IN.
+///
+/// The layout solver places relative child at flow index `i` into cell
+/// `(col = i % columns, row = i / columns)` and sizes each child to the uniform
+/// cell extent (the container content box divided by the track counts). A
+/// bounded, `O(children)` placement — no super-linear scan (the complexity guard
+/// holds). `columns == 0` is coerced to `1`; `rows == 0` derives the row count
+/// from the child count.
+#[repr(C)]
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct UiGrid {
+    /// Track count on the cross axis (number of columns). `0` ⇒ treated as `1`.
+    pub columns: u8,
+    /// Track count on the main axis (number of rows). `0` ⇒
+    /// `ceil(child_count / columns)`.
+    pub rows: u8,
+}
+
+/// The 9 screen-anchor positions for a [`UiAnchor`] (the corners, the edge
+/// centers, and the center). `#[repr(u8)]`.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum AnchorEdge {
+    /// Pin the node's top-left to the screen top-left.
+    #[default]
+    TopLeft,
+    /// Pin the node's top edge, centered horizontally.
+    TopCenter,
+    /// Pin the node's top-right to the screen top-right.
+    TopRight,
+    /// Pin the node's left edge, centered vertically.
+    CenterLeft,
+    /// Pin the node centered on both axes.
+    Center,
+    /// Pin the node's right edge, centered vertically.
+    CenterRight,
+    /// Pin the node's bottom-left to the screen bottom-left.
+    BottomLeft,
+    /// Pin the node's bottom edge, centered horizontally.
+    BottomCenter,
+    /// Pin the node's bottom-right to the screen bottom-right.
+    BottomRight,
+}
+
+/// Screen-edge anchor for a [`UiRoot`] (GUI P6a). COLD, OPT-IN, AUTHOR-OWNED.
+///
+/// Pins a root's resolved rectangle to a screen edge/corner with an inset
+/// `offset` and (optionally) the [`UiSafeArea`](crate::resources::UiSafeArea)
+/// inset. Resolved INSIDE `ui_layout_apply` (after the root is measured, before
+/// its rect is written) so the layout pass stays the SINGLE `ComputedRect`
+/// writer (no pre-pass write race). A node WITHOUT this component lays out at the
+/// viewport top-left as before.
+///
+/// P6a scopes anchoring to ROOTS only; a `UiAnchor` on a non-root in-tree node is
+/// ignored by the layout pass (a non-root is positioned by its parent's box, a
+/// different code path — Open Question 3). The system NEVER writes this component
+/// (author-only, like [`StackIndex`] / [`UiAbsolute`]).
+#[repr(C)]
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
+pub struct UiAnchor {
+    /// Which corner/edge to pin to.
+    pub edge: AnchorEdge,
+    /// Inset toward the screen interior from the pinned edge, x (logical px).
+    pub offset_x: f32,
+    /// Inset toward the screen interior from the pinned edge, y (logical px).
+    pub offset_y: f32,
+    /// Subtract the [`UiSafeArea`](crate::resources::UiSafeArea) inset when true.
+    pub use_safe_area: bool,
+    /// Explicit tail pad → const-asserted size.
+    pub _pad: [u8; 3],
+}
+
+const _: () = assert!(size_of::<UiAnchor>() == 16);
+const _: () = assert!(align_of::<UiAnchor>() == 4);
+
+impl Default for UiAnchor {
+    /// Top-left, zero offset, no safe-area — equivalent to no anchor.
+    #[inline]
+    fn default() -> Self {
+        UiAnchor {
+            edge: AnchorEdge::TopLeft,
+            offset_x: 0.0,
+            offset_y: 0.0,
+            use_safe_area: false,
+            _pad: [0; 3],
+        }
+    }
+}
+
 /// Stable per-sibling positional key for the `.ui` hot-reload reconcile of
 /// ANONYMOUS (unnamed) nodes (P3 Decision 11).
 ///

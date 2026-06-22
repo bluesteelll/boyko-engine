@@ -54,12 +54,13 @@ use boyko_ecs::ecs::core::iters::query::filter::{Added, Changed, Or};
 use boyko_ecs::ecs::core::iters::query::query::Query;
 use boyko_ecs::ecs::core::system::{Res, ResMut};
 
+use crate::anchor::resolve_anchor_origin;
 use crate::components::{
-    ComputedRect, ContentSize, UiAbsolute, UiAlign, UiLayout, UiRoot, UiSpacing,
+    ComputedRect, ContentSize, UiAbsolute, UiAlign, UiAnchor, UiGrid, UiLayout, UiRoot, UiSpacing,
 };
 use crate::resources::{
     ChildSize, Insets, LayoutScratch, MAX_LAYOUT_DEPTH, Measured, MeasuredNode, Size,
-    StretchItem, StretchTarget, UiViewport,
+    StretchItem, StretchTarget, UiSafeArea, UiViewport,
 };
 use crate::units::{AlignCross, AlignMain, LayoutType, PositionType, Unit};
 
@@ -90,6 +91,11 @@ pub fn ui_layout_discovery(
             Changed<Children>,
             Changed<ChildOf>,
             Added<UiRoot>,
+            // GUI P6a: an anchor change re-pins the root (its rect origin moves).
+            // A `UiAnchor` change is a property change (not a root-set change), so
+            // it does NOT trip `root_set_changed` — the cached `roots` list stays
+            // valid; only a relayout is needed.
+            Changed<UiAnchor>,
         )>,
     >,
     // Root-set-change signal: an `Added<UiRoot>` (a new root) or any structural
@@ -135,10 +141,17 @@ pub fn ui_layout_discovery(
 // systems).
 #[allow(clippy::needless_pass_by_ref_mut)]
 pub fn ui_layout_apply(world: &mut EcsMaster) {
-    // Read the viewport + dirty flag, then move the scratch buffers out so the
-    // recursion's `get_component_mut` calls do not conflict with a held borrow of
-    // the resource slab (Decision 7).
+    // Read the viewport + safe-area + dirty flag, then move the scratch buffers
+    // out so the recursion's `get_component_mut` calls do not conflict with a held
+    // borrow of the resource slab (Decision 7). The safe-area snapshot is read
+    // here (a `Copy` value) so the anchor resolve inside the recursion holds no
+    // resource borrow; `UiSafeArea` is host-set and defaults to zero, so a host
+    // that never inserts it still reads the zero inset.
     let viewport = *world.resource::<UiViewport>();
+    let safe_area = world
+        .try_resource::<UiSafeArea>()
+        .copied()
+        .unwrap_or_default();
     let (dirty, mut scratch) = {
         let s = world.resource_mut::<LayoutScratch>();
         (s.dirty, mem::take(s))
@@ -171,7 +184,7 @@ pub fn ui_layout_apply(world: &mut EcsMaster) {
             {
                 scratch.relayout_count += 1;
             }
-            layout_root(world, &mut scratch, root, viewport);
+            layout_root(world, &mut scratch, root, viewport, &safe_area);
         }
     }
 
@@ -203,6 +216,7 @@ fn layout_root(
     scratch: &mut LayoutScratch,
     root: Entity,
     viewport: UiViewport,
+    safe_area: &UiSafeArea,
 ) {
     let Some(layout) = world.get_component::<UiLayout>(root).copied() else {
         // A UiRoot without a UiLayout cannot be laid out. The DSL guarantees its
@@ -226,9 +240,6 @@ fn layout_root(
             viewport.width
         }),
     };
-
-    // Screen origin: the root is anchored at the viewport's top-left.
-    let origin = Origin { x: 0.0, y: 0.0 };
 
     // Reset the pass-stable arenas (capacity retained — no per-frame alloc after
     // warmup). The depth pools are cleared per-level inside the recursion.
@@ -257,6 +268,23 @@ fn layout_root(
         return;
     }
     let (w, h) = fold_size(root_m.lt, root_m.size.main, root_m.size.cross);
+
+    // Screen origin: the root anchors at the viewport top-left by default. GUI
+    // P6a: an optional `UiAnchor` re-pins it to a screen edge/corner. The anchor
+    // is resolved HERE — after measure (so the root's `w/h` are known, which the
+    // right/bottom edges need) and before the rect is written — so the layout pass
+    // remains the SINGLE `ComputedRect` writer (no pre-pass write race). The
+    // resolved origin then seeds BOTH the root rect and `position_node`, so the
+    // whole subtree shifts with the root. The `get_component::<UiAnchor>` lookup is
+    // O(1) per root and only on the (cold) relayout path.
+    let origin = match world.get_component::<UiAnchor>(root).copied() {
+        Some(anchor) => {
+            let o = resolve_anchor_origin(&viewport, safe_area, &anchor, w, h);
+            Origin { x: o.x, y: o.y }
+        }
+        None => Origin { x: 0.0, y: 0.0 },
+    };
+
     write_rect(
         world,
         root,
@@ -330,23 +358,11 @@ fn measured_in_parent_frame(parent_lt: LayoutType, child: &Measured) -> Size {
     }
 }
 
-/// Resolves the effective layout type, falling back to `Column` for the reserved
-/// `Grid` variant.
+/// Resolves the effective layout type. GUI P6a implements `Grid` (a uniform
+/// `columns × rows` cell placement); it is no longer a `Column` fallback.
 #[inline]
-fn resolved_layout_type(lt: LayoutType, node: Entity) -> LayoutType {
-    if matches!(lt, LayoutType::Grid) {
-        grid_fallback(node)
-    } else {
-        lt
-    }
-}
-
-/// Cold diagnostic for the reserved `Grid` variant (P1 falls back to `Column`).
-#[cold]
-#[inline(never)]
-fn grid_fallback(_node: Entity) -> LayoutType {
-    debug_assert!(false, "LayoutType::Grid is reserved in P1; falling back to Column");
-    LayoutType::Column
+fn resolved_layout_type(lt: LayoutType, _node: Entity) -> LayoutType {
+    lt
 }
 
 /// Cold diagnostic: a node reached the depth clamp (treated as a leaf).
@@ -531,6 +547,7 @@ fn measure_node(
     let mut max_child_cross = 0.0f32;
     collect_stretch_and_measure(
         world,
+        node,
         scratch,
         depth,
         lt,
@@ -543,7 +560,7 @@ fn measure_node(
     );
 
     // Leaf content fallback (no relative children): use ContentSize.
-    if relative_count == 0 && !matches!(lt, LayoutType::Overlay) {
+    if relative_count == 0 && !matches!(lt, LayoutType::Overlay | LayoutType::Grid) {
         let content = world
             .get_component::<ContentSize>(node)
             .copied()
@@ -607,10 +624,10 @@ fn measure_node(
     // `child_index[child_lo + k]`. The former `measure_node(child, …)` re-entries
     // here become ARENA READS of each child's Pass-B/B.5 result — the O(N) fix.
     let size_lo = scratch.child_sizes.len() as u32;
-    if matches!(lt, LayoutType::Overlay) {
-        resolve_overlay_child_sizes(world, scratch, depth, &m);
-    } else {
-        resolve_flow_child_sizes(world, scratch, depth, &m);
+    match lt {
+        LayoutType::Overlay => resolve_overlay_child_sizes(world, scratch, depth, &m),
+        LayoutType::Grid => resolve_grid_child_sizes(world, scratch, node, &m),
+        _ => resolve_flow_child_sizes(world, scratch, depth, &m),
     }
     resolve_absolute_child_sizes(world, scratch, depth, relative_count, total_children, &m);
     let size_hi = scratch.child_sizes.len() as u32;
@@ -805,6 +822,7 @@ fn measure_child_into_arena(
 #[allow(clippy::too_many_arguments)]
 fn collect_stretch_and_measure(
     world: &mut EcsMaster,
+    node: Entity,
     scratch: &mut LayoutScratch,
     depth: usize,
     lt: LayoutType,
@@ -816,9 +834,13 @@ fn collect_stretch_and_measure(
     max_child_cross: &mut f32,
 ) {
     scratch.stretch_pool[depth].clear();
-    if matches!(lt, LayoutType::Overlay) {
-        // Overlay children do not accumulate main; measured against the box later.
-        // Fold the widest/tallest child into the cross/main extents for hugging.
+    if matches!(lt, LayoutType::Overlay | LayoutType::Grid) {
+        // Overlay/Grid children do not accumulate flow main; they are measured
+        // against the content box and the container hugs the widest/tallest child
+        // (or its explicit size). Grid then resizes each child to a uniform cell in
+        // `resolve_grid_child_sizes` and places it in `position_grid_from_arena` —
+        // the size+position pair the two-pass solver requires (no position-pass
+        // re-measure).
         for i in 0..relative_count {
             let child = scratch.child_pool[depth][i];
             let child_def = AxisDef {
@@ -829,6 +851,19 @@ fn collect_stretch_and_measure(
                 measure_child_into_arena(world, scratch, lt, child, depth, child_def);
             *relative_main_sum = relative_main_sum.max(measured.main);
             *max_child_cross = max_child_cross.max(measured.cross);
+        }
+        // Grid: an Auto-sized container must hug ALL tracks. Each child becomes a
+        // uniform cell (`content / track-count`) in `resolve_grid_child_sizes`, so the
+        // Auto hug must reserve `rows * max_cell_main` x `cols * max_cell_cross` — NOT
+        // a single cell (the prior `max(child)` under-sized an Auto grid to 1/rows of
+        // one child). Overlay stacks its children, so its hug stays `max(child)`. A
+        // definite-sized container ignores this hug (Pass C uses the explicit size).
+        // Uses the SAME `grid_dims` the resolve/position passes use, so the measured
+        // box and the per-cell division agree. O(1) extra — no new traversal.
+        if matches!(lt, LayoutType::Grid) {
+            let (cols, rows) = grid_dims(world, node, relative_count);
+            *relative_main_sum *= rows as f32;
+            *max_child_cross *= cols as f32;
         }
         return;
     }
@@ -1136,6 +1171,50 @@ fn resolve_overlay_child_sizes(
     }
 }
 
+/// Resolves the `(columns, rows)` cell counts for a Grid container with
+/// `child_count` relative children, from the node's [`UiGrid`] config (default
+/// `1×auto` when absent). `columns == 0` coerces to `1`; `rows == 0` derives
+/// `ceil(child_count / columns)` (at least 1). Both are bounded by the child
+/// count's ceiling, so the placement stays `O(children)`.
+fn grid_dims(world: &EcsMaster, node: Entity, child_count: usize) -> (usize, usize) {
+    let cfg = world.get_component::<UiGrid>(node).copied().unwrap_or_default();
+    let cols = (cfg.columns as usize).max(1);
+    let rows = if cfg.rows == 0 {
+        // ceil(child_count / cols), at least 1 so an empty grid still has a row.
+        child_count.div_ceil(cols).max(1)
+    } else {
+        cfg.rows as usize
+    };
+    (cols, rows)
+}
+
+/// Pass D.5 (grid): sizes each relative child to a UNIFORM cell — the content
+/// box divided by the `(columns, rows)` track counts (GUI P6a). Appends one
+/// [`ChildSize`] per relative child to the pass-stable arena, 1:1 with
+/// `child_index`, so the position pass reads it without re-measuring (the
+/// two-pass invariant). `position_grid_from_arena` places each child into its
+/// cell. Bounded `O(relative_count)` — no super-linear scan.
+///
+/// The grid main axis is vertical (rows down y), the cross axis horizontal
+/// (columns across x) — the same axis convention `fold_size`/`fold_pos` use for
+/// the `Column`/`_` arm, so a cell's `(main = cell_main, cross = cell_cross)`
+/// folds to `(w = cell_cross, h = cell_main)`.
+fn resolve_grid_child_sizes(
+    world: &mut EcsMaster,
+    scratch: &mut LayoutScratch,
+    node: Entity,
+    m: &Measured,
+) {
+    let (cols, rows) = grid_dims(world, node, m.relative_count);
+    // Uniform cell extent: the content box divided by the track counts. `cols`/
+    // `rows` are >= 1 (see `grid_dims`), so no division by zero.
+    let cell_cross = m.content_cross / cols as f32;
+    let cell_main = m.content_main / rows as f32;
+    for _ in 0..m.relative_count {
+        scratch.child_sizes.push(ChildSize { main: cell_main, cross: cell_cross });
+    }
+}
+
 /// Pass D.5 (absolute tail): resolves each absolute child's final size into the
 /// arena, appended AFTER the relative/overlay entries so `child_sizes` stays 1:1
 /// with `child_index`. Same arithmetic as the former `position_absolute` sizing,
@@ -1292,10 +1371,10 @@ fn position_node(world: &mut EcsMaster, scratch: &mut LayoutScratch, idx: u32, o
         node.child_hi - node.child_lo,
         "child_sizes range must be 1:1 with child_index range"
     );
-    if matches!(node.measured.lt, LayoutType::Overlay) {
-        position_overlay_from_arena(world, scratch, &node, origin);
-    } else {
-        position_flow_from_arena(world, scratch, &node, origin);
+    match node.measured.lt {
+        LayoutType::Overlay => position_overlay_from_arena(world, scratch, &node, origin),
+        LayoutType::Grid => position_grid_from_arena(world, scratch, &node, origin),
+        _ => position_flow_from_arena(world, scratch, &node, origin),
     }
     position_absolute_from_arena(world, scratch, &node, origin);
 }
@@ -1437,6 +1516,59 @@ fn position_overlay_from_arena(
             + cross_align_fraction(child_align.cross) * (m.content_cross - child_cross);
         let (dx, dy) = fold_pos(m.lt, main_pos, cross_pos);
         let (w, h) = fold_size(m.lt, child_main, child_cross);
+        let rect = ComputedRect {
+            x: origin.x + dx,
+            y: origin.y + dy,
+            w,
+            h,
+        };
+        write_rect(world, child, rect);
+        position_node(world, scratch, child_idx, Origin { x: rect.x, y: rect.y });
+    }
+}
+
+/// Positions Grid children into a uniform `columns × rows` cell layout (GUI
+/// P6a). Relative child at flow slot `k` occupies cell
+/// `(col = k % cols, row = k / cols)`; its top-left is the content-box before-edge
+/// plus the cell offset. Child SIZES come from the arena (`child_sizes`, resolved
+/// to the cell extent in `resolve_grid_child_sizes`) — no re-measure. Recurses via
+/// `position_node`. Bounded `O(relative_count)`.
+///
+/// `cols` is recovered from the resolved cell extent (`content_cross / cell_cross`)
+/// so the placement uses the SAME track count `resolve_grid_child_sizes` sized
+/// against, without re-reading `UiGrid` (the position pass takes no extra
+/// component read on the hot path). A degenerate zero-width cell falls back to a
+/// single column.
+fn position_grid_from_arena(
+    world: &mut EcsMaster,
+    scratch: &mut LayoutScratch,
+    node: &MeasuredNode,
+    origin: Origin,
+) {
+    let m = &node.measured;
+    if m.relative_count == 0 {
+        return;
+    }
+    // Recover the column count from the resolved cell cross extent (set by
+    // `resolve_grid_child_sizes` to `content_cross / cols`). Guard against a
+    // zero/degenerate cell (zero content box) by defaulting to one column.
+    let first_cell_cross = scratch.child_sizes[node.size_lo as usize].cross;
+    let cols = if first_cell_cross > 0.0 {
+        (m.content_cross / first_cell_cross).round().max(1.0) as usize
+    } else {
+        1
+    };
+
+    for k in 0..m.relative_count {
+        let (child, child_idx, sz) = child_slot(scratch, node, k);
+        let col = k % cols;
+        let row = k / cols;
+        // Cell offset in axis-relative coordinates (main = rows down, cross =
+        // columns across), then folded to (dx, dy) like every other path.
+        let main_pos = m.insets.main_before + row as f32 * sz.main;
+        let cross_pos = m.insets.cross_before + col as f32 * sz.cross;
+        let (dx, dy) = fold_pos(m.lt, main_pos, cross_pos);
+        let (w, h) = fold_size(m.lt, sz.main, sz.cross);
         let rect = ComputedRect {
             x: origin.x + dx,
             y: origin.y + dy,

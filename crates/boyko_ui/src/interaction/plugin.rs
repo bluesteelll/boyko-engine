@@ -39,6 +39,7 @@
 //! `ui_bind_apply` late on `CoreSchedule::Main` (they do not feed actions).
 
 use boyko_ecs::ecs::core::app::{App, CoreSchedule, Plugin};
+use boyko_ecs::ecs::core::schedule::system_set::SystemSet;
 use boyko_input::{Actionlike, GameplaySet};
 
 use crate::binding::bind_system::{ui_bind_apply, ui_bind_discovery, UiBindScratch};
@@ -145,12 +146,20 @@ impl<A: Actionlike> Plugin for UiInteractionPlugin<A> {
 #[derive(Default)]
 pub struct UiBindingPlugin;
 
+/// The [`SystemSet`] the data-bind systems run in (GUI P4/P6a). Exposed so a
+/// downstream consumer (the GUI P6a `UiWidgetsPlugin`) can order its bar driver
+/// `.after_set(UiBindSet)` — the cross-plugin edge that makes a `BindValue`-driven
+/// `UiValue` write visible to the bar the SAME frame (C2).
+#[derive(Clone, Copy, Debug)]
+pub struct UiBindSet;
+impl SystemSet for UiBindSet {}
+
 impl Plugin for UiBindingPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(UiBindScratch::default());
         app.add_systems_cfg_in(CoreSchedule::Main, |b| {
-            let discovery = b.add_system(ui_bind_discovery).key();
-            b.add_system(ui_bind_apply).after(discovery);
+            let discovery = b.add_system(ui_bind_discovery).in_set(UiBindSet).key();
+            b.add_system(ui_bind_apply).in_set(UiBindSet).after(discovery);
         });
     }
 }

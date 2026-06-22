@@ -48,6 +48,27 @@ impl Default for UiViewport {
     }
 }
 
+/// Screen safe-area insets — the region to keep clear of notches, rounded
+/// corners, system bars, or a soft keyboard (GUI P6a). Host-set, viewport-
+/// derived. Default = zero (no inset).
+///
+/// A DISTINCT `Resource`, NOT a [`UiViewport`] field: safe-area can change
+/// independently of the viewport (e.g. a soft-keyboard inset on an unchanged
+/// surface), so keeping it a separate resource keeps the two churn surfaces apart
+/// (Principle 2). Read by the anchor resolve inside `ui_layout_apply` when a
+/// [`UiAnchor`](crate::components::UiAnchor)`{ use_safe_area: true }` is present.
+#[derive(Resource, Clone, Copy, Debug, Default)]
+pub struct UiSafeArea {
+    /// Inset from the left screen edge (logical px).
+    pub left: f32,
+    /// Inset from the top screen edge (logical px).
+    pub top: f32,
+    /// Inset from the right screen edge (logical px).
+    pub right: f32,
+    /// Inset from the bottom screen edge (logical px).
+    pub bottom: f32,
+}
+
 /// Which container-relative slot a stretch participant fills during the main-axis
 /// freeze loop.
 #[derive(Clone, Copy)]

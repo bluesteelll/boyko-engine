@@ -22,4 +22,4 @@ pub use focus::{
     ui_focus_system, PointerSlot, UiInputFocus, UiInteractionConfig, UiInteractionScratch,
     UiPointerState, MAX_POINTERS,
 };
-pub use plugin::{register_bindable, UiBindingPlugin, UiInteractionPlugin};
+pub use plugin::{register_bindable, UiBindSet, UiBindingPlugin, UiInteractionPlugin};

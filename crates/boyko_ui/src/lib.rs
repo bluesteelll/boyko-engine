@@ -30,6 +30,7 @@
 //! the CPU-boundary correctness of the seam is unit-proven (`measure_one` matches a
 //! shaped run; an `Auto` leaf hugs the measured size).
 
+pub mod anchor;
 pub mod binding;
 pub mod bundles;
 pub mod components;
@@ -40,6 +41,7 @@ pub mod reload;
 pub mod resources;
 pub mod text;
 pub mod units;
+pub mod widgets;
 
 /// The `ui!` authoring macro (P2): write a UI entity tree as a literal nested
 /// block. See [`boyko_macros::ui`] for the grammar and expansion contract.
@@ -73,20 +75,27 @@ pub mod prelude {
         ui_bind_apply, ui_bind_discovery, BindText, BindValue, Bindable, TemplateId, UiBindScratch,
         UiTextBuffer, UiValue, NO_FIELD,
     };
-    pub use crate::bundles::UiNodeBundle;
+    pub use crate::anchor::{resolve_anchor_origin, AnchorOrigin};
+    pub use crate::bundles::{
+        BarBundle, ButtonBundle, GridBundle, ImageBundle, LabelBundle, PanelBundle, UiNodeBundle,
+    };
     pub use crate::components::{
-        ComputedClip, ComputedRect, ContentSize, StackIndex, UiAbsolute, UiAlign, UiBackground,
-        UiLayout, UiName, UiRoot, UiSpacing,
+        AnchorEdge, Bar, BarFill, Button, ComputedClip, ComputedRect, ContentSize, StackIndex,
+        UiAbsolute, UiAlign, UiAnchor, UiBackground, UiGrid, UiImage, UiLayout, UiName, UiRoot,
+        UiSpacing,
     };
     pub use crate::interaction::{
         register_bindable, ui_dispatch_system, ui_focus_system, ui_refreeze_fixed_snapshot,
         FocusPolicy, Focusable, Interaction, OnClick, OnHover, OnSubmit, RelativeCursorPosition,
-        UiBindingPlugin, UiInputFocus, UiInteractionConfig, UiInteractionPlugin,
+        UiBindSet, UiBindingPlugin, UiInputFocus, UiInteractionConfig, UiInteractionPlugin,
         UiInteractionScratch, UiPointerState, NO_ACTION,
     };
     pub use crate::layout::{ui_layout_apply, ui_layout_discovery};
     pub use crate::plugin::UiPlugin;
-    pub use crate::resources::{LayoutScratch, UiViewport};
+    pub use crate::resources::{LayoutScratch, UiSafeArea, UiViewport};
+    pub use crate::widgets::{
+        ui_bar_apply, ui_bar_discovery, UiBarScratch, UiWidgetSet, UiWidgetsPlugin,
+    };
     pub use crate::text::{
         emit_glyphs, measure_one, parse_ui, read_bfont, serialize_ui, spawn_ui_tree,
         ui_text_measure_system, BakedFont, FontId, FontTable, GlyphInstance, TextAlign,
