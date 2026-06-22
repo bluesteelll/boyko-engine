@@ -27,7 +27,7 @@ use boyko_ecs::ecs::core::time::FixedTime;
 use boyko_threadpool::{ThreadPool, ThreadPoolBuilder};
 
 use boyko_physics::components::{
-    BodyType, Collider, ColliderShape, RigidBody, RigidBodyBundle, RigidBodyMass,
+    Collider, ColliderShape, RigidBody, RigidBodyBundle, RigidBodyMass, Simulated,
 };
 use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::plugin::add_physics_systems;
@@ -60,7 +60,7 @@ fn serial_pool() -> Arc<ThreadPool> {
 /// Spawns one rigid body via the raw `create_entity` path.
 fn spawn_body(world: &mut EcsMaster, body: RigidBody, mass: RigidBodyMass, collider: Collider) {
     let archetype = world.bundle_archetype_id_for::<RigidBodyBundle>();
-    world
+    let e = world
         .create_entity(
             archetype,
             &[
@@ -70,6 +70,7 @@ fn spawn_body(world: &mut EcsMaster, body: RigidBody, mass: RigidBodyMass, colli
             ],
         )
         .expect("invariant: RigidBodyBundle archetype accepts the three columns");
+    world.enable::<Simulated>(e);
 }
 
 /// A sphere body at `position` with the given velocity, radius, mass-inverse,
@@ -82,7 +83,6 @@ fn sphere(
     inv_mass: f32,
     restitution: f32,
     friction: f32,
-    body_type: BodyType,
 ) -> (RigidBody, RigidBodyMass, Collider) {
     let body = RigidBody {
         position,
@@ -95,7 +95,6 @@ fn sphere(
         inv_mass,
         restitution,
         friction,
-        body_type,
     };
     let collider = Collider {
         shape: ColliderShape::Sphere { radius },
@@ -116,7 +115,6 @@ fn box_body(
     inv_mass: f32,
     restitution: f32,
     friction: f32,
-    body_type: BodyType,
 ) -> (RigidBody, RigidBodyMass, Collider) {
     let body = RigidBody {
         position,
@@ -129,7 +127,6 @@ fn box_body(
         inv_mass,
         restitution,
         friction,
-        body_type,
     };
     let collider = Collider {
         shape: ColliderShape::Box { half_extents },
@@ -226,7 +223,7 @@ fn softstep_resolves_penetration() {
     // they penetrate by 0.5. No gravity, no restitution → they must separate and
     // momentum is honored (symmetric push apart, the COM stays put).
     let mut world = EcsMaster::new();
-    let (ab, am, ac) = sphere(Vec3::ZERO, Vec3::ZERO, 0.5, 1.0, 0.0, 0.0, BodyType::Dynamic);
+    let (ab, am, ac) = sphere(Vec3::ZERO, Vec3::ZERO, 0.5, 1.0, 0.0, 0.0);
     spawn_body(&mut world, ab, am, ac);
     let (bb, bm, bc) = sphere(
         Vec3::new(0.5, 0.0, 0.0),
@@ -235,7 +232,6 @@ fn softstep_resolves_penetration() {
         1.0,
         0.0,
         0.0,
-        BodyType::Dynamic,
     );
     spawn_body(&mut world, bb, bm, bc);
 
@@ -284,7 +280,6 @@ fn softstep_restitution_bounce_vs_no_bounce() {
             0.0, // static wall: inv_mass 0 (immovable)
             restitution,
             0.0,
-            BodyType::Static,
         );
         spawn_body(&mut world, wb, wm, wc);
         // Mover overlapping slightly, travelling -X into the wall.
@@ -296,7 +291,6 @@ fn softstep_restitution_bounce_vs_no_bounce() {
             1.0,
             restitution,
             0.0,
-            BodyType::Dynamic,
         );
         spawn_body(&mut world, mb, mm, mc);
 
@@ -348,7 +342,7 @@ fn restitution_resting_contact_genuine_sphere_pair_does_not_gain_energy() {
     use boyko_physics::resources::Manifolds;
     let mut world = EcsMaster::new();
     // Static r = 0.5 sphere at the origin.
-    let (fb, fm, fc) = sphere(Vec3::ZERO, Vec3::ZERO, 0.5, 0.0, 0.5, 0.5, BodyType::Static);
+    let (fb, fm, fc) = sphere(Vec3::ZERO, Vec3::ZERO, 0.5, 0.0, 0.5, 0.5);
     spawn_body(&mut world, fb, fm, fc);
     // Dynamic r = 0.5 sphere resting just on top (centers ~1.0 apart, a hair
     // overlapping so the strict `separation < 0` narrowphase fires).
@@ -359,7 +353,6 @@ fn restitution_resting_contact_genuine_sphere_pair_does_not_gain_energy() {
         1.0,
         0.5,
         0.5,
-        BodyType::Dynamic,
     );
     spawn_body(&mut world, sb, sm, sc);
 
@@ -437,7 +430,6 @@ fn restitution_resting_contact_does_not_gain_energy() {
         0.0,
         0.5,
         0.5,
-        BodyType::Static,
     );
     spawn_body(&mut world, fb, fm, fc);
     // Dynamic sphere spawned ABOVE the floor with a gap so it falls in and settles
@@ -451,7 +443,6 @@ fn restitution_resting_contact_does_not_gain_energy() {
         1.0,
         0.5,
         0.5,
-        BodyType::Dynamic,
     );
     spawn_body(&mut world, sb, sm, sc);
 
@@ -510,7 +501,7 @@ fn seam_swap_noop_vs_softstep() {
     // SoftStepSolver they separate. Proves the seam is load-bearing.
     fn final_distance<S: RigidSolver + Default>() -> f32 {
         let mut world = EcsMaster::new();
-        let (ab, am, ac) = sphere(Vec3::ZERO, Vec3::ZERO, 0.5, 1.0, 0.0, 0.0, BodyType::Dynamic);
+        let (ab, am, ac) = sphere(Vec3::ZERO, Vec3::ZERO, 0.5, 1.0, 0.0, 0.0);
         spawn_body(&mut world, ab, am, ac);
         let (bb, bm, bc) = sphere(
             Vec3::new(0.5, 0.0, 0.0),
@@ -519,7 +510,6 @@ fn seam_swap_noop_vs_softstep() {
             1.0,
             0.0,
             0.0,
-            BodyType::Dynamic,
         );
         spawn_body(&mut world, bb, bm, bc);
 
@@ -565,14 +555,15 @@ fn solver_is_deterministic() {
         let mut world = EcsMaster::new();
         // A small cluster of overlapping dynamic spheres + a static floor sphere.
         let setup = [
-            (Vec3::new(0.0, 1.0, 0.0), 1.0, BodyType::Dynamic),
-            (Vec3::new(0.3, 1.4, 0.1), 1.0, BodyType::Dynamic),
-            (Vec3::new(-0.2, 1.7, -0.1), 1.0, BodyType::Dynamic),
-            (Vec3::new(0.0, -10.0, 0.0), 0.0, BodyType::Static),
+            (Vec3::new(0.0, 1.0, 0.0), 1.0),
+            (Vec3::new(0.3, 1.4, 0.1), 1.0),
+            (Vec3::new(-0.2, 1.7, -0.1), 1.0),
+            (Vec3::new(0.0, -10.0, 0.0), 0.0),
         ];
-        for &(pos, inv_mass, body_type) in &setup {
-            let radius = if body_type == BodyType::Static { 10.0 } else { 0.5 };
-            let (b, m, c) = sphere(pos, Vec3::ZERO, radius, inv_mass, 0.3, 0.5, body_type);
+        for &(pos, inv_mass) in &setup {
+            // A static body is now `inv_mass == 0` (the `BodyType` field is gone).
+            let radius = if inv_mass == 0.0 { 10.0 } else { 0.5 };
+            let (b, m, c) = sphere(pos, Vec3::ZERO, radius, inv_mass, 0.3, 0.5);
             spawn_body(&mut world, b, m, c);
         }
 
@@ -642,7 +633,6 @@ fn floor_slide_xz(friction: f32, push: Vec3, frames: usize) -> (f32, f32) {
         0.0,
         0.0,
         friction,
-        BodyType::Static,
     );
     spawn_body(&mut world, fb, fm, fc);
     let r = 0.5_f32;
@@ -654,7 +644,6 @@ fn floor_slide_xz(friction: f32, push: Vec3, frames: usize) -> (f32, f32) {
         1.0,
         0.0,
         friction,
-        BodyType::Dynamic,
     );
     spawn_body(&mut world, sb, sm, sc);
 
@@ -711,7 +700,6 @@ fn settle_then_push_contact_slip(friction: f32, push: Vec3, frames: usize) -> f3
         0.0,
         0.0,
         friction,
-        BodyType::Static,
     );
     spawn_body(&mut world, fb, fm, fc);
     let r = 0.5_f32;
@@ -722,7 +710,6 @@ fn settle_then_push_contact_slip(friction: f32, push: Vec3, frames: usize) -> f3
         1.0,
         0.0,
         friction,
-        BodyType::Dynamic,
     );
     spawn_body(&mut world, sb, sm, sc);
 
@@ -869,7 +856,6 @@ fn static_body_unmoved_under_tgs() {
         0.0,
         0.0,
         0.5,
-        BodyType::Static,
     );
     let floor_before = fb;
     spawn_body(&mut world, fb, fm, fc);
@@ -881,7 +867,6 @@ fn static_body_unmoved_under_tgs() {
         1.0,
         0.0,
         0.5,
-        BodyType::Dynamic,
     );
     spawn_body(&mut world, db, dm, dc);
 
@@ -967,7 +952,7 @@ fn free_dynamic_body_falls_under_owning_solver() {
     // this step count) and carry vy ≈ -g·T.
     let mut world = EcsMaster::new();
     let spawn = Vec3::new(0.0, 100.0, 0.0);
-    let (b, m, c) = sphere(spawn, Vec3::ZERO, 0.5, 1.0, 0.0, 0.0, BodyType::Dynamic);
+    let (b, m, c) = sphere(spawn, Vec3::ZERO, 0.5, 1.0, 0.0, 0.0);
     spawn_body(&mut world, b, m, c);
 
     let dt = 1.0 / 60.0;
@@ -1044,7 +1029,6 @@ fn spawn_sphere_stack(world: &mut EcsMaster, n: usize, r: f32) {
         0.0,
         0.0,
         0.6,
-        BodyType::Static,
     );
     spawn_body(world, fb, fm, fc);
 
@@ -1062,7 +1046,6 @@ fn spawn_sphere_stack(world: &mut EcsMaster, n: usize, r: f32) {
             1.0,
             0.0, // no restitution — a resting stack must not bounce
             0.6,
-            BodyType::Dynamic,
         );
         spawn_body(world, sb, sm, sc);
     }
@@ -1281,7 +1264,6 @@ fn sphere_box_resting() {
         0.0,
         0.0,
         0.5,
-        BodyType::Static,
     );
     spawn_body(&mut world, fb, fm, fc);
     // Dynamic sphere spawned above the floor with a gap (rest height ≈ r = 0.5).
@@ -1294,7 +1276,6 @@ fn sphere_box_resting() {
         1.0,
         0.0,
         0.5,
-        BodyType::Dynamic,
     );
     spawn_body(&mut world, sb, sm, sc);
 
@@ -1350,7 +1331,6 @@ fn spawn_box_stack(world: &mut EcsMaster, n: usize, h: f32) {
         0.0,
         0.0,
         0.8,
-        BodyType::Static,
     );
     spawn_body(world, fb, fm, fc);
 
@@ -1365,7 +1345,6 @@ fn spawn_box_stack(world: &mut EcsMaster, n: usize, h: f32) {
             1.0,
             0.0, // resting stack must not bounce
             0.8,
-            BodyType::Dynamic,
         );
         spawn_body(world, bb, bm, bc);
     }
@@ -1495,7 +1474,6 @@ fn box_incline_slide(incline: f32, friction: f32, frames: usize) -> f32 {
         0.0,
         0.0,
         friction,
-        BodyType::Static,
     );
     spawn_body(&mut world, fb, fm, fc);
     // Dynamic box on the incline. Surface normal = R_z(θ)·(0,1,0) = (-sinθ, cosθ, 0).
@@ -1504,7 +1482,7 @@ fn box_incline_slide(incline: f32, friction: f32, frames: usize) -> f32 {
     // Spawn a small gap above the surface along the normal so it falls in cleanly.
     let gap = 0.3_f32;
     let center = surface_normal * (floor_half.y + box_half.y + gap);
-    let (db, dm, dc) = box_body(center, rot, box_half, 1.0, 0.0, friction, BodyType::Dynamic);
+    let (db, dm, dc) = box_body(center, rot, box_half, 1.0, 0.0, friction);
     spawn_body(&mut world, db, dm, dc);
 
     let dt = 1.0 / 120.0;
@@ -1579,7 +1557,6 @@ fn box_solver_is_deterministic() {
             0.0,
             0.0,
             0.6,
-            BodyType::Static,
         );
         spawn_body(&mut world, fb, fm, fc);
         // A few dynamic boxes, slightly tilted/offset so the SAT + clip do real work.
@@ -1596,7 +1573,6 @@ fn box_solver_is_deterministic() {
                 1.0,
                 0.0,
                 0.6,
-                BodyType::Dynamic,
             );
             spawn_body(&mut world, b, m, c);
         }

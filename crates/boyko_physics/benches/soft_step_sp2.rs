@@ -26,7 +26,7 @@ use boyko_ecs::ecs::core::component::component::Component;
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::system::into_system::IntoSystem;
 
-use boyko_physics::components::{BodyType, ColliderShape, RigidBody};
+use boyko_physics::components::{ColliderShape, RigidBody};
 use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::resources::{BodyState, BroadphaseGrid, PhysicsConfig, SolverScratch};
 use boyko_physics::sdf_query::SdfField;
@@ -144,7 +144,8 @@ fn sphere_state(position: Vec3, radius: f32, inv_mass: f32) -> BodyState {
         inv_mass,
         restitution: 0.0,
         friction: 0.0,
-        body_type: BodyType::Dynamic,
+        simulated: true,
+        kinematic: false,
         is_sensor: false,
         shape: ColliderShape::Sphere { radius },
     }

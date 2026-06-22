@@ -32,7 +32,7 @@ use boyko_ecs::ecs::core::time::FixedTime;
 use boyko_threadpool::{ThreadPool, ThreadPoolBuilder};
 
 use boyko_physics::components::{
-    BodyType, Collider, ColliderShape, RigidBody, RigidBodyBundle, RigidBodyMass,
+    Collider, ColliderShape, RigidBody, RigidBodyBundle, RigidBodyMass, Simulated,
 };
 use boyko_physics::manifold::SDF_SENTINEL;
 use boyko_physics::math::{Mat3, Quat, Vec3};
@@ -67,7 +67,7 @@ fn serial_pool() -> Arc<ThreadPool> {
 /// Spawns one rigid body via the raw `create_entity` path.
 fn spawn_body(world: &mut EcsMaster, body: RigidBody, mass: RigidBodyMass, collider: Collider) {
     let archetype = world.bundle_archetype_id_for::<RigidBodyBundle>();
-    world
+    let e = world
         .create_entity(
             archetype,
             &[
@@ -77,6 +77,7 @@ fn spawn_body(world: &mut EcsMaster, body: RigidBody, mass: RigidBodyMass, colli
             ],
         )
         .expect("invariant: RigidBodyBundle archetype accepts the three columns");
+    world.enable::<Simulated>(e);
 }
 
 /// A sphere body at `position` with the given velocity, radius, mass-inverse,
@@ -89,7 +90,6 @@ fn sphere(
     inv_mass: f32,
     restitution: f32,
     friction: f32,
-    body_type: BodyType,
 ) -> (RigidBody, RigidBodyMass, Collider) {
     let body = RigidBody {
         position,
@@ -102,7 +102,6 @@ fn sphere(
         inv_mass,
         restitution,
         friction,
-        body_type,
     };
     let collider = Collider {
         shape: ColliderShape::Sphere { radius },
@@ -122,7 +121,6 @@ fn box_body(
     inv_mass: f32,
     restitution: f32,
     friction: f32,
-    body_type: BodyType,
 ) -> (RigidBody, RigidBodyMass, Collider) {
     let body = RigidBody {
         position,
@@ -135,7 +133,6 @@ fn box_body(
         inv_mass,
         restitution,
         friction,
-        body_type,
     };
     let collider = Collider {
         shape: ColliderShape::Box { half_extents },
@@ -303,7 +300,6 @@ fn sphere_vs_sdf_box_manifold() {
         1.0,
         0.0,
         0.0,
-        BodyType::Dynamic,
     );
     spawn_body(&mut world, sb, sm, sc);
 
@@ -350,7 +346,6 @@ fn sdf_collision_resolves() {
             1.0,
             0.0,
             0.5,
-            BodyType::Dynamic,
         );
         spawn_body(&mut world, sb, sm, sc);
 
@@ -418,7 +413,6 @@ fn box_sdf_incline_slide(friction: f32, incline: f32, frames: usize) -> (f32, us
         1.0,
         0.0,
         friction,
-        BodyType::Dynamic,
     );
     spawn_body(&mut world, bb, bm, bc);
 
@@ -493,7 +487,7 @@ fn sdf_solver_is_deterministic() {
             Vec3::new(-0.2, 1.7, -0.1),
         ];
         for &pos in &setup {
-            let (b, m, c) = sphere(pos, Vec3::ZERO, 0.5, 1.0, 0.3, 0.5, BodyType::Dynamic);
+            let (b, m, c) = sphere(pos, Vec3::ZERO, 0.5, 1.0, 0.3, 0.5);
             spawn_body(&mut world, b, m, c);
         }
         let (bb, bm, bc) = box_body(
@@ -503,7 +497,6 @@ fn sdf_solver_is_deterministic() {
             1.0,
             0.3,
             0.5,
-            BodyType::Dynamic,
         );
         spawn_body(&mut world, bb, bm, bc);
 
@@ -562,7 +555,6 @@ fn sdf_critical_point_emits_no_contact_and_stays_finite() {
             1.0,
             0.0,
             0.5,
-            BodyType::Dynamic,
         );
         spawn_body(&mut world, sb, sm, sc);
 
@@ -588,7 +580,7 @@ fn sdf_critical_point_emits_no_contact_and_stays_finite() {
     fn run_once() -> Vec<RigidBody> {
         let mut world = EcsMaster::new();
         // The degenerate body (center at the SDF sphere center) ...
-        let (db, dm, dc) = sphere(Vec3::ZERO, Vec3::ZERO, 0.5, 1.0, 0.0, 0.5, BodyType::Dynamic);
+        let (db, dm, dc) = sphere(Vec3::ZERO, Vec3::ZERO, 0.5, 1.0, 0.0, 0.5);
         spawn_body(&mut world, db, dm, dc);
         // ... plus an ordinary body that resolves normally (so the solver runs).
         let (sb, sm, sc) = sphere(
@@ -598,7 +590,6 @@ fn sdf_critical_point_emits_no_contact_and_stays_finite() {
             1.0,
             0.0,
             0.5,
-            BodyType::Dynamic,
         );
         spawn_body(&mut world, sb, sm, sc);
 

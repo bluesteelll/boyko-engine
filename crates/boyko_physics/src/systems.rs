@@ -46,8 +46,9 @@
 //!    intentional for TGS (it supersedes the foundation docstrings' "integrate
 //!    then gather" ordering for the owning-solver mode; the solver re-projects and
 //!    integrates internally).
-//! 2. The solver integrates **DYNAMIC bodies only** (`body_type == Dynamic` /
-//!    `inv_mass != 0`) inside its substep loop — mandatory: it applies a
+//! 2. The solver integrates **SIMULATED dynamic bodies only**
+//!    (`simulated && is_dynamic_row(inv_mass)`) inside its substep loop —
+//!    mandatory: it applies a
 //!    per-substep gravity bias, so a static floor would drift if it were
 //!    integrated.
 //! 3. **DO NOT un-gate** [`physics_integrate`] for an owning solver: running both
@@ -55,11 +56,14 @@
 //!    orientation in the same step), corrupting the simulation.
 
 use boyko_ecs::ecs::core::iters::query::data::Mut;
+use boyko_ecs::ecs::core::iters::query::data_is_enabled::IsEnabled;
 use boyko_ecs::ecs::core::iters::query::query::Query;
 use boyko_ecs::ecs::core::system::{Res, ResMut};
 use boyko_ecs::ecs::core::time::FixedTime;
 
-use crate::components::{BodyType, Collider, ColliderShape, RigidBody, RigidBodyMass, Sensor};
+use crate::components::{
+    Collider, ColliderShape, Kinematic, RigidBody, RigidBodyMass, Sensor, Simulated,
+};
 use crate::manifold::{BodyIndex, ContactPoint, Manifold, SDF_SENTINEL};
 use crate::math::Vec3;
 use crate::narrowphase::box_box::box_box_contact;
@@ -88,18 +92,22 @@ const SDF_NORMAL_EPS: f32 = 1.0e-4;
 /// UNLESS the solver owns integration (C2).
 ///
 /// A sound `par_iter_mut` over disjoint rows: each body reads/writes only its
-/// own [`RigidBody`]. For a DYNAMIC body (`body_type == Dynamic && inv_mass !=
-/// 0`) it applies gravity to linear velocity, advances position by the fixed
-/// `dt`, then advances orientation by integrating the quaternion against the
-/// angular velocity. Static / Kinematic bodies are SKIPPED (their pose is
-/// gameplay-owned — see the body-type gate below).
+/// own [`RigidBody`]. For a SIMULATED dynamic body
+/// (`simulated && is_dynamic_row(inv_mass)`) it applies gravity to linear
+/// velocity, advances position by the fixed `dt`, then advances orientation by
+/// integrating the quaternion against the angular velocity. Parked / static /
+/// kinematic bodies are SKIPPED (their pose is gameplay-owned — see the gate
+/// below).
 ///
-/// # Body-type gate (single-source-of-truth with scene sync, std-lib S5)
+/// # Simulated gate (single-source-of-truth with scene sync, std-lib S5)
 ///
-/// This stage keys per-body integration on `BodyType` exactly as the
-/// solver-owned integrator does (`body_type == Dynamic && inv_mass != 0`, the
-/// mass test routed through [`is_dynamic_row`](crate::solver::contact) so the two
-/// sites cannot drift). Integrating a Static / Kinematic body here would advance
+/// This stage keys per-body integration on the
+/// [`Simulated`](crate::components::Simulated) bit (read non-filteringly via
+/// [`IsEnabled<Simulated>`](boyko_ecs::ecs::core::iters::query::IsEnabled))
+/// exactly as the solver-owned integrator does
+/// (`simulated && is_dynamic_row(inv_mass)`, the mass test routed through
+/// [`is_dynamic_row`](crate::solver::contact) so the two sites cannot drift).
+/// Integrating a parked / static / kinematic body here would advance
 /// it under gravity, which — once
 /// [`sync_transform_to_body`](crate::scene_sync::sync_transform_to_body) makes a
 /// Static / Kinematic `RigidBody.position` load-bearing (it copies the authored
@@ -126,7 +134,7 @@ const SDF_NORMAL_EPS: f32 = 1.0e-4;
 // `integrate_balls`.
 #[allow(clippy::needless_pass_by_value)]
 pub fn physics_integrate(
-    mut query: Query<(&mut RigidBody, &RigidBodyMass)>,
+    mut query: Query<(&mut RigidBody, &RigidBodyMass, IsEnabled<Simulated>)>,
     cfg: Res<PhysicsConfig>,
     dt: Res<FixedTime>,
     mode: Res<IntegrationMode>,
@@ -138,22 +146,28 @@ pub fn physics_integrate(
     }
     let dt = dt.delta_secs();
     let gravity = cfg.gravity;
-    query
-        .par_iter_mut()
-        .for_each(move |(body, mass): (&mut RigidBody, &RigidBodyMass)| {
-            // S5 / C2 parity: integrate ONLY the dynamic bodies, exactly the set
-            // the solver-owned integrator advances. A Static / Kinematic body's
-            // pose is gameplay-authored (copied IN by `sync_transform_to_body`)
+    query.par_iter_mut().for_each(
+        move |(body, mass, simulated): (&mut RigidBody, &RigidBodyMass, bool)| {
+            // Decision 3/4 / C2 parity: integrate ONLY a simulated dynamic body,
+            // exactly the set the solver-owned integrator advances. A parked
+            // (`Simulated` OFF) or `inv_mass == 0` body's pose is frozen-in-place
             // and must not drift under gravity. `is_dynamic_row` is the SAME
             // inv-mass predicate the coloring / solve write guards route through,
-            // so the integrate set cannot drift from the solve set.
-            if mass.body_type != BodyType::Dynamic || !is_dynamic_row(mass.inv_mass) {
+            // so the integrate set cannot drift from the solve set; the
+            // `Simulated` bit is AND-ed in (replacing the old `body_type ==
+            // Dynamic` discrimination).
+            if !simulated || !is_dynamic_row(mass.inv_mass) {
                 return;
             }
+            debug_assert!(
+                is_dynamic_row(mass.inv_mass),
+                "invariant: a Simulated body integrated here must have inv_mass != 0"
+            );
             body.linear_velocity = body.linear_velocity + gravity * dt;
             body.position = body.position + body.linear_velocity * dt;
             body.rotation = body.rotation.integrate(body.angular_velocity, dt);
-        });
+        },
+    );
 }
 
 /// Snapshots every body into the dense, row-indexed solver scratch and stamps
@@ -180,9 +194,19 @@ pub fn physics_integrate(
 // `clippy::needless_pass_by_value`: `ResMut<_>` / `Res<_>` are by-value
 // `SystemParam`s mutated/read through reborrows — the same false-positive as the
 // demo's `ResMut` systems.
-#[allow(clippy::needless_pass_by_value)]
+// `clippy::type_complexity`: the gather `Query<D>` SystemParam type must be named
+// concretely in the fn signature; the 6-term tuple is the irreducible projection
+// the gather needs (Decision 3 added the two `IsEnabled<>` data terms).
+#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 pub fn physics_gather(
-    query: Query<(&RigidBody, &RigidBodyMass, &Collider, Option<&Sensor>)>,
+    query: Query<(
+        &RigidBody,
+        &RigidBodyMass,
+        &Collider,
+        Option<&Sensor>,
+        IsEnabled<Simulated>,
+        IsEnabled<Kinematic>,
+    )>,
     mut scratch: ResMut<SolverScratch>,
     mut cfg: ResMut<PhysicsConfig>,
     fixed_time: Res<FixedTime>,
@@ -205,12 +229,27 @@ pub fn physics_gather(
     // identical to a world with no `Sensor` id (the 0%-gate; `is_sensor` is just
     // `false` everywhere there). The bit rides into `BodyState` for the
     // narrowphase to read.
+    //
+    // Decision 3: `IsEnabled<Simulated>` / `IsEnabled<Kinematic>` are likewise
+    // NON-filtering, order-preserving per-row data — they yield a `bool` for
+    // EVERY matched row without dropping/reordering, so the gather order is
+    // byte-identical to today (Encoding A; the same theorem as `Option<&Sensor>`).
+    // The bits ride into `BodyState`, where the integrate/solve gates AND
+    // `simulated` with the unchanged `is_dynamic_row` oracle.
     let mut bodies = scratch.bodies_build();
     bodies.clear();
-    for (body, mass, collider, sensor) in query.iter() {
-        bodies.push(BodyState::from_columns(body, mass, collider, sensor.is_some()));
+    for (body, mass, collider, sensor, simulated, kinematic) in query.iter() {
+        bodies.push(BodyState::from_columns(
+            body,
+            mass,
+            collider,
+            sensor.is_some(),
+            simulated,
+            kinematic,
+        ));
     }
     let n = bodies.len();
+    debug_assert_eq!(n, query.iter().count(), "Encoding A: gather must not drop a row");
     scratch.touched.reset(n);
 }
 
@@ -513,11 +552,13 @@ pub fn physics_narrowphase_sdf(
     let sensor_out = &mut manifolds.sensor_overlaps;
 
     for (row, body) in bodies.iter().enumerate() {
-        // Only DYNAMIC bodies collide against the SDF (a static/kinematic body's
-        // contact with an immovable field would be two immovable sides — no
-        // response; it also keeps the sentinel one-sided path exercised by a real
-        // moving body, matching the body-vs-static-floor convention).
-        if body.body_type != crate::components::BodyType::Dynamic || body.inv_mass == 0.0 {
+        // Only a SIMULATED dynamic body collides against the SDF (a parked /
+        // static / kinematic body's contact with an immovable field would be two
+        // immovable sides — no response; it also keeps the sentinel one-sided path
+        // exercised by a real moving body, matching the body-vs-static-floor
+        // convention). The `simulated` bit AND-ed with `is_dynamic_row` reproduces
+        // the old `body_type == Dynamic && inv_mass != 0` gate (Decision 3).
+        if !body.simulated || !is_dynamic_row(body.inv_mass) {
             continue;
         }
         let a = BodyIndex(row as u32);
@@ -1245,7 +1286,8 @@ mod o9_manifold_tests {
             inv_mass: 1.0,
             restitution: 0.0,
             friction: 0.5,
-            body_type: crate::components::BodyType::Dynamic,
+            simulated: true,
+            kinematic: false,
             is_sensor: false,
             shape: ColliderShape::Box { half_extents: half },
         }

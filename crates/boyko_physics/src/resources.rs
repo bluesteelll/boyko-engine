@@ -12,7 +12,7 @@ use boyko_macros::Resource;
 use boyko_threadpool::try_with_active_pool;
 use boyko_utils::bit_mask::bit_set_256::BitSet256;
 
-use crate::components::{BodyType, Collider, ColliderShape, RigidBody, RigidBodyMass};
+use crate::components::{Collider, ColliderShape, RigidBody, RigidBodyMass};
 use crate::manifold::{BodyIndex, Manifold};
 use crate::math::{Mat3, Quat, Vec3};
 use crate::narrowphase::axis_cache::BoxAxisCache;
@@ -2475,8 +2475,18 @@ pub struct BodyState {
     pub restitution: f32,
     /// Friction; read by the solve.
     pub friction: f32,
-    /// The body's simulation role.
-    pub body_type: BodyType,
+    /// `true` when this body's [`Simulated`](crate::components::Simulated) bit is
+    /// SET (Decision 3). Captured at gather from the per-row, order-preserving
+    /// [`IsEnabled<Simulated>`](boyko_ecs::ecs::core::iters::query::IsEnabled)
+    /// datum (Encoding A: never drops/reorders a row). Gates integration and
+    /// write-back: a body integrates / is advanced only when `simulated &&
+    /// is_dynamic_row(inv_mass)` (the compound truth value that REPLACES the old
+    /// `body_type == Dynamic && inv_mass != 0`).
+    pub simulated: bool,
+    /// `true` when this body's [`Kinematic`](crate::components::Kinematic) bit is
+    /// SET (Decision 3). Captured at gather; its velocity feeds the one-sided
+    /// contact response while its pose stays frozen (kinematic MOTION unbuilt).
+    pub kinematic: bool,
     /// `true` when this body carries the [`Sensor`](crate::components::Sensor)
     /// marker (std-lib S5). Projected at gather from the entity's `Sensor`
     /// archetype membership. The narrowphase routes any pair where EITHER body
@@ -2521,12 +2531,20 @@ impl BodyState {
     /// [`Sensor`](crate::components::Sensor) archetype-membership bit; it is a
     /// passthrough the gather supplies from the per-row `Option<&Sensor>` fetch
     /// (the projection, not a column on `Collider`).
+    ///
+    /// `simulated` / `kinematic` (Decision 3) are the per-row EnableTag bits the
+    /// gather supplies from the order-preserving
+    /// [`IsEnabled<Simulated>`](boyko_ecs::ecs::core::iters::query::IsEnabled) /
+    /// `IsEnabled<Kinematic>` data — pure passthroughs (Encoding A: never
+    /// drops/reorders a row).
     #[inline]
     pub fn from_columns(
         body: &RigidBody,
         mass: &RigidBodyMass,
         collider: &Collider,
         is_sensor: bool,
+        simulated: bool,
+        kinematic: bool,
     ) -> Self {
         let inv_inertia_local = local_inv_inertia(collider.shape, mass.inv_mass);
         // World tensor = R₀ · I⁻¹_local · R₀ᵀ (rotates the principal-axis
@@ -2543,7 +2561,8 @@ impl BodyState {
             inv_mass: mass.inv_mass,
             restitution: mass.restitution,
             friction: mass.friction,
-            body_type: mass.body_type,
+            simulated,
+            kinematic,
             is_sensor,
             shape: collider.shape,
         }
@@ -2787,7 +2806,7 @@ mod tests {
     //! gather builds — the values the solver's effective mass depends on.
 
     use super::*;
-    use crate::components::{BodyType, ColliderShape};
+    use crate::components::ColliderShape;
 
     /// Builds a `RigidBody` at the given orientation with everything else default.
     fn body_with_rotation(rotation: Quat) -> RigidBody {
@@ -2807,11 +2826,6 @@ mod tests {
             inv_mass,
             restitution: 0.5,
             friction: 0.3,
-            body_type: if inv_mass == 0.0 {
-                BodyType::Static
-            } else {
-                BodyType::Dynamic
-            },
         }
     }
 
@@ -2832,7 +2846,7 @@ mod tests {
         let mass = mass_with_inv_mass(2.0);
         let collider = collider_shape(ColliderShape::Sphere { radius: 0.5 });
 
-        let state = BodyState::from_columns(&body, &mass, &collider, false);
+        let state = BodyState::from_columns(&body, &mass, &collider, false, true, false);
         let i = state.inv_inertia_local;
         let expected = 20.0_f32;
         assert!((i.rows[0].x - expected).abs() < 1e-4, "Ixx⁻¹: {}", i.rows[0].x);
@@ -2858,7 +2872,7 @@ mod tests {
             half_extents: Vec3::new(1.0, 2.0, 3.0),
         });
 
-        let state = BodyState::from_columns(&body, &mass, &collider, false);
+        let state = BodyState::from_columns(&body, &mass, &collider, false, true, false);
         let i = state.inv_inertia_local;
         assert!((i.rows[0].x - 36.0 / 52.0).abs() < 1e-5, "Ixx⁻¹: {}", i.rows[0].x);
         assert!((i.rows[1].y - 36.0 / 40.0).abs() < 1e-5, "Iyy⁻¹: {}", i.rows[1].y);
@@ -2873,7 +2887,7 @@ mod tests {
         let mass = mass_with_inv_mass(0.0);
         let collider = collider_shape(ColliderShape::Sphere { radius: 0.5 });
 
-        let state = BodyState::from_columns(&body, &mass, &collider, false);
+        let state = BodyState::from_columns(&body, &mass, &collider, false, true, false);
         assert_eq!(state.inv_inertia_local, Mat3::ZERO, "static local tensor is ZERO");
         // World tensor R·ZERO·Rᵀ is also ZERO regardless of orientation.
         assert_eq!(state.inv_inertia, Mat3::ZERO, "static world tensor is ZERO");
@@ -2888,7 +2902,7 @@ mod tests {
         let mass = mass_with_inv_mass(1.0);
         let collider = collider_shape(ColliderShape::Sphere { radius: 0.0 });
 
-        let state = BodyState::from_columns(&body, &mass, &collider, false);
+        let state = BodyState::from_columns(&body, &mass, &collider, false, true, false);
         assert_eq!(
             state.inv_inertia_local,
             Mat3::ZERO,
@@ -2906,7 +2920,7 @@ mod tests {
             half_extents: Vec3::new(1.0, 2.0, 3.0),
         });
 
-        let state = BodyState::from_columns(&body, &mass, &collider, false);
+        let state = BodyState::from_columns(&body, &mass, &collider, false, true, false);
         assert_eq!(
             state.inv_inertia, state.inv_inertia_local,
             "world tensor equals local tensor when R₀ == IDENTITY"
@@ -2925,7 +2939,7 @@ mod tests {
             half_extents: Vec3::new(1.0, 2.0, 3.0),
         });
 
-        let state = BodyState::from_columns(&body, &mass, &collider, false);
+        let state = BodyState::from_columns(&body, &mass, &collider, false, true, false);
         let w = state.inv_inertia;
         assert!((w.rows[0].y - w.rows[1].x).abs() < 1e-5, "M[0][1]==M[1][0]");
         assert!((w.rows[0].z - w.rows[2].x).abs() < 1e-5, "M[0][2]==M[2][0]");

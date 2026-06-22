@@ -9,17 +9,24 @@
 //! Both are named `#[derive(Bundle)]` structs (the derive rejects tuples /
 //! generics), so a repeated spawn hits the per-impl Phase-8.5 static bundle cache.
 //!
-//! # The GPU instance + per-frame enable bit are NOT bundle fields
+//! # The GPU instance + per-frame enable bits are NOT bundle fields
 //!
-//! As with the scene bundles, neither `RenderEnabled` (a bitset tag) nor the dense
-//! `Gpu3dInstance` column is a field here — the render layer attaches them after
-//! spawning. A spawned [`DynamicBody`] becomes drawable by additionally inserting
-//! a `Gpu3dInstance` and enabling `RenderEnabled` on the entity.
+//! As with the scene bundles, neither `RenderEnabled` nor the
+//! [`Simulated`](crate::components::Simulated) /
+//! [`Kinematic`](crate::components::Kinematic) bits (all bitset tags) nor the
+//! dense `Gpu3dInstance` column is a field here — bitset tags have NO column, so
+//! they cannot be bundle fields. The owner attaches them after spawning: a
+//! [`DynamicBody`] becomes drawable by inserting a `Gpu3dInstance` and enabling
+//! `RenderEnabled`, and it ACTUALLY SIMULATES only once its `Simulated` bit is
+//! set (Decision 6). Spawn then `commands.entity(e).enable::<Simulated>()`, or
+//! use the [`spawn_dynamic`] helper which does both in one call.
 
+use boyko_ecs::ecs::core::entity::entity::Entity;
+use boyko_ecs::ecs::core::system::Commands;
 use boyko_macros::Bundle;
 use boyko_scene::{GlobalTransform, MaterialHandle, MeshHandle, Transform, Visibility};
 
-use crate::components::{Collider, RigidBody, RigidBodyMass, Sensor};
+use crate::components::{Collider, RigidBody, RigidBodyMass, Sensor, Simulated};
 
 /// A fully simulated, drawable dynamic body (arity 8).
 ///
@@ -48,6 +55,23 @@ pub struct DynamicBody {
     pub collider: Collider,
     /// Persisted authoring visibility.
     pub visibility: Visibility,
+}
+
+/// Spawns a [`DynamicBody`] and enables its
+/// [`Simulated`](crate::components::Simulated) bit in one deferred call, returning
+/// the new [`Entity`] (Decision 6).
+///
+/// The `Simulated` bit cannot be a bundle field (a bitset tag has no column), so a
+/// raw `commands.spawn(bundle)` yields a body whose pose is FROZEN until the bit is
+/// set. This helper is the one-call spawn-then-enable for the common "I want a body
+/// that simulates immediately" case; the toggle is deferred to the command apply
+/// window (O(1), no archetype migration). To park a body later, call
+/// `commands.entity(e).disable::<Simulated>()`.
+#[inline]
+pub fn spawn_dynamic(commands: &mut Commands<'_>, bundle: DynamicBody) -> Entity {
+    let mut e = commands.spawn(bundle);
+    e.enable::<Simulated>();
+    e.id()
 }
 
 /// A trigger / sensor volume: a placed collider that reports overlaps without

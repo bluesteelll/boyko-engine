@@ -28,7 +28,7 @@
 //! These are pure correctness + memory-safety checks; the full-physics resting
 //! behavior is the schedule-driven `sdf_collision.rs` gate.
 
-use boyko_physics::components::{BodyType, Collider, ColliderShape, RigidBody, RigidBodyMass};
+use boyko_physics::components::{Collider, ColliderShape, RigidBody, RigidBodyMass};
 use boyko_physics::manifold::{ContactPoint, Manifold, SDF_SENTINEL};
 use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::resources::{BodyState, PhysicsConfig, SolverScratch};
@@ -48,7 +48,6 @@ fn one_body_scratch(position: Vec3, velocity: Vec3, radius: f32) -> SolverScratc
         inv_mass: 1.0,
         restitution: 0.0,
         friction: 0.5,
-        body_type: BodyType::Dynamic,
     };
     let collider = Collider {
         shape: ColliderShape::Sphere { radius },
@@ -57,7 +56,7 @@ fn one_body_scratch(position: Vec3, velocity: Vec3, radius: f32) -> SolverScratc
     };
 
     let mut scratch = SolverScratch::with_capacity(1);
-    scratch.set_bodies(&[BodyState::from_columns(&body, &mass, &collider, false)]);
+    scratch.set_bodies(&[BodyState::from_columns(&body, &mass, &collider, false, true, false)]);
     // The solver's `write_back` calls `touched.set(row)`; the mask must be sized
     // to the row count first (the gather stage does this in the full pipeline).
     scratch.touched.reset(scratch.bodies().len());

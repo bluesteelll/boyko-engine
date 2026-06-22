@@ -60,11 +60,10 @@
 use boyko_ecs::ecs::core::component::scratch::ScratchColumn;
 use boyko_macros::Resource as ResourceDerive;
 
-use super::contact::{BodyEffective, effective_mass, tangent_basis};
+use super::contact::{BodyEffective, effective_mass, is_dynamic_row, tangent_basis};
 use super::simd;
 use super::warm_start::{self, WarmStartTable};
 use super::RigidSolver;
-use crate::components::BodyType;
 use crate::manifold::{Manifold, SDF_SENTINEL};
 use crate::math::{Mat3, Vec3};
 use crate::resources::{BodyState, PhysicsConfig, SolverScratch};
@@ -736,12 +735,13 @@ impl SoftStepSolver {
         let n = eff.len();
         for row in 0..n {
             // Touch exactly the rows the substep loop integrated (the same
-            // `Dynamic && inv_mass != 0` gate), so a free body's integrated state
-            // is written back and a static/kinematic row stays bit-identical.
-            // The snapshot read + write borrows are disjoint from `eff` (distinct
-            // ScratchColumns), bridged through the per-row helper.
-            let is_dynamic = scratch.bodies()[row].body_type == BodyType::Dynamic;
-            if is_dynamic && eff[row].inv_mass != 0.0 {
+            // `simulated && is_dynamic_row(inv_mass)` gate), so a free body's
+            // integrated state is written back and a parked/static/kinematic row
+            // stays bit-identical. The snapshot read + write borrows are disjoint
+            // from `eff` (distinct ScratchColumns), bridged through the per-row
+            // helper.
+            let simulated = scratch.bodies()[row].simulated;
+            if simulated && is_dynamic_row(eff[row].inv_mass) {
                 Self::write_body(scratch, row, &eff[row]);
             }
         }
@@ -841,7 +841,7 @@ impl RigidSolver for SoftStepSolver {
         let has_dynamic = scratch
             .bodies()
             .iter()
-            .any(|b| b.body_type == BodyType::Dynamic && b.inv_mass != 0.0);
+            .any(|b| b.simulated && is_dynamic_row(b.inv_mass));
         if !has_dynamic {
             return;
         }

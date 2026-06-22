@@ -34,7 +34,7 @@
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 
-use boyko_physics::components::{BodyType, Collider, ColliderShape, RigidBody, RigidBodyMass};
+use boyko_physics::components::{Collider, ColliderShape, RigidBody, RigidBodyMass};
 use boyko_physics::manifold::{BodyIndex, ContactPoint, Manifold};
 use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::resources::{BodyState, ConstraintGraph, PhysicsConfig, SolverScratch};
@@ -48,16 +48,16 @@ const MIN_PARALLEL_SLOTS_PER_COLOR: u32 = 256;
 
 fn dyn_sphere(position: Vec3) -> BodyState {
     let body = RigidBody { position, linear_velocity: Vec3::ZERO, rotation: Quat::IDENTITY, angular_velocity: Vec3::ZERO };
-    let mass = RigidBodyMass { inv_inertia: Mat3::IDENTITY, inv_mass: 1.0, restitution: 0.0, friction: 0.5, body_type: BodyType::Dynamic };
+    let mass = RigidBodyMass { inv_inertia: Mat3::IDENTITY, inv_mass: 1.0, restitution: 0.0, friction: 0.5 };
     let collider = Collider { shape: ColliderShape::Sphere { radius: 0.5 }, layer: 1, mask: 1 };
-    BodyState::from_columns(&body, &mass, &collider, false)
+    BodyState::from_columns(&body, &mass, &collider, false, true, false)
 }
 
 fn static_floor() -> BodyState {
     let body = RigidBody { position: Vec3::new(0.0, -50.0, 0.0), linear_velocity: Vec3::ZERO, rotation: Quat::IDENTITY, angular_velocity: Vec3::ZERO };
-    let mass = RigidBodyMass { inv_inertia: Mat3::ZERO, inv_mass: 0.0, restitution: 0.0, friction: 0.5, body_type: BodyType::Static };
+    let mass = RigidBodyMass { inv_inertia: Mat3::ZERO, inv_mass: 0.0, restitution: 0.0, friction: 0.5 };
     let collider = Collider { shape: ColliderShape::Sphere { radius: 50.0 }, layer: 1, mask: 1 };
-    BodyState::from_columns(&body, &mass, &collider, false)
+    BodyState::from_columns(&body, &mass, &collider, false, false, false)
 }
 
 fn manifold(a: u32, b: u32, normal: Vec3, anchor: Vec3) -> Manifold {

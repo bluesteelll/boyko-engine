@@ -35,7 +35,7 @@ use boyko_ecs::ecs::core::time::FixedTime;
 use boyko_threadpool::{ThreadPool, ThreadPoolBuilder};
 
 use boyko_physics::components::{
-    BodyType, Collider, ColliderShape, RigidBody, RigidBodyBundle, RigidBodyMass,
+    Collider, ColliderShape, RigidBody, RigidBodyBundle, RigidBodyMass, Simulated,
 };
 use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::plugin::add_physics_colored_solve;
@@ -63,7 +63,7 @@ fn spawn_body(
     collider: Collider,
 ) -> Entity {
     let archetype = world.bundle_archetype_id_for::<RigidBodyBundle>();
-    world
+    let e = world
         .create_entity(
             archetype,
             &[
@@ -72,7 +72,12 @@ fn spawn_body(
                 (Collider::component_id(), as_bytes(&collider)),
             ],
         )
-        .expect("invariant: RigidBodyBundle archetype accepts the three columns")
+        .expect("invariant: RigidBodyBundle archetype accepts the three columns");
+    // Decision 3/6: enable `Simulated` on every spawned body (byte-identical to the
+    // old `BodyType` — a static body, inv_mass == 0, stays gated off; no kinematic
+    // body is spawned here).
+    world.enable::<Simulated>(e);
+    e
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -80,7 +85,6 @@ fn sphere(
     position: Vec3,
     radius: f32,
     inv_mass: f32,
-    body_type: BodyType,
 ) -> (RigidBody, RigidBodyMass, Collider) {
     let body = RigidBody {
         position,
@@ -93,7 +97,6 @@ fn sphere(
         inv_mass,
         restitution: 0.0,
         friction: 0.5,
-        body_type,
     };
     let collider = Collider {
         shape: ColliderShape::Sphere { radius },
@@ -133,11 +136,11 @@ fn im1_desync_never_fires_under_topology_churn_with_sleeping() {
 
     // A small resting stack: a static floor + two stacked dynamic spheres (radius
     // 0.5, centres at y = 0.5 and y = 1.5 over a floor top at y = 0).
-    let (fb, fm, fc) = sphere(Vec3::new(0.0, -0.5, 0.0), 0.5, 0.0, BodyType::Static);
+    let (fb, fm, fc) = sphere(Vec3::new(0.0, -0.5, 0.0), 0.5, 0.0);
     spawn_body(&mut world, fb, fm, fc);
-    let (b0, m0, c0) = sphere(Vec3::new(0.0, 0.5, 0.0), 0.5, 1.0, BodyType::Dynamic);
+    let (b0, m0, c0) = sphere(Vec3::new(0.0, 0.5, 0.0), 0.5, 1.0);
     spawn_body(&mut world, b0, m0, c0);
-    let (b1, m1, c1) = sphere(Vec3::new(0.0, 1.5, 0.0), 0.5, 1.0, BodyType::Dynamic);
+    let (b1, m1, c1) = sphere(Vec3::new(0.0, 1.5, 0.0), 0.5, 1.0);
     spawn_body(&mut world, b1, m1, c1);
 
     let dt = 1.0 / 60.0;
@@ -168,7 +171,7 @@ fn im1_desync_never_fires_under_topology_churn_with_sleeping() {
         // Spawn a faller a little above the pile (alternating x so it sometimes
         // lands on the pile and sometimes beside it — both merge/split variants).
         let x = if cycle % 2 == 0 { 0.0 } else { 5.0 };
-        let (sb, sm, sc) = sphere(Vec3::new(x, 4.0, 0.0), 0.5, 1.0, BodyType::Dynamic);
+        let (sb, sm, sc) = sphere(Vec3::new(x, 4.0, 0.0), 0.5, 1.0);
         let faller = spawn_body(&mut world, sb, sm, sc);
 
         // Run with the new body present (island merge / new awake row).
@@ -213,11 +216,11 @@ fn im1_desync_never_fires_under_topology_churn_with_sleeping() {
 #[test]
 fn despawning_a_slept_body_does_not_desync_apply() {
     let mut world = EcsMaster::new();
-    let (fb, fm, fc) = sphere(Vec3::new(0.0, -0.5, 0.0), 0.5, 0.0, BodyType::Static);
+    let (fb, fm, fc) = sphere(Vec3::new(0.0, -0.5, 0.0), 0.5, 0.0);
     spawn_body(&mut world, fb, fm, fc);
-    let (b0, m0, c0) = sphere(Vec3::new(0.0, 0.5, 0.0), 0.5, 1.0, BodyType::Dynamic);
+    let (b0, m0, c0) = sphere(Vec3::new(0.0, 0.5, 0.0), 0.5, 1.0);
     let body0 = spawn_body(&mut world, b0, m0, c0);
-    let (b1, m1, c1) = sphere(Vec3::new(3.0, 0.5, 0.0), 0.5, 1.0, BodyType::Dynamic);
+    let (b1, m1, c1) = sphere(Vec3::new(3.0, 0.5, 0.0), 0.5, 1.0);
     spawn_body(&mut world, b1, m1, c1);
 
     let dt = 1.0 / 60.0;

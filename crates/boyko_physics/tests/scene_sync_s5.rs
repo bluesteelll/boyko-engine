@@ -33,7 +33,7 @@ use boyko_macros::Bundle;
 use boyko_threadpool::{ThreadPool, ThreadPoolBuilder};
 
 use boyko_physics::components::{
-    BodyType, Collider, ColliderShape, RigidBody, RigidBodyMass, Sensor,
+    Collider, ColliderShape, Kinematic, RigidBody, RigidBodyMass, Sensor, Simulated,
 };
 use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::plugin::add_physics_systems_with_scene_sync;
@@ -90,14 +90,27 @@ fn serial_pool() -> Arc<ThreadPool> {
     ThreadPoolBuilder::new().num_threads(1).build()
 }
 
-/// A `RigidBodyMass` with the given body type (unit mass for dynamic, the static
+/// Local replacement for the deleted `BodyType` enum — the test's body-role intent
+/// (Decision 2). It maps to the inverse mass plus the `Simulated` / `Kinematic`
+/// EnableTag bits the spawn helpers set: `Dynamic` ⇒ `inv_mass = 1`, `Simulated`
+/// SET; `Static` / `Kinematic` ⇒ `inv_mass = 0`, `Simulated` CLEAR; `Kinematic`
+/// additionally sets the `Kinematic` bit.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BodyKind {
+    Static,
+    Kinematic,
+    Dynamic,
+}
+
+/// A `RigidBodyMass` with the given body kind (unit mass for dynamic, the static
 /// `inv_mass == 0` for static/kinematic so the integrator and solver both treat
-/// it as immovable).
-fn mass_for(body_type: BodyType) -> RigidBodyMass {
-    let inv_mass = match body_type {
-        BodyType::Dynamic => 1.0,
+/// it as immovable). The runtime `Simulated` / `Kinematic` bits are applied by the
+/// spawn helpers (the field is gone — Decision 2/3).
+fn mass_for(kind: BodyKind) -> RigidBodyMass {
+    let inv_mass = match kind {
+        BodyKind::Dynamic => 1.0,
         // Static / kinematic bodies are immovable (the solver/integrate skip them).
-        BodyType::Static | BodyType::Kinematic => 0.0,
+        BodyKind::Static | BodyKind::Kinematic => 0.0,
     };
     let inv_inertia = if inv_mass == 0.0 {
         Mat3::ZERO
@@ -109,7 +122,6 @@ fn mass_for(body_type: BodyType) -> RigidBodyMass {
         inv_mass,
         restitution: 0.5,
         friction: 0.3,
-        body_type,
     }
 }
 
@@ -122,17 +134,30 @@ fn unit_sphere() -> Collider {
     }
 }
 
-/// Spawns a [`SyncedBody`] and returns its entity handle.
+/// Applies the EnableTag bits for `kind` to a freshly spawned body (Decision 3/6):
+/// `Dynamic` ⇒ `Simulated` SET; `Kinematic` ⇒ `Kinematic` SET (and `Simulated`
+/// CLEAR); `Static` ⇒ neither. The bit, not a field, now carries the body role.
+fn apply_kind_bits(world: &mut EcsMaster, e: Entity, kind: BodyKind) {
+    match kind {
+        BodyKind::Dynamic => world.enable::<Simulated>(e),
+        BodyKind::Kinematic => world.enable::<Kinematic>(e),
+        BodyKind::Static => {}
+    }
+}
+
+/// Spawns a [`SyncedBody`] and returns its entity handle, applying `kind`'s
+/// EnableTag bits.
 fn spawn_synced(
     world: &mut EcsMaster,
     body: RigidBody,
     mass: RigidBodyMass,
     collider: Collider,
     transform: Transform,
+    kind: BodyKind,
 ) -> Entity {
     let archetype = world.bundle_archetype_id_for::<SyncedBody>();
     let global = GlobalTransform::default();
-    world
+    let e = world
         .create_entity(
             archetype,
             &[
@@ -143,21 +168,25 @@ fn spawn_synced(
                 (GlobalTransform::component_id(), as_bytes(&global)),
             ],
         )
-        .expect("invariant: SyncedBody archetype accepts its five columns")
+        .expect("invariant: SyncedBody archetype accepts its five columns");
+    apply_kind_bits(world, e, kind);
+    e
 }
 
-/// Spawns a [`SyncedSensorBody`] and returns its entity handle.
+/// Spawns a [`SyncedSensorBody`] and returns its entity handle, applying `kind`'s
+/// EnableTag bits.
 fn spawn_synced_sensor(
     world: &mut EcsMaster,
     body: RigidBody,
     mass: RigidBodyMass,
     collider: Collider,
     transform: Transform,
+    kind: BodyKind,
 ) -> Entity {
     let archetype = world.bundle_archetype_id_for::<SyncedSensorBody>();
     let global = GlobalTransform::default();
     let sensor = Sensor;
-    world
+    let e = world
         .create_entity(
             archetype,
             &[
@@ -169,7 +198,9 @@ fn spawn_synced_sensor(
                 (GlobalTransform::component_id(), as_bytes(&global)),
             ],
         )
-        .expect("invariant: SyncedSensorBody archetype accepts its six columns")
+        .expect("invariant: SyncedSensorBody archetype accepts its six columns");
+    apply_kind_bits(world, e, kind);
+    e
 }
 
 /// Builds a fixed schedule with the physics pipeline + S5 scene sync wired for
@@ -201,9 +232,10 @@ fn dynamic_body_pose_flows_to_transform_and_global() {
     let entity = spawn_synced(
         &mut world,
         body,
-        mass_for(BodyType::Dynamic),
+        mass_for(BodyKind::Dynamic),
         unit_sphere(),
         Transform::from_translation(start),
+        BodyKind::Dynamic,
     );
 
     let dt = 1.0 / 64.0;
@@ -278,13 +310,14 @@ fn kinematic_transform_drives_body() {
     let entity = spawn_synced(
         &mut world,
         stale_body,
-        mass_for(BodyType::Kinematic),
+        mass_for(BodyKind::Kinematic),
         unit_sphere(),
         Transform {
             translation: authored,
             rotation: authored_rot,
             scale: Vec3::ONE,
         },
+        BodyKind::Kinematic,
     );
 
     let dt = 1.0 / 64.0;
@@ -330,9 +363,10 @@ fn static_transform_drives_body() {
     let entity = spawn_synced(
         &mut world,
         stale_body,
-        mass_for(BodyType::Static),
+        mass_for(BodyKind::Static),
         unit_sphere(),
         Transform::from_translation(authored),
+        BodyKind::Static,
     );
 
     let dt = 1.0 / 64.0;
@@ -375,9 +409,10 @@ fn run_overlap_frame(sensor: bool) -> (Vec3, usize, usize) {
     let dyn_entity = spawn_synced(
         &mut world,
         dyn_body,
-        mass_for(BodyType::Dynamic),
+        mass_for(BodyKind::Dynamic),
         unit_sphere(),
         Transform::from_translation(Vec3::ZERO),
+        BodyKind::Dynamic,
     );
 
     // A deeply overlapping static body at x = 0.4 (center distance 0.4 < 1.0 sum
@@ -389,12 +424,12 @@ fn run_overlap_frame(sensor: bool) -> (Vec3, usize, usize) {
         rotation: Quat::IDENTITY,
         angular_velocity: Vec3::ZERO,
     };
-    let wall_mass = mass_for(BodyType::Static);
+    let wall_mass = mass_for(BodyKind::Static);
     let wall_tf = Transform::from_translation(wall_pos);
     if sensor {
-        spawn_synced_sensor(&mut world, wall_body, wall_mass, unit_sphere(), wall_tf);
+        spawn_synced_sensor(&mut world, wall_body, wall_mass, unit_sphere(), wall_tf, BodyKind::Static);
     } else {
-        spawn_synced(&mut world, wall_body, wall_mass, unit_sphere(), wall_tf);
+        spawn_synced(&mut world, wall_body, wall_mass, unit_sphere(), wall_tf, BodyKind::Static);
     }
 
     let dt = 1.0 / 64.0;
@@ -505,9 +540,10 @@ fn no_parallel_pose_transform_and_body_agree() {
     let entity = spawn_synced(
         &mut world,
         body,
-        mass_for(BodyType::Dynamic),
+        mass_for(BodyKind::Dynamic),
         unit_sphere(),
         Transform::from_translation(start),
+        BodyKind::Dynamic,
     );
 
     let dt = 1.0 / 64.0;
@@ -566,9 +602,10 @@ fn scene_sync_does_not_perturb_solve_bit_identical() {
         let entity = spawn_synced(
             &mut world,
             body,
-            mass_for(BodyType::Dynamic),
+            mass_for(BodyKind::Dynamic),
             unit_sphere(),
             Transform::from_translation(start),
+            BodyKind::Dynamic,
         );
 
         let dt = 1.0 / 64.0;
@@ -622,9 +659,10 @@ fn adding_sensor_does_not_perturb_nonsensor_solve() {
                 rotation: Quat::IDENTITY,
                 angular_velocity: Vec3::ZERO,
             },
-            mass_for(BodyType::Dynamic),
+            mass_for(BodyKind::Dynamic),
             unit_sphere(),
             Transform::from_translation(Vec3::ZERO),
+            BodyKind::Dynamic,
         );
         // The solid wall the dynamic body actually hits.
         let wall_pos = Vec3::new(0.4, 0.0, 0.0);
@@ -636,9 +674,10 @@ fn adding_sensor_does_not_perturb_nonsensor_solve() {
                 rotation: Quat::IDENTITY,
                 angular_velocity: Vec3::ZERO,
             },
-            mass_for(BodyType::Static),
+            mass_for(BodyKind::Static),
             unit_sphere(),
             Transform::from_translation(wall_pos),
+            BodyKind::Static,
         );
         if extra_sensor {
             // A sensor body FAR away — it overlaps nothing, so it adds a sensor
@@ -652,9 +691,10 @@ fn adding_sensor_does_not_perturb_nonsensor_solve() {
                     rotation: Quat::IDENTITY,
                     angular_velocity: Vec3::ZERO,
                 },
-                mass_for(BodyType::Static),
+                mass_for(BodyKind::Static),
                 unit_sphere(),
                 Transform::from_translation(far),
+                BodyKind::Static,
             );
         }
 

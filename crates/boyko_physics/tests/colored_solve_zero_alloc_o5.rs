@@ -28,12 +28,13 @@ use std::sync::Arc;
 
 use boyko_ecs::ecs::core::component::component::Component;
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
+use boyko_ecs::ecs::core::entity::entity::Entity;
 use boyko_ecs::ecs::core::schedule::{Schedule, ScheduleBuilder};
 use boyko_ecs::ecs::core::time::FixedTime;
 use boyko_threadpool::{ThreadPool, ThreadPoolBuilder};
 
 use boyko_physics::components::{
-    BodyType, Collider, ColliderShape, RigidBody, RigidBodyBundle, RigidBodyMass,
+    Collider, ColliderShape, RigidBody, RigidBodyBundle, RigidBodyMass, Simulated,
 };
 use boyko_physics::manifold::{BodyIndex, ContactPoint, Manifold};
 use boyko_physics::math::{Mat3, Quat, Vec3};
@@ -53,7 +54,12 @@ fn serial_pool() -> Arc<ThreadPool> {
     ThreadPoolBuilder::new().num_threads(1).build()
 }
 
-fn spawn_body(world: &mut EcsMaster, body: RigidBody, mass: RigidBodyMass, collider: Collider) {
+fn spawn_body(
+    world: &mut EcsMaster,
+    body: RigidBody,
+    mass: RigidBodyMass,
+    collider: Collider,
+) -> Entity {
     let archetype = world.bundle_archetype_id_for::<RigidBodyBundle>();
     world
         .create_entity(
@@ -64,10 +70,10 @@ fn spawn_body(world: &mut EcsMaster, body: RigidBody, mass: RigidBodyMass, colli
                 (Collider::component_id(), as_bytes(&collider)),
             ],
         )
-        .expect("invariant: RigidBodyBundle archetype accepts the three columns");
+        .expect("invariant: RigidBodyBundle archetype accepts the three columns")
 }
 
-fn sphere_state(position: Vec3, inv_mass: f32, body_type: BodyType) -> BodyState {
+fn sphere_state(position: Vec3, inv_mass: f32, simulated: bool) -> BodyState {
     let body = RigidBody {
         position,
         linear_velocity: Vec3::ZERO,
@@ -79,17 +85,20 @@ fn sphere_state(position: Vec3, inv_mass: f32, body_type: BodyType) -> BodyState
         inv_mass,
         restitution: 0.0,
         friction: 0.5,
-        body_type,
     };
     let collider = Collider {
         shape: ColliderShape::Sphere { radius: 0.5 },
         layer: 1,
         mask: 1,
     };
-    BodyState::from_columns(&body, &mass, &collider, false)
+    BodyState::from_columns(&body, &mass, &collider, false, simulated, false)
 }
 
-fn sphere_components(position: Vec3, radius: f32, inv_mass: f32, body_type: BodyType) -> (RigidBody, RigidBodyMass, Collider) {
+fn sphere_components(
+    position: Vec3,
+    radius: f32,
+    inv_mass: f32,
+) -> (RigidBody, RigidBodyMass, Collider) {
     let body = RigidBody {
         position,
         linear_velocity: Vec3::ZERO,
@@ -101,7 +110,6 @@ fn sphere_components(position: Vec3, radius: f32, inv_mass: f32, body_type: Body
         inv_mass,
         restitution: 0.3,
         friction: 0.5,
-        body_type,
     };
     let collider = Collider {
         shape: ColliderShape::Sphere { radius },
@@ -137,9 +145,9 @@ fn colored_solve_does_no_per_step_alloc_in_steady_state() {
     let n_dyn = 64usize;
     let floor_row = n_dyn as u32;
     let mut bodies: Vec<BodyState> = (0..n_dyn)
-        .map(|i| sphere_state(Vec3::new(0.0, 1.0 + i as f32 * 0.99, 0.0), 1.0, BodyType::Dynamic))
+        .map(|i| sphere_state(Vec3::new(0.0, 1.0 + i as f32 * 0.99, 0.0), 1.0, true))
         .collect();
-    bodies.push(sphere_state(Vec3::new(0.0, -10.0, 0.0), 0.0, BodyType::Static));
+    bodies.push(sphere_state(Vec3::new(0.0, -10.0, 0.0), 0.0, false));
 
     // Build a fixed manifold set: each dyn sphere on the one below + the bottom on
     // the floor (a connected stack → 1 island, alternating colors).
@@ -214,10 +222,11 @@ fn colored_step_extra_alloc_is_bounded_dispatch_overhead() {
             Vec3::new(0.02, 3.7, 0.03),
         ];
         for &p in &column {
-            let (b, m, c) = sphere_components(p, 0.5, 1.0, BodyType::Dynamic);
-            spawn_body(world, b, m, c);
+            let (b, m, c) = sphere_components(p, 0.5, 1.0);
+            let e = spawn_body(world, b, m, c);
+            world.enable::<Simulated>(e);
         }
-        let (b, m, c) = sphere_components(Vec3::new(0.0, -10.0, 0.0), 10.0, 0.0, BodyType::Static);
+        let (b, m, c) = sphere_components(Vec3::new(0.0, -10.0, 0.0), 10.0, 0.0);
         spawn_body(world, b, m, c);
     }
 

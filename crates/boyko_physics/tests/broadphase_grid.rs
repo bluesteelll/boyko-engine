@@ -443,7 +443,7 @@ mod world_ab {
     use boyko_threadpool::ThreadPoolBuilder;
 
     use boyko_physics::components::{
-        BodyType, Collider, ColliderShape, RigidBody, RigidBodyBundle, RigidBodyMass,
+        Collider, ColliderShape, RigidBody, RigidBodyBundle, RigidBodyMass,
     };
     use boyko_physics::manifold::BodyIndex;
     use boyko_physics::math::{Mat3, Quat, Vec3};
@@ -473,7 +473,6 @@ mod world_ab {
             inv_mass: 1.0,
             restitution: 0.5,
             friction: 0.3,
-            body_type: BodyType::Dynamic,
         };
         let collider = Collider {
             shape: ColliderShape::Sphere { radius },

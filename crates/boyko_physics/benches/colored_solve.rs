@@ -27,7 +27,7 @@ use boyko_threadpool::ThreadPoolBuilder;
 
 // boyko_physics does not re-export RigidBody/Collider through a bench-friendly POD
 // builder, so build BodyState via from_columns with the public component structs.
-use boyko_physics::components::{BodyType, Collider, ColliderShape, RigidBody, RigidBodyMass};
+use boyko_physics::components::{Collider, ColliderShape, RigidBody, RigidBodyMass};
 
 /// A dynamic sphere body state at `position`.
 fn dyn_sphere(position: Vec3) -> BodyState {
@@ -42,14 +42,13 @@ fn dyn_sphere(position: Vec3) -> BodyState {
         inv_mass: 1.0,
         restitution: 0.0,
         friction: 0.5,
-        body_type: BodyType::Dynamic,
     };
     let collider = Collider {
         shape: ColliderShape::Sphere { radius: 0.5 },
         layer: 1,
         mask: 1,
     };
-    BodyState::from_columns(&body, &mass, &collider, false)
+    BodyState::from_columns(&body, &mass, &collider, false, true, false)
 }
 
 /// A static floor sphere.
@@ -65,14 +64,13 @@ fn static_floor() -> BodyState {
         inv_mass: 0.0,
         restitution: 0.0,
         friction: 0.5,
-        body_type: BodyType::Static,
     };
     let collider = Collider {
         shape: ColliderShape::Sphere { radius: 50.0 },
         layer: 1,
         mask: 1,
     };
-    BodyState::from_columns(&body, &mass, &collider, false)
+    BodyState::from_columns(&body, &mass, &collider, false, false, false)
 }
 
 /// A single-point penetrating manifold between rows `a` and `b`.

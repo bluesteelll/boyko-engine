@@ -31,7 +31,7 @@ use boyko_ecs::ecs::core::time::FixedTime;
 use boyko_threadpool::{ThreadPool, ThreadPoolBuilder};
 
 use boyko_physics::components::{
-    BodyType, Collider, ColliderShape, RigidBody, RigidBodyBundle, RigidBodyMass,
+    Collider, ColliderShape, RigidBody, RigidBodyBundle, RigidBodyMass, Simulated,
 };
 use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::plugin::{add_physics_colored, add_physics_systems};
@@ -53,7 +53,7 @@ fn serial_pool() -> Arc<ThreadPool> {
 
 fn spawn_body(world: &mut EcsMaster, body: RigidBody, mass: RigidBodyMass, collider: Collider) {
     let archetype = world.bundle_archetype_id_for::<RigidBodyBundle>();
-    world
+    let e = world
         .create_entity(
             archetype,
             &[
@@ -63,9 +63,10 @@ fn spawn_body(world: &mut EcsMaster, body: RigidBody, mass: RigidBodyMass, colli
             ],
         )
         .expect("invariant: RigidBodyBundle archetype accepts the three columns");
+    world.enable::<Simulated>(e);
 }
 
-fn sphere(position: Vec3, radius: f32, inv_mass: f32, body_type: BodyType) -> (RigidBody, RigidBodyMass, Collider) {
+fn sphere(position: Vec3, radius: f32, inv_mass: f32) -> (RigidBody, RigidBodyMass, Collider) {
     let body = RigidBody {
         position,
         linear_velocity: Vec3::ZERO,
@@ -77,7 +78,6 @@ fn sphere(position: Vec3, radius: f32, inv_mass: f32, body_type: BodyType) -> (R
         inv_mass,
         restitution: 0.3,
         friction: 0.5,
-        body_type,
     };
     let collider = Collider {
         shape: ColliderShape::Sphere { radius },
@@ -97,16 +97,16 @@ fn spawn_stack(world: &mut EcsMaster) {
         Vec3::new(0.02, 3.7, 0.03),
     ];
     for &p in &column {
-        let (b, m, c) = sphere(p, 0.5, 1.0, BodyType::Dynamic);
+        let (b, m, c) = sphere(p, 0.5, 1.0);
         spawn_body(world, b, m, c);
     }
     // A second disjoint pair, off to the side (→ a second island).
-    let (b, m, c) = sphere(Vec3::new(20.0, 1.0, 0.0), 0.5, 1.0, BodyType::Dynamic);
+    let (b, m, c) = sphere(Vec3::new(20.0, 1.0, 0.0), 0.5, 1.0);
     spawn_body(world, b, m, c);
-    let (b, m, c) = sphere(Vec3::new(20.0, 1.9, 0.0), 0.5, 1.0, BodyType::Dynamic);
+    let (b, m, c) = sphere(Vec3::new(20.0, 1.9, 0.0), 0.5, 1.0);
     spawn_body(world, b, m, c);
     // The static floor.
-    let (b, m, c) = sphere(Vec3::new(0.0, -10.0, 0.0), 10.0, 0.0, BodyType::Static);
+    let (b, m, c) = sphere(Vec3::new(0.0, -10.0, 0.0), 10.0, 0.0);
     spawn_body(world, b, m, c);
 }
 

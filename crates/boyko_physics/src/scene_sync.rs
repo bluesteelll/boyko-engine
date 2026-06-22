@@ -6,8 +6,8 @@
 //!
 //! There is no separate "physics pose" datum duplicated alongside `Transform`:
 //! the world pose lives in TWO ECS columns ([`RigidBody`] and `Transform`) with a
-//! **`BodyType`-selected, one-directional** copy between them, so no datum has two
-//! writers in one schedule window:
+//! **`Simulated`-bit-selected, one-directional** copy between them, so no datum
+//! has two writers in one schedule window:
 //!
 //! - **Dynamic** bodies: physics OWNS the pose. The solver integrates
 //!   `RigidBody.{position, rotation}`; [`sync_body_to_transform`] copies it OUT to
@@ -42,11 +42,13 @@
 
 use boyko_ecs::ecs::core::hierarchy::ChildOf;
 use boyko_ecs::ecs::core::iters::query::data::Mut;
+use boyko_ecs::ecs::core::iters::query::data_is_enabled::IsEnabled;
 use boyko_ecs::ecs::core::iters::query::filter::{With, Without};
 use boyko_ecs::ecs::core::iters::query::query::Query;
 use boyko_scene::Transform;
 
-use crate::components::{BodyType, RigidBody, RigidBodyMass};
+use crate::components::{RigidBody, RigidBodyMass, Simulated};
+use crate::solver::contact::is_dynamic_row;
 
 /// Copies `Transform` → `RigidBody` for STATIC / KINEMATIC bodies (std-lib S5).
 ///
@@ -54,9 +56,15 @@ use crate::components::{BodyType, RigidBody, RigidBodyMass};
 /// snapshots the gameplay-authored pose. Dynamic bodies are skipped (the solver
 /// owns their pose; [`sync_body_to_transform`] copies the other direction).
 ///
-/// The `body_type` test is a per-row read of the cold
-/// [`RigidBodyMass`] column (which carries [`BodyType`]); only a non-`Dynamic`
-/// body is written, so a pure-Dynamic world does zero writes here. The copy is
+/// The gate (Decision 3 / C3) reads the per-row
+/// [`Simulated`](crate::components::Simulated) bit via the non-filtering
+/// [`IsEnabled<Simulated>`](boyko_ecs::ecs::core::iters::query::IsEnabled) datum
+/// plus the cold `inv_mass`: only a body that is BOTH not-simulated AND not
+/// dynamic-capable (`!simulated && !is_dynamic_row(inv_mass)` — a genuine
+/// static / kinematic authored pose) is synced IN. A PARKED dynamic
+/// (`Simulated` OFF but `inv_mass != 0`) is deliberately NOT synced — its frozen
+/// pose is preserved in place. So a pure-simulated-dynamic world does zero writes
+/// here. The copy is
 /// **value-gated** through the [`Mut`] guard: it bumps `Changed<RigidBody>` only
 /// when the authored pose actually differs from the body's current pose, so a
 /// static body whose `Transform` never moves does not perpetually dirty
@@ -70,12 +78,18 @@ use crate::components::{BodyType, RigidBody, RigidBodyMass};
 // protocol (the param system delivers an owned handle); the body uses it through
 // `iter_mut`. Same idiom as the physics pipeline stages.
 #[allow(clippy::needless_pass_by_value)]
-pub fn sync_transform_to_body(mut query: Query<(&Transform, Mut<RigidBody>, &RigidBodyMass)>) {
-    for (transform, mut body, mass) in query.iter_mut() {
-        // Dynamic bodies own their own pose — physics integrates them and
-        // `sync_body_to_transform` writes the result back to `Transform`. Only the
-        // gameplay-driven Static / Kinematic bodies are synced IN here.
-        if mass.body_type == BodyType::Dynamic {
+pub fn sync_transform_to_body(
+    mut query: Query<(&Transform, Mut<RigidBody>, &RigidBodyMass, IsEnabled<Simulated>)>,
+) {
+    for (transform, mut body, mass, simulated) in query.iter_mut() {
+        // Decision 3 / C3: a simulated dynamic body owns its own pose (physics
+        // integrates it; `sync_body_to_transform` writes the result back to
+        // `Transform`), and a PARKED dynamic (`Simulated` OFF but `inv_mass != 0`)
+        // is frozen-in-place — neither is synced IN. Only a genuine static /
+        // kinematic authored pose (`!simulated && !is_dynamic_row(inv_mass)`) is
+        // copied from `Transform`, reproducing the old `body_type == Dynamic` skip
+        // for BOTH the simulated-dynamic AND parked-dynamic classes.
+        if simulated || is_dynamic_row(mass.inv_mass) {
             continue;
         }
         // Value-gated bit-exact copy: `Deref` reads the current pose without
@@ -120,14 +134,25 @@ pub fn sync_transform_to_body(mut query: Query<(&Transform, Mut<RigidBody>, &Rig
 /// [`debug_assert_dynamic_bodies_are_roots`] catches the misuse in debug builds.
 //
 // `clippy::needless_pass_by_value`: see `sync_transform_to_body`.
-#[allow(clippy::needless_pass_by_value)]
+// `clippy::type_complexity`: a system's `Query<D, F>` SystemParam type must be
+// named concretely in the fn signature (a `type` alias cannot stand in for a
+// SystemParam), and the (D, F) tuple is the irreducible query shape — Decision 3
+// added the `IsEnabled<Simulated>` datum that pushed it over the threshold.
+#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 pub fn sync_body_to_transform(
-    mut query: Query<(Mut<Transform>, &RigidBody, &RigidBodyMass), Without<ChildOf>>,
+    mut query: Query<
+        (Mut<Transform>, &RigidBody, &RigidBodyMass, IsEnabled<Simulated>),
+        Without<ChildOf>,
+    >,
 ) {
-    for (mut transform, body, mass) in query.iter_mut() {
-        // Only Dynamic bodies are downstream of the solve; a Static / Kinematic
-        // body's `Transform` is gameplay-owned and must not be overwritten.
-        if mass.body_type != BodyType::Dynamic {
+    for (mut transform, body, mass, simulated) in query.iter_mut() {
+        // Decision 3: only a SIMULATED dynamic body is downstream of the solve; a
+        // parked / static / kinematic body's `Transform` is gameplay-owned (or its
+        // pose is frozen) and must not be overwritten. The compound gate
+        // `simulated && is_dynamic_row(inv_mass)` reproduces the old
+        // `body_type == Dynamic` write condition; a parked dynamic is NOT written
+        // out, so its frozen pose stays put.
+        if !(simulated && is_dynamic_row(mass.inv_mass)) {
             continue;
         }
         // Value-gate: read the current `Transform` via `Deref` (no tick bump), and
@@ -162,16 +187,22 @@ pub fn sync_body_to_transform(
 //
 // `clippy::needless_pass_by_value`: see `sync_transform_to_body`.
 #[allow(clippy::needless_pass_by_value)]
-pub fn debug_assert_dynamic_bodies_are_roots(query: Query<&RigidBodyMass, With<ChildOf>>) {
+pub fn debug_assert_dynamic_bodies_are_roots(
+    query: Query<(&RigidBodyMass, IsEnabled<Simulated>), With<ChildOf>>,
+) {
     // Only meaningful in debug builds; the loop and assert vanish in release.
     if cfg!(debug_assertions) {
-        for mass in query.iter() {
+        for (mass, simulated) in query.iter() {
+            // Decision 3: PROBE the `Simulated` bit (the field is gone). A
+            // simulated dynamic body (`simulated && is_dynamic_row(inv_mass)`) must
+            // be a root — the same condition `sync_body_to_transform` writes out.
             debug_assert!(
-                mass.body_type != BodyType::Dynamic,
-                "invariant: a Dynamic RigidBody must be a hierarchy ROOT (no ChildOf) — \
-                 v1 does not support parented dynamics; the body's world pose would be \
-                 written into a local Transform and double-composed by propagation. \
-                 Parent a kinematic proxy instead, or keep the dynamic body unparented."
+                !(simulated && is_dynamic_row(mass.inv_mass)),
+                "invariant: a simulated dynamic RigidBody must be a hierarchy ROOT (no \
+                 ChildOf) — v1 does not support parented dynamics; the body's world pose \
+                 would be written into a local Transform and double-composed by \
+                 propagation. Parent a kinematic proxy instead, or keep the dynamic body \
+                 unparented."
             );
         }
     }

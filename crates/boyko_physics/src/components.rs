@@ -37,27 +37,41 @@ pub struct RigidBody {
     pub angular_velocity: Vec3,
 }
 
-/// The simulation role of a body (plan D5).
+/// Runtime on/off of dynamic simulation for a body that HAS a [`RigidBody`]
+/// (the capability+state model — Decision 1).
 ///
-/// `#[repr(u8)]` so it packs tightly inside the cold [`RigidBodyMass`] column.
-#[repr(u8)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum BodyType {
-    /// Immovable; infinite mass (`inv_mass == 0`). The default.
-    #[default]
-    Static,
-    /// Moved by external control only; ignores forces but participates in
-    /// collision against dynamic bodies.
-    ///
-    /// NOTE (P2 W2): in solver-owned mode (`SoftStepSolver`) a kinematic body's
-    /// externally-set velocity is read by contacts for a correct one-sided
-    /// response, but its position is NOT advanced by the solver (it integrates
-    /// `Dynamic && inv_mass != 0` only, and the pipeline's `physics_integrate` is
-    /// gated off). Kinematic MOTION is an intentional deferral, not built yet.
-    Kinematic,
-    /// Fully simulated; responds to forces and impulses.
-    Dynamic,
-}
+/// An EnableTag bit (`#[component(storage = "bitset")]`): O(1) toggle via the
+/// kernel `enable::<Simulated>` / `disable::<Simulated>` API, with NO archetype
+/// migration and NO row move — so flipping it NEVER reorders the physics gather
+/// (Encoding A is preserved bit-for-bit). It is a zero-sized tag with no column;
+/// the per-row bit is read non-filteringly through
+/// [`IsEnabled<Simulated>`](boyko_ecs::ecs::core::iters::query::IsEnabled).
+///
+/// Semantics: a body whose `Simulated` bit is SET integrates under gravity and
+/// is advanced by the solver (when `inv_mass != 0`). A body whose bit is CLEAR
+/// is "parked": its pose is frozen-in-place (not integrated), though if it still
+/// has `inv_mass != 0` the coloring/solve may apply impulses to it (Avian's
+/// "dummy SolverBody for a disabled dynamic" freeze semantics — Decision 4).
+///
+/// REPLACES the old `BodyType` enum's `Dynamic` discrimination. A permanent
+/// (collision-only) static body simply does not carry a [`RigidBody`] (Decision
+/// 5 — structural skip); an immovable contact surface carries `RigidBody` with
+/// `inv_mass == 0` and `Simulated` CLEAR.
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[component(storage = "bitset")]
+pub struct Simulated;
+
+/// Marks a body as kinematic (moved by external control only — Decision 1).
+///
+/// An EnableTag bit, like [`Simulated`]. Captured at gather into
+/// [`BodyState::kinematic`](crate::resources::BodyState::kinematic) and read by
+/// the one-sided contact response; the body's externally-set velocity feeds the
+/// response but its pose is NOT advanced by the solver (kinematic MOTION is an
+/// intentional deferral, not built yet — same status as the old
+/// `BodyType::Kinematic`).
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[component(storage = "bitset")]
+pub struct Kinematic;
 
 /// COLD mass / material properties of a rigid body (plan D5) — a SEPARATE
 /// column from [`RigidBody`].
@@ -85,13 +99,13 @@ pub struct RigidBodyMass {
     pub restitution: f32,
     /// Coulomb friction coefficient.
     pub friction: f32,
-    /// The body's simulation role.
-    pub body_type: BodyType,
 }
 
 impl Default for RigidBodyMass {
     fn default() -> Self {
-        // A unit-mass dynamic body with light bounce — the common spawn default.
+        // A unit-mass body with light bounce — the common spawn default. Whether
+        // it actually simulates is the runtime `Simulated` bit (Decision 6),
+        // defaulted ON by the spawn helpers, not a field here.
         // Identity inverse inertia is the unit-tensor placeholder until a real
         // shape-derived tensor is computed (Phase 10).
         Self {
@@ -99,7 +113,6 @@ impl Default for RigidBodyMass {
             inv_mass: 1.0,
             restitution: 0.5,
             friction: 0.3,
-            body_type: BodyType::Dynamic,
         }
     }
 }

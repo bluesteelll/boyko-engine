@@ -25,7 +25,7 @@ use boyko_ecs::ecs::core::time::FixedTime;
 use boyko_threadpool::{ThreadPool, ThreadPoolBuilder};
 
 use boyko_physics::components::{
-    BodyType, Collider, ColliderShape, RigidBody, RigidBodyBundle, RigidBodyMass,
+    Collider, ColliderShape, RigidBody, RigidBodyBundle, RigidBodyMass, Simulated,
 };
 use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::plugin::add_physics_colored_solve;
@@ -48,7 +48,7 @@ fn worker_pool() -> Arc<ThreadPool> {
 
 fn spawn_body(world: &mut EcsMaster, body: RigidBody, mass: RigidBodyMass, collider: Collider) {
     let archetype = world.bundle_archetype_id_for::<RigidBodyBundle>();
-    world
+    let e = world
         .create_entity(
             archetype,
             &[
@@ -58,6 +58,7 @@ fn spawn_body(world: &mut EcsMaster, body: RigidBody, mass: RigidBodyMass, colli
             ],
         )
         .expect("invariant: RigidBodyBundle archetype accepts the three columns");
+    world.enable::<Simulated>(e);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -68,7 +69,6 @@ fn sphere(
     inv_mass: f32,
     restitution: f32,
     friction: f32,
-    body_type: BodyType,
 ) -> (RigidBody, RigidBodyMass, Collider) {
     let body = RigidBody {
         position,
@@ -81,7 +81,6 @@ fn sphere(
         inv_mass,
         restitution,
         friction,
-        body_type,
     };
     let collider = Collider {
         shape: ColliderShape::Sphere { radius },
@@ -96,7 +95,6 @@ fn box_body(
     half_extents: Vec3,
     inv_mass: f32,
     friction: f32,
-    body_type: BodyType,
 ) -> (RigidBody, RigidBodyMass, Collider) {
     let body = RigidBody {
         position,
@@ -109,7 +107,6 @@ fn box_body(
         inv_mass,
         restitution: 0.0,
         friction,
-        body_type,
     };
     let collider = Collider {
         shape: ColliderShape::Box { half_extents },
@@ -146,10 +143,10 @@ fn all_bodies(world: &mut EcsMaster) -> Vec<RigidBody> {
 #[test]
 fn simd_solve_resolves_penetration() {
     let mut world = EcsMaster::new();
-    let (ab, am, ac) = sphere(Vec3::ZERO, Vec3::ZERO, 0.5, 1.0, 0.0, 0.0, BodyType::Dynamic);
+    let (ab, am, ac) = sphere(Vec3::ZERO, Vec3::ZERO, 0.5, 1.0, 0.0, 0.0);
     spawn_body(&mut world, ab, am, ac);
     let (bb, bm, bc) =
-        sphere(Vec3::new(0.5, 0.0, 0.0), Vec3::ZERO, 0.5, 1.0, 0.0, 0.0, BodyType::Dynamic);
+        sphere(Vec3::new(0.5, 0.0, 0.0), Vec3::ZERO, 0.5, 1.0, 0.0, 0.0);
     spawn_body(&mut world, bb, bm, bc);
 
     let dt = 1.0 / 60.0;
@@ -178,7 +175,7 @@ fn simd_solve_restitution_bounces() {
     fn run(restitution: f32) -> f32 {
         let mut world = EcsMaster::new();
         let (wb, wm, wc) =
-            sphere(Vec3::ZERO, Vec3::ZERO, 0.5, 0.0, restitution, 0.0, BodyType::Static);
+            sphere(Vec3::ZERO, Vec3::ZERO, 0.5, 0.0, restitution, 0.0);
         spawn_body(&mut world, wb, wm, wc);
         let (mb, mm, mc) = sphere(
             Vec3::new(0.95, 0.0, 0.0),
@@ -187,7 +184,6 @@ fn simd_solve_restitution_bounces() {
             1.0,
             restitution,
             0.0,
-            BodyType::Dynamic,
         );
         spawn_body(&mut world, mb, mm, mc);
 
@@ -210,13 +206,13 @@ fn simd_solve_restitution_bounces() {
 fn spawn_sphere_stack(world: &mut EcsMaster, n: usize, r: f32) {
     let floor_r = 50.0_f32;
     let (fb, fm, fc) =
-        sphere(Vec3::new(0.0, -floor_r, 0.0), Vec3::ZERO, floor_r, 0.0, 0.0, 0.6, BodyType::Static);
+        sphere(Vec3::new(0.0, -floor_r, 0.0), Vec3::ZERO, floor_r, 0.0, 0.0, 0.6);
     spawn_body(world, fb, fm, fc);
     let overlap = 0.01_f32;
     for i in 0..n {
         let y = r + (i as f32) * (2.0 * r - overlap) - overlap;
         let (sb, sm, sc) =
-            sphere(Vec3::new(0.0, y, 0.0), Vec3::ZERO, r, 1.0, 0.0, 0.6, BodyType::Dynamic);
+            sphere(Vec3::new(0.0, y, 0.0), Vec3::ZERO, r, 1.0, 0.0, 0.6);
         spawn_body(world, sb, sm, sc);
     }
 }
@@ -279,13 +275,13 @@ fn simd_solve_sphere_stack_is_stable() {
 fn spawn_box_stack(world: &mut EcsMaster, n: usize, h: f32) {
     let floor_half = Vec3::new(20.0, 1.0, 20.0);
     let (fb, fm, fc) =
-        box_body(Vec3::new(0.0, -floor_half.y, 0.0), floor_half, 0.0, 0.8, BodyType::Static);
+        box_body(Vec3::new(0.0, -floor_half.y, 0.0), floor_half, 0.0, 0.8);
     spawn_body(world, fb, fm, fc);
     let overlap = 0.01_f32;
     for i in 0..n {
         let y = h + (i as f32) * (2.0 * h - overlap) - overlap;
         let (bb, bm, bc) =
-            box_body(Vec3::new(0.0, y, 0.0), Vec3::new(h, h, h), 1.0, 0.8, BodyType::Dynamic);
+            box_body(Vec3::new(0.0, y, 0.0), Vec3::new(h, h, h), 1.0, 0.8);
         spawn_body(world, bb, bm, bc);
     }
 }

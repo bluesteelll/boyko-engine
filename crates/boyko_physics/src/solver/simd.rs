@@ -83,13 +83,12 @@ compile_error!(
      rejected to make the no-FMA invariant load-bearing.)"
 );
 
-use crate::components::BodyType;
 use crate::math::{Mat3, Vec3};
 #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
 use crate::math::Quat;
 use crate::resources::BodyState;
 
-use super::contact::BodyEffective;
+use super::contact::{BodyEffective, is_dynamic_row};
 
 /// AVX2 batch width (8 `f32` lanes per `__m256`).
 #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
@@ -182,7 +181,7 @@ pub fn apply_gravity_scalar(
     h: f32,
 ) {
     for (eff, snap) in bodies_eff.iter_mut().zip(snapshot.iter()) {
-        if snap.body_type == BodyType::Dynamic && eff.inv_mass != 0.0 {
+        if snap.simulated && is_dynamic_row(eff.inv_mass) {
             eff.linear_velocity = eff.linear_velocity + gravity * h;
         }
     }
@@ -230,7 +229,7 @@ pub fn position_integrate_scalar(
     h: f32,
 ) {
     for (eff, snap) in bodies_eff.iter().zip(snapshot.iter_mut()) {
-        if snap.body_type == BodyType::Dynamic && eff.inv_mass != 0.0 {
+        if snap.simulated && is_dynamic_row(eff.inv_mass) {
             snap.position = snap.position + eff.linear_velocity * h;
             snap.rotation = snap.rotation.integrate(eff.angular_velocity, h);
         }
@@ -762,7 +761,7 @@ fn apply_gravity_avx2(
             vx[lane] = eff.linear_velocity.x;
             vy[lane] = eff.linear_velocity.y;
             vz[lane] = eff.linear_velocity.z;
-            active[lane] = if snap.body_type == BodyType::Dynamic && eff.inv_mass != 0.0 {
+            active[lane] = if snap.simulated && is_dynamic_row(eff.inv_mass) {
                 1.0
             } else {
                 0.0
@@ -886,7 +885,7 @@ unsafe fn position_integrate_block_x8(
         qy[lane] = snap.rotation.y;
         qz[lane] = snap.rotation.z;
         qw[lane] = snap.rotation.w;
-        active[lane] = if snap.body_type == BodyType::Dynamic && eff.inv_mass != 0.0 {
+        active[lane] = if snap.simulated && is_dynamic_row(eff.inv_mass) {
             1.0
         } else {
             0.0
@@ -1038,7 +1037,7 @@ mod tests {
     //! is a pure speed path.
 
     use super::*;
-    use crate::components::{BodyType, ColliderShape};
+    use crate::components::ColliderShape;
     use crate::math::Quat;
     use crate::resources::BodyState;
 
@@ -1079,16 +1078,19 @@ mod tests {
         )
         .normalize();
 
-        // Mostly dynamic; a minority static / kinematic to exercise the mask path.
+        // Mostly simulated-dynamic; a minority static / kinematic to exercise the
+        // mask path. `simulated`/`kinematic` are the EnableTag bits captured at
+        // gather (Decision 3) that REPLACE the old `BodyType` enum.
         let r = rng.next_u64() % 10;
-        let (body_type, inv_mass) = if r < 7 {
-            (BodyType::Dynamic, 0.2 + (rng.f32_in(1.0).abs()))
+        let (simulated, kinematic, inv_mass) = if r < 7 {
+            (true, false, 0.2 + (rng.f32_in(1.0).abs()))
         } else if r < 9 {
-            (BodyType::Static, 0.0)
+            (false, false, 0.0)
         } else {
-            // Kinematic with a non-zero inv_mass would still be skipped by the
-            // `Dynamic && inv_mass != 0` gate — exercise that the kernel masks it.
-            (BodyType::Kinematic, 0.5)
+            // A kinematic body with a non-zero inv_mass is still skipped by the
+            // `simulated && is_dynamic_row(inv_mass)` gate (its `simulated` bit is
+            // OFF) — exercise that the kernel masks it.
+            (false, true, 0.5)
         };
 
         let radius = 0.3 + rng.f32_in(1.0).abs();
@@ -1118,7 +1120,8 @@ mod tests {
             inv_mass,
             restitution: 0.0,
             friction: 0.5,
-            body_type,
+            simulated,
+            kinematic,
             is_sensor: false,
             shape: ColliderShape::Sphere { radius },
         };
@@ -1273,7 +1276,8 @@ mod tests {
                 inv_mass: 1.0,
                 restitution: 0.0,
                 friction: 0.5,
-                body_type: BodyType::Dynamic,
+                simulated: true,
+                kinematic: false,
                 is_sensor: false,
                 shape: ColliderShape::Sphere { radius: 1.0 },
             });
@@ -1308,7 +1312,8 @@ mod tests {
             inv_mass: 1.0,
             restitution: 0.0,
             friction: 0.5,
-            body_type: BodyType::Dynamic,
+            simulated: true,
+            kinematic: false,
             is_sensor: false,
             shape: ColliderShape::Sphere { radius: 0.5 },
         };
@@ -1341,7 +1346,8 @@ mod tests {
             inv_mass,
             restitution: 0.0,
             friction: 0.5,
-            body_type: BodyType::Dynamic,
+            simulated: true,
+            kinematic: false,
             is_sensor: false,
             shape: ColliderShape::Sphere { radius: 0.5 },
         };

@@ -44,7 +44,7 @@ use boyko_ecs::ecs::core::component::component::Component;
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::system::into_system::IntoSystem;
 
-use boyko_physics::components::{BodyType, ColliderShape, RigidBody};
+use boyko_physics::components::{ColliderShape, RigidBody};
 use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::resources::{BodyState, BroadphaseGrid, PhysicsConfig, SolverScratch};
 use boyko_physics::sdf_query::SdfField;
@@ -278,11 +278,10 @@ fn sphere_state(position: Vec3, velocity: Vec3, radius: f32, inv_mass: f32) -> B
         inv_mass,
         restitution: 0.0,
         friction: 0.0,
-        body_type: if inv_mass > 0.0 {
-            BodyType::Dynamic
-        } else {
-            BodyType::Static
-        },
+        // A dynamic body (inv_mass > 0) is simulated; a static one is not
+        // (Decision 3 — replaces the old `BodyType` conditional).
+        simulated: inv_mass > 0.0,
+        kinematic: false,
         is_sensor: false,
         shape: ColliderShape::Sphere { radius },
     }
@@ -1267,7 +1266,7 @@ mod pipeline {
     use boyko_threadpool::{ThreadPool, ThreadPoolBuilder};
 
     use boyko_physics::components::{
-        BodyType, Collider, ColliderShape, RigidBody, RigidBodyBundle, RigidBodyMass,
+        Collider, ColliderShape, RigidBody, RigidBodyBundle, RigidBodyMass, Simulated,
     };
     use boyko_physics::math::{Mat3, Quat, Vec3};
     use boyko_physics::plugin::{add_physics_sdf, add_physics_soft};
@@ -1290,7 +1289,7 @@ mod pipeline {
 
     fn spawn_body(world: &mut EcsMaster, body: RigidBody, mass: RigidBodyMass, collider: Collider) {
         let archetype = world.bundle_archetype_id_for::<RigidBodyBundle>();
-        world
+        let e = world
             .create_entity(
                 archetype,
                 &[
@@ -1300,6 +1299,7 @@ mod pipeline {
                 ],
             )
             .expect("invariant: RigidBodyBundle archetype accepts the three columns");
+        world.enable::<Simulated>(e);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1308,7 +1308,6 @@ mod pipeline {
         velocity: Vec3,
         radius: f32,
         inv_mass: f32,
-        body_type: BodyType,
     ) -> (RigidBody, RigidBodyMass, Collider) {
         let body = RigidBody {
             position,
@@ -1321,7 +1320,6 @@ mod pipeline {
             inv_mass,
             restitution: 0.3,
             friction: 0.5,
-            body_type,
         };
         let collider = Collider {
             shape: ColliderShape::Sphere { radius },
@@ -1337,7 +1335,6 @@ mod pipeline {
         rotation: Quat,
         half_extents: Vec3,
         inv_mass: f32,
-        body_type: BodyType,
     ) -> (RigidBody, RigidBodyMass, Collider) {
         let body = RigidBody {
             position,
@@ -1350,7 +1347,6 @@ mod pipeline {
             inv_mass,
             restitution: 0.3,
             friction: 0.5,
-            body_type,
         };
         let collider = Collider {
             shape: ColliderShape::Box { half_extents },
@@ -1398,7 +1394,6 @@ mod pipeline {
             Vec3::ZERO,
             0.6,
             4.0, // light: mass 0.25
-            BodyType::Dynamic,
         );
         spawn_body(&mut world, b, m, c);
 
@@ -1539,7 +1534,7 @@ mod pipeline {
             Vec3::new(-0.2, 1.7, -0.1),
         ];
         for &pos in &setup {
-            let (b, m, c) = sphere(pos, Vec3::ZERO, 0.5, 1.0, BodyType::Dynamic);
+            let (b, m, c) = sphere(pos, Vec3::ZERO, 0.5, 1.0);
             spawn_body(&mut world, b, m, c);
         }
         let (bb, bm, bc) = box_body(
@@ -1547,7 +1542,6 @@ mod pipeline {
             quat_z(0.2),
             Vec3::new(0.5, 0.5, 0.5),
             1.0,
-            BodyType::Dynamic,
         );
         spawn_body(&mut world, bb, bm, bc);
 

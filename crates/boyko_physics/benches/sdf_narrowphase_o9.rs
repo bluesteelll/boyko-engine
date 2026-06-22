@@ -37,7 +37,7 @@ use boyko_ecs::ecs::core::time::FixedTime;
 use boyko_threadpool::{ThreadPool, ThreadPoolBuilder};
 
 use boyko_physics::components::{
-    BodyType, Collider, ColliderShape, RigidBody, RigidBodyBundle, RigidBodyMass,
+    Collider, ColliderShape, RigidBody, RigidBodyBundle, RigidBodyMass, Simulated,
 };
 use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::plugin::add_physics_sdf;
@@ -89,7 +89,6 @@ fn spawn_box(world: &mut EcsMaster, position: Vec3, rotation: Quat, half: Vec3) 
         inv_mass: 1.0,
         restitution: 0.0,
         friction: 0.5,
-        body_type: BodyType::Dynamic,
     };
     let collider = Collider {
         shape: ColliderShape::Box { half_extents: half },
@@ -97,7 +96,7 @@ fn spawn_box(world: &mut EcsMaster, position: Vec3, rotation: Quat, half: Vec3) 
         mask: 1,
     };
     let archetype = world.bundle_archetype_id_for::<RigidBodyBundle>();
-    world
+    let e = world
         .create_entity(
             archetype,
             &[
@@ -107,6 +106,9 @@ fn spawn_box(world: &mut EcsMaster, position: Vec3, rotation: Quat, half: Vec3) 
             ],
         )
         .expect("RigidBodyBundle archetype accepts the three columns");
+    // Decision 6: enable simulation so the SDF narrowphase gate (`body.simulated`)
+    // sees a dynamic body, reproducing the old `BodyType::Dynamic` behaviour.
+    world.enable::<Simulated>(e);
 }
 
 /// A field of `n_edits` (>= 1) primitives whose UNION fully encloses the body cloud

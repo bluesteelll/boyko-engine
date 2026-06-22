@@ -32,7 +32,7 @@ use boyko_ecs::ecs::core::time::FixedTime;
 use boyko_threadpool::{ThreadPool, ThreadPoolBuilder};
 
 use boyko_physics::bundles::DynamicBody;
-use boyko_physics::components::{BodyType, Collider, ColliderShape, RigidBody, RigidBodyMass};
+use boyko_physics::components::{Collider, ColliderShape, RigidBody, RigidBodyMass};
 use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::plugin::add_physics_systems_with_scene_sync;
 use boyko_physics::resources::PhysicsConfig;
@@ -73,7 +73,6 @@ fn dynamic_body_at_start() -> DynamicBody {
             inv_mass: 1.0,
             restitution: 0.5,
             friction: 0.3,
-            body_type: BodyType::Dynamic,
         },
         collider: Collider {
             shape: ColliderShape::Sphere { radius: 0.5 },

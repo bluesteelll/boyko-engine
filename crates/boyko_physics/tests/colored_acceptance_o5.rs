@@ -38,7 +38,7 @@ use boyko_ecs::ecs::core::time::FixedTime;
 use boyko_threadpool::{ThreadPool, ThreadPoolBuilder};
 
 use boyko_physics::components::{
-    BodyType, Collider, ColliderShape, RigidBody, RigidBodyBundle, RigidBodyMass,
+    Collider, ColliderShape, RigidBody, RigidBodyBundle, RigidBodyMass, Simulated,
 };
 use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::plugin::add_physics_colored_solve;
@@ -61,7 +61,7 @@ fn serial_pool() -> Arc<ThreadPool> {
 
 fn spawn_body(world: &mut EcsMaster, body: RigidBody, mass: RigidBodyMass, collider: Collider) {
     let archetype = world.bundle_archetype_id_for::<RigidBodyBundle>();
-    world
+    let e = world
         .create_entity(
             archetype,
             &[
@@ -71,6 +71,12 @@ fn spawn_body(world: &mut EcsMaster, body: RigidBody, mass: RigidBodyMass, colli
             ],
         )
         .expect("invariant: RigidBodyBundle archetype accepts the three columns");
+    // Decision 3/6: enable the `Simulated` bit on every spawned body. This is
+    // byte-identical to the old `BodyType`: a static body (inv_mass == 0) is still
+    // gated off by `is_dynamic_row(0) == false` in the compound integrate/solve
+    // gate, and this fixture spawns no kinematic body (which alone would need the
+    // bit CLEAR with a non-zero inv_mass).
+    world.enable::<Simulated>(e);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -81,7 +87,6 @@ fn sphere(
     inv_mass: f32,
     restitution: f32,
     friction: f32,
-    body_type: BodyType,
 ) -> (RigidBody, RigidBodyMass, Collider) {
     let body = RigidBody {
         position,
@@ -94,7 +99,6 @@ fn sphere(
         inv_mass,
         restitution,
         friction,
-        body_type,
     };
     let collider = Collider {
         shape: ColliderShape::Sphere { radius },
@@ -104,7 +108,6 @@ fn sphere(
     (body, mass, collider)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn box_body(
     position: Vec3,
     rotation: Quat,
@@ -112,7 +115,6 @@ fn box_body(
     inv_mass: f32,
     restitution: f32,
     friction: f32,
-    body_type: BodyType,
 ) -> (RigidBody, RigidBodyMass, Collider) {
     let body = RigidBody {
         position,
@@ -125,7 +127,6 @@ fn box_body(
         inv_mass,
         restitution,
         friction,
-        body_type,
     };
     let collider = Collider {
         shape: ColliderShape::Box { half_extents },
@@ -171,7 +172,7 @@ fn colored_softstep_resolves_penetration() {
     // gravity, no restitution → they must separate and conserve momentum (COM
     // stays put). A tolerance gate — the colored sweep value change is absorbed.
     let mut world = EcsMaster::new();
-    let (ab, am, ac) = sphere(Vec3::ZERO, Vec3::ZERO, 0.5, 1.0, 0.0, 0.0, BodyType::Dynamic);
+    let (ab, am, ac) = sphere(Vec3::ZERO, Vec3::ZERO, 0.5, 1.0, 0.0, 0.0);
     spawn_body(&mut world, ab, am, ac);
     let (bb, bm, bc) = sphere(
         Vec3::new(0.5, 0.0, 0.0),
@@ -180,7 +181,6 @@ fn colored_softstep_resolves_penetration() {
         1.0,
         0.0,
         0.0,
-        BodyType::Dynamic,
     );
     spawn_body(&mut world, bb, bm, bc);
 
@@ -211,7 +211,7 @@ fn colored_softstep_resolves_penetration() {
 fn colored_restitution_bounce_vs_no_bounce() {
     fn run(restitution: f32) -> f32 {
         let mut world = EcsMaster::new();
-        let (wb, wm, wc) = sphere(Vec3::ZERO, Vec3::ZERO, 0.5, 0.0, restitution, 0.0, BodyType::Static);
+        let (wb, wm, wc) = sphere(Vec3::ZERO, Vec3::ZERO, 0.5, 0.0, restitution, 0.0);
         spawn_body(&mut world, wb, wm, wc);
         let approach = -5.0_f32;
         let (mb, mm, mc) = sphere(
@@ -221,7 +221,6 @@ fn colored_restitution_bounce_vs_no_bounce() {
             1.0,
             restitution,
             0.0,
-            BodyType::Dynamic,
         );
         spawn_body(&mut world, mb, mm, mc);
 
@@ -248,7 +247,7 @@ fn colored_restitution_resting_contact_does_not_gain_energy() {
     // must SETTLE — no upward creep / energy gain (the RESTITUTION_THRESHOLD guard
     // is on the colored path too). Non-vacuous: a contact fires every frame.
     let mut world = EcsMaster::new();
-    let (fb, fm, fc) = sphere(Vec3::ZERO, Vec3::ZERO, 0.5, 0.0, 0.5, 0.5, BodyType::Static);
+    let (fb, fm, fc) = sphere(Vec3::ZERO, Vec3::ZERO, 0.5, 0.0, 0.5, 0.5);
     spawn_body(&mut world, fb, fm, fc);
     let (sb, sm, sc) = sphere(
         Vec3::new(0.0, 0.99, 0.0),
@@ -257,7 +256,6 @@ fn colored_restitution_resting_contact_does_not_gain_energy() {
         1.0,
         0.5,
         0.5,
-        BodyType::Dynamic,
     );
     spawn_body(&mut world, sb, sm, sc);
 
@@ -301,13 +299,12 @@ fn spawn_sphere_stack(world: &mut EcsMaster, n: usize, r: f32) {
         0.0,
         0.0,
         0.6,
-        BodyType::Static,
     );
     spawn_body(world, fb, fm, fc);
     let overlap = 0.01_f32;
     for i in 0..n {
         let y = r + (i as f32) * (2.0 * r - overlap) - overlap;
-        let (sb, sm, sc) = sphere(Vec3::new(0.0, y, 0.0), Vec3::ZERO, r, 1.0, 0.0, 0.6, BodyType::Dynamic);
+        let (sb, sm, sc) = sphere(Vec3::new(0.0, y, 0.0), Vec3::ZERO, r, 1.0, 0.0, 0.6);
         spawn_body(world, sb, sm, sc);
     }
 }
@@ -386,7 +383,6 @@ fn spawn_box_stack(world: &mut EcsMaster, n: usize, h: f32) {
         0.0,
         0.0,
         0.8,
-        BodyType::Static,
     );
     spawn_body(world, fb, fm, fc);
     let overlap = 0.01_f32;
@@ -399,7 +395,6 @@ fn spawn_box_stack(world: &mut EcsMaster, n: usize, h: f32) {
             1.0,
             0.0,
             0.8,
-            BodyType::Dynamic,
         );
         spawn_body(world, bb, bm, bc);
     }
@@ -481,13 +476,13 @@ fn box_incline_slide(incline: f32, friction: f32, frames: usize) -> f32 {
     let mut world = EcsMaster::new();
     let rot = quat_z(incline);
     let floor_half = Vec3::new(20.0, 0.5, 20.0);
-    let (fb, fm, fc) = box_body(Vec3::ZERO, rot, floor_half, 0.0, 0.0, friction, BodyType::Static);
+    let (fb, fm, fc) = box_body(Vec3::ZERO, rot, floor_half, 0.0, 0.0, friction);
     spawn_body(&mut world, fb, fm, fc);
     let surface_normal = Vec3::new(-incline.sin(), incline.cos(), 0.0);
     let box_half = Vec3::new(0.5, 0.5, 0.5);
     // Spawn the dynamic box just above the incline surface so it falls into contact.
     let spawn_pos = surface_normal * (floor_half.y + box_half.y + 0.05);
-    let (bb, bm, bc) = box_body(spawn_pos, rot, box_half, 1.0, 0.0, friction, BodyType::Dynamic);
+    let (bb, bm, bc) = box_body(spawn_pos, rot, box_half, 1.0, 0.0, friction);
     spawn_body(&mut world, bb, bm, bc);
 
     let dt = 1.0 / 120.0;
@@ -542,11 +537,10 @@ fn settle_then_push_contact_slip(friction: f32, push: Vec3, frames: usize) -> f3
         0.0,
         0.0,
         friction,
-        BodyType::Static,
     );
     spawn_body(&mut world, fb, fm, fc);
     let r = 0.5_f32;
-    let (sb, sm, sc) = sphere(Vec3::new(0.0, 1.0, 0.0), Vec3::ZERO, r, 1.0, 0.0, friction, BodyType::Dynamic);
+    let (sb, sm, sc) = sphere(Vec3::new(0.0, 1.0, 0.0), Vec3::ZERO, r, 1.0, 0.0, friction);
     spawn_body(&mut world, sb, sm, sc);
 
     let dt = 1.0 / 120.0;
@@ -597,14 +591,16 @@ fn colored_solve_run_to_run_bit_identical_through_schedule() {
     fn run_once() -> Vec<RigidBody> {
         let mut world = EcsMaster::new();
         let setup = [
-            (Vec3::new(0.0, 1.0, 0.0), 1.0, BodyType::Dynamic),
-            (Vec3::new(0.3, 1.4, 0.1), 1.0, BodyType::Dynamic),
-            (Vec3::new(-0.2, 1.7, -0.1), 1.0, BodyType::Dynamic),
-            (Vec3::new(0.0, -10.0, 0.0), 0.0, BodyType::Static),
+            (Vec3::new(0.0, 1.0, 0.0), 1.0),
+            (Vec3::new(0.3, 1.4, 0.1), 1.0),
+            (Vec3::new(-0.2, 1.7, -0.1), 1.0),
+            (Vec3::new(0.0, -10.0, 0.0), 0.0),
         ];
-        for &(pos, inv_mass, body_type) in &setup {
-            let radius = if body_type == BodyType::Static { 10.0 } else { 0.5 };
-            let (b, m, c) = sphere(pos, Vec3::ZERO, radius, inv_mass, 0.3, 0.5, body_type);
+        for &(pos, inv_mass) in &setup {
+            // A static body is now `inv_mass == 0` (the `BodyType::Static`
+            // discriminant is gone); the big radius is the floor.
+            let radius = if inv_mass == 0.0 { 10.0 } else { 0.5 };
+            let (b, m, c) = sphere(pos, Vec3::ZERO, radius, inv_mass, 0.3, 0.5);
             spawn_body(&mut world, b, m, c);
         }
         let dt = 1.0 / 60.0;

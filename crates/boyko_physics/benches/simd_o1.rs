@@ -17,7 +17,7 @@ use std::hint::black_box;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 
-use boyko_physics::components::{BodyType, ColliderShape};
+use boyko_physics::components::ColliderShape;
 use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::resources::BodyState;
 use boyko_physics::solver::contact::BodyEffective;
@@ -70,7 +70,8 @@ fn scene(n: usize) -> (Vec<BodyEffective>, Vec<BodyState>) {
             inv_mass,
             restitution: 0.0,
             friction: 0.5,
-            body_type: BodyType::Dynamic,
+            simulated: true,
+            kinematic: false,
             is_sensor: false,
             shape: ColliderShape::Sphere { radius },
         });

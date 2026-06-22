@@ -42,9 +42,9 @@ pub mod resources;
 /// detail of the scratch-column owners.
 pub(crate) mod scratch_ids;
 /// Physics ⇄ `Transform` pose sync + the parented-dynamic guard (std-lib S5).
-/// The `BodyType`-selected, one-directional copies that keep the world pose in
-/// ONE datum (Principle 0 — no parallel pose store), wrapped around the physics
-/// pipeline so the solve stays bit-identical.
+/// The `Simulated`-bit-selected, one-directional copies that keep the world pose
+/// in ONE datum (Principle 0 — no parallel pose store), wrapped around the
+/// physics pipeline so the solve stays bit-identical.
 pub mod scene_sync;
 pub mod sdf_query;
 /// O9 — width-only AVX2 batched SDF edit-list narrowphase kernel. Compiled ONLY in
@@ -58,7 +58,8 @@ pub mod systems;
 
 pub use bundles::{DynamicBody, Trigger};
 pub use components::{
-    BodyType, Collider, ColliderShape, Contact, RigidBody, RigidBodyBundle, RigidBodyMass, Sensor,
+    Collider, ColliderShape, Contact, Kinematic, RigidBody, RigidBodyBundle, RigidBodyMass, Sensor,
+    Simulated,
 };
 pub use manifold::{BodyIndex, ContactPoint, Manifold, SDF_SENTINEL};
 pub use math::{MAX_CONTACT_POINTS, Mat3, Quat, Vec3};

@@ -43,7 +43,7 @@
 //! with ZERO threadpool involvement, so the migration's unsafe is covered either
 //! way.
 
-use boyko_physics::components::{BodyType, ColliderShape};
+use boyko_physics::components::ColliderShape;
 use boyko_physics::manifold::{BodyIndex, ContactPoint, Manifold};
 use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::resources::{BodyState, ConstraintGraph, PhysicsConfig, SolverScratch};
@@ -62,7 +62,8 @@ fn dyn_sphere(position: Vec3, lin: Vec3) -> BodyState {
         inv_mass: 1.0,
         restitution: 0.0,
         friction: 0.5,
-        body_type: BodyType::Dynamic,
+        simulated: true,
+        kinematic: false,
         is_sensor: false,
         shape: ColliderShape::Sphere { radius: 1.0 },
     }
@@ -79,7 +80,8 @@ fn static_body(position: Vec3) -> BodyState {
         inv_mass: 0.0,
         restitution: 0.0,
         friction: 0.5,
-        body_type: BodyType::Static,
+        simulated: false,
+        kinematic: false,
         is_sensor: false,
         shape: ColliderShape::Sphere { radius: 1.0 },
     }

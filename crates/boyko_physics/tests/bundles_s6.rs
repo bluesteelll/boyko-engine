@@ -30,7 +30,7 @@ use boyko_ecs::ecs::identifiers::primitives::{ArchetypeId, ComponentId};
 
 use boyko_physics::bundles::{DynamicBody, Trigger};
 use boyko_physics::components::{
-    BodyType, Collider, ColliderShape, RigidBody, RigidBodyMass, Sensor,
+    Collider, ColliderShape, RigidBody, RigidBodyMass, Sensor,
 };
 use boyko_physics::math::{Mat3, Quat, Vec3};
 
@@ -102,7 +102,6 @@ fn dynamic_mass() -> RigidBodyMass {
         inv_mass: 1.0,
         restitution: 0.5,
         friction: 0.3,
-        body_type: BodyType::Dynamic,
     }
 }
 

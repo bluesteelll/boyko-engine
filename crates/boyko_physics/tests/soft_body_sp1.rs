@@ -827,7 +827,7 @@ mod rigid_zero_gate {
     use boyko_threadpool::{ThreadPool, ThreadPoolBuilder};
 
     use boyko_physics::components::{
-        BodyType, Collider, ColliderShape, RigidBody, RigidBodyBundle, RigidBodyMass,
+        Collider, ColliderShape, RigidBody, RigidBodyBundle, RigidBodyMass, Simulated,
     };
     use boyko_physics::math::{Mat3, Quat, Vec3};
     use boyko_physics::plugin::add_physics_sdf;
@@ -851,7 +851,7 @@ mod rigid_zero_gate {
 
     fn spawn_body(world: &mut EcsMaster, body: RigidBody, mass: RigidBodyMass, collider: Collider) {
         let archetype = world.bundle_archetype_id_for::<RigidBodyBundle>();
-        world
+        let e = world
             .create_entity(
                 archetype,
                 &[
@@ -861,6 +861,7 @@ mod rigid_zero_gate {
                 ],
             )
             .expect("invariant: RigidBodyBundle archetype accepts the three columns");
+        world.enable::<Simulated>(e);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -871,7 +872,6 @@ mod rigid_zero_gate {
         inv_mass: f32,
         restitution: f32,
         friction: f32,
-        body_type: BodyType,
     ) -> (RigidBody, RigidBodyMass, Collider) {
         let body = RigidBody {
             position,
@@ -884,7 +884,6 @@ mod rigid_zero_gate {
             inv_mass,
             restitution,
             friction,
-            body_type,
         };
         let collider = Collider {
             shape: ColliderShape::Sphere { radius },
@@ -902,7 +901,6 @@ mod rigid_zero_gate {
         inv_mass: f32,
         restitution: f32,
         friction: f32,
-        body_type: BodyType,
     ) -> (RigidBody, RigidBodyMass, Collider) {
         let body = RigidBody {
             position,
@@ -915,7 +913,6 @@ mod rigid_zero_gate {
             inv_mass,
             restitution,
             friction,
-            body_type,
         };
         let collider = Collider {
             shape: ColliderShape::Box { half_extents },
@@ -967,7 +964,7 @@ mod rigid_zero_gate {
             Vec3::new(-0.2, 1.7, -0.1),
         ];
         for &pos in &setup {
-            let (b, m, c) = sphere(pos, Vec3::ZERO, 0.5, 1.0, 0.3, 0.5, BodyType::Dynamic);
+            let (b, m, c) = sphere(pos, Vec3::ZERO, 0.5, 1.0, 0.3, 0.5);
             spawn_body(&mut world, b, m, c);
         }
         let (bb, bm, bc) = box_body(
@@ -977,7 +974,6 @@ mod rigid_zero_gate {
             1.0,
             0.3,
             0.5,
-            BodyType::Dynamic,
         );
         spawn_body(&mut world, bb, bm, bc);
 

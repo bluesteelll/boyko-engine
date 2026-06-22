@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use boyko_ecs::ecs::core::component::component::Component;
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
+use boyko_ecs::ecs::core::iters::query::filter_enable::Enabled;
 use boyko_ecs::ecs::core::schedule::{Schedule, ScheduleBuilder};
 use boyko_ecs::ecs::core::time::FixedTime;
 use boyko_ecs::ecs::identifiers::primitives::EntityId;
@@ -16,7 +17,7 @@ use boyko_macros::Resource;
 use boyko_threadpool::{ThreadPool, ThreadPoolBuilder};
 
 use boyko_physics::components::{
-    BodyType, Collider, ColliderShape, RigidBody, RigidBodyBundle, RigidBodyMass,
+    Collider, ColliderShape, RigidBody, RigidBodyBundle, RigidBodyMass, Simulated,
 };
 use boyko_physics::manifold::{BodyIndex, Manifold};
 use boyko_physics::math::{MAX_CONTACT_POINTS, Mat3, Quat, Vec3};
@@ -55,7 +56,7 @@ fn serial_pool() -> Arc<ThreadPool> {
 /// the demo's `spawn_balls` does).
 fn spawn_body(world: &mut EcsMaster, body: RigidBody, mass: RigidBodyMass, collider: Collider) {
     let archetype = world.bundle_archetype_id_for::<RigidBodyBundle>();
-    world
+    let e = world
         .create_entity(
             archetype,
             &[
@@ -65,6 +66,10 @@ fn spawn_body(world: &mut EcsMaster, body: RigidBody, mass: RigidBodyMass, colli
             ],
         )
         .expect("invariant: RigidBodyBundle archetype accepts the three columns");
+    // Decision 6: every body this fixture spawns is a simulated dynamic body
+    // (the old `BodyType::Dynamic`). Enable the `Simulated` bit so the integrate /
+    // solve gates (now `simulated && is_dynamic_row`) advance it.
+    world.enable::<Simulated>(e);
 }
 
 /// A dynamic unit-mass body at `position` with `linear_velocity`, a unit sphere
@@ -81,7 +86,6 @@ fn dynamic_body(position: Vec3, linear_velocity: Vec3) -> (RigidBody, RigidBodyM
         inv_mass: 1.0,
         restitution: 0.5,
         friction: 0.3,
-        body_type: BodyType::Dynamic,
     };
     let collider = Collider {
         shape: ColliderShape::Sphere { radius: 0.5 },
@@ -140,17 +144,27 @@ fn components_round_trip() {
     let (body, mass, collider) = dynamic_body(Vec3::new(1.0, 2.0, 3.0), Vec3::new(4.0, 5.0, 6.0));
     spawn_body(&mut world, body, mass, collider);
 
-    // Query the hot + cold columns back and confirm the values survived.
+    // Query the hot + cold columns back and confirm the values survived. The old
+    // `BodyType::Dynamic` field is gone (Decision 2); a body's dynamic capability
+    // is now `inv_mass != 0` plus the runtime `Simulated` bit (checked separately
+    // via `is_enabled` below since the bit is not a column on `RigidBodyMass`).
     let q = world.query::<(&RigidBody, &RigidBodyMass), ()>();
     let mut seen = 0;
     for (b, m) in q.iter() {
         assert_eq!(b.position, Vec3::new(1.0, 2.0, 3.0));
         assert_eq!(b.linear_velocity, Vec3::new(4.0, 5.0, 6.0));
         assert_eq!(m.inv_mass, 1.0);
-        assert_eq!(m.body_type, BodyType::Dynamic);
+        assert!(m.inv_mass != 0.0, "the round-tripped body is dynamic-capable");
         seen += 1;
     }
     assert_eq!(seen, 1, "exactly one body round-tripped");
+    // The `Simulated` bit (set by `spawn_body`) round-trips through the EnableTag
+    // store: exactly one entity has it set.
+    let enabled = world
+        .query::<&RigidBody, Enabled<Simulated>>()
+        .iter()
+        .count();
+    assert_eq!(enabled, 1, "the Simulated bit round-tripped (Decision 3)");
 }
 
 // ── noop_step_runs_in_schedule (plan Validation) ─────────────────────────────

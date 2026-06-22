@@ -93,7 +93,6 @@ use super::simd;
 use super::soft_step::{IMMOVABLE_AT_REST, MAX_BIAS_VELOCITY, RESTITUTION_THRESHOLD, SoftCoefficients};
 use super::warm_start::{self, WarmStartTable};
 use super::RigidSolver;
-use crate::components::BodyType;
 use crate::manifold::{Manifold, SDF_SENTINEL};
 use crate::math::{Mat3, Vec3};
 use crate::resources::{BodyState, ConstraintGraph, IslandSleep, PhysicsConfig, SolverScratch};
@@ -2887,7 +2886,7 @@ impl ColoredSoftStepSolver {
         let mut snap_view = scratch.bodies.build_view();
         let snapshot = snap_view.as_mut_slice();
         for row in 0..n {
-            if snapshot[row].body_type == BodyType::Dynamic && eff[row].inv_mass != 0.0 {
+            if snapshot[row].simulated && is_dynamic_row(eff[row].inv_mass) {
                 snapshot[row].linear_velocity = eff[row].linear_velocity;
                 snapshot[row].angular_velocity = eff[row].angular_velocity;
                 scratch.touched.set(row);
@@ -2912,7 +2911,7 @@ impl ColoredSoftStepSolver {
             if !sleep.is_row_awake(row) {
                 continue;
             }
-            if snapshot[row].body_type == BodyType::Dynamic && eff[row].inv_mass != 0.0 {
+            if snapshot[row].simulated && is_dynamic_row(eff[row].inv_mass) {
                 snapshot[row].linear_velocity = eff[row].linear_velocity;
                 snapshot[row].angular_velocity = eff[row].angular_velocity;
                 scratch.touched.set(row);
@@ -2989,7 +2988,7 @@ impl ColoredSoftStepSolver {
         let has_dynamic = scratch
             .bodies()
             .iter()
-            .any(|b| b.body_type == BodyType::Dynamic && b.inv_mass != 0.0);
+            .any(|b| b.simulated && is_dynamic_row(b.inv_mass));
         if !has_dynamic {
             return;
         }
@@ -3203,7 +3202,8 @@ mod tests {
             inv_mass,
             restitution,
             friction,
-            body_type: BodyType::Dynamic,
+            simulated: true,
+            kinematic: false,
             is_sensor: false,
             shape: ColliderShape::Sphere { radius: 1.0 },
         }
@@ -3221,7 +3221,8 @@ mod tests {
             inv_mass: 0.0,
             restitution: 0.0,
             friction: 0.5,
-            body_type: BodyType::Static,
+            simulated: false,
+            kinematic: false,
             is_sensor: false,
             shape: ColliderShape::Sphere { radius: 1.0 },
         }

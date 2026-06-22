@@ -25,7 +25,7 @@ use boyko_ecs::ecs::core::time::FixedTime;
 use boyko_threadpool::{ThreadPool, ThreadPoolBuilder};
 
 use boyko_physics::components::{
-    BodyType, Collider, ColliderShape, RigidBody, RigidBodyBundle, RigidBodyMass,
+    Collider, ColliderShape, RigidBody, RigidBodyBundle, RigidBodyMass, Simulated,
 };
 use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::plugin::add_physics_systems;
@@ -52,7 +52,7 @@ fn serial_pool() -> Arc<ThreadPool> {
 /// Spawns one rigid body via the raw `create_entity` path.
 fn spawn_body(world: &mut EcsMaster, body: RigidBody, mass: RigidBodyMass, collider: Collider) {
     let archetype = world.bundle_archetype_id_for::<RigidBodyBundle>();
-    world
+    let e = world
         .create_entity(
             archetype,
             &[
@@ -62,6 +62,7 @@ fn spawn_body(world: &mut EcsMaster, body: RigidBody, mass: RigidBodyMass, colli
             ],
         )
         .expect("invariant: RigidBodyBundle archetype accepts the three columns");
+    world.enable::<Simulated>(e);
 }
 
 /// A sphere body with the given spin (initial angular velocity) so the quaternion
@@ -71,7 +72,6 @@ fn spinning_sphere(
     spin: Vec3,
     radius: f32,
     inv_mass: f32,
-    body_type: BodyType,
 ) -> (RigidBody, RigidBodyMass, Collider) {
     let body = RigidBody {
         position,
@@ -84,7 +84,6 @@ fn spinning_sphere(
         inv_mass,
         restitution: 0.0,
         friction: 0.5,
-        body_type,
     };
     let collider = Collider {
         shape: ColliderShape::Sphere { radius },
@@ -134,7 +133,7 @@ fn run_scene(simd: bool, frames: usize) -> Vec<RigidBody> {
         (Vec3::new(-0.1, 13.0, 0.0), Vec3::new(2.0, -0.5, -1.0)),
     ];
     for &(pos, spin) in &setup {
-        let (b, m, c) = spinning_sphere(pos, spin, 0.5, 1.0, BodyType::Dynamic);
+        let (b, m, c) = spinning_sphere(pos, spin, 0.5, 1.0);
         spawn_body(&mut world, b, m, c);
     }
     // Static floor sphere.
@@ -143,7 +142,6 @@ fn run_scene(simd: bool, frames: usize) -> Vec<RigidBody> {
         Vec3::ZERO,
         10.0,
         0.0,
-        BodyType::Static,
     );
     spawn_body(&mut world, b, m, c);
 
