@@ -205,6 +205,44 @@ pub struct ClusterCell {
 const _: () =
     assert!(core::mem::size_of::<ClusterCell>() == 8, "ClusterCell must be 8 bytes (std430)");
 
+// ---- LightEnabled (Axis-2 runtime on/off — EnableTag bitset) -------------------------
+
+/// Runtime on/off switch for a light — a first-class EnableTag bitset component
+/// (Principle 0: NOT a `bool` field, NOT a side store).
+///
+/// A fieldless ZST tagged `#[component(storage = "bitset")]`, so toggling it is the
+/// O(1) `enable`/`disable` bit flip (no migration, no `Changed` tick). It is read
+/// per-row in [`collect_lights`](crate::light_system::collect_lights) via the
+/// non-filtering [`IsEnabled<LightEnabled>`] datum: a disabled light is skipped from
+/// the GPU light table, an enabled one is folded.
+///
+/// # Seed / back-compat
+///
+/// A never-toggled row reads DISABLED (the bitset default). To keep pre-existing /
+/// non-tagged lights visible, the [`LightSeedState`](crate::light_system::LightSeedState)
+/// seed enables the tag on every light it has not yet seeded — so a light spawned without
+/// touching `LightEnabled` still appears in the table. This is why the read uses the
+/// non-filtering `IsEnabled` datum rather than the `Enabled<LightEnabled>` filter
+/// (which would DROP every never-tagged row).
+///
+/// [`IsEnabled<LightEnabled>`]: boyko_ecs::ecs::core::iters::query::IsEnabled
+#[derive(Component)]
+#[component(storage = "bitset")]
+pub struct LightEnabled;
+
+/// The structural-change rebuild channel for the GPU light table (Decision 2).
+///
+/// A bitset toggle ([`LightEnabled`]) bumps no `Changed` tick, and a removed /
+/// despawned light advances no surviving row's tick — both are INVISIBLE to the
+/// `Changed`-gate in [`collect_lights`](crate::light_system::collect_lights). This
+/// resource is the channel that catches them: the set-light-enabled surface and the
+/// `on_remove` eviction hook set `0 = true`, and `collect_lights` consumes it (sets
+/// it back to `false`) on every rebuild. It is kept distinct from
+/// [`LightTableStaging`](crate::light_system::LightTableStaging)`::dirty` (the
+/// GPU-upload latch) so the two state machines stay clean.
+#[derive(Resource)]
+pub struct LightTableDirty(pub bool);
+
 // ---- ECS components (authoritative store — Decision 4) -------------------------------
 
 /// A directional light (the sun): an infinitely-distant parallel beam. `#[repr(C)]` for

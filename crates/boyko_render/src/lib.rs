@@ -85,12 +85,14 @@ pub use light::{
     CLUSTER_COUNT, CLUSTER_DIM_X, CLUSTER_DIM_Y, CLUSTER_DIM_Z, CLUSTER_FAR_DEFAULT,
     CLUSTER_NEAR_DEFAULT, ClusterCell, ClusterConfig, DirectionalLight, GPU_LIGHT_WORDS, GpuLight,
     INDEX_LIST_CAP, LIGHT_HEADER_BASE_WORDS, LIGHT_HEADER_WORDS, LIGHT_KIND_DIRECTIONAL,
-    LIGHT_KIND_POINT, LIGHT_KIND_SKY, LIGHT_KIND_SPOT, LightHeaderGpu, LightingConfig, MAX_LIGHTS,
-    MAX_LIGHTS_PER_CLUSTER, PointLight, SPOT_COS_OUTER_MAX, SkyLight, SpotLight, cluster_index,
+    LIGHT_KIND_POINT, LIGHT_KIND_SKY, LIGHT_KIND_SPOT, LightEnabled, LightHeaderGpu,
+    LightTableDirty, LightingConfig, MAX_LIGHTS, MAX_LIGHTS_PER_CLUSTER, PointLight,
+    SPOT_COS_OUTER_MAX, SkyLight, SpotLight, cluster_index,
 };
 pub use light_system::{
-    GPU_LIGHT_BYTES, LIGHT_HEADER_BYTES, LightChanged, LightTableStaging, collect_lights,
-    fold_light_table, write_light_table,
+    GPU_LIGHT_BYTES, LIGHT_HEADER_BYTES, LightChanged, LightSeedState, LightTableStaging,
+    SetLightEnabledById, collect_lights, evict_light, fold_light_table, light_seed_state,
+    set_light_enabled_now, write_light_table,
 };
 pub use material::{MATERIAL_GPU_WORDS, MaterialGpu, MaterialId};
 pub use view::{

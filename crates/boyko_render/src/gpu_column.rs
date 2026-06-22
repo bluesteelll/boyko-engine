@@ -593,11 +593,23 @@ impl GpuColumnManager {
         // Drive the A2 device-mint seam: flip the CPU pool to device-backing and
         // null its column cache (the C1 fix). Reached through the public
         // `archetype_master_mut().get_archetype_mut(id)` chain.
-        let arch = ecs
-            .archetype_master_mut()
-            .get_archetype_mut(archetype)
-            .expect("invariant: create_column targets an existing archetype");
-        arch.make_component_device_backed(component, handle);
+        //
+        // `Archetype::make_component_device_backed` is `#[cfg(not(miri))]` in
+        // boyko_ecs (it wraps the DeviceColumn RHI seam Miri cannot run), so the
+        // call site is gated to match. Under Miri this whole function is
+        // unreachable anyway — it requires a live `VulkanContext` device.
+        #[cfg(not(miri))]
+        {
+            let arch = ecs
+                .archetype_master_mut()
+                .get_archetype_mut(archetype)
+                .expect("invariant: create_column targets an existing archetype");
+            arch.make_component_device_backed(component, handle);
+        }
+        // Under Miri the device-mint block above is compiled out, leaving `ecs`
+        // unused; the mut-borrow keeps the signature honest without a warning.
+        #[cfg(miri)]
+        let _ = &mut *ecs;
 
         Ok(handle)
     }
@@ -1218,11 +1230,23 @@ impl GpuColumnManager {
         // funnel (MF-2/3): it updates ONLY the boxed DeviceColumn.handle (no
         // re-flip, no Box churn, no column touch — the pool is already
         // device-backed and its column already null).
-        let arch = ecs
-            .archetype_master_mut()
-            .get_archetype_mut(old_meta.archetype)
-            .expect("invariant: grow_column targets an existing archetype");
-        arch.set_component_device_handle(old_meta.component, new_handle);
+        //
+        // `Archetype::set_component_device_handle` is `#[cfg(not(miri))]` in
+        // boyko_ecs (it wraps the DeviceColumn RHI seam Miri cannot run), so the
+        // call site is gated to match. Under Miri this whole function is
+        // unreachable anyway — it requires a live `VulkanContext` device.
+        #[cfg(not(miri))]
+        {
+            let arch = ecs
+                .archetype_master_mut()
+                .get_archetype_mut(old_meta.archetype)
+                .expect("invariant: grow_column targets an existing archetype");
+            arch.set_component_device_handle(old_meta.component, new_handle);
+        }
+        // Under Miri the device-write block above is compiled out, leaving `ecs`
+        // unused; the mut-borrow keeps the signature honest without a warning.
+        #[cfg(miri)]
+        let _ = &mut *ecs;
 
         Ok(new_handle)
     }

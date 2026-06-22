@@ -15,14 +15,22 @@
 //! the flag via [`LightTableStaging::mark_uploaded`]. The FIRST seed uses the
 //! fence-waited `upload_initial`; only the on-change re-upload is async.
 
-use boyko_ecs::ecs::core::iters::query::{Changed, Or};
+use boyko_ecs::ecs::core::change_detection::Tick;
+use boyko_ecs::ecs::core::commands::Command;
+use boyko_ecs::ecs::core::component::hooks::HookContext;
+use boyko_ecs::ecs::core::component::hooks::deferred_master::DeferredEcsMaster;
+use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
+use boyko_ecs::ecs::core::entity::entity::Entity;
+use boyko_ecs::ecs::core::iters::query::{Added, Changed, IsEnabled, Or, Query};
+use boyko_ecs::ecs::core::system::into_system::IntoSystem;
+use boyko_ecs::ecs::core::system::system::System;
 use boyko_ecs::ecs::core::system::{Res, ResMut};
-use boyko_ecs::ecs::core::iters::query::Query;
+use boyko_ecs::ecs::identifiers::primitives::EntityId;
 use boyko_macros::Resource;
 
 use crate::light::{
-    DirectionalLight, GpuLight, LightHeaderGpu, LightingConfig, MAX_LIGHTS, PointLight, SkyLight,
-    SpotLight,
+    DirectionalLight, GpuLight, LightEnabled, LightHeaderGpu, LightTableDirty, LightingConfig,
+    MAX_LIGHTS, PointLight, SkyLight, SpotLight,
 };
 
 /// The byte size of the light SSBO's leading header region (`LightHeaderGpu`, 64 B).
@@ -220,46 +228,360 @@ fn write_pod<T: Copy>(dst: &mut [u8], off: usize, value: &T) {
 // `clippy::too_many_arguments`: an ECS system's arguments ARE its `SystemParam`s; the
 // param-injection protocol cannot read a struct of params, so the per-light-kind queries
 // (changed + full, four kinds) + the config + the staging are necessarily separate.
-#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments, clippy::type_complexity)]
 pub fn collect_lights(
     changed_dir: Query<&DirectionalLight, Changed<DirectionalLight>>,
     changed_sky: Query<&SkyLight, Changed<SkyLight>>,
     changed_point: Query<&PointLight, Changed<PointLight>>,
     changed_spot: Query<&SpotLight, Changed<SpotLight>>,
-    all_directionals: Query<&DirectionalLight>,
-    all_skies: Query<&SkyLight>,
-    all_points: Query<&PointLight>,
-    all_spots: Query<&SpotLight>,
+    all_directionals: Query<(&DirectionalLight, IsEnabled<LightEnabled>)>,
+    all_skies: Query<(&SkyLight, IsEnabled<LightEnabled>)>,
+    all_points: Query<(&PointLight, IsEnabled<LightEnabled>)>,
+    all_spots: Query<(&SpotLight, IsEnabled<LightEnabled>)>,
     cfg: Res<LightingConfig>,
     mut staging: ResMut<LightTableStaging>,
+    mut dirty: ResMut<LightTableDirty>,
 ) {
-    // Change gate: if no light's change tick advanced this frame, do nothing. Each
-    // `Changed` query yields zero rows on a static frame, so the collection is skipped
-    // entirely (no rebuild, no dirty flip). NOTE: a despawn/add still needs to be
-    // observed; the caller pairs this with the structural-change path when one exists.
+    // Rebuild gate: rebuild iff a light component's Changed tick advanced OR the
+    // structural `LightTableDirty` channel is set. Changed alone CANNOT see two events:
+    // (1) an O(1) LightEnabled toggle (enable_id/disable_id bumps no tick), and (2) a
+    // removed/despawned light (the departed row advances no surviving tick). Both mark
+    // LightTableDirty — toggles via the set-light-enabled surface, removals/despawns via
+    // the on_remove hook registered first in LightingPlugin::build — so this gate evicts
+    // them next frame. The dirty bit is consumed unconditionally after every rebuild (no
+    // early-return in between).
     let changed = changed_dir.iter().next().is_some()
         || changed_sky.iter().next().is_some()
         || changed_point.iter().next().is_some()
         || changed_spot.iter().next().is_some();
-    if !changed {
+    if !changed && !dirty.0 {
         return;
     }
 
     // Rebuild the full table from the live lights (the table is small — MAX_LIGHTS ≤
     // 1024 — so a full rebuild on change is cheaper than a delta map; Decision 4
-    // trade-off). Fold the unfiltered queries DIRECTLY into the preallocated scratch —
-    // the worst-case-sized `scratch` is the SOLE sink, no per-frame `Vec` (Principle 1/5).
+    // trade-off). Fold the queries DIRECTLY into the preallocated scratch — the
+    // worst-case-sized `scratch` is the SOLE sink, no per-frame `Vec` (Principle 1/5).
+    // The per-row `IsEnabled<LightEnabled>` bit is `filter_map`'d so a disabled light is
+    // dropped BEFORE the fold sees it — the header counts (incremented per write inside
+    // `fold_light_table`) stay correct, and the `impl Iterator<Item = &T>` signature is
+    // byte-identical (`write_light_table` + its slice unit tests are untouched).
     let staging = &mut *staging;
     let used = fold_light_table(
         &mut staging.scratch,
-        all_directionals.iter(),
-        all_skies.iter(),
-        all_points.iter(),
-        all_spots.iter(),
+        all_directionals.iter().filter_map(|(l, en)| en.then_some(l)),
+        all_skies.iter().filter_map(|(l, en)| en.then_some(l)),
+        all_points.iter().filter_map(|(l, en)| en.then_some(l)),
+        all_spots.iter().filter_map(|(l, en)| en.then_some(l)),
         &cfg,
     );
     staging.used_bytes = used;
     staging.dirty = true;
+    // Consume the structural-change signal — always reached on every rebuild, so a set
+    // bit is never stranded (W2).
+    dirty.0 = false;
+}
+
+/// Cross-frame state for the light-seed pass ([`seed`](Self::seed)): the eight CACHED
+/// light-id systems plus the first-run flag and a reused scratch buffer.
+///
+/// # Why cached systems (W1)
+///
+/// The per-row entity id is only reachable through a `Query` system context
+/// (`Query::iter_entities`; the exclusive `QueryView` does NOT expose ids — verified). A
+/// naive seed would call [`EcsMaster::run_system`] each frame, which rebuilds a fresh
+/// `FunctionSystem` and re-runs `initialize` (query-state allocation + archetype matching)
+/// on EVERY invocation — four uncached system builds+inits per steady-state frame, which
+/// contradicts Principle 1/5 (no per-frame setup/allocation on the hot path).
+///
+/// Instead this struct OWNS the eight `FunctionSystem` values (the four `Added`-filtered
+/// twins for the steady state, the four unfiltered twins for the first run) and runs them
+/// through [`EcsMaster::run_cached_system`], so `initialize` is paid ONCE (idempotent FS1).
+/// The steady-state cost is therefore four cached-system executions + four archetype scans
+/// (each yielding zero rows on a static frame) — no system rebuild, no init, and no
+/// allocation when the scans are empty (an empty `Vec` does not allocate).
+///
+/// The eight system types are unnameable (closure-backed `FunctionSystem`s), so the struct
+/// is generic over them; construct it via [`light_seed_state`] and let inference name the
+/// type at the (single) capture site.
+pub struct LightSeedState<A, S, P, T, Aa, Sa, Pa, Ta> {
+    added_dir: A,
+    added_sky: S,
+    added_point: P,
+    added_spot: T,
+    all_dir: Aa,
+    all_sky: Sa,
+    all_point: Pa,
+    all_spot: Ta,
+    first_run: bool,
+    /// Reused id scratch — cleared and refilled each non-static pass (Principle 5).
+    ids: Vec<EntityId>,
+}
+
+/// Builds the cross-frame [`LightSeedState`] with its eight cached light-id systems.
+///
+/// The `Added`-filtered systems drive the steady state (zero rows on a static frame); the
+/// unfiltered systems drive the one-time first-run full scan (pre-plugin / pre-existing
+/// lights). The return type is `impl`-named because the eight `FunctionSystem` types are
+/// closure-backed and unnameable; capture it once (e.g. in the plugin's seed closure).
+#[expect(
+    clippy::type_complexity,
+    reason = "eight closure-backed FunctionSystem type params are unnameable; \
+              the type is constructed once via this helper and never spelled by callers"
+)]
+pub fn light_seed_state() -> LightSeedState<
+    impl System<Out = Vec<EntityId>>,
+    impl System<Out = Vec<EntityId>>,
+    impl System<Out = Vec<EntityId>>,
+    impl System<Out = Vec<EntityId>>,
+    impl System<Out = Vec<EntityId>>,
+    impl System<Out = Vec<EntityId>>,
+    impl System<Out = Vec<EntityId>>,
+    impl System<Out = Vec<EntityId>>,
+> {
+    LightSeedState {
+        added_dir: IntoSystem::into_system(
+            |q: Query<&DirectionalLight, Added<DirectionalLight>>| {
+                q.iter_entities().map(|(id, _)| id).collect::<Vec<_>>()
+            },
+        ),
+        added_sky: IntoSystem::into_system(|q: Query<&SkyLight, Added<SkyLight>>| {
+            q.iter_entities().map(|(id, _)| id).collect::<Vec<_>>()
+        }),
+        added_point: IntoSystem::into_system(|q: Query<&PointLight, Added<PointLight>>| {
+            q.iter_entities().map(|(id, _)| id).collect::<Vec<_>>()
+        }),
+        added_spot: IntoSystem::into_system(|q: Query<&SpotLight, Added<SpotLight>>| {
+            q.iter_entities().map(|(id, _)| id).collect::<Vec<_>>()
+        }),
+        all_dir: IntoSystem::into_system(|q: Query<&DirectionalLight>| {
+            q.iter_entities().map(|(id, _)| id).collect::<Vec<_>>()
+        }),
+        all_sky: IntoSystem::into_system(|q: Query<&SkyLight>| {
+            q.iter_entities().map(|(id, _)| id).collect::<Vec<_>>()
+        }),
+        all_point: IntoSystem::into_system(|q: Query<&PointLight>| {
+            q.iter_entities().map(|(id, _)| id).collect::<Vec<_>>()
+        }),
+        all_spot: IntoSystem::into_system(|q: Query<&SpotLight>| {
+            q.iter_entities().map(|(id, _)| id).collect::<Vec<_>>()
+        }),
+        first_run: false,
+        ids: Vec::new(),
+    }
+}
+
+impl<A, S, P, T, Aa, Sa, Pa, Ta> LightSeedState<A, S, P, T, Aa, Sa, Pa, Ta>
+where
+    A: System<Out = Vec<EntityId>>,
+    S: System<Out = Vec<EntityId>>,
+    P: System<Out = Vec<EntityId>>,
+    T: System<Out = Vec<EntityId>>,
+    Aa: System<Out = Vec<EntityId>>,
+    Sa: System<Out = Vec<EntityId>>,
+    Pa: System<Out = Vec<EntityId>>,
+    Ta: System<Out = Vec<EntityId>>,
+{
+    /// Collects the ids of every light (all four kinds) into `self.ids` (first-run scan).
+    ///
+    /// Runs the four cached unfiltered systems via [`EcsMaster::run_cached_system`] so
+    /// `initialize` is paid once. The world borrow is internal to each call and dropped
+    /// before the caller `enable`s the bits.
+    fn collect_all_light_ids(&mut self, world: &mut EcsMaster) {
+        self.ids.extend(world.run_cached_system(&mut self.all_dir));
+        self.ids.extend(world.run_cached_system(&mut self.all_sky));
+        self.ids.extend(world.run_cached_system(&mut self.all_point));
+        self.ids.extend(world.run_cached_system(&mut self.all_spot));
+    }
+
+    /// Collects the ids of every NEWLY-added light into `self.ids` (steady-state scan).
+    ///
+    /// `Added<*Light>`-filtered twins of [`collect_all_light_ids`](Self::collect_all_light_ids)
+    /// — zero rows on a static frame, so the seed is a no-op there (and the empty system
+    /// outputs do not allocate).
+    ///
+    /// # Per-pass change-tick advance (W1)
+    ///
+    /// [`EcsMaster::run_cached_system`] runs `initialize` (idempotent — seeds the change-tick
+    /// window ONCE to the degenerate pre-first-run value) + `run_unsafe`, but it NEVER calls
+    /// [`System::set_change_ticks`]. Only the schedule's dispatch loop advances a system's
+    /// `(last_run, this_run]` window (schedule.rs:339-340). Because these sub-systems run
+    /// INSIDE the seed's exclusive body (not as schedule-dispatched systems), their window
+    /// would otherwise stay frozen at the initialize-time value for the life of the process —
+    /// so `Added` would NOT mean "added since the previous seed pass" (it would either never
+    /// re-report a light spawned after the first frame, or re-report every light every frame
+    /// and defeat the static fast path).
+    ///
+    /// We therefore stamp each sub-system's window before each run, mirroring the schedule's
+    /// per-frame snapshot exactly: the sub-system's PREVIOUS `this_run` becomes its new
+    /// `last_run`, and its new `this_run` is the world's current frame tick. The seed is an
+    /// exclusive system scheduled `.before(collect_lights)` WITHIN `Schedule::run`, which has
+    /// already bumped the frame tick (schedule.rs:286), so `world.current_tick()` is the
+    /// frame's `this_run`. After this stamp `Added<*Light>` correctly observes only the rows
+    /// whose add-tick falls in `(prev_this_run, this_run]` — exactly the lights added since
+    /// the previous seed pass (zero on a static frame).
+    fn collect_added_light_ids(&mut self, world: &mut EcsMaster) {
+        let this_run = world.current_tick();
+        Self::run_added(&mut self.added_dir, world, this_run, &mut self.ids);
+        Self::run_added(&mut self.added_sky, world, this_run, &mut self.ids);
+        Self::run_added(&mut self.added_point, world, this_run, &mut self.ids);
+        Self::run_added(&mut self.added_spot, world, this_run, &mut self.ids);
+    }
+
+    /// Advances `sys`'s change-tick window to `(prev_this_run, this_run]` (matching
+    /// schedule.rs:339-340), then runs it cached and extends `out` with its ids.
+    ///
+    /// Factored out so the four `Added` sub-systems share one stamp+run path; the
+    /// per-pass window advance is what makes `Added` mean "since the previous seed pass"
+    /// (see [`collect_added_light_ids`](Self::collect_added_light_ids)).
+    fn run_added<Sys>(sys: &mut Sys, world: &mut EcsMaster, this_run: Tick, out: &mut Vec<EntityId>)
+    where
+        Sys: System<Out = Vec<EntityId>>,
+    {
+        // `initialize` is idempotent (FS1); the first call seeds the window, after which
+        // `meta().this_run()` reads back the PREVIOUS pass's `this_run` to use as the new
+        // `last_run` — the same prev/cur snapshot the schedule dispatch performs.
+        sys.initialize(world);
+        let prev_this_run = sys.meta().this_run();
+        sys.set_change_ticks(prev_this_run, this_run);
+        out.extend(world.run_cached_system(sys));
+    }
+
+    /// Exclusive seed pass (`&mut EcsMaster`): enables the [`LightEnabled`] bit on lights
+    /// that have not been seeded yet, flipping bits IMMEDIATELY (not via deferred
+    /// `Commands`).
+    ///
+    /// Scheduled `.before(collect_lights)` so the freshly-enabled bits AND the
+    /// [`LightTableDirty`] mark are visible to `collect_lights` in the SAME schedule pass
+    /// (W2 — zero added latency; a deferred seed would apply only after `collect_lights`
+    /// already folded, hiding the bit for one frame).
+    ///
+    /// - **First run** (`!self.first_run`): scan every light (the four kinds) and `enable`
+    ///   `LightEnabled` on each — catching pre-plugin / pre-existing lights and test scenes
+    ///   that spawned lights before this system. Sets `self.first_run = true`.
+    /// - **Subsequent runs**: scan `Added<*Light>` rows only (zero on a static frame) and
+    ///   `enable` each.
+    ///
+    /// If any row was enabled, marks [`LightTableDirty`] so the same-pass `collect_lights`
+    /// rebuilds with the newly-visible lights.
+    ///
+    /// # Cost (corrected, W1)
+    ///
+    /// Exclusive (not `Commands`) because the immediate `&mut self` `enable` is the only way
+    /// to make the bit live in-pass. The steady-state pass is NOT free: it runs four CACHED
+    /// systems (`initialize` already paid — see [`LightSeedState`]) over four archetype
+    /// scans. On a static / no-new-light frame each scan yields zero rows, so no bit flip,
+    /// no dirty mark, and no allocation occur; only the four cached executions + the
+    /// exclusive serialization point remain — bounded and constant.
+    pub fn seed(&mut self, world: &mut EcsMaster) {
+        // Collect the ids first (the query view borrows the world), then enable (needs
+        // `&mut`). `self.ids` is the reused scratch (cleared here, refilled below).
+        self.ids.clear();
+        if self.first_run {
+            self.collect_added_light_ids(world);
+        } else {
+            self.collect_all_light_ids(world);
+            self.first_run = true;
+        }
+
+        if self.ids.is_empty() {
+            return;
+        }
+
+        // Index-walk (not a drain): `self.ids` and the `&mut world` arg are disjoint borrows,
+        // so we can read an id out of `self.ids` and call `world.enable` in the same loop body
+        // without aliasing. The buffer keeps its capacity for reuse — it is `clear()`ed at the
+        // top of the NEXT pass (line above), not emptied here.
+        for i in 0..self.ids.len() {
+            let id = self.ids[i];
+            // `get_entity` resolves the live `Entity` (with generation); a stale / dead id
+            // is a `None` no-op. `enable` is the O(1) immediate `&mut self` bit flip.
+            if let Some(entity) = world.get_entity(id) {
+                world.enable::<LightEnabled>(entity);
+            }
+        }
+
+        // At least one row was (re)enabled this pass — mark the table for an in-pass
+        // rebuild.
+        if let Some(d) = world.try_resource_mut::<LightTableDirty>() {
+            d.0 = true;
+        }
+    }
+}
+
+/// Enables/disables a light's [`LightEnabled`] bit at runtime and marks the light table
+/// for rebuild — the IMMEDIATE (`&mut EcsMaster`) entry point.
+///
+/// Use this from setup / test code (and the seed uses the same `enable`/`disable`); for
+/// in-system gameplay use the deferred [`SetLightEnabledById`] command. Marking the table
+/// dirty in the SAME call is mandatory: the bit flip bumps no `Changed` tick (Decision 2),
+/// so without the dirty mark `collect_lights` would never observe the toggle.
+///
+/// The `&mut self` exclusive borrow is the documented soundness ground for the bitset's
+/// `Relaxed` atomics (do NOT relax to `&self`). A dead / stale `entity` is a silent no-op
+/// (the underlying `set_enable_bit` no-ops), so a still-set dirty mark merely triggers one
+/// idempotent rebuild.
+pub fn set_light_enabled_now(world: &mut EcsMaster, entity: Entity, enabled: bool) {
+    debug_assert!(
+        world.get_entity(entity.id()).is_some(),
+        "invariant: set_light_enabled_now expects a live entity (no-ops on a dead one)"
+    );
+    if enabled {
+        world.enable::<LightEnabled>(entity);
+    } else {
+        world.disable::<LightEnabled>(entity);
+    }
+    if let Some(d) = world.try_resource_mut::<LightTableDirty>() {
+        d.0 = true;
+    }
+}
+
+/// Deferred [`Command`] twin of [`set_light_enabled_now`] — toggles a light's
+/// [`LightEnabled`] bit and marks the table dirty under the `&mut` apply window.
+///
+/// Enqueue from an in-system context via `commands.add(SetLightEnabledById { entity, enabled })`.
+/// Like the immediate path, it marks [`LightTableDirty`] in the same apply because the bit
+/// flip is tickless (Decision 2).
+pub struct SetLightEnabledById {
+    /// The light entity to toggle.
+    pub entity: Entity,
+    /// `true` enables the light, `false` disables it.
+    pub enabled: bool,
+}
+
+impl Command for SetLightEnabledById {
+    #[inline]
+    fn apply(self, world: &mut EcsMaster) {
+        set_light_enabled_now(world, self.entity, self.enabled);
+    }
+}
+
+/// Gate-5 eviction hook: marks [`LightTableDirty`] when a light DATA component is removed
+/// (the entity survives) or the whole entity is despawned (despawn fires `on_remove` per
+/// component too — so this single `on_remove` registration subsumes both classes).
+///
+/// Registered on the four light data components (a bitset tag rejects hooks). A removed /
+/// despawned light advances no surviving row's `Changed` tick, so `collect_lights`'s
+/// Changed gate alone would never evict it; this hook sets the structural-change channel
+/// so the next `collect_lights` rebuilds with the departed light gone.
+///
+/// Declared `unsafe fn` only to match the [`HookFn`] signature; its body calls ONLY the
+/// safe `resource_mut` — there is no `unsafe` block inside.
+///
+/// [`HookFn`]: boyko_ecs::ecs::core::component::hooks::HookFn
+///
+/// # Safety
+///
+/// The caller is always a `trigger_on_remove` dispatch that fires synchronously under the
+/// outermost apply's `&mut EcsMaster` (the single-threaded apply window). `resource_mut`
+/// returns a `&mut LightTableDirty` into resource storage, which is disjoint from every
+/// archetype / pool buffer — so this never aliases the apply's component reborrows. It does
+/// no structural mutation, enqueues no commands, and is non-re-entrant (the canonical
+/// `on_remove` resource-mark pattern; Phase-14a/19 Miri-TB-proven surface).
+pub unsafe fn evict_light(mut dm: DeferredEcsMaster<'_>, _ctx: HookContext) {
+    if let Some(d) = dm.resource_mut::<LightTableDirty>() {
+        d.0 = true;
+    }
 }
 
 /// A convenience change filter alias for the full collection path: a light is
