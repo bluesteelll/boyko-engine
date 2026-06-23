@@ -56,10 +56,21 @@ Full ECS core + scheduler + the entire feature line is landed:
   machinery's regression gate. Custom propagating triggers bubble along ANY
   relation via the generic `Traversal`/`Toward<R>` seam; deep-clone + serialize
   entity-remap are generic. v1 = `Vec<Entity>` one-to-many, `RETAIN_EMPTY=true`;
-  v1.1 lifts: 1:1 `Entity` collection + eviction, remove-on-empty. STILL OPEN
-  (relation-aware QUERY ergonomics): a relation-traversal query DSL (`(Likes, *)`
-  wildcards, transitive/exclusive query terms) — the storage + reactive
-  maintenance are done; the query-side sugar is the remaining nicety.
+  **v1.1 (1:1 `Exclusive` collection + eviction) — SHIPPED** (`2f47973`); only
+  remove-on-empty is deferred (v1.2). **Relation-aware
+  QUERY + OBSERVER DSL — SHIPPED** (`147446e` query side, `e3fa9a5` observer side):
+  the `Related<R, D>` read-only join term (sequential-only, par_iter-rejected, usable
+  as a `Query` SystemParam; aliasing build-panic via the existing conflict detector),
+  `HasRelation`/`NoRelation`/`RelatedTo` filters (the last via the new value-carrying
+  `query_filtered` entry), transitive accessors `targets`/`sources`/`ancestors`/
+  `descendants` (depth-capped + `!ACYCLIC` visited guard), `OnLink<R>`/`OnUnlink<R>`
+  edge observers (fired on the committed edge at the apply window), and `Broadcast<R>`
+  downward trigger propagation (per-node prune). Landing it also fixed two pre-existing
+  deep-clone reverse-index bugs (BUG-EDGE-CLONE-1/2). The flecs-style wildcard *pair*
+  term (`(Likes, *)` yielding each pair) is intentionally not added — the `sources`/
+  `targets` accessors + the join cover the non-fragmenting model. 1:1 collections
+  (v1.1) are now SHIPPED too — the only deferred relation work is remove-on-empty
+  (v1.2), a minor convenience (an emptied target keeps its empty reverse component).
 
 ### P1 — modern ECS ergonomics / storage
 - ~~**Required components.**~~ SHIPPED (`#[require]`, component A auto-inserts B, C).
