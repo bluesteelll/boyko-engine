@@ -50,7 +50,9 @@ use std::alloc::{self, Layout};
 
 use crate::ecs::core::archetype::archetype::Archetype;
 use crate::ecs::core::clone::cloner::EntityCloner;
-use crate::ecs::core::clone::deep::{link_child, remap_clone_child_of};
+use crate::ecs::core::clone::deep::{
+    link_child, remap_clone_child_of, remap_relink_generic_relations,
+};
 use crate::ecs::core::clone::map::EntityCloneMap;
 use crate::ecs::core::clone::materialize::{
     CloneColumnSrc, CloneRowGuard, MAX_CLONE_COLUMNS, select_clone_ids, write_clone_column,
@@ -116,6 +118,15 @@ struct PrefabNode {
     /// Whether `src_parent` is set (the root has no captured `ChildOf` — Decision 5,
     /// and a top-level captured node may have an external parent dropped at capture).
     has_src_parent: bool,
+    /// This node's OWN source `Entity` recorded at capture. Used at instantiate to
+    /// populate the per-node source→instance [`EntityCloneMap`] (`src_entity` →
+    /// instance) so [`remap_relink_generic_relations`] remaps every in-subtree generic
+    /// relation FK to its instance and relinks the reverse index — fixing the prefab
+    /// half-edge bug (FK present, target's reverse collection missing the instance).
+    /// A pure value key (never dereferenced against the world at instantiate), so the
+    /// prefab stays source-independent: it only matches the verbatim-copied FK target
+    /// values, which came from the same capture-time source entities.
+    src_entity: Entity,
 }
 
 /// One owned, max-aligned, growable byte region holding all captured component
@@ -590,6 +601,7 @@ pub(crate) fn capture(world: &mut EcsMaster, source: Entity, cloner: &EntityClon
             comp_len,
             src_parent,
             has_src_parent,
+            src_entity: src,
         });
 
         // W6: SNAPSHOT this node's children BY VALUE before any further push.
@@ -779,47 +791,55 @@ pub(crate) fn instantiate(world: &mut EcsMaster, prefab: &Prefab) -> Entity {
     }
 
     // ── Remap + link pass (VERBATIM clone_subtree_inner tail) ───────────────
-    // Build the source→instance map so `remap_clone_child_of` works UNCHANGED: for
-    // each non-root node, its captured `src_parent` (the source parent Entity) maps to
-    // the INSTANCE entity of its template parent node (Decision 5).
+    // Build the per-node source→instance map, keyed IDENTICALLY to the deep-clone map
+    // (`clone_subtree_inner` inserts `src → clone` for EVERY cloned node): every captured
+    // node's own source `Entity` → its instance. This is a strict superset of the prior
+    // ChildOf-only map (a child's `src_parent` IS its parent node's `src_entity`, so the
+    // verbatim `remap_clone_child_of` still resolves `childof.target() → parent_instance`),
+    // and it additionally lets `remap_relink_generic_relations` translate any in-subtree
+    // generic relation FK target to its instance (a target outside the subtree is absent
+    // from the map → kept verbatim, then relinked-or-detached per the v1.1 rules).
     let Some(remap_fn) = component_registry::get_map_entities_fn(child_of_id.0) else {
         debug_assert!(false, "instantiate: ChildOf map_entities_fn not installed");
         return instance_of[0];
     };
 
     let mut map = EntityCloneMap::new();
-    for node in &prefab.nodes {
-        if node.parent == PREFAB_NODE_NONE {
-            continue; // root / external parent — no internal remap
-        }
-        // This node's instance carries (in its blob-copied ChildOf) the source parent
-        // entity `src_parent`; map it to the instance of the parent node so the
-        // verbatim `remap_clone_child_of` rewrites it to the instance parent.
-        let parent_instance = instance_of[node.parent as usize];
-        map.insert(node.src_parent, parent_instance);
+    for (node_index, node) in prefab.nodes.iter().enumerate() {
+        map.insert(node.src_entity, instance_of[node_index]);
     }
 
     // Suppress 1:1 eviction for the relink phase (Relations v1.1, C3), identical to
-    // the `clone_subtree` relink guard. NOTE: this prefab loop currently relinks
-    // ONLY `ChildOf`/`Children` (a `Vec` collection that never evicts), so the guard
-    // is forward-looking SCAFFOLD here — it suppresses nothing until prefab
-    // `instantiate` routes generic-relation FKs through `remap_relink_generic_relations`
-    // (today generic relation FKs are not relinked on instantiate at all — a
-    // pre-existing prefab gap, broader than v1.1). Kept so the guard is already
-    // correct the moment that relink lands.
+    // the `clone_subtree` relink guard. NOW LOAD-BEARING: the loop below routes every
+    // node's generic-relation FKs through `remap_relink_generic_relations`, so an
+    // instance whose FK points at an EXTERNAL `Exclusive` 1:1 target must DETACH (drop
+    // its own dangling FK) instead of evicting that unrelated target's existing source.
+    // No effect on the `Vec` one-to-many path (eviction never triggers) or on
+    // `ChildOf`/`Children` (a `Vec` collection).
     let eviction_suppress = EvictionSuppressGuard::enter();
 
     for (node_index, node) in prefab.nodes.iter().enumerate() {
-        if node.parent == PREFAB_NODE_NONE {
-            continue;
-        }
         let instance = instance_of[node_index];
-        let remapped_parent = remap_clone_child_of(world, instance, child_of_id, remap_fn, &map);
-        if let Some(parent_clone) = remapped_parent
-            && parent_clone != instance
-        {
-            link_child(world, parent_clone, instance, children_id);
+
+        // ── (1) ChildOf / Children — UNCHANGED (Decision 5 + Phase-19 regression gate).
+        // Skip the root / externally-parented node (no captured ChildOf to remap).
+        if node.parent != PREFAB_NODE_NONE {
+            let remapped_parent =
+                remap_clone_child_of(world, instance, child_of_id, remap_fn, &map);
+            if let Some(parent_clone) = remapped_parent
+                && parent_clone != instance
+            {
+                link_child(world, parent_clone, instance, children_id);
+            }
         }
+
+        // ── (2) GENERIC relation FKs — fixes the prefab half-edge bug. Reuses the ONE
+        // deep-clone relink body (Principle 0): remaps every NON-ChildOf relationship
+        // source FK on the instance (in-subtree target → its instance via `map`,
+        // external target → verbatim) and relinks the instance into the target's reverse
+        // index (external `Exclusive` → detach under the eviction-suppress guard). Runs
+        // for EVERY node including the root (a root instance may carry a generic FK).
+        remap_relink_generic_relations(world, instance, child_of_id, &map);
     }
 
     // Re-enable 1:1 eviction before returning (any deferred detach removes run with

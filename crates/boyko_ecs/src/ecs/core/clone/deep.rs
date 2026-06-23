@@ -226,7 +226,14 @@ fn clone_subtree_inner(
 /// (no archetype hosts more than a handful of relation FKs); the snapshot avoids
 /// holding an `&Archetype` borrow across `get_component_raw_mut` (a `&mut` into a
 /// pool) — W6 "re-resolve / snapshot, don't hold a borrow across a structural-ish op".
-fn remap_relink_generic_relations(
+///
+/// `pub(crate)` so the S7 prefab `instantiate` path reuses this VERBATIM (Principle 0 —
+/// ONE relink body, no prefab copy): the prefab passes a source→instance
+/// [`EntityCloneMap`] keyed identically (every captured node's source `Entity` → its
+/// instance), so an in-subtree generic FK target remaps to its instance and an external
+/// target stays verbatim → relinked or detached per the v1.1 rules (the prefab places
+/// the same [`EvictionSuppressGuard`] window as the deep-clone tail).
+pub(crate) fn remap_relink_generic_relations(
     world: &mut EcsMaster,
     clone: Entity,
     child_of_id: crate::ecs::identifiers::primitives::ComponentId,
