@@ -55,3 +55,10 @@ bytemuck = { version = "1", features = ["derive"] }
 # physics pipeline fans across.
 boyko-physics = { path = "../boyko_physics" }
 boyko-threadpool = { path = "../boyko_threadpool" }
+# GUI P6b screenshot test ONLY: the HUD test drives the SHIPPED data-binding chain
+# (`BindText` -> `UiTextBuffer` -> `emit_glyphs`) that lives in boyko-ui, then renders
+# the bound glyphs through this crate's reused `pack_ui_instance` / `record_ui_rects`
+# path. Acyclic + TEST-ONLY: `boyko_render` (dev) -> `boyko-ui`; `boyko-ui` names no
+# render crate (verified: its deps are ecs/macros/utils/input/fontbake/scene/math), so
+# no production cycle is introduced.
+boyko-ui = { path = "../boyko_ui" }
