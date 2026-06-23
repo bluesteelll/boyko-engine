@@ -576,6 +576,42 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         write_words(mapped, &DEFAULT_MATERIAL_TABLE);
     }
 
+    // M1: the empty-skip `PointerGrid` SSBO (vocab binding 9). Baked from the SAME `sdf` edit
+    // authority via `boyko_sdf_math::brick::build_pointer_grid` (principle 0 — no parallel
+    // field store), one `u32` per cell (the GPU `StructuredBuffer<uint>` element). The windowed
+    // present path runs the marcher with the empty skip GATED OFF (`brick_enabled == 0`), so the
+    // marcher NEVER reads these cells — the on-screen output stays byte-identical to the pre-M1
+    // path. But the recompiled marcher SPIR-V statically references `register(t9)` past the
+    // runtime gate, so a VALID StorageBuffer descriptor must be bound at binding 9 regardless.
+    // Allocated + seeded ONCE here; borrowed (never written again) into the vocabulary set.
+    let pointer_grid_cells: Vec<u32> = {
+        use boyko_sdf_math::SdfEditField;
+        use boyko_sdf_math::brick::{PointerGrid, build_pointer_grid};
+        let mut field = SdfEditField::new();
+        for e in &sdf {
+            assert!(field.push(*e), "windowed scene must fit MAX_SDF_EDITS");
+        }
+        field.bump_gen();
+        let grid = PointerGrid::default_near_field();
+        let mut cells = vec![0u32; grid.cell_count()];
+        build_pointer_grid(&field, &grid, &mut cells);
+        cells
+    };
+    let pointer_grid = RhiDevice::create_buffer(
+        device,
+        &BufferDesc {
+            size: (pointer_grid_cells.len() as u64) * 4,
+            usage: BufferUsage::STORAGE,
+            location: MemoryLocation::HostVisibleCoherent,
+        },
+    )
+    .expect("M1 empty-skip pointer-grid storage buffer (vocab binding 9)");
+    {
+        let mapped = RhiDevice::buffer_mapped_ptr(device, &pointer_grid)
+            .expect("host-visible pointer-grid buffer is mapped");
+        write_words(mapped, &pointer_grid_cells);
+    }
+
     // Lighting L0a: the light table SSBO (resolve binding 6). For this test the table is
     // seeded host-visible with the DEGENERATE table (the 0%-gate anchor); a production
     // path would mint it DEVICE-LOCAL (TRANSFER_DST | STORAGE) and seed via
@@ -706,6 +742,13 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         BindGroupLayoutEntry { binding: 7, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
         // Lighting L0b: the gViewT STORAGE image @8 (the marcher stores the surface `t`).
         BindGroupLayoutEntry { binding: 8, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        // M1: the empty-skip `PointerGrid` SSBO @9. The recompiled marcher SPIR-V statically
+        // references `StructuredBuffer<uint> PointerGrid : register(t9)` inside the
+        // runtime-gated empty-skip branch (DXC does NOT dead-strip it despite `brick_enabled`),
+        // so the layout MUST declare binding 9 — a VALID StorageBuffer descriptor must be bound
+        // even though the windowed path runs the skip OFF (`brick_enabled == 0`), or
+        // `vkCreateComputePipelines` / `vkCmdDispatch` trip VUID-…-layout-07988 / -08114.
+        BindGroupLayoutEntry { binding: 9, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
     ];
     let vocab_layout = RhiDevice::create_bind_group_layout(
         device,
@@ -822,6 +865,7 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         edit_list: &edit_list,
         camera_uniform: &camera_uniform,
         tiles_buffer: &tiles_buffer,
+        pointer_grid: &pointer_grid,
         depth_sampler: &depth_sampler,
         material_table: &material_table,
         light_table: &light_table,
@@ -995,6 +1039,7 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         RhiDevice::destroy_sampler(device, depth_sampler);
         RhiDevice::destroy_buffer(device, vertex_buffer);
         RhiDevice::destroy_buffer(device, tiles_buffer);
+        RhiDevice::destroy_buffer(device, pointer_grid);
         RhiDevice::destroy_buffer(device, light_staging);
         RhiDevice::destroy_buffer(device, light_table);
         RhiDevice::destroy_buffer(device, material_table);

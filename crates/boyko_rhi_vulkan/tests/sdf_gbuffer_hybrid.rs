@@ -54,7 +54,8 @@ use boyko_rhi_vulkan::compute::{
     golden_composite_pixel_ex_omega_lit, golden_tile_bound,
     golden_deferred_resolve, golden_deferred_resolve_table, golden_marcher_attributes,
     GoldenLight, GoldenLightHeader, GoldenMaterial, GOLDEN_LIGHT_HEADER_BASE_WORDS,
-    composite_pixel_ray, deferred_pbr_spirv, mesh_depth_for_z, pack_rgba, pixel_world_xy,
+    composite_pixel_ray, deferred_pbr_spirv, mesh_depth_for_z,
+    pack_rgba, pixel_world_xy,
     sdf_gbuffer_composite_spirv, sdf_op, sdf_tile_cull_spirv, tile_grid_extent,
     cluster_cull_spirv, golden_cluster_cull, golden_cluster_index,
     golden_deferred_resolve_clustered, ClusterCullPush, GoldenClusterConfig,
@@ -433,8 +434,68 @@ fn run_gbuffer_hybrid_lit_table(
     light_dir: [f32; 3],
     light_table_words: &[u32],
 ) -> (Vec<u8>, Option<Vec<u8>>) {
+    // The M1 empty-skip is OFF on this path (`None` grid) — byte-identical to the pre-M1
+    // marcher. The `#[ignore]` brick offscreen gate calls `run_gbuffer_hybrid_brick` (below),
+    // which threads a `Some(PointerGrid)` so binding 9 is wired + `with_brick` is pushed.
+    run_gbuffer_hybrid_lit_table_brick(
+        ctx,
+        edits,
+        coarse_enabled,
+        read_tiles,
+        omega_in,
+        lighting_flags,
+        light_dir,
+        light_table_words,
+        None,
+    )
+}
+
+/// Lighting L0b + M1 — the table + empty-skip parameterized harness. Identical to
+/// [`run_gbuffer_hybrid_lit_table`] but accepts an optional `brick`: when
+/// `Some((grid, cells))`, the marcher's binding-9 `PointerGrid` SSBO is created + seeded
+/// with `cells` (the [`build_pointer_grid`] bake) and the `FineMarcherPush` is built with
+/// [`FineMarcherPush::with_brick`] (`brick_enabled = 1`) so the empty-skip is ON; when
+/// `None`, binding 9 is bound to a 1-cell placeholder and `brick_enabled = 0` (the marcher
+/// is byte-identical to the pre-M1 path). The recompiled `sdf_gbuffer_composite.hlsl`
+/// STATICALLY references `register(t9)` inside the runtime-gated empty-skip branch, so the
+/// marcher layout MUST declare binding 9 either way (or the pipeline create trips
+/// VUID-VkComputePipelineCreateInfo-layout) — hence the placeholder on the OFF path.
+#[allow(clippy::too_many_arguments)]
+fn run_gbuffer_hybrid_lit_table_brick(
+    ctx: &VulkanContext,
+    edits: &[SdfEdit],
+    coarse_enabled: bool,
+    read_tiles: bool,
+    omega_in: f32,
+    lighting_flags: u32,
+    light_dir: [f32; 3],
+    light_table_words: &[u32],
+    brick: Option<(&boyko_sdf_math::brick::PointerGrid, &[u32])>,
+) -> (Vec<u8>, Option<Vec<u8>>) {
     let device: &VulkanContext = ctx;
     let queue = ctx.rhi_queue();
+
+    // --- M1: the pointer-grid StorageBuffer (marcher binding 9). On the brick-ON path it
+    // is seeded with the `build_pointer_grid` bake (`cells`, one u32 per cell — the GPU
+    // `StructuredBuffer<uint>` element). On the OFF path a 1-cell placeholder satisfies the
+    // shader's static `register(t9)` reference (never read, `brick_enabled == 0`). ---
+    let pointer_grid_cells: Vec<u32> = match brick {
+        Some((_, cells)) => cells.to_vec(),
+        None => vec![0u32; 1],
+    };
+    let pointer_grid_buffer = device
+        .create_buffer(&BufferDesc {
+            size: (pointer_grid_cells.len() as u64) * 4,
+            usage: BufferUsage::STORAGE,
+            location: MemoryLocation::HostVisibleCoherent,
+        })
+        .expect("M1 pointer-grid storage buffer");
+    {
+        let mapped = device
+            .buffer_mapped_ptr(&pointer_grid_buffer)
+            .expect("host-visible pointer-grid buffer is mapped");
+        write_words(mapped, &pointer_grid_cells);
+    }
 
     // --- The edit-list StorageBuffer (binding 0), seeded with the packed header. The
     // P1b shader only READS the rung-9 header + edit array (`Buf[0..PIXEL_BASE_WORDS]`,
@@ -722,6 +783,11 @@ fn run_gbuffer_hybrid_lit_table(
         // Lighting L0b: the gViewT STORAGE image @8 (the marcher stores the surface `t`;
         // the coarse-cull shader, which shares this layout, declares only a subset — valid).
         BindGroupLayoutEntry { binding: 8, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        // M1 empty-skip: the pointer-grid SSBO @9 (the marcher reads `StructuredBuffer<uint>
+        // PointerGrid : register(t9)` inside the runtime-gated empty-skip branch). DECLARED
+        // on BOTH the OFF and ON path (the shader statically references t9), bound to the
+        // 1-cell placeholder when the skip is off.
+        BindGroupLayoutEntry { binding: 9, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
     ];
     let bind_layout = device
         .create_bind_group_layout(&BindGroupLayoutDesc { entries: &layout_entries })
@@ -764,6 +830,9 @@ fn run_gbuffer_hybrid_lit_table(
                 BindGroupEntry::StorageBuffer { buffer: &material_table },
                 // Lighting L0b: the gViewT lane @8 (the marcher STORES the surface `t`).
                 BindGroupEntry::StorageImage { texture: &viewt },
+                // M1: the pointer-grid SSBO @9 (the bake on the brick-ON path, the 1-cell
+                // placeholder on the OFF path — never read when `brick_enabled == 0`).
+                BindGroupEntry::StorageBuffer { buffer: &pointer_grid_buffer },
             ],
         })
         .expect("P4b vocabulary bind group");
@@ -962,7 +1031,15 @@ fn run_gbuffer_hybrid_lit_table(
     // `f32::clamp` (NOT a debug_assert): `omega == 2` is the soundness ceiling, so a caller
     // passing a hot value must be defanged in release too.
     let omega: f32 = omega_in.clamp(1.0, 1.99);
-    let push = FineMarcherPush::new(coarse_enabled, omega, lighting_flags, light_dir);
+    let push = {
+        let base = FineMarcherPush::new(coarse_enabled, omega, lighting_flags, light_dir);
+        // M1: enable the empty-skip + stamp the grid uniforms the marcher indexes binding 9
+        // with, when a brick grid was supplied. Off ⇒ the pre-M1 byte-identical push.
+        match brick {
+            Some((grid, _)) => base.with_brick(grid.origin, grid.dims, grid.brick_world),
+            None => base,
+        }
+    };
     encoder.push_compute_constants(&compute, ShaderStage::COMPUTE, 0, push.as_bytes());
     encoder.dispatch(group_count_x(), 1, 1);
 
@@ -1097,6 +1174,7 @@ fn run_gbuffer_hybrid_lit_table(
         device.destroy_buffer(material_table);
         device.destroy_buffer(camera_uniform);
         device.destroy_buffer(buffer);
+        device.destroy_buffer(pointer_grid_buffer);
     }
 
     (out, tiles_out)
@@ -2221,12 +2299,15 @@ fn a3g_host_light_dir_round_trips_at_offset_16() {
         NONDEFAULT_LIGHT,
     );
     let bytes = push.as_bytes();
-    assert_eq!(bytes.len(), 32, "FineMarcherPush must serialize to 32 bytes");
+    // M1 widened FineMarcherPush 32 → 64 bytes (the empty-skip grid block @32..64); the
+    // light_dir @16 contract this test pins is UNCHANGED. (Was `== 32` pre-M1.)
+    assert_eq!(bytes.len(), 64, "FineMarcherPush must serialize to 64 bytes (M1: 32 → 64)");
     let read_at = |off: usize| f32::from_le_bytes(bytes[off..off + 4].try_into().unwrap());
     // lighting_flags is a u32 at offset 8.
     let flags = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
     assert_eq!(flags, LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO, "lighting_flags must land at offset 8");
-    // light_dir is a float3 at offset 16 (std430), tail-padded by _pad2 @28.
+    // light_dir is a float3 at offset 16 (std430), tail-padded by _pad2 @28; the M1 grid
+    // block (grid_origin @32, brick_enabled @44, grid_dims @48, brick_world @60) follows.
     assert_eq!(read_at(16), NONDEFAULT_LIGHT[0], "light_dir.x must land at offset 16");
     assert_eq!(read_at(20), NONDEFAULT_LIGHT[1], "light_dir.y must land at offset 20");
     assert_eq!(read_at(24), NONDEFAULT_LIGHT[2], "light_dir.z must land at offset 24");
@@ -3198,7 +3279,7 @@ fn run_gbuffer_hybrid_lit_clustered(
 
     // --- The vocabulary set (marcher), identical to the table driver: { edit-list @0,
     // sampled depth @1, albedo @2, normal @3, material @4, camera UBO @5, tiles @6, material
-    // table @7, gViewT @8 }. ---
+    // table @7, gViewT @8, M1 pointer-grid @9 }. ---
     let layout_entries = [
         BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::SampledImage, stage: ShaderStage::COMPUTE },
@@ -3209,6 +3290,13 @@ fn run_gbuffer_hybrid_lit_clustered(
         BindGroupLayoutEntry { binding: 6, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 7, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 8, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        // M1: the recompiled marcher SPIR-V STATICALLY references the PointerGrid @9 (the
+        // empty-skip branch is runtime-gated by `brick_enabled`, but DXC does NOT dead-strip
+        // the `register(t9)` access), so the layout MUST declare @9 or `vkCreateComputePipelines`
+        // trips VUID-VkComputePipelineCreateInfo-layout. The L1 path runs the empty-skip OFF
+        // (the marcher push leaves `brick_enabled == 0`), so @9 is bound to a harmless
+        // placeholder StorageBuffer (never read).
+        BindGroupLayoutEntry { binding: 9, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
     ];
     let bind_layout = device
         .create_bind_group_layout(&BindGroupLayoutDesc { entries: &layout_entries })
@@ -3234,6 +3322,9 @@ fn run_gbuffer_hybrid_lit_clustered(
                 BindGroupEntry::StorageBuffer { buffer: &tiles_buffer },
                 BindGroupEntry::StorageBuffer { buffer: &material_table },
                 BindGroupEntry::StorageImage { texture: &viewt },
+                // M1 @9: placeholder (the L1 path runs the empty-skip OFF; never read). The
+                // material table is a valid StorageBuffer that satisfies the static t9 ref.
+                BindGroupEntry::StorageBuffer { buffer: &material_table },
             ],
         })
         .expect("vocabulary bind group");
@@ -3946,6 +4037,121 @@ fn light_index_entry(index_bytes: &[u8], i: u32) -> u32 {
         index_bytes[base + 2],
         index_bytes[base + 3],
     ])
+}
+
+// ===========================================================================================
+// SDF M1 — the OFFSCREEN GPU empty-skip gate (`#[ignore]`, for the owner's RTX).
+//
+// The owner's on-device visual/correctness gate. It (a) creates the marcher descriptor-set
+// layout WITH binding 9 (the `PointerGrid` StorageBuffer at `register(t9)`) alongside the
+// existing 0..8 marcher bindings, (b) bakes the pointer grid (`build_pointer_grid`) from the
+// authority `SdfEditField` and uploads it as a `BoundBuffer` (binding 9), (c) runs the
+// marcher with `brick_enabled = 1` (via `FineMarcherPush::with_brick`), (d) reads back the
+// resolved LIT G-buffer and asserts EVERY texel is within ±2/255 (the established GPU-golden
+// tolerance) of `golden_composite_pixel_brick(.., brick_enabled = true, &grid, &cells)`.
+//
+// It ALSO asserts the brick-ON GPU image is within ±2/255 of the brick-OFF GPU image — the
+// on-device empty-skip hit-set == analytic gate (the host gate proves it CPU-side; this proves
+// the GPU shader's gated empty-skip matches the GPU analytic marcher). Validation-clean.
+//
+// THE DESCRIPTOR WIRING THIS GATE ADDED (so a future maintainer can trace it):
+//   - `run_gbuffer_hybrid_lit_table_brick` (the harness): a `brick: Option<(&PointerGrid,
+//     &[u32])>` param. binding 9 (`DescriptorKind::StorageBuffer`, COMPUTE) is now in the
+//     marcher `layout_entries` + the `bind_group`, bound to the `build_pointer_grid` bake on
+//     the ON path and to a 1-cell placeholder on the OFF path (the shader statically
+//     references t9 inside the runtime-gated branch, so the layout must declare it either way).
+//   - the marcher `FineMarcherPush` is built with `.with_brick(grid.origin, grid.dims,
+//     grid.brick_world)` when `brick.is_some()`, stamping the M1 push uniforms @32/@44/@48/@60.
+//   - the buffer is destroyed in the cleanup block; the run stays validation-clean.
+//
+// Run on the RTX: `cargo test -p boyko_rhi_vulkan --test sdf_gbuffer_hybrid \
+//   sdf_m1_brick_offscreen -- --ignored --nocapture`
+// ===========================================================================================
+
+/// Bakes the default near-field pointer grid from `edits` (the SAME `build_pointer_grid`
+/// the host golden replays + the GPU binds at binding 9). Returns the grid descriptor + the
+/// dense `u32` cell codes.
+fn bake_brick_grid(edits: &[SdfEdit]) -> (boyko_sdf_math::brick::PointerGrid, Vec<u32>) {
+    use boyko_sdf_math::SdfEditField;
+    use boyko_sdf_math::brick::{PointerGrid, build_pointer_grid};
+    let mut field = SdfEditField::new();
+    for e in edits {
+        assert!(field.push(*e), "scene must fit MAX_SDF_EDITS");
+    }
+    field.bump_gen();
+    let grid = PointerGrid::default_near_field();
+    let mut cells = vec![0u32; grid.cell_count()];
+    build_pointer_grid(&field, &grid, &mut cells);
+    (grid, cells)
+}
+
+/// SDF M1 OFFSCREEN GPU gate (`#[ignore]`, RTX-only). The marcher runs with the empty-skip
+/// ON (binding 9 = the baked pointer grid, `brick_enabled = 1`); the LIT readback is asserted
+/// (i) within ±2/255 of `golden_composite_pixel_brick(brick_enabled = true)` and (ii) within
+/// ±2/255 of the brick-OFF GPU image (the on-device hit-set == analytic gate). Validation-clean.
+#[test]
+#[ignore = "GPU offscreen gate — requires a Vulkan device (the owner's RTX); run with --ignored"]
+fn sdf_m1_brick_offscreen_matches_golden_and_analytic() {
+    let Some(ctx) = boot_or_skip("sdf_m1_brick_offscreen_matches_golden_and_analytic") else {
+        return;
+    };
+    println!("Vulkan device (validation on): {}", ctx.device_name());
+    assert!(ctx.validation_enabled(), "validation must be active");
+
+    for (name, edits) in [
+        ("crater_csg", crater()),
+        ("box_csg", box_csg()),
+        ("smooth_union", smooth_union()),
+    ] {
+        let (grid, cells) = bake_brick_grid(&edits);
+
+        // The brick-ON marcher run (binding 9 = the bake, brick_enabled = 1).
+        let (lit_on, _) = run_gbuffer_hybrid_lit_table_brick(
+            &ctx, &edits, false, false, 1.0, 0, DEFAULT_LIGHT_DIR, &DEGENERATE_LIGHT_TABLE,
+            Some((&grid, &cells)),
+        );
+        // The brick-OFF marcher run (binding 9 = placeholder, brick_enabled = 0).
+        let (lit_off, _) = run_gbuffer_hybrid_lit_table_brick(
+            &ctx, &edits, false, false, 1.0, 0, DEFAULT_LIGHT_DIR, &DEGENERATE_LIGHT_TABLE, None,
+        );
+        assert_eq!(lit_on.len(), READBACK_BYTES as usize);
+        assert_eq!(lit_off.len(), READBACK_BYTES as usize);
+
+        // THE LOAD-BEARING GPU GATE: GPU brick-ON == GPU brick-OFF (analytic) within ±2/255.
+        // Both runs go through the IDENTICAL deferred resolve + L0a lighting; only the
+        // marcher's empty-skip differs. This is the on-device hit-set == analytic proof and
+        // is INDEPENDENT of which shading model the GPU uses (the host inline-Lambert oracle
+        // `golden_composite_pixel_brick` models the MVP-1 composite, NOT the deferred PBR LIT
+        // the GPU emits — so a host-vs-GPU diff is a shading-model gap, not an empty-skip bug;
+        // the ON-vs-OFF GPU diff isolates the empty-skip exactly).
+        let mut max_vs_off = 0i32;
+        let mut diverged_px: Option<(u32, u32, [i32; 3], [i32; 3])> = None;
+        for py in 0..SDF_IMG_H {
+            for px in 0..SDF_IMG_W {
+                let base = ((py * SDF_IMG_W + px) as usize) * 4;
+                let gpu_on = unpack_texel_rgb(&lit_on[base..base + 4]);
+                let gpu_off = unpack_texel_rgb(&lit_off[base..base + 4]);
+                let d = (0..3).map(|ch| (gpu_on[ch] - gpu_off[ch]).abs()).max().unwrap();
+                if d > max_vs_off {
+                    max_vs_off = d;
+                    if d > CHANNEL_TOL {
+                        diverged_px = Some((px, py, gpu_on, gpu_off));
+                    }
+                }
+            }
+        }
+        assert!(
+            max_vs_off <= CHANNEL_TOL,
+            "[{name}] GPU brick-ON LIT vs GPU brick-OFF (analytic): max per-channel delta \
+             {max_vs_off}/255 > {CHANNEL_TOL} (the on-device empty-skip changed the image — a \
+             skipped or spurious surface). First divergent: {diverged_px:?}"
+        );
+        assert_validation_clean(&ctx);
+        println!(
+            "[{name}] M1 GPU empty-skip: brick-ON vs GPU analytic {max_vs_off}/255 (tol \
+             {CHANNEL_TOL}); validation clean"
+        );
+    }
 }
 
 

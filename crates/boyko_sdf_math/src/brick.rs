@@ -254,6 +254,190 @@ pub fn classify_brick(
     }
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// M1 — the EMPTY-SPACE-SKIP pointer grid (the empty-skip pivot).
+//
+// A dense 3D grid over a BOUNDED near-field volume. Each cell holds one
+// [`BrickClass`] (0/1/2) derived from the authority [`SdfEditField`] via
+// [`classify_brick`] — a CONSERVATIVE occupancy label. The marcher skips
+// `EmptyOutside` cells to their exit (sound by construction: the conservative
+// classifier guarantees no surface within `band_half` of an EMPTY brick, so a
+// step to the brick boundary never over-steps a surface — the adjacent brick is
+// classified `Surface` if a surface is near). `Surface` cells are marched with the
+// EXACT analytic field. NO trilinear, NO image atlas — that is M2.
+//
+// This is NOT a parallel data system (principle 0): the grid is a TRANSIENT upload
+// buffer rebuilt from the ONE edit authority each regen, exactly like the GPU edit
+// list (`encode_edit_list`). It owns no durable per-entity state.
+// ════════════════════════════════════════════════════════════════════════════
+
+/// The default near-field grid edge (cells per axis), covering a `±GRID dims/2 *
+/// brick_world` volume around the origin. The demo / golden scenes live inside a
+/// `[-2, 2]³` extent (centers in `[-2, 2]`, primitives `<= 3`), so a 16-cell grid
+/// of `0.5`-world bricks spans `[-4, 4]³` — fully enclosing the near field with a
+/// margin. The origin/dims/brick_world are PARAMETERS to [`build_pointer_grid`];
+/// these are only the bounded defaults the render path seeds with.
+pub const DEFAULT_GRID_DIM: u32 = 16;
+
+/// The default world size of one pointer-grid cell (one brick). `0.5` matches the
+/// classifier's conservative band reach and keeps the default grid a tractable
+/// `16³ = 4096` cells. Distinct from the M2 voxel brick scale ([`VOXEL_SIZE`]).
+pub const DEFAULT_BRICK_WORLD: f32 = 0.5;
+
+/// The bounded near-field pointer grid built from the edit authority (M1).
+///
+/// A dense `dims.0 × dims.1 × dims.2` lattice of [`BrickClass`] codes (one `u32`
+/// each — the GPU `StructuredBuffer<uint>` element). Cell `(ix, iy, iz)` covers the
+/// world AABB `[origin + (ix,iy,iz)*brick_world, origin + (ix+1,iy+1,iz+1)*brick_world]`
+/// and stores `classify_brick` over that AABB. Linear index `ix + iy*W + iz*W*H`
+/// (`W = dims.0`, `H = dims.1`) — the SAME order the shader reads.
+///
+/// The grid is BOUNDED: a march point OUTSIDE `[origin, origin + dims*brick_world]`
+/// has no cell, so the marcher falls through to the analytic field there (the grid
+/// is a near-field accelerator, never a correctness boundary).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PointerGrid {
+    /// The minimum world corner of cell `(0, 0, 0)`.
+    pub origin: [f32; 3],
+    /// Cells per axis (`dims.0` = x, `.1` = y, `.2` = z).
+    pub dims: [u32; 3],
+    /// The world size of one cubic cell (one brick).
+    pub brick_world: f32,
+}
+
+impl PointerGrid {
+    /// The bounded near-field grid: `dim³` cells of `brick_world` each, CENTERED on
+    /// `center` (so it spans `[center - dim*brick_world/2, center + dim*brick_world/2]`
+    /// on every axis). The default render-path seed.
+    #[inline]
+    pub fn centered(center: [f32; 3], dim: u32, brick_world: f32) -> Self {
+        let half = dim as f32 * brick_world * 0.5;
+        Self {
+            origin: [center[0] - half, center[1] - half, center[2] - half],
+            dims: [dim, dim, dim],
+            brick_world,
+        }
+    }
+
+    /// The default near-field grid centered on the origin
+    /// ([`DEFAULT_GRID_DIM`]³ cells of [`DEFAULT_BRICK_WORLD`]).
+    #[inline]
+    pub fn default_near_field() -> Self {
+        Self::centered([0.0, 0.0, 0.0], DEFAULT_GRID_DIM, DEFAULT_BRICK_WORLD)
+    }
+
+    /// Total cell count (`dims.0 * dims.1 * dims.2`) — the length of the
+    /// [`build_pointer_grid`] destination and the GPU buffer's element count.
+    #[inline]
+    pub fn cell_count(&self) -> usize {
+        self.dims[0] as usize * self.dims[1] as usize * self.dims[2] as usize
+    }
+
+    /// The minimum world corner of cell `(ix, iy, iz)`.
+    #[inline]
+    pub fn cell_min(&self, ix: u32, iy: u32, iz: u32) -> [f32; 3] {
+        [
+            self.origin[0] + ix as f32 * self.brick_world,
+            self.origin[1] + iy as f32 * self.brick_world,
+            self.origin[2] + iz as f32 * self.brick_world,
+        ]
+    }
+}
+
+/// Builds the pointer grid into `out` from the authority edit list (M1).
+///
+/// `out.len()` MUST equal `grid.cell_count()`. For each cell, classifies the
+/// brick's world AABB against the authority via [`classify_brick`] at
+/// [`crate::SDF_EDIT_BAND_HALF`] (the SAME band the per-edit AABBs are skinned by,
+/// so the EMPTY skip stays conservative) and stores the [`BrickClass`] discriminant
+/// as a `u32`. The result is the dense grid the GPU marcher reads as a
+/// `StructuredBuffer<uint>`.
+///
+/// This is a SETUP-time (per-`gen`) bake, not a hot-path call — it folds the field
+/// once per cell. The render path rebuilds it whenever the authority's `gen` stamp
+/// changes (mirroring the edit-list re-encode), into a reused buffer.
+pub fn build_pointer_grid(field: &SdfEditField, grid: &PointerGrid, out: &mut [u32]) {
+    debug_assert_eq!(
+        out.len(),
+        grid.cell_count(),
+        "pointer-grid destination must have grid.cell_count() cells"
+    );
+
+    let w = grid.dims[0];
+    let h = grid.dims[1];
+    let d = grid.dims[2];
+    for iz in 0..d {
+        for iy in 0..h {
+            for ix in 0..w {
+                let cell_min = grid.cell_min(ix, iy, iz);
+                let class =
+                    classify_brick(field, cell_min, grid.brick_world, crate::SDF_EDIT_BAND_HALF);
+                let idx = (ix + iy * w + iz * w * h) as usize;
+                out[idx] = class as u32;
+            }
+        }
+    }
+}
+
+/// The minimum per-axis progress a brick-exit step makes (world units) — the
+/// progress guarantee. A ray parallel to a face, or one starting exactly on a brick
+/// boundary, would otherwise compute a zero (or negative) exit distance and stall;
+/// clamping the exit to at least this value forces the march forward. Small relative
+/// to a cell so it never skips into the next-but-one brick.
+pub const BRICK_EXIT_EPS: f32 = 1.0e-4;
+
+/// The ray-AABB SLAB exit distance for the brick at `cell_min` of size
+/// `brick_world`, from `ro` along `rd` (the empty-skip step length).
+///
+/// Returns the `t` at which the ray leaves the brick's `[cell_min, cell_min +
+/// brick_world]` AABB, measured from `ro` (NOT from the ray origin — `ro` is the
+/// CURRENT march point `p`, so the returned value is the additive step `t += exit`).
+/// Standard slab method: per axis the ray enters/exits the two faces; the brick exit
+/// is the MIN of the three far-face crossings. A near-zero or negative result
+/// (degenerate / boundary-grazing ray) is clamped UP to [`BRICK_EXIT_EPS`] so the
+/// march always advances (the progress guarantee — INVIOLABLE for the empty skip).
+///
+/// SOUNDNESS: this is only ever called for an `EmptyOutside` brick, which the
+/// conservative classifier guarantees has NO surface within `band_half` anywhere
+/// inside. Stepping to the brick boundary therefore cannot over-step a surface — if a
+/// surface is near, the adjacent brick is classified `Surface` and marched
+/// analytically. So the empty-skip hit-set equals the pure-analytic hit-set.
+#[inline]
+pub fn dist_to_brick_exit(
+    ro: [f32; 3],
+    rd: [f32; 3],
+    cell_min: [f32; 3],
+    brick_world: f32,
+) -> f32 {
+    let mut exit = f32::INFINITY;
+    for axis in 0..3 {
+        let dir = rd[axis];
+        let lo = cell_min[axis];
+        let hi = lo + brick_world;
+        // A near-axis-parallel component: the ray never crosses this axis's slab
+        // within the brick, so it imposes no exit bound (skip — the other axes
+        // bound it; the BRICK_EXIT_EPS clamp covers a fully-degenerate ray).
+        if dir.abs() <= BRICK_EXIT_EPS {
+            continue;
+        }
+        let inv = 1.0 / dir;
+        let t_lo = (lo - ro[axis]) * inv;
+        let t_hi = (hi - ro[axis]) * inv;
+        // The FAR-face crossing along this axis (the larger of the two slab planes).
+        let t_far = if t_lo > t_hi { t_lo } else { t_hi };
+        if t_far < exit {
+            exit = t_far;
+        }
+    }
+    // Progress guarantee: a degenerate ray (every axis skipped, or a boundary-grazing
+    // exit) must still advance by at least BRICK_EXIT_EPS.
+    if exit < BRICK_EXIT_EPS || !exit.is_finite() {
+        BRICK_EXIT_EPS
+    } else {
+        exit
+    }
+}
+
 /// Decodes one `R8_SNORM` narrow-band code back to a world-space distance.
 ///
 /// The inverse of the [`fill_brick`] encode (sans the conservative bias, which is

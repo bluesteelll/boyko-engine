@@ -53,6 +53,10 @@ use boyko_sdf_math::{
     HEADER_BASE_WORDS, MAX_SDF_EDITS, SDF_EDIT_WORDS, SDF_GRAD_H, edit_distance, sdf_edit_list,
     sdf_edit_list_normal, v_dot, v_len, v_normalize, v_sub,
 };
+// M1 empty-space-skip: the pointer-grid descriptor + the ray-AABB exit step the host
+// golden mirror replays bit-for-bit against the GPU marcher (`PointerGrid` is the SAME
+// origin/dims/brick_world the `FineMarcherPush` grid uniforms carry).
+use boyko_sdf_math::brick::{PointerGrid, dist_to_brick_exit};
 
 use crate::ffi::VkResult;
 use crate::memory::MemoryError;
@@ -134,7 +138,7 @@ static SDF_EDITLIST_STORAGE_IMAGE_SPV: SpirvBlob<24092> = SpirvBlob(*include_byt
 /// `ray_gen.hlsli`. The full Cook-Torrance shade runs in [`deferred_pbr_spirv`]. The byte
 /// length grew (41176 → 43944) with the material pick + oct-encode + SSBO fetch; Lighting
 /// L0b added the `gViewT` storage-image lane + its 3 terminal writes (43944 → 44216).
-static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<44216> = SpirvBlob(*include_bytes!(concat!(
+static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<47032> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/sdf_gbuffer_composite.comp.spv"
 )));
@@ -1140,22 +1144,47 @@ pub struct FineMarcherPush {
     pub light_dir: [f32; 3],
     /// std430 tail padding to a 32-byte stride.
     pub _pad2: f32,
+    /// M1 pointer-grid minimum world corner (cell `(0,0,0)`'s min). FIRST of the M1 block
+    /// so this `float3` lands on a 16-byte boundary (offset 32) — the std430/HLSL `vec3`
+    /// alignment rule (a `vec3` aligns to 16) that the `light_dir @16` field also obeys.
+    /// Placing it here (not after a scalar) keeps the Rust `#[repr(C)]` 4-byte packing and
+    /// the HLSL std430 layout byte-identical. Don't-care when `brick_enabled == 0`.
+    pub grid_origin: [f32; 3],
+    /// M1 empty-space-skip gate: non-zero reads binding 9 (the `PointerGrid`) and skips
+    /// `EmptyOutside` bricks to their AABB exit. `0` = the OFF path (byte-identical to the
+    /// pre-M1 marcher — the grid is never touched, the hit/normal stay analytic). Tucked
+    /// into the `float3` tail slot (offset 44) so the next `uint3` lands 16-aligned.
+    pub brick_enabled: u32,
+    /// M1 pointer-grid cell count per axis (`[x, y, z]`). A `uint3` — aligned to 16 by the
+    /// std430 rule (offset 48). Don't-care when off.
+    pub grid_dims: [u32; 3],
+    /// M1 pointer-grid cell size (the world width of one brick cell). The `uint3` tail slot
+    /// (offset 60). Don't-care when `brick_enabled == 0`.
+    pub brick_world: f32,
 }
 
-/// Byte size of [`FineMarcherPush`] — the marcher's COMPUTE push range (32 bytes), a
+/// Byte size of [`FineMarcherPush`] — the marcher's COMPUTE push range (64 bytes), a
 /// subset of the declared 80-byte (`COMPOSITE_PUSH_CONSTANT_BYTES`) range.
 pub const GBUFFER_MARCHER_PUSH_BYTES: u32 = core::mem::size_of::<FineMarcherPush>() as u32;
 
-// Pin the std430 field offsets + the 32-byte stride so a host/shader desync is a build
+// Pin the std430 field offsets + the 64-byte stride so a host/shader desync is a build
 // error (the same discipline as `CompositePushConstants` / `TileBound`). The `light_dir`
-// @16 pin is the one a non-default-direction GPU test catches if the packing slips.
+// @16 pin is the one a non-default-direction GPU test catches if the packing slips; the
+// `grid_origin` @32 + `grid_dims` @48 pins are the M1 analogue (a non-default grid GPU test
+// catches a slip). Both M1 vectors land 16-aligned — the std430/HLSL `vec3`-aligns-to-16
+// rule, which is why the M1 block is ordered vector-first (the scalar gate/size fill the
+// vec3 tail slots), keeping the Rust `#[repr(C)]` and the HLSL std430 byte-identical.
 const _: () = assert!(core::mem::offset_of!(FineMarcherPush, coarse_enabled) == 0);
 const _: () = assert!(core::mem::offset_of!(FineMarcherPush, omega) == 4);
 const _: () = assert!(core::mem::offset_of!(FineMarcherPush, lighting_flags) == 8);
 const _: () = assert!(core::mem::offset_of!(FineMarcherPush, _pad) == 12);
 const _: () = assert!(core::mem::offset_of!(FineMarcherPush, light_dir) == 16);
 const _: () = assert!(core::mem::offset_of!(FineMarcherPush, _pad2) == 28);
-const _: () = assert!(GBUFFER_MARCHER_PUSH_BYTES == 32, "FineMarcherPush must be 32 bytes");
+const _: () = assert!(core::mem::offset_of!(FineMarcherPush, grid_origin) == 32);
+const _: () = assert!(core::mem::offset_of!(FineMarcherPush, brick_enabled) == 44);
+const _: () = assert!(core::mem::offset_of!(FineMarcherPush, grid_dims) == 48);
+const _: () = assert!(core::mem::offset_of!(FineMarcherPush, brick_world) == 60);
+const _: () = assert!(GBUFFER_MARCHER_PUSH_BYTES == 64, "FineMarcherPush must be 64 bytes");
 const _: () = assert!(
     GBUFFER_MARCHER_PUSH_BYTES <= COMPOSITE_PUSH_CONSTANT_BYTES,
     "FineMarcherPush must fit the declared 80-byte COMPUTE push range"
@@ -1165,7 +1194,9 @@ impl FineMarcherPush {
     /// Builds the marcher push for the windowed / offscreen fine pass: the P4b
     /// `coarse_enabled` gate, the B1 `omega`, and the A1/A2 `lighting_flags` + the
     /// directional `light_dir`. `lighting_flags == 0` selects the OFF (byte-identical)
-    /// path; `light_dir` is then a don't-care (the shader never normalizes it).
+    /// path; `light_dir` is then a don't-care (the shader never normalizes it). The M1
+    /// empty-skip is OFF (`brick_enabled == 0`, a zero grid) — byte-identical to the
+    /// pre-M1 marcher. Use [`with_brick`](Self::with_brick) to enable the empty skip.
     #[inline]
     pub const fn new(
         coarse_enabled: bool,
@@ -1180,7 +1211,33 @@ impl FineMarcherPush {
             _pad: 0,
             light_dir,
             _pad2: 0.0,
+            grid_origin: [0.0, 0.0, 0.0],
+            brick_enabled: 0,
+            grid_dims: [0, 0, 0],
+            brick_world: 0.0,
         }
+    }
+
+    /// Enables the M1 empty-space-skip: turns on `brick_enabled` and stamps the
+    /// pointer-grid uniforms (`grid_origin`, `grid_dims`, `brick_world`) the marcher
+    /// indexes binding 9 with. The grid must match the [`build_pointer_grid`] bake bound
+    /// to binding 9. The base gates (`coarse_enabled` / `omega` / lighting) are
+    /// preserved. With the empty skip ON, the hit/normal stay ANALYTIC — only the
+    /// EMPTY-brick traversal is accelerated (the hit-set equals the analytic hit-set).
+    ///
+    /// [`build_pointer_grid`]: boyko_sdf_math::brick::build_pointer_grid
+    #[inline]
+    pub const fn with_brick(
+        mut self,
+        grid_origin: [f32; 3],
+        grid_dims: [u32; 3],
+        brick_world: f32,
+    ) -> Self {
+        self.brick_enabled = 1;
+        self.grid_origin = grid_origin;
+        self.grid_dims = grid_dims;
+        self.brick_world = brick_world;
+        self
     }
 
     /// Re-views the push constants as their raw 32-byte slice for `push_constants`.
@@ -1518,6 +1575,204 @@ pub fn golden_composite_pixel_ex_omega_lit(
     // (hit = false) result — the omega == 1.0 output is byte-unchanged (the 0%-gate).
     if exhausted {
         t = t_seed; // re-seed from the SAME original seed the fast pass used
+        hit = false;
+        for _it2 in 0..SDF_MAX_IT {
+            if t >= t_mesh {
+                break;
+            }
+            let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
+            let d = sdf_edit_list(edits, p);
+            if d < SDF_EPS {
+                hit = true;
+                break;
+            }
+            t += d; // frozen plain step
+            if t > SDF_T_MAX {
+                break;
+            }
+        }
+    }
+
+    let color = if hit && t < t_mesh {
+        let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
+        let n = sdf_edit_list_normal(edits, p);
+        host_shade(SDF_BASE_COLOR, SDF_AMBIENT, p, n, light_dir, lighting_flags, &|q| {
+            sdf_edit_list(edits, q)
+        })
+    } else if has_mesh {
+        MESH_COLOR
+    } else {
+        SDF_BACKGROUND
+    };
+    pack_rgba(color)
+}
+
+// ===========================================================================
+// M1 — the EMPTY-SPACE-SKIP host golden mirror (the empty-skip pivot).
+//
+// `golden_composite_pixel_brick` mirrors `sdf_gbuffer_composite.hlsl`'s primary march
+// with `brick_enabled != 0`: before each `sdf(p)` it reads the pointer-grid cell at `p`
+// and, on an `EmptyOutside` cell, steps to the brick's ray-AABB exit
+// (`dist_to_brick_exit`) instead of folding the field — sound by construction (the
+// conservative classifier guarantees no surface within `band_half` of an EMPTY brick).
+// `EmptyInside` and `Surface` cells, and points OUTSIDE the bounded grid, march
+// ANALYTICALLY (the exact `sdf(p)` step). The hit/normal/shade stay ANALYTIC (C1).
+//
+// With `brick_enabled == 0` (or an empty/None grid) the function delegates to the
+// pre-M1 `golden_composite_pixel_ex_omega_lit`, so the OFF golden is BYTE-IDENTICAL to
+// today (the 0%-gate). With it ON, the empty skip never skips a surface, so the hit `t`
+// — and therefore the composited color — equals the pure-analytic result.
+// ===========================================================================
+
+/// `BrickClass::EmptyOutside as u32` — the only cell class the empty skip acts on. The
+/// host mirror reads the grid as `u32` cells (the GPU `StructuredBuffer<uint>` element),
+/// matching `build_pointer_grid`.
+const BRICK_CLASS_EMPTY_OUTSIDE: u32 = 0;
+
+/// Reads the pointer-grid cell containing world point `p`, returning `(class, cell_min)`
+/// or `None` when `p` is OUTSIDE the bounded grid (the marcher then falls through to the
+/// analytic field). Mirrors the shader's `brick_cell(p)` index + bounds check exactly.
+#[inline]
+fn host_brick_cell(grid: &PointerGrid, cells: &[u32], p: [f32; 3]) -> Option<(u32, [f32; 3])> {
+    let rel = [
+        (p[0] - grid.origin[0]) / grid.brick_world,
+        (p[1] - grid.origin[1]) / grid.brick_world,
+        (p[2] - grid.origin[2]) / grid.brick_world,
+    ];
+    // Outside the grid on any axis (incl. negative `rel`) → no cell. `floor` then a
+    // signed range check; `rel < 0` is caught by the `>= dims` test after the cast only
+    // if guarded — so test the float directly to avoid the wrap on a negative cast.
+    if rel[0] < 0.0 || rel[1] < 0.0 || rel[2] < 0.0 {
+        return None;
+    }
+    let ix = rel[0] as u32;
+    let iy = rel[1] as u32;
+    let iz = rel[2] as u32;
+    if ix >= grid.dims[0] || iy >= grid.dims[1] || iz >= grid.dims[2] {
+        return None;
+    }
+    let w = grid.dims[0];
+    let h = grid.dims[1];
+    let idx = (ix + iy * w + iz * w * h) as usize;
+    debug_assert!(idx < cells.len(), "grid cell index in bounds");
+    Some((cells[idx], grid.cell_min(ix, iy, iz)))
+}
+
+/// M1 — the empty-space-skip extent/camera/omega/lighting golden. Identical to
+/// [`golden_composite_pixel_ex_omega_lit`] but the PRIMARY march runs the pointer-grid
+/// empty skip when `brick_enabled == true`: an `EmptyOutside` cell at the march point
+/// steps to the brick AABB exit ([`dist_to_brick_exit`], clamped to advance) instead of
+/// folding the field; every other cell (and any point outside the bounded grid) folds the
+/// EXACT analytic field. `grid` + `cells` are the [`build_pointer_grid`] bake the GPU
+/// binds at binding 9 (the SAME origin/dims/brick_world the push carries).
+///
+/// With `brick_enabled == false` this delegates to [`golden_composite_pixel_ex_omega_lit`]
+/// — BYTE-IDENTICAL to the pre-M1 golden (the 0%-gate). The re-march fallback, the
+/// hit/normal, and the shade stay ANALYTIC (C1): the empty skip only accelerates EMPTY
+/// traversal, so the hit `t` equals the pure-analytic hit `t` within `SDF_EPS` and the
+/// composited color matches the analytic golden.
+///
+/// [`build_pointer_grid`]: boyko_sdf_math::brick::build_pointer_grid
+#[allow(clippy::too_many_arguments)]
+pub fn golden_composite_pixel_brick(
+    edits: &[SdfEdit],
+    mesh_depth: f32,
+    px: u32,
+    py: u32,
+    img_w: u32,
+    img_h: u32,
+    camera: CompositeCamera,
+    omega: f32,
+    lighting_flags: u32,
+    light_dir: [f32; 3],
+    brick_enabled: bool,
+    grid: &PointerGrid,
+    cells: &[u32],
+) -> u32 {
+    // The OFF path is byte-identical to the pre-M1 marcher (the 0%-gate). The grid is
+    // never read; the march is the exact analytic sphere-trace.
+    if !brick_enabled {
+        return golden_composite_pixel_ex_omega_lit(
+            edits, mesh_depth, px, py, img_w, img_h, camera, omega, lighting_flags, light_dir,
+        );
+    }
+
+    let (ro, rd) = composite_ray(px, py, img_w, img_h, camera);
+
+    let has_mesh = mesh_depth < MESH_DEPTH_CLEAR;
+    let t_mesh = if has_mesh { depth_to_t(mesh_depth) } else { 1.0e30 };
+
+    let mut t = 0.0_f32;
+    let t_seed = t;
+    let mut omega = omega; // [1.0, 1.99]; sor-fail latches it to 1.0
+    let mut hit = false;
+    let mut safe_t = 0.0_f32;
+    let mut sor_prev = 0.0_f32;
+    let mut sor_step_prev = 0.0_f32;
+    let mut exhausted = true;
+    for it in 0..SDF_MAX_IT {
+        if t >= t_mesh {
+            exhausted = false; // mesh-occlusion termination
+            break;
+        }
+        let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
+
+        // M1 empty skip: an EmptyOutside cell at `p` has provably no surface within
+        // band_half (conservative classifier), so step to the brick AABB exit and skip
+        // the analytic fold. CONTINUE without touching `sdf`/the over-relax state — the
+        // exit step is plain (no omega), so it cannot overshoot a surface (the next
+        // brick is `Surface` if a surface is near). Sound by construction.
+        //
+        // EmptyInside / Surface (and an outside-grid `None`) fall THROUGH to the EXACT
+        // analytic field below. EmptyInside is the start-inside case the analytic
+        // negative-`d` handling already covers — a ray from outside reaches Surface first,
+        // so a negative `sdf(p)` here means the seed began inside a solid; the analytic step
+        // (which can be negative) is the consistent, unchanged behavior.
+        if let Some((class, cell_min)) = host_brick_cell(grid, cells, p)
+            && class == BRICK_CLASS_EMPTY_OUTSIDE
+        {
+            let exit = dist_to_brick_exit(p, rd, cell_min, grid.brick_world);
+            t += exit;
+            if t > SDF_T_MAX {
+                exhausted = false; // clear-miss termination
+                break;
+            }
+            continue; // skip the analytic fold this step
+        }
+
+        let d = sdf_edit_list(edits, p);
+        if d < SDF_EPS {
+            hit = true;
+            exhausted = false; // converged
+            break;
+        }
+        if omega > 1.0 {
+            let step_len = d * omega;
+            if it > 0 && sor_prev + d < FIELD_LIPSCHITZ_L * sor_step_prev {
+                debug_assert!(it > 0, "B1 budget: a>=1 precondition");
+                t = safe_t + sor_prev; // plain-resume one certified step past the safe probe
+                omega = 1.0;
+                continue;
+            }
+            safe_t = t;
+            sor_prev = d;
+            sor_step_prev = step_len;
+            t += step_len;
+        } else {
+            t += d; // frozen plain arm
+        }
+        if t > SDF_T_MAX {
+            exhausted = false; // clear-miss termination
+            break;
+        }
+    }
+
+    // The re-march fallback stays ANALYTIC (C1) — identical to the non-brick path. The
+    // empty skip never reopens the B1 budget hole (its plain exit steps are bounded), so
+    // `exhausted` here means the analytic field ran out of budget mid-field, exactly as
+    // in the non-brick marcher; the frozen plain re-march resolves it.
+    if exhausted {
+        t = t_seed;
         hit = false;
         for _it2 in 0..SDF_MAX_IT {
             if t >= t_mesh {
@@ -4742,6 +4997,742 @@ mod b1_over_relaxation_tests {
             "[B1 gate5] ω clamp: {} non-NaN hostile inputs decode finite ∈ [1.0,1.99]; NaN PASSES the clamp \
              but ≡ the ω=1 plain march over {checked} px (gate false for NaN); default={DEFAULT_MARCHER_OMEGA}",
             cases.len()
+        );
+    }
+}
+
+// ===========================================================================
+// M1 — the EMPTY-SPACE-SKIP marcher test matrix (host-side, no GPU).
+//
+// The two LOAD-BEARING soundness gates:
+//   (1) OFF byte-identical — `golden_composite_pixel_brick(brick_enabled=0)` is
+//       BIT-FOR-BIT the pre-M1 `golden_composite_pixel_ex_omega_lit` over a
+//       battery of scenes/cameras/pixels (the 0%-gate).
+//   (2) ON hit-set == analytic — over ≥500 random scenes + the demo scene, the
+//       empty-skip ON marcher and the analytic (OFF) marcher agree on EVERY
+//       pixel's HIT/MISS classification AND surface color (the empty skip only
+//       changes WHERE steps land, never the converged hit). A skipped or spurious
+//       surface is a BLOCKER.
+//
+// Plus: never-skip-surface (3), `dist_to_brick_exit` progress (4),
+// `build_pointer_grid` correctness (5), push-constant layout (6) — the std430
+// agreement the dev SPIR-V-verified, guarded host-side.
+//
+// The xorshift scene generator mirrors the M0 brick GATE generator (no new dep).
+// ===========================================================================
+#[cfg(test)]
+mod m1_empty_skip_tests {
+    use super::{
+        CompositeCamera, DEFAULT_LIGHT_DIR, DEFAULT_MARCHER_OMEGA, FineMarcherPush,
+        GBUFFER_MARCHER_PUSH_BYTES, LIGHTING_FLAG_AO, LIGHTING_FLAG_SHADOWS, MESH_DEPTH_CLEAR,
+        SDF_IMG_H, SDF_IMG_W, SdfEdit, golden_composite_pixel_brick,
+        golden_composite_pixel_ex_omega_lit, host_brick_cell, sdf_op,
+    };
+    use boyko_sdf_math::brick::{
+        BRICK_EXIT_EPS, DEFAULT_BRICK_WORLD, DEFAULT_GRID_DIM, PointerGrid, build_pointer_grid,
+        classify_brick, dist_to_brick_exit,
+    };
+    use boyko_sdf_math::{BrickClass, SDF_EDIT_BAND_HALF, SdfEditField};
+
+    // ── shared fixtures ────────────────────────────────────────────────────
+
+    /// `EmptyOutside as u32` — the cell class the empty-skip acts on (mirror of the
+    /// private `super::BRICK_CLASS_EMPTY_OUTSIDE`, re-stated so a drift in the enum
+    /// discriminant is caught by `class_codes_match_brickclass_discriminants`).
+    const EMPTY_OUTSIDE: u32 = 0;
+
+    /// A deterministic xorshift64* PRNG — the scene generator without a dep (mirrors
+    /// the M0 brick GATE's generator so the two suites draw from the SAME family).
+    struct XorShift64(u64);
+
+    impl XorShift64 {
+        fn new(seed: u64) -> Self {
+            Self(seed ^ 0x9E37_79B9_7F4A_7C15)
+        }
+        fn next_u64(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.0 = x;
+            x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+        fn range(&mut self, lo: f32, hi: f32) -> f32 {
+            let frac = (self.next_u64() >> 40) as f32 / (1u64 << 24) as f32;
+            lo + frac * (hi - lo)
+        }
+        fn below(&mut self, n: u32) -> u32 {
+            (self.next_u64() % n as u64) as u32
+        }
+    }
+
+    /// The demo / golden "crater" CSG scene (base sphere minus a smaller sphere) — the
+    /// SAME scene the rung-9/10 and B1 goldens use, so the M1 gates run against the
+    /// production demo field, not only synthetic scenes.
+    fn crater() -> Vec<SdfEdit> {
+        vec![
+            SdfEdit::sphere([0.0, 0.0, 0.0], 0.5, sdf_op::UNION, 0.0),
+            SdfEdit::sphere([0.3, 0.0, 0.0], 0.35, sdf_op::SUBTRACT, 0.0),
+        ]
+    }
+
+    fn box_csg() -> Vec<SdfEdit> {
+        vec![SdfEdit::box_shape([0.0, 0.0, 0.0], [0.4, 0.4, 0.4], sdf_op::UNION, 0.0)]
+    }
+
+    fn smooth_union() -> Vec<SdfEdit> {
+        vec![
+            SdfEdit::sphere([-0.25, 0.0, 0.0], 0.35, sdf_op::UNION, 0.0),
+            SdfEdit::sphere([0.25, 0.0, 0.0], 0.35, sdf_op::UNION, 0.15),
+        ]
+    }
+
+    /// Builds an `SdfEditField` (the authority) from a slice of edits and bumps its gen.
+    fn field_of(edits: &[SdfEdit]) -> SdfEditField {
+        let mut f = SdfEditField::new();
+        for e in edits {
+            assert!(f.push(*e), "scene must fit MAX_SDF_EDITS");
+        }
+        f.bump_gen();
+        f
+    }
+
+    /// A random valid scene (1..=6 edits, first forced UNION, SPHERE/BOX, radii/half-
+    /// extents >= 0.5, centers in [-2,2]³, UNION/SUBTRACT/INTERSECT, smoothness 0 or 0.15)
+    /// returned as a `Vec<SdfEdit>` — the ON-vs-analytic gate's scene family.
+    fn random_scene(rng: &mut XorShift64) -> Vec<SdfEdit> {
+        let n = 1 + rng.below(6);
+        let mut edits = Vec::with_capacity(n as usize);
+        for i in 0..n {
+            let center =
+                [rng.range(-2.0, 2.0), rng.range(-2.0, 2.0), rng.range(-2.0, 2.0)];
+            let op = if i == 0 {
+                sdf_op::UNION
+            } else {
+                match rng.below(3) {
+                    0 => sdf_op::UNION,
+                    1 => sdf_op::SUBTRACT,
+                    _ => sdf_op::INTERSECT,
+                }
+            };
+            let smoothness = if rng.below(2) == 0 { 0.0 } else { 0.15 };
+            let e = if rng.below(2) == 0 {
+                SdfEdit::sphere(center, rng.range(0.5, 1.5), op, smoothness)
+            } else {
+                SdfEdit::box_shape(
+                    center,
+                    [rng.range(0.5, 1.2), rng.range(0.5, 1.2), rng.range(0.5, 1.2)],
+                    op,
+                    smoothness,
+                )
+            };
+            edits.push(e);
+        }
+        edits
+    }
+
+    /// The default near-field pointer grid baked from `field` — the SAME grid the GPU
+    /// binds at binding 9 (origin/dims/brick_world the `FineMarcherPush` carries).
+    fn build_default_grid(field: &SdfEditField) -> (PointerGrid, Vec<u32>) {
+        let grid = PointerGrid::default_near_field();
+        let mut cells = vec![0u32; grid.cell_count()];
+        build_pointer_grid(field, &grid, &mut cells);
+        (grid, cells)
+    }
+
+    /// The result of one primary-march replay: the hit decision + hit-`t`, plus the
+    /// over-step audit signals (`min_field` = closest analytic approach SEEN at a probe,
+    /// `crossed_undetected` = a brick-exit step that jumped from outside the hit band
+    /// straight PAST the surface to a point where the field went NEGATIVE — the literal
+    /// definition of a skipped surface, `exhausted` = ran the whole iteration budget).
+    struct MarchTrace {
+        hit: bool,
+        min_field: f32,
+        crossed_undetected: bool,
+        exhausted: bool,
+    }
+
+    /// Replays the brick-ON / analytic PRIMARY march (the empty-skip loop, no re-march or
+    /// shade) and audits it for an OVER-STEP. A verbatim mirror of
+    /// `golden_composite_pixel_brick`'s primary loop, plus: before each brick-exit step it
+    /// records the field at the PRE- and POST-step points; if the pre-step field was
+    /// positive (outside the solid) and the post-step field is NEGATIVE (inside), the
+    /// brick step JUMPED PAST a surface undetected (a skip → soundness BLOCKER). ORTHO,
+    /// no mesh.
+    fn march_primary(
+        edits: &[SdfEdit],
+        px: u32,
+        py: u32,
+        grid: &PointerGrid,
+        cells: &[u32],
+        brick_on: bool,
+    ) -> MarchTrace {
+        use super::{SDF_EPS, SDF_MAX_IT, SDF_T_MAX, composite_ray, sdf_edit_list};
+        let (ro, rd) = composite_ray(px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
+        let mut t = 0.0_f32;
+        let mut hit = false;
+        let mut min_field = f32::INFINITY;
+        let mut crossed_undetected = false;
+        let mut iters = 0u32;
+        for _ in 0..SDF_MAX_IT {
+            iters += 1;
+            let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
+            if brick_on
+                && let Some((class, cmin)) = host_brick_cell(grid, cells, p)
+                && class == EMPTY_OUTSIDE
+            {
+                // Audit the brick-exit step for an over-step: sample the analytic field
+                // at the PRE-step point and at the POST-step point. A skip would show as
+                // pre >= 0 (outside) but post < 0 (inside) — the step crossed a surface.
+                let pre_d = sdf_edit_list(edits, p);
+                min_field = min_field.min(pre_d);
+                let exit = dist_to_brick_exit(p, rd, cmin, grid.brick_world);
+                t += exit;
+                let q = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
+                let post_d = sdf_edit_list(edits, q);
+                if pre_d >= 0.0 && post_d < 0.0 {
+                    crossed_undetected = true;
+                }
+                min_field = min_field.min(post_d);
+                if t > SDF_T_MAX {
+                    break;
+                }
+                continue;
+            }
+            let d = sdf_edit_list(edits, p);
+            min_field = min_field.min(d);
+            if d < SDF_EPS {
+                hit = true;
+                break;
+            }
+            t += d;
+            if t > SDF_T_MAX {
+                break;
+            }
+        }
+        MarchTrace {
+            hit,
+            min_field,
+            crossed_undetected,
+            exhausted: iters == SDF_MAX_IT && !hit,
+        }
+    }
+
+    /// Max per-channel difference between two packed `0xAABBGGRR` colors (RGB only).
+    fn chan_delta(a: u32, b: u32) -> i32 {
+        let c = |x: u32, sh: u32| ((x >> sh) & 0xFF) as i32;
+        (c(a, 0) - c(b, 0))
+            .abs()
+            .max((c(a, 8) - c(b, 8)).abs())
+            .max((c(a, 16) - c(b, 16)).abs())
+    }
+
+    /// A sparse-but-representative pixel battery across the 64×64 frame (corners, edges,
+    /// center, and a diagonal sweep) — exercises HIT, MISS, and the sphere-edge grazing
+    /// rays without folding the field on all 4096 pixels in the per-scene inner loops.
+    fn pixel_battery() -> Vec<(u32, u32)> {
+        let mut v = Vec::new();
+        let coords = [0u32, 1, 8, 16, 24, 31, 32, 40, 48, 56, 62, 63];
+        for &py in &coords {
+            for &px in &coords {
+                v.push((px, py));
+            }
+        }
+        // A diagonal sweep for extra edge coverage.
+        for i in 0..SDF_IMG_W {
+            v.push((i, i % SDF_IMG_H));
+        }
+        v
+    }
+
+    // ── 6. PUSH-CONSTANT LAYOUT (the std430 host/GPU agreement guard) ──────
+
+    /// The M1 `FineMarcherPush` field offsets match the std430/HLSL layout the dev
+    /// SPIR-V-verified (`grid_origin@32, brick_enabled@44, grid_dims@48, brick_world@60`)
+    /// and the block is 64 bytes — a runtime mirror of the `const _: () = assert!` pins
+    /// so a future reorder that desyncs the GPU push is caught even if the const-asserts
+    /// are ever weakened.
+    #[test]
+    fn fine_marcher_push_m1_field_offsets_match_std430() {
+        assert_eq!(core::mem::offset_of!(FineMarcherPush, grid_origin), 32, "grid_origin @32");
+        assert_eq!(core::mem::offset_of!(FineMarcherPush, brick_enabled), 44, "brick_enabled @44");
+        assert_eq!(core::mem::offset_of!(FineMarcherPush, grid_dims), 48, "grid_dims @48");
+        assert_eq!(core::mem::offset_of!(FineMarcherPush, brick_world), 60, "brick_world @60");
+        assert_eq!(GBUFFER_MARCHER_PUSH_BYTES, 64, "FineMarcherPush must be 64 bytes");
+    }
+
+    /// `with_brick` flips `brick_enabled` to 1 and stamps the grid uniforms, preserving
+    /// the base gates; `new` leaves the M1 block OFF (brick_enabled == 0, zero grid).
+    #[test]
+    fn with_brick_sets_grid_uniforms_and_preserves_base_gates() {
+        let base = FineMarcherPush::new(true, 1.3, LIGHTING_FLAG_SHADOWS, [0.1, 0.2, 0.3]);
+        assert_eq!(base.brick_enabled, 0, "new() leaves the empty-skip OFF");
+        assert_eq!(base.grid_dims, [0, 0, 0], "new() zeroes the grid");
+
+        let with = base.with_brick([-4.0, -4.0, -4.0], [16, 16, 16], 0.5);
+        assert_eq!(with.brick_enabled, 1, "with_brick turns the empty-skip ON");
+        assert_eq!(with.grid_origin, [-4.0, -4.0, -4.0], "grid_origin stamped");
+        assert_eq!(with.grid_dims, [16, 16, 16], "grid_dims stamped");
+        assert_eq!(with.brick_world, 0.5, "brick_world stamped");
+        // Base gates preserved.
+        assert_eq!(with.coarse_enabled, 1, "coarse gate preserved");
+        assert_eq!(with.omega, 1.3, "omega preserved");
+        assert_eq!(with.lighting_flags, LIGHTING_FLAG_SHADOWS, "lighting flags preserved");
+        assert_eq!(with.light_dir, [0.1, 0.2, 0.3], "light_dir preserved");
+    }
+
+    /// The host `EMPTY_OUTSIDE` code the empty-skip branches on equals the
+    /// `BrickClass::EmptyOutside` discriminant the bake stores — a drift in the enum
+    /// repr would make the skip act on the wrong class (or never).
+    #[test]
+    fn class_codes_match_brickclass_discriminants() {
+        assert_eq!(BrickClass::EmptyOutside as u32, EMPTY_OUTSIDE, "EmptyOutside == 0");
+        assert_eq!(BrickClass::EmptyInside as u32, 1, "EmptyInside == 1");
+        assert_eq!(BrickClass::Surface as u32, 2, "Surface == 2");
+    }
+
+    // ── 1. OFF BYTE-IDENTICAL (the 0%-gate) ────────────────────────────────
+
+    /// `golden_composite_pixel_brick(brick_enabled=0)` is BIT-FOR-BIT the pre-M1
+    /// `golden_composite_pixel_ex_omega_lit` over a battery of pixels across the demo
+    /// scenes (crater / box / smooth-union) under both ORTHO and a perspective camera,
+    /// at omega 1.0 and the default omega, and both lighting OFF and ON. Any single
+    /// byte difference is a BLOCKER — the 0%-gate is broken.
+    #[test]
+    fn off_path_is_byte_identical_to_pre_m1_golden() {
+        let scenes = [("crater", crater()), ("box", box_csg()), ("smooth", smooth_union())];
+        // The grid is supplied but MUST be ignored on the OFF path (a degenerate grid
+        // proves the OFF path never reads it).
+        let dummy_grid = PointerGrid::default_near_field();
+        let dummy_cells = vec![0u32; dummy_grid.cell_count()];
+
+        let cameras = [
+            ("ortho", CompositeCamera::Ortho),
+            (
+                "persp",
+                CompositeCamera::Perspective {
+                    eye: [0.0, 0.0, 2.0],
+                    forward: [0.0, 0.0, -1.0],
+                    right: [1.0, 0.0, 0.0],
+                    up: [0.0, 1.0, 0.0],
+                    tan_half_fov: 0.5,
+                    aspect: 1.0,
+                },
+            ),
+        ];
+        let omegas = [1.0_f32, DEFAULT_MARCHER_OMEGA];
+        let light_cfgs = [
+            (0u32, DEFAULT_LIGHT_DIR),
+            (LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO, [0.3, 0.7, 1.0]),
+        ];
+        let mesh_depths = [MESH_DEPTH_CLEAR, 0.5_f32]; // no-mesh + a covering mesh
+
+        let mut checked = 0u64;
+        for (sname, edits) in &scenes {
+            for &(cname, cam) in &cameras {
+                for &om in &omegas {
+                    for &(flags, ldir) in &light_cfgs {
+                        for &md in &mesh_depths {
+                            for &(px, py) in &pixel_battery() {
+                                let off = golden_composite_pixel_brick(
+                                    edits, md, px, py, SDF_IMG_W, SDF_IMG_H, cam, om, flags, ldir,
+                                    false, &dummy_grid, &dummy_cells,
+                                );
+                                let pre_m1 = golden_composite_pixel_ex_omega_lit(
+                                    edits, md, px, py, SDF_IMG_W, SDF_IMG_H, cam, om, flags, ldir,
+                                );
+                                assert_eq!(
+                                    off, pre_m1,
+                                    "[{sname}/{cname} ω={om} flags={flags} md={md}] OFF path \
+                                     diverged from pre-M1 at ({px},{py}): brick 0x{off:08X} \
+                                     pre-M1 0x{pre_m1:08X} — the 0%-gate is BROKEN"
+                                );
+                                checked += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // 3 scenes × 2 cameras × 2 ω × 2 light cfgs × 2 mesh depths × |battery| = 9984.
+        assert!(checked > 9_000, "OFF gate must exercise a wide battery (got {checked})");
+        println!("[M1 OFF 0%-gate] {checked} pixels byte-identical to pre-M1 golden");
+    }
+
+    // ── 2. ON HIT-SET == ANALYTIC (the load-bearing M1 property) ───────────
+
+    /// THE LOAD-BEARING M1 PROPERTY. Over the demo scene + ≥500 random scenes, asserts
+    /// the empty-skip is SOUND and behavior-identical at the SHIPPING level:
+    ///
+    ///   (a) NO OVER-STEP (the direct soundness invariant, budget-INDEPENDENT): not one
+    ///       brick-exit step ever jumps from OUTSIDE the solid (pre-step field >= 0)
+    ///       straight to INSIDE it (post-step field < 0) — the literal definition of a
+    ///       skipped surface. This is the conservative-classifier contract: an
+    ///       EmptyOutside brick has no surface within band_half, so stepping to its exit
+    ///       cannot cross one. A single `crossed_undetected` is a soundness BLOCKER.
+    ///
+    ///   (b) PRODUCTION HIT-SET + COLOR (the shipping contract): the production
+    ///       `golden_composite_pixel_brick` (WITH its `exhausted` re-march fallback, the
+    ///       same the GPU shader runs) yields ON output within ±1/255 of analytic — the
+    ///       converged-`t` < `SDF_EPS` rounding is the only difference; tighter than the
+    ///       established ±2/255 GPU-golden tolerance.
+    ///
+    /// The PRIMARY-loop hit-class is also tracked: any divergence there is a `MAX_IT`-cliff
+    /// budget-edge artifact on a near-tangent ray (NOT an over-step), and the test asserts
+    /// EVERY such pixel is resolved to ±1/255 by the production re-march (so the artifact
+    /// is provably non-shipping).
+    #[test]
+    fn on_hit_set_equals_analytic_over_many_scenes() {
+        const SCENES: u64 = 600; // ≥500 random scenes + the demo scenes below
+        let battery = pixel_battery();
+
+        let demo: [(&str, Vec<SdfEdit>); 3] =
+            [("crater", crater()), ("box", box_csg()), ("smooth", smooth_union())];
+        let mut overstep_blockers: u64 = 0;
+        let mut primary_budget_flips: u64 = 0;
+        let mut checked: u64 = 0;
+        let mut max_chan: i32 = 0;
+        let mut first_overstep: Option<String> = None;
+        let mut first_color_violation: Option<String> = None;
+        let mut first_unresolved_flip: Option<String> = None;
+        let mut unresolved_flips: u64 = 0;
+
+        let mut run_scene = |label: &str, edits: &[SdfEdit]| {
+            let field = field_of(edits);
+            let (grid, cells) = build_default_grid(&field);
+            for &(px, py) in &battery {
+                checked += 1;
+                let on_trace = march_primary(edits, px, py, &grid, &cells, true);
+                let an_trace = march_primary(edits, px, py, &grid, &cells, false);
+
+                // (a) the direct over-step soundness invariant (budget-independent).
+                if on_trace.crossed_undetected {
+                    overstep_blockers += 1;
+                    if first_overstep.is_none() {
+                        first_overstep = Some(format!(
+                            "[{label}] ({px},{py}) a brick-exit step crossed a surface \
+                             undetected (min_field={:.4e}); edits={edits:?}",
+                            on_trace.min_field
+                        ));
+                    }
+                }
+
+                // (b) the PRODUCTION shipping contract: ON within ±1/255 of analytic.
+                // Lighting OFF: bare Lambert (the ON lighting path is ±3/255 vs the
+                // shader and is gated separately).
+                let on = golden_composite_pixel_brick(
+                    edits, MESH_DEPTH_CLEAR, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho,
+                    1.0, 0, DEFAULT_LIGHT_DIR, true, &grid, &cells,
+                );
+                let analytic = golden_composite_pixel_brick(
+                    edits, MESH_DEPTH_CLEAR, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho,
+                    1.0, 0, DEFAULT_LIGHT_DIR, false, &grid, &cells,
+                );
+                let dchan = chan_delta(on, analytic);
+                max_chan = max_chan.max(dchan);
+                if dchan > 1 && first_color_violation.is_none() {
+                    first_color_violation = Some(format!(
+                        "[{label}] ({px},{py}) per-channel Δ={dchan} > 1/255 \
+                         (ON 0x{on:08X} analytic 0x{analytic:08X})"
+                    ));
+                }
+
+                // Track primary-loop hit-class flips and PROVE each is a budget artifact
+                // (the production function resolves it to ±1/255 via the re-march).
+                if on_trace.hit != an_trace.hit {
+                    primary_budget_flips += 1;
+                    // A genuine artifact has at least one path exhausting the budget AND
+                    // no over-step; the production function must reconcile it.
+                    if dchan > 1 {
+                        unresolved_flips += 1;
+                        if first_unresolved_flip.is_none() {
+                            first_unresolved_flip = Some(format!(
+                                "[{label}] ({px},{py}) primary hit-flip NOT resolved by the \
+                                 production re-march: ON-exhausted={} AN-exhausted={} dchan={dchan} \
+                                 (ON 0x{on:08X} analytic 0x{analytic:08X})",
+                                on_trace.exhausted, an_trace.exhausted
+                            ));
+                        }
+                    }
+                }
+            }
+        };
+
+        for (label, edits) in &demo {
+            run_scene(label, edits);
+        }
+        for seed in 0..SCENES {
+            let mut rng = XorShift64::new(seed.wrapping_mul(0x100_0001).wrapping_add(1));
+            let edits = random_scene(&mut rng);
+            run_scene(&format!("rand#{seed}"), &edits);
+        }
+
+        // (a) the SOUNDNESS gate: zero over-steps (no surface skipped).
+        assert_eq!(
+            overstep_blockers, 0,
+            "{overstep_blockers}/{checked} brick-exit steps crossed a surface undetected — \
+             a SKIPPED surface (SOUNDNESS BLOCKER). First: {}",
+            first_overstep.unwrap_or_default()
+        );
+        // (b) the shipping contract: production ON within ±1/255 of analytic.
+        assert!(
+            max_chan <= 1,
+            "production ON surface color exceeded ±1/255 vs analytic (max per-channel \
+             Δ={max_chan}). First: {}",
+            first_color_violation.unwrap_or_default()
+        );
+        // Every primary-loop hit-flip is a budget-edge artifact the production re-march
+        // resolves to ±1/255 (none ships as a divergence).
+        assert_eq!(
+            unresolved_flips, 0,
+            "{unresolved_flips} primary-loop hit-flips were NOT resolved by the production \
+             re-march (a shipping divergence). First: {}",
+            first_unresolved_flip.unwrap_or_default()
+        );
+        assert!(checked > 50_000, "ON gate must exercise a wide battery (got {checked})");
+        println!(
+            "[M1 ON-vs-analytic] {checked} pixels over {} scenes: 0 over-steps, \
+             {primary_budget_flips} primary-loop budget-edge flips (ALL resolved by the \
+             production re-march to ±{max_chan}/255 — non-shipping)",
+            SCENES + 3
+        );
+    }
+
+    // ── 3. EMPTY-SKIP NEVER SKIPS A SURFACE (the property, targeted) ───────
+
+    /// A thin shell straddling an EMPTY/SURFACE brick boundary: every ray that hits the
+    /// surface analytically must still hit with the empty-skip ON (no surface skipped),
+    /// and every ray that misses analytically must still miss (no spurious hit). Asserts
+    /// per-pixel HIT-classification equality on the boundary-grazing scene.
+    #[test]
+    fn empty_skip_never_skips_or_invents_a_surface_at_brick_boundary() {
+        // A small sphere placed so its surface grazes a brick face of the default grid
+        // (brick_world = 0.5; a center at a half-cell offset makes the surface cross a
+        // cell boundary). Plus a thin box to graze a face from outside.
+        let scenes: [(&str, Vec<SdfEdit>); 3] = [
+            (
+                "sphere_on_face",
+                vec![SdfEdit::sphere([0.25, 0.0, 0.0], 0.5, sdf_op::UNION, 0.0)],
+            ),
+            (
+                "thin_box_face_graze",
+                vec![SdfEdit::box_shape([0.5, 0.0, 0.0], [0.5, 0.6, 0.6], sdf_op::UNION, 0.0)],
+            ),
+            (
+                "off_center_csg",
+                vec![
+                    SdfEdit::sphere([0.5, 0.5, 0.0], 0.7, sdf_op::UNION, 0.0),
+                    SdfEdit::sphere([0.75, 0.5, 0.0], 0.3, sdf_op::SUBTRACT, 0.0),
+                ],
+            ),
+        ];
+
+        for (label, edits) in &scenes {
+            let field = field_of(edits);
+            let (grid, cells) = build_default_grid(&field);
+            // EVERY pixel of the frame (a thin-surface scene wants dense coverage).
+            for py in 0..SDF_IMG_H {
+                for px in 0..SDF_IMG_W {
+                    // The PROPERTY: not one brick-exit step crosses a surface — no surface
+                    // skipped (analytic-hit ⟹ no undetected crossing), no surface invented.
+                    let on_trace = march_primary(edits, px, py, &grid, &cells, true);
+                    assert!(
+                        !on_trace.crossed_undetected,
+                        "[{label}] ({px},{py}) a brick-exit step crossed a surface UNDETECTED \
+                         (min_field={:.4e}) — a surface was SKIPPED",
+                        on_trace.min_field
+                    );
+                    // The production composited color (with re-march) stays within ±1/255.
+                    let on = golden_composite_pixel_brick(
+                        edits, MESH_DEPTH_CLEAR, px, py, SDF_IMG_W, SDF_IMG_H,
+                        CompositeCamera::Ortho, 1.0, 0, DEFAULT_LIGHT_DIR, true, &grid, &cells,
+                    );
+                    let analytic = golden_composite_pixel_brick(
+                        edits, MESH_DEPTH_CLEAR, px, py, SDF_IMG_W, SDF_IMG_H,
+                        CompositeCamera::Ortho, 1.0, 0, DEFAULT_LIGHT_DIR, false, &grid, &cells,
+                    );
+                    assert!(
+                        chan_delta(on, analytic) <= 1,
+                        "[{label}] ({px},{py}) color Δ {} > 1/255 (ON 0x{on:08X} analytic \
+                         0x{analytic:08X}) — the empty skip changed the surface",
+                        chan_delta(on, analytic)
+                    );
+                }
+            }
+        }
+    }
+
+    // ── 4. `dist_to_brick_exit` PROGRESS (no zero/negative step) ───────────
+
+    /// A ray parallel to a brick face, starting exactly on a boundary, or axis-aligned
+    /// through cell corners still advances by >= `BRICK_EXIT_EPS` (no zero/negative step
+    /// → no infinite march). Tests the degenerate directions head-on.
+    #[test]
+    fn dist_to_brick_exit_always_advances_on_degenerate_rays() {
+        let cell_min = [0.0_f32, 0.0, 0.0];
+        let bw = 0.5_f32;
+        // Cases: (ro, rd, label). All `ro` are on/at a brick face or corner; all `rd`
+        // include axis-parallel + fully-degenerate (zero) directions.
+        let cases: &[([f32; 3], [f32; 3], &str)] = &[
+            // Parallel to the +x face plane (no x component), on the y=0 face.
+            ([0.1, 0.0, 0.1], [0.0, 1.0, 0.0], "parallel_y_on_face"),
+            // Parallel to a face, sitting exactly on a corner.
+            ([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], "axis_z_from_corner"),
+            // Diagonal through the cell corner (exits at a corner, can graze).
+            ([0.0, 0.0, 0.0], [1.0, 1.0, 1.0], "body_diagonal_from_corner"),
+            // Fully degenerate: zero direction (every axis skipped).
+            ([0.25, 0.25, 0.25], [0.0, 0.0, 0.0], "zero_direction"),
+            // Sub-eps direction on all axes (every axis below BRICK_EXIT_EPS).
+            ([0.25, 0.25, 0.25], [1e-6, 1e-6, 1e-6], "sub_eps_all_axes"),
+            // A ray starting on the FAR face, pointing further out (negative exit
+            // territory) — must clamp UP to advance.
+            ([0.5, 0.25, 0.25], [1.0, 0.0, 0.0], "on_far_face_outward"),
+            // Negative-x ray from inside (exits the lo face).
+            ([0.25, 0.25, 0.25], [-1.0, 0.0, 0.0], "neg_x_from_center"),
+        ];
+        for &(ro, rd, label) in cases {
+            let exit = dist_to_brick_exit(ro, rd, cell_min, bw);
+            assert!(exit.is_finite(), "[{label}] exit must be finite, got {exit}");
+            assert!(
+                exit >= BRICK_EXIT_EPS,
+                "[{label}] exit {exit} < BRICK_EXIT_EPS {BRICK_EXIT_EPS} — the march can stall (no progress)"
+            );
+        }
+    }
+
+    /// A well-conditioned ray through a brick exits at the analytically expected slab
+    /// distance (the progress clamp does not corrupt a normal exit).
+    #[test]
+    fn dist_to_brick_exit_matches_slab_far_face_on_normal_ray() {
+        let cell_min = [0.0_f32, 0.0, 0.0];
+        let bw = 0.5_f32;
+        // From the lo-x face center, straight +x: exits the +x face at t = 0.5.
+        let exit = dist_to_brick_exit([0.0, 0.25, 0.25], [1.0, 0.0, 0.0], cell_min, bw);
+        assert!((exit - 0.5).abs() < 1e-5, "axis-aligned exit must be the slab width 0.5, got {exit}");
+        // From the center, +x: exits at t = 0.25 (half the cell).
+        let exit2 = dist_to_brick_exit([0.25, 0.25, 0.25], [1.0, 0.0, 0.0], cell_min, bw);
+        assert!((exit2 - 0.25).abs() < 1e-5, "centered exit must be 0.25, got {exit2}");
+    }
+
+    // ── 5. `build_pointer_grid` CORRECTNESS ────────────────────────────────
+
+    /// Every cell the bake writes equals a direct `classify_brick` of that cell's AABB —
+    /// the bake is a faithful per-cell fold of the authority (no index/origin slip).
+    #[test]
+    fn build_pointer_grid_matches_per_cell_classify() {
+        let scenes: [(&str, Vec<SdfEdit>); 3] =
+            [("crater", crater()), ("box", box_csg()), ("smooth", smooth_union())];
+        for (label, edits) in &scenes {
+            let field = field_of(edits);
+            let grid = PointerGrid::default_near_field();
+            let mut cells = vec![0u32; grid.cell_count()];
+            build_pointer_grid(&field, &grid, &mut cells);
+
+            let w = grid.dims[0];
+            let h = grid.dims[1];
+            let d = grid.dims[2];
+            for iz in 0..d {
+                for iy in 0..h {
+                    for ix in 0..w {
+                        let cell_min = grid.cell_min(ix, iy, iz);
+                        let expect = classify_brick(
+                            &field, cell_min, grid.brick_world, SDF_EDIT_BAND_HALF,
+                        ) as u32;
+                        let idx = (ix + iy * w + iz * w * h) as usize;
+                        assert_eq!(
+                            cells[idx], expect,
+                            "[{label}] cell ({ix},{iy},{iz}) bake {} != classify {expect}",
+                            cells[idx]
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// A cell with no edit nearby bakes EmptyOutside (or EmptyInside deep in a solid); a
+    /// cell a surface passes through bakes Surface. Checked against a hand-placed scene.
+    #[test]
+    fn build_pointer_grid_classifies_empty_vs_surface() {
+        // A unit sphere at the origin. Cells far out are EmptyOutside; the cell at the
+        // origin (deep inside the sphere) overlaps the sphere's AABB → Surface (the C2
+        // conservative rule: a primitive's AABB covers its interior). A cell on the
+        // sphere's band is Surface.
+        let edits = vec![SdfEdit::sphere([0.0, 0.0, 0.0], 1.0, sdf_op::UNION, 0.0)];
+        let field = field_of(&edits);
+        let (grid, cells) = build_default_grid(&field);
+
+        let cell_class = |wx: f32, wy: f32, wz: f32| -> u32 {
+            let p = [wx, wy, wz];
+            let (class, _) = host_brick_cell(&grid, &cells, p).expect("point inside the default grid");
+            class
+        };
+
+        // A corner of the [-4,4]³ grid, far from the unit sphere → EmptyOutside.
+        assert_eq!(cell_class(-3.5, -3.5, -3.5), EMPTY_OUTSIDE, "far cell must be EmptyOutside");
+        // A cell straddling the sphere surface (radius 1) → Surface (class 2).
+        assert_eq!(cell_class(1.0, 0.0, 0.0), BrickClass::Surface as u32, "surface cell must be Surface");
+        // The center cell overlaps the sphere AABB → Surface (conservative, not EmptyInside).
+        assert_eq!(cell_class(0.0, 0.0, 0.0), BrickClass::Surface as u32, "deep-inside cell is Surface (C2)");
+    }
+
+    /// Grid indexing round-trips: `cell_min(ix,iy,iz)` then a point inside that cell maps
+    /// back to `(ix,iy,iz)` via `host_brick_cell`, and an out-of-grid point returns None.
+    #[test]
+    fn host_brick_cell_round_trips_and_bounds_check() {
+        let edits = crater();
+        let field = field_of(&edits);
+        let (grid, cells) = build_default_grid(&field);
+
+        // Round-trip a sampling of cells: a point at the cell center maps back to it.
+        for &(ix, iy, iz) in &[(0u32, 0u32, 0u32), (5, 7, 3), (15, 15, 15), (8, 0, 12)] {
+            let cmin = grid.cell_min(ix, iy, iz);
+            let center = [
+                cmin[0] + grid.brick_world * 0.5,
+                cmin[1] + grid.brick_world * 0.5,
+                cmin[2] + grid.brick_world * 0.5,
+            ];
+            let (_, got_min) = host_brick_cell(&grid, &cells, center)
+                .expect("cell-center point must land in the grid");
+            assert_eq!(got_min, cmin, "cell ({ix},{iy},{iz}) center must map back to its cell_min");
+        }
+
+        // Out-of-grid points (below origin and past the far corner) → None.
+        let below = [grid.origin[0] - 1.0, grid.origin[1], grid.origin[2]];
+        assert!(host_brick_cell(&grid, &cells, below).is_none(), "point below origin → no cell");
+        let far = [
+            grid.origin[0] + grid.dims[0] as f32 * grid.brick_world + 1.0,
+            grid.origin[1],
+            grid.origin[2],
+        ];
+        assert!(host_brick_cell(&grid, &cells, far).is_none(), "point past the far face → no cell");
+    }
+
+    /// The default near-field grid spans the demo `[-4,4]³` extent (DEFAULT_GRID_DIM
+    /// cells of DEFAULT_BRICK_WORLD), enclosing the demo scene with margin.
+    #[test]
+    fn default_near_field_grid_encloses_demo_extent() {
+        let grid = PointerGrid::default_near_field();
+        assert_eq!(grid.dims, [DEFAULT_GRID_DIM, DEFAULT_GRID_DIM, DEFAULT_GRID_DIM]);
+        assert_eq!(grid.brick_world, DEFAULT_BRICK_WORLD);
+        let half = DEFAULT_GRID_DIM as f32 * DEFAULT_BRICK_WORLD * 0.5;
+        assert!((grid.origin[0] + half).abs() < 1e-6, "grid centered on origin (x)");
+        // The demo primitives live within ±3; the grid spans ±4 → enclosed.
+        assert!(half >= 4.0 - 1e-6, "default grid must span at least ±4 (got ±{half})");
+    }
+
+    /// The empty scene (no edits) bakes an ALL-EmptyOutside grid — every cell is
+    /// provably outside, so the marcher skips the whole near-field to the analytic
+    /// (background) result.
+    #[test]
+    fn build_pointer_grid_empty_scene_is_all_empty_outside() {
+        let field = SdfEditField::new(); // no edits, gen 0
+        let grid = PointerGrid::default_near_field();
+        let mut cells = vec![0u32; grid.cell_count()];
+        build_pointer_grid(&field, &grid, &mut cells);
+        assert!(
+            cells.iter().all(|&c| c == EMPTY_OUTSIDE),
+            "an empty scene must bake an all-EmptyOutside grid"
         );
     }
 }

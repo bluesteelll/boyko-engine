@@ -3618,17 +3618,27 @@ pub struct GBufferScene<'a> {
     pub marcher: &'a ComputePipeline,
     /// The vocabulary bind-group LAYOUT { SSBO @0, sampled depth @1, storage albedo
     /// @2, storage normal @3, storage material @4, UNIFORM camera @5, STORAGE tiles
-    /// @6, STORAGE material-table @7, STORAGE `gViewT` @8 }. The renderer allocates + writes
-    /// a SET against it once per extent (pointing at the per-extent G-buffer + `gViewT`
-    /// images + the bundle's `edit_list` / `camera_uniform` / `depth_sampler` /
-    /// `tiles_buffer` / `material_table`). PBR MVP-2 added binding 7 (the material SSBO the
-    /// marcher fetches `base_color` from); Lighting L0b added binding 8 (the `gViewT` lane
-    /// the marcher stores the surface `t` into).
+    /// @6, STORAGE material-table @7, STORAGE `gViewT` @8, STORAGE `PointerGrid` @9 }. The
+    /// renderer allocates + writes a SET against it once per extent (pointing at the
+    /// per-extent G-buffer + `gViewT` images + the bundle's `edit_list` / `camera_uniform` /
+    /// `depth_sampler` / `tiles_buffer` / `material_table` / `pointer_grid`). PBR MVP-2 added
+    /// binding 7 (the material SSBO the marcher fetches `base_color` from); Lighting L0b added
+    /// binding 8 (the `gViewT` lane the marcher stores the surface `t` into); M1 added binding
+    /// 9 (the empty-skip `PointerGrid`).
     ///
     /// The caller MUST declare binding 6 = `DescriptorKind::StorageBuffer`
     /// (`ShaderStage::COMPUTE`): the P4b marcher shader unconditionally DECLARES `[Set
     /// 0, Binding 6, "Tiles"]`, so the layout + the bound set must carry a VALID
     /// descriptor there even when the coarse cull is gated OFF (`coarse_enabled == 0`).
+    ///
+    /// The caller MUST likewise declare binding 9 = `DescriptorKind::StorageBuffer`
+    /// (`ShaderStage::COMPUTE`): the M1 marcher SPIR-V STATICALLY references
+    /// `StructuredBuffer<uint> PointerGrid : register(t9)` inside the empty-skip branch (DXC
+    /// does NOT dead-strip the reference despite the runtime `brick_enabled` gate), so the
+    /// layout + the bound set must carry a VALID descriptor there even when the empty skip is
+    /// gated OFF (`brick_enabled == 0`, the windowed-present path), or
+    /// `vkCreateComputePipelines` / `vkCmdDispatch` fail validation
+    /// (VUID-…-layout-07988 / -08114).
     pub vocab_layout: &'a VulkanBindGroupLayout,
     /// The edit-list StorageBuffer (binding 0), host-seeded ONCE before the loop.
     pub edit_list: &'a BoundBuffer,
@@ -3644,6 +3654,21 @@ pub struct GBufferScene<'a> {
     /// VALID StorageBuffer descriptor bound there regardless. The scene OWNS this
     /// buffer; [`GBufferTargets`] only borrows it into the vocabulary set.
     pub tiles_buffer: &'a BoundBuffer,
+    /// The M1 empty-space-skip `PointerGrid` StorageBuffer (vocab binding 9): the dense
+    /// `dims.0 × dims.1 × dims.2` lattice of [`boyko_sdf_math::brick::BrickClass`] codes
+    /// (one `u32` each — the GPU `StructuredBuffer<uint>` element), baked from the ONE edit
+    /// authority via [`boyko_sdf_math::brick::build_pointer_grid`] (principle 0 — no parallel
+    /// field store) and host-seeded ONCE before the loop, exactly like `edit_list`.
+    ///
+    /// The windowed present path runs the marcher with the empty skip GATED OFF
+    /// (`brick_enabled == 0`), so the marcher NEVER reads this buffer's contents — the
+    /// on-screen output stays BYTE-IDENTICAL to the pre-M1 marcher. But the M1 marcher SPIR-V
+    /// STATICALLY references `PointerGrid : register(t9)` (DXC keeps the reference past the
+    /// runtime gate), so Vulkan requires a VALID StorageBuffer descriptor bound at binding 9
+    /// regardless. The scene OWNS this buffer; [`GBufferTargets`] only borrows it into the
+    /// vocabulary set. Activating the empty skip on-screen is a separate step
+    /// (`FineMarcherPush::with_brick`) — NOT done here.
+    pub pointer_grid: &'a BoundBuffer,
     /// The sampler bound alongside the depth image at binding 1 (ignored by the
     /// marcher's unfiltered `.Load`, but the SAMPLED_IMAGE descriptor requires one).
     pub depth_sampler: &'a VulkanSampler,
@@ -3748,7 +3773,7 @@ pub struct GBufferScene<'a> {
 /// # The descriptor sets are written ONCE per extent (NO per-frame update)
 ///
 /// `vocab_set` binds {SSBO, sampled depth, albedo/normal/material storage, camera
-/// UBO, P4b tiles SSBO} and `present_set` binds {ALBEDO combined-image-sampler}; both are written at
+/// UBO, P4b tiles SSBO, M1 pointer-grid SSBO} and `present_set` binds {ALBEDO combined-image-sampler}; both are written at
 /// `create_bind_group` time inside `sync_gbuffer` and reused unchanged across every
 /// frame at that extent. The recorder records NO `vkUpdateDescriptorSets` — only the
 /// per-frame barriers + bind + dispatch + draw. On an extent change `sync_gbuffer`
@@ -3785,7 +3810,7 @@ pub struct GBufferTargets {
     viewt: VulkanTexture,
     /// The marcher vocabulary descriptor set, written ONCE against
     /// [`GBufferScene::vocab_layout`] (pointing at `depth`/`albedo`/`normal`/`material`
-    /// + the scene's SSBO/UBO/sampler). NO per-frame update.
+    /// + the scene's SSBO/UBO/sampler + the M1 `pointer_grid` SSBO @9). NO per-frame update.
     vocab_set: VulkanBindGroup,
     /// The PBR MVP-2 RESOLVE descriptor set, written ONCE against
     /// [`GBufferScene::resolve_layout`] (10 bindings: `albedo` @0, `normal` @1, `material`
@@ -4004,10 +4029,12 @@ impl GBufferTargets {
         // The marcher vocabulary set, written ONCE here (NO per-frame update). The
         // entry order matches the layout: SSBO @0, sampled depth @1, storage albedo @2,
         // storage normal @3, storage material @4, UNIFORM camera @5, STORAGE tiles @6,
-        // STORAGE material-table @7, STORAGE gViewT @8 (Lighting L0b). Binding 6 is the P4b
-        // coarse-cull tile buffer: the marcher shader declares it unconditionally, so a
-        // VALID descriptor is bound here even though the windowed path gates the coarse read
-        // OFF (`coarse_enabled == 0`).
+        // STORAGE material-table @7, STORAGE gViewT @8 (Lighting L0b), STORAGE PointerGrid @9
+        // (M1). Binding 6 is the P4b coarse-cull tile buffer and binding 9 is the M1 empty-skip
+        // pointer grid: the marcher shader DECLARES both unconditionally (DXC keeps the @9
+        // reference past the runtime `brick_enabled` gate), so a VALID descriptor is bound here
+        // even though the windowed path gates BOTH reads OFF (`coarse_enabled == 0` /
+        // `brick_enabled == 0` — byte-identical output, binding bound-but-unread).
         let vocab_set = {
             let entries = [
                 BindGroupEntry::StorageBuffer { buffer: scene.edit_list },
@@ -4024,6 +4051,10 @@ impl GBufferTargets {
                 BindGroupEntry::StorageBuffer { buffer: scene.material_table },
                 // Lighting L0b: the gViewT lane @8 (the marcher STORES the surface `t`).
                 BindGroupEntry::StorageImage { texture: &viewt },
+                // M1: the empty-skip PointerGrid SSBO @9. Statically referenced by the marcher
+                // SPIR-V (`register(t9)`); the windowed path gates the read OFF
+                // (`brick_enabled == 0`), so it is bound-but-unread (byte-identical output).
+                BindGroupEntry::StorageBuffer { buffer: scene.pointer_grid },
             ];
             let desc = BindGroupDesc::<Vulkan> {
                 layout: scene.vocab_layout,

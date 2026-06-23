@@ -64,6 +64,11 @@
 //   binding 8 : RWTexture2D<float> (STORAGE, r32f) — the Lighting L0b `gViewT` lane (the
 //               surface ray param `t` for the resolve's `P = ro + rd * t`). The 9th vocab
 //               entry, within the raised 12-binding cap (C1).
+//   binding 9 : StructuredBuffer<uint> (READ-ONLY) — the SDF brick-atlas M1 POINTER GRID
+//               (a dense lattice of BrickClass codes, built CPU-side from the edit
+//               authority). Read ONLY when the `brick_enabled` push constant is non-zero;
+//               the OFF path never touches it (byte-identical to the pre-M1 marcher — the
+//               0%-gate). The 10th vocab entry, within the 12-binding cap.
 //
 // # The push constant (Render P4b + B1 + A1/A2 — pushed against THIS pipeline's OWN
 //   dedicated layout via `push_compute_constants`, NOT the shared `push_constants`)
@@ -204,6 +209,16 @@ StructuredBuffer<MaterialGpu> Materials : register(t7);
 // pixel, so gViewT is deliberately NOT written there.
 [[vk::image_format("r32f")]] RWTexture2D<float> gViewT : register(u8);
 
+// SDF brick-atlas M1 (empty-space-skip): the pointer grid, binding 9 (the 10th vocab
+// entry — within the raised 12-binding cap, C1). A dense `grid_dims.x*y*z` lattice of
+// `uint` BrickClass codes (0 = EmptyOutside, 1 = EmptyInside, 2 = Surface), built CPU-side
+// by `boyko_sdf_math::brick::build_pointer_grid` from the ONE edit authority and uploaded
+// as a plain `StructuredBuffer<uint>` (NO 3D image, NO trilinear — that is M2). Read ONLY
+// when `pc.brick_enabled != 0`; the OFF path never touches it (the 0%-gate). Linear index
+// `ix + iy*W + iz*W*H` (`W = grid_dims.x`, `H = grid_dims.y`) — the SAME order the host
+// builder writes.
+StructuredBuffer<uint> PointerGrid : register(t9);
+
 // Mirrors `boyko_render::material::MATERIAL_GPU_WORDS` (48 B / 4 = 12). A documentation
 // + intent pin; the StructuredBuffer<MaterialGpu> element stride is the std430 layout.
 static const uint MATERIAL_GPU_WORDS = 12u;
@@ -232,13 +247,37 @@ static const uint DEFAULT_MATERIAL_ID = 0u;
 // const-asserts pin every offset; a non-default light_dir GPU test catches mis-packing).
 // `lighting_flags == 0` selects the OFF path: the marcher emits the bare Lambert albedo,
 // byte-identical to the pre-A1/A2 shader (the 0%-gate).
+//
+// SDF brick-atlas M1 (empty-space-skip): widened 32 -> 64 bytes to carry the pointer-grid
+// uniforms. `brick_enabled == 0` keeps the marcher byte-identical to the pre-M1 path (the
+// grid @binding 9 is never read, the march is the exact analytic sphere-trace — the
+// 0%-gate); `!= 0` reads `PointerGrid[brick_index(p)]` before each `sdf(p)` and skips an
+// EmptyOutside brick to its AABB exit (sound by construction — the conservative classifier
+// guarantees no surface within band_half of an EMPTY brick). The hit/normal stay ANALYTIC.
+//
+// The M1 block is ordered VECTOR-FIRST so both `float3 grid_origin` (@32) and `uint3
+// grid_dims` (@48) land on 16-byte boundaries — the std430/HLSL `vec3`-aligns-to-16 rule
+// (the same rule `light_dir @16` obeys). The scalar gate/size fill the vec3 TAIL slots
+// (@44, @60), so the HLSL std430 layout and the host `#[repr(C)] FineMarcherPush`
+// (4-byte-packed) are byte-identical with NO explicit pad fields.
+//   offset 32 : float3 grid_origin    pointer-grid min world corner (cell 0,0,0)
+//   offset 44 : uint   brick_enabled  M1 empty-skip gate; 0 = OFF (byte-identical)
+//   offset 48 : uint3  grid_dims      cells per axis [x, y, z]
+//   offset 60 : float  brick_world    pointer-grid cell world size (one brick)
+// 64 bytes fits the declared 80-byte COMPOSITE push range. The host const-asserts pin every
+// offset; a non-default-grid GPU test catches a packing slip the way the light_dir@16 pin
+// does for A1/A2.
 [[vk::push_constant]] struct PushConstants {
     uint   coarse_enabled;  // offset 0 (unchanged)
     float  omega;           // offset 4 — Keinert over-relaxation factor, host-clamped [1.0, 1.99]
     uint   lighting_flags;  // offset 8 — bit 0 = A1 shadows, bit 1 = A2 AO; 0 = OFF
     uint   _pad;            // offset 12 — std430 pad so light_dir lands at offset 16
     float3 light_dir;       // offset 16 — directional-light direction (un-normalized)
-    float  _pad2;           // offset 28 — tail pad to a 32-byte stride
+    float  _pad2;           // offset 28 — pad to the 32-byte A1/A2 stride
+    float3 grid_origin;     // offset 32 — pointer-grid min world corner (16-aligned vec3)
+    uint   brick_enabled;   // offset 44 — M1 empty-skip gate; 0 = OFF (byte-identical)
+    uint3  grid_dims;       // offset 48 — pointer-grid cells per axis (16-aligned vec3)
+    float  brick_world;     // offset 60 — pointer-grid cell world size
 } pc;
 
 // P4b: the EMPTY flag bit (mirrors the host `TILE_FLAG_EMPTY` + sdf_tile_cull.hlsl).
@@ -403,6 +442,78 @@ uint pick_material_id(float3 p) {
     return best_id;
 }
 
+// --- SDF brick-atlas M1: the EMPTY-SPACE-SKIP helpers (mirror boyko_sdf_math::brick) ---
+
+// The BrickClass discriminants (mirror `boyko_sdf_math::BrickClass`). Only EMPTY_OUTSIDE
+// is acted on by the skip; EMPTY_INSIDE + SURFACE fold the analytic field.
+static const uint BRICK_EMPTY_OUTSIDE = 0u;
+static const uint BRICK_EMPTY_INSIDE  = 1u;
+static const uint BRICK_SURFACE       = 2u;
+
+// The minimum per-step progress a brick-exit makes (world units) — the progress guarantee
+// (mirror `boyko_sdf_math::brick::BRICK_EXIT_EPS`). A face-parallel / boundary-grazing ray
+// would compute a zero exit and stall; clamping to this forces the march forward.
+static const float BRICK_EXIT_EPS = 1.0e-4;
+
+// A sentinel returned by `brick_cell_class` when `p` is OUTSIDE the bounded grid: the
+// marcher then folds the analytic field (the grid is a near-field accelerator, never a
+// correctness boundary). Distinct from the three real classes.
+static const uint BRICK_OUTSIDE_GRID = 0xFFFFFFFFu;
+
+// The ray-AABB SLAB exit distance for the brick at `cell_min` of size `pc.brick_world`,
+// from `p` along `rd` (the empty-skip step length, mirror `dist_to_brick_exit`). Returns
+// the additive `t` step to leave the brick AABB; clamped UP to BRICK_EXIT_EPS so a
+// degenerate ray still advances (the progress guarantee — INVIOLABLE). Only called for an
+// EMPTY_OUTSIDE brick, which has provably no surface within band_half, so the step to the
+// brick boundary never over-steps a surface (the empty-skip soundness contract).
+float dist_to_brick_exit(float3 p, float3 rd, float3 cell_min) {
+    float bw = pc.brick_world;
+    float exit = 1.0e30;
+    [unroll]
+    for (uint a = 0u; a < 3u; ++a) {
+        float dir = rd[a];
+        float lo = cell_min[a];
+        float hi = lo + bw;
+        // A near-axis-parallel component imposes no exit bound (the other axes do; the
+        // clamp covers a fully-degenerate ray).
+        if (abs(dir) <= BRICK_EXIT_EPS) {
+            continue;
+        }
+        float inv = 1.0 / dir;
+        float t_lo = (lo - p[a]) * inv;
+        float t_hi = (hi - p[a]) * inv;
+        float t_far = max(t_lo, t_hi); // the far-face crossing along this axis
+        exit = min(exit, t_far);
+    }
+    // Progress guarantee: a degenerate / boundary-grazing exit must still advance.
+    return (exit < BRICK_EXIT_EPS) ? BRICK_EXIT_EPS : exit;
+}
+
+// Reads the pointer-grid cell class containing world point `p`, returning its BrickClass
+// (and `cell_min` via the out param) or BRICK_OUTSIDE_GRID when `p` is outside the bounded
+// grid. Mirrors `boyko_sdf_math::brick`'s host_brick_cell index + bounds check exactly.
+uint brick_cell_class(float3 p, out float3 cell_min) {
+    float3 origin = pc.grid_origin;
+    float bw = pc.brick_world;
+    float3 rel = (p - origin) / bw;
+    cell_min = origin; // default (overwritten on an in-grid hit; unread when OUTSIDE)
+    // Outside on any axis (incl. negative rel) → no cell. Test the float directly so a
+    // negative coordinate is caught before the uint cast wraps it.
+    if (rel.x < 0.0 || rel.y < 0.0 || rel.z < 0.0) {
+        return BRICK_OUTSIDE_GRID;
+    }
+    uint3 dims = pc.grid_dims;
+    uint ix = (uint)rel.x;
+    uint iy = (uint)rel.y;
+    uint iz = (uint)rel.z;
+    if (ix >= dims.x || iy >= dims.y || iz >= dims.z) {
+        return BRICK_OUTSIDE_GRID;
+    }
+    uint idx = ix + iy * dims.x + iz * dims.x * dims.y;
+    cell_min = origin + float3(ix, iy, iz) * bw;
+    return PointerGrid[idx];
+}
+
 [numthreads(64, 1, 1)]
 void main(uint3 tid : SV_DispatchThreadID) {
     uint idx = tid.x;
@@ -502,6 +613,33 @@ void main(uint3 tid : SV_DispatchThreadID) {
             break;
         }
         float3 p = ro + rd * t;
+
+        // --- SDF brick-atlas M1: the EMPTY-SPACE-SKIP prefix. `brick_enabled == 0` leaves
+        // this block textually dead → the marcher is the EXACT pre-M1 analytic sphere-trace
+        // (the 0%-gate). When enabled, read this point's pointer-grid cell:
+        //   * EmptyOutside → step to the brick AABB exit (a plain, non-over-relaxed step)
+        //     and CONTINUE, skipping the analytic fold. SOUND: the conservative classifier
+        //     guarantees no surface within band_half of an EMPTY brick, so the boundary step
+        //     never over-steps a surface (the next brick is Surface if a surface is near).
+        //   * EmptyInside / Surface (and OUTSIDE the bounded grid) → fall through to the
+        //     EXACT `sdf(p)` fold below. EmptyInside is the start-inside case the analytic
+        //     negative-`d` handling already covers; outside-grid folds analytically (the
+        //     grid is a near-field accelerator, never a correctness boundary).
+        // The hit/normal stay ANALYTIC (C1): the skip only accelerates EMPTY traversal, so
+        // the converged hit `t` equals the pure-analytic hit `t`. ---
+        if (pc.brick_enabled != 0u) {
+            float3 cell_min;
+            uint cls = brick_cell_class(p, cell_min);
+            if (cls == BRICK_EMPTY_OUTSIDE) {
+                t += dist_to_brick_exit(p, rd, cell_min);
+                if (t > T_MAX) {
+                    exhausted = false;   // clear-miss termination — NOT budget exhaustion
+                    break;
+                }
+                continue;                // skip the analytic fold this step
+            }
+        }
+
         float d = sdf(p);
         if (d < EPS) {
             hit = true;
