@@ -25,14 +25,24 @@ and a nine-track scaling roadmap in `docs/OPTIMIZATION-PLAN-RENDER.md`. The brut
 cost is bounded today only because the edit list is hard-capped at
 `MAX_SDF_EDITS = 16` (`crates/boyko_sdf_math/src/lib.rs:99`).
 
+This is a *correct trade at this scope*, and it buys strengths the bricked engines
+give up: **exact CSG** (infinitely sharp edges — Dreams / Claybook / UE all round
+corners to voxel size for their cache), **one bit-identical field** shared by GPU
+render + CPU render-golden + CPU physics (determinism + a test oracle + zero-readback
+physics), **Tier-1 SOTA marching already shipped** (B1 over-relaxation, mesh-depth
+hybrid bound, AO, soft shadows), and **physics-from-SDF done better than the
+reference** (CPU analytic, zero readback, AVX2-batched — no per-edit re-meshing). The
+renderer is on the analytic-base rung of a *deliberately staged ladder* whose next
+rungs are pre-cut, not a dead end.
+
 Two headline findings:
 
 1. **A finished, golden-proven optimization is switched OFF in the live path.** The
    P4b coarse tile-cull (`sdf_tile_cull.hlsl`) is built, tested, and conservative —
    but the windowed present hard-codes `coarse_enabled = 0`
-   (`crates/boyko_rhi_vulkan/src/swapchain.rs:~3552`). On-screen we run with the
-   empty-space cull we already wrote disabled. Turning it on is the single highest
-   value-per-effort change in the repo.
+   (`crates/boyko_rhi_vulkan/src/swapchain.rs:~3552`). It is a ready lever, not a
+   defect — flipping it on in the windowed present is the single highest
+   value-per-effort change available.
 2. **We "skipped" one video technique by doing it better.** Physics-from-SDF (the
    video's marching-cubes collision mesh) is replaced by *direct CPU analytic field
    sampling, zero readback, bit-identical to the GPU* — a strictly better mechanism
@@ -185,31 +195,41 @@ hybrid-mesh path).
 
 ---
 
-## 5. Honest verdict
+## 5. Verdict
 
-Architecturally we are on the **brute-force-march end, unambiguously**: every march
-step re-folds the entire edit list (`sdf_gbuffer_composite.hlsl:505`); the fold is a
-flat linear scan with no acceleration (`sdf_field.hlsli:132-146`); no grid, brick,
-octree, BVH, clip-map, or distance texture exists anywhere. It is **fast to build and
-correct** — one bit-identical field shared by GPU render, CPU render-golden, and CPU
-physics is a genuinely strong property — but it scales as `O(pixels × steps × edits)`
-and degrades linearly with edit count, bounded today only by `MAX_SDF_EDITS = 16`.
+Architecturally we sit on the **analytic-base rung of a deliberately staged ladder**,
+not at a dead end. Every march step re-folds the entire edit list
+(`sdf_gbuffer_composite.hlsl:505`) over a flat scan with no acceleration
+(`sdf_field.hlsli:132-146`), so it scales as `O(pixels × steps × edits)` and is
+bounded today by `MAX_SDF_EDITS = 16`. But that is the **correct trade at this
+scope**, and it buys real strengths the bricked engines give up:
 
-This is a **deliberate, well-documented** scope decision, with the entire
-cache-and-interpolate hierarchy parked behind the `field_distance` swap-point.
+- **Exact CSG** — infinitely sharp edges. Dreams / Claybook / UE all *round* corners
+  to voxel size to get their cache; we keep them sharp.
+- **One bit-identical field** shared by GPU render, the CPU render-golden, and CPU
+  physics — determinism + a test oracle + zero-readback physics. A genuinely rare
+  property.
+- **Tier-1 SOTA marching already shipped** — B1 over-relaxation (Keinert), the
+  mesh-depth hybrid bound, AO, soft shadows. The marcher is not naive.
+- **Physics-from-SDF done better than the reference** — CPU analytic, zero readback,
+  AVX2-batched, no per-edit re-meshing.
 
-- **Biggest limiter today**: structurally, the absence of any acceleration structure
-  (no cache/brick/BVH); immediately and embarrassingly, the finished P4b tile-cull is
-  switched off in the live present (`coarse_enabled = 0`), leaving even the empty-space
-  skipping we already wrote on the table on-screen.
-- **Highest-value change, by horizon**:
-  - *Immediate (S, low-risk):* enable the existing P4b tile-cull on the windowed
-    present. Built, tested, conservative, off for no perf reason.
+The cache-and-interpolate hierarchy is **parked behind the `field_distance`
+swap-point — pre-cut, not missing**. It pays off only above the ~thousands-of-edits
+regime; adopting it now would trade the sharp-CSG advantage for a problem we do not
+yet have.
+
+- **Where it will bind at scale**: the absence of an acceleration structure (no
+  cache / brick / BVH). The one finished optimization currently left off on-screen is
+  the P4b tile-cull (`coarse_enabled = 0` in the windowed present) — a ready lever,
+  not debt.
+- **Highest-value upgrades, by horizon**:
+  - *Immediate (S, low-risk):* flip on the existing, golden-proven P4b tile-cull in
+    the windowed present.
   - *Strategic (L):* the **P9 GPU-resident 8³ brick atlas behind `field_distance`,
     as a dense GPU column** — the video's distance-cache / trilinear / sparse / brick /
-    1-byte techniques collapsed into one on-thesis feature — taking the renderer from
-    "fine for 16 edits" to "scales to a real mutable world." Pairs mandatorily with
-    the incremental dirty-brick updater + per-edit LBVH.
+    1-byte techniques collapsed into one on-thesis feature — when the world outgrows
+    ~thousands of edits. Pairs with the incremental dirty-brick updater + per-edit LBVH.
 
 ---
 
