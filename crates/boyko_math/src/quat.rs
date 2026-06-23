@@ -6,6 +6,7 @@
 //! NOT `rsqrt`) are all instruction-identical, so the migrated physics is
 //! bit-for-bit unchanged. No `mul_add`/FMA/fast-math anywhere.
 
+use crate::mat::Mat3;
 use crate::vec::Vec3;
 
 use std::ops::Mul;
@@ -45,6 +46,88 @@ impl Quat {
     #[inline]
     pub const fn new(x: f32, y: f32, z: f32, w: f32) -> Self {
         Self { x, y, z, w }
+    }
+
+    /// Constructs a unit quaternion from a PROPER orthonormal rotation matrix
+    /// (`det ≈ +1`) — the algebraic inverse of [`Mat3::from_quat`].
+    ///
+    /// Uses Shepperd's largest-diagonal branch selection: the branch whose pivot
+    /// (the trace `t = m00+m11+m22`, or a diagonal element) is largest is taken,
+    /// so the `sqrt` operand is never near zero (avoiding the catastrophic
+    /// cancellation of the naive `w = sqrt(1+t)/2` when `t ≈ -1`). The four
+    /// branches invert exactly the sign layout `from_quat` writes (mat.rs):
+    /// with the row/column index convention `m_ij ≡ m.rows[i].component(j)`,
+    /// `from_quat` places `+w·k` on the LOWER-left of each off-diagonal pair, so
+    /// `m21 - m12 = 4·w·x`, `m02 - m20 = 4·w·y`, `m10 - m01 = 4·w·z`, and the
+    /// vector-vector sums `m21 + m12 = 4·y·z`, `m02 + m20 = 4·x·z`,
+    /// `m10 + m01 = 4·x·y`. Bit-determinism: literal `sqrt` (NOT `rsqrt`),
+    /// no FMA. The result is normalized (cheap insurance against input drift).
+    ///
+    /// DEBUG-asserts the input is orthonormal (unit, mutually-orthogonal rows,
+    /// `det ≈ +1`). On a degenerate (non-rotation) input it returns a normalized
+    /// best effort rather than `NaN`.
+    #[inline]
+    pub fn from_mat3(m: Mat3) -> Self {
+        // m_ij = m.rows[i].component(j) (row i, column j) — row-major Mat3.
+        let m00 = m.rows[0].x;
+        let m01 = m.rows[0].y;
+        let m02 = m.rows[0].z;
+        let m10 = m.rows[1].x;
+        let m11 = m.rows[1].y;
+        let m12 = m.rows[1].z;
+        let m20 = m.rows[2].x;
+        let m21 = m.rows[2].y;
+        let m22 = m.rows[2].z;
+
+        // The input must be a proper rotation; the branch math assumes it.
+        debug_assert!(
+            (m.determinant() - 1.0).abs() < 1.0e-2,
+            "Quat::from_mat3: input is not a proper rotation (det != +1)"
+        );
+
+        let trace = m00 + m11 + m22;
+        let q = if trace > 0.0 {
+            // Trace branch (w-dominant / small angle): s = 4w.
+            let s = (trace + 1.0).sqrt() * 2.0;
+            let inv_s = s.recip();
+            Self::new(
+                (m21 - m12) * inv_s,
+                (m02 - m20) * inv_s,
+                (m10 - m01) * inv_s,
+                s * 0.25,
+            )
+        } else if m00 > m11 && m00 > m22 {
+            // x-diagonal branch (near-180° about X): s = 4x.
+            let s = (1.0 + m00 - m11 - m22).sqrt() * 2.0;
+            let inv_s = s.recip();
+            Self::new(
+                s * 0.25,
+                (m01 + m10) * inv_s,
+                (m02 + m20) * inv_s,
+                (m21 - m12) * inv_s,
+            )
+        } else if m11 > m22 {
+            // y-diagonal branch (near-180° about Y): s = 4y.
+            let s = (1.0 + m11 - m00 - m22).sqrt() * 2.0;
+            let inv_s = s.recip();
+            Self::new(
+                (m01 + m10) * inv_s,
+                s * 0.25,
+                (m12 + m21) * inv_s,
+                (m02 - m20) * inv_s,
+            )
+        } else {
+            // z-diagonal branch (near-180° about Z): s = 4z.
+            let s = (1.0 + m22 - m00 - m11).sqrt() * 2.0;
+            let inv_s = s.recip();
+            Self::new(
+                (m02 + m20) * inv_s,
+                (m12 + m21) * inv_s,
+                s * 0.25,
+                (m10 - m01) * inv_s,
+            )
+        };
+        q.normalize()
     }
 
     /// Returns `self` scaled to unit length, or [`Quat::IDENTITY`] when `self`

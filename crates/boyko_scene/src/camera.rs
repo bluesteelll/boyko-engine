@@ -31,10 +31,11 @@
 
 use boyko_ecs::ecs::core::entity::entity::Entity;
 use boyko_ecs::ecs::core::iters::query::Query;
+use boyko_ecs::ecs::core::iters::query::data::Mut;
 use boyko_ecs::ecs::core::system::{Res, ResMut};
 use boyko_macros::{Component, Resource};
 
-use boyko_math::{Affine3A, Mat3, Mat4, Ray, Vec3, Vec4};
+use boyko_math::{Affine3A, Mat3, Mat4, Quat, Ray, Vec3, Vec4};
 
 use crate::transform::{GlobalTransform, Transform};
 
@@ -520,4 +521,155 @@ fn debug_assert_camera_rigid(global: Affine3A) {
         );
     }
     let _ = global;
+}
+
+/// Orbit-camera RIG: the camera entity's pose is DERIVED from these fields by
+/// [`orbit_camera_system`] — the eye orbits `target` on a sphere of radius
+/// `distance`, oriented to look AT `target`.
+///
+/// The rig is **pure state**: a caller (an example loop, an input system, an
+/// animation) advances `yaw` / `pitch`; the system only re-derives the
+/// [`Transform`]. Keeping the motion in the caller makes the system a
+/// deterministic, policy-free kernel (no hidden `Res<Time>`), and lets any
+/// driver compose the orbit. Principle 0: a component on ECS storage + a system,
+/// never a side data store.
+///
+/// `#[repr(C)]` POD (24 B, natural `f32` alignment), `Copy`. All fields are read
+/// together once per camera per frame, so there is no hot/cold split.
+///
+/// # Required components
+///
+/// `#[require(Transform, GlobalTransform)]` is a convenience: inserting an
+/// `OrbitCamera` alone auto-inserts the pose columns [`orbit_camera_system`]
+/// writes and [`propagate_transforms`](crate::propagation::propagate_transforms)
+/// needs. It is a pure ergonomic nicety — a rig camera is normally spawned with
+/// the explicit `Camera + Projection + OrbitCamera + Transform + GlobalTransform`
+/// list, which depends on nothing here.
+#[repr(C)]
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
+#[require(Transform, GlobalTransform)]
+pub struct OrbitCamera {
+    /// World-space point the camera orbits and looks at.
+    pub target: [f32; 3],
+    /// Orbit radius (eye distance from `target`). Guarded to
+    /// [`MIN_DISTANCE`](Self::MIN_DISTANCE) at read so a zero / negative radius
+    /// cannot collapse the look-at (`eye == target` → singular basis).
+    pub distance: f32,
+    /// Azimuth, radians. `yaw == 0` places the eye on `+Z` of `target`; `+yaw`
+    /// sweeps the eye `+Z → +X`.
+    pub yaw: f32,
+    /// Elevation, radians. `pitch == 0` is level (eye in the `target` `XZ` plane);
+    /// `+pitch` raises the eye toward `+Y`. CLAMPED to
+    /// `±`[`PITCH_LIMIT`](Self::PITCH_LIMIT) at read so the look direction is never
+    /// collinear with world-up (which would make the right axis degenerate).
+    pub pitch: f32,
+}
+
+// Layout pin (house style — cf. `Transform`, `CameraUniform`). 12 + 4 + 4 + 4 =
+// 24 B. A change here is a deliberate decision, not an accident.
+const _: () = assert!(size_of::<OrbitCamera>() == 24);
+
+impl OrbitCamera {
+    /// Pole guard margin (radians). Keeps the clamped pitch strictly off the
+    /// `±π/2` poles where the look direction would be collinear with world-up.
+    pub const PITCH_EPS: f32 = 1.0e-3;
+
+    /// The pitch clamp bound: `π/2 − `[`PITCH_EPS`](Self::PITCH_EPS). At read,
+    /// `pitch` is clamped to `±PITCH_LIMIT`, so the eye never reaches the pole and
+    /// the look-at right axis (`up × back`) never collapses.
+    pub const PITCH_LIMIT: f32 = core::f32::consts::FRAC_PI_2 - Self::PITCH_EPS;
+
+    /// The minimum orbit radius. At read, `distance` is clamped to at least this,
+    /// so `eye != target` and the look-at `back` axis is non-zero.
+    pub const MIN_DISTANCE: f32 = 1.0e-4;
+
+    /// Constructs a rig orbiting `target` at `distance`, with the given `yaw` /
+    /// `pitch` (radians). Fields are stored verbatim; the clamps are applied by
+    /// [`orbit_camera_system`] at read (the rig fields stay author-owned).
+    #[inline]
+    pub const fn new(target: [f32; 3], distance: f32, yaw: f32, pitch: f32) -> Self {
+        Self {
+            target,
+            distance,
+            yaw,
+            pitch,
+        }
+    }
+}
+
+impl Default for OrbitCamera {
+    /// A sensible default rig: orbits the origin at `distance == 5`, head-on
+    /// (`yaw == 0`, `pitch == 0`) — the eye on `+Z` of the origin, looking `−Z`.
+    #[inline]
+    fn default() -> Self {
+        Self::new([0.0, 0.0, 0.0], 5.0, 0.0, 0.0)
+    }
+}
+
+/// Derives each [`OrbitCamera`] entity's local [`Transform`] from its rig fields:
+/// the eye sits on the orbit sphere and looks AT `target`.
+///
+/// PURE rig fields → pose. It does NOT advance `yaw` / `pitch` itself —
+/// animation / input is the caller's loop (e.g. `rig.yaw += dt * omega`). For
+/// each rig:
+///
+/// 1. Read the CLAMPED `pitch` (`±`[`PITCH_LIMIT`](OrbitCamera::PITCH_LIMIT)) and
+///    `distance` (`≥ `[`MIN_DISTANCE`](OrbitCamera::MIN_DISTANCE)) — the clamp
+///    keeps the pose finite without mutating the author-owned `&OrbitCamera`.
+/// 2. `eye = target + distance · (cos·sin(yaw), sin(pitch), cos·cos(yaw))`, so
+///    `yaw == 0, pitch == 0` ⇒ `eye == target + (0, 0, distance)` (on `+Z`,
+///    looking `−Z` at `target`); `+yaw` sweeps the eye toward `+X`; `+pitch`
+///    raises it toward `+Y`.
+/// 3. Build the rigid camera world transform with
+///    [`Affine3A::look_at_rh`](boyko_math::Affine3A::look_at_rh) (world up `+Y`),
+///    and write `Transform { translation: eye, rotation: Quat::from_mat3(basis),
+///    scale: ONE }`.
+///
+/// # Change detection
+///
+/// The pose is written through the change-tracking
+/// [`Mut`](boyko_ecs::ecs::core::iters::query::data::Mut)`<Transform>` query
+/// guard, NOT a bare `&mut Transform`. In THIS engine a `&mut T` query term does
+/// NOT stamp the row's `changed_tick` (its `QueryData` impl declares
+/// `NEEDS_CHANGE_DETECTION = false`); the tick stamp lives in the `Mut<T>` guard's
+/// `DerefMut`. Writing through the guard (`*transform = …`) stamps `changed_tick`
+/// directly, so [`propagate_transforms`](crate::propagation::propagate_transforms)
+/// — which dirty-gates on `Transform.changed_tick` — sees the camera dirty and
+/// recomposes its [`GlobalTransform`] the SAME frame. No manual
+/// `world.bump_change_tick()` is needed under a real `Schedule::run` frame.
+///
+/// # Schedule order
+///
+/// Runs `.before(propagate_transforms)` so the same-frame
+/// [`resolve_active_camera`] (`.after(propagate_transforms)`) sees the new pose.
+//
+// `clippy::needless_pass_by_value`: `Query` is a by-value `SystemParam`
+// reborrowed internally — the same false-positive `resolve_active_camera` carries.
+#[allow(clippy::needless_pass_by_value)]
+pub fn orbit_camera_system(mut rigs: Query<(&OrbitCamera, Mut<Transform>)>) {
+    for (rig, mut transform) in rigs.iter_mut() {
+        // Clamp for the math only; the rig fields stay author/animation-owned.
+        let pitch = rig
+            .pitch
+            .clamp(-OrbitCamera::PITCH_LIMIT, OrbitCamera::PITCH_LIMIT);
+        let dist = rig.distance.max(OrbitCamera::MIN_DISTANCE);
+
+        let (sp, cp) = pitch.sin_cos();
+        let (sy, cy) = rig.yaw.sin_cos();
+
+        let target = Vec3::new(rig.target[0], rig.target[1], rig.target[2]);
+        // Eye on the orbit sphere: yaw rotates in the XZ plane (+Z at yaw 0),
+        // pitch lifts toward +Y. cos(pitch) shrinks the horizontal radius as the
+        // eye climbs, keeping |eye − target| == dist.
+        let offset = Vec3::new(dist * cp * sy, dist * sp, dist * cp * cy);
+        let eye = target + offset;
+
+        let world = Affine3A::look_at_rh(eye, target, Vec3::new(0.0, 1.0, 0.0));
+
+        *transform = Transform {
+            translation: world.translation,
+            rotation: Quat::from_mat3(world.matrix3),
+            scale: Vec3::ONE,
+        };
+    }
 }

@@ -52,6 +52,25 @@ impl Mat3 {
         Self { rows: [r0, r1, r2] }
     }
 
+    /// Constructs a matrix whose three **columns** are `c0`, `c1`, `c2`
+    /// (left to right).
+    ///
+    /// `Mat3` is row-major, so the columns are stored transposed: row `i` is
+    /// `(c0[i], c1[i], c2[i])`. This makes column `j` selectable by
+    /// [`mul_vec`](Self::mul_vec) on the `j`-th unit axis
+    /// (`from_columns(c0, c1, c2).mul_vec((1, 0, 0)) == c0`, etc.). The camera
+    /// basis convention `ViewUniform::from_camera` reads is column-major
+    /// (a local axis maps to a stored column), so a look-at basis is assembled
+    /// here as columns rather than rows.
+    #[inline]
+    pub const fn from_columns(c0: Vec3, c1: Vec3, c2: Vec3) -> Self {
+        Self::from_rows(
+            Vec3::new(c0.x, c1.x, c2.x),
+            Vec3::new(c0.y, c1.y, c2.y),
+            Vec3::new(c0.z, c1.z, c2.z),
+        )
+    }
+
     /// Matrix-vector product `self · v` (each output component is a row · `v`).
     #[inline]
     pub fn mul_vec(self, v: Vec3) -> Vec3 {

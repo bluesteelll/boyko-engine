@@ -51,7 +51,8 @@ pub mod visibility_sync;
 
 pub use bundles::{CameraRig, SpatialBundle, StaticProp};
 pub use camera::{
-    ActiveCamera, Camera, Projection, ViewUniform, Viewport, resolve_active_camera,
+    ActiveCamera, Camera, OrbitCamera, Projection, ViewUniform, Viewport, orbit_camera_system,
+    resolve_active_camera,
 };
 pub use camera_plugin::CameraPlugin;
 pub use identity::{Name, NameId, intern, resolve};
@@ -70,7 +71,8 @@ pub use visibility_sync::visibility_sync;
 pub mod prelude {
     pub use crate::bundles::{CameraRig, SpatialBundle, StaticProp};
     pub use crate::camera::{
-        ActiveCamera, Camera, Projection, ViewUniform, Viewport, resolve_active_camera,
+        ActiveCamera, Camera, OrbitCamera, Projection, ViewUniform, Viewport, orbit_camera_system,
+        resolve_active_camera,
     };
     pub use crate::camera_plugin::CameraPlugin;
     pub use crate::identity::{Name, NameId, intern, resolve};

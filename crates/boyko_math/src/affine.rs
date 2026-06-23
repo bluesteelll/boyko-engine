@@ -48,6 +48,66 @@ impl Affine3A {
         }
     }
 
+    /// The RIGID camera **world** transform looking from `eye` at `target` with
+    /// world `up` hint — NOT the view matrix (that is `self.inverse()`).
+    ///
+    /// Right-handed, in the basis convention `ViewUniform::from_camera` consumes:
+    /// local `right = +X`, `up = +Y`, `forward = -Z`, stored as the COLUMNS of
+    /// `matrix3`. Column 2 (camera `+Z`) is `normalize(eye - target)` (so the
+    /// camera's `-Z` points AT `target`); column 0 is `normalize(cross(up, +Z))`;
+    /// column 1 is `cross(+Z, right)`. The ordered triple `(right, true_up, back)`
+    /// is right-handed (`cross(right, true_up) ≈ back`, `det(matrix3) ≈ +1`).
+    ///
+    /// Degenerate guards (never `NaN`):
+    /// - `eye == target` (zero `back`) → substitute `back = +Z` (a valid default).
+    /// - `up ∥ back` (the pole, zero `right`) → swap ONLY the source `up` to a
+    ///   fallback axis orthogonal to `back` (the world axis least aligned with
+    ///   `back`), then re-derive `right = cross(fallback_up, back)`. The cross
+    ///   ORDER is never reordered, so the chirality (and thus `det ≈ +1`) is
+    ///   identical to the nominal case.
+    #[inline]
+    pub fn look_at_rh(eye: Vec3, target: Vec3, up: Vec3) -> Self {
+        // Threshold below which a length-squared counts as degenerate. Matches
+        // the zero-length guard scale used by `Vec3::normalize`.
+        const EPS_SQ: f32 = 1.0e-12;
+
+        // Column 2 (camera +Z) = direction FROM target TO eye, so -Z points AT
+        // target. Guard the eye==target case with a valid default +Z.
+        let back_raw = eye - target;
+        let back = if back_raw.length_squared() < EPS_SQ {
+            Vec3::new(0.0, 0.0, 1.0)
+        } else {
+            back_raw.normalize()
+        };
+
+        // Column 0 (camera +X) = cross(up, back). If up ∥ back the right axis is
+        // degenerate (the pole): swap ONLY the source up to a fallback axis that
+        // is least aligned with `back`, then reuse the SAME cross order so the
+        // basis chirality is preserved.
+        let right_raw = up.cross(back);
+        let right = if right_raw.length_squared() < EPS_SQ {
+            // Pick the world axis least aligned with `back` so the cross is
+            // well-conditioned: if `back` is closest to ±X use +Y, else use +X.
+            let fallback_up = if back.x.abs() <= back.y.abs() && back.x.abs() <= back.z.abs() {
+                Vec3::new(1.0, 0.0, 0.0)
+            } else {
+                Vec3::new(0.0, 1.0, 0.0)
+            };
+            fallback_up.cross(back).normalize()
+        } else {
+            right_raw.normalize()
+        };
+
+        // Column 1 (camera +Y). `right` and `back` are unit and orthogonal, so
+        // this is already unit; normalize defensively against accumulated drift.
+        let true_up = back.cross(right).normalize();
+
+        Self {
+            matrix3: Mat3::from_columns(right, true_up, back),
+            translation: eye,
+        }
+    }
+
     /// Composes `self ∘ rhs` (apply `rhs` first, then `self`) — the
     /// parent-from-child composition used by transform propagation.
     ///

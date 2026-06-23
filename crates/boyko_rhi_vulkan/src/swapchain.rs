@@ -3356,6 +3356,19 @@ impl Scene {
         }
     }
 
+    /// Overwrites the per-frame MVP push-constant bytes (a column-major 4x4 `f32`
+    /// matrix the vertex shader reads at VERTEX-stage offset 0). The next
+    /// [`Renderer::render_scene_frame`] (its `record_scene` re-pushes `mvp`
+    /// unconditionally each frame — swapchain.rs:1356) — and likewise the raster
+    /// [`Renderer::render_gbuffer_frame`] (`record_gbuffer` re-pushes it at
+    /// swapchain.rs:2542) — picks up these bytes with NO pipeline/scene rebuild.
+    /// This is the live render-view seam a windowed loop uses to drive the
+    /// on-screen view each frame from a per-frame `ViewUniform.view_proj`.
+    #[inline]
+    pub fn set_mvp(&mut self, mvp: [u8; SCENE_MVP_BYTES]) {
+        self.mvp = mvp;
+    }
+
     /// Ensures the depth image exists and matches `extent`, (re)creating it through
     /// `ctx` when it is absent (first frame) or stale (resize). The caller
     /// ([`Renderer::render_scene_frame`]) calls this only after fence-waiting the
