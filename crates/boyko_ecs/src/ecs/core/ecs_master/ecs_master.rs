@@ -3752,6 +3752,21 @@ impl EcsMaster {
         let _scope = DeferredScopeGuard::enter();
 
         let world_ptr: NonNull<EcsMaster> = NonNull::from(&mut *self);
+        // W4 / C1 — cross-level cascade backstop. The `LINKED_DESPAWN` cascade
+        // recurses through THIS flat queue, not the call stack: each cascade level
+        // enqueues despawns that surface as the NEXT drain turn. A *cyclic*
+        // `LINKED_DESPAWN` graph terminates naturally (a re-entered despawn of an
+        // already-freed entity is a generation-checked no-op in
+        // `delete_entity_core`, so the live set strictly shrinks per real
+        // despawn), so this counter is a BLUNT backstop against a *pathological*
+        // non-terminating re-enqueue — not the primary cycle-termination
+        // mechanism. The bound lives HERE (the flat drain) because the per-hook
+        // RAII depth guard could never accumulate across turns (every cascade
+        // level fired at depth 1). `turns` is a loop-local `usize` reset per
+        // outermost drain — ZERO cost on the 0%-gate (a register increment only
+        // when a turn actually runs) and relation-agnostic (no `LINKED_DESPAWN`
+        // const-fold dependence; the loop is not in a hook body).
+        let mut turns = 0usize;
         loop {
             // Transient shared borrow only for the emptiness test; dropped at
             // the `;`. The twin re-reads `bytes.len()` each turn, so re-entrant
@@ -3760,6 +3775,10 @@ impl EcsMaster {
             //   site); the borrow does not escape the `if`.
             if unsafe { (*world_ptr.as_ptr()).deferred_hook_queue.is_empty() } {
                 break;
+            }
+            turns += 1;
+            if turns > crate::ecs::constants::MAX_HOOK_DRAIN_TURNS {
+                drain_runaway_panic();
             }
             // SAFETY (SAFETY-5 / SAFETY-6): full catch + recovery semantics; no
             //   `&mut`-into-queue is held across the per-command `&mut *world`
@@ -4180,6 +4199,26 @@ where
 /// Distinct from `params::diagnostics::missing_resource_panic` (which targets
 /// the `SystemParam` `get_param` path) — the wording here points at the
 /// direct-call API rather than the system runner.
+/// Cold-path panic for the W4 / C1 deferred-hook drain backstop: the re-entrant
+/// drain exceeded [`MAX_HOOK_DRAIN_TURNS`] turns, i.e. a hook re-enqueues
+/// unboundedly (a pathological non-terminating cascade — a relation that
+/// resurrects entities, or a malformed hook). A well-formed cyclic
+/// `LINKED_DESPAWN` graph terminates via the already-dead-no-op long before this,
+/// so reaching it is a bug, surfaced loudly. Kept off the drain-loop body via
+/// `#[cold] #[inline(never)]`.
+///
+/// [`MAX_HOOK_DRAIN_TURNS`]: crate::ecs::constants::MAX_HOOK_DRAIN_TURNS
+#[cold]
+#[inline(never)]
+fn drain_runaway_panic() -> ! {
+    panic!(
+        "boyko-ecs: deferred-hook drain exceeded MAX_HOOK_DRAIN_TURNS ({}) — a hook \
+         re-enqueues unboundedly (non-terminating LINKED_DESPAWN cascade / resurrecting \
+         relation / malformed hook).",
+        crate::ecs::constants::MAX_HOOK_DRAIN_TURNS
+    );
+}
+
 #[cold]
 #[inline(never)]
 fn missing_resource_panic_facade<R: Resource>() -> ! {

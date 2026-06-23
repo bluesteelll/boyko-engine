@@ -392,6 +392,34 @@ pub const MAX_ENABLE_TERMS: usize = 8;
 /// malformed hierarchy in debug. Sized far above any realistic scene depth.
 pub const MAX_PROPAGATION_DEPTH: usize = 1024;
 
+//
+// Deferred-hook drain backstop (Relations v1, W4 / C1)
+//
+
+/// Hard upper bound on the number of re-entrant drain *turns* a single outermost
+/// `drain_deferred_hook_queue` may take before a `#[cold]` runaway backstop
+/// aborts the drain (Relations v1, W4 / C1).
+///
+/// One turn = one `apply_via_raw_twin` batch; a re-entrant hook-enqueued command
+/// (link / unlink / `LINKED_DESPAWN` cascade) produces the NEXT turn. A *cyclic*
+/// `LINKED_DESPAWN` graph already terminates naturally — a re-entered despawn of
+/// an already-freed entity is a clean generation-checked no-op in
+/// `delete_entity_core`, so each cyclic entity is despawned exactly once and the
+/// live set strictly shrinks per real despawn. This bound is therefore a BLUNT
+/// backstop against a *pathological* non-terminating re-enqueue (a future
+/// relation that resurrects entities, or a malformed hook) — NOT the primary
+/// cycle-termination mechanism. It is a cross-level bound on the FLAT drain queue
+/// (where the cascade actually recurses), not a per-hook depth count: the broken
+/// per-hook RAII guard could never accumulate across the flat queue (every
+/// cascade level fired at depth 1).
+///
+/// Sized far above any realistic per-drain turn count: a legitimate cascade takes
+/// turns proportional to the tree/graph DEPTH (bounded by `MAX_PROPAGATION_DEPTH`
+/// in well-formed scenes), never to the entity COUNT (a wide despawn of M
+/// children is still one cascade level = a bounded turn count). The backstop only
+/// fires for an unbounded re-enqueue that would otherwise hang.
+pub const MAX_HOOK_DRAIN_TURNS: usize = 1 << 24;
+
 // ── Phase X.I W1 — U-P1 sizing/slab table tests + U-P6 Tick::ZERO pin ──────
 
 #[cfg(test)]

@@ -118,19 +118,29 @@ impl<'w> DeferredEcsMaster<'w> {
         world.current_tick()
     }
 
-    /// Returns `true` iff `entity` is currently live (Phase 19 §3 — the
-    /// `ChildOf::on_insert` dangling-parent guard).
+    /// Returns `true` iff `entity` is currently live (Relations B3 — the generic
+    /// `Relationship::on_insert` dangling-target guard).
     ///
     /// A read-only existence check delegating to [`EcsMaster::has_entity`]; it
-    /// takes no `&mut`-into-storage, so it adds no Tree-Borrows surface. Named
-    /// `has_parent` because its sole caller probes a prospective parent, but it
-    /// is a generic liveness check on any entity.
+    /// takes no `&mut`-into-storage, so it adds no Tree-Borrows surface. Renamed
+    /// from `has_parent` (B3): it was always a generic liveness check on any
+    /// entity — the parent-specific name was an artifact of its first (hierarchy)
+    /// caller. The generic relationship hook calls `view.is_alive(target)`.
     #[inline]
-    pub fn has_parent(&self, entity: Entity) -> bool {
+    pub fn is_alive(&self, entity: Entity) -> bool {
         // SAFETY: same exclusive-borrow contract as `get_component`; this is a
         //   shared read of a live, exclusively-borrowed world.
         let world: &EcsMaster = unsafe { self.world.as_ref() };
         world.has_entity(entity)
+    }
+
+    /// Deprecated alias for [`is_alive`](Self::is_alive) (Relations B3). Retained
+    /// so the Phase-19 hand-mirror call sites (and any external code that probed a
+    /// prospective parent) keep compiling; new code uses `is_alive`.
+    #[doc(hidden)]
+    #[inline]
+    pub fn has_parent(&self, entity: Entity) -> bool {
+        self.is_alive(entity)
     }
 
     /// Returns a [`DeferredCommands`] handle that enqueues structural commands

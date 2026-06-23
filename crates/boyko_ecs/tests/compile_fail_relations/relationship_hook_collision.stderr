@@ -1,0 +1,68 @@
+error: a relationship owns its lifecycle hook slot(s): a #[derive(Relationship)] type owns on_insert + on_replace, a #[derive(RelationshipTarget)] type owns on_replace. Remove the conflicting #[component(on_insert=...)] / #[component(on_replace=...)] — the generic relationship hook is installed automatically.
+  --> tests/compile_fail_relations/relationship_hook_collision.rs:21:8
+   |
+21 | struct Likes(pub Entity);
+   |        ^^^^^
+
+error[E0277]: the trait bound `Likes: boyko_ecs::prelude::Component` is not satisfied
+  --> tests/compile_fail_relations/relationship_hook_collision.rs:21:8
+   |
+21 | struct Likes(pub Entity);
+   |        ^^^^^ unsatisfied trait bound
+   |
+help: the trait `boyko_ecs::prelude::Component` is not implemented for `Likes`
+  --> tests/compile_fail_relations/relationship_hook_collision.rs:21:1
+   |
+21 | struct Likes(pub Entity);
+   | ^^^^^^^^^^^^
+help: the following other types implement trait `boyko_ecs::prelude::Component`
+  --> tests/compile_fail_relations/relationship_hook_collision.rs:23:10
+   |
+23 | #[derive(Component, RelationshipTarget, Default)]
+   |          ^^^^^^^^^ `LikedBy`
+   |
+  ::: src/ecs/core/hierarchy/mod.rs
+   |
+   | impl Component for ChildOf {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^ `ChildOf`
+...
+   | impl Component for Children {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Children`
+note: required by a bound in `Relationship`
+  --> src/ecs/core/relationship/mod.rs
+   |
+   | pub trait Relationship: Component + Sized {
+   |                         ^^^^^^^^^ required by this bound in `Relationship`
+   = note: this error originates in the derive macro `Component` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `Likes: boyko_ecs::prelude::Component` is not satisfied
+  --> tests/compile_fail_relations/relationship_hook_collision.rs:24:32
+   |
+24 | #[relationship_target(source = Likes, linked_despawn, retain_empty)]
+   |                                ^^^^^ unsatisfied trait bound
+   |
+help: the trait `boyko_ecs::prelude::Component` is not implemented for `Likes`
+  --> tests/compile_fail_relations/relationship_hook_collision.rs:21:1
+   |
+21 | struct Likes(pub Entity);
+   | ^^^^^^^^^^^^
+help: the following other types implement trait `boyko_ecs::prelude::Component`
+  --> tests/compile_fail_relations/relationship_hook_collision.rs:23:10
+   |
+23 | #[derive(Component, RelationshipTarget, Default)]
+   |          ^^^^^^^^^ `LikedBy`
+   |
+  ::: src/ecs/core/hierarchy/mod.rs
+   |
+   | impl Component for ChildOf {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^ `ChildOf`
+...
+   | impl Component for Children {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Children`
+   = note: required for `<LikedBy as RelationshipTarget>::Source` to implement `Relationship`
+note: required by a bound in `boyko_ecs::prelude::RelationshipTarget::Source`
+  --> src/ecs/core/relationship/mod.rs
+   |
+   |     type Source: Relationship<Target = Self>;
+   |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `RelationshipTarget::Source`
+   = note: this error originates in the derive macro `Component` (in Nightly builds, run with -Z macro-backtrace for more info)

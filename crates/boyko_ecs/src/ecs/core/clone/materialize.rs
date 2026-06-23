@@ -24,7 +24,6 @@ use std::ptr::NonNull;
 use crate::ecs::core::archetype::archetype::Archetype;
 use crate::ecs::core::change_detection::tick::Tick;
 use crate::ecs::core::clone::cloner::EntityCloner;
-use crate::ecs::core::component::component::Component;
 use crate::ecs::core::component::component_mask::ComponentMask;
 use crate::ecs::core::component::component_registry::{self, Cloneability, MAX_COMPONENTS};
 use crate::ecs::core::component::hooks::archetype_flags::ArchetypeFlags;
@@ -84,10 +83,16 @@ pub(crate) struct SelectedCloneIds {
 /// `extra_excluded` is an additional id to drop from the source set (S7 uses it to
 /// exclude `ChildOf` from the prefab ROOT node so the instance root is detached —
 /// Decision 5); pass `None` for the standard live-clone path.
+///
+/// BUG-RELATIONS-CLONE-1: the reverse-index deny is GENERIC — every id flagged
+/// [`is_relationship_target`](component_registry::is_relationship_target) is dropped
+/// (it is never byte-copied; the clone rebuilds it when the source FKs are cloned and
+/// their link hooks fire). `Children` sets the flag, so the prior literal `children_id`
+/// special-case is subsumed; a derived `RelationshipTarget` (`LikedBy`, …) is now
+/// denied too instead of tripping the non-cloneable `debug_assert!` below.
 pub(crate) fn select_clone_ids(
     source_ptr: *mut Archetype,
     cloner: &EntityCloner,
-    children_id: ComponentId,
     extra_excluded: Option<ComponentId>,
 ) -> SelectedCloneIds {
     let mut target_ids: [ComponentId; MAX_CLONE_COLUMNS] = [ComponentId(0); MAX_CLONE_COLUMNS];
@@ -99,8 +104,13 @@ pub(crate) fn select_clone_ids(
         // source is live); the shared `&Archetype` view is scoped to this block.
         let source_arch: &Archetype = unsafe { &*source_ptr };
         for &id in source_arch.component_ids() {
-            if id == children_id {
-                continue; // always denied (D5)
+            // BUG-RELATIONS-CLONE-1: deny ANY relationship-target reverse index
+            // generically (Children, LikedBy, …) — never byte-copied; rebuilt when the
+            // source FKs clone and their link hooks fire. Subsumes the old literal
+            // `Children` deny (Children sets the flag) AND fixes the derived-target case
+            // that previously tripped the non-cloneable debug_assert below.
+            if component_registry::is_relationship_target(id.0) {
+                continue;
             }
             if Some(id) == extra_excluded {
                 continue; // S7 Decision 5: ChildOf excluded from the prefab root
@@ -315,10 +325,6 @@ fn materialize_clone_into(
     cloner: &EntityCloner,
 ) -> CloneResult {
     let current_tick = world.current_tick();
-    // `Children` is ALWAYS cloner-denied (a derived reverse index — a deep clone
-    // rebuilds it via `LinkChildCommand`, never byte-copies it). Resolve its id once
-    // to filter it out below.
-    let children_id = crate::ecs::core::hierarchy::Children::component_id();
 
     // ── Resolve the source's location (generation-checked) ─────────────────
     let source_inland = world.entity_master.entities_inland[source.id().0];
@@ -339,7 +345,7 @@ fn materialize_clone_into(
     // S7 Decision 2: the filter → require-closure → canonical-sort logic is now the
     // shared `select_clone_ids` extraction (reused verbatim by the prefab capture
     // path). The live-clone path passes `extra_excluded = None` (no root detach).
-    let selected = select_clone_ids(source_ptr, cloner, children_id, None);
+    let selected = select_clone_ids(source_ptr, cloner, None);
     let target_ids = selected.ids;
     let target_len = selected.len;
     let copy_from_source = selected.copy_from_source;

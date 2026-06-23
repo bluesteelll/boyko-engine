@@ -44,6 +44,7 @@ use crate::ecs::core::component::component_registry::{
 };
 use crate::ecs::core::component::hooks::{ComponentHooks, HookFn};
 use crate::ecs::core::entity::entity::Entity;
+use crate::ecs::core::relationship::{Relationship, RelationshipTarget};
 use crate::ecs::core::serialize::{DecodeError, LoadEntityMap};
 use crate::ecs::identifiers::primitives::ComponentId;
 
@@ -146,29 +147,70 @@ impl Children {
     }
 
     /// Constructs a `Children` holding exactly one child — the first-child
-    /// insert path (crate-internal; only Link/Unlink applies mutate `Children`).
+    /// insert path (crate-internal). Used by the deep-clone reverse-index rebuild
+    /// (`clone/deep.rs`, which mirrors `LinkCommand::apply`'s first-source migrate
+    /// without going through the deferred queue). The generic `LinkCommand` /
+    /// `UnlinkCommand` mutate the collection through
+    /// [`RelationshipTarget::collection_mut_risky`] (the `RelationshipSourceCollection`
+    /// `add` / `remove`), so the former bespoke `push` / `swap_remove_entity`
+    /// mutators are superseded by the generic `Vec<Entity>` collection impl.
     #[inline]
     pub(crate) fn with_one(child: Entity) -> Self {
         Self(vec![child])
     }
+}
 
-    /// Appends `child`. Crate-internal: only `LinkChildCommand::apply` calls it.
+// Relations Option A (D4): `ChildOf` / `Children` ARE the generic machinery. The
+// hand-written `Relationship` / `RelationshipTarget` impls below are the in-crate
+// MIRROR of `#[derive(Relationship)]` / `#[derive(RelationshipTarget)]` output
+// (the dev-dep cycle precludes the derives in library `src/`, exactly like
+// `impl_self_bundle!` mirrors `#[derive(Bundle)]`). They wire the generic
+// monomorphized hooks (`relationship_on_insert::<ChildOf>` etc.) into
+// `register_hooks` below, replacing the deleted bespoke `child_of_on_*` /
+// `children_on_replace` bodies.
+
+impl Relationship for ChildOf {
+    type Target = Children;
+
     #[inline]
-    pub(crate) fn push(&mut self, child: Entity) {
-        self.0.push(child);
+    fn target(&self) -> Entity {
+        self.0
     }
 
-    /// Removes `child` via `Vec::swap_remove` (O(1), order-perturbing), returning
-    /// whether it was present. Crate-internal: only `UnlinkChildCommand::apply`
-    /// calls it.
     #[inline]
-    pub(crate) fn swap_remove_entity(&mut self, child: Entity) -> bool {
-        if let Some(idx) = self.0.iter().position(|&c| c == child) {
-            self.0.swap_remove(idx);
-            true
-        } else {
-            false
-        }
+    fn from_target(target: Entity) -> Self {
+        ChildOf(target)
+    }
+    // `ALLOW_SELF_REFERENTIAL` keeps the trait default (`false`): a
+    // `ChildOf(self)` is reactively removed by the generic `on_insert` guard
+    // (Phase-19 self-ref behavior, B3).
+}
+
+impl RelationshipTarget for Children {
+    type Source = ChildOf;
+    type Collection = Vec<Entity>;
+
+    /// `Children` recursively despawns its children on the parent's despawn
+    /// (Phase-19 B9 / B13 — `LINKED_DESPAWN`).
+    const LINKED_DESPAWN: bool = true;
+
+    /// `Children` retains an emptied collection to dodge `0↔1↔0` archetype thrash
+    /// (Phase-19 B8 — the perf rule, now an explicit policy const; v1 mandatory).
+    const RETAIN_EMPTY: bool = true;
+
+    #[inline]
+    fn collection(&self) -> &Self::Collection {
+        &self.0
+    }
+
+    #[inline]
+    fn collection_mut_risky(&mut self) -> &mut Self::Collection {
+        &mut self.0
+    }
+
+    #[inline]
+    fn from_collection_risky(collection: Self::Collection) -> Self {
+        Children(collection)
     }
 }
 
@@ -359,9 +401,15 @@ impl Component for ChildOf {
     /// NOT register `on_add` / `on_remove`: `on_add` would double-fire alongside
     /// the migrate-insert `on_insert`, and unlink-on-removal already rides
     /// `on_replace` (which the remove-migration fires before the value leaves).
+    ///
+    /// Relations Option A: the slots are the GENERIC monomorphizations
+    /// `<ChildOf as Relationship>::on_insert` / `::on_replace` (which forward to
+    /// `relationship_on_insert::<ChildOf>` / `relationship_on_replace::<ChildOf>`),
+    /// replacing the deleted hand-written `child_of_on_*` bodies. The fn pointers
+    /// monomorphize to the same machine code.
     fn register_hooks(hooks: &mut ComponentHooks) {
-        hooks.on_insert = Some(commands::child_of_on_insert as HookFn);
-        hooks.on_replace = Some(commands::child_of_on_replace as HookFn);
+        hooks.on_insert = Some(<Self as Relationship>::on_insert as HookFn);
+        hooks.on_replace = Some(<Self as Relationship>::on_replace as HookFn);
     }
 }
 
@@ -380,6 +428,12 @@ impl Component for Children {
             // None`: it is a derived reverse index, ALWAYS cloner-denied (a deep
             // clone rebuilds it via `LinkChildCommand`, never byte-copies it).
             component_registry::install_clone_fn::<Self>(raw);
+            // BUG-RELATIONS-CLONE-1: flag `Children` as a relationship-target reverse
+            // index so the GENERIC clone-deny (`select_clone_ids` via
+            // `is_relationship_target`) denies it — replacing the old literal
+            // `children_id` special-case with the same predicate every derived target
+            // (`LikedBy`, …) uses.
+            component_registry::set_relationship_target(raw);
             ComponentId(raw)
         })
     }
@@ -387,13 +441,18 @@ impl Component for Children {
     const HAS_HOOKS: bool = true;
 
     /// `Children` registers ONLY `on_replace` — the recursive-despawn cascade
-    /// (Phase 19 §3 / W4). It must NOT register `on_add` / `on_insert`: the
+    /// (Phase 19 §3 / W4 / B7). It must NOT register `on_add` / `on_insert`: the
     /// first-child insert fires those, and a cascade there would despawn the
     /// brand-new (single-child) collection. It fires `on_replace` from
     /// `delete_entity` (the per-component pre-remove order), reading the CURRENT
     /// children.
+    ///
+    /// Relations Option A: the slot is the GENERIC monomorphization
+    /// `<Children as RelationshipTarget>::on_replace` (forwarding to
+    /// `relationship_target_on_replace::<Children>`), replacing the deleted
+    /// hand-written `children_on_replace` body. Same machine code.
     fn register_hooks(hooks: &mut ComponentHooks) {
-        hooks.on_replace = Some(commands::children_on_replace as HookFn);
+        hooks.on_replace = Some(<Self as RelationshipTarget>::on_replace as HookFn);
     }
 }
 

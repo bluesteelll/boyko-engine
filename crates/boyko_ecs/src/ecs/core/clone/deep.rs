@@ -22,6 +22,7 @@ use crate::ecs::core::component::component_registry;
 use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 use crate::ecs::core::entity::entity::Entity;
 use crate::ecs::core::hierarchy::{ChildOf, Children};
+use crate::ecs::core::relationship::{RelationshipSourceCollection, RelationshipTarget};
 
 /// Inline worklist capacity before spilling to the heap (mirrors
 /// `CASCADE_FANOUT_INLINE` — small subtrees never touch the `Vec` allocator).
@@ -147,32 +148,104 @@ fn clone_subtree_inner(
         return clone_root;
     };
 
-    // For each cloned source node, look up its clone and (if it has a ChildOf)
-    // remap the CLONE's ChildOf in place, then rebuild the parent's Children.
+    // For each cloned source node, look up its clone and (1) remap the CLONE's
+    // ChildOf in place + rebuild the parent's Children (the hierarchy-specific path,
+    // shared VERBATIM with the prefab `instantiate`), then (2) remap + relink EVERY
+    // OTHER cloned relationship-source foreign key generically (BUG-RELATIONS-CLONE-1).
     for src in cloned_nodes {
         let clone = map.get(src).expect("invariant: every cloned node is in the map");
-        // Resolve the clone's ChildOf dst pointer + remap it via the installed fn.
+
+        // ── (1) ChildOf / Children — UNCHANGED (Phase-19 + prefab regression gate) ──
         // The remap reads `map` to translate source-parent → clone-parent; a parent
         // outside the subtree (the root's external parent) stays verbatim.
         let remapped_parent: Option<Entity> = remap_clone_child_of(world, clone, child_of_id, remap_fn, &map);
-
         // Rebuild the Children reverse index: if the clone now points at a cloned
         // parent (inside the subtree), link it there via the canonical path. The
         // root's external parent already has the SOURCE root in its Children; the
         // clone-root becomes a sibling (shallow ChildOf verbatim) — we do NOT add
-        // the clone-root to the external parent's Children here (that is the
-        // shallow-sibling semantics; the external parent's Children is the source
-        // tree's concern, and a deep clone of a subtree does not re-link the root
-        // into the external parent's collection — Bevy parity: the cloned root is a
-        // detached copy unless explicitly reparented).
+        // the clone-root to the external parent's Children here (Bevy parity: the
+        // cloned root is a detached copy unless explicitly reparented).
         if let Some(parent_clone) = remapped_parent
             && parent_clone != clone
         {
             link_child(world, parent_clone, clone, children_id);
         }
+
+        // ── (2) GENERIC relation FKs (Likes, …) — BUG-RELATIONS-CLONE-1 ──
+        // Every OTHER cloned component that carries a clone-direction remap fn has its
+        // foreign key rewritten from the original target to the cloned one; a
+        // relationship SOURCE is then relinked into the clone-side reverse index iff
+        // its remapped target is in-subtree (a verbatim external FK stays detached).
+        remap_relink_generic_relations(world, clone, child_of_id, &map);
     }
 
     clone_root
+}
+
+/// Generic clone-direction remap + relink for every relation FK on `clone` OTHER than
+/// `ChildOf` (BUG-RELATIONS-CLONE-1). For each component id in `clone`'s archetype
+/// that has an installed clone-direction `map_entities_fn`, remaps the FK in place;
+/// then, for any such id that is also a relationship SOURCE (has a registered relink
+/// fn), relinks `clone` into its (now-remapped) target's reverse index — but only when
+/// the target is INSIDE the cloned subtree (a verbatim external FK stays detached,
+/// Bevy parity). `ChildOf` is skipped here: it is handled by the dedicated
+/// `remap_clone_child_of` + `link_child` pass (shared with the prefab path).
+///
+/// Cold: the deep-clone walk only. The per-node id snapshot is a small stack `Vec`
+/// (no archetype hosts more than a handful of relation FKs); the snapshot avoids
+/// holding an `&Archetype` borrow across `get_component_raw_mut` (a `&mut` into a
+/// pool) — W6 "re-resolve / snapshot, don't hold a borrow across a structural-ish op".
+fn remap_relink_generic_relations(
+    world: &mut EcsMaster,
+    clone: Entity,
+    child_of_id: crate::ecs::identifiers::primitives::ComponentId,
+    map: &EntityCloneMap,
+) {
+    // Snapshot the clone's component ids BY VALUE: `get_component_raw_mut` below takes
+    // `&mut` into a pool, so we must not hold the `&Archetype` signature borrow across
+    // it. The id set does not change during this pass (remap/relink mutate values +
+    // the reverse-index target, never `clone`'s own archetype).
+    let mut ids: Vec<crate::ecs::identifiers::primitives::ComponentId> = Vec::new();
+    if let Some(inland) = world.entity_master.entities_inland.get(clone.id().0).copied()
+        && !inland.is_null()
+    {
+        // SAFETY: `inland` is live, generation-checked slab provenance for `clone`
+        //   (cloned this call); the shared `&Archetype` view is scoped to copying the
+        //   id slice into the owned `ids` snapshot and is dropped before any `&mut`.
+        let arch: &crate::ecs::core::archetype::archetype::Archetype =
+            unsafe { &*inland.archetype_ptr() };
+        ids.extend_from_slice(arch.component_ids());
+    }
+
+    for id in ids {
+        if id == child_of_id {
+            continue; // handled by the dedicated ChildOf pass above
+        }
+        let Some(remap_fn) = component_registry::get_map_entities_fn(id.0) else {
+            continue; // not an entity-bearing remap-eligible component
+        };
+        let Some(dst) = world.get_component_raw_mut(clone, id) else {
+            continue;
+        };
+        // SAFETY (BUG-RELATIONS-CLONE-1): `dst` is a live, initialized row of `id`'s
+        //   type (resolved through the fast store for `clone`'s archetype, which hosts
+        //   `id`). `remap_fn` (= `relationship_clone_map_entities::<R>` or another
+        //   installed remap) forms `&mut R`, reads `map` (a shared, non-aliased
+        //   borrow), and rewrites the FK in place. It receives ONLY the raw pointer +
+        //   the map — no world view. Single-threaded `&mut EcsMaster`. Identical
+        //   invariant to the `remap_clone_child_of` block.
+        unsafe {
+            remap_fn(dst, map);
+        }
+
+        // Relink the source into the clone-side reverse index iff the remapped target
+        // is in-subtree. A relationship source installs both its remap fn and a relink
+        // fn together; a non-source remap-eligible component (none in v1) has no relink
+        // fn and is skipped here.
+        if let Some(relink_fn) = component_registry::get_relationship_relink_fn(id.0) {
+            relink_fn(world, clone, map);
+        }
+    }
 }
 
 /// Remaps `clone`'s `ChildOf` in place (if it has one) via the installed
@@ -221,7 +294,12 @@ pub(crate) fn link_child(
         return;
     }
     match world.get_component_mut::<Children>(parent) {
-        Some(mut children) => children.push(child),
+        // Relations Option A: the bespoke `Children::push` mutator is superseded
+        // by the generic `RelationshipSourceCollection::add` (routed through
+        // `collection_mut_risky`), the same mutator `LinkCommand::apply` uses.
+        Some(mut children) => {
+            children.collection_mut_risky().add(child);
+        }
         None => {
             // First child: insert a one-child `Children` via the same audited
             // migration machinery `LinkChildCommand::apply` uses. This fires

@@ -2,7 +2,7 @@ use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::{format_ident, quote};
 use syn::{
-    Data, DeriveInput, Expr, Fields, Ident, ItemStruct, Path, Type, parse_macro_input,
+    Data, DeriveInput, Expr, Fields, Ident, ItemStruct, Path, Type, Visibility, parse_macro_input,
 };
 
 /// Derive macro for implementing the Component trait.
@@ -85,7 +85,10 @@ use syn::{
 /// is expected (wrap it in a `#[derive(Bundle)]` struct instead). The flag is
 /// also the escape hatch when a type must derive BOTH `Component` and
 /// `Bundle` — without it the two derives now collide on the `Bundle` impl.
-#[proc_macro_derive(Component, attributes(component, require, entities))]
+#[proc_macro_derive(
+    Component,
+    attributes(component, require, entities, relationship, relationship_target)
+)]
 pub fn component_macro(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
 
@@ -96,6 +99,31 @@ pub fn component_macro(input: TokenStream) -> TokenStream {
         Ok(h) => h,
         Err(ts) => return ts,
     };
+
+    // Relations v1 (Decision 4): parse the optional `#[relationship(...)]` /
+    // `#[relationship_target(...)]` attribute. A `#[derive(Component)]` carrying one
+    // of these is the SOURCE / TARGET side of a relation: the `Component` derive
+    // folds the relationship hook wiring + (source) the entity-remap clone/serialize
+    // metadata into its OWN `register_hooks` / `component_id()` (composed, not a
+    // separate impl block — the `impl Relationship` / `impl RelationshipTarget` block
+    // itself is emitted by the paired `#[derive(Relationship)]` /
+    // `#[derive(RelationshipTarget)]`). The two are mutually exclusive (a type is one
+    // side of the relation, never both).
+    let relationship = match parse_relationship_role(&input) {
+        Ok(r) => r,
+        Err(ts) => return ts,
+    };
+
+    // Collision rule: the relationship OWNS the hook slots it wires
+    // (`on_insert`/`on_replace` for the source, `on_replace` for the target). A
+    // user `#[component(on_insert=…)]` / `#[component(on_replace=…)]` alongside a
+    // relationship attribute would silently lose to (or double-install with) the
+    // generic hook — reject it loudly (R5 `relationship_hook_collision`).
+    if let Some(role) = &relationship
+        && let Err(ts) = role.reject_hook_collision(&input.ident, &hooks)
+    {
+        return ts;
+    }
 
     // Required components (Feature 1): parse the optional `#[require(...)]`
     // attribute(s). Each key is a component type with an optional ctor:
@@ -158,8 +186,18 @@ pub fn component_macro(input: TokenStream) -> TokenStream {
     // raw saved id, the explicit-opt-in decision). Computed BEFORE `input.ident`
     // moves; suppressed for a bitset enable tag (no `ComponentPool` → never
     // serialized, mirrors the serialize / clone suppression).
+    //
+    // Relations v1 (C2/B10/B11): a relationship SOURCE auto-emits the load-remap for
+    // its foreign-key `Entity` field WITHOUT requiring `#[entities]` (a relation's
+    // foreign key is by definition an `Entity` that must be remapped on clone/load,
+    // else deep-clone / save-load silently break — see the hand-mirror
+    // `child_of_load_map_entities`). The accessor list is the FK field; the same
+    // `entities_map_codegen` machinery generates the load-remap fn + `map_entities_fn`
+    // override, which `install_serialize_fn` reads into the `SerializeInfo`.
     let (entities_items, entities_module_items) = if hooks.storage_bitset {
         (TokenStream2::new(), TokenStream2::new())
+    } else if let Some(RelationshipRole::Source(src)) = &relationship {
+        entities_map_codegen_for_accessors(&input.ident, &[src.field_access()])
     } else {
         entities_map_codegen(&input, &input.ident)
     };
@@ -169,23 +207,47 @@ pub fn component_macro(input: TokenStream) -> TokenStream {
     // stable_name + format_version) BEFORE `input.ident` moves. Suppressed for a
     // bitset enable tag (no `ComponentPool`, so it must classify `Ignore` and never
     // enter a serialized column set — mirrors the clone suppression below).
-    let (serialize_items, serialize_module_items) = if hooks.storage_bitset {
-        // A bitset tag stays at the trait defaults (`Ignore` / version 0 /
-        // fingerprint 0 / type-name key) — emit nothing.
-        (TokenStream2::new(), TokenStream2::new())
-    } else {
-        match serialize_codegen(&input, &input.ident, &hooks, has_entity_field) {
-            Ok(items) => items,
-            Err(ts) => return ts,
-        }
-    };
+    //
+    // Relations v1 (B12): a relationship TARGET (the reverse index) is NEVER
+    // serialized as data — it is rebuilt from the sources' `Relationship` on load,
+    // exactly as it is rebuilt on clone. Keep it at the `Serializability::Ignore`
+    // trait default (emit no serialize overrides), mirroring the in-crate `Children`
+    // hand-mirror, which carries no serialize metadata. (The SOURCE keeps the default
+    // path: its `Entity` foreign key → `SerializeViaFn` + the auto load-remap, B11.)
+    let (serialize_items, serialize_module_items) =
+        if hooks.storage_bitset || matches!(&relationship, Some(RelationshipRole::Target(_))) {
+            // A bitset tag / relationship target stays at the trait defaults
+            // (`Ignore` / version 0 / fingerprint 0 / type-name key) — emit nothing.
+            (TokenStream2::new(), TokenStream2::new())
+        } else {
+            match serialize_codegen(&input, &input.ident, &hooks, has_entity_field) {
+                Ok(items) => items,
+                Err(ts) => return ts,
+            }
+        };
 
     let name = input.ident;
 
     // Emit `const HAS_HOOKS = true;` + a `register_hooks` impl only when at
     // least one hook key is present; otherwise the trait defaults
     // (`HAS_HOOKS = false`, empty `register_hooks`) apply.
-    let hook_items = hooks.codegen();
+    //
+    // Relations v1 (Decision 4): a relationship side OWNS the hook slots — its
+    // `register_hooks` wires the GENERIC monomorphized hooks
+    // (`<Self as Relationship>::on_insert` etc.), overriding any user
+    // `#[component(on_*)]` (which the collision check already rejected). A SOURCE
+    // wires `on_insert` (link) + `on_replace` (unlink); a TARGET wires ONLY
+    // `on_replace` (the cascade — never `on_add`/`on_insert`, B7).
+    //
+    // The C2 install tripwire rides the const gate: `hook_items` emits
+    // `const HAS_HOOKS: bool = true`, and the `if Self::HAS_HOOKS { install_hooks }`
+    // line in the generated `component_id()` reads THAT const — so the cold `HOOKS`
+    // slot is installed for a relationship even though the in-macro `hooks` struct
+    // carries no user hook path.
+    let hook_items = match &relationship {
+        Some(role) => role.hook_items_codegen(),
+        None => hooks.codegen(),
+    };
 
     // EnableTag D5: emit `const STORAGE_IS_BITSET = true;` (overriding the trait
     // default) and the install call for the minted id, only for a bitset tag.
@@ -222,15 +284,70 @@ pub fn component_macro(input: TokenStream) -> TokenStream {
     // set. The clone materialization additionally skips any bitset id (W1 (a)); the
     // suppression here keeps the metadata table consistent (`Ignore` / `None`) and
     // mirrors the single-component `Bundle` suppression below.
+    //
+    // Relations v1 (B12): a relationship TARGET (the reverse index, e.g. `Children`
+    // / `LikedBy`) is ALWAYS `Cloneability::Ignore` — it is never byte-copied; a deep
+    // clone rebuilds it from the sources' `Relationship` via the Link commands.
+    // Override the autoref classification (the `Vec<Entity>` field would otherwise
+    // push it to `CloneViaFn`) to the explicit `Ignore`. A SOURCE keeps the default
+    // path (its `Entity` foreign key forces `CloneViaFn` so the remap runs, B10).
     let (clone_items, clone_install) = if hooks.storage_bitset {
         (TokenStream2::new(), TokenStream2::new())
     } else {
+        let items = match &relationship {
+            Some(RelationshipRole::Target(_)) => clone_ignore_codegen(),
+            _ => clone_codegen(&name, &hooks, has_entity_field),
+        };
         (
-            clone_codegen(&name, &hooks, has_entity_field),
+            items,
             quote! {
                 boyko_ecs::ecs::core::component::component_registry::install_clone_fn::<Self>(raw);
             },
         )
+    };
+
+    // BUG-RELATIONS-CLONE-1: the relationship CLONE-direction installs (the missing
+    // half of the Option-A generalization). A SOURCE installs the generic clone-remap
+    // + relink (`get_map_entities_fn(R)` / `get_relationship_relink_fn(R)` now return
+    // `Some`), so the deep clone remaps its foreign key + rebuilds the clone-side
+    // reverse index. A TARGET sets the relationship-target flag so the generic
+    // clone-deny (`select_clone_ids` via `is_relationship_target`) denies it instead of
+    // tripping the non-cloneable `debug_assert!`. A bitset tag suppresses both (it has
+    // no `ComponentPool` and is never cloned). One cold `OnceLock::set` per type — the
+    // 0%-gate, registration-time only.
+    let relationship_install = if hooks.storage_bitset {
+        TokenStream2::new()
+    } else {
+        match &relationship {
+            Some(RelationshipRole::Source(_)) => quote! {
+                boyko_ecs::ecs::core::component::component_registry::install_relationship_clone_remap::<Self>(raw);
+            },
+            Some(RelationshipRole::Target(_)) => quote! {
+                boyko_ecs::ecs::core::component::component_registry::set_relationship_target(raw);
+            },
+            None => TokenStream2::new(),
+        }
+    };
+
+    // BUG-RELATIONS-CLONE-1 (secondary): a relationship SOURCE carrying the `Entity`
+    // foreign key MUST be `Clone` — otherwise the autoref clone classification falls to
+    // the by-value `Ignore` arm, the source is never cloned, and its FK silently fails
+    // to remap on deep clone (the corruption this fix exists to prevent). The generic
+    // remap fn is installed unconditionally above, so a non-`Clone` source would be the
+    // worst case: a remap fn registered for a component that is never cloned. Fail
+    // LOUDLY at compile time with a clear message instead of the silent `Ignore`
+    // demotion. (A TARGET is always `Cloneability::Ignore` by design — no bound.)
+    let relationship_clone_assert = match &relationship {
+        Some(RelationshipRole::Source(_)) => quote! {
+            const _: () = {
+                const fn __assert_relationship_source_is_clone<T: ::core::clone::Clone>() {}
+                // A clear compile error if `#name` is not `Clone`: a relationship source
+                // must `#[derive(Clone)]` (or `Clone, Copy`) so its foreign key is
+                // remapped on deep clone (BUG-RELATIONS-CLONE-1).
+                __assert_relationship_source_is_clone::<#name>();
+            };
+        },
+        _ => TokenStream2::new(),
     };
 
     // Phase 4 Seam 1 (D1): the UNGATED residency install. One cold read of the
@@ -280,6 +397,8 @@ pub fn component_macro(input: TokenStream) -> TokenStream {
 
         #require_ctor_fns
 
+        #relationship_clone_assert
+
         #serialize_module_items
 
         #entities_module_items
@@ -321,6 +440,7 @@ pub fn component_macro(input: TokenStream) -> TokenStream {
                     #storage_install
                     #require_install
                     #clone_install
+                    #relationship_install
                     #residency_install
                     #serialize_install
                     boyko_ecs::ecs::identifiers::primitives::ComponentId(raw)
@@ -1837,7 +1957,20 @@ fn entities_map_codegen(input: &DeriveInput, name: &Ident) -> (TokenStream2, Tok
     let Some(accessors) = entities_field_accessors(input) else {
         return (TokenStream2::new(), TokenStream2::new());
     };
+    entities_map_codegen_for_accessors(name, &accessors)
+}
 
+/// Serialization S2.5 (C4) — the accessor-driven core of [`entities_map_codegen`],
+/// also reused by the Relations v1 source side (C2/B11). Emits the
+/// `map_entities_fn()` override + the monomorphized load-remap free fn for the given
+/// `accessors` (each a plain `Entity` field). The `#[entities]`-driven path and the
+/// relationship-foreign-key path share ONE codegen so the load-remap is byte-identical
+/// to the hand-mirror `child_of_load_map_entities`. `accessors` is never empty here
+/// (both callers gate on a non-empty list).
+fn entities_map_codegen_for_accessors(
+    name: &Ident,
+    accessors: &[FieldAccess],
+) -> (TokenStream2, TokenStream2) {
     // Per-field in-place remap: look up the saved id, rewrite on a hit, error on a
     // miss. `&mut (*value).<sel>` is a `&mut Entity` (a non-`Entity` annotated field
     // is a loud type error at `Entity::id`).
@@ -1905,6 +2038,719 @@ fn entities_map_codegen(input: &DeriveInput, name: &Ident) -> (TokenStream2, Tok
     };
 
     (trait_items, module_items)
+}
+
+// ── Relations v1 derive support (`Relationship` / `RelationshipTarget`) ──────────
+//
+// The two relationship derives are ADDITIVE over `#[derive(Component)]`: the
+// component itself is declared with `#[derive(Component)]`, and `#[derive(Relationship)]`
+// / `#[derive(RelationshipTarget)]` add ONLY the `impl Relationship` /
+// `impl RelationshipTarget` trait block. The hook wiring + (source) the entity-remap
+// clone/serialize metadata are folded into the SAME `register_hooks` / `component_id()`
+// the `Component` derive already builds (composed, not a separate impl block — see
+// `RelationshipRole` below, read by `component_macro`). This mirrors the in-crate
+// `ChildOf` / `Children` HAND-MIRROR (`hierarchy/mod.rs`), which the dev-dep cycle
+// forces to be written by hand but which is byte-for-byte the derive output.
+
+/// Which side of a relation a `#[derive(Component)]` carries (Relations v1,
+/// Decision 4), parsed from `#[relationship(...)]` / `#[relationship_target(...)]`.
+/// `None` (no such attribute) is the plain-component path — the relationship overrides
+/// in `component_macro` all no-op.
+enum RelationshipRole {
+    /// The source-of-truth foreign-key side (`#[relationship(target = T)]`). The
+    /// `component_macro` path reads the spec's foreign-key field to drive the auto
+    /// entity-remap codegen (B11).
+    Source(RelationshipSourceSpec),
+    /// The reverse-index side (`#[relationship_target(source = S, …)]`). The
+    /// `component_macro` path needs only the DISCRIMINANT (to pick the cascade-hook /
+    /// `Ignore`-clone / no-serialize overrides); the spec's fields are validated by
+    /// construction in `parse_relationship_target` (private-field + mandatory
+    /// `retain_empty` checks fire for `#[derive(Component)]` too) and re-read by the
+    /// `RelationshipTarget` derive, so the carried payload is intentionally not read
+    /// here — keeping it documents the parse and keeps the two roles symmetric.
+    ///
+    /// Boxed: the target spec carries a `syn::Type` (the collection field type) and is
+    /// far larger than the source spec; an unboxed variant skews the enum size
+    /// (`clippy::large_enum_variant`). This is a transient parse value (one per derive
+    /// invocation), so the indirection is free.
+    #[allow(dead_code)]
+    Target(Box<RelationshipTargetSpec>),
+}
+
+/// Parsed `#[relationship(target = <Type> [, allow_self_referential])]` (the SOURCE
+/// side). The foreign-key field is selected by the same rule as Bevy's
+/// `relationship_field()` (single field, or the `#[relationship]`-annotated field of a
+/// multi-field struct).
+struct RelationshipSourceSpec {
+    /// The `RelationshipTarget` type (`type Target = …`). Required.
+    target: Path,
+    /// The selector of the foreign-key `Entity` field — `self.#field` in `target()`.
+    field: FieldAccess,
+    /// `true` iff the bare `allow_self_referential` flag was supplied (sets
+    /// `const ALLOW_SELF_REFERENTIAL = true`).
+    allow_self_referential: bool,
+}
+
+impl RelationshipSourceSpec {
+    /// Clones the foreign-key field selector for the auto entity-remap codegen.
+    fn field_access(&self) -> FieldAccess {
+        match &self.field {
+            FieldAccess::Named(id) => FieldAccess::Named(id.clone()),
+            FieldAccess::Index(i) => FieldAccess::Index(*i),
+        }
+    }
+}
+
+/// Parsed `#[relationship_target(source = <Type> [, linked_despawn] [, retain_empty])]`
+/// (the TARGET side). The single field is the `Collection`; it must be private.
+struct RelationshipTargetSpec {
+    /// The `Relationship` source type (`type Source = …`). Required.
+    source: Path,
+    /// The collection field type (`type Collection = …`).
+    field_ty: Type,
+    /// The collection field selector — `&self.#field` in `collection()`.
+    field: FieldAccess,
+    /// `true` iff the bare `linked_despawn` flag was supplied
+    /// (`const LINKED_DESPAWN = true`).
+    linked_despawn: bool,
+    /// `true` iff the bare `retain_empty` flag was supplied
+    /// (`const RETAIN_EMPTY = true`). v1: MUST be `true` (W1) — `false` is rejected.
+    retain_empty: bool,
+}
+
+impl RelationshipRole {
+    /// Emits the `const HAS_HOOKS = true;` + `register_hooks` body wiring the GENERIC
+    /// monomorphized hooks for this relation side (Decision 4). The fn pointers are
+    /// the trait methods `<Self as Relationship>::on_insert` etc., which the runtime
+    /// trait defaults forward to `generic_hooks::relationship_on_insert::<Self>` —
+    /// each monomorphizes to one bare `HookFn` per relation type (no `dyn`). A SOURCE
+    /// wires `on_insert` (link) + `on_replace` (unlink); a TARGET wires ONLY
+    /// `on_replace` (the cascade — never `on_add`/`on_insert`, B7).
+    fn hook_items_codegen(&self) -> TokenStream2 {
+        let assigns = match self {
+            RelationshipRole::Source(_) => quote! {
+                hooks.on_insert = ::std::option::Option::Some(
+                    <Self as ::boyko_ecs::ecs::core::relationship::Relationship>::on_insert
+                        as ::boyko_ecs::ecs::core::component::hooks::HookFn,
+                );
+                hooks.on_replace = ::std::option::Option::Some(
+                    <Self as ::boyko_ecs::ecs::core::relationship::Relationship>::on_replace
+                        as ::boyko_ecs::ecs::core::component::hooks::HookFn,
+                );
+            },
+            RelationshipRole::Target(_) => quote! {
+                hooks.on_replace = ::std::option::Option::Some(
+                    <Self as ::boyko_ecs::ecs::core::relationship::RelationshipTarget>::on_replace
+                        as ::boyko_ecs::ecs::core::component::hooks::HookFn,
+                );
+            },
+        };
+        quote! {
+            const HAS_HOOKS: bool = true;
+
+            #[inline]
+            fn register_hooks(
+                hooks: &mut boyko_ecs::ecs::core::component::hooks::ComponentHooks,
+            ) {
+                #assigns
+            }
+        }
+    }
+
+    /// Rejects a user `#[component(on_insert=…)]` / `#[component(on_replace=…)]`
+    /// alongside the relationship attribute (R5 `relationship_hook_collision`): the
+    /// relationship OWNS those slots, so a user hook would be silently dropped or
+    /// double-install. The other two slots (`on_add` / `on_remove`) are free — a
+    /// relationship does not wire them, so they compose without conflict.
+    fn reject_hook_collision(
+        &self,
+        ident: &Ident,
+        hooks: &ComponentHookPaths,
+    ) -> Result<(), TokenStream> {
+        let owned = match self {
+            RelationshipRole::Source(_) => hooks.on_insert.is_some() || hooks.on_replace.is_some(),
+            RelationshipRole::Target(_) => hooks.on_replace.is_some(),
+        };
+        if owned {
+            return Err(syn::Error::new(
+                ident.span(),
+                "a relationship owns its lifecycle hook slot(s): a \
+                 #[derive(Relationship)] type owns on_insert + on_replace, a \
+                 #[derive(RelationshipTarget)] type owns on_replace. Remove the \
+                 conflicting #[component(on_insert=...)] / #[component(on_replace=...)] \
+                 — the generic relationship hook is installed automatically.",
+            )
+            .to_compile_error()
+            .into());
+        }
+        Ok(())
+    }
+}
+
+/// Emits the explicit `Cloneability::Ignore` clone classification for a relationship
+/// TARGET (B12): the reverse index is never byte-copied; a deep clone rebuilds it
+/// from the sources' `Relationship` via the Link commands. Overrides the autoref
+/// classification (a `Vec<Entity>` field would otherwise resolve `CloneViaFn`).
+fn clone_ignore_codegen() -> TokenStream2 {
+    quote! {
+        const CLONE_BEHAVIOR:
+            ::boyko_ecs::ecs::core::component::component_registry::Cloneability =
+            ::boyko_ecs::ecs::core::component::component_registry::Cloneability::Ignore;
+
+        #[inline]
+        fn clone_behavior()
+            -> ::boyko_ecs::ecs::core::component::component_registry::Cloneability {
+            ::boyko_ecs::ecs::core::component::component_registry::Cloneability::Ignore
+        }
+
+        #[inline]
+        fn clone_fn()
+            -> ::std::option::Option<
+                ::boyko_ecs::ecs::core::component::component_registry::CloneFn
+            > {
+            ::std::option::Option::None
+        }
+    }
+}
+
+/// Parses the relationship role from the item's attributes (Relations v1). Returns
+/// `Ok(None)` when neither `#[relationship(...)]` nor `#[relationship_target(...)]` is
+/// present (the plain-component path). The two are mutually exclusive — a type is one
+/// side of a relation, never both.
+fn parse_relationship_role(input: &DeriveInput) -> Result<Option<RelationshipRole>, TokenStream> {
+    let has_rel = input.attrs.iter().any(|a| a.path().is_ident("relationship"));
+    let has_target = input
+        .attrs
+        .iter()
+        .any(|a| a.path().is_ident("relationship_target"));
+
+    if has_rel && has_target {
+        return Err(syn::Error::new(
+            input.ident.span(),
+            "a type cannot be both #[relationship(...)] (the source) and \
+             #[relationship_target(...)] (the reverse index); a relation has two \
+             distinct component types",
+        )
+        .to_compile_error()
+        .into());
+    }
+
+    if has_rel {
+        return Ok(Some(RelationshipRole::Source(parse_relationship_source(
+            input,
+        )?)));
+    }
+    if has_target {
+        return Ok(Some(RelationshipRole::Target(Box::new(
+            parse_relationship_target(input)?,
+        ))));
+    }
+    Ok(None)
+}
+
+/// Parses `#[relationship(target = <Type> [, allow_self_referential])]` and selects the
+/// foreign-key `Entity` field (Relations v1, Decision 4). `target` is required.
+fn parse_relationship_source(input: &DeriveInput) -> Result<RelationshipSourceSpec, TokenStream> {
+    let err = |span: Span, msg: &str| -> TokenStream {
+        syn::Error::new(span, msg).to_compile_error().into()
+    };
+
+    let mut target: Option<Path> = None;
+    let mut allow_self_referential = false;
+
+    for attr in &input.attrs {
+        if !attr.path().is_ident("relationship") {
+            continue;
+        }
+        let result = attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("target") {
+                if target.is_some() {
+                    return Err(meta.error("duplicate #[relationship(...)] key; target may be set at most once"));
+                }
+                let value = meta.value()?; // consumes the `=`
+                target = Some(value.parse::<Path>()?);
+                return Ok(());
+            }
+            if meta.path.is_ident("allow_self_referential") {
+                allow_self_referential = true;
+                return Ok(());
+            }
+            Err(meta.error(
+                "unknown #[relationship(...)] key; valid keys: \
+                 target = <Type>, allow_self_referential",
+            ))
+        });
+        if let Err(e) = result {
+            return Err(e.to_compile_error().into());
+        }
+    }
+
+    let target = target.ok_or_else(|| {
+        err(
+            input.ident.span(),
+            "#[relationship(...)] requires `target = <Type>`: the RelationshipTarget \
+             component on the target entity (e.g. #[relationship(target = Children)])",
+        )
+    })?;
+
+    // Foreign-key field selection (mirror Bevy's `relationship_field()`).
+    let field = select_relationship_field(input)?;
+
+    Ok(RelationshipSourceSpec {
+        target,
+        field,
+        allow_self_referential,
+    })
+}
+
+/// Selects the single foreign-key field of a relationship source (Relations v1):
+/// a tuple/named struct with ONE field → that field; a multi-field named struct →
+/// the field annotated `#[relationship]` (error if zero or more than one); a unit
+/// struct → error. The field type is NOT validated here — `impl Relationship`'s
+/// `target(&self) -> Entity { self.#field }` makes a non-`Entity` field a loud type
+/// error at the user's struct.
+fn select_relationship_field(input: &DeriveInput) -> Result<FieldAccess, TokenStream> {
+    let err = |span: Span, msg: &str| -> TokenStream {
+        syn::Error::new(span, msg).to_compile_error().into()
+    };
+    let fields = match &input.data {
+        Data::Struct(s) => &s.fields,
+        Data::Enum(_) | Data::Union(_) => {
+            return Err(err(
+                input.ident.span(),
+                "#[relationship] requires a struct (a single Entity foreign key); \
+                 enums and unions cannot be a relationship source",
+            ));
+        }
+    };
+
+    let has_field_marker =
+        |f: &syn::Field| f.attrs.iter().any(|a| a.path().is_ident("relationship"));
+
+    match fields {
+        Fields::Unit => Err(err(
+            input.ident.span(),
+            "#[relationship] requires exactly one Entity foreign-key field; a unit \
+             struct has none (e.g. `struct Likes(Entity);`)",
+        )),
+        Fields::Unnamed(unnamed) => match unnamed.unnamed.len() {
+            1 => Ok(FieldAccess::Index(0)),
+            _ => {
+                // Multi-field tuple struct: select the `#[relationship]`-annotated
+                // field (exactly one).
+                let annotated: Vec<usize> = unnamed
+                    .unnamed
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, f)| has_field_marker(f))
+                    .map(|(i, _)| i)
+                    .collect();
+                match annotated.as_slice() {
+                    [i] => Ok(FieldAccess::Index(*i)),
+                    [] => Err(err(
+                        input.ident.span(),
+                        "#[relationship] on a multi-field struct requires exactly one \
+                         field annotated `#[relationship]` (the Entity foreign key)",
+                    )),
+                    _ => Err(err(
+                        input.ident.span(),
+                        "#[relationship] requires exactly ONE foreign-key field; more \
+                         than one field is annotated `#[relationship]`",
+                    )),
+                }
+            }
+        },
+        Fields::Named(named) => match named.named.len() {
+            1 => {
+                let id = named.named[0]
+                    .ident
+                    .clone()
+                    .expect("named field has an ident");
+                Ok(FieldAccess::Named(id))
+            }
+            _ => {
+                let annotated: Vec<&syn::Field> = named
+                    .named
+                    .iter()
+                    .filter(|f| has_field_marker(f))
+                    .collect();
+                match annotated.as_slice() {
+                    [f] => {
+                        let id = f.ident.clone().expect("named field has an ident");
+                        Ok(FieldAccess::Named(id))
+                    }
+                    [] => Err(err(
+                        input.ident.span(),
+                        "#[relationship] on a multi-field struct requires exactly one \
+                         field annotated `#[relationship]` (the Entity foreign key)",
+                    )),
+                    _ => Err(err(
+                        input.ident.span(),
+                        "#[relationship] requires exactly ONE foreign-key field; more \
+                         than one field is annotated `#[relationship]`",
+                    )),
+                }
+            }
+        },
+    }
+}
+
+/// Parses `#[relationship_target(source = <Type> [, linked_despawn] [, retain_empty])]`
+/// and selects the single collection field (Relations v1, Decision 4). `source` is
+/// required; the field MUST be private (the reverse-index privacy fence); v1 requires
+/// `retain_empty` (W1 — `RETAIN_EMPTY = false` is deferred to v1.1).
+fn parse_relationship_target(input: &DeriveInput) -> Result<RelationshipTargetSpec, TokenStream> {
+    let err = |span: Span, msg: &str| -> TokenStream {
+        syn::Error::new(span, msg).to_compile_error().into()
+    };
+
+    let mut source: Option<Path> = None;
+    let mut linked_despawn = false;
+    let mut retain_empty = false;
+
+    for attr in &input.attrs {
+        if !attr.path().is_ident("relationship_target") {
+            continue;
+        }
+        let result = attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("source") {
+                if source.is_some() {
+                    return Err(meta.error("duplicate #[relationship_target(...)] key; source may be set at most once"));
+                }
+                let value = meta.value()?; // consumes the `=`
+                source = Some(value.parse::<Path>()?);
+                return Ok(());
+            }
+            if meta.path.is_ident("linked_despawn") {
+                linked_despawn = true;
+                return Ok(());
+            }
+            if meta.path.is_ident("retain_empty") {
+                retain_empty = true;
+                return Ok(());
+            }
+            Err(meta.error(
+                "unknown #[relationship_target(...)] key; valid keys: \
+                 source = <Type>, linked_despawn, retain_empty",
+            ))
+        });
+        if let Err(e) = result {
+            return Err(e.to_compile_error().into());
+        }
+    }
+
+    let source = source.ok_or_else(|| {
+        err(
+            input.ident.span(),
+            "#[relationship_target(...)] requires `source = <Type>`: the Relationship \
+             component on the source entity (e.g. #[relationship_target(source = ChildOf, \
+             linked_despawn, retain_empty)])",
+        )
+    })?;
+
+    // v1 (W1): `RETAIN_EMPTY = true` is MANDATORY. A target without `retain_empty`
+    // would imply remove-on-empty, a NEW re-entrant edge (it fires the target's own
+    // `on_replace` on emptying) deferred to v1.1. Reject the absence loudly so a user
+    // does not silently get the unsupported policy.
+    if !retain_empty {
+        return Err(err(
+            input.ident.span(),
+            "#[relationship_target(...)] requires the `retain_empty` flag in v1 \
+             (RETAIN_EMPTY = true is mandatory; remove-on-empty is deferred to v1.1)",
+        ));
+    }
+
+    // Collection field selection: exactly one field, which must be private.
+    let (field, field_ty) = select_relationship_target_field(input)?;
+
+    Ok(RelationshipTargetSpec {
+        source,
+        field_ty,
+        field,
+        linked_despawn,
+        retain_empty,
+    })
+}
+
+/// Selects the single collection field of a relationship target (Relations v1) and
+/// enforces the privacy fence (the reverse index must be unwritable by user code).
+/// A tuple-struct field is private by default (no `pub`); a named-struct field must
+/// have inherited (private) visibility — a `pub` / `pub(...)` field is a compile error.
+fn select_relationship_target_field(
+    input: &DeriveInput,
+) -> Result<(FieldAccess, Type), TokenStream> {
+    let err = |span: Span, msg: &str| -> TokenStream {
+        syn::Error::new(span, msg).to_compile_error().into()
+    };
+    let fields = match &input.data {
+        Data::Struct(s) => &s.fields,
+        Data::Enum(_) | Data::Union(_) => {
+            return Err(err(
+                input.ident.span(),
+                "#[relationship_target] requires a struct with one collection field; \
+                 enums and unions cannot be a relationship target",
+            ));
+        }
+    };
+
+    let private = |vis: &Visibility| matches!(vis, Visibility::Inherited);
+
+    match fields {
+        Fields::Unit => Err(err(
+            input.ident.span(),
+            "#[relationship_target] requires exactly one collection field; a unit \
+             struct has none (e.g. `struct LikedBy(Vec<Entity>);`)",
+        )),
+        Fields::Unnamed(unnamed) if unnamed.unnamed.len() == 1 => {
+            let f = &unnamed.unnamed[0];
+            if !private(&f.vis) {
+                return Err(err(
+                    input.ident.span(),
+                    "#[relationship_target]'s collection field must be PRIVATE (the \
+                     reverse index must not be writable by user code); remove the `pub`",
+                ));
+            }
+            Ok((FieldAccess::Index(0), f.ty.clone()))
+        }
+        Fields::Named(named) if named.named.len() == 1 => {
+            let f = &named.named[0];
+            if !private(&f.vis) {
+                return Err(err(
+                    input.ident.span(),
+                    "#[relationship_target]'s collection field must be PRIVATE (the \
+                     reverse index must not be writable by user code); remove the `pub`",
+                ));
+            }
+            let id = f.ident.clone().expect("named field has an ident");
+            Ok((FieldAccess::Named(id), f.ty.clone()))
+        }
+        _ => Err(err(
+            input.ident.span(),
+            "#[relationship_target] requires exactly one collection field (e.g. \
+             `struct LikedBy(Vec<Entity>);`)",
+        )),
+    }
+}
+
+/// Derive macro for the source-of-truth side of a relation — `Relationship`.
+///
+/// ADDITIVE over `#[derive(Component)]` (both are required): this derive emits ONLY
+/// the `impl Relationship` trait block; the paired `#[derive(Component)]` reads the
+/// same `#[relationship(target = …)]` attribute and folds the generic hook wiring +
+/// the auto entity-remap clone/serialize metadata + the layout fingerprint into its
+/// `register_hooks` / `component_id()` (Decision 4). The component is the foreign key
+/// on the SOURCE entity pointing at one target.
+///
+/// # Attribute
+///
+/// `#[relationship(target = <Type>)]` — `target` (the `RelationshipTarget` component)
+/// is required. Optional bare `allow_self_referential` permits a self-link (default:
+/// a self-link is reactively removed by the generic `on_insert` guard).
+///
+/// # Foreign-key field
+///
+/// A single-field tuple / named struct uses that field; a multi-field struct uses the
+/// field annotated `#[relationship]` (exactly one). The field type must be `Entity`
+/// (enforced by the generated `target()` body). A unit struct is a compile error.
+///
+/// ```ignore
+/// #[derive(Component, Relationship)]
+/// #[relationship(target = LikedBy)]
+/// struct Likes(pub Entity);
+/// ```
+///
+/// The example is `ignore`'d for the same reason as `#[derive(Component)]`: a
+/// proc-macro crate cannot consume its own macros, and `boyko-macros` cannot depend on
+/// `boyko-ecs` for tests. Real usage lives in `boyko-ecs` integration tests.
+#[proc_macro_derive(Relationship, attributes(relationship))]
+pub fn relationship_macro(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+
+    let spec = match parse_relationship_source(&input) {
+        Ok(s) => s,
+        Err(ts) => return ts,
+    };
+
+    let name = &input.ident;
+    let target = &spec.target;
+    let field_sel = spec.field.offset_of_selector();
+    let allow_self = spec.allow_self_referential;
+
+    // `from_target` constructs `Self` from the target Entity. A single-field tuple
+    // struct uses `Self(target)`; a single-field named struct uses
+    // `Self { #field: target }`. A multi-field struct sets only the FK field and
+    // fills the rest via `..Default::default()` (so the source may carry extra data),
+    // which requires `Self: Default` — the spec's documented multi-field requirement.
+    let from_target_body = match &spec.field {
+        FieldAccess::Index(0) if is_single_field_struct(&input) => {
+            quote! { Self(target) }
+        }
+        FieldAccess::Index(i) => {
+            // Multi-field tuple struct: set field `i`, default the rest.
+            let idx = syn::Index::from(*i);
+            quote! {
+                let mut __this = <Self as ::std::default::Default>::default();
+                __this.#idx = target;
+                __this
+            }
+        }
+        FieldAccess::Named(id) if is_single_field_struct(&input) => {
+            quote! { Self { #id: target } }
+        }
+        FieldAccess::Named(id) => {
+            quote! {
+                Self {
+                    #id: target,
+                    ..<Self as ::std::default::Default>::default()
+                }
+            }
+        }
+    };
+
+    let allow_self_const = if allow_self {
+        quote! {
+            const ALLOW_SELF_REFERENTIAL: bool = true;
+        }
+    } else {
+        // Keep the trait default (`false`) — emit nothing.
+        TokenStream2::new()
+    };
+
+    let expanded = quote! {
+        impl ::boyko_ecs::ecs::core::relationship::Relationship for #name {
+            type Target = #target;
+
+            #[inline]
+            fn target(&self) -> ::boyko_ecs::ecs::core::entity::entity::Entity {
+                self.#field_sel
+            }
+
+            #[inline]
+            fn from_target(
+                target: ::boyko_ecs::ecs::core::entity::entity::Entity,
+            ) -> Self {
+                #from_target_body
+            }
+
+            #allow_self_const
+
+            // The `on_insert` / `on_replace` HookFn forwarders keep the trait
+            // defaults: they call `generic_hooks::relationship_on_insert::<Self>` /
+            // `..on_replace::<Self>`, each monomorphizing to one bare HookFn for this
+            // relation type (no `dyn`). The paired `#[derive(Component)]` wires those
+            // trait methods into `hooks.on_insert` / `hooks.on_replace`.
+            //
+            // SAFETY (forwarded from the trait default): the `HookFn` contract — the
+            // body is invoked only inside the single-threaded apply window with a view
+            // that withholds every structural + `&mut`-into-storage method, and holds
+            // no `world`-derived `&` across the `commands()` mint (F2). The generic
+            // body upholds this verbatim.
+        }
+    };
+
+    expanded.into()
+}
+
+/// Derive macro for the reverse-index side of a relation — `RelationshipTarget`.
+///
+/// ADDITIVE over `#[derive(Component)]` (both are required): this derive emits ONLY
+/// the `impl RelationshipTarget` trait block; the paired `#[derive(Component)]` reads
+/// the same `#[relationship_target(...)]` attribute and folds the cascade hook wiring
+/// (ONLY `on_replace`, never `on_add`/`on_insert` — B7) + the `Cloneability::Ignore`
+/// classification (the reverse index is rebuilt via Link commands, never byte-copied —
+/// B12) into its `register_hooks` / `component_id()` (Decision 4). User code must NEVER
+/// write the reverse index; the macro enforces the single collection field is PRIVATE.
+///
+/// # Attribute
+///
+/// `#[relationship_target(source = <Type> [, linked_despawn] [, retain_empty])]` —
+/// `source` (the `Relationship` component) is required. Bare `linked_despawn` sets
+/// `LINKED_DESPAWN = true` (despawning the target recursively despawns its sources);
+/// bare `retain_empty` sets `RETAIN_EMPTY = true`. **v1 requires `retain_empty`** —
+/// `RETAIN_EMPTY = false` (remove-on-empty) is deferred to v1.1 (W1).
+///
+/// ```ignore
+/// #[derive(Component, RelationshipTarget)]
+/// #[relationship_target(source = Likes, linked_despawn, retain_empty)]
+/// struct LikedBy(Vec<Entity>);
+/// ```
+///
+/// The example is `ignore`'d for the same reason as `#[derive(Component)]`.
+#[proc_macro_derive(RelationshipTarget, attributes(relationship_target))]
+pub fn relationship_target_macro(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+
+    let spec = match parse_relationship_target(&input) {
+        Ok(s) => s,
+        Err(ts) => return ts,
+    };
+
+    let name = &input.ident;
+    let source = &spec.source;
+    let field_ty = &spec.field_ty;
+    let field_sel = spec.field.offset_of_selector();
+    let linked_despawn = spec.linked_despawn;
+    let retain_empty = spec.retain_empty;
+
+    // `from_collection_risky` rebuilds the target from a collection. A tuple struct
+    // uses `Self(c)`; a named struct uses `Self { #field: c }`.
+    let from_collection_body = match &spec.field {
+        FieldAccess::Index(_) => quote! { Self(collection) },
+        FieldAccess::Named(id) => quote! { Self { #id: collection } },
+    };
+
+    let expanded = quote! {
+        impl ::boyko_ecs::ecs::core::relationship::RelationshipTarget for #name {
+            type Source = #source;
+            type Collection = #field_ty;
+
+            const LINKED_DESPAWN: bool = #linked_despawn;
+            const RETAIN_EMPTY: bool = #retain_empty;
+
+            #[inline]
+            fn collection(&self) -> &Self::Collection {
+                &self.#field_sel
+            }
+
+            #[inline]
+            fn collection_mut_risky(&mut self) -> &mut Self::Collection {
+                &mut self.#field_sel
+            }
+
+            #[inline]
+            fn from_collection_risky(collection: Self::Collection) -> Self {
+                #from_collection_body
+            }
+
+            // `on_replace` keeps the trait default: it calls
+            // `generic_hooks::relationship_target_on_replace::<Self>` (the cascade /
+            // unlink-only body, branched on `LINKED_DESPAWN`). The paired
+            // `#[derive(Component)]` wires this trait method into `hooks.on_replace`
+            // ONLY (never on_add/on_insert — B7 spurious-first-cascade guard).
+            //
+            // SAFETY (forwarded from the trait default): the `HookFn` contract — see
+            // `Relationship`. The cascade body copies sources to a stack buffer (inline
+            // path) or re-derives `&T` per turn (wide path) so no `world`-derived `&`
+            // spans the `commands()` mint.
+        }
+    };
+
+    expanded.into()
+}
+
+/// `true` iff the derive input is a struct with exactly one field (tuple or named).
+/// Used to choose between the positional `Self(x)` constructor (single field) and the
+/// `..Default::default()`-filled constructor (multi-field) in the `Relationship`
+/// derive's `from_target`.
+fn is_single_field_struct(input: &DeriveInput) -> bool {
+    match &input.data {
+        Data::Struct(s) => match &s.fields {
+            Fields::Unnamed(u) => u.unnamed.len() == 1,
+            Fields::Named(n) => n.named.len() == 1,
+            Fields::Unit => false,
+        },
+        _ => false,
+    }
 }
 
 /// Derive macro for implementing the Resource trait.

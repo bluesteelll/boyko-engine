@@ -1,10 +1,15 @@
 # Remaining gaps — toward an industrial "ultimate" ECS
 
 Forward-looking gap list (the old `PHASE-13-ROADMAP.md` is all-DONE). Snapshot
-2026-06-15, branch `ecs`. Each "missing" item was confirmed absent by a source
-probe (no `Option<&T>` query impl, no `EntityCloner`, no `serde`/serialization,
-no `.pipe()`, no general `Relationship` trait, no `Reflect`, no runtime-layout
-dynamic components, no `RequiredComponents`).
+updated 2026-06-23, branch `ecs`. Several items previously listed here have since
+SHIPPED and are confirmed present by a source probe: `Option<&T>`/`AnyOf` query
+data, `EntityCloner`/Prefab cloning, `RequiredComponents` (`#[require]`),
+serialization (separate `boyko_serialize` crate, S0–S3), entity-targeted observers
++ custom propagating `Trigger`s (Feature 2: `observers/{entity_store,trigger,
+traversal,propagate}`), and a **general `Relationship` trait** (`Relationship` /
+`RelationshipTarget` + `#[derive(...)]`, with `ChildOf`/`Children` refactored onto
+it). The genuine remaining kernel absences are `.pipe()`, `Reflect`, and
+runtime-layout dynamic components.
 
 ## Done (so the list is honest about scope)
 
@@ -41,16 +46,25 @@ Full ECS core + scheduler + the entire feature line is landed:
   perf-king ECS) ships WITHOUT reflection, and save-load can use a manual
   per-component serializer without it. So: P0 *conditionally* (tooling), else
   skippable for a lean perf ECS.
-- **General Relations.** Only the hardcoded `ChildOf`/`Children` exists. flecs'
-  headline feature — arbitrary entity↔entity relationships with query traversal
-  (`(Likes, *)`, transitive, exclusive). Currently each relation would be
-  hand-written like Phase 19.
-- **Optional query data `Option<&T>` (+ `AnyOf`).** No `impl QueryData for
-  Option<&T>`. A common, expected query ergonomic.
+- **General Relations — SHIPPED (generic `Relationship` API).** A first-class
+  `Relationship` / `RelationshipTarget` trait pair + `#[derive(Relationship)]` /
+  `#[derive(RelationshipTarget)]` lets any typed entity↔entity relation be declared
+  one-shot, on the **non-flecs, hook-maintained** model (a foreign-key component +
+  a reverse-collection maintained reactively — NO archetype-pair fragmentation,
+  unlike flecs). `ChildOf`/`Children` were REFACTORED onto this generic machinery
+  (the hand-written hooks deleted), so the hardened Phase-19 suite is the generic
+  machinery's regression gate. Custom propagating triggers bubble along ANY
+  relation via the generic `Traversal`/`Toward<R>` seam; deep-clone + serialize
+  entity-remap are generic. v1 = `Vec<Entity>` one-to-many, `RETAIN_EMPTY=true`;
+  v1.1 lifts: 1:1 `Entity` collection + eviction, remove-on-empty. STILL OPEN
+  (relation-aware QUERY ergonomics): a relation-traversal query DSL (`(Likes, *)`
+  wildcards, transitive/exclusive query terms) — the storage + reactive
+  maintenance are done; the query-side sugar is the remaining nicety.
 
 ### P1 — modern ECS ergonomics / storage
-- **Required components.** Bevy 0.15 — component A auto-inserts its deps B, C.
-- **Entity cloning / `EntityCloner`.** Bevy 0.16 — deep/shallow copy an entity.
+- ~~**Required components.**~~ SHIPPED (`#[require]`, component A auto-inserts B, C).
+- ~~**Entity cloning / `EntityCloner`.**~~ SHIPPED (deep/shallow clone + Prefab; the
+  `clone/` module, now generalized to remap any `Relationship` FK).
 - **Sparse-set / hybrid component storage.** Currently archetype-only for real
   components (+ enable-bit for tags). For add/remove-heavy components a sparse-set
   backend avoids migration. (Roadmap previously deferred "indefinitely"; revisit
@@ -58,9 +72,13 @@ Full ECS core + scheduler + the entire feature line is landed:
 - **Full dynamic components (runtime layout).** Only dynamic *tags* (name-keyed
   ZST) exist; no runtime-registered components with arbitrary layout + get/set by
   id (needed for scripting / data-driven content).
-- **Entity-targeted observers + `on_despawn`.** 14b shipped component-level
-  observers; full Bevy-style entity-targeted triggers, custom `Trigger` events,
-  propagation, and entity-level `on_despawn` remain.
+- **Entity-targeted observers + custom triggers — SHIPPED (Feature 2).** Beyond the
+  14b component-level observers: per-entity observers (`observers/entity_store`),
+  custom propagating `Trigger`s (`pub trait Trigger { const AUTO_PROPAGATE; type
+  Traversal; }`), and event bubbling along a relation (`observers/{traversal,
+  propagate}`, `Toward<R>`) are built + tested (`feature2_observers_*`, Miri). What
+  remains is only the smaller `on_despawn`-edge ergonomics noted in the phase
+  residuals.
 
 ### P2 — separate crates / niceties (NOT core ECS)
 - **Serialization / Save-Load — DEFERRED to a SEPARATE CRATE.** (User decision

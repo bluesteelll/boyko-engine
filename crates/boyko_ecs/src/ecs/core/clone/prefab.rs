@@ -433,7 +433,6 @@ pub(crate) fn capture(world: &mut EcsMaster, source: Entity, cloner: &EntityClon
     node_cloner.force_shallow();
 
     let child_of_id = ChildOf::component_id();
-    let children_id = Children::component_id();
 
     // MINOR-1: flag (never silently drop) a source carrying dense memberships — the
     // v1 prefab does not capture them (a divergence from `clone_subtree`).
@@ -498,7 +497,7 @@ pub(crate) fn capture(world: &mut EcsMaster, source: Entity, cloner: &EntityClon
         // Build the id set via the SHARED selector (byte-identical to the live clone;
         // exclude ChildOf for the root so the instance root is detached — Decision 5).
         let extra_excluded = if is_root { Some(child_of_id) } else { None };
-        let selected = select_clone_ids(source_ptr, &node_cloner, children_id, extra_excluded);
+        let selected = select_clone_ids(source_ptr, &node_cloner, extra_excluded);
 
         let comp_start = guard.committed.len() as u32;
         for &id in &selected.ids[..selected.len] {

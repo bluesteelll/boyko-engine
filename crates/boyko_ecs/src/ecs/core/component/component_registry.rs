@@ -42,7 +42,7 @@ use std::alloc::Layout;
 use std::any::TypeId;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use crate::ecs::core::component::component::{Component, RequiredBuilder};
@@ -1616,6 +1616,142 @@ pub(crate) fn install_map_entities_fn(component_id: usize, f: MapEntitiesFn) {
         MAX_COMPONENTS
     );
     let _ = MAP_ENTITIES[component_id].set(f);
+}
+
+/// Installs the GENERIC clone-direction foreign-key remap for a relationship
+/// SOURCE `R` (BUG-RELATIONS-CLONE-1). The deep-clone remap pass reads this fn via
+/// [`get_map_entities_fn`] and applies it to every cloned `R` so its FK is rewritten
+/// from the original target to the cloned one (the generalized `child_of_map_entities`
+/// hand-mirror).
+///
+/// **PUBLIC** for the same reason as [`install_clone_fn`]: a `#[derive(Component)]`
+/// for a relationship source expands into a downstream crate where the raw
+/// [`install_map_entities_fn`] setter (`pub(crate)`) is unreachable. This thin
+/// wrapper monomorphizes [`relationship_clone_map_entities`] for `R` and installs it
+/// through the same write-once setter — so the clone path reads the SAME remap fn
+/// whether the relation is the hand-mirrored `ChildOf` or a derived one. The serialize
+/// (load) direction stays a separate slot (`SerializeInfo::map_entities_fn`), since the
+/// two directions take different map types (`EntityCloneMap` vs `LoadEntityMap`).
+///
+/// One cold `OnceLock::set` per relation source type per process (the 0%-gate);
+/// never touched on a per-frame path.
+#[inline]
+pub fn install_relationship_clone_remap<R: crate::ecs::core::relationship::Relationship>(
+    component_id: usize,
+) {
+    install_map_entities_fn(
+        component_id,
+        crate::ecs::core::relationship::relationship_clone_map_entities::<R> as MapEntitiesFn,
+    );
+    install_relationship_relink(
+        component_id,
+        crate::ecs::core::relationship::relationship_clone_relink::<R>
+            as crate::ecs::core::relationship::RelationshipRelinkFn,
+    );
+}
+
+/// Parallel cold table of per-relationship-source clone-relink fns
+/// (BUG-RELATIONS-CLONE-1). The deep-clone remap pass (in `ComponentId` space) reads
+/// this via [`get_relationship_relink_fn`] to rebuild a clone's (cloner-denied)
+/// reverse index after its foreign key was remapped — the type-erased generalization
+/// of `link_child`. Set only for relationship SOURCES (`Likes`, `ChildOf`, …); a
+/// target / plain component leaves it unset. Mirrors the [`MAP_ENTITIES`] table.
+static RELATIONSHIP_LINK: [OnceLock<crate::ecs::core::relationship::RelationshipRelinkFn>;
+    MAX_COMPONENTS] = [const { OnceLock::new() }; MAX_COMPONENTS];
+
+/// Id-keyed relationship-relink install (BUG-RELATIONS-CLONE-1). Write-once,
+/// mirroring [`install_map_entities_fn`]. Called from
+/// [`install_relationship_clone_remap`] so a source installs its clone-remap and its
+/// relink together (the deep clone needs both).
+pub(crate) fn install_relationship_relink(
+    component_id: usize,
+    f: crate::ecs::core::relationship::RelationshipRelinkFn,
+) {
+    debug_assert!(
+        component_id < MAX_COMPONENTS,
+        "Component ID {} exceeds maximum allowed ({})",
+        component_id,
+        MAX_COMPONENTS
+    );
+    let _ = RELATIONSHIP_LINK[component_id].set(f);
+}
+
+/// Returns the relationship-relink fn for `component_id` (BUG-RELATIONS-CLONE-1),
+/// `Some` only for a relationship source that installed one. Cold: read only from the
+/// deep-clone remap pass.
+#[inline]
+pub fn get_relationship_relink_fn(
+    component_id: usize,
+) -> Option<crate::ecs::core::relationship::RelationshipRelinkFn> {
+    debug_assert!(
+        component_id < MAX_COMPONENTS,
+        "Component ID {} is out of bounds",
+        component_id
+    );
+    if component_id >= MAX_COMPONENTS {
+        return None;
+    }
+    RELATIONSHIP_LINK[component_id].get().copied()
+}
+
+/// Parallel cold table marking each `ComponentId` that is a `RelationshipTarget`
+/// reverse-index collection (BUG-RELATIONS-CLONE-1). One [`AtomicBool`] per id,
+/// mirroring the [`STORAGE_KIND`] table shape.
+///
+/// The deep-clone id-selection (`select_clone_ids`) denies EVERY id with this flag
+/// set: a reverse index is never byte-copied — it is rebuilt when the source FKs are
+/// cloned and their link hooks fire. `Children` and every derived `RelationshipTarget`
+/// (`LikedBy`, …) set it, so the generic clone-deny is one shared predicate rather
+/// than a literal `Children` special-case.
+///
+/// Touched ONLY at registration time (write-once via [`set_relationship_target`]) and
+/// from the cold clone id-selection — never on the per-frame hot path. `Relaxed` is
+/// sufficient: it is a registration-time, write-once datum with no payload published
+/// through it, settled (atomically with id assignment) before the component can appear
+/// in any archetype that a clone would walk. The default `false` reads back for every
+/// id that is not a relationship target.
+static RELATIONSHIP_TARGET: [AtomicBool; MAX_COMPONENTS] =
+    [const { AtomicBool::new(false) }; MAX_COMPONENTS];
+
+/// Returns `true` iff `component_id` is a `RelationshipTarget` reverse-index
+/// collection (BUG-RELATIONS-CLONE-1). Defaults to `false` for any id never flagged
+/// via [`set_relationship_target`].
+///
+/// Cold: read only from the clone id-selection (`select_clone_ids`), never on the
+/// per-frame hot path. One `Relaxed` load.
+#[inline]
+pub fn is_relationship_target(component_id: usize) -> bool {
+    debug_assert!(
+        component_id < MAX_COMPONENTS,
+        "Component ID {} is out of bounds",
+        component_id
+    );
+    if component_id >= MAX_COMPONENTS {
+        return false;
+    }
+    RELATIONSHIP_TARGET[component_id].load(Ordering::Relaxed)
+}
+
+/// Flags `component_id` as a `RelationshipTarget` reverse index (BUG-RELATIONS-CLONE-1).
+/// Idempotent write-once: called from the `RelationshipTarget` registration path (the
+/// derive's `component_id()` for `LikedBy`-style targets, and the in-crate `Children`
+/// hand-mirror) atomically with id assignment, before the component can enter any
+/// archetype a clone would walk.
+///
+/// **PUBLIC** for the same reason as [`install_clone_fn`]: the derive expands into
+/// downstream crates where `pub(crate)` is unreachable.
+#[inline]
+pub fn set_relationship_target(component_id: usize) {
+    debug_assert!(
+        component_id < MAX_COMPONENTS,
+        "Component ID {} exceeds maximum allowed ({})",
+        component_id,
+        MAX_COMPONENTS
+    );
+    if component_id >= MAX_COMPONENTS {
+        return;
+    }
+    RELATIONSHIP_TARGET[component_id].store(true, Ordering::Relaxed);
 }
 
 // ── Autoref clone-classification probes (Feature 3, derive support) ─────────────

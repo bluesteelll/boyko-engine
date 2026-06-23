@@ -10,6 +10,7 @@ pub mod entity;
 pub mod hierarchy;
 pub mod iters;
 pub mod events;
+pub mod relationship;
 pub mod resources;
 pub mod schedule;
 pub mod serialize;

@@ -69,4 +69,17 @@ impl EntityCloneMap {
     pub(crate) fn contains(&self, source: Entity) -> bool {
         self.sparse.contains(source.id().0)
     }
+
+    /// `true` if `entity` is a CLONE this map produced (a value in the map, not a
+    /// key). Used by the generic deep-clone relink (BUG-RELATIONS-CLONE-1) to decide
+    /// whether a remapped foreign key points INSIDE the cloned subtree — only then is
+    /// the source relinked into the clone-side reverse index (a verbatim FK pointing
+    /// at an external entity is left detached, Bevy parity).
+    ///
+    /// Cold: called only from the deep-clone relink pass. O(cloned-node-count) over
+    /// the dense values; the subtree is small and this never runs on a hot path.
+    #[inline]
+    pub(crate) fn is_clone(&self, entity: Entity) -> bool {
+        self.sparse.iter_dense().any(|&c| c == entity)
+    }
 }

@@ -33,6 +33,12 @@ pub use crate::ecs::core::component::hooks::HooksError;
 // ── Hierarchies (parent-child) ───────────────────────────────────────────────
 pub use crate::ecs::core::hierarchy::{ChildOf, Children};
 
+// ── Relations (generic one-to-many) ──────────────────────────────────────────
+pub use crate::ecs::core::component::observers::traversal::Toward;
+pub use crate::ecs::core::relationship::{
+    Relationship, RelationshipSourceCollection, RelationshipTarget,
+};
+
 // ── Entity cloning (Feature 3) ───────────────────────────────────────────────
 pub use crate::ecs::core::clone::{EntityCloner, EntityClonerBuilder};
 
