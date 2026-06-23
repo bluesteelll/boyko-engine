@@ -1,10 +1,10 @@
-error[E0277]: the trait bound `boyko_ecs::prelude::Disabled<A>: filter::OrComposable` is not satisfied
+error[E0277]: the trait bound `boyko_ecs::prelude::Disabled<A>: boyko_ecs::ecs::core::iters::query::filter::OrComposable` is not satisfied
   --> tests/enable_filter_compile_fail/or_disabled_rejected.rs:21:23
    |
 21 |     requires_filter::<Or<(Disabled<A>, With<B>)>>();
-   |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `filter::OrComposable` is not implemented for `boyko_ecs::prelude::Disabled<A>`
+   |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `boyko_ecs::ecs::core::iters::query::filter::OrComposable` is not implemented for `boyko_ecs::prelude::Disabled<A>`
    |
-   = help: the following other types implement trait `filter::OrComposable`:
+   = help: the following other types implement trait `boyko_ecs::ecs::core::iters::query::filter::OrComposable`:
              ()
              (F0, F1)
              (F0, F1, F2)
