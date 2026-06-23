@@ -48,6 +48,7 @@ use crate::ecs::core::bundle::bundle::Bundle;
 use crate::ecs::core::clone::map::EntityCloneMap;
 use crate::ecs::core::commands::command::Command;
 use crate::ecs::core::commands::migration_helpers::{merged_archetype_id, migrate_entity_insert};
+use crate::ecs::core::commands::remove_command::RemoveCommand;
 use crate::ecs::core::component::component::Component;
 use crate::ecs::core::component::hooks::HookContext;
 use crate::ecs::core::component::hooks::deferred_master::DeferredEcsMaster;
@@ -128,7 +129,66 @@ impl Drop for LinkSuppressGuard {
     }
 }
 
-pub use collection::RelationshipSourceCollection;
+// ===========================================================================
+// Clone-time eviction suppression (Relations v1.1) — relation-agnostic
+// ===========================================================================
+
+thread_local! {
+    /// When set, the 1:1 eviction branch in [`LinkCommand::apply`] does NOT steal a
+    /// real external incumbent (C3): a freshly-materialized clone whose verbatim FK
+    /// still points at an external 1:1 target must NOT evict that target's existing
+    /// source. Under suppression the clone DETACHES instead — its own (dangling) FK
+    /// is dropped via a deferred [`RemoveCommand`], and the external incumbent +
+    /// reverse slot are left byte-for-byte untouched.
+    ///
+    /// Mirrors [`RELATIONSHIP_LINK_SUPPRESS`]: a thread-local because every hook /
+    /// command applies on the single-threaded apply window and a per-thread cell
+    /// cannot be frozen by any `&mut EcsMaster` reborrow (the F2 invariant).
+    static RELATIONSHIP_EVICTION_SUPPRESS: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Reads the clone-time eviction-suppress flag for the current thread. Read by the
+/// 1:1 eviction branch in [`LinkCommand::apply`].
+#[inline]
+pub(crate) fn relationship_eviction_suppressed() -> bool {
+    RELATIONSHIP_EVICTION_SUPPRESS.with(|s| s.get())
+}
+
+/// RAII guard that suppresses clone-time 1:1 eviction for its scope and restores
+/// the previous value on every exit path (`Ok` / panic). Mirrors
+/// [`LinkSuppressGuard`] — it touches only the thread-local, never any field of
+/// `EcsMaster`, so a bracketed `&mut self` body cannot freeze it.
+///
+/// Held by the deep-clone / prefab relink pass: during that pass a cloned source's
+/// FK toward an EXTERNAL 1:1 target must not evict the external incumbent (the
+/// clone is unrelated); under the guard the clone detaches instead.
+pub(crate) struct EvictionSuppressGuard {
+    /// Restores the previous flag value on drop (supports nesting; in practice the
+    /// depth is one — a deep clone is not re-entrant under itself).
+    prev: bool,
+}
+
+impl EvictionSuppressGuard {
+    /// Enters a clone-time eviction-suppressed scope.
+    #[inline]
+    pub(crate) fn enter() -> Self {
+        let prev = RELATIONSHIP_EVICTION_SUPPRESS.with(|s| {
+            let p = s.get();
+            s.set(true);
+            p
+        });
+        Self { prev }
+    }
+}
+
+impl Drop for EvictionSuppressGuard {
+    #[inline]
+    fn drop(&mut self) {
+        RELATIONSHIP_EVICTION_SUPPRESS.with(|s| s.set(self.prev));
+    }
+}
+
+pub use collection::{Exclusive, RelationshipSourceCollection};
 pub use edge_observers::{OnLink, OnUnlink};
 
 /// The source-of-truth side of a relation: a foreign key on the source entity
@@ -443,6 +503,22 @@ unsafe impl<R: Relationship> Sync for LinkCommand<R> {}
 unsafe impl<R: Relationship> Send for UnlinkCommand<R> {}
 unsafe impl<R: Relationship> Sync for UnlinkCommand<R> {}
 
+/// The decision the in-place arm of [`LinkCommand::apply`] reaches WHILE the
+/// `Mut<R::Target>` borrow is live, so the world-touching follow-up (`fire_*` /
+/// deferred push) runs only AFTER that borrow ends (F2). Carries `Copy` scalars
+/// only — no borrow escapes the inner block.
+enum InPlaceOutcome {
+    /// Clone-relink detach (C3): skip the add + the `OnLink` fire; defer a remove of
+    /// the clone's own dangling FK.
+    Detach,
+    /// 1:1 production eviction: the slot was overwritten to the new source; fire
+    /// `OnUnlink{incumbent}` and defer a remove of the incumbent's dangling FK.
+    Evicted(Entity),
+    /// Plain add (empty slot, `Vec` push, or identical 1:1 re-link). `changed` gates
+    /// the `OnLink` fire (always `true` for `Vec` → byte-identical).
+    Added { changed: bool },
+}
+
 impl<R: Relationship> Command for LinkCommand<R> {
     fn apply(self, world: &mut EcsMaster) {
         let target = self.target;
@@ -457,12 +533,101 @@ impl<R: Relationship> Command for LinkCommand<R> {
             return;
         }
 
+        // Threaded out of the in-place arm: the migrate / first-source arm and the
+        // eviction arm always commit a genuine new edge → fire `OnLink`
+        // unconditionally; only an identical 1:1 re-link in-place clears this so the
+        // `OnLink` fire below is suppressed (W2/Q3). For `Vec`, `add()` is always
+        // `true`, so this stays `true` → byte-identical to the v1 unconditional fire.
+        let mut should_fire_link = true;
+
         match world.get_component_mut::<R::Target>(target) {
             // Target already hosts its `RelationshipTarget` — pure in-place push
             // (no archetype change). `DerefMut` stamps the changed tick; harmless
             // for a structural relationship op.
             Some(mut reverse) => {
-                reverse.collection_mut_risky().add(source);
+                // The in-place arm computes its outcome WHILE the `reverse` borrow is
+                // live (the inner block), yields the decision, and only THEN touches
+                // `world` again — so no `world`-derived `&mut` (the `Mut<R::Target>`,
+                // which is a non-`Drop` lifetime holder) spans the post-block
+                // `fire_*` / `deferred_hook_queue.push` (F2; clippy `drop_non_drop`).
+                let outcome = {
+                    // 1:1 eviction probe. `Vec` returns the trait default `None`, so
+                    // the whole eviction/detach block const-folds away (byte-identical
+                    // v1 path); only `Exclusive` can yield `Some(incumbent)`.
+                    let evict = reverse.collection().source_to_evict_before_add();
+                    match evict {
+                        Some(incumbent) if incumbent != source => {
+                            if relationship_eviction_suppressed() {
+                                // CLONE-RELINK DETACH (C3): do NOT steal a real
+                                // external incumbent during a clone. Do NOT add; the
+                                // clone is unrelated to this external 1:1 target, which
+                                // is left byte-for-byte untouched (incumbent + slot).
+                                InPlaceOutcome::Detach
+                            } else {
+                                // PRODUCTION EVICTION: overwrite the slot to the new
+                                // source `B` now (under the live borrow); fire
+                                // `OnUnlink` + defer the incumbent's FK clear AFTER the
+                                // borrow ends.
+                                let changed = reverse.collection_mut_risky().add(source);
+                                debug_assert!(
+                                    changed,
+                                    "eviction add of a distinct source must change the slot"
+                                );
+                                debug_assert_eq!(
+                                    reverse.collection().get(0),
+                                    Some(source),
+                                    "post-eviction slot must hold the new source"
+                                );
+                                InPlaceOutcome::Evicted(incumbent)
+                            }
+                        }
+                        _ => {
+                            // Empty slot, identical 1:1 re-link (incumbent == source),
+                            // or the `Vec` const-`None` path: plain add. For `Vec`,
+                            // `add()` is always `true` (byte-identical); an `Exclusive`
+                            // identical re-link returns `false`.
+                            let changed = reverse.collection_mut_risky().add(source);
+                            InPlaceOutcome::Added { changed }
+                        }
+                    }
+                    // <-- `reverse` (the `Mut<R::Target>` borrow) drops here, BEFORE
+                    //     any `world.fire_*` / `world.deferred_hook_queue.push` (F2).
+                };
+
+                match outcome {
+                    InPlaceOutcome::Detach => {
+                        // Drop the clone's own dangling FK next drain turn; skip the
+                        // add (already skipped) AND the `OnLink` fire.
+                        debug_assert!(relationship_eviction_suppressed());
+                        world
+                            .deferred_hook_queue
+                            .push(RemoveCommand::<R>::new(source));
+                        return;
+                    }
+                    InPlaceOutcome::Evicted(incumbent) => {
+                        // Q2 order: `OnUnlink` BEFORE `OnLink`; `OnUnlink` BEFORE the
+                        // `RemoveCommand` push. Fires `OnUnlink{incumbent, target}`
+                        // exactly once.
+                        world.fire_on_unlink::<R>(incumbent, target);
+                        // Clears the evicted source's now-dangling FK next drain turn
+                        // (the C2 deferred-remove pattern). W3 KEYSTONE: this remove
+                        // fires `incumbent`'s `on_replace` → an `UnlinkCommand`, whose
+                        // `Exclusive::remove(incumbent)` returns `false` (the slot now
+                        // holds `B != incumbent`), so the `if removed` gate suppresses
+                        // a second `OnUnlink`. Exactly one `OnUnlink`, one `OnLink`.
+                        world
+                            .deferred_hook_queue
+                            .push(RemoveCommand::<R>::new(incumbent));
+                        // Falls through to the unconditional `fire_on_link` below
+                        // (genuine new edge → `OnLink{B, target}` after `OnUnlink`).
+                    }
+                    InPlaceOutcome::Added { changed } => {
+                        // Gate the `OnLink` fire on `changed` so an identical 1:1
+                        // re-link does NOT spuriously re-fire `OnLink`. For `Vec`,
+                        // `changed` is always `true` → byte-identical.
+                        should_fire_link = changed;
+                    }
+                }
             }
             None => {
                 // First source: route the insert through the audited migration
@@ -498,14 +663,20 @@ impl<R: Relationship> Command for LinkCommand<R> {
         }
 
         // Critic W2 (i)/(v): the `R` edge `source -> target` is now COMMITTED in
-        // BOTH branches (the in-place push and the first-source migrate). Fire
-        // `OnLink<R>` on the source, gated behind the cold 0%-probe so a world
-        // with no edge observers pays ~nothing. Firing here (after the guard,
-        // inside the committed-edge apply) covers every committed edge exactly
+        // every reachable branch (in-place push, first-source migrate, eviction
+        // overwrite). Fire `OnLink<R>` on the source, gated behind the cold 0%-probe
+        // so a world with no edge observers pays ~nothing. Firing here (after the
+        // guard, inside the committed-edge apply) covers every committed edge exactly
         // once and excludes the never-established (dead-target) edge for free —
         // including a deep-clone subtree relink, which routes through this same
         // `apply` and INTENTIONALLY fires `OnLink` per re-established edge.
-        world.fire_on_link::<R>(source, target);
+        //
+        // `should_fire_link` is `true` in every arm EXCEPT an identical 1:1 re-link
+        // (W2/Q3); for `Vec` and the migrate / eviction arms it is always `true`, so
+        // the v1 `Vec` path stays byte-identical to the unconditional fire.
+        if should_fire_link {
+            world.fire_on_link::<R>(source, target);
+        }
     }
 }
 

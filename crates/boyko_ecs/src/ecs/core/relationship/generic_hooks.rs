@@ -90,10 +90,16 @@ pub unsafe fn relationship_on_insert<R: Relationship>(
         return;
     }
 
-    // 1:1 eviction (Collection == Entity) — RESERVED for v1.1 (W1/O3). The v1
-    // `Vec` collection's `source_to_evict_before_add` defaults to `None`, so this
-    // branch is dead in v1 and folds away under monomorphization. (Left as a doc
-    // marker; the eviction edge fires `try_remove`, a new re-entrant surface.)
+    // 1:1 eviction (Collection == `Exclusive`) is detected at APPLY, NOT here
+    // (Relations v1.1). This hook body is UNCHANGED for 1:1 — it only ENQUEUES the
+    // `LinkCommand` below; `LinkCommand::apply` reads
+    // `source_to_evict_before_add()` on the reverse collection and, on an occupied
+    // `Exclusive` slot held by a distinct incumbent, overwrites the slot, fires
+    // `OnUnlink{incumbent}` once, and defers a `RemoveCommand` to clear the
+    // incumbent's dangling FK. The `Vec` one-to-many collection returns the trait
+    // default `None` there, so that whole eviction branch const-folds away
+    // (byte-identical v1 apply). Keeping detection at apply time avoids a new
+    // re-entrant surface in this enqueue-only hook.
 
     // BUG-EDGE-CLONE-1: during a deep clone the FK is a VERBATIM copy still pointing
     // at the ORIGINAL (un-remapped) target — enqueuing a link here would leak the

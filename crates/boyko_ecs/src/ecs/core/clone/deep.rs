@@ -22,7 +22,9 @@ use crate::ecs::core::component::component_registry;
 use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 use crate::ecs::core::entity::entity::Entity;
 use crate::ecs::core::hierarchy::{ChildOf, Children};
-use crate::ecs::core::relationship::{RelationshipSourceCollection, RelationshipTarget};
+use crate::ecs::core::relationship::{
+    EvictionSuppressGuard, RelationshipSourceCollection, RelationshipTarget,
+};
 
 /// Inline worklist capacity before spilling to the heap (mirrors
 /// `CASCADE_FANOUT_INLINE` — small subtrees never touch the `Vec` allocator).
@@ -166,6 +168,13 @@ fn clone_subtree_inner(
         return clone_root;
     };
 
+    // Suppress 1:1 eviction for the entire relink phase (Relations v1.1, C3): a
+    // cloned source whose FK points at an EXTERNAL `Exclusive` 1:1 target must NOT
+    // evict that target's existing source — the clone is unrelated, so it DETACHES
+    // (drops its own dangling FK) instead. Dropped at loop end, BEFORE the outermost
+    // drain. No effect on the `Vec` one-to-many path (eviction never triggers).
+    let eviction_suppress = EvictionSuppressGuard::enter();
+
     // For each cloned source node, look up its clone and (1) remap the CLONE's
     // ChildOf in place + rebuild the parent's Children (the hierarchy-specific path,
     // shared VERBATIM with the prefab `instantiate`), then (2) remap + relink EVERY
@@ -196,6 +205,10 @@ fn clone_subtree_inner(
         // its remapped target is in-subtree (a verbatim external FK stays detached).
         remap_relink_generic_relations(world, clone, child_of_id, &map);
     }
+
+    // Re-enable 1:1 eviction BEFORE the outermost drain (the deferred detach removes
+    // enqueued above run with normal eviction semantics — they only clear FKs).
+    drop(eviction_suppress);
 
     clone_root
 }

@@ -43,7 +43,7 @@ pub use crate::ecs::core::relationship::{
 pub use crate::ecs::core::component::observers::propagate::propagate;
 pub use crate::ecs::core::component::observers::traversal::PropagationMode;
 pub use crate::ecs::core::component::observers::trigger::{Trigger, TriggerContext, TriggerFn};
-pub use crate::ecs::core::relationship::{OnLink, OnUnlink};
+pub use crate::ecs::core::relationship::{Exclusive, OnLink, OnUnlink};
 
 // ── Entity cloning (Feature 3) ───────────────────────────────────────────────
 pub use crate::ecs::core::clone::{EntityCloner, EntityClonerBuilder};

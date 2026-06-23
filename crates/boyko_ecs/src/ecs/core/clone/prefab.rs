@@ -60,6 +60,7 @@ use crate::ecs::core::component::component_registry::{self, Cloneability, DropFn
 use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 use crate::ecs::core::entity::entity::Entity;
 use crate::ecs::core::hierarchy::{ChildOf, Children};
+use crate::ecs::core::relationship::EvictionSuppressGuard;
 use crate::ecs::identifiers::primitives::{ComponentId, EntityId};
 
 /// Sentinel for "no parent" (the template root) in [`PrefabNode::parent`].
@@ -798,6 +799,16 @@ pub(crate) fn instantiate(world: &mut EcsMaster, prefab: &Prefab) -> Entity {
         map.insert(node.src_parent, parent_instance);
     }
 
+    // Suppress 1:1 eviction for the relink phase (Relations v1.1, C3), identical to
+    // the `clone_subtree` relink guard. NOTE: this prefab loop currently relinks
+    // ONLY `ChildOf`/`Children` (a `Vec` collection that never evicts), so the guard
+    // is forward-looking SCAFFOLD here — it suppresses nothing until prefab
+    // `instantiate` routes generic-relation FKs through `remap_relink_generic_relations`
+    // (today generic relation FKs are not relinked on instantiate at all — a
+    // pre-existing prefab gap, broader than v1.1). Kept so the guard is already
+    // correct the moment that relink lands.
+    let eviction_suppress = EvictionSuppressGuard::enter();
+
     for (node_index, node) in prefab.nodes.iter().enumerate() {
         if node.parent == PREFAB_NODE_NONE {
             continue;
@@ -810,6 +821,10 @@ pub(crate) fn instantiate(world: &mut EcsMaster, prefab: &Prefab) -> Entity {
             link_child(world, parent_clone, instance, children_id);
         }
     }
+
+    // Re-enable 1:1 eviction before returning (any deferred detach removes run with
+    // normal eviction semantics — they only clear FKs).
+    drop(eviction_suppress);
 
     instance_of[0]
 }
