@@ -1,0 +1,10 @@
+error[E0502]: cannot borrow `token` as mutable because it is also borrowed as immutable
+  --> tests/compile_fail_dispatcher_token/world_then_mut_aliases_rejected.rs:40:13
+   |
+38 |     let view = token.world();
+   |                ----- immutable borrow occurs here
+39 |     let r = view.resource::<ViewResource>();
+40 |     let m = token.nonsend_resource_mut::<NonSendCounter>().unwrap();
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ mutable borrow occurs here
+41 |     m.value += r.0;
+   |                --- immutable borrow later used here

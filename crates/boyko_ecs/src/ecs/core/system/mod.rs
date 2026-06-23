@@ -22,7 +22,7 @@ pub mod system_param;
 pub mod unsafe_ecs_cell;
 
 pub use access::Access;
-pub use dispatcher_token::DispatcherToken;
+pub use dispatcher_token::{DispatcherToken, WorldView};
 pub use exclusive_function_system::ExclusiveFunctionSystem;
 pub use filtered_access_set::{AccessConflict, ConflictKind, FilteredAccessSet};
 pub use gpu_intent::{GpuAccess, GpuAccessIntent, GpuStage, GpuTouch, MAX_GPU_TOUCHES};
