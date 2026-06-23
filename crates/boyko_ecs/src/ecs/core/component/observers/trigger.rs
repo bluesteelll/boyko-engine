@@ -27,10 +27,11 @@ use std::sync::{Mutex, OnceLock};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::ecs::core::component::hooks::deferred_master::DeferredEcsMaster;
-use crate::ecs::core::component::observers::traversal::Traversal;
+use crate::ecs::core::component::observers::traversal::{PropagationMode, Traversal};
 use crate::ecs::core::component::observers::ObserverId;
 use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 use crate::ecs::core::entity::entity::Entity;
+use crate::ecs::core::relationship::Relationship;
 
 /// Maximum number of distinct custom-trigger types in a process.
 pub const MAX_TRIGGERS: usize = 256;
@@ -70,10 +71,41 @@ pub trait Trigger: 'static {
     /// Whether this event bubbles up [`Self::Traversal`] without an explicit
     /// `propagate(true)`. `const` so the propagation loop const-folds away for
     /// non-bubbling events (the 0%-gate at the type level).
+    ///
+    /// Consulted ONLY when [`Self::PROPAGATION`] is
+    /// [`PropagationMode::Up`] (the bubble direction); the
+    /// [`Down`](PropagationMode::Down) broadcast seeds its per-node propagate
+    /// flag `true` (fan-out-all by default) independently of this constant.
     const AUTO_PROPAGATE: bool = false;
 
-    /// The relationship the event bubbles along. Default = `ChildOf`.
+    /// The propagation shape: [`None`](PropagationMode::None) (target only —
+    /// the default, byte-identical to the pre-broadcast machinery),
+    /// [`Up`](PropagationMode::Up) (bubble up [`Self::Traversal`]), or
+    /// [`Down`](PropagationMode::Down) (broadcast over [`Self::Broadcast`]'s
+    /// reverse collection). `const` so the fire loop const-folds the branch —
+    /// the `None`/`Up` arms keep their pre-broadcast code generation.
+    const PROPAGATION: PropagationMode = PropagationMode::None;
+
+    /// The relationship the event bubbles along (the `Up` direction). Set to
+    /// [`ChildOfTraversal`](crate::ecs::core::component::observers::traversal::ChildOfTraversal)
+    /// for the default parent bubble.
     type Traversal: Traversal;
+
+    /// The relationship whose reverse [`RelationshipTarget`](crate::ecs::core::relationship::RelationshipTarget)
+    /// collection is fanned out for a [`Down`](PropagationMode::Down) broadcast.
+    ///
+    /// Consulted ONLY when [`Self::PROPAGATION`] is `Down`. For a `None` / `Up`
+    /// trigger this binding is never read — set it to
+    /// [`ChildOf`](crate::ecs::core::hierarchy::ChildOf) (the conventional
+    /// placeholder; the associated type is compile-time only, so a never-read
+    /// binding is asm-identical to the pre-broadcast trigger). For a `Down`
+    /// broadcast over `ChildOf` the descent visits every transitive child.
+    ///
+    /// A required associated type (no default) to keep the crate on stable Rust
+    /// — associated-type defaults are unstable, and the sibling
+    /// [`Self::Traversal`] is already required, so every existing `Trigger`
+    /// impl already names its associated types.
+    type Broadcast: Relationship;
 }
 
 /// Runner for a custom trigger.
@@ -190,6 +222,19 @@ impl TriggerRegistry {
         let list = lists.by_trigger.get(tid as usize)?;
         list.get(i).map(|e| e.runner)
     }
+
+    /// `true` iff at least one GLOBAL observer is registered for `tid`.
+    ///
+    /// The cold 0%-probe half for the relation-edge observers: a world that
+    /// never registered a global trigger observer takes the lazy-`None`
+    /// early-out (one `Option::is_none()`).
+    #[inline]
+    pub(crate) fn has(&self, tid: TriggerId) -> bool {
+        self.inner
+            .as_ref()
+            .and_then(|l| l.by_trigger.get(tid as usize))
+            .is_some_and(|list| !list.is_empty())
+    }
 }
 
 impl Default for TriggerRegistry {
@@ -271,18 +316,22 @@ pub(crate) fn fire_global_triggers(
 mod tests {
     use super::*;
     use crate::ecs::core::component::observers::traversal::ChildOfTraversal;
+    use crate::ecs::core::hierarchy::ChildOf;
 
     struct TidA;
     impl Trigger for TidA {
         type Traversal = ChildOfTraversal;
+        type Broadcast = ChildOf;
     }
     struct TidB;
     impl Trigger for TidB {
         type Traversal = ChildOfTraversal;
+        type Broadcast = ChildOf;
     }
     struct TidC;
     impl Trigger for TidC {
         type Traversal = ChildOfTraversal;
+        type Broadcast = ChildOf;
     }
 
     /// TESTER FINDING (F2 — engine bug, see report): distinct `Trigger` types

@@ -161,3 +161,114 @@ fn miri_likes_cyclic_cascade_terminates() {
     assert!(!ecs.has_entity(b), "B cascaded; cyclic re-entry of A was a dead no-op");
     assert_eq!(ecs.entity_count(), 0, "cyclic cascade terminated under TB");
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// Target 4 — BUG-EDGE-CLONE-1 fix: the deep-clone materialize+relink path under TB.
+//            Exercises the `LinkSuppressGuard` crossing each node's
+//            `materialize_clone` unsafe AND the generic relink
+//            (`relationship_clone_relink::<Likes>` → `LinkCommand::apply` migrate)
+//            of the IN-SUBTREE edge. Tiny subtree (Miri ~100x). Asserts only the
+//            in-subtree consistency that DOES hold (clone_child Likes clone_parent,
+//            clone_parent.LikedBy ∋ clone_child) — the soundness probe, not the
+//            BUG-EDGE-CLONE-2 external case (that is an integration-level invariant
+//            test, here we only need the unsafe to be TB-clean).
+// ════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn miri_deep_clone_related_subtree_relink_tb_clean() {
+    use boyko_ecs::ecs::core::hierarchy::Children;
+
+    let mut ecs = EcsMaster::new();
+    let e = spawn_entities(&mut ecs, 2);
+    let (parent, child) = (e[0], e[1]);
+
+    // parent → child (ChildOf); child Likes(parent) — one in-subtree Likes edge.
+    ecs.run_system(move |mut cmds: Commands| {
+        cmds.entity(parent).add_child(child);
+        cmds.entity(child).insert(Likes(parent));
+    });
+
+    // Deep-clone the subtree: the suppress guard wraps the materialize walk, then
+    // the relink re-establishes the single in-subtree Likes edge toward the clone.
+    let clone_parent = ecs.clone_subtree(parent);
+    assert_ne!(clone_parent, parent, "clone parent distinct");
+
+    let clone_child = ecs
+        .get_component::<Children>(clone_parent)
+        .map(|c| c.as_slice()[0])
+        .expect("cloned parent has a rebuilt Children index");
+
+    assert_eq!(
+        ecs.get_component::<Likes>(clone_child).map(|r| r.target()),
+        Some(clone_parent),
+        "in-subtree Likes FK remapped to the clone parent",
+    );
+    let clone_liked = ecs.get_component::<LikedBy>(clone_parent).expect("clone parent LikedBy");
+    assert_eq!(clone_liked.len(), 1, "clone_parent.LikedBy has exactly the clone_child (relink)");
+
+    // Source untouched (the BUG-EDGE-CLONE-1 non-leak, also asserted natively in
+    // relations_deep_clone_external_target; here it doubles as a TB sanity read).
+    let src_liked = ecs.get_component::<LikedBy>(parent).expect("source parent LikedBy");
+    assert_eq!(src_liked.len(), 1, "source parent.LikedBy unchanged (no clone leaked in)");
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Target 5 — BUG-EDGE-CLONE-2 fix: the EXTERNAL-FK relink path under TB. The
+//            cloned child carries `Likes(E)` where E is OUTSIDE the cloned set,
+//            so `relationship_clone_map_entities` keeps the FK verbatim and the
+//            relink (`relationship_clone_relink::<Likes>`, no longer gated on
+//            `map.is_clone`) routes `LinkCommand::<Likes>::apply` into E's reverse
+//            index — the exact link surface the BUG-EDGE-CLONE-2 gate-removal newly
+//            activates and that Target 4 (in-subtree FK only) never reaches. E
+//            already hosts a `LikedBy` (its source liker, the original child), so
+//            the relink takes the IN-PLACE push arm (`collection_mut_risky().add`)
+//            on an EXTERNAL target during the deep-clone relink pass under
+//            `&mut EcsMaster`. Tiny subtree (Miri ~100x). Asserts the kept external
+//            FK gained its reverse entry, with no source-side leak (E's source
+//            liker stays, the clone is appended exactly once).
+// ════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn miri_deep_clone_external_fk_relink_tb_clean() {
+    use boyko_ecs::ecs::core::hierarchy::Children;
+
+    let mut ecs = EcsMaster::new();
+    let e = spawn_entities(&mut ecs, 3);
+    let (external, parent, child) = (e[0], e[1], e[2]);
+
+    // parent → child (ChildOf); child Likes(E) — one EXTERNAL Likes edge (E is not
+    // in the cloned subtree). The build-time on_insert already migrated E.LikedBy
+    // to host the source child, so the post-clone relink is an in-place push.
+    ecs.run_system(move |mut cmds: Commands| {
+        cmds.entity(parent).add_child(child);
+        cmds.entity(child).insert(Likes(external));
+    });
+
+    // Deep-clone parent's subtree: E is NOT cloned. The suppress guard wraps the
+    // materialize walk; the relink then links the clone_child into E.LikedBy via
+    // the kept verbatim external FK (the BUG-EDGE-CLONE-2 path).
+    let clone_parent = ecs.clone_subtree(parent);
+    assert_ne!(clone_parent, parent, "clone parent distinct");
+
+    let clone_child = ecs
+        .get_component::<Children>(clone_parent)
+        .map(|c| c.as_slice()[0])
+        .expect("cloned parent has a rebuilt Children index");
+
+    // The external FK is kept verbatim (points at E, NOT at any clone).
+    assert_eq!(
+        ecs.get_component::<Likes>(clone_child).map(|r| r.target()),
+        Some(external),
+        "external Likes FK kept verbatim (target outside the cloned subtree)",
+    );
+
+    // BUG-EDGE-CLONE-2: the kept external FK now HAS its reverse entry. E.LikedBy
+    // gained the clone_child alongside the original source child (relink pushed it).
+    let e_liked = ecs.get_component::<LikedBy>(external).expect("E LikedBy");
+    assert_eq!(
+        e_liked.len(),
+        2,
+        "E.LikedBy contains the SOURCE child and the relinked clone_child \
+         (external-FK reverse entry restored under TB)",
+    );
+}

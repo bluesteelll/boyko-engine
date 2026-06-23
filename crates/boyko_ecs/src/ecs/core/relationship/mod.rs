@@ -42,6 +42,8 @@
 //! [`Entity`]: crate::ecs::core::entity::entity::Entity
 //! [`Command::apply`]: crate::ecs::core::commands::command::Command::apply
 
+use std::cell::Cell;
+
 use crate::ecs::core::bundle::bundle::Bundle;
 use crate::ecs::core::clone::map::EntityCloneMap;
 use crate::ecs::core::commands::command::Command;
@@ -53,9 +55,81 @@ use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 use crate::ecs::core::entity::entity::Entity;
 
 pub mod collection;
+pub mod edge_observers;
 pub mod generic_hooks;
 
+// ===========================================================================
+// Clone-time link suppression (BUG-EDGE-CLONE-1) — relation-agnostic
+// ===========================================================================
+
+thread_local! {
+    /// When set, [`relationship_on_insert`](generic_hooks::relationship_on_insert)
+    /// does NOT enqueue its reverse-index [`LinkCommand`] — the verbatim-copied
+    /// foreign key of a freshly-materialized clone must NOT link into its
+    /// (un-remapped, still-original) target. The deep-clone relink pass
+    /// ([`relationship_clone_relink`]) is the SOLE linker, establishing exactly one
+    /// link toward the REMAPPED clone target after the FK has been remapped.
+    ///
+    /// Without this, the clone's `on_insert` (fired by `materialize_clone`) would
+    /// enqueue a `LinkCommand` toward the ORIGINAL target, leaking the clone into
+    /// the SOURCE subtree's reverse collection (`original_parent.LikedBy == [1, 3]`
+    /// instead of `[1]`). The reactive self-ref / dangling-target guards in
+    /// `relationship_on_insert` still run — only the (always-stale during clone)
+    /// link enqueue is suppressed.
+    ///
+    /// Thread-local for the same reason as `CASCADE_SUPPRESS`
+    /// (`hierarchy/commands.rs`): every hook fires on the single-threaded apply
+    /// window, and a per-thread cell cannot be frozen by any `&mut EcsMaster`
+    /// reborrow (the F2 invariant).
+    static RELATIONSHIP_LINK_SUPPRESS: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Reads the clone-time link-suppress flag for the current thread. Read by the
+/// generic link hook
+/// ([`relationship_on_insert`](generic_hooks::relationship_on_insert)).
+#[inline]
+pub(crate) fn relationship_link_suppressed() -> bool {
+    RELATIONSHIP_LINK_SUPPRESS.with(|s| s.get())
+}
+
+/// RAII guard that suppresses clone-time reverse-index linking for its scope and
+/// restores the previous value on every exit path (`Ok` / panic). Mirrors
+/// [`CascadeSuppressGuard`](crate::ecs::core::hierarchy::commands) — it touches
+/// only the thread-local, never any field of `EcsMaster`, so a bracketed
+/// `&mut self` body cannot freeze it.
+///
+/// Held by the deep-clone walk across each node's `materialize_clone` (whose
+/// `on_insert` fire would otherwise enqueue a stale `LinkCommand` toward the
+/// original target); dropped BEFORE the remap + relink pass, so
+/// [`relationship_clone_relink`] establishes the one correct link unimpeded.
+pub(crate) struct LinkSuppressGuard {
+    /// Restores the previous flag value on drop (supports nesting; in practice the
+    /// depth is one — a deep clone is not re-entrant under itself).
+    prev: bool,
+}
+
+impl LinkSuppressGuard {
+    /// Enters a clone-time link-suppressed scope.
+    #[inline]
+    pub(crate) fn enter() -> Self {
+        let prev = RELATIONSHIP_LINK_SUPPRESS.with(|s| {
+            let p = s.get();
+            s.set(true);
+            p
+        });
+        Self { prev }
+    }
+}
+
+impl Drop for LinkSuppressGuard {
+    #[inline]
+    fn drop(&mut self) {
+        RELATIONSHIP_LINK_SUPPRESS.with(|s| s.set(self.prev));
+    }
+}
+
 pub use collection::RelationshipSourceCollection;
+pub use edge_observers::{OnLink, OnUnlink};
 
 /// The source-of-truth side of a relation: a foreign key on the source entity
 /// pointing at one target (Relations v1, Decision 1).
@@ -270,39 +344,57 @@ pub unsafe fn relationship_clone_map_entities<R: Relationship>(
 /// the hierarchy-specific `link_child`.
 ///
 /// `source` is the CLONED source entity (its FK already remapped). `map` is the
-/// deep-clone source→clone map: the relink fires only when the remapped target is a
-/// clone the subtree produced (in-subtree), so a verbatim foreign key pointing at an
-/// external entity stays detached (Bevy parity).
+/// deep-clone source→clone map. The clone-time `on_insert` link is unconditionally
+/// suppressed by the [`LinkSuppressGuard`] (BUG-EDGE-CLONE-1), so this relink is the
+/// SOLE linker for every cloned source — it links toward whatever the FK CURRENTLY
+/// points at: the remapped clone target for an in-subtree FK, or the verbatim external
+/// target for an external FK (BUG-EDGE-CLONE-2 — restoring the kept FK's reverse entry
+/// so FK↔reverse consistency holds).
 pub(crate) type RelationshipRelinkFn =
     fn(world: &mut EcsMaster, source: Entity, map: &EntityCloneMap);
 
-/// Generic relink for a relationship source `R` (BUG-RELATIONS-CLONE-1): reads the
-/// cloned source's now-remapped `R` foreign key and, IF that target is in-subtree,
-/// links the source into the cloned target's [`RelationshipTarget`] collection,
-/// reusing [`LinkCommand`]'s apply logic verbatim (the audited migrate-or-push path —
-/// first source migrate-inserts the reverse index, subsequent sources push in place).
+/// Generic relink for a relationship source `R` (BUG-RELATIONS-CLONE-1 /
+/// BUG-EDGE-CLONE-2): reads the cloned source's now-remapped `R` foreign key and links
+/// the source into THAT target's [`RelationshipTarget`] collection, reusing
+/// [`LinkCommand`]'s apply logic verbatim (the audited migrate-or-push path — first
+/// source migrate-inserts the reverse index, subsequent sources push in place).
 /// Monomorphizes to one bare [`RelationshipRelinkFn`] per relation type — no `dyn`.
 ///
-/// A no-op when the source carries no `R`, or when its remapped target is OUTSIDE the
-/// cloned subtree (the FK was kept verbatim — a shared external reference that must
-/// stay detached, exactly like the deep clone leaves the cloned ROOT's external parent
-/// untouched).
+/// Because the clone-time `on_insert` link is unconditionally suppressed by the
+/// [`LinkSuppressGuard`] (BUG-EDGE-CLONE-1), this relink is the SOLE establisher of the
+/// clone's reverse-index membership and therefore must run for EVERY cloned FK,
+/// regardless of whether the target was part of the cloned subtree:
+/// - IN-SUBTREE FK (target was cloned): the FK was remapped to the cloned target; the
+///   relink links the clone into the CLONE target's reverse index.
+/// - EXTERNAL FK (target kept verbatim, `map.is_clone == false`): the FK still points
+///   at the external entity `E`; the relink links the clone into `E`'s reverse index,
+///   restoring `clone ∈ E.Reverse` for the kept `clone.fk == R(E)` (BUG-EDGE-CLONE-2).
+///   This restores internal FK↔reverse CONSISTENCY for the kept external FK; it is NOT
+///   the Bevy-parity "detach the clone-root's external subtree FK" semantic choice
+///   (that would change `relationship_clone_map_entities` to drop the FK, which v1 does
+///   not do).
+///
+/// Links ONLY into the TARGET's reverse collection (`LinkCommand::apply` mutates
+/// `R::Target` on `target`, never on `source`), so it can never re-introduce the
+/// BUG-EDGE-CLONE-1 source-side leak — a clone is never its own FK target.
+///
+/// A no-op when the source carries no `R`, or when the target was despawned
+/// (`LinkCommand::apply`'s dangling-target guard).
 pub(crate) fn relationship_clone_relink<R: Relationship>(
     world: &mut EcsMaster,
     source: Entity,
     map: &EntityCloneMap,
 ) {
+    let _ = map; // `map` is the relink-pass signature; the FK was already remapped.
     let Some(target) = world.get_component::<R>(source).map(|r| r.target()) else {
         return;
     };
-    // In-subtree gate: relink only when the (remapped) target is a clone this subtree
-    // produced. A verbatim external FK (`map.is_clone == false`) is left detached.
-    if !map.is_clone(target) {
-        return;
-    }
     // Reuse the audited link path verbatim — the same machinery `LinkCommand::apply`
     // and the hierarchy `link_child` route through (migrate-insert the reverse index
-    // for the first source, in-place push thereafter). A dangling target is a no-op.
+    // for the first source, in-place push thereafter). The link goes into `target`'s
+    // reverse collection only (never `source`'s), so an external `target` gets its
+    // kept FK's reverse entry restored without ever touching the source subtree's
+    // reverse index. A dangling target is a no-op.
     LinkCommand::<R> {
         target,
         source,
@@ -359,6 +451,8 @@ impl<R: Relationship> Command for LinkCommand<R> {
         // Dangling-target guard: the target may have been despawned between the
         // hook firing and this apply. A no-op keeps the invariant rather than
         // resurrecting a dead collection (Phase-19 `LinkChildCommand` verbatim).
+        // Critic W2/(iv): an edge that never establishes (dead target) does NOT
+        // fire `OnLink` — the fire below is reached only past this guard.
         if !world.has_entity(target) {
             return;
         }
@@ -402,20 +496,43 @@ impl<R: Relationship> Command for LinkCommand<R> {
                 );
             }
         }
+
+        // Critic W2 (i)/(v): the `R` edge `source -> target` is now COMMITTED in
+        // BOTH branches (the in-place push and the first-source migrate). Fire
+        // `OnLink<R>` on the source, gated behind the cold 0%-probe so a world
+        // with no edge observers pays ~nothing. Firing here (after the guard,
+        // inside the committed-edge apply) covers every committed edge exactly
+        // once and excludes the never-established (dead-target) edge for free —
+        // including a deep-clone subtree relink, which routes through this same
+        // `apply` and INTENTIONALLY fires `OnLink` per re-established edge.
+        world.fire_on_link::<R>(source, target);
     }
 }
 
 impl<R: Relationship> Command for UnlinkCommand<R> {
     fn apply(self, world: &mut EcsMaster) {
+        let target = self.target;
+        let source = self.source;
         // No remove-on-empty (v1, W1): an emptied collection is retained to avoid
         // archetype thrash on `0↔1↔0` oscillation. A missing target or an absent
         // source are both harmless no-ops (the spurious-unlink path from the
         // self-ref / dangling guards lands here). Phase-19 `UnlinkChildCommand`
         // verbatim, generalized over `R::Target`.
-        let Some(mut reverse) = world.get_component_mut::<R::Target>(self.target) else {
-            return;
+        let removed = {
+            let Some(mut reverse) = world.get_component_mut::<R::Target>(target) else {
+                return;
+            };
+            // `remove` returns `true` iff the source was actually present — the
+            // COMMITTED-edge test for `OnUnlink` (critic W2 (ii)/(iii)/(iv)). A
+            // spurious unlink (missing target / absent source — the self-ref /
+            // dangling / double-unlink paths) returns `false` and fires nothing.
+            reverse.collection_mut_risky().remove(source)
+            // <-- the `reverse` borrow ends here, BEFORE `fire_on_unlink` re-mints
+            //     a `world` borrow (no `world`-derived `&mut` spans the fire).
         };
-        reverse.collection_mut_risky().remove(self.source);
+        if removed {
+            world.fire_on_unlink::<R>(source, target);
+        }
     }
 }
 

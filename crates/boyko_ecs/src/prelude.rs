@@ -39,6 +39,12 @@ pub use crate::ecs::core::relationship::{
     Relationship, RelationshipSourceCollection, RelationshipTarget,
 };
 
+// ── Relation-aware triggers / observers (edge observers + Down broadcast) ─────
+pub use crate::ecs::core::component::observers::propagate::propagate;
+pub use crate::ecs::core::component::observers::traversal::PropagationMode;
+pub use crate::ecs::core::component::observers::trigger::{Trigger, TriggerContext, TriggerFn};
+pub use crate::ecs::core::relationship::{OnLink, OnUnlink};
+
 // ── Entity cloning (Feature 3) ───────────────────────────────────────────────
 pub use crate::ecs::core::clone::{EntityCloner, EntityClonerBuilder};
 

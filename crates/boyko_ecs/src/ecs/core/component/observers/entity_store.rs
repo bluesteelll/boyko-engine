@@ -123,6 +123,17 @@ struct EntityObserverInner {
     arena: Vec<EntityObserverList>,
     /// Free arena slots (handles) available for reuse.
     free_list: Vec<u32>,
+    /// STICKY per-`TriggerId` "has any entity ever attached a custom-trigger
+    /// observer for this id" flag (set-once, never cleared). Backs the
+    /// [`has_any_custom`](EntityObserverStore::has_any_custom) 0%-probe for the
+    /// relation-edge observers. Set-once (the sticky-archetype-bit precedent):
+    /// a world that never attaches an entity edge observer keeps every bit
+    /// clear (true 0%-gate); a world that attaches then removes one keeps the
+    /// bit set, so the probe stays conservatively `true` and the edge `trigger`
+    /// walk runs but finds nothing (a rare, correctness-preserving no-op — it
+    /// never MISSES a live observer, which a decrementing ref-count could on a
+    /// `retire`/recycle path). Lazily grown, one `bool` per minted trigger id.
+    ever_custom: Vec<bool>,
 }
 
 impl EntityObserverStore {
@@ -140,6 +151,7 @@ impl EntityObserverStore {
                 by_entity: SparseMap::new(),
                 arena: Vec::new(),
                 free_list: Vec::new(),
+                ever_custom: Vec::new(),
             })
         })
     }
@@ -227,12 +239,39 @@ impl EntityObserverStore {
         trigger_id: u32,
         runner: TriggerFn,
     ) -> ObserverId {
-        self.attach(
+        let id = self.attach(
             entity,
             DispatchKey::custom(trigger_id),
             ComponentId(0),
             EntityRunner::Custom(runner),
-        )
+        );
+        // Raise the sticky `ever_custom` flag for this id (set-once, never
+        // cleared) so the `has_any_custom` 0%-probe sees it.
+        let inner = self.inner_mut();
+        let tid = trigger_id as usize;
+        if tid >= inner.ever_custom.len() {
+            inner.ever_custom.resize(tid + 1, false);
+        }
+        inner.ever_custom[tid] = true;
+        id
+    }
+
+    /// `true` iff ANY entity has EVER attached a custom-trigger observer for
+    /// `trigger_id` (sticky, never cleared — see
+    /// [`ever_custom`](EntityObserverInner::ever_custom)).
+    ///
+    /// The entity-store half of the relation-edge observers' cold 0%-probe: a
+    /// world that never attaches an entity edge observer takes the lazy-`None`
+    /// early-out. Conservative by design (it can return `true` after the last
+    /// such observer is removed), which keeps the gate sound — it never reports
+    /// `false` while a live observer exists.
+    #[inline]
+    pub(crate) fn has_any_custom(&self, trigger_id: u32) -> bool {
+        self.inner
+            .as_ref()
+            .and_then(|i| i.ever_custom.get(trigger_id as usize))
+            .copied()
+            .unwrap_or(false)
     }
 
     /// Removes the observer with `id`, returning `true` if it was registered.

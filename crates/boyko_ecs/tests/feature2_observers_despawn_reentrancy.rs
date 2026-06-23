@@ -35,6 +35,7 @@ use boyko_ecs::ecs::core::component::observers::trigger::{Trigger, TriggerContex
 use boyko_ecs::ecs::core::component::observers::propagate::propagate;
 use boyko_ecs::ecs::core::component::observers::traversal::ChildOfTraversal;
 use boyko_ecs::ecs::core::component::observers::ObserverContext;
+use boyko_ecs::ecs::core::hierarchy::ChildOf;
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::entity::entity::Entity;
 use boyko_ecs::ecs::core::system::Commands;
@@ -287,6 +288,7 @@ impl Trigger for LeakEvent {
     // AUTO_PROPAGATE defaults to false — runtime opt-in only (so this test
     // avoids FINDING F1: the auto-propagate STOP path).
     type Traversal = ChildOfTraversal;
+    type Broadcast = ChildOf;
 }
 
 #[derive(Component, Clone, Copy)]
@@ -373,10 +375,12 @@ fn propagate_does_not_leak_across_sequential_walks() {
 struct EventX;
 impl Trigger for EventX {
     type Traversal = ChildOfTraversal;
+    type Broadcast = ChildOf;
 }
 struct EventY;
 impl Trigger for EventY {
     type Traversal = ChildOfTraversal;
+    type Broadcast = ChildOf;
 }
 
 #[derive(Component, Clone, Copy)]

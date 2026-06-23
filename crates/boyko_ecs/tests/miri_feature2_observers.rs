@@ -45,6 +45,7 @@ use boyko_ecs::ecs::core::component::observers::trigger::{Trigger, TriggerContex
 use boyko_ecs::ecs::core::component::observers::propagate::propagate;
 use boyko_ecs::ecs::core::component::observers::traversal::ChildOfTraversal;
 use boyko_ecs::ecs::core::component::observers::{ObserverContext, ObserverKind};
+use boyko_ecs::ecs::core::hierarchy::ChildOf;
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::entity::entity::Entity;
 use boyko_ecs::ecs::core::system::Commands;
@@ -130,12 +131,14 @@ struct MTrigger {
 }
 impl Trigger for MTrigger {
     type Traversal = ChildOfTraversal;
+    type Broadcast = ChildOf;
 }
 
 struct MBubble;
 impl Trigger for MBubble {
     const AUTO_PROPAGATE: bool = true;
     type Traversal = ChildOfTraversal;
+    type Broadcast = ChildOf;
 }
 
 #[derive(Component, Clone, Copy)]

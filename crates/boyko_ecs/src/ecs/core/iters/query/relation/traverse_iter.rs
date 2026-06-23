@@ -41,8 +41,12 @@ use crate::ecs::core::relationship::{Relationship, RelationshipSourceCollection,
 /// `boyko_utils::BitSet<T>` is a fixed-width integer bitset (≤ `T::BITS` keys),
 /// unsuitable for an arbitrary [`Entity`] id space; this growable word-vec
 /// bitset is the cold-path equivalent keyed on `EntityId.0`.
+///
+/// `pub(crate)` so the relation-aware observer-broadcast walk
+/// (`EcsMaster::trigger_broadcast_down`) reuses the SAME `!ACYCLIC` revisit
+/// guard rather than duplicating it (Principle 0 — one cold visited body).
 #[derive(Default)]
-struct VisitedSet {
+pub(crate) struct VisitedSet {
     /// One bit per entity id; word `i` covers ids `[64*i, 64*i + 64)`.
     words: Vec<u64>,
 }
@@ -52,7 +56,7 @@ impl VisitedSet {
     /// — the caller stops descending that branch).
     #[cold]
     #[inline(never)]
-    fn insert_seen(&mut self, id: usize) -> bool {
+    pub(crate) fn insert_seen(&mut self, id: usize) -> bool {
         let word = id >> 6;
         let bit = id & 63;
         if word >= self.words.len() {

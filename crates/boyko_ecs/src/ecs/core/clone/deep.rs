@@ -91,6 +91,17 @@ fn clone_subtree_inner(
     // ChildOf points outside the subtree and is kept verbatim).
     let mut cloned_nodes: Vec<Entity> = Vec::with_capacity(DEEP_WORKLIST_INLINE);
 
+    // BUG-EDGE-CLONE-1: suppress clone-time reverse-index linking for the whole
+    // materialize walk. Each node's `materialize_clone` fires `on_insert` for its
+    // VERBATIM-copied relationship FKs (still pointing at the ORIGINAL, un-remapped
+    // target); without this guard those hooks enqueue a `LinkCommand` toward the
+    // stale original target, leaking the clone into the SOURCE subtree's reverse
+    // collection. The remap + relink pass below (run AFTER this guard drops) is the
+    // SOLE linker, establishing exactly one link per cloned edge toward the remapped
+    // clone target. Relation-agnostic (covers `ChildOf` and any derived relation).
+    let link_suppress =
+        crate::ecs::core::relationship::LinkSuppressGuard::enter();
+
     let mut depth_guard = 0usize;
     while let Some(src) = worklist.pop() {
         // Diamond dedup (R2 #17726): an entity reachable via two links is cloned
@@ -132,6 +143,13 @@ fn clone_subtree_inner(
             }
         }
     }
+
+    // The materialize walk is done — drop the link-suppress guard so the relink pass
+    // below can establish the single correct link per cloned edge (it calls
+    // `LinkCommand::apply` DIRECTLY, not via the suppressed `on_insert` hook, so the
+    // drop is for hygiene / nesting correctness, not strictly required for the relink
+    // itself). BUG-EDGE-CLONE-1.
+    drop(link_suppress);
 
     let clone_root = map
         .get(source_root)

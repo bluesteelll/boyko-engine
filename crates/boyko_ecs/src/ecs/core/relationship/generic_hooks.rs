@@ -30,7 +30,7 @@ use crate::ecs::core::component::hooks::deferred_master::DeferredEcsMaster;
 use crate::ecs::core::entity::entity::Entity;
 use crate::ecs::core::hierarchy::CASCADE_FANOUT_INLINE;
 use crate::ecs::core::hierarchy::commands::cascade_suppressed;
-use crate::ecs::core::relationship::{LinkCommand, Relationship, RelationshipSourceCollection, RelationshipTarget, UnlinkCommand};
+use crate::ecs::core::relationship::{LinkCommand, Relationship, RelationshipSourceCollection, RelationshipTarget, UnlinkCommand, relationship_link_suppressed};
 
 // ===========================================================================
 // W4 / C1 — cyclic-cascade termination (cross-level, NOT a per-hook guard)
@@ -94,6 +94,17 @@ pub unsafe fn relationship_on_insert<R: Relationship>(
     // `Vec` collection's `source_to_evict_before_add` defaults to `None`, so this
     // branch is dead in v1 and folds away under monomorphization. (Left as a doc
     // marker; the eviction edge fires `try_remove`, a new re-entrant surface.)
+
+    // BUG-EDGE-CLONE-1: during a deep clone the FK is a VERBATIM copy still pointing
+    // at the ORIGINAL (un-remapped) target — enqueuing a link here would leak the
+    // clone into the SOURCE subtree's reverse collection. The clone's relink pass
+    // (`relationship_clone_relink`) is the sole linker, establishing exactly one link
+    // toward the remapped clone target after the FK is remapped. Suppress the stale
+    // link (the reactive self-ref / dangling guards above still ran). Relation-
+    // agnostic: every relation (incl. `ChildOf`) routes through this body.
+    if relationship_link_suppressed() {
+        return;
+    }
 
     view.commands().add(LinkCommand::<R> {
         target,

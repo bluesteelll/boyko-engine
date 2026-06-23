@@ -15,6 +15,30 @@ use crate::ecs::core::entity::entity::Entity;
 use crate::ecs::core::hierarchy::ChildOf;
 use crate::ecs::core::relationship::Relationship;
 
+/// The propagation shape of a custom [`Trigger`](crate::ecs::core::component::observers::trigger::Trigger)
+/// (relation-aware observer broadcast, Decision 6).
+///
+/// `const`-folded at the trigger fire loop: the [`None`](PropagationMode::None)
+/// and [`Up`](PropagationMode::Up) arms compile to the byte-identical pre-broadcast
+/// machinery (the 0%-gate at the type level), and the
+/// [`Down`](PropagationMode::Down) arm is the new fan-out descent.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PropagationMode {
+    /// The trigger fires only on its target — no propagation. The historical
+    /// default for every non-bubbling trigger; the fire loop's hop logic
+    /// const-folds away.
+    None,
+    /// The trigger bubbles UP `Trigger::Traversal` one hop at a time (the
+    /// existing single-chain `Toward<R>` bubble). Byte-identical to the
+    /// pre-broadcast `AUTO_PROPAGATE` walk.
+    Up,
+    /// The trigger broadcasts DOWN `Trigger::Broadcast`'s reverse collection:
+    /// after firing on the target it recurses over every source (descendant),
+    /// firing on each. Cycle-safe + depth-capped, with a per-node propagate
+    /// snapshot so `propagate(false)` prunes only that node's subtree.
+    Down,
+}
+
 /// Computes the next entity a bubbling trigger hops to.
 ///
 /// Implementations read through the read-only [`DeferredEcsMaster`] view, which

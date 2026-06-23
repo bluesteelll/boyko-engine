@@ -35,6 +35,7 @@ use boyko_ecs::ecs::core::component::observers::trigger::{Trigger, TriggerContex
 use boyko_ecs::ecs::core::component::observers::propagate::propagate;
 use boyko_ecs::ecs::core::component::observers::traversal::ChildOfTraversal;
 use boyko_ecs::ecs::core::component::observers::{ObserverContext, ObserverKind};
+use boyko_ecs::ecs::core::hierarchy::ChildOf;
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::entity::entity::Entity;
 use boyko_ecs::ecs::core::system::Commands;
@@ -365,6 +366,7 @@ struct DamageEvent {
 }
 impl Trigger for DamageEvent {
     type Traversal = ChildOfTraversal;
+    type Broadcast = ChildOf;
     // AUTO_PROPAGATE defaults to false.
 }
 
@@ -417,6 +419,7 @@ fn trigger_global_fires_global_only() {
     struct G5;
     impl Trigger for G5 {
         type Traversal = ChildOfTraversal;
+        type Broadcast = ChildOf;
     }
     static G5_GLOBAL: AtomicUsize = AtomicUsize::new(0);
     static G5_ENTITY: AtomicUsize = AtomicUsize::new(0);
@@ -448,6 +451,7 @@ struct BubbleEvent;
 impl Trigger for BubbleEvent {
     const AUTO_PROPAGATE: bool = true;
     type Traversal = ChildOfTraversal;
+    type Broadcast = ChildOf;
 }
 
 #[derive(Component, Clone, Copy)]
@@ -531,6 +535,7 @@ struct OptInEvent;
 impl Trigger for OptInEvent {
     // AUTO_PROPAGATE defaults to false — runtime opt-in only.
     type Traversal = ChildOfTraversal;
+    type Broadcast = ChildOf;
 }
 
 static I6_OPTIN_CHILD: AtomicUsize = AtomicUsize::new(0);
@@ -681,6 +686,7 @@ fn non_bubbling_trigger_fires_only_at_target_one_hop() {
 struct CmdTrigger(u32);
 impl Trigger for CmdTrigger {
     type Traversal = ChildOfTraversal;
+    type Broadcast = ChildOf;
 }
 
 #[derive(Component, Clone, Copy)]

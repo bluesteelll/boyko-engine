@@ -27,11 +27,15 @@ use crate::ecs::core::component::observers::dispatch::{
 use crate::ecs::core::component::observers::entity_store::{
     EntityObserverStore, fire_entity_observers, fire_entity_triggers,
 };
-use crate::ecs::core::component::observers::propagate::{PropagateGuard, get_propagate};
-use crate::ecs::core::component::observers::traversal::Traversal;
+use crate::ecs::core::component::observers::propagate::{PropagateGuard, get_propagate, propagate};
+use crate::ecs::core::component::observers::traversal::{PropagationMode, Traversal};
 use crate::ecs::core::component::observers::trigger::{
     Trigger, TriggerContext, TriggerFn, TriggerId, TriggerRegistry, fire_global_triggers,
     static_trigger_id,
+};
+use crate::ecs::core::iters::query::relation::traverse_iter::VisitedSet;
+use crate::ecs::core::relationship::{
+    OnLink, OnUnlink, Relationship, RelationshipSourceCollection, RelationshipTarget,
 };
 use crate::ecs::core::component::observers::{ObserverFn, ObserverId, ObserverKind};
 use crate::ecs::core::entity::entity::Entity;
@@ -3239,9 +3243,86 @@ impl EcsMaster {
         id
     }
 
+    // ── Relation-edge observers: OnLink<R> / OnUnlink<R> (Decision 5) ───────
+
+    /// Registers a GLOBAL observer for the relation-edge trigger
+    /// [`OnLink<R>`](crate::ecs::core::relationship::OnLink): fires whenever an
+    /// `R` edge is COMMITTED (a new foreign key, or the new side of a
+    /// re-target), targeting the source entity. The runner reads the committed
+    /// `target` from the `OnLink<R>` event.
+    ///
+    /// A thin wrapper over [`observe`](Self::observe) keyed on `OnLink<R>`'s
+    /// dense trigger id (no new dispatch path — the `(R, *)` analogue).
+    #[inline]
+    pub fn observe_on_link<R: Relationship>(&mut self, runner: TriggerFn) -> ObserverId {
+        self.observe::<OnLink<R>>(runner)
+    }
+
+    /// Registers a GLOBAL observer for the relation-edge trigger
+    /// [`OnUnlink<R>`](crate::ecs::core::relationship::OnUnlink): fires whenever
+    /// an `R` edge is DESTROYED (an explicit remove, the old side of a
+    /// re-target, a source despawn, or a non-cascading target teardown),
+    /// targeting the source entity. The runner reads the destroyed `old_target`
+    /// from the `OnUnlink<R>` event.
+    #[inline]
+    pub fn observe_on_unlink<R: Relationship>(&mut self, runner: TriggerFn) -> ObserverId {
+        self.observe::<OnUnlink<R>>(runner)
+    }
+
+    /// `true` iff ANY observer (global or entity-targeted) listens for the
+    /// trigger id `tid`. The cold 0%-probe for the edge-fire sites: one
+    /// global-registry read + one entity-store sticky-aggregate read, both
+    /// lazy-`None`-gated, so a world with no edge observers pays ~nothing.
+    #[inline]
+    pub(crate) fn has_edge_observer(&self, tid: TriggerId) -> bool {
+        self.triggers.has(tid) || self.entity_observers.has_any_custom(tid)
+    }
+
+    /// Fires [`OnLink<R>`](crate::ecs::core::relationship::OnLink) on the source
+    /// of a freshly-COMMITTED `R` edge, gated behind the cold 0%-probe.
+    ///
+    /// Called from
+    /// [`LinkCommand::apply`](crate::ecs::core::relationship::LinkCommand) AFTER
+    /// the dangling-target guard, under `&mut EcsMaster` at the apply window —
+    /// the synchronous `trigger` walk is sound there (it re-enters the audited
+    /// command drain on a separate allocation; W3 fence preserved because the
+    /// hook bodies only ENQUEUE, never fire).
+    #[inline]
+    pub(crate) fn fire_on_link<R: Relationship>(&mut self, source: Entity, target: Entity) {
+        let tid = Self::trigger_id::<OnLink<R>>();
+        if self.has_edge_observer(tid) {
+            self.fire_edge_observer::<OnLink<R>>(tid, source, OnLink::<R>::new(target));
+        }
+    }
+
+    /// Fires [`OnUnlink<R>`](crate::ecs::core::relationship::OnUnlink) on the
+    /// source of a freshly-DESTROYED `R` edge, gated behind the cold 0%-probe.
+    ///
+    /// Called from
+    /// [`UnlinkCommand::apply`](crate::ecs::core::relationship::UnlinkCommand)
+    /// only when the source was actually present in the target's reverse
+    /// collection (the committed-edge test), under `&mut EcsMaster`.
+    #[inline]
+    pub(crate) fn fire_on_unlink<R: Relationship>(&mut self, source: Entity, target: Entity) {
+        let tid = Self::trigger_id::<OnUnlink<R>>();
+        if self.has_edge_observer(tid) {
+            self.fire_edge_observer::<OnUnlink<R>>(tid, source, OnUnlink::<R>::new(target));
+        }
+    }
+
+    /// Drives the synchronous trigger walk for an edge event — a `#[cold]`
+    /// out-of-line tail so the gated common case (no edge observer) keeps the
+    /// committed-edge `apply` body compact (I-cache).
+    #[cold]
+    #[inline(never)]
+    fn fire_edge_observer<E: Trigger>(&mut self, tid: TriggerId, source: Entity, event: E) {
+        self.trigger_walk::<E>(tid, source, &event);
+    }
+
     /// Fires a custom trigger at `target`: runs global observers for `E`, then
-    /// entity-targeted observers for `target`, then bubbles up `E::Traversal`
-    /// if propagation is requested.
+    /// entity-targeted observers for `target`, then propagates per
+    /// `E::PROPAGATION` ([`Up`](PropagationMode::Up) bubble or
+    /// [`Down`](PropagationMode::Down) broadcast).
     ///
     /// `event` is moved in and lives on this frame until the walk ends; runners
     /// read it through a read-only `*const u8` and cannot move or free it.
@@ -3279,18 +3360,36 @@ impl EcsMaster {
         static_trigger_id::<E>()
     }
 
-    /// The custom-trigger fire + propagation walk (Feature 2 algorithm B).
+    /// The custom-trigger fire + propagation walk (Feature 2 algorithm B,
+    /// extended with the `Down` broadcast — Decision 6).
     ///
     /// Re-derives all `world`-borrows per turn (OBS-FIRE-LOOP); the propagation
     /// `propagate` bool lives in TLS via [`PropagateGuard`] (FIX W9). `target` /
     /// `original_target` travel in [`TriggerContext`] BY VALUE.
+    ///
+    /// Branches on `E::PROPAGATION` (const-folded): the
+    /// [`None`](PropagationMode::None) / [`Up`](PropagationMode::Up) arm is the
+    /// byte-identical pre-broadcast linear walk; the
+    /// [`Down`](PropagationMode::Down) arm is the relation-aware fan-out
+    /// (`trigger_broadcast_down`). For a non-`Down` trigger the `Down` call site
+    /// const-folds away entirely (the 0%-gate at the type level — existing `Up`
+    /// / `None` triggers keep their exact code generation).
     fn trigger_walk<E: Trigger>(&mut self, tid: TriggerId, target: Entity, event: &E) {
         let event_ptr: *const u8 = (event as *const E).cast();
         let original = target;
-        let mut current = target;
         // Save/restore the propagation TLS across this (possibly re-entrant)
         // walk; seed it with the event's compile-time AUTO_PROPAGATE.
         let _guard = PropagateGuard::enter(E::AUTO_PROPAGATE);
+
+        if const { matches!(E::PROPAGATION, PropagationMode::Down) } {
+            // Relation-aware DOWNWARD broadcast: fire on `target`, then DFS
+            // `E::Broadcast`'s reverse collection, per-node propagate snapshot.
+            self.trigger_broadcast_down::<E>(tid, original, event_ptr);
+            return;
+        }
+
+        // ── None / Up: the byte-identical pre-broadcast linear walk ─────────
+        let mut current = target;
         let mut hops = 0usize;
         loop {
             let ctx = TriggerContext { target: current, original_target: original, trigger_id: tid };
@@ -3333,6 +3432,139 @@ impl EcsMaster {
             match next {
                 Some(parent) => current = parent,
                 None => break,
+            }
+        }
+    }
+
+    /// Fires the GLOBAL + entity-targeted custom-trigger observers for `tid` at
+    /// ONE node (`current`), the per-node fire used by the `Down` broadcast.
+    ///
+    /// Mirrors the per-node fire of the linear walk exactly: probe the sticky
+    /// bit first (`&self`), fire global observers (re-mint `world_ptr`), then —
+    /// if the archetype observes — fire entity-targeted observers (re-mint).
+    /// No `world`-derived `&` spans a raw-pointer use (F2 / OBS-FIRE-LOOP).
+    #[inline]
+    fn fire_node_triggers(
+        &mut self,
+        tid: TriggerId,
+        current: Entity,
+        original: Entity,
+        event_ptr: *const u8,
+    ) {
+        let ctx = TriggerContext { target: current, original_target: original, trigger_id: tid };
+        let has_entity_obs = self.entity_archetype_has_entity_observer(current);
+        fire_global_triggers(NonNull::from(&mut *self), tid, ctx, event_ptr);
+        if has_entity_obs {
+            fire_entity_triggers(NonNull::from(&mut *self), tid, ctx, event_ptr);
+        }
+    }
+
+    /// DOWNWARD broadcast walk (Decision 6 / critic W4): fires `E` on `root`,
+    /// then recursively over every source in `E::Broadcast`'s reverse
+    /// collection — an explicit-stack DFS that reuses the EXACT depth-cap +
+    /// `!ACYCLIC` visited discipline of the query-side `DescendantsIter`, with a
+    /// PER-NODE propagate snapshot so a `propagate(false)` from one node's
+    /// observer prunes ONLY that node's subtree (never a sibling's).
+    ///
+    /// # Per-node propagate snapshot (critic W4)
+    ///
+    /// The linear `Up` bubble is a single chain, so one propagate `Cell`
+    /// suffices. A `Down` DFS has many live sibling subtrees, so a global flag
+    /// would let node X's `propagate(false)` leak to sibling Y. Each node's fire
+    /// is wrapped in a snapshot: seed `true` (fan-out-all default), fire, read
+    /// the post-fire flag (the prune decision for THIS node's children), then
+    /// RESTORE the caller's flag before moving to the next sibling. A node is
+    /// expanded (its children pushed) iff its own post-fire flag stayed `true`.
+    ///
+    /// # Cycle + depth safety
+    ///
+    /// Bounded by [`MAX_PROPAGATION_DEPTH`](crate::ecs::constants::MAX_PROPAGATION_DEPTH).
+    /// For a non-`ACYCLIC` `E::Broadcast` a `#[cold]` function-local visited set
+    /// keeps each node visited at most once; for an `ACYCLIC` relation (e.g.
+    /// `ChildOf`) the visited guard const-folds away and the depth cap alone
+    /// bounds the walk — identical to `DescendantsIter`.
+    #[cold]
+    #[inline(never)]
+    fn trigger_broadcast_down<E: Trigger>(
+        &mut self,
+        tid: TriggerId,
+        root: Entity,
+        event_ptr: *const u8,
+    ) {
+        use crate::ecs::constants::MAX_PROPAGATION_DEPTH;
+
+        // Fire on the root first (depth 0). Snapshot/seed-true/restore so the
+        // root's `propagate(false)` prunes the whole broadcast (no descent).
+        let saved = get_propagate();
+        propagate(true);
+        self.fire_node_triggers(tid, root, root, event_ptr);
+        let expand_root = get_propagate();
+        propagate(saved);
+        if !expand_root {
+            return;
+        }
+
+        // Explicit-stack DFS frontier of `(node, depth)`, transient scratch
+        // (function-local — NOT a durable side store, Principle 0). Seed with the
+        // root's direct sources at depth 1.
+        let mut stack: Vec<(Entity, usize)> = Vec::new();
+        let mut visited = VisitedSet::default();
+        if const { !<E::Broadcast as Relationship>::ACYCLIC } {
+            visited.insert_seen(root.id().0);
+        }
+        self.push_broadcast_sources::<E>(root, 1, &mut stack);
+
+        while let Some((node, depth)) = stack.pop() {
+            debug_assert!(
+                depth <= MAX_PROPAGATION_DEPTH,
+                "trigger Down broadcast exceeded MAX_PROPAGATION_DEPTH"
+            );
+            // `!ACYCLIC`: skip a node already fired (the ≤ C·N guarantee + cycle
+            // termination). Const-folds away for an acyclic broadcast relation.
+            if const { !<E::Broadcast as Relationship>::ACYCLIC }
+                && visited.insert_seen(node.id().0)
+            {
+                continue;
+            }
+            // PER-NODE propagate snapshot (W4): seed true (fan-out-all), fire,
+            // read the prune decision for THIS node's subtree, then restore.
+            let saved = get_propagate();
+            propagate(true);
+            self.fire_node_triggers(tid, node, root, event_ptr);
+            let expand = get_propagate();
+            propagate(saved);
+            // Descend only if this node did not prune itself AND we are below the
+            // depth cap. A pruned node still counts as fired (it was), but its
+            // subtree is skipped — exactly the sibling-isolating semantics.
+            if expand && depth < MAX_PROPAGATION_DEPTH {
+                self.push_broadcast_sources::<E>(node, depth + 1, &mut stack);
+            }
+        }
+    }
+
+    /// Pushes every source pointing at `node` through `E::Broadcast`'s reverse
+    /// collection onto the DFS `stack` at `depth` (the `Down` broadcast fan-out
+    /// step). Reuses the existing reverse index by O(1) index — the same hop
+    /// `DescendantsIter::push_sources` pays. Re-derives the read-only view per
+    /// call so no `world`-derived `&` spans a fire (OBS-FIRE-LOOP).
+    #[inline]
+    fn push_broadcast_sources<E: Trigger>(
+        &self,
+        node: Entity,
+        depth: usize,
+        stack: &mut Vec<(Entity, usize)>,
+    ) {
+        // The reverse-index component on the broadcast relation's target side.
+        let Some(reverse) =
+            self.get_component::<<E::Broadcast as Relationship>::Target>(node)
+        else {
+            return;
+        };
+        let collection = reverse.collection();
+        let len = collection.len();
+        for i in 0..len {
+            if let Some(source) = collection.get(i) {
+                stack.push((source, depth));
             }
         }
     }

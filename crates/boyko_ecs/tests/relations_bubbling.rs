@@ -49,6 +49,8 @@ struct LikeBubble;
 impl Trigger for LikeBubble {
     const AUTO_PROPAGATE: bool = true;
     type Traversal = Toward<Likes>;
+    // `Up` trigger — `Broadcast` is never read; an in-scope `Relationship`.
+    type Broadcast = Likes;
 }
 
 /// Spawns `n` markers; returns now-live handles (one apply window).
