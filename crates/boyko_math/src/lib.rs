@@ -32,9 +32,11 @@
 pub mod affine;
 pub mod mat;
 pub mod quat;
+pub mod ray;
 pub mod vec;
 
 pub use affine::Affine3A;
 pub use mat::{Mat3, Mat4};
 pub use quat::Quat;
+pub use ray::{Ray, ray_aabb, ray_sphere};
 pub use vec::{Vec2, Vec3, Vec4};

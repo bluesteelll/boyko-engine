@@ -63,7 +63,9 @@ use crate::resources::{
     StretchItem, StretchTarget, UiSafeArea, UiViewport,
 };
 use crate::units::{AlignCross, AlignMain, LayoutType, PositionType, Unit};
-use crate::world::components::{UiWorldAnchor, UiWorldCulled, UiWorldHidden, UiWorldProjection};
+use crate::world::components::{
+    UiWorldAnchor, UiWorldCulled, UiWorldHidden, UiWorldOccluded, UiWorldProjection,
+};
 
 // ───────────────────────── discovery ──────────────────────────────────────
 
@@ -288,7 +290,11 @@ fn layout_root(
             .unwrap_or_default();
         let culled = world.is_enabled::<UiWorldCulled>(root);
         let hidden = world.is_enabled::<UiWorldHidden>(root);
-        if !proj.visible || culled || hidden {
+        // GUI P7b: the third layout-skip authority — the CPU-proxy depth-test
+        // occlusion bit, owned by `ui_world_pick_system`. Independent of cull /
+        // hide (distinct bits, no race). An occluded root is not laid out.
+        let occluded = world.is_enabled::<UiWorldOccluded>(root);
+        if !proj.visible || culled || hidden || occluded {
             return;
         }
         // Uniform subtree scale (1.0 for ScreenSpace; ref/dist for WorldScaled).

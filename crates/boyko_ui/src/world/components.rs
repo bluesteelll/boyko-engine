@@ -136,13 +136,14 @@ impl Default for UiWorldAnchor {
 /// written ONLY by the layout pass (no pre-pass write race).
 ///
 /// AUTHOR-NEVER-WRITES; auto-inserted by `UiWorldAnchor`'s `#[require(...)]`.
-/// The [`Default`] (`visible == false`, `scale == 1.0`, `fade == 1.0`) lays a
-/// root out at the origin, invisible, until the first projection runs.
+/// The [`Default`] (`visible == false`, `scale == 1.0`, `fade == 1.0`,
+/// `depth == 1.0`) lays a root out at the origin, invisible, until the first
+/// projection runs.
 ///
 /// `#[repr(C)]`, POD `Copy`, `PartialEq` so the project system can `set_if_neq`
 /// it (the Changed-gate: a still anchor + still camera writes nothing).
 #[repr(C)]
-#[derive(Component, Clone, Copy, Debug, PartialEq, Default)]
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
 pub struct UiWorldProjection {
     /// Projected screen-space top-left seed, logical px (+x right, +y down) —
     /// the SAME basis as [`ComputedRect`](crate::components::ComputedRect) /
@@ -157,13 +158,45 @@ pub struct UiWorldProjection {
     /// monotonically non-increasing in eye-distance. The render path multiplies
     /// alpha by it (deferred — not applied by the P7a CPU core).
     pub fade: f32,
+    /// NDC z of the anchor point (= `ProjectedPoint.ndc_z`, previously discarded,
+    /// P7b/W1). Default `1.0` = the far plane / "nearest-neutral": a far-plane /
+    /// no-op depth that never reads as "in front" of real geometry, so a
+    /// default-constructed projection cannot spuriously win a future z-order.
+    /// Forward-looking GPU-depth / z-order seam: a future GPU-depth UI pass or a
+    /// CPU z-sort can consume it. The P7b occlusion is a CPU proxy and does NOT
+    /// read this — it is stored only.
+    pub depth: f32,
     /// `false` when the anchor is behind the camera or off-screen (the
     /// CPU-testable cull mirror; the layout pass skips a `!visible` world root).
+    /// STAYS LAST — author-never-writes.
     pub visible: bool,
 }
 
-const _: () = assert!(size_of::<UiWorldProjection>() == 20);
+// Layout pin (house style): 5×f32 (20 B) + `bool` + 3 B tail pad = 24 B at
+// align 4 (P7b grew it from 20 B by inserting `depth: f32` before `visible`). A
+// silent layout drift must fail the build rather than read as "correct".
+const _: () = assert!(size_of::<UiWorldProjection>() == 24);
 const _: () = assert!(align_of::<UiWorldProjection>() == 4);
+
+// `depth` defaults to the far-plane-neutral `1.0`, so `Default` is hand-written
+// rather than derived: a derived `Default` would give `depth: 0.0` = the NEAR
+// plane, which a future z-order would read as "in front of everything" — the
+// wrong neutral. The other neutrals (`scale: 1.0`, `fade: 1.0`, `visible:
+// false`) preserve the previous derived/documented semantics exactly.
+impl Default for UiWorldProjection {
+    /// A root at the origin, invisible, unit scale + fade, far-plane depth.
+    #[inline]
+    fn default() -> Self {
+        Self {
+            screen_x: 0.0,
+            screen_y: 0.0,
+            scale: 1.0,
+            fade: 1.0,
+            depth: 1.0,
+            visible: false,
+        }
+    }
+}
 
 /// The "hovered 3D entity" input the FUTURE P7b GPU cursor-ray pick populates.
 ///
@@ -198,3 +231,104 @@ pub struct UiWorldCulled;
 #[derive(Component, Clone, Copy, Debug)]
 #[component(storage = "bitset")]
 pub struct UiWorldHidden;
+
+/// The shape of a [`UiPickable`] bound, in the entity's LOCAL frame (transformed
+/// by its `GlobalTransform` at pick time, GUI P7b). `#[repr(C)]` POD enum.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum UiPickShape {
+    /// A sphere of `radius`, centered at the entity's world translation.
+    Sphere {
+        /// The sphere radius in the entity's local frame (scaled by the uniform
+        /// transform scale at pick time).
+        radius: f32,
+    },
+    /// An axis-aligned box of `half_extents`, centered at the world translation.
+    Aabb {
+        /// Per-axis half-extents in the entity's local frame (scaled by the
+        /// uniform transform scale at pick time).
+        half_extents: [f32; 3],
+    },
+}
+
+/// Marks a SCENE entity (NOT a UI root) as cursor-ray pickable for world-space UI
+/// (GUI P7b).
+///
+/// The pick (`ui_world_pick_system`) ray-tests this bound and writes the nearest
+/// hit into [`HoveredWorldEntity`]; the existing
+/// [`ui_world_visibility_system`](super::visibility::ui_world_visibility_system)
+/// then shows the [`UiWorldAnchor`] root whose `EntityAnchor(target)` equals the
+/// picked entity. THEREFORE `UiPickable` MUST sit on the entity an anchor tracks,
+/// alongside a `GlobalTransform`. A `UiPickable` placed on the UI ROOT instead
+/// would never match any `EntityAnchor` (the visibility system matches the picked
+/// id against `WorldTarget::EntityAnchor`), so nothing would ever show. NOT
+/// coupled to `boyko_physics` colliders (`boyko_ui` does not depend on
+/// `boyko_physics` — Principle 0: the pick bound is a first-class UI component,
+/// not a borrowed physics primitive).
+///
+/// The shape is local; the pick applies the `GlobalTransform`'s translation + a
+/// UNIFORM scale to the bound. The scale is the conservative per-axis bound
+/// `s = max(‖col_0‖, ‖col_1‖, ‖col_2‖)` of the transform's linear part (the
+/// COLUMN norms of the ROW-MAJOR `Mat3 { rows: [Vec3; 3] }`:
+/// `‖col_i‖ = (rows[0][i], rows[1][i], rows[2][i]).length()` — NOT a max-abs
+/// element). A uniform-scaled target has equal column norms; a non-uniform-scaled
+/// target conservatively uses the largest (the bound never shrinks below the true
+/// shape on any axis). True OBB picking is out of scope.
+///
+/// O1: a [`UiWorldAnchor`] whose `target` is [`WorldTarget::WorldPos`] has NO
+/// self-exclusion in the occlusion pass (`self_target = None`) — there is no
+/// scene entity to exclude, so a front pickable on (or near) the fixed point DOES
+/// occlude its label. Defensible: a `WorldPos` label is "a point in the air", not
+/// "a label on object X".
+///
+/// `#[repr(C)]`, POD `Copy`, its own SoA column.
+#[repr(C)]
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
+pub struct UiPickable {
+    /// The pick bound, in the entity's local frame.
+    pub shape: UiPickShape,
+    /// Pick-layer mask (a bitset of layers this target lives on); the pick's
+    /// `layer_mask` ANDs against it. `u32::MAX` (default) = "all layers".
+    pub layers: u32,
+}
+
+// Layout pin (house style): `UiPickShape` is a tagged union — the `Aabb` arm
+// carries `[f32; 3]` (12 B) and the discriminant rounds the enum to 16 B at
+// align 4; `+ layers: u32` (4 B) makes the struct 20 B at align 4. A silent
+// layout drift (a widened payload) must fail the build rather than read as
+// "correct".
+const _: () = assert!(size_of::<UiPickShape>() == 16);
+const _: () = assert!(align_of::<UiPickShape>() == 4);
+const _: () = assert!(size_of::<UiPickable>() == 20);
+const _: () = assert!(align_of::<UiPickable>() == 4);
+
+impl Default for UiPickable {
+    /// A unit-sphere pickable on all layers (the simplest "a clickable point").
+    #[inline]
+    fn default() -> Self {
+        Self {
+            shape: UiPickShape::Sphere { radius: 0.5 },
+            layers: u32::MAX,
+        }
+    }
+}
+
+/// The DEPTH-TEST occlusion EnableTag, OWNED by `ui_world_pick_system`'s
+/// occlusion pass (GUI P7b, Decision 5). A bitset tag
+/// (`#[component(storage = "bitset")]`): O(1) toggle, no archetype migration —
+/// IDENTICAL backend to [`UiWorldCulled`] / [`UiWorldHidden`].
+///
+/// Set on a `depth_test == true` world-anchor root whose anchor point is occluded
+/// by a nearer [`UiPickable`] surface (a CPU PROXY against the SAME bounds the
+/// pick ray-tests — this is NOT a GPU depth-buffer test). The layout pass skips a
+/// root with this bit set. Independent of [`UiWorldCulled`] (frustum,
+/// project-owned) and [`UiWorldHidden`] (hover, visibility-owned): a third
+/// authority over a distinct bit, so the three never race a shared bit.
+/// `depth_test == false` roots are NEVER set (always-on-top overlay).
+///
+/// O1: a [`WorldTarget::WorldPos`] anchor has NO self-exclusion in occlusion — a
+/// front pickable on its anchor point DOES occlude it (there is no scene entity
+/// to exclude; see [`UiPickable`]).
+#[derive(Component, Clone, Copy, Debug)]
+#[component(storage = "bitset")]
+pub struct UiWorldOccluded;

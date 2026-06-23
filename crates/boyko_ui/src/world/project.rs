@@ -161,6 +161,37 @@ fn resolve_fade(anchor: &UiWorldAnchor, dist: f32) -> f32 {
     t.clamp(0.0, 1.0)
 }
 
+/// Resolves an anchor's FINAL world point (the target base + its `offset`), or
+/// `None` for a dangling [`WorldTarget::EntityAnchor`] (despawned target or one
+/// without a `GlobalTransform`).
+///
+/// The single source of truth for "where is this anchor in the world", shared by
+/// [`ui_world_project_system`] (the projected point) and `ui_world_pick_system`'s
+/// occlusion pass (the eye→anchor ray) so the two can never drift apart. A
+/// `WorldPos` target is the fixed point; an `EntityAnchor` reads the tracked
+/// entity's `GlobalTransform.translation` live. The caller decides what `None`
+/// means (the project system marks the root invisible; the pick system clears the
+/// occlusion bit).
+#[inline]
+pub(crate) fn resolve_anchor_point(
+    world: &EcsMaster,
+    anchor: &UiWorldAnchor,
+) -> Option<[f32; 3]> {
+    let base = match anchor.target {
+        WorldTarget::WorldPos(p) => p,
+        WorldTarget::EntityAnchor(target) => {
+            let gt = world.get_component::<GlobalTransform>(target)?;
+            let t = gt.translation();
+            [t.x, t.y, t.z]
+        }
+    };
+    Some([
+        base[0] + anchor.offset[0],
+        base[1] + anchor.offset[1],
+        base[2] + anchor.offset[2],
+    ])
+}
+
 /// Projects every [`UiWorldAnchor`] root to a screen seed (GUI P7a).
 ///
 /// An EXCLUSIVE system (`&mut EcsMaster`): the engine's `Query` has no
@@ -244,29 +275,14 @@ pub fn ui_world_project_system(world: &mut EcsMaster) {
              (mutually-exclusive root-positioning kinds)"
         );
 
-        // Resolve the world point: a fixed point, or a live entity's translation.
-        // A dangling EntityAnchor (despawned / no GlobalTransform) leaves the
-        // anchor invisible this frame rather than projecting a stale point.
-        let base = match anchor.target {
-            WorldTarget::WorldPos(p) => p,
-            WorldTarget::EntityAnchor(target) => {
-                match world.get_component::<GlobalTransform>(target) {
-                    Some(gt) => {
-                        let t = gt.translation();
-                        [t.x, t.y, t.z]
-                    }
-                    None => {
-                        mark_invisible(world, root);
-                        continue;
-                    }
-                }
-            }
+        // Resolve the world point: a fixed point, or a live entity's translation
+        // (+ the anchor offset), via the shared helper. A dangling EntityAnchor
+        // (despawned / no GlobalTransform) leaves the anchor invisible this frame
+        // rather than projecting a stale point.
+        let Some(point) = resolve_anchor_point(world, &anchor) else {
+            mark_invisible(world, root);
+            continue;
         };
-        let point = [
-            base[0] + anchor.offset[0],
-            base[1] + anchor.offset[1],
-            base[2] + anchor.offset[2],
-        ];
 
         let pp = project_world_to_screen(&view.view_proj, point, viewport.width, viewport.height);
 
@@ -289,6 +305,7 @@ pub fn ui_world_project_system(world: &mut EcsMaster) {
             screen_y: pp.y,
             scale,
             fade,
+            depth: pp.ndc_z,
             visible: pp.visible,
         };
 

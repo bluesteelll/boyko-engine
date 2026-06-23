@@ -62,3 +62,8 @@ boyko-threadpool = { path = "../boyko_threadpool" }
 # render crate (verified: its deps are ecs/macros/utils/input/fontbake/scene/math), so
 # no production cycle is introduced.
 boyko-ui = { path = "../boyko_ui" }
+# GUI P7b screenshot test ONLY: the world-UI proof drives the SHIPPED pick/project/
+# visibility systems (boyko-ui::world), whose pick reads `PhysicalInput` (boyko-input).
+# Acyclic + TEST-ONLY: `boyko_render` (dev) -> `boyko-input`; `boyko-input` names no
+# render crate (its deps are ecs/macros/utils/math), so no production cycle is introduced.
+boyko-input = { path = "../boyko_input" }

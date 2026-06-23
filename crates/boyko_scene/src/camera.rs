@@ -34,7 +34,7 @@ use boyko_ecs::ecs::core::iters::query::Query;
 use boyko_ecs::ecs::core::system::{Res, ResMut};
 use boyko_macros::{Component, Resource};
 
-use boyko_math::{Affine3A, Mat3, Mat4, Vec3, Vec4};
+use boyko_math::{Affine3A, Mat3, Mat4, Ray, Vec3, Vec4};
 
 use crate::transform::{GlobalTransform, Transform};
 
@@ -347,6 +347,79 @@ impl Default for ViewUniform {
     #[inline]
     fn default() -> Self {
         Self::IDENTITY
+    }
+}
+
+/// The world-space cursor ray for a CONTINUOUS logical-pixel sample `(px, py)` at
+/// logical viewport extent `(vp_w, vp_h)` under `view` — the exact inverse of
+/// `boyko_ui`'s `project_world_to_screen` and a bit-mirror of the SDF marcher's
+/// perspective ray-gen (`composite_ray`), so a pick aligns pixel-accurately with
+/// what the marcher renders.
+///
+/// `(px, py)` are in LOGICAL pixels in the `UiViewport` / `ComputedRect` basis
+/// (+x right, +y DOWN). They are a CONTINUOUS sample (a cursor position, NOT a
+/// pixel center): `ndc_x = px / vp_w * 2 - 1` with NO `+0.5`. This makes
+/// `camera_ray` the exact inverse of `project_world_to_screen` (which uses the same
+/// `ndc = coord / extent * 2 - 1` + y-flip). Pass `px + 0.5` for an integer pixel
+/// `px` to reproduce the marcher's pixel-CENTER ray (what the cross-check golden
+/// does).
+///
+/// # PERSPECTIVE (`view.fov_y != 0.0`)
+///
+/// `origin = eye`, `dir = normalize(forward + right * sx + up * sy)`, with
+/// `aspect = vp_w / vp_h` DERIVED FROM THE HANDED VIEWPORT EXTENT — NOT
+/// [`ViewUniform::aspect`]. The marcher's `CompositeCamera::Perspective.aspect` is
+/// itself `w / h` from the push constants, so deriving it here from the same
+/// viewport extent is the faithful mirror and is immune to a stale `view.aspect`.
+/// [`Vec3::normalize`] guards a zero `dir` (→ [`Vec3::ZERO`]) where the marcher's
+/// raw `sqrt`+divide does not; for a valid forward camera `dir` is never zero, so
+/// they agree to f32 epsilon on the pixels the cross-check exercises (the guard
+/// only diverges on a degenerate camera, where the marcher emits a non-finite ray
+/// anyway — documented, not a bug).
+///
+/// # ORTHOGRAPHIC (`view.fov_y == 0.0`)
+///
+/// Best-effort, camera-driven: `origin = eye + right * ndc_x + up * ndc_y` (a UNIT
+/// half-extent placeholder), `dir = forward`. The ortho half-extents are not stored
+/// as scalars on [`ViewUniform`], so a marcher-accurate ortho ray is impossible
+/// from the view alone — and the marcher's ortho arm uses FIXED legacy constants,
+/// NOT the camera. **Ortho pick is therefore APPROXIMATE and does NOT match the
+/// marcher's ortho fixture.** P7b targets perspective (the screenshot scene is
+/// perspective); a future phase that adds ortho half-extents to [`ViewUniform`]
+/// upgrades this arm.
+#[inline]
+pub fn camera_ray(view: &ViewUniform, px: f32, py: f32, vp_w: f32, vp_h: f32) -> Ray {
+    // A zero-extent viewport would explode the NDC divide; the caller (the pick
+    // system) guards it, but trip it in debug for an out-of-contract host.
+    debug_assert!(
+        vp_w > 0.0 && vp_h > 0.0,
+        "camera_ray: viewport extent must be > 0 (vp_w {vp_w}, vp_h {vp_h})"
+    );
+
+    // NDC, identical to `project_world_to_screen`'s round-trip: +y down on screen
+    // is +y up in NDC, so the y term is flipped.
+    let ndc_x = (px / vp_w) * 2.0 - 1.0;
+    let ndc_y = -((py / vp_h) * 2.0 - 1.0);
+
+    let eye = view.camera_pos.xyz();
+    let fwd = view.cam_forward.xyz();
+    let right = view.cam_right.xyz();
+    let up = view.cam_up.xyz();
+
+    if view.fov_y != 0.0 {
+        // PERSPECTIVE: aspect from the HANDED extent (NOT view.aspect) — the
+        // marcher's payload aspect is itself w/h from the same viewport.
+        let tan_half = (view.fov_y * 0.5).tan();
+        let aspect = vp_w / vp_h;
+        let sx = ndc_x * aspect * tan_half;
+        let sy = ndc_y * tan_half;
+        let dir = (fwd + right * sx + up * sy).normalize();
+        Ray::new(eye, dir)
+    } else {
+        // ORTHOGRAPHIC: best-effort, unit-half-extent placeholder (documented
+        // approximate; does NOT match the marcher's fixed-constant ortho fixture).
+        let origin = eye + right * ndc_x + up * ndc_y;
+        Ray::new(origin, fwd)
     }
 }
 
