@@ -162,6 +162,14 @@ float3 sdf_normal(float3 p) {
 // (P9/P10/P12) ONLY this body changes — consumers stay byte-untouched.
 float field_distance(float3 p) { return sdf(p); }
 
+// --- The primary-march SKIP gateway (SDF brick-atlas campaign) -----------------
+// CALLED ONLY by the primary-march skip/approach (M1); shadow/AO/normal/refine
+// stay on analytic `sdf`/`field_distance`. Today a verbatim analytic alias; M1
+// swaps THIS body to the brick fetch (a trilinear `R8_SNORM` sample that is a
+// conservative LOWER BOUND on `sdf`, so the marcher never overshoots). Source-only
+// for W0 — no shader yet calls it and no .spv is recompiled.
+float field_skip(float3 p) { return sdf(p); }
+
 // --- P4b: the conservative-lower-bound invariant + the smin Lipschitz constant -
 //
 // # FIELD LOWER-BOUND INVARIANT (D7; the sphere-tracing precondition — INVIOLABLE)

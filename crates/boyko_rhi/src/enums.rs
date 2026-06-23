@@ -241,6 +241,11 @@ pub enum Format {
     /// `VK_FORMAT_B8G8R8A8_SRGB` — sRGB-encoded 8-bit BGRA (a common sRGB swapchain
     /// format). See [`Self::R8G8B8A8Srgb`].
     B8G8R8A8Srgb = 50,
+    /// `VK_FORMAT_R8_SNORM` — a single signed-normalized 8-bit channel mapping the
+    /// byte range onto `[-1, 1]` (SDF brick-atlas campaign M0/M1: the quantized
+    /// narrow-band distance the 8³ brick atlas stores; the hardware trilinear
+    /// sampler decodes a code to its `[-band_half, band_half]` distance).
+    R8Snorm = 9,
     /// `VK_FORMAT_R16_SFLOAT` — a compact single-channel float (deferred SDF use).
     R16Sfloat = 76,
     /// `VK_FORMAT_R32_SFLOAT` — a single 32-bit float (Lighting L0b: the `gViewT`

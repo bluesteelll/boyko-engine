@@ -66,6 +66,8 @@ fn sqrt(x: f32) -> f32 {
     }
 }
 
+pub mod brick;
+
 /// SDF primitive kind discriminant. Matches the shader's `KIND_*` constants.
 pub mod sdf_kind {
     /// A sphere primitive — `params.x` is the radius.
@@ -223,6 +225,213 @@ pub const HEADER_BASE_WORDS: usize = 4;
 // The shader hardcodes `SDF_EDIT_WORDS = 12u`; pin it so a layout change that
 // desyncs the host encoder from the shader is a build error.
 const _: () = assert!(SDF_EDIT_WORDS == 12, "SDF_EDIT_WORDS must equal the shader's 12u");
+
+// ---- The unified edit-authority payload + per-edit AABB (brick campaign W0) ----
+
+/// A conservative axis-aligned bound for one [`SdfEdit`]'s region of influence.
+///
+/// `min`/`max` are world-space corners. The bound is CONSERVATIVE: it covers the
+/// primitive's extent expanded by the narrow-band half-width AND the edit's
+/// smooth-blend radius, so an edit's analytic influence on the field can never
+/// reach outside its own AABB (see [`edit_aabb`]). The brick classifier
+/// ([`crate::brick::classify_brick`]) calls a brick EMPTY only when NO edit AABB
+/// overlaps it — this conservatism is what makes that skip sound.
+///
+/// `#[repr(C)]` POD: two contiguous `[f32; 3]`, 24 bytes, 4-byte aligned. It is a
+/// COLD trailing member of [`SdfEditField`]; it is NEVER interleaved into the hot
+/// `[SdfEdit; MAX_SDF_EDITS]` the physics AVX2 kernel streams.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SdfEditAabb {
+    /// The minimum (most-negative) world-space corner.
+    pub min: [f32; 3],
+    /// The maximum (most-positive) world-space corner.
+    pub max: [f32; 3],
+}
+
+/// The unified SDF edit-authority payload: the ONE owner of the scene edit list
+/// (principle 0). Every consumer — the physics narrowphase, the GPU encoder, and
+/// the brick reference ([`crate::brick`]) — reads its edits from here.
+///
+/// # Layout contract (the W4 0%-regression keystone — INVIOLABLE)
+///
+/// `edits` is FIRST (offset 0) and BYTE-IDENTICAL to the standalone
+/// `[SdfEdit; MAX_SDF_EDITS]` the physics scalar/AVX2 kernels stream today: the
+/// hot array is unchanged, no new field is interleaved before or within it. The
+/// COLD members (`count`/`gen`/`_pad`/`aabbs`) trail AFTER the hot array, so the
+/// kernel's `&edits[..count]` slice is over the exact same bytes as before and the
+/// generated code is asm-identical.
+///
+/// - `edits`   — the hot, kernel-streamed `[SdfEdit; 16]` (offset 0).
+/// - `count`   — number of live edits (`<= MAX_SDF_EDITS`).
+/// - `gen`     — a monotonically-bumped generation stamp for cache invalidation
+///   (the brick atlas re-bakes when `gen` changes; M1 wiring).
+/// - `_pad`    — keeps `aabbs` 16-byte aligned and the header a round size.
+/// - `aabbs`   — the per-edit conservative bounds (`aabbs[i]` bounds `edits[i]`),
+///   recomputed on every [`push`](SdfEditField::push). COLD: read only by the
+///   brick classifier, never by the field-fold hot path.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct SdfEditField {
+    /// The hot edit list (only `edits[..count]` are live). MUST stay first +
+    /// byte-identical to the physics kernel's `[SdfEdit; MAX_SDF_EDITS]`.
+    pub edits: [SdfEdit; MAX_SDF_EDITS],
+    /// Number of live edits in `edits` (`<= MAX_SDF_EDITS`).
+    pub count: u32,
+    /// Generation stamp; bumped whenever the edit list changes (cache key).
+    ///
+    /// Named `gen` (a Rust 2024 reserved keyword, escaped as `r#gen`) — the cold
+    /// brick-cache invalidation generation, NOT a `Generator`.
+    pub r#gen: u32,
+    /// Padding so `aabbs` stays 16-byte aligned (the cold header is a round size).
+    pub _pad: [u32; 2],
+    /// Per-edit conservative bounds — `aabbs[i]` bounds `edits[i]`. COLD.
+    pub aabbs: [SdfEditAabb; MAX_SDF_EDITS],
+}
+
+/// Brick occupancy class — the result of [`crate::brick::classify_brick`].
+///
+/// `#[repr(u8)]` so it round-trips a single byte into the eventual GPU brick-meta
+/// column. `EmptyOutside`/`EmptyInside` bricks need NO voxel data (the marcher
+/// skips/fills them analytically); only `Surface` bricks allocate a voxel block.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BrickClass {
+    /// Provably outside every solid: the analytic field is `> band_half` over the
+    /// whole brick (no edit AABB overlaps it and the center samples positive).
+    EmptyOutside = 0,
+    /// Provably inside a solid: the analytic field is `< -band_half` over the whole
+    /// brick (no edit AABB overlaps it and the center samples negative).
+    EmptyInside = 1,
+    /// The narrow band crosses (or may cross) this brick: it needs voxel data.
+    Surface = 2,
+}
+
+/// The STORED narrow-band half-width (world units): the per-edit AABB skin in
+/// [`edit_aabb`] AND the brick atlas's `R8_SNORM` snorm scale
+/// ([`crate::brick::BAND_HALF_STORE`]) both use this value.
+///
+/// An edit influences the COMPOSED field out to roughly its smooth-blend radius
+/// plus the band the brick atlas stores; expanding the AABB by `band_half`
+/// guarantees the bound contains every point where this edit can move the field
+/// inside `[-band_half, +band_half]`. Tied to the brick STORE scale so the
+/// classifier's non-overlap test is conservative against the SAME band the fill
+/// quantizes.
+///
+/// This is the wide STORE band, deliberately DISTINCT from the marcher's narrower
+/// USABLE trust band ([`crate::brick::USABLE_BAND`] ≈ 0.4418) — the M0
+/// conservative-lower-bound fix stores a wider band so a trusted point's
+/// bracketing corners never saturate. See `brick.rs` for the trust-region
+/// contract. Growing this value only GROWS the per-edit AABBs, so the EMPTY
+/// classifier stays conservative (no EMPTY regression). Callers that bake at a
+/// different band pass their own value to [`edit_aabb`].
+pub const SDF_EDIT_BAND_HALF: f32 = 0.90;
+
+/// Computes a CONSERVATIVE world-space AABB for one [`SdfEdit`] (brick campaign).
+///
+/// The bound is the primitive's raw extent (sphere: `center ± radius`; box:
+/// `center ± half_extents`) EXPANDED on every face by `band_half + smoothness`:
+///
+/// - `band_half` covers the narrow band the brick atlas stores — a point that far
+///   from the surface still has `|field| <= band_half`, so it must be inside the
+///   bound for the classifier's non-overlap skip to stay sound.
+/// - `smoothness` covers the smooth-blend reach: a `smin`/`smax` join pulls the
+///   surface up to `k` away from the hard intersection, so the edit's influence
+///   extends that far past its hard extent.
+///
+/// A SUBTRACT edit still expands its carver's influence bound (a subtraction can
+/// CREATE surface wherever the carver reaches), so the op does not shrink the
+/// AABB — the carver region is exactly where the field can change, hence where a
+/// brick must NOT be declared empty.
+#[inline]
+pub fn edit_aabb(e: &SdfEdit, band_half: f32) -> SdfEditAabb {
+    let c = [e.center[0], e.center[1], e.center[2]];
+    // The raw primitive half-extent: the sphere's radius on every axis, or the
+    // box's per-axis half-extents.
+    let half = if e.kind == sdf_kind::BOX {
+        [e.params[0], e.params[1], e.params[2]]
+    } else {
+        [e.params[0], e.params[0], e.params[0]]
+    };
+    // The conservative skin: the stored band plus the smooth-blend reach. A
+    // SUBTRACT carver expands the SAME way — its reach is where it can carve.
+    let skin = band_half + e.smoothness.max(0.0);
+    SdfEditAabb {
+        min: [c[0] - half[0] - skin, c[1] - half[1] - skin, c[2] - half[2] - skin],
+        max: [c[0] + half[0] + skin, c[1] + half[1] + skin, c[2] + half[2] + skin],
+    }
+}
+
+impl SdfEditField {
+    /// The empty authority payload — no edits (`count == 0`, `gen == 0`).
+    ///
+    /// Every slot is seeded with an inert zero-radius union sphere at the origin
+    /// (never read past `count`); the matching `aabbs` slots are degenerate points.
+    #[inline]
+    pub fn new() -> Self {
+        let placeholder = SdfEdit::sphere([0.0, 0.0, 0.0], 0.0, sdf_op::UNION, 0.0);
+        let placeholder_aabb = SdfEditAabb { min: [0.0; 3], max: [0.0; 3] };
+        Self {
+            edits: [placeholder; MAX_SDF_EDITS],
+            count: 0,
+            r#gen: 0,
+            _pad: [0; 2],
+            aabbs: [placeholder_aabb; MAX_SDF_EDITS],
+        }
+    }
+
+    /// Appends one edit, recomputing its conservative `aabbs[i]` ([`edit_aabb`]
+    /// at [`SDF_EDIT_BAND_HALF`]). Returns `false` (and ignores the edit) once the
+    /// list is full ([`MAX_SDF_EDITS`]), matching the shader's edit-count clamp.
+    ///
+    /// Does NOT bump `gen` — the caller stamps a coherent batch with
+    /// [`bump_gen`](Self::bump_gen) once after a run of pushes.
+    #[inline]
+    pub fn push(&mut self, e: SdfEdit) -> bool {
+        let i = self.count as usize;
+        if i >= MAX_SDF_EDITS {
+            return false;
+        }
+        self.edits[i] = e;
+        self.aabbs[i] = edit_aabb(&e, SDF_EDIT_BAND_HALF);
+        self.count += 1;
+        true
+    }
+
+    /// Bumps the generation stamp (wrapping) — the cache key the brick atlas keys
+    /// its re-bake on. Call once after a coherent batch of [`push`](Self::push)es.
+    #[inline]
+    pub fn bump_gen(&mut self) {
+        self.r#gen = self.r#gen.wrapping_add(1);
+    }
+
+    /// The live edit slice (`edits[..count]`) — exactly what the field math folds
+    /// and the physics kernel streams (byte-identical to the legacy hot array).
+    #[inline]
+    pub fn edits(&self) -> &[SdfEdit] {
+        &self.edits[..self.count as usize]
+    }
+}
+
+impl Default for SdfEditField {
+    #[inline]
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// `edits` MUST be first (offset 0) so the kernel's `&edits[..count]` slice is over
+// the exact same bytes as the standalone `[SdfEdit; 16]` — the W4 hot-path
+// byte-identity contract. A drift here is silent physics/golden corruption.
+const _: () = assert!(
+    core::mem::offset_of!(SdfEditField, edits) == 0,
+    "SdfEditField::edits must be at offset 0 (byte-identical to the physics hot array)"
+);
+const _: () = assert!(
+    core::mem::size_of::<[SdfEdit; MAX_SDF_EDITS]>()
+        == MAX_SDF_EDITS * core::mem::size_of::<SdfEdit>(),
+    "the hot edit array must be a dense [SdfEdit; 16] with no interleaved padding"
+);
 
 // ---- The edit-list field math (single source of truth, mirrors the shader) ----
 

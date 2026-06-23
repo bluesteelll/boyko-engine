@@ -15,7 +15,9 @@
 //! [`Vec3`] ↔ `[f32; 3]` at the boundary. It does NOT reimplement the field math.
 
 use boyko_macros::Resource;
-use boyko_sdf_math::{MAX_SDF_EDITS, SdfEdit, sdf_edit_list, sdf_edit_list_normal};
+use boyko_sdf_math::{
+    MAX_SDF_EDITS, SdfEdit, SdfEditField, sdf_edit_list, sdf_edit_list_normal,
+};
 
 use crate::math::Vec3;
 
@@ -30,78 +32,79 @@ use crate::math::Vec3;
 ///
 /// `Default` is the EMPTY field (`count == 0`): an empty edit list evaluates to
 /// `+SDF_FAR` everywhere, so no body ever collides against an empty field.
-#[derive(Resource, Clone, Copy, Debug)]
-pub struct SdfField {
-    /// The ordered edit list (only `edits[..count]` are live). Capped at
-    /// [`MAX_SDF_EDITS`] — the same ceiling the shader's edit-list buffer uses, so
-    /// the CPU field can never describe a scene the GPU cannot render.
-    edits: [SdfEdit; MAX_SDF_EDITS],
-    /// Number of live edits in `edits` (`<= MAX_SDF_EDITS`).
-    count: usize,
-}
-
-impl Default for SdfField {
-    /// The empty field — no edits, so [`sample_sdf`] returns `+far` everywhere and
-    /// no body collides.
-    #[inline]
-    fn default() -> Self {
-        // `SdfEdit` is `Copy` but not `Default`; seed every slot with a zero-radius
-        // sphere at the origin (an inert placeholder never read past `count`).
-        let placeholder = SdfEdit::sphere([0.0, 0.0, 0.0], 0.0, boyko_sdf_math::sdf_op::UNION, 0.0);
-        Self {
-            edits: [placeholder; MAX_SDF_EDITS],
-            count: 0,
-        }
-    }
-}
+///
+/// # Storage (brick campaign W0)
+///
+/// `SdfField` now embeds the ONE edit authority — [`SdfEditField`] — instead of a
+/// standalone `[SdfEdit; 16]` + `count` pair (principle 0: a single edit source
+/// shared with the GPU encoder and the brick reference). The hot `edits` array is
+/// FIRST inside [`SdfEditField`] and byte-identical to the legacy array, so the
+/// scalar [`sample_sdf`] and the AVX2 kernel still stream the EXACT same
+/// `[SdfEdit; 16]` layout via [`edits()`](Self::edits) — the generated code is
+/// asm-identical (the W4 0%-regression contract).
+#[derive(Resource, Clone, Copy, Debug, Default)]
+pub struct SdfField(SdfEditField);
 
 impl SdfField {
     /// Builds a field from an ordered edit list, keeping the first
     /// [`MAX_SDF_EDITS`] edits (matching the shader's `min` clamp).
     ///
     /// The list is the CSG scene in fold order: the first edit seeds the field, each
-    /// later one combines under its own [`op`](SdfEdit::op).
+    /// later one combines under its own [`op`](SdfEdit::op). Each edit's conservative
+    /// AABB is recomputed (the brick classifier reads them); `gen` is bumped once.
     #[inline]
     pub fn from_edits(edits: &[SdfEdit]) -> Self {
         let mut field = Self::default();
-        let n = edits.len().min(MAX_SDF_EDITS);
-        field.edits[..n].copy_from_slice(&edits[..n]);
-        field.count = n;
+        for &edit in edits.iter().take(MAX_SDF_EDITS) {
+            field.0.push(edit);
+        }
+        field.0.bump_gen();
         field
     }
 
     /// Appends one edit to the field, ignoring it once the field is full
-    /// ([`MAX_SDF_EDITS`] edits) — matching the shader's edit-count clamp.
+    /// ([`MAX_SDF_EDITS`] edits) — matching the shader's edit-count clamp. The
+    /// edit's conservative AABB is recomputed; `gen` is bumped so a brick cache
+    /// keyed on it re-bakes.
     #[inline]
     pub fn push(&mut self, edit: SdfEdit) {
-        if self.count < MAX_SDF_EDITS {
-            self.edits[self.count] = edit;
-            self.count += 1;
+        if self.0.push(edit) {
+            self.0.bump_gen();
         }
     }
 
-    /// Clears the field to empty (reuses the inline storage, no realloc).
+    /// Clears the field to empty (reuses the inline storage, no realloc). Bumps
+    /// `gen` so a brick cache keyed on it invalidates.
     #[inline]
     pub fn clear(&mut self) {
-        self.count = 0;
+        self.0.count = 0;
+        self.0.bump_gen();
     }
 
-    /// The live edit slice (`edits[..count]`) — what the field math folds.
+    /// The live edit slice (`edits[..count]`) — what the field math folds. This is
+    /// the hot array the AVX2 kernel streams; byte-identical to the legacy layout.
     #[inline]
     pub fn edits(&self) -> &[SdfEdit] {
-        &self.edits[..self.count]
+        self.0.edits()
+    }
+
+    /// The embedded edit authority — the single source the GPU encoder and the
+    /// brick reference ([`boyko_sdf_math::brick`]) read.
+    #[inline]
+    pub fn authority(&self) -> &SdfEditField {
+        &self.0
     }
 
     /// Number of live edits.
     #[inline]
     pub fn len(&self) -> usize {
-        self.count
+        self.0.count as usize
     }
 
     /// Whether the field has no edits (samples to `+far` everywhere).
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.count == 0
+        self.0.count == 0
     }
 }
 
