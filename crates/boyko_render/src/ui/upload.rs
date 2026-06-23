@@ -30,23 +30,27 @@
 //! [`Renderer::present_sampled`](boyko_rhi_vulkan::swapchain::Renderer::present_sampled)
 //! with `Some(&pass)` — the `record_present_sampled` UI sub-pass records the one draw.
 //!
+//! The host-drivable
+//! [`host_upload_frame_from_world`](UiUploadSystem::host_upload_frame_from_world)
+//! seam (#31) gathers the visible nodes from a [`DispatcherToken::world`]
+//! [`WorldView`](boyko_ecs::ecs::core::system::WorldView) (a read-only ECS
+//! projection, #30) FIRST, ends that borrow, then delegates to `host_upload_frame`
+//! with only the `!Send` borrows live. `WorldView` (#30) supplies the
+//! column/resource-read HALF of the world access the in-schedule site needs.
+//!
 //! The `impl System` shell ([`System::run_dispatcher`]) is registered for its
 //! scheduler SHAPE only (EMPTY access, `is_gpu()`, dispatcher-solo) and is an honest
-//! no-op in P5a: it does NOT project-and-drop the `!Send` [`RhiContext`]. Doing the
-//! upload from INSIDE `run_dispatcher` would need TWO capabilities the public
-//! [`DispatcherToken`] does not expose — an `&EcsMaster` projection to read the CPU
-//! columns (`ComputedRect`, …) + the [`UiRenderScratch`] / [`UiRenderGeneration`]
-//! `Resource`s, AND the swapchain `Renderer` slot index + in-flight fence (the
-//! `Renderer` is not an ECS resource). Until BOTH land the host drives the path
-//! directly (the world-agnostic core IS the shipped upload). This boundary is called
-//! out for the orchestrator — it needs an architectural decision (a public
-//! `DispatcherToken` world projection + an ECS-resident swapchain handle), not a
-//! developer choice.
+//! no-op here: it does NOT project-and-drop the `!Send` [`RhiContext`]. The one
+//! capability still missing for the in-schedule upload is the swapchain `Renderer`
+//! slot index + in-flight fence — the `Renderer` is not yet an ECS resource — so the
+//! host drives the path through `host_upload_frame_from_world` until an ECS-resident
+//! swapchain handle exists (the remaining architectural decision for the
+//! orchestrator).
 
 use boyko_ecs::ecs::core::change_detection::Tick;
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::system::access::Access;
-use boyko_ecs::ecs::core::system::dispatcher_token::DispatcherToken;
+use boyko_ecs::ecs::core::system::dispatcher_token::{DispatcherToken, WorldView};
 use boyko_ecs::ecs::core::system::system::System;
 use boyko_ecs::ecs::core::system::system_meta::SystemMeta;
 use boyko_ecs::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell;
@@ -213,6 +217,47 @@ impl UiUploadSystem {
         // (3) pack → sort → upload into the now-free slot.
         self.pack_sort_upload(nodes, scratch, gather, ortho, frame_index, ctx)
     }
+
+    /// Host-drivable per-frame upload that gathers the visible UI nodes from the
+    /// ECS [`WorldView`] FIRST (a read-only world borrow), lets that borrow end,
+    /// then drives the `!Send`-only upload via
+    /// [`host_upload_frame`](Self::host_upload_frame).
+    ///
+    /// This is the world-read half of the Rung-4 seam (#30/#31): `gather_nodes`
+    /// fills `node_buf` (reused, never `Vec::new`) using ONLY the view's `&self`
+    /// read surface ([`WorldView::resource`], [`WorldView::get_component_raw`],
+    /// [`WorldView::query_entities_buf`]). The world-read borrow ENDS with the
+    /// closure; only `&mut RhiContext` + `&Renderer` are live during the upload,
+    /// so the world-read and `!Send` borrows are sequential, never simultaneous.
+    ///
+    /// The swapchain `Renderer` is still host-supplied (it is not yet an ECS
+    /// resource), so this is a host driver, not the in-schedule site — see the
+    /// module docs' world-access seam.
+    ///
+    /// # Errors
+    /// [`GpuColumnError::Swapchain`] on the fence wait, or any
+    /// [`pack_sort_upload`](Self::pack_sort_upload) upload error.
+    #[allow(clippy::too_many_arguments)]
+    pub fn host_upload_frame_from_world<F>(
+        &self,
+        world: WorldView<'_>,
+        node_buf: &mut Vec<UiNode>,
+        gather_nodes: F,
+        scratch: &mut UiRenderScratch,
+        gather: &mut Vec<UiInstance>,
+        ortho: UiOrtho,
+        renderer: &Renderer<'_>,
+        ctx: &mut RhiContext,
+    ) -> Result<UiFramePlan, GpuColumnError>
+    where
+        F: FnOnce(WorldView<'_>, &mut Vec<UiNode>),
+    {
+        node_buf.clear();
+        gather_nodes(world, node_buf);
+        // The `world` view (the read borrow) is consumed by the closure above; only
+        // the `!Send` `&mut RhiContext` + `&Renderer` borrows are live below.
+        self.host_upload_frame(node_buf.drain(..), scratch, gather, ortho, renderer, ctx)
+    }
 }
 
 // SAFETY (S1' + MF-5 / Option C): this system records NO CPU component access (the
@@ -276,16 +321,18 @@ unsafe impl System for UiUploadSystem {
     /// The pack→sort→upload reads the world's CPU columns (`ComputedRect`, …) and the
     /// [`UiRenderScratch`] / [`UiRenderGeneration`] `Resource`s AND the swapchain's
     /// per-frame slot index + in-flight fence (for the write-after-read upload
-    /// contract). The public [`DispatcherToken`] exposes only `nonsend_resource_mut` /
-    /// `nonsend_resource` — no `&EcsMaster` column projection, and no swapchain
-    /// `Renderer` handle (the `Renderer` is not an ECS resource). The on-screen path is
-    /// therefore driven by the render host through
-    /// [`host_upload_frame`](Self::host_upload_frame) (fence the slot →
+    /// contract). The column/resource-read HALF is now reachable through
+    /// [`DispatcherToken::world`]'s
+    /// [`WorldView`](boyko_ecs::ecs::core::system::WorldView) (#30); the host-drivable
+    /// [`host_upload_frame_from_world`](Self::host_upload_frame_from_world) (#31)
+    /// gathers nodes through it before the `!Send` upload. The one capability still
+    /// missing in-schedule is the swapchain `Renderer` slot index + in-flight fence —
+    /// the `Renderer` is not yet an ECS resource — so the on-screen path is still
+    /// driven by the render host through `host_upload_frame_from_world` (gather via the
+    /// view → [`host_upload_frame`](Self::host_upload_frame): fence the slot →
     /// [`pack_sort_upload`](Self::pack_sort_upload)) + [`RhiContext::ui_pass`] +
-    /// [`Renderer::present_sampled`] — THAT is the shipped, end-to-end host path. This
-    /// shell becomes the in-schedule upload site only once a public `DispatcherToken`
-    /// world projection AND an ECS-resident swapchain handle exist (tracked for the
-    /// orchestrator — an architectural decision, not a developer choice).
+    /// [`Renderer::present_sampled`]. This shell becomes the in-schedule upload site
+    /// once an ECS-resident swapchain handle exists (tracked for the orchestrator).
     ///
     /// # Safety
     /// **S1'** — Vacuous: this body touches no world state and mints no aliasing
