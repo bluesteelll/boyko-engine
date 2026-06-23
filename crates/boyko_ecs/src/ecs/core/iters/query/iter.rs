@@ -189,6 +189,19 @@ where
             // SAFETY (D3): see above.
             unsafe { <F as QueryFilter>::resolve_dense(&mut filter_fetch, &state.filter_state, world); }
         }
+        // Relation-DSL join: cache the world cell into a `Related<R, D>` data
+        // term's fetch (the world-global resolution base for the per-row FK
+        // target lookup). Const-gated by `D::HAS_RELATED` — a non-relation
+        // query emits NOTHING here (the 0%-gate). Sequential-only: the cursor
+        // holds the `world` cell so `Related::fetch` can resolve the FK target's
+        // archetype per row (the parallel path const-rejects a `Related` join).
+        if const { D::HAS_RELATED } {
+            // SAFETY (relation join): `world` is the cursor's cell scoped to
+            //   `'q`; the cached cell is valid for `'q`. (On the mutable cursor
+            //   `Related` is reachable only with a read-only `D`, since
+            //   `Related` requires `D: ReadOnlyQueryData`.)
+            unsafe { <D as QueryData>::resolve_related(&mut data_fetch, &state.data_state, world); }
+        }
         Self {
             archetype_ids: ids.iter(),
             data_state: &state.data_state,
@@ -475,6 +488,19 @@ where
             // SAFETY (D3): see above.
             unsafe { <F as QueryFilter>::resolve_dense(&mut filter_fetch, &state.filter_state, world); }
         }
+        // Relation-DSL join: cache the world cell into a `Related<R, D>` data
+        // term's fetch (the world-global resolution base for the per-row FK
+        // target lookup). Const-gated by `D::HAS_RELATED` — a non-relation
+        // query emits NOTHING here (the 0%-gate). Sequential-only: the cursor
+        // holds the `world` cell so `Related::fetch` can resolve the FK target's
+        // archetype per row (the parallel path const-rejects a `Related` join).
+        if const { D::HAS_RELATED } {
+            // SAFETY (relation join): `world` is the cursor's cell scoped to
+            //   `'q`; the cached cell is valid for `'q`. (On the mutable cursor
+            //   `Related` is reachable only with a read-only `D`, since
+            //   `Related` requires `D: ReadOnlyQueryData`.)
+            unsafe { <D as QueryData>::resolve_related(&mut data_fetch, &state.data_state, world); }
+        }
         Self {
             archetype_ids: ids.iter(),
             data_state: &state.data_state,
@@ -718,6 +744,19 @@ where
             // SAFETY (D3): see above.
             unsafe { <F as QueryFilter>::resolve_dense(&mut filter_fetch, &state.filter_state, world); }
         }
+        // Relation-DSL join: cache the world cell into a `Related<R, D>` data
+        // term's fetch (the world-global resolution base for the per-row FK
+        // target lookup). Const-gated by `D::HAS_RELATED` — a non-relation
+        // query emits NOTHING here (the 0%-gate). Sequential-only: the cursor
+        // holds the `world` cell so `Related::fetch` can resolve the FK target's
+        // archetype per row (the parallel path const-rejects a `Related` join).
+        if const { D::HAS_RELATED } {
+            // SAFETY (relation join): `world` is the cursor's cell scoped to
+            //   `'q`; the cached cell is valid for `'q`. (On the mutable cursor
+            //   `Related` is reachable only with a read-only `D`, since
+            //   `Related` requires `D: ReadOnlyQueryData`.)
+            unsafe { <D as QueryData>::resolve_related(&mut data_fetch, &state.data_state, world); }
+        }
         Self {
             archetype_ids: ids.iter(),
             data_state: &state.data_state,
@@ -929,6 +968,19 @@ where
         if const { F::HAS_DENSE } {
             // SAFETY (D3): see above.
             unsafe { <F as QueryFilter>::resolve_dense(&mut filter_fetch, &state.filter_state, world); }
+        }
+        // Relation-DSL join: cache the world cell into a `Related<R, D>` data
+        // term's fetch (the world-global resolution base for the per-row FK
+        // target lookup). Const-gated by `D::HAS_RELATED` — a non-relation
+        // query emits NOTHING here (the 0%-gate). Sequential-only: the cursor
+        // holds the `world` cell so `Related::fetch` can resolve the FK target's
+        // archetype per row (the parallel path const-rejects a `Related` join).
+        if const { D::HAS_RELATED } {
+            // SAFETY (relation join): `world` is the cursor's cell scoped to
+            //   `'q`; the cached cell is valid for `'q`. (On the mutable cursor
+            //   `Related` is reachable only with a read-only `D`, since
+            //   `Related` requires `D: ReadOnlyQueryData`.)
+            unsafe { <D as QueryData>::resolve_related(&mut data_fetch, &state.data_state, world); }
         }
         Self {
             archetype_ids: ids.iter(),

@@ -2412,6 +2412,60 @@ impl EcsMaster {
         self.query_entities_buf(component_ids, out, &mut arch_scratch);
     }
 
+    // ── Relation-aware traversal accessors ──────────────────────────────────
+    //
+    // Thin wrappers over the transitive/wildcard iterators in
+    // `iters::query::relation::traverse_iter`. They walk ONLY the existing
+    // relationship storage (FK component + reverse collection) through
+    // `get_component` — no side index (Principle 0). The transitive walks are
+    // depth-capped at `MAX_PROPAGATION_DEPTH`; a non-`ACYCLIC` relation guards
+    // revisits with a function-local cold visited set, const-folded away for an
+    // acyclic relation (e.g. `ChildOf`).
+
+    /// Iterates the single target of relationship `R` for `source` (cardinality
+    /// 0..1): yields the FK target if `source` carries `R`, otherwise nothing.
+    #[inline]
+    pub fn targets<R: crate::ecs::core::relationship::Relationship>(
+        &self,
+        source: Entity,
+    ) -> crate::ecs::core::iters::query::relation::TargetsIter<'_, R> {
+        crate::ecs::core::iters::query::relation::TargetsIter::new(self, source)
+    }
+
+    /// Iterates every source whose relationship `R` foreign key points at
+    /// `target`, by reading the target's reverse `R::Target` collection (the
+    /// existing reverse index — no all-entity scan).
+    #[inline]
+    pub fn sources<R: crate::ecs::core::relationship::Relationship>(
+        &self,
+        target: Entity,
+    ) -> crate::ecs::core::iters::query::relation::SourcesIter<'_, R> {
+        crate::ecs::core::iters::query::relation::SourcesIter::new(self, target)
+    }
+
+    /// Walks UP the relationship `R` chain from `e` (`e -> R.target -> ...`),
+    /// yielding each ancestor target in turn (NOT `e` itself). Depth-capped;
+    /// cycle-safe for a non-`ACYCLIC` relation.
+    #[inline]
+    pub fn ancestors<R: crate::ecs::core::relationship::Relationship>(
+        &self,
+        e: Entity,
+    ) -> crate::ecs::core::iters::query::relation::AncestorsIter<'_, R> {
+        crate::ecs::core::iters::query::relation::AncestorsIter::new(self, e)
+    }
+
+    /// Walks DOWN the relationship `R` chain from `root` (DFS over the reverse
+    /// `R::Target` collections), yielding each descendant source (NOT `root`
+    /// itself). Depth-capped; each node visited at most once for a non-`ACYCLIC`
+    /// relation.
+    #[inline]
+    pub fn descendants<R: crate::ecs::core::relationship::Relationship>(
+        &self,
+        root: Entity,
+    ) -> crate::ecs::core::iters::query::relation::DescendantsIter<'_, R> {
+        crate::ecs::core::iters::query::relation::DescendantsIter::new(self, root)
+    }
+
     /// Gets raw pointers to multiple components for an entity.
     ///
     /// Resolves the inland record once, then walks `component_ids` reading
@@ -4036,6 +4090,49 @@ impl EcsMaster {
 
         // Cache miss: cold init path.
         self.query_cold_init::<D, F>(type_id)
+    }
+
+    /// Relations W1 — the value-carrying twin of [`Self::query`].
+    ///
+    /// Builds (or reuses) the SAME type-keyed `(D, F)` query as
+    /// `query::<D, F>()` — the matched-archetype set is value-INDEPENDENT (a
+    /// [`RelatedTo<R>`](crate::ecs::core::iters::query::relation::RelatedTo)
+    /// bounds to `R`-hosting archetypes regardless of the runtime target) — then
+    /// seeds the cached `filter_state` from the passed `filter` value via the
+    /// [`QueryFilter::seed_state`] seam. Only the per-row `filter_fetch`
+    /// comparison depends on the runtime value, so the cached set is reused
+    /// wholesale.
+    ///
+    /// For a value-less filter the seam is a no-op (the 0%-gate), so
+    /// `query_filtered(With::<C>::default())` is equivalent to `query::<_,
+    /// With<C>>()`. The intended use is a runtime-valued filter:
+    ///
+    /// ```ignore
+    /// for t in world
+    ///     .query_filtered::<&Transform, _>(RelatedTo::<ChildOf>::new(parent))
+    ///     .iter()
+    /// { /* per-row match: source's ChildOf FK target == parent */ }
+    /// ```
+    ///
+    /// # Cost
+    ///
+    /// Identical to [`Self::query`] plus one `seed_state` call (a single field
+    /// write for `RelatedTo`, const-folded to nothing for value-less filters).
+    ///
+    /// # Compile errors
+    ///
+    /// Same change-detection reject as [`Self::query`] (`D` / `F` carrying
+    /// `Ref`/`Mut`/`Added`/`Changed` is a compile error).
+    ///
+    /// [`QueryFilter::seed_state`]: crate::ecs::core::iters::query::filter::QueryFilter::seed_state
+    pub fn query_filtered<D, F>(&mut self, filter: F) -> QueryView<'_, D, F>
+    where
+        D: QueryData + 'static,
+        F: QueryFilter + 'static,
+    {
+        let mut view = self.query::<D, F>();
+        view.seed_filter(&filter);
+        view
     }
 
     /// Cold-path initialiser for [`Self::query`]. Allocates the

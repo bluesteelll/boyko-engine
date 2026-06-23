@@ -174,6 +174,24 @@ pub unsafe trait QueryFilter: Sized {
     /// Builds the per-system state. Called once at system registration.
     fn init_state(world: &mut EcsMaster) -> Self::State;
 
+    /// Relations W1 — injects a runtime-valued filter into the cached
+    /// [`Self::State`].
+    ///
+    /// The value-carrying filtered-query entry
+    /// ([`EcsMaster::query_filtered`](crate::ecs::core::ecs_master::ecs_master::EcsMaster::query_filtered))
+    /// calls this on the cached state with the live filter `value`, AFTER the
+    /// type-cached `(D, F)` matched-archetype set is built (the archetype match
+    /// is value-INDEPENDENT). Value-less filters (`()`, `With<C>`, `Without<C>`,
+    /// `Added`, `Changed`, every tuple, `Or`) inherit the default NO-OP, so
+    /// `query_filtered(With::<C>::default())` is byte-identical to `query` (the
+    /// 0%-gate — the call const-folds to nothing). Only a runtime-valued filter
+    /// such as [`RelatedTo<R>`](super::relation::RelatedTo) overrides it to copy
+    /// its target into the state.
+    #[inline]
+    fn seed_state(_state: &mut Self::State, _value: &Self) {
+        // Default: value-less filter — nothing to inject (the 0%-gate).
+    }
+
     /// Declares the filter's access surface to the intra-system aliasing
     /// detector. Archetypal-only filters declare nothing.
     fn init_access(state: &Self::State, access_set: &mut FilteredAccessSet);

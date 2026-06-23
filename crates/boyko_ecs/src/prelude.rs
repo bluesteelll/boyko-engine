@@ -58,6 +58,12 @@ pub use crate::ecs::core::iters::query::Query;
 pub use crate::ecs::core::iters::query::{AnyOf, IsEnabled, Mut, Ref};
 // EnableTag filters: per-row gates over the bitset storage backend.
 pub use crate::ecs::core::iters::query::filter_enable::{Disabled, Enabled};
+// Relation-aware DSL: the `Related<R, D>` join, the relation filters, and the
+// transitive/wildcard traversal iterators.
+pub use crate::ecs::core::iters::query::{
+    AncestorsIter, DescendantsIter, HasRelation, NoRelation, Related, RelatedTo, SourcesIter,
+    TargetsIter,
+};
 
 // ── System params ────────────────────────────────────────────────────────────
 pub use crate::ecs::core::system::{Commands, EventReader, EventWriter, Local, Res, ResMut};

@@ -93,6 +93,17 @@ pub trait Relationship: Component + Sized {
     /// the default `false`.
     const ALLOW_SELF_REFERENTIAL: bool = false;
 
+    /// `true` iff the relation graph is structurally acyclic (a forest/DAG of
+    /// single-target edges, e.g. `ChildOf`). When `true`, the transitive
+    /// traversal iterators ([`AncestorsIter`](crate::ecs::core::iters::query::relation::AncestorsIter)
+    /// / [`DescendantsIter`](crate::ecs::core::iters::query::relation::DescendantsIter))
+    /// const-fold away the per-walk revisit-guard `VisitedSet` — the depth cap
+    /// (`MAX_PROPAGATION_DEPTH`) alone bounds the walk. When `false` (the
+    /// default, the conservative choice for an arbitrary user relation), the
+    /// traversal allocates a `#[cold]` function-local visited set to terminate
+    /// on cycles. Shared with the relation-aware observer-broadcast phase.
+    const ACYCLIC: bool = false;
+
     /// Generic LINK hook (`on_insert`): pushes `source` into the target's
     /// collection. Wired into `hooks.on_insert` by the derive / hand-mirror; not
     /// overridable (the relation owns the slot).

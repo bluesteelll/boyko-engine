@@ -199,6 +199,37 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
         }
     }
 
+    /// Relations W1 — seeds the cached `filter_state` from a runtime-valued
+    /// filter, the value-carrying twin of the type-keyed cache build.
+    ///
+    /// Called ONCE by
+    /// [`EcsMaster::query_filtered`](crate::ecs::core::ecs_master::ecs_master::EcsMaster::query_filtered)
+    /// on a freshly-minted view, BEFORE any driver (`iter`/`par_iter`/…) runs.
+    /// The `(D, F)` matched-archetype set is value-INDEPENDENT (it bounds to
+    /// `R`-hosting archetypes), so only the per-row `filter_fetch`'s runtime
+    /// `target` needs injecting — done here via [`QueryFilter::seed_state`]
+    /// (default no-op for value-less filters; the 0%-gate).
+    ///
+    /// # Soundness
+    ///
+    /// At call time no driver holds a borrow of the cached state, so the
+    /// one-shot `&mut` reborrow below is exclusive — the same provenance
+    /// contract `EcsMaster::query`'s post-mint `state.update(master)` relies on.
+    #[inline]
+    pub(crate) fn seed_filter(&mut self, filter: &F) {
+        // SAFETY (QV6 / I1):
+        //   - `self.state` is a valid `NonNull<UnsafeCell<...>>` per the
+        //     `from_parts` contract; it was minted from `Box::leak` and lives
+        //     for `'w`.
+        //   - This view was just constructed by `query_filtered` and no driver
+        //     has borrowed the state yet, so this `&mut` reborrow is exclusive
+        //     (no aliasing `&`/`&mut` to the cache slot is live). The `&mut`
+        //     is dropped before the function returns.
+        let state_mut: &mut QueryDataState<D, F> =
+            unsafe { &mut *(*self.state.as_ptr()).get() };
+        <F as QueryFilter>::seed_state(&mut state_mut.filter_state, filter);
+    }
+
     /// Adds a dynamic-tag presence term (Phase 22 D4): only archetypes
     /// carrying `tag` participate in every driver of this view
     /// (`iter`/`iter_mut`, `par_iter`/`par_iter_mut`, `for_each_chunk`,

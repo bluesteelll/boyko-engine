@@ -47,6 +47,12 @@ pub mod par_iter;
 #[allow(clippy::module_inception)]
 pub mod query;
 pub mod query_type_registry;
+// Relation-aware DSL: the JOIN term (`Related<R, D>`), relation filters
+// (`HasRelation` / `NoRelation` / `RelatedTo`), and the transitive/wildcard
+// traversal iterators (`targets` / `sources` / `ancestors` / `descendants`).
+// Built ONLY on the existing relationship FK + reverse-collection storage
+// (Principle 0) — no side index.
+pub mod relation;
 pub mod query_view;
 pub mod state;
 // Phase 22 D4: stack-only dynamic-tag terms. The `TagTerms` carrier itself is
@@ -67,6 +73,10 @@ pub use iter::{QueryIter, QueryIterEntities, QueryIterEntitiesMut, QueryIterMut}
 pub use par_iter::{BatchingStrategy, MIN_ARCHETYPE_FOR_PARALLEL, ParQuery, ParQueryMut};
 pub use query::Query;
 pub use query_type_registry::{MAX_QUERY_TYPES, QueryTypeId, QueryTypeKey};
+pub use relation::{
+    AncestorsIter, DescendantsIter, HasRelation, NoRelation, Related, RelatedTo, SourcesIter,
+    TargetsIter,
+};
 pub use query_view::QueryView;
 pub use state::QueryDataState;
 pub use tag_terms::MAX_DYN_TAG_TERMS;

@@ -9,13 +9,13 @@ pub struct Entity {
 
 impl Entity {
     #[inline]
-    pub fn new(id: EntityId, generation: u32) -> Self {
+    pub const fn new(id: EntityId, generation: u32) -> Self {
         Self { id, generation }
     }
 
     /// Creates a new entity with the specified ID and generation 0
     #[inline]
-    pub fn with_id(id: EntityId) -> Self {
+    pub const fn with_id(id: EntityId) -> Self {
         Self { id, generation: 0 }
     }
 

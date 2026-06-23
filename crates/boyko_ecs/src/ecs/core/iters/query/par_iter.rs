@@ -309,6 +309,20 @@ fn for_each_impl<D, F, Body>(
              use `Query::iter` / `iter_mut` (mixed) or `Query::dense_iter` (pure dense)"
         )
     };
+    // Relation-DSL join: same structural reason as the dense rejection — the
+    // chunk runner (`run_chunk_raw`) has NO world cell, so a `Related<R, D>`
+    // join (which resolves the FK target's archetype through the world per row)
+    // cannot run on the parallel path. `Related` is sequential-only in v1.
+    // Const-folds to nothing for a non-relation query (the 0%-gate).
+    const {
+        assert!(
+            !D::HAS_RELATED,
+            "a `Related<R, D>` relation join is not supported on `par_iter` — \
+             the parallel chunk runner has no world cell to resolve the FK \
+             target's archetype per row. Use the sequential `Query::iter` / \
+             `iter_mut` instead (relation joins are sequential-only in v1)."
+        )
+    };
     // PAR7: fall back to sequential iteration if no pool is attached.
     // `try_with_active_pool` returns `None` for threads that never entered
     // an `install` frame; this is the common case for ad-hoc tests and

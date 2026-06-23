@@ -184,6 +184,12 @@ impl Relationship for ChildOf {
     // `ALLOW_SELF_REFERENTIAL` keeps the trait default (`false`): a
     // `ChildOf(self)` is reactively removed by the generic `on_insert` guard
     // (Phase-19 self-ref behavior, B3).
+
+    /// A `ChildOf` parent forest is structurally acyclic (the Phase-19
+    /// self-ref + cascade discipline forbids a cycle), so the transitive
+    /// `ancestors` / `descendants` walks const-fold away the revisit guard and
+    /// rely on the depth cap alone.
+    const ACYCLIC: bool = true;
 }
 
 impl RelationshipTarget for Children {

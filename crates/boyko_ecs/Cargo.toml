@@ -208,6 +208,12 @@ harness = false
 name = "gate_spawn_no_require"
 harness = false
 
+# Relations query DSL (H) — the `Related<ChildOf, &Pos>` join vs a manual
+# targets+get_component loop, plus the relation-seam 0%-gate (plain Query<&Pos>).
+[[bench]]
+name = "relation_join"
+harness = false
+
 [lints.rust]
 # Phase 9 Wave 7 Step 24: opt-in stronger ALLOC1 check via
 # `RUSTFLAGS="--cfg force_alloc_panic"`. See

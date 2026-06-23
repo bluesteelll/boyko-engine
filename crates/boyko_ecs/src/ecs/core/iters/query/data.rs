@@ -246,6 +246,52 @@ pub unsafe trait QueryData: Sized {
     ) {
     }
 
+    /// Relation-DSL join — `true` iff this data contains a
+    /// [`Related<R, D>`](crate::ecs::core::iters::query::relation::Related)
+    /// term (a single leaf or a tuple OR-folding one).
+    ///
+    /// Gates the relation-join machinery at monomorphisation:
+    /// * the cursor's [`Self::resolve_related`] call (caches the world cell so
+    ///   `fetch` can resolve the FK target's archetype per row);
+    /// * the `par_iter` const-rejection (the chunk runner has no world cell, so
+    ///   a `Related` join is sequential-only in v1 — mirrors `HAS_DENSE`).
+    ///
+    /// `false` by default, so every existing impl keeps it and pays nothing:
+    /// the cursor's `if const { D::HAS_RELATED }` arm const-folds OUT and a
+    /// non-relation query is byte-identical (the 0%-gate).
+    const HAS_RELATED: bool = false;
+
+    /// Relation-DSL join — resolves this data's relation term(s) against the
+    /// world.
+    ///
+    /// Called ONCE per cursor construction (`QueryIter`/`QueryIterMut::new`,
+    /// where the [`UnsafeEcsCell`] is available) under
+    /// `if const { Self::HAS_RELATED }`, so the call is emitted ONLY into a
+    /// relation monomorphisation. The default body is empty — every
+    /// non-relation impl inherits it and the cursor's gated call folds to
+    /// nothing (the 0%-gate). A
+    /// [`Related<R, D>`](crate::ecs::core::iters::query::relation::Related)
+    /// overrides it to cache the world cell (the world-global resolution base)
+    /// into its `Fetch` so the per-row `fetch` can resolve the FK target's
+    /// `entities_inland` record and the joined column.
+    ///
+    /// # Safety
+    ///
+    /// * `world` MUST satisfy the read contract declared by the active
+    ///   `SystemParam::init_access` (the same cell `set_table_*` rides).
+    /// * The cell is valid for `'w` (the cursor lifetime).
+    ///
+    /// [`UnsafeEcsCell`]: crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell
+    #[inline]
+    unsafe fn resolve_related<'w>(
+        _fetch: &mut Self::Fetch<'w>,
+        _state: &Self::State,
+        _world: crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell<'w>,
+    ) {
+        // Default: non-relation data resolves nothing (the 0%-gate). Overridden
+        // only by a `Related<R, D>` leaf.
+    }
+
     /// Builds the per-system [`Self::State`].
     ///
     /// Called once per `(system, world)` pair at registration time. Performs
@@ -1811,6 +1857,9 @@ unsafe impl<D: QueryData> QueryData for Option<D> {
     // `fetch` (NOT via `Self::dense_row_passes`, which stays the default `true`
     // so `Option` never SKIPS a row — it maps an absent member to `None`).
     const HAS_DENSE: bool = D::HAS_DENSE;
+    // Relation-DSL join: forward the inner's relation-ness so the cursor
+    // resolves the inner's world cell (gated internally by `D::HAS_RELATED`).
+    const HAS_RELATED: bool = D::HAS_RELATED;
 
     #[inline]
     fn init_state(world: &mut EcsMaster) -> Self::State {
@@ -1856,6 +1905,20 @@ unsafe impl<D: QueryData> QueryData for Option<D> {
         // SAFETY (D3): the `world` cell is `Copy`, forwarded by value to
         //   preserve provenance; the inner gates its body on its own dense-ness.
         unsafe { D::resolve_dense(&mut fetch.inner, state, world); }
+    }
+
+    #[inline]
+    unsafe fn resolve_related<'w>(
+        fetch: &mut Self::Fetch<'w>,
+        state: &Self::State,
+        world: crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell<'w>,
+    ) {
+        // Relation-DSL join: forward into the inner so its world cell is cached
+        // (gated internally by `const { D::HAS_RELATED }`).
+        // SAFETY (relation join): the `world` cell is `Copy`, forwarded by value
+        //   to preserve provenance; the inner gates its body on its own
+        //   relation-ness.
+        unsafe { D::resolve_related(&mut fetch.inner, state, world); }
     }
 
     #[inline]
@@ -2104,6 +2167,9 @@ macro_rules! impl_any_of {
             // an absent dense arm yields `None` (per-row membership via the
             // arm's `dense_row_passes`, checked inside `fetch`).
             const HAS_DENSE: bool = false $( || $D::HAS_DENSE )+;
+            // Relation-DSL join: an `AnyOf` arm may be a relation leaf; OR-fold
+            // so the cursor resolves each relation arm's world cell.
+            const HAS_RELATED: bool = false $( || $D::HAS_RELATED )+;
 
             #[inline]
             fn init_state(world: &mut EcsMaster) -> Self::State {
@@ -2132,6 +2198,23 @@ macro_rules! impl_any_of {
                     //   forwarded by value to preserve provenance. `$f.0` is the
                     //   arm's inner `Fetch`.
                     unsafe { <$D as QueryData>::resolve_dense(&mut $f.0, $s, world); }
+                )+
+            }
+
+            #[inline]
+            unsafe fn resolve_related<'w>(
+                fetch: &mut Self::Fetch<'w>,
+                state: &Self::State,
+                world: crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell<'w>,
+            ) {
+                let ( $($f,)+ ) = fetch;
+                let ( $($s,)+ ) = state;
+                $(
+                    // SAFETY (relation join): each arm gates its body on its own
+                    //   `const { $D::HAS_RELATED }`; the `world` cell is `Copy`,
+                    //   forwarded by value to preserve provenance. `$f.0` is the
+                    //   arm's inner `Fetch`.
+                    unsafe { <$D as QueryData>::resolve_related(&mut $f.0, $s, world); }
                 )+
             }
 
@@ -2457,6 +2540,11 @@ macro_rules! impl_query_data_tuple {
             // Dense plan D3: a tuple has a dense INCLUDE term iff ANY element
             // does (OR-fold) — drives the candidate seed.
             const HAS_DENSE_INCLUDE: bool = false $( || $D::HAS_DENSE_INCLUDE )*;
+            // Relation-DSL join: a tuple has a relation term iff ANY element
+            // does (OR-fold) — drives the cursor's gated `resolve_related`
+            // forwarder + the `par_iter` const-rejection. `false` for an
+            // all-non-relation tuple (the 0%-gate).
+            const HAS_RELATED: bool = false $( || $D::HAS_RELATED )*;
 
             #[inline]
             fn init_state(world: &mut EcsMaster) -> Self::State {
@@ -2571,6 +2659,24 @@ macro_rules! impl_query_data_tuple {
                     //   `world` cell is `Copy`, forwarded by value to preserve
                     //   provenance.
                     unsafe { <$D as QueryData>::resolve_dense($f, $s, world); }
+                )*
+            }
+
+            #[inline]
+            unsafe fn resolve_related<'w>(
+                fetch: &mut Self::Fetch<'w>,
+                state: &Self::State,
+                world: crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell<'w>,
+            ) {
+                let ( $($f,)* ) = fetch;
+                let ( $($s,)* ) = state;
+                $(
+                    // SAFETY (relation join): each element gates its own body on
+                    //   `const { $D::HAS_RELATED }` (a non-relation element's
+                    //   `resolve_related` is the empty default — folds out). The
+                    //   `world` cell is `Copy`, forwarded by value to preserve
+                    //   provenance.
+                    unsafe { <$D as QueryData>::resolve_related($f, $s, world); }
                 )*
             }
 
