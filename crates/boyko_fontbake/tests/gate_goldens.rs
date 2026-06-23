@@ -1073,6 +1073,211 @@ fn t2a_per_channel_distance_vs_bruteforce_on_parallel_path() {
 }
 
 // ----------------------------------------------------------------------------
+// GATE 2a (CFF/OTF) — END-TO-END cubic golden on the CFF charstring path
+//
+// The Ubuntu-Light fixture is TrueType (`glyf`): its outlines are quadratic, so
+// it never drives the `cubic_to` sink / `Segment::Cubic`. SourceCodePro-Regular
+// is OpenType-CFF (`OTTO`, Type-2 charstrings) whose curves are CUBIC. These
+// goldens load that `.otf`, prove the extracted outline is genuinely cubic (not
+// the quadratic fallback), pin the exact decoded charstring control points, and
+// cross-check the MSDF `.a` (true SDF) channel against an INDEPENDENT brute-force
+// nearest-point reference — exercising the same cubic solver end-to-end that the
+// synthetic `t2a_synthetic_cubic_distance_matches_bruteforce` covers in isolation.
+// ----------------------------------------------------------------------------
+
+/// Path to the checked-in libre OpenType-CFF (cubic) fixture.
+fn otf_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures")
+        .join("SourceCodePro-Regular.otf")
+}
+
+/// Parses the CFF `.otf` fixture into a [`TtfFace`].
+fn otf_face() -> TtfFace {
+    let bytes = std::fs::read(otf_path()).expect(
+        "test fixture missing: crates/boyko_fontbake/fixtures/SourceCodePro-Regular.otf \
+         (a libre OpenType-CFF font must be checked in for the cubic golden)",
+    );
+    TtfFace::from_bytes(&bytes).expect("CFF .otf fixture must parse as a font")
+}
+
+#[test]
+fn t2a_cff_otf_magic_is_opentype_cff() {
+    // Guard the fixture identity: the file must be the CFF flavour (`OTTO`),
+    // not a TrueType `glyf` font masquerading as `.otf`. This is what makes the
+    // outline cubic instead of quadratic.
+    let bytes = std::fs::read(otf_path()).expect("otf fixture must exist");
+    assert_eq!(&bytes[0..4], b"OTTO", "SourceCodePro-Regular.otf must be OpenType-CFF (OTTO magic)");
+}
+
+#[test]
+fn t2a_cff_glyph_o_is_all_cubics_two_contours() {
+    // The decisive end-to-end assertion: the CFF charstring path emits CUBIC
+    // segments. 'o' in SourceCodePro is a clean two-ring glyph whose every edge
+    // is a Type-2 `rrcurveto` cubic — zero lines, zero quads. A quadratic
+    // fallback (the `glyf` path) would report Q=8, C=0 instead.
+    let g = extract_codepoint(&otf_face(), 'o');
+    assert_eq!(g.outline.contours.len(), 2, "CFF 'o' has an outer ring + a counter");
+    assert_eq!(g.outline.segment_count(), 8, "CFF 'o' total segments");
+    let (lines, quads, cubics) = seg_type_counts(&g.outline);
+    assert_eq!(
+        (lines, quads, cubics),
+        (0, 0, 8),
+        "CFF 'o' must be ALL cubics (proves the CFF charstring path, not a quad fallback)"
+    );
+    assert!((g.advance_em - 0.6).abs() < 1e-4, "CFF 'o' advance_em == 0.6, got {}", g.advance_em);
+}
+
+#[test]
+fn t2a_cff_cubic_control_points_match_decoded_charstring() {
+    // Pin the EXACT decoded control points of the first cubic of 'o''s outer
+    // contour. These are the em-normalized (÷1000 upem) Type-2 charstring
+    // coordinates as emitted by the `cubic_to` sink; any drift in the CFF
+    // decode, the em-normalization, or the cubic-segment construction trips this.
+    let g = extract_codepoint(&otf_face(), 'o');
+    let first = g.outline.contours[0][0];
+    let Segment::Cubic { p0, c0, c1, p1 } = first else {
+        panic!("CFF 'o' outer contour must start with a cubic, got {:?}", first);
+    };
+    let eps = 1e-5;
+    let close = |a: Vec2, b: Vec2| (a.x - b.x).abs() < eps && (a.y - b.y).abs() < eps;
+    assert!(close(p0, Vec2::new(0.300, -0.012)), "cubic p0 golden, got ({},{})", p0.x, p0.y);
+    assert!(close(c0, Vec2::new(0.428, -0.012)), "cubic c0 golden, got ({},{})", c0.x, c0.y);
+    assert!(close(c1, Vec2::new(0.540, 0.081)), "cubic c1 golden, got ({},{})", c1.x, c1.y);
+    assert!(close(p1, Vec2::new(0.540, 0.242)), "cubic p1 golden, got ({},{})", p1.x, p1.y);
+}
+
+#[test]
+fn t2a_cff_glyph_o_outer_and_counter_wind_opposite() {
+    // Winding-topology invariant on the CFF cubic outline: the outer ring and
+    // the counter (hole) must wind in OPPOSITE directions so the fill rule
+    // carves the hole — the property the sign pass relies on, independent of the
+    // font's absolute orientation convention.
+    //
+    // CFF (PostScript/Type-2) fonts use the OPPOSITE absolute orientation from
+    // TrueType `glyf`: SourceCodePro 'o' decodes with the outer ring winding CCW
+    // (positive chord-area here) and the counter CW (negative) — the mirror of
+    // the Ubuntu (TTF) 'o'. Both signs are pinned to detect any future flip in
+    // the CFF decode while documenting the convention difference (NOT a bug:
+    // orientation is faithfully carried from the charstrings, and `correct_signs`
+    // is winding-aware — see `t2b_glyph_o_counter_reads_outside`).
+    let g = extract_codepoint(&otf_face(), 'o');
+    let areas: Vec<f32> = g.outline.contours.iter().map(contour_area).collect();
+    assert_eq!(areas.len(), 2, "CFF 'o' has two contours");
+    let outer = areas.iter().cloned().fold(0.0_f32, |m, a| if a.abs() > m.abs() { a } else { m });
+    let counter = areas.iter().cloned().find(|&a| a != outer).expect("two distinct areas");
+    assert!(outer > 0.0, "CFF 'o' outer ring winds CCW (positive area, PostScript convention), got {}", outer);
+    assert!(counter < 0.0, "CFF 'o' counter winds CW (negative area), got {}", counter);
+    assert!(
+        outer.signum() != counter.signum(),
+        "CFF 'o' outer ({}) and counter ({}) must wind opposite (fill rule carves the hole)",
+        outer,
+        counter
+    );
+}
+
+#[test]
+fn t2a_cff_cubic_distance_matches_bruteforce_end_to_end() {
+    // END-TO-END cubic distance gate: for every interior-projection,
+    // non-saturated texel/channel of the CFF 'o' field whose nearest edge is a
+    // CUBIC, the field's signed distance must match an INDEPENDENT brute-force
+    // nearest-point reference (dense sampling, the test's own evaluator) to
+    // within a tight tolerance. Because every edge of CFF 'o' is a cubic, this
+    // drives the crate's cubic nearest-point solver through the full extract →
+    // color → distance pipeline — the real-font analogue of the synthetic gate.
+    let g = extract_codepoint(&otf_face(), 'o');
+    let colored = color_outline(&g.outline);
+    let layout = field_layout(&colored);
+    let field = generate_distance_field(&colored, None);
+    let edges: &[ColoredEdge] = &colored.edges;
+
+    let mut max_err = 0.0_f32;
+    let mut checked = 0usize;
+    let mut cubic_checked = 0usize;
+    for y in 0..layout.height {
+        for x in 0..layout.width {
+            let p = texel_center(&layout, x, y);
+            for ch in 0..3 {
+                let mut best_true = f32::INFINITY;
+                let mut best_param = 0.5_f32;
+                let mut best_signed = f32::INFINITY;
+                let mut best_is_cubic = false;
+                for e in edges {
+                    if e.color.has_channel(ch) {
+                        let (td, param, sd) = brute_nearest(&e.seg, p, 8_000);
+                        if td < best_true {
+                            best_true = td;
+                            best_param = param;
+                            best_signed = sd;
+                            best_is_cubic = matches!(e.seg, Segment::Cubic { .. });
+                        }
+                    }
+                }
+                // Interior projection only (clamped feet use the pseudo path).
+                if best_param <= 0.02 || best_param >= 0.98 {
+                    continue;
+                }
+                let v = field.texel(x, y)[ch];
+                if v <= 1e-4 || v >= 1.0 - 1e-4 {
+                    continue; // mapping-saturated, distance is clamped
+                }
+                let got_signed = (v - 0.5) * range_em();
+                let err = (got_signed - best_signed).abs();
+                if err > max_err {
+                    max_err = err;
+                }
+                checked += 1;
+                if best_is_cubic {
+                    cubic_checked += 1;
+                }
+            }
+        }
+    }
+    assert!(checked > 50, "CFF 'o' must check a meaningful texel population, got {}", checked);
+    assert!(
+        cubic_checked > 30,
+        "CFF 'o' must exercise the CUBIC solver at most probes (got {} cubic-nearest of {} total)",
+        cubic_checked,
+        checked
+    );
+    // One texel is 1/48 em ≈ 0.0208; tolerance is a small fraction of that.
+    assert!(
+        max_err < 0.004,
+        "CFF 'o' end-to-end cubic distance vs brute force: max err {:.6} em ({:.3} texels) exceeds tolerance",
+        max_err,
+        max_err * 48.0
+    );
+}
+
+#[test]
+fn t2a_cff_glyph_o_field_is_finite_and_clash_free() {
+    // The CFF 'o' field must be all-finite, in [0,1], and the median must agree
+    // with the .a true-SDF sign everywhere the .a is decisive (no spurious MSDF
+    // edge) — the end-to-end MSDF acceptance property on the cubic path.
+    let g = extract_codepoint(&otf_face(), 'o');
+    let f = generate_glyph_field(&g.outline, None).expect("CFF 'o' is non-empty");
+    let mut clash = 0;
+    for y in 0..f.height {
+        for x in 0..f.width {
+            let t = f.texel(x, y);
+            for (i, &c) in t.iter().enumerate() {
+                assert!(c.is_finite(), "CFF 'o' texel ({},{}) ch {} is non-finite ({})", x, y, i, c);
+                assert!((0.0..=1.0).contains(&c), "CFF 'o' texel ({},{}) ch {} out of [0,1] ({})", x, y, i, c);
+            }
+            let med = median(t[0], t[1], t[2]);
+            // Decisive only when .a is clearly inside/outside (away from the edge).
+            if t[3] > 0.6 && med <= 0.5 {
+                clash += 1;
+            }
+            if t[3] < 0.4 && med > 0.5 {
+                clash += 1;
+            }
+        }
+    }
+    assert_eq!(clash, 0, "CFF 'o' field must have zero median/.a clashes (clean MSDF on cubic path)");
+}
+
+// ----------------------------------------------------------------------------
 // helpers that touch crate internals
 // ----------------------------------------------------------------------------
 

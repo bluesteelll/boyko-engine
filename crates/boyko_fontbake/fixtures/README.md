@@ -1,6 +1,6 @@
 # boyko_fontbake golden fixtures
 
-These two **libre** font files are the checked-in goldens for the T0–T3 tests
+These **libre** font files are the checked-in goldens for the T0–T3 tests
 (written by the `tester`, not the developer). They are NOT committed by the
 developer because (a) the developer must not write the golden tests, and (b)
 only freely-redistributable fonts may live in the repo — system fonts on the
@@ -11,18 +11,22 @@ build machine are proprietary and must never be checked in.
 | File | Format | Outline kind | Purpose | Status |
 |------|--------|--------------|---------|--------|
 | `Ubuntu-Light.ttf` | TrueType (`glyf`) | quadratic | T0/T1/T2/T3 goldens: outline + metrics + MSDF passes + atlas/.bfont | **present** (Ubuntu Font License / UFL, libre) |
-| _(CFF `.otf`)_ | OpenType-CFF | cubic | T2a cubic pseudo-distance golden (CFF charstring path) | **absent** — no libre CFF/OTF available on the build machine |
+| `SourceCodePro-Regular.otf` | OpenType-CFF (`OTTO`) | cubic | T2a end-to-end cubic golden (CFF charstring path) | **present** (SIL Open Font License 1.1 — see `SourceCodePro-OFL.txt`) |
 
 `Ubuntu-Light.ttf` is the canonical TrueType fixture the test suite pins
 specific glyph/segment/metric values against (`'A'`, `'o'`, `'.'`, `'8'`, …).
 
-**CFF/OTF (cubic) note:** no `.otf` (CFF) font was available to check in, so the
-end-to-end CFF charstring path is not exercised. Instead, the cubic
-nearest-point solver (the `multi-seed Newton` the CFF cubic path drives) is
-tested directly on a **synthetic `Segment::Cubic`** against a dense brute-force
-reference (`t2a_synthetic_cubic_distance_matches_bruteforce` in
-`tests/gate_goldens.rs`) — covering the same math without a CFF file. When a
-libre CFF/OTF is added, an end-to-end cubic golden can be enabled.
+**CFF/OTF (cubic) note:** `SourceCodePro-Regular.otf` is the OpenType-CFF
+(`OTTO`, Type-2 charstring) fixture that exercises the **end-to-end cubic path**
+the `glyf` (quadratic) Ubuntu font never reaches. The `t2a_cff_*` goldens in
+`tests/gate_goldens.rs` load it, assert the extracted outline is genuinely
+**cubic** (SourceCodePro `'o'` decodes to 8 `Segment::Cubic`, zero quads — the
+`curve_to` → `cubic_to` charstring path, NOT a quad fallback), pin the exact
+decoded control points, and cross-check the MSDF `.a` (true SDF) channel against
+an independent brute-force nearest-point reference. The complementary unit check
+`t2a_synthetic_cubic_distance_matches_bruteforce` still exercises the cubic
+nearest-point solver (the `multi-seed Newton`) directly on a **synthetic
+`Segment::Cubic`**, so the math is covered both in isolation and end-to-end.
 
 Any libre TrueType and any libre CFF/OTF will do as fixtures. Recommended libre
 sources:
@@ -39,5 +43,6 @@ format (the `ttf-parser` backend handles `glyf` and CFF/CFF2). The whole bake
 pipeline is font-agnostic, so the goldens only pin specific glyph/segment/field
 values, not the file identity.
 
-If a fixture is absent the relevant golden test should `skip` (the tester's
-call); the library itself never reads these files.
+Both required fixtures (the TTF quadratic and the CFF cubic) are now checked in,
+so the goldens hard-fail on a missing fixture rather than skipping. The library
+itself never reads these files; only the tests do.
