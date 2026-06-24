@@ -243,9 +243,14 @@ pub enum Format {
     B8G8R8A8Srgb = 50,
     /// `VK_FORMAT_R8_SNORM` — a single signed-normalized 8-bit channel mapping the
     /// byte range onto `[-1, 1]` (SDF brick-atlas campaign M0/M1: the quantized
-    /// narrow-band distance the 8³ brick atlas stores; the hardware trilinear
-    /// sampler decodes a code to its `[-band_half, band_half]` distance).
-    R8Snorm = 9,
+    /// narrow-band distance the 8³ brick atlas stores; the sampler decodes a code to
+    /// its `[-band_half, band_half]` distance).
+    ///
+    /// BUG-M2-GPU-1: this was 9 (`VK_FORMAT_R8_UNORM`), so the atlas image+view were
+    /// created as UNORM and the sampler decoded byte 127 as `127/255 = 0.498` instead of
+    /// the SNORM `127/127 = 1.0`. The whole M2 cubic was degenerate (corners 0.498× too
+    /// small, no sign change → no root → dead branch). The real `VK_FORMAT_R8_SNORM` is 10.
+    R8Snorm = 10,
     /// `VK_FORMAT_R16_SFLOAT` — a compact single-channel float (deferred SDF use).
     R16Sfloat = 76,
     /// `VK_FORMAT_R32_SFLOAT` — a single 32-bit float (Lighting L0b: the `gViewT`

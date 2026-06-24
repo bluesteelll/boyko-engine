@@ -238,8 +238,13 @@ StructuredBuffer<uint> PointerGrid : register(t9);
 // field store). The `Texture3D` + `SamplerState` at the SAME `[[vk::binding(10, 0)]]` collapse
 // to ONE `VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER` under DXC (the same pattern
 // `fullscreen_sample.fs.hlsl` uses), so the marcher's `BrickAtlas.SampleLevel(BrickSampler, …)`
-// hardware trilinear fetch reads the SAME corners the baker wrote. The sampler is Linear /
-// clamp-to-edge / no-mip (the apron read needs clamp, not a neighbour wrap).
+// point fetch reads the SAME corners the baker wrote. The sampler is NEAREST / clamp-to-edge /
+// no-mip (BUG-M2-GPU-1): the M2 DDA cubic needs the EXACT texel corner values, NOT trilinear
+// interpolation — a texel-center uvw `(texel + 0.5)/atlas_dim` through a NEAREST sampler returns
+// the exact decoded snorm, bit-matching the host `decode_snorm8(brick[i])` integer-index fetch,
+// AND exercises the combined descriptor correctly (a `.Load` on the texture half of a combined
+// image+sampler read 0 on-device → the cubic was degenerate → the M2 branch was dead). Clamp keeps
+// an apron-edge fetch reading the edge texel, not a neighbour wrap.
 //
 // Read ONLY when `pc.brick_trilinear != 0`; the OFF path never touches it (byte-identical to the
 // M1 marcher — the M2 0%-gate). The R2 contract: the marcher SPIR-V STATICALLY references t10/s10
@@ -588,10 +593,10 @@ static const float M2_CREASE_EPS     = 0.0192;
 static const uint  M2_REFINE_ITERS   = 8u;
 
 // Decodes one R8_SNORM code (a normalized float in [-1,1] from the hardware texel fetch) to a world
-// distance. `Texture3D<float>.Load` returns the hardware-decoded SNORM value at the EXACT texel with
-// ZERO filtering, so `n` is the decode of the stored i8 byte (the -128→-1 asymmetry is applied by the
-// Vulkan R8_SNORM rule the host `decode_snorm8` mirrors). Multiply by band_half (mirror
-// `decode_snorm8` post-normalization).
+// distance. The NEAREST `SampleLevel` returns the hardware-decoded SNORM value at the EXACT texel
+// (point sampling, no interpolation), so `n` is the decode of the stored i8 byte (the -128→-1
+// asymmetry is applied by the Vulkan R8_SNORM rule the host `decode_snorm8` mirrors). Multiply by
+// band_half (mirror `decode_snorm8` post-normalization).
 float m2_decode(float n, float band_half) {
     return n * band_half;
 }
@@ -599,48 +604,33 @@ float m2_decode(float n, float band_half) {
 // Fetches the atlas at apron'd-grid corner `(cx, cy, cz)` of tile origin `tile_org` (atlas-voxel
 // units), returning the decoded world distance.
 //
-// GPU-BUG FIX (M2 corner-fetch): the per-corner cubic MUST read the SAME decoded i8 the host's
-// `brick_cubic_hit` reads via `decode_snorm8(brick[exact_index])`. The previous
-// `BrickAtlas.SampleLevel(BrickSampler, uvw, 0.0)` used the bound LINEAR sampler: even at a texel-
-// center uvw, the hardware linear-filter path + the per-implementation R8_SNORM decode drifted from
-// the host's exact integer-index fetch, so the 8 cubic corners diverged, the cubic coefficients (and
-// thus `cand_t`) landed FAR from the true surface, and every candidate was rejected by the analytic
-// residual refine (HITS=0). `Texture3D.Load(int4(x,y,z,mip))` is a POINT texelFetch at integer coords:
-// it returns the decoded SNORM of the EXACT corner texel with no filtering and no sampler, matching
-// the host bit-for-bit. The corner index is the integer atlas-voxel `(tile_org + corner)`; `tile_org`
-// is integral (tile * BRICK_ALLOC) and the clamp keeps `corner` in `[0, BRICK_ALLOC-1]`, so the texel
-// is always in-bounds. `inv_atlas` is no longer needed (the integer Load takes no normalized uvw).
-float m2_corner(float3 tile_org, uint cx, uint cy, uint cz, float band_half) {
-    int3 texel = int3((int)(tile_org.x + (float)cx),
-                      (int)(tile_org.y + (float)cy),
-                      (int)(tile_org.z + (float)cz));
-    float n = BrickAtlas.Load(int4(texel, 0)).r;
-    return m2_decode(n, band_half);
-}
-
-// COMBINED-DESCRIPTOR KEEP-ALIVE (binding 10): the corner-fetch fix above reads the atlas with
-// `Texture3D.Load` (no sampler), so `BrickSampler` (s10) would be dead-stripped and binding 10 would
-// emit as a plain SAMPLED_IMAGE — mismatching the `DescriptorKind::CombinedImageSampler` the vocab
-// layout declares (the host R2 contract pins binding 10 = combined). This keeps `BrickSampler`
-// STATICALLY referenced (so DXC collapses t10+s10 into ONE combined descriptor) while contributing
-// EXACTLY 0.0 to the result.
+// GPU-BUG FIX (BUG-M2-GPU-1, M2 corner-fetch): the per-corner cubic MUST read the SAME decoded i8 the
+// host's `brick_cubic_hit` reads via `decode_snorm8(brick[exact_index])`. Two issues collapsed the
+// M2 branch on-device (RTX 3060); both are fixed here.
 //
-// The keep-alive must defeat DXC's aggressive DCE: a `x & 0u` mask, an `x * 0.0`, or any value DXC
-// can prove constant gets folded and the sample (and the sampler) removed. So the sampler load feeds
-// a CONTROL-FLOW branch whose outcome DXC cannot resolve at compile time — the sampled `n` is finite
-// for any real R8_SNORM/R16_SFLOAT texel (decoded into `[-1, 1]`), so `n > 2.0` is ALWAYS false at
-// runtime, but DXC cannot prove it (the texel contents are unknown), so it must keep the sample and
-// the conditional. The taken arm returns 0.0; the never-taken arm returns `n` (kept reachable so the
-// load is not hoisted out). `inv_atlas` provides the (UBO-derived, non-constant) sample coordinate.
-float m2_sampler_keepalive(float inv_atlas) {
-    float n = BrickAtlas.SampleLevel(BrickSampler, float3(0.5, 0.5, 0.5) * inv_atlas, 0.0).r;
-    // A decoded narrow-band sample is always in [-1, 1]·band_half — well under 2.0 — so this branch
-    // is never taken at runtime, but DXC cannot prove it ⇒ the sample (and s10) stay live.
-    [branch]
-    if (n > 2.0) {
-        return n; // unreachable for real data; keeps the load from being optimized away
-    }
-    return 0.0;
+//   (1) ROOT CAUSE — the atlas format constant `VK_FORMAT_R8_SNORM` was mis-set to 9, which is
+//       actually `VK_FORMAT_R8_UNORM` (the real `R8_SNORM` is 10). So the atlas image+view were
+//       created UNORM and the sampler decoded byte 127 as `127/255 = 0.498` instead of the signed
+//       `127/127 = 1.0`. Every corner was ~2× too small with the wrong sign, the cubic never changed
+//       sign, `m2_surface_hit` returned false for every pixel, and the branch was DEAD (gViewT
+//       bit-identical to the analytic marcher). Fixed in `boyko_rhi::Format::R8Snorm` (= 10) and
+//       `VK_FORMAT_R8_SNORM` (= 10). On-device: corner s111 then decoded 1.0 (correct SNORM).
+//   (2) the corner fetch is a POINT sample through the COMBINED image+sampler descriptor (the RHI has
+//       no standalone Sampler kind; binding 10 = combined). A NEAREST sampler (set in
+//       `brick_atlas.rs`) + `SampleLevel` at the texel CENTER uvw `(texel + 0.5) / atlas_dim` returns
+//       the EXACT texel's decoded snorm with ZERO interpolation — bit-matching the host's
+//       integer-index `decode_snorm8(brick[i])` while exercising the descriptor as a genuine combined
+//       image+sampler (a `.Load` texelFetch on the texture half of a combined descriptor is the wrong
+//       access path). The corner texel is the integer atlas-voxel `(tile_org + corner)`; `tile_org`
+//       is integral (tile * BRICK_ALLOC) and the clamp keeps `corner` in `[0, BRICK_ALLOC-1]`, so the
+//       texel is always in-bounds and the ClampToEdge sampler never wraps. `inv_atlas == 1.0 /
+//       atlas_dim` maps the integer texel to its normalized center uvw.
+float m2_corner(float3 tile_org, uint cx, uint cy, uint cz, float inv_atlas, float band_half) {
+    float3 uvw = (float3(tile_org.x + (float)cx,
+                         tile_org.y + (float)cy,
+                         tile_org.z + (float)cz) + 0.5) * inv_atlas;
+    float n = BrickAtlas.SampleLevel(BrickSampler, uvw, 0.0).r;
+    return m2_decode(n, band_half);
 }
 
 // Floors an apron'd-grid coordinate to a low cell index with room for the +1 neighbour
@@ -860,17 +850,17 @@ float m2_brick_cubic_hit(float3 ro_v, float3 rd_v, float t_enter, float t_exit,
         uint cy = min((uint)max(cell[1], 0), W - 2u);
         uint cz = min((uint)max(cell[2], 0), W - 2u);
 
-        // Fetch the 8 decoded corners in the s_ijk ↔ x + 2y + 4z order (atlas integer texelFetch —
-        // the point-sampled corner-fetch fix; the SAME decoded i8 the host `brick_cubic_hit` reads).
+        // Fetch the 8 decoded corners in the s_ijk ↔ x + 2y + 4z order (NEAREST point-sample at the
+        // texel center — the corner-fetch fix; the SAME decoded i8 the host `brick_cubic_hit` reads).
         float s[8];
-        s[0] = m2_corner(tile_org, cx,      cy,      cz,      band_half); // s000
-        s[1] = m2_corner(tile_org, cx + 1u, cy,      cz,      band_half); // s100
-        s[2] = m2_corner(tile_org, cx,      cy + 1u, cz,      band_half); // s010
-        s[3] = m2_corner(tile_org, cx + 1u, cy + 1u, cz,      band_half); // s110
-        s[4] = m2_corner(tile_org, cx,      cy,      cz + 1u, band_half); // s001
-        s[5] = m2_corner(tile_org, cx + 1u, cy,      cz + 1u, band_half); // s101
-        s[6] = m2_corner(tile_org, cx,      cy + 1u, cz + 1u, band_half); // s011
-        s[7] = m2_corner(tile_org, cx + 1u, cy + 1u, cz + 1u, band_half); // s111
+        s[0] = m2_corner(tile_org, cx,      cy,      cz,      inv_atlas, band_half); // s000
+        s[1] = m2_corner(tile_org, cx + 1u, cy,      cz,      inv_atlas, band_half); // s100
+        s[2] = m2_corner(tile_org, cx,      cy + 1u, cz,      inv_atlas, band_half); // s010
+        s[3] = m2_corner(tile_org, cx + 1u, cy + 1u, cz,      inv_atlas, band_half); // s110
+        s[4] = m2_corner(tile_org, cx,      cy,      cz + 1u, inv_atlas, band_half); // s001
+        s[5] = m2_corner(tile_org, cx + 1u, cy,      cz + 1u, inv_atlas, band_half); // s101
+        s[6] = m2_corner(tile_org, cx,      cy + 1u, cz + 1u, inv_atlas, band_half); // s011
+        s[7] = m2_corner(tile_org, cx + 1u, cy + 1u, cz + 1u, inv_atlas, band_half); // s111
 
         // The t-span of THIS cell along the ray (clamped to the brick span).
         float t_cell_exit = min(min(min(t_next[0], t_next[1]), t_next[2]), t_exit);
@@ -960,16 +950,17 @@ bool m2_surface_hit(float3 ro, float3 rd, float t_world, out float hit_t) {
     }
 
     // The candidate world `t` (local is measured from `p`, in world units). `local` is computed by
-    // the integer-texelFetch cubic; `m2_sampler_keepalive` adds EXACTLY 0.0 (it keeps the s10 sampler
-    // — and the binding-10 combined descriptor — statically referenced, see its note).
-    float cand_t = t_world + local + m2_sampler_keepalive(inv_atlas);
+    // the NEAREST point-sampled cubic (`m2_corner` reads s10 directly), so the s10 sampler — and the
+    // binding-10 combined descriptor — is GENUINELY referenced (no keep-alive hack needed).
+    float cand_t = t_world + local;
     float3 cand_p = ro + rd * cand_t;
     float resid = field_distance(cand_p);
 
     // ANALYTIC-RESIDUAL FALLBACK (the exact-CSG guarantee): a |resid| within the crease band accepts
     // the cubic hit (the surface is where the cubic said). ELSE a CSG crease / brick-rounding
     // divergence — a cold [branch] analytic refine settles it onto the EXACT field from the
-    // candidate. The accepted hit is thus ALWAYS analytically validated.
+    // candidate. The accepted hit is thus ALWAYS analytically validated. Mirrors the host
+    // `host_m2_surface_hit` order bit-for-bit (crease-accept, else refine).
     [branch]
     if (abs(resid) < M2_CREASE_EPS) {
         hit_t = cand_t;

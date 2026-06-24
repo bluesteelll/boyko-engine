@@ -38,9 +38,10 @@ use crate::texture::VulkanTexture;
 use boyko_sdf_math::SdfEditField;
 
 /// The M2 brick atlas: a `VK_IMAGE_TYPE_3D` `TRANSFER_DST | SAMPLED` image (NOT storage — the
-/// M2 fill is CPU-side; a GPU compute fill is M3), its trilinear / clamp-to-edge / no-mip
-/// sampler, and the chosen voxel [`AtlasEncoding`] (`R8_SNORM`, or `R16_SFLOAT` when the device
-/// cannot linear-filter `R8_SNORM`).
+/// M2 fill is CPU-side; a GPU compute fill is M3), its NEAREST / clamp-to-edge / no-mip sampler
+/// (BUG-M2-GPU-1: the M2 cubic point-samples exact texel corners, not a trilinear blend), and the
+/// chosen voxel [`AtlasEncoding`] (`R8_SNORM`, or `R16_SFLOAT` when the device cannot sample
+/// `R8_SNORM`).
 ///
 /// Owned by value; torn down through [`BrickAtlas::destroy`] (the caller has drained the device
 /// so no submission still samples it). Not `Copy`/`Clone`: the move encodes "destroyed once".
@@ -48,9 +49,10 @@ pub struct BrickAtlas {
     /// The `M2_ATLAS_DIM³` 3D atlas image (`TRANSFER_DST | SAMPLED`). The marcher will fetch it
     /// with the trilinear sampler in the M2 step; this step only fills it.
     texture: VulkanTexture,
-    /// The trilinear, clamp-to-edge, NO-MIP sampler the marcher's hardware fetch uses (the
-    /// `R8_SNORM`/`R16_SFLOAT` decode + apron read need a LINEAR filter; clamp keeps an
-    /// out-of-tile fetch reading the apron, not a neighbour).
+    /// The NEAREST (point), clamp-to-edge, NO-MIP sampler the marcher's corner fetch uses
+    /// (BUG-M2-GPU-1: the M2 DDA cubic reads the EXACT decoded texel corners, bit-matching the
+    /// host `decode_snorm8`; a LINEAR filter would blend neighbours and drift the cubic. Clamp
+    /// keeps an apron-edge fetch reading the edge texel, not a neighbour wrap).
     sampler: VulkanSampler,
     /// The chosen voxel encoding (mirrors [`crate::device::DeviceCaps::atlas_format`]).
     encoding: AtlasEncoding,
@@ -63,8 +65,8 @@ impl BrickAtlas {
     /// so far is torn down before the error returns.
     ///
     /// The image is `M2_ATLAS_DIM³`, `Format::R8Snorm` (or `Format::R16Sfloat` for the
-    /// fallback), `D3` dimension, `TRANSFER_DST | SAMPLED` usage. The sampler is `Linear` /
-    /// `ClampToEdge` / no-mip.
+    /// fallback), `D3` dimension, `TRANSFER_DST | SAMPLED` usage. The sampler is `Nearest` /
+    /// `ClampToEdge` / no-mip (BUG-M2-GPU-1: the M2 cubic point-samples exact texel corners).
     pub fn create(ctx: &VulkanContext, field: &SdfEditField) -> Result<Self, VulkanError> {
         let encoding =
             AtlasEncoding::from_linear_filter_ok(ctx.device_caps().atlas_linear_filter_ok);
@@ -88,8 +90,13 @@ impl BrickAtlas {
         let sampler = match RhiDevice::create_sampler(
             ctx,
             &SamplerDesc {
-                mag_filter: Filter::Linear,
-                min_filter: Filter::Linear,
+                // NEAREST (point) — BUG-M2-GPU-1. The M2 DDA cubic needs the EXACT texel corner
+                // values (bit-matching the host's integer-index `decode_snorm8`), NOT trilinear
+                // interpolation; the marcher point-samples each corner at the texel center
+                // `(texel + 0.5)/atlas_dim`. A LINEAR filter would blend neighbours and drift the
+                // 8 cubic corners off the host fetch (the degenerate-cubic / dead-branch failure).
+                mag_filter: Filter::Nearest,
+                min_filter: Filter::Nearest,
                 address_mode: boyko_rhi::AddressMode::ClampToEdge,
                 mip: MipMode::None,
             },

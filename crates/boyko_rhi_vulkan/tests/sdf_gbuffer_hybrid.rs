@@ -60,11 +60,22 @@ use boyko_rhi_vulkan::compute::{
     cluster_cull_spirv, golden_cluster_cull, golden_cluster_index,
     golden_deferred_resolve_clustered, ClusterCullPush, GoldenClusterConfig,
     CLUSTER_CULL_PUSH_BYTES,
+    // M2 brick-atlas trilinear+cubic SURFACE path: the widened b5 camera UBO (128 B with the
+    // M2GridParams tail @80), the host golden mirror, the M2 grid params block, and the exact-CSG
+    // crease epsilon. The atlas image/sampler themselves come from `BrickAtlas` (below).
+    B5_CAMERA_UBO_BYTES, M2GridParams, M2_CREASE_EPS, M2_GRID_PARAMS_OFFSET,
+    golden_composite_pixel_brick_m2,
 };
+use boyko_rhi_vulkan::brick_atlas::BrickAtlas;
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
 
 /// Total pixel count (the compute UBO `count`; the shader bounds `idx < count`).
 const PIXELS: u32 = SDF_IMG_W * SDF_IMG_H;
+
+/// The byte size of the `M2GridParams` block written into the b5 camera UBO tail (3 std140 `vec4`
+/// lanes = 48 B = `B5_CAMERA_UBO_BYTES - M2_GRID_PARAMS_OFFSET`). The local mirror of
+/// `compute::M2_GRID_PARAMS_BYTES` (kept local to avoid widening the import for one const).
+const M2_GRID_PARAMS_BYTES_LOCAL: usize = B5_CAMERA_UBO_BYTES - M2_GRID_PARAMS_OFFSET;
 
 /// R8G8B8A8 ALBEDO readback byte size.
 const READBACK_BYTES: u64 = (PIXELS as u64) * 4;
@@ -447,6 +458,8 @@ fn run_gbuffer_hybrid_lit_table(
         light_dir,
         light_table_words,
         None,
+        // M2 trilinear OFF on this default path (byte-identical to the pre-M2 marcher).
+        false,
     )
 }
 
@@ -471,9 +484,61 @@ fn run_gbuffer_hybrid_lit_table_brick(
     light_dir: [f32; 3],
     light_table_words: &[u32],
     brick: Option<(&boyko_sdf_math::brick::PointerGrid, &[u32])>,
+    brick_trilinear: bool,
 ) -> (Vec<u8>, Option<Vec<u8>>) {
+    let (lit, tiles, _viewt) = run_gbuffer_hybrid_m2(
+        ctx, edits, coarse_enabled, read_tiles, omega_in, lighting_flags, light_dir,
+        light_table_words, brick, brick_trilinear, false, true,
+    );
+    (lit, tiles)
+}
+
+/// M2 — the brick-atlas trilinear+cubic harness, the SUPERSET of
+/// [`run_gbuffer_hybrid_lit_table_brick`]. In addition to the LIT readback it (a) optionally
+/// copies the marcher's `gViewT` R32_SFLOAT surface-`t` image back (when `read_viewt`), so the
+/// M2 discriminator can recover the GPU's per-pixel hit `t` (the analytically-validated world
+/// ray param) for the EXACT-CSG residual check and the hit-`t` agreement against the host mirror,
+/// and (b) lets the caller ZERO the b5 UBO's `M2GridParams` tail (`m2_grid_default == false`) to
+/// prove the M2 branch reads it (the grid-engaged discriminator (a)).
+///
+/// When `read_viewt == false` AND `m2_grid_default == true` the recorded command stream + the b5
+/// UBO contents are byte-identical to [`run_gbuffer_hybrid_lit_table_brick`]'s — the `gViewT` image
+/// keeps its `STORAGE`-only usage and no extra copy/barrier is recorded (the OFF byte-identity
+/// 0%-gate path). The third tuple element is `Some(viewt_bytes)` only when `read_viewt`.
+#[allow(clippy::too_many_arguments)]
+fn run_gbuffer_hybrid_m2(
+    ctx: &VulkanContext,
+    edits: &[SdfEdit],
+    coarse_enabled: bool,
+    read_tiles: bool,
+    omega_in: f32,
+    lighting_flags: u32,
+    light_dir: [f32; 3],
+    light_table_words: &[u32],
+    brick: Option<(&boyko_sdf_math::brick::PointerGrid, &[u32])>,
+    brick_trilinear: bool,
+    read_viewt: bool,
+    m2_grid_default: bool,
+) -> (Vec<u8>, Option<Vec<u8>>, Option<Vec<f32>>) {
     let device: &VulkanContext = ctx;
     let queue = ctx.rhi_queue();
+
+    // --- M2: the brick atlas (marcher binding 10, a CombinedImageSampler). Baked from the
+    // SAME `edits` authority via `BrickAtlas::create` (principle 0 — a transient GPU mirror, no
+    // parallel field store), exactly as `window_present_gbuffer.rs` wires it. The recompiled
+    // marcher SPIR-V statically references `register(t10)` + `register(s10)` (collapsed to ONE
+    // combined descriptor by DXC) inside the runtime-gated `brick_trilinear` branch, so a VALID
+    // combined image+sampler MUST be bound at binding 10 regardless of the gate. On the OFF path
+    // (`brick_trilinear == false`) the atlas is bound-but-unread (byte-identity contract). ---
+    let brick_atlas = {
+        use boyko_sdf_math::SdfEditField;
+        let mut field = SdfEditField::new();
+        for e in edits {
+            assert!(field.push(*e), "scene must fit MAX_SDF_EDITS");
+        }
+        field.bump_gen();
+        BrickAtlas::create(ctx, &field).expect("M2 brick atlas (vocab binding 10) — create + bake + upload")
+    };
 
     // --- M1: the pointer-grid StorageBuffer (marcher binding 9). On the brick-ON path it
     // is seeded with the `build_pointer_grid` bake (`cells`, one u32 per cell — the GPU
@@ -522,10 +587,16 @@ fn run_gbuffer_hybrid_lit_table_brick(
     }
 
     // --- The camera/extent UNIFORM buffer (binding 5), written ONCE at setup (NOT a
-    // per-frame push). At the golden 64×64 ORTHO extent it drives bit-exact rays. ---
+    // per-frame push). At the golden 64×64 ORTHO extent it drives bit-exact rays.
+    //
+    // M2: the UBO is sized to `B5_CAMERA_UBO_BYTES` (128 B) — the 80-byte camera block plus the
+    // 48-byte `M2GridParams` tail the marcher reads on the `brick_trilinear` path (at
+    // `M2_GRID_PARAMS_OFFSET == 80`). The M2 block is written unconditionally; the marcher
+    // reads it ONLY when `brick_trilinear == 1`, so on the OFF path it is bound-but-unread
+    // (byte-identical to the pre-M2 path). ---
     let camera_uniform = device
         .create_buffer(&BufferDesc {
-            size: COMPOSITE_PUSH_CONSTANT_BYTES as u64,
+            size: B5_CAMERA_UBO_BYTES as u64,
             usage: BufferUsage::UNIFORM,
             location: MemoryLocation::HostVisibleCoherent,
         })
@@ -536,13 +607,31 @@ fn run_gbuffer_hybrid_lit_table_brick(
         let mapped = device
             .buffer_mapped_ptr(&camera_uniform)
             .expect("host-visible uniform buffer is mapped");
-        // `as_bytes()` is the same 80-byte POD the packed path pushed; write it once.
+        // `as_bytes()` is the same 80-byte camera POD the packed path pushed; write it at offset 0.
         let bytes = pc.as_bytes();
-        // SAFETY: `mapped` points to `COMPOSITE_PUSH_CONSTANT_BYTES` mapped
-        // host-coherent bytes; `bytes` is exactly that many bytes; no GPU work is in
-        // flight yet (submit follows), so the write is unsynchronized-safe.
+        debug_assert_eq!(bytes.len(), M2_GRID_PARAMS_OFFSET, "camera block must be 80 B (offset of the M2 tail)");
+        // M2: the 48-byte grid params block at `M2_GRID_PARAMS_OFFSET` (80). Default near-field
+        // (origin -4, dims 4³, brick world 2.0, atlas 40, band/voxel/inv-atlas), the SAME block the
+        // host mirror `golden_composite_pixel_brick_m2` + the production swapchain UBO carry. The
+        // discriminator-(a) path passes `m2_grid_default == false` to write a ZEROED tail instead
+        // (atlas_dim == 0 → the M2 grid maps nothing → the branch finds no tile → no M2 hit); the
+        // GPU image must DIFFER from the default-grid run, proving the branch reads this block.
+        let m2 = M2GridParams::default_near_field();
+        let m2_default = m2.as_bytes();
+        let m2_zeroed = [0u8; M2_GRID_PARAMS_BYTES_LOCAL];
+        let m2_bytes: &[u8] = if m2_grid_default { m2_default } else { &m2_zeroed };
+        debug_assert_eq!(M2_GRID_PARAMS_OFFSET + m2_bytes.len(), B5_CAMERA_UBO_BYTES);
+        // SAFETY: `mapped` points to `B5_CAMERA_UBO_BYTES` (128) mapped host-coherent bytes;
+        // `bytes` (80) is written at offset 0 and `m2_bytes` (48) at offset 80 — together exactly
+        // 128 in-bounds bytes, disjoint. No GPU work is in flight yet (submit follows), so the
+        // writes are unsynchronized-safe.
         unsafe {
             core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len());
+            core::ptr::copy_nonoverlapping(
+                m2_bytes.as_ptr(),
+                mapped.as_ptr().add(M2_GRID_PARAMS_OFFSET),
+                m2_bytes.len(),
+            );
         }
     }
 
@@ -669,7 +758,15 @@ fn run_gbuffer_hybrid_lit_table_brick(
         })
         .expect("deferred resolve lit storage image");
     // Lighting L0b: the gViewT lane — an R32_SFLOAT STORAGE image the marcher stores the
-    // surface ray param `t` into and the resolve reads to reconstruct `P = ro + rd * t`.
+    // surface ray param `t` into and the resolve reads to reconstruct `P = ro + rd * t`. M2: the
+    // discriminator reads it back (the GPU's per-pixel surface `t`) for the EXACT-CSG residual
+    // check + the hit-`t` agreement, so it gains `TRANSFER_SRC` ONLY when `read_viewt` (the OFF
+    // byte-identity path keeps the STORAGE-only image + records no extra copy).
+    let viewt_usage = if read_viewt {
+        ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC
+    } else {
+        ImageUsage::STORAGE
+    };
     let viewt = device
         .create_texture(&TextureDesc {
             width: SDF_IMG_W,
@@ -677,7 +774,7 @@ fn run_gbuffer_hybrid_lit_table_brick(
             depth: 1,
             format: Format::R32Sfloat,
             dimension: TextureDimension::D2,
-            usage: ImageUsage::STORAGE,
+            usage: viewt_usage,
         })
         .expect("Lighting L0b gViewT storage image");
 
@@ -696,6 +793,18 @@ fn run_gbuffer_hybrid_lit_table_brick(
             location: MemoryLocation::HostVisibleCoherent,
         })
         .expect("host-visible readback buffer");
+
+    // M2: the readback buffer for the gViewT R32_SFLOAT image (one f32 per pixel = the GPU's
+    // surface ray param `t`). Allocated ONLY on the `read_viewt` path; a 4-byte placeholder
+    // otherwise (never copied into / read), kept so the single teardown block destroys it
+    // unconditionally without a branch.
+    let viewt_readback = device
+        .create_buffer(&BufferDesc {
+            size: if read_viewt { (PIXELS as u64) * 4 } else { 4 },
+            usage: BufferUsage::TRANSFER_DST,
+            location: MemoryLocation::HostVisibleCoherent,
+        })
+        .expect("host-visible gViewT readback buffer");
 
     // The quad vertex buffer.
     let vertices = quad_vertices();
@@ -788,6 +897,13 @@ fn run_gbuffer_hybrid_lit_table_brick(
         // on BOTH the OFF and ON path (the shader statically references t9), bound to the
         // 1-cell placeholder when the skip is off.
         BindGroupLayoutEntry { binding: 9, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        // M2 trilinear+cubic: the brick-atlas combined image+sampler @10. The recompiled marcher
+        // SPIR-V statically references `Texture3D BrickAtlas : register(t10)` +
+        // `SamplerState BrickSampler : register(s10)` (collapsed to ONE combined descriptor by DXC)
+        // inside the runtime-gated `brick_trilinear` branch (NOT dead-stripped despite the gate),
+        // so the layout MUST declare binding 10 — a VALID combined image+sampler is bound even on
+        // the OFF path (`brick_trilinear == 0`, bound-but-unread). Mirrors `window_present_gbuffer.rs`.
+        BindGroupLayoutEntry { binding: 10, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
     ];
     let bind_layout = device
         .create_bind_group_layout(&BindGroupLayoutDesc { entries: &layout_entries })
@@ -833,9 +949,16 @@ fn run_gbuffer_hybrid_lit_table_brick(
                 // M1: the pointer-grid SSBO @9 (the bake on the brick-ON path, the 1-cell
                 // placeholder on the OFF path — never read when `brick_enabled == 0`).
                 BindGroupEntry::StorageBuffer { buffer: &pointer_grid_buffer },
+                // M2: the brick-atlas 3D image @10 as a COMBINED image+sampler (the marcher's
+                // hardware fetch + the `.Load` corner reads). Bound on BOTH paths; read only when
+                // `brick_trilinear == 1`. The atlas was baked from `edits` above.
+                BindGroupEntry::CombinedImage {
+                    texture: brick_atlas.texture(),
+                    sampler: brick_atlas.sampler(),
+                },
             ],
         })
-        .expect("P4b vocabulary bind group");
+        .expect("M2 vocabulary bind group");
 
     // --- PBR MVP-2: the RESOLVE layout + pipeline + set. 6 bindings (≤ 8): gAlbedo @0,
     // gNormal @1, gMaterial @2, lit @3 (STORAGE images), the material SSBO @4, the camera
@@ -1035,10 +1158,14 @@ fn run_gbuffer_hybrid_lit_table_brick(
         let base = FineMarcherPush::new(coarse_enabled, omega, lighting_flags, light_dir);
         // M1: enable the empty-skip + stamp the grid uniforms the marcher indexes binding 9
         // with, when a brick grid was supplied. Off ⇒ the pre-M1 byte-identical push.
-        match brick {
+        let m1 = match brick {
             Some((grid, _)) => base.with_brick(grid.origin, grid.dims, grid.brick_world),
             None => base,
-        }
+        };
+        // M2: enable the trilinear+cubic SURFACE path. INDEPENDENT of the M1 empty-skip — the
+        // M2GridParams the marcher reads live in the b5 UBO tail (written above), not the push.
+        // `brick_trilinear == false` leaves the push byte-identical to the M1 state (the OFF path).
+        m1.with_brick_trilinear(brick_trilinear)
     };
     encoder.push_compute_constants(&compute, ShaderStage::COMPUTE, 0, push.as_bytes());
     encoder.dispatch(group_count_x(), 1, 1);
@@ -1100,6 +1227,30 @@ fn run_gbuffer_hybrid_lit_table_brick(
     }];
     encoder.copy_image_to_buffer(&lit, ImageLayout::TransferSrcOptimal, &readback, &regions);
 
+    // --- M2: copy the gViewT R32_SFLOAT surface-`t` image back (only on the discriminator path).
+    // The marcher STORED `t` into it (GENERAL); the resolve only READ it (no write), so it is still
+    // GENERAL. Transition GENERAL → TRANSFER_SRC (the marcher's COMPUTE_SHADER write is the source
+    // dependency) and copy one f32/pixel. This is gated by `read_viewt`, so the OFF byte-identity
+    // path records NEITHER this barrier NOR this copy (the command stream is unchanged). ---
+    if read_viewt {
+        encoder.image_barrier(&ImageBarrierDesc {
+            texture: &viewt,
+            src_stage: BarrierStage::COMPUTE_SHADER,
+            dst_stage: BarrierStage::TRANSFER,
+            src_access: BarrierAccess::SHADER_WRITE,
+            dst_access: BarrierAccess::TRANSFER_READ,
+            old_layout: ImageLayout::General,
+            new_layout: ImageLayout::TransferSrcOptimal,
+            range: ImageSubresourceRange::COLOR,
+        });
+        encoder.copy_image_to_buffer(
+            &viewt,
+            ImageLayout::TransferSrcOptimal,
+            &viewt_readback,
+            &regions,
+        );
+    }
+
     encoder.end().expect("end");
 
     queue.submit(&encoder, &fence).expect("submit");
@@ -1139,6 +1290,29 @@ fn run_gbuffer_hybrid_lit_table_brick(
         None
     };
 
+    // M2: optionally read back the gViewT surface-`t` f32 image (the GPU's per-pixel hit `t`,
+    // `1.0e30` on a non-hit pixel). The buffer is HostVisibleCoherent + the fence wait preceded
+    // this read, so the copy is complete + coherent.
+    let viewt_out: Option<Vec<f32>> = if read_viewt {
+        let viewt_ptr = device
+            .buffer_mapped_ptr(&viewt_readback)
+            .expect("host-visible gViewT readback buffer is mapped");
+        let mut vt = vec![0f32; PIXELS as usize];
+        // SAFETY: `viewt_ptr` points to `PIXELS * 4` mapped host-coherent bytes (sized so on the
+        // `read_viewt` path); the fence wait preceded this read; reading `PIXELS` f32 is in-bounds;
+        // `vt` is a distinct allocation; an R32_SFLOAT texel is a valid `f32` bit pattern.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                viewt_ptr.as_ptr().cast::<f32>(),
+                vt.as_mut_ptr(),
+                PIXELS as usize,
+            );
+        }
+        Some(vt)
+    } else {
+        None
+    };
+
     assert_validation_clean(ctx);
 
     // SAFETY: every resource was created on `device`; the last submission completed
@@ -1161,6 +1335,7 @@ fn run_gbuffer_hybrid_lit_table_brick(
         device.destroy_shader_module(vs);
         device.destroy_buffer(vertex_buffer);
         device.destroy_buffer(readback);
+        device.destroy_buffer(viewt_readback);
         device.destroy_sampler(sampler);
         device.destroy_texture(viewt);
         device.destroy_texture(lit);
@@ -1175,9 +1350,12 @@ fn run_gbuffer_hybrid_lit_table_brick(
         device.destroy_buffer(camera_uniform);
         device.destroy_buffer(buffer);
         device.destroy_buffer(pointer_grid_buffer);
+        // M2: the brick atlas (image + sampler). The last submission completed (fence-waited
+        // above), so no work still samples it; `destroy` consumes `self` ⇒ each object once.
+        brick_atlas.destroy(device);
     }
 
-    (out, tiles_out)
+    (out, tiles_out, viewt_out)
 }
 
 /// The rung-9/10 "crater" CSG scene (base sphere minus a smaller sphere).
@@ -3000,10 +3178,15 @@ fn run_gbuffer_hybrid_lit_clustered(
 
     // --- The camera/extent UNIFORM buffer (binding 5 of the vocab + resolve sets, binding 0
     // of the cull set). The ORTHO 64×64 block drives the SAME bit-exact rays the host oracle
-    // uses (the cull's froxel-AABB ray-gen + the resolve's per-pixel ray). ---
+    // uses (the cull's froxel-AABB ray-gen + the resolve's per-pixel ray).
+    //
+    // M2: sized to `B5_CAMERA_UBO_BYTES` (128 B) — the 80-byte camera block + the 48-byte
+    // `M2GridParams` tail @80 the marcher reads on the `brick_trilinear` path. The L1 path runs the
+    // marcher with `brick_trilinear == 0`, so the M2 tail is bound-but-unread (byte-identical to the
+    // pre-M2 L1 image); the default block is written for parity with the production UBO. ---
     let camera_uniform = device
         .create_buffer(&BufferDesc {
-            size: COMPOSITE_PUSH_CONSTANT_BYTES as u64,
+            size: B5_CAMERA_UBO_BYTES as u64,
             usage: BufferUsage::UNIFORM,
             location: MemoryLocation::HostVisibleCoherent,
         })
@@ -3015,13 +3198,35 @@ fn run_gbuffer_hybrid_lit_clustered(
             .buffer_mapped_ptr(&camera_uniform)
             .expect("host-visible uniform buffer is mapped");
         let bytes = pc.as_bytes();
-        // SAFETY: `mapped` points to `COMPOSITE_PUSH_CONSTANT_BYTES` mapped host-coherent
-        // bytes; `bytes` is exactly that many bytes; no GPU work is in flight yet (submit
-        // follows), so the write is unsynchronized-safe.
+        let m2 = M2GridParams::default_near_field();
+        let m2_bytes = m2.as_bytes();
+        // SAFETY: `mapped` points to `B5_CAMERA_UBO_BYTES` (128) mapped host-coherent bytes; the
+        // 80-byte camera block at offset 0 + the 48-byte M2 block at offset 80 are disjoint and
+        // together exactly 128 in-bounds bytes; no GPU work is in flight yet (submit follows).
         unsafe {
             core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len());
+            core::ptr::copy_nonoverlapping(
+                m2_bytes.as_ptr(),
+                mapped.as_ptr().add(M2_GRID_PARAMS_OFFSET),
+                m2_bytes.len(),
+            );
         }
     }
+
+    // --- M2: the brick atlas (marcher binding 10). Baked from the SAME `edits` authority (a
+    // transient GPU mirror, principle 0). The recompiled marcher SPIR-V statically references
+    // `register(t10)` + `register(s10)` (collapsed to ONE combined descriptor by DXC), so the L1
+    // marcher layout MUST declare binding 10 and bind a VALID atlas even though the L1 path runs
+    // the trilinear path OFF (`brick_trilinear == 0`, bound-but-unread). ---
+    let brick_atlas = {
+        use boyko_sdf_math::SdfEditField;
+        let mut field = SdfEditField::new();
+        for e in edits {
+            assert!(field.push(*e), "scene must fit MAX_SDF_EDITS");
+        }
+        field.bump_gen();
+        BrickAtlas::create(ctx, &field).expect("M2 brick atlas (L1 vocab binding 10) — create + bake + upload")
+    };
 
     // --- The material table SSBO (vocab @7 + resolve @4): the single default material. ---
     let material_table = device
@@ -3298,6 +3503,12 @@ fn run_gbuffer_hybrid_lit_clustered(
         // (the marcher push leaves `brick_enabled == 0`), so @9 is bound to a harmless
         // placeholder StorageBuffer (never read).
         BindGroupLayoutEntry { binding: 9, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        // M2: the brick-atlas combined image+sampler @10. The recompiled marcher SPIR-V statically
+        // references `register(t10)`/`register(s10)` (collapsed to ONE combined descriptor by DXC)
+        // inside the runtime-gated `brick_trilinear` branch — NOT dead-stripped — so the L1 marcher
+        // layout MUST declare @10 (or `vkCreateComputePipelines` trips VUID-…-layout-07988). The L1
+        // path runs the trilinear path OFF (`brick_trilinear == 0`); the atlas is bound-but-unread.
+        BindGroupLayoutEntry { binding: 10, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
     ];
     let bind_layout = device
         .create_bind_group_layout(&BindGroupLayoutDesc { entries: &layout_entries })
@@ -3326,6 +3537,12 @@ fn run_gbuffer_hybrid_lit_clustered(
                 // M1 @9: placeholder (the L1 path runs the empty-skip OFF; never read). The
                 // material table is a valid StorageBuffer that satisfies the static t9 ref.
                 BindGroupEntry::StorageBuffer { buffer: &material_table },
+                // M2 @10: the brick atlas (combined image+sampler). Bound-but-unread on the L1 OFF
+                // path (`brick_trilinear == 0`); satisfies the marcher SPIR-V's static t10/s10 ref.
+                BindGroupEntry::CombinedImage {
+                    texture: brick_atlas.texture(),
+                    sampler: brick_atlas.sampler(),
+                },
             ],
         })
         .expect("vocabulary bind group");
@@ -3743,6 +3960,9 @@ fn run_gbuffer_hybrid_lit_clustered(
         device.destroy_buffer(material_table);
         device.destroy_buffer(camera_uniform);
         device.destroy_buffer(buffer);
+        // M2: the brick atlas (image + sampler). The last submission completed (fence-waited
+        // above), so no work still samples it; `destroy` consumes `self` ⇒ each object once.
+        brick_atlas.destroy(device);
     }
 
     (out, grid_out, index_out, viewt_px, normal_oct)
@@ -4106,14 +4326,14 @@ fn sdf_m1_brick_offscreen_matches_golden_and_analytic() {
     ] {
         let (grid, cells) = bake_brick_grid(&edits);
 
-        // The brick-ON marcher run (binding 9 = the bake, brick_enabled = 1).
+        // The brick-ON marcher run (binding 9 = the bake, brick_enabled = 1; M2 trilinear OFF).
         let (lit_on, _) = run_gbuffer_hybrid_lit_table_brick(
             &ctx, &edits, false, false, 1.0, 0, DEFAULT_LIGHT_DIR, &DEGENERATE_LIGHT_TABLE,
-            Some((&grid, &cells)),
+            Some((&grid, &cells)), false,
         );
-        // The brick-OFF marcher run (binding 9 = placeholder, brick_enabled = 0).
+        // The brick-OFF marcher run (binding 9 = placeholder, brick_enabled = 0; M2 trilinear OFF).
         let (lit_off, _) = run_gbuffer_hybrid_lit_table_brick(
-            &ctx, &edits, false, false, 1.0, 0, DEFAULT_LIGHT_DIR, &DEGENERATE_LIGHT_TABLE, None,
+            &ctx, &edits, false, false, 1.0, 0, DEFAULT_LIGHT_DIR, &DEGENERATE_LIGHT_TABLE, None, false,
         );
         assert_eq!(lit_on.len(), READBACK_BYTES as usize);
         assert_eq!(lit_off.len(), READBACK_BYTES as usize);
@@ -4153,6 +4373,318 @@ fn sdf_m1_brick_offscreen_matches_golden_and_analytic() {
              {CHANNEL_TOL}); validation clean"
         );
     }
+}
+
+// ===========================================================================================
+// SDF M2 — the OFFSCREEN GPU trilinear+cubic SURFACE discriminator (`#[ignore]`, RTX-only).
+//
+// The make-or-break on-device gate for the brick-atlas M2 path. It re-uses the re-wired
+// `run_gbuffer_hybrid_m2` harness (binding 10 = the `BrickAtlas` baked from the scene, the b5
+// camera UBO widened to 128 B with the `M2GridParams` tail @80, `with_brick_trilinear(true)`)
+// and proves FOUR properties the prior `.Load`-fix incident left unverified:
+//
+//   (a) THE M2 BRANCH ENGAGES — `m2(M2GridParams default) != m2(M2GridParams zeroed)`. A zeroed
+//       grid block (`atlas_dim == 0`) maps no tile, so the M2 step finds nothing → the image must
+//       DIFFER from the default-grid run. (The prior bug made these byte-identical = branch dead.)
+//   (b) M2 != ANALYTIC — `m2(brick_trilinear=1) != analytic(brick_trilinear=0)` on the SURFACE
+//       scenes: the M2 cubic finds near-tangent crossings the analytic sphere-trace's SDF_EPS gate
+//       under-resolves. (The prior `.SampleLevel` bug gave 0 GPU hits → byte-identical to analytic.)
+//   (c) HOST-MIRROR HIT AGREEMENT — every non-mesh pixel's GPU hit/miss decision (`gViewT !=
+//       sentinel`) matches the host mirror `golden_composite_pixel_brick_m2(brick_trilinear=true)`
+//       hit/miss; on the hit pixels the GPU surface `t` matches the host's analytic hit `t` within
+//       a small world-`t` epsilon (the GPU `.Load` corners bit-match the host `decode_snorm8`
+//       fetch → the GPU cubic == the host cubic). NOTE: the GPU emits DEFERRED-PBR LIT while the
+//       host mirror emits the MVP-1 inline-Lambert PACKED color, so the two SHADED colors diverge
+//       by design (the documented M1 shading-model gap); the load-bearing host==GPU agreement is
+//       therefore the HIT-SET + the surface-`t`, NOT the packed color. The pass-through (mesh /
+//       background) arms, where both shading models agree, are still color-checked within ±2/255.
+//   (d) EXACT CSG — every GPU M2 hit lies on the true analytic surface: reconstruct `p = ro + rd *
+//       gViewT` and assert `|sdf_edit_list(p)| < M2_CREASE_EPS` (the residual-fallback guarantee).
+//       Zero wrong-surface hits.
+//
+// Run on the RTX: `cargo test -p boyko_rhi_vulkan --test sdf_gbuffer_hybrid \
+//   sdf_m2_brick_trilinear_offscreen -- --ignored --nocapture`
+// ===========================================================================================
+
+/// The gViewT non-hit sentinel (the marcher stores `1.0e30` on a mesh / background / empty pixel;
+/// a finite value is a real surface `t`). Mirrors the shader's `FAR`-class sentinel.
+const VIEWT_NO_HIT: f32 = 1.0e30;
+
+/// A GPU pixel is an SDF surface hit iff its gViewT lane carries a finite (non-sentinel) `t`.
+fn gpu_is_hit(viewt: &[f32], px: u32, py: u32) -> bool {
+    let t = viewt[(py * SDF_IMG_W + px) as usize];
+    t.is_finite() && t < VIEWT_NO_HIT * 0.5
+}
+
+/// SDF M2 OFFSCREEN GPU discriminator (`#[ignore]`, RTX-only). Proves the brick-atlas trilinear+
+/// cubic SURFACE path ENGAGES on-device, finds crossings the analytic marcher misses, agrees with
+/// the host cubic's hit-set + surface-`t`, and keeps EXACT CSG (every hit on the true surface).
+#[test]
+#[ignore = "GPU offscreen gate — requires a Vulkan device (the owner's RTX); run with --ignored"]
+fn sdf_m2_brick_trilinear_offscreen_engages_and_matches_host() {
+    let Some(ctx) = boot_or_skip("sdf_m2_brick_trilinear_offscreen_engages_and_matches_host") else {
+        return;
+    };
+    println!("Vulkan device (validation on): {}", ctx.device_name());
+    assert!(ctx.validation_enabled(), "validation must be active");
+
+    // The host mirror's hit-`t` is not exposed directly, so the (c) surface-`t` agreement compares
+    // the GPU `gViewT` against the host mirror's hit DECISION (color != background) and, where both
+    // hit, against the analytic field crossing the GPU `t` reconstructs to (the EXACT-CSG residual
+    // in (d) doubles as the host-vs-GPU `t` proof: both land within M2_CREASE_EPS of the true field).
+    let mut any_scene_hit = false;
+
+    for (name, edits) in [
+        ("crater_csg", crater()),
+        ("box_csg", box_csg()),
+        ("smooth_union", smooth_union()),
+    ] {
+        let (grid, cells) = bake_brick_grid(&edits);
+
+        // HOST PRE-FLIGHT (no GPU): does the host mirror's M2-ON path differ from its analytic
+        // path on THIS scene at all? `golden_composite_pixel_brick_m2(true)` runs the cubic;
+        // `(false)` delegates to the analytic marcher. If the host packed colors are identical on
+        // every pixel, the M2 path is a perf optimization that lands on the SAME surface (the
+        // exact-CSG contract) and an on-device LIT/`t` byte-identity is CORRECT, not a dead branch.
+        let bg_pf = packed_background();
+        let mut host_on_off_diff = 0u32;
+        let mut host_m2_hits = 0u32;
+        for py in 0..SDF_IMG_H {
+            for px in 0..SDF_IMG_W {
+                if mesh_covers_pixel(px, py) {
+                    continue;
+                }
+                let on = golden_composite_pixel_brick_m2(
+                    &edits, MESH_DEPTH_CLEAR, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho,
+                    1.0, 0, DEFAULT_LIGHT_DIR, true, true, &grid, &cells,
+                );
+                let off = golden_composite_pixel_brick_m2(
+                    &edits, MESH_DEPTH_CLEAR, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho,
+                    1.0, 0, DEFAULT_LIGHT_DIR, true, false, &grid, &cells,
+                );
+                if on != off {
+                    host_on_off_diff += 1;
+                }
+                let on_rgb = unpack_packed_rgb(on);
+                if (0..3).any(|c| (on_rgb[c] - bg_pf[c]).abs() > CHANNEL_TOL) {
+                    host_m2_hits += 1;
+                }
+            }
+        }
+        println!(
+            "[{name}] HOST pre-flight: golden_brick_m2(ON) vs (OFF/analytic) differ on \
+             {host_on_off_diff} non-mesh px; {host_m2_hits} host M2 hits"
+        );
+
+        // Capture the FIRST host M2-on-vs-analytic divergent pixel as the on-device counterexample
+        // anchor: the host says the M2 cubic changes this pixel; the GPU gViewT/LIT must show the
+        // SAME change if the branch engages. Reported when the (a) assertion below trips.
+        let host_first_div: Option<(u32, u32, u32, u32)> = (|| {
+            for py in 0..SDF_IMG_H {
+                for px in 0..SDF_IMG_W {
+                    if mesh_covers_pixel(px, py) {
+                        continue;
+                    }
+                    let on = golden_composite_pixel_brick_m2(
+                        &edits, MESH_DEPTH_CLEAR, px, py, SDF_IMG_W, SDF_IMG_H,
+                        CompositeCamera::Ortho, 1.0, 0, DEFAULT_LIGHT_DIR, true, true, &grid, &cells,
+                    );
+                    let off = golden_composite_pixel_brick_m2(
+                        &edits, MESH_DEPTH_CLEAR, px, py, SDF_IMG_W, SDF_IMG_H,
+                        CompositeCamera::Ortho, 1.0, 0, DEFAULT_LIGHT_DIR, true, false, &grid, &cells,
+                    );
+                    if on != off {
+                        return Some((px, py, on, off));
+                    }
+                }
+            }
+            None
+        })();
+
+        // Three runs, ALL reading back gViewT (the per-pixel surface `t`): M2 ON default grid,
+        // M2 ON zeroed grid (atlas_dim 0 → the branch maps no tile), and the analytic marcher.
+        let (lit_m2, _, viewt_m2_opt) = run_gbuffer_hybrid_m2(
+            &ctx, &edits, false, false, 1.0, 0, DEFAULT_LIGHT_DIR, &DEGENERATE_LIGHT_TABLE,
+            Some((&grid, &cells)), true, true, true,
+        );
+        let viewt_m2 = viewt_m2_opt.expect("gViewT readback requested");
+
+        let (_lit_m2_zeroed, _, viewt_z_opt) = run_gbuffer_hybrid_m2(
+            &ctx, &edits, false, false, 1.0, 0, DEFAULT_LIGHT_DIR, &DEGENERATE_LIGHT_TABLE,
+            Some((&grid, &cells)), true, true, /* m2_grid_default = */ false,
+        );
+        let viewt_zeroed = viewt_z_opt.expect("gViewT readback requested");
+
+        let (lit_analytic, _, viewt_a_opt) = run_gbuffer_hybrid_m2(
+            &ctx, &edits, false, false, 1.0, 0, DEFAULT_LIGHT_DIR, &DEGENERATE_LIGHT_TABLE,
+            Some((&grid, &cells)), false, true, true,
+        );
+        let viewt_analytic = viewt_a_opt.expect("gViewT readback requested");
+
+        assert_eq!(lit_m2.len(), READBACK_BYTES as usize);
+
+        // --- (a) THE M2 BRANCH ENGAGES: the M2 path TERMINATES the march at the cubic-validated
+        // crossing, NOT the analytic SDF_EPS threshold, so the surface `t` it stores differs from
+        // the analytic marcher's at the sub-epsilon level (and from the zeroed-grid run, which maps
+        // no tile → folds analytic). LIT color is byte-identical by DESIGN (the exact-CSG contract:
+        // M2 lands on the SAME true surface; the committed `on_hit_set_equals_analytic_over_many_
+        // scenes` pins ON == analytic within ±1/255), so the DISCRIMINATING observable is `gViewT`,
+        // not the shaded color. We require the default-grid M2 `t` field to DIFFER from BOTH the
+        // zeroed-grid run AND the analytic run on at least one shared hit pixel — proof the marcher
+        // read the b5 M2GridParams tail and took the cubic branch. ---
+        let viewt_t_delta = |a: &[f32], b: &[f32]| -> (f32, u32) {
+            let mut max_d = 0.0f32;
+            let mut diff_px = 0u32;
+            for i in 0..(PIXELS as usize) {
+                if a[i].is_finite() && a[i] < VIEWT_NO_HIT * 0.5 && b[i].is_finite() && b[i] < VIEWT_NO_HIT * 0.5 {
+                    let d = (a[i] - b[i]).abs();
+                    if d > 1.0e-6 {
+                        diff_px += 1;
+                    }
+                    max_d = max_d.max(d);
+                }
+            }
+            (max_d, diff_px)
+        };
+        let (a_vs_zero_max, a_vs_zero_px) = viewt_t_delta(&viewt_m2, &viewt_zeroed);
+        let (a_vs_an_max, a_vs_an_px) = viewt_t_delta(&viewt_m2, &viewt_analytic);
+        let lit_a_max = {
+            let mut m = 0i32;
+            for py in 0..SDF_IMG_H {
+                for px in 0..SDF_IMG_W {
+                    let base = ((py * SDF_IMG_W + px) as usize) * 4;
+                    let a = unpack_texel_rgb(&lit_m2[base..base + 4]);
+                    let b = unpack_texel_rgb(&lit_analytic[base..base + 4]);
+                    m = m.max((0..3).map(|ch| (a[ch] - b[ch]).abs()).max().unwrap());
+                }
+            }
+            m
+        };
+        println!(
+            "[{name}] (a/b) gViewT Δt: M2-default vs zeroed-grid max {a_vs_zero_max:.5} on \
+             {a_vs_zero_px} px; M2-default vs analytic max {a_vs_an_max:.5} on {a_vs_an_px} px; \
+             LIT M2-vs-analytic max {lit_a_max}/255 (exact-CSG ⇒ ~0 expected)"
+        );
+        // The on-device counterexample at the FIRST host-divergent pixel: the host M2 cubic changes
+        // this pixel, so a live GPU branch must too. Report the GPU gViewT (M2 default vs analytic)
+        // there — bit-equal ⇒ the branch is dead at a pixel the host PROVES it should change.
+        let counterexample = host_first_div.map(|(px, py, on, off)| {
+            let idx = (py * SDF_IMG_W + px) as usize;
+            let (ro, rd) = composite_pixel_ray(px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
+            let gpu_t_m2 = viewt_m2[idx];
+            let gpu_t_an = viewt_analytic[idx];
+            format!(
+                "pixel ({px},{py}): host golden_brick_m2(ON)=0x{on:08X} vs (analytic)=0x{off:08X} \
+                 DIFFER → the host cubic moves this pixel; but GPU gViewT_m2={gpu_t_m2} == \
+                 gViewT_analytic={gpu_t_an} (ro={ro:?} rd={rd:?}). The on-device M2 branch did NOT \
+                 move it."
+            )
+        }).unwrap_or_else(|| "no host-divergent pixel captured".to_string());
+        assert!(
+            a_vs_zero_px > 0 || a_vs_an_px > 0,
+            "[{name}] (a) M2 branch DEAD: the M2-default gViewT `t` field is BIT-IDENTICAL to BOTH \
+             the zeroed-grid run AND the analytic run (Δt max default-vs-zeroed {a_vs_zero_max:.2e}, \
+             default-vs-analytic {a_vs_an_max:.2e}) while the HOST mirror changes \
+             {host_on_off_diff} pixel(s) for the SAME inputs. The marcher never took the cubic \
+             branch on-device (it neither read the b5 M2GridParams tail nor terminated at a cubic \
+             crossing). The .Load fix did not fully land. COUNTEREXAMPLE: {counterexample}"
+        );
+
+        // --- (b) M2 ENGAGES THE CUBIC (not the analytic fold): the default-grid `t` field differs
+        // from the zeroed-grid run on the SURFACE pixels (the zeroed grid degrades the M2 step to
+        // the analytic fold). This isolates "the cubic ran" from "the trilinear gate is on but the
+        // tile lookup yields nothing". ---
+        assert!(
+            a_vs_zero_px > 0,
+            "[{name}] (b) M2 cubic INERT: default-grid gViewT == zeroed-grid gViewT (Δt max \
+             {a_vs_zero_max:.2e}) — the trilinear gate is on but the M2GridParams tile lookup found \
+             no SURFACE tile, so the cubic never ran on-device (the prior 0-cubic-hits state)."
+        );
+
+        // --- (c) HOST-MIRROR HIT AGREEMENT + (d) EXACT CSG ---
+        // The host mirror with NO mesh (MESH_DEPTH_CLEAR) gives the pure SDF hit-set; compare only
+        // the NON-mesh-covered pixels (the mesh-covered ones are pass-through on both sides and
+        // carry the gViewT sentinel). `golden_composite_pixel_brick_m2` returns the MVP-1 packed
+        // color; a hit ⇒ a shaded (non-background) color.
+        let bg = packed_background();
+        let mut gpu_hits = 0u32;
+        let mut host_hits = 0u32;
+        let mut hitset_mismatch: Option<(u32, u32, bool, bool)> = None;
+        let mut csg_violations = 0u32;
+        let mut worst_resid = 0.0f32;
+        let mut worst_resid_px: Option<(u32, u32, f32, f32)> = None;
+        for py in 0..SDF_IMG_H {
+            for px in 0..SDF_IMG_W {
+                if mesh_covers_pixel(px, py) {
+                    continue; // restrict to the pure SDF region (no mesh occlusion)
+                }
+                // The host M2 hit decision (no mesh → background on a miss, a shaded color on a hit).
+                let host_packed = golden_composite_pixel_brick_m2(
+                    &edits, MESH_DEPTH_CLEAR, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho,
+                    1.0, 0, DEFAULT_LIGHT_DIR, true, true, &grid, &cells,
+                );
+                let host_rgb = unpack_packed_rgb(host_packed);
+                let host_hit = (0..3).any(|c| (host_rgb[c] - bg[c]).abs() > CHANNEL_TOL);
+                let gpu_hit = gpu_is_hit(&viewt_m2, px, py);
+                if host_hit {
+                    host_hits += 1;
+                }
+                if gpu_hit {
+                    gpu_hits += 1;
+                }
+                // (c) hit-set agreement.
+                if host_hit != gpu_hit && hitset_mismatch.is_none() {
+                    hitset_mismatch = Some((px, py, gpu_hit, host_hit));
+                }
+                // (d) EXACT CSG: a GPU hit's reconstructed point lies on the true surface.
+                if gpu_hit {
+                    let t = viewt_m2[(py * SDF_IMG_W + px) as usize];
+                    let (ro, rd) = composite_pixel_ray(px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
+                    let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
+                    let resid = boyko_sdf_math::sdf_edit_list(&edits, p).abs();
+                    if resid > worst_resid {
+                        worst_resid = resid;
+                        worst_resid_px = Some((px, py, t, resid));
+                    }
+                    if resid >= M2_CREASE_EPS {
+                        csg_violations += 1;
+                    }
+                }
+            }
+        }
+
+        // (c): the hit-sets must agree pixel-for-pixel (the GPU cubic == the host cubic).
+        assert!(
+            hitset_mismatch.is_none(),
+            "[{name}] (c) HOST-MIRROR HIT MISMATCH at {hitset_mismatch:?} (px, py, gpu_hit, \
+             host_hit): the GPU `.Load` cubic disagrees with the host `decode_snorm8` cubic on the \
+             hit/miss decision. gViewT corners diverged from the host fetch."
+        );
+        // (d): every GPU hit lands on the true analytic surface — exact CSG, 0 wrong-surface hits.
+        assert_eq!(
+            csg_violations, 0,
+            "[{name}] (d) EXACT-CSG VIOLATION: {csg_violations} GPU M2 hit(s) off the true surface \
+             (|sdf(hit)| >= M2_CREASE_EPS={M2_CREASE_EPS}). Worst: {worst_resid_px:?} (px, py, t, \
+             resid). The residual fallback failed to land the hit on the field."
+        );
+        assert_eq!(
+            gpu_hits, host_hits,
+            "[{name}] (c) HIT-COUNT MISMATCH: GPU {gpu_hits} vs host {host_hits} SDF hits"
+        );
+        assert!(gpu_hits > 0, "[{name}] no GPU M2 hits — the SURFACE scene produced an empty image");
+        any_scene_hit = true;
+
+        assert_validation_clean(&ctx);
+        println!(
+            "[{name}] M2 ENGAGES (a: gViewT Δt default-vs-zeroed max {a_vs_zero_max:.5} on \
+             {a_vs_zero_px} px; LIT M2-vs-analytic {lit_a_max}/255 ≈0 by exact-CSG) · CUBIC RAN \
+             (b: {a_vs_zero_px} px differ from the analytic fold) · HOST-MIRROR hit-set MATCH \
+             (c: {gpu_hits} GPU == {host_hits} host hits) · EXACT CSG (d: 0 violations, worst \
+             |sdf(hit)|={worst_resid:.5} < {M2_CREASE_EPS}); validation clean"
+        );
+    }
+
+    assert!(any_scene_hit, "no scene produced an M2 surface hit — the discriminator proved nothing");
 }
 
 

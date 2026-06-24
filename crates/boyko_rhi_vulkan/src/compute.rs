@@ -148,8 +148,12 @@ static SDF_EDITLIST_STORAGE_IMAGE_SPV: SpirvBlob<24092> = SpirvBlob(*include_byt
 /// L0b added the `gViewT` storage-image lane + its 3 terminal writes (43944 → 44216). The SDF
 /// brick-atlas M1 empty-skip prefix grew it (→ 47032), then M2 added the trilinear+JCGT-cubic
 /// SURFACE-brick path (atlas `Texture3D` @binding 10 + the b5 `M2GridParams` block + the cubic
-/// solver), bringing the marcher to its current 72280-byte size.
-static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<72280> = SpirvBlob(*include_bytes!(concat!(
+/// solver, → 72280). BUG-M2-GPU-1 then fixed the dead M2 branch (the real cause was
+/// `VK_FORMAT_R8_SNORM` mis-set to `9 == R8_UNORM`, so the atlas decoded `byte/255` not the signed
+/// `byte/127`, collapsing the cubic to no sign-change), switched the corner fetch from `.Load`
+/// (texelFetch, ill-defined on a combined image+sampler descriptor) to a NEAREST `SampleLevel`, and
+/// dropped the `m2_sampler_keepalive` hack — leaving the marcher at its current 72200-byte size.
+static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<72200> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/sdf_gbuffer_composite.comp.spv"
 )));

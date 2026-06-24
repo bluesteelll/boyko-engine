@@ -758,7 +758,13 @@ pub const VK_FORMAT_R8G8B8A8_SRGB: i32 = 43;
 pub const VK_FORMAT_UNDEFINED: i32 = 0;
 /// `VkFormat::VK_FORMAT_R8_SNORM` — a single signed-normalized 8-bit channel (SDF
 /// brick-atlas campaign: the quantized narrow-band distance the brick atlas stores).
-pub const VK_FORMAT_R8_SNORM: i32 = 9;
+///
+/// BUG-M2-GPU-1: this was 9, which is actually `VK_FORMAT_R8_UNORM`; `VK_FORMAT_R8_SNORM`
+/// is 10. The wrong value made the atlas image+view UNORM, so the sampler returned
+/// `byte/255` instead of the signed `byte/127`, collapsing the M2 cubic (a value 127
+/// decoded to 0.498 instead of 1.0). The `abi_guard` assert passed only because the
+/// `Format::R8Snorm` enum discriminant carried the SAME wrong value.
+pub const VK_FORMAT_R8_SNORM: i32 = 10;
 /// `VkFormat::VK_FORMAT_R16_SFLOAT` — a single 16-bit (half) float (SDF brick-atlas
 /// campaign M2: the D8 atlas fallback when `R8_SNORM` lacks the linear-filter feature;
 /// half-float carries the narrow-band distance with NO quantization, so the `EPSILON_Q`
