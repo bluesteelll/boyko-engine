@@ -159,8 +159,21 @@ static SDF_EDITLIST_STORAGE_IMAGE_SPV: SpirvBlob<24092> = SpirvBlob(*include_byt
 /// added `select_level` + the static branch-ladder in the marcher (→ 127548 bytes). `brick_levels == 1`
 /// loops once over level 0 (the M2 resources) — byte-identical to the pre-M4 marcher (the OFF/N=1 gate).
 /// The M2/M4 SIGNED-refine fix (the `m2_surface_hit` fallback now converges from EITHER side: accept on
-/// `abs(d)`, signed under-relaxed step `rt += M2_REFINE_RELAX * d`) → 127912 bytes.
-static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<127912> = SpirvBlob(*include_bytes!(concat!(
+/// `abs(d)`, signed under-relaxed step `rt += M2_REFINE_RELAX * d`) → 127912 bytes. BUG-B1-ANALYTIC-BLACK
+/// then mirrored that signed refine onto the ANALYTIC over-relaxation accept (an `omega > 1` step can
+/// overshoot deep inside the surface; `d < EPS` is one-sided, so the committed hit could sit ~δ inside →
+/// shadow + AO collapse to 0 → BLACK). The accept now runs `M2_REFINE_ITERS` signed
+/// `t += M2_REFINE_RELAX * d` steps so the hit lands on `|sdf| < EPS` → correct shadow/AO → lit (the omega==1 t is unchanged:
+/// its accept `d` is already in `[0, EPS)`, so the first refine iteration accepts) → 131272 bytes.
+/// BUG-M2-CRATER then routed the `m2_surface_hit` CREASE-ACCEPT (close) arm through the SAME signed
+/// refine the far arm already used (commit the refined `rt`, not the raw down-biased `cand_t`), so the
+/// baked AO samples ON the surface instead of ~M2_CREASE_EPS inside (the golf-ball craters) → 131344
+/// bytes. BUG-M2-RIM then REMOVED the trailing crease-accept band entirely: a candidate is committed
+/// ONLY when the signed refine CONVERGES (`abs(d) < EPS`); a grazing silhouette point (analytic miss
+/// within `M2_CREASE_EPS`) or a stalled hard crease falls to the analytic fold, erasing the 1-2px
+/// silhouette rim where the brick hit but the analytic ray missed (dead `resid`/`cand_p` removed),
+/// giving 121620 bytes (VulkanSDK 1.4.350.0 dxc). The hit-set is now exactly the refine-converged set; the residual silhouette rim is ACCEPTED as inherent (owner decision), and the marginal grazing-only EXACT-ANALYTIC RE-MARCH that chased it (a factored analytic re-march gated on a near-tangent normal-vs-ray dot, about 30KB more SPIR-V to recover roughly 7px) was REVERTED in favor of this clean band-removal state under a perf-maximal budget.
+static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<121620> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/sdf_gbuffer_composite.comp.spv"
 )));
@@ -2731,10 +2744,13 @@ fn brick_aabb_span_world(
 /// the caller falls through to the M1 analytic fold). `edits` is the authority the GPU baked the
 /// atlas from (so the host bakes the SAME tile bit-for-bit).
 ///
-/// The cubic candidate is accepted when `|sdf_edit_list(cand_p)| < M2_CREASE_EPS`; otherwise a SIGNED,
-/// under-relaxed sphere-trace ([`M2_REFINE_ITERS`] steps, factor [`M2_REFINE_RELAX`]) settles it onto
-/// the EXACT field from EITHER side (an inside candidate from the EPSILON_Q down-bias is pulled BACK
-/// to the surface, not committed deep), mirroring the shader's `[branch]` refine bit-for-bit.
+/// A SIGNED, under-relaxed sphere-trace ([`M2_REFINE_ITERS`] steps, factor [`M2_REFINE_RELAX`])
+/// refines the cubic candidate onto the EXACT field from EITHER side (an inside candidate from the
+/// EPSILON_Q down-bias is pulled BACK to the surface, never committed deep — committing the raw
+/// `cand_t` cratered the baked AO). ONLY a refine-CONVERGED candidate (`|d| < SDF_EPS`) is accepted;
+/// a grazing silhouette point or a stalled hard crease falls to `None` → the analytic fold, which
+/// resolves the pixel EXACTLY as the OFF path (this erased the BUG-M2-RIM silhouette ring). Mirrors
+/// the shader's refine loop bit-for-bit.
 fn host_m2_surface_hit(edits: &[SdfEdit], ro: [f32; 3], rd: [f32; 3], t_world: f32) -> Option<f32> {
     // The single-level M2 mirror delegates to the level-aware sibling at level-0 geometry
     // ([`BrickLevelParams::m2_near_field`]) — byte-identical to the pre-M4 hardcoded path.
@@ -2801,24 +2817,22 @@ fn host_m2_surface_hit_at(
 
     // The candidate world `t` (local is measured from `p`, in world units).
     let cand_t = t_world + local;
-    let cand_p = [
-        ro[0] + rd[0] * cand_t,
-        ro[1] + rd[1] * cand_t,
-        ro[2] + rd[2] * cand_t,
-    ];
-    let resid = sdf_edit_list(edits, cand_p);
 
-    // ANALYTIC-RESIDUAL FALLBACK (the exact-CSG guarantee): a `|resid|` within the crease band
-    // accepts the cubic hit; else a SIGNED, under-relaxed sphere-trace settles it onto the exact
-    // field from EITHER side. The down-biased brick reconstruction (EPSILON_Q, scaled `2^L` per
-    // clip-map level) lands the cubic candidate INSIDE the true surface (`d < 0`); a forward-only
-    // step (`d.max(SDF_EPS)`) could never pull it back out, so the inside hit committed ~`δ` deep.
-    // The signed step `rt += M2_REFINE_RELAX * d` walks BACKWARD for `d < 0` (toward the surface) and
-    // forward for `d > 0` — a unit-gradient SDF Newton step, under-relaxed against crease overshoot.
-    // Accept on `|d|` (not signed `d`) so an inside candidate is corrected, never committed as-is.
-    if resid.abs() < M2_CREASE_EPS {
-        return Some(cand_t);
-    }
+    // ANALYTIC-RESIDUAL FALLBACK (the exact-CSG guarantee): a SIGNED, under-relaxed sphere-trace from
+    // the cubic candidate onto the EXACT field decides BOTH whether this is a hit and where the
+    // committed `t` lands. The committed `t` always satisfies `|sdf| < SDF_EPS` (on-surface) — never
+    // the raw `cand_t`, which the down-biased brick (EPSILON_Q, scaled `2^L` per clip-map level) parks
+    // INSIDE the surface (`d < 0`) where the baked AO cratered (BUG-M2-CRATER). A forward-only step
+    // (`d.max(SDF_EPS)`) could never pull it back out; the signed step `rt += M2_REFINE_RELAX * d`
+    // walks BACKWARD for `d < 0` (toward the surface) and forward for `d > 0` — a unit-gradient SDF
+    // Newton step, under-relaxed against crease overshoot. Accept on `|d|` (not signed `d`) so an
+    // inside candidate is corrected, never committed as-is. ONLY a refine-CONVERGED candidate
+    // (`|d| < SDF_EPS`) is accepted; a grazing silhouette point (analytic miss within the old crease
+    // band) or a hard crease where the refine stalls falls to `None` → the caller's M1 analytic fold,
+    // which resolves the pixel EXACTLY as the OFF path. Removing the old trailing crease-accept band
+    // (which accepted a NON-converged candidate within `M2_CREASE_EPS`) erased the 1-2px silhouette
+    // rim where the brick hit but the analytic ray missed (BUG-M2-RIM). Mirrors the shader's refine
+    // loop bit-for-bit.
     let mut rt = cand_t;
     for _ in 0..M2_REFINE_ITERS {
         let q = [ro[0] + rd[0] * rt, ro[1] + rd[1] * rt, ro[2] + rd[2] * rt];
@@ -2837,8 +2851,11 @@ fn host_m2_surface_hit_at(
             break;
         }
     }
-    // The refine did not converge near the candidate (a CSG-subtracted / rounded region with no
-    // nearby exact surface): no hit in this brick — the caller falls back to the analytic fold.
+    // The refine did not reach `|d| < SDF_EPS` within M2_REFINE_ITERS: no confident hit in this brick
+    // (a grazing silhouette point where the analytic ray passes the surface to the SIDE, or a hard
+    // crease where the refine stalls). Return `None` → the caller folds the M1 analytic field for this
+    // step, which resolves the pixel EXACTLY as the OFF path. Mirrors the shader's trailing `return
+    // false`.
     None
 }
 
@@ -3727,6 +3744,27 @@ pub fn golden_marcher_attributes(
         if d < SDF_EPS {
             hit = true;
             exhausted = false;
+            // B1 over-relaxation accept-refine — the HOST MIRROR of the shader's analytic accept
+            // (`sdf_gbuffer_composite.hlsl`). `d < SDF_EPS` is a one-sided upper bound: an
+            // over-relaxed step (`omega > 1`) can overshoot DEEP inside the surface in one stride,
+            // so the accepted `d` may be large-negative and the committed `t` would sit ~δ inside
+            // the field → `host_soft_shadow` / `host_ao` sample inside → shadow == ao == 0 → BLACK.
+            // Mirror the brick `host_m2_surface_hit` signed refine: the signed under-relaxed step
+            // `t += M2_REFINE_RELAX * d` walks BACKWARD for `d < 0` (toward the surface) and
+            // forward for `d > 0`; accept on `d.abs() < SDF_EPS`. The plain arm (omega == 1) is
+            // sphere-traced from outside so its accept `d` is in `[0, SDF_EPS)` — the first
+            // iteration accepts immediately (the omega==1 `t` is byte-unchanged, the 0%-gate).
+            for _ri in 0..M2_REFINE_ITERS {
+                let q = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
+                let rd_ = sdf_edit_list(edits, q);
+                if rd_.abs() < SDF_EPS {
+                    break;
+                }
+                // Split the under-relaxed step into a named value then add it (no FMA contraction),
+                // so the shader's `step = M2_REFINE_RELAX * rd_; t += step;` rounds bit-identically.
+                let step = M2_REFINE_RELAX * rd_;
+                t += step;
+            }
             break;
         }
         if omega > 1.0 {

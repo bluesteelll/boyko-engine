@@ -2709,30 +2709,46 @@ impl<'ctx> Renderer<'ctx> {
         // factor (`DEFAULT_MARCHER_OMEGA`, the provably hole-free speedup). Render A1/A2:
         // the on-screen demo turns lighting ON (A1 soft shadows + A2 AO) with the default
         // directional light.
-        // SDF brick-atlas M4 (clip-map LOD, Slice C): the windowed present ships at `brick_levels = 1`
-        // (the OFF/N=1 path) pending owner visual sign-off — the marcher's `select_level` loops once over
-        // level 0, byte-identical to the pre-M4 M2 marcher. The brick atlas + per-level paths are gated
-        // OFF here anyway (`brick_trilinear == 0` / `brick_enabled == 0`), so `brick_levels` is moot on
-        // this command stream; `1` documents + locks the OFF contract. Activating the clip-map on-screen
-        // (`with_brick_levels(BRICK_LEVELS)` + `with_brick_trilinear(true)`) is a separate, owner-gated step.
-        let marcher_push = FineMarcherPush::new(
+        // SDF brick-cache activation (campaign M1/M2/M4): the empty-skip + trilinear/cubic surface
+        // cache + clip-map LOD gates live ENTIRELY in this per-frame push (the bound descriptors at
+        // 9..=14 are static), so `scene.brick` selects ON/OFF at runtime with no re-record — the
+        // owner's A/B toggle.
+        //
+        // - `None` (the default / OFF path): `brick_enabled == 0` / `brick_trilinear == 0` /
+        //   `brick_levels == 1` — the marcher's `select_level` loops once over level 0 and never reads
+        //   the brick grids/atlas, byte-identical to the pre-brick M2 marcher. `with_brick_levels(1)`
+        //   is REQUIRED (the recompiled shader treats `brick_levels == 0` as no-level).
+        // - `Some(a)` (the ON path): `with_brick(a.grid_origin, a.grid_dims, a.brick_world)` stamps the
+        //   level-0 empty-skip grid uniforms (the `lvl == 0` arm indexes binding 9 with them),
+        //   `with_brick_trilinear(true)` turns on the surface-brick cubic, and `with_brick_levels(a.levels)`
+        //   loops the clip-map ladder. The caller MUST have bound the real BrickClipmap per-level
+        //   resources at 9..=14 + written its `M4GridParams` tail into the b5 UBO. This mirrors the
+        //   offscreen RTX-verified `run_gbuffer_hybrid_m4` push exactly.
+        let base = FineMarcherPush::new(
             false,
             DEFAULT_MARCHER_OMEGA,
             LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO,
             DEFAULT_LIGHT_DIR,
-        )
-        .with_brick_levels(1);
+        );
+        let marcher_push = match scene.brick {
+            Some(a) => base
+                .with_brick(a.grid_origin, a.grid_dims, a.brick_world)
+                .with_brick_trilinear(true)
+                .with_brick_levels(a.levels),
+            None => base.with_brick_levels(1),
+        };
         // SAFETY: recording is open; the marcher pipeline + its layout (declaring
-        // `vocab_layout` at set 0 AND the 32-byte COMPUTE push range) are live on this
+        // `vocab_layout` at set 0 AND the 80-byte COMPUTE push range) are live on this
         // device (caller contract); the vocabulary set binds the SSBO/UBO + the
         // now-transitioned depth (SHADER_READ) + G-buffer (GENERAL) images + a valid
-        // Tiles SSBO @6; `dispatch_group_count_x` covers `present_extent`'s pixel count
-        // (the G-buffer images + dispatch grid + camera UBO `count` are all sized to
-        // `present_extent`, the composite — NOT the swapchain `extent`; caller contract);
-        // `&...descriptor_set` is a single-element local alive for the call (first_set 0,
-        // count 1, zero dynamic offsets); `marcher_push.as_bytes()` is
-        // `GBUFFER_MARCHER_PUSH_BYTES` (32) bytes at offset 0, a subset of the declared
-        // 80-byte range, and the backing `marcher_push` local outlives the call.
+        // Tiles SSBO @6 + valid brick descriptors @9..=14 (whether the brick gates are ON
+        // or OFF, those descriptors are always bound — caller contract); `dispatch_group_count_x`
+        // covers `present_extent`'s pixel count (the G-buffer images + dispatch grid + camera UBO
+        // `count` are all sized to `present_extent`, the composite — NOT the swapchain `extent`;
+        // caller contract); `&...descriptor_set` is a single-element local alive for the call
+        // (first_set 0, count 1, zero dynamic offsets); `marcher_push.as_bytes()` is
+        // `GBUFFER_MARCHER_PUSH_BYTES` (80) bytes at offset 0, exactly the declared 80-byte range,
+        // and the backing `marcher_push` local outlives the call.
         let marcher_push_bytes = marcher_push.as_bytes();
         unsafe {
             (self.fns.cmd_bind_pipeline)(
@@ -3571,6 +3587,44 @@ const CLUSTER_CULL_PUSH_BYTES: u32 = crate::compute::CLUSTER_CULL_PUSH_BYTES;
 /// group count is `ceil(cluster_count / LIGHT_CULL_LOCAL_SIZE_X)`.
 const LIGHT_CULL_LOCAL_SIZE_X: u32 = 64;
 
+/// The runtime brick-cache activation the windowed/offscreen G-buffer present applies to the
+/// marcher's [`FineMarcherPush`] (the SDF brick-atlas campaign — empty-skip + trilinear/cubic
+/// surface cache + clip-map LOD). `None` on [`GBufferScene::brick`] is the OFF path: the recorder
+/// builds the push exactly as before (`brick_enabled == 0` / `brick_trilinear == 0` /
+/// `brick_levels == 1`), byte-identical to the pre-brick command stream. `Some(_)` turns the brick
+/// path ON per-frame, so the caller can flip it at runtime (an A/B toggle) without re-recording any
+/// pipeline — the gates live entirely in the per-frame push.
+///
+/// When `Some`, the recorder stamps the empty-skip grid uniforms (`grid_origin`/`grid_dims`/
+/// `brick_world` — level 0's [`boyko_sdf_math::brick::PointerGrid`] geometry the marcher's `lvl == 0`
+/// arm indexes binding 9 with) via [`FineMarcherPush::with_brick`], turns on the trilinear+cubic
+/// surface path via [`FineMarcherPush::with_brick_trilinear`], and sets the clip-map level count via
+/// [`FineMarcherPush::with_brick_levels`]. The per-level atlas/grid SSBOs the marcher samples MUST
+/// already be bound at bindings 9..=14 (via the [`GBufferScene`]'s `pointer_grid` / `atlas` /
+/// `level_grids` / `level_atlases` fields — pointed at a real [`crate::brick_atlas::BrickClipmap`]),
+/// and the b5 camera UBO's `M4GridParams` tail (offset 80) MUST hold the clip-map's baked per-level
+/// origins — exactly the offscreen RTX-verified binding discipline. This struct carries ONLY the
+/// push-side gates; the descriptor binding + the UBO tail are the caller's (they are extent-stable,
+/// written once, NOT per frame).
+///
+/// `#[repr(C)]`, `Copy` — a small POD the caller flips each frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BrickActivation {
+    /// Level 0's empty-skip pointer-grid minimum world corner (cell `(0,0,0)`'s min). The marcher's
+    /// `lvl == 0` arm indexes binding 9 with `(grid_origin, grid_dims, brick_world)` — this MUST equal
+    /// the [`boyko_sdf_math::brick::PointerGrid`] geometry the level-0 grid bound at binding 9 was
+    /// baked at (`PointerGrid::default_near_field().origin` for the origin-centered demo clip-map).
+    pub grid_origin: [f32; 3],
+    /// Level 0's pointer-grid cell count per axis (`PointerGrid::dims`, e.g. `[16, 16, 16]`).
+    pub grid_dims: [u32; 3],
+    /// Level 0's pointer-grid cell size — the world width of one brick cell (`PointerGrid::brick_world`,
+    /// e.g. `0.5`).
+    pub brick_world: f32,
+    /// The clip-map level count the marcher loops over (`with_brick_levels`): `BRICK_LEVELS` (3) for the
+    /// full clip-map, `1` for the single-level near-field cache. `0` is treated as OFF by the shader.
+    pub levels: u32,
+}
+
 /// The on-screen Render-P1c G-buffer frame's STATIC inputs: the resources the
 /// [`Renderer::render_gbuffer_frame`] 3-pass needs that do NOT depend on the
 /// (WSI-clamped) swapchain extent. The EXTENT-dependent targets (depth + the MRT
@@ -3824,6 +3878,15 @@ pub struct GBufferScene<'a> {
     /// WSI-clamped extent the recorder dispatches). The deferred resolve dispatches at the
     /// SAME grid (1:1 the marched pixels).
     pub dispatch_group_count_x: u32,
+    /// The SDF brick-cache activation applied to the marcher push THIS frame. `None` = the OFF
+    /// path (`brick_enabled == 0` / `brick_trilinear == 0` / `brick_levels == 1`), byte-identical
+    /// to the pre-brick command stream — the bound brick descriptors at 9..=14 stay bound-but-unread.
+    /// `Some(_)` turns the empty-skip + trilinear/cubic surface cache + clip-map LOD ON (the gates
+    /// live entirely in the per-frame push, so the caller may flip this every frame for an A/B
+    /// toggle). When `Some`, the caller MUST have bound the real [`crate::brick_atlas::BrickClipmap`]
+    /// per-level resources at 9..=14 and written its `M4GridParams` tail into the b5 UBO (see
+    /// [`BrickActivation`]).
+    pub brick: Option<BrickActivation>,
 }
 
 /// The per-extent on-screen G-buffer targets for [`Renderer::render_gbuffer_frame`]:

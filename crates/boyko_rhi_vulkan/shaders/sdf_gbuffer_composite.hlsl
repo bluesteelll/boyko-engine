@@ -965,8 +965,9 @@ float m2_brick_cubic_hit(Texture3D<float> atlas, SamplerState atlas_smp,
 // The M2 SURFACE-brick step: given the march point `p`'s SURFACE M2 cell, sample the atlas + run
 // the JCGT cubic for the EXACT crossing, then VALIDATE it analytically (the exact-CSG fallback).
 // Returns the accepted world `t` of the hit (>= 0) via `out hit_t`, and `true`/`false` for
-// hit/no-cubic-crossing. On a cubic crossing whose analytic |sdf| diverges past M2_CREASE_EPS (a CSG
-// crease / brick-rounding) the [branch] analytic refine settles it onto the EXACT field. The normal
+// hit/no-crossing. A cubic crossing is accepted ONLY when the SIGNED analytic refine CONVERGES onto
+// the EXACT field (`abs(d) < EPS`); a grazing silhouette point or a stalled hard crease returns
+// `false` → the caller's analytic fold (matching the OFF path exactly, no silhouette rim). The normal
 // + shade stay ANALYTIC (decided by the caller's `sdf_normal`), so the surface is always validated
 // analytically (C1). `ro`/`rd` are the WORLD ray; `t_world` is the current march `t` (p = ro+rd·t).
 // M4: the per-level grid block (`lvl`) + the level's atlas/sampler are PARAMETERS (the marcher's
@@ -1022,47 +1023,44 @@ bool m2_surface_hit(M4Level lvl, Texture3D<float> atlas, SamplerState atlas_smp,
     // the NEAREST point-sampled cubic (`m2_corner` reads s10 directly), so the s10 sampler — and the
     // binding-10 combined descriptor — is GENUINELY referenced (no keep-alive hack needed).
     float cand_t = t_world + local;
-    float3 cand_p = ro + rd * cand_t;
-    float resid = field_distance(cand_p);
 
-    // ANALYTIC-RESIDUAL FALLBACK (the exact-CSG guarantee): a |resid| within the crease band accepts
-    // the cubic hit (the surface is where the cubic said). ELSE a CSG crease / brick-rounding
-    // divergence — a cold [branch] analytic refine settles it onto the EXACT field from the
-    // candidate. The accepted hit is thus ALWAYS analytically validated. Mirrors the host
-    // `host_m2_surface_hit` order bit-for-bit (crease-accept, else refine).
-    [branch]
-    if (abs(resid) < M2_CREASE_EPS) {
-        hit_t = cand_t;
-        return true;
-    } else {
-        // SIGNED, under-relaxed sphere-trace from the candidate onto the exact field, converging from
-        // EITHER side. The brick reconstruction's EPSILON_Q down-bias (scaled `2^L` per clip-map
-        // level) lands the cubic candidate INSIDE the true surface (`d < 0`); the signed step
-        // `rt += M2_REFINE_RELAX * d` walks BACKWARD for `d < 0` (toward the surface) and forward for
-        // `d > 0` — a forward-only step (`max(d, EPS)`) could never pull an inside hit back out.
-        // Accept on `abs(d)` (not signed `d`) so an inside candidate is corrected, never committed.
-        float rt = cand_t;
-        [loop]
-        for (uint i = 0u; i < M2_REFINE_ITERS; ++i) {
-            float d = field_distance(ro + rd * rt);
-            if (abs(d) < EPS) {
-                hit_t = rt;
-                return true;
-            }
-            // Split the under-relaxed step into a named value then add it (no FMA contraction), so
-            // the host `step = M2_REFINE_RELAX * d; rt += step;` rounds bit-identically (two
-            // roundings: one for the multiply, one for the add).
-            float step = M2_REFINE_RELAX * d;
-            rt += step;
-            if (rt < 0.0 || rt > T_MAX) {
-                break;
-            }
+    // ANALYTIC-RESIDUAL FALLBACK (the exact-CSG guarantee): a SIGNED, under-relaxed sphere-trace from
+    // the cubic candidate onto the EXACT field decides BOTH whether this is a hit and where `hit_t`
+    // lands, converging from EITHER side. The committed `hit_t` always satisfies `abs(sdf) < EPS`
+    // (on-surface). The brick reconstruction's EPSILON_Q down-bias (scaled `2^L` per clip-map level)
+    // lands the cubic candidate INSIDE the true surface (`d < 0`); committing the raw `cand_t` parked
+    // the baked AO ~M2_CREASE_EPS deep and cratered (BUG-M2-CRATER). The signed step
+    // `rt += M2_REFINE_RELAX * d` walks BACKWARD for `d < 0` (toward the surface) and forward for
+    // `d > 0` — a forward-only step (`max(d, EPS)`) could never pull an inside hit back out. Accept on
+    // `abs(d)` (not signed `d`) so an inside candidate is corrected, never committed. ONLY a
+    // refine-CONVERGED candidate (`abs(d) < EPS`) is accepted; a grazing silhouette point (analytic
+    // miss within the old crease band) or a hard crease where the refine stalls falls to `false` → the
+    // caller's M1 analytic fold, which resolves the pixel EXACTLY as the OFF path. Removing the old
+    // trailing crease-accept band (which accepted a NON-converged candidate within `M2_CREASE_EPS`)
+    // erased the 1-2px silhouette rim where the brick hit but the analytic ray missed (BUG-M2-RIM).
+    // Mirrors the host `host_m2_surface_hit` refine loop bit-for-bit.
+    float rt = cand_t;
+    [loop]
+    for (uint i = 0u; i < M2_REFINE_ITERS; ++i) {
+        float d = field_distance(ro + rd * rt);
+        if (abs(d) < EPS) {
+            hit_t = rt;
+            return true;
         }
-        // The refine did not converge near the candidate (the cubic pointed at a CSG-subtracted /
-        // rounded region with no nearby exact surface): treat as no hit in this brick — the caller
-        // falls back to the M1 analytic fold for this step (continue marching).
-        return false;
+        // Split the under-relaxed step into a named value then add it (no FMA contraction), so
+        // the host `step = M2_REFINE_RELAX * d; rt += step;` rounds bit-identically (two
+        // roundings: one for the multiply, one for the add).
+        float step = M2_REFINE_RELAX * d;
+        rt += step;
+        if (rt < 0.0 || rt > T_MAX) {
+            break;
+        }
     }
+    // The refine did not reach `abs(d) < EPS` within M2_REFINE_ITERS: no confident hit in this brick
+    // (a grazing silhouette point where the analytic ray passes the surface to the SIDE, or a hard
+    // crease where the refine stalls). Return `false` → the caller folds the M1 analytic field for
+    // this step (continue marching), which resolves the pixel EXACTLY as the OFF path.
+    return false;
 }
 
 // SDF brick-atlas M4 (clip-map LOD): selects the FINEST enclosing clip-map level for world point `p`,
@@ -1282,6 +1280,30 @@ void main(uint3 tid : SV_DispatchThreadID) {
         if (d < EPS) {
             hit = true;
             exhausted = false;       // converged — NOT budget exhaustion
+            // B1 over-relaxation accept-refine (mirror the brick `m2_surface_hit` signed
+            // refine). `d < EPS` is a ONE-SIDED upper bound: an over-relaxed step (`omega > 1`)
+            // can jump from outside to DEEP inside in one stride, so the accepted `d` may be
+            // large-NEGATIVE (the hit point sits ~δ below the surface). Committing that `t`
+            // makes `sdf_soft_shadow` / `sdf_ao` sample from inside the field → shadow == ao == 0
+            // → the resolve renders the surface BLACK. Settle the hit ONTO the surface with the
+            // SAME signed, under-relaxed sphere-trace the brick path uses: `t += M2_REFINE_RELAX
+            // * d` walks BACKWARD for `d < 0` (an overshot inside hit, back toward the surface)
+            // and forward for `d > 0`; accept on `abs(d) < EPS` so an inside hit is corrected,
+            // never committed. The plain arm (`omega == 1`) is sphere-traced from OUTSIDE so its
+            // accept `d` is already in `[0, EPS)` — the first iteration's `abs(d) < EPS` accepts
+            // immediately (the omega==1 t is byte-unchanged, the 0%-gate). Bounded by
+            // M2_REFINE_ITERS; only the FINAL accept refines (the omega march speed is preserved).
+            [loop]
+            for (uint ri = 0u; ri < M2_REFINE_ITERS; ++ri) {
+                float rd_ = sdf(ro + rd * t);
+                if (abs(rd_) < EPS) {
+                    break;
+                }
+                // Named `step` (no FMA contraction) so the host `step = M2_REFINE_RELAX * rd_;
+                // t += step;` rounds bit-identically (two roundings: the multiply, then the add).
+                float step = M2_REFINE_RELAX * rd_;
+                t += step;
+            }
             break;
         }
         if (omega > 1.0) {

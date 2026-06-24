@@ -4703,6 +4703,24 @@ fn sdf_m2_brick_trilinear_offscreen_engages_and_matches_host() {
              crossing). The .Load fix did not fully land. COUNTEREXAMPLE: {counterexample}"
         );
 
+        // --- (a2) EXACT-CSG LIT AGREEMENT: brick-cubic LIT must match analytic LIT within the
+        // consumer-side budget. This assertion was MISSING (`lit_a_max` was computed-but-unasserted),
+        // which is exactly what hid BUG-B1-ANALYTIC-BLACK: the over-relaxed analytic accept landed
+        // DEEP inside the surface (`d < 0` but `< EPS`), collapsing its shadow+AO to 0 → the analytic
+        // arm rendered BLACK while the brick arm (two-sided signed refine) rendered the lit gray.
+        // With the analytic accept now applying the SAME signed refine, both land ON the surface, so
+        // brick and analytic agree to within `LIT_CHANNEL_TOL` (±3/255 — the brick cubic vs analytic
+        // surface differs at the sub-pixel level, never gray-vs-black). A regression that reopens the
+        // overshoot would push `lit_a_max` to ~the gray magnitude and trip here.
+        assert!(
+            lit_a_max <= LIT_CHANNEL_TOL,
+            "[{name}] (a2) EXACT-CSG LIT MISMATCH: max |LIT_brick − LIT_analytic| = {lit_a_max}/255 \
+             exceeds ±{LIT_CHANNEL_TOL}/255. The brick and analytic arms must land on the SAME true \
+             surface (exact-CSG) → near-identical LIT. A large delta means one arm accepted a hit \
+             OFF the surface (e.g. the B1 over-relaxation overshoot collapsing analytic shadow+AO to \
+             black) — the analytic accept-refine regressed."
+        );
+
         // --- (b) M2 ENGAGES THE CUBIC (not the analytic fold): the default-grid `t` field differs
         // from the zeroed-grid run on the SURFACE pixels (the zeroed grid degrades the M2 step to
         // the analytic fold). This isolates "the cubic ran" from "the trilinear gate is on but the
