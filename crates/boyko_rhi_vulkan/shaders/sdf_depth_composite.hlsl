@@ -97,6 +97,14 @@
 
 RWStructuredBuffer<uint> Buf : register(u0);
 
+// The shared SDF field gateway (field consts/enums + `Edit`/`load_edit` + the
+// primitive distances + boolean ops + smooth-min/-max + the edit-list `sdf` +
+// `sdf_normal`). `Buf` (declared above) is the include contract precondition. This
+// header also defines `FAR` and `GRAD_H`, so they are NOT redeclared below; and it
+// defines `MAX_SDF_EDITS`/`SDF_EDIT_WORDS`/`HEADER_BASE`, so `DEPTH_BASE` and
+// `pixel_base()` (which derive from them) are positioned AFTER this include.
+#include "sdf_field.hlsli"
+
 // Camera modes selected by `pc.camera_mode`. ORTHO is the golden-frozen path; the
 // PERSPECTIVE branch is strictly additive (P0a part 2). Mirrored host-side in
 // compute.rs as `CAM_MODE_ORTHO` / `CAM_MODE_PERSPECTIVE`.
@@ -159,133 +167,22 @@ static const float3 MESH_COLOR = float3(0.15, 0.65, 0.25);
 static const float EPS    = 0.001;  // hit threshold on |sdf|
 static const float T_MAX  = 10.0;   // miss distance bound (= depth-1.0 far plane)
 static const uint  MAX_IT = 128u;   // max march steps per ray (the §S2 ceiling)
-static const float GRAD_H = 0.0005; // central-difference half-step for the normal
-static const float FAR    = 1.0e9;  // the "empty field" sentinel before the first edit
 
 // The depth value the depth attachment was CLEARED to (the far plane, 1.0). A
 // pixel whose stored depth is >= this sentinel had NO mesh fragment rasterized.
 static const float DEPTH_CLEAR = 1.0;
 
-// --- The edit-list + depth packed-header contract (mirrored host-side) --------
+// --- The depth/pixel region bases (derive from the header's field consts) -----
 //
-// IDENTICAL header to rung 9 up to the edit array; then a NEW depth region, then
-// the pixel output. These MUST match the host-side rung-10 composite constants in
-// `compute.rs` (pinned there by const-asserts).
-static const uint MAX_SDF_EDITS  = 16u;
-static const uint SDF_EDIT_WORDS = 12u;       // size_of::<SdfEdit>() / 4
-static const uint HEADER_BASE    = 4u;        // edit array word offset (count padded to 16 B)
-static const uint DEPTH_BASE     = HEADER_BASE + MAX_SDF_EDITS * SDF_EDIT_WORDS; // 4 + 192 = 196
+// `MAX_SDF_EDITS`/`SDF_EDIT_WORDS`/`HEADER_BASE` come from `sdf_field.hlsli`. The
+// header is IDENTICAL to rung 9 up to the edit array; then a NEW depth region,
+// then the pixel output. These MUST match the host-side rung-10 composite
+// constants in `compute.rs` (pinned there by const-asserts).
+static const uint DEPTH_BASE = HEADER_BASE + MAX_SDF_EDITS * SDF_EDIT_WORDS; // 4 + 192 = 196
 // PIXEL_BASE now scales with the runtime extent: the depth region is `img_w*img_h`
 // f32s, then the pixel region. At the golden 64×64 extent this is 196 + 4096 = 4292
 // (unchanged). The host computes the matching offsets from the same extent.
 uint pixel_base() { return DEPTH_BASE + img_w() * img_h(); }
-
-// Primitive kinds.
-static const uint KIND_SPHERE = 0u;
-static const uint KIND_BOX    = 1u;
-
-// Boolean ops.
-static const uint OP_UNION     = 0u;
-static const uint OP_SUBTRACT  = 1u;
-static const uint OP_INTERSECT = 2u;
-
-// One decoded edit (the in-register form of the packed std430 element).
-struct Edit {
-    float3 center;
-    float3 params;     // radius (sphere) or half-extents (box)
-    uint   kind;
-    uint   op;
-    float  smoothness;
-};
-
-// Reads `asfloat`/`asuint` of the i-th packed edit out of the header region.
-Edit load_edit(uint i) {
-    uint base = HEADER_BASE + i * SDF_EDIT_WORDS;
-    Edit e;
-    e.center     = float3(asfloat(Buf[base + 0u]), asfloat(Buf[base + 1u]), asfloat(Buf[base + 2u]));
-    // word base+3 = center.w (unused)
-    e.params     = float3(asfloat(Buf[base + 4u]), asfloat(Buf[base + 5u]), asfloat(Buf[base + 6u]));
-    // word base+7 = params.w (unused)
-    e.kind       = Buf[base + 8u];
-    e.op         = Buf[base + 9u];
-    e.smoothness = asfloat(Buf[base + 10u]);
-    // word base+11 = _pad (unused)
-    return e;
-}
-
-// --- Primitive distance functions (IQ; the frozen rung-9 primitive set) -------
-
-// Sphere: distance to a sphere centered at `c` with radius `r`.
-float sd_sphere(float3 p, float3 c, float r) {
-    return length(p - c) - r;
-}
-
-// Box: distance to an axis-aligned box centered at `c` with half-extents `h`
-// (the standard IQ exact box SDF).
-float sd_box(float3 p, float3 c, float3 h) {
-    float3 q = abs(p - c) - h;
-    return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0);
-}
-
-// One edit's primitive distance at `p`.
-float edit_distance(Edit e, float3 p) {
-    if (e.kind == KIND_BOX) {
-        return sd_box(p, e.center, e.params);
-    }
-    return sd_sphere(p, e.center, e.params.x);
-}
-
-// --- Boolean ops + polynomial smooth-min/-max (IQ) ----------------------------
-
-// Polynomial smooth-min (IQ `smin`): a soft union with blend radius `k`.
-float smin(float a, float b, float k) {
-    float hh = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
-    return lerp(b, a, hh) - k * hh * (1.0 - hh);
-}
-
-// Polynomial smooth-max: the De Morgan dual of `smin`.
-float smax(float a, float b, float k) {
-    return -smin(-a, -b, k);
-}
-
-// Combine the accumulated field distance `acc` with one edit's distance `d` under
-// the edit's boolean op, hard (`k <= 0`) or smooth (`k > 0`).
-float combine(float acc, float d, uint op, float k) {
-    if (op == OP_SUBTRACT) {
-        return (k > 0.0) ? smax(acc, -d, k) : max(acc, -d);
-    } else if (op == OP_INTERSECT) {
-        return (k > 0.0) ? smax(acc, d, k) : max(acc, d);
-    }
-    return (k > 0.0) ? smin(acc, d, k) : min(acc, d);
-}
-
-// --- The edit-list field (the single source of truth, identical to rung 9) ----
-float sdf(float3 p) {
-    uint n = min(Buf[0], MAX_SDF_EDITS); // word 0 = edit_count (clamped to capacity)
-    float acc = FAR;
-    [loop]
-    for (uint i = 0u; i < n; ++i) {
-        Edit e = load_edit(i);
-        float d = edit_distance(e, p);
-        if (i == 0u) {
-            acc = d;
-        } else {
-            acc = combine(acc, d, e.op, e.smoothness);
-        }
-    }
-    return acc;
-}
-
-// Surface normal via central differences of `sdf` (the gradient of the WHOLE
-// edit-list field).
-float3 sdf_normal(float3 p) {
-    float2 e = float2(GRAD_H, 0.0);
-    float3 n = float3(
-        sdf(p + e.xyy) - sdf(p - e.xyy),
-        sdf(p + e.yxy) - sdf(p - e.yxy),
-        sdf(p + e.yyx) - sdf(p - e.yyx));
-    return normalize(n);
-}
 
 // Packs a linear [0,1] RGB into 0xAABBGGRR (alpha forced to 0xFF), matching the
 // host-side `pack_rgba` golden (compared with a small +/-2/255 tolerance).

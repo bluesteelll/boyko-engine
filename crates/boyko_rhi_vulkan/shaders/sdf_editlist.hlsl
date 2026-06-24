@@ -75,6 +75,14 @@
 
 RWStructuredBuffer<uint> Buf : register(u0);
 
+// The shared SDF field gateway (field consts/enums + `Edit`/`load_edit` + the
+// primitive distances + boolean ops + smooth-min/-max + the edit-list `sdf` +
+// `sdf_normal`). `Buf` (declared above) is the include contract precondition. This
+// header also defines `FAR` and `GRAD_H`, so they are NOT redeclared below; and it
+// defines `MAX_SDF_EDITS`/`SDF_EDIT_WORDS`/`HEADER_BASE`, so `PIXEL_BASE` (which
+// derives from them) is positioned AFTER this include.
+#include "sdf_field.hlsli"
+
 struct PushConstants {
     uint count; // total PIXEL count = IMG_W * IMG_H (NOT the buffer word count)
 };
@@ -97,138 +105,14 @@ static const float3 BACKGROUND = float3(0.05, 0.05, 0.1); // miss color
 static const float EPS    = 0.001;  // hit threshold on |sdf|
 static const float T_MAX  = 10.0;   // miss distance bound
 static const uint  MAX_IT = 128u;   // max march steps per ray (the §S2 ceiling)
-static const float GRAD_H = 0.0005; // central-difference half-step for the normal
-static const float FAR    = 1.0e9;  // the "empty field" sentinel before the first edit
 
-// --- The edit-list packed-header contract (mirrored host-side) ----------------
+// --- The edit-list pixel-output base (derives from the header's field consts) -
 //
-// `MAX_SDF_EDITS` is the fixed capacity; `SDF_EDIT_WORDS` = 48 B / 4 = 12 u32s.
-// The header is `edit_count` (1 word) padded up to 4 words so the edit array
-// starts 16-byte aligned, then the edit array, then the pixel output. These
-// MUST match the host-side constants in `compute.rs`.
-static const uint MAX_SDF_EDITS  = 16u;
-static const uint SDF_EDIT_WORDS = 12u;       // size_of::<SdfEdit>() / 4
-static const uint HEADER_BASE    = 4u;        // edit array word offset (count padded to 16 B)
-static const uint PIXEL_BASE     = HEADER_BASE + MAX_SDF_EDITS * SDF_EDIT_WORDS; // 4 + 192 = 196
-
-// Primitive kinds.
-static const uint KIND_SPHERE = 0u;
-static const uint KIND_BOX    = 1u;
-
-// Boolean ops.
-static const uint OP_UNION     = 0u;
-static const uint OP_SUBTRACT  = 1u;
-static const uint OP_INTERSECT = 2u;
-
-// One decoded edit (the in-register form of the packed std430 element).
-struct Edit {
-    float3 center;
-    float3 params;     // radius (sphere) or half-extents (box)
-    uint   kind;
-    uint   op;
-    float  smoothness;
-};
-
-// Reads `asfloat`/`asuint` of the i-th packed edit out of the header region.
-Edit load_edit(uint i) {
-    uint base = HEADER_BASE + i * SDF_EDIT_WORDS;
-    Edit e;
-    e.center     = float3(asfloat(Buf[base + 0u]), asfloat(Buf[base + 1u]), asfloat(Buf[base + 2u]));
-    // word base+3 = center.w (unused)
-    e.params     = float3(asfloat(Buf[base + 4u]), asfloat(Buf[base + 5u]), asfloat(Buf[base + 6u]));
-    // word base+7 = params.w (unused)
-    e.kind       = Buf[base + 8u];
-    e.op         = Buf[base + 9u];
-    e.smoothness = asfloat(Buf[base + 10u]);
-    // word base+11 = _pad (unused)
-    return e;
-}
-
-// --- Primitive distance functions (IQ; the frozen rung-9 primitive set) -------
-
-// Sphere: distance to a sphere centered at `c` with radius `r`.
-float sd_sphere(float3 p, float3 c, float r) {
-    return length(p - c) - r;
-}
-
-// Box: distance to an axis-aligned box centered at `c` with half-extents `h`
-// (the standard IQ exact box SDF).
-float sd_box(float3 p, float3 c, float3 h) {
-    float3 q = abs(p - c) - h;
-    return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0);
-}
-
-// One edit's primitive distance at `p`.
-float edit_distance(Edit e, float3 p) {
-    if (e.kind == KIND_BOX) {
-        return sd_box(p, e.center, e.params);
-    }
-    return sd_sphere(p, e.center, e.params.x);
-}
-
-// --- Boolean ops + polynomial smooth-min/-max (IQ) ----------------------------
-
-// Polynomial smooth-min (IQ `smin`): a soft union with blend radius `k`.
-float smin(float a, float b, float k) {
-    float hh = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
-    return lerp(b, a, hh) - k * hh * (1.0 - hh);
-}
-
-// Polynomial smooth-max: the De Morgan dual of `smin` (smooth `max(a,b)` via
-// `-smin(-a,-b,k)`), used for the smooth subtraction / intersection.
-float smax(float a, float b, float k) {
-    return -smin(-a, -b, k);
-}
-
-// Combine the accumulated field distance `acc` with one edit's distance `d`
-// under the edit's boolean op, hard (`k <= 0`) or smooth (`k > 0`).
-float combine(float acc, float d, uint op, float k) {
-    if (op == OP_SUBTRACT) {
-        // subtraction = max(acc, -d), smooth variant uses smax.
-        return (k > 0.0) ? smax(acc, -d, k) : max(acc, -d);
-    } else if (op == OP_INTERSECT) {
-        // intersection = max(acc, d).
-        return (k > 0.0) ? smax(acc, d, k) : max(acc, d);
-    }
-    // union = min(acc, d).
-    return (k > 0.0) ? smin(acc, d, k) : min(acc, d);
-}
-
-// --- The edit-list field (the single source of truth) -------------------------
-//
-// Fold the edits IN ORDER. The first edit seeds the accumulator hard (there is
-// nothing to combine with `FAR`); each later edit combines under its own op.
-// This ordered fold IS the CSG result.
-float sdf(float3 p) {
-    uint n = min(Buf[0], MAX_SDF_EDITS); // word 0 = edit_count (clamped to capacity)
-    float acc = FAR;
-    [loop]
-    for (uint i = 0u; i < n; ++i) {
-        Edit e = load_edit(i);
-        float d = edit_distance(e, p);
-        if (i == 0u) {
-            // Seed with the first primitive's raw distance. The first op is
-            // applied against the empty field, where union/intersect both reduce
-            // to `d` and subtraction would carve from nothing (a no-op for a
-            // single-primitive seed) — seeding `acc = d` is the well-defined base.
-            acc = d;
-        } else {
-            acc = combine(acc, d, e.op, e.smoothness);
-        }
-    }
-    return acc;
-}
-
-// Surface normal via central differences of `sdf` (the gradient of the WHOLE
-// edit-list field, so it differentiates the CSG surface, not one primitive).
-float3 sdf_normal(float3 p) {
-    float2 e = float2(GRAD_H, 0.0);
-    float3 n = float3(
-        sdf(p + e.xyy) - sdf(p - e.xyy),
-        sdf(p + e.yxy) - sdf(p - e.yxy),
-        sdf(p + e.yyx) - sdf(p - e.yyx));
-    return normalize(n);
-}
+// `MAX_SDF_EDITS`/`SDF_EDIT_WORDS`/`HEADER_BASE` come from `sdf_field.hlsli`; the
+// header is `edit_count` (1 word) padded up to 4 words so the edit array starts
+// 16-byte aligned, then the edit array, then the pixel output. This MUST match the
+// host-side constants in `compute.rs`.
+static const uint PIXEL_BASE = HEADER_BASE + MAX_SDF_EDITS * SDF_EDIT_WORDS; // 4 + 192 = 196
 
 // Packs a linear [0,1] RGB into 0xAABBGGRR (alpha forced to 0xFF), matching the
 // host-side `pack_rgba` golden (compared with a small +/-2/255 tolerance, NOT
