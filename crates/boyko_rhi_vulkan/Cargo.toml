@@ -44,3 +44,8 @@ windows-sys = { version = "0.61", features = [
 # not the host test harness). proptest pulls only host-side, graphics-free crates.
 [dev-dependencies]
 proptest = "1"
+# Test-only. The in-house shader eDSL, with the std `emit` codegen backend ON, so
+# the `sdf_field_edsl_sync` guard can regenerate the HLSL field bodies and assert
+# the committed `shaders/sdf_field.hlsli` still matches them (no by-hand drift).
+# Zero third-party deps; `emit` is dev-only so the shipped backend never links it.
+boyko_shaderdsl = { path = "../boyko_shaderdsl", features = ["emit"] }
