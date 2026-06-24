@@ -206,6 +206,16 @@ pub const M2_BRICK_WORLD: f32 = BRICK_INTERIOR as f32 * VOXEL_SIZE; // 8 * 0.25 
 /// and snapped to its own grid ([`snapped_level_origin`]). Mirrors the M2 grid edge.
 pub const M2_GRID_DIM: u32 = 4;
 
+// M5 toroidal addressing keystone: the storage slot of a world cell is
+// `world_cell.rem_euclid(M2_GRID_DIM)`, which lowers to a single `& (M2_GRID_DIM - 1)`
+// mask ONLY when the dimension is a power of two. A non-power-of-two `M2_GRID_DIM`
+// would silently break [`toroidal_slot`]'s mask form (a wrong, slow, modulo) — make
+// it a BUILD error at the exact assumption instead.
+const _: () = assert!(
+    M2_GRID_DIM.is_power_of_two(),
+    "M2_GRID_DIM must be a power of two for the M5 toroidal slot mask (rem_euclid == & (DIM-1))"
+);
+
 // The level-0 per-level values must reduce to the pinned single-level constants —
 // a desync (e.g. a brick-scale tweak that forgets the clip-map) is a build error.
 const _: () = assert!(M2_BRICK_WORLD == 2.0);
@@ -338,17 +348,22 @@ const _: () = {
 /// level, so level `L` strictly encloses level `L-1` around the shared camera.
 #[inline]
 pub fn snapped_level_origin(camera: [f32; 3], level: u32) -> [f32; 3] {
+    // M5 Decision 2: the integer cell snap is the ONE authority; the world origin is
+    // `origin_cell · brick_world`. This is byte-identical to the prior
+    // `(raw_min / bw).floor() * bw` form — the cell index `oc[a] = floor((camera -
+    // 0.5·DIM·bw) / bw)` is exactly the `floor` the old code applied, and `oc · bw`
+    // reproduces the same multiply (an `m4_snapped_origin_equals_cell_times_bw` test
+    // pins the equality so the toroidal reduction stays bit-stable on the OFF path).
     let brick_world = brick_world_at_level(level);
-    let half_extent = 0.5 * M2_GRID_DIM as f32 * brick_world;
+    let cell = snapped_level_origin_cell(camera, level);
     let mut origin = [0.0f32; 3];
     let mut a = 0;
     while a < 3 {
-        let raw_min = camera[a] - half_extent;
-        let snapped = (raw_min / brick_world).floor() * brick_world;
+        let snapped = cell[a] as f32 * brick_world;
         // The snapped origin is grid-aligned: a multiple of `brick_world` within fp
-        // tolerance. `floor`-then-multiply is exact for the magnitudes in play
-        // (centers in [-2, 2], brick_world in {2, 4, 8}); the tolerance only guards
-        // the f32 round-trip of the divide/multiply.
+        // tolerance. `cell` is an exact integer and `brick_world` is a small power-of-two
+        // multiple, so the product is exact for the magnitudes in play; the tolerance
+        // only guards the f32 round-trip of the divide/multiply.
         debug_assert!(
             ((snapped / brick_world).round() * brick_world - snapped).abs() <= 1e-3 * brick_world,
             "snapped_level_origin: result not aligned to the level's brick grid"
@@ -357,6 +372,161 @@ pub fn snapped_level_origin(camera: [f32; 3], level: u32) -> [f32; 3] {
         a += 1;
     }
     origin
+}
+
+/// The INTEGER cell snap of clip-map `level`'s camera-centered grid (M5 Decision 2):
+/// `floor((camera − 0.5·M2_GRID_DIM·brick_world_L) / brick_world_L)` per axis, the
+/// authority [`snapped_level_origin`] multiplies by `brick_world_L`. World cell `(0,0,0)`
+/// of the level's grid sits at world `origin_cell · brick_world_L`.
+///
+/// Decoupling the WORLD cell from its STORAGE slot is the M5 toroidal keystone: when a
+/// level scrolls, `Δcell = new_origin_cell − old_origin_cell` is an EXACT integer (no
+/// fp diff of two snapped origins), so the revealed slab is computed in pure integer
+/// arithmetic ([`for_each_revealed_cell`]) and exited cells wrap onto the slots of
+/// entered cells ([`toroidal_slot`]). At `camera == [0,0,0]` every axis snaps to a
+/// fixed cell (`−0.5·DIM` floored), reproducing the M4 origin exactly.
+#[inline]
+pub fn snapped_level_origin_cell(camera: [f32; 3], level: u32) -> [i32; 3] {
+    let brick_world = brick_world_at_level(level);
+    let half_extent = 0.5 * M2_GRID_DIM as f32 * brick_world;
+    let mut cell = [0i32; 3];
+    let mut a = 0;
+    while a < 3 {
+        let raw_min = camera[a] - half_extent;
+        // `floor` then cast: a negative world position snaps to a negative cell index
+        // (the toroidal wrap below handles the sign via `rem_euclid`).
+        cell[a] = (raw_min / brick_world).floor() as i32;
+        a += 1;
+    }
+    cell
+}
+
+/// The toroidal STORAGE slot of a WORLD cell (M5 Decision 1): per axis
+/// `world_cell.rem_euclid(M2_GRID_DIM)`, which (since `M2_GRID_DIM` is a power of two —
+/// the const-assert at its definition) lowers to `& (M2_GRID_DIM − 1)`. `rem_euclid`
+/// is correct for NEGATIVE world cells (a camera left/below the origin), where a plain
+/// `%` would yield a negative remainder.
+///
+/// This is the heart of camera-follow streaming: as the grid scrolls, an exited world
+/// cell and a freshly-revealed world cell that are `M2_GRID_DIM` apart map to the SAME
+/// slot, so the revealed slab overwrites exactly the slots the departed cells vacated —
+/// unchanged cells keep their slots in place (no whole-atlas re-shuffle).
+///
+/// # OFF reduction (the byte-identity keystone)
+///
+/// When `origin_cell ≡ 0` the only world cells visited are the box `[0, M2_GRID_DIM)³`,
+/// where `world_cell.rem_euclid(M2_GRID_DIM) == world_cell` ⇒ `toroidal_slot(box) == box`,
+/// so every M5 scatter site is byte-for-byte the M4 `m2_tile_atlas_origin(box)` mapping.
+#[inline]
+pub fn toroidal_slot(world_cell: [i32; 3]) -> [u32; 3] {
+    let dim = M2_GRID_DIM as i32;
+    [
+        world_cell[0].rem_euclid(dim) as u32,
+        world_cell[1].rem_euclid(dim) as u32,
+        world_cell[2].rem_euclid(dim) as u32,
+    ]
+}
+
+/// Visits every WORLD cell in the NEW box `[new_oc, new_oc + M2_GRID_DIM)³` that is NOT
+/// in the OLD box `[old_oc, old_oc + M2_GRID_DIM)³` — the set-difference of two
+/// axis-aligned integer boxes, i.e. the slab a scroll REVEALS (the cells whose toroidal
+/// slots now hold stale departed-cell data and must be re-baked).
+///
+/// `f` is invoked once per revealed world cell as `f([wx, wy, wz])` (absolute WORLD cell
+/// indices; the caller maps each to its toroidal slot + world AABB). No heap, no sort.
+///
+/// # The set-difference decomposition
+///
+/// A cell is revealed iff it lies in the new box AND outside the old box on AT LEAST one
+/// axis. Decomposing by "the FIRST axis on which it leaves the old box" partitions the
+/// difference into ≤3 disjoint axis-aligned sub-boxes (the standard 3D box-difference
+/// shells), so every revealed cell is visited EXACTLY once (no dedup needed for the pure
+/// revealed set). On axis `a` the revealed coordinate range is the new range minus its
+/// overlap with the old range; on the axes BEFORE `a` the iteration is restricted to the
+/// overlap (so the shells don't double-count), and on the axes AFTER `a` it spans the
+/// full new range.
+///
+/// `|Δ| ≥ M2_GRID_DIM` on any axis ⇒ the new and old boxes are disjoint ⇒ the whole new
+/// box is revealed (a teleport degrades to a full re-bake — correct, never an over-skip).
+#[inline]
+pub fn for_each_revealed_cell<F: FnMut([i32; 3])>(old_oc: [i32; 3], new_oc: [i32; 3], mut f: F) {
+    let dim = M2_GRID_DIM as i32;
+    // Per axis: the new range `[new_lo, new_hi)` and the old range `[old_lo, old_hi)`,
+    // and their overlap `[ov_lo, ov_hi)` (empty when the boxes are disjoint on that axis).
+    let new_lo = new_oc;
+    let new_hi = [new_oc[0] + dim, new_oc[1] + dim, new_oc[2] + dim];
+    let old_lo = old_oc;
+    let old_hi = [old_oc[0] + dim, old_oc[1] + dim, old_oc[2] + dim];
+    // The overlap interval `[ov_lo, ov_hi)` on each axis, CLAMPED into the new range and collapsed to
+    // an empty point at `new_lo` when the boxes are disjoint on that axis (so the LOW remainder
+    // `[new_lo, ov_lo)` is empty and the HIGH remainder `[ov_hi, new_hi)` spans the whole new range —
+    // a disjoint axis reveals every new cell on it, and shells that clamp a LATER axis to this empty
+    // overlap contribute nothing, keeping the three shells disjoint and complete).
+    let mut ov_lo = [0i32; 3];
+    let mut ov_hi = [0i32; 3];
+    for a in 0..3 {
+        let lo = new_lo[a].max(old_lo[a]);
+        let hi = new_hi[a].min(old_hi[a]);
+        if lo >= hi {
+            // Disjoint on this axis: an empty overlap pinned at the new low edge.
+            ov_lo[a] = new_lo[a];
+            ov_hi[a] = new_lo[a];
+        } else {
+            ov_lo[a] = lo;
+            ov_hi[a] = hi;
+        }
+    }
+
+    // The revealed coordinates on each axis: the new range minus the overlap, split into
+    // the LOW remainder `[new_lo, ov_lo)` and the HIGH remainder `[ov_hi, new_hi)` (one or
+    // both empty when the boxes overlap fully / not at all on that axis).
+    //
+    // Shell `a` (a = 0,1,2) = cells revealed by leaving the old box on axis `a` FIRST:
+    // axis `a` ranges over its revealed remainder, axes `< a` are clamped to the overlap
+    // (already counted by an earlier shell otherwise), axes `> a` span the full new range.
+    // Empty shells contribute nothing; the three shells are disjoint and cover the whole
+    // difference, so each revealed cell is emitted exactly once.
+
+    // Helper: emit `[x0, x1) × [y0, y1) × [z0, z1)` (all half-open, empty if any lo >= hi).
+    let emit = |x0: i32, x1: i32, y0: i32, y1: i32, z0: i32, z1: i32, g: &mut F| {
+        let mut z = z0;
+        while z < z1 {
+            let mut y = y0;
+            while y < y1 {
+                let mut x = x0;
+                while x < x1 {
+                    g([x, y, z]);
+                    x += 1;
+                }
+                y += 1;
+            }
+            z += 1;
+        }
+    };
+
+    // Shell 0 — revealed on X first: X over its low+high remainders, Y/Z full new range.
+    emit(
+        new_lo[0], ov_lo[0], new_lo[1], new_hi[1], new_lo[2], new_hi[2], &mut f,
+    );
+    emit(
+        ov_hi[0], new_hi[0], new_lo[1], new_hi[1], new_lo[2], new_hi[2], &mut f,
+    );
+    // Shell 1 — revealed on Y first (and NOT already on X): X clamped to the overlap,
+    // Y over its remainders, Z full new range.
+    emit(
+        ov_lo[0], ov_hi[0], new_lo[1], ov_lo[1], new_lo[2], new_hi[2], &mut f,
+    );
+    emit(
+        ov_lo[0], ov_hi[0], ov_hi[1], new_hi[1], new_lo[2], new_hi[2], &mut f,
+    );
+    // Shell 2 — revealed on Z first (and NOT already on X or Y): X and Y clamped to the
+    // overlap, Z over its remainders.
+    emit(
+        ov_lo[0], ov_hi[0], ov_lo[1], ov_hi[1], new_lo[2], ov_lo[2], &mut f,
+    );
+    emit(
+        ov_lo[0], ov_hi[0], ov_lo[1], ov_hi[1], ov_hi[2], new_hi[2], &mut f,
+    );
 }
 
 // ---- The three marcher trust regions (the M0 contract; M1 wires the marcher) ----
@@ -3390,5 +3560,156 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ---- M5a — toroidal clip-map streaming (the bake-side math) ----
+
+    /// The M5 reimpl keystone: `snapped_level_origin(camera, level)` is BYTE-IDENTICAL
+    /// to `snapped_level_origin_cell(camera, level)[a] as f32 * brick_world_at_level(level)`
+    /// on every axis. The toroidal OFF reduction depends on the snapped origin being
+    /// exactly `origin_cell · bw` — a one-ULP drift would desync the shader's
+    /// `round(origin/bw)` recompute from the host's integer cell.
+    #[test]
+    fn m4_snapped_origin_equals_cell_times_bw() {
+        let cameras = [
+            [0.0, 0.0, 0.0],
+            [0.13, -1.77, 2.41],
+            [-3.5, 3.5, -0.01],
+            [5.99, -6.01, 0.5],
+            [-0.5, 1.0, -2.0],
+            [123.456, -78.9, 41.0],
+            [-200.0, 200.0, -0.25],
+        ];
+        for &cam in &cameras {
+            for l in 0..BRICK_LEVELS as u32 {
+                let bw = brick_world_at_level(l);
+                let origin = snapped_level_origin(cam, l);
+                let cell = snapped_level_origin_cell(cam, l);
+                for a in 0..3 {
+                    let from_cell = cell[a] as f32 * bw;
+                    assert_eq!(
+                        origin[a].to_bits(),
+                        from_cell.to_bits(),
+                        "axis {a} level {l} cam {cam:?}: origin {} != cell*bw {from_cell} (bit-diff)",
+                        origin[a]
+                    );
+                }
+            }
+        }
+    }
+
+    /// `toroidal_slot` reduces to the identity on the OFF box `[0, M2_GRID_DIM)³` (the
+    /// byte-identity keystone) and wraps via `rem_euclid` for negative world cells.
+    #[test]
+    fn toroidal_slot_off_identity_and_negative_wrap() {
+        let dim = M2_GRID_DIM as i32;
+        // OFF box: slot == cell.
+        for z in 0..dim {
+            for y in 0..dim {
+                for x in 0..dim {
+                    assert_eq!(
+                        toroidal_slot([x, y, z]),
+                        [x as u32, y as u32, z as u32],
+                        "OFF box cell {:?} must map to itself",
+                        [x, y, z]
+                    );
+                }
+            }
+        }
+        // rem_euclid wrap: -1 -> DIM-1, DIM -> 0, -DIM -> 0, 2*DIM+1 -> 1.
+        assert_eq!(toroidal_slot([-1, 0, dim]), [(dim - 1) as u32, 0, 0]);
+        assert_eq!(
+            toroidal_slot([-dim, 2 * dim + 1, -dim - 1]),
+            [0, 1, (dim - 1) as u32]
+        );
+    }
+
+    /// A scroll's revealed-cell slab matches a brute-force set-difference of the two
+    /// integer boxes, with EVERY revealed cell visited exactly once (no double-count,
+    /// no miss). Covers no-move (empty slab), 1-cell shifts on each axis, a diagonal
+    /// shift, and a teleport (`|Δ| >= DIM` ⇒ the whole new box).
+    #[test]
+    fn revealed_cells_match_box_difference_no_dup() {
+        let dim = M2_GRID_DIM as i32;
+        let in_box = |c: [i32; 3], lo: [i32; 3]| {
+            (0..3).all(|a| c[a] >= lo[a] && c[a] < lo[a] + dim)
+        };
+        let cases: [([i32; 3], [i32; 3]); 8] = [
+            ([0, 0, 0], [0, 0, 0]),       // no move: empty
+            ([0, 0, 0], [1, 0, 0]),       // +X by 1
+            ([0, 0, 0], [0, 1, 0]),       // +Y by 1
+            ([0, 0, 0], [0, 0, 1]),       // +Z by 1
+            ([2, 2, 2], [1, 2, 2]),       // -X by 1
+            ([0, 0, 0], [1, 1, 1]),       // diagonal +1
+            ([5, -3, 7], [5 + dim, -3, 7]), // teleport on X (disjoint)
+            ([0, 0, 0], [dim + 2, dim, dim - 1]), // partial+full teleport mix
+        ];
+        for (old_oc, new_oc) in cases {
+            // Brute-force oracle: every cell in the new box not in the old box.
+            let mut oracle: Vec<[i32; 3]> = Vec::new();
+            for z in new_oc[2]..new_oc[2] + dim {
+                for y in new_oc[1]..new_oc[1] + dim {
+                    for x in new_oc[0]..new_oc[0] + dim {
+                        if !in_box([x, y, z], old_oc) {
+                            oracle.push([x, y, z]);
+                        }
+                    }
+                }
+            }
+            let mut got: Vec<[i32; 3]> = Vec::new();
+            for_each_revealed_cell(old_oc, new_oc, |c| got.push(c));
+            // No duplicate emission (each shell disjoint).
+            let mut sorted = got.clone();
+            sorted.sort_unstable();
+            let dedup_len = {
+                let mut s = sorted.clone();
+                s.dedup();
+                s.len()
+            };
+            assert_eq!(
+                sorted.len(),
+                dedup_len,
+                "old {old_oc:?} new {new_oc:?}: a revealed cell was emitted twice"
+            );
+            let mut oracle_sorted = oracle.clone();
+            oracle_sorted.sort_unstable();
+            assert_eq!(
+                sorted, oracle_sorted,
+                "old {old_oc:?} new {new_oc:?}: revealed set != box difference"
+            );
+        }
+    }
+
+    /// A revealed cell ALWAYS lands on the toroidal slot of some cell the OLD box
+    /// vacated (the streaming invariant: entering cells overwrite exactly the slots of
+    /// the cells that left — the atlas never grows). For a single-axis +1 scroll the
+    /// revealed slab is one face, and its slots equal the departed face's slots.
+    #[test]
+    fn revealed_slots_overwrite_departed_slots() {
+        let old_oc = [3, -2, 5];
+        let new_oc = [4, -2, 5]; // +X by 1
+        // Departed cells: in old box, not in new box.
+        let dim = M2_GRID_DIM as i32;
+        let in_box = |c: [i32; 3], lo: [i32; 3]| {
+            (0..3).all(|a| c[a] >= lo[a] && c[a] < lo[a] + dim)
+        };
+        let mut departed_slots = std::collections::BTreeSet::new();
+        for z in old_oc[2]..old_oc[2] + dim {
+            for y in old_oc[1]..old_oc[1] + dim {
+                for x in old_oc[0]..old_oc[0] + dim {
+                    if !in_box([x, y, z], new_oc) {
+                        departed_slots.insert(toroidal_slot([x, y, z]));
+                    }
+                }
+            }
+        }
+        let mut revealed_slots = std::collections::BTreeSet::new();
+        for_each_revealed_cell(old_oc, new_oc, |c| {
+            revealed_slots.insert(toroidal_slot(c));
+        });
+        assert_eq!(
+            revealed_slots, departed_slots,
+            "the revealed slab's slots must exactly equal the departed cells' slots"
+        );
     }
 }

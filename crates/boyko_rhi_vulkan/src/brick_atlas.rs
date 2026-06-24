@@ -43,8 +43,9 @@ use boyko_rhi::{
 use boyko_rhi::enums::{BarrierAccess, BarrierStage};
 
 use crate::compute::{
-    AtlasEncoding, BrickLevelParams, M2_ATLAS_DIM, M4GridParams, atlas_voxel_index,
+    AtlasEncoding, BrickLevelParams, M2_ATLAS_DIM, M4GridParams, ScrollRebakeSet, atlas_voxel_index,
     bake_brick_atlas_at, m2_dirty_cell_bbox_at, m2_tile_atlas_origin, rebake_dirty_brick_atlas_at,
+    rebake_scroll_brick_atlas_at, scroll_rebake_set,
 };
 use crate::device::VulkanContext;
 use crate::error::VulkanError;
@@ -55,6 +56,25 @@ use crate::texture::VulkanTexture;
 
 use boyko_sdf_math::SdfEditField;
 use boyko_sdf_math::brick::{self, BRICK_ALLOC, PointerGrid, build_pointer_grid};
+
+/// A degenerate placeholder [`BufferImageCopy`] for fixed-capacity upload-region arrays (the unused
+/// tail slots past the actual count — never submitted). A zero-extent copy is a harmless no-op even
+/// if it were ever recorded.
+const EMPTY_COPY: BufferImageCopy = BufferImageCopy {
+    buffer_offset: 0,
+    buffer_row_length: M2_ATLAS_DIM,
+    buffer_image_height: M2_ATLAS_DIM,
+    aspect: ImageAspect::COLOR,
+    mip_level: 0,
+    base_array_layer: 0,
+    layer_count: 1,
+    image_offset_x: 0,
+    image_offset_y: 0,
+    image_offset_z: 0,
+    image_extent_w: 0,
+    image_extent_h: 0,
+    image_extent_d: 0,
+};
 
 /// The M2/M3 brick atlas: a `VK_IMAGE_TYPE_3D` `TRANSFER_DST | SAMPLED` image (NOT storage — the
 /// M2 fill is CPU-side; a GPU compute fill is a later step), its NEAREST / clamp-to-edge / no-mip
@@ -267,6 +287,115 @@ impl BrickAtlas {
         let region = Self::dirty_copy_region(self.encoding, lo, hi);
         self.upload_region(ctx, &region, true)?;
         Ok(true)
+    }
+
+    /// M5 — TOROIDAL camera-follow scroll. Re-bakes ONLY the revealed slab ∪ M3-dirty cells (`set`,
+    /// in NEW-grid box coordinates) into the persistent staging at the level's NEW [`BrickLevelParams`]
+    /// ([`rebake_scroll_brick_atlas_at`]), then uploads ONLY the touched TOROIDAL SLOT regions via ≤8
+    /// sub-region `copy_buffer_to_image`s (the box bbox mapped through the slot wrap may split across
+    /// the `slot == 0` seam — A3). Each touched slot holds the bytes of the world cell now occupying it,
+    /// so the staging stays BIT-IDENTICAL to a full re-bake at the new origin (the gate-(a) keystone).
+    ///
+    /// Returns `true` when an upload ran, `false` when `set` is empty (no cell revealed and nothing
+    /// dirty — the level is already current at the new origin). The caller MUST have drained any prior
+    /// sampling submit (the touched subresource transitions `SHADER_READ`→`TRANSFER_DST`→`SHADER_READ`).
+    pub fn scroll_at_level(
+        &self,
+        ctx: &VulkanContext,
+        field: &SdfEditField,
+        params: &BrickLevelParams,
+        set: &ScrollRebakeSet,
+    ) -> Result<bool, VulkanError> {
+        let Some((lo, hi)) = set.bbox() else {
+            return Ok(false); // Nothing revealed, nothing dirty: the level is current.
+        };
+
+        // Patch ONLY the marked box cells into the persistent staging (each scatters to its toroidal
+        // slot; un-touched slots keep their prior bytes — full/scroll parity).
+        let size = self.encoding.atlas_byte_size();
+        let Some(dst) = RhiDevice::buffer_mapped_ptr(ctx, &self.staging) else {
+            return Err(VulkanError::Vk(
+                "brick_atlas staging buffer not host-mapped",
+                VkResult::ERROR_INITIALIZATION_FAILED,
+            ));
+        };
+        // SAFETY: `dst` is the persistently-mapped first byte of the host-coherent staging buffer
+        // (exactly `size` bytes, allocated in `create`); the slice covers exactly those bytes; this is
+        // the unique writer before the upload binds the buffer (the caller has drained any prior
+        // sampling submit). Host-coherent ⇒ no flush.
+        let staging_bytes = unsafe { core::slice::from_raw_parts_mut(dst.as_ptr(), size) };
+        rebake_scroll_brick_atlas_at(field, self.encoding, params, set, staging_bytes);
+
+        // Upload the touched TOROIDAL SLOT regions: map the box bbox `[lo, hi]` through the slot wrap
+        // and emit one fenced upload per contiguous slot box (≤8 across the per-axis seam splits).
+        let mut regions = [EMPTY_COPY; 8];
+        let n = Self::scroll_copy_regions(self.encoding, params.origin_cell, lo, hi, &mut regions);
+        for region in &regions[..n] {
+            self.upload_region(ctx, region, true)?;
+        }
+        Ok(true)
+    }
+
+    /// Maps the inclusive BOX-cell bbox `[lo, hi]` (NEW-grid relative) through the TOROIDAL slot wrap
+    /// (`slot = (origin_cell + box).rem_euclid(M2_GRID_DIM)`) into ≤8 contiguous SLOT-box
+    /// [`BufferImageCopy`] upload regions, written into `out` (returning the count). A contiguous box
+    /// run on an axis maps to ≤2 contiguous slot runs (it may wrap across the `slot == 0` seam — A3);
+    /// the cartesian product of the per-axis slot runs is ≤2³ = 8 region boxes, each covering the
+    /// CONTIGUOUS atlas voxels `[slot_lo·BRICK_ALLOC, (slot_hi+1)·BRICK_ALLOC)` of its slot box.
+    ///
+    /// `out.len()` MUST be ≥ 8. The box run is never wider than `M2_GRID_DIM`, so the touched slots
+    /// never exceed the whole grid (the scroll upload is bounded by M4's full upload).
+    fn scroll_copy_regions(
+        encoding: AtlasEncoding,
+        origin_cell: [i32; 3],
+        lo: [u32; 3],
+        hi: [u32; 3],
+        out: &mut [BufferImageCopy],
+    ) -> usize {
+        // The per-axis contiguous SLOT runs the box run `[lo[a], hi[a]]` maps to. `toroidal_slot` of
+        // a contiguous box run is a contiguous run of slots that may wrap once across the seam → ≤2
+        // inclusive `[slot_lo, slot_hi]` runs per axis. A run spanning the whole `M2_GRID_DIM` (the
+        // box covers every slot) collapses to the single full `[0, DIM-1]` run.
+        let mut runs: [[(u32, u32); 2]; 3] = [[(0, 0); 2]; 3];
+        let mut run_count = [0usize; 3];
+        let dim = brick::M2_GRID_DIM;
+        for a in 0..3 {
+            let span = hi[a] - lo[a] + 1; // 1..=M2_GRID_DIM
+            // The slot of the run's first box cell; consecutive slots increment mod DIM.
+            let first = (origin_cell[a] + lo[a] as i32).rem_euclid(dim as i32) as u32;
+            if span >= dim {
+                // The run covers every slot on this axis: one full run.
+                runs[a][0] = (0, dim - 1);
+                run_count[a] = 1;
+            } else if first + span <= dim {
+                // No wrap: one contiguous run `[first, first + span - 1]`.
+                runs[a][0] = (first, first + span - 1);
+                run_count[a] = 1;
+            } else {
+                // Wraps the seam: a high run `[first, DIM-1]` and a low run `[0, first + span - 1 - DIM]`.
+                runs[a][0] = (first, dim - 1);
+                runs[a][1] = (0, first + span - dim - 1);
+                run_count[a] = 2;
+            }
+        }
+
+        // The cartesian product of the per-axis slot runs → one copy region per slot box. Iterate the
+        // ACTIVE run slices (`runs[a][..run_count[a]]`) so the index is never needed (clippy:
+        // needless_range_loop) — `run_count[a]` is `1` or `2`, the wrap-or-not run count per axis.
+        let mut n = 0usize;
+        for &(slo_z, shi_z) in &runs[2][..run_count[2]] {
+            for &(slo_y, shi_y) in &runs[1][..run_count[1]] {
+                for &(slo_x, shi_x) in &runs[0][..run_count[0]] {
+                    out[n] = Self::dirty_copy_region(
+                        encoding,
+                        [slo_x, slo_y, slo_z],
+                        [shi_x, shi_y, shi_z],
+                    );
+                    n += 1;
+                }
+            }
+        }
+        n
     }
 
     /// The chosen voxel encoding (for the host UBO / smoke checks).
@@ -608,6 +737,12 @@ pub struct BrickClipmap {
     /// The b5 camera-UBO tail: the per-level [`M4LevelParams`](crate::compute::M4LevelParams) array
     /// with the snapped origins baked in (the value the levels were baked at).
     params: M4GridParams,
+    /// M5: the per-level INTEGER cell snap the atlas slots are currently addressed at
+    /// (`origin_cell[L] == round(params.levels[L].origin / brick_world_L)`). [`scroll_update`] diffs
+    /// the new camera's [`snapped_level_origin_cell`](boyko_sdf_math::brick::snapped_level_origin_cell)
+    /// against this to find each level's revealed slab, then advances it. The toroidal slot of grid
+    /// box-cell `box` is `toroidal_slot(origin_cell[L] + box)`.
+    origin_cell: [[i32; 3]; brick::BRICK_LEVELS],
 }
 
 // The `create` fallible-array-init + the by-value `destroy` teardown both assume these element types
@@ -692,7 +827,11 @@ impl BrickClipmap {
         let grids = unsafe {
             core::mem::transmute_copy::<_, [BoundBuffer; brick::BRICK_LEVELS]>(&grids)
         };
-        Ok(Self { atlases, grids, params })
+        // The per-level cell snap the atlas slots were just baked at — the scroll diff baseline.
+        let origin_cell = core::array::from_fn(|l| {
+            boyko_sdf_math::brick::snapped_level_origin_cell(camera, l as u32)
+        });
+        Ok(Self { atlases, grids, params, origin_cell })
     }
 
     /// Re-snaps + FULLY re-bakes every level (the `gen`-changed fallback): rebuilds the
@@ -710,8 +849,57 @@ impl BrickClipmap {
             let geo = BrickLevelParams::at_level(camera, level as u32);
             self.atlases[level].rebake_at_level(ctx, field, &geo)?;
             reseed_level_grid(ctx, field, &geo, level, &self.grids[level])?;
+            // The full re-bake re-snaps every level: re-anchor the scroll baseline to the new origin.
+            self.origin_cell[level] = geo.origin_cell;
         }
         Ok(())
+    }
+
+    /// M5 — TOROIDAL camera-follow scroll. For each level, snaps the new camera to that level's cell
+    /// grid; if the level did not move (`Δcell == 0`) AND nothing is field-dirty, the level is skipped
+    /// (the cheap common case — a sub-cell camera move re-bakes nothing). Otherwise it re-bakes ONLY
+    /// the REVEALED slab ∪ the M3-dirty cells in the new box ([`scroll_rebake_set`]) to their TOROIDAL
+    /// slots ([`BrickAtlas::scroll_at_level`]), advances the level's origin (`params` + `origin_cell`),
+    /// and uploads only the touched slot regions. The empty-skip grid SSBOs are re-seeded only on the
+    /// `gen`-changed [`rebake_all`]; a pure scroll keeps the prior grid (the per-cell classes that
+    /// scrolled in are re-baked into the atlas, but the coarse empty-skip grid is a fixed lattice that
+    /// is re-seeded on `gen` change — a scroll does not change `gen`).
+    ///
+    /// Returns the number of levels that ran a scroll upload (0 when no level moved and nothing was
+    /// dirty). The caller MUST have drained any prior sampling submit.
+    ///
+    /// Bit-identity keystone: each level's scrolled staging is byte-for-byte a full
+    /// [`rebake_all`] at the new camera (the tester's `scroll_update == rebake_all` proptest) — the
+    /// revealed ∪ dirty cells are re-baked to the slots a full bake would write, and every untouched
+    /// slot already holds the bytes the full bake would write for the world cell still occupying it.
+    pub fn scroll_update(
+        &mut self,
+        ctx: &VulkanContext,
+        field: &SdfEditField,
+        camera: [f32; 3],
+    ) -> Result<u32, VulkanError> {
+        let mut scrolled_levels = 0u32;
+        let new_params = M4GridParams::camera_centered(camera);
+        for level in 0..brick::BRICK_LEVELS {
+            let geo = BrickLevelParams::at_level(camera, level as u32);
+            let old_oc = self.origin_cell[level];
+            let moved = geo.origin_cell != old_oc;
+            let set = scroll_rebake_set(field, &geo, old_oc);
+            // Early-out: the level neither moved nor has any dirty cell in its (unchanged) box.
+            if set.bbox().is_none() {
+                debug_assert!(!moved, "a moved level must reveal at least one cell");
+                continue;
+            }
+            if self.atlases[level].scroll_at_level(ctx, field, &geo, &set)? {
+                scrolled_levels += 1;
+            }
+            // Advance this level's scroll baseline to the new snap.
+            self.origin_cell[level] = geo.origin_cell;
+        }
+        // Advance the UBO tail to the new per-level snapped origins (the shader reads `params` for the
+        // marcher level-select + the toroidal `round(origin/bw)` slot recompute).
+        self.params = new_params;
+        Ok(scrolled_levels)
     }
 
     /// Incrementally re-bakes ONLY the dirty cells of every level (M3 reused per level): each level
@@ -769,7 +957,7 @@ impl BrickClipmap {
     /// work references any level's image, staging, or grid), and the by-value `self` destroys each
     /// resource exactly once.
     pub unsafe fn destroy(self, ctx: &VulkanContext) {
-        let Self { atlases, grids, params: _ } = self;
+        let Self { atlases, grids, params: _, origin_cell: _ } = self;
         // SAFETY: per the contract `ctx` is live + drained; every atlas + grid was created by
         // `create`/`rebake_all`; consuming the arrays by value moves each resource out once, so
         // `BrickAtlas::destroy` / `destroy_buffer` run exactly once per resource.

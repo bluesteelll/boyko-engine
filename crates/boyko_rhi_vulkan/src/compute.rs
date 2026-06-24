@@ -63,7 +63,8 @@ use boyko_sdf_math::brick::{PointerGrid, dist_to_brick_exit};
 use boyko_sdf_math::brick::{
     self, BRICK_ALLOC, BRICK_INTERIOR, BRICK_VOXELS, aabb_overlap, band_half_at_level,
     brick_cubic_hit, brick_world_at_level, c_max_at_level, classify_brick, decode_snorm8,
-    dirty_world_aabb, fill_brick, snapped_level_origin, voxel_size_at_level,
+    dirty_world_aabb, fill_brick, for_each_revealed_cell, snapped_level_origin,
+    snapped_level_origin_cell, toroidal_slot, voxel_size_at_level,
 };
 use boyko_sdf_math::{BrickClass, SDF_EDIT_BAND_HALF, SdfEditAabb, SdfEditField};
 
@@ -172,8 +173,8 @@ static SDF_EDITLIST_STORAGE_IMAGE_SPV: SpirvBlob<24092> = SpirvBlob(*include_byt
 /// ONLY when the signed refine CONVERGES (`abs(d) < EPS`); a grazing silhouette point (analytic miss
 /// within `M2_CREASE_EPS`) or a stalled hard crease falls to the analytic fold, erasing the 1-2px
 /// silhouette rim where the brick hit but the analytic ray missed (dead `resid`/`cand_p` removed),
-/// giving 121620 bytes (VulkanSDK 1.4.350.0 dxc). The hit-set is now exactly the refine-converged set; the residual silhouette rim is ACCEPTED as inherent (owner decision), and the marginal grazing-only EXACT-ANALYTIC RE-MARCH that chased it (a factored analytic re-march gated on a near-tangent normal-vs-ray dot, about 30KB more SPIR-V to recover roughly 7px) was REVERTED in favor of this clean band-removal state under a perf-maximal budget.
-static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<121620> = SpirvBlob(*include_bytes!(concat!(
+/// giving 121620 bytes (VulkanSDK 1.4.350.0 dxc). The hit-set is now exactly the refine-converged set; the residual silhouette rim is ACCEPTED as inherent (owner decision), and the marginal grazing-only EXACT-ANALYTIC RE-MARCH that chased it (a factored analytic re-march gated on a near-tangent normal-vs-ray dot, about 30KB more SPIR-V to recover roughly 7px) was REVERTED in favor of this clean band-removal state under a perf-maximal budget. SDF brick-atlas M5a (TOROIDAL clip-map streaming) then made `m2_surface_hit`'s tile lookup address the atlas at the TOROIDAL slot `(round(origin/bw) + box) mod M2_GRID_DIM` (Decision 5 — recomputed from the existing UBO `origin`/`brick_world`, NO new UBO field so the OFF UBO byte-identity is untouched); at a grid where `origin_cell ≡ 0 (mod DIM)` it reduces to the old `box * BRICK_ALLOC` map → 122488 bytes.
+static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<122488> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/sdf_gbuffer_composite.comp.spv"
 )));
@@ -2322,6 +2323,13 @@ pub struct BrickLevelParams {
     /// At level 0 this is [`M2_GRID_ORIGIN`] on every axis; at coarser camera-centered levels it
     /// is the snapped origin ([`snapped_level_origin`]).
     pub origin: [f32; 3],
+    /// The INTEGER cell snap of this level's grid (M5: `origin == origin_cell · brick_world`).
+    /// The toroidal STORAGE slot of grid box-cell `box` is `toroidal_slot(origin_cell + box)`
+    /// ([`boyko_sdf_math::brick::toroidal_slot`]); at `origin_cell ≡ [0,0,0]` the slot equals the
+    /// box index, so the bake scatter is byte-identical to the M4 `m2_tile_atlas_origin(box)` map
+    /// (the OFF reduction). The level-0 const path ([`m2_near_field`](Self::m2_near_field)) pins
+    /// `[0,0,0]`; the camera-centered path derives it from [`snapped_level_origin_cell`].
+    pub origin_cell: [i32; 3],
     /// The world edge of one brick cell at this level ([`brick_world_at_level`]; `M2_BRICK_WORLD`
     /// at level 0). The brick spans `[cell_min, cell_min + brick_world]³`.
     pub brick_world: f32,
@@ -2345,8 +2353,17 @@ impl BrickLevelParams {
     /// stay byte-identical to the pre-M4 const path.
     #[inline]
     pub const fn m2_near_field() -> Self {
+        // The static M2 grid's ABSOLUTE origin cell: `round(M2_GRID_ORIGIN / M2_BRICK_WORLD)`
+        // (`-4 / 2 == -2`), the value the shader's Decision-5 recompute `round(origin/bw)` yields
+        // for this grid, so the host baker's scatter slot and the shader's sample slot AGREE. The
+        // toroidal slot is a stable per-grid PERMUTATION of the tile positions
+        // (`toroidal_slot(origin_cell + box)`); the host bakes and the shader samples the SAME
+        // permutation, so the rendered result is byte-identical and the incremental==full identity
+        // holds. (A FIXED grid never scrolls, so its permutation never changes.)
+        const M2_ORIGIN_CELL: i32 = (M2_GRID_ORIGIN / M2_BRICK_WORLD) as i32;
         Self {
             origin: [M2_GRID_ORIGIN, M2_GRID_ORIGIN, M2_GRID_ORIGIN],
+            origin_cell: [M2_ORIGIN_CELL, M2_ORIGIN_CELL, M2_ORIGIN_CELL],
             brick_world: M2_BRICK_WORLD,
             voxel_size: M2_VOXEL_SIZE,
             band_half: M2_BAND_HALF,
@@ -2363,6 +2380,10 @@ impl BrickLevelParams {
     pub fn at_level(camera: [f32; 3], level: u32) -> Self {
         Self {
             origin: snapped_level_origin(camera, level),
+            // M5: the integer cell snap (`origin == origin_cell · brick_world`), the toroidal-slot
+            // offset. The shader's Decision-5 recompute `round(origin/bw)` yields the SAME cell, so
+            // the host scatter and the GPU sample agree.
+            origin_cell: snapped_level_origin_cell(camera, level),
             brick_world: brick_world_at_level(level),
             voxel_size: voxel_size_at_level(level),
             band_half: band_half_at_level(level),
@@ -2380,9 +2401,20 @@ impl BrickLevelParams {
     pub fn at_level_from_params(params: &M4GridParams, level: usize) -> Self {
         debug_assert!(level < brick::BRICK_LEVELS, "level out of range");
         let blk = &params.levels[level];
+        let origin = [blk.origin_brick_world[0], blk.origin_brick_world[1], blk.origin_brick_world[2]];
+        let brick_world = blk.origin_brick_world[3];
+        // M5: reconstruct the integer cell snap as `round(origin / brick_world)` — the SAME formula
+        // the shader's Decision-5 recompute uses, so the dirty rebake scatters to the SAME toroidal
+        // slots the GPU samples (and the SAME slots the full bake at this `origin_cell` wrote).
+        let origin_cell = [
+            (origin[0] / brick_world).round() as i32,
+            (origin[1] / brick_world).round() as i32,
+            (origin[2] / brick_world).round() as i32,
+        ];
         Self {
-            origin: [blk.origin_brick_world[0], blk.origin_brick_world[1], blk.origin_brick_world[2]],
-            brick_world: blk.origin_brick_world[3],
+            origin,
+            origin_cell,
+            brick_world,
             voxel_size: blk.band_voxel_inv_atlas[1],
             band_half: blk.band_voxel_inv_atlas[0],
             // The curvature bound is a pure function of the level (`C_MAX / 2^level`), not a baked field
@@ -2490,7 +2522,18 @@ fn bake_atlas_cell(
     // to the pre-M4 const path.
     let class = classify_brick(field, cell_min, params.brick_world, params.band_half);
     let is_surface = class == BrickClass::Surface;
-    let [ox, oy, oz] = m2_tile_atlas_origin(cell);
+    // M5: scatter to the TOROIDAL storage slot (`toroidal_slot(origin_cell + cell)`), decoupling the
+    // world box-cell from its atlas tile so a scroll re-bakes only the revealed slab onto the exited
+    // cells' slots. The shader samples this SAME slot (Decision 5: `toroidal_slot(round(origin/bw) +
+    // box)`, and `origin_cell == round(origin/bw)`). It is a stable per-grid PERMUTATION of the M4
+    // box→box map; the host bakes and the GPU samples the identical permutation, so the result is
+    // byte-identical and incremental==full holds.
+    let slot = toroidal_slot([
+        params.origin_cell[0] + cell[0] as i32,
+        params.origin_cell[1] + cell[1] as i32,
+        params.origin_cell[2] + cell[2] as i32,
+    ]);
+    let [ox, oy, oz] = m2_tile_atlas_origin(slot);
 
     if is_surface {
         // Bake the apron'd tile from the authority, then scatter it into the dense atlas at
@@ -2547,16 +2590,42 @@ pub fn m2_dirty_cell_bbox(field: &SdfEditField) -> Option<([u32; 3], [u32; 3])> 
 }
 
 /// The level-aware M4 dirty-cell bounding box: the inclusive cell span of the authority's dirty
-/// region for ONE clip-map level's [`BrickLevelParams`] (origin/brick_world/voxel) — the level-aware
-/// sibling of [`m2_dirty_cell_bbox`] (which delegates here at the level-0
-/// [`BrickLevelParams::m2_near_field`]). The apron skin scales with the level's `voxel_size`, and
-/// the world→cell mapping uses the level's `origin`/`brick_world`, so each clip-map level diffs the
-/// SAME authority against its OWN grid.
+/// region for ONE clip-map level's [`BrickLevelParams`] (origin/brick_world/voxel/band) — the
+/// level-aware sibling of [`m2_dirty_cell_bbox`] (which delegates here at the level-0
+/// [`BrickLevelParams::m2_near_field`]). The dirty region is widened by this level's band SHORTFALL
+/// (`params.band_half - SDF_EDIT_BAND_HALF`, the per-level store reach past the level-0 skin already
+/// baked into `field.aabbs`) and the apron skin scales with the level's `voxel_size`, and the
+/// world→cell mapping uses the level's `origin`/`brick_world`, so each clip-map level diffs the SAME
+/// authority against its OWN grid at its OWN voxel reach (the M4 coarse-level under-cover fix).
 pub fn m2_dirty_cell_bbox_at(
     field: &SdfEditField,
     params: &BrickLevelParams,
 ) -> Option<([u32; 3], [u32; 3])> {
     let dirty = dirty_world_aabb(field)?;
+
+    // PER-LEVEL band shortfall (the M4 coarse-level under-cover fix). `dirty_world_aabb` returns the
+    // union of `field.aabbs[i]`, each pre-skinned at PUSH/SET time by the LEVEL-0 band
+    // [`SDF_EDIT_BAND_HALF`] (see [`boyko_sdf_math::edit_aabb`]). At clip-map level `L` the stored
+    // voxels reach `params.band_half == band_half_at_level(L)` from the surface (`2^L`× wider), so a
+    // moved edit changes stored bytes that much farther than the level-0-skinned dirty AABB covers.
+    // Inflate by the SHORTFALL `params.band_half - SDF_EDIT_BAND_HALF` so the dirty region matches THIS
+    // level's voxel reach (the classifier overlaps a cell whose surface is within `band_half` of the
+    // edit). At level 0 `params.band_half == SDF_EDIT_BAND_HALF`, so the shortfall is `0.0` and the box
+    // is byte-identical to the M2 const path; coarser levels widen conservatively (over-mark a few
+    // cells, NEVER under-mark — the C2 dirty-set invariant). `max(0.0)` guards against an fp negative.
+    let band_shortfall = (params.band_half - SDF_EDIT_BAND_HALF).max(0.0);
+    let dirty = SdfEditAabb {
+        min: [
+            dirty.min[0] - band_shortfall,
+            dirty.min[1] - band_shortfall,
+            dirty.min[2] - band_shortfall,
+        ],
+        max: [
+            dirty.max[0] + band_shortfall,
+            dirty.max[1] + band_shortfall,
+            dirty.max[2] + band_shortfall,
+        ],
+    };
 
     // Inflate by the 1-voxel APRON reach so the box matches `m2_cell_is_dirty_at` exactly:
     // a SURFACE cell bakes apron voxels one `voxel_size` past its interior faces ([`fill_brick`]),
@@ -2654,6 +2723,163 @@ pub fn rebake_dirty_brick_atlas_at(
         for cy in lo[1]..=hi[1] {
             for cx in lo[0]..=hi[0] {
                 if bake_atlas_cell(field, encoding, params, [cx, cy, cz], &mut tile, out) {
+                    surface_cells += 1;
+                }
+            }
+        }
+    }
+    surface_cells
+}
+
+/// The per-axis box-cell count of one clip-map level grid (`M2_GRID_DIM`), as a `usize`.
+const SCROLL_GRID_DIM: usize = M2_GRID_DIM as usize;
+
+/// The total box-cell count of one grid (`M2_GRID_DIM³`) — the [`ScrollRebakeSet`] bitmap length.
+pub const SCROLL_REBAKE_CELLS: usize = SCROLL_GRID_DIM * SCROLL_GRID_DIM * SCROLL_GRID_DIM;
+
+/// The dedup bitmap of BOX cells (NEW-grid relative, `[0, M2_GRID_DIM)³`) a scroll re-bakes: the
+/// REVEALED slab ([`for_each_revealed_cell`]) UNIONed with the M3-dirty cells in the new box, each
+/// cell flagged at most once (a revealed cell that is also dirty is baked once). Index `cx + cy·DIM
+/// + cz·DIM²`. A preallocated, heap-free `[bool; M2_GRID_DIM³]` (Principle 5).
+#[derive(Clone, Copy, Debug)]
+pub struct ScrollRebakeSet {
+    marked: [bool; SCROLL_REBAKE_CELLS],
+}
+
+impl Default for ScrollRebakeSet {
+    #[inline]
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ScrollRebakeSet {
+    /// An empty set (no cell marked).
+    #[inline]
+    pub const fn new() -> Self {
+        Self { marked: [false; SCROLL_REBAKE_CELLS] }
+    }
+
+    /// The linear index of box cell `(cx, cy, cz)` in the bitmap (`cx + cy·DIM + cz·DIM²`).
+    #[inline]
+    const fn lin(cx: u32, cy: u32, cz: u32) -> usize {
+        cx as usize + cy as usize * SCROLL_GRID_DIM + cz as usize * SCROLL_GRID_DIM * SCROLL_GRID_DIM
+    }
+
+    /// Marks box cell `(cx, cy, cz)` (idempotent — the union dedup).
+    #[inline]
+    fn mark(&mut self, cx: u32, cy: u32, cz: u32) {
+        self.marked[Self::lin(cx, cy, cz)] = true;
+    }
+
+    /// Whether box cell `(cx, cy, cz)` is marked.
+    #[inline]
+    pub fn is_marked(&self, cx: u32, cy: u32, cz: u32) -> bool {
+        self.marked[Self::lin(cx, cy, cz)]
+    }
+
+    /// The inclusive box-cell bounding box `(lo, hi)` of every marked cell, or `None` when the set is
+    /// empty. The upload split derives the touched ATLAS-VOXEL regions from this (mapped through the
+    /// toroidal slot, which may wrap-split it across the `slot == 0` seam — A3).
+    pub fn bbox(&self) -> Option<([u32; 3], [u32; 3])> {
+        let mut lo = [u32::MAX; 3];
+        let mut hi = [0u32; 3];
+        let mut any = false;
+        for cz in 0..M2_GRID_DIM {
+            for cy in 0..M2_GRID_DIM {
+                for cx in 0..M2_GRID_DIM {
+                    if self.is_marked(cx, cy, cz) {
+                        any = true;
+                        let c = [cx, cy, cz];
+                        for a in 0..3 {
+                            lo[a] = lo[a].min(c[a]);
+                            hi[a] = hi[a].max(c[a]);
+                        }
+                    }
+                }
+            }
+        }
+        if any { Some((lo, hi)) } else { None }
+    }
+}
+
+/// Builds the scroll [`ScrollRebakeSet`] for a level that moved from `old_origin_cell` to
+/// `new_params.origin_cell`: the REVEALED box cells (world cells in the new box not in the old box,
+/// mapped to their NEW-grid box index) UNIONed with the M3-dirty box cells in the new box. Pure
+/// bake-side, CPU-verifiable (no GPU). A teleport (`|Δ| ≥ M2_GRID_DIM` on any axis) reveals the whole
+/// new box ([`for_each_revealed_cell`] handles the disjoint-box degenerate).
+pub fn scroll_rebake_set(
+    field: &SdfEditField,
+    new_params: &BrickLevelParams,
+    old_origin_cell: [i32; 3],
+) -> ScrollRebakeSet {
+    let mut set = ScrollRebakeSet::new();
+    let new_oc = new_params.origin_cell;
+
+    // 1) The revealed slab: world cells in the new box not in the old box. Map each to its NEW-grid
+    //    box index `world_cell - new_oc` (always in `[0, M2_GRID_DIM)` because `for_each_revealed_cell`
+    //    emits only cells inside the new box).
+    for_each_revealed_cell(old_origin_cell, new_oc, |world_cell| {
+        let bx = (world_cell[0] - new_oc[0]) as u32;
+        let by = (world_cell[1] - new_oc[1]) as u32;
+        let bz = (world_cell[2] - new_oc[2]) as u32;
+        debug_assert!(
+            bx < M2_GRID_DIM && by < M2_GRID_DIM && bz < M2_GRID_DIM,
+            "revealed cell must map into the new grid box"
+        );
+        set.mark(bx, by, bz);
+    });
+
+    // 2) The M3-dirty cells inside the new box (a field edit that changed since the last bake). These
+    //    must be re-baked even if they did not move into the box, so the scroll's staging equals a
+    //    full re-bake of the new grid (the gate-(a) keystone). The dirty box is in NEW-grid box
+    //    coordinates (`m2_dirty_cell_bbox_at` uses `new_params.origin`/`brick_world`).
+    if let Some((lo, hi)) = m2_dirty_cell_bbox_at(field, new_params) {
+        for cz in lo[2]..=hi[2] {
+            for cy in lo[1]..=hi[1] {
+                for cx in lo[0]..=hi[0] {
+                    set.mark(cx, cy, cz);
+                }
+            }
+        }
+    }
+
+    set
+}
+
+/// Re-bakes the marked box cells of `set` (the revealed slab ∪ M3-dirty) into the staging `out` at the
+/// level's NEW [`BrickLevelParams`] (M5 — the camera-follow scroll fast path). Each marked box cell is
+/// classified + filled at its WORLD `cell_min` ([`bake_atlas_cell`], which scatters to its TOROIDAL
+/// slot `toroidal_slot(origin_cell + cell)`), so an exited cell's slot is overwritten by the cell that
+/// scrolled into it. `out` MUST be the staging the level's last bake filled (un-touched slots keep
+/// their prior bytes). Returns the number of SURFACE cells baked.
+///
+/// Bit-identity keystone: a full [`bake_brick_atlas_at`] at the NEW `params` visits every box cell and
+/// scatters to `toroidal_slot(origin_cell + cell)`. A scroll re-bakes ONLY the revealed ∪ dirty box
+/// cells to the SAME slots; an untouched box cell's slot holds the bytes a PRIOR bake wrote for the
+/// world cell that still occupies it (unchanged because no edit reached it AND it did not leave the
+/// box), so the staging is byte-identical to the full re-bake.
+pub fn rebake_scroll_brick_atlas_at(
+    field: &SdfEditField,
+    encoding: AtlasEncoding,
+    params: &BrickLevelParams,
+    set: &ScrollRebakeSet,
+    out: &mut [u8],
+) -> u32 {
+    debug_assert_eq!(
+        out.len(),
+        encoding.atlas_byte_size(),
+        "atlas staging must be encoding.atlas_byte_size() bytes"
+    );
+
+    let mut surface_cells = 0u32;
+    let mut tile = [0i8; BRICK_VOXELS];
+    for cz in 0..M2_GRID_DIM {
+        for cy in 0..M2_GRID_DIM {
+            for cx in 0..M2_GRID_DIM {
+                if set.is_marked(cx, cy, cz)
+                    && bake_atlas_cell(field, encoding, params, [cx, cy, cz], &mut tile, out)
+                {
                     surface_cells += 1;
                 }
             }
@@ -7190,11 +7416,12 @@ mod m1_empty_skip_tests {
 mod m4_clipmap_tests {
     use super::{
         AtlasEncoding, BrickLevelParams, M2GridParams, M4GridParams, M4LevelParams,
-        M2_ATLAS_DIM, SdfEdit, atlas_voxel_index, bake_brick_atlas_at, sdf_op,
+        M2_ATLAS_DIM, SdfEdit, atlas_voxel_index, bake_brick_atlas_at, m2_tile_atlas_origin, sdf_op,
     };
     use boyko_sdf_math::brick::{
         self, BRICK_ALLOC, BRICK_VOXELS, band_half_at_level, brick_world_at_level, c_max_at_level,
-        classify_brick, decode_snorm8, fill_brick, snapped_level_origin, voxel_size_at_level,
+        classify_brick, decode_snorm8, fill_brick, snapped_level_origin, snapped_level_origin_cell,
+        toroidal_slot, voxel_size_at_level,
     };
     use boyko_sdf_math::{BrickClass, SDF_EDIT_BAND_HALF, SdfEditField};
 
@@ -7218,11 +7445,13 @@ mod m4_clipmap_tests {
 
     /// A DIRECT CPU reference bake of the `M2_ATLAS_DIM³` `Snorm8` atlas for one level's geometry,
     /// independent of `bake_brick_atlas_at`: classify each `M2_GRID_DIM³` cell, fill a SURFACE cell's
-    /// apron'd tile, scatter at the cell's atlas-voxel origin (EMPTY cells leave 0). The bit-exact
-    /// oracle the level-aware baker must match (the M3 full-bake bit-identity gate, per level).
+    /// apron'd tile, scatter at the cell's TOROIDAL atlas-voxel slot (M5: `toroidal_slot(origin_cell +
+    /// cell)`; EMPTY cells leave 0). The bit-exact oracle the level-aware baker must match (the M3
+    /// full-bake bit-identity gate, per level). `origin_cell == round(origin/brick_world)`.
     fn reference_atlas_snorm8(
         field: &SdfEditField,
         origin: [f32; 3],
+        origin_cell: [i32; 3],
         brick_world: f32,
         voxel_size: f32,
         band_half: f32,
@@ -7245,8 +7474,12 @@ mod m4_clipmap_tests {
                     if is_surface {
                         fill_brick(field, cell_min, voxel_size, band_half, c_max, &mut tile);
                     }
-                    let (ox, oy, oz) =
-                        (cx * BRICK_ALLOC as u32, cy * BRICK_ALLOC as u32, cz * BRICK_ALLOC as u32);
+                    let slot = toroidal_slot([
+                        origin_cell[0] + cx as i32,
+                        origin_cell[1] + cy as i32,
+                        origin_cell[2] + cz as i32,
+                    ]);
+                    let [ox, oy, oz] = m2_tile_atlas_origin(slot);
                     for lz in 0..W {
                         for ly in 0..W {
                             for lx in 0..W {
@@ -7284,6 +7517,7 @@ mod m4_clipmap_tests {
             let reference = reference_atlas_snorm8(
                 &field,
                 snapped_level_origin(camera, level),
+                snapped_level_origin_cell(camera, level),
                 brick_world_at_level(level),
                 voxel_size_at_level(level),
                 band_half_at_level(level),

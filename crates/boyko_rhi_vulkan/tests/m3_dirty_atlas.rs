@@ -24,8 +24,24 @@ use boyko_rhi_vulkan::compute::{
     bake_brick_atlas, m2_cell_is_dirty, m2_cell_min, m2_dirty_cell_bbox, rebake_dirty_brick_atlas,
     AtlasEncoding, M2_ATLAS_DIM, M2_BRICK_WORLD, M2_GRID_DIM,
 };
-use boyko_sdf_math::brick::BRICK_ALLOC;
+use boyko_sdf_math::brick::{toroidal_slot, BRICK_ALLOC};
 use boyko_sdf_math::{sdf_op, SdfEdit, SdfEditAabb, SdfEditField, MAX_SDF_EDITS};
+
+/// The M2 near-field grid's integer origin cell (`round(M2_GRID_ORIGIN / M2_BRICK_WORLD)`) — the
+/// toroidal-slot offset the M2 const baker (`bake_brick_atlas` at `m2_near_field`) scatters at. M5
+/// decoupled the world box-cell from the atlas STORAGE slot, so a box cell's tile lives at
+/// `toroidal_slot(M2_ORIGIN_CELL + box)`, NOT at `box * BRICK_ALLOC`. The probes map through this.
+const M2_ORIGIN_CELL: i32 = (-4.0f32 / M2_BRICK_WORLD) as i32;
+
+/// The toroidal STORAGE slot of M2 box-cell `cell` (`toroidal_slot(M2_ORIGIN_CELL + cell)`) — where
+/// the M2 const baker scatters that cell's tile in the dense atlas.
+fn m2_slot_of(cell: [u32; 3]) -> [u32; 3] {
+    toroidal_slot([
+        M2_ORIGIN_CELL + cell[0] as i32,
+        M2_ORIGIN_CELL + cell[1] as i32,
+        M2_ORIGIN_CELL + cell[2] as i32,
+    ])
+}
 
 use proptest::prelude::*;
 
@@ -97,11 +113,13 @@ fn field_with(edits: &[SdfEdit]) -> SdfEditField {
     f
 }
 
-/// The set of atlas voxels of M2 cell `cell` (a tile's `BRICK_ALLOC³` byte block, scattered).
+/// The set of atlas voxels of M2 cell `cell` (a tile's `BRICK_ALLOC³` byte block, scattered to its
+/// M5 TOROIDAL slot `toroidal_slot(M2_ORIGIN_CELL + cell)`, NOT box→box).
 fn tile_bytes_all_zero(staging: &[u8], cell: [u32; 3]) -> bool {
-    let ox = cell[0] * BRICK_ALLOC as u32;
-    let oy = cell[1] * BRICK_ALLOC as u32;
-    let oz = cell[2] * BRICK_ALLOC as u32;
+    let slot = m2_slot_of(cell);
+    let ox = slot[0] * BRICK_ALLOC as u32;
+    let oy = slot[1] * BRICK_ALLOC as u32;
+    let oz = slot[2] * BRICK_ALLOC as u32;
     let w = M2_ATLAS_DIM;
     for lz in 0..BRICK_ALLOC as u32 {
         for ly in 0..BRICK_ALLOC as u32 {

@@ -632,6 +632,7 @@ uint brick_cell_class(StructuredBuffer<uint> grid, float3 origin, float bw, uint
 // compile-time pins (the apron'd 10³ tile shape is fixed by the oracle).
 static const uint  M2_BRICK_INTERIOR = 8u;     // BRICK_INTERIOR
 static const uint  M2_BRICK_ALLOC    = 10u;    // BRICK_ALLOC (interior + 1-voxel apron each face)
+static const uint  M2_GRID_DIM       = 4u;     // M2_GRID_DIM — per-axis cell count (M5 toroidal mask DIM)
 static const float M2_APRON          = 1.0;    // APRON (one voxel)
 static const float M2_ATLAS_BIAS     = 0.0;    // ATLAS_SAMPLE_BIAS (golden-locked to 0)
 static const float M2_CUBIC_ROOT_EPS = 1.0e-6; // CUBIC_ROOT_EPS (root residual / bracket tol)
@@ -997,10 +998,24 @@ bool m2_surface_hit(M4Level lvl, Texture3D<float> atlas, SamplerState atlas_smp,
         return false;
     }
     float3 cell_min = origin + float3((float)tx, (float)ty, (float)tz) * brick_world;
-    // The atlas-voxel origin of this tile (mirror `m2_tile_atlas_origin`): tile * BRICK_ALLOC.
-    float3 tile_org = float3((float)(tx * M2_BRICK_ALLOC),
-                             (float)(ty * M2_BRICK_ALLOC),
-                             (float)(tz * M2_BRICK_ALLOC));
+    // M5 (Decision 5): the tile is stored at its TOROIDAL slot, decoupling the world box-cell from
+    // the atlas tile so a camera-follow scroll re-bakes only the revealed slab. The slot is
+    // `(origin_cell + box) mod M2_GRID_DIM`, where `origin_cell = round(origin / brick_world)` is the
+    // grid's integer cell snap (recomputed from the UBO `origin`/`brick_world` — NO new UBO field, so
+    // the OFF UBO byte-identity is untouched). `(uint)(... + DIM) % DIM` reproduces the host's
+    // `rem_euclid(DIM)` for the small non-negative `origin_cell + box` range these grids occupy; the
+    // `+ DIM` bias keeps the small NEGATIVE origin_cell case (camera below the origin) on the positive
+    // side of HLSL's truncating `%`. This is a stable per-grid PERMUTATION of the M4 box→box map; at a
+    // grid where `origin_cell ≡ 0 (mod DIM)` it reduces to `tile * BRICK_ALLOC` (the OFF reduction).
+    int3 origin_cell = (int3)round(origin / brick_world);
+    int3 world_cell = origin_cell + int3((int)tx, (int)ty, (int)tz);
+    // rem_euclid(DIM): bias by a multiple of DIM large enough to clear the negative magnitudes in play
+    // (the grids are camera-local, |origin_cell| stays small), then truncating `%`.
+    const int WRAP_BIAS = (int)(M2_GRID_DIM * 1024u); // a DIM-multiple swamping any camera-local cell
+    uint3 slot = (uint3)((world_cell + WRAP_BIAS) % (int)M2_GRID_DIM);
+    float3 tile_org = float3((float)(slot.x * M2_BRICK_ALLOC),
+                             (float)(slot.y * M2_BRICK_ALLOC),
+                             (float)(slot.z * M2_BRICK_ALLOC));
 
     // Clip the ray to the brick AABB, then convert to interior-voxel units (world → voxel:
     // (world - cell_min) / voxel_size). The DDA + cubic operate in voxel units.
