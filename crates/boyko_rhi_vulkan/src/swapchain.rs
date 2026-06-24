@@ -2709,12 +2709,19 @@ impl<'ctx> Renderer<'ctx> {
         // factor (`DEFAULT_MARCHER_OMEGA`, the provably hole-free speedup). Render A1/A2:
         // the on-screen demo turns lighting ON (A1 soft shadows + A2 AO) with the default
         // directional light.
+        // SDF brick-atlas M4 (clip-map LOD, Slice C): the windowed present ships at `brick_levels = 1`
+        // (the OFF/N=1 path) pending owner visual sign-off — the marcher's `select_level` loops once over
+        // level 0, byte-identical to the pre-M4 M2 marcher. The brick atlas + per-level paths are gated
+        // OFF here anyway (`brick_trilinear == 0` / `brick_enabled == 0`), so `brick_levels` is moot on
+        // this command stream; `1` documents + locks the OFF contract. Activating the clip-map on-screen
+        // (`with_brick_levels(BRICK_LEVELS)` + `with_brick_trilinear(true)`) is a separate, owner-gated step.
         let marcher_push = FineMarcherPush::new(
             false,
             DEFAULT_MARCHER_OMEGA,
             LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO,
             DEFAULT_LIGHT_DIR,
-        );
+        )
+        .with_brick_levels(1);
         // SAFETY: recording is open; the marcher pipeline + its layout (declaring
         // `vocab_layout` at set 0 AND the 32-byte COMPUTE push range) are live on this
         // device (caller contract); the vocabulary set binds the SSBO/UBO + the
@@ -3648,6 +3655,14 @@ pub struct GBufferScene<'a> {
     /// branch, so the layout + the bound set must carry a VALID combined image+sampler there even
     /// when the trilinear path is gated OFF (`brick_trilinear == 0`, the windowed-present path), or
     /// the SAME layout VUIDs fail.
+    ///
+    /// The caller MUST likewise declare the M4 clip-map (Slice C) LEVEL-1 + LEVEL-2 bindings:
+    /// 11 = `StorageBuffer` (`PointerGrid1`@t11), 12 = `CombinedImageSampler` (`BrickAtlas1`@t12),
+    /// 13 = `StorageBuffer` (`PointerGrid2`@t13), 14 = `CombinedImageSampler` (`BrickAtlas2`@t14).
+    /// The M4 marcher SPIR-V STATICALLY references all four inside the runtime level branch-ladder
+    /// (DXC keeps them past the `brick_levels` gate), so the layout + set must bind VALID descriptors
+    /// even on the OFF/N=1 path (`brick_levels == 1` takes only the lvl==0 arm → bound-but-unread).
+    /// 6 brick bindings total (9..=14) under the 16-binding cap (`MAX_BIND_GROUP_BINDINGS`).
     pub vocab_layout: &'a VulkanBindGroupLayout,
     /// The edit-list StorageBuffer (binding 0), host-seeded ONCE before the loop.
     pub edit_list: &'a BoundBuffer,
@@ -3700,6 +3715,26 @@ pub struct GBufferScene<'a> {
     /// fetch decodes the `R8_SNORM`/`R16_SFLOAT` codes; clamp keeps an out-of-tile fetch reading the
     /// apron, not a neighbour tile.
     pub atlas_sampler: &'a VulkanSampler,
+    /// The M4 clip-map LEVEL-1 + LEVEL-2 pointer grids (vocab bindings 11 + 13): the coarser levels'
+    /// `M2_GRID_DIM³` empty-skip lattices ([`crate::brick_atlas::BrickClipmap::grid_buffer`]). The M4
+    /// marcher SPIR-V STATICALLY references `PointerGrid1 : register(t11)` + `PointerGrid2 :
+    /// register(t13)` inside the runtime level branch-ladder (DXC keeps them past the gate), so the
+    /// layout MUST declare bindings 11/13 = `StorageBuffer` and bind VALID buffers even on the OFF/N=1
+    /// path (`brick_levels == 1` takes only the lvl==0 arm → bound-but-unread). With no clipmap, bind
+    /// level 0's grid ([`Self::pointer_grid`]) as a benign duplicate; `[0]` = level 1, `[1]` = level 2.
+    pub level_grids: [&'a BoundBuffer; 2],
+    /// The M4 clip-map LEVEL-1 + LEVEL-2 brick atlases (vocab bindings 12 + 14): the coarser levels'
+    /// `M2_ATLAS_DIM³` tile-grids ([`crate::brick_atlas::BrickClipmap::atlas`]'s texture). The M4
+    /// marcher SPIR-V STATICALLY references `BrickAtlas1 : register(t12)` + `BrickAtlas2 :
+    /// register(t14)` (each a COMBINED_IMAGE_SAMPLER with [`Self::level_atlas_samplers`]) inside the
+    /// branch-ladder, so the layout MUST declare bindings 12/14 = `CombinedImageSampler` and bind VALID
+    /// atlases even on the OFF/N=1 path (bound-but-unread). With no clipmap, bind level 0's atlas
+    /// ([`Self::atlas`]) as a benign duplicate; `[0]` = level 1, `[1]` = level 2.
+    pub level_atlases: [&'a VulkanTexture; 2],
+    /// The M4 clip-map LEVEL-1 + LEVEL-2 atlas samplers (vocab bindings 12 + 14, alongside
+    /// [`Self::level_atlases`]). NEAREST / clamp-to-edge / no-mip like [`Self::atlas_sampler`]. With no
+    /// clipmap, bind level 0's sampler; `[0]` = level 1, `[1]` = level 2.
+    pub level_atlas_samplers: [&'a VulkanSampler; 2],
     /// The sampler bound alongside the depth image at binding 1 (ignored by the
     /// marcher's unfiltered `.Load`, but the SAMPLED_IMAGE descriptor requires one).
     pub depth_sampler: &'a VulkanSampler,
@@ -4095,6 +4130,22 @@ impl GBufferTargets {
                 BindGroupEntry::CombinedImage {
                     texture: scene.atlas,
                     sampler: scene.atlas_sampler,
+                },
+                // M4 clip-map LOD: the LEVEL-1 + LEVEL-2 brick resources (bindings 11/12 + 13/14). The
+                // marcher SPIR-V statically references `PointerGrid1`@t11, `BrickAtlas1`@t12,
+                // `PointerGrid2`@t13, `BrickAtlas2`@t14 inside the runtime level branch-ladder (NOT
+                // dead-stripped past the gate), so VALID descriptors are bound here even on the OFF/N=1
+                // path (`brick_levels == 1` takes only the lvl==0 arm → bound-but-unread, byte-identical).
+                // Order matches the layout: PointerGrid1 @11, BrickAtlas1 @12, PointerGrid2 @13, BrickAtlas2 @14.
+                BindGroupEntry::StorageBuffer { buffer: scene.level_grids[0] },
+                BindGroupEntry::CombinedImage {
+                    texture: scene.level_atlases[0],
+                    sampler: scene.level_atlas_samplers[0],
+                },
+                BindGroupEntry::StorageBuffer { buffer: scene.level_grids[1] },
+                BindGroupEntry::CombinedImage {
+                    texture: scene.level_atlases[1],
+                    sampler: scene.level_atlas_samplers[1],
                 },
             ];
             let desc = BindGroupDesc::<Vulkan> {

@@ -65,8 +65,11 @@ use boyko_rhi_vulkan::compute::{
     // crease epsilon. The atlas image/sampler themselves come from `BrickAtlas` (below).
     B5_CAMERA_UBO_BYTES, M2GridParams, M2_CREASE_EPS, M2_GRID_PARAMS_OFFSET,
     golden_composite_pixel_brick_m2,
+    // M4 clip-map LOD (Slice C): the further-widened b5 camera UBO (224 B with the N-level M4GridParams
+    // array tail @80), the per-level params block + the N-level golden mirror.
+    B5_CAMERA_UBO_BYTES_M4, M4GridParams, golden_composite_pixel_brick_m4,
 };
-use boyko_rhi_vulkan::brick_atlas::BrickAtlas;
+use boyko_rhi_vulkan::brick_atlas::{BrickAtlas, BrickClipmap};
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
 
 /// Total pixel count (the compute UBO `count`; the shader bounds `idx < count`).
@@ -520,6 +523,37 @@ fn run_gbuffer_hybrid_m2(
     read_viewt: bool,
     m2_grid_default: bool,
 ) -> (Vec<u8>, Option<Vec<u8>>, Option<Vec<f32>>) {
+    // The single-level (M2) entry: no clip-map → `brick_levels = 1`, the level-0 atlas/grid bound at
+    // every level slot (duplicates). The N-level (M4) sibling [`run_gbuffer_hybrid_m4`] passes a real
+    // `BrickClipmap`. This wrapper keeps the M2/M3 call sites + byte output unchanged (the OFF/N=1 gate).
+    run_gbuffer_hybrid_m4(
+        ctx, edits, coarse_enabled, read_tiles, omega_in, lighting_flags, light_dir,
+        light_table_words, brick, brick_trilinear, read_viewt, m2_grid_default, None,
+    )
+}
+
+/// The N-level (M4 clip-map) GPU harness (Slice C). Identical to the single-level M2 harness but binds
+/// the per-level brick resources from `clipmap` (when `Some`): the level-`L` atlas at @10/@12/@14 and
+/// the level-`L` grid at @9/@11/@13, the `M4GridParams::camera_centered` tail in the b5 UBO, and
+/// `brick_levels = BRICK_LEVELS` on the push. When `clipmap` is `None` it is the OFF/N=1 path (the
+/// level-0 single atlas/grid bound at every level slot, `brick_levels = 1`) — byte-identical to the
+/// pre-M4 M2 harness (the call sites that pass `None`).
+#[allow(clippy::too_many_arguments)]
+fn run_gbuffer_hybrid_m4(
+    ctx: &VulkanContext,
+    edits: &[SdfEdit],
+    coarse_enabled: bool,
+    read_tiles: bool,
+    omega_in: f32,
+    lighting_flags: u32,
+    light_dir: [f32; 3],
+    light_table_words: &[u32],
+    brick: Option<(&boyko_sdf_math::brick::PointerGrid, &[u32])>,
+    brick_trilinear: bool,
+    read_viewt: bool,
+    m2_grid_default: bool,
+    clipmap: Option<&BrickClipmap>,
+) -> (Vec<u8>, Option<Vec<u8>>, Option<Vec<f32>>) {
     let device: &VulkanContext = ctx;
     let queue = ctx.rhi_queue();
 
@@ -596,7 +630,11 @@ fn run_gbuffer_hybrid_m2(
     // (byte-identical to the pre-M2 path). ---
     let camera_uniform = device
         .create_buffer(&BufferDesc {
-            size: B5_CAMERA_UBO_BYTES as u64,
+            // M4 (Slice C): widened to `B5_CAMERA_UBO_BYTES_M4` (224 B) — the 80-byte camera block + the
+            // N-level M4GridParams array tail @80. The recompiled marcher cbuffer declares 224 B, so the
+            // descriptor must cover it even though this single-level harness runs `brick_levels == 1`
+            // (only `m2_levels[0]` is read — byte-identical to the old M2 48-byte tail).
+            size: B5_CAMERA_UBO_BYTES_M4 as u64,
             usage: BufferUsage::UNIFORM,
             location: MemoryLocation::HostVisibleCoherent,
         })
@@ -609,28 +647,32 @@ fn run_gbuffer_hybrid_m2(
             .expect("host-visible uniform buffer is mapped");
         // `as_bytes()` is the same 80-byte camera POD the packed path pushed; write it at offset 0.
         let bytes = pc.as_bytes();
-        debug_assert_eq!(bytes.len(), M2_GRID_PARAMS_OFFSET, "camera block must be 80 B (offset of the M2 tail)");
-        // M2: the 48-byte grid params block at `M2_GRID_PARAMS_OFFSET` (80). Default near-field
-        // (origin -4, dims 4³, brick world 2.0, atlas 40, band/voxel/inv-atlas), the SAME block the
-        // host mirror `golden_composite_pixel_brick_m2` + the production swapchain UBO carry. The
+        debug_assert_eq!(bytes.len(), M2_GRID_PARAMS_OFFSET, "camera block must be 80 B (offset of the M4 tail)");
+        // M4: the N-level array tail at `M2_GRID_PARAMS_OFFSET` (80). With a `clipmap` (the N-level
+        // path) the tail is the clip-map's baked `camera_centered` params (the per-level snapped
+        // origins the atlases were baked at). Without one (the OFF/N=1 path) it is `near_field_only()`,
+        // whose level 0 is byte-FOR-byte the old M2 `default_near_field` block (the keystone), so the
+        // `brick_levels == 1` marcher reads `m2_levels[0]` exactly like the pre-M4 M2 path. The
         // discriminator-(a) path passes `m2_grid_default == false` to write a ZEROED tail instead
-        // (atlas_dim == 0 → the M2 grid maps nothing → the branch finds no tile → no M2 hit); the
-        // GPU image must DIFFER from the default-grid run, proving the branch reads this block.
-        let m2 = M2GridParams::default_near_field();
-        let m2_default = m2.as_bytes();
-        let m2_zeroed = [0u8; M2_GRID_PARAMS_BYTES_LOCAL];
-        let m2_bytes: &[u8] = if m2_grid_default { m2_default } else { &m2_zeroed };
-        debug_assert_eq!(M2_GRID_PARAMS_OFFSET + m2_bytes.len(), B5_CAMERA_UBO_BYTES);
-        // SAFETY: `mapped` points to `B5_CAMERA_UBO_BYTES` (128) mapped host-coherent bytes;
-        // `bytes` (80) is written at offset 0 and `m2_bytes` (48) at offset 80 — together exactly
-        // 128 in-bounds bytes, disjoint. No GPU work is in flight yet (submit follows), so the
+        // (atlas_dim == 0 → level-0 maps nothing → the branch finds no tile → no M2 hit).
+        let m4 = match clipmap {
+            Some(cm) => *cm.params(),
+            None => M4GridParams::near_field_only(),
+        };
+        let m4_default = m4.as_ubo_bytes();
+        let m4_zeroed = [0u8; B5_CAMERA_UBO_BYTES_M4 - M2_GRID_PARAMS_OFFSET];
+        let m4_bytes: &[u8] = if m2_grid_default { &m4_default } else { &m4_zeroed };
+        debug_assert_eq!(M2_GRID_PARAMS_OFFSET + m4_bytes.len(), B5_CAMERA_UBO_BYTES_M4);
+        // SAFETY: `mapped` points to `B5_CAMERA_UBO_BYTES_M4` (224) mapped host-coherent bytes;
+        // `bytes` (80) is written at offset 0 and `m4_bytes` (144) at offset 80 — together exactly
+        // 224 in-bounds bytes, disjoint. No GPU work is in flight yet (submit follows), so the
         // writes are unsynchronized-safe.
         unsafe {
             core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len());
             core::ptr::copy_nonoverlapping(
-                m2_bytes.as_ptr(),
+                m4_bytes.as_ptr(),
                 mapped.as_ptr().add(M2_GRID_PARAMS_OFFSET),
-                m2_bytes.len(),
+                m4_bytes.len(),
             );
         }
     }
@@ -904,6 +946,14 @@ fn run_gbuffer_hybrid_m2(
         // so the layout MUST declare binding 10 — a VALID combined image+sampler is bound even on
         // the OFF path (`brick_trilinear == 0`, bound-but-unread). Mirrors `window_present_gbuffer.rs`.
         BindGroupLayoutEntry { binding: 10, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+        // M4 clip-map LOD (Slice C): the LEVEL-1 + LEVEL-2 brick bindings @11..14. The recompiled
+        // marcher SPIR-V statically references `PointerGrid1`@t11, `BrickAtlas1`@t12, `PointerGrid2`@t13,
+        // `BrickAtlas2`@t14 inside the runtime level branch-ladder, so the layout MUST declare all four —
+        // bound-but-unread on this single-level harness (`brick_levels == 1` takes only the lvl==0 arm).
+        BindGroupLayoutEntry { binding: 11, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 12, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 13, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 14, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
     ];
     let bind_layout = device
         .create_bind_group_layout(&BindGroupLayoutDesc { entries: &layout_entries })
@@ -930,6 +980,24 @@ fn run_gbuffer_hybrid_m2(
             bind_group_layout: Some(&bind_layout),
         })
         .expect("P4b coarse-cull compute pipeline");
+    // M4 clip-map LOD (Slice C): resolve the per-level brick resources. With a `clipmap` (the N-level
+    // path) level `L`'s atlas/sampler/grid come from the clip-map; without one (the OFF/N=1 path) every
+    // level slot binds the single level-0 atlas + pointer grid as BENIGN DUPLICATES (bound-but-unread on
+    // the `brick_levels == 1` path, but the marcher SPIR-V references t9..t14 past the runtime gate, so
+    // VALID descriptors are required at all 6 brick bindings). Level 0 = @9/@10, 1 = @11/@12, 2 = @13/@14.
+    let level_atlas_tex = |level: usize| match clipmap {
+        Some(cm) => cm.atlas(level).texture(),
+        None => brick_atlas.texture(),
+    };
+    let level_atlas_smp = |level: usize| match clipmap {
+        Some(cm) => cm.sampler(level),
+        None => brick_atlas.sampler(),
+    };
+    let level_grid = |level: usize| match clipmap {
+        Some(cm) => cm.grid_buffer(level),
+        None => &pointer_grid_buffer,
+    };
+
     // The vocabulary bind group, written ONCE at create (NO per-frame update). Both
     // passes bind this same set; the coarse pass writes binding 6, the fine reads it.
     let bind_group = device
@@ -946,15 +1014,25 @@ fn run_gbuffer_hybrid_m2(
                 BindGroupEntry::StorageBuffer { buffer: &material_table },
                 // Lighting L0b: the gViewT lane @8 (the marcher STORES the surface `t`).
                 BindGroupEntry::StorageImage { texture: &viewt },
-                // M1: the pointer-grid SSBO @9 (the bake on the brick-ON path, the 1-cell
-                // placeholder on the OFF path — never read when `brick_enabled == 0`).
-                BindGroupEntry::StorageBuffer { buffer: &pointer_grid_buffer },
-                // M2: the brick-atlas 3D image @10 as a COMBINED image+sampler (the marcher's
-                // hardware fetch + the `.Load` corner reads). Bound on BOTH paths; read only when
-                // `brick_trilinear == 1`. The atlas was baked from `edits` above.
+                // M1/M4: the LEVEL-0 pointer-grid SSBO @9 (the bake on the brick-ON path; the 1-cell
+                // placeholder on the OFF path). With a clipmap, level 0's grid SSBO.
+                BindGroupEntry::StorageBuffer { buffer: level_grid(0) },
+                // M2/M4: the LEVEL-0 brick-atlas 3D image @10 as a COMBINED image+sampler. Read only when
+                // `brick_trilinear == 1` (+ select_level == 0). With a clipmap, level 0's atlas.
                 BindGroupEntry::CombinedImage {
-                    texture: brick_atlas.texture(),
-                    sampler: brick_atlas.sampler(),
+                    texture: level_atlas_tex(0),
+                    sampler: level_atlas_smp(0),
+                },
+                // M4 clip-map LOD: LEVEL-1 grid @11 + atlas @12, LEVEL-2 grid @13 + atlas @14.
+                BindGroupEntry::StorageBuffer { buffer: level_grid(1) },
+                BindGroupEntry::CombinedImage {
+                    texture: level_atlas_tex(1),
+                    sampler: level_atlas_smp(1),
+                },
+                BindGroupEntry::StorageBuffer { buffer: level_grid(2) },
+                BindGroupEntry::CombinedImage {
+                    texture: level_atlas_tex(2),
+                    sampler: level_atlas_smp(2),
                 },
             ],
         })
@@ -1165,7 +1243,19 @@ fn run_gbuffer_hybrid_m2(
         // M2: enable the trilinear+cubic SURFACE path. INDEPENDENT of the M1 empty-skip — the
         // M2GridParams the marcher reads live in the b5 UBO tail (written above), not the push.
         // `brick_trilinear == false` leaves the push byte-identical to the M1 state (the OFF path).
-        m1.with_brick_trilinear(brick_trilinear)
+        //
+        // M4 clip-map LOD (Slice C): `brick_levels` is `BRICK_LEVELS` with a clip-map (the N-level
+        // path — the marcher's `select_level` dispatches the finest enclosing level via the branch-
+        // ladder), else `1` (the OFF/N=1 path — `select_level` loops once over level 0, byte-identical
+        // to the pre-M4 M2 marcher). `with_brick_levels(1)` is REQUIRED on the single-level path: the
+        // recompiled shader treats `brick_levels == 0` as no-level. The level-1/2 bindings @11..14 are
+        // bound-but-unread when N == 1. (The lvl==0 empty-skip arm reads `pc.grid_*` set by `with_brick`
+        // above; with a clip-map the caller passes level-0's clip-map grid for byte-consistency.)
+        let levels = match clipmap {
+            Some(_) => boyko_sdf_math::brick::BRICK_LEVELS as u32,
+            None => 1,
+        };
+        m1.with_brick_trilinear(brick_trilinear).with_brick_levels(levels)
     };
     encoder.push_compute_constants(&compute, ShaderStage::COMPUTE, 0, push.as_bytes());
     encoder.dispatch(group_count_x(), 1, 1);
@@ -3180,13 +3270,13 @@ fn run_gbuffer_hybrid_lit_clustered(
     // of the cull set). The ORTHO 64×64 block drives the SAME bit-exact rays the host oracle
     // uses (the cull's froxel-AABB ray-gen + the resolve's per-pixel ray).
     //
-    // M2: sized to `B5_CAMERA_UBO_BYTES` (128 B) — the 80-byte camera block + the 48-byte
-    // `M2GridParams` tail @80 the marcher reads on the `brick_trilinear` path. The L1 path runs the
-    // marcher with `brick_trilinear == 0`, so the M2 tail is bound-but-unread (byte-identical to the
-    // pre-M2 L1 image); the default block is written for parity with the production UBO. ---
+    // M4 (Slice C): sized to `B5_CAMERA_UBO_BYTES_M4` (224 B) — the 80-byte camera block + the N-level
+    // `M4GridParams` array tail @80. The L1 path runs the marcher with `brick_trilinear == 0`, so the
+    // tail is bound-but-unread (byte-identical to the pre-M2 L1 image); the near-field block is written
+    // for parity with the production UBO (level 0 == the old M2 default block byte-for-byte). ---
     let camera_uniform = device
         .create_buffer(&BufferDesc {
-            size: B5_CAMERA_UBO_BYTES as u64,
+            size: B5_CAMERA_UBO_BYTES_M4 as u64,
             usage: BufferUsage::UNIFORM,
             location: MemoryLocation::HostVisibleCoherent,
         })
@@ -3198,17 +3288,17 @@ fn run_gbuffer_hybrid_lit_clustered(
             .buffer_mapped_ptr(&camera_uniform)
             .expect("host-visible uniform buffer is mapped");
         let bytes = pc.as_bytes();
-        let m2 = M2GridParams::default_near_field();
-        let m2_bytes = m2.as_bytes();
-        // SAFETY: `mapped` points to `B5_CAMERA_UBO_BYTES` (128) mapped host-coherent bytes; the
-        // 80-byte camera block at offset 0 + the 48-byte M2 block at offset 80 are disjoint and
-        // together exactly 128 in-bounds bytes; no GPU work is in flight yet (submit follows).
+        let m4 = M4GridParams::near_field_only();
+        let m4_bytes = m4.as_ubo_bytes();
+        // SAFETY: `mapped` points to `B5_CAMERA_UBO_BYTES_M4` (224) mapped host-coherent bytes; the
+        // 80-byte camera block at offset 0 + the 144-byte M4 array tail at offset 80 are disjoint and
+        // together exactly 224 in-bounds bytes; no GPU work is in flight yet (submit follows).
         unsafe {
             core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len());
             core::ptr::copy_nonoverlapping(
-                m2_bytes.as_ptr(),
+                m4_bytes.as_ptr(),
                 mapped.as_ptr().add(M2_GRID_PARAMS_OFFSET),
-                m2_bytes.len(),
+                m4_bytes.len(),
             );
         }
     }
@@ -3509,6 +3599,13 @@ fn run_gbuffer_hybrid_lit_clustered(
         // layout MUST declare @10 (or `vkCreateComputePipelines` trips VUID-…-layout-07988). The L1
         // path runs the trilinear path OFF (`brick_trilinear == 0`); the atlas is bound-but-unread.
         BindGroupLayoutEntry { binding: 10, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+        // M4 clip-map LOD (Slice C): the LEVEL-1 + LEVEL-2 brick bindings @11..14 the recompiled marcher
+        // references past the runtime level branch-ladder. The L1 path runs the brick blocks OFF; bound-
+        // but-unread, but the layout MUST declare all four or `vkCreateComputePipelines` trips the VUIDs.
+        BindGroupLayoutEntry { binding: 11, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 12, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 13, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 14, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
     ];
     let bind_layout = device
         .create_bind_group_layout(&BindGroupLayoutDesc { entries: &layout_entries })
@@ -3539,6 +3636,20 @@ fn run_gbuffer_hybrid_lit_clustered(
                 BindGroupEntry::StorageBuffer { buffer: &material_table },
                 // M2 @10: the brick atlas (combined image+sampler). Bound-but-unread on the L1 OFF
                 // path (`brick_trilinear == 0`); satisfies the marcher SPIR-V's static t10/s10 ref.
+                BindGroupEntry::CombinedImage {
+                    texture: brick_atlas.texture(),
+                    sampler: brick_atlas.sampler(),
+                },
+                // M4 @11..14: the LEVEL-1 + LEVEL-2 brick resources, bound to level-0 duplicates (the L1
+                // path has no clipmap + runs the brick blocks OFF — bound-but-unread, but the SPIR-V
+                // references t11..t14 past the gate, so VALID descriptors are required). @11/@13 reuse the
+                // material table (a valid StorageBuffer satisfying the static t11/t13 ref).
+                BindGroupEntry::StorageBuffer { buffer: &material_table },
+                BindGroupEntry::CombinedImage {
+                    texture: brick_atlas.texture(),
+                    sampler: brick_atlas.sampler(),
+                },
+                BindGroupEntry::StorageBuffer { buffer: &material_table },
                 BindGroupEntry::CombinedImage {
                     texture: brick_atlas.texture(),
                     sampler: brick_atlas.sampler(),
@@ -3716,7 +3827,9 @@ fn run_gbuffer_hybrid_lit_clustered(
     // --- SDF marcher compute pass: SAMPLE the depth image, STORE the G-buffer + gViewT. ---
     encoder.bind_compute_pipeline(&compute);
     encoder.bind_descriptor_set_compute(&bind_group, &compute);
-    let push = FineMarcherPush::new(false, 1.0, lighting_flags, light_dir);
+    // M4 (Slice C): the L1 path runs `brick_trilinear == 0` / `brick_enabled == 0` (the brick blocks
+    // are dead), so `brick_levels` is moot; `with_brick_levels(1)` documents the OFF/N=1 contract.
+    let push = FineMarcherPush::new(false, 1.0, lighting_flags, light_dir).with_brick_levels(1);
     encoder.push_compute_constants(&compute, ShaderStage::COMPUTE, 0, push.as_bytes());
     encoder.dispatch(group_count_x(), 1, 1);
 
@@ -4685,6 +4798,363 @@ fn sdf_m2_brick_trilinear_offscreen_engages_and_matches_host() {
     }
 
     assert!(any_scene_hit, "no scene produced an M2 surface hit — the discriminator proved nothing");
+}
+
+// ===========================================================================================
+// SDF brick-atlas M4 (clip-map LOD, Slice C) — the N-level clip-map tests. The OFF/N=1 byte-identity
+// gates are CPU-RUNNABLE (host goldens); the engagement + far-field gates are `#[ignore]` RTX
+// (the owner runs them on the device — the host mirror is the CPU oracle the GPU is compared against).
+//
+// Run the RTX gates: `cargo test -p boyko_rhi_vulkan --test sdf_gbuffer_hybrid sdf_m4_clipmap -- \
+//   --ignored --nocapture`
+// ===========================================================================================
+
+/// Builds the per-level host EMPTY-SKIP pointer grids for `golden_composite_pixel_brick_m4`, each
+/// mirroring the GPU `PointerGrid{L}` binding the shader's level-`L` empty-skip arm reads.
+///
+/// CRITICAL — the empty-skip grid and the surface atlas grid are DISTINCT, exactly as M2 keeps them
+/// (the conflation of the two was BUG-M4-SLICE-C-1):
+/// - **Level 0** uses the FINE [`PointerGrid::default_near_field`] (`DEFAULT_GRID_DIM³ @
+///   DEFAULT_BRICK_WORLD` = `16³ @ 0.5`, origin `[-4, -4, -4]`) — the SAME grid the GPU binds at
+///   binding 9 and the shader's lvl==0 arm reads via `pc.grid_*` (the harness seeds binding 9 +
+///   `with_brick` from `bake_brick_grid`, which IS `default_near_field`). This is also the SAME grid
+///   `golden_composite_pixel_brick_m2`'s empty-skip reads, so the OFF/N=1 path is byte-identical to M2.
+///   The level-0 SURFACE atlas (the COARSE `M2_GRID_DIM³ @ M2_BRICK_WORLD` = `4³ @ 2.0` grid) is read
+///   independently inside [`host_m2_surface_hit_at`] via `at_level_from_params` — NOT from this grid.
+/// - **Levels ≥ 1** use the per-level COARSE grid (`M2_GRID_DIM³` cells of `geo.brick_world` from the
+///   snapped `geo.origin`) — the SAME bake the GPU clip-map's `PointerGrid1/2` SSBO holds (the shader's
+///   coarse arms read `m2_levels[L]` geometry, i.e. `4³ @ (M2_BRICK_WORLD · 2^L)`).
+///
+/// Returns `(PointerGrid, Vec<u32>)` per level so the host golden's per-level empty-skip mirrors the
+/// GPU per level. The level-0 fine grid is origin-centered (NOT camera-snapped) to mirror the GPU
+/// binding 9, which the harness always seeds from the origin-centered `bake_brick_grid`.
+fn bake_clipmap_host_grids(
+    edits: &[SdfEdit],
+    params: &M4GridParams,
+) -> Vec<(boyko_sdf_math::brick::PointerGrid, Vec<u32>)> {
+    use boyko_rhi_vulkan::compute::BrickLevelParams;
+    use boyko_sdf_math::SdfEditField;
+    use boyko_sdf_math::brick::{self, PointerGrid, build_pointer_grid};
+    let mut field = SdfEditField::new();
+    for e in edits {
+        assert!(field.push(*e), "scene must fit MAX_SDF_EDITS");
+    }
+    field.bump_gen();
+    let mut out = Vec::with_capacity(brick::BRICK_LEVELS);
+    for level in 0..brick::BRICK_LEVELS {
+        let grid = if level == 0 {
+            // Level-0 empty-skip = the FINE 16³@0.5 near-field grid the GPU binds at binding 9 (read
+            // via `pc.grid_*`), identical to the M2 reference's empty-skip grid — NOT the 4³@2.0 atlas.
+            PointerGrid::default_near_field()
+        } else {
+            // Coarse levels: the per-level 4³@scaled grid the GPU's `PointerGrid{L}` SSBO holds (the
+            // snapped MIN corner from `geo.origin`, `geo.brick_world` cells), mirroring `m2_levels[L]`.
+            let geo = BrickLevelParams::at_level_from_params(params, level);
+            PointerGrid {
+                origin: geo.origin,
+                dims: [brick::M2_GRID_DIM; 3],
+                brick_world: geo.brick_world,
+            }
+        };
+        let mut cells = vec![0u32; grid.cell_count()];
+        build_pointer_grid(&field, &grid, &mut cells);
+        out.push((grid, cells));
+    }
+    out
+}
+
+/// Writes an RGBA8 image (`width × height`, the harness readback layout) as a 24-bit BMP for the
+/// owner's visual sign-off (the established offscreen screenshot pattern). BGR, bottom-up rows, 4-byte
+/// row padding. Drops the alpha channel.
+fn write_bmp_rgba(path: &std::path::Path, rgba: &[u8], width: u32, height: u32) {
+    let w = width as usize;
+    let h = height as usize;
+    let row_unpadded = w * 3;
+    let row_padded = (row_unpadded + 3) & !3; // 4-byte aligned rows
+    let pixel_bytes = row_padded * h;
+    let file_size = 54 + pixel_bytes; // 14-byte file header + 40-byte info header
+    let mut buf = Vec::with_capacity(file_size);
+    // File header (14 bytes).
+    buf.extend_from_slice(b"BM");
+    buf.extend_from_slice(&(file_size as u32).to_le_bytes());
+    buf.extend_from_slice(&0u32.to_le_bytes()); // reserved
+    buf.extend_from_slice(&54u32.to_le_bytes()); // pixel data offset
+    // Info header (BITMAPINFOHEADER, 40 bytes).
+    buf.extend_from_slice(&40u32.to_le_bytes());
+    buf.extend_from_slice(&(width as i32).to_le_bytes());
+    buf.extend_from_slice(&(height as i32).to_le_bytes()); // positive ⇒ bottom-up
+    buf.extend_from_slice(&1u16.to_le_bytes()); // planes
+    buf.extend_from_slice(&24u16.to_le_bytes()); // bits per pixel
+    buf.extend_from_slice(&0u32.to_le_bytes()); // BI_RGB (no compression)
+    buf.extend_from_slice(&(pixel_bytes as u32).to_le_bytes());
+    buf.extend_from_slice(&2835i32.to_le_bytes()); // x ppm (~72 DPI)
+    buf.extend_from_slice(&2835i32.to_le_bytes()); // y ppm
+    buf.extend_from_slice(&0u32.to_le_bytes()); // palette colors
+    buf.extend_from_slice(&0u32.to_le_bytes()); // important colors
+    // Pixel data: bottom-up, BGR, padded rows.
+    for y in (0..h).rev() {
+        let mut written = 0;
+        for x in 0..w {
+            let i = (y * w + x) * 4;
+            buf.push(rgba[i + 2]); // B
+            buf.push(rgba[i + 1]); // G
+            buf.push(rgba[i]); // R
+            written += 3;
+        }
+        while written < row_padded {
+            buf.push(0);
+            written += 1;
+        }
+    }
+    std::fs::write(path, &buf).expect("write BMP screenshot");
+}
+
+/// A far-field scene: a sphere ~9.5 units deep along the ortho ray (`z = -7.5`, camera at `z = 2`, so
+/// `t = 9.5 < T_MAX = 10`). It is OUTSIDE the level-0 box (`±4`) but inside the level-1 box (`±8`), so
+/// the clip-map MUST select level 1 to render it — the M4 far-reach discriminator. The XY is on-screen
+/// (the ortho view half-extent is `1.0`), so the sphere covers the center pixels.
+fn far_field_sphere() -> Vec<SdfEdit> {
+    vec![SdfEdit::sphere([0.0, 0.0, -7.5], 0.6, sdf_op::UNION, 0.0)]
+}
+
+/// SDF M4 OFF/N=1 BYTE-IDENTITY (CPU-runnable, the 0%-gate). The N-level host golden at `brick_levels =
+/// 1` with `M4GridParams::near_field_only()` (level 0 == the M2 near-field) is BYTE-FOR-BYTE the
+/// single-level M2 host golden on every non-mesh pixel, every scene. This is the inviolable keystone:
+/// `brick_levels == 1` reduces the clip-map to the M2 path. No GPU required.
+#[test]
+fn sdf_m4_clipmap_off_byte_identical() {
+    let params = M4GridParams::near_field_only();
+    for (name, edits) in [
+        ("crater_csg", crater()),
+        ("box_csg", box_csg()),
+        ("smooth_union", smooth_union()),
+    ] {
+        let (grid, cells) = bake_brick_grid(&edits);
+        let level_grids_owned = bake_clipmap_host_grids(&edits, &params);
+        // The golden takes `&[(PointerGrid, &[u32])]`; build the borrowed view over the owned grids.
+        let level_grids: Vec<(boyko_sdf_math::brick::PointerGrid, &[u32])> = level_grids_owned
+            .iter()
+            .map(|(g, c)| (*g, c.as_slice()))
+            .collect();
+        let mut diffs = 0u32;
+        for py in 0..SDF_IMG_H {
+            for px in 0..SDF_IMG_W {
+                if mesh_covers_pixel(px, py) {
+                    continue;
+                }
+                // The M2 single-level golden (the established M2 oracle).
+                let m2 = golden_composite_pixel_brick_m2(
+                    &edits, MESH_DEPTH_CLEAR, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho,
+                    1.0, 0, DEFAULT_LIGHT_DIR, true, true, &grid, &cells,
+                );
+                // The N-level golden at brick_levels = 1 (the OFF/N=1 path: select_level loops once
+                // over level 0 == the M2 near-field, so it must reduce to the M2 golden bit-for-bit).
+                let m4 = golden_composite_pixel_brick_m4(
+                    &edits, MESH_DEPTH_CLEAR, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho,
+                    1.0, 0, DEFAULT_LIGHT_DIR, true, true, 1, &params, &level_grids,
+                );
+                if m2 != m4 {
+                    diffs += 1;
+                }
+            }
+        }
+        assert_eq!(
+            diffs, 0,
+            "[{name}] M4 OFF/N=1 NOT byte-identical to M2: {diffs} pixel(s) differ. \
+             `brick_levels == 1` + near_field_only() must reduce the clip-map golden to the M2 golden."
+        );
+    }
+}
+
+/// SDF M4 the per-level UBO block byte-identity (CPU-runnable, the 0%-gate). `near_field_only()`'s
+/// LEVEL-0 48-byte block is BYTE-FOR-BYTE the M2 `default_near_field` tail (the keystone the shader's
+/// `m2_levels[0]` reads at N=1). Proves the M4 array tail's first entry equals the pre-M4 M2 tail.
+#[test]
+fn sdf_m4_level0_ubo_block_byte_identical_to_m2() {
+    let m4 = M4GridParams::near_field_only().as_ubo_bytes();
+    let m2 = M2GridParams::default_near_field();
+    let m2_bytes = m2.as_bytes();
+    assert_eq!(
+        &m4[..M2_GRID_PARAMS_BYTES_LOCAL],
+        m2_bytes,
+        "M4 near_field_only() level-0 block must be byte-identical to M2 default_near_field() \
+         (the OFF/N=1 keystone — the shader's m2_levels[0] reads the same bytes the pre-M4 M2 tail had)"
+    );
+}
+
+/// SDF M4 CLIP-MAP NEAR-FIELD == SINGLE-LEVEL (`#[ignore]`, RTX). A scene fully inside the level-0 box
+/// (`±4`) rendered with the N-level clip-map (`brick_levels = 3`) is BYTE-IDENTICAL to the single-level
+/// M2 render (`brick_levels = 1`): level 0 wins by containment, so the coarser levels never engage. The
+/// host pre-flight (CPU) proves the goldens agree; the RTX run proves the GPU `gViewT`/LIT agree.
+#[test]
+#[ignore = "GPU offscreen gate — requires a Vulkan device (the owner's RTX); run with --ignored"]
+fn sdf_m4_clipmap_near_field_matches_single_level() {
+    let Some(ctx) = boot_or_skip("sdf_m4_clipmap_near_field_matches_single_level") else {
+        return;
+    };
+    println!("Vulkan device (validation on): {}", ctx.device_name());
+
+    for (name, edits) in [("crater_csg", crater()), ("box_csg", box_csg())] {
+        let (grid, cells) = bake_brick_grid(&edits);
+
+        // The N-level GPU clip-map, camera-centered on the origin (level 0 == the M2 near-field).
+        let clipmap = {
+            use boyko_sdf_math::SdfEditField;
+            let mut field = SdfEditField::new();
+            for e in &edits {
+                assert!(field.push(*e), "scene must fit MAX_SDF_EDITS");
+            }
+            field.bump_gen();
+            BrickClipmap::create(&ctx, &field, [0.0, 0.0, 0.0]).expect("M4 clip-map create")
+        };
+
+        // The single-level M2 render (brick_levels = 1) and the N-level clip-map render (brick_levels =
+        // 3). Both read back gViewT — in the near field they must be byte-identical (level 0 contains
+        // the whole scene, so select_level returns 0 on every hit pixel; levels 1/2 never engage).
+        let (lit_single, _, vt_single_opt) = run_gbuffer_hybrid_m2(
+            &ctx, &edits, false, false, 1.0, 0, DEFAULT_LIGHT_DIR, &DEGENERATE_LIGHT_TABLE,
+            Some((&grid, &cells)), true, true, true,
+        );
+        let vt_single = vt_single_opt.expect("gViewT readback (single-level)");
+
+        let (lit_clip, _, vt_clip_opt) = run_gbuffer_hybrid_m4(
+            &ctx, &edits, false, false, 1.0, 0, DEFAULT_LIGHT_DIR, &DEGENERATE_LIGHT_TABLE,
+            Some((&grid, &cells)), true, true, true, Some(&clipmap),
+        );
+        let vt_clip = vt_clip_opt.expect("gViewT readback (clip-map)");
+
+        // Byte-identical LIT + gViewT in the near field (level 0 wins by containment).
+        assert_eq!(
+            lit_single, lit_clip,
+            "[{name}] near-field clip-map LIT differs from single-level — level 0 should win by \
+             containment (the scene is inside the ±4 level-0 box)"
+        );
+        let vt_diff = vt_single
+            .iter()
+            .zip(vt_clip.iter())
+            .filter(|(a, b)| (*a - *b).abs() > 1.0e-6)
+            .count();
+        assert_eq!(
+            vt_diff, 0,
+            "[{name}] near-field clip-map gViewT differs from single-level on {vt_diff} px — level 0 \
+             must win by containment in the near field"
+        );
+
+        assert_validation_clean(&ctx);
+        // SAFETY: the render submits were fence-waited inside `run_gbuffer_hybrid_*`; the device is
+        // drained, so no work still samples the clip-map; `destroy` consumes it (each resource once).
+        unsafe { clipmap.destroy(&ctx) };
+        println!("[{name}] M4 clip-map near-field == single-level (LIT + gViewT byte-identical)");
+    }
+}
+
+/// SDF M4 CLIP-MAP FAR-FIELD RENDERS (`#[ignore]`, RTX). A sphere ~9.5 units deep (`z = -7.5`) is
+/// OUTSIDE the level-0 box (`±4`) but inside level 1 (`±8`): the single-level M2 path (`brick_levels =
+/// 1`) finds NO level-0 tile (no M2 cubic hit → analytic fold), while the clip-map (`brick_levels = 3`)
+/// selects level 1 and renders the surface via the level-1 bricks. The GPU hit agrees with the analytic
+/// field within `M2_CREASE_EPS` (the exact-CSG residual). This is the M4 far-reach proof.
+#[test]
+#[ignore = "GPU offscreen gate — requires a Vulkan device (the owner's RTX); run with --ignored"]
+fn sdf_m4_clipmap_far_field_renders() {
+    let Some(ctx) = boot_or_skip("sdf_m4_clipmap_far_field_renders") else {
+        return;
+    };
+    println!("Vulkan device (validation on): {}", ctx.device_name());
+
+    let edits = far_field_sphere();
+    let (grid, cells) = bake_brick_grid(&edits);
+
+    let clipmap = {
+        use boyko_sdf_math::SdfEditField;
+        let mut field = SdfEditField::new();
+        for e in &edits {
+            assert!(field.push(*e), "scene must fit MAX_SDF_EDITS");
+        }
+        field.bump_gen();
+        BrickClipmap::create(&ctx, &field, [0.0, 0.0, 0.0]).expect("M4 far-field clip-map create")
+    };
+
+    // The clip-map render (brick_levels = 3): the far sphere is in level 1, so the clip-map renders it.
+    let (lit_clip, _, vt_clip_opt) = run_gbuffer_hybrid_m4(
+        &ctx, &edits, false, false, 1.0, 0, DEFAULT_LIGHT_DIR, &DEGENERATE_LIGHT_TABLE,
+        Some((&grid, &cells)), true, true, true, Some(&clipmap),
+    );
+    let vt_clip = vt_clip_opt.expect("gViewT readback (clip-map)");
+
+    // The clip-map must produce SURFACE hits on the far sphere (gViewT carries a finite t), and each hit
+    // must lie on the true analytic surface within M2_CREASE_EPS (the exact-CSG residual fallback).
+    let mut hits = 0u32;
+    let mut csg_violations = 0u32;
+    let mut worst_resid = 0.0f32;
+    for py in 0..SDF_IMG_H {
+        for px in 0..SDF_IMG_W {
+            if mesh_covers_pixel(px, py) {
+                continue;
+            }
+            if gpu_is_hit(&vt_clip, px, py) {
+                hits += 1;
+                let t = vt_clip[(py * SDF_IMG_W + px) as usize];
+                let (ro, rd) = composite_pixel_ray(px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
+                let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
+                let resid = boyko_sdf_math::sdf_edit_list(&edits, p).abs();
+                worst_resid = worst_resid.max(resid);
+                if resid >= M2_CREASE_EPS {
+                    csg_violations += 1;
+                }
+            }
+        }
+    }
+    assert!(
+        hits > 0,
+        "M4 far-field clip-map produced NO surface hits — the level-1 brick path did not render the \
+         far sphere at z=-7.5 (outside the ±4 level-0 box, inside the ±8 level-1 box)"
+    );
+    assert_eq!(
+        csg_violations, 0,
+        "M4 far-field EXACT-CSG VIOLATION: {csg_violations} clip-map hit(s) off the true surface \
+         (|sdf(hit)| >= M2_CREASE_EPS={M2_CREASE_EPS}); worst |sdf(hit)| = {worst_resid:.5}"
+    );
+    assert_eq!(lit_clip.len(), READBACK_BYTES as usize);
+
+    assert_validation_clean(&ctx);
+    // SAFETY: the render submit was fence-waited; the device is drained; `destroy` consumes the clip-map.
+    unsafe { clipmap.destroy(&ctx) };
+    println!(
+        "M4 clip-map far-field RENDERS: {hits} surface hits on the far sphere (level 1), \
+         worst |sdf(hit)| = {worst_resid:.5} < M2_CREASE_EPS={M2_CREASE_EPS} (exact CSG)"
+    );
+}
+
+/// SDF M4 clip-map OFFSCREEN SCREENSHOT DUMP (`#[ignore]`, RTX) — the owner's visual sign-off. Renders
+/// the far-field sphere with the N-level clip-map and writes the LIT image to a BMP the owner opens.
+#[test]
+#[ignore = "GPU offscreen screenshot dump — the owner runs it on the RTX for visual sign-off"]
+fn sdf_m4_clipmap_far_field_screenshot_dump() {
+    let Some(ctx) = boot_or_skip("sdf_m4_clipmap_far_field_screenshot_dump") else {
+        return;
+    };
+    let edits = far_field_sphere();
+    let (grid, cells) = bake_brick_grid(&edits);
+    let clipmap = {
+        use boyko_sdf_math::SdfEditField;
+        let mut field = SdfEditField::new();
+        for e in &edits {
+            assert!(field.push(*e), "scene must fit MAX_SDF_EDITS");
+        }
+        field.bump_gen();
+        BrickClipmap::create(&ctx, &field, [0.0, 0.0, 0.0]).expect("M4 screenshot clip-map create")
+    };
+    let (lit, _, _) = run_gbuffer_hybrid_m4(
+        &ctx, &edits, false, false, 1.0, LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO,
+        DEFAULT_LIGHT_DIR, &DEGENERATE_LIGHT_TABLE, Some((&grid, &cells)), true, false, true,
+        Some(&clipmap),
+    );
+    let path = std::env::temp_dir().join("sdf_m4_clipmap_far_field.bmp");
+    write_bmp_rgba(&path, &lit, SDF_IMG_W, SDF_IMG_H);
+    println!("M4 clip-map far-field screenshot written to {}", path.display());
+    assert_validation_clean(&ctx);
+    // SAFETY: the render submit was fence-waited; the device is drained; `destroy` consumes the clip-map.
+    unsafe { clipmap.destroy(&ctx) };
 }
 
 

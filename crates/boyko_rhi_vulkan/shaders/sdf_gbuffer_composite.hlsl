@@ -157,14 +157,32 @@ static const uint IMG_H_DEFAULT = 64u;
 //   offset 64 : float4 cam_up       xyz = up basis                (PERSPECTIVE)
 //   total: 80 bytes, 16-byte aligned.
 //
-// SDF brick-atlas M2: the b5 UBO is WIDENED to 128 bytes (host `B5_CAMERA_UBO_BYTES`) — the
-// 80-byte camera block above + a 48-byte `M2GridParams` tail at offset 80 (`M2_GRID_PARAMS_OFFSET`),
-// three std140 `float4` lanes. The marcher reads the M2 block ONLY on the `brick_trilinear` path;
-// `brick_trilinear == 0` never touches these fields (byte-identical to M1). The host writes them
-// via `M2GridParams::default_near_field().as_bytes()`; the lanes mirror that `#[repr(C)]` exactly:
-//   offset 80 : float4 m2_origin_brick_world   xyz = M2 grid min world corner, w = M2_BRICK_WORLD
-//   offset 96 : uint4  m2_dims_atlas_dim       xyz = M2 grid dims [x,y,z], w = M2_ATLAS_DIM
-//   offset 112: float4 m2_band_voxel_inv_atlas x = band_half, y = voxel_size, z = 1/atlas_dim, w = 0
+// SDF brick-atlas M4 (clip-map LOD): the b5 UBO is WIDENED to 224 bytes (host `B5_CAMERA_UBO_BYTES_M4`)
+// — the 80-byte camera block above + an ARRAY of `BRICK_LEVELS` (3) per-level `M4Level` blocks at
+// offset 80 (`M2_GRID_PARAMS_OFFSET`), each three std140 `float4` lanes (48 B). M4 REPLACES the single
+// M2 grid block at offset 80 with `m2_levels[BRICK_LEVELS]`. Level 0's 48-byte block is byte-FOR-byte
+// the old M2 tail (the OFF/N=1 keystone), so `brick_levels == 1` reads `m2_levels[0]` and is identical
+// to the pre-M4 M2 marcher. The marcher reads the M4 blocks ONLY on the `brick_trilinear` path;
+// `brick_trilinear == 0` never touches these fields (byte-identical to M1). The host writes them via
+// `M4GridParams::{camera_centered,near_field_only}().as_ubo_bytes()`; each 48-byte entry mirrors that
+// `#[repr(C)]` exactly (level `L` at byte `L*48`):
+//   +0  : float4 origin_brick_world   xyz = level L grid min world corner, w = brick_world_at_level(L)
+//   +16 : float4 dims_atlas_dim       xyz = grid dims [x,y,z] (as f32), w = M2_ATLAS_DIM (as f32)
+//   +32 : float4 band_voxel_inv_atlas x = band_half_at_level(L), y = voxel_size_at_level(L),
+//                                      z = 1/atlas_dim, w = level index L
+// (`dims_atlas_dim` is read as a `uint4` via `(uint)` casts — an exact small-integer f32↔uint round trip.)
+//
+// The number of nested clip-map levels (mirror host `boyko_sdf_math::brick::BRICK_LEVELS`). The b5 UBO
+// tail carries this many `M4Level` blocks; the marcher loops over `pc.brick_levels <= BRICK_LEVELS`.
+static const uint BRICK_LEVELS = 3u;
+
+// One clip-map level's 48-byte b5 UBO block (mirror host `M4LevelParams` / the old M2 lane layout).
+struct M4Level {
+    float4 origin_brick_world;   // xyz = level grid origin, w = brick_world_at_level(L)
+    float4 dims_atlas_dim;       // xyz = grid dims (f32), w = atlas_dim (f32); read via (uint) cast
+    float4 band_voxel_inv_atlas; // x = band_half(L), y = voxel_size(L), z = 1/atlas_dim, w = level L
+};
+
 cbuffer Camera : register(b5) {
     uint   count;
     uint   img_w_raw;
@@ -174,9 +192,10 @@ cbuffer Camera : register(b5) {
     float4 cam_forward;
     float4 cam_right;
     float4 cam_up;
-    float4 m2_origin_brick_world;   // offset 80 — xyz = M2 grid origin, w = M2_BRICK_WORLD
-    uint4  m2_dims_atlas_dim;       // offset 96 — xyz = M2 grid dims, w = M2_ATLAS_DIM
-    float4 m2_band_voxel_inv_atlas; // offset 112 — x = band_half, y = voxel_size, z = 1/atlas_dim
+    // The N-level clip-map array tail at offset 80 (`M2_GRID_PARAMS_OFFSET`). Each 48-byte entry is
+    // 16-aligned so the array packs contiguously (level L at byte 80 + L*48). Level 0 == the old M2
+    // tail byte-for-byte (the OFF/N=1 keystone). 80 + 3*48 == 224 (`B5_CAMERA_UBO_BYTES_M4`).
+    M4Level m2_levels[BRICK_LEVELS]; // offsets 80 / 128 / 176
 };
 
 // Render P4b: the per-tile coarse-cull bound, READ-ONLY here (the coarse pass writes
@@ -231,6 +250,17 @@ StructuredBuffer<MaterialGpu> Materials : register(t7);
 // builder writes.
 StructuredBuffer<uint> PointerGrid : register(t9);
 
+// SDF brick-atlas M4 (clip-map LOD): the LEVEL-1 + LEVEL-2 pointer grids, bindings 11 + 13 (the same
+// dense `M2_GRID_DIM³` lattice of BrickClass codes as level 0's @t9, but built from the authority at
+// the coarser level's snapped grid). N SEPARATE count=1 bindings (NOT a dynamic resource array): the
+// RHI bind-group WRITE path is one-descriptor-per-binding, so a `BrickAtlas[lvl]` dynamic array
+// (descriptorCount=N) is not writable. HLSL cannot dynamically index separate resources, so the
+// marcher dispatches via a STATIC branch-ladder (`if (lvl==0) {*0} else if (lvl==1) {*1} ...`). On the
+// OFF/N=1 path (`pc.brick_levels == 1`) the branch-ladder takes ONLY the lvl==0 arm, so t11/t13 are
+// bound-but-unread — but they MUST be bound (DXC keeps the static refs past the runtime level branch).
+StructuredBuffer<uint> PointerGrid1 : register(t11); // M4 level 1 pointer grid
+StructuredBuffer<uint> PointerGrid2 : register(t13); // M4 level 2 pointer grid
+
 // SDF brick-atlas M2 (trilinear SURFACE bricks): the dense `M2_ATLAS_DIM³` 3D `R8_SNORM`
 // (or `R16_SFLOAT` fallback) atlas, binding 10 (the 11th vocab entry — within the 12-binding
 // cap, C1). One apron'd `BRICK_ALLOC³` (10³) tile per M2 grid cell, baked CPU-side from the ONE
@@ -254,6 +284,18 @@ StructuredBuffer<uint> PointerGrid : register(t9);
 // `vkCreateComputePipelines` / `vkCmdDispatch` trip the layout VUIDs (the M1 R2 lesson at t9).
 [[vk::binding(10, 0)]] Texture3D<float>  BrickAtlas   : register(t10);
 [[vk::binding(10, 0)]] SamplerState      BrickSampler : register(s10);
+
+// SDF brick-atlas M4 (clip-map LOD): the LEVEL-1 + LEVEL-2 atlases + their NEAREST samplers, combined
+// image+sampler at bindings 12 + 14 (the same `M2_ATLAS_DIM³` `R8_SNORM` tile-grid as level 0's @t10,
+// baked from the authority at the coarser level's geometry). 6 brick bindings total (9..=14, under the
+// 16-binding cap). The marcher's branch-ladder calls `m2_surface_hit(... BrickAtlas1, BrickSampler1 ...)`
+// in the lvl==1 arm, `... BrickAtlas2, BrickSampler2 ...` in the lvl==2 arm. On the OFF/N=1 path these
+// are bound-but-unread (the ladder takes only the lvl==0 arm), yet MUST be bound — DXC keeps the static
+// `register(t12)`/`register(t14)` refs past the runtime level branch (the same R2 contract as t10).
+[[vk::binding(12, 0)]] Texture3D<float>  BrickAtlas1   : register(t12);
+[[vk::binding(12, 0)]] SamplerState      BrickSampler1 : register(s12);
+[[vk::binding(14, 0)]] Texture3D<float>  BrickAtlas2   : register(t14);
+[[vk::binding(14, 0)]] SamplerState      BrickSampler2 : register(s14);
 
 // Mirrors `boyko_render::material::MATERIAL_GPU_WORDS` (48 B / 4 = 12). A documentation
 // + intent pin; the StructuredBuffer<MaterialGpu> element stride is the std430 layout.
@@ -312,7 +354,13 @@ static const uint DEFAULT_MATERIAL_ID = 0u;
 // (the M1 empty-skip): the gates are orthogonal. The `_pad3[3]` fills the 16-byte tail (offsets
 // 68/72/76), matching the host `#[repr(C)] FineMarcherPush` byte-for-byte (offsets const-asserted).
 //   offset 64 : uint   brick_trilinear  M2 trilinear+cubic gate; 0 = OFF (byte-identical to M1)
-//   offset 68 : uint3  _pad3            tail pad to the 80-byte stride
+//
+// SDF brick-atlas M4 (clip-map LOD): the `brick_levels` count @68 reuses the first M2 `_pad3` slot (the
+// tail pad shrinks to `uint2 _pad3` @72), so the struct SIZE is unchanged (the declared 80-byte range).
+// `brick_levels == 1` (or 0) is the OFF/M2-identical path (`select_level` loops once over level 0); `> 1`
+// makes the marcher's branch-ladder dispatch the finest enclosing level (read from the b5 UBO array tail).
+//   offset 68 : uint   brick_levels     M4 clip-map level count; 1 (or 0) = OFF (byte-identical to M2)
+//   offset 72 : uint2  _pad3            tail pad to the 80-byte COMPOSITE stride
 [[vk::push_constant]] struct PushConstants {
     uint   coarse_enabled;  // offset 0 (unchanged)
     float  omega;           // offset 4 — Keinert over-relaxation factor, host-clamped [1.0, 1.99]
@@ -325,7 +373,8 @@ static const uint DEFAULT_MATERIAL_ID = 0u;
     uint3  grid_dims;       // offset 48 — pointer-grid cells per axis (16-aligned vec3)
     float  brick_world;     // offset 60 — pointer-grid cell world size
     uint   brick_trilinear; // offset 64 — M2 trilinear+cubic gate; 0 = OFF (byte-identical to M1)
-    uint3  _pad3;           // offset 68 — tail pad to the 80-byte COMPOSITE stride
+    uint   brick_levels;    // offset 68 — M4 clip-map level count; 1/0 = OFF (byte-identical to M2)
+    uint2  _pad3;           // offset 72 — tail pad to the 80-byte COMPOSITE stride
 } pc;
 
 // P4b: the EMPTY flag bit (mirrors the host `TILE_FLAG_EMPTY` + sdf_tile_cull.hlsl).
@@ -514,8 +563,10 @@ static const uint BRICK_OUTSIDE_GRID = 0xFFFFFFFFu;
 // degenerate ray still advances (the progress guarantee — INVIOLABLE). Only called for an
 // EMPTY_OUTSIDE brick, which has provably no surface within band_half, so the step to the
 // brick boundary never over-steps a surface (the empty-skip soundness contract).
-float dist_to_brick_exit(float3 p, float3 rd, float3 cell_min) {
-    float bw = pc.brick_world;
+// M4: the brick world edge `bw` is a PARAMETER so the marcher can pass this level's
+// `m2_levels[L].origin_brick_world.w` (the per-level cell size). At N=1 the caller passes
+// `pc.brick_world` — byte-identical to the pre-M4 M1 empty-skip.
+float dist_to_brick_exit(float3 p, float3 rd, float3 cell_min, float bw) {
     float exit = 1.0e30;
     [unroll]
     for (uint a = 0u; a < 3u; ++a) {
@@ -540,9 +591,12 @@ float dist_to_brick_exit(float3 p, float3 rd, float3 cell_min) {
 // Reads the pointer-grid cell class containing world point `p`, returning its BrickClass
 // (and `cell_min` via the out param) or BRICK_OUTSIDE_GRID when `p` is outside the bounded
 // grid. Mirrors `boyko_sdf_math::brick`'s host_brick_cell index + bounds check exactly.
-uint brick_cell_class(float3 p, out float3 cell_min) {
-    float3 origin = pc.grid_origin;
-    float bw = pc.brick_world;
+// M4: the grid geometry (`origin`/`brick_world`/`dims`) + the level's `PointerGrid` are PARAMETERS so
+// the marcher's branch-ladder can pass this level's `m2_levels[L]` geometry + `PointerGrid{L}`. At N=1
+// the caller passes the push grid geometry (`pc.grid_*`) + level-0's `PointerGrid` — byte-identical to
+// the pre-M4 M1 empty-skip (which read those same push fields + binding 9 directly).
+uint brick_cell_class(StructuredBuffer<uint> grid, float3 origin, float bw, uint3 dims,
+                      float3 p, out float3 cell_min) {
     float3 rel = (p - origin) / bw;
     cell_min = origin; // default (overwritten on an in-grid hit; unread when OUTSIDE)
     // Outside on any axis (incl. negative rel) → no cell. Test the float directly so a
@@ -550,7 +604,6 @@ uint brick_cell_class(float3 p, out float3 cell_min) {
     if (rel.x < 0.0 || rel.y < 0.0 || rel.z < 0.0) {
         return BRICK_OUTSIDE_GRID;
     }
-    uint3 dims = pc.grid_dims;
     uint ix = (uint)rel.x;
     uint iy = (uint)rel.y;
     uint iz = (uint)rel.z;
@@ -559,7 +612,7 @@ uint brick_cell_class(float3 p, out float3 cell_min) {
     }
     uint idx = ix + iy * dims.x + iz * dims.x * dims.y;
     cell_min = origin + float3(ix, iy, iz) * bw;
-    return PointerGrid[idx];
+    return grid[idx];
 }
 
 // --- SDF brick-atlas M2: the trilinear+JCGT-cubic SURFACE-brick path (mirror boyko_sdf_math::brick) ---
@@ -588,9 +641,15 @@ static const uint  M2_MAX_CELLS      = 30u;    // 3 * BRICK_ALLOC — the longes
 // accepted as the surface; beyond it (a CSG crease / brick-rounding divergence) the analytic refine
 // decides. `0.0192` ~ the brick's δ_tri + δ_quant world slack (the M0 EPSILON_Q dominance budget).
 static const float M2_CREASE_EPS     = 0.0192;
-// The analytic refine: a handful of plain sphere-trace steps from the cubic candidate, used to
-// settle a crease/divergence onto the EXACT field (the exact-CSG fallback).
+// The analytic refine: a handful of SIGNED, under-relaxed sphere-trace steps from the cubic
+// candidate, used to settle a crease/divergence onto the EXACT field from EITHER side (the
+// exact-CSG fallback). The signed step pulls an inside candidate (`d < 0`, the EPSILON_Q down-bias)
+// BACK toward the surface; a forward-only step could not.
 static const uint  M2_REFINE_ITERS   = 8u;
+// The under-relaxation factor of the signed refine step (`rt += M2_REFINE_RELAX * d`). `rt += d` is
+// the exact unit-gradient SDF Newton step; under-relaxing damps overshoot at a CSG crease. Mirrors
+// the host `M2_REFINE_RELAX` bit-for-bit.
+static const float M2_REFINE_RELAX   = 0.8;
 
 // Decodes one R8_SNORM code (a normalized float in [-1,1] from the hardware texel fetch) to a world
 // distance. The NEAREST `SampleLevel` returns the hardware-decoded SNORM value at the EXACT texel
@@ -625,11 +684,16 @@ float m2_decode(float n, float band_half) {
 //       is integral (tile * BRICK_ALLOC) and the clamp keeps `corner` in `[0, BRICK_ALLOC-1]`, so the
 //       texel is always in-bounds and the ClampToEdge sampler never wraps. `inv_atlas == 1.0 /
 //       atlas_dim` maps the integer texel to its normalized center uvw.
-float m2_corner(float3 tile_org, uint cx, uint cy, uint cz, float inv_atlas, float band_half) {
+// M4: the atlas + sampler are RESOURCE PARAMETERS so the marcher's branch-ladder can pass this level's
+// `BrickAtlas{N}`/`BrickSampler{N}` (HLSL supports resource params; it cannot dynamically index the N
+// separate resources, so the per-level dispatch is the static ladder in the marcher). At N=1 the ladder
+// passes `BrickAtlas`/`BrickSampler` (the level-0 / M2 resources), so this is byte-identical to M2.
+float m2_corner(Texture3D<float> atlas, SamplerState atlas_smp,
+                float3 tile_org, uint cx, uint cy, uint cz, float inv_atlas, float band_half) {
     float3 uvw = (float3(tile_org.x + (float)cx,
                          tile_org.y + (float)cy,
                          tile_org.z + (float)cz) + 0.5) * inv_atlas;
-    float n = BrickAtlas.SampleLevel(BrickSampler, uvw, 0.0).r;
+    float n = atlas.SampleLevel(atlas_smp, uvw, 0.0).r;
     return m2_decode(n, band_half);
 }
 
@@ -807,7 +871,8 @@ bool m2_brick_span(float3 p, float3 rd, float3 cell_min, float brick_world, out 
 // the ray clears the brick without crossing. `ro_v`/`rd_v` are the ray in INTERIOR-voxel units
 // (world → voxel: (world - cell_min) / voxel_size). Mirror `boyko_sdf_math::brick::brick_cubic_hit`
 // (the DDA + the cubic fetch order + the per-cell local-t solve are bit-for-bit the CPU oracle).
-float m2_brick_cubic_hit(float3 ro_v, float3 rd_v, float t_enter, float t_exit,
+float m2_brick_cubic_hit(Texture3D<float> atlas, SamplerState atlas_smp,
+                         float3 ro_v, float3 rd_v, float t_enter, float t_exit,
                          float3 tile_org, float inv_atlas, float band_half) {
     if (t_exit <= t_enter) {
         return -1.0;
@@ -853,14 +918,14 @@ float m2_brick_cubic_hit(float3 ro_v, float3 rd_v, float t_enter, float t_exit,
         // Fetch the 8 decoded corners in the s_ijk ↔ x + 2y + 4z order (NEAREST point-sample at the
         // texel center — the corner-fetch fix; the SAME decoded i8 the host `brick_cubic_hit` reads).
         float s[8];
-        s[0] = m2_corner(tile_org, cx,      cy,      cz,      inv_atlas, band_half); // s000
-        s[1] = m2_corner(tile_org, cx + 1u, cy,      cz,      inv_atlas, band_half); // s100
-        s[2] = m2_corner(tile_org, cx,      cy + 1u, cz,      inv_atlas, band_half); // s010
-        s[3] = m2_corner(tile_org, cx + 1u, cy + 1u, cz,      inv_atlas, band_half); // s110
-        s[4] = m2_corner(tile_org, cx,      cy,      cz + 1u, inv_atlas, band_half); // s001
-        s[5] = m2_corner(tile_org, cx + 1u, cy,      cz + 1u, inv_atlas, band_half); // s101
-        s[6] = m2_corner(tile_org, cx,      cy + 1u, cz + 1u, inv_atlas, band_half); // s011
-        s[7] = m2_corner(tile_org, cx + 1u, cy + 1u, cz + 1u, inv_atlas, band_half); // s111
+        s[0] = m2_corner(atlas, atlas_smp, tile_org, cx,      cy,      cz,      inv_atlas, band_half); // s000
+        s[1] = m2_corner(atlas, atlas_smp, tile_org, cx + 1u, cy,      cz,      inv_atlas, band_half); // s100
+        s[2] = m2_corner(atlas, atlas_smp, tile_org, cx,      cy + 1u, cz,      inv_atlas, band_half); // s010
+        s[3] = m2_corner(atlas, atlas_smp, tile_org, cx + 1u, cy + 1u, cz,      inv_atlas, band_half); // s110
+        s[4] = m2_corner(atlas, atlas_smp, tile_org, cx,      cy,      cz + 1u, inv_atlas, band_half); // s001
+        s[5] = m2_corner(atlas, atlas_smp, tile_org, cx + 1u, cy,      cz + 1u, inv_atlas, band_half); // s101
+        s[6] = m2_corner(atlas, atlas_smp, tile_org, cx,      cy + 1u, cz + 1u, inv_atlas, band_half); // s011
+        s[7] = m2_corner(atlas, atlas_smp, tile_org, cx + 1u, cy + 1u, cz + 1u, inv_atlas, band_half); // s111
 
         // The t-span of THIS cell along the ray (clamped to the brick span).
         float t_cell_exit = min(min(min(t_next[0], t_next[1]), t_next[2]), t_exit);
@@ -904,14 +969,18 @@ float m2_brick_cubic_hit(float3 ro_v, float3 rd_v, float t_enter, float t_exit,
 // crease / brick-rounding) the [branch] analytic refine settles it onto the EXACT field. The normal
 // + shade stay ANALYTIC (decided by the caller's `sdf_normal`), so the surface is always validated
 // analytically (C1). `ro`/`rd` are the WORLD ray; `t_world` is the current march `t` (p = ro+rd·t).
-bool m2_surface_hit(float3 ro, float3 rd, float t_world, out float hit_t) {
+// M4: the per-level grid block (`lvl`) + the level's atlas/sampler are PARAMETERS (the marcher's
+// branch-ladder passes `m2_levels[L]` + `BrickAtlas{L}`/`BrickSampler{L}`). At N=1 the caller passes
+// `m2_levels[0]` + the M2 resources, so this is byte-identical to the pre-M4 M2 surface-hit.
+bool m2_surface_hit(M4Level lvl, Texture3D<float> atlas, SamplerState atlas_smp,
+                    float3 ro, float3 rd, float t_world, out float hit_t) {
     hit_t = t_world;
-    float3 origin = m2_origin_brick_world.xyz;
-    float brick_world = m2_origin_brick_world.w;
-    uint3 dims = m2_dims_atlas_dim.xyz;
-    float band_half = m2_band_voxel_inv_atlas.x;
-    float voxel_size = m2_band_voxel_inv_atlas.y;
-    float inv_atlas = m2_band_voxel_inv_atlas.z;
+    float3 origin = lvl.origin_brick_world.xyz;
+    float brick_world = lvl.origin_brick_world.w;
+    uint3 dims = (uint3)lvl.dims_atlas_dim.xyz;
+    float band_half = lvl.band_voxel_inv_atlas.x;
+    float voxel_size = lvl.band_voxel_inv_atlas.y;
+    float inv_atlas = lvl.band_voxel_inv_atlas.z;
 
     float3 p = ro + rd * t_world;
     // The M2 tile containing `p`. Outside the bounded M2 grid → no atlas tile (the caller folds the
@@ -944,7 +1013,7 @@ bool m2_surface_hit(float3 ro, float3 rd, float t_world, out float hit_t) {
     // ro/rd in interior-voxel units with the SAME world-t parameterization).
     float3 rd_v = rd / voxel_size;
 
-    float local = m2_brick_cubic_hit(ro_v, rd_v, t_enter, t_exit, tile_org, inv_atlas, band_half);
+    float local = m2_brick_cubic_hit(atlas, atlas_smp, ro_v, rd_v, t_enter, t_exit, tile_org, inv_atlas, band_half);
     if (local < 0.0) {
         return false; // the ray clears this brick without crossing — the caller marches on
     }
@@ -966,17 +1035,26 @@ bool m2_surface_hit(float3 ro, float3 rd, float t_world, out float hit_t) {
         hit_t = cand_t;
         return true;
     } else {
-        // Plain sphere-trace a few steps from the candidate onto the exact field.
+        // SIGNED, under-relaxed sphere-trace from the candidate onto the exact field, converging from
+        // EITHER side. The brick reconstruction's EPSILON_Q down-bias (scaled `2^L` per clip-map
+        // level) lands the cubic candidate INSIDE the true surface (`d < 0`); the signed step
+        // `rt += M2_REFINE_RELAX * d` walks BACKWARD for `d < 0` (toward the surface) and forward for
+        // `d > 0` — a forward-only step (`max(d, EPS)`) could never pull an inside hit back out.
+        // Accept on `abs(d)` (not signed `d`) so an inside candidate is corrected, never committed.
         float rt = cand_t;
         [loop]
         for (uint i = 0u; i < M2_REFINE_ITERS; ++i) {
             float d = field_distance(ro + rd * rt);
-            if (d < EPS) {
+            if (abs(d) < EPS) {
                 hit_t = rt;
                 return true;
             }
-            rt += max(d, EPS);
-            if (rt > T_MAX) {
+            // Split the under-relaxed step into a named value then add it (no FMA contraction), so
+            // the host `step = M2_REFINE_RELAX * d; rt += step;` rounds bit-identically (two
+            // roundings: one for the multiply, one for the add).
+            float step = M2_REFINE_RELAX * d;
+            rt += step;
+            if (rt < 0.0 || rt > T_MAX) {
                 break;
             }
         }
@@ -985,6 +1063,31 @@ bool m2_surface_hit(float3 ro, float3 rd, float t_world, out float hit_t) {
         // falls back to the M1 analytic fold for this step (continue marching).
         return false;
     }
+}
+
+// SDF brick-atlas M4 (clip-map LOD): selects the FINEST enclosing clip-map level for world point `p`,
+// or -1 when `p` is outside EVERY level (the caller then folds the analytic field, exactly as M2 does
+// outside its single grid today). The levels are strictly concentric (level L's extent doubles), so
+// the first-enclosing scan (level 0 = finest, nearest) returns the tightest LOD. The loop is bounded by
+// `pc.brick_levels` (a runtime count <= BRICK_LEVELS); the `[unroll]` is compile-safe (BRICK_LEVELS).
+//
+// OFF/N=1 keystone: `pc.brick_levels == 1` loops ONCE over level 0 → returns 0 iff `p` is in the
+// level-0 box (else -1), EXACTLY the M2 single-grid containment test. The marcher's branch-ladder then
+// takes only the lvl==0 arm (the M2 resources), so `brick_levels == 1` is byte-identical to M2.
+int select_level(float3 p) {
+    [unroll]
+    for (uint L = 0u; L < BRICK_LEVELS; ++L) {
+        if (L >= pc.brick_levels) {
+            break; // honor the runtime level count (a level >= brick_levels is not active)
+        }
+        float3 o = m2_levels[L].origin_brick_world.xyz;
+        float bw = m2_levels[L].origin_brick_world.w;
+        float3 hi = o + m2_levels[L].dims_atlas_dim.xyz * bw;
+        if (all(p >= o) && all(p < hi)) {
+            return (int)L;
+        }
+    }
+    return -1; // outside all active levels → the caller folds the analytic field
 }
 
 [numthreads(64, 1, 1)]
@@ -1101,15 +1204,40 @@ void main(uint3 tid : SV_DispatchThreadID) {
         // The hit/normal stay ANALYTIC (C1): the skip only accelerates EMPTY traversal, so
         // the converged hit `t` equals the pure-analytic hit `t`. ---
         if (pc.brick_enabled != 0u) {
-            float3 cell_min;
-            uint cls = brick_cell_class(p, cell_min);
-            if (cls == BRICK_EMPTY_OUTSIDE) {
-                t += dist_to_brick_exit(p, rd, cell_min);
-                if (t > T_MAX) {
-                    exhausted = false;   // clear-miss termination — NOT budget exhaustion
-                    break;
+            // M4 clip-map LOD: pick the finest enclosing level for `p`, then read THAT level's pointer
+            // grid + geometry via the STATIC branch-ladder. `lvl < 0` (outside every active level) →
+            // skip the empty-skip and fold analytically (as M1 does outside its grid). At N=1
+            // (`pc.brick_levels == 1`) only the lvl==0 arm runs (the push grid geometry + level-0's
+            // PointerGrid) — byte-identical to the pre-M4 M1 empty-skip.
+            int lvl = select_level(p);
+            if (lvl >= 0) {
+                float3 cell_min;
+                uint cls;
+                float bw;
+                if (lvl == 0) {
+                    // Level 0 reads the SAME push grid geometry the pre-M4 M1 skip used (`pc.grid_*`),
+                    // so the N=1 path is byte-identical (the push + m2_levels[0] carry the same origin).
+                    cls = brick_cell_class(PointerGrid, pc.grid_origin, pc.brick_world, pc.grid_dims, p, cell_min);
+                    bw = pc.brick_world;
+                } else if (lvl == 1) {
+                    cls = brick_cell_class(PointerGrid1, m2_levels[1].origin_brick_world.xyz,
+                                           m2_levels[1].origin_brick_world.w,
+                                           (uint3)m2_levels[1].dims_atlas_dim.xyz, p, cell_min);
+                    bw = m2_levels[1].origin_brick_world.w;
+                } else {
+                    cls = brick_cell_class(PointerGrid2, m2_levels[2].origin_brick_world.xyz,
+                                           m2_levels[2].origin_brick_world.w,
+                                           (uint3)m2_levels[2].dims_atlas_dim.xyz, p, cell_min);
+                    bw = m2_levels[2].origin_brick_world.w;
                 }
-                continue;                // skip the analytic fold this step
+                if (cls == BRICK_EMPTY_OUTSIDE) {
+                    t += dist_to_brick_exit(p, rd, cell_min, bw);
+                    if (t > T_MAX) {
+                        exhausted = false;   // clear-miss termination — NOT budget exhaustion
+                        break;
+                    }
+                    continue;                // skip the analytic fold this step
+                }
             }
         }
 
@@ -1122,15 +1250,32 @@ void main(uint3 tid : SV_DispatchThreadID) {
         // THROUGH to the M1 analytic fold below (so a brick the cubic clears is still marched
         // exactly). INDEPENDENT of `brick_enabled` (the M1 empty-skip can be OFF here). ---
         if (pc.brick_trilinear != 0u) {
-            float m2_hit_t;
-            if (m2_surface_hit(ro, rd, t, m2_hit_t)) {
-                hit = true;
-                exhausted = false;       // M2 cubic+analytic-validated convergence
-                t = m2_hit_t;
-                break;
+            // M4 clip-map LOD: pick the finest enclosing level for `p`, then dispatch the surface-hit
+            // to THAT level's atlas/grid via the STATIC branch-ladder (HLSL can't dynamically index the
+            // N separate resources). `lvl < 0` → `p` is outside every active level → skip the brick
+            // block and fall to the analytic fold (exactly as M2 does outside its grid). At N=1
+            // (`pc.brick_levels == 1`) `select_level` returns 0 iff in the level-0 box, and only the
+            // lvl==0 arm runs (the M2 resources) — byte-identical to the pre-M4 M2 path.
+            int lvl = select_level(p);
+            if (lvl >= 0) {
+                float m2_hit_t;
+                bool m2_hit;
+                if (lvl == 0) {
+                    m2_hit = m2_surface_hit(m2_levels[0], BrickAtlas,  BrickSampler,  ro, rd, t, m2_hit_t);
+                } else if (lvl == 1) {
+                    m2_hit = m2_surface_hit(m2_levels[1], BrickAtlas1, BrickSampler1, ro, rd, t, m2_hit_t);
+                } else {
+                    m2_hit = m2_surface_hit(m2_levels[2], BrickAtlas2, BrickSampler2, ro, rd, t, m2_hit_t);
+                }
+                if (m2_hit) {
+                    hit = true;
+                    exhausted = false;       // M2 cubic+analytic-validated convergence
+                    t = m2_hit_t;
+                    break;
+                }
             }
-            // else: no cubic crossing in this brick (or the refine cleared it) → fall through to the
-            // analytic `sdf(p)` step, exactly as M1 marches a SURFACE brick.
+            // else: no level / no cubic crossing in this brick (or the refine cleared it) → fall through
+            // to the analytic `sdf(p)` step, exactly as M1 marches a SURFACE brick.
         }
 
         float d = sdf(p);

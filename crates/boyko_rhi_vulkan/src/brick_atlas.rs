@@ -470,28 +470,46 @@ impl BrickAtlas {
     }
 }
 
-/// The geometry of one clip-map level's pointer grid: the `M2_GRID_DIM³` lattice spanning the
-/// level's camera-snapped extent ([`BrickLevelParams`] origin/brick_world). The empty-skip marcher
-/// (M1, per level in Slice C) reads the grid SSBO via this origin/dims/brick_world.
+/// The geometry of one clip-map level's EMPTY-SKIP pointer grid (binding 9/11/13) — DISTINCT from the
+/// level's SURFACE-atlas grid (the `M2_GRID_DIM³ @ params.brick_world` lattice the atlas tiles map). The
+/// empty-skip grid and the surface grid are kept separate exactly as M2 does (the conflation was
+/// BUG-M4-SLICE-C-1: the N=3 near field stopped reducing to the N=1 near field).
+///
+/// - **Level 0** is the FINE [`PointerGrid::default_near_field`] (`DEFAULT_GRID_DIM³ @ DEFAULT_BRICK_WORLD`
+///   = `16³ @ 0.5`, origin `[-4, -4, -4]`) — the SAME grid the single-level M2/N=1 path binds at binding 9
+///   and the shader's `lvl == 0` arm reads via `pc.grid_*`. Binding the clip-map's level-0 grid at the
+///   SURFACE granularity (`4³ @ 2.0`) instead made the `pc.grid_*` (16³) index a 64-cell SSBO out of
+///   bounds, so the GPU level-0 empty-skip diverged from N=1 (the near-field-golden failure). Returning
+///   `default_near_field` here keeps `grid_buffer(0)` consistent with `pc.grid_*` and the host oracle.
+/// - **Levels ≥ 1** use the per-level COARSE grid (`M2_GRID_DIM³` cells of `params.brick_world` from the
+///   snapped `params.origin`) — the geometry the shader's coarse arms read via `m2_levels[L]`, so the SSBO
+///   the GPU binds at binding 11/13 aligns with the params the shader uses.
 #[inline]
-fn level_pointer_grid(params: &BrickLevelParams) -> PointerGrid {
-    PointerGrid {
-        origin: params.origin,
-        dims: [brick::M2_GRID_DIM, brick::M2_GRID_DIM, brick::M2_GRID_DIM],
-        brick_world: params.brick_world,
+fn level_empty_skip_grid(params: &BrickLevelParams, level: usize) -> PointerGrid {
+    if level == 0 {
+        PointerGrid::default_near_field()
+    } else {
+        PointerGrid {
+            origin: params.origin,
+            dims: [brick::M2_GRID_DIM, brick::M2_GRID_DIM, brick::M2_GRID_DIM],
+            brick_world: params.brick_world,
+        }
     }
 }
 
-/// Creates ONE clip-map level's pointer-grid StorageBuffer (the M1/M2 empty-skip grid SSBO) and
-/// seeds it from the authority via [`build_pointer_grid`] at the level's [`BrickLevelParams`]. The
-/// host-visible coherent buffer holds `cell_count` `u32` [`BrickClass`](boyko_sdf_math::BrickClass)
-/// codes — the SAME `StructuredBuffer<uint>` the shader (Slice C) reads per level.
+/// Creates ONE clip-map level's EMPTY-SKIP pointer-grid StorageBuffer (binding 9/11/13) and seeds it
+/// from the authority via [`build_pointer_grid`] at the level's [`level_empty_skip_grid`] geometry —
+/// level 0 the FINE `16³ @ 0.5` near-field grid (consistent with `pc.grid_*` + the host oracle), coarse
+/// levels the `M2_GRID_DIM³ @ params.brick_world` grid the shader's coarse arms read. The host-visible
+/// coherent buffer holds `cell_count` `u32` [`BrickClass`](boyko_sdf_math::BrickClass) codes — the SAME
+/// `StructuredBuffer<uint>` the shader (Slice C) reads per level.
 fn create_level_grid(
     ctx: &VulkanContext,
     field: &SdfEditField,
     params: &BrickLevelParams,
+    level: usize,
 ) -> Result<BoundBuffer, VulkanError> {
-    let grid = level_pointer_grid(params);
+    let grid = level_empty_skip_grid(params, level);
     let mut cells = vec![0u32; grid.cell_count()];
     build_pointer_grid(field, &grid, &mut cells);
 
@@ -507,17 +525,19 @@ fn create_level_grid(
     Ok(buffer)
 }
 
-/// Re-seeds an EXISTING level grid SSBO from the authority (the `gen`-changed full re-bake). Re-runs
-/// [`build_pointer_grid`] at the level's (re-snapped) [`BrickLevelParams`] and overwrites the
+/// Re-seeds an EXISTING level EMPTY-SKIP grid SSBO from the authority (the `gen`-changed full re-bake).
+/// Re-runs [`build_pointer_grid`] at the level's [`level_empty_skip_grid`] geometry (level 0 the fixed
+/// fine `16³ @ 0.5` near-field grid; coarse levels the re-snapped `params`) and overwrites the
 /// host-coherent buffer. The buffer is reused (no re-allocation); the caller has drained any prior
 /// sampling submit.
 fn reseed_level_grid(
     ctx: &VulkanContext,
     field: &SdfEditField,
     params: &BrickLevelParams,
+    level: usize,
     buffer: &BoundBuffer,
 ) -> Result<(), VulkanError> {
-    let grid = level_pointer_grid(params);
+    let grid = level_empty_skip_grid(params, level);
     let mut cells = vec![0u32; grid.cell_count()];
     build_pointer_grid(field, &grid, &mut cells);
     write_grid_cells(ctx, buffer, &cells)
@@ -644,7 +664,7 @@ impl BrickClipmap {
             };
             atlases[level].write(atlas);
 
-            let grid = match create_level_grid(ctx, field, &geo) {
+            let grid = match create_level_grid(ctx, field, &geo, level) {
                 Ok(g) => g,
                 Err(e) => {
                     // SAFETY: `atlases[..level + 1]` (the atlas at `level` was just written) and
@@ -689,7 +709,7 @@ impl BrickClipmap {
         for level in 0..brick::BRICK_LEVELS {
             let geo = BrickLevelParams::at_level(camera, level as u32);
             self.atlases[level].rebake_at_level(ctx, field, &geo)?;
-            reseed_level_grid(ctx, field, &geo, &self.grids[level])?;
+            reseed_level_grid(ctx, field, &geo, level, &self.grids[level])?;
         }
         Ok(())
     }

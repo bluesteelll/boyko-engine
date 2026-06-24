@@ -153,8 +153,14 @@ static SDF_EDITLIST_STORAGE_IMAGE_SPV: SpirvBlob<24092> = SpirvBlob(*include_byt
 /// `VK_FORMAT_R8_SNORM` mis-set to `9 == R8_UNORM`, so the atlas decoded `byte/255` not the signed
 /// `byte/127`, collapsing the cubic to no sign-change), switched the corner fetch from `.Load`
 /// (texelFetch, ill-defined on a combined image+sampler descriptor) to a NEAREST `SampleLevel`, and
-/// dropped the `m2_sampler_keepalive` hack — leaving the marcher at its current 72200-byte size.
-static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<72200> = SpirvBlob(*include_bytes!(concat!(
+/// dropped the `m2_sampler_keepalive` hack (→ 72200 bytes). SDF brick-atlas M4 (clip-map LOD, Slice C)
+/// then widened the b5 UBO tail to `M4Level m2_levels[BRICK_LEVELS]`, declared the N-level brick bindings
+/// (t11/t12 for L1, t13/t14 for L2), threaded the per-level resources as shader resource params, and
+/// added `select_level` + the static branch-ladder in the marcher (→ 127548 bytes). `brick_levels == 1`
+/// loops once over level 0 (the M2 resources) — byte-identical to the pre-M4 marcher (the OFF/N=1 gate).
+/// The M2/M4 SIGNED-refine fix (the `m2_surface_hit` fallback now converges from EITHER side: accept on
+/// `abs(d)`, signed under-relaxed step `rt += M2_REFINE_RELAX * d`) → 127912 bytes.
+static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<127912> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/sdf_gbuffer_composite.comp.spv"
 )));
@@ -1944,6 +1950,13 @@ pub const M2_GRID_PARAMS_OFFSET: usize = 80;
 /// `M2_REFINE_ITERS`).
 const M2_REFINE_ITERS: u32 = 8;
 
+/// The under-relaxation factor of the SIGNED M2 refine step (`rt += M2_REFINE_RELAX * d`). The refine
+/// is a unit-gradient SDF Newton step (`rt += d` is exact on a flat surface); under-relaxing damps
+/// overshoot oscillation at a CSG crease where the gradient is not unit. At `0.8` an inside candidate
+/// `~δ` deep converges in `~3` steps (`δ ≈ 0.048` near-field, `≈ 2^L·δ` at coarse clip-map level L) —
+/// well within [`M2_REFINE_ITERS`] (`8`). Mirrors the shader's `M2_REFINE_RELAX` bit-for-bit.
+const M2_REFINE_RELAX: f32 = 0.8;
+
 // The M2 grid constants pin the shader's static brick geometry (mirror the `.hlsl` `M2_*` consts):
 // a desync (e.g. a brick scale change) is a build error here, caught before the GPU runs.
 const _: () = assert!(M2_BRICK_WORLD == BRICK_INTERIOR as f32 * M2_VOXEL_SIZE);
@@ -2675,17 +2688,23 @@ pub fn m2_cell_is_dirty(cell: [u32; 3], dirty: &SdfEditAabb) -> bool {
 // baked-tile data the GPU samples, then delegates the shade to the analytic path (C1).
 // ---------------------------------------------------------------------------
 
-/// The world-space ray-AABB slab clip of brick `[cell_min, cell_min + M2_BRICK_WORLD]³` from `p`
-/// along `rd`, returning `Some((t_enter, t_exit))` (world `t`, measured from `p`, `t_enter >= 0`)
-/// or `None` on a miss. Mirrors the shader's `m2_brick_span` (the `tmin = 0` floor never marches
-/// behind the current point).
+/// The world-space ray-AABB slab clip of brick `[cell_min, cell_min + brick_world]³` from `p` along
+/// `rd`, returning `Some((t_enter, t_exit))` (world `t`, measured from `p`, `t_enter >= 0`) or `None`
+/// on a miss. Mirrors the shader's `m2_brick_span` (the `tmin = 0` floor never marches behind the
+/// current point). The brick edge `brick_world` is a PARAMETER (M4 Slice C): a clip-map level clips
+/// against its `2^L`× larger cell; the level-0 caller passes [`M2_BRICK_WORLD`] (byte-identical M2).
 #[inline]
-fn brick_aabb_span(p: [f32; 3], rd: [f32; 3], cell_min: [f32; 3]) -> Option<(f32, f32)> {
+fn brick_aabb_span_world(
+    p: [f32; 3],
+    rd: [f32; 3],
+    cell_min: [f32; 3],
+    brick_world: f32,
+) -> Option<(f32, f32)> {
     let mut tmin = 0.0_f32; // never march behind the current march point
     let mut tmax = 1.0e30_f32;
     for a in 0..3 {
         let lo = cell_min[a];
-        let hi = lo + M2_BRICK_WORLD;
+        let hi = lo + brick_world;
         if rd[a].abs() <= 1.0e-20 {
             // Parallel to this slab: a miss only if the origin is outside it.
             if p[a] < lo || p[a] > hi {
@@ -2712,21 +2731,44 @@ fn brick_aabb_span(p: [f32; 3], rd: [f32; 3], cell_min: [f32; 3]) -> Option<(f32
 /// the caller falls through to the M1 analytic fold). `edits` is the authority the GPU baked the
 /// atlas from (so the host bakes the SAME tile bit-for-bit).
 ///
-/// The cubic candidate is accepted when `|sdf_edit_list(cand_p)| < M2_CREASE_EPS`; otherwise a few
-/// analytic sphere-trace steps ([`M2_REFINE_ITERS`]) settle it onto the EXACT field, mirroring the
-/// shader's `[branch]` refine.
+/// The cubic candidate is accepted when `|sdf_edit_list(cand_p)| < M2_CREASE_EPS`; otherwise a SIGNED,
+/// under-relaxed sphere-trace ([`M2_REFINE_ITERS`] steps, factor [`M2_REFINE_RELAX`]) settles it onto
+/// the EXACT field from EITHER side (an inside candidate from the EPSILON_Q down-bias is pulled BACK
+/// to the surface, not committed deep), mirroring the shader's `[branch]` refine bit-for-bit.
 fn host_m2_surface_hit(edits: &[SdfEdit], ro: [f32; 3], rd: [f32; 3], t_world: f32) -> Option<f32> {
+    // The single-level M2 mirror delegates to the level-aware sibling at level-0 geometry
+    // ([`BrickLevelParams::m2_near_field`]) — byte-identical to the pre-M4 hardcoded path.
+    host_m2_surface_hit_at(edits, &BrickLevelParams::m2_near_field(), ro, rd, t_world)
+}
+
+/// The level-aware host mirror of the shader's `m2_surface_hit` (M4 Slice C): identical to
+/// [`host_m2_surface_hit`] but the grid origin / brick world / voxel / band come from `geo` (the
+/// clip-map level's [`BrickLevelParams`]) instead of the level-0 M2 consts. Locates the tile in THIS
+/// level's `M2_GRID_DIM³` grid containing `p = ro + rd * t_world`, bakes it at the level's geometry,
+/// solves the JCGT cubic, and validates analytically (the exact-CSG fallback, level-invariant). The
+/// host `select_level` picks `geo`; this mirrors the shader's per-level branch-ladder arm.
+fn host_m2_surface_hit_at(
+    edits: &[SdfEdit],
+    geo: &BrickLevelParams,
+    ro: [f32; 3],
+    rd: [f32; 3],
+    t_world: f32,
+) -> Option<f32> {
     let p = [
         ro[0] + rd[0] * t_world,
         ro[1] + rd[1] * t_world,
         ro[2] + rd[2] * t_world,
     ];
-    // The M2 tile containing `p` (mirror the shader: test the float directly so a negative coord is
+    let origin = geo.origin;
+    let brick_world = geo.brick_world;
+    let voxel_size = geo.voxel_size;
+    let band_half = geo.band_half;
+    // The tile containing `p` (mirror the shader: test the float directly so a negative coord is
     // caught before the cast). Outside the bounded grid → no atlas tile (the caller folds analytic).
     let rel = [
-        (p[0] - M2_GRID_ORIGIN) / M2_BRICK_WORLD,
-        (p[1] - M2_GRID_ORIGIN) / M2_BRICK_WORLD,
-        (p[2] - M2_GRID_ORIGIN) / M2_BRICK_WORLD,
+        (p[0] - origin[0]) / brick_world,
+        (p[1] - origin[1]) / brick_world,
+        (p[2] - origin[2]) / brick_world,
     ];
     if rel[0] < 0.0 || rel[1] < 0.0 || rel[2] < 0.0 {
         return None;
@@ -2737,26 +2779,25 @@ fn host_m2_surface_hit(edits: &[SdfEdit], ro: [f32; 3], rd: [f32; 3], t_world: f
     if tx >= M2_GRID_DIM || ty >= M2_GRID_DIM || tz >= M2_GRID_DIM {
         return None;
     }
-    let cell = [tx, ty, tz];
-    let cell_min = m2_cell_min(cell);
+    let cell_min = geo.cell_min([tx, ty, tz]);
 
     // Clip the world ray to the brick AABB.
-    let (t_enter, t_exit) = brick_aabb_span(p, rd, cell_min)?;
+    let (t_enter, t_exit) = brick_aabb_span_world(p, rd, cell_min, brick_world)?;
 
-    // Bake THIS tile from the authority (the SAME data the GPU atlas holds for this cell), then run
-    // the JCGT cubic in interior-voxel units (world → voxel: (world - cell_min) / voxel_size). The
+    // Bake THIS tile from the authority (the SAME data the level's GPU atlas holds for this cell), then
+    // run the JCGT cubic in interior-voxel units (world → voxel: (world - cell_min) / voxel_size). The
     // cubic's local `t` is in WORLD units (rd is divided by voxel_size to keep the world-t metric).
     let field = edits_field(edits);
     let mut tile = [0i8; BRICK_VOXELS];
-    fill_brick(&field, cell_min, M2_VOXEL_SIZE, M2_BAND_HALF, c_max_at_level(0), &mut tile);
+    fill_brick(&field, cell_min, voxel_size, band_half, geo.c_max, &mut tile);
     let ro_v = [
-        (p[0] - cell_min[0]) / M2_VOXEL_SIZE,
-        (p[1] - cell_min[1]) / M2_VOXEL_SIZE,
-        (p[2] - cell_min[2]) / M2_VOXEL_SIZE,
+        (p[0] - cell_min[0]) / voxel_size,
+        (p[1] - cell_min[1]) / voxel_size,
+        (p[2] - cell_min[2]) / voxel_size,
     ];
-    let rd_v = [rd[0] / M2_VOXEL_SIZE, rd[1] / M2_VOXEL_SIZE, rd[2] / M2_VOXEL_SIZE];
+    let rd_v = [rd[0] / voxel_size, rd[1] / voxel_size, rd[2] / voxel_size];
 
-    let local = brick_cubic_hit(&tile, ro_v, rd_v, t_enter, t_exit, M2_BAND_HALF)?;
+    let local = brick_cubic_hit(&tile, ro_v, rd_v, t_enter, t_exit, band_half)?;
 
     // The candidate world `t` (local is measured from `p`, in world units).
     let cand_t = t_world + local;
@@ -2768,7 +2809,13 @@ fn host_m2_surface_hit(edits: &[SdfEdit], ro: [f32; 3], rd: [f32; 3], t_world: f
     let resid = sdf_edit_list(edits, cand_p);
 
     // ANALYTIC-RESIDUAL FALLBACK (the exact-CSG guarantee): a `|resid|` within the crease band
-    // accepts the cubic hit; else a few analytic sphere-trace steps settle it onto the exact field.
+    // accepts the cubic hit; else a SIGNED, under-relaxed sphere-trace settles it onto the exact
+    // field from EITHER side. The down-biased brick reconstruction (EPSILON_Q, scaled `2^L` per
+    // clip-map level) lands the cubic candidate INSIDE the true surface (`d < 0`); a forward-only
+    // step (`d.max(SDF_EPS)`) could never pull it back out, so the inside hit committed ~`δ` deep.
+    // The signed step `rt += M2_REFINE_RELAX * d` walks BACKWARD for `d < 0` (toward the surface) and
+    // forward for `d > 0` — a unit-gradient SDF Newton step, under-relaxed against crease overshoot.
+    // Accept on `|d|` (not signed `d`) so an inside candidate is corrected, never committed as-is.
     if resid.abs() < M2_CREASE_EPS {
         return Some(cand_t);
     }
@@ -2776,11 +2823,17 @@ fn host_m2_surface_hit(edits: &[SdfEdit], ro: [f32; 3], rd: [f32; 3], t_world: f
     for _ in 0..M2_REFINE_ITERS {
         let q = [ro[0] + rd[0] * rt, ro[1] + rd[1] * rt, ro[2] + rd[2] * rt];
         let d = sdf_edit_list(edits, q);
-        if d < SDF_EPS {
+        if d.abs() < SDF_EPS {
             return Some(rt);
         }
-        rt += d.max(SDF_EPS);
-        if rt > SDF_T_MAX {
+        // Split the under-relaxed step into a named value then add it (no FMA contraction), so the
+        // shader's `step = M2_REFINE_RELAX * d; rt += step;` rounds bit-identically (two roundings).
+        let step = M2_REFINE_RELAX * d;
+        rt += step;
+        // Bail if the signed walk left the valid `t` span (the shader's `rt < 0.0 || rt > T_MAX`).
+        // This is loop control flow, not bit-mirrored arithmetic — the range form is the same
+        // truth table; clippy prefers it.
+        if !(0.0..=SDF_T_MAX).contains(&rt) {
             break;
         }
     }
@@ -2916,6 +2969,209 @@ pub fn golden_composite_pixel_brick_m2(
     // The re-march fallback stays ANALYTIC (C1) — identical to the M1 path: the M2 step never
     // reopens the B1 budget hole (its hit terminates, its miss falls through), so `exhausted` here
     // means the analytic field ran out of budget mid-field; the frozen plain re-march resolves it.
+    if exhausted {
+        t = t_seed;
+        hit = false;
+        for _it2 in 0..SDF_MAX_IT {
+            if t >= t_mesh {
+                break;
+            }
+            let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
+            let d = sdf_edit_list(edits, p);
+            if d < SDF_EPS {
+                hit = true;
+                break;
+            }
+            t += d; // frozen plain step
+            if t > SDF_T_MAX {
+                break;
+            }
+        }
+    }
+
+    let color = if hit && t < t_mesh {
+        let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
+        let n = sdf_edit_list_normal(edits, p);
+        host_shade(SDF_BASE_COLOR, SDF_AMBIENT, p, n, light_dir, lighting_flags, &|q| {
+            sdf_edit_list(edits, q)
+        })
+    } else if has_mesh {
+        MESH_COLOR
+    } else {
+        SDF_BACKGROUND
+    };
+    pack_rgba(color)
+}
+
+/// The host mirror of the shader's `select_level` (M4 Slice C): the FINEST enclosing clip-map level
+/// for world point `p`, or `None` when `p` is outside EVERY active level (`0..brick_levels`). The
+/// levels are strictly concentric (level `L`'s extent doubles), so the first-enclosing scan (level 0 =
+/// finest) returns the tightest LOD. `brick_levels <= BRICK_LEVELS` is the runtime level count; the
+/// containment test mirrors the shader (`all(p >= origin) && all(p < origin + dims * brick_world)`).
+///
+/// OFF/N=1 keystone: `brick_levels == 1` scans ONLY level 0 → `Some(0)` iff `p` is in the level-0 box,
+/// else `None` — exactly the M2 single-grid containment, so the M4 golden reduces to the M2 golden.
+fn host_select_level(params: &M4GridParams, brick_levels: u32, p: [f32; 3]) -> Option<usize> {
+    let n = (brick_levels as usize).min(brick::BRICK_LEVELS);
+    for level in 0..n {
+        let geo = BrickLevelParams::at_level_from_params(params, level);
+        let hi = [
+            geo.origin[0] + M2_GRID_DIM as f32 * geo.brick_world,
+            geo.origin[1] + M2_GRID_DIM as f32 * geo.brick_world,
+            geo.origin[2] + M2_GRID_DIM as f32 * geo.brick_world,
+        ];
+        if p[0] >= geo.origin[0]
+            && p[1] >= geo.origin[1]
+            && p[2] >= geo.origin[2]
+            && p[0] < hi[0]
+            && p[1] < hi[1]
+            && p[2] < hi[2]
+        {
+            return Some(level);
+        }
+    }
+    None
+}
+
+/// M4 — the N-level brick CLIP-MAP golden (Slice C). Generalizes [`golden_composite_pixel_brick_m2`]
+/// to `brick_levels` nested clip-map levels: at each primary march point the finest enclosing level is
+/// picked ([`host_select_level`]); the M2 SURFACE-brick cubic runs at THAT level's geometry
+/// ([`host_m2_surface_hit_at`]) and the M1 empty-skip reads THAT level's pointer grid. A hit TERMINATES
+/// the march at the analytically-validated `t` (hit/normal/shade stay ANALYTIC — C1); a no-crossing /
+/// outside-all-levels point folds the analytic field, exactly as the single-level M2 path. This is the
+/// CPU oracle the offscreen RTX M4 test compares the GPU `gViewT`/LIT against.
+///
+/// `params` is the [`M4GridParams`] written into the b5 UBO tail (the per-level snapped origins). The
+/// per-level EMPTY-SKIP pointer grids `level_grids[L] = (grid, cells)` mirror the GPU's per-level
+/// `PointerGrid{L}` SSBOs (binding 9/11/13). These are DISTINCT from the per-level SURFACE atlas grids
+/// (read inside [`host_m2_surface_hit_at`] via `at_level_from_params`), exactly as M2 keeps them
+/// separate: level 0's empty-skip grid is the FINE `default_near_field` (`16³ @ 0.5`, the GPU binding-9
+/// the shader reads via `pc.grid_*`), while its surface atlas is the COARSE `4³ @ 2.0` grid. With
+/// `brick_trilinear == false` this delegates to [`golden_composite_pixel_brick`] (the M1 analytic
+/// golden at level 0's empty-skip grid) — BYTE-IDENTICAL to the M1 golden (the OFF path).
+///
+/// # OFF/N=1 keystone
+///
+/// `brick_levels == 1` (and `params == M4GridParams::near_field_only()`, so level 0 == the M2
+/// near-field) makes [`host_select_level`] reduce to the M2 containment, [`host_m2_surface_hit_at`]
+/// bake at level-0 geometry, and the empty-skip read level 0's FINE `16³ @ 0.5` grid (the SAME grid
+/// `golden_composite_pixel_brick_m2`'s empty-skip reads) — so the packed output is byte-IDENTICAL to
+/// [`golden_composite_pixel_brick_m2`] (asserted in the tests, the 0%-gate).
+#[allow(clippy::too_many_arguments)]
+pub fn golden_composite_pixel_brick_m4(
+    edits: &[SdfEdit],
+    mesh_depth: f32,
+    px: u32,
+    py: u32,
+    img_w: u32,
+    img_h: u32,
+    camera: CompositeCamera,
+    omega: f32,
+    lighting_flags: u32,
+    light_dir: [f32; 3],
+    brick_enabled: bool,
+    brick_trilinear: bool,
+    brick_levels: u32,
+    params: &M4GridParams,
+    level_grids: &[(PointerGrid, &[u32])],
+) -> u32 {
+    // The OFF path (no trilinear) is byte-identical to the M1 marcher at level 0's grid (the M4 0%-gate
+    // for the analytic-only path): the atlas is never sampled, the empty-skip reads level 0's grid.
+    if !brick_trilinear {
+        let (grid, cells) = &level_grids[0];
+        return golden_composite_pixel_brick(
+            edits, mesh_depth, px, py, img_w, img_h, camera, omega, lighting_flags, light_dir,
+            brick_enabled, grid, cells,
+        );
+    }
+
+    let (ro, rd) = composite_ray(px, py, img_w, img_h, camera);
+
+    let has_mesh = mesh_depth < MESH_DEPTH_CLEAR;
+    let t_mesh = if has_mesh { depth_to_t(mesh_depth) } else { 1.0e30 };
+
+    let mut t = 0.0_f32;
+    let t_seed = t;
+    let mut omega = omega; // [1.0, 1.99]; sor-fail latches it to 1.0
+    let mut hit = false;
+    let mut safe_t = 0.0_f32;
+    let mut sor_prev = 0.0_f32;
+    let mut sor_step_prev = 0.0_f32;
+    let mut exhausted = true;
+    for it in 0..SDF_MAX_IT {
+        if t >= t_mesh {
+            exhausted = false; // mesh-occlusion termination
+            break;
+        }
+        let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
+
+        // M4 clip-map LOD: pick the finest enclosing level for `p` (None ⇒ outside every active level
+        // ⇒ fold the analytic field, exactly as M2 does outside its single grid).
+        let lvl = host_select_level(params, brick_levels, p);
+
+        // M2 SURFACE-brick path at the selected level: a hit terminates the march at the
+        // analytically-validated `t`. Mirrors the shader's per-level branch-ladder (lvl >= 0 arm).
+        if let Some(level) = lvl {
+            let geo = BrickLevelParams::at_level_from_params(params, level);
+            if let Some(m4_hit_t) = host_m2_surface_hit_at(edits, &geo, ro, rd, t) {
+                hit = true;
+                exhausted = false; // M2 cubic+analytic-validated convergence
+                t = m4_hit_t;
+                break;
+            }
+        }
+
+        // M1 empty skip (when on) at the selected level's EMPTY-SKIP grid: an EmptyOutside cell steps to
+        // the brick AABB exit. `level_grids[level]` is the empty-skip grid the GPU's `PointerGrid{level}`
+        // holds — DISTINCT from the surface atlas grid the M2 step above reads (level 0's empty-skip is
+        // the FINE `16³@0.5` near-field grid `pc.grid_*` carries, matching M2 bit-for-bit; coarse levels
+        // use the per-level `4³@scaled` grid). The SURFACE cells the M2 step owns are NOT EmptyOutside, so
+        // this only accelerates EMPTY space. `None` (outside all levels) ⇒ no skip (fold analytic).
+        if brick_enabled
+            && let Some(level) = lvl
+            && let Some((grid, cells)) = level_grids.get(level)
+            && let Some((class, cell_min)) = host_brick_cell(grid, cells, p)
+            && class == BRICK_CLASS_EMPTY_OUTSIDE
+        {
+            let exit = dist_to_brick_exit(p, rd, cell_min, grid.brick_world);
+            t += exit;
+            if t > SDF_T_MAX {
+                exhausted = false; // clear-miss termination
+                break;
+            }
+            continue; // skip the analytic fold this step
+        }
+
+        let d = sdf_edit_list(edits, p);
+        if d < SDF_EPS {
+            hit = true;
+            exhausted = false; // converged
+            break;
+        }
+        if omega > 1.0 {
+            let step_len = d * omega;
+            if it > 0 && sor_prev + d < FIELD_LIPSCHITZ_L * sor_step_prev {
+                debug_assert!(it > 0, "B1 budget: a>=1 precondition");
+                t = safe_t + sor_prev; // plain-resume one certified step past the safe probe
+                omega = 1.0;
+                continue;
+            }
+            safe_t = t;
+            sor_prev = d;
+            sor_step_prev = step_len;
+            t += step_len;
+        } else {
+            t += d; // frozen plain arm
+        }
+        if t > SDF_T_MAX {
+            exhausted = false; // clear-miss termination
+            break;
+        }
+    }
+
+    // The re-march fallback stays ANALYTIC (C1) — identical to the M1/M2 path: the M4 per-level step
+    // never reopens the B1 budget hole (its hit terminates, its miss falls through), so `exhausted`
+    // here means the analytic field ran out of budget mid-field; the frozen plain re-march resolves it.
     if exhausted {
         t = t_seed;
         hit = false;

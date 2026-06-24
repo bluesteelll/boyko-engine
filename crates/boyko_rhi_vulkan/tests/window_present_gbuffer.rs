@@ -63,7 +63,8 @@ use boyko_rhi::{
     SamplerDesc, ShaderStage, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 use boyko_rhi_vulkan::compute::{
-    COMPOSITE_PUSH_CONSTANT_BYTES, CompositePushConstants, EDITLIST_BUFFER_WORDS, LOCAL_SIZE_X,
+    B5_CAMERA_UBO_BYTES_M4, COMPOSITE_PUSH_CONSTANT_BYTES, CompositePushConstants,
+    EDITLIST_BUFFER_WORDS, LOCAL_SIZE_X, M2_GRID_PARAMS_OFFSET, M4GridParams,
     MESH_COLOR, MESH_DEPTH_CLEAR, SDF_CAMERA_Z, SDF_IMG_H, SDF_IMG_W, SDF_TRACE_T_MAX,
     SDF_VIEW_HALF_EXTENT, SdfEdit, TILE_BOUND_BYTES, CompositeCamera, editlist_pixel_hits,
     encode_edit_list, deferred_pbr_spirv, golden_composite_pixel, golden_deferred_resolve,
@@ -519,10 +520,16 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
 
     // The camera/extent UNIFORM buffer (binding 5), host-seeded ONCE at the golden 64×64
     // ORTHO extent (the composite size — NOT the swapchain extent) for bit-exact rays.
+    //
+    // SDF brick-atlas M4 (clip-map LOD, Slice C): the b5 UBO is sized to `B5_CAMERA_UBO_BYTES_M4`
+    // (224 B) — the 80-byte camera block + the `BRICK_LEVELS`-level `M4GridParams` array tail at
+    // `M2_GRID_PARAMS_OFFSET` (80). The widened marcher cbuffer declares 224 B, so the descriptor must
+    // cover it even though the present path runs `brick_trilinear == 0` (the tail is bound-but-unread).
+    // The OFF/N=1 tail is `M4GridParams::near_field_only()` (level 0 == the M2 near-field byte-for-byte).
     let camera_uniform = RhiDevice::create_buffer(
         device,
         &BufferDesc {
-            size: COMPOSITE_PUSH_CONSTANT_BYTES as u64,
+            size: B5_CAMERA_UBO_BYTES_M4 as u64,
             usage: BufferUsage::UNIFORM,
             location: MemoryLocation::HostVisibleCoherent,
         },
@@ -534,11 +541,22 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         let mapped = RhiDevice::buffer_mapped_ptr(device, &camera_uniform)
             .expect("host-visible uniform buffer is mapped");
         let bytes = pc.as_bytes();
-        // SAFETY: `mapped` points to `COMPOSITE_PUSH_CONSTANT_BYTES` mapped host-coherent
-        // bytes; `bytes` is exactly that many bytes; no GPU work is in flight yet (the
-        // present loop follows), so the write is unsynchronized-safe.
+        debug_assert_eq!(bytes.len(), M2_GRID_PARAMS_OFFSET, "camera block must be 80 B (offset of the M4 tail)");
+        // The OFF/N=1 M4 array tail at offset 80 (level 0 == the M2 near-field byte-for-byte).
+        let m4 = M4GridParams::near_field_only();
+        let m4_bytes = m4.as_ubo_bytes();
+        debug_assert_eq!(M2_GRID_PARAMS_OFFSET + m4_bytes.len(), B5_CAMERA_UBO_BYTES_M4);
+        // SAFETY: `mapped` points to `B5_CAMERA_UBO_BYTES_M4` (224) mapped host-coherent bytes; the
+        // 80-byte camera block is written at offset 0 and the (224-80)-byte M4 tail at offset 80 —
+        // together exactly 224 in-bounds bytes, disjoint. No GPU work is in flight yet (the present
+        // loop follows), so the writes are unsynchronized-safe.
         unsafe {
             core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len());
+            core::ptr::copy_nonoverlapping(
+                m4_bytes.as_ptr(),
+                mapped.as_ptr().add(M2_GRID_PARAMS_OFFSET),
+                m4_bytes.len(),
+            );
         }
     }
 
@@ -778,6 +796,15 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         // bound-but-unread, byte-identical output), or the layout VUIDs trip (the M1 binding-9
         // lesson at the next slot).
         BindGroupLayoutEntry { binding: 10, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+        // M4 clip-map LOD (Slice C): the LEVEL-1 + LEVEL-2 brick bindings. The recompiled marcher
+        // SPIR-V statically references `PointerGrid1`@t11 + `BrickAtlas1`@t12 + `PointerGrid2`@t13 +
+        // `BrickAtlas2`@t14 inside the runtime level branch-ladder, so the layout MUST declare all four
+        // — bound-but-unread on the windowed OFF/N=1 path (`brick_levels == 1` takes only the lvl==0 arm).
+        // 6 brick bindings total (9..=14) under the 16-binding cap.
+        BindGroupLayoutEntry { binding: 11, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 12, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 13, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 14, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
     ];
     let vocab_layout = RhiDevice::create_bind_group_layout(
         device,
@@ -898,6 +925,13 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         // M2: the brick-atlas image + sampler @10 (bound-but-unread on the windowed OFF path).
         atlas: brick_atlas.texture(),
         atlas_sampler: brick_atlas.sampler(),
+        // M4 clip-map LOD (Slice C): the LEVEL-1 + LEVEL-2 brick resources @11/12 + @13/14. The
+        // windowed present has no clipmap (the OFF/N=1 path), so bind level 0's single atlas + pointer
+        // grid as BENIGN DUPLICATES — they are bound-but-unread (`brick_levels == 1` takes only the
+        // lvl==0 arm) but MUST be valid descriptors (the marcher SPIR-V references t11..t14 past the gate).
+        level_grids: [&pointer_grid, &pointer_grid],
+        level_atlases: [brick_atlas.texture(), brick_atlas.texture()],
+        level_atlas_samplers: [brick_atlas.sampler(), brick_atlas.sampler()],
         depth_sampler: &depth_sampler,
         material_table: &material_table,
         light_table: &light_table,
