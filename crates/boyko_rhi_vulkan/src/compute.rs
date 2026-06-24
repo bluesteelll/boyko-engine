@@ -61,8 +61,9 @@ use boyko_sdf_math::brick::{PointerGrid, dist_to_brick_exit};
 // host golden mirror (`golden_composite_pixel_brick_m2`) and the atlas baker (`bake_brick_atlas`)
 // drive — the SAME `boyko_sdf_math::brick` oracle the GPU marcher mirrors bit-for-bit.
 use boyko_sdf_math::brick::{
-    BRICK_ALLOC, BRICK_INTERIOR, BRICK_VOXELS, aabb_overlap, brick_cubic_hit, classify_brick,
-    decode_snorm8, dirty_world_aabb, fill_brick,
+    self, BRICK_ALLOC, BRICK_INTERIOR, BRICK_VOXELS, aabb_overlap, band_half_at_level,
+    brick_cubic_hit, brick_world_at_level, c_max_at_level, classify_brick, decode_snorm8,
+    dirty_world_aabb, fill_brick, snapped_level_origin, voxel_size_at_level,
 };
 use boyko_sdf_math::{BrickClass, SDF_EDIT_BAND_HALF, SdfEditAabb, SdfEditField};
 
@@ -1183,9 +1184,17 @@ pub struct FineMarcherPush {
     /// First slot (offset 64) of the 16-byte headroom the 64-byte M1 layout left inside the
     /// declared 80-byte COMPOSITE push range.
     pub brick_trilinear: u32,
-    /// std430 tail padding (offsets 68/72/76) to the 80-byte COMPOSITE push stride. Mirrors the
-    /// shader's `uint3 _pad3`. Don't-care (the shader never reads it).
-    pub _pad3: [u32; 3],
+    /// M4 clip-map LEVEL COUNT: how many nested brick levels the marcher loops over (Slice C). `1`
+    /// = the M2-identical / OFF path (the shader loops once over level 0 — byte-identical to the
+    /// single-level M2 marcher); `> 1` reads that many [`M4LevelParams`] from the b5 UBO array tail.
+    /// Tucked into the first M2 `_pad3` slot (offset 68) so the struct SIZE is unchanged. `0` is
+    /// treated as the OFF path by the shader (no level sampled). Set via [`with_brick_levels`].
+    ///
+    /// [`with_brick_levels`]: Self::with_brick_levels
+    pub brick_levels: u32,
+    /// std430 tail padding (offsets 72/76) to the 80-byte COMPOSITE push stride. Mirrors the
+    /// shader's `uint2 _pad3`. Don't-care (the shader never reads it).
+    pub _pad3: [u32; 2],
 }
 
 /// Byte size of [`FineMarcherPush`] — the marcher's COMPUTE push range (80 bytes), exactly the
@@ -1214,7 +1223,11 @@ const _: () = assert!(core::mem::offset_of!(FineMarcherPush, brick_world) == 60)
 // non-default-grid / `brick_trilinear` GPU test catches a packing slip the way the light_dir@16
 // and grid_origin@32 pins do.
 const _: () = assert!(core::mem::offset_of!(FineMarcherPush, brick_trilinear) == 64);
-const _: () = assert!(core::mem::offset_of!(FineMarcherPush, _pad3) == 68);
+// M4: the `brick_levels` clip-map count @68 reuses the first M2 `_pad3` slot (the tail pad shrinks
+// to `[u32; 2]` @72/76), so the struct stays EXACTLY the declared 80-byte COMPOSITE push range. A
+// non-default `brick_levels` GPU test catches a packing slip the way the brick_trilinear@64 pin does.
+const _: () = assert!(core::mem::offset_of!(FineMarcherPush, brick_levels) == 68);
+const _: () = assert!(core::mem::offset_of!(FineMarcherPush, _pad3) == 72);
 const _: () = assert!(GBUFFER_MARCHER_PUSH_BYTES == 80, "FineMarcherPush must be 80 bytes");
 const _: () = assert!(
     GBUFFER_MARCHER_PUSH_BYTES == COMPOSITE_PUSH_CONSTANT_BYTES,
@@ -1247,7 +1260,8 @@ impl FineMarcherPush {
             grid_dims: [0, 0, 0],
             brick_world: 0.0,
             brick_trilinear: 0,
-            _pad3: [0, 0, 0],
+            brick_levels: 0,
+            _pad3: [0, 0],
         }
     }
 
@@ -1289,14 +1303,26 @@ impl FineMarcherPush {
         self
     }
 
+    /// Sets the M4 clip-map [`brick_levels`](Self::brick_levels) count the marcher loops over
+    /// (Slice C). `n == 1` is the M2-identical / OFF path (the shader loops once over level 0,
+    /// byte-identical to the single-level M2 marcher); `n > 1` reads `n` [`M4LevelParams`] blocks
+    /// from the b5 UBO array tail ([`M4GridParams`]). The other gates (`coarse_enabled` / `omega` /
+    /// lighting / the M1/M2 brick gates) are preserved. Does NOT itself enable the M2 surface path —
+    /// pair with [`with_brick_trilinear`](Self::with_brick_trilinear).
+    #[inline]
+    pub const fn with_brick_levels(mut self, n: u32) -> Self {
+        self.brick_levels = n;
+        self
+    }
+
     /// Re-views the push constants as their raw 80-byte slice for `push_constants`.
     #[inline]
     pub fn as_bytes(&self) -> &[u8] {
-        // SAFETY: `Self` is `#[repr(C)]` with only `u32` / `f32` / `[f32; 3]` / `[u32; 3]` fields
-        // (all `Copy`, every offset + the 80-byte total pinned by the const-asserts above, no
-        // uninit padding — the explicit `_pad`/`_pad2`/`_pad3` fields cover the std430 holes),
-        // so its `size_of` bytes are a fully-initialized, alignment-valid POD bit pattern.
-        // The `&self` borrow keeps the struct alive for the slice's lifetime; the slice is
+        // SAFETY: `Self` is `#[repr(C)]` with only `u32` / `f32` / `[f32; 3]` / `[u32; 3]` /
+        // `[u32; 2]` fields (all `Copy`, every offset + the 80-byte total pinned by the const-asserts
+        // above, no uninit padding — the explicit `_pad`/`_pad2`/`brick_levels`/`_pad3` fields cover
+        // the std430 holes), so its `size_of` bytes are a fully-initialized, alignment-valid POD bit
+        // pattern. The `&self` borrow keeps the struct alive for the slice's lifetime; the slice is
         // read-only (no aliasing write).
         unsafe {
             slice::from_raw_parts((self as *const Self).cast::<u8>(), core::mem::size_of::<Self>())
@@ -1923,6 +1949,15 @@ const M2_REFINE_ITERS: u32 = 8;
 const _: () = assert!(M2_BRICK_WORLD == BRICK_INTERIOR as f32 * M2_VOXEL_SIZE);
 const _: () = assert!(M2_GRID_ORIGIN == -(M2_GRID_DIM as f32 * M2_BRICK_WORLD * 0.5));
 const _: () = assert!(M2_ATLAS_DIM == 40);
+// M4 reconciliation: the compute-side M2 grid geometry MUST equal the `boyko_sdf_math::brick`
+// Slice-A copies (the `no_std` clip-map authority `brick.rs` derives the level table from). A
+// desync between the two would make level-0 of the clip-map disagree with the M2 single-level
+// bake — a build error here, not a silent divergence. The brick-side const reduces to the M2
+// scale at level 0 (`brick::brick_world_at_level(0) == brick::M2_BRICK_WORLD`).
+const _: () = assert!(M2_BRICK_WORLD == brick::M2_BRICK_WORLD);
+const _: () = assert!(M2_GRID_DIM == brick::M2_GRID_DIM);
+const _: () = assert!(M2_VOXEL_SIZE == brick::voxel_size_at_level(0));
+const _: () = assert!(M2_BAND_HALF == brick::band_half_at_level(0));
 
 /// The minimum world corner of M2 grid cell `cell = (cx, cy, cz)`:
 /// `M2_GRID_ORIGIN + cell * M2_BRICK_WORLD`. The brick spans `[min, min + M2_BRICK_WORLD]³`.
@@ -2019,6 +2054,170 @@ impl M2GridParams {
     }
 }
 
+// ===========================================================================
+// M4 — the CLIP-MAP LOD UBO TAIL ([`M4GridParams`]): the b5 camera-UBO tail for the N-level
+// brick clip-map. M4 replaces the SINGLE 48-byte [`M2GridParams`] block at [`M2_GRID_PARAMS_OFFSET`]
+// with an ARRAY of [`brick::BRICK_LEVELS`] per-level [`M4LevelParams`] blocks — the shader (Slice C)
+// loops over the level array. The per-level block is byte-for-byte the M2 lane layout, so a
+// single-level clip-map (level 0) is bit-identical to the M2 tail (the OFF/N=1 keystone).
+// ===========================================================================
+
+/// ONE clip-map level's b5 UBO block — byte-FOR-byte the [`M2GridParams`] 48-byte / three-vec4 lane
+/// layout, replicated so a single level is bit-identical to the M2 tail (the OFF/N=1 keystone). The
+/// shader (Slice C) declares a matching `struct { float4 origin_brick_world; float4 dims_atlas_dim;
+/// float4 band_voxel_inv_atlas; } m2_levels[BRICK_LEVELS]`.
+///
+/// - lane 0 `origin_brick_world` — `(origin.x, origin.y, origin.z, brick_world_at_level(L))`
+/// - lane 1 `dims_atlas_dim` — `(dims.x, dims.y, dims.z, M2_ATLAS_DIM)` as `f32`
+/// - lane 2 `band_voxel_inv_atlas` — `(band_half_at_level(L), voxel_size_at_level(L), 1/atlas_dim, level)`
+///
+/// The `level` index lives in lane 2 `w` (M2's level-0 pad slot is `0.0`, == level 0, so the level-0
+/// block stays byte-identical). The offsets are pinned by the const-asserts below.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct M4LevelParams {
+    /// Lane 0: `xyz` = this level's snapped grid min world corner, `w` = `brick_world_at_level(L)`.
+    pub origin_brick_world: [f32; 4],
+    /// Lane 1: `xyz` = the grid dims `[x, y, z]` as `f32` (level-invariant [`M2_GRID_DIM`]), `w` =
+    /// [`M2_ATLAS_DIM`] as `f32` (level-invariant). The shader reads it as a `uint4` (an exact
+    /// small-integer `f32`↔`uint` round trip).
+    pub dims_atlas_dim: [f32; 4],
+    /// Lane 2: `x` = `band_half_at_level(L)`, `y` = `voxel_size_at_level(L)`, `z` = `1/M2_ATLAS_DIM`,
+    /// `w` = the level index `L` (as `f32`; M2's level-0 pad `0.0` == level 0, byte-identical).
+    pub band_voxel_inv_atlas: [f32; 4],
+}
+
+/// Byte size of [`M4LevelParams`] — three std140 `vec4` lanes (48 B), IDENTICAL to [`M2GridParams`].
+pub const M4_LEVEL_PARAMS_BYTES: usize = core::mem::size_of::<M4LevelParams>();
+
+const _: () = assert!(core::mem::offset_of!(M4LevelParams, origin_brick_world) == 0);
+const _: () = assert!(core::mem::offset_of!(M4LevelParams, dims_atlas_dim) == 16);
+const _: () = assert!(core::mem::offset_of!(M4LevelParams, band_voxel_inv_atlas) == 32);
+const _: () = assert!(M4_LEVEL_PARAMS_BYTES == 48, "M4LevelParams must be 48 bytes (3 vec4 lanes)");
+// The per-level block MUST be byte-identical in layout to the M2 tail — a single level is then
+// bit-identical to the M2 `M2GridParams` (the OFF/N=1 keystone, runtime-asserted in the tests).
+const _: () = assert!(M4_LEVEL_PARAMS_BYTES == M2_GRID_PARAMS_BYTES);
+
+impl M4LevelParams {
+    /// This level's block from a [`BrickLevelParams`] geometry + the level index `L`. `dims`/
+    /// `atlas_dim`/`inv_atlas` are level-invariant; `origin`/`brick_world`/`band`/`voxel` come from
+    /// `geo` (the clip-map `*_at_level` table), and `level` is stamped into lane-2 `w`.
+    #[inline]
+    fn from_geometry(geo: &BrickLevelParams, level: u32) -> Self {
+        Self {
+            origin_brick_world: [geo.origin[0], geo.origin[1], geo.origin[2], geo.brick_world],
+            dims_atlas_dim: [
+                M2_GRID_DIM as f32,
+                M2_GRID_DIM as f32,
+                M2_GRID_DIM as f32,
+                M2_ATLAS_DIM as f32,
+            ],
+            band_voxel_inv_atlas: [
+                geo.band_half,
+                geo.voxel_size,
+                1.0 / M2_ATLAS_DIM as f32,
+                level as f32,
+            ],
+        }
+    }
+}
+
+/// The b5 camera-UBO tail for the N-level brick clip-map (M4): an ARRAY of [`brick::BRICK_LEVELS`]
+/// per-level [`M4LevelParams`] blocks, written at [`M2_GRID_PARAMS_OFFSET`] (replacing the single M2
+/// block). std140 array-of-structs: each 48-byte entry is already 16-aligned, so the array packs
+/// CONTIGUOUSLY (level `L` at byte `L*48`) with no inter-entry padding — the shader's
+/// `m2_levels[BRICK_LEVELS]` reads it directly.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct M4GridParams {
+    /// The per-level blocks, level `L` at index `L` (byte `L*48`). Level 0 is the finest/nearest.
+    pub levels: [M4LevelParams; brick::BRICK_LEVELS],
+}
+
+/// Byte size of [`M4GridParams`] — the contiguous `BRICK_LEVELS`-entry array (`BRICK_LEVELS*48`).
+pub const M4_GRID_PARAMS_BYTES: usize = core::mem::size_of::<M4GridParams>();
+
+const _: () =
+    assert!(M4_GRID_PARAMS_BYTES == brick::BRICK_LEVELS * 48, "M4GridParams must be N*48 bytes");
+// The array packs contiguously: no padding between the 16-aligned 48-byte entries.
+const _: () = assert!(M4_GRID_PARAMS_BYTES == brick::BRICK_LEVELS * M4_LEVEL_PARAMS_BYTES);
+
+/// The b5 camera-UBO byte size widened for the M4 clip-map: the 80-byte camera block
+/// ([`M2_GRID_PARAMS_OFFSET`]) + the [`brick::BRICK_LEVELS`]-level [`M4GridParams`] array tail
+/// (`= 80 + N*48 = 224` at `N = 3`). The Slice-C write path uses this; the single-level
+/// [`B5_CAMERA_UBO_BYTES`] (`= 128`) is RETAINED for the current M2 write site (Slice C migrates it).
+pub const B5_CAMERA_UBO_BYTES_M4: usize = M2_GRID_PARAMS_OFFSET + brick::BRICK_LEVELS * 48;
+
+const _: () = assert!(
+    M2_GRID_PARAMS_OFFSET + M4_GRID_PARAMS_BYTES == B5_CAMERA_UBO_BYTES_M4,
+    "the M4 array tail must fill the widened b5 UBO exactly (80 + N*48)"
+);
+const _: () =
+    assert!(B5_CAMERA_UBO_BYTES_M4 == 224, "B5_CAMERA_UBO_BYTES_M4 must be 224 at BRICK_LEVELS = 3");
+
+impl M4GridParams {
+    /// The camera-centered N-level clip-map block: level `L` filled from the Slice-A `*_at_level`
+    /// accessors (snapped origin [`snapped_level_origin`], `brick_world`/`voxel`/`band` `*_at_level`),
+    /// dims/atlas level-invariant. Level 0 tracks the camera's snapped near-field; coarser levels
+    /// reach `2^L`× farther.
+    #[inline]
+    pub fn camera_centered(camera: [f32; 3]) -> Self {
+        Self {
+            levels: core::array::from_fn(|l| {
+                let level = l as u32;
+                M4LevelParams::from_geometry(&BrickLevelParams::at_level(camera, level), level)
+            }),
+        }
+    }
+
+    /// The OFF/N=1 path: level 0 == [`M2GridParams::default_near_field`] BYTE-FOR-BYTE (the keystone),
+    /// the coarser levels filled by REPLICATING level 0's M2 near-field geometry. Level 0 uses the M2
+    /// const near-field ([`BrickLevelParams::m2_near_field`], origin `[-4, -4, -4]`), so its 48-byte
+    /// block matches the M2 default tail exactly.
+    ///
+    /// # Invariant (Slice C MUST honor)
+    ///
+    /// The marcher reads ONLY `m2_levels[0..brick_levels]`; on the OFF/N=1 path `brick_levels == 1`,
+    /// so levels `1..N` here are never sampled — they exist only to fill the fixed-size array. Their
+    /// content is therefore "dead bytes" on this path. To stay FAIL-SAFE (degrade visibly, not to a
+    /// plausible-but-wrong LOD), they REPLICATE level 0's near-field geometry rather than carrying a
+    /// `[0, 0, 0]`-snapped origin: if Slice C ever mis-reads a coarse level on the OFF path, it then
+    /// samples the SAME near-field as level 0 (a benign duplicate) instead of a wrong-LOD origin.
+    /// A shader that reads `levels[l]` for `l >= brick_levels` would still sample the wrong LOD on the
+    /// ON path, so Slice C MUST bound its level loop by `brick_levels`. (The ON/camera-centered path,
+    /// [`Self::camera_centered`], is unchanged — it carries the real per-level snapped origins.)
+    #[inline]
+    pub fn near_field_only() -> Self {
+        // Level 0 == the M2 const near-field (NOT a camera-snapped origin), so level 0's block is
+        // byte-identical to `M2GridParams::default_near_field` (the keystone). The coarser levels
+        // replicate the SAME geometry; only lane-2 `w` differs (the level index `l`), which is dead on
+        // the OFF/N=1 path (`brick_levels == 1`) and a benign duplicate if ever mis-read.
+        let near = BrickLevelParams::m2_near_field();
+        Self {
+            levels: core::array::from_fn(|l| M4LevelParams::from_geometry(&near, l as u32)),
+        }
+    }
+
+    /// The POD byte image of the N-level array tail (`BRICK_LEVELS*48` bytes), for the b5 UBO write
+    /// at [`M2_GRID_PARAMS_OFFSET`]. The OFF/N=1 keystone: `near_field_only().as_ubo_bytes()[..48]`
+    /// equals `M2GridParams::default_near_field().as_bytes()` (asserted in the tests).
+    #[inline]
+    pub fn as_ubo_bytes(&self) -> [u8; brick::BRICK_LEVELS * 48] {
+        let mut bytes = [0u8; brick::BRICK_LEVELS * 48];
+        // SAFETY: `Self` is `#[repr(C)]` and `M4_GRID_PARAMS_BYTES == BRICK_LEVELS*48` (pinned by the
+        // const-asserts above); the struct is a contiguous array of `[f32; 4]` lanes (all `Copy`, no
+        // uninit padding — each 48-byte entry is 16-aligned so the array packs with no holes), so its
+        // `size_of` bytes are a fully-initialized POD bit pattern. The source slice covers exactly the
+        // struct's bytes; `copy_from_slice` reads them into the equal-length `bytes` (a byte copy, no
+        // alignment requirement on the destination).
+        let src = unsafe {
+            slice::from_raw_parts((self as *const Self).cast::<u8>(), M4_GRID_PARAMS_BYTES)
+        };
+        bytes.copy_from_slice(src);
+        bytes
+    }
+}
+
 /// The voxel encoding the M2 brick atlas stores, chosen from the device's linear-filter support
 /// (mirrors [`crate::device::DeviceCaps::atlas_format`]). `R8_SNORM` is the dense quantized path;
 /// `R16_SFLOAT` is the fallback when the GPU cannot linear-filter `R8_SNORM` (no quantization — the
@@ -2081,6 +2280,105 @@ pub fn f16_from_f32(f: f32) -> u16 {
     golden_f16_from_f32(f)
 }
 
+/// The per-LEVEL geometry one clip-map (M4) brick-grid bake runs at: the snapped grid origin,
+/// the cell/brick world edge, the voxel edge, and the snorm store-band half-width — the four
+/// quantities that DIFFER per clip-map level ([`boyko_sdf_math::brick`]'s `*_at_level` table).
+/// Everything ELSE the bake touches (the `M2_GRID_DIM³` cell count, the `M2_ATLAS_DIM³` atlas
+/// geometry, the `BRICK_ALLOC³` tile shape) is LEVEL-INVARIANT, so a single `BrickLevelParams`
+/// threads the entire per-level variation through the ONE proven baker — no fork.
+///
+/// Level 0 == the M2 single-level constants ([`BrickLevelParams::m2_near_field`]): the level-0
+/// bake is byte-identical to the const-path [`bake_brick_atlas`], which delegates to the
+/// level-aware [`bake_brick_atlas_at`] with exactly this value.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BrickLevelParams {
+    /// The minimum world corner of this level's `M2_GRID_DIM³` brick grid (cell `(0,0,0)`'s min).
+    /// At level 0 this is [`M2_GRID_ORIGIN`] on every axis; at coarser camera-centered levels it
+    /// is the snapped origin ([`snapped_level_origin`]).
+    pub origin: [f32; 3],
+    /// The world edge of one brick cell at this level ([`brick_world_at_level`]; `M2_BRICK_WORLD`
+    /// at level 0). The brick spans `[cell_min, cell_min + brick_world]³`.
+    pub brick_world: f32,
+    /// The world edge of one atlas voxel at this level ([`voxel_size_at_level`]; `M2_VOXEL_SIZE`
+    /// at level 0). `brick_world == BRICK_INTERIOR * voxel_size` at every level.
+    pub voxel_size: f32,
+    /// The snorm store-band half-width at this level ([`band_half_at_level`]; `M2_BAND_HALF` at
+    /// level 0). The codes `fill_brick` quantizes span `[-band_half, band_half]`.
+    pub band_half: f32,
+    /// The maximum band curvature this level supports ([`c_max_at_level`]; the bare `C_MAX` `==
+    /// c_max_at_level(0)` at level 0). Passed into [`fill_brick`] to scope its conservative-lower-bound
+    /// dominance assert to THIS level's budget (a coarser level promises only a `2^L×`-larger radius of
+    /// curvature). Assert-only — it never enters a stored snorm code, so it does not affect baked bytes.
+    pub c_max: f32,
+}
+
+impl BrickLevelParams {
+    /// The M2 single-level (level-0) geometry: origin [`M2_GRID_ORIGIN`], brick [`M2_BRICK_WORLD`],
+    /// voxel [`M2_VOXEL_SIZE`], band [`M2_BAND_HALF`]. The const-path [`bake_brick_atlas`] /
+    /// [`m2_dirty_cell_bbox`] / [`rebake_dirty_brick_atlas`] bake at exactly this value, so they
+    /// stay byte-identical to the pre-M4 const path.
+    #[inline]
+    pub const fn m2_near_field() -> Self {
+        Self {
+            origin: [M2_GRID_ORIGIN, M2_GRID_ORIGIN, M2_GRID_ORIGIN],
+            brick_world: M2_BRICK_WORLD,
+            voxel_size: M2_VOXEL_SIZE,
+            band_half: M2_BAND_HALF,
+            // Level-0 curvature bound (`== C_MAX`): the L0 fill_brick assert is unchanged → byte-identical.
+            c_max: c_max_at_level(0),
+        }
+    }
+
+    /// This level's geometry for clip-map (M4) `level`, camera-centered on `camera`: the snapped
+    /// grid origin ([`snapped_level_origin`]) + the `*_at_level` brick/voxel/band scale. Level 0
+    /// reduces to [`m2_near_field`](Self::m2_near_field) only when `camera == [0, 0, 0]` (otherwise
+    /// the snapped origin tracks the camera — the clip-map anti-jitter origin).
+    #[inline]
+    pub fn at_level(camera: [f32; 3], level: u32) -> Self {
+        Self {
+            origin: snapped_level_origin(camera, level),
+            brick_world: brick_world_at_level(level),
+            voxel_size: voxel_size_at_level(level),
+            band_half: band_half_at_level(level),
+            // The per-level curvature bound (`C_MAX / 2^level`): scopes fill_brick's dominance assert
+            // to this level's budget so it holds at coarse levels (the M4 per-level soundness fix).
+            c_max: c_max_at_level(level),
+        }
+    }
+
+    /// Reconstructs level `level`'s geometry from a baked [`M4GridParams`] (the snapped origin +
+    /// scales the clip-map levels were CREATED at). The incremental dirty rebake uses this so a
+    /// level diffs the authority against the SAME grid it was baked against (NOT a freshly re-snapped
+    /// origin, which a dirty edit must not move). `level < BRICK_LEVELS`.
+    #[inline]
+    pub fn at_level_from_params(params: &M4GridParams, level: usize) -> Self {
+        debug_assert!(level < brick::BRICK_LEVELS, "level out of range");
+        let blk = &params.levels[level];
+        Self {
+            origin: [blk.origin_brick_world[0], blk.origin_brick_world[1], blk.origin_brick_world[2]],
+            brick_world: blk.origin_brick_world[3],
+            voxel_size: blk.band_voxel_inv_atlas[1],
+            band_half: blk.band_voxel_inv_atlas[0],
+            // The curvature bound is a pure function of the level (`C_MAX / 2^level`), not a baked field
+            // of `M4GridParams`; derive it from `level` so the dirty rebake uses the SAME per-level
+            // dominance budget the full bake did. Assert-only, so it does not affect the rebaked bytes.
+            c_max: c_max_at_level(level as u32),
+        }
+    }
+
+    /// The minimum world corner of grid cell `cell = (cx, cy, cz)` at this level:
+    /// `origin + cell * brick_world`. The level-aware sibling of [`m2_cell_min`] (which pins the
+    /// level-0 const origin); the brick spans `[min, min + brick_world]³`.
+    #[inline]
+    pub fn cell_min(&self, cell: [u32; 3]) -> [f32; 3] {
+        [
+            self.origin[0] + cell[0] as f32 * self.brick_world,
+            self.origin[1] + cell[1] as f32 * self.brick_world,
+            self.origin[2] + cell[2] as f32 * self.brick_world,
+        ]
+    }
+}
+
 /// Bakes the dense `M2_ATLAS_DIM³` brick atlas from the ONE edit authority `field` into `out`
 /// (the staging bytes), in the chosen [`AtlasEncoding`], returning the number of SURFACE cells
 /// baked.
@@ -2096,7 +2394,25 @@ pub fn f16_from_f32(f: f32) -> u16 {
 ///
 /// `out.len()` MUST be `encoding.atlas_byte_size()`. This is a SETUP-time (per-`gen`) bake, not a
 /// hot-path call. Principle 0: a transient mirror of the analytic authority, no durable state.
+///
+/// The const-path M2 baker: delegates to the level-aware [`bake_brick_atlas_at`] at the level-0
+/// [`BrickLevelParams::m2_near_field`], so it is byte-identical to the pre-M4 implementation.
 pub fn bake_brick_atlas(field: &SdfEditField, encoding: AtlasEncoding, out: &mut [u8]) -> u32 {
+    bake_brick_atlas_at(field, encoding, &BrickLevelParams::m2_near_field(), out)
+}
+
+/// The level-aware M4 full atlas bake: bakes the dense `M2_ATLAS_DIM³` atlas for ONE clip-map
+/// level's [`BrickLevelParams`] (origin/brick_world/voxel/band) into `out`, returning the SURFACE
+/// cell count. The ONE proven baker behind both the M2 const path ([`bake_brick_atlas`], at the
+/// level-0 [`BrickLevelParams::m2_near_field`]) and the M4 clip-map (one call per level). The atlas
+/// GEOMETRY (`M2_GRID_DIM³` cells, `M2_ATLAS_DIM³` voxels, `BRICK_ALLOC³` tiles) is level-invariant
+/// — only `params` differs per level — so no bake logic is duplicated.
+pub fn bake_brick_atlas_at(
+    field: &SdfEditField,
+    encoding: AtlasEncoding,
+    params: &BrickLevelParams,
+    out: &mut [u8],
+) -> u32 {
     debug_assert_eq!(
         out.len(),
         encoding.atlas_byte_size(),
@@ -2109,7 +2425,7 @@ pub fn bake_brick_atlas(field: &SdfEditField, encoding: AtlasEncoding, out: &mut
     for cz in 0..M2_GRID_DIM {
         for cy in 0..M2_GRID_DIM {
             for cx in 0..M2_GRID_DIM {
-                if bake_atlas_cell(field, encoding, [cx, cy, cz], &mut tile, out) {
+                if bake_atlas_cell(field, encoding, params, [cx, cy, cz], &mut tile, out) {
                     surface_cells += 1;
                 }
             }
@@ -2136,20 +2452,24 @@ pub fn bake_brick_atlas(field: &SdfEditField, encoding: AtlasEncoding, out: &mut
 fn bake_atlas_cell(
     field: &SdfEditField,
     encoding: AtlasEncoding,
+    params: &BrickLevelParams,
     cell: [u32; 3],
     tile: &mut [i8; BRICK_VOXELS],
     out: &mut [u8],
 ) -> bool {
     const W: usize = BRICK_ALLOC;
-    let cell_min = m2_cell_min(cell);
-    let class = classify_brick(field, cell_min, M2_BRICK_WORLD, SDF_EDIT_BAND_HALF);
+    let cell_min = params.cell_min(cell);
+    // Classify against the SAME band the per-edit AABBs are skinned by at this level's scale
+    // ([`band_half_at_level`]); at level 0 `params.band_half == SDF_EDIT_BAND_HALF`, byte-identical
+    // to the pre-M4 const path.
+    let class = classify_brick(field, cell_min, params.brick_world, params.band_half);
     let is_surface = class == BrickClass::Surface;
     let [ox, oy, oz] = m2_tile_atlas_origin(cell);
 
     if is_surface {
         // Bake the apron'd tile from the authority, then scatter it into the dense atlas at
         // the cell's atlas-voxel origin (the SAME `tile * BRICK_ALLOC` the shader addresses).
-        fill_brick(field, cell_min, M2_VOXEL_SIZE, M2_BAND_HALF, tile);
+        fill_brick(field, cell_min, params.voxel_size, params.band_half, params.c_max, tile);
     }
 
     for lz in 0..W {
@@ -2197,39 +2517,52 @@ fn bake_atlas_cell(
 /// uploads in a single `BufferImageCopy`. Cells inside the box but not themselves
 /// dirty are re-baked to the SAME bytes (full/incremental parity holds).
 pub fn m2_dirty_cell_bbox(field: &SdfEditField) -> Option<([u32; 3], [u32; 3])> {
+    m2_dirty_cell_bbox_at(field, &BrickLevelParams::m2_near_field())
+}
+
+/// The level-aware M4 dirty-cell bounding box: the inclusive cell span of the authority's dirty
+/// region for ONE clip-map level's [`BrickLevelParams`] (origin/brick_world/voxel) — the level-aware
+/// sibling of [`m2_dirty_cell_bbox`] (which delegates here at the level-0
+/// [`BrickLevelParams::m2_near_field`]). The apron skin scales with the level's `voxel_size`, and
+/// the world→cell mapping uses the level's `origin`/`brick_world`, so each clip-map level diffs the
+/// SAME authority against its OWN grid.
+pub fn m2_dirty_cell_bbox_at(
+    field: &SdfEditField,
+    params: &BrickLevelParams,
+) -> Option<([u32; 3], [u32; 3])> {
     let dirty = dirty_world_aabb(field)?;
 
-    // Inflate by the 1-voxel APRON reach so the box matches `m2_cell_is_dirty` exactly:
-    // a SURFACE cell bakes apron voxels one `M2_VOXEL_SIZE` past its interior faces
-    // ([`fill_brick`]), so a dirty region touching only a cell's apron band still dirties
-    // it (the seed=0 hard-scene high-face apron divergence). Both the box here and the
-    // per-cell test must skin the SAME apron margin, or the box would miss an apron-only
-    // dirty cell that `m2_cell_is_dirty` flags (a ghost the upload would never patch).
-    const APRON_WORLD: f32 = boyko_sdf_math::brick::APRON as f32 * M2_VOXEL_SIZE;
+    // Inflate by the 1-voxel APRON reach so the box matches `m2_cell_is_dirty_at` exactly:
+    // a SURFACE cell bakes apron voxels one `voxel_size` past its interior faces ([`fill_brick`]),
+    // so a dirty region touching only a cell's apron band still dirties it (the seed=0 hard-scene
+    // high-face apron divergence). Both the box here and the per-cell test must skin the SAME apron
+    // margin (scaled to this level's voxel), or the box would miss an apron-only dirty cell that
+    // `m2_cell_is_dirty_at` flags (a ghost the upload would never patch).
+    let apron_world = boyko_sdf_math::brick::APRON as f32 * params.voxel_size;
     let dirty = SdfEditAabb {
         min: [
-            dirty.min[0] - APRON_WORLD,
-            dirty.min[1] - APRON_WORLD,
-            dirty.min[2] - APRON_WORLD,
+            dirty.min[0] - apron_world,
+            dirty.min[1] - apron_world,
+            dirty.min[2] - apron_world,
         ],
         max: [
-            dirty.max[0] + APRON_WORLD,
-            dirty.max[1] + APRON_WORLD,
-            dirty.max[2] + APRON_WORLD,
+            dirty.max[0] + apron_world,
+            dirty.max[1] + apron_world,
+            dirty.max[2] + apron_world,
         ],
     };
 
     // Map the dirty world AABB to the inclusive cell index span on each axis. The grid is
-    // `M2_GRID_DIM` cells of `M2_BRICK_WORLD`, origin `M2_GRID_ORIGIN`. A cell `c` overlaps the
-    // dirty AABB on an axis iff `cell_min(c) <= dirty.max` and `cell_min(c) + M2_BRICK_WORLD >=
+    // `M2_GRID_DIM` cells of `params.brick_world`, origin `params.origin`. A cell `c` overlaps the
+    // dirty AABB on an axis iff `cell_min(c) <= dirty.max` and `cell_min(c) + brick_world >=
     // dirty.min`; that is `c` in `[floor((dirty.min - origin)/bw - 1), floor((dirty.max -
     // origin)/bw)]`, clamped to `[0, M2_GRID_DIM)`. A box that lies fully outside the grid yields
     // an empty span (no overlap) → `None`.
     let mut lo = [0u32; 3];
     let mut hi = [0u32; 3];
     for a in 0..3 {
-        let rel_min = (dirty.min[a] - M2_GRID_ORIGIN) / M2_BRICK_WORLD;
-        let rel_max = (dirty.max[a] - M2_GRID_ORIGIN) / M2_BRICK_WORLD;
+        let rel_min = (dirty.min[a] - params.origin[a]) / params.brick_world;
+        let rel_max = (dirty.max[a] - params.origin[a]) / params.brick_world;
         // A cell overlaps from one cell BELOW `floor(rel_min)` (the dirty min may fall inside the
         // previous cell's high face) up to `floor(rel_max)`.
         let lo_f = (rel_min.floor() - 1.0).max(0.0);
@@ -2263,6 +2596,22 @@ pub fn rebake_dirty_brick_atlas(
     hi: [u32; 3],
     out: &mut [u8],
 ) -> u32 {
+    rebake_dirty_brick_atlas_at(field, encoding, &BrickLevelParams::m2_near_field(), lo, hi, out)
+}
+
+/// The level-aware M4 incremental dirty rebake: re-bakes ONLY the cells in `(lo, hi)` for ONE
+/// clip-map level's [`BrickLevelParams`] into `out` — the level-aware sibling of
+/// [`rebake_dirty_brick_atlas`] (which delegates here at the level-0
+/// [`BrickLevelParams::m2_near_field`]). `out` MUST be the staging the level's last full
+/// [`bake_brick_atlas_at`] filled; the box is from [`m2_dirty_cell_bbox_at`] at the SAME `params`.
+pub fn rebake_dirty_brick_atlas_at(
+    field: &SdfEditField,
+    encoding: AtlasEncoding,
+    params: &BrickLevelParams,
+    lo: [u32; 3],
+    hi: [u32; 3],
+    out: &mut [u8],
+) -> u32 {
     debug_assert_eq!(
         out.len(),
         encoding.atlas_byte_size(),
@@ -2278,7 +2627,7 @@ pub fn rebake_dirty_brick_atlas(
     for cz in lo[2]..=hi[2] {
         for cy in lo[1]..=hi[1] {
             for cx in lo[0]..=hi[0] {
-                if bake_atlas_cell(field, encoding, [cx, cy, cz], &mut tile, out) {
+                if bake_atlas_cell(field, encoding, params, [cx, cy, cz], &mut tile, out) {
                     surface_cells += 1;
                 }
             }
@@ -2399,7 +2748,7 @@ fn host_m2_surface_hit(edits: &[SdfEdit], ro: [f32; 3], rd: [f32; 3], t_world: f
     // cubic's local `t` is in WORLD units (rd is divided by voxel_size to keep the world-t metric).
     let field = edits_field(edits);
     let mut tile = [0i8; BRICK_VOXELS];
-    fill_brick(&field, cell_min, M2_VOXEL_SIZE, M2_BAND_HALF, &mut tile);
+    fill_brick(&field, cell_min, M2_VOXEL_SIZE, M2_BAND_HALF, c_max_at_level(0), &mut tile);
     let ro_v = [
         (p[0] - cell_min[0]) / M2_VOXEL_SIZE,
         (p[1] - cell_min[1]) / M2_VOXEL_SIZE,
@@ -6532,5 +6881,190 @@ mod m1_empty_skip_tests {
             cells.iter().all(|&c| c == EMPTY_OUTSIDE),
             "an empty scene must bake an all-EmptyOutside grid"
         );
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// M4 — the CLIP-MAP LOD host CPU tests (the Slice-B gate). These are CPU-runnable
+// (no Vulkan device): they prove (1) the per-level bake feeds the proven baker
+// correctly (bit-identity vs a direct classify/fill reference, per level), (2) the
+// OFF/N=1 UBO tail is byte-identical to the M2 default, (3) the full N=3 UBO array
+// matches a hand-checked std140 array-of-structs golden. The GPU image tests are
+// Slice C (RTX-gated).
+// ════════════════════════════════════════════════════════════════════════════
+#[cfg(test)]
+mod m4_clipmap_tests {
+    use super::{
+        AtlasEncoding, BrickLevelParams, M2GridParams, M4GridParams, M4LevelParams,
+        M2_ATLAS_DIM, SdfEdit, atlas_voxel_index, bake_brick_atlas_at, sdf_op,
+    };
+    use boyko_sdf_math::brick::{
+        self, BRICK_ALLOC, BRICK_VOXELS, band_half_at_level, brick_world_at_level, c_max_at_level,
+        classify_brick, decode_snorm8, fill_brick, snapped_level_origin, voxel_size_at_level,
+    };
+    use boyko_sdf_math::{BrickClass, SDF_EDIT_BAND_HALF, SdfEditField};
+
+    /// The demo "crater" CSG scene (base sphere minus a smaller sphere) — the SAME field the M1/M2
+    /// goldens use, so the per-level bake runs against the production demo authority.
+    fn crater() -> Vec<SdfEdit> {
+        vec![
+            SdfEdit::sphere([0.0, 0.0, 0.0], 0.5, sdf_op::UNION, 0.0),
+            SdfEdit::sphere([0.3, 0.0, 0.0], 0.35, sdf_op::SUBTRACT, 0.0),
+        ]
+    }
+
+    fn field_of(edits: &[SdfEdit]) -> SdfEditField {
+        let mut f = SdfEditField::new();
+        for e in edits {
+            assert!(f.push(*e), "scene must fit MAX_SDF_EDITS");
+        }
+        f.bump_gen();
+        f
+    }
+
+    /// A DIRECT CPU reference bake of the `M2_ATLAS_DIM³` `Snorm8` atlas for one level's geometry,
+    /// independent of `bake_brick_atlas_at`: classify each `M2_GRID_DIM³` cell, fill a SURFACE cell's
+    /// apron'd tile, scatter at the cell's atlas-voxel origin (EMPTY cells leave 0). The bit-exact
+    /// oracle the level-aware baker must match (the M3 full-bake bit-identity gate, per level).
+    fn reference_atlas_snorm8(
+        field: &SdfEditField,
+        origin: [f32; 3],
+        brick_world: f32,
+        voxel_size: f32,
+        band_half: f32,
+        c_max: f32,
+    ) -> Vec<u8> {
+        const W: usize = BRICK_ALLOC;
+        let dim = brick::M2_GRID_DIM;
+        let mut out = vec![0u8; (M2_ATLAS_DIM as usize).pow(3)];
+        let mut tile = [0i8; BRICK_VOXELS];
+        for cz in 0..dim {
+            for cy in 0..dim {
+                for cx in 0..dim {
+                    let cell_min = [
+                        origin[0] + cx as f32 * brick_world,
+                        origin[1] + cy as f32 * brick_world,
+                        origin[2] + cz as f32 * brick_world,
+                    ];
+                    let class = classify_brick(field, cell_min, brick_world, band_half);
+                    let is_surface = class == BrickClass::Surface;
+                    if is_surface {
+                        fill_brick(field, cell_min, voxel_size, band_half, c_max, &mut tile);
+                    }
+                    let (ox, oy, oz) =
+                        (cx * BRICK_ALLOC as u32, cy * BRICK_ALLOC as u32, cz * BRICK_ALLOC as u32);
+                    for lz in 0..W {
+                        for ly in 0..W {
+                            for lx in 0..W {
+                                let byte =
+                                    if is_surface { tile[lx + ly * W + lz * W * W] } else { 0i8 };
+                                let vi = atlas_voxel_index(
+                                    ox + lx as u32,
+                                    oy + ly as u32,
+                                    oz + lz as u32,
+                                );
+                                out[vi] = byte as u8;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Per-level bake feeds the proven baker. For each clip-map level `L = 0..BRICK_LEVELS`, the
+    /// level-aware [`bake_brick_atlas_at`] staging at the level's snapped origin / `*_at_level`
+    /// brick/voxel/band is BIT-IDENTICAL to the direct `classify_brick`/`fill_brick` reference over
+    /// the SAME level grid — proving the Slice-A level table threads correctly into the M3-proven
+    /// per-cell baker at every level.
+    #[test]
+    fn m4_level_bake_equals_full_classify_fill() {
+        let camera = [0.37, -1.2, 2.0];
+        let field = field_of(&crater());
+        for level in 0..brick::BRICK_LEVELS as u32 {
+            let geo = BrickLevelParams::at_level(camera, level);
+            let mut baked = vec![0u8; (M2_ATLAS_DIM as usize).pow(3)];
+            bake_brick_atlas_at(&field, AtlasEncoding::Snorm8, &geo, &mut baked);
+
+            let reference = reference_atlas_snorm8(
+                &field,
+                snapped_level_origin(camera, level),
+                brick_world_at_level(level),
+                voxel_size_at_level(level),
+                band_half_at_level(level),
+                c_max_at_level(level),
+            );
+            assert_eq!(
+                baked, reference,
+                "level {level}: bake_brick_atlas_at diverged from the direct classify/fill reference"
+            );
+            // The decoded snorm round-trip is well-defined (a sanity tap on the oracle).
+            let _ = decode_snorm8(0, SDF_EDIT_BAND_HALF);
+        }
+    }
+
+    /// The OFF/N=1 keystone: `near_field_only().as_ubo_bytes()[..48]` is byte-for-byte equal to
+    /// `M2GridParams::default_near_field().as_bytes()` — a single-level (OFF) clip-map writes exactly
+    /// the M2 tail, so the M2 path is unchanged when the clip-map is OFF.
+    #[test]
+    fn m4_ubo_bytes_off_path_byte_identical() {
+        let m4 = M4GridParams::near_field_only();
+        let m4_bytes = m4.as_ubo_bytes();
+        let m2 = M2GridParams::default_near_field();
+        let m2_bytes = m2.as_bytes();
+        assert_eq!(m2_bytes.len(), 48, "M2 tail is 48 bytes");
+        assert_eq!(
+            &m4_bytes[..48],
+            m2_bytes,
+            "OFF/N=1 keystone: M4 level-0 block must equal the M2 default tail byte-for-byte"
+        );
+    }
+
+    /// The std140 array-of-structs golden: the full N-level `as_ubo_bytes` matches a hand-checked
+    /// layout where level `L` sits at byte `L*48`, lane 0 `origin_brick_world` at +0, lane 1
+    /// `dims_atlas_dim` at +16, lane 2 `band_voxel_inv_atlas` at +32, each lane four little-endian
+    /// `f32`s. This pins the exact byte layout the Slice-C shader's `m2_levels[BRICK_LEVELS]` reads.
+    #[test]
+    fn m4_grid_params_layout_golden() {
+        let camera = [0.37, -1.2, 2.0];
+        let m4 = M4GridParams::camera_centered(camera);
+        let bytes = m4.as_ubo_bytes();
+        assert_eq!(bytes.len(), brick::BRICK_LEVELS * 48);
+
+        let read_f32 = |off: usize| -> f32 {
+            f32::from_le_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]])
+        };
+
+        for level in 0..brick::BRICK_LEVELS {
+            let base = level * 48;
+            let origin = snapped_level_origin(camera, level as u32);
+            let bw = brick_world_at_level(level as u32);
+            let band = band_half_at_level(level as u32);
+            let voxel = voxel_size_at_level(level as u32);
+
+            // Lane 0 (origin_brick_world) at +0.
+            assert_eq!(read_f32(base), origin[0], "L{level} origin.x at byte {base}");
+            assert_eq!(read_f32(base + 4), origin[1], "L{level} origin.y");
+            assert_eq!(read_f32(base + 8), origin[2], "L{level} origin.z");
+            assert_eq!(read_f32(base + 12), bw, "L{level} brick_world at lane0.w");
+            // Lane 1 (dims_atlas_dim) at +16 — level-invariant dims/atlas.
+            assert_eq!(read_f32(base + 16), brick::M2_GRID_DIM as f32, "L{level} dims.x");
+            assert_eq!(read_f32(base + 20), brick::M2_GRID_DIM as f32, "L{level} dims.y");
+            assert_eq!(read_f32(base + 24), brick::M2_GRID_DIM as f32, "L{level} dims.z");
+            assert_eq!(read_f32(base + 28), M2_ATLAS_DIM as f32, "L{level} atlas_dim at lane1.w");
+            // Lane 2 (band_voxel_inv_atlas) at +32.
+            assert_eq!(read_f32(base + 32), band, "L{level} band_half at lane2.x");
+            assert_eq!(read_f32(base + 36), voxel, "L{level} voxel_size at lane2.y");
+            assert_eq!(read_f32(base + 40), 1.0 / M2_ATLAS_DIM as f32, "L{level} inv_atlas at lane2.z");
+            assert_eq!(read_f32(base + 44), level as f32, "L{level} level index at lane2.w");
+        }
+    }
+
+    /// The `M4LevelParams` struct is exactly one M2 lane block (48 B) — the array packs contiguously.
+    #[test]
+    fn m4_level_params_is_48_bytes() {
+        assert_eq!(core::mem::size_of::<M4LevelParams>(), 48);
+        assert_eq!(core::mem::size_of::<M4GridParams>(), brick::BRICK_LEVELS * 48);
     }
 }

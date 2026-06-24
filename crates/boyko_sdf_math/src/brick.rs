@@ -915,6 +915,15 @@ fn encode_snorm8(d: f32, band_half: f32) -> i8 {
 ///   one voxel below it).
 /// - `voxel_size` is the world width of one voxel (`brick_size / BRICK_INTERIOR`).
 /// - `band_half` is the narrow-band half-width the codes represent.
+/// - `c_max` is the maximum band curvature this brick's level supports
+///   ([`c_max_at_level`]; the bare [`C_MAX`](crate::brick) `== c_max_at_level(0)`
+///   for the single-level / level-0 path). It scopes the dominance check ONLY (it
+///   is NOT stored), so the entry assert verifies the per-level lower-bound budget
+///   the compile-time per-level predicate already proved. A COARSER clip-map level
+///   promises only a `2^L×`-larger radius of curvature: features sharper than
+///   `r_min_at_level(L)` are out of this level's contract and fall to the EXACT
+///   analytic fallback (the intended LOD degradation) — the store stays a
+///   conservative lower bound for fields of curvature `<= c_max`.
 /// - `out` is the `BRICK_VOXELS`-length destination (linear `x + y*W + z*W*W`,
 ///   `W == BRICK_ALLOC`).
 ///
@@ -923,20 +932,25 @@ fn encode_snorm8(d: f32, band_half: f32) -> i8 {
 /// point, since the world-space bias `EPSILON_Q * band_half` covers both the
 /// trilinear midpoint slack (`δ_tri_world`) and the quantization step
 /// (`δ_quant_world`) — see [`EPSILON_Q`]. A debug assert at entry re-checks this
-/// dominance against the caller's actual `(voxel_size, band_half)`.
+/// dominance against the caller's actual `(voxel_size, band_half, c_max)`.
 pub fn fill_brick(
     field: &SdfEditField,
     brick_min: [f32; 3],
     voxel_size: f32,
     band_half: f32,
+    c_max: f32,
     out: &mut [i8; BRICK_VOXELS],
 ) {
     // The world-space down-bias must dominate the trilinear-midpoint slack +
-    // quantization at the caller's ACTUAL (voxel_size, band_half) — the runtime
-    // mirror of the compile-time P2 predicate (which pins the M0 default scale).
+    // quantization at the caller's ACTUAL (voxel_size, band_half, c_max) — the
+    // runtime mirror of the compile-time per-level P2 predicate. At a COARSER level
+    // the curvature term uses this level's `c_max = c_max_at_level(L) = C_MAX/2^L`
+    // (not the bare L=0 `C_MAX`), so the whole inequality scales by `2^L` uniformly
+    // and holds at every level — see `c_max_at_level` and the per-level const-assert
+    // block. `c_max` is assert-only; it never enters the stored value.
     debug_assert!(
-        EPSILON_Q * band_half >= voxel_size * voxel_size * C_MAX / 8.0 + band_half / 254.0,
-        "EPSILON_Q under-bounds curvature+quant at this (voxel, band, R_min)"
+        EPSILON_Q * band_half >= voxel_size * voxel_size * c_max / 8.0 + band_half / 254.0,
+        "EPSILON_Q under-bounds curvature+quant at this (voxel, band, c_max) — per-level lower-bound budget broken"
     );
 
     let edits = field.edits();
@@ -1834,7 +1848,7 @@ mod tests {
             ];
 
             let mut brick = [0i8; BRICK_VOXELS];
-            fill_brick(&field, brick_min, voxel, BAND_HALF_STORE, &mut brick);
+            fill_brick(&field, brick_min, voxel, BAND_HALF_STORE, C_MAX, &mut brick);
 
             let edits = field.edits();
 
@@ -2074,7 +2088,7 @@ mod tests {
         // Place the surface inside the brick so the band-relevant voxels are unsaturated.
         let brick_min = [0.0, 0.0, 0.0];
         let mut brick = [0i8; BRICK_VOXELS];
-        fill_brick(&field, brick_min, voxel, BAND_HALF_STORE, &mut brick);
+        fill_brick(&field, brick_min, voxel, BAND_HALF_STORE, C_MAX, &mut brick);
 
         let edits = field.edits();
         let bias = EPSILON_Q * BAND_HALF_STORE;
@@ -2134,7 +2148,7 @@ mod tests {
 
         let brick_min = [0.0, 0.0, 0.0];
         let mut brick = [0i8; BRICK_VOXELS];
-        fill_brick(&field, brick_min, voxel, BAND_HALF_STORE, &mut brick);
+        fill_brick(&field, brick_min, voxel, BAND_HALF_STORE, C_MAX, &mut brick);
         let edits = field.edits();
 
         let bias = EPSILON_Q * BAND_HALF_STORE;
@@ -2788,7 +2802,7 @@ mod tests {
         field.bump_gen();
         let brick_min = [0.0, 0.0, 0.0];
         let mut brick = [0i8; BRICK_VOXELS];
-        fill_brick(&field, brick_min, voxel, BAND_HALF_STORE, &mut brick);
+        fill_brick(&field, brick_min, voxel, BAND_HALF_STORE, C_MAX, &mut brick);
 
         let mut rng = XorShift64::new(0xBEEF_FACE_0BAD_F00D);
         for _ in 0..2000 {
@@ -2936,7 +2950,7 @@ mod tests {
                 continue;
             }
             let mut brick = [0i8; BRICK_VOXELS];
-            fill_brick(&field, brick_min, voxel, band, &mut brick);
+            fill_brick(&field, brick_min, voxel, band, C_MAX, &mut brick);
 
             // Fire a battery of rays through the brick from random points on a sphere
             // around the brick center, aimed roughly at the center (so they traverse
@@ -3113,7 +3127,7 @@ mod tests {
         field.bump_gen();
         let brick_min = [0.0, 0.0, 0.0];
         let mut brick = [0i8; BRICK_VOXELS];
-        fill_brick(&field, brick_min, voxel, band, &mut brick);
+        fill_brick(&field, brick_min, voxel, band, C_MAX, &mut brick);
         let edits = field.edits();
 
         // A ray along +x at world y=1.4, z=1.0 (an OFF-axis chord so neither crossing
@@ -3169,7 +3183,7 @@ mod tests {
         field.bump_gen();
         let brick_min = [0.0, 0.0, 0.0];
         let mut brick = [0i8; BRICK_VOXELS];
-        fill_brick(&field, brick_min, voxel, band, &mut brick);
+        fill_brick(&field, brick_min, voxel, band, C_MAX, &mut brick);
 
         let interior = BRICK_INTERIOR as f32;
         // A battery of degenerate ray configs, in interior-voxel coords.
