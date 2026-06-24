@@ -21,11 +21,14 @@ use crate::error::RhiError;
 /// Sized for the lighting L0/L1 inputs on a SINGLE descriptor set with headroom:
 /// the deferred resolve grows 6 → 7 (L0a `+light_table`) → 8 (L0b `+gViewT`) → 10
 /// (L1 `+cluster_grid` `+light_index`), and the marcher vocab set grows 8 → 9 (L0b
-/// `+gViewT`). 12 leaves 2 free for a future shadow/probe lane. This is a
-/// self-imposed engine inline-array size, NOT a hardware limit (NVIDIA Ampere /
-/// RTX 3060 `maxPerStageDescriptorStorageImages` / `maxPerStageResources` are both
-/// 1048576, so 12 is safe). A `debug_assert!` traps an over-count.
-pub const MAX_BIND_GROUP_BINDINGS: usize = 12;
+/// `+gViewT`). The SDF clip-map (M4) binds `N = brick::BRICK_LEVELS` levels × 2
+/// resources (a pointer-grid SSBO + an atlas combined-image) at SEPARATE bindings
+/// 9..=14 on top of the 0..=8 gbuffer bindings = 15 total, so the cap is 16 (N
+/// levels × 2, +1 headroom). This is a self-imposed engine inline-array size, NOT a
+/// hardware limit (NVIDIA Ampere / RTX 3060 `maxPerStageDescriptorStorageImages` /
+/// `maxPerStageResources` are both 1048576, so 16 is safe). A `debug_assert!` traps
+/// an over-count.
+pub const MAX_BIND_GROUP_BINDINGS: usize = 16;
 
 /// Parameters for [`RhiDevice::create_texture`] (Phase-6 S0 graphics surface).
 ///

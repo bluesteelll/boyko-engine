@@ -147,6 +147,218 @@ const _: () = assert!(
     "M0: refine band >= outer trust edge — proven brick-step region R1 is empty"
 );
 
+// ════════════════════════════════════════════════════════════════════════════
+// M4 — the CLIP-MAP LOD STACK (the near-field-cache scale enabler).
+//
+// M0–M3 cache a SINGLE bounded [-4, 4]³ near-field at one brick scale. M4 stacks
+// `BRICK_LEVELS` nested, camera-centered cache levels so the brick cache reaches
+// past that near field: level `L` uses a brick `2^L`× larger
+// ([`brick_world_at_level`]) with a voxel `2^L`× larger ([`voxel_size_at_level`]).
+// The coarser the level, the farther it reaches and the less detail it stores.
+//
+// THE per-level soundness problem (and its fix). The single-level lower-bound
+// contract (P2) proves the EPSILON_Q store-bias DOMINATES the trilinear-midpoint
+// curvature slack plus the quantization step:
+//
+//     EPSILON_Q · band_half  >=  voxel²·C_MAX/8  +  band_half/254          (P2)
+//
+// At a COARSER level the voxel DOUBLES, so the slack `voxel²·C_MAX/8` QUADRUPLES —
+// P2 would FAIL and the coarse brick would OVER-report clearance, letting the
+// sphere-trace overstep a far surface (the C2 contract violated). The fix scales
+// the WHOLE inequality by `2^L` uniformly, so P2 at `L = 0` implies P2 at every
+// level (verified algebraically, see [`band_half_at_level`] / [`c_max_at_level`]):
+//
+//     voxel_size_L = VOXEL_SIZE · 2^L      (the per-level voxel widens)
+//     band_half_L  = BAND_HALF_STORE · 2^L (the store band widens with it)
+//     C_MAX_L      = C_MAX / 2^L           (a coarser level promises only a
+//                                           2^L×-larger radius of curvature;
+//                                           sharper FAR features fall to the
+//                                           analytic fallback — still EXACT)
+//
+//   Substituting: LHS_L = EPSILON_Q·band·2^L = 2^L·LHS_0 ; and
+//   RHS_L = (voxel·2^L)²·(C_MAX/2^L)/8 + (band·2^L)/254 = 2^L·RHS_0.
+//   Both sides scale by 2^L, so the L=0 proof carries to every level. The OTHER
+//   M0 predicates (P1 saturation, P3 R1-non-empty) are likewise 2^L-homogeneous
+//   in their world-space terms (`USABLE_BAND_OUTER`, `VOXEL_DIAG`, `BAND_REFINE`
+//   all scale by 2^L; `EPSILON_Q` is dimensionless), so their ratios are
+//   2^L-invariant — the per-level assert block below re-proves all three anyway.
+
+/// The canonical clip-map level count: `BRICK_LEVELS` nested, camera-centered
+/// brick-cache levels (M4). Level `L` reaches `2^L`× farther at `2^L`× coarser
+/// detail. `brick.rs` is the `no_std` soundness authority for the level math; the
+/// GPU side ([`boyko_rhi_vulkan`]'s `compute.rs`) references `brick::BRICK_LEVELS`.
+///
+/// Bumping `N` is a one-line change here — the per-level const-assert block below
+/// is the soundness GATE: it re-proves the conservative-lower-bound predicates at
+/// EVERY level `0..BRICK_LEVELS`, so a coarser level that breaks the EPSILON_Q
+/// dominance fails the build rather than silently emitting an over-reporting brick.
+pub const BRICK_LEVELS: usize = 3;
+
+/// The near-field (level-0) brick cell edge in world units (`2.0`). The width one
+/// apron'd `BRICK_ALLOC³` atlas tile covers at the finest level. Equals
+/// `BRICK_INTERIOR · VOXEL_SIZE` (the same identity the M2 grid pins in
+/// `compute.rs`), made a `brick.rs` const so the clip-map level math derives from
+/// the `no_std` soundness authority.
+pub const M2_BRICK_WORLD: f32 = BRICK_INTERIOR as f32 * VOXEL_SIZE; // 8 * 0.25 = 2.0
+
+/// The per-axis cell count of ONE clip-map level's brick grid (`4`). Each level is
+/// a `M2_GRID_DIM³` lattice of its own `brick_world_at_level` cells, camera-centered
+/// and snapped to its own grid ([`snapped_level_origin`]). Mirrors the M2 grid edge.
+pub const M2_GRID_DIM: u32 = 4;
+
+// The level-0 per-level values must reduce to the pinned single-level constants —
+// a desync (e.g. a brick-scale tweak that forgets the clip-map) is a build error.
+const _: () = assert!(M2_BRICK_WORLD == 2.0);
+const _: () = assert!(brick_world_at_level(0) == M2_BRICK_WORLD);
+const _: () = assert!(voxel_size_at_level(0) == VOXEL_SIZE);
+const _: () = assert!(band_half_at_level(0) == BAND_HALF_STORE);
+const _: () = assert!(c_max_at_level(0) == C_MAX);
+
+/// The world cell edge of clip-map level `level`: `M2_BRICK_WORLD · 2^level`
+/// (`2.0, 4.0, 8.0` for levels `0, 1, 2`). A coarser level's cell is `2^level`×
+/// wider, so it reaches `2^level`× farther from the camera.
+#[inline]
+pub const fn brick_world_at_level(level: u32) -> f32 {
+    M2_BRICK_WORLD * (1u32 << level) as f32
+}
+
+/// The world voxel width of clip-map level `level`: `VOXEL_SIZE · 2^level`
+/// (`0.25, 0.5, 1.0`). The trilinear-midpoint slack scales with the voxel SPAN,
+/// so this widening is exactly what the per-level P2 proof scales the budget by.
+#[inline]
+pub const fn voxel_size_at_level(level: u32) -> f32 {
+    VOXEL_SIZE * (1u32 << level) as f32
+}
+
+/// The store-band half-width of clip-map level `level`: `BAND_HALF_STORE · 2^level`
+/// (`0.90, 1.80, 3.60`). The store band widens WITH the voxel so the down-bias
+/// `EPSILON_Q · band_half_L` scales by `2^level` in lock-step with the curvature +
+/// quantization budget — the keystone of the per-level lower-bound proof.
+#[inline]
+pub const fn band_half_at_level(level: u32) -> f32 {
+    BAND_HALF_STORE * (1u32 << level) as f32
+}
+
+/// The maximum supported band curvature of clip-map level `level`: `C_MAX / 2^level`
+/// (`2.0, 1.0, 0.5`). Equivalently the minimum supported radius of curvature is
+/// `R_MIN · 2^level` ([`r_min_at_level`]): a coarser level promises only a
+/// `2^level`×-LARGER radius of curvature, so sharper FAR features are out of its
+/// contract and fall to the EXACT analytic fallback (never an over-report).
+#[inline]
+pub const fn c_max_at_level(level: u32) -> f32 {
+    C_MAX / (1u32 << level) as f32
+}
+
+/// The minimum supported radius of curvature of clip-map level `level`:
+/// `R_MIN · 2^level` (`0.5, 1.0, 2.0`) — the inverse-curvature view of
+/// [`c_max_at_level`] (`c_max_at_level(level) == 1.0 / r_min_at_level(level)`).
+#[inline]
+pub const fn r_min_at_level(level: u32) -> f32 {
+    R_MIN * (1u32 << level) as f32
+}
+
+/// The body-diagonal radius of one level-`level` voxel cube: `VOXEL_DIAG · 2^level`.
+/// The worst-case distance from any interior sample to its farthest bracketing
+/// corner at this level (scales with the voxel span — used by the per-level P1
+/// saturation proof).
+#[inline]
+const fn voxel_diag_at_level(level: u32) -> f32 {
+    VOXEL_DIAG * (1u32 << level) as f32
+}
+
+/// The outer trust edge of clip-map level `level`: `USABLE_BAND_OUTER · 2^level`.
+/// The largest `recon` magnitude that is a PROVEN lower bound at this level (the
+/// world-space trust radius scales with the level, exactly like the store band).
+#[inline]
+const fn usable_band_outer_at_level(level: u32) -> f32 {
+    USABLE_BAND_OUTER * (1u32 << level) as f32
+}
+
+/// The analytic hand-off band of clip-map level `level`: `BAND_REFINE · 2^level`.
+/// Inside it the marcher abandons this level's brick step for the exact analytic
+/// field (scales with the voxel span, so the hand-off stays voxel-relative).
+#[inline]
+const fn band_refine_at_level(level: u32) -> f32 {
+    BAND_REFINE * (1u32 << level) as f32
+}
+
+// ---- M4 per-level conservative-lower-bound soundness predicates (compile-time) ----
+//
+// Re-prove EVERY M0 predicate (P1 saturation, P2 EPSILON_Q dominance, P3 R1
+// non-empty) at each level L = 0..BRICK_LEVELS using the `*_at_level` values. The
+// L=0 entry is BYTE-IDENTICAL in form to the single-level M0 predicate above (the
+// existing predicate's constants, multiplied by `2^0 = 1`). A future bump to
+// `BRICK_LEVELS`, or any constant tweak that breaks the per-level dominance, FAILS
+// TO COMPILE rather than silently emitting an over-reporting (overshooting) brick.
+const _: () = {
+    let mut l = 0u32;
+    while l < BRICK_LEVELS as u32 {
+        // P1_L — saturation invariant (mirrors the M0 P1, scaled to level L).
+        assert!(
+            band_half_at_level(l)
+                >= usable_band_outer_at_level(l)
+                    + voxel_diag_at_level(l)
+                    + EPSILON_Q * band_half_at_level(l),
+            "M4: per-level store band too narrow — trusted corners can saturate (lower bound unsound)"
+        );
+        // P2_L — EPSILON_Q dominance (mirrors the M0 P2, scaled to level L): the
+        // store bias must cover the trilinear-midpoint slack + the quantization step.
+        assert!(
+            EPSILON_Q * band_half_at_level(l)
+                >= voxel_size_at_level(l) * voxel_size_at_level(l) * c_max_at_level(l) / 8.0
+                    + band_half_at_level(l) / 254.0,
+            "M4: per-level EPSILON_Q dominance broken — unsound coarse brick"
+        );
+        // P3_L — R1 non-empty (mirrors the M0 P3, scaled to level L): the analytic
+        // hand-off band lies strictly inside the outer trust edge.
+        assert!(
+            band_refine_at_level(l) < usable_band_outer_at_level(l),
+            "M4: per-level refine band >= outer trust edge — proven brick-step region R1 is empty"
+        );
+        l += 1;
+    }
+};
+
+/// The min world corner of clip-map `level`'s `M2_GRID_DIM³` brick grid, snapped to
+/// that level's OWN brick lattice and CENTERED on `camera` (anti-jitter origin).
+///
+/// Per axis the raw centered min is `camera[a] - 0.5 · M2_GRID_DIM · brick_world_L`;
+/// it is then `floor`-snapped to a multiple of `brick_world_L`. Snapping is the
+/// anti-jitter keystone: an unsnapped origin would slide continuously with the
+/// camera, so every cell's world AABB — and thus its baked brick — would shift
+/// sub-cell each frame, re-baking the whole atlas on every move. Snapping pins the
+/// grid to discrete `brick_world_L` steps, so the origin only jumps when the camera
+/// crosses a cell boundary; the cache content is then frame-stable between jumps.
+///
+/// Because `brick_world_L = M2_BRICK_WORLD · 2^level`, every coarse cell is an
+/// integer multiple (`2^level`) of a finer cell, so a coarser level's snapped grid
+/// stays PHASE-ALIGNED with every finer level (a coarse boundary always coincides
+/// with a fine boundary) — the levels nest without seams. The level extents are
+/// strictly concentric: extent_L = `M2_GRID_DIM · brick_world_L`, doubling per
+/// level, so level `L` strictly encloses level `L-1` around the shared camera.
+#[inline]
+pub fn snapped_level_origin(camera: [f32; 3], level: u32) -> [f32; 3] {
+    let brick_world = brick_world_at_level(level);
+    let half_extent = 0.5 * M2_GRID_DIM as f32 * brick_world;
+    let mut origin = [0.0f32; 3];
+    let mut a = 0;
+    while a < 3 {
+        let raw_min = camera[a] - half_extent;
+        let snapped = (raw_min / brick_world).floor() * brick_world;
+        // The snapped origin is grid-aligned: a multiple of `brick_world` within fp
+        // tolerance. `floor`-then-multiply is exact for the magnitudes in play
+        // (centers in [-2, 2], brick_world in {2, 4, 8}); the tolerance only guards
+        // the f32 round-trip of the divide/multiply.
+        debug_assert!(
+            ((snapped / brick_world).round() * brick_world - snapped).abs() <= 1e-3 * brick_world,
+            "snapped_level_origin: result not aligned to the level's brick grid"
+        );
+        origin[a] = snapped;
+        a += 1;
+    }
+    origin
+}
+
 // ---- The three marcher trust regions (the M0 contract; M1 wires the marcher) ----
 //
 // `recon` is the trilinear-reconstructed brick value at the sample point. The
@@ -3045,6 +3257,124 @@ mod tests {
                 c.iter().all(|v| v.is_finite()),
                 "jcgt_cubic_coeffs produced a non-finite coeff {c:?} for finite inputs"
             );
+        }
+    }
+
+    // ─── M4 clip-map LOD: per-level math (deterministic unit checks) ──────────────
+    //
+    // The per-level conservative-lower-bound PROPTEST (re-baking + worst-case offset
+    // at every level) is the tester's job; these are the pure-math invariants.
+
+    /// `brick_world_at_level` doubles per level off the `M2_BRICK_WORLD = 2.0` base.
+    #[test]
+    fn brick_world_doubles_per_level() {
+        assert_eq!(brick_world_at_level(0), 2.0);
+        assert_eq!(brick_world_at_level(1), 4.0);
+        assert_eq!(brick_world_at_level(2), 8.0);
+    }
+
+    /// `voxel_size_at_level` doubles per level off the `VOXEL_SIZE = 0.25` base.
+    #[test]
+    fn voxel_size_doubles_per_level() {
+        assert_eq!(voxel_size_at_level(0), 0.25);
+        assert_eq!(voxel_size_at_level(1), 0.5);
+        assert_eq!(voxel_size_at_level(2), 1.0);
+    }
+
+    /// `band_half_at_level` follows `2^L`; `c_max_at_level` follows `2^-L`; and
+    /// `r_min_at_level` is the inverse of `c_max_at_level` at every level.
+    #[test]
+    fn band_and_curvature_follow_powers_of_two() {
+        for l in 0..BRICK_LEVELS as u32 {
+            let scale = (1u32 << l) as f32;
+            assert_eq!(band_half_at_level(l), BAND_HALF_STORE * scale);
+            assert_eq!(c_max_at_level(l), C_MAX / scale);
+            assert_eq!(r_min_at_level(l), R_MIN * scale);
+            // c_max_L == 1 / r_min_L (the two views of the curvature floor agree).
+            assert!((c_max_at_level(l) - 1.0 / r_min_at_level(l)).abs() <= 1e-6);
+        }
+        assert_eq!(band_half_at_level(0), 0.90);
+        assert_eq!(c_max_at_level(0), 2.0);
+        assert_eq!(c_max_at_level(2), 0.5);
+    }
+
+    /// The level-0 per-level values reduce EXACTLY to the single-level M0 constants
+    /// (the clip-map's finest level is byte-identical to the pre-M4 brick scale).
+    #[test]
+    fn level_zero_reduces_to_single_level_constants() {
+        assert_eq!(brick_world_at_level(0), M2_BRICK_WORLD);
+        assert_eq!(voxel_size_at_level(0), VOXEL_SIZE);
+        assert_eq!(band_half_at_level(0), BAND_HALF_STORE);
+        assert_eq!(c_max_at_level(0), C_MAX);
+        assert_eq!(r_min_at_level(0), R_MIN);
+    }
+
+    /// `snapped_level_origin` is grid-aligned per axis at every level: each axis is
+    /// an integer multiple of that level's `brick_world` (the anti-jitter contract).
+    #[test]
+    fn snapped_origin_is_grid_aligned_per_axis() {
+        let cameras = [
+            [0.0, 0.0, 0.0],
+            [0.13, -1.77, 2.41],
+            [-3.5, 3.5, -0.01],
+            [5.99, -6.01, 0.5],
+            [-0.5, 1.0, -2.0],
+        ];
+        for &cam in &cameras {
+            for l in 0..BRICK_LEVELS as u32 {
+                let bw = brick_world_at_level(l);
+                let origin = snapped_level_origin(cam, l);
+                for a in 0..3 {
+                    let multiple = origin[a] / bw;
+                    assert!(
+                        (multiple - multiple.round()).abs() <= 1e-4,
+                        "axis {a} of level {l} origin {} not a multiple of brick_world {bw}",
+                        origin[a]
+                    );
+                    // The snapped origin encloses the camera from below on this axis
+                    // (the centered min never overshoots past the camera).
+                    assert!(
+                        origin[a] <= cam[a],
+                        "axis {a} of level {l}: snapped min {} must be <= camera {}",
+                        origin[a],
+                        cam[a]
+                    );
+                }
+            }
+        }
+    }
+
+    /// The clip-map levels are STRICTLY concentric: each level's world extent
+    /// `[origin, origin + M2_GRID_DIM·brick_world]` strictly contains the previous
+    /// level's extent on every axis (the nesting the marcher's level-select relies on).
+    #[test]
+    fn level_extents_are_strictly_nested() {
+        let cameras = [[0.0, 0.0, 0.0], [0.37, -1.2, 2.0], [-2.5, 1.9, -3.1]];
+        for &cam in &cameras {
+            for l in 1..BRICK_LEVELS as u32 {
+                let inner_bw = brick_world_at_level(l - 1);
+                let outer_bw = brick_world_at_level(l);
+                let inner_min = snapped_level_origin(cam, l - 1);
+                let outer_min = snapped_level_origin(cam, l);
+                let inner_span = M2_GRID_DIM as f32 * inner_bw;
+                let outer_span = M2_GRID_DIM as f32 * outer_bw;
+                // The coarser extent is strictly wider (doubles per level).
+                assert!(outer_span > inner_span);
+                for a in 0..3 {
+                    let inner_max = inner_min[a] + inner_span;
+                    let outer_max = outer_min[a] + outer_span;
+                    assert!(
+                        outer_min[a] <= inner_min[a] && outer_max >= inner_max,
+                        "axis {a}, level {l}: outer [{}, {outer_max}] must contain inner [{}, {inner_max}]",
+                        outer_min[a],
+                        inner_min[a]
+                    );
+                    // Phase alignment: the coarse boundary coincides with a fine
+                    // boundary (the coarse cell is an integer multiple of the fine one).
+                    let ratio = outer_bw / inner_bw;
+                    assert!((ratio - 2.0).abs() <= 1e-6, "coarse cell must be 2x the fine cell");
+                }
+            }
         }
     }
 }

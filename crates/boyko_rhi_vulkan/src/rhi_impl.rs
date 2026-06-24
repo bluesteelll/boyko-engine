@@ -69,10 +69,12 @@ const MAX_VERTEX_ATTRIBUTES: usize = 8;
 
 /// The maximum number of bindings a single bind group / its layout declares inline
 /// without heap allocation (Phase-6 S0 rung 6). Sized for the lighting L0/L1 inputs
-/// on a SINGLE resolve set with headroom (resolve grows to 10; the marcher vocab set
-/// to 9 — see the agnostic `boyko_rhi::MAX_BIND_GROUP_BINDINGS` docstring). A
-/// `debug_assert!` traps an over-count at `create_bind_group_layout`/`create_bind_group`.
-const MAX_BIND_GROUP_BINDINGS: usize = 12;
+/// on a SINGLE resolve set with headroom, then raised to 16 for the SDF clip-map
+/// (M4) per-level bindings (`N = brick::BRICK_LEVELS` levels × 2 resources on top of
+/// the 0..=8 gbuffer bindings = 15 — see the agnostic
+/// `boyko_rhi::MAX_BIND_GROUP_BINDINGS` docstring). A `debug_assert!` traps an
+/// over-count at `create_bind_group_layout`/`create_bind_group`.
+const MAX_BIND_GROUP_BINDINGS: usize = 16;
 
 // The bind-group create path keeps its own copy of the cap so a future divergence
 // from the agnostic `boyko_rhi::MAX_BIND_GROUP_BINDINGS` (the desc-side cap) breaks
