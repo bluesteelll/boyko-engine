@@ -274,8 +274,10 @@ pub struct SdfEditAabb {
 ///   was before the most recent mutation of edit `i` ([`set_edit`](Self::set_edit)
 ///   / [`move_edit`](Self::move_edit)). The M3 dirty set is the union over edits
 ///   where `aabbs[i] != prev_aabb[i]` of `aabbs[i] ∪ prev_aabb[i]` (the swept
-///   old+new region). For a fresh [`push`](Self::push) `prev_aabb[i] == aabbs[i]`
-///   (no ghost). [`clear_dirty`](Self::clear_dirty) re-snapshots it after a bake.
+///   old+new region). A fresh [`push`](Self::push) seeds `prev_aabb[i]` to a
+///   DEGENERATE point at the edit center (inside `aabbs[i]`), so the new edit dirties
+///   over its NEW AABB only — no ghost, yet it DOES bake incrementally.
+///   [`clear_dirty`](Self::clear_dirty) re-snapshots it after a bake.
 ///   COLD: read only by the M3 dirty-set classifier, never by the field-fold hot
 ///   path.
 #[repr(C)]
@@ -397,8 +399,15 @@ impl SdfEditField {
     /// at [`SDF_EDIT_BAND_HALF`]). Returns `false` (and ignores the edit) once the
     /// list is full ([`MAX_SDF_EDITS`]), matching the shader's edit-count clamp.
     ///
-    /// A fresh push seeds `prev_aabb[i] == aabbs[i]` (the new edit has NO prior
-    /// location, so it leaves no ghost — the M3 dirty set covers only the new AABB).
+    /// A fresh push's PREVIOUS region is EMPTY (the slot was unused), so the new edit
+    /// must be DIRTY over its NEW AABB only. `prev_aabb[i]` is seeded to a DEGENERATE
+    /// point at the edit's center: it lies inside the new AABB, so the union-dirty
+    /// rule (`aabbs[i] ∪ prev_aabb[i]`) collapses to `aabbs[i]` (the new region, no
+    /// ghost at a non-existent old location), while the point differs from the
+    /// extent-bearing `aabbs[i]`, so [`edit_is_dirty`](Self::edit_is_dirty) is TRUE
+    /// and the pushed edit's tile bakes incrementally. The next
+    /// [`clear_dirty`](Self::clear_dirty) re-snapshots `prev_aabb := aabbs`, so the
+    /// push-dirty holds only until the first bake consumes it.
     ///
     /// Does NOT bump `gen` — the caller stamps a coherent batch with
     /// [`bump_gen`](Self::bump_gen) once after a run of pushes.
@@ -411,9 +420,14 @@ impl SdfEditField {
         let aabb = edit_aabb(&e, SDF_EDIT_BAND_HALF);
         self.edits[i] = e;
         self.aabbs[i] = aabb;
-        // A new edit has no prior location: seed prev = new so it dirties only its
-        // own (new) AABB — no ghost at a non-existent old location.
-        self.prev_aabb[i] = aabb;
+        // A new edit's prior region is EMPTY: seed prev to a degenerate POINT at the
+        // edit center. It is contained in `aabb` (band_half + smoothness >= band_half
+        // > 0 skin makes `aabb` strictly enclose the center), so the swept union
+        // `aabb ∪ prev` equals `aabb` — the new region only, no spurious dirty area.
+        // The point also differs from the extent-bearing `aabb`, so `edit_is_dirty(i)`
+        // is true and the pushed edit's tile bakes incrementally.
+        let center = [e.center[0], e.center[1], e.center[2]];
+        self.prev_aabb[i] = SdfEditAabb { min: center, max: center };
         self.count += 1;
         true
     }

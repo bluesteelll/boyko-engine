@@ -2199,6 +2199,26 @@ fn bake_atlas_cell(
 pub fn m2_dirty_cell_bbox(field: &SdfEditField) -> Option<([u32; 3], [u32; 3])> {
     let dirty = dirty_world_aabb(field)?;
 
+    // Inflate by the 1-voxel APRON reach so the box matches `m2_cell_is_dirty` exactly:
+    // a SURFACE cell bakes apron voxels one `M2_VOXEL_SIZE` past its interior faces
+    // ([`fill_brick`]), so a dirty region touching only a cell's apron band still dirties
+    // it (the seed=0 hard-scene high-face apron divergence). Both the box here and the
+    // per-cell test must skin the SAME apron margin, or the box would miss an apron-only
+    // dirty cell that `m2_cell_is_dirty` flags (a ghost the upload would never patch).
+    const APRON_WORLD: f32 = boyko_sdf_math::brick::APRON as f32 * M2_VOXEL_SIZE;
+    let dirty = SdfEditAabb {
+        min: [
+            dirty.min[0] - APRON_WORLD,
+            dirty.min[1] - APRON_WORLD,
+            dirty.min[2] - APRON_WORLD,
+        ],
+        max: [
+            dirty.max[0] + APRON_WORLD,
+            dirty.max[1] + APRON_WORLD,
+            dirty.max[2] + APRON_WORLD,
+        ],
+    };
+
     // Map the dirty world AABB to the inclusive cell index span on each axis. The grid is
     // `M2_GRID_DIM` cells of `M2_BRICK_WORLD`, origin `M2_GRID_ORIGIN`. A cell `c` overlaps the
     // dirty AABB on an axis iff `cell_min(c) <= dirty.max` and `cell_min(c) + M2_BRICK_WORLD >=
@@ -2267,18 +2287,33 @@ pub fn rebake_dirty_brick_atlas(
     surface_cells
 }
 
-/// Whether M2 grid cell `cell` overlaps the world-space `dirty` AABB — the per-cell
-/// dirty test the M2 incremental rebake (and its tester) gates on. Mirrors
-/// [`boyko_sdf_math::brick::cell_is_dirty`] for the M2 grid's own consts.
+/// Whether M2 grid cell `cell`'s baked-VOXEL footprint overlaps the world-space
+/// `dirty` AABB — the per-cell dirty test the M2 incremental rebake (and its tester)
+/// gates on. Mirrors [`boyko_sdf_math::brick::cell_is_dirty`] for the M2 grid's own
+/// consts, with the apron correction below.
+///
+/// # The APRON footprint (the M3 atlas-only correction)
+///
+/// [`fill_brick`] bakes a 1-voxel APRON ([`boyko_sdf_math::brick::APRON`]) on every
+/// face: a SURFACE cell's stored voxels sample world points reaching one
+/// [`M2_VOXEL_SIZE`] BEYOND the cell's `[cell_min, cell_min + M2_BRICK_WORLD]`
+/// interior AABB. So a dirty region that touches ONLY a cell's apron band (without
+/// reaching the interior AABB) still changes that cell's stored apron voxels — and a
+/// bare interior-AABB overlap test would MISS it, leaving stale apron bytes (the
+/// seed=0 hard-scene divergence at the low-face apron voxel). Inflate the tested cell
+/// AABB by `APRON * M2_VOXEL_SIZE` on every face so the apron band is covered. The
+/// apron-LESS pointer grid ([`boyko_sdf_math::brick::cell_is_dirty`]) needs no such
+/// margin — `classify_brick` reads only the bare cell AABB + the cell center.
 #[inline]
 pub fn m2_cell_is_dirty(cell: [u32; 3], dirty: &SdfEditAabb) -> bool {
+    const APRON_WORLD: f32 = boyko_sdf_math::brick::APRON as f32 * M2_VOXEL_SIZE;
     let cmin = m2_cell_min(cell);
     let cell_aabb = SdfEditAabb {
-        min: cmin,
+        min: [cmin[0] - APRON_WORLD, cmin[1] - APRON_WORLD, cmin[2] - APRON_WORLD],
         max: [
-            cmin[0] + M2_BRICK_WORLD,
-            cmin[1] + M2_BRICK_WORLD,
-            cmin[2] + M2_BRICK_WORLD,
+            cmin[0] + M2_BRICK_WORLD + APRON_WORLD,
+            cmin[1] + M2_BRICK_WORLD + APRON_WORLD,
+            cmin[2] + M2_BRICK_WORLD + APRON_WORLD,
         ],
     };
     aabb_overlap(&cell_aabb, dirty)
