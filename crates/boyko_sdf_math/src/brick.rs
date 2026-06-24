@@ -180,13 +180,93 @@ pub const USABLE_BAND: f32 = USABLE_BAND_OUTER;
 /// face shares that surface, so it is NOT provably empty — it must classify as
 /// `Surface`. Treating touch as overlap keeps the skip conservative.
 #[inline]
-fn aabb_overlap(a: &SdfEditAabb, b: &SdfEditAabb) -> bool {
+pub fn aabb_overlap(a: &SdfEditAabb, b: &SdfEditAabb) -> bool {
     a.min[0] <= b.max[0]
         && a.max[0] >= b.min[0]
         && a.min[1] <= b.max[1]
         && a.max[1] >= b.min[1]
         && a.min[2] <= b.max[2]
         && a.max[2] >= b.min[2]
+}
+
+/// The minimal AABB enclosing both `a` and `b` (the union bound).
+#[inline]
+pub fn aabb_union(a: &SdfEditAabb, b: &SdfEditAabb) -> SdfEditAabb {
+    SdfEditAabb {
+        min: [
+            a.min[0].min(b.min[0]),
+            a.min[1].min(b.min[1]),
+            a.min[2].min(b.min[2]),
+        ],
+        max: [
+            a.max[0].max(b.max[0]),
+            a.max[1].max(b.max[1]),
+            a.max[2].max(b.max[2]),
+        ],
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// M3 — the INCREMENTAL DIRTY SET (the dynamic-edit enabler).
+//
+// M2 re-bakes the WHOLE atlas / pointer grid on every `gen` change. M3 re-bakes
+// ONLY the cells whose edits changed. The dirty region is derived ENTIRELY from
+// the ONE authority ([`SdfEditField`]) — its `aabbs` (current) vs `prev_aabb`
+// (pre-mutation) ledger (principle 0: no side state).
+//
+// THE union-dirty rule (the #1 correctness guard): a MOVED edit's dirty region is
+// `aabbs[i] ∪ prev_aabb[i]` — the SWEPT old+new bound. Covering BOTH locations is
+// what clears the ghost at the edit's previous position: re-baking the new AABB
+// alone would re-classify the new tiles to `Surface` but leave the OLD tiles still
+// holding the moved edit's surface (a phantom). The union sweeps the old tiles too,
+// re-classifying them empty.
+//
+// For ≤16 edits the linear scan here is trivial. TODO(scale): for HUNDREDS+ of
+// edits an LBVH over the edit AABBs would prune the per-cell overlap test from O(E)
+// to O(log E); not built now (the campaign caps at MAX_SDF_EDITS = 16).
+// ════════════════════════════════════════════════════════════════════════════
+
+/// The combined world-space dirty AABB of `field`: the union over every LIVE edit
+/// `i` with `aabbs[i] != prev_aabb[i]` of `aabbs[i] ∪ prev_aabb[i]` (the swept
+/// old+new region — the union-dirty rule). Returns `None` when NO live edit is
+/// dirty (nothing to re-bake — the caller keeps the prior atlas as-is).
+///
+/// A cell is DIRTY iff its world AABB overlaps this bound ([`aabb_overlap`]); see
+/// [`build_dirty_pointer_grid`] (M1) and the M2 atlas's `rebake_dirty`.
+#[inline]
+pub fn dirty_world_aabb(field: &SdfEditField) -> Option<SdfEditAabb> {
+    let n = field.count as usize;
+    let mut acc: Option<SdfEditAabb> = None;
+    for i in 0..n {
+        if !field.edit_is_dirty(i) {
+            continue;
+        }
+        // The swept old+new region for this edit — the union-dirty rule. Covering
+        // BOTH the new AABB and the previous one is what clears the ghost at the
+        // edit's old location.
+        let swept = aabb_union(&field.aabbs[i], &field.prev_aabb[i]);
+        acc = Some(match acc {
+            Some(u) => aabb_union(&u, &swept),
+            None => swept,
+        });
+    }
+    acc
+}
+
+/// Whether cell `(ix, iy, iz)` of `grid` overlaps the world-space `dirty` AABB —
+/// the per-cell DIRTY test the incremental pointer-grid / atlas rebake gates on.
+#[inline]
+pub fn cell_is_dirty(grid: &PointerGrid, ix: u32, iy: u32, iz: u32, dirty: &SdfEditAabb) -> bool {
+    let cmin = grid.cell_min(ix, iy, iz);
+    let cell_aabb = SdfEditAabb {
+        min: cmin,
+        max: [
+            cmin[0] + grid.brick_world,
+            cmin[1] + grid.brick_world,
+            cmin[2] + grid.brick_world,
+        ],
+    };
+    aabb_overlap(&cell_aabb, dirty)
 }
 
 /// Classifies a brick's occupancy against the authority edit list (C2).
@@ -377,6 +457,53 @@ pub fn build_pointer_grid(field: &SdfEditField, grid: &PointerGrid, out: &mut [u
             }
         }
     }
+}
+
+/// Incrementally re-classifies ONLY the dirty cells of an ALREADY-built pointer
+/// grid (M3) — the dynamic-edit fast path for [`build_pointer_grid`].
+///
+/// `out` MUST be the grid `build_pointer_grid` last filled (its un-dirtied cells
+/// hold the correct prior classes). For each cell overlapping the authority's
+/// [`dirty_world_aabb`], re-runs [`classify_brick`] and overwrites that cell;
+/// every other cell is left untouched. Returns the number of cells re-classified
+/// (`0` when nothing was dirty). The result is BIT-IDENTICAL to a full
+/// [`build_pointer_grid`] over the same authority (the correctness invariant): a
+/// non-dirty cell's class is provably unchanged because no edit's swept region
+/// reaches it, so its `classify_brick` result is the same value already stored.
+///
+/// The caller [`SdfEditField::clear_dirty`](crate::SdfEditField::clear_dirty)s the
+/// authority after this so the next mutation diffs against the freshly-baked state.
+pub fn build_dirty_pointer_grid(field: &SdfEditField, grid: &PointerGrid, out: &mut [u32]) -> u32 {
+    debug_assert_eq!(
+        out.len(),
+        grid.cell_count(),
+        "pointer-grid destination must have grid.cell_count() cells"
+    );
+
+    let Some(dirty) = dirty_world_aabb(field) else {
+        return 0; // No edit changed: the prior grid is already current.
+    };
+
+    let w = grid.dims[0];
+    let h = grid.dims[1];
+    let d = grid.dims[2];
+    let mut touched = 0u32;
+    for iz in 0..d {
+        for iy in 0..h {
+            for ix in 0..w {
+                if !cell_is_dirty(grid, ix, iy, iz, &dirty) {
+                    continue;
+                }
+                let cell_min = grid.cell_min(ix, iy, iz);
+                let class =
+                    classify_brick(field, cell_min, grid.brick_world, crate::SDF_EDIT_BAND_HALF);
+                let idx = (ix + iy * w + iz * w * h) as usize;
+                out[idx] = class as u32;
+                touched += 1;
+            }
+        }
+    }
+    touched
 }
 
 /// The minimum per-axis progress a brick-exit step makes (world units) — the

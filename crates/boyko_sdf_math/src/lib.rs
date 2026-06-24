@@ -270,6 +270,14 @@ pub struct SdfEditAabb {
 /// - `aabbs`   — the per-edit conservative bounds (`aabbs[i]` bounds `edits[i]`),
 ///   recomputed on every [`push`](SdfEditField::push). COLD: read only by the
 ///   brick classifier, never by the field-fold hot path.
+/// - `prev_aabb` — the per-edit PREVIOUS bound: `prev_aabb[i]` is what `aabbs[i]`
+///   was before the most recent mutation of edit `i` ([`set_edit`](Self::set_edit)
+///   / [`move_edit`](Self::move_edit)). The M3 dirty set is the union over edits
+///   where `aabbs[i] != prev_aabb[i]` of `aabbs[i] ∪ prev_aabb[i]` (the swept
+///   old+new region). For a fresh [`push`](Self::push) `prev_aabb[i] == aabbs[i]`
+///   (no ghost). [`clear_dirty`](Self::clear_dirty) re-snapshots it after a bake.
+///   COLD: read only by the M3 dirty-set classifier, never by the field-fold hot
+///   path.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct SdfEditField {
@@ -287,6 +295,10 @@ pub struct SdfEditField {
     pub _pad: [u32; 2],
     /// Per-edit conservative bounds — `aabbs[i]` bounds `edits[i]`. COLD.
     pub aabbs: [SdfEditAabb; MAX_SDF_EDITS],
+    /// Per-edit PREVIOUS bounds — `prev_aabb[i]` is `aabbs[i]`'s value before the
+    /// last mutation of edit `i` (the M3 union-dirty rule's old-location source).
+    /// COLD: read only by the M3 dirty-set classifier, never by the hot fold.
+    pub prev_aabb: [SdfEditAabb; MAX_SDF_EDITS],
 }
 
 /// Brick occupancy class — the result of [`crate::brick::classify_brick`].
@@ -377,12 +389,16 @@ impl SdfEditField {
             r#gen: 0,
             _pad: [0; 2],
             aabbs: [placeholder_aabb; MAX_SDF_EDITS],
+            prev_aabb: [placeholder_aabb; MAX_SDF_EDITS],
         }
     }
 
     /// Appends one edit, recomputing its conservative `aabbs[i]` ([`edit_aabb`]
     /// at [`SDF_EDIT_BAND_HALF`]). Returns `false` (and ignores the edit) once the
     /// list is full ([`MAX_SDF_EDITS`]), matching the shader's edit-count clamp.
+    ///
+    /// A fresh push seeds `prev_aabb[i] == aabbs[i]` (the new edit has NO prior
+    /// location, so it leaves no ghost — the M3 dirty set covers only the new AABB).
     ///
     /// Does NOT bump `gen` — the caller stamps a coherent batch with
     /// [`bump_gen`](Self::bump_gen) once after a run of pushes.
@@ -392,10 +408,67 @@ impl SdfEditField {
         if i >= MAX_SDF_EDITS {
             return false;
         }
+        let aabb = edit_aabb(&e, SDF_EDIT_BAND_HALF);
         self.edits[i] = e;
-        self.aabbs[i] = edit_aabb(&e, SDF_EDIT_BAND_HALF);
+        self.aabbs[i] = aabb;
+        // A new edit has no prior location: seed prev = new so it dirties only its
+        // own (new) AABB — no ghost at a non-existent old location.
+        self.prev_aabb[i] = aabb;
         self.count += 1;
         true
+    }
+
+    /// Replaces a LIVE edit in place (the dynamic-edit path), recording its OLD
+    /// `aabbs[i]` into `prev_aabb[i]` BEFORE overwriting so the M3 union-dirty rule
+    /// can sweep both the old and the new region. `i` MUST be `< count` (a debug
+    /// assert traps an out-of-range index — overwriting a dead slot is a caller bug).
+    ///
+    /// Does NOT bump `gen` — the caller stamps a coherent batch with
+    /// [`bump_gen`](Self::bump_gen) once after a run of edits. The brick atlas
+    /// re-bakes ONLY the dirtied cells on the next `gen` change
+    /// ([`crate::brick::dirty_world_aabb`]).
+    #[inline]
+    pub fn set_edit(&mut self, i: usize, e: SdfEdit) {
+        debug_assert!(
+            (i as u32) < self.count,
+            "set_edit index must address a live edit (< count)"
+        );
+        // Record the OLD bound before overwriting — the union-dirty rule needs the
+        // pre-mutation AABB to clear the ghost at the edit's previous location.
+        self.prev_aabb[i] = self.aabbs[i];
+        self.edits[i] = e;
+        self.aabbs[i] = edit_aabb(&e, SDF_EDIT_BAND_HALF);
+    }
+
+    /// Moves a LIVE edit's center to `center` (the common dynamic case — a
+    /// translating brush), keeping its primitive/op/smoothness. A thin
+    /// convenience over [`set_edit`](Self::set_edit) that preserves the old AABB in
+    /// `prev_aabb[i]` (so the swept old→new region dirties, leaving no ghost).
+    #[inline]
+    pub fn move_edit(&mut self, i: usize, center: [f32; 3]) {
+        debug_assert!(
+            (i as u32) < self.count,
+            "move_edit index must address a live edit (< count)"
+        );
+        let mut e = self.edits[i];
+        e.center = [center[0], center[1], center[2], e.center[3]];
+        self.set_edit(i, e);
+    }
+
+    /// Re-snapshots `prev_aabb := aabbs` (clears the dirty set): after a bake has
+    /// consumed the dirty region, the previous-AABB ledger is brought current so the
+    /// NEXT mutation diffs against the freshly-baked state, not the stale pre-bake
+    /// one. The render path calls this right after a `rebake_dirty`.
+    #[inline]
+    pub fn clear_dirty(&mut self) {
+        self.prev_aabb = self.aabbs;
+    }
+
+    /// Whether edit `i` is dirty since the last [`clear_dirty`](Self::clear_dirty)
+    /// (`aabbs[i] != prev_aabb[i]`). A live-index helper for the M3 dirty-set fold.
+    #[inline]
+    pub fn edit_is_dirty(&self, i: usize) -> bool {
+        self.aabbs[i] != self.prev_aabb[i]
     }
 
     /// Bumps the generation stamp (wrapping) — the cache key the brick atlas keys

@@ -74,12 +74,32 @@ fn m2_brick_atlas_creates_and_uploads_on_device() {
         .expect("M2 brick atlas should create + bake + upload on a Vulkan device");
     assert_eq!(atlas.encoding(), chosen, "atlas encoding must match the device probe");
 
-    // A re-bake (the per-gen path) must also run clean.
+    // A re-bake (the per-gen full-rebuild path) must also run clean.
     atlas
         .rebake(&ctx, &field)
         .expect("M2 brick atlas rebake should upload validation-clean");
 
-    // The validation messenger must be silent across the create + the two uploads.
+    // M3 — the INCREMENTAL dirty rebake (the dynamic-edit fast path). Move the carver edit, bump
+    // the gen, and re-bake ONLY the dirty cells via the sub-region upload. The prior full bake
+    // seeded `prev_aabb`, so moving edit 1 dirties the swept old+new region (the union-dirty rule
+    // clears the ghost at the old location). It MUST run validation-clean.
+    let mut moved = field;
+    moved.move_edit(1, [0.6, 0.0, 0.0]);
+    moved.bump_gen();
+    let uploaded = atlas
+        .rebake_dirty(&ctx, &moved)
+        .expect("M2 brick atlas rebake_dirty should upload validation-clean");
+    assert!(uploaded, "moving an edit must dirty at least one cell (an upload must run)");
+    // Snapshot the dirty ledger so a subsequent edit diffs against the freshly-baked state.
+    moved.clear_dirty();
+
+    // A `rebake_dirty` with NO change must be a no-op (no submit, atlas already current).
+    let noop = atlas
+        .rebake_dirty(&ctx, &moved)
+        .expect("M2 brick atlas rebake_dirty (no change) should not error");
+    assert!(!noop, "an unchanged authority must not upload");
+
+    // The validation messenger must be silent across the create + the full + the dirty uploads.
     let state = ctx
         .debug_state()
         .expect("invariant: validation enabled => a debug-messenger state is present");

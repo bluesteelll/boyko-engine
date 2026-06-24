@@ -61,10 +61,10 @@ use boyko_sdf_math::brick::{PointerGrid, dist_to_brick_exit};
 // host golden mirror (`golden_composite_pixel_brick_m2`) and the atlas baker (`bake_brick_atlas`)
 // drive — the SAME `boyko_sdf_math::brick` oracle the GPU marcher mirrors bit-for-bit.
 use boyko_sdf_math::brick::{
-    BRICK_ALLOC, BRICK_INTERIOR, BRICK_VOXELS, brick_cubic_hit, classify_brick, decode_snorm8,
-    fill_brick,
+    BRICK_ALLOC, BRICK_INTERIOR, BRICK_VOXELS, aabb_overlap, brick_cubic_hit, classify_brick,
+    decode_snorm8, dirty_world_aabb, fill_brick,
 };
-use boyko_sdf_math::{BrickClass, SDF_EDIT_BAND_HALF, SdfEditField};
+use boyko_sdf_math::{BrickClass, SDF_EDIT_BAND_HALF, SdfEditAabb, SdfEditField};
 
 use crate::ffi::VkResult;
 use crate::memory::MemoryError;
@@ -2109,48 +2109,179 @@ pub fn bake_brick_atlas(field: &SdfEditField, encoding: AtlasEncoding, out: &mut
     for cz in 0..M2_GRID_DIM {
         for cy in 0..M2_GRID_DIM {
             for cx in 0..M2_GRID_DIM {
-                let cell = [cx, cy, cz];
-                let cell_min = m2_cell_min(cell);
-                let class = classify_brick(field, cell_min, M2_BRICK_WORLD, SDF_EDIT_BAND_HALF);
-                if class != BrickClass::Surface {
-                    continue; // EMPTY cells: their tile voxels stay 0 (never sampled).
-                }
-                surface_cells += 1;
-
-                // Bake the apron'd tile from the authority, then scatter it into the dense atlas at
-                // the cell's atlas-voxel origin (the SAME `tile * BRICK_ALLOC` the shader addresses).
-                fill_brick(field, cell_min, M2_VOXEL_SIZE, M2_BAND_HALF, &mut tile);
-                let [ox, oy, oz] = m2_tile_atlas_origin(cell);
-                const W: usize = BRICK_ALLOC;
-                for lz in 0..W {
-                    for ly in 0..W {
-                        for lx in 0..W {
-                            let byte = tile[lx + ly * W + lz * W * W];
-                            let vx = ox + lx as u32;
-                            let vy = oy + ly as u32;
-                            let vz = oz + lz as u32;
-                            let vi = atlas_voxel_index(vx, vy, vz);
-                            match encoding {
-                                AtlasEncoding::Snorm8 => {
-                                    out[vi] = byte as u8;
-                                }
-                                AtlasEncoding::Sfloat16 => {
-                                    // Store the DECODED normalized value (in [-1, 1]); the shader's
-                                    // `m2_decode` multiplies by `band_half`, so the f16 lane carries
-                                    // the same normalized value the snorm hardware decode returns.
-                                    let n = decode_snorm8(byte, 1.0);
-                                    let h = f16_from_f32(n).to_le_bytes();
-                                    out[vi * 2] = h[0];
-                                    out[vi * 2 + 1] = h[1];
-                                }
-                            }
-                        }
-                    }
+                if bake_atlas_cell(field, encoding, [cx, cy, cz], &mut tile, out) {
+                    surface_cells += 1;
                 }
             }
         }
     }
     surface_cells
+}
+
+/// Bakes ONE M2 grid `cell` into the staging atlas `out` (the shared per-cell step
+/// of [`bake_brick_atlas`] and [`rebake_dirty_brick_atlas`]). Classifies the cell;
+/// a SURFACE cell's apron'd tile is filled ([`fill_brick`]) and scattered at the
+/// cell's atlas-voxel origin; an EMPTY cell ZEROES its tile region (so a cell that
+/// transitioned SURFACE→EMPTY in M3 leaves no stale surface — the same all-zero
+/// mid-band the full baker leaves an empty cell at). `tile` is a caller-owned
+/// scratch buffer (reused across cells to avoid a per-cell stack zero). Returns
+/// whether the cell was SURFACE.
+///
+/// FULL/INCREMENTAL BIT-IDENTITY: the full baker visits every cell exactly once;
+/// the incremental baker visits ONLY dirty cells. A non-dirty SURFACE cell's bytes
+/// are provably unchanged (its tile fold reads the SAME edits), so skipping it
+/// leaves the staging byte-identical to a full re-bake — hence `rebake_dirty`'s
+/// atlas equals `rebake`'s.
+#[inline]
+fn bake_atlas_cell(
+    field: &SdfEditField,
+    encoding: AtlasEncoding,
+    cell: [u32; 3],
+    tile: &mut [i8; BRICK_VOXELS],
+    out: &mut [u8],
+) -> bool {
+    const W: usize = BRICK_ALLOC;
+    let cell_min = m2_cell_min(cell);
+    let class = classify_brick(field, cell_min, M2_BRICK_WORLD, SDF_EDIT_BAND_HALF);
+    let is_surface = class == BrickClass::Surface;
+    let [ox, oy, oz] = m2_tile_atlas_origin(cell);
+
+    if is_surface {
+        // Bake the apron'd tile from the authority, then scatter it into the dense atlas at
+        // the cell's atlas-voxel origin (the SAME `tile * BRICK_ALLOC` the shader addresses).
+        fill_brick(field, cell_min, M2_VOXEL_SIZE, M2_BAND_HALF, tile);
+    }
+
+    for lz in 0..W {
+        for ly in 0..W {
+            for lx in 0..W {
+                // EMPTY cells (and SURFACE→EMPTY transitions) store 0 — a mid-band code never
+                // sampled by the marcher (it enters the M2 cubic only on a SURFACE grid cell),
+                // and the SAME byte the full baker leaves an empty cell at (full/incremental parity).
+                let byte = if is_surface { tile[lx + ly * W + lz * W * W] } else { 0i8 };
+                let vx = ox + lx as u32;
+                let vy = oy + ly as u32;
+                let vz = oz + lz as u32;
+                let vi = atlas_voxel_index(vx, vy, vz);
+                match encoding {
+                    AtlasEncoding::Snorm8 => {
+                        out[vi] = byte as u8;
+                    }
+                    AtlasEncoding::Sfloat16 => {
+                        // Store the DECODED normalized value (in [-1, 1]); the shader's
+                        // `m2_decode` multiplies by `band_half`, so the f16 lane carries
+                        // the same normalized value the snorm hardware decode returns.
+                        let n = decode_snorm8(byte, 1.0);
+                        let h = f16_from_f32(n).to_le_bytes();
+                        out[vi * 2] = h[0];
+                        out[vi * 2 + 1] = h[1];
+                    }
+                }
+            }
+        }
+    }
+    is_surface
+}
+
+/// The inclusive M2 grid-cell bounding box (`(min_cell, max_cell)`) of the
+/// authority's dirty region (M3) — the cells whose tiles must be re-baked +
+/// re-uploaded after a dynamic edit. Returns `None` when no edit is dirty (the
+/// prior atlas is already current; the caller skips the rebake).
+///
+/// The dirty WORLD AABB ([`dirty_world_aabb`], the swept old+new union — the
+/// union-dirty rule that clears a moved edit's ghost) is mapped to the M2 grid:
+/// every cell whose `[cell_min, cell_min + M2_BRICK_WORLD]³` AABB overlaps it is
+/// inside the returned box. The box is the integer span of those cells (clamped to
+/// `[0, M2_GRID_DIM)`), so the dirty tiles form ONE contiguous atlas-voxel region
+/// the sub-region [`copy_buffer_to_image`](boyko_rhi::RhiCommandEncoder::copy_buffer_to_image)
+/// uploads in a single `BufferImageCopy`. Cells inside the box but not themselves
+/// dirty are re-baked to the SAME bytes (full/incremental parity holds).
+pub fn m2_dirty_cell_bbox(field: &SdfEditField) -> Option<([u32; 3], [u32; 3])> {
+    let dirty = dirty_world_aabb(field)?;
+
+    // Map the dirty world AABB to the inclusive cell index span on each axis. The grid is
+    // `M2_GRID_DIM` cells of `M2_BRICK_WORLD`, origin `M2_GRID_ORIGIN`. A cell `c` overlaps the
+    // dirty AABB on an axis iff `cell_min(c) <= dirty.max` and `cell_min(c) + M2_BRICK_WORLD >=
+    // dirty.min`; that is `c` in `[floor((dirty.min - origin)/bw - 1), floor((dirty.max -
+    // origin)/bw)]`, clamped to `[0, M2_GRID_DIM)`. A box that lies fully outside the grid yields
+    // an empty span (no overlap) → `None`.
+    let mut lo = [0u32; 3];
+    let mut hi = [0u32; 3];
+    for a in 0..3 {
+        let rel_min = (dirty.min[a] - M2_GRID_ORIGIN) / M2_BRICK_WORLD;
+        let rel_max = (dirty.max[a] - M2_GRID_ORIGIN) / M2_BRICK_WORLD;
+        // A cell overlaps from one cell BELOW `floor(rel_min)` (the dirty min may fall inside the
+        // previous cell's high face) up to `floor(rel_max)`.
+        let lo_f = (rel_min.floor() - 1.0).max(0.0);
+        let hi_f = rel_max.floor();
+        if hi_f < 0.0 || lo_f > (M2_GRID_DIM - 1) as f32 {
+            return None; // Dirty region fully outside the bounded grid: nothing to re-bake.
+        }
+        lo[a] = lo_f as u32;
+        hi[a] = (hi_f.min((M2_GRID_DIM - 1) as f32)).max(0.0) as u32;
+        if lo[a] > hi[a] {
+            return None;
+        }
+    }
+    Some((lo, hi))
+}
+
+/// Incrementally re-bakes ONLY the M2 grid cells inside the dirty bounding box
+/// `(lo, hi)` (inclusive, from [`m2_dirty_cell_bbox`]) into the staging atlas
+/// `out` (M3) — the dynamic-edit fast path for [`bake_brick_atlas`].
+///
+/// `out` MUST be the staging buffer the last full [`bake_brick_atlas`] filled (its
+/// cells outside the box hold the correct prior bytes). Re-classifies + re-fills
+/// every cell in the box; a cell that turned SURFACE→EMPTY is zeroed (no ghost).
+/// Returns the number of SURFACE cells in the box. After this the box's atlas
+/// voxels are byte-identical to a full re-bake's, so the sub-region upload of the
+/// box keeps the GPU atlas bit-identical to a full `rebake`.
+pub fn rebake_dirty_brick_atlas(
+    field: &SdfEditField,
+    encoding: AtlasEncoding,
+    lo: [u32; 3],
+    hi: [u32; 3],
+    out: &mut [u8],
+) -> u32 {
+    debug_assert_eq!(
+        out.len(),
+        encoding.atlas_byte_size(),
+        "atlas staging must be encoding.atlas_byte_size() bytes"
+    );
+    debug_assert!(
+        hi[0] < M2_GRID_DIM && hi[1] < M2_GRID_DIM && hi[2] < M2_GRID_DIM,
+        "dirty cell box must lie inside the M2 grid"
+    );
+
+    let mut surface_cells = 0u32;
+    let mut tile = [0i8; BRICK_VOXELS];
+    for cz in lo[2]..=hi[2] {
+        for cy in lo[1]..=hi[1] {
+            for cx in lo[0]..=hi[0] {
+                if bake_atlas_cell(field, encoding, [cx, cy, cz], &mut tile, out) {
+                    surface_cells += 1;
+                }
+            }
+        }
+    }
+    surface_cells
+}
+
+/// Whether M2 grid cell `cell` overlaps the world-space `dirty` AABB — the per-cell
+/// dirty test the M2 incremental rebake (and its tester) gates on. Mirrors
+/// [`boyko_sdf_math::brick::cell_is_dirty`] for the M2 grid's own consts.
+#[inline]
+pub fn m2_cell_is_dirty(cell: [u32; 3], dirty: &SdfEditAabb) -> bool {
+    let cmin = m2_cell_min(cell);
+    let cell_aabb = SdfEditAabb {
+        min: cmin,
+        max: [
+            cmin[0] + M2_BRICK_WORLD,
+            cmin[1] + M2_BRICK_WORLD,
+            cmin[2] + M2_BRICK_WORLD,
+        ],
+    };
+    aabb_overlap(&cell_aabb, dirty)
 }
 
 // ---------------------------------------------------------------------------
