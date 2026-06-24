@@ -33,8 +33,9 @@ use crate::ffi::{
     VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
     VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_FILTER_LINEAR,
     VK_FILTER_NEAREST, VK_FORMAT_B8G8R8A8_SRGB, VK_FORMAT_B8G8R8A8_UNORM,
-    VK_FORMAT_D32_SFLOAT, VK_FORMAT_R32G32B32A32_SFLOAT, VK_FORMAT_R32G32B32_SFLOAT,
-    VK_FORMAT_R32_SFLOAT, VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8_SNORM,
+    VK_FORMAT_D32_SFLOAT, VK_FORMAT_R16_SFLOAT, VK_FORMAT_R32G32B32A32_SFLOAT,
+    VK_FORMAT_R32G32B32_SFLOAT, VK_FORMAT_R32_SFLOAT, VK_FORMAT_R8G8B8A8_SRGB,
+    VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8_SNORM,
     VK_FORMAT_UNDEFINED,
     VK_IMAGE_ASPECT_COLOR_BIT,
     VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -214,6 +215,13 @@ const _: () = assert!(
 const _: () = assert!(
     Format::R8Snorm.as_i32() == VK_FORMAT_R8_SNORM,
     "Format::R8Snorm must equal VK_FORMAT_R8_SNORM"
+);
+// SDF brick-atlas campaign M2: the D8 atlas fallback format (`as_i32()` mapped in
+// `create_texture`; chosen by the `atlas_linear_filter_ok` probe when `R8_SNORM` lacks
+// the linear-filter feature).
+const _: () = assert!(
+    Format::R16Sfloat.as_i32() == VK_FORMAT_R16_SFLOAT,
+    "Format::R16Sfloat must equal VK_FORMAT_R16_SFLOAT"
 );
 
 // --- ImageLayout `as_i32()` (mapped in `image_barrier` / `begin_rendering`). ---

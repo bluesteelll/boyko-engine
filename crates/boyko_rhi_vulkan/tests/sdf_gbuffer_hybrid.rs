@@ -2299,9 +2299,10 @@ fn a3g_host_light_dir_round_trips_at_offset_16() {
         NONDEFAULT_LIGHT,
     );
     let bytes = push.as_bytes();
-    // M1 widened FineMarcherPush 32 → 64 bytes (the empty-skip grid block @32..64); the
-    // light_dir @16 contract this test pins is UNCHANGED. (Was `== 32` pre-M1.)
-    assert_eq!(bytes.len(), 64, "FineMarcherPush must serialize to 64 bytes (M1: 32 → 64)");
+    // M1 widened FineMarcherPush 32 → 64 (empty-skip grid block @32..64); M2 added
+    // brick_trilinear @64 + _pad3 → 80. The light_dir @16 contract this test pins is
+    // UNCHANGED. (Was `== 32` pre-M1, `== 64` pre-M2.)
+    assert_eq!(bytes.len(), 80, "FineMarcherPush must serialize to 80 bytes (M2: 64 → 80)");
     let read_at = |off: usize| f32::from_le_bytes(bytes[off..off + 4].try_into().unwrap());
     // lighting_flags is a u32 at offset 8.
     let flags = u32::from_le_bytes(bytes[8..12].try_into().unwrap());

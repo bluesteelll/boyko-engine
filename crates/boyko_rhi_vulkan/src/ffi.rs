@@ -759,6 +759,11 @@ pub const VK_FORMAT_UNDEFINED: i32 = 0;
 /// `VkFormat::VK_FORMAT_R8_SNORM` — a single signed-normalized 8-bit channel (SDF
 /// brick-atlas campaign: the quantized narrow-band distance the brick atlas stores).
 pub const VK_FORMAT_R8_SNORM: i32 = 9;
+/// `VkFormat::VK_FORMAT_R16_SFLOAT` — a single 16-bit (half) float (SDF brick-atlas
+/// campaign M2: the D8 atlas fallback when `R8_SNORM` lacks the linear-filter feature;
+/// half-float carries the narrow-band distance with NO quantization, so the `EPSILON_Q`
+/// store bias is harmless there).
+pub const VK_FORMAT_R16_SFLOAT: i32 = 76;
 /// `VkFormat::VK_FORMAT_R32_SFLOAT` — a single 32-bit float (Lighting L0b: the
 /// `gViewT` G-buffer storage-image lane carrying the marcher's surface ray param `t`).
 pub const VK_FORMAT_R32_SFLOAT: i32 = 100;
@@ -800,6 +805,33 @@ const _: () = assert!(
     // transcription this guard exists to reject.
     VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT != 0x8,
     "STORAGE_IMAGE bit collides with the UNIFORM_TEXEL_BUFFER bit (0x8)"
+);
+
+/// `VkFormatFeatureFlagBits::VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT` — the
+/// OPTIMAL-tiling capability the SDF brick-atlas campaign (M2) requires of the chosen
+/// atlas format: a SAMPLED image must support `VK_FILTER_LINEAR` so the hardware
+/// trilinear fetch of the `R8_SNORM` brick atlas is well-defined. Queried via
+/// `vkGetPhysicalDeviceFormatProperties` at device-create for the
+/// [`crate::device::DeviceCaps::atlas_linear_filter_ok`] probe. When `R8_SNORM` lacks
+/// it the probe falls the atlas back to `R16_SFLOAT` (which supports linear filtering
+/// on every conformant GPU per the Vulkan spec's mandatory-format table).
+// vulkan_core.h: `VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT = 0x00001000`.
+pub const VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT: VkFlags = 0x0000_1000;
+
+// Value guard for the hand-typed M2 format-feature bit (same discipline as the
+// STORAGE_IMAGE guard above): pin the header value, require a single set bit, and assert
+// it is DISTINCT from the STORAGE_IMAGE bit it sits near.
+const _: () = assert!(
+    VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT == 0x1000,
+    "VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT must equal the vulkan_core.h value 0x00001000"
+);
+const _: () = assert!(
+    VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT.is_power_of_two(),
+    "a format-feature flag bit must be a single set bit (power of two)"
+);
+const _: () = assert!(
+    VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT != VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT,
+    "SAMPLED_IMAGE_FILTER_LINEAR bit collides with the STORAGE_IMAGE bit"
 );
 
 /// `VkColorSpaceKHR::VK_COLOR_SPACE_SRGB_NONLINEAR_KHR` — the always-present space.

@@ -82,6 +82,7 @@
 //! ```
 
 pub mod abi_guard;
+pub mod brick_atlas;
 pub mod compute;
 pub mod debug;
 pub mod device;

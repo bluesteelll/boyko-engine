@@ -156,6 +156,15 @@ static const uint IMG_H_DEFAULT = 64u;
 //   offset 48 : float4 cam_right    xyz = right basis,  w = aspect (W/H)  (PERSPECTIVE)
 //   offset 64 : float4 cam_up       xyz = up basis                (PERSPECTIVE)
 //   total: 80 bytes, 16-byte aligned.
+//
+// SDF brick-atlas M2: the b5 UBO is WIDENED to 128 bytes (host `B5_CAMERA_UBO_BYTES`) — the
+// 80-byte camera block above + a 48-byte `M2GridParams` tail at offset 80 (`M2_GRID_PARAMS_OFFSET`),
+// three std140 `float4` lanes. The marcher reads the M2 block ONLY on the `brick_trilinear` path;
+// `brick_trilinear == 0` never touches these fields (byte-identical to M1). The host writes them
+// via `M2GridParams::default_near_field().as_bytes()`; the lanes mirror that `#[repr(C)]` exactly:
+//   offset 80 : float4 m2_origin_brick_world   xyz = M2 grid min world corner, w = M2_BRICK_WORLD
+//   offset 96 : uint4  m2_dims_atlas_dim       xyz = M2 grid dims [x,y,z], w = M2_ATLAS_DIM
+//   offset 112: float4 m2_band_voxel_inv_atlas x = band_half, y = voxel_size, z = 1/atlas_dim, w = 0
 cbuffer Camera : register(b5) {
     uint   count;
     uint   img_w_raw;
@@ -165,6 +174,9 @@ cbuffer Camera : register(b5) {
     float4 cam_forward;
     float4 cam_right;
     float4 cam_up;
+    float4 m2_origin_brick_world;   // offset 80 — xyz = M2 grid origin, w = M2_BRICK_WORLD
+    uint4  m2_dims_atlas_dim;       // offset 96 — xyz = M2 grid dims, w = M2_ATLAS_DIM
+    float4 m2_band_voxel_inv_atlas; // offset 112 — x = band_half, y = voxel_size, z = 1/atlas_dim
 };
 
 // Render P4b: the per-tile coarse-cull bound, READ-ONLY here (the coarse pass writes
@@ -219,6 +231,25 @@ StructuredBuffer<MaterialGpu> Materials : register(t7);
 // builder writes.
 StructuredBuffer<uint> PointerGrid : register(t9);
 
+// SDF brick-atlas M2 (trilinear SURFACE bricks): the dense `M2_ATLAS_DIM³` 3D `R8_SNORM`
+// (or `R16_SFLOAT` fallback) atlas, binding 10 (the 11th vocab entry — within the 12-binding
+// cap, C1). One apron'd `BRICK_ALLOC³` (10³) tile per M2 grid cell, baked CPU-side from the ONE
+// edit authority by `boyko_rhi_vulkan::compute::bake_brick_atlas` (principle 0 — no parallel
+// field store). The `Texture3D` + `SamplerState` at the SAME `[[vk::binding(10, 0)]]` collapse
+// to ONE `VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER` under DXC (the same pattern
+// `fullscreen_sample.fs.hlsl` uses), so the marcher's `BrickAtlas.SampleLevel(BrickSampler, …)`
+// hardware trilinear fetch reads the SAME corners the baker wrote. The sampler is Linear /
+// clamp-to-edge / no-mip (the apron read needs clamp, not a neighbour wrap).
+//
+// Read ONLY when `pc.brick_trilinear != 0`; the OFF path never touches it (byte-identical to the
+// M1 marcher — the M2 0%-gate). The R2 contract: the marcher SPIR-V STATICALLY references t10/s10
+// inside the runtime-gated M2 branch, so the layout MUST declare binding 10 = combined-image-
+// sampler and bind a VALID atlas/sampler even when the trilinear path is gated OFF (the windowed
+// present path runs `brick_trilinear == 0` → bound-but-unread, byte-identical output), or
+// `vkCreateComputePipelines` / `vkCmdDispatch` trip the layout VUIDs (the M1 R2 lesson at t9).
+[[vk::binding(10, 0)]] Texture3D<float>  BrickAtlas   : register(t10);
+[[vk::binding(10, 0)]] SamplerState      BrickSampler : register(s10);
+
 // Mirrors `boyko_render::material::MATERIAL_GPU_WORDS` (48 B / 4 = 12). A documentation
 // + intent pin; the StructuredBuffer<MaterialGpu> element stride is the std430 layout.
 static const uint MATERIAL_GPU_WORDS = 12u;
@@ -267,6 +298,16 @@ static const uint DEFAULT_MATERIAL_ID = 0u;
 // 64 bytes fits the declared 80-byte COMPOSITE push range. The host const-asserts pin every
 // offset; a non-default-grid GPU test catches a packing slip the way the light_dir@16 pin
 // does for A1/A2.
+//
+// SDF brick-atlas M2: widened 64 -> 80 bytes to carry the `brick_trilinear` gate at offset 64
+// (the first slot of the 16-byte headroom the 64-byte M1 layout left inside the declared 80-byte
+// COMPOSITE range). `brick_trilinear == 0` keeps the marcher byte-identical to M1 (the M2 atlas
+// @binding 10 is never sampled, SURFACE bricks fold the analytic field — the M2 0%-gate); `!= 0`
+// samples the atlas + runs the JCGT cubic inside SURFACE bricks. INDEPENDENT of `brick_enabled`
+// (the M1 empty-skip): the gates are orthogonal. The `_pad3[3]` fills the 16-byte tail (offsets
+// 68/72/76), matching the host `#[repr(C)] FineMarcherPush` byte-for-byte (offsets const-asserted).
+//   offset 64 : uint   brick_trilinear  M2 trilinear+cubic gate; 0 = OFF (byte-identical to M1)
+//   offset 68 : uint3  _pad3            tail pad to the 80-byte stride
 [[vk::push_constant]] struct PushConstants {
     uint   coarse_enabled;  // offset 0 (unchanged)
     float  omega;           // offset 4 — Keinert over-relaxation factor, host-clamped [1.0, 1.99]
@@ -278,6 +319,8 @@ static const uint DEFAULT_MATERIAL_ID = 0u;
     uint   brick_enabled;   // offset 44 — M1 empty-skip gate; 0 = OFF (byte-identical)
     uint3  grid_dims;       // offset 48 — pointer-grid cells per axis (16-aligned vec3)
     float  brick_world;     // offset 60 — pointer-grid cell world size
+    uint   brick_trilinear; // offset 64 — M2 trilinear+cubic gate; 0 = OFF (byte-identical to M1)
+    uint3  _pad3;           // offset 68 — tail pad to the 80-byte COMPOSITE stride
 } pc;
 
 // P4b: the EMPTY flag bit (mirrors the host `TILE_FLAG_EMPTY` + sdf_tile_cull.hlsl).
@@ -514,6 +557,445 @@ uint brick_cell_class(float3 p, out float3 cell_min) {
     return PointerGrid[idx];
 }
 
+// --- SDF brick-atlas M2: the trilinear+JCGT-cubic SURFACE-brick path (mirror boyko_sdf_math::brick) ---
+//
+// Inside a SURFACE brick the marcher replaces the analytic fold with: a 3D-DDA march through the
+// brick's interior voxel cells, each cell's 8 corners forming the JCGT-2022 trilinear cubic
+// (`m2_jcgt_cubic_coeffs`), the near root found by the Marmitt iterative root-finder
+// (`m2_marmitt_root`, FMA-only, no transcendentals, no 1/c3) — the EXACT ray↔trilinear-isosurface
+// crossing. An ANALYTIC-RESIDUAL FALLBACK then validates the candidate against the exact field
+// (`field_distance`): a |sdf| within CREASE_EPS accepts the cubic hit, else a few analytic refine
+// steps decide it (the exact-CSG guarantee). The HLSL below mirrors `brick_cubic_hit` /
+// `jcgt_cubic_coeffs` / `marmitt_root` / `atlas_uvw` / `decode_snorm8` bit-for-bit (the offscreen
+// golden compares the GPU hit against `brick_cubic_hit` and the analytic field within tolerance).
+
+// M2 brick geometry (mirror `boyko_sdf_math::brick` + `boyko_rhi_vulkan::compute`). Read from the
+// b5 UBO M2 block so a host-side grid retune needs no shader edit; the brick-edge consts are
+// compile-time pins (the apron'd 10³ tile shape is fixed by the oracle).
+static const uint  M2_BRICK_INTERIOR = 8u;     // BRICK_INTERIOR
+static const uint  M2_BRICK_ALLOC    = 10u;    // BRICK_ALLOC (interior + 1-voxel apron each face)
+static const float M2_APRON          = 1.0;    // APRON (one voxel)
+static const float M2_ATLAS_BIAS     = 0.0;    // ATLAS_SAMPLE_BIAS (golden-locked to 0)
+static const float M2_CUBIC_ROOT_EPS = 1.0e-6; // CUBIC_ROOT_EPS (root residual / bracket tol)
+static const uint  M2_MARMITT_ITERS  = 8u;     // MARMITT_ITERS (regula-falsi cap)
+static const uint  M2_MAX_CELLS      = 30u;    // 3 * BRICK_ALLOC — the longest 3D-DDA path
+// The analytic-residual crease band (world units): a cubic candidate whose |sdf| is within this is
+// accepted as the surface; beyond it (a CSG crease / brick-rounding divergence) the analytic refine
+// decides. `0.0192` ~ the brick's δ_tri + δ_quant world slack (the M0 EPSILON_Q dominance budget).
+static const float M2_CREASE_EPS     = 0.0192;
+// The analytic refine: a handful of plain sphere-trace steps from the cubic candidate, used to
+// settle a crease/divergence onto the EXACT field (the exact-CSG fallback).
+static const uint  M2_REFINE_ITERS   = 8u;
+
+// Decodes one R8_SNORM code (a normalized float in [-1,1] from the hardware texel fetch) to a world
+// distance. `Texture3D<float>.Load` returns the hardware-decoded SNORM value at the EXACT texel with
+// ZERO filtering, so `n` is the decode of the stored i8 byte (the -128→-1 asymmetry is applied by the
+// Vulkan R8_SNORM rule the host `decode_snorm8` mirrors). Multiply by band_half (mirror
+// `decode_snorm8` post-normalization).
+float m2_decode(float n, float band_half) {
+    return n * band_half;
+}
+
+// Fetches the atlas at apron'd-grid corner `(cx, cy, cz)` of tile origin `tile_org` (atlas-voxel
+// units), returning the decoded world distance.
+//
+// GPU-BUG FIX (M2 corner-fetch): the per-corner cubic MUST read the SAME decoded i8 the host's
+// `brick_cubic_hit` reads via `decode_snorm8(brick[exact_index])`. The previous
+// `BrickAtlas.SampleLevel(BrickSampler, uvw, 0.0)` used the bound LINEAR sampler: even at a texel-
+// center uvw, the hardware linear-filter path + the per-implementation R8_SNORM decode drifted from
+// the host's exact integer-index fetch, so the 8 cubic corners diverged, the cubic coefficients (and
+// thus `cand_t`) landed FAR from the true surface, and every candidate was rejected by the analytic
+// residual refine (HITS=0). `Texture3D.Load(int4(x,y,z,mip))` is a POINT texelFetch at integer coords:
+// it returns the decoded SNORM of the EXACT corner texel with no filtering and no sampler, matching
+// the host bit-for-bit. The corner index is the integer atlas-voxel `(tile_org + corner)`; `tile_org`
+// is integral (tile * BRICK_ALLOC) and the clamp keeps `corner` in `[0, BRICK_ALLOC-1]`, so the texel
+// is always in-bounds. `inv_atlas` is no longer needed (the integer Load takes no normalized uvw).
+float m2_corner(float3 tile_org, uint cx, uint cy, uint cz, float band_half) {
+    int3 texel = int3((int)(tile_org.x + (float)cx),
+                      (int)(tile_org.y + (float)cy),
+                      (int)(tile_org.z + (float)cz));
+    float n = BrickAtlas.Load(int4(texel, 0)).r;
+    return m2_decode(n, band_half);
+}
+
+// COMBINED-DESCRIPTOR KEEP-ALIVE (binding 10): the corner-fetch fix above reads the atlas with
+// `Texture3D.Load` (no sampler), so `BrickSampler` (s10) would be dead-stripped and binding 10 would
+// emit as a plain SAMPLED_IMAGE — mismatching the `DescriptorKind::CombinedImageSampler` the vocab
+// layout declares (the host R2 contract pins binding 10 = combined). This keeps `BrickSampler`
+// STATICALLY referenced (so DXC collapses t10+s10 into ONE combined descriptor) while contributing
+// EXACTLY 0.0 to the result.
+//
+// The keep-alive must defeat DXC's aggressive DCE: a `x & 0u` mask, an `x * 0.0`, or any value DXC
+// can prove constant gets folded and the sample (and the sampler) removed. So the sampler load feeds
+// a CONTROL-FLOW branch whose outcome DXC cannot resolve at compile time — the sampled `n` is finite
+// for any real R8_SNORM/R16_SFLOAT texel (decoded into `[-1, 1]`), so `n > 2.0` is ALWAYS false at
+// runtime, but DXC cannot prove it (the texel contents are unknown), so it must keep the sample and
+// the conditional. The taken arm returns 0.0; the never-taken arm returns `n` (kept reachable so the
+// load is not hoisted out). `inv_atlas` provides the (UBO-derived, non-constant) sample coordinate.
+float m2_sampler_keepalive(float inv_atlas) {
+    float n = BrickAtlas.SampleLevel(BrickSampler, float3(0.5, 0.5, 0.5) * inv_atlas, 0.0).r;
+    // A decoded narrow-band sample is always in [-1, 1]·band_half — well under 2.0 — so this branch
+    // is never taken at runtime, but DXC cannot prove it ⇒ the sample (and s10) stay live.
+    [branch]
+    if (n > 2.0) {
+        return n; // unreachable for real data; keeps the load from being optimized away
+    }
+    return 0.0;
+}
+
+// Floors an apron'd-grid coordinate to a low cell index with room for the +1 neighbour
+// (clamped into 0..=BRICK_ALLOC-2). Mirror `boyko_sdf_math::brick::clamp_index`.
+uint m2_clamp_index(float g) {
+    if (g <= 0.0) {
+        return 0u;
+    }
+    uint i = (uint)g;
+    return (i >= M2_BRICK_ALLOC - 1u) ? (M2_BRICK_ALLOC - 2u) : i;
+}
+
+// Evaluates the JCGT cubic c3·t³ + c2·t² + c1·t + c0 (Horner, FMA-friendly) — mirror `cubic_eval`.
+float m2_cubic_eval(float4 c, float t) {
+    return ((c.w * t + c.z) * t + c.y) * t + c.x;
+}
+
+// Forms the JCGT-2022 cubic [c0,c1,c2,c3] whose root is the ray↔trilinear-isosurface crossing in
+// ONE voxel cell. `s` holds the 8 corners in the `s_ijk ↔ x + 2y + 4z` order (x fastest):
+// s[0]=s000,1=s100,2=s010,3=s110,4=s001,5=s101,6=s011,7=s111 — the SAME order `m2_corner` fetches
+// and the trilinear blend uses. `a` = ro_local, `b` = rd_local in the cell's [0,1]³ frame. Mirror
+// `boyko_sdf_math::brick::jcgt_cubic_coeffs` (the k-basis + the FMA chain must NOT be reordered).
+float4 m2_jcgt_cubic_coeffs(float s[8], float3 a, float3 b) {
+    float s000 = s[0]; float s100 = s[1]; float s010 = s[2]; float s110 = s[3];
+    float s001 = s[4]; float s101 = s[5]; float s011 = s[6]; float s111 = s[7];
+
+    float k0 = s000;
+    float k1 = s100 - s000;
+    float k2 = s010 - s000;
+    float k3 = s001 - s000;
+    float k4 = s110 - s100 - s010 + s000;                               // x·y
+    float k5 = s011 - s010 - s001 + s000;                               // y·z
+    float k6 = s101 - s100 - s001 + s000;                               // z·x
+    float k7 = s111 - s110 - s101 - s011 + s100 + s010 + s001 - s000;   // x·y·z
+
+    float ax = a.x; float ay = a.y; float az = a.z;
+    float bx = b.x; float by = b.y; float bz = b.z;
+
+    float c0 = k0
+        + k1 * ax + k2 * ay + k3 * az
+        + k4 * ax * ay + k5 * ay * az + k6 * az * ax
+        + k7 * ax * ay * az;
+
+    float c1 = k1 * bx + k2 * by + k3 * bz
+        + k4 * (ax * by + ay * bx)
+        + k5 * (ay * bz + az * by)
+        + k6 * (az * bx + ax * bz)
+        + k7 * (ax * ay * bz + ax * by * az + bx * ay * az);
+
+    float c2 = k4 * bx * by + k5 * by * bz + k6 * bz * bx
+        + k7 * (ax * by * bz + bx * ay * bz + bx * by * az);
+
+    float c3 = k7 * bx * by * bz;
+
+    return float4(c0, c1, c2, c3);
+}
+
+// Regula-falsi (false position) refinement of a sign-bracketed root in [lo, hi] — mirror
+// `boyko_sdf_math::brick::regula_falsi`. FMA-only, bounded iterations.
+float m2_regula_falsi(float4 c, float lo, float hi, float f_lo, float f_hi) {
+    float mid = lo;
+    [loop]
+    for (uint i = 0u; i < M2_MARMITT_ITERS; ++i) {
+        float denom = f_hi - f_lo;
+        // Degenerate (flat) bracket: fall back to the bisection midpoint.
+        mid = (abs(denom) > 1.0e-30) ? (lo - f_lo * (hi - lo) / denom) : (0.5 * (lo + hi));
+        float f_mid = m2_cubic_eval(c, mid);
+        if (abs(f_mid) <= M2_CUBIC_ROOT_EPS || (hi - lo) <= M2_CUBIC_ROOT_EPS) {
+            return mid;
+        }
+        if (f_lo * f_mid <= 0.0) {
+            hi = mid; f_hi = f_mid;
+        } else {
+            lo = mid; f_lo = f_mid;
+        }
+    }
+    return mid;
+}
+
+// The Marmitt iterative root of the JCGT cubic in [t0, t1] — the FIRST sign crossing, or a negative
+// sentinel (-1) when the cubic does not change sign. FMA-only, NO transcendentals, NO 1/c3 (robust
+// to c3 → 0). Mirror `boyko_sdf_math::brick::marmitt_root` (returns -1 instead of None).
+float m2_marmitt_root(float4 c, float t0, float t1) {
+    if (t1 <= t0) {
+        return -1.0;
+    }
+    // The interior extrema: roots of the derivative quadratic 3·c3·t² + 2·c2·t + c1, solved WITHOUT
+    // dividing by c3 (a near-zero leading term collapses to the linear/constant case → no split).
+    float qa = 3.0 * c.w;
+    float qb = 2.0 * c.z;
+    float qc = c.y;
+
+    float e0 = t1;
+    float e1 = t1;
+    bool have0 = false;
+    bool have1 = false;
+
+    float disc = qb * qb - 4.0 * qa * qc;
+    if (abs(qa) > 1.0e-30 && disc > 0.0) {
+        float sq = sqrt(disc);
+        float q = -0.5 * (qb + (qb >= 0.0 ? 1.0 : -1.0) * sq);
+        float r0 = q / qa;
+        float r1 = (abs(q) > 1.0e-30) ? (qc / q) : r0;
+        if (r0 > r1) { float tmp = r0; r0 = r1; r1 = tmp; }
+        if (r0 > t0 && r0 < t1) { e0 = r0; have0 = true; }
+        if (r1 > t0 && r1 < t1) {
+            if (have0) { e1 = r1; have1 = true; }
+            else { e0 = r1; have0 = true; }
+        }
+    }
+
+    // March the monotone sub-intervals left→right; refine the FIRST sign bracket.
+    float lo = t0;
+    float f_lo = m2_cubic_eval(c, lo);
+    float splits[3];
+    splits[0] = have0 ? e0 : t1;
+    splits[1] = have1 ? e1 : t1;
+    splits[2] = t1;
+    [unroll]
+    for (uint i = 0u; i < 3u; ++i) {
+        float hi = splits[i];
+        if (hi <= lo) {
+            continue;
+        }
+        float f_hi = m2_cubic_eval(c, hi);
+        if (f_lo == 0.0) {
+            return lo;
+        }
+        if (f_lo * f_hi <= 0.0) {
+            return m2_regula_falsi(c, lo, hi, f_lo, f_hi);
+        }
+        lo = hi;
+        f_lo = f_hi;
+        if (hi >= t1) {
+            break;
+        }
+    }
+    return -1.0;
+}
+
+// Clips the ray `p + rd·t` to the M2 brick at `cell_min` of size M2_BRICK_WORLD, returning the
+// [t_enter, t_exit] span (in world `t`, measured from `p`). `t_exit < t_enter` means the ray misses
+// the brick AABB. Standard slab intersection.
+bool m2_brick_span(float3 p, float3 rd, float3 cell_min, float brick_world, out float t_enter, out float t_exit) {
+    float tmin = 0.0;          // never march behind the current march point
+    float tmax = 1.0e30;
+    [unroll]
+    for (uint a = 0u; a < 3u; ++a) {
+        float lo = cell_min[a];
+        float hi = lo + brick_world;
+        if (abs(rd[a]) <= 1.0e-20) {
+            // Parallel to this slab: a miss only if the origin is outside it.
+            if (p[a] < lo || p[a] > hi) {
+                t_enter = 1.0; t_exit = 0.0; // empty span
+                return false;
+            }
+            continue;
+        }
+        float inv = 1.0 / rd[a];
+        float t1 = (lo - p[a]) * inv;
+        float t2 = (hi - p[a]) * inv;
+        if (t1 > t2) { float tmp = t1; t1 = t2; t2 = tmp; }
+        tmin = max(tmin, t1);
+        tmax = min(tmax, t2);
+    }
+    t_enter = tmin;
+    t_exit = tmax;
+    return tmax > tmin;
+}
+
+// Marches `p + rd·t` through SURFACE brick `cell_min`'s interior voxel cells (3D-DDA), forming the
+// JCGT cubic at the first cell whose 8 corners bracket a sign change and solving it for the in-cell
+// crossing. Returns the world-space `t` of the FIRST hit (>= 0), or a negative sentinel (-1) when
+// the ray clears the brick without crossing. `ro_v`/`rd_v` are the ray in INTERIOR-voxel units
+// (world → voxel: (world - cell_min) / voxel_size). Mirror `boyko_sdf_math::brick::brick_cubic_hit`
+// (the DDA + the cubic fetch order + the per-cell local-t solve are bit-for-bit the CPU oracle).
+float m2_brick_cubic_hit(float3 ro_v, float3 rd_v, float t_enter, float t_exit,
+                         float3 tile_org, float inv_atlas, float band_half) {
+    if (t_exit <= t_enter) {
+        return -1.0;
+    }
+    const uint W = M2_BRICK_ALLOC;
+    float t = t_enter;
+    int   cell[3];
+    int   step[3];
+    float t_next[3];
+    float t_delta[3];
+
+    [unroll]
+    for (uint axis = 0u; axis < 3u; ++axis) {
+        // The apron'd-grid coordinate at entry (the +APRON-0.5 shift maps interior coords to the
+        // apron'd grid, the SAME shift `atlas_uvw` / the corner fetch use).
+        float g_entry = ro_v[axis] + rd_v[axis] * t + M2_APRON - 0.5 + M2_ATLAS_BIAS;
+        int c0 = (int)m2_clamp_index(g_entry);
+        cell[axis] = c0;
+        if (rd_v[axis] > 0.0) {
+            step[axis] = 1;
+            float boundary = (float)(c0 + 1);
+            t_next[axis] = t + (boundary - g_entry) / rd_v[axis];
+            t_delta[axis] = 1.0 / rd_v[axis];
+        } else if (rd_v[axis] < 0.0) {
+            step[axis] = -1;
+            float boundary = (float)c0;
+            t_next[axis] = t + (boundary - g_entry) / rd_v[axis];
+            t_delta[axis] = -1.0 / rd_v[axis];
+        } else {
+            step[axis] = 0;
+            t_next[axis] = 1.0e30;
+            t_delta[axis] = 1.0e30;
+        }
+    }
+
+    [loop]
+    for (uint iter = 0u; iter < M2_MAX_CELLS; ++iter) {
+        // The cell's low corner clamped so the +1 neighbour is in-bounds.
+        uint cx = min((uint)max(cell[0], 0), W - 2u);
+        uint cy = min((uint)max(cell[1], 0), W - 2u);
+        uint cz = min((uint)max(cell[2], 0), W - 2u);
+
+        // Fetch the 8 decoded corners in the s_ijk ↔ x + 2y + 4z order (atlas integer texelFetch —
+        // the point-sampled corner-fetch fix; the SAME decoded i8 the host `brick_cubic_hit` reads).
+        float s[8];
+        s[0] = m2_corner(tile_org, cx,      cy,      cz,      band_half); // s000
+        s[1] = m2_corner(tile_org, cx + 1u, cy,      cz,      band_half); // s100
+        s[2] = m2_corner(tile_org, cx,      cy + 1u, cz,      band_half); // s010
+        s[3] = m2_corner(tile_org, cx + 1u, cy + 1u, cz,      band_half); // s110
+        s[4] = m2_corner(tile_org, cx,      cy,      cz + 1u, band_half); // s001
+        s[5] = m2_corner(tile_org, cx + 1u, cy,      cz + 1u, band_half); // s101
+        s[6] = m2_corner(tile_org, cx,      cy + 1u, cz + 1u, band_half); // s011
+        s[7] = m2_corner(tile_org, cx + 1u, cy + 1u, cz + 1u, band_half); // s111
+
+        // The t-span of THIS cell along the ray (clamped to the brick span).
+        float t_cell_exit = min(min(min(t_next[0], t_next[1]), t_next[2]), t_exit);
+        float seg_lo = max(t, t_enter);
+        float seg_hi = min(t_cell_exit, t_exit);
+
+        if (seg_hi > seg_lo) {
+            // The ray in the cell's LOCAL [0,1]³ frame: the apron'd-grid coordinate minus the cell
+            // low index gives the in-cell fraction; the direction is unchanged (a pure translation).
+            float3 lo_g = float3(
+                ro_v[0] + rd_v[0] * seg_lo + M2_APRON - 0.5 + M2_ATLAS_BIAS - (float)cx,
+                ro_v[1] + rd_v[1] * seg_lo + M2_APRON - 0.5 + M2_ATLAS_BIAS - (float)cy,
+                ro_v[2] + rd_v[2] * seg_lo + M2_APRON - 0.5 + M2_ATLAS_BIAS - (float)cz);
+            float4 coeffs = m2_jcgt_cubic_coeffs(s, lo_g, rd_v);
+            float local_t = m2_marmitt_root(coeffs, 0.0, seg_hi - seg_lo);
+            if (local_t >= 0.0) {
+                return seg_lo + local_t;
+            }
+        }
+
+        // Advance the DDA to the next cell boundary; stop once past the brick exit.
+        if (t_cell_exit >= t_exit) {
+            break;
+        }
+        uint axis = (t_next[0] <= t_next[1] && t_next[0] <= t_next[2]) ? 0u
+                  : ((t_next[1] <= t_next[2]) ? 1u : 2u);
+        t = t_next[axis];
+        cell[axis] += step[axis];
+        t_next[axis] += t_delta[axis];
+        if (step[axis] == 0 || cell[axis] < 0 || (uint)cell[axis] >= W - 1u) {
+            break;
+        }
+    }
+    return -1.0;
+}
+
+// The M2 SURFACE-brick step: given the march point `p`'s SURFACE M2 cell, sample the atlas + run
+// the JCGT cubic for the EXACT crossing, then VALIDATE it analytically (the exact-CSG fallback).
+// Returns the accepted world `t` of the hit (>= 0) via `out hit_t`, and `true`/`false` for
+// hit/no-cubic-crossing. On a cubic crossing whose analytic |sdf| diverges past M2_CREASE_EPS (a CSG
+// crease / brick-rounding) the [branch] analytic refine settles it onto the EXACT field. The normal
+// + shade stay ANALYTIC (decided by the caller's `sdf_normal`), so the surface is always validated
+// analytically (C1). `ro`/`rd` are the WORLD ray; `t_world` is the current march `t` (p = ro+rd·t).
+bool m2_surface_hit(float3 ro, float3 rd, float t_world, out float hit_t) {
+    hit_t = t_world;
+    float3 origin = m2_origin_brick_world.xyz;
+    float brick_world = m2_origin_brick_world.w;
+    uint3 dims = m2_dims_atlas_dim.xyz;
+    float band_half = m2_band_voxel_inv_atlas.x;
+    float voxel_size = m2_band_voxel_inv_atlas.y;
+    float inv_atlas = m2_band_voxel_inv_atlas.z;
+
+    float3 p = ro + rd * t_world;
+    // The M2 tile containing `p`. Outside the bounded M2 grid → no atlas tile (the caller folds the
+    // analytic field). Test the float directly so a negative coord is caught before the uint cast.
+    float3 rel = (p - origin) / brick_world;
+    if (rel.x < 0.0 || rel.y < 0.0 || rel.z < 0.0) {
+        return false;
+    }
+    uint tx = (uint)rel.x;
+    uint ty = (uint)rel.y;
+    uint tz = (uint)rel.z;
+    if (tx >= dims.x || ty >= dims.y || tz >= dims.z) {
+        return false;
+    }
+    float3 cell_min = origin + float3((float)tx, (float)ty, (float)tz) * brick_world;
+    // The atlas-voxel origin of this tile (mirror `m2_tile_atlas_origin`): tile * BRICK_ALLOC.
+    float3 tile_org = float3((float)(tx * M2_BRICK_ALLOC),
+                             (float)(ty * M2_BRICK_ALLOC),
+                             (float)(tz * M2_BRICK_ALLOC));
+
+    // Clip the ray to the brick AABB, then convert to interior-voxel units (world → voxel:
+    // (world - cell_min) / voxel_size). The DDA + cubic operate in voxel units.
+    float t_enter, t_exit;
+    if (!m2_brick_span(p, rd, cell_min, brick_world, t_enter, t_exit)) {
+        return false;
+    }
+    float3 ro_v = (p - cell_min) / voxel_size;
+    // rd is a unit world direction; in voxel units it scales by 1/voxel_size. Keep the world `t`
+    // metric by dividing the direction (so cubic-local `t` is in WORLD units, matching the oracle's
+    // ro/rd in interior-voxel units with the SAME world-t parameterization).
+    float3 rd_v = rd / voxel_size;
+
+    float local = m2_brick_cubic_hit(ro_v, rd_v, t_enter, t_exit, tile_org, inv_atlas, band_half);
+    if (local < 0.0) {
+        return false; // the ray clears this brick without crossing — the caller marches on
+    }
+
+    // The candidate world `t` (local is measured from `p`, in world units). `local` is computed by
+    // the integer-texelFetch cubic; `m2_sampler_keepalive` adds EXACTLY 0.0 (it keeps the s10 sampler
+    // — and the binding-10 combined descriptor — statically referenced, see its note).
+    float cand_t = t_world + local + m2_sampler_keepalive(inv_atlas);
+    float3 cand_p = ro + rd * cand_t;
+    float resid = field_distance(cand_p);
+
+    // ANALYTIC-RESIDUAL FALLBACK (the exact-CSG guarantee): a |resid| within the crease band accepts
+    // the cubic hit (the surface is where the cubic said). ELSE a CSG crease / brick-rounding
+    // divergence — a cold [branch] analytic refine settles it onto the EXACT field from the
+    // candidate. The accepted hit is thus ALWAYS analytically validated.
+    [branch]
+    if (abs(resid) < M2_CREASE_EPS) {
+        hit_t = cand_t;
+        return true;
+    } else {
+        // Plain sphere-trace a few steps from the candidate onto the exact field.
+        float rt = cand_t;
+        [loop]
+        for (uint i = 0u; i < M2_REFINE_ITERS; ++i) {
+            float d = field_distance(ro + rd * rt);
+            if (d < EPS) {
+                hit_t = rt;
+                return true;
+            }
+            rt += max(d, EPS);
+            if (rt > T_MAX) {
+                break;
+            }
+        }
+        // The refine did not converge near the candidate (the cubic pointed at a CSG-subtracted /
+        // rounded region with no nearby exact surface): treat as no hit in this brick — the caller
+        // falls back to the M1 analytic fold for this step (continue marching).
+        return false;
+    }
+}
+
 [numthreads(64, 1, 1)]
 void main(uint3 tid : SV_DispatchThreadID) {
     uint idx = tid.x;
@@ -638,6 +1120,26 @@ void main(uint3 tid : SV_DispatchThreadID) {
                 }
                 continue;                // skip the analytic fold this step
             }
+        }
+
+        // --- SDF brick-atlas M2: the trilinear SURFACE-brick path. `brick_trilinear == 0` leaves
+        // this block textually dead → the marcher is the EXACT M1 behavior (the M2 0%-gate). When
+        // enabled, inside a SURFACE brick (per the M2 grid lookup in `m2_surface_hit`) sample the
+        // atlas + run the JCGT cubic for the EXACT ray↔isosurface crossing, validated analytically
+        // (the exact-CSG residual fallback). A hit TERMINATES the march at the analytically-decided
+        // `t` (hit/normal stay analytic — C1). No cubic crossing / a CSG-rounded divergence FALLS
+        // THROUGH to the M1 analytic fold below (so a brick the cubic clears is still marched
+        // exactly). INDEPENDENT of `brick_enabled` (the M1 empty-skip can be OFF here). ---
+        if (pc.brick_trilinear != 0u) {
+            float m2_hit_t;
+            if (m2_surface_hit(ro, rd, t, m2_hit_t)) {
+                hit = true;
+                exhausted = false;       // M2 cubic+analytic-validated convergence
+                t = m2_hit_t;
+                break;
+            }
+            // else: no cubic crossing in this brick (or the refine cleared it) → fall through to the
+            // analytic `sdf(p)` step, exactly as M1 marches a SURFACE brick.
         }
 
         float d = sdf(p);

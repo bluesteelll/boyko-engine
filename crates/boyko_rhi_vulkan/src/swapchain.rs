@@ -3618,7 +3618,8 @@ pub struct GBufferScene<'a> {
     pub marcher: &'a ComputePipeline,
     /// The vocabulary bind-group LAYOUT { SSBO @0, sampled depth @1, storage albedo
     /// @2, storage normal @3, storage material @4, UNIFORM camera @5, STORAGE tiles
-    /// @6, STORAGE material-table @7, STORAGE `gViewT` @8, STORAGE `PointerGrid` @9 }. The
+    /// @6, STORAGE material-table @7, STORAGE `gViewT` @8, STORAGE `PointerGrid` @9,
+    /// COMBINED_IMAGE_SAMPLER `BrickAtlas` @10 (M2) }. 11 bindings, within the 12-binding cap. The
     /// renderer allocates + writes a SET against it once per extent (pointing at the
     /// per-extent G-buffer + `gViewT` images + the bundle's `edit_list` / `camera_uniform` /
     /// `depth_sampler` / `tiles_buffer` / `material_table` / `pointer_grid`). PBR MVP-2 added
@@ -3639,6 +3640,14 @@ pub struct GBufferScene<'a> {
     /// gated OFF (`brick_enabled == 0`, the windowed-present path), or
     /// `vkCreateComputePipelines` / `vkCmdDispatch` fail validation
     /// (VUID-…-layout-07988 / -08114).
+    ///
+    /// The caller MUST likewise declare binding 10 = `DescriptorKind::CombinedImageSampler`
+    /// (`ShaderStage::COMPUTE`): the M2 marcher SPIR-V STATICALLY references
+    /// `Texture3D BrickAtlas : register(t10)` + `SamplerState BrickSampler : register(s10)`
+    /// (collapsed to ONE combined descriptor by DXC) inside the runtime-gated `brick_trilinear`
+    /// branch, so the layout + the bound set must carry a VALID combined image+sampler there even
+    /// when the trilinear path is gated OFF (`brick_trilinear == 0`, the windowed-present path), or
+    /// the SAME layout VUIDs fail.
     pub vocab_layout: &'a VulkanBindGroupLayout,
     /// The edit-list StorageBuffer (binding 0), host-seeded ONCE before the loop.
     pub edit_list: &'a BoundBuffer,
@@ -3669,6 +3678,28 @@ pub struct GBufferScene<'a> {
     /// vocabulary set. Activating the empty skip on-screen is a separate step
     /// (`FineMarcherPush::with_brick`) — NOT done here.
     pub pointer_grid: &'a BoundBuffer,
+    /// The M2 brick-atlas 3D image (vocab binding 10): the dense `M2_ATLAS_DIM³` `R8_SNORM`
+    /// (or `R16_SFLOAT` fallback) tile-grid, baked from the ONE edit authority via
+    /// [`crate::compute::bake_brick_atlas`] (principle 0 — no parallel field store; the atlas is a
+    /// transient GPU mirror rebuilt on the edit `gen`). Created + filled by
+    /// [`crate::brick_atlas::BrickAtlas`]; pass [`BrickAtlas::texture`](crate::brick_atlas::BrickAtlas::texture).
+    ///
+    /// Bound as a `COMBINED_IMAGE_SAMPLER` at binding 10 (with [`Self::atlas_sampler`]): the M2
+    /// marcher SPIR-V STATICALLY references `Texture3D BrickAtlas : register(t10)` +
+    /// `SamplerState BrickSampler : register(s10)` (collapsed to ONE combined descriptor by DXC)
+    /// inside the runtime-gated `brick_trilinear` branch, so the layout MUST declare binding 10 =
+    /// `DescriptorKind::CombinedImageSampler` and bind a VALID atlas here even when the trilinear
+    /// path is gated OFF (the windowed present path runs `brick_trilinear == 0` → bound-but-unread,
+    /// byte-identical output), or `vkCreateComputePipelines` / `vkCmdDispatch` trip the layout VUIDs
+    /// (the M1 R2 lesson at binding 9). Activating the trilinear path on-screen is a separate step
+    /// (`FineMarcherPush::with_brick_trilinear`) — NOT done here.
+    pub atlas: &'a VulkanTexture,
+    /// The M2 brick-atlas trilinear / clamp-to-edge / no-mip sampler (vocab binding 10, alongside
+    /// [`Self::atlas`] in the combined-image-sampler). Pass
+    /// [`BrickAtlas::sampler`](crate::brick_atlas::BrickAtlas::sampler). The hardware trilinear
+    /// fetch decodes the `R8_SNORM`/`R16_SFLOAT` codes; clamp keeps an out-of-tile fetch reading the
+    /// apron, not a neighbour tile.
+    pub atlas_sampler: &'a VulkanSampler,
     /// The sampler bound alongside the depth image at binding 1 (ignored by the
     /// marcher's unfiltered `.Load`, but the SAMPLED_IMAGE descriptor requires one).
     pub depth_sampler: &'a VulkanSampler,
@@ -4030,11 +4061,12 @@ impl GBufferTargets {
         // entry order matches the layout: SSBO @0, sampled depth @1, storage albedo @2,
         // storage normal @3, storage material @4, UNIFORM camera @5, STORAGE tiles @6,
         // STORAGE material-table @7, STORAGE gViewT @8 (Lighting L0b), STORAGE PointerGrid @9
-        // (M1). Binding 6 is the P4b coarse-cull tile buffer and binding 9 is the M1 empty-skip
-        // pointer grid: the marcher shader DECLARES both unconditionally (DXC keeps the @9
-        // reference past the runtime `brick_enabled` gate), so a VALID descriptor is bound here
-        // even though the windowed path gates BOTH reads OFF (`coarse_enabled == 0` /
-        // `brick_enabled == 0` — byte-identical output, binding bound-but-unread).
+        // (M1), COMBINED_IMAGE_SAMPLER BrickAtlas @10 (M2). Bindings 6/9/10 are the P4b coarse-cull
+        // tiles, the M1 empty-skip pointer grid, and the M2 brick atlas: the marcher shader DECLARES
+        // all three unconditionally (DXC keeps the @9/@10 references past the runtime
+        // `brick_enabled`/`brick_trilinear` gates), so VALID descriptors are bound here even though
+        // the windowed path gates ALL reads OFF (`coarse_enabled == 0` / `brick_enabled == 0` /
+        // `brick_trilinear == 0` — byte-identical output, bindings bound-but-unread).
         let vocab_set = {
             let entries = [
                 BindGroupEntry::StorageBuffer { buffer: scene.edit_list },
@@ -4055,6 +4087,15 @@ impl GBufferTargets {
                 // SPIR-V (`register(t9)`); the windowed path gates the read OFF
                 // (`brick_enabled == 0`), so it is bound-but-unread (byte-identical output).
                 BindGroupEntry::StorageBuffer { buffer: scene.pointer_grid },
+                // M2: the brick-atlas 3D image @10 as a COMBINED_IMAGE_SAMPLER (the marcher's
+                // hardware trilinear `.SampleLevel` needs the sampler). Statically referenced by the
+                // marcher SPIR-V (`register(t10)` + `register(s10)`, collapsed to one combined
+                // descriptor by DXC); the windowed path gates the read OFF (`brick_trilinear == 0`),
+                // so it is bound-but-unread (byte-identical output, the M2 R2 contract).
+                BindGroupEntry::CombinedImage {
+                    texture: scene.atlas,
+                    sampler: scene.atlas_sampler,
+                },
             ];
             let desc = BindGroupDesc::<Vulkan> {
                 layout: scene.vocab_layout,

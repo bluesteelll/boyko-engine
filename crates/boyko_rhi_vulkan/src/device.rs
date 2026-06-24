@@ -137,6 +137,30 @@ pub struct DeviceCaps {
     /// L0b `gViewT` lane is a compute-store target). Always `true` on a booted context —
     /// boot fails with [`BootError::ViewtStorageFormatUnsupported`] otherwise (W2).
     pub viewt_storage_format_ok: bool,
+    /// Whether `R8_SNORM` supports `SAMPLED_IMAGE_FILTER_LINEAR` under OPTIMAL tiling (SDF
+    /// brick-atlas campaign M2): the hardware trilinear fetch of the quantized narrow-band
+    /// brick atlas needs `VK_FILTER_LINEAR` on the sampled `R8_SNORM` 3D image. RECORDED
+    /// (not a boot fail-fast): when `false`, the M2 atlas falls back to `R16_SFLOAT` (which
+    /// supports linear filtering on every conformant GPU), so the engine boots on either
+    /// path. Read via [`DeviceCaps::atlas_format`] to pick the brick-atlas image format.
+    pub atlas_linear_filter_ok: bool,
+}
+
+impl DeviceCaps {
+    /// The SDF brick-atlas image format chosen from [`Self::atlas_linear_filter_ok`]
+    /// (SDF brick-atlas campaign M2): `R8_SNORM` when the GPU supports linear filtering on
+    /// it (the dense quantized path), else the `R16_SFLOAT` D8 fallback (half-float, no
+    /// quantization — the `EPSILON_Q` store bias is harmless there). Both the CPU baker and
+    /// the GPU decode handle either format. Returned as the agnostic [`Format`] the
+    /// `create_texture` path maps to a `VkFormat`.
+    #[inline]
+    pub const fn atlas_format(&self) -> boyko_rhi::Format {
+        if self.atlas_linear_filter_ok {
+            boyko_rhi::Format::R8Snorm
+        } else {
+            boyko_rhi::Format::R16Sfloat
+        }
+    }
 }
 
 /// Global-scope Vulkan commands (resolved with a NULL instance).
@@ -1881,10 +1905,35 @@ fn query_device_caps(fns: &InstanceFns, physical_device: VkPhysicalDevice) -> De
     let viewt_storage_format_ok =
         (viewt_props.optimal_tiling_features & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0;
 
+    // --- atlas_linear_filter_ok (M2): SAMPLED_IMAGE_FILTER_LINEAR on R8_SNORM, OPTIMAL
+    // tiling. The SDF brick atlas is a SAMPLED `R8_SNORM` 3D image the marcher fetches with
+    // a hardware trilinear filter; mirror the storage-format checks for the new feature bit.
+    // RECORDED ONLY (no boot fail-fast): on a GPU that lacks it the atlas falls back to
+    // `R16_SFLOAT` (always linear-filterable), so the engine boots on either path.
+    let mut atlas_props = VkFormatProperties {
+        linear_tiling_features: 0,
+        optimal_tiling_features: 0,
+        buffer_features: 0,
+    };
+    // SAFETY: `physical_device` is valid; `R8_SNORM` is a valid `VkFormat`;
+    // `&mut atlas_props` is a valid out-pointer for the `#[repr(C)]` `VkFormatProperties`
+    // the driver fully overwrites.
+    unsafe {
+        (fns.get_physical_device_format_properties)(
+            physical_device,
+            VK_FORMAT_R8_SNORM,
+            &mut atlas_props,
+        )
+    };
+    let atlas_linear_filter_ok = (atlas_props.optimal_tiling_features
+        & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT)
+        != 0;
+
     DeviceCaps {
         bindless_capable,
         gbuffer_storage_format_ok,
         viewt_storage_format_ok,
+        atlas_linear_filter_ok,
     }
 }
 

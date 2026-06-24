@@ -72,6 +72,7 @@ use boyko_rhi_vulkan::compute::{
     pixel_world_xy,
     sdf_gbuffer_composite_spirv, sdf_op, tile_grid_extent,
 };
+use boyko_rhi_vulkan::brick_atlas::BrickAtlas;
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
 use boyko_rhi_vulkan::ffi::{
     VK_FORMAT_B8G8R8A8_SRGB, VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM, VkExtent2D,
@@ -612,6 +613,25 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         write_words(mapped, &pointer_grid_cells);
     }
 
+    // M2: the brick-atlas 3D image + trilinear sampler (vocab binding 10). Baked from the SAME
+    // `sdf` edit authority via `BrickAtlas::create` (principle 0 — no parallel field store; a
+    // transient GPU mirror). The windowed present path runs the marcher with the trilinear path
+    // GATED OFF (`brick_trilinear == 0`), so the marcher NEVER samples the atlas — the on-screen
+    // output stays byte-identical to the pre-M2 path. But the recompiled marcher SPIR-V statically
+    // references `register(t10)`/`register(s10)` past the runtime gate, so a VALID combined
+    // image+sampler must be bound at binding 10 regardless. Created ONCE here, borrowed into the
+    // vocabulary set; destroyed in the teardown block.
+    let brick_atlas = {
+        use boyko_sdf_math::SdfEditField;
+        let mut field = SdfEditField::new();
+        for e in &sdf {
+            assert!(field.push(*e), "windowed scene must fit MAX_SDF_EDITS");
+        }
+        field.bump_gen();
+        BrickAtlas::create(&ctx, &field)
+            .expect("M2 brick atlas (vocab binding 10) — create + bake + upload")
+    };
+
     // Lighting L0a: the light table SSBO (resolve binding 6). For this test the table is
     // seeded host-visible with the DEGENERATE table (the 0%-gate anchor); a production
     // path would mint it DEVICE-LOCAL (TRANSFER_DST | STORAGE) and seed via
@@ -749,6 +769,15 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         // even though the windowed path runs the skip OFF (`brick_enabled == 0`), or
         // `vkCreateComputePipelines` / `vkCmdDispatch` trip VUID-…-layout-07988 / -08114.
         BindGroupLayoutEntry { binding: 9, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        // M2: the brick-atlas combined image+sampler @10. The recompiled marcher SPIR-V
+        // statically references `Texture3D BrickAtlas : register(t10)` +
+        // `SamplerState BrickSampler : register(s10)` (collapsed to ONE combined descriptor by
+        // DXC) inside the runtime-gated `brick_trilinear` branch (NOT dead-stripped despite the
+        // gate), so the layout MUST declare binding 10 — a VALID combined image+sampler must be
+        // bound even though the windowed path runs the trilinear path OFF (`brick_trilinear == 0`,
+        // bound-but-unread, byte-identical output), or the layout VUIDs trip (the M1 binding-9
+        // lesson at the next slot).
+        BindGroupLayoutEntry { binding: 10, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
     ];
     let vocab_layout = RhiDevice::create_bind_group_layout(
         device,
@@ -866,6 +895,9 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         camera_uniform: &camera_uniform,
         tiles_buffer: &tiles_buffer,
         pointer_grid: &pointer_grid,
+        // M2: the brick-atlas image + sampler @10 (bound-but-unread on the windowed OFF path).
+        atlas: brick_atlas.texture(),
+        atlas_sampler: brick_atlas.sampler(),
         depth_sampler: &depth_sampler,
         material_table: &material_table,
         light_table: &light_table,
@@ -1039,6 +1071,9 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         RhiDevice::destroy_sampler(device, depth_sampler);
         RhiDevice::destroy_buffer(device, vertex_buffer);
         RhiDevice::destroy_buffer(device, tiles_buffer);
+        // M2: the brick atlas (image + sampler). The renderer was dropped above (waits idle), so
+        // no submission still samples it; `ctx` is alive; the by-value move destroys it once.
+        brick_atlas.destroy(&ctx);
         RhiDevice::destroy_buffer(device, pointer_grid);
         RhiDevice::destroy_buffer(device, light_staging);
         RhiDevice::destroy_buffer(device, light_table);

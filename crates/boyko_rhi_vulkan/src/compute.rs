@@ -57,6 +57,14 @@ use boyko_sdf_math::{
 // golden mirror replays bit-for-bit against the GPU marcher (`PointerGrid` is the SAME
 // origin/dims/brick_world the `FineMarcherPush` grid uniforms carry).
 use boyko_sdf_math::brick::{PointerGrid, dist_to_brick_exit};
+// M2 trilinear SURFACE bricks: the apron'd-brick bake + the JCGT analytic-cubic crossing the
+// host golden mirror (`golden_composite_pixel_brick_m2`) and the atlas baker (`bake_brick_atlas`)
+// drive — the SAME `boyko_sdf_math::brick` oracle the GPU marcher mirrors bit-for-bit.
+use boyko_sdf_math::brick::{
+    BRICK_ALLOC, BRICK_INTERIOR, BRICK_VOXELS, brick_cubic_hit, classify_brick, decode_snorm8,
+    fill_brick,
+};
+use boyko_sdf_math::{BrickClass, SDF_EDIT_BAND_HALF, SdfEditField};
 
 use crate::ffi::VkResult;
 use crate::memory::MemoryError;
@@ -137,8 +145,11 @@ static SDF_EDITLIST_STORAGE_IMAGE_SPV: SpirvBlob<24092> = SpirvBlob(*include_byt
 /// the GATE-1 probe tripwire). Phase 0 also extracted ray-gen into the shared
 /// `ray_gen.hlsli`. The full Cook-Torrance shade runs in [`deferred_pbr_spirv`]. The byte
 /// length grew (41176 → 43944) with the material pick + oct-encode + SSBO fetch; Lighting
-/// L0b added the `gViewT` storage-image lane + its 3 terminal writes (43944 → 44216).
-static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<47032> = SpirvBlob(*include_bytes!(concat!(
+/// L0b added the `gViewT` storage-image lane + its 3 terminal writes (43944 → 44216). The SDF
+/// brick-atlas M1 empty-skip prefix grew it (→ 47032), then M2 added the trilinear+JCGT-cubic
+/// SURFACE-brick path (atlas `Texture3D` @binding 10 + the b5 `M2GridParams` block + the cubic
+/// solver), bringing the marcher to its current 72280-byte size.
+static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<72280> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/sdf_gbuffer_composite.comp.spv"
 )));
@@ -1161,10 +1172,20 @@ pub struct FineMarcherPush {
     /// M1 pointer-grid cell size (the world width of one brick cell). The `uint3` tail slot
     /// (offset 60). Don't-care when `brick_enabled == 0`.
     pub brick_world: f32,
+    /// M2 trilinear+JCGT-cubic SURFACE-brick gate: non-zero samples the brick atlas (binding 10)
+    /// and runs the analytic-cubic crossing inside a SURFACE brick (validated by the analytic
+    /// residual). `0` = the OFF path (byte-identical to the M1 marcher — the atlas is never
+    /// sampled). INDEPENDENT of `brick_enabled` (the M1 empty-skip): the two gates are orthogonal.
+    /// First slot (offset 64) of the 16-byte headroom the 64-byte M1 layout left inside the
+    /// declared 80-byte COMPOSITE push range.
+    pub brick_trilinear: u32,
+    /// std430 tail padding (offsets 68/72/76) to the 80-byte COMPOSITE push stride. Mirrors the
+    /// shader's `uint3 _pad3`. Don't-care (the shader never reads it).
+    pub _pad3: [u32; 3],
 }
 
-/// Byte size of [`FineMarcherPush`] — the marcher's COMPUTE push range (64 bytes), a
-/// subset of the declared 80-byte (`COMPOSITE_PUSH_CONSTANT_BYTES`) range.
+/// Byte size of [`FineMarcherPush`] — the marcher's COMPUTE push range (80 bytes), exactly the
+/// declared `COMPOSITE_PUSH_CONSTANT_BYTES` range (the M2 widening filled the 16-byte headroom).
 pub const GBUFFER_MARCHER_PUSH_BYTES: u32 = core::mem::size_of::<FineMarcherPush>() as u32;
 
 // Pin the std430 field offsets + the 64-byte stride so a host/shader desync is a build
@@ -1184,10 +1205,16 @@ const _: () = assert!(core::mem::offset_of!(FineMarcherPush, grid_origin) == 32)
 const _: () = assert!(core::mem::offset_of!(FineMarcherPush, brick_enabled) == 44);
 const _: () = assert!(core::mem::offset_of!(FineMarcherPush, grid_dims) == 48);
 const _: () = assert!(core::mem::offset_of!(FineMarcherPush, brick_world) == 60);
-const _: () = assert!(GBUFFER_MARCHER_PUSH_BYTES == 64, "FineMarcherPush must be 64 bytes");
+// M2: the `brick_trilinear` gate @64 + the `_pad3` tail @68 fill the 16-byte headroom the M1
+// layout left, so the struct is now EXACTLY the declared 80-byte COMPOSITE push range. A
+// non-default-grid / `brick_trilinear` GPU test catches a packing slip the way the light_dir@16
+// and grid_origin@32 pins do.
+const _: () = assert!(core::mem::offset_of!(FineMarcherPush, brick_trilinear) == 64);
+const _: () = assert!(core::mem::offset_of!(FineMarcherPush, _pad3) == 68);
+const _: () = assert!(GBUFFER_MARCHER_PUSH_BYTES == 80, "FineMarcherPush must be 80 bytes");
 const _: () = assert!(
-    GBUFFER_MARCHER_PUSH_BYTES <= COMPOSITE_PUSH_CONSTANT_BYTES,
-    "FineMarcherPush must fit the declared 80-byte COMPUTE push range"
+    GBUFFER_MARCHER_PUSH_BYTES == COMPOSITE_PUSH_CONSTANT_BYTES,
+    "FineMarcherPush must equal the declared 80-byte COMPUTE push range"
 );
 
 impl FineMarcherPush {
@@ -1215,6 +1242,8 @@ impl FineMarcherPush {
             brick_enabled: 0,
             grid_dims: [0, 0, 0],
             brick_world: 0.0,
+            brick_trilinear: 0,
+            _pad3: [0, 0, 0],
         }
     }
 
@@ -1240,12 +1269,28 @@ impl FineMarcherPush {
         self
     }
 
-    /// Re-views the push constants as their raw 32-byte slice for `push_constants`.
+    /// Enables the M2 trilinear+JCGT-cubic SURFACE-brick path: turns on `brick_trilinear`. The
+    /// marcher then samples the brick atlas (binding 10) and solves the analytic cubic for the
+    /// EXACT ray↔isosurface crossing inside a SURFACE M2 cell, validated by the analytic residual
+    /// (the exact-CSG fallback). The atlas/grid uniforms the cubic needs live in the b5 camera UBO
+    /// ([`M2GridParams`]), NOT the push, so this gate carries no extra fields. INDEPENDENT of the
+    /// M1 empty-skip ([`with_brick`](Self::with_brick)): both gates may be on, off, or mixed. The
+    /// base gates (`coarse_enabled` / `omega` / lighting) and any M1 grid uniforms are preserved.
+    ///
+    /// `brick_trilinear == false` leaves the push byte-identical to the M1 state (the OFF path —
+    /// the atlas is never sampled).
+    #[inline]
+    pub const fn with_brick_trilinear(mut self, enabled: bool) -> Self {
+        self.brick_trilinear = enabled as u32;
+        self
+    }
+
+    /// Re-views the push constants as their raw 80-byte slice for `push_constants`.
     #[inline]
     pub fn as_bytes(&self) -> &[u8] {
-        // SAFETY: `Self` is `#[repr(C)]` with only `u32` / `f32` / `[f32; 3]` fields (all
-        // `Copy`, every offset + the 32-byte total pinned by the const-asserts above, no
-        // uninit padding — the two explicit `_pad`/`_pad2` fields cover the std430 holes),
+        // SAFETY: `Self` is `#[repr(C)]` with only `u32` / `f32` / `[f32; 3]` / `[u32; 3]` fields
+        // (all `Copy`, every offset + the 80-byte total pinned by the const-asserts above, no
+        // uninit padding — the explicit `_pad`/`_pad2`/`_pad3` fields cover the std430 holes),
         // so its `size_of` bytes are a fully-initialized, alignment-valid POD bit pattern.
         // The `&self` borrow keeps the struct alive for the slice's lifetime; the slice is
         // read-only (no aliasing write).
@@ -1771,6 +1816,587 @@ pub fn golden_composite_pixel_brick(
     // empty skip never reopens the B1 budget hole (its plain exit steps are bounded), so
     // `exhausted` here means the analytic field ran out of budget mid-field, exactly as
     // in the non-brick marcher; the frozen plain re-march resolves it.
+    if exhausted {
+        t = t_seed;
+        hit = false;
+        for _it2 in 0..SDF_MAX_IT {
+            if t >= t_mesh {
+                break;
+            }
+            let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
+            let d = sdf_edit_list(edits, p);
+            if d < SDF_EPS {
+                hit = true;
+                break;
+            }
+            t += d; // frozen plain step
+            if t > SDF_T_MAX {
+                break;
+            }
+        }
+    }
+
+    let color = if hit && t < t_mesh {
+        let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
+        let n = sdf_edit_list_normal(edits, p);
+        host_shade(SDF_BASE_COLOR, SDF_AMBIENT, p, n, light_dir, lighting_flags, &|q| {
+            sdf_edit_list(edits, q)
+        })
+    } else if has_mesh {
+        MESH_COLOR
+    } else {
+        SDF_BACKGROUND
+    };
+    pack_rgba(color)
+}
+
+// ===========================================================================
+// M2 — the trilinear+JCGT-cubic SURFACE-brick atlas (the CPU baker + the b5 UBO grid
+// block + the host golden mirror).
+//
+// M1 ships empty-space-skip + an analytic fold inside SURFACE bricks; M2 replaces that
+// analytic fold with a dense `R8_SNORM`/`R16_SFLOAT` brick atlas — one apron'd
+// `BRICK_ALLOC³` (10³) tile per SURFACE M2 grid cell — sampled by the marcher, whose
+// 8 per-cell corner distances form the JCGT-2022 cubic ([`brick_cubic_hit`]) whose root
+// is the EXACT ray↔trilinear-isosurface crossing, then VALIDATED by the analytic residual
+// (the exact-CSG fallback). The grid is a small NEAR-FIELD lattice ([-4, 4]³) of
+// `M2_BRICK_WORLD`-sized bricks; the atlas is `M2_ATLAS_DIM³` voxels.
+//
+// Principle 0: the atlas is a TRANSIENT GPU mirror of the ONE analytic authority
+// ([`SdfEditField`]) baked each `gen`, owning no durable per-entity state (exactly like
+// the M1 pointer grid / the GPU edit list). The host mirror ([`golden_composite_pixel_brick_m2`])
+// is the bit-exact reference the GPU golden compares against.
+// ===========================================================================
+
+/// The world size of one M2 brick cell (`BRICK_INTERIOR * M2_VOXEL_SIZE = 8 * 0.25`). The
+/// near-field grid cell edge — the world span a single apron'd `BRICK_ALLOC³` atlas tile covers.
+pub const M2_BRICK_WORLD: f32 = 2.0;
+
+/// The world width of one M2 atlas voxel (the brick scale [`fill_brick`] / [`brick_cubic_hit`] pin).
+pub const M2_VOXEL_SIZE: f32 = 0.25;
+
+/// The M2 near-field grid edge (cells per axis). A `4³` lattice of [`M2_BRICK_WORLD`]-sized bricks
+/// spans `[-4, 4]³` (the demo/golden extent — centers in `[-2, 2]`, primitives `<= 3`), fully
+/// enclosing the near field.
+pub const M2_GRID_DIM: u32 = 4;
+
+/// The minimum world corner of the M2 near-field grid (cell `(0,0,0)`'s min): `-M2_GRID_DIM *
+/// M2_BRICK_WORLD / 2 = -4`. The grid spans `[M2_GRID_ORIGIN, M2_GRID_ORIGIN + M2_GRID_DIM *
+/// M2_BRICK_WORLD]³ = [-4, 4]³`.
+pub const M2_GRID_ORIGIN: f32 = -4.0;
+
+/// The M2 atlas edge in voxels (`M2_GRID_DIM * BRICK_ALLOC = 4 * 10 = 40`). The dense 3D atlas
+/// image is `M2_ATLAS_DIM³` voxels — one apron'd `BRICK_ALLOC³` tile per M2 grid cell. The
+/// [`crate::brick_atlas::BrickAtlas`] image is sized to this.
+pub const M2_ATLAS_DIM: u32 = M2_GRID_DIM * BRICK_ALLOC as u32;
+
+/// The M2 snorm decode band half-width (world units) — the band the atlas codes span, mirroring
+/// `boyko_sdf_math::brick`'s store band (== [`SDF_EDIT_BAND_HALF`] `= 0.90`).
+pub const M2_BAND_HALF: f32 = SDF_EDIT_BAND_HALF;
+
+/// The M2 crease tolerance (world units): the largest `|analytic sdf|` at the cubic candidate that
+/// ACCEPTS the cubic hit as the surface; beyond it (a CSG crease / brick-rounding divergence) the
+/// analytic refine decides (the exact-CSG fallback). `~` the brick's `δ_tri + δ_quant` world slack.
+pub const M2_CREASE_EPS: f32 = 0.0192;
+
+/// The b5 camera UBO byte size widened for M2: the 80-byte camera block
+/// ([`COMPOSITE_PUSH_CONSTANT_BYTES`]) + a 48-byte [`M2GridParams`] tail at
+/// [`M2_GRID_PARAMS_OFFSET`]. The host writes the camera block then the M2 block; the marcher
+/// reads the M2 block ONLY on the `brick_trilinear` path (byte-identical to M1 when OFF).
+pub const B5_CAMERA_UBO_BYTES: usize = 128;
+
+/// The byte offset of the [`M2GridParams`] block inside the widened b5 camera UBO (right after the
+/// 80-byte camera block). The host writes `M2GridParams::default_near_field().as_bytes()` here.
+pub const M2_GRID_PARAMS_OFFSET: usize = 80;
+
+/// The number of analytic refine steps the M2 surface-hit fallback sphere-traces from the cubic
+/// candidate when the analytic residual exceeds [`M2_CREASE_EPS`] (mirror the shader's
+/// `M2_REFINE_ITERS`).
+const M2_REFINE_ITERS: u32 = 8;
+
+// The M2 grid constants pin the shader's static brick geometry (mirror the `.hlsl` `M2_*` consts):
+// a desync (e.g. a brick scale change) is a build error here, caught before the GPU runs.
+const _: () = assert!(M2_BRICK_WORLD == BRICK_INTERIOR as f32 * M2_VOXEL_SIZE);
+const _: () = assert!(M2_GRID_ORIGIN == -(M2_GRID_DIM as f32 * M2_BRICK_WORLD * 0.5));
+const _: () = assert!(M2_ATLAS_DIM == 40);
+
+/// The minimum world corner of M2 grid cell `cell = (cx, cy, cz)`:
+/// `M2_GRID_ORIGIN + cell * M2_BRICK_WORLD`. The brick spans `[min, min + M2_BRICK_WORLD]³`.
+#[inline]
+pub const fn m2_cell_min(cell: [u32; 3]) -> [f32; 3] {
+    [
+        M2_GRID_ORIGIN + cell[0] as f32 * M2_BRICK_WORLD,
+        M2_GRID_ORIGIN + cell[1] as f32 * M2_BRICK_WORLD,
+        M2_GRID_ORIGIN + cell[2] as f32 * M2_BRICK_WORLD,
+    ]
+}
+
+/// The atlas-VOXEL origin of M2 grid cell `tile = (tx, ty, tz)`: `tile * BRICK_ALLOC`. The cell's
+/// apron'd `BRICK_ALLOC³` tile occupies `[origin, origin + BRICK_ALLOC]³` voxels in the dense
+/// `M2_ATLAS_DIM³` atlas. MUST match the shader's `m2_corner` uvw mapping
+/// (`(tile_org + corner) / M2_ATLAS_DIM` under the integer texelFetch), and the host baker
+/// ([`bake_brick_atlas`]) scatters each tile at this voxel offset.
+#[inline]
+pub const fn m2_tile_atlas_origin(tile: [u32; 3]) -> [u32; 3] {
+    [
+        tile[0] * BRICK_ALLOC as u32,
+        tile[1] * BRICK_ALLOC as u32,
+        tile[2] * BRICK_ALLOC as u32,
+    ]
+}
+
+/// The M2 grid block written into the b5 camera UBO tail (at [`M2_GRID_PARAMS_OFFSET`]) so a
+/// host-side grid retune needs no shader edit. `#[repr(C)]`, 48 bytes — three std140 `vec4` lanes
+/// mirroring the shader's `cbuffer Camera` M2 fields (`m2_origin_brick_world`, `m2_dims_atlas_dim`,
+/// `m2_band_voxel_inv_atlas`):
+///
+/// - lane 0 `origin_brick_world` — `(origin.x, origin.y, origin.z, M2_BRICK_WORLD)`
+/// - lane 1 `dims_atlas_dim` — `(dims.x, dims.y, dims.z, M2_ATLAS_DIM)` as `f32`
+/// - lane 2 `band_voxel_inv_atlas` — `(band_half, voxel_size, 1.0 / atlas_dim, 0.0)`
+///
+/// The offsets are pinned by the const-asserts below so a host/shader desync is a build error.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct M2GridParams {
+    /// Lane 0: `xyz` = the M2 grid min world corner, `w` = [`M2_BRICK_WORLD`].
+    pub origin_brick_world: [f32; 4],
+    /// Lane 1: `xyz` = the M2 grid dims `[x, y, z]` as `f32`, `w` = [`M2_ATLAS_DIM`] as `f32`. The
+    /// shader reads it as a `uint4` (`(uint)` cast) — an exact small-integer `f32`↔`uint` round trip.
+    pub dims_atlas_dim: [f32; 4],
+    /// Lane 2: `x` = band half-width, `y` = voxel size, `z` = `1.0 / M2_ATLAS_DIM`, `w` = 0 (pad).
+    pub band_voxel_inv_atlas: [f32; 4],
+}
+
+/// Byte size of [`M2GridParams`] — three std140 `vec4` lanes (48 B), the b5 UBO M2 tail.
+pub const M2_GRID_PARAMS_BYTES: usize = core::mem::size_of::<M2GridParams>();
+
+const _: () = assert!(core::mem::offset_of!(M2GridParams, origin_brick_world) == 0);
+const _: () = assert!(core::mem::offset_of!(M2GridParams, dims_atlas_dim) == 16);
+const _: () = assert!(core::mem::offset_of!(M2GridParams, band_voxel_inv_atlas) == 32);
+const _: () = assert!(M2_GRID_PARAMS_BYTES == 48, "M2GridParams must be 48 bytes (3 vec4 lanes)");
+const _: () = assert!(
+    M2_GRID_PARAMS_OFFSET + M2_GRID_PARAMS_BYTES == B5_CAMERA_UBO_BYTES,
+    "the M2 block must fill the b5 UBO tail exactly (80 + 48 = 128)"
+);
+
+impl M2GridParams {
+    /// The default near-field M2 grid block: origin [`M2_GRID_ORIGIN`], dims [`M2_GRID_DIM`]³,
+    /// brick world [`M2_BRICK_WORLD`], atlas [`M2_ATLAS_DIM`], band [`M2_BAND_HALF`], voxel
+    /// [`M2_VOXEL_SIZE`] — the render-path seed the [`crate::brick_atlas::BrickAtlas`] bakes against.
+    #[inline]
+    pub fn default_near_field() -> Self {
+        Self {
+            origin_brick_world: [M2_GRID_ORIGIN, M2_GRID_ORIGIN, M2_GRID_ORIGIN, M2_BRICK_WORLD],
+            dims_atlas_dim: [
+                M2_GRID_DIM as f32,
+                M2_GRID_DIM as f32,
+                M2_GRID_DIM as f32,
+                M2_ATLAS_DIM as f32,
+            ],
+            band_voxel_inv_atlas: [
+                M2_BAND_HALF,
+                M2_VOXEL_SIZE,
+                1.0 / M2_ATLAS_DIM as f32,
+                0.0,
+            ],
+        }
+    }
+
+    /// Re-views the block as its raw 48-byte slice for the b5 UBO write (at [`M2_GRID_PARAMS_OFFSET`]).
+    #[inline]
+    pub fn as_bytes(&self) -> &[u8] {
+        // SAFETY: `Self` is `#[repr(C)]` with only `[f32; 4]` fields (all `Copy`, every offset + the
+        // 48-byte total pinned by the const-asserts above, no uninit padding — three packed vec4
+        // lanes), so its `size_of` bytes are a fully-initialized, alignment-valid POD bit pattern.
+        // The `&self` borrow keeps the struct alive for the slice's lifetime; read-only.
+        unsafe {
+            slice::from_raw_parts((self as *const Self).cast::<u8>(), core::mem::size_of::<Self>())
+        }
+    }
+}
+
+/// The voxel encoding the M2 brick atlas stores, chosen from the device's linear-filter support
+/// (mirrors [`crate::device::DeviceCaps::atlas_format`]). `R8_SNORM` is the dense quantized path;
+/// `R16_SFLOAT` is the fallback when the GPU cannot linear-filter `R8_SNORM` (no quantization — the
+/// `EPSILON_Q` store bias is harmless there). The CPU baker ([`bake_brick_atlas`]) writes either.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AtlasEncoding {
+    /// `R8_SNORM`: one signed byte per voxel (the snorm code [`fill_brick`] quantizes to).
+    Snorm8,
+    /// `R16_SFLOAT`: one half-float per voxel (the `decode_snorm8` value re-encoded to f16).
+    Sfloat16,
+}
+
+impl AtlasEncoding {
+    /// Picks the encoding from the device's `R8_SNORM` linear-filter support: `Snorm8` when the GPU
+    /// can linear-filter the quantized atlas, else the `Sfloat16` fallback (the SAME choice
+    /// [`crate::device::DeviceCaps::atlas_format`] maps to a `VkFormat`).
+    #[inline]
+    pub const fn from_linear_filter_ok(linear_filter_ok: bool) -> Self {
+        if linear_filter_ok {
+            Self::Snorm8
+        } else {
+            Self::Sfloat16
+        }
+    }
+
+    /// Bytes per voxel for this encoding (`1` for `Snorm8`, `2` for `Sfloat16`).
+    #[inline]
+    pub const fn bytes_per_voxel(self) -> usize {
+        match self {
+            Self::Snorm8 => 1,
+            Self::Sfloat16 => 2,
+        }
+    }
+
+    /// The total byte size of the dense `M2_ATLAS_DIM³` atlas for this encoding — the staging-buffer
+    /// + 3D-image byte size [`crate::brick_atlas::BrickAtlas`] allocates.
+    #[inline]
+    pub const fn atlas_byte_size(self) -> usize {
+        let voxels = (M2_ATLAS_DIM as usize) * (M2_ATLAS_DIM as usize) * (M2_ATLAS_DIM as usize);
+        voxels * self.bytes_per_voxel()
+    }
+}
+
+/// The linear voxel index of atlas voxel `(x, y, z)` in the dense `M2_ATLAS_DIM³` lattice
+/// (`x + y*W + z*W*W`, `W = M2_ATLAS_DIM`) — the SAME order the Vulkan 3D image's tightly-packed
+/// `copy_buffer_to_image` reads (row-major, x fastest), so the host baker's scatter and the GPU
+/// texel address agree.
+#[inline]
+pub const fn atlas_voxel_index(x: u32, y: u32, z: u32) -> usize {
+    let w = M2_ATLAS_DIM as usize;
+    x as usize + y as usize * w + z as usize * w * w
+}
+
+/// IEEE-754 binary32 → binary16 (round-to-nearest-even) — the f16 encode the `Sfloat16` atlas path
+/// stores. Reuses the validated [`golden_f16_from_f32`] (the same encoder the lighting cone path
+/// uses); the decoded snorm value lives in `[-band_half, band_half] ⊂ [-1, 1]`, inside the f16
+/// normal range.
+#[inline]
+pub fn f16_from_f32(f: f32) -> u16 {
+    golden_f16_from_f32(f)
+}
+
+/// Bakes the dense `M2_ATLAS_DIM³` brick atlas from the ONE edit authority `field` into `out`
+/// (the staging bytes), in the chosen [`AtlasEncoding`], returning the number of SURFACE cells
+/// baked.
+///
+/// For each M2 grid cell, classifies the brick ([`classify_brick`] at [`SDF_EDIT_BAND_HALF`]); a
+/// SURFACE cell's apron'd `BRICK_ALLOC³` tile is baked ([`fill_brick`]) and scattered into `out` at
+/// the cell's atlas-voxel origin ([`m2_tile_atlas_origin`]). EMPTY cells leave their tile voxels at
+/// `0` (a mid-band code — never sampled, since the marcher only enters the M2 cubic on a SURFACE
+/// cell via the M2 grid lookup). `Snorm8` stores the raw `i8` byte; `Sfloat16` stores
+/// `f16_from_f32(decode_snorm8(byte))` (the decoded normalized value, NOT multiplied by `band_half`
+/// — the shader's `m2_decode` applies `band_half`, matching the snorm hardware decode that also
+/// returns the normalized value).
+///
+/// `out.len()` MUST be `encoding.atlas_byte_size()`. This is a SETUP-time (per-`gen`) bake, not a
+/// hot-path call. Principle 0: a transient mirror of the analytic authority, no durable state.
+pub fn bake_brick_atlas(field: &SdfEditField, encoding: AtlasEncoding, out: &mut [u8]) -> u32 {
+    debug_assert_eq!(
+        out.len(),
+        encoding.atlas_byte_size(),
+        "atlas staging must be encoding.atlas_byte_size() bytes"
+    );
+
+    let mut surface_cells = 0u32;
+    let mut tile = [0i8; BRICK_VOXELS];
+
+    for cz in 0..M2_GRID_DIM {
+        for cy in 0..M2_GRID_DIM {
+            for cx in 0..M2_GRID_DIM {
+                let cell = [cx, cy, cz];
+                let cell_min = m2_cell_min(cell);
+                let class = classify_brick(field, cell_min, M2_BRICK_WORLD, SDF_EDIT_BAND_HALF);
+                if class != BrickClass::Surface {
+                    continue; // EMPTY cells: their tile voxels stay 0 (never sampled).
+                }
+                surface_cells += 1;
+
+                // Bake the apron'd tile from the authority, then scatter it into the dense atlas at
+                // the cell's atlas-voxel origin (the SAME `tile * BRICK_ALLOC` the shader addresses).
+                fill_brick(field, cell_min, M2_VOXEL_SIZE, M2_BAND_HALF, &mut tile);
+                let [ox, oy, oz] = m2_tile_atlas_origin(cell);
+                const W: usize = BRICK_ALLOC;
+                for lz in 0..W {
+                    for ly in 0..W {
+                        for lx in 0..W {
+                            let byte = tile[lx + ly * W + lz * W * W];
+                            let vx = ox + lx as u32;
+                            let vy = oy + ly as u32;
+                            let vz = oz + lz as u32;
+                            let vi = atlas_voxel_index(vx, vy, vz);
+                            match encoding {
+                                AtlasEncoding::Snorm8 => {
+                                    out[vi] = byte as u8;
+                                }
+                                AtlasEncoding::Sfloat16 => {
+                                    // Store the DECODED normalized value (in [-1, 1]); the shader's
+                                    // `m2_decode` multiplies by `band_half`, so the f16 lane carries
+                                    // the same normalized value the snorm hardware decode returns.
+                                    let n = decode_snorm8(byte, 1.0);
+                                    let h = f16_from_f32(n).to_le_bytes();
+                                    out[vi * 2] = h[0];
+                                    out[vi * 2 + 1] = h[1];
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    surface_cells
+}
+
+// ---------------------------------------------------------------------------
+// M2 — the HOST GOLDEN MIRROR (`golden_composite_pixel_brick_m2`): the bit-exact reference the
+// GPU M2 marcher is golden-compared against. Mirrors `sdf_gbuffer_composite.hlsl`'s
+// `m2_surface_hit` (the atlas sample → JCGT cubic → analytic-residual fallback) over the SAME
+// baked-tile data the GPU samples, then delegates the shade to the analytic path (C1).
+// ---------------------------------------------------------------------------
+
+/// The world-space ray-AABB slab clip of brick `[cell_min, cell_min + M2_BRICK_WORLD]³` from `p`
+/// along `rd`, returning `Some((t_enter, t_exit))` (world `t`, measured from `p`, `t_enter >= 0`)
+/// or `None` on a miss. Mirrors the shader's `m2_brick_span` (the `tmin = 0` floor never marches
+/// behind the current point).
+#[inline]
+fn brick_aabb_span(p: [f32; 3], rd: [f32; 3], cell_min: [f32; 3]) -> Option<(f32, f32)> {
+    let mut tmin = 0.0_f32; // never march behind the current march point
+    let mut tmax = 1.0e30_f32;
+    for a in 0..3 {
+        let lo = cell_min[a];
+        let hi = lo + M2_BRICK_WORLD;
+        if rd[a].abs() <= 1.0e-20 {
+            // Parallel to this slab: a miss only if the origin is outside it.
+            if p[a] < lo || p[a] > hi {
+                return None;
+            }
+            continue;
+        }
+        let inv = 1.0 / rd[a];
+        let mut t1 = (lo - p[a]) * inv;
+        let mut t2 = (hi - p[a]) * inv;
+        if t1 > t2 {
+            core::mem::swap(&mut t1, &mut t2);
+        }
+        tmin = tmin.max(t1);
+        tmax = tmax.min(t2);
+    }
+    if tmax > tmin { Some((tmin, tmax)) } else { None }
+}
+
+/// The host mirror of the shader's `m2_surface_hit`: locates the M2 tile containing `p = ro + rd *
+/// t_world`, bakes its brick ([`fill_brick`]), solves the JCGT cubic ([`brick_cubic_hit`]) for the
+/// in-brick crossing, then VALIDATES the candidate analytically (the exact-CSG fallback). Returns
+/// `Some(hit_t)` (world `t`, the accepted hit) or `None` (no crossing / the refine cleared it →
+/// the caller falls through to the M1 analytic fold). `edits` is the authority the GPU baked the
+/// atlas from (so the host bakes the SAME tile bit-for-bit).
+///
+/// The cubic candidate is accepted when `|sdf_edit_list(cand_p)| < M2_CREASE_EPS`; otherwise a few
+/// analytic sphere-trace steps ([`M2_REFINE_ITERS`]) settle it onto the EXACT field, mirroring the
+/// shader's `[branch]` refine.
+fn host_m2_surface_hit(edits: &[SdfEdit], ro: [f32; 3], rd: [f32; 3], t_world: f32) -> Option<f32> {
+    let p = [
+        ro[0] + rd[0] * t_world,
+        ro[1] + rd[1] * t_world,
+        ro[2] + rd[2] * t_world,
+    ];
+    // The M2 tile containing `p` (mirror the shader: test the float directly so a negative coord is
+    // caught before the cast). Outside the bounded grid → no atlas tile (the caller folds analytic).
+    let rel = [
+        (p[0] - M2_GRID_ORIGIN) / M2_BRICK_WORLD,
+        (p[1] - M2_GRID_ORIGIN) / M2_BRICK_WORLD,
+        (p[2] - M2_GRID_ORIGIN) / M2_BRICK_WORLD,
+    ];
+    if rel[0] < 0.0 || rel[1] < 0.0 || rel[2] < 0.0 {
+        return None;
+    }
+    let tx = rel[0] as u32;
+    let ty = rel[1] as u32;
+    let tz = rel[2] as u32;
+    if tx >= M2_GRID_DIM || ty >= M2_GRID_DIM || tz >= M2_GRID_DIM {
+        return None;
+    }
+    let cell = [tx, ty, tz];
+    let cell_min = m2_cell_min(cell);
+
+    // Clip the world ray to the brick AABB.
+    let (t_enter, t_exit) = brick_aabb_span(p, rd, cell_min)?;
+
+    // Bake THIS tile from the authority (the SAME data the GPU atlas holds for this cell), then run
+    // the JCGT cubic in interior-voxel units (world → voxel: (world - cell_min) / voxel_size). The
+    // cubic's local `t` is in WORLD units (rd is divided by voxel_size to keep the world-t metric).
+    let field = edits_field(edits);
+    let mut tile = [0i8; BRICK_VOXELS];
+    fill_brick(&field, cell_min, M2_VOXEL_SIZE, M2_BAND_HALF, &mut tile);
+    let ro_v = [
+        (p[0] - cell_min[0]) / M2_VOXEL_SIZE,
+        (p[1] - cell_min[1]) / M2_VOXEL_SIZE,
+        (p[2] - cell_min[2]) / M2_VOXEL_SIZE,
+    ];
+    let rd_v = [rd[0] / M2_VOXEL_SIZE, rd[1] / M2_VOXEL_SIZE, rd[2] / M2_VOXEL_SIZE];
+
+    let local = brick_cubic_hit(&tile, ro_v, rd_v, t_enter, t_exit, M2_BAND_HALF)?;
+
+    // The candidate world `t` (local is measured from `p`, in world units).
+    let cand_t = t_world + local;
+    let cand_p = [
+        ro[0] + rd[0] * cand_t,
+        ro[1] + rd[1] * cand_t,
+        ro[2] + rd[2] * cand_t,
+    ];
+    let resid = sdf_edit_list(edits, cand_p);
+
+    // ANALYTIC-RESIDUAL FALLBACK (the exact-CSG guarantee): a `|resid|` within the crease band
+    // accepts the cubic hit; else a few analytic sphere-trace steps settle it onto the exact field.
+    if resid.abs() < M2_CREASE_EPS {
+        return Some(cand_t);
+    }
+    let mut rt = cand_t;
+    for _ in 0..M2_REFINE_ITERS {
+        let q = [ro[0] + rd[0] * rt, ro[1] + rd[1] * rt, ro[2] + rd[2] * rt];
+        let d = sdf_edit_list(edits, q);
+        if d < SDF_EPS {
+            return Some(rt);
+        }
+        rt += d.max(SDF_EPS);
+        if rt > SDF_T_MAX {
+            break;
+        }
+    }
+    // The refine did not converge near the candidate (a CSG-subtracted / rounded region with no
+    // nearby exact surface): no hit in this brick — the caller falls back to the analytic fold.
+    None
+}
+
+/// Builds a transient single-`gen` [`SdfEditField`] from `edits` for the per-tile [`fill_brick`] /
+/// [`classify_brick`] bake (these take the authority field, not a raw slice). The render/golden
+/// path's authority is the SAME edit set, so the baked tile is bit-identical. `SdfEditField` is a
+/// fixed-size `Copy` POD (no heap), so this is a cheap stack build — the host mirror is a CPU-only
+/// reference, not the GPU hot path.
+#[inline]
+fn edits_field(edits: &[SdfEdit]) -> SdfEditField {
+    let mut field = SdfEditField::new();
+    for e in edits {
+        debug_assert!(field.push(*e), "golden M2 scene must fit MAX_SDF_EDITS");
+    }
+    field.bump_gen();
+    field
+}
+
+/// M2 — the trilinear+JCGT-cubic SURFACE-brick golden. Identical to
+/// [`golden_composite_pixel_brick`] but the PRIMARY march runs the M2 SURFACE-brick path when
+/// `brick_trilinear == true`: at each march point inside the bounded M2 grid the atlas cubic
+/// ([`host_m2_surface_hit`]) is tried; a hit TERMINATES the march at the analytically-validated
+/// `t` (hit/normal/shade stay ANALYTIC — C1), and a no-crossing / cleared-refine falls through to
+/// the M1 step (empty-skip when `brick_enabled`, else the analytic fold). INDEPENDENT of
+/// `brick_enabled` (the two gates are orthogonal).
+///
+/// With `brick_trilinear == false` this delegates to [`golden_composite_pixel_brick`] —
+/// BYTE-IDENTICAL to the M1 golden (the M2 0%-gate). This is the bit-exact reference the GPU M2
+/// golden compares against.
+#[allow(clippy::too_many_arguments)]
+pub fn golden_composite_pixel_brick_m2(
+    edits: &[SdfEdit],
+    mesh_depth: f32,
+    px: u32,
+    py: u32,
+    img_w: u32,
+    img_h: u32,
+    camera: CompositeCamera,
+    omega: f32,
+    lighting_flags: u32,
+    light_dir: [f32; 3],
+    brick_enabled: bool,
+    brick_trilinear: bool,
+    grid: &PointerGrid,
+    cells: &[u32],
+) -> u32 {
+    // The OFF path is byte-identical to the M1 marcher (the M2 0%-gate): the atlas is never sampled.
+    if !brick_trilinear {
+        return golden_composite_pixel_brick(
+            edits, mesh_depth, px, py, img_w, img_h, camera, omega, lighting_flags, light_dir,
+            brick_enabled, grid, cells,
+        );
+    }
+
+    let (ro, rd) = composite_ray(px, py, img_w, img_h, camera);
+
+    let has_mesh = mesh_depth < MESH_DEPTH_CLEAR;
+    let t_mesh = if has_mesh { depth_to_t(mesh_depth) } else { 1.0e30 };
+
+    let mut t = 0.0_f32;
+    let t_seed = t;
+    let mut omega = omega; // [1.0, 1.99]; sor-fail latches it to 1.0
+    let mut hit = false;
+    let mut safe_t = 0.0_f32;
+    let mut sor_prev = 0.0_f32;
+    let mut sor_step_prev = 0.0_f32;
+    let mut exhausted = true;
+    for it in 0..SDF_MAX_IT {
+        if t >= t_mesh {
+            exhausted = false; // mesh-occlusion termination
+            break;
+        }
+        let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
+
+        // M2 SURFACE-brick path: try the atlas cubic at `p`. A hit terminates the march at the
+        // analytically-validated `t` (the hit/normal/shade stay analytic — C1). INDEPENDENT of the
+        // M1 empty-skip below: the M2 step is taken FIRST (it owns the SURFACE cells the empty-skip
+        // never skips), and a no-crossing falls through to the M1 / analytic step.
+        if let Some(m2_hit_t) = host_m2_surface_hit(edits, ro, rd, t) {
+            hit = true;
+            exhausted = false; // M2 cubic+analytic-validated convergence
+            t = m2_hit_t;
+            break;
+        }
+
+        // M1 empty skip (when on): an EmptyOutside cell at `p` steps to the brick AABB exit. The
+        // SURFACE cells the M2 step owns are NOT EmptyOutside, so this only accelerates EMPTY space.
+        if brick_enabled
+            && let Some((class, cell_min)) = host_brick_cell(grid, cells, p)
+            && class == BRICK_CLASS_EMPTY_OUTSIDE
+        {
+            let exit = dist_to_brick_exit(p, rd, cell_min, grid.brick_world);
+            t += exit;
+            if t > SDF_T_MAX {
+                exhausted = false; // clear-miss termination
+                break;
+            }
+            continue; // skip the analytic fold this step
+        }
+
+        let d = sdf_edit_list(edits, p);
+        if d < SDF_EPS {
+            hit = true;
+            exhausted = false; // converged
+            break;
+        }
+        if omega > 1.0 {
+            let step_len = d * omega;
+            if it > 0 && sor_prev + d < FIELD_LIPSCHITZ_L * sor_step_prev {
+                debug_assert!(it > 0, "B1 budget: a>=1 precondition");
+                t = safe_t + sor_prev; // plain-resume one certified step past the safe probe
+                omega = 1.0;
+                continue;
+            }
+            safe_t = t;
+            sor_prev = d;
+            sor_step_prev = step_len;
+            t += step_len;
+        } else {
+            t += d; // frozen plain arm
+        }
+        if t > SDF_T_MAX {
+            exhausted = false; // clear-miss termination
+            break;
+        }
+    }
+
+    // The re-march fallback stays ANALYTIC (C1) — identical to the M1 path: the M2 step never
+    // reopens the B1 budget hole (its hit terminates, its miss falls through), so `exhausted` here
+    // means the analytic field ran out of budget mid-field; the frozen plain re-march resolves it.
     if exhausted {
         t = t_seed;
         hit = false;
@@ -5258,7 +5884,9 @@ mod m1_empty_skip_tests {
         assert_eq!(core::mem::offset_of!(FineMarcherPush, brick_enabled), 44, "brick_enabled @44");
         assert_eq!(core::mem::offset_of!(FineMarcherPush, grid_dims), 48, "grid_dims @48");
         assert_eq!(core::mem::offset_of!(FineMarcherPush, brick_world), 60, "brick_world @60");
-        assert_eq!(GBUFFER_MARCHER_PUSH_BYTES, 64, "FineMarcherPush must be 64 bytes");
+        // M2 widened the push to the full 80-byte COMPOSITE range (brick_trilinear @64 + _pad3 @68).
+        assert_eq!(core::mem::offset_of!(FineMarcherPush, brick_trilinear), 64, "brick_trilinear @64");
+        assert_eq!(GBUFFER_MARCHER_PUSH_BYTES, 80, "FineMarcherPush must be 80 bytes");
     }
 
     /// `with_brick` flips `brick_enabled` to 1 and stamps the grid uniforms, preserving
