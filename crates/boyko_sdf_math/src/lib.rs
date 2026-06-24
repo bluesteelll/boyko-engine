@@ -522,8 +522,6 @@ const _: () = assert!(
 
 // ---- The edit-list field math (single source of truth, mirrors the shader) ----
 
-const SDF_FAR: f32 = 1.0e9;
-
 /// `a - b` — component-wise vector subtraction (mirrors the shader's `-`).
 /// Exposed because the rung-8 single-sphere golden helpers in
 /// `boyko_rhi_vulkan::compute` reuse it.
@@ -585,86 +583,74 @@ pub fn v_normalize(a: [f32; 3]) -> [f32; 3] {
     [a[0] / len, a[1] / len, a[2] / len]
 }
 
-#[inline]
-fn v_abs(a: [f32; 3]) -> [f32; 3] {
-    [a[0].abs(), a[1].abs(), a[2].abs()]
-}
-
-#[inline]
-fn v_max0(a: [f32; 3]) -> [f32; 3] {
-    [a[0].max(0.0), a[1].max(0.0), a[2].max(0.0)]
-}
-
 /// `length(p - c) - r` — the analytic sphere distance (mirrors `sd_sphere`).
+///
+/// DELEGATES to [`boyko_shaderdsl::field::sd_sphere`] over the `f32` Eval backend:
+/// the field math is authored ONCE in `boyko_shaderdsl::field` (generic over a
+/// `FieldScalar` backend) and instantiated here as `f32`, so this body is the SAME
+/// machine code (and byte-identical result) as the hand-written form it replaces.
+/// The shared author kills the HLSL↔Rust duplication.
 #[inline]
 pub fn sd_sphere(p: [f32; 3], c: [f32; 3], r: f32) -> f32 {
-    v_len(v_sub(p, c)) - r
+    boyko_shaderdsl::field::sd_sphere::<f32>(p, c, r)
 }
 
 /// The exact IQ box distance for an AABB centered at `c` with half-extents `h`
-/// (mirrors the shader's `sd_box`).
+/// (mirrors the shader's `sd_box`). DELEGATES to
+/// [`boyko_shaderdsl::field::sd_box`] over the `f32` Eval backend (byte-identical).
 #[inline]
 pub fn sd_box(p: [f32; 3], c: [f32; 3], h: [f32; 3]) -> f32 {
-    let q = v_sub(v_abs(v_sub(p, c)), h);
-    let outside = v_len(v_max0(q));
-    let inside = q[0].max(q[1].max(q[2])).min(0.0);
-    outside + inside
+    boyko_shaderdsl::field::sd_box::<f32>(p, c, h)
 }
 
 /// One edit's primitive distance at `p` (mirrors the shader's `edit_distance`).
+/// Adapts the `SdfEdit`'s f32 fields into a `boyko_shaderdsl::field::EditView<f32>`
+/// and DELEGATES to [`boyko_shaderdsl::field::edit_distance`] (byte-identical).
 #[inline]
 pub fn edit_distance(e: &SdfEdit, p: [f32; 3]) -> f32 {
-    let center = [e.center[0], e.center[1], e.center[2]];
-    if e.kind == sdf_kind::BOX {
-        sd_box(p, center, [e.params[0], e.params[1], e.params[2]])
-    } else {
-        sd_sphere(p, center, e.params[0])
-    }
+    boyko_shaderdsl::field::edit_distance::<f32>(&edit_view(e), p)
 }
 
-/// Polynomial smooth-min (IQ `smin`), mirroring the shader's `smin`.
+/// Polynomial smooth-min (IQ `smin`), mirroring the shader's `smin`. DELEGATES to
+/// [`boyko_shaderdsl::field::smin`] over the `f32` Eval backend (byte-identical:
+/// the generic body computes `lerp(b, a, hh) - k*hh*(1-hh)` with `hh =
+/// clamp(0.5 + 0.5*(b-a)/k, 0, 1)`, the SAME op order this body used).
 #[inline]
 pub fn smin(a: f32, b: f32, k: f32) -> f32 {
-    let hh = (0.5 + 0.5 * (b - a) / k).clamp(0.0, 1.0);
-    // lerp(b, a, hh) = b + (a - b) * hh
-    (b + (a - b) * hh) - k * hh * (1.0 - hh)
+    boyko_shaderdsl::field::smin::<f32>(a, b, k)
 }
 
 /// Polynomial smooth-max (the De Morgan dual of [`smin`]), mirroring `smax`.
+/// DELEGATES to [`boyko_shaderdsl::field::smax`] over the `f32` Eval backend
+/// (byte-identical: `-smin(-a, -b, k)`).
 #[inline]
 pub fn smax(a: f32, b: f32, k: f32) -> f32 {
-    -smin(-a, -b, k)
+    boyko_shaderdsl::field::smax::<f32>(a, b, k)
 }
 
 /// Combines the accumulated distance `acc` with one edit's distance `d` under
 /// `op` (hard when `k <= 0`, smooth when `k > 0`), mirroring the shader's
-/// `combine`.
+/// `combine`. DELEGATES to [`boyko_shaderdsl::field::combine`] over the `f32` Eval
+/// backend (byte-identical: the generic body's host op-dispatch picks the SAME
+/// UNION/SUBTRACT/INTERSECT formula and the `k > 0` select returns the SAME
+/// already-computed smooth/hard value — both arms are pure).
 #[inline]
 pub fn combine(acc: f32, d: f32, op: u32, k: f32) -> f32 {
-    match op {
-        x if x == sdf_op::SUBTRACT => {
-            if k > 0.0 {
-                smax(acc, -d, k)
-            } else {
-                acc.max(-d)
-            }
-        }
-        x if x == sdf_op::INTERSECT => {
-            if k > 0.0 {
-                smax(acc, d, k)
-            } else {
-                acc.max(d)
-            }
-        }
-        // UNION (and any unknown discriminant falls back to union, matching the
-        // shader's `else` branch).
-        _ => {
-            if k > 0.0 {
-                smin(acc, d, k)
-            } else {
-                acc.min(d)
-            }
-        }
+    boyko_shaderdsl::field::combine::<f32>(acc, d, op, k)
+}
+
+/// Adapts one packed [`SdfEdit`] into a [`boyko_shaderdsl::field::EditView`] over
+/// the `f32` Eval backend (the f32 fields lift to themselves via `FieldScalar::lit`
+/// = identity). Reads ONLY `center.xyz` (skips `center.w`, the material lane) and
+/// `params.xyz`, exactly as the shader's `load_edit` does.
+#[inline]
+fn edit_view(e: &SdfEdit) -> boyko_shaderdsl::field::EditView<f32> {
+    boyko_shaderdsl::field::EditView {
+        center: [e.center[0], e.center[1], e.center[2]],
+        params: [e.params[0], e.params[1], e.params[2]],
+        kind: e.kind,
+        op: e.op,
+        smoothness: e.smoothness,
     }
 }
 
@@ -674,19 +660,35 @@ pub fn combine(acc: f32, d: f32, op: u32, k: f32) -> f32 {
 ///
 /// This is the single source of truth a future CPU physics evaluator reuses;
 /// `edits.len()` is clamped to [`MAX_SDF_EDITS`] to match the shader's `min`.
+///
+/// DELEGATES to [`boyko_shaderdsl::field::sdf_field_body`] over the `f32` Eval
+/// backend after adapting each [`SdfEdit`] to an `EditView` — the fold (seed-hard,
+/// then `combine`, clamp to [`MAX_SDF_EDITS`]) is authored ONCE there and is
+/// byte-identical to the hand-written fold this body replaced.
 pub fn sdf_edit_list(edits: &[SdfEdit], p: [f32; 3]) -> f32 {
     let n = edits.len().min(MAX_SDF_EDITS);
-    let mut acc = SDF_FAR;
+    // Adapt the live prefix into a fixed-capacity stack array of EditViews (no
+    // allocation): `boyko_shaderdsl::field::sdf_field_body` re-clamps to
+    // MAX_SDF_EDITS, so passing the n-prefix yields the identical fold.
+    let mut views: [boyko_shaderdsl::field::EditView<f32>; MAX_SDF_EDITS] =
+        [DEFAULT_EDIT_VIEW; MAX_SDF_EDITS];
     for (i, e) in edits.iter().take(n).enumerate() {
-        let d = edit_distance(e, p);
-        if i == 0 {
-            acc = d;
-        } else {
-            acc = combine(acc, d, e.op, e.smoothness);
-        }
+        views[i] = edit_view(e);
     }
-    acc
+    boyko_shaderdsl::field::sdf_field_body::<f32>(&views[..n], p)
 }
+
+/// A zero-valued [`boyko_shaderdsl::field::EditView`] used to fill the unused tail
+/// of the fixed-capacity stack buffer in [`sdf_edit_list`]; the buffer is sliced to
+/// `[..n]` before the fold, so these never participate.
+const DEFAULT_EDIT_VIEW: boyko_shaderdsl::field::EditView<f32> =
+    boyko_shaderdsl::field::EditView {
+        center: [0.0, 0.0, 0.0],
+        params: [0.0, 0.0, 0.0],
+        kind: 0,
+        op: 0,
+        smoothness: 0.0,
+    };
 
 /// Surface normal via central differences of [`sdf_edit_list`] (the gradient of
 /// the WHOLE edit-list field), mirroring the shader's `sdf_normal`.

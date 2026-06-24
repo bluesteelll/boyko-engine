@@ -11,6 +11,13 @@ description = "no_std leaf crate holding the analytic SDF edit-list field math +
 # single source of truth; zero readback). Adding any dependency here would break
 # that leaf invariant.
 [dependencies]
+# IN-HOUSE, ZERO third-party deps preserved: `boyko_shaderdsl` is a sibling
+# workspace leaf (no external deps), holding the field math authored ONCE generic
+# over a `FieldScalar` backend. `boyko_sdf_math` DELEGATES its f32 field bodies to
+# `boyko_shaderdsl::field::*::<f32>` (the Eval backend) so the HLSL↔Rust duplication
+# lives in one place. `default-features = false` keeps the `emit` (std/codegen)
+# side OFF — the physics leaf links ONLY the f32 Eval path.
+boyko_shaderdsl = { path = "../boyko_shaderdsl", default-features = false }
 
 [features]
 # `sqrt` is the ONLY float op the field math needs that is NOT in stable `core`
@@ -23,4 +30,7 @@ description = "no_std leaf crate holding the analytic SDF edit-list field math +
 # either mode (the rung-8/9/10/11 GPU goldens are unaffected). No third-party dep
 # is added in either mode. See the `sqrt` shim in `lib.rs`.
 default = []
-nightly = []
+# Forwarded to `boyko_shaderdsl` so the delegated f32 Eval path uses the SAME sqrt
+# source (the `core::intrinsics::sqrtf32` intrinsic under `nightly`, else `std`'s
+# `f32::sqrt`) and stays strictly `#![no_std]` in lock-step with this crate.
+nightly = ["boyko_shaderdsl/nightly"]
