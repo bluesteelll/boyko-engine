@@ -64,7 +64,8 @@ use boyko_rhi::{
 };
 use boyko_rhi_vulkan::compute::{
     B5_CAMERA_UBO_BYTES_M4, COMPOSITE_PUSH_CONSTANT_BYTES, CoarseMode, CompositePushConstants,
-    EDITLIST_BUFFER_WORDS, LOCAL_SIZE_X, M2_GRID_PARAMS_OFFSET,
+    EDITLIST_BUFFER_WORDS, GOLDEN_LIGHT_HEADER_BASE_WORDS, GoldenLight, GoldenLightHeader,
+    LOCAL_SIZE_X, M2_GRID_PARAMS_OFFSET,
     MESH_DEPTH_CLEAR, SDF_CAMERA_Z, SDF_TRACE_T_MAX,
     SDF_VIEW_HALF_EXTENT, SdfEdit, TILE_BOUND_BYTES, CompositeCamera,
     encode_edit_list, deferred_pbr_spirv, golden_composite_pixel_ex, golden_deferred_resolve,
@@ -1814,6 +1815,10 @@ fn p0_windowed_coarse_cull_matches_uncull() {
         BindGroupLayoutEntry { binding: 7, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 8, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 9, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        // Render P6 R1: the deferred resolve binds the SDF edit-list `Buf` at binding 10 (the
+        // sdf_soft_shadow_ranged march reads it). The production `record_gbuffer` binds it, so the
+        // resolve layout MUST declare it or bind-group creation trips the entry-count check.
+        BindGroupLayoutEntry { binding: 10, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
     ];
     let resolve_layout = RhiDevice::create_bind_group_layout(
         device,
@@ -2090,6 +2095,734 @@ fn p0_windowed_coarse_cull_matches_uncull() {
         RhiDevice::destroy_compute_pipeline(device, resolve_pipeline);
         RhiDevice::destroy_bind_group_layout(device, resolve_layout);
         RhiDevice::destroy_compute_pipeline(device, coarse_compute);
+        RhiDevice::destroy_compute_pipeline(device, marcher);
+        RhiDevice::destroy_bind_group_layout(device, vocab_layout);
+        RhiDevice::destroy_graphics_pipeline(device, raster_pipeline);
+        RhiDevice::destroy_sampler(device, present_sampler);
+        RhiDevice::destroy_sampler(device, depth_sampler);
+        RhiDevice::destroy_buffer(device, vertex_buffer);
+        RhiDevice::destroy_buffer(device, tiles_buffer);
+        clipmap.destroy(&ctx);
+        RhiDevice::destroy_buffer(device, light_staging);
+        RhiDevice::destroy_buffer(device, light_table);
+        RhiDevice::destroy_buffer(device, material_table);
+        RhiDevice::destroy_buffer(device, camera_uniform);
+        RhiDevice::destroy_buffer(device, edit_list);
+    }
+    drop(swapchain);
+    drop(surface);
+    drop(ctx);
+    drop(window);
+}
+
+// ============================================================================
+// Engine showcase — a CRISP 512×512-NATIVE multi-light SDF-shadow screenshot.
+//
+// This drives the EXACT production windowed present (`Renderer::render_gbuffer_frame`,
+// the same 3-pass raster-MRT → marcher → deferred-resolve → present-blit) at the native
+// `COMPOSITE_W`×`COMPOSITE_H` (512×512) extent and dumps ONE true-resolution BMP (no
+// upscale) so the owner can judge the render. Unlike the offscreen screenshot tests
+// (hardwired to 64×64, then 8× upscaled → blocky), this is the windowed path that renders
+// at the full composite extent.
+//
+// The scene is the P5 hybrid (a raster-PBR mesh + an SDF body) lit by P6 R1 multi-light
+// SDF shadows: a neutral primary directional plus TWO shadow-flagged POINT casters of
+// DISTINCT colors (a warm orange and a cool blue). The light table is `shadow_mode == 1`
+// + NON-CLUSTERED — exactly the path `p6_r1_multi_light_sdf_shadows_match_oracle` validates
+// offscreen, here re-seeded into the windowed `light_table` SSBO (no production-code change:
+// the resolve reads `shadow_mode`/`casts_sdf_shadow` from the table header/elements, and the
+// windowed `record_gbuffer` already binds the SDF edit-list at resolve binding 10, so the
+// per-caster `sdf_soft_shadow_ranged` march runs on hardware).
+// ============================================================================
+
+/// The fixed dump path for the 512-native engine showcase frame.
+const SHOWCASE_BMP: &str = r"D:\tmp\engine_showcase_512.bmp";
+
+/// The showcase SDF body: TWO unit spheres side-by-side (an occluder/receiver pair) in the
+/// central band of the ortho view (X ∈ [-1, 1]). Each sphere's bulk shadows the OTHER's
+/// facing flank when lit from across the valley, giving a BROAD, clearly-visible colored
+/// shadow band — far more than the thin self-shadow terminator a single convex body casts.
+/// The ORTHO camera marches +Z → origin, so both front faces sit at z ≈ +0.5 (in front of
+/// the mesh backdrop at z = 0, so the SDF wins the shared-depth test over the spheres).
+fn showcase_sdf_scene() -> Vec<SdfEdit> {
+    vec![
+        SdfEdit::sphere([-0.45, 0.10, 0.0], 0.50, sdf_op::UNION, 0.0),
+        SdfEdit::sphere([0.45, 0.10, 0.0], 0.50, sdf_op::UNION, 0.0),
+    ]
+}
+
+/// The showcase raster-PBR mesh: a backdrop floor strip across the LOWER band of the view
+/// at world Z 0 (BEHIND the spheres' z ≈ +0.5 front faces, so it never occludes them — the
+/// shared-depth test keeps the SDF in front where they overlap; outside the spheres the flat
+/// lit raster mesh shows as a "floor"). Spans the full view in x, the bottom third in y.
+fn showcase_quad_vertices() -> [Vertex; 6] {
+    const FLOOR_Z: f32 = 0.0;
+    const X_MIN: f32 = -1.0;
+    const X_MAX: f32 = 1.0;
+    const Y_MIN: f32 = -1.0;
+    const Y_MAX: f32 = -0.55;
+    let c = [1.0_f32, 1.0, 1.0, 1.0];
+    let bl = Vertex { position: [X_MIN, Y_MIN, FLOOR_Z], color: c };
+    let br = Vertex { position: [X_MAX, Y_MIN, FLOOR_Z], color: c };
+    let tr = Vertex { position: [X_MAX, Y_MAX, FLOOR_Z], color: c };
+    let tl = Vertex { position: [X_MIN, Y_MAX, FLOOR_Z], color: c };
+    [bl, br, tr, bl, tr, tl]
+}
+
+/// The showcase multi-light table: a gentle NEUTRAL primary directional (un-flagged — it
+/// keeps the marcher's `gMaterial.r`, byte-stable across the 1→N transition) + TWO
+/// shadow-flagged POINT casters of DISTINCT colors straddling the valley between the
+/// [`showcase_sdf_scene`] spheres. Each caster (low + toward the camera, offset in x) lights
+/// the FAR sphere's near flank, but the NEAR sphere occludes it ⇒ `vis < 1` over a broad
+/// colored band — a WARM ORANGE shadow region from the left caster and a COOL BLUE one from
+/// the right. The header is NON-CLUSTERED ([`GoldenLightHeader::new`], `cluster_params == 0`
+/// ⇒ `clusters_enabled == false`) with `shadow_mode == 1`. Mirrors the offscreen
+/// `p6_r1_multi_light_table` recipe, recolored for a vivid showcase.
+fn showcase_light_table() -> (GoldenLightHeader, Vec<GoldenLight>) {
+    // l0a_count = 1 (the primary directional); point_spot_count = 2 (the two flagged casters).
+    // The two COLORED point casters are the DOMINANT lights (so their tint reads strongly on the
+    // lit surface AND its absence reads as a colored shadow); the directional is only a very dim
+    // neutral fill so the deepest shadow is not pure black. The prior over-bright bake (power
+    // 7000) saturated the spheres to gray-white and washed out all color — these moderate powers
+    // keep the surface in the colored, non-saturated range.
+    let header = GoldenLightHeader::new(1, 2, 1.0).with_shadow_mode(1);
+    let lights = vec![
+        // Dim neutral directional fill (un-flagged): keeps the marcher's `gMaterial.r`, lifts the
+        // deepest shadow off pure black so the body stays readable.
+        GoldenLight::directional([0.0, 0.2, 1.0], [0.10, 0.10, 0.12], 1.0),
+        // Warm ORANGE point caster, LEFT + toward the camera: lights the LEFT sphere warm and the
+        // RIGHT sphere's left flank, which the LEFT sphere occludes ⇒ a warm-lit body with a cool
+        // shadow band where only the blue caster reaches.
+        GoldenLight::point([-1.1, 0.2, 1.1], [1.0, 0.45, 0.12], 70.0, 8.0).with_sdf_shadow(),
+        // Cool BLUE point caster, RIGHT + toward the camera: the symmetric counterpart ⇒ a
+        // blue-lit body with a warm shadow band on the opposite flank. Where BOTH casters are
+        // occluded (the deep valley) only the dim fill remains ⇒ a near-black core.
+        GoldenLight::point([1.1, 0.2, 1.1], [0.15, 0.45, 1.0], 70.0, 8.0).with_sdf_shadow(),
+    ];
+    (header, lights)
+}
+
+/// Packs a `GoldenLightHeader` + `GoldenLight[]` into the std430 light-table SSBO word stream
+/// (`[header (16 words) || GpuLight[] (12 words each)]`) the resolve reads at binding 6.
+/// Host mirror of `boyko_render::light`'s packing; identical to the offscreen test's
+/// `pack_light_table`.
+fn pack_showcase_light_table(header: &GoldenLightHeader, lights: &[GoldenLight]) -> Vec<u32> {
+    let mut words = vec![0u32; GOLDEN_LIGHT_HEADER_BASE_WORDS + lights.len() * 12];
+    let lanes = [
+        header.counts_exposure,
+        header.sky_diffuse,
+        header.sky_spec,
+        header.cluster_params,
+    ];
+    for (li, lane) in lanes.iter().enumerate() {
+        for (c, &v) in lane.iter().enumerate() {
+            words[li * 4 + c] = v.to_bits();
+        }
+    }
+    for (i, l) in lights.iter().enumerate() {
+        let base = GOLDEN_LIGHT_HEADER_BASE_WORDS + i * 12;
+        for (c, &v) in l.dir_kind.iter().enumerate() {
+            words[base + c] = v.to_bits();
+        }
+        for (c, &v) in l.pos_range.iter().enumerate() {
+            words[base + 4 + c] = v.to_bits();
+        }
+        for (c, &v) in l.color_cone.iter().enumerate() {
+            words[base + 8 + c] = v.to_bits();
+        }
+    }
+    words
+}
+
+/// Reads back a BI_RGB BMP's `biWidth` / `biHeight` (`biHeight` is negative for the top-down
+/// images [`write_bmp`] emits, so the magnitude is the height). Returns `None` if the file is
+/// not a `"BM"` 54-byte-header BMP. Used to VERIFY the dumped showcase is 512×512 native.
+fn read_bmp_dimensions(bytes: &[u8]) -> Option<(i32, i32)> {
+    if bytes.len() < 54 || &bytes[0..2] != b"BM" {
+        return None;
+    }
+    let w = i32::from_le_bytes([bytes[18], bytes[19], bytes[20], bytes[21]]);
+    let h = i32::from_le_bytes([bytes[22], bytes[23], bytes[24], bytes[25]]);
+    Some((w, h.abs()))
+}
+
+/// **Engine showcase — a CRISP 512×512-NATIVE multi-light SDF-shadow screenshot.**
+///
+/// Renders the production windowed present (the raster-PBR mesh + the SDF twin-sphere body)
+/// at the native 512×512 composite extent, lit by 1 directional + 2 shadow-flagged colored
+/// point casters (`shadow_mode == 1`, NON-CLUSTERED), reads back the 512 frame, and writes a
+/// TRUE 512×512 24-bit BMP to [`SHOWCASE_BMP`] — NO upscaling. Verifies the dumped BMP header
+/// is 512×512. The orchestrator converts it to PNG + opens it for the owner.
+///
+/// `#[ignore]`: needs a real RTX windowed device. Run with `BOYKO_DISABLE_VALIDATION=1` so the
+/// (broken-on-this-box) validation layer does not crash the process; the screenshot is the
+/// deliverable, not a golden assertion.
+#[test]
+#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the screenshot"]
+fn engine_showcase_512_screenshot_dump() {
+    let mut window = match Window::open("boyko_engine showcase 512", WIDTH, HEIGHT) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("SKIP engine_showcase_512: cannot open a window ({e:?})");
+            return;
+        }
+    };
+
+    let ctx = match VulkanContext::boot(InstanceConfig {
+        enable_validation: true,
+        windowed: true,
+    }) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("SKIP engine_showcase_512: windowed Vulkan unavailable ({e:?})");
+            return;
+        }
+    };
+    if !ctx.validation_enabled() {
+        eprintln!("NOTE: validation disabled (BOYKO_DISABLE_VALIDATION) — showcase dump still runs");
+    }
+    let caps = ctx.device_caps();
+    assert!(
+        caps.gbuffer_storage_format_ok,
+        "a booted context must support STORAGE_IMAGE on the G-buffer format"
+    );
+
+    // SAFETY: `window` outlives the surface (dropped after it below); its HWND/HINSTANCE are
+    // live for the surface's lifetime.
+    let surface = match unsafe { Surface::new(&ctx, window.hinstance(), window.hwnd()) } {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("SKIP engine_showcase_512: surface creation failed ({e:?})");
+            return;
+        }
+    };
+    let mut swapchain = match Swapchain::new(&ctx, &surface, window.width(), window.height()) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("SKIP engine_showcase_512: swapchain creation failed ({e:?})");
+            return;
+        }
+    };
+
+    if swapchain.extent().width < COMPOSITE_W || swapchain.extent().height < COMPOSITE_H {
+        eprintln!(
+            "SKIP engine_showcase_512: swapchain extent {}x{} is smaller than the {}x{} composite",
+            swapchain.extent().width,
+            swapchain.extent().height,
+            COMPOSITE_W,
+            COMPOSITE_H
+        );
+        return;
+    }
+
+    let Some(is_bgra) = swapchain_readback_is_bgra(swapchain.format()) else {
+        eprintln!("SKIP engine_showcase_512: swapchain format has no host-decodable UNORM byte order");
+        return;
+    };
+    let Some(swap_color_format) = (match swapchain.format() {
+        f if f == VK_FORMAT_B8G8R8A8_UNORM => Some(Format::B8G8R8A8Unorm),
+        f if f == VK_FORMAT_R8G8B8A8_UNORM => Some(Format::R8G8B8A8Unorm),
+        _ => None,
+    }) else {
+        eprintln!("SKIP engine_showcase_512: swapchain format has no basic-slice Format variant");
+        return;
+    };
+
+    let mut renderer =
+        Renderer::new(&ctx, &surface, &swapchain).expect("renderer (command pool + sync) creation");
+    let device: &VulkanContext = &ctx;
+    let sdf = showcase_sdf_scene();
+
+    // --- The edit-list SSBO (binding 0), host-seeded ONCE. The resolve binds the SAME buffer
+    // at binding 10 for the per-caster shadow march. ---
+    let edit_list = RhiDevice::create_buffer(
+        device,
+        &BufferDesc {
+            size: (EDITLIST_BUFFER_WORDS as u64) * 4,
+            usage: BufferUsage::STORAGE,
+            location: MemoryLocation::HostVisibleCoherent,
+        },
+    )
+    .expect("edit-list storage buffer");
+    {
+        let mut header = vec![0u32; EDITLIST_BUFFER_WORDS];
+        encode_edit_list(&mut header, &sdf);
+        let mapped = RhiDevice::buffer_mapped_ptr(device, &edit_list)
+            .expect("host-visible edit-list buffer is mapped");
+        write_words(mapped, &header);
+    }
+
+    // --- The camera/extent UBO (binding 5), host-seeded ONCE at the COMPOSITE ORTHO extent.
+    // The M4 tail stays zero (brick is held OFF for the showcase — the analytic marcher is the
+    // crisp reference path; bindings 9..=14 still need VALID descriptors below). ---
+    let camera_uniform = RhiDevice::create_buffer(
+        device,
+        &BufferDesc {
+            size: B5_CAMERA_UBO_BYTES_M4 as u64,
+            usage: BufferUsage::UNIFORM,
+            location: MemoryLocation::HostVisibleCoherent,
+        },
+    )
+    .expect("camera uniform buffer");
+    {
+        let pc = CompositePushConstants::ortho(COMPOSITE_W, COMPOSITE_H);
+        assert_eq!(pc.count, PIXELS);
+        let mapped = RhiDevice::buffer_mapped_ptr(device, &camera_uniform)
+            .expect("host-visible uniform buffer is mapped");
+        let bytes = pc.as_bytes();
+        debug_assert_eq!(bytes.len(), M2_GRID_PARAMS_OFFSET, "camera block must be 80 B");
+        // SAFETY: `mapped` points to `B5_CAMERA_UBO_BYTES_M4` (224) mapped host-coherent bytes;
+        // the 80-byte camera block is written at offset 0 (the M4 tail stays zero — brick OFF).
+        // No GPU work is in flight yet, so the host write is unsynchronized-safe.
+        unsafe {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len());
+        }
+    }
+
+    // --- The P4b coarse-cull tile StorageBuffer (vocab binding 6), bound-but-unread (the
+    // showcase runs the marcher with the coarse cull gated OFF). ---
+    let (tw, th) = tile_grid_extent(COMPOSITE_W, COMPOSITE_H);
+    let tiles_buffer = RhiDevice::create_buffer(
+        device,
+        &BufferDesc {
+            size: (tw as u64) * (th as u64) * (TILE_BOUND_BYTES as u64),
+            usage: BufferUsage::STORAGE,
+            location: MemoryLocation::HostVisibleCoherent,
+        },
+    )
+    .expect("P4b coarse-cull tile-bound storage buffer (vocab binding 6)");
+
+    // --- The PBR material table SSBO (vocab binding 7 + resolve binding 4): the default
+    // mid-gray dielectric (the showcase edits carry no material id ⇒ every SDF hit picks 0). ---
+    let material_table = RhiDevice::create_buffer(
+        device,
+        &BufferDesc {
+            size: (DEFAULT_MATERIAL_TABLE.len() as u64) * 4,
+            usage: BufferUsage::STORAGE,
+            location: MemoryLocation::HostVisibleCoherent,
+        },
+    )
+    .expect("PBR material table storage buffer");
+    {
+        let mapped = RhiDevice::buffer_mapped_ptr(device, &material_table)
+            .expect("host-visible material table is mapped");
+        write_words(mapped, &DEFAULT_MATERIAL_TABLE);
+    }
+
+    // --- The brick clip-map: brick is held OFF for the showcase, but the marcher SPIR-V
+    // statically references bindings 9..=14 past the runtime gate, so VALID descriptors must be
+    // bound. The real clip-map (baked from the SAME authority field) supplies them. ---
+    let field = {
+        use boyko_sdf_math::SdfEditField;
+        let mut f = SdfEditField::new();
+        for e in &sdf {
+            assert!(f.push(*e), "showcase scene must fit MAX_SDF_EDITS");
+        }
+        f.bump_gen();
+        f
+    };
+    let clipmap = BrickClipmap::create(&ctx, &field, [0.0, 0.0, 0.0])
+        .expect("brick clip-map (showcase scene) — create + bake + upload");
+
+    // --- The Lighting light table SSBO (resolve binding 6): the SHOWCASE multi-light shadow
+    // table (`shadow_mode == 1`, NON-CLUSTERED) + its staging source. ---
+    let (light_header, light_elems) = showcase_light_table();
+    let light_words = pack_showcase_light_table(&light_header, &light_elems);
+    let light_table_bytes = (light_words.len() as u64) * 4;
+    let light_table = RhiDevice::create_buffer(
+        device,
+        &BufferDesc {
+            size: light_table_bytes,
+            usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_DST,
+            location: MemoryLocation::HostVisibleCoherent,
+        },
+    )
+    .expect("showcase light table storage buffer");
+    {
+        let mapped = RhiDevice::buffer_mapped_ptr(device, &light_table)
+            .expect("host-visible light table is mapped");
+        write_words(mapped, &light_words);
+    }
+    let light_staging = RhiDevice::create_buffer(
+        device,
+        &BufferDesc {
+            size: light_table_bytes,
+            usage: BufferUsage::TRANSFER_SRC,
+            location: MemoryLocation::HostVisibleCoherent,
+        },
+    )
+    .expect("showcase light table staging buffer");
+    {
+        let mapped = RhiDevice::buffer_mapped_ptr(device, &light_staging)
+            .expect("host-visible light staging is mapped");
+        write_words(mapped, &light_words);
+    }
+
+    // --- The mesh quad's vertex buffer (the showcase floor backdrop). ---
+    let vertices = showcase_quad_vertices();
+    let vertex_bytes = core::mem::size_of_val(&vertices) as u64;
+    let vertex_buffer = RhiDevice::create_buffer(
+        device,
+        &BufferDesc {
+            size: vertex_bytes,
+            usage: BufferUsage::VERTEX,
+            location: MemoryLocation::HostVisibleCoherent,
+        },
+    )
+    .expect("host-visible vertex buffer");
+    {
+        let vb_ptr = RhiDevice::buffer_mapped_ptr(device, &vertex_buffer)
+            .expect("host-visible vertex buffer is mapped");
+        // SAFETY: `vb_ptr` points to `vertex_bytes` mapped host-coherent bytes; `vertices` is a
+        // distinct stack array of `vertex_bytes` bytes; the write completes before any submit.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                vertices.as_ptr().cast::<u8>(),
+                vb_ptr.as_ptr(),
+                vertex_bytes as usize,
+            );
+        }
+    }
+
+    let depth_sampler = RhiDevice::create_sampler(device, &SamplerDesc::default())
+        .expect("depth sampler (ignored by .Load)");
+    let present_sampler = RhiDevice::create_sampler(
+        device,
+        &SamplerDesc {
+            mag_filter: Filter::Nearest,
+            min_filter: Filter::Nearest,
+            address_mode: AddressMode::ClampToEdge,
+            mip: MipMode::None,
+        },
+    )
+    .expect("present nearest/clamp sampler");
+
+    // --- The mesh-MRT G-buffer producer graphics pipeline (Render P5-r0). ---
+    let vs = RhiDevice::create_shader_module(device, MRT_VS_SPV.as_words())
+        .expect("mesh-MRT vertex shader module");
+    let fs = RhiDevice::create_shader_module(device, MRT_FS_SPV.as_words())
+        .expect("mesh-MRT fragment shader module");
+    let attributes = [
+        VertexAttribute { location: 0, offset: 0, format: VertexFormat::Float32x3 },
+        VertexAttribute { location: 1, offset: 12, format: VertexFormat::Float32x4 },
+    ];
+    let raster_pipeline = RhiDevice::create_graphics_pipeline(
+        device,
+        &GraphicsPipelineDesc {
+            vertex_module: &vs,
+            vertex_entry: c"main",
+            fragment_module: &fs,
+            fragment_entry: c"main",
+            color_formats: &[RASTER_COLOR_FORMAT, RASTER_COLOR_FORMAT, RASTER_COLOR_FORMAT],
+            depth_format: Some(Format::D32Sfloat),
+            topology: PrimitiveTopology::TriangleList,
+            vertex_layout: Some(VertexBufferLayout {
+                stride: VERTEX_STRIDE,
+                attributes: &attributes,
+            }),
+            push_constant_bytes: MVP_BYTES,
+            bind_group_layout: None,
+            blend: None,
+        },
+    )
+    .expect("mesh-MRT graphics pipeline");
+
+    // --- The P1b marcher: the vocabulary layout + the marcher pipeline. ---
+    let cs = RhiDevice::create_shader_module(device, sdf_gbuffer_composite_spirv())
+        .expect("P1b G-buffer marcher compute shader module");
+    let vocab_entries = [
+        BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::SampledImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 2, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 3, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 4, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 5, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 6, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 7, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 8, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 9, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 10, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 11, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 12, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 13, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 14, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+    ];
+    let vocab_layout = RhiDevice::create_bind_group_layout(
+        device,
+        &BindGroupLayoutDesc { entries: &vocab_entries },
+    )
+    .expect("P1b vocabulary bind-group layout");
+    let marcher = RhiDevice::create_compute_pipeline(
+        device,
+        &ComputePipelineDesc {
+            module: &cs,
+            entry: c"main",
+            push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
+            bind_group_layout: Some(&vocab_layout),
+        },
+    )
+    .expect("P1b G-buffer marcher compute pipeline");
+
+    // --- The deferred RESOLVE pipeline (binds the light table @6 + the SDF edit-list @10 for
+    // the per-caster shadow march). ---
+    let resolve_cs = RhiDevice::create_shader_module(device, deferred_pbr_spirv())
+        .expect("deferred resolve compute shader module");
+    let resolve_entries = [
+        BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 2, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 3, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 4, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 5, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 6, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 7, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 8, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 9, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        // P6 R1: the SDF edit-list `Buf` @10 (the `sdf_soft_shadow_ranged` march reads it).
+        BindGroupLayoutEntry { binding: 10, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+    ];
+    let resolve_layout = RhiDevice::create_bind_group_layout(
+        device,
+        &BindGroupLayoutDesc { entries: &resolve_entries },
+    )
+    .expect("deferred resolve bind-group layout");
+    let resolve_pipeline = RhiDevice::create_compute_pipeline(
+        device,
+        &ComputePipelineDesc {
+            module: &resolve_cs,
+            entry: c"main",
+            push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
+            bind_group_layout: Some(&resolve_layout),
+        },
+    )
+    .expect("deferred resolve compute pipeline");
+
+    // --- The present-blit pipeline. ---
+    let present_layout = RhiDevice::create_bind_group_layout(
+        device,
+        &BindGroupLayoutDesc {
+            entries: &[BindGroupLayoutEntry {
+                binding: 0,
+                count: 1,
+                kind: DescriptorKind::CombinedImageSampler,
+                stage: ShaderStage::FRAGMENT,
+            }],
+        },
+    )
+    .expect("present-blit bind-group layout");
+    let sample_vs = RhiDevice::create_shader_module(device, SAMPLE_VS_SPV.as_words())
+        .expect("fullscreen vertex shader module");
+    let sample_fs = RhiDevice::create_shader_module(device, SAMPLE_FS_SPV.as_words())
+        .expect("fullscreen fragment shader module");
+    let present_pipeline = RhiDevice::create_graphics_pipeline(
+        device,
+        &GraphicsPipelineDesc {
+            vertex_module: &sample_vs,
+            vertex_entry: c"main",
+            fragment_module: &sample_fs,
+            fragment_entry: c"main",
+            color_formats: &[swap_color_format],
+            depth_format: None,
+            topology: PrimitiveTopology::TriangleList,
+            vertex_layout: None,
+            push_constant_bytes: 0,
+            bind_group_layout: Some(&present_layout),
+            blend: None,
+        },
+    )
+    .expect("present-blit fullscreen-sample pipeline");
+
+    // The shader modules are consumed by pipeline creation; destroy them now.
+    // SAFETY: every module was created on `ctx` above + is no longer needed once its pipeline
+    // is created; each is destroyed exactly once.
+    unsafe {
+        RhiDevice::destroy_shader_module(device, sample_fs);
+        RhiDevice::destroy_shader_module(device, sample_vs);
+        RhiDevice::destroy_shader_module(device, resolve_cs);
+        RhiDevice::destroy_shader_module(device, cs);
+        RhiDevice::destroy_shader_module(device, fs);
+        RhiDevice::destroy_shader_module(device, vs);
+    }
+
+    let mvp = ortho_mvp_bytes();
+    let scene = GBufferScene {
+        raster_pipeline: &raster_pipeline,
+        vertex_buffer: &vertex_buffer,
+        vertex_count: vertices.len() as u32,
+        mvp,
+        marcher: &marcher,
+        vocab_layout: &vocab_layout,
+        edit_list: &edit_list,
+        camera_uniform: &camera_uniform,
+        tiles_buffer: &tiles_buffer,
+        pointer_grid: clipmap.grid_buffer(0),
+        atlas: clipmap.atlas(0).texture(),
+        atlas_sampler: clipmap.sampler(0),
+        level_grids: [clipmap.grid_buffer(1), clipmap.grid_buffer(2)],
+        level_atlases: [clipmap.atlas(1).texture(), clipmap.atlas(2).texture()],
+        level_atlas_samplers: [clipmap.sampler(1), clipmap.sampler(2)],
+        depth_sampler: &depth_sampler,
+        material_table: &material_table,
+        light_table: &light_table,
+        light_staging: &light_staging,
+        light_upload_bytes: light_table_bytes,
+        light_dirty: false,
+        // L1 cluster cull OFF (NON-CLUSTERED): the frozen `cluster_cull.hlsl` drops a
+        // shadow-flagged punctual, so the multi-light SDF-shadow path runs on the flat-table
+        // (non-clustered) resolve — exactly `p6_r1_multi_light_sdf_shadows_match_oracle`'s path.
+        cluster_cull: None,
+        cull_layout: None,
+        cluster_grid: None,
+        light_index: None,
+        light_index_alloc: None,
+        cluster_cull_push: [0u8; 16],
+        cluster_count: 0,
+        resolve_pipeline: &resolve_pipeline,
+        resolve_layout: &resolve_layout,
+        present_pipeline: &present_pipeline,
+        present_layout: &present_layout,
+        present_sampler: &present_sampler,
+        dispatch_group_count_x: group_count_x(),
+        // The analytic marcher (brick OFF) is the crisp reference path for the showcase.
+        brick: None,
+        coarse: None,
+        coarse_mode: CoarseMode::EmptySkipOnly,
+        // The real on-screen lit flags: A1 soft shadows + A2 AO. The per-caster multi-light
+        // SDF shadow march is gated by the table's `shadow_mode == 1` + each caster's
+        // `casts_sdf_shadow` flag (set in `showcase_light_table`), independent of these flags.
+        lighting_flags: LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO,
+    };
+
+    let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
+    let staging_size = (swapchain.extent().width * swapchain.extent().height * 4) as u64;
+    let staging = RhiDevice::create_buffer(
+        device,
+        &BufferDesc {
+            size: staging_size,
+            usage: BufferUsage::TRANSFER_DST,
+            location: MemoryLocation::HostVisibleCoherent,
+        },
+    )
+    .expect("host-visible readback staging buffer");
+    let alloc_extent = swapchain.extent();
+    let mut frame = GBufferFrame::new();
+
+    // Render ONE readback frame, then drain so the staging buffer is host-coherent (the same
+    // FRAMES_IN_FLIGHT==2 / 3-drain discipline the existing windowed dumps use). The readback is
+    // a 4-B/texel BGRA-or-RGBA copy of the FULL swapchain image; `readback_to_rgba` normalizes
+    // the swapchain R/B order so the dumped BMP is color-correct.
+    const DRAIN_FRAMES: u32 = 3;
+    let clear = [0.04_f32, 0.05, 0.07, 1.0];
+
+    let mut dumped: Option<(Vec<u8>, u32, u32)> = None;
+    if !window.pump_events() {
+        eprintln!("NOTE engine_showcase_512: window closed before the dump frame — skipping");
+    } else {
+        window.refresh_size();
+        let live = swapchain.extent();
+        if live.width != alloc_extent.width || live.height != alloc_extent.height {
+            eprintln!("NOTE engine_showcase_512: extent changed before the dump frame — skipping");
+        } else {
+            // SAFETY: `ctx`/`surface`/`swapchain`/`renderer` share one device; every `scene`
+            // resource is live; `present_extent` + `scene.dispatch_group_count_x` + the camera UBO
+            // `count` cover the composite extent; `staging` is host-visible and ≥ one swapchain
+            // image in bytes.
+            let presented = unsafe {
+                renderer.render_gbuffer_frame(
+                    &ctx, &surface, &mut swapchain, &scene, &mut frame,
+                    window.width(), window.height(), clear, present_extent, Some(&staging),
+                )
+            }
+            .unwrap_or_else(|e| panic!("showcase readback frame failed: {e:?}"));
+
+            if !presented {
+                eprintln!("NOTE engine_showcase_512: swapchain recreated on the readback frame — skipping");
+            } else {
+                let extent = swapchain.extent();
+                for _ in 0..DRAIN_FRAMES {
+                    if !window.pump_events() {
+                        break;
+                    }
+                    window.refresh_size();
+                    // SAFETY: same contract; no readback requested on the drain frames.
+                    let _ = unsafe {
+                        renderer.render_gbuffer_frame(
+                            &ctx, &surface, &mut swapchain, &scene, &mut frame,
+                            window.width(), window.height(), clear, present_extent, None,
+                        )
+                    }
+                    .unwrap_or_else(|e| panic!("showcase drain frame failed: {e:?}"));
+                }
+
+                let w = extent.width;
+                let h = extent.height;
+                let byte_count = (w * h * 4) as usize;
+                let dst_ptr = RhiDevice::buffer_mapped_ptr(device, &staging)
+                    .expect("host-visible staging buffer is mapped");
+                let mut raw = vec![0u8; byte_count];
+                // SAFETY: `dst_ptr` points to `staging_size` (≥ `byte_count`) mapped host-coherent
+                // bytes; the readback frame's copy completed before this read (its slot fence was
+                // re-waited by the drain frames); `raw` is a distinct, non-overlapping alloc.
+                unsafe { core::ptr::copy_nonoverlapping(dst_ptr.as_ptr(), raw.as_mut_ptr(), byte_count) };
+                dumped = Some((readback_to_rgba(&raw, w, h, is_bgra), w, h));
+            }
+        }
+    }
+
+    if ctx.validation_enabled() {
+        let state = ctx
+            .debug_state()
+            .expect("validation enabled => a debug-messenger state is present");
+        assert_eq!(
+            state.total(),
+            0,
+            "validation layer reported {} message(s) during the showcase present — \
+             see the [vk-validation] log",
+            state.total()
+        );
+    }
+
+    // Write the TRUE 512×512 BMP (no upscale — the composite is already native) + verify the
+    // dumped dimensions are exactly 512×512.
+    match dumped {
+        Some((rgba, w, h)) => {
+            assert_eq!(
+                (w, h),
+                (COMPOSITE_W, COMPOSITE_H),
+                "the readback must be the native {COMPOSITE_W}x{COMPOSITE_H} composite (no upscale)"
+            );
+            write_bmp(SHOWCASE_BMP, &rgba, w, h)
+                .unwrap_or_else(|e| panic!("failed to write {SHOWCASE_BMP}: {e:?}"));
+            let bytes = std::fs::read(SHOWCASE_BMP)
+                .unwrap_or_else(|e| panic!("failed to re-read {SHOWCASE_BMP} for header verification: {e:?}"));
+            let (bw, bh) = read_bmp_dimensions(&bytes)
+                .expect("the dumped showcase must be a valid BM 54-byte-header BMP");
+            assert_eq!(
+                (bw, bh),
+                (COMPOSITE_W as i32, COMPOSITE_H as i32),
+                "the dumped BMP header must report {COMPOSITE_W}x{COMPOSITE_H} native dimensions"
+            );
+            println!("engine showcase dump -> {SHOWCASE_BMP} ({bw}x{bh} native, multi-light SDF shadows)");
+        }
+        None => {
+            eprintln!(
+                "NOTE engine_showcase_512: no readback frame presented (swapchain kept recreating); \
+                 no BMP written"
+            );
+        }
+    }
+
+    drop(renderer);
+    // SAFETY: the renderer was dropped above (its `Drop` waits the device idle), so no submission
+    // references these resources; `ctx` is still alive; each is destroyed exactly once, in reverse
+    // dependency order.
+    unsafe {
+        frame.destroy(&ctx);
+        RhiDevice::destroy_buffer(device, staging);
+        RhiDevice::destroy_graphics_pipeline(device, present_pipeline);
+        RhiDevice::destroy_bind_group_layout(device, present_layout);
+        RhiDevice::destroy_compute_pipeline(device, resolve_pipeline);
+        RhiDevice::destroy_bind_group_layout(device, resolve_layout);
         RhiDevice::destroy_compute_pipeline(device, marcher);
         RhiDevice::destroy_bind_group_layout(device, vocab_layout);
         RhiDevice::destroy_graphics_pipeline(device, raster_pipeline);
