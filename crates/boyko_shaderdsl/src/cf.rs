@@ -139,6 +139,21 @@ pub trait Cf {
     /// once Inc 3 declares more than one.
     fn decl_var(name: &'static str, init: Self::Scalar) -> Self::Var;
 
+    /// A MUTABLE `bool` LOCAL (the B1 marcher's `hit` / `exhausted` flags). Eval stores the
+    /// `bool` in a [`core::cell::Cell`] (the same interior-mutability shape [`Var`](Self::Var)
+    /// uses for `float`); Emit records a `Stmt::DeclVar` whose `ty` is [`bool`], spelling
+    /// `bool <name> = <init>;`. Distinct from [`Var`](Self::Var) (a `float` local) only in the
+    /// declared type — Increment 4d, the first rung of the B1-marcher single-source ladder.
+    type BoolVar;
+
+    /// Declares a mutable `bool` local named `name` initialized to the literal `init`, returning
+    /// its [`BoolVar`](Self::BoolVar) handle. The `bool` analogue of [`decl_var`](Self::decl_var)
+    /// (which hardcodes a `float`). Eval boxes `init` into a `Cell<bool>` (the `name` is an
+    /// Emit-only printing concern); Emit records a `Stmt::DeclVar` whose `ty` is the `bool`
+    /// type token and whose `rhs` is a `false`/`true` literal node, spelling `bool <name> =
+    /// <init>;`. The B1 marcher's `bool hit = false;` / `bool exhausted = true;` preamble decls.
+    fn decl_bool_var(name: &'static str, init: bool) -> Self::BoolVar;
+
     /// Reads the CURRENT value of a mutable local. Eval returns the `Cell`'s value; Emit
     /// returns an emit handle spelling the variable's NAME (`exit`, a named mutable local,
     /// not an SSA temp).
@@ -533,6 +548,17 @@ impl Cf for EvalCf {
 
     #[inline]
     fn decl_var(_name: &'static str, init: f32) -> core::cell::Cell<f32> {
+        // The name is an Emit-only printing concern (a `Cell` has no printed identity).
+        core::cell::Cell::new(init)
+    }
+
+    // The mutable `bool` local IS its value, held in a `Cell<bool>` for interior mutability (the
+    // same shape `Var` uses for `float`). `Cell<bool>` is 1 byte and adds NO field to the ZST
+    // backend marker, so `size_of::<EvalCf>() == 0` still holds.
+    type BoolVar = core::cell::Cell<bool>;
+
+    #[inline]
+    fn decl_bool_var(_name: &'static str, init: bool) -> core::cell::Cell<bool> {
         // The name is an Emit-only printing concern (a `Cell` has no printed identity).
         core::cell::Cell::new(init)
     }

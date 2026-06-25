@@ -1797,3 +1797,40 @@ fn b1_accept_refine_budget_exhaustion_matches_frozen() {
     }
     assert_bits(refactored, expected, "budget-exhaustion-8-step-accumulation");
 }
+
+// ======================================================================
+// Increment 4d — the TYPED `bool` decl facet (`Cf::decl_bool_var`).
+//
+// The FIRST rung of the B1-marcher single-source ladder: the two NON-CONTIGUOUS `bool` preamble
+// decls (`bool hit = false;` L1316, `bool exhausted = true;` L1327) authored ONCE over `C: Cf`.
+// The bodies are ONE-STATEMENT decls — straight-line, no control flow — so the Eval round-trip
+// (the returned `Cell<bool>` holds the init) is trivial; the REAL proof is the cmp-`.spv` after
+// the splice (the emit STRUCTURE golden in `tests/emit_b1_decls.rs` pins the generated text). This
+// block also re-asserts the ZST guarantee — `Cell<bool>` is 1 byte but adds NO field to the
+// `EvalCf` marker.
+// ======================================================================
+
+#[test]
+fn b1_decl_hit_inits_false_on_eval() {
+    use boyko_shaderdsl::decl::b1_decl_hit_body;
+    let hit = b1_decl_hit_body::<EvalCf>();
+    assert!(!hit.get(), "`bool hit` must initialize to `false`");
+}
+
+#[test]
+fn b1_decl_exhausted_inits_true_on_eval() {
+    use boyko_shaderdsl::decl::b1_decl_exhausted_body;
+    let exhausted = b1_decl_exhausted_body::<EvalCf>();
+    assert!(
+        exhausted.get(),
+        "`bool exhausted` must initialize to `true` (the BUG-B1-HOLE-3 flag — under-detecting \
+         exhaustion reopens the hole)"
+    );
+}
+
+#[test]
+fn evalcf_is_zst_inc4d() {
+    // The ZST guarantee still holds after the Inc-4d `BoolVar = Cell<bool>` facet (the `Cell<bool>`
+    // is the local's value, NOT a field on the backend marker).
+    assert_eq!(std::mem::size_of::<EvalCf>(), 0, "EvalCf must remain a ZST");
+}

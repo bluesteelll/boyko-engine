@@ -1313,7 +1313,9 @@ void main(uint3 tid : SV_DispatchThreadID) {
     // preserved exactly.
     float t = t_seed;
     float omega = pc.omega;          // [1.0, 1.99] host-clamped
+    // === GENERATED b1_decl_hit BEGIN ===
     bool hit = false;
+    // === GENERATED b1_decl_hit END ===
     float safe_t = 0.0;              // probe param remembered for an exact retreat
     float sor_prev = 0.0;           // previous probe's d
     float sor_step_prev = 0.0;      // previous over-relaxed step length
@@ -1324,7 +1326,9 @@ void main(uint3 tid : SV_DispatchThreadID) {
     // minimal re-march trigger (under-detecting it would reopen the hole; the flag is
     // unambiguous — it is true exactly when the `for` falls off the end). It starts
     // `true` and is cleared by EVERY in-loop `break`.
+    // === GENERATED b1_decl_exhausted BEGIN ===
     bool exhausted = true;
+    // === GENERATED b1_decl_exhausted END ===
     [loop]
     for (uint it = 0u; it < MAX_IT; ++it) {
         if (t >= t_mesh) {

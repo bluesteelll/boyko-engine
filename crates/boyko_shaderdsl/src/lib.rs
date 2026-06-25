@@ -42,6 +42,7 @@
 
 pub mod brick;
 pub mod cf;
+pub mod decl;
 pub mod field;
 pub mod normal;
 pub mod refine;
@@ -57,6 +58,7 @@ pub use brick::{
     snorm_normalize, snorm_scale,
 };
 pub use cf::{Cf, EvalCf, Flow, LoopOp};
+pub use decl::{b1_decl_exhausted_body, b1_decl_hit_body};
 pub use field::{
     EditView, MAX_SDF_EDITS, SDF_FAR, combine, edit_distance, kind, op, sd_box, sd_sphere,
     sdf_field_body, smax, smin,

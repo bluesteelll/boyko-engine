@@ -61,6 +61,11 @@ enum EmitTy {
     /// materializes a `float4` temp (`c` is an inlined call-through parameter); the type is
     /// carried so [`assert_operand_ty`] can validate the [`Node::Call2`] `float4` argument.
     Float4,
+    /// An HLSL `bool` local (the B1 marcher's `hit` / `exhausted` flags — Increment 4d). The
+    /// DECL-SITE type of a [`Cf::decl_bool_var`] local; spells the token `bool` (NOT `bool1`
+    /// or a vector form). Carried only on a [`Stmt::DeclVar`] `ty` field; no node materializes
+    /// a `bool` temp (the `false`/`true` init rhs is a [`Node::BoolLit`] inline leaf).
+    Bool,
 }
 
 /// One SSA node — a recorded field op. Operands reference earlier nodes by their
@@ -397,7 +402,8 @@ fn type_of(node: Node) -> EmitTy {
     }
 }
 
-/// The HLSL type keyword for an [`EmitTy`] (`float` / `uint` / `float3` / `uint3`).
+/// The HLSL type keyword for an [`EmitTy`] (`float` / `uint` / `float3` / `uint3` / `float4` /
+/// `bool`). The DECL-SITE type token a [`Stmt::DeclVar`] / [`Stmt::DeclTemp`] prints.
 fn ty_keyword(ty: EmitTy) -> &'static str {
     match ty {
         EmitTy::Float => "float",
@@ -405,6 +411,8 @@ fn ty_keyword(ty: EmitTy) -> &'static str {
         EmitTy::Float3 => "float3",
         EmitTy::Uint3 => "uint3",
         EmitTy::Float4 => "float4",
+        // The scalar `bool` decl token — `bool name = false;` (NOT `bool1` or a vector form).
+        EmitTy::Bool => "bool",
     }
 }
 
@@ -1746,6 +1754,26 @@ fn record_stmt(stmt: Stmt) {
     });
 }
 
+/// Records a mutable-local DECLARATION of an arbitrary [`EmitTy`]: seeds the `name` in the
+/// [`VARS`] table (so [`Node::VarRef`] later spells `name`) and records the `Stmt::DeclVar`
+/// with the given `ty` + `rhs`. Shared by [`EmitCf::decl_var`] (`EmitTy::Float`) and
+/// [`EmitCf::decl_bool_var`] (`EmitTy::Bool`); a future `decl_uint_var`/`decl_int_var` is a
+/// trivial mirror (pass its own `ty`). Threading the `ty` (vs the old hardcoded
+/// `EmitTy::Float`) is the Increment-4d generalization — the `float` path is byte-unchanged
+/// (it still passes `EmitTy::Float`).
+fn record_decl_var(name: &'static str, ty: EmitTy, rhs: u32) -> Var {
+    let var = VARS.with(|v| {
+        let mut v = v.borrow_mut();
+        let id = v.len() as u32;
+        // The HLSL local's name (threaded from the body — `exit` in Increment 1; Inc 3+4d
+        // declare more than one, each with its own name).
+        v.push(name);
+        Var(id)
+    });
+    record_stmt(Stmt::DeclVar { var, ty, rhs });
+    var
+}
+
 /// Records a materialized temp: assigns the next program-order `seq`, registers the
 /// temp's result [`EmitTy`] out-of-band (so [`type_of`]`(`[`Node::TempRef`]`(seq))` reads
 /// it), records the `Stmt::DeclTemp` (named or anonymous), and returns a [`Node::TempRef`]
@@ -1819,22 +1847,21 @@ impl Cf for EmitCf {
 
     fn decl_var(name: &'static str, init: Emit) -> Var {
         // `init` is an `Emit` handle: read its arena id DIRECTLY (no transmute — `Scalar`
-        // is `Emit` here, so `init.0` is a plain field access).
-        let rhs = init.0;
-        let var = VARS.with(|v| {
-            let mut v = v.borrow_mut();
-            let id = v.len() as u32;
-            // The HLSL local's name (threaded from the body — `exit` in Increment 1; Inc 3
-            // declares more than one, each with its own name).
-            v.push(name);
-            Var(id)
-        });
-        record_stmt(Stmt::DeclVar {
-            var,
-            ty: EmitTy::Float,
-            rhs,
-        });
-        var
+        // is `Emit` here, so `init.0` is a plain field access). A `float` decl — the `ty` is
+        // threaded into the shared `record_decl_var` (the SAME `EmitTy::Float` it hardcoded
+        // before — byte-unchanged).
+        record_decl_var(name, EmitTy::Float, init.0)
+    }
+
+    // On Emit a `bool` local is the SAME named-handle shape `Var` uses (a `u32` indexing the
+    // `VARS` name table); only the decl-site `ty` differs.
+    type BoolVar = Var;
+
+    fn decl_bool_var(name: &'static str, init: bool) -> Var {
+        // The `false`/`true` init rhs is a `Node::BoolLit` (printed `false`/`true`, the SAME node
+        // the proven bool-RETURN path uses). The `ty` is `EmitTy::Bool` → the printer spells
+        // `bool <name> = <init>;` (the `bool` token via `ty_keyword`).
+        record_decl_var(name, EmitTy::Bool, push(Node::BoolLit(init)))
     }
 
     fn get_var(v: &Var) -> Emit {
@@ -2887,5 +2914,93 @@ pub fn emit_hlsl_b1_accept_refine() -> String {
         // the hand-written B1 marcher).
         print_block(&body_block, &arena, names, 3, &mut span);
         span
+    })
+}
+
+/// Traces a SINGLE-STATEMENT bool-decl producer body over `EmitCf` and returns ONLY that one
+/// `bool <name> = <init>;` line (at depth 1 — 4-space indent, matching the committed B1 preamble
+/// decls at L1316/L1327 inside `main`). Shared by [`emit_hlsl_b1_decl_hit`] /
+/// [`emit_hlsl_b1_decl_exhausted`]: the body records exactly one [`Stmt::DeclVar`] whose `rhs` is
+/// a [`Node::BoolLit`] (a pure literal — NO inputs/temps/named-lits/calls), so every name table
+/// is empty except `vars` (the single declared name). The `body` closure records the decl into the
+/// freshly-seeded function block; this helper does the reset/seed/pop/print harness around it.
+fn emit_hlsl_b1_decl<F: FnOnce()>(body: F) -> String {
+    // Fresh recorder state.
+    ARENA.with(|a| a.borrow_mut().clear());
+    STMTS.with(|s| s.borrow_mut().clear());
+    VARS.with(|v| v.borrow_mut().clear());
+    NAMED_LITS.with(|n| n.borrow_mut().clear());
+    CALLS.with(|c| c.borrow_mut().clear());
+    TEMP_SEQ.with(|c| *c.borrow_mut() = 0);
+    TEMP_TYPES.with(|t| t.borrow_mut().clear());
+    TEMP_NAMES.with(|t| t.borrow_mut().clear());
+
+    // Seed the function body block (the bottom of the STMTS stack).
+    STMTS.with(|s| s.borrow_mut().push(Block { stmts: Vec::new() }));
+
+    // Record the single `Stmt::DeclVar` (the producer calls `EmitCf::decl_bool_var`).
+    body();
+
+    let body_block = STMTS.with(|s| {
+        s.borrow_mut()
+            .pop()
+            .expect("invariant: the function body block was pushed above")
+    });
+
+    // Only `vars` is populated (the single declared name); the bool literal rhs touches no
+    // other name table.
+    let vars = VARS.with(|v| v.borrow().clone());
+    let float_in: [&str; 0] = [];
+    let names = Names {
+        float_in: &float_in,
+        uint_in: NO_UINT_INPUTS,
+        vec_in: NO_VEC_INPUTS,
+        uint3_in: NO_UINT3_INPUTS,
+        buf_in: NO_BUF_INPUTS,
+        out_in: NO_OUT_INPUTS,
+        named_lit: NO_NAMED_LITS,
+        vars: &vars,
+        vec4_in: NO_VEC4_INPUTS,
+        call_in: NO_CALL_INPUTS,
+    };
+
+    ARENA.with(|a| {
+        let arena = a.borrow();
+        let mut span = String::new();
+        // The single `bool <name> = <init>;` decl at depth 1 (4-space indent, matching the
+        // committed L1316/L1327 inside `main`).
+        print_block(&body_block, &arena, names, 1, &mut span);
+        span
+    })
+}
+
+/// Generates the B1 marcher's `bool hit = false;` preamble decl (the committed
+/// `sdf_gbuffer_composite.hlsl:1316`) by tracing [`crate::decl::b1_decl_hit_body`] over `EmitCf`,
+/// and returns ONLY that one line. The FIRST rung of the B1-marcher single-source ladder
+/// (Increment 4d): a TYPED `bool` decl facet ([`Cf::decl_bool_var`]). The two B1 bool preamble
+/// decls (`hit` here, `exhausted` in [`emit_hlsl_b1_decl_exhausted`]) are NON-CONTIGUOUS in the
+/// committed shader (separated by 4 `float` decls + the BUG-B1-HOLE-3 comment), so each is its own
+/// generated sentinel pair; the float decls + comments between them stay hand-written.
+///
+/// The cmp-`.spv` (in `boyko_rhi_vulkan`) is the byte-identity oracle; the `b1_decl_hit`
+/// text-sync test pins the committed shader line to this output.
+pub fn emit_hlsl_b1_decl_hit() -> String {
+    use crate::decl;
+    emit_hlsl_b1_decl(|| {
+        let _ = decl::b1_decl_hit_body::<EmitCf>();
+    })
+}
+
+/// Generates the B1 marcher's `bool exhausted = true;` preamble decl (the committed
+/// `sdf_gbuffer_composite.hlsl:1327`) by tracing [`crate::decl::b1_decl_exhausted_body`] over
+/// `EmitCf`, and returns ONLY that one line. The BUG-B1-HOLE-3 budget-exhaustion flag (init
+/// `true`, cleared by every in-loop `break`); see [`emit_hlsl_b1_decl_hit`] for the rung framing.
+///
+/// The cmp-`.spv` (in `boyko_rhi_vulkan`) is the byte-identity oracle; the `b1_decl_exhausted`
+/// text-sync test pins the committed shader line to this output.
+pub fn emit_hlsl_b1_decl_exhausted() -> String {
+    use crate::decl;
+    emit_hlsl_b1_decl(|| {
+        let _ = decl::b1_decl_exhausted_body::<EmitCf>();
     })
 }

@@ -104,4 +104,18 @@ fn main() {
     // hand-written, framing b). The host B1 marcher stays hand-written and is not generated.
     println!();
     print!("{}", boyko_shaderdsl::emit::emit_hlsl_b1_accept_refine());
+    // The B1 marcher's two `bool` PREAMBLE DECLS (Increment 4d — the FIRST rung of the B1-marcher
+    // single-source ladder, the first TYPED `bool` decl facet via `Cf::decl_bool_var`): `bool hit
+    // = false;` and `bool exhausted = true;`, generated from `boyko_shaderdsl::decl::{b1_decl_hit_
+    // body, b1_decl_exhausted_body}` over the `Emit` + `EmitCf` backends. The two decls are
+    // NON-CONTIGUOUS in the committed shader (separated by 4 `float` decls — `safe_t`/`sor_prev`/
+    // `sor_step_prev` — + the 7-line BUG-B1-HOLE-3 rationale comment), so each is spliced between
+    // its OWN sentinel pair (`// === GENERATED b1_decl_hit BEGIN/END ===` at L1316, `// ===
+    // GENERATED b1_decl_exhausted BEGIN/END ===` at L1327 inside the main B1 marcher); the `float`
+    // decls + ALL comments BETWEEN them stay HAND-WRITTEN (framing b). The reads/sets of the flags
+    // are hand-written / out of scope, so no get/set bool facet is generated at this rung.
+    println!();
+    print!("{}", boyko_shaderdsl::emit::emit_hlsl_b1_decl_hit());
+    println!();
+    print!("{}", boyko_shaderdsl::emit::emit_hlsl_b1_decl_exhausted());
 }
