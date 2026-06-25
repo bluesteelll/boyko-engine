@@ -49,6 +49,7 @@ pub mod refine;
 pub mod remarch;
 pub mod scalar;
 pub mod shadow;
+pub mod sor;
 pub mod surface;
 
 #[cfg(feature = "emit")]
@@ -77,6 +78,9 @@ pub use scalar::FieldScalar;
 pub use shadow::{
     FIELD_LIPSCHITZ_L, MAX_IT, SHADOW_HIT_EPS, SHADOW_K, SHADOW_MINT, SHADOW_MINT_STEP, T_MAX,
     sdf_soft_shadow_body,
+};
+pub use sor::{
+    FIELD_LIPSCHITZ_L as B1_SOR_LIPSCHITZ_L, T_MAX as B1_SOR_T_MAX, b1_sor_retreat_body,
 };
 pub use surface::{
     EPS as M2_SURFACE_EPS, M2_REFINE_ITERS, M2_REFINE_RELAX, T_MAX as M2_SURFACE_T_MAX,

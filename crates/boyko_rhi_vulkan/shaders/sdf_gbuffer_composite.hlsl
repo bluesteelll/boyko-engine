@@ -1456,46 +1456,36 @@ void main(uint3 tid : SV_DispatchThreadID) {
             // === GENERATED b1_accept_refine END ===
             break;
         }
+        // Render B1: the Keinert over-relaxation STEP + the Lipschitz-aware SOR-FAIL retreat-to-plain
+        // + the `t > T_MAX` miss test. Single-sourced from `boyko_shaderdsl::sor::b1_sor_retreat_body`
+        // (Increment 4f — the DEFENSIBLE TERMINUS of the B1-marcher eDSL ladder). The full
+        // BUG-B1-HOLE-1 (Lipschitz threshold) / BUG-B1-HOLE-2 (plain-resume retreat) / +1-iteration-
+        // budget-proof rationale travels in that module's doc. The ENTIRE over-relax block is gated
+        // behind `if (omega > 1.0)`; the else-arm is the VERBATIM frozen `t = t + d`, so at
+        // `omega == 1.0` the live path is the pre-B1 plain sphere-trace (the 0%-gate). The `it > 0u`
+        // guard is LOAD-BEARING (the budget proof). R1: `t = t + …` is byte-identical to `t += …` in
+        // the `.spv` at this depth-2 site (the GO/NO-GO spike proved it). This is the SECOND generated
+        // sentinel inside this hand-written `for (uint it)` loop (the accept-refine above is the first).
+        // === GENERATED b1_sor_retreat BEGIN ===
         if (omega > 1.0) {
             float step_len = d * omega;
-            // sor_fail: the over-step taken last iter overshot the previous unbounding
-            // sphere. Valid only for omega < 2 (host-clamped). Spheres must overlap or we
-            // may have skipped a surface. Lipschitz-aware (BUG-B1-HOLE-1): IQ's smooth-min
-            // is super-Lipschitz, so the guaranteed-empty radius at field value `f` is `f/L`,
-            // not `f`. Two empty balls (radii sor_prev/L, d/L) cover the over-relaxed step
-            // `sor_step_prev` iff `sor_prev + d >= L*sor_step_prev`; the retreat must fire
-            // when that fails. Multiply the threshold by FIELD_LIPSCHITZ_L (defined in
-            // sdf_field.hlsli) to keep the lower-bound invariant sound in blend bands.
-            //
-            // The `it > 0u` guard is LOAD-BEARING (do not remove): a sor-fail can only be
-            // reached after at least one ACCEPTED over-relax step (it >= 1 ⟹ accepted >= 1),
-            // which is what pre-pays the +1 retreat iteration in the budget proof below.
             if (it > 0u && sor_prev + d < FIELD_LIPSCHITZ_L * sor_step_prev) {
-                // BUG-B1-HOLE-2: do NOT retreat to bare `safe_t` and re-probe. That re-evals
-                // the field at safe_t (costing +2 iters vs a plain march), and on a ray
-                // converging at the MAX_IT cliff the extra probe overflows the budget → a
-                // missed-surface hole. Instead RESUME the plain march ONE certified step past
-                // the safe point: `safe_t` is the exact probe param and `sor_prev` is the
-                // exact field value sampled there, so `safe_t + sor_prev` is precisely where a
-                // plain march lands after probing safe_t — reusing that eval (no re-probe). The
-                // add is one same-sign FMA-free addition (both operands >= 0): no catastrophic
-                // cancellation, unlike a `t - <correction>` subtraction form. Net cost is +1
-                // iteration vs plain, pre-paid by the >= 1 accepted over-step (the it>0 guard).
-                t = safe_t + sor_prev; // plain-resume one certified step past the safe probe
-                omega = 1.0;           // permanent fall-to-plain for the rest of this ray
+                t = safe_t + sor_prev;
+                omega = 1.0;
                 continue;
             }
-            safe_t = t;              // remember THIS probe point
+            safe_t = t;
             sor_prev = d;
             sor_step_prev = step_len;
-            t += step_len;
+            t = t + step_len;
         } else {
-            t += d;                  // frozen plain arm — TEXTUALLY identical to the frozen loop
+            t = t + d;
         }
         if (t > T_MAX) {
-            exhausted = false;       // clear-miss termination — NOT budget exhaustion
+            exhausted = false;
             break;
         }
+        // === GENERATED b1_sor_retreat END ===
     }
 
     // BUG-B1-HOLE-3 (Candidate C): the PROVABLY-hole-free fallback re-march. The fast

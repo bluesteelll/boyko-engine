@@ -135,4 +135,24 @@ fn main() {
     print!("{}", boyko_shaderdsl::emit::emit_hlsl_b1_decl_hit());
     println!();
     print!("{}", boyko_shaderdsl::emit::emit_hlsl_b1_decl_exhausted());
+    // The B1 over-relaxation SOR-FAIL-RETREAT STEP span (Increment 4f — the DEFENSIBLE TERMINUS of
+    // the B1-marcher single-source ladder: the EIGHTH CONTROL-FLOW leaf, the first with a TWO-arm
+    // `if (omega > 1.0) { ... } else { ... }` (`Cf::if_else`), a CAPTURED `uint` `it` read (the
+    // `uint` analogue of Inc4e's captured `float t_mesh`), a `uint` `>` guard (`Cf::ugt`) joined by
+    // a logical `&&` (`Cf::and2`) to the Lipschitz `<` with a bare `0u` (`Cf::uint_lit`), and the
+    // mid-body `continue` (`Cf::cont`)). The production B1 marcher's per-iteration Keinert over-
+    // relaxed step (`t = t + d * omega`) with the Lipschitz-aware retreat-to-plain (`t = safe_t +
+    // sor_prev; omega = 1.0; continue;` when `it > 0u && sor_prev + d < FIELD_LIPSCHITZ_L *
+    // sor_step_prev`), the 0%-gated `else { t = t + d; }` plain arm, and the `t > T_MAX` miss break;
+    // generated from `boyko_shaderdsl::sor::b1_sor_retreat_body` over the `Emit` + `EmitCf` backends.
+    // `d` is the already-sampled field value (a `float` input — NO field call in this span). Spliced
+    // between the `// === GENERATED b1_sor_retreat BEGIN/END ===` sentinels INSIDE the main B1
+    // marcher's `for (uint it)` loop (the step SPAN only — the loop header, the mesh-guard, the M1/M2
+    // brick islands, `float d = sdf(p);`, the `d < EPS` accept block, and ALL BUG-B1-HOLE rationale
+    // comments stay hand-written, framing b; the rationale travels in the sor module doc). This is
+    // the SECOND generated sentinel inside that one loop (Inc4c's accept-refine at depth 3 + this at
+    // depth 2). The span prints at DEPTH 2 (8-space `if (omega > 1.0)`). The host B1 marcher stays
+    // hand-written and is not generated.
+    println!();
+    print!("{}", boyko_shaderdsl::emit::emit_hlsl_b1_sor_retreat());
 }

@@ -246,10 +246,22 @@ enum Node {
     /// `a >= b` over two `uint` handles — a Mask node (printed inline inside a condition,
     /// like [`Node::Gt`]). The bounds guard `ix >= dims.x` (`OpUGreaterThanEqual`).
     UGe(u32, u32),
+    /// `a > b` over two `uint` handles — a Mask node (printed inline inside a condition,
+    /// like [`Node::UGe`]). The B1 sor-retreat's `it > 0u` iteration guard
+    /// (`OpUGreaterThan`, a DISTINCT opcode from a swapped `<`). The `uint` strict-`>`
+    /// analogue of [`Node::Gt`] (Increment 4f).
+    UGt(u32, u32),
     /// `a || b` over two MASK handles — a Mask node, the short-circuit OR (`rel.x < 0.0
     /// || rel.y < 0.0`). Printed inline (`<a> || <b>`); DXC lowers `a||b||c` to the
     /// short-circuit `OpBranchConditional` chain (spike E2a: zero `OpLogicalOr`).
     Or(u32, u32),
+    /// `a && b` over two MASK handles — a Mask node, the LOGICAL AND (`it > 0u && sor_prev
+    /// + d < ...`). Printed inline (`<a> && <b>`); DXC lowers `&&` to an
+    /// `OpBranchConditional` short-circuit chain (like `||`). SEPARATE from the bitwise
+    /// `uint` [`Node::And`] (overloading would mistype the result as `Uint` and print `&`).
+    /// Both operands are pure side-effect-free reads, so the eager-mask form matches the
+    /// GPU short-circuit (the SAME equivalence [`Node::Or`] carries — Increment 4f).
+    And2(u32, u32),
 
     // ---- Increment 4a: the runtime `[loop]` call site + `float4` param --------------
     /// A `float4` PARAMETER reference (`c`, the cubic coefficients) — prints the parameter
@@ -755,6 +767,10 @@ fn is_inline_leaf(node: Node) -> bool {
             | Node::Uint3Swizzle(_, _)
             | Node::BufferLoad(_, _)
             | Node::UGe(_, _)
+            // Increment 4f: the `uint` `>` guard (`it > 0u`) and the logical `&&` appear
+            // only inside a condition (inlined like `UGe`/`Or`), never as a `tN` temp.
+            | Node::UGt(_, _)
+            | Node::And2(_, _)
             | Node::Or(_, _)
             // Increment 4a: the `float4` parameter `c` spells its name (`c`) at every use;
             // it is consumed only by `Call2`. (The `Call2` itself materializes as a `f_mid`
@@ -848,6 +864,13 @@ fn operand_str(
         // The `>=` / `||` masks appear only inside a guard condition (inlined like `Gt`).
         Node::UGe(a, b) => format!("{} >= {}", opl(a), opl(b)),
         Node::Or(a, b) => format!("{} || {}", opl(a), opl(b)),
+        // The `uint` `>` guard (`it > 0u`) and the logical `&&` (Increment 4f) — inlined inside
+        // a condition. Both operands spell at Root (`opl` is the Root shorthand here): a
+        // comparison comparand needs no wrap (falls to `needs_paren_as_operand`'s `_ => false`),
+        // and an `&&` operand at Root excludes every wrap class, so `it > 0u && sor_prev + d <
+        // FIELD_LIPSCHITZ_L * sor_step_prev` prints FLAT (no parens), byte-identical to committed.
+        Node::UGt(a, b) => format!("{} > {}", opl(a), opl(b)),
+        Node::And2(a, b) => format!("{} && {}", opl(a), opl(b)),
         // A `float4` parameter (`c`) spells its NAME — a whole-`float4` call-through operand
         // (Increment 4a). Consumed only by `Call2`; never swizzled.
         Node::Vec4Param(n) => names.vec4_in[n as usize].to_string(),
@@ -1137,14 +1160,17 @@ fn define_str(arena: &[Node], names: Names, temps: &[Option<String>], id: u32) -
         }
 
         // The Increment-3 inline leaves (`Vec3Param`/`Vec3Swizzle`/`Uint3Param`/
-        // `Uint3Swizzle`/`BufferLoad`/`UGe`/`Or`) are spelled by `operand_str`, never
-        // materialized as a temp — so they must not reach `define_str`.
+        // `Uint3Swizzle`/`BufferLoad`/`UGe`/`Or`) — plus the Increment-4f `UGt`/`And2` masks —
+        // are spelled by `operand_str`, never materialized as a temp, so they must not reach
+        // `define_str`.
         Node::Vec3Param(_)
         | Node::Vec3Swizzle(_, _)
         | Node::Uint3Param(_)
         | Node::Uint3Swizzle(_, _)
         | Node::BufferLoad(_, _)
         | Node::UGe(_, _)
+        | Node::UGt(_, _)
+        | Node::And2(_, _)
         | Node::Or(_, _)
         // The Increment-4a `float4` parameter `c` is an inline leaf (spelled by operand_str).
         | Node::Vec4Param(_) => {
@@ -2050,6 +2076,26 @@ impl Cf for EmitCf {
 
     fn or(a: EmitMask, b: EmitMask) -> EmitMask {
         EmitMask(push(Node::Or(a.0, b.0)))
+    }
+
+    // ---- Increment 4f: the B1 sor-retreat condition leaves (recorder) -----------------
+
+    fn ugt(a: Emit, b: Emit) -> EmitMask {
+        // A `uint` `>` mask (`it > 0u`) — the `uint` strict-`>` analogue of `uge`'s `UGe` node.
+        EmitMask(push(Node::UGt(a.0, b.0)))
+    }
+
+    fn and2(a: EmitMask, b: EmitMask) -> EmitMask {
+        // The logical `&&` mask — a `And2` node (textual `&&`), DISTINCT from the bitwise `uint`
+        // `And` node. Mirrors `or`'s `Or` node (textual `||`); DXC lowers both to a short-circuit
+        // `OpBranchConditional` chain.
+        EmitMask(push(Node::And2(a.0, b.0)))
+    }
+
+    fn uint_lit(x: u32) -> Emit {
+        // A bare `uint` literal (`0u`) — the `UintLit` node (printed `<x>u`, an inline leaf typed
+        // `Uint`). DISTINCT from `named_uint` (which spells a SYMBOL via the named-lit table).
+        Emit(push(Node::UintLit(x)))
     }
 
     fn temp_vec3(name: &'static str, v: Emit) -> Emit {
@@ -3067,6 +3113,120 @@ pub fn emit_hlsl_b1_exhaustion_remarch() -> String {
         // main→`if (exhausted)`→this loop, hence depth 2 (vs the depth-3 span of `b1_accept_refine`
         // and the depth-1 span of `m2_surface_hit_refine`). NO function-signature wrap (the span is
         // spliced inside the hand-written `if (exhausted)` wrapper).
+        print_block(&body_block, &arena, names, 2, &mut span);
+        span
+    })
+}
+
+/// Generates the HLSL B1 over-relaxation SOR-FAIL-RETREAT STEP SPAN — the production main-marcher's
+/// per-iteration Keinert over-relaxed step (`t += d * omega`) with the Lipschitz-aware retreat-to-
+/// plain (`if (it > 0u && sor_prev + d < FIELD_LIPSCHITZ_L * sor_step_prev) { t = safe_t + sor_prev;
+/// omega = 1.0; continue; }`), the 0%-gated `else { t += d; }` plain arm, and the `t > T_MAX` miss
+/// break — by tracing the generic [`crate::sor::b1_sor_retreat_body`] over the `EmitCf` backend, and
+/// returns ONLY the span (NOT a wrapped function).
+///
+/// The Increment-4f facets vs the prior B1 rungs: the `if (omega > 1.0) { ... } else { ... }`
+/// TWO-arm branch ([`Cf::if_else`]); the CAPTURED `uint` `it` (seeded `Emit::uint_input(0)`, named
+/// `"it"` — the `uint` analogue of Inc4e's captured `float t_mesh`); the `uint` `>` guard
+/// ([`Cf::ugt`]) joined by a logical `&&` ([`Cf::and2`]) to the Lipschitz `<`, with `0u` a bare
+/// [`Cf::uint_lit`]; the mid-body `continue` ([`Cf::cont`]). `d` is the already-sampled field value
+/// (a `float` INPUT — there is NO field call in this span); the carried marcher state
+/// (`t`/`omega`/`safe_t`/`sor_prev`/`sor_step_prev` floats, `exhausted` bool) are SUPPRESSED-DECL
+/// vars (declared by the hand-written B1 preamble). The span prints at DEPTH 2 (the committed site
+/// nests main→`for (uint it)`→this step), matching the committed L1459-1498 indentation (8-space
+/// `if (omega > 1.0)`).
+///
+/// The enclosing marcher (the `for (uint it...)` header, the mesh-guard, the M1/M2 brick islands,
+/// `float d = sdf(p);`, the `d < EPS` accept block, and ALL BUG-B1-HOLE rationale comments) stays
+/// HAND-WRITTEN inline around the `// === GENERATED b1_sor_retreat BEGIN/END ===` sentinels
+/// (framing (b)); the rationale travels in [`crate::sor`]'s module doc. This is the SECOND generated
+/// sentinel inside the one hand-written `for (uint it)` loop (Inc4c's accept-refine at depth 3 + this
+/// at depth 2).
+///
+/// The cmp-`.spv` (in `boyko_rhi_vulkan`) is the byte-identity oracle; the `b1_sor_retreat`
+/// text-sync test pins the committed shader span to this output.
+pub fn emit_hlsl_b1_sor_retreat() -> String {
+    use crate::sor;
+
+    // Fresh recorder state.
+    ARENA.with(|a| a.borrow_mut().clear());
+    STMTS.with(|s| s.borrow_mut().clear());
+    VARS.with(|v| v.borrow_mut().clear());
+    NAMED_LITS.with(|n| n.borrow_mut().clear());
+    CALLS.with(|c| c.borrow_mut().clear());
+    TEMP_SEQ.with(|c| *c.borrow_mut() = 0);
+    TEMP_TYPES.with(|t| t.borrow_mut().clear());
+    TEMP_NAMES.with(|t| t.borrow_mut().clear());
+
+    // Seed the function body block (the bottom of the STMTS stack).
+    STMTS.with(|s| s.borrow_mut().push(Block { stmts: Vec::new() }));
+
+    // Seed the span's inputs:
+    //   d  → Input(0)     (float_in[0] = "d")  — THIS iteration's already-sampled field value (a
+    //                                            hand-written `float d = sdf(p);` above the span).
+    //   it → UintInput(0) (uint_in[0]  = "it") — the hand-written `for (uint it)` loop's CAPTURED
+    //                                            induction var (the `uint` analogue of `t_mesh`).
+    // `Node::UintInput(0)` already prints `uint_in[0]` = `"it"` (ZERO printer change for the read).
+    let d = Emit::input(0);
+    let it = Emit::uint_input(0);
+
+    // The carried marcher state — SUPPRESSED-DECL vars declared by the hand-written B1 preamble
+    // (so get/set spell `t`/`t = ...;` but NO `float t = ...;` redecl is recorded inside the span).
+    // The `_init` seeds are unused on Emit (a suppressed local is bound by name); pass the `d` input
+    // handle as a byte-neutral placeholder (decl_param/decl_bool_param record NO statement + push NO
+    // node on Emit, so the placeholder is never referenced).
+    let t = EmitCf::decl_param("t", d);
+    let omega = EmitCf::decl_param("omega", d);
+    let safe_t = EmitCf::decl_param("safe_t", d);
+    let sor_prev = EmitCf::decl_param("sor_prev", d);
+    let sor_step_prev = EmitCf::decl_param("sor_step_prev", d);
+    let exhausted = EmitCf::decl_bool_param("exhausted", false);
+
+    let _ = sor::b1_sor_retreat_body::<EmitCf>(
+        d,
+        it,
+        &t,
+        &omega,
+        &safe_t,
+        &sor_prev,
+        &sor_step_prev,
+        &exhausted,
+    );
+
+    // Pop the function body block and print it.
+    let body_block = STMTS.with(|s| {
+        s.borrow_mut()
+            .pop()
+            .expect("invariant: the function body block was pushed above")
+    });
+
+    let float_in = ["d"];
+    let uint_in = ["it"];
+    let named_lit = NAMED_LITS.with(|n| n.borrow().clone());
+    let vars = VARS.with(|v| v.borrow().clone());
+    let names = Names {
+        float_in: &float_in,
+        uint_in: &uint_in,
+        vec_in: NO_VEC_INPUTS,
+        uint3_in: NO_UINT3_INPUTS,
+        buf_in: NO_BUF_INPUTS,
+        out_in: NO_OUT_INPUTS,
+        named_lit: &named_lit,
+        vars: &vars,
+        vec4_in: NO_VEC4_INPUTS,
+        call_in: NO_CALL_INPUTS,
+    };
+
+    ARENA.with(|a| {
+        let arena = a.borrow();
+        let mut span = String::new();
+        // The whole span is TWO recorded statements (the `Stmt::IfElse` over `omega > 1.0` — its
+        // then-block carrying the DeclTemp step_len, the composite retreat `If { Assign t; Assign
+        // omega; Continue }`, the four trailing Assigns; its else-block the plain `Assign t` — and
+        // the `t > T_MAX` composite miss `If { Assign exhausted; Break }`) — a single in-order walk
+        // at DEPTH 2 (8-space `if (omega > 1.0)`), matching the committed L1459-1498. The site nests
+        // main→`for (uint it)`→this step. NO function-signature wrap (the span is spliced inside the
+        // hand-written B1 marcher loop).
         print_block(&body_block, &arena, names, 2, &mut span);
         span
     })

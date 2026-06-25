@@ -301,6 +301,39 @@ pub trait Cf {
         b: <Self::Scalar as FieldScalar>::Mask,
     ) -> <Self::Scalar as FieldScalar>::Mask;
 
+    // ---- Increment 4f: the B1 sor-retreat condition leaves (`uint >`, logical `&&`, `0u`) ----
+    //
+    // The B1 over-relaxation SOR-FAIL-RETREAT guard is `if (it > 0u && sor_prev + d <
+    // FIELD_LIPSCHITZ_L * sor_step_prev)` — a `uint` strict-`>` (`it > 0u`) joined to a `float`
+    // `<` by a logical `&&`, with `0u` a bare `uint` literal. Each is a 2-line mirror of a proven
+    // facet ([`uge`](Self::uge) for `ugt`, [`or`](Self::or) for `and2`, [`named_uint`](Self::
+    // named_uint)/[`named_lit`](Self::named_lit) for `uint_lit`); ZERO new loop/return machinery.
+
+    /// `a > b` over two [`Uint`](Self::Uint)s, producing a [`Mask`](Self::Mask) — the B1
+    /// sor-retreat's `it > 0u` iteration guard. The `uint` strict-`>` analogue of
+    /// [`uge`](Self::uge) (`a >= b`); a DISTINCT opcode (`OpUGreaterThan`) from a swapped `<`.
+    /// On Eval `a > b` over the host `u32`s; on Emit a [`crate::emit`] `UGt` node printed inline
+    /// (`it > 0u`).
+    fn ugt(a: Self::Uint, b: Self::Uint) -> <Self::Scalar as FieldScalar>::Mask;
+
+    /// `a && b` over two guard masks — the LOGICAL AND joining the sor-retreat's `it > 0u`
+    /// guard to the Lipschitz `<` test. On Eval the masks are already-computed `bool`s (`a &&
+    /// b`); BOTH comparands are pure side-effect-free reads (`it`, a `<` over locals), so the
+    /// eager-mask form is RESULT-EQUIVALENT to the GPU short-circuit (the SAME equivalence
+    /// [`or`](Self::or) carries). On Emit it records the lazy `OpBranchConditional` chain DXC
+    /// lowers `&&` to (like `||`). SEPARATE from the bitwise `uint` `&` (overloading would
+    /// mistype the result as `Uint` and print `&`).
+    fn and2(
+        a: <Self::Scalar as FieldScalar>::Mask,
+        b: <Self::Scalar as FieldScalar>::Mask,
+    ) -> <Self::Scalar as FieldScalar>::Mask;
+
+    /// A `uint` LITERAL — `x` on both backends as the VALUE, but spelled `<x>u` on Emit (NOT a
+    /// symbol). The B1 sor-retreat's `0u` (a bare literal, not the symbolic [`named_uint`](Self::
+    /// named_uint) constant). On Eval returns `x`; on Emit records a [`crate::emit`] `UintLit`
+    /// node (printed `<x>u`, already an inline leaf typed `Uint`).
+    fn uint_lit(x: u32) -> Self::Uint;
+
     /// Declares a NAMED mutable `float3` temp (`float3 rel = <rhs>;`). Eval is identity
     /// (the value flows directly); Emit records a named `Stmt::DeclTemp` (a `float3`
     /// temp). Returns the temp handle so later swizzles spell `rel.x`.
@@ -788,6 +821,27 @@ impl Cf for EvalCf {
         // result-equivalent to the short-circuit. (The tail-skip is preserved by statement
         // order + the `ret`'s `?`, not by short-circuiting the comparands.)
         a || b
+    }
+
+    // ---- Increment 4f: the B1 sor-retreat condition leaves (native host) --------------
+
+    #[inline]
+    fn ugt(a: u32, b: u32) -> bool {
+        a > b
+    }
+
+    #[inline]
+    fn and2(a: bool, b: bool) -> bool {
+        // Eager: both masks are already-computed (the `it > 0u` guard + the Lipschitz `<`, each
+        // a side-effect-free read), so `a && b` is result-equivalent to the GPU short-circuit
+        // (the SAME eager-mask equivalence `or` carries).
+        a && b
+    }
+
+    #[inline]
+    fn uint_lit(x: u32) -> u32 {
+        // The literal IS its value; the `<x>u` suffix is an Emit-only printing concern.
+        x
     }
 
     #[inline]
