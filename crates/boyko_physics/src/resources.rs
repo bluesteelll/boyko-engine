@@ -464,11 +464,37 @@ impl ContactPairs {
 
 /// A body whose AABB spans more than [`MAX_CELL_SPAN`] grid cells goes here
 /// instead of bucketing into every cell it touches (the standard uniform-grid
-/// escape hatch, Decision 1 trade-off). An oversized body is tested against every
-/// other body — an `n·k` residual where `k` is the oversized count — so a single
-/// giant body among many tiny ones cannot blow up the histogram into millions of
-/// cells. A body is "oversized" when its span along ANY axis exceeds this.
+/// escape hatch, Decision 1 trade-off). An oversized body is routed to a SECOND,
+/// COARSE size-class grid (P8) — never bucketed into the fine grid — so a single
+/// giant body among many tiny ones cannot blow up the fine histogram into millions
+/// of cells. A body is "oversized" when its span along ANY axis reaches this.
 pub const MAX_CELL_SPAN: u32 = 8;
+
+/// P8 coarse size-class grid: the coarse cell edge is this multiple of the fine
+/// cell edge, so a body that spans exactly [`MAX_CELL_SPAN`] fine cells (the
+/// oversized threshold) spans ~1 coarse cell — the coarse grid is sized to the
+/// oversized bodies' own scale, bounding how many coarse cells each spans (the perf
+/// goal: replace the O(k·n) oversized-vs-all residual with a grid-local lookup).
+///
+/// `[ESTIMATE:needs-calibration]` — the factor is tied to the oversized threshold
+/// ([`MAX_CELL_SPAN`]) by construction, NOT a measured crossover. Correctness is
+/// coarse-cell-size INDEPENDENT (any positive factor yields the SAME feasibility-
+/// filtered candidate set — a coarser cell only over-approximates which coarse cells
+/// a body buckets into, never the surviving pairs, exactly like the fine grid's
+/// output-neutrality); only the perf (coarse cells spanned per oversized body) moves
+/// with it. **P10** (offline criterion calibration) replaces this with a `[MEASURED]`
+/// value (`docs/ARCHITECTURE-HYBRID-PERF.md` Part 5).
+pub const COARSE_CELL_FACTOR: f32 = MAX_CELL_SPAN as f32;
+
+// A coarse cell strictly coarser than a fine cell is what makes an oversized body
+// (≥ MAX_CELL_SPAN fine cells on some axis) span a bounded number of coarse cells —
+// the P8 perf premise. A factor < 1 would make the coarse grid finer than the fine
+// grid (oversized bodies would span MORE coarse cells than fine), defeating the
+// purpose; assert it at compile time.
+const _: () = assert!(
+    COARSE_CELL_FACTOR >= 1.0,
+    "P8: the coarse size-class cell must be at least as large as a fine cell"
+);
 
 /// Hard ceiling on the total grid cell count (`dims.x · dims.y · dims.z`), so a
 /// pathological extent/cell-size ratio cannot demand an unbounded histogram. When
@@ -551,9 +577,28 @@ pub struct BroadphaseGrid {
     /// A running write cursor per cell during scatter (a working copy of
     /// `cell_start`), reused across builds.
     cursor: Vec<u32>,
-    /// Bodies spanning more than [`MAX_CELL_SPAN`] cells on some axis — tested
-    /// against every body, never bucketed (the size-disparity escape hatch).
+    /// Bodies spanning ≥ [`MAX_CELL_SPAN`] cells on some axis — binned into the
+    /// COARSE size-class grid below (the P8 size-disparity strategy), never bucketed
+    /// into the fine grid. Ascending dense-row order (pushed during the count pass).
     oversized: Vec<u32>,
+    /// P8 COARSE size-class grid — a second CSR over the SAME world AABB with a
+    /// coarser cell ([`COARSE_CELL_FACTOR`] × the fine cell), holding ONLY the
+    /// oversized bodies. Replaces the old O(k·n) oversized-vs-all residual:
+    /// oversized–oversized candidates come from within-coarse-cell pairs (deduped to
+    /// the minimum shared coarse cell), and each oversized body's coarse footprint
+    /// bounds the fine cells it scans for oversized–small candidates. Exclusive
+    /// prefix sums of the coarse histogram; `len == coarse_n_cells + 1`.
+    coarse_cell_start: Vec<u32>,
+    /// P8 coarse grid CSR values: the oversized DENSE ROWS bucketed by coarse cell
+    /// (the scatter target), `coarse_cell_start[c]..coarse_cell_start[c + 1]` indexes
+    /// coarse cell `c`'s oversized rows. Capacity-reused (clear + refill each build).
+    coarse_cell_bodies: Vec<u32>,
+    /// P8 coarse grid per-cell oversized-body histogram, reused; rebuilt then
+    /// prefix-summed into [`coarse_cell_start`](Self::coarse_cell_start) each build.
+    coarse_counts: Vec<u32>,
+    /// P8 coarse grid scatter write cursor (a working copy of `coarse_cell_start`),
+    /// reused across builds.
+    coarse_cursor: Vec<u32>,
     /// Scratch copy of the per-body bounding radii, reused across builds; used to
     /// compute the deterministic median radius (the typical-body cell-size proxy,
     /// O2 W1). `select_nth_unstable` reorders this in place — that is why it is a
@@ -579,6 +624,19 @@ pub struct BroadphaseGrid {
     inv_cell: f32,
     /// Grid resolution along each axis (`dims.x · dims.y · dims.z == n_cells`).
     dims: [u32; 3],
+    /// P8 COARSE grid: reciprocal of the coarse cell edge (`inv_cell /
+    /// COARSE_CELL_FACTOR`, sharing [`origin`](Self::origin) with the fine grid).
+    coarse_inv_cell: f32,
+    /// P8 COARSE grid resolution along each axis (`coarse_dims` product ==
+    /// `coarse_n_cells`); derived from the fine `dims` by the coarse factor.
+    coarse_dims: [u32; 3],
+    /// P8 diagnostic: the number of candidate pairs the OVERSIZED leg
+    /// ([`emit_oversized_candidates`](Self::emit_oversized_candidates)) emitted in the
+    /// most recent serial [`build`](Self::build) (oversized–oversized + oversized–
+    /// small). Isolated from the small–small leg so the P8 gate can observe directly
+    /// that the old O(k·n) residual is GONE (this stays footprint-bounded, never
+    /// `k·n`). Read via [`oversized_candidate_count`](Self::oversized_candidate_count).
+    oversized_candidate_count: usize,
 }
 
 impl BroadphaseGrid {
@@ -592,6 +650,14 @@ impl BroadphaseGrid {
             counts: Vec::new(),
             cursor: Vec::new(),
             oversized: Vec::with_capacity(capacity),
+            // P8 coarse size-class grid: the value array holds only the oversized
+            // bodies (few), so a small reserve covers it; the cell-indexed buffers
+            // (start/counts/cursor) grow on the first build to the live coarse cell
+            // count and reuse that capacity thereafter (like the fine grid's).
+            coarse_cell_start: Vec::new(),
+            coarse_cell_bodies: Vec::with_capacity(capacity),
+            coarse_counts: Vec::new(),
+            coarse_cursor: Vec::new(),
             scratch_radii: Vec::with_capacity(capacity),
             candidates: Vec::with_capacity(capacity),
             // The parallel-emit CSR scratch grows on the first parallel build to the
@@ -602,6 +668,9 @@ impl BroadphaseGrid {
             origin: Vec3::ZERO,
             inv_cell: 1.0,
             dims: [1, 1, 1],
+            coarse_inv_cell: 1.0,
+            coarse_dims: [1, 1, 1],
+            oversized_candidate_count: 0,
         }
     }
 
@@ -708,6 +777,78 @@ impl BroadphaseGrid {
         (self.cell_coord(min), self.cell_coord(max))
     }
 
+    /// Total cell count of the P8 COARSE size-class grid (`coarse_dims` product).
+    #[inline]
+    fn coarse_n_cells(&self) -> usize {
+        self.coarse_dims[0] as usize
+            * self.coarse_dims[1] as usize
+            * self.coarse_dims[2] as usize
+    }
+
+    /// COARSE-grid analogue of [`cell_coord`](Self::cell_coord): maps a world
+    /// position to its integer COARSE cell coordinate, clamped into `[0, coarse_dims)`
+    /// per axis (shares [`origin`](Self::origin) with the fine grid).
+    #[inline]
+    fn coarse_cell_coord(&self, p: Vec3) -> [u32; 3] {
+        let rel = p - self.origin;
+        let to_cell = |v: f32, dim: u32| -> u32 {
+            let idx = (v * self.coarse_inv_cell).floor();
+            if idx <= 0.0 {
+                0
+            } else {
+                (idx as u32).min(dim - 1)
+            }
+        };
+        [
+            to_cell(rel.x, self.coarse_dims[0]),
+            to_cell(rel.y, self.coarse_dims[1]),
+            to_cell(rel.z, self.coarse_dims[2]),
+        ]
+    }
+
+    /// COARSE-grid analogue of [`cell_index`](Self::cell_index): flattens a coarse
+    /// cell coordinate to a linear coarse cell index (row-major over `coarse_dims`).
+    #[inline]
+    fn coarse_cell_index(&self, c: [u32; 3]) -> u32 {
+        c[0] + self.coarse_dims[0] * (c[1] + self.coarse_dims[1] * c[2])
+    }
+
+    /// COARSE-grid analogue of [`cell_range`](Self::cell_range): the inclusive coarse
+    /// cell-coordinate range an AABB spans.
+    #[inline]
+    fn coarse_cell_range(&self, min: Vec3, max: Vec3) -> ([u32; 3], [u32; 3]) {
+        (self.coarse_cell_coord(min), self.coarse_cell_coord(max))
+    }
+
+    /// The lowest linear COARSE cell index shared by both bodies' coarse AABB cell
+    /// ranges, or `u32::MAX` if they share none — the COARSE-grid analogue of
+    /// [`min_shared_cell`](Self::min_shared_cell). The oversized–oversized emit keys
+    /// the within-coarse-cell dedup on this so a pair sharing several coarse cells is
+    /// emitted exactly once (at its minimum shared coarse cell).
+    #[inline]
+    fn min_shared_coarse_cell(&self, a: &BodyState, b: &BodyState) -> u32 {
+        let ra = body_bounding_radius(a);
+        let rb = body_bounding_radius(b);
+        let (alo, ahi) = self.coarse_cell_range(
+            a.position - Vec3::new(ra, ra, ra),
+            a.position + Vec3::new(ra, ra, ra),
+        );
+        let (blo, bhi) = self.coarse_cell_range(
+            b.position - Vec3::new(rb, rb, rb),
+            b.position + Vec3::new(rb, rb, rb),
+        );
+        let ox_lo = alo[0].max(blo[0]);
+        let oy_lo = alo[1].max(blo[1]);
+        let oz_lo = alo[2].max(blo[2]);
+        let ox_hi = ahi[0].min(bhi[0]);
+        let oy_hi = ahi[1].min(bhi[1]);
+        let oz_hi = ahi[2].min(bhi[2]);
+        if ox_lo > ox_hi || oy_lo > oy_hi || oz_lo > oz_hi {
+            return u32::MAX;
+        }
+        self.coarse_cell_index([ox_lo, oy_lo, oz_lo])
+    }
+
     /// Recomputes the grid geometry (`origin`, `inv_cell`, `dims`) from the
     /// bodies' world AABB and a closed-form cell-size proxy (plan O2 step 1, W1).
     ///
@@ -733,6 +874,8 @@ impl BroadphaseGrid {
             self.origin = Vec3::ZERO;
             self.inv_cell = 1.0;
             self.dims = [MIN_GRID_DIM, MIN_GRID_DIM, MIN_GRID_DIM];
+            self.coarse_inv_cell = 1.0;
+            self.coarse_dims = [MIN_GRID_DIM, MIN_GRID_DIM, MIN_GRID_DIM];
             return;
         }
 
@@ -853,6 +996,24 @@ impl BroadphaseGrid {
         self.origin = min;
         self.inv_cell = 1.0 / cell_size;
         self.dims = dims;
+
+        // P8 COARSE size-class grid geometry: the SAME origin/world AABB, a cell
+        // COARSE_CELL_FACTOR × coarser. The coarse dims follow from the coarse cell
+        // size over the same extent; ceil-divide the fine dims by the factor (a
+        // cheap, deterministic over-approximation — a body's coarse footprint is
+        // never under-covered, so the candidate set stays a conservative superset).
+        // Correctness is coarse-cell-size independent (only the per-oversized-body
+        // coarse-cell span moves), so the exact dims arithmetic is a perf knob.
+        let coarse_cell_size = cell_size * COARSE_CELL_FACTOR;
+        self.coarse_inv_cell = 1.0 / coarse_cell_size;
+        // `factor >= 1.0` (const-asserted), so each coarse dim ≤ its fine dim ≥ 1;
+        // `div_ceil` keeps ≥ 1 per axis (the degenerate 1×1×1 world stays valid).
+        let factor = COARSE_CELL_FACTOR.max(1.0) as u32;
+        self.coarse_dims = [
+            dims[0].div_ceil(factor).max(MIN_GRID_DIM),
+            dims[1].div_ceil(factor).max(MIN_GRID_DIM),
+            dims[2].div_ceil(factor).max(MIN_GRID_DIM),
+        ];
     }
 
     /// Builds the grid over `bodies` and writes the feasibility-filtered,
@@ -877,9 +1038,11 @@ impl BroadphaseGrid {
 
         // (5) Candidate emit: per cell, all-pairs within its (small) body slice,
         // deduped so a pair sharing ≥ 2 cells emits only at its MINIMUM shared
-        // cell; then each oversized body vs every body.
+        // cell; then the oversized candidates via the P8 coarse size-class grid
+        // (oversized–oversized from coarse cells, oversized–small from the fine cells
+        // each oversized body overlaps).
         self.emit_cell_candidates(bodies);
-        self.emit_oversized_candidates(bodies, n);
+        self.emit_oversized_candidates(bodies);
 
         // (6) Feasibility filter (the SAME sphere-bound predicate as all-pairs) +
         // sort by (min, max). Bit-identical to the all-pairs output set.
@@ -968,6 +1131,89 @@ impl BroadphaseGrid {
                 }
             }
         }
+
+        // P8: bin the oversized bodies (now fully collected in `self.oversized`) into
+        // the COARSE size-class grid. Both serial `build` and the parallel
+        // `emit_passes` go through `build_csr`, so the coarse CSR is ready for the
+        // oversized emit in either path.
+        self.build_coarse_csr(bodies);
+    }
+
+    /// P8: builds the COARSE size-class CSR over the oversized bodies (collected by
+    /// [`build_csr`](Self::build_csr) into [`oversized`](Self::oversized)) — count +
+    /// exclusive prefix-sum + scatter into [`coarse_cell_bodies`](Self::coarse_cell_bodies),
+    /// mirroring the fine CSR but over the coarse geometry and ONLY the oversized
+    /// rows. The geometry (`coarse_inv_cell` / `coarse_dims`) was set by
+    /// [`recompute_geometry`](Self::recompute_geometry); `oversized` is ascending
+    /// (pushed in dense-row order), so each coarse cell slice is row-sorted. All
+    /// buffers are capacity-reused (clear + refill), no per-step alloc once warmed.
+    fn build_coarse_csr(&mut self, bodies: &[BodyState]) {
+        // Common-case fast path: NO oversized bodies (the size-disparity strategy is
+        // dormant). Collapse the coarse grid to zero cells so the oversized emit's
+        // `0..coarse_n_cells` loop is a no-op — avoids zero-filling a potentially
+        // large `coarse_counts` histogram every frame when there is nothing to bin.
+        if self.oversized.is_empty() {
+            self.coarse_dims = [0, 0, 0];
+            self.coarse_cell_start.clear();
+            self.coarse_cell_bodies.clear();
+            return;
+        }
+
+        let coarse_n_cells = self.coarse_n_cells();
+
+        // (1) Count: per oversized body, +1 to every coarse cell its AABB spans.
+        self.coarse_counts.clear();
+        self.coarse_counts.resize(coarse_n_cells, 0);
+        for &row in &self.oversized {
+            let b = &bodies[row as usize];
+            let r = body_bounding_radius(b);
+            let half = Vec3::new(r, r, r);
+            let (lo, hi) = self.coarse_cell_range(b.position - half, b.position + half);
+            for z in lo[2]..=hi[2] {
+                for y in lo[1]..=hi[1] {
+                    for x in lo[0]..=hi[0] {
+                        let c = self.coarse_cell_index([x, y, z]) as usize;
+                        self.coarse_counts[c] += 1;
+                    }
+                }
+            }
+        }
+
+        // (2) Exclusive prefix-sum → coarse_cell_start (len coarse_n_cells + 1).
+        self.coarse_cell_start.clear();
+        self.coarse_cell_start.reserve(coarse_n_cells + 1);
+        let mut acc = 0u32;
+        self.coarse_cell_start.push(0);
+        for &c in &self.coarse_counts {
+            acc += c;
+            self.coarse_cell_start.push(acc);
+        }
+        let total_inserts = acc as usize;
+
+        // (3) Scatter the oversized rows into coarse_cell_bodies at coarse_cursor++,
+        // in ascending oversized-list (== dense-row) order so each coarse cell slice
+        // is row-sorted (matching the fine grid's within-cell ordering).
+        self.coarse_cursor.clear();
+        self.coarse_cursor
+            .extend_from_slice(&self.coarse_cell_start[..coarse_n_cells]);
+        self.coarse_cell_bodies.clear();
+        self.coarse_cell_bodies.resize(total_inserts, 0);
+        for &row in &self.oversized {
+            let b = &bodies[row as usize];
+            let r = body_bounding_radius(b);
+            let half = Vec3::new(r, r, r);
+            let (lo, hi) = self.coarse_cell_range(b.position - half, b.position + half);
+            for z in lo[2]..=hi[2] {
+                for y in lo[1]..=hi[1] {
+                    for x in lo[0]..=hi[0] {
+                        let c = self.coarse_cell_index([x, y, z]) as usize;
+                        let slot = self.coarse_cursor[c] as usize;
+                        self.coarse_cell_bodies[slot] = row;
+                        self.coarse_cursor[c] += 1;
+                    }
+                }
+            }
+        }
     }
 
     /// `true` when an AABB cell range spans more than [`MAX_CELL_SPAN`] cells on
@@ -1012,35 +1258,96 @@ impl BroadphaseGrid {
         }
     }
 
-    /// Emits oversized-body candidates: each oversized body against every other
-    /// body (the `n·k` residual). Oversized bodies are never bucketed, so a pair
-    /// with at least one oversized side is emitted ONLY here, never by the cell
-    /// pass (the two emit sources are disjoint). An oversized–oversized pair would
-    /// be reachable from both sides, so it is emitted only from the lower row
-    /// (`o < j`); an oversized–normal pair is reachable only from the oversized
-    /// side, so it is always emitted. Each pair is keyed `(min, max)`.
-    fn emit_oversized_candidates(&mut self, _bodies: &[BodyState], n: usize) {
-        // `oversized` is ascending (rows pushed in dense-row order).
-        for idx in 0..self.oversized.len() {
-            let o = self.oversized[idx];
-            for j in 0..n as u32 {
-                if j == o {
-                    continue;
+    /// Emits the candidate pairs with at least one OVERSIZED side via the P8 COARSE
+    /// size-class grid (replacing the old O(k·n) oversized-vs-all residual).
+    ///
+    /// Oversized bodies are never in the fine `cell_bodies` (the
+    /// [`build_csr`](Self::build_csr) scatter `continue`s them), so a pair with an
+    /// oversized side is emitted ONLY here — disjoint from
+    /// [`emit_cell_candidates`](Self::emit_cell_candidates). Two sub-passes:
+    ///
+    /// 1. **oversized–oversized** — within each COARSE cell, all-pairs over its
+    ///    row-sorted oversized slice, deduped to the minimum shared COARSE cell
+    ///    ([`min_shared_coarse_cell`](Self::min_shared_coarse_cell)`== c`), so a pair
+    ///    sharing several coarse cells emits exactly once, keyed `(min, max)`.
+    /// 2. **oversized–small** — each oversized body `o` walks the FINE cells its AABB
+    ///    overlaps (bounded by its footprint, NOT all `n` bodies); for each small
+    ///    body `s` in those cells it emits `{o, s}` exactly once, at the fine cell
+    ///    equal to [`min_shared_cell`](Self::min_shared_cell)`(o, s)` — the SAME
+    ///    minimum-shared-cell dedup the small–small pass uses, so each `{o, s}`
+    ///    sharing a fine cell emits once.
+    ///
+    /// # Result-equivalence (the P8 0%-gate)
+    ///
+    /// The old residual emitted EVERY `{oversized, x}` candidate (then the
+    /// feasibility filter in the caller dropped the non-overlapping ones). This emits
+    /// only the `{oversized, x}` candidates that SHARE a (coarse resp. fine) cell.
+    /// The difference is exactly the pairs whose AABBs occupy DISJOINT cell ranges —
+    /// and a disjoint cell range means the continuous AABBs (`pos ± bounding_radius`)
+    /// are separated on some axis by ≥ one cell, so `|delta| > rA + rB` and
+    /// [`feasible`](Self::feasible) is FALSE for them. The two emit sets therefore
+    /// have the IDENTICAL feasibility-filtered survivor set — the SAME argument that
+    /// makes the small–small fine-grid pass byte-identical to all-pairs. The caller's
+    /// feasibility filter + `(min, max)` sort then yield a byte-identical
+    /// [`ContactPairs`] set.
+    fn emit_oversized_candidates(&mut self, bodies: &[BodyState]) {
+        // Diagnostic: candidates already in the buffer (the small–small leg) so the
+        // P8 gate can isolate THIS leg's contribution (the residual-is-gone probe).
+        let before = self.candidates.len();
+
+        // ── (1) oversized–oversized via the coarse grid ─────────────────────────
+        let coarse_n_cells = self.coarse_n_cells();
+        for c in 0..coarse_n_cells {
+            let start = self.coarse_cell_start[c] as usize;
+            let end = self.coarse_cell_start[c + 1] as usize;
+            let slice = &self.coarse_cell_bodies[start..end];
+            // Oversized rows are row-sorted within a coarse cell slice, so
+            // `(slice[p], slice[q])` with p < q is already `(min, max)`.
+            for p in 0..slice.len() {
+                let i = slice[p];
+                for &j in &slice[p + 1..] {
+                    if self.min_shared_coarse_cell(&bodies[i as usize], &bodies[j as usize])
+                        == c as u32
+                    {
+                        self.candidates.push((BodyIndex(i), BodyIndex(j)));
+                    }
                 }
-                // Dedup oversized–oversized: emit it only from the lower row.
-                if Self::row_is_oversized(&self.oversized, j) && j < o {
-                    continue;
-                }
-                let (lo, hi) = if o < j { (o, j) } else { (j, o) };
-                self.candidates.push((BodyIndex(lo), BodyIndex(hi)));
             }
         }
-    }
 
-    /// `true` if dense row `row` is in the (ascending) `oversized` list.
-    #[inline]
-    fn row_is_oversized(oversized: &[u32], row: u32) -> bool {
-        oversized.binary_search(&row).is_ok()
+        // ── (2) oversized–small via the FINE grid cells `o` overlaps ─────────────
+        // Each oversized body scans only the fine cells inside its own AABB footprint
+        // (NOT every body): the fine cells hold ONLY small bodies (oversized rows are
+        // not scattered there), so this pass never re-emits an oversized–oversized
+        // pair. The `min_shared_cell(o, s) == fine_cell` dedup keys each `{o, s}` to
+        // the lowest fine cell both share, so a small body found in several of `o`'s
+        // overlapped cells contributes the pair exactly once.
+        for idx in 0..self.oversized.len() {
+            let o = self.oversized[idx];
+            let ob = &bodies[o as usize];
+            let r = body_bounding_radius(ob);
+            let half = Vec3::new(r, r, r);
+            let (lo, hi) = self.cell_range(ob.position - half, ob.position + half);
+            for z in lo[2]..=hi[2] {
+                for y in lo[1]..=hi[1] {
+                    for x in lo[0]..=hi[0] {
+                        let fine_cell = self.cell_index([x, y, z]);
+                        let cstart = self.cell_start[fine_cell as usize] as usize;
+                        let cend = self.cell_start[fine_cell as usize + 1] as usize;
+                        for &s in &self.cell_bodies[cstart..cend] {
+                            let sb = &bodies[s as usize];
+                            if self.min_shared_cell(ob, sb) == fine_cell {
+                                // Key `(min, max)` over the dense rows (`o` vs `s`).
+                                let (mn, mx) = if o < s { (o, s) } else { (s, o) };
+                                self.candidates.push((BodyIndex(mn), BodyIndex(mx)));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        self.oversized_candidate_count = self.candidates.len() - before;
     }
 
     /// The lowest linear cell index shared by both bodies' AABB cell ranges, or
@@ -1264,10 +1571,12 @@ impl BroadphaseGrid {
         }
         let m = acc as usize;
 
-        // Serial oversized emit (reuse the verbatim O2 emitter) into `candidates`,
-        // then feasibility-filter it — counted now so `out` can be sized once.
+        // Serial oversized emit (the P8 coarse-grid emitter, the SAME one `build`
+        // calls — the candidate multiset is identical) into `candidates`, then
+        // feasibility-filter it — counted now so `out` can be sized once. The coarse
+        // CSR was built by `build_csr` above, so the oversized emit is ready here.
         self.candidates.clear();
-        self.emit_oversized_candidates(bodies, bodies.len());
+        self.emit_oversized_candidates(bodies);
         let oversized_reserve = self.candidates.len();
 
         // Size `out` once for the m survivors + the (≤ oversized_reserve) feasible
@@ -1508,6 +1817,39 @@ impl BroadphaseGrid {
     #[inline]
     pub fn oversized_len(&self) -> usize {
         self.oversized.len()
+    }
+
+    /// The number of PRE-feasibility candidate pairs the most recent serial
+    /// [`build`](Self::build) emitted (small–small + oversized) — a diagnostic
+    /// accessor over the private `candidates` buffer, NOT a hot-path API.
+    ///
+    /// Exposed for the P8 size-class-grid gate: it is the observable that the old
+    /// O(k·n) oversized-vs-all residual is GONE. With `k` MUTUALLY-isolated giants
+    /// over `n` mutually-isolated small bodies, the old residual emitted ≈ `k·n`
+    /// oversized candidates (scaling with `n`); the coarse-grid emit shares no cell
+    /// with anything, so it emits ~0 — and the count stays flat as `n` grows. (Only
+    /// the SERIAL `build` leaves `candidates` populated; the parallel `emit_passes`
+    /// path reuses the buffer for the oversized leg only, so read this after a serial
+    /// `build`.)
+    #[inline]
+    pub fn candidate_count(&self) -> usize {
+        self.candidates.len()
+    }
+
+    /// The number of pre-feasibility candidates the OVERSIZED leg alone emitted in
+    /// the most recent [`build`](Self::build) / parallel emit (oversized–oversized +
+    /// oversized–small) — a diagnostic accessor, NOT a hot-path API.
+    ///
+    /// This is the direct observable that the P8 size-class grid KILLED the old
+    /// O(k·n) residual: it is bounded by the oversized bodies' cell FOOTPRINTS (the
+    /// cells they actually overlap), so for `k` giants over a far cluster of `m`
+    /// isolated bodies it stays ≈ 0 — NOT `k·m`, which the old residual emitted. It
+    /// is isolated from the small–small leg ([`candidate_count`](Self::candidate_count)
+    /// includes both), so it cannot be masked by the legitimately-scaling small–small
+    /// pair count.
+    #[inline]
+    pub fn oversized_candidate_count(&self) -> usize {
+        self.oversized_candidate_count
     }
 }
 
