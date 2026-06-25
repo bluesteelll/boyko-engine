@@ -104,6 +104,23 @@ fn main() {
     // hand-written, framing b). The host B1 marcher stays hand-written and is not generated.
     println!();
     print!("{}", boyko_shaderdsl::emit::emit_hlsl_b1_accept_refine());
+    // The B1 EXHAUSTION RE-MARCH inner-loop leaf (Increment 4e — the SEVENTH CONTROL-FLOW leaf, a
+    // near-CLONE of `b1_accept_refine` with 4 new facets: the FLOAT mesh guard `t >= t_mesh`
+    // (`FieldScalar::ge`), a NAMED `float3 p` temp (`Cf::temp_vec3`), and the in-loop `hit = true;`
+    // (`Cf::set_bool_var`) carried by a SUPPRESSED-DECL bool (`Cf::decl_bool_param`/`get_bool_var`)).
+    // The production B1 marcher's BUG-B1-HOLE-3 budget-exhaustion recovery: the plain `omega == 1.0`
+    // sphere-trace from the ORIGINAL seed (`t = t + sdf(p)`), run when the over-relaxed fast pass
+    // exhausted `MAX_IT` mid-field, with the `t >= t_mesh` mesh-guard break, the `d < EPS` accept
+    // (`hit = true; break;`), and the `t > T_MAX` miss break; generated from
+    // `boyko_shaderdsl::remarch::b1_exhaustion_remarch_body` over the `Emit` + `EmitCf` backends.
+    // Spliced between the `// === GENERATED b1_exhaustion_remarch BEGIN/END ===` sentinels INSIDE
+    // the main B1 marcher's `if (exhausted) { ... }` block (the inner re-march `[loop]` SPAN only —
+    // the `t = t_seed;` re-seed + the `hit = false;` reset + the BUG-B1-HOLE-3 rationale comment +
+    // the `if (exhausted)` wrapper stay hand-written, framing b). The span prints at DEPTH 2 (the
+    // site nests main→`if (exhausted)`→this re-march loop). The host B1 marcher stays hand-written
+    // and is not generated.
+    println!();
+    print!("{}", boyko_shaderdsl::emit::emit_hlsl_b1_exhaustion_remarch());
     // The B1 marcher's two `bool` PREAMBLE DECLS (Increment 4d — the FIRST rung of the B1-marcher
     // single-source ladder, the first TYPED `bool` decl facet via `Cf::decl_bool_var`): `bool hit
     // = false;` and `bool exhausted = true;`, generated from `boyko_shaderdsl::decl::{b1_decl_hit_

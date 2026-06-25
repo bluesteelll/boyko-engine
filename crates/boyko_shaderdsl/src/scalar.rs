@@ -119,6 +119,14 @@ pub trait FieldScalar: Copy {
     /// `abs(dir) <= BRICK_EXIT_EPS` ([`crate::brick::dist_to_brick_exit_body`]).
     fn le(self, rhs: Self) -> Self::Mask;
 
+    /// `self >= rhs` — the greater-than-or-equal comparison (HLSL `OpFOrdGreaterThanEqual`,
+    /// a DISTINCT opcode from a swapped `<=` — a swapped-`<=` would emit `OpFOrdLessThanEqual`
+    /// and FORK the committed `.spv`). Added for the B1 exhaustion re-march's mesh guard
+    /// `t >= t_mesh` ([`crate::remarch::b1_exhaustion_remarch_body`]). Operand order is
+    /// load-bearing: the committed shader spells `t >= t_mesh` (`t` LEFT), so the body calls
+    /// `get_var(&t).ge(t_mesh)` to match the emitted comparand order byte-for-byte.
+    fn ge(self, rhs: Self) -> Self::Mask;
+
     /// `op == want` — the unsigned op-discriminant equality in `combine`'s
     /// dispatch. `op`/`want` are host `u32` constants (the edit's op + the
     /// `sdf_op::*` discriminant), NOT traced values: the dispatch over the op enum
@@ -314,6 +322,11 @@ impl FieldScalar for f32 {
     #[inline]
     fn le(self, rhs: Self) -> bool {
         self <= rhs
+    }
+
+    #[inline]
+    fn ge(self, rhs: Self) -> bool {
+        self >= rhs
     }
 
     #[inline]

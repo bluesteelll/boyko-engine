@@ -523,6 +523,46 @@ pub trait Cf {
         cond: <Self::Scalar as FieldScalar>::Mask,
         rt_val: Self::Scalar,
     ) -> Flow;
+
+    // ---- Increment 4e: the BOOL mutable-local facets (the B1 exhaustion re-march) ----
+    //
+    // The B1 budget-exhaustion re-march (`b1_exhaustion_remarch_body`) carries the `hit`
+    // flag THROUGH the inner re-march `[loop]` — it WRITES `hit = true;` on a converged
+    // accept (NOT a `return`: the marcher continues past the inner loop) and READS it back
+    // for the Eval oracle's result tuple. The decls of `hit`/`t` live in the HAND-WRITTEN
+    // re-march preamble (`t = t_seed; hit = false;`), so the span needs a SUPPRESSED-DECL
+    // bool seam (the bool analogue of [`decl_param`](Self::decl_param)) plus a bool
+    // set/get. Each is a 2-line mirror of the proven `float` [`Var`](Self::Var) facets
+    // ([`decl_param`](Self::decl_param)/[`set_var`](Self::set_var)/[`get_var`](Self::
+    // get_var)); ZERO new loop/return machinery.
+
+    /// Declares a mutable `bool` local named `name` (init `init`) WITHOUT recording a
+    /// declaration — the bool analogue of [`decl_param`](Self::decl_param) (which suppresses a
+    /// `float` decl). The re-march's `hit`/`t` are declared by the HAND-WRITTEN preamble
+    /// (`hit = false;`), so [`set_bool_var`](Self::set_bool_var)/[`get_bool_var`](Self::
+    /// get_bool_var) must resolve their names but the span must record NO `Stmt::DeclVar` (a
+    /// `bool hit = false;` redecl would diverge the committed text). Distinct from
+    /// [`decl_bool_var`](Self::decl_bool_var) (which RECORDS the decl). Eval boxes `init` into a
+    /// `Cell<bool>` (identical to [`decl_bool_var`](Self::decl_bool_var) on Eval); Emit seeds a
+    /// [`BoolVar`](Self::BoolVar) name entry but records NO statement.
+    fn decl_bool_param(name: &'static str, init: bool) -> Self::BoolVar;
+
+    /// Reads the CURRENT value of a mutable `bool` local — the bool analogue of
+    /// [`get_var`](Self::get_var). On Eval returns the `Cell<bool>`'s value (read back for the
+    /// re-march oracle's `(hit, t)` result tuple). On Emit the generated span never EMITS a read of
+    /// `hit` (no statement/node references the flag's VALUE — the span mutates `hit` by name); the
+    /// body's tail constructs the `(hit, t)` tuple ONLY for the Eval oracle, and the Emit PRODUCER
+    /// discards it. So the Emit side records NO statement and pushes NO node — it returns a
+    /// byte-neutral placeholder whose value is irrelevant (discarded by the producer). NOT an
+    /// `unreachable!` (unlike [`call1`](Self::call1), which the producer routes around with a
+    /// closure): the tuple IS constructed on both backends, so the hook IS called on Emit.
+    fn get_bool_var(v: &Self::BoolVar) -> bool;
+
+    /// Assigns a mutable `bool` local to the literal `val` — the bool analogue of
+    /// [`set_var`](Self::set_var). Eval `set`s the `Cell<bool>`; Emit records a `Stmt::Assign`
+    /// whose `rhs` is a [`Node::BoolLit`] (`hit = true;`, reusing the proven `Stmt::Assign`
+    /// printer + the bool-literal node). The re-march's in-loop `hit = true;` accept.
+    fn set_bool_var(v: &Self::BoolVar, val: bool);
 }
 
 /// The control-flow EVAL backend — REAL host `for`/`if`/`continue`, a unit ZST.
@@ -916,5 +956,25 @@ impl Cf for EvalCf {
         } else {
             core::ops::ControlFlow::Continue(())
         }
+    }
+
+    // ---- Increment 4e: the BOOL mutable-local facets (native host) --------------------
+
+    #[inline]
+    fn decl_bool_param(_name: &'static str, init: bool) -> core::cell::Cell<bool> {
+        // On Eval a suppressed-decl bool param is IDENTICAL to `decl_bool_var` — the "no decl
+        // recorded" distinction is an Emit-only printing concern (a `Cell` has no printed
+        // identity). The carried-state model is the SAME `Cell<bool>` interior-mutability shape.
+        core::cell::Cell::new(init)
+    }
+
+    #[inline]
+    fn get_bool_var(v: &core::cell::Cell<bool>) -> bool {
+        v.get()
+    }
+
+    #[inline]
+    fn set_bool_var(v: &core::cell::Cell<bool>, val: bool) {
+        v.set(val);
     }
 }

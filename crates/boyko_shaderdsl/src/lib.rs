@@ -46,6 +46,7 @@ pub mod decl;
 pub mod field;
 pub mod normal;
 pub mod refine;
+pub mod remarch;
 pub mod scalar;
 pub mod shadow;
 pub mod surface;
@@ -67,6 +68,10 @@ pub use normal::sdf_normal_body;
 pub use refine::{
     EPS as B1_REFINE_EPS, M2_REFINE_ITERS as B1_REFINE_ITERS, M2_REFINE_RELAX as B1_REFINE_RELAX,
     b1_accept_refine_body,
+};
+pub use remarch::{
+    EPS as B1_REMARCH_EPS, MAX_IT as B1_REMARCH_MAX_IT, T_MAX as B1_REMARCH_T_MAX,
+    b1_exhaustion_remarch_body,
 };
 pub use scalar::FieldScalar;
 pub use shadow::{

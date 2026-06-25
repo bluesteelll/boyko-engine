@@ -120,6 +120,10 @@ enum Node {
     /// `>`), printed inline like [`Node::Gt`]. The brick-marcher's per-axis skip guard
     /// `abs(dir) <= BRICK_EXIT_EPS`.
     Le(u32, u32),
+    /// `a >= b` — a Mask node (`OpFOrdGreaterThanEqual`, a DISTINCT opcode from a swapped
+    /// `<=`), printed inline like [`Node::Gt`]. The B1 exhaustion re-march's mesh guard
+    /// `t >= t_mesh`.
+    Ge(u32, u32),
     /// `vec[iv]` — a dynamic index of a `float3` PARAMETER (`rd[a]`, `p[a]`,
     /// `cell_min[a]`) by the unroll induction variable. `(vec_id, iv_id)`: `vec_id`
     /// indexes [`Names::vec_in`] (the vector-parameter name table), `iv_id` references
@@ -397,6 +401,12 @@ fn type_of(node: Node) -> EmitTy {
         // `Stmt::DeclTemp`. The straight-line leaves record only `float` temps (TEMP_TYPES is
         // empty there → the default `Float`), so they are byte-unchanged.
         Node::TempRef(seq) => temp_type(seq),
+        // A `bool` literal IS a `bool` (W1 hardening, Increment 4e). NEVER reached today — a
+        // `BoolLit` is always an inline leaf consumed by a `Stmt::Return`/`Stmt::DeclVar`, never
+        // `type_of`'d for an arithmetic check — so this changes NO `.spv` (byte-neutral, proven
+        // by re-running the cmp-`.spv` gate); it closes the future hole where a `bool`-typed
+        // consumer would otherwise mis-read `Float`.
+        Node::BoolLit(_) => EmitTy::Bool,
         // `UintToFloat`/`Vec3Swizzle` PRODUCE a float; every other node is float.
         _ => EmitTy::Float,
     }
@@ -548,6 +558,11 @@ impl FieldScalar for Emit {
     #[inline]
     fn le(self, rhs: Self) -> EmitMask {
         EmitMask(push(Node::Le(self.0, rhs.0)))
+    }
+
+    #[inline]
+    fn ge(self, rhs: Self) -> EmitMask {
+        EmitMask(push(Node::Ge(self.0, rhs.0)))
     }
 
     fn eq_u(_op: u32, _want: u32) -> EmitMask {
@@ -722,6 +737,7 @@ fn is_inline_leaf(node: Node) -> bool {
             | Node::Gt(_, _)
             | Node::Lt(_, _)
             | Node::Le(_, _)
+            | Node::Ge(_, _)
             | Node::IntEq(_, _)
             | Node::UintInput(_)
             | Node::UintLit(_)
@@ -796,6 +812,7 @@ fn operand_str(
         Node::Gt(a, b) => format!("{} > {}", opl(a), opl(b)),
         Node::Lt(a, b) => format!("{} < {}", opl(a), opl(b)),
         Node::Le(a, b) => format!("{} <= {}", opl(a), opl(b)),
+        Node::Ge(a, b) => format!("{} >= {}", opl(a), opl(b)),
         // `vec[iv]` — the vector parameter's name (`rd`/`p`/`cell_min`) indexed by the
         // iv node's own spelling (`a`). Both inline, so `p[a]` spells inline at each use.
         Node::VecIndex(vec_id, iv_id) => format!("{}[{}]", names.vec_in[vec_id as usize], opl(iv_id)),
@@ -946,6 +963,7 @@ fn define_str(arena: &[Node], names: Names, temps: &[Option<String>], id: u32) -
         | Node::Gt(_, _)
         | Node::Lt(_, _)
         | Node::Le(_, _)
+        | Node::Ge(_, _)
         | Node::IntEq(_, _)
         | Node::UintInput(_)
         | Node::UintLit(_)
@@ -2257,6 +2275,44 @@ impl Cf for EmitCf {
         });
         Flow::Continue(())
     }
+
+    // ---- Increment 4e: the BOOL mutable-local facets (recorder) -----------------------
+
+    fn decl_bool_param(name: &'static str, _init: bool) -> Var {
+        // SUPPRESSED-DECL (bool): seed a `VARS` name entry (so set_bool_var/get_bool_var spell
+        // `hit`, `hit = ...;`) but record NO `Stmt::DeclVar` — `hit` is declared by the
+        // hand-written re-march preamble (`hit = false;`), so a `bool hit = false;` redecl would
+        // diverge the committed text. The bool mirror of `decl_param` (the `float` suppressed
+        // decl); `_init` is unused (a suppressed local is already bound by name).
+        VARS.with(|v| {
+            let mut v = v.borrow_mut();
+            let id = v.len() as u32;
+            v.push(name);
+            Var(id)
+        })
+    }
+
+    fn get_bool_var(_v: &Var) -> bool {
+        // The generated span never EMITS a read of `hit` (no `Stmt`/`Node` references the flag's
+        // VALUE — the span mutates `hit` by NAME via `set_bool_var`); the body's tail constructs a
+        // `(hit, t)` tuple ONLY for the Eval oracle's result, and the Emit PRODUCER discards that
+        // tuple. So this records NO statement and pushes NO node — it returns a placeholder `false`
+        // that is byte-neutral (the SSA arena / STMT IR are untouched). The value is irrelevant
+        // (discarded by the producer); a panic here would be wrong because the tuple IS constructed
+        // on both backends (unlike `call1`, which the producer routes around with a closure).
+        false
+    }
+
+    fn set_bool_var(v: &Var, val: bool) {
+        // `hit = <val>;` — a `Stmt::Assign` whose rhs is a `Node::BoolLit` (printed `true`/
+        // `false`, the SAME node the proven bool-return path uses). Reuses the shipped
+        // `Stmt::Assign` printer (the `float` `set_var` path); the only delta is the bool-literal
+        // rhs.
+        record_stmt(Stmt::Assign {
+            var: *v,
+            rhs: push(Node::BoolLit(val)),
+        });
+    }
 }
 
 // ---- The STMT printer + the brick-exit generator -------------------------------
@@ -2913,6 +2969,105 @@ pub fn emit_hlsl_b1_accept_refine() -> String {
         // span of `m2_surface_hit_refine`). NO function-signature wrap (the span is spliced inside
         // the hand-written B1 marcher).
         print_block(&body_block, &arena, names, 3, &mut span);
+        span
+    })
+}
+
+/// Generates the HLSL B1 EXHAUSTION RE-MARCH inner-loop SPAN — the production main-marcher's
+/// BUG-B1-HOLE-3 budget-exhaustion recovery (the plain `omega == 1.0` sphere-trace from the
+/// ORIGINAL seed, run when the over-relaxed fast pass exhausted `MAX_IT` mid-field), with the
+/// `sdf(p)` call site, the `t >= t_mesh` mesh-guard BREAK, the `d < EPS` accept (`hit = true;
+/// break;`), the `t > T_MAX` miss BREAK, and the `t = t + d` plain step — by tracing the generic
+/// [`crate::remarch::b1_exhaustion_remarch_body`] over the `EmitCf` backend (whose `Cf::Scalar =
+/// Emit` supplies the SSA-node arithmetic), and returns ONLY the span (NOT a wrapped function).
+///
+/// A near-CLONE of [`emit_hlsl_b1_accept_refine`] (Inc 4c) with the 4 Increment-4e facets: the
+/// FLOAT mesh guard `t >= t_mesh` (`FieldScalar::ge`); a NAMED `float3 p` temp (`Cf::temp_vec3`,
+/// vs the inline `ro + rd * t` of `b1_accept_refine`); and the in-loop `hit = true;`
+/// (`Cf::set_bool_var`) carried by a SUPPRESSED-DECL bool (`Cf::decl_bool_param`/`Cf::get_bool_var`).
+/// The seeded inputs are `ro`/`rd` (`Vec3Param`), `t_seed`/`t_mesh` (scalar `float` inputs); the
+/// field seam interns `"sdf"` (the ANALYTIC field, NOT `field_distance`); there are no out/ret cells.
+/// The span prints at DEPTH 2 (the committed site nests main→`if (exhausted)`→this re-march loop),
+/// matching the committed L1520-1535 indentation (8-space `[loop]`).
+///
+/// The `if (exhausted) { ... }` WRAPPER (the `t = t_seed;` re-seed, the `hit = false;` reset, the
+/// BUG-B1-HOLE-3 rationale comment, and the closing brace) stays HAND-WRITTEN inline above/around
+/// the `// === GENERATED b1_exhaustion_remarch BEGIN/END ===` sentinels (framing (b)), so the
+/// generator emits only the statements spliced BETWEEN the sentinels.
+///
+/// The cmp-`.spv` (in `boyko_rhi_vulkan`) is the byte-identity oracle; the `b1_exhaustion_remarch`
+/// text-sync test pins the committed shader span to this output.
+pub fn emit_hlsl_b1_exhaustion_remarch() -> String {
+    use crate::remarch;
+
+    // Fresh recorder state.
+    ARENA.with(|a| a.borrow_mut().clear());
+    STMTS.with(|s| s.borrow_mut().clear());
+    VARS.with(|v| v.borrow_mut().clear());
+    NAMED_LITS.with(|n| n.borrow_mut().clear());
+    CALLS.with(|c| c.borrow_mut().clear());
+    TEMP_SEQ.with(|c| *c.borrow_mut() = 0);
+    TEMP_TYPES.with(|t| t.borrow_mut().clear());
+    TEMP_NAMES.with(|t| t.borrow_mut().clear());
+
+    // Seed the function body block (the bottom of the STMTS stack).
+    STMTS.with(|s| s.borrow_mut().push(Block { stmts: Vec::new() }));
+
+    // Seed the span's inputs:
+    //   ro     → Vec3Param(0) (vec_in[0]   = "ro")     — the world ray origin
+    //   rd     → Vec3Param(1) (vec_in[1]   = "rd")     — the world ray direction
+    //   t_seed → Input(0)     (float_in[0] = "t_seed") — the original seed the fast pass used
+    //   t_mesh → Input(1)     (float_in[1] = "t_mesh") — the mesh-occlusion depth bound
+    // `ro`/`rd`/`t_seed`/`t_mesh` are the ONLY values the generated span sees (the `if (exhausted)`
+    // re-seed wrapper stays hand-written above; `t`/`hit` are the enclosing carried vars, both
+    // suppressed-decl).
+    let ro = Emit(push(Node::Vec3Param(0)));
+    let rd = Emit(push(Node::Vec3Param(1)));
+    let t_seed = Emit::input(0);
+    let t_mesh = Emit::input(1);
+
+    // The field-distance seam: on Emit it records a `sdf(p)` call node (the ANALYTIC field via the
+    // hand-written `sdf`, interned `"sdf"` — NOT `field_distance`).
+    let _ = remarch::b1_exhaustion_remarch_body::<EmitCf, _>(ro, rd, t_seed, t_mesh, |q| {
+        EmitCf::call1("sdf", q)
+    });
+
+    // Pop the function body block and print it.
+    let body_block = STMTS.with(|s| {
+        s.borrow_mut()
+            .pop()
+            .expect("invariant: the function body block was pushed above")
+    });
+
+    let float_in = ["t_seed", "t_mesh"];
+    let vec_in = ["ro", "rd"];
+    let named_lit = NAMED_LITS.with(|n| n.borrow().clone());
+    let call_in = CALLS.with(|c| c.borrow().clone());
+    let vars = VARS.with(|v| v.borrow().clone());
+    let names = Names {
+        float_in: &float_in,
+        uint_in: NO_UINT_INPUTS,
+        vec_in: &vec_in,
+        uint3_in: NO_UINT3_INPUTS,
+        buf_in: NO_BUF_INPUTS,
+        out_in: NO_OUT_INPUTS,
+        named_lit: &named_lit,
+        vars: &vars,
+        vec4_in: NO_VEC4_INPUTS,
+        call_in: &call_in,
+    };
+
+    ARENA.with(|a| {
+        let arena = a.borrow();
+        let mut span = String::new();
+        // The whole span is ONE recorded statement (the runtime `Stmt::Loop` with its `t >= t_mesh`
+        // `If { Break }`, the DeclTemp p, the DeclTemp d, the composite accept `If { Assign hit;
+        // Break }`, the `Stmt::Assign t`, and the `t > T_MAX` `If { Break }`) — a single in-order
+        // walk at DEPTH 2 (8-space indent), matching the committed L1520-1535. The site nests
+        // main→`if (exhausted)`→this loop, hence depth 2 (vs the depth-3 span of `b1_accept_refine`
+        // and the depth-1 span of `m2_surface_hit_refine`). NO function-signature wrap (the span is
+        // spliced inside the hand-written `if (exhausted)` wrapper).
+        print_block(&body_block, &arena, names, 2, &mut span);
         span
     })
 }

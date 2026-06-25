@@ -1517,10 +1517,16 @@ void main(uint3 tid : SV_DispatchThreadID) {
     if (exhausted) {
         t = t_seed;                  // re-seed from the SAME original seed the fast pass used
         hit = false;
+        // === GENERATED b1_exhaustion_remarch BEGIN ===
+        // SINGLE-SOURCED by boyko_shaderdsl::remarch::b1_exhaustion_remarch_body (Inc 4e). The
+        // enclosing `if (exhausted) { t = t_seed; hit = false; ... }` wrapper + the BUG-B1-HOLE-3
+        // rationale comment above stay HAND-WRITTEN (framing b). The body's plain `omega == 1.0`
+        // step is `t = t + d` (R1: byte-identical to `t += d` in the `.spv`). To regenerate:
+        // `cargo run -p boyko_shaderdsl --features emit --bin emit_field` and re-splice this span.
         [loop]
         for (uint it2 = 0u; it2 < MAX_IT; ++it2) {
             if (t >= t_mesh) {
-                break;               // mesh occludes from here on
+                break;
             }
             float3 p = ro + rd * t;
             float d = sdf(p);
@@ -1528,11 +1534,12 @@ void main(uint3 tid : SV_DispatchThreadID) {
                 hit = true;
                 break;
             }
-            t += d;                  // frozen plain step
+            t = t + d;
             if (t > T_MAX) {
                 break;
             }
         }
+        // === GENERATED b1_exhaustion_remarch END ===
     }
 
     // --- PBR MVP-2: the marcher WRITES G-BUFFER ATTRIBUTES; the full Cook-Torrance
