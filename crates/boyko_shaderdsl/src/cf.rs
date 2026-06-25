@@ -456,6 +456,58 @@ pub trait Cf {
     /// [`Break`](LoopOp::Return); on Emit records a single `Stmt::Return(value)`.
     /// `m2_regula_falsi`'s tail `return mid;`.
     fn ret_f(cell: &Self::RetCellF, value: Self::Scalar) -> Flow;
+
+    // ---- Increment 4b.2: the BOOL return + OUT-FLOAT facets (the `m2_surface_hit` refine) ----
+    //
+    // `m2_surface_hit` returns a `bool` (`return true;` / `return false;`, lowering to a
+    // genuine `OpTypeBool` function return with `OpConstantTrue`/`OpConstantFalse` — NOT
+    // `uint` 0/1, the binary fact the spike read off the committed `.comp.spv`) and writes its
+    // refined hit `t` through an `out float hit_t`. The facets below are 2-line mirrors of the
+    // proven float-return facet ([`RetCellF`](Self::RetCellF) / [`ret_f`](Self::ret_f) /
+    // [`if_ret_f`](Self::if_ret_f)) and the brick-cell out-vec3 facet ([`OutVec3`](Self::
+    // OutVec3) / [`out_vec3_assign`](Self::out_vec3_assign)); ZERO new loop/integer machinery.
+
+    /// The BOOL RETURN-VALUE cell (`Cell<bool>` on Eval — the body-local cell the
+    /// function-scope IIFE reads after an early in-loop `return true`; a ZST on Emit, the
+    /// `true`/`false` travels in the recorded `Stmt::Return` as a [`Node::BoolLit`]). The bool
+    /// analogue of [`RetCellF`](Self::RetCellF). Owned, passed by `&` to [`ret_b`](Self::ret_b)
+    /// / [`if_hit_ret_b`](Self::if_hit_ret_b).
+    type RetCellB;
+
+    /// The `out float` OUT-PARAMETER local state (`hit_t`) — `Cell<f32>` on Eval (interior
+    /// mutability; the body writes through `&o`), an emit out-param NAME handle on Emit (its
+    /// writes print bare `hit_t = ...;`, NOT a `float hit_t = ...;` decl). The `float` analogue
+    /// of [`OutVec3`](Self::OutVec3). Owned, passed by `&` to [`out_float_assign`](Self::
+    /// out_float_assign) / [`if_hit_ret_b`](Self::if_hit_ret_b).
+    type OutFloat;
+
+    /// The BOOL function-return (the bool analogue of [`ret_f`](Self::ret_f)). On Eval deposits
+    /// `value` into the [`RetCellB`](Self::RetCellB) and returns [`Break`](LoopOp::Return); on
+    /// Emit records a single `Stmt::Return` carrying a [`Node::BoolLit`] (printed `true`/`false`,
+    /// NOT a `uint`). `m2_surface_hit`'s function-tail `return false;`.
+    fn ret_b(cell: &Self::RetCellB, value: bool) -> Flow;
+
+    /// Assigns the `out float` OUT-PARAMETER (`hit_t = <rhs>;`). Eval `set`s the `Cell<f32>`
+    /// through `&o`; Emit records a bare `hit_t = <rhs>;` (NO decl — `hit_t` is an `out`
+    /// parameter, not a local). The `float` analogue of [`out_vec3_assign`](Self::
+    /// out_vec3_assign). `m2_surface_hit`'s in-loop `hit_t = rt;`.
+    fn out_float_assign(o: &Self::OutFloat, v: Self::Scalar);
+
+    /// The COMPOSITE in-loop hit — `if (cond) { hit_t = rt; return true; }`. Records BOTH
+    /// statements in ONE [`if_`](Self::if_)-style then-block (NOT the single-statement
+    /// [`if_ret_f`](Self::if_ret_f)): the out-float assign (`hit_t = rt;`) THEN the bool return
+    /// (`return true;`), IN ORDER. On Eval this writes `hit_t` BEFORE the [`Break`](LoopOp::
+    /// Return) short-circuits the IIFE, so the oracle reads the FRESH `rt` (not the stale entry
+    /// default); on Emit the then-block is EXACTLY the two committed statements in order. The
+    /// `?`-propagated `Break(Return)` forwards through [`runtime_for`](Self::runtime_for) to the
+    /// function-scope IIFE (skipping the tail `ret_b(false)`). `m2_surface_hit`'s
+    /// `if (abs(d) < EPS) { hit_t = rt; return true; }`.
+    fn if_hit_ret_b(
+        hit_out: &Self::OutFloat,
+        ret_out: &Self::RetCellB,
+        cond: <Self::Scalar as FieldScalar>::Mask,
+        rt_val: Self::Scalar,
+    ) -> Flow;
 }
 
 /// The control-flow EVAL backend — REAL host `for`/`if`/`continue`, a unit ZST.
@@ -804,5 +856,39 @@ impl Cf for EvalCf {
     fn ret_f(cell: &core::cell::Cell<f32>, value: f32) -> Flow {
         cell.set(value);
         core::ops::ControlFlow::Break(LoopOp::Return)
+    }
+
+    // ---- Increment 4b.2: the BOOL return + OUT-FLOAT facets (native host) -------------
+    type RetCellB = core::cell::Cell<bool>;
+    type OutFloat = core::cell::Cell<f32>;
+
+    #[inline]
+    fn ret_b(cell: &core::cell::Cell<bool>, value: bool) -> Flow {
+        cell.set(value);
+        core::ops::ControlFlow::Break(LoopOp::Return)
+    }
+
+    #[inline]
+    fn out_float_assign(o: &core::cell::Cell<f32>, v: f32) {
+        o.set(v);
+    }
+
+    #[inline]
+    fn if_hit_ret_b(
+        hit_out: &core::cell::Cell<f32>,
+        ret_out: &core::cell::Cell<bool>,
+        cond: bool,
+        rt_val: f32,
+    ) -> Flow {
+        if cond {
+            // Write `hit_t = rt;` BEFORE the `Break(Return)` short-circuits the IIFE, so the
+            // oracle reads the FRESH `rt` (matching the committed `hit_t = rt; return true;`
+            // statement order — the design's keystone ordering invariant).
+            hit_out.set(rt_val);
+            ret_out.set(true);
+            core::ops::ControlFlow::Break(LoopOp::Return)
+        } else {
+            core::ops::ControlFlow::Continue(())
+        }
     }
 }

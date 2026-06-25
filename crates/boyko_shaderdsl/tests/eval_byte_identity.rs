@@ -1488,3 +1488,164 @@ fn sdf_soft_shadow_control_flow_matches_frozen() {
         );
     }
 }
+
+// ======================================================================
+// Inc 4b.2 — the `m2_surface_hit` REFINE CONTROL-FLOW Eval oracle.
+//
+// A frozen HOST mirror of the committed `m2_surface_hit` REFINE LOOP+TAIL span (the L1184-1205
+// statements; the integer cell-addressing preamble + the call sites stay out — the generated
+// span never sees them) threading the SAME host `field` closure the eDSL body uses. The eDSL
+// `m2_surface_hit_refine_body::<EvalCf>` reproduces this CONTROL FLOW (the converged-hit early
+// `return true` + the FRESH `hit_t = rt`, the `rt < 0 || rt > T_MAX` break, the budget
+// exhaustion `return false`) — SCOPED TO CONTROL FLOW (the cmp-`.spv` is the byte-identity
+// oracle; an Eval ULP wobble does not block a green-`.spv` increment).
+//
+// The keystone the design pins: the composite `if_hit_ret_b` writes `hit_t` BEFORE the
+// `Break(Return)` short-circuits, so on a HIT `hit_t` holds the rt at the HIT iteration (NOT the
+// pre-call default, NOT the final-iteration rt); on a MISS `hit_t` is left at its pre-call
+// default (the hand-written `hit_t = t_world;` entry write, modeled here as the cell's seed).
+// ======================================================================
+
+// The committed tuning consts (mirror `boyko_shaderdsl::surface`'s values).
+const FROZEN_M2_REFINE_RELAX: f32 = 0.8;
+const FROZEN_M2_SURFACE_EPS: f32 = 0.001;
+const FROZEN_M2_SURFACE_T_MAX: f32 = 10.0;
+const FROZEN_M2_REFINE_ITERS: usize = 8;
+
+/// Verbatim hand-mirror of the committed `m2_surface_hit` REFINE LOOP+TAIL span (the L1184-1205
+/// statements), threading a host `field` closure (`ro + rd * rt -> distance`). Returns the
+/// `(bool hit, float hit_t)` pair — `hit_t` is the SENTINEL `default` on a miss (the
+/// hand-written `hit_t = t_world;` entry write the generated span never touches), or the rt at
+/// the converged iteration on a hit. The reference the eDSL `m2_surface_hit_refine_body::<EvalCf>`
+/// control flow + hit_t write-order is locked against.
+// The frozen mirror spells the committed HLSL span VERBATIM: `rt = rt + step;` (the eDSL's R1
+// `set_var` form, byte-identical to the committed `rt += step` in the `.spv`) and the
+// `rt < 0.0 || rt > T_MAX` escape guard. Collapsing to `rt += step` / `!(0.0..=T_MAX).contains`
+// would diverge the reference from the committed source it must mirror character-for-character
+// (and change the NaN edge-case semantics), so both clippy suggestions are deliberately suppressed.
+#[allow(clippy::assign_op_pattern, clippy::manual_range_contains)]
+fn frozen_m2_surface_hit_refine<Fld: Fn([f32; 3]) -> f32>(
+    ro: [f32; 3],
+    rd: [f32; 3],
+    cand_t: f32,
+    default: f32,
+    field: &Fld,
+) -> (bool, f32) {
+    // `hit_t = t_world;` (the hand-written entry default, OUTSIDE the generated span).
+    let mut hit_t = default;
+    let mut rt = cand_t;
+    for _ in 0..FROZEN_M2_REFINE_ITERS {
+        let q = [ro[0] + rd[0] * rt, ro[1] + rd[1] * rt, ro[2] + rd[2] * rt];
+        let d = field(q);
+        if d.abs() < FROZEN_M2_SURFACE_EPS {
+            // `hit_t = rt;` is written BEFORE the `return true;` — the keystone ordering.
+            hit_t = rt;
+            return (true, hit_t);
+        }
+        let step = FROZEN_M2_REFINE_RELAX * d;
+        rt = rt + step;
+        if rt < 0.0 || rt > FROZEN_M2_SURFACE_T_MAX {
+            break;
+        }
+    }
+    (false, hit_t)
+}
+
+/// The eDSL `m2_surface_hit_refine_body::<EvalCf>` threading the SAME host `field` closure (so
+/// `Cf::call1`'s `unreachable!` is never reached). The `hit_t` cell is seeded with `default` (the
+/// hand-written entry write); the bool cell is seeded `false` and only an in-loop converged hit
+/// flips it. Returns the `(bool hit, float hit_t)` pair the cells hold after the body runs.
+fn refactored_m2_surface_hit_refine<Fld: Fn([f32; 3]) -> f32>(
+    ro: [f32; 3],
+    rd: [f32; 3],
+    cand_t: f32,
+    default: f32,
+    field: &Fld,
+) -> (bool, f32) {
+    use std::cell::Cell;
+    // `hit_t` seeded with the hand-written entry default; the bool seeded `false`.
+    let hit_out = Cell::new(default);
+    let ret_out = Cell::new(false);
+    boyko_shaderdsl::surface::m2_surface_hit_refine_body::<EvalCf, _>(
+        ro, rd, cand_t, field, &hit_out, &ret_out,
+    );
+    (ret_out.get(), hit_out.get())
+}
+
+#[test]
+fn m2_surface_hit_refine_control_flow_matches_frozen() {
+    // A single analytic occluder — a sphere of radius `r` at `center` — so `field` is a clean
+    // signed distance the SIGNED refine steps along (converging from either side). All three
+    // control-flow outcomes are exercised across the sweep:
+    //   (a) a candidate near the surface -> the `abs(d) < EPS` converged hit (`true` + fresh hit_t);
+    //   (b) a candidate that walks out of [0, T_MAX] -> the break -> the tail `false`;
+    //   (c) a candidate that exhausts the budget without converging -> the tail `false`.
+    let sphere = |center: [f32; 3], r: f32| {
+        move |q: [f32; 3]| -> f32 {
+            let dx = q[0] - center[0];
+            let dy = q[1] - center[1];
+            let dz = q[2] - center[2];
+            (dx * dx + dy * dy + dz * dz).sqrt() - r
+        }
+    };
+
+    let mut lcg = Lcg::new(0x1357_9BDF_2468_ACE0_u64);
+    for _ in 0..5_000 {
+        let ro = [lcg.next_f32(2.0), lcg.next_f32(2.0), lcg.next_f32(2.0)];
+        let rd = [lcg.next_f32(1.0), lcg.next_f32(1.0), lcg.next_f32(1.0)];
+        let cand_t = lcg.next_f32(3.0);
+        let center = [lcg.next_f32(3.0), lcg.next_f32(3.0), lcg.next_f32(3.0)];
+        let r = lcg.next_f32(1.0).abs() + 0.05;
+        // A DISTINCT sentinel default so a stale read (the bug the composite combinator guards
+        // against) would be caught: a leak of the default would surface here.
+        let default = lcg.next_f32(5.0);
+        let field = sphere(center, r);
+
+        let (rhit, rht) = refactored_m2_surface_hit_refine(ro, rd, cand_t, default, &field);
+        let (fhit, fht) = frozen_m2_surface_hit_refine(ro, rd, cand_t, default, &field);
+        assert_eq!(rhit, fhit, "m2-surface-hit-refine: bool return diverged");
+        assert_bits(rht, fht, "m2-surface-hit-refine-hit_t");
+    }
+}
+
+#[test]
+fn m2_surface_hit_refine_hit_writes_fresh_rt_not_default_or_final() {
+    // A DIRECTED hit case proving the keystone: the composite `if_hit_ret_b` writes `hit_t = rt;`
+    // BEFORE the `Break(Return)` short-circuits, so on a hit `hit_t` holds the rt at the HIT
+    // iteration — NOT the pre-call default (a leak would surface the sentinel) and NOT the
+    // final-iteration rt (the loop short-circuits at the hit). Construct a candidate that is
+    // ALREADY on the surface (`abs(d) < EPS` at iter 0): a sphere of radius 1 centered at the
+    // origin, with `ro = origin`, `rd` a unit +x, and `cand_t = 1.0` (so `ro + rd*1.0` is exactly
+    // on the surface). The hit fires at iter 0 with `rt == cand_t == 1.0`.
+    let sphere = |q: [f32; 3]| -> f32 {
+        (q[0] * q[0] + q[1] * q[1] + q[2] * q[2]).sqrt() - 1.0
+    };
+    let ro = [0.0, 0.0, 0.0];
+    let rd = [1.0, 0.0, 0.0];
+    let cand_t = 1.0;
+    let default = -999.0; // a sentinel that can NEVER be a valid rt on this ray
+
+    let (hit, hit_t) = refactored_m2_surface_hit_refine(ro, rd, cand_t, default, &sphere);
+    assert!(hit, "an on-surface candidate must return true");
+    // hit_t is the FRESH rt at the hit iteration (cand_t == 1.0), NOT the -999.0 default.
+    assert_bits(hit_t, cand_t, "hit_t-is-fresh-rt-at-hit-iter");
+    assert_ne!(hit_t, default, "hit_t must NOT leak the pre-call default on a hit");
+}
+
+#[test]
+fn m2_surface_hit_refine_miss_leaves_hit_t_at_default() {
+    // The dual of the hit case: a MISS leaves `hit_t` at its pre-call default (the hand-written
+    // entry write the generated span never touches). Construct a candidate the refine can never
+    // bring within EPS of any surface: a far-everywhere field. The step `0.8 * 100 = 80` pushes
+    // `rt` past T_MAX on iter 0 -> break -> the tail `return false;` runs with `hit_t` never
+    // assigned (it holds the seed).
+    let empty = |_q: [f32; 3]| -> f32 { 100.0 };
+    let ro = [0.0, 0.0, 0.0];
+    let rd = [0.0, 0.0, 0.0]; // a degenerate dir keeps the field constant; only rt grows
+    let cand_t = 0.5;
+    let default = 7.25;
+
+    let (hit, hit_t) = refactored_m2_surface_hit_refine(ro, rd, cand_t, default, &empty);
+    assert!(!hit, "a never-converging candidate must return false");
+    assert_bits(hit_t, default, "miss-leaves-hit_t-at-default");
+}

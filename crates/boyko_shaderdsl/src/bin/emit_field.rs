@@ -76,4 +76,18 @@ fn main() {
     // framing b). The host shadow march stays ANALYTIC (C1) — only the GPU span is generated.
     println!();
     print!("{}", boyko_shaderdsl::emit::emit_hlsl_sdf_soft_shadow());
+    // The M2 brick-marcher SURFACE-HIT refine leaf (Increment 4b.2 — the FIFTH CONTROL-FLOW
+    // leaf, reusing the proven runtime `[loop]` + `brk` + `field_distance` `call1`, adding a
+    // real `OpTypeBool` return (`Cf::ret_b` — `return true`/`return false`, NOT uint 0/1) + an
+    // `out float hit_t` write (`Cf::out_float_assign`), folded by the composite `Cf::if_hit_ret_b`
+    // — the production `m2_surface_hit` analytic-residual signed refine: the fixed-budget
+    // (`M2_REFINE_ITERS`) sphere-trace from the cubic candidate onto the EXACT field, the
+    // converged-hit `hit_t = rt; return true;`, the `rt < 0 || rt > T_MAX` break, and the tail
+    // `return false;`, generated from `boyko_shaderdsl::surface::m2_surface_hit_refine_body` over
+    // the `Emit` + `EmitCf` backends. Spliced between the `// === GENERATED m2_surface_hit_refine
+    // BEGIN/END ===` sentinels INSIDE `m2_surface_hit` (the loop+tail SPAN only — the integer
+    // cell-addressing preamble + the `m2_brick_span`/`m2_brick_cubic_hit`/`select_level` call
+    // sites stay hand-written, framing b). The 2 callers of `m2_surface_hit` are untouched.
+    println!();
+    print!("{}", boyko_shaderdsl::emit::emit_hlsl_m2_surface_hit_refine());
 }

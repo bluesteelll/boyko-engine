@@ -46,6 +46,7 @@ pub mod field;
 pub mod normal;
 pub mod scalar;
 pub mod shadow;
+pub mod surface;
 
 #[cfg(feature = "emit")]
 pub mod emit;
@@ -64,4 +65,8 @@ pub use scalar::FieldScalar;
 pub use shadow::{
     FIELD_LIPSCHITZ_L, MAX_IT, SHADOW_HIT_EPS, SHADOW_K, SHADOW_MINT, SHADOW_MINT_STEP, T_MAX,
     sdf_soft_shadow_body,
+};
+pub use surface::{
+    EPS as M2_SURFACE_EPS, M2_REFINE_ITERS, M2_REFINE_RELAX, T_MAX as M2_SURFACE_T_MAX,
+    m2_surface_hit_refine_body,
 };

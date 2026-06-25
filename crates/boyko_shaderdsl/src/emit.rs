@@ -261,6 +261,16 @@ enum Node {
     /// [`Node::FieldCall`] which hardcodes the callee `sdf`. Result type [`EmitTy::Float`]
     /// (via [`type_of`]'s default arm, as for `Call2`).
     Call1 { sym_id: u32, a: u32 },
+
+    // ---- Increment 4b.2: the BOOL return literal (`m2_surface_hit`) -----------------
+    /// A `bool` LITERAL — prints `true` / `false` (lowering to `OpConstantTrue` /
+    /// `OpConstantFalse` on the function's `OpTypeBool` return, NOT a `uint` 0/1). The
+    /// committed `m2_surface_hit` returns `bool`; the spike read the `OpConstantTrue`/`False`
+    /// off the binary, so the bool return is modeled as a real bool literal, not uint. An
+    /// inline leaf, consumed ONLY by [`Stmt::Return`] (never `chk`-typed — `type_of` falls to
+    /// the `Float` default, harmless since no arithmetic consumer reads it; the SAME no-`chk`
+    /// discipline [`EmitCf::named_uint`] uses).
+    BoolLit(bool),
 }
 
 /// One VECTOR (`float3`/`float2`) SSA node — the normal leaf is a vector expression
@@ -726,6 +736,9 @@ fn is_inline_leaf(node: Node) -> bool {
             // it is consumed only by `Call2`. (The `Call2` itself materializes as a `f_mid`
             // temp, so it is NOT an inline leaf.)
             | Node::Vec4Param(_)
+            // Increment 4b.2: a `bool` literal spells `true`/`false` inline (it is the
+            // operand of a `Stmt::Return`, never a `tN` temp).
+            | Node::BoolLit(_)
     )
 }
 
@@ -813,6 +826,9 @@ fn operand_str(
         // A `float4` parameter (`c`) spells its NAME — a whole-`float4` call-through operand
         // (Increment 4a). Consumed only by `Call2`; never swizzled.
         Node::Vec4Param(n) => names.vec4_in[n as usize].to_string(),
+        // A `bool` literal spells `true`/`false` (Increment 4b.2) — the `m2_surface_hit`
+        // return value (`OpConstantTrue`/`OpConstantFalse`, NOT a `uint`).
+        Node::BoolLit(b) => if b { "true".to_string() } else { "false".to_string() },
         // A non-leaf operand: if it was MATERIALIZED as a `tN` temp (the straight-line
         // field/normal/decode/cubic emit materializes every non-leaf via the SSA walk,
         // so `temps[id]` is always `Some` there), use the temp name. Otherwise — the CF
@@ -929,7 +945,10 @@ fn define_str(arena: &[Node], names: Names, temps: &[Option<String>], id: u32) -
         | Node::NamedLit { .. }
         | Node::VecParamRef(_)
         | Node::VarRef(_)
-        | Node::TempRef(_) => {
+        | Node::TempRef(_)
+        // A `bool` literal (`true`/`false`) is inlined as the operand of a `Stmt::Return`
+        // (Increment 4b.2), never materialized as a temp.
+        | Node::BoolLit(_) => {
             // Leaves are inlined, never defined as a temp.
             unreachable!("leaf nodes are inlined, not defined")
         }
@@ -1658,6 +1677,15 @@ pub struct Var(u32);
 #[derive(Clone, Copy)]
 pub struct OutParam(u32);
 
+/// An `out float`-PARAMETER name handle (`m2_surface_hit`'s `hit_t`) — indexes the SAME
+/// printer out-param name table ([`Names::out_in`]) [`OutParam`] uses. The [`EmitCf`]'s
+/// [`Cf::OutFloat`] associated type (Increment 4b.2). Its assignments print BARE
+/// (`hit_t = <rhs>;`), not a `float hit_t = ...;` local declaration. Distinct type from
+/// [`OutParam`] only so the `float` / `float3` out-param facets stay separate at the call site;
+/// both record a [`Stmt::OutAssign`] indexing `out_in`.
+#[derive(Clone, Copy)]
+pub struct OutFloatParam(u32);
+
 /// A `StructuredBuffer<uint>`-PARAMETER name handle (the brick-cell's `grid`) — indexes
 /// the printer's [`Names::buf_in`] table. The [`EmitCf`]'s [`Cf::Buf`] associated type.
 #[derive(Clone, Copy)]
@@ -1675,6 +1703,13 @@ pub struct RetCell;
 /// return facets stay separate at the call site; the recorded `Stmt::Return` is identical.
 #[derive(Clone, Copy)]
 pub struct RetCellF;
+
+/// The BOOL RETURN-VALUE cell handle on the Emit backend — a ZST (the `true`/`false` travels
+/// in the recorded [`Stmt::Return`] as a [`Node::BoolLit`], not in a cell). The [`EmitCf`]'s
+/// [`Cf::RetCellB`] associated type (Increment 4b.2). Distinct type from [`RetCellF`] /
+/// [`RetCell`] only so the bool / float / uint return facets stay separate at the call site.
+#[derive(Clone, Copy)]
+pub struct RetCellB;
 
 thread_local! {
     /// The STMT block stack: the recorder pushes a [`Block`] on combinator entry
@@ -2144,6 +2179,57 @@ impl Cf for EmitCf {
         record_stmt(Stmt::Return(value.0));
         Flow::Continue(())
     }
+
+    // ---- Increment 4b.2: the BOOL return + OUT-FLOAT facets (recorder) ---------------
+    // On Emit the ret-cell is a ZST (the `true`/`false` travels in the `Stmt::Return` as a
+    // `BoolLit`); the out-float is a NAME handle (the value travels in the `Stmt::OutAssign`).
+    type RetCellB = RetCellB;
+    type OutFloat = OutFloatParam;
+
+    fn ret_b(_cell: &RetCellB, value: bool) -> Flow {
+        // The bool return — a single `Stmt::Return` carrying a `BoolLit` (printed `true`/
+        // `false`, NOT a `uint`). The function-tail `return false;`. Fall through on Emit.
+        record_stmt(Stmt::Return(push(Node::BoolLit(value))));
+        Flow::Continue(())
+    }
+
+    fn out_float_assign(o: &OutFloatParam, v: Emit) {
+        // A bare `hit_t = <rhs>;` (NO decl — `hit_t` is an `out` parameter). Records into the
+        // SAME `Stmt::OutAssign` (indexing `out_in`) the brick-cell's `cell_min` uses.
+        record_stmt(Stmt::OutAssign {
+            name_id: o.0,
+            rhs: v.0,
+        });
+    }
+
+    fn if_hit_ret_b(
+        hit_out: &OutFloatParam,
+        _ret_out: &RetCellB,
+        cond: EmitMask,
+        rt_val: Emit,
+    ) -> Flow {
+        // Record `if (<cond>) { hit_t = <rt>; return true; }` — the then-block carries BOTH
+        // statements IN ORDER (the out-float assign THEN the bool `return true;`), NOT the
+        // single-statement `if_ret_f`. Then FALL THROUGH (the recorder keeps recording the live
+        // tail structurally — the `?` never early-returns on Emit). The two committed statements
+        // print exactly as the committed `hit_t = rt; return true;`.
+        STMTS.with(|s| s.borrow_mut().push(Block { stmts: Vec::new() }));
+        record_stmt(Stmt::OutAssign {
+            name_id: hit_out.0,
+            rhs: rt_val.0,
+        });
+        record_stmt(Stmt::Return(push(Node::BoolLit(true))));
+        let then = STMTS.with(|s| {
+            s.borrow_mut()
+                .pop()
+                .expect("invariant: the if_hit_ret_b then block was pushed above")
+        });
+        record_stmt(Stmt::If {
+            cond: cond.0,
+            then,
+        });
+        Flow::Continue(())
+    }
 }
 
 // ---- The STMT printer + the brick-exit generator -------------------------------
@@ -2608,6 +2694,104 @@ pub fn emit_hlsl_sdf_soft_shadow() -> String {
         // `Stmt::Return(clamp01)` — a flat in-order walk at depth 1 (4-space indent), matching
         // the committed L454-468. NO function-signature wrap (the span is spliced inside the
         // hand-written `sdf_soft_shadow`).
+        print_block(&body_block, &arena, names, 1, &mut span);
+        span
+    })
+}
+
+/// Generates the HLSL `m2_surface_hit` REFINE LOOP+TAIL SPAN — the production brick-marcher's
+/// analytic-residual signed refine (the fixed-budget `[loop]` sphere-trace from the cubic
+/// candidate onto the EXACT field), with the `field_distance(ro + rd * rt)` call site, the
+/// in-loop converged-hit (`hit_t = rt; return true;`), the `rt < 0 || rt > T_MAX` BREAK, and
+/// the function-tail `return false;` — by tracing the generic
+/// [`crate::surface::m2_surface_hit_refine_body`] over the `EmitCf` backend (whose `Cf::Scalar =
+/// Emit` supplies the SSA-node arithmetic), and returns ONLY the span (NOT a wrapped function).
+///
+/// Distinct from [`emit_hlsl_m2_regula_falsi`] (a WHOLE function) in returning a SPAN only: the
+/// integer cell-addressing PREAMBLE (the 7-param header, the entry `hit_t = t_world;` default,
+/// the field-unpacks, the rel/tile float-guard early returns, the M5 toroidal-slot integer math,
+/// and the `m2_brick_span` / `m2_brick_cubic_hit` / `select_level` call sites) stays HAND-WRITTEN
+/// inline above/around the `// === GENERATED m2_surface_hit_refine BEGIN/END ===` sentinels
+/// (framing (b)), so the generator emits only the statements spliced BETWEEN the sentinels inside
+/// `m2_surface_hit`. The span is printed at depth 1 (4-space indent), matching the committed
+/// L1184-1205.
+///
+/// The cmp-`.spv` (in `boyko_rhi_vulkan`) is the byte-identity oracle; the
+/// `m2_surface_hit_refine` text-sync test pins the committed shader span to this output.
+pub fn emit_hlsl_m2_surface_hit_refine() -> String {
+    use crate::surface;
+
+    // Fresh recorder state.
+    ARENA.with(|a| a.borrow_mut().clear());
+    STMTS.with(|s| s.borrow_mut().clear());
+    VARS.with(|v| v.borrow_mut().clear());
+    NAMED_LITS.with(|n| n.borrow_mut().clear());
+    CALLS.with(|c| c.borrow_mut().clear());
+    TEMP_SEQ.with(|c| *c.borrow_mut() = 0);
+    TEMP_TYPES.with(|t| t.borrow_mut().clear());
+    TEMP_NAMES.with(|t| t.borrow_mut().clear());
+
+    // Seed the function body block (the bottom of the STMTS stack).
+    STMTS.with(|s| s.borrow_mut().push(Block { stmts: Vec::new() }));
+
+    // Seed the span's inputs:
+    //   ro     → Vec3Param(0) (vec_in[0]   = "ro")    — the world ray origin
+    //   rd     → Vec3Param(1) (vec_in[1]   = "rd")    — the world ray direction
+    //   cand_t → Input(0)     (float_in[0] = "cand_t")— the cubic candidate world t
+    //   hit_t  → OutFloatParam(0) (out_in[0] = "hit_t") — the `out float` written by the in-loop hit
+    // `ro`/`rd`/`cand_t` are the ONLY values the generated span sees (the integer cell-addressing
+    // preamble — `lvl`/`atlas`/`atlas_smp`/`t_world` + the slot math — stays hand-written above).
+    let ro = Emit(push(Node::Vec3Param(0)));
+    let rd = Emit(push(Node::Vec3Param(1)));
+    let cand_t = Emit::input(0);
+    let hit_out = OutFloatParam(0);
+    let ret_out = RetCellB;
+
+    // The field-distance seam: on Emit it records a `field_distance(ro + rd * rt)` call node.
+    surface::m2_surface_hit_refine_body::<EmitCf, _>(
+        ro,
+        rd,
+        cand_t,
+        |q| EmitCf::call1("field_distance", q),
+        &hit_out,
+        &ret_out,
+    );
+
+    // Pop the function body block and print it.
+    let body_block = STMTS.with(|s| {
+        s.borrow_mut()
+            .pop()
+            .expect("invariant: the function body block was pushed above")
+    });
+
+    let float_in = ["cand_t"];
+    let vec_in = ["ro", "rd"];
+    let out_in = ["hit_t"];
+    let named_lit = NAMED_LITS.with(|n| n.borrow().clone());
+    let call_in = CALLS.with(|c| c.borrow().clone());
+    let vars = VARS.with(|v| v.borrow().clone());
+    let names = Names {
+        float_in: &float_in,
+        uint_in: NO_UINT_INPUTS,
+        vec_in: &vec_in,
+        uint3_in: NO_UINT3_INPUTS,
+        buf_in: NO_BUF_INPUTS,
+        out_in: &out_in,
+        named_lit: &named_lit,
+        vars: &vars,
+        vec4_in: NO_VEC4_INPUTS,
+        call_in: &call_in,
+    };
+
+    ARENA.with(|a| {
+        let arena = a.borrow();
+        let mut span = String::new();
+        // The whole span is recorded statements (DeclVar rt, the runtime `Stmt::Loop` with its
+        // DeclTemp d, the composite converged-hit `If { OutAssign hit_t; Return true }`, the
+        // DeclTemp step, the `Stmt::Assign rt`, the `rt < 0 || rt > T_MAX` `If { Break }`) + the
+        // tail `Stmt::Return(false)` — a flat in-order walk at depth 1 (4-space indent), matching
+        // the committed L1184-1205. NO function-signature wrap (the span is spliced inside the
+        // hand-written `m2_surface_hit`).
         print_block(&body_block, &arena, names, 1, &mut span);
         span
     })
