@@ -57,6 +57,10 @@ enum EmitTy {
     /// materializes a `uint3` temp (`dims` is an inlined parameter), but the type is
     /// carried so [`assert_operand_ty`] can validate a `uint3` swizzle's source.
     Uint3,
+    /// An HLSL `float4` value (the cubic-coefficient `c` parameter — Increment 4a). No leaf
+    /// materializes a `float4` temp (`c` is an inlined call-through parameter); the type is
+    /// carried so [`assert_operand_ty`] can validate the [`Node::Call2`] `float4` argument.
+    Float4,
 }
 
 /// One SSA node — a recorded field op. Operands reference earlier nodes by their
@@ -93,8 +97,15 @@ enum Node {
     Abs(u32),
     /// `sqrt(a)`.
     Sqrt(u32),
-    /// `cond ? t : e` — the HLSL ternary (the frozen `(k > 0.0) ? _ : _`).
+    /// `cond ? t : e` — the HLSL ternary (the frozen `(k > 0.0) ? _ : _`). The arms are
+    /// spelled UN-wrapped (the brick-exit progress clamp). Recorded by
+    /// [`FieldScalar::select`].
     Select(u32, u32, u32),
+    /// `cond ? (t) : (e)` — the HLSL ternary with BOTH arms wrapped UNCONDITIONALLY (the
+    /// committed `m2_regula_falsi` ternary form). A DISTINCT node from [`Node::Select`] so
+    /// the brick-exit's un-wrapped `Select` printer is unperturbed; recorded ONLY by
+    /// [`EmitCf::select`] (`Cf::select`), never [`FieldScalar::select`] (Increment 4a).
+    SelectParen(u32, u32, u32),
     /// `a > b` — a Mask node (printed inline inside a ternary condition).
     Gt(u32, u32),
     /// `a < b` — a Mask node (`OpFOrdLessThan`), printed inline like [`Node::Gt`]. The
@@ -230,6 +241,19 @@ enum Node {
     /// || rel.y < 0.0`). Printed inline (`<a> || <b>`); DXC lowers `a||b||c` to the
     /// short-circuit `OpBranchConditional` chain (spike E2a: zero `OpLogicalOr`).
     Or(u32, u32),
+
+    // ---- Increment 4a: the runtime `[loop]` call site + `float4` param --------------
+    /// A `float4` PARAMETER reference (`c`, the cubic coefficients) — prints the parameter
+    /// NAME (an inline leaf). `u32` indexes [`Names::vec4_in`]. Consumed ONLY by
+    /// [`Node::Call2`] (`m2_cubic_eval(c, mid)`); never swizzled in `m2_regula_falsi`.
+    /// Result type [`EmitTy::Float4`].
+    Vec4Param(u32),
+    /// A CALL to a frozen hand-written shader function of two args — `m2_cubic_eval(c,
+    /// mid)`. `sym_id` indexes [`Names::call_in`]; `a`/`b` are the two argument node ids
+    /// (heterogeneous types live in the node graph — `a` may be a `Vec4Param`, `b` a
+    /// `float`). Materialized as a `float` temp (`m2_regula_falsi`'s `float f_mid =
+    /// m2_cubic_eval(c, mid);`). Result type [`EmitTy::Float`].
+    Call2 { sym_id: u32, a: u32, b: u32 },
 }
 
 /// One VECTOR (`float3`/`float2`) SSA node — the normal leaf is a vector expression
@@ -343,6 +367,9 @@ fn type_of(node: Node) -> EmitTy {
         | Node::Vec3DivScalar(_, _) => EmitTy::Float3,
         // The `uint3` parameter ref is a whole-`uint3` value.
         Node::Uint3Param(_) => EmitTy::Uint3,
+        // The `float4` parameter ref (`c`) is a whole-`float4` value (Increment 4a). The
+        // `Call2` result (`m2_cubic_eval(c, mid)`) is a `float`.
+        Node::Vec4Param(_) => EmitTy::Float4,
         // A materialized temp carries its OWN result type out-of-band (keyed by `seq`), set
         // when [`EmitCf::temp`] / [`EmitCf::temp_uint`] / [`EmitCf::temp_vec3`] recorded the
         // `Stmt::DeclTemp`. The straight-line leaves record only `float` temps (TEMP_TYPES is
@@ -360,6 +387,7 @@ fn ty_keyword(ty: EmitTy) -> &'static str {
         EmitTy::Uint => "uint",
         EmitTy::Float3 => "float3",
         EmitTy::Uint3 => "uint3",
+        EmitTy::Float4 => "float4",
     }
 }
 
@@ -574,6 +602,14 @@ const NO_NAMED_LITS: &[&str] = &[];
 /// mutable local).
 const NO_VARS: &[&str] = &[];
 
+/// The default `float4`-parameter table (empty — only the regula-falsi CF leaf takes a
+/// `float4 c` call-through parameter — Increment 4a).
+const NO_VEC4_INPUTS: &[&str] = &[];
+
+/// The default callee table (empty — only the regula-falsi CF leaf calls a frozen function
+/// `m2_cubic_eval` — Increment 4a).
+const NO_CALL_INPUTS: &[&str] = &[];
+
 /// The per-trace symbolic-input name tables threaded through the printer: `float`
 /// inputs ([`Node::Input`]) and `uint` inputs ([`Node::UintInput`]) are named
 /// separately because a leaf's parameter list mixes the two (e.g. `decode_snorm8`'s
@@ -606,6 +642,12 @@ struct Names<'a> {
     /// MUTABLE-LOCAL names (indexed by [`Node::VarRef`]'s id) — `exit`. Empty for the
     /// straight-line leaves (they declare no mutable local).
     vars: &'a [&'a str],
+    /// `float4`-PARAMETER names (indexed by [`Node::Vec4Param`]'s id) — `m2_regula_falsi`'s
+    /// `c`. Empty for every other leaf (Increment 4a).
+    vec4_in: &'a [&'a str],
+    /// CALLEE names (indexed by [`Node::Call2`]'s `sym_id`) — `m2_cubic_eval`. Empty for
+    /// every other leaf (Increment 4a).
+    call_in: &'a [&'a str],
 }
 
 /// Formats one f32 literal the way the frozen HLSL writes it (`0.5`, `1.0`, `0.0`).
@@ -673,6 +715,10 @@ fn is_inline_leaf(node: Node) -> bool {
             | Node::BufferLoad(_, _)
             | Node::UGe(_, _)
             | Node::Or(_, _)
+            // Increment 4a: the `float4` parameter `c` spells its name (`c`) at every use;
+            // it is consumed only by `Call2`. (The `Call2` itself materializes as a `f_mid`
+            // temp, so it is NOT an inline leaf.)
+            | Node::Vec4Param(_)
     )
 }
 
@@ -757,6 +803,9 @@ fn operand_str(
         // The `>=` / `||` masks appear only inside a guard condition (inlined like `Gt`).
         Node::UGe(a, b) => format!("{} >= {}", opl(a), opl(b)),
         Node::Or(a, b) => format!("{} || {}", opl(a), opl(b)),
+        // A `float4` parameter (`c`) spells its NAME — a whole-`float4` call-through operand
+        // (Increment 4a). Consumed only by `Call2`; never swizzled.
+        Node::Vec4Param(n) => names.vec4_in[n as usize].to_string(),
         // A non-leaf operand: if it was MATERIALIZED as a `tN` temp (the straight-line
         // field/normal/decode/cubic emit materializes every non-leaf via the SSA walk,
         // so `temps[id]` is always `Some` there), use the temp name. Otherwise — the CF
@@ -809,7 +858,7 @@ const AXIS: [&str; 3] = ["x", "y", "z"];
 fn needs_paren_as_operand(node: Node, pos: OperandPos) -> bool {
     match node {
         // A unary minus / a ternary always groups (side-independent).
-        Node::Neg(..) | Node::Select(..) => true,
+        Node::Neg(..) | Node::Select(..) | Node::SelectParen(..) => true,
         // Additive infix nodes (scalar `+`/`-`/`uint +`, AND the `float3` `+`/`-`): wrap
         // under a multiplicative parent (precedence: `(p - origin) / bw`, `(t1 - p[a]) *
         // t3`) or in the additive-RIGHT position (associativity); the additive-LEFT + root
@@ -930,11 +979,35 @@ fn define_str(arena: &[Node], names: Names, temps: &[Option<String>], id: u32) -
             format!("sqrt({})", op(a))
         }
         Node::Select(_c, t, e) => {
-            // The `_c` condition is a Mask leaf (a `Gt`/`IntEq` node), not a float
-            // value — only the two value arms are typed here.
+            // The `_c` condition is a Mask leaf (a `Gt`/`IntEq`/`Le` node), not a float
+            // value — only the two value arms are typed here. Arms spelled at `Root` (the
+            // committed brick-exit progress-clamp `(exit < EPS) ? BRICK_EXIT_EPS : exit`,
+            // arms UN-wrapped — a leaf is position-irrelevant). UNCHANGED by Inc 4a.
             chk(t, EmitTy::Float);
             chk(e, EmitTy::Float);
             format!("({}) ? {} : {}", op(_c), op(t), op(e))
+        }
+        Node::SelectParen(_c, t, e) => {
+            // Increment 4a: wrap BOTH arms UNCONDITIONALLY — `(cond) ? (then) : (else)` —
+            // the committed `m2_regula_falsi` ternary form (`? (lo - ...) : (0.5 * ...)`).
+            // `needs_paren_as_operand` would wrap the then arm (a `Sub`) but NOT the else arm
+            // (a `Mul`, which it explicitly excludes), so a precedence-aware position cannot
+            // reproduce the committed parens; the unconditional wrap does. A DISTINCT node
+            // from `Select` (recorded only by `Cf::select`, never `FieldScalar::select`) so
+            // the brick-exit's `Select` printer stays UN-wrapped and byte-identical. The
+            // spike (STEP 1) proved the no-`-O` `.spv` is byte-identical WITH the parens.
+            chk(t, EmitTy::Float);
+            chk(e, EmitTy::Float);
+            format!("({}) ? ({}) : ({})", op(_c), op(t), op(e))
+        }
+        Node::Call2 { sym_id, a, b } => {
+            // `m2_cubic_eval(c, mid)` — a frozen-function call site (Increment 4a). The two
+            // args spell at `Root` (function-call args, position-irrelevant): `a` a `float4`
+            // (`c`), `b` a `float` (`mid`). The `a` operand is checked `Float4`; `b` is the
+            // mid var ref (a `Float`), checked by the printer's leaf typing — left unchecked
+            // here since `b` may be a `VarRef`/`TempRef` whose `type_of` is `Float`.
+            chk(a, EmitTy::Float4);
+            format!("{}({}, {})", names.call_in[sym_id as usize], op(a), op(b))
         }
         Node::FieldCall(_) => {
             // `FieldCall` belongs to the NORMAL leaf (a vector expression printed by
@@ -1013,8 +1086,10 @@ fn define_str(arena: &[Node], names: Names, temps: &[Option<String>], id: u32) -
         | Node::Uint3Swizzle(_, _)
         | Node::BufferLoad(_, _)
         | Node::UGe(_, _)
-        | Node::Or(_, _) => {
-            unreachable!("Increment-3 inline leaves are spelled by operand_str, not defined")
+        | Node::Or(_, _)
+        // The Increment-4a `float4` parameter `c` is an inline leaf (spelled by operand_str).
+        | Node::Vec4Param(_) => {
+            unreachable!("inline leaves are spelled by operand_str, not defined")
         }
     }
 }
@@ -1094,6 +1169,8 @@ fn trace<F: FnOnce(&[Emit]) -> Emit>(inputs: usize, body: F) -> String {
         out_in: NO_OUT_INPUTS,
         named_lit: NO_NAMED_LITS,
         vars: NO_VARS,
+        vec4_in: NO_VEC4_INPUTS,
+        call_in: NO_CALL_INPUTS,
     };
     ARENA.with(|a| a.borrow_mut().clear());
     let mut ins = Vec::with_capacity(inputs);
@@ -1127,6 +1204,8 @@ fn trace_named<F: FnOnce(&[Emit], &[Emit]) -> Emit>(
         out_in: NO_OUT_INPUTS,
         named_lit: NO_NAMED_LITS,
         vars: NO_VARS,
+        vec4_in: NO_VEC4_INPUTS,
+        call_in: NO_CALL_INPUTS,
     };
     ARENA.with(|a| a.borrow_mut().clear());
     let mut floats = Vec::with_capacity(float_names.len());
@@ -1163,6 +1242,8 @@ fn trace_named_vec4<F: FnOnce(&[Emit], &[Emit]) -> [Emit; 4]>(
         out_in: NO_OUT_INPUTS,
         named_lit: NO_NAMED_LITS,
         vars: NO_VARS,
+        vec4_in: NO_VEC4_INPUTS,
+        call_in: NO_CALL_INPUTS,
     };
     ARENA.with(|a| a.borrow_mut().clear());
     let mut floats = Vec::with_capacity(float_names.len());
@@ -1509,6 +1590,28 @@ enum Stmt {
     /// `if (<cond>) { <then> }` — `cond` is the condition expression's [`Node`] id (a
     /// comparison mask), `then` the taken block (here only a [`Stmt::Continue`]).
     If { cond: u32, then: Block },
+    /// `if (<cond>) { <then> } else { <els>}` — the TWO-arm branch (Increment 4a). Distinct
+    /// from [`Stmt::If`] (single-arm). `cond` is the condition mask's [`Node`] id; `then` /
+    /// `els` the two blocks (here the `hi = mid; f_hi = f_mid;` / `lo = mid; f_lo = f_mid;`
+    /// assigns). Recorded by [`EmitCf::if_else`].
+    IfElse {
+        cond: u32,
+        then: Block,
+        els: Block,
+    },
+    /// `<attr> for (uint <iv> = 0u; <iv> < <bound_sym>; ++<iv>) { <body> }` — a RUNTIME loop
+    /// (Increment 4a). Distinct from [`Stmt::UnrollFor`] in spelling the BOUND SYMBOL
+    /// (`M2_MARMITT_ITERS`) in the header, NOT a `<n>u` literal — the key difference that
+    /// (with `attr = "[loop]"`) makes DXC emit a genuine `OpLoop` (verified by the GO/NO-GO
+    /// spike: `OpLoopMerge` present). `iv` is the induction-variable name (`"i"`);
+    /// `bound_sym` the symbol the header spells; `body` the loop block. Recorded by
+    /// [`EmitCf::runtime_for`].
+    Loop {
+        attr: &'static str,
+        iv: &'static str,
+        bound_sym: &'static str,
+        body: Block,
+    },
     /// `continue;` — the loop-continue (skip the rest of the iteration).
     Continue,
     /// `return <expr>;` — a function return. LIVE in Increment 3: recorded by
@@ -1549,6 +1652,13 @@ pub struct BufParam(u32);
 #[derive(Clone, Copy)]
 pub struct RetCell;
 
+/// The FLOAT RETURN-VALUE cell handle on the Emit backend — a ZST (the return value travels
+/// in the recorded [`Stmt::Return`], not in a cell). The [`EmitCf`]'s [`Cf::RetCellF`]
+/// associated type (Increment 4a). Distinct type from [`RetCell`] only so the float / uint
+/// return facets stay separate at the call site; the recorded `Stmt::Return` is identical.
+#[derive(Clone, Copy)]
+pub struct RetCellF;
+
 thread_local! {
     /// The STMT block stack: the recorder pushes a [`Block`] on combinator entry
     /// (`unroll_for` / `if_`) and pops it into its parent on exit, so the top is always
@@ -1562,6 +1672,10 @@ thread_local! {
     /// [`Node::NamedLit`]'s `sym_id`. Deduped so repeated `named_lit("BRICK_EXIT_EPS", _)`
     /// calls share one id.
     static NAMED_LITS: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
+
+    /// The per-emit CALLEE names (`m2_cubic_eval`), indexed by [`Node::Call2`]'s `sym_id`
+    /// (Increment 4a). Deduped so repeated `call2("m2_cubic_eval", ...)` calls share one id.
+    static CALLS: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
 
     /// The monotone program-order temp counter (`t0`, `t1`, ...). Bumped by
     /// [`EmitCf::temp`] each time a temp is MATERIALIZED, so the `t{seq}` numbering follows
@@ -1619,6 +1733,20 @@ fn intern_named_lit(sym: &'static str) -> u32 {
         } else {
             let id = n.len() as u32;
             n.push(sym);
+            id
+        }
+    })
+}
+
+/// Registers a callee name, returning its (deduped) `sym_id` (Increment 4a).
+fn intern_call(sym: &'static str) -> u32 {
+    CALLS.with(|c| {
+        let mut c = c.borrow_mut();
+        if let Some(i) = c.iter().position(|&s| s == sym) {
+            i as u32
+        } else {
+            let id = c.len() as u32;
+            c.push(sym);
             id
         }
     })
@@ -1860,6 +1988,128 @@ impl Cf for EmitCf {
         record_stmt(Stmt::Return(value.0));
         Flow::Continue(())
     }
+
+    // ---- Increment 4a: the runtime `[loop]` + the FLOAT return facet (recorder) ------
+    // On Emit every value is an `Emit` SSA-node handle; `c` is a `Vec4Param` node, the
+    // ret-cell a ZST (the value travels in the recorded `Stmt::Return`).
+    type RetCellF = RetCellF;
+    type Vec4f = Emit;
+
+    fn decl_param(name: &'static str, _init: Emit) -> Var {
+        // SUPPRESSED-DECL: seed a `VARS` name entry (so get_var/set_var spell `hi`, `hi =
+        // ...;`) but record NO `Stmt::DeclVar` — `lo`/`hi`/`f_lo`/`f_hi` are HLSL SIGNATURE
+        // parameters, so a `float hi = ...;` redecl would diverge the committed text. `_init`
+        // (the param's symbolic seed) is unused: a parameter is already bound by name.
+        VARS.with(|v| {
+            let mut v = v.borrow_mut();
+            let id = v.len() as u32;
+            v.push(name);
+            Var(id)
+        })
+    }
+
+    fn temp_float(name: &'static str, x: Emit) -> Emit {
+        // A NAMED `float` temp (`float denom = ...;` / `float f_mid = ...;`).
+        record_temp(Some(name), EmitTy::Float, x)
+    }
+
+    fn select(cond: EmitMask, t: Emit, e: Emit) -> Emit {
+        // A `SelectParen` node — the printer wraps BOTH arms (the committed regula-falsi
+        // ternary). DISTINCT from `FieldScalar::select`'s `Select` (the brick-exit's
+        // un-wrapped clamp), so the brick-exit `.spv` is unperturbed.
+        Emit(push(Node::SelectParen(cond.0, t.0, e.0)))
+    }
+
+    fn call2(fn_sym: &'static str, a: Emit, b: Emit) -> Emit {
+        // `m2_cubic_eval(c, mid)` — a frozen-function call site. The callee name interns into
+        // the per-emit `CALLS` table; `a`/`b` are the two argument node ids.
+        let sym_id = intern_call(fn_sym);
+        Emit(push(Node::Call2 {
+            sym_id,
+            a: a.0,
+            b: b.0,
+        }))
+    }
+
+    fn runtime_for<F: FnMut(Emit) -> Flow>(
+        attr: &'static str,
+        iv: &'static str,
+        bound_sym: &'static str,
+        _bound_val: usize,
+        mut body: F,
+    ) -> Flow {
+        // The iv is a `uint` loop variable named `iv` (threaded single-source — no hardcoded
+        // "a"). Seeded as a `UintInput` carrying the iv name so any body `vec[iv]` would
+        // print `i`; `m2_regula_falsi` does not index by `i`, but the single-source discipline
+        // is pinned for Inc 4c (pick_material_id references `i`).
+        let iv_node = Emit(push(Node::UintInput(0)));
+        // Push the loop body block, record the body ONCE (the `?` never early-returns on Emit
+        // — every guard records structurally), then pop and wrap into a `Stmt::Loop`.
+        STMTS.with(|s| s.borrow_mut().push(Block { stmts: Vec::new() }));
+        let _ = body(iv_node);
+        let body_block = STMTS.with(|s| {
+            s.borrow_mut()
+                .pop()
+                .expect("invariant: the loop body block was pushed above")
+        });
+        record_stmt(Stmt::Loop {
+            attr,
+            iv,
+            bound_sym,
+            body: body_block,
+        });
+        // ALWAYS fall through on Emit (the body was recorded once; the function tail's
+        // `ret_f` is recorded after this returns).
+        Flow::Continue(())
+    }
+
+    fn if_else<T: FnOnce() -> Flow, E: FnOnce() -> Flow>(cond: EmitMask, then: T, els: E) -> Flow {
+        // Record the THEN block, then the ELSE block (each a push/record/pop), wrap into a
+        // `Stmt::IfElse`, and FALL THROUGH so the recorder keeps recording the live tail.
+        STMTS.with(|s| s.borrow_mut().push(Block { stmts: Vec::new() }));
+        let _ = then();
+        let then_block = STMTS.with(|s| {
+            s.borrow_mut()
+                .pop()
+                .expect("invariant: the if_else then block was pushed above")
+        });
+        STMTS.with(|s| s.borrow_mut().push(Block { stmts: Vec::new() }));
+        let _ = els();
+        let els_block = STMTS.with(|s| {
+            s.borrow_mut()
+                .pop()
+                .expect("invariant: the if_else else block was pushed above")
+        });
+        record_stmt(Stmt::IfElse {
+            cond: cond.0,
+            then: then_block,
+            els: els_block,
+        });
+        Flow::Continue(())
+    }
+
+    fn if_ret_f(_cell: &RetCellF, cond: EmitMask, value: Emit) -> Flow {
+        // `if (<cond>) { return <value>; }` — the then-block is EXACTLY ONE `Stmt::Return`
+        // (the float early-return guard; identical recorded shape to `if_ret`'s uint guard).
+        STMTS.with(|s| s.borrow_mut().push(Block { stmts: Vec::new() }));
+        record_stmt(Stmt::Return(value.0));
+        let then = STMTS.with(|s| {
+            s.borrow_mut()
+                .pop()
+                .expect("invariant: the if_ret_f then block was pushed above")
+        });
+        record_stmt(Stmt::If {
+            cond: cond.0,
+            then,
+        });
+        Flow::Continue(())
+    }
+
+    fn ret_f(_cell: &RetCellF, value: Emit) -> Flow {
+        // The float return — a single `Stmt::Return(value)` (the tail `return mid;`).
+        record_stmt(Stmt::Return(value.0));
+        Flow::Continue(())
+    }
 }
 
 // ---- The STMT printer + the brick-exit generator -------------------------------
@@ -1940,6 +2190,30 @@ fn print_block(block: &Block, arena: &[Node], names: Names, depth: usize, out: &
                 print_block(then, arena, names, depth + 1, out);
                 out.push_str(&format!("{pad}}}\n"));
             }
+            Stmt::IfElse { cond, then, els } => {
+                let cond_s = inline_expr(arena, names, &[], *cond);
+                out.push_str(&format!("{pad}if ({cond_s}) {{\n"));
+                print_block(then, arena, names, depth + 1, out);
+                out.push_str(&format!("{pad}}} else {{\n"));
+                print_block(els, arena, names, depth + 1, out);
+                out.push_str(&format!("{pad}}}\n"));
+            }
+            Stmt::Loop {
+                attr,
+                iv,
+                bound_sym,
+                body,
+            } => {
+                // The header spells the BOUND SYMBOL (`M2_MARMITT_ITERS`), NOT a `<n>u`
+                // literal — the difference (with `attr = "[loop]"`) that makes DXC emit a
+                // genuine OpLoop.
+                out.push_str(&format!("{pad}{attr}\n"));
+                out.push_str(&format!(
+                    "{pad}for (uint {iv} = 0u; {iv} < {bound_sym}; ++{iv}) {{\n"
+                ));
+                print_block(body, arena, names, depth + 1, out);
+                out.push_str(&format!("{pad}}}\n"));
+            }
             Stmt::Continue => out.push_str(&format!("{pad}continue;\n")),
             Stmt::Return(expr) => {
                 let expr_s = inline_expr(arena, names, &[], *expr);
@@ -2007,6 +2281,8 @@ pub fn emit_hlsl_dist_to_brick_exit() -> String {
         out_in: NO_OUT_INPUTS,
         named_lit: &named_lit,
         vars: &vars,
+        vec4_in: NO_VEC4_INPUTS,
+        call_in: NO_CALL_INPUTS,
     };
 
     ARENA.with(|a| {
@@ -2093,6 +2369,8 @@ pub fn emit_hlsl_brick_cell_class() -> String {
         out_in: &out_in,
         named_lit: &named_lit,
         vars: NO_VARS,
+        vec4_in: NO_VEC4_INPUTS,
+        call_in: NO_CALL_INPUTS,
     };
 
     ARENA.with(|a| {
@@ -2109,6 +2387,107 @@ pub fn emit_hlsl_brick_cell_class() -> String {
         format!(
             "uint brick_cell_class(StructuredBuffer<uint> grid, float3 origin, float bw, uint3 dims,\n\
              {SIG_INDENT}float3 p, out float3 cell_min) {{\n{body}}}\n"
+        )
+    })
+}
+
+/// Generates the HLSL `m2_regula_falsi` body — the regula-falsi root refinement with a
+/// RUNTIME `[loop]` (the smallest genuine `OpLoop`), five loop-carried Phi vars, an in-loop
+/// early return, and a `m2_cubic_eval(c, mid)` call site — by tracing the generic
+/// [`crate::brick::m2_regula_falsi_body`] over the `EmitCf` backend (whose `Cf::Scalar =
+/// Emit` supplies the SSA-node arithmetic), and returns the full `float m2_regula_falsi(
+/// float4 c, float lo, float hi, float f_lo, float f_hi) { ... }`.
+///
+/// The four carried params {lo, hi, f_lo, f_hi} are SUPPRESSED-DECL signature parameters
+/// (seeded via [`Cf::decl_param`], no `float lo = ...;` redecl); `mid` is a TRUE local
+/// (`float mid = lo;`). The `[loop]` header spells the BOUND SYMBOL `M2_MARMITT_ITERS`, NOT
+/// `8u` (the difference that makes DXC emit an `OpLoop`). The cubic call is recorded as a
+/// `m2_cubic_eval(c, mid)` call site — the leaf body is generated separately
+/// ([`emit_hlsl_cubic_eval`]); this spells only the call.
+///
+/// The body is spliced between the `// === GENERATED m2_regula_falsi BEGIN/END ===`
+/// sentinels in `crates/boyko_rhi_vulkan/shaders/sdf_gbuffer_composite.hlsl` (the function
+/// DEFINITION only — the two call sites in `m2_marmitt_root` are UNTOUCHED). The
+/// `m2_regula_falsi_matches_edsl_emit` test pins the committed shader to this output; the
+/// cmp-`.spv` proves it re-DXCs byte-identical to the committed `.comp.spv`.
+pub fn emit_hlsl_m2_regula_falsi() -> String {
+    use crate::brick;
+
+    // Fresh recorder state.
+    ARENA.with(|a| a.borrow_mut().clear());
+    STMTS.with(|s| s.borrow_mut().clear());
+    VARS.with(|v| v.borrow_mut().clear());
+    NAMED_LITS.with(|n| n.borrow_mut().clear());
+    CALLS.with(|c| c.borrow_mut().clear());
+    TEMP_SEQ.with(|c| *c.borrow_mut() = 0);
+    TEMP_TYPES.with(|t| t.borrow_mut().clear());
+    TEMP_NAMES.with(|t| t.borrow_mut().clear());
+
+    // Seed the function body block (the bottom of the STMTS stack).
+    STMTS.with(|s| s.borrow_mut().push(Block { stmts: Vec::new() }));
+
+    // Seed the parameters as their typed marker nodes / name handles:
+    //   c    → Vec4Param(0) (vec4_in[0]  = "c")    — the cubic coefficients (call-through)
+    //   lo   → Input(0)     (float_in[0] = "lo")
+    //   hi   → Input(1)     (float_in[1] = "hi")
+    //   f_lo → Input(2)     (float_in[2] = "f_lo")
+    //   f_hi → Input(3)     (float_in[3] = "f_hi")
+    // The four scalar params are seeded as `Input` nodes ONLY for the `decl_param`'s `init`
+    // (which is unused on Emit — a suppressed-decl param is bound by name, not by an init
+    // expression); the VARS entry the body's get/set resolves is created by `decl_param`.
+    let c = Emit(push(Node::Vec4Param(0)));
+    let lo = Emit::input(0);
+    let hi = Emit::input(1);
+    let f_lo = Emit::input(2);
+    let f_hi = Emit::input(3);
+    let out = RetCellF;
+
+    // The cubic-eval seam: on Emit it records a `m2_cubic_eval(c, mid)` call node.
+    brick::m2_regula_falsi_body::<EmitCf, _>(
+        c,
+        lo,
+        hi,
+        f_lo,
+        f_hi,
+        |c, mid| EmitCf::call2("m2_cubic_eval", c, mid),
+        &out,
+    );
+
+    // Pop the function body block and print it.
+    let body_block = STMTS.with(|s| {
+        s.borrow_mut()
+            .pop()
+            .expect("invariant: the function body block was pushed above")
+    });
+
+    let float_in = ["lo", "hi", "f_lo", "f_hi"];
+    let vec4_in = ["c"];
+    let named_lit = NAMED_LITS.with(|n| n.borrow().clone());
+    let call_in = CALLS.with(|c| c.borrow().clone());
+    let vars = VARS.with(|v| v.borrow().clone());
+    let names = Names {
+        float_in: &float_in,
+        uint_in: NO_UINT_INPUTS,
+        vec_in: NO_VEC_INPUTS,
+        uint3_in: NO_UINT3_INPUTS,
+        buf_in: NO_BUF_INPUTS,
+        out_in: NO_OUT_INPUTS,
+        named_lit: &named_lit,
+        vars: &vars,
+        vec4_in: &vec4_in,
+        call_in: &call_in,
+    };
+
+    ARENA.with(|a| {
+        let arena = a.borrow();
+        let mut body = String::new();
+        // The whole body is recorded statements (DeclVar mid, the runtime `Stmt::Loop` with
+        // its DeclTemp denom/f_mid, the SelectParen assign, the early `If { Return }`, the
+        // `Stmt::IfElse` bracket update) + the tail `Stmt::Return(mid)` — a flat in-order
+        // walk; the early return is a structural `Stmt::If`.
+        print_block(&body_block, &arena, names, 1, &mut body);
+        format!(
+            "float m2_regula_falsi(float4 c, float lo, float hi, float f_lo, float f_hi) {{\n{body}}}\n"
         )
     })
 }

@@ -307,6 +307,132 @@ pub trait Cf {
     /// [`Break`](LoopOp::Return); on Emit records a single `Stmt::Return(value)`. The
     /// body's tail `C::ret(&cell, tail)?` is the final return (`return grid[idx];`).
     fn ret(cell: &Self::RetCell, value: Self::Uint) -> Flow;
+
+    // ---- Increment 4a: the runtime `[loop]` + the FLOAT return facet ----------------
+    //
+    // `m2_regula_falsi` (the smallest genuine runtime `[loop]`) returns a FLOAT
+    // (`return mid;`) and carries five Phi vars across a const-bounded `[loop]` whose
+    // header spells a BOUND SYMBOL (`M2_MARMITT_ITERS`, not a `<n>u` literal). The
+    // facets below are ADDITIVE — the `uint` return path ([`ret`](Self::ret) /
+    // [`if_ret`](Self::if_ret) / [`RetCell`](Self::RetCell)) used by `brick_cell_class`
+    // is UNTOUCHED. `brk()`/`Stmt::Break` are DEFERRED to Inc 4b (`m2_regula_falsi` has
+    // no plain break, so no untested emit surface is added now).
+
+    /// The FLOAT RETURN-VALUE cell (`Cell<f32>` on Eval — the body-local cell the
+    /// function-scope IIFE reads after an early in-loop return; a ZST on Emit, the value
+    /// travels in the recorded `Stmt::Return`). The float analogue of [`RetCell`](Self::
+    /// RetCell). Owned, passed by `&` to [`ret_f`](Self::ret_f) / [`if_ret_f`](Self::
+    /// if_ret_f).
+    type RetCellF;
+
+    /// A `float4` PARAMETER (`c`, the cubic coefficients) — `[f32; 4]` on Eval (opaque:
+    /// `c` is CALL-THROUGH-ONLY, never swizzled in `m2_regula_falsi`), a `Node::Vec4Param`
+    /// name handle on Emit. Consumed solely by [`call2`](Self::call2) (`m2_cubic_eval(c,
+    /// mid)`). `Copy` (a `[f32; 4]` / a name handle).
+    type Vec4f: Copy;
+
+    /// Seeds a SIGNATURE PARAMETER as a mutable local WITHOUT a declaration. The four
+    /// regula-falsi carried params {lo, hi, f_lo, f_hi} are HLSL signature parameters
+    /// (`float lo`, ...), so [`get_var`](Self::get_var)/[`set_var`](Self::set_var) must
+    /// resolve their names (`hi`, `hi = ...;`) but the body must record NO
+    /// `Stmt::DeclVar` (a `float lo = ...;` redecl would diverge the text). Eval boxes the
+    /// param value into a `Cell` (identical to [`decl_var`](Self::decl_var) on Eval); Emit
+    /// seeds a [`Var`](Self::Var) name entry but records NO statement — the SUPPRESSED-DECL
+    /// path. (`mid` is a TRUE local → `decl_var("mid", get_var(&lo))` → `float mid = lo;`.)
+    fn decl_param(name: &'static str, init: Self::Scalar) -> Self::Var;
+
+    /// Forces `x` to MATERIALIZE as a NAMED `float <name>` local in program order — the
+    /// `float` analogue of [`temp_vec3`](Self::temp_vec3) / [`temp_uint`](Self::temp_uint)
+    /// (the brick-cell named locals). `m2_regula_falsi`'s `float denom = ...;` and `float
+    /// f_mid = ...;` are NAMED (not anonymous `tN`), so the body uses `temp_float("denom",
+    /// ...)`. Eval is identity (the value flows directly); Emit records a named `float`
+    /// `Stmt::DeclTemp`.
+    fn temp_float(name: &'static str, x: Self::Scalar) -> Self::Scalar;
+
+    /// `cond ? t : e` — the value select over [`Scalar`](Self::Scalar). Eval is the eager
+    /// `if cond { t } else { e }` (both arms pure; the discarded `denom ≈ 0` path's `inf`
+    /// is never read — matching the GPU computing BOTH ternary arms); Emit records a
+    /// `Node::Select` whose printer wraps BOTH arms unconditionally `({cond}) ? ({t}) :
+    /// ({e})` (the committed `m2_regula_falsi` ternary form). Distinct from
+    /// [`FieldScalar::select`] only in being routed through [`Cf`] so the marcher body
+    /// reads `C::select(...)` uniformly with the other combinators.
+    fn select(
+        cond: <Self::Scalar as FieldScalar>::Mask,
+        t: Self::Scalar,
+        e: Self::Scalar,
+    ) -> Self::Scalar;
+
+    /// A call to a FROZEN hand-written shader function of two args — `m2_cubic_eval(c,
+    /// mid)`. The leaf body (`m2_cubic_eval`) is already generated separately; here it is
+    /// spelled as a CALL SITE (like [`crate::normal`] spells `sdf(...)`). `fn_sym` is the
+    /// callee name; `a`/`b` the two argument values (heterogeneous types — `c` is a
+    /// `float4`, `mid` a `float` — live in the node graph, so both are plain
+    /// [`Scalar`](Self::Scalar)-or-[`Vec4f`](Self::Vec4f) handles). Returns a
+    /// [`Scalar`](Self::Scalar). On Eval, the host evaluates the frozen function directly
+    /// (the closure passed by the generic body); on Emit, records a `Node::Call2`.
+    fn call2(fn_sym: &'static str, a: Self::Vec4f, b: Self::Scalar) -> Self::Scalar;
+
+    /// Runs a RUNTIME `for (uint <iv> = 0u; <iv> < <bound_sym>; ++<iv>)` over `body`. THE
+    /// new control-flow construct (Inc 4a) — the FIRST genuine runtime `[loop]` (an
+    /// `OpLoop`, vs the `[unroll]` of [`unroll_for`](Self::unroll_for)). `attr` is the loop
+    /// attribute (`"[loop]"`); `iv` the induction-variable name (`"i"`); `bound_sym` the
+    /// BOUND SYMBOL the header spells (`"M2_MARMITT_ITERS"`, NOT a `<n>u` literal — the key
+    /// diff from `unroll_for`); `bound_val` the concrete trip count Eval iterates (the
+    /// symbol's value, `8`). `body` returns a [`Flow`].
+    ///
+    /// EvalCf CONTROL TABLE (driven per-arm by a unit test):
+    /// - body returns `Continue(())` → run the next iteration;
+    /// - `Break(`[`LoopOp::Continue`]`)` → a real `continue` (skip this iteration's tail);
+    /// - `Break(`[`LoopOp::Break`]`)` → a real `break`, THEN `return Flow::Continue(())`
+    ///   (the loop consumed its own break; the function tail runs);
+    /// - `Break(`[`LoopOp::Return`]`)` → `return Flow::Break(LoopOp::Return)` — FORWARD the
+    ///   function return to the caller's `?` (the function-scope IIFE), so an in-loop
+    ///   `ret_f` short-circuits the tail `ret_f` (the early `mid`, NOT the 8-iter `mid`);
+    /// - natural completion → `return Flow::Continue(())`.
+    ///
+    /// So `runtime_for` CONSUMES its own loop control (Break/Continue) and FORWARDS the
+    /// function return — hence it RETURNS [`Flow`] (unlike [`unroll_for`](Self::unroll_for),
+    /// whose body has no `ret`). On Emit it ALWAYS returns `Flow::Continue(())` (records the
+    /// body once; `?` never fires on Emit), and threads `iv`/`bound_sym` into the
+    /// `Stmt::Loop` header (single-source — no hardcoded name).
+    fn runtime_for<F: FnMut(Self::Iv) -> Flow>(
+        attr: &'static str,
+        iv: &'static str,
+        bound_sym: &'static str,
+        bound_val: usize,
+        body: F,
+    ) -> Flow;
+
+    /// `if (cond) { then } else { els }` — the TWO-arm branch (the existing [`if_`](Self::
+    /// if_) is single-arm). `m2_regula_falsi`'s `if (f_lo * f_mid <= 0.0) { hi = mid; f_hi =
+    /// f_mid; } else { lo = mid; f_lo = f_mid; }`. Each arm is a `FnOnce() -> `[`Flow`]
+    /// recording its block (here pure `set_var`s, returning `Flow::Continue(())`). Eval runs
+    /// the real `if`/`else`; Emit records a `Stmt::IfElse` (push/record/pop each block) and
+    /// FALLS THROUGH (`Flow::Continue(())`), so the recorder keeps recording the tail.
+    fn if_else<T: FnOnce() -> Flow, E: FnOnce() -> Flow>(
+        cond: <Self::Scalar as FieldScalar>::Mask,
+        then: T,
+        els: E,
+    ) -> Flow;
+
+    /// `if (cond) { return value; }` — the FLOAT early-return guard (the float analogue of
+    /// [`if_ret`](Self::if_ret)). On Eval: when `cond`, `value` is deposited into the
+    /// [`RetCellF`](Self::RetCellF) (via `&cell`) and a [`Break`](LoopOp::Return) is
+    /// returned (the body's `?` forwards it through [`runtime_for`](Self::runtime_for) to
+    /// the function-scope IIFE, skipping the tail); else FALL THROUGH. On Emit: records a
+    /// `Stmt::If` whose then-block is EXACTLY ONE `Stmt::Return(value)`. `m2_regula_falsi`'s
+    /// `if (abs(f_mid) <= ... || (hi - lo) <= ...) { return mid; }`.
+    fn if_ret_f(
+        cell: &Self::RetCellF,
+        cond: <Self::Scalar as FieldScalar>::Mask,
+        value: Self::Scalar,
+    ) -> Flow;
+
+    /// The FLOAT function-return (the float analogue of [`ret`](Self::ret)). On Eval
+    /// deposits `value` into the [`RetCellF`](Self::RetCellF) and returns
+    /// [`Break`](LoopOp::Return); on Emit records a single `Stmt::Return(value)`.
+    /// `m2_regula_falsi`'s tail `return mid;`.
+    fn ret_f(cell: &Self::RetCellF, value: Self::Scalar) -> Flow;
 }
 
 /// The control-flow EVAL backend — REAL host `for`/`if`/`continue`, a unit ZST.
@@ -375,15 +501,18 @@ impl Cf for EvalCf {
                 core::ops::ControlFlow::Continue(()) => {}
                 core::ops::ControlFlow::Break(LoopOp::Continue) => continue,
                 core::ops::ControlFlow::Break(LoopOp::Break) => break,
-                // `Break(Return)` is a FUNCTION return, consumed by the function-scope IIFE's
-                // `?` — it must never reach a loop level (the only CF leaf with a `ret`,
-                // `brick_cell_class`, has no loop). If it does, a body wired a `ret` inside a
-                // loop without an enclosing IIFE: a bug, not a silent loop-break.
+                // `Break(Return)` is a FUNCTION return. The RUNTIME-loop carrier is
+                // [`runtime_for`](Cf::runtime_for) (Inc 4a), which FORWARDS it to the
+                // function-scope IIFE's `?`; an UNROLLED loop's body never has a `ret`
+                // (`dist_to_brick_exit` has no early return), so a `Return` reaching an
+                // `unroll_for` is a body that wired a `ret` inside an `[unroll]` without an
+                // enclosing IIFE: a bug, not a silent loop-break.
                 core::ops::ControlFlow::Break(LoopOp::Return) => {
                     debug_assert!(
                         false,
-                        "LoopOp::Return reached a loop level: a `ret` must be consumed by a \
-                         function-scope IIFE's `?`, not the loop (brick_cell_class has no loop)"
+                        "LoopOp::Return reached an unroll_for level: a `ret` in a runtime loop \
+                         is carried by runtime_for (which forwards it to the function IIFE's \
+                         `?`); an unrolled loop body has no early return"
                     );
                     break;
                 }
@@ -539,6 +668,96 @@ impl Cf for EvalCf {
 
     #[inline]
     fn ret(cell: &core::cell::Cell<u32>, value: u32) -> Flow {
+        cell.set(value);
+        core::ops::ControlFlow::Break(LoopOp::Return)
+    }
+
+    // ---- Increment 4a: the runtime `[loop]` + the FLOAT return facet (native host) ----
+    type RetCellF = core::cell::Cell<f32>;
+    type Vec4f = [f32; 4];
+
+    #[inline]
+    fn decl_param(_name: &'static str, init: f32) -> core::cell::Cell<f32> {
+        // On Eval a suppressed-decl param is IDENTICAL to `decl_var` — the "no decl
+        // recorded" distinction is an Emit-only printing concern (a `Cell` has no printed
+        // identity). The carried-state model (a `Cell<f32>` the loop closure mutates and the
+        // tail reads) is the SAME interior-mutability pattern the other vars use.
+        core::cell::Cell::new(init)
+    }
+
+    #[inline]
+    fn temp_float(_name: &'static str, x: f32) -> f32 {
+        // IDENTITY on Eval — materialization is an emit-only printing concern.
+        x
+    }
+
+    #[inline]
+    fn select(cond: bool, t: f32, e: f32) -> f32 {
+        // Eager `if cond { t } else { e }` — both arms are already computed (pure float
+        // arithmetic). On the degenerate `denom ≈ 0` path the discarded then-arm produces an
+        // `inf` (`f_lo * (hi - lo) / 0`), but it is NEVER read (the else bisection arm is
+        // selected), so the Eval result matches the GPU (which also computes both ternary
+        // arms and selects). This is the SAME value-select shape `FieldScalar::select` has.
+        if cond { t } else { e }
+    }
+
+    #[inline]
+    fn call2(_fn_sym: &'static str, _a: [f32; 4], _b: f32) -> f32 {
+        // On Eval the frozen callee (`m2_cubic_eval`) is invoked through a closure the
+        // generic body threads (the field-call seam, like `sdf_normal_body`'s `sdf`
+        // closure) — NOT through this hook, which is the EMIT call-site recorder. The Eval
+        // body never calls `Cf::call2` (it calls the closure directly), so this is
+        // UNREACHED on Eval. A panic is the honest signal instead of a wrong value.
+        unreachable!(
+            "Cf::call2 is the EMIT call-site recorder; the Eval body invokes the frozen \
+             callee through the threaded closure, not this hook"
+        )
+    }
+
+    #[inline]
+    fn runtime_for<F: FnMut(usize) -> Flow>(
+        _attr: &'static str,
+        _iv: &'static str,
+        _bound_sym: &'static str,
+        bound_val: usize,
+        mut body: F,
+    ) -> Flow {
+        for i in 0..bound_val {
+            match body(i) {
+                // Fall through to the next iteration.
+                core::ops::ControlFlow::Continue(()) => {}
+                // The loop CONSUMES its own continue/break.
+                core::ops::ControlFlow::Break(LoopOp::Continue) => continue,
+                core::ops::ControlFlow::Break(LoopOp::Break) => break,
+                // FORWARD the function return to the caller's `?` (the function-scope IIFE):
+                // an in-loop `ret_f` short-circuits the tail `ret_f`, so the EARLY `mid`
+                // (not the final-iteration `mid`) is the result.
+                core::ops::ControlFlow::Break(LoopOp::Return) => {
+                    return core::ops::ControlFlow::Break(LoopOp::Return);
+                }
+            }
+        }
+        // Natural completion (and the consumed break) fall through to the function tail.
+        core::ops::ControlFlow::Continue(())
+    }
+
+    #[inline]
+    fn if_else<T: FnOnce() -> Flow, E: FnOnce() -> Flow>(cond: bool, then: T, els: E) -> Flow {
+        if cond { then() } else { els() }
+    }
+
+    #[inline]
+    fn if_ret_f(cell: &core::cell::Cell<f32>, cond: bool, value: f32) -> Flow {
+        if cond {
+            cell.set(value);
+            core::ops::ControlFlow::Break(LoopOp::Return)
+        } else {
+            core::ops::ControlFlow::Continue(())
+        }
+    }
+
+    #[inline]
+    fn ret_f(cell: &core::cell::Cell<f32>, value: f32) -> Flow {
         cell.set(value);
         core::ops::ControlFlow::Break(LoopOp::Return)
     }

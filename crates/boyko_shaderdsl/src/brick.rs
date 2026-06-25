@@ -60,6 +60,29 @@ pub const BRICK_EXIT_EPS: f32 = 1.0e-4;
 /// (and -127) to `-1.0`. Mirrors the host `decode_snorm8`'s `i8::MIN` branch.
 pub const SNORM_SENTINEL: i32 = i8::MIN as i32;
 
+/// The fixed regula-falsi iteration budget — `m2_regula_falsi`'s `[loop]` trip count.
+/// Mirrors the GPU's `M2_MARMITT_ITERS` (`sdf_gbuffer_composite.hlsl:656`) and the host
+/// `boyko_sdf_math::brick::MARMITT_ITERS` (brick.rs:1276). Spelled SYMBOLICALLY in the
+/// emitted HLSL header (`M2_MARMITT_ITERS`, NOT `8u`) — the bound symbol the `[loop]`
+/// for-header carries.
+pub const M2_MARMITT_ITERS: usize = 8;
+
+/// The root residual / bracket-collapse tolerance — `m2_regula_falsi`'s early-return
+/// guard `abs(f_mid) <= M2_CUBIC_ROOT_EPS || (hi - lo) <= M2_CUBIC_ROOT_EPS`. Mirrors the
+/// GPU's `M2_CUBIC_ROOT_EPS` (`sdf_gbuffer_composite.hlsl:655`) and the host
+/// `boyko_sdf_math::brick::CUBIC_ROOT_EPS` (brick.rs:1269). Spelled SYMBOLICALLY in the
+/// emitted HLSL (`M2_CUBIC_ROOT_EPS`, NOT `1.0e-6`).
+pub const M2_CUBIC_ROOT_EPS: f32 = 1.0e-6;
+
+/// The degenerate-bracket guard `abs(denom) > M2_REGULA_DENOM_EPS` — when the function
+/// values at the bracket ends are too close (a flat secant), `m2_regula_falsi` falls back
+/// to the bisection midpoint. The committed GPU body spells the LITERAL `1.0e-30` inline
+/// (NOT a named symbol); this constant is the eDSL single-source of that literal. NOTE:
+/// the GPU shape uses `1.0e-30`, whereas the host `regula_falsi` uses `f32::MIN_POSITIVE`
+/// (≈1.18e-38) — the eDSL body picks the GPU SHAPE (the byte-identity target), exactly as
+/// `dist_to_brick_exit_body` picks the GPU's `1.0e30` over the host's `f32::INFINITY`.
+pub const M2_REGULA_DENOM_EPS: f32 = 1.0e-30;
+
 /// The byte → normalized-float step of the snorm decode: `q == i8::MIN ? -1 : q/127`.
 ///
 /// On the GPU this is done by the FIXED-FUNCTION `R8_SNORM` sampler (hardware), so the
@@ -418,5 +441,125 @@ pub fn brick_cell_class_body<C: Cf>(
     };
     // Discard the Flow: on Eval the early `?` already deposited the class into `cls`; on
     // Emit the recorder captured every statement.
+    let _ = run();
+}
+
+// ---- The regula-falsi root refinement leaf (Increment 4a: a RUNTIME `[loop]`) ----
+//
+// The THIRD control-flow leaf — the FIRST with a genuine RUNTIME loop (an `OpLoop`, vs
+// `dist_to_brick_exit`'s `[unroll]`). `m2_regula_falsi` carries FIVE Phi vars across a
+// const-bounded `[loop]` (whose header spells the BOUND SYMBOL `M2_MARMITT_ITERS`, not a
+// `<n>u` literal): {lo, hi, f_lo, f_hi} as SIGNATURE PARAMS (suppressed-decl) + `mid` as a
+// TRUE local. It has an in-loop EARLY RETURN (`return mid;`), forwarded through the runtime
+// loop to the function-scope IIFE by `?` (so the early `mid` — not the final-iteration
+// `mid` — is returned). Authored ONCE over the control-flow axis `C: Cf` + a field-call
+// seam (the frozen `m2_cubic_eval`). Instantiated:
+//   - `<EvalCf>` — the CPU oracle (real `for`/`if`-`else`/`Cell` + the host cubic closure);
+//     the `eval_byte_identity` regula-falsi sweep (incl. the early-return-at-k<8 case) locks
+//     it against a frozen GPU-shape reference.
+//   - `<EmitCf>` — the HLSL recorder; the printer
+//     (`crate::emit::emit_hlsl_m2_regula_falsi`) walks the STMT IR into the `[loop]` body
+//     spliced into `sdf_gbuffer_composite.hlsl` (byte-identical to the committed
+//     `.comp.spv`, proven by the cmp-`.spv`).
+//
+// GPU-SHAPE CANONICAL FORM: the degenerate-bracket guard uses `1.0e-30`
+// ([`M2_REGULA_DENOM_EPS`]), the COMMITTED GPU literal — NOT the host `regula_falsi`'s
+// `f32::MIN_POSITIVE`. The two ALREADY diverge on a near-flat secant whose `|denom|` lands
+// in `(1.18e-38, 1.0e-30)` (the GPU bisects, the host secant-steps), so the host
+// `regula_falsi` is NOT the oracle: the eval sweep pins this body against a frozen GPU-shape
+// reference (the same single-source discipline `dist_to_brick_exit_body` uses).
+
+/// Refines a sign-bracketed root of the JCGT cubic in `[lo, hi]` by regula-falsi (false
+/// position), depositing the refined `mid` into `out`. Authored ONCE over the control-flow
+/// axis `C` + the cubic-eval seam `eval`. Mirrors the GPU `m2_regula_falsi`
+/// (`sdf_gbuffer_composite.hlsl:867-885`) statement-for-statement.
+///
+/// `c` is the cubic coefficients (call-through-only — passed to `eval`, never swizzled);
+/// `lo`/`hi`/`f_lo`/`f_hi` are the bracket ends and their function values. `eval` is the
+/// cubic-eval seam (see [`crate::normal`]'s field-call seam): on Eval it is the host
+/// `cubic_eval` closure (so `m2_regula_falsi_body::<EvalCf>` re-runs the host cubic at each
+/// `mid`); on Emit it records a `m2_cubic_eval(c, mid)` call node (via [`Cf::call2`]).
+///
+/// The body is a FUNCTION-SCOPE IIFE `run = || -> Flow { ...; ret_f(out, mid)?; Continue }`,
+/// so an in-loop [`Cf::if_ret_f`]'s `Break(Return)` forwards through [`Cf::runtime_for`]'s
+/// `?` to the IIFE's `?` — skipping the tail `ret_f` (the early `mid` is the result, NOT the
+/// 8-iteration `mid`). On Emit every branch is recorded structurally (`?` never early-
+/// returns); the whole body is captured.
+#[inline]
+pub fn m2_regula_falsi_body<C: Cf, F: Fn(C::Vec4f, C::Scalar) -> C::Scalar>(
+    c: C::Vec4f,
+    lo0: C::Scalar,
+    hi0: C::Scalar,
+    f_lo0: C::Scalar,
+    f_hi0: C::Scalar,
+    eval: F,
+    out: &C::RetCellF,
+) {
+    let run = || -> Flow {
+        // The four carried params are SIGNATURE parameters (suppressed-decl — get/set spell
+        // `lo`/`hi`/..., but NO `float lo = ...;` redecl is recorded).
+        let lo = C::decl_param("lo", lo0);
+        let hi = C::decl_param("hi", hi0);
+        let f_lo = C::decl_param("f_lo", f_lo0);
+        let f_hi = C::decl_param("f_hi", f_hi0);
+        // `float mid = lo;` — a TRUE local (a recorded DeclVar).
+        let mid = C::decl_var("mid", C::get_var(&lo));
+
+        C::runtime_for(
+            "[loop]",
+            "i",
+            "M2_MARMITT_ITERS",
+            M2_MARMITT_ITERS,
+            |_i| -> Flow {
+                // float denom = f_hi - f_lo;
+                let denom = C::temp_float("denom", C::get_var(&f_hi).sub(C::get_var(&f_lo)));
+                // mid = (abs(denom) > 1.0e-30) ? (lo - f_lo * (hi - lo) / denom) : (0.5 * (lo + hi));
+                let denom_eps = C::Scalar::lit(M2_REGULA_DENOM_EPS);
+                // The secant step `lo - f_lo * (hi - lo) / denom` (left-to-right: `(hi - lo)`
+                // then `/ denom` then `* f_lo` then `lo - ...`).
+                let secant = C::get_var(&lo).sub(
+                    C::get_var(&f_lo)
+                        .mul(C::get_var(&hi).sub(C::get_var(&lo)))
+                        .div(denom),
+                );
+                // The bisection fallback `0.5 * (lo + hi)`.
+                let bisect = C::Scalar::lit(0.5).mul(C::get_var(&lo).add(C::get_var(&hi)));
+                C::set_var(&mid, C::select(denom.abs().gt(denom_eps), secant, bisect));
+                // float f_mid = m2_cubic_eval(c, mid);
+                let f_mid = C::temp_float("f_mid", eval(c, C::get_var(&mid)));
+                // if (abs(f_mid) <= M2_CUBIC_ROOT_EPS || (hi - lo) <= M2_CUBIC_ROOT_EPS) { return mid; }
+                let root_eps = C::named_lit("M2_CUBIC_ROOT_EPS", M2_CUBIC_ROOT_EPS);
+                let converged = C::or(
+                    f_mid.abs().le(root_eps),
+                    C::get_var(&hi).sub(C::get_var(&lo)).le(root_eps),
+                );
+                // The `?` forwards a Break(Return) through runtime_for to the function IIFE.
+                C::if_ret_f(out, converged, C::get_var(&mid))?;
+                // if (f_lo * f_mid <= 0.0) { hi = mid; f_hi = f_mid; } else { lo = mid; f_lo = f_mid; }
+                let bracket = C::get_var(&f_lo).mul(f_mid).le(C::Scalar::lit(0.0));
+                // The bracket update is a two-arm branch with no continue/return (both arms
+                // fall through), so its `Flow` is always `Continue` — discard it (no `?`).
+                let _ = C::if_else(
+                    bracket,
+                    || {
+                        C::set_var(&hi, C::get_var(&mid));
+                        C::set_var(&f_hi, f_mid);
+                        Flow::Continue(())
+                    },
+                    || {
+                        C::set_var(&lo, C::get_var(&mid));
+                        C::set_var(&f_lo, f_mid);
+                        Flow::Continue(())
+                    },
+                );
+                Flow::Continue(())
+            },
+        )?;
+        // return mid;  (reached only when the loop completes its budget without converging.)
+        C::ret_f(out, C::get_var(&mid))?;
+        Flow::Continue(())
+    };
+    // Discard the Flow: on Eval the early `?` already deposited the refined `mid` into `out`;
+    // on Emit the recorder captured every statement.
     let _ = run();
 }

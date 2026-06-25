@@ -1048,3 +1048,309 @@ fn brick_cell_class_tail_skip_on_eval() {
     let (class_in, _) = refactored_brick_cell_class(&grid, origin, bw, dims, [0.5, 0.5, 0.5]);
     assert_eq!(class_in, 0xAAAA_AAAA, "the in-grid point must read grid[0]");
 }
+
+// ======================================================================
+// Increment 4a — the regula-falsi root-refinement MARCHER leaf (RUNTIME [loop]).
+//
+// The THIRD control-flow leaf, the FIRST with a genuine runtime `[loop]` (an OpLoop):
+// five loop-carried Phi vars + an in-loop early return forwarded to the function IIFE +
+// a `m2_cubic_eval(c, mid)` call. The eDSL `m2_regula_falsi_body::<EvalCf>` is the CPU
+// oracle.
+//
+// GPU-SHAPE CANONICAL FORM: the degenerate-bracket guard uses `1.0e-30` (the committed
+// GPU literal), NOT the host `regula_falsi`'s `f32::MIN_POSITIVE` — so the two ALREADY
+// DIVERGE on a near-flat secant whose `|denom|` lands in (1.18e-38, 1.0e-30) (the GPU
+// bisects, the host secant-steps). The eDSL body picks the GPU SHAPE; its single-source
+// authority is the FROZEN GPU-shape reference below, NOT a host call (the same discipline
+// `dist_to_brick_exit_body` uses). The sweep:
+//   (a) proves the canonical body equals the frozen GPU-shape reference to-bits over a
+//       broad random set + targeted hard cases (degenerate denom → bisection arm,
+//       bracket-collapse early return, non-finite), and
+//   (b) a SPECIFIC early-return-at-iteration-k<8 case asserts the EARLY `mid` (not the
+//       8-iteration `mid`) — the test that catches a void-combinator / ret-forwarding bug.
+// ======================================================================
+
+const FROZEN_M2_CUBIC_ROOT_EPS: f32 = 1.0e-6; // boyko_shaderdsl::brick::M2_CUBIC_ROOT_EPS
+const FROZEN_M2_MARMITT_ITERS: usize = 8; // boyko_shaderdsl::brick::M2_MARMITT_ITERS
+const FROZEN_M2_REGULA_DENOM_EPS: f32 = 1.0e-30; // boyko_shaderdsl::brick::M2_REGULA_DENOM_EPS
+
+/// Verbatim hand-mirror of the GPU-SHAPE `m2_regula_falsi` (committed
+/// `sdf_gbuffer_composite.hlsl:867-885`), with the EXACT operand order. The degenerate-
+/// bracket guard uses `1.0e-30` (the GPU literal — NOT the host `f32::MIN_POSITIVE`). Do
+/// NOT "clean up": the `1.0e-30` guard + the secant operand order + the early return are
+/// the contract under test. Calls the frozen `cubic_eval` (the same `m2_cubic_eval` the
+/// GPU calls).
+fn frozen_gpu_m2_regula_falsi(
+    c: &[f32; 4],
+    mut lo: f32,
+    mut hi: f32,
+    mut f_lo: f32,
+    mut f_hi: f32,
+) -> f32 {
+    let mut mid = lo;
+    for _ in 0..FROZEN_M2_MARMITT_ITERS {
+        let denom = f_hi - f_lo;
+        mid = if denom.abs() > FROZEN_M2_REGULA_DENOM_EPS {
+            lo - f_lo * (hi - lo) / denom
+        } else {
+            0.5 * (lo + hi)
+        };
+        let f_mid = frozen_cubic_eval(c, mid);
+        if f_mid.abs() <= FROZEN_M2_CUBIC_ROOT_EPS || (hi - lo) <= FROZEN_M2_CUBIC_ROOT_EPS {
+            return mid;
+        }
+        if f_lo * f_mid <= 0.0 {
+            hi = mid;
+            f_hi = f_mid;
+        } else {
+            lo = mid;
+            f_lo = f_mid;
+        }
+    }
+    mid
+}
+
+/// The eDSL regula-falsi over the `<EvalCf>` instantiation (the CPU oracle). The cubic-eval
+/// seam is the frozen `cubic_eval` closure (so this re-runs the SAME frozen cubic at each
+/// `mid`). Drives the out-of-band `out` cell and returns the refined `mid`.
+fn refactored_m2_regula_falsi(c: &[f32; 4], lo: f32, hi: f32, f_lo: f32, f_hi: f32) -> f32 {
+    use std::cell::Cell;
+    let out = Cell::new(0.0f32);
+    boyko_shaderdsl::brick::m2_regula_falsi_body::<EvalCf, _>(
+        *c,
+        lo,
+        hi,
+        f_lo,
+        f_hi,
+        |cc, mid| frozen_cubic_eval(&cc, mid),
+        &out,
+    );
+    out.get()
+}
+
+#[test]
+fn m2_regula_falsi_oracle_sweep_byte_identical() {
+    // Random cubic coefficients + bracket ends (with the LCG's NaN/Inf/±0/MAX/MIN draws
+    // mixed into every operand) vs the frozen GPU-shape reference, to-bits.
+    let mut lcg = Lcg::new(0x4EC0_FA15_1DEA_6006);
+    for _ in 0..20_000 {
+        let c = [
+            lcg.next_f32(4.0),
+            lcg.next_f32(4.0),
+            lcg.next_f32(4.0),
+            lcg.next_f32(4.0),
+        ];
+        let lo = lcg.next_f32(2.0);
+        let hi = lcg.next_f32(2.0);
+        // Seed f_lo/f_hi from the cubic so a real sign bracket forms ~half the time (both
+        // bracket-update arms + the early return fire), plus the LCG's non-finite draws.
+        let f_lo = if lcg.next_u32().is_multiple_of(2) {
+            frozen_cubic_eval(&c, lo)
+        } else {
+            lcg.next_f32(3.0)
+        };
+        let f_hi = if lcg.next_u32().is_multiple_of(2) {
+            frozen_cubic_eval(&c, hi)
+        } else {
+            lcg.next_f32(3.0)
+        };
+        assert_bits(
+            refactored_m2_regula_falsi(&c, lo, hi, f_lo, f_hi),
+            frozen_gpu_m2_regula_falsi(&c, lo, hi, f_lo, f_hi),
+            "regula-falsi-sweep",
+        );
+    }
+}
+
+#[test]
+fn m2_regula_falsi_degenerate_denom_takes_bisection_byte_identical() {
+    // Degenerate (flat) bracket: |f_hi - f_lo| <= 1.0e-30 forces the bisection midpoint
+    // `0.5 * (lo + hi)` (the GPU-shape `1.0e-30` guard, NOT the host's f32::MIN_POSITIVE).
+    // The discarded secant arm's `/ denom` produces an inf that must NOT leak (the eager
+    // EvalCf::select computes both arms but selects the bisection one).
+    let c = [0.3f32, -1.2, 0.7, 0.05];
+    // f_lo == f_hi -> denom == 0 -> bisection on iteration 0. The first mid = 0.5*(lo+hi).
+    let lo = -0.4f32;
+    let hi = 1.6f32;
+    let f_same = 2.0f32; // both ends same sign + equal -> denom 0, no sign bracket
+    assert_bits(
+        refactored_m2_regula_falsi(&c, lo, hi, f_same, f_same),
+        frozen_gpu_m2_regula_falsi(&c, lo, hi, f_same, f_same),
+        "regula-falsi-degenerate-denom",
+    );
+    // A sub-1e-30 (but non-zero) denom also bisects (the `>` guard is strict).
+    let f_hi = f_same + 1.0e-32;
+    assert_bits(
+        refactored_m2_regula_falsi(&c, lo, hi, f_same, f_hi),
+        frozen_gpu_m2_regula_falsi(&c, lo, hi, f_same, f_hi),
+        "regula-falsi-subeps-denom",
+    );
+}
+
+#[test]
+fn m2_regula_falsi_early_return_at_iteration_k_lt_8() {
+    // THE void-combinator / ret-forwarding catch: an input that CONVERGES (early-returns)
+    // at an iteration k < 8 must return the EARLY `mid` (the iteration-k value), NOT the
+    // 8-iteration `mid`. If runtime_for swallowed the Break(Return) (the deleted void
+    // combinator) or returned the wrong Flow, the tail `ret_f(out, mid_final)` would
+    // overwrite the early value and this would fail.
+    //
+    // Construct a cubic with a clean root inside [lo, hi] so regula-falsi converges fast.
+    // c(t) = t (a line through 0): root at t=0; f(lo)<0, f(hi)>0 brackets it. The first
+    // secant step lands exactly on the root (a linear function), so f_mid == 0 <= EPS and
+    // it returns at iteration 0 — the EARLIEST possible early return.
+    let c = [0.0f32, 1.0, 0.0, 0.0]; // c0=0, c1=1, c2=0, c3=0  ->  f(t) = t
+    let lo = -1.0f32;
+    let hi = 2.0f32;
+    let f_lo = frozen_cubic_eval(&c, lo); // -1.0
+    let f_hi = frozen_cubic_eval(&c, hi); // 2.0
+    // The secant on a line is exact: mid = lo - f_lo*(hi-lo)/(f_hi-f_lo)
+    //   = -1 - (-1)*(3)/(3) = -1 + 1 = 0.0  -> f_mid = 0 -> early return at iter 0.
+    let got = refactored_m2_regula_falsi(&c, lo, hi, f_lo, f_hi);
+    // The EARLY mid is 0.0 (the root) — the iteration-0 value.
+    assert_bits(got, 0.0f32, "regula-falsi-early-return-value");
+    // And it equals the frozen reference (which also early-returns at iter 0).
+    assert_bits(
+        got,
+        frozen_gpu_m2_regula_falsi(&c, lo, hi, f_lo, f_hi),
+        "regula-falsi-early-return-vs-frozen",
+    );
+
+    // A second case converging at k>0 but <8 (bracket-collapse `(hi - lo) <= EPS`): a tiny
+    // bracket already within EPS returns on the first iteration via the second guard.
+    let c2 = [0.5f32, 2.0, -0.3, 0.1];
+    let lo2 = 0.3f32;
+    // hi - lo == 5e-7 < 1e-6 EPS -> early return on iteration 0 via the bracket-collapse
+    // guard `(hi - lo) <= M2_CUBIC_ROOT_EPS`. (Both sides compute the SAME `hi - lo`, so the
+    // float rounding of the sum is irrelevant to the to-bits comparison.)
+    let hi2 = lo2 + 5.0e-7f32;
+    let f_lo2 = frozen_cubic_eval(&c2, lo2);
+    let f_hi2 = frozen_cubic_eval(&c2, hi2);
+    assert_bits(
+        refactored_m2_regula_falsi(&c2, lo2, hi2, f_lo2, f_hi2),
+        frozen_gpu_m2_regula_falsi(&c2, lo2, hi2, f_lo2, f_hi2),
+        "regula-falsi-bracket-collapse",
+    );
+}
+
+#[test]
+fn m2_regula_falsi_non_finite_byte_identical() {
+    // NaN / Inf in the coefficients or the bracket must propagate identically (a NaN `>`
+    // / `<=` is false, so the denom guard / convergence guard fall through deterministically
+    // — the frozen mirror uses the SAME comparisons, so the two agree by construction).
+    let cases: &[([f32; 4], f32, f32, f32, f32)] = &[
+        ([f32::NAN, 1.0, 0.0, 0.0], -1.0, 1.0, -1.0, 1.0),
+        ([0.0, 1.0, 0.0, 0.0], f32::INFINITY, 1.0, -1.0, 1.0),
+        ([0.0, 1.0, 0.0, 0.0], -1.0, f32::NEG_INFINITY, -1.0, 1.0),
+        ([1.0, 0.0, 0.0, 0.0], -1.0, 1.0, f32::NAN, 1.0),
+        ([1.0, 0.0, 0.0, 0.0], -1.0, 1.0, -1.0, f32::INFINITY),
+        ([f32::MAX, f32::MIN, 0.0, 0.0], -1.0, 1.0, -2.0, 3.0),
+    ];
+    for &(c, lo, hi, f_lo, f_hi) in cases {
+        assert_bits(
+            refactored_m2_regula_falsi(&c, lo, hi, f_lo, f_hi),
+            frozen_gpu_m2_regula_falsi(&c, lo, hi, f_lo, f_hi),
+            "regula-falsi-non-finite",
+        );
+    }
+}
+
+#[test]
+fn runtime_for_control_table_drives_each_arm() {
+    // MANDATORY: drive EACH EvalCf::runtime_for control-table arm and assert the post-loop
+    // observable matches the documented semantics. This is the per-arm guard for the
+    // ret-forwarding correctness (a wrong Flow on any arm silently corrupts the eval oracle).
+    use boyko_shaderdsl::cf::{Cf, Flow, LoopOp};
+    use boyko_shaderdsl::scalar::FieldScalar;
+
+    // ARM 1 (Continue → next iter) + ARM 5 (natural completion → Continue): a counter that
+    // increments every iteration runs all `bound_val` times and the loop returns Continue.
+    {
+        let counter = EvalCf::decl_var("counter", 0.0);
+        let flow = EvalCf::runtime_for("[loop]", "i", "N", 8, |_i| -> Flow {
+            let cur = EvalCf::get_var(&counter);
+            EvalCf::set_var(&counter, cur.add(1.0));
+            Flow::Continue(())
+        });
+        assert_eq!(flow, Flow::Continue(()), "natural completion must yield Continue");
+        assert_eq!(
+            EvalCf::get_var(&counter).to_bits(),
+            8.0f32.to_bits(),
+            "Continue arm must run every iteration (8 increments)"
+        );
+    }
+
+    // ARM 2 (Break(Continue) → continue): skip the live tail on i==1; the tail increment
+    // runs for the other 7 of 8 iterations -> counter == 7. The loop returns Continue.
+    {
+        let counter = EvalCf::decl_var("counter", 0.0);
+        let flow = EvalCf::runtime_for("[loop]", "i", "N", 8, |i| -> Flow {
+            EvalCf::if_((i == 1).then_some(()).is_some(), EvalCf::cont)?;
+            let cur = EvalCf::get_var(&counter);
+            EvalCf::set_var(&counter, cur.add(1.0));
+            Flow::Continue(())
+        });
+        assert_eq!(flow, Flow::Continue(()), "Break(Continue) loop still completes -> Continue");
+        assert_eq!(
+            EvalCf::get_var(&counter).to_bits(),
+            7.0f32.to_bits(),
+            "Break(Continue) must skip the tail on i==1 (7 increments)"
+        );
+    }
+
+    // ARM 3 (Break(Break) → break THEN return Continue): break on i==3; the tail runs for
+    // i=0,1,2 only -> counter == 3. The loop returns Continue (the break is consumed).
+    {
+        let counter = EvalCf::decl_var("counter", 0.0);
+        let flow = EvalCf::runtime_for("[loop]", "i", "N", 8, |i| -> Flow {
+            if i == 3 {
+                return Flow::Break(LoopOp::Break);
+            }
+            let cur = EvalCf::get_var(&counter);
+            EvalCf::set_var(&counter, cur.add(1.0));
+            Flow::Continue(())
+        });
+        assert_eq!(
+            flow,
+            Flow::Continue(()),
+            "Break(Break) is consumed by the loop -> the loop returns Continue (the tail runs)"
+        );
+        assert_eq!(
+            EvalCf::get_var(&counter).to_bits(),
+            3.0f32.to_bits(),
+            "Break(Break) on i==3 runs the tail for i=0,1,2 only (3 increments)"
+        );
+    }
+
+    // ARM 4 (Break(Return) → FORWARD): a body that returns Break(Return) on i==2 must make
+    // runtime_for RETURN Break(Return) (so the caller's `?` short-circuits the IIFE). The
+    // tail runs for i=0,1 only -> counter == 2.
+    {
+        let counter = EvalCf::decl_var("counter", 0.0);
+        let flow = EvalCf::runtime_for("[loop]", "i", "N", 8, |i| -> Flow {
+            if i == 2 {
+                return Flow::Break(LoopOp::Return);
+            }
+            let cur = EvalCf::get_var(&counter);
+            EvalCf::set_var(&counter, cur.add(1.0));
+            Flow::Continue(())
+        });
+        assert_eq!(
+            flow,
+            Flow::Break(LoopOp::Return),
+            "Break(Return) must be FORWARDED out of runtime_for (to the function IIFE's `?`)"
+        );
+        assert_eq!(
+            EvalCf::get_var(&counter).to_bits(),
+            2.0f32.to_bits(),
+            "Break(Return) on i==2 runs the tail for i=0,1 only (2 increments)"
+        );
+    }
+}
+
+#[test]
+fn evalcf_is_zst_inc4a() {
+    // The ZST guarantee still holds after the Inc-4a additive facets (no data added to the
+    // backend marker).
+    assert_eq!(std::mem::size_of::<EvalCf>(), 0, "EvalCf must remain a ZST");
+}

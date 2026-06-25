@@ -53,4 +53,17 @@ fn main() {
     // host `host_brick_cell` (boyko_rhi_vulkan::compute) stays HAND-WRITTEN (firewall option B).
     println!();
     print!("{}", boyko_shaderdsl::emit::emit_hlsl_brick_cell_class());
+    // The regula-falsi root-refinement MARCHER leaf (Increment 4a — the THIRD CONTROL-FLOW
+    // leaf, the first with a genuine RUNTIME `[loop]` (an `OpLoop`): five loop-carried Phi
+    // vars {lo,hi,f_lo,f_hi as suppressed-decl params + mid as a local}, an in-loop early
+    // return forwarded to the function IIFE, and a `m2_cubic_eval(c, mid)` call site),
+    // generated from `boyko_shaderdsl::brick::m2_regula_falsi_body` over the `Emit` value
+    // backend + the `EmitCf` control-flow backend. Spliced between the `// === GENERATED
+    // m2_regula_falsi BEGIN/END ===` sentinels in `sdf_gbuffer_composite.hlsl` (the
+    // DEFINITION only — the 2 call sites in `m2_marmitt_root` are untouched). The host
+    // `boyko_sdf_math::brick::regula_falsi` stays HAND-WRITTEN (firewall option B); the eval
+    // oracle is a frozen GPU-shape reference (the GPU's `1.0e-30` denom guard differs from
+    // the host's `f32::MIN_POSITIVE`).
+    println!();
+    print!("{}", boyko_shaderdsl::emit::emit_hlsl_m2_regula_falsi());
 }
