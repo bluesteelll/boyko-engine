@@ -32,6 +32,26 @@ thread_local! {
     static ARENA: RefCell<Vec<Node>> = const { RefCell::new(Vec::new()) };
 }
 
+/// The HLSL scalar TYPE a materialized temp is declared with (O2).
+///
+/// The field/normal leaves are all `float`; the integer/bit leaves (`decode_snorm8`
+/// and the A3/A4 brick-index family) introduce `uint` temps (a packed byte source, a
+/// bit-AND / shift, a `(float)` numeric cast). The printer ([`emit_body`]) reads a
+/// node's [`EmitTy`] to emit `float tN = …;` vs `uint tN = …;`.
+///
+/// MINIMAL by design (the reviewer's O2): exactly the two states the current leaves
+/// need. A signed `Int` state is deferred until a leaf genuinely produces a negative
+/// integer temp — `decode_snorm8`'s only integer op is an UNSIGNED byte extract, and
+/// the snorm sign is carried by the `float` after the cast. Extend the enum (and the
+/// one match in [`type_of`]) when A3/A4's index math needs `int`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EmitTy {
+    /// An HLSL `float` temp (the default — every field/normal node).
+    Float,
+    /// An HLSL `uint` temp (a packed byte source / bit op, before the numeric cast).
+    Uint,
+}
+
 /// One SSA node — a recorded field op. Operands reference earlier nodes by their
 /// arena index ([`Emit`] handle), so the arena is a topologically-ordered DAG
 /// (a node only references strictly-smaller indices: SSA, no cycles).
@@ -75,6 +95,34 @@ enum Node {
     /// argument), so the printer emits `sdf(<vexpr>)`. The field is NOT inlined: the
     /// frozen HLSL keeps `sdf` a hand-written function owning the edit-list `[loop]`.
     FieldCall(u32),
+
+    // ---- Integer / bit nodes (the A2 brick leaves; [`EmitTy::Uint`]) -------------
+    /// A symbolic `uint` INPUT (a `uint`-typed function parameter), printed verbatim
+    /// by name. Distinct from [`Node::Input`] only in its [`EmitTy`] so the printer
+    /// declares any derived temp `uint` (the parameter itself inlines, so the tag is
+    /// carried for its consumers via [`type_of`]).
+    UintInput(u32),
+    /// A `uint` literal (a bit mask / shift amount), printed as `Nu` (HLSL unsigned).
+    UintLit(u32),
+    /// `a == b` over two integer handles — a Mask node (printed inline inside a
+    /// ternary condition, like [`Node::Gt`]). The snorm `q == i8::MIN` sentinel test.
+    IntEq(u32, u32),
+    // A2 FOUNDATION (not yet constructed): the packed-byte bit ops. `decode_snorm8`
+    // reads an UNPACKED `i8` code (no AND/shift needed), but the reviewer's O2 calls
+    // for the bit ops + the printer support as the brick-index (A3/A4) prerequisite.
+    // The printer (`define_str`) already spells them; A3 wires the `FieldScalar` trait
+    // methods + the host index math that constructs them. `#[allow(dead_code)]` keeps
+    // the foundation in tree without a false `-D warnings` failure until then.
+    /// `a & b` — a bitwise AND over two `uint` handles (the packed-byte extract).
+    #[allow(dead_code)]
+    And(u32, u32),
+    /// `a >> b` — a logical right shift over `uint` handles (the byte select within
+    /// a packed word).
+    #[allow(dead_code)]
+    Shr(u32, u32),
+    /// `(float)a` — the HLSL NUMERIC `uint -> float` cast (value-preserving), NOT
+    /// `asfloat` (a bit-reinterpret). Materialized as a `float` temp.
+    UintToFloat(u32),
 }
 
 /// One VECTOR (`float3`/`float2`) SSA node — the normal leaf is a vector expression
@@ -125,6 +173,28 @@ thread_local! {
     static VARENA: RefCell<Vec<VNode>> = const { RefCell::new(Vec::new()) };
 }
 
+/// The HLSL [`EmitTy`] a node materializes as (O2). Every legacy field/normal node
+/// is [`EmitTy::Float`]; only the integer/bit nodes are [`EmitTy::Uint`]. The
+/// `UintToFloat` cast is the boundary — its RESULT is `float` (so consumers see a
+/// `float`), its operand is `uint`. This is a per-NODE tag (the node's own result
+/// type), not an operand walk: each int node declares its own result type, so the
+/// printer needs no recursion to type a temp.
+fn type_of(node: Node) -> EmitTy {
+    match node {
+        Node::UintInput(_) | Node::UintLit(_) | Node::And(_, _) | Node::Shr(_, _) => EmitTy::Uint,
+        // `UintToFloat` PRODUCES a float (the cast result); every other node is float.
+        _ => EmitTy::Float,
+    }
+}
+
+/// The HLSL type keyword for an [`EmitTy`] (`float` / `uint`).
+fn ty_keyword(ty: EmitTy) -> &'static str {
+    match ty {
+        EmitTy::Float => "float",
+        EmitTy::Uint => "uint",
+    }
+}
+
 #[inline]
 fn push(node: Node) -> u32 {
     ARENA.with(|a| {
@@ -146,20 +216,46 @@ fn vpush(node: VNode) -> u32 {
 }
 
 impl Emit {
-    /// Records a symbolic INPUT node named `name_id` (an index into the printer's
-    /// name table). Used by [`emit_hlsl_field`] to seed the traced parameters.
+    /// Records a symbolic `float` INPUT node named `name_id` (an index into the
+    /// printer's float-name table). Used by [`trace`]/[`trace_named`] to seed the
+    /// traced parameters.
     fn input(name_id: u32) -> Self {
         Emit(push(Node::Input(name_id)))
+    }
+
+    /// Records a symbolic `uint` INPUT node named `name_id` (an index into the
+    /// printer's uint-name table) — the packed-byte source an integer leaf decodes.
+    fn uint_input(name_id: u32) -> Self {
+        Emit(push(Node::UintInput(name_id)))
     }
 }
 
 impl FieldScalar for Emit {
     type Vec3 = [Emit; 3];
     type Mask = EmitMask;
+    // The Emit integer is itself an `Emit` node handle: the `uint` type is carried
+    // per-node via [`type_of`] (a handle pointing at a `UintLit`/`UintInput`/`And`
+    // node IS a uint), so no separate handle newtype is needed.
+    type Int = Emit;
 
     #[inline]
     fn lit(x: f32) -> Self {
         Emit(push(Node::Lit(x)))
+    }
+
+    #[inline]
+    fn int_lit(x: i32) -> Emit {
+        // The snorm leaf's only `int_lit` is the `i8::MIN` (-128) sentinel; lifted as a
+        // `uint` two's-complement bit pattern (the HLSL `uint` literal the printer emits).
+        Emit(push(Node::UintLit(x as u32)))
+    }
+    #[inline]
+    fn int_eq(a: Emit, b: Emit) -> EmitMask {
+        EmitMask(push(Node::IntEq(a.0, b.0)))
+    }
+    #[inline]
+    fn int_to_float(a: Emit) -> Emit {
+        Emit(push(Node::UintToFloat(a.0)))
     }
 
     #[inline]
@@ -223,49 +319,71 @@ impl FieldScalar for Emit {
         EmitMask(push(Node::Gt(self.0, rhs.0)))
     }
 
-    #[inline]
-    fn eq_u(op: u32, want: u32) -> EmitMask {
-        // The op-discriminant equality is a HOST comparison: the generic
-        // `combine`'s op-dispatch is a host `if op == ...` (the frozen
-        // `if (op == OP_*)`), NOT a traced mask. So `eq_u` for `Emit` is never
-        // reached by `field::combine` (it dispatches on the host `u32` directly).
-        // It is provided to satisfy the trait; it records a constant mask.
-        let l = push(Node::Lit(op as f32));
-        let r = push(Node::Lit(want as f32));
-        EmitMask(push(Node::Gt(l, r))) // placeholder; unreached by the field body
+    fn eq_u(_op: u32, _want: u32) -> EmitMask {
+        // W3: the op-discriminant equality is a HOST comparison — `field::combine`'s
+        // op-dispatch is a host `if op == ...` (the frozen `if (op == OP_*)`), so it
+        // dispatches on the `u32` directly and NEVER calls `eq_u` on the `Emit`
+        // backend. Recording a node here (the old `push(Gt(Lit, Lit))`) would inject a
+        // bogus mask into the live arena if the contract ever changed; a panic is the
+        // honest signal that no `Emit` path may reach it. (`#[inline]` dropped: a cold
+        // `unreachable!` must not bloat any caller's I-cache.)
+        unreachable!(
+            "FieldScalar::eq_u is never called on the Emit backend: combine's op-dispatch \
+             is a host branch, not a traced mask"
+        )
     }
 
-    #[inline]
     fn grad_offsets() -> [[Emit; 3]; 3] {
-        // The normal leaf is a VECTOR expression: its `float3`/`float2` dataflow
-        // (`e.xyy`, `p ± offset`, `normalize(n)`) is recorded into the separate
-        // [`VARENA`] by [`emit_normal_body`], NOT through this component-wise
-        // (`[Emit; 3]`) scalar hook — the scalar granularity cannot carry the textual
-        // swizzle the SPIR-V gate requires. So `grad_offsets` for `Emit` is UNREACHED
-        // by the printer; it is provided only to satisfy the trait (the normal is
-        // traced at vector granularity in `emit_hlsl_normal`). It records literal
-        // axis vectors to keep the contract total.
-        const GRAD_H: f32 = 0.0005;
-        let h = Emit::lit(GRAD_H);
-        let z = Emit::lit(0.0);
-        [[h, z, z], [z, h, z], [z, z, h]]
+        // W3: the normal leaf is a VECTOR expression whose `float3`/`float2` dataflow
+        // (`e.xyy`, `p ± offset`, `normalize(n)`) is recorded into [`VARENA`] by
+        // [`emit_normal_body`] — NOT through this component-wise (`[Emit; 3]`) scalar
+        // hook (the scalar granularity cannot carry the textual swizzle the SPIR-V gate
+        // requires). `sdf_normal_body::<Emit>` is therefore never instantiated, so this
+        // is UNREACHED. The old impl recorded literal axis vectors into the arena; a
+        // panic is the honest signal instead of a silent wrong-node.
+        unreachable!(
+            "FieldScalar::grad_offsets is never called on the Emit backend: the normal is \
+             recorded at vector granularity by emit_normal_body, not via sdf_normal_body::<Emit>"
+        )
     }
 
-    #[inline]
-    fn v_normalize(a: [Emit; 3]) -> [Emit; 3] {
-        // Like `grad_offsets`: UNREACHED by the printer (the normal's `normalize` is a
-        // `VNode::Normalize` in the vector arena). Provided to satisfy the trait; the
-        // component-wise stub returns the input unchanged (it never runs).
-        a
+    fn v_normalize(_a: [Emit; 3]) -> [Emit; 3] {
+        // W3/W1: like `grad_offsets`, UNREACHED — the normal's final `normalize(n)` is
+        // emitted as a LITERAL `return normalize(n);` string in [`emit_normal_body`]
+        // (there is no `VNode::Normalize` node; the old comment misnamed it). Provided
+        // only to satisfy the trait; a panic replaces the old identity-return stub.
+        unreachable!(
+            "FieldScalar::v_normalize is never called on the Emit backend: emit_normal_body \
+             prints `normalize(n)` textually, it does not record this hook"
+        )
     }
 }
 
 // ---- The HLSL printer ---------------------------------------------------------
 
-/// The symbolic input names the field is traced over, in the order [`Emit::input`]
-/// is called by [`emit_hlsl_field`]. The printer prints `Node::Input(i)` as
-/// `INPUT_NAMES[i]`.
-const INPUT_NAMES: &[&str] = &["a", "b", "k"];
+/// The float-input names for the FIELD leaves (`smin`/`smax`/`combine`), in
+/// [`Emit::input`] call order. The printer prints a [`Node::Input(i)`] as
+/// `float_names[i]`. The integer/bit leaves pass their own table via [`Names`] (e.g.
+/// `decode_snorm8`'s `["n", "band_half"]`), so the per-trace names are threaded, not
+/// global.
+const FIELD_INPUT_NAMES: &[&str] = &["a", "b", "k"];
+
+/// The default `uint`-input table (empty — the float field/normal leaves take no
+/// `uint` parameter). The integer leaves override it via [`Names`].
+const NO_UINT_INPUTS: &[&str] = &[];
+
+/// The per-trace symbolic-input name tables threaded through the printer: `float`
+/// inputs ([`Node::Input`]) and `uint` inputs ([`Node::UintInput`]) are named
+/// separately because a leaf's parameter list mixes the two (e.g. `decode_snorm8`'s
+/// `float n` + `float band_half`, or A3's `uint code` byte source). Carried by-ref so
+/// the recursive `operand_str`/`define_str` stay a single threaded slice each.
+#[derive(Clone, Copy)]
+struct Names<'a> {
+    /// `float`-input names (indexed by [`Node::Input`]'s id).
+    float_in: &'a [&'a str],
+    /// `uint`-input names (indexed by [`Node::UintInput`]'s id).
+    uint_in: &'a [&'a str],
+}
 
 /// Formats one f32 literal the way the frozen HLSL writes it (`0.5`, `1.0`, `0.0`).
 /// A short, deterministic rendering — enough for the smin/smax field constants.
@@ -289,23 +407,39 @@ fn fmt_lit(x: f32) -> String {
 /// condition). Every arithmetic node gets a `float tN = ...;` temp instead, so a
 /// shared subtree (e.g. `hh`) is computed ONCE — matching the frozen `hh` variable.
 fn is_inline_leaf(node: Node) -> bool {
-    matches!(node, Node::Input(_) | Node::Lit(_) | Node::Gt(_, _))
+    matches!(
+        node,
+        Node::Input(_)
+            | Node::Lit(_)
+            | Node::Gt(_, _)
+            | Node::IntEq(_, _)
+            | Node::UintInput(_)
+            | Node::UintLit(_)
+    )
 }
 
 /// The operand spelling for node `id` at a USE site: a leaf inlines (its input
 /// name or formatted literal, or the `a > b` comparison nested in a ternary
 /// condition); a non-leaf names its already-emitted `tN` temp. The temp must exist
 /// because the SSA walk emits nodes in arena order, which is topological.
-fn operand_str(arena: &[Node], temps: &[Option<String>], id: u32) -> String {
+fn operand_str(arena: &[Node], names: Names, temps: &[Option<String>], id: u32) -> String {
     let node = arena[id as usize];
     match node {
-        Node::Input(n) => INPUT_NAMES[n as usize].to_string(),
+        Node::Input(n) => names.float_in[n as usize].to_string(),
         Node::Lit(x) => fmt_lit(x),
         Node::Gt(a, b) => format!(
             "{} > {}",
-            operand_str(arena, temps, a),
-            operand_str(arena, temps, b)
+            operand_str(arena, names, temps, a),
+            operand_str(arena, names, temps, b)
         ),
+        Node::IntEq(a, b) => format!(
+            "{} == {}",
+            operand_str(arena, names, temps, a),
+            operand_str(arena, names, temps, b)
+        ),
+        Node::UintInput(n) => names.uint_in[n as usize].to_string(),
+        // A `uint` literal renders with the HLSL unsigned suffix (`0xFFu`, `8u`).
+        Node::UintLit(u) => format!("{}u", u),
         // Any non-leaf has a temp name assigned during the SSA walk.
         _ => temps[id as usize]
             .clone()
@@ -315,11 +449,16 @@ fn operand_str(arena: &[Node], temps: &[Option<String>], id: u32) -> String {
 
 /// The HLSL expression that DEFINES node `id` (its temp's right-hand side), built
 /// from its operands' names (a temp name, an input name, or an inlined literal).
-fn define_str(arena: &[Node], temps: &[Option<String>], id: u32) -> String {
+fn define_str(arena: &[Node], names: Names, temps: &[Option<String>], id: u32) -> String {
     let node = arena[id as usize];
-    let op = |child: u32| operand_str(arena, temps, child);
+    let op = |child: u32| operand_str(arena, names, temps, child);
     match node {
-        Node::Input(_) | Node::Lit(_) | Node::Gt(_, _) => {
+        Node::Input(_)
+        | Node::Lit(_)
+        | Node::Gt(_, _)
+        | Node::IntEq(_, _)
+        | Node::UintInput(_)
+        | Node::UintLit(_) => {
             // Leaves are inlined, never defined as a temp.
             unreachable!("leaf nodes are inlined, not defined")
         }
@@ -340,6 +479,10 @@ fn define_str(arena: &[Node], temps: &[Option<String>], id: u32) -> String {
             // `sexpr_str`/`vexpr_str`), never to the scalar field body's printer.
             unreachable!("FieldCall is a normal-leaf node, not a scalar field node")
         }
+        Node::And(a, b) => format!("{} & {}", op(a), op(b)),
+        Node::Shr(a, b) => format!("{} >> {}", op(a), op(b)),
+        // The HLSL numeric cast (value-preserving), NOT `asfloat` (a bit-reinterpret).
+        Node::UintToFloat(a) => format!("(float){}", op(a)),
     }
 }
 
@@ -349,7 +492,7 @@ fn define_str(arena: &[Node], temps: &[Option<String>], id: u32) -> String {
 /// leaves (inputs/literals) inline. The walk is in arena order, which is already
 /// topological (SSA: a node only references strictly-earlier indices), so every
 /// operand's temp exists before its use.
-fn emit_body(arena: &[Node], root: u32) -> String {
+fn emit_body(arena: &[Node], names: Names, root: u32) -> String {
     let mut temps: Vec<Option<String>> = vec![None; arena.len()];
     let mut out = String::new();
     let mut next = 0u32;
@@ -359,20 +502,29 @@ fn emit_body(arena: &[Node], root: u32) -> String {
         }
         let name = format!("t{}", next);
         next += 1;
-        let rhs = define_str(arena, &temps, i as u32);
-        out.push_str(&format!("    float {} = {};\n", name, rhs));
+        let rhs = define_str(arena, names, &temps, i as u32);
+        // O2: declare the temp with its node's HLSL type (`float` for every field/
+        // normal node; `uint` for an integer/bit node). The default `Float` keeps
+        // the existing smin/smax/sdf_normal emit byte-identical.
+        let ty = ty_keyword(type_of(node));
+        out.push_str(&format!("    {} {} = {};\n", ty, name, rhs));
         temps[i] = Some(name);
     }
-    let ret = operand_str(arena, &temps, root);
+    let ret = operand_str(arena, names, &temps, root);
     out.push_str(&format!("    return {};\n", ret));
     out
 }
 
 /// Runs `body` over a fresh symbolic-input arena and returns the HLSL `{ ... }`
 /// statement body for the result node. `inputs` is the count of [`Emit::input`]
-/// handles to seed (named by [`INPUT_NAMES`] in order); `body` receives them and
-/// returns the result handle.
+/// (`float`) handles to seed, named by [`FIELD_INPUT_NAMES`] in order; `body` receives
+/// them and returns the result handle. The field/normal leaves take no `uint`
+/// parameter ([`NO_UINT_INPUTS`]); an integer leaf uses [`trace_named`].
 fn trace<F: FnOnce(&[Emit]) -> Emit>(inputs: usize, body: F) -> String {
+    let names = Names {
+        float_in: FIELD_INPUT_NAMES,
+        uint_in: NO_UINT_INPUTS,
+    };
     ARENA.with(|a| a.borrow_mut().clear());
     let mut ins = Vec::with_capacity(inputs);
     for i in 0..inputs {
@@ -381,7 +533,38 @@ fn trace<F: FnOnce(&[Emit]) -> Emit>(inputs: usize, body: F) -> String {
     let result = body(&ins);
     ARENA.with(|a| {
         let a = a.borrow();
-        emit_body(&a, result.0)
+        emit_body(&a, names, result.0)
+    })
+}
+
+/// Like [`trace`], but for a leaf with a CUSTOM parameter list: `float_names` /
+/// `uint_names` are the per-leaf input tables (e.g. `decode_snorm8`'s `["n",
+/// "band_half"]` floats + no uints). `body` receives the seeded `float` handles
+/// (named by `float_names`) and the seeded `uint` handles (named by `uint_names`),
+/// in that order, and returns the result node. The two seed groups are pushed
+/// float-first so a leaf's `Node::Input`/`Node::UintInput` ids index their own table.
+fn trace_named<F: FnOnce(&[Emit], &[Emit]) -> Emit>(
+    float_names: &[&str],
+    uint_names: &[&str],
+    body: F,
+) -> String {
+    let names = Names {
+        float_in: float_names,
+        uint_in: uint_names,
+    };
+    ARENA.with(|a| a.borrow_mut().clear());
+    let mut floats = Vec::with_capacity(float_names.len());
+    for i in 0..float_names.len() {
+        floats.push(Emit::input(i as u32));
+    }
+    let mut uints = Vec::with_capacity(uint_names.len());
+    for i in 0..uint_names.len() {
+        uints.push(Emit::uint_input(i as u32));
+    }
+    let result = body(&floats, &uints);
+    ARENA.with(|a| {
+        let a = a.borrow();
+        emit_body(&a, names, result.0)
     })
 }
 
@@ -534,6 +717,14 @@ fn emit_normal_body() -> String {
     // (matching the frozen `float3 n`), so `return normalize(n)` references the name
     // — the gradient is NOT recomputed in the return. The body shape is therefore
     // byte-for-byte the frozen `sdf_normal` (which the SPIR-V gate freezes).
+    //
+    // W2 (deferred): the `float2 e = float2(GRAD_H, 0.0)` head and the `normalize(n)`
+    // tail are HARDCODED format-string literals here, NOT arena-materialized vector
+    // nodes (there is no `VNode::Eps`-construct or `VNode::Normalize`). This is fine
+    // while the normal is the ONLY vector leaf, but the vector printer should be
+    // generalized — `e` as a recorded `float2` constructor node and `normalize` as a
+    // recorded unary vector node — WHEN a second vector-returning leaf lands (A2's
+    // leaves are scalar-returning, so it is not needed yet).
     VARENA.with(|va| {
         ARENA.with(|sa| {
             let va = va.borrow();
@@ -559,4 +750,31 @@ fn emit_normal_body() -> String {
 pub fn emit_hlsl_normal() -> String {
     let body = emit_normal_body();
     format!("float3 sdf_normal(float3 p) {{\n{body}}}\n")
+}
+
+// ---- The brick snorm decode leaf (A2) -----------------------------------------
+
+/// Generates the HLSL `m2_decode` body — the GPU-spliceable WORLD-SCALE step of the
+/// snorm decode (`n * band_half`) — by tracing the generic [`crate::brick::snorm_scale`]
+/// over the `Emit` backend, and returns the full `float m2_decode(float n, float
+/// band_half) { ... }` function.
+///
+/// Only the SCALE is shader code: the byte → normalized-float step ([`crate::brick::
+/// snorm_normalize`]) is done by the fixed-function `R8_SNORM` sampler in HARDWARE, so
+/// it is never spliced (see the [`crate::brick`] module doc). The `f32` Eval
+/// instantiation of the WHOLE [`crate::brick::decode_snorm8`] (byte → normalize →
+/// scale) is the CPU oracle, locked byte-identical to the host by the
+/// `eval_byte_identity` to-bits sweep.
+///
+/// The generated body is spliced between the `// === GENERATED decode_snorm8
+/// BEGIN/END ===` sentinels in `crates/boyko_rhi_vulkan/shaders/sdf_gbuffer_composite.hlsl`.
+/// The `sdf_field_edsl_sync` test pins the committed shader to this output.
+pub fn emit_hlsl_decode_snorm8() -> String {
+    use crate::brick;
+
+    // m2_decode(n, band_half) = n * band_half — traced over the two float inputs.
+    let body = trace_named(&["n", "band_half"], NO_UINT_INPUTS, |f, _u| {
+        brick::snorm_scale::<Emit>(f[0], f[1])
+    });
+    format!("float m2_decode(float n, float band_half) {{\n{body}}}\n")
 }

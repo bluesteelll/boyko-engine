@@ -413,3 +413,92 @@ fn each_op_each_smoothness_byte_identical() {
         }
     }
 }
+
+// ======================================================================
+// A2 — the brick `decode_snorm8` leaf byte-identity.
+//
+// Frozen snapshot of `boyko_sdf_math::brick::decode_snorm8` (brick.rs:1049-1054) vs
+// the eDSL `boyko_shaderdsl::brick::decode_snorm8` over the `f32` Eval backend. The
+// full leaf (byte → normalize → world scale) is compared to-bits over EVERY one of the
+// 256 codes (`i8::MIN..=i8::MAX`), crossed with edge band-half values (0.0, the
+// production `BAND_HALF_STORE`, non-finite). On the GPU the byte → normalize step is
+// the hardware `R8_SNORM` sampler and only the `n * band_half` scale is shader code
+// (the `m2_decode` body); this test locks the CPU oracle the GPU fetch is golden-
+// compared against.
+// ======================================================================
+
+/// The production narrow-band half-width (`boyko_sdf_math::brick::BAND_HALF_STORE`).
+const FROZEN_BAND_HALF_STORE: f32 = 0.90;
+
+/// Verbatim snapshot of the PRE-eDSL host `decode_snorm8` (brick.rs:1049-1054). Do NOT
+/// "clean up": the `i8::MIN` sentinel branch + the `q as f32 / 127.0` operand order is
+/// the contract under test.
+fn frozen_decode_snorm8(q: i8, band_half: f32) -> f32 {
+    let n = if q == i8::MIN {
+        -1.0
+    } else {
+        q as f32 / 127.0
+    };
+    n * band_half
+}
+
+/// The eDSL decode over the `f32` Eval backend. The code widens to `i32` (the
+/// `FieldScalar::Int` for `f32`) losslessly; `q as f32` is identical from either width.
+fn refactored_decode_snorm8(q: i8, band_half: f32) -> f32 {
+    boyko_shaderdsl::brick::decode_snorm8::<f32>(q as i32, band_half)
+}
+
+#[test]
+fn decode_snorm8_all_256_codes_byte_identical() {
+    // Every code, crossed with edge + production band-half values (incl. non-finite,
+    // where the multiply must propagate NaN/Inf bit-identically through both paths).
+    let bands = [
+        FROZEN_BAND_HALF_STORE,
+        0.0,
+        1.0,
+        -1.0,
+        0.5,
+        f32::INFINITY,
+        f32::NAN,
+        f32::MIN_POSITIVE,
+        f32::MAX,
+    ];
+    for &band in &bands {
+        for q in i8::MIN..=i8::MAX {
+            assert_bits(
+                refactored_decode_snorm8(q, band),
+                frozen_decode_snorm8(q, band),
+                "decode_snorm8",
+            );
+        }
+    }
+}
+
+#[test]
+fn decode_snorm8_sentinel_and_extremes_byte_identical() {
+    // Targeted: the `-128` snorm sentinel decodes to `-1.0 * band` (NOT `-128/127`),
+    // and the `±127` extremes map to `±1.0 * band` — the asymmetric R8_SNORM rule. A
+    // random sweep over codes/bands mixes the LCG's non-finite band-half draws in.
+    let mut lcg = Lcg::new(0x5D0F_DEC0_DE00_BEEF);
+    for (q, want_n) in [
+        (i8::MIN, -1.0f32),    // -128 → -1.0 (sentinel, NOT -128/127)
+        (-127i8, -127.0 / 127.0),
+        (0i8, 0.0),
+        (127i8, 127.0 / 127.0),
+    ] {
+        for &band in &[FROZEN_BAND_HALF_STORE, 0.5, 2.0] {
+            let got = refactored_decode_snorm8(q, band);
+            assert_bits(got, want_n * band, "decode-sentinel");
+            assert_bits(got, frozen_decode_snorm8(q, band), "decode-sentinel-vs-frozen");
+        }
+    }
+    for _ in 0..4_000 {
+        let q = (lcg.next_u32() & 0xFF) as u8 as i8;
+        let band = lcg.next_f32(4.0);
+        assert_bits(
+            refactored_decode_snorm8(q, band),
+            frozen_decode_snorm8(q, band),
+            "decode-random",
+        );
+    }
+}

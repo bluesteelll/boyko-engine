@@ -17,4 +17,11 @@ fn main() {
     // BEGIN/END ===` sentinels in `sdf_field.hlsli`.
     println!();
     print!("{}", boyko_shaderdsl::emit::emit_hlsl_normal());
+    // The brick snorm decode SCALE leaf (`m2_decode` — the GPU-spliceable `n *
+    // band_half`), generated from `boyko_shaderdsl::brick::snorm_scale`. The byte →
+    // normalize step is the hardware `R8_SNORM` sampler (not shader code). Spliced
+    // between the `// === GENERATED decode_snorm8 BEGIN/END ===` sentinels in
+    // `sdf_gbuffer_composite.hlsl`.
+    println!();
+    print!("{}", boyko_shaderdsl::emit::emit_hlsl_decode_snorm8());
 }

@@ -1045,12 +1045,16 @@ pub fn dist_to_brick_exit(
 /// baked into the stored code): `q ∈ [-127, 127]` maps linearly onto
 /// `[-band_half, +band_half]`. `q == -128` (the snorm sentinel) is clamped to the
 /// `-127` magnitude so the decode stays inside the band.
+///
+/// DELEGATES to [`boyko_shaderdsl::brick::decode_snorm8`] over the `f32` Eval backend
+/// (A2): the decode is authored ONCE in `boyko_shaderdsl::brick` (generic over a
+/// `FieldScalar`), so this `f32` form and the GPU `m2_decode` scale spliced into
+/// `sdf_gbuffer_composite.hlsl` cannot diverge by construction. The `i8` code widens
+/// to the backend `i32` losslessly (`q as f32` is identical from either width). The
+/// `eval_byte_identity` to-bits sweep locks this against the frozen pre-eDSL snapshot.
 #[inline]
 pub fn decode_snorm8(q: i8, band_half: f32) -> f32 {
-    // R8_SNORM hardware maps -128 and -127 BOTH to -1.0 (the asymmetric snorm
-    // rule); mirror it so the CPU oracle matches the GPU sampler bit-for-bit.
-    let n = if q == i8::MIN { -1.0 } else { q as f32 / 127.0 };
-    n * band_half
+    boyko_shaderdsl::brick::decode_snorm8::<f32>(q as i32, band_half)
 }
 
 /// Encodes a world-space distance into an `R8_SNORM` narrow-band code (round to

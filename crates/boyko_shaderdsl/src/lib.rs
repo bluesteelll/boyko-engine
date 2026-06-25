@@ -40,6 +40,7 @@
 #![cfg_attr(feature = "nightly", feature(core_intrinsics))]
 #![cfg_attr(feature = "nightly", allow(internal_features))]
 
+pub mod brick;
 pub mod field;
 pub mod normal;
 pub mod scalar;
@@ -47,6 +48,7 @@ pub mod scalar;
 #[cfg(feature = "emit")]
 pub mod emit;
 
+pub use brick::{decode_snorm8, snorm_normalize, snorm_scale};
 pub use field::{
     EditView, MAX_SDF_EDITS, SDF_FAR, combine, edit_distance, kind, op, sd_box, sd_sphere,
     sdf_field_body, smax, smin,

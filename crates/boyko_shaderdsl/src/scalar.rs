@@ -41,10 +41,30 @@ pub trait FieldScalar: Copy {
     /// [`eq_u`](Self::eq_u)) and consumed by [`select`](Self::select). `bool` for
     /// the Eval backend; an SSA node for `Emit`.
     type Mask: Copy;
+    /// The INTEGER value type the bit/brick leaves ([`crate::brick`]) operate on — a
+    /// packed atlas byte / index. `i32` for the Eval backend (so the snorm `q as f32`
+    /// numeric cast and the `q == i8::MIN` sentinel compare are byte-mirrors of the
+    /// host); a `uint` SSA node for `Emit`. The A2 leaf only uses [`int_lit`](Self::
+    /// int_lit) / [`int_eq`](Self::int_eq) / [`int_to_float`](Self::int_to_float); the
+    /// bitwise AND / shift the printer already supports are added to the trait when
+    /// A3's brick-index math needs them.
+    type Int: Copy;
 
     /// A floating-point literal lifted into the backend (`x` on Eval; a constant
     /// SSA node on `Emit`).
     fn lit(x: f32) -> Self;
+
+    /// An INTEGER literal lifted into the backend (`x` on Eval; a `uint` constant SSA
+    /// node on `Emit`) — the snorm sentinel / a bit mask.
+    fn int_lit(x: i32) -> Self::Int;
+
+    /// `a == b` over two [`Int`](Self::Int)s, producing a [`Mask`](Self::Mask) — the
+    /// snorm `q == i8::MIN` sentinel test.
+    fn int_eq(a: Self::Int, b: Self::Int) -> Self::Mask;
+
+    /// The NUMERIC (value-preserving) `Int -> Self` conversion — HLSL `(float)q`, NOT
+    /// `asfloat` (a bit-reinterpret). Mirrors the host `q as f32`.
+    fn int_to_float(a: Self::Int) -> Self;
 
     /// `self + rhs`.
     fn add(self, rhs: Self) -> Self;
@@ -173,10 +193,28 @@ pub fn v_max0<S: FieldScalar<Vec3 = [S; 3]>>(a: [S; 3]) -> [S; 3] {
 impl FieldScalar for f32 {
     type Vec3 = [f32; 3];
     type Mask = bool;
+    // The Eval integer is `i32`: the host snorm decode reads an `i8` code, which
+    // widens to `i32` losslessly, and `q as f32` is identical from either width.
+    type Int = i32;
 
     #[inline]
     fn lit(x: f32) -> Self {
         x
+    }
+
+    #[inline]
+    fn int_lit(x: i32) -> i32 {
+        x
+    }
+    #[inline]
+    fn int_eq(a: i32, b: i32) -> bool {
+        a == b
+    }
+    #[inline]
+    fn int_to_float(a: i32) -> f32 {
+        // `a as f32` — the byte-mirror of the host `q as f32` (the `i8` code already
+        // widened to `i32`, so the float value is identical).
+        a as f32
     }
 
     #[inline]

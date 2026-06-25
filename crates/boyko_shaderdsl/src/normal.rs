@@ -18,7 +18,9 @@
 //! - On **Eval** the test passes `|q| sdf_edit_list(edits, q)`, so the body literally
 //!   re-runs the host field at each probe — making `sdf_normal_body::<f32>` reproduce
 //!   `sdf_edit_list_normal` exactly.
-//! - On **Emit** the callback records a `Call` node the printer prints as `sdf(<arg>)`.
+//! - On **Emit** the dataflow is recorded by [`crate::emit::emit_hlsl_normal`], which
+//!   pushes a `Node::FieldCall` per probe (printed as `sdf(<arg>)`); the generic body
+//!   here is not monomorphized over `Emit` (the normal is traced at vector granularity).
 //!
 //! # `no_std`
 //!
