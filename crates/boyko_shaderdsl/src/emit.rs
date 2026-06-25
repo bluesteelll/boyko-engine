@@ -2796,3 +2796,96 @@ pub fn emit_hlsl_m2_surface_hit_refine() -> String {
         span
     })
 }
+
+/// Generates the HLSL B1 over-relaxation ACCEPT-REFINE LOOP SPAN — the production main-marcher's
+/// settle-onto-surface refine (the fixed-budget `[loop]` SIGNED sphere-trace that corrects an
+/// over-relaxed accept off the surface), with the `sdf(ro + rd * t)` call site, the
+/// `abs(rd_) < EPS` BREAK, and the `t = t + step` accumulation — by tracing the generic
+/// [`crate::refine::b1_accept_refine_body`] over the `EmitCf` backend (whose `Cf::Scalar = Emit`
+/// supplies the SSA-node arithmetic), and returns ONLY the span (NOT a wrapped function).
+///
+/// A near-CLONE of [`emit_hlsl_m2_surface_hit_refine`], STRICTLY SIMPLER: there is NO return
+/// facet (no `out float hit_t`, no bool return, no composite converged-hit `if_hit_ret_b`), so
+/// the only seeded inputs are `ro`/`rd` (`Vec3Param`) and `t_seed` (a scalar `float` input). The
+/// four producer deltas from the `m2_surface_hit_refine` template: the field seam interns `"sdf"`
+/// (this site folds the ANALYTIC field via the hand-written `sdf`, NOT `field_distance`); the
+/// float input is named `"t_seed"`; there are no out/ret cells; and the span prints at DEPTH 3
+/// (the committed site nests main→`for (it)`→`if (d < EPS)`→this refine loop), matching the
+/// committed L1442-1452 indentation (12-space `[loop]`).
+///
+/// The integer/over-relaxation marcher PREAMBLE (the `hit = true; exhausted = false;` accept
+/// block, the rationale comment, and the outer `break;` that exits the MARCHER loop) stays
+/// HAND-WRITTEN inline above/around the `// === GENERATED b1_accept_refine BEGIN/END ===`
+/// sentinels (framing (b)), so the generator emits only the statements spliced BETWEEN the
+/// sentinels.
+///
+/// The cmp-`.spv` (in `boyko_rhi_vulkan`) is the byte-identity oracle; the `b1_accept_refine`
+/// text-sync test pins the committed shader span to this output.
+pub fn emit_hlsl_b1_accept_refine() -> String {
+    use crate::refine;
+
+    // Fresh recorder state.
+    ARENA.with(|a| a.borrow_mut().clear());
+    STMTS.with(|s| s.borrow_mut().clear());
+    VARS.with(|v| v.borrow_mut().clear());
+    NAMED_LITS.with(|n| n.borrow_mut().clear());
+    CALLS.with(|c| c.borrow_mut().clear());
+    TEMP_SEQ.with(|c| *c.borrow_mut() = 0);
+    TEMP_TYPES.with(|t| t.borrow_mut().clear());
+    TEMP_NAMES.with(|t| t.borrow_mut().clear());
+
+    // Seed the function body block (the bottom of the STMTS stack).
+    STMTS.with(|s| s.borrow_mut().push(Block { stmts: Vec::new() }));
+
+    // Seed the span's inputs:
+    //   ro     → Vec3Param(0) (vec_in[0]   = "ro")     — the world ray origin
+    //   rd     → Vec3Param(1) (vec_in[1]   = "rd")     — the world ray direction
+    //   t_seed → Input(0)     (float_in[0] = "t_seed") — the carried candidate world t
+    // `ro`/`rd`/`t_seed` are the ONLY values the generated span sees (the over-relaxation marcher
+    // preamble stays hand-written above; `t` is the enclosing carried var, a suppressed-decl).
+    let ro = Emit(push(Node::Vec3Param(0)));
+    let rd = Emit(push(Node::Vec3Param(1)));
+    let t_seed = Emit::input(0);
+
+    // The field-distance seam: on Emit it records a `sdf(ro + rd * t)` call node (the ANALYTIC
+    // field via the hand-written `sdf`, interned `"sdf"` — NOT `field_distance`).
+    let _ = refine::b1_accept_refine_body::<EmitCf, _>(ro, rd, t_seed, |q| EmitCf::call1("sdf", q));
+
+    // Pop the function body block and print it.
+    let body_block = STMTS.with(|s| {
+        s.borrow_mut()
+            .pop()
+            .expect("invariant: the function body block was pushed above")
+    });
+
+    let float_in = ["t_seed"];
+    let vec_in = ["ro", "rd"];
+    let named_lit = NAMED_LITS.with(|n| n.borrow().clone());
+    let call_in = CALLS.with(|c| c.borrow().clone());
+    let vars = VARS.with(|v| v.borrow().clone());
+    let names = Names {
+        float_in: &float_in,
+        uint_in: NO_UINT_INPUTS,
+        vec_in: &vec_in,
+        uint3_in: NO_UINT3_INPUTS,
+        buf_in: NO_BUF_INPUTS,
+        out_in: NO_OUT_INPUTS,
+        named_lit: &named_lit,
+        vars: &vars,
+        vec4_in: NO_VEC4_INPUTS,
+        call_in: &call_in,
+    };
+
+    ARENA.with(|a| {
+        let arena = a.borrow();
+        let mut span = String::new();
+        // The whole span is ONE recorded statement (the runtime `Stmt::Loop` with its DeclTemp
+        // rd_, the `abs(rd_) < EPS` `If { Break }`, the DeclTemp step, and the `Stmt::Assign t`) —
+        // a single in-order walk at DEPTH 3 (12-space indent), matching the committed L1442-1452.
+        // The site nests main→`for (it)`→`if (d < EPS)`→this loop, hence depth 3 (vs the depth-1
+        // span of `m2_surface_hit_refine`). NO function-signature wrap (the span is spliced inside
+        // the hand-written B1 marcher).
+        print_block(&body_block, &arena, names, 3, &mut span);
+        span
+    })
+}

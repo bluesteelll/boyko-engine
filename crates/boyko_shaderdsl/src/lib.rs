@@ -44,6 +44,7 @@ pub mod brick;
 pub mod cf;
 pub mod field;
 pub mod normal;
+pub mod refine;
 pub mod scalar;
 pub mod shadow;
 pub mod surface;
@@ -61,6 +62,10 @@ pub use field::{
     sdf_field_body, smax, smin,
 };
 pub use normal::sdf_normal_body;
+pub use refine::{
+    EPS as B1_REFINE_EPS, M2_REFINE_ITERS as B1_REFINE_ITERS, M2_REFINE_RELAX as B1_REFINE_RELAX,
+    b1_accept_refine_body,
+};
 pub use scalar::FieldScalar;
 pub use shadow::{
     FIELD_LIPSCHITZ_L, MAX_IT, SHADOW_HIT_EPS, SHADOW_K, SHADOW_MINT, SHADOW_MINT_STEP, T_MAX,

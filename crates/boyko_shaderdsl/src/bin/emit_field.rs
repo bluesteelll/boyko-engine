@@ -90,4 +90,18 @@ fn main() {
     // sites stay hand-written, framing b). The 2 callers of `m2_surface_hit` are untouched.
     println!();
     print!("{}", boyko_shaderdsl::emit::emit_hlsl_m2_surface_hit_refine());
+    // The B1 over-relaxation ACCEPT-REFINE inner-loop leaf (Increment 4c — the SIXTH CONTROL-FLOW
+    // leaf, a near-CLONE of `m2_surface_hit_refine` but STRICTLY SIMPLER: NO return facet — the
+    // only loop control is the `abs(rd_) < EPS` `brk`; the field seam interns `sdf` (the ANALYTIC
+    // field, NOT `field_distance`); the span prints at DEPTH 3 (the site nests main→`for (it)`→
+    // `if (d < EPS)`→this refine loop)). The production B1 marcher's settle-onto-surface refine:
+    // the fixed-budget (`M2_REFINE_ITERS`) SIGNED sphere-trace that corrects an over-relaxed
+    // accept off the surface (`t = t + M2_REFINE_RELAX * sdf(...)`), accepting on `abs(rd_) < EPS`,
+    // generated from `boyko_shaderdsl::refine::b1_accept_refine_body` over the `Emit` + `EmitCf`
+    // backends. Spliced between the `// === GENERATED b1_accept_refine BEGIN/END ===` sentinels
+    // INSIDE the main B1 marcher (the inner refine `[loop]` SPAN only — the `hit = true;
+    // exhausted = false;` accept block + the rationale comment + the outer marcher `break;` stay
+    // hand-written, framing b). The host B1 marcher stays hand-written and is not generated.
+    println!();
+    print!("{}", boyko_shaderdsl::emit::emit_hlsl_b1_accept_refine());
 }

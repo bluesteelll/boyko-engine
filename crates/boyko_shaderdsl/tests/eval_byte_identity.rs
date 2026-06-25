@@ -1649,3 +1649,151 @@ fn m2_surface_hit_refine_miss_leaves_hit_t_at_default() {
     assert!(!hit, "a never-converging candidate must return false");
     assert_bits(hit_t, default, "miss-leaves-hit_t-at-default");
 }
+
+// ======================================================================
+// Inc 4c — the B1 over-relaxation ACCEPT-REFINE CONTROL-FLOW Eval oracle.
+//
+// A frozen HOST mirror of the committed B1 accept-refine LOOP span (the L1442-1452 statements;
+// the enclosing over-relaxation marcher + the outer `break;` stay out — the generated span never
+// sees them) threading the SAME host `sdf` closure the eDSL body uses. The eDSL
+// `b1_accept_refine_body::<EvalCf>` reproduces this CONTROL FLOW (the `abs(rd_) < EPS` accept
+// break, the budget exhaustion, the SIGNED `t = t + M2_REFINE_RELAX * rd_` accumulation) — SCOPED
+// TO CONTROL FLOW (the cmp-`.spv` is the byte-identity oracle; an Eval ULP wobble does not block a
+// green-`.spv` increment).
+//
+// STRICTLY SIMPLER than the 4b.2 m2_surface_hit refine: there is NO return facet — the carried `t`
+// is mutated IN PLACE and read after the body runs. The break fires BEFORE the step (an
+// already-on-surface seed is accepted with `t` unchanged); an off-surface seed accumulates k
+// signed steps; a never-converging field exhausts the full M2_REFINE_ITERS budget.
+// ======================================================================
+
+// The committed tuning consts (mirror `boyko_shaderdsl::refine`'s values).
+const FROZEN_B1_REFINE_RELAX: f32 = 0.8;
+const FROZEN_B1_REFINE_EPS: f32 = 0.001;
+const FROZEN_B1_REFINE_ITERS: usize = 8;
+
+/// Verbatim hand-mirror of the committed B1 accept-refine LOOP span (the L1442-1452 statements),
+/// threading a host `field` closure (`ro + rd * t -> distance`). Returns the settled `t`. The
+/// reference the eDSL `b1_accept_refine_body::<EvalCf>` control flow is locked against.
+// The frozen mirror spells the committed HLSL span VERBATIM: `t = t + step;` (the eDSL's R1
+// `set_var` form, byte-identical to the committed `t += step` in the `.spv`). Collapsing to
+// `t += step` would diverge the reference from the committed source it must mirror
+// character-for-character, so the clippy suggestion is deliberately suppressed.
+#[allow(clippy::assign_op_pattern)]
+fn frozen_b1_accept_refine<Fld: Fn([f32; 3]) -> f32>(
+    ro: [f32; 3],
+    rd: [f32; 3],
+    t_seed: f32,
+    field: &Fld,
+) -> f32 {
+    let mut t = t_seed;
+    for _ in 0..FROZEN_B1_REFINE_ITERS {
+        let q = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
+        let rd_ = field(q);
+        if rd_.abs() < FROZEN_B1_REFINE_EPS {
+            break;
+        }
+        let step = FROZEN_B1_REFINE_RELAX * rd_;
+        t = t + step;
+    }
+    t
+}
+
+/// The eDSL `b1_accept_refine_body::<EvalCf>` threading the SAME host `field` closure (so
+/// `Cf::call1`'s `unreachable!` is never reached). Returns the settled `t` the body yields.
+fn refactored_b1_accept_refine<Fld: Fn([f32; 3]) -> f32>(
+    ro: [f32; 3],
+    rd: [f32; 3],
+    t_seed: f32,
+    field: &Fld,
+) -> f32 {
+    boyko_shaderdsl::refine::b1_accept_refine_body::<EvalCf, _>(ro, rd, t_seed, field)
+}
+
+#[test]
+fn b1_accept_refine_control_flow_matches_frozen() {
+    // A single analytic occluder — a sphere of radius `r` at `center` — so `field` is a clean
+    // signed distance the SIGNED refine steps along (converging from either side). All three
+    // control-flow outcomes are exercised across the sweep:
+    //   (a) a seed already on the surface -> the `abs(rd_) < EPS` accept break (`t` unchanged);
+    //   (b) a seed off the surface that converges at k>0 -> k signed steps then the break;
+    //   (c) a seed in a field that never reaches EPS -> the full M2_REFINE_ITERS budget.
+    let sphere = |center: [f32; 3], r: f32| {
+        move |q: [f32; 3]| -> f32 {
+            let dx = q[0] - center[0];
+            let dy = q[1] - center[1];
+            let dz = q[2] - center[2];
+            (dx * dx + dy * dy + dz * dz).sqrt() - r
+        }
+    };
+
+    let mut lcg = Lcg::new(0x0B1A_CCEE_7711_22F0_u64);
+    for _ in 0..5_000 {
+        let ro = [lcg.next_f32(2.0), lcg.next_f32(2.0), lcg.next_f32(2.0)];
+        let rd = [lcg.next_f32(1.0), lcg.next_f32(1.0), lcg.next_f32(1.0)];
+        let t_seed = lcg.next_f32(3.0);
+        let center = [lcg.next_f32(3.0), lcg.next_f32(3.0), lcg.next_f32(3.0)];
+        let r = lcg.next_f32(1.0).abs() + 0.05;
+        let field = sphere(center, r);
+        assert_bits(
+            refactored_b1_accept_refine(ro, rd, t_seed, &field),
+            frozen_b1_accept_refine(ro, rd, t_seed, &field),
+            "b1-accept-refine-control-flow",
+        );
+    }
+}
+
+#[test]
+fn b1_accept_refine_on_surface_seed_breaks_before_step() {
+    // The inner break fires BEFORE the step: a seed already on the surface (`abs(rd_) < EPS` at
+    // iter 0) returns `t == t_seed` UNCHANGED (the break precedes the `t = t + step` accumulation).
+    // A sphere of radius 1 centered at the origin, `ro = origin`, `rd` a unit +x, `t_seed = 1.0`
+    // (so `ro + rd*1.0` is exactly on the surface) accepts at iter 0 with `t` untouched.
+    let sphere = |q: [f32; 3]| -> f32 { (q[0] * q[0] + q[1] * q[1] + q[2] * q[2]).sqrt() - 1.0 };
+    let ro = [0.0, 0.0, 0.0];
+    let rd = [1.0, 0.0, 0.0];
+    let t_seed = 1.0;
+
+    let t = refactored_b1_accept_refine(ro, rd, t_seed, &sphere);
+    assert_bits(t, t_seed, "on-surface-seed-leaves-t-unchanged");
+}
+
+#[test]
+fn b1_accept_refine_off_surface_mutates_in_place() {
+    // A seed strictly inside the sphere (`abs(rd_) >= EPS`) takes a nonzero signed step on the
+    // first iteration, mutating `t` away from `t_seed`. This pins FAITHFULNESS + in-place mutation,
+    // NOT convergence: with `ro = origin`, `rd` a unit +x, `t_seed = 0.5`, the point sits at
+    // distance 0.5 inside the unit sphere (`rd_ = -0.5`), and the signed step `t = t + RELAX*rd_`
+    // (rd_ < 0) DECREASES `t`. The test asserts only that the eDSL and the frozen host mirror agree
+    // to-bits and that `t` actually moved — i.e. the running `t` is carried in place across iters.
+    let sphere = |q: [f32; 3]| -> f32 { (q[0] * q[0] + q[1] * q[1] + q[2] * q[2]).sqrt() - 1.0 };
+    let ro = [0.0, 0.0, 0.0];
+    let rd = [1.0, 0.0, 0.0];
+    let t_seed = 0.5;
+
+    let refactored = refactored_b1_accept_refine(ro, rd, t_seed, &sphere);
+    let frozen = frozen_b1_accept_refine(ro, rd, t_seed, &sphere);
+    assert_bits(refactored, frozen, "off-surface-converges-to-frozen");
+    assert_ne!(refactored, t_seed, "an off-surface seed must move t");
+}
+
+#[test]
+fn b1_accept_refine_budget_exhaustion_matches_frozen() {
+    // A field that never reaches EPS exhausts the full M2_REFINE_ITERS budget: with `field` a
+    // constant far value, every iteration takes the SAME signed step, so the settled `t` is
+    // `t_seed + ITERS * (RELAX * far)` to-bits (a degenerate `rd = 0` keeps the field constant —
+    // only `t` grows). Pins the exact 8-step accumulation against the frozen mirror.
+    let far = |_q: [f32; 3]| -> f32 { 100.0 };
+    let ro = [0.0, 0.0, 0.0];
+    let rd = [0.0, 0.0, 0.0]; // a degenerate dir keeps the field constant; only t grows
+    let t_seed = 0.5;
+
+    let refactored = refactored_b1_accept_refine(ro, rd, t_seed, &far);
+    // 8 steps of `t = t + 0.8 * 100.0`, accumulated with the SAME per-step rounding as the body.
+    let mut expected = t_seed;
+    for _ in 0..FROZEN_B1_REFINE_ITERS {
+        let step = FROZEN_B1_REFINE_RELAX * 100.0_f32;
+        expected += step;
+    }
+    assert_bits(refactored, expected, "budget-exhaustion-8-step-accumulation");
+}

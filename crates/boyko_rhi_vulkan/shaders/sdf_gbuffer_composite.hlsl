@@ -1439,17 +1439,17 @@ void main(uint3 tid : SV_DispatchThreadID) {
             // accept `d` is already in `[0, EPS)` — the first iteration's `abs(d) < EPS` accepts
             // immediately (the omega==1 t is byte-unchanged, the 0%-gate). Bounded by
             // M2_REFINE_ITERS; only the FINAL accept refines (the omega march speed is preserved).
+            // === GENERATED b1_accept_refine BEGIN ===
             [loop]
             for (uint ri = 0u; ri < M2_REFINE_ITERS; ++ri) {
                 float rd_ = sdf(ro + rd * t);
                 if (abs(rd_) < EPS) {
                     break;
                 }
-                // Named `step` (no FMA contraction) so the host `step = M2_REFINE_RELAX * rd_;
-                // t += step;` rounds bit-identically (two roundings: the multiply, then the add).
                 float step = M2_REFINE_RELAX * rd_;
-                t += step;
+                t = t + step;
             }
+            // === GENERATED b1_accept_refine END ===
             break;
         }
         if (omega > 1.0) {
