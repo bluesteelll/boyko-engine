@@ -2379,3 +2379,87 @@ fn oct_encode_matches_host_directed_and_sweep() {
         sampled += 1;
     }
 }
+
+// ======================================================================
+// Track B Increment 4g-g1: the B1 main-marcher GLUE spans (control-flow + field-call coverage)
+// ======================================================================
+
+/// Drives `boyko_shaderdsl::marcher::b1_marcher_mesh_p_body::<EvalCf>` (SPAN A) and observes BOTH its
+/// control-flow effect (the mesh-guard clearing `exhausted` on a break) and its probe-point return.
+/// Returns `(exhausted_after, p)`.
+fn refactored_mesh_p(ro: [f32; 3], rd: [f32; 3], t: f32, t_mesh: f32) -> (bool, [f32; 3]) {
+    use boyko_shaderdsl::cf::Cf;
+
+    // The carried marcher vars (a `decl_param` `t`, a `decl_bool_param` `exhausted` init true — the
+    // committed `bool exhausted = true;` preamble seed), held in Cells on Eval.
+    let t_var = EvalCf::decl_param("t", t);
+    let exhausted = EvalCf::decl_bool_param("exhausted", true);
+    let p = boyko_shaderdsl::marcher::b1_marcher_mesh_p_body::<EvalCf>(ro, rd, &t_var, t_mesh, &exhausted);
+    (EvalCf::get_bool_var(&exhausted), p)
+}
+
+#[test]
+fn b1_marcher_mesh_p_control_flow_and_probe() {
+    // The mesh-guard's two arms + the probe point, byte-identical to the hand-written host shape.
+    //
+    // ARM 1 (t < t_mesh): the guard FALLS THROUGH — `exhausted` keeps its `true` seed (the break did
+    // NOT run, so `exhausted = false;` did NOT execute), and `p = ro + rd * t` is computed.
+    // ARM 2 (t >= t_mesh): the guard BREAKS — `exhausted` is cleared to `false` (the mesh-occlusion
+    // termination). On Eval the `?` short-circuits the IIFE, so `p` is the carried/uninitialized value
+    // (the producer reads the carried result on a mesh-occluded ray); we assert only `exhausted` here.
+    let ro = [1.0f32, 2.0, 3.0];
+    let rd = [0.25f32, -0.5, 0.75];
+
+    // ARM 1: t strictly below the mesh depth → fall-through, p computed, exhausted unchanged.
+    let (exhausted_a, p_a) = refactored_mesh_p(ro, rd, 2.0, 10.0);
+    assert!(exhausted_a, "t < t_mesh must NOT clear exhausted (the break did not run)");
+    let expect_p = [ro[0] + rd[0] * 2.0, ro[1] + rd[1] * 2.0, ro[2] + rd[2] * 2.0];
+    assert_vec_bits(p_a, expect_p, "mesh_p-fallthrough-probe");
+
+    // ARM 2: t at/above the mesh depth → break, exhausted cleared.
+    let (exhausted_b, _p_b) = refactored_mesh_p(ro, rd, 10.0, 10.0); // t == t_mesh (>= is inclusive)
+    assert!(!exhausted_b, "t >= t_mesh must clear exhausted (the mesh-occlusion break ran)");
+    let (exhausted_c, _p_c) = refactored_mesh_p(ro, rd, 12.5, 10.0); // t > t_mesh
+    assert!(!exhausted_c, "t > t_mesh must clear exhausted (the mesh-occlusion break ran)");
+
+    // An LCG sweep: for each random (t, t_mesh), the exhausted bit is `false` iff `t >= t_mesh`, and
+    // on a fall-through the probe point equals `ro + rd * t` bit-for-bit.
+    let mut lcg = Lcg::new(0xB1_4A_6C_4E_57_3D_19_F2_u64);
+    for _ in 0..20_000 {
+        let t = lcg.next_f32(20.0);
+        let t_mesh = lcg.next_f32(20.0);
+        if !t.is_finite() || !t_mesh.is_finite() {
+            continue;
+        }
+        let (exhausted, p) = refactored_mesh_p(ro, rd, t, t_mesh);
+        assert_eq!(exhausted, t < t_mesh, "exhausted bit must be `t < t_mesh` (t={t}, t_mesh={t_mesh})");
+        if t < t_mesh {
+            let h = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
+            assert_vec_bits(p, h, &format!("mesh_p-sweep-probe-t{t}"));
+        }
+    }
+}
+
+#[test]
+fn b1_marcher_fold_d_threads_field_seam() {
+    // SPAN B (`float d = sdf(p);`) threads the host field closure as `field` — the Eval oracle runs
+    // the REAL field at `p` (the `Cf::call1` `unreachable!` is never reached). The refactored `d`
+    // must equal the host field sampled at `p`, bit-for-bit. Reuse the proven `refactored` field
+    // (the eDSL `sdf_field_body::<f32>`) as the threaded seam AND as the host reference: the test
+    // pins that SPAN B is the IDENTITY pass-through of `field(p)` (it adds no arithmetic of its own).
+    let mut lcg = Lcg::new(0x5D_F0_1D_3A_92_C4_77_EE_u64);
+    let edits: Vec<FrozenEdit> = (0..6).map(|_| lcg.next_edit()).collect();
+    let views: Vec<EditView<f32>> = edits.iter().map(to_view).collect();
+
+    for _ in 0..20_000 {
+        let p = [lcg.next_f32(12.0), lcg.next_f32(12.0), lcg.next_f32(12.0)];
+        if !p.iter().all(|c| c.is_finite()) {
+            continue;
+        }
+        let field = |q: [f32; 3]| field::sdf_field_body::<f32>(&views, q);
+        let d = boyko_shaderdsl::marcher::b1_marcher_fold_d_body::<EvalCf, _>(p, &field);
+        // `temp_float` is identity on Eval, so `d` is exactly `field(p)`.
+        let h = field::sdf_field_body::<f32>(&views, p);
+        assert_bits(d, h, &format!("fold_d-sweep-p{p:?}"));
+    }
+}

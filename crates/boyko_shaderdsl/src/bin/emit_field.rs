@@ -155,6 +155,34 @@ fn main() {
     // hand-written and is not generated.
     println!();
     print!("{}", boyko_shaderdsl::emit::emit_hlsl_b1_sor_retreat());
+    // The B1 main-marcher MESH-GUARD + PROBE-POINT glue (Track B Increment 4g-g1, SPAN A — literal
+    // completeness, owner-requested): the production `for (uint it...)` loop's `if (t >= t_mesh) {
+    // exhausted = false; break; }` mesh-occlusion guard + the `float3 p = ro + rd * t;` probe-point
+    // compute, contiguous right after the loop header `{` and BEFORE the M1 brick island. Pure REUSE
+    // (ZERO new machinery): the FLOAT mesh guard `t >= t_mesh` (`FieldScalar::ge`), the in-guard
+    // `exhausted = false;` (`Cf::set_bool_var` over a SUPPRESSED-DECL bool `Cf::decl_bool_param`), the
+    // `brk`, and the NAMED `float3 p` temp (`Cf::temp_vec3` over `ro + rd * t`). `p` is READ-ONLY in
+    // the loop, so it is a `temp_vec3` (a `float3 p = ...;` DeclTemp); the hand-written M1/M2 islands
+    // + the fold span read it by NAME (the cross-splice name-sharing). Generated from
+    // `boyko_shaderdsl::marcher::b1_marcher_mesh_p_body` over the `Emit` + `EmitCf` backends. Spliced
+    // between the `// === GENERATED b1_marcher_mesh_p BEGIN/END ===` sentinels INSIDE the main B1
+    // marcher's `for (uint it)` loop (the M1/M2 brick islands + the accept wrapper stay hand-written,
+    // framing b). The span prints at DEPTH 2 (8-space indent).
+    println!();
+    print!("{}", boyko_shaderdsl::emit::emit_hlsl_b1_marcher_mesh_p());
+    // The B1 main-marcher ANALYTIC-FOLD DISTANCE glue (Track B Increment 4g-g1, SPAN B): the
+    // production `for (uint it...)` loop's `float d = sdf(p);` analytic field sample, AFTER the M2
+    // trilinear brick island and BEFORE the `if (d < EPS)` accept wrapper. Pure REUSE — the field-call
+    // seam (`Cf::call1`, interned `"sdf"` — the ANALYTIC field, NOT `field_distance`) into a NAMED
+    // `float d` temp (`Cf::temp_float`). `p` is a CAPTURED `float3` (SPAN A declared it above; each
+    // span is a fresh emit, so `p` re-seeds by name as a `Vec3Param`); the hand-written `if (d < EPS)`
+    // accept wrapper reads `d` by NAME. Generated from
+    // `boyko_shaderdsl::marcher::b1_marcher_fold_d_body` over the `Emit` + `EmitCf` backends. Spliced
+    // between the `// === GENERATED b1_marcher_fold_d BEGIN/END ===` sentinels INSIDE the main B1
+    // marcher's `for (uint it)` loop (the M1/M2 islands + the accept wrapper stay hand-written, framing
+    // b). The span prints at DEPTH 2 (8-space indent).
+    println!();
+    print!("{}", boyko_shaderdsl::emit::emit_hlsl_b1_marcher_fold_d());
     // The M4 clip-map LEVEL-SELECTOR leaf (Increment 5a — the FIRST signed-`int`-returning leaf,
     // landing the signed-int subsystem): the `[unroll]` finest-first containment scan that returns
     // the tightest enclosing LOD index (`return (int)L;` via `Cf::if_ret_i` + `Cf::int_from_uint`)

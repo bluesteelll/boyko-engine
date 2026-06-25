@@ -3093,17 +3093,21 @@ impl Cf for EmitCf {
     // ---- Increment 4e: the BOOL mutable-local facets (recorder) -----------------------
 
     fn decl_bool_param(name: &'static str, _init: bool) -> Var {
-        // SUPPRESSED-DECL (bool): seed a `VARS` name entry (so set_bool_var/get_bool_var spell
-        // `hit`, `hit = ...;`) but record NO `Stmt::DeclVar` — `hit` is declared by the
-        // hand-written re-march preamble (`hit = false;`), so a `bool hit = false;` redecl would
-        // diverge the committed text. The bool mirror of `decl_param` (the `float` suppressed
+        // SUPPRESSED-DECL (bool): seed a `VARS`/`VAR_TYPES` name+type entry (so set_bool_var/
+        // get_bool_var spell `hit`, `hit = ...;`) but record NO `Stmt::DeclVar` — `hit` is declared
+        // by the hand-written re-march preamble (`hit = false;`), so a `bool hit = false;` redecl
+        // would diverge the committed text. The bool mirror of `decl_param` (the `float` suppressed
         // decl); `_init` is unused (a suppressed local is already bound by name).
-        VARS.with(|v| {
-            let mut v = v.borrow_mut();
-            let id = v.len() as u32;
-            v.push(name);
-            Var(id)
-        })
+        //
+        // Routed through `push_var` with `EmitTy::Bool` (vs the old direct `VARS.push`, which left
+        // VAR_TYPES short by one entry, relying on the unstated "the bool is always the LAST decl"
+        // invariant). BYTE-NEUTRAL: a bool var's `VarRef` is never `type_of`'d (`get_bool_var`
+        // records no `VarRef`), so the `EmitTy::Bool` entry is never read — it only keeps the
+        // VARS/VAR_TYPES tables aligned UNCONDITIONALLY, so `push_var`'s `debug_assert(t.len() ==
+        // id)` stays satisfiable if a FUTURE producer routes a `push_var`-backed var (a `decl_param`/
+        // `decl_var`, NOT a `temp_*` which uses the separate TEMP_TYPES table) through `push_var`
+        // AFTER a bool decl.
+        push_var(name, EmitTy::Bool)
     }
 
     fn get_bool_var(_v: &Var) -> bool {
@@ -4481,6 +4485,187 @@ pub fn emit_hlsl_b1_sor_retreat() -> String {
         // at DEPTH 2 (8-space `if (omega > 1.0)`), matching the committed L1459-1498. The site nests
         // main→`for (uint it)`→this step. NO function-signature wrap (the span is spliced inside the
         // hand-written B1 marcher loop).
+        print_block(&body_block, &arena, names, 2, &mut span);
+        span
+    })
+}
+
+/// Generates the HLSL B1 main-marcher MESH-GUARD + PROBE-POINT span (SPAN A — the production
+/// `for (uint it...)` loop's `if (t >= t_mesh) { exhausted = false; break; }` mesh-occlusion guard +
+/// the `float3 p = ro + rd * t;` probe-point compute, contiguous right after the loop header `{` and
+/// BEFORE the M1 brick island) by tracing the generic [`crate::marcher::b1_marcher_mesh_p_body`]
+/// over the `EmitCf` backend, and returns ONLY the span (NOT a wrapped function).
+///
+/// Track-B-Increment-4g-g1 (literal completeness — owner-requested): pure REUSE of proven facets,
+/// ZERO new machinery. The mesh guard reuses the FLOAT `t >= t_mesh` ([`FieldScalar::ge`]), the
+/// in-guard `exhausted = false;` ([`EmitCf::set_bool_var`] over a SUPPRESSED-DECL bool —
+/// [`EmitCf::decl_bool_param`]), and the `brk` ([`EmitCf::brk`]); the probe point reuses the NAMED
+/// `float3 p` temp ([`EmitCf::temp_vec3`] over `ro + rd * t`, the SAME shape Inc-4e's re-march builds
+/// `p` with). `p` is READ-ONLY in the loop, so it is a `temp_vec3` (a `float3 p = ...;` DeclTemp),
+/// NOT a mutable `decl_var_vec3`; the hand-written M1/M2 islands + the fold span read `p` by NAME
+/// (the established cross-splice name-sharing).
+///
+/// The seeded inputs are `ro`/`rd` (`Vec3Param`), `t_mesh` (a scalar `float` input); the carried
+/// marcher state (`t` float, `exhausted` bool) are SUPPRESSED-DECL vars (declared by the hand-written
+/// B1 preamble). The span prints at DEPTH 2 (8-space indent; the committed site nests
+/// main→`for (uint it)`→these statements), matching the committed indentation.
+///
+/// The enclosing marcher (the `for (uint it...)` header + the M1/M2 brick islands + the accept
+/// wrapper) stays HAND-WRITTEN inline around the `// === GENERATED b1_marcher_mesh_p BEGIN/END ===`
+/// sentinels (framing (b)). The cmp-`.spv` (in `boyko_rhi_vulkan`) is the byte-identity oracle; the
+/// `b1_marcher_mesh_p` text-sync test pins the committed span to this output.
+pub fn emit_hlsl_b1_marcher_mesh_p() -> String {
+    use crate::marcher;
+
+    // Fresh recorder state.
+    ARENA.with(|a| a.borrow_mut().clear());
+    STMTS.with(|s| s.borrow_mut().clear());
+    VARS.with(|v| v.borrow_mut().clear());
+    VAR_TYPES.with(|t| t.borrow_mut().clear());
+    NAMED_LITS.with(|n| n.borrow_mut().clear());
+    CALLS.with(|c| c.borrow_mut().clear());
+    TEMP_SEQ.with(|c| *c.borrow_mut() = 0);
+    TEMP_TYPES.with(|t| t.borrow_mut().clear());
+    TEMP_NAMES.with(|t| t.borrow_mut().clear());
+
+    // Seed the function body block (the bottom of the STMTS stack).
+    STMTS.with(|s| s.borrow_mut().push(Block { stmts: Vec::new() }));
+
+    // Seed the span's inputs:
+    //   ro     → Vec3Param(0) (vec_in[0]   = "ro")     — the world ray origin
+    //   rd     → Vec3Param(1) (vec_in[1]   = "rd")     — the world ray direction
+    //   t_mesh → Input(0)     (float_in[0] = "t_mesh") — the mesh-occlusion depth bound
+    // `t` and `exhausted` are the enclosing carried vars (both suppressed-decl: `decl_param` for
+    // `t`, `decl_bool_param` for `exhausted`), declared by the hand-written B1 preamble. The `_init`
+    // seeds are unused on Emit (a suppressed local is bound by name); pass `t_mesh` as a byte-neutral
+    // placeholder (decl_param/decl_bool_param record NO statement + push NO node, so it is never
+    // referenced).
+    let ro = Emit(push(Node::Vec3Param(0)));
+    let rd = Emit(push(Node::Vec3Param(1)));
+    let t_mesh = Emit::input(0);
+    let t = EmitCf::decl_param("t", t_mesh);
+    let exhausted = EmitCf::decl_bool_param("exhausted", false);
+
+    let _ = marcher::b1_marcher_mesh_p_body::<EmitCf>(ro, rd, &t, t_mesh, &exhausted);
+
+    // Pop the function body block and print it.
+    let body_block = STMTS.with(|s| {
+        s.borrow_mut()
+            .pop()
+            .expect("invariant: the function body block was pushed above")
+    });
+
+    let float_in = ["t_mesh"];
+    let vec_in = ["ro", "rd"];
+    let vars = VARS.with(|v| v.borrow().clone());
+    let names = Names {
+        float_in: &float_in,
+        uint_in: NO_UINT_INPUTS,
+        vec_in: &vec_in,
+        uint3_in: NO_UINT3_INPUTS,
+        buf_in: NO_BUF_INPUTS,
+        out_in: NO_OUT_INPUTS,
+        named_lit: NO_NAMED_LITS,
+        vars: &vars,
+        vec4_in: NO_VEC4_INPUTS,
+        call_in: NO_CALL_INPUTS,
+        pc_in: NO_PC_INPUTS,
+        level_field: NO_LEVEL_FIELDS,
+        array: NO_ARRAY,
+        res_in: NO_RES_INPUTS,
+    };
+
+    ARENA.with(|a| {
+        let arena = a.borrow();
+        let mut span = String::new();
+        // The whole span is TWO recorded statements — the mesh-guard `Stmt::If { cond: t >= t_mesh,
+        // then: [Assign exhausted = false, Break] }` and the `Stmt::DeclTemp p = ro + rd * t` — a
+        // single in-order walk at DEPTH 2 (8-space indent), matching the committed site (the M1
+        // island follows hand-written). NO function-signature wrap (the span is spliced inside the
+        // hand-written B1 marcher loop).
+        print_block(&body_block, &arena, names, 2, &mut span);
+        span
+    })
+}
+
+/// Generates the HLSL B1 main-marcher ANALYTIC-FOLD DISTANCE span (SPAN B — the production
+/// `for (uint it...)` loop's `float d = sdf(p);` analytic field sample, AFTER the M2 trilinear brick
+/// island and BEFORE the `if (d < EPS)` accept wrapper) by tracing the generic
+/// [`crate::marcher::b1_marcher_fold_d_body`] over the `EmitCf` backend, and returns ONLY the span
+/// (NOT a wrapped function).
+///
+/// Track-B-Increment-4g-g1 (literal completeness): pure REUSE — the field-call seam
+/// ([`EmitCf::call1`], interned `"sdf"` — the ANALYTIC field, NOT `field_distance`) into a NAMED
+/// `float d` temp ([`EmitCf::temp_float`]). `p` is a CAPTURED `float3` input (SPAN A declared
+/// `float3 p = ...;` above; each span is a separate emit with FRESH recorder state, so `p` is
+/// re-seeded by NAME here as a `Vec3Param`). The hand-written `if (d < EPS)` accept wrapper reads `d`
+/// by NAME (the cross-splice name-sharing).
+///
+/// The span prints at DEPTH 2 (8-space indent; the committed site nests main→`for (uint it)`→this
+/// statement). The enclosing marcher (the loop header + the M1/M2 islands + the accept wrapper) stays
+/// HAND-WRITTEN inline around the `// === GENERATED b1_marcher_fold_d BEGIN/END ===` sentinels
+/// (framing (b)). The cmp-`.spv` (in `boyko_rhi_vulkan`) is the byte-identity oracle; the
+/// `b1_marcher_fold_d` text-sync test pins the committed span to this output.
+pub fn emit_hlsl_b1_marcher_fold_d() -> String {
+    use crate::marcher;
+
+    // Fresh recorder state.
+    ARENA.with(|a| a.borrow_mut().clear());
+    STMTS.with(|s| s.borrow_mut().clear());
+    VARS.with(|v| v.borrow_mut().clear());
+    VAR_TYPES.with(|t| t.borrow_mut().clear());
+    NAMED_LITS.with(|n| n.borrow_mut().clear());
+    CALLS.with(|c| c.borrow_mut().clear());
+    TEMP_SEQ.with(|c| *c.borrow_mut() = 0);
+    TEMP_TYPES.with(|t| t.borrow_mut().clear());
+    TEMP_NAMES.with(|t| t.borrow_mut().clear());
+
+    // Seed the function body block (the bottom of the STMTS stack).
+    STMTS.with(|s| s.borrow_mut().push(Block { stmts: Vec::new() }));
+
+    // Seed the span's single input:
+    //   p → Vec3Param(0) (vec_in[0] = "p") — the probe point (SPAN A's `float3 p`, re-seeded by name
+    //                                        here as a captured `float3` — each span is a fresh emit).
+    let p = Emit(push(Node::Vec3Param(0)));
+
+    // The field-distance seam: on Emit it records a `sdf(p)` call node (the ANALYTIC field via the
+    // hand-written `sdf`, interned `"sdf"` — NOT `field_distance`).
+    let _ = marcher::b1_marcher_fold_d_body::<EmitCf, _>(p, |q| EmitCf::call1("sdf", q));
+
+    // Pop the function body block and print it.
+    let body_block = STMTS.with(|s| {
+        s.borrow_mut()
+            .pop()
+            .expect("invariant: the function body block was pushed above")
+    });
+
+    let float_in: [&str; 0] = [];
+    let vec_in = ["p"];
+    let call_in = CALLS.with(|c| c.borrow().clone());
+    let names = Names {
+        float_in: &float_in,
+        uint_in: NO_UINT_INPUTS,
+        vec_in: &vec_in,
+        uint3_in: NO_UINT3_INPUTS,
+        buf_in: NO_BUF_INPUTS,
+        out_in: NO_OUT_INPUTS,
+        named_lit: NO_NAMED_LITS,
+        vars: NO_VARS,
+        vec4_in: NO_VEC4_INPUTS,
+        call_in: &call_in,
+        pc_in: NO_PC_INPUTS,
+        level_field: NO_LEVEL_FIELDS,
+        array: NO_ARRAY,
+        res_in: NO_RES_INPUTS,
+    };
+
+    ARENA.with(|a| {
+        let arena = a.borrow();
+        let mut span = String::new();
+        // The whole span is ONE recorded statement — the `Stmt::DeclTemp d = sdf(p)` — at DEPTH 2
+        // (8-space indent), matching the committed site (the `if (d < EPS)` accept wrapper follows
+        // hand-written). NO function-signature wrap (the span is spliced inside the hand-written B1
+        // marcher loop).
         print_block(&body_block, &arena, names, 2, &mut span);
         span
     })

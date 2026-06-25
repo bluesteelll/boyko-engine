@@ -1350,12 +1350,21 @@ void main(uint3 tid : SV_DispatchThreadID) {
     // === GENERATED b1_decl_exhausted END ===
     [loop]
     for (uint it = 0u; it < MAX_IT; ++it) {
+        // The mesh occludes the SDF from this distance onward — stop marching (the mesh-occlusion
+        // termination, NOT budget exhaustion: `exhausted = false;`). Then the probe point `p`. This
+        // STRAIGHT-LINE glue is single-sourced from `boyko_shaderdsl::marcher::b1_marcher_mesh_p_body`
+        // (Track B Increment 4g-g1 — literal completeness). `p` is READ-ONLY in the loop (declared
+        // once here, never reassigned), so it is a `float3 p = ...;` temp the M1/M2 islands + the fold
+        // span below read BY NAME (the established cross-splice name-sharing). The M1/M2 brick islands
+        // (irreducible resource-binding ladders) + the `if (d < EPS)` accept wrapper stay hand-written
+        // around the generated sentinels (framing b).
+        // === GENERATED b1_marcher_mesh_p BEGIN ===
         if (t >= t_mesh) {
-            // The mesh occludes the SDF from this distance onward — stop marching.
-            exhausted = false;       // mesh-occlusion termination — NOT budget exhaustion
+            exhausted = false;
             break;
         }
         float3 p = ro + rd * t;
+        // === GENERATED b1_marcher_mesh_p END ===
 
         // --- SDF brick-atlas M1: the EMPTY-SPACE-SKIP prefix. `brick_enabled == 0` leaves
         // this block textually dead → the marcher is the EXACT pre-M1 analytic sphere-trace
@@ -1445,7 +1454,15 @@ void main(uint3 tid : SV_DispatchThreadID) {
             // to the analytic `sdf(p)` step, exactly as M1 marches a SURFACE brick.
         }
 
+        // The analytic fold's distance sample — single-sourced from
+        // `boyko_shaderdsl::marcher::b1_marcher_fold_d_body` (Track B Increment 4g-g1). `p` is the
+        // probe point declared by the `b1_marcher_mesh_p` span above (read here by name); the
+        // `if (d < EPS)` accept wrapper below reads `d` by name (cross-splice name-sharing). The
+        // accept wrapper stays hand-written (it nests the Inc-4c accept-refine span; absorbing it is
+        // the deferred g2 restructure).
+        // === GENERATED b1_marcher_fold_d BEGIN ===
         float d = sdf(p);
+        // === GENERATED b1_marcher_fold_d END ===
         if (d < EPS) {
             hit = true;
             exhausted = false;       // converged — NOT budget exhaustion

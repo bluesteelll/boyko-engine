@@ -46,6 +46,7 @@ pub mod cubic_hit;
 pub mod decl;
 pub mod field;
 pub mod levels;
+pub mod marcher;
 pub mod normal;
 pub mod oct;
 pub mod pack;
@@ -73,6 +74,7 @@ pub use field::{
     sdf_field_body, smax, smin,
 };
 pub use levels::{BRICK_LEVELS, select_level_body};
+pub use marcher::{b1_marcher_fold_d_body, b1_marcher_mesh_p_body};
 pub use normal::sdf_normal_body;
 pub use pack::pack_material_id_ba_body;
 pub use refine::{
