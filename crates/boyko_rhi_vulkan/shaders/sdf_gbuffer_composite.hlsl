@@ -1313,19 +1313,30 @@ void main(uint3 tid : SV_DispatchThreadID) {
         TileBound tb = Tiles[ty * tiles_w + tx];
         if ((tb.flags & TILE_FLAG_EMPTY) != 0u) {
             // EMPTY fast-path: the marcher's else-if(has_mesh)/else arms with hit = false.
-            // PBR MVP-2 (mask == 0 arms): write the base mesh/background color to gAlbedo
-            // and gMaterial = (shadow = 1, ao = 1, mask = 0, 1). mask == 0 makes the resolve
+            // PBR MVP-2 (mask == 0 arms): write the base background color to gAlbedo and
+            // gMaterial = (shadow = 1, ao = 1, mask = 0, 1). mask == 0 makes the resolve
             // PASS THE BASE THROUGH byte-identically (no PBR, no material fetch) — the
-            // 0%-gate for mesh / background / empty. gNormal is neutral (unread when mask==0).
-            float3 empty_color = has_mesh ? MESH_COLOR : BACKGROUND;
-            gAlbedo[uint2(px, py)] = float4(clamp(empty_color, 0.0, 1.0), 1.0);
-            gNormal[uint2(px, py)] = float4(0.5, 0.5, 0.0, 0.0);   // neutral oct, id = 0
-            gMaterial[uint2(px, py)] = float4(1.0, 1.0, 0.0, 1.0); // shadow=1, ao=1, mask=0
-            // Lighting L0b (C2): this EMPTY-tile early-return is a SEPARATE terminal exit
-            // BEFORE the final block, so gViewT must be written here too — the `1.0e30`
-            // sentinel (mask == 0, never read on a non-lit pixel). Omitting it would leave
-            // an EMPTY pixel's gViewT lane unwritten this frame (the prior single-site plan's
-            // bug). EXACTLY-ONCE: this thread returns immediately after.
+            // 0%-gate for background / empty. gNormal is neutral (unread when mask==0).
+            //
+            // Render P5-r2: the OWNERSHIP gate (Site A), symmetric with Site B. An EMPTY
+            // tile has NO SDF surface in front, so `own_pixel == !has_mesh` here: a
+            // mesh-covered EMPTY pixel is necessarily raster-owned (the mesh is in front of
+            // nothing-SDF). Gate the three ATTRIBUTE stores on `!has_mesh` — on a
+            // mesh-covered EMPTY pixel the marcher writes NOTHING to the attribute lanes and
+            // the raster's fragment stands (it wrote the mesh G-buffer in pass A). On a
+            // no-mesh scene `has_mesh` is always false, so the attributes are written exactly
+            // as before (the marcher's old `empty_color = BACKGROUND` arm) — byte-identical.
+            if (!has_mesh) {
+                gAlbedo[uint2(px, py)] = float4(clamp(BACKGROUND, 0.0, 1.0), 1.0);
+                gNormal[uint2(px, py)] = float4(0.5, 0.5, 0.0, 0.0);   // neutral oct, id = 0
+                gMaterial[uint2(px, py)] = float4(1.0, 1.0, 0.0, 1.0); // shadow=1, ao=1, mask=0
+            }
+            // Lighting L0b (C2) / Decision 3: this EMPTY-tile early-return is a SEPARATE
+            // terminal exit BEFORE the final block, so gViewT must be written here too — the
+            // `1.0e30` sentinel (mask == 0, never read on a non-lit pixel), ALWAYS written
+            // (the gate controls only the three attribute lanes). Omitting it would leave an
+            // EMPTY pixel's gViewT lane unwritten this frame. EXACTLY-ONCE: this thread
+            // returns immediately after.
             gViewT[uint2(px, py)] = 1.0e30;
             return;
         }
@@ -1639,16 +1650,33 @@ void main(uint3 tid : SV_DispatchThreadID) {
         base = BACKGROUND;                         // background arm: mask = 0 (pass-through)
     }
 
-    // PBR MVP-2 WRITES. The resolve reads gNormal (oct + id), gAlbedo (raw base), and
-    // gMaterial (shadow, ao, mask), fetches `materials[id]`, and runs Cook-Torrance.
-    gAlbedo[uint2(px, py)] = float4(clamp(base, 0.0, 1.0), 1.0);
-    gNormal[uint2(px, py)] = float4(oct.x, oct.y, id_ba.x, id_ba.y);
-    gMaterial[uint2(px, py)] = float4(shadow, ao, mask, 1.0);
-    // Lighting L0b (C2): the third + last terminal write site. The mesh + background arms
-    // (mask == 0) and the SDF-lit arm (mask == 1) all fall through here. On the lit arm
-    // store the REAL marched ray param `t` (the same `t` the SDF-hit arm's `p = ro + rd * t`
-    // used, in scope here); on the mesh/background arm store the `1.0e30` sentinel (never
-    // read on a non-lit pixel). `t` is the true world distance (rd is unit), so the resolve
-    // reconstructs `P = ro + rd * t` exactly.
-    gViewT[uint2(px, py)] = (mask == 1.0) ? t : 1.0e30;
+    // Render P5-r1: the per-pixel SDF/mesh OWNERSHIP gate (Site B). `own_pixel` is true
+    // iff the marcher is the producer for this pixel's G-buffer attribute lanes this
+    // frame: no mesh covers it (`!has_mesh` — the no-mesh-scene universal case, the
+    // 0%-gate), OR an SDF surface won the depth test in FRONT of the mesh (`hit && t <
+    // t_mesh`). On `!own_pixel` (a mesh covers it and no SDF is in front) the RASTER owns
+    // the pixel — the marcher writes NOTHING to gAlbedo/gNormal/gMaterial and lets the
+    // raster's already-written G-buffer fragment stand (pass A wrote it before this
+    // dispatch). On a no-mesh scene `own_pixel` is ALWAYS true, so every write path below
+    // is byte-identical to pre-P5. (Decision 1 / the 4-state table.)
+    bool own_pixel = !has_mesh || (hit && t < t_mesh);
+
+    // PBR MVP-2 WRITES, gated by ownership (Decision 2). The resolve reads gNormal (oct +
+    // id), gAlbedo (raw base), and gMaterial (shadow, ao, mask), fetches `materials[id]`,
+    // and runs Cook-Torrance. On `!own_pixel` the three ATTRIBUTE lanes are skipped — the
+    // raster's fragment is the single producer for this texel.
+    if (own_pixel) {
+        gAlbedo[uint2(px, py)] = float4(clamp(base, 0.0, 1.0), 1.0);
+        gNormal[uint2(px, py)] = float4(oct.x, oct.y, id_ba.x, id_ba.y);
+        gMaterial[uint2(px, py)] = float4(shadow, ao, mask, 1.0);
+    }
+    // Lighting L0b (C2) / Decision 3: gViewT is the third + last terminal write site and is
+    // ALWAYS written (the exactly-once contract is structurally separate from the attribute
+    // gate). On an own_pixel SDF-lit pixel store the REAL marched ray param `t` (the same `t`
+    // the SDF-hit arm's `p = ro + rd * t` used, in scope here); on every other case (own
+    // mesh/background, or a raster-owned `!own_pixel` pixel) store the `1.0e30` sentinel
+    // (never read on a non-lit pixel — the resolve gates its gViewT read inside `mask == 1`).
+    // `own_pixel && mask == 1.0` is the only lit case; a `!own_pixel` pixel is necessarily
+    // mask == 0 in the marcher (the mesh arm), so the sentinel is correct.
+    gViewT[uint2(px, py)] = (own_pixel && mask == 1.0) ? t : 1.0e30;
 }

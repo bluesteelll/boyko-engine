@@ -65,11 +65,11 @@ use boyko_rhi::{
 use boyko_rhi_vulkan::compute::{
     B5_CAMERA_UBO_BYTES_M4, COMPOSITE_PUSH_CONSTANT_BYTES, CoarseMode, CompositePushConstants,
     EDITLIST_BUFFER_WORDS, LOCAL_SIZE_X, M2_GRID_PARAMS_OFFSET,
-    MESH_COLOR, MESH_DEPTH_CLEAR, SDF_CAMERA_Z, SDF_TRACE_T_MAX,
+    MESH_DEPTH_CLEAR, SDF_CAMERA_Z, SDF_TRACE_T_MAX,
     SDF_VIEW_HALF_EXTENT, SdfEdit, TILE_BOUND_BYTES, CompositeCamera,
     encode_edit_list, deferred_pbr_spirv, golden_composite_pixel_ex, golden_deferred_resolve,
     golden_marcher_attributes, composite_pixel_ray, GoldenMaterial, DEFAULT_MARCHER_OMEGA,
-    LIGHTING_FLAG_AO, LIGHTING_FLAG_SHADOWS, DEFAULT_LIGHT_DIR, mesh_depth_for_z, pack_rgba,
+    LIGHTING_FLAG_AO, LIGHTING_FLAG_SHADOWS, DEFAULT_LIGHT_DIR, mesh_depth_for_z,
     sdf_gbuffer_composite_spirv, sdf_op, sdf_tile_cull_spirv, tile_grid_extent,
 };
 use boyko_rhi_vulkan::brick_atlas::BrickClipmap;
@@ -143,9 +143,9 @@ const WM_KEYDOWN: u32 = 0x0100;
 /// The virtual-key code for the 'B' key (`0x42`) — the brick A/B toggle.
 const VK_B: usize = 0x42;
 
-/// The throwaway raster-color format. MUST equal the recorder's
-/// `GBUFFER_RASTER_COLOR_FORMAT` (`R8G8B8A8_UNORM`) so the depth-prepass pipeline's
-/// declared color format matches the bound throwaway color attachment (W2-b).
+/// The mesh-raster G-buffer color format (Render P5-r0). MUST equal the recorder's
+/// `GBUFFER_FORMAT` (`R8G8B8A8_UNORM`) so the mesh-MRT producer pipeline's 3 declared
+/// color formats match the bound albedo/normal/material attachments.
 const RASTER_COLOR_FORMAT: Format = Format::R8G8B8A8Unorm;
 
 /// One vertex: a `Float32x3` position (offset 0) + a `Float32x4` color (offset 12), the
@@ -179,16 +179,19 @@ impl<const N: usize> SpirvBlob<N> {
     }
 }
 
-/// The committed rung-3 vertex SPIR-V (`triangle_mvp.vs.spv`), reused for the prepass.
-static MVP_VS_SPV: SpirvBlob<916> = SpirvBlob(*include_bytes!(concat!(
+/// Render P5-r0: the mesh-MRT G-buffer PRODUCER vertex SPIR-V (`gbuffer_mrt.vs.spv`).
+/// Same pos+color vertex layout as `triangle_mvp.vs`; passes through the LINEAR color +
+/// a constant world normal (the fronto-parallel quad's +Z).
+static MRT_VS_SPV: SpirvBlob<1044> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/shaders/triangle_mvp.vs.spv"
+    "/shaders/gbuffer_mrt.vs.spv"
 )));
 
-/// The committed rung-3 fragment SPIR-V (`triangle_mvp.fs.spv`), reused.
-static MVP_FS_SPV: SpirvBlob<368> = SpirvBlob(*include_bytes!(concat!(
+/// Render P5-r0: the mesh-MRT G-buffer PRODUCER fragment SPIR-V (`gbuffer_mrt.fs.spv`):
+/// writes albedo/normal/material as 3 MRT in the marcher's exact encoding (mask=1).
+static MRT_FS_SPV: SpirvBlob<1756> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/shaders/triangle_mvp.fs.spv"
+    "/shaders/gbuffer_mrt.fs.spv"
 )));
 
 /// The committed rung-5 fullscreen vertex SPIR-V (`fullscreen_sample.vs.spv`): a
@@ -604,8 +607,8 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
     // Live-computed at the COMPOSITE extent via the extent-aware ORTHO oracle, so the golden
     // re-blesses automatically at 512×512 (the frozen 64×64 `golden_composite_pixel` is the
     // `_ex` forwarder at `(SDF_IMG_W, SDF_IMG_H)`; here we forward at `(COMPOSITE_W, COMPOSITE_H)`).
-    let a_want =
-        golden_composite_pixel_ex(&sdf, depth_at(ax, ay), ax, ay, COMPOSITE_W, COMPOSITE_H, CompositeCamera::Ortho);
+    // Render P5: a_want (mesh-occludes) is now a RASTER-PBR producer (mask == 1) — computed below
+    // alongside b_want via the PBR oracle, NOT the old flat MESH_COLOR pass-through.
     let d_want =
         golden_composite_pixel_ex(&sdf, depth_at(dx, dy), dx, dy, COMPOSITE_W, COMPOSITE_H, CompositeCamera::Ortho);
     // The SDF-LIT texel (b) is now FULL Cook-Torrance (the owner-acknowledged behavioral
@@ -621,14 +624,18 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
     let (_, b_rd) = composite_pixel_ray(bx, by, COMPOSITE_W, COMPOSITE_H, CompositeCamera::Ortho);
     let b_want = golden_deferred_resolve(b_attrs, b_rd, &materials);
 
-    let mesh_packed = pack_rgba(MESH_COLOR);
-    assert!(
-        goldens_close(a_want, mesh_packed),
-        "invariant: the mesh-occludes-SDF golden must equal MESH_COLOR"
+    // Render P5: the mesh-occludes (a) texel is a raster-PBR producer (mask == 1) — model it
+    // through the SAME PBR oracle as the SDF-lit texel (golden_marcher_attributes' has_mesh arm
+    // emits the raster mesh attrs; golden_deferred_resolve runs full Cook-Torrance).
+    let (_, a_rd) = composite_pixel_ray(ax, ay, COMPOSITE_W, COMPOSITE_H, CompositeCamera::Ortho);
+    let a_attrs = golden_marcher_attributes(
+        &sdf, &materials, depth_at(ax, ay), ax, ay, COMPOSITE_W, COMPOSITE_H, CompositeCamera::Ortho,
+        DEFAULT_MARCHER_OMEGA, b_flags, DEFAULT_LIGHT_DIR,
     );
+    let a_want = golden_deferred_resolve(a_attrs, a_rd, &materials);
     assert!(
         !goldens_close(a_want, b_want),
-        "invariant: MESH_COLOR and the SDF lit color must differ beyond +/-{CHANNEL_TOL}"
+        "invariant: the raster-PBR mesh and the SDF lit color must differ beyond +/-{CHANNEL_TOL}"
     );
     assert!(
         !goldens_close(a_want, d_want),
@@ -873,12 +880,12 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
     )
     .expect("present nearest/clamp sampler");
 
-    // The depth-prepass graphics pipeline (rung-3 vertex layout + 64-byte VERTEX MVP +
-    // the throwaway color format + a declared depth format).
-    let vs = RhiDevice::create_shader_module(device, MVP_VS_SPV.as_words())
-        .expect("prepass vertex shader module");
-    let fs = RhiDevice::create_shader_module(device, MVP_FS_SPV.as_words())
-        .expect("prepass fragment shader module");
+    // The mesh-MRT G-buffer producer graphics pipeline (Render P5-r0): rung-3 vertex
+    // layout + 64-byte VERTEX MVP + 3 G-buffer color formats + a declared depth format.
+    let vs = RhiDevice::create_shader_module(device, MRT_VS_SPV.as_words())
+        .expect("mesh-MRT vertex shader module");
+    let fs = RhiDevice::create_shader_module(device, MRT_FS_SPV.as_words())
+        .expect("mesh-MRT fragment shader module");
     let attributes = [
         VertexAttribute { location: 0, offset: 0, format: VertexFormat::Float32x3 },
         VertexAttribute { location: 1, offset: 12, format: VertexFormat::Float32x4 },
@@ -890,7 +897,9 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
             vertex_entry: c"main",
             fragment_module: &fs,
             fragment_entry: c"main",
-            color_formats: &[RASTER_COLOR_FORMAT],
+            // Render P5-r0: 3 MRT color formats = the G-buffer RGBA8 lanes; the production
+            // `record_gbuffer` binds albedo/normal/material as the 3 MRT attachments.
+            color_formats: &[RASTER_COLOR_FORMAT, RASTER_COLOR_FORMAT, RASTER_COLOR_FORMAT],
             depth_format: Some(Format::D32Sfloat),
             topology: PrimitiveTopology::TriangleList,
             vertex_layout: Some(VertexBufferLayout {
@@ -1375,7 +1384,7 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         let b_got = read_texel(bx, by);
         let d_got = read_texel(dx, dy);
 
-        assert_readback_close(a_got, a_want, is_bgra, "mesh-occludes-SDF texel (MESH_COLOR)");
+        assert_readback_close(a_got, a_want, is_bgra, "mesh-occludes-SDF texel (raster-PBR)");
         assert_readback_close(b_got, b_want, is_bgra, "SDF texel (lit color)");
         assert_readback_close(d_got, d_want, is_bgra, "background texel");
 
@@ -1703,11 +1712,11 @@ fn p0_windowed_coarse_cull_matches_uncull() {
     )
     .expect("present nearest/clamp sampler");
 
-    // --- The depth-prepass graphics pipeline. ---
-    let vs = RhiDevice::create_shader_module(device, MVP_VS_SPV.as_words())
-        .expect("prepass vertex shader module");
-    let fs = RhiDevice::create_shader_module(device, MVP_FS_SPV.as_words())
-        .expect("prepass fragment shader module");
+    // --- The mesh-MRT G-buffer producer graphics pipeline (Render P5-r0). ---
+    let vs = RhiDevice::create_shader_module(device, MRT_VS_SPV.as_words())
+        .expect("mesh-MRT vertex shader module");
+    let fs = RhiDevice::create_shader_module(device, MRT_FS_SPV.as_words())
+        .expect("mesh-MRT fragment shader module");
     let attributes = [
         VertexAttribute { location: 0, offset: 0, format: VertexFormat::Float32x3 },
         VertexAttribute { location: 1, offset: 12, format: VertexFormat::Float32x4 },
@@ -1719,7 +1728,9 @@ fn p0_windowed_coarse_cull_matches_uncull() {
             vertex_entry: c"main",
             fragment_module: &fs,
             fragment_entry: c"main",
-            color_formats: &[RASTER_COLOR_FORMAT],
+            // Render P5-r0: 3 MRT color formats = the G-buffer RGBA8 lanes; the production
+            // `record_gbuffer` binds albedo/normal/material as the 3 MRT attachments.
+            color_formats: &[RASTER_COLOR_FORMAT, RASTER_COLOR_FORMAT, RASTER_COLOR_FORMAT],
             depth_format: Some(Format::D32Sfloat),
             topology: PrimitiveTopology::TriangleList,
             vertex_layout: Some(VertexBufferLayout {

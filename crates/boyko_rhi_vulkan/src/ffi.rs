@@ -840,6 +840,35 @@ const _: () = assert!(
     "SAMPLED_IMAGE_FILTER_LINEAR bit collides with the STORAGE_IMAGE bit"
 );
 
+/// `VkFormatFeatureFlagBits::VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT` — the OPTIMAL-tiling
+/// capability Render P5-r0 requires of the `R8G8B8A8_UNORM` G-buffer images: the mesh
+/// raster pass A now writes albedo/normal/material as MRT COLOR attachments (alongside
+/// their STORAGE usage), so the format must be color-attachment-renderable. RGBA8_UNORM
+/// color-attachment renderability is mandatory in Vulkan, so the boot fail-fast
+/// ([`crate::device::DeviceCaps::gbuffer_color_attachment_format_ok`]) passes universally
+/// — the explicit gate is the project's fail-fast discipline (no validation oracle on
+/// this box, so an unsupported usage must abort at boot with a clear message, not as a
+/// device-lost). Queried via `vkGetPhysicalDeviceFormatProperties` at device-create.
+// vulkan_core.h: `VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT = 0x00000080`.
+pub const VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT: VkFlags = 0x0000_0080;
+
+// Value guard for the hand-typed P5-r0 format-feature bit (same discipline as the
+// STORAGE_IMAGE / SAMPLED_IMAGE_FILTER_LINEAR guards): pin the header value, require a
+// single set bit, and assert it is DISTINCT from the two bits it sits among.
+const _: () = assert!(
+    VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT == 0x80,
+    "VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT must equal the vulkan_core.h value 0x00000080"
+);
+const _: () = assert!(
+    VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT.is_power_of_two(),
+    "a format-feature flag bit must be a single set bit (power of two)"
+);
+const _: () = assert!(
+    VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT != VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT
+        && VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT != VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT,
+    "COLOR_ATTACHMENT bit collides with the STORAGE_IMAGE / SAMPLED_IMAGE_FILTER_LINEAR bit"
+);
+
 /// `VkColorSpaceKHR::VK_COLOR_SPACE_SRGB_NONLINEAR_KHR` — the always-present space.
 pub const VK_COLOR_SPACE_SRGB_NONLINEAR_KHR: i32 = 0;
 

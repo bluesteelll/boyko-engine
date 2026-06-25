@@ -86,6 +86,13 @@ pub enum BootError {
     /// [`Self::GbufferStorageFormatUnsupported`] so the new lane can never fault on an
     /// unsupported format.
     ViewtStorageFormatUnsupported,
+    /// The GPU does not advertise `COLOR_ATTACHMENT` on the G-buffer color format
+    /// (`R8G8B8A8_UNORM`, OPTIMAL tiling) — Render P5-r0's mesh raster pass A cannot write
+    /// the albedo/normal/material images as MRT color attachments. RGBA8_UNORM
+    /// color-attachment renderability is mandatory in Vulkan, so this is core-guaranteed on
+    /// any conformant GPU; the fail-fast mirrors [`Self::GbufferStorageFormatUnsupported`]
+    /// so the producer can never fault as a device-lost on an unsupported usage.
+    GbufferColorAttachmentFormatUnsupported,
 }
 
 /// Bootstrap options for the instance.
@@ -137,6 +144,11 @@ pub struct DeviceCaps {
     /// L0b `gViewT` lane is a compute-store target). Always `true` on a booted context —
     /// boot fails with [`BootError::ViewtStorageFormatUnsupported`] otherwise (W2).
     pub viewt_storage_format_ok: bool,
+    /// Whether `R8G8B8A8_UNORM` supports `COLOR_ATTACHMENT` under OPTIMAL tiling (Render
+    /// P5-r0: the mesh raster pass A writes the G-buffer color images as MRT color
+    /// attachments). Always `true` on a booted context — boot fails with
+    /// [`BootError::GbufferColorAttachmentFormatUnsupported`] otherwise.
+    pub gbuffer_color_attachment_format_ok: bool,
     /// Whether `R8_SNORM` supports `SAMPLED_IMAGE_FILTER_LINEAR` under OPTIMAL tiling (SDF
     /// brick-atlas campaign M2): the hardware trilinear fetch of the quantized narrow-band
     /// brick atlas needs `VK_FILTER_LINEAR` on the sampled `R8_SNORM` 3D image. RECORDED
@@ -541,6 +553,13 @@ impl VulkanContext {
         // an unsupported format. Core-guaranteed on the RTX 3060.
         if !device_caps.viewt_storage_format_ok {
             fail!(BootError::ViewtStorageFormatUnsupported);
+        }
+        // Render P5-r0: the mesh raster pass A writes the R8G8B8A8_UNORM G-buffer images as
+        // MRT COLOR attachments — fail-fast here (mirroring the storage checks) so the
+        // producer can never device-lost on an unsupported usage. RGBA8_UNORM
+        // color-attachment renderability is mandatory in Vulkan (core-guaranteed on the RTX).
+        if !device_caps.gbuffer_color_attachment_format_ok {
+            fail!(BootError::GbufferColorAttachmentFormatUnsupported);
         }
 
         // --- 6. Create the logical device + retrieve the queue. ---
@@ -1946,6 +1965,30 @@ fn query_device_caps(fns: &InstanceFns, physical_device: VkPhysicalDevice) -> De
     let viewt_storage_format_ok =
         (viewt_props.optimal_tiling_features & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0;
 
+    // --- gbuffer_color_attachment_format_ok (P5-r0): COLOR_ATTACHMENT on R8G8B8A8_UNORM,
+    // OPTIMAL tiling. The mesh raster pass A writes the albedo/normal/material G-buffer
+    // images as MRT color attachments (alongside their STORAGE usage); mirror the
+    // `gbuffer_storage_format_ok` check exactly for the new feature bit so the caller can
+    // fail-fast before pass A binds them. (R8G8B8A8_UNORM color-attachment renderability is
+    // mandatory in Vulkan, so this passes universally — the gate is the fail-fast discipline.)
+    let mut gbuffer_color_props = VkFormatProperties {
+        linear_tiling_features: 0,
+        optimal_tiling_features: 0,
+        buffer_features: 0,
+    };
+    // SAFETY: `physical_device` is valid; `R8G8B8A8_UNORM` is a valid `VkFormat`;
+    // `&mut gbuffer_color_props` is a valid out-pointer for the `#[repr(C)]`
+    // `VkFormatProperties` the driver fully overwrites.
+    unsafe {
+        (fns.get_physical_device_format_properties)(
+            physical_device,
+            VK_FORMAT_R8G8B8A8_UNORM,
+            &mut gbuffer_color_props,
+        )
+    };
+    let gbuffer_color_attachment_format_ok =
+        (gbuffer_color_props.optimal_tiling_features & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) != 0;
+
     // --- atlas_linear_filter_ok (M2): SAMPLED_IMAGE_FILTER_LINEAR on R8_SNORM, OPTIMAL
     // tiling. The SDF brick atlas is a SAMPLED `R8_SNORM` 3D image the marcher fetches with
     // a hardware trilinear filter; mirror the storage-format checks for the new feature bit.
@@ -1974,6 +2017,7 @@ fn query_device_caps(fns: &InstanceFns, physical_device: VkPhysicalDevice) -> De
         bindless_capable,
         gbuffer_storage_format_ok,
         viewt_storage_format_ok,
+        gbuffer_color_attachment_format_ok,
         atlas_linear_filter_ok,
     }
 }

@@ -173,8 +173,15 @@ static SDF_EDITLIST_STORAGE_IMAGE_SPV: SpirvBlob<24092> = SpirvBlob(*include_byt
 /// ONLY when the signed refine CONVERGES (`abs(d) < EPS`); a grazing silhouette point (analytic miss
 /// within `M2_CREASE_EPS`) or a stalled hard crease falls to the analytic fold, erasing the 1-2px
 /// silhouette rim where the brick hit but the analytic ray missed (dead `resid`/`cand_p` removed),
-/// giving 121620 bytes (VulkanSDK 1.4.350.0 dxc). The hit-set is now exactly the refine-converged set; the residual silhouette rim is ACCEPTED as inherent (owner decision), and the marginal grazing-only EXACT-ANALYTIC RE-MARCH that chased it (a factored analytic re-march gated on a near-tangent normal-vs-ray dot, about 30KB more SPIR-V to recover roughly 7px) was REVERTED in favor of this clean band-removal state under a perf-maximal budget. SDF brick-atlas M5a (TOROIDAL clip-map streaming) then made `m2_surface_hit`'s tile lookup address the atlas at the TOROIDAL slot `(round(origin/bw) + box) mod M2_GRID_DIM` (Decision 5 — recomputed from the existing UBO `origin`/`brick_world`, NO new UBO field so the OFF UBO byte-identity is untouched); at a grid where `origin_cell ≡ 0 (mod DIM)` it reduces to the old `box * BRICK_ALLOC` map → 122488 bytes. Render P0 (empty-skip-only) then generalized the hand-written coarse-cull prefix's `coarse_enabled` gate from a bool to a 3-value `CoarseMode` (0 off / 1 full / 2 empty-skip-only): the `near_t` seed is now wrapped in `if (pc.coarse_enabled == 1u)`, so mode 2 skips empty tiles WITHOUT seeding (the lit-transparent on-screen cull, no grazing-silhouette AO/shadow rim). Mode 0 and mode 1 OUTPUT are byte-unchanged; the new `== 1u` compare adds → 122532 bytes.
-static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<122532> = SpirvBlob(*include_bytes!(concat!(
+/// giving 121620 bytes (VulkanSDK 1.4.350.0 dxc). The hit-set is now exactly the refine-converged set; the residual silhouette rim is ACCEPTED as inherent (owner decision), and the marginal grazing-only EXACT-ANALYTIC RE-MARCH that chased it (a factored analytic re-march gated on a near-tangent normal-vs-ray dot, about 30KB more SPIR-V to recover roughly 7px) was REVERTED in favor of this clean band-removal state under a perf-maximal budget. SDF brick-atlas M5a (TOROIDAL clip-map streaming) then made `m2_surface_hit`'s tile lookup address the atlas at the TOROIDAL slot `(round(origin/bw) + box) mod M2_GRID_DIM` (Decision 5 — recomputed from the existing UBO `origin`/`brick_world`, NO new UBO field so the OFF UBO byte-identity is untouched); at a grid where `origin_cell ≡ 0 (mod DIM)` it reduces to the old `box * BRICK_ALLOC` map → 122488 bytes. Render P0 (empty-skip-only) then generalized the hand-written coarse-cull prefix's `coarse_enabled` gate from a bool to a 3-value `CoarseMode` (0 off / 1 full / 2 empty-skip-only): the `near_t` seed is now wrapped in `if (pc.coarse_enabled == 1u)`, so mode 2 skips empty tiles WITHOUT seeding (the lit-transparent on-screen cull, no grazing-silhouette AO/shadow rim). Mode 0 and mode 1 OUTPUT are byte-unchanged; the new `== 1u` compare adds → 122532 bytes. Render
+/// P5 (mesh-first-class hybrid) r1+r2 then added the per-pixel SDF/mesh OWNERSHIP GATE at the two
+/// terminal write sites: `own_pixel = !has_mesh || (hit && t < t_mesh)` wraps the THREE attribute
+/// stores (gAlbedo/gNormal/gMaterial) at Site B and `!has_mesh` wraps them at Site A (the empty-tile
+/// early-return); gViewT stays ALWAYS-written with its value forced to the `1.0e30` sentinel on a
+/// `!own_pixel` pixel (Decision 3, exactly-once). On a NO-MESH scene `has_mesh` is always false so
+/// `own_pixel` is always true and every write path is byte-identical (the 0%-gate); the `.spv` grows
+/// by the two gate branches → 122812 bytes.
+static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<122812> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/sdf_gbuffer_composite.comp.spv"
 )));
@@ -919,6 +926,28 @@ pub fn golden_editlist_pixel(edits: &[SdfEdit], px: u32, py: u32) -> u32 {
 /// deferred S3 refinement; this rung proves DEPTH sharing, so the color is a
 /// constant.)
 pub const MESH_COLOR: [f32; 3] = [0.15, 0.65, 0.25];
+
+/// Render P5 (r0+r1): the LINEAR vertex color of the offscreen test harness's mesh quad —
+/// the RASTER-PBR producer's gAlbedo. The `gbuffer_mrt.fs` writes `albedo = saturate(color)`;
+/// the harness drivers (`run_gbuffer_hybrid_*`) all build the quad with a WHITE linear
+/// vertex color (`[1, 1, 1, 1]` in `quad_vertices`), so `saturate` is the identity here.
+///
+/// After P5 a mesh-covered pixel the SDF did NOT win is RASTER-OWNED (`!own_pixel`): the
+/// raster pass writes a first-class PBR G-buffer (`base = this color`, `n = (0, 0, 1)`,
+/// `mat_id = 0`, `shadow = ao = 1`, `mask = 1`) and the deferred resolve runs FULL
+/// Cook-Torrance on it — exactly like an SDF pixel. The host oracle
+/// [`golden_marcher_attributes`] models that producer with this albedo so the GPU-vs-oracle
+/// comparison matches mesh pixels too. (The old flat marcher-derived [`MESH_COLOR`] with
+/// `mask = 0` is the pre-P5 behavior; it is retained only for the docs/inline-composite
+/// `golden_composite_pixel_*` oracles that model the marcher's own mesh arm.)
+///
+/// NOTE: the marcher does NOT write `gViewT` for a `!own_pixel` mesh pixel — it stores the
+/// `1.0e30` sentinel there (`sdf_gbuffer_composite.hlsl`, the `own_pixel && mask == 1.0`
+/// guard), and the raster pass writes only the 3 attribute MRT (no `gViewT`). So a mesh
+/// pixel's reconstructed `P = ro + rd * 1.0e30` is at infinity → every point/spot light is
+/// range-culled → a mesh pixel receives the directional + sky terms only. The oracle mirrors
+/// this by emitting the sentinel `view_t` on the raster-PBR mesh arm.
+pub const MESH_RASTER_ALBEDO: [f32; 3] = [1.0, 1.0, 1.0];
 
 /// Word offset of the per-pixel mesh-depth region (immediately after the edit
 /// array — i.e. where rung 9 put its pixel region). Matches the shader's
@@ -4159,18 +4188,44 @@ pub fn golden_marcher_attributes(
             // hit point `p = ro + rd * t` above used) — the resolve reconstructs `P` from it.
             view_t: t,
         }
-    } else {
-        let base = if has_mesh { MESH_COLOR } else { SDF_BACKGROUND };
-        // mask == 0: gNormal/id/shadow/ao are unread by the resolve (pass-through); model
-        // the marcher's neutral defaults so the attribute struct round-trips deterministically.
+    } else if has_mesh {
+        // Render P5 (r0+r1): a mesh-covered pixel the SDF did NOT win is RASTER-OWNED
+        // (`!own_pixel` in `sdf_gbuffer_composite.hlsl`). The raster pass (`gbuffer_mrt.fs`)
+        // is the SINGLE producer: it writes a first-class PBR G-buffer with `mask = 1`, so
+        // the deferred resolve runs FULL Cook-Torrance on the mesh pixel — identical to an
+        // SDF pixel — NOT the pre-P5 flat MESH_COLOR pass-through. Model that producer here:
+        //   - gAlbedo = saturate(LINEAR vertex color) = MESH_RASTER_ALBEDO (the harness quad
+        //     is white; `saturate` is the identity).
+        //   - gNormal = oct_encode((0, 0, 1)) (the fronto-parallel quad's +Z) + mat_id 0.
+        //   - gMaterial = (shadow = 1, ao = 1, mask = 1) — the raster has no analytic SDF
+        //     shadow/AO (a charted follow-up), so both are unoccluded.
+        //   - gViewT: the marcher writes the 1.0e30 SENTINEL for a `!own_pixel` pixel (the
+        //     raster MRT carry no gViewT lane), so the resolve reconstructs P at infinity and
+        //     range-culls every point/spot — a mesh pixel gets the directional + sky terms
+        //     only. Mirror that with the sentinel `view_t`.
+        let n = [0.0_f32, 0.0, 1.0];
+        let oct = oct_encode(n);
         MarcherAttributes {
-            base_rgb: base_bytes(base),
+            base_rgb: base_bytes(MESH_RASTER_ALBEDO),
+            oct_rg: [q8(oct[0]), q8(oct[1])],
+            mat_id: 0,
+            shadow: 255,
+            ao: 255,
+            mask: 1,
+            view_t: 1.0e30,
+        }
+    } else {
+        // Pure background / empty (NO mesh, SDF missed): mask == 0 pass-through. gNormal/id/
+        // shadow/ao are unread by the resolve; model the marcher's neutral defaults so the
+        // attribute struct round-trips deterministically.
+        MarcherAttributes {
+            base_rgb: base_bytes(SDF_BACKGROUND),
             oct_rg: [q8(0.5), q8(0.5)],
             mat_id: 0,
             shadow: 255,
             ao: 255,
             mask: 0,
-            // Lighting L0b: the mesh / background / empty arms store the `1.0e30` sentinel
+            // Lighting L0b: the background / empty arm stores the `1.0e30` sentinel
             // (the GPU's mask == 0 write); never read on a non-lit pixel (read-under-mask).
             view_t: 1.0e30,
         }

@@ -105,10 +105,6 @@ const QUAD_Y_MAX: f32 = 1.0;
 /// decoded as "no mesh"). Must equal [`MESH_DEPTH_CLEAR`].
 const DEPTH_CLEAR: f32 = MESH_DEPTH_CLEAR;
 
-/// A throwaway color-attachment format for the mesh raster pass (the graphics pipeline
-/// requires a non-empty `color_formats`; only the DEPTH result is consumed).
-const COLOR_FORMAT: Format = Format::R8G8B8A8Unorm;
-
 /// The G-buffer color format (albedo / normal / material): `R8G8B8A8_UNORM`, the
 /// STORAGE-image store target whose support the [`DeviceCaps`] boot fail-fast asserts.
 const GBUFFER_FORMAT: Format = Format::R8G8B8A8Unorm;
@@ -186,16 +182,21 @@ impl<const N: usize> SpirvBlob<N> {
     }
 }
 
-/// The committed rung-3 vertex SPIR-V (`triangle_mvp.vs.spv`), reused for the raster.
-static MVP_VS_SPV: SpirvBlob<916> = SpirvBlob(*include_bytes!(concat!(
+/// Render P5-r0: the mesh-MRT G-buffer PRODUCER vertex SPIR-V (`gbuffer_mrt.vs.spv`):
+/// passes through the LINEAR vertex color + a constant world normal (the fronto-parallel
+/// quad's +Z). Same pos+color vertex layout as `triangle_mvp.vs`.
+static MRT_VS_SPV: SpirvBlob<1044> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/shaders/triangle_mvp.vs.spv"
+    "/shaders/gbuffer_mrt.vs.spv"
 )));
 
-/// The committed rung-3 fragment SPIR-V (`triangle_mvp.fs.spv`), reused.
-static MVP_FS_SPV: SpirvBlob<368> = SpirvBlob(*include_bytes!(concat!(
+/// Render P5-r0: the mesh-MRT G-buffer PRODUCER fragment SPIR-V (`gbuffer_mrt.fs.spv`):
+/// writes albedo/normal/material as 3 MRT in the marcher's exact encoding (mask=1), with
+/// the eDSL-spliced `oct_encode` / `pack_material_id_ba` (guarded by
+/// `gbuffer_mrt_edsl_sync.rs`).
+static MRT_FS_SPV: SpirvBlob<1756> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/shaders/triangle_mvp.fs.spv"
+    "/shaders/gbuffer_mrt.fs.spv"
 )));
 
 /// Boots a validation-enabled headless context, or returns `None` (with a SKIP log)
@@ -750,22 +751,12 @@ fn run_gbuffer_hybrid_m4(
         })
         .expect("offscreen depth texture (sampled)");
 
-    // A throwaway color attachment for the raster pass (never read back).
-    let color = device
-        .create_texture(&TextureDesc {
-            width: SDF_IMG_W,
-            height: SDF_IMG_H,
-            depth: 1,
-            format: COLOR_FORMAT,
-            dimension: TextureDimension::D2,
-            usage: ImageUsage::COLOR_ATTACHMENT,
-        })
-        .expect("throwaway color texture");
-
-    // --- The MRT G-buffer STORAGE images (albedo + normal + material): STORAGE for the
-    // compute store. Deferred split: albedo/material are CONSUMED by the resolve (STORAGE
-    // load in GENERAL), so albedo no longer needs TRANSFER_SRC — the readback copies the
-    // resolve's LIT output instead. ---
+    // --- The MRT G-buffer STORAGE images (albedo + normal + material). Render P5-r0: each
+    // ALSO carries COLOR_ATTACHMENT — the mesh raster pass A now writes them as a 3-MRT
+    // G-buffer producer (in the marcher's encoding, mask=1), so a yielded mesh pixel (r1)
+    // has a real fragment to stand on. The marcher still STORES them in GENERAL; the
+    // deferred resolve loads albedo/normal/material in GENERAL. The throwaway color
+    // attachment is DELETED (the MRT binds the three real images). ---
     let albedo = device
         .create_texture(&TextureDesc {
             width: SDF_IMG_W,
@@ -773,9 +764,9 @@ fn run_gbuffer_hybrid_m4(
             depth: 1,
             format: GBUFFER_FORMAT,
             dimension: TextureDimension::D2,
-            usage: ImageUsage::STORAGE,
+            usage: ImageUsage::STORAGE | ImageUsage::COLOR_ATTACHMENT,
         })
-        .expect("G-buffer albedo storage image");
+        .expect("G-buffer albedo storage+color image");
     let normal = device
         .create_texture(&TextureDesc {
             width: SDF_IMG_W,
@@ -783,9 +774,9 @@ fn run_gbuffer_hybrid_m4(
             depth: 1,
             format: GBUFFER_FORMAT,
             dimension: TextureDimension::D2,
-            usage: ImageUsage::STORAGE,
+            usage: ImageUsage::STORAGE | ImageUsage::COLOR_ATTACHMENT,
         })
-        .expect("G-buffer normal storage image");
+        .expect("G-buffer normal storage+color image");
     let material = device
         .create_texture(&TextureDesc {
             width: SDF_IMG_W,
@@ -793,9 +784,9 @@ fn run_gbuffer_hybrid_m4(
             depth: 1,
             format: GBUFFER_FORMAT,
             dimension: TextureDimension::D2,
-            usage: ImageUsage::STORAGE,
+            usage: ImageUsage::STORAGE | ImageUsage::COLOR_ATTACHMENT,
         })
-        .expect("G-buffer material storage image");
+        .expect("G-buffer material storage+color image");
     // Deferred split: the LIT image is the resolve's STORAGE store output; TRANSFER_SRC so
     // the golden readback copies it out (the readback now reads LIT, not albedo).
     let lit = device
@@ -881,13 +872,15 @@ fn run_gbuffer_hybrid_m4(
         );
     }
 
-    // --- Modules: the rung-3 mesh-raster pair + the P1b G-buffer marcher (compute). ---
+    // --- Modules: the Render P5-r0 mesh-MRT producer pair + the P1b G-buffer marcher
+    // (compute). The raster pair is now `gbuffer_mrt.{vs,fs}` (3-MRT producer), NOT the
+    // depth-only `triangle_mvp` pair. ---
     let vs = device
-        .create_shader_module(MVP_VS_SPV.as_words())
-        .expect("vertex shader module");
+        .create_shader_module(MRT_VS_SPV.as_words())
+        .expect("mesh-MRT vertex shader module");
     let fs = device
-        .create_shader_module(MVP_FS_SPV.as_words())
-        .expect("fragment shader module");
+        .create_shader_module(MRT_FS_SPV.as_words())
+        .expect("mesh-MRT fragment shader module");
     let cs = device
         .create_shader_module(sdf_gbuffer_composite_spirv())
         .expect("P1b G-buffer marcher compute shader module");
@@ -912,7 +905,9 @@ fn run_gbuffer_hybrid_m4(
             vertex_entry: c"main",
             fragment_module: &fs,
             fragment_entry: c"main",
-            color_formats: &[COLOR_FORMAT],
+            // Render P5-r0: 3 MRT color formats = the G-buffer RGBA8 lanes (albedo@0,
+            // normal@1, material@2). The builder auto-derives 3 opaque blend states.
+            color_formats: &[GBUFFER_FORMAT, GBUFFER_FORMAT, GBUFFER_FORMAT],
             depth_format: Some(Format::D32Sfloat),
             topology: PrimitiveTopology::TriangleList,
             vertex_layout: Some(VertexBufferLayout {
@@ -923,7 +918,7 @@ fn run_gbuffer_hybrid_m4(
             bind_group_layout: None,
             blend: None,
         })
-        .expect("depth-testing graphics pipeline");
+        .expect("mesh-MRT G-buffer producer graphics pipeline");
 
     // --- The P1b vocabulary set, EXTENDED for P4b: { SSBO edit-list @0, SAMPLED depth
     // @1, STORAGE albedo @2, STORAGE normal @3, STORAGE material @4, UNIFORM camera @5,
@@ -1112,17 +1107,21 @@ fn run_gbuffer_hybrid_m4(
 
     encoder.begin().expect("begin");
 
-    // --- Mesh raster pass: clear depth to the far plane, rasterize the quad. ---
-    encoder.image_barrier(&ImageBarrierDesc {
-        texture: &color,
-        src_stage: BarrierStage::TOP_OF_PIPE,
-        dst_stage: BarrierStage::COLOR_ATTACHMENT_OUTPUT,
-        src_access: BarrierAccess::NONE,
-        dst_access: BarrierAccess::COLOR_ATTACHMENT_WRITE,
-        old_layout: ImageLayout::Undefined,
-        new_layout: ImageLayout::ColorAttachmentOptimal,
-        range: ImageSubresourceRange::COLOR,
-    });
+    // --- Render P5-r0 mesh raster pass A: clear depth + the 3 MRT G-buffer lanes, then
+    // rasterize the quad as a 3-MRT producer (albedo/normal/material in the marcher's
+    // encoding, mask=1). The 3 RGBA8 images: UNDEFINED → COLOR_ATTACHMENT_OPTIMAL. ---
+    for tex in [&albedo, &normal, &material] {
+        encoder.image_barrier(&ImageBarrierDesc {
+            texture: tex,
+            src_stage: BarrierStage::TOP_OF_PIPE,
+            dst_stage: BarrierStage::COLOR_ATTACHMENT_OUTPUT,
+            src_access: BarrierAccess::NONE,
+            dst_access: BarrierAccess::COLOR_ATTACHMENT_WRITE,
+            old_layout: ImageLayout::Undefined,
+            new_layout: ImageLayout::ColorAttachmentOptimal,
+            range: ImageSubresourceRange::COLOR,
+        });
+    }
     encoder.image_barrier(&ImageBarrierDesc {
         texture: &depth,
         src_stage: BarrierStage::TOP_OF_PIPE,
@@ -1135,16 +1134,36 @@ fn run_gbuffer_hybrid_m4(
     });
 
     let full = RenderArea { x: 0, y: 0, width: SDF_IMG_W, height: SDF_IMG_H };
-    let color_attachment = [RenderingAttachment {
-        texture: &color,
-        layout: ImageLayout::ColorAttachmentOptimal,
-        load_op: LoadOp::Clear,
-        store_op: StoreOp::Store,
-        clear_color: [0.0, 0.0, 0.0, 1.0],
-    }];
+    // Render P5-r0 / Decision r0-2: the MRT clears ARE the marcher's mask=0 neutral
+    // G-buffer (albedo=(BACKGROUND.rgb,1), normal=(0.5,0.5,0,0), material=(1,1,0,1)), so a
+    // no-fragment pixel holds the cleared neutral the marcher (owning it) overwrites anyway
+    // — the no-mesh 0%-gate. All values pass through the same round(c*255) quantizer exactly.
+    let color_attachments = [
+        RenderingAttachment {
+            texture: &albedo,
+            layout: ImageLayout::ColorAttachmentOptimal,
+            load_op: LoadOp::Clear,
+            store_op: StoreOp::Store,
+            clear_color: [0.05, 0.05, 0.1, 1.0],
+        },
+        RenderingAttachment {
+            texture: &normal,
+            layout: ImageLayout::ColorAttachmentOptimal,
+            load_op: LoadOp::Clear,
+            store_op: StoreOp::Store,
+            clear_color: [0.5, 0.5, 0.0, 0.0],
+        },
+        RenderingAttachment {
+            texture: &material,
+            layout: ImageLayout::ColorAttachmentOptimal,
+            load_op: LoadOp::Clear,
+            store_op: StoreOp::Store,
+            clear_color: [1.0, 1.0, 0.0, 1.0],
+        },
+    ];
     encoder.begin_rendering(&RenderingDesc {
         render_area: full,
-        colors: &color_attachment,
+        colors: &color_attachments,
         depth: Some(DepthAttachment {
             texture: &depth,
             layout: ImageLayout::DepthAttachmentOptimal,
@@ -1186,10 +1205,28 @@ fn run_gbuffer_hybrid_m4(
         range: ImageSubresourceRange::DEPTH,
     });
 
-    // --- The 3 G-buffer storage images + the lit output + the Lighting-L0b gViewT lane:
-    // UNDEFINED → GENERAL. The marcher stores albedo/normal/material + gViewT; the deferred
-    // resolve loads albedo/material/gViewT and stores lit — all in GENERAL. ---
-    for tex in [&albedo, &normal, &material, &lit, &viewt] {
+    // --- Render P5-r0 barrier-out: the 3 RGBA8 G-buffer images COLOR_ATTACHMENT_OPTIMAL →
+    // GENERAL, handing pass A's rasterized mesh fragments to the marcher (a GENUINE
+    // raster-write hand-off: COLOR_ATTACHMENT_OUTPUT/COLOR_ATTACHMENT_WRITE →
+    // COMPUTE_SHADER/SHADER_READ|SHADER_WRITE). The marcher (under r1) yields mesh-owned
+    // texels so the raster's value survives. On a no-mesh scene a CLEAR is a color write,
+    // correctly made available. ---
+    for tex in [&albedo, &normal, &material] {
+        encoder.image_barrier(&ImageBarrierDesc {
+            texture: tex,
+            src_stage: BarrierStage::COLOR_ATTACHMENT_OUTPUT,
+            dst_stage: BarrierStage::COMPUTE_SHADER,
+            src_access: BarrierAccess::COLOR_ATTACHMENT_WRITE,
+            dst_access: BarrierAccess::SHADER_READ | BarrierAccess::SHADER_WRITE,
+            old_layout: ImageLayout::ColorAttachmentOptimal,
+            new_layout: ImageLayout::General,
+            range: ImageSubresourceRange::COLOR,
+        });
+    }
+
+    // --- The lit output + the Lighting-L0b gViewT lane: UNDEFINED → GENERAL (r0 does NOT
+    // rasterize into these — they stay wholly marcher/resolve-produced). ---
+    for tex in [&lit, &viewt] {
         encoder.image_barrier(&ImageBarrierDesc {
             texture: tex,
             src_stage: BarrierStage::TOP_OF_PIPE,
@@ -1441,7 +1478,6 @@ fn run_gbuffer_hybrid_m4(
         device.destroy_texture(material);
         device.destroy_texture(normal);
         device.destroy_texture(albedo);
-        device.destroy_texture(color);
         device.destroy_texture(depth);
         device.destroy_buffer(tiles_buffer);
         device.destroy_buffer(light_table);
@@ -1564,17 +1600,24 @@ fn p1b_gbuffer_hybrid_matches_golden() {
              (tol {CHANNEL_TOL}); {sdf_lit_hits} SDF-lit px"
         );
 
-        // Texel A (sphere ∧ quad) → MESH_COLOR (mesh occludes the SDF — the load-bearing
-        // occlusion proof, only correct if the sampled depth actually clipped the march).
+        // Texel A (sphere ∧ quad): the mesh occludes the SDF — the load-bearing occlusion
+        // proof. Render P5-r0+r1: the mesh pixel is now the RASTER pass-A's first-class PBR
+        // G-buffer (mask=1, base = the white vertex color, Cook-Torrance lit), NOT the old
+        // flat marcher-derived MESH_COLOR (mask=0). So texel A must DIFFER from MESH_COLOR
+        // (proving the raster PBR producer, not the retired flat constant, owns it) AND from
+        // background (proving the mesh occluded the SDF / something was drawn). The EXACT
+        // raster-PBR lit value is the RTX visual oracle's responsibility (it depends on the
+        // GPU Cook-Torrance under the degenerate light table — not hand-derivable here).
         if let Some((ax, ay)) = a {
             let got = unpack_texel_rgb(texel(ax, ay));
             assert!(
-                texel_close(got, boyko_rhi_vulkan::compute::pack_rgba(MESH_COLOR)),
-                "[{name}] texel A ({ax},{ay}) must be MESH_COLOR (mesh occludes SDF), got {got:?}"
+                !texel_close(got, boyko_rhi_vulkan::compute::pack_rgba(MESH_COLOR)),
+                "[{name}] texel A ({ax},{ay}) must be the RASTER PBR mesh G-buffer (mask=1), \
+                 NOT the retired flat MESH_COLOR — got {got:?}"
             );
         }
-        // Texel D (background) — distinct from texel A (mesh), proving the marcher ran a
-        // field, not a constant fill.
+        // Texel D (background) — distinct from texel A (mesh), proving the mesh occluded the
+        // SDF / the raster drew a real fragment, not a constant fill.
         if let (Some((ax, ay)), Some((dx, dy))) = (a, d) {
             let av = unpack_texel_rgb(texel(ax, ay));
             let dv = unpack_texel_rgb(texel(dx, dy));
@@ -2145,19 +2188,59 @@ fn b1_gate8c_bug_b1_hole_1_is_mesh_masked_on_gpu_harness() {
     let at12 = run_gbuffer_hybrid_ex(&ctx, &edits, false, false, 1.2).0;
     let g1 = albedo_rgb(&at1, px, py);
     let g12 = albedo_rgb(&at12, px, py);
-    let mesh = unpack_packed_rgb(pack_rgba(MESH_COLOR));
+    // Render P5 (r0+r1): the mesh now MASKS the hole as a first-class RASTER-PBR fragment
+    // (mask=1, base = the white vertex color, full Cook-Torrance under the degenerate light
+    // table), NOT the old flat MESH_COLOR (mask=0) pass-through. The masking premise stands —
+    // the SDF (hit OR hole) is occluded by the mesh — but the expected value is now the
+    // raster-PBR mesh, derived through the SAME deferred oracle the harness compares against
+    // (the run is lighting OFF / flags == 0 / ω == 1.0, the DEGENERATE table). This proves the
+    // hole pixel reads the MESH (not the SDF-hole value, not background), keeping the masking
+    // proof meaningful.
+    let materials = host_material_table();
+    let md = expected_mesh_depth(px, py);
+    let attrs = golden_marcher_attributes(
+        &edits, &materials, md, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, 1.0, 0,
+        DEFAULT_LIGHT_DIR,
+    );
+    // The mesh quad occludes the SDF here, so the host oracle picks its raster-PBR mesh arm.
+    assert_eq!(attrs.mask, 1, "the mesh-covered hole pixel is the RASTER-PBR mesh (mask=1)");
+    let (_, rd) = composite_pixel_ray(px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
+    let mesh = unpack_packed_rgb(golden_deferred_resolve(attrs, rd, &materials));
     println!(
-        "[BUG-B1-HOLE-1 GPU] ({px},{py}) mesh-covered: ω=1 {g1:?} ω=1.2 {g12:?} (MESH_COLOR {mesh:?}) — hole MASKED by the mesh quad"
+        "[BUG-B1-HOLE-1 GPU] ({px},{py}) mesh-covered: ω=1 {g1:?} ω=1.2 {g12:?} (raster-PBR mesh {mesh:?}) — hole MASKED by the mesh quad"
     );
     // Both composite the mesh (the SDF — hit or hole — is occluded), so the GPU readback cannot
     // distinguish the hole here. This documents the harness limitation, not a B1 success.
     assert!(
-        (0..3).all(|c| (g1[c] - mesh[c]).abs() <= CHANNEL_TOL),
-        "ω=1 ({g1:?}) must be MESH_COLOR ({mesh:?}) at the mesh-covered hole pixel"
+        (0..3).all(|c| (g1[c] - mesh[c]).abs() <= DEFERRED_ARM1_TOL),
+        "ω=1 ({g1:?}) must be the raster-PBR mesh value ({mesh:?}) at the mesh-covered hole pixel"
     );
     assert!(
-        !gpu_pixel_is_sdf_hit(&at1, px, py),
-        "the hole pixel is mesh-covered on-device, so it is not an exposed SDF hit (the masking)"
+        (0..3).all(|c| (g12[c] - mesh[c]).abs() <= DEFERRED_ARM1_TOL),
+        "ω=1.2 ({g12:?}) must ALSO be the raster-PBR mesh value ({mesh:?}) — the mesh masks the \
+         B1 hole at BOTH ω (the readback cannot distinguish the hole here)"
+    );
+    // The masking is real: the GPU readback shows the MESH, NOT the SDF surface. The SDF DOES
+    // exist underneath (the pixel is an analytic SDF hit at ω=1), so its un-masked color would
+    // be the SDF-lit value — derive it through the SAME oracle with NO mesh and assert the mesh
+    // value differs from it. (This is the post-P5 replacement for the pre-P5 `gpu_pixel_is_sdf_hit`
+    // probe, which classified by proximity to the flat MESH_COLOR — invalid now that the mesh is
+    // a PBR-lit white, far from MESH_COLOR.)
+    assert!(
+        editlist_pixel_hits(&edits, px, py),
+        "BUG-B1-HOLE-1 premise: the pixel IS an analytic SDF hit at ω=1 (the over-relax hole is \
+         an ω>1 artifact); the mesh masks whatever the SDF does there"
+    );
+    let sdf_attrs = golden_marcher_attributes(
+        &edits, &materials, MESH_DEPTH_CLEAR, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho,
+        1.0, 0, DEFAULT_LIGHT_DIR,
+    );
+    assert_eq!(sdf_attrs.mask, 1, "the un-masked pixel is an SDF-lit surface (mask=1)");
+    let sdf_lit = unpack_packed_rgb(golden_deferred_resolve(sdf_attrs, rd, &materials));
+    assert!(
+        !(0..3).all(|c| (mesh[c] - sdf_lit[c]).abs() <= CHANNEL_TOL),
+        "the masked mesh value ({mesh:?}) must DIFFER from the un-masked SDF-lit value \
+         ({sdf_lit:?}) — proving the mesh (not the SDF) owns the readback (the masking)"
     );
 }
 
@@ -2715,6 +2798,13 @@ fn assert_lit_matches_deferred_golden_omega(
                 edits, &materials, md, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, omega,
                 flags, light_dir,
             );
+            // Render P5 (r0+r1): a mesh-covered pixel the SDF did NOT win is RASTER-OWNED —
+            // the marcher yields and the raster pass A's PBR fragment (mask=1, base = the
+            // white vertex color, Cook-Torrance lit) stands, NOT the old flat MESH_COLOR
+            // (mask=0) pass-through. `golden_marcher_attributes` now MODELS that raster-PBR
+            // producer exactly (mask=1, base=MESH_RASTER_ALBEDO, n=(0,0,1), shadow=ao=1,
+            // view_t=sentinel), so the deferred oracle predicts the mesh pixel too and it is
+            // asserted on the SAME ±2/255 budget as every other pixel — no skip.
             let (_, rd) = composite_pixel_ray(px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
             let want = unpack_packed_rgb(golden_deferred_resolve(attrs, rd, &materials));
             let got = albedo_rgb(lit, px, py);
@@ -3429,7 +3519,8 @@ fn run_gbuffer_hybrid_lit_clustered(
         })
         .expect("P4b coarse-cull tile-bound storage buffer");
 
-    // --- The depth IMAGE (D32_SFLOAT) + the throwaway color attachment. ---
+    // --- The depth IMAGE (D32_SFLOAT). Render P5-r0: the throwaway color attachment is
+    // DELETED — pass A now binds the three real G-buffer images as a 3-MRT producer. ---
     let depth = device
         .create_texture(&TextureDesc {
             width: SDF_IMG_W,
@@ -3440,18 +3531,9 @@ fn run_gbuffer_hybrid_lit_clustered(
             usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT | ImageUsage::SAMPLED,
         })
         .expect("offscreen depth texture (sampled)");
-    let color = device
-        .create_texture(&TextureDesc {
-            width: SDF_IMG_W,
-            height: SDF_IMG_H,
-            depth: 1,
-            format: COLOR_FORMAT,
-            dimension: TextureDimension::D2,
-            usage: ImageUsage::COLOR_ATTACHMENT,
-        })
-        .expect("throwaway color texture");
 
-    // --- The MRT G-buffer STORAGE images + the LIT output + the gViewT lane. ---
+    // --- The MRT G-buffer STORAGE images + the LIT output + the gViewT lane. Render P5-r0:
+    // albedo/normal/material ALSO carry COLOR_ATTACHMENT (the mesh raster pass-A producer). ---
     let albedo = device
         .create_texture(&TextureDesc {
             width: SDF_IMG_W,
@@ -3459,9 +3541,9 @@ fn run_gbuffer_hybrid_lit_clustered(
             depth: 1,
             format: GBUFFER_FORMAT,
             dimension: TextureDimension::D2,
-            usage: ImageUsage::STORAGE,
+            usage: ImageUsage::STORAGE | ImageUsage::COLOR_ATTACHMENT,
         })
-        .expect("G-buffer albedo storage image");
+        .expect("G-buffer albedo storage+color image");
     let normal = device
         .create_texture(&TextureDesc {
             width: SDF_IMG_W,
@@ -3473,9 +3555,9 @@ fn run_gbuffer_hybrid_lit_clustered(
             // also overrides the oracle's `attrs.oct_rg` with the GPU's REAL stored normal bytes
             // (the residual FP gap is in the marcher's normal, amplified by 1/d² lights), so the
             // oracle's UNORM decode is bit-identical to the GPU resolve's gNormal load.
-            usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC,
+            usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC | ImageUsage::COLOR_ATTACHMENT,
         })
-        .expect("G-buffer normal storage image");
+        .expect("G-buffer normal storage+color image");
     let material = device
         .create_texture(&TextureDesc {
             width: SDF_IMG_W,
@@ -3483,9 +3565,9 @@ fn run_gbuffer_hybrid_lit_clustered(
             depth: 1,
             format: GBUFFER_FORMAT,
             dimension: TextureDimension::D2,
-            usage: ImageUsage::STORAGE,
+            usage: ImageUsage::STORAGE | ImageUsage::COLOR_ATTACHMENT,
         })
-        .expect("G-buffer material storage image");
+        .expect("G-buffer material storage+color image");
     let lit = device
         .create_texture(&TextureDesc {
             width: SDF_IMG_W,
@@ -3566,13 +3648,14 @@ fn run_gbuffer_hybrid_lit_clustered(
         );
     }
 
-    // --- Modules: the mesh-raster pair + the marcher + the cull + the resolve. ---
+    // --- Modules: the Render P5-r0 mesh-MRT producer pair + the marcher + the cull + the
+    // resolve. The raster pair is now `gbuffer_mrt.{vs,fs}` (3-MRT producer). ---
     let vs = device
-        .create_shader_module(MVP_VS_SPV.as_words())
-        .expect("vertex shader module");
+        .create_shader_module(MRT_VS_SPV.as_words())
+        .expect("mesh-MRT vertex shader module");
     let fs = device
-        .create_shader_module(MVP_FS_SPV.as_words())
-        .expect("fragment shader module");
+        .create_shader_module(MRT_FS_SPV.as_words())
+        .expect("mesh-MRT fragment shader module");
     let cs = device
         .create_shader_module(sdf_gbuffer_composite_spirv())
         .expect("P1b G-buffer marcher compute shader module");
@@ -3583,7 +3666,7 @@ fn run_gbuffer_hybrid_lit_clustered(
         .create_shader_module(deferred_pbr_spirv())
         .expect("deferred resolve compute shader module");
 
-    // --- The depth-testing graphics pipeline. ---
+    // --- The mesh-MRT G-buffer producer graphics pipeline (Render P5-r0). ---
     let attributes = [
         VertexAttribute { location: 0, offset: 0, format: VertexFormat::Float32x3 },
         VertexAttribute { location: 1, offset: 12, format: VertexFormat::Float32x4 },
@@ -3594,7 +3677,8 @@ fn run_gbuffer_hybrid_lit_clustered(
             vertex_entry: c"main",
             fragment_module: &fs,
             fragment_entry: c"main",
-            color_formats: &[COLOR_FORMAT],
+            // Render P5-r0: 3 MRT color formats = the G-buffer RGBA8 lanes.
+            color_formats: &[GBUFFER_FORMAT, GBUFFER_FORMAT, GBUFFER_FORMAT],
             depth_format: Some(Format::D32Sfloat),
             topology: PrimitiveTopology::TriangleList,
             vertex_layout: Some(VertexBufferLayout {
@@ -3605,7 +3689,7 @@ fn run_gbuffer_hybrid_lit_clustered(
             bind_group_layout: None,
             blend: None,
         })
-        .expect("depth-testing graphics pipeline");
+        .expect("mesh-MRT G-buffer producer graphics pipeline");
 
     // --- The vocabulary set (marcher), identical to the table driver: { edit-list @0,
     // sampled depth @1, albedo @2, normal @3, material @4, camera UBO @5, tiles @6, material
@@ -3776,17 +3860,21 @@ fn run_gbuffer_hybrid_lit_clustered(
 
     encoder.begin().expect("begin");
 
-    // --- Mesh raster pass: clear depth to the far plane, rasterize the quad. ---
-    encoder.image_barrier(&ImageBarrierDesc {
-        texture: &color,
-        src_stage: BarrierStage::TOP_OF_PIPE,
-        dst_stage: BarrierStage::COLOR_ATTACHMENT_OUTPUT,
-        src_access: BarrierAccess::NONE,
-        dst_access: BarrierAccess::COLOR_ATTACHMENT_WRITE,
-        old_layout: ImageLayout::Undefined,
-        new_layout: ImageLayout::ColorAttachmentOptimal,
-        range: ImageSubresourceRange::COLOR,
-    });
+    // --- Render P5-r0 mesh raster pass A: clear depth + the 3 MRT G-buffer lanes, then
+    // rasterize the quad as a 3-MRT producer. The 3 RGBA8 images: UNDEFINED →
+    // COLOR_ATTACHMENT_OPTIMAL. ---
+    for tex in [&albedo, &normal, &material] {
+        encoder.image_barrier(&ImageBarrierDesc {
+            texture: tex,
+            src_stage: BarrierStage::TOP_OF_PIPE,
+            dst_stage: BarrierStage::COLOR_ATTACHMENT_OUTPUT,
+            src_access: BarrierAccess::NONE,
+            dst_access: BarrierAccess::COLOR_ATTACHMENT_WRITE,
+            old_layout: ImageLayout::Undefined,
+            new_layout: ImageLayout::ColorAttachmentOptimal,
+            range: ImageSubresourceRange::COLOR,
+        });
+    }
     encoder.image_barrier(&ImageBarrierDesc {
         texture: &depth,
         src_stage: BarrierStage::TOP_OF_PIPE,
@@ -3799,16 +3887,33 @@ fn run_gbuffer_hybrid_lit_clustered(
     });
 
     let full = RenderArea { x: 0, y: 0, width: SDF_IMG_W, height: SDF_IMG_H };
-    let color_attachment = [RenderingAttachment {
-        texture: &color,
-        layout: ImageLayout::ColorAttachmentOptimal,
-        load_op: LoadOp::Clear,
-        store_op: StoreOp::Store,
-        clear_color: [0.0, 0.0, 0.0, 1.0],
-    }];
+    // Render P5-r0 / Decision r0-2: the MRT clears ARE the marcher's mask=0 neutral G-buffer.
+    let color_attachments = [
+        RenderingAttachment {
+            texture: &albedo,
+            layout: ImageLayout::ColorAttachmentOptimal,
+            load_op: LoadOp::Clear,
+            store_op: StoreOp::Store,
+            clear_color: [0.05, 0.05, 0.1, 1.0],
+        },
+        RenderingAttachment {
+            texture: &normal,
+            layout: ImageLayout::ColorAttachmentOptimal,
+            load_op: LoadOp::Clear,
+            store_op: StoreOp::Store,
+            clear_color: [0.5, 0.5, 0.0, 0.0],
+        },
+        RenderingAttachment {
+            texture: &material,
+            layout: ImageLayout::ColorAttachmentOptimal,
+            load_op: LoadOp::Clear,
+            store_op: StoreOp::Store,
+            clear_color: [1.0, 1.0, 0.0, 1.0],
+        },
+    ];
     encoder.begin_rendering(&RenderingDesc {
         render_area: full,
-        colors: &color_attachment,
+        colors: &color_attachments,
         depth: Some(DepthAttachment {
             texture: &depth,
             layout: ImageLayout::DepthAttachmentOptimal,
@@ -3844,8 +3949,23 @@ fn run_gbuffer_hybrid_lit_clustered(
         range: ImageSubresourceRange::DEPTH,
     });
 
-    // --- The G-buffer + lit + gViewT images: UNDEFINED → GENERAL. ---
-    for tex in [&albedo, &normal, &material, &lit, &viewt] {
+    // --- Render P5-r0 barrier-out: the 3 RGBA8 G-buffer images COLOR_ATTACHMENT_OPTIMAL →
+    // GENERAL (a genuine raster-write hand-off to the marcher). ---
+    for tex in [&albedo, &normal, &material] {
+        encoder.image_barrier(&ImageBarrierDesc {
+            texture: tex,
+            src_stage: BarrierStage::COLOR_ATTACHMENT_OUTPUT,
+            dst_stage: BarrierStage::COMPUTE_SHADER,
+            src_access: BarrierAccess::COLOR_ATTACHMENT_WRITE,
+            dst_access: BarrierAccess::SHADER_READ | BarrierAccess::SHADER_WRITE,
+            old_layout: ImageLayout::ColorAttachmentOptimal,
+            new_layout: ImageLayout::General,
+            range: ImageSubresourceRange::COLOR,
+        });
+    }
+
+    // --- The lit + gViewT images: UNDEFINED → GENERAL (not rasterized into in r0). ---
+    for tex in [&lit, &viewt] {
         encoder.image_barrier(&ImageBarrierDesc {
             texture: tex,
             src_stage: BarrierStage::TOP_OF_PIPE,
@@ -4097,7 +4217,6 @@ fn run_gbuffer_hybrid_lit_clustered(
         device.destroy_texture(material);
         device.destroy_texture(normal);
         device.destroy_texture(albedo);
-        device.destroy_texture(color);
         device.destroy_texture(depth);
         device.destroy_buffer(tiles_buffer);
         device.destroy_buffer(light_index_alloc);
@@ -5215,6 +5334,79 @@ fn sdf_m4_clipmap_far_field_screenshot_dump() {
     assert_validation_clean(&ctx);
     // SAFETY: the render submit was fence-waited; the device is drained; `destroy` consumes the clip-map.
     unsafe { clipmap.destroy(&ctx) };
+}
+
+/// Render P5 (r0+r1) MESH+SDF OFFSCREEN SCREENSHOT DUMP (`#[ignore]`, RTX) — the owner's
+/// visual sign-off that the mesh is now a first-class RASTER-PBR G-buffer producer (lit by
+/// the SAME deferred Cook-Torrance as the SDF), NOT the pre-P5 flat MESH_COLOR pass-through.
+///
+/// Renders the `crater()` SDF scene WITH the harness mesh quad rasterized over it (the quad
+/// spans the world-XY footprint at `MESH_Z`, occluding the LEFT portion of the crater), under
+/// a colorful L0b light table (1 directional + 1 point (warm) + 1 spot (cool)) so the lit
+/// shading is visible. The mesh-covered pixels now show a PBR-LIT WHITE quad (the white
+/// vertex albedo run through full Cook-Torrance: directional + sky ambient — point/spot are
+/// range-culled by the mesh's sentinel `gViewT`); the SDF-covered pixels show the lit crater.
+/// The owner eyeballs that the mesh region is a shaded white surface (not a flat green
+/// `[38,166,64]` = the old MESH_COLOR), proving the P5 raster-PBR producer is on-screen.
+///
+/// Writes the LIT image to `D:/tmp/p5_mesh_sdf.bmp` (created if absent). `#[ignore]` because
+/// it needs the RTX (no CPU oracle assert — it is a visual dump).
+#[test]
+#[ignore = "GPU offscreen screenshot dump — the owner runs it on the RTX for visual sign-off"]
+fn p5_mesh_sdf_pbr_screenshot_dump() {
+    let Some(ctx) = boot_or_skip("p5_mesh_sdf_pbr_screenshot_dump") else {
+        return;
+    };
+    println!("Vulkan device: {}", ctx.device_name());
+
+    // The SDF body the mesh quad partially occludes — the recognizable crater CSG.
+    let edits = crater();
+
+    // A colorful L0b light table (mirrors `l0b_point_and_spot_match_the_table_oracle`): a
+    // white directional + a warm point + a cool spot, all in front of the origin-plane
+    // surface so a swath of pixels is lit. Shadows + AO ON.
+    let flags = LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO;
+    let header = GoldenLightHeader::new(1, 2, 1.0);
+    let lights = vec![
+        GoldenLight::directional([0.0, 0.0, 1.0], [1.0, 1.0, 1.0], 1.0),
+        GoldenLight::point([0.0, 0.0, 1.5], [1.0, 0.9, 0.8], 4000.0, 6.0),
+        GoldenLight::spot([0.4, 0.4, 1.5], [0.0, 0.0, 1.0], [0.8, 0.9, 1.0], 6000.0, 6.0, 20.0, 35.0),
+    ];
+    let table = pack_light_table(&header, &lights);
+
+    // The full offscreen hybrid composite: raster the mesh quad → marcher writes SDF/empty
+    // attributes (yielding the mesh-owned pixels to the raster) → deferred resolve lights the
+    // whole G-buffer (mesh + SDF) with Cook-Torrance.
+    let lit =
+        run_gbuffer_hybrid_lit_table(&ctx, &edits, false, false, 1.0, flags, DEFAULT_LIGHT_DIR, &table).0;
+    assert_eq!(lit.len(), READBACK_BYTES as usize);
+    let nonzero = lit.chunks_exact(4).filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+    assert!(nonzero > 0, "P5 mesh+SDF LIT all-zero — device did not render");
+
+    // Spot-check: a mesh-covered pixel must now read a LIT (non-zero, non-MESH_COLOR) value.
+    let probe = (10u32, 32u32);
+    assert!(
+        mesh_covers_pixel(probe.0, probe.1),
+        "the probe pixel must be inside the mesh quad footprint"
+    );
+    let mesh_px = albedo_rgb(&lit, probe.0, probe.1);
+    let old_mesh = unpack_packed_rgb(pack_rgba(MESH_COLOR));
+    assert!(
+        !(0..3).all(|c| (mesh_px[c] - old_mesh[c]).abs() <= CHANNEL_TOL),
+        "the mesh pixel {mesh_px:?} must be the raster-PBR producer, NOT the retired flat \
+         MESH_COLOR {old_mesh:?}"
+    );
+
+    let dir = std::path::Path::new("D:/tmp");
+    std::fs::create_dir_all(dir).expect("create D:/tmp for the screenshot dump");
+    let path = dir.join("p5_mesh_sdf.bmp");
+    write_bmp_rgba(&path, &lit, SDF_IMG_W, SDF_IMG_H);
+    println!(
+        "P5 mesh+SDF PBR screenshot written to {} (mesh pixel {mesh_px:?} = raster-PBR white, \
+         not MESH_COLOR {old_mesh:?})",
+        path.display()
+    );
+    assert_validation_clean(&ctx);
 }
 
 

@@ -2398,37 +2398,46 @@ impl<'ctx> Renderer<'ctx> {
             return Err(SwapchainError::VkError("vkBeginCommandBuffer", result));
         }
 
-        // === Pass A: rasterize the mesh quad's depth into the D32 depth IMAGE. ===
+        // === Pass A (Render P5-r0): rasterize the mesh quad as a 3-MRT G-buffer PRODUCER
+        // (albedo@0, normal@1, material@2) + the D32 depth. The marcher's attribute
+        // encoding is the contract; pass A writes mesh fragments in it (mask=1) so the
+        // deferred resolve lights mesh pixels first-class and the r1 ownership gate yields
+        // to them. gViewT is UNTOUCHED by r0 (still wholly marcher-produced). ===
 
-        // (0) Barrier (throwaway raster color): UNDEFINED → COLOR_ATTACHMENT_OPTIMAL.
-        let raster_color_barrier = VkImageMemoryBarrier {
-            s_type: VkStructureType::ImageMemoryBarrier,
-            p_next: ptr::null(),
-            src_access_mask: 0,
-            dst_access_mask: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-            old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
-            new_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-            src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
-            dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
-            image: targets.raster_color.image,
-            subresource_range: COLOR_SUBRESOURCE_RANGE,
-        };
-        // SAFETY: recording is open; one image barrier on the live throwaway color
-        // image; TOP_OF_PIPE→COLOR_ATTACHMENT_OUTPUT with UNDEFINED→COLOR is the
-        // superset-correct first transition; `&raster_color_barrier` outlives the call.
-        unsafe {
-            (self.fns.cmd_pipeline_barrier)(
-                cmd,
-                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                0,
-                0,
-                ptr::null(),
-                0,
-                ptr::null(),
-                1,
-                (&raster_color_barrier as *const VkImageMemoryBarrier).cast(),
-            );
+        // (0) Barrier-in: the 3 RGBA8 G-buffer images UNDEFINED → COLOR_ATTACHMENT_OPTIMAL.
+        // Replaces the deleted throwaway-color barrier, now on the three real images.
+        // `src=0`/`TOP_OF_PIPE` is the superset-correct FIRST transition for a freshly
+        // re-`UNDEFINED`'d image (no prior content to make available).
+        for tex in [&targets.albedo, &targets.normal, &targets.material] {
+            let to_color = VkImageMemoryBarrier {
+                s_type: VkStructureType::ImageMemoryBarrier,
+                p_next: ptr::null(),
+                src_access_mask: 0,
+                dst_access_mask: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+                new_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                image: tex.image,
+                subresource_range: COLOR_SUBRESOURCE_RANGE,
+            };
+            // SAFETY: recording is open; one image barrier on a live G-buffer image;
+            // TOP_OF_PIPE→COLOR_ATTACHMENT_OUTPUT with UNDEFINED→COLOR is the
+            // superset-correct first transition; `&to_color` outlives the iteration.
+            unsafe {
+                (self.fns.cmd_pipeline_barrier)(
+                    cmd,
+                    VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                    0,
+                    0,
+                    ptr::null(),
+                    0,
+                    ptr::null(),
+                    1,
+                    (&to_color as *const VkImageMemoryBarrier).cast(),
+                );
+            }
         }
 
         // (1) Barrier (depth): UNDEFINED → DEPTH_ATTACHMENT_OPTIMAL at the
@@ -2464,16 +2473,28 @@ impl<'ctx> Renderer<'ctx> {
             );
         }
 
-        // (2) Dynamic rendering at the marcher's extent: a throwaway color attachment
-        // (CLEAR/STORE, format-compatible with the raster pipeline's declared color
-        // format, never read) + the depth attachment (CLEAR to the far plane / STORE).
-        // The render area is the marcher's extent so the rasterized depth covers exactly
-        // the dispatched pixels; the swapchain may be WSI-clamped wider (the present-blit
-        // handles that).
-        let raster_color_attachment = VkRenderingAttachmentInfo {
+        // (2) Dynamic rendering at the marcher's extent: 3 MRT color attachments
+        // (albedo@0, normal@1, material@2; CLEAR/STORE) + the depth attachment (CLEAR to
+        // the far plane / STORE). The render area is the marcher's extent so the
+        // rasterized fragments cover exactly the dispatched pixels; the swapchain may be
+        // WSI-clamped wider (the present-blit handles that).
+        //
+        // Render P5-r0 / Decision r0-2: each color clear IS the marcher's mask=0 neutral
+        // G-buffer, so a pixel with NO mesh fragment holds the cleared neutral, which the
+        // marcher (owning that pixel) overwrites anyway — making the no-mesh 0%-gate
+        // trivial AND a depth-failed/missed mesh fragment fall back to a valid mask=0
+        // neutral. The clears pass through the SAME float→UNORM8 `round(c*255)` quantizer
+        // the marcher store uses; 0.05/0.10/0.5/1.0/0.0 are all exact, so the cleared
+        // neutral is bit-identical to a marcher-written neutral.
+        //   albedo  clear = (BACKGROUND.rgb, 1.0)  — the marcher's background base.
+        //   normal  clear = (0.5, 0.5, 0.0, 0.0)   — neutral oct + id=0.
+        //   material clear = (1.0, 1.0, 0.0, 1.0)  — shadow=1, ao=1, mask=0, 1.
+        // These MUST equal the marcher's background-arm constants (sdf_gbuffer_composite.hlsl:
+        // BACKGROUND = (0.05, 0.05, 0.1); the Site-A/B mask=0 neutrals).
+        let albedo_attachment = VkRenderingAttachmentInfo {
             s_type: VkStructureType::RenderingAttachmentInfo,
             p_next: ptr::null(),
-            image_view: targets.raster_color.view,
+            image_view: targets.albedo.view,
             image_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
             resolve_mode: 0,
             resolve_image_view: VkImageView::NULL,
@@ -2482,10 +2503,44 @@ impl<'ctx> Renderer<'ctx> {
             store_op: VK_ATTACHMENT_STORE_OP_STORE,
             clear_value: VkClearValue {
                 color: VkClearColorValue {
-                    float32: [0.0, 0.0, 0.0, 1.0],
+                    float32: [0.05, 0.05, 0.1, 1.0],
                 },
             },
         };
+        let normal_attachment = VkRenderingAttachmentInfo {
+            s_type: VkStructureType::RenderingAttachmentInfo,
+            p_next: ptr::null(),
+            image_view: targets.normal.view,
+            image_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            resolve_mode: 0,
+            resolve_image_view: VkImageView::NULL,
+            resolve_image_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+            load_op: VK_ATTACHMENT_LOAD_OP_CLEAR,
+            store_op: VK_ATTACHMENT_STORE_OP_STORE,
+            clear_value: VkClearValue {
+                color: VkClearColorValue {
+                    float32: [0.5, 0.5, 0.0, 0.0],
+                },
+            },
+        };
+        let material_attachment = VkRenderingAttachmentInfo {
+            s_type: VkStructureType::RenderingAttachmentInfo,
+            p_next: ptr::null(),
+            image_view: targets.material.view,
+            image_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            resolve_mode: 0,
+            resolve_image_view: VkImageView::NULL,
+            resolve_image_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+            load_op: VK_ATTACHMENT_LOAD_OP_CLEAR,
+            store_op: VK_ATTACHMENT_STORE_OP_STORE,
+            clear_value: VkClearValue {
+                color: VkClearColorValue {
+                    float32: [1.0, 1.0, 0.0, 1.0],
+                },
+            },
+        };
+        let raster_color_attachments =
+            [albedo_attachment, normal_attachment, material_attachment];
         let depth_attachment = VkRenderingAttachmentInfo {
             s_type: VkStructureType::RenderingAttachmentInfo,
             p_next: ptr::null(),
@@ -2514,8 +2569,8 @@ impl<'ctx> Renderer<'ctx> {
             render_area: raster_area,
             layer_count: 1,
             view_mask: 0,
-            color_attachment_count: 1,
-            p_color_attachments: &raster_color_attachment,
+            color_attachment_count: raster_color_attachments.len() as u32,
+            p_color_attachments: raster_color_attachments.as_ptr(),
             p_depth_attachment: (&depth_attachment as *const VkRenderingAttachmentInfo).cast(),
             p_stencil_attachment: ptr::null(),
         };
@@ -2528,13 +2583,15 @@ impl<'ctx> Renderer<'ctx> {
             max_depth: 1.0,
         };
         let vertex_offset: VkDeviceSize = 0;
-        // SAFETY: recording is open; `raster_rendering` is fully initialized — its color
-        // attachment names the live throwaway color view (now COLOR_ATTACHMENT_OPTIMAL)
-        // and its depth attachment the live depth view (now DEPTH_ATTACHMENT_OPTIMAL);
-        // dynamic rendering is enabled on this device. The raster pipeline + its VERTEX
-        // push range + the vertex buffer all belong to this device (caller contract) and
-        // the pipeline's declared color/depth formats equal the bound attachments' (W2-b).
-        // The MVP push is `GBUFFER_MVP_BYTES` at offset 0 into the VERTEX range;
+        // SAFETY: recording is open; `raster_rendering` is fully initialized — its 3 color
+        // attachments name the live albedo/normal/material views (now
+        // COLOR_ATTACHMENT_OPTIMAL) and its depth attachment the live depth view (now
+        // DEPTH_ATTACHMENT_OPTIMAL); `raster_color_attachments` outlives the bracketed
+        // calls; dynamic rendering is enabled on this device. The raster pipeline (declaring
+        // 3 matching color formats + 3 blend states, P5-r0) + its VERTEX push range + the
+        // vertex buffer all belong to this device (caller contract) and the pipeline's
+        // declared color/depth formats equal the bound attachments'. The MVP push is
+        // `GBUFFER_MVP_BYTES` at offset 0 into the VERTEX range;
         // `vertex_offset`/`raster_viewport`/`raster_area` locals outlive the bracketed
         // calls; `draw(vertex_count, 1, 0, 0)` reads the bound vertices. Begin/End
         // bracket pass A exactly.
@@ -2604,17 +2661,56 @@ impl<'ctx> Renderer<'ctx> {
             );
         }
 
-        // (4) The 3 G-buffer storage images + the lit output + the Lighting-L0b gViewT
-        // lane: UNDEFINED → GENERAL. The marcher stores into albedo/normal/material + gViewT
-        // (a compute store); the deferred resolve loads albedo/material/gViewT and stores
-        // into lit — all in GENERAL.
-        for tex in [
-            &targets.albedo,
-            &targets.normal,
-            &targets.material,
-            &targets.lit,
-            &targets.viewt,
-        ] {
+        // (3b) Render P5-r0 barrier-out: the 3 RGBA8 G-buffer images
+        // COLOR_ATTACHMENT_OPTIMAL → GENERAL, handing pass A's rasterized mesh fragments to
+        // the marcher. This is a GENUINE raster-write hand-off (NOT the old throwaway
+        // UNDEFINED→GENERAL shape): `src=COLOR_ATTACHMENT_OUTPUT/COLOR_ATTACHMENT_WRITE`
+        // makes the raster's color writes AVAILABLE, `dst=COMPUTE_SHADER/SHADER_READ|
+        // SHADER_WRITE` makes them VISIBLE to the marcher's reads/writes (and, post-r1, the
+        // resolve's reads). The marcher then (under the r1 ownership gate) does NOT write a
+        // mesh-owned texel, so the raster's value survives to the resolve — single producer
+        // per texel across the barrier. On a no-mesh / clear-only pass a CLEAR is a color
+        // write, correctly made available by the same source half.
+        for tex in [&targets.albedo, &targets.normal, &targets.material] {
+            let color_to_general = VkImageMemoryBarrier {
+                s_type: VkStructureType::ImageMemoryBarrier,
+                p_next: ptr::null(),
+                src_access_mask: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                dst_access_mask: VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                old_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                new_layout: VK_IMAGE_LAYOUT_GENERAL,
+                src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                image: tex.image,
+                subresource_range: COLOR_SUBRESOURCE_RANGE,
+            };
+            // SAFETY: recording is open; one image barrier on a live G-buffer image;
+            // COLOR_ATTACHMENT_OUTPUT→COMPUTE_SHADER with COLOR_ATTACHMENT_WRITE→
+            // SHADER_READ|SHADER_WRITE and COLOR_ATTACHMENT_OPTIMAL→GENERAL makes pass A's
+            // rasterized fragments available + visible to the marcher; `&color_to_general`
+            // outlives the iteration.
+            unsafe {
+                (self.fns.cmd_pipeline_barrier)(
+                    cmd,
+                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    0,
+                    0,
+                    ptr::null(),
+                    0,
+                    ptr::null(),
+                    1,
+                    (&color_to_general as *const VkImageMemoryBarrier).cast(),
+                );
+            }
+        }
+
+        // (4) The lit output + the Lighting-L0b gViewT lane: UNDEFINED → GENERAL. The
+        // marcher stores gViewT and the resolve stores lit — both in GENERAL. (Render P5-r0:
+        // albedo/normal/material moved to the COLOR_ATTACHMENT_OPTIMAL→GENERAL barrier-out
+        // (3b) above, since pass A now rasterizes into them; gViewT stays UNDEFINED→GENERAL
+        // because r0 does NOT rasterize into it — it is still wholly marcher-produced.)
+        for tex in [&targets.lit, &targets.viewt] {
             let to_general = VkImageMemoryBarrier {
                 s_type: VkStructureType::ImageMemoryBarrier,
                 p_next: ptr::null(),
@@ -3760,8 +3856,13 @@ pub struct BrickActivation {
 /// its layout MUST declare `present_layout` (one COMBINED_IMAGE_SAMPLER) — or the
 /// validation layer faults at record/draw time.
 pub struct GBufferScene<'a> {
-    /// The depth-testing mesh-raster graphics pipeline (rung-3 vertex+fragment): the
-    /// fronto-parallel quad drawn into the D32 depth image (pass A).
+    /// The mesh-raster graphics pipeline (pass A). Render P5-r0: a 3-MRT G-buffer
+    /// PRODUCER — the fronto-parallel quad is drawn into the D32 depth image AND the three
+    /// RGBA8 G-buffer color attachments (albedo@0, normal@1, material@2) in the marcher's
+    /// exact encoding (mask=1). The caller MUST build it with `color_formats =
+    /// [R8G8B8A8_UNORM; 3]` + 3 per-target blend states (W2-b) and the new
+    /// `gbuffer_mrt.{vs,fs}` shader pair. (Pre-P5 it was a depth-only prepass with one
+    /// throwaway color format.)
     pub raster_pipeline: &'a VulkanGraphicsPipeline,
     /// The mesh quad's host-visible vertex buffer (position + color).
     pub vertex_buffer: &'a BoundBuffer,
@@ -4063,13 +4164,9 @@ pub struct GBufferTargets {
     /// The D32_SFLOAT depth image: DEPTH_STENCIL_ATTACHMENT (rasterize into) |
     /// SAMPLED (the marcher's `.Load`). Re-`UNDEFINED`'d every frame by the recorder.
     depth: VulkanTexture,
-    /// A throwaway COLOR_ATTACHMENT image for the depth-prepass (pass A). The raster
-    /// pipeline declares a single color format (W2-b), so the dynamic-rendering pass
-    /// MUST bind one format-compatible color attachment; its result is never read (only
-    /// the depth is consumed) — mirrors the P1b offscreen driver's throwaway `color`.
-    raster_color: VulkanTexture,
     /// The ALBEDO storage image (R8G8B8A8): the marcher's FINAL composite sink; also
-    /// sampled by the present-blit (pass C).
+    /// sampled by the present-blit (pass C). Render P5-r0: it additionally carries
+    /// `COLOR_ATTACHMENT` usage — the mesh raster pass A writes it as MRT@0.
     albedo: VulkanTexture,
     /// The NORMAL storage image (R8G8B8A8): the PBR MVP-2 marcher's `(oct.x, oct.y,
     /// matid_lo, matid_hi)` attribute — the octahedral world normal in RG + the 16-bit
@@ -4126,13 +4223,6 @@ const GBUFFER_FORMAT: Format = Format::R8G8B8A8Unorm;
 /// attenuation/cone banding a low-precision `t` would cause. W2: `STORAGE_IMAGE` support
 /// on this format is fail-fast-checked at device boot.
 const GVIEWT_FORMAT: Format = Format::R32Sfloat;
-
-/// The throwaway color-attachment format for the depth-prepass (pass A). The raster
-/// pipeline declares a single color format (W2-b); the prepass binds a format-matching
-/// throwaway color image whose result is discarded (only the depth is consumed). MUST
-/// equal the `color_formats[0]` the caller declares on [`GBufferScene::raster_pipeline`]
-/// (the P1b offscreen driver uses `R8G8B8A8_UNORM`).
-const GBUFFER_RASTER_COLOR_FORMAT: Format = Format::R8G8B8A8Unorm;
 
 impl GBufferTargets {
     /// Creates a 2D `R8G8B8A8_UNORM` storage image at `extent` with `usage`. A small
@@ -4200,68 +4290,57 @@ impl GBufferTargets {
             RhiDevice::create_texture(ctx, &desc).map_err(SwapchainError::DepthImage)?
         };
 
-        // Throwaway COLOR_ATTACHMENT for the depth prepass (never read; the raster
-        // pipeline declares one color format so the pass must bind one).
-        let raster_color = {
-            let desc = TextureDesc {
-                width: extent.width,
-                height: extent.height,
-                depth: 1,
-                format: GBUFFER_RASTER_COLOR_FORMAT,
-                dimension: TextureDimension::D2,
-                usage: ImageUsage::COLOR_ATTACHMENT,
-            };
-            match RhiDevice::create_texture(ctx, &desc) {
-                Ok(t) => t,
-                Err(e) => {
-                    // SAFETY: `depth` was created on `ctx` just above; referenced by no
-                    // submission; destroyed exactly once on this error path.
-                    unsafe { RhiDevice::destroy_texture(ctx, depth) };
-                    return Err(SwapchainError::DepthImage(e));
-                }
-            }
-        };
+        // Render P5-r0: the throwaway depth-prepass color attachment is DELETED — pass A
+        // now binds the three REAL G-buffer images (albedo/normal/material) as MRT color
+        // attachments, so a separate throwaway color image is obsolete.
 
-        // ALBEDO: STORAGE (marcher store) | SAMPLED (the present-blit, pass C).
+        // ALBEDO: STORAGE (marcher store) | SAMPLED (the present-blit, pass C) |
+        // COLOR_ATTACHMENT (Render P5-r0: the mesh raster pass A writes it as MRT@0).
         let albedo = match Self::create_gbuffer_image(
             ctx,
             extent,
-            ImageUsage::STORAGE | ImageUsage::SAMPLED,
+            ImageUsage::STORAGE | ImageUsage::SAMPLED | ImageUsage::COLOR_ATTACHMENT,
         ) {
             Ok(t) => t,
             Err(e) => {
-                // SAFETY: `raster_color`/`depth` were created on `ctx` above; referenced
-                // by no submission; each destroyed exactly once on this error path.
+                // SAFETY: `depth` was created on `ctx` above; referenced by no submission;
+                // destroyed exactly once on this error path.
                 unsafe {
-                    RhiDevice::destroy_texture(ctx, raster_color);
                     RhiDevice::destroy_texture(ctx, depth);
                 }
                 return Err(e);
             }
         };
-        // NORMAL / MATERIAL: STORAGE only (written, never sampled by P1c).
-        let normal = match Self::create_gbuffer_image(ctx, extent, ImageUsage::STORAGE) {
+        // NORMAL / MATERIAL: STORAGE (marcher store) | COLOR_ATTACHMENT (Render P5-r0: the
+        // mesh raster pass A writes them as MRT@1 / MRT@2). Read by the deferred resolve.
+        let normal = match Self::create_gbuffer_image(
+            ctx,
+            extent,
+            ImageUsage::STORAGE | ImageUsage::COLOR_ATTACHMENT,
+        ) {
+            Ok(t) => t,
+            Err(e) => {
+                // SAFETY: the two textures above were created on `ctx`; referenced by
+                // no submission; each destroyed exactly once on this error path.
+                unsafe {
+                    RhiDevice::destroy_texture(ctx, albedo);
+                    RhiDevice::destroy_texture(ctx, depth);
+                }
+                return Err(e);
+            }
+        };
+        let material = match Self::create_gbuffer_image(
+            ctx,
+            extent,
+            ImageUsage::STORAGE | ImageUsage::COLOR_ATTACHMENT,
+        ) {
             Ok(t) => t,
             Err(e) => {
                 // SAFETY: the three textures above were created on `ctx`; referenced by
                 // no submission; each destroyed exactly once on this error path.
                 unsafe {
-                    RhiDevice::destroy_texture(ctx, albedo);
-                    RhiDevice::destroy_texture(ctx, raster_color);
-                    RhiDevice::destroy_texture(ctx, depth);
-                }
-                return Err(e);
-            }
-        };
-        let material = match Self::create_gbuffer_image(ctx, extent, ImageUsage::STORAGE) {
-            Ok(t) => t,
-            Err(e) => {
-                // SAFETY: the four textures above were created on `ctx`; referenced by
-                // no submission; each destroyed exactly once on this error path.
-                unsafe {
                     RhiDevice::destroy_texture(ctx, normal);
                     RhiDevice::destroy_texture(ctx, albedo);
-                    RhiDevice::destroy_texture(ctx, raster_color);
                     RhiDevice::destroy_texture(ctx, depth);
                 }
                 return Err(e);
@@ -4276,13 +4355,12 @@ impl GBufferTargets {
         ) {
             Ok(t) => t,
             Err(e) => {
-                // SAFETY: the five textures above were created on `ctx`; referenced by
+                // SAFETY: the four textures above were created on `ctx`; referenced by
                 // no submission; each destroyed exactly once on this error path.
                 unsafe {
                     RhiDevice::destroy_texture(ctx, material);
                     RhiDevice::destroy_texture(ctx, normal);
                     RhiDevice::destroy_texture(ctx, albedo);
-                    RhiDevice::destroy_texture(ctx, raster_color);
                     RhiDevice::destroy_texture(ctx, depth);
                 }
                 return Err(e);
@@ -4292,14 +4370,13 @@ impl GBufferTargets {
         let viewt = match Self::create_viewt_image(ctx, extent) {
             Ok(t) => t,
             Err(e) => {
-                // SAFETY: the six textures above were created on `ctx`; referenced by
+                // SAFETY: the five textures above were created on `ctx`; referenced by
                 // no submission; each destroyed exactly once on this error path.
                 unsafe {
                     RhiDevice::destroy_texture(ctx, lit);
                     RhiDevice::destroy_texture(ctx, material);
                     RhiDevice::destroy_texture(ctx, normal);
                     RhiDevice::destroy_texture(ctx, albedo);
-                    RhiDevice::destroy_texture(ctx, raster_color);
                     RhiDevice::destroy_texture(ctx, depth);
                 }
                 return Err(e);
@@ -4377,7 +4454,6 @@ impl GBufferTargets {
                         RhiDevice::destroy_texture(ctx, material);
                         RhiDevice::destroy_texture(ctx, normal);
                         RhiDevice::destroy_texture(ctx, albedo);
-                        RhiDevice::destroy_texture(ctx, raster_color);
                         RhiDevice::destroy_texture(ctx, depth);
                     }
                     return Err(SwapchainError::DepthImage(e));
@@ -4427,7 +4503,6 @@ impl GBufferTargets {
                         RhiDevice::destroy_texture(ctx, material);
                         RhiDevice::destroy_texture(ctx, normal);
                         RhiDevice::destroy_texture(ctx, albedo);
-                        RhiDevice::destroy_texture(ctx, raster_color);
                         RhiDevice::destroy_texture(ctx, depth);
                     }
                     return Err(SwapchainError::DepthImage(e));
@@ -4463,7 +4538,6 @@ impl GBufferTargets {
                             RhiDevice::destroy_texture(ctx, material);
                             RhiDevice::destroy_texture(ctx, normal);
                             RhiDevice::destroy_texture(ctx, albedo);
-                            RhiDevice::destroy_texture(ctx, raster_color);
                             RhiDevice::destroy_texture(ctx, depth);
                         }
                         return Err(SwapchainError::DepthImage(e));
@@ -4502,7 +4576,6 @@ impl GBufferTargets {
                         RhiDevice::destroy_texture(ctx, material);
                         RhiDevice::destroy_texture(ctx, normal);
                         RhiDevice::destroy_texture(ctx, albedo);
-                        RhiDevice::destroy_texture(ctx, raster_color);
                         RhiDevice::destroy_texture(ctx, depth);
                     }
                     return Err(SwapchainError::DepthImage(e));
@@ -4512,7 +4585,6 @@ impl GBufferTargets {
 
         Ok(Self {
             depth,
-            raster_color,
             albedo,
             normal,
             material,
@@ -4600,7 +4672,6 @@ impl GBufferTargets {
             RhiDevice::destroy_texture(ctx, self.material);
             RhiDevice::destroy_texture(ctx, self.normal);
             RhiDevice::destroy_texture(ctx, self.albedo);
-            RhiDevice::destroy_texture(ctx, self.raster_color);
             RhiDevice::destroy_texture(ctx, self.depth);
         }
     }
