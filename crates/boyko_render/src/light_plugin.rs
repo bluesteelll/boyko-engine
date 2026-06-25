@@ -6,6 +6,7 @@
 use boyko_ecs::ecs::core::app::{App, Plugin};
 
 use crate::light::{DirectionalLight, LightTableDirty, PointLight, SkyLight, SpotLight};
+use crate::light_policy::{LightStats, select_lighting_cull};
 use crate::light_reconcile::light_reconcile;
 use crate::light_system::{collect_lights, evict_light, light_seed_state};
 
@@ -70,6 +71,12 @@ impl Plugin for LightingPlugin {
         // removals/despawns that the `Changed` gate cannot see.
         app.insert_resource(LightTableDirty(false));
 
+        // P1: the cold cost-model carrier for the lighting StrategyPolicy. Default starts
+        // the band OFF (matching `LightingConfig::clusters_enabled`'s `false` default), so
+        // a default-Manual world is byte-identical to pre-P1. `select_lighting_cull` is its
+        // single writer (the Part 2.2 write discipline).
+        app.insert_resource(LightStats::default());
+
         // Co-register so the `.before` ordering edges between the keys are expressible in a
         // single closure (mirrors `CameraPlugin`). The seed is an EXCLUSIVE
         // (`&mut EcsMaster`) system that flips `LightEnabled` bits immediately, so the bits
@@ -77,9 +84,12 @@ impl Plugin for LightingPlugin {
         // The cross-frame seed state (the eight CACHED light-id systems + the first-run flag
         // + the reused scratch) is owned here, in the registering closure; capturing it once
         // is what makes the per-frame system `initialize` cost amortise to zero (W1).
+        // `select_lighting_cull` (P1) also runs `.before(collect)` so this frame's banded
+        // cluster decision feeds the header fold (no one-frame staleness).
         app.add_systems_cfg(|b| {
             let collect = b.add_system(collect_lights).key();
             b.add_system(light_reconcile).before(collect);
+            b.add_system(select_lighting_cull).before(collect);
             let mut seed_state = light_seed_state();
             b.add_system(move |w: &mut boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster| {
                 seed_state.seed(w);

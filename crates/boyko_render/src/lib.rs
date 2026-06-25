@@ -64,6 +64,7 @@ pub mod gpu_column;
 pub mod gpu_system;
 pub mod light;
 pub mod light_plugin;
+pub mod light_policy;
 pub mod light_reconcile;
 pub mod light_system;
 pub mod material;
@@ -83,12 +84,13 @@ pub use gpu_column::{GpuColumnManager, GpuColumnMeta, LOCAL_SIZE_X, ResolvedColu
 pub use gpu_system::{GpuSystem, gpu_integrate_spirv};
 pub use light::{
     CLUSTER_COUNT, CLUSTER_DIM_X, CLUSTER_DIM_Y, CLUSTER_DIM_Z, CLUSTER_FAR_DEFAULT,
-    CLUSTER_NEAR_DEFAULT, ClusterCell, ClusterConfig, DirectionalLight, GPU_LIGHT_WORDS, GpuLight,
-    INDEX_LIST_CAP, LIGHT_HEADER_BASE_WORDS, LIGHT_HEADER_WORDS, LIGHT_KIND_DIRECTIONAL,
-    LIGHT_KIND_POINT, LIGHT_KIND_SKY, LIGHT_KIND_SPOT, LightEnabled, LightHeaderGpu,
-    LightTableDirty, LightingConfig, MAX_LIGHTS, MAX_LIGHTS_PER_CLUSTER, PointLight,
+    CLUSTER_NEAR_DEFAULT, ClusterCell, ClusterConfig, ClusterSelectMode, DirectionalLight,
+    GPU_LIGHT_WORDS, GpuLight, INDEX_LIST_CAP, LIGHT_HEADER_BASE_WORDS, LIGHT_HEADER_WORDS,
+    LIGHT_KIND_DIRECTIONAL, LIGHT_KIND_POINT, LIGHT_KIND_SKY, LIGHT_KIND_SPOT, LightEnabled,
+    LightHeaderGpu, LightTableDirty, LightingConfig, MAX_LIGHTS, MAX_LIGHTS_PER_CLUSTER, PointLight,
     SPOT_COS_OUTER_MAX, SkyLight, SpotLight, cluster_index,
 };
+pub use light_policy::{CLUSTER_HI, CLUSTER_LO, LightStats, select_lighting_cull};
 pub use light_system::{
     GPU_LIGHT_BYTES, LIGHT_HEADER_BYTES, LightChanged, LightSeedState, LightTableStaging,
     SetLightEnabledById, collect_lights, evict_light, fold_light_table, light_seed_state,

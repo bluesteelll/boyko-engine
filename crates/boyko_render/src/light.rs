@@ -342,6 +342,22 @@ impl SkyLight {
     }
 }
 
+/// Who drives [`LightingConfig::clusters_enabled`] (P1 — the cold StrategyPolicy
+/// substrate). DEFAULT [`Manual`](ClusterSelectMode::Manual) — the 0%-gate: in `Manual`
+/// the gate is owner-controlled exactly as before P1 (no behavior change), and the
+/// `select_lighting_cull` policy leaves `clusters_enabled` untouched. Only
+/// [`Auto`](ClusterSelectMode::Auto) lets the policy drive it from the live light count.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ClusterSelectMode {
+    /// `clusters_enabled` is set by the owner; the policy never writes it. The default,
+    /// so a pre-P1 world is byte-identical.
+    #[default]
+    Manual,
+    /// `select_lighting_cull` drives `clusters_enabled` from the banded live point/spot
+    /// light count (see [`LightStats`](crate::light_policy::LightStats)).
+    Auto,
+}
+
 /// The global lighting config (Decision 3) — a `World`-singleton resource. `exposure`
 /// defaults to identity (`1.0`) and `sky_*` default to the resolve's old `SKY_*`
 /// constants, so a world that never inserts a non-default config reproduces today's
@@ -355,8 +371,13 @@ pub struct LightingConfig {
     pub sky_diffuse: [f32; 3],
     /// Ambient specular `rgb` (default = the resolve's old `SKY_SPEC`).
     pub sky_spec: [f32; 3],
-    /// L1 cluster gate (default `false` → the L0b/L1 flat-table loop path).
+    /// L1 cluster gate (default `false` → the L0b/L1 flat-table loop path). In
+    /// [`ClusterSelectMode::Manual`] (the default) this is owner-controlled; in
+    /// [`ClusterSelectMode::Auto`] it is driven by `select_lighting_cull` (P1).
     pub clusters_enabled: bool,
+    /// Who owns `clusters_enabled` (P1). DEFAULT [`ClusterSelectMode::Manual`] → the
+    /// gate stays owner-controlled and the policy is a no-op (the 0%-gate).
+    pub cluster_select: ClusterSelectMode,
 }
 
 impl Default for LightingConfig {
@@ -368,6 +389,7 @@ impl Default for LightingConfig {
             sky_diffuse: [0.10, 0.10, 0.12],
             sky_spec: [0.10, 0.10, 0.12],
             clusters_enabled: false,
+            cluster_select: ClusterSelectMode::Manual,
         }
     }
 }
@@ -820,6 +842,8 @@ mod tests {
         assert_eq!(cfg.sky_diffuse, [0.10, 0.10, 0.12]);
         assert_eq!(cfg.sky_spec, [0.10, 0.10, 0.12]);
         assert!(!cfg.clusters_enabled);
+        // P1: the policy substrate defaults to Manual so the gate stays owner-controlled.
+        assert_eq!(cfg.cluster_select, ClusterSelectMode::Manual);
     }
 
     #[test]

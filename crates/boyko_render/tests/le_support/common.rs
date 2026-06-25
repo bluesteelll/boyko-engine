@@ -26,9 +26,11 @@ use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::entity::entity::Entity;
 
 use boyko_render::light::{
-    DirectionalLight, LightHeaderGpu, LightingConfig, PointLight, SkyLight, SpotLight,
+    ClusterSelectMode, DirectionalLight, LightHeaderGpu, LightingConfig, PointLight, SkyLight,
+    SpotLight,
 };
 use boyko_render::light_plugin::LightingPlugin;
+use boyko_render::light_policy::LightStats;
 use boyko_render::light_system::{LightTableStaging, LIGHT_HEADER_BYTES};
 
 use boyko_scene::transform::{GlobalTransform, Transform};
@@ -94,6 +96,39 @@ pub fn point_spot_count(app: &App) -> u32 {
 pub fn l0a_count(app: &App) -> u32 {
     let staging = app.world().resource::<LightTableStaging>();
     read_header(staging.bytes()).l0a_count()
+}
+
+/// The live ENABLED point/spot light count `select_lighting_cull` wrote into
+/// [`LightStats`] (the P1 cost-model carrier).
+pub fn policy_point_spot_count(app: &App) -> u32 {
+    app.world().resource::<LightStats>().point_spot_count
+}
+
+/// The current side of the banded cluster selector ([`LightStats::cluster_band`]).
+pub fn policy_cluster_band(app: &App) -> bool {
+    app.world().resource::<LightStats>().cluster_band
+}
+
+/// The live `LightingConfig::clusters_enabled` gate (what the resolve actually reads).
+pub fn clusters_enabled(app: &App) -> bool {
+    app.world().resource::<LightingConfig>().clusters_enabled
+}
+
+/// Sets `LightingConfig::cluster_select` (`Manual` ⇒ the 0%-gate, `Auto` ⇒ policy-driven).
+pub fn set_cluster_select(app: &mut App, mode: ClusterSelectMode) {
+    app.world_mut().resource_mut::<LightingConfig>().cluster_select = mode;
+}
+
+/// Sets `LightingConfig::clusters_enabled` directly (the owner-controlled `Manual` path /
+/// a test seed of the band's previous side).
+pub fn set_clusters_enabled(app: &mut App, on: bool) {
+    app.world_mut().resource_mut::<LightingConfig>().clusters_enabled = on;
+}
+
+/// Forces the banded selector's current side ([`LightStats::cluster_band`]) — used to set
+/// up the "previous band" before exercising the in-band hold (hysteresis).
+pub fn set_cluster_band(app: &mut App, on: bool) {
+    app.world_mut().resource_mut::<LightStats>().cluster_band = on;
 }
 
 /// Spawns a directional light (with its required `Transform` / `GlobalTransform`) WITHOUT
