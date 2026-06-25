@@ -2,9 +2,9 @@ name: Deploy Documentation
 
 on:
   push:
-    branches: [master]
+    branches: [master, ecs]
   pull_request:
-    branches: [master]
+    branches: [master, ecs]
   workflow_dispatch:
 
 permissions:
@@ -102,17 +102,17 @@ jobs:
       # `continue-on-error`, and the publish step below only copies dist/ if it
       # was actually produced. See docs/DEMO-DOGFOODING.md (Wave-7 finding).
       - name: Add wasm target
-        if: github.ref == 'refs/heads/master'
+        if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/ecs'
         run: rustup target add wasm32-unknown-unknown
 
       - name: Install Trunk
-        if: github.ref == 'refs/heads/master'
+        if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/ecs'
         uses: jetli/trunk-action@v0.5.0
         with:
           version: 'latest'
 
       - name: Build boyko_demo (wasm, non-fatal until the core layout asserts are pointer-width-aware)
-        if: github.ref == 'refs/heads/master'
+        if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/ecs'
         id: build_demo
         continue-on-error: true
         working-directory: crates/boyko_demo
@@ -123,17 +123,17 @@ jobs:
         run: trunk build --release --public-url /boyko-engine/demo/
 
       - name: Publish boyko_demo to /demo/ (only if the wasm build succeeded)
-        if: github.ref == 'refs/heads/master' && steps.build_demo.outcome == 'success'
+        if: (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/ecs') && steps.build_demo.outcome == 'success'
         run: |
           mkdir -p _site/demo
           cp -r crates/boyko_demo/dist/* _site/demo/
 
       - name: Setup Pages
-        if: github.ref == 'refs/heads/master'
+        if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/ecs'
         uses: actions/configure-pages@v5
 
       - name: Upload artifact
-        if: github.ref == 'refs/heads/master'
+        if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/ecs'
         uses: actions/upload-pages-artifact@v3
         with:
           path: _site
@@ -141,7 +141,7 @@ jobs:
   deploy:
     name: Deploy to GitHub Pages
     needs: build
-    if: github.ref == 'refs/heads/master'
+    if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/ecs'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
