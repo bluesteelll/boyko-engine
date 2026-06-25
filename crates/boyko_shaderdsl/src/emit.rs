@@ -2490,6 +2490,16 @@ impl Cf for EmitCf {
         Flow::Continue(())
     }
 
+    // ---- Increment 5b: the COMPUTED-bool return facet (recorder) ----------------------
+
+    fn ret_b_expr(_cell: &RetCellB, value: EmitMask) -> Flow {
+        // The computed-bool return — a single `Stmt::Return` carrying the MASK node (`tmax > tmin`,
+        // a `Gt` node printed inline by the `Stmt::Return` printer's `inline_expr`), NOT a `BoolLit`.
+        // The function-tail `return tmax > tmin;`. Fall through on Emit.
+        record_stmt(Stmt::Return(value.0));
+        Flow::Continue(())
+    }
+
     // ---- Increment 4e: the BOOL mutable-local facets (recorder) -----------------------
 
     fn decl_bool_param(name: &'static str, _init: bool) -> Var {
@@ -3687,6 +3697,106 @@ pub fn emit_hlsl_select_level() -> String {
         // the composite containment `If { Return (int)L }`) + the tail `Stmt::Return(-1)` — a flat
         // in-order walk at DEPTH 1 (4-space indent), matching the committed L1222-1234. NO
         // function-signature wrap (the span is spliced inside the hand-written `select_level`).
+        print_block(&body_block, &arena, names, 1, &mut span);
+        span
+    })
+}
+
+/// Generates the HLSL `m2_brick_span` body — the brick-AABB ray-span clip (the standard slab
+/// method) with the `[unroll]` axis loop, the parallel-slab early `return false`, the near/far
+/// swap, and the COMPUTED-bool tail `return tmax > tmin;` — by tracing the generic
+/// [`crate::brick::m2_brick_span_body`] over the `EmitCf` backend (whose `Cf::Scalar = Emit`
+/// supplies the SSA-node arithmetic), and returns ONLY the BODY span (between the hand-written
+/// `bool m2_brick_span(...) {` signature and the closing `}`).
+///
+/// Framing (b): the signature + closing brace stay hand-written; the body (L970-993) is spliced
+/// between the `// === GENERATED m2_brick_span BEGIN/END ===` sentinels in
+/// `crates/boyko_rhi_vulkan/shaders/sdf_gbuffer_composite.hlsl`. The three new Increment-5b facets:
+/// the COMPUTED-bool return ([`EmitCf::ret_b_expr`] — the `tmax > tmin` mask as the `Stmt::Return`
+/// operand, vs the `bool`-literal [`EmitCf::ret_b`]); the TWO `out float` params (`t_enter`/
+/// `t_exit`, two `out_in` entries); and the FALL-THROUGH swap `if_` (the `t1 > t2` swap whose body
+/// returns `Flow::Continue(())`). The `[unroll]` axis loop reuses [`EmitCf::runtime_for`] with a
+/// LITERAL bound (`"3u"`) so the in-loop early `return false` forwards through it (the
+/// [`Cf::unroll_for`] form does NOT forward a `Return` — see the brick module doc).
+///
+/// The `p`/`rd`/`cell_min` `float3` params are seeded as `VecParamRef` (the `dist_to_brick_exit`
+/// index discipline — they are indexed `p[a]`, never used whole), and `brick_world` is a scalar
+/// `float` input. The cmp-`.spv` (in `boyko_rhi_vulkan`) is the byte-identity oracle; the
+/// `m2_brick_span` text-sync test pins the committed body to this output.
+pub fn emit_hlsl_m2_brick_span() -> String {
+    use crate::brick;
+
+    // Fresh recorder state.
+    ARENA.with(|a| a.borrow_mut().clear());
+    STMTS.with(|s| s.borrow_mut().clear());
+    VARS.with(|v| v.borrow_mut().clear());
+    NAMED_LITS.with(|n| n.borrow_mut().clear());
+    TEMP_SEQ.with(|c| *c.borrow_mut() = 0);
+    TEMP_TYPES.with(|t| t.borrow_mut().clear());
+    TEMP_NAMES.with(|t| t.borrow_mut().clear());
+
+    // Seed the function body block (the bottom of the STMTS stack).
+    STMTS.with(|s| s.borrow_mut().push(Block { stmts: Vec::new() }));
+
+    // Seed the span's inputs:
+    //   p           → VecParamRef(0) (vec_in[0]   = "p")           — the world ray origin
+    //   rd          → VecParamRef(1) (vec_in[1]   = "rd")          — the world ray direction
+    //   cell_min    → VecParamRef(2) (vec_in[2]   = "cell_min")    — the brick lower world corner
+    //   brick_world → Input(0)       (float_in[0] = "brick_world") — the brick edge length
+    //   t_enter     → OutFloatParam(0) (out_in[0] = "t_enter")     — the span near `out float`
+    //   t_exit      → OutFloatParam(1) (out_in[1] = "t_exit")      — the span far  `out float`
+    // The three `float3` params are indexed `p[a]` (the `dist_to_brick_exit` `VecParamRef` discipline,
+    // so each is seeded as three copies of one `VecParamRef` id).
+    let p_id = push(Node::VecParamRef(0));
+    let rd_id = push(Node::VecParamRef(1));
+    let cm_id = push(Node::VecParamRef(2));
+    let p = [Emit(p_id), Emit(p_id), Emit(p_id)];
+    let rd = [Emit(rd_id), Emit(rd_id), Emit(rd_id)];
+    let cell_min = [Emit(cm_id), Emit(cm_id), Emit(cm_id)];
+    let brick_world = Emit::input(0);
+    let t_enter = OutFloatParam(0);
+    let t_exit = OutFloatParam(1);
+    let ret_out = RetCellB;
+
+    brick::m2_brick_span_body::<EmitCf>(p, rd, cell_min, brick_world, &t_enter, &t_exit, &ret_out);
+
+    // Pop the function body block and print it.
+    let body_block = STMTS.with(|s| {
+        s.borrow_mut()
+            .pop()
+            .expect("invariant: the function body block was pushed above")
+    });
+
+    let float_in = ["brick_world"];
+    let vec_in = ["p", "rd", "cell_min"];
+    let out_in = ["t_enter", "t_exit"];
+    let named_lit = NAMED_LITS.with(|n| n.borrow().clone());
+    let vars = VARS.with(|v| v.borrow().clone());
+    let names = Names {
+        float_in: &float_in,
+        uint_in: &["a"],
+        vec_in: &vec_in,
+        uint3_in: NO_UINT3_INPUTS,
+        buf_in: NO_BUF_INPUTS,
+        out_in: &out_in,
+        named_lit: &named_lit,
+        vars: &vars,
+        vec4_in: NO_VEC4_INPUTS,
+        call_in: NO_CALL_INPUTS,
+        pc_in: NO_PC_INPUTS,
+        level_field: NO_LEVEL_FIELDS,
+    };
+
+    ARENA.with(|a| {
+        let arena = a.borrow();
+        let mut span = String::new();
+        // The whole body is the two DeclVar (tmin/tmax) + the runtime `Stmt::Loop` (header `[unroll]
+        // for (uint a = 0u; a < 3u; ++a)`, body: the DeclTemp lo/hi, the parallel-slab `If { If {
+        // OutAssign t_enter; OutAssign t_exit; Return false } Continue }`, the DeclTemp inv, the
+        // DeclVar t1/t2, the swap `If { DeclTemp tmp; Assign t1; Assign t2 }`, the `Assign tmin/tmax`)
+        // + the tail two `OutAssign` + the `Stmt::Return(tmax > tmin)` — a flat in-order walk at DEPTH
+        // 1 (4-space indent), matching the committed L970-993. NO function-signature wrap (the span is
+        // spliced inside the hand-written `m2_brick_span`).
         print_block(&body_block, &arena, names, 1, &mut span);
         span
     })

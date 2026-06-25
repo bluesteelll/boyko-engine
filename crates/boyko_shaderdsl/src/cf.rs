@@ -557,6 +557,22 @@ pub trait Cf {
         rt_val: Self::Scalar,
     ) -> Flow;
 
+    // ---- Increment 5b: the COMPUTED-bool return facet (the `m2_brick_span` tail) -------
+    //
+    // `m2_brick_span` ends `return tmax > tmin;` — a COMPUTED bool (a [`Mask`](FieldScalar::Mask)),
+    // unlike [`ret_b`](Self::ret_b)'s `bool` LITERAL (`return true;`/`return false;`). The mask is
+    // the function's value, so the recorded `Stmt::Return`'s operand is the mask NODE (printed
+    // `tmax > tmin`), not a [`Node::BoolLit`]. A 2-line mirror of [`ret_b`](Self::ret_b) with a
+    // [`Mask`](FieldScalar::Mask) operand in place of the `bool`; ZERO new loop/integer machinery.
+
+    /// The COMPUTED-bool function-return — `return <mask>;` (the `m2_brick_span` tail `return tmax >
+    /// tmin;`). The Mask variant of [`ret_b`](Self::ret_b) (which takes a `bool` LITERAL). On Eval
+    /// deposits the `value` mask (a host `bool`) into the [`RetCellB`](Self::RetCellB) and returns
+    /// [`Break`](LoopOp::Return); on Emit records a single `Stmt::Return` carrying the MASK NODE (the
+    /// `Stmt::Return` printer spells `return <mask-expr>;` — the same inline-expr printer that handles
+    /// any non-`BoolLit` operand). DISTINCT from [`ret_b`](Self::ret_b) (a `BoolLit` operand).
+    fn ret_b_expr(cell: &Self::RetCellB, value: <Self::Scalar as FieldScalar>::Mask) -> Flow;
+
     // ---- Increment 4e: the BOOL mutable-local facets (the B1 exhaustion re-march) ----
     //
     // The B1 budget-exhaustion re-march (`b1_exhaustion_remarch_body`) carries the `hit`
@@ -1108,6 +1124,17 @@ impl Cf for EvalCf {
         } else {
             core::ops::ControlFlow::Continue(())
         }
+    }
+
+    // ---- Increment 5b: the COMPUTED-bool return facet (native host) -------------------
+
+    #[inline]
+    fn ret_b_expr(cell: &core::cell::Cell<bool>, value: bool) -> Flow {
+        // The computed bool (`tmax > tmin`, already a host `bool`) is the function's value: deposit
+        // it into the cell and return. Identical to `ret_b` on Eval except the value is COMPUTED (a
+        // mask) rather than a literal.
+        cell.set(value);
+        core::ops::ControlFlow::Break(LoopOp::Return)
     }
 
     // ---- Increment 4e: the BOOL mutable-local facets (native host) --------------------

@@ -563,3 +563,159 @@ pub fn m2_regula_falsi_body<C: Cf, F: Fn(C::Vec4f, C::Scalar) -> C::Scalar>(
     // on Emit the recorder captured every statement.
     let _ = run();
 }
+
+// ---- The brick-AABB ray-span clip leaf (Increment 5b: a COMPUTED-bool return) ----
+//
+// The FOURTH-AND-A-HALF control-flow leaf (the second `[unroll]` body after
+// `dist_to_brick_exit`) — `m2_brick_span` clips the ray `p + rd·t` to ONE brick's
+// `[cell_min, cell_min + brick_world]` AABB by the standard slab method, returning the
+// `[t_enter, t_exit]` span through TWO `out float` params + a COMPUTED `bool` (`tmax >
+// tmin` — a hit). It reuses the Inc-5a Cf-axis machinery (the `runtime_for` loop, the two
+// `OutFloat` params, the swap `if_`) + adds three small facets:
+//   - the COMPUTED-bool return (`Cf::ret_b_expr` — `return tmax > tmin;`, a Mask operand,
+//     vs the `bool`-LITERAL `Cf::ret_b`'s `return false;`);
+//   - TWO `out float` params (`t_enter`/`t_exit`), each written by `Cf::out_float_assign`;
+//   - a FALL-THROUGH `if_` (the swap `if (t1 > t2) { float tmp = t1; t1 = t2; t2 = tmp; }`)
+//     whose body runs 3 statements then FALLS THROUGH (returns `Flow::Continue(())`) — the
+//     same fall-through-body shape `m2_regula_falsi`'s bracket-update `if_else` already
+//     proved (`if_` accepts a `FnOnce() -> Flow`; a `Continue` body records a `Stmt::If`
+//     then falls through on Emit, runs the block then continues on Eval).
+//
+// THE LOOP IS `runtime_for`, NOT `unroll_for`: the early `return false` inside the loop is a
+// `Break(LoopOp::Return)` that must FORWARD through the loop to the function-scope IIFE's
+// `?` — which `runtime_for` does (its `Break(Return)` arm forwards), but `unroll_for` does
+// NOT (its `Return` arm is a `debug_assert!(false)` — an unrolled loop is assumed to have no
+// early return, as `dist_to_brick_exit` does not). `runtime_for("[unroll]", "a", "3u", 3,
+// ...)` emits `[unroll]\nfor (uint a = 0u; a < 3u; ++a)` — BYTE-IDENTICAL text to the
+// committed `[unroll] for (... a < 3u ...)` header (DXC sees only text, so the re-DXC'd
+// SPIR-V is unchanged), while correctly forwarding the in-loop return.
+//
+// CANONICAL FORM = the GPU SHAPE (the committed `m2_brick_span`,
+// sdf_gbuffer_composite.hlsl:969-994): `tmax` inits to a plain `1.0e30` literal, the
+// parallel-slab guard is `abs(rd[a]) <= 1.0e-20`, and the literals `1.0`/`0.0`/`1.0e30`/
+// `1.0e-20` spell DIRECTLY (not symbols) — `fmt_lit`'s shortest-round-trip compiles to the
+// SAME `OpConstant`, gated by the cmp-`.spv`. There is no host `m2_brick_span` mirror in the
+// engine; the eval oracle is a verbatim host transcription of the committed span
+// (`eval_byte_identity`'s `host_m2_brick_span`), the SAME GPU-shape single-source discipline
+// `dist_to_brick_exit_body` uses.
+
+/// `float tmin = 0.0;` — the entry-side clamp (never march behind the current point).
+const SPAN_TMIN_INIT: f32 = 0.0;
+
+/// `float tmax = 1.0e30;` — the far-side init (the GPU shape's plain literal). DXC-fold-neutral
+/// (`fmt_lit` round-trips to the same `OpConstant`).
+const SPAN_TMAX_INIT: f32 = 1.0e30;
+
+/// The near-axis-parallel guard `abs(rd[a]) <= 1.0e-20` — a slab whose direction component is
+/// (near-)zero is parallel, so it contributes no near/far crossing; the origin must lie inside it
+/// or the whole brick is missed. Mirrors the committed literal (NOT a symbol).
+const SPAN_PARALLEL_EPS: f32 = 1.0e-20;
+
+/// The empty-span `t_enter` sentinel (`t_enter = 1.0;`) written on a parallel-slab miss — paired
+/// with `SPAN_EMPTY_EXIT` so `t_exit < t_enter` flags the miss to the caller.
+const SPAN_EMPTY_ENTER: f32 = 1.0;
+
+/// The empty-span `t_exit` sentinel (`t_exit = 0.0;`) — see `SPAN_EMPTY_ENTER`.
+const SPAN_EMPTY_EXIT: f32 = 0.0;
+
+/// Clips the ray `p + rd·t` to the M2 brick at `cell_min` of size `brick_world`, depositing the
+/// `[t_enter, t_exit]` world-`t` span (measured from `p`) into the two `out float` params and
+/// returning a COMPUTED `bool` (`tmax > tmin` — true on a real intersection) into `ret_out`.
+/// Authored ONCE over the control-flow axis `C`. Mirrors the GPU `m2_brick_span`
+/// (`sdf_gbuffer_composite.hlsl:969-994`) statement-for-statement (the hand-written signature +
+/// closing brace stay un-generated, framing (b)).
+///
+/// `p`/`rd` are the world ray origin/direction; `cell_min` the brick's lower world corner;
+/// `brick_world` the brick edge length. The span travels OUT OF BAND through `t_enter`/`t_exit`
+/// (the two [`Cf::OutFloat`]s) and the hit through `ret_out` (the [`Cf::RetCellB`]) — on Eval the
+/// caller reads them after this returns; on Emit the recorded `Stmt::OutAssign`s / `Stmt::Return`
+/// spell the writes.
+///
+/// The body is a FUNCTION-SCOPE IIFE `run = || -> Flow { ...; ret_b_expr(ret_out, tmax > tmin)?;
+/// Continue }`, so the in-loop early `return false` (a parallel-slab miss — [`Cf::ret_b`] inside the
+/// inner `if_`) forwards through [`Cf::runtime_for`]'s `?` to the IIFE's `?`, skipping the tail (the
+/// empty `t_enter = 1.0; t_exit = 0.0;` is written FIRST, so the caller reads them). The
+/// parallel-slab pass-through is a [`Cf::cont`] (consumed by `runtime_for`). On Emit every branch is
+/// recorded structurally (`?` never early-returns); the whole body is captured.
+#[inline]
+pub fn m2_brick_span_body<C: Cf>(
+    p: [C::Scalar; 3],
+    rd: [C::Scalar; 3],
+    cell_min: [C::Scalar; 3],
+    brick_world: C::Scalar,
+    t_enter: &C::OutFloat,
+    t_exit: &C::OutFloat,
+    ret_out: &C::RetCellB,
+) {
+    // The `p`/`rd`/`cell_min` `float3` PARAMETERS are indexed per-axis by the unroll iv (`p[a]`),
+    // so they thread as `[C::Scalar; 3]` (the `dist_to_brick_exit` index discipline — three copies
+    // of one `VecParamRef` on Emit, a real array on Eval), NOT the first-class `C::Vec3f` (the body
+    // never uses them as a whole `float3`).
+    type S<C> = <C as Cf>::Scalar;
+
+    let run = || -> Flow {
+        // float tmin = 0.0;  float tmax = 1.0e30;  — the two MUTABLE carried locals (`tmin =
+        // max(tmin, t1)` / `tmax = min(tmax, t2)` are set-form updates, so they are `decl_var`s, NOT
+        // read-only temps).
+        let tmin = C::decl_var("tmin", S::<C>::lit(SPAN_TMIN_INIT));
+        let tmax = C::decl_var("tmax", S::<C>::lit(SPAN_TMAX_INIT));
+
+        C::runtime_for("[unroll]", "a", "3u", 3, |a| -> Flow {
+            // float lo = cell_min[a];  float hi = lo + brick_world;  — read-only NAMED `float`
+            // temps (`temp_float` returns the value directly; on Eval identity, on Emit a
+            // `float lo = ...;` decl). Never reassigned, so they are temps, NOT `decl_var`s.
+            let lo = C::temp_float("lo", C::index(cell_min, a));
+            let hi = C::temp_float("hi", lo.add(brick_world));
+            // if (abs(rd[a]) <= 1.0e-20) { ... continue; }  — the parallel-slab branch. Its body is
+            // an INNER early-return `if_` (the outside-the-slab miss) THEN a `continue` (the
+            // pass-through). The outer `if_`'s `?` forwards whichever token the body yields
+            // (`Break(Return)` from the inner miss, or `Break(Continue)` from `cont`).
+            let eps = S::<C>::lit(SPAN_PARALLEL_EPS);
+            C::if_(C::index(rd, a).abs().le(eps), || -> Flow {
+                // if (p[a] < lo || p[a] > hi) { t_enter = 1.0; t_exit = 0.0; return false; }
+                // The origin is outside this parallel slab → the whole brick is missed. The two
+                // empty-span out-writes happen BEFORE the `ret_b` short-circuits, so the caller
+                // reads the `1.0`/`0.0` sentinels (`t_exit < t_enter` flags the miss).
+                let outside = C::or(C::index(p, a).lt(lo), C::index(p, a).gt(hi));
+                C::if_(outside, || -> Flow {
+                    C::out_float_assign(t_enter, S::<C>::lit(SPAN_EMPTY_ENTER));
+                    C::out_float_assign(t_exit, S::<C>::lit(SPAN_EMPTY_EXIT));
+                    C::ret_b(ret_out, false)
+                })?;
+                // continue;  — the slab is parallel but the origin is inside it, so it imposes no
+                // near/far bound; skip the rest of this axis.
+                C::cont()
+            })?;
+            // float inv = 1.0 / rd[a];  — read-only NAMED temp.
+            let inv = C::temp_float("inv", S::<C>::lit(1.0).div(C::index(rd, a)));
+            // float t1 = (lo - p[a]) * inv;  float t2 = (hi - p[a]) * inv;  — the two slab crossings,
+            // MUTABLE (swapped below) → `decl_var`s.
+            let t1 = C::decl_var("t1", lo.sub(C::index(p, a)).mul(inv));
+            let t2 = C::decl_var("t2", hi.sub(C::index(p, a)).mul(inv));
+            // if (t1 > t2) { float tmp = t1; t1 = t2; t2 = tmp; }  — order the crossings so t1 is
+            // near, t2 far. A FALL-THROUGH `if_` (no continue/break/return; runs 3 statements then
+            // returns `Flow::Continue(())`). `tmp` captures t1's OLD value BEFORE t1 is overwritten
+            // (`temp_float` reads `get_var(&t1)` eagerly), so the swap is correct on Eval.
+            C::if_(C::get_var(&t1).gt(C::get_var(&t2)), || -> Flow {
+                let tmp = C::temp_float("tmp", C::get_var(&t1));
+                C::set_var(&t1, C::get_var(&t2));
+                C::set_var(&t2, tmp);
+                Flow::Continue(())
+            })?;
+            // tmin = max(tmin, t1);  tmax = min(tmax, t2);  — the running near/far span bounds.
+            C::set_var(&tmin, C::get_var(&tmin).max(C::get_var(&t1)));
+            C::set_var(&tmax, C::get_var(&tmax).min(C::get_var(&t2)));
+            Flow::Continue(())
+        })?;
+        // t_enter = tmin;  t_exit = tmax;  return tmax > tmin;  — the span + the COMPUTED hit (a
+        // real intersection has a non-empty `[tmin, tmax]`). `ret_b_expr` records the mask `tmax >
+        // tmin` as the return value (vs the `bool`-literal `ret_b`).
+        C::out_float_assign(t_enter, C::get_var(&tmin));
+        C::out_float_assign(t_exit, C::get_var(&tmax));
+        C::ret_b_expr(ret_out, C::get_var(&tmax).gt(C::get_var(&tmin)))?;
+        Flow::Continue(())
+    };
+    // Discard the Flow: on Eval the early `?` already deposited the empty span + `false` into the
+    // cells; on Emit the recorder captured every statement.
+    let _ = run();
+}

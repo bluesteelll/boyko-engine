@@ -171,4 +171,24 @@ fn main() {
     // + the closing `}` stay un-generated, framing b). The span prints at DEPTH 1 (4-space indent).
     println!();
     print!("{}", boyko_shaderdsl::emit::emit_hlsl_select_level());
+    // The M2 brick-AABB ray-span clip leaf (Increment 5b — the SECOND `[unroll]` body after
+    // `dist_to_brick_exit`, the first with a COMPUTED-bool return): the standard slab-method clip of
+    // the ray `p + rd·t` to ONE brick's `[cell_min, cell_min + brick_world]` AABB, returning the
+    // `[t_enter, t_exit]` world-`t` span through TWO `out float` params + a COMPUTED `bool` (`return
+    // tmax > tmin;` via `Cf::ret_b_expr` — a Mask operand, vs the `bool`-literal `Cf::ret_b`'s
+    // `return false;`). The three new facets: the COMPUTED-bool return (`Cf::ret_b_expr`), the TWO
+    // `out float` params (`t_enter`/`t_exit`, both `Cf::out_float_assign`), and the FALL-THROUGH swap
+    // `if (t1 > t2) { float tmp = t1; t1 = t2; t2 = tmp; }` (a `Cf::if_` whose body returns
+    // `Flow::Continue(())` — the same fall-through shape `m2_regula_falsi`'s bracket `if_else`
+    // proved). The `[unroll]` axis loop reuses `Cf::runtime_for` (attr `[unroll]`, the LITERAL bound
+    // `"3u"`, NOT `unroll_for`'s form — the in-loop parallel-slab early `return false` must FORWARD
+    // through the loop to the function IIFE, which `runtime_for` does and `unroll_for` does not).
+    // Generated from `boyko_shaderdsl::brick::m2_brick_span_body` over the `Emit` + `EmitCf` backends.
+    // Spliced between the `// === GENERATED m2_brick_span BEGIN/END ===` sentinels INSIDE
+    // `m2_brick_span` (the BODY only — the hand-written `bool m2_brick_span(...) {` signature + the
+    // closing `}` stay un-generated, framing b). The span prints at DEPTH 1 (4-space indent). There
+    // is no host `m2_brick_span` mirror; the eval oracle is a verbatim host transcription of the
+    // committed body (the GPU-shape single-source discipline `dist_to_brick_exit` uses).
+    println!();
+    print!("{}", boyko_shaderdsl::emit::emit_hlsl_m2_brick_span());
 }

@@ -2036,3 +2036,178 @@ fn select_level_directed_inside_boundary_outside_skip() {
     };
     assert_eq!(refactored_select_level([0.5, 0.5, 0.5], &nested_zero), -1);
 }
+
+// ======================================================================
+// Inc 5b — the `m2_brick_span` brick-AABB ray-span clip Eval oracle (FULL coverage — pure
+// arithmetic, no field call).
+//
+// `m2_brick_span` is a pure slab-method clip (no field/buffer reads), so the Eval body has FULL
+// coverage: a host mirror transcribing the committed L970-993 VERBATIM is the EXACT reference. The
+// return is `(bool hit, float t_enter, float t_exit)`; the assertion is `(hit, t_enter.to_bits(),
+// t_exit.to_bits())` bit-identical (EXACT, no ULP slack — the body is the SAME arithmetic on both).
+// The sweep + directed cases cover every branch the design pins: a NORMAL hit (`tmax > tmin`), a
+// MISS (`tmax <= tmin`), a PARALLEL-SLAB miss (`abs(rd[a]) <= 1e-20` with `p[a]` outside →
+// `return false`, `t_enter = 1.0`/`t_exit = 0.0`), a PARALLEL-SLAB pass-through (origin inside the
+// slab → `continue`), and the SWAP branch (`t1 > t2` on a negative `rd[a]`).
+// ======================================================================
+
+/// Verbatim hand-mirror of the committed `m2_brick_span` body (the L970-993 statements). Returns
+/// `(bool hit, float t_enter, float t_exit)` — on a parallel-slab miss `(false, 1.0, 0.0)`; else
+/// the slab span + `tmax > tmin`. The reference the eDSL `m2_brick_span_body::<EvalCf>` is locked
+/// against (EXACT to-bits eq).
+// The frozen mirror spells the committed HLSL body VERBATIM (two separate `t_enter`/`t_exit`
+// assigns, the explicit `tmp` swap, the `1.0e30`/`1.0e-20` literals). The 5-element return-tuple
+// and the verbatim swap are clearer than any "idiomatic" rewrite that would diverge from the
+// committed source the body must mirror; clippy's needless-range / swap suggestions are suppressed.
+#[allow(clippy::needless_range_loop, clippy::manual_swap)]
+fn host_m2_brick_span(
+    p: [f32; 3],
+    rd: [f32; 3],
+    cell_min: [f32; 3],
+    brick_world: f32,
+) -> (bool, f32, f32) {
+    let mut tmin = 0.0f32;
+    let mut tmax = 1.0e30f32;
+    for a in 0..3usize {
+        let lo = cell_min[a];
+        let hi = lo + brick_world;
+        if rd[a].abs() <= 1.0e-20 {
+            if p[a] < lo || p[a] > hi {
+                // `t_enter = 1.0; t_exit = 0.0; return false;` — the empty-span miss (the verbatim
+                // committed sentinel; `t_exit < t_enter` flags it).
+                return (false, 1.0, 0.0);
+            }
+            continue;
+        }
+        let inv = 1.0 / rd[a];
+        let mut t1 = (lo - p[a]) * inv;
+        let mut t2 = (hi - p[a]) * inv;
+        if t1 > t2 {
+            let tmp = t1;
+            t1 = t2;
+            t2 = tmp;
+        }
+        tmin = tmin.max(t1);
+        tmax = tmax.min(t2);
+    }
+    // `t_enter = tmin; t_exit = tmax; return tmax > tmin;`
+    (tmax > tmin, tmin, tmax)
+}
+
+/// The eDSL `m2_brick_span_body::<EvalCf>` over `[f32; 3]` params + two `Cell<f32>` out-floats + a
+/// `Cell<bool>` ret-cell. Returns the `(hit, t_enter, t_exit)` the cells hold after the body runs.
+/// The out-float cells are seeded with a DISTINCT sentinel so a missing write surfaces (the body
+/// writes both on every path — the empty-span miss AND the tail).
+fn refactored_m2_brick_span(
+    p: [f32; 3],
+    rd: [f32; 3],
+    cell_min: [f32; 3],
+    brick_world: f32,
+) -> (bool, f32, f32) {
+    use std::cell::Cell;
+    let t_enter = Cell::new(f32::from_bits(0xDEAD_BEEF));
+    let t_exit = Cell::new(f32::from_bits(0xDEAD_BEEF));
+    let ret_out = Cell::new(false);
+    boyko_shaderdsl::brick::m2_brick_span_body::<EvalCf>(
+        p,
+        rd,
+        cell_min,
+        brick_world,
+        &t_enter,
+        &t_exit,
+        &ret_out,
+    );
+    (ret_out.get(), t_enter.get(), t_exit.get())
+}
+
+fn assert_brick_span(
+    r: (bool, f32, f32),
+    h: (bool, f32, f32),
+    ctx: &str,
+) {
+    assert_eq!(r.0, h.0, "{ctx}: hit diverged (refactored={} host={})", r.0, h.0);
+    assert_bits(r.1, h.1, &format!("{ctx}-t_enter"));
+    assert_bits(r.2, h.2, &format!("{ctx}-t_exit"));
+}
+
+#[test]
+fn m2_brick_span_matches_host_on_random_sweep() {
+    // A deterministic LCG sweeps rays × brick boxes. `rd` ranges over signed components (so the
+    // SWAP branch `t1 > t2` — a negative direction — is exercised), and `p`/`cell_min` are biased
+    // so the ray lands ON, NEAR, and FAR from the brick (hit / miss both sampled). `brick_world` is
+    // a positive edge length. The full sweep exercises the normal hit, the miss, and the swap; the
+    // directed test below pins the two parallel-slab branches (which a random `rd` essentially never
+    // hits, since `abs(rd[a]) <= 1e-20` is measure-zero).
+    let mut lcg = Lcg::new(0x5EED_1234_BEEF_0F0F_u64);
+    for _ in 0..20_000 {
+        let p = [lcg.next_f32(4.0), lcg.next_f32(4.0), lcg.next_f32(4.0)];
+        let rd = [lcg.next_f32(2.0), lcg.next_f32(2.0), lcg.next_f32(2.0)];
+        let cell_min = [lcg.next_f32(4.0), lcg.next_f32(4.0), lcg.next_f32(4.0)];
+        let brick_world = lcg.next_f32(2.0).abs() + 0.05;
+
+        let r = refactored_m2_brick_span(p, rd, cell_min, brick_world);
+        let h = host_m2_brick_span(p, rd, cell_min, brick_world);
+        assert_brick_span(
+            r,
+            h,
+            &format!("m2-brick-span sweep p={p:?} rd={rd:?} cell_min={cell_min:?} bw={brick_world}"),
+        );
+    }
+}
+
+#[test]
+fn m2_brick_span_directed_hit_miss_swap_parallel() {
+    // A unit brick at the origin: cell_min=[0,0,0], brick_world=1 -> AABB [0,0,0]..[1,1,1].
+    let cell_min = [0.0, 0.0, 0.0];
+    let bw = 1.0;
+
+    // (a) NORMAL HIT: a ray from (-1, 0.5, 0.5) along +x pierces the brick -> tmax > tmin.
+    {
+        let p = [-1.0, 0.5, 0.5];
+        let rd = [1.0, 0.0, 0.0]; // y/z are parallel slabs with the origin INSIDE -> continue
+        let r = refactored_m2_brick_span(p, rd, cell_min, bw);
+        let h = host_m2_brick_span(p, rd, cell_min, bw);
+        assert!(r.0, "directed hit: expected a hit");
+        assert_brick_span(r, h, "m2-brick-span-directed-hit");
+    }
+
+    // (b) MISS: a ray from (-1, 5, 5) along +x — the y/z origins (5) are OUTSIDE the [0,1] slabs and
+    // those slabs are PARALLEL (rd.y = rd.z = 0) -> the parallel-slab early `return false`
+    // (t_enter=1, t_exit=0). This is BOTH the miss case AND the PARALLEL-SLAB-MISS branch.
+    {
+        let p = [-1.0, 5.0, 5.0];
+        let rd = [1.0, 0.0, 0.0];
+        let r = refactored_m2_brick_span(p, rd, cell_min, bw);
+        let h = host_m2_brick_span(p, rd, cell_min, bw);
+        assert!(!r.0, "directed parallel-slab miss: expected a miss");
+        assert_bits(r.1, 1.0, "parallel-slab-miss-t_enter-is-1.0");
+        assert_bits(r.2, 0.0, "parallel-slab-miss-t_exit-is-0.0");
+        assert_brick_span(r, h, "m2-brick-span-parallel-slab-miss");
+    }
+
+    // (c) PARALLEL-SLAB PASS-THROUGH: rd.y = rd.z = 0 but the y/z origins (0.5) are INSIDE the [0,1]
+    // slabs -> those axes `continue` (impose no bound); the x axis (rd.x = 1, origin -1) provides the
+    // span. A real hit, exercising the `continue` (NOT the early return).
+    {
+        let p = [-1.0, 0.5, 0.5];
+        let rd = [1.0, 0.0, 0.0];
+        let r = refactored_m2_brick_span(p, rd, cell_min, bw);
+        let h = host_m2_brick_span(p, rd, cell_min, bw);
+        assert!(r.0, "directed parallel pass-through: expected a hit");
+        assert_brick_span(r, h, "m2-brick-span-parallel-pass-through");
+    }
+
+    // (d) SWAP branch: a ray along -x (rd.x = -1) makes the near/far crossings arrive in t1 > t2
+    // order -> the `if (t1 > t2)` swap fires. From (2, 0.5, 0.5) marching -x the brick is ahead.
+    {
+        let p = [2.0, 0.5, 0.5];
+        let rd = [-1.0, 0.0, 0.0];
+        let r = refactored_m2_brick_span(p, rd, cell_min, bw);
+        let h = host_m2_brick_span(p, rd, cell_min, bw);
+        assert!(r.0, "directed swap: expected a hit");
+        assert_brick_span(r, h, "m2-brick-span-swap-branch");
+        // The span starts at t=1 (x goes 2 -> 1, the near face) and exits at t=2 (x -> 0).
+        assert_bits(r.1, 1.0, "swap-branch-t_enter");
+        assert_bits(r.2, 2.0, "swap-branch-t_exit");
+    }
+}
