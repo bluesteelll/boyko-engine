@@ -71,6 +71,12 @@ enum EmitTy {
     /// `Stmt::Return`). No node materializes an `int` temp (the `int` return type comes from the
     /// hand-written `int select_level` SIGNATURE, not a decl). Spells the token `int`.
     Int,
+    /// An HLSL `float2` value (`pack_material_id_ba`'s `float2((float)lo / 255.0, (float)hi / 255.0)`
+    /// return — Track B Increment G1). The result type of [`Node::Vec2FromScalars`] (the `float2(x,
+    /// y)` ctor of two `float` scalars), consumed only by a `Stmt::Return`. No node materializes a
+    /// `float2` temp (the `float2` return type comes from the hand-written `float2 pack_material_id_ba`
+    /// SIGNATURE, not a decl). Spells the token `float2`.
+    Float2,
 }
 
 /// One SSA node — a recorded field op. Operands reference earlier nodes by their
@@ -168,18 +174,15 @@ enum Node {
     /// `a == b` over two integer handles — a Mask node (printed inline inside a
     /// ternary condition, like [`Node::Gt`]). The snorm `q == i8::MIN` sentinel test.
     IntEq(u32, u32),
-    // A2 FOUNDATION (not yet constructed): the packed-byte bit ops. `decode_snorm8`
-    // reads an UNPACKED `i8` code (no AND/shift needed), but the reviewer's O2 calls
-    // for the bit ops + the printer support as the brick-index (A3/A4) prerequisite.
-    // The printer (`define_str`) already spells them; A3 wires the `FieldScalar` trait
-    // methods + the host index math that constructs them. `#[allow(dead_code)]` keeps
-    // the foundation in tree without a false `-D warnings` failure until then.
-    /// `a & b` — a bitwise AND over two `uint` handles (the packed-byte extract).
-    #[allow(dead_code)]
+    // The packed-byte bit ops. `decode_snorm8` reads an UNPACKED `i8` code (no AND/shift
+    // needed), so these were dead foundation until Track B Increment G1 wired the
+    // `Cf::and_u` / `Cf::shr_u` methods + the `pack_material_id_ba` host index math that
+    // CONSTRUCTS them (`id & 255u`, `id >> 8u`). The printer (`define_str`) already spelled
+    // them (`{} & {}` / `{} >> {}`, unparenthesized).
+    /// `a & b` — a bitwise AND over two `uint` handles (the packed-byte extract, `id & 255u`).
     And(u32, u32),
-    /// `a >> b` — a logical right shift over `uint` handles (the byte select within
-    /// a packed word).
-    #[allow(dead_code)]
+    /// `a >> b` — a logical right shift over `uint` handles (the byte select within a packed
+    /// word, `id >> 8u`).
     Shr(u32, u32),
     /// `(float)a` — the HLSL NUMERIC `uint -> float` cast (value-preserving), NOT
     /// `asfloat` (a bit-reinterpret). Materialized as a `float` temp.
@@ -431,6 +434,14 @@ enum Node {
     /// [`EmitTy::Float3`].
     Vec3FromScalars(u32, u32, u32),
 
+    /// `float2(<x>, <y>)` from TWO `float` SCALAR expressions — `pack_material_id_ba`'s
+    /// `float2((float)lo / 255.0, (float)hi / 255.0)` return (Track B Increment G1). The `float2`
+    /// analogue of [`Node::Vec3FromScalars`] (both components already-`float` arithmetic). Asserts
+    /// both operands `Float`; result type [`EmitTy::Float2`]. NEVER materialized as a temp (the
+    /// committed body returns the ctor directly), so it is composed inline by the `Stmt::Return`
+    /// printer.
+    Vec2FromScalars(u32, u32),
+
     /// A CALL to a frozen hand-written shader function with N HETEROGENEOUS args — `m2_corner(atlas,
     /// atlas_smp, tile_org, cx, cy, cz, inv_atlas, band_half)` / `m2_jcgt_cubic_coeffs(s, lo_g, rd_v)`
     /// / `m2_marmitt_root(coeffs, 0.0, seg_hi - seg_lo)`. `sym_id` indexes [`Names::call_in`] (the
@@ -609,6 +620,8 @@ fn type_of(node: Node) -> EmitTy {
         // the `float3` ctor of 3 scalars is a `float3`; a `CallN` carries its result type out-of-band.
         Node::FloatFromInt(_) | Node::FloatFromUint(_) | Node::Vec3DynIndex { .. } => EmitTy::Float,
         Node::Vec3FromScalars(_, _, _) => EmitTy::Float3,
+        // Track B Increment G1: the `float2(x, y)` ctor of two `float` scalars is a `float2`.
+        Node::Vec2FromScalars(_, _) => EmitTy::Float2,
         Node::CallN { ret, .. } => ret,
         // Increment 5c: a named-local-array ELEMENT carries the array's element type out-of-band
         // (`int` for `cell`/`step`, `float` for `t_next`/`t_delta`/`s`), keyed by the array id.
@@ -671,6 +684,12 @@ fn ty_keyword(ty: EmitTy) -> &'static str {
         // operands, never `Stmt::DeclTemp`/`Stmt::DeclVar` `ty` fields). Spelled for exhaustiveness
         // + any future `int` decl (a 2-line mirror).
         EmitTy::Int => "int",
+        // The `float2` token (Track B Increment G1). NEVER reached today as a DECL-SITE token: no
+        // node materializes a `float2` temp (the `float2` return type comes from the hand-written
+        // `float2 pack_material_id_ba` SIGNATURE, and the `Vec2FromScalars` ctor is an inline-leaf-
+        // composed `Stmt::Return` operand, never a `Stmt::DeclTemp`/`Stmt::DeclVar` `ty` field).
+        // Spelled for exhaustiveness + any future `float2` decl (a 2-line mirror).
+        EmitTy::Float2 => "float2",
     }
 }
 
@@ -1571,6 +1590,14 @@ fn define_str(arena: &[Node], names: Names, temps: &[Option<String>], id: u32) -
             chk(z, EmitTy::Float);
             format!("float3({}, {}, {})", op(x), op(y), op(z))
         }
+        // `float2(<x>, <y>)` from two already-`float` scalar expressions (the `pack_material_id_ba`
+        // return). Each component is checked `Float`; spelled at Root (a ctor arg, position-
+        // irrelevant), so `(float)lo / 255.0` spells flat — `(float)lo / 255.0`, not wrapped.
+        Node::Vec2FromScalars(x, y) => {
+            chk(x, EmitTy::Float);
+            chk(y, EmitTy::Float);
+            format!("float2({}, {})", op(x), op(y))
+        }
         // A variadic heterogeneous call `sym(op(a0), op(a1), ...)` — `m2_corner(atlas, atlas_smp,
         // tile_org, cx, cy, cz, inv_atlas, band_half)` / `m2_jcgt_cubic_coeffs(s, lo_g, rd_v)` /
         // `m2_marmitt_root(coeffs, 0.0, seg_hi - seg_lo)`. The args slice the `CALL_ARGS` side-table;
@@ -2248,6 +2275,14 @@ pub struct RetCellB;
 /// stay separate at the call site.
 #[derive(Clone, Copy)]
 pub struct RetCellI;
+
+/// The `float2` RETURN-VALUE cell handle on the Emit backend — a ZST (the `float2(...)` ctor travels
+/// in the recorded [`Stmt::Return`] as a [`Node::Vec2FromScalars`], not in a cell). The [`EmitCf`]'s
+/// [`Cf::RetCellV2`] associated type (Track B Increment G1). Distinct type from [`RetCellI`] /
+/// [`RetCellB`] / [`RetCellF`] / [`RetCell`] only so the `float2` / int / bool / float / uint return
+/// facets stay separate at the call site; the recorded `Stmt::Return` is identical.
+#[derive(Clone, Copy)]
+pub struct RetCellV2;
 
 /// A NAMED-LOCAL-ARRAY name handle (Increment 5c) — indexes the printer's [`Names::array`] table.
 /// The [`EmitCf`]'s [`Cf::IntArr`] AND [`Cf::FloatArr`] associated types (both are a `u32` array-id;
@@ -3223,6 +3258,40 @@ impl Cf for EmitCf {
     fn temp_vec4(name: &'static str, v: Emit) -> Emit {
         // A NAMED `float4` temp (`float4 coeffs = ...;`).
         record_temp(Some(name), EmitTy::Float4, v)
+    }
+
+    // ---- Track B Increment G1: the `float2` axis + bitwise `uint` `&`/`>>` (recorder) ----
+    // On Emit the `float2` value is an `Emit` SSA-node handle (a `Vec2FromScalars` typed `Float2` via
+    // `type_of`); the ret-cell is a ZST (the value travels in the recorded `Stmt::Return`).
+    type Vec2f = Emit;
+    type RetCellV2 = RetCellV2;
+
+    fn and_u(a: Emit, b: Emit) -> Emit {
+        // The bitwise AND (`id & 255u`) — the (previously dead) `And` node, printed UNPARENTHESIZED
+        // (`{} & {}`). DISTINCT from `and2`'s `And2` (logical `&&`): this is `&` over two `uint`s,
+        // result-typed `Uint`.
+        Emit(push(Node::And(a.0, b.0)))
+    }
+
+    fn shr_u(a: Emit, b: Emit) -> Emit {
+        // The logical right shift (`id >> 8u`) — the (previously dead) `Shr` node, printed
+        // UNPARENTHESIZED (`{} >> {}`). The `id >> 8u & 255u` precedence is correct unparenthesized
+        // (`>>` binds tighter than `&`).
+        Emit(push(Node::Shr(a.0, b.0)))
+    }
+
+    fn vec2_from_scalars(x: Emit, y: Emit) -> Emit {
+        // `float2(<x>, <y>)` — a `Vec2FromScalars` node typed `Float2`. NEVER materialized as a temp;
+        // composed inline by the `Stmt::Return` printer (the committed body returns the ctor directly).
+        Emit(push(Node::Vec2FromScalars(x.0, y.0)))
+    }
+
+    fn ret_vec2(_cell: &RetCellV2, value: Emit) -> Flow {
+        // The `float2` return — a single `Stmt::Return(value)` carrying the `Vec2FromScalars` node
+        // (the tail `return float2(...);`; the hand-written `float2 pack_material_id_ba` signature
+        // supplies the return type). Fall through on Emit.
+        record_stmt(Stmt::Return(value.0));
+        Flow::Continue(())
     }
 }
 
@@ -4339,6 +4408,86 @@ pub fn emit_hlsl_select_level() -> String {
         // the composite containment `If { Return (int)L }`) + the tail `Stmt::Return(-1)` — a flat
         // in-order walk at DEPTH 1 (4-space indent), matching the committed L1222-1234. NO
         // function-signature wrap (the span is spliced inside the hand-written `select_level`).
+        print_block(&body_block, &arena, names, 1, &mut span);
+        span
+    })
+}
+
+/// Generates the HLSL `pack_material_id_ba` body — the G-buffer material-id packer (the 16-bit `uint
+/// id` → low/high-byte split → `float2` UNORM pair) — by tracing the generic
+/// [`crate::pack::pack_material_id_ba_body`] over the `EmitCf` backend (whose `Cf::Scalar = Emit`
+/// supplies the SSA-node arithmetic), and returns ONLY the BODY span (between the hand-written
+/// `float2 pack_material_id_ba(uint id) {` signature and the closing `}`).
+///
+/// Framing (b): the signature + closing brace stay hand-written; the body (L520-522) is spliced
+/// between the `// === GENERATED pack_material_id_ba BEGIN/END ===` sentinels in
+/// `crates/boyko_rhi_vulkan/shaders/sdf_gbuffer_composite.hlsl`. The Track-B-Increment-G1 facets: the
+/// `float2` return ([`EmitCf::ret_vec2`] + [`EmitCf::vec2_from_scalars`] — the FIRST `float2`-
+/// returning leaf, landing the minimal `float2` axis) and the bitwise `uint` `&`/`>>`
+/// ([`EmitCf::and_u`] / [`EmitCf::shr_u`] — the two DEAD `Node::And`/`Node::Shr` nodes' methods,
+/// whose printer arms already existed). The named `lo`/`hi` `uint` temps reuse [`EmitCf::temp_uint`];
+/// `255u`/`8u` reuse [`EmitCf::uint_lit`]; `(float)lo` reuses [`EmitCf::float_from_uint`].
+///
+/// The span spells `uint lo = id & 255u;` / `uint hi = id >> 8u & 255u;` — `255u` (the committed
+/// `0xFFu` re-spliced; the hex→decimal change is DXC-fold-neutral) and UNPARENTHESIZED (the
+/// committed `(id >> 8) & 0xFFu`'s redundant parens removal is byte-identical, proven). The
+/// `pack_material_id_ba` text-sync test pins the committed body to this output; the cmp-`.spv` (in
+/// `boyko_rhi_vulkan`) is the byte-identity oracle. The span prints at DEPTH 1 (4-space indent).
+pub fn emit_hlsl_pack_material_id_ba() -> String {
+    use crate::pack;
+
+    // Fresh recorder state.
+    ARENA.with(|a| a.borrow_mut().clear());
+    STMTS.with(|s| s.borrow_mut().clear());
+    VARS.with(|v| v.borrow_mut().clear());
+    NAMED_LITS.with(|n| n.borrow_mut().clear());
+    TEMP_SEQ.with(|c| *c.borrow_mut() = 0);
+    TEMP_TYPES.with(|t| t.borrow_mut().clear());
+    TEMP_NAMES.with(|t| t.borrow_mut().clear());
+
+    // Seed the function body block (the bottom of the STMTS stack).
+    STMTS.with(|s| s.borrow_mut().push(Block { stmts: Vec::new() }));
+
+    // Seed the span's single input:
+    //   id → UintInput(0) (uint_in[0] = "id") — the 16-bit material id (the only generated-span input).
+    let id = Emit::uint_input(0);
+    let ret_out = RetCellV2;
+
+    let _ = pack::pack_material_id_ba_body::<EmitCf>(id, &ret_out);
+
+    // Pop the function body block and print it.
+    let body_block = STMTS.with(|s| {
+        s.borrow_mut()
+            .pop()
+            .expect("invariant: the function body block was pushed above")
+    });
+
+    // `id` is the only `uint` input; there are no float/vec/level-field/pc names.
+    let float_in: [&str; 0] = [];
+    let names = Names {
+        float_in: &float_in,
+        uint_in: &["id"],
+        vec_in: NO_VEC_INPUTS,
+        uint3_in: NO_UINT3_INPUTS,
+        buf_in: NO_BUF_INPUTS,
+        out_in: NO_OUT_INPUTS,
+        named_lit: NO_NAMED_LITS,
+        vars: NO_VARS,
+        vec4_in: NO_VEC4_INPUTS,
+        call_in: NO_CALL_INPUTS,
+        pc_in: NO_PC_INPUTS,
+        level_field: NO_LEVEL_FIELDS,
+        array: NO_ARRAY,
+        res_in: NO_RES_INPUTS,
+    };
+
+    ARENA.with(|a| {
+        let arena = a.borrow();
+        let mut span = String::new();
+        // The whole span is two `Stmt::DeclTemp` (`uint lo = id & 255u;`, `uint hi = id >> 8u &
+        // 255u;`) + the tail `Stmt::Return(float2(...))` — a flat in-order walk at DEPTH 1 (4-space
+        // indent), matching the committed L520-522. NO function-signature wrap (the span is spliced
+        // inside the hand-written `pack_material_id_ba`).
         print_block(&body_block, &arena, names, 1, &mut span);
         span
     })

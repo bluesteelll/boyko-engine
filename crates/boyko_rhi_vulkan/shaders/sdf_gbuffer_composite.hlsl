@@ -517,9 +517,11 @@ float2 oct_encode(float3 n) {
 // high byte -> A, each as a normalized [0,1] UNORM value (byte/255). The resolve
 // reconstructs `id = round(b*255) | (round(a*255) << 8)`. 16 bits = 65 536 materials.
 float2 pack_material_id_ba(uint id) {
-    uint lo = id & 0xFFu;
-    uint hi = (id >> 8) & 0xFFu;
+    // === GENERATED pack_material_id_ba BEGIN === (boyko_shaderdsl::pack::pack_material_id_ba_body)
+    uint lo = id & 255u;
+    uint hi = id >> 8u & 255u;
     return float2((float)lo / 255.0, (float)hi / 255.0);
+    // === GENERATED pack_material_id_ba END ===
 }
 
 // ATTRIBUTE an SDF hit point `p` to the nearest edit's material id via an argmin over the

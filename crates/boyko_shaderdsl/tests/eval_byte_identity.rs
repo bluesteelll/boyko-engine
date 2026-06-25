@@ -2211,3 +2211,61 @@ fn m2_brick_span_directed_hit_miss_swap_parallel() {
         assert_bits(r.2, 2.0, "swap-branch-t_exit");
     }
 }
+
+// ======================================================================
+// Track B Increment G1 — the `pack_material_id_ba` material-id packer Eval oracle (FULL coverage —
+// pure bit/arithmetic).
+//
+// `pack_material_id_ba` is a pure byte split (no field call, no control flow), so the Eval body has
+// FULL coverage: a host mirror transcribing the committed L520-522 VERBATIM is the EXACT reference.
+// The return is a `float2`, so each lane is compared to-BITS (the byte split masks the high bits
+// away, so the two lanes are exact). Swept over directed ids {0, 1, 0xFF, 0x100, 0x8080, 0xFFFF,
+// 0x12345} + an LCG sweep.
+// ======================================================================
+
+/// Verbatim hand-mirror of the committed `pack_material_id_ba` body (the L520-522 statements). The
+/// independent reference the eDSL `pack_material_id_ba_body::<EvalCf>` is locked against (EXACT
+/// to-bits eq per lane).
+fn host_pack_material_id_ba(id: u32) -> [f32; 2] {
+    [
+        (id & 0xFF) as f32 / 255.0,
+        ((id >> 8) & 0xFF) as f32 / 255.0,
+    ]
+}
+
+/// The eDSL `pack_material_id_ba_body::<EvalCf>` reading the `float2` the ret-cell holds after the
+/// body runs.
+fn refactored_pack_material_id_ba(id: u32) -> [f32; 2] {
+    use std::cell::Cell;
+    let ret_out = Cell::new([0.0f32; 2]);
+    let _ = boyko_shaderdsl::pack::pack_material_id_ba_body::<EvalCf>(id, &ret_out);
+    ret_out.get()
+}
+
+fn assert_pack_bits(r: [f32; 2], h: [f32; 2], ctx: &str) {
+    assert_bits(r[0], h[0], &format!("{ctx}-lo"));
+    assert_bits(r[1], h[1], &format!("{ctx}-hi"));
+}
+
+#[test]
+fn pack_material_id_ba_matches_host_directed_and_sweep() {
+    // Directed ids exercising the byte boundaries: 0, the smallest nonzero, a single-byte max
+    // (0xFF), the first carry into the high byte (0x100), both bytes set (0x8080), the 16-bit max
+    // (0xFFFF), and an id with bits ABOVE 16 (0x12345 — the `& 255` / `>> 8 & 255` discards them, the
+    // high-bits-masked-away property).
+    for id in [0u32, 1, 0xFF, 0x100, 0x8080, 0xFFFF, 0x1_2345] {
+        let r = refactored_pack_material_id_ba(id);
+        let h = host_pack_material_id_ba(id);
+        assert_pack_bits(r, h, &format!("pack-directed-id-{id:#x}"));
+    }
+
+    // An LCG sweep over the full `u32` range (the bits above 16 are masked away by the byte split, so
+    // the two-lane result still byte-matches the host mirror exactly).
+    let mut lcg = Lcg::new(0xBA00_5EED_1234_ABCD_u64);
+    for _ in 0..50_000 {
+        let id = lcg.next_u32();
+        let r = refactored_pack_material_id_ba(id);
+        let h = host_pack_material_id_ba(id);
+        assert_pack_bits(r, h, &format!("pack-sweep-id-{id:#x}"));
+    }
+}

@@ -47,6 +47,7 @@ pub mod decl;
 pub mod field;
 pub mod levels;
 pub mod normal;
+pub mod pack;
 pub mod refine;
 pub mod remarch;
 pub mod scalar;
@@ -72,6 +73,7 @@ pub use field::{
 };
 pub use levels::{BRICK_LEVELS, select_level_body};
 pub use normal::sdf_normal_body;
+pub use pack::pack_material_id_ba_body;
 pub use refine::{
     EPS as B1_REFINE_EPS, M2_REFINE_ITERS as B1_REFINE_ITERS, M2_REFINE_RELAX as B1_REFINE_RELAX,
     b1_accept_refine_body,

@@ -885,6 +885,58 @@ pub trait Cf {
     /// Forces `v` to MATERIALIZE as a NAMED `float4 <name>` local — the `float4` analogue of
     /// [`temp_vec3`](Self::temp_vec3) (`float3`). `m2_brick_cubic_hit`'s `float4 coeffs = ...;`.
     fn temp_vec4(name: &'static str, v: Self::Vec4f) -> Self::Vec4f;
+
+    // ---- Track B Increment G1: the `float2` axis + the bitwise `uint` `&`/`>>` (`pack_material_id_ba`) ----
+    //
+    // `pack_material_id_ba` (`sdf_gbuffer_composite.hlsl:519`) is the G-buffer material-id packer: it
+    // splits a 16-bit `uint id` into its low/high bytes (`id & 255u`, `id >> 8u & 255u`) and returns
+    // each as a normalized `[0,1]` UNORM in a `float2` (`float2((float)lo / 255.0, (float)hi /
+    // 255.0)`). The facets below land the MINIMAL `float2` axis (mirroring the `float3` facets) plus
+    // the two DEAD bitwise nodes' methods ([`crate::emit`]'s `Node::And` / `Node::Shr`, whose printer
+    // arms already exist). The named `lo`/`hi` `uint` temps reuse [`temp_uint`](Self::temp_uint); the
+    // `255u`/`8u` literals reuse [`uint_lit`](Self::uint_lit); the `(float)lo` cast reuses
+    // [`float_from_uint`](Self::float_from_uint); the `/ 255.0` divide is the scalar
+    // [`crate::scalar::FieldScalar::div`].
+
+    /// The `float2` VALUE type the `pack_material_id_ba` return carries — `[f32; 2]` on Eval (the
+    /// `[lo/255, hi/255]` pair), the SSA-node handle [`Scalar`](Self::Scalar) on Emit (a
+    /// [`crate::emit::Node::Vec2FromScalars`] typed `float2`). The `float2` analogue of
+    /// [`Vec3f`](Self::Vec3f). `Copy` (a `[f32; 2]` / a node handle).
+    type Vec2f: Copy;
+
+    /// The `float2` RETURN-VALUE cell (`Cell<[f32; 2]>` on Eval — the body-local cell the producer
+    /// reads after the body runs; a ZST on Emit, the `float2(...)` travels in the recorded
+    /// `Stmt::Return`). The `float2` analogue of [`RetCellF`](Self::RetCellF) /
+    /// [`RetCellI`](Self::RetCellI). Owned, passed by `&` to [`ret_vec2`](Self::ret_vec2).
+    type RetCellV2;
+
+    /// `a & b` over two [`Uint`](Self::Uint)s — the bitwise AND (`id & 255u`). ACTIVATES the
+    /// [`crate::emit::Node::And`] (its `{} & {}` printer arm already exists). On Eval `a & b` over the
+    /// host `u32`s; on Emit an `And` node (an UNPARENTHESIZED inline `id & 255u`). SEPARATE from the
+    /// logical [`and2`](Self::and2) (which joins two Masks and prints `&&`): this is the bitwise `&`
+    /// over two `uint` VALUES, result-typed [`Uint`](Self::Uint).
+    fn and_u(a: Self::Uint, b: Self::Uint) -> Self::Uint;
+
+    /// `a >> b` over two [`Uint`](Self::Uint)s — the logical right shift (`id >> 8u`). ACTIVATES the
+    /// [`crate::emit::Node::Shr`] (its `{} >> {}` printer arm already exists). On Eval `a >> b` over
+    /// the host `u32`s; on Emit a `Shr` node (an UNPARENTHESIZED inline `id >> 8u`). The
+    /// `id >> 8u & 255u` precedence is correct UNPARENTHESIZED (`>>` binds tighter than `&`).
+    fn shr_u(a: Self::Uint, b: Self::Uint) -> Self::Uint;
+
+    /// `float2(<x>, <y>)` from TWO already-`float` SCALAR expressions — the `pack_material_id_ba`
+    /// return ctor. The `float2` analogue of [`vec3_from_scalars`](Self::vec3_from_scalars) (three
+    /// scalars). Asserts both operands `Float`; result [`Vec2f`](Self::Vec2f). On Eval `[x, y]`; on
+    /// Emit a [`crate::emit::Node::Vec2FromScalars`].
+    fn vec2_from_scalars(x: Self::Scalar, y: Self::Scalar) -> Self::Vec2f;
+
+    /// The `float2` function-return — `return <float2>;` (the `pack_material_id_ba` tail `return
+    /// float2(...);`). The `float2` analogue of [`ret_f`](Self::ret_f) / [`ret_i`](Self::ret_i). On
+    /// Eval deposits `value` into the [`RetCellV2`](Self::RetCellV2) and returns
+    /// [`Break`](LoopOp::Return); on Emit records a single `Stmt::Return` carrying the
+    /// [`Vec2f`](Self::Vec2f) node (the hand-written `float2 pack_material_id_ba` SIGNATURE supplies
+    /// the return type — NO function-typer). Returns [`Flow`] so the body's `?` short-circuits the
+    /// producer IIFE (Eval) / records structurally (Emit).
+    fn ret_vec2(cell: &Self::RetCellV2, value: Self::Vec2f) -> Flow;
 }
 
 /// The control-flow EVAL backend — REAL host `for`/`if`/`continue`, a unit ZST.
@@ -1510,8 +1562,13 @@ impl Cf for EvalCf {
         unreachable!("Cf::float_from_int is EMIT-ONLY: m2_brick_cubic_hit_body is never run over EvalCf")
     }
     #[inline]
-    fn float_from_uint(_a: u32) -> f32 {
-        unreachable!("Cf::float_from_uint is EMIT-ONLY: m2_brick_cubic_hit_body is never run over EvalCf")
+    fn float_from_uint(a: u32) -> f32 {
+        // `(float)<uint>` — the value-preserving `uint -> float` cast (Track B Increment G1's
+        // `(float)lo` / `(float)hi`). REACHABLE on Eval since `pack_material_id_ba_body` runs over
+        // `EvalCf` (the byte-split `lo`/`hi` are `< 256`, so `a as f32` is exact). `m2_brick_cubic_hit`
+        // (the prior consumer) is EMIT-ONLY and never reaches this on Eval, so making it concrete is
+        // harmless to that body.
+        a as f32
     }
     #[inline]
     fn usub(_a: u32, _b: u32) -> u32 {
@@ -1549,5 +1606,36 @@ impl Cf for EvalCf {
     #[inline]
     fn temp_vec4(_name: &'static str, _v: [f32; 4]) -> [f32; 4] {
         unreachable!("Cf::temp_vec4 is EMIT-ONLY: m2_brick_cubic_hit_body is never run over EvalCf")
+    }
+
+    // ---- Track B Increment G1: the `float2` axis + bitwise `uint` `&`/`>>` (native host) ----
+    // The mutable `float2` cell IS its value, held in a `Cell<[f32; 2]>` (the same interior-
+    // mutability shape the other ret-cells use). `Cell<[f32; 2]>` is body-LOCAL (not a field on
+    // the marker), so `size_of::<EvalCf>() == 0` still holds.
+    type Vec2f = [f32; 2];
+    type RetCellV2 = core::cell::Cell<[f32; 2]>;
+
+    #[inline]
+    fn and_u(a: u32, b: u32) -> u32 {
+        // The bitwise AND (`id & 255u`) — the byte mask. The host `&` matches HLSL's `OpBitwiseAnd`.
+        a & b
+    }
+
+    #[inline]
+    fn shr_u(a: u32, b: u32) -> u32 {
+        // The logical right shift (`id >> 8u`) — the high-byte select. The host `>>` over a `u32` is
+        // logical (zero-fill), matching HLSL's `OpShiftRightLogical` for the `uint` operand.
+        a >> b
+    }
+
+    #[inline]
+    fn vec2_from_scalars(x: f32, y: f32) -> [f32; 2] {
+        [x, y]
+    }
+
+    #[inline]
+    fn ret_vec2(cell: &core::cell::Cell<[f32; 2]>, value: [f32; 2]) -> Flow {
+        cell.set(value);
+        core::ops::ControlFlow::Break(LoopOp::Return)
     }
 }

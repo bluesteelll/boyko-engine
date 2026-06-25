@@ -213,4 +213,20 @@ fn main() {
     // DEPTH 1 (4-space indent).
     println!();
     print!("{}", boyko_shaderdsl::emit::emit_hlsl_m2_brick_cubic_hit());
+    // The G-buffer MATERIAL-ID PACKER leaf (Track B Increment G1 — the FIRST `float2`-returning leaf,
+    // landing the minimal `float2` axis + the bitwise `uint` `&`/`>>`): the 16-bit `uint id` →
+    // low/high-byte split (`id & 255u` / `id >> 8u & 255u`) → `float2` UNORM pair
+    // (`float2((float)lo / 255.0, (float)hi / 255.0)`). The two new facets: the `float2` return
+    // (`Cf::ret_vec2` + `Cf::vec2_from_scalars` — the `EmitTy::Float2` + `Node::Vec2FromScalars`
+    // axis) and the bitwise `uint` `&`/`>>` (`Cf::and_u` / `Cf::shr_u` — the two DEAD `Node::And`/
+    // `Node::Shr` nodes' methods, whose printer arms already existed). Generated from
+    // `boyko_shaderdsl::pack::pack_material_id_ba_body` over the `Emit` + `EmitCf` backends. Spliced
+    // between the `// === GENERATED pack_material_id_ba BEGIN/END ===` sentinels INSIDE
+    // `pack_material_id_ba` (the BODY only — the hand-written `float2 pack_material_id_ba(uint id) {`
+    // signature + the closing `}` stay un-generated, framing b). The committed `0xFFu` / `(id >> 8) &
+    // 0xFFu` is re-spliced to the eDSL spelling `255u` / `id >> 8u & 255u` (the hex→decimal +
+    // redundant-parens removal are both DXC byte-neutral, proven). The span prints at DEPTH 1
+    // (4-space indent).
+    println!();
+    print!("{}", boyko_shaderdsl::emit::emit_hlsl_pack_material_id_ba());
 }
