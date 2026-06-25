@@ -43,6 +43,31 @@ pub enum BroadphaseKind {
     Grid,
 }
 
+/// Who drives [`PhysicsConfig::broadphase`] — the user (Manual, the 0%-gate) or
+/// the cold [`select_broadphase`](crate::broadphase_policy::select_broadphase)
+/// density policy (Auto). The physics analogue of the lighting
+/// `ClusterSelectMode` (P3, `docs/ARCHITECTURE-HYBRID-PERF.md` Part 3.3).
+///
+/// [`Manual`](BroadphaseSelectMode::Manual) is the DEFAULT and the back-compat
+/// anchor: the policy NEVER writes [`PhysicsConfig::broadphase`], so the
+/// broadphase stays exactly config-controlled (byte-identical to pre-P3 — every
+/// existing test unchanged). [`Auto`](BroadphaseSelectMode::Auto) lets the policy
+/// banded-select `BroadphaseKind` from the live active-body count. Because the
+/// AllPairs and Grid arms are RESULT-EQUIVALENT (the O2 0%-correctness gate — same
+/// `(min, max)`-sorted candidate set), Auto is RESULT-TRANSPARENT: it changes which
+/// broadphase runs, never a single physics result bit.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BroadphaseSelectMode {
+    /// The user owns [`PhysicsConfig::broadphase`] (DEFAULT). The policy only
+    /// counts active bodies; it never overrides the configured kind (the 0%-gate).
+    #[default]
+    Manual,
+    /// The cold density policy banded-selects `BroadphaseKind` from the live
+    /// active-body count (Grid above the high band, AllPairs below the low band,
+    /// hold inside).
+    Auto,
+}
+
 /// Global physics tunables (plan D1; P2 W1 soft-constraint set).
 ///
 /// `gravity`, `substeps`, `relax_iterations`, and the soft-constraint pair
@@ -79,6 +104,17 @@ pub struct PhysicsConfig {
     /// all-pairs (the 0%-gate flag — a single runtime branch in
     /// [`physics_broadphase`](crate::systems::physics_broadphase)).
     pub broadphase: BroadphaseKind,
+    /// Who drives [`broadphase`](Self::broadphase) — the user
+    /// ([`Manual`](BroadphaseSelectMode::Manual), the DEFAULT and 0%-gate) or the
+    /// cold [`select_broadphase`](crate::broadphase_policy::select_broadphase)
+    /// density policy ([`Auto`](BroadphaseSelectMode::Auto), P3).
+    ///
+    /// `Manual` keeps the broadphase exactly config-controlled (byte-identical to
+    /// pre-P3); `Auto` lets the policy banded-select `BroadphaseKind` from the live
+    /// active-body count. Because the AllPairs and Grid arms are result-equivalent
+    /// (the O2 0%-correctness gate), `Auto` is result-transparent — it changes the
+    /// broadphase, never a physics result bit.
+    pub broadphase_select: BroadphaseSelectMode,
     /// Opt into the O1 AVX2 width-only SoA kernels for the hot per-substep
     /// `refresh_inertia` (`R · I⁻¹_local · Rᵀ`) and the gravity/position/quaternion
     /// integrate loop (default `false`). These are a PURE speed path: each AVX2
@@ -330,6 +366,9 @@ impl Default for PhysicsConfig {
             // Default to the shipped O(n²) loop so an un-opted world is
             // byte-identical to today (the campaign 0%-gate).
             broadphase: BroadphaseKind::AllPairs,
+            // Default Manual so the user owns `broadphase` (the P3 0%-gate): the
+            // density policy only counts bodies, it never overrides the kind.
+            broadphase_select: BroadphaseSelectMode::Manual,
             // Default OFF so an un-opted world runs the scalar bit-oracle kernels
             // (the campaign 0%-gate); the SIMD path is a pure opt-in speed path.
             simd: false,

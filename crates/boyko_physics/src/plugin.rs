@@ -13,6 +13,7 @@
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::schedule::ScheduleBuilder;
 
+use crate::broadphase_policy::{PhysicsStats, select_broadphase};
 use crate::resources::{
     BroadphaseGrid, BroadphaseKind, ConstraintGraph, ContactPairs, IntegrationMode, IslandSleep,
     Manifolds, PhysicsConfig, SolverScratch,
@@ -60,6 +61,14 @@ pub struct PhysicsStageKeys {
     pub integrate: usize,
     /// Descriptor index of the [`physics_gather`] stage.
     pub gather: usize,
+    /// Descriptor index of the cold
+    /// [`select_broadphase`](crate::broadphase_policy::select_broadphase) density
+    /// policy (P3) — runs `.after(gather)` and `.before(broadphase)` so its fresh
+    /// [`BroadphaseKind`] decision feeds this frame's build. Registered on EVERY
+    /// path (the `Res<SolverScratch>` / `ResMut<PhysicsConfig>` / `ResMut<PhysicsStats>`
+    /// params always resolve); in the default `Manual` mode it only counts bodies
+    /// and never overrides the kind (the 0%-gate).
+    pub select_broadphase: usize,
     /// Descriptor index of the [`physics_broadphase`] stage.
     pub broadphase: usize,
     /// Descriptor index of the [`physics_narrowphase`] stage.
@@ -454,6 +463,14 @@ fn add_physics_pipeline<S: RigidSolver + Default>(
     // so `physics_broadphase`'s `ResMut<BroadphaseGrid>` param always resolves; it
     // stays untouched while `PhysicsConfig::broadphase` is the default `AllPairs`.
     world.insert_resource(BroadphaseGrid::with_capacity(INITIAL_BODY_CAPACITY));
+    // P3: the cold broadphase-policy cost-model carrier (the `select_broadphase`
+    // density selector's situation key + hysteresis band). Inserted unconditionally
+    // so the policy's `ResMut<PhysicsStats>` param always resolves; it cold-starts
+    // with the band OFF (AllPairs), matching `PhysicsConfig::broadphase`'s default,
+    // and stays inert in the default `Manual` select mode (the 0%-gate). The Grid
+    // CSR buffers above are preallocated to `INITIAL_BODY_CAPACITY`, so an Auto
+    // AllPairs→Grid flip is a FILL, not a frame-path `Vec::new`/grow (Principle 5).
+    world.insert_resource(PhysicsStats::default());
     if colored {
         // O4: the islands + coloring scratch (capacity-reused). Inserted only on
         // the colored path so `physics_build_graph`'s `ResMut<ConstraintGraph>`
@@ -536,7 +553,14 @@ fn add_physics_pipeline<S: RigidSolver + Default>(
         builder.add_system(physics_integrate).key()
     };
     let gather = builder.add_system(physics_gather).after(integrate).key();
-    let broadphase = builder.add_system(physics_broadphase).after(gather).key();
+    // P3: the cold density policy runs `.after(gather)` (the body count is fresh —
+    // the gather has just refilled `SolverScratch`) and `.before(broadphase)` (this
+    // frame's `BroadphaseKind` decision feeds the build). `physics_broadphase` is
+    // pinned `.after(select)` below so the ordering is deterministic, not merely
+    // conflict-derived (the policy's `ResMut<PhysicsConfig>` vs the broadphase's
+    // `Res<PhysicsConfig>` would serialize them anyway, but the edge is explicit).
+    let select = builder.add_system(select_broadphase).after(gather).key();
+    let broadphase = builder.add_system(physics_broadphase).after(select).key();
     let narrowphase = builder
         .add_system(physics_narrowphase)
         .after(broadphase)
@@ -686,6 +710,7 @@ fn add_physics_pipeline<S: RigidSolver + Default>(
     PhysicsStageKeys {
         integrate: integrate.0,
         gather: gather.0,
+        select_broadphase: select.0,
         broadphase: broadphase.0,
         narrowphase: narrowphase.0,
         narrowphase_sdf: narrowphase_sdf_key.map(|k| k.0),

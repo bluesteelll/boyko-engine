@@ -30,6 +30,11 @@
 /// `#[derive(Bundle)]` mixes of scene spatial/render components with this crate's
 /// physics columns (std-lib S6). Cycle-free: physics depends on scene.
 pub mod bundles;
+/// P3 — the cold broadphase StrategyPolicy ([`PhysicsStats`] + `select_broadphase`):
+/// a density-driven banded selector for [`PhysicsConfig::broadphase`] (AllPairs ↔
+/// Grid), gated Manual-by-default (the 0%-gate). The physics analogue of the P1
+/// lighting policy; ECS-native, cold, zero hot-path cost.
+pub mod broadphase_policy;
 pub mod components;
 pub mod manifold;
 pub mod math;
@@ -56,6 +61,7 @@ pub mod soft;
 pub mod solver;
 pub mod systems;
 
+pub use broadphase_policy::{GRID_HI, GRID_LO, PhysicsStats, select_broadphase};
 pub use bundles::{DynamicBody, Trigger};
 pub use components::{
     Collider, ColliderShape, Contact, Kinematic, RigidBody, RigidBodyBundle, RigidBodyMass, Sensor,
@@ -72,9 +78,9 @@ pub use scene_sync::{
     debug_assert_dynamic_bodies_are_roots, sync_body_to_transform, sync_transform_to_body,
 };
 pub use resources::{
-    BodyState, BroadphaseGrid, BroadphaseKind, ConstraintGraph, ContactPairs,
-    DEFAULT_SLEEP_FRAMES, DEFAULT_SLEEP_THRESHOLD, IntegrationMode, IslandSleep, Manifolds,
-    PhysicsConfig, SolverScratch, TouchedMask,
+    BodyState, BroadphaseGrid, BroadphaseKind, BroadphaseSelectMode, ConstraintGraph,
+    ContactPairs, DEFAULT_SLEEP_FRAMES, DEFAULT_SLEEP_THRESHOLD, IntegrationMode, IslandSleep,
+    Manifolds, PhysicsConfig, SolverScratch, TouchedMask,
 };
 pub use sdf_query::{SdfField, sample_sdf};
 pub use soft::{
