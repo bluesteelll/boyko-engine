@@ -5,7 +5,7 @@ particular component added or modified since the system last ran**. It is
 modelled after [Bevy ECS](https://bevyengine.org/) (post-PR #6547) and ships
 with the following surface:
 
-- A monotonic `Tick(u32)` counter, bumped once per `Schedule::run`.
+- A monotonic `Tick(u32)` counter, advanced ~2 ticks per `Schedule::run`.
 - Per-row `added` and `changed` ticks stored alongside every component.
 - The filters `Added<T>` and `Changed<T>` (non-archetypal, composable with
   `Or`, `With`, `Without`).
@@ -13,7 +13,7 @@ with the following surface:
   on read / write paths.
 - Escape hatches: `set_if_neq`, `bypass_change_detection`.
 - Wraparound safety via `MAX_CHANGE_AGE` clamping (runs at most ~once per
-  100 days of continuous play at 60 FPS).
+  50 days of continuous play at 60 FPS).
 
 If your systems do not use any of these, **Phase 10 adds zero overhead** to
 their hot paths. The compiler's const-fold elides every per-row branch
@@ -30,22 +30,34 @@ At the heart of change detection is a single global counter:
 pub fn current_tick(&self) -> Tick;
 ```
 
-Each call to `Schedule::run` performs a single atomic `fetch_add(1, Relaxed)`
-on this counter. Every system about to dispatch records two snapshots:
+Each call to `Schedule::run` advances this counter with **two** atomic
+`fetch_add(1, Relaxed)` bumps:
 
-- `this_run` — the world's tick at the start of the current frame.
-- `last_run` — the system's `this_run` from the **previous frame**.
+- A **frame-start bump**
+  ([`schedule.rs:286`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/schedule/schedule.rs#L286))
+  that publishes the new `this_run` read by every system, condition, and the
+  state pass.
+- An **apply-window bump** (Bug #56,
+  [`schedule.rs:381`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/schedule/schedule.rs#L381))
+  that lands deferred-command stamps at `this_run + 1`, strictly between this
+  run's reader window and the next's.
+
+So a plain run costs ~2 atomics; a fixed-timestep run with substeps costs a
+few more. Every system about to dispatch records two snapshots:
+
+- `this_run` — the world's tick captured by the frame-start bump.
+- `last_run` — the system's `this_run` from its **previous run**.
 
 Both snapshots are stored on `SystemMeta` and read by filters and `Ref` /
 `Mut` accessors. The combination `(last_run, this_run]` is the **observation
 window** for the system.
 
-Boyko bumps `change_tick` **once per `Schedule::run`** (per-frame regime),
-rather than once per system (Bevy's regime). Practical consequences:
+Boyko bumps `change_tick` **per `Schedule::run`** (per-run regime), rather
+than once per system (Bevy's per-system regime). Practical consequences:
 
-- All systems in one frame share the same `this_run`.
-- One atomic per frame (instead of `N` atomics for `N` systems).
-- `Added<T>` granularity is **frame-level** — the resolution remains
+- All systems in one run share the same frame-start `this_run`.
+- A handful of atomics per run (instead of `N` atomics for `N` systems).
+- `Added<T>` granularity is **run-level** — the resolution remains
   sufficient for the conventional fixed-tick game loop.
 
 ---
@@ -197,10 +209,11 @@ fn rebuild_in_place(mut q: Query<Mut<Buffer>>) {
 Use sparingly — invisible to downstream `Changed<T>` filters until the
 next legitimate write.
 
-### `into_inner` and conversions
-
-`Mut<T>::into_inner(self) -> &'w mut T` consumes the guard and bumps the
-tick once. Useful when forwarding to APIs that take `&mut T` directly.
+The `Mut<T>` surface is exactly these four methods plus `Deref` / `DerefMut`
+— see the impl block at
+[`data.rs:1346`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/iters/query/data.rs#L1346).
+To forward to an API that takes `&mut T`, pass `bypass_change_detection()`
+(no bump) or `&mut *guard` (`DerefMut`, bumps once).
 
 ---
 
@@ -243,20 +256,22 @@ cold-path **`check_ticks` scan**.
 
 Constants:
 
-- `CHECK_TICK_THRESHOLD = 518_400_000` — frames between scans (Bevy mirror).
-- `MAX_CHANGE_AGE = u32::MAX - 2 * CHECK_TICK_THRESHOLD + 1` ≈ 3.26 B.
+- `CHECK_TICK_THRESHOLD = 518_400_000` — ticks between scans (Bevy mirror).
+- `MAX_CHANGE_AGE = u32::MAX - (2 * CHECK_TICK_THRESHOLD - 1)` ≈ 3.26 B.
 
-At 60 FPS with per-frame bump:
+At 60 FPS the world advances ~2 ticks per run (the frame-start bump plus the
+Bug #56 apply-window bump; see §1), so the threshold maps to roughly half the
+naive single-bump figure:
 
 | Metric | Value |
 | --- | --- |
-| Ticks per second | 60 |
-| Time between scans | ~100 days of continuous play |
+| Ticks per run | ~2 (more under fixed-timestep substeps) |
+| Time between scans | ~50 days of continuous play at 60 FPS |
 | Scan cost (100 k entities × 50 components) | ~3 ms cold |
 
-Effectively, a player who runs your game for less than three months will
-never observe a `check_ticks` scan. The clamp is a safety net, not a hot
-path. You do not need to think about it.
+Effectively, a player who runs your game non-stop for under a month and a
+half will never observe a `check_ticks` scan. The clamp is a safety net, not
+a hot path. You do not need to think about it.
 
 ---
 
@@ -277,7 +292,7 @@ fn integration_pipeline(
         seed_pathfinder(t);
     }
 
-    for (t, mut v) in &mut movers.iter_mut() {
+    for (t, mut v) in &mut movers {
         // Read the transform with tick info; recompute velocity.
         if t.is_changed() {
             v.target = compute_target(&t);
@@ -293,8 +308,12 @@ fn integration_pipeline(
 
 ### How the scheduler frames it
 
-- The frame starts: `change_tick.fetch_add(1, Relaxed)`.
-- Each system about to dispatch runs `set_change_ticks(prev_this_run, this_run)`.
+- The run starts with the frame-start bump: `change_tick.fetch_add(1, Relaxed)`,
+  capturing `this_run`.
+- Each system about to dispatch runs `set_change_ticks(last_run, this_run)`,
+  where the system's previous `this_run` becomes its new `last_run`.
+- The apply-window bump (Bug #56) fires once more before deferred commands
+  drain, so deferred-added components land at `this_run + 1`.
 - Workers read `&SystemMeta` (shared) inside their tasks.
 - `Mut<T>::deref_mut` writes the changed tick via `UnsafeCell<Tick>` — no
   atomic; the Phase 9 conflict graph guarantees no concurrent reader.
@@ -313,8 +332,8 @@ fn integration_pipeline(
 | `Changed<T>` filter, hot row | ≤ 1 ns/row | autovectorisable predicate |
 | `Or<(_, Changed<T>)>`, null-base | ≤ 1.5 ns/row | branch + return false |
 | `Mut<T>::deref_mut` bump | ≤ 1 ns | single u32 store |
-| Frame tick bump | ≤ 5 ns | one `fetch_add(Relaxed)` |
-| `check_ticks` scan, 100 k × 50 components | ≤ 10 ms cold | runs ~once per 100 days |
+| Per-run tick bumps | ≤ 5 ns each | ~2 `fetch_add(Relaxed)` per run |
+| `check_ticks` scan, 100 k × 50 components | ≤ 10 ms cold | runs ~once per 50 days |
 | `Query::iter` overhead without change detection | 0 ns | const-fold elision |
 | Phase 9 dispatcher regression budget | 0 % | rides existing exclusivity |
 
@@ -332,8 +351,10 @@ The numbers are validated by the criterion bench suite
 - **Write a component and track the change**: `Query<Mut<T>>` →
   `*t = ...` (bumps) or `t.set_if_neq(...)` (bumps only on inequality).
 - **Skip the tick bump**: `t.bypass_change_detection()`.
-- **Read the system's tick snapshot directly**: `SystemChangeTick` —
-  exposes `this_run()` and `last_run()` as a `SystemParam`.
+
+> A `SystemChangeTick` SystemParam that exposes a system's `this_run()` /
+> `last_run()` snapshot directly is planned (Wave B+) but **not yet shipped**.
+> Until then, read tick state through `Ref<T>` / `Mut<T>` accessors.
 
 For the design rationale and full invariant catalogue, see
-`docs/PHASE-10-CHANGE-DETECTION-PLAN.md`.
+[`docs/PHASE-10-CHANGE-DETECTION-PLAN.md`](https://github.com/bluesteelll/boyko-engine/blob/ecs/docs/PHASE-10-CHANGE-DETECTION-PLAN.md).

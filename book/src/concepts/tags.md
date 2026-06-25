@@ -85,6 +85,8 @@ Phase 22 precisely because tags make wide bundles the norm).
 
 ```rust,ignore
 use boyko_ecs::prelude::*;
+// `With` / `Without` (and `Added` / `Changed` below) are NOT in the prelude
+// glob — import them from the query module explicitly.
 use boyko_ecs::ecs::core::iters::query::{With, Without};
 
 fn move_players(mut q: Query<&mut Position, (With<Player>, Without<Frozen>)>) {
@@ -100,8 +102,8 @@ dangling aligned base — sound because zero bytes are ever read — and a
 `Mut<Tag>` write-through stamps the row's changed tick like any component:
 
 ```rust,ignore
-fn read_tag_directly(world: &mut EcsMaster, e: Entity) {
-    // Valid: Some(&Player) if `e` carries the tag.
+fn read_tag_directly(world: &EcsMaster, e: Entity) {
+    // `get_component` takes `&self`: Some(&Player) if `e` carries the tag.
     let _tag: Option<&Player> = world.get_component::<Player>(e);
 }
 ```

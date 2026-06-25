@@ -1,8 +1,8 @@
 # Storage Trade-offs: Tags, Churn, and Fragmentation
 
-> Tags are free to carry and free to query — but not free to toggle, and not free to combine without limit. This page is the cost model, and the Table-vs-Bitset decision matrix.
+> Tags are free to carry and free to query — but not free to toggle, and not free to combine without limit. This page is the cost model, and the storage-kind decision matrix.
 
-*(Branch: `ecs`, Phase 22 + EnableTag.)*
+*(Branch: `ecs`, EnableTag + Dense components.)*
 
 ## Problem
 
@@ -23,6 +23,33 @@ An archetype ECS gives you three ways to model it, with different cost profiles:
 
 None is universally right. The two tag backends are an **explicit choice**, and
 the axis that decides it is toggle frequency.
+
+### Where this sits in the storage-kind axis
+
+Tags are not the only place storage kind matters. The kernel classifies every
+component id into a `StorageKind` with **three** members
+([`component_registry.rs:397`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/component/component_registry.rs#L397)):
+
+| `StorageKind` | In archetype signature? | Backing store |
+|---------------|-------------------------|---------------|
+| `Table` (0) | yes — mints archetypes | per-archetype `ComponentPool` |
+| `Bitset` (1) | no | per-archetype paged enable bitset (no data column) |
+| `Dense` (2) | no | **one global `DenseStore` column** across all archetypes |
+
+Only `Table` is a *signature* kind: `is_signature_storage` returns `true` for
+`Table` and `false` for both `Bitset` and `Dense`
+([`component_registry.rs:428`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/component/component_registry.rs#L428)).
+That single predicate is why neither bitset tags nor dense components ever mint
+an archetype.
+
+**This page is the cost model for the two *tag* backends — `Table` vs `Bitset`.**
+The third kind, **dense (non-fragmenting) components**
+(`#[component(storage = "dense")]`), is the canonical "one contiguous buffer for
+all instances" storage — solver state, GPU instances — rather than a way to
+model boolean-ish flags. It shares the non-fragmenting property (signature
+excluded) but it carries *data*, not presence, so it is out of scope for the
+toggle-frequency analysis below. It appears here only where the fragmentation
+story needs it (the [comparison table](#comparison-to-other-engines)).
 
 ## The churn ladder
 
@@ -68,16 +95,23 @@ base archetype can mint up to **2^N** combinations. Five tags = up to 32
 archetypes for one logical kind of entity.
 
 Boyko's hard ceiling is `MAX_ARCHETYPES = 1024`, and hitting it is a **loud
-failure** (a release-active assert at archetype creation), never silent
-misbehavior. The practical guidance:
+failure**, never silent misbehavior. There are two surfaces, both carrying the
+count: the infallible creation path trips a release-active
+`assert!(self.count < MAX_ARCHETYPES, ...)`
+([`archetype_bundle.rs:654`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/archetype/archetype_bundle.rs#L654)),
+while the fallible path returns `Err(BundleFullError)`
+([`archetype_bundle.rs:433`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/archetype/archetype_bundle.rs#L433))
+whose `Display` reads `ArchetypeBundle is full (MAX_ARCHETYPES = {…})`
+([`archetype_bundle.rs:71`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/archetype/archetype_bundle.rs#L71)).
+The practical guidance:
 
 - Budget tags per entity *kind*, not per idea. Ten orthogonal toggleable tags
   on one base archetype is a 1024-combination worst case — the entire budget.
 - Fragmentation also degrades iteration: many small archetypes mean more
   archetype transitions per query (each one ~a predicted branch + pointer
   chase) and worse per-archetype SIMD batch sizes.
-- The same ceiling protects you: the failure mode is an assert with a count,
-  not a slow drift into pointer soup.
+- The same ceiling protects you: the failure mode is a counted assert (or a
+  counted `Err`), not a slow drift into pointer soup.
 
 ## The address-space profile (what a VM monitor will show you)
 
@@ -117,17 +151,25 @@ The recurring trade in this design is *honest costs over silent lies*:
 | `Added`/`Changed` on tags | yes | yes | n/a (different reactive model) |
 | Toggle cost | archetype move | archetype move | archetype move; opt-in non-fragmenting toggle (`DontFragment`/enable bits) |
 | Dynamic (runtime) tags | name-keyed `TagId` in the shared id space | dynamic components share `ComponentId` space | tags are entities |
-| Fragmentation mitigation | enable bitset tags (below) | none built-in | enable bits / union storage |
+| Fragmentation mitigation | enable bitset tags (below) + dense (signature-excluded) components | none built-in | enable bits / union storage |
 
 ## The second backend: enable bitset tags
 
-The non-fragmenting escape hatch landed as a second tag backend. An **enable
-tag** (`#[component(storage = "bitset")]` or `register_enable_tag`) encodes
-presence in a per-archetype **paged bitset** — one bit per row — instead of the
-archetype signature. Toggling is an O(1) atomic bit read-modify-write in place:
-no migration, no fragmentation, no spawn-time tick-pool floor. The full concept
-page is [Enable Tags](../concepts/enable-tags.md); this section is the
+The non-fragmenting escape hatch *for tags* landed as a second tag backend. An
+**enable tag** (`#[component(storage = "bitset")]` or `register_enable_tag`)
+encodes presence in a per-archetype **paged bitset** — one bit per row — instead
+of the archetype signature. Toggling is an O(1) atomic bit read-modify-write in
+place: no migration, no fragmentation, no spawn-time tick-pool floor. The full
+concept page is [Enable Tags](../concepts/enable-tags.md); this section is the
 trade-off side.
+
+(Enable tags are not the *only* signature-excluded backend. Dense components
+(`StorageKind::Dense`) are likewise filtered out of every archetype signature
+and so never mint an archetype — see
+[the storage-kind axis](#where-this-sits-in-the-storage-kind-axis). But a dense
+column carries per-instance *data* in one global `DenseStore`, not boolean
+presence, so it is not a tag and the rest of this section concerns only the
+bitset backend.)
 
 ### Table vs Bitset decision matrix
 

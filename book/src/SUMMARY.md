@@ -15,7 +15,7 @@
 
 # Memory Subsystem
 
-- [Arena Allocator](memory/arena.md)
+- [Per-Pool Virtual Memory](memory/arena.md)
 
 # Scheduling
 

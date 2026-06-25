@@ -27,13 +27,19 @@ entities, 60 Hz tick), that's not enough. Phase 9 adds:
 3. **Deterministic `Commands` flush** — commands enqueued during the
    parallel phase apply in a serial _apply window_, eliminating the
    race-on-write that a naive parallel apply would create.
-4. **Allocation discipline** — system bodies cannot allocate from the
-   `Arena` (debug-asserted). All growth happens on the dispatcher during
-   `ScheduleBuilder::build` or the per-frame apply window.
+4. **Context discipline** — system bodies run under a thread-local
+   "in-system-run" flag. Context-restricted paths (event send/read, `Time`
+   access, the hook-drain) `debug_assert!` against it. Storage growth never
+   happens inside a system body: a `ComponentPool` only grows on a `&mut`
+   path (the owner's direct API or the per-frame apply window), where the
+   dispatcher holds `&mut EcsMaster` exclusively.
 
 The scheduler does not introduce `Mutex` or `RwLock` on the hot path.
 Cross-worker synchronization is one `AtomicUsize` per frame
-(`pending_apply`) plus a lock-free `ArrayQueue` for completions.
+(`pending_apply`) plus a lock-free MPSC `ArrayQueue` for completions,
+both living inside an out-of-line `CompletionChannel` (Phase 9.3c) the
+workers reach through a `NonNull` rather than through the dispatcher's
+`&mut self`.
 
 ## High-level overview
 
@@ -63,8 +69,10 @@ Two types form the public surface:
   per frame.
 
 A third type — [`SystemConfig`](#systemconfig) — is the value returned
-from `add_system(...)`. It carries the `.before`, `.after`, `.chain`, and
-`.in_set` fluent hints.
+from `add_system(...)`. It carries the `.before`, `.after`, `.chain`,
+`.in_set`, `.before_set`, `.after_set`, `.run_if`, and `.gpu` fluent
+hints, plus `.key()` to capture the system's `SystemKey` for use in a
+sibling ordering call.
 
 ## `ScheduleBuilder`
 
@@ -82,9 +90,10 @@ let mut world = EcsMaster::new();
 let mut builder = ScheduleBuilder::new(Arc::clone(&pool));
 
 // Register systems. Each call returns a SystemConfig handle for fluent
-// ordering / set membership.
-builder.add_system(physics_step);
-builder.add_system(render_prepare).after(physics_step);
+// ordering / set membership. Ordering edges reference another system by
+// its `SystemKey`, captured from the handle via `.key()`.
+let physics = builder.add_system(physics_step).key();
+builder.add_system(render_prepare).after(physics);
 
 let mut schedule = builder.build(&mut world);
 
@@ -200,7 +209,9 @@ Bounds and behaviour:
   mutation flows through `D::Item<'_>` (e.g. `&mut Position`).
 - **`Send + Sync`** — workers cross thread boundaries; the closure body
   is shared across them. This compile-fails any `&mut Commands` capture
-  (CQ-SEND2 — see `tests/par_iter_captures_commands_fails.rs`).
+  (CQ-SEND2 — the failing fixture is
+  `crates/boyko_ecs/tests/par_iter_compile_fail/capture_commands.rs`, run
+  by the trybuild harness `tests/par_iter_captures_commands_fails.rs`).
 - **Inline threshold** — archetypes with fewer than
   `MIN_ARCHETYPE_FOR_PARALLEL` (= 1024) rows run inline on the calling
   thread. The fork-join overhead would otherwise dominate.
@@ -229,66 +240,109 @@ struct RenderSet;
 let mut builder = ScheduleBuilder::new(pool);
 builder.add_system(integrate).in_set(PhysicsSet);
 builder.add_system(collide).in_set(PhysicsSet);
-builder.add_system(render).in_set(RenderSet).after(PhysicsSet);
+// Order this system relative to a *set* with `.after_set` / `.before_set`
+// (a set-relative hint expands to per-member edges at build time).
+builder.add_system(render).in_set(RenderSet).after_set(PhysicsSet);
 ```
 
-`.before(SystemSet)`, `.after(SystemSet)`, `.in_set(SystemSet)`, and
-`.chain()` are the four ordering primitives. They compose; conflicts
-between hints panic at `build` time with a cycle diagnostic.
+Ordering relative to a set uses `.before_set(set)` / `.after_set(set)` —
+**not** `.before` / `.after`, which take a `SystemKey` for ordering against
+a single system. `.in_set(set)` records membership only (no edge on its
+own). The full ordering vocabulary is:
+
+- `.before(key)` / `.after(key)` — order against a single system by `SystemKey`.
+- `.chain(key)` — strict serial order (this → `key`), a distinct edge variant for diagnostics.
+- `.in_set(set)` — set membership.
+- `.before_set(set)` / `.after_set(set)` — order against every (transitive) member of a set.
+- `.run_if(cond)` (Phase 16) — attach a run condition.
+- `.gpu()` (Phase 5) — mark a GPU-compute system (runs dispatcher-solo at the apply-window barrier).
+
+These compose; conflicts between hints panic at `build` time with a cycle
+diagnostic.
 
 ## `SystemConfig` fluent API
 
 `SystemConfig` (returned by `add_system`) carries:
 
-- **`.before(other)`** — this system runs before `other`.
-- **`.after(other)`** — this system runs after `other`.
-- **`.chain()`** — chained with the previously-added system (shorthand
-  for `.after(prev)`).
-- **`.in_set(SET)`** — adds this system to the named `SystemSet`.
+- **`.key()`** — returns this system's `SystemKey` so a sibling call can
+  order against it.
+- **`.before(other: SystemKey)`** — this system runs before `other`.
+- **`.after(other: SystemKey)`** — this system runs after `other`.
+- **`.chain(other: SystemKey)`** — strict serial order (this → `other`).
+  Same DAG edge as `before` but a distinct variant for diagnostics. There
+  is no no-arg `.chain()` — pass the target key explicitly.
+- **`.in_set(set)`** — adds this system to `set` (a `SystemSet` value).
+- **`.before_set(set)` / `.after_set(set)`** — order against a set's members.
+- **`.run_if(cond)`** — attach a run condition (Phase 16).
+- **`.gpu()`** — mark a GPU-compute system (Phase 5).
 
 ```rust,ignore
-builder
+let physics = builder
     .add_system(physics_step)
-    .in_set(PhysicsSet);
+    .in_set(PhysicsSet)
+    .key();
 
 builder
     .add_system(input_handler)
-    .before(physics_step);
+    .before(physics);
 ```
 
-## Allocation discipline (ALLOC1)
+## Context discipline (ALLOC1)
 
-System bodies **must not** allocate from the `Arena`. The dispatcher
-sets a thread-local flag (`IN_SYSTEM_RUN`) around every system body via
-the `InSystemRunGuard`. `Arena::allocate_*` `debug_assert!`s the negation
-of this flag.
+There is no shared arena allocator to protect — the engine retired the
+shared `Arena` in **Phase X.J**. Component storage now lives in per-pool
+virtual-memory reservations: each `ComponentPool` reserves a fixed,
+address-stable row ceiling up front (`ComponentPool::new(component_id,
+reserve_rows)` on a `VmReservation`) and commits frontier pages lazily as
+rows are added. There is no global `Arena::allocate_*` call on the hot
+path.
 
-All allocation happens during the apply window (dispatcher-only) or
-during `ScheduleBuilder::build`. The disciplined paths:
+Growth (`ComponentPool::grow_rows`) is plain `&mut self` field mutation —
+it commits more pages on the pool's **own** reservation and never moves
+the base pointer. Because it is reachable only through `&mut` paths (the
+owner's direct API, or the apply window where the dispatcher holds
+`&mut EcsMaster` and SCH7 guarantees zero workers in flight), the `&mut`
+exclusivity **is** the guard. The commit syscalls are not global-allocator
+calls, so they need no separate allocation flag
+([`component_pool.rs:2023`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/memory/component_pool.rs#L2023)).
 
-- Archetype growth — deferred via `Commands::spawn` and resolved on
-  apply.
-- `CommandQueue::push` — uses its own `Vec<MaybeUninit<u8>>`, which IS
-  on the heap, but is a per-system queue allocated before the system
-  body runs.
-- Event buffer growth — flagged in plan §11.5 as a pre-Phase 10 audit
-  item; today only fires on first-write per buffer.
+What survives from the old discipline is a thread-local **context flag**.
+The dispatcher wraps every system body in
+`boyko_threadpool::InSystemRunGuard::enter()`
+([`schedule.rs:1239`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/schedule/schedule.rs#L1239)),
+and context-restricted paths `debug_assert!(boyko_threadpool::is_in_system_run())`
+(or its negation) to catch misuse:
 
-If you find a `debug_assert!` firing inside a system body, the rule is
-not to relax the assert — it's to refactor the allocation to happen
-outside the body. The release-mode safety net is the `force_alloc_panic`
-cfg gate (see `docs/PHASE-9-FORCE-ALLOC-PANIC.md`).
+- `EventReader` / `EventWriter` — must be used from inside a system body
+  (the TLS `current_worker_id` router places the write on the correct
+  event lane).
+- `Time` access — `debug_assert!`s it is **not** called inside a system
+  body (advance happens on the dispatcher).
+- The deferred hook-drain — asserts the dispatcher context (not mid-body).
+
+The structural mutation paths stay deferred regardless:
+
+- Archetype / pool growth — happens on `&mut` paths only (apply window or
+  the owner's direct API), never from a worker mid-body.
+- `Commands` — a system enqueues into its own per-system `CommandQueue`
+  (allocated before the body runs) and the queue flushes during the apply
+  window.
 
 ## Event lanes
 
 The event dispatcher reserves one lane per worker plus one lane for the
 dispatcher. Worker bodies emit events to their own lane; the dispatcher
-emits during the apply window. The number of lanes is set at
-`EventConfig::default_for(worker_count + 1)` time.
+emits during the apply window. The lane count is the `thread_count`
+passed to `EventConfig::default_for(thread_count: u32) -> EcsResult<Self>`
+([`event_config.rs:66`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/events/event_config.rs#L66)) —
+sized to cover every worker plus the dispatcher lane.
 
-User code calls `EventDispatcher::send_event<E>(event)` (or
-`Commands::send_event<E>(event)` for deferred-from-system emission); the
-TLS `current_worker_id` router places the write on the correct lane.
+User code calls `EventDispatcher::send_event::<E>(event) -> EcsResult<()>`
+(or `Commands::send_event::<E>(event)` for deferred-from-system emission);
+the TLS `current_worker_id` router places the write on the correct lane.
+Both `send_event` and `EventConfig::default_for` return an `EcsResult`,
+so a caller may need to handle the `Err` (e.g. a full lane or an
+out-of-range config).
 
 ## Threading model
 
@@ -341,7 +395,7 @@ Measured numbers (8-core Windows reference box, `cargo bench --release`):
 | Bench                               | Time      | Target  | Headroom |
 |-------------------------------------|-----------|---------|----------|
 | `phase9_schedule_run_empty`         | ~3.5 ns   | n/a     | n/a      |
-| `phase9_schedule_run_50_exclusive`  | ~4.3 µs   | ≤ 20 µs | 5×       |
+| `phase9_schedule_run_50_exclusive_systems` | ~4.3 µs | ≤ 20 µs | 5× |
 | `phase9_par_iter_4096_entities`     | ~25.0 µs  | n/a     | n/a      |
 | `phase9_schedule_run_two_disjoint`  | ~1.6 µs   | n/a     | n/a      |
 | `phase9_schedule_run_one_exclusive` | ~265 ns   | n/a     | n/a      |
@@ -368,6 +422,24 @@ No `Cargo.toml` change is required for `boyko_ecs` users — the public
 re-exports (`Schedule`, `ScheduleBuilder`, `SystemConfig`, `SystemSet`)
 flow through `boyko_ecs::ecs::core::schedule::*`.
 
+## What layers on top
+
+Phase 9 is the execution core. Later phases extend the **same**
+`Schedule` / `ScheduleBuilder` without re-architecting it:
+
+- **Schedule ordering & sets** (Phase 15) — `.before_set` / `.after_set`
+  and `configure_set`, expanded into per-member edges at `build`.
+- **Run conditions** (Phase 16) — `.run_if(cond)` gates a system's body
+  per frame; conditions evaluate single-threaded at the apply-window
+  barrier.
+- **States** (Phase 17) — `State<S>` / `NextState<S>` with the
+  `in_state` / `on_enter` / `on_exit` / `on_transition` conditions, built
+  on the same run-condition mechanism.
+- **App / Plugin facade** (Phase 18) — the `App` builder owns one or more
+  `Schedule`s; plugins register systems through it.
+- **Fixed timestep** (Phase 20) — `Time` / `FixedTime` and a `CoreSchedule`
+  driving a fixed-step inner loop.
+
 ## Further reading
 
 - `docs/PHASE-9-PARALLEL-SCHEDULER-PLAN.md` — the architectural plan
@@ -379,3 +451,7 @@ flow through `boyko_ecs::ecs::core::schedule::*`.
 - `crates/boyko_ecs/tests/scheduler_par_iter_concurrent_systems.rs` —
   end-to-end integration test exercising the full `par_iter` ×
   `Schedule::run` path.
+- `crates/boyko_ecs/tests/par_iter_compile_fail/capture_commands.rs` —
+  the trybuild compile-fail fixture proving `&mut Commands` cannot be
+  captured inside a `par_iter` body (CQ-SEND2), driven by the harness
+  `crates/boyko_ecs/tests/par_iter_captures_commands_fails.rs`.

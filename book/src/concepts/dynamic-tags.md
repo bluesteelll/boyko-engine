@@ -112,13 +112,24 @@ fn tick_poison(q: Query<&mut Health>, poisoned: Res<PoisonTag>) {
 
 Properties of tag terms:
 
-- **Archetype granularity, zero per-row cost.** A term is at most eight
-  signature-bit tests per *archetype transition*, outside the row loop. With no
-  terms set, the cost is one predicted not-taken branch per transition — the
-  inner row loop is byte-identical to a term-free query.
-- **Honored by every driver**: `iter`/`iter_mut`, `par_iter`/`par_iter_mut`,
-  `for_each_chunk`, `par_for_each_chunk`, `len`/`is_empty`, `get`/`get_mut`,
-  `single`/`single_mut`.
+- **Archetype granularity, resolved once per epoch.** Terms resolve **once
+  per epoch at the driver entry** (Phase 22.1), not per archetype transition
+  and never per row. The first driver call builds a memoised, term-filtered
+  `&[ArchetypeId]` slice; the iteration cursors and the chunk/par drivers then
+  walk that pre-resolved slice carrying **zero** term code. The bit-test (at
+  most eight signature-bit tests per matched archetype) runs once, during that
+  per-epoch prefilter build — plus on each point lookup in `QueryView::get` /
+  `get_mut`, where a prefilter cannot help a single in-hand archetype. With no
+  terms set, the driver takes the shared pre-terms slice through one predicted
+  not-taken branch — the inner row loop is byte-identical to a term-free query.
+- **Honored by every iteration driver** (both `Query` and `QueryView`):
+  `iter`/`iter_mut`, `iter_entities`/`iter_entities_mut`,
+  `par_iter`/`par_iter_mut`, `for_each_chunk`/`par_for_each_chunk`, and the
+  `archetype_count`/`is_empty` accessors.
+- **Point lookups are `QueryView`-only.** `single`/`single_mut` and
+  `get`/`get_mut` exist on `QueryView` (the direct API) only — the `Query`
+  SystemParam has no point-lookup methods. On the lookup path the term test
+  runs per call against the in-hand archetype.
 - **Ceiling: 8 terms** per query (`MAX_DYN_TAG_TERMS`), `with_tag` +
   `without_tag` combined. Exceeding it is a loud, release-active panic at
   term-add time (setup), never a silent truncation.
@@ -172,7 +183,7 @@ walk that raises the bits on existing archetypes.
 | Exhaustion | `try_register_tag` → `None`; `register_tag` → panic naming the budget |
 | Storage per tag | 8 B/row (ticks) — identical to static tags |
 | `has_tag` | O(1): inland load → archetype pointer → signature bit test |
-| Query terms | ≤ 8 per query; archetype-level; loud panic past the ceiling |
+| Query terms | ≤ 8 per query; archetype-level, resolved once per epoch into a memoised id slice; loud panic past the ceiling |
 | Toggle cost | archetype migration (row move) — see the churn ladder |
 | Stable identity | the **name** (ids are process-unstable) |
 
