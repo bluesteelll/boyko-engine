@@ -58,22 +58,29 @@ jobs:
         run: mdbook build
 
       - name: Build cargo doc
-        # The /api/ landing page is produced by the manual redirect in "Assemble
-        # site", so the nightly-only --enable-index-page is not needed here.
-        # RUSTDOCFLAGS=-D warnings is intentionally NOT set: doc warnings must not
-        # take down the whole Pages deploy (the mdBook book builds independently).
-        run: cargo doc --no-deps --workspace --all-features
+        id: build_doc
+        # NON-FATAL by design: the rustdoc /api/ sub-site must never take down the
+        # mdBook book deploy (the book builds independently above). If this step
+        # fails, "Assemble site" below publishes the book without /api/.
+        #   - default features only (NOT --all-features): --all-features pulls the
+        #     bench-only `bench-alloc`/mimalloc C dependency, which has no doc value.
+        #   - --enable-index-page is omitted; the /api/ landing page is the manual
+        #     redirect written in "Assemble site".
+        #   - RUSTDOCFLAGS=-D warnings is intentionally NOT set.
+        continue-on-error: true
+        run: cargo doc --no-deps --workspace
 
       - name: Assemble site
         run: |
           mkdir -p _site
           # mdBook output → root
           cp -r book/output/* _site/
-          # cargo doc → /api/
-          mkdir -p _site/api
-          cp -r target/doc/* _site/api/
-          # Index redirect for /api/ to main crate
-          cat > _site/api/index.html <<'EOF'
+          # cargo doc → /api/ — only if the (non-fatal) doc build succeeded.
+          if [ "${{ steps.build_doc.outcome }}" = "success" ]; then
+            mkdir -p _site/api
+            cp -r target/doc/* _site/api/
+            # Index redirect for /api/ to main crate
+            cat > _site/api/index.html <<'EOF'
           <!DOCTYPE html>
           <html lang="en">
           <head>
@@ -87,6 +94,9 @@ jobs:
           </body>
           </html>
           EOF
+          else
+            echo "::warning::cargo doc failed; publishing the book without the /api/ rustdoc sub-site."
+          fi
           # Ensure GitHub Pages serves correctly
           touch _site/.nojekyll
 
