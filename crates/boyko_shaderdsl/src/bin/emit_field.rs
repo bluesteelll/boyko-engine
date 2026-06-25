@@ -191,4 +191,26 @@ fn main() {
     // committed body (the GPU-shape single-source discipline `dist_to_brick_exit` uses).
     println!();
     print!("{}", boyko_shaderdsl::emit::emit_hlsl_m2_brick_span());
+    // The M2 brick 3D-DDA cubic-hit MARCHER leaf (Increment 5c — the LARGEST + FINAL brick called
+    // body): the `[unroll]` per-axis DDA setup (the 3-way `else { if }` direction branch), the
+    // `[loop]` 3D-DDA march (the `min((uint)max(cell[i],0), W-2u)` cell clamp, the 8 `m2_corner`
+    // fetches, the cubic form+solve `m2_jcgt_cubic_coeffs(s,...)` / `m2_marmitt_root(coeffs,...)`,
+    // the in-cell early `return seg_lo + local_t;`, the nearest-axis nested-select advance, the
+    // `cell[axis] += step[axis]` `+=` step, and the DDA-exit guard), and the tail `return -1.0;`.
+    // The four new FACET GROUPS: (1) named local arrays (`int cell[3]`, `float s[8]`, the per-element
+    // get/set/`+=` — the `+=` a DISTINCT statement per the R1 spike), (2) generalized heterogeneous
+    // call sites (`m2_corner` with RESOURCE params, `m2_jcgt_cubic_coeffs(s,...)` with a by-name array
+    // arg, `m2_marmitt_root`, `(int)m2_clamp_index(...)`), (3) int casts/arith (`(uint)max(...)`,
+    // `(float)(c0 + 1)`, `W - 2u`, `step[axis] == 0`, `cell[axis] < 0`), and (4) misc (the nested
+    // `uint` axis-select, the dynamic `rd_v[axis]` index, the `float3(...)` scalar ctor, the captured
+    // `uint W`). Generated from `boyko_shaderdsl::cubic_hit::m2_brick_cubic_hit_body` over the
+    // `EmitCf` backend. EMIT-ONLY: `m2_corner` → `atlas.SampleLevel` cannot run on the CPU, so the
+    // body is never instantiated over `EvalCf` and there is NO eval sweep — the cmp-`.spv` is the SOLE
+    // byte-identity oracle. Spliced between the `// === GENERATED m2_brick_cubic_hit BEGIN/END ===`
+    // sentinels INSIDE `m2_brick_cubic_hit` (the BODY span only — the hand-written signature, the
+    // `if (t_exit <= t_enter) { return -1.0; }` early-out, the `const uint W = M2_BRICK_ALLOC;` decl,
+    // and the closing `}` stay un-generated ABOVE the BEGIN sentinel, framing b). The span prints at
+    // DEPTH 1 (4-space indent).
+    println!();
+    print!("{}", boyko_shaderdsl::emit::emit_hlsl_m2_brick_cubic_hit());
 }

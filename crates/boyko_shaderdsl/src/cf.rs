@@ -710,6 +710,181 @@ pub trait Cf {
     /// returns [`Break`](LoopOp::Return); on Emit records a single `Stmt::Return(value)`.
     /// `select_level`'s tail `return -1;`.
     fn ret_i(cell: &Self::RetCellI, value: Self::Int) -> Flow;
+
+    // ---- Increment 5c: the DDA marcher subsystem (`m2_brick_cubic_hit`) ----------------
+    //
+    // `m2_brick_cubic_hit` (`sdf_gbuffer_composite.hlsl:1014`) is the LARGEST + final brick called
+    // body: a 3D-DDA that marches the ray through a brick's interior voxel cells, forms the JCGT
+    // cubic at the first sign-bracketing cell, and solves it for the in-cell crossing. It needs
+    // four FACET GROUPS none of the prior leaves have:
+    //
+    //   1. NAMED LOCAL ARRAYS — `int cell[3]`, `int step[3]`, `float t_next[3]`, `float t_delta[3]`
+    //      + a per-cell `float s[8]` corner buffer (uninit decl, per-element get/set, `+=`).
+    //   2. GENERALIZED CALL SITES — `m2_corner` (8 heterogeneous args incl. RESOURCE params),
+    //      `m2_jcgt_cubic_coeffs(s, ...)` (a by-name ARRAY arg), `m2_marmitt_root` (a `float4` arg).
+    //   3. INT CASTS/ARITH — `(uint)max(cell[0], 0)`, `(float)(c0 + 1)`, `W - 2u`, `step[axis] == 0`.
+    //   4. MISC — the nested `uint` axis-select, the dynamic `rd_v[axis]` index, the `float3(...)`
+    //      scalar ctor, a captured `uint W`.
+    //
+    // EMIT-ONLY CONTRACT: `m2_corner` calls `atlas.SampleLevel(...)` — a `Texture3D` the CPU cannot
+    // run — so `m2_brick_cubic_hit_body::<EvalCf>` is NEVER instantiated. There is NO eval sweep; the
+    // cmp-`.spv` is the SOLE gate (precedented by Inc 5a's `unreachable!`-on-Eval level/pc hooks).
+    // EVERY EvalCf impl below is therefore `unreachable!` (the honest-panic discipline, like
+    // [`call1`](Self::call1)).
+
+    /// A NAMED LOCAL `int` ARRAY (`int cell[3]`) — an `IntArr` name handle on Emit, an unreachable
+    /// ZST on Eval (the body is EMIT-ONLY). Declared by [`decl_array_int`](Self::decl_array_int),
+    /// read/written per-element by [`arr_int_get`](Self::arr_int_get) / [`arr_int_set`](Self::
+    /// arr_int_set) / [`arr_int_add_assign`](Self::arr_int_add_assign).
+    type IntArr: Copy;
+
+    /// A NAMED LOCAL `float` ARRAY (`float t_next[3]` / `float s[8]`) — the `float` analogue of
+    /// [`IntArr`](Self::IntArr).
+    type FloatArr: Copy;
+
+    /// A RESOURCE PARAMETER (`atlas` — a `Texture3D<float>`, or `atlas_smp` — a `SamplerState`) — a
+    /// `ResTok` name handle on Emit, an unreachable ZST on Eval. A CALL-THROUGH-ONLY operand
+    /// (consumed by [`call_corner`](Self::call_corner)).
+    type ResTok: Copy;
+
+    // The `float4` VALUE `coeffs` (the cubic coefficients returned by `m2_jcgt_cubic_coeffs`) reuses
+    // the SAME [`Vec4f`](Self::Vec4f) the regula-falsi `c` param uses (NO new associated type) — the
+    // cubic-hit `coeffs` temp + the `m2_marmitt_root(coeffs, ...)` arg both thread it.
+
+    // -- Group 1: the named-local-array combinators -----------------------------------
+
+    /// Declares an UNINITIALIZED named-local `int` array (`int <name>[<len>];`). Returns the
+    /// [`IntArr`](Self::IntArr) handle so later element ops spell `<name>[idx]`.
+    fn decl_array_int(name: &'static str, len: u32) -> Self::IntArr;
+    /// Declares an UNINITIALIZED named-local `float` array (`float <name>[<len>];`).
+    fn decl_array_float(name: &'static str, len: u32) -> Self::FloatArr;
+
+    /// `<name>[<idx>]` — an `int`-array element READ (the inline `cell[axis]` / `cell[0]`). The
+    /// index is a [`Uint`](Self::Uint) (the iv `axis` or a `uint` literal).
+    fn arr_int_get(a: Self::IntArr, idx: Self::Uint) -> Self::Int;
+    /// `<name>[<idx>]` — a `float`-array element READ (`t_next[0]` / `s[k]`).
+    fn arr_float_get(a: Self::FloatArr, idx: Self::Uint) -> Self::Scalar;
+
+    /// `<name>[<idx>] = <v>;` — an `int`-array element STORE (`cell[axis] = c0;`).
+    fn arr_int_set(a: Self::IntArr, idx: Self::Uint, v: Self::Int);
+    /// `<name>[<idx>] = <v>;` — a `float`-array element STORE (`s[0] = <call>;`, `t_next[axis] =
+    /// <expr>;`).
+    fn arr_float_set(a: Self::FloatArr, idx: Self::Uint, v: Self::Scalar);
+
+    /// `<name>[<idx>] += <v>;` — an `int`-array element COMPOUND-ADD (`cell[axis] += step[axis];`).
+    /// The `+=` TOKEN (NOT `<name>[idx] = <name>[idx] + v`): the spike (R1) proved the `= +` form
+    /// computes the access-chain TWICE at `-O0`, so it is NOT byte-identical.
+    fn arr_int_add_assign(a: Self::IntArr, idx: Self::Uint, v: Self::Int);
+    /// `<name>[<idx>] += <v>;` — a `float`-array element COMPOUND-ADD (`t_next[axis] +=
+    /// t_delta[axis];`). Same `+=`-token R1 rationale as [`arr_int_add_assign`](Self::
+    /// arr_int_add_assign).
+    fn arr_float_add_assign(a: Self::FloatArr, idx: Self::Uint, v: Self::Scalar);
+
+    // -- Group 2: the generalized call sites ------------------------------------------
+
+    /// `m2_corner(atlas, atlas_smp, tile_org, cx, cy, cz, inv_atlas, band_half)` — the 8-arg
+    /// resource-bearing corner fetch (`Texture3D.SampleLevel`). Returns a [`Scalar`](Self::Scalar)
+    /// (the decoded corner distance). EMIT-ONLY (the CPU cannot run `SampleLevel`).
+    #[allow(clippy::too_many_arguments)]
+    fn call_corner(
+        fn_sym: &'static str,
+        atlas: Self::ResTok,
+        smp: Self::ResTok,
+        tile_org: Self::Vec3f,
+        cx: Self::Uint,
+        cy: Self::Uint,
+        cz: Self::Uint,
+        inv_atlas: Self::Scalar,
+        band_half: Self::Scalar,
+    ) -> Self::Scalar;
+
+    /// `m2_jcgt_cubic_coeffs(s, lo_g, rd_v)` — the cubic-coefficient fold over the by-NAME corner
+    /// array `s`, the cell-local ray origin `lo_g`, and the ray direction `rd_v`. Returns a
+    /// [`Vec4f`](Self::Vec4f) (the `[c0,c1,c2,c3]` coefficients).
+    fn call_coeffs(
+        fn_sym: &'static str,
+        s: Self::FloatArr,
+        lo_g: Self::Vec3f,
+        rd_v: Self::Vec3f,
+    ) -> Self::Vec4f;
+
+    /// `m2_marmitt_root(coeffs, a, b)` — the Marmitt cubic root over `[a, b]` (`0.0`, `seg_hi -
+    /// seg_lo`). Returns a [`Scalar`](Self::Scalar) (the in-cell crossing `local_t`, or `-1`).
+    fn call_marmitt(
+        fn_sym: &'static str,
+        coeffs: Self::Vec4f,
+        a: Self::Scalar,
+        b: Self::Scalar,
+    ) -> Self::Scalar;
+
+    /// `(int)<callee>(<arg>)` — the `(int)m2_clamp_index(g_entry)` call+cast: a 1-arg `float ->
+    /// uint` frozen call ([`call1`](Self::call1)-shape) immediately `(int)`-cast. Returns an
+    /// [`Int`](Self::Int). The `float`-arg variant of [`call1`](Self::call1) (whose arg is a
+    /// `float3`); folded with the cast so the `int c0 = (int)m2_clamp_index(g_entry);` materializes
+    /// as one `int` temp.
+    fn call_clamp_index_int(fn_sym: &'static str, g: Self::Scalar) -> Self::Int;
+
+    // -- Group 3: the int casts / arithmetic ------------------------------------------
+
+    /// `max(a, b)` over two SIGNED `int`s (`max(cell[0], 0)`). The signed-int analogue of
+    /// [`FieldScalar::max`] (FLOAT).
+    fn smax(a: Self::Int, b: Self::Int) -> Self::Int;
+    /// `(uint)<int>` — the value-preserving `int -> uint` cast (`(uint)max(...)`).
+    fn uint_from_int(a: Self::Int) -> Self::Uint;
+    /// `a < b` over two SIGNED `int`s, producing a [`Mask`](FieldScalar::Mask) — the DDA-exit's
+    /// `cell[axis] < 0`. The SIGNED `<` (a DISTINCT opcode from the FLOAT / `uint` `<`).
+    fn slt(a: Self::Int, b: Self::Int) -> <Self::Scalar as FieldScalar>::Mask;
+    /// `a + b` over two SIGNED `int`s (`c0 + 1`).
+    fn sadd(a: Self::Int, b: Self::Int) -> Self::Int;
+    /// `(float)<int>` — the value-preserving `int -> float` cast (`(float)c0` / `(float)(c0 + 1)`).
+    fn float_from_int(a: Self::Int) -> Self::Scalar;
+    /// `(float)<uint>` — the value-preserving `uint -> float` cast (`(float)cx`).
+    fn float_from_uint(a: Self::Uint) -> Self::Scalar;
+    /// `a - b` over two `uint`s (`W - 2u` / `W - 1u`).
+    fn usub(a: Self::Uint, b: Self::Uint) -> Self::Uint;
+    /// `min(a, b)` over two `uint`s (`min((uint)max(cell[0], 0), W - 2u)`). The `uint` analogue of
+    /// [`FieldScalar::min`] (FLOAT) — needed because the `uint`-typed clamp's `min` cannot reuse the
+    /// FLOAT `min` (its operands would mis-check `Float`).
+    fn umin(a: Self::Uint, b: Self::Uint) -> Self::Uint;
+    /// `a == b` over two SIGNED `int`s, producing a [`Mask`](FieldScalar::Mask) — the DDA-exit's
+    /// `step[axis] == 0`. The SIGNED integer `==`.
+    fn sint_eq(a: Self::Int, b: Self::Int) -> <Self::Scalar as FieldScalar>::Mask;
+    /// Forces an [`Int`](Self::Int) to MATERIALIZE as a NAMED `int <name>` local — the `int`
+    /// analogue of [`temp_float`](Self::temp_float) / [`temp_uint`](Self::temp_uint).
+    /// `m2_brick_cubic_hit`'s `int c0 = (int)m2_clamp_index(g_entry);`.
+    fn temp_int(name: &'static str, x: Self::Int) -> Self::Int;
+
+    // -- Group 4: the misc facets -----------------------------------------------------
+
+    /// A captured `uint` read by bare NAME (`W`) — the `const uint W = M2_BRICK_ALLOC;` the
+    /// hand-written shader declares ABOVE the generated span. The `W - 2u` / `W - 1u` consumers read
+    /// it. The plain-captured analogue of [`pc_uint`](Self::pc_uint) (a push-constant field).
+    fn captured_uint(name: &'static str) -> Self::Uint;
+
+    /// A nested `uint` axis-select `cond ? t : e` — the DDA's `axis = (...) ? 0u : ((...) ? 1u :
+    /// 2u)`. The `uint`-arm analogue of [`select`](Self::select) (FLOAT arms). On Emit a
+    /// `SelectParenU` node (the condition `(...)`-wrapped, the else arm self-wraps when a nested
+    /// select).
+    fn select_uint(
+        cond: <Self::Scalar as FieldScalar>::Mask,
+        t: Self::Uint,
+        e: Self::Uint,
+    ) -> Self::Uint;
+
+    /// `<vec>[<idx>]` — a DYNAMIC index of a WHOLE `float3` PARAMETER (`rd_v[axis]` / `ro_v[0]`).
+    /// DISTINCT from [`index`](Self::index) (which reads a SEEDED `[Scalar; 3]`): this indexes a
+    /// whole [`Vec3f`](Self::Vec3f) by an arbitrary [`Uint`](Self::Uint), so a single seeded
+    /// `Vec3Param` is BOTH passed whole (the `call_coeffs` `rd_v` arg) AND indexed `rd_v[axis]`.
+    fn vec3_dyn_index(v: Self::Vec3f, idx: Self::Uint) -> Self::Scalar;
+
+    /// `float3(<x>, <y>, <z>)` from THREE already-`float` SCALAR expressions (the `lo_g` ctor).
+    /// DISTINCT from [`vec3_from_uints`](Self::vec3_from_uints) (three `uint`s, implicit uint→float):
+    /// here all three are `float` arithmetic.
+    fn vec3_from_scalars(x: Self::Scalar, y: Self::Scalar, z: Self::Scalar) -> Self::Vec3f;
+
+    /// Forces `v` to MATERIALIZE as a NAMED `float4 <name>` local — the `float4` analogue of
+    /// [`temp_vec3`](Self::temp_vec3) (`float3`). `m2_brick_cubic_hit`'s `float4 coeffs = ...;`.
+    fn temp_vec4(name: &'static str, v: Self::Vec4f) -> Self::Vec4f;
 }
 
 /// The control-flow EVAL backend — REAL host `for`/`if`/`continue`, a unit ZST.
@@ -1238,5 +1413,141 @@ impl Cf for EvalCf {
     fn ret_i(cell: &core::cell::Cell<i32>, value: i32) -> Flow {
         cell.set(value);
         core::ops::ControlFlow::Break(LoopOp::Return)
+    }
+
+    // ---- Increment 5c: the DDA marcher subsystem (EMIT-ONLY — every hook unreachable) ----
+    //
+    // `m2_brick_cubic_hit` calls `m2_corner` → `atlas.SampleLevel(...)` (a `Texture3D` the CPU
+    // cannot run), so `m2_brick_cubic_hit_body::<EvalCf>` is NEVER instantiated and NONE of these
+    // hooks is ever reached on Eval. A `unreachable!` is the honest signal (the `call1` discipline,
+    // precedented by Inc 5a's level/pc Eval hooks) — a wrong value would silently fork the .spv.
+
+    // The array / resource / float4 handles are unit ZSTs on Eval (never constructed — the body is
+    // EMIT-ONLY — but the trait requires concrete associated types). `size_of::<EvalCf>() == 0`
+    // still holds (these are body-LOCAL types, not fields on the marker).
+    type IntArr = ();
+    type FloatArr = ();
+    type ResTok = ();
+
+    #[inline]
+    fn decl_array_int(_name: &'static str, _len: u32) {
+        unreachable!("Cf::decl_array_int is EMIT-ONLY: m2_brick_cubic_hit_body is never run over EvalCf")
+    }
+    #[inline]
+    fn decl_array_float(_name: &'static str, _len: u32) {
+        unreachable!("Cf::decl_array_float is EMIT-ONLY: m2_brick_cubic_hit_body is never run over EvalCf")
+    }
+    #[inline]
+    fn arr_int_get(_a: (), _idx: u32) -> i32 {
+        unreachable!("Cf::arr_int_get is EMIT-ONLY: m2_brick_cubic_hit_body is never run over EvalCf")
+    }
+    #[inline]
+    fn arr_float_get(_a: (), _idx: u32) -> f32 {
+        unreachable!("Cf::arr_float_get is EMIT-ONLY: m2_brick_cubic_hit_body is never run over EvalCf")
+    }
+    #[inline]
+    fn arr_int_set(_a: (), _idx: u32, _v: i32) {
+        unreachable!("Cf::arr_int_set is EMIT-ONLY: m2_brick_cubic_hit_body is never run over EvalCf")
+    }
+    #[inline]
+    fn arr_float_set(_a: (), _idx: u32, _v: f32) {
+        unreachable!("Cf::arr_float_set is EMIT-ONLY: m2_brick_cubic_hit_body is never run over EvalCf")
+    }
+    #[inline]
+    fn arr_int_add_assign(_a: (), _idx: u32, _v: i32) {
+        unreachable!("Cf::arr_int_add_assign is EMIT-ONLY: m2_brick_cubic_hit_body is never run over EvalCf")
+    }
+    #[inline]
+    fn arr_float_add_assign(_a: (), _idx: u32, _v: f32) {
+        unreachable!("Cf::arr_float_add_assign is EMIT-ONLY: m2_brick_cubic_hit_body is never run over EvalCf")
+    }
+
+    #[inline]
+    fn call_corner(
+        _fn_sym: &'static str,
+        _atlas: (),
+        _smp: (),
+        _tile_org: [f32; 3],
+        _cx: u32,
+        _cy: u32,
+        _cz: u32,
+        _inv_atlas: f32,
+        _band_half: f32,
+    ) -> f32 {
+        unreachable!("Cf::call_corner is EMIT-ONLY: atlas.SampleLevel cannot run on the CPU")
+    }
+    #[inline]
+    fn call_coeffs(_fn_sym: &'static str, _s: (), _lo_g: [f32; 3], _rd_v: [f32; 3]) -> [f32; 4] {
+        unreachable!("Cf::call_coeffs is EMIT-ONLY: m2_brick_cubic_hit_body is never run over EvalCf")
+    }
+    #[inline]
+    fn call_marmitt(_fn_sym: &'static str, _coeffs: [f32; 4], _a: f32, _b: f32) -> f32 {
+        unreachable!("Cf::call_marmitt is EMIT-ONLY: m2_brick_cubic_hit_body is never run over EvalCf")
+    }
+    #[inline]
+    fn call_clamp_index_int(_fn_sym: &'static str, _g: f32) -> i32 {
+        unreachable!("Cf::call_clamp_index_int is EMIT-ONLY: m2_brick_cubic_hit_body is never run over EvalCf")
+    }
+
+    #[inline]
+    fn smax(_a: i32, _b: i32) -> i32 {
+        unreachable!("Cf::smax is EMIT-ONLY: m2_brick_cubic_hit_body is never run over EvalCf")
+    }
+    #[inline]
+    fn uint_from_int(_a: i32) -> u32 {
+        unreachable!("Cf::uint_from_int is EMIT-ONLY: m2_brick_cubic_hit_body is never run over EvalCf")
+    }
+    #[inline]
+    fn slt(_a: i32, _b: i32) -> bool {
+        unreachable!("Cf::slt is EMIT-ONLY: m2_brick_cubic_hit_body is never run over EvalCf")
+    }
+    #[inline]
+    fn sadd(_a: i32, _b: i32) -> i32 {
+        unreachable!("Cf::sadd is EMIT-ONLY: m2_brick_cubic_hit_body is never run over EvalCf")
+    }
+    #[inline]
+    fn float_from_int(_a: i32) -> f32 {
+        unreachable!("Cf::float_from_int is EMIT-ONLY: m2_brick_cubic_hit_body is never run over EvalCf")
+    }
+    #[inline]
+    fn float_from_uint(_a: u32) -> f32 {
+        unreachable!("Cf::float_from_uint is EMIT-ONLY: m2_brick_cubic_hit_body is never run over EvalCf")
+    }
+    #[inline]
+    fn usub(_a: u32, _b: u32) -> u32 {
+        unreachable!("Cf::usub is EMIT-ONLY: m2_brick_cubic_hit_body is never run over EvalCf")
+    }
+    #[inline]
+    fn umin(_a: u32, _b: u32) -> u32 {
+        unreachable!("Cf::umin is EMIT-ONLY: m2_brick_cubic_hit_body is never run over EvalCf")
+    }
+    #[inline]
+    fn sint_eq(_a: i32, _b: i32) -> bool {
+        unreachable!("Cf::sint_eq is EMIT-ONLY: m2_brick_cubic_hit_body is never run over EvalCf")
+    }
+    #[inline]
+    fn temp_int(_name: &'static str, _x: i32) -> i32 {
+        unreachable!("Cf::temp_int is EMIT-ONLY: m2_brick_cubic_hit_body is never run over EvalCf")
+    }
+
+    #[inline]
+    fn captured_uint(_name: &'static str) -> u32 {
+        unreachable!("Cf::captured_uint is EMIT-ONLY: m2_brick_cubic_hit_body is never run over EvalCf")
+    }
+    #[inline]
+    fn select_uint(_cond: bool, _t: u32, _e: u32) -> u32 {
+        unreachable!("Cf::select_uint is EMIT-ONLY: m2_brick_cubic_hit_body is never run over EvalCf")
+    }
+    #[inline]
+    fn vec3_dyn_index(_v: [f32; 3], _idx: u32) -> f32 {
+        unreachable!("Cf::vec3_dyn_index is EMIT-ONLY: m2_brick_cubic_hit_body is never run over EvalCf")
+    }
+    #[inline]
+    fn vec3_from_scalars(_x: f32, _y: f32, _z: f32) -> [f32; 3] {
+        unreachable!("Cf::vec3_from_scalars is EMIT-ONLY: m2_brick_cubic_hit_body is never run over EvalCf")
+    }
+    #[inline]
+    fn temp_vec4(_name: &'static str, _v: [f32; 4]) -> [f32; 4] {
+        unreachable!("Cf::temp_vec4 is EMIT-ONLY: m2_brick_cubic_hit_body is never run over EvalCf")
     }
 }

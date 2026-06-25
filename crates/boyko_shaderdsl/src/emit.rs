@@ -334,6 +334,131 @@ enum Node {
     /// `all(p < hi)`. An inline leaf (a mask, appears only inside the `&&` condition); printed
     /// `all(<operand>)`.
     All3(u32),
+
+    // ---- Increment 5c: the named-local-array subsystem (`m2_brick_cubic_hit`) ----
+    //
+    // The DDA marcher carries four named LOCAL ARRAYS (`int cell[3]`, `int step[3]`, `float
+    // t_next[3]`, `float t_delta[3]`) + a per-cell `float s[8]` corner buffer. Each array is an
+    // UNINITIALIZED named decl ([`Stmt::DeclArray`]); a per-element access ([`Node::ArrayElem`])
+    // is an INLINE leaf (`cell[axis]` / `s[k]`); a per-element store / compound-add are
+    // statements ([`Stmt::ArrayStore`] / [`Stmt::ArrayAddAssign`]). The array NAME is carried
+    // out-of-band (the printer's ARRAY_NAMES table), the element TYPE out-of-band (ARRAY_ELEM_TYS).
+
+    /// A named-local-array ELEMENT read — `cell[axis]` / `s[0]` / `t_next[axis]`. `(arr, idx)`:
+    /// `arr` indexes the printer's array-name table ([`Names::array`]); `idx` is the index node
+    /// (a [`Node::UintLit`] `0`/`1`/`2` or the iv `axis`/`cx`). Printed INLINE (`is_inline_leaf` =
+    /// true), so each use spells `cell[axis]` at the use site (matching the committed body). The
+    /// result type is read OUT-OF-BAND ([`array_elem_ty`] keyed by `arr`) — `int` for `cell`/`step`,
+    /// `float` for `t_next`/`t_delta`/`s` (the access-chain carries no type itself).
+    ArrayElem { arr: u32, idx: u32 },
+
+    /// `(int)<uint>` — the HLSL value-preserving `uint -> int` cast of a `uint` arithmetic value
+    /// (`(uint)max(cell[0], 0)`). DISTINCT from [`Node::IntFromUint`] only in being recorded by
+    /// the Increment-5c [`Cf::int_from_uint`] for an arbitrary `uint` node (Increment 5a's seeded
+    /// the loop iv `L`); both print `(int)<operand>` and are inline leaves typed [`EmitTy::Int`].
+    /// NOT added as a new variant — see the reuse note in [`Cf::int_from_uint`].
+
+    /// `max(a, b)` over two SIGNED `int` handles (`max(cell[0], 0)`). The signed-int analogue of
+    /// [`Node::Max`] (which is FLOAT). Materialized as an `int` temp (none in this body — it is
+    /// always the operand of a `(uint)` cast, so it is a non-leaf consumed by [`Node::UintFromInt`]).
+    /// Result type [`EmitTy::Int`].
+    SMax(u32, u32),
+
+    /// `(uint)<int>` — the HLSL value-preserving `int -> uint` cast (`(uint)max(cell[0], 0)`). The
+    /// `int -> uint` analogue of [`Node::IntFromUint`]'s `uint -> int`. Materialized as a `uint`
+    /// temp (none here — it is the inner of a `min(..., W - 2u)`, a non-leaf operand). Result type
+    /// [`EmitTy::Uint`].
+    UintFromInt(u32),
+
+    /// `a < b` over two SIGNED `int` handles — a Mask node (`OpSLessThan`, the SIGNED `<`, DISTINCT
+    /// from the FLOAT [`Node::Lt`] and the UNSIGNED comparisons). The DDA exit guard's `cell[axis] <
+    /// 0`. Printed inline like [`Node::Lt`].
+    SLt(u32, u32),
+
+    /// `a + b` over two SIGNED `int` handles (`c0 + 1`). The signed-int analogue of [`Node::Add`]
+    /// (FLOAT) / [`Node::UAdd`] (`uint`). Additive (wraps under a multiplicative/cast parent — see
+    /// [`needs_paren_as_operand`], the `(float)(c0 + 1)` cast-operand wrap). Result type
+    /// [`EmitTy::Int`].
+    SAdd(u32, u32),
+
+    /// `(float)<int>` — the HLSL value-preserving `int -> float` cast (`(float)c0` / `(float)(c0 +
+    /// 1)`). The `int -> float` analogue of [`Node::UintToFloat`]. An inline leaf typed
+    /// [`EmitTy::Float`]; its operand spells at a CAST position (an additive operand wraps —
+    /// `(float)(c0 + 1)`, NOT `(float)c0 + 1`).
+    FloatFromInt(u32),
+
+    /// `(float)<uint>` — the HLSL value-preserving `uint -> float` cast (`(float)cx`). The `uint ->
+    /// float` analogue of [`Node::FloatFromInt`] / [`Node::UintToFloat`] (the LATTER materializes a
+    /// temp; this is an INLINE leaf for the `lo_g` `float3` constructor's per-component `- (float)cx`).
+    /// Routed separately so the `lo_g` ctor spells `(float)cx` inline at the use site. An inline leaf
+    /// typed [`EmitTy::Float`].
+    FloatFromUint(u32),
+
+    /// `a - b` over two `uint` handles (`W - 2u` / `W - 1u`). The `uint` SUBTRACT — the `uint`
+    /// analogue of [`Node::Sub`] (FLOAT). Additive (wraps under a multiplicative parent like
+    /// [`Node::UAdd`]). Result type [`EmitTy::Uint`].
+    USub(u32, u32),
+
+    /// `min(a, b)` over two `uint` handles (`min((uint)max(cell[0], 0), W - 2u)`). The `uint` MIN —
+    /// the `uint` analogue of [`Node::Min`] (FLOAT). Materialized as a `uint` temp (`uint cx = ...;`).
+    /// DISTINCT from [`Node::Min`] only so its operands are checked `Uint` (not `Float`). Result type
+    /// [`EmitTy::Uint`].
+    UMin(u32, u32),
+
+    /// `a == b` over two SIGNED `int` handles — a Mask node (`OpIEqual`, the integer `==`). The DDA
+    /// exit guard's `step[axis] == 0`. Printed inline like [`Node::IntEq`] (the SAME `==` spelling;
+    /// DISTINCT only at the type level — its operands are `int` array elements, not `uint`).
+    SIntEq(u32, u32),
+
+    /// A `uint` NESTED axis-select — `(<c0>) ? 0u : ((<c1>) ? 1u : 2u)`. The `uint`-typed analogue of
+    /// [`Node::SelectParen`] (FLOAT arms). `(c, t, e)`: both arms are `uint` (`0u` / a nested select).
+    /// The DDA's `axis = (t_next[0] <= t_next[1] && t_next[0] <= t_next[2]) ? 0u : (...)`. Result type
+    /// [`EmitTy::Uint`]. Printed `(<c>) ? <t> : <e>` (the arms WRAPPED only when themselves a select
+    /// — the committed text wraps the nested select but NOT the `0u`/`1u`/`2u` leaves).
+    SelectParenU(u32, u32, u32),
+
+    /// A DYNAMIC float3-PARAMETER index — `rd_v[axis]` / `ro_v[0]`. `(vec_id, idx)`: `vec_id` indexes
+    /// [`Names::vec_in`] (the whole-`float3` PARAMETER name, e.g. `rd_v`); `idx` is the index node (a
+    /// [`Node::UintLit`] literal `0`/`1`/`2` or the iv `axis`). DISTINCT from [`Node::VecIndex`]
+    /// (which reads a SEEDED `[Emit; 3]` `VecParamRef`): a `Vec3DynIndex` indexes a WHOLE `Vec3Param`
+    /// by an arbitrary index node, so a single seeded `Vec3Param` is BOTH passed whole (the
+    /// `call_coeffs` `rd_v` arg) AND indexed `rd_v[axis]`. An inline leaf typed [`EmitTy::Float`].
+    Vec3DynIndex { vec_id: u32, idx: u32 },
+
+    /// `float3(<x>, <y>, <z>)` from THREE `float` SCALAR expressions (the `lo_g` ctor). DISTINCT from
+    /// [`Node::Vec3FromUints`] (three `uint` operands, implicit `uint->float`): here all three are
+    /// already-`float` arithmetic expressions. Materialized as a `float3` temp. Result type
+    /// [`EmitTy::Float3`].
+    Vec3FromScalars(u32, u32, u32),
+
+    /// A CALL to a frozen hand-written shader function with N HETEROGENEOUS args — `m2_corner(atlas,
+    /// atlas_smp, tile_org, cx, cy, cz, inv_atlas, band_half)` / `m2_jcgt_cubic_coeffs(s, lo_g, rd_v)`
+    /// / `m2_marmitt_root(coeffs, 0.0, seg_hi - seg_lo)`. `sym_id` indexes [`Names::call_in`] (the
+    /// SAME table [`Node::Call1`]/[`Node::Call2`] use); `arg_lo`/`arg_count` slice the flat
+    /// [`CALL_ARGS`] side-table (the variadic arg node ids — the arena [`Node`] is `Copy`, so the
+    /// arg list lives out-of-band). `ret` carries the result [`EmitTy`] (`Float` for `m2_corner`/
+    /// `m2_marmitt_root`, `Float4` for `m2_jcgt_cubic_coeffs`). Printed `sym(<op(a0)>, <op(a1)>, ...)`.
+    CallN {
+        sym_id: u32,
+        arg_lo: u32,
+        arg_count: u32,
+        ret: EmitTy,
+    },
+
+    /// A RESOURCE-PARAMETER reference — `atlas` (a `Texture3D<float>`) / `atlas_smp` (a
+    /// `SamplerState`). `u32` indexes [`Names::res_in`] (the resource-name table). It is a
+    /// CALL-THROUGH-ONLY operand (consumed by a [`Node::CallN`] `m2_corner(atlas, atlas_smp, ...)`);
+    /// the CPU cannot run `atlas.SampleLevel`, so this is an EMIT-ONLY node (the body is never
+    /// instantiated over `EvalCf`). An inline leaf; spells its NAME. Carries no scalar/vector type
+    /// ([`type_of`] falls to the default `Float`, harmless — it is never an arithmetic operand).
+    ResRef(u32),
+
+    /// A by-NAME ARRAY argument — `s` (the whole `float s[8]` passed to `m2_jcgt_cubic_coeffs(s,
+    /// ...)`). `u32` indexes [`Names::array`] (the SAME array-name table [`Node::ArrayElem`] uses).
+    /// DISTINCT from [`Node::ArrayElem`] (a per-ELEMENT `s[k]` read): this passes the WHOLE array by
+    /// name. An inline leaf; spells the array NAME (`s`). Carries no element type ([`type_of`]
+    /// default `Float`, harmless — it is only ever a `CallN` arg, never an arithmetic operand).
+    ArrName(u32),
 }
 
 /// One VECTOR (`float3`/`float2`) SSA node — the normal leaf is a vector expression
@@ -400,6 +525,37 @@ thread_local! {
     /// [`TEMP_TYPES`] — the frozen `TempRef` node stays byte-unchanged. The straight-line +
     /// Inc-1 leaves push only `None` (every `Cf::temp` is anonymous), so they are unchanged.
     static TEMP_NAMES: RefCell<Vec<Option<&'static str>>> = const { RefCell::new(Vec::new()) };
+
+    /// The FLAT variadic-call argument pool (Increment 5c) — a [`Node::CallN`] slices it by
+    /// `(arg_lo, arg_count)`. The arena [`Node`] is `Copy` (fixed size), so a heterogeneous
+    /// argument list (`m2_corner`'s 8 args, `m2_jcgt_cubic_coeffs`'s 3) lives in THIS side table,
+    /// not in the node. Each entry is an arg's [`Node`] arena id; the printer reads `CALL_ARGS[arg_lo
+    /// .. arg_lo + arg_count]` and spells `sym(op(a0), op(a1), ...)`. Cleared per-emit.
+    static CALL_ARGS: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
+
+    /// OUT-OF-BAND named-local-array ELEMENT types (Increment 5c) — `cell`/`step` are `int` arrays,
+    /// `t_next`/`t_delta`/`s` are `float` arrays, keyed by the array's name-table index (the index IS
+    /// the [`Names::array`] id). [`array_elem_ty`]`(`[`Node::ArrayElem`]`{arr,..})` reads it so the
+    /// printer types a `cell[axis]` access `int` (vs a `t_next[axis]` `float`) without a type on the
+    /// access node. Pushed in [`Stmt::DeclArray`] order (the index IS the array id). Cleared per-emit.
+    static ARRAY_ELEM_TYS: RefCell<Vec<EmitTy>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The element [`EmitTy`] of named-local array `arr` (out-of-band, see [`ARRAY_ELEM_TYS`]).
+/// Defaults to [`EmitTy::Float`] when `arr` is past the recorded set (no array decls outside
+/// `m2_brick_cubic_hit`, so the default is never read on other leaves).
+fn array_elem_ty(arr: u32) -> EmitTy {
+    ARRAY_ELEM_TYS.with(|t| t.borrow().get(arr as usize).copied().unwrap_or(EmitTy::Float))
+}
+
+/// Pushes `arg` ids into [`CALL_ARGS`] and returns the `(arg_lo, arg_count)` slice (Increment 5c).
+fn record_call_args(args: &[u32]) -> (u32, u32) {
+    CALL_ARGS.with(|c| {
+        let mut c = c.borrow_mut();
+        let lo = c.len() as u32;
+        c.extend_from_slice(args);
+        (lo, args.len() as u32)
+    })
 }
 
 /// The result [`EmitTy`] of materialized temp `seq` (out-of-band, see [`TEMP_TYPES`]).
@@ -442,6 +598,25 @@ fn type_of(node: Node) -> EmitTy {
         Node::PcUint(_) => EmitTy::Uint,
         // Increment 5a: the SIGNED-`int` value surfaces (`-1`, `(int)L`) are `int`.
         Node::IntLit(_) | Node::IntFromUint(_) => EmitTy::Int,
+        // Increment 5c: the signed-int value surfaces (`max(cell[0],0)`, `c0 + 1`) are `int`.
+        Node::SMax(_, _) | Node::SAdd(_, _) => EmitTy::Int,
+        // Increment 5c: the `uint`-result nodes — the `int -> uint` cast, the `uint` subtract,
+        // the `uint` min, and the nested `uint` axis-select.
+        Node::UintFromInt(_) | Node::USub(_, _) | Node::UMin(_, _) | Node::SelectParenU(_, _, _) => {
+            EmitTy::Uint
+        }
+        // Increment 5c: the `int->float`/`uint->float` casts + the dynamic float3 index are `float`;
+        // the `float3` ctor of 3 scalars is a `float3`; a `CallN` carries its result type out-of-band.
+        Node::FloatFromInt(_) | Node::FloatFromUint(_) | Node::Vec3DynIndex { .. } => EmitTy::Float,
+        Node::Vec3FromScalars(_, _, _) => EmitTy::Float3,
+        Node::CallN { ret, .. } => ret,
+        // Increment 5c: a named-local-array ELEMENT carries the array's element type out-of-band
+        // (`int` for `cell`/`step`, `float` for `t_next`/`t_delta`/`s`), keyed by the array id.
+        Node::ArrayElem { arr, .. } => array_elem_ty(arr),
+        // Increment 5c: a resource ref / a by-name array arg / a signed-int `==` mask / a signed-int
+        // `<` mask are NEVER arithmetic operands (`ResRef`/`ArrName` are call-through-only;
+        // `SIntEq`/`SLt` are masks inside the DDA-exit `||` condition), so they fall to the `Float`
+        // default like the other masks — never `chk`-typed.
         // Increment 5a: an `M4Level` field read is a `float3` (`.xyz`) or `float` (`.w`), carried by
         // the `is_vec3` flag (the `M4Level` layout is NOT modeled — only the access text + its type).
         Node::LevelField { is_vec3, .. } => {
@@ -731,6 +906,14 @@ const NO_PC_INPUTS: &[&str] = &[];
 /// fields — Increment 5a).
 const NO_LEVEL_FIELDS: &[&str] = &[];
 
+/// The default named-local-array name table (empty — only `m2_brick_cubic_hit` declares local
+/// arrays `cell`/`step`/`t_next`/`t_delta`/`s` — Increment 5c).
+const NO_ARRAY: &[&str] = &[];
+
+/// The default resource-parameter name table (empty — only `m2_brick_cubic_hit` takes the
+/// `atlas`/`atlas_smp` resource params — Increment 5c).
+const NO_RES_INPUTS: &[&str] = &[];
+
 /// The per-trace symbolic-input name tables threaded through the printer: `float`
 /// inputs ([`Node::Input`]) and `uint` inputs ([`Node::UintInput`]) are named
 /// separately because a leaf's parameter list mixes the two (e.g. `decode_snorm8`'s
@@ -777,6 +960,15 @@ struct Names<'a> {
     /// spells `m2_levels[<L>].<level_field[id]>`. Empty for every leaf but `select_level`
     /// (Increment 5a).
     level_field: &'a [&'a str],
+    /// NAMED-LOCAL-ARRAY names (indexed by [`Node::ArrayElem`]'s `arr`, [`Node::ArrName`]'s id, AND
+    /// [`Stmt::DeclArray`]'s `arr`) — `cell` / `step` / `t_next` / `t_delta` / `s`. The printer
+    /// spells `cell[<idx>]` / `s` (by-name). Empty for every leaf but `m2_brick_cubic_hit`
+    /// (Increment 5c).
+    array: &'a [&'a str],
+    /// RESOURCE-PARAMETER names (indexed by [`Node::ResRef`]'s id) — `atlas` / `atlas_smp`. The
+    /// printer spells the resource name as a [`Node::CallN`] arg. Empty for every leaf but
+    /// `m2_brick_cubic_hit` (Increment 5c).
+    res_in: &'a [&'a str],
 }
 
 /// Formats one f32 literal the way the frozen HLSL writes it (`0.5`, `1.0`, `0.0`).
@@ -868,6 +1060,19 @@ fn is_inline_leaf(node: Node) -> bool {
             | Node::Bool3Ge(_, _)
             | Node::Bool3Lt(_, _)
             | Node::All3(_)
+            // Increment 5c inline leaves: a named-array element (`cell[axis]`/`s[0]`) spells inline at
+            // each use; the signed `<`/`==` masks appear only inside the DDA-exit `||` condition; the
+            // `(float)`-cast leaves (`(float)c0`/`(float)cx`) spell inline in the `lo_g` ctor; the
+            // dynamic float3 index (`rd_v[axis]`) spells inline; the resource refs (`atlas`/
+            // `atlas_smp`) + the by-name array arg (`s`) spell their name as a `CallN` arg.
+            | Node::ArrayElem { .. }
+            | Node::SLt(_, _)
+            | Node::SIntEq(_, _)
+            | Node::FloatFromInt(_)
+            | Node::FloatFromUint(_)
+            | Node::Vec3DynIndex { .. }
+            | Node::ResRef(_)
+            | Node::ArrName(_)
     )
 }
 
@@ -892,6 +1097,28 @@ enum OperandPos {
     /// An operand (either side) of a MULTIPLICATIVE (`*`/`/`) parent — an additive child
     /// always wraps (`(t1 - p[a]) * t3`), since `*`/`/` bind tighter than `+`/`-`.
     MulSide,
+}
+
+/// The spelling of an ARRAY-SUBSCRIPT / DYNAMIC-INDEX index node (Increment 5c). The committed
+/// body spells a LITERAL index BARE (`cell[0]`, `rd_v[0]`, `s[1]`) — NOT `cell[0u]` — so a
+/// [`Node::UintLit`] in an index POSITION drops its `u` suffix (the subscript is `int`-typed by
+/// HLSL, the bare literal compiles to the same `OpConstant`). A NON-literal index (the iv `axis` /
+/// the `cx`/`cy`/`cz` temp) spells normally via [`operand_str`].
+fn array_index_str(arena: &[Node], names: Names, temps: &[Option<String>], idx: u32) -> String {
+    match arena[idx as usize] {
+        // A literal subscript spells BARE (`0`, not `0u`).
+        Node::UintLit(u) => format!("{u}"),
+        // The iv (`axis`) / a `uint` temp (`cx`) spells its name.
+        _ => operand_str(arena, names, temps, idx, OperandPos::Root),
+    }
+}
+
+/// The spelling of a `(float)`-cast OPERAND (Increment 5c). A cast binds TIGHTER than `+`/`-`, so an
+/// ADDITIVE operand must WRAP — `(float)(c0 + 1)`, NOT `(float)c0 + 1` (the O1 review carry-in,
+/// confirmed against the committed L1036). A non-additive operand (a leaf `cx`/`c0`) spells bare.
+/// Implemented by spelling at [`OperandPos::MulSide`] (which wraps an additive child like a cast does).
+fn cast_operand_str(arena: &[Node], names: Names, temps: &[Option<String>], a: u32) -> String {
+    operand_str(arena, names, temps, a, OperandPos::MulSide)
 }
 
 /// The operand spelling for node `id` at a USE site: a leaf inlines (its input
@@ -983,6 +1210,25 @@ fn operand_str(
         Node::Bool3Lt(a, b) => format!("{} < {}", opl(a), opl(b)),
         // `all(<bool3>)` — the reduction; its operand is the `Bool3Ge`/`Bool3Lt` inline leaf.
         Node::All3(a) => format!("all({})", opl(a)),
+        // ---- Increment 5c inline leaves -----------------------------------------------
+        // A named-local-array element spells `<name>[<idx>]` (`cell[axis]`, `s[0]`). The idx is an
+        // inline leaf (a `UintLit` `0u`/.. — printed `0`/.. WITHOUT the `u` suffix for the array
+        // subscript — or the iv `axis`/`cx`), spelled at Root.
+        Node::ArrayElem { arr, idx } => format!("{}[{}]", names.array[arr as usize], array_index_str(arena, names, temps, idx)),
+        // The signed-int `<` / `==` masks spell `cell[axis] < 0` / `step[axis] == 0` (inside the
+        // DDA-exit `||` condition); both operands are inline leaves (an array element / a literal).
+        Node::SLt(a, b) => format!("{} < {}", opl(a), opl(b)),
+        Node::SIntEq(a, b) => format!("{} == {}", opl(a), opl(b)),
+        // The `(float)`-cast leaves spell `(float)<operand>`. The operand is at a CAST position: an
+        // additive operand WRAPS (`(float)(c0 + 1)`, NOT `(float)c0 + 1`), a leaf does not (`(float)cx`).
+        Node::FloatFromInt(a) => format!("(float){}", cast_operand_str(arena, names, temps, a)),
+        Node::FloatFromUint(a) => format!("(float){}", cast_operand_str(arena, names, temps, a)),
+        // The dynamic float3-parameter index spells `<name>[<idx>]` (`rd_v[axis]`, `ro_v[0]`); the idx
+        // is an inline leaf (a `UintLit` `0`/.. or the iv `axis`), spelled at Root WITHOUT the `u`.
+        Node::Vec3DynIndex { vec_id, idx } => format!("{}[{}]", names.vec_in[vec_id as usize], array_index_str(arena, names, temps, idx)),
+        // A resource ref / a by-name array arg spell their NAME (a call-through-only operand).
+        Node::ResRef(n) => names.res_in[n as usize].to_string(),
+        Node::ArrName(n) => names.array[n as usize].to_string(),
         // A non-leaf operand: if it was MATERIALIZED as a `tN` temp (the straight-line
         // field/normal/decode/cubic emit materializes every non-leaf via the SSA walk,
         // so `temps[id]` is always `Some` there), use the temp name. Otherwise — the CF
@@ -1034,17 +1280,22 @@ const AXIS: [&str; 3] = ["x", "y", "z"];
 /// NOT in the set.
 fn needs_paren_as_operand(node: Node, pos: OperandPos) -> bool {
     match node {
-        // A unary minus / a ternary always groups (side-independent).
-        Node::Neg(..) | Node::Select(..) | Node::SelectParen(..) => true,
-        // Additive infix nodes (scalar `+`/`-`/`uint +`, AND the `float3` `+`/`-`): wrap
-        // under a multiplicative parent (precedence: `(p - origin) / bw`, `(t1 - p[a]) *
-        // t3`) or in the additive-RIGHT position (associativity); the additive-LEFT + root
-        // positions stay flat (the brick `idx` line's `ix + iy*dims.x + iz*...`).
+        // A unary minus / a ternary always groups (side-independent). The Increment-5c `uint`
+        // nested axis-select ([`Node::SelectParenU`]) groups like the other ternaries.
+        Node::Neg(..) | Node::Select(..) | Node::SelectParen(..) | Node::SelectParenU(..) => true,
+        // Additive infix nodes (scalar `+`/`-`/`uint +`, the `float3` `+`/`-`, AND the Increment-5c
+        // signed-`int` `+` / `uint` `-`): wrap under a multiplicative OR CAST parent (precedence:
+        // `(p - origin) / bw`, `(t1 - p[a]) * t3`, `(float)(c0 + 1)`, `W - 2u`'s consumers) or in
+        // the additive-RIGHT position (associativity); the additive-LEFT + root positions stay flat
+        // (the brick `idx` line's `ix + iy*dims.x + iz*...`). A `cast` operand is spelled at
+        // [`OperandPos::MulSide`] ([`cast_operand_str`]), so the `SAdd` of `(float)(c0 + 1)` wraps here.
         Node::Add(..)
         | Node::Sub(..)
         | Node::UAdd(..)
         | Node::Vec3Add(..)
-        | Node::Vec3Sub(..) => matches!(pos, OperandPos::MulSide | OperandPos::AddRight),
+        | Node::Vec3Sub(..)
+        | Node::SAdd(..)
+        | Node::USub(..) => matches!(pos, OperandPos::MulSide | OperandPos::AddRight),
         _ => false,
     }
 }
@@ -1265,6 +1516,76 @@ fn define_str(arena: &[Node], names: Names, temps: &[Option<String>], id: u32) -
             format!("{} * {}", opm(a), opm(b))
         }
 
+        // ---- Increment 5c non-leaf (materialized / composed) nodes ----------------------
+        // `max(cell[0], 0)` — the SIGNED-int max (both `int`). The committed body NEVER temps it (it
+        // is the inner of `(uint)max(...)`), so it reaches here only via the `(uint)` cast's `op`.
+        Node::SMax(a, b) => {
+            chk(a, EmitTy::Int);
+            chk(b, EmitTy::Int);
+            format!("max({}, {})", op(a), op(b))
+        }
+        // `(uint)max(cell[0], 0)` — the `int -> uint` cast. The operand is the `SMax` (or a `cell[0]`
+        // element), checked `Int`.
+        Node::UintFromInt(a) => {
+            chk(a, EmitTy::Int);
+            format!("(uint){}", op(a))
+        }
+        // `c0 + 1` — the SIGNED-int add (both `int`). The committed `boundary = (float)(c0 + 1);`
+        // temps the cast, NOT the add, so the add reaches here as the cast's operand (wrapped by
+        // `cast_operand_str`'s MulSide).
+        Node::SAdd(a, b) => {
+            chk(a, EmitTy::Int);
+            chk(b, EmitTy::Int);
+            format!("{} + {}", opl(a), opr(b))
+        }
+        // `W - 2u` / `W - 1u` — the `uint` subtract (both `uint`). The `min(..., W - 2u)` consumer
+        // spells it at `MulSide`-or-Root; as a `min` arg it spells at `op` (Root), bare.
+        Node::USub(a, b) => {
+            chk(a, EmitTy::Uint);
+            chk(b, EmitTy::Uint);
+            format!("{} - {}", opl(a), opr(b))
+        }
+        // `min(a, b)` over two `uint`s (`min((uint)max(cell[0], 0), W - 2u)`). The args spell at Root
+        // (a `min` intrinsic arg, position-irrelevant); both checked `Uint`.
+        Node::UMin(a, b) => {
+            chk(a, EmitTy::Uint);
+            chk(b, EmitTy::Uint);
+            format!("min({}, {})", op(a), op(b))
+        }
+        // The nested `uint` axis-select `(<c0>) ? 0u : ((<c1>) ? 1u : 2u)`. The arms are `uint`; the
+        // condition is a Mask (the `And2` of two `Le`s / a nested `SelectParenU`). The arms spell at
+        // Root — the `0u`/`1u`/`2u` leaves need no wrap, and the nested `SelectParenU` self-wraps via
+        // `needs_paren_as_operand` (its `Select` family arm), producing `... ? 0u : (... ? 1u : 2u)`.
+        Node::SelectParenU(c, t, e) => {
+            // `op(e)` spells the else arm at Root: a `0u`/`1u`/`2u` `UintLit` leaf needs no wrap,
+            // while a NESTED `SelectParenU` self-wraps (its `Select`-family arm in
+            // `needs_paren_as_operand` returns `true` regardless of position) — producing
+            // `(c0) ? 0u : ((c1) ? 1u : 2u)`, byte-identical to the committed nested ternary.
+            format!("({}) ? {} : {}", op(c), op(t), op(e))
+        }
+        // `float3(<x>, <y>, <z>)` from three already-`float` scalar expressions (the `lo_g` ctor).
+        // Each component is checked `Float`; spelled at Root (a ctor arg, position-irrelevant).
+        Node::Vec3FromScalars(x, y, z) => {
+            chk(x, EmitTy::Float);
+            chk(y, EmitTy::Float);
+            chk(z, EmitTy::Float);
+            format!("float3({}, {}, {})", op(x), op(y), op(z))
+        }
+        // A variadic heterogeneous call `sym(op(a0), op(a1), ...)` — `m2_corner(atlas, atlas_smp,
+        // tile_org, cx, cy, cz, inv_atlas, band_half)` / `m2_jcgt_cubic_coeffs(s, lo_g, rd_v)` /
+        // `m2_marmitt_root(coeffs, 0.0, seg_hi - seg_lo)`. The args slice the `CALL_ARGS` side-table;
+        // each spells at Root (a call arg, position-irrelevant). The args' types are heterogeneous
+        // (resource / array / float3 / float), so they are NOT `chk`'d here (a `ResRef`/`ArrName`
+        // types `Float` by default — never an arithmetic operand).
+        Node::CallN { sym_id, arg_lo, arg_count, .. } => {
+            let args = CALL_ARGS.with(|c| {
+                let c = c.borrow();
+                c[arg_lo as usize..(arg_lo + arg_count) as usize].to_vec()
+            });
+            let spelled: Vec<String> = args.iter().map(|&a| op(a)).collect();
+            format!("{}({})", names.call_in[sym_id as usize], spelled.join(", "))
+        }
+
         // The Increment-3 inline leaves (`Vec3Param`/`Vec3Swizzle`/`Uint3Param`/
         // `Uint3Swizzle`/`BufferLoad`/`UGe`/`Or`) — plus the Increment-4f `UGt`/`And2` masks —
         // are spelled by `operand_str`, never materialized as a temp, so they must not reach
@@ -1289,7 +1610,18 @@ fn define_str(arena: &[Node], names: Names, temps: &[Option<String>], id: u32) -
         | Node::LevelField { .. }
         | Node::Bool3Ge(_, _)
         | Node::Bool3Lt(_, _)
-        | Node::All3(_) => {
+        | Node::All3(_)
+        // The Increment-5c inline leaves (a named-array element, the signed `<`/`==` masks, the
+        // `(float)`-cast leaves, the dynamic float3 index, the resource refs, the by-name array arg)
+        // are ALL spelled by `operand_str`, never materialized as a temp.
+        | Node::ArrayElem { .. }
+        | Node::SLt(_, _)
+        | Node::SIntEq(_, _)
+        | Node::FloatFromInt(_)
+        | Node::FloatFromUint(_)
+        | Node::Vec3DynIndex { .. }
+        | Node::ResRef(_)
+        | Node::ArrName(_) => {
             unreachable!("inline leaves are spelled by operand_str, not defined")
         }
     }
@@ -1374,6 +1706,8 @@ fn trace<F: FnOnce(&[Emit]) -> Emit>(inputs: usize, body: F) -> String {
         call_in: NO_CALL_INPUTS,
         pc_in: NO_PC_INPUTS,
         level_field: NO_LEVEL_FIELDS,
+        array: NO_ARRAY,
+        res_in: NO_RES_INPUTS,
     };
     ARENA.with(|a| a.borrow_mut().clear());
     let mut ins = Vec::with_capacity(inputs);
@@ -1411,6 +1745,8 @@ fn trace_named<F: FnOnce(&[Emit], &[Emit]) -> Emit>(
         call_in: NO_CALL_INPUTS,
         pc_in: NO_PC_INPUTS,
         level_field: NO_LEVEL_FIELDS,
+        array: NO_ARRAY,
+        res_in: NO_RES_INPUTS,
     };
     ARENA.with(|a| a.borrow_mut().clear());
     let mut floats = Vec::with_capacity(float_names.len());
@@ -1451,6 +1787,8 @@ fn trace_named_vec4<F: FnOnce(&[Emit], &[Emit]) -> [Emit; 4]>(
         call_in: NO_CALL_INPUTS,
         pc_in: NO_PC_INPUTS,
         level_field: NO_LEVEL_FIELDS,
+        array: NO_ARRAY,
+        res_in: NO_RES_INPUTS,
     };
     ARENA.with(|a| a.borrow_mut().clear());
     let mut floats = Vec::with_capacity(float_names.len());
@@ -1829,6 +2167,24 @@ enum Stmt {
     /// marcher `brick_cell_class`). The brick-exit (Increment 1) spells its single final
     /// return directly in the printer (not via this), so its body records no `Return`.
     Return(u32),
+
+    // ---- Increment 5c: the named-local-array statements (`m2_brick_cubic_hit`) ----
+    /// `<elem_ty> <name>[<len>];` — an UNINITIALIZED named-local-array declaration (`int cell[3];`,
+    /// `float s[8];`). `arr` indexes the [`Names::array`] name table; `elem_ty` the element type;
+    /// `len` the array length. NO initializer (the committed body declares the arrays empty and
+    /// fills them in the `[unroll]` setup loop). Recorded by [`EmitCf::decl_array_int`] /
+    /// [`EmitCf::decl_array_float`].
+    DeclArray { arr: u32, elem_ty: EmitTy, len: u32 },
+    /// `<name>[<idx>] = <rhs>;` — a named-local-array element STORE (`cell[axis] = c0;`, `s[0] =
+    /// <call>;`). `arr` indexes [`Names::array`]; `idx` the index node id; `rhs` the value node id.
+    /// Recorded by [`EmitCf::arr_int_set`] / [`EmitCf::arr_float_set`].
+    ArrayStore { arr: u32, idx: u32, rhs: u32 },
+    /// `<name>[<idx>] += <rhs>;` — a named-local-array element COMPOUND-ADD (`cell[axis] +=
+    /// step[axis];`, `t_next[axis] += t_delta[axis];`). The `+=` TOKEN is recorded as a DISTINCT
+    /// statement (NOT desugared to `cell[axis] = cell[axis] + step[axis]`): the spike (R1) proved
+    /// the `= +` form computes the access-chain TWICE at `-O0`, so it is NOT byte-identical. Recorded
+    /// by [`EmitCf::arr_int_add_assign`] / [`EmitCf::arr_float_add_assign`].
+    ArrayAddAssign { arr: u32, idx: u32, rhs: u32 },
 }
 
 /// A sequence of [`Stmt`]s — a control-flow BLOCK (a `{ ... }`).
@@ -1893,6 +2249,20 @@ pub struct RetCellB;
 #[derive(Clone, Copy)]
 pub struct RetCellI;
 
+/// A NAMED-LOCAL-ARRAY name handle (Increment 5c) — indexes the printer's [`Names::array`] table.
+/// The [`EmitCf`]'s [`Cf::IntArr`] AND [`Cf::FloatArr`] associated types (both are a `u32` array-id;
+/// the element type is carried out-of-band in [`ARRAY_ELEM_TYS`], so one handle type serves both —
+/// the `int`/`float` distinction lives in [`Stmt::DeclArray`]'s `elem_ty` + the [`ARRAY_ELEM_TYS`]
+/// entry, NOT in the handle).
+#[derive(Clone, Copy)]
+pub struct ArrName(u32);
+
+/// A RESOURCE-PARAMETER name handle (Increment 5c) — indexes the printer's [`Names::res_in`] table.
+/// The [`EmitCf`]'s [`Cf::ResTok`] associated type (`atlas` / `atlas_smp`). A call-through-only
+/// operand (consumed by a [`Node::CallN`] `m2_corner` arg).
+#[derive(Clone, Copy)]
+pub struct ResTok(u32);
+
 thread_local! {
     /// The STMT block stack: the recorder pushes a [`Block`] on combinator entry
     /// (`unroll_for` / `if_`) and pops it into its parent on exit, so the top is always
@@ -1919,6 +2289,12 @@ thread_local! {
     /// [`Node::LevelField`]'s `field_id` (Increment 5a). Deduped so repeated reads of the same
     /// member+swizzle share one id.
     static LEVEL_FIELDS: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
+
+    /// The per-emit NAMED-LOCAL-ARRAY names (`cell`/`step`/`t_next`/`t_delta`/`s`), indexed by
+    /// [`Node::ArrayElem`]'s `arr` / [`Node::ArrName`]'s id / [`Stmt::DeclArray`]'s `arr` (Increment
+    /// 5c). Pushed in `decl_array_*` order (the index IS the array id), so the index aligns with the
+    /// matching [`ARRAY_ELEM_TYS`] entry.
+    static ARRAY_NAMES: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
 
     /// The monotone program-order temp counter (`t0`, `t1`, ...). Bumped by
     /// [`EmitCf::temp`] each time a temp is MATERIALIZED, so the `t{seq}` numbering follows
@@ -1985,6 +2361,27 @@ fn record_temp(name: Option<&'static str>, ty: EmitTy, x: Emit) -> Emit {
     });
     record_stmt(Stmt::DeclTemp { seq, name, ty, rhs });
     Emit(push(Node::TempRef(seq)))
+}
+
+/// Records a named-local-array DECLARATION (Increment 5c): seeds the `name` in the [`ARRAY_NAMES`]
+/// table (so [`Node::ArrayElem`]/[`Node::ArrName`] later spell `name`) + the element type in
+/// [`ARRAY_ELEM_TYS`] (keyed by the array id, so [`array_elem_ty`] reads it), and records the
+/// `Stmt::DeclArray`. Returns the [`ArrName`] handle. The index pushed into both tables is the
+/// SAME (they grow in lockstep), so `array_elem_ty(arr)` aligns with `ARRAY_NAMES[arr]`.
+fn record_decl_array(name: &'static str, elem_ty: EmitTy, len: u32) -> ArrName {
+    let arr = ARRAY_NAMES.with(|a| {
+        let mut a = a.borrow_mut();
+        let id = a.len() as u32;
+        a.push(name);
+        id
+    });
+    ARRAY_ELEM_TYS.with(|t| {
+        let mut t = t.borrow_mut();
+        debug_assert_eq!(t.len() as u32, arr, "ARRAY_ELEM_TYS must stay array-id-indexed");
+        t.push(elem_ty);
+    });
+    record_stmt(Stmt::DeclArray { arr, elem_ty, len });
+    ArrName(arr)
 }
 
 /// Registers a named-literal symbol, returning its (deduped) `sym_id`.
@@ -2628,6 +3025,205 @@ impl Cf for EmitCf {
         record_stmt(Stmt::Return(value.0));
         Flow::Continue(())
     }
+
+    // ---- Increment 5c: the DDA marcher subsystem (recorder) ---------------------------
+    // On Emit the array / resource handles are NAME handles (`u32` indexing `ARRAY_NAMES` /
+    // `Names::res_in`); the float4 value is an `Emit` SSA-node handle (the SAME `Vec4f = Emit` the
+    // regula-falsi `c` uses). Every value is an `Emit`/`Var` node handle.
+    type IntArr = ArrName;
+    type FloatArr = ArrName;
+    type ResTok = ResTok;
+
+    fn decl_array_int(name: &'static str, len: u32) -> ArrName {
+        // `int <name>[<len>];` — an UNINITIALIZED `int` array. Seeds the name + the `int` element
+        // type (so `ArrayElem{arr}` types `int`), records the `Stmt::DeclArray`.
+        record_decl_array(name, EmitTy::Int, len)
+    }
+    fn decl_array_float(name: &'static str, len: u32) -> ArrName {
+        // `float <name>[<len>];` — an UNINITIALIZED `float` array.
+        record_decl_array(name, EmitTy::Float, len)
+    }
+
+    fn arr_int_get(a: ArrName, idx: Emit) -> Emit {
+        // `<name>[<idx>]` — an `int`-array element read (an inline `ArrayElem` leaf).
+        Emit(push(Node::ArrayElem { arr: a.0, idx: idx.0 }))
+    }
+    fn arr_float_get(a: ArrName, idx: Emit) -> Emit {
+        // `<name>[<idx>]` — a `float`-array element read.
+        Emit(push(Node::ArrayElem { arr: a.0, idx: idx.0 }))
+    }
+
+    fn arr_int_set(a: ArrName, idx: Emit, v: Emit) {
+        record_stmt(Stmt::ArrayStore {
+            arr: a.0,
+            idx: idx.0,
+            rhs: v.0,
+        });
+    }
+    fn arr_float_set(a: ArrName, idx: Emit, v: Emit) {
+        record_stmt(Stmt::ArrayStore {
+            arr: a.0,
+            idx: idx.0,
+            rhs: v.0,
+        });
+    }
+
+    fn arr_int_add_assign(a: ArrName, idx: Emit, v: Emit) {
+        // `<name>[<idx>] += <v>;` — the `+=` TOKEN (one access-chain — the R1 finding; NOT desugared).
+        record_stmt(Stmt::ArrayAddAssign {
+            arr: a.0,
+            idx: idx.0,
+            rhs: v.0,
+        });
+    }
+    fn arr_float_add_assign(a: ArrName, idx: Emit, v: Emit) {
+        record_stmt(Stmt::ArrayAddAssign {
+            arr: a.0,
+            idx: idx.0,
+            rhs: v.0,
+        });
+    }
+
+    fn call_corner(
+        fn_sym: &'static str,
+        atlas: ResTok,
+        smp: ResTok,
+        tile_org: Emit,
+        cx: Emit,
+        cy: Emit,
+        cz: Emit,
+        inv_atlas: Emit,
+        band_half: Emit,
+    ) -> Emit {
+        // `m2_corner(atlas, atlas_smp, tile_org, cx, cy, cz, inv_atlas, band_half)` — the 8-arg
+        // resource-bearing corner fetch. The resource refs are `ResRef` nodes; the rest are SSA
+        // handles. The args go into the flat `CALL_ARGS` side-table; the `CallN` returns a `float`.
+        let sym_id = intern_call(fn_sym);
+        let atlas_n = push(Node::ResRef(atlas.0));
+        let smp_n = push(Node::ResRef(smp.0));
+        let (arg_lo, arg_count) = record_call_args(&[
+            atlas_n, smp_n, tile_org.0, cx.0, cy.0, cz.0, inv_atlas.0, band_half.0,
+        ]);
+        Emit(push(Node::CallN {
+            sym_id,
+            arg_lo,
+            arg_count,
+            ret: EmitTy::Float,
+        }))
+    }
+
+    fn call_coeffs(fn_sym: &'static str, s: ArrName, lo_g: Emit, rd_v: Emit) -> Emit {
+        // `m2_jcgt_cubic_coeffs(s, lo_g, rd_v)` — the by-name array arg `s` (an `ArrName` node),
+        // `lo_g`/`rd_v` `float3` handles. Returns a `float4`.
+        let sym_id = intern_call(fn_sym);
+        let s_n = push(Node::ArrName(s.0));
+        let (arg_lo, arg_count) = record_call_args(&[s_n, lo_g.0, rd_v.0]);
+        Emit(push(Node::CallN {
+            sym_id,
+            arg_lo,
+            arg_count,
+            ret: EmitTy::Float4,
+        }))
+    }
+
+    fn call_marmitt(fn_sym: &'static str, coeffs: Emit, a: Emit, b: Emit) -> Emit {
+        // `m2_marmitt_root(coeffs, 0.0, seg_hi - seg_lo)` — a `float4` arg + two `float`s. Returns
+        // a `float`.
+        let sym_id = intern_call(fn_sym);
+        let (arg_lo, arg_count) = record_call_args(&[coeffs.0, a.0, b.0]);
+        Emit(push(Node::CallN {
+            sym_id,
+            arg_lo,
+            arg_count,
+            ret: EmitTy::Float,
+        }))
+    }
+
+    fn call_clamp_index_int(fn_sym: &'static str, g: Emit) -> Emit {
+        // `(int)m2_clamp_index(g_entry)` — a 1-arg `float -> uint` frozen call, immediately
+        // `(int)`-cast. The inner call is a `CallN` (a `uint`-result call — NOT the `Float3`-arg
+        // `Call1`, whose `chk` would reject the `float` `g_entry`), wrapped in an `IntFromUint` cast
+        // node (printed `(int)m2_clamp_index(g_entry)`, the SAME `(int)` cast spelling Inc 5a's iv
+        // cast uses). One `int` temp materializes at the body's `int c0 = ...;`.
+        let sym_id = intern_call(fn_sym);
+        let (arg_lo, arg_count) = record_call_args(&[g.0]);
+        let call = push(Node::CallN {
+            sym_id,
+            arg_lo,
+            arg_count,
+            ret: EmitTy::Uint,
+        });
+        Emit(push(Node::IntFromUint(call)))
+    }
+
+    fn smax(a: Emit, b: Emit) -> Emit {
+        Emit(push(Node::SMax(a.0, b.0)))
+    }
+    fn uint_from_int(a: Emit) -> Emit {
+        Emit(push(Node::UintFromInt(a.0)))
+    }
+    fn slt(a: Emit, b: Emit) -> EmitMask {
+        EmitMask(push(Node::SLt(a.0, b.0)))
+    }
+    fn sadd(a: Emit, b: Emit) -> Emit {
+        Emit(push(Node::SAdd(a.0, b.0)))
+    }
+    fn float_from_int(a: Emit) -> Emit {
+        Emit(push(Node::FloatFromInt(a.0)))
+    }
+    fn float_from_uint(a: Emit) -> Emit {
+        Emit(push(Node::FloatFromUint(a.0)))
+    }
+    fn usub(a: Emit, b: Emit) -> Emit {
+        Emit(push(Node::USub(a.0, b.0)))
+    }
+    fn umin(a: Emit, b: Emit) -> Emit {
+        Emit(push(Node::UMin(a.0, b.0)))
+    }
+    fn sint_eq(a: Emit, b: Emit) -> EmitMask {
+        EmitMask(push(Node::SIntEq(a.0, b.0)))
+    }
+    fn temp_int(name: &'static str, x: Emit) -> Emit {
+        // A NAMED `int` temp (`int c0 = ...;`).
+        record_temp(Some(name), EmitTy::Int, x)
+    }
+
+    fn captured_uint(name: &'static str) -> Emit {
+        // A captured `uint` read by bare NAME (`W`) — interned into the per-emit `PC_FIELDS` table
+        // (the SAME bare-text table `pc_uint` uses; the printer spells the bare `field` text). The
+        // node is a `PcUint` (an inline leaf typed `Uint`), so `W - 2u` types correctly.
+        let sym_id = intern_pc_field(name);
+        Emit(push(Node::PcUint(sym_id)))
+    }
+
+    fn select_uint(cond: EmitMask, t: Emit, e: Emit) -> Emit {
+        // The nested `uint` axis-select — a `SelectParenU` node (the condition `(...)`-wrapped, the
+        // else arm self-wraps when itself a select). DISTINCT from `select`'s FLOAT `SelectParen`.
+        Emit(push(Node::SelectParenU(cond.0, t.0, e.0)))
+    }
+
+    fn vec3_dyn_index(v: Emit, idx: Emit) -> Emit {
+        // `<vec>[<idx>]` — a dynamic index of a WHOLE `Vec3Param`. The `v` handle is a `Vec3Param`
+        // node; read its vec id off it (like `index()` reads a `VecParamRef`), so `rd_v[axis]` /
+        // `ro_v[0]` print the parameter NAME + the index.
+        let vec_id = ARENA.with(|a| match a.borrow()[v.0 as usize] {
+            Node::Vec3Param(id) => id,
+            other => unreachable!("vec3_dyn_index expected a Vec3Param parameter, got {other:?}"),
+        });
+        Emit(push(Node::Vec3DynIndex {
+            vec_id,
+            idx: idx.0,
+        }))
+    }
+
+    fn vec3_from_scalars(x: Emit, y: Emit, z: Emit) -> Emit {
+        Emit(push(Node::Vec3FromScalars(x.0, y.0, z.0)))
+    }
+
+    fn temp_vec4(name: &'static str, v: Emit) -> Emit {
+        // A NAMED `float4` temp (`float4 coeffs = ...;`).
+        record_temp(Some(name), EmitTy::Float4, v)
+    }
 }
 
 // ---- The STMT printer + the brick-exit generator -------------------------------
@@ -2738,6 +3334,32 @@ fn print_block(block: &Block, arena: &[Node], names: Names, depth: usize, out: &
                 let expr_s = inline_expr(arena, names, &[], *expr);
                 out.push_str(&format!("{pad}return {expr_s};\n"));
             }
+            Stmt::DeclArray { arr, elem_ty, len } => {
+                // `int cell[3];` / `float s[8];` — an UNINITIALIZED named-local array.
+                out.push_str(&format!(
+                    "{pad}{} {}[{len}];\n",
+                    ty_keyword(*elem_ty),
+                    names.array[*arr as usize]
+                ));
+            }
+            Stmt::ArrayStore { arr, idx, rhs } => {
+                // `cell[axis] = <rhs>;` — a per-element store (the idx spelled BARE for a literal).
+                let idx_s = array_index_str(arena, names, &[], *idx);
+                let rhs_s = inline_expr(arena, names, &[], *rhs);
+                out.push_str(&format!(
+                    "{pad}{}[{idx_s}] = {rhs_s};\n",
+                    names.array[*arr as usize]
+                ));
+            }
+            Stmt::ArrayAddAssign { arr, idx, rhs } => {
+                // `cell[axis] += step[axis];` — the `+=` TOKEN (one access-chain — the R1 finding).
+                let idx_s = array_index_str(arena, names, &[], *idx);
+                let rhs_s = inline_expr(arena, names, &[], *rhs);
+                out.push_str(&format!(
+                    "{pad}{}[{idx_s}] += {rhs_s};\n",
+                    names.array[*arr as usize]
+                ));
+            }
         }
     }
 }
@@ -2804,6 +3426,8 @@ pub fn emit_hlsl_dist_to_brick_exit() -> String {
         call_in: NO_CALL_INPUTS,
         pc_in: NO_PC_INPUTS,
         level_field: NO_LEVEL_FIELDS,
+        array: NO_ARRAY,
+        res_in: NO_RES_INPUTS,
     };
 
     ARENA.with(|a| {
@@ -2894,6 +3518,8 @@ pub fn emit_hlsl_brick_cell_class() -> String {
         call_in: NO_CALL_INPUTS,
         pc_in: NO_PC_INPUTS,
         level_field: NO_LEVEL_FIELDS,
+        array: NO_ARRAY,
+        res_in: NO_RES_INPUTS,
     };
 
     ARENA.with(|a| {
@@ -3001,6 +3627,8 @@ pub fn emit_hlsl_m2_regula_falsi() -> String {
         call_in: &call_in,
         pc_in: NO_PC_INPUTS,
         level_field: NO_LEVEL_FIELDS,
+        array: NO_ARRAY,
+        res_in: NO_RES_INPUTS,
     };
 
     ARENA.with(|a| {
@@ -3089,6 +3717,8 @@ pub fn emit_hlsl_sdf_soft_shadow() -> String {
         call_in: &call_in,
         pc_in: NO_PC_INPUTS,
         level_field: NO_LEVEL_FIELDS,
+        array: NO_ARRAY,
+        res_in: NO_RES_INPUTS,
     };
 
     ARENA.with(|a| {
@@ -3189,6 +3819,8 @@ pub fn emit_hlsl_m2_surface_hit_refine() -> String {
         call_in: &call_in,
         pc_in: NO_PC_INPUTS,
         level_field: NO_LEVEL_FIELDS,
+        array: NO_ARRAY,
+        res_in: NO_RES_INPUTS,
     };
 
     ARENA.with(|a| {
@@ -3284,6 +3916,8 @@ pub fn emit_hlsl_b1_accept_refine() -> String {
         call_in: &call_in,
         pc_in: NO_PC_INPUTS,
         level_field: NO_LEVEL_FIELDS,
+        array: NO_ARRAY,
+        res_in: NO_RES_INPUTS,
     };
 
     ARENA.with(|a| {
@@ -3384,6 +4018,8 @@ pub fn emit_hlsl_b1_exhaustion_remarch() -> String {
         call_in: &call_in,
         pc_in: NO_PC_INPUTS,
         level_field: NO_LEVEL_FIELDS,
+        array: NO_ARRAY,
+        res_in: NO_RES_INPUTS,
     };
 
     ARENA.with(|a| {
@@ -3500,6 +4136,8 @@ pub fn emit_hlsl_b1_sor_retreat() -> String {
         call_in: NO_CALL_INPUTS,
         pc_in: NO_PC_INPUTS,
         level_field: NO_LEVEL_FIELDS,
+        array: NO_ARRAY,
+        res_in: NO_RES_INPUTS,
     };
 
     ARENA.with(|a| {
@@ -3564,6 +4202,8 @@ fn emit_hlsl_b1_decl<F: FnOnce()>(body: F) -> String {
         call_in: NO_CALL_INPUTS,
         pc_in: NO_PC_INPUTS,
         level_field: NO_LEVEL_FIELDS,
+        array: NO_ARRAY,
+        res_in: NO_RES_INPUTS,
     };
 
     ARENA.with(|a| {
@@ -3687,6 +4327,8 @@ pub fn emit_hlsl_select_level() -> String {
         call_in: NO_CALL_INPUTS,
         pc_in: &pc_in,
         level_field: &level_field,
+        array: NO_ARRAY,
+        res_in: NO_RES_INPUTS,
     };
 
     ARENA.with(|a| {
@@ -3785,6 +4427,8 @@ pub fn emit_hlsl_m2_brick_span() -> String {
         call_in: NO_CALL_INPUTS,
         pc_in: NO_PC_INPUTS,
         level_field: NO_LEVEL_FIELDS,
+        array: NO_ARRAY,
+        res_in: NO_RES_INPUTS,
     };
 
     ARENA.with(|a| {
@@ -3797,6 +4441,124 @@ pub fn emit_hlsl_m2_brick_span() -> String {
         // + the tail two `OutAssign` + the `Stmt::Return(tmax > tmin)` — a flat in-order walk at DEPTH
         // 1 (4-space indent), matching the committed L970-993. NO function-signature wrap (the span is
         // spliced inside the hand-written `m2_brick_span`).
+        print_block(&body_block, &arena, names, 1, &mut span);
+        span
+    })
+}
+
+/// Generates the HLSL `m2_brick_cubic_hit` body — the 3D-DDA cubic-hit marcher (the LARGEST + FINAL
+/// brick called body): the `[unroll]` per-axis DDA setup (with the 3-way `else { if }` direction
+/// branch), the `[loop]` 3D-DDA march (the cell clamp, the 8 `m2_corner` fetches, the cubic
+/// form+solve, the in-cell early `return seg_lo + local_t;`, the nearest-axis advance, the DDA-exit
+/// guard), and the tail `return -1.0;` — by tracing the generic
+/// [`crate::cubic_hit::m2_brick_cubic_hit_body`] over the `EmitCf` backend (whose `Cf::Scalar = Emit`
+/// supplies the SSA-node arithmetic), and returns ONLY the BODY span (between the hand-written
+/// signature + the `const uint W = M2_BRICK_ALLOC;` decl and the closing `}`).
+///
+/// Framing (b): the signature, the `if (t_exit <= t_enter) { return -1.0; }` early-out, the `const
+/// uint W = M2_BRICK_ALLOC;` decl, and the closing brace stay HAND-WRITTEN; the body span (L1021-
+/// 1102) is spliced between the `// === GENERATED m2_brick_cubic_hit BEGIN/END ===` sentinels in
+/// `crates/boyko_rhi_vulkan/shaders/sdf_gbuffer_composite.hlsl`. EMIT-ONLY: the body is never
+/// instantiated over `EvalCf` (`m2_corner` → `atlas.SampleLevel` cannot run on the CPU), so there is
+/// NO eval sweep — the cmp-`.spv` is the SOLE byte-identity oracle. The `m2_brick_cubic_hit`
+/// text-sync test pins the committed body to this output.
+///
+/// The `atlas`/`atlas_smp` are RESOURCE params (`ResTok`); `ro_v`/`rd_v`/`tile_org` are WHOLE
+/// `float3` params (`Vec3Param` — indexed `rd_v[axis]` via `Vec3DynIndex` AND passed whole to
+/// `m2_jcgt_cubic_coeffs(s, lo_g, rd_v)`); `t_enter`/`t_exit`/`inv_atlas`/`band_half` are scalar
+/// `float` inputs; `w` is the captured `uint W` (read via `captured_uint("W")` → the `PcUint`
+/// bare-text path); `ret_out` is the `RetCellF`.
+pub fn emit_hlsl_m2_brick_cubic_hit() -> String {
+    use crate::cubic_hit;
+
+    // Fresh recorder state (incl. the Increment-5c array tables + the CALL_ARGS side-table).
+    ARENA.with(|a| a.borrow_mut().clear());
+    STMTS.with(|s| s.borrow_mut().clear());
+    VARS.with(|v| v.borrow_mut().clear());
+    NAMED_LITS.with(|n| n.borrow_mut().clear());
+    CALLS.with(|c| c.borrow_mut().clear());
+    PC_FIELDS.with(|p| p.borrow_mut().clear());
+    CALL_ARGS.with(|c| c.borrow_mut().clear());
+    ARRAY_NAMES.with(|a| a.borrow_mut().clear());
+    ARRAY_ELEM_TYS.with(|t| t.borrow_mut().clear());
+    TEMP_SEQ.with(|c| *c.borrow_mut() = 0);
+    TEMP_TYPES.with(|t| t.borrow_mut().clear());
+    TEMP_NAMES.with(|t| t.borrow_mut().clear());
+
+    // Seed the function body block (the bottom of the STMTS stack).
+    STMTS.with(|s| s.borrow_mut().push(Block { stmts: Vec::new() }));
+
+    // Seed the span's inputs:
+    //   atlas       → ResTok(0)    (res_in[0]   = "atlas")        — the brick atlas Texture3D
+    //   atlas_smp   → ResTok(1)    (res_in[1]   = "atlas_smp")    — the atlas SamplerState
+    //   ro_v        → Vec3Param(0) (vec_in[0]   = "ro_v")         — the ray origin (voxel units)
+    //   rd_v        → Vec3Param(1) (vec_in[1]   = "rd_v")         — the ray direction (voxel units)
+    //   tile_org    → Vec3Param(2) (vec_in[2]   = "tile_org")     — the atlas-voxel tile origin
+    //   t_enter     → Input(0)     (float_in[0] = "t_enter")      — the brick-span near bound
+    //   t_exit      → Input(1)     (float_in[1] = "t_exit")       — the brick-span far bound
+    //   inv_atlas   → Input(2)     (float_in[2] = "inv_atlas")    — the atlas-voxel inverse dim
+    //   band_half   → Input(3)     (float_in[3] = "band_half")    — the snorm decode half-band
+    //   w           → captured_uint("W")                          — the `const uint W` above the span
+    // `ro_v`/`rd_v`/`tile_org` are WHOLE `Vec3Param`s (NOT the `VecParamRef`-x3 of the index-only
+    // params): they are indexed `rd_v[axis]` (Vec3DynIndex reads the vec id off the Vec3Param) AND
+    // passed whole to `m2_jcgt_cubic_coeffs(s, lo_g, rd_v)`.
+    let atlas = ResTok(0);
+    let atlas_smp = ResTok(1);
+    let ro_v = Emit(push(Node::Vec3Param(0)));
+    let rd_v = Emit(push(Node::Vec3Param(1)));
+    let tile_org = Emit(push(Node::Vec3Param(2)));
+    let t_enter = Emit::input(0);
+    let t_exit = Emit::input(1);
+    let inv_atlas = Emit::input(2);
+    let band_half = Emit::input(3);
+    let w = EmitCf::captured_uint("W");
+    let ret_out = RetCellF;
+
+    cubic_hit::m2_brick_cubic_hit_body::<EmitCf>(
+        atlas, atlas_smp, ro_v, rd_v, tile_org, t_enter, t_exit, inv_atlas, band_half, w, &ret_out,
+    );
+
+    // Pop the function body block and print it.
+    let body_block = STMTS.with(|s| {
+        s.borrow_mut()
+            .pop()
+            .expect("invariant: the function body block was pushed above")
+    });
+
+    let float_in = ["t_enter", "t_exit", "inv_atlas", "band_half"];
+    let vec_in = ["ro_v", "rd_v", "tile_org"];
+    let res_in = ["atlas", "atlas_smp"];
+    let named_lit = NAMED_LITS.with(|n| n.borrow().clone());
+    let call_in = CALLS.with(|c| c.borrow().clone());
+    let pc_in = PC_FIELDS.with(|p| p.borrow().clone());
+    let array = ARRAY_NAMES.with(|a| a.borrow().clone());
+    let vars = VARS.with(|v| v.borrow().clone());
+    let names = Names {
+        float_in: &float_in,
+        // `axis`/`iter` are the two loop iv names (seeded as `UintInput(0)` by `runtime_for`); the
+        // captured `W` rides the `pc_in` bare-text table, not `uint_in`.
+        uint_in: &["axis"],
+        vec_in: &vec_in,
+        uint3_in: NO_UINT3_INPUTS,
+        buf_in: NO_BUF_INPUTS,
+        out_in: NO_OUT_INPUTS,
+        named_lit: &named_lit,
+        vars: &vars,
+        vec4_in: NO_VEC4_INPUTS,
+        call_in: &call_in,
+        pc_in: &pc_in,
+        level_field: NO_LEVEL_FIELDS,
+        array: &array,
+        res_in: &res_in,
+    };
+
+    ARENA.with(|a| {
+        let arena = a.borrow();
+        let mut span = String::new();
+        // The whole body is the DeclVar `t` + the four DeclArray + the `[unroll]` setup `Stmt::Loop`
+        // + the `[loop]` DDA `Stmt::Loop` + the tail `Stmt::Return(-1.0)` — a flat in-order walk at
+        // DEPTH 1 (4-space indent), matching the committed L1021-1102. NO function-signature wrap (the
+        // span is spliced inside the hand-written `m2_brick_cubic_hit`, BELOW the `const uint W` decl).
         print_block(&body_block, &arena, names, 1, &mut span);
         span
     })
