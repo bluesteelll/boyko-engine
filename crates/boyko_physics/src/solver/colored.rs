@@ -95,7 +95,9 @@ use super::warm_start::{self, WarmStartTable};
 use super::RigidSolver;
 use crate::manifold::{Manifold, SDF_SENTINEL};
 use crate::math::{Mat3, Vec3};
-use crate::resources::{BodyState, ConstraintGraph, IslandSleep, PhysicsConfig, SolverScratch};
+use crate::resources::{
+    BodyState, ConstraintGraph, IslandSleep, LARGE_ISLAND_CONSTRAINTS, PhysicsConfig, SolverScratch,
+};
 use crate::scratch_ids::{
     body_eff_colored_id, contact_column_id, register_scratch_layouts, scratch_reserve_rows,
 };
@@ -3042,7 +3044,22 @@ impl ColoredSoftStepSolver {
         // O6: parallel per-color dispatch when opted in. The result is bit-identical
         // to the single-threaded colored solve for any worker count (disjoint-body
         // groups + canonical warm store); when off it is BYTE-IDENTICAL to O5.
-        let parallel = config.parallel_solve;
+        //
+        // P2 large-island gate: even with `parallel_solve` opted in, a step whose
+        // LARGEST island is below `LARGE_ISLAND_CONSTRAINTS` cannot produce a color
+        // worth a `pool.scope` dispatch — the largest color is bounded by the largest
+        // island's manifold count, so no color can clear the solver's per-color
+        // `MIN_PARALLEL_SLOTS_PER_COLOR` dispatch floor. Force the byte-identical
+        // single-threaded path so the whole solve skips the ambient-pool probe + the
+        // per-color span checks every pass (the build_graph + dispatch overhead the
+        // analysis flags as pure loss below the crossover). This changes only WHERE
+        // the colored solve runs, NEVER the bits: the inline / single-threaded path is
+        // the SAME `solve_color` the `parallel == false` fallback uses, and the
+        // {1, N}-worker bit-identity property makes large-island parallel == this. The
+        // metric is a single scalar compare on a count `build_graph` already folded in
+        // (zero extra pass). `[ESTIMATE]` threshold — P10 calibrates it (see the const).
+        let parallel =
+            config.parallel_solve && graph.max_island_constraints() >= LARGE_ISLAND_CONSTRAINTS;
 
         for _ in 0..substeps {
             // (1) Gravity integrate DYNAMIC bodies (shared O1 kernel). Single-

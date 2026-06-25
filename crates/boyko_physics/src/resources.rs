@@ -1616,6 +1616,45 @@ impl Manifolds {
 /// Bit width of one `color_occ` word (a `u64` per-color body bitset cell).
 const OCC_WORD_BITS: u32 = 64;
 
+/// `[ESTIMATE:needs-calibration]` — provisional largest-island constraint count
+/// at/above which the colored solve takes the parallel-dispatch path; below it the
+/// solve runs the byte-identical single-threaded path (plan P2, the LargeIslandSplitter
+/// trigger).
+///
+/// # Rationale (`[DERIVED]` direction, `[ESTIMATE]` value)
+///
+/// `build_graph` + greedy coloring + the per-color `pool.scope` dispatch are pure
+/// overhead at small contact counts: below the crossover the partition + dispatch
+/// cost exceeds the parallel-solve saving (docs/ARCHITECTURE-HYBRID-PERF.md Part 3.3
+/// `[DERIVED]`). The colored solve parallelizes WITHIN a color, and the largest
+/// color is bounded by the largest island's manifold count, so the largest island is
+/// the metric that bounds the largest parallel unit a step can produce. When even
+/// the largest island is below this, no color can cross the solver's own
+/// `MIN_PARALLEL_SLOTS_PER_COLOR` per-color dispatch threshold (a color holds ≤ one
+/// manifold per island it spans, and a step's manifolds-per-island peak is exactly
+/// this count), so a `pool.scope` can never help — the whole solve runs
+/// single-threaded, skipping the ambient-pool probe and per-color span checks every
+/// pass.
+///
+/// # Value (UNMEASURED)
+///
+/// `256` mirrors the analysis's `~256 contacts` first-principles crossover AND the
+/// solver's own `MIN_PARALLEL_SLOTS_PER_COLOR = 256` per-color floor (a step that
+/// cannot reach that floor in its largest island can never dispatch). It is a
+/// PROVISIONAL const; **P10 (offline calibration) is a HARD dependency** — it
+/// replaces this `[ESTIMATE]` with a `[MEASURED]` break-even. Until then the gate
+/// only changes WHERE the bit-identical colored solve runs, never the bits, so a
+/// mis-calibrated value is at worst a perf regression near the boundary, never a
+/// result change.
+pub const LARGE_ISLAND_CONSTRAINTS: u32 = 256;
+
+// Sanity: the whole-solve gate must not be STRICTER than the solver's own per-color
+// dispatch floor — if it were, a step could clear the per-color floor (a genuinely
+// parallel color exists) yet still be forced single-threaded by this coarser gate,
+// leaving real parallelism on the table. Keeping it == the per-color floor makes the
+// whole-solve gate a pure pre-empt of steps that cannot dispatch anyway.
+const _: () = assert!(LARGE_ISLAND_CONSTRAINTS >= 1, "the threshold must admit at least one constraint");
+
 /// Constraint islands + greedy graph coloring of one step's manifolds (plan O4,
 /// Decision 2 / Decision 7).
 ///
@@ -1688,6 +1727,22 @@ pub struct ConstraintGraph {
     n_colors: u32,
     /// Number of islands produced this build.
     n_islands: u32,
+    /// Manifold count of the LARGEST island this build — `max over islands of
+    /// (island_manifold_start[i + 1] - island_manifold_start[i])`, `0` for an
+    /// empty/island-less partition (plan P2).
+    ///
+    /// The colored-parallel solve parallelizes WITHIN a color, and a color can hold
+    /// at most one manifold per island (the coloring invariant: no color shares a
+    /// dynamic body, so two manifolds of the same island never share a color only
+    /// when body-disjoint), so the largest parallel unit a step can ever produce is
+    /// bounded by the largest island's manifold count. The colored solve keys its
+    /// whole-solve parallel-dispatch decision on this (the P2 large-island gate): a
+    /// step whose largest island is below the threshold cannot produce a color worth
+    /// a `pool.scope` dispatch, so it runs the byte-identical single-threaded path
+    /// (see [`max_island_constraints`](Self::max_island_constraints)). Folded into
+    /// [`flatten_islands`](Self::flatten_islands) at zero extra pass (the per-island
+    /// counts already exist as the CSR deltas).
+    max_island_constraints: u32,
 }
 
 impl ConstraintGraph {
@@ -1714,6 +1769,7 @@ impl ConstraintGraph {
             words_per_color: 0,
             n_colors: 0,
             n_islands: 0,
+            max_island_constraints: 0,
         }
     }
 
@@ -1727,6 +1783,21 @@ impl ConstraintGraph {
     #[inline]
     pub fn n_islands(&self) -> u32 {
         self.n_islands
+    }
+
+    /// Manifold count of the LARGEST island in the current partition (`0` for an
+    /// empty partition) — the P2 large-island gate metric.
+    ///
+    /// The colored solve compares this against
+    /// [`LARGE_ISLAND_CONSTRAINTS`](crate::resources::LARGE_ISLAND_CONSTRAINTS) to
+    /// decide its whole-solve parallel-dispatch strategy: below the threshold it runs
+    /// the byte-identical single-threaded path (the dispatch cannot amortize), at/
+    /// above it the colored-parallel path. Computed during
+    /// [`build`](Self::build) at zero extra pass (folded into the island CSR), so
+    /// reading it is free.
+    #[inline]
+    pub fn max_island_constraints(&self) -> u32 {
+        self.max_island_constraints
     }
 
     /// Manifold indices of color `color`, in ascending manifold order (D4). Returns
@@ -1908,9 +1979,17 @@ impl ConstraintGraph {
                 self.island_manifold_start[isl as usize + 1] += 1;
             }
         }
+        // Exclusive prefix-sum the per-island counts in place, folding the LARGEST
+        // per-island manifold count (P2) into the SAME pass — at step `i`,
+        // `island_manifold_start[i + 1]` still holds island `i`'s RAW count (the
+        // accumulation below reads it before overwriting), so the max is exact and
+        // free. `0` for an island-less partition (the loop body never runs).
+        let mut max_island = 0u32;
         for i in 0..n_islands {
+            max_island = max_island.max(self.island_manifold_start[i + 1]);
             self.island_manifold_start[i + 1] += self.island_manifold_start[i];
         }
+        self.max_island_constraints = max_island;
         let total = self.island_manifold_start[n_islands] as usize;
         self.island_manifolds.clear();
         self.island_manifolds.resize(total, 0);
