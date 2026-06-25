@@ -447,11 +447,35 @@ fn operand_str(arena: &[Node], names: Names, temps: &[Option<String>], id: u32) 
     }
 }
 
+/// M1 (review carry-in): asserts an operand node's HLSL [`EmitTy`] is `want`. A
+/// FLOAT arithmetic node (`Add`/`Mul`/...) must not take a `uint` operand and a bit
+/// op (`And`/`Shr`/`UintToFloat`) must take a `uint` operand — the int/float boundary
+/// introduced by the brick leaves is now load-bearing, so a mistyped operand (a
+/// future int-leaf transcription slip) would emit a textually-valid but
+/// SEMANTICALLY-WRONG body that silently forks the `.spv`. A `debug_assert!`
+/// (compiled out in release) catches it at generation time. The current cubic leaf
+/// is all-float, so this mainly guards the A4 / int-leaf family; wired now because
+/// the boundary exists.
+fn assert_operand_ty(arena: &[Node], id: u32, want: EmitTy) {
+    debug_assert_eq!(
+        type_of(arena[id as usize]),
+        want,
+        "operand node {id} has type {:?} but the consuming op expects {want:?} — a \
+         mistyped int/float operand in a generated leaf",
+        type_of(arena[id as usize])
+    );
+}
+
 /// The HLSL expression that DEFINES node `id` (its temp's right-hand side), built
 /// from its operands' names (a temp name, an input name, or an inlined literal).
 fn define_str(arena: &[Node], names: Names, temps: &[Option<String>], id: u32) -> String {
     let node = arena[id as usize];
     let op = |child: u32| operand_str(arena, names, temps, child);
+    // M1: the FLOAT arithmetic nodes take FLOAT operands; the bit/cast nodes take
+    // UINT operands. Check before spelling (the `Mask` operand of `Select` and the
+    // `Gt`/`IntEq` comparands are excluded — a comparison is an inlined leaf typed
+    // `Float` by `type_of`, but its operands' types are the comparison's own concern).
+    let chk = |child: u32, want: EmitTy| assert_operand_ty(arena, child, want);
     match node {
         Node::Input(_)
         | Node::Lit(_)
@@ -462,37 +486,96 @@ fn define_str(arena: &[Node], names: Names, temps: &[Option<String>], id: u32) -
             // Leaves are inlined, never defined as a temp.
             unreachable!("leaf nodes are inlined, not defined")
         }
-        Node::Add(a, b) => format!("{} + {}", op(a), op(b)),
-        Node::Sub(a, b) => format!("{} - {}", op(a), op(b)),
-        Node::Mul(a, b) => format!("{} * {}", op(a), op(b)),
-        Node::Div(a, b) => format!("{} / {}", op(a), op(b)),
-        Node::Neg(a) => format!("-{}", op(a)),
-        Node::Min(a, b) => format!("min({}, {})", op(a), op(b)),
-        Node::Max(a, b) => format!("max({}, {})", op(a), op(b)),
-        Node::Clamp01(a) => format!("clamp({}, 0.0, 1.0)", op(a)),
-        Node::Lerp(s, a, h) => format!("lerp({}, {}, {})", op(s), op(a), op(h)),
-        Node::Abs(a) => format!("abs({})", op(a)),
-        Node::Sqrt(a) => format!("sqrt({})", op(a)),
-        Node::Select(c, t, e) => format!("({}) ? {} : {}", op(c), op(t), op(e)),
+        Node::Add(a, b) => {
+            chk(a, EmitTy::Float);
+            chk(b, EmitTy::Float);
+            format!("{} + {}", op(a), op(b))
+        }
+        Node::Sub(a, b) => {
+            chk(a, EmitTy::Float);
+            chk(b, EmitTy::Float);
+            format!("{} - {}", op(a), op(b))
+        }
+        Node::Mul(a, b) => {
+            chk(a, EmitTy::Float);
+            chk(b, EmitTy::Float);
+            format!("{} * {}", op(a), op(b))
+        }
+        Node::Div(a, b) => {
+            chk(a, EmitTy::Float);
+            chk(b, EmitTy::Float);
+            format!("{} / {}", op(a), op(b))
+        }
+        Node::Neg(a) => {
+            chk(a, EmitTy::Float);
+            format!("-{}", op(a))
+        }
+        Node::Min(a, b) => {
+            chk(a, EmitTy::Float);
+            chk(b, EmitTy::Float);
+            format!("min({}, {})", op(a), op(b))
+        }
+        Node::Max(a, b) => {
+            chk(a, EmitTy::Float);
+            chk(b, EmitTy::Float);
+            format!("max({}, {})", op(a), op(b))
+        }
+        Node::Clamp01(a) => {
+            chk(a, EmitTy::Float);
+            format!("clamp({}, 0.0, 1.0)", op(a))
+        }
+        Node::Lerp(s, a, h) => {
+            chk(s, EmitTy::Float);
+            chk(a, EmitTy::Float);
+            chk(h, EmitTy::Float);
+            format!("lerp({}, {}, {})", op(s), op(a), op(h))
+        }
+        Node::Abs(a) => {
+            chk(a, EmitTy::Float);
+            format!("abs({})", op(a))
+        }
+        Node::Sqrt(a) => {
+            chk(a, EmitTy::Float);
+            format!("sqrt({})", op(a))
+        }
+        Node::Select(_c, t, e) => {
+            // The `_c` condition is a Mask leaf (a `Gt`/`IntEq` node), not a float
+            // value — only the two value arms are typed here.
+            chk(t, EmitTy::Float);
+            chk(e, EmitTy::Float);
+            format!("({}) ? {} : {}", op(_c), op(t), op(e))
+        }
         Node::FieldCall(_) => {
             // `FieldCall` belongs to the NORMAL leaf (a vector expression printed by
             // `sexpr_str`/`vexpr_str`), never to the scalar field body's printer.
             unreachable!("FieldCall is a normal-leaf node, not a scalar field node")
         }
-        Node::And(a, b) => format!("{} & {}", op(a), op(b)),
-        Node::Shr(a, b) => format!("{} >> {}", op(a), op(b)),
+        Node::And(a, b) => {
+            chk(a, EmitTy::Uint);
+            chk(b, EmitTy::Uint);
+            format!("{} & {}", op(a), op(b))
+        }
+        Node::Shr(a, b) => {
+            chk(a, EmitTy::Uint);
+            chk(b, EmitTy::Uint);
+            format!("{} >> {}", op(a), op(b))
+        }
         // The HLSL numeric cast (value-preserving), NOT `asfloat` (a bit-reinterpret).
-        Node::UintToFloat(a) => format!("(float){}", op(a)),
+        Node::UintToFloat(a) => {
+            chk(a, EmitTy::Uint);
+            format!("(float){}", op(a))
+        }
     }
 }
 
-/// Walks the recorded SSA arena into a `{ float tN = ...; ... return tROOT; }`
-/// HLSL body. Each NON-leaf node becomes one `float tN` temp (so shared subtrees —
-/// e.g. `hh` in `smin` — are computed ONCE, matching the frozen `hh` variable); the
-/// leaves (inputs/literals) inline. The walk is in arena order, which is already
-/// topological (SSA: a node only references strictly-earlier indices), so every
-/// operand's temp exists before its use.
-fn emit_body(arena: &[Node], names: Names, root: u32) -> String {
+/// Emits the `float tN = ...;` (or `uint tN`) temp declarations for every NON-leaf
+/// node in arena order (which is topological — SSA: a node only references
+/// strictly-earlier indices), so shared subtrees are computed ONCE. Returns the
+/// `temps` table (each non-leaf node's emitted temp name) for the caller to spell
+/// the `return`. Factored out of [`emit_body`] so the scalar return ([`emit_body`])
+/// and the `float4` construct return ([`emit_body_vec4`]) share the identical
+/// temp-emission walk.
+fn emit_temps(arena: &[Node], names: Names) -> (String, Vec<Option<String>>) {
     let mut temps: Vec<Option<String>> = vec![None; arena.len()];
     let mut out = String::new();
     let mut next = 0u32;
@@ -510,8 +593,38 @@ fn emit_body(arena: &[Node], names: Names, root: u32) -> String {
         out.push_str(&format!("    {} {} = {};\n", ty, name, rhs));
         temps[i] = Some(name);
     }
+    (out, temps)
+}
+
+/// Walks the recorded SSA arena into a `{ float tN = ...; ... return tROOT; }`
+/// HLSL body. Each NON-leaf node becomes one `float tN` temp (so shared subtrees —
+/// e.g. `hh` in `smin` — are computed ONCE, matching the frozen `hh` variable); the
+/// leaves (inputs/literals) inline.
+fn emit_body(arena: &[Node], names: Names, root: u32) -> String {
+    let (mut out, temps) = emit_temps(arena, names);
     let ret = operand_str(arena, names, &temps, root);
     out.push_str(&format!("    return {};\n", ret));
+    out
+}
+
+/// Like [`emit_body`], but the FOUR `roots` are spelled as a `return float4(r0, r1,
+/// r2, r3);` construct — the `jcgt_cubic_coeffs` `[c0, c1, c2, c3]` array return,
+/// mirroring the GPU `m2_jcgt_cubic_coeffs`'s `return float4(c0, c1, c2, c3)`. The
+/// shared temp-emission walk ([`emit_temps`]) computes the k-basis / cubic subtrees
+/// ONCE; each root operand inlines its (already-emitted) `tN` temp into the
+/// constructor, the SAME shape the frozen HLSL has (`float c0 = ...; return
+/// float4(c0, ...)`). The textual temp NAMES differ from the frozen source
+/// (`tN` vs `c0`), which is invisible to the `.spv` (DXC strips local debug names).
+fn emit_body_vec4(arena: &[Node], names: Names, roots: [u32; 4]) -> String {
+    let (mut out, temps) = emit_temps(arena, names);
+    let r = |id: u32| operand_str(arena, names, &temps, id);
+    out.push_str(&format!(
+        "    return float4({}, {}, {}, {});\n",
+        r(roots[0]),
+        r(roots[1]),
+        r(roots[2]),
+        r(roots[3])
+    ));
     out
 }
 
@@ -565,6 +678,37 @@ fn trace_named<F: FnOnce(&[Emit], &[Emit]) -> Emit>(
     ARENA.with(|a| {
         let a = a.borrow();
         emit_body(&a, names, result.0)
+    })
+}
+
+/// Like [`trace_named`], but `body` returns FOUR result handles (the `[c0, c1, c2,
+/// c3]` cubic-coefficient array), emitted as a `return float4(...)` construct
+/// ([`emit_body_vec4`]). `jcgt_cubic_coeffs` is the only leaf with a `float4` return;
+/// the four roots share the recorded k-basis / cubic temps in the one arena, so the
+/// constructor inlines the four already-emitted temps.
+fn trace_named_vec4<F: FnOnce(&[Emit], &[Emit]) -> [Emit; 4]>(
+    float_names: &[&str],
+    uint_names: &[&str],
+    body: F,
+) -> String {
+    let names = Names {
+        float_in: float_names,
+        uint_in: uint_names,
+    };
+    ARENA.with(|a| a.borrow_mut().clear());
+    let mut floats = Vec::with_capacity(float_names.len());
+    for i in 0..float_names.len() {
+        floats.push(Emit::input(i as u32));
+    }
+    let mut uints = Vec::with_capacity(uint_names.len());
+    for i in 0..uint_names.len() {
+        uints.push(Emit::uint_input(i as u32));
+    }
+    let result = body(&floats, &uints);
+    let roots = [result[0].0, result[1].0, result[2].0, result[3].0];
+    ARENA.with(|a| {
+        let a = a.borrow();
+        emit_body_vec4(&a, names, roots)
     })
 }
 
@@ -777,4 +921,70 @@ pub fn emit_hlsl_decode_snorm8() -> String {
         brick::snorm_scale::<Emit>(f[0], f[1])
     });
     format!("float m2_decode(float n, float band_half) {{\n{body}}}\n")
+}
+
+// ---- The M2 cubic-surface leaves (A3) -----------------------------------------
+
+/// Generates the HLSL `m2_cubic_eval` body — the Horner evaluation of the JCGT cubic
+/// `c3·t³ + c2·t² + c1·t + c0` at `t` — by tracing the generic
+/// [`crate::brick::cubic_eval`] over the `Emit` backend, and returns the full
+/// `float m2_cubic_eval(float4 c, float t) { ... }` function.
+///
+/// The coefficient float4 `c` is read through the SAME scalar accessors the frozen
+/// GPU uses (`c.x` = c0 ... `c.w` = c3, NOT `c[0]`), spelled as the traced input
+/// names so the emitted body is byte-identical to the committed `m2_cubic_eval`. The
+/// `f32` Eval instantiation is the host `boyko_sdf_math::brick::cubic_eval` (the CPU
+/// oracle the `eval_byte_identity` to-bits sweep locks).
+///
+/// The generated body is spliced between the `// === GENERATED m2_cubic_eval
+/// BEGIN/END ===` sentinels in
+/// `crates/boyko_rhi_vulkan/shaders/sdf_gbuffer_composite.hlsl`. The
+/// `sdf_field_edsl_sync` test pins the committed shader to this output; the cmp-`.spv`
+/// gate pins it to the frozen baseline.
+pub fn emit_hlsl_cubic_eval() -> String {
+    use crate::brick;
+
+    // The coefficient array is read as `c.x..c.w` (the frozen `float4 c` swizzle
+    // accessors), `t` as the second parameter. `cubic_eval` indexes `c[0]..c[3]`,
+    // so the names map `c[0]=c.x, c[1]=c.y, c[2]=c.z, c[3]=c.w` by input order.
+    let body = trace_named(&["c.x", "c.y", "c.z", "c.w", "t"], NO_UINT_INPUTS, |f, _u| {
+        let c = [f[0], f[1], f[2], f[3]];
+        brick::cubic_eval::<Emit>(&c, f[4])
+    });
+    format!("float m2_cubic_eval(float4 c, float t) {{\n{body}}}\n")
+}
+
+/// Generates the HLSL `m2_jcgt_cubic_coeffs` body — the 8-corner → k-basis → cubic
+/// coefficient fold returning `float4(c0, c1, c2, c3)` — by tracing the generic
+/// [`crate::brick::jcgt_cubic_coeffs`] over the `Emit` backend, and returns the full
+/// `float4 m2_jcgt_cubic_coeffs(float s[8], float3 a, float3 b) { ... }` function.
+///
+/// The 8 corners are read through the frozen array accessors `s[0]..s[7]` (NOT a
+/// swizzle), `a`/`b` through `a.x/a.y/a.z` / `b.x/b.y/b.z` — spelled as the traced
+/// input names so the body matches the committed `m2_jcgt_cubic_coeffs`. The four
+/// coefficients are returned as the GPU's `float4(c0, c1, c2, c3)` construct (the
+/// `[S; 4]` array return printed by [`emit_body_vec4`]). The `f32` Eval instantiation
+/// is the host `boyko_sdf_math::brick::jcgt_cubic_coeffs`.
+///
+/// The generated body is spliced between the `// === GENERATED m2_jcgt_cubic_coeffs
+/// BEGIN/END ===` sentinels in
+/// `crates/boyko_rhi_vulkan/shaders/sdf_gbuffer_composite.hlsl`. The
+/// `sdf_field_edsl_sync` test pins the committed shader to this output; the cmp-`.spv`
+/// gate pins it to the frozen baseline.
+pub fn emit_hlsl_jcgt_cubic_coeffs() -> String {
+    use crate::brick;
+
+    // s[0..7], a.x/a.y/a.z, b.x/b.y/b.z — the EXACT frozen accessor spelling (array
+    // index for the corners, swizzle for the two float3s).
+    let float_names = &[
+        "s[0]", "s[1]", "s[2]", "s[3]", "s[4]", "s[5]", "s[6]", "s[7]", "a.x", "a.y", "a.z", "b.x",
+        "b.y", "b.z",
+    ];
+    let body = trace_named_vec4(float_names, NO_UINT_INPUTS, |f, _u| {
+        let s = [f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7]];
+        let a = [f[8], f[9], f[10]];
+        let b = [f[11], f[12], f[13]];
+        brick::jcgt_cubic_coeffs::<Emit>(&s, a, b)
+    });
+    format!("float4 m2_jcgt_cubic_coeffs(float s[8], float3 a, float3 b) {{\n{body}}}\n")
 }

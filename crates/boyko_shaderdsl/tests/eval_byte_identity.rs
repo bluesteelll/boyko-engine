@@ -502,3 +502,166 @@ fn decode_snorm8_sentinel_and_extremes_byte_identical() {
         );
     }
 }
+
+// ======================================================================
+// A3 — the M2 cubic-surface leaves byte-identity (the bit-exact-`t` guard).
+//
+// Frozen snapshot of `boyko_sdf_math::brick::{cubic_eval, jcgt_cubic_coeffs}` (brick.rs
+// :1353-1415, pre-eDSL) vs the eDSL `boyko_shaderdsl::brick::{cubic_eval,
+// jcgt_cubic_coeffs}` over the `f32` Eval backend. These feed the cubic root-finder's
+// `t`, where hit/miss is a CLIFF (not a ±2/255 render band), so a single-ULP coefficient
+// drift flips a hit — the to-bits gate is the real defense (the render golden can MASK
+// it). Swept 20k+ over random `c`/`t` and random 8-corner `s` + rays, with the LCG's
+// NaN/Inf/±0/MAX/MIN draws mixed into EVERY operand.
+// ======================================================================
+
+/// Verbatim snapshot of the PRE-eDSL host `jcgt_cubic_coeffs` (brick.rs:1353-1407). Do
+/// NOT "clean up": the k-basis index pairing (the k3/k7 trap) and the FMA grouping are
+/// the contract under test — a transposed pair / reordered expansion drifts the golden.
+fn frozen_jcgt_cubic_coeffs(s: &[f32; 8], ro_local: [f32; 3], rd_local: [f32; 3]) -> [f32; 4] {
+    let s000 = s[0];
+    let s100 = s[1];
+    let s010 = s[2];
+    let s110 = s[3];
+    let s001 = s[4];
+    let s101 = s[5];
+    let s011 = s[6];
+    let s111 = s[7];
+
+    let k0 = s000;
+    let k1 = s100 - s000;
+    let k2 = s010 - s000;
+    let k3 = s001 - s000;
+    let k4 = s110 - s100 - s010 + s000; // x·y
+    let k5 = s011 - s010 - s001 + s000; // y·z
+    let k6 = s101 - s100 - s001 + s000; // z·x
+    let k7 = s111 - s110 - s101 - s011 + s100 + s010 + s001 - s000; // x·y·z
+
+    let (ax, ay, az) = (ro_local[0], ro_local[1], ro_local[2]);
+    let (bx, by, bz) = (rd_local[0], rd_local[1], rd_local[2]);
+
+    let c0 = k0
+        + k1 * ax
+        + k2 * ay
+        + k3 * az
+        + k4 * ax * ay
+        + k5 * ay * az
+        + k6 * az * ax
+        + k7 * ax * ay * az;
+
+    let c1 = k1 * bx
+        + k2 * by
+        + k3 * bz
+        + k4 * (ax * by + ay * bx)
+        + k5 * (ay * bz + az * by)
+        + k6 * (az * bx + ax * bz)
+        + k7 * (ax * ay * bz + ax * by * az + bx * ay * az);
+
+    let c2 = k4 * bx * by
+        + k5 * by * bz
+        + k6 * bz * bx
+        + k7 * (ax * by * bz + bx * ay * bz + bx * by * az);
+
+    let c3 = k7 * bx * by * bz;
+
+    [c0, c1, c2, c3]
+}
+
+/// Verbatim snapshot of the PRE-eDSL host `cubic_eval` (brick.rs:1411-1415).
+fn frozen_cubic_eval(c: &[f32; 4], t: f32) -> f32 {
+    ((c[3] * t + c[2]) * t + c[1]) * t + c[0]
+}
+
+/// The eDSL cubic-eval over the `f32` Eval backend.
+fn refactored_cubic_eval(c: &[f32; 4], t: f32) -> f32 {
+    boyko_shaderdsl::brick::cubic_eval::<f32>(c, t)
+}
+
+/// The eDSL cubic-coeffs fold over the `f32` Eval backend.
+fn refactored_jcgt_cubic_coeffs(s: &[f32; 8], a: [f32; 3], b: [f32; 3]) -> [f32; 4] {
+    boyko_shaderdsl::brick::jcgt_cubic_coeffs::<f32>(s, a, b)
+}
+
+fn assert_vec4_bits(a: [f32; 4], b: [f32; 4], ctx: &str) {
+    for i in 0..4 {
+        assert_eq!(
+            a[i].to_bits(),
+            b[i].to_bits(),
+            "{ctx}[{i}]: refactored={} (0x{:08x}) != frozen={} (0x{:08x})",
+            a[i],
+            a[i].to_bits(),
+            b[i],
+            b[i].to_bits()
+        );
+    }
+}
+
+#[test]
+fn cubic_eval_random_sweep_byte_identical() {
+    // Random coefficients + `t`, with the LCG's NaN/Inf/±0/MAX/MIN draws mixed into
+    // every operand (so the Horner FMA chain must propagate the bit pattern identically
+    // through both paths).
+    let mut lcg = Lcg::new(0x0C0B_1C5E_E000_3333);
+    for _ in 0..20_000 {
+        let c = [
+            lcg.next_f32(8.0),
+            lcg.next_f32(8.0),
+            lcg.next_f32(8.0),
+            lcg.next_f32(8.0),
+        ];
+        let t = lcg.next_f32(2.0);
+        assert_bits(
+            refactored_cubic_eval(&c, t),
+            frozen_cubic_eval(&c, t),
+            "cubic-eval-sweep",
+        );
+    }
+}
+
+#[test]
+fn jcgt_cubic_coeffs_random_sweep_byte_identical() {
+    // Random 8-corner sets + random ray frame (`a` = ro_local, `b` = rd_local), with the
+    // LCG's non-finite + signed-zero draws mixed in. The full coefficient vector is
+    // compared to-bits — a single-ULP drift in any of c0..c3 flips a hit/miss on `t`.
+    let mut lcg = Lcg::new(0x5165_C0B1_C5EE_4444);
+    for _ in 0..20_000 {
+        let mut s = [0.0f32; 8];
+        for v in s.iter_mut() {
+            *v = lcg.next_f32(4.0);
+        }
+        let a = [lcg.next_f32(2.0), lcg.next_f32(2.0), lcg.next_f32(2.0)];
+        let b = [lcg.next_f32(2.0), lcg.next_f32(2.0), lcg.next_f32(2.0)];
+        assert_vec4_bits(
+            refactored_jcgt_cubic_coeffs(&s, a, b),
+            frozen_jcgt_cubic_coeffs(&s, a, b),
+            "jcgt-coeffs-sweep",
+        );
+    }
+}
+
+#[test]
+fn cubic_chain_coeffs_then_eval_byte_identical() {
+    // The full chain the solver runs: form the coefficients then evaluate the cubic at
+    // many `t` — the eDSL `cubic_eval(jcgt_cubic_coeffs(...), t)` must be to-bits the
+    // frozen chain. (Random corners/rays/`t`; non-finite draws included.)
+    let mut lcg = Lcg::new(0xC0B1_C5EE_BADC_5555);
+    for _ in 0..6_000 {
+        let mut s = [0.0f32; 8];
+        for v in s.iter_mut() {
+            *v = lcg.next_f32(3.0);
+        }
+        let a = [lcg.next_f32(1.0), lcg.next_f32(1.0), lcg.next_f32(1.0)];
+        let b = [lcg.next_f32(1.0), lcg.next_f32(1.0), lcg.next_f32(1.0)];
+        let c_re = refactored_jcgt_cubic_coeffs(&s, a, b);
+        let c_fr = frozen_jcgt_cubic_coeffs(&s, a, b);
+        assert_vec4_bits(c_re, c_fr, "chain-coeffs");
+        for ti in 0..8 {
+            let t = (ti as f32) / 7.0;
+            assert_bits(
+                refactored_cubic_eval(&c_re, t),
+                frozen_cubic_eval(&c_fr, t),
+                "chain-eval",
+            );
+        }
+    }
+}

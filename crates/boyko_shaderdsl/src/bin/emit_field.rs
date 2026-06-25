@@ -24,4 +24,15 @@ fn main() {
     // `sdf_gbuffer_composite.hlsl`.
     println!();
     print!("{}", boyko_shaderdsl::emit::emit_hlsl_decode_snorm8());
+    // The M2 cubic-surface leaves (A3) — the PURE-EXPRESSION leaves of the JCGT cubic
+    // solver: `m2_cubic_eval` (Horner) and `m2_jcgt_cubic_coeffs` (the trilinear →
+    // cubic-coefficient fold). Generated from `boyko_shaderdsl::brick::{cubic_eval,
+    // jcgt_cubic_coeffs}`. Spliced between the `// === GENERATED m2_cubic_eval
+    // BEGIN/END ===` and `// === GENERATED m2_jcgt_cubic_coeffs BEGIN/END ===`
+    // sentinels in `sdf_gbuffer_composite.hlsl`. The root-finders that CALL them
+    // (`m2_marmitt_root` / `m2_regula_falsi`) stay hand-written (runtime control flow).
+    println!();
+    print!("{}", boyko_shaderdsl::emit::emit_hlsl_cubic_eval());
+    println!();
+    print!("{}", boyko_shaderdsl::emit::emit_hlsl_jcgt_cubic_coeffs());
 }

@@ -1349,69 +1349,28 @@ pub fn atlas_uvw(local_uvw: [f32; 3], bias: f32) -> ([f32; 3], [usize; 3]) {
 /// coefficients `[c0, c1, c2, c3]`. The substitution order is fixed here so the GPU
 /// port transcribes the SAME FMA chain (a reordered expansion could drift the
 /// golden past tolerance — this MUST NOT be "simplified").
+///
+/// DELEGATES to [`boyko_shaderdsl::brick::jcgt_cubic_coeffs`] over the `f32` Eval
+/// backend (A3): the trilinear → cubic-coefficient fold is authored ONCE in
+/// `boyko_shaderdsl::brick` (generic over a `FieldScalar`), so this `f32` form and the
+/// GPU `m2_jcgt_cubic_coeffs` spliced into `sdf_gbuffer_composite.hlsl` cannot diverge
+/// by construction. The `eval_byte_identity` to-bits sweep locks this against the
+/// frozen pre-eDSL snapshot — the bit-exact gate, since a single-ULP coefficient drift
+/// flips a hit/miss on `t`.
 #[inline]
 pub fn jcgt_cubic_coeffs(s: &[f32; 8], ro_local: [f32; 3], rd_local: [f32; 3]) -> [f32; 4] {
-    // Fold the 8 corners into the trilinear k-basis. Pin the corner indices to the
-    // `x + 2y + 4z` convention so this matches `trilinear_reconstruct` exactly.
-    let s000 = s[0];
-    let s100 = s[1];
-    let s010 = s[2];
-    let s110 = s[3];
-    let s001 = s[4];
-    let s101 = s[5];
-    let s011 = s[6];
-    let s111 = s[7];
-
-    let k0 = s000;
-    let k1 = s100 - s000;
-    let k2 = s010 - s000;
-    let k3 = s001 - s000;
-    let k4 = s110 - s100 - s010 + s000; // x·y
-    let k5 = s011 - s010 - s001 + s000; // y·z
-    let k6 = s101 - s100 - s001 + s000; // z·x
-    let k7 = s111 - s110 - s101 - s011 + s100 + s010 + s001 - s000; // x·y·z
-
-    let (ax, ay, az) = (ro_local[0], ro_local[1], ro_local[2]);
-    let (bx, by, bz) = (rd_local[0], rd_local[1], rd_local[2]);
-
-    // Substitute (x,y,z) = a + b·t into
-    //   S = k0 + k1·x + k2·y + k3·z + k4·x·y + k5·y·z + k6·z·x + k7·x·y·z
-    // and collect powers of t. Each bilinear term k·u·v expands as
-    //   k·(au + bu·t)(av + bv·t) = k·au·av + k·(au·bv + av·bu)·t + k·bu·bv·t²,
-    // and the trilinear k7·x·y·z carries one cubic term k7·bx·by·bz·t³.
-    let c0 = k0
-        + k1 * ax
-        + k2 * ay
-        + k3 * az
-        + k4 * ax * ay
-        + k5 * ay * az
-        + k6 * az * ax
-        + k7 * ax * ay * az;
-
-    let c1 = k1 * bx
-        + k2 * by
-        + k3 * bz
-        + k4 * (ax * by + ay * bx)
-        + k5 * (ay * bz + az * by)
-        + k6 * (az * bx + ax * bz)
-        + k7 * (ax * ay * bz + ax * by * az + bx * ay * az);
-
-    let c2 = k4 * bx * by
-        + k5 * by * bz
-        + k6 * bz * bx
-        + k7 * (ax * by * bz + bx * ay * bz + bx * by * az);
-
-    let c3 = k7 * bx * by * bz;
-
-    [c0, c1, c2, c3]
+    boyko_shaderdsl::brick::jcgt_cubic_coeffs::<f32>(s, ro_local, rd_local)
 }
 
 /// Evaluates the cubic `c3·t³ + c2·t² + c1·t + c0` at `t` (Horner, FMA-friendly).
+///
+/// DELEGATES to [`boyko_shaderdsl::brick::cubic_eval`] over the `f32` Eval backend
+/// (A3) — authored ONCE alongside [`jcgt_cubic_coeffs`], so this `f32` Horner and the
+/// GPU `m2_cubic_eval` cannot diverge. Horner `((c3·t + c2)·t + c1)·t + c0`, the form
+/// the GPU shader transcribes.
 #[inline]
 fn cubic_eval(c: &[f32; 4], t: f32) -> f32 {
-    // Horner: ((c3·t + c2)·t + c1)·t + c0 — one multiply-add per term, the form the
-    // GPU shader transcribes.
-    ((c[3] * t + c[2]) * t + c[1]) * t + c[0]
+    boyko_shaderdsl::brick::cubic_eval::<f32>(c, t)
 }
 
 /// The Marmitt et al. iterative root of the JCGT cubic in `[t0, t1]` — the GPU
