@@ -1834,3 +1834,205 @@ fn evalcf_is_zst_inc4d() {
     // is the local's value, NOT a field on the backend marker).
     assert_eq!(std::mem::size_of::<EvalCf>(), 0, "EvalCf must remain a ZST");
 }
+
+// ======================================================================
+// Inc 5a — the `select_level` clip-map LOD scan Eval oracle (FULL coverage — pure arithmetic).
+//
+// `select_level` is a pure containment scan (no field call), so the Eval body has FULL coverage:
+// a host mirror transcribing the committed L1222-1234 VERBATIM (an `m2_levels` fixture array of N
+// level boxes + a `pc.brick_levels` count) is the EXACT reference. Since the return is an `i32`,
+// the assertion is EXACT integer eq (no ULP slack). The sweep covers every branch the design
+// pins: inside-each-level (returns that L, finest-first), outside-all (returns -1), the boundary
+// `p == hi` (EXCLUDED by `<` — not that level), and `L >= pc.brick_levels` (an inactive level
+// skipped via the `break`).
+//
+// The `Cf::level_field_*` / `Cf::pc_uint` Emit recorders are routed around on Eval by the THREADED
+// CLOSURES (the `Cf::call1` discipline): the closures index the host fixture, so the
+// `unreachable!` hooks are never reached.
+// ======================================================================
+
+/// The host `M4Level` fixture — one clip-map level box (the fields `select_level` reads). NOT the
+/// GPU struct layout (only the access text matters there); just the values the containment test
+/// folds.
+#[derive(Clone, Copy)]
+struct HostLevel {
+    /// `origin_brick_world.xyz` — the level grid's lower world corner.
+    origin: [f32; 3],
+    /// `origin_brick_world.w` — the level's brick world size.
+    bw: f32,
+    /// `dims_atlas_dim.xyz` — the level grid dims (as f32).
+    dims: [f32; 3],
+}
+
+/// The host `select_level` fixture — the `m2_levels[BRICK_LEVELS]` array + the runtime
+/// `pc.brick_levels` count.
+#[derive(Clone, Copy)]
+struct HostLevels {
+    levels: [HostLevel; 3],
+    brick_levels: u32,
+}
+
+/// Verbatim hand-mirror of the committed `select_level` scan (the L1222-1234 statements), reading
+/// the host `levels` fixture. Returns the SIGNED level index (`0..brick_levels-1`) or `-1`. The
+/// reference the eDSL `select_level_body::<EvalCf>` is locked against (EXACT `i32` eq).
+fn host_select_level(p: [f32; 3], lv: &HostLevels) -> i32 {
+    for l in 0..3usize {
+        let lu = l as u32;
+        if lu >= lv.brick_levels {
+            break;
+        }
+        let o = lv.levels[l].origin;
+        let bw = lv.levels[l].bw;
+        let d = lv.levels[l].dims;
+        let hi = [o[0] + d[0] * bw, o[1] + d[1] * bw, o[2] + d[2] * bw];
+        let inside = p[0] >= o[0]
+            && p[1] >= o[1]
+            && p[2] >= o[2]
+            && p[0] < hi[0]
+            && p[1] < hi[1]
+            && p[2] < hi[2];
+        if inside {
+            return l as i32;
+        }
+    }
+    -1
+}
+
+/// The eDSL `select_level_body::<EvalCf>` threading the host fixture through the level-field / pc
+/// closures (so `Cf::level_field_*` / `Cf::pc_uint`'s `unreachable!` is never reached). Returns the
+/// `i32` the ret-cell holds after the body runs.
+fn refactored_select_level(p: [f32; 3], lv: &HostLevels) -> i32 {
+    use std::cell::Cell;
+    let ret_out = Cell::new(0i32);
+    boyko_shaderdsl::levels::select_level_body::<EvalCf, _, _, _>(
+        p,
+        // `m2_levels[L].<field>` (`.xyz`) — index the fixture by the iv, pick the member by text.
+        |l: usize, field: &'static str| -> [f32; 3] {
+            match field {
+                "origin_brick_world.xyz" => lv.levels[l].origin,
+                "dims_atlas_dim.xyz" => lv.levels[l].dims,
+                other => unreachable!("unexpected level vec3 field `{other}`"),
+            }
+        },
+        // `m2_levels[L].<field>` (`.w`).
+        |l: usize, field: &'static str| -> f32 {
+            match field {
+                "origin_brick_world.w" => lv.levels[l].bw,
+                other => unreachable!("unexpected level scalar field `{other}`"),
+            }
+        },
+        // `pc.brick_levels`.
+        || lv.brick_levels,
+        &ret_out,
+    );
+    ret_out.get()
+}
+
+#[test]
+fn select_level_matches_host_on_random_sweep() {
+    // A deterministic LCG sweeps query points × a few level configurations. The level boxes are
+    // built as a NESTED clip-map (level 0 finest/smallest, level 2 coarsest/largest, sharing a
+    // center) so finest-first is meaningfully exercised (an inner point matches level 0 even though
+    // it is also inside levels 1/2), plus random non-nested configs for the general scan.
+    let mut lcg = Lcg::new(0x0BAD_F00D_DEAD_BEEF_u64);
+    for _ in 0..20_000 {
+        // Build a random level fixture. Each level: a random origin + a random (positive) bw + a
+        // random small integer dims (so `hi = o + dims*bw` is a finite box).
+        let mk_level = |lcg: &mut Lcg| -> HostLevel {
+            let origin = [lcg.next_f32(4.0), lcg.next_f32(4.0), lcg.next_f32(4.0)];
+            let bw = lcg.next_f32(1.0).abs() + 0.05;
+            let dims = [
+                (lcg.next_u32() % 8 + 1) as f32,
+                (lcg.next_u32() % 8 + 1) as f32,
+                (lcg.next_u32() % 8 + 1) as f32,
+            ];
+            HostLevel { origin, bw, dims }
+        };
+        let levels = [mk_level(&mut lcg), mk_level(&mut lcg), mk_level(&mut lcg)];
+        // A runtime count in {0, 1, 2, 3} — exercises the `L >= pc.brick_levels` skip (an inactive
+        // level is never tested) AND the OFF/N=1 keystone (`brick_levels == 1` is the M2 single
+        // grid).
+        let brick_levels = lcg.next_u32() % 4;
+        let lv = HostLevels {
+            levels,
+            brick_levels,
+        };
+        // Query points biased to land ON, NEAR, and FAR from the level boxes (so inside / boundary
+        // / outside are all sampled).
+        let p = [lcg.next_f32(6.0), lcg.next_f32(6.0), lcg.next_f32(6.0)];
+
+        let r = refactored_select_level(p, &lv);
+        let h = host_select_level(p, &lv);
+        assert_eq!(
+            r, h,
+            "select_level diverged at p={p:?} brick_levels={brick_levels}: refactored={r} host={h}"
+        );
+    }
+}
+
+#[test]
+fn select_level_directed_inside_boundary_outside_skip() {
+    // DIRECTED cases pinning each branch the design calls out.
+    // A single unit-cell level at the origin: origin=[0,0,0], bw=1, dims=[1,1,1] -> box [0,0,0)..[1,1,1).
+    let unit = HostLevel {
+        origin: [0.0, 0.0, 0.0],
+        bw: 1.0,
+        dims: [1.0, 1.0, 1.0],
+    };
+    let one_level = HostLevels {
+        levels: [unit, unit, unit],
+        brick_levels: 1,
+    };
+
+    // (a) INSIDE level 0 -> returns 0.
+    assert_eq!(refactored_select_level([0.5, 0.5, 0.5], &one_level), 0);
+    assert_eq!(host_select_level([0.5, 0.5, 0.5], &one_level), 0);
+
+    // (b) The lower corner `p == o` is INSIDE (`>=`).
+    assert_eq!(refactored_select_level([0.0, 0.0, 0.0], &one_level), 0);
+
+    // (c) The upper corner `p == hi` is EXCLUDED (`<`, not `<=`) -> outside -> -1.
+    assert_eq!(refactored_select_level([1.0, 0.5, 0.5], &one_level), -1);
+    assert_eq!(host_select_level([1.0, 0.5, 0.5], &one_level), -1);
+
+    // (d) OUTSIDE all -> -1.
+    assert_eq!(refactored_select_level([5.0, 5.0, 5.0], &one_level), -1);
+
+    // (e) FINEST-FIRST: a nested fixture where level 0 (smaller) and level 1 (larger) both contain
+    // the point -> the finest (level 0) wins.
+    let inner = HostLevel {
+        origin: [0.25, 0.25, 0.25],
+        bw: 1.0,
+        dims: [1.0, 1.0, 1.0],
+    }; // box [0.25..1.25)
+    let outer = HostLevel {
+        origin: [0.0, 0.0, 0.0],
+        bw: 1.0,
+        dims: [2.0, 2.0, 2.0],
+    }; // box [0..2)
+    let nested = HostLevels {
+        levels: [inner, outer, outer],
+        brick_levels: 2,
+    };
+    // p=[0.5,0.5,0.5] is inside BOTH inner (level 0) and outer (level 1) -> finest-first returns 0.
+    assert_eq!(refactored_select_level([0.5, 0.5, 0.5], &nested), 0);
+    // p=[0.1,0.1,0.1] is OUTSIDE inner (< 0.25) but inside outer (level 1) -> returns 1.
+    assert_eq!(refactored_select_level([0.1, 0.1, 0.1], &nested), 1);
+    assert_eq!(host_select_level([0.1, 0.1, 0.1], &nested), 1);
+
+    // (f) The `L >= pc.brick_levels` SKIP: the same nested fixture but brick_levels==1 only tests
+    // level 0 (inner). p=[0.1,..] is outside inner and level 1 is INACTIVE -> -1 (not 1).
+    let nested_off = HostLevels {
+        levels: [inner, outer, outer],
+        brick_levels: 1,
+    };
+    assert_eq!(refactored_select_level([0.1, 0.1, 0.1], &nested_off), -1);
+    assert_eq!(host_select_level([0.1, 0.1, 0.1], &nested_off), -1);
+
+    // (g) brick_levels==0 -> the loop breaks immediately on L=0 -> -1 (no level active).
+    let nested_zero = HostLevels {
+        levels: [inner, outer, outer],
+        brick_levels: 0,
+    };
+    assert_eq!(refactored_select_level([0.5, 0.5, 0.5], &nested_zero), -1);
+}

@@ -155,4 +155,20 @@ fn main() {
     // hand-written and is not generated.
     println!();
     print!("{}", boyko_shaderdsl::emit::emit_hlsl_b1_sor_retreat());
+    // The M4 clip-map LEVEL-SELECTOR leaf (Increment 5a — the FIRST signed-`int`-returning leaf,
+    // landing the signed-int subsystem): the `[unroll]` finest-first containment scan that returns
+    // the tightest enclosing LOD index (`return (int)L;` via `Cf::if_ret_i` + `Cf::int_from_uint`)
+    // or `-1` (`return -1;` via `Cf::ret_i` + `Cf::int_lit_signed` — a BARE signed literal, NOT a
+    // `<x>u`). The new facets: the signed-int return path (`EmitTy::Int` + `Node::IntLit`/
+    // `IntFromUint`), the `all(p >= o) && all(p < hi)` bool3 reduction (`Cf::all3_ge`/`all3_lt`),
+    // the push-constant `pc.brick_levels` read (`Cf::pc_uint`), and the `M4Level` access-text reads
+    // (`Cf::level_field_vec3`/`level_field_scalar` — `m2_levels[L].…`, the struct layout NOT
+    // modeled). The `[unroll]` loop reuses `Cf::runtime_for` (attr `[unroll]`, the bound SYMBOL
+    // `BRICK_LEVELS`); the in-loop `(int)L` return forwards through it to the function IIFE.
+    // Generated from `boyko_shaderdsl::levels::select_level_body` over the `Emit` + `EmitCf`
+    // backends. Spliced between the `// === GENERATED select_level BEGIN/END ===` sentinels INSIDE
+    // `select_level` (the SCAN SPAN only — the hand-written `int select_level(float3 p) {` signature
+    // + the closing `}` stay un-generated, framing b). The span prints at DEPTH 1 (4-space indent).
+    println!();
+    print!("{}", boyko_shaderdsl::emit::emit_hlsl_select_level());
 }

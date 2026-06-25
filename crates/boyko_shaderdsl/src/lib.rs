@@ -44,6 +44,7 @@ pub mod brick;
 pub mod cf;
 pub mod decl;
 pub mod field;
+pub mod levels;
 pub mod normal;
 pub mod refine;
 pub mod remarch;
@@ -65,6 +66,7 @@ pub use field::{
     EditView, MAX_SDF_EDITS, SDF_FAR, combine, edit_distance, kind, op, sd_box, sd_sphere,
     sdf_field_body, smax, smin,
 };
+pub use levels::{BRICK_LEVELS, select_level_body};
 pub use normal::sdf_normal_body;
 pub use refine::{
     EPS as B1_REFINE_EPS, M2_REFINE_ITERS as B1_REFINE_ITERS, M2_REFINE_RELAX as B1_REFINE_RELAX,

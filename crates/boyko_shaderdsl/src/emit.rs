@@ -66,6 +66,11 @@ enum EmitTy {
     /// or a vector form). Carried only on a [`Stmt::DeclVar`] `ty` field; no node materializes
     /// a `bool` temp (the `false`/`true` init rhs is a [`Node::BoolLit`] inline leaf).
     Bool,
+    /// An HLSL SIGNED `int` value (`select_level`'s `-1` / `(int)L` — Increment 5a). The result
+    /// type of [`Node::IntLit`] / [`Node::IntFromUint`] (both inline leaves, consumed only by a
+    /// `Stmt::Return`). No node materializes an `int` temp (the `int` return type comes from the
+    /// hand-written `int select_level` SIGNATURE, not a decl). Spells the token `int`.
+    Int,
 }
 
 /// One SSA node — a recorded field op. Operands reference earlier nodes by their
@@ -292,6 +297,43 @@ enum Node {
     /// the `Float` default, harmless since no arithmetic consumer reads it; the SAME no-`chk`
     /// discipline [`EmitCf::named_uint`] uses).
     BoolLit(bool),
+
+    // ---- Increment 5a: the SIGNED-INT subsystem + the M4Level access-text (`select_level`) ----
+    /// A SIGNED `int` LITERAL — prints the bare signed value (`-1`), DISTINCT from
+    /// [`Node::UintLit`]'s `<x>u` unsigned suffix. `select_level`'s tail `return -1;`. An inline
+    /// leaf, result type [`EmitTy::Int`], consumed ONLY by a [`Stmt::Return`].
+    IntLit(i32),
+    /// `(int)<operand>` — the HLSL value-preserving `uint -> int` cast (`select_level`'s `(int)L`).
+    /// The operand is the loop iv node (a `UintInput` printing `L`). An inline leaf (spells `(int)L`
+    /// at its single use), result type [`EmitTy::Int`].
+    IntFromUint(u32),
+    /// A PUSH-CONSTANT `uint` FIELD read by BARE TEXT — prints the literal `field` string
+    /// (`pc.brick_levels`). `sym_id` indexes [`Names::pc_in`]. `select_level`'s `L >= pc.brick_levels`
+    /// guard comparand. An inline leaf, result type [`EmitTy::Uint`] (a `uint` push-constant field).
+    PcUint(u32),
+    /// An `M4Level` array-element field read by ACCESS TEXT — prints `m2_levels[<L>].<field>`.
+    /// `(iv_id, field_id, is_vec3)`: `iv_id` references the loop iv node (a `UintInput` printing
+    /// `L`), `field_id` indexes [`Names::level_field`] (the member+swizzle text, e.g.
+    /// `origin_brick_world.xyz`). The `M4Level` STRUCT LAYOUT is NOT modeled — only the access text.
+    /// An inline leaf; its result type is [`EmitTy::Float3`] (a `.xyz` swizzle) or [`EmitTy::Float`]
+    /// (a `.w` swizzle), carried by the `is_vec3` flag.
+    LevelField {
+        iv_id: u32,
+        field_id: u32,
+        is_vec3: bool,
+    },
+    /// `p >= o` — a component-wise `float3` `>=` producing a bool3 (`OpFOrdGreaterThanEqual` over
+    /// vectors). NEVER printed alone: it is the operand of an [`Node::All3`] (`all(p >= o)`). A Mask
+    /// node (typed `Float` by `type_of`, like the other comparisons — never `chk`-typed).
+    Bool3Ge(u32, u32),
+    /// `p < hi` — the component-wise `float3` `<` analogue of [`Node::Bool3Ge`] (`OpFOrdLessThan`
+    /// over vectors). The operand of an [`Node::All3`] (`all(p < hi)`).
+    Bool3Lt(u32, u32),
+    /// `all(<bool3>)` — the HLSL `all` intrinsic reducing a component-wise vector compare
+    /// ([`Node::Bool3Ge`] / [`Node::Bool3Lt`]) to a single bool. `select_level`'s `all(p >= o)` /
+    /// `all(p < hi)`. An inline leaf (a mask, appears only inside the `&&` condition); printed
+    /// `all(<operand>)`.
+    All3(u32),
 }
 
 /// One VECTOR (`float3`/`float2`) SSA node — the normal leaf is a vector expression
@@ -396,6 +438,19 @@ fn type_of(node: Node) -> EmitTy {
         | Node::UAdd(_, _)
         | Node::UMul(_, _)
         | Node::BufferLoad(_, _) => EmitTy::Uint,
+        // Increment 5a: a push-constant `uint` field read (`pc.brick_levels`) is a `uint`.
+        Node::PcUint(_) => EmitTy::Uint,
+        // Increment 5a: the SIGNED-`int` value surfaces (`-1`, `(int)L`) are `int`.
+        Node::IntLit(_) | Node::IntFromUint(_) => EmitTy::Int,
+        // Increment 5a: an `M4Level` field read is a `float3` (`.xyz`) or `float` (`.w`), carried by
+        // the `is_vec3` flag (the `M4Level` layout is NOT modeled — only the access text + its type).
+        Node::LevelField { is_vec3, .. } => {
+            if is_vec3 {
+                EmitTy::Float3
+            } else {
+                EmitTy::Float
+            }
+        }
         // `float3`-result nodes: the parameter ref, the constructors, the vector arithmetic.
         Node::Vec3Param(_)
         | Node::Vec3FromUints(_, _, _)
@@ -435,6 +490,12 @@ fn ty_keyword(ty: EmitTy) -> &'static str {
         EmitTy::Float4 => "float4",
         // The scalar `bool` decl token — `bool name = false;` (NOT `bool1` or a vector form).
         EmitTy::Bool => "bool",
+        // The SIGNED `int` token (Increment 5a). NEVER reached today as a DECL-SITE token: no
+        // node materializes an `int` temp/local (the `int` return type comes from the hand-written
+        // `int select_level` SIGNATURE, and `IntLit`/`IntFromUint` are inline-leaf `Stmt::Return`
+        // operands, never `Stmt::DeclTemp`/`Stmt::DeclVar` `ty` fields). Spelled for exhaustiveness
+        // + any future `int` decl (a 2-line mirror).
+        EmitTy::Int => "int",
     }
 }
 
@@ -662,6 +723,14 @@ const NO_VEC4_INPUTS: &[&str] = &[];
 /// `m2_cubic_eval` — Increment 4a).
 const NO_CALL_INPUTS: &[&str] = &[];
 
+/// The default push-constant field-text table (empty — only `select_level` reads a push-constant
+/// field `pc.brick_levels` — Increment 5a).
+const NO_PC_INPUTS: &[&str] = &[];
+
+/// The default `M4Level` access-text table (empty — only `select_level` reads `m2_levels[L].…`
+/// fields — Increment 5a).
+const NO_LEVEL_FIELDS: &[&str] = &[];
+
 /// The per-trace symbolic-input name tables threaded through the printer: `float`
 /// inputs ([`Node::Input`]) and `uint` inputs ([`Node::UintInput`]) are named
 /// separately because a leaf's parameter list mixes the two (e.g. `decode_snorm8`'s
@@ -700,6 +769,14 @@ struct Names<'a> {
     /// CALLEE names (indexed by [`Node::Call2`]'s `sym_id`) — `m2_cubic_eval`. Empty for
     /// every other leaf (Increment 4a).
     call_in: &'a [&'a str],
+    /// PUSH-CONSTANT field-text (indexed by [`Node::PcUint`]'s `sym_id`) — `pc.brick_levels`.
+    /// Empty for every leaf but `select_level` (Increment 5a).
+    pc_in: &'a [&'a str],
+    /// `M4Level` ACCESS-TEXT (indexed by [`Node::LevelField`]'s `field_id`) — the member+swizzle
+    /// (`origin_brick_world.xyz` / `origin_brick_world.w` / `dims_atlas_dim.xyz`). The printer
+    /// spells `m2_levels[<L>].<level_field[id]>`. Empty for every leaf but `select_level`
+    /// (Increment 5a).
+    level_field: &'a [&'a str],
 }
 
 /// Formats one f32 literal the way the frozen HLSL writes it (`0.5`, `1.0`, `0.0`).
@@ -779,6 +856,18 @@ fn is_inline_leaf(node: Node) -> bool {
             // Increment 4b.2: a `bool` literal spells `true`/`false` inline (it is the
             // operand of a `Stmt::Return`, never a `tN` temp).
             | Node::BoolLit(_)
+            // Increment 5a: the signed-int return values (`-1`, `(int)L`) spell inline (operands of
+            // a `Stmt::Return`); the push-constant field read (`pc.brick_levels`) spells inline; the
+            // `all(...)` reduction + its component-wise `>=`/`<` operands appear only inside the `&&`
+            // condition (inlined like the other masks); the level-field read spells `m2_levels[L].…`
+            // inline at its single `temp_vec3`/`temp_float` rhs.
+            | Node::IntLit(_)
+            | Node::IntFromUint(_)
+            | Node::PcUint(_)
+            | Node::LevelField { .. }
+            | Node::Bool3Ge(_, _)
+            | Node::Bool3Lt(_, _)
+            | Node::All3(_)
     )
 }
 
@@ -877,6 +966,23 @@ fn operand_str(
         // A `bool` literal spells `true`/`false` (Increment 4b.2) — the `m2_surface_hit`
         // return value (`OpConstantTrue`/`OpConstantFalse`, NOT a `uint`).
         Node::BoolLit(b) => if b { "true".to_string() } else { "false".to_string() },
+        // ---- Increment 5a inline leaves -----------------------------------------------
+        // A SIGNED `int` literal spells the bare signed value (`-1`), NOT the `<x>u` of UintLit.
+        Node::IntLit(i) => format!("{i}"),
+        // The `(int)L` cast — the operand is the iv node (`L`), an inline leaf (no wrap).
+        Node::IntFromUint(u) => format!("(int){}", opl(u)),
+        // A push-constant `uint` field spells its bare access text (`pc.brick_levels`).
+        Node::PcUint(sym_id) => names.pc_in[sym_id as usize].to_string(),
+        // An `M4Level` field read spells `m2_levels[<L>].<field>` (the iv inline + the access text).
+        Node::LevelField { iv_id, field_id, .. } => {
+            format!("m2_levels[{}].{}", opl(iv_id), names.level_field[field_id as usize])
+        }
+        // The component-wise vector compares spell `p >= o` / `p < hi` (inside `all(...)`); both
+        // operands are inline leaves (whole-`float3` temp refs), so no wrap.
+        Node::Bool3Ge(a, b) => format!("{} >= {}", opl(a), opl(b)),
+        Node::Bool3Lt(a, b) => format!("{} < {}", opl(a), opl(b)),
+        // `all(<bool3>)` — the reduction; its operand is the `Bool3Ge`/`Bool3Lt` inline leaf.
+        Node::All3(a) => format!("all({})", opl(a)),
         // A non-leaf operand: if it was MATERIALIZED as a `tN` temp (the straight-line
         // field/normal/decode/cubic emit materializes every non-leaf via the SSA walk,
         // so `temps[id]` is always `Some` there), use the temp name. Otherwise — the CF
@@ -1173,7 +1279,17 @@ fn define_str(arena: &[Node], names: Names, temps: &[Option<String>], id: u32) -
         | Node::And2(_, _)
         | Node::Or(_, _)
         // The Increment-4a `float4` parameter `c` is an inline leaf (spelled by operand_str).
-        | Node::Vec4Param(_) => {
+        | Node::Vec4Param(_)
+        // The Increment-5a inline leaves (the signed-int return values, the push-constant field,
+        // the `all(...)` reduction + its component-wise operands, the level-field access text) are
+        // ALL spelled by `operand_str`, never materialized as a temp.
+        | Node::IntLit(_)
+        | Node::IntFromUint(_)
+        | Node::PcUint(_)
+        | Node::LevelField { .. }
+        | Node::Bool3Ge(_, _)
+        | Node::Bool3Lt(_, _)
+        | Node::All3(_) => {
             unreachable!("inline leaves are spelled by operand_str, not defined")
         }
     }
@@ -1256,6 +1372,8 @@ fn trace<F: FnOnce(&[Emit]) -> Emit>(inputs: usize, body: F) -> String {
         vars: NO_VARS,
         vec4_in: NO_VEC4_INPUTS,
         call_in: NO_CALL_INPUTS,
+        pc_in: NO_PC_INPUTS,
+        level_field: NO_LEVEL_FIELDS,
     };
     ARENA.with(|a| a.borrow_mut().clear());
     let mut ins = Vec::with_capacity(inputs);
@@ -1291,6 +1409,8 @@ fn trace_named<F: FnOnce(&[Emit], &[Emit]) -> Emit>(
         vars: NO_VARS,
         vec4_in: NO_VEC4_INPUTS,
         call_in: NO_CALL_INPUTS,
+        pc_in: NO_PC_INPUTS,
+        level_field: NO_LEVEL_FIELDS,
     };
     ARENA.with(|a| a.borrow_mut().clear());
     let mut floats = Vec::with_capacity(float_names.len());
@@ -1329,6 +1449,8 @@ fn trace_named_vec4<F: FnOnce(&[Emit], &[Emit]) -> [Emit; 4]>(
         vars: NO_VARS,
         vec4_in: NO_VEC4_INPUTS,
         call_in: NO_CALL_INPUTS,
+        pc_in: NO_PC_INPUTS,
+        level_field: NO_LEVEL_FIELDS,
     };
     ARENA.with(|a| a.borrow_mut().clear());
     let mut floats = Vec::with_capacity(float_names.len());
@@ -1763,6 +1885,14 @@ pub struct RetCellF;
 #[derive(Clone, Copy)]
 pub struct RetCellB;
 
+/// The SIGNED-`int` RETURN-VALUE cell handle on the Emit backend — a ZST (the signed value travels
+/// in the recorded [`Stmt::Return`] as a [`Node::IntLit`] / [`Node::IntFromUint`], not in a cell).
+/// The [`EmitCf`]'s [`Cf::RetCellI`] associated type (Increment 5a). Distinct type from
+/// [`RetCellB`] / [`RetCellF`] / [`RetCell`] only so the int / bool / float / uint return facets
+/// stay separate at the call site.
+#[derive(Clone, Copy)]
+pub struct RetCellI;
+
 thread_local! {
     /// The STMT block stack: the recorder pushes a [`Block`] on combinator entry
     /// (`unroll_for` / `if_`) and pops it into its parent on exit, so the top is always
@@ -1780,6 +1910,15 @@ thread_local! {
     /// The per-emit CALLEE names (`m2_cubic_eval`), indexed by [`Node::Call2`]'s `sym_id`
     /// (Increment 4a). Deduped so repeated `call2("m2_cubic_eval", ...)` calls share one id.
     static CALLS: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
+
+    /// The per-emit PUSH-CONSTANT field-text (`pc.brick_levels`), indexed by [`Node::PcUint`]'s
+    /// `sym_id` (Increment 5a). Deduped so repeated reads share one id.
+    static PC_FIELDS: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
+
+    /// The per-emit `M4Level` ACCESS-TEXT (`origin_brick_world.xyz`, ...), indexed by
+    /// [`Node::LevelField`]'s `field_id` (Increment 5a). Deduped so repeated reads of the same
+    /// member+swizzle share one id.
+    static LEVEL_FIELDS: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
 
     /// The monotone program-order temp counter (`t0`, `t1`, ...). Bumped by
     /// [`EmitCf::temp`] each time a temp is MATERIALIZED, so the `t{seq}` numbering follows
@@ -1871,6 +2010,35 @@ fn intern_call(sym: &'static str) -> u32 {
         } else {
             let id = c.len() as u32;
             c.push(sym);
+            id
+        }
+    })
+}
+
+/// Registers a push-constant field-text, returning its (deduped) `sym_id` (Increment 5a).
+fn intern_pc_field(field: &'static str) -> u32 {
+    PC_FIELDS.with(|p| {
+        let mut p = p.borrow_mut();
+        if let Some(i) = p.iter().position(|&s| s == field) {
+            i as u32
+        } else {
+            let id = p.len() as u32;
+            p.push(field);
+            id
+        }
+    })
+}
+
+/// Registers an `M4Level` access-text (the member+swizzle), returning its (deduped) `field_id`
+/// (Increment 5a).
+fn intern_level_field(field: &'static str) -> u32 {
+    LEVEL_FIELDS.with(|l| {
+        let mut l = l.borrow_mut();
+        if let Some(i) = l.iter().position(|&s| s == field) {
+            i as u32
+        } else {
+            let id = l.len() as u32;
+            l.push(field);
             id
         }
     })
@@ -2359,6 +2527,97 @@ impl Cf for EmitCf {
             rhs: push(Node::BoolLit(val)),
         });
     }
+
+    // ---- Increment 5a: the SIGNED-INT subsystem + M4Level access-text (recorder) ------
+    // On Emit the signed-int value is an `Emit` SSA-node handle (typed `int` per-node via
+    // `type_of`); the ret-cell is a ZST (the value travels in the recorded `Stmt::Return`).
+    type Int = Emit;
+    type RetCellI = RetCellI;
+
+    fn iv_uint(iv: Emit) -> Emit {
+        // The iv SSA node (a `UintInput` printing `L`) IS already typed `uint`, so the iv-as-value
+        // read is identity — the same handle, spelling `L` at every use (`L >= pc.brick_levels`,
+        // `(int)L`).
+        iv
+    }
+
+    fn int_lit_signed(x: i32) -> Emit {
+        // A SIGNED `int` literal (`-1`) — the `IntLit` node (printed bare `-1`, an inline leaf typed
+        // `Int`). DISTINCT from `uint_lit`'s `UintLit` (printed `<x>u`).
+        Emit(push(Node::IntLit(x)))
+    }
+
+    fn int_from_uint(u: Emit) -> Emit {
+        // `(int)L` — the `IntFromUint` node (printed `(int)<operand>`, an inline leaf typed `Int`).
+        // The operand is the loop iv node (`L`).
+        Emit(push(Node::IntFromUint(u.0)))
+    }
+
+    fn all3_ge(p: Emit, o: Emit) -> EmitMask {
+        // `all(p >= o)` — an `All3` over a `Bool3Ge` (a component-wise `float3` `>=`). The mask is
+        // consumed only inside the `&&` condition (an inline leaf), never `chk`-typed.
+        let cmp = push(Node::Bool3Ge(p.0, o.0));
+        EmitMask(push(Node::All3(cmp)))
+    }
+
+    fn all3_lt(p: Emit, hi: Emit) -> EmitMask {
+        // `all(p < hi)` — the upper-corner analogue (an `All3` over a `Bool3Lt`).
+        let cmp = push(Node::Bool3Lt(p.0, hi.0));
+        EmitMask(push(Node::All3(cmp)))
+    }
+
+    fn pc_uint(field: &'static str) -> Emit {
+        // A push-constant `uint` field read by BARE TEXT (`pc.brick_levels`) — a `PcUint` node
+        // (printed by `pc_in[sym_id]`, an inline leaf typed `Uint`). The field text interns into
+        // the per-emit `PC_FIELDS` table.
+        let sym_id = intern_pc_field(field);
+        Emit(push(Node::PcUint(sym_id)))
+    }
+
+    fn level_field_vec3(l: Emit, field: &'static str) -> Emit {
+        // `m2_levels[<L>].<field>` (`.xyz` swizzle) — a `LevelField` node typed `Float3`. The iv
+        // handle's id carries `L`'s spelling; the access text interns into `LEVEL_FIELDS`.
+        let field_id = intern_level_field(field);
+        Emit(push(Node::LevelField {
+            iv_id: l.0,
+            field_id,
+            is_vec3: true,
+        }))
+    }
+
+    fn level_field_scalar(l: Emit, field: &'static str) -> Emit {
+        // `m2_levels[<L>].<field>` (`.w` swizzle) — a `LevelField` node typed `Float`.
+        let field_id = intern_level_field(field);
+        Emit(push(Node::LevelField {
+            iv_id: l.0,
+            field_id,
+            is_vec3: false,
+        }))
+    }
+
+    fn if_ret_i(_cell: &RetCellI, cond: EmitMask, value: Emit) -> Flow {
+        // `if (<cond>) { return <value>; }` — the then-block is EXACTLY ONE `Stmt::Return` (the
+        // signed-int early-return guard; identical recorded shape to `if_ret_f`'s float guard).
+        STMTS.with(|s| s.borrow_mut().push(Block { stmts: Vec::new() }));
+        record_stmt(Stmt::Return(value.0));
+        let then = STMTS.with(|s| {
+            s.borrow_mut()
+                .pop()
+                .expect("invariant: the if_ret_i then block was pushed above")
+        });
+        record_stmt(Stmt::If {
+            cond: cond.0,
+            then,
+        });
+        Flow::Continue(())
+    }
+
+    fn ret_i(_cell: &RetCellI, value: Emit) -> Flow {
+        // The signed-int return — a single `Stmt::Return(value)` (the tail `return -1;`). Fall
+        // through on Emit.
+        record_stmt(Stmt::Return(value.0));
+        Flow::Continue(())
+    }
 }
 
 // ---- The STMT printer + the brick-exit generator -------------------------------
@@ -2533,6 +2792,8 @@ pub fn emit_hlsl_dist_to_brick_exit() -> String {
         vars: &vars,
         vec4_in: NO_VEC4_INPUTS,
         call_in: NO_CALL_INPUTS,
+        pc_in: NO_PC_INPUTS,
+        level_field: NO_LEVEL_FIELDS,
     };
 
     ARENA.with(|a| {
@@ -2621,6 +2882,8 @@ pub fn emit_hlsl_brick_cell_class() -> String {
         vars: NO_VARS,
         vec4_in: NO_VEC4_INPUTS,
         call_in: NO_CALL_INPUTS,
+        pc_in: NO_PC_INPUTS,
+        level_field: NO_LEVEL_FIELDS,
     };
 
     ARENA.with(|a| {
@@ -2726,6 +2989,8 @@ pub fn emit_hlsl_m2_regula_falsi() -> String {
         vars: &vars,
         vec4_in: &vec4_in,
         call_in: &call_in,
+        pc_in: NO_PC_INPUTS,
+        level_field: NO_LEVEL_FIELDS,
     };
 
     ARENA.with(|a| {
@@ -2812,6 +3077,8 @@ pub fn emit_hlsl_sdf_soft_shadow() -> String {
         vars: &vars,
         vec4_in: NO_VEC4_INPUTS,
         call_in: &call_in,
+        pc_in: NO_PC_INPUTS,
+        level_field: NO_LEVEL_FIELDS,
     };
 
     ARENA.with(|a| {
@@ -2910,6 +3177,8 @@ pub fn emit_hlsl_m2_surface_hit_refine() -> String {
         vars: &vars,
         vec4_in: NO_VEC4_INPUTS,
         call_in: &call_in,
+        pc_in: NO_PC_INPUTS,
+        level_field: NO_LEVEL_FIELDS,
     };
 
     ARENA.with(|a| {
@@ -3003,6 +3272,8 @@ pub fn emit_hlsl_b1_accept_refine() -> String {
         vars: &vars,
         vec4_in: NO_VEC4_INPUTS,
         call_in: &call_in,
+        pc_in: NO_PC_INPUTS,
+        level_field: NO_LEVEL_FIELDS,
     };
 
     ARENA.with(|a| {
@@ -3101,6 +3372,8 @@ pub fn emit_hlsl_b1_exhaustion_remarch() -> String {
         vars: &vars,
         vec4_in: NO_VEC4_INPUTS,
         call_in: &call_in,
+        pc_in: NO_PC_INPUTS,
+        level_field: NO_LEVEL_FIELDS,
     };
 
     ARENA.with(|a| {
@@ -3215,6 +3488,8 @@ pub fn emit_hlsl_b1_sor_retreat() -> String {
         vars: &vars,
         vec4_in: NO_VEC4_INPUTS,
         call_in: NO_CALL_INPUTS,
+        pc_in: NO_PC_INPUTS,
+        level_field: NO_LEVEL_FIELDS,
     };
 
     ARENA.with(|a| {
@@ -3277,6 +3552,8 @@ fn emit_hlsl_b1_decl<F: FnOnce()>(body: F) -> String {
         vars: &vars,
         vec4_in: NO_VEC4_INPUTS,
         call_in: NO_CALL_INPUTS,
+        pc_in: NO_PC_INPUTS,
+        level_field: NO_LEVEL_FIELDS,
     };
 
     ARENA.with(|a| {
@@ -3317,5 +3594,100 @@ pub fn emit_hlsl_b1_decl_exhausted() -> String {
     use crate::decl;
     emit_hlsl_b1_decl(|| {
         let _ = decl::b1_decl_exhausted_body::<EmitCf>();
+    })
+}
+
+/// Generates the HLSL `select_level` SCAN SPAN — the M4 clip-map LOD selector's `[unroll]`
+/// finest-first containment scan (the per-level `[o, hi)` box test + the `L >= pc.brick_levels`
+/// early-out + the `return (int)L;` hit + the tail `return -1;`) — by tracing the generic
+/// [`crate::levels::select_level_body`] over the `EmitCf` backend (whose `Cf::Scalar = Emit`
+/// supplies the SSA-node arithmetic), and returns ONLY the span (NOT a wrapped function).
+///
+/// Distinct from the WHOLE-function producers in returning a SPAN: the hand-written signature
+/// `int select_level(float3 p) {` + the closing `}` stay un-generated (framing (b)), so the
+/// generator emits only the statements spliced BETWEEN the `// === GENERATED select_level
+/// BEGIN/END ===` sentinels. The span is printed at DEPTH 1 (4-space `[unroll]` indent), matching
+/// the committed L1222-1234.
+///
+/// The `[unroll]` loop reuses [`Cf::runtime_for`] (attr `"[unroll]"`, the bound SYMBOL
+/// `BRICK_LEVELS`); the `M4Level` reads (`m2_levels[L].…`) + the `pc.brick_levels` read are recorded
+/// through the producer's `EmitCf::level_field_*` / `EmitCf::pc_uint` closures (on Emit these are the
+/// access-text / bare-text recorders; on Eval they would be `unreachable!`, but the Eval body uses a
+/// host-fixture closure instead).
+///
+/// The cmp-`.spv` (in `boyko_rhi_vulkan`) is the byte-identity oracle; the `select_level` text-sync
+/// test pins the committed shader span to this output.
+pub fn emit_hlsl_select_level() -> String {
+    use crate::levels;
+
+    // Fresh recorder state.
+    ARENA.with(|a| a.borrow_mut().clear());
+    STMTS.with(|s| s.borrow_mut().clear());
+    VARS.with(|v| v.borrow_mut().clear());
+    NAMED_LITS.with(|n| n.borrow_mut().clear());
+    CALLS.with(|c| c.borrow_mut().clear());
+    PC_FIELDS.with(|p| p.borrow_mut().clear());
+    LEVEL_FIELDS.with(|l| l.borrow_mut().clear());
+    TEMP_SEQ.with(|c| *c.borrow_mut() = 0);
+    TEMP_TYPES.with(|t| t.borrow_mut().clear());
+    TEMP_NAMES.with(|t| t.borrow_mut().clear());
+
+    // Seed the function body block (the bottom of the STMTS stack).
+    STMTS.with(|s| s.borrow_mut().push(Block { stmts: Vec::new() }));
+
+    // Seed the span's single input:
+    //   p → Vec3Param(0) (vec_in[0] = "p") — the world query point (the only generated-span input).
+    // The loop iv `L` is seeded INTERNALLY by `runtime_for` (a `UintInput(0)` printing `uint_in[0]`
+    // = `"L"`); the level-field / pc reads spell their bare access text (no name table seeding).
+    let p = Emit(push(Node::Vec3Param(0)));
+    let ret_out = RetCellI;
+
+    // The fixture seams: on Emit they record the access-text / bare-text nodes.
+    levels::select_level_body::<EmitCf, _, _, _>(
+        p,
+        EmitCf::level_field_vec3,
+        EmitCf::level_field_scalar,
+        || EmitCf::pc_uint("pc.brick_levels"),
+        &ret_out,
+    );
+
+    // Pop the function body block and print it.
+    let body_block = STMTS.with(|s| {
+        s.borrow_mut()
+            .pop()
+            .expect("invariant: the function body block was pushed above")
+    });
+
+    // `p` is the only `float3` parameter (vec_in); the loop iv `L` is the only `uint` name. The
+    // level-field / pc reads carry their own text tables.
+    let float_in: [&str; 0] = [];
+    let vec_in = ["p"];
+    let pc_in = PC_FIELDS.with(|p| p.borrow().clone());
+    let level_field = LEVEL_FIELDS.with(|l| l.borrow().clone());
+    let names = Names {
+        float_in: &float_in,
+        uint_in: &["L"],
+        vec_in: &vec_in,
+        uint3_in: NO_UINT3_INPUTS,
+        buf_in: NO_BUF_INPUTS,
+        out_in: NO_OUT_INPUTS,
+        named_lit: NO_NAMED_LITS,
+        vars: NO_VARS,
+        vec4_in: NO_VEC4_INPUTS,
+        call_in: NO_CALL_INPUTS,
+        pc_in: &pc_in,
+        level_field: &level_field,
+    };
+
+    ARENA.with(|a| {
+        let arena = a.borrow();
+        let mut span = String::new();
+        // The whole span is the runtime `Stmt::Loop` (header `[unroll] for (uint L = 0u; L <
+        // BRICK_LEVELS; ++L)`, body: the `L >= pc.brick_levels` `If { Break }`, the DeclTemp o/bw/hi,
+        // the composite containment `If { Return (int)L }`) + the tail `Stmt::Return(-1)` — a flat
+        // in-order walk at DEPTH 1 (4-space indent), matching the committed L1222-1234. NO
+        // function-signature wrap (the span is spliced inside the hand-written `select_level`).
+        print_block(&body_block, &arena, names, 1, &mut span);
+        span
     })
 }

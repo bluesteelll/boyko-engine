@@ -596,6 +596,104 @@ pub trait Cf {
     /// whose `rhs` is a [`Node::BoolLit`] (`hit = true;`, reusing the proven `Stmt::Assign`
     /// printer + the bool-literal node). The re-march's in-loop `hit = true;` accept.
     fn set_bool_var(v: &Self::BoolVar, val: bool);
+
+    // ---- Increment 5a: the SIGNED-INT subsystem + the M4Level access-text (`select_level`) ----
+    //
+    // `select_level` (`sdf_gbuffer_composite.hlsl:1221`) scans the nested clip-map levels for the
+    // tightest enclosing LOD, returning a SIGNED `int` (`return (int)L;` inside, `return -1;` at
+    // the tail). The facets below land the signed-int return path — distinct from the `uint` return
+    // ([`ret`](Self::ret)) by spelling a SIGNED literal `-1` (NOT `<x>u`) + an `(int)L` cast — plus
+    // the `all(p >= o) && all(p < hi)` bool3 reduction and the M4Level access-text reads. The
+    // `[unroll]` loop reuses [`runtime_for`](Self::runtime_for) (attr `"[unroll]"`, the bound SYMBOL
+    // `BRICK_LEVELS`); the level-field / pc reads are THREADED CLOSURES on Eval (the [`call1`](Self::
+    // call1) discipline — these hooks are the EMIT recorders, `unreachable!` on Eval).
+
+    /// The SIGNED-`int` value type the `select_level` return carries — `i32` on Eval (the host
+    /// fixture's level index / the `-1` outside sentinel), the SSA-node handle [`Scalar`](Self::
+    /// Scalar) on Emit (a handle carrying [`crate::emit`]'s `int` [`crate::emit::EmitTy`]). DISTINCT
+    /// from [`Uint`](Self::Uint) so the return prints a SIGNED literal (`-1`, NOT `4294967295u`) and
+    /// an `(int)L` cast.
+    type Int: Copy;
+
+    /// Reads the `[unroll]` loop INDUCTION VARIABLE as a `uint` VALUE — `select_level`'s `L` used in
+    /// both `L >= pc.brick_levels` (a `uint` `>=`) and `(int)L` (the cast). The iv-as-value read
+    /// (the `dist_to_brick_exit` `p[a]` discipline). On Eval `iv as u32` (the host `usize` counter
+    /// narrowed — `L < BRICK_LEVELS = 3` always fits); on Emit the iv SSA node IS already typed
+    /// `uint` (a `UintInput` printing `L`), so identity. DISTINCT from [`index`](Self::index) (which
+    /// indexes a `float3` PARAMETER by the iv); this exposes the iv's own `uint` value.
+    fn iv_uint(iv: Self::Iv) -> Self::Uint;
+
+    /// The SIGNED-`int` RETURN-VALUE cell (`Cell<i32>` on Eval — the body-local cell the
+    /// function-scope IIFE reads after an early in-loop `return (int)L`; a ZST on Emit, the value
+    /// travels in the recorded `Stmt::Return`). The `int` analogue of [`RetCellF`](Self::RetCellF) /
+    /// [`RetCellB`](Self::RetCellB). Owned, passed by `&` to [`ret_i`](Self::ret_i) /
+    /// [`if_ret_i`](Self::if_ret_i).
+    type RetCellI;
+
+    /// A SIGNED-`int` LITERAL — `x` on both backends as the VALUE, but spelled BARE (`-1`, NOT a
+    /// `<x>u` unsigned suffix) on Emit. `select_level`'s tail `return -1;`. On Eval returns `x`; on
+    /// Emit records a [`crate::emit`] `IntLit` node (printed `-1`, an inline leaf typed
+    /// [`Int`](Self::Int)). DISTINCT from [`uint_lit`](Self::uint_lit) (which spells `<x>u`).
+    fn int_lit_signed(x: i32) -> Self::Int;
+
+    /// `(int)<uint>` — the HLSL value-preserving `uint -> int` cast (`select_level`'s `(int)L`). On
+    /// Eval `u as i32` (the in-range cast — `L < BRICK_LEVELS = 3` always fits an `i32`); on Emit a
+    /// [`crate::emit`] `IntFromUint` node (printed `(int)L`, an inline leaf typed [`Int`](Self::
+    /// Int)). The ONLY non-literal `int`-typed value surface.
+    fn int_from_uint(u: Self::Uint) -> Self::Int;
+
+    /// `all(p >= o)` — a component-wise `float3` `>=` (`p >= o`, a bool3) reduced by the HLSL `all`
+    /// intrinsic to a single [`Mask`](FieldScalar::Mask). `select_level`'s lower-corner containment
+    /// test. On Eval the three lanes are compared and ANDed (`p.x>=o.x && p.y>=o.y && p.z>=o.z`); on
+    /// Emit an `All3(Bool3Ge(p, o))` node printed `all(p >= o)`.
+    fn all3_ge(p: Self::Vec3f, o: Self::Vec3f) -> <Self::Scalar as FieldScalar>::Mask;
+
+    /// `all(p < hi)` — the upper-corner analogue of [`all3_ge`](Self::all3_ge) (a component-wise
+    /// `float3` `<` reduced by `all`). `select_level`'s exclusive upper bound (`p == hi` is EXCLUDED
+    /// — the `<`, not `<=`, so the boundary belongs to the next cell). On Emit an `All3(Bool3Lt(p,
+    /// hi))` node printed `all(p < hi)`.
+    fn all3_lt(p: Self::Vec3f, hi: Self::Vec3f) -> <Self::Scalar as FieldScalar>::Mask;
+
+    /// Reads a PUSH-CONSTANT `uint` FIELD by its bare text (`pc.brick_levels`) — `select_level`'s
+    /// runtime level count, the `[unroll]` loop's early-out guard (`if (L >= pc.brick_levels) break;`).
+    /// On Eval this hook is the EMIT recorder routed around by a threaded closure (the [`call1`](Self::
+    /// call1) discipline), so it is UNREACHED (`unreachable!`); on Emit it records a [`crate::emit`]
+    /// `PcUint` node printing the bare `field` text. `field` is the LITERAL HLSL text (`"pc.brick_levels"`).
+    fn pc_uint(field: &'static str) -> Self::Uint;
+
+    /// Reads a `float3` swizzle of an `M4Level` array element by ACCESS TEXT — `m2_levels[<L>].<field>`
+    /// (`select_level`'s `m2_levels[L].origin_brick_world.xyz` / `m2_levels[L].dims_atlas_dim.xyz`).
+    /// `field` carries the member + swizzle (`"origin_brick_world.xyz"`). The `M4Level` STRUCT LAYOUT
+    /// is NOT modeled — only the access text. On Eval this hook is the EMIT recorder routed around by
+    /// a threaded closure (UNREACHED, `unreachable!`); on Emit a [`crate::emit`] `LevelField` node
+    /// printing `m2_levels[<L>].<field>`.
+    fn level_field_vec3(l: Self::Iv, field: &'static str) -> Self::Vec3f;
+
+    /// Reads a SCALAR `float` swizzle of an `M4Level` array element by ACCESS TEXT —
+    /// `m2_levels[<L>].<field>` (`select_level`'s `m2_levels[L].origin_brick_world.w`). The scalar
+    /// analogue of [`level_field_vec3`](Self::level_field_vec3) (a `.w` swizzle). On Eval this hook
+    /// is the EMIT recorder routed around by a threaded closure (UNREACHED, `unreachable!`); on Emit
+    /// a [`crate::emit`] `LevelField` node printing `m2_levels[<L>].<field>` (typed `float`).
+    fn level_field_scalar(l: Self::Iv, field: &'static str) -> Self::Scalar;
+
+    /// `if (cond) { return <int>; }` — the SIGNED-`int` early-return guard (the `int` analogue of
+    /// [`if_ret_f`](Self::if_ret_f) / [`if_ret`](Self::if_ret)). On Eval: when `cond`, `value` is
+    /// deposited into the [`RetCellI`](Self::RetCellI) (via `&cell`) and a [`Break`](LoopOp::Return)
+    /// is returned (the body's `?` forwards it through [`runtime_for`](Self::runtime_for) to the
+    /// function-scope IIFE, skipping the tail); else FALL THROUGH. On Emit: records a `Stmt::If` whose
+    /// then-block is EXACTLY ONE `Stmt::Return(value)`. `select_level`'s `if (all && all) { return
+    /// (int)L; }`.
+    fn if_ret_i(
+        cell: &Self::RetCellI,
+        cond: <Self::Scalar as FieldScalar>::Mask,
+        value: Self::Int,
+    ) -> Flow;
+
+    /// The SIGNED-`int` function-return (the `int` analogue of [`ret_f`](Self::ret_f) /
+    /// [`ret`](Self::ret)). On Eval deposits `value` into the [`RetCellI`](Self::RetCellI) and
+    /// returns [`Break`](LoopOp::Return); on Emit records a single `Stmt::Return(value)`.
+    /// `select_level`'s tail `return -1;`.
+    fn ret_i(cell: &Self::RetCellI, value: Self::Int) -> Flow;
 }
 
 /// The control-flow EVAL backend — REAL host `for`/`if`/`continue`, a unit ZST.
@@ -1030,5 +1128,88 @@ impl Cf for EvalCf {
     #[inline]
     fn set_bool_var(v: &core::cell::Cell<bool>, val: bool) {
         v.set(val);
+    }
+
+    // ---- Increment 5a: the SIGNED-INT subsystem + M4Level access-text (native host) ----
+    type Int = i32;
+    type RetCellI = core::cell::Cell<i32>;
+
+    #[inline]
+    fn iv_uint(iv: usize) -> u32 {
+        // The host `for` counter narrowed to a `uint` — `L < BRICK_LEVELS = 3` always fits a `u32`.
+        iv as u32
+    }
+
+    #[inline]
+    fn int_lit_signed(x: i32) -> i32 {
+        // The literal IS its value; the bare (vs `<x>u`) spelling is an Emit-only printing concern.
+        x
+    }
+
+    #[inline]
+    fn int_from_uint(u: u32) -> i32 {
+        // `u as i32` — the in-range value-preserving cast (`L < BRICK_LEVELS = 3` always fits an
+        // `i32`), the byte-mirror of HLSL's `(int)L` (`OpBitcast`/`OpUConvert` for a small index).
+        u as i32
+    }
+
+    #[inline]
+    fn all3_ge(p: [f32; 3], o: [f32; 3]) -> bool {
+        // `all(p >= o)` — the three lanes ANDed (the host reduction of the GPU `all` intrinsic over
+        // a component-wise `>=`). Eager (both comparands are pure float reads).
+        p[0] >= o[0] && p[1] >= o[1] && p[2] >= o[2]
+    }
+
+    #[inline]
+    fn all3_lt(p: [f32; 3], hi: [f32; 3]) -> bool {
+        // `all(p < hi)` — the upper-corner analogue (strict `<`: `p == hi` is EXCLUDED).
+        p[0] < hi[0] && p[1] < hi[1] && p[2] < hi[2]
+    }
+
+    #[inline]
+    fn pc_uint(_field: &'static str) -> u32 {
+        // On Eval the push-constant `pc.brick_levels` is read through the THREADED CLOSURE the
+        // generic body carries (the `call1` field-call seam discipline) — NOT through this hook,
+        // which is the EMIT bare-text recorder. The Eval body never calls `Cf::pc_uint` (it calls
+        // the closure directly), so this is UNREACHED on Eval. A panic is the honest signal.
+        unreachable!(
+            "Cf::pc_uint is the EMIT bare-text recorder; the Eval body reads pc.brick_levels \
+             through the threaded fixture closure, not this hook"
+        )
+    }
+
+    #[inline]
+    fn level_field_vec3(_l: usize, _field: &'static str) -> [f32; 3] {
+        // On Eval the `m2_levels[L].<field>` read is served by the THREADED CLOSURE indexing the
+        // host fixture (the `call1` discipline) — NOT through this hook, the EMIT access-text
+        // recorder. UNREACHED on Eval; a panic is the honest signal.
+        unreachable!(
+            "Cf::level_field_vec3 is the EMIT access-text recorder; the Eval body reads the level \
+             fixture through the threaded closure, not this hook"
+        )
+    }
+
+    #[inline]
+    fn level_field_scalar(_l: usize, _field: &'static str) -> f32 {
+        unreachable!(
+            "Cf::level_field_scalar is the EMIT access-text recorder; the Eval body reads the level \
+             fixture through the threaded closure, not this hook"
+        )
+    }
+
+    #[inline]
+    fn if_ret_i(cell: &core::cell::Cell<i32>, cond: bool, value: i32) -> Flow {
+        if cond {
+            cell.set(value);
+            core::ops::ControlFlow::Break(LoopOp::Return)
+        } else {
+            core::ops::ControlFlow::Continue(())
+        }
+    }
+
+    #[inline]
+    fn ret_i(cell: &core::cell::Cell<i32>, value: i32) -> Flow {
+        cell.set(value);
+        core::ops::ControlFlow::Break(LoopOp::Return)
     }
 }
