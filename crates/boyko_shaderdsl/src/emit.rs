@@ -254,6 +254,13 @@ enum Node {
     /// `float`). Materialized as a `float` temp (`m2_regula_falsi`'s `float f_mid =
     /// m2_cubic_eval(c, mid);`). Result type [`EmitTy::Float`].
     Call2 { sym_id: u32, a: u32, b: u32 },
+    /// A CALL to a frozen hand-written shader function of ONE `float3` arg returning a
+    /// `float` — `field_distance(p + L * t)` (Inc 4b). `sym_id` indexes [`Names::call_in`]
+    /// (the SAME table [`Node::Call2`] uses — `intern_call`); `a` the single `float3`
+    /// argument node id. The float3→float analogue of [`Node::Call2`]; distinct from
+    /// [`Node::FieldCall`] which hardcodes the callee `sdf`. Result type [`EmitTy::Float`]
+    /// (via [`type_of`]'s default arm, as for `Call2`).
+    Call1 { sym_id: u32, a: u32 },
 }
 
 /// One VECTOR (`float3`/`float2`) SSA node — the normal leaf is a vector expression
@@ -1009,6 +1016,13 @@ fn define_str(arena: &[Node], names: Names, temps: &[Option<String>], id: u32) -
             chk(a, EmitTy::Float4);
             format!("{}({}, {})", names.call_in[sym_id as usize], op(a), op(b))
         }
+        Node::Call1 { sym_id, a } => {
+            // `field_distance(p + L * t)` — a frozen single-`float3`-arg call site (Inc 4b).
+            // The arg spells at `Root` (a function-call arg, position-irrelevant) and is a
+            // `float3` (the `p + L * t` probe point), checked `Float3`.
+            chk(a, EmitTy::Float3);
+            format!("{}({})", names.call_in[sym_id as usize], op(a))
+        }
         Node::FieldCall(_) => {
             // `FieldCall` belongs to the NORMAL leaf (a vector expression printed by
             // `sexpr_str`/`vexpr_str`), never to the scalar field body's printer.
@@ -1614,6 +1628,9 @@ enum Stmt {
     },
     /// `continue;` — the loop-continue (skip the rest of the iteration).
     Continue,
+    /// `break;` — the loop-break (exit the loop). Recorded by [`EmitCf::brk`] (Inc 4b);
+    /// mirrors [`Stmt::Continue`]. `sdf_soft_shadow`'s `if (t > T_MAX) { break; }`.
+    Break,
     /// `return <expr>;` — a function return. LIVE in Increment 3: recorded by
     /// [`EmitCf::ret`] / [`EmitCf::if_ret`] (the SOLE return mechanism for the early-return
     /// marcher `brick_cell_class`). The brick-exit (Increment 1) spells its single final
@@ -1863,6 +1880,15 @@ impl Cf for EmitCf {
         Flow::Break(LoopOp::Continue)
     }
 
+    fn brk() -> Flow {
+        // SIDE EFFECT: record a `break` into the current (then) block — mirrors `cont`. The
+        // returned `Break(LoopOp::Break)` is ignored by `if_`'s emit (the break is captured
+        // structurally inside the `Stmt::If`; the recorder keeps recording the live tail);
+        // on Eval it is the real loop-break token `runtime_for` consumes.
+        record_stmt(Stmt::Break);
+        Flow::Break(LoopOp::Break)
+    }
+
     // ---- Increment 3 typed facets (the brick-cell value model recorder) -------------
     // On Emit every value is an `Emit` SSA-node handle; the out-param / buffer / ret-cell
     // are NAME handles (the value travels in the recorded statement, not in a cell).
@@ -2029,6 +2055,14 @@ impl Cf for EmitCf {
             a: a.0,
             b: b.0,
         }))
+    }
+
+    fn call1(fn_sym: &'static str, a: Emit) -> Emit {
+        // `field_distance(p + L * t)` — a frozen single-`float3`-arg call site (Inc 4b). The
+        // callee name interns into the SAME per-emit `CALLS` table `call2` uses; `a` is the
+        // single `float3` argument node id.
+        let sym_id = intern_call(fn_sym);
+        Emit(push(Node::Call1 { sym_id, a: a.0 }))
     }
 
     fn runtime_for<F: FnMut(Emit) -> Flow>(
@@ -2215,6 +2249,7 @@ fn print_block(block: &Block, arena: &[Node], names: Names, depth: usize, out: &
                 out.push_str(&format!("{pad}}}\n"));
             }
             Stmt::Continue => out.push_str(&format!("{pad}continue;\n")),
+            Stmt::Break => out.push_str(&format!("{pad}break;\n")),
             Stmt::Return(expr) => {
                 let expr_s = inline_expr(arena, names, &[], *expr);
                 out.push_str(&format!("{pad}return {expr_s};\n"));
@@ -2489,5 +2524,91 @@ pub fn emit_hlsl_m2_regula_falsi() -> String {
         format!(
             "float m2_regula_falsi(float4 c, float lo, float hi, float f_lo, float f_hi) {{\n{body}}}\n"
         )
+    })
+}
+
+/// Generates the HLSL `sdf_soft_shadow` LOOP+TAIL SPAN — the first marcher `[loop]` (the
+/// fixed-budget penumbra-min cone-trace), with the `field_distance(p + L * t)` call site, the
+/// in-loop occluder-hit early return, and the `t > T_MAX` BREAK — by tracing the generic
+/// [`crate::shadow::sdf_soft_shadow_body`] over the `EmitCf` backend (whose `Cf::Scalar =
+/// Emit` supplies the SSA-node arithmetic), and returns ONLY the span
+/// (`    float res = 1.0;\n    float t = SHADOW_MINT;\n    [loop]\n    for ... { ... }\n
+/// return clamp(res, 0.0, 1.0);\n`) — NOT a wrapped function.
+///
+/// Distinct from [`emit_hlsl_m2_regula_falsi`] (a WHOLE function) in returning a SPAN only:
+/// the `dot(n, L)` early-return PREAMBLE stays HAND-WRITTEN inline above the
+/// `// === GENERATED sdf_soft_shadow BEGIN ===` sentinel (framing (b)), so the generator emits
+/// only the statements spliced BETWEEN the sentinels inside `sdf_soft_shadow`. The span is
+/// printed at depth 1 (4-space indent), matching the committed L454-468.
+///
+/// The cmp-`.spv` (in `boyko_rhi_vulkan`) is the byte-identity oracle; the
+/// `sdf_soft_shadow` text-sync test pins the committed shader span to this output.
+pub fn emit_hlsl_sdf_soft_shadow() -> String {
+    use crate::shadow;
+
+    // Fresh recorder state.
+    ARENA.with(|a| a.borrow_mut().clear());
+    STMTS.with(|s| s.borrow_mut().clear());
+    VARS.with(|v| v.borrow_mut().clear());
+    NAMED_LITS.with(|n| n.borrow_mut().clear());
+    CALLS.with(|c| c.borrow_mut().clear());
+    TEMP_SEQ.with(|c| *c.borrow_mut() = 0);
+    TEMP_TYPES.with(|t| t.borrow_mut().clear());
+    TEMP_NAMES.with(|t| t.borrow_mut().clear());
+
+    // Seed the function body block (the bottom of the STMTS stack).
+    STMTS.with(|s| s.borrow_mut().push(Block { stmts: Vec::new() }));
+
+    // Seed the three `float3` parameters as `Vec3Param` markers (the whole-`float3` value
+    // model `vec3_add`/`vec3_mul_scalar` operate on):
+    //   p → Vec3Param(0) (vec_in[0] = "p")
+    //   n → Vec3Param(1) (vec_in[1] = "n")  — consumed only by the hand-written preamble
+    //                                          (UNUSED in the generated span)
+    //   L → Vec3Param(2) (vec_in[2] = "L")
+    let p = Emit(push(Node::Vec3Param(0)));
+    let n = Emit(push(Node::Vec3Param(1)));
+    let l = Emit(push(Node::Vec3Param(2)));
+    let out = RetCellF;
+
+    // The field-distance seam: on Emit it records a `field_distance(p + L * t)` call node.
+    shadow::sdf_soft_shadow_body::<EmitCf, _>(p, n, l, |q| EmitCf::call1("field_distance", q), &out);
+
+    // Pop the function body block and print it.
+    let body_block = STMTS.with(|s| {
+        s.borrow_mut()
+            .pop()
+            .expect("invariant: the function body block was pushed above")
+    });
+
+    // No scalar `float` parameters — `p`/`n`/`L` are all `float3` (vec_in).
+    let float_in: [&str; 0] = [];
+    let vec_in = ["p", "n", "L"];
+    let named_lit = NAMED_LITS.with(|n| n.borrow().clone());
+    let call_in = CALLS.with(|c| c.borrow().clone());
+    let vars = VARS.with(|v| v.borrow().clone());
+    let names = Names {
+        float_in: &float_in,
+        uint_in: NO_UINT_INPUTS,
+        vec_in: &vec_in,
+        uint3_in: NO_UINT3_INPUTS,
+        buf_in: NO_BUF_INPUTS,
+        out_in: NO_OUT_INPUTS,
+        named_lit: &named_lit,
+        vars: &vars,
+        vec4_in: NO_VEC4_INPUTS,
+        call_in: &call_in,
+    };
+
+    ARENA.with(|a| {
+        let arena = a.borrow();
+        let mut span = String::new();
+        // The whole span is recorded statements (DeclVar res/t, the runtime `Stmt::Loop` with
+        // its DeclTemp d, the min `Stmt::Assign res`, the in-loop occluder-hit `If { Return }`,
+        // the step `Stmt::Assign t`, the `t > T_MAX` `If { Break }`) + the tail
+        // `Stmt::Return(clamp01)` — a flat in-order walk at depth 1 (4-space indent), matching
+        // the committed L454-468. NO function-signature wrap (the span is spliced inside the
+        // hand-written `sdf_soft_shadow`).
+        print_block(&body_block, &arena, names, 1, &mut span);
+        span
     })
 }

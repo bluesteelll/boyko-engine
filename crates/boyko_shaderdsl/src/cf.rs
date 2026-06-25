@@ -169,6 +169,17 @@ pub trait Cf {
     /// `?`-propagated out of the loop body to skip the rest of the iteration.
     fn cont() -> Flow;
 
+    /// The loop-BREAK token (a [`ControlFlow::Break`]`(`[`LoopOp::Break`]`)`) — the Inc-4b
+    /// PRODUCER of the break payload [`unroll_for`](Self::unroll_for)/[`runtime_for`](Self::
+    /// runtime_for) already CONSUME (cf.rs `Break` arms, tested). Mirrors [`cont`](Self::cont):
+    /// `?`-propagated out of the loop body (typically through [`if_`](Self::if_) as `C::if_(
+    /// cond, C::brk)?`) to EXIT the loop. On Eval it returns `Break(LoopOp::Break)` (which
+    /// [`runtime_for`](Self::runtime_for) maps to a real `break` then returns
+    /// `Flow::Continue(())`, so the post-loop tail runs); on Emit it records a `Stmt::Break`
+    /// then returns the same token (the recorder keeps recording the live tail — the break is
+    /// captured structurally inside the enclosing `Stmt::If`).
+    fn brk() -> Flow;
+
     // ---- Increment 3 typed facets (the `brick_cell_class` value model) -----------
     //
     // A `uint` class + a `float3` cell_min out-param + a `StructuredBuffer<uint>` load
@@ -372,6 +383,18 @@ pub trait Cf {
     /// (the closure passed by the generic body); on Emit, records a `Node::Call2`.
     fn call2(fn_sym: &'static str, a: Self::Vec4f, b: Self::Scalar) -> Self::Scalar;
 
+    /// A call to a FROZEN hand-written shader function of ONE `float3` arg returning a
+    /// `float` — `field_distance(p + L * t)` (Inc 4b). The float3→float analogue of
+    /// [`call2`](Self::call2) (whose `float4,float` signature is NOT reusable). `fn_sym` is
+    /// the callee name (interned, so ANY callee — `field_distance` now,
+    /// `brick_cell_class`/`select_level` later — not the hardcoded `sdf` of
+    /// [`crate::field`]'s field-call leaf); `a` the single [`Vec3f`](Self::Vec3f) argument.
+    /// On Eval the host evaluates the frozen function directly through the THREADED CLOSURE
+    /// the generic body carries (the A1 field-call seam — like [`call2`](Self::call2)'s
+    /// `m2_cubic_eval` closure), so this hook is UNREACHED on Eval (`unreachable!`, the
+    /// honest-panic discipline — NOT a wrong value); on Emit it records a `Node::Call1`.
+    fn call1(fn_sym: &'static str, a: Self::Vec3f) -> Self::Scalar;
+
     /// Runs a RUNTIME `for (uint <iv> = 0u; <iv> < <bound_sym>; ++<iv>)` over `body`. THE
     /// new control-flow construct (Inc 4a) — the FIRST genuine runtime `[loop]` (an
     /// `OpLoop`, vs the `[unroll]` of [`unroll_for`](Self::unroll_for)). `attr` is the loop
@@ -532,6 +555,14 @@ impl Cf for EvalCf {
     #[inline]
     fn cont() -> Flow {
         core::ops::ControlFlow::Break(LoopOp::Continue)
+    }
+
+    #[inline]
+    fn brk() -> Flow {
+        // The loop-break token. `runtime_for`/`unroll_for` CONSUME it (the `Break(Break)`
+        // arms map it to a real `continue`/`break`); their consumer arms already exist+tested
+        // (this is the matching PRODUCER, Inc 4b).
+        core::ops::ControlFlow::Break(LoopOp::Break)
     }
 
     // ---- Increment 3 typed facets (native host: real casts, real ||, Cell out-param) ----
@@ -710,6 +741,19 @@ impl Cf for EvalCf {
         // UNREACHED on Eval. A panic is the honest signal instead of a wrong value.
         unreachable!(
             "Cf::call2 is the EMIT call-site recorder; the Eval body invokes the frozen \
+             callee through the threaded closure, not this hook"
+        )
+    }
+
+    #[inline]
+    fn call1(_fn_sym: &'static str, _a: [f32; 3]) -> f32 {
+        // On Eval the frozen callee (`field_distance`) is invoked through the `field` closure
+        // the generic body threads (the A1 field-call seam, like `m2_regula_falsi_body`'s
+        // `m2_cubic_eval` closure) — NOT through this hook, which is the EMIT call-site
+        // recorder. The Eval body never calls `Cf::call1` (it calls the closure directly), so
+        // this is UNREACHED on Eval. A panic is the honest signal instead of a wrong value.
+        unreachable!(
+            "Cf::call1 is the EMIT call-site recorder; the Eval body invokes the frozen \
              callee through the threaded closure, not this hook"
         )
     }

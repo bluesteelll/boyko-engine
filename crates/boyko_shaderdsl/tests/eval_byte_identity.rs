@@ -1354,3 +1354,137 @@ fn evalcf_is_zst_inc4a() {
     // backend marker).
     assert_eq!(std::mem::size_of::<EvalCf>(), 0, "EvalCf must remain a ZST");
 }
+
+#[test]
+fn evalcf_if_guarded_brk_breaks_then_post_loop_tail_runs() {
+    // Inc 4b — the GENUINELY-NEW Eval control path: an `if_`-guarded `brk()` (the PRODUCER,
+    // `C::if_(cond, C::brk)?`) propagated through `runtime_for` => a REAL `break` => the loop
+    // CONSUMES it (returns `Continue`) => the POST-LOOP tail RUNS. This is DISTINCT from
+    // `runtime_for_control_table_drives_each_arm`'s ARM 3, which returns
+    // `Flow::Break(LoopOp::Break)` DIRECTLY (the consumer-only arm); here the break flows
+    // through the `brk()` producer + `if_`'s `?` (the exact shape `sdf_soft_shadow`'s
+    // `if (t > T_MAX) { break; }` uses).
+    use boyko_shaderdsl::cf::{Cf, Flow};
+    use boyko_shaderdsl::scalar::FieldScalar;
+
+    // A counter incremented each iteration; `brk()` fires (via `if_`) on i==4. The increment
+    // tail runs for i=0,1,2,3 only -> counter == 4. A SECOND post-loop counter proves the
+    // tail after the loop executes (the break was consumed, not forwarded).
+    let counter = EvalCf::decl_var("counter", 0.0);
+    let tail_ran = EvalCf::decl_var("tail_ran", 0.0);
+    let flow = EvalCf::runtime_for("[loop]", "i", "MAX_IT", 128, |i| -> Flow {
+        // The `brk()` PRODUCER through `if_`'s `?` — the live-tail (the increment below) is
+        // SKIPPED on the breaking iteration, and `runtime_for` consumes the break.
+        EvalCf::if_((i == 4).then_some(()).is_some(), EvalCf::brk)?;
+        let cur = EvalCf::get_var(&counter);
+        EvalCf::set_var(&counter, cur.add(1.0));
+        Flow::Continue(())
+    });
+    // The loop CONSUMED the break -> it returns `Continue` (the function tail runs).
+    assert_eq!(
+        flow,
+        Flow::Continue(()),
+        "an if_-guarded brk is CONSUMED by runtime_for -> the loop returns Continue (tail runs)"
+    );
+    // The increment tail ran for i=0,1,2,3 only (skipped on the breaking i==4).
+    assert_eq!(
+        EvalCf::get_var(&counter).to_bits(),
+        4.0f32.to_bits(),
+        "the brk on i==4 runs the increment tail for i=0..3 only (4 increments)"
+    );
+    // The POST-LOOP tail runs (the genuinely-new observable: the break did NOT forward out of
+    // the IIFE — it was consumed, so the statement after the loop executes).
+    EvalCf::set_var(&tail_ran, 1.0);
+    assert_eq!(
+        EvalCf::get_var(&tail_ran).to_bits(),
+        1.0f32.to_bits(),
+        "the post-loop tail must RUN (the consumed brk does not skip it)"
+    );
+}
+
+// ======================================================================
+// Inc 4b — the `sdf_soft_shadow` CONTROL-FLOW Eval oracle.
+//
+// A frozen HOST mirror of the committed `sdf_soft_shadow` LOOP+TAIL span (the L454-468
+// statements; the `dot(n,L)` preamble stays out — the generated span never sees it) threading
+// the SAME host `field` closure the eDSL body uses. The eDSL `sdf_soft_shadow_body::<EvalCf>`
+// reproduces this CONTROL FLOW (the occluder-hit early return, the `t > T_MAX` break, the
+// budget exhaustion, the penumbra-min accumulation) — SCOPED TO CONTROL FLOW (the cmp-`.spv`
+// is the byte-identity oracle; an Eval ULP wobble does not block a green-`.spv` increment).
+// ======================================================================
+
+// The committed tuning consts (mirror `boyko_shaderdsl::shadow`'s values).
+const FROZEN_SHADOW_K: f32 = 8.0;
+const FROZEN_SHADOW_MINT: f32 = 16.0 * 0.0005;
+const FROZEN_SHADOW_MINT_STEP: f32 = 16.0 * 0.0005;
+const FROZEN_SHADOW_HIT_EPS: f32 = 2.0 * 0.001;
+// The committed GPU literal VERBATIM (NOT `SQRT_2` — a different f32 bit pattern); the eDSL
+// const it mirrors carries the same allow for the same reason.
+#[allow(clippy::approx_constant, clippy::excessive_precision)]
+const FROZEN_FIELD_LIPSCHITZ_L: f32 = 1.41421356;
+const FROZEN_T_MAX: f32 = 10.0;
+const FROZEN_MAX_IT: usize = 128;
+
+/// Verbatim hand-mirror of the committed `sdf_soft_shadow` LOOP+TAIL span (the L454-468
+/// statements), threading a host `field` closure (`p + L * t -> distance`). The reference the
+/// eDSL `sdf_soft_shadow_body::<EvalCf>` control flow is locked against.
+fn frozen_sdf_soft_shadow<Fld: Fn([f32; 3]) -> f32>(p: [f32; 3], l: [f32; 3], field: &Fld) -> f32 {
+    let mut res = 1.0f32;
+    let mut t = FROZEN_SHADOW_MINT;
+    for _ in 0..FROZEN_MAX_IT {
+        let q = [p[0] + l[0] * t, p[1] + l[1] * t, p[2] + l[2] * t];
+        let d = field(q);
+        res = res.min(FROZEN_SHADOW_K * d / t);
+        if d < FROZEN_SHADOW_HIT_EPS {
+            return 0.0;
+        }
+        t += (d / FROZEN_FIELD_LIPSCHITZ_L).max(FROZEN_SHADOW_MINT_STEP);
+        if t > FROZEN_T_MAX {
+            break;
+        }
+    }
+    res.clamp(0.0, 1.0)
+}
+
+/// The eDSL `sdf_soft_shadow_body::<EvalCf>` threading the SAME host `field` closure (so
+/// `Cf::call1`'s `unreachable!` is never reached). `n` is unused by the generated span (the
+/// preamble owns it), so a zero normal is passed.
+fn refactored_sdf_soft_shadow<Fld: Fn([f32; 3]) -> f32>(p: [f32; 3], l: [f32; 3], field: &Fld) -> f32 {
+    use std::cell::Cell;
+    let out = Cell::new(0.0f32);
+    boyko_shaderdsl::shadow::sdf_soft_shadow_body::<EvalCf, _>(p, [0.0, 0.0, 0.0], l, field, &out);
+    out.get()
+}
+
+#[test]
+fn sdf_soft_shadow_control_flow_matches_frozen() {
+    // A single analytic occluder — a sphere of radius `r` at `center` — so `field` is a clean
+    // signed distance the march steps along. The three control-flow outcomes are all exercised:
+    //   (a) a ray AIMED AT the occluder -> the `d < SHADOW_HIT_EPS` early return (0.0);
+    //   (b) a ray MISSING the occluder, escaping past T_MAX -> the break -> clamp(res,..) tail;
+    //   (c) a grazing ray -> a partial penumbra `res` in (0, 1).
+    let sphere = |center: [f32; 3], r: f32| {
+        move |q: [f32; 3]| -> f32 {
+            let dx = q[0] - center[0];
+            let dy = q[1] - center[1];
+            let dz = q[2] - center[2];
+            (dx * dx + dy * dy + dz * dz).sqrt() - r
+        }
+    };
+
+    let mut lcg = Lcg::new(0x5DF5_0F75_AD00_77A0_u64);
+    for _ in 0..5_000 {
+        let p = [lcg.next_f32(2.0), lcg.next_f32(2.0), lcg.next_f32(2.0)];
+        // A unit-ish light direction (not normalized exactly — the march tolerates it; the host
+        // mirror and the eDSL see the SAME L, so the control flow agrees regardless).
+        let l = [lcg.next_f32(1.0), lcg.next_f32(1.0), lcg.next_f32(1.0)];
+        let center = [lcg.next_f32(3.0), lcg.next_f32(3.0), lcg.next_f32(3.0)];
+        let r = lcg.next_f32(1.0).abs() + 0.05;
+        let field = sphere(center, r);
+        assert_bits(
+            refactored_sdf_soft_shadow(p, l, &field),
+            frozen_sdf_soft_shadow(p, l, &field),
+            "sdf-soft-shadow-control-flow",
+        );
+    }
+}

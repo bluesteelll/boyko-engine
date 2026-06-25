@@ -45,6 +45,7 @@ pub mod cf;
 pub mod field;
 pub mod normal;
 pub mod scalar;
+pub mod shadow;
 
 #[cfg(feature = "emit")]
 pub mod emit;
@@ -60,3 +61,7 @@ pub use field::{
 };
 pub use normal::sdf_normal_body;
 pub use scalar::FieldScalar;
+pub use shadow::{
+    FIELD_LIPSCHITZ_L, MAX_IT, SHADOW_HIT_EPS, SHADOW_K, SHADOW_MINT, SHADOW_MINT_STEP, T_MAX,
+    sdf_soft_shadow_body,
+};

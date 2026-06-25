@@ -66,4 +66,14 @@ fn main() {
     // the host's `f32::MIN_POSITIVE`).
     println!();
     print!("{}", boyko_shaderdsl::emit::emit_hlsl_m2_regula_falsi());
+    // The soft-shadow penumbra MARCHER leaf (Increment 4b — the FOURTH CONTROL-FLOW leaf, the
+    // first with a real `break` + a `field_distance` CALL site): the runtime `[loop]` penumbra
+    // accumulation (`min(res, SHADOW_K*d/t)`) with the occluder-hit early return, the
+    // `t > T_MAX` break (the `brk` producer), and the `clamp01` tail, generated from
+    // `boyko_shaderdsl::shadow::sdf_soft_shadow_body` over the `Emit` + `EmitCf` backends.
+    // Spliced between the `// === GENERATED sdf_soft_shadow BEGIN/END ===` sentinels INSIDE
+    // `sdf_soft_shadow` (the loop+tail SPAN only — the `dot(n,L)` preamble stays hand-written,
+    // framing b). The host shadow march stays ANALYTIC (C1) — only the GPU span is generated.
+    println!();
+    print!("{}", boyko_shaderdsl::emit::emit_hlsl_sdf_soft_shadow());
 }
