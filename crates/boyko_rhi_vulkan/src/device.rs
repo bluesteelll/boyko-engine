@@ -371,6 +371,29 @@ impl VulkanContext {
     /// Returns a [`BootError`] (never panics) on any loader / driver / GPU
     /// absence so the caller can skip gracefully on a GPU-less machine.
     pub fn boot(config: InstanceConfig) -> Result<Self, BootError> {
+        // --- 0. Validation escape hatch. ---
+        // Normalize `enable_validation` to its EFFECTIVE value ONCE, at the single
+        // entry point, before `config` (passed BY VALUE / `Copy`) flows into
+        // `create_instance`, `boot_with_instance`, `load_instance_fns` and
+        // `create_debug_messenger`. Every downstream read — including the
+        // `validation_enabled()` accessor, which reflects whether a messenger was
+        // created — therefore sees the effective flag with NO per-site changes.
+        //
+        // WHY the env gate: on this windows-gnu (MinGW) box the VulkanSDK
+        // `VkLayer_khronos_validation.dll` (an MSVC build) crashes the MinGW
+        // process (0xc0000005) on LOAD, so `vkCreateInstance` faults whenever the
+        // layer is requested-and-present, and boot returns `ValidationUnavailable`
+        // when it is absent — either way no GPU pixel golden can run. The render
+        // OUTPUT does not depend on validation (it only catches API misuse), so
+        // `BOYKO_DISABLE_VALIDATION` lets the goldens boot WITHOUT the layer.
+        //
+        // DEFAULT (env unset): `validation_requested` returns `config.enable_validation`
+        // unchanged — byte-identical to prior behavior; this is a pure opt-in.
+        let config = InstanceConfig {
+            enable_validation: validation_requested(&config),
+            ..config
+        };
+
         // --- 1. Load the loader DLL + vkGetInstanceProcAddr. ---
         let module = load_vulkan_loader().ok_or(BootError::LoaderUnavailable)?;
 
@@ -1596,6 +1619,24 @@ fn cstr_array_eq(name: &[c_char; 256], want: &CStr) -> bool {
         .all(|(&a, &b)| a as u8 == b)
 }
 
+/// The EFFECTIVE validation flag: `config.enable_validation` AND the
+/// `BOYKO_DISABLE_VALIDATION` environment variable being UNSET.
+///
+/// The env variable is an opt-in escape hatch: on a host whose
+/// `VK_LAYER_KHRONOS_validation` DLL is incompatible with the process (the
+/// windows-gnu / MinGW build crashes on the MSVC-built layer's load), requesting
+/// the layer either faults `vkCreateInstance` or makes boot return
+/// [`BootError::ValidationUnavailable`] — so no GPU pixel golden can run. Since
+/// the render OUTPUT is independent of validation (it only catches API misuse),
+/// setting `BOYKO_DISABLE_VALIDATION` lets the goldens boot without the layer.
+///
+/// With the variable UNSET this is exactly `config.enable_validation`
+/// (`x && true`), so the default path is byte-identical to prior behavior.
+#[inline]
+fn validation_requested(config: &InstanceConfig) -> bool {
+    config.enable_validation && std::env::var_os("BOYKO_DISABLE_VALIDATION").is_none()
+}
+
 /// Creates the `VK_EXT_debug_utils` validation messenger (Slice-0 0a oracle).
 ///
 /// Returns `(NULL, None)` when `enable_validation` is `false`. Otherwise it
@@ -2013,4 +2054,59 @@ fn create_device(
         return Err(BootError::VkError("vkCreateDevice", result));
     }
     Ok(device)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{InstanceConfig, validation_requested};
+
+    /// `BOYKO_DISABLE_VALIDATION` forces the effective flag to `false` regardless of
+    /// `config.enable_validation`; with the var unset the helper mirrors the config
+    /// (the default path is byte-identical to plain `config.enable_validation`).
+    ///
+    /// Mutates a process-global env var, so the three cases run in ONE test (no
+    /// cross-test interleave) and the prior value is saved + restored.
+    #[test]
+    fn validation_requested_env_gate() {
+        const KEY: &str = "BOYKO_DISABLE_VALIDATION";
+        let saved = std::env::var_os(KEY);
+
+        let on = InstanceConfig {
+            enable_validation: true,
+            ..InstanceConfig::default()
+        };
+        let off = InstanceConfig {
+            enable_validation: false,
+            ..InstanceConfig::default()
+        };
+
+        // Env UNSET: helper mirrors the config (default-path invariant).
+        // SAFETY: single-threaded test scope; no other thread reads the env
+        // concurrently. The original value is restored at the end of the test.
+        unsafe { std::env::remove_var(KEY) };
+        assert!(validation_requested(&on), "env unset + config true => requested");
+        assert!(
+            !validation_requested(&off),
+            "env unset + config false => not requested"
+        );
+
+        // Env SET: forces `false` even when the config requests validation.
+        // SAFETY: as above — single-threaded test scope.
+        unsafe { std::env::set_var(KEY, "1") };
+        assert!(
+            !validation_requested(&on),
+            "env set overrides config true => not requested"
+        );
+        assert!(
+            !validation_requested(&off),
+            "env set + config false => not requested"
+        );
+
+        // Restore the prior process env so sibling tests are unaffected.
+        // SAFETY: as above — single-threaded test scope.
+        match saved {
+            Some(v) => unsafe { std::env::set_var(KEY, v) },
+            None => unsafe { std::env::remove_var(KEY) },
+        }
+    }
 }
