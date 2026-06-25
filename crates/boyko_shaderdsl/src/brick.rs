@@ -33,12 +33,21 @@
 //! [`FieldScalar::int_to_float`]) lower to single `core` `i32`/`f32` instructions on
 //! the `f32` backend.
 
+use crate::cf::{Cf, Flow};
 use crate::scalar::FieldScalar;
 
 /// The `R8_SNORM` normalize divisor — `q ∈ [-127, 127]` maps onto `[-1, 1]` as
 /// `q / 127`. Mirrors the host `decode_snorm8`'s `127.0` (brick.rs:1052) and the
 /// Vulkan `R8_SNORM` rule.
 pub const SNORM_DIVISOR: f32 = 127.0;
+
+/// The minimum per-step progress a brick-exit makes (world units) — the empty-skip
+/// PROGRESS GUARANTEE. Mirrors `boyko_sdf_math::brick::BRICK_EXIT_EPS` (brick.rs:988)
+/// and the GPU shader's `BRICK_EXIT_EPS` (`sdf_gbuffer_composite.hlsl:553`). A
+/// face-parallel / boundary-grazing ray computes a zero/negative exit and would stall;
+/// clamping UP to this forces the march forward. Spelled SYMBOLICALLY in the emitted
+/// HLSL (the committed body writes `BRICK_EXIT_EPS`, not `1.0e-4`).
+pub const BRICK_EXIT_EPS: f32 = 1.0e-4;
 
 /// The snorm sentinel code: `i8::MIN` (-128). The asymmetric `R8_SNORM` rule maps it
 /// (and -127) to `-1.0`. Mirrors the host `decode_snorm8`'s `i8::MIN` branch.
@@ -219,4 +228,83 @@ pub fn jcgt_cubic_coeffs<S: FieldScalar>(s: &[S; 8], a: [S; 3], b: [S; 3]) -> [S
     let c3 = k7.mul(bx).mul(by).mul(bz);
 
     [c0, c1, c2, c3]
+}
+
+// ---- The brick-exit empty-skip marcher leaf (Increment 1: control flow) ---------
+//
+// The FIRST leaf with CONTROL FLOW: an `[unroll]` `for a in 0..3` slab loop with a
+// data-dependent `continue` (the near-axis-parallel skip) and a final `Select`
+// (the progress clamp). Authored ONCE generic over the control-flow axis `C: Cf`,
+// whose `C::Scalar` fixes the value arithmetic per backend. Instantiated:
+//   - `<EvalCf>` (`Scalar = f32`)  — the CPU oracle (real `for`/`if`/`continue`); the
+//     `eval_byte_identity` brick-exit sweep locks it.
+//   - `<EmitCf>` (`Scalar = Emit`) — the HLSL recorder; the printer
+//     (`crate::emit::emit_hlsl_dist_to_brick_exit`) walks the STMT IR into the
+//     `[unroll]`/`for`/`continue` body spliced into `sdf_gbuffer_composite.hlsl`.
+//
+// CANONICAL FORM = the GPU SHAPE (the committed `dist_to_brick_exit`,
+// sdf_gbuffer_composite.hlsl:569-589): `exit` inits to a plain `1.0e30` literal,
+// `.max()`/`.min()` for the per-axis far-face / running exit, NO `is_finite` term.
+// The HOST `boyko_sdf_math::brick::dist_to_brick_exit` (which inits `f32::INFINITY`
+// and has a final `|| !exit.is_finite()` guard) STAYS HAND-WRITTEN and does NOT
+// delegate (firewall option B) — they already diverge on an all-axes-degenerate ray,
+// which is marcher-UNREACHABLE (a normalized `rd` cannot have all three |components|
+// <= 1e-4). This body picks the GPU shape; its single-source authority is the EvalCf
+// to-bits sweep, not a host call.
+
+/// The ray-AABB SLAB exit distance for the brick at `cell_min` of size `bw`, from `p`
+/// along `rd` — the empty-skip step length, authored ONCE over the value axis `S` and
+/// the control-flow axis `C`.
+///
+/// Returns the `t` at which the ray leaves the brick's `[cell_min, cell_min + bw]`
+/// AABB, measured from `p`. Standard slab method: per axis the far-face crossing is
+/// `max(t_lo, t_hi)`, and the brick exit is the `min` over the three axes; a near-axis-
+/// parallel component (`abs(dir) <= BRICK_EXIT_EPS`) is SKIPPED (`continue`). The final
+/// `exit < BRICK_EXIT_EPS ? BRICK_EXIT_EPS : exit` is the PROGRESS GUARANTEE (the march
+/// must always advance — INVIOLABLE for the empty skip).
+///
+/// This is the GPU-SHAPE canonical form (see the module comment): `exit` inits to a
+/// plain `1.0e30` and there is no `is_finite` term. The eval sweep proves the dropped
+/// `is_finite` changes no output bit on the reachable (normalized-ray) set.
+#[inline]
+pub fn dist_to_brick_exit_body<C: Cf>(
+    p: [C::Scalar; 3],
+    rd: [C::Scalar; 3],
+    cell_min: [C::Scalar; 3],
+    bw: C::Scalar,
+) -> C::Scalar {
+    // The value type IS `C::Scalar` (`f32` on Eval, `Emit` on Emit); bound locally for
+    // readability so the body reads `S::lit(..)` / `S::select(..)` as before.
+    type S2<C> = <C as Cf>::Scalar;
+    // `float exit = 1.0e30;` — the GPU init (a plain literal, NOT f32::INFINITY).
+    let exit = C::decl_var("exit", S2::<C>::lit(1.0e30));
+    C::unroll_for("[unroll]", 3, |a| -> Flow {
+        // The MATERIALIZED slab temps, in program order (each `C::temp` becomes a
+        // `float tN = ...;`; on Eval `temp` is identity). The materialization choice
+        // (which subexpressions are `tN` locals) is pinned to the committed HLSL so the
+        // generator re-DXCs byte-identical — see `Cf::temp`. `t0 = rd[a]`, `t1 =
+        // cell_min[a]` and `t2 = t1 + bw` are computed BEFORE the skip guard (the original
+        // author's order); `abs(t0)` and `p[a]` stay INLINE (un-`temp`'d).
+        let dir = C::temp(C::index(rd, a)); // float t0 = rd[a];
+        let lo = C::temp(C::index(cell_min, a)); // float t1 = cell_min[a];
+        let hi = C::temp(lo.add(bw)); // float t2 = t1 + bw;
+        // if (abs(t0) <= BRICK_EXIT_EPS) { continue; } — the near-axis-parallel skip.
+        // `?` propagates the continue token out of this closure (the live tail below is
+        // skipped), which `unroll_for` maps to a real `continue` (Eval) / `Stmt::Continue`
+        // (Emit). `<=` is a DISTINCT opcode (OpFOrdLessThanEqual) from a swapped `>`.
+        let eps = C::named_lit("BRICK_EXIT_EPS", BRICK_EXIT_EPS);
+        C::if_(dir.abs().le(eps), C::cont)?;
+        // float t3 = 1.0/t0; float t4 = (t1 - p[a]) * t3; float t5 = (t2 - p[a]) * t3;
+        // float t6 = max(t4, t5);  exit = min(exit, t6);  (`p[a]` stays inline.)
+        let inv = C::temp(S2::<C>::lit(1.0).div(dir)); // float t3 = 1.0 / t0;
+        let t_lo = C::temp(lo.sub(C::index(p, a)).mul(inv)); // float t4 = (t1 - p[a]) * t3;
+        let t_hi = C::temp(hi.sub(C::index(p, a)).mul(inv)); // float t5 = (t2 - p[a]) * t3;
+        let t_far = C::temp(t_lo.max(t_hi)); // float t6 = max(t4, t5);
+        C::set_var(&exit, C::get_var(&exit).min(t_far)); // exit = min(exit, t6);
+        Flow::Continue(())
+    });
+    // return (exit < BRICK_EXIT_EPS) ? BRICK_EXIT_EPS : exit;  (the ternary stays inline.)
+    let final_exit = C::get_var(&exit);
+    let eps = C::named_lit("BRICK_EXIT_EPS", BRICK_EXIT_EPS);
+    S2::<C>::select(final_exit.lt(eps), eps, final_exit)
 }

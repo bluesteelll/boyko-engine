@@ -16,6 +16,7 @@
 //! NOTE: this test links the DEFAULT (non-`nightly`) profile, where `std` is
 //! available for `f32::sqrt` (the Eval `sqrt` shim) and the test harness.
 
+use boyko_shaderdsl::cf::EvalCf;
 use boyko_shaderdsl::field::{self, EditView};
 
 // ======================================================================
@@ -664,4 +665,180 @@ fn cubic_chain_coeffs_then_eval_byte_identical() {
             );
         }
     }
+}
+
+// ======================================================================
+// Increment 1 — the brick-exit empty-skip MARCHER leaf (control flow).
+//
+// The FIRST control-flow leaf: an `[unroll]` slab loop with a data-dependent
+// `continue` + a final progress-clamp ternary. The eDSL
+// `boyko_shaderdsl::brick::dist_to_brick_exit_body::<EvalCf>` (`Cf::Scalar = f32`) is the
+// CPU oracle.
+//
+// CANONICAL SHAPE = the GPU's (`sdf_gbuffer_composite.hlsl`): `exit` inits to a plain
+// `1.0e30`, `max`/`min` per axis, NO `is_finite` term. The HOST
+// `boyko_sdf_math::brick::dist_to_brick_exit` stays HAND-WRITTEN (firewall option B) and
+// inits `f32::INFINITY` with a final `|| !exit.is_finite()` guard — so the two ALREADY
+// DIVERGE on an all-axes-degenerate ray (1e30 vs EPS). That input is marcher-UNREACHABLE
+// (a normalized `rd` cannot have all three |components| <= 1e-4), so this sweep:
+//   (a) proves the canonical body equals a FROZEN GPU-shape reference to-bits over the
+//       HARD reachable set (subnormal dir just above EPS, dir == EPS boundary, overflowing
+//       slab products, partly-skipped axes), and
+//   (b) asserts the all-degenerate ray yields the GPU value `1.0e30` — NOT compared vs the
+//       host (the one intentional GPU-vs-host difference).
+// ======================================================================
+
+const FROZEN_BRICK_EXIT_EPS: f32 = 1.0e-4; // boyko_shaderdsl::brick::BRICK_EXIT_EPS
+
+/// Verbatim snapshot of the GPU-SHAPE `dist_to_brick_exit` (the committed
+/// `sdf_gbuffer_composite.hlsl:569-589` math): `exit = 1.0e30`, `max`/`min`, NO
+/// `is_finite`. This is the reference the canonical eDSL body must equal to-bits — NOT
+/// the host (which has the `is_finite` guard). Do NOT "clean up": the operand order +
+/// the dropped `is_finite` are the contract under test.
+fn frozen_gpu_dist_to_brick_exit(
+    p: [f32; 3],
+    rd: [f32; 3],
+    cell_min: [f32; 3],
+    bw: f32,
+) -> f32 {
+    let mut exit = 1.0e30f32;
+    for a in 0..3 {
+        let t0 = rd[a];
+        let t1 = cell_min[a];
+        let t2 = t1 + bw;
+        if t0.abs() <= FROZEN_BRICK_EXIT_EPS {
+            continue;
+        }
+        let t3 = 1.0 / t0;
+        let t4 = (t1 - p[a]) * t3;
+        let t5 = (t2 - p[a]) * t3;
+        let t6 = t4.max(t5);
+        exit = exit.min(t6);
+    }
+    if exit < FROZEN_BRICK_EXIT_EPS {
+        FROZEN_BRICK_EXIT_EPS
+    } else {
+        exit
+    }
+}
+
+/// The eDSL brick-exit over the `<EvalCf>` instantiation (`Cf::Scalar = f32`; the CPU
+/// oracle).
+fn refactored_brick_exit(p: [f32; 3], rd: [f32; 3], cell_min: [f32; 3], bw: f32) -> f32 {
+    boyko_shaderdsl::brick::dist_to_brick_exit_body::<EvalCf>(p, rd, cell_min, bw)
+}
+
+#[test]
+fn brick_exit_canonical_equals_gpu_shape_byte_identical() {
+    // The HARD non-finite / boundary set the dropped `is_finite` term might have changed,
+    // PLUS a broad random sweep — proving the eDSL canonical body is to-bits the frozen
+    // GPU-shape reference on the whole reachable set.
+    let eps = FROZEN_BRICK_EXIT_EPS;
+    let cell_min = [0.0, 0.0, 0.0];
+    let bw = 1.0;
+
+    // Targeted hard cases (one axis non-degenerate so the ray is reachable):
+    let hard: &[[f32; 3]] = &[
+        // Subnormal dir JUST above EPS on x (1/dir overflows -> t_far = Inf -> min stays
+        // finite from the other axes; here y carries a finite bound).
+        [eps * 1.0001, 0.5, 0.5],
+        // dir == EPS exactly on x (abs(dir) <= EPS -> x SKIPPED; y/z bound it).
+        [eps, 0.7, 0.3],
+        // dir just BELOW EPS on x and z (both skipped); y non-degenerate.
+        [eps * 0.5, 0.9, eps * 0.5],
+        // A normal ray (all axes contribute).
+        [0.6, -0.5, 0.62],
+        // Tiny-but-finite y, large x.
+        [0.99, eps * 2.0, 0.14],
+    ];
+    for &rd in hard {
+        // `p` placed so some `(lo - p)*inv` / `(hi - p)*inv` products are huge (overflow
+        // path) as well as inside the cell.
+        for &p in &[
+            [0.5, 0.5, 0.5],
+            [-1.0e20, 0.5, 0.5],   // (lo - p) huge
+            [1.0e20, 0.5, 0.5],    // (hi - p) huge negative
+            [0.5, 1.0e30, 0.5],
+        ] {
+            assert_bits(
+                refactored_brick_exit(p, rd, cell_min, bw),
+                frozen_gpu_dist_to_brick_exit(p, rd, cell_min, bw),
+                "brick-exit-hard",
+            );
+        }
+    }
+
+    // A broad random sweep (reachable rays + p across the cell and far outside), with the
+    // LCG's non-finite/±0 draws mixed into `p`/`cell_min`/`bw`.
+    let mut lcg = Lcg::new(0xB21C_E417_DEAD_9001);
+    for _ in 0..20_000 {
+        // Force at least one axis above EPS so the ray is marcher-reachable.
+        let mut rd = [lcg.next_f32(1.0), lcg.next_f32(1.0), lcg.next_f32(1.0)];
+        if rd.iter().all(|c| c.abs() <= eps) {
+            rd[0] = 0.5; // make it reachable
+        }
+        let p = [lcg.next_f32(50.0), lcg.next_f32(50.0), lcg.next_f32(50.0)];
+        let cmin = [lcg.next_f32(10.0), lcg.next_f32(10.0), lcg.next_f32(10.0)];
+        let bwid = lcg.next_f32(5.0).abs() + 0.01;
+        assert_bits(
+            refactored_brick_exit(p, rd, cmin, bwid),
+            frozen_gpu_dist_to_brick_exit(p, rd, cmin, bwid),
+            "brick-exit-sweep",
+        );
+    }
+}
+
+#[test]
+fn brick_exit_all_degenerate_ray_is_gpu_value() {
+    // The ONE intentional GPU-vs-host difference: an all-axes-degenerate ray (every
+    // |rd component| <= EPS) skips every axis, so `exit` stays at the `1.0e30` init and the
+    // final clamp (1e30 >= EPS) returns 1.0e30 — the GPU value (the host would return EPS
+    // via its extra `|| !exit.is_finite()`-style INFINITY init). This input is
+    // marcher-UNREACHABLE (a normalized rd cannot have all three components <= 1e-4); the
+    // canonical form is asserted against the GPU value, NOT compared vs the host.
+    let eps = FROZEN_BRICK_EXIT_EPS;
+    for &rd in &[
+        [0.0, 0.0, 0.0],
+        [eps, eps, eps],
+        [eps * 0.5, -eps * 0.5, eps * 0.9],
+        [-0.0, 0.0, eps],
+    ] {
+        let got = refactored_brick_exit([0.5, 0.5, 0.5], rd, [0.0, 0.0, 0.0], 1.0);
+        assert_bits(got, 1.0e30, "brick-exit-all-degenerate");
+        // And the canonical body matches the frozen GPU-shape reference on this input.
+        assert_bits(
+            got,
+            frozen_gpu_dist_to_brick_exit([0.5, 0.5, 0.5], rd, [0.0, 0.0, 0.0], 1.0),
+            "brick-exit-all-degenerate-vs-gpu-frozen",
+        );
+    }
+}
+
+#[test]
+fn cf_continue_skips_live_tail_on_eval() {
+    // MANDATORY: a body that SETS a Var AFTER a TAKEN continue must NOT run the set on
+    // Eval — the `?`-propagated continue early-returns the loop-body closure, so the live
+    // tail (the var assignment) is skipped, exactly like a host `continue`. This proves the
+    // Try-based control-flow propagation has the correct continue semantics (a structurally
+    // recorded continue on Emit, a real skip on Eval).
+    use boyko_shaderdsl::cf::{Cf, Flow};
+    use boyko_shaderdsl::scalar::FieldScalar;
+
+    // counter starts at 0; for a in 0..3, continue when a == 1, else `counter += 1`. The
+    // tail `counter += 1` must run for a=0 and a=2 only -> counter == 2 (NOT 3).
+    let counter = EvalCf::decl_var("counter", 0.0);
+    EvalCf::unroll_for("[unroll]", 3, |a| -> Flow {
+        // Skip the live tail when a == 1.
+        EvalCf::if_((a == 1).then_some(()).is_some(), EvalCf::cont)?;
+        // LIVE TAIL — must be skipped on the taken-continue iteration.
+        let cur = EvalCf::get_var(&counter);
+        EvalCf::set_var(&counter, cur.add(1.0));
+        Flow::Continue(())
+    });
+    let total = EvalCf::get_var(&counter);
+    assert_eq!(
+        total.to_bits(),
+        2.0f32.to_bits(),
+        "continue must skip the live tail: expected 2 increments (a=0, a=2), got {total}"
+    );
 }

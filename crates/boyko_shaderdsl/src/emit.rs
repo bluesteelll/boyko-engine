@@ -23,6 +23,7 @@
 
 use core::cell::RefCell;
 
+use crate::cf::{Cf, Flow, LoopOp};
 use crate::scalar::FieldScalar;
 
 thread_local! {
@@ -90,6 +91,35 @@ enum Node {
     Select(u32, u32, u32),
     /// `a > b` — a Mask node (printed inline inside a ternary condition).
     Gt(u32, u32),
+    /// `a < b` — a Mask node (`OpFOrdLessThan`), printed inline like [`Node::Gt`]. The
+    /// brick-marcher's progress clamp `exit < BRICK_EXIT_EPS`.
+    Lt(u32, u32),
+    /// `a <= b` — a Mask node (`OpFOrdLessThanEqual`, a DISTINCT opcode from a swapped
+    /// `>`), printed inline like [`Node::Gt`]. The brick-marcher's per-axis skip guard
+    /// `abs(dir) <= BRICK_EXIT_EPS`.
+    Le(u32, u32),
+    /// `vec[iv]` — a dynamic index of a `float3` PARAMETER (`rd[a]`, `p[a]`,
+    /// `cell_min[a]`) by the unroll induction variable. `(vec_id, iv_id)`: `vec_id`
+    /// indexes [`Names::vec_in`] (the vector-parameter name table), `iv_id` references
+    /// the induction-variable node ([`Node::Input`] carrying the iv's name). Printed
+    /// INLINE (`is_inline_leaf` = true), so `p[a]` spells inline at every use — matching
+    /// the committed body, which does NOT temp `p[a]`.
+    VecIndex(u32, u32),
+    /// A NAMED float literal — prints the SYMBOL (`BRICK_EXIT_EPS`) for Emit. `sym_id`
+    /// indexes [`Names::named_lit`]; printed inline. The committed body spells
+    /// `BRICK_EXIT_EPS` (not `1.0e-4`) in both the skip guard and the final clamp, so the
+    /// symbol — not the value — reaches the HLSL.
+    ///
+    /// `val` carries the concrete numeric value (`1e-4`). On the `Emit` backend the
+    /// printer spells the SYMBOL, so `val` is not read here (the `f32` Eval backend uses
+    /// it directly, NOT through a `Node`); it is recorded for IR completeness and the
+    /// Increment-2 const-fold path (which compares a node's `val` against a guard). Dead
+    /// on the emit print path by design.
+    NamedLit {
+        sym_id: u32,
+        #[allow(dead_code)]
+        val: f32,
+    },
     /// A call to the hand-written field function `sdf(<arg>)`. The operand is a
     /// VECTOR-expression handle into the separate [`VNode`] arena (the `float3`
     /// argument), so the printer emits `sdf(<vexpr>)`. The field is NOT inlined: the
@@ -123,6 +153,23 @@ enum Node {
     /// `(float)a` — the HLSL NUMERIC `uint -> float` cast (value-preserving), NOT
     /// `asfloat` (a bit-reinterpret). Materialized as a `float` temp.
     UintToFloat(u32),
+
+    // ---- Control-flow leaves (Increment 1; the brick-exit marcher) ---------------
+    /// A `float3` VECTOR-PARAMETER marker (`p` / `rd` / `cell_min`). The `u32` is the
+    /// [`Names::vec_in`] id. It is NEVER printed directly: [`EmitCf::index`] reads the
+    /// vec id off it and emits a [`Node::VecIndex`]. Seeded as the three identical
+    /// elements of the body's `[Emit; 3]` parameter (so `index(p, a)` recovers p's id).
+    VecParamRef(u32),
+    /// A named mutable LOCAL reference (`exit`) — prints the variable's name (NOT a `tN`
+    /// temp). The `u32` is the [`Block`]/printer var id. Recorded by [`EmitCf::get_var`]
+    /// so a `min(exit, t6)` rhs reads the running `exit`.
+    VarRef(u32),
+    /// A reference to a MATERIALIZED temp (`t0`..`t6`) — prints `t{seq}`, where `seq` is
+    /// the temp's program-order sequence number (assigned by [`EmitCf::temp`] when it
+    /// records the matching `Stmt::DeclTemp`). The committed-shape materialization is
+    /// EXPLICIT (the body wraps a subexpression in [`Cf::temp`]); this node is the handle
+    /// the wrapped value flows through, so later uses spell `t{seq}`.
+    TempRef(u32),
 }
 
 /// One VECTOR (`float3`/`float2`) SSA node — the normal leaf is a vector expression
@@ -319,6 +366,16 @@ impl FieldScalar for Emit {
         EmitMask(push(Node::Gt(self.0, rhs.0)))
     }
 
+    #[inline]
+    fn lt(self, rhs: Self) -> EmitMask {
+        EmitMask(push(Node::Lt(self.0, rhs.0)))
+    }
+
+    #[inline]
+    fn le(self, rhs: Self) -> EmitMask {
+        EmitMask(push(Node::Le(self.0, rhs.0)))
+    }
+
     fn eq_u(_op: u32, _want: u32) -> EmitMask {
         // W3: the op-discriminant equality is a HOST comparison — `field::combine`'s
         // op-dispatch is a host `if op == ...` (the frozen `if (op == OP_*)`), so it
@@ -372,6 +429,18 @@ const FIELD_INPUT_NAMES: &[&str] = &["a", "b", "k"];
 /// `uint` parameter). The integer leaves override it via [`Names`].
 const NO_UINT_INPUTS: &[&str] = &[];
 
+/// The default VECTOR-parameter table (empty — only the brick-marcher CF leaf indexes
+/// a `float3` parameter by the unroll iv).
+const NO_VEC_INPUTS: &[&str] = &[];
+
+/// The default named-literal table (empty — only the brick-marcher CF leaf spells a
+/// symbolic constant).
+const NO_NAMED_LITS: &[&str] = &[];
+
+/// The default mutable-local table (empty — only the brick-marcher CF leaf declares a
+/// mutable local).
+const NO_VARS: &[&str] = &[];
+
 /// The per-trace symbolic-input name tables threaded through the printer: `float`
 /// inputs ([`Node::Input`]) and `uint` inputs ([`Node::UintInput`]) are named
 /// separately because a leaf's parameter list mixes the two (e.g. `decode_snorm8`'s
@@ -383,16 +452,44 @@ struct Names<'a> {
     float_in: &'a [&'a str],
     /// `uint`-input names (indexed by [`Node::UintInput`]'s id).
     uint_in: &'a [&'a str],
+    /// `float3`-VECTOR-parameter names (indexed by [`Node::VecIndex`]'s `vec_id`) — the
+    /// `rd` / `p` / `cell_min` the brick-marcher indexes by the unroll iv. Empty for the
+    /// straight-line field/normal/decode leaves (they take no indexed vector parameter).
+    vec_in: &'a [&'a str],
+    /// NAMED-literal symbols (indexed by [`Node::NamedLit`]'s `sym_id`) — `BRICK_EXIT_EPS`.
+    /// Empty for leaves that use no named constant.
+    named_lit: &'a [&'a str],
+    /// MUTABLE-LOCAL names (indexed by [`Node::VarRef`]'s id) — `exit`. Empty for the
+    /// straight-line leaves (they declare no mutable local).
+    vars: &'a [&'a str],
 }
 
 /// Formats one f32 literal the way the frozen HLSL writes it (`0.5`, `1.0`, `0.0`).
 /// A short, deterministic rendering — enough for the smin/smax field constants.
 fn fmt_lit(x: f32) -> String {
     if x == x.trunc() && x.abs() < 1.0e7 {
-        // Integer-valued: render as `N.0` (matches `0.0` / `1.0` in the frozen src).
+        // Integer-valued (small): render as `N.0` (matches `0.0` / `1.0` / `127.0` in the
+        // frozen src). The `< 1.0e7` bound keeps this from spelling huge magnitudes as a
+        // 30-digit decimal.
         format!("{:.1}", x)
+    } else if x != 0.0 && (x.abs() >= 1.0e7 || x.abs() < 1.0e-4) {
+        // Very large / very small magnitudes render in SCIENTIFIC form to match the frozen
+        // src's `1.0e30` (a 30-digit decimal would parse to the same bits but not match the
+        // committed text). Rust's `{:e}` gives `1e30`; normalize the mantissa to carry a
+        // `.0` (`1e30` -> `1.0e30`) so it reads as a float literal. The only such literal in
+        // any traced body is the brick-exit `1.0e30` init.
+        let e = format!("{:e}", x); // e.g. "1e30" / "1.5e-5"
+        if let Some((mantissa, exp)) = e.split_once('e') {
+            if mantissa.contains('.') {
+                format!("{mantissa}e{exp}")
+            } else {
+                format!("{mantissa}.0e{exp}")
+            }
+        } else {
+            e
+        }
     } else {
-        // Non-integer: a compact shortest round-trip (e.g. `0.5`).
+        // Non-integer (normal magnitude): a compact shortest round-trip (e.g. `0.5`).
         let s = format!("{}", x);
         if s.contains('.') || s.contains('e') {
             s
@@ -412,9 +509,16 @@ fn is_inline_leaf(node: Node) -> bool {
         Node::Input(_)
             | Node::Lit(_)
             | Node::Gt(_, _)
+            | Node::Lt(_, _)
+            | Node::Le(_, _)
             | Node::IntEq(_, _)
             | Node::UintInput(_)
             | Node::UintLit(_)
+            | Node::VecIndex(_, _)
+            | Node::NamedLit { .. }
+            | Node::VecParamRef(_)
+            | Node::VarRef(_)
+            | Node::TempRef(_)
     )
 }
 
@@ -432,6 +536,34 @@ fn operand_str(arena: &[Node], names: Names, temps: &[Option<String>], id: u32) 
             operand_str(arena, names, temps, a),
             operand_str(arena, names, temps, b)
         ),
+        Node::Lt(a, b) => format!(
+            "{} < {}",
+            operand_str(arena, names, temps, a),
+            operand_str(arena, names, temps, b)
+        ),
+        Node::Le(a, b) => format!(
+            "{} <= {}",
+            operand_str(arena, names, temps, a),
+            operand_str(arena, names, temps, b)
+        ),
+        // `vec[iv]` — the vector parameter's name (`rd`/`p`/`cell_min`) indexed by the
+        // iv node's own spelling (`a`). Both inline, so `p[a]` spells inline at each use.
+        Node::VecIndex(vec_id, iv_id) => format!(
+            "{}[{}]",
+            names.vec_in[vec_id as usize],
+            operand_str(arena, names, temps, iv_id)
+        ),
+        // The named literal prints the SYMBOL (`BRICK_EXIT_EPS`), not its `val`.
+        Node::NamedLit { sym_id, .. } => names.named_lit[sym_id as usize].to_string(),
+        // A mutable-local read prints the variable NAME (`exit`), not a `tN` temp.
+        Node::VarRef(v) => names.vars[v as usize].to_string(),
+        // A materialized-temp reference prints `t{seq}`.
+        Node::TempRef(seq) => format!("t{seq}"),
+        // A vector-parameter marker is consumed by `EmitCf::index` (→ `VecIndex`); it is
+        // never spelled directly.
+        Node::VecParamRef(_) => {
+            unreachable!("VecParamRef is consumed by index() into VecIndex, never printed")
+        }
         Node::IntEq(a, b) => format!(
             "{} == {}",
             operand_str(arena, names, temps, a),
@@ -440,11 +572,47 @@ fn operand_str(arena: &[Node], names: Names, temps: &[Option<String>], id: u32) 
         Node::UintInput(n) => names.uint_in[n as usize].to_string(),
         // A `uint` literal renders with the HLSL unsigned suffix (`0xFFu`, `8u`).
         Node::UintLit(u) => format!("{}u", u),
-        // Any non-leaf has a temp name assigned during the SSA walk.
-        _ => temps[id as usize]
-            .clone()
-            .expect("invariant: every non-leaf node has an emitted temp before any use"),
+        // A non-leaf operand: if it was MATERIALIZED as a `tN` temp (the straight-line
+        // field/normal/decode/cubic emit materializes every non-leaf via the SSA walk,
+        // so `temps[id]` is always `Some` there), use the temp name. Otherwise — the CF
+        // body's UN-`temp`'d nodes (`abs(t0)` in the skip guard) — INLINE it via
+        // `define_str` (recursing through the same rule). This keeps the existing leaves
+        // byte-unchanged (their temps are always present) while letting a CF condition
+        // spell `abs(t0)` inline, matching the committed body.
+        _ => match temps.get(id as usize).and_then(|t| t.as_ref()) {
+            Some(name) => name.clone(),
+            None => {
+                // An UN-`temp`'d non-leaf used as an operand (the CF body's inline
+                // subexpressions). Inline it via `define_str`, PARENTHESIZING a
+                // low-precedence node (`Add`/`Sub`/`Select`/`Lerp`/`Neg`) so it composes
+                // correctly inside a higher-precedence parent — e.g. `(t1 - p[a]) * t3`,
+                // NOT `t1 - p[a] * t3`. A function-call form (`abs(_)`/`min(_)`/...) and
+                // the comparisons need no wrap.
+                let inner = define_str(arena, names, temps, id);
+                if needs_paren_as_operand(node) {
+                    format!("({inner})")
+                } else {
+                    inner
+                }
+            }
+        },
     }
+}
+
+/// True for a node whose inline spelling is an INFIX low-precedence expression
+/// (`a + b`, `a - b`, `-a`, the `cond ? t : e` ternary, the `lerp` is a call so it does
+/// NOT need a wrap) — it must be PARENTHESIZED when used as an operand of a higher-
+/// precedence op, so `(t1 - p[a]) * t3` does not mis-parse as `t1 - (p[a] * t3)`.
+///
+/// NOTE (review carry-in): `Mul`/`Div` are deliberately NOT parenthesized — the only CF
+/// body today (`dist_to_brick_exit`) leaves no un-`temp`'d `Mul`/`Div` as an operand (its
+/// products are all materialized into `tN` temps before reuse), so there is no precedence/
+/// associativity hazard to wrap against. RE-AUDIT `Mul`/`Div` precedence + left-
+/// associativity here when a FUTURE CF body leaves arithmetic un-`temp`'d as an operand
+/// (e.g. an inline `a / b / c`, which left-associates as `(a / b) / c` and would need a
+/// wrap if it became the right operand of another `/`).
+fn needs_paren_as_operand(node: Node) -> bool {
+    matches!(node, Node::Add(..) | Node::Sub(..) | Node::Neg(..) | Node::Select(..))
 }
 
 /// M1 (review carry-in): asserts an operand node's HLSL [`EmitTy`] is `want`. A
@@ -480,9 +648,16 @@ fn define_str(arena: &[Node], names: Names, temps: &[Option<String>], id: u32) -
         Node::Input(_)
         | Node::Lit(_)
         | Node::Gt(_, _)
+        | Node::Lt(_, _)
+        | Node::Le(_, _)
         | Node::IntEq(_, _)
         | Node::UintInput(_)
-        | Node::UintLit(_) => {
+        | Node::UintLit(_)
+        | Node::VecIndex(_, _)
+        | Node::NamedLit { .. }
+        | Node::VecParamRef(_)
+        | Node::VarRef(_)
+        | Node::TempRef(_) => {
             // Leaves are inlined, never defined as a temp.
             unreachable!("leaf nodes are inlined, not defined")
         }
@@ -637,6 +812,9 @@ fn trace<F: FnOnce(&[Emit]) -> Emit>(inputs: usize, body: F) -> String {
     let names = Names {
         float_in: FIELD_INPUT_NAMES,
         uint_in: NO_UINT_INPUTS,
+        vec_in: NO_VEC_INPUTS,
+        named_lit: NO_NAMED_LITS,
+        vars: NO_VARS,
     };
     ARENA.with(|a| a.borrow_mut().clear());
     let mut ins = Vec::with_capacity(inputs);
@@ -664,6 +842,9 @@ fn trace_named<F: FnOnce(&[Emit], &[Emit]) -> Emit>(
     let names = Names {
         float_in: float_names,
         uint_in: uint_names,
+        vec_in: NO_VEC_INPUTS,
+        named_lit: NO_NAMED_LITS,
+        vars: NO_VARS,
     };
     ARENA.with(|a| a.borrow_mut().clear());
     let mut floats = Vec::with_capacity(float_names.len());
@@ -694,6 +875,9 @@ fn trace_named_vec4<F: FnOnce(&[Emit], &[Emit]) -> [Emit; 4]>(
     let names = Names {
         float_in: float_names,
         uint_in: uint_names,
+        vec_in: NO_VEC_INPUTS,
+        named_lit: NO_NAMED_LITS,
+        vars: NO_VARS,
     };
     ARENA.with(|a| a.borrow_mut().clear());
     let mut floats = Vec::with_capacity(float_names.len());
@@ -987,4 +1171,370 @@ pub fn emit_hlsl_jcgt_cubic_coeffs() -> String {
         brick::jcgt_cubic_coeffs::<Emit>(&s, a, b)
     });
     format!("float4 m2_jcgt_cubic_coeffs(float s[8], float3 a, float3 b) {{\n{body}}}\n")
+}
+
+// ===============================================================================
+// The CONTROL-FLOW emit surface (Increment 1) — the STMT IR + `EmitCf` recorder +
+// the block-scoped temp printer + the brick-exit generator.
+//
+// FIREWALL (option B): this whole surface lives in the `emit` module, which is
+// `#[cfg(feature = "emit")]`-gated as a unit — a non-emit (physics) build cannot
+// even NAME `Stmt` / `Block` / `EmitCf`, so a physics call is a hard compile error.
+// ===============================================================================
+
+/// One control-flow STATEMENT — the IR the [`Cf`] combinators record on the [`Emit`]
+/// backend, walked by the printer into HLSL. Distinct from [`Node`] (the SSA
+/// EXPRESSION arena): a `Stmt` SEQUENCES expressions and carries the loop/branch
+/// structure. The expression operands reference [`Node`] arena ids.
+enum Stmt {
+    /// `<ty> <var> = <rhs>;` — a mutable-local declaration (`float exit = 1.0e30;`).
+    /// `rhs` is the init expression's [`Node`] id.
+    DeclVar { var: Var, ty: EmitTy, rhs: u32 },
+    /// `<ty> t<seq> = <rhs>;` — a MATERIALIZED temp (`float t0 = rd[a];`). `seq` is the
+    /// temp's program-order sequence number; `rhs` the materialized expression's [`Node`]
+    /// id. Recorded by [`EmitCf::temp`] (the EXPLICIT materialization the body requests via
+    /// [`Cf::temp`], pinning the emitted shape to the committed HLSL).
+    DeclTemp { seq: u32, ty: EmitTy, rhs: u32 },
+    /// `<var> = <rhs>;` — a mutable-local assignment (`exit = min(exit, t6);`).
+    Assign { var: Var, rhs: u32 },
+    /// `<attr> for (uint <iv> = 0u; <iv> < <n>u; ++<iv>) { <body> }` — an UNROLLED loop.
+    /// `iv` is the induction-variable name; `n` the trip count; `body` the loop block.
+    UnrollFor {
+        attr: &'static str,
+        iv: &'static str,
+        n: usize,
+        body: Block,
+    },
+    /// `if (<cond>) { <then> }` — `cond` is the condition expression's [`Node`] id (a
+    /// comparison mask), `then` the taken block (here only a [`Stmt::Continue`]).
+    If { cond: u32, then: Block },
+    /// `continue;` — the loop-continue (skip the rest of the iteration).
+    Continue,
+    /// `return <expr>;` — a function return. DEAD in Increment 1 (the brick-exit's final
+    /// return is spelled directly by the printer, NOT recorded); Increment 3 wires it for
+    /// the early-return marcher. Kept as a foundation node (mirroring how `Node::And`/
+    /// `Node::Shr` sat as foundations before A3 used them).
+    #[allow(dead_code)]
+    Return(u32),
+}
+
+/// A sequence of [`Stmt`]s — a control-flow BLOCK (a `{ ... }`).
+struct Block {
+    stmts: Vec<Stmt>,
+}
+
+/// A mutable-local handle — indexes the per-emit [`VARS`] name table. The variable
+/// carries its OWN name (`exit`), not a `tN` temp name.
+///
+/// `pub` because it is the [`EmitCf`]'s [`Cf::Var`] associated type (a public trait's
+/// associated type leaks the concrete type into the public API surface), but its single
+/// field is private, so it is an opaque handle.
+#[derive(Clone, Copy)]
+pub struct Var(u32);
+
+thread_local! {
+    /// The STMT block stack: the recorder pushes a [`Block`] on combinator entry
+    /// (`unroll_for` / `if_`) and pops it into its parent on exit, so the top is always
+    /// the block currently being recorded. The bottom (index 0) is the function body.
+    static STMTS: RefCell<Vec<Block>> = const { RefCell::new(Vec::new()) };
+
+    /// The per-emit mutable-local names (`exit`), indexed by [`Var`] / [`Node::VarRef`].
+    static VARS: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
+
+    /// The per-emit named-literal symbols (`BRICK_EXIT_EPS`), indexed by
+    /// [`Node::NamedLit`]'s `sym_id`. Deduped so repeated `named_lit("BRICK_EXIT_EPS", _)`
+    /// calls share one id.
+    static NAMED_LITS: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
+
+    /// The monotone program-order temp counter (`t0`, `t1`, ...). Bumped by
+    /// [`EmitCf::temp`] each time a temp is MATERIALIZED, so the `t{seq}` numbering follows
+    /// recording (= print) order across the whole body, nested blocks included.
+    static TEMP_SEQ: RefCell<u32> = const { RefCell::new(0) };
+}
+
+/// Pushes `stmt` into the block currently being recorded (the top of [`STMTS`]).
+fn record_stmt(stmt: Stmt) {
+    STMTS.with(|s| {
+        s.borrow_mut()
+            .last_mut()
+            .expect("invariant: a block is on the STMTS stack while recording")
+            .stmts
+            .push(stmt);
+    });
+}
+
+/// Registers a named-literal symbol, returning its (deduped) `sym_id`.
+fn intern_named_lit(sym: &'static str) -> u32 {
+    NAMED_LITS.with(|n| {
+        let mut n = n.borrow_mut();
+        if let Some(i) = n.iter().position(|&s| s == sym) {
+            i as u32
+        } else {
+            let id = n.len() as u32;
+            n.push(sym);
+            id
+        }
+    })
+}
+
+/// The control-flow EMIT backend — a unit ZST that RECORDS each combinator into the
+/// STMT IR ([`STMTS`]) + the SSA arena ([`ARENA`]). The `Emit` value axis ([`Emit`] as
+/// [`FieldScalar`]) supplies the arithmetic nodes; this supplies the control flow.
+#[derive(Clone, Copy)]
+pub struct EmitCf;
+
+impl Cf for EmitCf {
+    type Scalar = Emit;
+    // On Emit the mutable local is a NAMED handle (a `u32` indexing the `VARS` name table).
+    type Var = Var;
+    // The induction variable is the iv SSA node handle (a `UintInput` printing `a`).
+    type Iv = Emit;
+
+    fn decl_var(name: &'static str, init: Emit) -> Var {
+        // `init` is an `Emit` handle: read its arena id DIRECTLY (no transmute — `Scalar`
+        // is `Emit` here, so `init.0` is a plain field access).
+        let rhs = init.0;
+        let var = VARS.with(|v| {
+            let mut v = v.borrow_mut();
+            let id = v.len() as u32;
+            // The HLSL local's name (threaded from the body — `exit` in Increment 1; Inc 3
+            // declares more than one, each with its own name).
+            v.push(name);
+            Var(id)
+        });
+        record_stmt(Stmt::DeclVar {
+            var,
+            ty: EmitTy::Float,
+            rhs,
+        });
+        var
+    }
+
+    fn get_var(v: &Var) -> Emit {
+        // Read the running value: a `VarRef` node printing the variable's name (`exit`).
+        Emit(push(Node::VarRef(v.0)))
+    }
+
+    fn set_var(v: &Var, val: Emit) {
+        record_stmt(Stmt::Assign {
+            var: *v,
+            rhs: val.0,
+        });
+    }
+
+    fn index(vec: [Emit; 3], iv: Emit) -> Emit {
+        // The seeded `[Emit; 3]` carries the vec id in each element's `VecParamRef`.
+        let vec_id = ARENA.with(|a| match a.borrow()[vec[0].0 as usize] {
+            Node::VecParamRef(id) => id,
+            other => unreachable!("index() expected a VecParamRef parameter, got {other:?}"),
+        });
+        Emit(push(Node::VecIndex(vec_id, iv.0)))
+    }
+
+    fn named_lit(sym: &'static str, val: f32) -> Emit {
+        let sym_id = intern_named_lit(sym);
+        Emit(push(Node::NamedLit { sym_id, val }))
+    }
+
+    fn temp(x: Emit) -> Emit {
+        // Assign the next program-order sequence number, record the materialization
+        // statement (`float t{seq} = <x's expression>;`) into the current block, and
+        // return a `TempRef` handle so later uses of `x` spell `t{seq}`.
+        let rhs = x.0;
+        let seq = TEMP_SEQ.with(|c| {
+            let mut c = c.borrow_mut();
+            let s = *c;
+            *c += 1;
+            s
+        });
+        record_stmt(Stmt::DeclTemp {
+            seq,
+            ty: EmitTy::Float,
+            rhs,
+        });
+        Emit(push(Node::TempRef(seq)))
+    }
+
+    fn unroll_for<F: FnMut(Emit) -> Flow>(attr: &'static str, n: usize, mut body: F) {
+        // The iv is a `uint` loop variable named `a` (the committed body's induction var).
+        // Seeded as a `UintInput` so `VecIndex`'s operand prints `a`.
+        let iv = Emit(push(Node::UintInput(0)));
+        // Push the loop body block, record the body ONCE (the unroll is structural — DXC
+        // unrolls it), then pop and wrap into a `Stmt::UnrollFor` in the parent.
+        STMTS.with(|s| s.borrow_mut().push(Block { stmts: Vec::new() }));
+        // The body's `?` cannot early-return on Emit (every `if_` returns Fallthrough), so
+        // the whole loop body is recorded; the `Flow` result is discarded.
+        let _ = body(iv);
+        let body_block = STMTS.with(|s| {
+            s.borrow_mut()
+                .pop()
+                .expect("invariant: the loop body block was pushed above")
+        });
+        record_stmt(Stmt::UnrollFor {
+            attr,
+            iv: "a",
+            n,
+            body: body_block,
+        });
+    }
+
+    fn if_<F: FnOnce() -> Flow>(cond: EmitMask, body: F) -> Flow {
+        // Record the THEN block (here a single `Continue`), wrap into `Stmt::If`, and
+        // FALL THROUGH (return `Continue`) so the recorder keeps recording the live tail —
+        // the `continue` is captured structurally inside the `Stmt::If`, not by control
+        // flow. (Eval is the path where `?` actually skips the tail.)
+        STMTS.with(|s| s.borrow_mut().push(Block { stmts: Vec::new() }));
+        let _ = body(); // records `Stmt::Continue` into the then-block (via `EmitCf::cont`)
+        let then = STMTS.with(|s| {
+            s.borrow_mut()
+                .pop()
+                .expect("invariant: the then block was pushed above")
+        });
+        record_stmt(Stmt::If { cond: cond.0, then });
+        Flow::Continue(())
+    }
+
+    fn cont() -> Flow {
+        // SIDE EFFECT: record a `continue` into the current (then) block. The returned
+        // `Break(Continue)` is the loop-continue token (consumed by Eval; ignored by
+        // `if_`'s emit).
+        record_stmt(Stmt::Continue);
+        Flow::Break(LoopOp::Continue)
+    }
+}
+
+// ---- The STMT printer + the brick-exit generator -------------------------------
+
+/// The INLINE HLSL spelling of expression `expr` for a STATEMENT rhs / condition. A leaf
+/// (incl. a `TempRef`/`VarRef`/`VecIndex`/`NamedLit`) spells via [`operand_str`]; a
+/// non-leaf (an arithmetic / comparison / select node) spells via [`define_str`] (its
+/// operands recurse through the same inline rule). Because EVERY materialized
+/// subexpression was wrapped in [`Cf::temp`] (→ a `TempRef` leaf), an `expr` here bottoms
+/// out at temps/inputs/literals — no recursive temp emission is needed (temps are
+/// EXPLICIT [`Stmt::DeclTemp`]s recorded in program order, not auto-hoisted).
+fn inline_expr(arena: &[Node], names: Names, temps: &[Option<String>], expr: u32) -> String {
+    let node = arena[expr as usize];
+    if is_inline_leaf(node) {
+        operand_str(arena, names, temps, expr)
+    } else {
+        define_str(arena, names, temps, expr)
+    }
+}
+
+/// Prints a [`Block`]'s statements at indent `depth`. Temps are EXPLICIT
+/// (`Stmt::DeclTemp`, recorded in program order by [`Cf::temp`]), so this is a flat
+/// in-order walk — no dominance analysis. `temps` maps a temp's [`Node::TempRef`] seq to
+/// its `t{seq}` name (filled as `DeclTemp`s are printed).
+fn print_block(block: &Block, arena: &[Node], names: Names, depth: usize, out: &mut String) {
+    let pad = "    ".repeat(depth);
+    for stmt in &block.stmts {
+        match stmt {
+            Stmt::DeclVar { var, ty, rhs } => {
+                let rhs_s = inline_expr(arena, names, &[], *rhs);
+                out.push_str(&format!(
+                    "{pad}{} {} = {};\n",
+                    ty_keyword(*ty),
+                    names.vars[var.0 as usize],
+                    rhs_s
+                ));
+            }
+            Stmt::DeclTemp { seq, ty, rhs } => {
+                let rhs_s = inline_expr(arena, names, &[], *rhs);
+                out.push_str(&format!("{pad}{} t{seq} = {};\n", ty_keyword(*ty), rhs_s));
+            }
+            Stmt::Assign { var, rhs } => {
+                let rhs_s = inline_expr(arena, names, &[], *rhs);
+                out.push_str(&format!("{pad}{} = {};\n", names.vars[var.0 as usize], rhs_s));
+            }
+            Stmt::UnrollFor { attr, iv, n, body } => {
+                out.push_str(&format!("{pad}{attr}\n"));
+                out.push_str(&format!("{pad}for (uint {iv} = 0u; {iv} < {n}u; ++{iv}) {{\n"));
+                print_block(body, arena, names, depth + 1, out);
+                out.push_str(&format!("{pad}}}\n"));
+            }
+            Stmt::If { cond, then } => {
+                let cond_s = inline_expr(arena, names, &[], *cond);
+                out.push_str(&format!("{pad}if ({cond_s}) {{\n"));
+                print_block(then, arena, names, depth + 1, out);
+                out.push_str(&format!("{pad}}}\n"));
+            }
+            Stmt::Continue => out.push_str(&format!("{pad}continue;\n")),
+            Stmt::Return(expr) => {
+                let expr_s = inline_expr(arena, names, &[], *expr);
+                out.push_str(&format!("{pad}return {expr_s};\n"));
+            }
+        }
+    }
+}
+
+/// Generates the HLSL `dist_to_brick_exit` body — the empty-skip slab marcher with the
+/// `[unroll]` loop + the data-dependent `continue` — by tracing the generic
+/// [`crate::brick::dist_to_brick_exit_body`] over the `EmitCf` backend (whose
+/// `Cf::Scalar = Emit` supplies the SSA-node arithmetic), and returns the full
+/// `float dist_to_brick_exit(float3 p, float3 rd, float3 cell_min, float bw) { ... }`.
+///
+/// The body is spliced between the `// === GENERATED dist_to_brick_exit BEGIN/END ===`
+/// sentinels in `crates/boyko_rhi_vulkan/shaders/sdf_gbuffer_composite.hlsl`. The
+/// `sdf_field_edsl_sync` test pins the committed shader to this output; the cmp-`.spv`
+/// gate proves it re-DXCs byte-identical to the committed `.comp.spv`.
+pub fn emit_hlsl_dist_to_brick_exit() -> String {
+    use crate::brick;
+
+    // Fresh recorder state.
+    ARENA.with(|a| a.borrow_mut().clear());
+    STMTS.with(|s| s.borrow_mut().clear());
+    VARS.with(|v| v.borrow_mut().clear());
+    NAMED_LITS.with(|n| n.borrow_mut().clear());
+    TEMP_SEQ.with(|c| *c.borrow_mut() = 0);
+
+    // Seed the function body block (the bottom of the STMTS stack).
+    STMTS.with(|s| s.borrow_mut().push(Block { stmts: Vec::new() }));
+
+    // The three `float3` parameters, each seeded as a `VecParamRef` so `index(p, a)`
+    // recovers the parameter id and prints `p[a]` / `rd[a]` / `cell_min[a]`. `bw` is a
+    // scalar `float` input (named `bw`).
+    let p_id = push(Node::VecParamRef(0)); // vec_in[0] = "p"
+    let rd_id = push(Node::VecParamRef(1)); // vec_in[1] = "rd"
+    let cm_id = push(Node::VecParamRef(2)); // vec_in[2] = "cell_min"
+    let p = [Emit(p_id), Emit(p_id), Emit(p_id)];
+    let rd = [Emit(rd_id), Emit(rd_id), Emit(rd_id)];
+    let cell_min = [Emit(cm_id), Emit(cm_id), Emit(cm_id)];
+    let bw = Emit::input(0); // float_in[0] = "bw"
+
+    let result = brick::dist_to_brick_exit_body::<EmitCf>(p, rd, cell_min, bw);
+
+    // Pop the function body block and print it.
+    let body_block = STMTS.with(|s| {
+        s.borrow_mut()
+            .pop()
+            .expect("invariant: the function body block was pushed above")
+    });
+
+    let float_in = ["bw"];
+    let vec_in = ["p", "rd", "cell_min"];
+    let named_lit = NAMED_LITS.with(|n| n.borrow().clone());
+    let vars = VARS.with(|v| v.borrow().clone());
+    let names = Names {
+        float_in: &float_in,
+        uint_in: &["a"],
+        vec_in: &vec_in,
+        named_lit: &named_lit,
+        vars: &vars,
+    };
+
+    ARENA.with(|a| {
+        let arena = a.borrow();
+        let mut body = String::new();
+        // The statements (DeclVar exit + the UnrollFor with its explicit DeclTemps).
+        print_block(&body_block, &arena, names, 1, &mut body);
+        // The final return — `(exit < BRICK_EXIT_EPS) ? BRICK_EXIT_EPS : exit;`. The root
+        // SELECT is spelled INLINE (matching the committed ternary); its cond/then/else
+        // are leaves (the `Lt` comparison, the `BRICK_EXIT_EPS` named lit, the `exit` var).
+        let ret = inline_expr(&arena, names, &[], result.0);
+        body.push_str(&format!("    return {ret};\n"));
+
+        format!(
+            "float dist_to_brick_exit(float3 p, float3 rd, float3 cell_min, float bw) {{\n{body}}}\n"
+        )
+    })
 }

@@ -35,4 +35,13 @@ fn main() {
     print!("{}", boyko_shaderdsl::emit::emit_hlsl_cubic_eval());
     println!();
     print!("{}", boyko_shaderdsl::emit::emit_hlsl_jcgt_cubic_coeffs());
+    // The brick-exit empty-skip MARCHER leaf (Increment 1 — the first CONTROL-FLOW leaf):
+    // the `[unroll]` slab loop with the data-dependent `continue` + the final progress-
+    // clamp ternary, generated from `boyko_shaderdsl::brick::dist_to_brick_exit_body` over
+    // the `Emit` value backend + the `EmitCf` control-flow backend. Spliced between the
+    // `// === GENERATED dist_to_brick_exit BEGIN/END ===` sentinels in
+    // `sdf_gbuffer_composite.hlsl`. The host `boyko_sdf_math::brick::dist_to_brick_exit`
+    // stays HAND-WRITTEN (firewall option B — see the brick module doc).
+    println!();
+    print!("{}", boyko_shaderdsl::emit::emit_hlsl_dist_to_brick_exit());
 }

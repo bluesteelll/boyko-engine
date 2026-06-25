@@ -106,6 +106,19 @@ pub trait FieldScalar: Copy {
     /// `self > rhs` — the `k > 0.0` smooth/hard test in `combine`.
     fn gt(self, rhs: Self) -> Self::Mask;
 
+    /// `self < rhs` — the strict less-than comparison (HLSL `OpFOrdLessThan`). Added
+    /// for the brick-marcher control-flow leaf ([`crate::brick::dist_to_brick_exit_body`]),
+    /// whose final progress clamp is `exit < BRICK_EXIT_EPS ? EPS : exit`. The frozen
+    /// field/normal/decode bodies use only [`gt`](Self::gt), so adding this is
+    /// firewall-harmless (no existing traced body records an `Lt`).
+    fn lt(self, rhs: Self) -> Self::Mask;
+
+    /// `self <= rhs` — the less-than-or-equal comparison (HLSL `OpFOrdLessThanEqual`,
+    /// a DISTINCT opcode from a swapped `>` — a swapped-`>` would emit `OpFOrdGreaterThan`
+    /// and FORK the committed `.spv`). Added for the brick-marcher's per-axis skip guard
+    /// `abs(dir) <= BRICK_EXIT_EPS` ([`crate::brick::dist_to_brick_exit_body`]).
+    fn le(self, rhs: Self) -> Self::Mask;
+
     /// `op == want` — the unsigned op-discriminant equality in `combine`'s
     /// dispatch. `op`/`want` are host `u32` constants (the edit's op + the
     /// `sdf_op::*` discriminant), NOT traced values: the dispatch over the op enum
@@ -291,6 +304,16 @@ impl FieldScalar for f32 {
     #[inline]
     fn gt(self, rhs: Self) -> bool {
         self > rhs
+    }
+
+    #[inline]
+    fn lt(self, rhs: Self) -> bool {
+        self < rhs
+    }
+
+    #[inline]
+    fn le(self, rhs: Self) -> bool {
+        self <= rhs
     }
 
     #[inline]
