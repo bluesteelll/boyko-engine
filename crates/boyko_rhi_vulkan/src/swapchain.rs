@@ -4485,6 +4485,13 @@ impl GBufferTargets {
                 // pixel's froxel slice when `clusters_enabled`).
                 BindGroupEntry::StorageBuffer { buffer: cluster_grid_buf },
                 BindGroupEntry::StorageBuffer { buffer: light_index_buf },
+                // P6 R1: the SDF edit-list `Buf` @10 — the SAME buffer the marcher binds +
+                // uploads + barriers. The resolve dispatch is ordered after the marcher in the
+                // same submit, so the prior upload+barrier covers this second COMPUTE read (no
+                // new barrier). The resolve's `sdf_soft_shadow_ranged` march reads it read-only
+                // (a strict field-CONSUMER); on a `shadow_mode==0` scene the march is never
+                // executed, so the binding is a harmless valid descriptor (the 0%-gate).
+                BindGroupEntry::StorageBuffer { buffer: scene.edit_list },
             ];
             let desc = BindGroupDesc::<Vulkan> {
                 layout: scene.resolve_layout,

@@ -216,10 +216,17 @@ static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<122812> = SpirvBlob(*include_bytes!(
 /// `normalize(0) == NaN` that blackened the pixel (`NaN * (NoL == 0) == NaN` →
 /// `pack_unorm(NaN) == 0`). Bindings 8/9 are now STATICALLY referenced on every path (DXC no
 /// longer dead-strips them when clusters are off), so every resolve pipeline layout declares +
-/// binds 0..9 (placeholder buffers @8/@9 on the non-clustered paths). The host mirror is
+/// binds 0..9 (placeholder buffers @8/@9 on the non-clustered paths). The byte length then
+/// grew 15252 → 24728 with **P6 R1** (multi-light SDF shadows, ANALYTIC ranged march): the
+/// resolve now `#include`s `sdf_field.hlsli` (the frozen `field_distance`) + binds the
+/// edit-list `Buf` SSBO @10 (one new binding, 10 → 11; NO cap raise), defines the generated
+/// `sdf_soft_shadow_ranged(p,n,L,t_max)` leaf, and — gated by the header's `shadow_mode`
+/// (word 7; 0 = the BYTE-IDENTICAL 0%-gate) — marches each EXTRA flagged caster's per-light
+/// shadow (the primary directional KEEPS `gMaterial.r`). The host mirror is
 /// [`golden_deferred_resolve_table`] (clustered via [`golden_cluster_cull`] +
-/// [`golden_deferred_resolve_clustered`]).
-static DEFERRED_PBR_SPV: SpirvBlob<15252> = SpirvBlob(*include_bytes!(concat!(
+/// [`golden_deferred_resolve_clustered`]); the shadowed multi-light path is mirrored by the
+/// `_shadowed` variants.
+static DEFERRED_PBR_SPV: SpirvBlob<24728> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/deferred_pbr.comp.spv"
 )));
@@ -568,6 +575,43 @@ fn host_soft_shadow<F: Fn([f32; 3]) -> f32>(
         // near-zero `d` cannot stall the march.
         t += (d / FIELD_LIPSCHITZ_L).max(SHADOW_MINT_STEP);
         if t > SDF_T_MAX {
+            break;
+        }
+    }
+    res.clamp(0.0, 1.0)
+}
+
+/// P6 R1 cap: the maximum EXTRA shadow casters marched per pixel (the dominant-N bound).
+/// Mirrors the shader's `MAX_SDF_SHADOW_CASTERS_PER_PIXEL`. Beyond this, flagged lights
+/// contribute NoL-only (no march). Owner-retunable.
+pub const MAX_SDF_SHADOW_CASTERS_PER_PIXEL: u32 = 4;
+
+/// The P6 R1 `t_max`-RANGED host mirror of `sdf_soft_shadow_ranged` — IDENTICAL to
+/// [`host_soft_shadow`] except the escape break bound is the runtime `t_max` (the per-caster
+/// march range: the light DISTANCE for a punctual caster, `SDF_T_MAX` for an extra
+/// directional) instead of the hardcoded `SDF_T_MAX`. The multi-light shadow term is
+/// consumer-side (±2/255), not bit-exact. `field` is the FROZEN field gateway.
+fn host_soft_shadow_ranged<F: Fn([f32; 3]) -> f32>(
+    p: [f32; 3],
+    n: [f32; 3],
+    l: [f32; 3],
+    t_max: f32,
+    field: &F,
+) -> f32 {
+    if v_dot(n, l) <= SHADOW_NDOTL_EPS {
+        return 0.0;
+    }
+    let mut res = 1.0_f32;
+    let mut t = SHADOW_MINT;
+    for _ in 0..SDF_MAX_IT {
+        let q = [p[0] + l[0] * t, p[1] + l[1] * t, p[2] + l[2] * t];
+        let d = field(q);
+        res = res.min(SHADOW_K * d / t);
+        if d < SHADOW_HIT_EPS {
+            return 0.0;
+        }
+        t += (d / FIELD_LIPSCHITZ_L).max(SHADOW_MINT_STEP);
+        if t > t_max {
             break;
         }
     }
@@ -3706,12 +3750,38 @@ impl GoldenLight {
         }
     }
 
-    /// The bit-cast kind tag from `dir_kind.w`.
+    /// The bit-cast kind tag from `dir_kind.w` (the flag bits masked off — mirrors the
+    /// shader's `light_kind()`). The P6 R1 `casts_sdf_shadow` flag lives in bit 16 of the
+    /// same word; on every pre-P6 light bit 16 is 0, so this is byte-equivalent to the raw
+    /// bitcast (the 0%-gate).
     #[inline]
     pub fn kind(&self) -> u32 {
-        self.dir_kind[3].to_bits()
+        self.dir_kind[3].to_bits() & GOLDEN_LIGHT_KIND_MASK
+    }
+
+    /// True iff this light is flagged a P6 R1 per-light SDF-shadow caster (bit 16 of the kind
+    /// word — mirrors the shader's `light_casts_sdf_shadow()`).
+    #[inline]
+    pub fn casts_sdf_shadow(&self) -> bool {
+        (self.dir_kind[3].to_bits() & GOLDEN_LIGHT_FLAG_CASTS_SHADOW) != 0
+    }
+
+    /// Flags this light a P6 R1 SDF-shadow caster (sets bit 16 of the kind word). The
+    /// builder the multi-light goldens use; the kind enum (low bits) is preserved.
+    #[inline]
+    pub fn with_sdf_shadow(mut self) -> Self {
+        let bits = self.dir_kind[3].to_bits() | GOLDEN_LIGHT_FLAG_CASTS_SHADOW;
+        self.dir_kind[3] = f32::from_bits(bits);
+        self
     }
 }
+
+/// The kind-enum mask (low 16 bits) — mirrors the shader's `LIGHT_KIND_MASK`. The P6 R1
+/// `casts_sdf_shadow` flag occupies bit 16, so the enum + the flag coexist in one word.
+pub const GOLDEN_LIGHT_KIND_MASK: u32 = 0xFFFF;
+/// Bit 16 of the kind word: the P6 R1 per-light `casts_sdf_shadow` flag (mirrors the shader's
+/// `LIGHT_FLAG_CASTS_SHADOW`).
+pub const GOLDEN_LIGHT_FLAG_CASTS_SHADOW: u32 = 0x1_0000;
 
 /// The maximum `cos(outer)` the spot bake clamps to (mirrors
 /// `boyko_render::light::SPOT_COS_OUTER_MAX`): bounds `I = Φ/(2π(1−cos))` as the cone
@@ -3860,6 +3930,24 @@ impl GoldenLightHeader {
     #[inline]
     pub fn exposure(&self) -> f32 {
         self.counts_exposure[1]
+    }
+
+    /// Sets the P6 R1 `shadow_mode` (header WORD 7 = `sky_diffuse.w`, read RAW by the shader's
+    /// `load_shadow_mode` — so it is stored bit-cast, NOT as a float value). 0 =
+    /// single-directional legacy (the BYTE-IDENTICAL 0%-gate); 1 = multi-light (the primary
+    /// directional keeps `gMaterial.r`, every extra flagged caster gets a `sdf_soft_shadow_
+    /// ranged` march). The builder the multi-light goldens use.
+    #[inline]
+    pub fn with_shadow_mode(mut self, shadow_mode: u32) -> Self {
+        self.sky_diffuse[3] = f32::from_bits(shadow_mode);
+        self
+    }
+
+    /// The P6 R1 `shadow_mode` (header word 7, bit-cast back from `sky_diffuse.w`). 0 on every
+    /// pre-P6 scene (the 0%-gate).
+    #[inline]
+    pub fn shadow_mode(&self) -> u32 {
+        self.sky_diffuse[3].to_bits()
     }
 
     /// Builds the L1 CLUSTERED header (mirrors `LightHeaderGpu::new_clustered`): the
@@ -4492,6 +4580,191 @@ pub fn golden_deferred_resolve_table(
     pack_rgba(lit)
 }
 
+/// The P6 R1 MULTI-LIGHT SDF-shadow CPU mirror of the `deferred_pbr` resolve — the
+/// `shadow_mode != 0` oracle. Identical to [`golden_deferred_resolve_table`] EXCEPT each
+/// per-light visibility `vis` is the per-caster shadow term (Decision 1/2/7). The PRIMARY
+/// directional (the FIRST directional — the one the marcher marched into `gMaterial.r`) KEEPS
+/// `attrs.shadow` (never re-marched, byte-stable across 1→N); an EXTRA flagged directional
+/// gets `host_soft_shadow_ranged(P, n, L, SDF_T_MAX)` (it reaches everywhere — unbounded,
+/// capped by dominant-N + NoL skip); a flagged point/spot caster gets `host_soft_shadow_
+/// ranged(P, n, L, dist)` (the light DISTANCE bound); otherwise `vis` DEFAULTS to
+/// `attrs.shadow` (the legacy L0b modulation).
+///
+/// At most [`MAX_SDF_SHADOW_CASTERS_PER_PIXEL`] extra casters are marched; the `NoL <= 0`
+/// front-of-loop skip elides the march (and the term). `field` is the FROZEN edit-list
+/// gateway (`sdf_edit_list`); the multi-light shadow term is consumer-side (±2/255), NOT
+/// bit-exact — but with `header.shadow_mode() == 0` this is BYTE-IDENTICAL to
+/// [`golden_deferred_resolve_table`] (no caster is marched, every `vis == shadow`).
+#[allow(clippy::too_many_arguments)]
+pub fn golden_deferred_resolve_table_shadowed<F: Fn([f32; 3]) -> f32>(
+    attrs: MarcherAttributes,
+    ro: [f32; 3],
+    rd: [f32; 3],
+    materials: &[GoldenMaterial],
+    header: &GoldenLightHeader,
+    lights: &[GoldenLight],
+    field: &F,
+) -> u32 {
+    let base = [
+        attrs.base_rgb[0] as f32 / 255.0,
+        attrs.base_rgb[1] as f32 / 255.0,
+        attrs.base_rgb[2] as f32 / 255.0,
+    ];
+    if attrs.mask != 1 {
+        return pack_rgba(base);
+    }
+
+    let n = oct_decode([attrs.oct_rg[0] as f32 / 255.0, attrs.oct_rg[1] as f32 / 255.0]);
+    let mat = materials
+        .get(attrs.mat_id as usize)
+        .copied()
+        .unwrap_or_default();
+
+    let metallic = mat.mrr[0];
+    let roughness = mat.mrr[1].clamp(0.045, 1.0);
+    let reflectance = mat.mrr[2];
+    let a = roughness * roughness;
+    let dielectric_f0 = 0.16 * reflectance * reflectance;
+    let f0 = [
+        dielectric_f0 + (base[0] - dielectric_f0) * metallic,
+        dielectric_f0 + (base[1] - dielectric_f0) * metallic,
+        dielectric_f0 + (base[2] - dielectric_f0) * metallic,
+    ];
+    let diffuse_color = [
+        base[0] * (1.0 - metallic),
+        base[1] * (1.0 - metallic),
+        base[2] * (1.0 - metallic),
+    ];
+
+    let v = [-rd[0], -rd[1], -rd[2]];
+    let nov = v_dot(n, v).max(1e-4);
+    let shadow = attrs.shadow as f32 / 255.0;
+    let ao = attrs.ao as f32 / 255.0;
+    let pi = core::f32::consts::PI;
+    const UP: [f32; 3] = [0.0, 1.0, 0.0];
+    let hemi = v_dot(n, UP) * 0.5 + 0.5;
+
+    // P6 R1: the shadow_mode gate + the surface world position `P` (hoisted, mirroring the
+    // shader) + the dominant-N march counter.
+    let multi_light = header.shadow_mode() != 0;
+    let p = [
+        ro[0] + rd[0] * attrs.view_t,
+        ro[1] + rd[1] * attrs.view_t,
+        ro[2] + rd[2] * attrs.view_t,
+    ];
+    let mut marched = 0u32;
+
+    let mut lit_direct = [0.0_f32; 3];
+    let mut ambient = [0.0_f32; 3];
+    let mut primary_dir_seen = false;
+    let count = header.l0a_count() as usize;
+    for li in lights.iter().take(count) {
+        match li.kind() {
+            GOLDEN_LIGHT_KIND_DIRECTIONAL => {
+                let l = v_normalize([li.dir_kind[0], li.dir_kind[1], li.dir_kind[2]]);
+                let nol = v_dot(n, l).max(0.0);
+                // The primary directional KEEPS gMaterial.r; an extra flagged directional
+                // marches with t_max = SDF_T_MAX. `vis` defaults to `shadow` (legacy).
+                let mut vis = shadow;
+                if !primary_dir_seen {
+                    primary_dir_seen = true;
+                } else if multi_light
+                    && li.casts_sdf_shadow()
+                    && marched < MAX_SDF_SHADOW_CASTERS_PER_PIXEL
+                    && nol > SHADOW_NDOTL_EPS
+                {
+                    vis = host_soft_shadow_ranged(p, n, l, SDF_T_MAX, field);
+                    marched += 1;
+                }
+                let hvec = v_normalize([v[0] + l[0], v[1] + l[1], v[2] + l[2]]);
+                let noh = v_dot(n, hvec).clamp(0.0, 1.0);
+                let loh = v_dot(l, hvec).clamp(0.0, 1.0);
+                let d_term = d_ggx(noh, a);
+                let v_term = v_smith_ggx_correlated(nov, nol, a);
+                let f_term = f_schlick(loh, f0);
+                for c in 0..3 {
+                    let spec = d_term * v_term * f_term[c];
+                    let diff = diffuse_color[c] * (1.0 / pi);
+                    lit_direct[c] += (diff + spec) * (nol * vis) * li.color_cone[c];
+                }
+            }
+            GOLDEN_LIGHT_KIND_SKY => {
+                let sky = [li.color_cone[0], li.color_cone[1], li.color_cone[2]];
+                let ground = [li.pos_range[0], li.pos_range[1], li.pos_range[2]];
+                let dfg = env_brdf_approx(roughness, nov);
+                for c in 0..3 {
+                    let hemi_c = ground[c] + (sky[c] - ground[c]) * hemi;
+                    let spec_ambient = (f0[c] * dfg[0] + dfg[1]) * sky[c];
+                    let diff_ambient = diffuse_color[c] * hemi_c;
+                    ambient[c] += (spec_ambient + diff_ambient) * ao;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // L0b point/spot block (flat) with the per-caster ranged march.
+    let l0a = header.l0a_count() as usize;
+    let total = header.light_count() as usize;
+    for li in lights.iter().take(total).skip(l0a) {
+        let kind = li.kind();
+        if kind != GOLDEN_LIGHT_KIND_POINT && kind != GOLDEN_LIGHT_KIND_SPOT {
+            continue;
+        }
+        let pos = [li.pos_range[0], li.pos_range[1], li.pos_range[2]];
+        let range = li.pos_range[3];
+        let to_l = [pos[0] - p[0], pos[1] - p[1], pos[2] - p[2]];
+        let d2 = v_dot(to_l, to_l);
+        let range2 = range * range;
+        if d2 > range2 {
+            continue;
+        }
+        let inv_d = 1.0 / d2.max(1e-8).sqrt();
+        let l = [to_l[0] * inv_d, to_l[1] * inv_d, to_l[2] * inv_d];
+        let win = (1.0 - (d2 * d2) / (range2 * range2)).clamp(0.0, 1.0);
+        let mut atten = (1.0 / d2.max(1e-4)) * win * win;
+        if kind == GOLDEN_LIGHT_KIND_SPOT {
+            let (cos_inner, cos_outer) = golden_unpack_cones(li.color_cone[3]);
+            let spot_dir = v_normalize([li.dir_kind[0], li.dir_kind[1], li.dir_kind[2]]);
+            let cos_a = v_dot([-l[0], -l[1], -l[2]], spot_dir);
+            let denom = (cos_inner - cos_outer).max(1e-4);
+            let tt = ((cos_a - cos_outer) / denom).clamp(0.0, 1.0);
+            atten *= tt * tt;
+        }
+        let hvec = v_normalize([v[0] + l[0], v[1] + l[1], v[2] + l[2]]);
+        let nol = v_dot(n, l).max(0.0);
+        let noh = v_dot(n, hvec).clamp(0.0, 1.0);
+        let loh = v_dot(l, hvec).clamp(0.0, 1.0);
+        let d_term = d_ggx(noh, a);
+        let v_term = v_smith_ggx_correlated(nov, nol, a);
+        let f_term = f_schlick(loh, f0);
+        // `vis` defaults to `shadow` (legacy L0b modulation); a flagged caster marches with
+        // t_max = the light DISTANCE (`sqrt(d2)`).
+        let mut vis = shadow;
+        if multi_light
+            && li.casts_sdf_shadow()
+            && marched < MAX_SDF_SHADOW_CASTERS_PER_PIXEL
+            && nol > SHADOW_NDOTL_EPS
+        {
+            let t_max = d2.sqrt();
+            vis = host_soft_shadow_ranged(p, n, l, t_max, field);
+            marched += 1;
+        }
+        for c in 0..3 {
+            let spec = d_term * v_term * f_term[c];
+            let diff = diffuse_color[c] * (1.0 / pi);
+            lit_direct[c] += (diff + spec) * (nol * vis) * atten * li.color_cone[c];
+        }
+    }
+
+    let exposure = header.exposure();
+    let mut lit = [0.0_f32; 3];
+    for c in 0..3 {
+        lit[c] = (lit_direct[c] + ambient[c] + mat.emissive[c]) * exposure;
+    }
+    pack_rgba(lit)
+}
+
 // ===========================================================================
 // Lighting L1 — clustered froxel light cull (host mirror of cluster_cull.hlsl +
 // the deferred_pbr.hlsl cluster lookup).
@@ -4824,6 +5097,193 @@ pub fn golden_deferred_resolve_clustered(
             let spec = d_term * v_term * f_term[c];
             let diff = diffuse_color[c] * (1.0 / pi);
             lit_direct[c] += (diff + spec) * (nol * shadow) * atten * li.color_cone[c];
+        }
+    }
+
+    let exposure = header.exposure();
+    let mut lit = [0.0_f32; 3];
+    for c in 0..3 {
+        lit[c] = (lit_direct[c] + ambient[c] + mat.emissive[c]) * exposure;
+    }
+    pack_rgba(lit)
+}
+
+/// The P6 R1 MULTI-LIGHT SDF-shadow CPU mirror of the L1 CLUSTERED `deferred_pbr` resolve —
+/// the `shadow_mode != 0` clustered oracle. Identical to [`golden_deferred_resolve_clustered`]
+/// EXCEPT each per-light visibility is the per-caster shadow term (the same primary-directional
+/// rule + ranged march + dominant-N cap + NoL skip as [`golden_deferred_resolve_table_shadowed`]).
+/// When clusters are OFF (or a non-lit pixel) this DELEGATES to the flat shadowed table oracle.
+///
+/// # Limitation (the cull does NOT mask the flag in R1)
+/// `golden_cluster_cull` (frozen) compares the RAW `li.kind()` — wait, the host `kind()` now
+/// masks the flag, so the HOST cull correctly includes a shadow-flagged point. The GPU
+/// `cluster_cull.hlsl` compares the raw `e.kind` (unmasked), so a shadow-flagged punctual is
+/// dropped by the GPU cull until a follow-up masks it there too. R1's multi-light shadow GPU
+/// golden therefore uses the NON-clustered path; this clustered oracle exists for parity
+/// (casting DIRECTIONALS + non-casting clustered punctual lights match).
+#[allow(clippy::too_many_arguments)]
+pub fn golden_deferred_resolve_clustered_shadowed<F: Fn([f32; 3]) -> f32>(
+    attrs: MarcherAttributes,
+    px: u32,
+    py: u32,
+    img_w: u32,
+    img_h: u32,
+    camera: CompositeCamera,
+    materials: &[GoldenMaterial],
+    header: &GoldenLightHeader,
+    lights: &[GoldenLight],
+    cfg: &GoldenClusterConfig,
+    grid: &[Vec<u32>],
+    field: &F,
+) -> u32 {
+    let (ro, rd) = composite_ray(px, py, img_w, img_h, camera);
+    // L1 OFF (or a non-lit pixel): the flat shadowed path.
+    if !header.clusters_enabled() || attrs.mask != 1 {
+        return golden_deferred_resolve_table_shadowed(attrs, ro, rd, materials, header, lights, field);
+    }
+
+    let base = [
+        attrs.base_rgb[0] as f32 / 255.0,
+        attrs.base_rgb[1] as f32 / 255.0,
+        attrs.base_rgb[2] as f32 / 255.0,
+    ];
+    let n = oct_decode([attrs.oct_rg[0] as f32 / 255.0, attrs.oct_rg[1] as f32 / 255.0]);
+    let mat = materials
+        .get(attrs.mat_id as usize)
+        .copied()
+        .unwrap_or_default();
+
+    let metallic = mat.mrr[0];
+    let roughness = mat.mrr[1].clamp(0.045, 1.0);
+    let reflectance = mat.mrr[2];
+    let a = roughness * roughness;
+    let dielectric_f0 = 0.16 * reflectance * reflectance;
+    let f0 = [
+        dielectric_f0 + (base[0] - dielectric_f0) * metallic,
+        dielectric_f0 + (base[1] - dielectric_f0) * metallic,
+        dielectric_f0 + (base[2] - dielectric_f0) * metallic,
+    ];
+    let diffuse_color = [
+        base[0] * (1.0 - metallic),
+        base[1] * (1.0 - metallic),
+        base[2] * (1.0 - metallic),
+    ];
+
+    let v = [-rd[0], -rd[1], -rd[2]];
+    let nov = v_dot(n, v).max(1e-4);
+    let shadow = attrs.shadow as f32 / 255.0;
+    let ao = attrs.ao as f32 / 255.0;
+    let pi = core::f32::consts::PI;
+    const UP: [f32; 3] = [0.0, 1.0, 0.0];
+    let hemi = v_dot(n, UP) * 0.5 + 0.5;
+
+    let multi_light = header.shadow_mode() != 0;
+    let p = [
+        ro[0] + rd[0] * attrs.view_t,
+        ro[1] + rd[1] * attrs.view_t,
+        ro[2] + rd[2] * attrs.view_t,
+    ];
+    let mut marched = 0u32;
+
+    let mut lit_direct = [0.0_f32; 3];
+    let mut ambient = [0.0_f32; 3];
+    let mut primary_dir_seen = false;
+    let l0a = header.l0a_count() as usize;
+    for li in lights.iter().take(l0a) {
+        match li.kind() {
+            GOLDEN_LIGHT_KIND_DIRECTIONAL => {
+                let l = v_normalize([li.dir_kind[0], li.dir_kind[1], li.dir_kind[2]]);
+                let nol = v_dot(n, l).max(0.0);
+                let mut vis = shadow;
+                if !primary_dir_seen {
+                    primary_dir_seen = true;
+                } else if multi_light
+                    && li.casts_sdf_shadow()
+                    && marched < MAX_SDF_SHADOW_CASTERS_PER_PIXEL
+                    && nol > SHADOW_NDOTL_EPS
+                {
+                    vis = host_soft_shadow_ranged(p, n, l, SDF_T_MAX, field);
+                    marched += 1;
+                }
+                let hvec = v_normalize([v[0] + l[0], v[1] + l[1], v[2] + l[2]]);
+                let noh = v_dot(n, hvec).clamp(0.0, 1.0);
+                let loh = v_dot(l, hvec).clamp(0.0, 1.0);
+                let d_term = d_ggx(noh, a);
+                let v_term = v_smith_ggx_correlated(nov, nol, a);
+                let f_term = f_schlick(loh, f0);
+                for c in 0..3 {
+                    let spec = d_term * v_term * f_term[c];
+                    let diff = diffuse_color[c] * (1.0 / pi);
+                    lit_direct[c] += (diff + spec) * (nol * vis) * li.color_cone[c];
+                }
+            }
+            GOLDEN_LIGHT_KIND_SKY => {
+                let sky = [li.color_cone[0], li.color_cone[1], li.color_cone[2]];
+                let ground = [li.pos_range[0], li.pos_range[1], li.pos_range[2]];
+                let dfg = env_brdf_approx(roughness, nov);
+                for c in 0..3 {
+                    let hemi_c = ground[c] + (sky[c] - ground[c]) * hemi;
+                    let spec_ambient = (f0[c] * dfg[0] + dfg[1]) * sky[c];
+                    let diff_ambient = diffuse_color[c] * hemi_c;
+                    ambient[c] += (spec_ambient + diff_ambient) * ao;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let view_z = match camera {
+        CompositeCamera::Perspective { forward, .. } => v_dot(rd, forward) * attrs.view_t,
+        CompositeCamera::Ortho => attrs.view_t,
+    };
+    let (tx, ty) = golden_cluster_xy_tile(px, py, img_w, img_h, cfg);
+    let zsl = golden_cluster_z_slice(view_z, cfg);
+    let cluster = golden_cluster_index(tx, ty, zsl, cfg.dim_x, cfg.dim_z) as usize;
+    let slice = grid.get(cluster).map(Vec::as_slice).unwrap_or(&[]);
+    for &j in slice {
+        let li = &lights[j as usize];
+        let kind = li.kind();
+        let pos = [li.pos_range[0], li.pos_range[1], li.pos_range[2]];
+        let range = li.pos_range[3];
+        let to_l = [pos[0] - p[0], pos[1] - p[1], pos[2] - p[2]];
+        let d2 = v_dot(to_l, to_l);
+        let range2 = range * range;
+        if d2 > range2 {
+            continue;
+        }
+        let inv_d = 1.0 / d2.max(1e-8).sqrt();
+        let l = [to_l[0] * inv_d, to_l[1] * inv_d, to_l[2] * inv_d];
+        let win = (1.0 - (d2 * d2) / (range2 * range2)).clamp(0.0, 1.0);
+        let mut atten = (1.0 / d2.max(1e-4)) * win * win;
+        if kind == GOLDEN_LIGHT_KIND_SPOT {
+            let (cos_inner, cos_outer) = golden_unpack_cones(li.color_cone[3]);
+            let spot_dir = v_normalize([li.dir_kind[0], li.dir_kind[1], li.dir_kind[2]]);
+            let cos_a = v_dot([-l[0], -l[1], -l[2]], spot_dir);
+            let denom = (cos_inner - cos_outer).max(1e-4);
+            let tt = ((cos_a - cos_outer) / denom).clamp(0.0, 1.0);
+            atten *= tt * tt;
+        }
+        let hvec = v_normalize([v[0] + l[0], v[1] + l[1], v[2] + l[2]]);
+        let nol = v_dot(n, l).max(0.0);
+        let noh = v_dot(n, hvec).clamp(0.0, 1.0);
+        let loh = v_dot(l, hvec).clamp(0.0, 1.0);
+        let d_term = d_ggx(noh, a);
+        let v_term = v_smith_ggx_correlated(nov, nol, a);
+        let f_term = f_schlick(loh, f0);
+        let mut vis = shadow;
+        if multi_light
+            && li.casts_sdf_shadow()
+            && marched < MAX_SDF_SHADOW_CASTERS_PER_PIXEL
+            && nol > SHADOW_NDOTL_EPS
+        {
+            let t_max = d2.sqrt();
+            vis = host_soft_shadow_ranged(p, n, l, t_max, field);
+            marched += 1;
+        }
+        for c in 0..3 {
+            let spec = d_term * v_term * f_term[c];
+            let diff = diffuse_color[c] * (1.0 / pi);
+            lit_direct[c] += (diff + spec) * (nol * vis) * atten * li.color_cone[c];
         }
     }
 

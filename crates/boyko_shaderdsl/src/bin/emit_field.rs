@@ -274,4 +274,15 @@ fn main() {
     // DEPTH 1 (4-space indent).
     println!();
     print!("{}", boyko_shaderdsl::emit::emit_hlsl_oct_encode());
+    // The P6 R1 `t_max`-RANGED soft-shadow leaf (multi-light SDF shadows) — a SEPARATELY-NAMED
+    // clone of `sdf_soft_shadow` whose escape break spells the RUNTIME parameter `t_max`
+    // instead of the frozen `T_MAX` symbol (B3 — option a). UNLIKE the marcher's
+    // `sdf_soft_shadow` (a span spliced inside a hand-written function), this is a COMPLETE
+    // function consumed ONLY by the deferred RESOLVE (`deferred_pbr.hlsl`): the resolve's
+    // per-light loop calls `sdf_soft_shadow_ranged(P, n, L, t_max)` for each extra shadow
+    // caster. The marcher's `sdf_soft_shadow` emit is UNTOUCHED, so its frozen `.comp.spv`
+    // cannot move. Generated from `boyko_shaderdsl::shadow::sdf_soft_shadow_ranged_body` over
+    // the `Emit` + `EmitCf` backends.
+    println!();
+    print!("{}", boyko_shaderdsl::emit::emit_hlsl_sdf_soft_shadow_ranged());
 }

@@ -156,3 +156,58 @@ pub fn sdf_soft_shadow_body<C: Cf, F: Fn(C::Vec3f) -> C::Scalar>(
     // Emit the recorder captured every statement.
     let _ = run();
 }
+
+/// The `t_max`-RANGED clone of [`sdf_soft_shadow_body`] (P6 R1 — multi-light SDF shadows).
+///
+/// Statement-for-statement IDENTICAL to [`sdf_soft_shadow_body`] EXCEPT the escape break
+/// bound: the hardcoded `T_MAX` symbol is replaced by the runtime parameter `t_max` (the
+/// `if (t > t_max) { break; }`). Authored as a SEPARATE entrypoint (B3 — option a) so the
+/// marcher's frozen `sdf_soft_shadow` emit / `.comp.spv` cannot move: this generator is
+/// consumed ONLY by the RESOLVE (`deferred_pbr.hlsl`), never the marcher.
+///
+/// `t_max` is the per-caster march bound the resolve passes: the light DISTANCE for a
+/// punctual (point/spot) caster (the common, cheap, nearby case) or `T_MAX` for an extra
+/// directional caster. `p`/`_n`/`l`/`field`/`out` carry the SAME contract as
+/// [`sdf_soft_shadow_body`] (the `dot(n, L)` early-return preamble stays hand-written inline
+/// in the RESOLVE's per-light loop — the generated span is the loop+tail only).
+#[inline]
+pub fn sdf_soft_shadow_ranged_body<C: Cf, F: Fn(C::Vec3f) -> C::Scalar>(
+    p: C::Vec3f,
+    _n: C::Vec3f,
+    l: C::Vec3f,
+    t_max: C::Scalar,
+    field: F,
+    out: &C::RetCellF,
+) {
+    let run = || -> Flow {
+        // float res = 1.0;  /  float t = SHADOW_MINT;  (both TRUE locals — recorded DeclVars).
+        let res = C::decl_var("res", C::Scalar::lit(1.0));
+        let t = C::decl_var("t", C::named_lit("SHADOW_MINT", SHADOW_MINT));
+
+        C::runtime_for("[loop]", "i", "MAX_IT", MAX_IT, |_i| -> Flow {
+            // float d = field_distance(p + L * t);
+            let d = C::temp_float(
+                "d",
+                field(C::vec3_add(p, C::vec3_mul_scalar(l, C::get_var(&t)))),
+            );
+            // res = min(res, SHADOW_K * d / t);
+            let k = C::named_lit("SHADOW_K", SHADOW_K);
+            C::set_var(&res, C::get_var(&res).min(k.mul(d).div(C::get_var(&t))));
+            // if (d < SHADOW_HIT_EPS) { return 0.0; }
+            let hit_eps = C::named_lit("SHADOW_HIT_EPS", SHADOW_HIT_EPS);
+            C::if_ret_f(out, d.lt(hit_eps), C::Scalar::lit(0.0))?;
+            // t = t + max(d / FIELD_LIPSCHITZ_L, SHADOW_MINT_STEP);
+            let lip = C::named_lit("FIELD_LIPSCHITZ_L", FIELD_LIPSCHITZ_L);
+            let step = C::named_lit("SHADOW_MINT_STEP", SHADOW_MINT_STEP);
+            C::set_var(&t, C::get_var(&t).add(d.div(lip).max(step)));
+            // if (t > t_max) { break; }  — THE ONLY DIVERGENCE from `sdf_soft_shadow_body`:
+            // the RUNTIME parameter `t_max` replaces the frozen `T_MAX` symbol.
+            C::if_(C::get_var(&t).gt(t_max), C::brk)?;
+            Flow::Continue(())
+        })?;
+        // return clamp(res, 0.0, 1.0);
+        C::ret_f(out, C::get_var(&res).clamp01())?;
+        Flow::Continue(())
+    };
+    let _ = run();
+}

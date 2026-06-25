@@ -155,3 +155,64 @@ fn full_span_brace_matched_golden() {
 ";
     assert_eq!(g, GOLDEN, "the generated span must match the brace-matched golden");
 }
+
+// ======================================================================
+// P6 R1 — the `sdf_soft_shadow_ranged` GENERATOR structure guard.
+//
+// The `t_max`-RANGED multi-light soft-shadow leaf consumed ONLY by the deferred RESOLVE.
+// It is a WHOLE function (unlike `sdf_soft_shadow`'s span splice): the resolve calls it
+// per extra shadow caster. The body is statement-for-statement identical to
+// `sdf_soft_shadow` EXCEPT the escape break spells the PARAMETER `t_max` (B3 — option a, so
+// the marcher's frozen `.comp.spv` cannot move).
+// ======================================================================
+
+fn generated_ranged() -> String {
+    boyko_shaderdsl::emit::emit_hlsl_sdf_soft_shadow_ranged().replace("\r\n", "\n")
+}
+
+#[test]
+fn ranged_is_a_whole_function_with_t_max_param() {
+    let g = generated_ranged();
+    // The COMPLETE function signature with the new `float t_max` parameter (the resolve
+    // calls it directly — there is no hand-written preamble to splice into).
+    assert!(
+        g.starts_with("float sdf_soft_shadow_ranged(float3 p, float3 n, float3 L, float t_max) {"),
+        "the ranged leaf must be a whole function with the `float t_max` parameter:\n{g}"
+    );
+    // The escape break spells the PARAMETER `t_max`, NOT the frozen `T_MAX` symbol.
+    assert!(
+        g.contains("if (t > t_max) {"),
+        "the escape guard must spell `if (t > t_max) {{` (the runtime param):\n{g}"
+    );
+    assert!(
+        !g.contains("T_MAX"),
+        "the ranged leaf must NOT reference the frozen `T_MAX` symbol (it is t_max-bounded):\n{g}"
+    );
+}
+
+#[test]
+fn ranged_full_function_brace_matched_golden() {
+    let g = generated_ranged();
+    // The WHOLE function, brace-matched — the canonical generated text. A single golden so a
+    // structural drift fails loudly. Identical to the `sdf_soft_shadow` span golden EXCEPT
+    // the function wrapper + the `t > t_max` break.
+    const GOLDEN: &str = "float sdf_soft_shadow_ranged(float3 p, float3 n, float3 L, float t_max) {
+    float res = 1.0;
+    float t = SHADOW_MINT;
+    [loop]
+    for (uint i = 0u; i < MAX_IT; ++i) {
+        float d = field_distance(p + L * t);
+        res = min(res, SHADOW_K * d / t);
+        if (d < SHADOW_HIT_EPS) {
+            return 0.0;
+        }
+        t = t + max(d / FIELD_LIPSCHITZ_L, SHADOW_MINT_STEP);
+        if (t > t_max) {
+            break;
+        }
+    }
+    return clamp(res, 0.0, 1.0);
+}
+";
+    assert_eq!(g, GOLDEN, "the generated ranged function must match the brace-matched golden");
+}

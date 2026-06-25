@@ -349,6 +349,36 @@ fn sdf_soft_shadow_matches_edsl_emit() {
 }
 
 #[test]
+fn sdf_soft_shadow_ranged_matches_edsl_emit() {
+    // P6 R1: the `t_max`-RANGED soft-shadow leaf `sdf_soft_shadow_ranged(p,n,L,t_max)` —
+    // consumed by the deferred RESOLVE (`deferred_pbr.hlsl`), NOT the marcher — is GENERATED
+    // by boyko_shaderdsl::emit::emit_hlsl_sdf_soft_shadow_ranged(). It is a WHOLE function
+    // (unlike the marcher's `sdf_soft_shadow` SPAN splice): the resolve calls it per extra
+    // shadow caster. A hand-edit of the committed function fails CI here. The body is
+    // statement-for-statement identical to `sdf_soft_shadow` EXCEPT the escape break spells
+    // the PARAMETER `t_max` (B3 — option a, so the marcher's frozen `sdf_gbuffer_composite.
+    // comp.spv` cannot move; `marcher_spv_byte_frozen` is the gate for that). The resolve
+    // re-DXCs to `deferred_pbr.comp.spv`; the host shadow march mirror is
+    // `host_soft_shadow_ranged` (compute.rs), consumer-side (±2/255).
+    let generated = boyko_shaderdsl::emit::emit_hlsl_sdf_soft_shadow_ranged().replace("\r\n", "\n");
+
+    let shader_path = concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/deferred_pbr.hlsl");
+    let shader = std::fs::read_to_string(shader_path)
+        .expect("invariant: shaders/deferred_pbr.hlsl must exist next to this crate")
+        .replace("\r\n", "\n");
+
+    assert!(
+        shader.contains(&generated),
+        "deferred_pbr.hlsl `sdf_soft_shadow_ranged` DRIFTED from boyko_shaderdsl::emit — the \
+         committed function no longer matches the generator. Re-run `cargo run -p boyko_shaderdsl \
+         --features emit --bin emit_field` and re-splice the sdf_soft_shadow_ranged function \
+         between the GENERATED sdf_soft_shadow_ranged sentinels, then re-DXC deferred_pbr.comp.spv \
+         (bump DEFERRED_PBR_SPV in compute.rs to the new size).\n\
+         --- expected (eDSL-generated) ---\n{generated}"
+    );
+}
+
+#[test]
 fn m2_surface_hit_refine_matches_edsl_emit() {
     // The m2_surface_hit REFINE LOOP+TAIL span (Inc 4b.2 — the production analytic-residual
     // signed refine: the runtime [loop] sphere-trace onto the EXACT field, the converged-hit

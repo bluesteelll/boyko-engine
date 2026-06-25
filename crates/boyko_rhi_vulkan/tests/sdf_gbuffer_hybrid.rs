@@ -53,6 +53,9 @@ use boyko_rhi_vulkan::compute::{
     golden_composite_pixel_culled, golden_composite_pixel_ex,
     golden_composite_pixel_ex_omega_lit, golden_tile_bound,
     golden_deferred_resolve, golden_deferred_resolve_table, golden_marcher_attributes,
+    // P6 R1 multi-light SDF shadows: the `shadow_mode == 1` host oracle + the per-pixel
+    // dominant-N caster cap (mirrors the shader's `MAX_SDF_SHADOW_CASTERS_PER_PIXEL`).
+    golden_deferred_resolve_table_shadowed, MAX_SDF_SHADOW_CASTERS_PER_PIXEL,
     GoldenLight, GoldenLightHeader, GoldenMaterial, GOLDEN_LIGHT_HEADER_BASE_WORDS,
     composite_pixel_ray, deferred_pbr_spirv, mesh_depth_for_z,
     pack_rgba, pixel_world_xy,
@@ -1066,6 +1069,10 @@ fn run_gbuffer_hybrid_m4(
         // never reads them) — the same pattern the production swapchain resolve uses.
         BindGroupLayoutEntry { binding: 8, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 9, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        // P6 R1: the SDF edit-list `Buf` SSBO @10 (the resolve's `sdf_soft_shadow_ranged`
+        // analytic march reads it read-only; the SAME buffer the marcher binds @0). 11 ≤ 12
+        // (no cap raise — the orchestrator's R1=(A) decision drops the brick atlas binds).
+        BindGroupLayoutEntry { binding: 10, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
     ];
     let resolve_layout = device
         .create_bind_group_layout(&BindGroupLayoutDesc { entries: &resolve_layout_entries })
@@ -1098,6 +1105,8 @@ fn run_gbuffer_hybrid_m4(
                 // the recompiled shader's static @8/@9 reference).
                 BindGroupEntry::StorageBuffer { buffer: &light_table },
                 BindGroupEntry::StorageBuffer { buffer: &light_table },
+                // P6 R1: the SDF edit-list `Buf` @10 (the marcher's vocab @0 SSBO).
+                BindGroupEntry::StorageBuffer { buffer: &buffer },
             ],
         })
         .expect("deferred resolve bind group");
@@ -3184,6 +3193,164 @@ fn assert_lit_matches_table_golden(
     (max_delta, sdf_lit_hits)
 }
 
+// ============================================================================
+// Lighting P6 R1 GPU golden (multi-light SDF shadows, analytic) — the NON-CLUSTERED resolve
+// path on hardware.
+//
+// R1 turns the resolve's per-light visibility into a per-caster `sdf_soft_shadow_ranged`
+// march, gated by `header.shadow_mode() == 1` + the per-light `casts_sdf_shadow` flag + the
+// `MAX_SDF_SHADOW_CASTERS_PER_PIXEL` dominant-N cap + the `NoL <= 0` skip. The PRIMARY
+// directional keeps the marcher's `gMaterial.r`; every EXTRA flagged caster (point/spot via
+// the flat table on this NON-CLUSTERED path, plus extra directionals) marches the field.
+//
+// CONSTRAINT (documented): the frozen GPU `cluster_cull.hlsl` compares the RAW `e.kind`, so a
+// shadow-flagged punctual is DROPPED by the GPU clustered cull until a follow-up rung. The R1
+// multi-light GPU golden therefore drives the NON-CLUSTERED resolve (`clusters_enabled ==
+// false`, i.e. a non-clustered `GoldenLightHeader`) — the same flat-table path
+// `l0b_point_and_spot_match_the_table_oracle` exercises.
+//
+// The HOST oracle is `golden_deferred_resolve_table_shadowed` (the `shadow_mode != 0` mirror),
+// fed the FROZEN `sdf_edit_list` field gateway. The non-vacuity gate diffs the SHADOWED oracle
+// against the UNSHADOWED `golden_deferred_resolve_table` per pixel: any pixel whose RGB the
+// shadow march dimmed is a genuine SHADOWED pixel (vis < 1 from an occluder between the pixel
+// and a flagged light), so a non-zero count proves the test meaningfully exercises shadowing.
+// ============================================================================
+
+/// Scans the host oracles for the P6 R1 multi-light scene and returns `(shadowed_px,
+/// sdf_lit_px)`: `shadowed_px` is the count of SDF surface pixels whose SHADOWED-oracle RGB
+/// (`golden_deferred_resolve_table_shadowed`, `header.shadow_mode() == 1`) differs from the
+/// UNSHADOWED-oracle RGB (`golden_deferred_resolve_table`, same lights) by more than
+/// `SHADOW_PROOF_EPS` on any channel — i.e. the per-caster `sdf_soft_shadow_ranged` march
+/// dimmed the pixel. A non-zero `shadowed_px` is the NON-VACUITY proof: an occluder lies
+/// between the pixel and a flagged light. CPU-only (no GPU), so the GPU golden can assert it
+/// host-side BEFORE the device run.
+fn host_count_shadowed_pixels(
+    edits: &[SdfEdit],
+    flags: u32,
+    light_dir: [f32; 3],
+    header: &GoldenLightHeader,
+    lights: &[GoldenLight],
+) -> (u64, u64) {
+    // The smallest channel delta that proves the shadow march did SOMETHING. The shadow term
+    // is `vis ∈ [0, 1]` multiplied into the per-light direct contribution, so a real occlusion
+    // moves at least one channel by ≥ a few units; `> 0` after the double-quant is sufficient
+    // proof but we require ≥ 1 to be robust against an exact-equal rounding tie.
+    const SHADOW_PROOF_EPS: i32 = 1;
+    let materials = host_material_table();
+    let field = |q: [f32; 3]| boyko_sdf_math::sdf_edit_list(edits, q);
+    let mut shadowed_px = 0u64;
+    let mut sdf_lit_px = 0u64;
+    for py in 0..SDF_IMG_H {
+        for px in 0..SDF_IMG_W {
+            let md = expected_mesh_depth(px, py);
+            let attrs = golden_marcher_attributes(
+                edits, &materials, md, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, 1.0,
+                flags, light_dir,
+            );
+            if attrs.mask != 1 {
+                continue;
+            }
+            sdf_lit_px += 1;
+            let (ro, rd) =
+                composite_pixel_ray(px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
+            let lit_shadowed = unpack_packed_rgb(golden_deferred_resolve_table_shadowed(
+                attrs, ro, rd, &materials, header, lights, &field,
+            ));
+            let lit_plain =
+                unpack_packed_rgb(golden_deferred_resolve_table(attrs, ro, rd, &materials, header, lights));
+            let dmax = (0..3).map(|c| (lit_shadowed[c] - lit_plain[c]).abs()).max().unwrap();
+            if dmax >= SHADOW_PROOF_EPS {
+                shadowed_px += 1;
+            }
+        }
+    }
+    (shadowed_px, sdf_lit_px)
+}
+
+/// Diffs the whole GPU LIT readback (the multi-light `shadow_mode == 1` NON-CLUSTERED resolve)
+/// against the host `golden_deferred_resolve_table_shadowed` per texel, within ±2/255 (the
+/// deferred double-quant budget). Mirrors [`assert_lit_matches_table_golden`] but feeds the
+/// SHADOWED oracle the FROZEN `sdf_edit_list` field closure. Returns the max delta + the
+/// SDF-lit pixel count.
+fn assert_lit_matches_table_shadowed_golden(
+    lit: &[u8],
+    edits: &[SdfEdit],
+    flags: u32,
+    light_dir: [f32; 3],
+    header: &GoldenLightHeader,
+    lights: &[GoldenLight],
+    name: &str,
+) -> (i32, u64) {
+    let mut max_delta = 0i32;
+    let mut sdf_lit_hits = 0u64;
+    let materials = host_material_table();
+    let field = |q: [f32; 3]| boyko_sdf_math::sdf_edit_list(edits, q);
+    for py in 0..SDF_IMG_H {
+        for px in 0..SDF_IMG_W {
+            let md = expected_mesh_depth(px, py);
+            let attrs = golden_marcher_attributes(
+                edits, &materials, md, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, 1.0,
+                flags, light_dir,
+            );
+            let (ro, rd) =
+                composite_pixel_ray(px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
+            let want = unpack_packed_rgb(golden_deferred_resolve_table_shadowed(
+                attrs, ro, rd, &materials, header, lights, &field,
+            ));
+            let got = albedo_rgb(lit, px, py);
+            let dmax = (0..3).map(|c| (got[c] - want[c]).abs()).max().unwrap();
+            if attrs.mask == 1 {
+                sdf_lit_hits += 1;
+            }
+            if dmax > max_delta {
+                max_delta = dmax;
+            }
+            assert!(
+                dmax <= DEFERRED_ARM1_TOL,
+                "[{name}] P6 R1 multi-light LIT texel ({px},{py}) got {got:?} want {want:?} \
+                 (shadowed table oracle) exceeds ±{DEFERRED_ARM1_TOL}/255 (delta {dmax})"
+            );
+        }
+    }
+    (max_delta, sdf_lit_hits)
+}
+
+/// The P6 R1 multi-light scene: TWO big spheres side-by-side at the same depth (the
+/// occluder/receiver pair). Each sphere's bulk shadows the OTHER sphere's facing flank when lit
+/// from across the valley, giving a broad, clearly-visible shadow band — far more than the
+/// thin self-shadow terminator a single convex body produces (the `crater` body shadowed only
+/// ~2 pixels). The ORTHO camera marches +Z → origin, so both front faces sit at z ≈ +0.55.
+fn p6_r1_twin_scene() -> Vec<SdfEdit> {
+    vec![
+        SdfEdit::sphere([-0.5, 0.0, 0.0], 0.55, sdf_op::UNION, 0.0),
+        SdfEdit::sphere([0.5, 0.0, 0.0], 0.55, sdf_op::UNION, 0.0),
+    ]
+}
+
+/// The P6 R1 multi-light scene's light table: a gentle WHITE primary directional (front
+/// block, keeps `gMaterial.r`) + two shadow-flagged POINT casters straddling the valley between
+/// the [`p6_r1_twin_scene`] spheres (one in front of each, low + toward the camera). The LEFT
+/// caster's rays into the RIGHT sphere's left flank are occluded by the LEFT sphere (and
+/// symmetrically), so BOTH casters cast a visible shadow. The header is NON-CLUSTERED (`new`,
+/// so `cluster_params == 0` ⇒ `clusters_enabled == false`) with `shadow_mode == 1`. Both point
+/// casters are `with_sdf_shadow()`; the primary directional is NOT flagged (it keeps the
+/// marcher's `gMaterial.r`, byte-stable across 1→N).
+fn p6_r1_multi_light_table() -> (GoldenLightHeader, Vec<GoldenLight>) {
+    // l0a_count = 1 (the primary directional); point_spot_count = 2 (the two flagged casters).
+    let header = GoldenLightHeader::new(1, 2, 1.0).with_shadow_mode(1);
+    let lights = vec![
+        // Primary directional (un-flagged): keeps `gMaterial.r`. A gentle front-fill so the
+        // shadowed band is dimmed, not pure black.
+        GoldenLight::directional([0.2, 0.2, 1.0], [0.4, 0.4, 0.4], 1.0),
+        // Two shadow-flagged point casters straddling the valley, low (z ≈ 0.9, toward the
+        // camera) + offset in x: the left caster lights the right sphere's left flank but the
+        // LEFT sphere occludes it (and vice-versa) ⇒ `vis < 1` over the valley band.
+        GoldenLight::point([-0.8, -0.3, 0.9], [1.0, 0.9, 0.8], 6500.0, 7.0).with_sdf_shadow(),
+        GoldenLight::point([0.8, -0.3, 0.9], [0.8, 0.9, 1.0], 6500.0, 7.0).with_sdf_shadow(),
+    ];
+    (header, lights)
+}
+
 /// L0b 0%-gate: adding the `gViewT` lane + an all-directional/sky table (zero point/spot)
 /// must reproduce the L0a image — the point/spot loop body never runs, and the gViewT lane
 /// is purely additive (no existing G-buffer byte changes). The GPU output with the
@@ -3260,6 +3427,171 @@ fn l0b_point_and_spot_match_the_table_oracle() {
              {max_delta}/255 (tol {DEFERRED_ARM1_TOL}); {sdf_lit_hits} SDF-lit px"
         );
     }
+}
+
+/// P6 R1 host NON-VACUITY pre-flight (CPU-only, no GPU): the multi-light shadowed scene's
+/// host oracle MUST produce at least one genuinely SHADOWED SDF pixel (the SHADOWED-oracle RGB
+/// differs from the UNSHADOWED-oracle RGB — an occluder lies between the pixel and a flagged
+/// light). This pins that `p6_r1_multi_light_table()` is NOT a vacuous fixture independent of
+/// any GPU; the GPU golden re-asserts the same count after the device run.
+#[test]
+fn p6_r1_oracle_produces_shadowed_pixels() {
+    let flags = LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO;
+    let (header, lights) = p6_r1_multi_light_table();
+    assert_eq!(header.shadow_mode(), 1, "the R1 fixture must set shadow_mode == 1");
+    assert_eq!(
+        header.cluster_params, [0.0, 0.0, 0.0, 0.0],
+        "the R1 fixture MUST be NON-CLUSTERED (cluster_params == 0 ⇒ clusters_enabled == false): \
+         the frozen cluster_cull drops shadow-flagged punctuals"
+    );
+    assert!(
+        lights.iter().skip(1).all(|l| l.casts_sdf_shadow()),
+        "both extra punctual casters must be flagged casts_sdf_shadow"
+    );
+
+    let (shadowed_px, sdf_lit_px) =
+        host_count_shadowed_pixels(&p6_r1_twin_scene(), flags, DEFAULT_LIGHT_DIR, &header, &lights);
+    assert!(
+        sdf_lit_px > 0,
+        "the twin scene must have SDF-lit pixels (the shadow gate would be vacuous otherwise)"
+    );
+    assert!(
+        shadowed_px > 0,
+        "P6 R1 NON-VACUITY: the shadowed oracle dimmed ZERO pixels — no occluder lies between \
+         any pixel and a flagged light, so the GPU golden would not exercise shadowing. Retune \
+         the light positions in `p6_r1_multi_light_table()`"
+    );
+    println!(
+        "P6 R1 host non-vacuity: {shadowed_px} SHADOWED px (shadowed-vs-unshadowed oracle delta \
+         ≥ 1) of {sdf_lit_px} SDF-lit px on the twin scene"
+    );
+}
+
+/// P6 R1 GPU golden: the multi-light SDF-shadow NON-CLUSTERED resolve on hardware. An SDF
+/// occluder (the `crater` body) + two shadow-flagged POINT lights (`with_sdf_shadow()`) +
+/// `header.with_shadow_mode(1)` on a NON-CLUSTERED header. The GPU LIT readback must match the
+/// host `golden_deferred_resolve_table_shadowed` (fed the FROZEN `sdf_edit_list` field) within
+/// ±2/255 per texel. NON-VACUITY: the host oracle is first asserted to produce ≥1 SHADOWED
+/// pixel (the shadowed-vs-unshadowed oracle diverges), so the test meaningfully exercises the
+/// per-caster `sdf_soft_shadow_ranged` march on the device.
+#[test]
+fn p6_r1_multi_light_sdf_shadows_match_oracle() {
+    let Some(ctx) = boot_render_or_skip("p6_r1_multi_light_sdf_shadows_match_oracle") else {
+        return;
+    };
+    println!("Vulkan device: {}", ctx.device_name());
+
+    let flags = LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO;
+    let (header, lights) = p6_r1_multi_light_table();
+    let table = pack_light_table(&header, &lights);
+    let edits = p6_r1_twin_scene();
+
+    // NON-VACUITY: the host oracle MUST dim at least one pixel BEFORE we trust the device run.
+    let (shadowed_px, sdf_lit_px) =
+        host_count_shadowed_pixels(&edits, flags, DEFAULT_LIGHT_DIR, &header, &lights);
+    assert!(
+        shadowed_px > 0,
+        "P6 R1 NON-VACUITY: the host shadowed oracle dimmed ZERO pixels — the GPU golden would \
+         not exercise shadowing; retune `p6_r1_multi_light_table()`"
+    );
+
+    // The NON-CLUSTERED resolve path (`run_gbuffer_hybrid_lit_table`, clusters_enabled == false
+    // since the header's cluster_params == 0): the marcher writes the primary `gMaterial.r`, the
+    // resolve marches every extra flagged caster.
+    let lit =
+        run_gbuffer_hybrid_lit_table(&ctx, &edits, false, false, 1.0, flags, DEFAULT_LIGHT_DIR, &table).0;
+    assert_eq!(lit.len(), READBACK_BYTES as usize);
+    let nonzero = lit.chunks_exact(4).filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+    assert!(nonzero > 0, "P6 R1 multi-light LIT all-zero — device did not render");
+
+    let (max_delta, sdf_lit_hits) = assert_lit_matches_table_shadowed_golden(
+        &lit, &edits, flags, DEFAULT_LIGHT_DIR, &header, &lights, "twin_spheres",
+    );
+    assert!(sdf_lit_hits > 0, "P6 R1: no SDF-lit pixel — the gate is vacuous");
+    println!(
+        "P6 R1 multi-light SDF shadows (shadow_mode==1, NON-CLUSTERED, 2 flagged point casters) \
+         == shadowed table oracle: max delta {max_delta}/255 (tol {DEFERRED_ARM1_TOL}); \
+         {sdf_lit_hits} SDF-lit px, {shadowed_px}/{sdf_lit_px} host-SHADOWED px"
+    );
+    assert_validation_clean(&ctx);
+}
+
+/// P6 R1 single-point-caster GPU golden + the dominant-N cap proof. A scene with a SINGLE
+/// shadow-flagged point caster matches the shadowed oracle (the simplest non-vacuous shadow),
+/// AND a fixture flagging MORE than `MAX_SDF_SHADOW_CASTERS_PER_PIXEL` casters STILL matches the
+/// oracle — because the host oracle models the SAME dominant-N cap (the GPU caps too), so the
+/// GPU/oracle agreement holds with the cap engaged. The cap-engaged fixture also re-asserts the
+/// host oracle is non-vacuous (≥1 shadowed pixel) so the cap path is genuinely exercised.
+#[test]
+fn p6_r1_single_point_light_gets_sdf_shadow() {
+    let Some(ctx) = boot_render_or_skip("p6_r1_single_point_light_gets_sdf_shadow") else {
+        return;
+    };
+    println!("Vulkan device: {}", ctx.device_name());
+
+    let flags = LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO;
+    let edits = p6_r1_twin_scene();
+
+    // --- (a) The single flagged point caster (1 directional + 1 point). The valley caster
+    // shadows the opposite sphere's facing flank — a broad, robust single-caster shadow. ---
+    {
+        let header = GoldenLightHeader::new(1, 1, 1.0).with_shadow_mode(1);
+        let lights = vec![
+            GoldenLight::directional([0.2, 0.2, 1.0], [0.4, 0.4, 0.4], 1.0),
+            GoldenLight::point([0.0, 0.0, 1.2], [1.0, 0.9, 0.8], 5000.0, 6.0).with_sdf_shadow(),
+        ];
+        let (shadowed_px, _) =
+            host_count_shadowed_pixels(&edits, flags, DEFAULT_LIGHT_DIR, &header, &lights);
+        assert!(shadowed_px > 0, "single-point R1: host oracle dimmed ZERO pixels (vacuous)");
+
+        let table = pack_light_table(&header, &lights);
+        let lit =
+            run_gbuffer_hybrid_lit_table(&ctx, &edits, false, false, 1.0, flags, DEFAULT_LIGHT_DIR, &table).0;
+        let (max_delta, sdf_lit_hits) = assert_lit_matches_table_shadowed_golden(
+            &lit, &edits, flags, DEFAULT_LIGHT_DIR, &header, &lights, "single_point",
+        );
+        assert!(sdf_lit_hits > 0, "single-point R1: no SDF-lit pixel");
+        println!(
+            "P6 R1 single point caster == shadowed oracle: max delta {max_delta}/255 \
+             (tol {DEFERRED_ARM1_TOL}); {shadowed_px} host-SHADOWED px"
+        );
+    }
+
+    // --- (b) The dominant-N cap: flag (MAX + 2) point casters; the oracle + GPU both cap the
+    // march at `MAX_SDF_SHADOW_CASTERS_PER_PIXEL`, so the readback still agrees with the oracle. ---
+    {
+        let extra = MAX_SDF_SHADOW_CASTERS_PER_PIXEL + 2;
+        let mut lights = vec![GoldenLight::directional([0.2, 0.2, 1.0], [0.4, 0.4, 0.4], 1.0)];
+        // A ring of flagged point casters above/around the valley — more than the cap, so per
+        // pixel only the first N (in table order) are marched; the rest contribute NoL-only.
+        for i in 0..extra {
+            let ang = (i as f32) * 0.9;
+            let pos = [0.6 * ang.cos(), -0.3 + 0.5 * ang.sin(), 1.0];
+            lights.push(GoldenLight::point(pos, [0.9, 0.85, 0.8], 6000.0, 7.0).with_sdf_shadow());
+        }
+        let header = GoldenLightHeader::new(1, extra, 1.0).with_shadow_mode(1);
+
+        let (shadowed_px, _) =
+            host_count_shadowed_pixels(&edits, flags, DEFAULT_LIGHT_DIR, &header, &lights);
+        assert!(
+            shadowed_px > 0,
+            "dominant-N cap R1: host oracle dimmed ZERO pixels with {extra} flagged casters (vacuous)"
+        );
+
+        let table = pack_light_table(&header, &lights);
+        let lit =
+            run_gbuffer_hybrid_lit_table(&ctx, &edits, false, false, 1.0, flags, DEFAULT_LIGHT_DIR, &table).0;
+        let (max_delta, sdf_lit_hits) = assert_lit_matches_table_shadowed_golden(
+            &lit, &edits, flags, DEFAULT_LIGHT_DIR, &header, &lights, "dominant_n_cap",
+        );
+        assert!(sdf_lit_hits > 0, "dominant-N cap R1: no SDF-lit pixel");
+        println!(
+            "P6 R1 dominant-N cap ({extra} flagged casters, cap {MAX_SDF_SHADOW_CASTERS_PER_PIXEL}) \
+             == shadowed oracle: max delta {max_delta}/255 (tol {DEFERRED_ARM1_TOL}); \
+             {shadowed_px} host-SHADOWED px"
+        );
+    }
+    assert_validation_clean(&ctx);
 }
 
 // ============================================================================
@@ -3824,6 +4156,10 @@ fn run_gbuffer_hybrid_lit_clustered(
         BindGroupLayoutEntry { binding: 7, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 8, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 9, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        // P6 R1: the SDF edit-list `Buf` SSBO @10 (the resolve's `sdf_soft_shadow_ranged`
+        // analytic march reads it read-only; the SAME buffer the marcher binds @0). 11 ≤ 12
+        // (no cap raise — the orchestrator's R1=(A) decision drops the brick atlas binds).
+        BindGroupLayoutEntry { binding: 10, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
     ];
     let resolve_layout = device
         .create_bind_group_layout(&BindGroupLayoutDesc { entries: &resolve_layout_entries })
@@ -3851,6 +4187,8 @@ fn run_gbuffer_hybrid_lit_clustered(
                 // Lighting L1 @8/@9: the REAL cluster buffers the cull pass populated.
                 BindGroupEntry::StorageBuffer { buffer: &cluster_grid },
                 BindGroupEntry::StorageBuffer { buffer: &light_index },
+                // P6 R1: the SDF edit-list `Buf` @10 (the marcher's vocab @0 SSBO).
+                BindGroupEntry::StorageBuffer { buffer: &buffer },
             ],
         })
         .expect("deferred resolve bind group");
@@ -5409,4 +5747,73 @@ fn p5_mesh_sdf_pbr_screenshot_dump() {
     assert_validation_clean(&ctx);
 }
 
+/// Nearest-neighbor upscales an R8G8B8A8 image `scale`× in both axes, returning the larger
+/// R8G8B8A8 buffer. The composite GPU extent is fixed at `SDF_IMG_W × SDF_IMG_H` (64×64) — the
+/// marcher/resolve dispatch + readback are hardwired to it — so the owner-facing 512×512
+/// screenshot is the GENUINE GPU-shaded pixels block-replicated (each source texel → a
+/// `scale × scale` block). No filtering: the per-pixel shadow term stays crisp, not blurred.
+fn upscale_rgba_nn(src: &[u8], w: u32, h: u32, scale: u32) -> Vec<u8> {
+    let (w, h, s) = (w as usize, h as usize, scale as usize);
+    let (dw, dh) = (w * s, h * s);
+    let mut dst = vec![0u8; dw * dh * 4];
+    for dy in 0..dh {
+        let sy = dy / s;
+        for dx in 0..dw {
+            let sx = dx / s;
+            let si = (sy * w + sx) * 4;
+            let di = (dy * dw + dx) * 4;
+            dst[di..di + 4].copy_from_slice(&src[si..si + 4]);
+        }
+    }
+    dst
+}
 
+/// P6 R1 MULTI-LIGHT SHADOW OFFSCREEN SCREENSHOT DUMP (`#[ignore]`, RTX) — the owner's visual
+/// sign-off that analytic multi-light SDF shadows are on-screen. Renders the [`p6_r1_twin_scene`]
+/// (two side-by-side spheres) under the `p6_r1_multi_light_table()` scene (a front-fill
+/// directional + two shadow-flagged point casters straddling the valley, `shadow_mode == 1`,
+/// NON-CLUSTERED) and writes the LIT image — nearest-neighbor upscaled 8× to **512×512** (the
+/// native composite extent is 64×64) — to `D:/tmp/p6_multilight_shadows.bmp`. The owner eyeballs
+/// the darkened valley band where each caster's rays into the opposite sphere's facing flank are
+/// occluded by the near sphere. `#[ignore]` (no CPU assert beyond non-empty — it is a visual
+/// dump; the GPU/oracle agreement is the load-bearing `p6_r1_multi_light_sdf_shadows_match_oracle`).
+#[test]
+#[ignore = "GPU offscreen screenshot dump — the owner runs it on the RTX for visual sign-off"]
+fn p6_multilight_shadows_screenshot_dump() {
+    let Some(ctx) = boot_or_skip("p6_multilight_shadows_screenshot_dump") else {
+        return;
+    };
+    println!("Vulkan device: {}", ctx.device_name());
+
+    let flags = LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO;
+    let (header, lights) = p6_r1_multi_light_table();
+    let table = pack_light_table(&header, &lights);
+    let edits = p6_r1_twin_scene();
+
+    // The full offscreen hybrid composite, NON-CLUSTERED multi-light resolve (clusters_enabled
+    // == false): the marcher writes the primary `gMaterial.r`, the resolve marches the two
+    // flagged point casters per pixel — the darkened valley band is the analytic SDF shadow.
+    let lit =
+        run_gbuffer_hybrid_lit_table(&ctx, &edits, false, false, 1.0, flags, DEFAULT_LIGHT_DIR, &table).0;
+    assert_eq!(lit.len(), READBACK_BYTES as usize);
+    let nonzero = lit.chunks_exact(4).filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+    assert!(nonzero > 0, "P6 R1 multi-light LIT all-zero — device did not render");
+
+    // Native composite extent is 64×64; upscale 8× → 512×512 for the owner-facing screenshot.
+    const SHOT_SCALE: u32 = 8;
+    let shot_w = SDF_IMG_W * SHOT_SCALE;
+    let shot_h = SDF_IMG_H * SHOT_SCALE;
+    debug_assert_eq!((shot_w, shot_h), (512, 512), "the dump must be 512×512");
+    let big = upscale_rgba_nn(&lit, SDF_IMG_W, SDF_IMG_H, SHOT_SCALE);
+
+    let dir = std::path::Path::new("D:/tmp");
+    std::fs::create_dir_all(dir).expect("create D:/tmp for the screenshot dump");
+    let path = dir.join("p6_multilight_shadows.bmp");
+    write_bmp_rgba(&path, &big, shot_w, shot_h);
+    println!(
+        "P6 R1 multi-light shadows screenshot written to {} ({shot_w}×{shot_h}, 8× NN upscale of \
+         the {SDF_IMG_W}×{SDF_IMG_H} GPU composite; {nonzero} non-black native px)",
+        path.display()
+    );
+    assert_validation_clean(&ctx);
+}

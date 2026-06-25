@@ -1490,6 +1490,128 @@ fn sdf_soft_shadow_control_flow_matches_frozen() {
 }
 
 // ======================================================================
+// P6 R1 — the `sdf_soft_shadow_ranged` CONTROL-FLOW Eval oracle.
+//
+// The `t_max`-RANGED multi-light soft-shadow leaf. A frozen HOST mirror of the committed
+// `sdf_soft_shadow_ranged` LOOP+TAIL (statement-for-statement identical to
+// `frozen_sdf_soft_shadow` EXCEPT the escape break bound is the RUNTIME `t_max`, not
+// `FROZEN_T_MAX`). The eDSL `sdf_soft_shadow_ranged_body::<EvalCf>` reproduces this CONTROL
+// FLOW — SCOPED TO CONTROL FLOW (the cmp-`.spv` is the byte-identity oracle).
+// ======================================================================
+
+/// Verbatim hand-mirror of the committed `sdf_soft_shadow_ranged` body — `frozen_sdf_soft_
+/// shadow` with the `t > FROZEN_T_MAX` break replaced by the RUNTIME `t > t_max`. The
+/// reference the eDSL `sdf_soft_shadow_ranged_body::<EvalCf>` control flow is locked against.
+fn frozen_sdf_soft_shadow_ranged<Fld: Fn([f32; 3]) -> f32>(
+    p: [f32; 3],
+    l: [f32; 3],
+    t_max: f32,
+    field: &Fld,
+) -> f32 {
+    let mut res = 1.0f32;
+    let mut t = FROZEN_SHADOW_MINT;
+    for _ in 0..FROZEN_MAX_IT {
+        let q = [p[0] + l[0] * t, p[1] + l[1] * t, p[2] + l[2] * t];
+        let d = field(q);
+        res = res.min(FROZEN_SHADOW_K * d / t);
+        if d < FROZEN_SHADOW_HIT_EPS {
+            return 0.0;
+        }
+        t += (d / FROZEN_FIELD_LIPSCHITZ_L).max(FROZEN_SHADOW_MINT_STEP);
+        if t > t_max {
+            break;
+        }
+    }
+    res.clamp(0.0, 1.0)
+}
+
+/// The eDSL `sdf_soft_shadow_ranged_body::<EvalCf>` threading the SAME host `field` closure.
+/// `n` is unused by the body (carried for signature parity), so a zero normal is passed.
+fn refactored_sdf_soft_shadow_ranged<Fld: Fn([f32; 3]) -> f32>(
+    p: [f32; 3],
+    l: [f32; 3],
+    t_max: f32,
+    field: &Fld,
+) -> f32 {
+    use std::cell::Cell;
+    let out = Cell::new(0.0f32);
+    boyko_shaderdsl::shadow::sdf_soft_shadow_ranged_body::<EvalCf, _>(
+        p,
+        [0.0, 0.0, 0.0],
+        l,
+        t_max,
+        field,
+        &out,
+    );
+    out.get()
+}
+
+#[test]
+fn sdf_soft_shadow_ranged_control_flow_matches_frozen() {
+    // Same single-sphere occluder as the un-ranged sweep, but the escape bound `t_max`
+    // VARIES per sample — exercising the new divergence: the break now fires at the
+    // per-caster bound (a SHORT `t_max` clips an otherwise-marching ray early; a LONG
+    // `t_max` reproduces the un-ranged budget-exhaustion / T_MAX path). The three control-
+    // flow outcomes (occluder hit, escape break, partial penumbra) are all hit across the
+    // sweep, and the per-sample `t_max` agreement is the load-bearing new check.
+    let sphere = |center: [f32; 3], r: f32| {
+        move |q: [f32; 3]| -> f32 {
+            let dx = q[0] - center[0];
+            let dy = q[1] - center[1];
+            let dz = q[2] - center[2];
+            (dx * dx + dy * dy + dz * dz).sqrt() - r
+        }
+    };
+
+    let mut lcg = Lcg::new(0x7AD0_5DF5_0F75_0091_u64);
+    for _ in 0..5_000 {
+        let p = [lcg.next_f32(2.0), lcg.next_f32(2.0), lcg.next_f32(2.0)];
+        let l = [lcg.next_f32(1.0), lcg.next_f32(1.0), lcg.next_f32(1.0)];
+        let center = [lcg.next_f32(3.0), lcg.next_f32(3.0), lcg.next_f32(3.0)];
+        let r = lcg.next_f32(1.0).abs() + 0.05;
+        // A per-sample march bound in (0, ~2*T_MAX]: small values clip the march early,
+        // large values reproduce the un-ranged escape; both the eDSL + the frozen mirror
+        // see the SAME bound, so the control flow agrees regardless.
+        let t_max = lcg.next_f32(1.0).abs() * 2.0 * FROZEN_T_MAX + 0.05;
+        let field = sphere(center, r);
+        assert_bits(
+            refactored_sdf_soft_shadow_ranged(p, l, t_max, &field),
+            frozen_sdf_soft_shadow_ranged(p, l, t_max, &field),
+            "sdf-soft-shadow-ranged-control-flow",
+        );
+    }
+}
+
+#[test]
+fn ranged_at_t_max_eq_frozen_t_max_matches_unranged() {
+    // The structural parity check: with `t_max == FROZEN_T_MAX` the ranged leaf must be
+    // bit-identical to the un-ranged `sdf_soft_shadow` (the break bound coincides). This
+    // pins that the ONLY divergence is the bound — proving R1 did not perturb the march.
+    let sphere = |center: [f32; 3], r: f32| {
+        move |q: [f32; 3]| -> f32 {
+            let dx = q[0] - center[0];
+            let dy = q[1] - center[1];
+            let dz = q[2] - center[2];
+            (dx * dx + dy * dy + dz * dz).sqrt() - r
+        }
+    };
+
+    let mut lcg = Lcg::new(0x0091_5DF5_7AD0_0F75_u64);
+    for _ in 0..5_000 {
+        let p = [lcg.next_f32(2.0), lcg.next_f32(2.0), lcg.next_f32(2.0)];
+        let l = [lcg.next_f32(1.0), lcg.next_f32(1.0), lcg.next_f32(1.0)];
+        let center = [lcg.next_f32(3.0), lcg.next_f32(3.0), lcg.next_f32(3.0)];
+        let r = lcg.next_f32(1.0).abs() + 0.05;
+        let field = sphere(center, r);
+        assert_bits(
+            refactored_sdf_soft_shadow_ranged(p, l, FROZEN_T_MAX, &field),
+            frozen_sdf_soft_shadow(p, l, &field),
+            "sdf-soft-shadow-ranged-equals-unranged-at-T_MAX",
+        );
+    }
+}
+
+// ======================================================================
 // Inc 4b.2 — the `m2_surface_hit` REFINE CONTROL-FLOW Eval oracle.
 //
 // A frozen HOST mirror of the committed `m2_surface_hit` REFINE LOOP+TAIL span (the L1184-1205

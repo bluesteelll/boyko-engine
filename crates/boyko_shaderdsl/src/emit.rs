@@ -4066,6 +4066,93 @@ pub fn emit_hlsl_sdf_soft_shadow() -> String {
     })
 }
 
+/// Generates the WHOLE HLSL `sdf_soft_shadow_ranged(float3 p, float3 n, float3 L, float
+/// t_max)` function — the P6 R1 `t_max`-RANGED soft-shadow leaf consumed ONLY by the
+/// deferred RESOLVE (`deferred_pbr.hlsl`). It traces [`crate::shadow::
+/// sdf_soft_shadow_ranged_body`] over `EmitCf` (statement-for-statement identical to
+/// [`emit_hlsl_sdf_soft_shadow`] except the escape break spells the PARAMETER `t_max`
+/// instead of the frozen `T_MAX` symbol), and — UNLIKE `emit_hlsl_sdf_soft_shadow` which
+/// returns a span spliced inside a hand-written marcher function — returns a COMPLETE
+/// function (the resolve's per-light loop calls it directly; there is no hand-written
+/// preamble to splice into).
+///
+/// B3 (option a): a SEPARATELY-NAMED entrypoint. The marcher's `sdf_soft_shadow` emit
+/// (`emit_hlsl_sdf_soft_shadow`) is UNTOUCHED, so the marcher's frozen `.comp.spv` cannot
+/// move. The `sdf_soft_shadow_ranged_matches_edsl_emit` sync pin (in `boyko_rhi_vulkan`)
+/// pins the committed `deferred_pbr.hlsl` function to this output.
+pub fn emit_hlsl_sdf_soft_shadow_ranged() -> String {
+    use crate::shadow;
+
+    // Fresh recorder state.
+    ARENA.with(|a| a.borrow_mut().clear());
+    STMTS.with(|s| s.borrow_mut().clear());
+    VARS.with(|v| v.borrow_mut().clear());
+    VAR_TYPES.with(|t| t.borrow_mut().clear());
+    NAMED_LITS.with(|n| n.borrow_mut().clear());
+    CALLS.with(|c| c.borrow_mut().clear());
+    TEMP_SEQ.with(|c| *c.borrow_mut() = 0);
+    TEMP_TYPES.with(|t| t.borrow_mut().clear());
+    TEMP_NAMES.with(|t| t.borrow_mut().clear());
+
+    // Seed the function body block (the bottom of the STMTS stack).
+    STMTS.with(|s| s.borrow_mut().push(Block { stmts: Vec::new() }));
+
+    // p/n/L are the three `float3` params (Vec3Param markers); `t_max` is the new scalar
+    // `float` param (float_in[0]), seeded as an `Input` node (the same suppressed-decl
+    // mechanism `m2_regula_falsi`'s {lo,hi,..} use — bound by NAME, not by an init expr).
+    let p = Emit(push(Node::Vec3Param(0)));
+    let n = Emit(push(Node::Vec3Param(1)));
+    let l = Emit(push(Node::Vec3Param(2)));
+    let t_max = Emit::input(0);
+    let out = RetCellF;
+
+    // The field-distance seam: on Emit it records a `field_distance(p + L * t)` call node.
+    shadow::sdf_soft_shadow_ranged_body::<EmitCf, _>(
+        p,
+        n,
+        l,
+        t_max,
+        |q| EmitCf::call1("field_distance", q),
+        &out,
+    );
+
+    // Pop the function body block and print it.
+    let body_block = STMTS.with(|s| {
+        s.borrow_mut()
+            .pop()
+            .expect("invariant: the function body block was pushed above")
+    });
+
+    let float_in = ["t_max"];
+    let vec_in = ["p", "n", "L"];
+    let named_lit = NAMED_LITS.with(|n| n.borrow().clone());
+    let call_in = CALLS.with(|c| c.borrow().clone());
+    let vars = VARS.with(|v| v.borrow().clone());
+    let names = Names {
+        float_in: &float_in,
+        uint_in: NO_UINT_INPUTS,
+        vec_in: &vec_in,
+        uint3_in: NO_UINT3_INPUTS,
+        buf_in: NO_BUF_INPUTS,
+        out_in: NO_OUT_INPUTS,
+        named_lit: &named_lit,
+        vars: &vars,
+        vec4_in: NO_VEC4_INPUTS,
+        call_in: &call_in,
+        pc_in: NO_PC_INPUTS,
+        level_field: NO_LEVEL_FIELDS,
+        array: NO_ARRAY,
+        res_in: NO_RES_INPUTS,
+    };
+
+    ARENA.with(|a| {
+        let arena = a.borrow();
+        let mut body = String::new();
+        print_block(&body_block, &arena, names, 1, &mut body);
+        format!("float sdf_soft_shadow_ranged(float3 p, float3 n, float3 L, float t_max) {{\n{body}}}\n")
+    })
+}
+
 /// Generates the HLSL `m2_surface_hit` REFINE LOOP+TAIL SPAN — the production brick-marcher's
 /// analytic-residual signed refine (the fixed-budget `[loop]` sphere-trace from the cubic
 /// candidate onto the EXACT field), with the `field_distance(ro + rd * rt)` call site, the

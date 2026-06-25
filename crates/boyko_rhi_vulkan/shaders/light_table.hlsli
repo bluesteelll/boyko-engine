@@ -42,6 +42,35 @@ static const uint LIGHT_KIND_POINT       = 1u;
 static const uint LIGHT_KIND_SPOT        = 2u;
 static const uint LIGHT_KIND_SKY         = 3u;
 
+// === P6 R1 — the per-light `casts_sdf_shadow` flag, packed into the kind word ===========
+//
+// `GpuLight`'s kind word (element lane-0 `.w`, decoded into `LightElem.kind`) carries the
+// `LIGHT_KIND_*` enum in its LOW bits (0..3) and the P6 R1 `casts_sdf_shadow` flag in BIT
+// 16. ADDITIVE helpers (the existing `load_light` / `LightElem.kind` decode is UNTOUCHED, so
+// `cluster_cull.hlsl`'s `.spv` is unaffected — it never calls these; the helpers are defined
+// AFTER `LightElem` below). The resolve uses `light_kind()` for the kind COMPARISONS (masking
+// off the flag bits) and `light_casts_sdf_shadow()` to gate the per-light SDF shadow march.
+// On every pre-P6 scene bit 16 is 0, so `light_kind() == e.kind` and the comparisons are
+// byte-equivalent to today (the 0%-gate).
+static const uint LIGHT_KIND_MASK         = 0xFFFFu; // the kind enum lives in the low 16 bits
+static const uint LIGHT_FLAG_CASTS_SHADOW = 0x10000u; // bit 16: this light casts an SDF shadow
+
+// === P6 R1 — the resolve shadow_mode, sourced from a SPARE header word =================
+//
+// Header word 7 (`counts_exposure`/`sky_diffuse`'s tail — `sky_diffuse.w`, NEVER read by the
+// L0a sky ambient, which uses only words 4..6) carries the P6 R1 `shadow_mode`:
+//   0 = legacy single-directional (the primary reads `gMaterial.r`, NO resolve march — the
+//       BYTE-IDENTICAL 0%-gate; word 7 is 0.0 on every pre-P6 scene).
+//   1 = multi-light: the primary directional KEEPS `gMaterial.r`; every EXTRA flagged caster
+//       gets a `sdf_soft_shadow_ranged` march in the resolve's per-light loop.
+// Sourced from a header word (not the marcher push) so the FROZEN marcher is untouched.
+static const uint SHADOW_MODE_LEGACY     = 0u;
+static const uint SHADOW_MODE_MULTI_LIGHT = 1u;
+
+uint load_shadow_mode(StructuredBuffer<uint> LightBuf) {
+    return LightBuf[7];
+}
+
 // The decoded header (read once per dispatch — a wave-uniform broadcast).
 struct LightHeader {
     uint   light_count;
@@ -85,6 +114,20 @@ LightElem load_light(StructuredBuffer<uint> LightBuf, uint i) {
     e.color     = float3(asfloat(LightBuf[b + 8]), asfloat(LightBuf[b + 9]), asfloat(LightBuf[b + 10]));
     e.cone_pack = asfloat(LightBuf[b + 11]);
     return e;
+}
+
+// P6 R1: the kind enum with the flag bits masked off — use this for every `kind ==`
+// comparison (the resolve does; the cull keeps the raw `e.kind`, unaffected since a
+// shadow-flagged point's `kind != LIGHT_KIND_POINT` correctly skips the cull until the
+// follow-up rung masks it there too).
+uint light_kind(LightElem e) {
+    return e.kind & LIGHT_KIND_MASK;
+}
+
+// P6 R1: true iff this light is flagged a per-light SDF-shadow caster. Gated additionally by
+// the header's `shadow_mode` in the resolve (a `shadow_mode==0` scene never marches).
+bool light_casts_sdf_shadow(LightElem e) {
+    return (e.kind & LIGHT_FLAG_CASTS_SHADOW) != 0u;
 }
 
 // Unpacks two f16 spot cone cosines (cos_inner in the low half, cos_outer in the high
