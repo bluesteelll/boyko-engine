@@ -63,14 +63,14 @@ use boyko_rhi::{
     SamplerDesc, ShaderStage, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 use boyko_rhi_vulkan::compute::{
-    B5_CAMERA_UBO_BYTES_M4, COMPOSITE_PUSH_CONSTANT_BYTES, CompositePushConstants,
+    B5_CAMERA_UBO_BYTES_M4, COMPOSITE_PUSH_CONSTANT_BYTES, CoarseMode, CompositePushConstants,
     EDITLIST_BUFFER_WORDS, LOCAL_SIZE_X, M2_GRID_PARAMS_OFFSET,
     MESH_COLOR, MESH_DEPTH_CLEAR, SDF_CAMERA_Z, SDF_TRACE_T_MAX,
     SDF_VIEW_HALF_EXTENT, SdfEdit, TILE_BOUND_BYTES, CompositeCamera,
     encode_edit_list, deferred_pbr_spirv, golden_composite_pixel_ex, golden_deferred_resolve,
     golden_marcher_attributes, composite_pixel_ray, GoldenMaterial, DEFAULT_MARCHER_OMEGA,
     LIGHTING_FLAG_AO, LIGHTING_FLAG_SHADOWS, DEFAULT_LIGHT_DIR, mesh_depth_for_z, pack_rgba,
-    sdf_gbuffer_composite_spirv, sdf_op, tile_grid_extent,
+    sdf_gbuffer_composite_spirv, sdf_op, sdf_tile_cull_spirv, tile_grid_extent,
 };
 use boyko_rhi_vulkan::brick_atlas::BrickClipmap;
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
@@ -510,7 +510,13 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         }
     };
     println!("Vulkan device (windowed, validation on): {}", ctx.device_name());
-    assert!(ctx.validation_enabled(), "validation must be active");
+    // Validation is the soundness oracle, NOT a render-output dependency: a context
+    // booted with `BOYKO_DISABLE_VALIDATION` (the layer DLL crashes the MinGW
+    // process on this box) still drives the pixel gate. The `state.total() == 0`
+    // oracle below self-gates on `validation_enabled()`.
+    if !ctx.validation_enabled() {
+        eprintln!("NOTE: validation disabled (BOYKO_DISABLE_VALIDATION) — pixel gate still runs");
+    }
     let caps = ctx.device_caps();
     assert!(
         caps.gbuffer_storage_format_ok,
@@ -1100,6 +1106,16 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         // `None` boots the analytic (OFF) path. RTX-verified byte-identical in this scene, so either
         // start looks the same on screen.
         brick: if BRICK_START_ON { Some(brick_on) } else { None },
+        // P0 coarse tile-cull: OFF for this existing golden present (the 0%-gate — NO coarse
+        // dispatch / barrier recorded, `coarse_enabled == 0`, byte-identical to the pre-P0 stream).
+        // The dedicated `p0_windowed_coarse_cull_matches_uncull` test drives the ON vs OFF readback.
+        coarse: None,
+        // The on-screen present's coarse-cull mode (a don't-care here since `coarse == None`):
+        // `EmptySkipOnly` is the lit-transparent on-screen cull (EMPTY-skip only, no `near_t` seed).
+        coarse_mode: CoarseMode::EmptySkipOnly,
+        // The on-screen demo renders with soft shadows (A1) + AO (A2) — its existing lighting
+        // validation is unchanged (byte-identical push to the pre-`lighting_flags`-field stream).
+        lighting_flags: LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO,
     };
 
     // The composite's native size — drives the G-buffer alloc + the 1:1 top-left present.
@@ -1315,16 +1331,20 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
     }
 
     // The oracle: a clean windowed image-based present records zero validation messages.
-    let state = ctx
-        .debug_state()
-        .expect("validation enabled => a debug-messenger state is present");
-    assert_eq!(
-        state.total(),
-        0,
-        "validation layer reported {} message(s) during the windowed G-buffer present — \
-         see the [vk-validation] log",
-        state.total()
-    );
+    // Gated on `validation_enabled()` so the composite pixel golden below still runs under
+    // `BOYKO_DISABLE_VALIDATION` (no messenger is created when validation is off).
+    if ctx.validation_enabled() {
+        let state = ctx
+            .debug_state()
+            .expect("validation enabled => a debug-messenger state is present");
+        assert_eq!(
+            state.total(),
+            0,
+            "validation layer reported {} message(s) during the windowed G-buffer present — \
+             see the [vk-validation] log",
+            state.total()
+        );
+    }
 
     // The golden: if a readback frame presented, the three discriminator texels must
     // match the host composite truth (swapchain byte-order-aware) — PROVING the
@@ -1398,6 +1418,671 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         // The brick clip-map (every level's atlas image + sampler + pointer-grid SSBO). The renderer
         // was dropped above (waits idle), so no submission still samples it; `ctx` is alive; the
         // by-value `destroy` moves each level's resources out once.
+        clipmap.destroy(&ctx);
+        RhiDevice::destroy_buffer(device, light_staging);
+        RhiDevice::destroy_buffer(device, light_table);
+        RhiDevice::destroy_buffer(device, material_table);
+        RhiDevice::destroy_buffer(device, camera_uniform);
+        RhiDevice::destroy_buffer(device, edit_list);
+    }
+    drop(swapchain);
+    drop(surface);
+    drop(ctx);
+    drop(window);
+}
+
+/// **Render P0 GPU gate — the windowed EMPTY-SKIP-ONLY coarse cull is LIT-TRANSPARENT.**
+///
+/// Drives the WINDOWED present path (the same `Renderer::render_gbuffer_frame` 3-pass) through a
+/// swapchain-image readback TWICE from the IDENTICAL camera / scene / edit-list AT THE REAL ON-SCREEN
+/// LIT FLAGS (`LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO`), differing ONLY by [`GBufferScene::coarse`]:
+///
+/// - `coarse = None` (the OFF / 0%-gate path): NO coarse dispatch + NO `tiles_buffer` barrier are
+///   recorded, `coarse_enabled == 0` — the pre-P0 windowed command stream, byte-for-byte.
+/// - `coarse = Some(&coarse_compute)` with `coarse_mode = EmptySkipOnly` (the lit-transparent ON
+///   path): the P4b coarse-cull pass runs BEFORE the marcher (one invocation per 8×8 tile writes a
+///   `TileBound` into vocab binding 6), and the marcher reads them with `coarse_enabled == 2` — it
+///   SKIPS EMPTY tiles only, WITHOUT seeding `near_t` on the surface tiles.
+///
+/// # Why EmptySkipOnly (mode 2), not Full (mode 1)
+///
+/// The empty-tile skip is provably image-identical lit+unlit (an empty tile has no surface). The
+/// FULL mode (1) additionally seeds the march at the tile's conservative `near_t` on a NON-empty
+/// tile; fed into the B1 over-relaxed march that seed latches a different grazing tangent on the
+/// silhouette (a shifted normal → a shifted AO/shadow), so the LIT cull-ON image gains a 16–32/255
+/// rim — the FULL cull is NOT lit-transparent. EmptySkipOnly drops the seed, so it is transparent
+/// UNDER LIGHTING by construction. This test asserts that: the ON readback MUST equal the OFF
+/// readback within the goldens' per-channel tolerance ([`CHANNEL_TOL`], `+/-2/255`) AT THE LIT FLAGS
+/// — proving the on-screen cull adds NO visible rim. (The FULL-mode image-transparency contract
+/// remains the UNLIT offscreen golden `sdf_gbuffer_hybrid::p4b_cull_on_conservative_within_tol_of_cull_off`.)
+///
+/// The brick path is held OFF (`brick = None`) on BOTH frames so the comparison isolates the cull.
+/// The test also asserts the validation layer is clean across the ON path (the recorder's new coarse
+/// dispatch + barrier are sound).
+///
+/// `#[ignore]`: needs a real RTX windowed device. The orchestrator runs it on the GPU; CPU `cargo
+/// test` skips it (the harness still compiles it, proving the OFF caller + the new `coarse` field +
+/// the coarse-pipeline creation type-check).
+#[test]
+#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU"]
+fn p0_windowed_coarse_cull_matches_uncull() {
+    let mut window = match Window::open("boyko_rhi_vulkan P0 coarse-cull window", WIDTH, HEIGHT) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("SKIP p0_windowed_coarse_cull: cannot open a window ({e:?})");
+            return;
+        }
+    };
+
+    let ctx = match VulkanContext::boot(InstanceConfig {
+        enable_validation: true,
+        windowed: true,
+    }) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("SKIP p0_windowed_coarse_cull: windowed Vulkan unavailable ({e:?})");
+            return;
+        }
+    };
+    // Validation is the soundness oracle, NOT a render-output dependency: a context
+    // booted with `BOYKO_DISABLE_VALIDATION` (the layer DLL crashes the MinGW
+    // process on this box) still drives the pixel gate. The `state.total() == 0`
+    // oracle below self-gates on `validation_enabled()`.
+    if !ctx.validation_enabled() {
+        eprintln!("NOTE: validation disabled (BOYKO_DISABLE_VALIDATION) — pixel gate still runs");
+    }
+    let caps = ctx.device_caps();
+    assert!(
+        caps.gbuffer_storage_format_ok,
+        "a booted context must support STORAGE_IMAGE on the G-buffer format"
+    );
+
+    // SAFETY: `window` outlives the surface (dropped after it below); its HWND/HINSTANCE are live
+    // for the surface's lifetime.
+    let surface = match unsafe { Surface::new(&ctx, window.hinstance(), window.hwnd()) } {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("SKIP p0_windowed_coarse_cull: surface creation failed ({e:?})");
+            return;
+        }
+    };
+    let mut swapchain = match Swapchain::new(&ctx, &surface, window.width(), window.height()) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("SKIP p0_windowed_coarse_cull: swapchain creation failed ({e:?})");
+            return;
+        }
+    };
+
+    if swapchain.extent().width < COMPOSITE_W || swapchain.extent().height < COMPOSITE_H {
+        eprintln!(
+            "SKIP p0_windowed_coarse_cull: swapchain extent {}x{} is smaller than the {}x{} composite",
+            swapchain.extent().width,
+            swapchain.extent().height,
+            COMPOSITE_W,
+            COMPOSITE_H
+        );
+        return;
+    }
+
+    let Some(is_bgra) = swapchain_readback_is_bgra(swapchain.format()) else {
+        eprintln!("SKIP p0_windowed_coarse_cull: swapchain format has no host-decodable UNORM byte order");
+        return;
+    };
+    let Some(swap_color_format) = (match swapchain.format() {
+        f if f == VK_FORMAT_B8G8R8A8_UNORM => Some(Format::B8G8R8A8Unorm),
+        f if f == VK_FORMAT_R8G8B8A8_UNORM => Some(Format::R8G8B8A8Unorm),
+        _ => None,
+    }) else {
+        eprintln!("SKIP p0_windowed_coarse_cull: swapchain format has no basic-slice Format variant");
+        return;
+    };
+
+    let mut renderer =
+        Renderer::new(&ctx, &surface, &swapchain).expect("renderer (command pool + sync) creation");
+    let device: &VulkanContext = &ctx;
+    let sdf = sphere_scene();
+
+    // --- The edit-list SSBO (binding 0), host-seeded ONCE. ---
+    let edit_list = RhiDevice::create_buffer(
+        device,
+        &BufferDesc {
+            size: (EDITLIST_BUFFER_WORDS as u64) * 4,
+            usage: BufferUsage::STORAGE,
+            location: MemoryLocation::HostVisibleCoherent,
+        },
+    )
+    .expect("edit-list storage buffer");
+    {
+        let mut header = vec![0u32; EDITLIST_BUFFER_WORDS];
+        encode_edit_list(&mut header, &sdf);
+        let mapped = RhiDevice::buffer_mapped_ptr(device, &edit_list)
+            .expect("host-visible edit-list buffer is mapped");
+        write_words(mapped, &header);
+    }
+
+    // --- The camera/extent UBO (binding 5), host-seeded ONCE at the COMPOSITE ORTHO extent. The
+    // M4 tail is zero here (brick is held OFF on both readback frames, so the marcher never reads
+    // the per-level params; binding 9..=14 still need VALID descriptors below). ---
+    let camera_uniform = RhiDevice::create_buffer(
+        device,
+        &BufferDesc {
+            size: B5_CAMERA_UBO_BYTES_M4 as u64,
+            usage: BufferUsage::UNIFORM,
+            location: MemoryLocation::HostVisibleCoherent,
+        },
+    )
+    .expect("camera uniform buffer");
+    {
+        let pc = CompositePushConstants::ortho(COMPOSITE_W, COMPOSITE_H);
+        assert_eq!(pc.count, PIXELS);
+        let mapped = RhiDevice::buffer_mapped_ptr(device, &camera_uniform)
+            .expect("host-visible uniform buffer is mapped");
+        let bytes = pc.as_bytes();
+        debug_assert_eq!(bytes.len(), M2_GRID_PARAMS_OFFSET, "camera block must be 80 B");
+        // SAFETY: `mapped` points to `B5_CAMERA_UBO_BYTES_M4` (224) mapped host-coherent bytes; the
+        // 80-byte camera block is written at offset 0 (the M4 tail stays zero — brick is OFF). No
+        // GPU work is in flight yet, so the host write is unsynchronized-safe.
+        unsafe {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len());
+        }
+    }
+
+    // --- The P4b coarse-cull tile StorageBuffer (vocab binding 6), sized to the full tile grid at
+    // the COMPOSITE extent. On the OFF frame it is bound-but-unread; on the ON frame the coarse
+    // pass WRITES it and the marcher READS it. ---
+    let (tw, th) = tile_grid_extent(COMPOSITE_W, COMPOSITE_H);
+    let tiles_buffer = RhiDevice::create_buffer(
+        device,
+        &BufferDesc {
+            size: (tw as u64) * (th as u64) * (TILE_BOUND_BYTES as u64),
+            usage: BufferUsage::STORAGE,
+            location: MemoryLocation::HostVisibleCoherent,
+        },
+    )
+    .expect("P4b coarse-cull tile-bound storage buffer (vocab binding 6)");
+
+    // --- The PBR material table SSBO (vocab binding 7 + resolve binding 4). ---
+    let material_table = RhiDevice::create_buffer(
+        device,
+        &BufferDesc {
+            size: (DEFAULT_MATERIAL_TABLE.len() as u64) * 4,
+            usage: BufferUsage::STORAGE,
+            location: MemoryLocation::HostVisibleCoherent,
+        },
+    )
+    .expect("PBR material table storage buffer");
+    {
+        let mapped = RhiDevice::buffer_mapped_ptr(device, &material_table)
+            .expect("host-visible material table is mapped");
+        write_words(mapped, &DEFAULT_MATERIAL_TABLE);
+    }
+
+    // --- The brick clip-map: the brick path is held OFF on both readback frames, but the marcher
+    // SPIR-V statically references bindings 9..=14 past the runtime gate, so VALID descriptors must
+    // be bound. The real clip-map supplies them (`brick = None` keeps them bound-but-unread). ---
+    let field = {
+        use boyko_sdf_math::SdfEditField;
+        let mut f = SdfEditField::new();
+        for e in &sdf {
+            assert!(f.push(*e), "P0 cull scene must fit MAX_SDF_EDITS");
+        }
+        f.bump_gen();
+        f
+    };
+    let clipmap = BrickClipmap::create(&ctx, &field, [0.0, 0.0, 0.0])
+        .expect("brick clip-map (P0 cull scene) — create + bake + upload");
+
+    // --- The Lighting-L0 light table SSBO (resolve binding 6) + its staging source. ---
+    let light_table_bytes = (DEGENERATE_LIGHT_TABLE.len() as u64) * 4;
+    let light_table = RhiDevice::create_buffer(
+        device,
+        &BufferDesc {
+            size: light_table_bytes,
+            usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_DST,
+            location: MemoryLocation::HostVisibleCoherent,
+        },
+    )
+    .expect("Lighting-L0 light table storage buffer");
+    {
+        let mapped = RhiDevice::buffer_mapped_ptr(device, &light_table)
+            .expect("host-visible light table is mapped");
+        write_words(mapped, &DEGENERATE_LIGHT_TABLE);
+    }
+    let light_staging = RhiDevice::create_buffer(
+        device,
+        &BufferDesc {
+            size: light_table_bytes,
+            usage: BufferUsage::TRANSFER_SRC,
+            location: MemoryLocation::HostVisibleCoherent,
+        },
+    )
+    .expect("Lighting-L0 light table staging buffer");
+    {
+        let mapped = RhiDevice::buffer_mapped_ptr(device, &light_staging)
+            .expect("host-visible light staging is mapped");
+        write_words(mapped, &DEGENERATE_LIGHT_TABLE);
+    }
+
+    // --- The mesh quad's vertex buffer. ---
+    let vertices = quad_vertices();
+    let vertex_bytes = core::mem::size_of_val(&vertices) as u64;
+    let vertex_buffer = RhiDevice::create_buffer(
+        device,
+        &BufferDesc {
+            size: vertex_bytes,
+            usage: BufferUsage::VERTEX,
+            location: MemoryLocation::HostVisibleCoherent,
+        },
+    )
+    .expect("host-visible vertex buffer");
+    {
+        let vb_ptr = RhiDevice::buffer_mapped_ptr(device, &vertex_buffer)
+            .expect("host-visible vertex buffer is mapped");
+        // SAFETY: `vb_ptr` points to `vertex_bytes` mapped host-coherent bytes; `vertices` is a
+        // distinct stack array of `vertex_bytes` bytes; the write completes before any submit.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                vertices.as_ptr().cast::<u8>(),
+                vb_ptr.as_ptr(),
+                vertex_bytes as usize,
+            );
+        }
+    }
+
+    let depth_sampler = RhiDevice::create_sampler(device, &SamplerDesc::default())
+        .expect("depth sampler (ignored by .Load)");
+    let present_sampler = RhiDevice::create_sampler(
+        device,
+        &SamplerDesc {
+            mag_filter: Filter::Nearest,
+            min_filter: Filter::Nearest,
+            address_mode: AddressMode::ClampToEdge,
+            mip: MipMode::None,
+        },
+    )
+    .expect("present nearest/clamp sampler");
+
+    // --- The depth-prepass graphics pipeline. ---
+    let vs = RhiDevice::create_shader_module(device, MVP_VS_SPV.as_words())
+        .expect("prepass vertex shader module");
+    let fs = RhiDevice::create_shader_module(device, MVP_FS_SPV.as_words())
+        .expect("prepass fragment shader module");
+    let attributes = [
+        VertexAttribute { location: 0, offset: 0, format: VertexFormat::Float32x3 },
+        VertexAttribute { location: 1, offset: 12, format: VertexFormat::Float32x4 },
+    ];
+    let raster_pipeline = RhiDevice::create_graphics_pipeline(
+        device,
+        &GraphicsPipelineDesc {
+            vertex_module: &vs,
+            vertex_entry: c"main",
+            fragment_module: &fs,
+            fragment_entry: c"main",
+            color_formats: &[RASTER_COLOR_FORMAT],
+            depth_format: Some(Format::D32Sfloat),
+            topology: PrimitiveTopology::TriangleList,
+            vertex_layout: Some(VertexBufferLayout {
+                stride: VERTEX_STRIDE,
+                attributes: &attributes,
+            }),
+            push_constant_bytes: MVP_BYTES,
+            bind_group_layout: None,
+            blend: None,
+        },
+    )
+    .expect("depth-prepass graphics pipeline");
+
+    // --- The P1b marcher: the vocabulary layout + the marcher pipeline. The SAME layout is shared
+    // by the coarse-cull pipeline below (the cull shader declares only a subset — valid). ---
+    let cs = RhiDevice::create_shader_module(device, sdf_gbuffer_composite_spirv())
+        .expect("P1b G-buffer marcher compute shader module");
+    let vocab_entries = [
+        BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::SampledImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 2, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 3, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 4, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 5, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 6, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 7, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 8, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 9, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 10, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 11, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 12, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 13, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 14, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+    ];
+    let vocab_layout = RhiDevice::create_bind_group_layout(
+        device,
+        &BindGroupLayoutDesc { entries: &vocab_entries },
+    )
+    .expect("P1b vocabulary bind-group layout");
+    let marcher = RhiDevice::create_compute_pipeline(
+        device,
+        &ComputePipelineDesc {
+            module: &cs,
+            entry: c"main",
+            push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
+            bind_group_layout: Some(&vocab_layout),
+        },
+    )
+    .expect("P1b G-buffer marcher compute pipeline");
+
+    // --- Render P0: the COARSE-CULL pipeline, created against the SAME vocabulary layout (the
+    // offscreen `run_gbuffer_hybrid_ex` discipline — the cull shader declares only a subset of the
+    // vocab bindings, so sharing the full layout is valid). ---
+    let coarse_cs = RhiDevice::create_shader_module(device, sdf_tile_cull_spirv())
+        .expect("P4b coarse-cull compute shader module");
+    let coarse_compute = RhiDevice::create_compute_pipeline(
+        device,
+        &ComputePipelineDesc {
+            module: &coarse_cs,
+            entry: c"main",
+            push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
+            bind_group_layout: Some(&vocab_layout),
+        },
+    )
+    .expect("P4b coarse-cull compute pipeline (shared vocab layout)");
+
+    // --- The deferred RESOLVE pipeline. ---
+    let resolve_cs = RhiDevice::create_shader_module(device, deferred_pbr_spirv())
+        .expect("deferred resolve compute shader module");
+    let resolve_entries = [
+        BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 2, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 3, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 4, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 5, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 6, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 7, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 8, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 9, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+    ];
+    let resolve_layout = RhiDevice::create_bind_group_layout(
+        device,
+        &BindGroupLayoutDesc { entries: &resolve_entries },
+    )
+    .expect("deferred resolve bind-group layout");
+    let resolve_pipeline = RhiDevice::create_compute_pipeline(
+        device,
+        &ComputePipelineDesc {
+            module: &resolve_cs,
+            entry: c"main",
+            push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
+            bind_group_layout: Some(&resolve_layout),
+        },
+    )
+    .expect("deferred resolve compute pipeline");
+
+    // --- The present-blit pipeline. ---
+    let present_layout = RhiDevice::create_bind_group_layout(
+        device,
+        &BindGroupLayoutDesc {
+            entries: &[BindGroupLayoutEntry {
+                binding: 0,
+                count: 1,
+                kind: DescriptorKind::CombinedImageSampler,
+                stage: ShaderStage::FRAGMENT,
+            }],
+        },
+    )
+    .expect("present-blit bind-group layout");
+    let sample_vs = RhiDevice::create_shader_module(device, SAMPLE_VS_SPV.as_words())
+        .expect("fullscreen vertex shader module");
+    let sample_fs = RhiDevice::create_shader_module(device, SAMPLE_FS_SPV.as_words())
+        .expect("fullscreen fragment shader module");
+    let present_pipeline = RhiDevice::create_graphics_pipeline(
+        device,
+        &GraphicsPipelineDesc {
+            vertex_module: &sample_vs,
+            vertex_entry: c"main",
+            fragment_module: &sample_fs,
+            fragment_entry: c"main",
+            color_formats: &[swap_color_format],
+            depth_format: None,
+            topology: PrimitiveTopology::TriangleList,
+            vertex_layout: None,
+            push_constant_bytes: 0,
+            bind_group_layout: Some(&present_layout),
+            blend: None,
+        },
+    )
+    .expect("present-blit fullscreen-sample pipeline");
+
+    // The shader modules are consumed by pipeline creation; destroy them now.
+    // SAFETY: every module was created on `ctx` above + is no longer needed once its pipeline is
+    // created; each is destroyed exactly once.
+    unsafe {
+        RhiDevice::destroy_shader_module(device, sample_fs);
+        RhiDevice::destroy_shader_module(device, sample_vs);
+        RhiDevice::destroy_shader_module(device, resolve_cs);
+        RhiDevice::destroy_shader_module(device, coarse_cs);
+        RhiDevice::destroy_shader_module(device, cs);
+        RhiDevice::destroy_shader_module(device, fs);
+        RhiDevice::destroy_shader_module(device, vs);
+    }
+
+    let mvp = ortho_mvp_bytes();
+    let mut scene = GBufferScene {
+        raster_pipeline: &raster_pipeline,
+        vertex_buffer: &vertex_buffer,
+        vertex_count: vertices.len() as u32,
+        mvp,
+        marcher: &marcher,
+        vocab_layout: &vocab_layout,
+        edit_list: &edit_list,
+        camera_uniform: &camera_uniform,
+        tiles_buffer: &tiles_buffer,
+        pointer_grid: clipmap.grid_buffer(0),
+        atlas: clipmap.atlas(0).texture(),
+        atlas_sampler: clipmap.sampler(0),
+        level_grids: [clipmap.grid_buffer(1), clipmap.grid_buffer(2)],
+        level_atlases: [clipmap.atlas(1).texture(), clipmap.atlas(2).texture()],
+        level_atlas_samplers: [clipmap.sampler(1), clipmap.sampler(2)],
+        depth_sampler: &depth_sampler,
+        material_table: &material_table,
+        light_table: &light_table,
+        light_staging: &light_staging,
+        light_upload_bytes: light_table_bytes,
+        light_dirty: false,
+        cluster_cull: None,
+        cull_layout: None,
+        cluster_grid: None,
+        light_index: None,
+        light_index_alloc: None,
+        cluster_cull_push: [0u8; 16],
+        cluster_count: 0,
+        resolve_pipeline: &resolve_pipeline,
+        resolve_layout: &resolve_layout,
+        present_pipeline: &present_pipeline,
+        present_layout: &present_layout,
+        present_sampler: &present_sampler,
+        dispatch_group_count_x: group_count_x(),
+        // The brick path is held OFF on BOTH frames so the cull-on-vs-off comparison is isolated.
+        brick: None,
+        // The cull gate, flipped per readback frame below (None then Some(&coarse_compute)).
+        coarse: None,
+        // EmptySkipOnly (mode 2) — the LIT-TRANSPARENT cull: EMPTY-skip only, NO `near_t` seed.
+        // The empty-tile skip is provably image-identical lit+unlit (an empty tile has no surface);
+        // dropping the `near_t` seed on the few NON-empty surface tiles removes the grazing-silhouette
+        // AO/shadow rim the FULL mode's seed latches (a shifted grazing tangent → a shifted normal →
+        // a shifted AO/shadow). So this mode is transparent UNDER LIGHTING — which is exactly what
+        // this test now proves (it renders at the real on-screen lit flags, NOT `0`).
+        coarse_mode: CoarseMode::EmptySkipOnly,
+        // Lighting ON — the REAL on-screen flags (A1 soft shadows + A2 AO). The previous P0 test set
+        // `lighting_flags == 0` to dodge the FULL-mode `near_t` rim (the lit cull-transparency
+        // invariant was un-shipped). EmptySkipOnly is lit-transparent BY CONSTRUCTION (no seed → no
+        // rim), so the cull-ON vs cull-OFF comparison is now asserted at the real lit flags — proving
+        // the on-screen cull adds NO visible rim.
+        lighting_flags: LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO,
+    };
+
+    let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
+    let staging_size = (swapchain.extent().width * swapchain.extent().height * 4) as u64;
+    let staging = RhiDevice::create_buffer(
+        device,
+        &BufferDesc {
+            size: staging_size,
+            usage: BufferUsage::TRANSFER_DST,
+            location: MemoryLocation::HostVisibleCoherent,
+        },
+    )
+    .expect("host-visible readback staging buffer");
+    let alloc_extent = swapchain.extent();
+    let mut frame = GBufferFrame::new();
+
+    // Render ONE readback frame at the current `scene.coarse` state + drain so the staging buffer is
+    // coherent, then copy it out as an RGBA frame (the SAME R/B normalization the goldens use). The
+    // closure mirrors the existing `dump_brick_ab` readback/drain discipline (FRAMES_IN_FLIGHT==2,
+    // 3 drain frames re-wait the readback slot's fence). Returns `None` if the swapchain recreated
+    // (a resize), in which case the comparison is skipped gracefully.
+    const DRAIN_FRAMES: u32 = 3;
+    let coarse_pipeline_ref: &boyko_rhi_vulkan::rhi_impl::ComputePipeline = &coarse_compute;
+    let mut readback_rgba = |cull_on: bool| -> Option<(Vec<u8>, u32, u32)> {
+        if !window.pump_events() {
+            return None;
+        }
+        window.refresh_size();
+        let live = swapchain.extent();
+        if live.width != alloc_extent.width || live.height != alloc_extent.height {
+            eprintln!("NOTE p0 cull: extent changed before the readback frame — skipping");
+            return None;
+        }
+
+        scene.coarse = if cull_on { Some(coarse_pipeline_ref) } else { None };
+        let clear = [0.0_f32, 0.0, 0.0, 1.0];
+
+        // SAFETY: `ctx`/`surface`/`swapchain`/`renderer` share one device; every `scene` resource
+        // is live; `present_extent` + `scene.dispatch_group_count_x` + the camera UBO `count` cover
+        // the composite extent; `staging` is host-visible and ≥ one swapchain image in bytes.
+        let presented = unsafe {
+            renderer.render_gbuffer_frame(
+                &ctx, &surface, &mut swapchain, &scene, &mut frame,
+                window.width(), window.height(), clear, present_extent, Some(&staging),
+            )
+        }
+        .unwrap_or_else(|e| panic!("p0 cull readback frame (cull_on={cull_on}) failed: {e:?}"));
+        if !presented {
+            eprintln!("NOTE p0 cull: swapchain recreated on the readback frame — skipping");
+            return None;
+        }
+        let extent = swapchain.extent();
+
+        for _ in 0..DRAIN_FRAMES {
+            if !window.pump_events() {
+                break;
+            }
+            window.refresh_size();
+            // SAFETY: same contract; no readback requested on the drain frames.
+            let _ = unsafe {
+                renderer.render_gbuffer_frame(
+                    &ctx, &surface, &mut swapchain, &scene, &mut frame,
+                    window.width(), window.height(), clear, present_extent, None,
+                )
+            }
+            .unwrap_or_else(|e| panic!("p0 cull drain frame (cull_on={cull_on}) failed: {e:?}"));
+        }
+
+        let w = extent.width;
+        let h = extent.height;
+        let byte_count = (w * h * 4) as usize;
+        let dst_ptr = RhiDevice::buffer_mapped_ptr(device, &staging)
+            .expect("host-visible staging buffer is mapped");
+        let mut raw = vec![0u8; byte_count];
+        // SAFETY: `dst_ptr` points to `staging_size` (≥ `byte_count`) mapped host-coherent bytes;
+        // the readback frame's copy completed before this read (its slot fence was re-waited by the
+        // drain frames); `raw` is a distinct, non-overlapping alloc.
+        unsafe { core::ptr::copy_nonoverlapping(dst_ptr.as_ptr(), raw.as_mut_ptr(), byte_count) };
+        Some((readback_to_rgba(&raw, w, h, is_bgra), w, h))
+    };
+
+    let off = readback_rgba(false);
+    let on = readback_rgba(true);
+
+    // The validation oracle: the ON path's new coarse dispatch + barrier are sound (zero messages
+    // across all frames recorded by the two readbacks). Gated on `validation_enabled()` so the
+    // pixel gate below still runs under `BOYKO_DISABLE_VALIDATION` (no messenger when off).
+    if ctx.validation_enabled() {
+        let state = ctx
+            .debug_state()
+            .expect("validation enabled => a debug-messenger state is present");
+        assert_eq!(
+            state.total(),
+            0,
+            "validation layer reported {} message(s) during the P0 coarse-cull present — \
+             see the [vk-validation] log",
+            state.total()
+        );
+    }
+
+    // The pixel gate: cull-ON must equal cull-OFF within +/-CHANNEL_TOL per RGB channel (the cull
+    // is a PERF optimization — same surface, fewer marches). Both frames are already RGBA-normalized
+    // (the swapchain R/B swap applied), so they are byte-comparable per channel.
+    match (off, on) {
+        (Some((off_rgba, ow, oh)), Some((on_rgba, nw, nh))) => {
+            assert_eq!((ow, oh), (nw, nh), "cull-ON and cull-OFF readback extents must match");
+            assert_eq!(
+                off_rgba.len(),
+                on_rgba.len(),
+                "cull-ON and cull-OFF readback byte lengths must match"
+            );
+            let mut mismatches = 0usize;
+            let mut worst = (0u32, 0u32, 0i32);
+            for (i, (o, n)) in off_rgba.chunks_exact(4).zip(on_rgba.chunks_exact(4)).enumerate() {
+                let mut bad = false;
+                for c in 0..3 {
+                    let d = (o[c] as i32 - n[c] as i32).abs();
+                    if d > CHANNEL_TOL {
+                        bad = true;
+                        if d > worst.2 {
+                            let px = (i as u32) % ow;
+                            let py = (i as u32) / ow;
+                            worst = (px, py, d);
+                        }
+                    }
+                }
+                if bad {
+                    mismatches += 1;
+                }
+            }
+            assert_eq!(
+                mismatches, 0,
+                "P0 coarse cull changed {mismatches} pixel(s) beyond +/-{CHANNEL_TOL} (worst delta \
+                 {} at ({}, {})) — the cull must skip empty tiles only, NOT alter the surface",
+                worst.2, worst.0, worst.1,
+            );
+            println!("p0_windowed_coarse_cull: cull-ON == cull-OFF across {ow}x{oh} (0 mismatches)");
+        }
+        _ => {
+            eprintln!(
+                "NOTE p0_windowed_coarse_cull: a readback frame did not present (swapchain kept \
+                 recreating); validation was still asserted clean"
+            );
+        }
+    }
+
+    drop(renderer);
+    // SAFETY: the renderer was dropped above (its `Drop` waits the device idle), so no submission
+    // references these resources; `ctx` is still alive; each is destroyed exactly once, in reverse
+    // dependency order.
+    unsafe {
+        frame.destroy(&ctx);
+        RhiDevice::destroy_buffer(device, staging);
+        RhiDevice::destroy_graphics_pipeline(device, present_pipeline);
+        RhiDevice::destroy_bind_group_layout(device, present_layout);
+        RhiDevice::destroy_compute_pipeline(device, resolve_pipeline);
+        RhiDevice::destroy_bind_group_layout(device, resolve_layout);
+        RhiDevice::destroy_compute_pipeline(device, coarse_compute);
+        RhiDevice::destroy_compute_pipeline(device, marcher);
+        RhiDevice::destroy_bind_group_layout(device, vocab_layout);
+        RhiDevice::destroy_graphics_pipeline(device, raster_pipeline);
+        RhiDevice::destroy_sampler(device, present_sampler);
+        RhiDevice::destroy_sampler(device, depth_sampler);
+        RhiDevice::destroy_buffer(device, vertex_buffer);
+        RhiDevice::destroy_buffer(device, tiles_buffer);
         clipmap.destroy(&ctx);
         RhiDevice::destroy_buffer(device, light_staging);
         RhiDevice::destroy_buffer(device, light_table);

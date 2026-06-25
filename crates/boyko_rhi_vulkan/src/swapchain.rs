@@ -39,8 +39,8 @@ use boyko_rhi::{
 };
 
 use crate::compute::{
-    DEFAULT_LIGHT_DIR, DEFAULT_MARCHER_OMEGA, FineMarcherPush, LIGHTING_FLAG_AO,
-    LIGHTING_FLAG_SHADOWS,
+    CoarseMode, DEFAULT_LIGHT_DIR, DEFAULT_MARCHER_OMEGA, FineMarcherPush, LOCAL_SIZE_X,
+    tile_grid_extent,
 };
 use crate::device::{DeviceFns, SurfaceInstanceFns, SwapchainDeviceFns, VulkanContext};
 use crate::ffi::*;
@@ -2335,14 +2335,20 @@ impl<'ctx> Renderer<'ctx> {
     ///    (EARLY|LATE)_FRAGMENT_TESTS → COMPUTE_SHADER) — the single dual-use depth
     ///    barrier (REPLACES the packed path's depth copy + its two transfer barriers)
     /// 4. the 3 G-buffer images `UNDEFINED → GENERAL` (TOP_OF_PIPE → COMPUTE_SHADER)
-    /// 5. **(pass B)** bind the marcher + the vocabulary set, dispatch (the marcher
+    /// 5. **(P0 coarse cull, OPTIONAL — only when `scene.coarse` is `Some`)** bind the
+    ///    coarse-cull pipeline + the vocabulary set, dispatch one group per `LOCAL_SIZE_X`
+    ///    tiles (each invocation writes a `TileBound` into binding 6), then a COMPUTE→COMPUTE
+    ///    buffer barrier on `tiles_buffer` (SHADER_WRITE → SHADER_READ); the marcher then runs
+    ///    with `coarse_enabled == scene.coarse_mode` (`1` = full / `2` = empty-skip-only). When
+    ///    `scene.coarse` is `None` this step records NOTHING (`coarse_enabled == 0`).
+    /// 6. **(pass B)** bind the marcher + the vocabulary set, dispatch (the marcher
     ///    SAMPLES the depth image, STORES the final composite into ALBEDO)
-    /// 6. ALBEDO `GENERAL → SHADER_READ_ONLY_OPTIMAL` (COMPUTE_SHADER → FRAGMENT_SHADER)
-    /// 7. swapchain `UNDEFINED → COLOR_ATTACHMENT_OPTIMAL` (TOP_OF_PIPE → COLOR_ATTACHMENT_OUTPUT)
-    /// 8. **(pass C)** `vkCmdBeginRendering` (swapchain color CLEAR), fullscreen-sample
+    /// 7. ALBEDO `GENERAL → SHADER_READ_ONLY_OPTIMAL` (COMPUTE_SHADER → FRAGMENT_SHADER)
+    /// 8. swapchain `UNDEFINED → COLOR_ATTACHMENT_OPTIMAL` (TOP_OF_PIPE → COLOR_ATTACHMENT_OUTPUT)
+    /// 9. **(pass C)** `vkCmdBeginRendering` (swapchain color CLEAR), fullscreen-sample
     ///    the ALBEDO 1:1 in the top-left, end
-    /// 9. swapchain `COLOR_ATTACHMENT_OPTIMAL → PRESENT_SRC_KHR` (steady) or
-    ///    `→ TRANSFER_SRC`, copy-to-buffer, `→ PRESENT` (the readback path)
+    /// 10. swapchain `COLOR_ATTACHMENT_OPTIMAL → PRESENT_SRC_KHR` (steady) or
+    ///     `→ TRANSFER_SRC`, copy-to-buffer, `→ PRESENT` (the readback path)
     ///
     /// NO `copy_image_to_buffer(depth)` (step 3 replaces it) and NO
     /// `vkUpdateDescriptorSets` (both sets were written once at `sync_gbuffer`).
@@ -2695,6 +2701,86 @@ impl<'ctx> Renderer<'ctx> {
             }
         }
 
+        // === Render P0: the P4b COARSE-CULL pass (Decision: mirror the offscreen
+        // `run_gbuffer_hybrid_ex` coarse dispatch + the `cluster_cull` optional-compute
+        // recorder shape). Recorded ONLY when the scene wires the coarse pipeline; otherwise
+        // skipped entirely — NO dispatch, NO barrier — so the command stream is byte-identical
+        // to the pre-P0 windowed path (the 0%-gate). The coarse pass binds the SAME vocabulary
+        // set (the cull shader declares only a subset — valid), SAMPLES the depth (already
+        // SHADER_READ from barrier 3, which it shares with the marcher), and WRITES one
+        // `TileBound` per 8×8 tile into vocab binding 6. The fine marcher then READS those
+        // bounds (gated by `coarse_enabled == 1` in its push) to skip empty / cone-rejected
+        // tiles — the SAME pixels, fewer marches. A COMPUTE→COMPUTE buffer barrier on
+        // `tiles_buffer` orders the cull WRITE before the marcher READ. ===
+        let coarse_enabled = scene.coarse.is_some();
+        if let Some(coarse_pipeline) = scene.coarse {
+            // The 1D coarse dispatch element count = the full tile grid at the COMPOSITE
+            // extent (the marcher dispatches + the camera UBO `count` are sized to it). One
+            // group per `LOCAL_SIZE_X` tiles, mirroring the offscreen `coarse_group_count_x`.
+            let (tw, th) = tile_grid_extent(present_extent.width, present_extent.height);
+            let coarse_groups = (tw * th).div_ceil(LOCAL_SIZE_X);
+            // SAFETY: recording is open; the coarse pipeline + its layout (declaring
+            // `vocab_layout` at set 0 + the shared COMPUTE push range) are live on this device
+            // (caller contract); the vocabulary set binds the SSBO/UBO + the now-transitioned
+            // depth (SHADER_READ) + a valid Tiles SSBO @6 (the cull's write target) + the valid
+            // brick descriptors @9..=14; the cull shader uses only a subset of those bindings
+            // (valid); `coarse_groups` covers the full tile grid at the 64-wide group;
+            // `&...vocab_set.descriptor_set` is a single-element local alive for the call
+            // (first_set 0, count 1, zero dynamic offsets). The cull declares no push it reads,
+            // but the layout's push range matches the marcher's, so no constant is pushed here.
+            unsafe {
+                (self.fns.cmd_bind_pipeline)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    coarse_pipeline.pipeline,
+                );
+                (self.fns.cmd_bind_descriptor_sets)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    coarse_pipeline.layout,
+                    0,
+                    1,
+                    &targets.vocab_set.descriptor_set,
+                    0,
+                    ptr::null(),
+                );
+                (self.fns.cmd_dispatch)(cmd, coarse_groups, 1, 1);
+            }
+
+            // Order the coarse pass's `TileBound` WRITES (binding 6, COMPUTE/SHADER_WRITE)
+            // before the fine marcher's READS (COMPUTE/SHADER_READ) — a COMPUTE→COMPUTE buffer
+            // barrier on `tiles_buffer` (mirrors the offscreen inter-dispatch barrier).
+            let tiles_barrier = VkBufferMemoryBarrier {
+                s_type: VkStructureType::BufferMemoryBarrier,
+                p_next: ptr::null(),
+                src_access_mask: VK_ACCESS_SHADER_WRITE_BIT,
+                dst_access_mask: VK_ACCESS_SHADER_READ_BIT,
+                src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                buffer: scene.tiles_buffer.buffer,
+                offset: 0,
+                size: VK_WHOLE_SIZE,
+            };
+            // SAFETY: recording is open; `tiles_buffer` is a live STORAGE buffer on this device
+            // (the cull just wrote it); COMPUTE_SHADER→COMPUTE_SHADER with
+            // SHADER_WRITE→SHADER_READ makes the cull's tile-bound writes available + visible to
+            // the marcher's reads on the GPU timeline; `&tiles_barrier` outlives the call.
+            unsafe {
+                (self.fns.cmd_pipeline_barrier)(
+                    cmd,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    0,
+                    0,
+                    ptr::null(),
+                    1,
+                    (&tiles_barrier as *const VkBufferMemoryBarrier).cast(),
+                    0,
+                    ptr::null(),
+                );
+            }
+        }
+
         // === Pass B: the marcher SAMPLES the depth image, STORES the G-buffer. ===
         // (5) Bind the marcher + the vocabulary set (written ONCE at sync_gbuffer; NO
         // per-frame update) against the marcher's OWN dedicated layout, push the 32-byte
@@ -2702,10 +2788,12 @@ impl<'ctx> Renderer<'ctx> {
         //
         // The marcher's 32-byte compute push range is `FineMarcherPush`
         // `{ coarse_enabled: u32 @0, omega: f32 @4, lighting_flags: u32 @8, light_dir: float3 @16 }`.
-        // The windowed present path runs WITHOUT the coarse cull pass (no coarse dispatch
-        // writes binding 6), so `coarse_enabled = false` gates the tile read off — but the
-        // marcher shader still DECLARES binding 6, so the (valid) Tiles descriptor must be
-        // bound (it is, in the vocabulary set). `omega` carries the B1 over-relaxation
+        // Render P0: `coarse_enabled` is a 3-value `CoarseMode` — `0` on the OFF path (no coarse
+        // dispatch, the tile read is gated off), else `scene.coarse_mode`: `1` (full = EMPTY-skip +
+        // `near_t` seed) or `2` (empty-skip-only = EMPTY-skip, NO seed → lit-transparent, no rim).
+        // When the cull pass above ran the marcher reads the per-tile bounds it wrote into binding 6
+        // (skipping empty tiles). Either way the marcher DECLARES binding 6, so the (valid) Tiles descriptor
+        // is always bound in the vocabulary set. `omega` carries the B1 over-relaxation
         // factor (`DEFAULT_MARCHER_OMEGA`, the provably hole-free speedup). Render A1/A2:
         // the on-screen demo turns lighting ON (A1 soft shadows + A2 AO) with the default
         // directional light.
@@ -2724,10 +2812,17 @@ impl<'ctx> Renderer<'ctx> {
         //   loops the clip-map ladder. The caller MUST have bound the real BrickClipmap per-level
         //   resources at 9..=14 + written its `M4GridParams` tail into the b5 UBO. This mirrors the
         //   offscreen RTX-verified `run_gbuffer_hybrid_m4` push exactly.
-        let base = FineMarcherPush::new(
-            false,
+        // Render P0: the marcher's coarse-cull mode. OFF (no `coarse` pipeline ⇒ no dispatch) forces
+        // `CoarseMode::Off` so the push byte is 0 and the marcher never reads the (un-dispatched)
+        // tile bounds — byte-identical to the pre-P0 stream. ON uses `scene.coarse_mode`: `Full`
+        // keeps the historical EMPTY-skip + `near_t` seed (the offscreen goldens' mode);
+        // `EmptySkipOnly` is the LIT-TRANSPARENT on-screen cull (EMPTY-skip only, no seed → no
+        // grazing-silhouette AO/shadow rim).
+        let coarse_mode = if coarse_enabled { scene.coarse_mode } else { CoarseMode::Off };
+        let base = FineMarcherPush::new_mode(
+            coarse_mode,
             DEFAULT_MARCHER_OMEGA,
-            LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO,
+            scene.lighting_flags,
             DEFAULT_LIGHT_DIR,
         );
         let marcher_push = match scene.brick {
@@ -3887,6 +3982,62 @@ pub struct GBufferScene<'a> {
     /// per-level resources at 9..=14 and written its `M4GridParams` tail into the b5 UBO (see
     /// [`BrickActivation`]).
     pub brick: Option<BrickActivation>,
+    /// The P4b COARSE TILE-CULL compute pipeline (`sdf_tile_cull.comp`), applied to this frame.
+    /// `None` = the OFF path (the default, byte-identical to the pre-P0 command stream): NO coarse
+    /// dispatch + NO `tiles_buffer` barrier are recorded, and the marcher push carries
+    /// `coarse_enabled == 0`, so the marcher never reads [`Self::tiles_buffer`]'s contents.
+    ///
+    /// `Some(coarse)` = the ON path (a PERF optimization, not a visual one): BEFORE the marcher
+    /// (pass B), the recorder binds this pipeline against the SAME vocabulary descriptor set (the
+    /// coarse-cull shader declares only a subset of the vocab layout — sharing the full layout is
+    /// valid), dispatches `ceil(tile_count / LOCAL_SIZE_X)` groups (one invocation per 8×8 tile,
+    /// each writing a `TileBound` into vocab binding 6 — [`Self::tiles_buffer`]), records a
+    /// COMPUTE-WRITE → COMPUTE-READ buffer barrier on `tiles_buffer`, and then the marcher push
+    /// carries `coarse_enabled == 1`, so the fine marcher reads the per-tile bounds and skips
+    /// empty / cone-rejected tiles. The cull MUST NOT change pixels (only fewer marches), so the ON
+    /// output equals the OFF output within the goldens' per-channel tolerance.
+    ///
+    /// `coarse`'s layout MUST declare [`Self::vocab_layout`] at `set 0` (it shares the marcher's
+    /// vocabulary set verbatim) and the same compute push range; the depth image it samples is
+    /// already `SHADER_READ_ONLY_OPTIMAL` (the dual-use depth barrier the recorder emits before pass
+    /// B) and the `tiles_buffer` it writes is bound at vocab binding 6 (always — caller contract).
+    /// Flipping `coarse` between frames needs NO re-record (it gates only the recorded dispatch +
+    /// the push byte), so the caller may A/B-toggle it live.
+    pub coarse: Option<&'a ComputePipeline>,
+    /// The marcher's coarse-cull CONSUMPTION mode ([`CoarseMode`]) stamped into the push when
+    /// [`Self::coarse`] is `Some` (when `None`, the recorder forces [`CoarseMode::Off`], so this
+    /// field is a don't-care on the OFF path). The cull DISPATCH is identical across modes — only
+    /// the marcher's reading of the per-tile bounds differs:
+    ///
+    /// - [`CoarseMode::Full`] — the historical EMPTY-skip + `near_t` seed (the offscreen goldens'
+    ///   mode; image-transparent under the UNLIT contract).
+    /// - [`CoarseMode::EmptySkipOnly`] — the LIT-TRANSPARENT cull: EMPTY-skip only, NO `near_t`
+    ///   seed (the seed shifts the grazing-silhouette AO/shadow rim; dropping it removes the rim).
+    ///   This is the on-screen windowed-present mode (lit-transparent, near-identical perf).
+    ///
+    /// A per-frame push field (no re-record on a flip). Defaults to [`CoarseMode::Off`].
+    pub coarse_mode: CoarseMode,
+    /// The A1/A2 lighting flags stamped into the marcher's [`FineMarcherPush`] `lighting_flags`
+    /// (offset 8) THIS frame: `LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO` for the on-screen demo's
+    /// soft-shadow + AO shading, or `0` for the byte-identical Lambert path.
+    ///
+    /// This is a per-frame push field (NOT a descriptor), so flipping it needs no re-record and the
+    /// OFF (`coarse == None`) command stream stays byte-identical for any fixed value.
+    ///
+    /// # Why it is a field (the P0 coarse-cull transparency contract)
+    ///
+    /// The coarse cull ([`Self::coarse`]) is proven IMAGE-TRANSPARENT — cull-ON equals cull-OFF
+    /// within the goldens' tolerance — by the offscreen golden
+    /// `sdf_gbuffer_hybrid::p4b_cull_on_conservative_within_tol_of_cull_off`, which runs that
+    /// comparison on the UNLIT marcher (`lighting_flags == 0`). With shadows + AO ON, the cull's
+    /// conservative per-tile `near_t` / EMPTY classification (tuned for the primary hit test) is
+    /// NOT transparent to the secondary AO / shadow rays near a grazing silhouette: a tile the cull
+    /// deems empty-enough for the primary ray still owes an AO darkening the un-culled march would
+    /// have produced, so the lit cull-ON image drops that darkening (a visible ring). That cull ⇄
+    /// lighting interaction is a separate, un-shipped invariant — the shipped cull contract is the
+    /// unlit one. Exposing `lighting_flags` lets a cull-transparency test compare under the proven
+    /// (`0`) condition while the on-screen present keeps shadows + AO.
+    pub lighting_flags: u32,
 }
 
 /// The per-extent on-screen G-buffer targets for [`Renderer::render_gbuffer_frame`]:

@@ -1285,14 +1285,25 @@ void main(uint3 tid : SV_DispatchThreadID) {
     bool has_mesh = (md < DEPTH_CLEAR);          // strictly less than the far-plane clear
     float t_mesh = has_mesh ? (md * T_MAX) : 1.0e30; // a finite bound only when covered
 
-    // --- Render P4b: the GATED coarse-cull prefix (Algorithm B). `coarse_enabled == 0`
-    // leaves `t_seed = 0.0` and never touches `Tiles` — the OFF path is BYTE-IDENTICAL
-    // to today's marcher (the 0%-gate). When enabled, read this pixel's tile bound:
+    // --- Render P4b: the GATED coarse-cull prefix (Algorithm B). `coarse_enabled` is a
+    // THREE-VALUE mode (host `CoarseMode`):
+    //   * 0 (Off)           -> never touches `Tiles`, `t_seed` stays 0.0 — the OFF path is
+    //                          BYTE-IDENTICAL to today's marcher (the 0%-gate).
+    //   * 1 (Full)          -> EMPTY-skip + SEED the march at `near_t` (the proven-empty
+    //                          prefix, a conservative lower bound on every in-tile pixel's
+    //                          first hit -> never skips this pixel's surface). This is the
+    //                          historical cull; the offscreen FULL-mode goldens assert it.
+    //   * 2 (EmptySkipOnly) -> EMPTY-skip ONLY; `t_seed` stays 0.0 (NO `near_t` seed). The
+    //                          empty-tile skip is provably image-identical lit+unlit (an empty
+    //                          tile has no surface), but the `near_t` SEED on a NON-empty tile
+    //                          latches a different grazing tangent into the B1 over-relaxed
+    //                          march (a shifted normal -> a shifted AO/shadow rim). Dropping
+    //                          the seed makes the cull LIT-TRANSPARENT (no rim) at the cost of
+    //                          the prefix-skip on the few surface tiles (first-principles <2%).
+    // For ANY non-zero mode the EMPTY branch is identical (read the bound, skip empty tiles):
     //   * EMPTY tile -> no SDF surface in the cone in front of the deepest mesh, but the
     //     pixel can still be MESH-covered -> composite mesh/background + return (D6); a
     //     blind background would erase the mesh -> golden regression.
-    //   * else SEED the march at `near_t` (the proven-empty prefix, a conservative lower
-    //     bound on every in-tile pixel's first hit -> never skips this pixel's surface).
     // The march loop + field eval below stay BYTE-UNTOUCHED. ---
     float t_seed = 0.0;
     if (pc.coarse_enabled != 0u) {
@@ -1318,7 +1329,11 @@ void main(uint3 tid : SV_DispatchThreadID) {
             gViewT[uint2(px, py)] = 1.0e30;
             return;
         }
-        t_seed = tb.near_t;
+        // FULL mode (1) ONLY seeds the prefix; EmptySkipOnly (2) leaves `t_seed = 0.0`
+        // (no prefix skip on a surface tile -> no grazing-tangent rim, the lit-transparent path).
+        if (pc.coarse_enabled == 1u) {
+            t_seed = tb.near_t;
+        }
     }
 
     // Sphere-trace, BOUNDED by the mesh depth: as soon as the march parameter reaches

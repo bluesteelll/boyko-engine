@@ -173,8 +173,8 @@ static SDF_EDITLIST_STORAGE_IMAGE_SPV: SpirvBlob<24092> = SpirvBlob(*include_byt
 /// ONLY when the signed refine CONVERGES (`abs(d) < EPS`); a grazing silhouette point (analytic miss
 /// within `M2_CREASE_EPS`) or a stalled hard crease falls to the analytic fold, erasing the 1-2px
 /// silhouette rim where the brick hit but the analytic ray missed (dead `resid`/`cand_p` removed),
-/// giving 121620 bytes (VulkanSDK 1.4.350.0 dxc). The hit-set is now exactly the refine-converged set; the residual silhouette rim is ACCEPTED as inherent (owner decision), and the marginal grazing-only EXACT-ANALYTIC RE-MARCH that chased it (a factored analytic re-march gated on a near-tangent normal-vs-ray dot, about 30KB more SPIR-V to recover roughly 7px) was REVERTED in favor of this clean band-removal state under a perf-maximal budget. SDF brick-atlas M5a (TOROIDAL clip-map streaming) then made `m2_surface_hit`'s tile lookup address the atlas at the TOROIDAL slot `(round(origin/bw) + box) mod M2_GRID_DIM` (Decision 5 — recomputed from the existing UBO `origin`/`brick_world`, NO new UBO field so the OFF UBO byte-identity is untouched); at a grid where `origin_cell ≡ 0 (mod DIM)` it reduces to the old `box * BRICK_ALLOC` map → 122488 bytes.
-static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<122488> = SpirvBlob(*include_bytes!(concat!(
+/// giving 121620 bytes (VulkanSDK 1.4.350.0 dxc). The hit-set is now exactly the refine-converged set; the residual silhouette rim is ACCEPTED as inherent (owner decision), and the marginal grazing-only EXACT-ANALYTIC RE-MARCH that chased it (a factored analytic re-march gated on a near-tangent normal-vs-ray dot, about 30KB more SPIR-V to recover roughly 7px) was REVERTED in favor of this clean band-removal state under a perf-maximal budget. SDF brick-atlas M5a (TOROIDAL clip-map streaming) then made `m2_surface_hit`'s tile lookup address the atlas at the TOROIDAL slot `(round(origin/bw) + box) mod M2_GRID_DIM` (Decision 5 — recomputed from the existing UBO `origin`/`brick_world`, NO new UBO field so the OFF UBO byte-identity is untouched); at a grid where `origin_cell ≡ 0 (mod DIM)` it reduces to the old `box * BRICK_ALLOC` map → 122488 bytes. Render P0 (empty-skip-only) then generalized the hand-written coarse-cull prefix's `coarse_enabled` gate from a bool to a 3-value `CoarseMode` (0 off / 1 full / 2 empty-skip-only): the `near_t` seed is now wrapped in `if (pc.coarse_enabled == 1u)`, so mode 2 skips empty tiles WITHOUT seeding (the lit-transparent on-screen cull, no grazing-silhouette AO/shadow rim). Mode 0 and mode 1 OUTPUT are byte-unchanged; the new `== 1u` compare adds → 122532 bytes.
+static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<122532> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/sdf_gbuffer_composite.comp.spv"
 )));
@@ -1147,13 +1147,61 @@ impl CompositePushConstants {
     }
 }
 
+/// The fine marcher's coarse-cull consumption mode — the value stamped into
+/// [`FineMarcherPush::coarse_enabled`] (offset 0), read by the hand-written cull prefix in
+/// `sdf_gbuffer_composite.hlsl`. The cull DISPATCH (which writes the per-tile `TileBound`
+/// into binding 6) is unchanged across modes; only the marcher's CONSUMPTION of those bounds
+/// differs:
+///
+/// - [`Off`](Self::Off) (`0`) — the cull is not consumed: `t_seed` stays `0.0`, the `Tiles`
+///   buffer is never read. The OFF path is byte-identical to the pre-P4b marcher (the 0%-gate).
+/// - [`Full`](Self::Full) (`1`) — the historical cull: EMPTY tiles short-circuit to the
+///   mesh/background composite, and a NON-empty tile SEEDS the march at its conservative
+///   `near_t` lower bound (the prefix skip). The offscreen FULL-mode goldens assert this output.
+/// - [`EmptySkipOnly`](Self::EmptySkipOnly) (`2`) — the LIT-TRANSPARENT cull: EMPTY tiles still
+///   short-circuit (provably image-identical lit+unlit — an empty tile has no surface), but a
+///   NON-empty tile is NOT seeded (`t_seed` stays `0.0`). The `near_t` seed, fed into the B1
+///   over-relaxed march, latches a different grazing tangent on the silhouette (a shifted normal
+///   → a shifted AO/shadow rim); dropping it removes the rim. The cost is the lost prefix skip on
+///   the few surface tiles (first-principles < 2% of the cull's perf win, which is dominated by the
+///   empty-tile skip).
+///
+/// `#[repr(u32)]` so the discriminant IS the value the shader reads at offset 0.
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum CoarseMode {
+    /// `0` — the cull is not consumed (byte-identical to the pre-P4b marcher).
+    #[default]
+    Off = 0,
+    /// `1` — EMPTY-skip + `near_t` seed (the historical cull; the offscreen goldens assert it).
+    Full = 1,
+    /// `2` — EMPTY-skip only, NO seed (the lit-transparent on-screen cull — no grazing rim).
+    EmptySkipOnly = 2,
+}
+
+impl CoarseMode {
+    /// Maps the legacy `coarse_enabled: bool` to a mode: `false` → [`Off`](Self::Off),
+    /// `true` → [`Full`](Self::Full). Keeps every pre-existing bool call site byte-unchanged
+    /// (the `true` callers still seed `near_t`).
+    #[inline]
+    pub const fn from_bool(enabled: bool) -> Self {
+        if enabled { Self::Full } else { Self::Off }
+    }
+
+    /// The raw `u32` discriminant stamped into [`FineMarcherPush::coarse_enabled`].
+    #[inline]
+    pub const fn as_u32(self) -> u32 {
+        self as u32
+    }
+}
+
 /// `#[repr(C)]` the fine SDF-marcher's COMPUTE push constant
 /// (`sdf_gbuffer_composite.hlsl`), pushed against the marcher pipeline's OWN dedicated
 /// layout via `push_compute_constants`. Render P4b introduced the first two fields; A1/A2
 /// widened it from 8 → 32 bytes to carry the directional-light state. The byte layout is
 /// HLSL std430-style scalar+`float3` (the const-asserts below pin every offset):
 ///
-///   offset  0 : u32   coarse_enabled   P4b coarse-cull gate (0 = cull off)
+///   offset  0 : u32   coarse_enabled   P4b coarse-cull mode (0 = off, 1 = full, 2 = empty-skip)
 ///   offset  4 : f32   omega            B1 Keinert over-relaxation factor, [1.0, 1.99]
 ///   offset  8 : u32   lighting_flags   bit 0 = A1 shadows, bit 1 = A2 AO; 0 = OFF path
 ///   offset 12 : u32   _pad             aligns `light_dir` to offset 16 (a `float3` lands
@@ -1168,7 +1216,10 @@ impl CompositePushConstants {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FineMarcherPush {
-    /// P4b coarse-cull gate: non-zero reads binding 6 (`TileBound`) and culls / seeds.
+    /// P4b coarse-cull mode ([`CoarseMode`] as `u32`): `0` = off (never reads binding 6),
+    /// `1` = full (EMPTY-skip + `near_t` seed), `2` = empty-skip-only (EMPTY-skip, NO seed —
+    /// the lit-transparent on-screen cull). Any non-zero value reads binding 6 (`TileBound`)
+    /// for the EMPTY-skip; only `1` consumes `near_t`.
     pub coarse_enabled: u32,
     /// B1 Keinert over-relaxation factor, host-clamped to `[1.0, 1.99]`.
     pub omega: f32,
@@ -1261,6 +1312,12 @@ impl FineMarcherPush {
     /// path; `light_dir` is then a don't-care (the shader never normalizes it). The M1
     /// empty-skip is OFF (`brick_enabled == 0`, a zero grid) — byte-identical to the
     /// pre-M1 marcher. Use [`with_brick`](Self::with_brick) to enable the empty skip.
+    ///
+    /// The legacy `coarse_enabled: bool` maps via [`CoarseMode::from_bool`] — `false` →
+    /// [`Off`](CoarseMode::Off) (0), `true` → [`Full`](CoarseMode::Full) (1) — so every
+    /// pre-existing bool caller is byte-unchanged (the `true` callers still seed `near_t`).
+    /// Use [`new_mode`](Self::new_mode) to select the 3-value mode (e.g.
+    /// [`EmptySkipOnly`](CoarseMode::EmptySkipOnly) for the lit-transparent on-screen cull).
     #[inline]
     pub const fn new(
         coarse_enabled: bool,
@@ -1268,8 +1325,24 @@ impl FineMarcherPush {
         lighting_flags: u32,
         light_dir: [f32; 3],
     ) -> Self {
+        Self::new_mode(CoarseMode::from_bool(coarse_enabled), omega, lighting_flags, light_dir)
+    }
+
+    /// Builds the marcher push with the explicit 3-value coarse-cull [`CoarseMode`] (the
+    /// generalization of [`new`](Self::new)). [`Off`](CoarseMode::Off) is byte-identical to
+    /// the pre-P4b push; [`Full`](CoarseMode::Full) is the historical EMPTY-skip + `near_t`
+    /// seed (the offscreen goldens' mode); [`EmptySkipOnly`](CoarseMode::EmptySkipOnly) is the
+    /// lit-transparent on-screen cull (EMPTY-skip, no seed). All other fields are identical to
+    /// [`new`](Self::new).
+    #[inline]
+    pub const fn new_mode(
+        coarse_mode: CoarseMode,
+        omega: f32,
+        lighting_flags: u32,
+        light_dir: [f32; 3],
+    ) -> Self {
         Self {
-            coarse_enabled: coarse_enabled as u32,
+            coarse_enabled: coarse_mode.as_u32(),
             omega,
             lighting_flags,
             _pad: 0,
