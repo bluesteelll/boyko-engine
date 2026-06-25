@@ -56,10 +56,11 @@ jobs:
 
       - name: Build cargo doc
         env:
-          RUSTDOCFLAGS: "-D warnings --enable-index-page -Z unstable-options"
-        run: |
-          # Note: --enable-index-page requires nightly. For stable, we generate a manual redirect below.
-          cargo doc --no-deps --workspace --all-features || cargo doc --no-deps --workspace --all-features
+          # --enable-index-page / -Z unstable-options are nightly-only and break the
+          # stable toolchain used above. The /api/ landing page is produced by the
+          # manual redirect in "Assemble site", so the index page is not needed here.
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo doc --no-deps --workspace --all-features
 
       - name: Assemble site
         run: |
