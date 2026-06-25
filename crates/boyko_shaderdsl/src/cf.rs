@@ -937,6 +937,122 @@ pub trait Cf {
     /// the return type — NO function-typer). Returns [`Flow`] so the body's `?` short-circuits the
     /// producer IIFE (Eval) / records structurally (Emit).
     fn ret_vec2(cell: &Self::RetCellV2, value: Self::Vec2f) -> Flow;
+
+    // ---- Track B Increment G2: the `oct_encode` octahedral-normal encoder ----------------
+    //
+    // `oct_encode` (`sdf_gbuffer_composite.hlsl:507`) folds a unit normal into a `[0,1]^2` octahedral
+    // pair. It is the LAST G-buffer leaf and the first with a MUTABLE `float3` PARAMETER reassigned in
+    // place (`n /= ...`, modeled as the R1 whole-variable `n = n / ...`), a MUTABLE `float2` local
+    // (`float2 e = n.xy;` reassigned inside an `if`), a REAL `if (n.z < 0.0)` fall-through branch, two
+    // scalar sign-ternaries (`e.x >= 0.0 ? 1.0 : -1.0`), and a fused `e * 0.5 + 0.5` return. The facets
+    // below land: the mutable `float3` suppressed-decl param ([`Vec3Var`](Self::Vec3Var)), the mutable
+    // `float2` local ([`Vec2Var`](Self::Vec2Var)), the `float2` component ops (the `.xy`/`.yx` swizzles,
+    // the `.x`/`.y` component reads, `abs`, `*`, `* s`, `+ s`, `s - v`). The `if_` reuses the proven
+    // fall-through [`if_`](Self::if_); the sign-ternaries reuse [`select`](Self::select); the `n.z <
+    // 0.0` guard reuses [`FieldScalar::lt`]; the `e.x >= 0.0` comparands reuse [`FieldScalar::ge`].
+
+    /// A MUTABLE `float3` LOCAL holding the SUPPRESSED-DECL parameter `n` (the param reassigned in
+    /// place by `n /= ...`). The `float3` analogue of [`decl_param`](Self::decl_param) (the scalar
+    /// suppressed-decl carried param): Eval stores the `[f32; 3]` in a [`core::cell::Cell`] (interior
+    /// mutability — the `if` body reads/assigns through `&var`); Emit seeds a [`Var`](crate::emit::Var)
+    /// name entry but records NO `Stmt::DeclVar` (a `float3 n = ...;` redecl would diverge the committed
+    /// text — `n` is the HLSL signature parameter). Distinct from [`Var`](Self::Var) (a `float` local)
+    /// only in the held type. Owned, passed by `&` to [`get_var_vec3`](Self::get_var_vec3) /
+    /// [`set_var_vec3`](Self::set_var_vec3).
+    type Vec3Var;
+
+    /// Seeds the SIGNATURE PARAMETER `n` as a mutable `float3` local WITHOUT a declaration — the
+    /// `float3` analogue of [`decl_param`](Self::decl_param) (which seeds a `float` param). The `init`
+    /// is the param's symbolic seed ([`Vec3f`](Self::Vec3f)); Eval boxes its `[f32; 3]` into a `Cell`
+    /// (identical to [`decl_param`](Self::decl_param) on Eval — the no-decl distinction is Emit-only),
+    /// Emit seeds a [`Var`](crate::emit::Var) name entry but records NO statement (the SUPPRESSED-DECL
+    /// path). Returns the [`Vec3Var`](Self::Vec3Var) handle so the body's `n.x` / `n.xy` reads resolve
+    /// the name `n`.
+    fn decl_param_vec3(name: &'static str, init: Self::Vec3f) -> Self::Vec3Var;
+
+    /// Reads the CURRENT `float3` value of a [`Vec3Var`](Self::Vec3Var). Eval returns the `Cell`'s
+    /// `[f32; 3]`; Emit returns a [`Vec3f`](Self::Vec3f) handle spelling the variable's NAME (`n`).
+    fn get_var_vec3(v: &Self::Vec3Var) -> Self::Vec3f;
+
+    /// Assigns a [`Vec3Var`](Self::Vec3Var) (`n = <expr>;`). Eval `set`s the `Cell`; Emit records a
+    /// `Stmt::Assign` whose rhs is the `float3` expression (a BARE `n = ...;`, NO `float3` decl).
+    fn set_var_vec3(v: &Self::Vec3Var, val: Self::Vec3f);
+
+    /// A MUTABLE `float2` LOCAL (the `float2 e = n.xy;` declared local, reassigned inside the `if`).
+    /// The `float2` analogue of [`Var`](Self::Var) (a `float` local) / [`Vec3Var`](Self::Vec3Var):
+    /// Eval stores the `[f32; 2]` in a [`core::cell::Cell`]; Emit records a `Stmt::DeclVar` whose `ty`
+    /// is [`crate::emit::EmitTy::Float2`] (`float2 e = <init>;`). Owned, passed by `&` to
+    /// [`get_var_vec2`](Self::get_var_vec2) / [`set_var_vec2`](Self::set_var_vec2).
+    type Vec2Var;
+
+    /// Declares a mutable `float2` local named `name` initialized to `init` (`float2 e = n.xy;`) — the
+    /// `float2` analogue of [`decl_var`](Self::decl_var) (a `float` local). Eval boxes `init` into a
+    /// `Cell<[f32; 2]>`; Emit records a `Stmt::DeclVar` (`ty = Float2`, `rhs = init`). Returns the
+    /// [`Vec2Var`](Self::Vec2Var) handle.
+    fn decl_var_vec2(name: &'static str, init: Self::Vec2f) -> Self::Vec2Var;
+
+    /// Reads the CURRENT `float2` value of a [`Vec2Var`](Self::Vec2Var). Eval returns the `Cell`'s
+    /// `[f32; 2]`; Emit returns a [`Vec2f`](Self::Vec2f) handle spelling the variable's NAME (`e`).
+    fn get_var_vec2(v: &Self::Vec2Var) -> Self::Vec2f;
+
+    /// Assigns a [`Vec2Var`](Self::Vec2Var) (`e = <expr>;`). Eval `set`s the `Cell`; Emit records a
+    /// `Stmt::Assign` whose rhs is the `float2` expression.
+    fn set_var_vec2(v: &Self::Vec2Var, val: Self::Vec2f);
+
+    /// `v.xy` — a `float3` → `float2` swizzle (`n.xy`). Eval drops the `.z` lane (`[v[0], v[1]]`); Emit
+    /// records a [`crate::emit::Node::Vec2Swizzle`] printing `<src>.xy`. Result [`Vec2f`](Self::Vec2f).
+    fn vec3_xy(v: Self::Vec3f) -> Self::Vec2f;
+
+    /// `v.yx` — a `float2` → `float2` lane SWAP (`e.yx`). Eval swaps (`[v[1], v[0]]`); Emit records a
+    /// [`crate::emit::Node::Vec2Swizzle`] printing `<src>.yx`. Result [`Vec2f`](Self::Vec2f).
+    fn vec2_yx(v: Self::Vec2f) -> Self::Vec2f;
+
+    /// `v.x` — a `float2` → `float` component read (`e.x`). Eval reads lane 0; Emit records a
+    /// [`crate::emit::Node::Vec2Comp`] printing `<src>.x`. Result [`Scalar`](Self::Scalar).
+    fn vec2_x(v: Self::Vec2f) -> Self::Scalar;
+
+    /// `v.y` — a `float2` → `float` component read (`e.y`). Eval reads lane 1; Emit records a
+    /// [`crate::emit::Node::Vec2Comp`] printing `<src>.y`. Result [`Scalar`](Self::Scalar).
+    fn vec2_y(v: Self::Vec2f) -> Self::Scalar;
+
+    /// `abs(v)` — a component-wise `float2` absolute value (`abs(e.yx)`). Eval is `[|x|, |y|]`; Emit
+    /// records a [`crate::emit::Node::Vec2Abs`] printing `abs(<v>)`. Result [`Vec2f`](Self::Vec2f).
+    fn vec2_abs(v: Self::Vec2f) -> Self::Vec2f;
+
+    /// `a * b` — a component-wise `float2` multiply (`(1.0 - abs(e.yx)) * float2(...)`). Eval is `[a0*b0,
+    /// a1*b1]`; Emit records a [`crate::emit::Node::Vec2Mul`] (the `float2` analogue of
+    /// [`vec3_mul_scalar`](Self::vec3_mul_scalar), but BOTH operands `float2`). Result
+    /// [`Vec2f`](Self::Vec2f).
+    fn vec2_mul(a: Self::Vec2f, b: Self::Vec2f) -> Self::Vec2f;
+
+    /// `v * s` — a `float2` times a `float` scalar (`e * 0.5`). Eval is `[v0*s, v1*s]`; Emit records a
+    /// [`crate::emit::Node::Vec2MulScalar`] (the `float2` analogue of
+    /// [`vec3_mul_scalar`](Self::vec3_mul_scalar)). Result [`Vec2f`](Self::Vec2f).
+    fn vec2_mul_scalar(v: Self::Vec2f, s: Self::Scalar) -> Self::Vec2f;
+
+    /// `v + s` — a `float2` plus a `float` scalar broadcast (`... + 0.5`). Eval is `[v0+s, v1+s]`; Emit
+    /// records a [`crate::emit::Node::Vec2AddScalar`]. Result [`Vec2f`](Self::Vec2f).
+    fn vec2_add_scalar(v: Self::Vec2f, s: Self::Scalar) -> Self::Vec2f;
+
+    /// `s - v` — a `float` scalar (broadcast) MINUS a `float2`, scalar on the LEFT (`1.0 - abs(e.yx)`).
+    /// Eval is `[s-v0, s-v1]`; Emit records a [`crate::emit::Node::Vec2RSubScalar`] printing `<s> -
+    /// <v>` (the scalar-LHS form, DISTINCT from a `float2 - float` which has no committed use here).
+    /// Result [`Vec2f`](Self::Vec2f).
+    fn vec2_rsub_scalar(s: Self::Scalar, v: Self::Vec2f) -> Self::Vec2f;
+
+    /// `cond ? t : e` — the BARE scalar ternary, NO parentheses on the condition OR the arms (the
+    /// committed `oct_encode` sign-ternary `e.x >= 0.0 ? 1.0 : -1.0`). DISTINCT from
+    /// [`select`](Self::select) (which records the BOTH-arms-wrapped `SelectParen` form of the
+    /// regula-falsi root-finder) and [`FieldScalar::select`] (the condition-wrapped `(cond) ? t : e`):
+    /// `oct_encode` spells the un-parenthesized form (the comparand `e.x >= 0.0` + the literals
+    /// `1.0`/`-1.0` are all leaves, so no precedence wrap is needed). Eval is the eager `if cond { t }
+    /// else { e }` (both arms pure `±1.0` literals); Emit records a [`crate::emit::Node::SelectBare`]
+    /// printing all three parts un-wrapped.
+    fn select_bare(
+        cond: <Self::Scalar as FieldScalar>::Mask,
+        t: Self::Scalar,
+        e: Self::Scalar,
+    ) -> Self::Scalar;
 }
 
 /// The control-flow EVAL backend — REAL host `for`/`if`/`continue`, a unit ZST.
@@ -1637,5 +1753,103 @@ impl Cf for EvalCf {
     fn ret_vec2(cell: &core::cell::Cell<[f32; 2]>, value: [f32; 2]) -> Flow {
         cell.set(value);
         core::ops::ControlFlow::Break(LoopOp::Return)
+    }
+
+    // ---- Track B Increment G2: the `oct_encode` octahedral encoder (native host) ----
+    // The mutable `float3` param / `float2` local ARE their values, each held in a `Cell` for
+    // interior mutability (the same shape `Var`/`decl_param` use). Both are body-LOCAL (not fields on
+    // the marker), so `size_of::<EvalCf>() == 0` still holds.
+    type Vec3Var = core::cell::Cell<[f32; 3]>;
+    type Vec2Var = core::cell::Cell<[f32; 2]>;
+
+    #[inline]
+    fn decl_param_vec3(_name: &'static str, init: [f32; 3]) -> core::cell::Cell<[f32; 3]> {
+        // On Eval a suppressed-decl `float3` param is IDENTICAL to a `decl_var` — the "no decl
+        // recorded" distinction is an Emit-only printing concern (a `Cell` has no printed identity).
+        core::cell::Cell::new(init)
+    }
+
+    #[inline]
+    fn get_var_vec3(v: &core::cell::Cell<[f32; 3]>) -> [f32; 3] {
+        v.get()
+    }
+
+    #[inline]
+    fn set_var_vec3(v: &core::cell::Cell<[f32; 3]>, val: [f32; 3]) {
+        v.set(val);
+    }
+
+    #[inline]
+    fn decl_var_vec2(_name: &'static str, init: [f32; 2]) -> core::cell::Cell<[f32; 2]> {
+        core::cell::Cell::new(init)
+    }
+
+    #[inline]
+    fn get_var_vec2(v: &core::cell::Cell<[f32; 2]>) -> [f32; 2] {
+        v.get()
+    }
+
+    #[inline]
+    fn set_var_vec2(v: &core::cell::Cell<[f32; 2]>, val: [f32; 2]) {
+        v.set(val);
+    }
+
+    #[inline]
+    fn vec3_xy(v: [f32; 3]) -> [f32; 2] {
+        // `n.xy` — drop the `.z` lane.
+        [v[0], v[1]]
+    }
+
+    #[inline]
+    fn vec2_yx(v: [f32; 2]) -> [f32; 2] {
+        // `e.yx` — swap the two lanes.
+        [v[1], v[0]]
+    }
+
+    #[inline]
+    fn vec2_x(v: [f32; 2]) -> f32 {
+        v[0]
+    }
+
+    #[inline]
+    fn vec2_y(v: [f32; 2]) -> f32 {
+        v[1]
+    }
+
+    #[inline]
+    fn vec2_abs(v: [f32; 2]) -> [f32; 2] {
+        // `abs(e.yx)` — component-wise. The host `f32::abs` matches HLSL's per-lane `abs`.
+        [v[0].abs(), v[1].abs()]
+    }
+
+    #[inline]
+    fn vec2_mul(a: [f32; 2], b: [f32; 2]) -> [f32; 2] {
+        [a[0] * b[0], a[1] * b[1]]
+    }
+
+    #[inline]
+    fn vec2_mul_scalar(v: [f32; 2], s: f32) -> [f32; 2] {
+        // The HLSL `float2 * float` broadcasts `s` to a `float2` then multiplies component-wise.
+        [v[0] * s, v[1] * s]
+    }
+
+    #[inline]
+    fn vec2_add_scalar(v: [f32; 2], s: f32) -> [f32; 2] {
+        // The HLSL `float2 + float` broadcasts `s` to a `float2` then adds component-wise.
+        [v[0] + s, v[1] + s]
+    }
+
+    #[inline]
+    fn vec2_rsub_scalar(s: f32, v: [f32; 2]) -> [f32; 2] {
+        // `1.0 - abs(e.yx)` — the HLSL `float - float2` broadcasts the scalar LHS then subtracts.
+        [s - v[0], s - v[1]]
+    }
+
+    #[inline]
+    fn select_bare(cond: bool, t: f32, e: f32) -> f32 {
+        // Eager `if cond { t } else { e }` — both arms are pure `±1.0` literals, so the eager form is
+        // result-equivalent to the GPU ternary (which computes both arms and selects). The SAME shape
+        // `select` / `FieldScalar::select` use; the bare vs wrapped spelling is an Emit-only concern.
+        if cond { t } else { e }
     }
 }

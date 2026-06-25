@@ -122,6 +122,15 @@ enum Node {
     /// the brick-exit's un-wrapped `Select` printer is unperturbed; recorded ONLY by
     /// [`EmitCf::select`] (`Cf::select`), never [`FieldScalar::select`] (Increment 4a).
     SelectParen(u32, u32, u32),
+    /// `cond ? t : e` — the HLSL ternary with NO parentheses on ANY of the three parts (the committed
+    /// `oct_encode` sign-ternary `e.x >= 0.0 ? 1.0 : -1.0`, Track B Increment G2). DISTINCT from
+    /// [`Node::Select`] (which wraps the CONDITION — `(cond) ? t : e`) and [`Node::SelectParen`] (which
+    /// wraps the condition AND both arms): the committed `oct_encode` spells the bare form, so a
+    /// distinct node prints all three parts un-wrapped. Recorded ONLY by [`EmitCf::select_bare`]; the
+    /// arms (`1.0`/`-1.0`) + condition (`e.x >= 0.0`) are all inline leaves, so the bare spelling is the
+    /// exact committed text. Groups like the other ternaries in [`needs_paren_as_operand`] (it is the
+    /// `float2(<a>, <b>)` ctor arg, so the grouping is never exercised).
+    SelectBare(u32, u32, u32),
     /// `a > b` — a Mask node (printed inline inside a ternary condition).
     Gt(u32, u32),
     /// `a < b` — a Mask node (`OpFOrdLessThan`), printed inline like [`Node::Gt`]. The
@@ -442,6 +451,37 @@ enum Node {
     /// printer.
     Vec2FromScalars(u32, u32),
 
+    // ---- Track B Increment G2: the `oct_encode` `float2` component ops (`EmitTy::Float2`/`Float`) ----
+    /// A `float2`/`float3` → `float2` MULTI-LANE swizzle — `(src, mask)` where `mask` indexes
+    /// [`VEC2_SWIZZLES`] (`"xy"` for `n.xy`, `"yx"` for `e.yx`). The source may be a `Vec3f` (`n.xy`)
+    /// or a `Vec2f` (`e.yx`) — the swizzle text alone determines the result lanes. Printed INLINE
+    /// (`<src>.xy` / `<src>.yx`). Result type [`EmitTy::Float2`].
+    Vec2Swizzle(u32, u8),
+    /// A `float2` → `float` SINGLE-COMPONENT swizzle (`e.x` / `e.y`) — `(src, axis)` where `axis` 0/1 =
+    /// x/y. Printed INLINE (`<src>.x` / `<src>.y`). DISTINCT from [`Node::Vec3Swizzle`] only in being
+    /// recorded for a `float2` source (the spelling is the SAME `.x`/`.y`). Result type
+    /// [`EmitTy::Float`].
+    Vec2Comp(u32, u8),
+    /// `abs(v)` over a `float2` (`abs(e.yx)`) — component-wise. Result type [`EmitTy::Float2`]. The
+    /// `float2` analogue of the scalar [`Node::Abs`]; printed `abs(<v>)`.
+    Vec2Abs(u32),
+    /// `a * b` over two `float2` handles (`(1.0 - abs(e.yx)) * float2(...)`) — component-wise. Result
+    /// type [`EmitTy::Float2`]. The `float2` analogue of [`Node::Mul`]; both operands are the
+    /// MULTIPLICATIVE side (`*`/`/` bind tighter than `+`/`-`).
+    Vec2Mul(u32, u32),
+    /// `v * s` — a `float2` times a `float` scalar (`e * 0.5`). `(vec, scalar)`. Result type
+    /// [`EmitTy::Float2`]. The `float2` analogue of [`Node::Vec3MulScalar`].
+    Vec2MulScalar(u32, u32),
+    /// `v + s` — a `float2` plus a `float` scalar broadcast (`... + 0.5`). `(vec, scalar)`. Result type
+    /// [`EmitTy::Float2`]. ADDITIVE (wraps under a multiplicative parent) — the `float2` analogue of
+    /// [`Node::Add`].
+    Vec2AddScalar(u32, u32),
+    /// `s - v` — a `float` scalar (broadcast) MINUS a `float2`, scalar on the LEFT (`1.0 - abs(e.yx)`).
+    /// `(scalar, vec)`. Result type [`EmitTy::Float2`]. ADDITIVE (wraps under a multiplicative parent —
+    /// `(1.0 - abs(e.yx)) * float2(...)`). DISTINCT from a `float2 - float`: the operand ORDER is
+    /// scalar-then-vector, so the printer spells `<s> - <v>`.
+    Vec2RSubScalar(u32, u32),
+
     /// A CALL to a frozen hand-written shader function with N HETEROGENEOUS args — `m2_corner(atlas,
     /// atlas_smp, tile_org, cx, cy, cz, inv_atlas, band_half)` / `m2_jcgt_cubic_coeffs(s, lo_g, rd_v)`
     /// / `m2_marmitt_root(coeffs, 0.0, seg_hi - seg_lo)`. `sym_id` indexes [`Names::call_in`] (the
@@ -589,6 +629,13 @@ fn temp_name(seq: u32) -> Option<&'static str> {
     TEMP_NAMES.with(|t| t.borrow().get(seq as usize).copied().flatten())
 }
 
+/// The declared [`EmitTy`] of mutable local `id` (out-of-band, see [`VAR_TYPES`]). Defaults to
+/// [`EmitTy::Float`] when `id` is past the recorded set (the pre-G2 leaves declare only `float`/`bool`
+/// scalar vars and do not necessarily seed [`VAR_TYPES`], so the default preserves their behavior).
+fn var_type(id: u32) -> EmitTy {
+    VAR_TYPES.with(|t| t.borrow().get(id as usize).copied().unwrap_or(EmitTy::Float))
+}
+
 /// The HLSL [`EmitTy`] a node materializes as (O2). Every legacy field/normal node
 /// is [`EmitTy::Float`]; only the integer/bit nodes are [`EmitTy::Uint`]. The
 /// `UintToFloat` cast is the boundary — its RESULT is `float` (so consumers see a
@@ -622,6 +669,21 @@ fn type_of(node: Node) -> EmitTy {
         Node::Vec3FromScalars(_, _, _) => EmitTy::Float3,
         // Track B Increment G1: the `float2(x, y)` ctor of two `float` scalars is a `float2`.
         Node::Vec2FromScalars(_, _) => EmitTy::Float2,
+        // Track B Increment G2: the `float2` component ops are `float2` (the multi-lane swizzle, abs,
+        // mul, mul-scalar, add-scalar, scalar-minus-vec); the SINGLE-component `e.x`/`e.y` swizzle is a
+        // `float`. ALL above the `_ => Float` catch-all (O1 — each typed node has an explicit arm).
+        Node::Vec2Swizzle(_, _)
+        | Node::Vec2Abs(_)
+        | Node::Vec2Mul(_, _)
+        | Node::Vec2MulScalar(_, _)
+        | Node::Vec2AddScalar(_, _)
+        | Node::Vec2RSubScalar(_, _) => EmitTy::Float2,
+        Node::Vec2Comp(_, _) => EmitTy::Float,
+        // A mutable-local READ carries the var's DECLARED type out-of-band ([`var_type`], keyed by the
+        // `VARS` id) — `float3` for `oct_encode`'s `n`, `float2` for `e`, `float`/`bool` for every
+        // pre-G2 scalar var (the default). Above the `_ => Float` catch-all so the typed-var reads
+        // (`n.x` consumers' `Float3` `chk`) pass; pre-G2 scalar vars resolve `Float` either way.
+        Node::VarRef(id) => var_type(id),
         Node::CallN { ret, .. } => ret,
         // Increment 5c: a named-local-array ELEMENT carries the array's element type out-of-band
         // (`int` for `cell`/`step`, `float` for `t_next`/`t_delta`/`s`), keyed by the array id.
@@ -1092,6 +1154,13 @@ fn is_inline_leaf(node: Node) -> bool {
             | Node::Vec3DynIndex { .. }
             | Node::ResRef(_)
             | Node::ArrName(_)
+            // Track B Increment G2: the `float2` swizzles (`n.xy`, `e.yx`, `e.x`, `e.y`) spell
+            // `<src>.<mask>` inline at every use (like `Vec3Swizzle`), never a `tN` temp. The `float2`
+            // ARITHMETIC nodes (abs/mul/mul-scalar/add-scalar/scalar-sub) are NOT leaves — they are
+            // composed inline by `define_str` (the committed `oct_encode` temps NOTHING; every value is
+            // inline within the `n = ...;` / `e = ...;` / `return ...;` statements).
+            | Node::Vec2Swizzle(_, _)
+            | Node::Vec2Comp(_, _)
     )
 }
 
@@ -1194,6 +1263,11 @@ fn operand_str(
         // or a `rel` temp ref — so it never needs a wrap; pass `Left`).
         Node::Vec3Swizzle(v, axis) => format!("{}.{}", opl(v), AXIS[axis as usize]),
         Node::Uint3Swizzle(v, axis) => format!("{}.{}", opl(v), AXIS[axis as usize]),
+        // Track B Increment G2: the `float2` swizzles — a multi-lane `<src>.xy`/`<src>.yx` (the source
+        // is an inline leaf — a `VarRef` `n`/`e` — so it needs no wrap) and a single-component
+        // `<src>.x`/`<src>.y`. Both spell inline at each use, matching the committed `oct_encode`.
+        Node::Vec2Swizzle(v, mask) => format!("{}.{}", opl(v), VEC2_SWIZZLES[mask as usize]),
+        Node::Vec2Comp(v, axis) => format!("{}.{}", opl(v), AXIS[axis as usize]),
         // `grid[idx]` — the buffer name + the index (an inline leaf, the `idx` temp ref).
         Node::BufferLoad(buf, idx) => format!("{}[{}]", names.buf_in[buf as usize], opl(idx)),
         // The `>=` / `||` masks appear only inside a guard condition (inlined like `Gt`).
@@ -1279,6 +1353,10 @@ fn operand_str(
 /// The HLSL swizzle component letters, indexed by axis (0=x, 1=y, 2=z).
 const AXIS: [&str; 3] = ["x", "y", "z"];
 
+/// The `float2`-producing MULTI-LANE swizzle masks, indexed by a [`Node::Vec2Swizzle`] mask id
+/// (Track B Increment G2). `0 = "xy"` (the `n.xy` lane-keep), `1 = "yx"` (the `e.yx` lane-swap).
+const VEC2_SWIZZLES: [&str; 2] = ["xy", "yx"];
+
 /// True for a node whose inline spelling must be PARENTHESIZED in the parent `pos`.
 ///
 /// PRECEDENCE-AND-ASSOCIATIVITY-AWARE (Increment 3): the precedence comes from the
@@ -1302,6 +1380,10 @@ fn needs_paren_as_operand(node: Node, pos: OperandPos) -> bool {
         // A unary minus / a ternary always groups (side-independent). The Increment-5c `uint`
         // nested axis-select ([`Node::SelectParenU`]) groups like the other ternaries.
         Node::Neg(..) | Node::Select(..) | Node::SelectParen(..) | Node::SelectParenU(..) => true,
+        // Track B Increment G2: the BARE ternary groups ONLY when nested in an infix parent (an
+        // additive/multiplicative operand); at Root (the `float2(<a>, <b>)` ctor arg — the ONLY
+        // position `oct_encode` uses it) it stays UN-wrapped, matching the committed bare ctor args.
+        Node::SelectBare(..) => !matches!(pos, OperandPos::Root),
         // Additive infix nodes (scalar `+`/`-`/`uint +`, the `float3` `+`/`-`, AND the Increment-5c
         // signed-`int` `+` / `uint` `-`): wrap under a multiplicative OR CAST parent (precedence:
         // `(p - origin) / bw`, `(t1 - p[a]) * t3`, `(float)(c0 + 1)`, `W - 2u`'s consumers) or in
@@ -1314,7 +1396,13 @@ fn needs_paren_as_operand(node: Node, pos: OperandPos) -> bool {
         | Node::Vec3Add(..)
         | Node::Vec3Sub(..)
         | Node::SAdd(..)
-        | Node::USub(..) => matches!(pos, OperandPos::MulSide | OperandPos::AddRight),
+        | Node::USub(..)
+        // Track B Increment G2: the additive `float2` nodes — the `+ s` broadcast (`... + 0.5`) and
+        // the scalar-minus-vec (`1.0 - abs(e.yx)`) — wrap under a multiplicative parent (the
+        // `(1.0 - abs(e.yx)) * float2(...)` keystone) or in the additive-RIGHT position, like the
+        // scalar/`float3` additive nodes.
+        | Node::Vec2AddScalar(..)
+        | Node::Vec2RSubScalar(..) => matches!(pos, OperandPos::MulSide | OperandPos::AddRight),
         _ => false,
     }
 }
@@ -1437,6 +1525,15 @@ fn define_str(arena: &[Node], names: Names, temps: &[Option<String>], id: u32) -
             chk(t, EmitTy::Float);
             chk(e, EmitTy::Float);
             format!("({}) ? {} : {}", op(_c), op(t), op(e))
+        }
+        Node::SelectBare(_c, t, e) => {
+            // Track B Increment G2: the BARE ternary — NO parens on the condition OR the arms (the
+            // committed `oct_encode` sign-ternary `e.x >= 0.0 ? 1.0 : -1.0`). The condition is a Mask
+            // leaf (a `Ge` node, spelled `e.x >= 0.0` at Root), the arms are `Lit` leaves (`1.0`/`-1.0`,
+            // also Root). DISTINCT from `Select`'s `(cond) ? t : e` (which wraps the condition).
+            chk(t, EmitTy::Float);
+            chk(e, EmitTy::Float);
+            format!("{} ? {} : {}", op(_c), op(t), op(e))
         }
         Node::SelectParen(_c, t, e) => {
             // Increment 4a: wrap BOTH arms UNCONDITIONALLY — `(cond) ? (then) : (else)` —
@@ -1598,6 +1695,45 @@ fn define_str(arena: &[Node], names: Names, temps: &[Option<String>], id: u32) -
             chk(y, EmitTy::Float);
             format!("float2({}, {})", op(x), op(y))
         }
+        // ---- Track B Increment G2: the `oct_encode` `float2` arithmetic (non-leaf, composed) ----
+        // `abs(e.yx)` — component-wise `float2` abs. The operand is the `Vec2Swizzle` `e.yx` (a leaf),
+        // spelled at Root (an `abs(...)` intrinsic arg, position-irrelevant).
+        Node::Vec2Abs(a) => {
+            chk(a, EmitTy::Float2);
+            format!("abs({})", op(a))
+        }
+        // `a * b` over two `float2`s (`(1.0 - abs(e.yx)) * float2(...)`). Both operands are the
+        // multiplicative side: the LEFT (`Vec2RSubScalar`, an additive node) WRAPS via
+        // `needs_paren_as_operand`'s MulSide arm → `(1.0 - abs(e.yx))`; the RIGHT (`Vec2FromScalars`,
+        // a ctor) needs no wrap.
+        Node::Vec2Mul(a, b) => {
+            chk(a, EmitTy::Float2);
+            chk(b, EmitTy::Float2);
+            format!("{} * {}", opm(a), opm(b))
+        }
+        // `v * s` — `float2 * float` (`e * 0.5`). The vector is the multiplicative side, the scalar a
+        // `float`. (`e` is a `VarRef` leaf, `0.5` a `Lit` leaf — neither wraps.)
+        Node::Vec2MulScalar(v, s) => {
+            chk(v, EmitTy::Float2);
+            chk(s, EmitTy::Float);
+            format!("{} * {}", opm(v), opm(s))
+        }
+        // `v + s` — `float2 + float` broadcast (`(e * 0.5) + 0.5`). The vector is the additive-LEFT
+        // operand (`e * 0.5`, a `Vec2MulScalar` — multiplicative, no wrap), the scalar the additive
+        // RIGHT (`0.5`, a `Lit` leaf). Spells flat `e * 0.5 + 0.5`, byte-identical to the committed.
+        Node::Vec2AddScalar(v, s) => {
+            chk(v, EmitTy::Float2);
+            chk(s, EmitTy::Float);
+            format!("{} + {}", opl(v), opr(s))
+        }
+        // `s - v` — `float - float2`, scalar on the LEFT (`1.0 - abs(e.yx)`). The scalar is the
+        // additive-LEFT (`1.0`, a `Lit` leaf), the `float2` the additive-RIGHT (`abs(e.yx)`, a
+        // `Vec2Abs` — a function-call form, no wrap). Spells `1.0 - abs(e.yx)`.
+        Node::Vec2RSubScalar(s, v) => {
+            chk(s, EmitTy::Float);
+            chk(v, EmitTy::Float2);
+            format!("{} - {}", opl(s), opr(v))
+        }
         // A variadic heterogeneous call `sym(op(a0), op(a1), ...)` — `m2_corner(atlas, atlas_smp,
         // tile_org, cx, cy, cz, inv_atlas, band_half)` / `m2_jcgt_cubic_coeffs(s, lo_g, rd_v)` /
         // `m2_marmitt_root(coeffs, 0.0, seg_hi - seg_lo)`. The args slice the `CALL_ARGS` side-table;
@@ -1648,7 +1784,11 @@ fn define_str(arena: &[Node], names: Names, temps: &[Option<String>], id: u32) -
         | Node::FloatFromUint(_)
         | Node::Vec3DynIndex { .. }
         | Node::ResRef(_)
-        | Node::ArrName(_) => {
+        | Node::ArrName(_)
+        // The Track B Increment G2 `float2` swizzles (`n.xy`/`e.yx`/`e.x`/`e.y`) are inline leaves
+        // (spelled by `operand_str`), never materialized as a temp.
+        | Node::Vec2Swizzle(_, _)
+        | Node::Vec2Comp(_, _) => {
             unreachable!("inline leaves are spelled by operand_str, not defined")
         }
     }
@@ -2307,6 +2447,16 @@ thread_local! {
     /// The per-emit mutable-local names (`exit`), indexed by [`Var`] / [`Node::VarRef`].
     static VARS: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
 
+    /// OUT-OF-BAND mutable-local result TYPES (Track B Increment G2) — a [`Var`]'s declared
+    /// [`EmitTy`], keyed by the var's [`VARS`] index (the index IS the [`Var`] id, pushed in
+    /// declaration order). [`type_of`]`(`[`Node::VarRef`]`(id))` reads it so a `float3`/`float2`
+    /// mutable local (`oct_encode`'s `n`/`e`) types its READS correctly (the consuming `vec3_div_scalar`
+    /// / `vec2_*` ops `chk` a `Float3`/`Float2` operand). Kept off the frozen [`Node::VarRef`]`(u32)`
+    /// node (the same out-of-band rationale [`TEMP_TYPES`] uses). Every PRE-G2 var is a `float`/`bool`
+    /// scalar, so this table is byte-neutral for them — a `VarRef` past the recorded set (or a leaf that
+    /// never seeded it) defaults to [`EmitTy::Float`], the prior behavior.
+    static VAR_TYPES: RefCell<Vec<EmitTy>> = const { RefCell::new(Vec::new()) };
+
     /// The per-emit named-literal symbols (`BRICK_EXIT_EPS`), indexed by
     /// [`Node::NamedLit`]'s `sym_id`. Deduped so repeated `named_lit("BRICK_EXIT_EPS", _)`
     /// calls share one id.
@@ -2348,22 +2498,35 @@ fn record_stmt(stmt: Stmt) {
     });
 }
 
-/// Records a mutable-local DECLARATION of an arbitrary [`EmitTy`]: seeds the `name` in the
-/// [`VARS`] table (so [`Node::VarRef`] later spells `name`) and records the `Stmt::DeclVar`
-/// with the given `ty` + `rhs`. Shared by [`EmitCf::decl_var`] (`EmitTy::Float`) and
-/// [`EmitCf::decl_bool_var`] (`EmitTy::Bool`); a future `decl_uint_var`/`decl_int_var` is a
-/// trivial mirror (pass its own `ty`). Threading the `ty` (vs the old hardcoded
-/// `EmitTy::Float`) is the Increment-4d generalization — the `float` path is byte-unchanged
-/// (it still passes `EmitTy::Float`).
-fn record_decl_var(name: &'static str, ty: EmitTy, rhs: u32) -> Var {
-    let var = VARS.with(|v| {
+/// Seeds a mutable local: pushes `name` into [`VARS`] and `ty` into [`VAR_TYPES`] IN LOCKSTEP (the
+/// shared index is the [`Var`] id), returning the handle. The single chokepoint that keeps the two
+/// tables aligned, so [`var_type`]`(`[`Node::VarRef`]`(id))` reads the var's declared type. Used by
+/// both the DECLARED-local path ([`record_decl_var`]) and the SUPPRESSED-DECL param paths
+/// ([`EmitCf::decl_param`] / [`EmitCf::decl_param_vec3`]) — the latter records NO `Stmt::DeclVar` but
+/// must still register the var's name+type.
+fn push_var(name: &'static str, ty: EmitTy) -> Var {
+    VARS.with(|v| {
         let mut v = v.borrow_mut();
         let id = v.len() as u32;
-        // The HLSL local's name (threaded from the body — `exit` in Increment 1; Inc 3+4d
-        // declare more than one, each with its own name).
         v.push(name);
+        VAR_TYPES.with(|t| {
+            let mut t = t.borrow_mut();
+            debug_assert_eq!(t.len() as u32, id, "VAR_TYPES must stay var-id-indexed (== VARS len)");
+            t.push(ty);
+        });
         Var(id)
-    });
+    })
+}
+
+/// Records a mutable-local DECLARATION of an arbitrary [`EmitTy`]: seeds the `name`+`ty` in the
+/// [`VARS`]/[`VAR_TYPES`] tables (so [`Node::VarRef`] later spells `name` and types as `ty`) and
+/// records the `Stmt::DeclVar` with the given `ty` + `rhs`. Shared by [`EmitCf::decl_var`]
+/// (`EmitTy::Float`), [`EmitCf::decl_bool_var`] (`EmitTy::Bool`), and [`EmitCf::decl_var_vec2`]
+/// (`EmitTy::Float2`); a future `decl_uint_var`/`decl_int_var` is a trivial mirror (pass its own
+/// `ty`). Threading the `ty` (vs the old hardcoded `EmitTy::Float`) is the Increment-4d generalization
+/// — the `float` path is byte-unchanged (it still passes `EmitTy::Float`).
+fn record_decl_var(name: &'static str, ty: EmitTy, rhs: u32) -> Var {
+    let var = push_var(name, ty);
     record_stmt(Stmt::DeclVar { var, ty, rhs });
     var
 }
@@ -2748,16 +2911,11 @@ impl Cf for EmitCf {
     type Vec4f = Emit;
 
     fn decl_param(name: &'static str, _init: Emit) -> Var {
-        // SUPPRESSED-DECL: seed a `VARS` name entry (so get_var/set_var spell `hi`, `hi =
-        // ...;`) but record NO `Stmt::DeclVar` — `lo`/`hi`/`f_lo`/`f_hi` are HLSL SIGNATURE
-        // parameters, so a `float hi = ...;` redecl would diverge the committed text. `_init`
-        // (the param's symbolic seed) is unused: a parameter is already bound by name.
-        VARS.with(|v| {
-            let mut v = v.borrow_mut();
-            let id = v.len() as u32;
-            v.push(name);
-            Var(id)
-        })
+        // SUPPRESSED-DECL: seed a `VARS`/`VAR_TYPES` name+type entry (so get_var/set_var spell `hi`, `hi
+        // = ...;` and type the read `float`) but record NO `Stmt::DeclVar` — `lo`/`hi`/`f_lo`/`f_hi` are
+        // HLSL SIGNATURE parameters, so a `float hi = ...;` redecl would diverge the committed text.
+        // `_init` (the param's symbolic seed) is unused: a parameter is already bound by name.
+        push_var(name, EmitTy::Float)
     }
 
     fn temp_float(name: &'static str, x: Emit) -> Emit {
@@ -3293,6 +3451,102 @@ impl Cf for EmitCf {
         record_stmt(Stmt::Return(value.0));
         Flow::Continue(())
     }
+
+    // ---- Track B Increment G2: the `oct_encode` octahedral encoder (recorder) ----
+    // On Emit a mutable `float3`/`float2` local is a NAMED `Var` handle (the SAME shape `Var` uses);
+    // the `float2` value is an `Emit` SSA-node handle.
+    type Vec3Var = Var;
+    type Vec2Var = Var;
+
+    fn decl_param_vec3(name: &'static str, _init: Emit) -> Var {
+        // SUPPRESSED-DECL: seed a `VARS`/`VAR_TYPES` name+type entry (so get/set_var_vec3 spell `n`, `n
+        // = ...;` and type the read `Float3` — the `n.x`/`n.xy` consumers `chk` a `Float3` operand) but
+        // record NO `Stmt::DeclVar` — `n` is the HLSL signature parameter, so a `float3 n = ...;` redecl
+        // would diverge the committed text. `_init` (the `Vec3Param` seed) is unused: a parameter is
+        // already bound by name. Mirrors the scalar `decl_param`'s suppressed-decl path.
+        push_var(name, EmitTy::Float3)
+    }
+
+    fn get_var_vec3(v: &Var) -> Emit {
+        // Read the running `float3` value: a `VarRef` node printing the variable's name (`n`).
+        Emit(push(Node::VarRef(v.0)))
+    }
+
+    fn set_var_vec3(v: &Var, val: Emit) {
+        // A BARE `n = <rhs>;` (NO decl — `n` is the suppressed-decl param). The SAME `Stmt::Assign`
+        // the scalar `set_var` records; the rhs is a `float3` expression node.
+        record_stmt(Stmt::Assign {
+            var: *v,
+            rhs: val.0,
+        });
+    }
+
+    fn decl_var_vec2(name: &'static str, init: Emit) -> Var {
+        // A `float2 e = <init>;` decl — `record_decl_var` with `EmitTy::Float2` (so the printer spells
+        // the `float2` token via `ty_keyword`). The `float2` analogue of `decl_var` (a `float` local).
+        record_decl_var(name, EmitTy::Float2, init.0)
+    }
+
+    fn get_var_vec2(v: &Var) -> Emit {
+        // Read the running `float2` value: a `VarRef` node printing the variable's name (`e`).
+        Emit(push(Node::VarRef(v.0)))
+    }
+
+    fn set_var_vec2(v: &Var, val: Emit) {
+        // `e = <rhs>;` — a `Stmt::Assign` whose rhs is a `float2` expression node.
+        record_stmt(Stmt::Assign {
+            var: *v,
+            rhs: val.0,
+        });
+    }
+
+    fn vec3_xy(v: Emit) -> Emit {
+        // `n.xy` — a `Vec2Swizzle` with mask 0 (`"xy"`), typed `Float2`.
+        Emit(push(Node::Vec2Swizzle(v.0, 0)))
+    }
+
+    fn vec2_yx(v: Emit) -> Emit {
+        // `e.yx` — a `Vec2Swizzle` with mask 1 (`"yx"`), typed `Float2`.
+        Emit(push(Node::Vec2Swizzle(v.0, 1)))
+    }
+
+    fn vec2_x(v: Emit) -> Emit {
+        // `e.x` — a `Vec2Comp` with axis 0, typed `Float`.
+        Emit(push(Node::Vec2Comp(v.0, 0)))
+    }
+
+    fn vec2_y(v: Emit) -> Emit {
+        // `e.y` — a `Vec2Comp` with axis 1, typed `Float`.
+        Emit(push(Node::Vec2Comp(v.0, 1)))
+    }
+
+    fn vec2_abs(v: Emit) -> Emit {
+        Emit(push(Node::Vec2Abs(v.0)))
+    }
+
+    fn vec2_mul(a: Emit, b: Emit) -> Emit {
+        Emit(push(Node::Vec2Mul(a.0, b.0)))
+    }
+
+    fn vec2_mul_scalar(v: Emit, s: Emit) -> Emit {
+        Emit(push(Node::Vec2MulScalar(v.0, s.0)))
+    }
+
+    fn vec2_add_scalar(v: Emit, s: Emit) -> Emit {
+        Emit(push(Node::Vec2AddScalar(v.0, s.0)))
+    }
+
+    fn vec2_rsub_scalar(s: Emit, v: Emit) -> Emit {
+        // `1.0 - abs(e.yx)` — the scalar-LHS subtract (`(scalar, vec)` operand order).
+        Emit(push(Node::Vec2RSubScalar(s.0, v.0)))
+    }
+
+    fn select_bare(cond: EmitMask, t: Emit, e: Emit) -> Emit {
+        // A `SelectBare` node — the printer wraps NOTHING (the committed `oct_encode` sign-ternary
+        // `e.x >= 0.0 ? 1.0 : -1.0`). DISTINCT from `select`'s `SelectParen` (both arms wrapped) and
+        // `FieldScalar::select`'s `Select` (condition wrapped).
+        Emit(push(Node::SelectBare(cond.0, t.0, e.0)))
+    }
 }
 
 // ---- The STMT printer + the brick-exit generator -------------------------------
@@ -3450,6 +3704,7 @@ pub fn emit_hlsl_dist_to_brick_exit() -> String {
     ARENA.with(|a| a.borrow_mut().clear());
     STMTS.with(|s| s.borrow_mut().clear());
     VARS.with(|v| v.borrow_mut().clear());
+    VAR_TYPES.with(|t| t.borrow_mut().clear());
     NAMED_LITS.with(|n| n.borrow_mut().clear());
     TEMP_SEQ.with(|c| *c.borrow_mut() = 0);
     TEMP_TYPES.with(|t| t.borrow_mut().clear());
@@ -3536,6 +3791,7 @@ pub fn emit_hlsl_brick_cell_class() -> String {
     ARENA.with(|a| a.borrow_mut().clear());
     STMTS.with(|s| s.borrow_mut().clear());
     VARS.with(|v| v.borrow_mut().clear());
+    VAR_TYPES.with(|t| t.borrow_mut().clear());
     NAMED_LITS.with(|n| n.borrow_mut().clear());
     TEMP_SEQ.with(|c| *c.borrow_mut() = 0);
     TEMP_TYPES.with(|t| t.borrow_mut().clear());
@@ -3635,6 +3891,7 @@ pub fn emit_hlsl_m2_regula_falsi() -> String {
     ARENA.with(|a| a.borrow_mut().clear());
     STMTS.with(|s| s.borrow_mut().clear());
     VARS.with(|v| v.borrow_mut().clear());
+    VAR_TYPES.with(|t| t.borrow_mut().clear());
     NAMED_LITS.with(|n| n.borrow_mut().clear());
     CALLS.with(|c| c.borrow_mut().clear());
     TEMP_SEQ.with(|c| *c.borrow_mut() = 0);
@@ -3737,6 +3994,7 @@ pub fn emit_hlsl_sdf_soft_shadow() -> String {
     ARENA.with(|a| a.borrow_mut().clear());
     STMTS.with(|s| s.borrow_mut().clear());
     VARS.with(|v| v.borrow_mut().clear());
+    VAR_TYPES.with(|t| t.borrow_mut().clear());
     NAMED_LITS.with(|n| n.borrow_mut().clear());
     CALLS.with(|c| c.borrow_mut().clear());
     TEMP_SEQ.with(|c| *c.borrow_mut() = 0);
@@ -3830,6 +4088,7 @@ pub fn emit_hlsl_m2_surface_hit_refine() -> String {
     ARENA.with(|a| a.borrow_mut().clear());
     STMTS.with(|s| s.borrow_mut().clear());
     VARS.with(|v| v.borrow_mut().clear());
+    VAR_TYPES.with(|t| t.borrow_mut().clear());
     NAMED_LITS.with(|n| n.borrow_mut().clear());
     CALLS.with(|c| c.borrow_mut().clear());
     TEMP_SEQ.with(|c| *c.borrow_mut() = 0);
@@ -3937,6 +4196,7 @@ pub fn emit_hlsl_b1_accept_refine() -> String {
     ARENA.with(|a| a.borrow_mut().clear());
     STMTS.with(|s| s.borrow_mut().clear());
     VARS.with(|v| v.borrow_mut().clear());
+    VAR_TYPES.with(|t| t.borrow_mut().clear());
     NAMED_LITS.with(|n| n.borrow_mut().clear());
     CALLS.with(|c| c.borrow_mut().clear());
     TEMP_SEQ.with(|c| *c.borrow_mut() = 0);
@@ -4034,6 +4294,7 @@ pub fn emit_hlsl_b1_exhaustion_remarch() -> String {
     ARENA.with(|a| a.borrow_mut().clear());
     STMTS.with(|s| s.borrow_mut().clear());
     VARS.with(|v| v.borrow_mut().clear());
+    VAR_TYPES.with(|t| t.borrow_mut().clear());
     NAMED_LITS.with(|n| n.borrow_mut().clear());
     CALLS.with(|c| c.borrow_mut().clear());
     TEMP_SEQ.with(|c| *c.borrow_mut() = 0);
@@ -4140,6 +4401,7 @@ pub fn emit_hlsl_b1_sor_retreat() -> String {
     ARENA.with(|a| a.borrow_mut().clear());
     STMTS.with(|s| s.borrow_mut().clear());
     VARS.with(|v| v.borrow_mut().clear());
+    VAR_TYPES.with(|t| t.borrow_mut().clear());
     NAMED_LITS.with(|n| n.borrow_mut().clear());
     CALLS.with(|c| c.borrow_mut().clear());
     TEMP_SEQ.with(|c| *c.borrow_mut() = 0);
@@ -4236,6 +4498,7 @@ fn emit_hlsl_b1_decl<F: FnOnce()>(body: F) -> String {
     ARENA.with(|a| a.borrow_mut().clear());
     STMTS.with(|s| s.borrow_mut().clear());
     VARS.with(|v| v.borrow_mut().clear());
+    VAR_TYPES.with(|t| t.borrow_mut().clear());
     NAMED_LITS.with(|n| n.borrow_mut().clear());
     CALLS.with(|c| c.borrow_mut().clear());
     TEMP_SEQ.with(|c| *c.borrow_mut() = 0);
@@ -4343,6 +4606,7 @@ pub fn emit_hlsl_select_level() -> String {
     ARENA.with(|a| a.borrow_mut().clear());
     STMTS.with(|s| s.borrow_mut().clear());
     VARS.with(|v| v.borrow_mut().clear());
+    VAR_TYPES.with(|t| t.borrow_mut().clear());
     NAMED_LITS.with(|n| n.borrow_mut().clear());
     CALLS.with(|c| c.borrow_mut().clear());
     PC_FIELDS.with(|p| p.borrow_mut().clear());
@@ -4440,6 +4704,7 @@ pub fn emit_hlsl_pack_material_id_ba() -> String {
     ARENA.with(|a| a.borrow_mut().clear());
     STMTS.with(|s| s.borrow_mut().clear());
     VARS.with(|v| v.borrow_mut().clear());
+    VAR_TYPES.with(|t| t.borrow_mut().clear());
     NAMED_LITS.with(|n| n.borrow_mut().clear());
     TEMP_SEQ.with(|c| *c.borrow_mut() = 0);
     TEMP_TYPES.with(|t| t.borrow_mut().clear());
@@ -4493,6 +4758,89 @@ pub fn emit_hlsl_pack_material_id_ba() -> String {
     })
 }
 
+/// Generates the HLSL `oct_encode` BODY span — the octahedral-normal encoder's `n /= ...` normalize,
+/// `float2 e = n.xy;`, the `if (n.z < 0.0)` lower-hemisphere fold, and the fused `return e * 0.5 +
+/// 0.5;` — by tracing the generic [`crate::oct::oct_encode_body`] over the `EmitCf` backend (whose
+/// `Cf::Scalar = Emit` supplies the SSA-node arithmetic), and returns ONLY the BODY span (between the
+/// hand-written `float2 oct_encode(float3 n) {` signature and the closing `}`).
+///
+/// Framing (b): the signature + closing brace stay hand-written; the body (L508-513) is spliced
+/// between the `// === GENERATED oct_encode BEGIN/END ===` sentinels INSIDE `oct_encode`. The new
+/// facets: the mutable `float3` suppressed-decl param `n` ([`EmitCf::decl_param_vec3`] — `n = n /
+/// ...;`, the R1 whole-variable form), the mutable `float2` local `e` ([`EmitCf::decl_var_vec2`] —
+/// `float2 e = n.xy;`), the REAL fall-through `if_` (the `n.z < 0.0` branch), and the `float2`
+/// component ops (the `.xy`/`.yx`/`.x`/`.y` swizzles, `abs`, `*`, `* s`, `+ s`, `s - v`). The span
+/// prints at DEPTH 1 (4-space indent), matching the committed L508-513.
+///
+/// The cmp-`.spv` (in `boyko_rhi_vulkan`) is the byte-identity oracle; the `oct_encode` text-sync test
+/// pins the committed shader span to this output.
+pub fn emit_hlsl_oct_encode() -> String {
+    use crate::oct;
+
+    // Fresh recorder state.
+    ARENA.with(|a| a.borrow_mut().clear());
+    STMTS.with(|s| s.borrow_mut().clear());
+    VARS.with(|v| v.borrow_mut().clear());
+    VAR_TYPES.with(|t| t.borrow_mut().clear());
+    NAMED_LITS.with(|n| n.borrow_mut().clear());
+    TEMP_SEQ.with(|c| *c.borrow_mut() = 0);
+    TEMP_TYPES.with(|t| t.borrow_mut().clear());
+    TEMP_NAMES.with(|t| t.borrow_mut().clear());
+
+    // Seed the function body block (the bottom of the STMTS stack).
+    STMTS.with(|s| s.borrow_mut().push(Block { stmts: Vec::new() }));
+
+    // Seed the span's single input:
+    //   n → Vec3Param(0) (vec_in[0] = "n") — the unit normal (the only generated-span input). It is the
+    // SUPPRESSED-DECL mutable param: `decl_param_vec3("n", n)` seeds the `VARS` entry the body's
+    // get/set_var_vec3 resolve (the `Vec3Param` seed itself is unused on Emit — a parameter is bound by
+    // name). The `e` local is declared INSIDE the body (a second `VARS` entry).
+    let n = Emit(push(Node::Vec3Param(0)));
+    let ret_out = RetCellV2;
+
+    let _ = oct::oct_encode_body::<EmitCf>(n, &ret_out);
+
+    // Pop the function body block and print it.
+    let body_block = STMTS.with(|s| {
+        s.borrow_mut()
+            .pop()
+            .expect("invariant: the function body block was pushed above")
+    });
+
+    // `n` is the only `float3` input; there are no float/uint scalar inputs. The `vars` table holds
+    // `n` (the suppressed-decl param) + `e` (the `float2` local), pushed in program order.
+    let float_in: [&str; 0] = [];
+    let vars = VARS.with(|v| v.borrow().clone());
+    let names = Names {
+        float_in: &float_in,
+        uint_in: NO_UINT_INPUTS,
+        vec_in: &["n"],
+        uint3_in: NO_UINT3_INPUTS,
+        buf_in: NO_BUF_INPUTS,
+        out_in: NO_OUT_INPUTS,
+        named_lit: NO_NAMED_LITS,
+        vars: &vars,
+        vec4_in: NO_VEC4_INPUTS,
+        call_in: NO_CALL_INPUTS,
+        pc_in: NO_PC_INPUTS,
+        level_field: NO_LEVEL_FIELDS,
+        array: NO_ARRAY,
+        res_in: NO_RES_INPUTS,
+    };
+
+    ARENA.with(|a| {
+        let arena = a.borrow();
+        let mut span = String::new();
+        // The whole span is a bare `Stmt::Assign` (`n = n / (...)`), a `Stmt::DeclVar` (`float2 e =
+        // n.xy;`), a `Stmt::If` whose then-block is the single `e = ...;` fold assign, and the tail
+        // `Stmt::Return(e * 0.5 + 0.5)` — a flat in-order walk at DEPTH 1 (4-space indent), matching the
+        // committed L508-513. NO function-signature wrap (the span is spliced inside the hand-written
+        // `oct_encode`).
+        print_block(&body_block, &arena, names, 1, &mut span);
+        span
+    })
+}
+
 /// Generates the HLSL `m2_brick_span` body — the brick-AABB ray-span clip (the standard slab
 /// method) with the `[unroll]` axis loop, the parallel-slab early `return false`, the near/far
 /// swap, and the COMPUTED-bool tail `return tmax > tmin;` — by tracing the generic
@@ -4521,6 +4869,7 @@ pub fn emit_hlsl_m2_brick_span() -> String {
     ARENA.with(|a| a.borrow_mut().clear());
     STMTS.with(|s| s.borrow_mut().clear());
     VARS.with(|v| v.borrow_mut().clear());
+    VAR_TYPES.with(|t| t.borrow_mut().clear());
     NAMED_LITS.with(|n| n.borrow_mut().clear());
     TEMP_SEQ.with(|c| *c.borrow_mut() = 0);
     TEMP_TYPES.with(|t| t.borrow_mut().clear());
@@ -4624,6 +4973,7 @@ pub fn emit_hlsl_m2_brick_cubic_hit() -> String {
     ARENA.with(|a| a.borrow_mut().clear());
     STMTS.with(|s| s.borrow_mut().clear());
     VARS.with(|v| v.borrow_mut().clear());
+    VAR_TYPES.with(|t| t.borrow_mut().clear());
     NAMED_LITS.with(|n| n.borrow_mut().clear());
     CALLS.with(|c| c.borrow_mut().clear());
     PC_FIELDS.with(|p| p.borrow_mut().clear());

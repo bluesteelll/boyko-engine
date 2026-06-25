@@ -47,6 +47,7 @@ pub mod decl;
 pub mod field;
 pub mod levels;
 pub mod normal;
+pub mod oct;
 pub mod pack;
 pub mod refine;
 pub mod remarch;

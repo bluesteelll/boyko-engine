@@ -229,4 +229,21 @@ fn main() {
     // (4-space indent).
     println!();
     print!("{}", boyko_shaderdsl::emit::emit_hlsl_pack_material_id_ba());
+    // The G-buffer OCTAHEDRAL-NORMAL ENCODER leaf (Track B Increment G2 — the LAST G-buffer leaf,
+    // landing the mutable `float3`/`float2` locals + the `float2` component ops): the unit normal `n`
+    // → octahedral `[0,1]^2` fold (`n /= ...`, `float2 e = n.xy;`, the `if (n.z < 0.0)` lower-
+    // hemisphere fold with the two sign-ternaries, the fused `return e * 0.5 + 0.5;`). The new facets:
+    // the mutable `float3` SUPPRESSED-DECL param `n` (`Cf::decl_param_vec3` — the `n = n / ...;` R1
+    // whole-variable form), the mutable `float2` local `e` (`Cf::decl_var_vec2`), the REAL fall-through
+    // `if_` (the `n.z < 0.0` branch — an OpBranchConditional+merge, NOT a branchless select), and the
+    // `float2` component ops (`Cf::vec3_xy`/`vec2_yx`/`vec2_x`/`vec2_y` swizzles + `vec2_abs`/`vec2_mul`/
+    // `vec2_mul_scalar`/`vec2_add_scalar`/`vec2_rsub_scalar`). Generated from
+    // `boyko_shaderdsl::oct::oct_encode_body` over the `Emit` + `EmitCf` backends. Spliced between the
+    // `// === GENERATED oct_encode BEGIN/END ===` sentinels INSIDE `oct_encode` (the BODY only — the
+    // hand-written `float2 oct_encode(float3 n) {` signature + the closing `}` stay un-generated,
+    // framing b). The committed `n /= (...)` is re-spliced to the eDSL spelling `n = n / (...)` (the
+    // `/=` → `= /` whole-variable form is DXC byte-neutral, proven by the R1 spike). The span prints at
+    // DEPTH 1 (4-space indent).
+    println!();
+    print!("{}", boyko_shaderdsl::emit::emit_hlsl_oct_encode());
 }

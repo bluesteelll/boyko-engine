@@ -505,12 +505,14 @@ float sdf_ao(float3 p, float3 n) {
 // stored here in the RG channels of the RGBA8 gNormal target (MVP-2 keeps the existing
 // RGBA8 G-buffer; the BA channels carry the material id). Plain ops; off the frozen field.
 float2 oct_encode(float3 n) {
-    n /= (abs(n.x) + abs(n.y) + abs(n.z));
+    // === GENERATED oct_encode BEGIN === (boyko_shaderdsl::oct::oct_encode_body)
+    n = n / (abs(n.x) + abs(n.y) + abs(n.z));
     float2 e = n.xy;
     if (n.z < 0.0) {
         e = (1.0 - abs(e.yx)) * float2(e.x >= 0.0 ? 1.0 : -1.0, e.y >= 0.0 ? 1.0 : -1.0);
     }
-    return e * 0.5 + 0.5; // [-1,1] -> [0,1] for the UNORM store
+    return e * 0.5 + 0.5;
+    // === GENERATED oct_encode END ===
 }
 
 // Pack a 16-bit material id into the B + A channels of an RGBA8 texel: low byte -> B,

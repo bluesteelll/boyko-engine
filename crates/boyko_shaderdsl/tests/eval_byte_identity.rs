@@ -2269,3 +2269,113 @@ fn pack_material_id_ba_matches_host_directed_and_sweep() {
         assert_pack_bits(r, h, &format!("pack-sweep-id-{id:#x}"));
     }
 }
+
+// ======================================================================
+// Track B Increment G2 — the `oct_encode` octahedral-normal encoder Eval oracle (FULL coverage —
+// pure arithmetic + a single data-dependent branch).
+//
+// `oct_encode` has no field call and only ONE branch (`n.z < 0.0`), so the Eval body has FULL
+// coverage: a host mirror transcribing the committed L508-513 VERBATIM is the EXACT reference. The
+// return is a `float2`, compared to-BITS per lane (the host op order matches the eDSL body's, so the
+// two lanes are bit-exact). Swept over BOTH hemispheres (`n.z < 0` and `n.z >= 0`, exercising the `if`
+// both ways), all four sign quadrants (±x/±y, exercising both sign-ternaries), the six axis-aligned
+// normals (±x/±y/±z), + an LCG sweep of normalized vectors.
+// ======================================================================
+
+/// Verbatim hand-mirror of the committed `oct_encode` body (the L508-513 statements). The independent
+/// reference the eDSL `oct_encode_body::<EvalCf>` is locked against (EXACT to-bits eq per lane). The op
+/// order matches the committed source statement-for-statement.
+fn host_oct_encode(n: [f32; 3]) -> [f32; 2] {
+    // n /= (abs(n.x) + abs(n.y) + abs(n.z));
+    let s = n[0].abs() + n[1].abs() + n[2].abs();
+    let n = [n[0] / s, n[1] / s, n[2] / s];
+    // float2 e = n.xy;
+    let mut e = [n[0], n[1]];
+    // if (n.z < 0.0) { e = (1.0 - abs(e.yx)) * float2(e.x >= 0.0 ? 1.0 : -1.0, e.y >= 0.0 ? 1.0 : -1.0); }
+    if n[2] < 0.0 {
+        let yx = [e[1].abs(), e[0].abs()];
+        let mirror = [1.0 - yx[0], 1.0 - yx[1]];
+        let sign = [
+            if e[0] >= 0.0 { 1.0 } else { -1.0 },
+            if e[1] >= 0.0 { 1.0 } else { -1.0 },
+        ];
+        e = [mirror[0] * sign[0], mirror[1] * sign[1]];
+    }
+    // return e * 0.5 + 0.5;
+    [e[0] * 0.5 + 0.5, e[1] * 0.5 + 0.5]
+}
+
+/// The eDSL `oct_encode_body::<EvalCf>` reading the `float2` the ret-cell holds after the body runs.
+fn refactored_oct_encode(n: [f32; 3]) -> [f32; 2] {
+    use std::cell::Cell;
+    let ret_out = Cell::new([0.0f32; 2]);
+    let _ = boyko_shaderdsl::oct::oct_encode_body::<EvalCf>(n, &ret_out);
+    ret_out.get()
+}
+
+fn assert_oct_bits(r: [f32; 2], h: [f32; 2], ctx: &str) {
+    assert_bits(r[0], h[0], &format!("{ctx}-x"));
+    assert_bits(r[1], h[1], &format!("{ctx}-y"));
+}
+
+/// Normalize a non-zero vector (the encoder assumes a unit normal, but the eDSL/host parity holds for
+/// ANY non-degenerate input — both run the SAME ops). Returns `None` for a near-zero vector (the L1
+/// divide would be non-finite, which is outside the unit-normal contract).
+fn normalize(v: [f32; 3]) -> Option<[f32; 3]> {
+    let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    if len < 1.0e-6 {
+        return None;
+    }
+    Some([v[0] / len, v[1] / len, v[2] / len])
+}
+
+#[test]
+fn oct_encode_matches_host_directed_and_sweep() {
+    // The six AXIS-ALIGNED unit normals (±x/±y/±z) — `+z`/`-z` exercise the `n.z < 0.0` branch's two
+    // sides at the pole; ±x/±y land on the equator. Plus the four DIAGONAL sign quadrants in the LOWER
+    // hemisphere (n.z < 0), which is the ONLY path that runs the two sign-ternaries — one per (sign(x),
+    // sign(y)) combination so both `e.x >= 0.0` and `e.y >= 0.0` are exercised true AND false.
+    let directed: &[[f32; 3]] = &[
+        [1.0, 0.0, 0.0],
+        [-1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, -1.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [0.0, 0.0, -1.0],
+        // The four lower-hemisphere sign quadrants (n.z < 0 → the fold + both sign-ternaries).
+        [0.5, 0.5, -0.5],
+        [-0.5, 0.5, -0.5],
+        [0.5, -0.5, -0.5],
+        [-0.5, -0.5, -0.5],
+        // The four UPPER-hemisphere sign quadrants (n.z >= 0 → the fold is SKIPPED, the `e = n.xy` path).
+        [0.5, 0.5, 0.5],
+        [-0.5, 0.5, 0.5],
+        [0.5, -0.5, 0.5],
+        [-0.5, -0.5, 0.5],
+    ];
+    for &v in directed {
+        let n = normalize(v).expect("invariant: the directed normals are non-degenerate");
+        let r = refactored_oct_encode(n);
+        let h = host_oct_encode(n);
+        assert_oct_bits(r, h, &format!("oct-directed-{n:?}"));
+    }
+
+    // An LCG sweep of normalized vectors covering BOTH hemispheres + all sign quadrants densely (the
+    // `n.z` sign is uniform, so ~half the samples take the `if` branch).
+    let mut lcg = Lcg::new(0x0C7A_1234_5EED_BEEF_u64);
+    let mut sampled = 0u32;
+    while sampled < 50_000 {
+        let v = [lcg.next_f32(1.0), lcg.next_f32(1.0), lcg.next_f32(1.0)];
+        // Skip the non-finite distribution entries (NaN/Inf) the `next_f32` mixes in — the encoder's
+        // unit-normal contract is finite inputs; the parity is the property under test, not NaN
+        // propagation (the field tests cover non-finite handling).
+        if !v.iter().all(|c| c.is_finite()) {
+            continue;
+        }
+        let Some(n) = normalize(v) else { continue };
+        let r = refactored_oct_encode(n);
+        let h = host_oct_encode(n);
+        assert_oct_bits(r, h, &format!("oct-sweep-{n:?}"));
+        sampled += 1;
+    }
+}
