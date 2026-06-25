@@ -70,6 +70,38 @@ enum Node {
     Select(u32, u32, u32),
     /// `a > b` — a Mask node (printed inline inside a ternary condition).
     Gt(u32, u32),
+    /// A call to the hand-written field function `sdf(<arg>)`. The operand is a
+    /// VECTOR-expression handle into the separate [`VNode`] arena (the `float3`
+    /// argument), so the printer emits `sdf(<vexpr>)`. The field is NOT inlined: the
+    /// frozen HLSL keeps `sdf` a hand-written function owning the edit-list `[loop]`.
+    FieldCall(u32),
+}
+
+/// One VECTOR (`float3`/`float2`) SSA node — the normal leaf is a vector expression
+/// (`p ± e.xyy`, `normalize(n)`), so it records into this separate arena. Operands
+/// reference earlier `VNode`s (the float3 dataflow) or scalar [`Node`]s (the float3
+/// constructor's components), each by arena index.
+#[derive(Clone, Copy, Debug)]
+enum VNode {
+    /// The symbolic `float3` input `p` (the normal's only vector parameter).
+    InputP,
+    /// The `float2 e = float2(GRAD_H, 0.0)` constant the GRAD_H swizzles read.
+    EpsE,
+    /// A swizzle off the (single) [`VNode::EpsE`] — `e.xyy` / `e.yxy` / `e.yyx`. The
+    /// `u8` is the axis (0=`xyy`, 1=`yxy`, 2=`yyx`). Printed TEXTUALLY (not decomposed
+    /// into a `float3(...)` constructor): the frozen `sdf_normal` uses the `.xyy` form
+    /// and DXC's SPIR-V is sensitive to it. The source vector is implicitly `e` (the
+    /// only `float2` in the body), so no operand handle is carried.
+    Swizzle(u8),
+    /// `a + b` over two `float3` handles.
+    VAdd(u32, u32),
+    /// `a - b` over two `float3` handles.
+    VSub(u32, u32),
+    /// `float3(x, y, z)` — the three components are SCALAR [`Node`] handles (the
+    /// per-axis central differences `sdf(p+o) - sdf(p-o)`). Materialized as the named
+    /// `float3 n` temp, so the final `normalize(n)` references it (RAW HLSL `normalize`:
+    /// the value-level zero-guard is an Eval-only concern, invisible at the op level).
+    Construct(u32, u32, u32),
 }
 
 /// A handle into the SSA arena — `#[repr(transparent)]` over the node index, so it
@@ -87,9 +119,25 @@ pub struct Emit(u32);
 #[repr(transparent)]
 pub struct EmitMask(u32);
 
+thread_local! {
+    /// The build-time VECTOR SSA arena (the normal leaf's `float3`/`float2` dataflow),
+    /// separate from the scalar [`ARENA`]. Drained by [`emit_normal_body`].
+    static VARENA: RefCell<Vec<VNode>> = const { RefCell::new(Vec::new()) };
+}
+
 #[inline]
 fn push(node: Node) -> u32 {
     ARENA.with(|a| {
+        let mut a = a.borrow_mut();
+        let id = a.len() as u32;
+        a.push(node);
+        id
+    })
+}
+
+#[inline]
+fn vpush(node: VNode) -> u32 {
+    VARENA.with(|a| {
         let mut a = a.borrow_mut();
         let id = a.len() as u32;
         a.push(node);
@@ -186,6 +234,30 @@ impl FieldScalar for Emit {
         let r = push(Node::Lit(want as f32));
         EmitMask(push(Node::Gt(l, r))) // placeholder; unreached by the field body
     }
+
+    #[inline]
+    fn grad_offsets() -> [[Emit; 3]; 3] {
+        // The normal leaf is a VECTOR expression: its `float3`/`float2` dataflow
+        // (`e.xyy`, `p ± offset`, `normalize(n)`) is recorded into the separate
+        // [`VARENA`] by [`emit_normal_body`], NOT through this component-wise
+        // (`[Emit; 3]`) scalar hook — the scalar granularity cannot carry the textual
+        // swizzle the SPIR-V gate requires. So `grad_offsets` for `Emit` is UNREACHED
+        // by the printer; it is provided only to satisfy the trait (the normal is
+        // traced at vector granularity in `emit_hlsl_normal`). It records literal
+        // axis vectors to keep the contract total.
+        const GRAD_H: f32 = 0.0005;
+        let h = Emit::lit(GRAD_H);
+        let z = Emit::lit(0.0);
+        [[h, z, z], [z, h, z], [z, z, h]]
+    }
+
+    #[inline]
+    fn v_normalize(a: [Emit; 3]) -> [Emit; 3] {
+        // Like `grad_offsets`: UNREACHED by the printer (the normal's `normalize` is a
+        // `VNode::Normalize` in the vector arena). Provided to satisfy the trait; the
+        // component-wise stub returns the input unchanged (it never runs).
+        a
+    }
 }
 
 // ---- The HLSL printer ---------------------------------------------------------
@@ -263,6 +335,11 @@ fn define_str(arena: &[Node], temps: &[Option<String>], id: u32) -> String {
         Node::Abs(a) => format!("abs({})", op(a)),
         Node::Sqrt(a) => format!("sqrt({})", op(a)),
         Node::Select(c, t, e) => format!("({}) ? {} : {}", op(c), op(t), op(e)),
+        Node::FieldCall(_) => {
+            // `FieldCall` belongs to the NORMAL leaf (a vector expression printed by
+            // `sexpr_str`/`vexpr_str`), never to the scalar field body's printer.
+            unreachable!("FieldCall is a normal-leaf node, not a scalar field node")
+        }
     }
 }
 
@@ -356,4 +433,130 @@ pub fn emit_hlsl_field() -> String {
          // combine(acc=a, d=b, op, k) — INTERSECT branch:\n\
          float combine_intersect(float a, float b, float k) {{\n{combine_intersect}}}\n",
     )
+}
+
+// ---- The normal leaf (a VECTOR expression) ------------------------------------
+
+/// The three GRAD_H swizzle spellings, indexed by axis (`Swizzle`'s `u8`). The
+/// frozen `sdf_normal` reads `e.xyy` (x-axis), `e.yxy` (y-axis), `e.yyx` (z-axis)
+/// off `float2 e = float2(GRAD_H, 0.0)` — these textual swizzles are load-bearing for
+/// the SPIR-V gate (decomposing them into `float3(GRAD_H,0,0)` would fork the
+/// baseline disassembly).
+const SWIZZLES: [&str; 3] = ["e.xyy", "e.yxy", "e.yyx"];
+
+/// The inline HLSL spelling of a VECTOR node `id` — the normal's `float3`/`float2`
+/// subexpressions are printed inline (no temps), matching the compact frozen
+/// `sdf_normal`. `scalar` is the scalar arena (for the `float3(...)` constructor's
+/// component handles); `varena` is the vector arena.
+fn vexpr_str(varena: &[VNode], scalar: &[Node], id: u32) -> String {
+    match varena[id as usize] {
+        VNode::InputP => "p".to_string(),
+        VNode::EpsE => "e".to_string(),
+        VNode::Swizzle(axis) => SWIZZLES[axis as usize].to_string(),
+        VNode::VAdd(a, b) => format!(
+            "{} + {}",
+            vexpr_str(varena, scalar, a),
+            vexpr_str(varena, scalar, b)
+        ),
+        VNode::VSub(a, b) => format!(
+            "{} - {}",
+            vexpr_str(varena, scalar, a),
+            vexpr_str(varena, scalar, b)
+        ),
+        VNode::Construct(x, y, z) => format!(
+            "float3(\n        {},\n        {},\n        {})",
+            sexpr_str(varena, scalar, x),
+            sexpr_str(varena, scalar, y),
+            sexpr_str(varena, scalar, z)
+        ),
+    }
+}
+
+/// The inline HLSL spelling of a SCALAR node `id` for the normal body — only the
+/// node kinds the central differences use (`FieldCall` and `Sub`); the `FieldCall`'s
+/// argument is a vector handle, so the scalar and vector printers recurse into each
+/// other.
+fn sexpr_str(varena: &[VNode], scalar: &[Node], id: u32) -> String {
+    match scalar[id as usize] {
+        Node::FieldCall(v) => format!("sdf({})", vexpr_str(varena, scalar, v)),
+        Node::Sub(a, b) => format!(
+            "{} - {}",
+            sexpr_str(varena, scalar, a),
+            sexpr_str(varena, scalar, b)
+        ),
+        // The normal body only ever forms `FieldCall - FieldCall`; no other scalar
+        // node reaches this printer.
+        other => unreachable!("normal scalar printer reached an unexpected node: {other:?}"),
+    }
+}
+
+/// Builds the `sdf_normal` body by recording the SAME dataflow [`crate::normal::sdf_normal_body`]
+/// expresses (the GRAD_H swizzle offsets, the six `sdf` probe calls, the three
+/// central differences, and the final `normalize`), into the VECTOR arena, then
+/// prints it in the frozen textual shape (`float2 e` / `float3 n = float3(...)` /
+/// `return normalize(n)`).
+///
+/// It records the dataflow directly (rather than monomorphizing `sdf_normal_body`
+/// over `Emit`) because the normal is a VECTOR expression and `Emit::Vec3` is
+/// `[Emit; 3]` (scalar granularity) — too coarse to carry the textual swizzle the
+/// SPIR-V gate needs. The structure here is operand-for-operand the same as the
+/// generic body, so the single-source contract holds: the generic body is the CPU
+/// source (proven byte-identical to the host normal by `eval_normal_byte_identity`),
+/// and this is its HLSL twin (pinned to the committed header by `sdf_field_edsl_sync`).
+fn emit_normal_body() -> String {
+    ARENA.with(|a| a.borrow_mut().clear());
+    VARENA.with(|a| a.borrow_mut().clear());
+
+    let p = vpush(VNode::InputP);
+    // `float2 e = float2(GRAD_H, 0.0)` — declared in the printed body; the swizzles
+    // read it implicitly (it is the body's only `float2`).
+    let _e = vpush(VNode::EpsE);
+    // The GRAD_H swizzle offsets `e.xyy` / `e.yxy` / `e.yyx` (one per axis).
+    let offsets = [
+        vpush(VNode::Swizzle(0)),
+        vpush(VNode::Swizzle(1)),
+        vpush(VNode::Swizzle(2)),
+    ];
+    // Per axis: sdf(p + offset) - sdf(p - offset) — the central difference. The
+    // `field` callback records a `FieldCall` node (NOT inlined: `sdf` stays the
+    // hand-written `[loop]` function).
+    let mut comps = [0u32; 3];
+    for (axis, &o) in offsets.iter().enumerate() {
+        let plus = vpush(VNode::VAdd(p, o));
+        let minus = vpush(VNode::VSub(p, o));
+        let f_plus = push(Node::FieldCall(plus));
+        let f_minus = push(Node::FieldCall(minus));
+        comps[axis] = push(Node::Sub(f_plus, f_minus));
+    }
+    let n = vpush(VNode::Construct(comps[0], comps[1], comps[2]));
+
+    // The `float3 n = float3(...)` constructor is materialized as the NAMED temp `n`
+    // (matching the frozen `float3 n`), so `return normalize(n)` references the name
+    // — the gradient is NOT recomputed in the return. The body shape is therefore
+    // byte-for-byte the frozen `sdf_normal` (which the SPIR-V gate freezes).
+    VARENA.with(|va| {
+        ARENA.with(|sa| {
+            let va = va.borrow();
+            let sa = sa.borrow();
+            let n_expr = vexpr_str(&va, &sa, n);
+            format!(
+                "    float2 e = float2(GRAD_H, 0.0);\n    \
+                 float3 n = {n_expr};\n    \
+                 return normalize(n);\n",
+            )
+        })
+    })
+}
+
+/// Generates the HLSL `sdf_normal` body by recording the generic normal leaf's
+/// dataflow over the vector arena (see [`emit_normal_body`]) and returns the full
+/// `float3 sdf_normal(float3 p) { ... }` function as a string.
+///
+/// The generated body is spliced between the `// === GENERATED NORMAL BEGIN/END ===`
+/// sentinels in `crates/boyko_rhi_vulkan/shaders/sdf_field.hlsli`. The `sdf_field_edsl_sync`
+/// test pins the committed header to this output; the `field_probe_gate` SPIR-V
+/// tripwire pins it to the frozen baseline disassembly.
+pub fn emit_hlsl_normal() -> String {
+    let body = emit_normal_body();
+    format!("float3 sdf_normal(float3 p) {{\n{body}}}\n")
 }

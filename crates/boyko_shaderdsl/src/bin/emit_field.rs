@@ -11,4 +11,10 @@
 
 fn main() {
     print!("{}", boyko_shaderdsl::emit::emit_hlsl_field());
+    // The surface-normal leaf (`sdf_normal`) — the central-difference gradient of the
+    // whole edit-list field, generated from the SAME single source (`boyko_shaderdsl::
+    // normal::sdf_normal_body`). Spliced between the `// === GENERATED NORMAL
+    // BEGIN/END ===` sentinels in `sdf_field.hlsli`.
+    println!();
+    print!("{}", boyko_shaderdsl::emit::emit_hlsl_normal());
 }

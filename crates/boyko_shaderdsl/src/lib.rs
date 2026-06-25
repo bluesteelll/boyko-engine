@@ -41,6 +41,7 @@
 #![cfg_attr(feature = "nightly", allow(internal_features))]
 
 pub mod field;
+pub mod normal;
 pub mod scalar;
 
 #[cfg(feature = "emit")]
@@ -50,4 +51,5 @@ pub use field::{
     EditView, MAX_SDF_EDITS, SDF_FAR, combine, edit_distance, kind, op, sd_box, sd_sphere,
     sdf_field_body, smax, smin,
 };
+pub use normal::sdf_normal_body;
 pub use scalar::FieldScalar;

@@ -92,6 +92,42 @@ pub trait FieldScalar: Copy {
     /// is a HOST branch that selects which finite formula to fold, exactly as the
     /// frozen `combine` does.
     fn eq_u(op: u32, want: u32) -> Self::Mask;
+
+    /// The three central-difference GRAD_H offset vectors `[e.xyy, e.yxy, e.yyx]`
+    /// where `e = (GRAD_H, 0.0)` — the exact swizzles the frozen `sdf_normal` writes
+    /// (`sdf_field.hlsli:194-198`).
+    ///
+    /// A backend hook (not a free function) because the two backends spell the
+    /// offsets DIFFERENTLY and that spelling is load-bearing for the SPIR-V gate:
+    /// - **Eval** (`f32`) returns the literal axis vectors `[h,0,0]`, `[0,h,0]`,
+    ///   `[0,0,h]` (with `h = GRAD_H`) — the same triple `sdf_edit_list_normal` adds
+    ///   to `p`, so the Eval result is byte-identical.
+    /// - **Emit** records THREE swizzle nodes off one shared `float2 e =
+    ///   float2(GRAD_H, 0.0)`, printed TEXTUALLY as `e.xyy` / `e.yxy` / `e.yyx`
+    ///   (NOT decomposed into `float3(GRAD_H, 0.0, 0.0)`): the frozen HLSL uses the
+    ///   `.xyy` swizzle form and DXC's SPIR-V is sensitive to it (an `OpVectorShuffle`
+    ///   off `e` vs three scalar `OpCompositeConstruct`s would FORK the frozen
+    ///   `sdf_field_probe.baseline.dis`). Returning the offsets through this hook is
+    ///   the single point that keeps the swizzle spelling frozen.
+    ///
+    /// `GRAD_H` is `0.0005` — mirrors `boyko_sdf_math::SDF_GRAD_H` and the shader's
+    /// `GRAD_H` (`sdf_field.hlsli:42`).
+    fn grad_offsets() -> [Self::Vec3; 3];
+
+    /// `a / length(a)` — the unit vector, the LAST op of the surface normal.
+    ///
+    /// The spelling is, again, backend-specific and load-bearing:
+    /// - **Eval** (`f32`) is the GUARDED `v_normalize`: a zero / non-finite length
+    ///   returns `[0, 0, 0]` (a field critical point) instead of `NaN`, BYTE-MIRRORING
+    ///   `boyko_sdf_math::v_normalize` (lib.rs:575) so the Eval normal is identical to
+    ///   `sdf_edit_list_normal`. The guard intercepts ONLY the exactly-zero /
+    ///   non-finite path; every non-degenerate input is the byte-identical division.
+    /// - **Emit** records the RAW HLSL `normalize(a)` intrinsic (no zero-check exists
+    ///   at the op level — the guard is a value-level CPU concern the GPU goldens
+    ///   never sample, since they evaluate the normal only at surface hits where
+    ///   `|grad| ≈ 1`). This is what the frozen `sdf_normal` emits, so the SPIR-V
+    ///   stays byte-identical.
+    fn v_normalize(a: Self::Vec3) -> Self::Vec3;
 }
 
 /// `length(a)` over a backend `Vec3` — `sqrt(x*x + y*y + z*z)`. A free function
@@ -103,6 +139,14 @@ pub fn v_len<S: FieldScalar<Vec3 = [S; 3]>>(a: [S; 3]) -> S {
     // `boyko_sdf_math::v_len` (lib.rs:540).
     let sum = a[0].mul(a[0]).add(a[1].mul(a[1])).add(a[2].mul(a[2]));
     sum.sqrt()
+}
+
+/// `a + b` — component-wise vector addition. Used by [`crate::normal`] to form the
+/// central-difference probe points `p ± offset` (the offset vectors are the GRAD_H
+/// swizzle constructors, see [`FieldScalar::grad_offsets`]).
+#[inline]
+pub fn v_add<S: FieldScalar<Vec3 = [S; 3]>>(a: [S; 3], b: [S; 3]) -> [S; 3] {
+    [a[0].add(b[0]), a[1].add(b[1]), a[2].add(b[2])]
 }
 
 /// `a - b` — component-wise vector subtraction.
@@ -214,5 +258,32 @@ impl FieldScalar for f32 {
     #[inline]
     fn eq_u(op: u32, want: u32) -> bool {
         op == want
+    }
+
+    #[inline]
+    fn grad_offsets() -> [[f32; 3]; 3] {
+        // `e = (GRAD_H, 0.0)`; the offsets are `e.xyy`, `e.yxy`, `e.yyx` — i.e. the
+        // axis vectors `[h,0,0]`, `[0,h,0]`, `[0,0,h]`. The SAME triple
+        // `sdf_edit_list_normal` (lib.rs:698-702) adds/subtracts to `p`. `GRAD_H`
+        // mirrors `boyko_sdf_math::SDF_GRAD_H` (lib.rs:97).
+        const GRAD_H: f32 = 0.0005;
+        [
+            [GRAD_H, 0.0, 0.0],
+            [0.0, GRAD_H, 0.0],
+            [0.0, 0.0, GRAD_H],
+        ]
+    }
+
+    #[inline]
+    fn v_normalize(a: [f32; 3]) -> [f32; 3] {
+        // The GUARDED unit-vector, BYTE-MIRRORING `boyko_sdf_math::v_normalize`
+        // (lib.rs:575-584): a zero / non-finite length (a field critical point)
+        // returns ZERO so the physics seam-skip fires instead of a `NaN` normal; every
+        // non-degenerate input takes the byte-identical `[a0/len, a1/len, a2/len]`.
+        let len = v_len(a);
+        if len <= f32::MIN_POSITIVE || !len.is_finite() {
+            return [0.0, 0.0, 0.0];
+        }
+        [a[0] / len, a[1] / len, a[2] / len]
     }
 }

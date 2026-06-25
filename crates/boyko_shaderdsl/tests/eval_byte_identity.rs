@@ -264,6 +264,113 @@ fn random_sweep_byte_identical() {
     }
 }
 
+// ======================================================================
+// A1 — the surface-NORMAL leaf byte-identity.
+//
+// Frozen snapshot of `boyko_sdf_math::{v_normalize, sdf_edit_list_normal}`
+// (lib.rs:575-584, 696-704) vs the eDSL `boyko_shaderdsl::normal::sdf_normal_body`
+// over the `f32` Eval backend. The normal CALLS the field at six probe points
+// (`p ± GRAD_H` per axis); the eDSL field-call seam passes the frozen field as the
+// closure, so the whole central-difference + guarded-`normalize` chain is compared
+// bit-for-bit — including the `-0.0` / NaN off-axis cases, where the eDSL's full
+// `v_add(p, [h,0,0])` differs from the host's per-axis `[p0+h, p1, p2]` BEFORE the
+// field eval (the field is ±0-/payload-insensitive and the guard collapses any
+// non-finite-length gradient to ZERO, so the OUTPUT normal must still be identical).
+// ======================================================================
+
+const FROZEN_GRAD_H: f32 = 0.0005; // boyko_sdf_math::SDF_GRAD_H == sdf_field.hlsli GRAD_H
+
+fn frozen_v_normalize(a: [f32; 3]) -> [f32; 3] {
+    let len = frozen_v_len(a);
+    // The guarded normalize (lib.rs:575): a zero / non-finite length collapses to
+    // ZERO (the physics seam-skip sentinel), not NaN. Non-degenerate inputs take the
+    // byte-identical division.
+    if len <= f32::MIN_POSITIVE || !len.is_finite() {
+        return [0.0, 0.0, 0.0];
+    }
+    [a[0] / len, a[1] / len, a[2] / len]
+}
+
+fn frozen_sdf_edit_list_normal(edits: &[FrozenEdit], p: [f32; 3]) -> [f32; 3] {
+    let h = FROZEN_GRAD_H;
+    let n = [
+        frozen_sdf_edit_list(edits, [p[0] + h, p[1], p[2]])
+            - frozen_sdf_edit_list(edits, [p[0] - h, p[1], p[2]]),
+        frozen_sdf_edit_list(edits, [p[0], p[1] + h, p[2]])
+            - frozen_sdf_edit_list(edits, [p[0], p[1] - h, p[2]]),
+        frozen_sdf_edit_list(edits, [p[0], p[1], p[2] + h])
+            - frozen_sdf_edit_list(edits, [p[0], p[1], p[2] - h]),
+    ];
+    frozen_v_normalize(n)
+}
+
+/// The eDSL normal over the `f32` Eval backend, with the frozen field as the
+/// field-call seam closure (so this re-runs the SAME frozen fold at each probe).
+fn refactored_normal(edits: &[FrozenEdit], p: [f32; 3]) -> [f32; 3] {
+    let views: Vec<EditView<f32>> = edits.iter().map(to_view).collect();
+    boyko_shaderdsl::normal::sdf_normal_body::<f32, _>(p, |q| {
+        field::sdf_field_body::<f32>(&views, q)
+    })
+}
+
+fn assert_vec_bits(a: [f32; 3], b: [f32; 3], ctx: &str) {
+    for i in 0..3 {
+        assert_eq!(
+            a[i].to_bits(),
+            b[i].to_bits(),
+            "{ctx}[{i}]: refactored={} (0x{:08x}) != frozen={} (0x{:08x})",
+            a[i],
+            a[i].to_bits(),
+            b[i],
+            b[i].to_bits()
+        );
+    }
+}
+
+#[test]
+fn normal_random_sweep_byte_identical() {
+    // Same sweep shape as the field test: random edits/points across all kinds/ops/
+    // smoothness, sizes 1..=16, with non-finite + signed-zero values mixed in.
+    let mut lcg = Lcg::new(0xBADC_0FFE_E0DD_F00D);
+    for _ in 0..20_000 {
+        let n = 1 + (lcg.next_u32() as usize % FROZEN_MAX_SDF_EDITS);
+        let edits: Vec<FrozenEdit> = (0..n).map(|_| lcg.next_edit()).collect();
+        let p = [lcg.next_f32(15.0), lcg.next_f32(15.0), lcg.next_f32(15.0)];
+        assert_vec_bits(
+            refactored_normal(&edits, p),
+            frozen_sdf_edit_list_normal(&edits, p),
+            "normal-sweep",
+        );
+    }
+}
+
+#[test]
+fn normal_signed_zero_and_axis_aligned_byte_identical() {
+    // Targeted: points with -0.0 / +0.0 / on-axis coords where the eDSL full-vector
+    // offset (p + [h,0,0]) and the host per-axis offset diverge at the bit level
+    // before the field eval. The field must wash this out.
+    let mut lcg = Lcg::new(0x5165_D000_2E20_0001);
+    let zeros = [-0.0f32, 0.0f32];
+    for _ in 0..2_000 {
+        let n = 1 + (lcg.next_u32() as usize % FROZEN_MAX_SDF_EDITS);
+        let edits: Vec<FrozenEdit> = (0..n).map(|_| lcg.next_edit()).collect();
+        for &z in &zeros {
+            for p in [
+                [z, lcg.next_f32(5.0), lcg.next_f32(5.0)],
+                [lcg.next_f32(5.0), z, lcg.next_f32(5.0)],
+                [lcg.next_f32(5.0), lcg.next_f32(5.0), z],
+                [z, z, z],
+            ] {
+                assert_vec_bits(
+                    refactored_normal(&edits, p),
+                    frozen_sdf_edit_list_normal(&edits, p),
+                    "normal-signed-zero",
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn each_op_each_smoothness_byte_identical() {
     // Exhaustively cross each op with hard (k=0) and smooth (k>0), each kind.
