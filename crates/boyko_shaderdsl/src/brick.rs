@@ -36,6 +36,13 @@
 use crate::cf::{Cf, Flow};
 use crate::scalar::FieldScalar;
 
+/// `BrickClass::EmptyOutside as u32` is grid-content, but the OUT-OF-GRID sentinel the
+/// host `host_brick_cell` returns as `None` and the GPU `brick_cell_class` returns
+/// directly is `0xFFFFFFFF`. Mirrors the shader's `BRICK_OUTSIDE_GRID`
+/// (`sdf_gbuffer_composite.hlsl:558`). Spelled SYMBOLICALLY in the emitted HLSL (the
+/// committed body writes `BRICK_OUTSIDE_GRID`, not `4294967295u`).
+pub const BRICK_OUTSIDE_GRID: u32 = 0xFFFF_FFFF;
+
 /// The `R8_SNORM` normalize divisor — `q ∈ [-127, 127]` maps onto `[-1, 1]` as
 /// `q / 127`. Mirrors the host `decode_snorm8`'s `127.0` (brick.rs:1052) and the
 /// Vulkan `R8_SNORM` rule.
@@ -307,4 +314,109 @@ pub fn dist_to_brick_exit_body<C: Cf>(
     let final_exit = C::get_var(&exit);
     let eps = C::named_lit("BRICK_EXIT_EPS", BRICK_EXIT_EPS);
     S2::<C>::select(final_exit.lt(eps), eps, final_exit)
+}
+
+// ---- The brick-cell pointer-grid lookup leaf (Increment 3: early-return CF) ------
+//
+// The SECOND control-flow leaf — the first with EARLY RETURNS, a `StructuredBuffer<uint>`
+// load, an `out float3` parameter, and `uint` index math (a `float3`/`uint` value model).
+// Authored ONCE generic over the control-flow axis `C: Cf`; `C::Scalar` fixes the float
+// arithmetic, the typed facets (`C::Uint`/`C::Vec3f`/`C::Uint3`/`C::Buf`/`C::OutVec3`)
+// fix the brick value model. Instantiated:
+//   - `<EvalCf>` — the CPU oracle (real casts / real `||` / a `Cell` out-param + ret-cell);
+//     the `eval_byte_identity` brick-cell sweep + a tail-skip test lock it.
+//   - `<EmitCf>` — the HLSL recorder; the printer
+//     (`crate::emit::emit_hlsl_brick_cell_class`) walks the STMT IR into the early-return
+//     body spliced into `sdf_gbuffer_composite.hlsl` (byte-identical to the committed
+//     `.comp.spv`, proven by the one-shot cmp-`.spv`).
+//
+// RET is the SOLE return mechanism: each guard records EXACTLY ONE `Stmt::Return`; the
+// VALUE travels OUT OF BAND (a body-local cell on Eval; the value node into `Stmt::Return`
+// on Emit). The body NEVER writes a `__cls`/`__ret` local — no spurious assign reaches the
+// emitted HLSL. The out-param `cell_min` is written by TWO `out_vec3_assign`s (the default
+// `cell_min = origin;` and the conditional `cell_min = origin + float3(...)*bw;`), each a
+// bare assignment (no `float3` decl).
+
+/// Reads the pointer-grid cell class containing world point `p`, depositing the class into
+/// `cls` (`BRICK_OUTSIDE_GRID` when `p` is outside the bounded grid) and the cell's world
+/// minimum corner into the `cell_min` out-param. Authored ONCE over the control-flow axis
+/// `C` + the brick value model. Mirrors the GPU `brick_cell_class`
+/// (`sdf_gbuffer_composite.hlsl:608-626`) statement-for-statement.
+///
+/// The class travels OUT OF BAND through `cls` (the [`Cf::RetCell`]) — on Eval the caller
+/// reads `cls` after this returns; on Emit the recorded `Stmt::Return`s spell `return
+/// <expr>;`. The body order matches the committed HLSL: the default `cell_min`, guard 1
+/// (negative-rel), the `(uint)` casts, guard 2 (bounds), the `idx`, the conditional
+/// `cell_min`, and the buffer-load return.
+///
+/// The body is an IIFE `(|| -> Flow { ... })()` whose `?`-propagated [`Cf::ret`] /
+/// [`Cf::if_ret`] short-circuit the closure on Eval (so the tail — the casts after guard 1
+/// — does NOT run on a negative rel, the load-bearing tail-skip), then the caller reads
+/// `cls`. On Emit every branch is recorded structurally (the `?` never early-returns), so
+/// the whole body is captured.
+#[inline]
+pub fn brick_cell_class_body<C: Cf>(
+    grid: C::Buf<'_>,
+    origin: C::Vec3f,
+    bw: C::Scalar,
+    dims: C::Uint3,
+    p: C::Vec3f,
+    cell_min: &C::OutVec3,
+    cls: &C::RetCell,
+) {
+    // The IIFE: the guard logic runs in a closure returning `Flow`. On Eval the first
+    // `?`-propagated `ret`/`if_ret` short-circuits the closure (the deposited class is read
+    // from `cls` afterward); on Emit every statement is recorded (the closure runs to the
+    // end, returning `Continue`). The `Flow` result is discarded either way.
+    let run = || -> Flow {
+        // float3 rel = (p - origin) / bw;
+        let rel = C::temp_vec3("rel", C::vec3_div_scalar(C::vec3_sub(p, origin), bw));
+        // cell_min = origin;  (default — overwritten on an in-grid hit; unread when OUTSIDE)
+        C::out_vec3_assign(cell_min, origin);
+        // if (rel.x < 0.0 || rel.y < 0.0 || rel.z < 0.0) { return BRICK_OUTSIDE_GRID; }
+        // The float `<` is tested directly (a negative coord is caught BEFORE the uint cast
+        // wraps it). The `||` is lazy on Emit (short-circuit OpBranchConditional, spike E2a)
+        // and result-equivalent on Eval (the comparands are pure); the tail-skip (the casts
+        // below not running on a negative rel) is the `?` early-returning the IIFE.
+        let zero = C::Scalar::lit(0.0);
+        let neg = C::or(
+            C::or(C::vec3_x(rel).lt(zero), C::vec3_y(rel).lt(zero)),
+            C::vec3_z(rel).lt(zero),
+        );
+        C::if_ret(cls, neg, C::named_uint("BRICK_OUTSIDE_GRID", BRICK_OUTSIDE_GRID))?;
+        // uint ix = (uint)rel.x;  uint iy = (uint)rel.y;  uint iz = (uint)rel.z;
+        let ix = C::temp_uint("ix", C::float_to_uint(C::vec3_x(rel)));
+        let iy = C::temp_uint("iy", C::float_to_uint(C::vec3_y(rel)));
+        let iz = C::temp_uint("iz", C::float_to_uint(C::vec3_z(rel)));
+        // if (ix >= dims.x || iy >= dims.y || iz >= dims.z) { return BRICK_OUTSIDE_GRID; }
+        let oob = C::or(
+            C::or(C::uge(ix, C::uint3_x(dims)), C::uge(iy, C::uint3_y(dims))),
+            C::uge(iz, C::uint3_z(dims)),
+        );
+        C::if_ret(cls, oob, C::named_uint("BRICK_OUTSIDE_GRID", BRICK_OUTSIDE_GRID))?;
+        // uint idx = ix + iy * dims.x + iz * dims.x * dims.y;
+        // Flat left-associated: ((ix + (iy*dims.x)) + ((iz*dims.x)*dims.y)). The
+        // position-aware paren keeps the emitted text flat (`ix + iy * dims.x + ...`).
+        let idx = C::temp_uint(
+            "idx",
+            C::uadd(
+                C::uadd(ix, C::umul(iy, C::uint3_x(dims))),
+                C::umul(C::umul(iz, C::uint3_x(dims)), C::uint3_y(dims)),
+            ),
+        );
+        // cell_min = origin + float3(ix, iy, iz) * bw;
+        C::out_vec3_assign(
+            cell_min,
+            C::vec3_add(
+                origin,
+                C::vec3_mul_scalar(C::vec3_from_uints(ix, iy, iz), bw),
+            ),
+        );
+        // return grid[idx];
+        C::ret(cls, C::buffer_load(grid, idx))?;
+        Flow::Continue(())
+    };
+    // Discard the Flow: on Eval the early `?` already deposited the class into `cls`; on
+    // Emit the recorder captured every statement.
+    let _ = run();
 }

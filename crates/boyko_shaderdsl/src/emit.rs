@@ -51,6 +51,12 @@ enum EmitTy {
     Float,
     /// An HLSL `uint` temp (a packed byte source / bit op, before the numeric cast).
     Uint,
+    /// An HLSL `float3` temp/value (the brick-cell `rel` / `cell_min` rhs — Increment 3).
+    Float3,
+    /// An HLSL `uint3` value (a `dims`-style parameter — Increment 3). No leaf currently
+    /// materializes a `uint3` temp (`dims` is an inlined parameter), but the type is
+    /// carried so [`assert_operand_ty`] can validate a `uint3` swizzle's source.
+    Uint3,
 }
 
 /// One SSA node — a recorded field op. Operands reference earlier nodes by their
@@ -170,6 +176,60 @@ enum Node {
     /// EXPLICIT (the body wraps a subexpression in [`Cf::temp`]); this node is the handle
     /// the wrapped value flows through, so later uses spell `t{seq}`.
     TempRef(u32),
+
+    // ---- Increment 3: the brick-cell value model (uint / float3 / uint3 / buffer) ----
+    //
+    // The second CF leaf (`brick_cell_class`) introduces first-class `float3` and `uint`
+    // values + a `StructuredBuffer<uint>` load. The `float3`/`uint3` VALUE nodes record
+    // into THIS scalar arena (operands = arena ids); a node's result type is tagged by
+    // [`type_of`] (Float3/Uint3/Uint), so the printer types a temp without recursion.
+
+    /// A `float3` PARAMETER reference (`p` / `origin`) — prints the parameter NAME (an
+    /// inline leaf). `u32` indexes [`Names::vec_in`]. Distinct from [`Node::VecParamRef`]
+    /// (which is consumed by [`EmitCf::index`] into a dynamic `vec[iv]` and never printed):
+    /// a `Vec3Param` IS spelled directly (`p`, `origin`) as a whole-`float3` operand.
+    Vec3Param(u32),
+    /// A `float3` swizzle to a `float` scalar (`rel.x`) — `(vec_id, axis)` where `axis`
+    /// 0/1/2 = x/y/z. Printed inline (`<op(vec_id)>.x`). Result type [`EmitTy::Float`].
+    Vec3Swizzle(u32, u8),
+    /// `float3(x, y, z)` from THREE `uint` operands (`float3(ix, iy, iz)`) — the implicit
+    /// uint→float ctor. Asserts all-`uint` operands (the single cross-type construct).
+    Vec3FromUints(u32, u32, u32),
+    /// `a + b` over two `float3` handles (`origin + offset`).
+    Vec3Add(u32, u32),
+    /// `a - b` over two `float3` handles (`p - origin`).
+    Vec3Sub(u32, u32),
+    /// `v * s` — a `float3` times a `float` scalar (`float3(...) * bw`). `(vec, scalar)`.
+    Vec3MulScalar(u32, u32),
+    /// `v / s` — a `float3` divided by a `float` scalar (`(p - origin) / bw`).
+    Vec3DivScalar(u32, u32),
+
+    /// A `uint3` PARAMETER reference (`dims`) — prints the parameter NAME (an inline leaf).
+    /// `u32` indexes [`Names::uint3_in`]. Result type [`EmitTy::Uint3`].
+    Uint3Param(u32),
+    /// A `uint3` swizzle to a `uint` (`dims.x`) — `(uint3_id, axis)`. Printed inline
+    /// (`<op>.x`). Result type [`EmitTy::Uint`].
+    Uint3Swizzle(u32, u8),
+
+    /// `(uint)f` — the HLSL NUMERIC `float -> uint` truncating cast (`(uint)rel.x`), NOT
+    /// `asuint`. Materialized as a `uint` temp. Result type [`EmitTy::Uint`].
+    FloatToUint(u32),
+    /// `a + b` over two `uint` handles (the index accumulation). Result [`EmitTy::Uint`].
+    UAdd(u32, u32),
+    /// `a * b` over two `uint` handles (a row/slice stride). Result [`EmitTy::Uint`].
+    UMul(u32, u32),
+    /// `grid[idx]` — a `StructuredBuffer<uint>` load. `(buf_id, idx)`: `buf_id` indexes
+    /// [`Names::buf_in`], `idx` is the index node. Printed INLINE (`grid[idx]`). Result
+    /// [`EmitTy::Uint`].
+    BufferLoad(u32, u32),
+
+    /// `a >= b` over two `uint` handles — a Mask node (printed inline inside a condition,
+    /// like [`Node::Gt`]). The bounds guard `ix >= dims.x` (`OpUGreaterThanEqual`).
+    UGe(u32, u32),
+    /// `a || b` over two MASK handles — a Mask node, the short-circuit OR (`rel.x < 0.0
+    /// || rel.y < 0.0`). Printed inline (`<a> || <b>`); DXC lowers `a||b||c` to the
+    /// short-circuit `OpBranchConditional` chain (spike E2a: zero `OpLogicalOr`).
+    Or(u32, u32),
 }
 
 /// One VECTOR (`float3`/`float2`) SSA node — the normal leaf is a vector expression
@@ -220,6 +280,44 @@ thread_local! {
     static VARENA: RefCell<Vec<VNode>> = const { RefCell::new(Vec::new()) };
 }
 
+thread_local! {
+    /// OUT-OF-BAND materialized-temp result types — `t{seq}`'s [`EmitTy`], keyed by the
+    /// temp's program-order `seq` (the index IS `seq`, pushed in order by the `temp_*`
+    /// combinators). [`type_of`]`(`[`Node::TempRef`]`(seq))` reads it. Kept off the frozen
+    /// [`Node::TempRef`]`(u32)` node (widening it would risk the Inc-1/2 sync gate, which
+    /// freezes `dist_to_brick_exit`'s `exit` path). The straight-line + Inc-1 leaves push
+    /// only `Float` here (every `Cf::temp` is a `float`), so they are byte-unchanged.
+    static TEMP_TYPES: RefCell<Vec<EmitTy>> = const { RefCell::new(Vec::new()) };
+
+    /// OUT-OF-BAND materialized-temp NAMES — `Some("rel")` for a NAMED temp (the brick-cell
+    /// `rel`/`ix`/`idx`), `None` for an ANONYMOUS temp (the brick-exit `t{seq}`), keyed by
+    /// `seq` (the index IS `seq`). [`operand_str`]`(`[`Node::TempRef`]`(seq))` reads it to
+    /// spell the name (named) or `t{seq}` (anonymous). Same out-of-band rationale as
+    /// [`TEMP_TYPES`] — the frozen `TempRef` node stays byte-unchanged. The straight-line +
+    /// Inc-1 leaves push only `None` (every `Cf::temp` is anonymous), so they are unchanged.
+    static TEMP_NAMES: RefCell<Vec<Option<&'static str>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The result [`EmitTy`] of materialized temp `seq` (out-of-band, see [`TEMP_TYPES`]).
+/// Defaults to [`EmitTy::Float`] when `seq` is past the recorded set (the straight-line
+/// emit paths do not populate `TEMP_TYPES`, so every temp there is a `float`).
+fn temp_type(seq: u32) -> EmitTy {
+    TEMP_TYPES.with(|t| {
+        t.borrow()
+            .get(seq as usize)
+            .copied()
+            .unwrap_or(EmitTy::Float)
+    })
+}
+
+/// The NAME of materialized temp `seq` (out-of-band, see [`TEMP_NAMES`]) — `Some("rel")`
+/// for a named brick-cell temp, `None` for an anonymous `t{seq}`. Defaults to `None` when
+/// `seq` is past the recorded set (the straight-line emit paths do not populate
+/// `TEMP_NAMES`, so every temp there is anonymous).
+fn temp_name(seq: u32) -> Option<&'static str> {
+    TEMP_NAMES.with(|t| t.borrow().get(seq as usize).copied().flatten())
+}
+
 /// The HLSL [`EmitTy`] a node materializes as (O2). Every legacy field/normal node
 /// is [`EmitTy::Float`]; only the integer/bit nodes are [`EmitTy::Uint`]. The
 /// `UintToFloat` cast is the boundary — its RESULT is `float` (so consumers see a
@@ -229,16 +327,39 @@ thread_local! {
 fn type_of(node: Node) -> EmitTy {
     match node {
         Node::UintInput(_) | Node::UintLit(_) | Node::And(_, _) | Node::Shr(_, _) => EmitTy::Uint,
-        // `UintToFloat` PRODUCES a float (the cast result); every other node is float.
+        // Increment 3 `uint`-result nodes: the cell index math, the buffer load, the
+        // `(uint)` cast, the `uint3` swizzle, and a named `uint` constant.
+        Node::Uint3Swizzle(_, _)
+        | Node::FloatToUint(_)
+        | Node::UAdd(_, _)
+        | Node::UMul(_, _)
+        | Node::BufferLoad(_, _) => EmitTy::Uint,
+        // `float3`-result nodes: the parameter ref, the constructors, the vector arithmetic.
+        Node::Vec3Param(_)
+        | Node::Vec3FromUints(_, _, _)
+        | Node::Vec3Add(_, _)
+        | Node::Vec3Sub(_, _)
+        | Node::Vec3MulScalar(_, _)
+        | Node::Vec3DivScalar(_, _) => EmitTy::Float3,
+        // The `uint3` parameter ref is a whole-`uint3` value.
+        Node::Uint3Param(_) => EmitTy::Uint3,
+        // A materialized temp carries its OWN result type out-of-band (keyed by `seq`), set
+        // when [`EmitCf::temp`] / [`EmitCf::temp_uint`] / [`EmitCf::temp_vec3`] recorded the
+        // `Stmt::DeclTemp`. The straight-line leaves record only `float` temps (TEMP_TYPES is
+        // empty there → the default `Float`), so they are byte-unchanged.
+        Node::TempRef(seq) => temp_type(seq),
+        // `UintToFloat`/`Vec3Swizzle` PRODUCE a float; every other node is float.
         _ => EmitTy::Float,
     }
 }
 
-/// The HLSL type keyword for an [`EmitTy`] (`float` / `uint`).
+/// The HLSL type keyword for an [`EmitTy`] (`float` / `uint` / `float3` / `uint3`).
 fn ty_keyword(ty: EmitTy) -> &'static str {
     match ty {
         EmitTy::Float => "float",
         EmitTy::Uint => "uint",
+        EmitTy::Float3 => "float3",
+        EmitTy::Uint3 => "uint3",
     }
 }
 
@@ -433,6 +554,18 @@ const NO_UINT_INPUTS: &[&str] = &[];
 /// a `float3` parameter by the unroll iv).
 const NO_VEC_INPUTS: &[&str] = &[];
 
+/// The default `uint3`-parameter table (empty — only the brick-cell CF leaf takes a
+/// `uint3 dims` parameter).
+const NO_UINT3_INPUTS: &[&str] = &[];
+
+/// The default `StructuredBuffer<uint>`-parameter table (empty — only the brick-cell CF
+/// leaf takes a `StructuredBuffer<uint> grid` parameter).
+const NO_BUF_INPUTS: &[&str] = &[];
+
+/// The default `out`-parameter table (empty — only the brick-cell CF leaf has an `out
+/// float3 cell_min` parameter).
+const NO_OUT_INPUTS: &[&str] = &[];
+
 /// The default named-literal table (empty — only the brick-marcher CF leaf spells a
 /// symbolic constant).
 const NO_NAMED_LITS: &[&str] = &[];
@@ -452,10 +585,21 @@ struct Names<'a> {
     float_in: &'a [&'a str],
     /// `uint`-input names (indexed by [`Node::UintInput`]'s id).
     uint_in: &'a [&'a str],
-    /// `float3`-VECTOR-parameter names (indexed by [`Node::VecIndex`]'s `vec_id`) — the
-    /// `rd` / `p` / `cell_min` the brick-marcher indexes by the unroll iv. Empty for the
-    /// straight-line field/normal/decode leaves (they take no indexed vector parameter).
+    /// `float3`-VECTOR-parameter names (indexed by [`Node::VecIndex`]'s `vec_id` AND by
+    /// [`Node::Vec3Param`]'s id) — the `rd` / `p` / `cell_min` the brick-marcher indexes by
+    /// the unroll iv, plus the brick-cell's `p` / `origin` whole-`float3` params. Empty for
+    /// the straight-line field/normal/decode leaves (they take no vector parameter).
     vec_in: &'a [&'a str],
+    /// `uint3`-parameter names (indexed by [`Node::Uint3Param`]'s id) — the brick-cell's
+    /// `dims`. Empty for every other leaf (Increment 3).
+    uint3_in: &'a [&'a str],
+    /// `StructuredBuffer<uint>`-parameter names (indexed by [`Node::BufferLoad`]'s
+    /// `buf_id`) — the brick-cell's `grid`. Empty for every other leaf (Increment 3).
+    buf_in: &'a [&'a str],
+    /// `out`-PARAMETER names (indexed by [`Stmt::OutAssign`]'s `name_id`) — the brick-cell's
+    /// `cell_min`. Its assignments print BARE (`cell_min = ...;`), not a local decl. Empty
+    /// for every other leaf (Increment 3).
+    out_in: &'a [&'a str],
     /// NAMED-literal symbols (indexed by [`Node::NamedLit`]'s `sym_id`) — `BRICK_EXIT_EPS`.
     /// Empty for leaves that use no named constant.
     named_lit: &'a [&'a str],
@@ -519,59 +663,100 @@ fn is_inline_leaf(node: Node) -> bool {
             | Node::VecParamRef(_)
             | Node::VarRef(_)
             | Node::TempRef(_)
+            // Increment 3 inline leaves: a parameter ref / swizzle spells its name at every
+            // use (`origin`, `rel.x`, `dims.x`); the buffer load spells `grid[idx]`; the
+            // `>=`/`||` masks appear only inside a guard condition (never as a `tN` temp).
+            | Node::Vec3Param(_)
+            | Node::Vec3Swizzle(_, _)
+            | Node::Uint3Param(_)
+            | Node::Uint3Swizzle(_, _)
+            | Node::BufferLoad(_, _)
+            | Node::UGe(_, _)
+            | Node::Or(_, _)
     )
+}
+
+/// An operand's CONTEXT in its parent infix expression — the parent's precedence class
+/// together with this operand's side. Threaded into [`needs_paren_as_operand`] so the
+/// brick `idx` line's inner `UAdd` (the LEFT operand of an additive parent) stays flat
+/// (`a + b + c`, not `(a + b) + c`) while a `Sub` LEFT operand of a `Mul` still wraps
+/// (`(t1 - p[a]) * t3`). The precedence is decided by the PARENT, the associativity by
+/// the SIDE.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OperandPos {
+    /// No enclosing infix op (a function-call argument, a comparison comparand, the root
+    /// return) — the inline spelling needs no extra wrap regardless of its shape.
+    Root,
+    /// The LEFT operand of an additive (`+`/`-`) parent. A left-associative `+`/`-` LEFT
+    /// operand of the SAME class needs NO wrap (`a + b + c` already groups left) — the
+    /// brick `idx` line's load-bearing flat case.
+    AddLeft,
+    /// The RIGHT operand of an additive (`+`/`-`) parent. A same-class subexpression DOES
+    /// wrap here (`a - (b - c)`).
+    AddRight,
+    /// An operand (either side) of a MULTIPLICATIVE (`*`/`/`) parent — an additive child
+    /// always wraps (`(t1 - p[a]) * t3`), since `*`/`/` bind tighter than `+`/`-`.
+    MulSide,
 }
 
 /// The operand spelling for node `id` at a USE site: a leaf inlines (its input
 /// name or formatted literal, or the `a > b` comparison nested in a ternary
 /// condition); a non-leaf names its already-emitted `tN` temp. The temp must exist
-/// because the SSA walk emits nodes in arena order, which is topological.
-fn operand_str(arena: &[Node], names: Names, temps: &[Option<String>], id: u32) -> String {
+/// because the SSA walk emits nodes in arena order, which is topological. `pos` is the
+/// operand's position in its parent (drives the position-aware paren rule); callers
+/// where position is irrelevant (a leaf use, a function-call arg, the root return) pass
+/// [`OperandPos::Left`] (the never-wrap position).
+fn operand_str(
+    arena: &[Node],
+    names: Names,
+    temps: &[Option<String>],
+    id: u32,
+    pos: OperandPos,
+) -> String {
     let node = arena[id as usize];
+    // A nested comparand / index / swizzle source is position-irrelevant — pass `Root`.
+    let opl = |child: u32| operand_str(arena, names, temps, child, OperandPos::Root);
     match node {
         Node::Input(n) => names.float_in[n as usize].to_string(),
         Node::Lit(x) => fmt_lit(x),
-        Node::Gt(a, b) => format!(
-            "{} > {}",
-            operand_str(arena, names, temps, a),
-            operand_str(arena, names, temps, b)
-        ),
-        Node::Lt(a, b) => format!(
-            "{} < {}",
-            operand_str(arena, names, temps, a),
-            operand_str(arena, names, temps, b)
-        ),
-        Node::Le(a, b) => format!(
-            "{} <= {}",
-            operand_str(arena, names, temps, a),
-            operand_str(arena, names, temps, b)
-        ),
+        Node::Gt(a, b) => format!("{} > {}", opl(a), opl(b)),
+        Node::Lt(a, b) => format!("{} < {}", opl(a), opl(b)),
+        Node::Le(a, b) => format!("{} <= {}", opl(a), opl(b)),
         // `vec[iv]` — the vector parameter's name (`rd`/`p`/`cell_min`) indexed by the
         // iv node's own spelling (`a`). Both inline, so `p[a]` spells inline at each use.
-        Node::VecIndex(vec_id, iv_id) => format!(
-            "{}[{}]",
-            names.vec_in[vec_id as usize],
-            operand_str(arena, names, temps, iv_id)
-        ),
+        Node::VecIndex(vec_id, iv_id) => format!("{}[{}]", names.vec_in[vec_id as usize], opl(iv_id)),
         // The named literal prints the SYMBOL (`BRICK_EXIT_EPS`), not its `val`.
         Node::NamedLit { sym_id, .. } => names.named_lit[sym_id as usize].to_string(),
         // A mutable-local read prints the variable NAME (`exit`), not a `tN` temp.
         Node::VarRef(v) => names.vars[v as usize].to_string(),
-        // A materialized-temp reference prints `t{seq}`.
-        Node::TempRef(seq) => format!("t{seq}"),
+        // A materialized-temp reference prints its NAME (`rel`/`ix`, a named brick-cell
+        // temp) or `t{seq}` (an anonymous brick-exit temp).
+        Node::TempRef(seq) => match temp_name(seq) {
+            Some(n) => n.to_string(),
+            None => format!("t{seq}"),
+        },
         // A vector-parameter marker is consumed by `EmitCf::index` (→ `VecIndex`); it is
         // never spelled directly.
         Node::VecParamRef(_) => {
             unreachable!("VecParamRef is consumed by index() into VecIndex, never printed")
         }
-        Node::IntEq(a, b) => format!(
-            "{} == {}",
-            operand_str(arena, names, temps, a),
-            operand_str(arena, names, temps, b)
-        ),
+        Node::IntEq(a, b) => format!("{} == {}", opl(a), opl(b)),
         Node::UintInput(n) => names.uint_in[n as usize].to_string(),
         // A `uint` literal renders with the HLSL unsigned suffix (`0xFFu`, `8u`).
         Node::UintLit(u) => format!("{}u", u),
+        // ---- Increment 3 inline leaves -------------------------------------------------
+        // A `float3`/`uint3` parameter spells its NAME (`origin`, `dims`).
+        Node::Vec3Param(n) => names.vec_in[n as usize].to_string(),
+        Node::Uint3Param(n) => names.uint3_in[n as usize].to_string(),
+        // A swizzle spells `<source>.x` (the source is itself an inline leaf — a param ref
+        // or a `rel` temp ref — so it never needs a wrap; pass `Left`).
+        Node::Vec3Swizzle(v, axis) => format!("{}.{}", opl(v), AXIS[axis as usize]),
+        Node::Uint3Swizzle(v, axis) => format!("{}.{}", opl(v), AXIS[axis as usize]),
+        // `grid[idx]` — the buffer name + the index (an inline leaf, the `idx` temp ref).
+        Node::BufferLoad(buf, idx) => format!("{}[{}]", names.buf_in[buf as usize], opl(idx)),
+        // The `>=` / `||` masks appear only inside a guard condition (inlined like `Gt`).
+        Node::UGe(a, b) => format!("{} >= {}", opl(a), opl(b)),
+        Node::Or(a, b) => format!("{} || {}", opl(a), opl(b)),
         // A non-leaf operand: if it was MATERIALIZED as a `tN` temp (the straight-line
         // field/normal/decode/cubic emit materializes every non-leaf via the SSA walk,
         // so `temps[id]` is always `Some` there), use the temp name. Otherwise — the CF
@@ -583,13 +768,14 @@ fn operand_str(arena: &[Node], names: Names, temps: &[Option<String>], id: u32) 
             Some(name) => name.clone(),
             None => {
                 // An UN-`temp`'d non-leaf used as an operand (the CF body's inline
-                // subexpressions). Inline it via `define_str`, PARENTHESIZING a
-                // low-precedence node (`Add`/`Sub`/`Select`/`Lerp`/`Neg`) so it composes
-                // correctly inside a higher-precedence parent — e.g. `(t1 - p[a]) * t3`,
-                // NOT `t1 - p[a] * t3`. A function-call form (`abs(_)`/`min(_)`/...) and
-                // the comparisons need no wrap.
+                // subexpressions). Inline it via `define_str`, PARENTHESIZING per the
+                // POSITION-AWARE rule so it composes correctly inside a higher-precedence
+                // parent — e.g. `(t1 - p[a]) * t3`, NOT `t1 - p[a] * t3` — yet a LEFT
+                // same-precedence operand stays flat (`ix + iy*dims.x + iz*...`, NOT
+                // `(ix + iy*dims.x) + iz*...`). A function-call form / a comparison need no
+                // wrap.
                 let inner = define_str(arena, names, temps, id);
-                if needs_paren_as_operand(node) {
+                if needs_paren_as_operand(node, pos) {
                     format!("({inner})")
                 } else {
                     inner
@@ -599,20 +785,42 @@ fn operand_str(arena: &[Node], names: Names, temps: &[Option<String>], id: u32) 
     }
 }
 
-/// True for a node whose inline spelling is an INFIX low-precedence expression
-/// (`a + b`, `a - b`, `-a`, the `cond ? t : e` ternary, the `lerp` is a call so it does
-/// NOT need a wrap) — it must be PARENTHESIZED when used as an operand of a higher-
-/// precedence op, so `(t1 - p[a]) * t3` does not mis-parse as `t1 - (p[a] * t3)`.
+/// The HLSL swizzle component letters, indexed by axis (0=x, 1=y, 2=z).
+const AXIS: [&str; 3] = ["x", "y", "z"];
+
+/// True for a node whose inline spelling must be PARENTHESIZED in the parent `pos`.
 ///
-/// NOTE (review carry-in): `Mul`/`Div` are deliberately NOT parenthesized — the only CF
-/// body today (`dist_to_brick_exit`) leaves no un-`temp`'d `Mul`/`Div` as an operand (its
-/// products are all materialized into `tN` temps before reuse), so there is no precedence/
-/// associativity hazard to wrap against. RE-AUDIT `Mul`/`Div` precedence + left-
-/// associativity here when a FUTURE CF body leaves arithmetic un-`temp`'d as an operand
-/// (e.g. an inline `a / b / c`, which left-associates as `(a / b) / c` and would need a
-/// wrap if it became the right operand of another `/`).
-fn needs_paren_as_operand(node: Node) -> bool {
-    matches!(node, Node::Add(..) | Node::Sub(..) | Node::Neg(..) | Node::Select(..))
+/// PRECEDENCE-AND-ASSOCIATIVITY-AWARE (Increment 3): the precedence comes from the
+/// PARENT's class, the wrap-or-not from the SIDE.
+/// - A `Neg`/`Select` always groups (a unary minus / a ternary, side-independent).
+/// - An ADDITIVE node (`Add`/`Sub`/`UAdd`):
+///   - under a MULTIPLICATIVE parent ([`OperandPos::MulSide`]) → ALWAYS wraps (`(t1 -
+///     p[a]) * t3` — `*`/`/` bind tighter), preserving the existing leaves byte-for-byte.
+///   - as the RIGHT operand of an additive parent ([`OperandPos::AddRight`]) → wraps
+///     (`a - (b - c)`).
+///   - as the LEFT operand of an additive parent ([`OperandPos::AddLeft`]) → NO wrap
+///     (left-associativity: `a + b + c` is already `(a + b) + c`) — the brick `idx`
+///     line's load-bearing flat case.
+///   - at the root ([`OperandPos::Root`]) → no wrap.
+///
+/// `Mul`/`Div`/`UMul` bind tighter than `+`/`-`, so they never need a wrap as an additive
+/// or multiplicative operand (the brick `idx`'s products are bare `iy*dims.x`); they are
+/// NOT in the set.
+fn needs_paren_as_operand(node: Node, pos: OperandPos) -> bool {
+    match node {
+        // A unary minus / a ternary always groups (side-independent).
+        Node::Neg(..) | Node::Select(..) => true,
+        // Additive infix nodes (scalar `+`/`-`/`uint +`, AND the `float3` `+`/`-`): wrap
+        // under a multiplicative parent (precedence: `(p - origin) / bw`, `(t1 - p[a]) *
+        // t3`) or in the additive-RIGHT position (associativity); the additive-LEFT + root
+        // positions stay flat (the brick `idx` line's `ix + iy*dims.x + iz*...`).
+        Node::Add(..)
+        | Node::Sub(..)
+        | Node::UAdd(..)
+        | Node::Vec3Add(..)
+        | Node::Vec3Sub(..) => matches!(pos, OperandPos::MulSide | OperandPos::AddRight),
+        _ => false,
+    }
 }
 
 /// M1 (review carry-in): asserts an operand node's HLSL [`EmitTy`] is `want`. A
@@ -638,7 +846,15 @@ fn assert_operand_ty(arena: &[Node], id: u32, want: EmitTy) {
 /// from its operands' names (a temp name, an input name, or an inlined literal).
 fn define_str(arena: &[Node], names: Names, temps: &[Option<String>], id: u32) -> String {
     let node = arena[id as usize];
-    let op = |child: u32| operand_str(arena, names, temps, child);
+    // Position-aware operand spellings: `op` = position-irrelevant (Root — function-call
+    // args, comparison comparands, the `min`/`max`/`abs` intrinsics); `opl`/`opr` = the
+    // LEFT/RIGHT operand of an ADDITIVE parent; `opm` = an operand of a MULTIPLICATIVE
+    // parent (an additive child always wraps). The existing float leaves use `op`/`opm`
+    // (their products always wrapped an additive child), so they stay byte-identical.
+    let op = |child: u32| operand_str(arena, names, temps, child, OperandPos::Root);
+    let opl = |child: u32| operand_str(arena, names, temps, child, OperandPos::AddLeft);
+    let opr = |child: u32| operand_str(arena, names, temps, child, OperandPos::AddRight);
+    let opm = |child: u32| operand_str(arena, names, temps, child, OperandPos::MulSide);
     // M1: the FLOAT arithmetic nodes take FLOAT operands; the bit/cast nodes take
     // UINT operands. Check before spelling (the `Mask` operand of `Select` and the
     // `Gt`/`IntEq` comparands are excluded — a comparison is an inlined leaf typed
@@ -664,22 +880,22 @@ fn define_str(arena: &[Node], names: Names, temps: &[Option<String>], id: u32) -
         Node::Add(a, b) => {
             chk(a, EmitTy::Float);
             chk(b, EmitTy::Float);
-            format!("{} + {}", op(a), op(b))
+            format!("{} + {}", opl(a), opr(b))
         }
         Node::Sub(a, b) => {
             chk(a, EmitTy::Float);
             chk(b, EmitTy::Float);
-            format!("{} - {}", op(a), op(b))
+            format!("{} - {}", opl(a), opr(b))
         }
         Node::Mul(a, b) => {
             chk(a, EmitTy::Float);
             chk(b, EmitTy::Float);
-            format!("{} * {}", op(a), op(b))
+            format!("{} * {}", opm(a), opm(b))
         }
         Node::Div(a, b) => {
             chk(a, EmitTy::Float);
             chk(b, EmitTy::Float);
-            format!("{} / {}", op(a), op(b))
+            format!("{} / {}", opm(a), opm(b))
         }
         Node::Neg(a) => {
             chk(a, EmitTy::Float);
@@ -740,6 +956,66 @@ fn define_str(arena: &[Node], names: Names, temps: &[Option<String>], id: u32) -
             chk(a, EmitTy::Uint);
             format!("(float){}", op(a))
         }
+
+        // ---- Increment 3 materialized (non-leaf) nodes ---------------------------------
+        // `float3(ix, iy, iz)` — the implicit uint→float ctor (asserts all-`uint`).
+        Node::Vec3FromUints(x, y, z) => {
+            chk(x, EmitTy::Uint);
+            chk(y, EmitTy::Uint);
+            chk(z, EmitTy::Uint);
+            format!("float3({}, {}, {})", op(x), op(y), op(z))
+        }
+        Node::Vec3Add(a, b) => {
+            chk(a, EmitTy::Float3);
+            chk(b, EmitTy::Float3);
+            format!("{} + {}", opl(a), opr(b))
+        }
+        Node::Vec3Sub(a, b) => {
+            chk(a, EmitTy::Float3);
+            chk(b, EmitTy::Float3);
+            format!("{} - {}", opl(a), opr(b))
+        }
+        // `float3 * float` / `float3 / float`: the vector is the multiplicative side, the
+        // scalar a `float`. (`float3(...) * bw` / `(p - origin) / bw`.)
+        Node::Vec3MulScalar(v, s) => {
+            chk(v, EmitTy::Float3);
+            chk(s, EmitTy::Float);
+            format!("{} * {}", opm(v), opm(s))
+        }
+        Node::Vec3DivScalar(v, s) => {
+            chk(v, EmitTy::Float3);
+            chk(s, EmitTy::Float);
+            format!("{} / {}", opm(v), opm(s))
+        }
+        // `(uint)f` — the HLSL float→uint truncating cast.
+        Node::FloatToUint(a) => {
+            chk(a, EmitTy::Float);
+            format!("(uint){}", op(a))
+        }
+        // `a + b` / `a * b` over `uint`s (the cell index math).
+        Node::UAdd(a, b) => {
+            chk(a, EmitTy::Uint);
+            chk(b, EmitTy::Uint);
+            format!("{} + {}", opl(a), opr(b))
+        }
+        Node::UMul(a, b) => {
+            chk(a, EmitTy::Uint);
+            chk(b, EmitTy::Uint);
+            format!("{} * {}", opm(a), opm(b))
+        }
+
+        // The Increment-3 inline leaves (`Vec3Param`/`Vec3Swizzle`/`Uint3Param`/
+        // `Uint3Swizzle`/`BufferLoad`/`UGe`/`Or`) are spelled by `operand_str`, never
+        // materialized as a temp — so they must not reach `define_str`.
+        Node::Vec3Param(_)
+        | Node::Vec3Swizzle(_, _)
+        | Node::Uint3Param(_)
+        | Node::Uint3Swizzle(_, _)
+        | Node::BufferLoad(_, _)
+        | Node::UGe(_, _)
+        | Node::Or(_, _) => {
+            unreachable!("Increment-3 inline leaves are spelled by operand_str, not defined")
+        }
     }
 }
 
@@ -777,7 +1053,7 @@ fn emit_temps(arena: &[Node], names: Names) -> (String, Vec<Option<String>>) {
 /// leaves (inputs/literals) inline.
 fn emit_body(arena: &[Node], names: Names, root: u32) -> String {
     let (mut out, temps) = emit_temps(arena, names);
-    let ret = operand_str(arena, names, &temps, root);
+    let ret = operand_str(arena, names, &temps, root, OperandPos::Root);
     out.push_str(&format!("    return {};\n", ret));
     out
 }
@@ -792,7 +1068,7 @@ fn emit_body(arena: &[Node], names: Names, root: u32) -> String {
 /// (`tN` vs `c0`), which is invisible to the `.spv` (DXC strips local debug names).
 fn emit_body_vec4(arena: &[Node], names: Names, roots: [u32; 4]) -> String {
     let (mut out, temps) = emit_temps(arena, names);
-    let r = |id: u32| operand_str(arena, names, &temps, id);
+    let r = |id: u32| operand_str(arena, names, &temps, id, OperandPos::Root);
     out.push_str(&format!(
         "    return float4({}, {}, {}, {});\n",
         r(roots[0]),
@@ -813,6 +1089,9 @@ fn trace<F: FnOnce(&[Emit]) -> Emit>(inputs: usize, body: F) -> String {
         float_in: FIELD_INPUT_NAMES,
         uint_in: NO_UINT_INPUTS,
         vec_in: NO_VEC_INPUTS,
+        uint3_in: NO_UINT3_INPUTS,
+        buf_in: NO_BUF_INPUTS,
+        out_in: NO_OUT_INPUTS,
         named_lit: NO_NAMED_LITS,
         vars: NO_VARS,
     };
@@ -843,6 +1122,9 @@ fn trace_named<F: FnOnce(&[Emit], &[Emit]) -> Emit>(
         float_in: float_names,
         uint_in: uint_names,
         vec_in: NO_VEC_INPUTS,
+        uint3_in: NO_UINT3_INPUTS,
+        buf_in: NO_BUF_INPUTS,
+        out_in: NO_OUT_INPUTS,
         named_lit: NO_NAMED_LITS,
         vars: NO_VARS,
     };
@@ -876,6 +1158,9 @@ fn trace_named_vec4<F: FnOnce(&[Emit], &[Emit]) -> [Emit; 4]>(
         float_in: float_names,
         uint_in: uint_names,
         vec_in: NO_VEC_INPUTS,
+        uint3_in: NO_UINT3_INPUTS,
+        buf_in: NO_BUF_INPUTS,
+        out_in: NO_OUT_INPUTS,
         named_lit: NO_NAMED_LITS,
         vars: NO_VARS,
     };
@@ -1190,13 +1475,29 @@ enum Stmt {
     /// `<ty> <var> = <rhs>;` — a mutable-local declaration (`float exit = 1.0e30;`).
     /// `rhs` is the init expression's [`Node`] id.
     DeclVar { var: Var, ty: EmitTy, rhs: u32 },
-    /// `<ty> t<seq> = <rhs>;` — a MATERIALIZED temp (`float t0 = rd[a];`). `seq` is the
-    /// temp's program-order sequence number; `rhs` the materialized expression's [`Node`]
-    /// id. Recorded by [`EmitCf::temp`] (the EXPLICIT materialization the body requests via
-    /// [`Cf::temp`], pinning the emitted shape to the committed HLSL).
-    DeclTemp { seq: u32, ty: EmitTy, rhs: u32 },
+    /// `<ty> t<seq> = <rhs>;` (anonymous) or `<ty> <name> = <rhs>;` (named) — a
+    /// MATERIALIZED temp. `dist_to_brick_exit` uses ANONYMOUS temps (`float t0 = rd[a];`,
+    /// `name = None`); `brick_cell_class` uses NAMED temps (`float3 rel = ...;`, `uint ix =
+    /// ...;`, `name = Some("rel")`) to match the committed body's named locals. `seq` is
+    /// the temp's program-order sequence number (the `TempRef` handle's id, used for the
+    /// out-of-band type lookup AND the anonymous `t{seq}` spelling); `rhs` the materialized
+    /// expression's [`Node`] id. Recorded by [`EmitCf::temp`] / [`EmitCf::temp_vec3`] /
+    /// [`EmitCf::temp_uint`] (the EXPLICIT materialization the body requests).
+    DeclTemp {
+        seq: u32,
+        name: Option<&'static str>,
+        ty: EmitTy,
+        rhs: u32,
+    },
     /// `<var> = <rhs>;` — a mutable-local assignment (`exit = min(exit, t6);`).
     Assign { var: Var, rhs: u32 },
+    /// `<name> = <rhs>;` — an OUT-PARAMETER assignment (`cell_min = origin;`). Distinct
+    /// from [`Stmt::DeclVar`] (which prints a `<ty> <name> = <rhs>;` LOCAL declaration):
+    /// `cell_min` is an HLSL `out` PARAMETER, so its writes are BARE assignments (no
+    /// `float3` keyword). `name_id` indexes the out-param name table (carried by the
+    /// printer); `rhs` the value expression's [`Node`] id. Recorded by
+    /// [`EmitCf::out_vec3_assign`]; printed as `cell_min = <rhs>;`.
+    OutAssign { name_id: u32, rhs: u32 },
     /// `<attr> for (uint <iv> = 0u; <iv> < <n>u; ++<iv>) { <body> }` — an UNROLLED loop.
     /// `iv` is the induction-variable name; `n` the trip count; `body` the loop block.
     UnrollFor {
@@ -1210,11 +1511,10 @@ enum Stmt {
     If { cond: u32, then: Block },
     /// `continue;` — the loop-continue (skip the rest of the iteration).
     Continue,
-    /// `return <expr>;` — a function return. DEAD in Increment 1 (the brick-exit's final
-    /// return is spelled directly by the printer, NOT recorded); Increment 3 wires it for
-    /// the early-return marcher. Kept as a foundation node (mirroring how `Node::And`/
-    /// `Node::Shr` sat as foundations before A3 used them).
-    #[allow(dead_code)]
+    /// `return <expr>;` — a function return. LIVE in Increment 3: recorded by
+    /// [`EmitCf::ret`] / [`EmitCf::if_ret`] (the SOLE return mechanism for the early-return
+    /// marcher `brick_cell_class`). The brick-exit (Increment 1) spells its single final
+    /// return directly in the printer (not via this), so its body records no `Return`.
     Return(u32),
 }
 
@@ -1231,6 +1531,23 @@ struct Block {
 /// field is private, so it is an opaque handle.
 #[derive(Clone, Copy)]
 pub struct Var(u32);
+
+/// An `out`-PARAMETER name handle (the brick-cell's `cell_min`) — indexes the printer's
+/// out-param name table. The [`EmitCf`]'s [`Cf::OutVec3`] associated type. Its assignments
+/// print BARE (`cell_min = ...;`), not a local declaration.
+#[derive(Clone, Copy)]
+pub struct OutParam(u32);
+
+/// A `StructuredBuffer<uint>`-PARAMETER name handle (the brick-cell's `grid`) — indexes
+/// the printer's [`Names::buf_in`] table. The [`EmitCf`]'s [`Cf::Buf`] associated type.
+#[derive(Clone, Copy)]
+pub struct BufParam(u32);
+
+/// The RETURN-VALUE cell handle on the Emit backend — a ZST (the return value travels in
+/// the recorded [`Stmt::Return`], not in a cell). The [`EmitCf`]'s [`Cf::RetCell`]
+/// associated type; a unit so `&cell` is a zero-cost ignored argument.
+#[derive(Clone, Copy)]
+pub struct RetCell;
 
 thread_local! {
     /// The STMT block stack: the recorder pushes a [`Block`] on combinator entry
@@ -1261,6 +1578,36 @@ fn record_stmt(stmt: Stmt) {
             .stmts
             .push(stmt);
     });
+}
+
+/// Records a materialized temp: assigns the next program-order `seq`, registers the
+/// temp's result [`EmitTy`] out-of-band (so [`type_of`]`(`[`Node::TempRef`]`(seq))` reads
+/// it), records the `Stmt::DeclTemp` (named or anonymous), and returns a [`Node::TempRef`]
+/// handle so later uses spell the temp's name/`t{seq}`. Shared by [`Cf::temp`] (anonymous
+/// `float`) and the Increment-3 named-temp combinators ([`Cf::temp_vec3`] /
+/// [`Cf::temp_uint`]).
+fn record_temp(name: Option<&'static str>, ty: EmitTy, x: Emit) -> Emit {
+    let rhs = x.0;
+    let seq = TEMP_SEQ.with(|c| {
+        let mut c = c.borrow_mut();
+        let s = *c;
+        *c += 1;
+        s
+    });
+    // Register the temp's result type + name at index == seq (pushed in program order, so
+    // the index IS the seq). `type_of`/`operand_str` of a `TempRef(seq)` read them.
+    TEMP_TYPES.with(|t| {
+        let mut t = t.borrow_mut();
+        debug_assert_eq!(t.len() as u32, seq, "TEMP_TYPES must stay seq-indexed");
+        t.push(ty);
+    });
+    TEMP_NAMES.with(|t| {
+        let mut t = t.borrow_mut();
+        debug_assert_eq!(t.len() as u32, seq, "TEMP_NAMES must stay seq-indexed");
+        t.push(name);
+    });
+    record_stmt(Stmt::DeclTemp { seq, name, ty, rhs });
+    Emit(push(Node::TempRef(seq)))
 }
 
 /// Registers a named-literal symbol, returning its (deduped) `sym_id`.
@@ -1337,22 +1684,8 @@ impl Cf for EmitCf {
     }
 
     fn temp(x: Emit) -> Emit {
-        // Assign the next program-order sequence number, record the materialization
-        // statement (`float t{seq} = <x's expression>;`) into the current block, and
-        // return a `TempRef` handle so later uses of `x` spell `t{seq}`.
-        let rhs = x.0;
-        let seq = TEMP_SEQ.with(|c| {
-            let mut c = c.borrow_mut();
-            let s = *c;
-            *c += 1;
-            s
-        });
-        record_stmt(Stmt::DeclTemp {
-            seq,
-            ty: EmitTy::Float,
-            rhs,
-        });
-        Emit(push(Node::TempRef(seq)))
+        // An ANONYMOUS `float` temp (`float t{seq} = ...;`, the brick-exit materialization).
+        record_temp(None, EmitTy::Float, x)
     }
 
     fn unroll_for<F: FnMut(Emit) -> Flow>(attr: &'static str, n: usize, mut body: F) {
@@ -1401,6 +1734,132 @@ impl Cf for EmitCf {
         record_stmt(Stmt::Continue);
         Flow::Break(LoopOp::Continue)
     }
+
+    // ---- Increment 3 typed facets (the brick-cell value model recorder) -------------
+    // On Emit every value is an `Emit` SSA-node handle; the out-param / buffer / ret-cell
+    // are NAME handles (the value travels in the recorded statement, not in a cell).
+    type Uint = Emit;
+    type Uint3 = Emit;
+    type Vec3f = Emit;
+    type OutVec3 = OutParam;
+    type RetCell = RetCell;
+    type Buf<'a> = BufParam;
+
+    fn vec3_sub(a: Emit, b: Emit) -> Emit {
+        Emit(push(Node::Vec3Sub(a.0, b.0)))
+    }
+    fn vec3_add(a: Emit, b: Emit) -> Emit {
+        Emit(push(Node::Vec3Add(a.0, b.0)))
+    }
+    fn vec3_div_scalar(v: Emit, s: Emit) -> Emit {
+        Emit(push(Node::Vec3DivScalar(v.0, s.0)))
+    }
+    fn vec3_mul_scalar(v: Emit, s: Emit) -> Emit {
+        Emit(push(Node::Vec3MulScalar(v.0, s.0)))
+    }
+    fn vec3_from_uints(x: Emit, y: Emit, z: Emit) -> Emit {
+        Emit(push(Node::Vec3FromUints(x.0, y.0, z.0)))
+    }
+
+    fn vec3_x(v: Emit) -> Emit {
+        Emit(push(Node::Vec3Swizzle(v.0, 0)))
+    }
+    fn vec3_y(v: Emit) -> Emit {
+        Emit(push(Node::Vec3Swizzle(v.0, 1)))
+    }
+    fn vec3_z(v: Emit) -> Emit {
+        Emit(push(Node::Vec3Swizzle(v.0, 2)))
+    }
+
+    fn uint3_x(d: Emit) -> Emit {
+        Emit(push(Node::Uint3Swizzle(d.0, 0)))
+    }
+    fn uint3_y(d: Emit) -> Emit {
+        Emit(push(Node::Uint3Swizzle(d.0, 1)))
+    }
+    fn uint3_z(d: Emit) -> Emit {
+        Emit(push(Node::Uint3Swizzle(d.0, 2)))
+    }
+
+    fn float_to_uint(f: Emit) -> Emit {
+        Emit(push(Node::FloatToUint(f.0)))
+    }
+
+    fn uadd(a: Emit, b: Emit) -> Emit {
+        Emit(push(Node::UAdd(a.0, b.0)))
+    }
+    fn umul(a: Emit, b: Emit) -> Emit {
+        Emit(push(Node::UMul(a.0, b.0)))
+    }
+
+    fn named_uint(sym: &'static str, _val: u32) -> Emit {
+        // A `uint` named constant interns into the SAME named-literal table the `float`
+        // `named_lit` uses (the printer spells the SYMBOL); the `val` is Emit-irrelevant.
+        // The node is `NamedLit`, but its CONSUMERS (the `ret` of `BRICK_OUTSIDE_GRID`)
+        // never read `type_of` for an arithmetic check — a bare `return SYM;` types via the
+        // return printer with no `chk`. To keep `type_of(NamedLit) == Float` from mis-typing
+        // a `uint` consumer, this leaf's only use is a direct `ret` (no `chk`).
+        let sym_id = intern_named_lit(sym);
+        Emit(push(Node::NamedLit {
+            sym_id,
+            val: f32::NAN,
+        }))
+    }
+
+    fn buffer_load(buf: BufParam, idx: Emit) -> Emit {
+        Emit(push(Node::BufferLoad(buf.0, idx.0)))
+    }
+
+    fn uge(a: Emit, b: Emit) -> EmitMask {
+        EmitMask(push(Node::UGe(a.0, b.0)))
+    }
+
+    fn or(a: EmitMask, b: EmitMask) -> EmitMask {
+        EmitMask(push(Node::Or(a.0, b.0)))
+    }
+
+    fn temp_vec3(name: &'static str, v: Emit) -> Emit {
+        // A NAMED `float3` temp (`float3 rel = ...;`).
+        record_temp(Some(name), EmitTy::Float3, v)
+    }
+    fn temp_uint(name: &'static str, u: Emit) -> Emit {
+        // A NAMED `uint` temp (`uint ix = ...;`).
+        record_temp(Some(name), EmitTy::Uint, u)
+    }
+
+    fn out_vec3_assign(o: &OutParam, v: Emit) {
+        // A bare `cell_min = <rhs>;` (NO decl — `cell_min` is an `out` parameter).
+        record_stmt(Stmt::OutAssign {
+            name_id: o.0,
+            rhs: v.0,
+        });
+    }
+
+    fn if_ret(_cell: &RetCell, cond: EmitMask, value: Emit) -> Flow {
+        // Record `if (<cond>) { return <value>; }` — the then-block is EXACTLY ONE
+        // `Stmt::Return` (no spurious assign; the deleted dual set_var+ret mechanism), then
+        // FALL THROUGH (the recorder keeps recording the tail structurally). The `_cell` is
+        // a ZST on Emit (the value travels in the `Stmt::Return`, not a cell).
+        STMTS.with(|s| s.borrow_mut().push(Block { stmts: Vec::new() }));
+        record_stmt(Stmt::Return(value.0));
+        let then = STMTS.with(|s| {
+            s.borrow_mut()
+                .pop()
+                .expect("invariant: the if_ret then block was pushed above")
+        });
+        record_stmt(Stmt::If {
+            cond: cond.0,
+            then,
+        });
+        Flow::Continue(())
+    }
+
+    fn ret(_cell: &RetCell, value: Emit) -> Flow {
+        // The SOLE return mechanism — record a single `Stmt::Return(value)` into the current
+        // block (the function body's tail `return grid[idx];`). Fall through on Emit.
+        record_stmt(Stmt::Return(value.0));
+        Flow::Continue(())
+    }
 }
 
 // ---- The STMT printer + the brick-exit generator -------------------------------
@@ -1415,8 +1874,10 @@ impl Cf for EmitCf {
 fn inline_expr(arena: &[Node], names: Names, temps: &[Option<String>], expr: u32) -> String {
     let node = arena[expr as usize];
     if is_inline_leaf(node) {
-        operand_str(arena, names, temps, expr)
+        operand_str(arena, names, temps, expr, OperandPos::Root)
     } else {
+        // The statement rhs / condition is a ROOT-position expression (no enclosing infix
+        // op), so an additive top-level node needs no wrap.
         define_str(arena, names, temps, expr)
     }
 }
@@ -1438,13 +1899,34 @@ fn print_block(block: &Block, arena: &[Node], names: Names, depth: usize, out: &
                     rhs_s
                 ));
             }
-            Stmt::DeclTemp { seq, ty, rhs } => {
+            Stmt::DeclTemp {
+                seq,
+                name,
+                ty,
+                rhs,
+            } => {
                 let rhs_s = inline_expr(arena, names, &[], *rhs);
-                out.push_str(&format!("{pad}{} t{seq} = {};\n", ty_keyword(*ty), rhs_s));
+                // A NAMED temp (`float3 rel = ...;`, the brick-cell locals) prints its name;
+                // an ANONYMOUS temp (`float t0 = ...;`, the brick-exit) prints `t{seq}`.
+                match name {
+                    Some(n) => out.push_str(&format!("{pad}{} {n} = {};\n", ty_keyword(*ty), rhs_s)),
+                    None => {
+                        out.push_str(&format!("{pad}{} t{seq} = {};\n", ty_keyword(*ty), rhs_s))
+                    }
+                }
             }
             Stmt::Assign { var, rhs } => {
                 let rhs_s = inline_expr(arena, names, &[], *rhs);
                 out.push_str(&format!("{pad}{} = {};\n", names.vars[var.0 as usize], rhs_s));
+            }
+            Stmt::OutAssign { name_id, rhs } => {
+                // A BARE out-parameter assignment (`cell_min = <rhs>;`) — NO `float3` decl.
+                let rhs_s = inline_expr(arena, names, &[], *rhs);
+                out.push_str(&format!(
+                    "{pad}{} = {};\n",
+                    names.out_in[*name_id as usize],
+                    rhs_s
+                ));
             }
             Stmt::UnrollFor { attr, iv, n, body } => {
                 out.push_str(&format!("{pad}{attr}\n"));
@@ -1486,6 +1968,8 @@ pub fn emit_hlsl_dist_to_brick_exit() -> String {
     VARS.with(|v| v.borrow_mut().clear());
     NAMED_LITS.with(|n| n.borrow_mut().clear());
     TEMP_SEQ.with(|c| *c.borrow_mut() = 0);
+    TEMP_TYPES.with(|t| t.borrow_mut().clear());
+    TEMP_NAMES.with(|t| t.borrow_mut().clear());
 
     // Seed the function body block (the bottom of the STMTS stack).
     STMTS.with(|s| s.borrow_mut().push(Block { stmts: Vec::new() }));
@@ -1518,6 +2002,9 @@ pub fn emit_hlsl_dist_to_brick_exit() -> String {
         float_in: &float_in,
         uint_in: &["a"],
         vec_in: &vec_in,
+        uint3_in: NO_UINT3_INPUTS,
+        buf_in: NO_BUF_INPUTS,
+        out_in: NO_OUT_INPUTS,
         named_lit: &named_lit,
         vars: &vars,
     };
@@ -1535,6 +2022,93 @@ pub fn emit_hlsl_dist_to_brick_exit() -> String {
 
         format!(
             "float dist_to_brick_exit(float3 p, float3 rd, float3 cell_min, float bw) {{\n{body}}}\n"
+        )
+    })
+}
+
+/// Generates the HLSL `brick_cell_class` body — the pointer-grid cell lookup with the two
+/// EARLY-RETURN guards (negative-rel + bounds), the `uint` index math, the
+/// `StructuredBuffer<uint>` load, and the two `out float3 cell_min` writes — by tracing
+/// the generic [`crate::brick::brick_cell_class_body`] over the `EmitCf` backend, and
+/// returns the full `uint brick_cell_class(StructuredBuffer<uint> grid, float3 origin,
+/// float bw, uint3 dims, float3 p, out float3 cell_min) { ... }`.
+///
+/// The body is spliced between the `// === GENERATED brick_cell_class BEGIN/END ===`
+/// sentinels in `crates/boyko_rhi_vulkan/shaders/sdf_gbuffer_composite.hlsl` (the function
+/// DEFINITION only — the three call sites are UNTOUCHED). The `sdf_field_edsl_sync` test
+/// pins the committed shader to this output; the one-shot cmp-`.spv` proves it re-DXCs
+/// byte-identical to the committed `.comp.spv`. The host `host_brick_cell` (in
+/// `boyko_rhi_vulkan::compute`) stays hand-written (firewall option B).
+pub fn emit_hlsl_brick_cell_class() -> String {
+    use crate::brick;
+
+    // Fresh recorder state (incl. the Increment-3 TEMP_TYPES out-of-band table).
+    ARENA.with(|a| a.borrow_mut().clear());
+    STMTS.with(|s| s.borrow_mut().clear());
+    VARS.with(|v| v.borrow_mut().clear());
+    NAMED_LITS.with(|n| n.borrow_mut().clear());
+    TEMP_SEQ.with(|c| *c.borrow_mut() = 0);
+    TEMP_TYPES.with(|t| t.borrow_mut().clear());
+    TEMP_NAMES.with(|t| t.borrow_mut().clear());
+
+    // Seed the function body block (the bottom of the STMTS stack).
+    STMTS.with(|s| s.borrow_mut().push(Block { stmts: Vec::new() }));
+
+    // Seed the parameters as their typed marker nodes / name handles:
+    //   grid     → BufParam(0)   (buf_in[0]   = "grid")
+    //   origin   → Vec3Param(0)  (vec_in[0]   = "origin")
+    //   bw       → Input(0)      (float_in[0] = "bw")
+    //   dims     → Uint3Param(0) (uint3_in[0] = "dims")
+    //   p        → Vec3Param(1)  (vec_in[1]   = "p")
+    //   cell_min → OutParam(0)   (out_in[0]   = "cell_min")
+    let grid = BufParam(0);
+    let origin = Emit(push(Node::Vec3Param(0)));
+    let bw = Emit::input(0);
+    let dims = Emit(push(Node::Uint3Param(0)));
+    let p = Emit(push(Node::Vec3Param(1)));
+    let cell_min = OutParam(0);
+    let cls = RetCell;
+
+    brick::brick_cell_class_body::<EmitCf>(grid, origin, bw, dims, p, &cell_min, &cls);
+
+    // Pop the function body block and print it.
+    let body_block = STMTS.with(|s| {
+        s.borrow_mut()
+            .pop()
+            .expect("invariant: the function body block was pushed above")
+    });
+
+    let float_in = ["bw"];
+    let vec_in = ["origin", "p"];
+    let uint3_in = ["dims"];
+    let buf_in = ["grid"];
+    let out_in = ["cell_min"];
+    let named_lit = NAMED_LITS.with(|n| n.borrow().clone());
+    let names = Names {
+        float_in: &float_in,
+        uint_in: NO_UINT_INPUTS,
+        vec_in: &vec_in,
+        uint3_in: &uint3_in,
+        buf_in: &buf_in,
+        out_in: &out_in,
+        named_lit: &named_lit,
+        vars: NO_VARS,
+    };
+
+    ARENA.with(|a| {
+        let arena = a.borrow();
+        let mut body = String::new();
+        // The whole body is recorded statements (DeclTemp rel, OutAssign cell_min, the two
+        // guard `If { Return }`s, the `uint` temps, the conditional OutAssign, the buffer
+        // load Return) — a flat in-order walk; the early returns are structural `Stmt::If`s.
+        print_block(&body_block, &arena, names, 1, &mut body);
+
+        // The signature is two lines: the continuation is indented by 22 spaces (aligned
+        // under the first parameter, matching the committed `sdf_gbuffer_composite.hlsl`).
+        const SIG_INDENT: &str = "                      "; // 22 spaces
+        format!(
+            "uint brick_cell_class(StructuredBuffer<uint> grid, float3 origin, float bw, uint3 dims,\n\
+             {SIG_INDENT}float3 p, out float3 cell_min) {{\n{body}}}\n"
         )
     })
 }

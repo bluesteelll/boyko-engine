@@ -44,4 +44,13 @@ fn main() {
     // stays HAND-WRITTEN (firewall option B — see the brick module doc).
     println!();
     print!("{}", boyko_shaderdsl::emit::emit_hlsl_dist_to_brick_exit());
+    // The brick-cell pointer-grid lookup MARCHER leaf (Increment 3 — the second CONTROL-FLOW
+    // leaf, the first with EARLY RETURNS + a `StructuredBuffer<uint>` load + an `out float3`
+    // param + `uint` index math), generated from `boyko_shaderdsl::brick::brick_cell_class_body`
+    // over the `Emit` value backend + the `EmitCf` control-flow backend. Spliced between the
+    // `// === GENERATED brick_cell_class BEGIN/END ===` sentinels in
+    // `sdf_gbuffer_composite.hlsl` (the DEFINITION only — the 3 call sites are untouched). The
+    // host `host_brick_cell` (boyko_rhi_vulkan::compute) stays HAND-WRITTEN (firewall option B).
+    println!();
+    print!("{}", boyko_shaderdsl::emit::emit_hlsl_brick_cell_class());
 }

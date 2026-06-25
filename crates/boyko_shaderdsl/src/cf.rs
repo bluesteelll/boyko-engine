@@ -51,6 +51,13 @@ pub enum LoopOp {
     /// Exit the loop (the loop `break`) — carried now for type stability; PRODUCED by
     /// Increment 4 (no combinator emits it yet).
     Break,
+    /// FUNCTION return (the early-return marcher) — produced by [`Cf::ret`] (Increment 3,
+    /// `brick_cell_class`). The return VALUE travels OUT OF BAND (a body-local cell on
+    /// Eval; the value node recorded into `Stmt::Return` on Emit), so the payload stays
+    /// ZST and the [`Flow`] type is unchanged (no `?`-propagation re-audit). The token is
+    /// consumed by the function-scope IIFE's `?` — `brick_cell_class` has no loop, so it
+    /// never reaches [`Cf::unroll_for`]'s match (a `debug_assert!` guards that).
+    Return,
 }
 
 /// The control-flow propagation token threaded through a loop body by `?`.
@@ -161,6 +168,145 @@ pub trait Cf {
     /// The loop-CONTINUE token (a [`ControlFlow::Break`]`(`[`LoopOp::Continue`]`)`) —
     /// `?`-propagated out of the loop body to skip the rest of the iteration.
     fn cont() -> Flow;
+
+    // ---- Increment 3 typed facets (the `brick_cell_class` value model) -----------
+    //
+    // A `uint` class + a `float3` cell_min out-param + a `StructuredBuffer<uint>` load
+    // — the second CF leaf's value types. Each is an associated TYPE instantiated as a
+    // body-local / parameter (NOT stored on the ZST backend), so the
+    // `size_of::<EvalCf>() == 0` guarantee still holds. Eval is native Rust (real
+    // casts, real `||`, a `Cell` out-param); Emit records SSA nodes / statements.
+
+    /// The `uint` scalar — `u32` on Eval, the SSA-node handle [`Scalar`](Self::Scalar)
+    /// on Emit (a handle carrying [`crate::emit`]'s `uint` [`EmitTy`] per-node). The
+    /// brick class + the linear cell index.
+    type Uint: Copy;
+
+    /// A `uint3` PARAMETER (`dims`) — `[u32; 3]` on Eval, an emit `uint3`-param handle on
+    /// Emit. Swizzled component-wise by [`uint3_x`](Self::uint3_x) etc.
+    type Uint3: Copy;
+
+    /// A `float3` VALUE (`rel`, `cell_min`'s rhs) — `[f32; 3]` on Eval, an emit `float3`
+    /// SSA handle on Emit. Distinct from the straight-line leaves' `[Self::Scalar; 3]`:
+    /// `brick_cell_class` records `float3` as a FIRST-CLASS value (a `rel` temp, a `p -
+    /// origin` subtract) so the emitted HLSL spells `float3 rel = ...;`, not three scalar
+    /// temps.
+    type Vec3f: Copy;
+
+    /// The `float3` OUT-PARAMETER local state (`cell_min`) — `Cell<[f32; 3]>` on Eval
+    /// (interior mutability; the body writes through `&o`), an emit out-param NAME handle
+    /// on Emit (its writes print bare `cell_min = ...;`, NOT a `float3 cell_min = ...;`
+    /// decl). Owned (no lifetime), passed by `&` to [`out_vec3_assign`](Self::
+    /// out_vec3_assign) — the SAME `&Self::Var` idiom [`get_var`](Self::get_var) uses.
+    type OutVec3;
+
+    /// The RETURN-VALUE cell (`Cell<u32>` on Eval — the body-local cell the IIFE reads
+    /// after an early return; a ZST on Emit, the value travels in the recorded
+    /// `Stmt::Return`). Owned, passed by `&` to [`ret`](Self::ret) / [`if_ret`](Self::
+    /// if_ret).
+    type RetCell;
+
+    /// A `StructuredBuffer<uint>` PARAMETER (`grid`) — a BORROW of the external grid data
+    /// (`&'a [u32]` on Eval, an emit buffer-name handle on Emit), so it is a GENERIC
+    /// associated type over the borrow lifetime (the grid is owned by the caller, not the
+    /// body). `Copy` (a shared slice / a name handle). Read by
+    /// [`buffer_load`](Self::buffer_load).
+    type Buf<'a>: Copy;
+
+    /// `(p - origin)` — component-wise `float3` subtraction.
+    fn vec3_sub(a: Self::Vec3f, b: Self::Vec3f) -> Self::Vec3f;
+    /// `(a + b)` — component-wise `float3` addition (`origin + offset`).
+    fn vec3_add(a: Self::Vec3f, b: Self::Vec3f) -> Self::Vec3f;
+    /// `(v / s)` — `float3` divided by a `float` scalar (`(p - origin) / bw`).
+    fn vec3_div_scalar(v: Self::Vec3f, s: Self::Scalar) -> Self::Vec3f;
+    /// `(v * s)` — `float3` times a `float` scalar (`float3(ix,iy,iz) * bw`).
+    fn vec3_mul_scalar(v: Self::Vec3f, s: Self::Scalar) -> Self::Vec3f;
+    /// `float3(x, y, z)` from THREE `uint`s — the HLSL ctor's implicit uint→float
+    /// (`float3(ix, iy, iz)`). A NARROW node (asserts all-`uint` operands on Emit); the
+    /// only cross-type construct in the leaf.
+    fn vec3_from_uints(x: Self::Uint, y: Self::Uint, z: Self::Uint) -> Self::Vec3f;
+
+    /// `v.x` / `v.y` / `v.z` — a `float3` swizzle to a `float` scalar (`rel.x`).
+    fn vec3_x(v: Self::Vec3f) -> Self::Scalar;
+    /// `v.y`.
+    fn vec3_y(v: Self::Vec3f) -> Self::Scalar;
+    /// `v.z`.
+    fn vec3_z(v: Self::Vec3f) -> Self::Scalar;
+
+    /// `d.x` / `d.y` / `d.z` — a `uint3` swizzle to a `uint` (`dims.x`).
+    fn uint3_x(d: Self::Uint3) -> Self::Uint;
+    /// `d.y`.
+    fn uint3_y(d: Self::Uint3) -> Self::Uint;
+    /// `d.z`.
+    fn uint3_z(d: Self::Uint3) -> Self::Uint;
+
+    /// `(uint)f` — the HLSL NUMERIC `float -> uint` truncating cast (`(uint)rel.x`), NOT
+    /// `asuint` (a bit-reinterpret). On Eval `f as u32` (the same truncation HLSL's
+    /// `OpConvertFToU` performs for in-range non-negative inputs — the negative-rel case
+    /// is guarded OUT before any cast runs).
+    fn float_to_uint(f: Self::Scalar) -> Self::Uint;
+
+    /// `a + b` over two `uint`s (the index accumulation).
+    fn uadd(a: Self::Uint, b: Self::Uint) -> Self::Uint;
+    /// `a * b` over two `uint`s (the row/slice strides).
+    fn umul(a: Self::Uint, b: Self::Uint) -> Self::Uint;
+
+    /// A NAMED `uint` constant — `val` on Eval, the SYMBOL `sym` on Emit (so the
+    /// emitted HLSL spells `BRICK_OUTSIDE_GRID`, not `4294967295u`).
+    fn named_uint(sym: &'static str, val: u32) -> Self::Uint;
+
+    /// `grid[idx]` — a `StructuredBuffer<uint>` load (→ `uint`).
+    fn buffer_load(buf: Self::Buf<'_>, idx: Self::Uint) -> Self::Uint;
+
+    /// `f < 0.0`-style: the `float` strict-less-than producing the leaf's guard
+    /// [`Mask`](FieldScalar::Mask). (`rel.x < 0.0` reuses [`FieldScalar::lt`]; this is the
+    /// `uint` `>=` analogue.) `a >= b` over two `uint`s — the bounds guard `ix >= dims.x`.
+    fn uge(a: Self::Uint, b: Self::Uint) -> <Self::Scalar as FieldScalar>::Mask;
+
+    /// `a || b` over two guard masks — the short-circuit OR. On Eval the masks are
+    /// already-computed `bool`s (`a || b`); every comparand in `brick_cell_class` is
+    /// side-effect-free (pure `<` / `>=` over locals), so the eager-mask form is
+    /// RESULT-EQUIVALENT to the short-circuit (the tail-skip — the casts not running on a
+    /// negative rel — is preserved by statement ORDER + the `ret`'s `?`, proven by the
+    /// negative-rel sweep). On Emit it records the lazy `OpBranchConditional` chain DXC
+    /// lowers `a||b||c` to (spike E2a: zero `OpLogicalOr`).
+    fn or(
+        a: <Self::Scalar as FieldScalar>::Mask,
+        b: <Self::Scalar as FieldScalar>::Mask,
+    ) -> <Self::Scalar as FieldScalar>::Mask;
+
+    /// Declares a NAMED mutable `float3` temp (`float3 rel = <rhs>;`). Eval is identity
+    /// (the value flows directly); Emit records a named `Stmt::DeclTemp` (a `float3`
+    /// temp). Returns the temp handle so later swizzles spell `rel.x`.
+    fn temp_vec3(name: &'static str, v: Self::Vec3f) -> Self::Vec3f;
+
+    /// Declares a NAMED mutable `uint` temp (`uint ix = <rhs>;`). Eval is identity; Emit
+    /// records a named `uint` `Stmt::DeclTemp`. Returns the temp handle.
+    fn temp_uint(name: &'static str, u: Self::Uint) -> Self::Uint;
+
+    /// Assigns the `float3` OUT-PARAMETER (`cell_min = <rhs>;`). Eval `set`s the
+    /// `Cell<[f32; 3]>` through `&o`; Emit records a `Stmt::OutAssign` printing a bare
+    /// `cell_min = <rhs>;` (NO decl — `cell_min` is an `out` parameter, not a local).
+    fn out_vec3_assign(o: &Self::OutVec3, v: Self::Vec3f);
+
+    /// `if (cond) { return value; }` — the early-return guard. On Eval: when `cond`, the
+    /// `value` is deposited into the `ret` cell (via `&cell`) and a
+    /// [`Break`](LoopOp::Return) token is returned (the body's `?` short-circuits the
+    /// IIFE, skipping the live tail — the casts after guard 1); else FALL THROUGH. On
+    /// Emit: records a `Stmt::If` whose then-block is EXACTLY ONE `Stmt::Return(value)`
+    /// (no spurious assign), then falls through (the recorder keeps recording the tail
+    /// structurally).
+    fn if_ret(
+        cell: &Self::RetCell,
+        cond: <Self::Scalar as FieldScalar>::Mask,
+        value: Self::Uint,
+    ) -> Flow;
+
+    /// The SOLE function-return mechanism (replaces the deleted dual set_var+ret). On
+    /// Eval deposits `value` into the `cell` (via `&cell`) and returns
+    /// [`Break`](LoopOp::Return); on Emit records a single `Stmt::Return(value)`. The
+    /// body's tail `C::ret(&cell, tail)?` is the final return (`return grid[idx];`).
+    fn ret(cell: &Self::RetCell, value: Self::Uint) -> Flow;
 }
 
 /// The control-flow EVAL backend — REAL host `for`/`if`/`continue`, a unit ZST.
@@ -229,6 +375,18 @@ impl Cf for EvalCf {
                 core::ops::ControlFlow::Continue(()) => {}
                 core::ops::ControlFlow::Break(LoopOp::Continue) => continue,
                 core::ops::ControlFlow::Break(LoopOp::Break) => break,
+                // `Break(Return)` is a FUNCTION return, consumed by the function-scope IIFE's
+                // `?` — it must never reach a loop level (the only CF leaf with a `ret`,
+                // `brick_cell_class`, has no loop). If it does, a body wired a `ret` inside a
+                // loop without an enclosing IIFE: a bug, not a silent loop-break.
+                core::ops::ControlFlow::Break(LoopOp::Return) => {
+                    debug_assert!(
+                        false,
+                        "LoopOp::Return reached a loop level: a `ret` must be consumed by a \
+                         function-scope IIFE's `?`, not the loop (brick_cell_class has no loop)"
+                    );
+                    break;
+                }
             }
         }
     }
@@ -245,5 +403,143 @@ impl Cf for EvalCf {
     #[inline]
     fn cont() -> Flow {
         core::ops::ControlFlow::Break(LoopOp::Continue)
+    }
+
+    // ---- Increment 3 typed facets (native host: real casts, real ||, Cell out-param) ----
+    type Uint = u32;
+    type Uint3 = [u32; 3];
+    type Vec3f = [f32; 3];
+    type OutVec3 = core::cell::Cell<[f32; 3]>;
+    type RetCell = core::cell::Cell<u32>;
+    type Buf<'a> = &'a [u32];
+
+    #[inline]
+    fn vec3_sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+        [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+    }
+    #[inline]
+    fn vec3_add(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+        [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+    }
+    #[inline]
+    fn vec3_div_scalar(v: [f32; 3], s: f32) -> [f32; 3] {
+        // The HLSL `float3 / float` broadcasts `s` to a `float3` then divides component-wise
+        // (the spike disassembly's `OpCompositeConstruct %93 %93 %93` then `OpFDiv`).
+        [v[0] / s, v[1] / s, v[2] / s]
+    }
+    #[inline]
+    fn vec3_mul_scalar(v: [f32; 3], s: f32) -> [f32; 3] {
+        [v[0] * s, v[1] * s, v[2] * s]
+    }
+    #[inline]
+    fn vec3_from_uints(x: u32, y: u32, z: u32) -> [f32; 3] {
+        // The implicit uint→float in the HLSL `float3(ix, iy, iz)` ctor (`OpConvertUToF`).
+        [x as f32, y as f32, z as f32]
+    }
+
+    #[inline]
+    fn vec3_x(v: [f32; 3]) -> f32 {
+        v[0]
+    }
+    #[inline]
+    fn vec3_y(v: [f32; 3]) -> f32 {
+        v[1]
+    }
+    #[inline]
+    fn vec3_z(v: [f32; 3]) -> f32 {
+        v[2]
+    }
+
+    #[inline]
+    fn uint3_x(d: [u32; 3]) -> u32 {
+        d[0]
+    }
+    #[inline]
+    fn uint3_y(d: [u32; 3]) -> u32 {
+        d[1]
+    }
+    #[inline]
+    fn uint3_z(d: [u32; 3]) -> u32 {
+        d[2]
+    }
+
+    #[inline]
+    fn float_to_uint(f: f32) -> u32 {
+        // `f as u32` — the SATURATING cast Rust 2024 gives `as`. For the reachable inputs
+        // (guard 1 has already rejected any negative `rel`, so `f >= 0` here), this matches
+        // HLSL's `OpConvertFToU` truncation. (The negative case never reaches this on Eval —
+        // the `?` in `if_ret` short-circuits the IIFE before the cast statements run.)
+        f as u32
+    }
+
+    #[inline]
+    fn uadd(a: u32, b: u32) -> u32 {
+        // The host grid index is constructed to be in-bounds (the bounds guard ran), so the
+        // arithmetic does not overflow on any reachable input; `wrapping_add` matches HLSL's
+        // modular `OpIAdd` for the (unreachable) overflow case rather than panicking in debug.
+        a.wrapping_add(b)
+    }
+    #[inline]
+    fn umul(a: u32, b: u32) -> u32 {
+        a.wrapping_mul(b)
+    }
+
+    #[inline]
+    fn named_uint(_sym: &'static str, val: u32) -> u32 {
+        // The symbol is an Emit-only printing concern; Eval uses the concrete value.
+        val
+    }
+
+    #[inline]
+    fn buffer_load(buf: &[u32], idx: u32) -> u32 {
+        // `grid[idx]` — the real slice index. The index was constructed in-bounds (the
+        // bounds guard `ix >= dims.x || ...` ran and returned BRICK_OUTSIDE_GRID otherwise,
+        // and the grid length == dims.x*dims.y*dims.z), so this never panics on a reachable
+        // input. The oracle sweep's out-of-grid inputs early-return before reaching here.
+        buf[idx as usize]
+    }
+
+    #[inline]
+    fn uge(a: u32, b: u32) -> bool {
+        a >= b
+    }
+
+    #[inline]
+    fn or(a: bool, b: bool) -> bool {
+        // Eager: both masks are already-computed (side-effect-free `<`/`>=`), so `a || b` is
+        // result-equivalent to the short-circuit. (The tail-skip is preserved by statement
+        // order + the `ret`'s `?`, not by short-circuiting the comparands.)
+        a || b
+    }
+
+    #[inline]
+    fn temp_vec3(_name: &'static str, v: [f32; 3]) -> [f32; 3] {
+        // IDENTITY on Eval — materialization is an emit-only printing concern.
+        v
+    }
+    #[inline]
+    fn temp_uint(_name: &'static str, u: u32) -> u32 {
+        u
+    }
+
+    #[inline]
+    fn out_vec3_assign(o: &core::cell::Cell<[f32; 3]>, v: [f32; 3]) {
+        o.set(v);
+    }
+
+    #[inline]
+    fn if_ret(cell: &core::cell::Cell<u32>, cond: bool, value: u32) -> Flow {
+        if cond {
+            cell.set(value);
+            core::ops::ControlFlow::Break(LoopOp::Return)
+        } else {
+            core::ops::ControlFlow::Continue(())
+        }
+    }
+
+    #[inline]
+    fn ret(cell: &core::cell::Cell<u32>, value: u32) -> Flow {
+        cell.set(value);
+        core::ops::ControlFlow::Break(LoopOp::Return)
     }
 }

@@ -49,7 +49,10 @@ pub mod scalar;
 #[cfg(feature = "emit")]
 pub mod emit;
 
-pub use brick::{cubic_eval, decode_snorm8, jcgt_cubic_coeffs, snorm_normalize, snorm_scale};
+pub use brick::{
+    BRICK_OUTSIDE_GRID, brick_cell_class_body, cubic_eval, decode_snorm8, jcgt_cubic_coeffs,
+    snorm_normalize, snorm_scale,
+};
 pub use cf::{Cf, EvalCf, Flow, LoopOp};
 pub use field::{
     EditView, MAX_SDF_EDITS, SDF_FAR, combine, edit_distance, kind, op, sd_box, sd_sphere,

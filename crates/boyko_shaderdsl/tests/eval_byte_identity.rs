@@ -842,3 +842,209 @@ fn cf_continue_skips_live_tail_on_eval() {
         "continue must skip the live tail: expected 2 increments (a=0, a=2), got {total}"
     );
 }
+
+// ======================================================================
+// Increment 3 — the brick-cell pointer-grid lookup leaf (early-return CF).
+//
+// The SECOND control-flow leaf, the first with EARLY RETURNS + a
+// `StructuredBuffer<uint>` load + an `out float3` param + `uint` index math. The eDSL
+// `boyko_shaderdsl::brick::brick_cell_class_body::<EvalCf>` is the CPU oracle.
+//
+// CANONICAL SHAPE = the GPU's committed `brick_cell_class` (sdf_gbuffer_composite.hlsl
+// :608-626). The frozen GPU-shape mirror below replicates the EXACT write order: the
+// default `cell_min = origin`, guard 1 (negative rel — tested on the float BEFORE any
+// cast), the `(uint)` casts, guard 2 (bounds), the `idx`, the conditional `cell_min =
+// origin + float3(ix,iy,iz)*bw`, then `grid[idx]`. The oracle MAP: the host
+// `host_brick_cell` returns `Option<(u32,[f32;3])>` (None == out-of-grid); the eDSL body
+// deposits `class` (== BRICK_OUTSIDE_GRID when out-of-grid) + writes `cell_min`. So:
+//   - None  <=>  class == BRICK_OUTSIDE_GRID (0xFFFFFFFF); cell_min is DON'T-CARE on
+//     OUTSIDE (the committed comment: unread when OUTSIDE), so only the class is compared.
+//   - in-grid: compare BOTH class.to_bits()-equivalent (u32 eq) AND cell_min[k].to_bits().
+// Edge set: negative rel, on-boundary ix==dims.x, idx==len-1, all-axes-outside, NaN/Inf.
+// PLUS a tail-skip test (guard 1's `?` short-circuits before the casts run on a negative
+// rel).
+// ======================================================================
+
+const FROZEN_BRICK_OUTSIDE_GRID: u32 = 0xFFFF_FFFF; // boyko_shaderdsl::brick::BRICK_OUTSIDE_GRID
+
+/// Verbatim hand-mirror of the GPU-SHAPE `brick_cell_class` (committed
+/// `sdf_gbuffer_composite.hlsl:608-626`), with the EXACT write order. Returns `(class,
+/// cell_min)` — `class == BRICK_OUTSIDE_GRID` on an out-of-grid point (cell_min then the
+/// default `origin`, a don't-care). Do NOT "clean up": the statement order + the
+/// negative-rel-before-cast guard + the two cell_min writes are the contract under test.
+fn frozen_gpu_brick_cell_class(
+    grid: &[u32],
+    origin: [f32; 3],
+    bw: f32,
+    dims: [u32; 3],
+    p: [f32; 3],
+) -> (u32, [f32; 3]) {
+    let rel = [
+        (p[0] - origin[0]) / bw,
+        (p[1] - origin[1]) / bw,
+        (p[2] - origin[2]) / bw,
+    ];
+    let mut cell_min = origin; // default (overwritten on an in-grid hit; unread when OUTSIDE)
+    if rel[0] < 0.0 || rel[1] < 0.0 || rel[2] < 0.0 {
+        return (FROZEN_BRICK_OUTSIDE_GRID, cell_min);
+    }
+    let ix = rel[0] as u32;
+    let iy = rel[1] as u32;
+    let iz = rel[2] as u32;
+    if ix >= dims[0] || iy >= dims[1] || iz >= dims[2] {
+        return (FROZEN_BRICK_OUTSIDE_GRID, cell_min);
+    }
+    let idx = ix + iy * dims[0] + iz * dims[0] * dims[1];
+    cell_min = [
+        origin[0] + (ix as f32) * bw,
+        origin[1] + (iy as f32) * bw,
+        origin[2] + (iz as f32) * bw,
+    ];
+    (grid[idx as usize], cell_min)
+}
+
+/// The eDSL brick-cell over the `<EvalCf>` instantiation (the CPU oracle). Drives the
+/// out-of-band `cls` + `cell_min` cells and returns `(class, cell_min)`.
+fn refactored_brick_cell_class(
+    grid: &[u32],
+    origin: [f32; 3],
+    bw: f32,
+    dims: [u32; 3],
+    p: [f32; 3],
+) -> (u32, [f32; 3]) {
+    use std::cell::Cell;
+    let cell_min = Cell::new([0.0f32; 3]);
+    let cls = Cell::new(0u32);
+    boyko_shaderdsl::brick::brick_cell_class_body::<EvalCf>(
+        grid, origin, bw, dims, p, &cell_min, &cls,
+    );
+    (cls.get(), cell_min.get())
+}
+
+/// Asserts the eDSL brick-cell matches the frozen GPU-shape mirror per the oracle map.
+fn assert_brick_cell(
+    grid: &[u32],
+    origin: [f32; 3],
+    bw: f32,
+    dims: [u32; 3],
+    p: [f32; 3],
+    ctx: &str,
+) {
+    let (re_class, re_min) = refactored_brick_cell_class(grid, origin, bw, dims, p);
+    let (fr_class, fr_min) = frozen_gpu_brick_cell_class(grid, origin, bw, dims, p);
+    assert_eq!(
+        re_class, fr_class,
+        "{ctx}: class refactored=0x{re_class:08x} != frozen=0x{fr_class:08x}"
+    );
+    // cell_min is compared ONLY on an in-grid hit (it is unread when OUTSIDE — the
+    // committed comment); both sides produce the default `origin` there as the contract.
+    if re_class != FROZEN_BRICK_OUTSIDE_GRID {
+        assert_vec_bits(re_min, fr_min, &format!("{ctx} cell_min"));
+    }
+}
+
+/// A small grid filler: `dims` cells, each `cells[i] = i` (so the class IS the linear
+/// index — any wrong `idx` shows up as a wrong class).
+fn fill_grid(dims: [u32; 3]) -> Vec<u32> {
+    let n = (dims[0] * dims[1] * dims[2]) as usize;
+    (0..n as u32).collect()
+}
+
+#[test]
+fn brick_cell_class_oracle_sweep_byte_identical() {
+    // A representative grid + the targeted edge set, then a broad random sweep.
+    let dims = [4u32, 3, 2];
+    let grid = fill_grid(dims);
+    let origin = [-1.0f32, 2.0, 0.5];
+    let bw = 0.75f32;
+
+    // Targeted edge cases (the design's set):
+    let edges: &[[f32; 3]] = &[
+        // negative rel on each axis (out-of-grid via guard 1, before any cast).
+        [origin[0] - 0.1, 3.0, 1.0],
+        [1.0, origin[1] - 0.1, 1.0],
+        [1.0, 3.0, origin[2] - 0.1],
+        // on-boundary ix == dims.x (out-of-grid via guard 2). cell rel.x in [dims.x,
+        // dims.x+1) → ix == dims.x.
+        [origin[0] + (dims[0] as f32) * bw + 0.01, origin[1] + 0.1, origin[2] + 0.1],
+        // the LAST in-grid cell (idx == len-1): ix=dims.x-1, iy=dims.y-1, iz=dims.z-1.
+        [
+            origin[0] + ((dims[0] - 1) as f32 + 0.5) * bw,
+            origin[1] + ((dims[1] - 1) as f32 + 0.5) * bw,
+            origin[2] + ((dims[2] - 1) as f32 + 0.5) * bw,
+        ],
+        // the FIRST in-grid cell (idx == 0).
+        [origin[0] + 0.1, origin[1] + 0.1, origin[2] + 0.1],
+        // all axes outside (every axis past the far face).
+        [
+            origin[0] + (dims[0] as f32 + 2.0) * bw,
+            origin[1] + (dims[1] as f32 + 2.0) * bw,
+            origin[2] + (dims[2] as f32 + 2.0) * bw,
+        ],
+        // NaN / Inf in p (the comparisons / cast must propagate identically: a NaN `<` is
+        // false, so guard 1 falls through; `NaN as u32` == 0 in Rust, matching HLSL's
+        // OpConvertFToU undefined-but-deterministic-here lowering — the frozen mirror uses
+        // the SAME `as u32`, so the two agree by construction).
+        [f32::NAN, origin[1] + 0.1, origin[2] + 0.1],
+        [f32::INFINITY, origin[1] + 0.1, origin[2] + 0.1],
+        [origin[0] + 0.1, f32::NEG_INFINITY, origin[2] + 0.1],
+    ];
+    for &p in edges {
+        assert_brick_cell(&grid, origin, bw, dims, p, "brick-cell-edge");
+    }
+
+    // A broad random sweep across the cell, the boundaries, and far outside (the LCG's
+    // non-finite / ±0 draws mixed into p / origin / bw).
+    let mut lcg = Lcg::new(0xB21C_CE11_DEAD_3003);
+    for _ in 0..20_000 {
+        // Random non-degenerate dims (keep the grid small so the fill is cheap).
+        let d = [
+            1 + (lcg.next_u32() % 5),
+            1 + (lcg.next_u32() % 5),
+            1 + (lcg.next_u32() % 5),
+        ];
+        let g = fill_grid(d);
+        let o = [lcg.next_f32(5.0), lcg.next_f32(5.0), lcg.next_f32(5.0)];
+        let b = lcg.next_f32(3.0).abs() + 0.01; // bw > 0
+        // Bias p to land near/in the grid (so in-grid hits AND out-of-grid both fire).
+        let span = (d[0].max(d[1]).max(d[2]) as f32) * b;
+        let p = [
+            o[0] + lcg.next_f32(span * 1.5),
+            o[1] + lcg.next_f32(span * 1.5),
+            o[2] + lcg.next_f32(span * 1.5),
+        ];
+        assert_brick_cell(&g, o, b, d, p, "brick-cell-sweep");
+    }
+}
+
+#[test]
+fn brick_cell_class_tail_skip_on_eval() {
+    // MANDATORY tail-skip: on a NEGATIVE rel, guard 1's `?` must short-circuit the IIFE
+    // BEFORE the `(uint)` casts run — so the out-of-grid path returns BRICK_OUTSIDE_GRID
+    // and cell_min stays the default `origin` (the casts, which would wrap a negative
+    // float to a huge uint and read out of bounds, NEVER execute). A 1-cell grid: a
+    // negative-rel point must NOT index `grid[huge]` (which would panic) — the early
+    // return is the proof.
+    let dims = [1u32, 1, 1];
+    let grid = vec![0xAAAA_AAAAu32]; // a single cell
+    let origin = [0.0f32, 0.0, 0.0];
+    let bw = 1.0f32;
+
+    // p below origin on x → rel.x < 0 → guard 1 returns BEFORE the cast. If the tail ran,
+    // `(uint)(-5.0)` would be a huge index and `grid[huge]` would panic — so reaching here
+    // without a panic IS the tail-skip proof.
+    let (class, cmin) = refactored_brick_cell_class(&grid, origin, bw, dims, [-5.0, 0.5, 0.5]);
+    assert_eq!(
+        class, FROZEN_BRICK_OUTSIDE_GRID,
+        "negative rel must early-return BRICK_OUTSIDE_GRID (the tail casts must not run)"
+    );
+    assert_vec_bits(
+        cmin, origin,
+        "cell_min must stay the default origin on the early (negative-rel) return",
+    );
+
+    // And the in-grid point reads the single cell (the tail DOES run when guard 1 falls
+    // through).
+    let (class_in, _) = refactored_brick_cell_class(&grid, origin, bw, dims, [0.5, 0.5, 0.5]);
+    assert_eq!(class_in, 0xAAAA_AAAA, "the in-grid point must read grid[0]");
+}
