@@ -222,6 +222,38 @@ Implementation order: **P7-Q1** = the dither fix (1+2, verify the rings are gone
 channel stays ±6/255 (already a tolerance), the host==eDSL horizon cross-check is unaffected (the
 dither is in the glue, not the horizon-step span).
 
+## P7-Q2 DECISION (perf analysis `wf_a2ac99f8-801`) — Mechanism C: compile-time variant pipelines
+
+Ruled by Principle 1 (zero runtime overhead). Measured/first-principles GPU cost (RTX 3060/Ampere):
+- **Scalars** (radius/strength/eps) runtime-push = **FREE (<1%)**: one SGPR read, loop-hoisted, broadcast.
+- **Loop bounds** (blur 49-tap; slices×steps 16-tap horizon) runtime = **EXPENSIVE**: de-unroll tax
+  (blur ×1.1–2.5, horizon ×1.3–2 of their passes — lost `[unroll]` + lost MLP on a latency-bound gather).
+- **Variant-pipeline select** (bind `&ComputePipeline` by a CPU enum) = **FREE** (one pointer flip).
+
+**DECISION: (C) compile-time variant pipelines.** Off/Low/Medium/High each a pre-compiled `.spv` with
+BAKED consts (fully `[unroll]`'d, zero per-pixel cost = today). An ECS `SsaoConfig{quality}` Resource
+SELECTS which variant pipeline to bind at record time (free). This honors the owner's compile-time
+instinct for the cost-bearing knobs AND delivers the ECS-native runtime preset-switch at no per-pixel
+cost. **(A) full-runtime REJECTED** (ethos violation — no production engine ships a dynamic SSAO
+sample-count loop). **(B) cargo-feature DOMINATED** (commits all N `.spv` anyway, loses runtime switch,
+recompile to change). Free-scalar push (radius/strength runtime for an editor slider) = **DEFERRED**
+(YAGNI until a live-preview need is measured; it is a zero-cost add-on). **Resolve blur = ONE radius
+across qualities** (only the SSAO compute pass is variantized; gather slices/steps dominate the visible
+delta — the resolve stays un-permuted/single).
+
+Idiomatic wiring: `SDF_SSAO_SPV` → `[SpirvBlob<_>; 3]` (Low/Med/High), N pipelines pre-created at init
+on ONE shared bind-group layout; `scene.ssao = (quality==Off) ? None : Some(SsaoActivation{ pipeline:
+&ssao_pipelines[q], layout })` + `with_ssao_mode(quality as u32)` (Off=0 = the 0%-gate, untouched).
+eDSL: parameterize over `SsaoParams{radius,slices,steps,strength,eps}` + `SSAO_PRESETS:[_;3]`; the
+GENERATED `ssao_horizon_step` span is symbol-spelled (byte-identical across variants) — only the glue
+`static const` header differs; `ssao_edsl_sync` becomes a parameterized loop over the N presets (one
+byte-identity pin each); `golden_ssao_attributes`/`golden_ssao_blur` take `SsaoParams` (GPU==host per
+variant). **The no-op gate: `SSAO_PRESETS[Medium]` == today's consts → the Medium `.spv` is
+byte-identical to today's frozen `sdf_ssao.comp.spv` (proves the parameterization changes nothing).**
+Implementation order: (1) eDSL params + presets + no-op proof, (2) gen N HLSL+`.spv`, (3) per-variant
+byte-identity loop, (4) per-variant host golden, (5) SpirvBlob array + N pipelines, (6) ECS SsaoConfig
++ select, (7) owner visual oracle per preset. (8 DEFERRED: free-scalar push.)
+
 ## Constraints (HARD)
 
 - Shaders via the eDSL (byte-identical `.spv` + Eval mirror + sync pins). ZERO unsafe in

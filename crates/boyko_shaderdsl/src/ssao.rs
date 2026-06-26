@@ -71,6 +71,212 @@ pub const SSAO_STRENGTH: f32 = 2.5;
 /// max(length(delta), SSAO_EPS), 0)`. Spelled SYMBOLICALLY (`SSAO_EPS`).
 pub const SSAO_EPS: f32 = 1.0e-4;
 
+/// One SSAO QUALITY PRESET — the per-variant tuning the Render P7-Q2 PRE-COMPILED `.spv`
+/// variants (Mechanism C) BAKE as `static const` so every `[unroll]` slice/step loop stays
+/// fully unrolled with ZERO per-pixel runtime cost. A variant is selected at runtime by
+/// binding a different pipeline, NEVER by a dynamic loop bound (Mechanism A — the de-unroll
+/// tax — is rejected).
+///
+/// `slices` × `steps` × 2 horizons is the per-pixel tap budget; `radius`/`strength`/`eps`
+/// are the scalars the generated horizon-step span spells SYMBOLICALLY (so the span text is
+/// IDENTICAL across all variants — only this header block + the loop bounds change). The
+/// resolve blur radius is NOT part of a preset (it stays one fixed value in
+/// `deferred_pbr.hlsl`, the resolve is not variantized).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SsaoParams {
+    /// The world-space sampling radius (`SSAO_RADIUS`).
+    pub radius: f32,
+    /// The number of rotated screen-space slices (`SSAO_SLICES`).
+    pub slices: u32,
+    /// The number of forward steps per half-slice (`SSAO_STEPS`).
+    pub steps: u32,
+    /// The occlusion strength multiplier (`SSAO_STRENGTH`).
+    pub strength: f32,
+    /// The `length(delta)` divide-by-zero guard (`SSAO_EPS`).
+    pub eps: f32,
+}
+
+/// The SSAO quality-preset table (Render P7-Q2 — Mechanism C). One PRE-COMPILED `.spv`
+/// variant per row; the host selects a variant by binding its pipeline. The Medium row
+/// (`SSAO_PRESETS[1]`) MUST equal today's shipped scalars (`SSAO_RADIUS`/`SSAO_SLICES`/…)
+/// — it is the no-op proof: re-emitting + re-DXCing the Medium variant reproduces the
+/// committed `sdf_ssao.comp.spv` byte-for-byte.
+///
+/// Only the GLUE `static const` header (and thereby the `[unroll]` loop bounds) varies per
+/// row; the eDSL-GENERATED horizon-step span text is byte-identical across all three (it
+/// spells `SSAO_RADIUS`/`SSAO_EPS` symbolically — see [`ssao_horizon_step_body`]).
+pub const SSAO_PRESETS: [SsaoParams; 3] = [
+    // Low — the cheapest tap budget (2 slices × 3 steps × 2 = 12 taps).
+    SsaoParams {
+        radius: 0.5,
+        slices: 2,
+        steps: 3,
+        strength: 2.5,
+        eps: 1.0e-4,
+    },
+    // Medium — IDENTICAL to today's shipped consts (2 slices × 4 steps × 2 = 16 taps). The
+    // no-op proof: this variant's `.spv` == the committed `sdf_ssao.comp.spv`.
+    SsaoParams {
+        radius: SSAO_RADIUS,
+        slices: SSAO_SLICES as u32,
+        steps: SSAO_STEPS as u32,
+        strength: SSAO_STRENGTH,
+        eps: SSAO_EPS,
+    },
+    // High — the widest tap budget (3 slices × 6 steps × 2 = 36 taps).
+    SsaoParams {
+        radius: 0.5,
+        slices: 3,
+        steps: 6,
+        strength: 2.5,
+        eps: 1.0e-4,
+    },
+];
+
+/// The variant-quality index in [`SSAO_PRESETS`] (the table-row name). Also the canonical
+/// per-variant file-stem suffix (`sdf_ssao_<quality>.comp.{hlsl,spv}`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SsaoQuality {
+    /// `SSAO_PRESETS[0]` — `sdf_ssao_low`.
+    Low,
+    /// `SSAO_PRESETS[1]` — `sdf_ssao_medium` (== today's shipped consts).
+    Medium,
+    /// `SSAO_PRESETS[2]` — `sdf_ssao_high`.
+    High,
+}
+
+impl SsaoQuality {
+    /// All three qualities in table order — the iteration source for the per-variant
+    /// emit + byte-identity loop.
+    pub const ALL: [SsaoQuality; 3] = [SsaoQuality::Low, SsaoQuality::Medium, SsaoQuality::High];
+
+    /// The lowercase file-stem suffix (`"low"`/`"medium"`/`"high"`) — the variant
+    /// `sdf_ssao_<suffix>.comp.{hlsl,spv}` stem.
+    #[inline]
+    pub const fn suffix(self) -> &'static str {
+        match self {
+            SsaoQuality::Low => "low",
+            SsaoQuality::Medium => "medium",
+            SsaoQuality::High => "high",
+        }
+    }
+
+    /// The preset row this quality selects from [`SSAO_PRESETS`].
+    #[inline]
+    pub const fn params(self) -> SsaoParams {
+        SSAO_PRESETS[self as usize]
+    }
+}
+
+/// Renders the per-variant SSAO `static const` tuning header — the GLUE block that BAKES one
+/// [`SsaoParams`] preset into the `.hlsl` (Render P7-Q2 Mechanism C). This is the ONLY text
+/// that varies between the pre-compiled variants: the eDSL-generated horizon-step span spells
+/// `SSAO_RADIUS`/`SSAO_EPS` symbolically and is byte-identical across all variants, and the
+/// `[unroll]` slice/step loops read `SSAO_SLICES`/`SSAO_STEPS` from this header.
+///
+/// The block is byte-identical to the committed `sdf_ssao.comp.hlsl:110-115` when `p ==
+/// SSAO_PRESETS[1]` (Medium) — that exact reproduction is the no-op proof the byte-identity
+/// loop asserts. The float spellings match the committed literals: `radius`/`strength` print
+/// via the default `f32` `Display` (`0.5` / `2.5`), `eps` prints as `1.0e-4`, and the slice
+/// count emits both the `uint` (`Nu`) and the `SSAO_SLICES_F` float (`N.0`) the `occ / N`
+/// divisor reads. Counts are integers, so they spell exactly (`2u`/`3u`/`4u`/`6u`).
+pub fn ssao_glue_header(p: &SsaoParams) -> String {
+    // The `eps` is spelled `1.0e-4` (the committed literal), NOT the `f32` `Display`
+    // `0.0001`: the presets all share `1.0e-4`, so a fixed spelling reproduces the committed
+    // header byte-for-byte. If a future preset needs a different `eps`, extend this.
+    debug_assert!(
+        p.eps == 1.0e-4,
+        "invariant: SSAO presets currently all use eps = 1.0e-4 (the committed `1.0e-4` literal)"
+    );
+    let radius = fmt_hlsl_f32(p.radius);
+    let strength = fmt_hlsl_f32(p.strength);
+    let slices_f = fmt_hlsl_f32(p.slices as f32);
+    format!(
+        "static const float SSAO_RADIUS   = {radius};     // world-space sampling radius\n\
+         static const uint  SSAO_SLICES   = {slices}u;      // rotated screen-space slices\n\
+         static const float SSAO_SLICES_F = {slices_f};     // the slice count as a float (the `occ / N` divisor)\n\
+         static const uint  SSAO_STEPS    = {steps}u;      // forward steps per half-slice\n\
+         static const float SSAO_STRENGTH = {strength};     // occlusion strength multiplier\n\
+         static const float SSAO_EPS      = 1.0e-4;  // length(delta) divide-by-zero guard\n",
+        slices = p.slices,
+        steps = p.steps,
+    )
+}
+
+/// Spells an `f32` the way the committed SSAO header literals read: an integral-valued
+/// scalar gets a trailing `.0` (`2.0`), otherwise the default `f32` `Display` (`0.5`/`2.5`).
+/// This matches the committed `SSAO_RADIUS = 0.5` / `SSAO_SLICES_F = 2.0` / `SSAO_STRENGTH =
+/// 2.5` spellings so the Medium header reproduces byte-for-byte.
+fn fmt_hlsl_f32(v: f32) -> String {
+    if v.fract() == 0.0 {
+        format!("{v:.1}")
+    } else {
+        format!("{v}")
+    }
+}
+
+/// The first line of the committed SSAO `static const` tuning block — the anchor
+/// [`variant_hlsl`] swaps FROM (inclusive). The base shader carries exactly one such line.
+const SSAO_HEADER_FIRST_LINE: &str = "static const float SSAO_RADIUS";
+
+/// The last line of the committed SSAO `static const` tuning block — the anchor
+/// [`variant_hlsl`] swaps TO (inclusive). The base shader carries exactly one such line.
+const SSAO_HEADER_LAST_LINE: &str = "static const float SSAO_EPS";
+
+/// Produces ONE quality variant's complete `.hlsl` from the committed base SSAO shader text
+/// by swapping ONLY the `static const SSAO_*` tuning header (the 6 lines from `SSAO_RADIUS`
+/// through `SSAO_EPS`) for the per-preset header ([`ssao_glue_header`]). Everything else —
+/// the eDSL-GENERATED horizon-step span, the forward neighbour reconstruct, the rotation/
+/// step-phase dither, the `[unroll]` slice/step loops (which read the swapped `SSAO_SLICES`/
+/// `SSAO_STEPS`), and the `occ → ao` fold — is carried VERBATIM from `base`.
+///
+/// This is the single-source seam: the glue body lives ONCE in the base file, so the Medium
+/// variant (`p == SSAO_PRESETS[1]`) is byte-identical to the base (the no-op proof), and the
+/// generated span text is identical across all variants. The `base` line ending is detected
+/// and preserved (CRLF or LF), so the swap does not perturb bytes around the block.
+///
+/// Panics if the header anchors are missing or out of order (a malformed base shader — a
+/// developer-tool invariant, surfaced loudly rather than silently producing a broken variant).
+pub fn variant_hlsl(base: &str, params: SsaoParams) -> String {
+    // Detect the base's line ending so the swapped header matches it (the committed base is
+    // LF; a CRLF checkout must round-trip CRLF). `ssao_glue_header` emits LF, normalized below.
+    let crlf = base.contains("\r\n");
+
+    let first = base.find(SSAO_HEADER_FIRST_LINE).unwrap_or_else(|| {
+        panic!(
+            "invariant: base SSAO shader is missing the `{SSAO_HEADER_FIRST_LINE}` header anchor"
+        )
+    });
+    // The block END is the line-end of the LAST anchor line: find the anchor, then the next
+    // line break after it (inclusive of that break, so the replacement owns its trailing EOL).
+    let last_start = base[first..]
+        .find(SSAO_HEADER_LAST_LINE)
+        .map(|off| first + off)
+        .unwrap_or_else(|| {
+            panic!(
+                "invariant: base SSAO shader is missing the `{SSAO_HEADER_LAST_LINE}` header \
+                 anchor after `{SSAO_HEADER_FIRST_LINE}`"
+            )
+        });
+    let after_last = base[last_start..]
+        .find('\n')
+        .map(|off| last_start + off + 1) // include the '\n'
+        .expect(
+            "invariant: the SSAO_EPS header line must be newline-terminated in the base shader",
+        );
+
+    let mut header = ssao_glue_header(&params);
+    if crlf {
+        header = header.replace('\n', "\r\n");
+    }
+
+    let mut out = String::with_capacity(base.len() + header.len());
+    out.push_str(&base[..first]);
+    out.push_str(&header);
+    out.push_str(&base[after_last..]);
+    out
+}
+
 /// Accumulates ONE forward horizon tap into the running per-half-slice `horizonCos`
 /// (`hc`). Authored over the control-flow axis `C`; the tapped neighbour world position
 /// `pp` (`P'`) is supplied by the hand-written forward-reconstruct seam (see the module

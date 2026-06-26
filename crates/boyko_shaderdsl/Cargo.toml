@@ -28,3 +28,8 @@ default = []
 name = "emit_field"
 path = "src/bin/emit_field.rs"
 required-features = ["emit"]
+
+[[bin]]
+name = "emit_ssao_variants"
+path = "src/bin/emit_ssao_variants.rs"
+required-features = ["emit"]

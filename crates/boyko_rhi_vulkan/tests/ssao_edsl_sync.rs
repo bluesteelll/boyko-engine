@@ -10,25 +10,37 @@
 //! — UNLESS someone hand-edits the spliced span without re-emitting (the by-hand drift the
 //! eDSL kills).
 //!
-//! This file is the SSAO drift gate. Two tests:
-//!   1. `ssao_horizon_step_matches_edsl_emit` — the `.contains` drift gate: assert the
-//!      committed shader still contains the EXACT generated span. The fix when it trips:
-//!      re-run `cargo run -p boyko_shaderdsl --features emit --bin emit_field` and re-splice
-//!      between the `// === GENERATED ssao_horizon_step BEGIN/END ===` sentinels (BOTH the
-//!      `+dir` and `-dir` half-slice copies), then re-DXC `sdf_ssao.comp.spv`.
-//!   2. `ssao_spv_byte_identical` — the re-DXC byte-identity gate: re-compile the committed
-//!      `.hlsl` with the EXACT recipe (`dxc -spirv -T cs_6_0 -E main
-//!      -fspv-target-env=vulkan1.3`, NO `-O`) and assert the bytes equal the committed
-//!      `sdf_ssao.comp.spv`. This proves the committed `.spv` the engine loads IS the
-//!      spliced text + hand-written glue, end-to-end. SKIPS (does not fail) when DXC is not
-//!      on this host — the byte-identity claim cannot be evaluated without the compiler, and
-//!      a missing SDK is an environment gap, not a shader regression.
+//! Render P7-Q2 (Mechanism C) added the PRE-COMPILED SSAO quality variants
+//! (`sdf_ssao_{low,medium,high}.comp.{hlsl,spv}`): one `.spv` per `boyko_shaderdsl::ssao::
+//! SSAO_PRESETS` row, each BAKING that preset's `static const` tuning so every `[unroll]`
+//! slice/step loop stays fully unrolled (the host selects a variant by binding its pipeline,
+//! ZERO per-pixel runtime cost). The eDSL-generated horizon-step span is VARIANT-INDEPENDENT
+//! (it spells `SSAO_RADIUS`/`SSAO_EPS` symbolically; the loop bounds are hand-written glue),
+//! so the SAME span appears in the base + every variant, and only the `static const` header
+//! differs between them.
+//!
+//! This file is the SSAO drift gate. Two file/byte tests (both now ITERATE the base + 3
+//! variants) + two host-mirror tests:
+//!   1. `ssao_horizon_step_matches_edsl_emit` — the `.contains` drift gate PER shader file
+//!      (base + 3 variants): assert each still contains the EXACT generated span. The fix
+//!      when it trips: re-run `cargo run -p boyko_shaderdsl --features emit --bin
+//!      emit_ssao_variants` (the variants) and, for the base, re-splice between the `// ===
+//!      GENERATED ssao_horizon_step BEGIN/END ===` sentinels (BOTH the `+dir` and `-dir`
+//!      half-slice copies); then re-DXC the affected `.spv`.
+//!   2. `ssao_spv_byte_identical` — the per-variant re-DXC byte-identity gate: for each
+//!      variant, re-emit its `.hlsl` from the base (`ssao::variant_hlsl`), re-DXC with the
+//!      EXACT recipe (`dxc -spirv -T cs_6_0 -E main -fspv-target-env=vulkan1.3`, NO `-O`), and
+//!      assert the bytes equal the committed variant `.spv`. The keystone no-op proof: the
+//!      MEDIUM variant (== today's shipped consts) is byte-identical to the committed base
+//!      `sdf_ssao.comp.{hlsl,spv}`. SKIPS (does not fail) when DXC is not on this host — the
+//!      byte-identity claim cannot be evaluated without the compiler, and a missing SDK is an
+//!      environment gap, not a shader regression.
 
 use std::path::PathBuf;
 use std::process::Command;
 
 use boyko_shaderdsl::cf::EvalCf;
-use boyko_shaderdsl::ssao;
+use boyko_shaderdsl::ssao::{self, SsaoQuality};
 
 /// The shaders directory (`CARGO_MANIFEST_DIR/shaders`), where the committed `.hlsl` and
 /// `.spv` live (and where DXC must run so its `#include "ray_gen.hlsli"` resolves).
@@ -69,8 +81,14 @@ fn ssao_horizon_step_matches_edsl_emit() {
     // `[unroll]` slice/step loops, the rotation-table direction, and the `occ → ao` fold stay
     // hand-written (framing b), so this is a `.contains` of the emitted span (spliced between
     // the GENERATED ssao_horizon_step sentinels — TWICE, the +dir and -dir half-slices), not
-    // an extract_fn. A hand-edit of the committed span fails CI here. The cmp-.spv (the
-    // companion `ssao_spv_byte_identical`) proves the spliced text re-DXCs byte-identical.
+    // an extract_fn. A hand-edit of the committed span fails CI here.
+    //
+    // Render P7-Q2 (Mechanism C): the span is VARIANT-INDEPENDENT — it spells `SSAO_RADIUS`/
+    // `SSAO_EPS` SYMBOLICALLY (the per-preset `static const` header carries the values), and
+    // references neither slices nor steps (those are the hand-written `[unroll]` bounds). So
+    // the SAME generated span must appear in the base `sdf_ssao.comp.hlsl` AND in every
+    // pre-compiled variant `sdf_ssao_<quality>.comp.hlsl`. This loop pins one drift gate PER
+    // shader file (the base + the 3 variants).
     //
     // ZERO new eDSL leaves: `dot` is inline component-reads + mul/add, `length =
     // sqrt(dot(d,d))`, the `ao*ao` power an integer self-mul — so the frozen marcher/field/
@@ -78,58 +96,43 @@ fn ssao_horizon_step_matches_edsl_emit() {
     // which stays green).
     let generated = boyko_shaderdsl::emit::emit_hlsl_ssao().replace("\r\n", "\n");
 
-    let shader_path = shaders_dir().join("sdf_ssao.comp.hlsl");
-    let shader = std::fs::read_to_string(&shader_path)
-        .expect("invariant: shaders/sdf_ssao.comp.hlsl must exist next to this crate")
-        .replace("\r\n", "\n");
-
-    assert!(
-        shader.contains(&generated),
-        "sdf_ssao.comp.hlsl `ssao_horizon_step` span DRIFTED from boyko_shaderdsl::emit — the \
-         committed span no longer matches the generator. Re-run `cargo run -p boyko_shaderdsl \
-         --features emit --bin emit_field` and re-splice between BOTH GENERATED \
-         ssao_horizon_step sentinel pairs (the forward reconstruct + the slice/step loops + \
-         the rotation direction + the occ→ao fold stay hand-written), then re-DXC \
-         sdf_ssao.comp.spv.\n--- expected (eDSL-generated) ---\n{generated}"
+    // The base shader + the 3 pre-compiled quality variants all carry the SAME span.
+    let mut shader_files: Vec<String> = vec!["sdf_ssao.comp.hlsl".to_string()];
+    shader_files.extend(
+        SsaoQuality::ALL
+            .iter()
+            .map(|q| format!("sdf_ssao_{}.comp.hlsl", q.suffix())),
     );
+
+    for file in &shader_files {
+        let shader_path = shaders_dir().join(file);
+        let shader = std::fs::read_to_string(&shader_path)
+            .unwrap_or_else(|e| {
+                panic!("invariant: shaders/{file} must exist next to this crate: {e}")
+            })
+            .replace("\r\n", "\n");
+
+        assert!(
+            shader.contains(&generated),
+            "{file} `ssao_horizon_step` span DRIFTED from boyko_shaderdsl::emit — the \
+             committed span no longer matches the generator. Re-run `cargo run -p \
+             boyko_shaderdsl --features emit --bin emit_ssao_variants` (and re-splice the base \
+             between BOTH GENERATED ssao_horizon_step sentinel pairs if it is the base), then \
+             re-DXC the variant `.spv`. The span is variant-independent (it spells \
+             SSAO_RADIUS/SSAO_EPS symbolically), so it must be IDENTICAL in every variant.\n\
+             --- expected (eDSL-generated) ---\n{generated}"
+        );
+    }
 }
 
-#[test]
-fn ssao_spv_byte_identical() {
-    // The committed `sdf_ssao.comp.spv` the engine loads must be the EXACT re-DXC of the
-    // committed `sdf_ssao.comp.hlsl` (the spliced eDSL span + the hand-written glue) under the
-    // frozen recipe `dxc -spirv -T cs_6_0 -E main -fspv-target-env=vulkan1.3` (NO `-O`). This
-    // is the byte-identity oracle: it proves the shipped `.spv` is the single-sourced text,
-    // not a stale or hand-tweaked blob. A drift fails CI; the fix is to re-DXC and re-commit.
-    let Some(dxc) = find_dxc() else {
-        eprintln!(
-            "ssao_edsl_sync: dxc not found (no C:/VulkanSDK/.../dxc.exe, no $VULKAN_SDK/Bin, \
-             not on PATH) — SKIPPING the SSAO re-DXC byte-identity check on this host."
-        );
-        return;
-    };
-
-    let dir = shaders_dir();
-    let hlsl = dir.join("sdf_ssao.comp.hlsl");
-    let committed_spv = dir.join("sdf_ssao.comp.spv");
-    assert!(
-        hlsl.exists(),
-        "missing committed SSAO HLSL: {} ",
-        hlsl.display()
-    );
-    let committed = std::fs::read(&committed_spv).unwrap_or_else(|e| {
-        panic!(
-            "missing committed SSAO SPIR-V {} : {e} (compile sdf_ssao.comp.hlsl with the \
-             frozen DXC recipe and commit it)",
-            committed_spv.display()
-        )
-    });
-
-    // Re-DXC to a temp `.spv` (NOT overwriting the committed one) under the EXACT recipe.
-    // `current_dir(shaders_dir)` so the relative `#include "ray_gen.hlsli"` resolves.
-    let out_spv = std::env::temp_dir().join("sdf_ssao.redxc.comp.spv");
-    let status = Command::new(&dxc)
-        .current_dir(&dir)
+/// Re-DXCs `hlsl_name` (relative to the shaders dir, so its `#include "ray_gen.hlsli"`
+/// resolves) under the EXACT frozen recipe (`-spirv -T cs_6_0 -E main
+/// -fspv-target-env=vulkan1.3`, NO `-O`) into a fresh temp `.spv`, and returns the bytes.
+/// Never overwrites a committed artifact.
+fn redxc_to_bytes(dxc: &PathBuf, dir: &PathBuf, hlsl_name: &str) -> Vec<u8> {
+    let out_spv = std::env::temp_dir().join(format!("{hlsl_name}.redxc.spv"));
+    let status = Command::new(dxc)
+        .current_dir(dir)
         .args([
             "-spirv",
             "-T",
@@ -137,7 +140,7 @@ fn ssao_spv_byte_identical() {
             "-E",
             "main",
             "-fspv-target-env=vulkan1.3",
-            "sdf_ssao.comp.hlsl",
+            hlsl_name,
             "-Fo",
         ])
         .arg(&out_spv)
@@ -145,23 +148,120 @@ fn ssao_spv_byte_identical() {
         .expect("invariant: dxc was located and must run");
     assert!(
         status.success(),
-        "dxc failed re-compiling sdf_ssao.comp.hlsl under the frozen recipe"
+        "dxc failed re-compiling {hlsl_name} under the frozen recipe"
     );
+    let bytes = std::fs::read(&out_spv).expect("invariant: dxc wrote the re-DXC .spv");
+    let _ = std::fs::remove_file(&out_spv); // best-effort tidy
+    bytes
+}
 
-    let regenerated = std::fs::read(&out_spv).expect("invariant: dxc wrote the re-DXC .spv");
-    // Tidy the temp artifact (best-effort).
-    let _ = std::fs::remove_file(&out_spv);
+#[test]
+fn ssao_spv_byte_identical() {
+    // Render P7-Q2 (Mechanism C) per-variant byte-identity loop. Each pre-compiled SSAO
+    // quality variant (`sdf_ssao_<quality>.comp.spv`) the engine loads must be the EXACT
+    // re-DXC of its committed `.hlsl` under the frozen recipe — the byte-identity oracle that
+    // the shipped variant `.spv` IS the single-sourced text, not a stale or hand-tweaked blob.
+    //
+    // Each variant `.hlsl` is itself re-derived from the base `sdf_ssao.comp.hlsl` by swapping
+    // ONLY the `static const SSAO_*` tuning header (`ssao::variant_hlsl` — the same transform
+    // the `emit_ssao_variants` bin runs), so this also pins the committed variant `.hlsl` to
+    // its single source: the eDSL-generated span + the hand-written glue, with one baked preset.
+    //
+    // The keystone no-op proof: the MEDIUM variant (`SSAO_PRESETS[1]` == today's shipped
+    // consts) must be byte-identical to BOTH (a) the committed base `sdf_ssao.comp.spv` and
+    // (b) the committed base `sdf_ssao.comp.hlsl`. If Medium drifts, the parameterization
+    // changed something it must not have.
+    let Some(dxc) = find_dxc() else {
+        eprintln!(
+            "ssao_edsl_sync: dxc not found (no C:/VulkanSDK/.../dxc.exe, no $VULKAN_SDK/Bin, \
+             not on PATH) — SKIPPING the SSAO per-variant re-DXC byte-identity check on this host."
+        );
+        return;
+    };
 
-    assert_eq!(
-        regenerated,
-        committed,
-        "sdf_ssao.comp.spv BYTE-DRIFTED from a fresh re-DXC of sdf_ssao.comp.hlsl — the \
-         committed .spv the engine loads is NOT the single-sourced text. Re-DXC with \
-         `dxc -spirv -T cs_6_0 -E main -fspv-target-env=vulkan1.3 sdf_ssao.comp.hlsl \
-         -Fo sdf_ssao.comp.spv` and re-commit. (regenerated = {} bytes, committed = {} bytes)",
-        regenerated.len(),
-        committed.len()
-    );
+    let dir = shaders_dir();
+
+    // The single source of the variant glue body: the base shader text.
+    let base_hlsl_path = dir.join("sdf_ssao.comp.hlsl");
+    let base_hlsl = std::fs::read_to_string(&base_hlsl_path).unwrap_or_else(|e| {
+        panic!(
+            "missing committed base SSAO HLSL {}: {e}",
+            base_hlsl_path.display()
+        )
+    });
+    let base_spv = std::fs::read(dir.join("sdf_ssao.comp.spv")).unwrap_or_else(|e| {
+        panic!("missing committed base SSAO SPIR-V (compile + commit it): {e}")
+    });
+
+    for quality in SsaoQuality::ALL {
+        let stem = format!("sdf_ssao_{}.comp", quality.suffix());
+        let hlsl_name = format!("{stem}.hlsl");
+        let committed_hlsl_path = dir.join(&hlsl_name);
+        let committed_spv_path = dir.join(format!("{stem}.spv"));
+
+        // (1) The committed variant `.hlsl` must equal a fresh re-emit from the base
+        //     (`variant_hlsl(base, preset)`) — the single-source `.hlsl` drift gate. Compare
+        //     line-ending-normalized so a CRLF checkout does not false-fail.
+        let committed_hlsl = std::fs::read_to_string(&committed_hlsl_path)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "missing committed variant HLSL {}: {e} (run `cargo run -p boyko_shaderdsl \
+                     --features emit --bin emit_ssao_variants`)",
+                    committed_hlsl_path.display()
+                )
+            })
+            .replace("\r\n", "\n");
+        let reemitted = ssao::variant_hlsl(&base_hlsl, quality.params()).replace("\r\n", "\n");
+        assert_eq!(
+            committed_hlsl, reemitted,
+            "{hlsl_name} DRIFTED from a fresh `variant_hlsl(base, SSAO_PRESETS[{}])` re-emit — \
+             the committed variant `.hlsl` is NOT the single-sourced text. Re-run \
+             `cargo run -p boyko_shaderdsl --features emit --bin emit_ssao_variants`.",
+            quality as usize
+        );
+
+        // (2) The MEDIUM `.hlsl` must equal the base `.hlsl` byte-for-byte (the no-op proof,
+        //     `.hlsl` level): Medium bakes today's exact consts, so it is the base unchanged.
+        if quality == SsaoQuality::Medium {
+            assert_eq!(
+                committed_hlsl,
+                base_hlsl.replace("\r\n", "\n"),
+                "MEDIUM variant `.hlsl` is NOT byte-identical to the base sdf_ssao.comp.hlsl — \
+                 the Medium preset must equal today's shipped consts (the no-op proof). STOP \
+                 and audit `SSAO_PRESETS[1]` / `ssao_glue_header`."
+            );
+        }
+
+        // (3) The committed variant `.spv` must equal a fresh re-DXC of the variant `.hlsl`.
+        let committed_spv = std::fs::read(&committed_spv_path).unwrap_or_else(|e| {
+            panic!(
+                "missing committed variant SPIR-V {}: {e} (DXC the variant with the frozen \
+                 recipe and commit it)",
+                committed_spv_path.display()
+            )
+        });
+        let regenerated = redxc_to_bytes(&dxc, &dir, &hlsl_name);
+        assert_eq!(
+            regenerated,
+            committed_spv,
+            "{stem}.spv BYTE-DRIFTED from a fresh re-DXC of {hlsl_name} — the committed variant \
+             .spv the engine loads is NOT the single-sourced text. Re-DXC with the frozen \
+             recipe and re-commit. (regenerated = {} bytes, committed = {} bytes)",
+            regenerated.len(),
+            committed_spv.len()
+        );
+
+        // (4) The MEDIUM `.spv` must equal the committed BASE `.spv` byte-for-byte (the no-op
+        //     proof, `.spv` level): Medium == today's pipeline, end-to-end through DXC.
+        if quality == SsaoQuality::Medium {
+            assert_eq!(
+                committed_spv, base_spv,
+                "MEDIUM variant `.spv` is NOT byte-identical to the committed base \
+                 sdf_ssao.comp.spv — the Medium pre-compiled variant must reproduce today's \
+                 shipped shader exactly (the no-op proof). STOP and audit the parameterization."
+            );
+        }
+    }
 }
 
 #[test]
