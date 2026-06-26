@@ -4066,6 +4066,106 @@ pub fn emit_hlsl_sdf_soft_shadow() -> String {
     })
 }
 
+/// Generates the HLSL SSAO HORIZON-STEP span (Render P7 GROUP A) — ONE forward HBAO-lite
+/// horizon tap's math (`delta = P' - P`, the squared-distance `falloff` range gate, the
+/// `sampleCos = dot(delta,dir) / max(length(delta), SSAO_EPS)` horizon cosine, and the
+/// `hc = max(hc, sampleCos * falloff)` running horizon max) — by tracing the generic
+/// [`crate::ssao::ssao_horizon_step_body`] over the `EmitCf` backend, and returns ONLY the
+/// span (NOT a wrapped function).
+///
+/// Framing (b): a SPAN, not a whole function. The forward neighbour reconstruct
+/// (`generate_ray(px', py') * gViewT'`, the integer step-rounding + the bounds-clamp + the
+/// `mask != 1 || view_t >= 1e30` skip), the `[unroll]` slice/step loops, the
+/// rotation-table slice direction, and the final `occ → ao` fold stay HAND-WRITTEN inline
+/// in `sdf_ssao.comp.hlsl` (around the `// === GENERATED ssao_horizon_step BEGIN/END ===`
+/// sentinels). The hand-written loop body computes the per-tap neighbour into a `float3 Pp`
+/// and the slice direction into a `float3 dir`, both of which this span reads by NAME; the
+/// running horizon max is the suppressed-decl `float hc` the hand-written half-slice
+/// preamble declared (`float hc_pos = 0.0;` / `float hc_neg = 0.0;` — the span writes
+/// through the name `hc`). The full [`crate::ssao::ssao_estimate_body`] /
+/// [`crate::ssao::ssao_slice_body`] are the EVAL ORACLE (the CPU mirror the host golden
+/// gather calls); their loop STRUCTURE is mirrored by the hand-written HLSL loops, and the
+/// re-DXC byte-identity gate (`ssao_edsl_sync`) proves the spliced text + glue compiles to
+/// the committed `sdf_ssao.comp.spv` end-to-end.
+///
+/// The span prints at DEPTH 5 (20-space indent; the committed site nests
+/// `main`→`if (center_lit)`→`for (slice)`→the half-slice brace→`for (step)`→this body).
+/// The tuning consts spell SYMBOLICALLY
+/// (`SSAO_RADIUS` / `SSAO_EPS`), so a value-spelled const cannot move the committed
+/// `OpConstant` set.
+pub fn emit_hlsl_ssao() -> String {
+    use crate::ssao;
+
+    // Fresh recorder state.
+    ARENA.with(|a| a.borrow_mut().clear());
+    STMTS.with(|s| s.borrow_mut().clear());
+    VARS.with(|v| v.borrow_mut().clear());
+    VAR_TYPES.with(|t| t.borrow_mut().clear());
+    NAMED_LITS.with(|n| n.borrow_mut().clear());
+    CALLS.with(|c| c.borrow_mut().clear());
+    TEMP_SEQ.with(|c| *c.borrow_mut() = 0);
+    TEMP_TYPES.with(|t| t.borrow_mut().clear());
+    TEMP_NAMES.with(|t| t.borrow_mut().clear());
+
+    // Seed the function body block (the bottom of the STMTS stack).
+    STMTS.with(|s| s.borrow_mut().push(Block { stmts: Vec::new() }));
+
+    // Seed the span's inputs:
+    //   P   → Vec3Param(0) (vec_in[0] = "P")   — the center world position
+    //   Pp  → Vec3Param(1) (vec_in[1] = "Pp")  — the forward-reconstructed neighbour `P'`
+    //   dir → Vec3Param(2) (vec_in[2] = "dir") — the in-slice (±) screen direction
+    // `hc` is the running horizon max the hand-written half-slice loop declared (`float
+    // hc_pos = 0.0;` etc.); seeded as a SUPPRESSED-DECL `float` param (bound by NAME, no
+    // recorded decl) so `set_var`/`get_var` spell `hc = ...;` with NO `float hc = ...;`
+    // redecl. The `_init` seed is unused on Emit (a param is bound by name).
+    let p = Emit(push(Node::Vec3Param(0)));
+    let pp = Emit(push(Node::Vec3Param(1)));
+    let dir = Emit(push(Node::Vec3Param(2)));
+    let hc = EmitCf::decl_param("hc", Emit::lit(0.0));
+
+    // Record `hc = <horizon step>;` — the generated span is the `delta`/`d2`/`falloff`/
+    // `sampleCos` temps + this assign.
+    let updated = ssao::ssao_horizon_step_body::<EmitCf>(p, pp, dir, EmitCf::get_var(&hc));
+    EmitCf::set_var(&hc, updated);
+
+    // Pop the function body block and print it.
+    let body_block = STMTS.with(|s| {
+        s.borrow_mut()
+            .pop()
+            .expect("invariant: the function body block was pushed above")
+    });
+
+    let float_in: [&str; 0] = [];
+    let vec_in = ["P", "Pp", "dir"];
+    let named_lit = NAMED_LITS.with(|n| n.borrow().clone());
+    let vars = VARS.with(|v| v.borrow().clone());
+    let names = Names {
+        float_in: &float_in,
+        uint_in: NO_UINT_INPUTS,
+        vec_in: &vec_in,
+        uint3_in: NO_UINT3_INPUTS,
+        buf_in: NO_BUF_INPUTS,
+        out_in: NO_OUT_INPUTS,
+        named_lit: &named_lit,
+        vars: &vars,
+        vec4_in: NO_VEC4_INPUTS,
+        call_in: NO_CALL_INPUTS,
+        pc_in: NO_PC_INPUTS,
+        level_field: NO_LEVEL_FIELDS,
+        array: NO_ARRAY,
+        res_in: NO_RES_INPUTS,
+    };
+
+    ARENA.with(|a| {
+        let arena = a.borrow();
+        let mut span = String::new();
+        // DEPTH 5 (20-space indent): the committed site nests `main`→`if (center_lit)`→
+        // `for (sl)`→the half-slice brace→`for (sp/sn)`→this body.
+        print_block(&body_block, &arena, names, 5, &mut span);
+        span
+    })
+}
+
 /// Generates the WHOLE HLSL `sdf_soft_shadow_ranged(float3 p, float3 n, float3 L, float
 /// t_max)` function — the P6 R1 `t_max`-RANGED soft-shadow leaf consumed ONLY by the
 /// deferred RESOLVE (`deferred_pbr.hlsl`). It traces [`crate::shadow::

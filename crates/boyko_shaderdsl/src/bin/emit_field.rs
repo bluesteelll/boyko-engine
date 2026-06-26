@@ -285,4 +285,19 @@ fn main() {
     // the `Emit` + `EmitCf` backends.
     println!();
     print!("{}", boyko_shaderdsl::emit::emit_hlsl_sdf_soft_shadow_ranged());
+    // The Render P7 GROUP A SSAO horizon-step span (HBAO-lite, no-trig): ONE forward
+    // horizon tap's math — `delta = P' - P`, the squared-distance `falloff` range gate, the
+    // `sampleCos = dot(delta,dir) / max(length(delta), SSAO_EPS)` horizon cosine, and the
+    // `hc = max(hc, sampleCos * falloff)` running horizon max — generated from
+    // `boyko_shaderdsl::ssao::ssao_horizon_step_body` over the `Emit` + `EmitCf` backends.
+    // ZERO new eDSL leaves (`dot` is INLINE component reads + mul/add; `length = sqrt(dot)`),
+    // so the frozen marcher/field/shadow/brick/resolve `.spv` cannot fork. Spliced between
+    // the `// === GENERATED ssao_horizon_step BEGIN/END ===` sentinels INSIDE the
+    // hand-written double-loop of `sdf_ssao.comp.hlsl` (framing b — the forward neighbour
+    // reconstruct + the `[unroll]` slice/step loops + the rotation-table direction + the
+    // `occ → ao` fold stay hand-written). The host oracle is the full
+    // `ssao_estimate_body::<EvalCf>` (bit-comparable; no trig). The span prints at DEPTH 2
+    // (8-space indent).
+    println!();
+    print!("{}", boyko_shaderdsl::emit::emit_hlsl_ssao());
 }

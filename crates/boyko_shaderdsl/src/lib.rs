@@ -55,6 +55,7 @@ pub mod remarch;
 pub mod scalar;
 pub mod shadow;
 pub mod sor;
+pub mod ssao;
 pub mod surface;
 
 #[cfg(feature = "emit")]
@@ -92,6 +93,10 @@ pub use shadow::{
 };
 pub use sor::{
     FIELD_LIPSCHITZ_L as B1_SOR_LIPSCHITZ_L, T_MAX as B1_SOR_T_MAX, b1_sor_retreat_body,
+};
+pub use ssao::{
+    SSAO_EPS, SSAO_RADIUS, SSAO_SLICES, SSAO_STEPS, SSAO_STRENGTH, ssao_estimate_body,
+    ssao_horizon_step_body, ssao_slice_body,
 };
 pub use surface::{
     EPS as M2_SURFACE_EPS, M2_REFINE_ITERS, M2_REFINE_RELAX, T_MAX as M2_SURFACE_T_MAX,
